@@ -208,9 +208,9 @@ GEM is part of a larger effort to enable humanoid motion data for robotics, phys
 Check out these related works:
 * [GEM-X](https://github.com/NVlabs/GEM-X)
 * [SOMA Body Model](https://github.com/NVlabs/SOMA-X)
-* [BONES-SEED Dataset]()
+* [BONES-SEED Dataset](ttps://huggingface.co/datasets/bones-studio/seed)
 * [ProtoMotions](https://github.com/NVlabs/ProtoMotions)
-* [SOMA Retargeter]()
+* [SOMA Retargeter](https://github.com/NVIDIA/soma-retargeter)
 * [SONIC](https://github.com/NVlabs/GR00T-WholeBodyControl)
 * [Kimodo](https://github.com/nv-tlabs/kimodo)
 
