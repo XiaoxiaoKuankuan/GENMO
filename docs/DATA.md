@@ -24,6 +24,29 @@ Required for running `task=test`:
 | **3DPW** | `3DPW_hmr4d_support.tar.gz` | `configs/test_datasets/3dpw_fliptest.yaml` |
 | **RICH** | `RICH_hmr4d_support.tar.gz` | `configs/test_datasets/rich_all.yaml` |
 
+### Supplemental RICH / 3DPW Test Files
+
+Some GEM-SMPL test dataloaders also require supplemental files that may be
+missing from the GVHMR archives:
+
+```
+inputs/RICH/hmr4d_support/rich_test_vimo_preproc.pt
+inputs/3DPW/hmr4d_support/test_3dpw_vimo_labels.pt
+inputs/3DPW/hmr4d_support/3dpw_test_slam_traj.pt
+```
+
+Download them from the GEM-X HuggingFace repository and merge the included
+`inputs/` directory into the repository root:
+
+```bash
+hf download nvidia/GEM-X \
+  --include "gem_smpl/missing_hmr4d_support/**" \
+  --local-dir .
+
+mkdir -p inputs
+cp -a gem_smpl/missing_hmr4d_support/inputs/. inputs/
+```
+
 ## Training Datasets
 
 Required for training `gem_smpl_regression`:
