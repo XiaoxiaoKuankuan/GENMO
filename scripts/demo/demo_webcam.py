@@ -1,5 +1,5 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-# SPDX-License-Identifier: Apache-2.0
+# SPDX-License-Identifier: LicenseRef-NVIDIA-OneWay-Noncommercial
 """Real-time GEM-SMPL webcam demo using ONNX inference.
 
 Runs the GEM-SMPL pipeline frame-by-frame with a sliding window:

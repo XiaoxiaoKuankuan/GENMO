@@ -1,5 +1,5 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-# SPDX-License-Identifier: Apache-2.0
+# SPDX-License-Identifier: LicenseRef-NVIDIA-OneWay-Noncommercial
 """Per-module latency benchmark for the GEM-SMPL real-time pipeline.
 
 Measures each module in isolation with proper CUDA synchronization. Reports

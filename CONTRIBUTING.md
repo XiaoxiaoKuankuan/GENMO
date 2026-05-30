@@ -2,7 +2,7 @@
 
 ## Contribution License
 
-Contributions will only be accepted under the Apache-2.0 license. By contributing to this project, you agree that your contributions will be licensed under the [Apache 2.0 License](LICENSE).
+Contributions will only be accepted under the project license. By contributing to this project, you agree that your contributions will be licensed under the [NVIDIA OneWay Noncommercial License](LICENSE).
 
 ## Code Reviews
 

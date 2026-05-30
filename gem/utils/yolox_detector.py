@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: Apache-2.0
+# SPDX-License-Identifier: Apache-2.0 AND MIT
 """YOLOX person detection (ONNX) + ByteTrack multi-object tracking.
 
 YOLOX — Apache-2.0 (Megvii)

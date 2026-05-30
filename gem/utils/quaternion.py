@@ -1,6 +1,6 @@
 # Copyright (c) 2018-present, Facebook, Inc. All rights reserved.
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-# SPDX-License-Identifier: BSD-3-Clause AND Apache-2.0
+# SPDX-License-Identifier: BSD-3-Clause AND LicenseRef-NVIDIA-OneWay-Noncommercial
 # This code is derived from Facebook Research
 
 import torch

@@ -1,5 +1,5 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-# SPDX-License-Identifier: Apache-2.0
+# SPDX-License-Identifier: LicenseRef-NVIDIA-OneWay-Noncommercial
 """Minimal pyrender-based mesh-on-image compositor.
 
 Minimal pyrender-based mesh renderer for overlaying SMPL meshes on images.

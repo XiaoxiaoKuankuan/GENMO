@@ -1,5 +1,5 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-# SPDX-License-Identifier: Apache-2.0
+# SPDX-License-Identifier: LicenseRef-NVIDIA-OneWay-Noncommercial
 """Export the ViTPose-H COCO-17 backbone + heatmap head to ONNX.
 
 The exported ONNX model takes ImageNet-normalized 256x192 RGB crops and

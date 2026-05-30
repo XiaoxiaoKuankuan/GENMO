@@ -1,5 +1,5 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-# SPDX-License-Identifier: Apache-2.0
+# SPDX-License-Identifier: LicenseRef-NVIDIA-OneWay-Noncommercial
 from gem.diffusion_utils import gaussian_diffusion as gd
 from gem.diffusion_utils.respace import SpacedDiffusion, space_timesteps
 

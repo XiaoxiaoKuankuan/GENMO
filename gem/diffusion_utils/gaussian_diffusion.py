@@ -1,6 +1,6 @@
 # Copyright (c) 2021 OpenAI
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-# SPDX-License-Identifier: MIT AND Apache-2.0
+# SPDX-License-Identifier: MIT AND LicenseRef-NVIDIA-OneWay-Noncommercial
 # This code is derived from https://github.com/openai/guided-diffusion
 """
 This code started out as a PyTorch port of Ho et al's diffusion models:

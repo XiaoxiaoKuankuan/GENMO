@@ -1,5 +1,5 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-# SPDX-License-Identifier: Apache-2.0
+# SPDX-License-Identifier: LicenseRef-NVIDIA-OneWay-Noncommercial
 """Export the GEM-SMPL denoiser (with condition composition) to ONNX.
 
 Wraps the GEM Lightning module's embedding layers + the core ``NetworkEncoderRoPE``

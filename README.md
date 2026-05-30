@@ -23,7 +23,7 @@
 <p align="center">
   <a href="https://research.nvidia.com/labs/dair/gem/"><img src="https://img.shields.io/badge/Project-Page-0099cc"></a>
   <a href="https://arxiv.org/abs/2505.01425"><img src="https://img.shields.io/badge/arXiv-2505.01425-b31b1b.svg"></a>
-  <a href="LICENSE"><img src="https://img.shields.io/badge/License-Apache_2.0-green"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/License-NVIDIA_OneWay_Noncommercial-green"></a>
 </p>
 
 GEM is a unified generative framework for human motion estimation and generation. GEM accepts multiple conditioning modalities — video, 2D keypoints, text, and audio — and handles multiple tasks without task-specific heads.
@@ -230,4 +230,4 @@ Check out these related works:
 
 ## 📄 License
 
-This project is released under the Apache 2.0 License — see [LICENSE](LICENSE) for details. Third-party components are subject to their own licenses; see [ATTRIBUTIONS.md](ATTRIBUTIONS.md) for specifics.
+This project is released under the NVIDIA OneWay Noncommercial License — see [LICENSE](LICENSE) for details. Third-party components are subject to their own licenses; see [ATTRIBUTIONS.md](ATTRIBUTIONS.md) for specifics.
