@@ -24,12 +24,14 @@ Required for running `task=test`:
 | **3DPW** | `3DPW_hmr4d_support.tar.gz` | `configs/test_datasets/3dpw_fliptest.yaml` |
 | **RICH** | `RICH_hmr4d_support.tar.gz` | `configs/test_datasets/rich_all.yaml` |
 
-### Supplemental RICH / 3DPW Test Files
+### Supplemental EMDB / RICH / 3DPW Test Files
 
 Some GEM-SMPL test dataloaders also require supplemental files that may be
 missing from the GVHMR archives:
 
 ```
+inputs/EMDB/hmr4d_support/emdb_vimo.pt
+inputs/EMDB/hmr4d_support/emdb_slam_traj.pt
 inputs/RICH/hmr4d_support/rich_test_vimo_preproc.pt
 inputs/3DPW/hmr4d_support/test_3dpw_vimo_labels.pt
 inputs/3DPW/hmr4d_support/3dpw_test_slam_traj.pt
