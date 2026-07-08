@@ -1,3 +1,6 @@
+# EnDecoder 配置。
+# 定义训练使用的 151 维 gvhmr motion feature、归一化统计量和 clip_std 行为。
+# GEM 通过它在 SMPL 参数和网络特征之间互相转换。
 _target_: gem.network.endecoder.EnDecoder
 stats_name: MM_V1_AMASS_LOCAL_BEDLAM_CAM
 feat_dim: 151

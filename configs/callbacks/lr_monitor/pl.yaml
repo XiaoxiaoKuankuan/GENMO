@@ -1,2 +1,4 @@
+# Lightning 学习率监控回调配置。
+# 训练时把 optimizer 的学习率记录到 logger，便于检查 scheduler 是否按预期工作。
 pl:
   _target_: pytorch_lightning.callbacks.lr_monitor.LearningRateMonitor

@@ -1,5 +1,10 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: LicenseRef-NVIDIA-OneWay-Noncommercial
+"""文本动作验证可视化回调。
+
+完整 gem_smpl 训练会在 HumanML3D 等文本动作数据上使用该 callback。它从验证输出
+中提取预测关节和文本描述，保留可视化/日志扩展入口，方便观察文本条件生成质量。
+"""
 
 import pytorch_lightning as pl
 import torch

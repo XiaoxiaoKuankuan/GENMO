@@ -1,2 +1,4 @@
+# 文本动作可视化/日志回调配置。
+# 完整训练中用于 HumanML3D 等文本动作数据的验证输出观察。
 vis_text:
   _target_: gem.callbacks.vis.vis_text.VisText

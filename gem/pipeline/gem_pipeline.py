@@ -1,5 +1,12 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: LicenseRef-NVIDIA-OneWay-Noncommercial
+"""GEM 训练前向流水线。
+
+Pipeline 连接三件事：扩散/回归网络、运动特征 EnDecoder、以及训练损失。
+训练时它先让 denoiser 预测归一化的运动特征，再解码成 SMPL/相机相关参数，
+最后计算 3D 关节、2D 重投影、顶点和全局运动等监督损失。
+"""
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F

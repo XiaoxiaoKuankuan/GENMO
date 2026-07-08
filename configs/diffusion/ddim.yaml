@@ -1,3 +1,6 @@
+# 扩散过程配置。
+# 定义训练噪声日程、采样器、DDIM 推理步数和 classifier-free guidance 参数；
+# GEMDiffusion 会用它创建 train/test GaussianDiffusion 对象。
 sampler: ddim
 train_timestep_respacing: ""
 test_timestep_respacing: "50"

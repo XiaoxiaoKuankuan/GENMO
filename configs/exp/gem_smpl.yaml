@@ -1,4 +1,7 @@
 # @package _global_
+# 完整 GEM-SMPL 训练实验配置。
+# 该实验同时训练 regression 和 diffusion 两种模式，使用图像、2D、相机、文本、
+# 音乐和音频条件，并组合 AMASS/BEDLAM/H36M/3DPW/AIST++/BEAT2/HumanML3D 等训练集。
 defaults:
   - /diffusion@model_cfg.diffusion: ddim
   - override /data: mocap/trainX_testY

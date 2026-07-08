@@ -1,5 +1,12 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: LicenseRef-NVIDIA-OneWay-Noncommercial
+"""训练 checkpoint 保存回调。
+
+Hydra callback 配置会实例化 SimpleCkptSaver。它按 step/epoch 周期保存 checkpoint，
+维护 last/top-k 文件，并在 rank0 创建输出目录，是训练恢复和保留阶段性模型的
+主要组件。
+"""
+
 import os
 from copy import deepcopy
 from pathlib import Path

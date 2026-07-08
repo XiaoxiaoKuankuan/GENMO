@@ -1,5 +1,12 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: LicenseRef-NVIDIA-OneWay-Noncommercial
+"""运动特征编码/解码器。
+
+EnDecoder 把 batch 中的 SMPL 参数编码成网络训练的 151 维归一化 motion feature，
+也把网络输出解码回 body_pose、global_orient、local_transl_vel 等物理含义明确的
+字段。它还保存统计量和 SMPL 前向运动学工具，是训练目标与模型输出之间的桥。
+"""
+
 import torch
 import torch.nn as nn
 

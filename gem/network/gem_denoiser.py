@@ -1,5 +1,12 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: LicenseRef-NVIDIA-OneWay-Noncommercial
+"""时序 Transformer denoiser。
+
+NetworkEncoderRoPE 接收带噪运动特征、时间步和多模态条件特征
+（2D 观测、相机、图像特征、文本/音乐/音频等），经过 RoPE Transformer 编码后
+输出去噪后的运动特征、相机参数和静止关节置信度，是 GEM 训练中的核心网络。
+"""
+
 import torch
 import torch.nn as nn
 from einops import repeat

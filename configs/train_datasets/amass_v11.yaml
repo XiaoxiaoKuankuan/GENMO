@@ -1,3 +1,5 @@
+# AMASS 训练数据集配置。
+# 指向纯运动数据集 AmassDataset，并使用 v11 相机轨迹增强来生成可监督的相机/2D 条件。
 amass_v11:
   _target_: gem.datasets.pure_motion.amass.AmassDataset
   cam_augmentation: v11

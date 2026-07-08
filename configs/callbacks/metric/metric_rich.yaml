@@ -1,2 +1,4 @@
+# RICH 指标回调配置。
+# 用于完整训练中评估复杂真实场景的相机坐标和全局坐标指标。
 metric_rich:
   _target_: gem.callbacks.metric.metric_rich.MetricRICH

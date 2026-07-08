@@ -1,4 +1,7 @@
 # enable color logging
+# Hydra 运行时配置。
+# 控制训练输出目录、日志文件位置和 Hydra 自身日志格式；scripts/train.py 中的
+# `${hydra:runtime.output_dir}`、`output_dir` 等路径都受这里影响。
 defaults:
   - override hydra_logging: colorlog
   - override job_logging: colorlog

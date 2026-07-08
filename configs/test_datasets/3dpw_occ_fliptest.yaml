@@ -1,3 +1,5 @@
+# 3DPW-OCC 验证/测试数据集配置。
+# 用于遮挡场景评测，完整 gem_smpl 配置会配合 metric_3dpw_occ 使用。
 3dpw_occ_fliptest:
   _target_: gem.datasets.threedpw.threedpw_occ_motion_test.ThreedpwOccSmplFullSeqDataset
   flip_test: true

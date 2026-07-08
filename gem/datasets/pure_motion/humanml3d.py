@@ -1,5 +1,11 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: LicenseRef-NVIDIA-OneWay-Noncommercial
+"""HumanML3D 文本动作训练/评测数据集。
+
+该数据集读取 HumanML3D 的 SMPL 动作和 T5 文本嵌入，将文本描述、运动片段和相机
+增强组合成 GEM 样本。完整 gem_smpl 模型用它学习文本条件到人体动作的生成能力。
+"""
+
 from pathlib import Path
 
 import numpy as np

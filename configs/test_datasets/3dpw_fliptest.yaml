@@ -1,3 +1,5 @@
+# 3DPW 验证/测试数据集配置。
+# 训练验证时用于真实视频人体重建指标，开启 flip_test。
 3dpw_fliptest:
   _target_: gem.datasets.threedpw.threedpw_motion_test.ThreedpwSmplFullSeqDataset
   flip_test: true

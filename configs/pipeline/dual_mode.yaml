@@ -1,3 +1,6 @@
+# 双模式 Pipeline 配置。
+# 完整 gem_smpl 实验使用它同时训练 regression 与 diffusion，并启用图像、2D、相机、
+# 音乐、音频等条件输入；weights 字段定义 pipeline 内各监督损失的权重。
 _target_: gem.pipeline.gem_pipeline.Pipeline
 args_denoiser3d: ${network}
 args:

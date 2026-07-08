@@ -1,5 +1,12 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: LicenseRef-NVIDIA-OneWay-Noncommercial
+"""BEDLAM 图像特征+运动训练数据集。
+
+该数据集读取 BEDLAM 的 SMPL 序列、相机信息和预提取 ViT 图像特征，采样有效视频
+片段并整理成 GEM 训练 batch 所需字段。它给模型提供图像条件、2D 观测、相机运动
+和 3D 人体监督。
+"""
+
 from pathlib import Path
 from time import time
 

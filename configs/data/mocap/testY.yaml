@@ -1,3 +1,5 @@
+# 测试专用 DataModule 配置。
+# 没有 train split，只实例化 test_datasets，用于 `task=test` 或单独评测 checkpoint。
 defaults:
   - collate_cfg: default
 

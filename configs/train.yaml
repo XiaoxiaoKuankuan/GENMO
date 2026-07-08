@@ -1,3 +1,6 @@
+# 训练总配置入口。
+# scripts/train.py 默认读取本文件，再通过 `exp=...` 选择具体实验。
+# 这里声明 Hydra defaults、全局输出目录、resume/checkpoint、Lightning Trainer 和 logger 默认值。
 defaults:
   - _self_
   # pytorch-lightning

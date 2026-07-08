@@ -3,6 +3,11 @@
 # SPDX-License-Identifier: MIT AND LicenseRef-NVIDIA-OneWay-Noncommercial
 # This code is derived from https://github.com/openai/guided-diffusion
 """
+扩散损失中的张量归约工具。
+
+GaussianDiffusion 用这些函数把每个样本除 batch 维之外的维度求和/平均，从而得到
+按样本统计的训练 loss。
+
 Various utilities for neural networks.
 """
 

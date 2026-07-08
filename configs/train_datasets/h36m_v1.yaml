@@ -1,2 +1,4 @@
+# Human3.6M 训练数据集配置。
+# 指向 H36MDataset，提供室内 mocap 视频的图像特征、相机和人体监督。
 h36m_v1:
   _target_: gem.datasets.h36m.h36m.H36MDataset

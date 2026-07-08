@@ -1,2 +1,4 @@
+# 3DPW-OCC 指标回调配置。
+# 用于完整训练中评估遮挡场景的人体重建表现。
 metric_3dpw_occ:
   _target_: gem.callbacks.metric.metric_3dpw_occ.Metric3DPW

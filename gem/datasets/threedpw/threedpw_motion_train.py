@@ -1,5 +1,11 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: LicenseRef-NVIDIA-OneWay-Noncommercial
+"""3DPW 训练数据集。
+
+该数据集读取 3DPW 训练集的 refit SMPL-X、相机和图像特征，按有效区间采样片段。
+它把真实户外视频中的人体动作加入训练，提升模型在自然场景视频上的回归能力。
+"""
+
 from pathlib import Path
 
 import numpy as np

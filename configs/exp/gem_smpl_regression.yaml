@@ -1,4 +1,7 @@
 # @package _global_
+# GEM-SMPL 回归阶段训练实验配置。
+# 该实验只训练 video/2D/camera 条件到 SMPL motion feature 的回归路径，常作为完整
+# diffusion 训练前的基础模型或单独的视频到 SMPL 模型使用。
 defaults:
   - /diffusion@model_cfg.diffusion: ddim
   - override /data: mocap/trainX_testY

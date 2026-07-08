@@ -1,3 +1,5 @@
+# 训练进度展示回调配置。
+# 实例化 ProgressReporter，将损失、速度和实验信息以更紧凑的格式显示在终端。
 prog_reporter_ed1:
   _target_: gem.callbacks.prog_bar.ProgressReporter
   log_every_percent: 0.1

@@ -1,5 +1,11 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: LicenseRef-NVIDIA-OneWay-Noncommercial
+"""BEAT2 语音/音频动作训练数据集。
+
+该数据集读取 BEAT2 中的说话人动作和音频，构造静态相机或增强相机下的 SMPL 训练
+样本。完整 gem_smpl 模型用它学习音频条件与人体姿态/手势之间的关系。
+"""
+
 from pathlib import Path
 
 import librosa

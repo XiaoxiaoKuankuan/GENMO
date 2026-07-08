@@ -1,5 +1,10 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: LicenseRef-NVIDIA-OneWay-Noncommercial
+"""EMDB 验证指标回调。
+
+训练验证阶段会根据 dataset_id 收集 EMDB 输出，计算相机坐标或全局坐标下的 MPJPE、
+PVE、RTE、jitter 等指标，并在 epoch 结束时汇总记录。
+"""
 
 import numpy as np
 import pytorch_lightning as pl

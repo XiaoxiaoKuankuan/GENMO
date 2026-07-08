@@ -1,3 +1,5 @@
+# 训练速度统计回调配置。
+# N_avg 控制最近多少个 batch 的耗时平均值，用来观察数据等待和单 batch 训练时间。
 base:
   _target_: gem.callbacks.train_speed_timer.TrainSpeedTimer
   N_avg: 5

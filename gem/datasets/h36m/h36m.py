@@ -1,5 +1,12 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: LicenseRef-NVIDIA-OneWay-Noncommercial
+"""Human3.6M 训练数据集。
+
+该数据集读取 H36M 的 SMPL-X 标注、相机参数和预提取图像特征，将长视频切成训练
+窗口。它主要提供室内 mocap 视频中的 2D/3D 人体监督，帮助回归模型学习图像到
+SMPL 的对应关系。
+"""
+
 from pathlib import Path
 
 import numpy as np

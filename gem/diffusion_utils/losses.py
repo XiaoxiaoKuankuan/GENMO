@@ -3,6 +3,11 @@
 # SPDX-License-Identifier: MIT AND LicenseRef-NVIDIA-OneWay-Noncommercial
 # This code is derived from https://github.com/openai/guided-diffusion
 """
+扩散模型的概率损失工具函数。
+
+GaussianDiffusion 在需要 KL、离散 Gaussian log-likelihood 等项时会调用这里的函数。
+GEM 当前主要训练 x_start/MSE 目标，但这些工具仍保留在 diffusion 框架中。
+
 Helpers for various likelihood-based losses. These are ported from the original
 Ho et al. diffusion models codebase:
 https://github.com/hojonathanho/diffusion/blob/1e0dceb3b3495bbe19116a5e1b3596cd0706c543/diffusion_tf/utils.py

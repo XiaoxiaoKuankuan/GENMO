@@ -1,5 +1,12 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: LicenseRef-NVIDIA-OneWay-Noncommercial
+"""GEM 的扩散/回归网络外壳。
+
+这个模块包装真正的 denoiser Transformer，并创建训练和推理用的 Gaussian
+Diffusion 对象。regression_only 实验会直接预测 x_start；完整 gem_smpl 实验会
+同时支持 regression 与 diffusion 两种训练模式，并在推理时使用 DDIM/CFG 采样。
+"""
+
 from copy import deepcopy
 
 import torch

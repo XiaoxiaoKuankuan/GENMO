@@ -1,5 +1,12 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: LicenseRef-NVIDIA-OneWay-Noncommercial
+"""自动恢复训练回调。
+
+如果运行环境提供 `userlib.auto_resume`，训练入口会启用该 callback，在训练过程中
+保存 last checkpoint，并在作业重启时配合 `scripts/train.py` 找回版本号和 wandb
+run id。没有该依赖时会自动降级为不启用。
+"""
+
 import os
 from typing import Any
 

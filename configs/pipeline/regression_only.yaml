@@ -1,3 +1,6 @@
+# 只训练回归路径的 Pipeline 配置。
+# gem_smpl_regression 使用它，只依赖 2D 观测、相机和图像特征，直接预测 SMPL motion
+# feature，不训练文本/音频/音乐条件扩散生成路径。
 _target_: gem.pipeline.gem_pipeline.Pipeline
 args_denoiser3d: ${network}
 args:

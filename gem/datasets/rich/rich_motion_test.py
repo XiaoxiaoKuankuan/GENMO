@@ -1,5 +1,11 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: LicenseRef-NVIDIA-OneWay-Noncommercial
+"""RICH 验证/测试数据集。
+
+完整 gem_smpl 训练会使用 RICH 作为验证集之一，评估多人/复杂场景中的相机坐标和
+全局坐标人体重建质量。该数据集按完整序列组织图像特征、相机和 SMPL-X 标注。
+"""
+
 from pathlib import Path
 
 import torch

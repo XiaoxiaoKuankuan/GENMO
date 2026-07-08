@@ -1,5 +1,10 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: LicenseRef-NVIDIA-OneWay-Noncommercial
+"""RICH 验证指标回调。
+
+完整训练配置会用它评估 RICH 数据集，既计算相机坐标下的重建指标，也计算全局坐标
+相关的运动指标，帮助判断模型在复杂真实场景中的泛化效果。
+"""
 
 import numpy as np
 import pytorch_lightning as pl

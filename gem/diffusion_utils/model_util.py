@@ -1,5 +1,12 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: LicenseRef-NVIDIA-OneWay-Noncommercial
+"""扩散过程构建工具。
+
+GEMDiffusion 会调用 `create_gaussian_diffusion`，根据 YAML 中的噪声日程、训练/测试
+步数和方差设置创建 SpacedDiffusion。这里是配置文件和实际 diffusion 对象之间的
+转换层。
+"""
+
 from gem.diffusion_utils import gaussian_diffusion as gd
 from gem.diffusion_utils.respace import SpacedDiffusion, space_timesteps
 

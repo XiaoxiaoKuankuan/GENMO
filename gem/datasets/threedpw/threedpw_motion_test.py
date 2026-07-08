@@ -1,5 +1,12 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: LicenseRef-NVIDIA-OneWay-Noncommercial
+"""3DPW 验证/测试数据集。
+
+训练时该数据集通常作为 validation loader 使用，按完整序列提供 3DPW 视频、
+相机、2D 观测和 SMPL 标注。Metric3DPW callback 会消费它的输出计算 MPJPE、
+PA-MPJPE、PVE 等指标。
+"""
+
 from pathlib import Path
 
 import torch

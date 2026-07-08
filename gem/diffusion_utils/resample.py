@@ -1,5 +1,11 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: LicenseRef-NVIDIA-OneWay-Noncommercial
+"""训练时间步采样器。
+
+扩散训练每个 batch 只采样一部分时间步计算 loss。这里提供 uniform 和
+loss-second-moment 两类 schedule sampler，用于决定当前 batch 的噪声时间步及其权重。
+"""
+
 from abc import ABC, abstractmethod
 
 import numpy as np

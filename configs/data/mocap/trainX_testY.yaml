@@ -1,3 +1,6 @@
+# 训练 DataModule 配置。
+# train 部分来自 train_datasets，val 部分来自 test_datasets；DataModule 会把多个
+# 训练集拼接成一个 ConcatDataset，并按验证数据集顺序评估。
 defaults:
   - collate_cfg: default
 

@@ -1,5 +1,10 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: LicenseRef-NVIDIA-OneWay-Noncommercial
+"""3DPW 验证指标回调。
+
+该 callback 在 validation/test/predict 阶段消费 3DPW 完整序列输出，把预测 SMPL-X
+转换到评测用 SMPL 空间，并汇总 PA-MPJPE、MPJPE、PVE、accel 等常用重建指标。
+"""
 
 import numpy as np
 import pytorch_lightning as pl

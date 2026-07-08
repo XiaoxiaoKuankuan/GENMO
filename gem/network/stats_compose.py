@@ -1,5 +1,12 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: LicenseRef-NVIDIA-OneWay-Noncommercial
+"""训练用运动特征统计量。
+
+EnDecoder 会读取这里的均值和标准差，对 151 维 motion feature 做归一化/反归一化。
+统计量把 AMASS 的局部动作分布和 BEDLAM 的相机/全局朝向分布组合起来，保证不同
+数据源进入网络时处于相近数值尺度。
+"""
+
 # fmt:off
 cam_angvel = {
     "manual": {

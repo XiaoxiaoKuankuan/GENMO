@@ -3,6 +3,12 @@
 # SPDX-License-Identifier: MIT AND LicenseRef-NVIDIA-OneWay-Noncommercial
 # This code is derived from https://github.com/openai/guided-diffusion
 """
+GEM 训练使用的 Gaussian Diffusion 核心实现。
+
+这个文件改编自 OpenAI guided-diffusion，负责 beta schedule、加噪、去噪目标、
+训练损失和 DDIM/采样步骤。GEM 的 denoiser 预测 motion feature 的 x_start，
+扩散 loss 和推理采样都会经过这里。
+
 This code started out as a PyTorch port of Ho et al's diffusion models:
 https://github.com/hojonathanho/diffusion/blob/1e0dceb3b3495bbe19116a5e1b3596cd0706c543/diffusion_tf/diffusion_utils_2.py
 https://github.com/openai/guided-diffusion/blob/main/guided_diffusion/gaussian_diffusion.py

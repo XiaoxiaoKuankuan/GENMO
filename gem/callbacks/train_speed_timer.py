@@ -1,5 +1,11 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: LicenseRef-NVIDIA-OneWay-Noncommercial
+"""训练速度统计回调。
+
+该 callback 记录 DataLoader 等待时间和单个 batch 的训练耗时，并写入
+Lightning log/progress bar，方便判断瓶颈在数据加载还是模型计算。
+"""
+
 from collections import deque
 from time import time
 

@@ -1,5 +1,11 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: LicenseRef-NVIDIA-OneWay-Noncommercial
+"""Classifier-free guidance 采样包装器。
+
+训练阶段会随机 mask 条件；推理采样时这个包装器分别跑有条件和无条件分支，
+再用 guidance scale 放大条件信号。它主要服务完整扩散模型的生成/补全路径。
+"""
+
 from copy import deepcopy
 
 import torch

@@ -1,3 +1,6 @@
+# 大尺寸 GEMDiffusion 网络配置。
+# 完整 gem_smpl 实验默认使用它：latent_dim=1024、16 层 RoPE Transformer，容量更大，
+# 用来承接文本/音乐/音频等更多条件信号。
 _target_: gem.network.gem_diffusion.GEMDiffusion
 args: ${pipeline.args}
 latent_dim: ${.model_cfg.denoiser.latent_dim}

@@ -1,3 +1,5 @@
+# HumanML3D 训练数据集配置。
+# 指向 Humanml3dDataset，使用静态相机和 train split，为完整模型提供文本动作样本。
 humanml3d_static_train:
   _target_: gem.datasets.pure_motion.humanml3d.Humanml3dDataset
   cam_augmentation: static

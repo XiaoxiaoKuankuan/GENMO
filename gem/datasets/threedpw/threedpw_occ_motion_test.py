@@ -1,5 +1,12 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: LicenseRef-NVIDIA-OneWay-Noncommercial
+"""3DPW-OCC 验证/测试数据集。
+
+该文件提供遮挡场景下的 3DPW 完整序列样本，用于训练过程中的鲁棒性验证。
+输出格式与普通 3DPW 测试集保持一致，但 dataset_id 指向 3DPW_OCC，便于对应
+metric callback 过滤和汇总。
+"""
+
 from pathlib import Path
 
 import torch

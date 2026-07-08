@@ -1,5 +1,12 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: LicenseRef-NVIDIA-OneWay-Noncommercial
+"""AMASS 纯运动训练数据集。
+
+该数据集读取 AMASS 的 SMPL-X 序列，按固定窗口采样动作片段，并通过
+BaseDataset 添加身体形状、朝向和相机轨迹增强。它主要提供没有图像特征的纯动作
+监督，用来丰富模型对人体运动先验的学习。
+"""
+
 from pathlib import Path
 
 import numpy as np

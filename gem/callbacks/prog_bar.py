@@ -1,5 +1,12 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: LicenseRef-NVIDIA-OneWay-Noncommercial
+"""训练进度条和日志展示回调。
+
+这里扩展 PyTorch Lightning 的 progress bar，把训练/验证损失、step、epoch、
+耗时和实验名整理成更易读的终端输出。训练配置中的 prog_reporter_ed1 会实例化
+ProgressReporter。
+"""
+
 from collections import OrderedDict, deque
 from datetime import datetime, timedelta
 from numbers import Number

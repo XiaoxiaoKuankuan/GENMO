@@ -1,5 +1,12 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: LicenseRef-NVIDIA-OneWay-Noncommercial
+"""EMDB 验证/测试数据集。
+
+训练过程中会把 EMDB 作为验证集之一，用于检查相机坐标和全局坐标下的人体重建
+指标。该文件负责读取完整序列、图像特征、相机参数和标注，供 metric callback
+在 validation/test 阶段评估。
+"""
+
 from pathlib import Path
 
 import torch

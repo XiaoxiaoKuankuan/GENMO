@@ -1,3 +1,5 @@
+# EMDB split 2 指标回调配置。
+# 用于训练验证阶段的全局坐标运动指标。
 metric_emdb2:
   _target_: gem.callbacks.metric.metric_emdb.MetricMocap
   emdb_split: 2

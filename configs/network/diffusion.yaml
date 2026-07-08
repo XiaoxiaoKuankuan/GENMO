@@ -1,3 +1,6 @@
+# 标准尺寸 GEMDiffusion 网络配置。
+# 回归实验默认使用它：外层是 gem.network.gem_diffusion.GEMDiffusion，内部 denoiser
+# 是 12 层 RoPE Transformer，输出维度来自 EnDecoder 的 motion feature 维度。
 _target_: gem.network.gem_diffusion.GEMDiffusion
 args: ${pipeline.args}
 latent_dim: ${.model_cfg.denoiser.latent_dim}

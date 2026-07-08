@@ -1,3 +1,6 @@
+# GEM LightningModule 配置。
+# `_target_` 指向 gem.gem.GEM，并把 pipeline、optimizer、scheduler 和模型级训练
+# 选项传进去；这里的 model_cfg 会控制条件 mask、文本编码器、2D 噪声等训练行为。
 _target_: gem.gem.GEM
 
 pipeline: ${pipeline}

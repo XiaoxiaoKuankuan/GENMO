@@ -1,5 +1,13 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: LicenseRef-NVIDIA-OneWay-Noncommercial
+"""训练主入口。
+
+这个文件负责读取 Hydra 配置、实例化 DataModule 和 GEM LightningModule、
+恢复或加载 checkpoint、配置 logger/callback，然后把模型和数据交给
+PyTorch Lightning Trainer 执行 fit/test。README 中的训练命令最终都会进入
+这里，例如 `python scripts/train.py exp=gem_smpl`。
+"""
+
 import builtins
 import os
 import sys

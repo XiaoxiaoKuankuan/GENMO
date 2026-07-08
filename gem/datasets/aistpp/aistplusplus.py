@@ -1,5 +1,11 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: LicenseRef-NVIDIA-OneWay-Noncommercial
+"""AIST++ 音乐舞蹈训练数据集。
+
+该数据集读取 AIST++ 舞蹈动作、相机/图像特征和音乐相关特征，把舞蹈视频整理成
+GEM 可训练的时序样本。完整 gem_smpl 模型用它学习音乐条件下的人体动作生成能力。
+"""
+
 import os
 from pathlib import Path
 

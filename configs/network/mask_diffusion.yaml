@@ -1,3 +1,6 @@
+# 带局部姿态 mask 的扩散网络配置。
+# 这是 diffusion_lg 的变体，额外开启 mask_localpose，用于需要在采样或训练时遮蔽
+# 局部姿态输入的实验。
 _target_: gem.network.gem_diffusion.GEMDiffusion
 args: ${pipeline.args}
 latent_dim: ${.model_cfg.denoiser.latent_dim}

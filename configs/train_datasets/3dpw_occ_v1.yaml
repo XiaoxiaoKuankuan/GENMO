@@ -1,2 +1,4 @@
+# 3DPW-OCC 训练数据集配置。
+# 指向遮挡版 3DPW 训练集，用于增强模型对遮挡场景的鲁棒性。
 3dpw_occ_v1:
   _target_: gem.datasets.threedpw.threedpw_occ_motion_train.ThreedpwOccSmplDataset

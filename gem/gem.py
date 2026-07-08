@@ -1,5 +1,13 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: LicenseRef-NVIDIA-OneWay-Noncommercial
+"""GEM 的 PyTorch Lightning 训练模块。
+
+这个文件把数据预处理、条件特征构造、训练 step、验证/测试 step、优化器和
+checkpoint 兼容逻辑组织在一起。训练时 `scripts/train.py` 会实例化 GEM，
+GEM 再实例化 pipeline，并在 `training_step` 中按 regression/diffusion 模式
+准备 batch、调用 pipeline、记录损失。
+"""
+
 import os
 import time
 

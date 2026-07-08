@@ -1,3 +1,5 @@
+# AIST++ 训练数据集配置。
+# 指向 AISTPlusPlusSmplDataset，完整 gem_smpl 训练用它学习音乐/舞蹈条件动作。
 aistpp_train:
   _target_: gem.datasets.aistpp.aistplusplus.AISTPlusPlusSmplDataset
   feat_version: v2

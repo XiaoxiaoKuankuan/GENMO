@@ -1,2 +1,4 @@
+# RICH 验证/测试数据集配置。
+# 完整 gem_smpl 训练中用于复杂真实场景的人体重建和全局运动评测。
 rich_all:
   _target_: gem.datasets.rich.rich_motion_test.RichSmplFullSeqDataset

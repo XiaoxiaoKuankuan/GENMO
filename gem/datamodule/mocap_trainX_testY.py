@@ -1,5 +1,13 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: LicenseRef-NVIDIA-OneWay-Noncommercial
+"""训练/验证数据加载模块。
+
+Hydra 会根据 `configs/data/mocap/trainX_testY.yaml` 实例化这里的
+DataModule。训练阶段把多个训练数据集拼成 ConcatDataset；验证/测试阶段用
+CombinedLoader 顺序遍历各个评测数据集。`collate_fn` 负责把不同数据集缺失的
+文本、音乐、音频等字段补成统一 batch，方便 GEM 模型统一消费。
+"""
+
 import resource
 from functools import partial
 

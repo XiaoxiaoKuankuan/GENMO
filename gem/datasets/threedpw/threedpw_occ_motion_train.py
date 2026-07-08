@@ -1,5 +1,11 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: LicenseRef-NVIDIA-OneWay-Noncommercial
+"""3DPW-OCC 遮挡训练数据集。
+
+该数据集与 3DPW 训练集类似，但使用遮挡版本的图像特征/观测，强调人体被遮挡时的
+鲁棒回归能力。完整 gem_smpl 训练会把它作为额外训练源之一。
+"""
+
 from pathlib import Path
 
 import numpy as np

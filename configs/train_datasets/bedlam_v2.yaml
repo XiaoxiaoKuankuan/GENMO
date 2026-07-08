@@ -1,2 +1,4 @@
+# BEDLAM 训练数据集配置。
+# 指向 BedlamDataset，提供合成视频中的 SMPL、相机、2D 观测和预提取图像特征。
 bedlam_v2:
   _target_: gem.datasets.bedlam.bedlam.BedlamDataset

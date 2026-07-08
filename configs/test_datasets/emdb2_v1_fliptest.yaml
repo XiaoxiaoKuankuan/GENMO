@@ -1,3 +1,5 @@
+# EMDB split 2 验证/测试数据集配置。
+# 训练验证时用于全局坐标运动指标，开启 flip_test 提升评测稳定性。
 emdb2_v1_fliptest:
   _target_: gem.datasets.emdb.emdb_motion_test.EmdbMotionTest
   split: 2

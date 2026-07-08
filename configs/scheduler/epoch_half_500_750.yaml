@@ -1,3 +1,5 @@
+# epoch 级学习率调度配置。
+# 完整 gem_smpl 实验默认使用，在第 500 和 750 个 epoch 将学习率乘以 0.5。
 scheduler:
   _target_: torch.optim.lr_scheduler.MultiStepLR
   milestones: [500, 750]

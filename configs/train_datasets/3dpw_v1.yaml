@@ -1,2 +1,4 @@
+# 3DPW 训练数据集配置。
+# 指向 ThreedpwSmplDataset，提供真实户外视频中的 SMPL/相机/图像特征监督。
 3dpw_v1:
   _target_: gem.datasets.threedpw.threedpw_motion_train.ThreedpwSmplDataset

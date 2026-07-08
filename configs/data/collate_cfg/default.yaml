@@ -1,3 +1,6 @@
+# 默认 batch 拼接配置。
+# 不同训练数据集可能缺少文本、音乐、音频或检测关键点字段；collate_fn 会按这里的
+# 默认 shape/value 补齐，保证 GEM 的 batch 字段一致。
 max_motion_frames: ${data.dataset_opts.max_motion_frames}
 default_frame_feature_dim:
   music_array: [1024]

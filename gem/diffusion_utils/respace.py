@@ -2,6 +2,12 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: MIT AND LicenseRef-NVIDIA-OneWay-Noncommercial
 # This code is derived from https://github.com/openai/guided-diffusion
+"""扩散时间步重采样工具。
+
+训练通常使用完整 1000 步噪声过程，推理可以通过 DDIM/respacing 只保留少量时间步。
+SpacedDiffusion 用这里的映射关系把稀疏时间步包装成和原 diffusion 接口一致的对象。
+"""
+
 import numpy as np
 import torch as th
 

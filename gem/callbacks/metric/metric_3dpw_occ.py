@@ -1,5 +1,10 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: LicenseRef-NVIDIA-OneWay-Noncommercial
+"""3DPW-OCC 验证指标回调。
+
+该 callback 与普通 3DPW 指标逻辑基本一致，但只处理 dataset_id 为 3DPW_OCC 的
+遮挡序列，用来观察模型在遮挡条件下的人体重建稳定性。
+"""
 
 import numpy as np
 import pytorch_lightning as pl

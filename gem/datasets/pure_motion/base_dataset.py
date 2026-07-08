@@ -1,5 +1,11 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: LicenseRef-NVIDIA-OneWay-Noncommercial
+"""纯运动数据集基类。
+
+AMASS 和 HumanML3D 等没有真实图像特征的数据集会继承这个基类。它统一处理 SMPL
+参数增强、相机轨迹模拟、2D 投影、mask 构造和长度补齐，把纯动作转换成和视频
+数据集兼容的训练样本。
+"""
 
 import torch
 from torch.utils.data import Dataset

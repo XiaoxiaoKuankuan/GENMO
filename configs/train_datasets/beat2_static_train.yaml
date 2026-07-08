@@ -1,3 +1,5 @@
+# BEAT2 训练数据集配置。
+# 指向 BEAT2SmplDataset，使用静态相机设置，为完整模型提供语音/音频动作样本。
 beat2_static_train:
   _target_: gem.datasets.beat2.beat2.BEAT2SmplDataset
   cam_augmentation: static

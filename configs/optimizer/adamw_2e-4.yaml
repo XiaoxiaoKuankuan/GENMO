@@ -1,2 +1,4 @@
+# 优化器配置。
+# GEM.configure_optimizers 会把可训练参数传给这里的 AdamW partial，默认学习率为 2e-4。
 _target_: torch.optim.AdamW
 lr: 2e-4
