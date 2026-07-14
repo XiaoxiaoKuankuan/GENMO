@@ -18,13 +18,14 @@ import queue
 import threading
 import time
 from collections.abc import Mapping
+from pathlib import Path
 from typing import Any
 
 import numpy as np
 import torch
 from scipy.spatial.transform import Rotation
 
-from gem.utils.smplx_utils import make_smplx
+from gem.utils.sonic.smpl_converter import SonicSMPLConverter
 
 _HEADER_SIZE = 1280
 _STOP = object()
@@ -86,32 +87,11 @@ def _resolve_pose_packer():
     return pack_pose_message
 
 
-def _as_rows(value: Any, width: int, name: str) -> torch.Tensor:
-    """Convert an array-like SMPL parameter to CPU float rows."""
-    if isinstance(value, torch.Tensor):
-        tensor = value.detach().to(device="cpu", dtype=torch.float32)
-    else:
-        tensor = torch.as_tensor(value, dtype=torch.float32, device="cpu")
-
-    if tensor.numel() == 0 or tensor.numel() % width:
-        raise ValueError(f"{name} must contain a multiple of {width} values, got {tensor.shape}")
-    return tensor.reshape(-1, width).contiguous()
-
-
-def _match_frames(value: torch.Tensor, num_frames: int, name: str) -> torch.Tensor:
-    """Broadcast a single constant SMPL parameter across a temporal chunk."""
-    if len(value) == num_frames:
-        return value
-    if len(value) == 1:
-        return value.expand(num_frames, -1).contiguous()
-    raise ValueError(f"{name} has {len(value)} frames; expected 1 or {num_frames}")
-
-
 class SonicPublisher:
     """Non-blocking GEM-SMPL to SONIC Protocol v3 publisher.
 
     ``publish_smpl`` is the producer-side API.  It only enqueues references to
-    the already detached webcam outputs.  SMPL forward kinematics, SciPy
+    the already detached webcam outputs.  SONIC forward kinematics, SciPy
     quaternion conversion, packing, and ZMQ send all run on the consumer
     thread, keeping them off the GEM inference path.
     """
@@ -122,6 +102,7 @@ class SonicPublisher:
         port: int = 5556,
         topic: str = "pose",
         queue_size: int = 2,
+        sonic_repo_path: str | Path | None = None,
     ) -> None:
         if not host:
             raise ValueError("host must not be empty")
@@ -136,6 +117,9 @@ class SonicPublisher:
         self.port = int(port)
         self.topic = topic
         self.endpoint = f"tcp://{host}:{self.port}"
+        if sonic_repo_path is None:
+            sonic_repo_path = Path(__file__).resolve().parents[4] / "GR00T-WholeBodyControl"
+        self.sonic_repo_path = Path(sonic_repo_path).expanduser()
 
         self._queue: queue.Queue[Any] = queue.Queue(maxsize=queue_size)
         self._stop_event = threading.Event()
@@ -146,7 +130,7 @@ class SonicPublisher:
         self._worker_error: BaseException | None = None
         self._connected = False
 
-        self._body_model = None
+        self._smpl_converter: SonicSMPLConverter | None = None
         self._next_frame_index = 0
         self._frames_sent = 0
         self._frames_dropped = 0
@@ -213,7 +197,7 @@ class SonicPublisher:
                 self._state = "disconnected"
                 raise
 
-        # Startup is outside the inference loop. Waiting here makes bind/model
+        # Startup is outside the inference loop. Waiting here makes bind/converter
         # failures visible immediately instead of silently losing every frame.
         if not self._ready_event.wait(timeout=30.0):
             self.close()
@@ -345,10 +329,8 @@ class SonicPublisher:
             socket.setsockopt(zmq.SNDHWM, self._queue.maxsize)
             socket.bind(self.endpoint)
 
-            # GEM emits 21 SMPL-X body joints. This existing lightweight model
-            # applies the project's SMPL-X LBS and SMPL-neutral 24-joint
-            # regressor without introducing a second SMPL implementation.
-            self._body_model = make_smplx("supermotion_smpl24").eval().cpu()
+            self._smpl_converter = SonicSMPLConverter(self.sonic_repo_path)
+            print("[SONIC] Using SONIC compute_human_joints")
             pack_pose_message = _resolve_pose_packer()
         except BaseException as exc:
             self._worker_error = exc
@@ -392,7 +374,7 @@ class SonicPublisher:
         finally:
             socket.close(linger=0)
             context.term()
-            self._body_model = None
+            self._smpl_converter = None
             self._mark_worker_stopped()
 
     def _mark_worker_stopped(self) -> None:
@@ -411,57 +393,17 @@ class SonicPublisher:
         body_params_global: Mapping[str, Any],
         frame_index: np.ndarray | None = None,
     ) -> dict[str, np.ndarray]:
-        if self._body_model is None:
-            raise RuntimeError("SMPL body model is not initialized")
+        if self._smpl_converter is None:
+            raise RuntimeError("SONIC SMPL converter is not initialized")
 
-        body_pose_value = body_params_global.get("body_pose")
-        if body_pose_value is None:
-            body_pose_value = body_params_incam.get("body_pose")
-        if body_pose_value is None:
-            raise KeyError("body_pose is required in body_params_incam or body_params_global")
-
-        body_pose = _as_rows(body_pose_value, 63, "body_pose")
-        num_frames = len(body_pose)
-
-        global_orient_value = body_params_global.get("global_orient")
-        if global_orient_value is None:
-            global_orient_value = body_params_incam.get("global_orient")
-        if global_orient_value is None:
-            raise KeyError("global_orient is required in body parameters")
-        global_orient = _match_frames(
-            _as_rows(global_orient_value, 3, "global_orient"),
-            num_frames,
-            "global_orient",
+        converted = self._smpl_converter.convert(
+            body_params_global=body_params_global,
+            body_params_incam=body_params_incam,
         )
-
-        transl_value = body_params_global.get("transl")
-        if transl_value is None:
-            transl_value = body_params_incam.get("transl")
-        transl = (
-            torch.zeros((num_frames, 3), dtype=torch.float32)
-            if transl_value is None
-            else _match_frames(_as_rows(transl_value, 3, "transl"), num_frames, "transl")
-        )
-
-        betas_value = body_params_global.get("betas")
-        if betas_value is None:
-            betas_value = body_params_incam.get("betas")
-        betas = (
-            torch.zeros((num_frames, 10), dtype=torch.float32)
-            if betas_value is None
-            else _match_frames(_as_rows(betas_value, 10, "betas"), num_frames, "betas")
-        )
-
-        model_output = self._body_model(
-            body_pose=body_pose,
-            global_orient=global_orient,
-            transl=transl,
-            betas=betas,
-        )
-        smpl_joints = model_output.joints if hasattr(model_output, "joints") else model_output
-        smpl_joints = smpl_joints.reshape(num_frames, -1, 3)[:, :24]
-        if smpl_joints.shape != (num_frames, 24, 3):
-            raise ValueError(f"SMPL model returned invalid joint shape {smpl_joints.shape}")
+        smpl_pose = converted["smpl_pose"]
+        smpl_joints_local = converted["smpl_joints_local"]
+        global_orient = converted["global_orient"]
+        num_frames = len(smpl_pose)
 
         # SciPy emits scalar-last [x, y, z, w]; SONIC requires [w, x, y, z].
         quat_xyzw = Rotation.from_rotvec(global_orient.numpy()).as_quat()
@@ -483,10 +425,8 @@ class SonicPublisher:
                 )
 
         return {
-            "smpl_pose": np.ascontiguousarray(
-                body_pose.reshape(num_frames, 21, 3).numpy(), dtype=np.float32
-            ),
-            "smpl_joints": np.ascontiguousarray(smpl_joints.numpy(), dtype=np.float32),
+            "smpl_pose": np.ascontiguousarray(smpl_pose.cpu().numpy(), dtype=np.float32),
+            "smpl_joints": np.ascontiguousarray(smpl_joints_local.cpu().numpy(), dtype=np.float32),
             "body_quat": np.ascontiguousarray(body_quat, dtype=np.float32),
             # Protocol v3 requires G1 qpos/qvel. GEM supplies SMPL rather than
             # retargeted G1 joints, so these valid placeholders stay zero; the
@@ -507,12 +447,23 @@ class SonicPublisher:
             self._next_log_frame += 100
 
         elapsed = max(time.perf_counter() - self._started_at, 1e-6)
+        smpl_joints = pose_data["smpl_joints"]
+        pelvis = smpl_joints[-1, SonicSMPLConverter.PELVIS_INDEX]
+        left_wrist = smpl_joints[-1, SonicSMPLConverter.LEFT_WRIST_INDEX]
+        right_wrist = smpl_joints[-1, SonicSMPLConverter.RIGHT_WRIST_INDEX]
+        smpl_pose_shape = f"({','.join(map(str, pose_data['smpl_pose'].shape))})"
+        smpl_joints_shape = f"({','.join(map(str, smpl_joints.shape))})"
         print(
             "\n[SONIC]\n"
             f"fps={self._frames_sent / elapsed:.1f}\n"
             f"frames={self._frames_sent}\n"
-            f"smpl_pose_shape={pose_data['smpl_pose'].shape}\n"
-            f"smpl_joint_shape={pose_data['smpl_joints'].shape}"
+            f"smpl_pose_shape={smpl_pose_shape}\n"
+            f"smpl_joint_shape={smpl_joints_shape}\n"
+            f"smpl_pose:\nshape={smpl_pose_shape}\n"
+            f"smpl_joints:\nshape={smpl_joints_shape}\n"
+            f"pelvis position={np.array2string(pelvis, precision=4, separator=', ')}\n"
+            f"left_wrist position={np.array2string(left_wrist, precision=4, separator=', ')}\n"
+            f"right_wrist position={np.array2string(right_wrist, precision=4, separator=', ')}"
         )
 
     def __enter__(self) -> SonicPublisher:

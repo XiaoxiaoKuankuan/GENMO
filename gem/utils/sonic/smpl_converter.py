@@ -1,0 +1,143 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES.
+# All rights reserved.
+# SPDX-License-Identifier: LicenseRef-NVIDIA-OneWay-Noncommercial
+"""Convert GEM SMPL parameters to SONIC's FK joint definition."""
+
+from __future__ import annotations
+
+import sys
+from collections.abc import Mapping
+from pathlib import Path
+from typing import Any
+
+import torch
+
+
+def _as_rows(value: Any, width: int, name: str) -> torch.Tensor:
+    """Convert an array-like SMPL parameter to contiguous CPU float rows."""
+    if isinstance(value, torch.Tensor):
+        tensor = value.detach().to(device="cpu", dtype=torch.float32)
+    else:
+        tensor = torch.as_tensor(value, dtype=torch.float32, device="cpu")
+
+    if tensor.numel() == 0 or tensor.numel() % width:
+        raise ValueError(f"{name} must contain a multiple of {width} values, got {tensor.shape}")
+    return tensor.reshape(-1, width).contiguous()
+
+
+def _match_frames(value: torch.Tensor, num_frames: int, name: str) -> torch.Tensor:
+    """Broadcast one root parameter across a temporal pose chunk."""
+    if len(value) == num_frames:
+        return value
+    if len(value) == 1:
+        return value.expand(num_frames, -1).contiguous()
+    raise ValueError(f"{name} has {len(value)} frames; expected 1 or {num_frames}")
+
+
+class SonicSMPLConverter:
+    """Use GR00T-WholeBodyControl FK to produce SONIC-local SMPL joints.
+
+    The GR00T repository is added to ``sys.path`` only by this SONIC adapter.
+    All computation runs on CPU in the publisher's consumer thread and does not
+    instantiate or call a GEM/SMPL-X body layer.
+    """
+
+    PELVIS_INDEX = 0
+    LEFT_WRIST_INDEX = 20
+    RIGHT_WRIST_INDEX = 21
+
+    def __init__(self, sonic_repo_path: str | Path) -> None:
+        repo_path = Path(sonic_repo_path).expanduser().resolve()
+        torch_transform_path = repo_path / "gear_sonic/trl/utils/torch_transform.py"
+        human_joints_info_path = repo_path / "gear_sonic/data/human/human_joints_info.pkl"
+        if not torch_transform_path.is_file():
+            raise FileNotFoundError(
+                "SONIC torch_transform.py was not found under "
+                f"{repo_path}. Pass the GR00T-WholeBodyControl repository path."
+            )
+        if not human_joints_info_path.is_file():
+            raise FileNotFoundError(
+                f"SONIC human joint metadata was not found: {human_joints_info_path}"
+            )
+
+        repo_path_str = str(repo_path)
+        if repo_path_str in sys.path:
+            sys.path.remove(repo_path_str)
+        sys.path.insert(0, repo_path_str)
+
+        from gear_sonic.trl.utils.torch_transform import (
+            angle_axis_to_quaternion,
+            compute_human_joints,
+            quat_apply,
+            quat_inv,
+        )
+
+        imported_path = Path(sys.modules[compute_human_joints.__module__].__file__).resolve()
+        if repo_path not in imported_path.parents:
+            raise ImportError(
+                "gear_sonic was already imported from a different location: "
+                f"{imported_path}; expected it under {repo_path}"
+            )
+
+        self.sonic_repo_path = repo_path
+        self._human_joints_info_path = str(human_joints_info_path)
+        self._compute_human_joints = compute_human_joints
+        self._angle_axis_to_quaternion = angle_axis_to_quaternion
+        self._quat_apply = quat_apply
+        self._quat_inv = quat_inv
+
+    @torch.inference_mode()
+    def convert(
+        self,
+        body_params_global: Mapping[str, Any],
+        body_params_incam: Mapping[str, Any],
+    ) -> dict[str, torch.Tensor]:
+        """Convert GEM parameters to SONIC pose and root-local FK joints.
+
+        ``transl`` is intentionally not applied: SONIC consumes the 24 joint
+        positions after removal of the root rotation, not world-space joints.
+        """
+        body_pose_value = body_params_global.get("body_pose")
+        if body_pose_value is None:
+            body_pose_value = body_params_incam.get("body_pose")
+        if body_pose_value is None:
+            raise KeyError("body_pose is required in body_params_incam or body_params_global")
+
+        body_pose = _as_rows(body_pose_value, 63, "body_pose")
+        num_frames = len(body_pose)
+
+        global_orient_value = body_params_global.get("global_orient")
+        if global_orient_value is None:
+            global_orient_value = body_params_incam.get("global_orient")
+        if global_orient_value is None:
+            raise KeyError("global_orient is required in body parameters")
+        global_orient = _match_frames(
+            _as_rows(global_orient_value, 3, "global_orient"),
+            num_frames,
+            "global_orient",
+        )
+
+        joints = self._compute_human_joints(
+            body_pose=body_pose[..., :63],
+            global_orient=global_orient,
+            human_joints_info_path=self._human_joints_info_path,
+        )
+        joints = joints.reshape(num_frames, -1, 3)
+        if joints.shape != (num_frames, 24, 3):
+            raise ValueError(
+                f"SONIC compute_human_joints returned {joints.shape}, expected "
+                f"({num_frames}, 24, 3)"
+            )
+
+        # Follow the bridge contract literally: remove the raw GEM root
+        # rotation. Do not mix in Pico's optional y-up/z-up or SMPL base-rot
+        # adjustments, which would define a different local coordinate frame.
+        root_quat = self._angle_axis_to_quaternion(global_orient)
+        root_quat_inv = self._quat_inv(root_quat).unsqueeze(1).expand(-1, 24, -1)
+        smpl_joints_local = self._quat_apply(root_quat_inv, joints).contiguous()
+
+        return {
+            "smpl_pose": body_pose.reshape(num_frames, 21, 3),
+            "smpl_joints_local": smpl_joints_local,
+            "global_orient": global_orient,
+        }

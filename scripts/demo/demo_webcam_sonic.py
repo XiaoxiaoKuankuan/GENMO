@@ -17,6 +17,7 @@ import sys
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
+DEFAULT_SONIC_REPO_PATH = PROJECT_ROOT.parent / "GR00T-WholeBodyControl"
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
@@ -44,6 +45,7 @@ class WebcamGEMSMPLSonicDemo(WebcamGEMSMPLDemo):
                 host=args.sonic_host,
                 port=args.sonic_port,
                 topic=args.sonic_topic,
+                sonic_repo_path=args.sonic_repo_path,
             )
             self._sonic_publisher.connect()
 
@@ -160,6 +162,12 @@ def parse_args():
         type=str,
         default="pose",
         help="SONIC ZMQ topic prefix",
+    )
+    parser.add_argument(
+        "--sonic_repo_path",
+        type=str,
+        default=str(DEFAULT_SONIC_REPO_PATH),
+        help="Path to the GR00T-WholeBodyControl repository",
     )
     return parser.parse_args()
 
