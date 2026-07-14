@@ -308,6 +308,7 @@ class WebcamGEMSMPLDemo:
         self.vitpose_period = args.vitpose_period
         self.no_imgfeat = args.no_imgfeat
         self.render_enabled = args.render
+        self.display_enabled = args.display
 
         # Optional GEM -> GMR-CPP UDP bridge.
         self.gmr_bridge = None
@@ -317,8 +318,8 @@ class WebcamGEMSMPLDemo:
                 port=args.gmr_port,
                 yaw_deg=args.gmr_yaw_deg,
                 scale=args.gmr_scale,
-                device=_DEVICE,
             )
+        self._last_gmr_error_log = 0.0
 
         self._async = args.async_pipeline and not args.no_async_pipeline
         Log.info(
@@ -598,12 +599,26 @@ class WebcamGEMSMPLDemo:
 
         if self.gmr_bridge is not None:
             try:
-                self.gmr_bridge.send(
-                    body_params_global=body_params_global,
-                    body_params_incam=pred_body_params_incam,
+                body_pose_fk = pred_body_params_incam["body_pose"].reshape(1, 1, 63)
+                betas_fk = pred_body_params_incam["betas"].reshape(1, 1, 10)
+                global_orient_fk = body_params_global["global_orient"].reshape(1, 1, 3)
+                transl_fk = body_params_global["transl"].reshape(1, 1, 3)
+                joints, _, fk_mat = self.endecoder.fk_v2(
+                    body_pose=body_pose_fk,
+                    betas=betas_fk,
+                    global_orient=global_orient_fk,
+                    transl=transl_fk,
+                    get_intermediate=True,
+                )
+                self.gmr_bridge.send_fk(
+                    joints[0, 0, :22],
+                    fk_mat[0, 0, :22, :3, :3],
                 )
             except Exception as exc:
-                print(f"\n[GMR UDP ERROR] {type(exc).__name__}: {exc}")
+                now = time.monotonic()
+                if now - self._last_gmr_error_log >= 2.0:
+                    print(f"\n[GMR UDP ERROR] {type(exc).__name__}: {exc}")
+                    self._last_gmr_error_log = now
 
         return {
             "ready": True,
@@ -760,6 +775,63 @@ class WebcamGEMSMPLDemo:
         result["timing"]["total"] = time.perf_counter() - t_total
         return result
 
+    def _show_live(self, frame_bgr, result, fps):
+        """Draw status and display from the main thread. Return True on q."""
+        if not self.display_enabled:
+            return False
+
+        canvas = frame_bgr.copy()
+        if self._display_queue is not None:
+            try:
+                canvas = self._display_queue.get_nowait()
+            except _queue_mod.Empty:
+                pass
+
+        if self.bbox_xyxy is not None:
+            x1, y1, x2, y2 = np.asarray(self.bbox_xyxy, dtype=np.int32)
+            x1 = int(np.clip(x1, 0, self.width - 1))
+            x2 = int(np.clip(x2, 0, self.width - 1))
+            y1 = int(np.clip(y1, 0, self.height - 1))
+            y2 = int(np.clip(y2, 0, self.height - 1))
+            cv2.rectangle(canvas, (x1, y1), (x2, y2), (70, 220, 70), 2)
+            track = "-" if self.primary_track_id is None else str(self.primary_track_id)
+            cv2.putText(
+                canvas, f"track {track}", (x1, max(20, y1 - 8)),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.6, (70, 220, 70), 2,
+            )
+
+        if result is None:
+            state = "NO PERSON"
+            state_color = (0, 180, 255)
+        elif not result.get("ready", False):
+            state = f"WARMUP {result.get('warmup', '')}"
+            state_color = (0, 220, 255)
+        else:
+            state = "READY"
+            state_color = (70, 220, 70)
+
+        if self.gmr_bridge is None:
+            udp = "GMR UDP: off"
+        else:
+            udp = f"GMR UDP: on seq={self.gmr_bridge.sequence}"
+
+        lines = (
+            (state, state_color),
+            (f"FPS: {fps:.1f}", (255, 255, 255)),
+            (udp, (255, 255, 255)),
+            ("q: quit", (200, 200, 200)),
+        )
+        y = 28
+        for text, color in lines:
+            cv2.putText(
+                canvas, text, (12, y), cv2.FONT_HERSHEY_SIMPLEX,
+                0.65, color, 2, cv2.LINE_AA,
+            )
+            y += 27
+
+        cv2.imshow("GEM Live", canvas)
+        return (cv2.waitKey(1) & 0xFF) == ord("q")
+
     def run(self):
         """Main processing loop."""
         Log.info(
@@ -770,7 +842,9 @@ class WebcamGEMSMPLDemo:
         )
 
         fps_history = deque(maxlen=60)
+        display_fps_history = deque(maxlen=60)
         n_frames = 0
+        last_display_tick = time.monotonic()
 
         try:
             while True:
@@ -780,9 +854,15 @@ class WebcamGEMSMPLDemo:
 
                 result = self.process_frame(frame_bgr)
                 n_frames += 1
+                now = time.monotonic()
+                display_fps_history.append(1.0 / max(now - last_display_tick, 1e-6))
+                last_display_tick = now
+                display_fps = sum(display_fps_history) / len(display_fps_history)
 
                 if result is None:
-                    if self._display_queue is not None:
+                    if self._show_live(frame_bgr, result, display_fps):
+                        break
+                    if self._display_queue is not None and not self.display_enabled:
                         try:
                             disp_frame = self._display_queue.get_nowait()
                             cv2.imshow("GEM-SMPL Webcam", disp_frame)
@@ -810,7 +890,10 @@ class WebcamGEMSMPLDemo:
                     except _queue_mod.Full:
                         pass
 
-                if self._display_queue is not None:
+                if self._show_live(frame_bgr, result, display_fps):
+                    break
+
+                if self._display_queue is not None and not self.display_enabled:
                     try:
                         disp_frame = self._display_queue.get_nowait()
                         cv2.imshow("GEM-SMPL Webcam", disp_frame)
@@ -871,8 +954,7 @@ class WebcamGEMSMPLDemo:
                 self._render_proc.join(timeout=3)
                 if self._render_proc.is_alive():
                     self._render_proc.terminate()
-            if self._display_queue is not None:
-                cv2.destroyAllWindows()
+            cv2.destroyAllWindows()
             print()
 
             if fps_history:
@@ -918,6 +1000,10 @@ def parse_args():
     parser.add_argument(
         "--render_port", type=int, default=8012,
         help="Port for Viser web server (only used with --render_mode viser)",
+    )
+    parser.add_argument(
+        "--display", action="store_true",
+        help="Show the main-thread 'GEM Live' video/status window",
     )
     parser.add_argument(
         "--async_pipeline", action="store_true", default=True,
