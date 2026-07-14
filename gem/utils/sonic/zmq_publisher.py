@@ -13,6 +13,7 @@ importable.  The local fallback mirrors its current Protocol v3 wire format.
 
 from __future__ import annotations
 
+import copy
 import json
 import queue
 import threading
@@ -28,7 +29,7 @@ import torch
 from scipy.spatial.transform import Rotation
 
 from gem.utils.sonic.resampler import SMPLRealtimeResampler
-from gem.utils.sonic.smpl_converter import SonicSMPLConverter
+from gem.utils.sonic.smpl_converter import InvalidSMPLFrameError, SonicSMPLConverter
 
 _HEADER_SIZE = 1280
 _STOP = object()
@@ -36,6 +37,7 @@ _TARGET_FPS = 50
 _WINDOW_SIZE = 5
 _SEND_LOOKAHEAD = 2
 _PENDING_WINDOW_LIMIT = 2
+_MAX_BAD_FRAME_SNAPSHOTS = 3
 
 
 def _pack_pose_message_compat(
@@ -147,6 +149,24 @@ def _compute_g1_wrist_joint_pos(
     return joint_pos
 
 
+def _cpu_debug_copy(value: Any) -> Any:
+    """Recursively snapshot body parameters without retaining GPU storage."""
+    if isinstance(value, torch.Tensor):
+        return value.detach().to(device="cpu").clone()
+    if isinstance(value, np.ndarray):
+        try:
+            return torch.as_tensor(value.copy()).clone()
+        except (TypeError, ValueError):
+            return value.copy()
+    if isinstance(value, Mapping):
+        return {key: _cpu_debug_copy(item) for key, item in value.items()}
+    if isinstance(value, tuple):
+        return tuple(_cpu_debug_copy(item) for item in value)
+    if isinstance(value, list):
+        return [_cpu_debug_copy(item) for item in value]
+    return copy.deepcopy(value)
+
+
 class SonicPublisher:
     """Non-blocking GEM-SMPL to SONIC Protocol v3 publisher.
 
@@ -164,6 +184,7 @@ class SonicPublisher:
         queue_size: int = 2,
         sonic_repo_path: str | Path | None = None,
         enable_yaw_calibration: bool = False,
+        sonic_bad_frame_dir: str | Path | None = None,
     ) -> None:
         if not host:
             raise ValueError("host must not be empty")
@@ -182,6 +203,9 @@ class SonicPublisher:
             sonic_repo_path = Path(__file__).resolve().parents[4] / "GR00T-WholeBodyControl"
         self.sonic_repo_path = Path(sonic_repo_path).expanduser()
         self.enable_yaw_calibration = bool(enable_yaw_calibration)
+        self.sonic_bad_frame_dir = (
+            Path(sonic_bad_frame_dir).expanduser() if sonic_bad_frame_dir is not None else None
+        )
         self.target_fps = _TARGET_FPS
         self.window_size = _WINDOW_SIZE
 
@@ -207,6 +231,12 @@ class SonicPublisher:
         self._lookahead_deadline: float | None = None
         self._last_send_started_at: float | None = None
         self._last_batch_discontinuity = False
+        self._invalid_source_frames = 0
+        self._consecutive_invalid_frames = 0
+        self._last_invalid_warning_time = float("-inf")
+        self._max_consecutive_invalid_frames = 30
+        self._bad_frame_save_attempts = 0
+        self._bad_frames_saved = 0
 
     def connect(self) -> None:
         """Bind the PUB endpoint and start the background consumer thread.
@@ -238,6 +268,9 @@ class SonicPublisher:
         self._lookahead_deadline = None
         self._last_send_started_at = None
         self._last_batch_discontinuity = False
+        self._invalid_source_frames = 0
+        self._consecutive_invalid_frames = 0
+        self._last_invalid_warning_time = float("-inf")
 
         try:
             import zmq  # Imported lazily so the original webcam demo stays independent.
@@ -326,17 +359,63 @@ class SonicPublisher:
         """
         self.check_health()
 
-        body_pose = body_params_global.get("body_pose")
-        if body_pose is None:
-            body_pose = body_params_incam.get("body_pose")
-        if body_pose is None:
-            raise KeyError("body_pose is required in body parameters")
-        num_values = (
-            body_pose.numel() if isinstance(body_pose, torch.Tensor) else np.size(body_pose)
+        body_pose_candidates = (
+            body_params_incam.get("body_pose"),
+            body_params_global.get("body_pose"),
         )
-        if num_values == 0 or num_values % 63:
-            raise ValueError(f"body_pose must contain a multiple of 63 values, got {num_values}")
-        num_frames = num_values // 63
+        body_pose = body_pose_candidates[0]
+        if body_pose is None:
+            body_pose = body_pose_candidates[1]
+        if body_pose is not None:
+            frame_count_candidates = body_pose_candidates
+            values_per_frame = 63
+            num_values = (
+                body_pose.numel() if isinstance(body_pose, torch.Tensor) else np.size(body_pose)
+            )
+            if num_values == 0 or num_values % 63:
+                raise ValueError(
+                    f"body_pose must contain a multiple of 63 values, got {num_values}"
+                )
+            num_frames = num_values // 63
+        else:
+            # Missing pose fields are recoverable source-frame errors. Infer the
+            # batch size from the root when possible so the worker can count and
+            # drop the batch through InvalidSMPLFrameError instead of raising on
+            # the inference thread.
+            root_candidates = (
+                body_params_global.get("global_orient"),
+                body_params_incam.get("global_orient"),
+            )
+            root = root_candidates[0]
+            if root is None:
+                root = root_candidates[1]
+            if root is None:
+                frame_count_candidates = ()
+                values_per_frame = 3
+                num_frames = 1
+            else:
+                frame_count_candidates = root_candidates
+                values_per_frame = 3
+                num_values = root.numel() if isinstance(root, torch.Tensor) else np.size(root)
+                if num_values == 0 or num_values % 3:
+                    raise ValueError(
+                        "global_orient must contain a multiple of 3 values when "
+                        f"body_pose is missing, got {num_values}"
+                    )
+                num_frames = num_values // 3
+
+        # A finite fallback candidate can legitimately have a different batch
+        # length. Accept timestamps matching any structurally valid candidate;
+        # the consumer performs the final match after finite-value selection.
+        timestamp_frame_counts = {num_frames}
+        for candidate in frame_count_candidates:
+            if candidate is None:
+                continue
+            candidate_values = (
+                candidate.numel() if isinstance(candidate, torch.Tensor) else np.size(candidate)
+            )
+            if candidate_values > 0 and candidate_values % values_per_frame == 0:
+                timestamp_frame_counts.add(candidate_values // values_per_frame)
 
         if timestamp_ns is None:
             timestamp_ns = time.monotonic_ns()
@@ -348,17 +427,14 @@ class SonicPublisher:
         ):
             raise ValueError("timestamp_ns exceeds the signed int64 range")
         timestamps = raw_timestamps.astype(np.int64, copy=False).reshape(-1)
-        if len(timestamps) == 1 and num_frames > 1:
-            end_timestamp = int(timestamps[0])
-            timestamps = end_timestamp - np.arange(
-                num_frames - 1,
-                -1,
-                -1,
-                dtype=np.int64,
-            ) * int(round(1_000_000_000 / self.target_fps))
-        elif len(timestamps) != num_frames:
+        # Keep a scalar timestamp scalar until the consumer has selected the
+        # finite body-pose candidate. The fallback candidate may have a
+        # different batch length, and only the worker knows that final length.
+        if len(timestamps) != 1 and len(timestamps) not in timestamp_frame_counts:
+            expected_counts = ", ".join(map(str, sorted(timestamp_frame_counts)))
             raise ValueError(
-                f"timestamp_ns has {len(timestamps)} values; expected 1 or {num_frames}"
+                f"timestamp_ns has {len(timestamps)} values; expected 1 or one of "
+                f"[{expected_counts}]"
             )
 
         with self._state_lock:
@@ -523,12 +599,30 @@ class SonicPublisher:
                     body_params_incam, body_params_global, timestamps, num_frames, dropped = item
                     if dropped:
                         self._discard_stale_pending(pending_windows)
-                    pose_windows = self._make_pose_windows(
-                        body_params_incam,
-                        body_params_global,
-                        timestamps,
-                        num_frames,
-                    )
+                    try:
+                        pose_windows = self._make_pose_windows(
+                            body_params_incam,
+                            body_params_global,
+                            timestamps,
+                            num_frames,
+                        )
+                    except InvalidSMPLFrameError as exc:
+                        self._record_invalid_source_frames(
+                            exc,
+                            body_params_incam,
+                            body_params_global,
+                            timestamps,
+                            num_frames,
+                        )
+                        if self._consecutive_invalid_frames >= self._max_consecutive_invalid_frames:
+                            raise RuntimeError(
+                                "Too many consecutive invalid GEM-SMPL frames "
+                                f"({self._consecutive_invalid_frames} >= "
+                                f"{self._max_consecutive_invalid_frames})"
+                            ) from exc
+                        continue
+
+                    self._consecutive_invalid_frames = 0
                     if self._last_batch_discontinuity:
                         pending_windows.clear()
                         self._next_send_deadline = None
@@ -553,6 +647,68 @@ class SonicPublisher:
         with self._state_lock:
             self._worker_error = error
         print(f"\n[SONIC ERROR] {error}")
+
+    def _record_invalid_source_frames(
+        self,
+        error: InvalidSMPLFrameError,
+        body_params_incam: Mapping[str, Any],
+        body_params_global: Mapping[str, Any],
+        timestamps_ns: np.ndarray,
+        num_frames: int,
+    ) -> None:
+        """Count, optionally snapshot, and rate-limit logging for a bad source batch."""
+        self._invalid_source_frames += num_frames
+        self._consecutive_invalid_frames += num_frames
+        self._save_bad_frame(
+            body_params_incam,
+            body_params_global,
+            timestamps_ns,
+            error,
+        )
+
+        now = time.monotonic()
+        if now - self._last_invalid_warning_time < 1.0:
+            return
+        self._last_invalid_warning_time = now
+        print(
+            "\n[SONIC WARNING] dropped invalid GEM frame\n"
+            f"reason={error}\n"
+            f"consecutive={self._consecutive_invalid_frames}\n"
+            f"total_invalid={self._invalid_source_frames}"
+        )
+
+    def _save_bad_frame(
+        self,
+        body_params_incam: Mapping[str, Any],
+        body_params_global: Mapping[str, Any],
+        timestamps_ns: np.ndarray,
+        error: InvalidSMPLFrameError,
+    ) -> None:
+        """Save at most three diagnostic inputs; failures remain recoverable."""
+        if (
+            self.sonic_bad_frame_dir is None
+            or self._bad_frame_save_attempts >= _MAX_BAD_FRAME_SNAPSHOTS
+        ):
+            return
+
+        snapshot_index = self._bad_frame_save_attempts
+        self._bad_frame_save_attempts += 1
+        output_path = self.sonic_bad_frame_dir / f"bad_smpl_frame_{snapshot_index:03d}.pt"
+        try:
+            self.sonic_bad_frame_dir.mkdir(parents=True, exist_ok=True)
+            snapshot = {
+                "timestamp_ns": torch.as_tensor(
+                    np.asarray(timestamps_ns, dtype=np.int64).copy()
+                ).clone(),
+                "body_params_incam": _cpu_debug_copy(body_params_incam),
+                "body_params_global": _cpu_debug_copy(body_params_global),
+                "error": str(error),
+            }
+            torch.save(snapshot, output_path)
+            self._bad_frames_saved += 1
+            print(f"[SONIC WARNING] saved invalid GEM frame: {output_path}")
+        except Exception as exc:
+            print(f"[SONIC WARNING] failed to save invalid GEM frame: {exc}")
 
     def _send_due(self, pending_windows: deque[dict[str, np.ndarray]]) -> bool:
         """Return true for one 50 Hz send slot without replaying missed slots."""
@@ -634,7 +790,7 @@ class SonicPublisher:
         body_params_incam: Mapping[str, Any],
         body_params_global: Mapping[str, Any],
         timestamps_ns: np.ndarray,
-        num_source_frames: int,
+        _num_source_frames: int,
     ) -> list[dict[str, np.ndarray]]:
         if self._smpl_converter is None:
             raise RuntimeError("SONIC SMPL converter is not initialized")
@@ -659,17 +815,25 @@ class SonicPublisher:
             converted["body_quat_w"].detach().cpu().numpy(), dtype=np.float32
         )
         timestamps_ns = np.ascontiguousarray(timestamps_ns, dtype=np.int64).reshape(-1)
-        if not (
-            len(smpl_pose)
-            == len(smpl_joints_local)
-            == len(body_quat)
-            == len(timestamps_ns)
-            == num_source_frames
-        ):
+        converted_frames = len(smpl_pose)
+        if len(timestamps_ns) == 1 and converted_frames > 1:
+            end_timestamp = int(timestamps_ns[0])
+            timestamps_ns = end_timestamp - np.arange(
+                converted_frames - 1,
+                -1,
+                -1,
+                dtype=np.int64,
+            ) * int(round(1_000_000_000 / self.target_fps))
+        elif len(timestamps_ns) != converted_frames:
+            raise InvalidSMPLFrameError(
+                "timestamp_ns no longer matches the finite fallback pose: "
+                f"timestamps={len(timestamps_ns)}, pose_frames={converted_frames}"
+            )
+        if not (len(smpl_pose) == len(smpl_joints_local) == len(body_quat) == len(timestamps_ns)):
             raise ValueError("SONIC source pose fields and timestamps have different lengths")
 
         pose_windows: list[dict[str, np.ndarray]] = []
-        for source_index in range(num_source_frames):
+        for source_index in range(converted_frames):
             resampled = self._resampler.push(
                 int(timestamps_ns[source_index]),
                 smpl_pose[source_index],
@@ -750,6 +914,9 @@ class SonicPublisher:
             "\n[SONIC]\n"
             f"fps={self._frames_sent / elapsed:.1f}\n"
             f"frames={self._frames_sent}\n"
+            f"invalid_source_frames={self._invalid_source_frames}\n"
+            f"consecutive_invalid_frames={self._consecutive_invalid_frames}\n"
+            f"dropped_queue_frames={self._frames_dropped}\n"
             f"smpl_pose_shape={smpl_pose_shape}\n"
             f"smpl_joints_shape={smpl_joints_shape}\n"
             f"body_quat={np.array2string(body_quat, precision=4, separator=', ')}\n"

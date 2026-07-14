@@ -81,7 +81,6 @@ from gem.utils.cam_utils import compute_transl_full_cam, estimate_K
 from gem.utils.geo_transform import compute_cam_angvel, get_bbx_xys_from_xyxy
 from gem.utils.motion_utils import init_rollout_w_Rt_state, rollout_step_w_Rt
 from gem.utils.pylogger import Log
-from gem.gmr_udp_bridge import GMRUDPBridge
 
 from onnx_runners import (
     hmr2_preprocess_256x256,
@@ -308,17 +307,6 @@ class WebcamGEMSMPLDemo:
         self.vitpose_period = args.vitpose_period
         self.no_imgfeat = args.no_imgfeat
         self.render_enabled = args.render
-
-        # Optional GEM -> GMR-CPP UDP bridge.
-        self.gmr_bridge = None
-        if args.gmr_host:
-            self.gmr_bridge = GMRUDPBridge(
-                host=args.gmr_host,
-                port=args.gmr_port,
-                yaw_deg=args.gmr_yaw_deg,
-                scale=args.gmr_scale,
-                device=_DEVICE,
-            )
 
         self._async = args.async_pipeline and not args.no_async_pipeline
         Log.info(
@@ -596,15 +584,6 @@ class WebcamGEMSMPLDemo:
             w, h = (xmax - xmin) * 1.1, (ymax - ymin) * 1.1
             updated_bbox = np.array([cx - w / 2, cy - h / 2, cx + w / 2, cy + h / 2])
 
-        if self.gmr_bridge is not None:
-            try:
-                self.gmr_bridge.send(
-                    body_params_global=body_params_global,
-                    body_params_incam=pred_body_params_incam,
-                )
-            except Exception as exc:
-                print(f"\n[GMR UDP ERROR] {type(exc).__name__}: {exc}")
-
         return {
             "ready": True,
             "body_params_incam": {k: v.detach().cpu() for k, v in pred_body_params_incam.items()},
@@ -858,8 +837,6 @@ class WebcamGEMSMPLDemo:
         except KeyboardInterrupt:
             print("\n[Interrupted]")
         finally:
-            if self.gmr_bridge is not None:
-                self.gmr_bridge.close()
             self.cap.release()
             if self._denoiser_executor is not None:
                 self._denoiser_executor.shutdown(wait=True, cancel_futures=True)
@@ -926,22 +903,6 @@ def parse_args():
     parser.add_argument(
         "--no_async_pipeline", action="store_true",
         help="Disable async pipeline (force synchronous mode)",
-    )
-    parser.add_argument(
-        "--gmr_host", type=str, default=None,
-        help="GMR-CPP UDP destination IP; omit to disable streaming",
-    )
-    parser.add_argument(
-        "--gmr_port", type=int, default=7001,
-        help="GMR-CPP UDP destination port",
-    )
-    parser.add_argument(
-        "--gmr_yaw_deg", type=float, default=0.0,
-        help="Additional Z-up yaw rotation applied before sending",
-    )
-    parser.add_argument(
-        "--gmr_scale", type=float, default=1.0,
-        help="Global scale applied to GEM joint positions",
     )
     return parser.parse_args()
 

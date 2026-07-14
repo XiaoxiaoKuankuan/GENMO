@@ -17,6 +17,9 @@ import sys
 import time
 from pathlib import Path
 
+import numpy as np
+import torch
+
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_SONIC_REPO_PATH = PROJECT_ROOT.parent / "GR00T-WholeBodyControl"
 if str(PROJECT_ROOT) not in sys.path:
@@ -29,6 +32,64 @@ if str(DEMO_DIR) not in sys.path:
 from demo_webcam import WebcamGEMSMPLDemo
 
 
+def _shape_text(shape):
+    if not shape:
+        return "()"
+    suffix = "," if len(shape) == 1 else ""
+    return f"({','.join(map(str, shape))}{suffix})"
+
+
+def _nonfinite_summary(value, name):
+    """Return a lightweight raw-output diagnostic without altering the value."""
+    try:
+        if isinstance(value, torch.Tensor):
+            tensor = value.detach()
+            if not (tensor.is_floating_point() or tensor.is_complex()):
+                return None
+            counts = torch.stack(
+                (
+                    torch.isnan(tensor).sum(),
+                    torch.isposinf(tensor).sum(),
+                    torch.isneginf(tensor).sum(),
+                )
+            ).to(device="cpu")
+            nan_count, posinf_count, neginf_count = map(int, counts.tolist())
+            shape = tuple(tensor.shape)
+        else:
+            array = np.asarray(value)
+            if not np.issubdtype(array.dtype, np.inexact):
+                return None
+            nan_count = int(np.isnan(array).sum())
+            posinf_count = int(np.isposinf(array).sum())
+            neginf_count = int(np.isneginf(array).sum())
+            shape = array.shape
+    except Exception as exc:
+        return f"{name}: finite precheck failed ({exc})"
+
+    if nan_count + posinf_count + neginf_count == 0:
+        return None
+    return (
+        f"{name}: shape={_shape_text(shape)}, nan={nan_count}, "
+        f"posinf={posinf_count}, neginf={neginf_count}"
+    )
+
+
+def _raw_smpl_nonfinite_details(body_params_incam, body_params_global):
+    details = []
+    for source_name, params in (
+        ("in-camera", body_params_incam),
+        ("global", body_params_global),
+    ):
+        for field_name in ("body_pose", "global_orient"):
+            value = params.get(field_name)
+            if value is None:
+                continue
+            detail = _nonfinite_summary(value, f"{source_name} {field_name}")
+            if detail is not None:
+                details.append(detail)
+    return details
+
+
 class WebcamGEMSMPLSonicDemo(WebcamGEMSMPLDemo):
     """Thin streaming adapter around the unchanged webcam inference demo."""
 
@@ -36,6 +97,7 @@ class WebcamGEMSMPLSonicDemo(WebcamGEMSMPLDemo):
         self._sonic_enabled = bool(args.sonic_zmq)
         self._sonic_publisher = None
         self._last_sonic_params = None
+        self._last_raw_nonfinite_warning_time = float("-inf")
 
         if self._sonic_enabled:
             # Lazy import keeps this script usable without pyzmq when streaming
@@ -48,6 +110,7 @@ class WebcamGEMSMPLSonicDemo(WebcamGEMSMPLDemo):
                 topic=args.sonic_topic,
                 sonic_repo_path=args.sonic_repo_path,
                 enable_yaw_calibration=args.enable_yaw_calibration,
+                sonic_bad_frame_dir=getattr(args, "sonic_bad_frame_dir", None),
             )
             self._sonic_publisher.connect()
 
@@ -71,9 +134,22 @@ class WebcamGEMSMPLSonicDemo(WebcamGEMSMPLDemo):
             # object identity across those shallow copies, so publish it once.
             if body_params_incam is not self._last_sonic_params:
                 self._last_sonic_params = body_params_incam
+                body_params_global = result["body_params_global"]
+                invalid_details = _raw_smpl_nonfinite_details(
+                    body_params_incam,
+                    body_params_global,
+                )
+                now = time.monotonic()
+                if invalid_details and now - self._last_raw_nonfinite_warning_time >= 1.0:
+                    self._last_raw_nonfinite_warning_time = now
+                    print(
+                        "\n[SONIC WARNING] raw GEM result contains non-finite values\n"
+                        + "\n".join(invalid_details)
+                        + "\npublisher will apply fallback/drop policy"
+                    )
                 self._sonic_publisher.publish_smpl(
                     body_params_incam,
-                    result["body_params_global"],
+                    body_params_global,
                     timestamp_ns=time.monotonic_ns(),
                 )
 
@@ -178,6 +254,12 @@ def parse_args():
         "--enable_yaw_calibration",
         action="store_true",
         help="Remove the first valid SONIC root heading from subsequent frames",
+    )
+    parser.add_argument(
+        "--sonic_bad_frame_dir",
+        type=str,
+        default=None,
+        help="Optionally save at most three invalid GEM-SMPL inputs for diagnosis",
     )
     return parser.parse_args()
 

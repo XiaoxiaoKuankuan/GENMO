@@ -6,11 +6,64 @@
 from __future__ import annotations
 
 import sys
+import time
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
 import torch
+
+
+class InvalidSMPLFrameError(ValueError):
+    """A recoverable invalid source pose that should be dropped."""
+
+
+def _shape_text(shape: torch.Size | tuple[int, ...]) -> str:
+    if not shape:
+        return "()"
+    suffix = "," if len(shape) == 1 else ""
+    return f"({','.join(map(str, shape))}{suffix})"
+
+
+def _require_finite(tensor: torch.Tensor, name: str) -> torch.Tensor:
+    """Reject a non-finite tensor with enough detail to locate its source."""
+    finite = torch.isfinite(tensor)
+    if bool(finite.all()):
+        return tensor
+
+    nan_count = int(torch.isnan(tensor).sum().item())
+    posinf_count = int(torch.isposinf(tensor).sum().item())
+    neginf_count = int(torch.isneginf(tensor).sum().item())
+    raise InvalidSMPLFrameError(
+        f"{name} contains non-finite values:\n"
+        f"shape={_shape_text(tensor.shape)}, nan={nan_count}, "
+        f"posinf={posinf_count}, neginf={neginf_count}"
+    )
+
+
+def _normalize_quaternion_safe(
+    quaternion: torch.Tensor,
+    name: str,
+) -> torch.Tensor:
+    """Validate and normalize a scalar-first quaternion without hiding errors."""
+    if quaternion.ndim < 1 or quaternion.shape[-1] != 4:
+        raise ValueError(f"{name} must end in 4 quaternion components, got {quaternion.shape}")
+
+    _require_finite(quaternion, name)
+    norm = torch.linalg.vector_norm(quaternion, dim=-1, keepdim=True)
+    _require_finite(norm, f"{name} norm")
+    near_zero = norm < 1e-8
+    if bool(near_zero.any()):
+        raise InvalidSMPLFrameError(
+            f"{name} contains a zero or near-zero quaternion norm:\n"
+            f"shape={_shape_text(quaternion.shape)}, "
+            f"near_zero={int(near_zero.sum().item())}, "
+            f"min_norm={float(norm.min().item()):.9g}"
+        )
+
+    normalized = quaternion / norm
+    _require_finite(normalized, f"{name} normalized")
+    return normalized.contiguous()
 
 
 def _as_rows(value: Any, width: int, name: str) -> torch.Tensor:
@@ -31,7 +84,7 @@ def _match_frames(value: torch.Tensor, num_frames: int, name: str) -> torch.Tens
         return value
     if len(value) == 1:
         return value.expand(num_frames, -1).contiguous()
-    raise ValueError(f"{name} has {len(value)} frames; expected 1 or {num_frames}")
+    raise InvalidSMPLFrameError(f"{name} has {len(value)} frames; expected 1 or {num_frames}")
 
 
 class SonicSMPLConverter:
@@ -106,6 +159,8 @@ class SonicSMPLConverter:
         self._quat_mul = quat_mul
         self._get_heading_q = get_heading_q
         self._initial_heading: torch.Tensor | None = None
+        self._fallback_warnings_once: set[str] = set()
+        self._last_fallback_warning_time: dict[str, float] = {}
 
     @property
     def initial_heading(self) -> torch.Tensor | None:
@@ -116,11 +171,68 @@ class SonicSMPLConverter:
     def reset_yaw_calibration(self) -> None:
         self._initial_heading = None
 
+    def _warn_fallback_once(self, key: str, message: str) -> None:
+        if key in self._fallback_warnings_once:
+            return
+        self._fallback_warnings_once.add(key)
+        print(f"[SONIC WARNING] {message}")
+
+    def _warn_fallback_rate_limited(self, key: str, message: str) -> None:
+        now = time.monotonic()
+        if now - self._last_fallback_warning_time.get(key, float("-inf")) < 1.0:
+            return
+        self._last_fallback_warning_time[key] = now
+        print(f"[SONIC WARNING] {message}")
+
+    def _select_finite_rows(
+        self,
+        candidates: tuple[tuple[str, Mapping[str, Any]], ...],
+        field_name: str,
+        width: int,
+    ) -> torch.Tensor:
+        """Choose the first present finite candidate, preserving source priority."""
+        invalid_candidates: list[tuple[str, InvalidSMPLFrameError]] = []
+        found_candidate = False
+
+        for source_name, params in candidates:
+            value = params.get(field_name)
+            if value is None:
+                continue
+            found_candidate = True
+            tensor = _as_rows(value, width, f"{source_name} {field_name}")
+            try:
+                _require_finite(tensor, f"{source_name} {field_name}")
+            except InvalidSMPLFrameError as exc:
+                invalid_candidates.append((source_name, exc))
+                continue
+
+            if invalid_candidates:
+                invalid_source = invalid_candidates[0][0]
+                message = f"invalid {invalid_source} {field_name}; using {source_name} {field_name}"
+                if field_name == "body_pose":
+                    self._warn_fallback_once(field_name, message)
+                else:
+                    self._warn_fallback_rate_limited(field_name, message)
+            return tensor
+
+        if not found_candidate:
+            raise InvalidSMPLFrameError(
+                f"{field_name} is missing from all GEM body-parameter candidates"
+            )
+
+        details = "\n".join(f"- {source}: {error}" for source, error in invalid_candidates)
+        raise InvalidSMPLFrameError(f"no finite {field_name} candidate is available:\n{details}")
+
     def _remove_initial_yaw(self, body_quat_w: torch.Tensor) -> torch.Tensor:
         if not self.enable_yaw_calibration:
             return body_quat_w
         if self._initial_heading is None:
-            self._initial_heading = self._get_heading_q(body_quat_w[:1]).detach().clone()
+            initial_heading = self._get_heading_q(body_quat_w[:1])
+            initial_heading = _normalize_quaternion_safe(
+                initial_heading,
+                "initial_heading",
+            )
+            self._initial_heading = initial_heading.detach().clone()
         initial_heading_inv = self._quat_inv(self._initial_heading).expand_as(body_quat_w)
         return self._quat_mul(initial_heading_inv, body_quat_w)
 
@@ -135,35 +247,50 @@ class SonicSMPLConverter:
         ``transl`` is intentionally not applied: SONIC consumes the 24 joint
         positions after removal of the root rotation, not world-space joints.
         """
-        body_pose_value = body_params_global.get("body_pose")
-        if body_pose_value is None:
-            body_pose_value = body_params_incam.get("body_pose")
-        if body_pose_value is None:
-            raise KeyError("body_pose is required in body_params_incam or body_params_global")
-
-        body_pose = _as_rows(body_pose_value, 63, "body_pose")
+        body_pose = self._select_finite_rows(
+            (
+                ("in-camera", body_params_incam),
+                ("global", body_params_global),
+            ),
+            "body_pose",
+            63,
+        )
+        _require_finite(body_pose, "body_pose")
         num_frames = len(body_pose)
 
-        global_orient_value = body_params_global.get("global_orient")
-        if global_orient_value is None:
-            global_orient_value = body_params_incam.get("global_orient")
-        if global_orient_value is None:
-            raise KeyError("global_orient is required in body parameters")
         global_orient = _match_frames(
-            _as_rows(global_orient_value, 3, "global_orient"),
+            self._select_finite_rows(
+                (
+                    ("global", body_params_global),
+                    ("in-camera", body_params_incam),
+                ),
+                "global_orient",
+                3,
+            ),
             num_frames,
             "global_orient",
         )
+        _require_finite(global_orient, "global_orient")
 
         global_orient_quat = self._angle_axis_to_quaternion(global_orient)
+        global_orient_quat = _normalize_quaternion_safe(
+            global_orient_quat,
+            "global_orient_quat_y_up",
+        )
         global_orient_quat = self._smpl_root_ytoz_up(global_orient_quat)
+        global_orient_quat = _normalize_quaternion_safe(
+            global_orient_quat,
+            "global_orient_quat_z_up",
+        )
         global_orient_sonic = self._quaternion_to_angle_axis(global_orient_quat)
+        _require_finite(global_orient_sonic, "global_orient_sonic")
 
         joints = self._compute_human_joints(
             body_pose=body_pose[..., :63],
             global_orient=global_orient_sonic,
             human_joints_info_path=self._human_joints_info_path,
         )
+        _require_finite(joints, "compute_human_joints output")
         joints = joints.reshape(num_frames, -1, 3)
         if joints.shape != (num_frames, 24, 3):
             raise ValueError(
@@ -172,9 +299,17 @@ class SonicSMPLConverter:
             )
 
         body_quat_w = self._remove_smpl_base_rot(global_orient_quat, w_last=False)
-        root_quat_inv = self._quat_inv(body_quat_w).unsqueeze(1).expand(-1, 24, -1)
-        smpl_joints_local = self._quat_apply(root_quat_inv, joints).contiguous()
-        body_quat_w = self._remove_initial_yaw(body_quat_w).contiguous()
+        body_quat_w = _normalize_quaternion_safe(body_quat_w, "body_quat_w")
+        root_quat_inv = self._quat_inv(body_quat_w)
+        root_quat_inv = _normalize_quaternion_safe(root_quat_inv, "root_quat_inv")
+        root_quat_inv_expanded = root_quat_inv.unsqueeze(1).expand(-1, 24, -1)
+        smpl_joints_local = self._quat_apply(root_quat_inv_expanded, joints).contiguous()
+        _require_finite(smpl_joints_local, "smpl_joints_local")
+        body_quat_w = self._remove_initial_yaw(body_quat_w)
+        body_quat_w = _normalize_quaternion_safe(
+            body_quat_w,
+            "body_quat_w after yaw calibration",
+        )
 
         return {
             "smpl_pose": body_pose.reshape(num_frames, 21, 3),
