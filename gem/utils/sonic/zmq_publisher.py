@@ -17,6 +17,8 @@ import json
 import queue
 import threading
 import time
+import warnings
+from collections import deque
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
@@ -25,10 +27,15 @@ import numpy as np
 import torch
 from scipy.spatial.transform import Rotation
 
+from gem.utils.sonic.resampler import SMPLRealtimeResampler
 from gem.utils.sonic.smpl_converter import SonicSMPLConverter
 
 _HEADER_SIZE = 1280
 _STOP = object()
+_TARGET_FPS = 50
+_WINDOW_SIZE = 5
+_SEND_LOOKAHEAD = 2
+_PENDING_WINDOW_LIMIT = 2
 
 
 def _pack_pose_message_compat(
@@ -87,12 +94,65 @@ def _resolve_pose_packer():
     return pack_pose_message
 
 
+def _elbow_swing_euler(
+    elbow_axis_angle: np.ndarray,
+    decompose_rotation_aa,
+) -> np.ndarray:
+    """Return Pico-compatible elbow swing Euler angles with a zero-pose guard."""
+    elbow_axis_angle = np.asarray(elbow_axis_angle, dtype=np.float64).reshape(-1, 3)
+    swing_euler = np.zeros_like(elbow_axis_angle)
+    valid = np.linalg.norm(elbow_axis_angle, axis=1) > 1e-8
+    if not np.any(valid):
+        return swing_euler
+
+    _, swing_wxyz = decompose_rotation_aa(
+        elbow_axis_angle[valid],
+        np.array([0.0, 1.0, 0.0], dtype=np.float64),
+    )
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", UserWarning)
+        swing_euler[valid] = Rotation.from_quat(swing_wxyz[:, [1, 2, 3, 0]]).as_euler(
+            "XYZ", degrees=False
+        )
+    return swing_euler
+
+
+def _compute_g1_wrist_joint_pos(
+    smpl_pose: np.ndarray,
+    decompose_rotation_aa,
+) -> np.ndarray:
+    """Map Pico's SMPL elbow/wrist rotations into the six G1 wrist DoFs."""
+    pose = np.asarray(smpl_pose, dtype=np.float64)
+    if pose.ndim == 2:
+        pose = pose[None]
+    if pose.ndim != 3 or pose.shape[1:] != (21, 3):
+        raise ValueError(f"smpl_pose must have shape [N,21,3], got {pose.shape}")
+
+    left_elbow_swing = _elbow_swing_euler(pose[:, 17], decompose_rotation_aa)
+    right_elbow_swing = _elbow_swing_euler(pose[:, 18], decompose_rotation_aa)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", UserWarning)
+        left_wrist_euler = Rotation.from_rotvec(pose[:, 19]).as_euler("XYZ", degrees=False)
+        right_wrist_euler = Rotation.from_rotvec(pose[:, 20]).as_euler("XYZ", degrees=False)
+
+    joint_pos = np.zeros((len(pose), 29), dtype=np.float32)
+    joint_pos[:, 23] = left_elbow_swing[:, 0] + left_wrist_euler[:, 0]
+    joint_pos[:, 25] = left_wrist_euler[:, 1]
+    joint_pos[:, 27] = left_elbow_swing[:, 2] + left_wrist_euler[:, 2]
+    joint_pos[:, 24] = -(right_elbow_swing[:, 0] + right_wrist_euler[:, 0])
+    joint_pos[:, 26] = -right_wrist_euler[:, 1]
+    joint_pos[:, 28] = right_elbow_swing[:, 2] + right_wrist_euler[:, 2]
+    if not np.isfinite(joint_pos).all():
+        raise ValueError("G1 wrist mapping produced non-finite joint positions")
+    return joint_pos
+
+
 class SonicPublisher:
     """Non-blocking GEM-SMPL to SONIC Protocol v3 publisher.
 
     ``publish_smpl`` is the producer-side API.  It only enqueues references to
-    the already detached webcam outputs.  SONIC forward kinematics, SciPy
-    quaternion conversion, packing, and ZMQ send all run on the consumer
+    the already detached webcam outputs. SONIC forward kinematics, resampling,
+    wrist mapping, packing, and ZMQ send all run on the consumer
     thread, keeping them off the GEM inference path.
     """
 
@@ -103,6 +163,7 @@ class SonicPublisher:
         topic: str = "pose",
         queue_size: int = 2,
         sonic_repo_path: str | Path | None = None,
+        enable_yaw_calibration: bool = False,
     ) -> None:
         if not host:
             raise ValueError("host must not be empty")
@@ -120,6 +181,9 @@ class SonicPublisher:
         if sonic_repo_path is None:
             sonic_repo_path = Path(__file__).resolve().parents[4] / "GR00T-WholeBodyControl"
         self.sonic_repo_path = Path(sonic_repo_path).expanduser()
+        self.enable_yaw_calibration = bool(enable_yaw_calibration)
+        self.target_fps = _TARGET_FPS
+        self.window_size = _WINDOW_SIZE
 
         self._queue: queue.Queue[Any] = queue.Queue(maxsize=queue_size)
         self._stop_event = threading.Event()
@@ -131,11 +195,18 @@ class SonicPublisher:
         self._connected = False
 
         self._smpl_converter: SonicSMPLConverter | None = None
+        self._resampler: SMPLRealtimeResampler | None = None
+        self._frame_window: deque[dict[str, np.ndarray | int]] = deque(maxlen=self.window_size)
+        self._decompose_rotation_aa = None
         self._next_frame_index = 0
         self._frames_sent = 0
         self._frames_dropped = 0
         self._next_log_frame = 100
         self._started_at = 0.0
+        self._next_send_deadline: float | None = None
+        self._lookahead_deadline: float | None = None
+        self._last_send_started_at: float | None = None
+        self._last_batch_discontinuity = False
 
     def connect(self) -> None:
         """Bind the PUB endpoint and start the background consumer thread.
@@ -162,6 +233,11 @@ class SonicPublisher:
         self._frames_sent = 0
         self._frames_dropped = 0
         self._next_log_frame = 100
+        self._frame_window.clear()
+        self._next_send_deadline = None
+        self._lookahead_deadline = None
+        self._last_send_started_at = None
+        self._last_batch_discontinuity = False
 
         try:
             import zmq  # Imported lazily so the original webcam demo stays independent.
@@ -223,16 +299,33 @@ class SonicPublisher:
             raise RuntimeError("SONIC publisher startup was cancelled")
         print("[SONIC] ZMQ publisher started")
 
+    def check_health(self) -> bool:
+        """Raise in the caller when the asynchronous worker has failed."""
+        with self._state_lock:
+            error = self._worker_error
+            state = self._state
+            thread_alive = self._thread is not None and self._thread.is_alive()
+            was_connected = self._connected
+
+        if error is not None:
+            raise RuntimeError("SONIC publisher worker failed") from error
+        if was_connected and (state != "connected" or not thread_alive):
+            raise RuntimeError("SONIC publisher worker stopped unexpectedly")
+        return True
+
     def publish_smpl(
         self,
         body_params_incam: Mapping[str, Any],
         body_params_global: Mapping[str, Any],
+        timestamp_ns: int | np.ndarray | None = None,
     ) -> bool:
         """Queue one SMPL frame/chunk without waiting for the consumer.
 
         When the bounded queue is full, its oldest unsent item is discarded so
         real-time inference never waits behind stale poses.
         """
+        self.check_health()
+
         body_pose = body_params_global.get("body_pose")
         if body_pose is None:
             body_pose = body_params_incam.get("body_pose")
@@ -245,28 +338,59 @@ class SonicPublisher:
             raise ValueError(f"body_pose must contain a multiple of 63 values, got {num_values}")
         num_frames = num_values // 63
 
+        if timestamp_ns is None:
+            timestamp_ns = time.monotonic_ns()
+        raw_timestamps = np.asarray(timestamp_ns)
+        if raw_timestamps.dtype == np.bool_ or not np.issubdtype(raw_timestamps.dtype, np.integer):
+            raise TypeError("timestamp_ns must contain integer nanosecond timestamps")
+        if np.issubdtype(raw_timestamps.dtype, np.unsignedinteger) and np.any(
+            raw_timestamps > np.iinfo(np.int64).max
+        ):
+            raise ValueError("timestamp_ns exceeds the signed int64 range")
+        timestamps = raw_timestamps.astype(np.int64, copy=False).reshape(-1)
+        if len(timestamps) == 1 and num_frames > 1:
+            end_timestamp = int(timestamps[0])
+            timestamps = end_timestamp - np.arange(
+                num_frames - 1,
+                -1,
+                -1,
+                dtype=np.int64,
+            ) * int(round(1_000_000_000 / self.target_fps))
+        elif len(timestamps) != num_frames:
+            raise ValueError(
+                f"timestamp_ns has {len(timestamps)} values; expected 1 or {num_frames}"
+            )
+
         with self._state_lock:
             thread_alive = self._thread is not None and self._thread.is_alive()
             if self._state != "connected" or not thread_alive or self._stop_event.is_set():
                 return False
-            frame_index = np.arange(
-                self._next_frame_index,
-                self._next_frame_index + num_frames,
-                dtype=np.int64,
-            )
-            self._next_frame_index += num_frames
 
-        item = (dict(body_params_incam), dict(body_params_global), frame_index)
+        item = (
+            dict(body_params_incam),
+            dict(body_params_global),
+            timestamps,
+            num_frames,
+            False,
+        )
         try:
             self._queue.put_nowait(item)
         except queue.Full:
+            dropped_input = False
             try:
                 dropped_item = self._queue.get_nowait()
                 if dropped_item is not _STOP:
+                    dropped_input = True
                     with self._state_lock:
-                        self._frames_dropped += len(dropped_item[2])
+                        self._frames_dropped += dropped_item[3]
+                else:
+                    # close() also sets the stop event, so the worker does not
+                    # depend on replacing a sentinel removed by this race.
+                    return False
             except queue.Empty:
                 pass
+            if dropped_input:
+                item = (*item[:4], True)
             try:
                 self._queue.put_nowait(item)
             except queue.Full:
@@ -322,6 +446,7 @@ class SonicPublisher:
     def _worker_loop(self, zmq) -> None:
         context = None
         socket = None
+        pending_windows: deque[dict[str, np.ndarray]] = deque(maxlen=_PENDING_WINDOW_LIMIT)
         try:
             context = zmq.Context()
             socket = context.socket(zmq.PUB)
@@ -329,11 +454,31 @@ class SonicPublisher:
             socket.setsockopt(zmq.SNDHWM, self._queue.maxsize)
             socket.bind(self.endpoint)
 
-            self._smpl_converter = SonicSMPLConverter(self.sonic_repo_path)
+            self._smpl_converter = SonicSMPLConverter(
+                self.sonic_repo_path,
+                enable_yaw_calibration=self.enable_yaw_calibration,
+            )
+            self._resampler = SMPLRealtimeResampler(target_fps=self.target_fps)
+            from gear_sonic.trl.utils.rotation_conversion import decompose_rotation_aa
+
+            self._decompose_rotation_aa = decompose_rotation_aa
             print("[SONIC] Using SONIC compute_human_joints")
+            print(f"[SONIC] SONIC repo path: {self._smpl_converter.sonic_repo_path}")
+            print(
+                "[SONIC] SONIC compute_human_joints: "
+                f"{self._smpl_converter.compute_human_joints_source}"
+            )
+            print(f"[SONIC] Using Y-up -> Z-up: {self._smpl_converter.using_y_up_to_z_up}")
+            print(
+                "[SONIC] Using remove_smpl_base_rot: "
+                f"{self._smpl_converter.using_remove_smpl_base_rot}"
+            )
+            print(f"[SONIC] Target FPS: {self.target_fps}")
+            print(f"[SONIC] Window size: {self.window_size}")
+            print(f"[SONIC] Yaw calibration: {self.enable_yaw_calibration}")
             pack_pose_message = _resolve_pose_packer()
         except BaseException as exc:
-            self._worker_error = exc
+            self._set_worker_error(exc)
             self._ready_event.set()
             if socket is not None:
                 socket.close(linger=0)
@@ -347,35 +492,132 @@ class SonicPublisher:
         try:
             while not self._stop_event.is_set():
                 try:
-                    item = self._queue.get(timeout=0.1)
-                except queue.Empty:
-                    continue
-                if item is _STOP:
-                    break
+                    if self._send_due(pending_windows):
+                        pose_data = pending_windows.popleft()
+                        self._last_send_started_at = time.monotonic()
+                        message = pack_pose_message(pose_data, topic=self.topic, version=3)
+                        if self._stop_event.is_set():
+                            break
+                        try:
+                            socket.send(message, flags=zmq.NOBLOCK)
+                        except zmq.Again:
+                            # A slow/no subscriber must never back-pressure inference.
+                            pass
+                        else:
+                            self._report_sent(pose_data)
+                        assert self._next_send_deadline is not None
+                        self._next_send_deadline += 1.0 / self.target_fps
+                        continue
 
-                try:
-                    pose_data = self._make_pose_data(*item)
-                    if self._stop_event.is_set():
+                    timeout = self._input_wait_timeout(pending_windows)
+                    try:
+                        item = self._queue.get(timeout=timeout)
+                    except queue.Empty:
+                        if not pending_windows:
+                            self._next_send_deadline = None
+                            self._lookahead_deadline = None
+                        continue
+                    if item is _STOP:
                         break
-                    message = pack_pose_message(pose_data, topic=self.topic, version=3)
-                    if self._stop_event.is_set():
-                        break
-                    socket.send(message, flags=zmq.NOBLOCK)
-                    self._report_sent(pose_data)
-                except zmq.Again:
-                    # A slow/no subscriber must never back-pressure inference.
-                    continue
+
+                    body_params_incam, body_params_global, timestamps, num_frames, dropped = item
+                    if dropped:
+                        self._discard_stale_pending(pending_windows)
+                    pose_windows = self._make_pose_windows(
+                        body_params_incam,
+                        body_params_global,
+                        timestamps,
+                        num_frames,
+                    )
+                    if self._last_batch_discontinuity:
+                        pending_windows.clear()
+                        self._next_send_deadline = None
+                        self._lookahead_deadline = None
+                    self._append_latest_windows(pending_windows, pose_windows)
                 except Exception as exc:
-                    self._worker_error = exc
-                    print(f"\n[SONIC] publisher error: {exc}")
+                    self._set_worker_error(exc)
+                    break
         except BaseException as exc:
-            self._worker_error = exc
-            print(f"\n[SONIC] publisher stopped: {exc}")
+            self._set_worker_error(exc)
         finally:
             socket.close(linger=0)
             context.term()
             self._smpl_converter = None
+            self._resampler = None
+            self._decompose_rotation_aa = None
+            self._frame_window.clear()
+            pending_windows.clear()
             self._mark_worker_stopped()
+
+    def _set_worker_error(self, error: BaseException) -> None:
+        with self._state_lock:
+            self._worker_error = error
+        print(f"\n[SONIC ERROR] {error}")
+
+    def _send_due(self, pending_windows: deque[dict[str, np.ndarray]]) -> bool:
+        """Return true for one 50 Hz send slot without replaying missed slots."""
+        if not pending_windows:
+            return False
+        now = time.monotonic()
+        period = 1.0 / self.target_fps
+        if self._next_send_deadline is None:
+            if len(pending_windows) >= _SEND_LOOKAHEAD:
+                self._next_send_deadline = now
+                self._lookahead_deadline = None
+            else:
+                if self._lookahead_deadline is None:
+                    self._lookahead_deadline = now + _SEND_LOOKAHEAD * period
+                if now < self._lookahead_deadline:
+                    return False
+                self._next_send_deadline = now
+                self._lookahead_deadline = None
+
+        effective_deadline = self._next_send_deadline
+        if self._last_send_started_at is not None:
+            effective_deadline = max(
+                effective_deadline,
+                self._last_send_started_at + period,
+            )
+        if now < effective_deadline:
+            return False
+
+        missed_slots = int((now - self._next_send_deadline) // period)
+        for _ in range(min(missed_slots, max(0, len(pending_windows) - 1))):
+            pending_windows.popleft()
+        self._next_send_deadline += missed_slots * period
+        return True
+
+    def _input_wait_timeout(
+        self,
+        pending_windows: deque[dict[str, np.ndarray]],
+    ) -> float:
+        """Wait for source data only until the next wall-clock send slot."""
+        deadline = self._next_send_deadline or self._lookahead_deadline
+        if self._next_send_deadline is not None and self._last_send_started_at is not None:
+            deadline = max(
+                self._next_send_deadline,
+                self._last_send_started_at + 1.0 / self.target_fps,
+            )
+        if deadline is not None:
+            return max(0.0, min(deadline - time.monotonic(), 0.1))
+        return 0.1
+
+    def _append_latest_windows(
+        self,
+        pending_windows: deque[dict[str, np.ndarray]],
+        pose_windows: list[dict[str, np.ndarray]],
+    ) -> None:
+        """Keep only the newest bounded set; stale history can never be replayed."""
+        pending_windows.extend(pose_windows)
+
+    def _discard_stale_pending(
+        self,
+        pending_windows: deque[dict[str, np.ndarray]],
+    ) -> None:
+        """Drop unsent packets after raw queue loss while preserving interpolation."""
+        pending_windows.clear()
+        self._next_send_deadline = None
+        self._lookahead_deadline = None
 
     def _mark_worker_stopped(self) -> None:
         """Publish a terminal worker state without racing connect/close."""
@@ -387,59 +629,109 @@ class SonicPublisher:
             self._state = "disconnected"
 
     @torch.inference_mode()
-    def _make_pose_data(
+    def _make_pose_windows(
         self,
         body_params_incam: Mapping[str, Any],
         body_params_global: Mapping[str, Any],
-        frame_index: np.ndarray | None = None,
-    ) -> dict[str, np.ndarray]:
+        timestamps_ns: np.ndarray,
+        num_source_frames: int,
+    ) -> list[dict[str, np.ndarray]]:
         if self._smpl_converter is None:
             raise RuntimeError("SONIC SMPL converter is not initialized")
+        if self._resampler is None:
+            raise RuntimeError("SONIC realtime resampler is not initialized")
+        if self._decompose_rotation_aa is None:
+            raise RuntimeError("SONIC wrist mapper is not initialized")
+
+        self._last_batch_discontinuity = False
 
         converted = self._smpl_converter.convert(
             body_params_global=body_params_global,
             body_params_incam=body_params_incam,
         )
-        smpl_pose = converted["smpl_pose"]
-        smpl_joints_local = converted["smpl_joints_local"]
-        global_orient = converted["global_orient"]
-        num_frames = len(smpl_pose)
+        smpl_pose = np.ascontiguousarray(
+            converted["smpl_pose"].detach().cpu().numpy(), dtype=np.float32
+        )
+        smpl_joints_local = np.ascontiguousarray(
+            converted["smpl_joints_local"].detach().cpu().numpy(), dtype=np.float32
+        )
+        body_quat = np.ascontiguousarray(
+            converted["body_quat_w"].detach().cpu().numpy(), dtype=np.float32
+        )
+        timestamps_ns = np.ascontiguousarray(timestamps_ns, dtype=np.int64).reshape(-1)
+        if not (
+            len(smpl_pose)
+            == len(smpl_joints_local)
+            == len(body_quat)
+            == len(timestamps_ns)
+            == num_source_frames
+        ):
+            raise ValueError("SONIC source pose fields and timestamps have different lengths")
 
-        # SciPy emits scalar-last [x, y, z, w]; SONIC requires [w, x, y, z].
-        quat_xyzw = Rotation.from_rotvec(global_orient.numpy()).as_quat()
-        body_quat = quat_xyzw[:, [3, 0, 1, 2]].astype(np.float32, copy=False)
+        pose_windows: list[dict[str, np.ndarray]] = []
+        for source_index in range(num_source_frames):
+            resampled = self._resampler.push(
+                int(timestamps_ns[source_index]),
+                smpl_pose[source_index],
+                smpl_joints_local[source_index],
+                body_quat[source_index],
+            )
+            if bool(resampled["discontinuity"]):
+                self._frame_window.clear()
+                self._next_send_deadline = None
+                self._lookahead_deadline = None
+                self._last_batch_discontinuity = True
+                pose_windows.clear()
 
-        if frame_index is None:
-            with self._state_lock:
-                frame_index = np.arange(
-                    self._next_frame_index,
-                    self._next_frame_index + num_frames,
-                    dtype=np.int64,
+            resampled_pose = np.asarray(resampled["smpl_pose"], dtype=np.float32)
+            resampled_joints = np.asarray(resampled["smpl_joints_local"], dtype=np.float32)
+            resampled_body_quat = np.asarray(resampled["body_quat"], dtype=np.float32)
+            for output_index in range(len(resampled_pose)):
+                joint_pos = _compute_g1_wrist_joint_pos(
+                    resampled_pose[output_index],
+                    self._decompose_rotation_aa,
+                )[0]
+                self._frame_window.append(
+                    {
+                        "smpl_pose": resampled_pose[output_index],
+                        "smpl_joints": resampled_joints[output_index],
+                        "body_quat": resampled_body_quat[output_index],
+                        "joint_pos": joint_pos,
+                        "frame_index": self._next_frame_index,
+                    }
                 )
-                self._next_frame_index += num_frames
-        else:
-            frame_index = np.ascontiguousarray(frame_index, dtype=np.int64).reshape(-1)
-            if len(frame_index) != num_frames:
-                raise ValueError(
-                    f"frame_index has {len(frame_index)} frames; expected {num_frames}"
-                )
+                self._next_frame_index += 1
+                if len(self._frame_window) == self.window_size:
+                    pose_windows.append(self._stack_pose_window())
+        return pose_windows
 
+    def _stack_pose_window(self) -> dict[str, np.ndarray]:
+        """Snapshot the current five resampled frames for Protocol v3."""
+        if len(self._frame_window) != self.window_size:
+            raise RuntimeError("SONIC pose window is not full")
+        frames = list(self._frame_window)
         return {
-            "smpl_pose": np.ascontiguousarray(smpl_pose.cpu().numpy(), dtype=np.float32),
-            "smpl_joints": np.ascontiguousarray(smpl_joints_local.cpu().numpy(), dtype=np.float32),
-            "body_quat": np.ascontiguousarray(body_quat, dtype=np.float32),
-            # Protocol v3 requires G1 qpos/qvel. GEM supplies SMPL rather than
-            # retargeted G1 joints, so these valid placeholders stay zero; the
-            # SMPL fields carry the primary whole-body motion.
-            "joint_pos": np.zeros((num_frames, 29), dtype=np.float32),
-            "joint_vel": np.zeros((num_frames, 29), dtype=np.float32),
-            "frame_index": frame_index,
+            "smpl_pose": np.ascontiguousarray(
+                np.stack([frame["smpl_pose"] for frame in frames]), dtype=np.float32
+            ),
+            "smpl_joints": np.ascontiguousarray(
+                np.stack([frame["smpl_joints"] for frame in frames]), dtype=np.float32
+            ),
+            "body_quat": np.ascontiguousarray(
+                np.stack([frame["body_quat"] for frame in frames]), dtype=np.float32
+            ),
+            "joint_pos": np.ascontiguousarray(
+                np.stack([frame["joint_pos"] for frame in frames]), dtype=np.float32
+            ),
+            "joint_vel": np.zeros((self.window_size, 29), dtype=np.float32),
+            "frame_index": np.asarray([frame["frame_index"] for frame in frames], dtype=np.int64),
         }
 
     def _report_sent(self, pose_data: Mapping[str, np.ndarray]) -> None:
         if self._frames_sent == 0:
             self._started_at = time.perf_counter()
-        self._frames_sent += len(pose_data["frame_index"])
+        # Each message advances the five-frame sliding window by one 50 Hz tick.
+        self._frames_sent += 1
         if self._frames_sent < self._next_log_frame:
             return
 
@@ -448,6 +740,7 @@ class SonicPublisher:
 
         elapsed = max(time.perf_counter() - self._started_at, 1e-6)
         smpl_joints = pose_data["smpl_joints"]
+        body_quat = pose_data["body_quat"][-1]
         pelvis = smpl_joints[-1, SonicSMPLConverter.PELVIS_INDEX]
         left_wrist = smpl_joints[-1, SonicSMPLConverter.LEFT_WRIST_INDEX]
         right_wrist = smpl_joints[-1, SonicSMPLConverter.RIGHT_WRIST_INDEX]
@@ -458,12 +751,11 @@ class SonicPublisher:
             f"fps={self._frames_sent / elapsed:.1f}\n"
             f"frames={self._frames_sent}\n"
             f"smpl_pose_shape={smpl_pose_shape}\n"
-            f"smpl_joint_shape={smpl_joints_shape}\n"
-            f"smpl_pose:\nshape={smpl_pose_shape}\n"
-            f"smpl_joints:\nshape={smpl_joints_shape}\n"
-            f"pelvis position={np.array2string(pelvis, precision=4, separator=', ')}\n"
-            f"left_wrist position={np.array2string(left_wrist, precision=4, separator=', ')}\n"
-            f"right_wrist position={np.array2string(right_wrist, precision=4, separator=', ')}"
+            f"smpl_joints_shape={smpl_joints_shape}\n"
+            f"body_quat={np.array2string(body_quat, precision=4, separator=', ')}\n"
+            f"pelvis={np.array2string(pelvis, precision=4, separator=', ')}\n"
+            f"left_wrist={np.array2string(left_wrist, precision=4, separator=', ')}\n"
+            f"right_wrist={np.array2string(right_wrist, precision=4, separator=', ')}"
         )
 
     def __enter__(self) -> SonicPublisher:

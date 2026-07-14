@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import argparse
 import sys
+import time
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -46,6 +47,7 @@ class WebcamGEMSMPLSonicDemo(WebcamGEMSMPLDemo):
                 port=args.sonic_port,
                 topic=args.sonic_topic,
                 sonic_repo_path=args.sonic_repo_path,
+                enable_yaw_calibration=args.enable_yaw_calibration,
             )
             self._sonic_publisher.connect()
 
@@ -57,6 +59,8 @@ class WebcamGEMSMPLSonicDemo(WebcamGEMSMPLDemo):
             raise
 
     def process_frame(self, frame_bgr):
+        if self._sonic_publisher is not None:
+            self._sonic_publisher.check_health()
         result = super().process_frame(frame_bgr)
 
         if self._sonic_publisher is not None and result is not None and result.get("ready"):
@@ -70,6 +74,7 @@ class WebcamGEMSMPLSonicDemo(WebcamGEMSMPLDemo):
                 self._sonic_publisher.publish_smpl(
                     body_params_incam,
                     result["body_params_global"],
+                    timestamp_ns=time.monotonic_ns(),
                 )
 
         return result
@@ -168,6 +173,11 @@ def parse_args():
         type=str,
         default=str(DEFAULT_SONIC_REPO_PATH),
         help="Path to the GR00T-WholeBodyControl repository",
+    )
+    parser.add_argument(
+        "--enable_yaw_calibration",
+        action="store_true",
+        help="Remove the first valid SONIC root heading from subsequent frames",
     )
     return parser.parse_args()
 

@@ -46,7 +46,11 @@ class SonicSMPLConverter:
     LEFT_WRIST_INDEX = 20
     RIGHT_WRIST_INDEX = 21
 
-    def __init__(self, sonic_repo_path: str | Path) -> None:
+    def __init__(
+        self,
+        sonic_repo_path: str | Path,
+        enable_yaw_calibration: bool = False,
+    ) -> None:
         repo_path = Path(sonic_repo_path).expanduser().resolve()
         torch_transform_path = repo_path / "gear_sonic/trl/utils/torch_transform.py"
         human_joints_info_path = repo_path / "gear_sonic/data/human/human_joints_info.pkl"
@@ -65,11 +69,18 @@ class SonicSMPLConverter:
             sys.path.remove(repo_path_str)
         sys.path.insert(0, repo_path_str)
 
+        from gear_sonic.isaac_utils.rotations import (
+            remove_smpl_base_rot,
+            smpl_root_ytoz_up,
+        )
         from gear_sonic.trl.utils.torch_transform import (
             angle_axis_to_quaternion,
             compute_human_joints,
+            get_heading_q,
             quat_apply,
             quat_inv,
+            quat_mul,
+            quaternion_to_angle_axis,
         )
 
         imported_path = Path(sys.modules[compute_human_joints.__module__].__file__).resolve()
@@ -80,11 +91,38 @@ class SonicSMPLConverter:
             )
 
         self.sonic_repo_path = repo_path
+        self.compute_human_joints_source = f"{imported_path}::compute_human_joints"
+        self.enable_yaw_calibration = bool(enable_yaw_calibration)
+        self.using_y_up_to_z_up = True
+        self.using_remove_smpl_base_rot = True
         self._human_joints_info_path = str(human_joints_info_path)
         self._compute_human_joints = compute_human_joints
         self._angle_axis_to_quaternion = angle_axis_to_quaternion
+        self._quaternion_to_angle_axis = quaternion_to_angle_axis
+        self._smpl_root_ytoz_up = smpl_root_ytoz_up
+        self._remove_smpl_base_rot = remove_smpl_base_rot
         self._quat_apply = quat_apply
         self._quat_inv = quat_inv
+        self._quat_mul = quat_mul
+        self._get_heading_q = get_heading_q
+        self._initial_heading: torch.Tensor | None = None
+
+    @property
+    def initial_heading(self) -> torch.Tensor | None:
+        if self._initial_heading is None:
+            return None
+        return self._initial_heading.clone()
+
+    def reset_yaw_calibration(self) -> None:
+        self._initial_heading = None
+
+    def _remove_initial_yaw(self, body_quat_w: torch.Tensor) -> torch.Tensor:
+        if not self.enable_yaw_calibration:
+            return body_quat_w
+        if self._initial_heading is None:
+            self._initial_heading = self._get_heading_q(body_quat_w[:1]).detach().clone()
+        initial_heading_inv = self._quat_inv(self._initial_heading).expand_as(body_quat_w)
+        return self._quat_mul(initial_heading_inv, body_quat_w)
 
     @torch.inference_mode()
     def convert(
@@ -117,9 +155,13 @@ class SonicSMPLConverter:
             "global_orient",
         )
 
+        global_orient_quat = self._angle_axis_to_quaternion(global_orient)
+        global_orient_quat = self._smpl_root_ytoz_up(global_orient_quat)
+        global_orient_sonic = self._quaternion_to_angle_axis(global_orient_quat)
+
         joints = self._compute_human_joints(
             body_pose=body_pose[..., :63],
-            global_orient=global_orient,
+            global_orient=global_orient_sonic,
             human_joints_info_path=self._human_joints_info_path,
         )
         joints = joints.reshape(num_frames, -1, 3)
@@ -129,15 +171,13 @@ class SonicSMPLConverter:
                 f"({num_frames}, 24, 3)"
             )
 
-        # Follow the bridge contract literally: remove the raw GEM root
-        # rotation. Do not mix in Pico's optional y-up/z-up or SMPL base-rot
-        # adjustments, which would define a different local coordinate frame.
-        root_quat = self._angle_axis_to_quaternion(global_orient)
-        root_quat_inv = self._quat_inv(root_quat).unsqueeze(1).expand(-1, 24, -1)
+        body_quat_w = self._remove_smpl_base_rot(global_orient_quat, w_last=False)
+        root_quat_inv = self._quat_inv(body_quat_w).unsqueeze(1).expand(-1, 24, -1)
         smpl_joints_local = self._quat_apply(root_quat_inv, joints).contiguous()
+        body_quat_w = self._remove_initial_yaw(body_quat_w).contiguous()
 
         return {
             "smpl_pose": body_pose.reshape(num_frames, 21, 3),
             "smpl_joints_local": smpl_joints_local,
-            "global_orient": global_orient,
+            "body_quat_w": body_quat_w,
         }
