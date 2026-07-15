@@ -87,6 +87,8 @@ from gem.gmr_segment_adapter import (
     GMRSegmentAdapter,
     SegmentDebugPublisher,
 )
+from gem.smpl_direct_adapter import HIERARCHY as SMPL_DIRECT_HIERARCHY
+from gem.smpl_direct_adapter import SMPLDirectAdapter
 
 from onnx_runners import (
     hmr2_preprocess_256x256,
@@ -313,8 +315,10 @@ class WebcamGEMSMPLDemo:
         self.vitpose_period = args.vitpose_period
         self.no_imgfeat = args.no_imgfeat
         self.render_enabled = args.render
-        self.display_enabled = args.display
+        self.display_enabled = args.display or args.smpl_gmr_debug
+        self.gmr_protocol = args.gmr_protocol
         self.gmr_debug_skeleton = args.gmr_debug_skeleton
+        self.smpl_gmr_debug = args.smpl_gmr_debug
 
         # Optional GEM joints -> anatomical segments -> GMR-CPP UDP path.
         self.gmr_bridge = None
@@ -327,28 +331,47 @@ class WebcamGEMSMPLDemo:
                 host=args.gmr_host,
                 port=args.gmr_port,
             )
-            self.gmr_adapter = GMRSegmentAdapter.from_json(
-                args.gmr_adapter_config,
-                forward_sign=args.gmr_forward_sign,
-                heading_source=args.gmr_heading_source,
-                ground_mode=args.gmr_ground_mode,
-                user_yaw_deg=args.gmr_yaw_deg,
-                global_scale=args.gmr_scale,
-            )
+            if self.gmr_protocol == "gem2":
+                self.gmr_adapter = SMPLDirectAdapter.from_json(
+                    args.smpl_adapter_config,
+                    forward_sign=args.smpl_forward_sign,
+                    heading_source=args.smpl_heading_source,
+                    vertical_mode=args.smpl_vertical_mode,
+                    user_yaw_deg=args.smpl_yaw_deg,
+                    global_scale=args.gmr_scale,
+                )
+            else:
+                self.gmr_adapter = GMRSegmentAdapter.from_json(
+                    args.gmr_adapter_config,
+                    forward_sign=args.gmr_forward_sign,
+                    heading_source=args.gmr_heading_source,
+                    ground_mode=args.gmr_ground_mode,
+                    user_yaw_deg=args.gmr_yaw_deg,
+                    global_scale=args.gmr_scale,
+                )
             self.gmr_shape = BetaStabilizer(
                 mode=args.gmr_shape_mode,
                 warmup=args.gmr_shape_warmup,
             )
-            if self.gmr_debug_skeleton:
+            if self.gmr_protocol == "gem1" and self.gmr_debug_skeleton:
                 self.gmr_debug_publisher = SegmentDebugPublisher(
                     args.gmr_debug_host, args.gmr_debug_port
                 )
-            Log.info(
-                f"[GMR Adapter] config={args.gmr_adapter_config}, "
-                f"shape={args.gmr_shape_mode}/{args.gmr_shape_warmup}, "
-                f"heading={args.gmr_heading_source}, ground={args.gmr_ground_mode}, "
-                f"forward_sign={args.gmr_forward_sign:+d}"
-            )
+            if self.gmr_protocol == "gem2":
+                Log.info(
+                    f"[GMR GEM2] config={args.smpl_adapter_config}, "
+                    f"shape={args.gmr_shape_mode}/{args.gmr_shape_warmup}, "
+                    f"heading={args.smpl_heading_source}, "
+                    f"vertical={args.smpl_vertical_mode}, "
+                    f"forward_sign={args.smpl_forward_sign:+d}"
+                )
+            else:
+                Log.info(
+                    f"[GMR GEM1] config={args.gmr_adapter_config}, "
+                    f"shape={args.gmr_shape_mode}/{args.gmr_shape_warmup}, "
+                    f"heading={args.gmr_heading_source}, ground={args.gmr_ground_mode}, "
+                    f"forward_sign={args.gmr_forward_sign:+d}"
+                )
         self._last_gmr_error_log = 0.0
 
         self._async = args.async_pipeline and not args.no_async_pipeline
@@ -664,10 +687,16 @@ class WebcamGEMSMPLDemo:
                     frame_id=self.gmr_bridge.sequence,
                     timestamp_ns=stamp_ns,
                 )
-                packet = self.gmr_bridge.send_segments(
-                    adapter_frame.scaled_segments,
-                    source_stamp_ns=stamp_ns,
-                )
+                if self.gmr_protocol == "gem2":
+                    packet = self.gmr_bridge.send_smpl_targets(
+                        adapter_frame.scaled_targets,
+                        source_stamp_ns=stamp_ns,
+                    )
+                else:
+                    packet = self.gmr_bridge.send_segments(
+                        adapter_frame.scaled_segments,
+                        source_stamp_ns=stamp_ns,
+                    )
                 self._last_gmr_adapter_frame = adapter_frame
                 if self.gmr_debug_publisher is not None:
                     self.gmr_debug_publisher.publish(adapter_frame, packet)
@@ -835,7 +864,7 @@ class WebcamGEMSMPLDemo:
     def _draw_gmr_debug_overlay(self, canvas):
         """Draw a front-view joint/segment diagnostic inset on the OpenCV image."""
         frame = self._last_gmr_adapter_frame
-        if not self.gmr_debug_skeleton or frame is None:
+        if self.gmr_protocol != "gem1" or not self.gmr_debug_skeleton or frame is None:
             return
 
         panel_width = min(300, max(220, canvas.shape[1] // 3))
@@ -923,6 +952,90 @@ class WebcamGEMSMPLDemo:
             cv2.LINE_AA,
         )
 
+    def _draw_smpl_gmr_debug_overlay(self, canvas):
+        """Draw GEM2 joint centers and anatomical frames; toggled with the g key."""
+        frame = self._last_gmr_adapter_frame
+        if self.gmr_protocol != "gem2" or not self.smpl_gmr_debug or frame is None:
+            return
+
+        panel_width = min(300, max(220, canvas.shape[1] // 3))
+        panel_height = min(320, max(240, canvas.shape[0] - 20))
+        x0 = canvas.shape[1] - panel_width - 10
+        y0 = 10
+        overlay = canvas.copy()
+        cv2.rectangle(
+            overlay,
+            (x0, y0),
+            (x0 + panel_width, y0 + panel_height),
+            (15, 15, 15),
+            -1,
+        )
+        cv2.addWeighted(overlay, 0.78, canvas, 0.22, 0.0, canvas)
+
+        joints = frame.joints_zup
+        targets = frame.raw_targets
+        target_points = np.stack(
+            [pose.position_zup for pose in targets.values()]
+        )
+        points = np.concatenate((joints, target_points), axis=0)
+        lateral = points[:, 1]
+        vertical = points[:, 2]
+        y_mid = 0.5 * (float(lateral.min()) + float(lateral.max()))
+        z_min, z_max = float(vertical.min()), float(vertical.max())
+        extent_y = max(float(np.ptp(lateral)), 0.5)
+        extent_z = max(z_max - z_min, 1.0)
+        scale = min((panel_width - 30) / extent_y, (panel_height - 45) / extent_z)
+
+        def project(point):
+            px = int(x0 + panel_width * 0.5 - (point[1] - y_mid) * scale)
+            py = int(y0 + panel_height - 15 - (point[2] - z_min) * scale)
+            return px, py
+
+        joint_edges = (
+            (0, 9), (9, 12),
+            (0, 1), (1, 4), (4, 7), (7, 10),
+            (0, 2), (2, 5), (5, 8), (8, 11),
+            (9, 16), (16, 18), (18, 20),
+            (9, 17), (17, 19), (19, 21),
+        )
+        for first, second in joint_edges:
+            cv2.line(
+                canvas,
+                project(joints[first]),
+                project(joints[second]),
+                (145, 145, 145),
+                1,
+            )
+        for point in joints:
+            cv2.circle(canvas, project(point), 2, (145, 145, 145), -1)
+
+        direct_blue = (255, 110, 30)
+        for parent, child in SMPL_DIRECT_HIERARCHY:
+            cv2.line(
+                canvas,
+                project(targets[parent].position_zup),
+                project(targets[child].position_zup),
+                direct_blue,
+                2,
+            )
+        axis_colors = ((0, 0, 255), (0, 255, 0), (255, 0, 0))
+        for pose in targets.values():
+            center = project(pose.position_zup)
+            cv2.circle(canvas, center, 4, direct_blue, -1)
+            for axis, color in enumerate(axis_colors):
+                endpoint = pose.position_zup + 0.08 * pose.rotation_zup[:, axis]
+                cv2.line(canvas, center, project(endpoint), color, 1)
+        cv2.putText(
+            canvas,
+            "SMPL direct joints (Y/Z)",
+            (x0 + 8, y0 + 20),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.45,
+            (235, 235, 235),
+            1,
+            cv2.LINE_AA,
+        )
+
     def _show_live(self, frame_bgr, result, fps):
         """Draw status and display from the main thread. Return True on q."""
         if not self.display_enabled:
@@ -949,6 +1062,7 @@ class WebcamGEMSMPLDemo:
             )
 
         self._draw_gmr_debug_overlay(canvas)
+        self._draw_smpl_gmr_debug_overlay(canvas)
 
         if result is None:
             state = "NO PERSON"
@@ -969,7 +1083,7 @@ class WebcamGEMSMPLDemo:
             (state, state_color),
             (f"FPS: {fps:.1f}", (255, 255, 255)),
             (udp, (255, 255, 255)),
-            ("q: quit", (200, 200, 200)),
+            ("q: quit | g: SMPL targets", (200, 200, 200)),
         )
         y = 28
         for text, color in lines:
@@ -980,7 +1094,10 @@ class WebcamGEMSMPLDemo:
             y += 27
 
         cv2.imshow("GEM Live", canvas)
-        return (cv2.waitKey(1) & 0xFF) == ord("q")
+        key = cv2.waitKey(1) & 0xFF
+        if key == ord("g") and self.gmr_protocol == "gem2":
+            self.smpl_gmr_debug = not self.smpl_gmr_debug
+        return key == ord("q")
 
     def run(self):
         """Main processing loop."""
@@ -1185,6 +1302,10 @@ def parse_args():
         help="GMR-CPP UDP destination port",
     )
     parser.add_argument(
+        "--gmr_protocol", choices=["gem1", "gem2"], default="gem1",
+        help="GEM1 legacy segments or independent GEM2 SMPL-direct targets",
+    )
+    parser.add_argument(
         "--gmr_yaw_deg", type=float, default=0.0,
         help="Additional Z-up yaw rotation applied before sending",
     )
@@ -1228,6 +1349,31 @@ def parse_args():
     parser.add_argument(
         "--gmr_debug_port", type=int, default=7002,
         help="Destination port for segment debug JSON/UDP",
+    )
+    parser.add_argument(
+        "--smpl_adapter_config", type=str,
+        default=str(PROJECT_ROOT / "config/gmr/smpl_direct_e1_adapter.json"),
+        help="GEM2 SMPL joint-center/anatomical-frame adapter JSON",
+    )
+    parser.add_argument(
+        "--smpl_vertical_mode", choices=["gem", "foot_lock", "contact"],
+        default="foot_lock", help="GEM2 root-height and foot contact policy",
+    )
+    parser.add_argument(
+        "--smpl_heading_source", choices=["joints", "pelvis"], default="joints",
+        help="GEM2 initial heading source; captured once",
+    )
+    parser.add_argument(
+        "--smpl_forward_sign", type=int, choices=[-1, 1], default=1,
+        help="GEM2 joint-geometry forward sign; synthetic default is +1",
+    )
+    parser.add_argument(
+        "--smpl_yaw_deg", type=float, default=0.0,
+        help="Additional yaw after GEM2 initial-heading alignment",
+    )
+    parser.add_argument(
+        "--smpl_gmr_debug", action="store_true",
+        help="Show gray SMPL joints, blue direct targets and RGB anatomical axes",
     )
     return parser.parse_args()
 

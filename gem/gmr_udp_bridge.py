@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: LicenseRef-NVIDIA-OneWay-Noncommercial
-"""Send GEM FK joints to GMR-CPP using the fixed-size GEM1 UDP protocol."""
+"""Send legacy GEM1 or explicit SMPL-direct GEM2 targets to GMR-CPP."""
 
 from __future__ import annotations
 
@@ -31,11 +31,30 @@ BONE_NAMES = (
     "Right_Hand",
 )
 
+SMPL_TARGET_NAMES = (
+    "SMPL_Pelvis",
+    "SMPL_Chest",
+    "SMPL_LeftHip",
+    "SMPL_RightHip",
+    "SMPL_LeftKnee",
+    "SMPL_RightKnee",
+    "SMPL_LeftAnkle",
+    "SMPL_RightAnkle",
+    "SMPL_LeftShoulder",
+    "SMPL_RightShoulder",
+    "SMPL_LeftElbow",
+    "SMPL_RightElbow",
+    "SMPL_LeftWrist",
+    "SMPL_RightWrist",
+)
+
 JOINT_INDICES = (0, 9, 1, 2, 4, 5, 7, 8, 16, 17, 18, 19, 20, 21)
 GROUND_JOINT_INDICES = (10, 11)
 
 MAGIC = b"GEM1"
 VERSION = 1
+GEM2_MAGIC = b"GEM2"
+GEM2_VERSION = 2
 HEADER = struct.Struct("<4sHHIQ")
 PAYLOAD = struct.Struct("<" + "f" * (len(BONE_NAMES) * 7))
 PACKET_BYTES = HEADER.size + PAYLOAD.size
@@ -119,6 +138,7 @@ class GMRUDPBridge:
         self._user_yaw = _rot_z(math.radians(float(yaw_deg)))
         self._yaw_inv: np.ndarray | None = None
         self._origin: np.ndarray | None = None
+        self._previous_smpl_quaternions: dict[str, np.ndarray] = {}
 
         self._rate_started = time.monotonic()
         self._rate_packets = 0
@@ -144,6 +164,7 @@ class GMRUDPBridge:
         """Re-capture initial yaw, horizontal origin, and foot ground height."""
         self._yaw_inv = None
         self._origin = None
+        self._previous_smpl_quaternions.clear()
 
     @staticmethod
     def _segment_array(value: Any, shape: tuple[int, ...], name: str) -> np.ndarray:
@@ -179,20 +200,24 @@ class GMRUDPBridge:
         values: list[float],
         source_stamp_ns: int | None,
         debug_details: str | None = None,
+        *,
+        magic: bytes = MAGIC,
+        version: int = VERSION,
+        item_count: int = len(BONE_NAMES),
     ) -> bytes:
         stamp_ns = time.monotonic_ns() if source_stamp_ns is None else int(source_stamp_ns)
         if stamp_ns < 0 or stamp_ns > 0xFFFFFFFFFFFFFFFF:
             raise ValueError("source_stamp_ns must fit uint64")
 
         packet = HEADER.pack(
-            MAGIC,
-            VERSION,
-            len(BONE_NAMES),
+            magic,
+            version,
+            item_count,
             self.sequence & 0xFFFFFFFF,
             stamp_ns,
         ) + PAYLOAD.pack(*values)
         if len(packet) != PACKET_BYTES:
-            raise RuntimeError(f"unexpected GEM1 packet size: {len(packet)}")
+            raise RuntimeError(f"unexpected {magic.decode()} packet size: {len(packet)}")
 
         self.sock.sendto(packet, (self.host, self.port))
         self.sequence = (self.sequence + 1) & 0xFFFFFFFF
@@ -256,6 +281,68 @@ class GMRUDPBridge:
                 f"right_upper_arm:{quaternions[9].tolist()}"
             )
         return self._pack_and_send(values, source_stamp_ns, debug_details)
+
+    @torch.no_grad()
+    def send_smpl_targets(
+        self,
+        targets: Mapping[str, Any],
+        source_stamp_ns: int | None = None,
+    ) -> bytes:
+        """Pack 14 explicit SMPL joint-center/anatomical targets as GEM2."""
+        missing = set(SMPL_TARGET_NAMES) - set(targets)
+        extra = set(targets) - set(SMPL_TARGET_NAMES)
+        if missing or extra:
+            raise ValueError(
+                f"SMPL targets names mismatch; missing={sorted(missing)} "
+                f"extra={sorted(extra)}"
+            )
+
+        values: list[float] = []
+        quaternions: dict[str, np.ndarray] = {}
+        positions: dict[str, np.ndarray] = {}
+        for name in SMPL_TARGET_NAMES:
+            pose = targets[name]
+            if isinstance(pose, Mapping):
+                position_value = pose["position_zup"]
+                rotation_value = pose["rotation_zup"]
+            else:
+                position_value = pose.position_zup
+                rotation_value = pose.rotation_zup
+            position = self._segment_array(
+                position_value, (3,), f"{name}.position_zup"
+            )
+            rotation = self._segment_array(
+                rotation_value, (3, 3), f"{name}.rotation_zup"
+            )
+            self._validate_rotations(rotation[None], f"{name}.rotation_zup")
+            if np.max(np.abs(position)) > MAX_ABS_POSITION_M:
+                raise ValueError(f"{name}.position_zup exceeds safety limit")
+            quaternion = _matrix_to_quaternion_wxyz(rotation)
+            previous = self._previous_smpl_quaternions.get(name)
+            if previous is not None and float(np.dot(quaternion, previous)) < 0.0:
+                quaternion = -quaternion
+            self._previous_smpl_quaternions[name] = quaternion.copy()
+            positions[name] = position
+            quaternions[name] = quaternion
+            values.extend((*position.tolist(), *quaternion.tolist()))
+
+        debug_details = None
+        if self.debug:
+            debug_details = (
+                "GEM2 "
+                f"pelvis_z={positions['SMPL_Pelvis'][2]:.4f} "
+                f"left_ankle_z={positions['SMPL_LeftAnkle'][2]:.4f} "
+                f"right_ankle_z={positions['SMPL_RightAnkle'][2]:.4f} "
+                f"pelvis_q={quaternions['SMPL_Pelvis'].tolist()}"
+            )
+        return self._pack_and_send(
+            values,
+            source_stamp_ns,
+            debug_details,
+            magic=GEM2_MAGIC,
+            version=GEM2_VERSION,
+            item_count=len(SMPL_TARGET_NAMES),
+        )
 
     @torch.no_grad()
     def send_fk(
