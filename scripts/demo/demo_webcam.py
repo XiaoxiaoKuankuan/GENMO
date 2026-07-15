@@ -89,6 +89,7 @@ from gem.gmr_segment_adapter import (
 )
 from gem.smpl_direct_adapter import HIERARCHY as SMPL_DIRECT_HIERARCHY
 from gem.smpl_direct_adapter import SMPLDirectAdapter
+from gem.smplx_gmr_reference import SMPLXGMRReference
 
 from onnx_runners import (
     hmr2_preprocess_256x256,
@@ -340,6 +341,11 @@ class WebcamGEMSMPLDemo:
                     user_yaw_deg=args.smpl_yaw_deg,
                     global_scale=args.gmr_scale,
                 )
+            elif self.gmr_protocol == "smplx1":
+                self.gmr_adapter = SMPLXGMRReference(
+                    user_yaw_deg=args.smplx_yaw_deg,
+                    global_scale=args.gmr_scale,
+                )
             else:
                 self.gmr_adapter = GMRSegmentAdapter.from_json(
                     args.gmr_adapter_config,
@@ -364,6 +370,12 @@ class WebcamGEMSMPLDemo:
                     f"heading={args.smpl_heading_source}, "
                     f"vertical={args.smpl_vertical_mode}, "
                     f"forward_sign={args.smpl_forward_sign:+d}"
+                )
+            elif self.gmr_protocol == "smplx1":
+                Log.info(
+                    f"[GMR SMP1] original SMPL-X FK targets, "
+                    f"shape={args.gmr_shape_mode}/{args.gmr_shape_warmup}, "
+                    f"yaw={args.smplx_yaw_deg:.1f} deg, scale={args.gmr_scale:.3f}"
                 )
             else:
                 Log.info(
@@ -689,6 +701,11 @@ class WebcamGEMSMPLDemo:
                 )
                 if self.gmr_protocol == "gem2":
                     packet = self.gmr_bridge.send_smpl_targets(
+                        adapter_frame.scaled_targets,
+                        source_stamp_ns=stamp_ns,
+                    )
+                elif self.gmr_protocol == "smplx1":
+                    packet = self.gmr_bridge.send_smplx_targets(
                         adapter_frame.scaled_targets,
                         source_stamp_ns=stamp_ns,
                     )
@@ -1302,8 +1319,8 @@ def parse_args():
         help="GMR-CPP UDP destination port",
     )
     parser.add_argument(
-        "--gmr_protocol", choices=["gem1", "gem2"], default="gem1",
-        help="GEM1 legacy segments or independent GEM2 SMPL-direct targets",
+        "--gmr_protocol", choices=["gem1", "gem2", "smplx1"], default="gem1",
+        help="GEM1 segments, GEM2 anatomical targets, or original-GMR SMP1 SMPL-X FK",
     )
     parser.add_argument(
         "--gmr_yaw_deg", type=float, default=0.0,
@@ -1374,6 +1391,10 @@ def parse_args():
     parser.add_argument(
         "--smpl_gmr_debug", action="store_true",
         help="Show gray SMPL joints, blue direct targets and RGB anatomical axes",
+    )
+    parser.add_argument(
+        "--smplx_yaw_deg", type=float, default=0.0,
+        help="Additional Z-up yaw for original-GMR SMP1 targets",
     )
     return parser.parse_args()
 

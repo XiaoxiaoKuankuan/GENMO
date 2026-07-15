@@ -48,6 +48,23 @@ SMPL_TARGET_NAMES = (
     "SMPL_RightWrist",
 )
 
+SMPLX_TARGET_NAMES = (
+    "pelvis",
+    "spine3",
+    "left_hip",
+    "right_hip",
+    "left_knee",
+    "right_knee",
+    "left_foot",
+    "right_foot",
+    "left_shoulder",
+    "right_shoulder",
+    "left_elbow",
+    "right_elbow",
+    "left_wrist",
+    "right_wrist",
+)
+
 JOINT_INDICES = (0, 9, 1, 2, 4, 5, 7, 8, 16, 17, 18, 19, 20, 21)
 GROUND_JOINT_INDICES = (10, 11)
 
@@ -55,6 +72,8 @@ MAGIC = b"GEM1"
 VERSION = 1
 GEM2_MAGIC = b"GEM2"
 GEM2_VERSION = 2
+SMPLX_MAGIC = b"SMP1"
+SMPLX_VERSION = 1
 HEADER = struct.Struct("<4sHHIQ")
 PAYLOAD = struct.Struct("<" + "f" * (len(BONE_NAMES) * 7))
 PACKET_BYTES = HEADER.size + PAYLOAD.size
@@ -139,6 +158,7 @@ class GMRUDPBridge:
         self._yaw_inv: np.ndarray | None = None
         self._origin: np.ndarray | None = None
         self._previous_smpl_quaternions: dict[str, np.ndarray] = {}
+        self._previous_smplx_quaternions: dict[str, np.ndarray] = {}
 
         self._rate_started = time.monotonic()
         self._rate_packets = 0
@@ -165,6 +185,7 @@ class GMRUDPBridge:
         self._yaw_inv = None
         self._origin = None
         self._previous_smpl_quaternions.clear()
+        self._previous_smplx_quaternions.clear()
 
     @staticmethod
     def _segment_array(value: Any, shape: tuple[int, ...], name: str) -> np.ndarray:
@@ -342,6 +363,65 @@ class GMRUDPBridge:
             magic=GEM2_MAGIC,
             version=GEM2_VERSION,
             item_count=len(SMPL_TARGET_NAMES),
+        )
+
+    @torch.no_grad()
+    def send_smplx_targets(
+        self,
+        targets: Mapping[str, Any],
+        source_stamp_ns: int | None = None,
+    ) -> bytes:
+        """Pack original-GMR SMPL-X joint centers/global FK frames as SMP1."""
+        missing = set(SMPLX_TARGET_NAMES) - set(targets)
+        extra = set(targets) - set(SMPLX_TARGET_NAMES)
+        if missing or extra:
+            raise ValueError(
+                f"SMPL-X targets names mismatch; missing={sorted(missing)} "
+                f"extra={sorted(extra)}"
+            )
+
+        values: list[float] = []
+        debug_positions: dict[str, np.ndarray] = {}
+        for name in SMPLX_TARGET_NAMES:
+            pose = targets[name]
+            if isinstance(pose, Mapping):
+                position_value = pose["position_zup"]
+                rotation_value = pose["rotation_zup"]
+            else:
+                position_value = pose.position_zup
+                rotation_value = pose.rotation_zup
+            position = self._segment_array(
+                position_value, (3,), f"{name}.position_zup"
+            )
+            rotation = self._segment_array(
+                rotation_value, (3, 3), f"{name}.rotation_zup"
+            )
+            self._validate_rotations(rotation[None], f"{name}.rotation_zup")
+            if np.max(np.abs(position)) > MAX_ABS_POSITION_M:
+                raise ValueError(f"{name}.position_zup exceeds safety limit")
+            quaternion = _matrix_to_quaternion_wxyz(rotation)
+            previous = self._previous_smplx_quaternions.get(name)
+            if previous is not None and float(np.dot(quaternion, previous)) < 0.0:
+                quaternion = -quaternion
+            self._previous_smplx_quaternions[name] = quaternion.copy()
+            debug_positions[name] = position
+            values.extend((*position.tolist(), *quaternion.tolist()))
+
+        details = None
+        if self.debug:
+            details = (
+                "SMP1 "
+                f"pelvis_z={debug_positions['pelvis'][2]:.4f} "
+                f"left_foot_z={debug_positions['left_foot'][2]:.4f} "
+                f"right_foot_z={debug_positions['right_foot'][2]:.4f}"
+            )
+        return self._pack_and_send(
+            values,
+            source_stamp_ns,
+            details,
+            magic=SMPLX_MAGIC,
+            version=SMPLX_VERSION,
+            item_count=len(SMPLX_TARGET_NAMES),
         )
 
     @torch.no_grad()
