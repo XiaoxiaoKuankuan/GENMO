@@ -8,6 +8,8 @@ import os
 import socket
 import struct
 import time
+from collections.abc import Mapping
+from typing import Any
 
 import numpy as np
 import torch
@@ -144,6 +146,18 @@ class GMRUDPBridge:
         self._origin = None
 
     @staticmethod
+    def _segment_array(value: Any, shape: tuple[int, ...], name: str) -> np.ndarray:
+        if isinstance(value, torch.Tensor):
+            array = value.detach().to(device="cpu", dtype=torch.float64).numpy()
+        else:
+            array = np.asarray(value, dtype=np.float64)
+        if array.shape != shape:
+            raise ValueError(f"{name} shape must be {shape}, got {array.shape}")
+        if not np.isfinite(array).all():
+            raise ValueError(f"{name} contains NaN or Inf")
+        return array
+
+    @staticmethod
     def _validate_rotations(rotations: np.ndarray, name: str) -> None:
         """Reject matrices that are not proper rotations in SO(3)."""
         identity = np.eye(3, dtype=np.float64)
@@ -160,13 +174,96 @@ class GMRUDPBridge:
                 f"(orthogonality_error={error:.3g}, det={determinants[index]:.6g})"
             )
 
+    def _pack_and_send(
+        self,
+        values: list[float],
+        source_stamp_ns: int | None,
+        debug_details: str | None = None,
+    ) -> bytes:
+        stamp_ns = time.monotonic_ns() if source_stamp_ns is None else int(source_stamp_ns)
+        if stamp_ns < 0 or stamp_ns > 0xFFFFFFFFFFFFFFFF:
+            raise ValueError("source_stamp_ns must fit uint64")
+
+        packet = HEADER.pack(
+            MAGIC,
+            VERSION,
+            len(BONE_NAMES),
+            self.sequence & 0xFFFFFFFF,
+            stamp_ns,
+        ) + PAYLOAD.pack(*values)
+        if len(packet) != PACKET_BYTES:
+            raise RuntimeError(f"unexpected GEM1 packet size: {len(packet)}")
+
+        self.sock.sendto(packet, (self.host, self.port))
+        self.sequence = (self.sequence + 1) & 0xFFFFFFFF
+        self._rate_packets += 1
+
+        now = time.monotonic()
+        elapsed = now - self._rate_started
+        if elapsed >= 5.0:
+            print(
+                f"[GMR UDP] send={self._rate_packets / elapsed:.1f}Hz "
+                f"sequence={self.sequence} packet={len(packet)} bytes"
+            )
+            if self.debug and debug_details:
+                print(f"[GMR UDP debug] {debug_details}")
+            self._rate_started = now
+            self._rate_packets = 0
+        return packet
+
+    @torch.no_grad()
+    def send_segments(
+        self,
+        segment_poses: Mapping[str, Any],
+        source_stamp_ns: int | None = None,
+    ) -> bytes:
+        """Pack already-adapted Z-up anatomical segment poses without guessing frames."""
+        missing = set(BONE_NAMES) - set(segment_poses)
+        extra = set(segment_poses) - set(BONE_NAMES)
+        if missing or extra:
+            raise ValueError(
+                f"segment_poses names mismatch; missing={sorted(missing)} extra={sorted(extra)}"
+            )
+
+        values: list[float] = []
+        positions: list[np.ndarray] = []
+        quaternions: list[np.ndarray] = []
+        for name in BONE_NAMES:
+            pose = segment_poses[name]
+            if isinstance(pose, Mapping):
+                position_value = pose["position_zup"]
+                rotation_value = pose["rotation_zup"]
+            else:
+                position_value = pose.position_zup
+                rotation_value = pose.rotation_zup
+            position = self._segment_array(position_value, (3,), f"{name}.position_zup")
+            rotation = self._segment_array(rotation_value, (3, 3), f"{name}.rotation_zup")
+            self._validate_rotations(rotation[None], f"{name}.rotation_zup")
+            if np.max(np.abs(position)) > MAX_ABS_POSITION_M:
+                raise ValueError(f"{name}.position_zup exceeds safety limit")
+            quaternion = _matrix_to_quaternion_wxyz(rotation)
+            positions.append(position)
+            quaternions.append(quaternion)
+            values.extend((*position.tolist(), *quaternion.tolist()))
+
+        debug_details = None
+        if self.debug:
+            debug_details = (
+                f"segment_z pelvis:{positions[0][2]:.4f} "
+                f"left_foot:{positions[6][2]:.4f} right_foot:{positions[7][2]:.4f}; "
+                f"q pelvis:{quaternions[0].tolist()} "
+                f"left_upper_arm:{quaternions[8].tolist()} "
+                f"right_upper_arm:{quaternions[9].tolist()}"
+            )
+        return self._pack_and_send(values, source_stamp_ns, debug_details)
+
     @torch.no_grad()
     def send_fk(
         self,
         joints_ay: torch.Tensor,
         rotations_ay: torch.Tensor,
         source_stamp_ns: int | None = None,
-    ) -> None:
+    ) -> bytes:
         joints = self._as_numpy(joints_ay, (22, 3), "joints_ay")
         rotations = self._as_numpy(rotations_ay, (22, 3, 3), "rotations_ay")
 
@@ -219,48 +316,20 @@ class GMRUDPBridge:
             selected_quaternions.append(quat)
             values.extend((*position.tolist(), *quat.tolist()))
 
-        stamp_ns = time.monotonic_ns() if source_stamp_ns is None else int(source_stamp_ns)
-        if stamp_ns < 0 or stamp_ns > 0xFFFFFFFFFFFFFFFF:
-            raise ValueError("source_stamp_ns must fit uint64")
-
-        packet = HEADER.pack(
-            MAGIC,
-            VERSION,
-            len(BONE_NAMES),
-            self.sequence & 0xFFFFFFFF,
-            stamp_ns,
-        ) + PAYLOAD.pack(*values)
-        if len(packet) != PACKET_BYTES:
-            raise RuntimeError(f"unexpected GEM1 packet size: {len(packet)}")
-
-        self.sock.sendto(packet, (self.host, self.port))
-        self.sequence = (self.sequence + 1) & 0xFFFFFFFF
-        self._rate_packets += 1
-
-        now = time.monotonic()
-        elapsed = now - self._rate_started
-        if elapsed >= 5.0:
-            print(
-                f"[GMR UDP] send={self._rate_packets / elapsed:.1f}Hz "
-                f"sequence={self.sequence} packet={len(packet)} bytes"
+        debug_details = None
+        if self.debug:
+            selected_positions = positions_out[np.asarray(JOINT_INDICES)]
+            z_values = selected_positions[[0, 6, 7], 2]
+            foot_z = positions_out[np.asarray(GROUND_JOINT_INDICES), 2]
+            debug_details = (
+                f"joint_z pelvis:{z_values[0]:.4f} "
+                f"left_ankle:{z_values[1]:.4f} right_ankle:{z_values[2]:.4f} "
+                f"left_foot:{foot_z[0]:.4f} right_foot:{foot_z[1]:.4f}; "
+                f"q pelvis:{selected_quaternions[0].tolist()} "
+                f"left_upper_arm:{selected_quaternions[8].tolist()} "
+                f"right_upper_arm:{selected_quaternions[9].tolist()}"
             )
-            if self.debug:
-                selected_positions = positions_out[np.asarray(JOINT_INDICES)]
-                z_values = selected_positions[[0, 6, 7], 2]
-                foot_z = positions_out[np.asarray(GROUND_JOINT_INDICES), 2]
-                print(
-                    "[GMR UDP debug] z="
-                    f"pelvis:{z_values[0]:.4f} "
-                    f"left_ankle:{z_values[1]:.4f} "
-                    f"right_ankle:{z_values[2]:.4f} "
-                    f"left_foot:{foot_z[0]:.4f} "
-                    f"right_foot:{foot_z[1]:.4f}; "
-                    f"q pelvis:{selected_quaternions[0].tolist()} "
-                    f"left_upper_arm:{selected_quaternions[8].tolist()} "
-                    f"right_upper_arm:{selected_quaternions[9].tolist()}"
-                )
-            self._rate_started = now
-            self._rate_packets = 0
+        return self._pack_and_send(values, source_stamp_ns, debug_details)
 
     def close(self) -> None:
         try:
