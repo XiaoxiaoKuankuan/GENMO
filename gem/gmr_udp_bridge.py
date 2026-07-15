@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import math
+import os
 import socket
 import struct
 import time
@@ -29,6 +30,7 @@ BONE_NAMES = (
 )
 
 JOINT_INDICES = (0, 9, 1, 2, 4, 5, 7, 8, 16, 17, 18, 19, 20, 21)
+GROUND_JOINT_INDICES = (10, 11)
 
 MAGIC = b"GEM1"
 VERSION = 1
@@ -54,20 +56,16 @@ def _matrix_to_quaternion_wxyz(matrix: np.ndarray) -> np.ndarray:
 
     if trace > 0.0:
         s = math.sqrt(max(trace + 1.0, 1e-12)) * 2.0
-        q = (0.25 * s, (m[2, 1] - m[1, 2]) / s,
-             (m[0, 2] - m[2, 0]) / s, (m[1, 0] - m[0, 1]) / s)
+        q = (0.25 * s, (m[2, 1] - m[1, 2]) / s, (m[0, 2] - m[2, 0]) / s, (m[1, 0] - m[0, 1]) / s)
     elif m[0, 0] > m[1, 1] and m[0, 0] > m[2, 2]:
         s = math.sqrt(max(1.0 + m[0, 0] - m[1, 1] - m[2, 2], 1e-12)) * 2.0
-        q = ((m[2, 1] - m[1, 2]) / s, 0.25 * s,
-             (m[0, 1] + m[1, 0]) / s, (m[0, 2] + m[2, 0]) / s)
+        q = ((m[2, 1] - m[1, 2]) / s, 0.25 * s, (m[0, 1] + m[1, 0]) / s, (m[0, 2] + m[2, 0]) / s)
     elif m[1, 1] > m[2, 2]:
         s = math.sqrt(max(1.0 + m[1, 1] - m[0, 0] - m[2, 2], 1e-12)) * 2.0
-        q = ((m[0, 2] - m[2, 0]) / s, (m[0, 1] + m[1, 0]) / s,
-             0.25 * s, (m[1, 2] + m[2, 1]) / s)
+        q = ((m[0, 2] - m[2, 0]) / s, (m[0, 1] + m[1, 0]) / s, 0.25 * s, (m[1, 2] + m[2, 1]) / s)
     else:
         s = math.sqrt(max(1.0 + m[2, 2] - m[0, 0] - m[1, 1], 1e-12)) * 2.0
-        q = ((m[1, 0] - m[0, 1]) / s, (m[0, 2] + m[2, 0]) / s,
-             (m[1, 2] + m[2, 1]) / s, 0.25 * s)
+        q = ((m[1, 0] - m[0, 1]) / s, (m[0, 2] + m[2, 0]) / s, (m[1, 2] + m[2, 1]) / s, 0.25 * s)
 
     quat = np.asarray(q, dtype=np.float64)
     norm = float(np.linalg.norm(quat))
@@ -89,6 +87,7 @@ class GMRUDPBridge:
         port: int = 7001,
         yaw_deg: float = 0.0,
         scale: float = 1.0,
+        debug: bool | None = None,
     ) -> None:
         if not host:
             raise ValueError("host must be non-empty")
@@ -102,6 +101,11 @@ class GMRUDPBridge:
         self.host = host
         self.port = int(port)
         self.scale = float(scale)
+        self.debug = (
+            os.environ.get("GMR_UDP_DEBUG", "").strip().lower() in {"1", "true", "yes", "on"}
+            if debug is None
+            else bool(debug)
+        )
         self.sequence = 0
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 
@@ -139,6 +143,23 @@ class GMRUDPBridge:
         self._yaw_inv = None
         self._origin = None
 
+    @staticmethod
+    def _validate_rotations(rotations: np.ndarray, name: str) -> None:
+        """Reject matrices that are not proper rotations in SO(3)."""
+        identity = np.eye(3, dtype=np.float64)
+        gram = np.einsum("nji,njk->nik", rotations, rotations)
+        orthogonal = np.all(np.isclose(gram, identity, atol=1e-4, rtol=1e-4), axis=(1, 2))
+        determinants = np.linalg.det(rotations)
+        proper = np.isclose(determinants, 1.0, atol=1e-4, rtol=1e-4)
+        invalid = np.flatnonzero(~(orthogonal & proper))
+        if invalid.size:
+            index = int(invalid[0])
+            error = float(np.max(np.abs(gram[index] - identity)))
+            raise ValueError(
+                f"{name}[{index}] is not a proper rotation "
+                f"(orthogonality_error={error:.3g}, det={determinants[index]:.6g})"
+            )
+
     @torch.no_grad()
     def send_fk(
         self,
@@ -150,27 +171,34 @@ class GMRUDPBridge:
         rotations = self._as_numpy(rotations_ay, (22, 3, 3), "rotations_ay")
 
         if np.max(np.abs(joints)) > MAX_ABS_POSITION_M:
-            raise ValueError(
-                f"joints_ay exceeds {MAX_ABS_POSITION_M:.0f} m safety limit"
-            )
+            raise ValueError(f"joints_ay exceeds {MAX_ABS_POSITION_M:.0f} m safety limit")
+        self._validate_rotations(rotations, "rotations_ay")
 
-        pelvis_zup_rotation = self._axis_convert @ rotations[0]
+        # Local joint frames need a change of basis on both sides. In contrast,
+        # world-space positions are vectors and only need the left transform.
+        rotations_zup = np.einsum(
+            "ij,njk,kl->nil",
+            self._axis_convert,
+            rotations,
+            self._axis_convert.T,
+        )
         if self._yaw_inv is None:
             yaw = math.atan2(
-                float(pelvis_zup_rotation[1, 0]),
-                float(pelvis_zup_rotation[0, 0]),
+                float(rotations_zup[0, 1, 0]),
+                float(rotations_zup[0, 0, 0]),
             )
             self._yaw_inv = _rot_z(-yaw)
 
         # User yaw must be applied after initial-yaw cancellation.
-        total_rotation = self._user_yaw @ self._yaw_inv @ self._axis_convert
-        positions_out = np.einsum("ij,nj->ni", total_rotation, joints)
-        rotations_out = np.einsum("ij,njk->nik", total_rotation, rotations)
+        world_yaw = self._user_yaw @ self._yaw_inv
+        positions_out = np.einsum("ij,nj->ni", world_yaw @ self._axis_convert, joints)
+        rotations_out = np.einsum("ij,njk->nik", world_yaw, rotations_zup)
+        self._validate_rotations(rotations_out, "rotations_out")
 
         if self._origin is None:
             ground_z = min(
-                float(positions_out[JOINT_INDICES[6], 2]),
-                float(positions_out[JOINT_INDICES[7], 2]),
+                float(positions_out[GROUND_JOINT_INDICES[0], 2]),
+                float(positions_out[GROUND_JOINT_INDICES[1], 2]),
             )
             self._origin = np.asarray(
                 (positions_out[0, 0], positions_out[0, 1], ground_z),
@@ -181,14 +209,14 @@ class GMRUDPBridge:
         if not np.isfinite(positions_out).all() or not np.isfinite(rotations_out).all():
             raise ValueError("coordinate conversion produced NaN or Inf")
         if np.max(np.abs(positions_out)) > MAX_ABS_POSITION_M:
-            raise ValueError(
-                f"normalized positions exceed {MAX_ABS_POSITION_M:.0f} m safety limit"
-            )
+            raise ValueError(f"normalized positions exceed {MAX_ABS_POSITION_M:.0f} m safety limit")
 
         values: list[float] = []
+        selected_quaternions: list[np.ndarray] = []
         for joint_index in JOINT_INDICES:
             position = positions_out[joint_index]
             quat = _matrix_to_quaternion_wxyz(rotations_out[joint_index])
+            selected_quaternions.append(quat)
             values.extend((*position.tolist(), *quat.tolist()))
 
         stamp_ns = time.monotonic_ns() if source_stamp_ns is None else int(source_stamp_ns)
@@ -216,6 +244,21 @@ class GMRUDPBridge:
                 f"[GMR UDP] send={self._rate_packets / elapsed:.1f}Hz "
                 f"sequence={self.sequence} packet={len(packet)} bytes"
             )
+            if self.debug:
+                selected_positions = positions_out[np.asarray(JOINT_INDICES)]
+                z_values = selected_positions[[0, 6, 7], 2]
+                foot_z = positions_out[np.asarray(GROUND_JOINT_INDICES), 2]
+                print(
+                    "[GMR UDP debug] z="
+                    f"pelvis:{z_values[0]:.4f} "
+                    f"left_ankle:{z_values[1]:.4f} "
+                    f"right_ankle:{z_values[2]:.4f} "
+                    f"left_foot:{foot_z[0]:.4f} "
+                    f"right_foot:{foot_z[1]:.4f}; "
+                    f"q pelvis:{selected_quaternions[0].tolist()} "
+                    f"left_upper_arm:{selected_quaternions[8].tolist()} "
+                    f"right_upper_arm:{selected_quaternions[9].tolist()}"
+                )
             self._rate_started = now
             self._rate_packets = 0
 

@@ -329,7 +329,8 @@ class WebcamGEMSMPLDemo:
         )
 
         # --- Video capture ---
-        if args.video is not None:
+        self._is_video_file = args.video is not None
+        if self._is_video_file:
             self.cap = cv2.VideoCapture(args.video)
             self.source_name = Path(args.video).stem
         else:
@@ -339,8 +340,23 @@ class WebcamGEMSMPLDemo:
 
         self.width = int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH))
         self.height = int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-        self.fps = self.cap.get(cv2.CAP_PROP_FPS) or 30.0
+        reported_fps = float(self.cap.get(cv2.CAP_PROP_FPS))
+        if not np.isfinite(reported_fps) or reported_fps <= 0.0:
+            self.fps = 30.0
+            if self._is_video_file:
+                Log.warning(
+                    f"[Source] Invalid video FPS metadata ({reported_fps}); "
+                    "falling back to 30.0 fps"
+                )
+        else:
+            self.fps = reported_fps
+        self._video_frame_period = 1.0 / self.fps if self._is_video_file else None
         Log.info(f"[Source] {self.source_name}: {self.width}x{self.height} @ {self.fps:.1f} fps")
+        if self._video_frame_period is not None:
+            Log.info(
+                f"[Source] Video playback pacing enabled: {self.fps:.3f} fps "
+                f"({self._video_frame_period * 1000.0:.2f} ms/frame)"
+            )
 
         # --- Camera intrinsics ---
         self.K_fullimg = estimate_K(self.width, self.height)  # (3, 3)
@@ -845,12 +861,23 @@ class WebcamGEMSMPLDemo:
         display_fps_history = deque(maxlen=60)
         n_frames = 0
         last_display_tick = time.monotonic()
+        next_video_frame_at = last_display_tick
 
         try:
             while True:
                 ok, frame_bgr = self.cap.read()
                 if not ok:
                     break
+
+                # VideoCapture reads files as quickly as decoding allows. Pace
+                # file input to its metadata FPS, without delaying live cameras.
+                # Re-anchor after a slow inference frame instead of attempting
+                # a burst of catch-up frames.
+                if self._video_frame_period is not None:
+                    wait_seconds = next_video_frame_at - time.monotonic()
+                    if wait_seconds > 0.0:
+                        time.sleep(wait_seconds)
+                    next_video_frame_at = time.monotonic() + self._video_frame_period
 
                 result = self.process_frame(frame_bgr)
                 n_frames += 1
