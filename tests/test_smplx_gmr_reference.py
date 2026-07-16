@@ -18,6 +18,7 @@ from gem.gmr_udp_bridge import (
 )
 from gem.smplx_gmr_reference import (
     AXIS_CONVERT_AY_TO_ZUP,
+    BetaStabilizer,
     TARGET_JOINT_INDICES,
     TARGET_NAMES,
     SMPLXGMRReference,
@@ -45,6 +46,15 @@ def standing_frame() -> tuple[np.ndarray, np.ndarray]:
 
 
 class SMPLXGMRReferenceTest(unittest.TestCase):
+    def test_beta_mean_freezes_after_warmup(self) -> None:
+        stabilizer = BetaStabilizer("mean", warmup=3)
+        stabilizer.update(np.zeros(10))
+        stabilizer.update(np.ones(10))
+        frozen = stabilizer.update(np.full(10, 2.0))
+        np.testing.assert_allclose(frozen, np.ones(10))
+        np.testing.assert_allclose(stabilizer.update(np.full(10, 99.0)), frozen)
+        self.assertTrue(stabilizer.frozen)
+
     def test_names_indices_and_joint_centers(self) -> None:
         joints, rotations = standing_frame()
         frame = SMPLXGMRReference().adapt(joints, rotations)

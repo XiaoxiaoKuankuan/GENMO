@@ -82,14 +82,7 @@ from gem.utils.geo_transform import compute_cam_angvel, get_bbx_xys_from_xyxy
 from gem.utils.motion_utils import init_rollout_w_Rt_state, rollout_step_w_Rt
 from gem.utils.pylogger import Log
 from gem.gmr_udp_bridge import GMRUDPBridge
-from gem.gmr_segment_adapter import (
-    BetaStabilizer,
-    GMRSegmentAdapter,
-    SegmentDebugPublisher,
-)
-from gem.smpl_direct_adapter import HIERARCHY as SMPL_DIRECT_HIERARCHY
-from gem.smpl_direct_adapter import SMPLDirectAdapter
-from gem.smplx_gmr_reference import SMPLXGMRReference
+from gem.smplx_gmr_reference import BetaStabilizer, SMPLXGMRReference
 
 from onnx_runners import (
     hmr2_preprocess_256x256,
@@ -316,74 +309,30 @@ class WebcamGEMSMPLDemo:
         self.vitpose_period = args.vitpose_period
         self.no_imgfeat = args.no_imgfeat
         self.render_enabled = args.render
-        self.display_enabled = args.display or args.smpl_gmr_debug
-        self.gmr_protocol = args.gmr_protocol
-        self.gmr_debug_skeleton = args.gmr_debug_skeleton
-        self.smpl_gmr_debug = args.smpl_gmr_debug
+        self.display_enabled = args.display
 
-        # Optional GEM joints -> anatomical segments -> GMR-CPP UDP path.
+        # Optional GEM SMPL-X FK -> original-GMR SMP1 UDP path.
         self.gmr_bridge = None
         self.gmr_adapter = None
         self.gmr_shape = None
-        self.gmr_debug_publisher = None
-        self._last_gmr_adapter_frame = None
         if args.gmr_host:
             self.gmr_bridge = GMRUDPBridge(
                 host=args.gmr_host,
                 port=args.gmr_port,
             )
-            if self.gmr_protocol == "gem2":
-                self.gmr_adapter = SMPLDirectAdapter.from_json(
-                    args.smpl_adapter_config,
-                    forward_sign=args.smpl_forward_sign,
-                    heading_source=args.smpl_heading_source,
-                    vertical_mode=args.smpl_vertical_mode,
-                    user_yaw_deg=args.smpl_yaw_deg,
-                    global_scale=args.gmr_scale,
-                )
-            elif self.gmr_protocol == "smplx1":
-                self.gmr_adapter = SMPLXGMRReference(
-                    user_yaw_deg=args.smplx_yaw_deg,
-                    global_scale=args.gmr_scale,
-                )
-            else:
-                self.gmr_adapter = GMRSegmentAdapter.from_json(
-                    args.gmr_adapter_config,
-                    forward_sign=args.gmr_forward_sign,
-                    heading_source=args.gmr_heading_source,
-                    ground_mode=args.gmr_ground_mode,
-                    user_yaw_deg=args.gmr_yaw_deg,
-                    global_scale=args.gmr_scale,
-                )
+            self.gmr_adapter = SMPLXGMRReference(
+                user_yaw_deg=args.smplx_yaw_deg,
+                global_scale=args.gmr_scale,
+            )
             self.gmr_shape = BetaStabilizer(
                 mode=args.gmr_shape_mode,
                 warmup=args.gmr_shape_warmup,
             )
-            if self.gmr_protocol == "gem1" and self.gmr_debug_skeleton:
-                self.gmr_debug_publisher = SegmentDebugPublisher(
-                    args.gmr_debug_host, args.gmr_debug_port
-                )
-            if self.gmr_protocol == "gem2":
-                Log.info(
-                    f"[GMR GEM2] config={args.smpl_adapter_config}, "
-                    f"shape={args.gmr_shape_mode}/{args.gmr_shape_warmup}, "
-                    f"heading={args.smpl_heading_source}, "
-                    f"vertical={args.smpl_vertical_mode}, "
-                    f"forward_sign={args.smpl_forward_sign:+d}"
-                )
-            elif self.gmr_protocol == "smplx1":
-                Log.info(
-                    f"[GMR SMP1] original SMPL-X FK targets, "
-                    f"shape={args.gmr_shape_mode}/{args.gmr_shape_warmup}, "
-                    f"yaw={args.smplx_yaw_deg:.1f} deg, scale={args.gmr_scale:.3f}"
-                )
-            else:
-                Log.info(
-                    f"[GMR GEM1] config={args.gmr_adapter_config}, "
-                    f"shape={args.gmr_shape_mode}/{args.gmr_shape_warmup}, "
-                    f"heading={args.gmr_heading_source}, ground={args.gmr_ground_mode}, "
-                    f"forward_sign={args.gmr_forward_sign:+d}"
-                )
+            Log.info(
+                f"[GMR SMP1] SMPL-X FK targets, "
+                f"shape={args.gmr_shape_mode}/{args.gmr_shape_warmup}, "
+                f"yaw={args.smplx_yaw_deg:.1f} deg, scale={args.gmr_scale:.3f}"
+            )
         self._last_gmr_error_log = 0.0
 
         self._async = args.async_pipeline and not args.no_async_pipeline
@@ -699,24 +648,10 @@ class WebcamGEMSMPLDemo:
                     frame_id=self.gmr_bridge.sequence,
                     timestamp_ns=stamp_ns,
                 )
-                if self.gmr_protocol == "gem2":
-                    packet = self.gmr_bridge.send_smpl_targets(
-                        adapter_frame.scaled_targets,
-                        source_stamp_ns=stamp_ns,
-                    )
-                elif self.gmr_protocol == "smplx1":
-                    packet = self.gmr_bridge.send_smplx_targets(
-                        adapter_frame.scaled_targets,
-                        source_stamp_ns=stamp_ns,
-                    )
-                else:
-                    packet = self.gmr_bridge.send_segments(
-                        adapter_frame.scaled_segments,
-                        source_stamp_ns=stamp_ns,
-                    )
-                self._last_gmr_adapter_frame = adapter_frame
-                if self.gmr_debug_publisher is not None:
-                    self.gmr_debug_publisher.publish(adapter_frame, packet)
+                self.gmr_bridge.send_smplx_targets(
+                    adapter_frame.scaled_targets,
+                    source_stamp_ns=stamp_ns,
+                )
             except Exception as exc:
                 now = time.monotonic()
                 if now - self._last_gmr_error_log >= 2.0:
@@ -878,181 +813,6 @@ class WebcamGEMSMPLDemo:
         result["timing"]["total"] = time.perf_counter() - t_total
         return result
 
-    def _draw_gmr_debug_overlay(self, canvas):
-        """Draw a front-view joint/segment diagnostic inset on the OpenCV image."""
-        frame = self._last_gmr_adapter_frame
-        if self.gmr_protocol != "gem1" or not self.gmr_debug_skeleton or frame is None:
-            return
-
-        panel_width = min(300, max(220, canvas.shape[1] // 3))
-        panel_height = min(320, max(240, canvas.shape[0] - 20))
-        x0 = canvas.shape[1] - panel_width - 10
-        y0 = 10
-        overlay = canvas.copy()
-        cv2.rectangle(
-            overlay,
-            (x0, y0),
-            (x0 + panel_width, y0 + panel_height),
-            (15, 15, 15),
-            -1,
-        )
-        cv2.addWeighted(overlay, 0.78, canvas, 0.22, 0.0, canvas)
-
-        joints = frame.joints_zup
-        origins = np.stack(
-            [pose.position_zup for pose in frame.scaled_segments.values()]
-        )
-        points = np.concatenate((joints, origins), axis=0)
-        lateral = points[:, 1]
-        vertical = points[:, 2]
-        y_mid = 0.5 * (float(lateral.min()) + float(lateral.max()))
-        z_min, z_max = float(vertical.min()), float(vertical.max())
-        extent_y = max(float(np.ptp(lateral)), 0.5)
-        extent_z = max(z_max - z_min, 1.0)
-        scale = min((panel_width - 30) / extent_y, (panel_height - 45) / extent_z)
-
-        def project(point):
-            px = int(x0 + panel_width * 0.5 - (point[1] - y_mid) * scale)
-            py = int(y0 + panel_height - 15 - (point[2] - z_min) * scale)
-            return px, py
-
-        joint_edges = (
-            (0, 9), (9, 12),
-            (0, 1), (1, 4), (4, 7), (7, 10),
-            (0, 2), (2, 5), (5, 8), (8, 11),
-            (9, 16), (16, 18), (18, 20),
-            (9, 17), (17, 19), (19, 21),
-        )
-        for first, second in joint_edges:
-            cv2.line(canvas, project(joints[first]), project(joints[second]), (120, 120, 120), 1)
-        for point in joints:
-            cv2.circle(canvas, project(point), 2, (255, 120, 40), -1)
-
-        hierarchy = (
-            ("Pelvis", "Chest"),
-            ("Pelvis", "Left_UpperLeg"),
-            ("Left_UpperLeg", "Left_LowerLeg"),
-            ("Left_LowerLeg", "Left_Foot"),
-            ("Pelvis", "Right_UpperLeg"),
-            ("Right_UpperLeg", "Right_LowerLeg"),
-            ("Right_LowerLeg", "Right_Foot"),
-            ("Chest", "Left_UpperArm"),
-            ("Left_UpperArm", "Left_Forearm"),
-            ("Left_Forearm", "Left_Hand"),
-            ("Chest", "Right_UpperArm"),
-            ("Right_UpperArm", "Right_Forearm"),
-            ("Right_Forearm", "Right_Hand"),
-        )
-        for parent, child in hierarchy:
-            cv2.line(
-                canvas,
-                project(frame.scaled_segments[parent].position_zup),
-                project(frame.scaled_segments[child].position_zup),
-                (0, 210, 255),
-                2,
-            )
-        axis_colors = ((0, 0, 255), (0, 255, 0), (255, 0, 0))
-        for pose in frame.scaled_segments.values():
-            center = project(pose.position_zup)
-            cv2.circle(canvas, center, 4, (0, 210, 255), -1)
-            for axis, color in enumerate(axis_colors):
-                endpoint = pose.position_zup + 0.08 * pose.rotation_zup[:, axis]
-                cv2.line(canvas, center, project(endpoint), color, 1)
-        cv2.putText(
-            canvas,
-            "GMR segments front (Y/Z)",
-            (x0 + 8, y0 + 20),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.45,
-            (235, 235, 235),
-            1,
-            cv2.LINE_AA,
-        )
-
-    def _draw_smpl_gmr_debug_overlay(self, canvas):
-        """Draw GEM2 joint centers and anatomical frames; toggled with the g key."""
-        frame = self._last_gmr_adapter_frame
-        if self.gmr_protocol != "gem2" or not self.smpl_gmr_debug or frame is None:
-            return
-
-        panel_width = min(300, max(220, canvas.shape[1] // 3))
-        panel_height = min(320, max(240, canvas.shape[0] - 20))
-        x0 = canvas.shape[1] - panel_width - 10
-        y0 = 10
-        overlay = canvas.copy()
-        cv2.rectangle(
-            overlay,
-            (x0, y0),
-            (x0 + panel_width, y0 + panel_height),
-            (15, 15, 15),
-            -1,
-        )
-        cv2.addWeighted(overlay, 0.78, canvas, 0.22, 0.0, canvas)
-
-        joints = frame.joints_zup
-        targets = frame.raw_targets
-        target_points = np.stack(
-            [pose.position_zup for pose in targets.values()]
-        )
-        points = np.concatenate((joints, target_points), axis=0)
-        lateral = points[:, 1]
-        vertical = points[:, 2]
-        y_mid = 0.5 * (float(lateral.min()) + float(lateral.max()))
-        z_min, z_max = float(vertical.min()), float(vertical.max())
-        extent_y = max(float(np.ptp(lateral)), 0.5)
-        extent_z = max(z_max - z_min, 1.0)
-        scale = min((panel_width - 30) / extent_y, (panel_height - 45) / extent_z)
-
-        def project(point):
-            px = int(x0 + panel_width * 0.5 - (point[1] - y_mid) * scale)
-            py = int(y0 + panel_height - 15 - (point[2] - z_min) * scale)
-            return px, py
-
-        joint_edges = (
-            (0, 9), (9, 12),
-            (0, 1), (1, 4), (4, 7), (7, 10),
-            (0, 2), (2, 5), (5, 8), (8, 11),
-            (9, 16), (16, 18), (18, 20),
-            (9, 17), (17, 19), (19, 21),
-        )
-        for first, second in joint_edges:
-            cv2.line(
-                canvas,
-                project(joints[first]),
-                project(joints[second]),
-                (145, 145, 145),
-                1,
-            )
-        for point in joints:
-            cv2.circle(canvas, project(point), 2, (145, 145, 145), -1)
-
-        direct_blue = (255, 110, 30)
-        for parent, child in SMPL_DIRECT_HIERARCHY:
-            cv2.line(
-                canvas,
-                project(targets[parent].position_zup),
-                project(targets[child].position_zup),
-                direct_blue,
-                2,
-            )
-        axis_colors = ((0, 0, 255), (0, 255, 0), (255, 0, 0))
-        for pose in targets.values():
-            center = project(pose.position_zup)
-            cv2.circle(canvas, center, 4, direct_blue, -1)
-            for axis, color in enumerate(axis_colors):
-                endpoint = pose.position_zup + 0.08 * pose.rotation_zup[:, axis]
-                cv2.line(canvas, center, project(endpoint), color, 1)
-        cv2.putText(
-            canvas,
-            "SMPL direct joints (Y/Z)",
-            (x0 + 8, y0 + 20),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.45,
-            (235, 235, 235),
-            1,
-            cv2.LINE_AA,
-        )
-
     def _show_live(self, frame_bgr, result, fps):
         """Draw status and display from the main thread. Return True on q."""
         if not self.display_enabled:
@@ -1078,9 +838,6 @@ class WebcamGEMSMPLDemo:
                 cv2.FONT_HERSHEY_SIMPLEX, 0.6, (70, 220, 70), 2,
             )
 
-        self._draw_gmr_debug_overlay(canvas)
-        self._draw_smpl_gmr_debug_overlay(canvas)
-
         if result is None:
             state = "NO PERSON"
             state_color = (0, 180, 255)
@@ -1100,7 +857,7 @@ class WebcamGEMSMPLDemo:
             (state, state_color),
             (f"FPS: {fps:.1f}", (255, 255, 255)),
             (udp, (255, 255, 255)),
-            ("q: quit | g: SMPL targets", (200, 200, 200)),
+            ("q: quit", (200, 200, 200)),
         )
         y = 28
         for text, color in lines:
@@ -1111,10 +868,7 @@ class WebcamGEMSMPLDemo:
             y += 27
 
         cv2.imshow("GEM Live", canvas)
-        key = cv2.waitKey(1) & 0xFF
-        if key == ord("g") and self.gmr_protocol == "gem2":
-            self.smpl_gmr_debug = not self.smpl_gmr_debug
-        return key == ord("q")
+        return cv2.waitKey(1) & 0xFF == ord("q")
 
     def run(self):
         """Main processing loop."""
@@ -1238,8 +992,6 @@ class WebcamGEMSMPLDemo:
         finally:
             if self.gmr_bridge is not None:
                 self.gmr_bridge.close()
-            if self.gmr_debug_publisher is not None:
-                self.gmr_debug_publisher.close()
             self.cap.release()
             if self._denoiser_executor is not None:
                 self._denoiser_executor.shutdown(wait=True, cancel_futures=True)
@@ -1315,25 +1067,16 @@ def parse_args():
         help="GMR-CPP UDP destination IP; omit to disable streaming",
     )
     parser.add_argument(
-        "--gmr_port", type=int, default=7001,
-        help="GMR-CPP UDP destination port",
+        "--gmr_port", type=int, default=7005,
+        help="GMR-CPP SMP1 UDP destination port (E1 default: 7005)",
     )
     parser.add_argument(
-        "--gmr_protocol", choices=["gem1", "gem2", "smplx1"], default="gem1",
-        help="GEM1 segments, GEM2 anatomical targets, or original-GMR SMP1 SMPL-X FK",
-    )
-    parser.add_argument(
-        "--gmr_yaw_deg", type=float, default=0.0,
-        help="Additional Z-up yaw rotation applied before sending",
+        "--gmr_protocol", choices=["smplx1"], default="smplx1",
+        help="Compatibility flag; the supported protocol is SMP1",
     )
     parser.add_argument(
         "--gmr_scale", type=float, default=1.0,
-        help="Optional global multiplier applied after hierarchical segment scaling",
-    )
-    parser.add_argument(
-        "--gmr_adapter_config", type=str,
-        default=str(PROJECT_ROOT / "config/gmr/e1_segment_adapter.json"),
-        help="GEM joint-to-anatomical-segment adapter JSON",
+        help="Global position scale applied to SMP1 targets",
     )
     parser.add_argument(
         "--gmr_shape_mode", choices=["first", "mean", "ema", "per_frame"],
@@ -1344,57 +1087,8 @@ def parse_args():
         help="Valid beta frames averaged before mean shape is frozen",
     )
     parser.add_argument(
-        "--gmr_ground_mode", choices=["initial", "per_frame", "contact"],
-        default="contact", help="Foot-ground normalization policy",
-    )
-    parser.add_argument(
-        "--gmr_heading_source", choices=["joints", "pelvis"], default="joints",
-        help="Heading source; initial heading offset is captured once",
-    )
-    parser.add_argument(
-        "--gmr_forward_sign", type=int, choices=[-1, 1], default=-1,
-        help="Cross-product sign mapping SMPL canonical front to E1 +X",
-    )
-    parser.add_argument(
-        "--gmr_debug_skeleton", action="store_true",
-        help="Draw joints/segment origins/axes and publish the debug side channel",
-    )
-    parser.add_argument(
-        "--gmr_debug_host", default="127.0.0.1",
-        help="Destination host for segment debug JSON/UDP",
-    )
-    parser.add_argument(
-        "--gmr_debug_port", type=int, default=7002,
-        help="Destination port for segment debug JSON/UDP",
-    )
-    parser.add_argument(
-        "--smpl_adapter_config", type=str,
-        default=str(PROJECT_ROOT / "config/gmr/smpl_direct_e1_adapter.json"),
-        help="GEM2 SMPL joint-center/anatomical-frame adapter JSON",
-    )
-    parser.add_argument(
-        "--smpl_vertical_mode", choices=["gem", "foot_lock", "contact"],
-        default="foot_lock", help="GEM2 root-height and foot contact policy",
-    )
-    parser.add_argument(
-        "--smpl_heading_source", choices=["joints", "pelvis"], default="joints",
-        help="GEM2 initial heading source; captured once",
-    )
-    parser.add_argument(
-        "--smpl_forward_sign", type=int, choices=[-1, 1], default=1,
-        help="GEM2 joint-geometry forward sign; synthetic default is +1",
-    )
-    parser.add_argument(
-        "--smpl_yaw_deg", type=float, default=0.0,
-        help="Additional yaw after GEM2 initial-heading alignment",
-    )
-    parser.add_argument(
-        "--smpl_gmr_debug", action="store_true",
-        help="Show gray SMPL joints, blue direct targets and RGB anatomical axes",
-    )
-    parser.add_argument(
         "--smplx_yaw_deg", type=float, default=0.0,
-        help="Additional Z-up yaw for original-GMR SMP1 targets",
+        help="Additional Z-up yaw for SMP1 targets",
     )
     return parser.parse_args()
 
