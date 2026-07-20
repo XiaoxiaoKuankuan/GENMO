@@ -142,6 +142,63 @@ def _resolve_text_encoder_settings(device: str, dtype: str) -> tuple[str, torch.
     return resolved_device, torch_dtype, resolved_dtype
 
 
+def _load_t5_components_cached_first(
+    model_name_or_path: str,
+    torch_dtype: torch.dtype,
+    local_files_only: bool,
+    tokenizer_class: Any,
+    encoder_class: Any,
+) -> tuple[Any, Any, str]:
+    """Load a complete local T5 cache before attempting network access.
+
+    Transformers may perform a Hub metadata request even when all required
+    files are cached. Trying strict local mode first makes repeat inference
+    independent of transient or malformed proxy settings without accepting a
+    partial cache or replacing text features with zeros.
+    """
+    attempts = (True,) if local_files_only else (True, False)
+    failures: list[tuple[str, Exception]] = []
+    for use_local_cache in attempts:
+        tokenizer = None
+        text_encoder = None
+        source = "local cache/path" if use_local_cache else "Hugging Face Hub"
+        try:
+            tokenizer = tokenizer_class.from_pretrained(
+                model_name_or_path,
+                local_files_only=use_local_cache,
+            )
+            text_encoder = encoder_class.from_pretrained(
+                model_name_or_path,
+                torch_dtype=torch_dtype,
+                local_files_only=use_local_cache,
+            )
+            return tokenizer, text_encoder, source
+        except Exception as exc:
+            failures.append((source, exc))
+            if text_encoder is not None:
+                del text_encoder
+            if tokenizer is not None:
+                del tokenizer
+            gc.collect()
+
+    details = "; ".join(f"{source} failed: {type(exc).__name__}: {exc}" for source, exc in failures)
+    proxy_hint = ""
+    if "Unknown scheme for proxy URL" in details or "socks://" in details:
+        proxy_hint = (
+            " The configured socks:// proxy scheme is not supported by this httpx "
+            "installation. For a local mixed HTTP proxy, use "
+            "HTTP_PROXY=http://127.0.0.1:7897 and "
+            "HTTPS_PROXY=http://127.0.0.1:7897, and unset ALL_PROXY/all_proxy. "
+            "For a real SOCKS proxy, install SOCKS support and use socks5://."
+        )
+    attempted_sources = (
+        "the local cache/path" if local_files_only else "the local cache/path or Hugging Face Hub"
+    )
+    raise RuntimeError(
+        f"T5 files could not be loaded from {attempted_sources}. {details}.{proxy_hint}"
+    )
+
+
 def encode_prompt_t5(
     prompt: str,
     model_name_or_path: str,
@@ -157,14 +214,14 @@ def encode_prompt_t5(
     try:
         from transformers import T5EncoderModel, T5Tokenizer
 
-        tokenizer = T5Tokenizer.from_pretrained(
-            model_name_or_path, local_files_only=local_files_only
-        )
-        text_encoder = T5EncoderModel.from_pretrained(
+        tokenizer, text_encoder, load_source = _load_t5_components_cached_first(
             model_name_or_path,
-            torch_dtype=torch_dtype,
-            local_files_only=local_files_only,
+            torch_dtype,
+            local_files_only,
+            T5Tokenizer,
+            T5EncoderModel,
         )
+        print(f"[Text] T5 loaded from {load_source}")
         text_encoder = text_encoder.to(resolved_device).eval()
 
         tokenized = tokenizer(

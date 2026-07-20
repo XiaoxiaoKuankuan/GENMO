@@ -7,7 +7,11 @@ from pathlib import Path
 import pytest
 import torch
 
-from gem.runtime.motion_streamer import SMPLFrame
+from gem.runtime.motion_streamer import (
+    SMPLFrame,
+    frame_from_motion,
+    synthetic_idle_motion,
+)
 from gem.smplx_gmr_reference import SMPLXGMRReference
 from scripts.demo import stream_smpl_params_to_gmr as streamer
 from scripts.tools.extract_smpl_idle_pose import extract_idle_pose
@@ -150,8 +154,9 @@ def test_mock_bridge_receives_finite_targets_and_fk_gets_zero_betas() -> None:
 def test_real_cpu_fk_output_is_finite_and_zero_shape() -> None:
     endecoder = streamer.load_endecoder(torch.device("cpu"))
     adapter = SMPLXGMRReference()
+    idle_frame = frame_from_motion(synthetic_idle_motion(), 0)
     adapted = streamer.fk_and_adapt_frame(
-        SMPLFrame(torch.zeros(63), torch.zeros(3), torch.zeros(3), torch.ones(10)),
+        idle_frame,
         endecoder,
         adapter,
         device=torch.device("cpu"),
@@ -163,3 +168,6 @@ def test_real_cpu_fk_output_is_finite_and_zero_shape() -> None:
         torch.isfinite(torch.as_tensor(target.position_zup)).all()
         for target in adapted.scaled_targets.values()
     )
+    targets = adapted.scaled_targets
+    assert targets["left_wrist"].position_zup[2] < targets["left_shoulder"].position_zup[2]
+    assert targets["right_wrist"].position_zup[2] < targets["right_shoulder"].position_zup[2]

@@ -10,6 +10,9 @@ import pytest
 import torch
 
 from gem.runtime.motion_streamer import (
+    LEFT_SHOULDER_BODY_INDEX,
+    RIGHT_SHOULDER_BODY_INDEX,
+    SYNTHETIC_IDLE_ARM_ANGLE_RAD,
     MonotonicDeadline,
     MotionPlayer,
     MotionQueue,
@@ -161,6 +164,10 @@ def test_holding_continuously_returns_static_frames() -> None:
     assert player.state == PlayerState.HOLDING
     assert torch.equal(first.body_pose, second.body_pose)
     assert torch.equal(first.transl, second.transl)
+    pose = first.body_pose.reshape(21, 3)
+    assert pose[LEFT_SHOULDER_BODY_INDEX, 2].item() == pytest.approx(-SYNTHETIC_IDLE_ARM_ANGLE_RAD)
+    assert pose[RIGHT_SHOULDER_BODY_INDEX, 2].item() == pytest.approx(SYNTHETIC_IDLE_ARM_ANGLE_RAD)
+    assert torch.count_nonzero(pose).item() == 2
 
 
 def test_motion_end_returns_then_holds(tmp_path: Path) -> None:

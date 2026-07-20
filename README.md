@@ -125,6 +125,14 @@ python scripts/demo/demo_smpl_text.py \
 
 This path does not read video and does not run YOLO, ByteTrack, ViTPose, or HMR2. It uses T5-3B text embeddings and the full GEM DDIM/CFG diffusion sampler, so it requires the complete `gem_smpl` checkpoint. A checkpoint trained with `exp=gem_smpl_regression` cannot generate motion from text, and the real-time ONNX denoiser does not contain this text diffusion sampling path. The first run may need to download T5-3B; use `--t5_model /path/to/t5-3b --local_files_only` for an existing local model.
 
+T5 loading is cache-first: a complete local Hugging Face cache is used without
+making a network metadata request, so repeat runs are not affected by proxy
+availability. If a download is required, do not use the unsupported
+`socks://` proxy scheme with the default HTTPX installation. For a local mixed
+HTTP proxy, use `HTTP_PROXY=http://127.0.0.1:7897` and
+`HTTPS_PROXY=http://127.0.0.1:7897`, then unset `ALL_PROXY`/`all_proxy`. A real
+SOCKS proxy requires HTTPX SOCKS support and a `socks5://` URL.
+
 Results are written under `outputs/text_motion/` as SMPL parameter files, metadata, and (unless `--no_render` is set) a global-coordinate `global.mp4`. Use `--dry_run` to validate the synthetic camera/input tensor contract without loading T5, GEM, a checkpoint, or CUDA.
 
 Each completed generation is published atomically in a unique directory. The
@@ -210,9 +218,15 @@ python scripts/demo/stream_smpl_params_to_gmr.py \
 The player uses monotonic-time resampling, quaternion shortest-path
 interpolation, root-position/yaw alignment, and explicit BLENDING, PLAYING,
 RETURNING, HOLDING, ERROR, and ESTOP states. With no action it keeps publishing
-idle targets; after every action it returns smoothly to the aligned idle pose
-instead of holding the last frame. `queue` is the recommended robot policy.
-`interrupt` is rejected in robot mode unless explicitly enabled.
+idle targets; the default simulation idle is an arms-down standing pose rather
+than the SMPL-X horizontal-arm T-pose. After every action it returns smoothly
+to the aligned idle pose instead of holding the last frame. `queue` is the
+recommended robot policy. `interrupt` is rejected in robot mode unless
+explicitly enabled.
+
+The synthetic arms-down pose is for simulation only. Robot mode continues to
+require `--idle_motion`; that verified file determines the real robot idle body
+pose and should itself contain a tested, arms-down safe stance.
 
 `--shape_mode zero` is the only streamer shape policy: source betas are ignored
 and every SMPL-X FK call receives `zeros(1, 1, 10)`. The software ESTOP file

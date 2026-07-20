@@ -9,6 +9,7 @@ from gem.gem import prepare_precomputed_text_embed
 from scripts.demo.demo_smpl_text import (
     MAX_TEXT_LEN,
     TEXT_EMBED_DIM,
+    _load_t5_components_cached_first,
     build_arg_parser,
     build_text_only_data,
     enforce_zero_shape,
@@ -178,3 +179,68 @@ def test_ready_is_created_only_after_atomic_directory_publish(tmp_path) -> None:
     assert not temporary.exists()
     assert (final / "smpl_params.pt").read_bytes() == b"complete"
     assert (final / "READY").is_file()
+
+
+def test_t5_loader_prefers_complete_local_cache_without_network() -> None:
+    class Tokenizer:
+        calls = []
+
+        @classmethod
+        def from_pretrained(cls, _name, **kwargs):
+            cls.calls.append(kwargs["local_files_only"])
+            return "tokenizer"
+
+    class Encoder:
+        calls = []
+
+        @classmethod
+        def from_pretrained(cls, _name, **kwargs):
+            cls.calls.append(kwargs["local_files_only"])
+            return "encoder"
+
+    tokenizer, encoder, source = _load_t5_components_cached_first(
+        "t5-3b", torch.float16, False, Tokenizer, Encoder
+    )
+    assert (tokenizer, encoder, source) == ("tokenizer", "encoder", "local cache/path")
+    assert Tokenizer.calls == [True]
+    assert Encoder.calls == [True]
+
+
+def test_t5_loader_uses_network_only_after_incomplete_local_cache() -> None:
+    class Tokenizer:
+        calls = []
+
+        @classmethod
+        def from_pretrained(cls, _name, **kwargs):
+            cls.calls.append(kwargs["local_files_only"])
+            return object()
+
+    class Encoder:
+        calls = []
+
+        @classmethod
+        def from_pretrained(cls, _name, **kwargs):
+            local = kwargs["local_files_only"]
+            cls.calls.append(local)
+            if local:
+                raise OSError("cached weights incomplete")
+            return object()
+
+    _, _, source = _load_t5_components_cached_first(
+        "t5-3b", torch.float16, False, Tokenizer, Encoder
+    )
+    assert source == "Hugging Face Hub"
+    assert Tokenizer.calls == [True, False]
+    assert Encoder.calls == [True, False]
+
+
+def test_t5_loader_reports_actionable_socks_proxy_error() -> None:
+    class AlwaysFails:
+        @classmethod
+        def from_pretrained(cls, _name, **kwargs):
+            if kwargs["local_files_only"]:
+                raise OSError("cache missing")
+            raise ValueError("Unknown scheme for proxy URL socks://127.0.0.1:7897")
+
+    with pytest.raises(RuntimeError, match="unset ALL_PROXY/all_proxy"):
+        _load_t5_components_cached_first("t5-3b", torch.float16, False, AlwaysFails, AlwaysFails)

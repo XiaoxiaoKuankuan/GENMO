@@ -31,6 +31,13 @@ from gem.utils.rotation_conversions import (
 ShapeMode = Literal["zero"]
 MotionPolicy = Literal["queue", "latest", "interrupt"]
 
+# SMPL-X body_pose excludes the pelvis/root, so global joints 16/17 map to
+# body-pose entries 15/16. In the neutral rest skeleton the arms extend along
+# +/-X; opposite Z rotations lower both upper arms along -Y (GENMO is Y-up).
+LEFT_SHOULDER_BODY_INDEX = 15
+RIGHT_SHOULDER_BODY_INDEX = 16
+SYNTHETIC_IDLE_ARM_ANGLE_RAD = math.pi / 2.0
+
 
 class PlayerState(str, Enum):
     """Explicit states exposed by the persistent motion player."""
@@ -179,17 +186,25 @@ def load_smpl_motion(
 
 
 def synthetic_idle_motion(fps: float = 30.0) -> SMPLMotion:
-    """Return a neutral one-frame pose for simulation-only testing."""
+    """Return a simulation-only one-frame standing pose with both arms down."""
     if not math.isfinite(fps) or fps <= 0:
         raise ValueError("fps must be finite and > 0")
+    body_pose = torch.zeros(1, 63)
+    body_pose_aa = body_pose.reshape(1, 21, 3)
+    body_pose_aa[0, LEFT_SHOULDER_BODY_INDEX, 2] = -SYNTHETIC_IDLE_ARM_ANGLE_RAD
+    body_pose_aa[0, RIGHT_SHOULDER_BODY_INDEX, 2] = SYNTHETIC_IDLE_ARM_ANGLE_RAD
     return SMPLMotion(
-        body_pose=torch.zeros(1, 63),
+        body_pose=body_pose,
         global_orient=torch.zeros(1, 3),
         transl=torch.zeros(1, 3),
         betas=torch.zeros(1, 10),
         fps=float(fps),
         source_path=Path("<synthetic-idle>"),
-        metadata={"source": "synthetic_idle", "shape_mode": "zero"},
+        metadata={
+            "source": "synthetic_idle_arms_down",
+            "shape_mode": "zero",
+            "arms": "down",
+        },
     )
 
 

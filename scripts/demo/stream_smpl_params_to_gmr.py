@@ -139,7 +139,9 @@ def load_idle(args: argparse.Namespace) -> SMPLMotion:
         "WARNING: using synthetic idle pose; do not use this pose on a real robot\n"
         "without validation."
     )
-    return synthetic_idle_motion(args.publish_fps)
+    idle = synthetic_idle_motion(args.publish_fps)
+    print("[Idle] Synthetic simulation pose: standing with both arms down")
+    return idle
 
 
 @torch.inference_mode()
