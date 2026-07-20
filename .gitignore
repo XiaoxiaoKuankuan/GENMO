@@ -17,3 +17,6 @@ scripts/train_slurm.py
 scripts/slurm_init.local.sh
 examples/
 data/
+!tools/data/
+!tools/data/aistpp/
+!tools/data/aistpp/*.py

@@ -92,6 +92,48 @@ def prepare_precomputed_text_embed(
     return text_embed
 
 
+def prepare_predict_text_condition(
+    data: dict,
+    *,
+    max_text_len: int,
+    encoded_text_dim: int,
+    device: torch.device | str,
+    encode_text_fn=None,
+) -> tuple[list[str], torch.Tensor, torch.Tensor]:
+    """Prepare the single-sample text condition used by :meth:`GEM.predict`.
+
+    A false ``has_text`` value takes a dedicated zero path and never invokes
+    the T5 encoder. This is important for music-only inference, where loading
+    T5-3B is unnecessary and an empty caption must not become a valid prompt.
+    """
+    raw_has_text = data.get("has_text")
+    if raw_has_text is None:
+        raw_has_text = bool(data.get("caption", ""))
+    has_text = torch.as_tensor(raw_has_text, dtype=torch.bool, device=device).reshape(-1)
+    if has_text.numel() != 1:
+        raise ValueError(
+            f"GEM.predict() expects one has_text value; got shape {tuple(has_text.shape)}"
+        )
+    caption = [str(data.get("caption", ""))] if bool(has_text.item()) else [""]
+    if not bool(has_text.item()):
+        encoded_text = torch.zeros(
+            (1, int(max_text_len), int(encoded_text_dim)),
+            dtype=torch.float32,
+            device=device,
+        )
+    else:
+        if encode_text_fn is None:
+            raise RuntimeError("has_text=True requires a text encoder or precomputed text_embed")
+        encoded_text = encode_text_fn(caption, has_text)
+        expected = (1, int(max_text_len), int(encoded_text_dim))
+        if tuple(encoded_text.shape) != expected:
+            raise ValueError(
+                f"Text encoder returned {tuple(encoded_text.shape)}; expected {expected}"
+            )
+        encoded_text = encoded_text.to(device=device)
+    return caption, has_text, encoded_text
+
+
 class GEM(pl.LightningModule):
     def __init__(
         self,
@@ -1151,7 +1193,12 @@ class GEM(pl.LightningModule):
     def predict(self, data, static_cam=False, postproc=True):
         now = time.time()
         # ROPE inference
-        test_mode = data["meta"][0].get("mode", "default")
+        meta = data.get("meta") or [{"mode": "default"}]
+        if isinstance(meta, dict):
+            meta = [meta]
+        if not isinstance(meta, list) or not meta or not isinstance(meta[0], dict):
+            raise ValueError("data['meta'] must be a non-empty list of dictionaries")
+        test_mode = meta[0].get("mode", "default")
         if self.endecoder.obs_indices_dict is None:
             self.endecoder.build_obs_indices_dict()
         batch = {
@@ -1164,7 +1211,9 @@ class GEM(pl.LightningModule):
             "cam_tvel": data["cam_tvel"][None].cuda(),
             "R_w2c": data["R_w2c"][None].cuda(),
             "f_imgseq": data["f_imgseq"][None].cuda(),
-            "has_text": data["has_text"].cuda(),
+            "has_text": torch.as_tensor(data.get("has_text", False), dtype=torch.bool)
+            .reshape(-1)
+            .cuda(),
             "B": 1,
             "L": data["f_imgseq"].shape[0],
             "mode": test_mode,
@@ -1178,16 +1227,15 @@ class GEM(pl.LightningModule):
         if "audio_array" in data:
             batch["audio_array"] = data["audio_array"][None].cuda()
 
+        diffusion_model = self.pipeline.denoiser3d
+        denoiser = getattr(diffusion_model, "denoiser", diffusion_model)
+        if not hasattr(denoiser, "encoded_text_dim"):
+            raise RuntimeError(
+                "GEM denoiser does not expose encoded_text_dim; cannot prepare text conditioning"
+            )
+        expected_dim = int(denoiser.encoded_text_dim)
+        expected_length = int(self.max_text_len)
         if "text_embed" in data:
-            diffusion_model = self.pipeline.denoiser3d
-            denoiser = getattr(diffusion_model, "denoiser", diffusion_model)
-            if not hasattr(denoiser, "encoded_text_dim"):
-                raise RuntimeError(
-                    "GEM denoiser does not expose encoded_text_dim; cannot validate "
-                    "the precomputed text embedding"
-                )
-            expected_dim = int(denoiser.encoded_text_dim)
-            expected_length = int(getattr(self, "max_text_len", 50))
             batch["text_embed"] = prepare_precomputed_text_embed(
                 data["text_embed"],
                 expected_dim=expected_dim,
@@ -1199,20 +1247,22 @@ class GEM(pl.LightningModule):
             batch["fast_rollout"] = data["fast_rollout"]
         batch["device"] = batch["f_imgseq"].device
 
-        if "meta" in data:
-            batch["meta"] = data["meta"]
-        else:
-            batch["meta"] = None
+        batch["meta"] = meta
 
         if "text_embed" in batch:
             batch["encoded_text"] = batch["text_embed"]
+            batch["caption"] = [str(data.get("caption", ""))]
         else:
-            if "caption" in data:
-                batch["caption"] = [data["caption"]]
-            else:
-                batch["caption"] = [""]
-            batch["has_text"] = torch.tensor([True])
-            batch["encoded_text"] = self.encode_text(batch["caption"], batch["has_text"])
+            caption, has_text, encoded_text = prepare_predict_text_condition(
+                data,
+                max_text_len=expected_length,
+                encoded_text_dim=expected_dim,
+                device=batch["f_imgseq"].device,
+                encode_text_fn=self.encode_text,
+            )
+            batch["caption"] = caption
+            batch["has_text"] = has_text
+            batch["encoded_text"] = encoded_text
 
         batch["f_cliffcam"] = compute_bbox_info_bedlam(batch["bbx_xys"], batch["K_fullimg"]).cuda()
 

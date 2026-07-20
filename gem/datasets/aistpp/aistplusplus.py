@@ -11,7 +11,6 @@ from pathlib import Path
 
 import numpy as np
 import torch
-from moviepy.editor import AudioFileClip
 from torch.utils import data
 
 from gem.utils.geo_transform import (
@@ -28,6 +27,53 @@ from gem.utils.net_utils import (
 )
 from gem.utils.pylogger import Log
 from gem.utils.smplx_utils import make_smplx
+
+
+def load_music_feature_tensor(path: str | Path) -> torch.Tensor:
+    """Load a NumPy- or Tensor-backed ``.pt`` music feature as float32."""
+    path = Path(path)
+    value = torch.load(path, map_location="cpu", weights_only=False)
+    try:
+        tensor = torch.as_tensor(value).float()
+    except (TypeError, ValueError) as exc:
+        raise ValueError(
+            f"Unsupported music feature payload in {path}: {type(value).__name__}"
+        ) from exc
+    return tensor
+
+
+def validate_musicfeat_v2(features: torch.Tensor, source: str | Path = "musicfeat_v2") -> None:
+    """Validate the EDGE baseline35 contract used by the v2 AIST++ loader."""
+    if features.ndim != 2 or features.shape[1] != 35:
+        raise ValueError(f"{source} must have shape [L, 35]; got {tuple(features.shape)}")
+    if not torch.isfinite(features).all():
+        raise ValueError(f"{source} contains NaN or Inf")
+    for channel in (33, 34):
+        values = features[:, channel]
+        binary = torch.isclose(values, torch.zeros_like(values), atol=1e-4) | torch.isclose(
+            values, torch.ones_like(values), atol=1e-4
+        )
+        if binary.float().mean().item() < 0.99:
+            raise ValueError(f"{source} channel {channel} must be essentially binary (0/1)")
+
+
+def load_music_beats(
+    root: str | Path,
+    vid: str,
+    music_features: torch.Tensor,
+) -> torch.Tensor:
+    """Use legacy beat channel 53 when present, otherwise v2 channel 34."""
+    legacy_path = Path(root) / "musicfeat" / f"{vid}_musicfeat_fps30.pt"
+    if legacy_path.is_file():
+        legacy = load_music_feature_tensor(legacy_path)
+        if legacy.ndim != 2 or legacy.shape[1] <= 53:
+            raise ValueError(
+                f"Legacy music feature must expose beat channel 53: {legacy_path}, "
+                f"got {tuple(legacy.shape)}"
+            )
+        return legacy[..., 53]
+    validate_musicfeat_v2(music_features, source=f"musicfeat_v2 for {vid}")
+    return music_features[..., 34]
 
 
 class AISTPlusPlusSmplDataset(data.Dataset):
@@ -95,9 +141,10 @@ class AISTPlusPlusSmplDataset(data.Dataset):
         vid = self.idx2meta[idx]
         motion = self.motion_files[vid]
 
-        music_feat = torch.load(
-            self.root / f"musicfeat_{self.feat_version}/{vid}_musicfeat_fps30.pt"
-        )
+        music_feat_path = self.root / f"musicfeat_{self.feat_version}/{vid}_musicfeat_fps30.pt"
+        music_feat = load_music_feature_tensor(music_feat_path)
+        if self.feat_version == "v2":
+            validate_musicfeat_v2(music_feat, source=music_feat_path)
         seq_length = min(music_feat.shape[0], motion["bbox_xyxy"].shape[0])
         sampled_motion["vid"] = vid
 
@@ -119,8 +166,8 @@ class AISTPlusPlusSmplDataset(data.Dataset):
         sampled_motion["length"] = length
         sampled_motion["start_end"] = (start, end)
 
-        music_beats = torch.load(self.root / f"musicfeat/{vid}_musicfeat_fps30.pt")[..., 53]
-        sampled_motion["music_beats"] = torch.from_numpy(music_beats[start:end]).float()
+        music_beats = load_music_beats(self.root, vid, music_feat)
+        sampled_motion["music_beats"] = torch.as_tensor(music_beats[start:end]).float()
 
         # Select motion subset
         # body_pose, global_orient, transl, betas
@@ -151,13 +198,15 @@ class AISTPlusPlusSmplDataset(data.Dataset):
         # Camera
         sampled_motion["T_w2c"] = motion["T_w2c"]  # (4, 4)
 
-        sampled_motion["music_embed"] = torch.from_numpy(music_feat[start:end]).float()  # (L, 1024)
+        sampled_motion["music_embed"] = torch.as_tensor(music_feat[start:end]).float()  # (L, 35)
 
         # load audio
         if self.split in ["train", "minitrain"]:
             music_fps = 30
             music_array = torch.zeros((length, 1024)).float()
         else:
+            from moviepy.editor import AudioFileClip
+
             music_array = torch.load(os.path.join(self.root, f"audio_array/{vid}.pt"))
             music_array = torch.from_numpy(music_array).float()
             music = AudioFileClip(os.path.join(self.root, f"audio/{vid}.mp3"))

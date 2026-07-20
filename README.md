@@ -127,6 +127,21 @@ This path does not read video and does not run YOLO, ByteTrack, ViTPose, or HMR2
 
 Results are written under `outputs/text_motion/` as SMPL parameter files, metadata, and (unless `--no_render` is set) a global-coordinate `global.mp4`. Use `--dry_run` to validate the synthetic camera/input tensor contract without loading T5, GEM, a checkpoint, or CUDA.
 
+### Music-only motion generation
+
+Generate SMPL human motion directly from arbitrary WAV, MP3, or FLAC audio, without video preprocessing or T5:
+
+```bash
+python scripts/demo/demo_music.py \
+  --audio /path/to/song.wav \
+  --ckpt_path inputs/pretrained/gem_smpl.ckpt \
+  --duration_sec 10 \
+  --output_root outputs/music_demo \
+  --save_features
+```
+
+This demo extracts EDGE-compatible 35-D music features and runs DDIM/CFG with the complete PyTorch `gem_smpl` checkpoint. The current regression-only ONNX denoiser and `gem_smpl_regression` checkpoints cannot perform this music diffusion path. Add `--mux_audio` for a global render with the selected source-audio segment, or `--no_render` to save SMPL parameters only. See [Music-only SMPL motion generation](docs/MUSIC_DEMO.md) for feature layout, AIST++ preparation, outputs, and memory limits.
+
 ### Video-only demo
 
 For simple pose estimation without text conditioning, use `demo_smpl_hpe.py`:
