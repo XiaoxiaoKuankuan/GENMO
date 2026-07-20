@@ -112,6 +112,21 @@ Results are saved to `outputs/<first_video_name>_mix/`:
 | `3_incam_global_horiz.mp4` | Side-by-side comparison |
 | `smpl_params.pt` | SMPL parameters (`body_params_global`, `body_params_incam`, `K_fullimg`, `segment_info`) |
 
+### Text-only motion generation
+
+Generate a complete SMPL motion directly from one text prompt, without an input video:
+
+```bash
+python scripts/demo/demo_smpl_text.py \
+  --prompt "a person walks forward and waves" \
+  --ckpt_path inputs/pretrained/gem_smpl.ckpt \
+  --num_frames 300
+```
+
+This path does not read video and does not run YOLO, ByteTrack, ViTPose, or HMR2. It uses T5-3B text embeddings and the full GEM DDIM/CFG diffusion sampler, so it requires the complete `gem_smpl` checkpoint. A checkpoint trained with `exp=gem_smpl_regression` cannot generate motion from text, and the real-time ONNX denoiser does not contain this text diffusion sampling path. The first run may need to download T5-3B; use `--t5_model /path/to/t5-3b --local_files_only` for an existing local model.
+
+Results are written under `outputs/text_motion/` as SMPL parameter files, metadata, and (unless `--no_render` is set) a global-coordinate `global.mp4`. Use `--dry_run` to validate the synthetic camera/input tensor contract without loading T5, GEM, a checkpoint, or CUDA.
+
 ### Video-only demo
 
 For simple pose estimation without text conditioning, use `demo_smpl_hpe.py`:

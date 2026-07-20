@@ -536,10 +536,10 @@ def render_global_frames(
     scale, cx, cz = get_ground_params_from_points(root_points, verts_global)
 
     # Global camera
-    _, _, K_global = create_camera_sensor(W, H, fov_deg=24)
+    _, _, K_global = create_camera_sensor(W, H, fov_deg=32)
     position, target_center, up_vec = get_global_cameras_static_v2(
         verts_global.clone(),
-        beta=4.5,
+        beta=6.0,
         cam_height_degree=30,
     )
 

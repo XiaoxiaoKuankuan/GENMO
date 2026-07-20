@@ -45,6 +45,53 @@ from gem.utils.tools import Timer
 reproj_z_thr = 0.3
 
 
+def prepare_precomputed_text_embed(
+    text_embed: torch.Tensor,
+    *,
+    expected_dim: int,
+    expected_length: int = 50,
+    device: torch.device | str | None = None,
+) -> torch.Tensor:
+    """Validate and batch a precomputed GEM text embedding.
+
+    ``GEM.predict`` accepts either a single ``[T, C]`` embedding or an
+    already-batched ``[1, T, C]`` embedding.  Keeping this validation in a
+    small helper also makes the input contract testable without constructing
+    the full diffusion model.
+    """
+    if not isinstance(text_embed, torch.Tensor):
+        raise TypeError(
+            "data['text_embed'] must be a torch.Tensor with shape "
+            f"[{expected_length}, {expected_dim}] or [1, {expected_length}, {expected_dim}]"
+        )
+    if text_embed.ndim == 2:
+        text_embed = text_embed.unsqueeze(0)
+    if text_embed.ndim != 3:
+        raise ValueError(
+            "data['text_embed'] must have 2 or 3 dimensions; expected "
+            f"[{expected_length}, {expected_dim}] or [1, {expected_length}, {expected_dim}], "
+            f"got {tuple(text_embed.shape)}"
+        )
+    if text_embed.shape[0] != 1:
+        raise ValueError(
+            "GEM.predict() currently supports exactly one precomputed text prompt; "
+            f"got batch dimension {text_embed.shape[0]}"
+        )
+    if text_embed.shape[1] != expected_length:
+        raise ValueError(
+            f"Precomputed text embedding length must be {expected_length}; "
+            f"got {text_embed.shape[1]}"
+        )
+    if text_embed.shape[2] != expected_dim:
+        raise ValueError(
+            f"Precomputed text embedding feature dimension must match the denoiser "
+            f"encoded_text_dim ({expected_dim}); got {text_embed.shape[2]}"
+        )
+    if device is not None:
+        text_embed = text_embed.to(device=device)
+    return text_embed
+
+
 class GEM(pl.LightningModule):
     def __init__(
         self,
@@ -1117,7 +1164,6 @@ class GEM(pl.LightningModule):
             "cam_tvel": data["cam_tvel"][None].cuda(),
             "R_w2c": data["R_w2c"][None].cuda(),
             "f_imgseq": data["f_imgseq"][None].cuda(),
-            # "text_embed": data["text_embed"][None].cuda(),
             "has_text": data["has_text"].cuda(),
             "B": 1,
             "L": data["f_imgseq"].shape[0],
@@ -1132,6 +1178,23 @@ class GEM(pl.LightningModule):
         if "audio_array" in data:
             batch["audio_array"] = data["audio_array"][None].cuda()
 
+        if "text_embed" in data:
+            diffusion_model = self.pipeline.denoiser3d
+            denoiser = getattr(diffusion_model, "denoiser", diffusion_model)
+            if not hasattr(denoiser, "encoded_text_dim"):
+                raise RuntimeError(
+                    "GEM denoiser does not expose encoded_text_dim; cannot validate "
+                    "the precomputed text embedding"
+                )
+            expected_dim = int(denoiser.encoded_text_dim)
+            expected_length = int(getattr(self, "max_text_len", 50))
+            batch["text_embed"] = prepare_precomputed_text_embed(
+                data["text_embed"],
+                expected_dim=expected_dim,
+                expected_length=expected_length,
+                device=batch["f_imgseq"].device,
+            )
+
         if "fast_rollout" in data:
             batch["fast_rollout"] = data["fast_rollout"]
         batch["device"] = batch["f_imgseq"].device
@@ -1142,7 +1205,7 @@ class GEM(pl.LightningModule):
             batch["meta"] = None
 
         if "text_embed" in batch:
-            batch["encoded_text"] = batch["text_embed"].cuda()
+            batch["encoded_text"] = batch["text_embed"]
         else:
             if "caption" in data:
                 batch["caption"] = [data["caption"]]
