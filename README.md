@@ -127,6 +127,113 @@ This path does not read video and does not run YOLO, ByteTrack, ViTPose, or HMR2
 
 Results are written under `outputs/text_motion/` as SMPL parameter files, metadata, and (unless `--no_render` is set) a global-coordinate `global.mp4`. Use `--dry_run` to validate the synthetic camera/input tensor contract without loading T5, GEM, a checkpoint, or CUDA.
 
+Each completed generation is published atomically in a unique directory. The
+`READY` marker is created last, after `smpl_params.pt`, `motion.npz`,
+`metadata.json`, `prompt.txt`, and any successfully generated render have been
+closed and flushed. Runtime consumers must ignore directories without `READY`.
+
+### Text-to-motion robot streaming
+
+The text generator and robot player are separate processes. GEM may take longer
+than real time to generate a complete action, while the persistent streamer
+continues sending a cached motion, a smooth safety transition, or an idle pose
+to GMR-CPP at a fixed rate:
+
+```text
+demo_smpl_text.py                  text -> complete SMPL-X action + READY
+stream_smpl_params_to_gmr.py       watch/cache/interpolate -> SMP1 UDP
+run_smplx_bumi3.sh                 SMPL-X targets -> BUMI3 retargeting
+GMT                                reference trajectory -> tracking policy
+```
+
+Terminal 1 — start GMR-CPP and its MuJoCo visualization:
+
+```bash
+cd /home/weili/GMR-CPP_e1jump_lowdpi
+./run_smplx_bumi3.sh \
+  --always \
+  --vis \
+  --vis-smplx-targets \
+  --vis-smplx-frames
+```
+
+Terminal 2 — keep the simulation streamer running:
+
+```bash
+cd /home/weili/GENMO
+source .venv/bin/activate
+python scripts/demo/stream_smpl_params_to_gmr.py \
+  --watch_dir outputs/text_motion \
+  --gmr_host 127.0.0.1 \
+  --gmr_port 7006 \
+  --publish_fps 30 \
+  --shape_mode zero \
+  --mode sim \
+  --new_motion_policy queue
+```
+
+Terminal 3 — generate actions as needed:
+
+```bash
+python scripts/demo/demo_smpl_text.py \
+  --prompt "A person walks forward, turns left, raises both arms and returns to a standing pose." \
+  --ckpt_path inputs/pretrained/gem_smpl.ckpt \
+  --num_frames 300 \
+  --fps 30 \
+  --seed 42 \
+  --shape_mode zero \
+  --no_render
+```
+
+For robot mode, first extract a frame from a stand motion that has already been
+validated in simulation and on the target platform:
+
+```bash
+python scripts/tools/extract_smpl_idle_pose.py \
+  --motion outputs/verified_stand/smpl_params.pt \
+  --frame 0 \
+  --output inputs/motions/smplx_idle_stand.pt \
+  --shape_mode zero
+
+python scripts/demo/stream_smpl_params_to_gmr.py \
+  --watch_dir outputs/text_motion \
+  --gmr_host 127.0.0.1 \
+  --gmr_port 7006 \
+  --publish_fps 30 \
+  --shape_mode zero \
+  --mode robot \
+  --idle_motion inputs/motions/smplx_idle_stand.pt \
+  --new_motion_policy queue \
+  --estop_file /tmp/genmo_estop
+```
+
+The player uses monotonic-time resampling, quaternion shortest-path
+interpolation, root-position/yaw alignment, and explicit BLENDING, PLAYING,
+RETURNING, HOLDING, ERROR, and ESTOP states. With no action it keeps publishing
+idle targets; after every action it returns smoothly to the aligned idle pose
+instead of holding the last frame. `queue` is the recommended robot policy.
+`interrupt` is rejected in robot mode unless explicitly enabled.
+
+`--shape_mode zero` is the only streamer shape policy: source betas are ignored
+and every SMPL-X FK call receives `zeros(1, 1, 10)`. The software ESTOP file
+causes a finite, short return to idle and latches until the file is removed and
+a new action arrives. It does not replace the robot's physical emergency stop.
+Before real-hardware testing, validate the idle/action in MuJoCo, use reduced
+speed and suspended support, and retain the robot's normal safety systems. The
+streamer sends pose references only; it does not send motor torques and does not
+change the existing SMP1, GMR-CPP, BUMI3, Redis, or GMT protocols.
+
+Validate an action without opening a UDP socket:
+
+```bash
+python scripts/demo/stream_smpl_params_to_gmr.py \
+  --motion outputs/text_motion/example/smpl_params.pt \
+  --shape_mode zero \
+  --publish_fps 30 \
+  --mode sim \
+  --dry_run
+```
+
 ### Music-only motion generation
 
 Generate SMPL human motion directly from arbitrary WAV, MP3, or FLAC audio, without video preprocessing or T5:

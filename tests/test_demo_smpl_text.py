@@ -9,8 +9,11 @@ from gem.gem import prepare_precomputed_text_embed
 from scripts.demo.demo_smpl_text import (
     MAX_TEXT_LEN,
     TEXT_EMBED_DIM,
+    build_arg_parser,
     build_text_only_data,
+    enforce_zero_shape,
     prompt_slug,
+    publish_ready_directory,
     resolve_prompt,
     validate_arguments,
 )
@@ -151,3 +154,27 @@ def test_predict_text_embed_helper_rejects_invalid_shapes(
         prepare_precomputed_text_embed(
             embedding, expected_dim=1024, expected_length=50, device="cpu"
         )
+
+
+def test_shape_mode_defaults_to_zero_and_overrides_both_parameter_groups() -> None:
+    args = build_arg_parser().parse_args(["--prompt", "stand"])
+    assert args.shape_mode == "zero"
+    params = {
+        "body_params_global": {"betas": torch.randn(4, 10)},
+        "body_params_incam": {"betas": torch.randn(4, 10)},
+    }
+    enforce_zero_shape(params)
+    assert torch.count_nonzero(params["body_params_global"]["betas"]) == 0
+    assert torch.count_nonzero(params["body_params_incam"]["betas"]) == 0
+
+
+def test_ready_is_created_only_after_atomic_directory_publish(tmp_path) -> None:
+    temporary = tmp_path / ".tmp_test"
+    final = tmp_path / "motion"
+    temporary.mkdir()
+    (temporary / "smpl_params.pt").write_bytes(b"complete")
+    assert not (temporary / "READY").exists()
+    publish_ready_directory(temporary, final, "2026-01-01T00:00:00Z")
+    assert not temporary.exists()
+    assert (final / "smpl_params.pt").read_bytes() == b"complete"
+    assert (final / "READY").is_file()

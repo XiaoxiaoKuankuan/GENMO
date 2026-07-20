@@ -13,9 +13,13 @@ from __future__ import annotations
 import argparse
 import gc
 import json
+import os
 import random
 import re
+import shutil
+import uuid
 import warnings
+from datetime import datetime, timezone
 from fractions import Fraction
 from pathlib import Path
 from typing import Any
@@ -376,6 +380,70 @@ def _to_cpu(value: Any) -> Any:
     return value
 
 
+def enforce_zero_shape(
+    body_params: dict[str, dict[str, torch.Tensor]],
+) -> dict[str, dict[str, torch.Tensor]]:
+    """Force both global and in-camera SMPL-X parameters to neutral shape."""
+    for group_name in ("body_params_global", "body_params_incam"):
+        group = body_params.get(group_name)
+        if not isinstance(group, dict) or "betas" not in group:
+            raise RuntimeError(f"Cannot apply shape_mode=zero: missing {group_name}.betas")
+        betas = group["betas"]
+        if not isinstance(betas, torch.Tensor) or betas.ndim != 2 or betas.shape[-1] != 10:
+            raise RuntimeError(
+                f"Cannot apply shape_mode=zero to {group_name}.betas with shape "
+                f"{getattr(betas, 'shape', None)}"
+            )
+        group["betas"] = torch.zeros_like(betas)
+        if torch.count_nonzero(group["betas"]).item() != 0:
+            raise AssertionError(f"{group_name}.betas is not zero after shape policy")
+    return body_params
+
+
+def unique_output_paths(output_root: Path, prompt: str, seed: int) -> tuple[Path, Path]:
+    """Return same-filesystem temporary and unique final generation directories."""
+    output_root.mkdir(parents=True, exist_ok=True)
+    token = uuid.uuid4().hex
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    final = output_root / f"{prompt_slug(prompt)}_seed{seed}_{timestamp}_{token[:8]}"
+    temporary = output_root / f".tmp_{token}"
+    return temporary, final
+
+
+def _fsync_path(path: Path) -> None:
+    """Flush one regular file to disk before publishing its directory."""
+    with path.open("rb") as handle:
+        os.fsync(handle.fileno())
+
+
+def _fsync_directory(path: Path) -> None:
+    descriptor = os.open(path, os.O_RDONLY)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def publish_ready_directory(temporary: Path, final: Path, completed_at: str) -> None:
+    """Atomically publish a complete generation and create READY strictly last."""
+    if final.exists():
+        raise FileExistsError(f"Refusing to overwrite existing output directory: {final}")
+    for path in temporary.rglob("*"):
+        if path.is_file():
+            _fsync_path(path)
+    _fsync_directory(temporary)
+    os.replace(temporary, final)
+    _fsync_directory(final.parent)
+
+    ready = final / "READY"
+    with ready.open("x", encoding="utf-8") as handle:
+        handle.write(f"completed_at={completed_at}\n")
+        handle.flush()
+        os.fsync(handle.fileno())
+    _fsync_directory(final)
+    _fsync_directory(final.parent)
+
+
 def save_results(
     output_dir: Path,
     body_params: dict[str, dict[str, torch.Tensor]],
@@ -385,6 +453,7 @@ def save_results(
     ckpt_path: Path,
     text_encoder_device: str,
     text_encoder_dtype: str,
+    completed_at: str,
 ) -> None:
     """Save CPU SMPL parameters, NumPy motion arrays, prompt, and metadata."""
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -403,6 +472,7 @@ def save_results(
         "ddim_steps": args.ddim_steps,
         "checkpoint": str(ckpt_path),
         "source": "text_only",
+        "shape_mode": args.shape_mode,
     }
     torch.save(save_dict, output_dir / "smpl_params.pt")
     np.savez(
@@ -429,6 +499,9 @@ def save_results(
         "t5_model": args.t5_model,
         "text_encoder_device": text_encoder_device,
         "text_encoder_dtype": text_encoder_dtype,
+        "source": "text_only",
+        "shape_mode": args.shape_mode,
+        "completed_at": completed_at,
     }
     (output_dir / "metadata.json").write_text(
         json.dumps(metadata, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
@@ -481,6 +554,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--num_frames", type=int, default=300)
     parser.add_argument("--fps", type=float, default=30.0)
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument(
+        "--shape_mode",
+        choices=("zero",),
+        default="zero",
+        help="SMPL-X body-shape policy; robot-compatible generation requires zero.",
+    )
     parser.add_argument("--width", type=int, default=1280)
     parser.add_argument("--height", type=int, default=720)
     parser.add_argument("--bbox_scale", type=float, default=0.75)
@@ -587,30 +666,40 @@ def main(argv: list[str] | None = None) -> int:
             postproc=not args.no_postproc,
         )
     body_params = validate_smpl_prediction(pred, args.num_frames)
+    body_params = enforce_zero_shape(body_params)
+    print("[Shape] mode=zero; global/incam betas norm=0.000000")
 
-    output_dir = args.output_root / f"{prompt_slug(prompt)}_seed{args.seed}"
-    save_results(
-        output_dir,
-        body_params,
-        data,
-        prompt,
-        args,
-        ckpt_path,
-        text_device,
-        text_dtype,
-    )
-    print(f"[Output] Saved SMPL parameters and metadata to {output_dir}")
+    temporary_dir, output_dir = unique_output_paths(args.output_root, prompt, args.seed)
+    try:
+        temporary_dir.mkdir(parents=False, exist_ok=False)
+        if not args.no_render:
+            render_global_video(
+                temporary_dir,
+                _to_cpu(body_params["body_params_global"]),
+                args.width,
+                args.height,
+                args.fps,
+            )
+        completed_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+        save_results(
+            temporary_dir,
+            body_params,
+            data,
+            prompt,
+            args,
+            ckpt_path,
+            text_device,
+            text_dtype,
+            completed_at,
+        )
+        publish_ready_directory(temporary_dir, output_dir, completed_at)
+    except Exception:
+        shutil.rmtree(temporary_dir, ignore_errors=True)
+        raise
+
+    print(f"[Output] Published complete motion with READY: {output_dir}")
     for field, value in body_params["body_params_global"].items():
         print(f"  {field:<14}{list(value.shape)}")
-
-    if not args.no_render:
-        render_global_video(
-            output_dir,
-            _to_cpu(body_params["body_params_global"]),
-            args.width,
-            args.height,
-            args.fps,
-        )
     return 0
 
 
