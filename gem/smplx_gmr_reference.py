@@ -82,7 +82,7 @@ AXIS_CONVERT_AY_TO_ZUP = np.asarray(
 class BetaStabilizer:
     """Freeze or smooth GEM betas before SMPL-X FK."""
 
-    MODES = {"first", "mean", "ema", "per_frame"}
+    MODES = {"zero", "first", "mean", "ema", "per_frame"}
 
     def __init__(self, mode: str = "mean", warmup: int = 30, ema_alpha: float = 0.05):
         if mode not in self.MODES:
@@ -98,6 +98,8 @@ class BetaStabilizer:
 
     @property
     def frozen(self) -> bool:
+        if self.mode == "zero":
+            return True
         return self.mode in {"first", "mean"} and self._frozen is not None
 
     def reset(self) -> None:
@@ -116,7 +118,9 @@ class BetaStabilizer:
         if not np.isfinite(array).all():
             raise ValueError("betas contains NaN or Inf")
 
-        if self.mode == "per_frame":
+        if self.mode == "zero":
+            result = np.zeros_like(array)
+        elif self.mode == "per_frame":
             result = array.copy()
         elif self.mode == "first":
             if self._frozen is None:
@@ -137,7 +141,7 @@ class BetaStabilizer:
         else:
             result = self._frozen
 
-        if self.mode != "mean":
+        if self.mode not in {"zero", "mean"}:
             self.count += 1
         if is_tensor:
             return torch.as_tensor(result, dtype=betas.dtype, device=betas.device)

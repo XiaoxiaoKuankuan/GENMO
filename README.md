@@ -151,6 +151,12 @@ python scripts/demo/demo_webcam.py \
 python scripts/demo/demo_webcam.py \
   --camera_id 0 --no_imgfeat \
   --render --render_mode viser
+
+# Webcam with neutral SMPL-X shape and GMR-CPP SMP1 streaming
+python scripts/demo/demo_webcam.py \
+  --camera_id 2 --no_imgfeat --display \
+  --gmr_host 127.0.0.1 --gmr_port 7006 \
+  --shape_mode zero
 ```
 
 | Flag | Default | Purpose |
@@ -159,7 +165,10 @@ python scripts/demo/demo_webcam.py \
 | `--context_frames` | 120 | sliding-window length (must match exported denoiser `--seq_len`) |
 | `--no_imgfeat` | off | use the no-imgfeat denoiser variant; skips HMR2 entirely |
 | `--render_mode {opencv,viser}` | `viser` | mesh-overlay window vs web 3D viewer |
+| `--shape_mode {zero,first,mean,ema,per_frame}` | `zero` | control SMPL-X body shape consistently for rendering and GMR FK; `zero` uses the neutral mean body shape and avoids frame-to-frame or run-to-run body-proportion changes |
 | `--no_async_pipeline` | off | force synchronous mode (lower throughput, zero pipeline lag) |
+
+`--shape_mode` controls the SMPL-X body shape consistently for rendering and GMR FK. The default `zero` mode uses the neutral mean SMPL-X body shape and avoids frame-to-frame or run-to-run body-proportion changes.
 
 For per-module latency profiling: `python tools/benchmark/benchmark_modules.py`.
 

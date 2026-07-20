@@ -7,6 +7,11 @@ import unittest
 
 import numpy as np
 
+try:
+    import torch
+except ImportError:  # pragma: no cover - project runtime normally provides torch.
+    torch = None
+
 from gem.gmr_udp_bridge import (
     HEADER,
     PACKET_BYTES,
@@ -18,9 +23,9 @@ from gem.gmr_udp_bridge import (
 )
 from gem.smplx_gmr_reference import (
     AXIS_CONVERT_AY_TO_ZUP,
-    BetaStabilizer,
     TARGET_JOINT_INDICES,
     TARGET_NAMES,
+    BetaStabilizer,
     SMPLXGMRReference,
 )
 
@@ -46,6 +51,53 @@ def standing_frame() -> tuple[np.ndarray, np.ndarray]:
 
 
 class SMPLXGMRReferenceTest(unittest.TestCase):
+    def test_beta_zero_numpy_preserves_shape_and_dtype(self) -> None:
+        stabilizer = BetaStabilizer("zero", warmup=30)
+        betas = np.arange(20, dtype=np.float32).reshape(2, 10)
+        result = stabilizer.update(betas)
+        self.assertIsInstance(result, np.ndarray)
+        self.assertEqual(result.shape, betas.shape)
+        self.assertEqual(result.dtype, betas.dtype)
+        self.assertEqual(np.count_nonzero(result), 0)
+        self.assertTrue(stabilizer.frozen)
+        self.assertEqual(stabilizer.count, 0)
+
+    @unittest.skipUnless(torch is not None, "Torch is not installed")
+    def test_beta_zero_torch_cpu_preserves_shape_dtype_and_device(self) -> None:
+        stabilizer = BetaStabilizer("zero")
+        betas = torch.randn(3, 10, dtype=torch.float64)
+        result = stabilizer.update(betas)
+        self.assertIsInstance(result, torch.Tensor)
+        self.assertEqual(result.shape, betas.shape)
+        self.assertEqual(result.dtype, betas.dtype)
+        self.assertEqual(result.device, betas.device)
+        self.assertEqual(torch.count_nonzero(result).item(), 0)
+
+    @unittest.skipUnless(torch is not None and torch.cuda.is_available(), "CUDA is not available")
+    def test_beta_zero_torch_cuda_stays_on_cuda(self) -> None:
+        stabilizer = BetaStabilizer("zero")
+        betas = torch.randn(1, 10, device="cuda", dtype=torch.float16)
+        result = stabilizer.update(betas)
+        self.assertEqual(result.device.type, "cuda")
+        self.assertEqual(result.dtype, betas.dtype)
+        self.assertEqual(result.shape, betas.shape)
+        self.assertEqual(torch.count_nonzero(result).item(), 0)
+
+    def test_beta_zero_is_constant_across_updates(self) -> None:
+        stabilizer = BetaStabilizer("zero", warmup=30)
+        for value in (-10.0, 1.0, 99.0):
+            result = stabilizer.update(np.full((1, 10), value, dtype=np.float32))
+            np.testing.assert_array_equal(result, np.zeros((1, 10), dtype=np.float32))
+        self.assertTrue(stabilizer.frozen)
+        self.assertEqual(stabilizer.count, 0)
+
+    def test_beta_zero_still_rejects_nonfinite_input(self) -> None:
+        stabilizer = BetaStabilizer("zero")
+        for bad_value in (np.nan, np.inf, -np.inf):
+            with self.subTest(bad_value=bad_value):
+                with self.assertRaisesRegex(ValueError, "NaN or Inf"):
+                    stabilizer.update(np.full((1, 10), bad_value, dtype=np.float32))
+
     def test_beta_mean_freezes_after_warmup(self) -> None:
         stabilizer = BetaStabilizer("mean", warmup=3)
         stabilizer.update(np.zeros(10))
@@ -72,16 +124,16 @@ class SMPLXGMRReferenceTest(unittest.TestCase):
         joints, rotations = standing_frame()
         angle = np.deg2rad(31.0)
         rotation = np.asarray(
-            ((np.cos(angle), 0.0, np.sin(angle)),
-             (0.0, 1.0, 0.0),
-             (-np.sin(angle), 0.0, np.cos(angle)))
+            (
+                (np.cos(angle), 0.0, np.sin(angle)),
+                (0.0, 1.0, 0.0),
+                (-np.sin(angle), 0.0, np.cos(angle)),
+            )
         )
         rotations[16] = rotation
         frame = SMPLXGMRReference().adapt(joints, rotations)
         actual = frame.scaled_targets["left_shoulder"].rotation_zup
-        np.testing.assert_allclose(
-            actual, AXIS_CONVERT_AY_TO_ZUP @ rotation, atol=1e-12
-        )
+        np.testing.assert_allclose(actual, AXIS_CONVERT_AY_TO_ZUP @ rotation, atol=1e-12)
         self.assertFalse(
             np.allclose(
                 actual,
@@ -108,9 +160,7 @@ class SMPLXGMRReferenceTest(unittest.TestCase):
         bridge = GMRUDPBridge("127.0.0.1", receiver.getsockname()[1])
         try:
             joints, rotations = standing_frame()
-            frame = SMPLXGMRReference().adapt(
-                joints, rotations, frame_id=7, timestamp_ns=123456789
-            )
+            frame = SMPLXGMRReference().adapt(joints, rotations, frame_id=7, timestamp_ns=123456789)
             returned = bridge.send_smplx_targets(
                 frame.scaled_targets, source_stamp_ns=frame.timestamp_ns
             )

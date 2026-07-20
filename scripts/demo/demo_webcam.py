@@ -147,6 +147,51 @@ def run_denoiser(runner, _backend, batch):
     return pred_x, pred_cam
 
 
+def resolve_effective_betas(
+    raw_betas: torch.Tensor | None,
+    stabilizer: BetaStabilizer,
+    *,
+    reference: torch.Tensor,
+) -> torch.Tensor:
+    """Resolve the body shape used by rendering and GMR FK."""
+    if not isinstance(reference, torch.Tensor):
+        raise TypeError("reference must be a torch.Tensor")
+    if reference.ndim < 1:
+        raise ValueError("reference must have at least one dimension")
+
+    if raw_betas is None:
+        if stabilizer.mode != "zero":
+            raise ValueError(
+                "The denoiser output does not contain SMPL-X betas, but "
+                f"shape_mode={stabilizer.mode} requires predicted betas."
+            )
+        effective_betas = torch.zeros(
+            reference.shape[:-1] + (10,),
+            device=reference.device,
+            dtype=reference.dtype,
+        )
+    else:
+        if not isinstance(raw_betas, torch.Tensor):
+            raise TypeError("raw_betas must be a torch.Tensor or None")
+        if raw_betas.ndim < 1 or raw_betas.shape[-1] != 10:
+            raise ValueError(
+                "SMPL-X betas must have last dimension 10, "
+                f"got shape {tuple(raw_betas.shape)}"
+            )
+        effective_betas = stabilizer.update(raw_betas)
+
+    if not isinstance(effective_betas, torch.Tensor):
+        raise TypeError("BetaStabilizer must return a torch.Tensor for tensor input")
+    if effective_betas.ndim < 1 or effective_betas.shape[-1] != 10:
+        raise ValueError(
+            "Effective SMPL-X betas must have last dimension 10, "
+            f"got shape {tuple(effective_betas.shape)}"
+        )
+    if not torch.isfinite(effective_betas).all():
+        raise ValueError("effective SMPL-X betas contains NaN or Inf")
+    return effective_betas
+
+
 # ---------------------------------------------------------------------------
 #  Background render workers (mp.Process)
 # ---------------------------------------------------------------------------
@@ -311,10 +356,18 @@ class WebcamGEMSMPLDemo:
         self.render_enabled = args.render
         self.display_enabled = args.display
 
+        # One body-shape policy feeds every downstream consumer.  It is
+        # intentionally independent of whether rendering or GMR is enabled.
+        self.shape_stabilizer = BetaStabilizer(
+            mode=args.shape_mode,
+            warmup=args.shape_warmup,
+        )
+        self._shape_logged = False
+        Log.info(f"[Shape] mode={args.shape_mode}, warmup={args.shape_warmup}")
+
         # Optional GEM SMPL-X FK -> original-GMR SMP1 UDP path.
         self.gmr_bridge = None
         self.gmr_adapter = None
-        self.gmr_shape = None
         if args.gmr_host:
             self.gmr_bridge = GMRUDPBridge(
                 host=args.gmr_host,
@@ -324,13 +377,9 @@ class WebcamGEMSMPLDemo:
                 user_yaw_deg=args.smplx_yaw_deg,
                 global_scale=args.gmr_scale,
             )
-            self.gmr_shape = BetaStabilizer(
-                mode=args.gmr_shape_mode,
-                warmup=args.gmr_shape_warmup,
-            )
             Log.info(
                 f"[GMR SMP1] SMPL-X FK targets, "
-                f"shape={args.gmr_shape_mode}/{args.gmr_shape_warmup}, "
+                f"shape={args.shape_mode}, "
                 f"yaw={args.smplx_yaw_deg:.1f} deg, scale={args.gmr_scale:.3f}"
             )
         self._last_gmr_error_log = 0.0
@@ -613,8 +662,33 @@ class WebcamGEMSMPLDemo:
                 K_fullimg_seq[-1:].unsqueeze(0).to(_DEVICE),
             )[0],
         }
-        if "betas" in decode_dict:
-            pred_body_params_incam["betas"] = decode_dict["betas"][0, -1:]
+        raw_betas = decode_dict["betas"][0, -1:] if "betas" in decode_dict else None
+        raw_betas_norm = None
+        if not self._shape_logged and raw_betas is not None:
+            raw_betas_norm = torch.linalg.vector_norm(raw_betas.detach().float()).item()
+        effective_betas = resolve_effective_betas(
+            raw_betas,
+            self.shape_stabilizer,
+            reference=pred_body_params_incam["body_pose"],
+        )
+
+        if not self._shape_logged:
+            if raw_betas_norm is None:
+                Log.info("[Shape] raw betas unavailable")
+            else:
+                Log.info(f"[Shape] raw betas norm={raw_betas_norm:.6f}")
+            effective_norm = torch.linalg.vector_norm(
+                effective_betas.detach().float()
+            ).item()
+            Log.info(
+                f"[Shape] effective betas norm={effective_norm:.6f} "
+                f"mode={self.shape_stabilizer.mode}"
+            )
+            self._shape_logged = True
+
+        # All downstream paths consume this one resolved effective shape.
+        pred_body_params_incam["betas"] = effective_betas
+        body_params_global["betas"] = effective_betas
 
         # --- Bbox update from last-frame keypoints ---
         updated_bbox = None
@@ -630,8 +704,7 @@ class WebcamGEMSMPLDemo:
         if self.gmr_bridge is not None:
             try:
                 body_pose_fk = pred_body_params_incam["body_pose"].reshape(1, 1, 63)
-                stable_betas = self.gmr_shape.update(pred_body_params_incam["betas"])
-                betas_fk = stable_betas.reshape(1, 1, 10)
+                betas_fk = effective_betas.reshape(1, 1, 10)
                 global_orient_fk = body_params_global["global_orient"].reshape(1, 1, 3)
                 transl_fk = body_params_global["transl"].reshape(1, 1, 3)
                 joints, _, fk_mat = self.endecoder.fk_v2(
@@ -1018,7 +1091,7 @@ class WebcamGEMSMPLDemo:
 # ---------------------------------------------------------------------------
 
 
-def parse_args():
+def parse_args(argv: list[str] | None = None):
     parser = argparse.ArgumentParser(description="GEM-SMPL Webcam Demo (real-time, ONNX)")
     parser.add_argument("--camera_id", type=int, default=0, help="Webcam device ID")
     parser.add_argument("--video", type=str, default=None, help="Video file (overrides camera)")
@@ -1079,18 +1152,29 @@ def parse_args():
         help="Global position scale applied to SMP1 targets",
     )
     parser.add_argument(
-        "--gmr_shape_mode", choices=["first", "mean", "ema", "per_frame"],
-        default="mean", help="How predicted SMPL-X betas are stabilized before FK",
+        "--shape_mode",
+        "--gmr_shape_mode",
+        dest="shape_mode",
+        choices=["zero", "first", "mean", "ema", "per_frame"],
+        default="zero",
+        help=(
+            "SMPL-X body-shape policy used consistently for rendering and GMR FK. "
+            "'zero' uses the fixed neutral mean body shape."
+        ),
     )
     parser.add_argument(
-        "--gmr_shape_warmup", type=int, default=30,
-        help="Valid beta frames averaged before mean shape is frozen",
+        "--shape_warmup",
+        "--gmr_shape_warmup",
+        dest="shape_warmup",
+        type=int,
+        default=30,
+        help="Warmup frames used by mean shape mode.",
     )
     parser.add_argument(
         "--smplx_yaw_deg", type=float, default=0.0,
         help="Additional Z-up yaw for SMP1 targets",
     )
-    return parser.parse_args()
+    return parser.parse_args(argv)
 
 
 if __name__ == "__main__":
