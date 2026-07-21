@@ -135,6 +135,75 @@ def test_watcher_does_not_replay_preexisting_by_default(tmp_path: Path) -> None:
     assert MotionWatcher(tmp_path, replay_existing=True).scan() == [ready]
 
 
+def _ready_source(root: Path, name: str, source: str | None) -> Path:
+    path = root / name
+    path.mkdir()
+    if source is not None:
+        (path / "metadata.json").write_text(
+            json.dumps({"source": source, "completed_at": "2026-07-20T00:00:00Z"}),
+            encoding="utf-8",
+        )
+    (path / "READY").touch()
+    return path
+
+
+def test_watcher_source_filters_do_not_consume_mismatches(tmp_path: Path) -> None:
+    music = _ready_source(tmp_path, "music", "music_only")
+    text = _ready_source(tmp_path, "text", "text_only")
+    assert MotionWatcher(
+        tmp_path, replay_existing=True, source_filter="music_only", logger=None
+    ).scan() == [music]
+    text_watcher = MotionWatcher(
+        tmp_path, replay_existing=True, source_filter="text_only", logger=None
+    )
+    assert text_watcher.scan() == [text]
+    assert str(music.resolve()) not in text_watcher.consumed
+    any_paths = MotionWatcher(
+        tmp_path, replay_existing=True, source_filter="any", logger=None
+    ).scan()
+    assert any_paths == [music, text]
+
+
+def test_filtered_watcher_warns_and_ignores_bad_metadata(tmp_path: Path) -> None:
+    missing = _ready_source(tmp_path, "missing", None)
+    broken = _ready_source(tmp_path, "broken", "music_only")
+    (broken / "metadata.json").write_text("not-json", encoding="utf-8")
+    logs: list[str] = []
+    watcher = MotionWatcher(
+        tmp_path, replay_existing=True, source_filter="music_only", logger=logs.append
+    )
+    assert watcher.scan() == []
+    assert len(logs) == 2
+    assert str(missing.resolve()) not in watcher.consumed
+    assert str(broken.resolve()) not in watcher.consumed
+
+
+def test_music_metadata_is_preserved_by_loader(tmp_path: Path) -> None:
+    path = write_motion(tmp_path / "music.pt")
+    payload = torch.load(path, map_location="cpu", weights_only=False)
+    payload.update(
+        {
+            "source": "music_only",
+            "audio_path": "/tmp/song.wav",
+            "audio_start_sec": 1.0,
+            "audio_duration_sec": 2.0,
+            "feature_type": "edge_baseline35",
+            "feature_fps": 30,
+            "estimated_bpm": 120.0,
+            "bpm_source": "estimated",
+            "sample_index": 3,
+            "guidance_scale": 2.5,
+            "ddim_steps": 50,
+        }
+    )
+    torch.save(payload, path)
+    metadata = load_smpl_motion(path).metadata
+    assert metadata["source"] == "music_only"
+    assert metadata["audio_path"] == "/tmp/song.wav"
+    assert metadata["estimated_bpm"] == 120.0
+    assert metadata["sample_index"] == 3
+
+
 def test_queue_latest_and_interrupt_policies(tmp_path: Path) -> None:
     first = load_smpl_motion(write_motion(tmp_path / "first.pt"))
     second = load_smpl_motion(write_motion(tmp_path / "second.pt"))

@@ -21,6 +21,7 @@ EDGE_BASELINE_FEATURE_NAMES = (
     "onset_peak",
     "beat_peak",
 )
+EDGE_FEATURE_DIM = len(EDGE_BASELINE_FEATURE_NAMES)
 
 _AIST_TEMPO_FAMILIES_10 = {"BR", "PO", "LO", "MH", "LH", "WA", "KR", "JS", "JB"}
 _AIST_MUSIC_ID = re.compile(r"^m([A-Z]{2})(\d)$")

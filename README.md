@@ -248,20 +248,71 @@ python scripts/demo/stream_smpl_params_to_gmr.py \
   --dry_run
 ```
 
-### Music-only motion generation
+### Music-to-motion robot streaming
 
-Generate SMPL human motion directly from arbitrary WAV, MP3, or FLAC audio, without video preprocessing or T5:
+Generate human SMPL-X motion from WAV, MP3, or FLAC without video, YOLO,
+ViTPose, HMR2, or T5. This uses EDGE baseline35 and the complete PyTorch
+`gem_smpl.ckpt` DDIM/CFG path; the regression-only ONNX exports cannot perform
+music-conditioned generation.
+
+Terminal 1 — start GMR-CPP/MuJoCo:
+
+```bash
+cd /home/weili/GMR-CPP_e1jump_lowdpi
+./run_smplx_bumi3.sh \
+  --always \
+  --vis \
+  --vis-smplx-targets \
+  --vis-smplx-frames
+```
+
+Terminal 2 — keep the music streamer running:
+
+```bash
+cd /home/weili/GENMO
+source .venv/bin/activate
+python scripts/demo/stream_smpl_params_to_gmr.py \
+  --watch_dir outputs/music_motion \
+  --source_filter music_only \
+  --gmr_host 127.0.0.1 \
+  --gmr_port 7006 \
+  --publish_fps 30 \
+  --shape_mode zero \
+  --mode sim \
+  --new_motion_policy queue
+```
+
+Terminal 3 — generate a complete action and atomically publish READY:
 
 ```bash
 python scripts/demo/demo_music.py \
   --audio /path/to/song.wav \
   --ckpt_path inputs/pretrained/gem_smpl.ckpt \
+  --start_sec 0 \
   --duration_sec 10 \
-  --output_root outputs/music_demo \
-  --save_features
+  --output_root outputs/music_motion \
+  --seed 42 \
+  --shape_mode zero \
+  --guidance_scale 2.5 \
+  --ddim_steps 50 \
+  --no_render
 ```
 
-This demo extracts EDGE-compatible 35-D music features and runs DDIM/CFG with the complete PyTorch `gem_smpl` checkpoint. The current regression-only ONNX denoiser and `gem_smpl_regression` checkpoints cannot perform this music diffusion path. Add `--mux_audio` for a global render with the selected source-audio segment, or `--no_render` to save SMPL parameters only. See [Music-only SMPL motion generation](docs/MUSIC_DEMO.md) for feature layout, AIST++ preparation, outputs, and memory limits.
+Every sample is a direct `outputs/music_motion/<generation>/` child containing
+SMPL parameters, raw diagnostics, music features, metadata, and a READY marker
+created last. Both saved global/in-camera betas and every streamer FK beta are
+zero. With no action, the streamer keeps sending idle at a fixed rate; after an
+action it blends back to idle instead of holding the last frame.
+
+Add `--audio_playback ffplay` to terminal 2 for best-effort local audio. Audio
+failure never stops the control stream and is not a hard-real-time clock. Robot
+mode requires `--idle_motion inputs/motions/smplx_idle_stand.pt`; first validate
+in MuJoCo, then use reduced speed, suspended support, physical emergency stop,
+and normal hardware protection. Software ESTOP cannot replace physical ESTOP.
+
+See [Music-to-motion and robot streaming](docs/MUSIC_DEMO.md) for the exact
+35-channel contract, dry-run, atomic output protocol, long-audio limit, direct
+playback, robot command, and safety details.
 
 ### Video-only demo
 

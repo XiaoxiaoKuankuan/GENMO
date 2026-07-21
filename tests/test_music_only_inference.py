@@ -121,11 +121,14 @@ def test_cuda_checkpoint_music_smoke(tmp_path: Path) -> None:
         )
         == 0
     )
+    generations = [path.parent for path in output.glob("*/READY")]
+    assert len(generations) == 1
+    generation = generations[0]
     features = torch.load(
-        output / audio.stem / "music_features.pt", map_location="cpu", weights_only=False
+        generation / "music_features.pt", map_location="cpu", weights_only=False
     )
     saved = torch.load(
-        output / audio.stem / "sample_000" / "smpl_params.pt",
+        generation / "smpl_params.pt",
         map_location="cpu",
         weights_only=False,
     )
@@ -135,3 +138,5 @@ def test_cuda_checkpoint_music_smoke(tmp_path: Path) -> None:
         for value in saved[group_name].values():
             assert value.shape[0] == length
             assert torch.isfinite(value).all()
+        assert torch.count_nonzero(saved[group_name]["betas"]) == 0
+    assert saved["source"] == "music_only"

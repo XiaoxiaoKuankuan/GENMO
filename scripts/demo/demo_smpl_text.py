@@ -13,19 +13,23 @@ from __future__ import annotations
 import argparse
 import gc
 import json
-import os
 import random
 import re
 import shutil
-import uuid
 import warnings
-from datetime import datetime, timezone
 from fractions import Fraction
 from pathlib import Path
 from typing import Any
 
 import numpy as np
 import torch
+
+from gem.runtime.artifact_publish import (
+    enforce_zero_shape,
+    make_unique_output_paths,
+    publish_ready_directory,
+    utc_now_iso,
+)
 
 DEFAULT_CHECKPOINT = Path("inputs/pretrained/gem_smpl.ckpt")
 DEFAULT_OUTPUT_ROOT = Path("outputs/text_motion")
@@ -437,68 +441,9 @@ def _to_cpu(value: Any) -> Any:
     return value
 
 
-def enforce_zero_shape(
-    body_params: dict[str, dict[str, torch.Tensor]],
-) -> dict[str, dict[str, torch.Tensor]]:
-    """Force both global and in-camera SMPL-X parameters to neutral shape."""
-    for group_name in ("body_params_global", "body_params_incam"):
-        group = body_params.get(group_name)
-        if not isinstance(group, dict) or "betas" not in group:
-            raise RuntimeError(f"Cannot apply shape_mode=zero: missing {group_name}.betas")
-        betas = group["betas"]
-        if not isinstance(betas, torch.Tensor) or betas.ndim != 2 or betas.shape[-1] != 10:
-            raise RuntimeError(
-                f"Cannot apply shape_mode=zero to {group_name}.betas with shape "
-                f"{getattr(betas, 'shape', None)}"
-            )
-        group["betas"] = torch.zeros_like(betas)
-        if torch.count_nonzero(group["betas"]).item() != 0:
-            raise AssertionError(f"{group_name}.betas is not zero after shape policy")
-    return body_params
-
-
 def unique_output_paths(output_root: Path, prompt: str, seed: int) -> tuple[Path, Path]:
     """Return same-filesystem temporary and unique final generation directories."""
-    output_root.mkdir(parents=True, exist_ok=True)
-    token = uuid.uuid4().hex
-    timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    final = output_root / f"{prompt_slug(prompt)}_seed{seed}_{timestamp}_{token[:8]}"
-    temporary = output_root / f".tmp_{token}"
-    return temporary, final
-
-
-def _fsync_path(path: Path) -> None:
-    """Flush one regular file to disk before publishing its directory."""
-    with path.open("rb") as handle:
-        os.fsync(handle.fileno())
-
-
-def _fsync_directory(path: Path) -> None:
-    descriptor = os.open(path, os.O_RDONLY)
-    try:
-        os.fsync(descriptor)
-    finally:
-        os.close(descriptor)
-
-
-def publish_ready_directory(temporary: Path, final: Path, completed_at: str) -> None:
-    """Atomically publish a complete generation and create READY strictly last."""
-    if final.exists():
-        raise FileExistsError(f"Refusing to overwrite existing output directory: {final}")
-    for path in temporary.rglob("*"):
-        if path.is_file():
-            _fsync_path(path)
-    _fsync_directory(temporary)
-    os.replace(temporary, final)
-    _fsync_directory(final.parent)
-
-    ready = final / "READY"
-    with ready.open("x", encoding="utf-8") as handle:
-        handle.write(f"completed_at={completed_at}\n")
-        handle.flush()
-        os.fsync(handle.fileno())
-    _fsync_directory(final)
-    _fsync_directory(final.parent)
+    return make_unique_output_paths(output_root, f"{prompt_slug(prompt)}_seed{seed}")
 
 
 def save_results(
@@ -737,7 +682,7 @@ def main(argv: list[str] | None = None) -> int:
                 args.height,
                 args.fps,
             )
-        completed_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+        completed_at = utc_now_iso()
         save_results(
             temporary_dir,
             body_params,

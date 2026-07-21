@@ -30,6 +30,7 @@ from gem.utils.rotation_conversions import (
 
 ShapeMode = Literal["zero"]
 MotionPolicy = Literal["queue", "latest", "interrupt"]
+SourceFilter = Literal["any", "text_only", "music_only"]
 
 # SMPL-X body_pose excludes the pelvis/root, so global joints 16/17 map to
 # body-pose entries 15/16. In the neutral rest skeleton the arms extend along
@@ -170,7 +171,23 @@ def load_smpl_motion(
     if torch.count_nonzero(betas).item() != 0:
         raise AssertionError("shape_mode=zero failed to produce zero betas")
     metadata_out = dict(metadata) if isinstance(metadata, dict) else {}
-    for key in ("prompt", "seed", "source", "shape_mode", "num_frames"):
+    for key in (
+        "prompt",
+        "seed",
+        "source",
+        "shape_mode",
+        "num_frames",
+        "audio_path",
+        "audio_start_sec",
+        "audio_duration_sec",
+        "feature_type",
+        "feature_fps",
+        "estimated_bpm",
+        "bpm_source",
+        "sample_index",
+        "guidance_scale",
+        "ddim_steps",
+    ):
         if key in payload:
             metadata_out.setdefault(key, payload[key])
     metadata_out["shape_mode"] = "zero"
@@ -400,15 +417,26 @@ class MotionWatcher:
         watch_dir: str | Path,
         *,
         replay_existing: bool = False,
+        source_filter: SourceFilter = "any",
         state_filename: str = ".watch_state.json",
+        logger: Callable[[str], None] | None = print,
     ) -> None:
+        if source_filter not in {"any", "text_only", "music_only"}:
+            raise ValueError("source_filter must be any, text_only, or music_only")
         self.watch_dir = Path(watch_dir).expanduser()
         self.watch_dir.mkdir(parents=True, exist_ok=True)
         self.state_path = self.watch_dir / state_filename
+        self.source_filter: SourceFilter = source_filter
+        self.logger = logger
+        self._warned_metadata: set[str] = set()
         self._consumed = set() if replay_existing else self._load_state()
         self._offered: set[str] = set()
         if not replay_existing:
-            existing = {str(path.resolve()) for path in self._ready_dirs()}
+            existing = {
+                str(path.resolve())
+                for path in self._ready_dirs()
+                if self._matches_source(path)
+            }
             if existing - self._consumed:
                 self._consumed.update(existing)
                 self._save_state()
@@ -440,6 +468,29 @@ class MotionWatcher:
             if path.is_dir() and (path / "READY").is_file()
         ]
 
+    def _warn_metadata(self, path: Path, message: str) -> None:
+        resolved = str(path.resolve())
+        if resolved not in self._warned_metadata and self.logger is not None:
+            self.logger(f"[Watch WARNING] {path}: {message}")
+            self._warned_metadata.add(resolved)
+
+    def _matches_source(self, path: Path) -> bool:
+        if self.source_filter == "any":
+            return True
+        metadata_path = path / "metadata.json"
+        if not metadata_path.is_file():
+            self._warn_metadata(path, "metadata.json is missing; source filter cannot classify it")
+            return False
+        try:
+            metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError, TypeError) as exc:
+            self._warn_metadata(path, f"metadata.json is invalid: {exc}")
+            return False
+        if not isinstance(metadata, dict) or not isinstance(metadata.get("source"), str):
+            self._warn_metadata(path, "metadata.json has no string 'source' field")
+            return False
+        return metadata["source"] == self.source_filter
+
     @staticmethod
     def _completion_key(path: Path) -> tuple[float, str]:
         metadata_path = path / "metadata.json"
@@ -458,7 +509,11 @@ class MotionWatcher:
         candidates = []
         for path in self._ready_dirs():
             resolved = str(path.resolve())
-            if resolved not in self._consumed and resolved not in self._offered:
+            if (
+                resolved not in self._consumed
+                and resolved not in self._offered
+                and self._matches_source(path)
+            ):
                 candidates.append(path)
                 self._offered.add(resolved)
         return sorted(candidates, key=self._completion_key)

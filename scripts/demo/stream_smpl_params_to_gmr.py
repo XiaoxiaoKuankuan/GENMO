@@ -11,6 +11,8 @@ from __future__ import annotations
 
 import argparse
 import math
+import shutil
+import subprocess
 import sys
 import time
 from collections import deque
@@ -39,6 +41,122 @@ from gem.runtime.motion_streamer import (
 from gem.smplx_gmr_reference import SMPLXGMRReference
 
 
+class FFplayAudioController:
+    """Best-effort, non-blocking source-audio playback tied to player states."""
+
+    def __init__(
+        self,
+        mode: str = "off",
+        *,
+        offset_sec: float = 0.0,
+        which=shutil.which,
+        popen=subprocess.Popen,
+        logger=print,
+    ) -> None:
+        if mode not in {"off", "ffplay"}:
+            raise ValueError("audio playback mode must be off or ffplay")
+        if not math.isfinite(offset_sec):
+            raise ValueError("audio_offset_sec must be finite")
+        self.mode = mode
+        self.offset_sec = float(offset_sec)
+        self._which = which
+        self._popen = popen
+        self._logger = logger
+        self.process: Any | None = None
+        self._last_state: PlayerState | None = None
+        self._warned_missing = False
+
+    def _warn(self, message: str) -> None:
+        if self._logger is not None:
+            self._logger(f"[Audio WARNING] {message}")
+
+    def start(self, motion: SMPLMotion | None) -> bool:
+        """Start ffplay for one music motion without blocking the send loop."""
+        if self.mode == "off" or motion is None:
+            return False
+        metadata = motion.metadata
+        if metadata.get("source") != "music_only":
+            return False
+        audio_value = metadata.get("audio_path")
+        if not isinstance(audio_value, str) or not audio_value:
+            self._warn("music motion has no audio_path metadata")
+            return False
+        audio_path = Path(audio_value).expanduser()
+        if not audio_path.is_file():
+            self._warn(f"source audio does not exist: {audio_path}")
+            return False
+        ffplay = self._which("ffplay")
+        if ffplay is None:
+            if not self._warned_missing:
+                self._warn("ffplay is unavailable; motion streaming continues without audio")
+                self._warned_missing = True
+            return False
+        try:
+            start_sec = float(metadata.get("audio_start_sec", 0.0)) + self.offset_sec
+            duration_sec = float(metadata.get("audio_duration_sec", motion.duration))
+        except (TypeError, ValueError):
+            self._warn("audio timing metadata is invalid")
+            return False
+        if not math.isfinite(start_sec) or not math.isfinite(duration_sec) or duration_sec <= 0:
+            self._warn("audio timing metadata is non-finite or non-positive")
+            return False
+        start_sec = max(0.0, start_sec)
+        command = [
+            ffplay,
+            "-nodisp",
+            "-autoexit",
+            "-loglevel",
+            "error",
+            "-ss",
+            f"{start_sec:.9f}",
+            "-t",
+            f"{duration_sec:.9f}",
+            str(audio_path),
+        ]
+        try:
+            self.process = self._popen(
+                command,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+        except OSError as exc:
+            self.process = None
+            self._warn(f"ffplay failed to start: {exc}; motion streaming continues")
+            return False
+        if self._logger is not None:
+            self._logger(f"[Audio] Playing {audio_path} from {start_sec:.3f}s")
+        return True
+
+    def stop(self, reason: str = "state change") -> None:
+        """Terminate a running ffplay child without failing motion streaming."""
+        process, self.process = self.process, None
+        if process is None:
+            return
+        try:
+            if process.poll() is None:
+                process.terminate()
+                try:
+                    process.wait(timeout=0.2)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    process.wait(timeout=0.2)
+        except (OSError, ProcessLookupError, subprocess.SubprocessError) as exc:
+            self._warn(f"unable to stop ffplay cleanly ({reason}): {exc}")
+
+    def update(self, state: PlayerState, motion: SMPLMotion | None) -> None:
+        """Start only on entry to PLAYING and stop on every safety transition."""
+        if state == PlayerState.PLAYING and self._last_state != PlayerState.PLAYING:
+            self.start(motion)
+        elif state != PlayerState.PLAYING and self.process is not None:
+            self.stop(state.value)
+        self._last_state = state
+
+    def close(self) -> None:
+        """Release the optional subprocess during normal or exceptional exit."""
+        self.stop("program exit")
+
+
 def build_parser() -> argparse.ArgumentParser:
     """Build the command-line interface without creating runtime resources."""
     parser = argparse.ArgumentParser(
@@ -65,6 +183,24 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--allow_interrupt_in_robot", action="store_true")
     parser.add_argument("--reset_origin_on_motion", action="store_true")
     parser.add_argument("--replay_existing", action="store_true")
+    parser.add_argument(
+        "--source_filter",
+        choices=["any", "text_only", "music_only"],
+        default="any",
+        help="Only enqueue READY directories whose metadata source matches.",
+    )
+    parser.add_argument(
+        "--audio_playback",
+        choices=["off", "ffplay"],
+        default="off",
+        help="Best-effort source audio playback for music_only motions.",
+    )
+    parser.add_argument(
+        "--audio_offset_sec",
+        type=float,
+        default=0.0,
+        help="Offset added to the source-audio seek time for best-effort sync.",
+    )
     parser.add_argument("--loop", action="store_true")
     parser.add_argument("--once", action="store_true")
     parser.add_argument("--dry_run", action="store_true")
@@ -99,6 +235,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         raise ValueError("--gmr_port must be in [1, 65535]")
     if args.max_send_errors <= 0:
         raise ValueError("--max_send_errors must be > 0")
+    if not math.isfinite(args.audio_offset_sec):
+        raise ValueError("--audio_offset_sec must be finite")
     if args.once and args.loop:
         raise ValueError("--once and --loop cannot be used together")
     if args.mode == "robot" and args.idle_motion is None:
@@ -281,6 +419,8 @@ def _banner(args: argparse.Namespace) -> None:
     print(f"  Shape mode:    {args.shape_mode}")
     print(f"  Idle motion:   {idle}")
     print(f"  New policy:    {args.new_motion_policy}")
+    print(f"  Source filter: {args.source_filter}")
+    print(f"  Audio:         {args.audio_playback} (offset={args.audio_offset_sec:g}s)")
     print("=" * 60)
 
 
@@ -294,10 +434,20 @@ def _load_future_result(
     except Exception as exc:
         print(f"[Load ERROR] {source_dir}: {type(exc).__name__}: {exc}")
         return None
-    print(f"[Load] Motion validated: {motion.num_frames} frames @ {motion.fps:g} FPS")
+    _log_loaded_motion(motion)
     if watcher is not None:
         watcher.mark_consumed(source_dir)
     return motion
+
+
+def _log_loaded_motion(motion: SMPLMotion) -> None:
+    """Log common and optional music provenance without requiring metadata fields."""
+    source = motion.metadata.get("source", "unknown")
+    print(f"[Load] source={source}")
+    if source == "music_only":
+        print(f"[Load] audio={motion.metadata.get('audio_path', '-')}")
+        print(f"[Load] bpm={motion.metadata.get('estimated_bpm', '-')}")
+    print(f"[Load] motion={motion.num_frames} frames @ {motion.fps:g} FPS")
 
 
 def run_stream(args: argparse.Namespace) -> int:
@@ -308,10 +458,7 @@ def run_stream(args: argparse.Namespace) -> int:
         load_smpl_motion(args.motion, shape_mode="zero") if args.motion is not None else None
     )
     if direct_motion is not None:
-        print(
-            f"[Load] Motion validated: {direct_motion.num_frames} frames "
-            f"@ {direct_motion.fps:g} FPS"
-        )
+        _log_loaded_motion(direct_motion)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"[Init] Loading SMPL-X FK on {device}")
     endecoder = load_endecoder(device)
@@ -320,6 +467,10 @@ def run_stream(args: argparse.Namespace) -> int:
         global_scale=args.gmr_scale,
     )
     bridge = GMRUDPBridge(args.gmr_host, args.gmr_port, debug=args.verbose)
+    audio_controller = FFplayAudioController(
+        args.audio_playback,
+        offset_sec=args.audio_offset_sec,
+    )
     player = MotionPlayer(
         idle,
         blend_seconds=args.blend_seconds,
@@ -331,7 +482,11 @@ def run_stream(args: argparse.Namespace) -> int:
     player.start(now)
 
     watcher = (
-        MotionWatcher(args.watch_dir, replay_existing=args.replay_existing)
+        MotionWatcher(
+            args.watch_dir,
+            replay_existing=args.replay_existing,
+            source_filter=args.source_filter,
+        )
         if args.watch_dir is not None
         else None
     )
@@ -422,6 +577,7 @@ def run_stream(args: argparse.Namespace) -> int:
                 }:
                     player.enter_error(now)
                     consecutive_errors = 0
+            audio_controller.update(player.state, player.active_motion)
             stats_sends += 1
 
             elapsed_stats = now - stats_started
@@ -448,6 +604,7 @@ def run_stream(args: argparse.Namespace) -> int:
         print("\n[Interrupted] closing streamer")
         return 0
     finally:
+        audio_controller.close()
         bridge.close()
         executor.shutdown(wait=False, cancel_futures=True)
 

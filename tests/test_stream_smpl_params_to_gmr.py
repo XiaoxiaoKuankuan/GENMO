@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
 import torch
 
 from gem.runtime.motion_streamer import (
+    PlayerState,
     SMPLFrame,
     frame_from_motion,
     synthetic_idle_motion,
@@ -43,6 +45,9 @@ def test_cli_defaults_and_shape_policy() -> None:
     assert args.mode == "sim"
     assert args.poll_interval == 0.2
     assert args.new_motion_policy == "queue"
+    assert args.source_filter == "any"
+    assert args.audio_playback == "off"
+    assert args.audio_offset_sec == 0.0
     assert not args.loop
 
 
@@ -145,6 +150,110 @@ def test_mock_bridge_receives_finite_targets_and_fk_gets_zero_betas() -> None:
     for target in targets.values():
         assert torch.isfinite(torch.as_tensor(target.position_zup)).all()
         assert torch.isfinite(torch.as_tensor(target.rotation_zup)).all()
+
+
+class FakeProcess:
+    def __init__(self) -> None:
+        self.running = True
+        self.terminated = False
+        self.killed = False
+
+    def poll(self):
+        return None if self.running else 0
+
+    def terminate(self) -> None:
+        self.terminated = True
+        self.running = False
+
+    def wait(self, timeout=None):
+        self.running = False
+        return 0
+
+    def kill(self) -> None:
+        self.killed = True
+        self.running = False
+
+
+def _music_motion(audio: Path):
+    idle = synthetic_idle_motion()
+    return replace(
+        idle,
+        source_path=audio,
+        metadata={
+            "source": "music_only",
+            "audio_path": str(audio),
+            "audio_start_sec": 1.0,
+            "audio_duration_sec": 2.0,
+        },
+    )
+
+
+def test_ffplay_starts_only_playing_and_stops_on_return(tmp_path: Path) -> None:
+    audio = tmp_path / "song.wav"
+    audio.write_bytes(b"audio")
+    calls = []
+    process = FakeProcess()
+
+    def popen(command, **kwargs):
+        calls.append((command, kwargs))
+        return process
+
+    controller = streamer.FFplayAudioController(
+        "ffplay", offset_sec=0.25, which=lambda _: "/usr/bin/ffplay", popen=popen, logger=None
+    )
+    motion = _music_motion(audio)
+    controller.update(PlayerState.BLENDING, motion)
+    assert calls == []
+    controller.update(PlayerState.PLAYING, motion)
+    assert len(calls) == 1
+    command = calls[0][0]
+    assert command[command.index("-ss") + 1] == "1.250000000"
+    controller.update(PlayerState.RETURNING, motion)
+    assert process.terminated and controller.process is None
+
+
+def test_ffplay_stops_on_estop_and_failures_are_nonfatal(tmp_path: Path) -> None:
+    audio = tmp_path / "song.wav"
+    audio.write_bytes(b"audio")
+    process = FakeProcess()
+    controller = streamer.FFplayAudioController(
+        "ffplay",
+        which=lambda _: "/usr/bin/ffplay",
+        popen=lambda *_args, **_kwargs: process,
+        logger=None,
+    )
+    motion = _music_motion(audio)
+    controller.update(PlayerState.PLAYING, motion)
+    controller.update(PlayerState.ESTOP, motion)
+    assert process.terminated
+
+    logs: list[str] = []
+    missing = streamer.FFplayAudioController(
+        "ffplay", which=lambda _: None, logger=logs.append
+    )
+    missing.update(PlayerState.PLAYING, motion)
+    assert missing.process is None and any("unavailable" in line for line in logs)
+
+    def fail(*_args, **_kwargs):
+        raise OSError("no audio device")
+
+    failed = streamer.FFplayAudioController(
+        "ffplay", which=lambda _: "/usr/bin/ffplay", popen=fail, logger=logs.append
+    )
+    failed.update(PlayerState.PLAYING, motion)
+    assert failed.process is None and any("failed to start" in line for line in logs)
+
+
+def test_audio_playback_off_never_starts(tmp_path: Path) -> None:
+    audio = tmp_path / "song.wav"
+    audio.write_bytes(b"audio")
+
+    def forbidden(*_args, **_kwargs):
+        raise AssertionError("audio_playback=off started a process")
+
+    controller = streamer.FFplayAudioController("off", popen=forbidden, logger=None)
+    controller.update(PlayerState.PLAYING, _music_motion(audio))
+    assert controller.process is None
 
 
 @pytest.mark.skipif(
