@@ -346,6 +346,32 @@ python tools/benchmark/benchmark_modules.py
 
 数据集下载链接和目录结构请参阅 [数据集准备文档](docs/DATA.md)。
 
+### 构建 HumanML3D SMPL-X 动作元数据
+
+已有 HumanML3D 官方仓库、精确 AMASS 映射报告和 GENMO 预处理 AMASS 文件时，可生成 `Humanml3dDataset` 直接读取的动作与文本元数据：
+
+```bash
+python tools/data/humanml3d/build_humanml3d_smpl.py
+```
+
+默认输出为：
+
+```text
+inputs/HumanML3D_SMPL/hmr4d_support/humanml3d_smplhpose_train.pth
+```
+
+工具只使用 `exact_family_path` 记录，不对 unmatched 动作做模糊匹配，也不处理 HumanAct12。它将 HumanML3D 的 20 FPS 时间范围换算到预处理 AMASS 的 30 FPS 时间轴，复用官方五类前缀裁剪，读取官方原动作/镜像文本，并按确定性 key 保存带独立描述的子片段。输出坐标仍保持 AMASS AZ；训练数据集加载时会执行现有的 AZ → AY 转换。
+
+建议先进行不保存主 PTH 的全量审计：
+
+```bash
+python tools/data/humanml3d/build_humanml3d_smpl.py \
+  --dry-run \
+  --report-dir outputs/humanml3d_full_dryrun
+```
+
+正式构建会先写入 `.tmp` 文件，重新加载并验证全部记录，再原子替换正式输出。详细审计报告写入 `outputs/humanml3d_build_report/`。本工具不提取 T5 embedding；后续需要根据最终 PTH 的 motion key 和 `text_data` 单独生成 `all_text_embed.pth`。
+
 **回归模型（视频 → SMPL）：**
 
 ```bash
