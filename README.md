@@ -1,5 +1,5 @@
 <p align="center">
-  <h1 align="center">GEM: A Generalist Model for Human Motion</h1>
+  <h1 align="center">GEM：通用人体动作模型</h1>
   <p align="center">
     <a href="https://jeffli.site/"><strong>Jiefeng Li</strong></a>
     ·
@@ -15,9 +15,9 @@
     ·
     <a href="https://ye-yuan.com/"><strong>Ye Yuan</strong></a>
   </p>
-  <h2 align="center">ICCV 2025 (Highlight)</h2>
+  <h2 align="center">ICCV 2025（Highlight）</h2>
   <div align="center">
-    <img src="./assets/teaser.png" alt="Logo" width="100%">
+    <img src="./assets/teaser.png" alt="GEM 项目预览" width="100%">
   </div>
 </p>
 <p align="center">
@@ -26,20 +26,21 @@
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-NVIDIA_OneWay_Noncommercial-green"></a>
 </p>
 
-GEM is a unified generative framework for human motion estimation and generation. GEM accepts multiple conditioning modalities — video, 2D keypoints, text, and audio — and handles multiple tasks without task-specific heads.
+GEM 是一个用于人体动作估计与生成的统一生成式框架。GEM 可接收视频、2D 关键点、文本和音频等多种条件，并通过统一模型完成多类任务，无需为每项任务设计独立的专用头。
 
-> For full-body motion estimation (hands + face), see [GEM-X](https://github.com/NVlabs/GEM-X).
-
----
-
-## 📰 News
-- **[March 2026]** 📢 **GEM-SMPL** is released with a multi-modal demo script.
-- **[December 2025]** 📢 GENMO has been renamed to **GEM**.
-- **[October 2025]** 📢 The **GEM** codebase is **released!**.
+> 如需包含手部和面部的全身动作估计，请参阅 [GEM-X](https://github.com/NVlabs/GEM-X)。
 
 ---
 
-## 🚀 Quick Start
+## 📰 最新动态
+
+- **[2026 年 3 月]** 📢 发布带有多模态 Demo 脚本的 **GEM-SMPL**。
+- **[2025 年 12 月]** 📢 GENMO 正式更名为 **GEM**。
+- **[2025 年 10 月]** 📢 **GEM** 代码库正式发布。
+
+---
+
+## 🚀 快速开始
 
 ```bash
 pip install uv && uv venv .venv --python 3.10 && source .venv/bin/activate
@@ -48,73 +49,76 @@ bash scripts/install_env.sh
 python scripts/demo/demo_smpl.py --input_list path/to/video.mp4 "text:a person walks forward" --ckpt_path inputs/pretrained/gem_smpl.ckpt
 ```
 
-For full installation instructions (body model, checkpoints), see [docs/INSTALL.md](docs/INSTALL.md).
+完整安装说明（包括身体模型和 checkpoint）请参阅 [docs/INSTALL.md](docs/INSTALL.md)。
 
 ---
 
-## 📦 Pretrained Models
+## 📦 预训练模型
 
-| Model | Body Model | Description | Download |
-|-------|-----------|-------------|----------|
-| GEM-SMPL | SMPL | Regression + generation (text/audio/music/video) | [HuggingFace](https://huggingface.co/nvidia/GEM-X) |
+| 模型 | 身体模型 | 说明 | 下载地址 |
+|---|---|---|---|
+| GEM-SMPL | SMPL | 回归与生成（文本、语音、音乐、视频） | [HuggingFace](https://huggingface.co/nvidia/GEM-X) |
 
-Place checkpoints under `inputs/pretrained/` or pass the path directly via `--ckpt_path`. The demo scripts will automatically download the checkpoint from HuggingFace if `--ckpt` is not provided.
+请将 checkpoint 放在 `inputs/pretrained/` 下，也可以通过 `--ckpt_path` 直接指定路径。如果没有显式提供 checkpoint，Demo 脚本会按其默认逻辑从 Hugging Face 下载。
 
 ---
 
-## 🎬 Demo
+## 🎬 使用演示
 
-### Multi-modal demo (video + text)
+### 多模态演示（视频 + 文本）
 
-The main demo supports mixed video and text conditioning — the core contribution of GEM.
+主演示支持视频与文本混合条件，这是 GEM 的核心能力之一。
 
-**Video + inline text:**
+**视频 + 行内文本：**
+
 ```bash
 python scripts/demo/demo_smpl.py \
   --input_list video1.mp4 "text:a person acting like a monkey" video2.mp4 \
   --ckpt_path inputs/pretrained/gem_smpl.ckpt
 ```
 
-**Video + text file:**
+**视频 + 文本文件：**
+
 ```bash
 python scripts/demo/demo_smpl.py \
   --input_list video1.mp4 prompt.txt video2.mp4 \
   --ckpt_path inputs/pretrained/gem_smpl.ckpt
 ```
 
-**Multiple videos + multiple text prompts:**
+**多个视频 + 多个文本提示：**
+
 ```bash
 python scripts/demo/demo_smpl.py \
   --input_list video1.mp4 "text:a person acting like a monkey" video2.mp4 "text:a person dances" \
   --ckpt_path inputs/pretrained/gem_smpl.ckpt
 ```
 
-### Key arguments
+### 主要参数
 
-| Argument | Default | Description |
+| 参数 | 默认值 | 说明 |
 |---|---|---|
-| `--input_list` | — | Input list (required): `.mp4`/`.avi`/`.mov` files, `.txt` files, or `text:prompt` strings |
-| `--ckpt_path` | `null` | Pretrained checkpoint path |
-| `--text_length` | `300` | Number of frames for each text segment (300 = 10s at 30fps) |
-| `--hmr2_ckpt` | `inputs/checkpoints/hmr2/epoch=10-step=25000.ckpt` | HMR2 checkpoint for image features |
-| `-s` / `--static_cam` | off | Assume static camera |
-| `--output_root` | `outputs` | Output directory |
-| `--no_render` | off | Skip visualization, only save SMPL parameters |
+| `--input_list` | — | 必需输入列表：`.mp4`、`.avi`、`.mov`、`.txt` 文件或 `text:提示词` 字符串 |
+| `--ckpt_path` | `null` | 预训练 checkpoint 路径 |
+| `--text_length` | `300` | 每个文本片段的帧数；30 FPS 下 300 帧为 10 秒 |
+| `--hmr2_ckpt` | `inputs/checkpoints/hmr2/epoch=10-step=25000.ckpt` | 图像特征使用的 HMR2 checkpoint |
+| `-s` / `--static_cam` | 关闭 | 假设相机静止 |
+| `--output_root` | `outputs` | 输出目录 |
+| `--no_render` | 关闭 | 跳过可视化，只保存 SMPL 参数 |
 
-### Outputs
+### 输出文件
 
-Results are saved to `outputs/<first_video_name>_mix/`:
+结果保存在 `outputs/<first_video_name>_mix/`：
 
-| File | Description |
+| 文件 | 说明 |
 |---|---|
-| `1_incam.mp4` | In-camera mesh overlay |
-| `2_global.mp4` | Global-coordinate render |
-| `3_incam_global_horiz.mp4` | Side-by-side comparison |
-| `smpl_params.pt` | SMPL parameters (`body_params_global`, `body_params_incam`, `K_fullimg`, `segment_info`) |
+| `1_incam.mp4` | 相机坐标中的人体网格叠加视频 |
+| `2_global.mp4` | 全局坐标动作渲染视频 |
+| `3_incam_global_horiz.mp4` | 相机视图与全局视图的横向对比视频 |
+| `smpl_params.pt` | SMPL 参数：`body_params_global`、`body_params_incam`、`K_fullimg`、`segment_info` |
 
-### Text-only motion generation
+### 纯文本动作生成
 
-Generate a complete SMPL motion directly from one text prompt, without an input video:
+无需输入视频，直接通过一条文本提示生成完整 SMPL 动作：
 
 ```bash
 python scripts/demo/demo_smpl_text.py \
@@ -123,38 +127,39 @@ python scripts/demo/demo_smpl_text.py \
   --num_frames 300
 ```
 
-This path does not read video and does not run YOLO, ByteTrack, ViTPose, or HMR2. It uses T5-3B text embeddings and the full GEM DDIM/CFG diffusion sampler, so it requires the complete `gem_smpl` checkpoint. A checkpoint trained with `exp=gem_smpl_regression` cannot generate motion from text, and the real-time ONNX denoiser does not contain this text diffusion sampling path. The first run may need to download T5-3B; use `--t5_model /path/to/t5-3b --local_files_only` for an existing local model.
+这条路径不读取视频，也不运行 YOLO、ByteTrack、ViTPose 或 HMR2。它使用 T5-3B 文本特征和完整 GEM DDIM/CFG 扩散采样器，因此必须使用完整 `gem_smpl` checkpoint。通过 `exp=gem_smpl_regression` 训练的 checkpoint 无法从文本生成动作，实时 ONNX denoiser 也不包含文本扩散采样路径。
 
-T5 loading is cache-first: a complete local Hugging Face cache is used without
-making a network metadata request, so repeat runs are not affected by proxy
-availability. If a download is required, do not use the unsupported
-`socks://` proxy scheme with the default HTTPX installation. For a local mixed
-HTTP proxy, use `HTTP_PROXY=http://127.0.0.1:7897` and
-`HTTPS_PROXY=http://127.0.0.1:7897`, then unset `ALL_PROXY`/`all_proxy`. A real
-SOCKS proxy requires HTTPX SOCKS support and a `socks5://` URL.
+第一次运行可能需要下载 T5-3B。若本地已有模型，请使用：
 
-Results are written under `outputs/text_motion/` as SMPL parameter files, metadata, and (unless `--no_render` is set) a global-coordinate `global.mp4`. Use `--dry_run` to validate the synthetic camera/input tensor contract without loading T5, GEM, a checkpoint, or CUDA.
-
-Each completed generation is published atomically in a unique directory. The
-`READY` marker is created last, after `smpl_params.pt`, `motion.npz`,
-`metadata.json`, `prompt.txt`, and any successfully generated render have been
-closed and flushed. Runtime consumers must ignore directories without `READY`.
-
-### Text-to-motion robot streaming
-
-The text generator and robot player are separate processes. GEM may take longer
-than real time to generate a complete action, while the persistent streamer
-continues sending a cached motion, a smooth safety transition, or an idle pose
-to GMR-CPP at a fixed rate:
-
-```text
-demo_smpl_text.py                  text -> complete SMPL-X action + READY
-stream_smpl_params_to_gmr.py       watch/cache/interpolate -> SMP1 UDP
-run_smplx_bumi3.sh                 SMPL-X targets -> BUMI3 retargeting
-GMT                                reference trajectory -> tracking policy
+```bash
+--t5_model /path/to/t5-3b --local_files_only
 ```
 
-Terminal 1 — start GMR-CPP and its MuJoCo visualization:
+T5 采用“本地缓存优先”加载：如果 Hugging Face 本地缓存完整，则不会发起网络元数据请求，因此重复运行不受代理可用性影响。需要下载时，默认 HTTPX 环境不支持 `socks://` 代理协议。对于本地 HTTP 混合代理，可设置：
+
+```bash
+HTTP_PROXY=http://127.0.0.1:7897
+HTTPS_PROXY=http://127.0.0.1:7897
+```
+
+同时取消 `ALL_PROXY` 和 `all_proxy`。真正的 SOCKS 代理需要安装 HTTPX SOCKS 支持，并使用 `socks5://` 地址。
+
+结果写入 `outputs/text_motion/`，其中包含 SMPL 参数、元数据；未指定 `--no_render` 时还会生成全局坐标视频 `global.mp4`。使用 `--dry_run` 可以在不加载 T5、GEM、checkpoint 或 CUDA 的情况下验证合成相机与输入张量契约。
+
+每次成功生成都会原子发布到一个唯一目录。`smpl_params.pt`、`motion.npz`、`metadata.json`、`prompt.txt` 和成功生成的渲染文件全部关闭并刷新后，才会最后创建 `READY`。运行时消费者必须忽略没有 `READY` 的目录。
+
+### 文本动作到机器人实时播放
+
+文本生成器与机器人播放器是两个独立进程。即使 GEM 生成一整段动作的速度慢于实时，常驻 streamer 仍会以固定频率向 GMR-CPP 发送缓存动作、安全过渡姿态或 idle 姿态：
+
+```text
+demo_smpl_text.py                  文本 -> 完整 SMPL-X 动作 + READY
+stream_smpl_params_to_gmr.py       监视/缓存/插值 -> SMP1 UDP
+run_smplx_bumi3.sh                 SMPL-X 目标 -> BUMI3 重定向
+GMT                                参考轨迹 -> tracking policy
+```
+
+终端 1：启动 GMR-CPP 与 MuJoCo 可视化。
 
 ```bash
 cd /home/weili/GMR-CPP_e1jump_lowdpi
@@ -165,7 +170,7 @@ cd /home/weili/GMR-CPP_e1jump_lowdpi
   --vis-smplx-frames
 ```
 
-Terminal 2 — keep the simulation streamer running:
+终端 2：保持仿真 streamer 常驻运行。
 
 ```bash
 cd /home/weili/GENMO
@@ -180,7 +185,7 @@ python scripts/demo/stream_smpl_params_to_gmr.py \
   --new_motion_policy queue
 ```
 
-Terminal 3 — generate actions as needed:
+终端 3：按需生成新动作。
 
 ```bash
 python scripts/demo/demo_smpl_text.py \
@@ -193,8 +198,7 @@ python scripts/demo/demo_smpl_text.py \
   --no_render
 ```
 
-For robot mode, first extract a frame from a stand motion that has already been
-validated in simulation and on the target platform:
+实物机器人模式下，首先从已在仿真和目标平台上验证过的站立动作中提取一帧：
 
 ```bash
 python scripts/tools/extract_smpl_idle_pose.py \
@@ -215,29 +219,15 @@ python scripts/demo/stream_smpl_params_to_gmr.py \
   --estop_file /tmp/genmo_estop
 ```
 
-The player uses monotonic-time resampling, quaternion shortest-path
-interpolation, root-position/yaw alignment, and explicit BLENDING, PLAYING,
-RETURNING, HOLDING, ERROR, and ESTOP states. With no action it keeps publishing
-idle targets; the default simulation idle is an arms-down standing pose rather
-than the SMPL-X horizontal-arm T-pose. After every action it returns smoothly
-to the aligned idle pose instead of holding the last frame. `queue` is the
-recommended robot policy. `interrupt` is rejected in robot mode unless
-explicitly enabled.
+播放器采用基于单调时钟的重采样、四元数最短路径插值、根节点位置/yaw 对齐，并使用明确的 `BLENDING`、`PLAYING`、`RETURNING`、`HOLDING`、`ERROR` 和 `ESTOP` 状态。没有动作时仍持续发送 idle 目标；默认仿真 idle 是双臂下垂的站立姿态，而不是 SMPL-X 双臂水平展开的 T-pose。每段动作结束后会平滑返回对齐后的 idle，不会停留在最后一帧。
 
-The synthetic arms-down pose is for simulation only. Robot mode continues to
-require `--idle_motion`; that verified file determines the real robot idle body
-pose and should itself contain a tested, arms-down safe stance.
+`queue` 是实物机器人推荐策略。除非显式允许，否则 robot 模式拒绝 `interrupt`。仿真用的合成双臂下垂姿态不能直接用于实物；robot 模式仍要求传入经过验证的 `--idle_motion`。
 
-`--shape_mode zero` is the only streamer shape policy: source betas are ignored
-and every SMPL-X FK call receives `zeros(1, 1, 10)`. The software ESTOP file
-causes a finite, short return to idle and latches until the file is removed and
-a new action arrives. It does not replace the robot's physical emergency stop.
-Before real-hardware testing, validate the idle/action in MuJoCo, use reduced
-speed and suspended support, and retain the robot's normal safety systems. The
-streamer sends pose references only; it does not send motor torques and does not
-change the existing SMP1, GMR-CPP, BUMI3, Redis, or GMT protocols.
+`--shape_mode zero` 是 streamer 唯一支持的体型策略：忽略源动作中的 betas，每次 SMPL-X FK 都接收 `zeros(1, 1, 10)`。软件 ESTOP 文件触发后，播放器会在有限时间内返回 idle 并保持锁存，直到文件删除且有新动作到达。软件 ESTOP 不能替代机器人硬件急停。
 
-Validate an action without opening a UDP socket:
+streamer 只发送姿态参考，不发送电机力矩，也不会修改 SMP1、GMR-CPP、BUMI3、Redis 或 GMT 协议。实机测试前必须先在 MuJoCo 中验证 idle 和动作，并使用低速、吊装保护及机器人原有安全系统。
+
+不创建 UDP socket 的动作验证命令：
 
 ```bash
 python scripts/demo/stream_smpl_params_to_gmr.py \
@@ -248,14 +238,11 @@ python scripts/demo/stream_smpl_params_to_gmr.py \
   --dry_run
 ```
 
-### Music-to-motion robot streaming
+### 音乐动作到机器人实时播放
 
-Generate human SMPL-X motion from WAV, MP3, or FLAC without video, YOLO,
-ViTPose, HMR2, or T5. This uses EDGE baseline35 and the complete PyTorch
-`gem_smpl.ckpt` DDIM/CFG path; the regression-only ONNX exports cannot perform
-music-conditioned generation.
+无需视频、YOLO、ViTPose、HMR2 或 T5，直接从 WAV、MP3 或 FLAC 生成 SMPL-X 人体动作。该路径使用 EDGE baseline35 和完整 PyTorch `gem_smpl.ckpt` 的 DDIM/CFG；回归型 ONNX 导出不能进行音乐条件动作生成。
 
-Terminal 1 — start GMR-CPP/MuJoCo:
+终端 1：启动 GMR-CPP/MuJoCo。
 
 ```bash
 cd /home/weili/GMR-CPP_e1jump_lowdpi
@@ -266,7 +253,7 @@ cd /home/weili/GMR-CPP_e1jump_lowdpi
   --vis-smplx-frames
 ```
 
-Terminal 2 — keep the music streamer running:
+终端 2：保持音乐动作 streamer 常驻运行。
 
 ```bash
 cd /home/weili/GENMO
@@ -282,7 +269,7 @@ python scripts/demo/stream_smpl_params_to_gmr.py \
   --new_motion_policy queue
 ```
 
-Terminal 3 — generate a complete action and atomically publish READY:
+终端 3：生成完整动作并原子发布 READY。
 
 ```bash
 python scripts/demo/demo_music.py \
@@ -298,25 +285,15 @@ python scripts/demo/demo_music.py \
   --no_render
 ```
 
-Every sample is a direct `outputs/music_motion/<generation>/` child containing
-SMPL parameters, raw diagnostics, music features, metadata, and a READY marker
-created last. Both saved global/in-camera betas and every streamer FK beta are
-zero. With no action, the streamer keeps sending idle at a fixed rate; after an
-action it blends back to idle instead of holding the last frame.
+每个 sample 都是 `outputs/music_motion/<generation>/` 的直接子目录，包含 SMPL 参数、原始诊断数据、音乐特征、元数据，以及最后创建的 READY。保存的 global/incam betas 和 streamer 每次 FK 使用的 betas 都是全零。没有动作时 streamer 继续定频发送 idle；动作结束后平滑返回 idle，不保持最后一帧。
 
-Add `--audio_playback ffplay` to terminal 2 for best-effort local audio. Audio
-failure never stops the control stream and is not a hard-real-time clock. Robot
-mode requires `--idle_motion inputs/motions/smplx_idle_stand.pt`; first validate
-in MuJoCo, then use reduced speed, suspended support, physical emergency stop,
-and normal hardware protection. Software ESTOP cannot replace physical ESTOP.
+终端 2 增加 `--audio_playback ffplay` 可同时进行尽力而为的本地音乐播放。音频失败不会中断控制流，这也不是硬实时音频时钟。robot 模式必须提供 `--idle_motion inputs/motions/smplx_idle_stand.pt`。先在 MuJoCo 中验证，再使用低速、吊装保护、物理急停和机器人正常硬件保护；软件 ESTOP 不能替代物理急停。
 
-See [Music-to-motion and robot streaming](docs/MUSIC_DEMO.md) for the exact
-35-channel contract, dry-run, atomic output protocol, long-audio limit, direct
-playback, robot command, and safety details.
+完整的 35 通道契约、dry-run、原子输出协议、长音频限制、直接播放命令和安全说明请参阅 [音乐动作生成与机器人实时播放](docs/MUSIC_DEMO.md)。
 
-### Video-only demo
+### 纯视频演示
 
-For simple pose estimation without text conditioning, use `demo_smpl_hpe.py`:
+如需进行不含文本条件的简单姿态估计，请使用 `demo_smpl_hpe.py`：
 
 ```bash
 python scripts/demo/demo_smpl_hpe.py \
@@ -324,83 +301,87 @@ python scripts/demo/demo_smpl_hpe.py \
   --ckpt_path inputs/pretrained/gem_smpl.ckpt
 ```
 
-### Real-time webcam demo
+### 实时摄像头演示
 
-`demo_webcam.py` runs the whole pipeline (YOLOX → ViTPose-H → HMR2 → GEM denoiser) frame-by-frame via ONNX Runtime, with a sliding window and streaming global rollout. See [docs/INSTALL.md](docs/INSTALL.md) Steps 8–10 for ONNX Runtime setup and ONNX export commands (one-time).
+`demo_webcam.py` 通过 ONNX Runtime 逐帧运行 YOLOX → ViTPose-H → HMR2 → GEM denoiser，采用滑动窗口和流式全局 rollout。ONNX Runtime 安装和一次性 ONNX 导出命令请参阅 [docs/INSTALL.md](docs/INSTALL.md) 的步骤 8～10。
 
 ```bash
-# Video file, OpenCV in-camera mesh overlay, no image features (fastest)
+# 视频文件：OpenCV 相机内人体网格叠加，不使用图像特征，速度最快
 python scripts/demo/demo_webcam.py \
   --video path/to/video.mp4 --no_imgfeat \
   --render --render_mode opencv
 
-# Webcam with Viser-based 3D world viewer (open http://localhost:8012)
+# Webcam：Viser 三维世界查看器，浏览器打开 http://localhost:8012
 python scripts/demo/demo_webcam.py \
   --camera_id 0 --no_imgfeat \
   --render --render_mode viser
 
-# Webcam with neutral SMPL-X shape and GMR-CPP SMP1 streaming
+# Webcam：中性 SMPL-X 体型，并通过 SMP1 向 GMR-CPP 实时发送
 python scripts/demo/demo_webcam.py \
   --camera_id 2 --no_imgfeat --display \
   --gmr_host 127.0.0.1 --gmr_port 7006 \
   --shape_mode zero
 ```
 
-| Flag | Default | Purpose |
+| 参数 | 默认值 | 用途 |
 |---|---|---|
-| `--video` / `--camera_id` | camera 0 | input source |
-| `--context_frames` | 120 | sliding-window length (must match exported denoiser `--seq_len`) |
-| `--no_imgfeat` | off | use the no-imgfeat denoiser variant; skips HMR2 entirely |
-| `--render_mode {opencv,viser}` | `viser` | mesh-overlay window vs web 3D viewer |
-| `--shape_mode {zero,first,mean,ema,per_frame}` | `zero` | control SMPL-X body shape consistently for rendering and GMR FK; `zero` uses the neutral mean body shape and avoids frame-to-frame or run-to-run body-proportion changes |
-| `--no_async_pipeline` | off | force synchronous mode (lower throughput, zero pipeline lag) |
+| `--video` / `--camera_id` | camera 0 | 输入源 |
+| `--context_frames` | `120` | 滑动窗口长度，必须与导出 denoiser 时的 `--seq_len` 一致 |
+| `--no_imgfeat` | 关闭 | 使用无图像特征版本的 denoiser，完全跳过 HMR2 |
+| `--render_mode {opencv,viser}` | `viser` | 人体网格叠加窗口或 Web 三维查看器 |
+| `--shape_mode {zero,first,mean,ema,per_frame}` | `zero` | 统一控制渲染和 GMR FK 的 SMPL-X 体型；`zero` 使用中性平均体型，避免不同帧或不同运行之间人体比例变化 |
+| `--no_async_pipeline` | 关闭 | 强制同步运行，降低吞吐量但消除流水线延迟 |
 
-`--shape_mode` controls the SMPL-X body shape consistently for rendering and GMR FK. The default `zero` mode uses the neutral mean SMPL-X body shape and avoids frame-to-frame or run-to-run body-proportion changes.
+`--shape_mode` 会统一控制渲染与 GMR FK 使用的 SMPL-X 体型。默认 `zero` 使用中性平均 SMPL-X 体型，避免身体比例逐帧变化或不同运行之间发生变化。
 
-For per-module latency profiling: `python tools/benchmark/benchmark_modules.py`.
+各模块延迟分析命令：
+
+```bash
+python tools/benchmark/benchmark_modules.py
+```
 
 ---
 
-## 🏋️ Training
+## 🏋️ 训练
 
-See [Dataset Preparation](docs/DATA.md) for download links and directory structure.
+数据集下载链接和目录结构请参阅 [数据集准备文档](docs/DATA.md)。
 
-**Regression model** (video → SMPL):
+**回归模型（视频 → SMPL）：**
 
 ```bash
 python scripts/train.py exp=gem_smpl_regression
 ```
 
-**Full model** (regression + text/audio generation):
+**完整模型（回归 + 文本/音频生成）：**
 
 ```bash
 python scripts/train.py exp=gem_smpl
 ```
 
-**Multi-GPU (DDP)**:
+**多 GPU（DDP）：**
 
 ```bash
 python scripts/train.py exp=gem_smpl_regression pl_trainer.devices=4
 ```
 
-**SLURM**:
+**SLURM：**
 
 ```bash
 python scripts/train_slurm.py exp=gem_smpl_regression
 ```
 
-### Key settings
+### 主要训练配置
 
-From `configs/exp/gem_smpl_regression.yaml`:
+来自 `configs/exp/gem_smpl_regression.yaml`：
 
-- Body model: SMPLx
-- Optimizer: AdamW (lr=2e-4)
-- Precision: 16-mixed
-- Max steps: 500K
-- Gradient clipping: 0.5
-- Validation every 3000 steps
+- 身体模型：SMPL-X
+- 优化器：AdamW，学习率 `2e-4`
+- 精度：`16-mixed`
+- 最大步数：500K
+- 梯度裁剪：0.5
+- 每 3000 步验证一次
 
-Logging uses W&B by default. To disable:
+默认使用 W&B 记录日志。关闭方法：
 
 ```bash
 python scripts/train.py exp=gem_smpl_regression use_wandb=false
@@ -408,25 +389,23 @@ python scripts/train.py exp=gem_smpl_regression use_wandb=false
 
 ---
 
-See [FAQ](docs/FAQ.md) for common issues.
+常见问题请参阅 [FAQ](docs/FAQ.md)。
 
 ---
 
+## 🤝 NVIDIA 相关人形机器人项目
 
-## 🤝 Related Humanoid Work at NVIDIA
-GEM is part of a larger effort to enable humanoid motion data for robotics, physical AI, and other applications.
+GEM 是 NVIDIA 人体动作数据、机器人和 Physical AI 研究生态的一部分。相关项目包括：
 
-Check out these related works:
-* [GEM-X](https://github.com/NVlabs/GEM-X)
-* [SOMA Body Model](https://github.com/NVlabs/SOMA-X)
-* [BONES-SEED Dataset](ttps://huggingface.co/datasets/bones-studio/seed)
-* [ProtoMotions](https://github.com/NVlabs/ProtoMotions)
-* [SOMA Retargeter](https://github.com/NVIDIA/soma-retargeter)
-* [SONIC](https://github.com/NVlabs/GR00T-WholeBodyControl)
-* [Kimodo](https://github.com/nv-tlabs/kimodo)
+- [GEM-X](https://github.com/NVlabs/GEM-X)
+- [SOMA Body Model](https://github.com/NVlabs/SOMA-X)
+- [BONES-SEED Dataset](https://huggingface.co/datasets/bones-studio/seed)
+- [ProtoMotions](https://github.com/NVlabs/ProtoMotions)
+- [SOMA Retargeter](https://github.com/NVIDIA/soma-retargeter)
+- [SONIC](https://github.com/NVlabs/GR00T-WholeBodyControl)
+- [Kimodo](https://github.com/nv-tlabs/kimodo)
 
-
-## 📖 Citation
+## 📖 引用
 
 ```bibtex
 @inproceedings{genmo2025,
@@ -439,6 +418,6 @@ Check out these related works:
 
 ---
 
-## 📄 License
+## 📄 许可证
 
-This project is released under the NVIDIA OneWay Noncommercial License — see [LICENSE](LICENSE) for details. Third-party components are subject to their own licenses; see [ATTRIBUTIONS.md](ATTRIBUTIONS.md) for specifics.
+本项目采用 NVIDIA OneWay Noncommercial License，详情请参阅 [LICENSE](LICENSE)。第三方组件遵循各自许可证，具体信息请参阅 [ATTRIBUTIONS.md](ATTRIBUTIONS.md)。
