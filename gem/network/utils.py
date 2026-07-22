@@ -21,7 +21,12 @@ def encode_text_batch(raw_text, text_encoder, tokenizer, device="cuda"):
     with torch.no_grad():
         max_text_len = 50
 
-        encoded = tokenizer.batch_encode_plus(
+        tokenize = getattr(tokenizer, "batch_encode_plus", None)
+        if tokenize is None:
+            # transformers >=5 removed the public batch_encode_plus alias;
+            # __call__ keeps the same batching and padding semantics.
+            tokenize = tokenizer
+        encoded = tokenize(
             raw_text,
             return_tensors="pt",
             padding="max_length",

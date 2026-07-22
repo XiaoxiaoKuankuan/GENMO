@@ -370,7 +370,40 @@ python tools/data/humanml3d/build_humanml3d_smpl.py \
   --report-dir outputs/humanml3d_full_dryrun
 ```
 
-正式构建会先写入 `.tmp` 文件，重新加载并验证全部记录，再原子替换正式输出。详细审计报告写入 `outputs/humanml3d_build_report/`。本工具不提取 T5 embedding；后续需要根据最终 PTH 的 motion key 和 `text_data` 单独生成 `all_text_embed.pth`。
+正式构建会先写入 `.tmp` 文件，重新加载并验证全部记录，再原子替换正式输出。详细审计报告写入 `outputs/humanml3d_build_report/`。该步骤只构建 SMPL-X 动作和原始 caption，不在内存中加载 T5-3B。
+
+### 提取 HumanML3D T5-3B 文本特征
+
+动作 PTH 构建完成后，先估算 FP16 特征体积和“分片 + 最终临时文件”的峰值磁盘需求；该命令不加载 T5：
+
+```bash
+python tools/data/humanml3d/extract_t5_embeddings.py \
+  --estimate-only
+```
+
+使用本地缓存中的 T5-3B 执行全量提取：
+
+```bash
+CUDA_VISIBLE_DEVICES=0 \
+python tools/data/humanml3d/extract_t5_embeddings.py \
+  --model-name-or-path t5-3b \
+  --local-files-only \
+  --device cuda:0 \
+  --batch-size 16 \
+  --motions-per-shard 256 \
+  --resume \
+  --cleanup-shards
+```
+
+默认输出为：
+
+```text
+inputs/HumanML3D_SMPL/t5_embeddings_v1_half/all_text_embed.pth
+```
+
+最终文件是纯 `motion_id -> Tensor[num_captions, 50, 1024]` 字典：T5 推理默认使用 float32，保存为 CPU float16；第 0 维与动作记录中 `text_data` 的原始顺序严格一致，padding token 对应位置为零。工具使用原始 caption 字符串，不使用 processed tokens，不去重，也不进行 mean pooling、PCA 或维度裁剪。
+
+提取过程先复制轻量 caption 元数据并释放约 1.4 GB 的动作字典，再加载 T5-3B。每个分片都采用“写临时文件 → 回读完整验证 → 原子替换”，`--resume` 只复用 fingerprint 一致且实际回读通过的分片；最终文件也会回读并核对全部 key、caption 数、shape、dtype、连续内存和有限值。`--cleanup-shards` 只在最终文件验证成功后删除分片 PTH，保留 manifest 和 `outputs/humanml3d_t5_report/` 审计报告。
 
 ### 构建本地 AIST++ partial 音乐训练集
 
@@ -396,6 +429,38 @@ inputs/AIST++/minitrain_partial.pt
 ```
 
 partial 训练配置位于 `configs/train_datasets/aistpp_partial_train.yaml`。`train_partial` 使用本地所有成功构建序列减去当前可用的官方 crossmodal val/test 交集，绝不是官方 980 条 crossmodal training split，不能用于声明官方 AIST++ benchmark 或论文指标复现。构建器不下载数据、不重新提取音乐特征，也不会用零值或其他歌曲特征填补缺失序列。
+
+### 构建 BEAT2 四语言 split 索引
+
+当 BEAT2 四个语言子集已经下载到 `/home/weili/datasets/BEAT2_official` 后，可生成 `BEAT2SmplDataset` 直接读取的 `all_splits.pth`。工具只构建索引，不复制或修改 NPZ/WAV，也不预提取音频特征：
+
+```bash
+python tools/data/beat2/build_all_splits.py \
+  --root /home/weili/datasets/BEAT2_official \
+  --dry-run \
+  --report-dir outputs/beat2_build_dryrun
+```
+
+默认策略会在正式 train/val/test 条目缺少 NPZ 或 WAV 时拒绝发布。当前本机数据有 7 条中文 train 记录缺少 NPZ；重新下载缺失文件是首选方案。如果确认要跳过并在报告中保留缺失清单，则必须显式运行：
+
+```bash
+python tools/data/beat2/build_all_splits.py \
+  --root /home/weili/datasets/BEAT2_official \
+  --output /home/weili/datasets/BEAT2_official/all_splits.pth \
+  --report-dir outputs/beat2_build_report \
+  --allow-missing-pairs \
+  --overwrite
+```
+
+默认不会把 `additional` 合入 train；如确实需要该策略，必须显式增加 `--include-additional-as-train`。输出顶层仅包含 `train`、`val`、`test`、`minitrain` 和 `additional`，每项只保存 `video_id`、相对语言 `subset` 与 NPZ 的真实帧数。所有引用在临时 PTH 回读验证后才通过 `os.replace` 原子发布。
+
+确保 GENMO 输入路径指向数据根目录：
+
+```bash
+ln -s /home/weili/datasets/BEAT2_official inputs/BEAT2
+```
+
+如果 `inputs/BEAT2` 已存在，应先用 `readlink -f inputs/BEAT2` 核对目标，不要覆盖用户已有路径。详细审计报告位于 `outputs/beat2_build_report/`，其中会列出缺失配对、CSV 外孤立文件、非法 NPZ、Git LFS pointer、短音频和过短动作。
 
 **回归模型（视频 → SMPL）：**
 
