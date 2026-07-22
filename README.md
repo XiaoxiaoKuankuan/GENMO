@@ -405,6 +405,34 @@ inputs/HumanML3D_SMPL/t5_embeddings_v1_half/all_text_embed.pth
 
 提取过程先复制轻量 caption 元数据并释放约 1.4 GB 的动作字典，再加载 T5-3B。每个分片都采用“写临时文件 → 回读完整验证 → 原子替换”，`--resume` 只复用 fingerprint 一致且实际回读通过的分片；最终文件也会回读并核对全部 key、caption 数、shape、dtype、连续内存和有限值。`--cleanup-shards` 只在最终文件验证成功后删除分片 PTH，保留 manifest 和 `outputs/humanml3d_t5_report/` 审计报告。
 
+### 构建官方 AIST++ crossmodal 音乐训练集
+
+完整 AIST++ motion、keypoints2d、camera 标注和对齐后的 EDGE baseline35 特征齐备时，使用官方 crossmodal 文件原始顺序构建标准训练产物：
+
+```bash
+python tools/data/aistpp/build_annot_aist_official_30fps.py \
+  --annotations-root /home/weili/datasets/AISTPP_fullset/aist_plusplus_final \
+  --musicfeat-dir /home/weili/GENMO/inputs/AIST++/musicfeat_v2 \
+  --output-root /home/weili/GENMO/inputs/AIST++ \
+  --view c01 \
+  --dry-run \
+  --report-dir outputs/aistpp_official_dryrun
+```
+
+dry-run 完整通过后再去掉 `--dry-run` 并增加 `--overwrite`。正式输出固定为：
+
+```text
+inputs/AIST++/annot_aist_30fps.pt   # train/val/test 官方并集 1020 条
+inputs/AIST++/train.pt              # 980 条
+inputs/AIST++/val.pt                # 20 条
+inputs/AIST++/test.pt               # 20 条
+inputs/AIST++/minitrain.pt          # 按官方 train 顺序选取 16 条
+```
+
+该工具复用 partial builder 已验证的 60→30 FPS、关键点、tight bbox、相机和 `get_c_rootparam()` 逻辑，不重新提取、截断或填充音乐特征。所有官方 ID 都必须同时具备 motion、keypoints2d、`[L,35]` 音乐特征和相机标定；官方 split 与 `ignore_list.txt` 有交集时也会拒绝发布，避免静默删除后伪装成完整 980/20/20。额外 motion、keypoints 或音乐特征只写入报告，不会自动加入 train。
+
+五个文件先全部写入 `.tmp` 并重新加载验证，确认 annot 契约、音乐长度、split 顺序/互斥和 minitrain 后才发布；任一步失败都会清理临时文件并保留审计报告。`--limit` 仅用于 dry-run 或独立测试输出目录，不能覆盖标准正式文件。默认训练配置 `configs/train_datasets/aistpp_train.yaml` 已使用 `feat_version: v2` 和上述标准文件名。
+
 ### 构建本地 AIST++ partial 音乐训练集
 
 当本地只有部分官方 AIST++ 动作、对应关键点/相机标注和已经对齐的 EDGE baseline35 音乐特征时，可以构建用于验证音乐条件训练链路的 partial 数据集：
