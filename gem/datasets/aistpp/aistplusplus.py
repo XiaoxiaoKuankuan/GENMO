@@ -8,6 +8,7 @@ GEM 可训练的时序样本。完整 gem_smpl 模型用它学习音乐条件下
 
 import os
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 import torch
@@ -40,6 +41,15 @@ def load_music_feature_tensor(path: str | Path) -> torch.Tensor:
             f"Unsupported music feature payload in {path}: {type(value).__name__}"
         ) from exc
     return tensor
+
+
+def load_aist_artifact(path: str | Path) -> Any:
+    """Load trusted local AIST++ NumPy/Tensor artifacts across Torch versions."""
+    path = Path(path)
+    try:
+        return torch.load(path, map_location="cpu", weights_only=False)
+    except TypeError:
+        return torch.load(path, map_location="cpu")
 
 
 def validate_musicfeat_v2(features: torch.Tensor, source: str | Path = "musicfeat_v2") -> None:
@@ -85,6 +95,8 @@ class AISTPlusPlusSmplDataset(data.Dataset):
         lazy_load=False,
         eval_gen_only=True,
         feat_version="v1",
+        annot_file=None,
+        split_file=None,
     ):
         super().__init__()
         # Path
@@ -96,17 +108,25 @@ class AISTPlusPlusSmplDataset(data.Dataset):
         self.split = split
         self.eval_gen_only = eval_gen_only
         self.feat_version = feat_version
+        self.annot_file = annot_file
+        self.split_file = split_file
         self._load_dataset()
         self._get_idx2meta()
 
     def _load_dataset(self):
         # smplpose
         tic = Log.time()
-        fn = self.root / "annot_aist_30fps.pt"
+        annot_filename = (
+            self.annot_file if self.annot_file is not None else "annot_aist_30fps.pt"
+        )
+        split_filename = (
+            self.split_file if self.split_file is not None else f"{self.split}.pt"
+        )
+        fn = self.root / annot_filename
         self.smpl_model = make_smplx("supermotion")
         Log.info(f"[AIST++ {self.feat_version}] Loading from {fn} ...")
-        self.motion_files = torch.load(fn)
-        self.split_set = torch.load(self.root / f"{self.split}.pt")
+        self.motion_files = load_aist_artifact(fn)
+        self.split_set = load_aist_artifact(self.root / split_filename)
         # Dict of {
         #          "smpl_params_glob": {'body_pose', 'global_orient', 'transl', 'betas'}, FxC
         #          "cam_Rt": tensor(F, 3),

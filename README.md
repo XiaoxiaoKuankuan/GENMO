@@ -372,6 +372,31 @@ python tools/data/humanml3d/build_humanml3d_smpl.py \
 
 正式构建会先写入 `.tmp` 文件，重新加载并验证全部记录，再原子替换正式输出。详细审计报告写入 `outputs/humanml3d_build_report/`。本工具不提取 T5 embedding；后续需要根据最终 PTH 的 motion key 和 `text_data` 单独生成 `all_text_embed.pth`。
 
+### 构建本地 AIST++ partial 音乐训练集
+
+当本地只有部分官方 AIST++ 动作、对应关键点/相机标注和已经对齐的 EDGE baseline35 音乐特征时，可以构建用于验证音乐条件训练链路的 partial 数据集：
+
+```bash
+python tools/data/aistpp/build_annot_aist_30fps.py \
+  --annotations-root /home/weili/datasets/AISTPP_official/annotations \
+  --musicfeat-dir inputs/AIST++/musicfeat_v2 \
+  --output-root inputs/AIST++ \
+  --view c01 \
+  --overwrite
+```
+
+该工具将 60 FPS 动作同步按 `[::2]` 转为 30 FPS，使用具名相机参数和现有 `get_c_rootparam()` 构造相机坐标 SMPL，通过 COCO17 关键点生成紧 bbox，并跳过所有缺少或不匹配音乐特征的序列。它生成：
+
+```text
+inputs/AIST++/annot_aist_30fps_partial.pt
+inputs/AIST++/train_partial.pt
+inputs/AIST++/val_partial.pt
+inputs/AIST++/test_partial.pt
+inputs/AIST++/minitrain_partial.pt
+```
+
+partial 训练配置位于 `configs/train_datasets/aistpp_partial_train.yaml`。`train_partial` 使用本地所有成功构建序列减去当前可用的官方 crossmodal val/test 交集，绝不是官方 980 条 crossmodal training split，不能用于声明官方 AIST++ benchmark 或论文指标复现。构建器不下载数据、不重新提取音乐特征，也不会用零值或其他歌曲特征填补缺失序列。
+
 **回归模型（视频 → SMPL）：**
 
 ```bash

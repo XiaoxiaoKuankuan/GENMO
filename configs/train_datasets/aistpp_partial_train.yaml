@@ -1,0 +1,9 @@
+# 使用本地可用动作构建的 AIST++ partial 工程验证训练集。
+# 这不是官方 crossmodal_train，不能用于声明官方 benchmark 复现。
+aistpp_partial_train:
+  _target_: gem.datasets.aistpp.aistplusplus.AISTPlusPlusSmplDataset
+  root: inputs/AIST++
+  split: train
+  annot_file: annot_aist_30fps_partial.pt
+  split_file: train_partial.pt
+  feat_version: v2
