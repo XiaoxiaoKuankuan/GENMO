@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import math
 import re
 from pathlib import Path
 from typing import Any, Literal
@@ -97,6 +98,60 @@ def _estimate_tempo(librosa: Any, waveform: np.ndarray, onset_envelope: np.ndarr
     return _tempo_scalar(tempo)
 
 
+def _audio_duration_seconds(librosa: Any, path: Path) -> float:
+    """Read source duration without decoding the full waveform when supported."""
+    try:
+        duration = librosa.get_duration(path=str(path))
+    except TypeError:
+        # librosa < 0.10 used ``filename`` instead of ``path``.
+        duration = librosa.get_duration(filename=str(path))
+    duration = float(duration)
+    if not math.isfinite(duration) or duration <= 0.0:
+        raise ValueError(f"Unable to determine a positive duration for audio file: {path}")
+    return duration
+
+
+def _load_selected_waveform(
+    librosa: Any,
+    path: Path,
+    *,
+    start_sec: float,
+    duration_sec: float | None,
+    original_duration_sec: float,
+) -> tuple[np.ndarray, str]:
+    """Decode only the selected range, with a compatible full-decode fallback."""
+    try:
+        waveform, _ = librosa.load(
+            str(path),
+            sr=EDGE_SAMPLE_RATE,
+            mono=True,
+            offset=float(start_sec),
+            duration=None if duration_sec is None else float(duration_sec),
+        )
+        decode_mode = "range"
+    except (OSError, RuntimeError, TypeError, ValueError):
+        full_waveform, _ = librosa.load(str(path), sr=EDGE_SAMPLE_RATE, mono=True)
+        full_waveform = np.asarray(full_waveform, dtype=np.float32)
+        start_sample = int(round(start_sec * EDGE_SAMPLE_RATE))
+        if duration_sec is None:
+            end_sample = full_waveform.shape[0]
+        else:
+            end_sample = min(
+                full_waveform.shape[0],
+                start_sample + int(round(duration_sec * EDGE_SAMPLE_RATE)),
+            )
+        waveform = full_waveform[start_sample:end_sample]
+        decode_mode = "full_fallback"
+
+    waveform = np.ascontiguousarray(np.asarray(waveform, dtype=np.float32))
+    if waveform.size == 0:
+        raise ValueError(
+            f"The selected audio range is empty: start_sec={start_sec}, "
+            f"source_duration={original_duration_sec:.6f}s"
+        )
+    return waveform, decode_mode
+
+
 def extract_edge_baseline35(
     audio_path: str | Path,
     start_sec: float = 0.0,
@@ -117,29 +172,24 @@ def extract_edge_baseline35(
         raise ValueError(
             f"edge_baseline35 is defined at {EDGE_TARGET_FPS} FPS; got target_fps={target_fps}"
         )
-    if start_sec < 0:
-        raise ValueError(f"start_sec must be >= 0; got {start_sec}")
-    if duration_sec is not None and duration_sec <= 0:
-        raise ValueError(f"duration_sec must be > 0 when provided; got {duration_sec}")
+    if not math.isfinite(start_sec) or start_sec < 0:
+        raise ValueError(f"start_sec must be finite and >= 0; got {start_sec}")
+    if duration_sec is not None and (not math.isfinite(duration_sec) or duration_sec <= 0):
+        raise ValueError(f"duration_sec must be finite and > 0 when provided; got {duration_sec}")
 
     librosa = _import_librosa()
-    waveform, _ = librosa.load(str(path), sr=EDGE_SAMPLE_RATE, mono=True)
-    waveform = np.asarray(waveform, dtype=np.float32)
-    original_duration_sec = waveform.shape[0] / EDGE_SAMPLE_RATE
-    start_sample = int(round(start_sec * EDGE_SAMPLE_RATE))
-    if start_sample >= waveform.shape[0]:
+    original_duration_sec = _audio_duration_seconds(librosa, path)
+    if start_sec >= original_duration_sec:
         raise ValueError(
             f"start_sec={start_sec} is outside the {original_duration_sec:.3f}s audio file"
         )
-    if duration_sec is None:
-        end_sample = waveform.shape[0]
-    else:
-        end_sample = min(
-            waveform.shape[0], start_sample + int(round(duration_sec * EDGE_SAMPLE_RATE))
-        )
-    waveform = np.ascontiguousarray(waveform[start_sample:end_sample])
-    if waveform.size == 0:
-        raise ValueError("The selected audio range is empty")
+    waveform, audio_decode_mode = _load_selected_waveform(
+        librosa,
+        path,
+        start_sec=float(start_sec),
+        duration_sec=None if duration_sec is None else float(duration_sec),
+        original_duration_sec=original_duration_sec,
+    )
 
     onset_envelope = librosa.onset.onset_strength(
         y=waveform,
@@ -231,6 +281,7 @@ def extract_edge_baseline35(
         "bpm_source": "aist_prior" if tempo_prior is not None else "librosa_estimate",
         "librosa_estimated_bpm": float(estimated_tempo),
         "feature_frames": frame_count,
+        "audio_decode_mode": audio_decode_mode,
     }
     return torch.from_numpy(feature_array), metadata
 

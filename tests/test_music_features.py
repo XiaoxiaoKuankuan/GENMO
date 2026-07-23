@@ -58,6 +58,88 @@ def test_synthetic_audio_produces_edge_baseline35(tmp_path: Path) -> None:
     assert metadata["hop_length"] == 512
     assert metadata["target_fps"] == 30
     assert metadata["feature_dim"] == 35
+    assert metadata["audio_decode_mode"] == "range"
+
+
+@pytest.mark.skipif(importlib.util.find_spec("librosa") is None, reason="librosa not installed")
+def test_wav_range_decode_has_expected_time_and_matches_cropped_reference(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "source.wav"
+    cropped = tmp_path / "cropped.wav"
+    _write_test_wav(source, seconds=2.0)
+    ranged, metadata = extract_edge_baseline35(
+        source,
+        start_sec=0.5,
+        duration_sec=0.75,
+    )
+
+    import librosa
+
+    waveform, _ = librosa.load(
+        str(source),
+        sr=EDGE_SAMPLE_RATE,
+        mono=True,
+    )
+    start = round(0.5 * EDGE_SAMPLE_RATE)
+    end = start + round(0.75 * EDGE_SAMPLE_RATE)
+    selected = np.asarray(waveform[start:end])
+    pcm = np.clip(selected, -1.0, 1.0)
+    pcm = (pcm * np.iinfo(np.int16).max).astype("<i2")
+    with wave.open(str(cropped), "wb") as output:
+        output.setnchannels(1)
+        output.setsampwidth(2)
+        output.setframerate(EDGE_SAMPLE_RATE)
+        output.writeframes(pcm.tobytes())
+    reference, _ = extract_edge_baseline35(cropped)
+
+    assert ranged.shape == reference.shape
+    torch.testing.assert_close(ranged[:, :33], reference[:, :33], rtol=2e-2, atol=0.5)
+    assert 0.74 <= metadata["selected_duration_sec"] <= 0.76
+    assert metadata["original_duration_sec"] == pytest.approx(2.0, abs=1e-3)
+    assert metadata["audio_decode_mode"] == "range"
+
+
+@pytest.mark.skipif(importlib.util.find_spec("librosa") is None, reason="librosa not installed")
+def test_range_validation_and_duration_past_end(tmp_path: Path) -> None:
+    audio = tmp_path / "range.wav"
+    _write_test_wav(audio, seconds=1.0)
+    with pytest.raises(ValueError, match="outside"):
+        extract_edge_baseline35(audio, start_sec=1.1)
+    with pytest.raises(ValueError, match="duration_sec"):
+        extract_edge_baseline35(audio, duration_sec=float("nan"))
+    features, metadata = extract_edge_baseline35(
+        audio,
+        start_sec=0.75,
+        duration_sec=10.0,
+    )
+    assert features.shape[1] == 35
+    assert torch.isfinite(features).all()
+    assert metadata["selected_duration_sec"] == pytest.approx(0.25, abs=2 / EDGE_SAMPLE_RATE)
+
+
+@pytest.mark.skipif(importlib.util.find_spec("librosa") is None, reason="librosa not installed")
+def test_full_decode_fallback_is_reported(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import librosa
+
+    audio = tmp_path / "fallback.wav"
+    _write_test_wav(audio, seconds=1.0)
+    real_load = librosa.load
+
+    def reject_range(*args, **kwargs):
+        if "offset" in kwargs:
+            raise TypeError("range unsupported")
+        return real_load(*args, **kwargs)
+
+    monkeypatch.setattr(librosa, "load", reject_range)
+    features, metadata = extract_edge_baseline35(
+        audio,
+        start_sec=0.25,
+        duration_sec=0.5,
+    )
+    assert features.shape[1] == 35
+    assert torch.isfinite(features).all()
+    assert metadata["audio_decode_mode"] == "full_fallback"
 
 
 def test_feature_channel_order_is_exact() -> None:

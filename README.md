@@ -373,6 +373,81 @@ python scripts/demo/demo_music.py \
   --no_render
 ```
 
+#### 常驻音乐动作生成服务
+
+上面的 `demo_music.py` 单次模式保持不变。需要连续提交多首音乐或多个片段时，可让完整 GEM-SMPL 和固定 DDIM/CFG 常驻同一张 GPU，避免每次请求重新加载 checkpoint 和初始化扩散采样器。音乐服务不加载 T5，也不修改文本常驻服务协议。
+
+stdin 模式：
+
+```bash
+cd /home/weili/GENMO
+source .venv/bin/activate
+
+CUDA_VISIBLE_DEVICES=0 \
+python scripts/demo/demo_music_server.py \
+  --ckpt_path inputs/pretrained/gem_smpl.ckpt \
+  --device cuda:0 \
+  --output_root outputs/music_motion \
+  --transport stdin \
+  --duration_sec 10 \
+  --ddim_steps 20 \
+  --guidance_scale 2.5 \
+  --shape_mode zero
+```
+
+看到 `[ResidentMusic] SERVICE READY` 和 `music-motion>` 后，可以直接粘贴一行 WAV、MP3 或 FLAC 路径。路径中可以包含空格，也可以使用一对单引号或双引号：
+
+```text
+/home/weili/music/song.wav
+"/home/weili/music/My Song.mp3"
+{"request_id":"music-001","audio_path":"/home/weili/music/song.flac","start_sec":15,"duration_sec":10,"seed":7}
+```
+
+直接输入路径时默认从第 0 秒生成 10 秒动作。JSON 中可将 `duration_sec` 设为 `null`，表示从 `start_sec` 生成到文件末尾，但仍受 `--max_frames` 限制；默认 600 帧约为 20 秒，不会自动截断或拼接长音乐。
+
+管理命令为 `/status`、`/help`、`/clear-cache` 和 `/quit`。`/clear-cache` 只清除 CPU 中的 EDGE baseline35 特征 LRU 缓存，不卸载常驻 GEM，也不会重新初始化 DDIM。缓存 key 包含解析后的绝对路径、文件 inode/大小/mtime、音频范围和特征版本；源文件被替换或修改后会自动 cache miss。
+
+可通过 `--allowed_audio_root` 重复配置允许访问的服务端目录：
+
+```bash
+python scripts/demo/demo_music_server.py \
+  --allowed_audio_root /home/weili/music \
+  --allowed_audio_root /mnt/shared/audio
+```
+
+路径会先解析符号链接再检查，不能使用 `../` 或 symlink 越过白名单。stdin 和 ZMQ 请求中的 `audio_path` 都是**服务端机器上的文件路径**，协议不会上传音频字节；跨机器调用需要共享挂载。
+
+ZMQ 服务默认只监听本机 `127.0.0.1:7011`：
+
+```bash
+CUDA_VISIBLE_DEVICES=0 \
+python scripts/demo/demo_music_server.py \
+  --ckpt_path inputs/pretrained/gem_smpl.ckpt \
+  --device cuda:0 \
+  --output_root outputs/music_motion \
+  --transport zmq \
+  --bind tcp://127.0.0.1:7011 \
+  --duration_sec 10 \
+  --ddim_steps 20 \
+  --guidance_scale 2.5
+```
+
+另一个终端发送路径请求：
+
+```bash
+python scripts/demo/music_motion_client.py \
+  --endpoint tcp://127.0.0.1:7011 \
+  --audio "/home/weili/music/My Song.wav" \
+  --start_sec 0 \
+  --duration_sec 10 \
+  --seed 42 \
+  --timeout_seconds 60
+```
+
+服务从选定音频范围提取固定 30 FPS 的 35 维特征，生成帧数由实际特征长度决定。相同文件和范围的第二次请求会命中特征缓存。每次成功请求仍在 `outputs/music_motion/` 下发布现有 `music_only` READY 直接子目录，现有 `MotionWatcher(source_filter=music_only)` 无需修改即可消费。
+
+常驻音乐服务 v1 专注低延迟参数生成，不执行 Open3D 渲染和 ffmpeg mux。需要离线视频时继续使用单次 `demo_music.py`；需要播放原音乐时继续由 streamer 的 `--audio_playback ffplay` 控制。音频播放仍是 best-effort，不属于机器人硬实时控制时钟。
+
 每个 sample 都是 `outputs/music_motion/<generation>/` 的直接子目录，包含 SMPL 参数、原始诊断数据、音乐特征、元数据，以及最后创建的 READY。保存的 global/incam betas 和 streamer 每次 FK 使用的 betas 都是全零。没有动作时 streamer 继续定频发送 idle；动作结束后平滑返回 idle，不保持最后一帧。
 
 终端 2 增加 `--audio_playback ffplay` 可同时进行尽力而为的本地音乐播放。音频失败不会中断控制流，这也不是硬实时音频时钟。robot 模式必须提供 `--idle_motion inputs/motions/smplx_idle_stand.pt`。先在 MuJoCo 中验证，再使用低速、吊装保护、物理急停和机器人正常硬件保护；软件 ESTOP 不能替代物理急停。

@@ -39,6 +39,8 @@ checkpoint、模型第一层 `music_embedder` 线性层和输入特征张量的�
 
 EDGE 原始数据集脚本先把音频切成 5 秒片段，再保留 150 帧。本 Demo 支持显式指定 `--start_sec` 和 `--duration_sec`，因此移除了固定 5 秒裁剪。由于 Librosa 的边界分帧行为，输出有时会比 `duration × 30` 多一个边界帧；实际生成时长按 `feature_frames / 30` 记录。
 
+特征提取器优先使用 Librosa 的 `offset` 和 `duration` 只解码所选范围，长 MP3 的短片段请求不再先读取整首歌曲。如果音频后端不支持范围读取，才回退到完整解码后切片；`feature_metadata["audio_decode_mode"]` 会记录 `range` 或 `full_fallback`。两种路径都保持相同的采样率、hop、帧率和 35 通道定义。
+
 如当前环境缺少音频特征依赖，可执行：
 
 ```bash
@@ -91,6 +93,128 @@ Open3D 或 ffmpeg 失败只会产生 warning，有效的动作参数仍会正常
 第一版有意拒绝超过 `--max_frames` 的音频范围。默认值为 600，即 30 FPS 下约 20 秒。请选择更短的 `--start_sec` 和 `--duration_sec`；首次机器人测试推荐使用 5～10 秒。
 
 长音乐生成需要专门处理动作重叠、根节点连续、脚接触连续和节拍连续。本实现不会进行未经验证的简单动作拼接。
+
+## 常驻音乐动作生成服务
+
+单次 `demo_music.py` 的 CLI 和输出协议保持不变。连续生成多个音乐片段时，可以启动独立的常驻音乐服务。服务启动时只做一次：
+
+1. 审计完整 checkpoint 的 `music_embedder` 权重和 35 维输入；
+2. 加载一次不含 T5 的完整 GEM-SMPL；
+3. 固定 DDIM steps 和 CFG；
+4. 初始化一次 DDIM；
+5. 执行一次不发布文件的音乐 warmup；
+6. 打印 `[ResidentMusic] SERVICE READY`。
+
+正常请求不会重新加载 checkpoint/GEM、不会再次初始化 DDIM、不会卸载模型，也不会调用 `gc.collect()` 或 `torch.cuda.empty_cache()`。只有 CUDA OOM 恢复和服务关闭允许清理 CUDA cache；所有 GEM 请求通过同一把锁串行执行。
+
+### stdin 模式
+
+```bash
+cd /home/weili/GENMO
+source .venv/bin/activate
+
+CUDA_VISIBLE_DEVICES=0 \
+python scripts/demo/demo_music_server.py \
+  --ckpt_path inputs/pretrained/gem_smpl.ckpt \
+  --device cuda:0 \
+  --output_root outputs/music_motion \
+  --transport stdin \
+  --start_sec 0 \
+  --duration_sec 10 \
+  --seed 42 \
+  --ddim_steps 20 \
+  --guidance_scale 2.5 \
+  --shape_mode zero \
+  --feature_cache_size 32 \
+  --max_frames 600
+```
+
+看到 `music-motion>` 后，直接输入一行服务端音频路径：
+
+```text
+/home/weili/music/song.wav
+"/home/weili/music/My Song.mp3"
+```
+
+也可以输入 JSON：
+
+```json
+{"request_id":"music-001","audio_path":"/home/weili/music/song.flac","start_sec":15,"duration_sec":10,"seed":7}
+```
+
+直接路径使用服务启动参数中的默认范围，默认是前 10 秒。JSON 的 `duration_sec=null` 表示从 `start_sec` 到文件末尾，但最终特征帧数仍不能超过 `--max_frames`。
+
+管理命令：
+
+```text
+/status
+/help
+/clear-cache
+/quit
+```
+
+`/clear-cache` 只清 CPU 音乐特征缓存，不卸载 GEM。每个 cache value 是 CPU float32 contiguous `[L,35]` 张量和一份独立元数据，不缓存 waveform。cache key 包含解析后的绝对路径、设备/inode、文件大小、mtime、选择范围、特征版本和 EDGE 时间参数；文件变化后会自动重新提取。
+
+可重复指定服务端路径白名单：
+
+```bash
+--allowed_audio_root /home/weili/music \
+--allowed_audio_root /mnt/shared/audio
+```
+
+路径会执行 `expanduser()` 和 `resolve(strict=True)`，并在解析符号链接后检查是否位于白名单内，从而拒绝 `../` 或 symlink 越界。
+
+### ZMQ 模式与客户端
+
+ZMQ 默认只绑定 loopback：
+
+```bash
+CUDA_VISIBLE_DEVICES=0 \
+python scripts/demo/demo_music_server.py \
+  --ckpt_path inputs/pretrained/gem_smpl.ckpt \
+  --device cuda:0 \
+  --output_root outputs/music_motion \
+  --transport zmq \
+  --bind tcp://127.0.0.1:7011 \
+  --duration_sec 10 \
+  --ddim_steps 20 \
+  --guidance_scale 2.5
+```
+
+客户端：
+
+```bash
+python scripts/demo/music_motion_client.py \
+  --endpoint tcp://127.0.0.1:7011 \
+  --audio "/home/weili/music/My Song.wav" \
+  --start_sec 0 \
+  --duration_sec 10 \
+  --seed 42 \
+  --request_id music-001 \
+  --timeout_seconds 60
+```
+
+客户端只发送 `audio_path`，不上传音频内容。该路径属于服务端机器；跨机器使用必须保证两端拥有相同共享挂载。`--full` 表示从 `start_sec` 到末尾，不能与 `--duration_sec` 同时使用。
+
+成功响应包含输出路径、帧数、30 FPS、BPM、缓存命中状态、特征提取/输入构造/生成/保存/总耗时和 GPU 显存快照。单个错误返回结构化 JSON，服务继续处理后续请求。
+
+### 常驻服务输出与 streamer
+
+常驻服务复用单次 Demo 的 body 参数校验、151 维诊断输出、zero shape、制品写入和 READY 原子发布函数。每个成功请求仍产生：
+
+```text
+smpl_params.pt
+motion.npz
+raw_motion_151d.pt
+music_features.pt
+metadata.json
+source_audio.txt
+READY
+```
+
+metadata 额外记录 `request_id`、`request_metadata` 和 `service=resident_music_motion`，`source` 仍为 `music_only`。因此现有 `MotionWatcher(source_filter=music_only)`、GMR streamer 和 SMP1 完全不需要修改。
+
+常驻服务 v1 不渲染、不执行 ffmpeg mux，避免 Open3D、额外 body model 和 ffmpeg 影响低延迟与显存稳定。需要渲染或合成视频时使用单次 `demo_music.py`。streamer 的 `--audio_playback ffplay` 仍可独立进行 best-effort 音频播放，动作安全和 GMR 定频发送不依赖音频播放成功。
 
 ## 原子输出协议
 
