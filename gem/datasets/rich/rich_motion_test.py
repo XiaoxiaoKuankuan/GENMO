@@ -28,6 +28,7 @@ from .rich_utils import (
     get_cam2params,
     get_cam_key_wham_vid,
     get_w2az_sahmr,
+    load_rich_artifact,
     parse_seqname_info,
 )
 
@@ -57,11 +58,11 @@ class RichSmplFullSeqDataset(data.Dataset):
 
         # Load evaluation protocol from WHAM labels
         self.rich_dir = Path("inputs/RICH/hmr4d_support")
-        self.labels = torch.load(self.rich_dir / "rich_test_labels.pt")
-        self.preproc_data = torch.load(self.rich_dir / "rich_test_preproc.pt")
+        self.labels = load_rich_artifact(self.rich_dir / "rich_test_labels.pt")
+        self.preproc_data = load_rich_artifact(self.rich_dir / "rich_test_preproc.pt")
         vids = select_subset(self.labels, vid_presets)
 
-        self.vimo_labels = torch.load(self.rich_dir / "rich_test_vimo_preproc.pt")
+        self.vimo_labels = load_rich_artifact(self.rich_dir / "rich_test_vimo_preproc.pt")
         # Setup dataset index
         self.idx2meta = []
         for vid in vids:

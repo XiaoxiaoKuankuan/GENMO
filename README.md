@@ -416,6 +416,7 @@ python tools/data/aistpp/build_annot_aist_official_30fps.py \
   --output-root /home/weili/GENMO/inputs/AIST++ \
   --view c01 \
   --dry-run \
+  --allow-ignored-official \
   --report-dir outputs/aistpp_official_dryrun
 ```
 
@@ -430,6 +431,8 @@ inputs/AIST++/minitrain.pt          # 按官方 train 顺序选取 16 条
 ```
 
 该工具复用 partial builder 已验证的 60→30 FPS、关键点、tight bbox、相机和 `get_c_rootparam()` 逻辑，不重新提取、截断或填充音乐特征。所有官方 ID 都必须同时具备 motion、keypoints2d、`[L,35]` 音乐特征和相机标定；官方 split 与 `ignore_list.txt` 有交集时也会拒绝发布，避免静默删除后伪装成完整 980/20/20。额外 motion、keypoints 或音乐特征只写入报告，不会自动加入 train。
+
+如果已经人工审计并明确确认这些交集序列可以使用，可显式增加 `--allow-ignored-official`。该参数只授权保留官方 split 中的交集 ID，不修改原始 `ignore_list.txt`；省略时仍按默认安全策略失败。当前本机 28 条交集序列已经确认可用，因此正式构建命令需要带上此参数。
 
 五个文件先全部写入 `.tmp` 并重新加载验证，确认 annot 契约、音乐长度、split 顺序/互斥和 minitrain 后才发布；任一步失败都会清理临时文件并保留审计报告。`--limit` 仅用于 dry-run 或独立测试输出目录，不能覆盖标准正式文件。默认训练配置 `configs/train_datasets/aistpp_train.yaml` 已使用 `feat_version: v2` 和上述标准文件名。
 
@@ -489,6 +492,39 @@ ln -s /home/weili/datasets/BEAT2_official inputs/BEAT2
 ```
 
 如果 `inputs/BEAT2` 已存在，应先用 `readlink -f inputs/BEAT2` 核对目标，不要覆盖用户已有路径。详细审计报告位于 `outputs/beat2_build_report/`，其中会列出缺失配对、CSV 外孤立文件、非法 NPZ、Git LFS pointer、短音频和过短动作。
+
+### 服务器完整训练预检
+
+`configs/exp/gem_smpl_server.yaml` 保留 AMASS、BEDLAM、H36M、3DPW、AIST++、BEAT2 和 HumanML3D 七个训练集，以及 EMDB1、EMDB2、3DPW、RICH 四个验证集。它仍使用完整 regression + DDIM diffusion、多模态条件、151 维 EnDecoder、T5-3B 预计算特征、AdamW 和 16-bit mixed precision；仅移除了本地缺少 `imgfeats/3dpw_occ_train` 的 3DPW-OCC 额外遮挡增强源及其 metric。默认单卡起始设置为 batch size 4、4 个 worker，可通过 Hydra 命令行覆盖。
+
+开始服务器训练前运行统一检查：
+
+```bash
+python tools/train/preflight_gem_smpl.py \
+  --exp gem_smpl_server \
+  --samples-per-dataset 1 \
+  --batch-size 2 \
+  --num-workers 0 \
+  --instantiate-model \
+  --check-pretrained \
+  --strict
+```
+
+该工具通过 Hydra compose 读取真实配置，检查所有正式数据产物、HumanML3D motion/T5 key 与有限值、AIST++ 官方 split/35 维音乐特征、BEAT2 索引配对、回归/验证数据和身体模型；随后逐个实例化 Dataset、读取样本、构造真实混合 batch，并可实例化完整 GEM 模型。结果写入 `outputs/preflight_gem_smpl/report.json`。RICH 验证依赖的小型 `cam2params.pt` 使用 [GVHMR 官方资源](https://github.com/zju3dv/GVHMR/blob/main/hmr4d/dataset/rich/resource/cam2params.pt)，loader 已兼容 PyTorch 2.6 的可信本地 artifact 加载。
+
+预检通过后可启动完整服务器训练：
+
+```bash
+python scripts/train.py exp=gem_smpl_server
+```
+
+例如调整实际 batch 与 worker：
+
+```bash
+python scripts/train.py exp=gem_smpl_server \
+  data.loader_opts.train.batch_size=8 \
+  data.loader_opts.train.num_workers=8
+```
 
 **回归模型（视频 → SMPL）：**
 

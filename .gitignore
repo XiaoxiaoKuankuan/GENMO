@@ -13,6 +13,7 @@ wandb/
 *.zip
 *.pt
 *.pth
+!gem/datasets/rich/resource/cam2params.pt
 scripts/train_slurm.py
 scripts/slurm_init.local.sh
 examples/

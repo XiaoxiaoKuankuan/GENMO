@@ -225,6 +225,9 @@ def preflight_official_inputs(
         "missing_camera_mapping": missing_mapping,
         "missing_camera_environment_json": missing_environment,
         "ignored_official_ids": ignored_official,
+        "ignored_official_authorized": bool(
+            ignored_official and args.allow_ignored_official
+        ),
         "missing_required_count": len(
             set(missing_motion)
             | set(missing_keypoints)
@@ -250,6 +253,7 @@ def preflight_official_inputs(
             "extra_keypoints2d_count": len(keypoint_ids - official_ids),
             "extra_musicfeat_count": len(music_ids - official_ids),
             "ignored_official_count": len(ignored_official),
+            "allow_ignored_official": args.allow_ignored_official,
             "missing_motion_count": len(missing_motion),
             "missing_keypoints_count": len(missing_keypoints),
             "missing_musicfeat_count": len(missing_music),
@@ -266,13 +270,18 @@ def preflight_official_inputs(
     ):
         if values:
             problems.append(f"missing {label} for {len(values)} official IDs")
-    if ignored_official:
+    if ignored_official and not args.allow_ignored_official:
         problems.append(
             f"{len(ignored_official)} official IDs also occur in ignore_list.txt"
         )
     if problems:
         raise AISTOfficialBuildError(
             "Official AIST++ preflight failed: " + "; ".join(problems)
+        )
+    if ignored_official:
+        print(
+            "[Audit] Explicitly authorized "
+            f"{len(ignored_official)} official IDs from ignore_list.txt"
         )
     return motion_ids, keypoint_ids, music_ids, camera_mapping
 
@@ -690,6 +699,14 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--overwrite", action="store_true")
     parser.add_argument("--strict", action="store_true")
+    parser.add_argument(
+        "--allow-ignored-official",
+        action="store_true",
+        help=(
+            "Explicitly authorize official split IDs that also occur in "
+            "ignore_list.txt. The default remains to fail without publishing."
+        ),
+    )
     parser.add_argument("--report-dir", type=Path, default=DEFAULT_REPORT_DIR)
     parser.add_argument("--expected-train-count", type=int, default=980)
     parser.add_argument("--expected-val-count", type=int, default=20)

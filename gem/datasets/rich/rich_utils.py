@@ -9,6 +9,15 @@ import torch
 
 from gem.utils.geo_transform import apply_T_on_points, project_p2d
 
+
+def load_rich_artifact(path):
+    """Load trusted local RICH artifacts across PyTorch 2.6 and older releases."""
+    try:
+        return torch.load(path, map_location="cpu", weights_only=False)
+    except TypeError:
+        return torch.load(path, map_location="cpu")
+
+
 # ----- Meta sample utils ----- #
 
 
@@ -248,7 +257,7 @@ def get_cam2params(scene_info_root=None):
             cam_key = f"{cap_name}_{cam_id}"
             cam_params[cam_key] = (T_w2c, K)
     else:
-        cam_params = torch.load(Path(__file__).parent / "resource/cam2params.pt")
+        cam_params = load_rich_artifact(Path(__file__).parent / "resource/cam2params.pt")
     return cam_params
 
 

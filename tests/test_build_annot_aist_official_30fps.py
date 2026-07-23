@@ -223,6 +223,27 @@ def test_official_ignore_intersection_is_fatal(tmp_path: Path, monkeypatch) -> N
     assert payload["ignored_official_ids"] == ["seq_val"]
 
 
+def test_explicit_authorization_allows_official_ignore_intersection(
+    tmp_path: Path, monkeypatch
+) -> None:
+    annotations, music, _ = _synthetic_tree(tmp_path)
+    (annotations / "ignore_list.txt").write_text("seq_val\n", encoding="utf-8")
+    monkeypatch.setattr(official, "make_smplx", lambda _kind: _DummyBodyModel())
+    report = tmp_path / "report"
+    assert (
+        official.main(
+            _args(annotations, music, tmp_path / "out", report)
+            + ["--dry-run", "--allow-ignored-official"]
+        )
+        == 0
+    )
+    payload = json.loads((report / "missing_required_data.json").read_text())
+    assert payload["ignored_official_authorized"] is True
+    summary = json.loads((report / "build_summary.json").read_text())
+    assert summary["successfully_built_count"] == 4
+    assert summary["allow_ignored_official"] is True
+
+
 def test_output_splits_and_annot_preserve_exact_source_order(built_dataset) -> None:
     _, _, annot, splits, _, _, _, source = built_dataset
     assert splits["train"] == source["train"]
