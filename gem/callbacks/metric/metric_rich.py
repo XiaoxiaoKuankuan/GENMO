@@ -54,7 +54,6 @@ class MetricRICH(pl.Callback):
         }
         self.J_regressor = torch.load(f"{_BODY_MODEL_DIR}/smpl_neutral_J_regressor.pt")
         self.smplx2smpl = torch.load(f"{_BODY_MODEL_DIR}/smplx2smpl_sparse.pt")
-        self.faces_smpl = make_smplx("smpl").faces
 
         # The metrics are calculated similarly for val/test/predict
         self.on_test_batch_end = self.on_validation_batch_end = self.on_predict_batch_end

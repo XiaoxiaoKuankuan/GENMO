@@ -512,6 +512,8 @@ python tools/train/preflight_gem_smpl.py \
 
 该工具通过 Hydra compose 读取真实配置，检查所有正式数据产物、HumanML3D motion/T5 key 与有限值、AIST++ 官方 split/35 维音乐特征、BEAT2 索引配对、回归/验证数据和身体模型；随后逐个实例化 Dataset、读取样本、构造真实混合 batch，并可实例化完整 GEM 模型。结果写入 `outputs/preflight_gem_smpl/report.json`。RICH 验证依赖的小型 `cam2params.pt` 使用 [GVHMR 官方资源](https://github.com/zju3dv/GVHMR/blob/main/hmr4d/dataset/rich/resource/cam2params.pt)，loader 已兼容 PyTorch 2.6 的可信本地 artifact 加载。
 
+`MetricRICH` 只创建实际用于 FK 和指标计算的 male/female/neutral 三个 SMPL-X 模型，并加载 `smpl_neutral_J_regressor.pt` 与 `smplx2smpl_sparse.pt`。已移除从未参与相机坐标指标、全局指标或日志的 SMPL mesh faces 初始化，因此 RICH 回调不再非必要地依赖 `SMPL_NEUTRAL.pkl`；所有 RICH 指标公式、metric key 和日志名称保持不变。
+
 预检通过后可启动完整服务器训练：
 
 ```bash
