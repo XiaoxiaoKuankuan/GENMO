@@ -17,6 +17,12 @@ from .motion_streamer import (
     sample_motion_at,
     synthetic_idle_motion,
 )
+from .resident_text_motion import (
+    ResidentTextMotionEngine,
+    TextMotionRequest,
+    encode_prompt_with_loaded_t5,
+    get_cuda_memory_snapshot,
+)
 
 __all__ = [
     "MonotonicDeadline",
@@ -24,10 +30,14 @@ __all__ = [
     "MotionQueue",
     "MotionWatcher",
     "PlayerState",
+    "ResidentTextMotionEngine",
     "SMPLFrame",
     "SMPLMotion",
+    "TextMotionRequest",
     "align_motion_root_yaw",
     "align_motion_to_frame",
+    "encode_prompt_with_loaded_t5",
+    "get_cuda_memory_snapshot",
     "interpolate_axis_angle",
     "interpolate_frames",
     "load_smpl_motion",

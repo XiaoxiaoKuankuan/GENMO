@@ -8,6 +8,7 @@ created, so runtime watchers never consume a partially written generation.
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import uuid
@@ -52,6 +53,24 @@ def fsync_directory(path: Path) -> None:
         os.fsync(descriptor)
     finally:
         os.close(descriptor)
+
+
+def atomic_write_json(path: Path, payload: dict[str, Any]) -> None:
+    """Atomically replace one JSON notification file and flush its directory."""
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.name}.tmp-{os.getpid()}-{uuid.uuid4().hex}")
+    try:
+        with temporary.open("x", encoding="utf-8") as handle:
+            json.dump(payload, handle, indent=2, ensure_ascii=False)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+        fsync_directory(path.parent)
+    except Exception:
+        temporary.unlink(missing_ok=True)
+        raise
 
 
 def publish_ready_directory(temporary: Path, final: Path, completed_at: str) -> None:

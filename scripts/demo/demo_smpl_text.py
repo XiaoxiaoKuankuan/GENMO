@@ -30,6 +30,7 @@ from gem.runtime.artifact_publish import (
     publish_ready_directory,
     utc_now_iso,
 )
+from gem.runtime.resident_text_motion import encode_prompt_with_loaded_t5
 
 DEFAULT_CHECKPOINT = Path("inputs/pretrained/gem_smpl.ckpt")
 DEFAULT_OUTPUT_ROOT = Path("outputs/text_motion")
@@ -228,27 +229,13 @@ def encode_prompt_t5(
         print(f"[Text] T5 loaded from {load_source}")
         text_encoder = text_encoder.to(resolved_device).eval()
 
-        tokenized = tokenizer(
-            [prompt],
-            return_tensors="pt",
-            padding="max_length",
-            max_length=max_text_len,
-            truncation=True,
+        text_embed = encode_prompt_with_loaded_t5(
+            prompt,
+            tokenizer,
+            text_encoder,
+            resolved_device,
+            max_text_len,
         )
-        input_ids = tokenized.input_ids.to(resolved_device)
-        attention_mask = tokenized.attention_mask.to(resolved_device)
-        with torch.inference_mode():
-            output = text_encoder(input_ids=input_ids, attention_mask=attention_mask)
-        encoded_text = output.last_hidden_state
-        encoded_text = encoded_text[:, :max_text_len]
-        encoded_text = encoded_text * attention_mask[:, :max_text_len].unsqueeze(-1)
-        expected = (1, MAX_TEXT_LEN, TEXT_EMBED_DIM)
-        if tuple(encoded_text.shape) != expected:
-            raise RuntimeError(
-                f"T5 text embedding has shape {tuple(encoded_text.shape)}, expected {expected}. "
-                "Use the T5-3B encoder expected by GEM-SMPL."
-            )
-        text_embed = encoded_text[0].detach().float().cpu()
         assert tuple(text_embed.shape) == (MAX_TEXT_LEN, TEXT_EMBED_DIM)
         return text_embed
     except Exception as exc:

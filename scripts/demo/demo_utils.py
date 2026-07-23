@@ -343,12 +343,19 @@ def get_camera_static(L: int, width: int, height: int):
 # ===========================================================================
 
 
-def load_model(ckpt_path: str, load_text_encoder: bool = False):
+def load_model(
+    ckpt_path: str,
+    load_text_encoder: bool = False,
+    *,
+    defer_diffusion_init: bool = False,
+):
     """Load the GEM model with Hydra config composition.
 
     Args:
         ckpt_path: path to pretrained checkpoint
         load_text_encoder: if True, load T5 text encoder for text-conditioned generation
+        defer_diffusion_init: if True, let a resident caller configure and initialize
+            the inference diffusion exactly once after model construction
 
     Returns the model (on CUDA, eval mode).
     """
@@ -368,6 +375,8 @@ def load_model(ckpt_path: str, load_text_encoder: bool = False):
     ]
     if load_text_encoder:
         overrides.append("model.model_cfg.text_encoder.load_llm=true")
+    if defer_diffusion_init:
+        overrides.append("+network.defer_diffusion_init=true")
 
     with initialize_config_dir(config_dir=config_dir, version_base="1.3"):
         cfg = compose(

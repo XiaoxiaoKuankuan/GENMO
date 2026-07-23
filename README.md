@@ -148,6 +148,94 @@ HTTPS_PROXY=http://127.0.0.1:7897
 
 每次成功生成都会原子发布到一个唯一目录。`smpl_params.pt`、`motion.npz`、`metadata.json`、`prompt.txt` 和成功生成的渲染文件全部关闭并刷新后，才会最后创建 `READY`。运行时消费者必须忽略没有 `READY` 的目录。
 
+### 常驻文本动作生成服务
+
+`demo_smpl_text.py` 的单次模式会依次加载 T5-3B、编码文本、释放 T5、加载 GEM、初始化 DDIM、生成一次后退出，适合离线使用，但每条命令都要重复约 20 秒的模型启动开销。`demo_smpl_text_server.py` 在启动时把 FP16 T5-3B 和完整 GEM-SMPL 同时常驻同一张 GPU，并且只初始化一次固定的 DDIM/CFG；后续请求只执行文本编码、扩散生成和原子保存，实测通常约 1 秒以内。
+
+服务正常请求路径不会卸载模型、不会 CPU offload、不会量化，也不会调用 `torch.cuda.empty_cache()`。相同 prompt 的 `[50,1024]` T5 embedding 会进入 CPU LRU 缓存，不会随 prompt 数量占用更多 GPU 显存。只有 CUDA OOM 恢复或服务最终关闭时才允许清理 CUDA cache。
+
+stdin 常驻模式：
+
+```bash
+cd /home/weili/GENMO
+source .venv/bin/activate
+
+CUDA_VISIBLE_DEVICES=0 \
+python scripts/demo/demo_smpl_text_server.py \
+  --ckpt_path inputs/pretrained/gem_smpl.ckpt \
+  --t5_model t5-3b \
+  --local_files_only \
+  --device cuda:0 \
+  --text_encoder_dtype float16 \
+  --output_root outputs/text_motion \
+  --transport stdin \
+  --num_frames 120 \
+  --fps 30 \
+  --seed 42 \
+  --ddim_steps 20 \
+  --guidance_scale 2.5 \
+  --shape_mode zero
+```
+
+看到 `SERVICE READY` 和 `text-motion>` 后，可直接输入动作文本，也可输入一行 JSON：
+
+```text
+A person performs exactly one squat and returns to standing.
+{"request_id":"walk-001","prompt":"A person continuously walks straight forward.","num_frames":300,"fps":30,"seed":44}
+```
+
+管理命令为 `/status`、`/help`、`/clear-cache` 和 `/quit`。`/quit`、Ctrl+C 或 SIGTERM 会停止接收新请求，释放 T5/GEM，最后清理 CUDA cache。
+
+ZMQ 常驻模式：
+
+```bash
+CUDA_VISIBLE_DEVICES=0 \
+python scripts/demo/demo_smpl_text_server.py \
+  --ckpt_path inputs/pretrained/gem_smpl.ckpt \
+  --t5_model t5-3b \
+  --local_files_only \
+  --device cuda:0 \
+  --text_encoder_dtype float16 \
+  --output_root outputs/text_motion \
+  --transport zmq \
+  --bind tcp://127.0.0.1:7010 \
+  --num_frames 120 \
+  --fps 30 \
+  --seed 42 \
+  --ddim_steps 20 \
+  --guidance_scale 2.5 \
+  --shape_mode zero
+```
+
+另一个终端发送请求：
+
+```bash
+python scripts/demo/text_motion_client.py \
+  --endpoint tcp://127.0.0.1:7010 \
+  --request_id squat-001 \
+  --prompt "A person performs exactly one squat and returns to standing." \
+  --num_frames 120 \
+  --fps 30 \
+  --seed 42 \
+  --timeout_seconds 30
+```
+
+每次成功请求仍按现有协议生成直接位于 `outputs/text_motion/` 下的唯一 READY 目录，其中包含 `smpl_params.pt`、`motion.npz`、`prompt.txt` 和 `metadata.json`；同时原子更新 `outputs/text_motion/latest_ready.json`。现有 GMR streamer 已直接监视 READY 目录，不需要读取 latest 文件，也不需要改变 SMP1：
+
+```bash
+python scripts/demo/stream_smpl_params_to_gmr.py \
+  --watch_dir outputs/text_motion \
+  --source_filter text_only \
+  --gmr_host 127.0.0.1 \
+  --gmr_port 7006 \
+  --publish_fps 30 \
+  --shape_mode zero \
+  --mode sim \
+  --new_motion_policy queue
+```
+
+RTX 4090 实测：T5 加载后 allocated 约 3.061 GiB，T5+GEM 加载后约 5.041 GiB，预热后约 5.048 GiB；120 帧请求约 0.51～0.55 秒，300 帧请求约 0.79 秒。连续 50 次混合请求后 PyTorch allocated 增长为 0 MiB。该性能取决于 GPU、CUDA、checkpoint、磁盘与是否命中文本缓存。
+
 ### 文本动作到机器人实时播放
 
 文本生成器与机器人播放器是两个独立进程。即使 GEM 生成一整段动作的速度慢于实时，常驻 streamer 仍会以固定频率向 GMR-CPP 发送缓存动作、安全过渡姿态或 idle 姿态：

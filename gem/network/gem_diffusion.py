@@ -43,6 +43,7 @@ class GEMDiffusion(nn.Module):
         img_process_modules_enable_grad=None,
         multi_text_module_cfg=None,
         regression_only=False,
+        defer_diffusion_init=False,
         **kwargs,
     ):
         super().__init__()
@@ -60,7 +61,8 @@ class GEMDiffusion(nn.Module):
         self.mask_localpose_prob = kwargs.get("mask_localpose_prob", 0.0)
 
         self.denoiser = instantiate(self.model_cfg.denoiser)
-        self.init_diffusion()
+        if not defer_diffusion_init:
+            self.init_diffusion()
         self.text_encoder, self.tokenizer = None, None
 
     def init_diffusion(self):
