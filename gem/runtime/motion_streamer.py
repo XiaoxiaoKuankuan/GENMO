@@ -615,8 +615,30 @@ class MotionPlayer:
         self._transition(PlayerState.BLENDING)
 
     def _aligned_idle_target(self) -> SMPLFrame:
-        aligned = align_motion_to_frame(self.idle_motion, self.current_frame)
-        return frame_from_motion(aligned, 0)
+        """Keep the current floor position while returning to the idle heading.
+
+        Root-yaw alignment is correct when entering a new motion because the
+        clip must inherit the currently displayed heading.  Applying the same
+        alignment to the return target is not correct: it preserves the
+        motion's final yaw, after which the mux can switch to the canonical
+        idle yaw in one frame.  A motion ending near 180 degrees therefore
+        produced an apparent instant turn at both the end of that clip and the
+        beginning of the next one.
+
+        Use the idle pose and orientation as the actual return target, while
+        retaining only the current horizontal root position.  SLERP then
+        performs any heading change over ``return_seconds`` and the root does
+        not jump back to the world origin.
+        """
+        target = self.idle_frame
+        transl = target.transl.clone()
+        transl[[0, 2]] = self.current_frame.transl[[0, 2]]
+        return SMPLFrame(
+            body_pose=target.body_pose.clone(),
+            global_orient=target.global_orient.clone(),
+            transl=transl,
+            betas=torch.zeros_like(target.betas),
+        )
 
     def _begin_return(self, now: float, *, error: bool = False) -> None:
         if self.loop and self._active_source is not None and not error:

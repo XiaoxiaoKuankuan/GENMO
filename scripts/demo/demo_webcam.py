@@ -85,7 +85,6 @@ from gem.gmr_udp_bridge import GMRUDPBridge
 from gem.smplx_gmr_reference import BetaStabilizer, SMPLXGMRReference
 
 from onnx_runners import (
-    hmr2_preprocess_256x256,
     load_denoiser,
     load_hmr2,
     load_vitpose,
@@ -346,9 +345,31 @@ def _render_worker_cv2(render_queue, width, height, _port, display_queue=None):
 class WebcamGEMSMPLDemo:
     """Real-time GEM-SMPL pose estimation with sliding-window rollout."""
 
-    def __init__(self, args):
+    def __init__(
+        self,
+        args,
+        *,
+        frame_sink=None,
+        model_stack=None,
+        create_gmr_bridge=True,
+        capture=None,
+    ):
+        """Create the legacy demo or a reusable source session.
+
+        The optional arguments are used only by the unified resident service:
+        ``model_stack`` reuses already loaded video models, ``frame_sink``
+        receives zero-shape :class:`SMPLFrame` objects, and
+        ``create_gmr_bridge=False`` guarantees that the service's
+        ``MotionSourceMux`` remains the sole UDP sender.  Existing CLI callers
+        use the defaults and therefore retain the original behaviour.
+        """
         torch.backends.cudnn.benchmark = True
 
+        self.args = args
+        self.frame_sink = frame_sink
+        self.model_stack = model_stack
+        self._create_gmr_bridge = bool(create_gmr_bridge)
+        self._closed = False
         self.context_frames = args.context_frames
         self.yolo_period = args.yolo_period
         self.vitpose_period = args.vitpose_period
@@ -368,7 +389,7 @@ class WebcamGEMSMPLDemo:
         # Optional GEM SMPL-X FK -> original-GMR SMP1 UDP path.
         self.gmr_bridge = None
         self.gmr_adapter = None
-        if args.gmr_host:
+        if self._create_gmr_bridge and args.gmr_host:
             self.gmr_bridge = GMRUDPBridge(
                 host=args.gmr_host,
                 port=args.gmr_port,
@@ -392,10 +413,23 @@ class WebcamGEMSMPLDemo:
         )
 
         # --- Video capture ---
+        rtsp_url = getattr(args, "rtsp_url", None)
         self._is_video_file = args.video is not None
-        if self._is_video_file:
+        self._is_rtsp = rtsp_url is not None
+        if capture is not None:
+            self.cap = capture
+            if self._is_video_file:
+                self.source_name = Path(args.video).stem
+            elif self._is_rtsp:
+                self.source_name = "rtsp"
+            else:
+                self.source_name = f"cam{args.camera_id}"
+        elif self._is_video_file:
             self.cap = cv2.VideoCapture(args.video)
             self.source_name = Path(args.video).stem
+        elif self._is_rtsp:
+            self.cap = cv2.VideoCapture(rtsp_url)
+            self.source_name = "rtsp"
         else:
             self.cap = cv2.VideoCapture(args.camera_id)
             self.source_name = f"cam{args.camera_id}"
@@ -458,7 +492,11 @@ class WebcamGEMSMPLDemo:
         self._last_frame_bgr = None
 
         # --- Models ---
-        self._load_models()
+        if self.model_stack is None:
+            self._load_models()
+        else:
+            self.model_stack.initialize()
+            self._bind_model_stack(self.model_stack)
 
         # --- Background render process ---
         self._render_queue = None
@@ -492,6 +530,84 @@ class WebcamGEMSMPLDemo:
                 f"[Render] Background {render_mode} render process started "
                 f"(pid={self._render_proc.pid})"
             )
+
+    def _bind_model_stack(self, stack):
+        """Bind one resident model stack and create only per-source tracker state."""
+        if bool(stack.no_imgfeat) != bool(self.no_imgfeat):
+            raise ValueError(
+                "Resident video stack no_imgfeat setting does not match the source session"
+            )
+        if int(stack.context_frames) != int(self.context_frames):
+            raise ValueError(
+                "Resident video stack context_frames does not match the source session"
+            )
+        self.yolox = stack.yolox
+        self.tracker = stack.new_tracker()
+        self.vitpose_runner = stack.vitpose_runner
+        self.vitpose_backend = stack.vitpose_backend
+        self.denoiser_runner = stack.denoiser_runner
+        self.denoiser_backend = stack.denoiser_backend
+        self.endecoder = stack.endecoder
+        self.hmr2_runner = stack.hmr2_runner
+        self.hmr2_backend = stack.hmr2_backend
+        Log.info("[Init] Reusing resident video model stack")
+
+    def reset_state(self):
+        """Reset tracker, windows, rollout and frame counters without unloading models."""
+        if self._denoiser_future is not None and not self._denoiser_future.done():
+            raise RuntimeError(
+                "Cannot reset Webcam state while asynchronous denoiser inference is active"
+            )
+        if self._preproc_future is not None and not self._preproc_future.done():
+            raise RuntimeError(
+                "Cannot reset Webcam state while asynchronous preprocessing is active"
+            )
+        if self.model_stack is not None:
+            self.tracker = self.model_stack.new_tracker()
+        else:
+            from gem.utils.yolox_detector import ByteTracker
+
+            self.tracker = ByteTracker(max_lost=30)
+        self.bbx_xys_window.clear()
+        self.kp2d_window.clear()
+        self.f_imgseq_window.clear()
+        self.frame_index = 0
+        self.bbox_xyxy = None
+        self.rollout_state = None
+        self.primary_track_id = None
+        self._last_kp2d = None
+        self._last_f_img = torch.zeros(1024)
+        self._last_bbx_xys = None
+        self._last_frame_bgr = None
+        self._denoiser_future = None
+        self._preproc_future = None
+        self._pending_result = None
+        self.shape_stabilizer.reset()
+        self._shape_logged = False
+        Log.info("[Video] Tracker, windows, rollout and frame index reset")
+
+    def close(self):
+        """Release this source and session workers without unloading an injected stack."""
+        if self._closed:
+            return
+        self._closed = True
+        if self.gmr_bridge is not None:
+            self.gmr_bridge.close()
+            self.gmr_bridge = None
+        self.cap.release()
+        if self._denoiser_executor is not None:
+            self._denoiser_executor.shutdown(wait=True, cancel_futures=True)
+            self._denoiser_executor = None
+        if self._preproc_executor is not None:
+            self._preproc_executor.shutdown(wait=True, cancel_futures=True)
+            self._preproc_executor = None
+        if self._render_queue is not None:
+            self._render_queue.put(None)
+        if self._render_proc is not None:
+            self._render_proc.join(timeout=3)
+            if self._render_proc.is_alive():
+                self._render_proc.terminate()
+        cv2.destroyAllWindows()
 
     def _load_models(self):
         """Load YOLOX, ViTPose, HMR2, denoiser, and the EnDecoder in parallel."""
@@ -731,10 +847,33 @@ class WebcamGEMSMPLDemo:
                     print(f"\n[GMR UDP ERROR] {type(exc).__name__}: {exc}")
                     self._last_gmr_error_log = now
 
+        body_params_incam_cpu = {
+            key: value.detach().cpu() for key, value in pred_body_params_incam.items()
+        }
+        body_params_global_cpu = {
+            key: value.detach().cpu() for key, value in body_params_global.items()
+        }
+        frame_sink = getattr(self, "frame_sink", None)
+        if frame_sink is not None:
+            from gem.runtime.motion_streamer import SMPLFrame
+
+            stream_frame = SMPLFrame(
+                body_pose=body_params_incam_cpu["body_pose"][0].clone(),
+                global_orient=body_params_global_cpu["global_orient"][0].clone(),
+                transl=body_params_global_cpu["transl"][0].clone(),
+                betas=torch.zeros(10, dtype=body_params_incam_cpu["body_pose"].dtype),
+            )
+            for field, value in vars(stream_frame).items():
+                if not torch.isfinite(value).all():
+                    raise ValueError(
+                        f"Webcam frame_sink received non-finite SMPL field: {field}"
+                    )
+            frame_sink(stream_frame)
+
         return {
             "ready": True,
-            "body_params_incam": {k: v.detach().cpu() for k, v in pred_body_params_incam.items()},
-            "body_params_global": {k: v.detach().cpu() for k, v in body_params_global.items()},
+            "body_params_incam": body_params_incam_cpu,
+            "body_params_global": body_params_global_cpu,
             "timing": timings,
             "_updated_bbox": updated_bbox,
             "_frame_bgr": frame_bgr,
@@ -1063,20 +1202,7 @@ class WebcamGEMSMPLDemo:
         except KeyboardInterrupt:
             print("\n[Interrupted]")
         finally:
-            if self.gmr_bridge is not None:
-                self.gmr_bridge.close()
-            self.cap.release()
-            if self._denoiser_executor is not None:
-                self._denoiser_executor.shutdown(wait=True, cancel_futures=True)
-            if self._preproc_executor is not None:
-                self._preproc_executor.shutdown(wait=True, cancel_futures=True)
-            if self._render_queue is not None:
-                self._render_queue.put(None)
-            if self._render_proc is not None:
-                self._render_proc.join(timeout=3)
-                if self._render_proc.is_alive():
-                    self._render_proc.terminate()
-            cv2.destroyAllWindows()
+            self.close()
             print()
 
             if fps_history:
