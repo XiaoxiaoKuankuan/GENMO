@@ -1,0 +1,126 @@
+# @package _global_
+# 在官方完整 gem_smpl.ckpt 基础上加入 Motion-X++ 3D+文本监督。
+# 保持完整 GEM 网络（含 audio/music 参数）以兼容预训练权重；本配置不加入 BEAT2。
+defaults:
+  - /diffusion@model_cfg.diffusion: ddim
+  - override /data: mocap/trainX_testY
+  - override /model: gem
+  - override /network: diffusion_lg
+  - override /pipeline: dual_mode
+  - override /endecoder: v1_smpl_amass_bedlam
+  - override /optimizer: adamw_2e-4
+  - override /scheduler: epoch_half_500_750
+  - override /train_datasets:
+      - amass_v11
+      - bedlam_v2
+      - h36m_v1
+      - 3dpw_v1
+      - aistpp_train
+      - humanml3d_static_train
+      - motionxpp_static_train
+  - override /test_datasets:
+      - emdb1_v1_fliptest
+      - emdb2_v1_fliptest
+      - 3dpw_fliptest
+      - rich_all
+  - override /callbacks:
+      - ckpt_saver/every10000s_top100
+      - prog_bar/prog_reporter_ed1
+      - train_speed_timer/base
+      - lr_monitor/pl
+      - metric/metric_emdb1
+      - metric/metric_emdb2
+      - metric/metric_3dpw
+      - vis/vis_text
+      - metric/metric_rich
+  - _self_
+
+exp_name_base: gem_smpl_motionxpp
+exp_name_var: ""
+exp_name: ${exp_name_base}${exp_name_var}
+data_name: gem_mixed
+
+train_datasets:
+  aistpp_train:
+    feat_version: v2
+
+multicond_args: null
+
+model:
+  model_cfg:
+    body_model: smplx
+
+    text_encoder:
+      load_llm: false
+      llm_version: "t5-3b"
+      max_text_len: 50
+
+    condition_mask:
+      mask_img_prob: 0.5
+      mask_cam_prob: 1.0
+      reuse_regression_mask: false
+      regression_no_img_mask: true
+
+    mask_cfg:
+      drop_prob: 0.75
+      max_num_drops: 3
+      min_drop_nframes: 1
+      max_drop_nframes: 30
+    body_mask_cfg:
+      drop_prob: 0.75
+      joint_drop_prob: 0.25
+      max_num_drops: 3
+      min_drop_nframes: 1
+      max_drop_nframes: 30
+    music_mask_prob: 0.1
+    audio_mask_prob: 0.1
+
+network:
+  model_cfg:
+    regression_only: false
+    denoiser:
+      args: ${pipeline.args}
+      encode_text: true
+      encoded_text_dim: 1024
+      text_encoder_cfg:
+        mode: all
+        cross_attn_type: mha
+
+pipeline:
+  args:
+    extract_features: false
+    regression_only: false
+
+# 从 gem_smpl.ckpt 微调，降低到 2e-5；ckpt_path 仅加载模型权重，
+# 不恢复 optimizer/global_step。真正断点恢复请使用 resume_mode。
+optimizer:
+  lr: 2e-5
+
+data:
+  loader_opts:
+    train:
+      batch_size: 4
+      num_workers: 4
+
+pl_trainer:
+  precision: 16-mixed
+  log_every_n_steps: 10
+  gradient_clip_val: 0.5
+  max_epochs: null
+  check_val_every_n_epoch: 1
+  val_check_interval: 1.0
+  max_steps: 20000
+  devices: 1
+
+logger:
+  _target_: pytorch_lightning.loggers.WandbLogger
+  project: "gem"
+  save_dir: "/tmp"
+  name: ""
+  version: ""
+  resume: "allow"
+  dir: "/tmp"
+  id: null
+
+use_wandb: true
+

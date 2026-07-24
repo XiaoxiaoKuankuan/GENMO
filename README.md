@@ -902,6 +902,54 @@ python scripts/train.py exp=gem_smpl_regression use_wandb=false
 
 ---
 
+### Motion-X++ 三维动作与文本微调
+
+Motion-X++ 支持直接读取 ZIP 或解压目录，先将官方 30 FPS、Y-up 的
+`motion_generation/smplx322` 和 `semantic_label` 构建为可恢复的动作分片，再生成
+T5-3B FP16 embedding 分片。Dataset 使用每个 worker 独立的小型 LRU，不会一次加载
+全部动作或 embedding。
+
+服务器数据审计：
+
+```bash
+python tools/data/motionxpp/inspect_motionxpp.py \
+  --root inputs/Motion-Xplusplus \
+  --output-dir outputs/motionxpp_inspect
+```
+
+完整动作构建：
+
+```bash
+python tools/data/motionxpp/build_motionxpp_genmo.py \
+  --root inputs/Motion-Xplusplus \
+  --output-root inputs/Motion-Xplusplus/genmo_support \
+  --subsets-file outputs/motionxpp_inspect/recommended_subsets.txt \
+  --records-per-shard 512 \
+  --source-up-axis y \
+  --target-fps 30 \
+  --split-seed 20260724 \
+  --strict
+```
+
+完成 T5 分片和预检后，从官方完整 checkpoint 做 20 步单卡 smoke：
+
+```bash
+CUDA_VISIBLE_DEVICES=0 \
+python scripts/train.py \
+  exp=gem_smpl_motionxpp \
+  ckpt_path=inputs/pretrained/gem_smpl.ckpt \
+  pl_trainer.devices=1 \
+  pl_trainer.max_steps=20 \
+  data.loader_opts.train.batch_size=2 \
+  data.loader_opts.train.num_workers=0 \
+  use_wandb=false
+```
+
+当前第一版只启用可靠的 SMPL-X 3D + semantic text。关键点归档没有图像宽高和校准
+相机参数，所以正式配置保持 `condition_on_keypoints=false`，不会伪造 K 或把样本
+标成纯 2D-only。完整的审计、T5、preflight、resume 和四卡训练命令见
+[Motion-X++ 中文文档](docs/motionxpp.md)。
+
 常见问题请参阅 [FAQ](docs/FAQ.md)。
 
 ---

@@ -21,3 +21,5 @@ data/
 !tools/data/
 !tools/data/aistpp/
 !tools/data/aistpp/*.py
+!tests/data/
+!tests/data/**/*.py

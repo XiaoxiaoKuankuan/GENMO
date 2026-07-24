@@ -197,6 +197,8 @@ def train(cfg: DictConfig) -> None:
             print("pretrained ckpt info:", wandb_cfg["pretrained_ckpt_info"])
 
     # PL callbacks and logger
+    tb_logger = None
+
     if cfg.task == "fit":
         if global_rank == 0:
             tb_logger = TensorBoardLogger(run_root_dir, version=version, name="")
@@ -231,6 +233,7 @@ def train(cfg: DictConfig) -> None:
             if version is None:
                 version = find_last_version(run_root_dir, cp=None)
             cfg.output_dir = f"{run_root_dir}/version_{version}"
+            tb_logger = TensorBoardLogger(run_root_dir, version=version, name="")
 
     callbacks = get_callbacks(cfg)
     has_ckpt_cb = any([isinstance(cb, Checkpoint) for cb in callbacks])

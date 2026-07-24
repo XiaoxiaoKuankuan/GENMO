@@ -1,0 +1,16 @@
+# Motion-X++ 三维 SMPL-X + semantic text 训练集。
+# 动作和 T5 embedding 都按 manifest 延迟加载；第一版不启用未校准的 2D 关键点。
+motionxpp_static_train:
+  _target_: gem.datasets.pure_motion.motionxpp.MotionXppDataset
+  root: inputs/Motion-Xplusplus
+  manifest_path: inputs/Motion-Xplusplus/genmo_support/manifests/train.jsonl
+  embedding_manifest_path: inputs/Motion-Xplusplus/t5_embeddings_v1_half/manifests/train.json
+  split: train
+  motion_frames: 120
+  cam_augmentation: static
+  condition_on_keypoints: false
+  shard_cache_size: 2
+  enable_speed_aug: false
+  source_up_axis: y
+  random_seed: 20260724
+
