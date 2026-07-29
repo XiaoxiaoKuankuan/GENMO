@@ -1,6 +1,6 @@
 # @package _global_
-# 在官方完整 gem_smpl.ckpt 基础上加入 Motion-X++ 3D+文本监督。
-# 保持完整 GEM 网络（含 audio/music 参数）以兼容预训练权重；本配置不加入 BEAT2。
+# 使用 Motion-X++ 3D+文本监督从随机初始化开始训练完整 GEM-SMPL。
+# 保持完整 GEM 网络（含 audio/music 参数）；本配置不加入 BEAT2。
 defaults:
   - /diffusion@model_cfg.diffusion: ddim
   - override /data: mocap/trainX_testY
@@ -39,6 +39,7 @@ exp_name_base: gem_smpl_motionxpp
 exp_name_var: ""
 exp_name: ${exp_name_base}${exp_name_var}
 data_name: gem_mixed
+ckpt_path: null
 
 train_datasets:
   aistpp_train:
@@ -91,15 +92,15 @@ pipeline:
     extract_features: false
     regression_only: false
 
-# 从 gem_smpl.ckpt 微调，降低到 2e-5；ckpt_path 仅加载模型权重，
-# 不恢复 optimizer/global_step。真正断点恢复请使用 resume_mode。
+# 从头训练使用完整模型的 AdamW 2e-4，不加载预训练 checkpoint。
 optimizer:
-  lr: 2e-5
+  lr: 2e-4
 
 data:
   loader_opts:
     train:
-      batch_size: 4
+      # Lightning 的 batch_size 是每个 GPU 的 batch；8 卡全局 batch 为 1024。
+      batch_size: 128
       num_workers: 4
 
 pl_trainer:
@@ -107,10 +108,10 @@ pl_trainer:
   log_every_n_steps: 10
   gradient_clip_val: 0.5
   max_epochs: null
-  check_val_every_n_epoch: 1
-  val_check_interval: 1.0
-  max_steps: 20000
-  devices: 1
+  check_val_every_n_epoch: null
+  val_check_interval: 3000
+  max_steps: 500000
+  devices: 8
 
 logger:
   _target_: pytorch_lightning.loggers.WandbLogger
@@ -123,4 +124,3 @@ logger:
   id: null
 
 use_wandb: true
-

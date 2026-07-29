@@ -50,8 +50,8 @@ GENMO 的核心模型 GEM 是一个统一的人体动作模型。它既可以做
 
 - `gem_smpl_server`：完整 GEM-SMPL 训练配置，使用当前已经准备好的七个训练集和四个
   验证集。它只移除了本地缺失的 `3DPW-OCC` 额外遮挡增强数据，不改变模型主体。
-- `gem_smpl_motionxpp`：在官方完整 `gem_smpl.ckpt` 基础上加入 Motion-X++ 的
-  SMPL-X 三维动作和语义文本监督，适合做扩展数据微调。
+- `gem_smpl_motionxpp`：将 Motion-X++ 的 SMPL-X 三维动作和语义文本加入完整
+  GEM 网络，当前配置从随机初始化训练 500,000 步。
 
 训练阶段不会常驻加载 T5-3B。HumanML3D 和 Motion-X++ 的文本先离线编码为
 `[50, 1024]` 特征，训练 DataLoader 直接读取这些预计算结果。因此训练机器需要足够的
@@ -333,8 +333,8 @@ hf download nvidia/GEM-X \
 ls -lh inputs/pretrained/gem_smpl.ckpt
 ```
 
-这个文件约 5.5 GB。文本、音乐生成和 Motion-X++ 微调都需要完整 checkpoint，不能用
-实时 ONNX denoiser 代替。
+这个文件约 5.5 GB。文本、音乐生成和基于官方权重继续训练需要完整 checkpoint，不能用
+实时 ONNX denoiser 代替。当前 `gem_smpl_motionxpp` 从头训练命令不加载这个文件。
 
 ### 5.3 T5-3B
 
@@ -887,7 +887,7 @@ find gem_smpl/missing_hmr4d_support/inputs -type f | sort
 
 ## 8. HumanML3D：动作与文本训练数据
 
-### 7.1 获取官方仓库
+### 8.1 获取官方仓库
 
 HumanML3D 官方仓库不能直接重新分发 AMASS 动作，但提供 `index.csv`、训练划分和文本
 标注。先克隆：
@@ -911,7 +911,7 @@ test -f /home/weili/datasets/HumanML3D_official/HumanML3D/texts.zip
 当前构建器可以只读访问 `texts.zip`，不要求把全部文本解压。如果已解压
 `HumanML3D/texts/`，也会优先读取目录。
 
-### 7.2 准备精确 AMASS 映射表
+### 8.2 准备精确 AMASS 映射表
 
 本仓库的转换不是根据名称模糊猜测 AMASS 动作，而是读取已经审计过的精确映射：
 
@@ -935,7 +935,7 @@ sha256sum outputs/humanml3d_amass_exact_coverage.csv
 `build_humanml3d_smpl.py` 的输出。构建器只消费该报告，不会用模糊匹配补齐 unmatched
 动作。
 
-### 7.3 小规模构建
+### 8.3 小规模构建
 
 先处理 20 条精确动作，验证环境和路径：
 
@@ -975,7 +975,7 @@ for key in list(data)[:5]:
 PY
 ```
 
-### 7.4 全量 dry-run 和正式构建
+### 8.4 全量 dry-run 和正式构建
 
 先执行全量检查但不保存主 PTH：
 
@@ -1029,7 +1029,7 @@ exact_family_path 训练基础动作   10,600
 140 条非法文本行、14 个过短子片段和 107 个 duration mismatch；它们没有被静默隐藏。
 当前没有缺失 AMASS key、缺失文本文件或非法动作 shape。
 
-### 7.5 提取 T5-3B 特征
+### 8.5 提取 T5-3B 特征
 
 先估算空间，不加载 T5：
 
@@ -1091,7 +1091,7 @@ ls -lh \
 
 ## 9. AIST++：音乐条件动作训练数据
 
-### 8.1 下载官方标注和视频
+### 9.1 下载官方标注和视频
 
 [AIST++ 官方下载页](https://google.github.io/aistplusplus_dataset/download.html)提供
 motion、2D/3D keypoints、camera、split 和完整 annotation 包。下载前需要阅读并同意
@@ -1126,7 +1126,7 @@ python downloader.py \
 官方 motion 和 keypoints 是 60 FPS。GENMO 的 AIST++ 构建工具会同步取 `[::2]` 转为
 30 FPS。
 
-### 8.2 准备同名对齐 WAV
+### 9.2 准备同名对齐 WAV
 
 EDGE baseline35 特征必须从与每个 sequence 时间对齐的同名 WAV 提取，例如：
 
@@ -1152,7 +1152,7 @@ ffmpeg -i <sequence_video.mp4> -vn -ac 1 <sequence_name>.wav
 这条命令只负责抽取已经对齐的视频音轨，不负责估计偏移。仓库当前没有自动恢复
 per-sequence 音乐对齐关系的工具，因此应把对齐 WAV 目录作为需要备份的数据资产。
 
-### 8.3 审计 AIST++
+### 9.3 审计 AIST++
 
 ```bash
 cd /home/weili/GENMO
@@ -1164,7 +1164,7 @@ python tools/data/aistpp/audit_aistpp.py \
     /home/weili/datasets/AISTPP_fullset/music_prepare/aligned_wav_official
 ```
 
-### 8.4 提取 EDGE baseline35 音乐特征
+### 9.4 提取 EDGE baseline35 音乐特征
 
 ```bash
 python tools/data/aistpp/extract_musicfeat_v2.py \
@@ -1206,7 +1206,7 @@ target_fps  = 30
 
 不要截断列、补列、PCA、随机投影或用 mel spectrogram 替代。
 
-### 8.5 构建官方 980/20/20 训练文件
+### 9.5 构建官方 980/20/20 训练文件
 
 先 dry-run：
 
@@ -1270,7 +1270,7 @@ minitrain             16
 
 ## 10. BEAT2：语音条件动作训练数据
 
-### 9.1 下载
+### 10.1 下载
 
 BEAT2 使用 Git LFS 发布。可从官方 PantoMatrix Hugging Face 数据仓库克隆：
 
@@ -1301,7 +1301,7 @@ Spanish/
 
 各语言目录下应有 split CSV、SMPL-X NPZ 和对应 WAV。
 
-### 9.2 审计并构建 split 索引
+### 10.2 审计并构建 split 索引
 
 先 dry-run：
 
@@ -1363,7 +1363,7 @@ Motion-X++ 不是 `gem_smpl_server` 的必要数据，而是后来加入的扩�
 只使用可靠的 SMPL-X 三维动作和 semantic text，不启用关键点条件。原因是公开关键点
 归档没有配套图像尺寸和校准相机参数，不能伪造相机 K。
 
-### 10.1 下载
+### 11.1 下载
 
 从官方 Hugging Face 数据集下载到外部数据盘：
 
@@ -1414,7 +1414,7 @@ if [ ! -e inputs/Motion-Xplusplus ]; then
 fi
 ```
 
-### 10.2 审计
+### 11.2 审计
 
 ```bash
 python tools/data/motionxpp/inspect_motionxpp.py \
@@ -1442,7 +1442,7 @@ python tools/data/motionxpp/inspect_motionxpp.py \
 outputs/motionxpp_inspect/recommended_subsets.txt
 ```
 
-### 10.3 先做 8 条 smoke
+### 11.3 先做 8 条 smoke
 
 ```bash
 python tools/data/motionxpp/build_motionxpp_genmo.py \
@@ -1488,7 +1488,7 @@ python tools/data/motionxpp/preflight_motionxpp.py \
   --report outputs/motionxpp_smoke/preflight_report.json
 ```
 
-### 10.4 全量构建
+### 11.4 全量构建
 
 动作分片：
 
@@ -1608,7 +1608,7 @@ inputs/
 └── BEAT2 -> /home/weili/datasets/BEAT2_official
 ```
 
-Motion-X++ 微调还需要：
+Motion-X++ 从头训练还需要：
 
 ```text
 inputs/Motion-Xplusplus -> /home/weili/datasets/Motion-Xplusplus
@@ -1698,7 +1698,7 @@ finite、split 或资源问题，不要通过删除 metric、吞掉异常或填�
 
 ## 15. 训练命令
 
-### 14.1 先跑 20 步 smoke
+### 15.1 先跑 20 步 smoke
 
 ```bash
 CUDA_VISIBLE_DEVICES=0 \
@@ -1719,7 +1719,7 @@ python scripts/train.py \
 - 验证 callback 能实例化；
 - checkpoint 输出目录可写。
 
-### 14.2 从随机初始化训练完整模型
+### 15.2 从随机初始化训练完整模型
 
 ```bash
 CUDA_VISIBLE_DEVICES=0 \
@@ -1743,7 +1743,7 @@ learning rate       2e-4
 
 “随机初始化完整训练”才是严格意义上的从头训练。它计算量很大，先确认 smoke 训练稳定。
 
-### 14.3 从官方 checkpoint 加载权重继续训练
+### 15.3 从官方 checkpoint 加载权重继续训练
 
 ```bash
 CUDA_VISIBLE_DEVICES=0 \
@@ -1756,7 +1756,7 @@ python scripts/train.py \
 这里的 `ckpt_path` 只加载模型权重，不恢复 optimizer、scheduler、global step 或原训练
 日志状态。它适合迁移学习和基于官方权重继续训练，不等于真正的断点恢复。
 
-### 14.4 多 GPU
+### 15.4 多 GPU
 
 四卡示例：
 
@@ -1773,7 +1773,7 @@ python scripts/train.py \
 `batch_size` 是每个进程的 batch。四卡时全局有效 batch 通常为单卡 batch 乘设备数，
 还要结合梯度累积设置判断。不要只看命令行中的一个数字。
 
-### 14.5 W&B
+### 15.5 W&B
 
 需要在线记录：
 
@@ -1792,7 +1792,7 @@ python scripts/train.py \
 use_wandb=false
 ```
 
-### 14.6 回归模型
+### 15.6 回归模型
 
 只训练视频、二维关键点和相机条件的回归路径：
 
@@ -1805,7 +1805,7 @@ python scripts/train.py \
 
 这个 checkpoint 不具备文本或音乐 DDIM 生成能力。
 
-### 14.7 原始完整配置
+### 15.7 原始完整配置
 
 原始 `gem_smpl` 配置还包含本机未准备的 `3dpw_occ_v1`：
 
@@ -1822,15 +1822,14 @@ exp=gem_smpl_server
 
 ---
 
-## 16. Motion-X++ 微调训练
+## 16. Motion-X++ 从头训练
 
-Motion-X++ 完整构建和预检通过后，先做 20 步：
+Motion-X++ 完整构建和预检通过后，先从随机初始化做 20 步：
 
 ```bash
 CUDA_VISIBLE_DEVICES=0 \
 python scripts/train.py \
   exp=gem_smpl_motionxpp \
-  ckpt_path=inputs/pretrained/gem_smpl.ckpt \
   pl_trainer.devices=1 \
   pl_trainer.max_steps=20 \
   data.loader_opts.train.batch_size=2 \
@@ -1838,26 +1837,15 @@ python scripts/train.py \
   use_wandb=false
 ```
 
-正式单卡：
+正式八卡，每张卡 batch 128：
 
 ```bash
-CUDA_VISIBLE_DEVICES=0 \
+CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 \
 python scripts/train.py \
   exp=gem_smpl_motionxpp \
-  ckpt_path=inputs/pretrained/gem_smpl.ckpt \
-  pl_trainer.devices=1 \
-  use_wandb=false
-```
-
-正式四卡：
-
-```bash
-CUDA_VISIBLE_DEVICES=0,1,2,3 \
-python scripts/train.py \
-  exp=gem_smpl_motionxpp \
-  ckpt_path=inputs/pretrained/gem_smpl.ckpt \
-  pl_trainer.devices=4 \
-  data.loader_opts.train.batch_size=4 \
+  pl_trainer.devices=8 \
+  pl_trainer.max_steps=500000 \
+  data.loader_opts.train.batch_size=128 \
   data.loader_opts.train.num_workers=4 \
   use_wandb=false
 ```
@@ -1865,18 +1853,21 @@ python scripts/train.py \
 当前 Motion-X++ 配置的主要设置：
 
 ```text
-初始化权重       官方 gem_smpl.ckpt
-学习率           2e-5
-最大步数         20,000
+初始化权重       随机初始化
+学习率           2e-4
+最大步数         500,000
 精度             16-mixed
-默认 batch       4
+默认设备         8 张 GPU
+每卡 batch       128
+全局 batch       1,024
 默认 workers     4
 条件             SMPL-X 3D + semantic text
 关键点条件       关闭
 ```
 
-模型结构仍保留完整 audio/music 参数，以兼容官方 checkpoint，但这个实验没有加入 BEAT2
-或 3DPW-OCC 数据源。
+模型结构仍保留完整 audio/music 参数，但这个实验没有加入 BEAT2 或 3DPW-OCC 数据源。
+首次启动不要传入 `ckpt_path`；只有以后从本实验自己的 checkpoint 继续训练时才使用
+`resume_mode=last`。
 
 ---
 
@@ -1976,7 +1967,7 @@ python scripts/demo/demo_music.py \
 
 ## 19. 常见问题
 
-### 18.1 T5 下载失败或代理报错
+### 19.1 T5 下载失败或代理报错
 
 如果出现 Hugging Face 代理错误，例如不支持的 `socks://` scheme，先检查：
 
@@ -1999,23 +1990,23 @@ unset http_proxy https_proxy all_proxy
 --local-files-only
 ```
 
-### 18.2 `SMPLX_NEUTRAL.npz` 不存在
+### 19.2 `SMPLX_NEUTRAL.npz` 不存在
 
 这是许可证模型，不能靠 `pip install smplx` 自动获得。必须从 SMPL-X 官方下载后放到
 指定目录。不要把其他 body model 改名冒充。
 
-### 18.3 AIST++ 音乐特征少于动作数量
+### 19.3 AIST++ 音乐特征少于动作数量
 
 先查 `missing_wavs.json`。每条动作需要同 stem 且时间对齐的 WAV。不能把整首音乐从
 第 0 秒复制给所有舞蹈，也不能用最后一帧 padding 掩盖大范围缺失。
 
-### 18.4 HumanML3D 缺少映射 CSV
+### 19.4 HumanML3D 缺少映射 CSV
 
 `build_humanml3d_smpl.py` 不生成映射表。必须从当前工程资产备份
 `outputs/humanml3d_amass_exact_coverage.csv`，并校验 SHA256。没有映射表时不要启用
 模糊匹配。
 
-### 18.5 BEAT2 是 Git LFS pointer
+### 19.5 BEAT2 是 Git LFS pointer
 
 如果文件只有几 KB 并以 Git LFS 文本开头，执行：
 
@@ -2025,7 +2016,7 @@ git lfs install
 git lfs pull
 ```
 
-### 18.6 DataLoader worker 被杀死
+### 19.6 DataLoader worker 被杀死
 
 先把 worker 和 batch 调低：
 
@@ -2039,7 +2030,7 @@ python scripts/train.py exp=gem_smpl_server \
 确认可运行后再逐步增加。HumanML3D 是较大的单体 PTH，Motion-X++ 已采用分片和小型
 LRU 以减少 worker 内存。
 
-### 18.7 CUDA OOM
+### 19.7 CUDA OOM
 
 依次降低：
 
@@ -2051,7 +2042,7 @@ pl_trainer.devices
 训练已经默认使用 `16-mixed`。不要在同一张卡上同时运行 T5 提取、推理 server 和正式
 训练。
 
-### 18.8 `gem_smpl` 启动时缺少 3DPW-OCC
+### 19.8 `gem_smpl` 启动时缺少 3DPW-OCC
 
 这是原配置的数据依赖。当前数据条件下改用：
 
@@ -2061,7 +2052,7 @@ exp=gem_smpl_server
 
 不要创建空目录或伪造图像特征来让原配置越过检查。
 
-### 18.9 预检通过但训练很慢
+### 19.9 预检通过但训练很慢
 
 预检只证明契约和模型路径正确，不代表当前 I/O 和 worker 数已经最优。观察 GPU
 utilization、CPU、磁盘吞吐和共享内存，再调 `batch_size`、`num_workers` 和数据盘位置。
@@ -2174,11 +2165,10 @@ nvidia-smi > outputs/reproduction_nvidia_smi.txt
 exp=gem_smpl_server
 ```
 
-如果目标是在官方完整 checkpoint 上增加 Motion-X++ 三维动作和语义文本监督，使用：
+如果目标是使用 Motion-X++ 三维动作和语义文本从头训练完整 GEM，使用：
 
 ```text
 exp=gem_smpl_motionxpp
-ckpt_path=inputs/pretrained/gem_smpl.ckpt
 ```
 
 不要把实时 ONNX 模型用于文本、音乐或完整扩散训练；不要把 partial AIST++ 数据称为

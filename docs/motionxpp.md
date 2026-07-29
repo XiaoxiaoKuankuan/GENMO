@@ -267,7 +267,7 @@ python tools/data/motionxpp/preflight_motionxpp.py \
   --report outputs/motionxpp_preflight/report.json
 ```
 
-## 8. 单卡 20 步训练 smoke
+## 8. 从头训练的单卡 20 步 smoke
 
 这一步只在数据预检通过后手工启动：
 
@@ -275,7 +275,6 @@ python tools/data/motionxpp/preflight_motionxpp.py \
 CUDA_VISIBLE_DEVICES=0 \
 python scripts/train.py \
   exp=gem_smpl_motionxpp \
-  ckpt_path=inputs/pretrained/gem_smpl.ckpt \
   pl_trainer.devices=1 \
   pl_trainer.max_steps=20 \
   data.loader_opts.train.batch_size=2 \
@@ -283,18 +282,18 @@ python scripts/train.py \
   use_wandb=false
 ```
 
-这里的 `ckpt_path` 调用仓库现有 `load_pretrained_model()`，只加载官方完整 GEM-SMPL
-权重，不把 checkpoint 中的 `global_step` 当作 Lightning optimizer resume。
+该命令不传 `ckpt_path`，模型从随机初始化开始；20 步只用于验证数据、前向、反向、
+优化器和验证回调，不能作为正式训练结果。
 
-## 9. 四卡正式微调
+## 9. 八卡正式从头训练
 
 ```bash
-CUDA_VISIBLE_DEVICES=0,1,2,3 \
+CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 \
 python scripts/train.py \
   exp=gem_smpl_motionxpp \
-  ckpt_path=inputs/pretrained/gem_smpl.ckpt \
-  pl_trainer.devices=4 \
-  data.loader_opts.train.batch_size=4 \
+  pl_trainer.devices=8 \
+  pl_trainer.max_steps=500000 \
+  data.loader_opts.train.batch_size=128 \
   data.loader_opts.train.num_workers=4
 ```
 
@@ -303,13 +302,15 @@ python scripts/train.py \
 - 完整 GEM 网络，不删除 audio/music 参数；
 - 不加入 BEAT2；
 - 不加入缺失的 `3dpw_occ_v1`；
-- AdamW 学习率 `2e-5`；
-- `max_steps=20000`；
-- 每 epoch 验证；
-- 每卡 batch size 4、4 个 worker。
+- 不加载预训练 checkpoint，从随机初始化训练；
+- AdamW 学习率 `2e-4`；
+- `max_steps=500000`；
+- 每 3000 个优化步骤验证；
+- 8 张 GPU，每卡 batch size 128、4 个 worker；
+- 无梯度累积时全局 batch size 为 `8 × 128 = 1024`。
 
-真正恢复 optimizer、scheduler 和 global step 时使用项目现有 `resume_mode=last`，不要
-同时把旧的官方 checkpoint 当成 resume checkpoint。
+真正恢复 optimizer、scheduler 和 global step 时使用项目现有 `resume_mode=last`。
+从头训练的首次启动不要传入 `ckpt_path`。
 
 ## 与 Motion-X V1 的关系
 
@@ -317,4 +318,3 @@ python scripts/train.py \
 Motion-X V1。这里实现的是可审计的 Motion-X++ `motion_generation/smplx322` +
 `semantic_label` 支持；没有声称严格复现 Motion-X V1 的全部 subset、face/hand
 目标或论文纯 2D-only 训练。
-
