@@ -675,6 +675,14 @@ python tools/benchmark/benchmark_modules.py
 
 ## 🏋️ 训练
 
+如果要从一台新机器开始完成环境安装、模型下载、HumanML3D/AIST++/BEAT2/Motion-X++
+数据准备、T5 与音乐特征提取、训练预检、20 步 smoke、正式训练和断点恢复，请优先阅读：
+
+> [GENMO / GEM-SMPL 完整训练复现指南（中文）](docs/TRAINING_REPRODUCTION_CN.md)
+
+该文档同时记录了当前真实构建结果、必须单独备份的 HumanML3D 精确映射表和 AIST++
+同名对齐 WAV，并明确区分从头训练、加载官方权重微调与真正断点恢复。
+
 数据集下载链接和目录结构请参阅 [数据集准备文档](docs/DATA.md)。
 
 ### 构建 HumanML3D SMPL-X 动作元数据
