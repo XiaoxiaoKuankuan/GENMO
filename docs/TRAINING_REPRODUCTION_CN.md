@@ -23,11 +23,12 @@ https://github.com/XiaoxiaoKuankuan/GENMO
 ## 阅读导航
 
 - 第 1～3 节：项目定位、框架理解和正确复现顺序。
-- 第 4～6 节：系统环境、Python 包、checkpoint、身体模型和基础动作数据。
-- 第 7～10 节：HumanML3D、AIST++、BEAT2 和 Motion-X++ 的完整准备过程。
-- 第 11～13 节：新增前处理工具、最终目录和统一训练预检。
-- 第 14～17 节：smoke、正式训练、多卡、微调、断点恢复和训练后验证。
-- 第 18～21 节：常见故障、新服务器检查表、复现边界和推荐结论。
+- 第 4～5 节：系统环境、Python 包、checkpoint 和身体模型。
+- 第 6 节：拿到仓库后从安装到真实 Demo 的最短验证路线。
+- 第 7～11 节：基础动作数据、HumanML3D、AIST++、BEAT2 和 Motion-X++。
+- 第 12～14 节：新增前处理工具、最终目录和统一训练预检。
+- 第 15～18 节：smoke、正式训练、多卡、微调、断点恢复和训练后验证。
+- 第 19～22 节：常见故障、新服务器检查表、复现边界和推荐结论。
 
 ---
 
@@ -413,7 +414,417 @@ ONNX denoiser 是 regression-only，只用于实时视频回归，不是完整�
 
 ---
 
-## 6. 基础动作与验证数据
+## 6. 拿到仓库后的快速 Demo 验证
+
+这一节给出一套最短、可复制的上手流程。它的目的不是替代后面的完整数据准备，而是在
+投入大量时间下载训练集之前，先确认仓库、Python、CUDA、checkpoint、T5 和基本推理
+链路可以工作。
+
+### 6.1 从克隆到进入环境
+
+```bash
+cd /home/weili
+
+git clone https://github.com/XiaoxiaoKuankuan/GENMO.git
+cd GENMO
+
+sudo apt update
+sudo apt install -y \
+  git \
+  git-lfs \
+  curl \
+  wget \
+  ffmpeg \
+  libsndfile1 \
+  build-essential
+
+git lfs install
+
+curl -LsSf https://astral.sh/uv/install.sh | sh
+source "$HOME/.local/bin/env"
+
+uv venv .venv --python 3.10
+source .venv/bin/activate
+
+uv pip install \
+  torch==2.6.0 \
+  torchvision==0.21.0 \
+  --index-url https://download.pytorch.org/whl/cu124
+
+uv pip install -e ".[train,dev]"
+```
+
+以后每次打开新终端，先执行：
+
+```bash
+cd /home/weili/GENMO
+source .venv/bin/activate
+```
+
+验证安装：
+
+```bash
+python - <<'PY'
+import torch
+import gem
+
+print("PyTorch:", torch.__version__)
+print("CUDA runtime:", torch.version.cuda)
+print("CUDA available:", torch.cuda.is_available())
+if torch.cuda.is_available():
+    print("GPU:", torch.cuda.get_device_name(0))
+print("GENMO import: OK")
+PY
+```
+
+### 6.2 准备最少模型资源
+
+下载完整 checkpoint：
+
+```bash
+mkdir -p inputs/pretrained
+
+hf download nvidia/GEM-X \
+  gem_smpl.ckpt \
+  --local-dir inputs/pretrained
+
+ls -lh inputs/pretrained/gem_smpl.ckpt
+```
+
+从 SMPL-X 官网手动下载身体模型并放置：
+
+```text
+inputs/checkpoints/body_models/smplx/SMPLX_NEUTRAL.npz
+inputs/checkpoints/body_models/smplx/SMPLX_MALE.npz
+inputs/checkpoints/body_models/smplx/SMPLX_FEMALE.npz
+```
+
+下载本地 T5-3B：
+
+```bash
+mkdir -p /home/weili/models/t5-3b
+
+hf download google-t5/t5-3b \
+  --local-dir /home/weili/models/t5-3b
+
+du -sh /home/weili/models/t5-3b
+```
+
+### 6.3 先运行不加载大模型的 dry-run
+
+纯文本 dry-run 不加载 T5、GEM、checkpoint，也不要求 CUDA：
+
+```bash
+python scripts/demo/demo_smpl_text.py \
+  --prompt "a person walks forward and waves" \
+  --num_frames 60 \
+  --fps 30 \
+  --dry_run
+```
+
+关键输出应接近：
+
+```text
+kp2d:          (60, 17, 3)
+bbx_xys:       (60, 3)
+K_fullimg:     (60, 3, 3)
+cam_angvel:    (60, 6)
+f_imgseq:      (60, 1024)
+text_embed:    (50, 1024)
+has_img:       0 / 60
+has_2d:        0 / 60
+has_cam:       0 / 60
+```
+
+音乐 dry-run 会读取真实 WAV、MP3 或 FLAC 并提取 EDGE baseline35，但不加载 GEM：
+
+```bash
+python scripts/demo/demo_music.py \
+  --audio /path/to/song.wav \
+  --duration_sec 2 \
+  --dry_run
+```
+
+关键输出应包括：
+
+```text
+music_embed: (约 60, 35)
+has_music:   L / L
+has_img:     0 / L
+has_2d:      0 / L
+has_cam:     0 / L
+```
+
+### 6.4 运行真实纯文本生成
+
+先用 60 或 120 帧并关闭渲染，验证最核心的文本扩散和 SMPL-X 参数保存：
+
+```bash
+CUDA_VISIBLE_DEVICES=0 \
+python scripts/demo/demo_smpl_text.py \
+  --prompt "a person walks forward, turns left, and waves with the right hand" \
+  --ckpt_path inputs/pretrained/gem_smpl.ckpt \
+  --t5_model /home/weili/models/t5-3b \
+  --local_files_only \
+  --num_frames 120 \
+  --fps 30 \
+  --seed 42 \
+  --guidance_scale 2.5 \
+  --ddim_steps 50 \
+  --shape_mode zero \
+  --no_render
+```
+
+成功结果位于：
+
+```text
+outputs/text_motion/<唯一动作目录>/
+```
+
+检查发布文件：
+
+```bash
+find outputs/text_motion \
+  -maxdepth 2 \
+  -type f \
+  \( -name READY -o -name smpl_params.pt -o -name motion.npz \) \
+  -print
+```
+
+检查最新一条动作的 shape、finite 和零体型：
+
+```bash
+python - <<'PY'
+from pathlib import Path
+import torch
+
+files = sorted(
+    Path("outputs/text_motion").glob("*/smpl_params.pt"),
+    key=lambda path: path.stat().st_mtime,
+)
+if not files:
+    raise SystemExit("No text-motion smpl_params.pt was found")
+
+path = files[-1]
+data = torch.load(path, map_location="cpu", weights_only=False)
+body = data["body_params_global"]
+
+print("file:", path)
+print("body_pose:", tuple(body["body_pose"].shape))
+print("global_orient:", tuple(body["global_orient"].shape))
+print("transl:", tuple(body["transl"].shape))
+print("betas:", tuple(body["betas"].shape))
+print("all finite:", all(value.isfinite().all() for value in body.values()))
+print("betas norm:", body["betas"].norm().item())
+PY
+```
+
+120 帧时应为：
+
+```text
+body_pose:     (120, 63)
+global_orient: (120, 3)
+transl:        (120, 3)
+betas:         (120, 10)
+all finite:    True
+betas norm:    0.0
+```
+
+得到 `smpl_params.pt` 和最后创建的 `READY`，说明 T5 编码、完整 GEM checkpoint、
+DDIM、151 维动作解码、SMPL-X 参数生成和原子发布已经工作。
+
+### 6.5 运行真实音乐生成
+
+```bash
+CUDA_VISIBLE_DEVICES=0 \
+python scripts/demo/demo_music.py \
+  --audio /path/to/song.wav \
+  --ckpt_path inputs/pretrained/gem_smpl.ckpt \
+  --start_sec 0 \
+  --duration_sec 5 \
+  --output_root outputs/music_motion \
+  --seed 42 \
+  --shape_mode zero \
+  --guidance_scale 2.5 \
+  --ddim_steps 50 \
+  --save_features \
+  --no_render
+```
+
+检查：
+
+```bash
+find outputs/music_motion \
+  -maxdepth 2 \
+  -type f \
+  \( -name READY -o -name smpl_params.pt -o -name music_features.pt \) \
+  -print
+```
+
+每个成功目录至少包含：
+
+```text
+smpl_params.pt
+motion.npz
+raw_motion_151d.pt
+music_features.pt
+metadata.json
+source_audio.txt
+READY
+```
+
+需要全局渲染和原音乐合成时，删除 `--no_render` 并增加：
+
+```text
+--mux_audio
+```
+
+例如：
+
+```bash
+CUDA_VISIBLE_DEVICES=0 \
+python scripts/demo/demo_music.py \
+  --audio /path/to/song.wav \
+  --ckpt_path inputs/pretrained/gem_smpl.ckpt \
+  --duration_sec 5 \
+  --output_root outputs/music_motion \
+  --shape_mode zero \
+  --mux_audio
+```
+
+渲染或 ffmpeg 失败不会改变已经生成的 SMPL-X 参数；排查动作生成时优先使用
+`--no_render`，把模型问题和可视化依赖问题分开。
+
+### 6.6 运行离线视频 Demo
+
+视频 Demo 还需要：
+
+```text
+inputs/checkpoints/hmr2/epoch=10-step=25000.ckpt
+inputs/checkpoints/vitpose/vitpose-h-multi-coco.pth
+```
+
+从第 5.5 节给出的 GVHMR 模型目录下载后运行：
+
+```bash
+CUDA_VISIBLE_DEVICES=0 \
+python scripts/demo/demo_smpl.py \
+  --input_list /path/to/video.mp4 \
+  --ckpt_path inputs/pretrained/gem_smpl.ckpt
+```
+
+视频和文本混合输入：
+
+```bash
+CUDA_VISIBLE_DEVICES=0 \
+python scripts/demo/demo_smpl.py \
+  --input_list \
+    /path/to/video1.mp4 \
+    "text:a person walks forward and raises both arms" \
+    /path/to/video2.mp4 \
+  --ckpt_path inputs/pretrained/gem_smpl.ckpt
+```
+
+只保存参数、不渲染：
+
+```bash
+CUDA_VISIBLE_DEVICES=0 \
+python scripts/demo/demo_smpl.py \
+  --input_list /path/to/video.mp4 \
+  --ckpt_path inputs/pretrained/gem_smpl.ckpt \
+  --no_render
+```
+
+### 6.7 运行实时摄像头 Demo
+
+安装 GPU ONNX Runtime：
+
+```bash
+uv pip install onnxruntime-gpu nvidia-cudnn-cu12
+```
+
+检查执行提供器：
+
+```bash
+python - <<'PY'
+import onnxruntime as ort
+print(ort.get_available_providers())
+PY
+```
+
+输出中应包含：
+
+```text
+CUDAExecutionProvider
+```
+
+摄像头运行：
+
+```bash
+CUDA_VISIBLE_DEVICES=0 \
+python scripts/demo/demo_webcam.py \
+  --camera_id 0 \
+  --no_imgfeat \
+  --display \
+  --shape_mode zero
+```
+
+摄像头编号不是 0 时修改，例如：
+
+```text
+--camera_id 2
+```
+
+使用视频文件按实际 FPS 播放：
+
+```bash
+CUDA_VISIBLE_DEVICES=0 \
+python scripts/demo/demo_webcam.py \
+  --video /path/to/video.mp4 \
+  --no_imgfeat \
+  --display \
+  --shape_mode zero
+```
+
+首次运行缺少 ONNX 文件时，脚本会按照现有逻辑下载到 `inputs/onnx/`。实时 ONNX 验证
+成功只代表视频 regression 路径正常，文本和音乐仍应通过完整 PyTorch checkpoint 验证。
+
+### 6.8 推荐的最短验证顺序
+
+如果只想最快确认新机器能够运行，依次执行：
+
+```bash
+# 1. Python、CUDA 和仓库导入
+python -c \
+  "import torch, gem; print(torch.__version__, torch.cuda.is_available())"
+
+# 2. 不加载大模型的文本输入检查
+python scripts/demo/demo_smpl_text.py \
+  --prompt "a person walks forward" \
+  --num_frames 60 \
+  --dry_run
+
+# 3. 真实文本生成
+CUDA_VISIBLE_DEVICES=0 \
+python scripts/demo/demo_smpl_text.py \
+  --prompt "a person walks forward" \
+  --ckpt_path inputs/pretrained/gem_smpl.ckpt \
+  --t5_model /home/weili/models/t5-3b \
+  --local_files_only \
+  --num_frames 60 \
+  --shape_mode zero \
+  --no_render
+
+# 4. 检查完整制品是否最后发布 READY
+find outputs/text_motion -maxdepth 2 -name READY -print
+```
+
+这四步完成后，再继续下载数百 GB 训练数据、执行第 14 节 preflight 和第 15 节训练，
+可以显著减少把环境问题拖到数据准备完成后才发现的情况。
+
+---
+
+## 7. 基础动作与验证数据
 
 完整训练首先需要 AMASS、BEDLAM、H36M、3DPW，验证需要 EMDB 和 RICH。这些数据不是
 直接把原始数据下载到仓库就能读取，而是使用 GVHMR 已经整理好的 `hmr4d_support`
@@ -474,7 +885,7 @@ find gem_smpl/missing_hmr4d_support/inputs -type f | sort
 
 ---
 
-## 7. HumanML3D：动作与文本训练数据
+## 8. HumanML3D：动作与文本训练数据
 
 ### 7.1 获取官方仓库
 
@@ -678,7 +1089,7 @@ ls -lh \
 
 ---
 
-## 8. AIST++：音乐条件动作训练数据
+## 9. AIST++：音乐条件动作训练数据
 
 ### 8.1 下载官方标注和视频
 
@@ -857,7 +1268,7 @@ minitrain             16
 
 ---
 
-## 9. BEAT2：语音条件动作训练数据
+## 10. BEAT2：语音条件动作训练数据
 
 ### 9.1 下载
 
@@ -946,7 +1357,7 @@ test -f inputs/BEAT2/all_splits.pth
 
 ---
 
-## 10. Motion-X++：后来补充的三维动作与文本数据
+## 11. Motion-X++：后来补充的三维动作与文本数据
 
 Motion-X++ 不是 `gem_smpl_server` 的必要数据，而是后来加入的扩展训练来源。当前第一版
 只使用可靠的 SMPL-X 三维动作和 semantic text，不启用关键点条件。原因是公开关键点
@@ -1131,7 +1542,7 @@ docs/motionxpp.md
 
 ---
 
-## 11. 本仓库新增的数据准备工具
+## 12. 本仓库新增的数据准备工具
 
 为了把各数据集整理成 GEM 训练直接读取的格式，本项目新增了以下几组工具。这里按任务
 说明用途，不逐个展开代码实现。
@@ -1162,7 +1573,7 @@ docs/motionxpp.md
 
 ---
 
-## 12. 完整训练前应有的目录
+## 13. 完整训练前应有的目录
 
 执行 `gem_smpl_server` 前，关键结构至少是：
 
@@ -1222,7 +1633,7 @@ readlink -f inputs/Motion-Xplusplus
 
 ---
 
-## 13. 统一训练前预检
+## 14. 统一训练前预检
 
 正式完整训练使用：
 
@@ -1285,7 +1696,7 @@ finite、split 或资源问题，不要通过删除 metric、吞掉异常或填�
 
 ---
 
-## 14. 训练命令
+## 15. 训练命令
 
 ### 14.1 先跑 20 步 smoke
 
@@ -1411,7 +1822,7 @@ exp=gem_smpl_server
 
 ---
 
-## 15. Motion-X++ 微调训练
+## 16. Motion-X++ 微调训练
 
 Motion-X++ 完整构建和预检通过后，先做 20 步：
 
@@ -1469,7 +1880,7 @@ python scripts/train.py \
 
 ---
 
-## 16. 断点恢复
+## 17. 断点恢复
 
 训练输出通常位于：
 
@@ -1518,7 +1929,7 @@ find outputs/gem_mixed -name '*.ckpt' -ls
 
 ---
 
-## 17. 训练后快速验证
+## 18. 训练后快速验证
 
 训练结束后先确认 checkpoint 可被 Lightning 读取，再根据目标选择 Demo。
 
@@ -1563,7 +1974,7 @@ python scripts/demo/demo_music.py \
 
 ---
 
-## 18. 常见问题
+## 19. 常见问题
 
 ### 18.1 T5 下载失败或代理报错
 
@@ -1657,7 +2068,7 @@ utilization、CPU、磁盘吞吐和共享内存，再调 `batch_size`、`num_wor
 
 ---
 
-## 19. 一台新服务器的最短检查清单
+## 20. 一台新服务器的最短检查清单
 
 完成迁移后逐项运行：
 
@@ -1718,7 +2129,7 @@ python scripts/train.py \
 
 ---
 
-## 20. 复现边界与应备份的资产
+## 21. 复现边界与应备份的资产
 
 能够只依赖公开下载和仓库脚本重建的内容：
 
@@ -1755,7 +2166,7 @@ nvidia-smi > outputs/reproduction_nvidia_smi.txt
 
 ---
 
-## 21. 当前推荐结论
+## 22. 当前推荐结论
 
 如果目标是复现当前已经验证的数据组合和完整训练链路，使用：
 
