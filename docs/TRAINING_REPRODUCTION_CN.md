@@ -1731,7 +1731,11 @@ python scripts/train.py \
 默认配置：
 
 ```text
-batch_size          4
+devices             8
+num_nodes           1
+strategy            auto（8 卡选择 DDP，单卡自动退化）
+batch_size          128/卡
+global_batch        1024（8 × 128）
 num_workers         4
 precision           16-mixed
 gradient_clip_val   0.5
@@ -1741,7 +1745,16 @@ optimizer           AdamW
 learning rate       2e-4
 ```
 
-“随机初始化完整训练”才是严格意义上的从头训练。它计算量很大，先确认 smoke 训练稳定。
+默认配置面向单机 8 张 6000D。“随机初始化完整训练”才是严格意义上的从头训练。
+它计算量很大，先确认 smoke 训练稳定。若要用单张卡保持 batch 128，可执行：
+
+```bash
+CUDA_VISIBLE_DEVICES=0 \
+python scripts/train.py \
+  exp=gem_smpl_server \
+  pl_trainer.devices=1 \
+  use_wandb=false
+```
 
 ### 15.3 从官方 checkpoint 加载权重继续训练
 

@@ -834,7 +834,7 @@ ln -s /home/weili/datasets/BEAT2_official inputs/BEAT2
 
 ### 服务器完整训练预检
 
-`configs/exp/gem_smpl_server.yaml` 保留 AMASS、BEDLAM、H36M、3DPW、AIST++、BEAT2 和 HumanML3D 七个训练集，以及 EMDB1、EMDB2、3DPW、RICH 四个验证集。它仍使用完整 regression + DDIM diffusion、多模态条件、151 维 EnDecoder、T5-3B 预计算特征、AdamW 和 16-bit mixed precision；仅移除了本地缺少 `imgfeats/3dpw_occ_train` 的 3DPW-OCC 额外遮挡增强源及其 metric。默认单卡起始设置为 batch size 4、4 个 worker，可通过 Hydra 命令行覆盖。
+`configs/exp/gem_smpl_server.yaml` 保留 AMASS、BEDLAM、H36M、3DPW、AIST++、BEAT2 和 HumanML3D 七个训练集，以及 EMDB1、EMDB2、3DPW、RICH 四个验证集。它仍使用完整 regression + DDIM diffusion、多模态条件、151 维 EnDecoder、T5-3B 预计算特征、AdamW 和 16-bit mixed precision；仅移除了本地缺少 `imgfeats/3dpw_occ_train` 的 3DPW-OCC 额外遮挡增强源及其 metric。默认面向单机 8 张 6000D：每卡 batch size 128、4 个 DataLoader worker，全局 batch 为 1024，并由 Lightning `strategy=auto` 自动选择 DDP。单卡验证可覆盖 `pl_trainer.devices=1`，batch 仍为 128。
 
 开始服务器训练前运行统一检查：
 
@@ -853,18 +853,20 @@ python tools/train/preflight_gem_smpl.py \
 
 `MetricRICH` 只创建实际用于 FK 和指标计算的 male/female/neutral 三个 SMPL-X 模型，并加载 `smpl_neutral_J_regressor.pt` 与 `smplx2smpl_sparse.pt`。已移除从未参与相机坐标指标、全局指标或日志的 SMPL mesh faces 初始化，因此 RICH 回调不再非必要地依赖 `SMPL_NEUTRAL.pkl`；所有 RICH 指标公式、metric key 和日志名称保持不变。
 
-预检通过后可启动完整服务器训练：
+预检通过后可启动默认的 8 卡完整服务器训练：
 
 ```bash
+CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 \
 python scripts/train.py exp=gem_smpl_server
 ```
 
-例如调整实际 batch 与 worker：
+单卡、batch 128 运行：
 
 ```bash
-python scripts/train.py exp=gem_smpl_server \
-  data.loader_opts.train.batch_size=8 \
-  data.loader_opts.train.num_workers=8
+CUDA_VISIBLE_DEVICES=0 \
+python scripts/train.py \
+  exp=gem_smpl_server \
+  pl_trainer.devices=1
 ```
 
 **回归模型（视频 → SMPL）：**

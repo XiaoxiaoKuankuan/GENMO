@@ -96,18 +96,24 @@ pipeline:
 data:
   loader_opts:
     train:
-      batch_size: 4
+      # batch_size 是每个 GPU/进程的 batch；8 卡时全局 batch 为 8 × 128 = 1024。
+      # 单卡调试只需覆盖 pl_trainer.devices=1，单卡 batch 仍保持 128。
+      batch_size: 128
       num_workers: 4
 
 pl_trainer:
   precision: 16-mixed
+  # 单机 8 卡默认由 Lightning 的 auto strategy 选择 DDP；覆盖 devices=1 时
+  # 自动退化为单 GPU，不需要维护另一份配置。
+  strategy: auto
+  num_nodes: 1
   log_every_n_steps: 10
   gradient_clip_val: 0.5
   max_epochs: null
   check_val_every_n_epoch: null
   val_check_interval: 3000
   max_steps: 500000
-  devices: 1
+  devices: 8
 
 logger:
   _target_: pytorch_lightning.loggers.WandbLogger

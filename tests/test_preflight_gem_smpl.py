@@ -116,6 +116,15 @@ def test_server_config_excludes_3dpw_occ_and_accepts_missing_optional_dir() -> N
     assert not optional.exists()
 
 
+def test_server_config_defaults_to_eight_gpus_and_batch_128_per_gpu() -> None:
+    cfg = preflight.compose_training_config(Path.cwd(), "gem_smpl_server")
+    assert cfg.pl_trainer.devices == 8
+    assert cfg.pl_trainer.num_nodes == 1
+    assert cfg.pl_trainer.strategy == "auto"
+    assert cfg.pl_trainer.precision == "16-mixed"
+    assert cfg.data.loader_opts.train.batch_size == 128
+
+
 def test_server_config_rejects_3dpw_occ() -> None:
     cfg = preflight.compose_training_config(Path.cwd(), "gem_smpl_server")
     with open_dict(cfg.train_datasets):
