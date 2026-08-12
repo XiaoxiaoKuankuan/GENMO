@@ -20,6 +20,27 @@ from gem.utils.net_utils import length_to_mask
 from .gem_cfg_sampler import ClassifierFreeSampleModel
 
 
+def apply_regression_targets_to_2d_only(
+    target_x: torch.Tensor, inputs: dict
+) -> torch.Tensor:
+    """Replace only 2D-only targets with regression predictions when required.
+
+    Fully supervised diffusion batches never need a regression pass.  A 2D-only
+    sample, however, has no valid 151D ground truth and must retain the legacy
+    regression-derived target rather than silently training against zeros.
+    """
+    mask_2d_only = inputs["mask"]["2d_only"].bool()
+    if not bool(mask_2d_only.any()):
+        return target_x
+    if "regression_outputs" not in inputs:
+        raise RuntimeError(
+            "diffusion-only cannot train 2d_only samples without regression outputs"
+        )
+    regression_target = inputs["regression_outputs"]["model_output"]["pred_x_start"].detach()
+    target_x[mask_2d_only] = regression_target[mask_2d_only]
+    return target_x
+
+
 class GEMDiffusion(nn.Module):
     def __init__(
         self,
@@ -122,16 +143,8 @@ class GEMDiffusion(nn.Module):
                 raise ValueError(f"Unsupported regression_input_type: {self.regression_input_type}")
         elif mode == "diffusion":
             t, t_weights = self.schedule_sampler.sample(motion.shape[0], motion.device)
-            if "regression_outputs" in inputs:
-                pred_x_start_regression = inputs["regression_outputs"]["model_output"][
-                    "pred_x_start"
-                ].detach()
-            else:
-                raise ValueError("No regression outputs found")
-                # pred_x_start_regression = torch.zeros_like(motion)
-            x_start_reg = pred_x_start_regression.clone()
             x_start = motion.clone()
-            x_start[inputs["mask"]["2d_only"]] = x_start_reg[inputs["mask"]["2d_only"]]
+            x_start = apply_regression_targets_to_2d_only(x_start, inputs)
             # regression_mask = (
             #     torch.rand(B).to(motion.device) < self.args.use_regression_outputs_prob
             # ).float()

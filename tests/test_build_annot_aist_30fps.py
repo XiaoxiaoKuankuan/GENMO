@@ -217,6 +217,39 @@ def test_dataset_custom_and_default_filenames_are_backward_compatible(
     assert default.idx2meta == ["sequence"]
 
 
+def test_music_only_eval_dataset_uses_center_clip_without_raw_audio(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """The validation loader must not require audio_array/ or audio/*.mp3."""
+    monkeypatch.setattr(aist_dataset_module, "make_smplx", lambda _kind: _DummyBodyModel())
+    sequence = "gBR_sBM_cAll_d04_mBR0_ch01"
+    torch.save({sequence: _record(240)}, tmp_path / "annot_aist_30fps.pt")
+    torch.save([sequence], tmp_path / "val.pt")
+    music_dir = tmp_path / "musicfeat_v2"
+    music_dir.mkdir()
+    torch.save(_valid_music(240), music_dir / f"{sequence}_musicfeat_fps30.pt")
+
+    dataset = AISTPlusPlusSmplDataset(
+        root=tmp_path,
+        split="val",
+        feat_version="v2",
+        strict_music_alignment=True,
+        load_raw_music_audio=False,
+        eval_motion_frames=120,
+        eval_clip_mode="center",
+        music_only_conditioning=True,
+    )
+    item = dataset[0]
+    assert item["length"] == 120
+    assert item["meta"]["start_end"] == (60, 180)
+    assert item["music_embed"].shape == (120, 35)
+    assert item["music_embed"][0, 0].item() == 60
+    assert item["music_array"].shape == (120, 1024)
+    assert torch.count_nonzero(item["music_array"]) == 0
+    assert not item["mask"]["has_2d_mask"].any()
+    assert item["mask"]["has_music_mask"].all()
+
+
 def _write_synthetic_tree(root: Path) -> tuple[Path, Path]:
     annotations = root / "annotations"
     music_root = root / "musicfeat_v2"
@@ -280,4 +313,3 @@ def test_dry_run_skips_missing_music_and_writes_only_reports(
     assert summary["successfully_built_count"] == 1
     assert summary["skipped_missing_musicfeat"] == 1
     assert summary["status"] == "dry_run_complete"
-

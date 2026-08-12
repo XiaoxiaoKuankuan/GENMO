@@ -26,7 +26,6 @@ def remap_legacy_state_dict(state_dict):
         "cliffcam_embedder.",
         "imgseq_embedder.",
         "cam_angvel_embedder.",
-        "cond_exists_embedder.",
     )
 
     remapped = OrderedDict()

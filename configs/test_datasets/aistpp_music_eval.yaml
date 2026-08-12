@@ -1,0 +1,13 @@
+# Deterministic fixed-window AIST++ validation for the music-only specialist.
+aistpp_music_eval:
+  _target_: gem.datasets.aistpp.aistplusplus.AISTPlusPlusSmplDataset
+  root: inputs/AIST++
+  split: val
+  feat_version: v2
+  eval_gen_only: true
+  strict_music_alignment: true
+  max_music_motion_frame_mismatch: 2
+  load_raw_music_audio: false
+  eval_motion_frames: 120
+  eval_clip_mode: center
+  music_only_conditioning: true

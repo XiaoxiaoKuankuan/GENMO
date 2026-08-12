@@ -20,7 +20,10 @@ class ClassifierFreeSampleModel:
 
     def __call__(self, x, timesteps, y=None, **kwargs):
         y_uncond = deepcopy(y)
-        y_uncond["encoded_text"] = torch.zeros_like(y["encoded_text"])
+        # Text is optional for specialist denoisers.  Generalist checkpoints
+        # keep the exact legacy behaviour when the key is present.
+        if "encoded_text" in y:
+            y_uncond["encoded_text"] = torch.zeros_like(y["encoded_text"])
         y_uncond["f_cond"] = y["f_uncond"]
         if "multi_text_data" in y:
             y_uncond["multi_text_data"]["text_embed"] = torch.zeros_like(

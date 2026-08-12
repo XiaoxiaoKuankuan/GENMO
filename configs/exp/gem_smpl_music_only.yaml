@@ -1,0 +1,104 @@
+# @package _global_
+# Independent AIST++ music-only GEM-SMPL diffusion specialist.
+defaults:
+  - /diffusion@model_cfg.diffusion: ddim
+  - override /data: mocap/trainX_testY
+  - override /model: gem
+  - override /network: diffusion_lg
+  - override /pipeline: music_only
+  - override /endecoder: v1_smpl_amass_bedlam
+  - override /optimizer: adamw_2e-4
+  - override /scheduler: epoch_half_500_750
+  - override /train_datasets:
+      - aistpp_train
+  - override /test_datasets:
+      - aistpp_music_eval
+  - override /callbacks:
+      - ckpt_saver/every10000s_top100
+      - prog_bar/prog_reporter_ed1
+      - train_speed_timer/base
+      - lr_monitor/pl
+  - _self_
+
+exp_name_base: gem_smpl_music_only
+exp_name_var: ""
+exp_name: ${exp_name_base}${exp_name_var}
+data_name: gem_smpl_music_only
+output_dir: outputs/${exp_name}
+pretrain_ckpt: null
+ckpt_path: null
+
+multicond_args: null
+
+train_datasets:
+  aistpp_train:
+    root: inputs/AIST++
+    split: train
+    feat_version: v2
+    strict_music_alignment: true
+    max_music_motion_frame_mismatch: 2
+    load_raw_music_audio: false
+    music_only_conditioning: true
+
+model:
+  model_cfg:
+    body_model: smplx
+    text_encoder: null
+
+    condition_mask:
+      mask_img_prob: 0.0
+      mask_cam_prob: 0.0
+      reuse_regression_mask: false
+      regression_no_img_mask: false
+
+    # Exactly one whole-sequence dropout.  The Pipeline disables the second
+    # per-frame random-null mechanism.
+    music_mask_prob: 0.1
+    audio_mask_prob: 0.0
+
+network:
+  model_cfg:
+    regression_only: false
+    denoiser:
+      args: ${pipeline.args}
+      encode_text: false
+      encoded_text_dim: 1024
+      text_encoder_cfg:
+        mode: none
+        cross_attn_type: mha
+
+pipeline:
+  args:
+    extract_features: false
+    regression_only: false
+
+data:
+  loader_opts:
+    train:
+      batch_size: 128
+      num_workers: 6
+    val:
+      batch_size: 1
+      num_workers: 1
+
+pl_trainer:
+  precision: 16-mixed
+  log_every_n_steps: 10
+  gradient_clip_val: 0.5
+  max_epochs: null
+  check_val_every_n_epoch: null
+  val_check_interval: 3000
+  max_steps: 500000
+  devices: 1
+
+logger:
+  _target_: pytorch_lightning.loggers.WandbLogger
+  project: "gem"
+  save_dir: "/tmp"
+  name: ""
+  version: ""
+  resume: "allow"
+  dir: "/tmp"
+  id: null
+
+use_wandb: true

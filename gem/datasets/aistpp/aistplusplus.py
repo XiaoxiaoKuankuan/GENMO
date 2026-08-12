@@ -7,6 +7,7 @@ GEM 可训练的时序样本。完整 gem_smpl 模型用它学习音乐条件下
 """
 
 import os
+import warnings
 from pathlib import Path
 from typing import Any
 
@@ -86,6 +87,58 @@ def load_music_beats(
     return music_features[..., 34]
 
 
+def resolve_music_motion_alignment(
+    *,
+    sequence_id: str,
+    motion_frames: int,
+    music_frames: int,
+    music_feature_path: str | Path,
+    strict: bool,
+    max_mismatch: int,
+) -> tuple[int, dict[str, Any]]:
+    """Validate/resolve the shared temporal extent of motion and music."""
+    difference = abs(int(motion_frames) - int(music_frames))
+    info = {
+        "sequence_id": sequence_id,
+        "motion_frames": int(motion_frames),
+        "music_frames": int(music_frames),
+        "difference": difference,
+        "music_feature_path": str(music_feature_path),
+        "trimmed_to_frames": min(int(motion_frames), int(music_frames)),
+    }
+    if strict and difference > max_mismatch:
+        raise ValueError(
+            "AIST++ music-motion alignment exceeds tolerance: "
+            f"sequence_id={sequence_id}, F_motion={motion_frames}, "
+            f"F_music={music_frames}, difference={difference}, "
+            f"music_feature_path={music_feature_path}"
+        )
+    return info["trimmed_to_frames"], info
+
+
+def select_aist_temporal_window(
+    *,
+    sequence_length: int,
+    target_length: int,
+    random_crop: bool,
+    eval_clip_mode: str = "first",
+) -> tuple[int, int]:
+    """Select a safe random or deterministic AIST++ temporal window."""
+    if sequence_length <= 0 or target_length <= 0:
+        raise ValueError("sequence_length and target_length must be positive")
+    if eval_clip_mode not in {"first", "center"}:
+        raise ValueError("eval_clip_mode must be 'first' or 'center'")
+    if sequence_length <= target_length:
+        return 0, sequence_length
+    if random_crop:
+        start = int(np.random.randint(0, sequence_length - target_length + 1))
+    elif eval_clip_mode == "center":
+        start = (sequence_length - target_length) // 2
+    else:
+        start = 0
+    return start, target_length
+
+
 class AISTPlusPlusSmplDataset(data.Dataset):
     def __init__(
         self,
@@ -97,6 +150,12 @@ class AISTPlusPlusSmplDataset(data.Dataset):
         feat_version="v1",
         annot_file=None,
         split_file=None,
+        strict_music_alignment: bool = False,
+        max_music_motion_frame_mismatch: int = 2,
+        load_raw_music_audio: bool = True,
+        eval_motion_frames: int | None = None,
+        eval_clip_mode: str = "first",
+        music_only_conditioning: bool = False,
     ):
         super().__init__()
         # Path
@@ -110,6 +169,25 @@ class AISTPlusPlusSmplDataset(data.Dataset):
         self.feat_version = feat_version
         self.annot_file = annot_file
         self.split_file = split_file
+        self.strict_music_alignment = strict_music_alignment
+        self.max_music_motion_frame_mismatch = max_music_motion_frame_mismatch
+        self.load_raw_music_audio = load_raw_music_audio
+        self.eval_motion_frames = eval_motion_frames
+        self.eval_clip_mode = eval_clip_mode
+        self.music_only_conditioning = music_only_conditioning
+        if self.max_music_motion_frame_mismatch < 0:
+            raise ValueError("max_music_motion_frame_mismatch must be non-negative")
+        if self.eval_motion_frames is not None and self.eval_motion_frames <= 0:
+            raise ValueError("eval_motion_frames must be positive when provided")
+        if self.eval_clip_mode not in {"first", "center"}:
+            raise ValueError("eval_clip_mode must be 'first' or 'center'")
+        self.music_alignment_stats = {
+            "exact_match_count": 0,
+            "within_1_count": 0,
+            "within_2_count": 0,
+            "trimmed_count": 0,
+            "max_abs_mismatch": 0,
+        }
         self._load_dataset()
         self._get_idx2meta()
 
@@ -165,23 +243,56 @@ class AISTPlusPlusSmplDataset(data.Dataset):
         music_feat = load_music_feature_tensor(music_feat_path)
         if self.feat_version == "v2":
             validate_musicfeat_v2(music_feat, source=music_feat_path)
-        seq_length = min(music_feat.shape[0], motion["bbox_xyxy"].shape[0])
-        sampled_motion["vid"] = vid
-
-        # Random select a subset
-        target_length = self.motion_frames
-        if target_length > seq_length:  # this should not happen
-            start = 0
-            length = seq_length
-            Log.info(
-                f"[AIST++] ({idx}) target length < sequence length: {target_length} <= {seq_length}"
+        motion_frames = int(motion["bbox_xyxy"].shape[0])
+        music_frames = int(music_feat.shape[0])
+        seq_length, alignment = resolve_music_motion_alignment(
+            sequence_id=vid,
+            motion_frames=motion_frames,
+            music_frames=music_frames,
+            music_feature_path=music_feat_path,
+            strict=self.strict_music_alignment,
+            max_mismatch=self.max_music_motion_frame_mismatch,
+        )
+        difference = alignment["difference"]
+        self.music_alignment_stats["exact_match_count"] += int(difference == 0)
+        self.music_alignment_stats["within_1_count"] += int(difference <= 1)
+        self.music_alignment_stats["within_2_count"] += int(difference <= 2)
+        self.music_alignment_stats["trimmed_count"] += int(difference > 0)
+        self.music_alignment_stats["max_abs_mismatch"] = max(
+            self.music_alignment_stats["max_abs_mismatch"], difference
+        )
+        if self.strict_music_alignment and difference > 0:
+            warnings.warn(
+                "AIST++ strict alignment trimmed a small frame mismatch: "
+                f"sequence_id={vid}, F_motion={motion_frames}, F_music={music_frames}, "
+                f"difference={difference}, music_feature_path={music_feat_path}",
+                RuntimeWarning,
+                stacklevel=2,
             )
-        elif self.split in ["train", "minitrain"]:
-            start = np.random.randint(0, seq_length - target_length)
-            length = target_length
+        sampled_motion["vid"] = vid
+        sampled_motion["music_feature_path"] = str(music_feat_path)
+        sampled_motion["alignment"] = alignment
+
+        # Random train crop or deterministic fixed-window evaluation crop.
+        if self.split in ["train", "minitrain"]:
+            target_length = self.motion_frames
+            random_crop = True
+        elif self.eval_motion_frames is not None:
+            target_length = self.eval_motion_frames
+            random_crop = False
         else:
-            start = 0
-            length = seq_length
+            target_length = seq_length
+            random_crop = False
+        start, length = select_aist_temporal_window(
+            sequence_length=seq_length,
+            target_length=target_length,
+            random_crop=random_crop,
+            eval_clip_mode=self.eval_clip_mode,
+        )
+        if seq_length < target_length:
+            Log.info(
+                f"[AIST++] ({idx}) sequence shorter than target: {seq_length} < {target_length}"
+            )
         end = start + length
         sampled_motion["length"] = length
         sampled_motion["start_end"] = (start, end)
@@ -221,7 +332,7 @@ class AISTPlusPlusSmplDataset(data.Dataset):
         sampled_motion["music_embed"] = torch.as_tensor(music_feat[start:end]).float()  # (L, 35)
 
         # load audio
-        if self.split in ["train", "minitrain"]:
+        if not self.load_raw_music_audio or self.split in ["train", "minitrain"]:
             music_fps = 30
             music_array = torch.zeros((length, 1024)).float()
         else:
@@ -305,6 +416,9 @@ class AISTPlusPlusSmplDataset(data.Dataset):
                 "height": data["height"],
                 "width": data["width"],
                 "eval_gen_only": self.eval_gen_only,
+                "music_feature_path": data["music_feature_path"],
+                "music_motion_alignment": data["alignment"],
+                "start_end": data["start_end"],
             },
             "length": length,
             "smpl_params_c": smpl_params_c,
@@ -327,7 +441,9 @@ class AISTPlusPlusSmplDataset(data.Dataset):
                 "valid": get_valid_mask(length, length),
                 "humanoid": get_valid_mask(length, 0),
                 "has_img_mask": get_valid_mask(length, 0),
-                "has_2d_mask": get_valid_mask(length, length),
+                "has_2d_mask": get_valid_mask(
+                    length, 0 if self.music_only_conditioning else length
+                ),
                 "has_cam_mask": get_valid_mask(length, 0),
                 "has_audio_mask": get_valid_mask(length, 0),
                 "has_music_mask": get_valid_mask(length, length),

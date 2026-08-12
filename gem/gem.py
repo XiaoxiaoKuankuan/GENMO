@@ -21,6 +21,7 @@ from transformers import T5EncoderModel, T5Tokenizer
 
 from gem.network import stats_compose
 from gem.network.base_arch.transformer.layer import BasicBlock, zero_module
+from gem.network.gem_diffusion import apply_regression_targets_to_2d_only
 from gem.utils.body_params import get_pred_body_params_global, get_pred_body_params_incam
 from gem.utils.cam_utils import (
     compute_bbox_info_bedlam,
@@ -177,19 +178,28 @@ class GEM(pl.LightningModule):
         self.obs_num_joints = 17
         obs_num_joints = self.obs_num_joints
 
-        if "text_encoder" in model_cfg:
-            self.max_text_len = model_cfg.text_encoder.max_text_len
+        text_encoder_cfg = model_cfg.get("text_encoder", None)
+        if text_encoder_cfg is not None:
+            self.max_text_len = text_encoder_cfg.max_text_len
 
             self.use_text_encoder = True
-            if model_cfg.text_encoder.get("load_llm", False):
-                llm_version = model_cfg.text_encoder.llm_version
-                self.max_text_len = model_cfg.text_encoder.max_text_len
+            if text_encoder_cfg.get("load_llm", False):
+                llm_version = text_encoder_cfg.llm_version
+                self.max_text_len = text_encoder_cfg.max_text_len
                 text_encoder, self.tokenizer = self.load_and_freeze_llm(llm_version)
                 self.text_encoder = [text_encoder.cuda()]
             else:
                 self.text_encoder = self.tokenizer = None
         else:
             self.use_text_encoder = False
+            self.max_text_len = 0
+
+        diffusion_wrapper = self.pipeline.denoiser3d
+        diffusion_denoiser = getattr(diffusion_wrapper, "denoiser", diffusion_wrapper)
+        self.denoiser_uses_text = bool(getattr(diffusion_denoiser, "encode_text", False))
+        # Preserve the legacy batch contract for every non-null text config.
+        # The specialist disables text explicitly with ``text_encoder: null``.
+        self.text_condition_enabled = self.use_text_encoder
 
         self.f_condition_dim = {
             "obs": (obs_num_joints, 3),
@@ -511,9 +521,7 @@ class GEM(pl.LightningModule):
         target_x = self.endecoder.encode(batch)  # (B, L, C)
         batch["sample_indices_dict"] = self.endecoder.obs_indices_dict
         if mode == "diffusion":
-            target_x[batch["mask"]["2d_only"]] = batch["regression_outputs"]["model_output"][
-                "pred_x_start"
-            ][batch["mask"]["2d_only"]]
+            target_x = apply_regression_targets_to_2d_only(target_x, batch)
         else:
             target_x[batch["mask"]["2d_only"]] = 0
         valid_mask = batch["mask"]["valid"]
@@ -534,9 +542,9 @@ class GEM(pl.LightningModule):
         batch["device"] = batch["target_x"].device
         batch["B"], batch["L"] = B, L = batch["target_x"].shape[:2]
 
-        if "text_embed" in batch:
+        if self.text_condition_enabled and "text_embed" in batch:
             batch["encoded_text"] = batch["text_embed"].cuda()
-        elif self.use_text_encoder:
+        elif self.text_condition_enabled:
             batch["encoded_text"] = self.encode_text(batch["caption"], batch["has_text"])
 
         # Create augmented noisy-obs : gt_j3d(coco17)
@@ -590,8 +598,6 @@ class GEM(pl.LightningModule):
         prob = 0.5
         mask_real_vitpose = (torch.rand(batch["B"]).to(obs_i_j2d) < prob) * batch["mask"]["vitpose"]
         mask_real_vitpose = mask_real_vitpose | batch["mask"]["2d_only"]
-
-        assert batch["mask"]["2d_only"].sum() == 0, batch["mask"]["2d_only"].sum()
 
         obs_i_j2d[mask_real_vitpose] = noisy_det_j2d[mask_real_vitpose]
 
@@ -1013,9 +1019,9 @@ class GEM(pl.LightningModule):
                 batch_["f_cam_angvel"] - self.cam_angvel_mean
             ) / self.cam_angvel_std
 
-        if "text_embed" in batch:
+        if self.text_condition_enabled and "text_embed" in batch:
             batch_["encoded_text"] = batch["text_embed"].cuda()
-        elif self.use_text_encoder:
+        elif self.text_condition_enabled:
             batch_["encoded_text"] = self.encode_text(batch["caption"], batch["has_text"])
 
         if test_mode == "infilling":
@@ -1142,9 +1148,9 @@ class GEM(pl.LightningModule):
                 if k in batch_:
                     batch_[k] = self.normalize_attr(batch_[k], k)
 
-            if "text_embed" in batch:
+            if self.text_condition_enabled and "text_embed" in batch:
                 batch_["encoded_text"] = batch["text_embed"].cuda()
-            elif self.use_text_encoder:
+            elif self.text_condition_enabled:
                 batch_["encoded_text"] = self.encode_text(batch["caption"], batch["has_text"])
             batch_ = self.create_condition_mask(batch_, cond_mask_cfg=None, mode=None, train=False)
 
@@ -1227,21 +1233,22 @@ class GEM(pl.LightningModule):
         if "audio_array" in data:
             batch["audio_array"] = data["audio_array"][None].cuda()
 
-        diffusion_model = self.pipeline.denoiser3d
-        denoiser = getattr(diffusion_model, "denoiser", diffusion_model)
-        if not hasattr(denoiser, "encoded_text_dim"):
-            raise RuntimeError(
-                "GEM denoiser does not expose encoded_text_dim; cannot prepare text conditioning"
-            )
-        expected_dim = int(denoiser.encoded_text_dim)
-        expected_length = int(self.max_text_len)
-        if "text_embed" in data:
-            batch["text_embed"] = prepare_precomputed_text_embed(
-                data["text_embed"],
-                expected_dim=expected_dim,
-                expected_length=expected_length,
-                device=batch["f_imgseq"].device,
-            )
+        if self.text_condition_enabled:
+            diffusion_model = self.pipeline.denoiser3d
+            denoiser = getattr(diffusion_model, "denoiser", diffusion_model)
+            if not hasattr(denoiser, "encoded_text_dim"):
+                raise RuntimeError(
+                    "GEM denoiser does not expose encoded_text_dim; cannot prepare text conditioning"
+                )
+            expected_dim = int(denoiser.encoded_text_dim)
+            expected_length = int(self.max_text_len)
+            if "text_embed" in data:
+                batch["text_embed"] = prepare_precomputed_text_embed(
+                    data["text_embed"],
+                    expected_dim=expected_dim,
+                    expected_length=expected_length,
+                    device=batch["f_imgseq"].device,
+                )
 
         if "fast_rollout" in data:
             batch["fast_rollout"] = data["fast_rollout"]
@@ -1249,10 +1256,10 @@ class GEM(pl.LightningModule):
 
         batch["meta"] = meta
 
-        if "text_embed" in batch:
+        if self.text_condition_enabled and "text_embed" in batch:
             batch["encoded_text"] = batch["text_embed"]
             batch["caption"] = [str(data.get("caption", ""))]
-        else:
+        elif self.text_condition_enabled:
             caption, has_text, encoded_text = prepare_predict_text_condition(
                 data,
                 max_text_len=expected_length,
@@ -1263,6 +1270,9 @@ class GEM(pl.LightningModule):
             batch["caption"] = caption
             batch["has_text"] = has_text
             batch["encoded_text"] = encoded_text
+        else:
+            batch["caption"] = [""]
+            batch["has_text"] = torch.zeros(1, dtype=torch.bool, device=batch["device"])
 
         batch["f_cliffcam"] = compute_bbox_info_bedlam(batch["bbx_xys"], batch["K_fullimg"]).cuda()
 
