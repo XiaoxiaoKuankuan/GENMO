@@ -4,3 +4,5 @@ metric_emdb1:
   _target_: gem.callbacks.metric.metric_emdb.MetricMocap
   emdb_split: 1
   occ: false
+  invalid_policy: skip
+  dump_invalid: true

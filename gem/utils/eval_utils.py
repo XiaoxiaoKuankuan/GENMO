@@ -1,13 +1,314 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: LicenseRef-NVIDIA-OneWay-Noncommercial
+import os
+import re
+import uuid
+from collections.abc import Mapping
+from pathlib import Path
+from typing import Any
+
 import numpy as np
 import torch
 from scipy.ndimage import gaussian_filter
 from scipy.signal import argrelextrema
 
+from gem.utils.pylogger import Log
+
+
+class InvalidMetricInputError(RuntimeError):
+    """Raised when one evaluation sequence cannot produce trustworthy metrics."""
+
+    def __init__(self, message: str, diagnostics: dict[str, Any] | None = None):
+        super().__init__(message)
+        self.diagnostics = diagnostics or {}
+
+
+def tensor_metric_diagnostics(name: str, tensor: torch.Tensor) -> dict[str, Any]:
+    """Return finite-value diagnostics without modifying ``tensor`` or its graph."""
+
+    if not isinstance(tensor, torch.Tensor):
+        raise TypeError(f"{name} must be a torch.Tensor, got {type(tensor).__name__}")
+    value = tensor.detach()
+    finite = torch.isfinite(value)
+    nan_mask = torch.isnan(value)
+    posinf_mask = torch.isposinf(value)
+    neginf_mask = torch.isneginf(value)
+    nonfinite = ~finite
+
+    if value.numel() == 0:
+        bad_frames: list[int] = []
+    elif value.ndim == 0:
+        bad_frames = [0] if bool(nonfinite.item()) else []
+    else:
+        per_frame = nonfinite.reshape(value.shape[0], -1).any(dim=1)
+        bad_frames = per_frame.nonzero(as_tuple=False).flatten()[:20].cpu().tolist()
+
+    finite_values = value[finite]
+    if finite_values.numel() > 0:
+        finite_min = float(finite_values.min().item())
+        finite_max = float(finite_values.max().item())
+        finite_absmax = float(finite_values.abs().max().item())
+    else:
+        finite_min = finite_max = finite_absmax = None
+
+    return {
+        "name": name,
+        "shape": list(value.shape),
+        "dtype": str(value.dtype),
+        "nan_count": int(nan_mask.sum().item()),
+        "posinf_count": int(posinf_mask.sum().item()),
+        "neginf_count": int(neginf_mask.sum().item()),
+        "nonfinite_count": int(nonfinite.sum().item()),
+        "bad_frames": bad_frames,
+        "finite_min": finite_min,
+        "finite_max": finite_max,
+        "finite_absmax": finite_absmax,
+    }
+
+
+def _format_tensor_diagnostic(diagnostic: dict[str, Any]) -> str:
+    return (
+        f"tensor={diagnostic['name']} shape={tuple(diagnostic['shape'])} "
+        f"NaN={diagnostic['nan_count']} +Inf={diagnostic['posinf_count']} "
+        f"-Inf={diagnostic['neginf_count']} "
+        f"nonfinite={diagnostic['nonfinite_count']} "
+        f"bad_frames={diagnostic['bad_frames']}"
+    )
+
+
+def check_finite_metric_inputs(
+    tensors: dict[str, torch.Tensor], *, sequence_id: str = "unknown"
+) -> None:
+    """Reject a sequence when any named metric input contains NaN or Inf."""
+
+    diagnostics = {
+        name: tensor_metric_diagnostics(name, tensor) for name, tensor in tensors.items()
+    }
+    invalid = [item for item in diagnostics.values() if item["nonfinite_count"] > 0]
+    if invalid:
+        details = "; ".join(_format_tensor_diagnostic(item) for item in invalid)
+        raise InvalidMetricInputError(
+            f"sequence_id={sequence_id}: non-finite metric input: {details}",
+            diagnostics=diagnostics,
+        )
+
+
+def check_non_degenerate_points(
+    pred_points: torch.Tensor,
+    target_points: torch.Tensor,
+    *,
+    sequence_id: str = "unknown",
+    eps: float = 1e-12,
+) -> None:
+    """Reject frames whose spatial point cloud has essentially zero energy."""
+
+    if pred_points.ndim != 3 or target_points.ndim != 3:
+        raise ValueError(
+            "pred_points and target_points must have shape [frames, points, coordinates]"
+        )
+    if pred_points.shape != target_points.shape or pred_points.shape[-1] not in (2, 3):
+        raise ValueError(
+            f"point-cloud shape mismatch: pred={tuple(pred_points.shape)}, "
+            f"target={tuple(target_points.shape)}"
+        )
+    check_finite_metric_inputs(
+        {"pred_points": pred_points, "target_points": target_points},
+        sequence_id=sequence_id,
+    )
+
+    diagnostics: dict[str, Any] = {}
+    messages = []
+    for name, points in (("pred_points", pred_points), ("target_points", target_points)):
+        detached = points.detach()
+        centered = detached - detached.mean(dim=1, keepdim=True)
+        energy = centered.square().sum(dim=(1, 2))
+        invalid = (~torch.isfinite(energy)) | (energy <= eps)
+        bad_frames = invalid.nonzero(as_tuple=False).flatten()[:20].cpu().tolist()
+        diagnostics[f"{name}_energy"] = {
+            "eps": float(eps),
+            "bad_frames": bad_frames,
+            "minimum": float(energy.min().item()) if energy.numel() else None,
+        }
+        if bad_frames:
+            messages.append(f"{name} degenerate bad_frames={bad_frames} eps={eps}")
+    if messages:
+        raise InvalidMetricInputError(
+            f"sequence_id={sequence_id}: degenerate point cloud: {'; '.join(messages)}",
+            diagnostics=diagnostics,
+        )
+
+
+def validate_invalid_policy(invalid_policy: str) -> str:
+    """Validate and return a metric callback invalid-sequence policy."""
+
+    if invalid_policy not in {"skip", "raise"}:
+        raise ValueError(
+            f"invalid_policy must be one of {{'skip', 'raise'}}, got {invalid_policy!r}"
+        )
+    return invalid_policy
+
+
+def apply_invalid_policy(invalid_policy: str, error: InvalidMetricInputError) -> None:
+    """Re-raise an invalid metric input in strict mode; skip mode returns normally."""
+
+    validate_invalid_policy(invalid_policy)
+    if invalid_policy == "raise":
+        raise error
+
+
+def _safe_filename_component(value: object) -> str:
+    text = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(value)).strip("._")
+    return text or "unknown"
+
+
+def _resolve_eval_dump_run_dir(trainer: object) -> Path:
+    for callback in getattr(trainer, "checkpoint_callbacks", None) or []:
+        dirpath = getattr(callback, "dirpath", None)
+        if dirpath:
+            return Path(dirpath).expanduser().resolve(strict=False).parent
+    for attribute in ("log_dir", "default_root_dir"):
+        value = getattr(trainer, attribute, None)
+        if value:
+            return Path(value).expanduser().resolve(strict=False)
+    return Path.cwd()
+
+
+def _cpu_prediction_parameters(outputs: object) -> dict[str, dict[str, torch.Tensor]]:
+    saved: dict[str, dict[str, torch.Tensor]] = {}
+    if not isinstance(outputs, Mapping):
+        return saved
+    for group_name in ("pred_body_params_incam", "pred_body_params_global"):
+        group = outputs.get(group_name)
+        if not isinstance(group, Mapping):
+            continue
+        tensors = {
+            str(name): value.detach().float().cpu().contiguous().clone()
+            for name, value in group.items()
+            if isinstance(value, torch.Tensor)
+        }
+        if tensors:
+            saved[group_name] = tensors
+    return saved
+
+
+def _safe_batch_metadata(batch: object) -> dict[str, Any]:
+    if not isinstance(batch, Mapping):
+        return {}
+    metadata: dict[str, Any] = {}
+    length = batch.get("length")
+    if isinstance(length, torch.Tensor) and length.numel() <= 32:
+        metadata["length"] = length.detach().cpu().clone()
+    gender = batch.get("gender")
+    if isinstance(gender, (str, int, float, bool)):
+        metadata["gender"] = gender
+    elif isinstance(gender, (list, tuple)):
+        metadata["gender"] = [str(value) for value in gender[:8]]
+    meta = batch.get("meta")
+    if isinstance(meta, (list, tuple)) and meta and isinstance(meta[0], Mapping):
+        for name in ("dataset_id", "vid"):
+            if name in meta[0]:
+                metadata[name] = str(meta[0][name])
+    return metadata
+
+
+def dump_invalid_eval_sample(
+    trainer: object,
+    dataset_id: str,
+    sequence_id: str,
+    reason: str,
+    outputs: object,
+    *,
+    batch: object | None = None,
+    tensor_diagnostics: dict[str, Any] | None = None,
+) -> Path | None:
+    """Atomically save a compact invalid-sequence artifact without full meshes."""
+
+    tmp_path: Path | None = None
+    try:
+        output_dir = _resolve_eval_dump_run_dir(trainer) / "eval_nonfinite"
+        output_dir.mkdir(parents=True, exist_ok=True)
+        step = int(getattr(trainer, "global_step", 0))
+        epoch = int(getattr(trainer, "current_epoch", 0))
+        rank = int(getattr(trainer, "global_rank", 0))
+        unique = uuid.uuid4().hex[:8]
+        filename = (
+            f"step{step:08d}_epoch{epoch:04d}_rank{rank}_"
+            f"{_safe_filename_component(dataset_id)}_"
+            f"{_safe_filename_component(sequence_id)}_{unique}.pt"
+        )
+        final_path = output_dir / filename
+        tmp_path = output_dir / f".{filename}.tmp"
+        payload = {
+            "dataset_id": str(dataset_id),
+            "sequence_id": str(sequence_id),
+            "global_step": step,
+            "epoch": epoch,
+            "global_rank": rank,
+            "reason": str(reason),
+            "tensor_diagnostics": tensor_diagnostics or {},
+            "predictions": _cpu_prediction_parameters(outputs),
+            "batch_metadata": _safe_batch_metadata(batch),
+        }
+        with tmp_path.open("wb") as file:
+            torch.save(payload, file)
+            file.flush()
+            os.fsync(file.fileno())
+        os.replace(tmp_path, final_path)
+        return final_path
+    except (OSError, RuntimeError, TypeError, ValueError) as error:
+        if tmp_path is not None:
+            tmp_path.unlink(missing_ok=True)
+        Log.warning(
+            f"[EvalGuard] failed to dump invalid sequence "
+            f"dataset={dataset_id} vid={sequence_id}: {error}"
+        )
+        return None
+
+
+def _detach_cpu_tensors(batch: dict[str, torch.Tensor], names: tuple[str, ...]):
+    return {name: batch[name].detach().cpu() for name in names}
+
+
+def _apply_frame_mask(
+    tensors: dict[str, torch.Tensor],
+    mask: torch.Tensor | None,
+    *,
+    sequence_id: str,
+) -> dict[str, torch.Tensor]:
+    if mask is None:
+        return tensors
+    if not isinstance(mask, torch.Tensor) or mask.ndim != 1:
+        raise ValueError("metric mask must be a one-dimensional torch.Tensor")
+    mask = mask.detach().cpu()
+    if mask.dtype != torch.bool:
+        raise ValueError(f"metric mask must be boolean, got {mask.dtype}")
+    for name, tensor in tensors.items():
+        if tensor.ndim == 0 or tensor.shape[0] != mask.shape[0]:
+            raise ValueError(
+                f"mask length {mask.shape[0]} does not match {name} shape {tuple(tensor.shape)}"
+            )
+    return {name: tensor[mask].clone() for name, tensor in tensors.items()}
+
+
+def _check_minimum_frames(
+    tensors: dict[str, torch.Tensor], minimum: int, *, sequence_id: str, metric_name: str
+) -> None:
+    frames = next(iter(tensors.values())).shape[0]
+    if frames < minimum:
+        raise InvalidMetricInputError(
+            f"sequence_id={sequence_id}: {metric_name} requires at least {minimum} "
+            f"valid frames, got {frames}",
+            diagnostics={"valid_frame_count": int(frames), "required": int(minimum)},
+        )
+
+
+def _check_finite_metric_results(results: dict[str, Any], *, sequence_id: str) -> None:
+    tensors = {f"metric.{name}": torch.as_tensor(value) for name, value in results.items()}
+    check_finite_metric_inputs(tensors, sequence_id=sequence_id)
+
 
 @torch.no_grad()
-def compute_camcoord_metrics(batch, pelvis_idxs=None, fps=30, mask=None):
+def compute_camcoord_metrics(batch, pelvis_idxs=None, fps=30, mask=None, sequence_id="unknown"):
     """
     Args:
         batch (dict): {
@@ -26,28 +327,30 @@ def compute_camcoord_metrics(batch, pelvis_idxs=None, fps=30, mask=None):
     """
     if pelvis_idxs is None:
         pelvis_idxs = [1, 2]
-    # All data is in camera coordinates
-    pred_j3d = batch["pred_j3d"].cpu()  # (..., J, 3)
-    target_j3d = batch["target_j3d"].cpu()
-    pred_verts = batch["pred_verts"].cpu()
-    target_verts = batch["target_verts"].cpu()
-
-    if mask is not None:
-        mask = mask.cpu()
-        pred_j3d = pred_j3d[mask].clone()
-        target_j3d = target_j3d[mask].clone()
-        pred_verts = pred_verts[mask].clone()
-        target_verts = target_verts[mask].clone()
+    names = ("pred_j3d", "target_j3d", "pred_verts", "target_verts")
+    tensors = _detach_cpu_tensors(batch, names)
+    tensors = _apply_frame_mask(tensors, mask, sequence_id=sequence_id)
+    _check_minimum_frames(tensors, 3, sequence_id=sequence_id, metric_name="camera metrics")
+    check_finite_metric_inputs(tensors, sequence_id=sequence_id)
+    pred_j3d, target_j3d, pred_verts, target_verts = (tensors[name] for name in names)
     assert "mask" not in batch
 
     # Align by pelvis
     pred_j3d, target_j3d, pred_verts, target_verts = batch_align_by_pelvis(
         [pred_j3d, target_j3d, pred_verts, target_verts], pelvis_idxs=pelvis_idxs
     )
+    aligned = {
+        "aligned_pred_j3d": pred_j3d,
+        "aligned_target_j3d": target_j3d,
+        "aligned_pred_verts": pred_verts,
+        "aligned_target_verts": target_verts,
+    }
+    check_finite_metric_inputs(aligned, sequence_id=sequence_id)
+    check_non_degenerate_points(pred_j3d, target_j3d, sequence_id=sequence_id)
 
     # Metrics
     m2mm = 1000
-    S1_hat = batch_compute_similarity_transform_torch(pred_j3d, target_j3d)
+    S1_hat = batch_compute_similarity_transform_torch(pred_j3d, target_j3d, sequence_id=sequence_id)
     pa_mpjpe = compute_jpe(S1_hat, target_j3d) * m2mm
     mpjpe = compute_jpe(pred_j3d, target_j3d) * m2mm
     pve = compute_jpe(pred_verts, target_verts) * m2mm
@@ -59,6 +362,7 @@ def compute_camcoord_metrics(batch, pelvis_idxs=None, fps=30, mask=None):
         "pve": pve,
         "accel": accel,
     }
+    _check_finite_metric_results(camcoord_metrics, sequence_id=sequence_id)
     return camcoord_metrics
 
 
@@ -122,7 +426,7 @@ def compute_music_metrics(batch, mask=None):
 
 
 @torch.no_grad()
-def compute_global_metrics(batch, mask=None):
+def compute_global_metrics(batch, mask=None, sequence_id="unknown"):
     """Follow WHAM, the input has skipped invalid frames
     Args:
         batch (dict): {
@@ -140,18 +444,21 @@ def compute_global_metrics(batch, mask=None):
             "fs":
         }
     """
-    # All data is in global coordinates
-    pred_j3d_glob = batch["pred_j3d_glob"].cpu()  # (..., J, 3)
-    target_j3d_glob = batch["target_j3d_glob"].cpu()
-    pred_verts_glob = batch["pred_verts_glob"].cpu()
-    target_verts_glob = batch["target_verts_glob"].cpu()
-    if mask is not None:
-        mask = mask.cpu()
-        pred_j3d_glob = pred_j3d_glob[mask].clone()
-        target_j3d_glob = target_j3d_glob[mask].clone()
-        pred_verts_glob = pred_verts_glob[mask].clone()
-        target_verts_glob = target_verts_glob[mask].clone()
+    names = (
+        "pred_j3d_glob",
+        "target_j3d_glob",
+        "pred_verts_glob",
+        "target_verts_glob",
+    )
+    tensors = _detach_cpu_tensors(batch, names)
+    tensors = _apply_frame_mask(tensors, mask, sequence_id=sequence_id)
+    _check_minimum_frames(tensors, 4, sequence_id=sequence_id, metric_name="global metrics")
+    check_finite_metric_inputs(tensors, sequence_id=sequence_id)
+    pred_j3d_glob, target_j3d_glob, pred_verts_glob, target_verts_glob = (
+        tensors[name] for name in names
+    )
     assert "mask" not in batch
+    check_non_degenerate_points(pred_j3d_glob, target_j3d_glob, sequence_id=sequence_id)
 
     seq_length = pred_j3d_glob.shape[0]
 
@@ -187,6 +494,7 @@ def compute_global_metrics(batch, mask=None):
         "jitter": jitter,
         "fs": foot_sliding,
     }
+    _check_finite_metric_results(global_metrics, sequence_id=sequence_id)
     return global_metrics
 
 
@@ -263,19 +571,32 @@ def batch_align_by_pelvis(data_list, pelvis_idxs=None):
     return (pred_j3d, target_j3d, pred_verts, target_verts)
 
 
-def batch_compute_similarity_transform_torch(S1, S2):
+def batch_compute_similarity_transform_torch(S1, S2, sequence_id="unknown", eps=1e-12):
     """
     Computes a similarity transform (sR, t) that takes
     a set of 3D points S1 (3 x N) closest to a set of 3D points S2,
     where R is an 3x3 rotation matrix, t 3x1 translation, s scale.
     i.e. solves the orthogonal Procrutes problem.
     """
+    check_finite_metric_inputs({"S1": S1, "S2": S2}, sequence_id=sequence_id)
+    if S1.ndim != 3 or S2.ndim != 3 or S1.shape != S2.shape:
+        raise ValueError(
+            f"S1 and S2 must have matching rank-3 shapes, got {S1.shape} and {S2.shape}"
+        )
+    if S1.device != S2.device:
+        raise ValueError(f"S1 and S2 must share a device, got {S1.device} and {S2.device}")
+    original_dtype = S1.dtype
+    original_device = S1.device
+
     transposed = False
-    if S1.shape[0] != 3 and S1.shape[0] != 2:
+    if S1.shape[-1] in (2, 3):
         S1 = S1.permute(0, 2, 1)
         S2 = S2.permute(0, 2, 1)
         transposed = True
-    assert S2.shape[1] == S1.shape[1]
+    elif S1.shape[1] not in (2, 3):
+        raise ValueError(f"S1 and S2 must contain 2D or 3D points, got shape {S1.shape}")
+    S1 = S1.to(dtype=torch.float64)
+    S2 = S2.to(dtype=torch.float64)
 
     # 1. Remove mean.
     mu1 = S1.mean(axis=-1, keepdims=True)
@@ -286,34 +607,65 @@ def batch_compute_similarity_transform_torch(S1, S2):
 
     # 2. Compute variance of X1 used for scale.
     var1 = torch.sum(X1**2, dim=1).sum(dim=1)
+    invalid_var = (~torch.isfinite(var1)) | (var1 <= eps)
+    if invalid_var.any():
+        bad_frames = invalid_var.nonzero(as_tuple=False).flatten()[:20].cpu().tolist()
+        raise InvalidMetricInputError(
+            f"sequence_id={sequence_id}: invalid Procrustes variance; "
+            f"bad_frames={bad_frames} eps={eps}",
+            diagnostics={
+                "var1": tensor_metric_diagnostics("var1", var1),
+                "bad_frames": bad_frames,
+                "eps": float(eps),
+            },
+        )
 
     # 3. The outer product of X1 and X2.
     K = X1.bmm(X2.permute(0, 2, 1))
+    check_finite_metric_inputs({"Procrustes_K": K}, sequence_id=sequence_id)
 
     # 4. Solution that Maximizes trace(R'K) is R=U*V', where U, V are
     # singular vectors of K.
-    U, s, V = torch.svd(K)
+    try:
+        U, singular_values, Vh = torch.linalg.svd(K, full_matrices=False)
+    except RuntimeError as error:
+        raise InvalidMetricInputError(
+            f"sequence_id={sequence_id}: finite Procrustes SVD failed: {error}",
+            diagnostics={"Procrustes_K": tensor_metric_diagnostics("Procrustes_K", K)},
+        ) from error
+    check_finite_metric_inputs(
+        {"svd_U": U, "svd_singular_values": singular_values, "svd_Vh": Vh},
+        sequence_id=sequence_id,
+    )
+    V = Vh.transpose(1, 2)
 
     # Construct Z that fixes the orientation of R to get det(R)=1.
-    Z = torch.eye(U.shape[1], device=S1.device).unsqueeze(0)
+    Z = torch.eye(U.shape[1], device=S1.device, dtype=S1.dtype).unsqueeze(0)
     Z = Z.repeat(U.shape[0], 1, 1)
     Z[:, -1, -1] *= torch.sign(torch.det(U.bmm(V.permute(0, 2, 1))))
 
     # Construct R.
     R = V.bmm(Z.bmm(U.permute(0, 2, 1)))
+    check_finite_metric_inputs({"Procrustes_R": R}, sequence_id=sequence_id)
 
     # 5. Recover scale.
-    scale = torch.cat([torch.trace(x).unsqueeze(0) for x in R.bmm(K)]) / var1
+    scale = torch.diagonal(R.bmm(K), dim1=-2, dim2=-1).sum(dim=-1) / var1
 
     # 6. Recover translation.
     t = mu2 - (scale.unsqueeze(-1).unsqueeze(-1) * (R.bmm(mu1)))
 
     # 7. Error:
     S1_hat = scale.unsqueeze(-1).unsqueeze(-1) * R.bmm(S1) + t
+    check_finite_metric_inputs(
+        {"Procrustes_scale": scale, "Procrustes_t": t, "S1_hat_float64": S1_hat},
+        sequence_id=sequence_id,
+    )
 
     if transposed:
         S1_hat = S1_hat.permute(0, 2, 1)
 
+    S1_hat = S1_hat.to(device=original_device, dtype=original_dtype)
+    check_finite_metric_inputs({"S1_hat": S1_hat}, sequence_id=sequence_id)
     return S1_hat
 
 
