@@ -46,6 +46,7 @@ def inspect_dataset(root: Path, *, sample_count: int, seed: int, source_fps: flo
     wav_channels: Counter[int] = Counter()
     frame_counts: dict[str, int] = {}
     temporal_records: list[dict[str, Any]] = []
+    label_anomalies: list[dict[str, Any]] = []
 
     for index, sample_id in enumerate(paired, start=1):
         try:
@@ -53,6 +54,15 @@ def inspect_dataset(root: Path, *, sample_count: int, seed: int, source_fps: flo
             frame_count = int(motion.shape[0])
             frame_counts[sample_id] = frame_count
             label = read_label(root, sample_id)
+            if not isinstance(label["name"], str):
+                label_anomalies.append(
+                    {
+                        "sample_id": sample_id,
+                        "field": "name",
+                        "value": label["name"],
+                        "type": type(label["name"]).__name__,
+                    }
+                )
             wav = read_wav_info(root, sample_id)
             music_npy = np.load(root / "music_npy" / f"{sample_id}.npy", mmap_mode="r", allow_pickle=False)
             if music_npy.ndim != 2 or music_npy.shape[1] != 35:
@@ -149,6 +159,7 @@ def inspect_dataset(root: Path, *, sample_count: int, seed: int, source_fps: flo
         "total_motion_hours": sum(frame_counts.values()) / source_fps / 3600,
         "label_minus_motion_histogram": summarize_counts(label_differences),
         "official_music_npy_minus_motion_histogram": summarize_counts(music_npy_differences),
+        "label_anomalies": label_anomalies,
         "wav_sample_rates": summarize_counts(wav_rates.elements()),
         "wav_channels": summarize_counts(wav_channels.elements()),
         "audio_minus_motion_frames": {

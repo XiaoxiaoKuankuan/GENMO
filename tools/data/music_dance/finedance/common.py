@@ -105,8 +105,13 @@ def read_label(root: str | Path, sample_id: str) -> dict[str, Any]:
     expected = {"name", "style1", "style2", "frames"}
     if not isinstance(value, dict) or set(value) != expected:
         raise ValueError(f"{path}: label keys must be exactly {sorted(expected)}")
-    if not all(isinstance(value[key], str) and value[key] for key in ("name", "style1", "style2")):
-        raise ValueError(f"{path}: name/style labels must be non-empty strings")
+    # One real release file (187.json) stores the song name as integer 711.
+    # Preserve that observed value instead of fabricating a string. Style fields
+    # remain categorical strings.
+    if not isinstance(value["name"], (str, int, float)) or value["name"] == "":
+        raise ValueError(f"{path}: name must be a non-empty string or numeric release value")
+    if not all(isinstance(value[key], str) and value[key] for key in ("style1", "style2")):
+        raise ValueError(f"{path}: style1/style2 must be non-empty strings")
     if not isinstance(value["frames"], int) or value["frames"] <= 0:
         raise ValueError(f"{path}: frames must be a positive integer")
     return value
