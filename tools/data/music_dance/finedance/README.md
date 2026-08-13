@@ -16,6 +16,8 @@ The bundled `music_npy` is audited but never used. Every WAV is processed once b
 `gem.utils.music_features.extract_edge_baseline35`, yielding `[T,35] @ 30 Hz`.
 The inspection report also preserves the release anomaly in `187.json`, whose song `name` is
 the numeric value `711` rather than a string; this does not invalidate its motion/WAV pair.
+The converter isolates librosa/Numba's compiled cache below
+`/tmp/genmo_finedance_numba_cache` to avoid stale shared-cache crashes on the server.
 
 ## Inspect all 203 complete motion/WAV pairs
 

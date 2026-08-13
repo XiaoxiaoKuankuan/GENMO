@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import math
 import os
@@ -39,6 +40,15 @@ from tools.data.music_dance.finedance.common import (  # noqa: E402
     write_json,
     write_jsonl,
 )
+
+
+def _configure_numba_cache(cache_root: Path, output_root: Path) -> Path:
+    """Avoid stale/shared Numba cache crashes during librosa extraction."""
+    namespace = hashlib.sha256(str(output_root).encode()).hexdigest()[:12]
+    cache = cache_root.expanduser().resolve() / namespace / f"process_{os.getpid()}"
+    cache.mkdir(parents=True, exist_ok=True)
+    os.environ["NUMBA_CACHE_DIR"] = str(cache)
+    return cache
 
 
 def _prepare_output(root: Path, overwrite: bool) -> None:
@@ -196,6 +206,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-audio-motion-frame-mismatch", type=float, default=2.0)
     parser.add_argument("--max-feature-frame-mismatch", type=int, default=2)
     parser.add_argument("--report-every", type=int, default=10)
+    parser.add_argument(
+        "--numba-cache-root",
+        type=Path,
+        default=Path("/tmp/genmo_finedance_numba_cache"),
+    )
     parser.add_argument("--overwrite", action="store_true")
     parser.add_argument("--strict", action="store_true")
     return parser
@@ -210,6 +225,7 @@ def main(argv: list[str] | None = None) -> int:
     raw_root = args.root.expanduser().resolve()
     output_root = args.output_root.expanduser().resolve()
     _prepare_output(output_root, args.overwrite)
+    numba_cache = _configure_numba_cache(args.numba_cache_root, output_root)
     inventory = inventory_audit(raw_root)
     ids = list_ids(raw_root)
     paired = sorted(ids["motion"] & ids["music_wav"])
@@ -272,6 +288,7 @@ def main(argv: list[str] | None = None) -> int:
             "max_feature_frame_mismatch": args.max_feature_frame_mismatch,
             "overwrite": args.overwrite,
             "strict": args.strict,
+            "numba_cache": str(numba_cache),
         },
         "inventory": inventory,
         "official_split": split_metadata,
