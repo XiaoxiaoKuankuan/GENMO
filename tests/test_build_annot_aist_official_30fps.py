@@ -49,6 +49,7 @@ def _record(length: int = 4) -> dict:
         ),
         "intrinsics": torch.eye(3, dtype=torch.float32),
         "T_w2c": torch.eye(4, dtype=torch.float32),
+        "contact_supervision_valid": True,
         "height": 480,
         "width": 640,
     }

@@ -59,6 +59,7 @@ ANNOT_RECORD_KEYS = {
     "bbox_xyxy",
     "intrinsics",
     "T_w2c",
+    "contact_supervision_valid",
     "height",
     "width",
 }
@@ -330,6 +331,40 @@ def camera_space_smpl(
     return pose_camera, trans_camera
 
 
+def normalize_aist_translation(
+    smpl_trans: np.ndarray, smpl_scaling: float
+) -> np.ndarray:
+    """Convert fitted AIST++ translation to generic-SMPL metric scale.
+
+    AIST++ fits a per-sequence scaled SMPL body. Its official motion-feature
+    example divides ``smpl_trans`` by ``smpl_scaling`` before passing the motion
+    to an unscaled generic SMPL model. GEM uses that generic model and metric
+    velocity thresholds, so retaining fitted-scene units corrupts both the 151D
+    root-velocity target and static-contact labels.
+    """
+    if not np.isfinite(smpl_scaling) or smpl_scaling == 0:
+        raise ValueError(f"smpl_scaling must be finite and non-zero, got {smpl_scaling}")
+    # Scale is a geometric magnitude. A small number of upstream ignored fits
+    # contain a negative signed value; callers retain them only when explicitly
+    # allowing ignored official IDs and mark their contact supervision invalid.
+    scale_magnitude = abs(float(smpl_scaling))
+    translation = np.asarray(smpl_trans, dtype=np.float32)
+    return np.ascontiguousarray(
+        translation / np.float32(scale_magnitude), dtype=np.float32
+    )
+
+
+def normalize_aist_camera_extrinsics(
+    t_w2c: torch.Tensor, smpl_scaling: float
+) -> torch.Tensor:
+    """Put camera translation in the same generic-SMPL scale as the motion."""
+    if not np.isfinite(smpl_scaling) or smpl_scaling == 0:
+        raise ValueError(f"smpl_scaling must be finite and non-zero, got {smpl_scaling}")
+    normalized = torch.as_tensor(t_w2c).detach().clone().float()
+    normalized[:3, 3] /= abs(float(smpl_scaling))
+    return normalized.contiguous()
+
+
 def validate_music_features(path: str | Path, expected_length: int) -> torch.Tensor:
     """Load and validate aligned EDGE baseline35 features without changing length."""
     features = load_music_feature_tensor(path).contiguous().cpu().float()
@@ -345,6 +380,8 @@ def validate_annot_record(record: dict[str, Any], sequence: str = "<record>") ->
     """Validate one record against ``AISTPlusPlusSmplDataset``'s exact contract."""
     if not isinstance(record, dict) or set(record) != ANNOT_RECORD_KEYS:
         raise ValueError(f"{sequence}: record fields must be exactly {sorted(ANNOT_RECORD_KEYS)}")
+    if not isinstance(record["contact_supervision_valid"], (bool, np.bool_)):
+        raise ValueError(f"{sequence}: contact_supervision_valid must be boolean")
     arrays = {
         name: record[name]
         for name in (
@@ -488,7 +525,8 @@ def _load_motion(path: Path) -> tuple[np.ndarray, np.ndarray, float]:
         raise ValueError("smpl_scaling is empty or non-finite")
     if scaling_array.size != 1:
         raise ValueError(f"smpl_scaling must contain one value, got {scaling_array.size}")
-    return poses, trans, float(scaling_array[0])
+    scaling = float(scaling_array[0])
+    return poses, normalize_aist_translation(trans, scaling), scaling
 
 
 def _load_keypoints(path: Path) -> np.ndarray:
@@ -557,7 +595,10 @@ def write_reports(report_dir: Path, reports: BuildReports) -> None:
     _save_json(report_dir / "camera_summary.json", camera_summary)
     scaling_values = [row["scaling"] for row in reports.scalings]
     scaling_summary: dict[str, Any] = {
-        "note": "smpl_scaling is audited only; it is not converted to betas or applied to translation",
+        "note": (
+            "smpl_trans and camera translation are divided by per-sequence "
+            "smpl_scaling; scaling is not converted to betas"
+        ),
         "count": len(scaling_values),
         "per_sequence": reports.scalings,
     }
@@ -799,6 +840,7 @@ def build_partial_dataset(
             camera, intrinsics, t_w2c, width, height = _load_camera_environment(
                 cameras_root, environment, args.view
             )
+            t_w2c = normalize_aist_camera_extrinsics(t_w2c, scaling)
             common_manifest["environment"] = environment
             bboxes, invalid_bbox_count = compute_tight_bboxes(
                 selected_keypoints,
@@ -822,6 +864,7 @@ def build_partial_dataset(
                 "bbox_xyxy": np.ascontiguousarray(bboxes, dtype=np.float32),
                 "intrinsics": intrinsics.detach().cpu().float().contiguous(),
                 "T_w2c": t_w2c.detach().cpu().float().contiguous(),
+                "contact_supervision_valid": True,
                 "height": int(height),
                 "width": int(width),
             }

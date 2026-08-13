@@ -21,6 +21,8 @@ from tools.data.aistpp.build_annot_aist_30fps import (
     choose_minitrain,
     compute_tight_bboxes,
     downsample_motion_indices,
+    normalize_aist_camera_extrinsics,
+    normalize_aist_translation,
     normalize_smpl_poses,
     select_camera,
     select_keypoint_frames,
@@ -56,6 +58,7 @@ def _record(length: int = 4) -> dict:
         "bbox_xyxy": np.tile(np.array([[10, 20, 100, 200]], dtype=np.float32), (length, 1)),
         "intrinsics": torch.eye(3, dtype=torch.float32),
         "T_w2c": torch.eye(4, dtype=torch.float32),
+        "contact_supervision_valid": True,
         "height": 480,
         "width": 640,
     }
@@ -163,6 +166,37 @@ def test_camera_space_root_uses_current_transform() -> None:
     assert np.allclose(camera_trans, expected.numpy(), atol=1e-5)
 
 
+def test_aist_scene_translation_is_normalized_by_sequence_scaling() -> None:
+    translation = np.array([[100.0, -50.0, 25.0]], dtype=np.float32)
+    normalized = normalize_aist_translation(translation, 100.0)
+    assert normalized.dtype == np.float32
+    assert normalized.flags.c_contiguous
+    assert np.allclose(normalized, [[1.0, -0.5, 0.25]])
+
+    transform = torch.eye(4, dtype=torch.float32)
+    transform[:3, 3] = torch.tensor([100.0, 200.0, -300.0])
+    normalized_transform = normalize_aist_camera_extrinsics(transform, 100.0)
+    assert torch.allclose(normalized_transform[:3, 3], torch.tensor([1.0, 2.0, -3.0]))
+    assert torch.allclose(normalized_transform[:3, :3], transform[:3, :3])
+    assert torch.allclose(transform[:3, 3], torch.tensor([100.0, 200.0, -300.0]))
+
+
+def test_aist_scene_normalization_uses_negative_scale_magnitude() -> None:
+    translation = np.array([[100.0, -50.0, 25.0]], dtype=np.float32)
+    assert np.allclose(
+        normalize_aist_translation(translation, -100.0),
+        [[1.0, -0.5, 0.25]],
+    )
+
+
+@pytest.mark.parametrize("scaling", [0.0, float("nan"), float("inf")])
+def test_aist_scene_normalization_rejects_invalid_scaling(scaling: float) -> None:
+    with pytest.raises(ValueError, match="finite and non-zero"):
+        normalize_aist_translation(np.zeros((1, 3), dtype=np.float32), scaling)
+    with pytest.raises(ValueError, match="finite and non-zero"):
+        normalize_aist_camera_extrinsics(torch.eye(4), scaling)
+
+
 def test_music_validation_rejects_shape_and_length(tmp_path: Path) -> None:
     good = tmp_path / "good.pt"
     torch.save(_valid_music(4), good)
@@ -250,6 +284,30 @@ def test_music_only_eval_dataset_uses_center_clip_without_raw_audio(
     assert not item["mask"]["has_2d_mask"].any()
     assert item["mask"]["has_music_mask"].all()
     assert item["mask"]["invalid_contact"] is False
+
+
+def test_music_only_respects_per_sequence_invalid_contact_metadata(
+    tmp_path: Path, monkeypatch
+) -> None:
+    monkeypatch.setattr(aist_dataset_module, "make_smplx", lambda _kind: _DummyBodyModel())
+    sequence = "gBR_sBM_cAll_d04_mBR0_ch01"
+    record = _record(120)
+    record["contact_supervision_valid"] = False
+    torch.save({sequence: record}, tmp_path / "annot_aist_30fps.pt")
+    torch.save([sequence], tmp_path / "train.pt")
+    music_dir = tmp_path / "musicfeat_v2"
+    music_dir.mkdir()
+    torch.save(_valid_music(120), music_dir / f"{sequence}_musicfeat_fps30.pt")
+
+    dataset = AISTPlusPlusSmplDataset(
+        root=tmp_path,
+        split="train",
+        feat_version="v2",
+        enable_contact_supervision=True,
+    )
+    item = dataset[0]
+    assert item["meta"]["contact_supervision_valid"] is False
+    assert item["mask"]["invalid_contact"] is True
 
 
 def _write_synthetic_tree(root: Path) -> tuple[Path, Path]:

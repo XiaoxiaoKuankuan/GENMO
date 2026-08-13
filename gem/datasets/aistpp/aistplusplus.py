@@ -277,6 +277,9 @@ class AISTPlusPlusSmplDataset(data.Dataset):
         sampled_motion["vid"] = vid
         sampled_motion["music_feature_path"] = str(music_feat_path)
         sampled_motion["alignment"] = alignment
+        sampled_motion["contact_supervision_valid"] = bool(
+            motion.get("contact_supervision_valid", True)
+        )
 
         # Random train crop or deterministic fixed-window evaluation crop.
         if self.split in ["train", "minitrain"]:
@@ -424,6 +427,7 @@ class AISTPlusPlusSmplDataset(data.Dataset):
                 "music_feature_path": data["music_feature_path"],
                 "music_motion_alignment": data["alignment"],
                 "start_end": data["start_end"],
+                "contact_supervision_valid": data["contact_supervision_valid"],
             },
             "length": length,
             "smpl_params_c": smpl_params_c,
@@ -457,7 +461,10 @@ class AISTPlusPlusSmplDataset(data.Dataset):
                 "bbx_xys": False,
                 "f_imgseq": False,
                 "spv_incam_only": False,
-                "invalid_contact": not self.enable_contact_supervision,
+                "invalid_contact": not (
+                    self.enable_contact_supervision
+                    and data["contact_supervision_valid"]
+                ),
             },
         }
 

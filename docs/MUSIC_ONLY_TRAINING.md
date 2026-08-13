@@ -52,6 +52,11 @@ HumanML3D、BEAT2 等数据学习 static-contact head。music-only 从零训练�
 速度生成的静止标签；其他实验仍保持上游默认行为。训练时应确认
 `Loss_diffusion/static_conf_loss_{step,epoch}` 非零且 finite。
 
+AIST++原始motion使用逐序列的拟合缩放。构建脚本按官方AIST++通用SMPL用法将
+`smpl_trans` 和相机外参平移同时除以 `smpl_scaling`，再生成米制151D根速度和
+静止标签。修改此逻辑后必须重新构建 `annot_aist_30fps.pt`；旧产物不会因代码更新
+自动改变。
+
 本实验使用按 optimizer step 计数的学习率调度，而不是按 epoch 计数：初始学习率
 为 `2e-4`，第 70,000 step 降为 `1e-4`，第 100,000 step 降为 `5e-5`。这样不会因
 AIST++ 每个 epoch 的 batch 数很少而在训练早期提前完成全部衰减。

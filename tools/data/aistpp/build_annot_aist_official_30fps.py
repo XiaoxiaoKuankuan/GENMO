@@ -37,6 +37,7 @@ from tools.data.aistpp.build_annot_aist_30fps import (  # noqa: E402
     camera_space_smpl,
     compute_tight_bboxes,
     downsample_motion_indices,
+    normalize_aist_camera_extrinsics,
     parse_camera_mapping,
     safe_torch_load,
     select_keypoint_frames,
@@ -476,6 +477,7 @@ def build_official_dataset(
     # Ignore-list safety is checked against the complete official union even in
     # debug-limit mode; a limit must never hide a split-level contract conflict.
     preflight_official_inputs(args, official_ids, reports)
+    ignore_ids = _read_ignore_ids(args.annotations_root / "ignore_list.txt")
 
     smpl_model = make_smplx("supermotion")
     offset = smpl_model.get_skeleton(torch.zeros(10))[0].detach().cpu().float()
@@ -522,6 +524,7 @@ def build_official_dataset(
             _, intrinsics, t_w2c, width, height = _load_camera_environment(
                 cameras_root, environment, args.view
             )
+            t_w2c = normalize_aist_camera_extrinsics(t_w2c, scaling)
             row["environment"] = environment
             bboxes, invalid_bbox_count = compute_tight_bboxes(
                 selected_keypoints,
@@ -551,6 +554,7 @@ def build_official_dataset(
                 "bbox_xyxy": np.ascontiguousarray(bboxes, dtype=np.float32),
                 "intrinsics": intrinsics.detach().cpu().float().contiguous(),
                 "T_w2c": t_w2c.detach().cpu().float().contiguous(),
+                "contact_supervision_valid": sequence not in ignore_ids and scaling > 0,
                 "height": int(height),
                 "width": int(width),
             }
@@ -655,7 +659,10 @@ def write_reports(report_dir: Path, reports: OfficialBuildReports) -> None:
     )
     values = np.asarray([row["scaling"] for row in reports.scalings], dtype=np.float64)
     scaling_report: dict[str, Any] = {
-        "note": "smpl_scaling is audited only; it is not applied to translation or betas",
+        "note": (
+            "smpl_trans and camera translation are divided by per-sequence "
+            "smpl_scaling; scaling is not converted to betas"
+        ),
         "count": len(values),
         "per_sequence": reports.scalings,
     }
