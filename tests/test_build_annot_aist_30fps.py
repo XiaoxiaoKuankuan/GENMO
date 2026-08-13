@@ -238,6 +238,7 @@ def test_music_only_eval_dataset_uses_center_clip_without_raw_audio(
         eval_motion_frames=120,
         eval_clip_mode="center",
         music_only_conditioning=True,
+        enable_contact_supervision=True,
     )
     item = dataset[0]
     assert item["length"] == 120
@@ -248,6 +249,7 @@ def test_music_only_eval_dataset_uses_center_clip_without_raw_audio(
     assert torch.count_nonzero(item["music_array"]) == 0
     assert not item["mask"]["has_2d_mask"].any()
     assert item["mask"]["has_music_mask"].all()
+    assert item["mask"]["invalid_contact"] is False
 
 
 def _write_synthetic_tree(root: Path) -> tuple[Path, Path]:

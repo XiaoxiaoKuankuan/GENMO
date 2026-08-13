@@ -156,6 +156,7 @@ class AISTPlusPlusSmplDataset(data.Dataset):
         eval_motion_frames: int | None = None,
         eval_clip_mode: str = "first",
         music_only_conditioning: bool = False,
+        enable_contact_supervision: bool = False,
     ):
         super().__init__()
         # Path
@@ -175,6 +176,10 @@ class AISTPlusPlusSmplDataset(data.Dataset):
         self.eval_motion_frames = eval_motion_frames
         self.eval_clip_mode = eval_clip_mode
         self.music_only_conditioning = music_only_conditioning
+        # Upstream AIST++ samples disable static-joint supervision.  Keep that
+        # legacy default, while allowing the music-only specialist to opt in to
+        # velocity-derived contact labels from its fully supervised SMPL motion.
+        self.enable_contact_supervision = enable_contact_supervision
         if self.max_music_motion_frame_mismatch < 0:
             raise ValueError("max_music_motion_frame_mismatch must be non-negative")
         if self.eval_motion_frames is not None and self.eval_motion_frames <= 0:
@@ -452,7 +457,7 @@ class AISTPlusPlusSmplDataset(data.Dataset):
                 "bbx_xys": False,
                 "f_imgseq": False,
                 "spv_incam_only": False,
-                "invalid_contact": True,
+                "invalid_contact": not self.enable_contact_supervision,
             },
         }
 

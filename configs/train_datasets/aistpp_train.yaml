@@ -3,3 +3,6 @@
 aistpp_train:
   _target_: gem.datasets.aistpp.aistplusplus.AISTPlusPlusSmplDataset
   feat_version: v2
+  # Preserve the upstream AIST++ behavior unless an experiment explicitly
+  # opts in after validating its world-space SMPL motion.
+  enable_contact_supervision: false

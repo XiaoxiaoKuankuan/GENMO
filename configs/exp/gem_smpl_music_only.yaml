@@ -8,7 +8,7 @@ defaults:
   - override /pipeline: music_only
   - override /endecoder: v1_smpl_amass_bedlam
   - override /optimizer: adamw_2e-4
-  - override /scheduler: epoch_half_500_750
+  - override /scheduler: iters_half_70k_100k
   - override /train_datasets:
       - aistpp_train
   - override /test_datasets:
@@ -39,6 +39,9 @@ train_datasets:
     max_music_motion_frame_mismatch: 2
     load_raw_music_audio: false
     music_only_conditioning: true
+    # Unlike the upstream AIST++ default, the from-scratch music specialist
+    # trains its static-joint head from velocity-derived SMPL contact labels.
+    enable_contact_supervision: true
 
 model:
   model_cfg:

@@ -23,6 +23,7 @@ from gem.network.gem_diffusion import (
     GEMDiffusion,
     apply_regression_targets_to_2d_only,
 )
+from gem.pipeline.gem_pipeline import compute_extra_global_loss
 from gem.utils.ckpt_compat import remap_legacy_state_dict
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -46,12 +47,59 @@ def test_music_only_and_generalist_configs_compose() -> None:
     assert specialist.network.model_cfg.denoiser.encode_text is False
     assert specialist.train_datasets.aistpp_train.strict_music_alignment is True
     assert specialist.train_datasets.aistpp_train.load_raw_music_audio is False
+    assert specialist.train_datasets.aistpp_train.enable_contact_supervision is True
+    assert specialist.test_datasets.aistpp_music_eval.enable_contact_supervision is True
+    assert specialist.scheduler.interval == "step"
+    assert list(specialist.scheduler.scheduler.milestones) == [70000, 100000]
 
     generalist = _compose("gem_smpl")
     assert list(generalist.pipeline.args.train_modes) == ["regression", "diffusion"]
     assert "encoded_music" in generalist.pipeline.args.in_attr
     assert "f_imgseq" in generalist.pipeline.args.in_attr
     assert generalist.network.model_cfg.denoiser.encode_text is True
+    assert generalist.train_datasets.aistpp_train.enable_contact_supervision is False
+    assert generalist.scheduler.interval == "epoch"
+
+
+def _static_contact_loss(enabled: bool) -> tuple[torch.Tensor, torch.Tensor]:
+    logits = torch.zeros(1, 4, 6, requires_grad=True)
+    inputs = {
+        "mask": {
+            "valid": torch.ones(1, 4, dtype=torch.bool),
+            "spv_incam_only": torch.zeros(1, dtype=torch.bool),
+            "2d_only": torch.zeros(1, dtype=torch.bool),
+        },
+        "static_gt_mask": torch.tensor([enabled]),
+        "static_gt": torch.ones_like(logits),
+    }
+    outputs = {
+        "decode_dict": {},
+        "model_output": {"static_conf_logits": logits},
+    }
+    pipeline = SimpleNamespace(
+        endecoder=None,
+        weights=OmegaConf.create({"transl_w": 0.0, "static_conf_bce": 1.0}),
+        args=OmegaConf.create({"static_conf": {"vel_thr": 0.15}}),
+    )
+    loss, loss_dict = compute_extra_global_loss(inputs, outputs, pipeline, "diffusion")
+    return loss_dict["static_conf_loss"], logits
+
+
+def test_music_only_contact_mask_enables_bce_and_gradient() -> None:
+    contact_loss, logits = _static_contact_loss(enabled=True)
+    assert torch.allclose(contact_loss, torch.tensor(0.6931472), atol=1e-6)
+    contact_loss.backward()
+    assert logits.grad is not None
+    assert torch.isfinite(logits.grad).all()
+    assert torch.count_nonzero(logits.grad) > 0
+
+
+def test_legacy_invalid_contact_mask_still_disables_bce() -> None:
+    contact_loss, logits = _static_contact_loss(enabled=False)
+    assert contact_loss.item() == 0.0
+    contact_loss.backward()
+    assert logits.grad is not None
+    assert torch.count_nonzero(logits.grad) == 0
 
 
 def _target_case(mask: torch.Tensor, with_regression: bool) -> tuple[torch.Tensor, dict]:

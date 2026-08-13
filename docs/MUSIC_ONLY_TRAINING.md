@@ -46,6 +46,16 @@ SMPL motion
 translation rollout 和 static-contact loss。这里的 music-only 仅指 condition
 architecture，不表示只训练一个 MSE。
 
+上游 AIST++ 默认设置 `invalid_contact=true`，因为 generalist 可从 BEDLAM、H36M、
+HumanML3D、BEAT2 等数据学习 static-contact head。music-only 从零训练只有 AIST++，
+因此本实验通过 `enable_contact_supervision=true` 单独启用由 world-space SMPL 关节
+速度生成的静止标签；其他实验仍保持上游默认行为。训练时应确认
+`Loss_diffusion/static_conf_loss_{step,epoch}` 非零且 finite。
+
+本实验使用按 optimizer step 计数的学习率调度，而不是按 epoch 计数：初始学习率
+为 `2e-4`，第 70,000 step 降为 `1e-4`，第 100,000 step 降为 `5e-5`。这样不会因
+AIST++ 每个 epoch 的 batch 数很少而在训练早期提前完成全部衰减。
+
 CFG 训练只有一套 dropout：`music_mask_prob=0.1` 按 sample 将整段音乐置零，约
 90% sample 使用真实音乐、约 10% sample 训练 unconditional branch。
 `disable_random_null_condition=true` 禁止再叠加逐帧 `uncond_prob` dropout。

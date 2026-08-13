@@ -11,3 +11,4 @@ aistpp_music_eval:
   eval_motion_frames: 120
   eval_clip_mode: center
   music_only_conditioning: true
+  enable_contact_supervision: true
