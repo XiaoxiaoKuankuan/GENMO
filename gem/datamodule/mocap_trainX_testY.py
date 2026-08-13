@@ -143,6 +143,7 @@ class DataModule(pl.LightningDataModule):
                 split_opts, DictConfig
             ), "split_opts should be a dict for each dataset"
             dataset = []
+            sampling_records = []
             dataset_num = len(split_opts)
             for idx, (k, v) in enumerate(split_opts.items()):
                 dataset_i = instantiate(v)
@@ -157,8 +158,29 @@ class DataModule(pl.LightningDataModule):
                         ),
                     )
                 dataset.append(dataset_i)
+                summary = getattr(dataset_i, "sampling_summary", None)
+                if summary is not None:
+                    sampling_records.append((k, dict(summary), len(dataset_i)))
                 Log.info(
                     f"[Train Dataset][{idx + 1}/{dataset_num}]: name={k}, size={len(dataset[-1])}, {v._target_}"
+                )
+            # Use the actual concatenated length as denominator.  This keeps
+            # the report correct even when a generalist experiment contains
+            # legacy datasets without a sampling_summary attribute.
+            effective_total = sum(len(value) for value in dataset)
+            for name, summary, effective_len in sampling_records:
+                fraction = (
+                    effective_len / effective_total
+                    if effective_total > 0
+                    else 0.0
+                )
+                Log.info(
+                    "[Train Sampling] "
+                    f"name={name}, raw_sequences={summary['raw_sequences']}, "
+                    f"hours={summary['hours']:.6f}, "
+                    f"effective_len={effective_len}, "
+                    f"sampling_fraction={fraction:.6%}, "
+                    f"duration_aware={summary['duration_aware_sampling']}"
                 )
             dataset = ConcatDataset(dataset)
             self.trainset = dataset

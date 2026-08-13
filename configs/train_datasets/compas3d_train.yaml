@@ -1,0 +1,9 @@
+compas3d_train:
+  _target_: gem.datasets.music_dance.music_dance_smpl.MusicDanceSmplDataset
+  root: /data0/user/liwei/datasets/music_dance_genmo/CoMPAS3D
+  dataset_name: compas3d
+  split: train
+  motion_frames: 120
+  duration_aware_sampling: false
+  strict_alignment: true
+  enable_contact_supervision: true

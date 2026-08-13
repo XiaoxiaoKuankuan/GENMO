@@ -157,6 +157,7 @@ class AISTPlusPlusSmplDataset(data.Dataset):
         eval_clip_mode: str = "first",
         music_only_conditioning: bool = False,
         enable_contact_supervision: bool = False,
+        duration_aware_sampling: bool = False,
     ):
         super().__init__()
         # Path
@@ -176,6 +177,10 @@ class AISTPlusPlusSmplDataset(data.Dataset):
         self.eval_motion_frames = eval_motion_frames
         self.eval_clip_mode = eval_clip_mode
         self.music_only_conditioning = music_only_conditioning
+        # Opt-in only: old AIST++ experiments keep one item per sequence.
+        # The four-dataset specialist repeats a sequence in proportion to its
+        # number of complete 120-frame windows.
+        self.duration_aware_sampling = duration_aware_sampling
         # Upstream AIST++ samples disable static-joint supervision.  Keep that
         # legacy default, while allowing the music-only specialist to opt in to
         # velocity-derived contact labels from its fully supervised SMPL motion.
@@ -228,10 +233,41 @@ class AISTPlusPlusSmplDataset(data.Dataset):
         for vid in self.motion_files:
             if vid not in self.split_set:
                 continue
-            seq_length = self.motion_files[vid]["bbox_xyxy"].shape[0]
+            motion_length = self.motion_files[vid]["bbox_xyxy"].shape[0]
+            if self.duration_aware_sampling:
+                music_path = (
+                    self.root
+                    / f"musicfeat_{self.feat_version}/{vid}_musicfeat_fps30.pt"
+                )
+                music_length = int(load_music_feature_tensor(music_path).shape[0])
+                seq_length, _ = resolve_music_motion_alignment(
+                    sequence_id=vid,
+                    motion_frames=motion_length,
+                    music_frames=music_length,
+                    music_feature_path=music_path,
+                    strict=self.strict_music_alignment,
+                    max_mismatch=self.max_music_motion_frame_mismatch,
+                )
+            else:
+                seq_length = motion_length
             seq_lengths.append(seq_length)
-            self.idx2meta.extend([vid])
+            repeat_count = (
+                max(seq_length // self.motion_frames, 1)
+                if self.duration_aware_sampling
+                else 1
+            )
+            self.idx2meta.extend([vid] * repeat_count)
         hours = sum(seq_lengths) / 30 / 3600
+        self.raw_sequence_count = len(seq_lengths)
+        self.total_valid_frames = sum(seq_lengths)
+        self.sampling_summary = {
+            "dataset_name": "aist++",
+            "raw_sequences": self.raw_sequence_count,
+            "valid_frames": self.total_valid_frames,
+            "hours": hours,
+            "effective_len": len(self.idx2meta),
+            "duration_aware_sampling": self.duration_aware_sampling,
+        }
         Log.info(
             f"[AIST++] has {hours:.1f} hours motion -> Resampled to {len(self.idx2meta)} samples."
         )
