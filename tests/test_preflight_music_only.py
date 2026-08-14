@@ -68,3 +68,19 @@ def test_preflight_official_counts_required_without_allow_subset(tmp_path: Path)
     report = run_preflight(root, strict=True, allow_subset=False)
     assert report["final_pass"] is False
     assert any("official train count" in issue for issue in report["blocking_issues"])
+
+
+def test_preflight_rejects_stale_centimetre_translation(tmp_path: Path) -> None:
+    root = tmp_path / "AIST++"
+    _write_subset(root)
+    annot = torch.load(root / "annot_aist_30fps.pt", weights_only=False)
+    stale = np.zeros((120, 3), dtype=np.float32)
+    stale[:, 1] = 170.0
+    stale[:, 0] = np.arange(120, dtype=np.float32)
+    annot["train_seq"]["smpl_trans_global"] = stale
+    torch.save(annot, root / "annot_aist_30fps.pt")
+
+    report = run_preflight(root, strict=True, allow_subset=True)
+    assert report["final_pass"] is False
+    assert len(report["invalid_motion"]) == 1
+    assert "not in GEM metric scale" in report["invalid_motion"][0]["error"]

@@ -181,6 +181,14 @@ def test_aist_scene_translation_is_normalized_by_sequence_scaling() -> None:
     assert torch.allclose(transform[:3, 3], torch.tensor([100.0, 200.0, -300.0]))
 
 
+def test_annot_validation_rejects_stale_unscaled_translation() -> None:
+    record = _record(120)
+    record["smpl_trans_global"][:, 1] = 170.0
+    record["smpl_trans_global"][:, 0] = np.arange(120, dtype=np.float32)
+    with pytest.raises(ValueError, match="not in GEM metric scale"):
+        builder.validate_annot_record(record, "stale_sequence")
+
+
 def test_aist_scene_normalization_uses_negative_scale_magnitude() -> None:
     translation = np.array([[100.0, -50.0, 25.0]], dtype=np.float32)
     assert np.allclose(
@@ -284,6 +292,31 @@ def test_music_only_eval_dataset_uses_center_clip_without_raw_audio(
     assert not item["mask"]["has_2d_mask"].any()
     assert item["mask"]["has_music_mask"].all()
     assert item["mask"]["invalid_contact"] is False
+
+
+def test_music_only_aist_y_up_produces_identity_gravity_view_for_static_camera(
+    tmp_path: Path, monkeypatch
+) -> None:
+    monkeypatch.setattr(aist_dataset_module, "make_smplx", lambda _kind: _DummyBodyModel())
+    sequence = "gBR_sBM_cAll_d04_mBR0_ch01"
+    torch.save({sequence: _record(120)}, tmp_path / "annot_aist_30fps.pt")
+    torch.save([sequence], tmp_path / "train.pt")
+    music_dir = tmp_path / "musicfeat_v2"
+    music_dir.mkdir()
+    torch.save(_valid_music(120), music_dir / f"{sequence}_musicfeat_fps30.pt")
+
+    dataset = AISTPlusPlusSmplDataset(
+        root=tmp_path,
+        split="train",
+        feat_version="v2",
+        music_only_conditioning=True,
+        aist_world_up_axis="y",
+        validate_metric_translation=True,
+    )
+    item = dataset[0]
+    assert torch.equal(item["gravity_vec"], torch.tensor([0.0, -1.0, 0.0]))
+    assert torch.allclose(item["R_c2gv"], torch.eye(3).repeat(120, 1, 1))
+    assert item["meta"]["aist_world_up_axis"] == "y"
 
 
 def test_music_only_respects_per_sequence_invalid_contact_metadata(

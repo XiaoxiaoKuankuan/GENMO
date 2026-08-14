@@ -30,6 +30,62 @@ from gem.utils.net_utils import (
 from gem.utils.pylogger import Log
 from gem.utils.smplx_utils import make_smplx
 
+AIST_METRIC_MAX_MEDIAN_ROOT_STEP_M = 0.25
+AIST_METRIC_MAX_ABS_TRANSLATION_P95_M = 20.0
+
+
+def aist_translation_statistics(
+    translations: np.ndarray | torch.Tensor,
+) -> dict[str, float]:
+    """Return robust diagnostics for one AIST++ root trajectory in metres."""
+    array = (
+        translations.detach().cpu().numpy()
+        if isinstance(translations, torch.Tensor)
+        else np.asarray(translations)
+    )
+    if array.ndim != 2 or array.shape[1] != 3 or array.shape[0] <= 0:
+        raise ValueError(f"AIST++ translation must be non-empty [F,3], got {array.shape}")
+    if not np.issubdtype(array.dtype, np.number) or not np.isfinite(array).all():
+        raise ValueError("AIST++ translation must be numeric and finite")
+    steps = (
+        np.linalg.norm(np.diff(array.astype(np.float64), axis=0), axis=1)
+        if array.shape[0] > 1
+        else np.zeros(1, dtype=np.float64)
+    )
+    return {
+        "median_root_step_m": float(np.median(steps)),
+        "p95_root_step_m": float(np.percentile(steps, 95)),
+        "max_root_step_m": float(steps.max(initial=0.0)),
+        "p95_abs_translation_m": float(
+            np.percentile(np.abs(array.astype(np.float64)), 95)
+        ),
+    }
+
+
+def validate_aist_metric_translation(
+    translations: np.ndarray | torch.Tensor,
+    *,
+    sequence_id: str,
+    max_median_root_step_m: float = AIST_METRIC_MAX_MEDIAN_ROOT_STEP_M,
+    max_abs_translation_p95_m: float = AIST_METRIC_MAX_ABS_TRANSLATION_P95_M,
+) -> dict[str, float]:
+    """Reject stale AIST++ artifacts that still store centimetre-scale motion."""
+    stats = aist_translation_statistics(translations)
+    if (
+        stats["median_root_step_m"] > max_median_root_step_m
+        or stats["p95_abs_translation_m"] > max_abs_translation_p95_m
+    ):
+        raise ValueError(
+            "AIST++ translation is not in GEM metric scale: "
+            f"sequence_id={sequence_id}, "
+            f"median_root_step={stats['median_root_step_m']:.6f}m, "
+            f"p95_abs_translation={stats['p95_abs_translation_m']:.6f}m. "
+            "This usually means annot_aist_30fps.pt was built before smpl_trans "
+            "was divided by smpl_scaling. Rebuild the artifact; do not train or "
+            "repair the target by silently clipping/zeroing translation."
+        )
+    return stats
+
 
 def load_music_feature_tensor(path: str | Path) -> torch.Tensor:
     """Load a NumPy- or Tensor-backed ``.pt`` music feature as float32."""
@@ -158,6 +214,8 @@ class AISTPlusPlusSmplDataset(data.Dataset):
         music_only_conditioning: bool = False,
         enable_contact_supervision: bool = False,
         duration_aware_sampling: bool = False,
+        validate_metric_translation: bool = False,
+        aist_world_up_axis: str = "z",
     ):
         super().__init__()
         # Path
@@ -177,6 +235,8 @@ class AISTPlusPlusSmplDataset(data.Dataset):
         self.eval_motion_frames = eval_motion_frames
         self.eval_clip_mode = eval_clip_mode
         self.music_only_conditioning = music_only_conditioning
+        self.validate_metric_translation = validate_metric_translation
+        self.aist_world_up_axis = aist_world_up_axis
         # Opt-in only: old AIST++ experiments keep one item per sequence.
         # The four-dataset specialist repeats a sequence in proportion to its
         # number of complete 120-frame windows.
@@ -191,6 +251,8 @@ class AISTPlusPlusSmplDataset(data.Dataset):
             raise ValueError("eval_motion_frames must be positive when provided")
         if self.eval_clip_mode not in {"first", "center"}:
             raise ValueError("eval_clip_mode must be 'first' or 'center'")
+        if self.aist_world_up_axis not in {"y", "z"}:
+            raise ValueError("aist_world_up_axis must be 'y' or 'z'")
         self.music_alignment_stats = {
             "exact_match_count": 0,
             "within_1_count": 0,
@@ -215,6 +277,26 @@ class AISTPlusPlusSmplDataset(data.Dataset):
         Log.info(f"[AIST++ {self.feat_version}] Loading from {fn} ...")
         self.motion_files = load_aist_artifact(fn)
         self.split_set = load_aist_artifact(self.root / split_filename)
+        if self.validate_metric_translation:
+            metric_stats = []
+            for sequence_id in self.split_set:
+                if sequence_id not in self.motion_files:
+                    continue
+                metric_stats.append(
+                    validate_aist_metric_translation(
+                        self.motion_files[sequence_id]["smpl_trans_global"],
+                        sequence_id=sequence_id,
+                    )
+                )
+            self.metric_translation_summary = {
+                "checked_sequences": len(metric_stats),
+                "max_median_root_step_m": max(
+                    (item["median_root_step_m"] for item in metric_stats), default=0.0
+                ),
+                "max_p95_abs_translation_m": max(
+                    (item["p95_abs_translation_m"] for item in metric_stats), default=0.0
+                ),
+            }
         # Dict of {
         #          "smpl_params_glob": {'body_pose', 'global_orient', 'transl', 'betas'}, FxC
         #          "cam_Rt": tensor(F, 3),
@@ -400,7 +482,7 @@ class AISTPlusPlusSmplDataset(data.Dataset):
         length = data["length"]
 
         # SMPL params in world
-        smpl_params_w = data["smpl_params_glob"]  # in az
+        smpl_params_w = data["smpl_params_glob"]
         old_smpl_params_c = data["smpl_params_cam"]
         music_fps = data["music_fps"]
 
@@ -432,7 +514,15 @@ class AISTPlusPlusSmplDataset(data.Dataset):
         }
 
         # World params
-        gravity_vec = torch.tensor([0, 0, -1]).float()  # (3), AIST++ is az
+        # Official AIST++ SMPL forward after ``smpl_trans / smpl_scaling`` is
+        # Y-up. Keep the old Z-up mode configurable so legacy generalist
+        # experiments preserve their exact input contract, while corrected
+        # music-only experiments explicitly select Y-up.
+        gravity_vec = (
+            torch.tensor([0.0, -1.0, 0.0])
+            if self.aist_world_up_axis == "y"
+            else torch.tensor([0.0, 0.0, -1.0])
+        ).float()
         T_w2c = T_w2c.repeat(length, 1, 1)  # (F, 4, 4)
         R_c2gv = get_R_c2gv(T_w2c[..., :3, :3], axis_gravity_in_w=gravity_vec)  # (F, 3, 3)
 
@@ -464,6 +554,7 @@ class AISTPlusPlusSmplDataset(data.Dataset):
                 "music_motion_alignment": data["alignment"],
                 "start_end": data["start_end"],
                 "contact_supervision_valid": data["contact_supervision_valid"],
+                "aist_world_up_axis": self.aist_world_up_axis,
             },
             "length": length,
             "smpl_params_c": smpl_params_c,

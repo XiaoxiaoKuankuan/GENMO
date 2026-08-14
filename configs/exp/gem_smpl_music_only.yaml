@@ -39,6 +39,10 @@ train_datasets:
     max_music_motion_frame_mismatch: 2
     load_raw_music_audio: false
     music_only_conditioning: true
+    # The official SMPL body is Y-up after smpl_trans/smpl_scaling. Reject old
+    # centimetre-scale artifacts before the first training step.
+    aist_world_up_axis: y
+    validate_metric_translation: true
     # Unlike the upstream AIST++ default, the from-scratch music specialist
     # trains its static-joint head from velocity-derived SMPL contact labels.
     enable_contact_supervision: true

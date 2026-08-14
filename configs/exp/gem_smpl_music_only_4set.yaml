@@ -42,6 +42,8 @@ train_datasets:
     max_music_motion_frame_mismatch: 2
     load_raw_music_audio: false
     music_only_conditioning: true
+    aist_world_up_axis: y
+    validate_metric_translation: true
     enable_contact_supervision: true
     duration_aware_sampling: true
   aioz_gdance_train:

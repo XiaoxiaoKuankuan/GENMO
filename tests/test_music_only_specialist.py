@@ -14,6 +14,7 @@ from omegaconf import OmegaConf
 from gem.datasets.aistpp.aistplusplus import (
     resolve_music_motion_alignment,
     select_aist_temporal_window,
+    validate_aist_metric_translation,
     validate_musicfeat_v2,
 )
 from gem.gem import GEM
@@ -48,7 +49,10 @@ def test_music_only_and_generalist_configs_compose() -> None:
     assert specialist.train_datasets.aistpp_train.strict_music_alignment is True
     assert specialist.train_datasets.aistpp_train.load_raw_music_audio is False
     assert specialist.train_datasets.aistpp_train.enable_contact_supervision is True
+    assert specialist.train_datasets.aistpp_train.aist_world_up_axis == "y"
+    assert specialist.train_datasets.aistpp_train.validate_metric_translation is True
     assert specialist.test_datasets.aistpp_music_eval.enable_contact_supervision is True
+    assert specialist.test_datasets.aistpp_music_eval.aist_world_up_axis == "y"
     assert specialist.scheduler.interval == "step"
     assert list(specialist.scheduler.scheduler.milestones) == [70000, 100000]
 
@@ -58,6 +62,7 @@ def test_music_only_and_generalist_configs_compose() -> None:
     assert "f_imgseq" in generalist.pipeline.args.in_attr
     assert generalist.network.model_cfg.denoiser.encode_text is True
     assert generalist.train_datasets.aistpp_train.enable_contact_supervision is False
+    assert "aist_world_up_axis" not in generalist.train_datasets.aistpp_train
     assert generalist.scheduler.interval == "epoch"
 
 
@@ -151,6 +156,16 @@ def test_music_feature_nonfinite_fails(bad_value: float) -> None:
 
 def test_music_feature_120x35_passes() -> None:
     validate_musicfeat_v2(torch.zeros(120, 35))
+
+
+def test_aist_metric_translation_rejects_unscaled_centimetres() -> None:
+    metric = torch.tensor([[0.0, 1.8, 0.0], [0.02, 1.8, 0.01], [0.04, 1.8, 0.02]])
+    stats = validate_aist_metric_translation(metric, sequence_id="metric")
+    assert stats["median_root_step_m"] < 0.1
+
+    centimetres = metric * 90.0
+    with pytest.raises(ValueError, match="not in GEM metric scale.*smpl_scaling"):
+        validate_aist_metric_translation(centimetres, sequence_id="stale")
 
 
 @pytest.mark.parametrize(

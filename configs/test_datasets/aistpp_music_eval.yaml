@@ -11,4 +11,6 @@ aistpp_music_eval:
   eval_motion_frames: 120
   eval_clip_mode: center
   music_only_conditioning: true
+  aist_world_up_axis: y
+  validate_metric_translation: true
   enable_contact_supervision: true

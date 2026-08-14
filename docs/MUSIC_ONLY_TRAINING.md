@@ -55,7 +55,12 @@ HumanML3D、BEAT2 等数据学习 static-contact head。music-only 从零训练�
 AIST++原始motion使用逐序列的拟合缩放。构建脚本按官方AIST++通用SMPL用法将
 `smpl_trans` 和相机外参平移同时除以 `smpl_scaling`，再生成米制151D根速度和
 静止标签。修改此逻辑后必须重新构建 `annot_aist_30fps.pt`；旧产物不会因代码更新
-自动改变。
+自动改变。music-only Dataset 和 preflight 还会用稳健的平移统计拒绝旧的厘米尺度
+artifact，避免有限但错误的数值再次进入训练。
+
+官方 AIST++ pose/trans 经通用 SMPL/SMPL-X forward 验证为 Y-up。music-only 配置
+因此明确设置 `aist_world_up_axis: y`，对应重力方向 `[0,-1,0]`。旧 generalist 默认
+仍保留原先的 Z-up 行为，避免借修 specialist 改变既有实验合约。
 
 本实验使用按 optimizer step 计数的学习率调度，而不是按 epoch 计数：初始学习率
 为 `2e-4`，第 70,000 step 降为 `1e-4`，第 100,000 step 降为 `5e-5`。这样不会因
@@ -125,14 +130,16 @@ python tools/data/aistpp/build_annot_aist_official_30fps.py \
   --musicfeat-dir inputs/AIST++/musicfeat_v2 \
   --output-root inputs/AIST++ \
   --view c01 \
-  --strict \
   --dry-run \
+  --allow-ignored-official \
   --report-dir outputs/aistpp_official_dryrun
 ```
 
-若官方 split 中的 sequence 同时出现在上游 `ignore_list.txt`，builder 默认拒绝
-发布。只有检查报告并明确接受这些 official ID 后，才在 dry-run 和正式命令中加
-`--allow-ignored-official`。
+当前官方 split 中有 28 条 sequence 同时出现在上游 `ignore_list.txt`，所以命令显式
+使用 `--allow-ignored-official`，同时给这些 sequence 标记无效接触监督。c01 还有
+448 帧二维框需要构建器已有的插值/首尾填充；builder 的 `--strict` 会拒绝任何这种
+非关键修补，因此这里不使用它。训练合约的严格检查由下一节 `preflight --strict`
+完成。
 
 dry-run 通过后正式发布：
 
@@ -142,8 +149,8 @@ python tools/data/aistpp/build_annot_aist_official_30fps.py \
   --musicfeat-dir inputs/AIST++/musicfeat_v2 \
   --output-root inputs/AIST++ \
   --view c01 \
-  --strict \
   --overwrite \
+  --allow-ignored-official \
   --report-dir outputs/aistpp_official_build_report
 ```
 
@@ -158,8 +165,8 @@ python tools/data/aistpp/preflight_music_only.py \
 ```
 
 报告写入 `outputs/aistpp_music_only_preflight.json`。strict 模式要求 980/20/20，
-并在 artifact 缺失、split 重叠、sequence 缺失、motion/music 非法、非 finite，或
-music-motion 帧差大于 2 时返回非零 exit code。
+并在 artifact 缺失、split 重叠、sequence 缺失、motion/music 非法、非 finite、
+平移不是米制，或 music-motion 帧差大于 2 时返回非零 exit code。
 
 只用于小型开发数据时：
 
@@ -272,22 +279,28 @@ python tools/eval/eval_music_only.py \
 
 ## 10. Music-only inference
 
-输入必须是已提取的 float、finite `[T,35]` tensor；当前最小 CLI 明确支持
-`1 <= T <= 120`：
+日常使用直接输入 WAV；demo 默认渲染并合成原音乐：
 
 ```bash
 python scripts/demo_music_only.py \
-  --music-embed outputs/music_embed.pt \
+  --audio /path/to/music.wav \
+  --audio-duration-sec 8 \
   --ckpt outputs/gem_smpl_music_only/version_N/checkpoints/last.ckpt \
   --output-dir outputs/gem_smpl_music_only/demo \
   --cfg-scale 2.5 \
-  --seed 42
+  --seed 42 \
+  --postproc
 ```
 
 `--cfg-scale` 直接映射到仓库已有 diffusion guidance 参数，没有实现另一套
-sampler。若要启用现有锁脚后处理，可加 `--postproc`。脚本构造静态 camera、零
+sampler。输入也可以改成 `--music-embed outputs/music_embed.pt`。脚本构造静态 camera、零
 图像/2D placeholder 以兼容 `GEM.predict` contract，但模型会先断言
 `pipeline.args.in_attr == ["encoded_music"]`；这些 placeholder 不进入 `f_cond`。
 
-输出包括 `generated_motion_151d.pt`、`pred_body_params_global.pt` 和
-`metadata.json`，并验证生成 motion 与所有 global body parameter 都为 finite。
+120帧是训练窗口，不是 PyTorch 硬上限。超过120帧时，denoiser 使用仓库已有的滑动
+120帧局部注意力；demo 默认安全上限600帧。由于长序列仍只接受局部上下文，且根轨迹
+通过逐帧速度积分得到，长度越长越可能积累漂移，不能把它描述成真正的长序列训练。
+
+输出包括 `generated_motion_151d.pt`、`pred_body_params_global.pt`、
+`motion_global.mp4`、`motion_with_audio.mp4` 和 `demo_report.json`。除 finite 外，
+demo 还检查每帧根位移和人体 Y-up 朝向；粗检失败时保存诊断但返回非零状态。

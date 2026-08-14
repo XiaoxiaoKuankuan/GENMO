@@ -19,6 +19,7 @@ if str(REPO_ROOT) not in sys.path:
 from gem.datasets.aistpp.aistplusplus import (  # noqa: E402
     load_aist_artifact,
     load_music_feature_tensor,
+    validate_aist_metric_translation,
     validate_musicfeat_v2,
 )
 
@@ -46,7 +47,7 @@ def _finite_array(value: Any, *, name: str) -> np.ndarray:
     return array
 
 
-def validate_motion_record(sequence: str, record: Any) -> int:
+def validate_motion_record(sequence: str, record: Any) -> tuple[int, dict[str, float]]:
     """Validate the motion fields consumed by AISTPlusPlusSmplDataset."""
     if not isinstance(record, dict):
         raise ValueError(f"{sequence}: annotation record must be a dict")
@@ -83,7 +84,10 @@ def validate_motion_record(sequence: str, record: Any) -> int:
         atol=1e-6,
     ):
         raise ValueError(f"{sequence}: T_w2c has an invalid homogeneous last row")
-    return frames
+    translation_stats = validate_aist_metric_translation(
+        record["smpl_trans_global"], sequence_id=sequence
+    )
+    return frames, translation_stats
 
 
 def validate_music_file(path: Path) -> int:
@@ -153,6 +157,7 @@ def run_preflight(root: Path, *, strict: bool, allow_subset: bool) -> dict[str, 
         "invalid_music": [],
         "invalid_motion": [],
         "alignment_stats": {},
+        "translation_stats": {},
         "hours": {},
         "blocking_issues": [],
         "final_pass": False,
@@ -201,6 +206,7 @@ def run_preflight(root: Path, *, strict: bool, allow_subset: bool) -> dict[str, 
 
     total_stats = _empty_alignment_stats()
     total_frames = 0
+    translation_rows: list[dict[str, Any]] = []
     for split_name, sequences in splits.items():
         stats = _empty_alignment_stats()
         split_frames = 0
@@ -211,7 +217,12 @@ def run_preflight(root: Path, *, strict: bool, allow_subset: bool) -> dict[str, 
                 )
                 continue
             try:
-                motion_frames = validate_motion_record(sequence, annot[sequence])
+                motion_frames, translation_stats = validate_motion_record(
+                    sequence, annot[sequence]
+                )
+                translation_rows.append(
+                    {"split": split_name, "sequence": sequence, **translation_stats}
+                )
             except Exception as exc:
                 report["invalid_motion"].append(
                     {"split": split_name, "sequence": sequence, "error": str(exc)}
@@ -249,6 +260,15 @@ def run_preflight(root: Path, *, strict: bool, allow_subset: bool) -> dict[str, 
     report["alignment_stats"]["total"] = total_stats
     report["hours"]["total"] = total_frames / 30.0 / 3600.0
     report["total_frames"] = total_frames
+    report["translation_stats"] = {
+        "sequences": translation_rows,
+        "max_median_root_step_m": max(
+            (row["median_root_step_m"] for row in translation_rows), default=0.0
+        ),
+        "max_p95_abs_translation_m": max(
+            (row["p95_abs_translation_m"] for row in translation_rows), default=0.0
+        ),
+    }
 
     for label in ("missing_motion", "missing_music", "invalid_music", "invalid_motion"):
         if report[label]:
@@ -295,6 +315,11 @@ def main(argv: list[str] | None = None) -> int:
         "missing_music": len(report["missing_music"]),
         "invalid_motion": len(report["invalid_motion"]),
         "invalid_music": len(report["invalid_music"]),
+        "translation_stats": {
+            key: value
+            for key, value in report.get("translation_stats", {}).items()
+            if key != "sequences"
+        },
         "final_pass": report["final_pass"],
         "output": str(args.output),
     }, indent=2, ensure_ascii=False))

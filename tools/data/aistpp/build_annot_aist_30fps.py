@@ -33,6 +33,7 @@ if str(REPO_ROOT) not in sys.path:
 
 from gem.datasets.aistpp.aistplusplus import (  # noqa: E402
     load_music_feature_tensor,
+    validate_aist_metric_translation,
     validate_musicfeat_v2,
 )
 from gem.utils.motion_utils import get_c_rootparam  # noqa: E402
@@ -382,6 +383,11 @@ def validate_annot_record(record: dict[str, Any], sequence: str = "<record>") ->
         raise ValueError(f"{sequence}: record fields must be exactly {sorted(ANNOT_RECORD_KEYS)}")
     if not isinstance(record["contact_supervision_valid"], (bool, np.bool_)):
         raise ValueError(f"{sequence}: contact_supervision_valid must be boolean")
+    # A stale pre-normalization artifact is finite and shape-correct, so shape
+    # checks alone cannot catch its 80--100x root-velocity error.
+    validate_aist_metric_translation(
+        record["smpl_trans_global"], sequence_id=sequence
+    )
     arrays = {
         name: record[name]
         for name in (

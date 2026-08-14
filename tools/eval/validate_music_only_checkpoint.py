@@ -25,6 +25,7 @@ from gem.datasets.aistpp.aistplusplus import (  # noqa: E402
     load_music_feature_tensor,
     validate_musicfeat_v2,
 )
+from gem.runtime.motion_sanity import evaluate_global_motion_sanity  # noqa: E402
 from gem.utils.music_features import extract_edge_baseline35  # noqa: E402
 from gem.utils.net_utils import load_pretrained_model  # noqa: E402
 from scripts.demo.demo_music import (  # noqa: E402
@@ -57,6 +58,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--audio-duration-sec", type=float, default=4.0)
     parser.add_argument("--feature-start-frame", type=int, default=0)
     parser.add_argument("--num-frames", type=int, default=120)
+    parser.add_argument("--max-frames", type=int, default=600)
     parser.add_argument("--cfg-scale", type=float, default=2.5)
     parser.add_argument("--ddim-steps", type=int, default=50)
     parser.add_argument("--seed", type=int, default=42)
@@ -69,8 +71,10 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def load_selected_music(args: argparse.Namespace) -> tuple[torch.Tensor, dict[str, Any]]:
-    if not 1 <= args.num_frames <= 120:
-        raise ValueError("--num-frames must be in 1..120")
+    if args.max_frames <= 0:
+        raise ValueError("--max-frames must be > 0")
+    if not 1 <= args.num_frames <= args.max_frames:
+        raise ValueError(f"--num-frames must be in 1..{args.max_frames}")
     if args.feature_start_frame < 0:
         raise ValueError("--feature-start-frame must be >= 0")
     if args.audio is not None:
@@ -186,6 +190,7 @@ def main(argv: list[str] | None = None) -> int:
     if not torch.isfinite(raw_motion).all():
         raise RuntimeError("generated 151-D motion contains NaN or Inf")
     body_global = _validate_body_group(prediction.get("body_params_global"), args.num_frames)
+    motion_sanity = evaluate_global_motion_sanity(body_global)
     static_logits = outputs["model_output"].get("static_conf_logits")
     if not isinstance(static_logits, torch.Tensor) or not torch.isfinite(static_logits).all():
         raise RuntimeError("static_conf_logits is missing or non-finite")
@@ -211,9 +216,12 @@ def main(argv: list[str] | None = None) -> int:
         "ddim_steps": args.ddim_steps,
         "seed": args.seed,
         "postproc": args.postproc,
+        "training_window_frames": 120,
+        "uses_sliding_attention": bool(args.num_frames > 120),
         "total_params": total_params,
         "trainable_params": trainable_params,
-        "final_pass": True,
+        "motion_sanity": motion_sanity,
+        "final_pass": bool(motion_sanity["physical_sanity_pass"]),
     }
     args.output_dir.mkdir(parents=True, exist_ok=True)
     torch.save(music, args.output_dir / "music_features.pt")
@@ -259,8 +267,14 @@ def main(argv: list[str] | None = None) -> int:
         json.dumps(report, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
     )
     print(json.dumps(report, indent=2, ensure_ascii=False))
-    print(f"[Music] 验证通过，结果位于: {args.output_dir.resolve()}")
-    return 0
+    if report["final_pass"]:
+        print(f"[Music] 数值与物理粗检通过，结果位于: {args.output_dir.resolve()}")
+        return 0
+    print(
+        "[Music] 张量 finite，但物理粗检失败；该 checkpoint 不能视为有效舞蹈模型。"
+        f" 结果位于: {args.output_dir.resolve()}"
+    )
+    return 2
 
 
 if __name__ == "__main__":

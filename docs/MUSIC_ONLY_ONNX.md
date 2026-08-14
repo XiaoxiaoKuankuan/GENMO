@@ -14,6 +14,12 @@
 inputs/checkpoints/music_only_aistpp/version_1/last.ckpt
 ```
 
+> **重要诊断结论（2026-08-14）**：该 checkpoint 训练时读取的
+> `annot_aist_30fps.pt` 是修复 `smpl_trans / smpl_scaling` 之前生成的旧 artifact，
+> 并且 specialist 当时把实际 Y-up 的 AIST++ 当成 Z-up。它学到约80--100倍的根
+> 速度和错误重力朝向，不能作为有效舞蹈模型。下述 ONNX/PyTorch 对齐只证明数值
+> 导出一致，不证明动作语义正确；必须重建 AIST++ artifact 并从头训练。
+
 该 checkpoint 的 `global_step=260000`，实验是
 `exp=gem_smpl_music_only`，网络条件列表必须严格为：
 
@@ -25,11 +31,33 @@ inputs/checkpoints/music_only_aistpp/version_1/last.ckpt
 `extract_edge_baseline35()` 从 WAV 提取的 `[T,35] @ 30 Hz` 特征。音乐验证脚本会在
 内部完成这一步，不会使用 OMG 特征。
 
-## 1. 用真实音乐验证 PyTorch checkpoint
+## 1. 最终用户入口：从音乐生成带声音视频
+
+日常使用入口位于 `scripts/`，不是 `tools/eval/`：
+
+```bash
+.venv/bin/python scripts/demo_music_only.py \
+  --audio /home/weili/datasets/AISTPP_official/music/wav/mHO1.wav \
+  --audio-duration-sec 8 \
+  --ckpt /path/to/retrained_metric_yup_checkpoint.ckpt \
+  --ddim-steps 50 \
+  --cfg-scale 2.5 \
+  --postproc \
+  --output-dir outputs/demo/music_only_mHO1
+```
+
+默认输出 `motion_global.mp4` 和带原音乐的 `motion_with_audio.mp4`。PyTorch 可输入
+超过120帧：网络会使用已有的滑动120帧局部注意力；默认安全上限为600帧。120帧仍是
+训练窗口以及当前 ONNX 静态导出的序列长度，长输入并不等于训练过长序列。
+
+当前旧 checkpoint 只应做故障复现。如确实需要保存其错误结果，显式添加
+`--allow-physically-invalid`；否则 demo 会在保存诊断后以非零状态退出。
+
+## 2. 用真实音乐验证 PyTorch checkpoint
 
 以下命令选取 WAV 的前 4 秒，从 STFT 边界产生的 121 帧中明确选择前 120 帧
-EDGE35，运行 50-step DDIM/CFG，检查
-151D motion、SMPL body 参数和接触置信度均存在且 finite：
+EDGE35，运行 50-step DDIM/CFG。除 finite 外还检查相邻帧根位移和人体 Y-up 朝向；
+当前旧 checkpoint 会正确报告 `final_pass=false`：
 
 ```bash
 cd /home/weili/GENMO
@@ -78,7 +106,7 @@ validation_report.json
 `--postproc` 是可选的推理后处理；不传时验证网络原始生成，传入时再启用接触置信度
 驱动的根轨迹修正和 IK 锁脚。
 
-## 2. ONNX 的准确边界
+## 3. ONNX 的准确边界
 
 导出的 ONNX 是“一个 CFG-guided diffusion denoising step”，包含：
 
@@ -111,7 +139,7 @@ ONNX 输入为：
 
 序列长度固定为 120，batch 维动态。这与该模型的 120 帧训练窗口一致。
 
-## 3. 导出 ONNX
+## 4. 导出 ONNX
 
 环境需要 `onnx`；运行验证还需要 `onnxruntime-gpu`（或 CPU 版
 `onnxruntime`）：
@@ -136,7 +164,7 @@ ONNX 输入为：
 复制。旁边的 `music_only_denoiser.onnx.json` 保存图合约、checkpoint step、文件大小
 和 SHA256。
 
-## 4. ONNX Runtime 数值验证
+## 5. ONNX Runtime 数值验证
 
 先做真实音乐的单步严格对齐：
 
@@ -168,7 +196,7 @@ ONNX 输入为：
 报告会给出每个输出的 shape、finite、最大绝对误差、平均绝对误差、RMSE 和
 `allclose` 结果。完整 DDIM 结果另外保存为 `onnx_generated_motion_151d.pt`。
 
-## 5. 本机实际验收结果
+## 6. 本机实际验收结果
 
 2026-08-14 使用 `mHO1.wav` 前 4 秒、seed 42、CFG 2.5、50-step DDIM 实测：
 
@@ -176,10 +204,11 @@ ONNX 输入为：
   `4ffd053b6bd53405e56198ce3c89762a0b972b6ee4eb5356544f1c10f02ca5fd`；
 - checkpoint 大小 2,570,404,846 bytes，`global_step=260000`；
 - 模型参数量 217,580,704，条件列表为 `["encoded_music"]`，没有文本权重；
-- PyTorch 生成 `[1,120,151]`，SMPL body 参数全部 finite；
+- PyTorch 生成 `[1,120,151]`，SMPL body 参数全部 finite，但物理粗检失败；
 - ONNX 大小 874,074,147 bytes，SHA256 为
   `1dcf2afeb30a488522c38946a6ba6fbdc6eccfab6d43c8a98a9b039fdfd69356`；
 - ONNX 单步 151D 最大绝对误差 0.002948、平均绝对误差 0.000181；
-- 完整 50-step DDIM 最大绝对误差 0.009118、平均绝对误差 0.000251，finite 且通过；
+- 完整 50-step DDIM 最大绝对误差 0.009118、平均绝对误差 0.000251，finite 且通过
+  **数值对齐**；该结论不覆盖动作物理合理性；
 - 完整报告位于
   `outputs/onnx/music_only_aistpp_s260000/validation_full_ddim/validation_report.json`。
