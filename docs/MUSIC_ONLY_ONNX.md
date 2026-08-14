@@ -43,6 +43,9 @@ cd /home/weili/GENMO
   --cfg-scale 2.5 \
   --ddim-steps 50 \
   --seed 42 \
+  --postproc \
+  --render-video \
+  --mux-audio \
   --output-dir outputs/validation/music_only_aistpp_mHO1
 ```
 
@@ -52,8 +55,14 @@ cd /home/weili/GENMO
 music_features.pt
 generated_motion_151d.pt
 pred_body_params_global.pt
+motion_global.mp4
+motion_with_audio.mp4
 validation_report.json
 ```
+
+最终直接观看 `motion_with_audio.mp4`。渲染统一使用 neutral zero-betas 身形；动作姿态、
+全局朝向和根平移来自模型预测。`--postproc` 会启用接触置信度驱动的根轨迹修正和 IK
+锁脚；如果需要观察未经后处理的原始模型输出，去掉该参数。
 
 如果要验证已提取的 EDGE35，改用：
 

@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import random
 import sys
 from pathlib import Path
@@ -26,7 +27,13 @@ from gem.datasets.aistpp.aistplusplus import (  # noqa: E402
 )
 from gem.utils.music_features import extract_edge_baseline35  # noqa: E402
 from gem.utils.net_utils import load_pretrained_model  # noqa: E402
-from scripts.demo.demo_music import build_music_only_data  # noqa: E402
+from scripts.demo.demo_music import (  # noqa: E402
+    build_music_only_data,  # noqa: E402
+    mux_selected_audio,
+    render_global_motion,
+)
+
+os.environ.setdefault("PYOPENGL_PLATFORM", "egl")
 
 DEFAULT_CHECKPOINT = Path("inputs/checkpoints/music_only_aistpp/version_1/last.ckpt")
 
@@ -54,6 +61,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--ddim-steps", type=int, default=50)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--postproc", action="store_true")
+    parser.add_argument("--render-video", action="store_true")
+    parser.add_argument("--mux-audio", action="store_true")
+    parser.add_argument("--width", type=int, default=1280)
+    parser.add_argument("--height", type=int, default=720)
     return parser
 
 
@@ -135,6 +146,12 @@ def main(argv: list[str] | None = None) -> int:
         raise ValueError("--ddim-steps must be in 2..1000")
     if not np.isfinite(args.cfg_scale) or args.cfg_scale < 0:
         raise ValueError("--cfg-scale must be finite and >= 0")
+    if args.width <= 0 or args.height <= 0:
+        raise ValueError("--width and --height must be > 0")
+    if args.mux_audio and args.audio is None:
+        raise ValueError("--mux-audio requires --audio so the original waveform is available")
+    if args.mux_audio:
+        args.render_video = True
     music, source_metadata = load_selected_music(args)
 
     random.seed(args.seed)
@@ -202,6 +219,42 @@ def main(argv: list[str] | None = None) -> int:
     torch.save(music, args.output_dir / "music_features.pt")
     torch.save(raw_motion[0], args.output_dir / "generated_motion_151d.pt")
     torch.save(_cpu_tree(body_global), args.output_dir / "pred_body_params_global.pt")
+
+    rendered_video: Path | None = None
+    muxed_video: Path | None = None
+    if args.render_video:
+        # The motion is evaluated independently of body shape.  Use a neutral body
+        # for stable visual comparison while preserving pose/orientation/translation.
+        render_params = dict(body_global)
+        render_params["betas"] = torch.zeros_like(body_global["betas"])
+        rendered_video = render_global_motion(
+            args.output_dir, render_params, args.width, args.height
+        )
+        if rendered_video is None:
+            raise RuntimeError("motion generation passed, but SMPL rendering failed")
+    if args.mux_audio:
+        muxed_video = args.output_dir / "motion_with_audio.mp4"
+        audio_start = float(args.audio_start_sec) + float(args.feature_start_frame) / 30.0
+        mux_ok = mux_selected_audio(
+            rendered_video,
+            args.audio,
+            muxed_video,
+            audio_start,
+            float(args.num_frames) / 30.0,
+        )
+        if not mux_ok:
+            raise RuntimeError("motion rendering passed, but ffmpeg audio mux failed")
+    report["render"] = {
+        "enabled": bool(args.render_video),
+        "neutral_zero_betas": bool(args.render_video),
+        "video": None if rendered_video is None else str(rendered_video.resolve()),
+        "width": args.width,
+        "height": args.height,
+    }
+    report["audio_mux"] = {
+        "enabled": bool(args.mux_audio),
+        "video": None if muxed_video is None else str(muxed_video.resolve()),
+    }
     (args.output_dir / "validation_report.json").write_text(
         json.dumps(report, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
     )
