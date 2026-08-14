@@ -37,9 +37,10 @@ review_id  dataset__sample_id
 `pose[:, :3]` 是 global orientation，`pose[:, 3:66]` 是 21 个 body joint。手、脸、眼睛
 和表情不在 GENMO 当前 151D motion contract 中，因此不会伪造或导出。
 
-AIOZ、FineDance、CoMPAS3D 当前转换产物已经是 Y-up。AIST++ 源世界是 Z-up，导出工具只对
-审阅副本做 Y-up 刚体变换，并通过 SMPL-X forward 检查顶点等价；服务器上的 AIST++ 源数据
-不会被修改。
+AIOZ、FineDance、CoMPAS3D 当前转换产物已经是 Y-up。AIST++ 官方 SMPL 参数在把
+`smpl_trans` 除以每条序列的 `smpl_scaling` 后同样是米制 Y-up；导出时必须保持 identity，
+不能再套用 CoMPAS3D 的 Z-up 到 Y-up 旋转。导出工具会拒绝旧的厘米尺度 artifact，并通过
+SMPL-X forward 检查审阅动作与源动作顶点完全等价；服务器上的 AIST++ 源数据不会被修改。
 
 ## 导出与交付
 
@@ -57,6 +58,23 @@ cd /home/user/liwei/GENMO
   --export-root /data0/user/liwei/datasets/music_dance_review/music_only_4set_v1 \
   --expect-full-four-set
 ```
+
+如果已有筛选包曾错误地把 AIST++ 当作 Z-up，只刷新 AIST++，不要重导出其余三库：
+
+```bash
+.venv/bin/python tools/data/music_dance/curation/refresh_aist_review.py \
+  --export-root /data0/user/liwei/datasets/music_dance_review/music_only_4set_v1 \
+  --aist-root /home/user/liwei/GENMO/inputs/AIST++ \
+  --overwrite
+
+.venv/bin/python tools/data/music_dance/curation/validate_review_package.py \
+  --export-root /data0/user/liwei/datasets/music_dance_review/music_only_4set_v1 \
+  --expect-full-four-set \
+  --allow-filled-decisions
+```
+
+刷新命令会在同级 `backups/` 下保留旧 AIST++ NPZ 和旧索引，原样保留其他三库动作与
+`review/decisions.csv`；替换前后都会校验 SHA256，完成后再对整个 7,286 条包做一次验证。
 
 交付给筛选人员的内容是 `motions/`、`review/decisions.csv`、`index/` 和 `README.md`。
 服务器必须保留一份未经编辑的 `index/master.jsonl` 和 `source_fingerprints.json`。
@@ -136,4 +154,3 @@ CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 \
 pipeline.args.in_attr == ["encoded_music"]
 pipeline.args.train_modes == ["diffusion"]
 ```
-

@@ -10,10 +10,13 @@ from collections import Counter
 from pathlib import Path
 from typing import Any
 
+import numpy as np
+
 REPO_ROOT = Path(__file__).resolve().parents[4]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
+from gem.datasets.aistpp.aistplusplus import validate_aist_metric_translation  # noqa: E402
 from tools.data.music_dance.curation.common import (  # noqa: E402
     DATASET_ORDER,
     DECISION_COLUMNS,
@@ -24,9 +27,18 @@ from tools.data.music_dance.curation.common import (  # noqa: E402
     write_json,
 )
 
-
 FORBIDDEN_MEDIA_SUFFIXES = {
-    ".wav", ".mp3", ".m4a", ".aac", ".flac", ".ogg", ".mp4", ".mov", ".pt", ".pth", ".ckpt"
+    ".wav",
+    ".mp3",
+    ".m4a",
+    ".aac",
+    ".flac",
+    ".ogg",
+    ".mp4",
+    ".mov",
+    ".pt",
+    ".pth",
+    ".ckpt",
 }
 EXPECTED_FULL_COUNTS = {
     "by_dataset": {"aistpp": 1020, "aioz_gdance": 6011, "finedance": 183, "compas3d": 72},
@@ -57,6 +69,7 @@ def validate_package(
     *,
     verify_checksums: bool = True,
     expect_full_four_set: bool = False,
+    require_blank_decisions: bool = True,
     write_report: bool = True,
 ) -> dict[str, Any]:
     root = Path(export_root).expanduser().resolve()
@@ -121,26 +134,51 @@ def validate_package(
             total_frames += validate_review_npz(path, row)
         except Exception as exc:  # report all damaged package members together
             errors.append(str(exc))
+        if row.get("dataset") == "aistpp":
+            if row.get("source_coordinate_system") != "right_handed_y_up_metric":
+                errors.append(
+                    f"{row.get('review_id')}: AIST++ source must be right_handed_y_up_metric"
+                )
+            if row.get("review_coordinate_system") != "right_handed_y_up_metric":
+                errors.append(
+                    f"{row.get('review_id')}: AIST++ review motion must be right_handed_y_up_metric"
+                )
+            if row.get("coordinate_transform") != "identity":
+                errors.append(
+                    f"{row.get('review_id')}: AIST++ review export must use identity transform"
+                )
+            try:
+                with np.load(path, allow_pickle=False) as payload:
+                    coordinate = str(np.asarray(payload["coordinate_system"]).item())
+                    if coordinate != "right_handed_y_up_metric":
+                        errors.append(
+                            f"{row.get('review_id')}: NPZ coordinate_system={coordinate!r}"
+                        )
+                    validate_aist_metric_translation(
+                        payload["transl"], sequence_id=str(row.get("sample_id"))
+                    )
+            except Exception as exc:
+                errors.append(str(exc))
         if relative not in checksums:
             errors.append(f"{relative}: absent from SHA256SUMS")
         if row.get("review_sha256") != checksums.get(relative):
             errors.append(f"{relative}: master review_sha256 differs from SHA256SUMS")
 
-    disk_npz = {
-        path.relative_to(root).as_posix() for path in (root / "motions").rglob("*.npz")
-    }
+    disk_npz = {path.relative_to(root).as_posix() for path in (root / "motions").rglob("*.npz")}
     if disk_npz != indexed_npz:
         errors.append(
-            f"disk/master NPZ mismatch: orphan={sorted(disk_npz-indexed_npz)[:10]}, "
-            f"missing={sorted(indexed_npz-disk_npz)[:10]}"
+            f"disk/master NPZ mismatch: orphan={sorted(disk_npz - indexed_npz)[:10]}, "
+            f"missing={sorted(indexed_npz - disk_npz)[:10]}"
         )
     expected_checksum_paths = indexed_npz | {
-        "index/master.jsonl", "index/source_fingerprints.json", "README.md"
+        "index/master.jsonl",
+        "index/source_fingerprints.json",
+        "README.md",
     }
     if set(checksums) != expected_checksum_paths:
         errors.append(
-            f"SHA256SUMS/index mismatch: extra={sorted(set(checksums)-expected_checksum_paths)[:10]}, "
-            f"missing={sorted(expected_checksum_paths-set(checksums))[:10]}"
+            f"SHA256SUMS/index mismatch: extra={sorted(set(checksums) - expected_checksum_paths)[:10]}, "
+            f"missing={sorted(expected_checksum_paths - set(checksums))[:10]}"
         )
     forbidden = [
         path.relative_to(root).as_posix()
@@ -148,7 +186,9 @@ def validate_package(
         if path.is_file() and path.suffix.lower() in FORBIDDEN_MEDIA_SUFFIXES
     ]
     if forbidden:
-        errors.append(f"review package contains forbidden music/video/model files: {forbidden[:10]}")
+        errors.append(
+            f"review package contains forbidden music/video/model files: {forbidden[:10]}"
+        )
 
     columns, decision_rows = read_csv(decisions_path)
     missing_columns = set(DECISION_COLUMNS) - set(columns)
@@ -157,7 +197,7 @@ def validate_package(
     template_ids = [row.get("review_id", "") for row in decision_rows]
     if template_ids != review_ids:
         errors.append("decision template order/identity differs from master index")
-    if any(row.get("decision", "").strip() for row in decision_rows):
+    if require_blank_decisions and any(row.get("decision", "").strip() for row in decision_rows):
         errors.append("fresh review package decision template is not blank")
 
     if expect_full_four_set:
@@ -181,6 +221,7 @@ def validate_package(
         "indexed_npz_count": len(indexed_npz),
         "forbidden_media_files": forbidden,
         "checksum_verification_enabled": verify_checksums,
+        "blank_decisions_required": require_blank_decisions,
         "error_count": len(errors),
         "errors": errors,
         "final_pass": not errors,
@@ -197,11 +238,17 @@ def main() -> None:
     parser.add_argument("--export-root", required=True)
     parser.add_argument("--skip-checksums", action="store_true")
     parser.add_argument("--expect-full-four-set", action="store_true")
+    parser.add_argument(
+        "--allow-filled-decisions",
+        action="store_true",
+        help="validate package integrity without requiring a fresh blank decision template",
+    )
     args = parser.parse_args()
     report = validate_package(
         args.export_root,
         verify_checksums=not args.skip_checksums,
         expect_full_four_set=args.expect_full_four_set,
+        require_blank_decisions=not args.allow_filled_decisions,
     )
     print(json.dumps(report, indent=2, ensure_ascii=False))
 

@@ -18,14 +18,15 @@ from tools.data.music_dance.curation.common import (
     Z_UP_TO_Y_UP,
     read_csv,
     read_jsonl,
+    sha256_file,
     transform_z_up_to_y_up,
     write_csv,
 )
 from tools.data.music_dance.curation.export_motion_review import export_package
+from tools.data.music_dance.curation.refresh_aist_review import refresh_aist_review
 from tools.data.music_dance.curation.validate_curated_datasets import validate_curated
 from tools.data.music_dance.curation.validate_review_package import validate_package
 from tools.data.music_dance.curation.validate_review_results import validate_decisions
-
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
@@ -94,6 +95,9 @@ def _write_four_roots(base: Path) -> dict[str, Path]:
     frames = 12
     pose = np.zeros((frames, 72), dtype=np.float32)
     transl = np.zeros((frames, 3), dtype=np.float32)
+    transl[:, 0] = np.arange(frames, dtype=np.float32) / 100.0
+    transl[:, 1] = 1.8
+    transl[:, 2] = 0.2
     annotation = {
         "gBR_sBM_cAll_d01_mBR0_ch01": {
             "smpl_pose_global": pose,
@@ -116,15 +120,19 @@ def _write_four_roots(base: Path) -> dict[str, Path]:
             ("group_dancer_01", "group", "group_music", 12, {"person_id": 1}),
         ],
     )
-    _write_manifest_dataset(
-        roots["finedance"], "finedance", [("001", "001", "001_music", 12, {})]
-    )
+    _write_manifest_dataset(roots["finedance"], "finedance", [("001", "001", "001_music", 12, {})])
     _write_manifest_dataset(
         roots["compas3d"],
         "compas3d",
         [
             ("Pair1_song1_take1_leader", "Pair1_song1_take1", "pair_music", 12, {"role": "leader"}),
-            ("Pair1_song1_take1_follower", "Pair1_song1_take1", "pair_music", 12, {"role": "follower"}),
+            (
+                "Pair1_song1_take1_follower",
+                "Pair1_song1_take1",
+                "pair_music",
+                12,
+                {"role": "follower"},
+            ),
         ],
     )
     return roots
@@ -185,9 +193,9 @@ def test_z_up_review_transform_preserves_rotation_and_pelvis_path() -> None:
         axis_angle_to_matrix(target["global_orient"]),
         Z_UP_TO_Y_UP @ axis_angle_to_matrix(source["global_orient"]),
     )
-    expected_translation = (
-        Z_UP_TO_Y_UP @ (source["transl"] + pelvis).unsqueeze(-1)
-    ).squeeze(-1) - pelvis
+    expected_translation = (Z_UP_TO_Y_UP @ (source["transl"] + pelvis).unsqueeze(-1)).squeeze(
+        -1
+    ) - pelvis
     torch.testing.assert_close(target["transl"], expected_translation)
     torch.testing.assert_close(target["body_pose"], source["body_pose"])
 
@@ -197,10 +205,6 @@ def test_review_export_decision_and_shared_music_roundtrip(
 ) -> None:
     roots = _write_four_roots(tmp_path / "sources")
     export_root = tmp_path / "review"
-    monkeypatch.setattr(
-        "tools.data.music_dance.curation.export_motion_review._neutral_pelvis_and_model",
-        lambda: (torch.zeros(3), None),
-    )
     report = export_package(_export_args(roots, export_root))
     assert report["sample_count"] == 6
     package = validate_package(export_root, verify_checksums=True, write_report=False)
@@ -212,12 +216,24 @@ def test_review_export_decision_and_shared_music_roundtrip(
         "compas3d": 2,
     }
     assert not list(export_root.rglob("*.pt"))
+    master = read_jsonl(export_root / "index" / "master.jsonl")
+    aist_row = next(row for row in master if row["dataset"] == "aistpp")
+    assert aist_row["source_coordinate_system"] == "right_handed_y_up_metric"
+    assert aist_row["review_coordinate_system"] == "right_handed_y_up_metric"
+    assert aist_row["coordinate_transform"] == "identity"
+    with np.load(export_root / aist_row["review_motion_path"], allow_pickle=False) as payload:
+        np.testing.assert_array_equal(
+            payload["transl"],
+            torch.load(
+                roots["aistpp"] / "annot_aist_30fps.pt",
+                map_location="cpu",
+                weights_only=False,
+            )[aist_row["sample_id"]]["smpl_trans_global"],
+        )
 
     decisions = tmp_path / "decisions.csv"
     _filled_decisions(export_root, decisions)
-    decision_report, _ = validate_decisions(
-        export_root, decisions, strict=True, write_report=False
-    )
+    decision_report, _ = validate_decisions(export_root, decisions, strict=True, write_report=False)
     assert decision_report["decision_counts"] == {"reject": 4, "keep": 2}
 
     curated = tmp_path / "curated"
@@ -264,10 +280,6 @@ def test_strict_review_result_rejects_missing_unknown_and_unsure(
 ) -> None:
     roots = _write_four_roots(tmp_path / "sources")
     export_root = tmp_path / "review"
-    monkeypatch.setattr(
-        "tools.data.music_dance.curation.export_motion_review._neutral_pelvis_and_model",
-        lambda: (torch.zeros(3), None),
-    )
     export_package(_export_args(roots, export_root))
     columns, rows = read_csv(export_root / "review" / "decisions.csv")
     assert set(DECISION_COLUMNS) <= set(columns)
@@ -279,14 +291,64 @@ def test_strict_review_result_rejects_missing_unknown_and_unsure(
         validate_decisions(export_root, bad, strict=True, write_report=False)
 
 
+def test_refresh_aist_only_preserves_other_motions_and_decisions(tmp_path: Path) -> None:
+    roots = _write_four_roots(tmp_path / "sources")
+    export_root = tmp_path / "review"
+    export_package(_export_args(roots, export_root))
+    decisions = export_root / "review" / "decisions.csv"
+    _filled_decisions(export_root, decisions)
+    decisions_before = decisions.read_bytes()
+    non_aist = export_root / "motions" / "aioz_gdance" / "group_dancer_00.npz"
+    non_aist_sha = sha256_file(non_aist)
+    non_aist_mtime = non_aist.stat().st_mtime_ns
+
+    annotation_path = roots["aistpp"] / "annot_aist_30fps.pt"
+    annotation = torch.load(annotation_path, map_location="cpu", weights_only=False)
+    sample_id = next(iter(annotation))
+    annotation[sample_id]["smpl_trans_global"][:, 2] += 0.25
+    torch.save(annotation, annotation_path)
+    backup_root = tmp_path / "backup"
+    report = refresh_aist_review(
+        argparse.Namespace(
+            export_root=str(export_root),
+            aist_root=str(roots["aistpp"]),
+            backup_root=str(backup_root),
+            aist_forward_checks=0,
+            seed=1,
+            skip_existing_checksums=False,
+            overwrite=True,
+        )
+    )
+
+    assert report["final_pass"]
+    assert report["aist_sample_count"] == 1
+    assert decisions.read_bytes() == decisions_before
+    assert sha256_file(non_aist) == non_aist_sha
+    assert non_aist.stat().st_mtime_ns == non_aist_mtime
+    assert (backup_root / "motions" / "aistpp" / f"{sample_id}.npz").is_file()
+    master = read_jsonl(export_root / "index" / "master.jsonl")
+    aist_row = next(row for row in master if row["dataset"] == "aistpp")
+    with np.load(export_root / aist_row["review_motion_path"], allow_pickle=False) as payload:
+        np.testing.assert_array_equal(payload["transl"], annotation[sample_id]["smpl_trans_global"])
+    package = validate_package(
+        export_root,
+        verify_checksums=True,
+        require_blank_decisions=False,
+        write_report=False,
+    )
+    assert package["final_pass"]
+
+
 def test_curated_experiment_composes_without_changing_condition_contract() -> None:
     with initialize_config_dir(version_base="1.3", config_dir=str(REPO_ROOT / "configs")):
         cfg = compose(config_name="train", overrides=["exp=gem_smpl_music_only_4set_curated"])
     assert list(cfg.train_datasets) == [
-        "aistpp_train", "aioz_gdance_train", "finedance_train", "compas3d_train"
+        "aistpp_train",
+        "aioz_gdance_train",
+        "finedance_train",
+        "compas3d_train",
     ]
     assert list(cfg.pipeline.args.in_attr) == ["encoded_music"]
     assert list(cfg.pipeline.args.train_modes) == ["diffusion"]
     assert cfg.train_datasets.aistpp_train.root.endswith("/AIST++")
     assert cfg.test_datasets.aistpp_music_eval.root.endswith("/AIST++")
-

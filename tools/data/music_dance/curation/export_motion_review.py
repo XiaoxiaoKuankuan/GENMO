@@ -22,17 +22,16 @@ if str(REPO_ROOT) not in sys.path:
 from gem.datasets.aistpp.aistplusplus import (  # noqa: E402
     load_aist_artifact,
     load_music_feature_tensor,
+    validate_aist_metric_translation,
     validate_musicfeat_v2,
 )
 from gem.utils.smplx_utils import make_smplx  # noqa: E402
 from tools.data.music_dance.curation.common import (  # noqa: E402
-    DATASET_DIRS,
     DATASET_ORDER,
     DECISION_COLUMNS,
     DEFAULT_EXPORT_ID,
     SCHEMA_VERSION,
     SPLITS,
-    Z_UP_TO_Y_UP,
     atomic_save_npz,
     canonical_motion,
     git_commit,
@@ -42,14 +41,12 @@ from tools.data.music_dance.curation.common import (  # noqa: E402
     safe_torch_load,
     sha256_file,
     sha256_motion,
-    transform_z_up_to_y_up,
     validate_canonical_motion,
     validate_review_npz,
     write_csv,
     write_json,
     write_jsonl,
 )
-
 
 DEFAULT_ROOTS = {
     "aistpp": "inputs/AIST++",
@@ -69,12 +66,19 @@ def _artifact(path: Path, root: Path) -> dict[str, Any]:
 
 def _aist_music_id(sample_id: str) -> str | None:
     for token in sample_id.split("_"):
-        if len(token) == 4 and token.startswith("m") and token[1:3].isalpha() and token[3].isdigit():
+        if (
+            len(token) == 4
+            and token.startswith("m")
+            and token[1:3].isalpha()
+            and token[3].isdigit()
+        ):
             return token
     return None
 
 
-def collect_aist_records(root: Path, splits: tuple[str, ...]) -> tuple[list[dict[str, Any]], Any, dict[str, Any]]:
+def collect_aist_records(
+    root: Path, splits: tuple[str, ...]
+) -> tuple[list[dict[str, Any]], Any, dict[str, Any]]:
     annotation_path = root / "annot_aist_30fps.pt"
     if not annotation_path.is_file():
         raise FileNotFoundError(annotation_path)
@@ -106,6 +110,7 @@ def collect_aist_records(root: Path, splits: tuple[str, ...]) -> tuple[list[dict
                 )
             if not torch.isfinite(pose[:, :66]).all() or not torch.isfinite(transl).all():
                 raise ValueError(f"AIST++:{sample_id}: motion contains NaN or Inf")
+            validate_aist_metric_translation(transl, sequence_id=sample_id)
             music_relative = f"musicfeat_v2/{sample_id}_musicfeat_fps30.pt"
             records.append(
                 {
@@ -117,7 +122,10 @@ def collect_aist_records(root: Path, splits: tuple[str, ...]) -> tuple[list[dict
                     "motion_path": "annot_aist_30fps.pt",
                     "motion_key": sample_id,
                     "music_feature_path": music_relative,
-                    "source_coordinate_system": "right_handed_z_up_metric",
+                    # Official AIST++ SMPL pose/trans after dividing smpl_trans by
+                    # smpl_scaling is already right-handed Y-up.  Do not apply the
+                    # CoMPAS3D Z-up conversion to this artifact.
+                    "source_coordinate_system": "right_handed_y_up_metric",
                     "source_manifest_row": None,
                     "source_num_frames": len(pose),
                 }
@@ -180,11 +188,8 @@ def collect_manifest_records(
     return records, source
 
 
-def _neutral_pelvis_and_model():
-    model = make_smplx("supermotion")
-    with torch.no_grad():
-        pelvis = model.get_skeleton(torch.zeros(1, 10, dtype=torch.float32))[0, 0].cpu()
-    return pelvis, model
+def _smplx_model():
+    return make_smplx("supermotion")
 
 
 def _load_record_motion(
@@ -202,9 +207,7 @@ def _load_record_motion(
             },
             f"AIST++:{record['sample_id']}",
         )
-    motion_path = resolve_relative(
-        roots[record["dataset"]], record["motion_path"], "motion_path"
-    )
+    motion_path = resolve_relative(roots[record["dataset"]], record["motion_path"], "motion_path")
     motion = canonical_motion(safe_torch_load(motion_path), motion_path)
     if len(motion["pose"]) != int(record["source_num_frames"]):
         raise ValueError(
@@ -214,7 +217,7 @@ def _load_record_motion(
     return motion
 
 
-def validate_aist_forward_equivalence(
+def validate_aist_identity_forward_equivalence(
     source: dict[str, torch.Tensor],
     review: dict[str, torch.Tensor],
     model: Any,
@@ -237,11 +240,10 @@ def validate_aist_forward_equivalence(
     with torch.no_grad():
         source_vertices = model(**source_inputs).vertices.cpu()
         review_vertices = model(**review_inputs).vertices.cpu()
-    expected = torch.einsum("ij,bvj->bvi", Z_UP_TO_Y_UP, source_vertices)
-    maximum = float((review_vertices - expected).abs().max().item())
+    maximum = float((review_vertices - source_vertices).abs().max().item())
     if maximum > tolerance:
         raise ValueError(
-            f"AIST++ Z-up to Y-up SMPL-X forward equivalence failed: "
+            f"AIST++ Y-up identity SMPL-X forward equivalence failed: "
             f"max_abs_error={maximum:.6g}, tolerance={tolerance:.6g}"
         )
     return maximum
@@ -258,7 +260,8 @@ SMPL-X 模型权重。每条 NPZ 为 30 FPS：
 * `betas`: `[T,10]`；
 * `review_id`: 必须原样写回 `review/decisions.csv`。
 
-审阅副本统一为右手系 Y-up。AIST++ 的审阅副本由源 Z-up 刚体转换而来，源训练数据没有
+审阅副本统一为右手系 Y-up。AIST++ 在 `smpl_trans / smpl_scaling` 后本来就是米制
+Y-up，因此审阅副本必须保持 identity，不能再次做 Z-up 到 Y-up 的旋转。源训练数据没有
 被修改。请只编辑 CSV 中的 `decision`、`issue_codes`、`reviewer`、`notes` 四列。
 `decision` 只允许 `keep`、`reject`、`unsure`；reject 必须填写问题代码。
 """
@@ -288,7 +291,9 @@ def export_package(args: argparse.Namespace) -> dict[str, Any]:
     if args.limit_per_dataset is not None:
         limited: list[dict[str, Any]] = []
         for dataset in DATASET_ORDER:
-            limited.extend([r for r in records if r["dataset"] == dataset][: args.limit_per_dataset])
+            limited.extend(
+                [r for r in records if r["dataset"] == dataset][: args.limit_per_dataset]
+            )
         records = limited
 
     seen_review: set[str] = set()
@@ -315,14 +320,15 @@ def export_package(args: argparse.Namespace) -> dict[str, Any]:
         difference = abs(int(record["source_num_frames"]) - music_cache[music_path])
         if record["dataset"] == "aistpp":
             if difference > 2:
-                raise ValueError(f"{review_id}: AIST++ motion/music mismatch is {difference} frames")
+                raise ValueError(
+                    f"{review_id}: AIST++ motion/music mismatch is {difference} frames"
+                )
         elif difference != 0:
             raise ValueError(f"{review_id}: canonical motion/music mismatch is {difference} frames")
 
-    pelvis = None
     smplx_model = None
-    if args.review_coordinate == "y_up" and any(r["dataset"] == "aistpp" for r in records):
-        pelvis, smplx_model = _neutral_pelvis_and_model()
+    if args.aist_forward_checks and any(r["dataset"] == "aistpp" for r in records):
+        smplx_model = _smplx_model()
     rng = random.Random(args.seed)
     aist_checks = [r for r in records if r["dataset"] == "aistpp"]
     checked_ids = {
@@ -335,17 +341,17 @@ def export_package(args: argparse.Namespace) -> dict[str, Any]:
     total = len(records)
     for index, record in enumerate(records, 1):
         source_motion = _load_record_motion(record, roots, aist_annotation)
-        if record["dataset"] == "aistpp" and args.review_coordinate == "y_up":
-            assert pelvis is not None
-            review_motion = transform_z_up_to_y_up(source_motion, pelvis)
-            transform_name = "aist_z_up_to_review_y_up_with_pelvis_compensation"
-        else:
-            review_motion = {key: value.clone() for key, value in source_motion.items()}
-            transform_name = "identity"
+        # All four canonical conversion artifacts are right-handed Y-up.  In
+        # particular AIST++ is already Y-up after its per-sequence metric scale
+        # correction, so every review export is an identity copy.
+        review_motion = {key: value.clone() for key, value in source_motion.items()}
+        transform_name = "identity"
         frames = validate_canonical_motion(review_motion, record["review_id"])
         if record["review_id"] in checked_ids:
             assert smplx_model is not None
-            maximum = validate_aist_forward_equivalence(source_motion, review_motion, smplx_model)
+            maximum = validate_aist_identity_forward_equivalence(
+                source_motion, review_motion, smplx_model
+            )
             forward_errors.append({"review_id": record["review_id"], "max_abs_error": maximum})
 
         npz_relative = Path("motions") / record["dataset"] / f"{record['sample_id']}.npz"
@@ -374,7 +380,9 @@ def export_package(args: argparse.Namespace) -> dict[str, Any]:
                 source_motion["pose"], source_motion["transl"], source_motion["betas"]
             )
         else:
-            source_sha = sha256_file(resolve_relative(source_root, record["motion_path"], "motion_path"))
+            source_sha = sha256_file(
+                resolve_relative(source_root, record["motion_path"], "motion_path")
+            )
         row = {
             "schema_version": SCHEMA_VERSION,
             "export_id": args.export_id,
@@ -454,7 +462,7 @@ def export_package(args: argparse.Namespace) -> dict[str, Any]:
     report = {
         **source_fingerprints,
         "total_hours": source_fingerprints["total_frames"] / 30.0 / 3600.0,
-        "aist_forward_equivalence_checks": forward_errors,
+        "aist_forward_identity_checks": forward_errors,
         "aist_forward_max_abs_error": max(
             (row["max_abs_error"] for row in forward_errors), default=0.0
         ),
