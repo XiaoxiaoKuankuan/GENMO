@@ -1,0 +1,30 @@
+# @package _global_
+# Human-curated variant of the four-dataset music-only specialist.
+# It inherits the architecture/optimizer/scheduler unchanged and only switches
+# dataset roots plus the isolated experiment/output names.
+defaults:
+  - gem_smpl_music_only_4set
+  - _self_
+
+exp_name_base: gem_smpl_music_only_4set_curated
+exp_name_var: ""
+exp_name: ${exp_name_base}${exp_name_var}
+data_name: gem_smpl_music_only_4set_curated
+output_dir: outputs/${exp_name}
+
+curated_data_root: /data0/user/liwei/datasets/music_dance_curated/music_only_4set_v1
+
+train_datasets:
+  aistpp_train:
+    root: ${curated_data_root}/AIST++
+  aioz_gdance_train:
+    root: ${curated_data_root}/AIOZ-GDANCE
+  finedance_train:
+    root: ${curated_data_root}/FineDance
+  compas3d_train:
+    root: ${curated_data_root}/CoMPAS3D
+
+test_datasets:
+  aistpp_music_eval:
+    root: ${curated_data_root}/AIST++
+
