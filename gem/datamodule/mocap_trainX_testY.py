@@ -19,6 +19,7 @@ from omegaconf import DictConfig
 from pytorch_lightning.utilities.combined_loader import CombinedLoader
 from torch.utils.data import ConcatDataset, DataLoader, Subset, default_collate
 
+from gem.datamodule.balanced_music_sampler import HierarchicalMusicDistributedSampler
 from gem.utils.pylogger import Log
 
 rlimit = resource.getrlimit(resource.RLIMIT_NOFILE)
@@ -119,6 +120,7 @@ class DataModule(pl.LightningDataModule):
         train_subset_ratio=None,
         train_2d_only=False,
         collate_cfg: DictConfig = None,
+        balanced_sampling: DictConfig | dict | None = None,
     ):
         """This is a general datamodule that can be used for any dataset.
         Train uses ConcatDataset
@@ -135,6 +137,7 @@ class DataModule(pl.LightningDataModule):
         self.train_subset_ratio = train_subset_ratio
         self.train_2d_only = train_2d_only
         self.collate_cfg = collate_cfg
+        self.balanced_sampling = balanced_sampling
         # Train uses concat dataset
         if "train" in dataset_opts:
             assert "train" in self.loader_opts, "train not in loader_opts"
@@ -143,6 +146,7 @@ class DataModule(pl.LightningDataModule):
                 split_opts, DictConfig
             ), "split_opts should be a dict for each dataset"
             dataset = []
+            dataset_names = []
             sampling_records = []
             dataset_num = len(split_opts)
             for idx, (k, v) in enumerate(split_opts.items()):
@@ -158,6 +162,7 @@ class DataModule(pl.LightningDataModule):
                         ),
                     )
                 dataset.append(dataset_i)
+                dataset_names.append(str(k))
                 summary = getattr(dataset_i, "sampling_summary", None)
                 if summary is not None:
                     sampling_records.append((k, dict(summary), len(dataset_i)))
@@ -182,6 +187,8 @@ class DataModule(pl.LightningDataModule):
                     f"sampling_fraction={fraction:.6%}, "
                     f"duration_aware={summary['duration_aware_sampling']}"
                 )
+            self.trainsets = dataset
+            self.trainset_names = dataset_names
             dataset = ConcatDataset(dataset)
             self.trainset = dataset
             Log.info(f"[Train Dataset][All]: ConcatDataset size={len(dataset)}")
@@ -209,9 +216,48 @@ class DataModule(pl.LightningDataModule):
 
     def train_dataloader(self):
         if hasattr(self, "trainset"):
+            sampler = None
+            if self.balanced_sampling is not None and self.balanced_sampling.get(
+                "enabled", False
+            ):
+                sampler = HierarchicalMusicDistributedSampler(
+                    self.trainsets,
+                    dataset_names=self.trainset_names,
+                    samples_per_epoch=int(
+                        self.balanced_sampling.get("samples_per_epoch", 52224)
+                    ),
+                    fps=float(self.balanced_sampling.get("fps", 30.0)),
+                    temperature=float(
+                        self.balanced_sampling.get("temperature", 0.5)
+                    ),
+                    minimum_dataset_probability=float(
+                        self.balanced_sampling.get(
+                            "minimum_dataset_probability", 0.05
+                        )
+                    ),
+                    maximum_dataset_probability=float(
+                        self.balanced_sampling.get(
+                            "maximum_dataset_probability", 0.50
+                        )
+                    ),
+                    seed=int(self.balanced_sampling.get("seed", 42)),
+                )
+                summary = ", ".join(
+                    f"{name}={probability:.4%} (H={hours:.4f}h)"
+                    for name, probability, hours in zip(
+                        sampler.dataset_names,
+                        sampler.dataset_probabilities,
+                        sampler.unique_music_hours,
+                    )
+                )
+                Log.info(
+                    "[Train Sampling][Deduplicated hierarchical] "
+                    f"global_samples={sampler.samples_per_epoch}, {summary}"
+                )
             return DataLoader(
                 self.trainset,
-                shuffle=True,
+                shuffle=sampler is None,
+                sampler=sampler,
                 num_workers=self.loader_opts.train.num_workers,
                 persistent_workers=True and self.loader_opts.train.num_workers > 0,
                 batch_size=self.loader_opts.train.batch_size,

@@ -16,6 +16,7 @@ music-only denoiser because ``pipeline.args.in_attr == ["encoded_music"]``.
 from __future__ import annotations
 
 import json
+import unicodedata
 from pathlib import Path
 from typing import Any
 
@@ -29,6 +30,7 @@ from gem.datasets.aistpp.aistplusplus import (
 )
 from gem.utils.cam_utils import create_camera_sensor
 from gem.utils.geo_transform import compute_cam_angvel, compute_cam_tvel, normalize_T_w2c
+from gem.utils.ground_sidecar import load_ground_sidecar
 from gem.utils.motion_utils import get_c_rootparam, get_R_c2gv
 from gem.utils.net_utils import get_valid_mask, repeat_to_max_len, repeat_to_max_len_dict
 from gem.utils.pylogger import Log
@@ -88,6 +90,15 @@ def select_training_window(sequence_length: int, target_length: int) -> tuple[in
     return start, target_length
 
 
+def normalize_music_group_name(value: Any) -> str:
+    """Canonicalise free-form song names without merging distinct titles."""
+    normalized = unicodedata.normalize("NFKC", str(value)).strip().casefold()
+    normalized = " ".join(normalized.split())
+    if not normalized:
+        raise ValueError("music group identifier must be non-empty")
+    return normalized
+
+
 class MusicDanceSmplDataset(Dataset):
     """Read one canonical music-dance manifest as music-only GEM samples."""
 
@@ -102,6 +113,8 @@ class MusicDanceSmplDataset(Dataset):
         enable_contact_supervision: bool = True,
         camera_distance: float = 8.0,
         limit_size: int | None = None,
+        ground_sidecar_path: str | Path | None = None,
+        require_ground_sidecar: bool = False,
     ) -> None:
         super().__init__()
         self.root = Path(root).expanduser().resolve()
@@ -113,6 +126,7 @@ class MusicDanceSmplDataset(Dataset):
         self.enable_contact_supervision = bool(enable_contact_supervision)
         self.camera_distance = float(camera_distance)
         self.limit_size = limit_size
+        self.require_ground_sidecar = bool(require_ground_sidecar)
         if self.motion_frames <= 0:
             raise ValueError("motion_frames must be positive")
         if not np.isfinite(self.camera_distance) or self.camera_distance <= 0:
@@ -120,6 +134,30 @@ class MusicDanceSmplDataset(Dataset):
 
         self.rows = _read_jsonl(self.root / "manifests" / f"{self.split}.jsonl")
         self._validate_manifest_rows()
+        if ground_sidecar_path is None:
+            self.ground_records = None
+            if self.require_ground_sidecar:
+                raise ValueError(
+                    f"{self.dataset_name}: require_ground_sidecar=True but no path was configured"
+                )
+        else:
+            sidecar_path = Path(ground_sidecar_path).expanduser()
+            if not sidecar_path.is_absolute():
+                sidecar_path = self.root / sidecar_path
+            self.ground_records = load_ground_sidecar(sidecar_path)
+            expected_ids = {str(row["sample_id"]) for row in self.rows}
+            missing_ids = sorted(expected_ids - set(self.ground_records))
+            if missing_ids:
+                preview = ", ".join(missing_ids[:5])
+                raise ValueError(
+                    f"{self.dataset_name}: ground sidecar misses {len(missing_ids)} samples: {preview}"
+                )
+            for row in self.rows:
+                record = self.ground_records[str(row["sample_id"])]
+                if int(record["num_frames"]) != int(row["num_frames"]):
+                    raise ValueError(
+                        f"{row['sample_id']}: ground num_frames differs from manifest"
+                    )
         self.idx2meta: list[int] = []
         for row_index, row in enumerate(self.rows):
             repeats = (
@@ -143,6 +181,45 @@ class MusicDanceSmplDataset(Dataset):
             f"[{self.dataset_name}] split={self.split}, raw={self.raw_sequence_count}, "
             f"hours={self.sampling_summary['hours']:.3f}, effective_len={len(self.idx2meta)}"
         )
+
+    def _music_group_id(self, row: dict[str, Any]) -> str:
+        dataset_name = self.dataset_name.casefold().replace("-", "_")
+        if dataset_name in {"aioz", "aioz_gdance"}:
+            field = "group_id"
+            value = row.get(field)
+        elif dataset_name in {"finedance", "fine_dance"}:
+            field = "song_name"
+            value = row.get(field)
+        elif dataset_name in {"compas3d", "compas_3d"}:
+            field = "song_id"
+            value = row.get(field)
+        else:
+            # Generic fixtures/third-party users retain one group per sample;
+            # the four contracted datasets always take one of the branches above.
+            field = "sample_id"
+            value = row.get(field)
+        if value is None:
+            raise ValueError(f"{row['sample_id']}: manifest is missing {field}")
+        return normalize_music_group_name(value)
+
+    def get_music_sampling_records(self) -> list[dict[str, Any]]:
+        """Return one variant record per source sequence for the DDP sampler."""
+        records: list[dict[str, Any]] = []
+        seen_rows: set[int] = set()
+        for dataset_index, row_index in enumerate(self.idx2meta):
+            if row_index in seen_rows:
+                continue
+            seen_rows.add(row_index)
+            row = self.rows[row_index]
+            records.append(
+                {
+                    "dataset_index": dataset_index,
+                    "sample_id": str(row["sample_id"]),
+                    "group_id": self._music_group_id(row),
+                    "num_frames": int(row["num_frames"]),
+                }
+            )
+        return records
 
     def _validate_manifest_rows(self) -> None:
         seen: set[str] = set()
@@ -282,6 +359,21 @@ class MusicDanceSmplDataset(Dataset):
         source_crop_length = int(loaded["length"])
         max_len = self.motion_frames
         smpl_params_w = loaded["motion"]
+        physics = None
+        if self.ground_records is not None:
+            ground_record = self.ground_records[str(row["sample_id"])]
+            ground_valid = bool(ground_record["ground_valid"])
+            ground_y = (
+                float(ground_record["ground_y"]) if ground_valid else 0.0
+            )
+            physics = {
+                "ground_y": torch.tensor(ground_y, dtype=torch.float32),
+                "ground_y_local": torch.tensor(
+                    ground_y - float(smpl_params_w["transl"][0, 1]),
+                    dtype=torch.float32,
+                ),
+                "ground_valid": torch.tensor(ground_valid, dtype=torch.bool),
+            }
         T_w2c, K_fullimg, _, width, height = self._make_static_camera(smpl_params_w)
         offset = self.smpl_model.get_skeleton(smpl_params_w["betas"][0])[0]
         global_orient_c, transl_c = get_c_rootparam(
@@ -317,15 +409,15 @@ class MusicDanceSmplDataset(Dataset):
                 "start_end": (loaded["start"], loaded["end"]),
                 "source_crop_length": source_crop_length,
                 "source_lengths": loaded["source_lengths"],
+                "music_group_id": self._music_group_id(row),
                 "coordinate_system": "GENMO Y-up metric (already canonical; no runtime axis conversion)",
                 "synthetic_camera": True,
                 "height": height,
                 "width": width,
             },
-            # Short canonical clips are synchronously last-frame padded below.
-            # Their one natural repetition remains a full 120-frame training
-            # item, matching the fixed-window specialist contract.
-            "length": max_len,
+            # Short canonical clips are synchronously last-frame padded below,
+            # while ``length`` and masks retain the real-frame count.
+            "length": source_crop_length,
             "smpl_params_c": smpl_params_c,
             "smpl_params_w": smpl_params_w,
             "R_c2gv": R_c2gv,
@@ -343,13 +435,13 @@ class MusicDanceSmplDataset(Dataset):
             "music_array": torch.zeros(source_crop_length, 1024, dtype=torch.float32),
             "music_fps": 30,
             "mask": {
-                "valid": get_valid_mask(max_len, max_len),
+                "valid": get_valid_mask(max_len, source_crop_length),
                 "humanoid": get_valid_mask(max_len, 0),
                 "has_img_mask": get_valid_mask(max_len, 0),
                 "has_2d_mask": get_valid_mask(max_len, 0),
                 "has_cam_mask": get_valid_mask(max_len, 0),
                 "has_audio_mask": get_valid_mask(max_len, 0),
-                "has_music_mask": get_valid_mask(max_len, max_len),
+                "has_music_mask": get_valid_mask(max_len, source_crop_length),
                 "2d_only": False,
                 "vitpose": False,
                 "bbx_xys": False,
@@ -358,6 +450,8 @@ class MusicDanceSmplDataset(Dataset):
                 "invalid_contact": not self.enable_contact_supervision,
             },
         }
+        if physics is not None:
+            result["physics"] = physics
         for key in ("smpl_params_c", "smpl_params_w"):
             result[key] = repeat_to_max_len_dict(result[key], max_len)
         for key in (
@@ -382,4 +476,5 @@ __all__ = [
     "MusicDanceSmplDataset",
     "duration_repeat_count",
     "select_training_window",
+    "normalize_music_group_name",
 ]

@@ -1,0 +1,78 @@
+# @package _global_
+# SMPL 151D four-dataset temporal/ground fine-tuning experiment.
+# The base experiment configuration remains unchanged; this file is opt-in.
+defaults:
+  - gem_smpl_music_only_4set
+  - override /optimizer: adamw_2e-5
+  - override /scheduler: iters_half_30k_45k
+  - override /callbacks:
+      - ckpt_saver/every5000s_top100
+      - prog_bar/prog_reporter_ed1
+      - train_speed_timer/base
+      - lr_monitor/pl
+  - _self_
+
+exp_name_base: gem_smpl_music_only_4set_physics_v1
+exp_name_var: ""
+exp_name: ${exp_name_base}${exp_name_var}
+data_name: gem_smpl_music_only_4set_physics_v1
+output_dir: outputs/${exp_name}
+
+# Pass the baseline checkpoint on the command line.  scripts/train.py loads it
+# as weights only, so optimizer/scheduler/global step are reset for fine-tuning.
+pretrain_ckpt: null
+ckpt_path: null
+
+train_datasets:
+  aistpp_train:
+    duration_aware_sampling: false
+    ground_sidecar_path: physics/ground_v1.jsonl
+    require_ground_sidecar: true
+  aioz_gdance_train:
+    duration_aware_sampling: false
+    ground_sidecar_path: physics/ground_v1.jsonl
+    require_ground_sidecar: true
+  finedance_train:
+    duration_aware_sampling: false
+    ground_sidecar_path: physics/ground_v1.jsonl
+    require_ground_sidecar: true
+  compas3d_train:
+    duration_aware_sampling: false
+    ground_sidecar_path: physics/ground_v1.jsonl
+    require_ground_sidecar: true
+
+data:
+  balanced_sampling:
+    enabled: true
+    samples_per_epoch: 52224
+    fps: 30.0
+    temperature: 0.5
+    minimum_dataset_probability: 0.05
+    maximum_dataset_probability: 0.50
+    seed: ${seed}
+
+pipeline:
+  args:
+    physics_losses:
+      enabled: true
+      fps: 30.0
+      warmup_steps: 10000
+      max_gt_root_speed: 6.0
+      max_gt_joint_angular_speed: 30.0
+      max_gt_fk_speed: 9.0
+      sole_tolerance_m: 0.01
+      dataset_ids: [aist++, aioz_gdance, finedance, compas3d]
+      root_velocity: {scale: 2.0, weight: 0.01}
+      root_acceleration: {scale: 20.0, weight: 0.002}
+      root_jerk: {scale: 600.0, weight: 0.0002}
+      joint_angular_velocity: {scale: 6.0, weight: 0.005}
+      joint_angular_acceleration: {scale: 180.0, weight: 0.0005}
+      fk_velocity: {scale: 2.0, weight: 0.01}
+      fk_acceleration: {scale: 30.0, weight: 0.002}
+      fk_jerk: {scale: 600.0, weight: 0.0002}
+      sole_penetration: {scale: 0.03, weight: 0.005}
+
+pl_trainer:
+  devices: 8
+  use_distributed_sampler: false
+  max_steps: 50000

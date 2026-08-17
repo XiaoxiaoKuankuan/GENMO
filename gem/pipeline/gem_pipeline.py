@@ -14,6 +14,7 @@ from hydra.utils import instantiate
 from torch.cuda.amp import autocast
 
 from gem.network.endecoder import EnDecoder
+from gem.pipeline.smpl_physics_losses import compute_smpl_physics_losses
 from gem.utils.body_params import (
     get_pred_body_params_incam,
     set_intermediate_pred_body_params_global,
@@ -204,6 +205,21 @@ class Pipeline(nn.Module):
                 total_loss += extra_loss
                 outputs.update(extra_loss_dict)
 
+        physics_config = self.args.get("physics_losses", None)
+        if physics_config is not None and physics_config.get("enabled", False):
+            physics_loss, physics_loss_dict = compute_smpl_physics_losses(
+                inputs,
+                outputs,
+                self,
+                global_step=global_step,
+            )
+            total_loss += physics_loss
+            outputs.update(physics_loss_dict)
+
+        # The camera-space mesh is an intra-forward cache, not part of the
+        # public training output/checkpoint contract.
+        outputs.pop("_pred_c_verts437", None)
+
         outputs["loss"] = total_loss
         return outputs
 
@@ -359,8 +375,17 @@ def compute_extra_incam_loss(inputs, outputs, ppl, mode):
         # extra_loss += j2d_17_loss * weights.j2d_17
         # extra_loss_dict["j2d_17_loss"] = j2d_17_loss
 
-    if weights.get("cr_verts", 0) > 0:
+    physics_config = ppl.args.get("physics_losses", None)
+    need_pred_verts = (
+        weights.get("cr_verts", 0) > 0
+        or weights.get("verts2d", 0) > 0
+        or (physics_config is not None and physics_config.get("enabled", False))
+    )
+    if need_pred_verts:
         pred_c_verts437, pred_c_j17 = smpl_model(**smpl_fwd_params_incam)
+        outputs["_pred_c_verts437"] = pred_c_verts437
+
+    if weights.get("cr_verts", 0) > 0:
         root_ = pred_c_j17[:, :, [11, 12], :].mean(-2, keepdim=True)
         pred_cr_verts437 = pred_c_verts437 - root_
         gt_cr_verts437 = inputs["gt_cr_verts437"]  # (B, L, 437, 3)

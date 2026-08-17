@@ -6,7 +6,11 @@ import pytest
 import torch
 
 from gem.runtime.motion_sanity import evaluate_global_motion_sanity
-from scripts.demo_music_only import select_music_window
+from scripts.demo_music_only import (
+    chunk_blend_weights,
+    plan_overlapping_windows,
+    select_music_window,
+)
 
 
 def _music(frames: int) -> torch.Tensor:
@@ -32,6 +36,22 @@ def test_demo_selects_explicit_long_window_and_enforces_safety_limit() -> None:
         select_music_window(
             _music(400), start_frame=0, num_frames=None, max_frames=120, source="test"
         )
+
+
+def test_plan_overlapping_windows_keeps_attention_bounded() -> None:
+    windows = plan_overlapping_windows(1171, chunk_frames=600, overlap_frames=120)
+    assert windows == [(0, 600), (480, 1080), (960, 1171)]
+    covered = torch.zeros(1171, dtype=torch.bool)
+    for start, end in windows:
+        assert end - start <= 600
+        covered[start:end] = True
+    assert covered.all()
+
+
+def test_chunk_blend_weights_sum_to_one_in_regular_overlap() -> None:
+    first = chunk_blend_weights(0, 600, 1080, 120)
+    second = chunk_blend_weights(480, 1080, 1080, 120)
+    assert torch.allclose(first[-120:] + second[:120], torch.ones(120))
 
 
 def test_motion_sanity_accepts_metric_upright_motion() -> None:

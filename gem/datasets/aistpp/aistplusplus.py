@@ -7,6 +7,7 @@ GEM 可训练的时序样本。完整 gem_smpl 模型用它学习音乐条件下
 """
 
 import os
+import re
 import warnings
 from pathlib import Path
 from typing import Any
@@ -21,6 +22,7 @@ from gem.utils.geo_transform import (
     get_bbx_xys_from_xyxy,
     normalize_T_w2c,
 )
+from gem.utils.ground_sidecar import load_ground_sidecar
 from gem.utils.motion_utils import get_c_rootparam, get_R_c2gv
 from gem.utils.net_utils import (
     get_valid_mask,
@@ -32,6 +34,15 @@ from gem.utils.smplx_utils import make_smplx
 
 AIST_METRIC_MAX_MEDIAN_ROOT_STEP_M = 0.25
 AIST_METRIC_MAX_ABS_TRANSLATION_P95_M = 20.0
+_AIST_MUSIC_TOKEN_RE = re.compile(r"_(m[^_]+)_ch", re.IGNORECASE)
+
+
+def get_aist_music_token(sequence_id: str) -> str:
+    """Extract the official AIST++ music token, for example ``mBR1``."""
+    match = _AIST_MUSIC_TOKEN_RE.search(str(sequence_id))
+    if match is None:
+        raise ValueError(f"AIST++ sequence has no music token: {sequence_id}")
+    return match.group(1).casefold()
 
 
 def aist_translation_statistics(
@@ -216,6 +227,8 @@ class AISTPlusPlusSmplDataset(data.Dataset):
         duration_aware_sampling: bool = False,
         validate_metric_translation: bool = False,
         aist_world_up_axis: str = "z",
+        ground_sidecar_path: str | Path | None = None,
+        require_ground_sidecar: bool = False,
     ):
         super().__init__()
         # Path
@@ -237,6 +250,8 @@ class AISTPlusPlusSmplDataset(data.Dataset):
         self.music_only_conditioning = music_only_conditioning
         self.validate_metric_translation = validate_metric_translation
         self.aist_world_up_axis = aist_world_up_axis
+        self.ground_sidecar_path = ground_sidecar_path
+        self.require_ground_sidecar = bool(require_ground_sidecar)
         # Opt-in only: old AIST++ experiments keep one item per sequence.
         # The four-dataset specialist repeats a sequence in proportion to its
         # number of complete 120-frame windows.
@@ -262,6 +277,32 @@ class AISTPlusPlusSmplDataset(data.Dataset):
         }
         self._load_dataset()
         self._get_idx2meta()
+        if self.ground_sidecar_path is None:
+            self.ground_records = None
+            if self.require_ground_sidecar:
+                raise ValueError(
+                    "AIST++ require_ground_sidecar=True but no path was configured"
+                )
+        else:
+            sidecar_path = Path(self.ground_sidecar_path).expanduser()
+            if not sidecar_path.is_absolute():
+                sidecar_path = self.root / sidecar_path
+            self.ground_records = load_ground_sidecar(sidecar_path)
+            expected_ids = set(self.idx2meta)
+            missing_ids = sorted(expected_ids - set(self.ground_records))
+            if missing_ids:
+                preview = ", ".join(missing_ids[:5])
+                raise ValueError(
+                    f"AIST++ ground sidecar misses {len(missing_ids)} samples: {preview}"
+                )
+            for sequence_id in expected_ids:
+                expected_frames = int(
+                    self.motion_files[sequence_id]["bbox_xyxy"].shape[0]
+                )
+                if int(self.ground_records[sequence_id]["num_frames"]) != expected_frames:
+                    raise ValueError(
+                        f"{sequence_id}: ground num_frames differs from AIST artifact"
+                    )
 
     def _load_dataset(self):
         # smplpose
@@ -273,6 +314,7 @@ class AISTPlusPlusSmplDataset(data.Dataset):
             self.split_file if self.split_file is not None else f"{self.split}.pt"
         )
         fn = self.root / annot_filename
+        self.annot_path = fn
         self.smpl_model = make_smplx("supermotion")
         Log.info(f"[AIST++ {self.feat_version}] Loading from {fn} ...")
         self.motion_files = load_aist_artifact(fn)
@@ -357,6 +399,26 @@ class AISTPlusPlusSmplDataset(data.Dataset):
     def __len__(self):
         return len(self.idx2meta)
 
+    def get_music_sampling_records(self) -> list[dict[str, Any]]:
+        """Return one AIST++ dance variant per official music token."""
+        records: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for dataset_index, sequence_id in enumerate(self.idx2meta):
+            if sequence_id in seen:
+                continue
+            seen.add(sequence_id)
+            records.append(
+                {
+                    "dataset_index": dataset_index,
+                    "sample_id": sequence_id,
+                    "group_id": get_aist_music_token(sequence_id),
+                    "num_frames": int(
+                        self.motion_files[sequence_id]["bbox_xyxy"].shape[0]
+                    ),
+                }
+            )
+        return records
+
     def _load_data(self, idx):
         sampled_motion = {}
         vid = self.idx2meta[idx]
@@ -397,6 +459,9 @@ class AISTPlusPlusSmplDataset(data.Dataset):
         sampled_motion["alignment"] = alignment
         sampled_motion["contact_supervision_valid"] = bool(
             motion.get("contact_supervision_valid", True)
+        )
+        sampled_motion["ground_record"] = (
+            self.ground_records.get(vid) if self.ground_records is not None else None
         )
 
         # Random train crop or deterministic fixed-window evaluation crop.
@@ -555,6 +620,7 @@ class AISTPlusPlusSmplDataset(data.Dataset):
                 "start_end": data["start_end"],
                 "contact_supervision_valid": data["contact_supervision_valid"],
                 "aist_world_up_axis": self.aist_world_up_axis,
+                "music_group_id": get_aist_music_token(data["vid"]),
             },
             "length": length,
             "smpl_params_c": smpl_params_c,
@@ -594,6 +660,19 @@ class AISTPlusPlusSmplDataset(data.Dataset):
                 ),
             },
         }
+
+        ground_record = data.get("ground_record")
+        if ground_record is not None:
+            ground_valid = bool(ground_record["ground_valid"])
+            ground_y = float(ground_record["ground_y"]) if ground_valid else 0.0
+            return_data["physics"] = {
+                "ground_y": torch.tensor(ground_y, dtype=torch.float32),
+                "ground_y_local": torch.tensor(
+                    ground_y - float(smpl_params_w["transl"][0, 1]),
+                    dtype=torch.float32,
+                ),
+                "ground_valid": torch.tensor(ground_valid, dtype=torch.bool),
+            }
 
         # Batchable
         if self.split in ["train", "minitrain"]:

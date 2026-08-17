@@ -487,6 +487,8 @@ class GEM(pl.LightningModule):
             for k in list(outputs.keys()):
                 if "_loss" in k or k in {"loss"}:
                     outputs[f"Loss_{mode}{suffix}/{k}"] = outputs.pop(k)
+                elif k.endswith("_metric"):
+                    outputs[f"Metric_{mode}{suffix}/{k}"] = outputs.pop(k)
             return outputs
 
         outputs = {"loss": 0}
@@ -514,6 +516,19 @@ class GEM(pl.LightningModule):
         for k, v in outputs.items():
             if "_loss" in k:
                 self.log(f"{k}", v, **log_kwargs)
+            elif "_metric" in k:
+                reduce_fx = "sum" if "_count_metric" in k else "mean"
+                self.log(
+                    f"{k}",
+                    v,
+                    on_step=False,
+                    on_epoch=True,
+                    prog_bar=False,
+                    logger=True,
+                    sync_dist=True,
+                    batch_size=outputs["batch_size"],
+                    reduce_fx=reduce_fx,
+                )
 
         return outputs
 

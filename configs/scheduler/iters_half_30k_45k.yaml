@@ -1,0 +1,7 @@
+# Fine-tuning schedule: halve LR at optimizer steps 30k and 45k.
+scheduler:
+  _target_: torch.optim.lr_scheduler.MultiStepLR
+  milestones: [30000, 45000]
+  gamma: 0.5
+interval: step
+frequency: 1

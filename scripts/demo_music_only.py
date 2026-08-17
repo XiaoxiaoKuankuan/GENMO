@@ -73,7 +73,22 @@ def build_parser() -> argparse.ArgumentParser:
         "--max-frames",
         type=int,
         default=600,
-        help="Safety limit. The denoiser uses sliding 120-frame attention above 120 frames.",
+        help="Safety limit for the complete output sequence.",
+    )
+    parser.add_argument(
+        "--chunk-frames",
+        type=int,
+        default=600,
+        help=(
+            "Run sequences longer than this as overlapping diffusion chunks. This keeps "
+            "attention memory bounded and avoids the denoiser's 4096-frame RoPE limit."
+        ),
+    )
+    parser.add_argument(
+        "--chunk-overlap-frames",
+        type=int,
+        default=120,
+        help="Overlap blended between adjacent diffusion chunks.",
     )
     parser.add_argument("--cfg-scale", type=float, default=2.5)
     parser.add_argument("--ddim-steps", type=int, default=50)
@@ -125,6 +140,44 @@ def select_music_window(
     selected = music[start_frame:end].float().contiguous()
     validate_musicfeat_v2(selected, source=source)
     return selected
+
+
+def plan_overlapping_windows(
+    num_frames: int, chunk_frames: int, overlap_frames: int
+) -> list[tuple[int, int]]:
+    """Return bounded, ordered windows whose adjacent chunks overlap exactly."""
+    if num_frames <= 0:
+        raise ValueError("num_frames must be > 0")
+    if chunk_frames <= 0:
+        raise ValueError("chunk_frames must be > 0")
+    if overlap_frames < 0 or overlap_frames >= chunk_frames:
+        raise ValueError("overlap_frames must be in [0, chunk_frames)")
+    if num_frames <= chunk_frames:
+        return [(0, num_frames)]
+    stride = chunk_frames - overlap_frames
+    return [
+        (start, min(start + chunk_frames, num_frames))
+        for start in range(0, num_frames, stride)
+    ]
+
+
+def chunk_blend_weights(
+    start: int, end: int, num_frames: int, overlap_frames: int
+) -> torch.Tensor:
+    """Linear overlap-add weights with non-zero sequence endpoints."""
+    length = end - start
+    if length <= 0 or start < 0 or end > num_frames:
+        raise ValueError("invalid chunk bounds")
+    weights = torch.ones(length, dtype=torch.float32)
+    fade = min(overlap_frames, length)
+    if fade and start > 0:
+        weights[:fade] = torch.arange(1, fade + 1, dtype=torch.float32) / (fade + 1)
+    if fade and end < num_frames:
+        weights[-fade:] = torch.minimum(
+            weights[-fade:],
+            torch.arange(fade, 0, -1, dtype=torch.float32) / (fade + 1),
+        )
+    return weights
 
 
 def load_selected_music(args: argparse.Namespace) -> tuple[torch.Tensor, dict[str, Any]]:
@@ -187,6 +240,95 @@ def _validate_body_group(group: Any, frames: int) -> dict[str, torch.Tensor]:
     return result
 
 
+def _predict_chunked_motion(
+    model: Any,
+    music: torch.Tensor,
+    *,
+    chunk_frames: int,
+    overlap_frames: int,
+    postproc: bool,
+) -> tuple[torch.Tensor, dict[str, torch.Tensor], dict[str, Any]]:
+    """Generate long motion with bounded attention and decode it only after stitching."""
+    from gem.pipeline.gem_pipeline import get_body_params_w_Rt_v2
+    from gem.utils.postprocess import pp_static_joint, process_ik
+
+    frames = int(music.shape[0])
+    windows = plan_overlapping_windows(frames, chunk_frames, overlap_frames)
+    motion_sum = torch.zeros(frames, 151, dtype=torch.float32)
+    static_sum: torch.Tensor | None = None
+    weight_sum = torch.zeros(frames, 1, dtype=torch.float32)
+
+    for number, (start, end) in enumerate(windows, start=1):
+        print(
+            f"[Demo] diffusion chunk {number}/{len(windows)}: "
+            f"frames [{start}:{end})",
+            flush=True,
+        )
+        prediction = model.predict(
+            build_music_only_data(music[start:end]),
+            static_cam=True,
+            postproc=False,
+        )
+        outputs = prediction["net_outputs"]
+        chunk_motion = outputs["model_output"]["pred_x"][0].detach().cpu().float()
+        chunk_static = outputs["model_output"]["static_conf_logits"][0].detach().cpu().float()
+        if tuple(chunk_motion.shape) != (end - start, 151):
+            raise RuntimeError(f"invalid chunk motion shape: {tuple(chunk_motion.shape)}")
+        if chunk_static.shape[0] != end - start:
+            raise RuntimeError(f"invalid chunk static shape: {tuple(chunk_static.shape)}")
+        if static_sum is None:
+            static_sum = torch.zeros(frames, chunk_static.shape[-1], dtype=torch.float32)
+        weights = chunk_blend_weights(start, end, frames, overlap_frames).unsqueeze(-1)
+        motion_sum[start:end] += chunk_motion * weights
+        static_sum[start:end] += chunk_static * weights
+        weight_sum[start:end] += weights
+        del prediction, outputs, chunk_motion, chunk_static
+
+    if static_sum is None or torch.any(weight_sum <= 0):
+        raise RuntimeError("chunked inference left uncovered output frames")
+    generated = (motion_sum / weight_sum).contiguous()
+    static_logits = (static_sum / weight_sum).contiguous()
+    # Shape is a sequence-level property. Each independently denoised chunk predicts
+    # a constant beta, so make the stitched result constant as well.
+    generated[:, 126:136] = generated[:, 126:136].mean(dim=0, keepdim=True)
+
+    pred_x = generated.unsqueeze(0).cuda()
+    decode_dict = model.pipeline.endecoder.decode(pred_x)
+    full_data = build_music_only_data(music)
+    params = get_body_params_w_Rt_v2(
+        global_orient_gv=decode_dict["global_orient_gv"],
+        local_transl_vel=decode_dict["local_transl_vel"],
+        global_orient_c=decode_dict["global_orient"],
+        cam_angvel=full_data["cam_angvel"].unsqueeze(0).cuda(),
+    )
+    params = {
+        "body_pose": decode_dict["body_pose"],
+        **params,
+        "betas": decode_dict["betas"],
+    }
+    stitched_outputs = {
+        "model_output": {
+            "pred_x": pred_x,
+            "static_conf_logits": static_logits.unsqueeze(0).cuda(),
+        },
+        "decode_dict": decode_dict,
+        "pred_body_params_global": params,
+        "static_conf_logits": static_logits.unsqueeze(0).cuda(),
+    }
+    if postproc:
+        params["transl"] = pp_static_joint(stitched_outputs, model.pipeline.endecoder)
+        params["body_pose"] = process_ik(stitched_outputs, model.pipeline.endecoder)
+    body_global = {key: value[0].detach().cpu() for key, value in params.items()}
+    metadata = {
+        "enabled": len(windows) > 1,
+        "chunk_frames": chunk_frames,
+        "overlap_frames": overlap_frames,
+        "num_chunks": len(windows),
+        "windows": [[start, end] for start, end in windows],
+    }
+    return generated, body_global, metadata
+
+
 @torch.inference_mode()
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
@@ -200,6 +342,10 @@ def main(argv: list[str] | None = None) -> int:
         raise ValueError("--ddim-steps must be in 2..1000")
     if args.width <= 0 or args.height <= 0:
         raise ValueError("--width and --height must be > 0")
+    if args.chunk_frames <= 0:
+        raise ValueError("--chunk-frames must be > 0")
+    if args.chunk_overlap_frames < 0 or args.chunk_overlap_frames >= args.chunk_frames:
+        raise ValueError("--chunk-overlap-frames must be in [0, --chunk-frames)")
     music, source_metadata = load_selected_music(args)
     frames = int(music.shape[0])
 
@@ -224,25 +370,40 @@ def main(argv: list[str] | None = None) -> int:
     denoiser = model.pipeline.denoiser3d.denoiser
     if model.text_condition_enabled or hasattr(denoiser, "embed_text"):
         raise RuntimeError("music-only specialist unexpectedly contains text conditioning")
-    if frames > denoiser.max_len:
+    if frames > args.chunk_frames:
         print(
-            f"[Demo] {frames} frames > training window {denoiser.max_len}; "
-            "using the repository's sliding local-attention path."
+            f"[Demo] {frames} frames > chunk size {args.chunk_frames}; "
+            "using bounded overlapping diffusion chunks."
         )
-
-    prediction = model.predict(
-        build_music_only_data(music), static_cam=True, postproc=args.postproc
-    )
-    outputs = prediction["net_outputs"]
-    generated = outputs["model_output"]["pred_x"].detach().cpu()
-    if tuple(generated.shape) != (1, frames, 151) or not torch.isfinite(generated).all():
+    if frames > args.chunk_frames:
+        generated, body_global, chunking = _predict_chunked_motion(
+            model,
+            music,
+            chunk_frames=args.chunk_frames,
+            overlap_frames=args.chunk_overlap_frames,
+            postproc=args.postproc,
+        )
+    else:
+        prediction = model.predict(
+            build_music_only_data(music), static_cam=True, postproc=args.postproc
+        )
+        outputs = prediction["net_outputs"]
+        generated = outputs["model_output"]["pred_x"][0].detach().cpu()
+        body_global = _validate_body_group(prediction.get("body_params_global"), frames)
+        chunking = {
+            "enabled": False,
+            "chunk_frames": args.chunk_frames,
+            "overlap_frames": args.chunk_overlap_frames,
+            "num_chunks": 1,
+            "windows": [[0, frames]],
+        }
+    if tuple(generated.shape) != (frames, 151) or not torch.isfinite(generated).all():
         raise RuntimeError(f"invalid generated 151D motion: {tuple(generated.shape)}")
-    body_global = _validate_body_group(prediction.get("body_params_global"), frames)
     sanity = evaluate_global_motion_sanity(body_global)
 
     args.output_dir.mkdir(parents=True, exist_ok=True)
     torch.save(music, args.output_dir / "music_features.pt")
-    torch.save(generated[0], args.output_dir / "generated_motion_151d.pt")
+    torch.save(generated, args.output_dir / "generated_motion_151d.pt")
     torch.save(_cpu_tree(body_global), args.output_dir / "pred_body_params_global.pt")
 
     rendered: Path | None = None
@@ -273,6 +434,7 @@ def main(argv: list[str] | None = None) -> int:
         "music_source": source_metadata,
         "music_shape": list(music.shape),
         "generated_shape": list(generated.shape),
+        "chunking": chunking,
         "cfg_scale": args.cfg_scale,
         "ddim_steps": args.ddim_steps,
         "seed": args.seed,

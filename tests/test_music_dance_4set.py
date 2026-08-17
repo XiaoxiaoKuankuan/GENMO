@@ -178,7 +178,7 @@ def test_manifest_dataset_emits_exact_music_only_batch_contract(tmp_path: Path) 
     assert not batch["has_text"].any()
 
 
-def test_short_sequence_is_synchronously_padded_to_one_full_window(tmp_path: Path) -> None:
+def test_short_sequence_padding_is_excluded_from_training_masks(tmp_path: Path) -> None:
     _write_canonical_root(tmp_path, name="short", length=102)
     dataset = MusicDanceSmplDataset(
         tmp_path,
@@ -188,12 +188,14 @@ def test_short_sequence_is_synchronously_padded_to_one_full_window(tmp_path: Pat
     dataset._smpl_model = _DummySmpl()
     sample = dataset[0]
     assert len(dataset) == 1
-    assert sample["length"] == 120
+    assert sample["length"] == 102
     assert sample["meta"]["source_crop_length"] == 102
     assert sample["music_embed"].shape == (120, 35)
     assert sample["smpl_params_w"]["body_pose"].shape == (120, 63)
-    assert sample["mask"]["valid"].all()
-    assert sample["mask"]["has_music_mask"].all()
+    assert sample["mask"]["valid"][:102].all()
+    assert not sample["mask"]["valid"][102:].any()
+    assert sample["mask"]["has_music_mask"][:102].all()
+    assert not sample["mask"]["has_music_mask"][102:].any()
     assert torch.equal(sample["music_embed"][101], sample["music_embed"][119])
     assert torch.equal(
         sample["smpl_params_w"]["transl"][101],
