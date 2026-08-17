@@ -1,0 +1,80 @@
+# @package _global_
+# Independent four-dataset BUMI-native music-only diffusion specialist.
+defaults:
+  - /diffusion@model_cfg.diffusion: ddim
+  - override /data: music_robot/trainX_testY
+  - override /model: bumi_music_gem
+  - override /network: diffusion_lg_bumi93
+  - override /pipeline: music_only_bumi
+  - override /endecoder: bumi_93d
+  - override /optimizer: adamw_2e-4
+  - override /scheduler: iters_half_70k_100k
+  - override /train_datasets:
+      - aistpp_bumi_train
+      - aioz_gdance_bumi_train
+      - finedance_bumi_train
+      - compas3d_bumi_train
+  - override /test_datasets:
+      - aistpp_bumi_music_eval
+  - override /callbacks:
+      - ckpt_saver/every10000s_top100
+      - prog_bar/prog_reporter_ed1
+      - train_speed_timer/base
+      - lr_monitor/pl
+  - _self_
+
+exp_name_base: gem_bumi_music_only_4set
+exp_name_var: ""
+exp_name: ${exp_name_base}${exp_name_var}
+data_name: gem_bumi_music_only_4set
+output_dir: outputs/${exp_name}
+pretrain_ckpt: null
+ckpt_path: null
+multicond_args: null
+
+model:
+  model_cfg:
+    motion_backend: bumi
+    checkpoint_adapter: null
+    text_encoder: null
+    music_mask_prob: 0.1
+    audio_mask_prob: 0.0
+    normalize_cam_angvel: false
+
+network:
+  model_cfg:
+    regression_only: false
+    denoiser:
+      encode_text: false
+      input_remove_global: false
+
+data:
+  loader_opts:
+    train:
+      batch_size: 128
+      num_workers: 6
+    val:
+      batch_size: 1
+      num_workers: 1
+
+pl_trainer:
+  precision: 16-mixed
+  log_every_n_steps: 10
+  gradient_clip_val: 0.5
+  max_epochs: null
+  check_val_every_n_epoch: null
+  val_check_interval: 3000
+  max_steps: 500000
+  devices: 1
+
+logger:
+  _target_: pytorch_lightning.loggers.WandbLogger
+  project: gem
+  save_dir: /tmp
+  name: ""
+  version: ""
+  resume: allow
+  dir: /tmp
+  id: null
+
+use_wandb: true

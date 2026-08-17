@@ -8,6 +8,8 @@ optimizer: ${optimizer}
 scheduler: ${scheduler}
 
 model_cfg:
+  # Backward-compatible default; robot-native experiments override explicitly.
+  motion_backend: smpl
   train_modes: ${pipeline.args.train_modes}
   noisy_2d_obs: true
   kp2d_noise_scale: 0.5

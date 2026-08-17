@@ -1,0 +1,35 @@
+_target_: gem.pipeline.bumi_music_pipeline.BumiMusicPipeline
+args_denoiser3d: ${network}
+args:
+  motion_backend: bumi
+  train_modes:
+    - diffusion
+  endecoder_opt: ${endecoder}
+  use_cfg_sampler_for_gen: true
+  encoded_music_dim: 35
+  in_attr:
+    - encoded_music
+  mask_out_attr: []
+  out_attr:
+    static_conf_logits: 2
+
+  # Initial untuned values; validate and tune only after real BUMI data arrives.
+  weights:
+    repr_root_pos: 1.0
+    repr_root_rot: 1.0
+    repr_joint: 1.0
+    repr_body_pos: 1.0
+    root_pos: 1.0
+    root_rot: 1.0
+    joint_dof: 1.0
+    fk_body_pos: 5.0
+    fk_consistency: 1.0
+    joint_velocity: 0.1
+    joint_acceleration: 0.05
+    joint_jerk: 0.0
+    joint_limit: 1.0
+    contact_bce: 1.0
+    foot_slide: 1.0
+    penetration: 5.0
+    root_height: 1.0
+

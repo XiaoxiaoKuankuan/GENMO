@@ -183,9 +183,10 @@ class Pipeline(nn.Module):
 
         # 1. Simple loss: MSE
         if self.weights.get("simple", 1.0) > 0.0:
-            pred_x = model_output["pred_x"][..., :151]  # (B, L, C)
-            target_x = inputs["target_x"][..., :151]  # (B, L, C)
-            target_x_mask = inputs["target_x_mask"][..., :151]  # (B, L, C)
+            motion_dim = self.endecoder.get_motion_dim()
+            pred_x = model_output["pred_x"][..., :motion_dim]  # (B, L, C)
+            target_x = inputs["target_x"][..., :motion_dim]  # (B, L, C)
+            target_x_mask = inputs["target_x_mask"][..., :motion_dim]  # (B, L, C)
 
             simple_loss = F.mse_loss(pred_x, target_x, reduction="none")
 

@@ -29,7 +29,13 @@ def apply_regression_targets_to_2d_only(
     sample, however, has no valid 151D ground truth and must retain the legacy
     regression-derived target rather than silently training against zeros.
     """
-    mask_2d_only = inputs["mask"]["2d_only"].bool()
+    mask_2d_only = inputs.get("mask", {}).get("2d_only")
+    # Robot-native batches have no 2D-only sample concept. Their target is
+    # already authoritative qpos/FK supervision and needs no compatibility
+    # placeholder field.
+    if mask_2d_only is None:
+        return target_x
+    mask_2d_only = mask_2d_only.bool()
     if not bool(mask_2d_only.any()):
         return target_x
     if "regression_outputs" not in inputs:
@@ -78,10 +84,25 @@ class GEMDiffusion(nn.Module):
 
         self.regression_input_type = self.args.get("regression_input_type", "zero")
         self.regression_only = bool(regression_only or self.model_cfg.get("regression_only", False))
+        self.motion_backend = str(self.args.get("motion_backend", "smpl"))
+        self.observed_motion_3d_dim = int(observed_motion_3d_dim)
         self.mask_localpose = kwargs.get("mask_localpose", False)
         self.mask_localpose_prob = kwargs.get("mask_localpose_prob", 0.0)
 
+        if self.motion_backend != "smpl" and self.mask_localpose:
+            raise ValueError(
+                "mask_localpose is a SMPL body_pose feature mask and cannot be enabled "
+                f"for motion_backend={self.motion_backend!r}"
+            )
+
         self.denoiser = instantiate(self.model_cfg.denoiser)
+        if self.motion_backend == "bumi" and bool(
+            getattr(self.denoiser, "input_remove_global", False)
+        ):
+            raise ValueError(
+                "BUMI forbids input_remove_global because the legacy implementation masks "
+                "the final 15 SMPL-specific channels"
+            )
         if not defer_diffusion_init:
             self.init_diffusion()
         self.text_encoder, self.tokenizer = None, None
