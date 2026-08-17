@@ -40,8 +40,39 @@ from gem.utils.smpl_physics_metrics import (
     sole_penetration_metrics,
     temporal_quality_metrics,
 )
+from scripts.build_ground_sidecars import _aist_sources
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
+
+
+def test_aist_ground_sources_accept_official_72d_pose_contract(
+    tmp_path: Path,
+) -> None:
+    sequence_id = "gWA_sFM_cAll_d25_mWA4_ch05"
+    num_frames = 4
+    pose = torch.arange(num_frames * 72, dtype=torch.float32).reshape(
+        num_frames, 72
+    )
+    annotation = {
+        sequence_id: {
+            "smpl_pose_global": pose,
+            "smpl_trans_global": torch.zeros(num_frames, 3),
+            "bbox_xyxy": torch.zeros(num_frames, 4),
+        }
+    }
+    torch.save(annotation, tmp_path / "annot_aist_30fps.pt")
+    torch.save([sequence_id], tmp_path / "train.pt")
+
+    sources = list(
+        _aist_sources(tmp_path, "annot_aist_30fps.pt", "train.pt")
+    )
+
+    assert len(sources) == 1
+    assert sources[0]["num_frames"] == num_frames
+    assert sources[0]["motion"]["global_orient"].shape == (num_frames, 3)
+    assert sources[0]["motion"]["body_pose"].shape == (num_frames, 63)
+    assert torch.equal(sources[0]["motion"]["global_orient"], pose[:, :3])
+    assert torch.equal(sources[0]["motion"]["body_pose"], pose[:, 3:66])
 
 
 def test_physics_experiment_is_derived_without_mutating_baseline() -> None:

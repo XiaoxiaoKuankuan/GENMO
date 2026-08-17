@@ -74,8 +74,18 @@ def _aist_sources(
         pose = torch.as_tensor(payload["smpl_pose_global"]).float()
         translation = torch.as_tensor(payload["smpl_trans_global"]).float()
         num_frames = int(payload["bbox_xyxy"].shape[0])
-        if pose.shape != (num_frames, 66) or translation.shape != (num_frames, 3):
-            raise ValueError(f"{sequence_id}: invalid AIST++ canonical motion shapes")
+        # The official AIST++ artifact stores all 24 SMPL joint rotations as
+        # axis-angle vectors [F, 72].  GEM's SMPL-22 contract consumes the root
+        # plus the first 21 body joints (the first 66 values), matching
+        # AISTPlusPlusSmplDataset._load_data.  Do not require an already-trimmed
+        # [F, 66] pose here: that rejects every valid official artifact.
+        if pose.shape != (num_frames, 72) or translation.shape != (num_frames, 3):
+            raise ValueError(
+                f"{sequence_id}: invalid AIST++ canonical motion shapes: "
+                f"smpl_pose_global={tuple(pose.shape)}, "
+                f"smpl_trans_global={tuple(translation.shape)}, "
+                f"bbox_frames={num_frames}; expected [F,72], [F,3], F"
+            )
         yield {
             "sample_id": str(sequence_id),
             "source_path": annot_path,
