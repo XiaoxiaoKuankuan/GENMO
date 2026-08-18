@@ -133,6 +133,73 @@ class MusicOnlyGuidedDenoiser(nn.Module):
         return pred_motion, pred_camera, static_conf_logits
 
 
+class MusicOnlyTensorRTDenoiser(nn.Module):
+    """Deployment-only CFG denoiser with one batched Transformer invocation.
+
+    The public inputs deliberately match :class:`MusicOnlyGuidedDenoiser`, but
+    conditional and unconditional samples are concatenated along the batch
+    dimension before calling the Transformer.  This keeps one copy of the
+    denoiser weights in ONNX/TensorRT and returns only the 151-D x-start motion
+    required by the streaming DDIM scheduler.
+    """
+
+    def __init__(self, model: nn.Module):
+        super().__init__()
+        validate_music_only_export_model(model)
+        if model.endecoder.obs_indices_dict is None:
+            model.endecoder.build_obs_indices_dict()
+
+        self.music_embedder = model.music_embedder
+        self.denoiser = model.pipeline.denoiser3d.denoiser
+        self.sample_indices_dict = dict(model.endecoder.obs_indices_dict)
+        self.use_condition_exists = bool(model.model_cfg.use_cond_exists_as_input)
+        if self.use_condition_exists:
+            embedders = getattr(model, "cond_exists_embedder", None)
+            if embedders is None or "encoded_music" not in embedders:
+                raise RuntimeError(
+                    "use_cond_exists_as_input=True but encoded_music exists embedder is missing"
+                )
+            self.music_exists_embedder = embedders["encoded_music"]
+
+    def _condition_pair(self, music: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        conditional = self.music_embedder(music)
+        unconditional = torch.zeros_like(conditional)
+        if self.use_condition_exists:
+            ones = torch.ones_like(conditional[..., :1])
+            zeros = torch.zeros_like(conditional[..., :1])
+            conditional = self.music_exists_embedder(torch.cat((conditional, ones), dim=-1))
+            unconditional = self.music_exists_embedder(
+                torch.cat((unconditional, zeros), dim=-1)
+            )
+        return conditional, unconditional
+
+    def forward(
+        self,
+        noisy_motion: torch.Tensor,
+        diffusion_timestep: torch.Tensor,
+        music: torch.Tensor,
+        length: torch.Tensor,
+        guidance_scale: torch.Tensor,
+    ) -> torch.Tensor:
+        conditional, unconditional = self._condition_pair(music)
+        paired_motion = torch.cat((noisy_motion, noisy_motion), dim=0)
+        paired_timestep = torch.cat((diffusion_timestep, diffusion_timestep), dim=0)
+        paired_length = torch.cat((length, length), dim=0)
+        paired_condition = torch.cat((conditional, unconditional), dim=0)
+        paired_output = self.denoiser(
+            paired_motion,
+            paired_timestep,
+            y={"f_cond": paired_condition, "length": paired_length},
+            inputs={},
+            sample_indices_dict=self.sample_indices_dict,
+        )["pred_x_start"]
+        batch = noisy_motion.shape[0]
+        pred_cond = paired_output[:batch]
+        pred_uncond = paired_output[batch:]
+        scale = guidance_scale.reshape(1, 1, 1).to(dtype=pred_cond.dtype)
+        return pred_uncond + scale * (pred_cond - pred_uncond)
+
+
 def make_onnx_inputs(
     music: torch.Tensor,
     *,

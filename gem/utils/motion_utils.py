@@ -212,7 +212,7 @@ def init_rollout_w_Rt_state(global_orient_gv_0, global_orient_c_0, device=None):
 
     Returns:
         dict with keys R_t_to_0, global_orient_pre, transl_pre,
-        last_global_orient_gv, last_global_orient_c
+        last_global_orient_gv, last_global_orient_c, frame_index
     """
     if global_orient_gv_0.dim() == 1:
         global_orient_gv_0 = global_orient_gv_0.unsqueeze(0)
@@ -233,6 +233,7 @@ def init_rollout_w_Rt_state(global_orient_gv_0, global_orient_c_0, device=None):
         "transl_pre": transl_pre_0,
         "last_global_orient_gv": global_orient_gv_0.detach().clone(),
         "last_global_orient_c": global_orient_c_0.detach().clone(),
+        "frame_index": 0,
     }
 
 
@@ -262,14 +263,9 @@ def rollout_step_w_Rt(
         body_params_curr: {"global_orient": (B, 3), "transl": (B, 3)} in AY coords
         new_state: updated state dict for the next call
 
-    Note:
-        ``local_transl_vel_curr`` is only consumed as a fallback when
-        ``local_transl_vel_prev`` is None (typically at frame 0 of a stream).
-        In that case the rollout uses the current-frame velocity to take its
-        single forward step, which introduces a one-frame phase error in
-        ``transl`` that disappears once frame-1 supplies a real ``prev``
-        velocity. Inference-only (``@torch.no_grad``); for differentiable
-        rollout, use ``get_body_params_w_Rt_v2``.
+    The first emitted frame is exactly at translation zero.  Frame ``t>0``
+    integrates frame ``t-1``'s local velocity, matching
+    :func:`rollout_local_transl_vel` and the batch inference path.
     """
     if global_orient_gv_curr.dim() == 1:
         global_orient_gv_curr = global_orient_gv_curr.unsqueeze(0)
@@ -333,9 +329,11 @@ def rollout_step_w_Rt(
         gop = gop.unsqueeze(0)
     R_prev_world = axis_angle_to_matrix(gop.to(device))
 
-    if local_transl_vel_prev is None:
-        assert local_transl_vel_curr is not None
-        delta_transl = torch.einsum("bij,bj->bi", R_prev_world, local_transl_vel_curr.to(device))
+    frame_index = int(state.get("frame_index", 0))
+    if frame_index == 0:
+        delta_transl = torch.zeros((B, 3), device=device, dtype=R_prev_world.dtype)
+    elif local_transl_vel_prev is None:
+        raise ValueError("local_transl_vel_prev is required after the first streaming frame")
     else:
         delta_transl = torch.einsum("bij,bj->bi", R_prev_world, local_transl_vel_prev.to(device))
 
@@ -355,5 +353,6 @@ def rollout_step_w_Rt(
         "transl_pre": transl_pre_curr.detach(),
         "last_global_orient_gv": global_orient_gv_curr.detach().clone(),
         "last_global_orient_c": global_orient_c_curr.detach().clone(),
+        "frame_index": frame_index + 1,
     }
     return body_params_curr, new_state

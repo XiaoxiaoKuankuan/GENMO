@@ -85,21 +85,10 @@ def _matrix_to_quaternion_wxyz(matrix: np.ndarray) -> np.ndarray:
     return (quaternion / norm).astype(np.float32)
 
 
-class GMRUDPBridge:
-    """Pack and send one fixed-size SMP1 datagram per GEM inference frame."""
+class SMP1PacketEncoder:
+    """Pure fixed-size SMP1 encoder shared by UDP and synchronous GMR paths."""
 
-    def __init__(
-        self,
-        host: str,
-        port: int = 7005,
-        debug: bool | None = None,
-    ) -> None:
-        if not host:
-            raise ValueError("host must be non-empty")
-        if not 1 <= int(port) <= 65535:
-            raise ValueError("port must be in [1, 65535]")
-        self.host = host
-        self.port = int(port)
+    def __init__(self, debug: bool | None = None) -> None:
         self.debug = (
             os.environ.get("GMR_UDP_DEBUG", "").strip().lower()
             in {"1", "true", "yes", "on"}
@@ -107,11 +96,8 @@ class GMRUDPBridge:
             else bool(debug)
         )
         self.sequence = 0
-        self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self._previous_quaternions: dict[str, np.ndarray] = {}
-        self._rate_started = time.monotonic()
-        self._rate_packets = 0
-        print(f"[GMR UDP] SMP1 enabled: {self.host}:{self.port}, packet={PACKET_BYTES} bytes")
+        self._last_positions: dict[str, np.ndarray] = {}
 
     @staticmethod
     def _array(value: Any, shape: tuple[int, ...], name: str) -> np.ndarray:
@@ -135,7 +121,7 @@ class GMRUDPBridge:
             raise ValueError(f"{name} is not a proper rotation (det={determinant:.6g})")
 
     @torch.no_grad()
-    def send_smplx_targets(
+    def pack_smplx_targets(
         self,
         targets: Mapping[str, Any],
         source_stamp_ns: int | None = None,
@@ -168,7 +154,7 @@ class GMRUDPBridge:
             if previous is not None and float(np.dot(quaternion, previous)) < 0.0:
                 quaternion = -quaternion
             self._previous_quaternions[name] = quaternion.copy()
-            positions[name] = position
+            positions[name] = position.copy()
             values.extend((*position.tolist(), *quaternion.tolist()))
 
         stamp_ns = time.monotonic_ns() if source_stamp_ns is None else int(source_stamp_ns)
@@ -181,8 +167,41 @@ class GMRUDPBridge:
             self.sequence & 0xFFFFFFFF,
             stamp_ns,
         ) + PAYLOAD.pack(*values)
-        self.sock.sendto(packet, (self.host, self.port))
+        self._last_positions = positions
         self.sequence = (self.sequence + 1) & 0xFFFFFFFF
+        return packet
+
+
+class GMRUDPBridge(SMP1PacketEncoder):
+    """Pack and send one fixed-size SMP1 datagram per GEM inference frame."""
+
+    def __init__(
+        self,
+        host: str,
+        port: int = 7005,
+        debug: bool | None = None,
+    ) -> None:
+        if not host:
+            raise ValueError("host must be non-empty")
+        if not 1 <= int(port) <= 65535:
+            raise ValueError("port must be in [1, 65535]")
+        super().__init__(debug=debug)
+        self.host = host
+        self.port = int(port)
+        self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self._rate_started = time.monotonic()
+        self._rate_packets = 0
+        print(f"[GMR UDP] SMP1 enabled: {self.host}:{self.port}, packet={PACKET_BYTES} bytes")
+
+    @torch.no_grad()
+    def send_smplx_targets(
+        self,
+        targets: Mapping[str, Any],
+        source_stamp_ns: int | None = None,
+    ) -> bytes:
+        sequence = self.sequence
+        packet = self.pack_smplx_targets(targets, source_stamp_ns=source_stamp_ns)
+        self.sock.sendto(packet, (self.host, self.port))
         self._rate_packets += 1
 
         now = time.monotonic()
@@ -190,14 +209,14 @@ class GMRUDPBridge:
         if elapsed >= 5.0:
             print(
                 f"[GMR UDP] send={self._rate_packets / elapsed:.1f}Hz "
-                f"sequence={self.sequence} packet={len(packet)} bytes"
+                f"sequence={sequence} packet={len(packet)} bytes"
             )
             if self.debug:
                 print(
                     "[GMR UDP debug] "
-                    f"pelvis_z={positions['pelvis'][2]:.4f} "
-                    f"left_foot_z={positions['left_foot'][2]:.4f} "
-                    f"right_foot_z={positions['right_foot'][2]:.4f}"
+                    f"pelvis_z={self._last_positions['pelvis'][2]:.4f} "
+                    f"left_foot_z={self._last_positions['left_foot'][2]:.4f} "
+                    f"right_foot_z={self._last_positions['right_foot'][2]:.4f}"
                 )
             self._rate_started = now
             self._rate_packets = 0

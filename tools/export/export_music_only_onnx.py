@@ -28,6 +28,7 @@ from gem.datasets.aistpp.aistplusplus import (  # noqa: E402
 )
 from gem.runtime.music_only_onnx import (  # noqa: E402
     MusicOnlyGuidedDenoiser,
+    MusicOnlyTensorRTDenoiser,
     make_onnx_inputs,
     output_statistics,
 )
@@ -105,6 +106,15 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--timestep", type=int, default=999)
     parser.add_argument("--cfg-scale", type=float, default=2.5)
     parser.add_argument("--overwrite", action="store_true")
+    parser.add_argument(
+        "--trt-deployment",
+        action="store_true",
+        help=(
+            "Export the fixed-shape, batched-CFG, pred_motion-only graph used by "
+            "the physical robot TensorRT runtime. The legacy export stays unchanged "
+            "when this flag is absent."
+        ),
+    )
     return parser
 
 
@@ -151,7 +161,8 @@ def main(argv: list[str] | None = None) -> int:
     model = instantiate(cfg.model, _recursive_=False)
     load_pretrained_model(model, args.ckpt)
     model = model.eval().to(device)
-    wrapper = MusicOnlyGuidedDenoiser(model).eval().to(device)
+    wrapper_cls = MusicOnlyTensorRTDenoiser if args.trt_deployment else MusicOnlyGuidedDenoiser
+    wrapper = wrapper_cls(model).eval().to(device)
     inputs = make_onnx_inputs(
         music,
         seed=args.seed,
@@ -159,7 +170,8 @@ def main(argv: list[str] | None = None) -> int:
         guidance_scale=args.cfg_scale,
         device=device,
     )
-    reference = wrapper(*inputs)
+    reference_raw = wrapper(*inputs)
+    reference = (reference_raw,) if isinstance(reference_raw, torch.Tensor) else reference_raw
     if not all(torch.isfinite(value).all() for value in reference):
         raise RuntimeError("PyTorch reference forward contains NaN or Inf")
     print(f"[ONNX] PyTorch 单步前向通过: {output_statistics(reference)}")
@@ -171,9 +183,20 @@ def main(argv: list[str] | None = None) -> int:
         "length",
         "guidance_scale",
     ]
-    output_names = ["pred_motion", "pred_camera", "static_conf_logits"]
-    dynamic_axes = {name: {0: "batch"} for name in input_names[:-1] + output_names}
-    print(f"[ONNX] 开始导出固定 T={args.seq_len}、动态 batch 的 opset {args.opset} 图")
+    output_names = (
+        ["pred_motion"]
+        if args.trt_deployment
+        else ["pred_motion", "pred_camera", "static_conf_logits"]
+    )
+    dynamic_axes = (
+        None
+        if args.trt_deployment
+        else {name: {0: "batch"} for name in input_names[:-1] + output_names}
+    )
+    batch_description = "固定 batch=1" if args.trt_deployment else "动态 batch"
+    print(
+        f"[ONNX] 开始导出固定 T={args.seq_len}、{batch_description}的 opset {args.opset} 图"
+    )
     torch.onnx.export(
         wrapper,
         inputs,
@@ -190,30 +213,53 @@ def main(argv: list[str] | None = None) -> int:
 
     artifacts = [path for path in (output, output_data) if path.is_file()]
     metadata = {
-        "format": "gem_music_only_guided_denoiser_step_v1",
+        "format": (
+            "gem_music_only_trt_denoiser_step_v2"
+            if args.trt_deployment
+            else "gem_music_only_guided_denoiser_step_v1"
+        ),
         "checkpoint": checkpoint_summary,
         "experiment": args.exp,
         "condition_list": list(cfg.pipeline.args.in_attr),
         "sequence_length": args.seq_len,
         "opset": args.opset,
         "fixed_sequence_length": True,
-        "dynamic_batch": True,
-        "input_contract": {
-            "noisy_motion": ["B", args.seq_len, 151],
-            "diffusion_timestep": ["B"],
-            "music": ["B", args.seq_len, 35],
-            "length": ["B"],
-            "guidance_scale": [1],
-        },
-        "output_contract": {
-            "pred_motion": ["B", args.seq_len, 151],
-            "pred_camera": ["B", args.seq_len, 3],
-            "static_conf_logits": ["B", args.seq_len, 6],
-        },
+        "dynamic_batch": not args.trt_deployment,
+        "input_contract": (
+            {
+                "noisy_motion": [1, args.seq_len, 151],
+                "diffusion_timestep": [1],
+                "music": [1, args.seq_len, 35],
+                "length": [1],
+                "guidance_scale": [1],
+            }
+            if args.trt_deployment
+            else {
+                "noisy_motion": ["B", args.seq_len, 151],
+                "diffusion_timestep": ["B"],
+                "music": ["B", args.seq_len, 35],
+                "length": ["B"],
+                "guidance_scale": [1],
+            }
+        ),
+        "output_contract": (
+            {"pred_motion": [1, args.seq_len, 151]}
+            if args.trt_deployment
+            else {
+                "pred_motion": ["B", args.seq_len, 151],
+                "pred_camera": ["B", args.seq_len, 3],
+                "static_conf_logits": ["B", args.seq_len, 6],
+            }
+        ),
         "export_boundary": (
             "EDGE35 embedding + conditional/unconditional CFG + one x_start denoiser step; "
             "DDIM iteration and EnDecoder/SMPL decoding remain outside ONNX"
         ),
+        "deployment": {
+            "tensorrt": bool(args.trt_deployment),
+            "cfg_internal_batch": 2 if args.trt_deployment else None,
+            "returns_pred_motion_only": bool(args.trt_deployment),
+        },
         "pytorch_reference": output_statistics(reference),
         "artifacts": [
             {

@@ -10,6 +10,7 @@ import torch.nn as nn
 
 from gem.runtime.music_only_onnx import (
     MusicOnlyGuidedDenoiser,
+    MusicOnlyTensorRTDenoiser,
     make_onnx_inputs,
     validate_music_only_export_model,
 )
@@ -20,7 +21,12 @@ class _FakeDenoiser(nn.Module):
     encode_text = False
     max_len = 120
 
+    def __init__(self):
+        super().__init__()
+        self.calls = 0
+
     def forward(self, xt, timesteps, y, inputs, sample_indices_dict):
+        self.calls += 1
         del inputs, sample_indices_dict
         cond = y["f_cond"].mean(dim=-1, keepdim=True)
         time = timesteps.float().view(-1, 1, 1) / 1000.0
@@ -74,6 +80,22 @@ def test_export_boundary_contains_only_music_and_cfg_matches_formula() -> None:
     assert guided[0].shape == (2, 7, 151)
     assert guided[1].shape == (2, 7, 3)
     assert guided[2].shape == (2, 7, 6)
+
+
+def test_tensorrt_export_batches_cfg_and_returns_only_motion() -> None:
+    torch.manual_seed(5)
+    legacy_model = _FakeModel()
+    deploy_model = _FakeModel()
+    deploy_model.load_state_dict(legacy_model.state_dict())
+    legacy = MusicOnlyGuidedDenoiser(legacy_model).eval()
+    deployment = MusicOnlyTensorRTDenoiser(deploy_model).eval()
+    music = torch.randn(1, 120, 35)
+    inputs = make_onnx_inputs(music, seed=2, guidance_scale=2.5)
+    expected = legacy(*inputs)[0]
+    actual = deployment(*inputs)
+    torch.testing.assert_close(actual, expected)
+    assert actual.shape == (1, 120, 151)
+    assert deploy_model.pipeline.denoiser3d.denoiser.calls == 1
 
 
 def test_export_rejects_non_specialist_conditions() -> None:
