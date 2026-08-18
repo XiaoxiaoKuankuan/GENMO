@@ -18,6 +18,9 @@ scripts/train_slurm.py
 scripts/slurm_init.local.sh
 examples/
 data/
+!configs/data/
+!configs/data/music_robot/
+!configs/data/music_robot/*.yaml
 !tools/data/
 !tools/data/aistpp/
 !tools/data/aistpp/*.py

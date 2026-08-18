@@ -1,0 +1,14 @@
+_target_: gem.datamodule.music_robot_trainX_testY.DataModule
+dataset_opts:
+  train: ${train_datasets}
+  val: ${test_datasets}
+loader_opts:
+  train:
+    batch_size: 128
+    num_workers: 8
+  val:
+    batch_size: 1
+    num_workers: 1
+limit_each_trainset: null
+train_subset_ratio: null
+

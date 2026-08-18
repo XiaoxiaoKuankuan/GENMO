@@ -62,6 +62,7 @@ def test_experiment_selects_only_new_bumi_layers() -> None:
 
 
 def test_random_v1_disables_ground_contact_and_uses_balanced_sampling() -> None:
+    assert (REPO_ROOT / "configs/data/music_robot/trainX_testY.yaml").is_file()
     pipeline = load_yaml("configs/pipeline/music_only_bumi_physical_v1.yaml")["args"]
     network = load_yaml("configs/network/diffusion_lg_bumi93_no_contact.yaml")
     experiment = load_yaml("configs/exp/gem_bumi_music_only_4set_random_v1.yaml")
