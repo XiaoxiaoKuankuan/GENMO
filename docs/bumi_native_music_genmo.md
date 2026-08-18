@@ -6,7 +6,10 @@
 
 训练和推理代码不 import OMG、`robot_retarget`、GMR-CPP 或 MuJoCo。OMG 只提供过数学定义参考；GMR-CPP 只负责数据到达前的离线人体到机器人重定向。MuJoCo 只出现在 MJCF 资产导出、FK parity 检查和离线渲染工具中。
 
-当前仓库没有真实 BUMI 数据、MJCF 导出的 kinematics JSON 或 train-split 93D stats。本轮只完成代码，未执行真实数据验收。
+仓库不版本化真实 BUMI 数据、MJCF 导出的 kinematics JSON 或 train-split 93D stats。
+当前机器的 `data/motions` 是历史 GMR legacy pickle，已经执行预筛选 dry-run，但仍不等于
+通过 `genmo.bumi_music.v1` 验收的正式训练集；目标 kinematics、转换、统计量和正式训练
+仍必须按下文契约独立完成。
 
 ## qpos28 契约
 
@@ -79,6 +82,12 @@ Torch FK 对任意 `[...,28]` 输出 `body_pos_w [...,22,3]` 和 `body_quat_w [.
 ```
 
 ## 数据契约 `genmo.bumi_music.v1`
+
+GMR 生产版 SMPL-X→BUMI3 legacy pickle 在进入本契约前，必须先执行独立的
+source-asset 绑定、
+动力学和贴地风格预筛选；规则、命令和报告字段见
+[BUMI3 重定向动作预筛选](bumi_motion_quality_filter.md)。正式转换只能接收报告中
+`quality_accepted=true` 的 PASS 样本，不能把 REVIEW 静默提升为接受。
 
 ```text
 <dataset_root>/
