@@ -1,0 +1,72 @@
+{
+  "contract_version": "genmo.bumi_proxy_config.v1",
+  "derivation": {
+    "algorithm": "actual_mesh_vertices_within_1mm_of_min_z_then_four_extreme_support_points_v1",
+    "coordinate_frame": "ankle_roll_link_local",
+    "left_mesh": "l_ankle_roll_link.STL",
+    "left_mesh_sha256": "02ffd67b382031735f1749d89f1b573f1cff1d198b7dd3036da410ebda4f83dd",
+    "right_mesh": "r_ankle_roll_link.STL",
+    "right_mesh_sha256": "931cfc248e090d6aeddbc4ca35a2f1523aac8fa4f58a7d7db257bf48eff7c70e",
+    "source_mjcf_sha256": "482138b437dbdabd6171fa8d44b55db5d7125a228c95b69ce3d1159cafe8537c",
+    "support_radius_m": 0.0
+  },
+  "sole_proxies": [
+    {
+      "name": "left_sole_rear_outer",
+      "foot": "left",
+      "feature_body_name": "l_ankle_roll_link",
+      "local_position": [-0.04871731996536255, -0.023270374163985252, -0.050516121089458466],
+      "radius": 0.0
+    },
+    {
+      "name": "left_sole_rear_inner",
+      "foot": "left",
+      "feature_body_name": "l_ankle_roll_link",
+      "local_position": [-0.04871731251478195, 0.023270362988114357, -0.050516121089458466],
+      "radius": 0.0
+    },
+    {
+      "name": "left_sole_front_outer",
+      "foot": "left",
+      "feature_body_name": "l_ankle_roll_link",
+      "local_position": [0.08003373444080353, -0.024482673034071922, -0.050409846007823944],
+      "radius": 0.0
+    },
+    {
+      "name": "left_sole_front_inner",
+      "foot": "left",
+      "feature_body_name": "l_ankle_roll_link",
+      "local_position": [0.0764826312661171, 0.026456037536263466, -0.05035542696714401],
+      "radius": 0.0
+    },
+    {
+      "name": "right_sole_rear_inner",
+      "foot": "right",
+      "feature_body_name": "r_ankle_roll_link",
+      "local_position": [-0.04871731251478195, -0.023270362988114357, -0.050516121089458466],
+      "radius": 0.0
+    },
+    {
+      "name": "right_sole_rear_outer",
+      "foot": "right",
+      "feature_body_name": "r_ankle_roll_link",
+      "local_position": [-0.04871731996536255, 0.023270374163985252, -0.050516121089458466],
+      "radius": 0.0
+    },
+    {
+      "name": "right_sole_front_inner",
+      "foot": "right",
+      "feature_body_name": "r_ankle_roll_link",
+      "local_position": [0.08086620271205902, -0.0259235966950655, -0.050263576209545135],
+      "radius": 0.0
+    },
+    {
+      "name": "right_sole_front_outer",
+      "foot": "right",
+      "feature_body_name": "r_ankle_roll_link",
+      "local_position": [0.07649162411689758, 0.02647159807384014, -0.0503537580370903],
+      "radius": 0.0
+    }
+  ],
+  "evaluation_proxies": []
+}

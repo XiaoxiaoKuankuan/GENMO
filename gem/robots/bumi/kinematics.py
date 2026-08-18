@@ -88,6 +88,7 @@ class BumiKinematics(nn.Module):
         self.kinematics_path = str(path)
         self.kinematics_sha256 = sha256_file(path)
         self.contract_version = str(spec["contract_version"])
+        self.source_mjcf_sha256 = str(spec.get("source_mjcf_sha256", ""))
         self.root_body = str(spec["root_body"])
         self.root_link = self.root_body
         self.joint_order = tuple(str(value) for value in spec["joint_order"])
@@ -194,6 +195,7 @@ class BumiKinematics(nn.Module):
             "root_body",
             "joint_order",
             "feature_body_names",
+            "source_mjcf_sha256",
         }
         missing = required - set(spec)
         if missing:
@@ -212,6 +214,13 @@ class BumiKinematics(nn.Module):
                     f"BUMI kinematics {path}: {key} must be {expected_value!r}, "
                     f"got {spec.get(key)!r}"
                 )
+        source_mjcf_sha256 = str(spec["source_mjcf_sha256"])
+        if len(source_mjcf_sha256) != 64 or any(
+            character not in "0123456789abcdef" for character in source_mjcf_sha256
+        ):
+            raise ValueError(
+                f"BUMI kinematics {path}: source_mjcf_sha256 must be lowercase SHA-256"
+            )
         joints = _require_list(spec, "joint_order", 21)
         bodies = _require_list(spec, "feature_body_names", 21)
         if len(set(map(str, joints))) != 21:
@@ -318,12 +327,13 @@ class BumiKinematics(nn.Module):
             )
         if not bool(torch.isfinite(qpos).all()):
             raise ValueError("BUMI qpos contains NaN or Inf")
-        result = qpos.clone()
-        quat_norm = torch.linalg.vector_norm(result[..., 3:7], dim=-1, keepdim=True)
+        quaternion = qpos[..., 3:7]
+        quat_norm = torch.linalg.vector_norm(quaternion, dim=-1, keepdim=True)
         if bool((quat_norm < 1.0e-8).any()):
             raise ValueError("BUMI qpos contains a zero-length root quaternion")
-        result[..., 3:7] = result[..., 3:7] / quat_norm
-        return result
+        return torch.cat(
+            (qpos[..., :3], quaternion / quat_norm, qpos[..., 7:]), dim=-1
+        )
 
     def clamp_joint_positions(self, joint_dof: torch.Tensor) -> torch.Tensor:
         if joint_dof.shape[-1] != 21:

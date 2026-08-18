@@ -6,10 +6,11 @@
 
 训练和推理代码不 import OMG、`robot_retarget`、GMR-CPP 或 MuJoCo。OMG 只提供过数学定义参考；GMR-CPP 只负责数据到达前的离线人体到机器人重定向。MuJoCo 只出现在 MJCF 资产导出、FK parity 检查和离线渲染工具中。
 
-仓库不版本化真实 BUMI 数据、MJCF 导出的 kinematics JSON 或 train-split 93D stats。
-当前机器的 `data/motions` 是历史 GMR legacy pickle，已经执行预筛选 dry-run，但仍不等于
-通过 `genmo.bumi_music.v1` 验收的正式训练集；目标 kinematics、转换、统计量和正式训练
-仍必须按下文契约独立完成。
+仓库不版本化真实 BUMI 数据和 train-split 93D stats。与当前 6,610 条 PASS 数据严格
+同源的 `482138…` MJCF 导出结果和真实 ankle-roll mesh 足底代理配置分别固定为
+`configs/bumi/bumi_kinematics_482138_v1.json` 与
+`configs/bumi/sole_proxies_482138_v1.json`。正式数据由
+`tools/data/bumi/build_bumi_music_dataset.py` 从只读 legacy pickle 原子转换发布。
 
 ## qpos28 契约
 
@@ -66,7 +67,7 @@ body_link_pos_local[t,j] = H0^-1 (body_pos_w[t,j] - p_anchor)
 
 Torch FK 对任意 `[...,28]` 输出 `body_pos_w [...,22,3]` 和 `body_quat_w [...,22,4]`：一个 root body 加 21 个 feature bodies。固定 body 变换由 exporter 折叠进最近的上游 feature body，不把 mesh/fixed bodies 塞进 93D 表示。
 
-真实 sole proxy 必须由版本化 proxy config 明确指定真实 body/geom 或 feature-body local point；exporter 不含任何 BUMI 名称猜测。训练 penetration 使用 proxy center Z 减 radius 的底部高度，不能使用 ankle/body origin。
+真实 sole proxy 必须由版本化 proxy config 明确指定真实 body/geom 或 feature-body local point；exporter 不含任何 BUMI 名称猜测。当前 proxy 使用左右 ankle-roll STL 最低 1 mm 支撑簇中的真实 mesh vertex。正式 v1 保留 legacy root 高度，地面语义不是鞋底地面，因此这些 proxy 仅用于 FK/未来版本，正式随机初始化实验硬性关闭 penetration/contact/sliding。
 
 最小 proxy config 结构如下；其中名称和数值必须来自真实资产：
 
@@ -94,6 +95,8 @@ source-asset 绑定、
 ├── manifests/{train,val,test}.jsonl
 ├── motions/*.pt
 ├── musicfeat_v2/*.pt
+├── audio/*.wav
+├── reports/conversion_report.json
 └── meta/dataset_info.json
 ```
 
@@ -111,17 +114,22 @@ source-asset 绑定、
   "fps": 30,
   "quality_filter_applied": true,
   "mjcf_sha256": "64 lowercase hex chars",
+  "source_mjcf_sha256": "same as mjcf_sha256",
   "kinematics_sha256": "64 lowercase hex chars",
   "retarget_config_sha256": "64 lowercase hex chars",
-  "quality_config_sha256": "64 lowercase hex chars"
+  "quality_config_sha256": "64 lowercase hex chars",
+  "ground_semantics": "legacy_body_origin_min_zero",
+  "root_z_adjusted": false
 }
 ```
 
 Motion `.pt` 是字典，必需字段为 `qpos [T,28]`、`fps=30`、`robot_name=bumi`、完整 `joint_names`、`quaternion_convention=wxyz`、`qpos_order=mujoco_native`；可包含 `foot_contact [T,2]`、`quality_accepted`、source/retarget metadata。正式数据的 manifest 和 dataset info 必须已经表明 quality accepted/applied。Music `.pt` 明确定义为原始 finite `Tensor[T,35]`，通道顺序与 EDGE baseline35 一致。
 
-Manifest 每行必须含 `sample_id`、`sequence_id`、`dataset`、两个相对路径、`fps`、`num_frames`、`split` 和 `quality_accepted`。路径必须留在 dataset root 内。正式配置在 Dataset 初始化时扫描并校验所有 payload；错误会带 sample ID、路径和实际 shape。
+Manifest 每行必须含 `sample_id`、`sequence_id`、`music_group_id`、`audio_key`、`dataset`、motion/EDGE35/audio 三个相对路径、`fps`、`num_frames`、`split`、`quality_accepted`，以及 source motion/EDGE35/audio 三个 SHA256。路径必须留在 dataset root 内。严格验证工具会扫描 payload 和三个来源 SHA；训练只读取 qpos/EDGE35，WAV 用于审计、demo 和特征重算。
 
-训练 crop 对 qpos、music 和可选 contact 使用同一个 `[start:end]`。长序列的 epoch 重复数为 `max(valid_frames // 120, 1)`。短序列 qpos 用最后一帧补到 120，music 用零补齐；`length` 保存真实长度，`valid`/`has_music_mask` 只标记真实帧。缺少 contact 时不会制造全零标签，`BumiEndecoder` 会从该样本 GT qpos 的 sole FK 高度和水平速度派生标签。
+训练 crop 对 qpos 和 music 使用同一个 `[start:end]`。短序列 qpos 用最后一帧补到 120，music 用零补齐；`length` 保存真实长度，`valid`/`has_music_mask` 只标记真实帧。正式 v1 设置 `enable_contact_targets=false`，既不伪造标签，也不派生或训练 contact head。
+
+正式采样不是 `ConcatDataset` 的多人总时长加权，而是确定性的四层采样：先按每数据集去重音乐时长平方根（投影到 5%～50%）选择数据集，再按组最大有效时长选择音乐组，组内均匀选舞者/编舞/角色，最后均匀选 120 帧窗口。当前目标为 AIST++ 11.3993%、AIOZ 50%、FineDance 33.6007%、CoMPAS3D 5%。每个 epoch 全局 52,224 条，8 卡按全局 draw index 无重复分片，每卡 batch 128 时恰好 51 step。
 
 磁盘解析集中在 `BumiMusicDatasetReader`。未来真实转换格式变化时，应只调整 reader/转换器，不能让 Pipeline 或 loss 依赖目录布局。
 
@@ -153,20 +161,17 @@ BumiMusicDanceDataset
 
 ## 损失
 
-`BumiMusicPipeline` 的所有损失都使用 `valid` mask；一、二、三阶差分分别要求参与的连续 2、3、4 帧全部有效。权重全部位于 `configs/pipeline/music_only_bumi.yaml`，当前只是 `initial untuned values`：
+正式实验使用独立的 `physical_v1` 合约，旧 `music_only_bumi.yaml` 骨架路径保留不变。所有物理项在 FP32 和 `valid` mask 下计算；一、二、三阶差分分别要求连续 2、3、4 帧全部有效。四组 normalized representation MSE 权重均为 1.0，其余辅助项在前 10k step 线性 warmup，并同时记录 raw/normalized/weighted：
 
-- 四组独立 representation loss：root position、root rot6d、joint DOF、body positions；
-- physical root position SmoothL1；
-- SO(3) root rotation geodesic angle；
-- physical joint DOF SmoothL1；
-- qpos Torch FK 对 GT FK 的 body-position loss；
-- raw 63D 对同一预测 qpos FK 的内部一致性；
-- joint velocity、acceleration、可配置 jerk；
-- soft joint-limit violation；
-- 两足 contact BCE（数据标签优先，否则 GT qpos FK 派生）；
-- 由 GT contact gate 的预测 sole XY sliding；
-- sole proxy bottom penetration；
-- root height 对 GT。
+- Root XYZ `SmoothL1(/1m)` 0.1，Root SO(3) geodesic `/π` 0.1；
+- Joint DOF `SmoothL1(/1rad)` 0.1；
+- qpos Torch FK 对 GT FK `SmoothL1(/1m)` 0.5；
+- raw 63D/FK 一致性 `SmoothL1(/1m)` 0.1；
+- joint velocity `SmoothL1(/6rad/s)` 0.01；
+- joint acceleration `SmoothL1(/180rad/s²)` 0.002；jerk 首轮为 0；
+- soft joint limit `SmoothL1(violation/0.1rad)` 0.01；
+- root height GT `SmoothL1(/1m)` 0.05；
+- contact BCE、foot sliding、sole penetration 均为 0，且 ground contract 会拒绝误开启。
 
 推理结果始终以 qpos FK 为准，raw 63D 不进入最终机器人状态。
 
@@ -187,17 +192,17 @@ model.model_cfg.checkpoint_adapter=smpl_music_to_bumi
 
 ## Hydra 配置
 
-实验入口为 `configs/exp/gem_bumi_music_only_4set.yaml`，覆盖：
+骨架入口仍为 `configs/exp/gem_bumi_music_only_4set.yaml`；正式随机初始化入口是 `configs/exp/gem_bumi_music_only_4set_random_v1.yaml`，覆盖：
 
 ```text
 data       = music_robot/trainX_testY
 model      = bumi_music_gem
-network    = diffusion_lg_bumi93
-pipeline   = music_only_bumi
-endecoder  = bumi_93d
+network    = diffusion_lg_bumi93_no_contact
+pipeline   = music_only_bumi_physical_v1
+endecoder  = bumi_93d_no_contact
 ```
 
-四个训练 root 必须通过 `AISTPP_BUMI_ROOT`、`AIOZ_GDANCE_BUMI_ROOT`、`FINEDANCE_BUMI_ROOT` 和 `COMPAS3D_BUMI_ROOT` 提供；资产通过 `BUMI_KINEMATICS_PATH` 和 `BUMI_MUSIC_STATS_PATH` 提供。没有 fallback 硬编码路径。实验保留 `max_steps=500000`，但在完成真实验收前不应启动。
+四个训练 root 必须通过 `AISTPP_BUMI_ROOT`、`AIOZ_GDANCE_BUMI_ROOT`、`FINEDANCE_BUMI_ROOT` 和 `COMPAS3D_BUMI_ROOT` 提供；资产通过 `BUMI_KINEMATICS_PATH` 和 `BUMI_MUSIC_STATS_PATH` 提供。正式配置完全随机初始化，AdamW `2e-4`，300k/450k 各衰减一半，固定 500k step，每 10k 保存和验证四数据集。
 
 原 `gem_smpl_music_only_4set` 未被替换。公共默认仍是 `motion_backend=smpl`、SMPL EnDecoder 151D、`diffusion_lg` 151D、原 SMPL Pipeline/数据集/checkpoint 行为；公共改动只有动态 motion dimension 和显式 backend 扩展点。
 
@@ -226,25 +231,63 @@ music_path              source path
 
 `render_bumi_motion.py` 对每帧设置 qpos 后只调用 `mujoco.mj_forward` 渲染。FK parity 同样只比较几何。它们不证明 GMT 可跟踪、机器人不会跌倒或扭矩可行。下一阶段必须执行“生成轨迹 → GMT → MuJoCo `mj_step` dynamics tracking”才能评估这些声明。
 
-## 数据到达后的验收命令（本轮未执行）
+## 服务器 2 构建、验收与训练
 
-先准备一个 `genmo.bumi_proxy_config.v1`，明确真实左右足 proxy 和 radius/geom：
+服务器 2 的固定资产路径如下；MJCF SHA 必须是 `482138…`，不能替换为 OMG/GMR-CPP 的其他版本：
 
 ```bash
-python tools/robots/export_bumi_kinematics.py \
-  --mjcf /path/to/real_bumi.xml \
-  --proxy-config /path/to/real_bumi_proxy_config.json \
-  --output /path/to/bumi_kinematics.json
+cd /home/user/liwei/GENMO
+source .venv/bin/activate
 
-python tools/robots/validate_bumi_fk_parity.py \
-  --mjcf /path/to/real_bumi.xml \
-  --kinematics /path/to/bumi_kinematics.json
+export BUMI_BASE=/data0/user/liwei/datasets/bumi_music_genmo_v1
+export BUMI_KINEMATICS_PATH=/data0/user/liwei/datasets/bumi_assets_482138_v1/kinematics/bumi_kinematics_482138_v1.json
+export AISTPP_BUMI_ROOT=$BUMI_BASE/AIST++
+export AIOZ_GDANCE_BUMI_ROOT=$BUMI_BASE/AIOZ-GDANCE
+export FINEDANCE_BUMI_ROOT=$BUMI_BASE/FineDance
+export COMPAS3D_BUMI_ROOT=$BUMI_BASE/CoMPAS3D
+export BUMI_MUSIC_STATS_PATH=$BUMI_BASE/meta/bumi_93d_stats_train_v1.json
+```
 
-python tools/data/bumi/validate_bumi_music_dataset.py \
-  --root "$AISTPP_BUMI_ROOT" \
-  --dataset-name aistpp_bumi \
+先生成固定传输清单，再在四套 WAV 到齐后执行一次全有或全无的转换：
+
+```bash
+python tools/data/bumi/build_bumi_transfer_filelists.py \
+  --selected-root /data0/user/liwei/datasets/bumi_motions_quality_v1 \
+  --human-root aistpp=/data0/user/liwei/datasets/music_dance_genmo/AIST++ \
+  --human-root aioz_gdance=/data0/user/liwei/datasets/music_dance_genmo/AIOZ-GDANCE \
+  --human-root finedance=/data0/user/liwei/datasets/music_dance_genmo/FineDance \
+  --human-root compas3d=/data0/user/liwei/datasets/music_dance_genmo/CoMPAS3D \
+  --output /data0/user/liwei/datasets/bumi_transfer_plan_v1
+
+python tools/data/bumi/build_bumi_music_dataset.py \
+  --selected-root /data0/user/liwei/datasets/bumi_motions_quality_v1 \
+  --human-root aistpp=/data0/user/liwei/datasets/music_dance_genmo/AIST++ \
+  --human-root aioz_gdance=/data0/user/liwei/datasets/music_dance_genmo/AIOZ-GDANCE \
+  --human-root finedance=/data0/user/liwei/datasets/music_dance_genmo/FineDance \
+  --human-root compas3d=/data0/user/liwei/datasets/music_dance_genmo/CoMPAS3D \
+  --audio-root aistpp=/data0/user/liwei/datasets/bumi_music_audio_selected_v1/aistpp \
+  --audio-root aioz_gdance=/data0/user/liwei/datasets/bumi_music_audio_selected_v1/aioz_gdance \
+  --audio-root finedance=/data0/user/liwei/datasets/bumi_music_audio_selected_v1/finedance \
+  --audio-root compas3d=/data0/user/liwei/datasets/bumi_music_audio_selected_v1/compas3d \
+  --source-mjcf /data0/user/liwei/datasets/bumi_assets_482138_v1/mjcf/bumi3.xml \
+  --ik-config /data0/user/liwei/datasets/bumi_assets_482138_v1/ik/smplx_to_bumi3_auto.json \
   --kinematics "$BUMI_KINEMATICS_PATH" \
-  --splits train val test
+  --output-root "$BUMI_BASE"
+```
+
+对四套数据逐一执行带 source SHA 的严格扫描，然后只用 train split 计算统计量：
+
+```bash
+for ITEM in \
+  "AIST++ aistpp_bumi" \
+  "AIOZ-GDANCE aioz_gdance_bumi" \
+  "FineDance finedance_bumi" \
+  "CoMPAS3D compas3d_bumi"; do
+  set -- $ITEM
+  python tools/data/bumi/validate_bumi_music_dataset.py \
+    --root "$BUMI_BASE/$1" --dataset-name "$2" \
+    --kinematics "$BUMI_KINEMATICS_PATH" --splits train val test
+done
 
 python tools/data/bumi/compute_bumi_93d_stats.py \
   --kinematics "$BUMI_KINEMATICS_PATH" \
@@ -252,14 +295,20 @@ python tools/data/bumi/compute_bumi_93d_stats.py \
   --dataset "aioz_gdance_bumi=$AIOZ_GDANCE_BUMI_ROOT" \
   --dataset "finedance_bumi=$FINEDANCE_BUMI_ROOT" \
   --dataset "compas3d_bumi=$COMPAS3D_BUMI_ROOT" \
-  --output /path/to/bumi_93d_stats.json
-
-python scripts/train.py \
-  exp=gem_bumi_music_only_4set \
-  pl_trainer.max_steps=100 \
-  use_wandb=false
+  --output "$BUMI_MUSIC_STATS_PATH"
 ```
 
-真实数据到达后仍需完成：dataset contract 实测、qpos/music alignment、真实 stats、Torch/MuJoCo FK parity（position max `<1e-5 m`、rotation-matrix max element `<1e-4`）、DataLoader、forward/backward、100-step smoke、loss 权重调优以及 inference rendering。
+单 batch、显存和 100-step smoke 通过后，正式训练使用同一入口并去掉 `max_steps=100` 覆盖。随机初始化实验不得设置 `pretrain_ckpt`：
 
-本轮仅完成代码，未声称真实 BUMI 数据链路已验收通过。
+```bash
+NCCL_CUMEM_HOST_ENABLE=0 NCCL_IB_DISABLE=1 NCCL_SOCKET_IFNAME=lo \
+TORCH_NCCL_BLOCKING_WAIT=1 python -u scripts/train.py \
+  exp=gem_bumi_music_only_4set_random_v1 \
+  pl_trainer.max_steps=100 use_wandb=false
+
+NCCL_CUMEM_HOST_ENABLE=0 NCCL_IB_DISABLE=1 NCCL_SOCKET_IFNAME=lo \
+TORCH_NCCL_BLOCKING_WAIT=1 python -u scripts/train.py \
+  exp=gem_bumi_music_only_4set_random_v1
+```
+
+这些检查只验证数据、运动学、生成训练和运动学指标，不声明 GMT 动力学可跟踪、平衡或扭矩可行。

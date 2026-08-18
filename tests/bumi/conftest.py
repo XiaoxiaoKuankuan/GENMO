@@ -112,6 +112,9 @@ def write_dataset(
         "kinematics_sha256": sha256(kinematics_path),
         "retarget_config_sha256": "b" * 64,
         "quality_config_sha256": "c" * 64,
+        "source_mjcf_sha256": "a" * 64,
+        "ground_semantics": "legacy_body_origin_min_zero",
+        "root_z_adjusted": False,
     }
     (root / "meta" / "dataset_info.json").write_text(json.dumps(info), encoding="utf-8")
     qpos = torch.zeros(length, 28)
@@ -128,12 +131,20 @@ def write_dataset(
         "quaternion_convention": "wxyz",
         "qpos_order": "mujoco_native",
         "quality_accepted": quality_accepted,
+        "source_motion_sha256": "d" * 64,
+        "source_mjcf_sha256": "a" * 64,
+        "quality_config_sha256": "c" * 64,
+        "retarget_config_sha256": "b" * 64,
+        "ground_semantics": "legacy_body_origin_min_zero",
+        "root_z_adjusted": False,
     }
     torch.save(motion, root / "motions" / "sample.pt")
     music = torch.zeros(length, 35)
     music[:, 0] = torch.arange(length)
     music[:, 34] = (torch.arange(length) % 4 == 0).float()
     torch.save(music, root / "musicfeat_v2" / "sample.pt")
+    (root / "audio").mkdir()
+    (root / "audio" / "sample.wav").write_bytes(b"test-wave-payload")
     row = {
         "sample_id": "sample",
         "sequence_id": "sequence",
@@ -144,6 +155,12 @@ def write_dataset(
         "num_frames": length,
         "split": "train",
         "quality_accepted": quality_accepted,
+        "music_group_id": "test_song",
+        "audio_key": "sample",
+        "audio_path": "audio/sample.wav",
+        "source_motion_sha256": "d" * 64,
+        "source_music_feature_sha256": sha256(root / "musicfeat_v2" / "sample.pt"),
+        "source_audio_sha256": sha256(root / "audio" / "sample.wav"),
     }
     (root / "manifests" / "train.jsonl").write_text(json.dumps(row) + "\n", encoding="utf-8")
     return root

@@ -10,6 +10,7 @@ from typing import Any
 import torch
 
 from gem.gem import GEM
+from gem.robots.bumi.metrics import compute_bumi_kinematic_metrics
 from gem.utils.bumi_checkpoint_adapter import adapt_smpl_music_checkpoint_to_bumi
 from gem.utils.pylogger import Log
 
@@ -140,7 +141,7 @@ class BumiMusicGEM(GEM):
         return self.validation(batch, "default", batch_idx, dataloader_idx)
 
     def validation(self, batch, test_mode, batch_idx, dataloader_idx=0):
-        del batch_idx, dataloader_idx
+        del batch_idx
         self.prepare_batch(batch, "diffusion")
         batch["target_x"] = torch.zeros_like(batch["target_x"])
         batch = self.create_condition_mask(
@@ -149,6 +150,43 @@ class BumiMusicGEM(GEM):
         outputs = self.pipeline.forward(batch, train=False, test_mode=test_mode)
         outputs["target_qpos_canonical"] = batch["target_qpos_canonical"]
         outputs["target_body_link_pos_local"] = batch["target_body_link_pos_local"]
+        metrics = compute_bumi_kinematic_metrics(
+            outputs["pred_qpos_canonical"],
+            self.endecoder.kinematics,
+            target_qpos=batch["target_qpos_canonical"],
+            valid_mask=batch["mask"]["valid"],
+            music_beats=batch.get("music_beats"),
+            fps=30,
+        )
+        report_names = (
+            "joint_angle_mae_rad",
+            "root_trajectory_error_m",
+            "fk_body_position_error_m",
+            "joint_limit_violation_rate",
+            "minimum_joint_margin_rad",
+            "joint_velocity_p95_radps",
+            "joint_acceleration_p95_radps2",
+            "joint_jerk_p95_radps3",
+            "root_linear_velocity_p95_mps",
+            "root_angular_velocity_p95_radps",
+            "beat_alignment_mean_distance_s",
+            "beat_alignment_score",
+        )
+        dataset_name = str(batch["meta"][0].get("dataset_id", f"loader{dataloader_idx}"))
+        for name in report_names:
+            if name in metrics:
+                self.log(
+                    f"val/{dataset_name}/{name}",
+                    metrics[name],
+                    on_step=False,
+                    on_epoch=True,
+                    prog_bar=False,
+                    logger=True,
+                    sync_dist=True,
+                    batch_size=int(batch["B"]),
+                    add_dataloader_idx=False,
+                )
+        outputs["kinematic_metrics"] = metrics
         return outputs
 
     @torch.no_grad()

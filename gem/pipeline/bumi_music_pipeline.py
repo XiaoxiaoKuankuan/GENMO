@@ -31,7 +31,14 @@ class BumiMusicPipeline(nn.Module):
         if not isinstance(self.endecoder, BumiEndecoder):
             raise TypeError("BumiMusicPipeline endecoder_opt must instantiate BumiEndecoder")
         self.denoiser3d.endecoder = self.endecoder
-        self.losses = BumiRobotLosses(self.endecoder, args.weights, fps=30)
+        self.losses = BumiRobotLosses(
+            self.endecoder,
+            args.weights,
+            fps=30,
+            contract_version=args.get("loss_contract", "legacy_v0"),
+            auxiliary_warmup_steps=args.get("auxiliary_warmup_steps", 0),
+            ground_semantics=args.get("ground_semantics", None),
+        )
 
     @staticmethod
     def _prediction(model_output: dict[str, Any]) -> torch.Tensor:
@@ -52,7 +59,7 @@ class BumiMusicPipeline(nn.Module):
         test_mode: str | None = None,
         normalizer_stats: dict | None = None,
     ) -> dict[str, Any]:
-        del postproc, static_cam, global_step
+        del postproc, static_cam
         if self.endecoder.obs_indices_dict is None:
             self.endecoder.build_obs_indices_dict()
         model_output = self.denoiser3d(
@@ -94,6 +101,7 @@ class BumiMusicPipeline(nn.Module):
             pred_qpos_canonical,
             pred_body_link_pos_local_fk,
             fk["body_quat_w"],
+            global_step=global_step,
         )
         outputs.update(loss_output)
         return outputs

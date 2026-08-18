@@ -1,0 +1,15 @@
+finedance_bumi_music_eval:
+  _target_: gem.datasets.music_dance.music_dance_bumi.BumiMusicDanceDataset
+  root: ${oc.env:FINEDANCE_BUMI_ROOT}
+  dataset_name: finedance_bumi
+  kinematics_path: ${oc.env:BUMI_KINEMATICS_PATH}
+  split: val
+  motion_frames: 120
+  duration_aware_sampling: false
+  strict_alignment: true
+  strict_contract: true
+  require_quality_filter: true
+  validate_payloads_on_init: false
+  validate_source_hashes_on_init: false
+  random_crop: false
+  eval_clip_mode: center

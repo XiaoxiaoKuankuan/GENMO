@@ -157,8 +157,13 @@ class BumiMotionFeatureCodec:
         first_pos = qpos[..., 0:1, :3]
         first_quat = qpos[..., 0:1, 3:7]
         yaw, heading, heading_inverse = self._heading_from_root_quaternion(first_quat)
-        anchor_position = first_pos.clone()
-        anchor_position[..., 2] = self.default_root_height.to(qpos)
+        anchor_position = torch.cat(
+            (
+                first_pos[..., :2],
+                torch.ones_like(first_pos[..., 2:3]) * self.default_root_height.to(qpos),
+            ),
+            dim=-1,
+        )
         return BumiCanonicalAnchor(
             position_w=anchor_position,
             heading_quat_wxyz=heading,
@@ -175,9 +180,14 @@ class BumiMotionFeatureCodec:
             )
         if not bool(torch.isfinite(qpos).all()):
             raise ValueError("BUMI qpos contains NaN or Inf")
-        result = qpos.clone()
-        result[..., 3:7] = make_quaternion_continuous(result[..., 3:7])
-        return result
+        return torch.cat(
+            (
+                qpos[..., :3],
+                make_quaternion_continuous(qpos[..., 3:7]),
+                qpos[..., 7:],
+            ),
+            dim=-1,
+        )
 
     @staticmethod
     def rotation_quat_to_features(quaternion: torch.Tensor) -> torch.Tensor:
@@ -240,10 +250,12 @@ class BumiMotionFeatureCodec:
             body_link_pos_local=body_link_pos_local,
         )
         canonical_qpos = torch.cat(
-            (root_pos_local, root_rot_local, qpos[..., 7:]), dim=-1
-        )
-        canonical_qpos[..., 3:7] = make_quaternion_continuous(
-            canonical_qpos[..., 3:7]
+            (
+                root_pos_local,
+                make_quaternion_continuous(root_rot_local),
+                qpos[..., 7:],
+            ),
+            dim=-1,
         )
         return components, anchor, canonical_qpos
 
@@ -318,16 +330,14 @@ class BumiMotionFeatureCodec:
 
     def decode_to_canonical_qpos(self, physical_features: torch.Tensor) -> torch.Tensor:
         components = self.split_features(physical_features)
-        qpos = torch.cat(
+        return torch.cat(
             (
                 components.root_pos_local,
-                components.root_rot_local_quat,
+                make_quaternion_continuous(components.root_rot_local_quat),
                 components.joint_dof,
             ),
             dim=-1,
         )
-        qpos[..., 3:7] = make_quaternion_continuous(qpos[..., 3:7])
-        return qpos
 
     def apply_world_anchor(
         self,

@@ -11,6 +11,10 @@ from hydra.utils import instantiate
 from pytorch_lightning.utilities.combined_loader import CombinedLoader
 from torch.utils.data import ConcatDataset, DataLoader, Subset, default_collate
 
+from gem.datasets.music_dance.bumi_sampler import (
+    BumiBalancedMultiDataset,
+    DeduplicatedBumiSampler,
+)
 from gem.utils.pylogger import Log
 
 
@@ -80,11 +84,25 @@ class DataModule(pl.LightningDataModule):
         loader_opts,
         limit_each_trainset: int | None = None,
         train_subset_ratio: float | None = None,
+        sampling_strategy: str = "concat",
+        samples_per_epoch: int = 52224,
+        sampler_seed: int = 42,
+        dataset_probability_min: float = 0.05,
+        dataset_probability_max: float = 0.50,
     ) -> None:
         super().__init__()
         self.loader_opts = loader_opts
         self.limit_each_trainset = limit_each_trainset
         self.train_subset_ratio = train_subset_ratio
+        self.sampling_strategy = str(sampling_strategy)
+        self.samples_per_epoch = int(samples_per_epoch)
+        self.sampler_seed = int(sampler_seed)
+        self.dataset_probability_min = float(dataset_probability_min)
+        self.dataset_probability_max = float(dataset_probability_max)
+        if self.sampling_strategy not in {"concat", "deduplicated_hierarchical"}:
+            raise ValueError(
+                "sampling_strategy must be 'concat' or 'deduplicated_hierarchical'"
+            )
         if train_subset_ratio is not None and not 0.0 < float(train_subset_ratio) <= 1.0:
             raise ValueError("train_subset_ratio must be in (0,1]")
         if "train" in dataset_opts:
@@ -96,7 +114,7 @@ class DataModule(pl.LightningDataModule):
                 for index, dataset in enumerate(datasets):
                     Log.info(f"[BUMI {split.title()} Dataset][{index + 1}]: size={len(dataset)}")
 
-    def _build_train(self, split_opts) -> ConcatDataset:
+    def _build_train(self, split_opts):
         datasets = []
         records = []
         for index, (name, config) in enumerate(split_opts.items()):
@@ -116,6 +134,7 @@ class DataModule(pl.LightningDataModule):
             )
         if not datasets:
             raise ValueError("BUMI DataModule requires at least one training dataset")
+        self.train_datasets = tuple(datasets)
         effective_total = sum(len(dataset) for dataset in datasets)
         for name, summary, effective_len in records:
             if summary:
@@ -127,6 +146,17 @@ class DataModule(pl.LightningDataModule):
                     f"sampling_fraction={fraction:.6%}, "
                     f"duration_aware={summary['duration_aware_sampling']}"
                 )
+        if self.sampling_strategy == "deduplicated_hierarchical":
+            if self.limit_each_trainset is not None or self.train_subset_ratio is not None:
+                raise ValueError(
+                    "hierarchical sampling does not permit subset wrappers; filter manifests instead"
+                )
+            result = BumiBalancedMultiDataset(datasets)
+            Log.info(
+                f"[BUMI Train Dataset][All]: hierarchical source size={len(result)}, "
+                f"global samples/epoch={self.samples_per_epoch}"
+            )
+            return result
         result = ConcatDataset(datasets)
         Log.info(f"[BUMI Train Dataset][All]: ConcatDataset size={len(result)}")
         return result
@@ -142,9 +172,22 @@ class DataModule(pl.LightningDataModule):
             return super().train_dataloader()
         options = self._options(self.loader_opts.train)
         workers = int(options.pop("num_workers", 0))
+        sampler = None
+        shuffle = True
+        if self.sampling_strategy == "deduplicated_hierarchical":
+            sampler = DeduplicatedBumiSampler(
+                self.train_datasets,
+                samples_per_epoch=self.samples_per_epoch,
+                seed=self.sampler_seed,
+                probability_min=self.dataset_probability_min,
+                probability_max=self.dataset_probability_max,
+            )
+            shuffle = False
+            Log.info(f"[BUMI Train Sampler] {sampler.summary()}")
         return DataLoader(
             self.trainset,
-            shuffle=True,
+            shuffle=shuffle,
+            sampler=sampler,
             num_workers=workers,
             persistent_workers=workers > 0,
             drop_last=True,

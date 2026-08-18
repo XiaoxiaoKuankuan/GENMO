@@ -73,6 +73,7 @@ class BumiEndecoder(nn.Module):
         allow_placeholder_stats: bool = False,
         contact_height_threshold: float = 0.025,
         contact_velocity_threshold: float = 0.05,
+        enable_contact_targets: bool = True,
         fps: int = 30,
     ) -> None:
         super().__init__()
@@ -98,6 +99,7 @@ class BumiEndecoder(nn.Module):
         self.fps = 30
         self.contact_height_threshold = float(contact_height_threshold)
         self.contact_velocity_threshold = float(contact_velocity_threshold)
+        self.enable_contact_targets = bool(enable_contact_targets)
         self.stats_path = str(resolve_asset_path(stats_path)) if str(stats_path).strip() else ""
         if not self.stats_path:
             raise ValueError(
@@ -183,10 +185,16 @@ class BumiEndecoder(nn.Module):
         encoded = self.codec.encode(qpos)
         normalized = self.normalize(encoded.physical_features)
         valid = self._valid_mask(inputs, qpos)
-        derived_contact = self.infer_foot_contact(encoded.normalized_world_qpos, valid)
-        target_contact, contact_mask = self._merge_contact_labels(
-            inputs, derived_contact, valid
-        )
+        if self.enable_contact_targets:
+            derived_contact = self.infer_foot_contact(encoded.normalized_world_qpos, valid)
+            target_contact, contact_mask = self._merge_contact_labels(
+                inputs, derived_contact, valid
+            )
+        else:
+            target_contact = torch.zeros(
+                (*valid.shape, 2), dtype=encoded.physical_features.dtype, device=valid.device
+            )
+            contact_mask = torch.zeros_like(target_contact, dtype=torch.bool)
         anchor = encoded.anchor
         return BumiEncodedMotion(
             normalized_features=normalized,

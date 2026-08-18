@@ -34,6 +34,19 @@ BUMI_LOSS_NAMES = (
     "root_height",
 )
 
+BUMI_PHYSICAL_V1_SCALES = {
+    "root_pos": 1.0,
+    "root_rot": torch.pi,
+    "joint_dof": 1.0,
+    "fk_body_pos": 1.0,
+    "fk_consistency": 1.0,
+    "joint_velocity": 6.0,
+    "joint_acceleration": 180.0,
+    "joint_jerk": 600.0,
+    "joint_limit": 0.1,
+    "root_height": 1.0,
+}
+
 
 def _masked_mean(value: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
     if not isinstance(value, torch.Tensor) or not isinstance(mask, torch.Tensor):
@@ -98,11 +111,17 @@ class BumiRobotLosses(nn.Module):
         endecoder: BumiEndecoder,
         weights: Mapping[str, float],
         fps: int = 30,
+        contract_version: str = "legacy_v0",
+        auxiliary_warmup_steps: int = 0,
+        ground_semantics: str | None = None,
     ) -> None:
         super().__init__()
         self.endecoder = endecoder
         self.kinematics = endecoder.kinematics
         self.fps = int(fps)
+        self.contract_version = str(contract_version)
+        self.auxiliary_warmup_steps = int(auxiliary_warmup_steps)
+        self.ground_semantics = ground_semantics
         if self.fps != 30:
             raise ValueError(f"BUMI losses require 30 FPS, got {fps}")
         self.weights = {name: float(weights.get(name, 0.0)) for name in BUMI_LOSS_NAMES}
@@ -111,6 +130,28 @@ class BumiRobotLosses(nn.Module):
             raise ValueError(f"Unknown BUMI loss weights: {sorted(unknown)}")
         if any(not torch.isfinite(torch.tensor(value)) or value < 0.0 for value in self.weights.values()):
             raise ValueError("BUMI loss weights must be finite and non-negative")
+        if self.contract_version not in {"legacy_v0", "physical_v1"}:
+            raise ValueError(
+                "BUMI loss contract_version must be 'legacy_v0' or 'physical_v1'"
+            )
+        if self.auxiliary_warmup_steps < 0:
+            raise ValueError("auxiliary_warmup_steps must be non-negative")
+        if self.contract_version == "physical_v1":
+            if self.ground_semantics != "legacy_body_origin_min_zero":
+                raise ValueError(
+                    "BUMI physical_v1 requires ground_semantics="
+                    "'legacy_body_origin_min_zero'"
+                )
+            forbidden = {
+                name: self.weights[name]
+                for name in ("contact_bce", "foot_slide", "penetration")
+                if self.weights[name] != 0.0
+            }
+            if forbidden:
+                raise ValueError(
+                    "Unadjusted legacy-body-origin data cannot enable contact/slide/"
+                    f"penetration losses: {forbidden}"
+                )
 
     @staticmethod
     def _repr_loss(
@@ -122,7 +163,7 @@ class BumiRobotLosses(nn.Module):
         start, end = BUMI_FEATURE_SLICES[name]
         return _masked_mean((pred[..., start:end] - target[..., start:end]).square(), valid)
 
-    def forward(
+    def _forward_legacy(
         self,
         inputs: Mapping[str, Any],
         model_output: Mapping[str, torch.Tensor | None],
@@ -130,7 +171,9 @@ class BumiRobotLosses(nn.Module):
         pred_qpos_canonical: torch.Tensor,
         pred_body_link_pos_local_fk: torch.Tensor,
         pred_body_quat_local_fk: torch.Tensor,
+        global_step: int = 0,
     ) -> dict[str, torch.Tensor]:
+        del global_step
         required = (
             "target_x",
             "target_physical_features",
@@ -289,9 +332,213 @@ class BumiRobotLosses(nn.Module):
         output["loss"] = total
         return output
 
+    @staticmethod
+    def _smooth_l1_pair(
+        prediction: torch.Tensor,
+        target: torch.Tensor,
+        mask: torch.Tensor,
+        scale: float,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        error = prediction - target
+        zero = torch.zeros_like(error)
+        raw = _masked_mean(
+            F.smooth_l1_loss(error, zero, beta=1.0, reduction="none"), mask
+        )
+        normalized = _masked_mean(
+            F.smooth_l1_loss(error / float(scale), zero, beta=1.0, reduction="none"),
+            mask,
+        )
+        return raw, normalized
+
+    def _forward_physical_v1(
+        self,
+        inputs: Mapping[str, Any],
+        model_output: Mapping[str, torch.Tensor | None],
+        decode_dict: Mapping[str, torch.Tensor],
+        pred_qpos_canonical: torch.Tensor,
+        pred_body_link_pos_local_fk: torch.Tensor,
+        pred_body_quat_local_fk: torch.Tensor,
+        global_step: int = 0,
+    ) -> dict[str, torch.Tensor]:
+        """Low-weight GT derivative losses for the unadjusted BUMI corpus."""
+
+        del pred_qpos_canonical, pred_body_quat_local_fk
+        required = (
+            "target_x",
+            "target_physical_features",
+            "target_body_link_pos_local",
+            "mask",
+        )
+        missing = [key for key in required if key not in inputs]
+        if missing:
+            raise KeyError(f"BUMI physical_v1 loss inputs are missing {missing}")
+        valid = inputs["mask"]["valid"].bool()
+        pred_norm_source = model_output.get("pred_x")
+        if pred_norm_source is None:
+            pred_norm_source = model_output.get("pred_x_start")
+        if not isinstance(pred_norm_source, torch.Tensor):
+            raise KeyError("BUMI model output is missing pred_x/pred_x_start")
+
+        # Autocast may be active around the Lightning forward. Explicit casts
+        # preserve the graph while forcing every physical calculation to FP32.
+        pred_norm = pred_norm_source.float()
+        target_norm = inputs["target_x"].float()
+        target_physical = inputs["target_physical_features"].float()
+        pred_root_pos = decode_dict["root_pos_local"].float()
+        pred_root_rot6d = decode_dict["root_rot_local_6d"].float()
+        pred_joint = decode_dict["joint_dof"].float()
+        pred_body_raw = decode_dict["body_link_pos_local_raw"].float()
+        pred_body_fk = pred_body_link_pos_local_fk.float()
+        target_body_fk = inputs["target_body_link_pos_local"].float()
+        target_components = self.endecoder.codec.split_features(target_physical)
+
+        raw: dict[str, torch.Tensor] = {}
+        normalized: dict[str, torch.Tensor] = {}
+        for loss_name, feature_name in (
+            ("repr_root_pos", "root_pos_local"),
+            ("repr_root_rot", "root_rot_local"),
+            ("repr_joint", "joint_dof"),
+            ("repr_body_pos", "body_link_pos_local"),
+        ):
+            value = self._repr_loss(pred_norm, target_norm, valid, feature_name)
+            raw[loss_name] = value
+            normalized[loss_name] = value
+
+        raw["root_pos"], normalized["root_pos"] = self._smooth_l1_pair(
+            pred_root_pos,
+            target_components.root_pos_local.float(),
+            valid,
+            BUMI_PHYSICAL_V1_SCALES["root_pos"],
+        )
+        pred_rotation = rotation_6d_to_matrix(pred_root_rot6d)
+        rot_start, rot_end = BUMI_FEATURE_SLICES["root_rot_local"]
+        target_rotation = rotation_6d_to_matrix(
+            target_physical[..., rot_start:rot_end]
+        )
+        root_angle = so3_geodesic_angle(pred_rotation, target_rotation)
+        raw["root_rot"] = _masked_mean(root_angle, valid)
+        normalized["root_rot"] = _masked_mean(
+            root_angle / float(BUMI_PHYSICAL_V1_SCALES["root_rot"]), valid
+        )
+        raw["joint_dof"], normalized["joint_dof"] = self._smooth_l1_pair(
+            pred_joint,
+            target_components.joint_dof.float(),
+            valid,
+            BUMI_PHYSICAL_V1_SCALES["joint_dof"],
+        )
+        raw["fk_body_pos"], normalized["fk_body_pos"] = self._smooth_l1_pair(
+            pred_body_fk,
+            target_body_fk,
+            valid,
+            BUMI_PHYSICAL_V1_SCALES["fk_body_pos"],
+        )
+        raw["fk_consistency"], normalized["fk_consistency"] = self._smooth_l1_pair(
+            pred_body_raw,
+            pred_body_fk,
+            valid,
+            BUMI_PHYSICAL_V1_SCALES["fk_consistency"],
+        )
+
+        target_joint = target_components.joint_dof.float()
+        for order, name in (
+            (1, "joint_velocity"),
+            (2, "joint_acceleration"),
+            (3, "joint_jerk"),
+        ):
+            multiplier = float(self.fps) ** order
+            pred_delta = torch.diff(pred_joint, n=order, dim=1) * multiplier
+            target_delta = torch.diff(target_joint, n=order, dim=1) * multiplier
+            derivative_mask = temporal_difference_mask(valid, order)
+            raw[name], normalized[name] = self._smooth_l1_pair(
+                pred_delta,
+                target_delta,
+                derivative_mask,
+                BUMI_PHYSICAL_V1_SCALES[name],
+            )
+
+        lower = self.kinematics.joint_lower_limits.to(pred_joint)
+        upper = self.kinematics.joint_upper_limits.to(pred_joint)
+        violation = F.relu(lower - pred_joint) + F.relu(pred_joint - upper)
+        raw["joint_limit"] = _masked_mean(violation, valid)
+        normalized["joint_limit"] = _masked_mean(
+            F.smooth_l1_loss(
+                violation / BUMI_PHYSICAL_V1_SCALES["joint_limit"],
+                torch.zeros_like(violation),
+                beta=1.0,
+                reduction="none",
+            ),
+            valid,
+        )
+        raw["root_height"], normalized["root_height"] = self._smooth_l1_pair(
+            pred_root_pos[..., 2],
+            target_components.root_pos_local[..., 2].float(),
+            valid,
+            BUMI_PHYSICAL_V1_SCALES["root_height"],
+        )
+
+        # These are contractually disabled until root height has true sole-ground
+        # semantics and audited labels exist. Keep explicit zero logs so a run
+        # cannot be mistaken for one that trained these objectives.
+        zero = pred_norm.new_zeros(())
+        for name in ("contact_bce", "foot_slide", "penetration"):
+            raw[name] = zero
+            normalized[name] = zero
+
+        if self.auxiliary_warmup_steps <= 0:
+            warmup = 1.0
+        else:
+            warmup = min(max(float(global_step), 0.0) / self.auxiliary_warmup_steps, 1.0)
+        representation = {
+            "repr_root_pos",
+            "repr_root_rot",
+            "repr_joint",
+            "repr_body_pos",
+        }
+        total = zero
+        output: dict[str, torch.Tensor] = {
+            "auxiliary_warmup_factor": pred_norm.new_tensor(warmup)
+        }
+        for name in BUMI_LOSS_NAMES:
+            factor = 1.0 if name in representation else warmup
+            weighted = normalized[name] * (self.weights[name] * factor)
+            output[f"raw_{name}_loss"] = raw[name]
+            output[f"normalized_{name}_loss"] = normalized[name]
+            output[f"weighted_{name}_loss"] = weighted
+            total = total + weighted
+        if not bool(torch.isfinite(total)):
+            raise FloatingPointError("BUMI physical_v1 total loss is NaN or Inf")
+        output["loss"] = total
+        return output
+
+    def forward(
+        self,
+        inputs: Mapping[str, Any],
+        model_output: Mapping[str, torch.Tensor | None],
+        decode_dict: Mapping[str, torch.Tensor],
+        pred_qpos_canonical: torch.Tensor,
+        pred_body_link_pos_local_fk: torch.Tensor,
+        pred_body_quat_local_fk: torch.Tensor,
+        global_step: int = 0,
+    ) -> dict[str, torch.Tensor]:
+        implementation = (
+            self._forward_physical_v1
+            if self.contract_version == "physical_v1"
+            else self._forward_legacy
+        )
+        return implementation(
+            inputs,
+            model_output,
+            decode_dict,
+            pred_qpos_canonical,
+            pred_body_link_pos_local_fk,
+            pred_body_quat_local_fk,
+            global_step=global_step,
+        )
+
 
 __all__ = [
     "BUMI_LOSS_NAMES",
+    "BUMI_PHYSICAL_V1_SCALES",
     "BumiRobotLosses",
     "so3_geodesic_angle",
     "temporal_difference_mask",

@@ -59,3 +59,20 @@ def test_experiment_selects_only_new_bumi_layers() -> None:
         "bumi_93d",
     ):
         assert expected in text
+
+
+def test_random_v1_disables_ground_contact_and_uses_balanced_sampling() -> None:
+    pipeline = load_yaml("configs/pipeline/music_only_bumi_physical_v1.yaml")["args"]
+    network = load_yaml("configs/network/diffusion_lg_bumi93_no_contact.yaml")
+    experiment = load_yaml("configs/exp/gem_bumi_music_only_4set_random_v1.yaml")
+    assert pipeline["loss_contract"] == "physical_v1"
+    assert pipeline["auxiliary_warmup_steps"] == 10000
+    assert pipeline["out_attr"] == []
+    for name in ("contact_bce", "foot_slide", "penetration", "joint_jerk"):
+        assert pipeline["weights"][name] == 0.0
+    assert network["model_cfg"]["denoiser"]["static_conf_dim"] == 0
+    assert experiment["pretrain_ckpt"] is None
+    assert experiment["data"]["sampling_strategy"] == "deduplicated_hierarchical"
+    assert experiment["data"]["samples_per_epoch"] == 52224
+    assert experiment["pl_trainer"]["max_steps"] == 500000
+    assert experiment["pl_trainer"]["devices"] == 8

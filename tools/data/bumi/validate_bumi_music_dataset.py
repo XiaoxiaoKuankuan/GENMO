@@ -38,6 +38,7 @@ def main() -> None:
             strict_contract=True,
             require_quality_filter=True,
             validate_payloads_on_init=True,
+            validate_source_hashes_on_init=True,
         )
         frames = sum(int(row["num_frames"]) for row in reader.rows)
         split_reports.append(
@@ -66,4 +67,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

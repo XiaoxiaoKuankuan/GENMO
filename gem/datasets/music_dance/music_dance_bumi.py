@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 from pathlib import Path
@@ -24,6 +25,14 @@ BUMI_MUSIC_CONTRACT_VERSION = "genmo.bumi_music.v1"
 BUMI_MUSIC_FPS = 30
 BUMI_MUSIC_DIM = 35
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
+
+
+def sha256_file(path: Path, chunk_size: int = 4 * 1024 * 1024) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(chunk_size), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def safe_torch_load(path: Path) -> Any:
@@ -114,6 +123,7 @@ class BumiMusicDatasetReader:
         quaternion_norm_tolerance: float = 1.0e-3,
         joint_limit_tolerance: float = 1.0e-3,
         validate_payloads_on_init: bool = True,
+        validate_source_hashes_on_init: bool = False,
     ) -> None:
         self.root = Path(root).expanduser().resolve()
         self.dataset_name = str(dataset_name)
@@ -124,6 +134,8 @@ class BumiMusicDatasetReader:
         self.require_quality_filter = bool(require_quality_filter)
         self.quaternion_norm_tolerance = float(quaternion_norm_tolerance)
         self.joint_limit_tolerance = float(joint_limit_tolerance)
+        self.validate_source_hashes = bool(validate_source_hashes_on_init)
+        self._sha256_cache: dict[Path, str] = {}
         if not self.root.is_dir():
             raise FileNotFoundError(f"BUMI dataset root does not exist: {self.root}")
         self.dataset_info_path = self.root / "meta" / "dataset_info.json"
@@ -182,6 +194,19 @@ class BumiMusicDatasetReader:
             raise ValueError(
                 f"BUMI dataset_info {path}: quality_filter_applied must be true for formal training"
             )
+        if info.get("source_mjcf_sha256") != info.get("mjcf_sha256"):
+            raise ValueError(
+                f"BUMI dataset_info {path}: source_mjcf_sha256 must equal mjcf_sha256"
+            )
+        if info.get("ground_semantics") != "legacy_body_origin_min_zero":
+            raise ValueError(
+                f"BUMI dataset_info {path}: ground_semantics must be "
+                "'legacy_body_origin_min_zero' for the unadjusted v1 corpus"
+            )
+        if info.get("root_z_adjusted") is not False:
+            raise ValueError(
+                f"BUMI dataset_info {path}: root_z_adjusted must be false"
+            )
         return info
 
     def _validate_manifest_rows(self) -> None:
@@ -195,6 +220,12 @@ class BumiMusicDatasetReader:
             "num_frames",
             "split",
             "quality_accepted",
+            "music_group_id",
+            "audio_key",
+            "audio_path",
+            "source_motion_sha256",
+            "source_music_feature_sha256",
+            "source_audio_sha256",
         }
         seen: set[str] = set()
         for line_number, row in enumerate(self.rows, 1):
@@ -226,10 +257,36 @@ class BumiMusicDatasetReader:
                 raise ValueError(f"{sample_id}: num_frames must be a positive integer")
             if self.require_quality_filter and row["quality_accepted"] is not True:
                 raise ValueError(f"{sample_id}: quality_accepted must be true")
-            for field in ("motion_path", "music_feature_path"):
+            for field in ("music_group_id", "audio_key"):
+                if not isinstance(row[field], str) or not row[field]:
+                    raise ValueError(f"{sample_id}: {field} must be a non-empty string")
+            for field in (
+                "source_motion_sha256",
+                "source_music_feature_sha256",
+                "source_audio_sha256",
+            ):
+                if not isinstance(row[field], str) or _SHA256.fullmatch(row[field]) is None:
+                    raise ValueError(f"{sample_id}: {field} must be a lowercase SHA-256")
+            for field in ("motion_path", "music_feature_path", "audio_path"):
                 path = resolve_contract_path(self.root, row[field], field, sample_id)
                 if not path.is_file():
                     raise FileNotFoundError(f"{sample_id}: missing {field}: {path}")
+            if self.validate_source_hashes:
+                expected_by_field = {
+                    "music_feature_path": "source_music_feature_sha256",
+                    "audio_path": "source_audio_sha256",
+                }
+                for path_field, sha_field in expected_by_field.items():
+                    source = resolve_contract_path(
+                        self.root, row[path_field], path_field, sample_id
+                    )
+                    if self._digest(source) != row[sha_field]:
+                        raise ValueError(f"{sample_id}: {sha_field} does not match {source}")
+
+    def _digest(self, path: Path) -> str:
+        if path not in self._sha256_cache:
+            self._sha256_cache[path] = sha256_file(path)
+        return self._sha256_cache[path]
 
     def read_motion(self, row: dict[str, Any]) -> tuple[dict[str, Any], Path]:
         sample_id = str(row["sample_id"])
@@ -253,6 +310,19 @@ class BumiMusicDatasetReader:
             raise ValueError(f"{sample_id}: {path}: joint_names do not match kinematics")
         if self.require_quality_filter and payload.get("quality_accepted", True) is not True:
             raise ValueError(f"{sample_id}: {path}: quality_accepted must not be false")
+        for key, expected_value in (
+            ("source_motion_sha256", row["source_motion_sha256"]),
+            ("source_mjcf_sha256", self.dataset_info["source_mjcf_sha256"]),
+            ("quality_config_sha256", self.dataset_info["quality_config_sha256"]),
+            ("retarget_config_sha256", self.dataset_info["retarget_config_sha256"]),
+            ("ground_semantics", "legacy_body_origin_min_zero"),
+            ("root_z_adjusted", False),
+        ):
+            if payload.get(key) != expected_value:
+                raise ValueError(
+                    f"{sample_id}: {path}: {key} must be {expected_value!r}, "
+                    f"got {payload.get(key)!r}"
+                )
         if "qpos" not in payload:
             raise ValueError(f"{sample_id}: {path}: missing qpos")
         qpos = torch.as_tensor(payload["qpos"]).detach().cpu().float()
@@ -322,6 +392,8 @@ class BumiMusicDatasetReader:
             )
         if not bool(torch.isfinite(music).all()):
             raise ValueError(f"{sample_id}: {path}: music contains NaN or Inf")
+        if self.validate_source_hashes and self._digest(path) != row["source_music_feature_sha256"]:
+            raise ValueError(f"{sample_id}: source_music_feature_sha256 mismatch: {path}")
         return music.contiguous(), path
 
     def load_aligned_sequence(self, row: dict[str, Any]) -> dict[str, Any]:
@@ -369,6 +441,7 @@ class BumiMusicDanceDataset(Dataset):
         strict_contract: bool = True,
         require_quality_filter: bool = True,
         validate_payloads_on_init: bool = True,
+        validate_source_hashes_on_init: bool = False,
         random_crop: bool | None = None,
         eval_clip_mode: str = "center",
         quaternion_norm_tolerance: float = 1.0e-3,
@@ -397,6 +470,7 @@ class BumiMusicDanceDataset(Dataset):
             quaternion_norm_tolerance=quaternion_norm_tolerance,
             joint_limit_tolerance=joint_limit_tolerance,
             validate_payloads_on_init=validate_payloads_on_init,
+            validate_source_hashes_on_init=validate_source_hashes_on_init,
         )
         self.root = self.reader.root
         self.rows = self.reader.rows
@@ -447,16 +521,29 @@ class BumiMusicDanceDataset(Dataset):
         )
         return torch.cat((value, padding), dim=0).contiguous()
 
-    def __getitem__(self, index: int) -> dict[str, Any]:
-        row = self.rows[self.idx2meta[index]]
+    def get_window(self, row_index: int, start_frame: int | None = None) -> dict[str, Any]:
+        """Load one row with either legacy random crop or a sampler-selected crop."""
+
+        if not 0 <= int(row_index) < len(self.rows):
+            raise IndexError(row_index)
+        row = self.rows[int(row_index)]
         sequence = self.reader.load_aligned_sequence(row)
         sequence_length = int(sequence["qpos"].shape[0])
-        start, crop_length = select_aligned_window(
-            sequence_length,
-            self.motion_frames,
-            random_crop=self.random_crop,
-            eval_clip_mode=self.eval_clip_mode,
-        )
+        if start_frame is None:
+            start, crop_length = select_aligned_window(
+                sequence_length,
+                self.motion_frames,
+                random_crop=self.random_crop,
+                eval_clip_mode=self.eval_clip_mode,
+            )
+        else:
+            start = int(start_frame)
+            last_start = max(sequence_length - self.motion_frames, 0)
+            if not 0 <= start <= last_start:
+                raise ValueError(
+                    f"{row['sample_id']}: explicit crop start={start} outside [0,{last_start}]"
+                )
+            crop_length = min(self.motion_frames, sequence_length - start)
         end = start + crop_length
         qpos = sequence["qpos"][start:end]
         music = sequence["music"][start:end]
@@ -480,6 +567,13 @@ class BumiMusicDanceDataset(Dataset):
                 "dataset_id": self.dataset_name,
                 "sample_id": str(row["sample_id"]),
                 "sequence_id": str(row["sequence_id"]),
+                "music_group_id": str(row["music_group_id"]),
+                "audio_key": str(row["audio_key"]),
+                "audio_path": str(
+                    resolve_contract_path(
+                        self.root, row["audio_path"], "audio_path", str(row["sample_id"])
+                    )
+                ),
                 "split": self.split,
                 "source_manifest": str(self.reader.manifest_path),
                 "motion_path": str(sequence["motion_path"]),
@@ -499,6 +593,9 @@ class BumiMusicDanceDataset(Dataset):
             )
         return result
 
+    def __getitem__(self, index: int) -> dict[str, Any]:
+        return self.get_window(self.idx2meta[index])
+
 
 __all__ = [
     "BUMI_MUSIC_CONTRACT_VERSION",
@@ -510,5 +607,6 @@ __all__ = [
     "read_jsonl",
     "resolve_contract_path",
     "safe_torch_load",
+    "sha256_file",
     "select_aligned_window",
 ]
