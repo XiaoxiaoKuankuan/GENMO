@@ -13,10 +13,7 @@ from gem.utils.rotation_conversions import (
 
 _BODY_MODEL_DIR = Path(__file__).parent / "body_model"
 
-COCO17_AUG = {
-    k: v.flatten()
-    for k, v in torch.load(_BODY_MODEL_DIR / "coco_aug_dict.pth", weights_only=False).items()
-}
+COCO17_AUG = {}
 COCO17_AUG_CUDA = {}
 COCO17_TREE = [
     [5, 6],
@@ -44,10 +41,7 @@ COCO17_TREE = [
     16,
 ]
 
-COCO12_AUG = {
-    k: v.flatten()[5:]
-    for k, v in torch.load(_BODY_MODEL_DIR / "coco_aug_dict.pth", weights_only=False).items()
-}
+COCO12_AUG = {}
 COCO12_AUG_CUDA = {}
 COCO12_TREE = [
     -1,
@@ -63,6 +57,30 @@ COCO12_TREE = [
     8,
     9,
 ]
+
+
+def _select_augmentation_dicts(num_joints):
+    """Load SMPL-only augmentation assets on first use, not module import.
+
+    BUMI-native training inherits GEM's optimization lifecycle but never calls
+    the SMPL keypoint augmentation path. Keeping this resource lazy prevents a
+    robot-only installation from requiring unrelated SMPL body-model files.
+    """
+
+    if num_joints not in (12, 17):
+        raise ValueError(f"num_J: {num_joints} is not supported")
+    if not COCO17_AUG:
+        path = _BODY_MODEL_DIR / "coco_aug_dict.pth"
+        if not path.is_file():
+            raise FileNotFoundError(
+                f"SMPL keypoint augmentation requires body-model asset: {path}"
+            )
+        source = torch.load(path, weights_only=False)
+        COCO17_AUG.update({key: value.flatten() for key, value in source.items()})
+        COCO12_AUG.update({key: value.flatten()[5:] for key, value in source.items()})
+    if num_joints == 17:
+        return COCO17_AUG, COCO17_AUG_CUDA
+    return COCO12_AUG, COCO12_AUG_CUDA
 
 
 def gaussian_augment(body_pose, std_angle=10.0, to_R=True):
@@ -108,12 +126,7 @@ def gaussian_augment(body_pose, std_angle=10.0, to_R=True):
 
 def get_jitter(shape=(8, 120), s_jittering=5e-2, num_J=12):
     """Guassian jitter modeling."""
-    if num_J == 17:
-        AUG_DICT = COCO17_AUG
-    elif num_J == 12:
-        AUG_DICT = COCO12_AUG
-    else:
-        raise ValueError(f"num_J: {num_J} is not supported")
+    AUG_DICT, _ = _select_augmentation_dicts(num_J)
     jittering_noise = (
         torch.normal(
             mean=torch.zeros((*shape, num_J, 3)),
@@ -125,14 +138,7 @@ def get_jitter(shape=(8, 120), s_jittering=5e-2, num_J=12):
 
 
 def get_jitter_cuda(shape=(8, 120), s_jittering=5e-2, num_J=12, device="cuda"):
-    if num_J == 17:
-        AUG_DICT = COCO17_AUG
-        AUG_DICT_CUDA = COCO17_AUG_CUDA
-    elif num_J == 12:
-        AUG_DICT = COCO12_AUG
-        AUG_DICT_CUDA = COCO12_AUG_CUDA
-    else:
-        raise ValueError(f"num_J: {num_J} is not supported")
+    AUG_DICT, AUG_DICT_CUDA = _select_augmentation_dicts(num_J)
     if "jittering" not in AUG_DICT_CUDA:
         AUG_DICT_CUDA["jittering"] = AUG_DICT["jittering"].to(device).reshape(1, 1, num_J, 1)
     jittering = AUG_DICT_CUDA["jittering"]
@@ -142,12 +148,7 @@ def get_jitter_cuda(shape=(8, 120), s_jittering=5e-2, num_J=12, device="cuda"):
 
 def get_lfhp(shape=(8, 120), s_peak=3e-1, s_peak_mask=5e-3, num_J=12):
     """Low-frequency high-peak noise modeling."""
-    if num_J == 17:
-        AUG_DICT = COCO17_AUG
-    elif num_J == 12:
-        AUG_DICT = COCO12_AUG
-    else:
-        raise ValueError(f"num_J: {num_J} is not supported")
+    AUG_DICT, _ = _select_augmentation_dicts(num_J)
 
     def get_peak_noise_mask():
         peak_noise_mask = torch.rand(*shape, num_J) * AUG_DICT["pmask"]
@@ -161,14 +162,7 @@ def get_lfhp(shape=(8, 120), s_peak=3e-1, s_peak_mask=5e-3, num_J=12):
 
 
 def get_lfhp_cuda(shape=(8, 120), s_peak=3e-1, s_peak_mask=5e-3, num_J=12, device="cuda"):
-    if num_J == 17:
-        AUG_DICT = COCO17_AUG
-        AUG_DICT_CUDA = COCO17_AUG_CUDA
-    elif num_J == 12:
-        AUG_DICT = COCO12_AUG
-        AUG_DICT_CUDA = COCO12_AUG_CUDA
-    else:
-        raise ValueError(f"num_J: {num_J} is not supported")
+    AUG_DICT, AUG_DICT_CUDA = _select_augmentation_dicts(num_J)
     if "peak" not in AUG_DICT_CUDA:
         AUG_DICT_CUDA["pmask"] = AUG_DICT["pmask"].to(device)
         AUG_DICT_CUDA["peak"] = AUG_DICT["peak"].to(device).reshape(num_J, 1)
@@ -187,12 +181,7 @@ def get_lfhp_cuda(shape=(8, 120), s_peak=3e-1, s_peak_mask=5e-3, num_J=12, devic
 
 def get_bias(shape=(8, 120), s_bias=1e-1, num_J=12):
     """Bias noise modeling."""
-    if num_J == 17:
-        AUG_DICT = COCO17_AUG
-    elif num_J == 12:
-        AUG_DICT = COCO12_AUG
-    else:
-        raise ValueError(f"num_J: {num_J} is not supported")
+    AUG_DICT, _ = _select_augmentation_dicts(num_J)
     b, seq_len = shape
     bias_noise = (
         torch.normal(mean=torch.zeros((b, num_J, 3)), std=AUG_DICT["bias"].reshape(1, num_J, 1))
@@ -205,14 +194,7 @@ def get_bias(shape=(8, 120), s_bias=1e-1, num_J=12):
 
 
 def get_bias_cuda(shape=(8, 120), s_bias=1e-1, num_J=12, device="cuda"):
-    if num_J == 17:
-        AUG_DICT = COCO17_AUG
-        AUG_DICT_CUDA = COCO17_AUG_CUDA
-    elif num_J == 12:
-        AUG_DICT = COCO12_AUG
-        AUG_DICT_CUDA = COCO12_AUG_CUDA
-    else:
-        raise ValueError(f"num_J: {num_J} is not supported")
+    AUG_DICT, AUG_DICT_CUDA = _select_augmentation_dicts(num_J)
     if "bias" not in AUG_DICT_CUDA:
         AUG_DICT_CUDA["bias"] = AUG_DICT["bias"].to(device).reshape(1, num_J, 1)
 
