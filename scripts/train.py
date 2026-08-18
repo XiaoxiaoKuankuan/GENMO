@@ -278,8 +278,7 @@ def train(cfg: DictConfig) -> None:
         Log.info("Start Fitting...")
         trainer.fit(
             model,
-            datamodule.train_dataloader(),
-            datamodule.val_dataloader(),
+            datamodule=datamodule,
             ckpt_path=resume_path,
         )
     elif cfg.task == "test":

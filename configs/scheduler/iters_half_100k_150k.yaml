@@ -1,0 +1,8 @@
+# Large-batch scratch schedule.  With global batch 3072 these milestones have
+# the same sample exposure as 300k/450k at global batch 1024.
+scheduler:
+  _target_: torch.optim.lr_scheduler.MultiStepLR
+  milestones: [100000, 150000]
+  gamma: 0.5
+interval: step
+frequency: 1

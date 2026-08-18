@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import math
+from types import SimpleNamespace
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -17,6 +18,7 @@ from gem.datamodule.balanced_music_sampler import (
     HierarchicalMusicDistributedSampler,
     project_bounded_probabilities,
 )
+from gem.datamodule.mocap_trainX_testY import _trainer_ddp_sampler_kwargs
 from gem.pipeline.smpl_physics_losses import (
     compute_smpl_physics_losses,
     consecutive_valid_mask,
@@ -109,6 +111,59 @@ def test_physics_experiment_is_derived_without_mutating_baseline() -> None:
     assert OmegaConf.to_container(
         physics.endecoder, resolve=True
     ) == OmegaConf.to_container(baseline.endecoder, resolve=True)
+
+
+def test_physics_v2_is_a_long_scratch_run_with_calibrated_weights() -> None:
+    with initialize_config_dir(
+        version_base="1.3", config_dir=str(REPO_ROOT / "configs")
+    ):
+        v1 = compose(
+            config_name="train",
+            overrides=["exp=gem_smpl_music_only_4set_physics_v1"],
+        )
+        v2 = compose(
+            config_name="train",
+            overrides=["exp=gem_smpl_music_only_4set_physics_v2"],
+        )
+
+    assert v2.exp_name == "gem_smpl_music_only_4set_physics_v2"
+    assert v2.pretrain_ckpt is None
+    assert v2.ckpt_path is None
+    assert v2.resume_mode is None
+    assert v2.optimizer.lr == pytest.approx(3e-4)
+    assert list(v2.scheduler.scheduler.milestones) == [100000, 150000]
+    assert v2.pl_trainer.max_steps == 170000
+    assert v2.pipeline.args.physics_losses.warmup_steps == 6667
+    assert v2.data.loader_opts.train.batch_size == 384
+    assert v2.data.balanced_sampling.samples_per_epoch == 52224
+    assert (
+        v2.data.balanced_sampling.samples_per_epoch // 8
+        // v2.data.loader_opts.train.batch_size
+        == 17
+    )
+
+    expected_weights = {
+        "root_velocity": 0.20,
+        "root_acceleration": 0.040,
+        "root_jerk": 0.004,
+        "joint_angular_velocity": 0.10,
+        "joint_angular_acceleration": 0.020,
+        "fk_velocity": 0.20,
+        "fk_acceleration": 0.040,
+        "fk_jerk": 0.008,
+        "sole_penetration": 0.020,
+    }
+    for name, weight in expected_weights.items():
+        assert v2.pipeline.args.physics_losses[name].weight == pytest.approx(weight)
+
+    # The completed v1 run remains reproducible and unchanged.
+    assert v1.optimizer.lr == pytest.approx(2e-5)
+    assert v1.pl_trainer.max_steps == 50000
+    assert v1.pipeline.args.physics_losses.warmup_steps == 10000
+    assert v1.pipeline.args.physics_losses.fk_jerk.weight == pytest.approx(0.0002)
+    assert v1.pipeline.args.physics_losses.sole_penetration.weight == pytest.approx(
+        0.005
+    )
 
 
 def test_first_to_third_derivative_masks_exclude_padding_and_bad_intervals() -> None:
@@ -353,6 +408,20 @@ class _SamplingDataset(Dataset):
 
 def _interleave(rank0: list[int], rank1: list[int]) -> list[int]:
     return [value for pair in zip(rank0, rank1) for value in pair]
+
+
+def test_trainer_ddp_context_shards_global_epoch_before_dist_init() -> None:
+    assert _trainer_ddp_sampler_kwargs(None) == {}
+    assert _trainer_ddp_sampler_kwargs(
+        SimpleNamespace(world_size=1, global_rank=0)
+    ) == {}
+    assert _trainer_ddp_sampler_kwargs(
+        SimpleNamespace(world_size=8, global_rank=3)
+    ) == {"rank": 3, "num_replicas": 8}
+    with pytest.raises(ValueError, match="invalid Trainer DDP context"):
+        _trainer_ddp_sampler_kwargs(
+            SimpleNamespace(world_size=8, global_rank=8)
+        )
 
 
 def test_bounded_sqrt_probabilities_and_ddp_reproducibility() -> None:

@@ -1,0 +1,65 @@
+# @package _global_
+# Full scratch-training successor to physics_v1.
+#
+# physics_v1 is intentionally kept unchanged so its s050000 checkpoint remains
+# reproducible.  The v2 temporal weights are calibrated from the completed v1
+# TensorBoard run: at steps 45k-50k the old physics total was 7.42e-4, only
+# 0.0134% of total loss and 4.87% of diffusion simple_loss.  Most temporal
+# terms are therefore raised 20x.  Joint angular acceleration and FK jerk are
+# raised 40x because they directly target the visible high-frequency jitter.
+defaults:
+  - gem_smpl_music_only_4set_physics_v1
+  - override /optimizer: adamw_2e-4
+  - override /scheduler: iters_half_100k_150k
+  - override /callbacks:
+      - ckpt_saver/every5000s_top100
+      - prog_bar/prog_reporter_ed1
+      - train_speed_timer/base
+      - lr_monitor/pl
+  - _self_
+
+exp_name_base: gem_smpl_music_only_4set_physics_v2
+exp_name_var: ""
+exp_name: ${exp_name_base}${exp_name_var}
+data_name: gem_smpl_music_only_4set_physics_v2
+output_dir: outputs/${exp_name}
+
+# This experiment is intentionally initialized from scratch.  Supplying any of
+# these on the command line changes the run semantics and should be deliberate.
+pretrain_ckpt: null
+ckpt_path: null
+resume_mode: null
+
+pipeline:
+  args:
+    physics_losses:
+      # Batch 384 is 3x the v1 batch, so 6667 steps preserve the sample exposure
+      # of the original 20k-step scratch warmup.
+      warmup_steps: 6667
+      root_velocity: {scale: 2.0, weight: 0.20}
+      root_acceleration: {scale: 20.0, weight: 0.040}
+      root_jerk: {scale: 600.0, weight: 0.004}
+      joint_angular_velocity: {scale: 6.0, weight: 0.10}
+      joint_angular_acceleration: {scale: 180.0, weight: 0.020}
+      fk_velocity: {scale: 2.0, weight: 0.20}
+      fk_acceleration: {scale: 30.0, weight: 0.040}
+      fk_jerk: {scale: 600.0, weight: 0.008}
+      # v1 had high ground-valid coverage but essentially no penetration
+      # activation.  Keep this conservative: 4x instead of the temporal 20x.
+      sole_penetration: {scale: 0.03, weight: 0.020}
+
+optimizer:
+  # Conservative sqrt-style scaling from 2e-4 at global batch 1024.  Linear
+  # scaling (6e-4) was rejected as unnecessarily risky for a scratch run.
+  lr: 3e-4
+
+data:
+  loader_opts:
+    train:
+      # Server benchmark on 8x RTX 6000D: ~52.1 GB/GPU and ~1.6 s/step.
+      # 512 used ~68.4 GB for only ~1.6% more throughput, so 384 is safer.
+      batch_size: 384
+
+pl_trainer:
+  # 170k * (8*384) is 1.02x the sample exposure of 500k * (8*128).
+  max_steps: 170000

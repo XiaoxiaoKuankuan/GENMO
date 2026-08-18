@@ -10,6 +10,7 @@ CombinedLoader 顺序遍历各个评测数据集。`collate_fn` 负责把不同�
 
 import resource
 from functools import partial
+from typing import Any
 
 import pytorch_lightning as pl
 import torch
@@ -24,6 +25,27 @@ from gem.utils.pylogger import Log
 
 rlimit = resource.getrlimit(resource.RLIMIT_NOFILE)
 resource.setrlimit(resource.RLIMIT_NOFILE, (4096, rlimit[1]))
+
+
+def _trainer_ddp_sampler_kwargs(trainer: Any) -> dict[str, int]:
+    """Resolve DDP rank information even before torch.distributed is initialized.
+
+    Lightning can ask for a dataloader while constructing the strategy.  At that
+    point ``torch.distributed`` may still report a world size of one, although
+    the Trainer already knows the requested device count.  Passing the Trainer
+    values explicitly prevents every rank from sampling a full global epoch.
+    """
+    if trainer is None:
+        return {}
+    world_size = int(getattr(trainer, "world_size", 1) or 1)
+    global_rank = int(getattr(trainer, "global_rank", 0) or 0)
+    if world_size <= 1:
+        return {}
+    if not 0 <= global_rank < world_size:
+        raise ValueError(
+            f"invalid Trainer DDP context: rank={global_rank}, world_size={world_size}"
+        )
+    return {"rank": global_rank, "num_replicas": world_size}
 
 
 def collate_fn(batch, mode, collate_cfg=None):
@@ -220,6 +242,9 @@ class DataModule(pl.LightningDataModule):
             if self.balanced_sampling is not None and self.balanced_sampling.get(
                 "enabled", False
             ):
+                ddp_sampler_kwargs = _trainer_ddp_sampler_kwargs(
+                    getattr(self, "trainer", None)
+                )
                 sampler = HierarchicalMusicDistributedSampler(
                     self.trainsets,
                     dataset_names=self.trainset_names,
@@ -241,6 +266,7 @@ class DataModule(pl.LightningDataModule):
                         )
                     ),
                     seed=int(self.balanced_sampling.get("seed", 42)),
+                    **ddp_sampler_kwargs,
                 )
                 summary = ", ".join(
                     f"{name}={probability:.4%} (H={hours:.4f}h)"
@@ -252,7 +278,9 @@ class DataModule(pl.LightningDataModule):
                 )
                 Log.info(
                     "[Train Sampling][Deduplicated hierarchical] "
-                    f"global_samples={sampler.samples_per_epoch}, {summary}"
+                    f"global_samples={sampler.samples_per_epoch}, "
+                    f"per_rank_samples={len(sampler)}, "
+                    f"rank={sampler.rank}/{sampler.num_replicas}, {summary}"
                 )
             return DataLoader(
                 self.trainset,
