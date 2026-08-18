@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import json
 from collections.abc import Mapping
 from functools import partial
+from pathlib import Path
 
 import pytorch_lightning as pl
 import torch
@@ -15,6 +17,7 @@ from gem.datasets.music_dance.bumi_sampler import (
     BumiBalancedMultiDataset,
     DeduplicatedBumiSampler,
 )
+from gem.datasets.music_dance.music_dance_bumi import sha256_file
 from gem.utils.pylogger import Log
 
 
@@ -89,6 +92,9 @@ class DataModule(pl.LightningDataModule):
         sampler_seed: int = 42,
         dataset_probability_min: float = 0.05,
         dataset_probability_max: float = 0.50,
+        stats_path: str | Path | None = None,
+        require_stats_fingerprint_match: bool = False,
+        expected_train_sequences: int | None = None,
     ) -> None:
         super().__init__()
         self.loader_opts = loader_opts
@@ -99,6 +105,11 @@ class DataModule(pl.LightningDataModule):
         self.sampler_seed = int(sampler_seed)
         self.dataset_probability_min = float(dataset_probability_min)
         self.dataset_probability_max = float(dataset_probability_max)
+        self.stats_path = None if stats_path in (None, "") else Path(stats_path).expanduser().resolve()
+        self.require_stats_fingerprint_match = bool(require_stats_fingerprint_match)
+        self.expected_train_sequences = (
+            None if expected_train_sequences is None else int(expected_train_sequences)
+        )
         if self.sampling_strategy not in {"concat", "deduplicated_hierarchical"}:
             raise ValueError(
                 "sampling_strategy must be 'concat' or 'deduplicated_hierarchical'"
@@ -135,6 +146,17 @@ class DataModule(pl.LightningDataModule):
         if not datasets:
             raise ValueError("BUMI DataModule requires at least one training dataset")
         self.train_datasets = tuple(datasets)
+        raw_train_sequences = sum(len(dataset.rows) for dataset in datasets)
+        if (
+            self.expected_train_sequences is not None
+            and raw_train_sequences != self.expected_train_sequences
+        ):
+            raise ValueError(
+                "BUMI train sequence count mismatch: "
+                f"expected={self.expected_train_sequences}, actual={raw_train_sequences}"
+            )
+        if self.require_stats_fingerprint_match:
+            self._validate_stats_fingerprints(datasets)
         effective_total = sum(len(dataset) for dataset in datasets)
         for name, summary, effective_len in records:
             if summary:
@@ -160,6 +182,47 @@ class DataModule(pl.LightningDataModule):
         result = ConcatDataset(datasets)
         Log.info(f"[BUMI Train Dataset][All]: ConcatDataset size={len(result)}")
         return result
+
+    def _validate_stats_fingerprints(self, datasets) -> None:
+        if self.stats_path is None or not self.stats_path.is_file():
+            raise FileNotFoundError(
+                "Formal BUMI training requires an existing stats_path so dataset "
+                "fingerprints can be verified"
+            )
+        try:
+            stats = json.loads(self.stats_path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError as exc:
+            raise ValueError(f"Invalid BUMI stats JSON {self.stats_path}: {exc}") from exc
+        fingerprints = stats.get("dataset_fingerprints") if isinstance(stats, dict) else None
+        if not isinstance(fingerprints, dict):
+            raise ValueError(
+                f"BUMI stats {self.stats_path} is missing dataset_fingerprints"
+            )
+        expected_names = {str(dataset.dataset_name) for dataset in datasets}
+        if set(fingerprints) != expected_names:
+            raise ValueError(
+                "BUMI stats dataset set mismatch: "
+                f"expected={sorted(expected_names)}, actual={sorted(fingerprints)}"
+            )
+        for dataset in datasets:
+            name = str(dataset.dataset_name)
+            fingerprint = fingerprints[name]
+            if not isinstance(fingerprint, dict):
+                raise ValueError(f"BUMI stats fingerprint for {name} must be an object")
+            actual = {
+                "dataset_info_sha256": sha256_file(dataset.reader.dataset_info_path),
+                "train_manifest_sha256": sha256_file(dataset.reader.manifest_path),
+                "sequences": len(dataset.rows),
+            }
+            expected = {key: fingerprint.get(key) for key in actual}
+            if expected != actual:
+                raise ValueError(
+                    f"BUMI stats fingerprint mismatch for {name}: "
+                    f"expected={expected}, actual={actual}"
+                )
+        Log.info(
+            f"[BUMI Stats] Verified train dataset fingerprints: {self.stats_path}"
+        )
 
     @staticmethod
     def _options(config) -> dict:

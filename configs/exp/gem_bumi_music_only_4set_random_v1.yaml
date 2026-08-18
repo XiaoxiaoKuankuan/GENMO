@@ -58,6 +58,9 @@ data:
   sampler_seed: ${seed}
   dataset_probability_min: 0.05
   dataset_probability_max: 0.50
+  stats_path: ${oc.env:BUMI_MUSIC_STATS_PATH}
+  require_stats_fingerprint_match: true
+  expected_train_sequences: 5537
   loader_opts:
     train:
       batch_size: 128

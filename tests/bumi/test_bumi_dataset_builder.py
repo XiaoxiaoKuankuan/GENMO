@@ -164,6 +164,8 @@ def test_converter_preserves_names_root_and_atomic_contract(
         output_root=output,
         expected_total=4,
         expected_splits={"train": 4, "val": 0, "test": 0},
+        expected_dataset_counts={name: 1 for name in SAMPLES},
+        expected_unique_music_features=4,
     )
     assert report["total_sequences"] == 4
     assert report["split_counts"] == {"test": 0, "train": 4, "val": 0}
@@ -205,6 +207,8 @@ def test_converter_sha_failure_leaves_no_published_or_staging_tree(
             output_root=output,
             expected_total=4,
             expected_splits={"train": 4, "val": 0, "test": 0},
+            expected_dataset_counts={name: 1 for name in SAMPLES},
+            expected_unique_music_features=4,
         )
     assert not output.exists()
     assert not list(tmp_path.glob(".failed_formal.staging-*"))

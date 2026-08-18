@@ -74,5 +74,7 @@ def test_random_v1_disables_ground_contact_and_uses_balanced_sampling() -> None:
     assert experiment["pretrain_ckpt"] is None
     assert experiment["data"]["sampling_strategy"] == "deduplicated_hierarchical"
     assert experiment["data"]["samples_per_epoch"] == 52224
+    assert experiment["data"]["require_stats_fingerprint_match"] is True
+    assert experiment["data"]["expected_train_sequences"] == 5537
     assert experiment["pl_trainer"]["max_steps"] == 500000
     assert experiment["pl_trainer"]["devices"] == 8

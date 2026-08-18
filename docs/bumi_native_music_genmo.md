@@ -69,14 +69,27 @@ Torch FK 对任意 `[...,28]` 输出 `body_pos_w [...,22,3]` 和 `body_quat_w [.
 
 真实 sole proxy 必须由版本化 proxy config 明确指定真实 body/geom 或 feature-body local point；exporter 不含任何 BUMI 名称猜测。当前 proxy 使用左右 ankle-roll STL 最低 1 mm 支撑簇中的真实 mesh vertex。正式 v1 保留 legacy root 高度，地面语义不是鞋底地面，因此这些 proxy 仅用于 FK/未来版本，正式随机初始化实验硬性关闭 penetration/contact/sliding。
 
-最小 proxy config 结构如下；其中名称和数值必须来自真实资产：
+当前 mesh-vertex proxy config 使用已经转换到 ankle-roll feature-body 局部系的
+真实支撑点；名称、坐标和半径都必须来自绑定资产：
 
 ```json
 {
   "contract_version": "genmo.bumi_proxy_config.v1",
   "sole_proxies": [
-    {"name": "...", "foot": "left", "body_name": "...", "geom_name": "..."},
-    {"name": "...", "foot": "right", "body_name": "...", "geom_name": "..."}
+    {
+      "name": "...",
+      "foot": "left",
+      "feature_body_name": "l_ankle_roll_link",
+      "local_position": [0.0, 0.0, 0.0],
+      "radius": 0.0
+    },
+    {
+      "name": "...",
+      "foot": "right",
+      "feature_body_name": "r_ankle_roll_link",
+      "local_position": [0.0, 0.0, 0.0],
+      "radius": 0.0
+    }
   ],
   "evaluation_proxies": []
 }
@@ -138,6 +151,9 @@ Manifest 每行必须含 `sample_id`、`sequence_id`、`music_group_id`、`audio
 `BUMI_MUSIC_STATS_PATH` 必须指向 `genmo.bumi_stats.v1` JSON，包括 93 维 mean/std、固定 slices、真实 joint names、anchor mode、kinematics SHA 和各数据集 fingerprint。统计只使用 train split；每条序列按 stride 120 枚举 120 帧窗口并包含最后一个合法窗口，每个窗口独立以第一帧 canonicalize。短序列只让真实有效帧进入统计。
 
 实现使用流式 Welford，不拼接全量数据。最终只执行 `std.clamp_min(1e-6)`，不会采用 SMPL 的 `std < 1 -> 1`。`is_placeholder=true` 默认被正式 Endecoder 拒绝；仓库不附带可被训练静默使用的 identity stats。
+正式 DataModule 还会在启动时重新计算四个 `dataset_info.json` 和 train manifest 的
+SHA256，与 stats 中的 fingerprint 逐项比对，并要求 train 序列总数严格为 5,537；
+数据或统计量任一方变化都会在创建训练 loader 前失败。
 
 ## 模型与训练路径
 
@@ -298,9 +314,15 @@ python tools/data/bumi/compute_bumi_93d_stats.py \
   --output "$BUMI_MUSIC_STATS_PATH"
 ```
 
-单 batch、显存和 100-step smoke 通过后，正式训练使用同一入口并去掉 `max_steps=100` 覆盖。随机初始化实验不得设置 `pretrain_ckpt`：
+单 batch、显存和 100-step smoke 通过后，正式训练使用同一入口并去掉
+`max_steps` 覆盖。随机初始化实验不得设置 `pretrain_ckpt`：
 
 ```bash
+NCCL_CUMEM_HOST_ENABLE=0 NCCL_IB_DISABLE=1 NCCL_SOCKET_IFNAME=lo \
+TORCH_NCCL_BLOCKING_WAIT=1 python -u scripts/train.py \
+  exp=gem_bumi_music_only_4set_random_v1 \
+  pl_trainer.max_steps=1 use_wandb=false
+
 NCCL_CUMEM_HOST_ENABLE=0 NCCL_IB_DISABLE=1 NCCL_SOCKET_IFNAME=lo \
 TORCH_NCCL_BLOCKING_WAIT=1 python -u scripts/train.py \
   exp=gem_bumi_music_only_4set_random_v1 \

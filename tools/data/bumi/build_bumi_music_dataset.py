@@ -307,6 +307,8 @@ def convert_datasets(
     output_root: Path,
     expected_total: int | None = 6610,
     expected_splits: Mapping[str, int] | None = None,
+    expected_dataset_counts: Mapping[str, int] | None = None,
+    expected_unique_music_features: int | None = 2548,
 ) -> dict[str, Any]:
     """Perform a complete staged conversion and atomically publish ``output_root``."""
 
@@ -346,12 +348,26 @@ def convert_datasets(
     }
     counters: Counter[str] = Counter()
     hash_cache: dict[Path, str] = {}
+    music_frame_cache: dict[Path, int] = {}
+    materialized_destinations: dict[Path, str] = {}
     materialization: Counter[str] = Counter()
 
     def digest(path: Path) -> str:
         if path not in hash_cache:
             hash_cache[path] = sha256_file(path)
         return hash_cache[path]
+
+    def materialize_once(source: Path, destination: Path, source_sha: str) -> str:
+        previous = materialized_destinations.get(destination)
+        if previous is not None:
+            if previous != source_sha:
+                raise ValueError(
+                    f"destination collision with different source SHA: {destination}"
+                )
+            return "existing"
+        mode = _materialize(source, destination)
+        materialized_destinations[destination] = source_sha
+        return mode
 
     output_root.parent.mkdir(parents=True, exist_ok=True)
     if output_root.exists():
@@ -402,11 +418,14 @@ def convert_datasets(
 
             motion = load_legacy_bumi_motion(legacy_path, expected_fps=30)
             qpos = torch.from_numpy(motion.qpos_wxyz(kinematics.joint_order)).float()
-            music = _music_tensor(feature_source, sample_id)
+            if feature_source not in music_frame_cache:
+                music_frame_cache[feature_source] = int(
+                    _music_tensor(feature_source, sample_id).shape[0]
+                )
             expected_frames = int(human.get("num_frames", -1))
             lengths = {
                 "qpos": int(qpos.shape[0]),
-                "edge35": int(music.shape[0]),
+                "edge35": music_frame_cache[feature_source],
                 "human_manifest": expected_frames,
             }
             if len(set(lengths.values())) != 1:
@@ -441,8 +460,12 @@ def convert_datasets(
             motion_destination = dataset_root / motion_relative
             motion_destination.parent.mkdir(parents=True, exist_ok=True)
             torch.save(motion_payload, motion_destination)
-            materialization[_materialize(feature_source, dataset_root / feature_relative)] += 1
-            materialization[_materialize(audio_source, dataset_root / audio_relative)] += 1
+            materialization[
+                materialize_once(feature_source, dataset_root / feature_relative, feature_sha)
+            ] += 1
+            materialization[
+                materialize_once(audio_source, dataset_root / audio_relative, audio_sha)
+            ] += 1
             row = {
                 "sample_id": sample_id,
                 "sequence_id": pair["sequence_id"],
@@ -539,11 +562,31 @@ def convert_datasets(
                 for dataset in DATASET_SPECS
             },
             "unique_music_features": sum(
-                len({row["source_music_feature_sha256"] for rows in values.values() for row in rows})
+                len({row["music_feature_path"] for rows in values.values() for row in rows})
                 for values in split_rows.values()
             ),
             "materialization": dict(materialization),
         }
+        if expected_dataset_counts is not None:
+            actual_dataset_counts = {
+                dataset: int(report["dataset_counts"][dataset]["total"])
+                for dataset in DATASET_SPECS
+            }
+            if actual_dataset_counts != dict(expected_dataset_counts):
+                raise ValueError(
+                    "formal dataset counts mismatch: "
+                    f"expected={dict(expected_dataset_counts)}, "
+                    f"actual={actual_dataset_counts}"
+                )
+        if (
+            expected_unique_music_features is not None
+            and report["unique_music_features"] != int(expected_unique_music_features)
+        ):
+            raise ValueError(
+                "unique EDGE35 count mismatch: "
+                f"expected={expected_unique_music_features}, "
+                f"actual={report['unique_music_features']}"
+            )
         for dataset in DATASET_SPECS:
             _write_json(
                 staging / DATASET_SPECS[dataset]["output"] / "reports" / "conversion_report.json",
@@ -577,6 +620,11 @@ def main() -> None:
         default="train=5537,val=547,test=526",
         help="comma-separated SPLIT=COUNT; pass an empty string to disable",
     )
+    parser.add_argument(
+        "--expected-dataset-counts",
+        default="aistpp=824,aioz_gdance=5608,finedance=111,compas3d=67",
+    )
+    parser.add_argument("--expected-unique-music-features", type=int, default=2548)
     args = parser.parse_args()
     expected_splits = None
     if args.expected_splits:
@@ -584,6 +632,14 @@ def main() -> None:
             name: int(count)
             for name, count in (
                 item.split("=", 1) for item in args.expected_splits.split(",")
+            )
+        }
+    expected_dataset_counts = None
+    if args.expected_dataset_counts:
+        expected_dataset_counts = {
+            name: int(count)
+            for name, count in (
+                item.split("=", 1) for item in args.expected_dataset_counts.split(",")
             )
         }
     report = convert_datasets(
@@ -597,6 +653,8 @@ def main() -> None:
         output_root=args.output_root,
         expected_total=args.expected_total,
         expected_splits=expected_splits,
+        expected_dataset_counts=expected_dataset_counts,
+        expected_unique_music_features=args.expected_unique_music_features,
     )
     print(json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True))
 
