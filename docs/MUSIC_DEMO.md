@@ -251,6 +251,11 @@ global 和 incam 两组参数还包含相机张量、FPS、音频选择范围、
 
 ## 音乐动作到机器人实时播放
 
+> 本节下面的 `stream_smpl_params_to_gmr.py` 是兼容旧 GMR 单帧 Redis 输入的路径。
+> BUMI GMT 若需要真实的“过去 10 + 当前 + 未来 10”参考窗口，请使用
+> [GENMO → 完整 GMR → BUMI GMT 时序链路](GENMO_GMR_GMT_TRAJECTORY.md)，不要让
+> legacy publisher 和 `trajectory_v1` publisher 同时写同一个 Redis key。
+
 以下四个程序相互解耦：
 
 ```text
