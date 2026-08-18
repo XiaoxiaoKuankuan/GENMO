@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+import os
 from collections import defaultdict
 from collections.abc import Iterator, Sequence
 from dataclasses import dataclass
@@ -11,6 +12,8 @@ from typing import Any
 import torch
 import torch.distributed as dist
 from torch.utils.data import Dataset, Sampler
+
+from gem.utils.pylogger import Log
 
 
 @dataclass(frozen=True)
@@ -132,18 +135,15 @@ class DeduplicatedBumiSampler(Sampler[BumiWindowIndex]):
         self.epoch = 0
         if self.samples_per_epoch <= 0:
             raise ValueError("samples_per_epoch must be positive")
-        if world_size is None:
-            world_size = dist.get_world_size() if dist.is_available() and dist.is_initialized() else 1
-        if rank is None:
-            rank = dist.get_rank() if dist.is_available() and dist.is_initialized() else 0
-        self.world_size = int(world_size)
-        self.rank = int(rank)
-        if self.world_size <= 0 or not 0 <= self.rank < self.world_size:
-            raise ValueError(f"invalid rank/world_size={self.rank}/{self.world_size}")
-        if self.samples_per_epoch % self.world_size != 0:
-            raise ValueError(
-                "samples_per_epoch must be divisible by world_size; padding would duplicate draws"
-            )
+        # ``scripts/train.py`` constructs the DataLoader before Lightning calls
+        # ``init_process_group``.  Pinning rank/world-size here would therefore
+        # make every DDP process rank 0 of 1.  Keep automatic values dynamic and
+        # resolve them at iteration/length time, when either torch.distributed or
+        # Lightning's RANK/WORLD_SIZE environment is available.
+        self._rank_override = None if rank is None else int(rank)
+        self._world_size_override = None if world_size is None else int(world_size)
+        self._logged_distributed_contexts: set[tuple[int, int]] = set()
+        self._validate_distributed_context(*self._distributed_context())
 
         self.dataset_names: list[str] = []
         self.group_ids: list[list[str]] = []
@@ -187,20 +187,68 @@ class DeduplicatedBumiSampler(Sampler[BumiWindowIndex]):
     def set_epoch(self, epoch: int) -> None:
         self.epoch = int(epoch)
 
+    @staticmethod
+    def _environment_rank_world_size() -> tuple[int, int]:
+        world_size_text = os.environ.get("WORLD_SIZE")
+        rank_text = os.environ.get("RANK")
+        if world_size_text is None:
+            return 0, 1
+        world_size = int(world_size_text)
+        if rank_text is not None:
+            return int(rank_text), world_size
+        # LOCAL_RANK is sufficient for the supported single-node launch and is
+        # preferable to silently treating every spawned worker as rank zero.
+        local_rank_text = os.environ.get("LOCAL_RANK")
+        return (int(local_rank_text) if local_rank_text is not None else 0), world_size
+
+    def _distributed_context(self) -> tuple[int, int]:
+        if dist.is_available() and dist.is_initialized():
+            automatic_rank = int(dist.get_rank())
+            automatic_world_size = int(dist.get_world_size())
+        else:
+            automatic_rank, automatic_world_size = self._environment_rank_world_size()
+        rank = automatic_rank if self._rank_override is None else self._rank_override
+        world_size = (
+            automatic_world_size
+            if self._world_size_override is None
+            else self._world_size_override
+        )
+        return int(rank), int(world_size)
+
+    def _validate_distributed_context(self, rank: int, world_size: int) -> None:
+        if world_size <= 0 or not 0 <= rank < world_size:
+            raise ValueError(f"invalid rank/world_size={rank}/{world_size}")
+        if self.samples_per_epoch % world_size != 0:
+            raise ValueError(
+                "samples_per_epoch must be divisible by world_size; padding would duplicate draws"
+            )
+
+    @property
+    def rank(self) -> int:
+        rank, world_size = self._distributed_context()
+        self._validate_distributed_context(rank, world_size)
+        return rank
+
+    @property
+    def world_size(self) -> int:
+        rank, world_size = self._distributed_context()
+        self._validate_distributed_context(rank, world_size)
+        return world_size
+
     def state_dict(self) -> dict[str, int]:
+        rank, world_size = self._distributed_context()
+        self._validate_distributed_context(rank, world_size)
         return {
             "epoch": self.epoch,
             "seed": self.seed,
             "samples_per_epoch": self.samples_per_epoch,
-            "rank": self.rank,
-            "world_size": self.world_size,
+            "world_size": world_size,
         }
 
     def load_state_dict(self, state: dict[str, int]) -> None:
         for key, expected in (
             ("seed", self.seed),
             ("samples_per_epoch", self.samples_per_epoch),
-            ("rank", self.rank),
             ("world_size", self.world_size),
         ):
             if int(state.get(key, -1)) != expected:
@@ -210,13 +258,15 @@ class DeduplicatedBumiSampler(Sampler[BumiWindowIndex]):
         self.set_epoch(int(state["epoch"]))
 
     def summary(self) -> dict[str, Any]:
+        rank, world_size = self._distributed_context()
+        self._validate_distributed_context(rank, world_size)
         return {
             "strategy": "deduplicated_hierarchical_sqrt_duration_v1",
             "samples_per_epoch_global": self.samples_per_epoch,
-            "samples_per_epoch_rank": len(self),
+            "samples_per_epoch_rank": self.samples_per_epoch // world_size,
             "seed": self.seed,
-            "rank": self.rank,
-            "world_size": self.world_size,
+            "rank": rank,
+            "world_size": world_size,
             "datasets": [
                 {
                     "name": name,
@@ -269,11 +319,23 @@ class DeduplicatedBumiSampler(Sampler[BumiWindowIndex]):
         return output
 
     def __iter__(self) -> Iterator[BumiWindowIndex]:
+        rank, world_size = self._distributed_context()
+        self._validate_distributed_context(rank, world_size)
+        context = (rank, world_size)
+        if context not in self._logged_distributed_contexts:
+            Log.info(
+                "[BUMI Train Sampler Effective DDP] "
+                f"rank={rank}, world_size={world_size}, "
+                f"samples_per_epoch_rank={self.samples_per_epoch // world_size}"
+            )
+            self._logged_distributed_contexts.add(context)
         draws = self._global_draws()
-        return iter(draws[self.rank :: self.world_size])
+        return iter(draws[rank::world_size])
 
     def __len__(self) -> int:
-        return self.samples_per_epoch // self.world_size
+        rank, world_size = self._distributed_context()
+        self._validate_distributed_context(rank, world_size)
+        return self.samples_per_epoch // world_size
 
 
 __all__ = [

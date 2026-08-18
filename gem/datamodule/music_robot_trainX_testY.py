@@ -246,7 +246,7 @@ class DataModule(pl.LightningDataModule):
                 probability_max=self.dataset_probability_max,
             )
             shuffle = False
-            Log.info(f"[BUMI Train Sampler] {sampler.summary()}")
+            Log.info(f"[BUMI Train Sampler Construction] {sampler.summary()}")
         return DataLoader(
             self.trainset,
             shuffle=shuffle,

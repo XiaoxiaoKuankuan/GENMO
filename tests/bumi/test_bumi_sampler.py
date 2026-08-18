@@ -51,6 +51,7 @@ def test_sampler_ddp_ratio_reproducibility_and_restore() -> None:
         assert abs(counts[index] / len(first) - probability) < 0.005
 
     sampler.set_epoch(9)
+    assert list(sampler) != first
     state = sampler.state_dict()
     restored = DeduplicatedBumiSampler(
         datasets, samples_per_epoch=52224, seed=17, rank=0, world_size=1
@@ -58,13 +59,48 @@ def test_sampler_ddp_ratio_reproducibility_and_restore() -> None:
     restored.load_state_dict(state)
     assert list(sampler) == list(restored)
 
-    rank0 = DeduplicatedBumiSampler(
+    # A distributed checkpoint is written once by rank zero.  Its sampler
+    # state must be loadable by every rank, which then derives its own shard.
+    rank0_state = DeduplicatedBumiSampler(
         datasets, samples_per_epoch=1024, seed=23, rank=0, world_size=8
-    )
-    rank1 = DeduplicatedBumiSampler(
+    ).state_dict()
+    restored_rank1 = DeduplicatedBumiSampler(
         datasets, samples_per_epoch=1024, seed=23, rank=1, world_size=8
     )
-    draw0 = {item.draw_index for item in rank0}
-    draw1 = {item.draw_index for item in rank1}
-    assert len(draw0) == len(draw1) == 128
-    assert draw0.isdisjoint(draw1)
+    restored_rank1.load_state_dict(rank0_state)
+    assert {item.draw_index % 8 for item in restored_rank1} == {1}
+
+    rank_draws = []
+    for rank in range(8):
+        rank_sampler = DeduplicatedBumiSampler(
+            datasets, samples_per_epoch=1024, seed=23, rank=rank, world_size=8
+        )
+        draws = {item.draw_index for item in rank_sampler}
+        assert len(draws) == 128
+        rank_draws.append(draws)
+    assert len(set().union(*rank_draws)) == 1024
+    assert sum(len(draws) for draws in rank_draws) == 1024
+
+
+def test_sampler_resolves_ddp_context_after_construction(monkeypatch) -> None:
+    """Lightning creates this sampler before torch.distributed is initialized."""
+
+    dataset = FakeDataset("dataset", [120, 240])
+    monkeypatch.delenv("RANK", raising=False)
+    monkeypatch.delenv("WORLD_SIZE", raising=False)
+    monkeypatch.delenv("LOCAL_RANK", raising=False)
+    sampler = DeduplicatedBumiSampler(
+        [dataset], samples_per_epoch=1024, seed=31, probability_max=1.0
+    )
+    assert len(sampler) == 1024
+
+    # Mimic Lightning populating the launch environment after the DataLoader
+    # object already exists but before the rank starts iterating it.
+    monkeypatch.setenv("WORLD_SIZE", "8")
+    monkeypatch.setenv("RANK", "3")
+    assert len(sampler) == 128
+    draws = list(sampler)
+    assert len(draws) == 128
+    assert {item.draw_index % 8 for item in draws} == {3}
+    assert sampler.summary()["rank"] == 3
+    assert sampler.summary()["world_size"] == 8

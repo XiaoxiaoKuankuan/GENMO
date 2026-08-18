@@ -224,7 +224,7 @@ endecoder  = bumi_93d_no_contact
 
 ## 推理输出
 
-`scripts/demo/demo_music_bumi.py` 接收 WAV 或预计算 EDGE35、BUMI checkpoint、CFG scale、DDIM steps、可选帧数及 world root XY/yaw。输出 `.pt` 至少包含：
+`scripts/demo/demo_music_bumi.py` 接收 WAV 或预计算 EDGE35、BUMI checkpoint、CFG scale、DDIM steps、可选帧数及 world root XY/yaw。它默认组合正式的 `gem_bumi_music_only_4set_random_v1` 无 contact-head 架构；只有加载其他架构的 checkpoint 时才显式传 `--exp`，避免把正式 checkpoint 误载入带未训练 contact head 的骨架配置。输出 `.pt` 至少包含：
 
 ```text
 qpos                    [T,28]
@@ -253,7 +253,12 @@ music_path              source path
 
 ```bash
 cd /home/user/liwei/GENMO
-source .venv/bin/activate
+
+# RTX 6000D (sm_120) 必须使用包含 sm_120 kernel 的 CUDA 12.8 环境；仓库原
+# `.venv` 是 torch 2.6.0+cu124，不能用于这台机器。该解释器已在服务器 2
+# 实测完成 CUDA tensor、单 batch forward/backward。
+export GENMO_PYTHON=/data0/user/liwei/envs/GENMO-cu128/bin/python
+$GENMO_PYTHON -c "import torch; assert 'sm_120' in torch.cuda.get_arch_list(); print(torch.__version__, torch.cuda.get_device_name(0))"
 
 export BUMI_BASE=/data0/user/liwei/datasets/bumi_music_genmo_v1
 export BUMI_KINEMATICS_PATH=/data0/user/liwei/datasets/bumi_assets_482138_v1/kinematics/bumi_kinematics_482138_v1.json
@@ -267,7 +272,7 @@ export BUMI_MUSIC_STATS_PATH=$BUMI_BASE/meta/bumi_93d_stats_train_v1.json
 先生成固定传输清单，再在四套 WAV 到齐后执行一次全有或全无的转换：
 
 ```bash
-python tools/data/bumi/build_bumi_transfer_filelists.py \
+$GENMO_PYTHON tools/data/bumi/build_bumi_transfer_filelists.py \
   --selected-root /data0/user/liwei/datasets/bumi_motions_quality_v1 \
   --human-root aistpp=/data0/user/liwei/datasets/music_dance_genmo/AIST++ \
   --human-root aioz_gdance=/data0/user/liwei/datasets/music_dance_genmo/AIOZ-GDANCE \
@@ -275,7 +280,7 @@ python tools/data/bumi/build_bumi_transfer_filelists.py \
   --human-root compas3d=/data0/user/liwei/datasets/music_dance_genmo/CoMPAS3D \
   --output /data0/user/liwei/datasets/bumi_transfer_plan_v1
 
-python tools/data/bumi/build_bumi_music_dataset.py \
+$GENMO_PYTHON tools/data/bumi/build_bumi_music_dataset.py \
   --selected-root /data0/user/liwei/datasets/bumi_motions_quality_v1 \
   --human-root aistpp=/data0/user/liwei/datasets/music_dance_genmo/AIST++ \
   --human-root aioz_gdance=/data0/user/liwei/datasets/music_dance_genmo/AIOZ-GDANCE \
@@ -300,12 +305,12 @@ for ITEM in \
   "FineDance finedance_bumi" \
   "CoMPAS3D compas3d_bumi"; do
   set -- $ITEM
-  python tools/data/bumi/validate_bumi_music_dataset.py \
+  $GENMO_PYTHON tools/data/bumi/validate_bumi_music_dataset.py \
     --root "$BUMI_BASE/$1" --dataset-name "$2" \
     --kinematics "$BUMI_KINEMATICS_PATH" --splits train val test
 done
 
-python tools/data/bumi/compute_bumi_93d_stats.py \
+$GENMO_PYTHON tools/data/bumi/compute_bumi_93d_stats.py \
   --kinematics "$BUMI_KINEMATICS_PATH" \
   --dataset "aistpp_bumi=$AISTPP_BUMI_ROOT" \
   --dataset "aioz_gdance_bumi=$AIOZ_GDANCE_BUMI_ROOT" \
@@ -318,18 +323,21 @@ python tools/data/bumi/compute_bumi_93d_stats.py \
 `max_steps` 覆盖。随机初始化实验不得设置 `pretrain_ckpt`：
 
 ```bash
+CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 \
 NCCL_CUMEM_HOST_ENABLE=0 NCCL_IB_DISABLE=1 NCCL_SOCKET_IFNAME=lo \
-TORCH_NCCL_BLOCKING_WAIT=1 python -u scripts/train.py \
+TORCH_NCCL_BLOCKING_WAIT=1 $GENMO_PYTHON -u scripts/train.py \
   exp=gem_bumi_music_only_4set_random_v1 \
   pl_trainer.max_steps=1 use_wandb=false
 
+CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 \
 NCCL_CUMEM_HOST_ENABLE=0 NCCL_IB_DISABLE=1 NCCL_SOCKET_IFNAME=lo \
-TORCH_NCCL_BLOCKING_WAIT=1 python -u scripts/train.py \
+TORCH_NCCL_BLOCKING_WAIT=1 $GENMO_PYTHON -u scripts/train.py \
   exp=gem_bumi_music_only_4set_random_v1 \
   pl_trainer.max_steps=100 use_wandb=false
 
+CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 \
 NCCL_CUMEM_HOST_ENABLE=0 NCCL_IB_DISABLE=1 NCCL_SOCKET_IFNAME=lo \
-TORCH_NCCL_BLOCKING_WAIT=1 python -u scripts/train.py \
+TORCH_NCCL_BLOCKING_WAIT=1 $GENMO_PYTHON -u scripts/train.py \
   exp=gem_bumi_music_only_4set_random_v1
 ```
 

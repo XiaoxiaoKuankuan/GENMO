@@ -75,6 +75,11 @@ def main() -> None:
     source.add_argument("--edge35", type=Path)
     parser.add_argument("--checkpoint", required=True, type=Path)
     parser.add_argument("--output", required=True, type=Path)
+    parser.add_argument(
+        "--exp",
+        default="gem_bumi_music_only_4set_random_v1",
+        help="Hydra BUMI experiment whose architecture matches the checkpoint",
+    )
     parser.add_argument("--num-frames", type=int)
     parser.add_argument("--start-sec", type=float, default=0.0)
     parser.add_argument("--duration-sec", type=float)
@@ -115,7 +120,7 @@ def main() -> None:
     features, has_music = align_music_frames(features, args.num_frames)
 
     with initialize_config_dir(version_base="1.3", config_dir=str(REPO_ROOT / "configs")):
-        cfg = compose(config_name="train", overrides=["exp=gem_bumi_music_only_4set"])
+        cfg = compose(config_name="train", overrides=[f"exp={args.exp}"])
     model = instantiate(cfg.model, _recursive_=False)
     load_pretrained_model(model, args.checkpoint)
     with open_dict(model.pipeline.denoiser3d.model_cfg.diffusion):
@@ -166,6 +171,7 @@ def main() -> None:
     artifact["seed"] = args.seed
     artifact["cfg_scale"] = float(args.cfg_scale)
     artifact["ddim_steps"] = str(args.ddim_steps)
+    artifact["experiment_config"] = str(args.exp)
     output = args.output.expanduser().resolve()
     output.parent.mkdir(parents=True, exist_ok=True)
     torch.save(artifact, output)

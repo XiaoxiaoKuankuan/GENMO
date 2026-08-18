@@ -265,13 +265,11 @@ class BumiMusicGEM(GEM):
             "anchor_mode": self.endecoder.anchor_mode,
             "music_path": str(data.get("music_path", "")),
             "world_anchor_applied": data.get("world_anchor") is not None,
-            "pred_foot_contact_logits": (
-                None
-                if outputs.get("pred_foot_contact_logits") is None
-                else outputs["pred_foot_contact_logits"][0, :length_value]
-            ),
             "net_outputs": outputs,
         }
+        contact_logits = outputs.get("pred_foot_contact_logits")
+        if isinstance(contact_logits, torch.Tensor):
+            result["pred_foot_contact_logits"] = contact_logits[0, :length_value]
         return result
 
     def load_pretrained_model(self, ckpt_path):
