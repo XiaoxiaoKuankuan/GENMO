@@ -1,5 +1,9 @@
 # BUMI-native Music-only GENMO
 
+> 本文是数据契约、工程实现、训练和验证说明。若要从方法角度理解模型为什么采用
+> qpos28、93D、canonicalization、音乐条件扩散和 Torch FK，请先读
+> [BUMI-GENMO 方法与框架讲解](BUMI_GENMO_METHOD_CN.md)。
+
 ## 2026-08-19 本地与服务器 2 验收结论
 
 结论：**正式数据、代码、CUDA 环境和训练配置均已具备训练条件，而且服务器 2
