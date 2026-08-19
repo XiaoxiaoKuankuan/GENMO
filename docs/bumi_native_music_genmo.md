@@ -13,7 +13,7 @@
 | Git 分支 | 本地和服务器 2 均为 `feature/bumi-music-only` |
 | Git commit | 两端均为 `3bcc030d2e9911c604035e478515e92dbaab8ea5` |
 | 工作区 | 核查时两端均干净；本次只在本地修改本说明文档，训练代码未变 |
-| 自动化测试 | 指定真实 kinematics 后 BUMI `37 passed`；全仓 `499 passed, 1 skipped, 3 subtests passed` |
+| 自动化测试 | 指定真实 kinematics 后 BUMI `42 passed`；全仓 `504 passed, 1 skipped, 3 subtests passed` |
 | 服务器 Python | `/data0/user/liwei/envs/GENMO-cu128/bin/python`，PyTorch `2.7.1+cu128` |
 | GPU 架构 | 8 × RTX 6000D；PyTorch wheel 已包含 `sm_120` kernel |
 | 正式动作数 | 6,610，严格 split 为 `5537 / 547 / 526` |
@@ -345,7 +345,7 @@ endecoder  = bumi_93d_no_contact
 
 ## 推理输出
 
-`scripts/demo/demo_music_bumi.py` 接收 WAV 或预计算 EDGE35、BUMI checkpoint、CFG scale、DDIM steps、可选帧数及 world root XY/yaw。它默认组合正式的 `gem_bumi_music_only_4set_random_v1` 无 contact-head 架构；只有加载其他架构的 checkpoint 时才显式传 `--exp`，避免把正式 checkpoint 误载入带未训练 contact head 的骨架配置。输出 `.pt` 至少包含：
+`scripts/demo/demo_music_bumi.py` 接收 WAV 或预计算 EDGE35、BUMI checkpoint、CFG scale、DDIM steps、可选帧数及 world root XY/yaw。它默认组合正式的 `gem_bumi_music_only_4set_random_v1` 无 contact-head 架构；只有加载其他架构的 checkpoint 时才显式传 `--exp`，避免把正式 checkpoint 误载入带未训练 contact head 的骨架配置。脚本固定 Python/NumPy/PyTorch/CUDA seed，校验 checkpoint 的 music/93D 架构，保存 checkpoint、kinematics 和 stats SHA，并输出速度、加速度、jerk、关节限位、root 和 beat 等运动学报告。提供配对 target 时还会报告 joint/root/FK GT error；提供 MJCF 时可直接渲染并选择是否混入原音乐。输出 `.pt` 至少包含：
 
 ```text
 qpos                    [T,28]
@@ -358,9 +358,160 @@ qpos_order              mujoco_native
 feature_dim             93
 anchor_mode             first_frame_xy_yaw_default_height
 music_path              source path
+normalized_motion_93d   [T,93]
+music_features          [T,35]
+checkpoint/stats/asset  path + SHA256
 ```
 
 推理不调用 SMPL、GMR、在线 IK 或 pred_cam。未提供 world anchor 时，`qpos` 与 canonical qpos 相同；提供 anchor 时，`qpos` 是放回世界的轨迹，而 `qpos_canonical` 始终保留。
+
+## Checkpoint Demo、ONNX 导出和完整验证链路
+
+### 边界设计
+
+BUMI 不能复用旧 `music_only_onnx.py` 的 SMPL 图：旧图把动作、camera 和 static head
+固定为 `151 + 3 + 6`，而正式 BUMI 是 93D 且两个附加 head 均关闭。新增链路为：
+
+```text
+WAV / EDGE35
+  → PyTorch checkpoint demo
+  → normalized motion93
+  → BUMI EnDecoder
+  → canonical/world qpos28
+  → Torch FK / kinematic metrics / MuJoCo render
+
+checkpoint
+  → export_bumi_music_onnx.py
+  → fixed [1,120,93] ONNX denoiser step
+  → validate_bumi_music_onnx.py
+  → same noise + same repository DDIM scheduler
+  → compare 93D + qpos28 + FK
+  → ONNX BUMI motion artifact
+```
+
+ONNX 内包含 EDGE35 embedding、conditional/unconditional 两个 CFG 分支和一次
+Transformer x-start 预测；两个 CFG 分支在图内合成 batch=2，只调用一次 Transformer。
+图只输出 `pred_motion[1,120,93]`。DDIM 循环、统计量反归一化、rot6d→quaternion、
+qpos28 组合和 FK 不重复导出，继续使用仓库权威实现。这样不会在图中展开 20/50 份
+Transformer，也不会产生另一套扩散公式。
+
+相关入口：
+
+| 入口 | 用途 |
+|---|---|
+| `scripts/demo/demo_music_bumi.py` | checkpoint 固定 seed 生成、指标、可选 GT 和带音乐渲染 |
+| `tools/export/export_bumi_music_onnx.py` | 导出 batch=1、T=120、图内 CFG 的 93D 单步网络 |
+| `tools/eval/validate_bumi_music_onnx.py` | PyTorch/ONNX 单步及完整 DDIM、qpos、FK parity |
+| `tools/eval/render_bumi_motion.py` | 渲染 PyTorch 或 ONNX 产生的 qpos28 artifact |
+
+### 1. 验证一个训练 checkpoint
+
+下面以服务器 2 的 `s090000.ckpt` 为例。训练尚未结束时不要与正式作业争抢 GPU；
+可以等 checkpoint 保存完成后在另一台机器验证，或明确选择有余量的 GPU。
+
+```bash
+cd /home/user/liwei/GENMO
+export GENMO_PYTHON=/data0/user/liwei/envs/GENMO-cu128/bin/python
+export BUMI_BASE=/data0/user/liwei/datasets/bumi_music_genmo_v1
+export BUMI_KINEMATICS_PATH=/data0/user/liwei/datasets/bumi_assets_482138_v1/kinematics/bumi_kinematics_482138_v1.json
+export BUMI_MUSIC_STATS_PATH=$BUMI_BASE/meta/bumi_93d_stats_train_v1.json
+export BUMI_MJCF=/data0/user/liwei/datasets/bumi_assets_482138_v1/mjcf/bumi3.xml
+export CKPT=/data0/user/liwei/experiments/genmo/gem_bumi_music_only_4set_random_v1/version_0/checkpoints/s090000.ckpt
+
+# 替换成要验证的真实音乐；公平比较不同 checkpoint 时保持音乐、区间和 seed 不变。
+export AUDIO=/absolute/path/to/music.wav
+mkdir -p outputs/bumi_checkpoint_validation/s090000
+
+CUDA_VISIBLE_DEVICES=0 $GENMO_PYTHON scripts/demo/demo_music_bumi.py \
+  --wav "$AUDIO" \
+  --checkpoint "$CKPT" \
+  --kinematics "$BUMI_KINEMATICS_PATH" \
+  --stats "$BUMI_MUSIC_STATS_PATH" \
+  --start-sec 0 --duration-sec 4 --num-frames 120 \
+  --seed 42 --cfg-scale 2.5 --ddim-steps 50 \
+  --world-root-x 0 --world-root-y 0 --world-root-yaw 0 \
+  --output outputs/bumi_checkpoint_validation/s090000/motion.pt \
+  --report outputs/bumi_checkpoint_validation/s090000/report.json \
+  --render-mjcf "$BUMI_MJCF" \
+  --video outputs/bumi_checkpoint_validation/s090000/motion_with_audio.mp4 \
+  --mux-audio
+```
+
+如果音乐、动作是同一正式样本，再添加以下参数可计算配对 GT 指标。目标 qpos 会先用
+同一个 BUMI codec canonicalize，避免把 legacy 世界坐标直接与生成 canonical 坐标比较：
+
+```bash
+  --target-motion "$BUMI_BASE/AIST++/motions/<sample_id>.pt" \
+  --target-start-frame 0
+```
+
+### 2. 导出 BUMI ONNX
+
+导出环境必须安装 `onnx`；下面的检查不会安装或修改环境：
+
+2026-08-19 实查服务器 2 的 `GENMO-cu128` 环境尚未安装 `onnx`、`onnxruntime`
+或 `mujoco`。因此该环境当前可以运行不渲染的 PyTorch checkpoint demo，但执行导出、
+ONNX parity 或 MuJoCo render 前必须显式补齐对应依赖；脚本不会静默降级或假装成功。
+
+```bash
+$GENMO_PYTHON -c "import onnx; print(onnx.__version__)"
+
+export ONNX_DIR=outputs/onnx/bumi_s090000_t120
+mkdir -p "$ONNX_DIR"
+CUDA_VISIBLE_DEVICES=0 $GENMO_PYTHON tools/export/export_bumi_music_onnx.py \
+  --ckpt "$CKPT" \
+  --kinematics "$BUMI_KINEMATICS_PATH" \
+  --stats "$BUMI_MUSIC_STATS_PATH" \
+  --seq-len 120 --opset 18 --device cuda \
+  --output "$ONNX_DIR/bumi_music_denoiser_t120.onnx" \
+  --overwrite
+```
+
+导出同时生成 `.onnx.json`，记录 checkpoint/ONNX 外部权重/kinematics/stats SHA、
+固定输入输出 shape、opset、checkpoint step/epoch 和 PyTorch reference 统计。
+
+### 3. 单步和完整 DDIM parity
+
+CUDA 验证需要带 `CUDAExecutionProvider` 的 ONNX Runtime；没有时可用 `--provider cpu`
+验证正确性，但 50-step 大模型会明显更慢：
+
+```bash
+$GENMO_PYTHON -c "import onnxruntime as ort; print(ort.__version__, ort.get_available_providers())"
+
+CUDA_VISIBLE_DEVICES=0 $GENMO_PYTHON tools/eval/validate_bumi_music_onnx.py \
+  --audio "$AUDIO" --audio-start-sec 0 --audio-duration-sec 4 \
+  --ckpt "$CKPT" \
+  --onnx "$ONNX_DIR/bumi_music_denoiser_t120.onnx" \
+  --kinematics "$BUMI_KINEMATICS_PATH" \
+  --stats "$BUMI_MUSIC_STATS_PATH" \
+  --seq-len 120 --seed 42 --cfg-scale 2.5 \
+  --provider cuda --device cuda \
+  --full-ddim-steps 50 \
+  --output-dir "$ONNX_DIR/validation"
+```
+
+校验器首先核对 checkpoint/asset/stats SHA，随后比较同一 noisy motion 和 timestep 的
+单步输出；完整模式让两个后端使用相同初始噪声和同一 DDIM scheduler，并依次检查
+normalized 93D、canonical qpos28 和 FK positions。任一输出非 finite、shape 不一致或
+超出容差都会非零退出。成功时输出：
+
+```text
+validation_report.json
+onnx_pred_motion_step_93d.pt
+onnx_bumi_motion.pt
+```
+
+最后一个 artifact 已将 canonical 轨迹放置到世界原点和默认 root 高度，可直接渲染：
+
+```bash
+$GENMO_PYTHON tools/eval/render_bumi_motion.py \
+  --motion "$ONNX_DIR/validation/onnx_bumi_motion.pt" \
+  --mjcf "$BUMI_MJCF" \
+  --output "$ONNX_DIR/validation/onnx_bumi_motion.mp4"
+```
+
+这条 ONNX parity 链路验证神经网络、DDIM、93D 解码和 FK 数值一致性；MuJoCo 渲染仍是
+逐帧 `mj_forward`，不代表 GMT 控制器动力学跟踪已经验证。
 
 ## 运动学评估与动力学验证
 
