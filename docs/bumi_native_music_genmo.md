@@ -1,5 +1,126 @@
 # BUMI-native Music-only GENMO
 
+## 2026-08-19 本地与服务器 2 验收结论
+
+结论：**正式数据、代码、CUDA 环境和训练配置均已具备训练条件，而且服务器 2
+上的正式随机初始化训练已经启动并稳定运行。当前不要再启动第二个同配置作业。**
+
+本次对 `/home/weili/GENMO` 和服务器 2 的
+`/home/user/liwei/GENMO` 做了逐项只读核对：
+
+| 检查项 | 结果 |
+|---|---|
+| Git 分支 | 本地和服务器 2 均为 `feature/bumi-music-only` |
+| Git commit | 两端均为 `3bcc030d2e9911c604035e478515e92dbaab8ea5` |
+| 工作区 | 核查时两端均干净；本次只在本地修改本说明文档，训练代码未变 |
+| 自动化测试 | 指定真实 kinematics 后 BUMI `37 passed`；全仓 `499 passed, 1 skipped, 3 subtests passed` |
+| 服务器 Python | `/data0/user/liwei/envs/GENMO-cu128/bin/python`，PyTorch `2.7.1+cu128` |
+| GPU 架构 | 8 × RTX 6000D；PyTorch wheel 已包含 `sm_120` kernel |
+| 正式动作数 | 6,610，严格 split 为 `5537 / 547 / 526` |
+| EDGE35 | 2,548 个唯一文件；动作与特征逐条等长 |
+| 资产绑定 | MJCF `482138…`，kinematics `226306…`，均与数据 metadata 一致 |
+| 93D stats | 只由 5,537 条 train 计算，非 placeholder，dataset fingerprint 已通过启动校验 |
+| 正式作业 | 8 卡 DDP 正在 `tmux: bumi-train` 中运行，输出为 `version_0` |
+
+2026-08-19 11:51 CST 的服务器快照已完成 Epoch 1896，约 96.7k/500k step；
+每 epoch 51 step，速度约 2.25～2.34 step/s，`loss_epoch` 近期约 0.24～0.27，
+日志未出现 NaN/Inf，已正常生成 `s010000.ckpt` 至 `s090000.ckpt`。
+进程列表中的大量同名 Python 进程是 8 个 DDP rank 及其 DataLoader worker，
+不是重复启动了多份训练。
+
+训练总 loss 的代表点为 Epoch 0 `3.02`、100 `0.403`、500 `0.339`、
+1000 `0.309`、1500 `0.262`、1897 `0.256`；优化过程在稳定下降。
+这只能证明训练数值健康，是否收敛仍需结合四数据集 validation 指标和固定音乐生成结果，
+不能仅凭训练 loss 判定。
+
+这里的“可以训练”只表示数据契约、可微 FK、扩散训练和运动学损失链路可用；
+它不等于模型已收敛，也不证明 GMT 动力学可跟踪、实物平衡或扭矩安全。
+
+## 为 BUMI-native 训练新增和修改了什么
+
+### 新增的独立 BUMI 路径
+
+这次实现没有把原 SMPL 151D 路径改造成机器人专用代码，而是在公共扩散主干旁新增
+一条显式 `motion_backend=bumi` 的完整路径：
+
+| 层次 | 主要文件 | 职责 |
+|---|---|---|
+| 正式实验 | `configs/exp/gem_bumi_music_only_4set_random_v1.yaml` | 随机初始化、四数据集、500k step、8 卡 DDP |
+| 数据配置 | `configs/data/music_robot/trainX_testY.yaml` 和 `configs/{train,test}_datasets/*bumi*` | 四数据集 root、split 和严格 reader 参数 |
+| Dataset | `gem/datasets/music_dance/music_dance_bumi.py` | 读取 qpos28/EDGE35、同步 crop/pad、校验 manifest/SHA/资产契约 |
+| DataModule | `gem/datamodule/music_robot_trainX_testY.py` | 组合四个 reader、校验 stats fingerprint、安装自定义 sampler |
+| Sampler | `gem/datasets/music_dance/bumi_sampler.py` | 去重音乐分层采样、确定性 DDP 分片和 `set_epoch` |
+| 93D codec | `gem/robots/bumi/feature_codec.py` | qpos28、first-frame canonicalization、rot6d 和 93D 编解码 |
+| Torch FK | `gem/robots/bumi/kinematics.py` | 由版本化真实 MJCF 导出参数执行可微前向运动学 |
+| EnDecoder | `gem/robots/bumi/endecoder.py` | 归一化、反归一化、权威 qpos 组合和 FK 输出 |
+| GEM 模型 | `gem/bumi_gem.py` | 绕开 SMPL/camera/mesh，建立纯 music→BUMI 扩散训练/验证/预测 |
+| Pipeline/loss | `gem/pipeline/bumi_music_pipeline.py`、`gem/robots/bumi/losses.py` | 93D diffusion 目标、物理辅助损失及 raw/normalized/weighted 日志 |
+| Checkpoint adapter | `gem/utils/bumi_checkpoint_adapter.py` | 可选迁移 SMPL music Transformer；正式 v1 不使用 |
+| 数据工具 | `tools/data/bumi/*.py` | 质量筛选、转换、传输清单、严格校验和 train-only stats |
+| 资产工具 | `tools/robots/*.py` | MJCF→Torch FK 导出及 MuJoCo parity 检查 |
+| 推理/评估 | `scripts/demo/demo_music_bumi.py`、`tools/eval/*bumi*` | music→qpos28、运动学指标和离线渲染 |
+| 测试 | `tests/bumi/` | 数据契约、93D/FK、loss、sampler、adapter 和转换失败路径 |
+
+### 对公共 GENMO 框架的最小改造
+
+公共代码只增加后端扩展点，没有改变旧 SMPL 实验的默认语义：
+
+- `gem/network/gem_diffusion.py` 和 `gem/network/gem_cfg_sampler.py` 不再把动作维度
+  写死为 151，可由网络配置显式使用 93D；CFG 仍复用原 diffusion 逻辑。
+- `gem/gem.py`、`gem/pipeline/gem_pipeline.py` 和 `configs/model/gem.yaml`
+  增加显式 motion backend/动态动作维度接口；默认仍是 SMPL。
+- `gem/utils/smpl_augment.py` 把通用旋转辅助函数扩展为可被 BUMI codec 复用，
+  原 SMPL 调用保持兼容。
+- 进度条修正 DDP sampler 下的 epoch 总步数显示；不会再把每卡/全局样本数混淆。
+- 正式 BUMI 网络使用原 16 层 RoPE diffusion Transformer 和 EDGE35 music CFG，
+  只替换动作输入/输出层及机器人数据、解码和损失路径。
+
+从 BUMI 功能开始的提交到当前 HEAD 共新增/修改 77 个文件，约新增 11.5k 行；
+原 `gem_smpl_music_only_4set` 配置、151D 表示和 SMPL 推理路径仍然保留。
+
+## 数据集做了哪些修改
+
+原始人体数据不被覆盖。数据处理采用“原人体 ID → 离线 GMR BUMI pickle → 自动质量筛选
+→ 严格正式格式”的可追溯链路：
+
+1. 对 7,286 条 legacy BUMI 动作自动计算 root/joint 速度、加速度、jerk、
+   root 高度/倾斜及地面风格等指标。
+2. 自动判定得到 PASS 6,610、REJECT 287、REVIEW 389；正式数据只接收 PASS，
+   `include_review=false`，不需要人工挑选。
+3. 筛选目录以硬链接保留 PASS，原始动作文件不改写；每条记录保存源 SHA、质量配置 SHA、
+   MJCF SHA、判定和原因。
+4. 正式转换把 legacy root quaternion 从 `xyzw` 变为 `wxyz`，归一化并修复
+   `q/-q` 时间符号；21 个关节按完整名称映射到 `482138…` MJCF 的 qpos 顺序。
+5. 保持原 root XYZ 和原人体 sample basename，不重新贴鞋底地面；因此 v1 明确关闭
+   contact、sliding 和 sole penetration 训练损失。
+6. 继承原人体 train/val/test split，把动作与正式 EDGE35 逐帧配对；WAV 用于审计、
+   demo 和重算特征，不进入训练 batch。
+7. 转换先写 staging，所有文件、重名、帧数和 SHA 均通过后再原子发布；manifest
+   记录 motion/music/audio 路径及三者 SHA。
+
+正式数据结果为：
+
+| 数据集 | 原始条数 | PASS | REJECT | REVIEW | train / val / test | 唯一 EDGE35 | WAV |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| AIST++ | 1,020 | 824 | 121 | 75 | 790 / 15 / 19 | 824 | 60 |
+| AIOZ-GDANCE | 6,011 | 5,608 | 111 | 292 | 4614 / 513 / 481 | 1,578 | 1,578 |
+| FineDance | 183 | 111 | 54 | 18 | 99 / 1 / 11 | 111 | 111 |
+| CoMPAS3D | 72 | 67 | 1 | 4 | 34 / 18 / 15 | 35 | 35 |
+| 合计 | 7,286 | 6,610 | 287 | 389 | 5537 / 547 / 526 | 2,548 | 1,784 |
+
+拒绝/复核原因由代码自动记录，主要包括 joint velocity/acceleration/jerk 异常、
+root linear/angular velocity 异常、持续或碎片化贴地动作，以及低 root 姿态复核。
+完整阈值、优先级和统计字段见 [BUMI3 重定向动作预筛选](bumi_motion_quality_filter.md)。
+
+服务器 2 的正式目录为：
+
+```text
+/data0/user/liwei/datasets/
+├── bumi_motions_quality_v1/   # 3.6 GiB，自动筛选结果和 6,610 条 PASS
+├── bumi_assets_482138_v1/     # 绑定的 MJCF、mesh、IK 和 kinematics
+└── bumi_music_genmo_v1/       # 15 GiB，四套正式 motion/EDGE35/WAV/manifest/stats
+```
+
 ## 目标与边界
 
 这条路径让 GENMO 直接学习 BUMI 机器人状态，而不是先生成 SMPL 人体动作、再在在线推理阶段调用 GMR/IK。模型输入仍是 EDGE baseline35 音乐特征，生成主干仍是带 RoPE 的 16 层扩散 Transformer、DDIM 和 CFG；动作输出改为 BUMI 93D 表示，并确定性解码成 qpos28。
@@ -247,7 +368,7 @@ music_path              source path
 
 `render_bumi_motion.py` 对每帧设置 qpos 后只调用 `mujoco.mj_forward` 渲染。FK parity 同样只比较几何。它们不证明 GMT 可跟踪、机器人不会跌倒或扭矩可行。下一阶段必须执行“生成轨迹 → GMT → MuJoCo `mj_step` dynamics tracking”才能评估这些声明。
 
-## 服务器 2 构建、验收与训练
+## 服务器 2 路径、验收与训练命令
 
 服务器 2 的固定资产路径如下；MJCF SHA 必须是 `482138…`，不能替换为 OMG/GMR-CPP 的其他版本：
 
@@ -268,6 +389,108 @@ export FINEDANCE_BUMI_ROOT=$BUMI_BASE/FineDance
 export COMPAS3D_BUMI_ROOT=$BUMI_BASE/CoMPAS3D
 export BUMI_MUSIC_STATS_PATH=$BUMI_BASE/meta/bumi_93d_stats_train_v1.json
 ```
+
+### 当前作业：只监控，不要重复启动
+
+服务器 2 当前已有一个正式 8 卡作业。查看状态：
+
+```bash
+ssh -p 50031 user@112.65.216.193
+tmux ls
+tmux attach -t bumi-train
+
+# 在 tmux 内按 Ctrl-b，再按 d，只分离终端，不会停止训练。
+# 不进入 tmux 也可以只读日志：
+tail -f /data0/user/liwei/experiments/genmo/gem_bumi_music_only_4set_random_v1/formal_train.log
+```
+
+核对主作业、GPU 和 checkpoint：
+
+```bash
+pgrep -af 'scripts/train.py.*gem_bumi_music_only_4set_random_v1' | head
+nvidia-smi
+ls -lh /data0/user/liwei/experiments/genmo/gem_bumi_music_only_4set_random_v1/version_0/checkpoints
+```
+
+### 中断后的完整状态续训
+
+只有当前训练进程确实退出后才执行。必须保持相同的 `output_dir`，并使用
+`resume_mode=last`；它会恢复模型、optimizer、scheduler、epoch、global step 和 sampler
+的 epoch 语义。**不要用 `ckpt_path` 代替 `resume_mode`**：`ckpt_path` 只做
+weights-only 初始化，会重置训练状态。
+
+```bash
+tmux new -s bumi-train-resume
+
+cd /home/user/liwei/GENMO
+export GENMO_PYTHON=/data0/user/liwei/envs/GENMO-cu128/bin/python
+export BUMI_BASE=/data0/user/liwei/datasets/bumi_music_genmo_v1
+export BUMI_KINEMATICS_PATH=/data0/user/liwei/datasets/bumi_assets_482138_v1/kinematics/bumi_kinematics_482138_v1.json
+export AISTPP_BUMI_ROOT=$BUMI_BASE/AIST++
+export AIOZ_GDANCE_BUMI_ROOT=$BUMI_BASE/AIOZ-GDANCE
+export FINEDANCE_BUMI_ROOT=$BUMI_BASE/FineDance
+export COMPAS3D_BUMI_ROOT=$BUMI_BASE/CoMPAS3D
+export BUMI_MUSIC_STATS_PATH=$BUMI_BASE/meta/bumi_93d_stats_train_v1.json
+export CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
+export NCCL_CUMEM_HOST_ENABLE=0
+export NCCL_IB_DISABLE=1
+export NCCL_SOCKET_IFNAME=lo
+export TORCH_NCCL_BLOCKING_WAIT=1
+
+RUN_ROOT=/data0/user/liwei/experiments/genmo/gem_bumi_music_only_4set_random_v1
+$GENMO_PYTHON -u scripts/train.py \
+  exp=gem_bumi_music_only_4set_random_v1 \
+  output_dir="$RUN_ROOT" \
+  resume_mode=last \
+  2>&1 | tee -a "$RUN_ROOT/formal_train.log"
+```
+
+要固定从某个 checkpoint 完整续训，可把上一条命令的 `resume_mode=last` 换成：
+
+```bash
+resume_mode=/data0/user/liwei/experiments/genmo/gem_bumi_music_only_4set_random_v1/version_0/checkpoints/s090000.ckpt
+```
+
+### 从随机初始化重新训练
+
+同样只能在 8 张卡空闲时执行。使用新的 output root，避免覆盖或混淆当前
+`version_0`；正式配置已经固定 `pretrain_ckpt=null` 和 `checkpoint_adapter=null`。
+
+```bash
+tmux new -s bumi-train-fresh
+
+cd /home/user/liwei/GENMO
+export GENMO_PYTHON=/data0/user/liwei/envs/GENMO-cu128/bin/python
+export BUMI_BASE=/data0/user/liwei/datasets/bumi_music_genmo_v1
+export BUMI_KINEMATICS_PATH=/data0/user/liwei/datasets/bumi_assets_482138_v1/kinematics/bumi_kinematics_482138_v1.json
+export AISTPP_BUMI_ROOT=$BUMI_BASE/AIST++
+export AIOZ_GDANCE_BUMI_ROOT=$BUMI_BASE/AIOZ-GDANCE
+export FINEDANCE_BUMI_ROOT=$BUMI_BASE/FineDance
+export COMPAS3D_BUMI_ROOT=$BUMI_BASE/CoMPAS3D
+export BUMI_MUSIC_STATS_PATH=$BUMI_BASE/meta/bumi_93d_stats_train_v1.json
+export CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
+export NCCL_CUMEM_HOST_ENABLE=0
+export NCCL_IB_DISABLE=1
+export NCCL_SOCKET_IFNAME=lo
+export TORCH_NCCL_BLOCKING_WAIT=1
+
+RUN_ROOT=/data0/user/liwei/experiments/genmo/gem_bumi_music_only_4set_random_v1_rerun
+mkdir -p "$RUN_ROOT"
+$GENMO_PYTHON -u scripts/train.py \
+  exp=gem_bumi_music_only_4set_random_v1 \
+  output_dir="$RUN_ROOT" \
+  use_wandb=false \
+  2>&1 | tee "$RUN_ROOT/formal_train.log"
+```
+
+上述命令使用配置内的 8 GPU、每卡 batch 128、global batch 1024、500k step、
+AdamW `2e-4`、300k/450k 学习率减半和每 10k step 保存。`samples_per_epoch=52224`
+是全局样本数，因此每个 rank 每 epoch 6,528 条，`6528 / 128 = 51 step/epoch`。
+
+### 数据重新构建命令（当前服务器不需要重跑）
+
+以下命令仅用于数据或资产发生版本变化时重建。当前服务器 2 已完成构建、严格扫描和
+stats 计算；训练期间不要重复执行全量 SHA 扫描或重建，以免争用 I/O。
 
 先生成固定传输清单，再在四套 WAV 到齐后执行一次全有或全无的转换：
 
@@ -319,8 +542,8 @@ $GENMO_PYTHON tools/data/bumi/compute_bumi_93d_stats.py \
   --output "$BUMI_MUSIC_STATS_PATH"
 ```
 
-单 batch、显存和 100-step smoke 通过后，正式训练使用同一入口并去掉
-`max_steps` 覆盖。随机初始化实验不得设置 `pretrain_ckpt`：
+如果将来重建了数据，必须重新跑单 batch 和 100-step smoke，再启动正式训练。
+随机初始化实验不得设置 `pretrain_ckpt`：
 
 ```bash
 CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 \
@@ -334,11 +557,6 @@ NCCL_CUMEM_HOST_ENABLE=0 NCCL_IB_DISABLE=1 NCCL_SOCKET_IFNAME=lo \
 TORCH_NCCL_BLOCKING_WAIT=1 $GENMO_PYTHON -u scripts/train.py \
   exp=gem_bumi_music_only_4set_random_v1 \
   pl_trainer.max_steps=100 use_wandb=false
-
-CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 \
-NCCL_CUMEM_HOST_ENABLE=0 NCCL_IB_DISABLE=1 NCCL_SOCKET_IFNAME=lo \
-TORCH_NCCL_BLOCKING_WAIT=1 $GENMO_PYTHON -u scripts/train.py \
-  exp=gem_bumi_music_only_4set_random_v1
 ```
 
 这些检查只验证数据、运动学、生成训练和运动学指标，不声明 GMT 动力学可跟踪、平衡或扭矩可行。
