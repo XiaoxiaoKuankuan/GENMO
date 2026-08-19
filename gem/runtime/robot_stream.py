@@ -23,7 +23,6 @@ from gem.gmr_udp_bridge import SMP1PacketEncoder
 from gem.runtime.gmt_trajectory import (
     BUMI_QPOS_DIM,
     TRAJECTORY_PLAN_FRAMES,
-    resample_qpos_timeline,
 )
 from gem.smplx_gmr_reference import SMPLXGMRReference
 
@@ -365,40 +364,102 @@ class GMRMotionRetargetSession:
 
 
 class IncrementalQposTimeline:
-    """Append native 30 Hz qpos while exposing an exact 50 Hz timeline."""
+    """Append native 30 Hz qpos on the fixed global 50 Hz sample grid.
+
+    Only the newly available target samples are interpolated.  The last source
+    sample from the previous chunk is retained as the interpolation boundary;
+    previously emitted target samples are final and are never recomputed.
+    """
 
     def __init__(self) -> None:
-        self._source = np.empty((0, BUMI_QPOS_DIM), dtype=np.float32)
-        self._target = np.empty((0, BUMI_QPOS_DIM), dtype=np.float32)
+        self._source_frames = 0
+        self._last_source: np.ndarray | None = None
+        self._target_frames = 0
+        self._target_chunks: list[np.ndarray] = []
 
     @property
     def source_frames(self) -> int:
-        return len(self._source)
+        return self._source_frames
 
     @property
     def target_frames(self) -> int:
-        return len(self._target)
+        return self._target_frames
 
     def append(self, values: np.ndarray) -> np.ndarray:
-        qpos = np.asarray(values, dtype=np.float32)
+        qpos = np.asarray(values, dtype=np.float32).copy()
         if qpos.ndim != 2 or qpos.shape[1] != BUMI_QPOS_DIM or len(qpos) <= 0:
             raise ValueError(f"qpos chunk must have shape [T,{BUMI_QPOS_DIM}]")
         if not np.isfinite(qpos).all():
             raise ValueError("qpos chunk contains NaN or Inf")
-        old_target_count = len(self._target)
-        self._source = np.concatenate((self._source, qpos), axis=0)
-        # This helper is intentionally the same whole-timeline implementation
-        # used by offline deployment.  Only the newly committed suffix is
-        # exposed, while exact equivalence remains straightforward to audit.
-        self._target = resample_qpos_timeline(self._source, SOURCE_FPS, TARGET_FPS)
-        return self._target[old_target_count:].copy()
+
+        # Normalize and make quaternion signs continuous across the chunk
+        # boundary before constructing the local Slerp interval.
+        for index in range(len(qpos)):
+            quat = qpos[index, 3:7]
+            norm = float(np.linalg.norm(quat))
+            if not math.isfinite(norm) or norm < 1e-8:
+                raise ValueError("quaternion norm is too small or non-finite")
+            qpos[index, 3:7] = quat / np.float32(norm)
+            previous = self._last_source if index == 0 else qpos[index - 1]
+            if previous is not None and float(np.dot(previous[3:7], qpos[index, 3:7])) < 0.0:
+                qpos[index, 3:7] *= -1.0
+
+        old_source_frames = self._source_frames
+        new_source_frames = old_source_frames + len(qpos)
+        duration = (new_source_frames - 1) / SOURCE_FPS
+        new_target_frames = int(math.floor(duration * TARGET_FPS)) + 1
+        target_indices = np.arange(
+            self._target_frames, new_target_frames, dtype=np.int64
+        )
+
+        if self._last_source is None:
+            local_source = qpos
+            local_start = 0
+        else:
+            local_source = np.concatenate((self._last_source[None], qpos), axis=0)
+            local_start = old_source_frames - 1
+
+        if len(target_indices) == 0:
+            result = np.empty((0, BUMI_QPOS_DIM), dtype=np.float32)
+        elif len(local_source) == 1:
+            result = local_source.copy()
+        else:
+            from scipy.spatial.transform import Rotation, Slerp
+
+            source_times = (
+                local_start + np.arange(len(local_source), dtype=np.float64)
+            ) / SOURCE_FPS
+            target_times = target_indices.astype(np.float64) / TARGET_FPS
+            target_times = np.clip(target_times, source_times[0], source_times[-1])
+            result = np.empty((len(target_indices), BUMI_QPOS_DIM), dtype=np.float32)
+            for dimension in (*range(3), *range(7, BUMI_QPOS_DIM)):
+                result[:, dimension] = np.interp(
+                    target_times, source_times, local_source[:, dimension]
+                ).astype(np.float32)
+            source_xyzw = local_source[:, (4, 5, 6, 3)]
+            target_xyzw = Slerp(
+                source_times, Rotation.from_quat(source_xyzw)
+            )(target_times).as_quat().astype(np.float32)
+            result[:, 3:7] = target_xyzw[:, (3, 0, 1, 2)]
+
+        result.setflags(write=False)
+        if len(result):
+            self._target_chunks.append(result)
+        self._source_frames = new_source_frames
+        self._last_source = qpos[-1].copy()
+        self._target_frames = new_target_frames
+        return result
 
     def target(self) -> np.ndarray:
-        return self._target.copy()
+        if not self._target_chunks:
+            return np.empty((0, BUMI_QPOS_DIM), dtype=np.float32)
+        return np.concatenate(self._target_chunks, axis=0)
 
     def reset(self) -> None:
-        self._source = np.empty((0, BUMI_QPOS_DIM), dtype=np.float32)
-        self._target = np.empty((0, BUMI_QPOS_DIM), dtype=np.float32)
+        self._source_frames = 0
+        self._last_source = None
+        self._target_frames = 0
+        self._target_chunks.clear()
 
 
 @torch.inference_mode()

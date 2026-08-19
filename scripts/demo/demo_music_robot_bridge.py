@@ -14,6 +14,7 @@ import sys
 import threading
 import time
 from collections import deque
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -34,6 +35,7 @@ from gem.runtime.gmt_trajectory import (  # noqa: E402
     FLAG_FIXED_IDLE,
     FLAG_TRANSITION,
     GmtPolicyContract,
+    IncrementalGmtFrameTimeline,
     RedisTrajectoryPublisher,
     qpos_timeline_to_gmt_frames,
 )
@@ -155,48 +157,184 @@ def _align_action(action: np.ndarray, idle: np.ndarray) -> np.ndarray:
     return result
 
 
+@dataclass(frozen=True, slots=True)
+class _PlanSnapshot:
+    """One immutable plan revision consumed by the 50 Hz publisher."""
+
+    qpos: np.ndarray
+    frames: np.ndarray
+    audio_start_frame: int
+    audio_end_frame: int
+    action_complete: bool
+    terminal_idle_qpos: np.ndarray | None = None
+    terminal_idle_frames: np.ndarray | None = None
+
+    def __post_init__(self) -> None:
+        if self.qpos.ndim != 2 or self.qpos.shape[1] != BUMI_QPOS_DIM:
+            raise ValueError("plan qpos has an invalid shape")
+        if self.frames.ndim != 2 or len(self.frames) != len(self.qpos):
+            raise ValueError("plan frames have an invalid shape")
+        if self.qpos.flags.writeable or self.frames.flags.writeable:
+            raise ValueError("plan arrays must be immutable")
+
+
+class _IncrementalPlanBuilder:
+    """Build one action plan without revisiting its committed history."""
+
+    def __init__(
+        self,
+        idle_qpos: np.ndarray,
+        native_to_gmt: np.ndarray,
+        *,
+        blend_seconds: float,
+        return_seconds: float,
+    ) -> None:
+        self.idle_qpos = np.asarray(idle_qpos, dtype=np.float32).copy()
+        self.native_to_gmt = np.asarray(native_to_gmt, dtype=np.int64).copy()
+        self.blend_frames = int(round(float(blend_seconds) * 50.0))
+        self.return_frames = int(round(float(return_seconds) * 50.0))
+        self.resampler = IncrementalQposTimeline()
+        self.timeline = IncrementalGmtFrameTimeline(self.native_to_gmt, fps=50.0)
+        self.source_origin: np.ndarray | None = None
+        self.alignment_rotation: Rotation | None = None
+        self.action_frames = 0
+        self.audio_start_frame = 0
+        self.closed = False
+
+    def _align_suffix(self, values: np.ndarray) -> np.ndarray:
+        result = np.asarray(values, dtype=np.float32).copy()
+        if self.source_origin is None:
+            self.source_origin = result[0, :3].copy()
+            source_rotation = Rotation.from_quat(result[0, (4, 5, 6, 3)])
+            target_rotation = Rotation.from_quat(self.idle_qpos[[4, 5, 6, 3]])
+            self.alignment_rotation = Rotation.from_euler(
+                "z",
+                target_rotation.as_euler("zyx")[0]
+                - source_rotation.as_euler("zyx")[0],
+            )
+        assert self.alignment_rotation is not None
+        assert self.source_origin is not None
+        relative = result[:, :3] - self.source_origin[None]
+        result[:, :3] = (
+            self.alignment_rotation.apply(relative).astype(np.float32)
+            + self.source_origin[None]
+        )
+        result[:, :2] += self.idle_qpos[None, :2] - self.source_origin[None, :2]
+        xyzw = (
+            self.alignment_rotation
+            * Rotation.from_quat(result[:, (4, 5, 6, 3)])
+        ).as_quat()
+        result[:, 3:7] = xyzw[:, (3, 0, 1, 2)]
+        return result
+
+    def append(self, source_qpos: np.ndarray, *, is_last: bool) -> _PlanSnapshot:
+        if self.closed:
+            raise RuntimeError("cannot append to a completed plan")
+        new_action = self.resampler.append(source_qpos)
+        if len(new_action) <= 0:
+            raise RuntimeError("source qpos did not produce a new 50 Hz sample")
+        aligned = self._align_suffix(new_action)
+        if self.action_frames == 0:
+            prefix = np.repeat(self.idle_qpos[None], 10, axis=0)
+            blend = _intermediate_qpos(
+                self.idle_qpos, aligned[0], self.blend_frames
+            )
+            self.audio_start_frame = len(prefix) + len(blend)
+            self.timeline.append(np.concatenate((prefix, blend, aligned), axis=0))
+        else:
+            self.timeline.append(aligned)
+        self.action_frames += len(aligned)
+        audio_end_frame = self.audio_start_frame + self.action_frames
+
+        terminal_idle_qpos: np.ndarray | None = None
+        terminal_idle_frames: np.ndarray | None = None
+        if is_last:
+            terminal_idle_qpos = aligned[-1].copy()
+            terminal_idle_qpos[:2] = aligned[-1, :2]
+            terminal_idle_qpos[2:] = self.idle_qpos[2:]
+            returning = _intermediate_qpos(
+                aligned[-1], terminal_idle_qpos, self.return_frames
+            )
+            self.timeline.append(
+                np.concatenate(
+                    (
+                        returning,
+                        np.repeat(terminal_idle_qpos[None], 101, axis=0),
+                    ),
+                    axis=0,
+                )
+            )
+            terminal_idle_frames = qpos_timeline_to_gmt_frames(
+                np.repeat(terminal_idle_qpos[None], 110, axis=0),
+                fps=50.0,
+                native_to_gmt=self.native_to_gmt,
+            )
+            terminal_idle_qpos.setflags(write=False)
+            terminal_idle_frames.setflags(write=False)
+            self.closed = True
+
+        return _PlanSnapshot(
+            qpos=self.timeline.qpos,
+            frames=self.timeline.frames,
+            audio_start_frame=self.audio_start_frame,
+            audio_end_frame=audio_end_frame,
+            action_complete=bool(is_last),
+            terminal_idle_qpos=terminal_idle_qpos,
+            terminal_idle_frames=terminal_idle_frames,
+        )
+
+
 class AudioController:
     def __init__(self, mode: str) -> None:
         self.mode = mode
         self.process: subprocess.Popen[bytes] | None = None
+        self.lock = threading.RLock()
 
     def start(self, path: Path, start_sec: float, duration_sec: float) -> bool:
-        self.stop("replace")
-        if self.mode == "off":
-            return False
-        ffplay = shutil.which("ffplay")
-        if ffplay is None:
-            print("[Audio WARNING] ffplay is unavailable")
-            return False
-        self.process = subprocess.Popen(
-            [
-                ffplay,
-                "-nodisp",
-                "-autoexit",
-                "-loglevel",
-                "error",
-                "-ss",
-                f"{start_sec:.9f}",
-                "-t",
-                f"{duration_sec:.9f}",
-                str(path),
-            ],
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
-        return True
+        with self.lock:
+            self.stop("replace")
+            if self.mode == "off":
+                return False
+            ffplay = shutil.which("ffplay")
+            if ffplay is None:
+                print("[Audio WARNING] ffplay is unavailable")
+                return False
+            self.process = subprocess.Popen(
+                [
+                    ffplay,
+                    "-nodisp",
+                    "-autoexit",
+                    "-loglevel",
+                    "error",
+                    "-ss",
+                    f"{start_sec:.9f}",
+                    "-t",
+                    f"{duration_sec:.9f}",
+                    str(path),
+                ],
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            return True
 
     def stop(self, reason: str) -> None:
         del reason
-        process, self.process = self.process, None
+        with self.lock:
+            process, self.process = self.process, None
         if process is None or process.poll() is not None:
             return
         process.terminate()
-        try:
-            process.wait(timeout=0.2)
-        except subprocess.TimeoutExpired:
-            process.kill()
+
+        def reap() -> None:
+            try:
+                process.wait(timeout=0.2)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait()
+
+        # Never make the 50 Hz safety path wait for an audio subprocess.
+        threading.Thread(target=reap, daemon=True).start()
 
 
 class BridgeRuntime:
@@ -213,13 +351,11 @@ class BridgeRuntime:
         self.last_error: str | None = None
         self.last_heartbeat = time.monotonic()
         self.request: dict[str, Any] | None = None
-        self.timeline = IncrementalQposTimeline()
-        self.action_complete = False
-        self.plan_qpos: np.ndarray | None = None
-        self.plan_frames: np.ndarray | None = None
+        self.plan_builder: _IncrementalPlanBuilder | None = None
+        self.plan_snapshot: _PlanSnapshot | None = None
+        self.publish_generation = 0
+        self.stand_building = False
         self.cursor = 0
-        self.audio_start_frame = 0
-        self.audio_end_frame = 0
         self.audio_started = False
         self.publisher: RedisTrajectoryPublisher | None = None
         self.submitted_monotonic = 0.0
@@ -230,9 +366,13 @@ class BridgeRuntime:
         self.gmr_times_ms: list[float] = []
         self.gmr_warmup_ms: float | None = None
         self.retargeted_frames = 0
+        self.plan_build_last_ms: float | None = None
+        self.plan_build_max_ms = 0.0
         self.publish_ticks = 0
         self.publish_started = time.monotonic()
         self.publish_jitter_ms: deque[float] = deque(maxlen=30_000)
+        self.publish_p99_jitter_ms: float | None = None
+        self.publish_max_lock_wait_ms = 0.0
 
         root = args.gmr_root.expanduser().resolve(strict=True)
         self.gmr_root = root
@@ -485,18 +625,24 @@ class BridgeRuntime:
         # stand may already have followed a previous dance in world XY.  Keep
         # that safe world anchor so a new request cannot teleport the robot.
         reset_qpos[:2] = idle_anchor_xy
+        idle_frames = qpos_timeline_to_gmt_frames(
+            np.repeat(reset_qpos[None], 110, axis=0),
+            fps=50.0,
+            native_to_gmt=self.native_to_gmt,
+        )
+        plan_builder = _IncrementalPlanBuilder(
+            reset_qpos,
+            self.native_to_gmt,
+            blend_seconds=self.args.blend_seconds,
+            return_seconds=self.args.return_seconds,
+        )
         with self.lock:
             self.idle_qpos = reset_qpos
-            self.idle_frames = qpos_timeline_to_gmt_frames(
-                np.repeat(self.idle_qpos[None], 110, axis=0),
-                fps=50.0,
-                native_to_gmt=self.native_to_gmt,
-            )
+            self.idle_frames = idle_frames
             self.tracker.begin(request_id, revision, total_frames)
-            self.timeline.reset()
-            self.action_complete = False
-            self.plan_qpos = None
-            self.plan_frames = None
+            self.plan_builder = plan_builder
+            self.plan_snapshot = None
+            self.publish_generation += 1
             self.publisher = None
             self.cursor = 0
             self.acked = False
@@ -506,6 +652,8 @@ class BridgeRuntime:
             self.retargeted_frames = 0
             self.gmr_times_ms.clear()
             self.gmr_warmup_ms = None
+            self.plan_build_last_ms = None
+            self.plan_build_max_ms = 0.0
             self.last_heartbeat = time.monotonic()
             self.request = {
                 "request_id": request_id,
@@ -547,11 +695,15 @@ class BridgeRuntime:
                             break
                         if warmup_elapsed_us is not None:
                             self.gmr_warmup_ms = warmup_elapsed_us / 1000.0
-                            print(
+                            warmup_message = (
                                 "[GMR] warmed from first real motion frame "
                                 f"for revision={chunk.revision} in "
                                 f"{self.gmr_warmup_ms:.1f} ms"
                             )
+                        else:
+                            warmup_message = None
+                    if warmup_message is not None:
+                        print(warmup_message)
                     qpos_values.append(qpos)
                     timings.append(elapsed_us / 1000.0)
                 if len(qpos_values) != chunk.frame_count:
@@ -559,11 +711,28 @@ class BridgeRuntime:
                 with self.lock:
                     if chunk.revision != self.tracker.revision:
                         continue
-                    self.timeline.append(np.stack(qpos_values))
+                    builder = self.plan_builder
+                    if builder is None:
+                        continue
+                plan_started = time.perf_counter()
+                snapshot = builder.append(
+                    np.stack(qpos_values), is_last=chunk.is_last
+                )
+                plan_elapsed_ms = (time.perf_counter() - plan_started) * 1000.0
+                with self.lock:
+                    if (
+                        chunk.revision != self.tracker.revision
+                        or builder is not self.plan_builder
+                    ):
+                        continue
+                    self.plan_snapshot = snapshot
                     self.retargeted_frames += len(qpos_values)
                     self.gmr_times_ms.extend(timings)
-                    self.action_complete = chunk.is_last
-                    self._rebuild_plan_locked()
+                    self.plan_build_last_ms = plan_elapsed_ms
+                    self.plan_build_max_ms = max(
+                        self.plan_build_max_ms, plan_elapsed_ms
+                    )
+                    ready_message: str | None = None
                     prime_ready = bool(
                         chunk.is_last
                         or (
@@ -581,9 +750,10 @@ class BridgeRuntime:
                         self.submitted_monotonic = time.monotonic()
                         self.last_ack_monotonic = self.submitted_monotonic
                         self.last_ack_sequence = -1
-                        print(
+                        ready_message = (
                             f"[Bridge] first qpos buffer ready: "
-                            f"{(0 if self.plan_frames is None else len(self.plan_frames)) / 50.0:.2f}s"
+                            f"{len(snapshot.frames) / 50.0:.2f}s "
+                            f"(incremental plan {plan_elapsed_ms:.1f} ms)"
                         )
                     elif self.state == "PREPARING":
                         self.state = "PRIMING"
@@ -597,10 +767,13 @@ class BridgeRuntime:
                         self.submitted_monotonic = time.monotonic()
                         self.last_ack_monotonic = self.submitted_monotonic
                         self.last_ack_sequence = -1
-                        print(
+                        ready_message = (
                             f"[Bridge] primed qpos buffer ready: "
-                            f"{(0 if self.plan_frames is None else len(self.plan_frames)) / 50.0:.2f}s"
+                            f"{len(snapshot.frames) / 50.0:.2f}s "
+                            f"(incremental plan {plan_elapsed_ms:.1f} ms)"
                         )
+                if ready_message is not None:
+                    print(ready_message)
             except Exception as exc:
                 self.last_error = f"{type(exc).__name__}: {exc}"
                 print(f"[GMR ERROR] {self.last_error}")
@@ -611,58 +784,59 @@ class BridgeRuntime:
             finally:
                 self.chunk_queue.task_done()
 
-    def _rebuild_plan_locked(self) -> None:
-        action = _align_action(self.timeline.target(), self.idle_qpos)
-        prefix = np.repeat(self.idle_qpos[None], 10, axis=0)
-        blend = _intermediate_qpos(
-            self.idle_qpos, action[0], int(round(self.args.blend_seconds * 50.0))
-        )
-        pieces = [prefix, blend, action]
-        self.audio_start_frame = len(prefix) + len(blend)
-        self.audio_end_frame = self.audio_start_frame + len(action)
-        if self.action_complete:
-            target_idle = self.idle_qpos.copy()
-            target_idle[:2] = action[-1, :2]
-            returning = _intermediate_qpos(
-                action[-1], target_idle, int(round(self.args.return_seconds * 50.0))
-            )
-            pieces.extend((returning, np.repeat(target_idle[None], 101, axis=0)))
-        self.plan_qpos = np.concatenate(pieces, axis=0)
-        self.plan_frames = qpos_timeline_to_gmt_frames(
-            self.plan_qpos, fps=50.0, native_to_gmt=self.native_to_gmt
-        )
-
     def request_stand(self, reason: str) -> None:
         with self.lock:
-            self.audio.stop(reason)
-            while True:
-                try:
-                    self.chunk_queue.get_nowait()
-                    self.chunk_queue.task_done()
-                except queue.Empty:
-                    break
-            if self.state == "STAND":
+            if self.state == "STAND" or self.stand_building:
                 return
-            self.tracker.revision += 1
+            self.stand_building = True
+            snapshot = self.plan_snapshot
+            cursor = self.cursor
             current = self.idle_qpos.copy()
-            if self.plan_qpos is not None:
-                current = self.plan_qpos[min(self.cursor, len(self.plan_qpos) - 1)].copy()
+            if snapshot is not None:
+                current = snapshot.qpos[min(cursor, len(snapshot.qpos) - 1)].copy()
             target = self.idle_qpos.copy()
             target[:2] = current[:2]
+        try:
             transition = _intermediate_qpos(
                 current, target, int(round(self.args.return_seconds * 50.0))
             )
-            self.plan_qpos = np.concatenate(
-                (current[None], transition, np.repeat(target[None], 101, axis=0)), axis=0
+            qpos = np.concatenate(
+                (current[None], transition, np.repeat(target[None], 101, axis=0)),
+                axis=0,
             )
-            self.plan_frames = qpos_timeline_to_gmt_frames(
-                self.plan_qpos, fps=50.0, native_to_gmt=self.native_to_gmt
+            frames = qpos_timeline_to_gmt_frames(
+                qpos, fps=50.0, native_to_gmt=self.native_to_gmt
             )
+            terminal_frames = qpos_timeline_to_gmt_frames(
+                np.repeat(target[None], 110, axis=0),
+                fps=50.0,
+                native_to_gmt=self.native_to_gmt,
+            )
+            for value in (qpos, frames, target, terminal_frames):
+                value.setflags(write=False)
+            stand_snapshot = _PlanSnapshot(
+                qpos=qpos,
+                frames=frames,
+                audio_start_frame=0,
+                audio_end_frame=0,
+                action_complete=True,
+                terminal_idle_qpos=target,
+                terminal_idle_frames=terminal_frames,
+            )
+        except Exception:
+            with self.lock:
+                self.stand_building = False
+            raise
+        with self.lock:
+            if self.state == "STAND":
+                self.stand_building = False
+                return
+            self.tracker.revision += 1
+            self.publish_generation += 1
+            self.plan_builder = None
+            self.plan_snapshot = stand_snapshot
             self.cursor = 0
-            self.audio_start_frame = 0
-            self.audio_end_frame = 0
             self.audio_started = False
-            self.action_complete = True
             self.publisher = RedisTrajectoryPublisher(
                 self.redis, key=self.args.redis_key, ttl_ms=self.args.redis_ttl_ms
             )
@@ -673,13 +847,22 @@ class BridgeRuntime:
             self.ack_latency_ms = None
             self.state = "STAND_WAIT_ACK"
             self.request = None
-            print(f"[Bridge] {reason}; returning to synthesized stand")
+            self.stand_building = False
+        self.audio.stop(reason)
+        while True:
+            try:
+                self.chunk_queue.get_nowait()
+                self.chunk_queue.task_done()
+            except queue.Empty:
+                break
+        print(f"[Bridge] {reason}; returning to synthesized stand")
 
     def status_locked(self) -> dict[str, Any]:
+        snapshot = self.plan_snapshot
         future = (
             0.0
-            if self.plan_frames is None
-            else max(0, len(self.plan_frames) - 1 - self.cursor) / 50.0
+            if snapshot is None
+            else max(0, len(snapshot.frames) - 1 - self.cursor) / 50.0
         )
         return {
             "state": self.state,
@@ -690,13 +873,15 @@ class BridgeRuntime:
             "played_50hz_frames": self.cursor,
             "future_buffer_seconds": future,
             "queue_depth": self.chunk_queue.qsize(),
-            "action_complete": self.action_complete,
+            "action_complete": False if snapshot is None else snapshot.action_complete,
             "gmt_acked": self.acked,
             "gmt_ack_latency_ms": self.ack_latency_ms,
             "gmr_mean_ms": (
                 None if not self.gmr_times_ms else float(np.mean(self.gmr_times_ms[-300:]))
             ),
             "gmr_warmup_ms": self.gmr_warmup_ms,
+            "incremental_plan_last_ms": self.plan_build_last_ms,
+            "incremental_plan_max_ms": self.plan_build_max_ms,
             "gmr_viewer_enabled": self.gmr_viewer is not None,
             "gmr_viewer_alive": (
                 False if self.gmr_viewer is None else self.gmr_viewer.alive
@@ -706,11 +891,8 @@ class BridgeRuntime:
             ),
             "publish_hz": self.publish_ticks
             / max(1e-6, time.monotonic() - self.publish_started),
-            "publish_p99_jitter_ms": (
-                None
-                if not self.publish_jitter_ms
-                else float(np.percentile(self.publish_jitter_ms, 99))
-            ),
+            "publish_p99_jitter_ms": self.publish_p99_jitter_ms,
+            "publish_max_lock_wait_ms": self.publish_max_lock_wait_ms,
             "last_error": self.last_error,
         }
 
@@ -720,6 +902,8 @@ class BridgeRuntime:
         self.publish_ticks = 0
         self.publish_started = time.monotonic()
         self.publish_jitter_ms.clear()
+        self.publish_p99_jitter_ms = None
+        self.publish_max_lock_wait_ms = 0.0
         previous_tick = self.publish_started
         deadline = MonotonicDeadline(50.0, time.monotonic())
         try:
@@ -736,80 +920,158 @@ class BridgeRuntime:
                 )
                 previous_tick = now
                 skipped = deadline.advance(now)
-                if self.args.estop_file.exists():
-                    with self.lock:
-                        active = self.state != "STAND"
-                    if active:
-                        self.request_stand("ESTOP")
+                if jitter_ms is not None:
+                    self.publish_jitter_ms.append(jitter_ms)
+                self.publish_ticks += 1
+                if self.publish_ticks % 250 == 0 and self.publish_jitter_ms:
+                    # Only the publisher owns this deque, so the percentile is
+                    # calculated without holding the shared state lock.
+                    self.publish_p99_jitter_ms = float(
+                        np.percentile(tuple(self.publish_jitter_ms), 99)
+                    )
 
-                with self.lock:
+                lock_started = time.perf_counter()
+                self.lock.acquire()
+                lock_wait_ms = (time.perf_counter() - lock_started) * 1000.0
+                self.publish_max_lock_wait_ms = max(
+                    self.publish_max_lock_wait_ms, lock_wait_ms
+                )
+                try:
+                    generation = self.publish_generation
+                    state = self.state
+                    snapshot = self.plan_snapshot
+                    cursor = self.cursor
+                    revision = self.tracker.revision
+                    request = self.request
+                    publisher = self.publisher
+                    idle_publisher = self.idle_publisher
+                    idle_frames = self.idle_frames
                     viewer_qpos = self.idle_qpos
-                    if jitter_ms is not None:
-                        self.publish_jitter_ms.append(jitter_ms)
-                    if self.request is not None and heartbeat_expired(
-                        self.last_heartbeat,
-                        now,
-                        self.args.heartbeat_timeout_seconds,
-                    ):
-                        self.request_stand("heartbeat timeout")
-
-                    if self.state in {"STAND", "PREPARING", "PRIMING"}:
-                        self.idle_publisher.publish(
-                            self.idle_frames,
-                            0,
-                            fps=50.0,
-                            joint_order_hash=self.contract.joint_order_hash,
-                            flags=FLAG_FIXED_IDLE,
+                    heartbeat_failed = bool(
+                        request is not None
+                        and heartbeat_expired(
+                            self.last_heartbeat,
+                            now,
+                            self.args.heartbeat_timeout_seconds,
                         )
-                    elif self.plan_frames is not None and self.publisher is not None:
-                        assert self.plan_qpos is not None
-                        viewer_qpos = self.plan_qpos[
-                            min(self.cursor, len(self.plan_qpos) - 1)
+                    )
+                    active = state != "STAND"
+                    if snapshot is not None:
+                        viewer_qpos = snapshot.qpos[
+                            min(cursor, len(snapshot.qpos) - 1)
                         ]
-                        flags = (
-                            FLAG_AUDIO
-                            if self.audio_start_frame <= self.cursor < self.audio_end_frame
-                            else FLAG_TRANSITION
+                finally:
+                    self.lock.release()
+
+                if self.args.estop_file.exists() and active:
+                    self.request_stand("ESTOP")
+                    continue
+                if heartbeat_failed:
+                    self.request_stand("heartbeat timeout")
+                    continue
+
+                ack = None
+                published_plan = False
+                if state in {"STAND", "PREPARING", "PRIMING"}:
+                    idle_publisher.publish(
+                        idle_frames,
+                        0,
+                        fps=50.0,
+                        joint_order_hash=self.contract.joint_order_hash,
+                        flags=FLAG_FIXED_IDLE,
+                    )
+                elif snapshot is not None and publisher is not None:
+                    published_plan = True
+                    flags = (
+                        FLAG_AUDIO
+                        if snapshot.audio_start_frame
+                        <= cursor
+                        < snapshot.audio_end_frame
+                        else FLAG_TRANSITION
+                    )
+                    publisher.publish(
+                        snapshot.frames,
+                        cursor,
+                        fps=50.0,
+                        joint_order_hash=self.contract.joint_order_hash,
+                        command_revision=revision,
+                        plan_id=revision,
+                        flags=flags,
+                    )
+                    ack = publisher.matching_ack()
+
+                if self.gmr_viewer is not None:
+                    displayed = self.gmr_viewer.publish(viewer_qpos)
+                    if (
+                        not displayed
+                        and self.gmr_viewer.last_error is not None
+                        and not self.gmr_viewer_warning_reported
+                    ):
+                        print(
+                            "[GMR viewer WARNING] "
+                            f"{self.gmr_viewer.last_error}; bridge remains active"
                         )
-                        self.publisher.publish(
-                            self.plan_frames,
-                            self.cursor,
-                            fps=50.0,
-                            joint_order_hash=self.contract.joint_order_hash,
-                            command_revision=self.tracker.revision,
-                            plan_id=self.tracker.revision,
-                            flags=flags,
-                        )
-                        ack = self.publisher.matching_ack()
+                        self.gmr_viewer_warning_reported = True
+
+                stand_reason: str | None = None
+                audio_start: tuple[Path, float, float] | None = None
+                audio_stop_reason: str | None = None
+                ack_started = False
+                became_stand = False
+                after_publish = time.monotonic()
+                lock_started = time.perf_counter()
+                self.lock.acquire()
+                lock_wait_ms = (time.perf_counter() - lock_started) * 1000.0
+                self.publish_max_lock_wait_ms = max(
+                    self.publish_max_lock_wait_ms, lock_wait_ms
+                )
+                try:
+                    # A control command may atomically replace the plan while
+                    # Redis I/O is in flight.  Ignore results from that stale
+                    # generation; the next 20 ms tick uses the new snapshot.
+                    if (
+                        published_plan
+                        and generation == self.publish_generation
+                        and publisher is self.publisher
+                        and snapshot is not None
+                        and self.plan_snapshot is not None
+                    ):
+                        live_snapshot = self.plan_snapshot
                         if ack is not None and ack.sequence > self.last_ack_sequence:
                             self.last_ack_sequence = ack.sequence
-                            self.last_ack_monotonic = now
+                            self.last_ack_monotonic = after_publish
                             if not self.acked:
                                 self.acked = True
                                 self.ack_latency_ms = (
-                                    now - self.submitted_monotonic
+                                    after_publish - self.submitted_monotonic
                                 ) * 1000.0
                                 self.state = (
                                     "RETURNING"
                                     if self.state == "STAND_WAIT_ACK"
                                     else "TRANSITION"
                                 )
-                                print("[Bridge] GMT ACK received; playback clock started")
+                                ack_started = True
                         if not self.acked:
-                            if now - self.submitted_monotonic > self.args.ack_timeout_seconds:
+                            if (
+                                after_publish - self.submitted_monotonic
+                                > self.args.ack_timeout_seconds
+                            ):
                                 self.last_error = "GMT ACK timeout"
                                 if self.state != "STAND_WAIT_ACK":
-                                    self.request_stand("GMT ACK timeout")
-                        elif now - self.last_ack_monotonic > self.args.ack_stale_seconds:
+                                    stand_reason = "GMT ACK timeout"
+                        elif (
+                            after_publish - self.last_ack_monotonic
+                            > self.args.ack_stale_seconds
+                        ):
                             self.last_error = "GMT ACK stale"
-                            self.request_stand("GMT ACK stale")
+                            stand_reason = "GMT ACK stale"
                         else:
                             if (
                                 self.request is not None
-                                and self.cursor >= self.audio_start_frame
+                                and self.cursor >= live_snapshot.audio_start_frame
                                 and not self.audio_started
                             ):
-                                self.audio.start(
+                                audio_start = (
                                     self.request["audio_path"],
                                     self.request["audio_start_sec"],
                                     self.request["audio_duration_sec"],
@@ -819,66 +1081,83 @@ class BridgeRuntime:
                             if (
                                 self.request is not None
                                 and self.audio_started
-                                and self.cursor >= self.audio_end_frame
+                                and self.cursor >= live_snapshot.audio_end_frame
                             ):
-                                self.audio.stop("audio range complete")
+                                audio_stop_reason = "audio range complete"
                                 self.state = "RETURNING"
                             future_seconds = (
-                                len(self.plan_frames) - 1 - self.cursor
+                                len(live_snapshot.frames) - 1 - self.cursor
                             ) / 50.0
                             can_advance = has_complete_publish_context(
-                                len(self.plan_frames), self.cursor
+                                len(live_snapshot.frames), self.cursor
                             )
-                            if not can_advance and not self.action_complete:
-                                self.request_stand("motion buffer underrun")
+                            if not can_advance and not live_snapshot.action_complete:
+                                stand_reason = "motion buffer underrun"
                             elif (
-                                not self.action_complete
+                                not live_snapshot.action_complete
                                 and future_seconds <= self.args.critical_buffer_seconds
                             ):
-                                self.request_stand("critical motion buffer")
+                                stand_reason = "critical motion buffer"
                             elif can_advance:
                                 self.cursor += 1 + skipped
-                            if self.cursor >= len(self.plan_frames) - 101:
-                                if self.action_complete:
-                                    self.audio.stop("action complete")
-                                    assert self.plan_qpos is not None
-                                    self.idle_qpos = self.plan_qpos[-1].copy()
-                                    self.idle_frames = qpos_timeline_to_gmt_frames(
-                                        np.repeat(self.idle_qpos[None], 110, axis=0),
-                                        fps=50.0,
-                                        native_to_gmt=self.native_to_gmt,
-                                    )
-                                    self.idle_publisher = RedisTrajectoryPublisher(
-                                        self.redis,
-                                        key=self.args.redis_key,
-                                        ttl_ms=self.args.redis_ttl_ms,
-                                    )
-                                    self.plan_qpos = None
-                                    self.plan_frames = None
-                                    self.publisher = None
-                                    self.request = None
-                                    self.state = "STAND"
-                                    self.acked = False
-                                    print("[Bridge] synthesized stand is active")
-
-                    if self.gmr_viewer is not None:
-                        displayed = self.gmr_viewer.publish(viewer_qpos)
-                        if (
-                            not displayed
-                            and self.gmr_viewer.last_error is not None
-                            and not self.gmr_viewer_warning_reported
-                        ):
-                            print(
-                                "[GMR viewer WARNING] "
-                                f"{self.gmr_viewer.last_error}; bridge remains active"
-                            )
-                            self.gmr_viewer_warning_reported = True
-                    self.publish_ticks += 1
+                            if (
+                                self.cursor >= len(live_snapshot.frames) - 101
+                                and live_snapshot.action_complete
+                            ):
+                                audio_stop_reason = "action complete"
+                                assert live_snapshot.terminal_idle_qpos is not None
+                                assert live_snapshot.terminal_idle_frames is not None
+                                self.idle_qpos = (
+                                    live_snapshot.terminal_idle_qpos.copy()
+                                )
+                                self.idle_frames = live_snapshot.terminal_idle_frames
+                                self.idle_publisher = RedisTrajectoryPublisher(
+                                    self.redis,
+                                    key=self.args.redis_key,
+                                    ttl_ms=self.args.redis_ttl_ms,
+                                )
+                                self.plan_builder = None
+                                self.plan_snapshot = None
+                                self.publisher = None
+                                self.request = None
+                                self.state = "STAND"
+                                self.acked = False
+                                self.publish_generation += 1
+                                became_stand = True
                     if self.shutdown_requested and self.state == "STAND":
                         self.stop_event.set()
+                finally:
+                    self.lock.release()
+
+                if ack_started:
+                    print("[Bridge] GMT ACK received; playback clock started")
+                if audio_start is not None:
+                    with self.lock:
+                        audio_generation_is_current = bool(
+                            generation == self.publish_generation
+                            and self.audio_started
+                            and self.request is not None
+                        )
+                    if audio_generation_is_current:
+                        self.audio.start(*audio_start)
+                        with self.lock:
+                            audio_generation_is_current = bool(
+                                generation == self.publish_generation
+                                and self.audio_started
+                                and self.request is not None
+                            )
+                        if not audio_generation_is_current:
+                            self.audio.stop("stale audio generation")
+                if audio_stop_reason is not None:
+                    self.audio.stop(audio_stop_reason)
+                if became_stand:
+                    print("[Bridge] synthesized stand is active")
+                if stand_reason is not None:
+                    self.request_stand(stand_reason)
                 if self.args.verbose and self.publish_ticks % 250 == 0:
                     with self.lock:
-                        print(f"[Bridge status] {self.status_locked()}")
+                        status = self.status_locked()
+                    print(f"[Bridge status] {status}")
         finally:
             self.audio.stop("bridge exit")
             if self.gmr is not None:

@@ -10,7 +10,9 @@ import pytest
 from gem.gmr_udp_bridge import PACKET_BYTES
 from gem.runtime.gmt_trajectory import (
     BUMI_QPOS_DIM,
+    IncrementalGmtFrameTimeline,
     body_angular_velocity,
+    qpos_timeline_to_gmt_frames,
     resample_qpos_timeline,
 )
 from gem.runtime.robot_stream import (
@@ -180,6 +182,54 @@ def test_incremental_resampling_matches_complete_timeline() -> None:
     expected = resample_qpos_timeline(source, 30.0, 50.0)
     np.testing.assert_allclose(timeline.target(), expected, atol=1e-6)
     np.testing.assert_allclose(np.concatenate((first, second)), expected, atol=1e-6)
+
+
+def test_incremental_resampling_uses_only_previous_boundary_and_new_chunk() -> None:
+    source = make_qpos(390)
+    timeline = IncrementalQposTimeline()
+    emitted = []
+    for start, end in ((0, 120), (120, 210), (210, 300), (300, 390)):
+        previous_target_frames = timeline.target_frames
+        suffix = timeline.append(source[start:end])
+        assert len(suffix) == timeline.target_frames - previous_target_frames
+        # The implementation deliberately retains one interpolation boundary,
+        # not the complete source history.
+        assert timeline._last_source is not None
+        assert timeline._last_source.shape == (BUMI_QPOS_DIM,)
+        emitted.append(suffix)
+    expected = resample_qpos_timeline(source, 30.0, 50.0)
+    np.testing.assert_allclose(np.concatenate(emitted), expected, atol=1e-6)
+
+
+def test_incremental_gmt_frames_patch_only_tail_derivative_and_new_suffix(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import gem.runtime.gmt_trajectory as module
+
+    original = module.qpos_timeline_to_gmt_frames
+    converted_lengths: list[int] = []
+
+    def recording_converter(qpos, *, fps, native_to_gmt):
+        converted_lengths.append(len(qpos))
+        return original(qpos, fps=fps, native_to_gmt=native_to_gmt)
+
+    monkeypatch.setattr(module, "qpos_timeline_to_gmt_frames", recording_converter)
+    qpos = resample_qpos_timeline(make_qpos(390), 30.0, 50.0)
+    timeline = IncrementalGmtFrameTimeline(np.arange(21), fps=50.0)
+    first_qpos, first_frames = timeline.append(qpos[:199])
+    frozen_qpos = first_qpos.copy()
+    frozen_frames = first_frames.copy()
+    assert not first_qpos.flags.writeable and not first_frames.flags.writeable
+
+    timeline.append(qpos[199:349])
+    timeline.append(qpos[349:])
+    expected = qpos_timeline_to_gmt_frames(
+        qpos, fps=50.0, native_to_gmt=np.arange(21)
+    )
+    np.testing.assert_allclose(timeline.frames, expected, atol=1e-6)
+    np.testing.assert_array_equal(first_qpos, frozen_qpos)
+    np.testing.assert_array_equal(first_frames, frozen_frames)
+    assert converted_lengths == [199, 152, len(qpos) - 349 + 2]
 
 
 def test_quaternion_sign_slerp_and_pi_wrap_are_continuous() -> None:

@@ -287,6 +287,77 @@ def qpos_timeline_to_gmt_frames(
     return frames
 
 
+class IncrementalGmtFrameTimeline:
+    """Incrementally derive GMT frames while preserving offline semantics.
+
+    Appending qpos can only change the derivative stored for the previous tail
+    frame.  Recomputing that one boundary frame plus the new suffix is enough
+    to remain equivalent to :func:`qpos_timeline_to_gmt_frames`.  Published
+    snapshots remain immutable because every append allocates new arrays.
+    """
+
+    def __init__(self, native_to_gmt: np.ndarray, *, fps: float = 50.0) -> None:
+        self.native_to_gmt = np.asarray(native_to_gmt, dtype=np.int64).copy()
+        if self.native_to_gmt.shape != (TRAJECTORY_JOINT_COUNT,) or set(
+            self.native_to_gmt.tolist()
+        ) != set(range(TRAJECTORY_JOINT_COUNT)):
+            raise ValueError("native_to_gmt must be a permutation of 0..20")
+        if not math.isfinite(float(fps)) or fps <= 0.0:
+            raise ValueError("fps must be finite and > 0")
+        self.fps = float(fps)
+        self._qpos = np.empty((0, BUMI_QPOS_DIM), dtype=np.float32)
+        self._frames = np.empty((0, TRAJECTORY_FRAME_DIM), dtype=np.float32)
+        self._freeze()
+
+    def _freeze(self) -> None:
+        self._qpos.setflags(write=False)
+        self._frames.setflags(write=False)
+
+    @property
+    def qpos(self) -> np.ndarray:
+        return self._qpos
+
+    @property
+    def frames(self) -> np.ndarray:
+        return self._frames
+
+    def append(self, values: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        qpos = np.asarray(values, dtype=np.float32)
+        if qpos.ndim != 2 or qpos.shape[1] != BUMI_QPOS_DIM or len(qpos) <= 0:
+            raise ValueError(f"qpos chunk must have shape [T,{BUMI_QPOS_DIM}]")
+        if not np.isfinite(qpos).all():
+            raise ValueError("qpos chunk contains NaN or Inf")
+        qpos = qpos.copy()
+        old_count = len(self._qpos)
+        if old_count == 0:
+            next_qpos = qpos
+            next_frames = qpos_timeline_to_gmt_frames(
+                qpos, fps=self.fps, native_to_gmt=self.native_to_gmt
+            )
+        else:
+            # Two prior qpos samples are sufficient for the centered linear
+            # velocity at the old tail.  SO(3) angular velocity only needs the
+            # immediately preceding sample, so it is covered by the same halo.
+            halo = min(2, old_count)
+            patch_qpos = np.concatenate((self._qpos[-halo:], qpos), axis=0)
+            patch_frames = qpos_timeline_to_gmt_frames(
+                patch_qpos, fps=self.fps, native_to_gmt=self.native_to_gmt
+            )
+            replace_from = old_count - 1
+            patch_from = halo - 1
+            next_qpos = np.concatenate((self._qpos, qpos), axis=0)
+            next_frames = np.concatenate(
+                (self._frames[:replace_from], patch_frames[patch_from:]), axis=0
+            )
+        if len(next_qpos) != len(next_frames):
+            raise AssertionError("incremental GMT qpos/frame lengths diverged")
+        next_qpos.setflags(write=False)
+        next_frames.setflags(write=False)
+        self._qpos = next_qpos
+        self._frames = next_frames
+        return self._qpos, self._frames
+
+
 def rolling_window_indices(num_frames: int, cursor: int) -> np.ndarray:
     if num_frames <= 0:
         raise ValueError("num_frames must be > 0")
