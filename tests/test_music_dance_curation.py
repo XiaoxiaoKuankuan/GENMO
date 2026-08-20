@@ -24,6 +24,11 @@ from tools.data.music_dance.curation.common import (
 )
 from tools.data.music_dance.curation.export_motion_review import export_package
 from tools.data.music_dance.curation.refresh_aist_review import refresh_aist_review
+from tools.data.music_dance.curation.select_human_motions_from_ratings import (
+    RATING_FILES,
+    build_selection_plan,
+    select_human_motions,
+)
 from tools.data.music_dance.curation.validate_curated_datasets import validate_curated
 from tools.data.music_dance.curation.validate_review_package import validate_package
 from tools.data.music_dance.curation.validate_review_results import validate_decisions
@@ -352,3 +357,100 @@ def test_curated_experiment_composes_without_changing_condition_contract() -> No
     assert list(cfg.pipeline.args.train_modes) == ["diffusion"]
     assert cfg.train_datasets.aistpp_train.root.endswith("/AIST++")
     assert cfg.test_datasets.aistpp_music_eval.root.endswith("/AIST++")
+
+
+def _write_quality_ratings(root: Path) -> None:
+    rows = {
+        "aistpp": [
+            {"motion_name": "gBR_sBM_cAll_d01_mBR0_ch01.npz", "score": "1"},
+            {"motion_name": "gBR_sBM_cAll_d01_mBR0_ch01_armfix.npz", "score": "1"},
+        ],
+        "aioz_gdance": [
+            {"motion_name": "group_dancer_00.npz", "score": "1"},
+            {"motion_name": "group_dancer_01.npz", "score": "2"},
+        ],
+        "finedance": [{"motion_name": "001.npz", "score": "1"}],
+        "compas3d": [
+            {"motion_name": "Pair1_song1_take1_leader.npz", "score": "1"},
+            {"motion_name": "Pair1_song1_take1_follower.npz", "score": "3"},
+        ],
+    }
+    for dataset, values in rows.items():
+        write_csv(root / RATING_FILES[dataset], values, ("motion_name", "score"))
+
+
+def test_select_score_one_human_motions_collapses_armfix_alias(tmp_path: Path) -> None:
+    roots = _write_four_roots(tmp_path / "sources")
+    export_root = tmp_path / "review"
+    export_package(_export_args(roots, export_root))
+    rating_root = tmp_path / "ratings"
+    _write_quality_ratings(rating_root)
+    output_root = tmp_path / "manual_q1"
+
+    plan = build_selection_plan(export_root, rating_root)
+    assert plan["selected_rating_row_counts"] == {
+        "aistpp": 2,
+        "aioz_gdance": 1,
+        "finedance": 1,
+        "compas3d": 1,
+    }
+    assert plan["selected_counts"] == {
+        "aistpp": 1,
+        "aioz_gdance": 1,
+        "finedance": 1,
+        "compas3d": 1,
+    }
+    assert len(plan["aliases"]) == 1
+    assert plan["aliases"][0]["canonical_motion_name"] == ("gBR_sBM_cAll_d01_mBR0_ch01.npz")
+
+    dry = select_human_motions(
+        argparse.Namespace(
+            export_root=str(export_root),
+            rating_root=str(rating_root),
+            output_root=str(output_root),
+            score="1",
+            dry_run=True,
+            apply=False,
+        )
+    )
+    assert dry["selected_rating_row_count"] == 5
+    assert dry["selected_unique_motion_count"] == 4
+    assert not output_root.exists()
+
+    report = select_human_motions(
+        argparse.Namespace(
+            export_root=str(export_root),
+            rating_root=str(rating_root),
+            output_root=str(output_root),
+            score="1",
+            dry_run=False,
+            apply=True,
+        )
+    )
+    assert report["final_pass"]
+    assert report["materialization_counts"] == {"hardlink": 4}
+    selected = read_jsonl(output_root / "index" / "selected.jsonl")
+    assert len(selected) == 4
+    for row in selected:
+        source = export_root / row["review_motion_path"]
+        target = output_root / row["selected_motion_path"]
+        assert target.stat().st_ino == source.stat().st_ino
+    assert len(list((output_root / "motions").rglob("*.npz"))) == 4
+    assert len(list((export_root / "motions").rglob("*.npz"))) == 6
+
+
+def test_rating_tables_must_cover_every_source_human_motion(tmp_path: Path) -> None:
+    roots = _write_four_roots(tmp_path / "sources")
+    export_root = tmp_path / "review"
+    export_package(_export_args(roots, export_root))
+    rating_root = tmp_path / "ratings"
+    _write_quality_ratings(rating_root)
+    aioz_path = rating_root / RATING_FILES["aioz_gdance"]
+    write_csv(
+        aioz_path,
+        [{"motion_name": "group_dancer_00.npz", "score": "1"}],
+        ("motion_name", "score"),
+    )
+
+    with pytest.raises(ValueError, match="rating/source coverage mismatch"):
+        build_selection_plan(export_root, rating_root)

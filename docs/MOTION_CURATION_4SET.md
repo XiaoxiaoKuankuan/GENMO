@@ -133,6 +133,40 @@ reject 必须填写至少一个受支持的问题代码。`unsure` 用于二次�
 动作所需的 musicfeat_v2；零引用 EDGE35 以硬链接或恢复副本放入 `quarantine/`。源转换目录、
 原始 WAV 和正在运行的训练均不修改。跨文件系统时无法建立硬链接的文件会自动复制。
 
+## 从 BUMI 人工评分表备份高质量人体动作
+
+`data/motions_npz_bumi3_smooth_q1/rate` 的四张 CSV 使用 `score=1` 表示人工高质量。
+如果需要保存与这些 BUMI 名称一一对应的原始人体动作，而不是已经 GMR 重定向的机器人
+轨迹，可在服务器1执行：
+
+```bash
+cd /home/user/liwei/GENMO
+
+.venv/bin/python tools/data/music_dance/curation/select_human_motions_from_ratings.py \
+  --export-root /data0/user/liwei/datasets/music_dance_review/music_only_4set_v1 \
+  --rating-root data/motions_npz_bumi3_smooth_q1/rate \
+  --output-root /data0/user/liwei/datasets/music_dance_review/music_only_4set_manual_q1_human_v1 \
+  --score 1 \
+  --dry-run
+
+.venv/bin/python tools/data/music_dance/curation/select_human_motions_from_ratings.py \
+  --export-root /data0/user/liwei/datasets/music_dance_review/music_only_4set_v1 \
+  --rating-root data/motions_npz_bumi3_smooth_q1/rate \
+  --output-root /data0/user/liwei/datasets/music_dance_review/music_only_4set_manual_q1_human_v1 \
+  --score 1 \
+  --apply
+```
+
+工具要求评分表完整覆盖四数据集源审阅包，并逐条验证 30 FPS、NPZ 字段、内部 ID、坐标系
+和 master SHA256。AIST++ 的 `gBR_sBM_cAll_d04_mBR0_ch02_armfix.npz` 是机器人重定向
+阶段别名，会折叠到基础人体动作，避免后训练重复采样。
+
+服务器1当前 `manual_q1_human_v1` 发布结果为 3,163 个高质量评分项、3,162 条唯一人体
+动作、3,589,146 帧和 33.2328 小时；四库分别为 AIST++ 963、AIOZ-GDANCE 1,978、
+FineDance 149、CoMPAS3D 72。输出保留源 split、`music_key` 和 `source_manifest_row`，但
+本备用包只物化人体 NPZ，不包含 WAV 或 EDGE35；正式后训练前应据
+`index/selected.jsonl` 重建音乐闭包、manifest 和训练统计量。
+
 ## 使用筛选后的训练集
 
 筛选结果验证通过后使用独立实验，不覆盖原四数据集实验：
