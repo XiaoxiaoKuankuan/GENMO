@@ -72,11 +72,23 @@ def test_failed_quality_is_rejected(dataset_factory, test_kinematics_path) -> No
         make_dataset(root, test_kinematics_path)
 
 
+def test_adjusted_root_and_versioned_joint_tolerance_are_bound_to_reader(
+    dataset_factory, test_kinematics_path
+) -> None:
+    root = dataset_factory(
+        length=8,
+        root_z_adjusted=True,
+        reader_joint_limit_tolerance_rad=0.25,
+    )
+    dataset = make_dataset(root, test_kinematics_path, joint_limit_tolerance=0.25)
+    assert dataset.reader.dataset_info["root_z_adjusted"] is True
+    with pytest.raises(ValueError, match="reader_joint_limit_tolerance_rad"):
+        make_dataset(root, test_kinematics_path, joint_limit_tolerance=1.0e-3)
+
+
 def _formal_datamodule(root, kinematics_path, stats_path, expected_sequences=1):
     dataset = {
-        "_target_": (
-            "gem.datasets.music_dance.music_dance_bumi.BumiMusicDanceDataset"
-        ),
+        "_target_": ("gem.datasets.music_dance.music_dance_bumi.BumiMusicDanceDataset"),
         "root": str(root),
         "dataset_name": "test_bumi",
         "kinematics_path": str(kinematics_path),

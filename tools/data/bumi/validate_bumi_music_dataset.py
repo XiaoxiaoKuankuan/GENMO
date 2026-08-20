@@ -25,6 +25,12 @@ def main() -> None:
     parser.add_argument("--kinematics", required=True, type=Path)
     parser.add_argument("--splits", nargs="+", default=["train", "val", "test"])
     parser.add_argument("--output", type=Path)
+    parser.add_argument(
+        "--joint-limit-tolerance",
+        type=float,
+        default=1.0e-3,
+        help="reader 允许的关节限位越界弧度；必须与目标数据版本绑定的策略一致",
+    )
     args = parser.parse_args()
     kinematics = BumiKinematics(args.kinematics)
     split_reports = []
@@ -37,6 +43,7 @@ def main() -> None:
             strict_alignment=True,
             strict_contract=True,
             require_quality_filter=True,
+            joint_limit_tolerance=args.joint_limit_tolerance,
             validate_payloads_on_init=True,
             validate_source_hashes_on_init=True,
         )

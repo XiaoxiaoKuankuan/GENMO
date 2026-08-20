@@ -1,0 +1,154 @@
+# BUMI3 SONIC/Isaac-Lab 50 Hz 离线 NPZ 自动物理预检查 v1。
+#
+# 本配置面向 scripts/export_smplx_to_bumi3_offline_npz.py 产生的七字段部署轨迹，
+# 不适用于 data/motions 下的 30 Hz legacy pickle。动力学阈值沿用 legacy v1 的
+# 物理单位阈值；连续帧、坏段 halo 和最短安全段按相同持续时间从 30 Hz 换算到
+# 50 Hz（6→10、15→25、120→200），因此没有把同一个“帧数”错误地跨帧率复用。
+#
+# 当前 NPZ 不包含 legacy 的 torso/hand virtual body。手部原本只用于诊断，不参与
+# 决策；torso 则使用左右 shoulder（l/r_arm_pitch_link）世界高度均值作为可审计代理。
+# GMR 导出采用 --offset-to-ground --ground-clearance 0.05，不能再使用 legacy 的
+# “所有 body origin 全局最小值必须等于 0”门禁，因此这里只记录 body origin 最低点，
+# 不用它单独拒绝动作。该检查是离线运动学/动力学预筛选，不等价于 Isaac-Lab 物理
+# rollout 或 SONIC 策略可跟踪性验证。
+
+contract_version: genmo.bumi_sonic_npz_quality_config.v1
+
+source:
+  motion_contract_version: sonic_isaaclab_bumi3_motion_v1
+  fps: 50
+  quaternion_convention: wxyz
+  required_keys:
+    - fps
+    - joint_pos
+    - joint_vel
+    - body_pos_w
+    - body_quat_w
+    - body_lin_vel_w
+    - body_ang_vel_w
+  robot_xml_sha256: 041c81e8176c7f375302796deca28b141891a3c097d8e341e8d967b735466edf
+  preset_sha256: 5c03a0467ce88a83be6f77c29574e5a9ac8dec7d1ac0eb15be475a37f2cb99a9
+  kinematics_sha256: 2305a21711b042fd2f2522ea23229f27f9f4240e24fbc7f4abaa0860f1b65d87
+  joint_order:
+    - l_leg_pitch_joint
+    - r_leg_pitch_joint
+    - waist_yaw_joint
+    - l_leg_roll_joint
+    - r_leg_roll_joint
+    - l_arm_pitch_joint
+    - r_arm_pitch_joint
+    - l_leg_yaw_joint
+    - r_leg_yaw_joint
+    - l_arm_roll_joint
+    - r_arm_roll_joint
+    - l_knee_pitch_joint
+    - r_knee_pitch_joint
+    - l_arm_yaw_joint
+    - r_arm_yaw_joint
+    - l_ankle_pitch_joint
+    - r_ankle_pitch_joint
+    - l_elbow_pitch_joint
+    - r_elbow_pitch_joint
+    - l_ankle_roll_joint
+    - r_ankle_roll_joint
+  joint_lower_limits:
+    [-2.09, -2.09, -1.57, -0.66, -1.57, -3.14, -3.14,
+     -2.53, -2.53, -0.14, -1.94, 0.0, 0.0, -1.57, -1.57,
+     -0.96, -0.96, -2.26, -2.26, -0.17, -0.17]
+  joint_upper_limits:
+    [2.09, 2.09, 1.57, 1.57, 0.66, 1.57, 1.57,
+     2.53, 2.53, 1.94, 0.14, 2.24, 2.24, 1.57, 1.57,
+     0.44, 0.44, 0.0, 0.0, 0.17, 0.17]
+  body_order:
+    - base_link
+    - waist_yaw_link
+    - l_arm_pitch_link
+    - l_arm_roll_link
+    - l_arm_yaw_link
+    - l_elbow_pitch_link
+    - r_arm_pitch_link
+    - r_arm_roll_link
+    - r_arm_yaw_link
+    - r_elbow_pitch_link
+    - l_leg_pitch_link
+    - l_leg_roll_link
+    - l_leg_yaw_link
+    - l_knee_pitch_link
+    - l_ankle_pitch_link
+    - l_ankle_roll_link
+    - r_leg_pitch_link
+    - r_leg_roll_link
+    - r_leg_yaw_link
+    - r_knee_pitch_link
+    - r_ankle_pitch_link
+    - r_ankle_roll_link
+
+hard_thresholds:
+  minimum_frames: 4
+  quaternion_norm_error_max: 0.001
+  joint_limit_violation_max: 0.0001
+  minimum_joint_limit_margin_warn: 0.01
+  root_height_min_absolute: -0.02
+  root_height_max_absolute: 2.1
+
+soft_policy:
+  exceed_ratio_max: 0.08
+  consecutive_exceed_frames: 10
+  severe_multiplier: 3.0
+  soft_failure_status: REVIEW
+
+dynamics:
+  joint_velocity_l2:
+    threshold: 30.0
+    unit: rad/s
+  joint_acceleration_l2:
+    threshold: 1200.0
+    unit: rad/s^2
+  joint_jerk_l2:
+    threshold: 60000.0
+    unit: rad/s^3
+  root_linear_velocity:
+    threshold: 3.0
+    unit: m/s
+  root_angular_velocity:
+    threshold: 12.0
+    unit: rad/s
+
+floor_style:
+  root_low_height: 0.30
+  root_low_tilt_degrees: 45.0
+  torso_ground_height: 0.30
+  upper_body_ground_height: 0.08
+  gate_root_height: 0.34
+  gate_tilt_degrees: 40.0
+  ankles_airborne_height: 0.08
+  reject_consecutive_frames: 25
+  review_ratio: 0.02
+  review_min_frames: 25
+  low_root_review_height: 0.22
+  low_root_review_consecutive_frames: 25
+  safe_interval_halo_frames: 25
+  minimum_safe_interval_frames: 200
+  body_groups:
+    torso_proxy:
+      - l_arm_pitch_link
+      - r_arm_pitch_link
+    upper_non_hand:
+      - l_arm_pitch_link
+      - l_arm_roll_link
+      - l_arm_yaw_link
+      - l_elbow_pitch_link
+      - r_arm_pitch_link
+      - r_arm_roll_link
+      - r_arm_yaw_link
+      - r_elbow_pitch_link
+    ankles:
+      - l_ankle_roll_link
+      - r_ankle_roll_link
+
+diagnostics:
+  # 这些一致性误差只进入报告，不改变 v1 状态。body 速度可能来自解析速度、数值
+  # 差分或后处理，未在数据契约中绑定唯一离散化实现，不能用任意容差误杀全量数据。
+  compare_stored_joint_velocity_to_central_difference: true
+  compare_stored_body_linear_velocity_to_central_difference: true
+

@@ -30,12 +30,8 @@ def write_test_kinematics(path: Path) -> Path:
             name: index for index, name in enumerate(["test_root", *body_names])
         },
         "joint_order": joint_names,
-        "joint_name_to_qpos_index": {
-            name: index for index, name in enumerate(joint_names)
-        },
-        "joint_name_to_qpos_address": {
-            name: index + 7 for index, name in enumerate(joint_names)
-        },
+        "joint_name_to_qpos_index": {name: index for index, name in enumerate(joint_names)},
+        "joint_name_to_qpos_address": {name: index + 7 for index, name in enumerate(joint_names)},
         "joint_qpos_addresses": list(range(7, 28)),
         "parent_body_indices": [0] * 21,
         "child_body_indices": list(range(1, 22)),
@@ -91,6 +87,8 @@ def write_dataset(
     motion_joint_names: list[str] | None = None,
     quaternion: torch.Tensor | None = None,
     quality_accepted: bool = True,
+    root_z_adjusted: bool = False,
+    reader_joint_limit_tolerance_rad: float | None = None,
 ) -> Path:
     spec = json.loads(kinematics_path.read_text(encoding="utf-8"))
     joint_names = spec["joint_order"]
@@ -114,8 +112,10 @@ def write_dataset(
         "quality_config_sha256": "c" * 64,
         "source_mjcf_sha256": "a" * 64,
         "ground_semantics": "legacy_body_origin_min_zero",
-        "root_z_adjusted": False,
+        "root_z_adjusted": root_z_adjusted,
     }
+    if reader_joint_limit_tolerance_rad is not None:
+        info["reader_joint_limit_tolerance_rad"] = reader_joint_limit_tolerance_rad
     (root / "meta" / "dataset_info.json").write_text(json.dumps(info), encoding="utf-8")
     qpos = torch.zeros(length, 28)
     qpos[:, 0] = torch.arange(length)
@@ -136,7 +136,7 @@ def write_dataset(
         "quality_config_sha256": "c" * 64,
         "retarget_config_sha256": "b" * 64,
         "ground_semantics": "legacy_body_origin_min_zero",
-        "root_z_adjusted": False,
+        "root_z_adjusted": root_z_adjusted,
     }
     torch.save(motion, root / "motions" / "sample.pt")
     music = torch.zeros(length, 35)

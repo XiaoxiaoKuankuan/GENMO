@@ -1,0 +1,49 @@
+# @package _global_
+# 手工 q1 + 50 Hz 自动 0.25 rad 复筛后的 BUMI 四数据集下一次训练配置。
+#
+# 本配置继承正式 random_v1 的 93D 网络、physical_v1 loss、优化器、500k steps、
+# 8-GPU DDP 与每 epoch 52,224 个全局 draw，只替换数据版本相关约束：train 唯一
+# 序列数为 2,623；reader 关节限位容差与质量策略共同绑定为 0.25 rad；FineDance
+# 因筛选后 val 为空而使用原始 test split 做周期评估。四库顶层权重改为显式版本化
+# 配置，不再由去重时长平方根随 manifest 隐式漂移。AIOZ 保留最大覆盖，AIST++
+# 保留稳定舞种监督；FineDance/CoMPAS3D 被适度上采样，但低于旧版对 FineDance 的
+# 33.6% 极端占比，以降低小库重复过拟合风险。
+defaults:
+  - gem_bumi_music_only_4set_random_v1
+  - _self_
+
+exp_name_base: gem_bumi_music_only_4set_smooth_q1_auto025_v1
+exp_name_var: ""
+exp_name: ${exp_name_base}${exp_name_var}
+data_name: gem_bumi_music_only_4set_smooth_q1_auto025_v1
+output_dir: outputs/${exp_name}
+
+data:
+  expected_train_sequences: 2623
+  dataset_probability_min: 0.03
+  dataset_sampling_weights:
+    aistpp_bumi: 0.30
+    aioz_gdance_bumi: 0.50
+    finedance_bumi: 0.17
+    compas3d_bumi: 0.03
+
+train_datasets:
+  aistpp_bumi_train:
+    joint_limit_tolerance: 0.25
+  aioz_gdance_bumi_train:
+    joint_limit_tolerance: 0.25
+  finedance_bumi_train:
+    joint_limit_tolerance: 0.25
+  compas3d_bumi_train:
+    joint_limit_tolerance: 0.25
+
+test_datasets:
+  aistpp_bumi_music_eval:
+    joint_limit_tolerance: 0.25
+  aioz_gdance_bumi_music_eval:
+    joint_limit_tolerance: 0.25
+  finedance_bumi_music_eval:
+    split: test
+    joint_limit_tolerance: 0.25
+  compas3d_bumi_music_eval:
+    joint_limit_tolerance: 0.25

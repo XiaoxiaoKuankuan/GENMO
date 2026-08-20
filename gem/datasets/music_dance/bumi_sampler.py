@@ -5,7 +5,7 @@ from __future__ import annotations
 import math
 import os
 from collections import defaultdict
-from collections.abc import Iterator, Sequence
+from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
@@ -49,9 +49,7 @@ def project_probabilities_with_bounds(
     remaining = 1.0
     while free:
         weight_sum = sum(values[index] for index in free)
-        proposal = {
-            index: remaining * values[index] / weight_sum for index in free
-        }
+        proposal = {index: remaining * values[index] / weight_sum for index in free}
         low = sorted(index for index, value in proposal.items() if value < minimum)
         high = sorted(index for index, value in proposal.items() if value > maximum)
         if not low and not high:
@@ -123,6 +121,7 @@ class DeduplicatedBumiSampler(Sampler[BumiWindowIndex]):
         seed: int = 42,
         probability_min: float = 0.05,
         probability_max: float = 0.50,
+        dataset_sampling_weights: Mapping[str, float] | None = None,
         rank: int | None = None,
         world_size: int | None = None,
     ) -> None:
@@ -177,7 +176,23 @@ class DeduplicatedBumiSampler(Sampler[BumiWindowIndex]):
             self.group_rows.append(variants)
             self.group_weights.append(torch.tensor(durations, dtype=torch.double))
             self.deduplicated_hours.append(sum(durations) / 30.0 / 3600.0)
-        top_weights = [math.sqrt(value) for value in self.deduplicated_hours]
+        if dataset_sampling_weights is None:
+            top_weights = [math.sqrt(value) for value in self.deduplicated_hours]
+            self.dataset_weight_source = "sqrt_deduplicated_music_hours"
+            self.strategy_name = "deduplicated_hierarchical_sqrt_duration_v1"
+        else:
+            provided = {str(name): float(value) for name, value in dataset_sampling_weights.items()}
+            if len(set(self.dataset_names)) != len(self.dataset_names):
+                raise ValueError("explicit dataset weights require unique dataset names")
+            if set(provided) != set(self.dataset_names):
+                raise ValueError(
+                    "explicit dataset weight names mismatch: "
+                    f"expected={sorted(self.dataset_names)}, actual={sorted(provided)}"
+                )
+            top_weights = [provided[name] for name in self.dataset_names]
+            self.dataset_weight_source = "explicit_config"
+            self.strategy_name = "deduplicated_hierarchical_explicit_weights_v1"
+        self.dataset_sampling_weights = list(map(float, top_weights))
         self.dataset_probabilities = project_probabilities_with_bounds(
             top_weights, float(probability_min), float(probability_max)
         )
@@ -209,9 +224,7 @@ class DeduplicatedBumiSampler(Sampler[BumiWindowIndex]):
             automatic_rank, automatic_world_size = self._environment_rank_world_size()
         rank = automatic_rank if self._rank_override is None else self._rank_override
         world_size = (
-            automatic_world_size
-            if self._world_size_override is None
-            else self._world_size_override
+            automatic_world_size if self._world_size_override is None else self._world_size_override
         )
         return int(rank), int(world_size)
 
@@ -261,23 +274,26 @@ class DeduplicatedBumiSampler(Sampler[BumiWindowIndex]):
         rank, world_size = self._distributed_context()
         self._validate_distributed_context(rank, world_size)
         return {
-            "strategy": "deduplicated_hierarchical_sqrt_duration_v1",
+            "strategy": self.strategy_name,
             "samples_per_epoch_global": self.samples_per_epoch,
             "samples_per_epoch_rank": self.samples_per_epoch // world_size,
             "seed": self.seed,
             "rank": rank,
             "world_size": world_size,
+            "dataset_weight_source": self.dataset_weight_source,
             "datasets": [
                 {
                     "name": name,
                     "groups": len(groups),
                     "deduplicated_hours": hours,
+                    "input_weight": weight,
                     "probability": probability,
                 }
-                for name, groups, hours, probability in zip(
+                for name, groups, hours, weight, probability in zip(
                     self.dataset_names,
                     self.group_ids,
                     self.deduplicated_hours,
+                    self.dataset_sampling_weights,
                     self.dataset_probabilities,
                     strict=True,
                 )
@@ -304,18 +320,14 @@ class DeduplicatedBumiSampler(Sampler[BumiWindowIndex]):
                 ).item()
             )
             variants = self.group_rows[dataset_index][group_index]
-            variant_offset = int(
-                torch.randint(len(variants), (1,), generator=generator).item()
-            )
+            variant_offset = int(torch.randint(len(variants), (1,), generator=generator).item())
             row_index = variants[variant_offset]
             row = self.datasets[dataset_index].rows[row_index]
             last_start = max(
                 int(row["num_frames"]) - int(self.datasets[dataset_index].motion_frames), 0
             )
             start = int(torch.randint(last_start + 1, (1,), generator=generator).item())
-            output.append(
-                BumiWindowIndex(dataset_index, row_index, start, draw_index)
-            )
+            output.append(BumiWindowIndex(dataset_index, row_index, start, draw_index))
         return output
 
     def __iter__(self) -> Iterator[BumiWindowIndex]:

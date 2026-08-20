@@ -97,6 +97,12 @@ def main() -> None:
     parser.add_argument("--output", required=True, type=Path)
     parser.add_argument("--motion-frames", type=int, default=120)
     parser.add_argument("--stride", type=int, default=120)
+    parser.add_argument(
+        "--joint-limit-tolerance",
+        type=float,
+        default=1.0e-3,
+        help="reader 允许的关节限位越界弧度；必须与目标数据版本绑定的策略一致",
+    )
     args = parser.parse_args()
     if args.motion_frames != 120:
         raise ValueError("Formal BUMI music stats require --motion-frames=120")
@@ -114,6 +120,7 @@ def main() -> None:
             strict_alignment=True,
             strict_contract=True,
             require_quality_filter=True,
+            joint_limit_tolerance=args.joint_limit_tolerance,
             validate_payloads_on_init=False,
         )
         dataset_windows = 0
@@ -161,7 +168,11 @@ def main() -> None:
     output = args.output.expanduser().resolve()
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    print(json.dumps({"output": str(output), "windows": window_count, "frames": accumulator.count}, indent=2))
+    print(
+        json.dumps(
+            {"output": str(output), "windows": window_count, "frames": accumulator.count}, indent=2
+        )
+    )
 
 
 if __name__ == "__main__":

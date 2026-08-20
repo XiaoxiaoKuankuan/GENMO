@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from collections import Counter
 
+import pytest
+
 from gem.datasets.music_dance.bumi_sampler import (
     DeduplicatedBumiSampler,
     project_probabilities_with_bounds,
@@ -25,9 +27,7 @@ class FakeDataset:
 
 def test_bounded_probability_projection_matches_formal_ratios() -> None:
     hours = [0.407620, 13.149139, 3.541583, 0.083843]
-    probabilities = project_probabilities_with_bounds(
-        [value**0.5 for value in hours], 0.05, 0.50
-    )
+    probabilities = project_probabilities_with_bounds([value**0.5 for value in hours], 0.05, 0.50)
     expected = [0.113993, 0.50, 0.336007, 0.05]
     for actual, target in zip(probabilities, expected, strict=True):
         assert abs(actual - target) < 2.0e-5
@@ -80,6 +80,36 @@ def test_sampler_ddp_ratio_reproducibility_and_restore() -> None:
         rank_draws.append(draws)
     assert len(set().union(*rank_draws)) == 1024
     assert sum(len(draws) for draws in rank_draws) == 1024
+
+
+def test_sampler_accepts_versioned_explicit_four_dataset_weights() -> None:
+    datasets = [FakeDataset(f"dataset_{index}", [120 * (index + 1)]) for index in range(4)]
+    weights = {
+        "dataset_0": 0.30,
+        "dataset_1": 0.45,
+        "dataset_2": 0.17,
+        "dataset_3": 0.08,
+    }
+    sampler = DeduplicatedBumiSampler(
+        datasets,
+        samples_per_epoch=1024,
+        dataset_sampling_weights=weights,
+        rank=0,
+        world_size=1,
+    )
+    assert sampler.dataset_probabilities == pytest.approx([0.30, 0.45, 0.17, 0.08])
+    summary = sampler.summary()
+    assert summary["dataset_weight_source"] == "explicit_config"
+    assert summary["strategy"] == "deduplicated_hierarchical_explicit_weights_v1"
+    assert [item["input_weight"] for item in summary["datasets"]] == pytest.approx(
+        [0.30, 0.45, 0.17, 0.08]
+    )
+    with pytest.raises(ValueError, match="weight names mismatch"):
+        DeduplicatedBumiSampler(
+            datasets,
+            samples_per_epoch=1024,
+            dataset_sampling_weights={"wrong": 1.0},
+        )
 
 
 def test_sampler_resolves_ddp_context_after_construction(monkeypatch) -> None:

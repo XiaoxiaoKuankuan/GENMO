@@ -517,6 +517,69 @@ $GENMO_PYTHON tools/eval/render_bumi_motion.py \
 这条 ONNX parity 链路验证神经网络、DDIM、93D 解码和 FK 数值一致性；MuJoCo 渲染仍是
 逐帧 `mj_forward`，不代表 GMT 控制器动力学跟踪已经验证。
 
+## smooth_q1 + auto025 下一次训练数据版本（2026-08-20）
+
+手工 q1 的 3,163 条真实 50 Hz SONIC NPZ 使用独立的
+`quality_filter_sonic_npz_50hz_auto025_v1.yaml` 复筛。关节最大允许越界由 strict
+配置的 0.0001 rad 放宽为 0.25 rad，其余动力学、根姿态和贴地规则保持不变；结果为
+PASS 2,986、REVIEW 59、REJECT 118。AIST++ 有一对基础版/`_armfix` 的 qpos 完全相同，
+正式发布显式选择 `_armfix` 并在 conversion report 中记录替代关系，因此最终是 2,985
+条唯一动作，而不是把同一人体/音乐样本重复计权。
+
+服务器2的新版本均为新目录，不覆盖旧 `bumi_music_genmo_v1`：
+
+```text
+/data0/user/liwei/datasets/bumi_motions_smooth_q1_50hz_auto025_v1   # 2,986 条 PASS 源 NPZ、质量报告和源资产快照
+/data0/user/liwei/datasets/bumi_music_audio_smooth_q1_auto025_v1   # 新旧音频配对合集；旧 WAV 用硬链接，新补 38 个 WAV
+/data0/user/liwei/datasets/bumi_music_genmo_smooth_q1_auto025_v1   # 30 Hz qpos28/EDGE35/WAV/manifest/stats 正式训练版本
+```
+
+50→30 Hz 使用源导出的右端点不包含时间网格，位置/关节线性插值、连续 wxyz 根四元数
+最短弧 SLERP，末帧只保持而不外推。源 publish-order 21 关节按完整名称重排到 GENMO
+`482138…` MuJoCo 顺序。每条输出再用 GENMO kinematics 做 FK，并施加一个常量 root-Z
+偏移，使 `legacy_body_origin_min_zero` 地面规范成立；metadata 明确记录
+`root_z_adjusted=true`。motion `.pt` 的权威轨迹仍是 qpos28，93D 由固定 codec 在线编码，
+不是另一份互相独立的轨迹。
+
+| 数据集 | 唯一动作 | train / val / test | 总小时 | train 去重音乐组 |
+|---|---:|---:|---:|---:|
+| AIST++ | 853 | 818 / 17 / 18 | 2.8881 | 50 |
+| AIOZ-GDance | 1,947 | 1,667 / 136 / 144 | 20.6022 | 555 |
+| FineDance | 118 | 105 / 0 / 13 | 4.2951 | 98 |
+| CoMPAS3D | 67 | 33 / 18 / 16 | 2.8066 | 2 |
+| 合计 | 2,985 | 2,623 / 171 / 191 | 30.5919 | — |
+
+四库严格 payload、qpos/EDGE35/manifest 等长及 source motion/EDGE35/WAV SHA 扫描均
+通过；FineDance 因 val 为空而严格扫描 train/test，下一次实验也用 test 做 FineDance
+周期评估，不改写原 split。train-only stats 共 24,274 个窗口、2,912,765 个统计帧，
+SHA256 为 `3c9aa73b172cbe0e687f24686c1b912289166a150d6ad11eefccd2a69c279ea2`；
+DataModule 已验证四库 fingerprint，并实取到 finite 的 qpos `[128,120,28]` 与
+EDGE35 `[128,120,35]` batch。最终训练配置快照和上述 conversion/stats/validation SHA
+汇总在 `meta/data_version_release.json`，该 release manifest 的 SHA256 为
+`283e27150632f6fa7f27db1b7e36a26f12c6ba4d4822372e61725d890a975b23`。
+
+下一次训练入口为 `gem_bumi_music_only_4set_smooth_q1_auto025_v1`。顶层采样不再随
+manifest 时长隐式漂移，而固定为 AIST++ 30%、AIOZ 50%、FineDance 17%、CoMPAS3D
+3%。CoMPAS3D train 只有两个音乐组，因此低于旧版 5%，避免小库被过度重复；AIOZ
+具有 555 个组并承担 50%，其余两库保留跨舞种覆盖。启动前设置：
+
+```bash
+export BUMI_BASE=/data0/user/liwei/datasets/bumi_music_genmo_smooth_q1_auto025_v1
+export BUMI_KINEMATICS_PATH=/data0/user/liwei/datasets/bumi_assets_482138_v1/kinematics/bumi_kinematics_482138_v1.json
+export AISTPP_BUMI_ROOT=$BUMI_BASE/AIST++
+export AIOZ_GDANCE_BUMI_ROOT=$BUMI_BASE/AIOZ-GDANCE
+export FINEDANCE_BUMI_ROOT=$BUMI_BASE/FineDance
+export COMPAS3D_BUMI_ROOT=$BUMI_BASE/CoMPAS3D
+export BUMI_MUSIC_STATS_PATH=$BUMI_BASE/meta/bumi_93d_stats_train_auto025_v1.json
+
+$GENMO_PYTHON -u scripts/train.py \
+  exp=gem_bumi_music_only_4set_smooth_q1_auto025_v1 \
+  output_dir=/data0/user/liwei/experiments/genmo/gem_bumi_music_only_4set_smooth_q1_auto025_v1
+```
+
+这里没有自动停止或覆盖当前服务器2训练，也没有自动启动下一次正式作业；新入口用于
+当前作业结束后的独立随机初始化训练。
+
 ## 运动学评估与动力学验证
 
 `eval_bumi_music.py` 实现 joint angle MAE、root trajectory/FK error、joint limits/margin、sole penetration/sliding、root height/tilt、joint velocity/acceleration/jerk P95、root linear/angular velocity、contact accuracy、beat alignment 和 batch diversity。它们都是运动学质量指标。

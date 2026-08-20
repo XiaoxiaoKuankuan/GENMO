@@ -134,6 +134,8 @@ class BumiMusicDatasetReader:
         self.require_quality_filter = bool(require_quality_filter)
         self.quaternion_norm_tolerance = float(quaternion_norm_tolerance)
         self.joint_limit_tolerance = float(joint_limit_tolerance)
+        if not np.isfinite(self.joint_limit_tolerance) or self.joint_limit_tolerance < 0.0:
+            raise ValueError("joint_limit_tolerance must be finite and non-negative")
         self.validate_source_hashes = bool(validate_source_hashes_on_init)
         self._sha256_cache: dict[Path, str] = {}
         if not self.root.is_dir():
@@ -189,23 +191,33 @@ class BumiMusicDatasetReader:
         ):
             value = info.get(key)
             if not isinstance(value, str) or _SHA256.fullmatch(value) is None:
-                raise ValueError(f"BUMI dataset_info {path}: {key} must be a real SHA-256 hex digest")
+                raise ValueError(
+                    f"BUMI dataset_info {path}: {key} must be a real SHA-256 hex digest"
+                )
         if self.require_quality_filter and info.get("quality_filter_applied") is not True:
             raise ValueError(
                 f"BUMI dataset_info {path}: quality_filter_applied must be true for formal training"
             )
         if info.get("source_mjcf_sha256") != info.get("mjcf_sha256"):
-            raise ValueError(
-                f"BUMI dataset_info {path}: source_mjcf_sha256 must equal mjcf_sha256"
-            )
+            raise ValueError(f"BUMI dataset_info {path}: source_mjcf_sha256 must equal mjcf_sha256")
         if info.get("ground_semantics") != "legacy_body_origin_min_zero":
             raise ValueError(
                 f"BUMI dataset_info {path}: ground_semantics must be "
-                "'legacy_body_origin_min_zero' for the unadjusted v1 corpus"
+                "'legacy_body_origin_min_zero' for the v1 training contract"
             )
-        if info.get("root_z_adjusted") is not False:
+        if not isinstance(info.get("root_z_adjusted"), bool):
+            raise ValueError(f"BUMI dataset_info {path}: root_z_adjusted must be a boolean")
+        declared_joint_tolerance = info.get("reader_joint_limit_tolerance_rad")
+        if declared_joint_tolerance is not None and not np.isclose(
+            float(declared_joint_tolerance),
+            self.joint_limit_tolerance,
+            rtol=0.0,
+            atol=1.0e-12,
+        ):
             raise ValueError(
-                f"BUMI dataset_info {path}: root_z_adjusted must be false"
+                f"BUMI dataset_info {path}: reader_joint_limit_tolerance_rad="
+                f"{declared_joint_tolerance!r} does not match reader tolerance "
+                f"{self.joint_limit_tolerance!r}"
             )
         return info
 
@@ -238,7 +250,9 @@ class BumiMusicDatasetReader:
             if not sample_id:
                 raise ValueError(f"{self.manifest_path}:{line_number}: sample_id is empty")
             if sample_id in seen:
-                raise ValueError(f"{self.manifest_path}:{line_number}: duplicate sample_id={sample_id}")
+                raise ValueError(
+                    f"{self.manifest_path}:{line_number}: duplicate sample_id={sample_id}"
+                )
             seen.add(sample_id)
             if not str(row["sequence_id"]):
                 raise ValueError(f"{sample_id}: sequence_id is empty")
@@ -316,7 +330,7 @@ class BumiMusicDatasetReader:
             ("quality_config_sha256", self.dataset_info["quality_config_sha256"]),
             ("retarget_config_sha256", self.dataset_info["retarget_config_sha256"]),
             ("ground_semantics", "legacy_body_origin_min_zero"),
-            ("root_z_adjusted", False),
+            ("root_z_adjusted", self.dataset_info["root_z_adjusted"]),
         ):
             if payload.get(key) != expected_value:
                 raise ValueError(
@@ -516,9 +530,7 @@ class BumiMusicDanceDataset(Dataset):
             raise ValueError(f"cannot pad length {value.shape[0]} to shorter {target_length}")
         if value.shape[0] == target_length:
             return value.contiguous()
-        padding = torch.zeros(
-            (target_length - value.shape[0], *value.shape[1:]), dtype=value.dtype
-        )
+        padding = torch.zeros((target_length - value.shape[0], *value.shape[1:]), dtype=value.dtype)
         return torch.cat((value, padding), dim=0).contiguous()
 
     def get_window(self, row_index: int, start_frame: int | None = None) -> dict[str, Any]:

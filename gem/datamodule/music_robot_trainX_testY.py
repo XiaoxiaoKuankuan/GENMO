@@ -92,6 +92,7 @@ class DataModule(pl.LightningDataModule):
         sampler_seed: int = 42,
         dataset_probability_min: float = 0.05,
         dataset_probability_max: float = 0.50,
+        dataset_sampling_weights: Mapping[str, float] | None = None,
         stats_path: str | Path | None = None,
         require_stats_fingerprint_match: bool = False,
         expected_train_sequences: int | None = None,
@@ -105,15 +106,20 @@ class DataModule(pl.LightningDataModule):
         self.sampler_seed = int(sampler_seed)
         self.dataset_probability_min = float(dataset_probability_min)
         self.dataset_probability_max = float(dataset_probability_max)
-        self.stats_path = None if stats_path in (None, "") else Path(stats_path).expanduser().resolve()
+        self.dataset_sampling_weights = (
+            None
+            if dataset_sampling_weights is None
+            else {str(name): float(value) for name, value in dataset_sampling_weights.items()}
+        )
+        self.stats_path = (
+            None if stats_path in (None, "") else Path(stats_path).expanduser().resolve()
+        )
         self.require_stats_fingerprint_match = bool(require_stats_fingerprint_match)
         self.expected_train_sequences = (
             None if expected_train_sequences is None else int(expected_train_sequences)
         )
         if self.sampling_strategy not in {"concat", "deduplicated_hierarchical"}:
-            raise ValueError(
-                "sampling_strategy must be 'concat' or 'deduplicated_hierarchical'"
-            )
+            raise ValueError("sampling_strategy must be 'concat' or 'deduplicated_hierarchical'")
         if train_subset_ratio is not None and not 0.0 < float(train_subset_ratio) <= 1.0:
             raise ValueError("train_subset_ratio must be in (0,1]")
         if "train" in dataset_opts:
@@ -195,9 +201,7 @@ class DataModule(pl.LightningDataModule):
             raise ValueError(f"Invalid BUMI stats JSON {self.stats_path}: {exc}") from exc
         fingerprints = stats.get("dataset_fingerprints") if isinstance(stats, dict) else None
         if not isinstance(fingerprints, dict):
-            raise ValueError(
-                f"BUMI stats {self.stats_path} is missing dataset_fingerprints"
-            )
+            raise ValueError(f"BUMI stats {self.stats_path} is missing dataset_fingerprints")
         expected_names = {str(dataset.dataset_name) for dataset in datasets}
         if set(fingerprints) != expected_names:
             raise ValueError(
@@ -220,9 +224,7 @@ class DataModule(pl.LightningDataModule):
                     f"BUMI stats fingerprint mismatch for {name}: "
                     f"expected={expected}, actual={actual}"
                 )
-        Log.info(
-            f"[BUMI Stats] Verified train dataset fingerprints: {self.stats_path}"
-        )
+        Log.info(f"[BUMI Stats] Verified train dataset fingerprints: {self.stats_path}")
 
     @staticmethod
     def _options(config) -> dict:
@@ -244,6 +246,7 @@ class DataModule(pl.LightningDataModule):
                 seed=self.sampler_seed,
                 probability_min=self.dataset_probability_min,
                 probability_max=self.dataset_probability_max,
+                dataset_sampling_weights=self.dataset_sampling_weights,
             )
             shuffle = False
             Log.info(f"[BUMI Train Sampler Construction] {sampler.summary()}")
