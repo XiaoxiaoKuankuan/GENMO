@@ -129,8 +129,15 @@ GMT 动力学已经通过：
   --video outputs/onnx/bumi_music/s430000/demo_mJS3.mp4 \
   --width 640 \
   --height 480 \
+  --world-root-x 0 \
+  --world-root-y 0 \
+  --world-root-yaw 0 \
   --mux-audio
 ```
+
+BUMI 93D 训练表示是首帧 XY/yaw、默认根高归一化后的 canonical 坐标，不能直接当作 MJCF
+世界坐标渲染。Demo 在启用 `--render-mjcf` 且没有显式给出世界位置时，会自动使用
+`root_xy=[0,0]、anchor_z=0.65、yaw=0`；上面的命令仍显式写出 XY/yaw，便于复现实验。
 
 ## TensorRT 构建与 parity
 

@@ -304,6 +304,35 @@ def validate_arguments(args: argparse.Namespace) -> None:
         raise ValueError("--target-start-frame must be >= 0")
 
 
+def resolve_world_anchor(
+    args: argparse.Namespace, *, default_root_height: float
+) -> dict[str, float | list[float]] | None:
+    """解析显式世界位置，并为 MuJoCo 渲染补上安全的默认世界锚点。"""
+
+    anchor_values = (args.world_root_x, args.world_root_y, args.world_root_yaw)
+    if args.world_root_z is not None and not all(value is not None for value in anchor_values):
+        raise ValueError("--world-root-z requires complete world XY/yaw placement")
+    if any(value is not None for value in anchor_values) and not all(
+        value is not None for value in anchor_values
+    ):
+        raise ValueError("world placement requires root X, Y and yaw together")
+    world_anchor: dict[str, float | list[float]] | None = None
+    if all(value is not None for value in anchor_values):
+        world_anchor = {
+            "root_xy": [float(args.world_root_x), float(args.world_root_y)],
+            "yaw": float(args.world_root_yaw),
+        }
+    elif args.render_mjcf is not None:
+        world_anchor = {"root_xy": [0.0, 0.0], "yaw": 0.0}
+    if world_anchor is not None:
+        world_anchor["anchor_z"] = (
+            float(default_root_height)
+            if args.world_root_z is None
+            else float(args.world_root_z)
+        )
+    return world_anchor
+
+
 @torch.inference_mode()
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
@@ -363,21 +392,10 @@ def main(argv: list[str] | None = None) -> int:
     model = model.to(device).eval()
     load_seconds = time.perf_counter() - load_started
 
-    anchor_values = (args.world_root_x, args.world_root_y, args.world_root_yaw)
-    if args.world_root_z is not None and not all(value is not None for value in anchor_values):
-        raise ValueError("--world-root-z requires complete world XY/yaw placement")
-    if any(value is not None for value in anchor_values) and not all(
-        value is not None for value in anchor_values
-    ):
-        raise ValueError("world placement requires root X, Y and yaw together")
-    world_anchor = None
-    if all(value is not None for value in anchor_values):
-        world_anchor = {
-            "root_xy": [args.world_root_x, args.world_root_y],
-            "yaw": args.world_root_yaw,
-        }
-        if args.world_root_z is not None:
-            world_anchor["anchor_z"] = args.world_root_z
+    world_anchor = resolve_world_anchor(
+        args,
+        default_root_height=float(model.endecoder.kinematics.default_qpos[2]),
+    )
 
     generation_started = time.perf_counter()
     prediction = model.predict(
@@ -413,6 +431,7 @@ def main(argv: list[str] | None = None) -> int:
             "kinematics_sha256": model.endecoder.kinematics.kinematics_sha256,
             "stats_path": str(stats_path),
             "stats_sha256": sha256_file(stats_path),
+            "world_anchor": world_anchor,
         }
     )
     output.parent.mkdir(parents=True, exist_ok=True)

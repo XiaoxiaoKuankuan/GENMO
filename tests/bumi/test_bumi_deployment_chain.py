@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -27,6 +28,7 @@ from gem.runtime.bumi_robot_stream import (
     bumi_joint_order_sha256,
 )
 from gem.runtime.gmt_trajectory import qpos_timeline_to_gmt_frames, resample_qpos_timeline
+from scripts.demo.demo_music_bumi import resolve_world_anchor
 
 
 def _stats(path: Path, kinematics: BumiKinematics) -> Path:
@@ -180,3 +182,20 @@ def test_joint_order_hash_is_stable(test_kinematics_path: Path) -> None:
     second = bumi_joint_order_sha256(list(kinematics.joint_order))
     assert first == second and len(first) == 64
     assert sha256_file(test_kinematics_path) == kinematics.kinematics_sha256
+
+
+def test_bumi_render_defaults_to_world_anchor() -> None:
+    args = SimpleNamespace(
+        world_root_x=None,
+        world_root_y=None,
+        world_root_z=None,
+        world_root_yaw=None,
+        render_mjcf=Path("bumi3.xml"),
+    )
+    assert resolve_world_anchor(args, default_root_height=0.65) == {
+        "root_xy": [0.0, 0.0],
+        "yaw": 0.0,
+        "anchor_z": 0.65,
+    }
+    args.render_mjcf = None
+    assert resolve_world_anchor(args, default_root_height=0.65) is None
