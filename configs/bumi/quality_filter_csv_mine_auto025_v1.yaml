@@ -1,0 +1,84 @@
+# 自建 BUMI CSV/WAV 数据的 0.25 rad 离线质量与发布规则。
+#
+# 该配置绑定当前 GENMO BUMI kinematics，并描述原始 CSV 的 28 列 xyzw 契约、允许的
+# 30/50 Hz 帧率、48 kHz 双声道 PCM WAV、明确排除曲目及可由 qpos/FK 复算的质量阈值。
+# 它不声称原始 CSV 带有 SONIC 七字段 NPZ 的 body velocity，也不把离线 PASS 等同于
+# GMT 动力学跟踪或实物安全通过。发布工具会把本文件 SHA 写入 dataset_info 和 motion。
+contract_version: genmo.bumi_csv_quality_config.v1
+dataset_name: mine_bumi
+expected_kinematics_sha256: 226306c217a39643a32ccc641b63e72c8ce0bf307af1fd6781b739fb694bcda0
+
+source:
+  allowed_fps: [30, 50]
+  quaternion_convention: xyzw
+  csv_header:
+    - root_pos_x
+    - root_pos_y
+    - root_pos_z
+    - root_rot_x
+    - root_rot_y
+    - root_rot_z
+    - root_rot_w
+    - leg.pitch.l
+    - leg.roll.l
+    - leg.yaw.l
+    - knee.pitch.l
+    - ankle.pitch.l
+    - ankle.roll.l
+    - leg.pitch.r
+    - leg.roll.r
+    - leg.yaw.r
+    - knee.pitch.r
+    - ankle.pitch.r
+    - ankle.roll.r
+    - waist.yaw
+    - arm.pitch.l
+    - arm.roll.l
+    - arm.yaw.l
+    - elbow.pitch.l
+    - arm.pitch.r
+    - arm.roll.r
+    - arm.yaw.r
+    - elbow.pitch.r
+  wav_sample_rate: 48000
+  wav_channels: 2
+  wav_sample_width_bytes: 2
+
+selection:
+  excluded_songs:
+    - APT啦啦操
+  expected_candidates: 100
+  expected_accepted: 99
+
+hard_thresholds:
+  minimum_frames: 4
+  quaternion_norm_error_max: 0.001
+  joint_limit_violation_max: 0.25
+  root_height_min_absolute: -0.02
+  root_height_max_absolute: 2.1
+
+soft_policy:
+  exceed_ratio_max: 0.08
+  consecutive_exceed_frames: 10
+  severe_multiplier: 3.0
+
+dynamics:
+  joint_velocity_l2: 30.0
+  joint_acceleration_l2: 1200.0
+  joint_jerk_l2: 60000.0
+  root_linear_velocity: 3.0
+  root_angular_velocity: 12.0
+
+floor_style:
+  root_low_height: 0.30
+  root_low_tilt_degrees: 45.0
+  torso_ground_height: 0.30
+  upper_body_ground_height: 0.08
+  gate_root_height: 0.34
+  gate_tilt_degrees: 40.0
+  ankles_airborne_height: 0.08
+  reject_consecutive_frames: 25
+  review_ratio: 0.02
+  review_min_frames: 25
+  low_root_review_height: 0.22
+  low_root_review_consecutive_frames: 25
