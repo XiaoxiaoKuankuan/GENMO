@@ -131,3 +131,25 @@ def test_ground_losses_are_hard_disabled_for_legacy_ground(test_kinematics_path)
             contract_version="physical_v1",
             ground_semantics="legacy_body_origin_min_zero",
         )
+
+
+def test_mixed_ground_contract_is_allowed_only_without_contact_labels(
+    test_kinematics_path,
+) -> None:
+    kinematics = BumiKinematics(test_kinematics_path)
+    endecoder = SimpleNamespace(kinematics=kinematics, codec=BumiMotionFeatureCodec(kinematics))
+    BumiRobotLosses(
+        endecoder,
+        _weights(),
+        contract_version="physical_v1",
+        ground_semantics="mixed_floor_zero_no_contact_v1",
+    )
+    weights = _weights()
+    weights["foot_slide"] = 0.001
+    with pytest.raises(ValueError, match="cannot enable"):
+        BumiRobotLosses(
+            endecoder,
+            weights,
+            contract_version="physical_v1",
+            ground_semantics="mixed_floor_zero_no_contact_v1",
+        )

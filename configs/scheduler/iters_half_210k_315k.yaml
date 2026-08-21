@@ -1,0 +1,8 @@
+# 350k-step 大 batch 训练的两阶段学习率衰减。
+# 里程碑保持原 500k 配置的 60%/90% 相对位置，分别在 210k 和 315k 将学习率减半。
+scheduler:
+  _target_: torch.optim.lr_scheduler.MultiStepLR
+  milestones: [210000, 315000]
+  gamma: 0.5
+interval: step
+frequency: 1

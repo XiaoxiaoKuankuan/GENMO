@@ -50,9 +50,7 @@ def test_pipeline_and_model_contract() -> None:
 
 
 def test_experiment_selects_only_new_bumi_layers() -> None:
-    text = (REPO_ROOT / "configs/exp/gem_bumi_music_only_4set.yaml").read_text(
-        encoding="utf-8"
-    )
+    text = (REPO_ROOT / "configs/exp/gem_bumi_music_only_4set.yaml").read_text(encoding="utf-8")
     for expected in (
         "music_robot/trainX_testY",
         "bumi_music_gem",
@@ -85,9 +83,7 @@ def test_random_v1_disables_ground_contact_and_uses_balanced_sampling() -> None:
 
 def test_mine_five_dataset_config_composes_with_exact_training_contract() -> None:
     with initialize_config_dir(version_base="1.3", config_dir=str(REPO_ROOT / "configs")):
-        config = compose(
-            config_name="train", overrides=["exp=gem_bumi_music_only_5set_mine_v1"]
-        )
+        config = compose(config_name="train", overrides=["exp=gem_bumi_music_only_5set_mine_v1"])
 
     assert list(config.train_datasets) == [
         "aistpp_bumi_train",
@@ -96,14 +92,10 @@ def test_mine_five_dataset_config_composes_with_exact_training_contract() -> Non
         "compas3d_bumi_train",
         "mine_bumi_train",
     ]
-    mine_config = OmegaConf.to_container(
-        config.train_datasets.mine_bumi_train, resolve=False
-    )
+    mine_config = OmegaConf.to_container(config.train_datasets.mine_bumi_train, resolve=False)
     assert mine_config["root"] == "${oc.env:MINE_BUMI_ROOT}"
     assert config.train_datasets.mine_bumi_train.dataset_name == "mine_bumi"
-    assert all(
-        value.joint_limit_tolerance == 0.25 for value in config.train_datasets.values()
-    )
+    assert all(value.joint_limit_tolerance == 0.25 for value in config.train_datasets.values())
     assert config.data.expected_train_sequences == 2623 + 99
     assert dict(config.data.dataset_sampling_weights) == {
         "aistpp_bumi": 0.29,
@@ -113,3 +105,25 @@ def test_mine_five_dataset_config_composes_with_exact_training_contract() -> Non
         "mine_bumi": 0.05,
     }
     assert sum(config.data.dataset_sampling_weights.values()) == 1.0
+
+
+def test_manual_q1_v3_uses_large_batch_and_mixed_ground_contract() -> None:
+    with initialize_config_dir(version_base="1.3", config_dir=str(REPO_ROOT / "configs")):
+        config = compose(
+            config_name="train", overrides=["exp=gem_bumi_music_only_5set_manual_q1_v3"]
+        )
+
+    assert config.pretrain_ckpt is None
+    assert config.ckpt_path is None
+    assert config.data.expected_train_sequences == 2792 + 99
+    assert config.data.loader_opts.train.batch_size == 192
+    assert config.data.samples_per_epoch == 52224
+    assert config.data.samples_per_epoch % (8 * config.data.loader_opts.train.batch_size) == 0
+    assert config.pl_trainer.devices == 8
+    assert config.pl_trainer.max_steps == 350000
+    assert list(config.scheduler.scheduler.milestones) == [210000, 315000]
+    assert config.pipeline.args.ground_semantics == "mixed_floor_zero_no_contact_v1"
+    assert config.pipeline.args.weights.contact_bce == 0.0
+    assert config.pipeline.args.weights.foot_slide == 0.0
+    assert config.pipeline.args.weights.penetration == 0.0
+    assert config.use_wandb is False

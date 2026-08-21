@@ -633,6 +633,35 @@ $GENMO_PYTHON -u scripts/train.py \
 这里没有自动停止或覆盖当前服务器2训练，也没有自动启动下一次正式作业；新入口用于
 当前作业结束后的独立随机初始化训练。
 
+## 人工 q1 GMR temporal-bounded v3 五库训练
+
+该版本把人工评分为 1 的 3,162 条动作作为收录集合，再逐条要求 GMR 嵌入式
+`safety_overall=true`。硬安全门覆盖 finite、XML/URDF 关节限位一致、关节位置/速度/
+加速度约束、上半身最大帧差、Root Z 足底穿透及 Root Z 加速度；`fidelity_overall`
+只衡量轨迹优化后末端相对 raw IK 的偏移，作为诊断字段保留，不删除用户已选的动作。
+AIST++ 评审 NPZ 做过明确的坐标转换，因此其旧源索引哈希不同是预期行为；完整性必须核对
+评审包自身的 `motion_sha256.txt`，不能错误要求 `source_index_hash_match=true`。
+
+适配入口为 `tools/data/bumi/prepare_gmr_manual_q1_selected_root.py`。它同时核对人工选择
+索引、评审 NPZ SHA、GMR release audit、输出 PKL SHA、每条 legacy payload 与嵌入式质量
+报告，并原子生成下游 converter 使用的 selected root。正式本地结果为 3,162 条、
+3,589,146 帧、33.232833 小时；四库数量为 AIST++ 963、AIOZ-GDance 1,978、
+FineDance 149、CoMPAS3D 72，train/val/test 为 2,792/174/196。全部安全门通过；
+2,614 条 fidelity 通过、548 条仅 fidelity 诊断未通过。
+
+Root Z 不再套用旧 `legacy_body_origin_min_zero` 二次平移。四个 GMR 库使用
+`gmr_foot_sole_ground_zero_v1`，保留真实足底网格、有界 QP、最大 2.1 mm 穿透门和原始
+加速度审计；自建库仍是历史 body-origin 地面。联合训练入口把这种组合声明为
+`mixed_floor_zero_no_contact_v1`，并硬保持 contact BCE、foot slide、penetration 权重为
+零，避免从两种地面定义伪造统一接触标签。根高度、表示、FK、关节时序和限位监督继续有效。
+
+正式实验入口是 `gem_bumi_music_only_5set_manual_q1_v3`。train 序列为
+2,792+99=2,891，固定采样概率 AIST/AIOZ/FineDance/CoMPAS3D/Mine 为
+29%/47%/16%/3%/5%。每卡 batch 192、8 卡全局 batch 1,536；每 epoch 52,224 draw
+恰好是 34 个全局 step。训练从随机初始化开始，350k step 共 5.376 亿 draw，210k/315k
+各衰减一半，略高于旧 128×8×500k 的 5.12 亿 draw，目标墙钟时间约三天。五库 stats
+必须用新四库与自建库的 train manifests 联合重算，旧四库或旧五库 fingerprint 会被拒绝。
+
 ## 运动学评估与动力学验证
 
 `eval_bumi_music.py` 实现 joint angle MAE、root trajectory/FK error、joint limits/margin、sole penetration/sliding、root height/tilt、joint velocity/acceleration/jerk P95、root linear/angular velocity、contact accuracy、beat alignment 和 batch diversity。它们都是运动学质量指标。

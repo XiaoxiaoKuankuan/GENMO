@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import hashlib
 import pickle
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -213,6 +213,8 @@ class LegacyBumiMotion:
     dof_pos: np.ndarray
     local_body_pos: np.ndarray
     body_names: tuple[str, ...]
+    declared_dof_names: tuple[str, ...] | None = None
+    quality: Mapping[str, Any] | None = None
 
     @property
     def num_frames(self) -> int:
@@ -306,6 +308,17 @@ def load_legacy_bumi_motion(
     quaternion_norm = np.linalg.norm(root_rot, axis=-1)
     if np.any(quaternion_norm < 1.0e-8):
         raise ValueError(f"{source}: root_rot contains a zero-norm quaternion")
+    declared_dof_names: tuple[str, ...] | None = None
+    if "dof_names" in payload:
+        declared_dof_names = tuple(map(str, payload["dof_names"]))
+        if declared_dof_names != LEGACY_BUMI_JOINT_ORDER:
+            raise ValueError(
+                f"{source}: dof_names does not match the legacy BUMI joint contract; "
+                f"expected={LEGACY_BUMI_JOINT_ORDER}, got={declared_dof_names}"
+            )
+    quality = payload.get("quality")
+    if quality is not None and not isinstance(quality, Mapping):
+        raise ValueError(f"{source}: quality must be a mapping when present")
     return LegacyBumiMotion(
         path=source,
         fps=int(expected_fps),
@@ -314,4 +327,6 @@ def load_legacy_bumi_motion(
         dof_pos=dof_pos,
         local_body_pos=local_body_pos,
         body_names=body_names,
+        declared_dof_names=declared_dof_names,
+        quality=quality,
     )

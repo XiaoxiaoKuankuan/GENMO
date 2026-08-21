@@ -1,0 +1,67 @@
+# GMR temporal-bounded v3 人工 q1 发布门。
+#
+# 该文件不是对 GMR 结果再做一轮旧启发式筛选，而是把用户明确指定的人工 score=1、
+# GMR 嵌入式硬安全门、生产 BUMI3 MJCF、30 FPS/21 关节顺序和 Root Z 足底有界 QP
+# 契约固定成可哈希的数据版本。末端 FK fidelity 仅保留为诊断，不改变 3162 条收录集合。
+contract_version: genmo.bumi_gmr_manual_q1_quality_gate.v1
+
+source:
+  motion_contract_version: genmo.bumi_legacy_motion.v1
+  pipeline_version: bumi3_temporal_bounded_v1
+  mjcf_sha256: 482138b437dbdabd6171fa8d44b55db5d7125a228c95b69ce3d1159cafe8537c
+  fps: 30
+  quaternion_convention: xyzw
+  joint_order:
+    - l_leg_pitch_joint
+    - l_leg_roll_joint
+    - l_leg_yaw_joint
+    - l_knee_pitch_joint
+    - l_ankle_pitch_joint
+    - l_ankle_roll_joint
+    - r_leg_pitch_joint
+    - r_leg_roll_joint
+    - r_leg_yaw_joint
+    - r_knee_pitch_joint
+    - r_ankle_pitch_joint
+    - r_ankle_roll_joint
+    - waist_yaw_joint
+    - l_arm_pitch_joint
+    - l_arm_roll_joint
+    - l_arm_yaw_joint
+    - l_elbow_pitch_joint
+    - r_arm_pitch_joint
+    - r_arm_roll_joint
+    - r_arm_yaw_joint
+    - r_elbow_pitch_joint
+
+selection:
+  manual_rating_score: 1
+  expected_total: 3162
+  expected_dataset_counts:
+    aistpp: 963
+    aioz_gdance: 1978
+    finedance: 149
+    compas3d: 72
+  expected_split_counts:
+    train: 2792
+    val: 174
+    test: 196
+
+gmr_acceptance:
+  required_flags:
+    - finite
+    - xml_urdf_joint_limit_contract
+    - joint_position_velocity_acceleration
+    - upper_body_frame_delta
+    - root_height
+    - root_acceleration_not_worse
+    - safety_overall
+  fidelity_flag: fidelity_overall
+  fidelity_policy: diagnostic_only
+
+root_z:
+  ground_semantics: gmr_foot_sole_ground_zero_v1
+  required_method: foot_contact_bounded_qp
+  max_sole_penetration_m: 0.0021
+  require_finite_audit: true
+  apply_second_adjustment: false

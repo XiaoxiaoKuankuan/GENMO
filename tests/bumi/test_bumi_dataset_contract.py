@@ -86,6 +86,24 @@ def test_adjusted_root_and_versioned_joint_tolerance_are_bound_to_reader(
         make_dataset(root, test_kinematics_path, joint_limit_tolerance=1.0e-3)
 
 
+def test_gmr_foot_sole_ground_contract_is_explicitly_supported(
+    dataset_factory, test_kinematics_path
+) -> None:
+    root = dataset_factory(
+        length=8,
+        root_z_adjusted=True,
+        ground_semantics="gmr_foot_sole_ground_zero_v1",
+    )
+    dataset = make_dataset(root, test_kinematics_path)
+    assert dataset.reader.dataset_info["ground_semantics"] == "gmr_foot_sole_ground_zero_v1"
+
+
+def test_unknown_ground_contract_is_rejected(dataset_factory, test_kinematics_path) -> None:
+    root = dataset_factory(length=8, ground_semantics="unknown_ground")
+    with pytest.raises(ValueError, match="unsupported ground_semantics"):
+        make_dataset(root, test_kinematics_path)
+
+
 def _formal_datamodule(root, kinematics_path, stats_path, expected_sequences=1):
     dataset = {
         "_target_": ("gem.datasets.music_dance.music_dance_bumi.BumiMusicDanceDataset"),

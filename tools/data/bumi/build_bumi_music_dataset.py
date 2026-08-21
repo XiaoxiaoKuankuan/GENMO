@@ -5,7 +5,9 @@ The quality-selected legacy pickle tree is immutable input.  This converter
 joins every accepted BUMI motion to the authoritative human-dataset split and
 EDGE35 artifact, converts xyzw/root + legacy joints to MuJoCo-native qpos28,
 and materializes auditable per-dataset roots.  It deliberately does not alter
-root height or infer contact labels.
+root height or infer contact labels.  A versioned ``selection_info.json`` may
+declare a newer source ground contract; that metadata is propagated without
+silently changing the trajectory.
 """
 
 from __future__ import annotations
@@ -40,9 +42,7 @@ from gem.robots.bumi.legacy_motion import (  # noqa: E402
     sha256_file,
 )
 
-EXPECTED_SOURCE_MJCF_SHA256 = (
-    "482138b437dbdabd6171fa8d44b55db5d7125a228c95b69ce3d1159cafe8537c"
-)
+EXPECTED_SOURCE_MJCF_SHA256 = "482138b437dbdabd6171fa8d44b55db5d7125a228c95b69ce3d1159cafe8537c"
 DATASET_SPECS: dict[str, dict[str, str]] = {
     "aistpp": {"output": "AIST++", "contract_name": "aistpp_bumi"},
     "aioz_gdance": {"output": "AIOZ-GDANCE", "contract_name": "aioz_gdance_bumi"},
@@ -80,10 +80,7 @@ def _write_json(path: Path, value: Any) -> None:
 def _write_jsonl(path: Path, rows: Iterable[Mapping[str, Any]]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(
-        "".join(
-            json.dumps(dict(row), ensure_ascii=False, sort_keys=True) + "\n"
-            for row in rows
-        ),
+        "".join(json.dumps(dict(row), ensure_ascii=False, sort_keys=True) + "\n" for row in rows),
         encoding="utf-8",
     )
 
@@ -186,9 +183,7 @@ def _aist_index(root: Path) -> dict[str, dict[str, Any]]:
             "split": split,
             "num_frames": _sequence_frames(value, sequence_id),
             "fps": 30,
-            "music_feature_path": (
-                f"musicfeat_v2/{sequence_id}_musicfeat_fps30.pt"
-            ),
+            "music_feature_path": (f"musicfeat_v2/{sequence_id}_musicfeat_fps30.pt"),
             "music_token": token_fields[4],
         }
     return result
@@ -283,6 +278,34 @@ def _check_digest(value: Any, label: str) -> str:
     return digest
 
 
+def _selection_info(selected_root: Path) -> tuple[dict[str, Any], str | None]:
+    """读取可选选择契约；旧 selected root 继续使用历史默认语义。"""
+
+    path = selected_root / "meta" / "selection_info.json"
+    if not path.exists():
+        return {
+            "contract_version": None,
+            "ground_semantics": "legacy_body_origin_min_zero",
+            "root_z_adjusted": False,
+            "root_z_adjustment_method": "none",
+        }, None
+    value = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(value, dict):
+        raise ValueError(f"selection info must be an object: {path}")
+    ground_semantics = value.get("ground_semantics")
+    if ground_semantics not in {
+        "legacy_body_origin_min_zero",
+        "gmr_foot_sole_ground_zero_v1",
+    }:
+        raise ValueError(f"unsupported selected ground_semantics={ground_semantics!r}")
+    if not isinstance(value.get("root_z_adjusted"), bool):
+        raise ValueError("selection info root_z_adjusted must be a boolean")
+    method = value.get("root_z_adjustment_method")
+    if not isinstance(method, str) or not method:
+        raise ValueError("selection info root_z_adjustment_method must be non-empty")
+    return dict(value), sha256_file(path)
+
+
 def _music_tensor(path: Path, sample_id: str) -> torch.Tensor:
     value = safe_torch_load(path)
     if not isinstance(value, torch.Tensor):
@@ -336,6 +359,10 @@ def convert_datasets(
 
     selected_manifest = selected_root / "manifests" / "selected.jsonl"
     selected_rows = _read_jsonl(selected_manifest)
+    selection_info, selection_info_sha = _selection_info(selected_root)
+    ground_semantics = str(selection_info["ground_semantics"])
+    root_z_adjusted = bool(selection_info["root_z_adjusted"])
+    root_z_adjustment_method = str(selection_info["root_z_adjustment_method"])
     if expected_total is not None and len(selected_rows) != int(expected_total):
         raise ValueError(
             f"selected count mismatch: expected={expected_total}, actual={len(selected_rows)}"
@@ -343,8 +370,7 @@ def convert_datasets(
     human_indices = load_human_indices(human_roots)
     seen: set[tuple[str, str]] = set()
     split_rows: dict[str, dict[str, list[dict[str, Any]]]] = {
-        dataset: {split: [] for split in ("train", "val", "test")}
-        for dataset in DATASET_SPECS
+        dataset: {split: [] for split in ("train", "val", "test")} for dataset in DATASET_SPECS
     }
     counters: Counter[str] = Counter()
     hash_cache: dict[Path, str] = {}
@@ -361,9 +387,7 @@ def convert_datasets(
         previous = materialized_destinations.get(destination)
         if previous is not None:
             if previous != source_sha:
-                raise ValueError(
-                    f"destination collision with different source SHA: {destination}"
-                )
+                raise ValueError(f"destination collision with different source SHA: {destination}")
             return "existing"
         mode = _materialize(source, destination)
         materialized_destinations[destination] = source_sha
@@ -374,9 +398,7 @@ def convert_datasets(
         raise FileExistsError(
             f"formal output already exists; refusing to merge partial data: {output_root}"
         )
-    staging = Path(
-        tempfile.mkdtemp(prefix=f".{output_root.name}.staging-", dir=output_root.parent)
-    )
+    staging = Path(tempfile.mkdtemp(prefix=f".{output_root.name}.staging-", dir=output_root.parent))
     try:
         for selected in selected_rows:
             dataset, sample_id = _sample_basename(selected)
@@ -384,9 +406,15 @@ def convert_datasets(
             if key in seen:
                 raise ValueError(f"duplicate selected sample: {dataset}/{sample_id}")
             seen.add(key)
-            if selected.get("quality_accepted") is not True or selected.get("quality_status") != "PASS":
+            if (
+                selected.get("quality_accepted") is not True
+                or selected.get("quality_status") != "PASS"
+            ):
                 raise ValueError(f"{dataset}/{sample_id}: only PASS quality records are accepted")
-            if _check_digest(selected.get("quality_config_sha256"), "quality config") != quality_sha:
+            if (
+                _check_digest(selected.get("quality_config_sha256"), "quality config")
+                != quality_sha
+            ):
                 raise ValueError(f"{dataset}/{sample_id}: quality config SHA mismatch")
             if _check_digest(selected.get("source_mjcf_sha256"), "source MJCF") != mjcf_sha:
                 raise ValueError(f"{dataset}/{sample_id}: source MJCF SHA mismatch")
@@ -454,8 +482,11 @@ def convert_datasets(
                 "quality_config_sha256": quality_sha,
                 "quality_accepted": True,
                 "quality_record": dict(selected),
-                "root_z_adjusted": False,
-                "ground_semantics": "legacy_body_origin_min_zero",
+                "root_z_adjusted": root_z_adjusted,
+                "root_z_adjustment_method": root_z_adjustment_method,
+                "ground_semantics": ground_semantics,
+                "selection_contract_version": selection_info.get("contract_version"),
+                "selection_info_sha256": selection_info_sha,
             }
             motion_destination = dataset_root / motion_relative
             motion_destination.parent.mkdir(parents=True, exist_ok=True)
@@ -526,8 +557,11 @@ def convert_datasets(
                 "kinematics_sha256": kinematics.kinematics_sha256,
                 "retarget_config_sha256": ik_sha,
                 "quality_config_sha256": quality_sha,
-                "ground_semantics": "legacy_body_origin_min_zero",
-                "root_z_adjusted": False,
+                "ground_semantics": ground_semantics,
+                "root_z_adjusted": root_z_adjusted,
+                "root_z_adjustment_method": root_z_adjustment_method,
+                "selection_contract_version": selection_info.get("contract_version"),
+                "selection_info_sha256": selection_info_sha,
                 "split_counts": {name: len(rows) for name, rows in by_split.items()},
             }
             _write_json(dataset_root / "meta" / "dataset_info.json", info)
@@ -542,8 +576,11 @@ def convert_datasets(
             "contract_version": BUMI_MUSIC_CONTRACT_VERSION,
             "generated_at_utc": datetime.now(timezone.utc).isoformat(),
             "source_files_modified": False,
-            "root_z_adjusted": False,
-            "ground_semantics": "legacy_body_origin_min_zero",
+            "root_z_adjusted": root_z_adjusted,
+            "root_z_adjustment_method": root_z_adjustment_method,
+            "ground_semantics": ground_semantics,
+            "selection_contract_version": selection_info.get("contract_version"),
+            "selection_info_sha256": selection_info_sha,
             "source_mjcf_sha256": mjcf_sha,
             "retarget_config_sha256": ik_sha,
             "quality_config_sha256": quality_sha,
@@ -554,10 +591,7 @@ def convert_datasets(
             "dataset_counts": {
                 dataset: {
                     "total": counters[f"{dataset}:total"],
-                    **{
-                        split: counters[f"{dataset}:{split}"]
-                        for split in ("train", "val", "test")
-                    },
+                    **{split: counters[f"{dataset}:{split}"] for split in ("train", "val", "test")},
                 }
                 for dataset in DATASET_SPECS
             },
@@ -578,9 +612,8 @@ def convert_datasets(
                     f"expected={dict(expected_dataset_counts)}, "
                     f"actual={actual_dataset_counts}"
                 )
-        if (
-            expected_unique_music_features is not None
-            and report["unique_music_features"] != int(expected_unique_music_features)
+        if expected_unique_music_features is not None and report["unique_music_features"] != int(
+            expected_unique_music_features
         ):
             raise ValueError(
                 "unique EDGE35 count mismatch: "
@@ -630,9 +663,7 @@ def main() -> None:
     if args.expected_splits:
         expected_splits = {
             name: int(count)
-            for name, count in (
-                item.split("=", 1) for item in args.expected_splits.split(",")
-            )
+            for name, count in (item.split("=", 1) for item in args.expected_splits.split(","))
         }
     expected_dataset_counts = None
     if args.expected_dataset_counts:

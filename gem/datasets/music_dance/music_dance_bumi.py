@@ -24,6 +24,12 @@ from gem.utils.pylogger import Log
 BUMI_MUSIC_CONTRACT_VERSION = "genmo.bumi_music.v1"
 BUMI_MUSIC_FPS = 30
 BUMI_MUSIC_DIM = 35
+BUMI_GROUND_SEMANTICS = frozenset(
+    {
+        "legacy_body_origin_min_zero",
+        "gmr_foot_sole_ground_zero_v1",
+    }
+)
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 
 
@@ -200,10 +206,11 @@ class BumiMusicDatasetReader:
             )
         if info.get("source_mjcf_sha256") != info.get("mjcf_sha256"):
             raise ValueError(f"BUMI dataset_info {path}: source_mjcf_sha256 must equal mjcf_sha256")
-        if info.get("ground_semantics") != "legacy_body_origin_min_zero":
+        if info.get("ground_semantics") not in BUMI_GROUND_SEMANTICS:
             raise ValueError(
-                f"BUMI dataset_info {path}: ground_semantics must be "
-                "'legacy_body_origin_min_zero' for the v1 training contract"
+                f"BUMI dataset_info {path}: unsupported ground_semantics="
+                f"{info.get('ground_semantics')!r}; expected one of "
+                f"{sorted(BUMI_GROUND_SEMANTICS)}"
             )
         if not isinstance(info.get("root_z_adjusted"), bool):
             raise ValueError(f"BUMI dataset_info {path}: root_z_adjusted must be a boolean")
@@ -329,7 +336,7 @@ class BumiMusicDatasetReader:
             ("source_mjcf_sha256", self.dataset_info["source_mjcf_sha256"]),
             ("quality_config_sha256", self.dataset_info["quality_config_sha256"]),
             ("retarget_config_sha256", self.dataset_info["retarget_config_sha256"]),
-            ("ground_semantics", "legacy_body_origin_min_zero"),
+            ("ground_semantics", self.dataset_info["ground_semantics"]),
             ("root_z_adjusted", self.dataset_info["root_z_adjusted"]),
         ):
             if payload.get(key) != expected_value:

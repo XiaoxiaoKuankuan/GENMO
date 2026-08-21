@@ -88,6 +88,7 @@ def write_dataset(
     quaternion: torch.Tensor | None = None,
     quality_accepted: bool = True,
     root_z_adjusted: bool = False,
+    ground_semantics: str = "legacy_body_origin_min_zero",
     reader_joint_limit_tolerance_rad: float | None = None,
 ) -> Path:
     spec = json.loads(kinematics_path.read_text(encoding="utf-8"))
@@ -111,7 +112,7 @@ def write_dataset(
         "retarget_config_sha256": "b" * 64,
         "quality_config_sha256": "c" * 64,
         "source_mjcf_sha256": "a" * 64,
-        "ground_semantics": "legacy_body_origin_min_zero",
+        "ground_semantics": ground_semantics,
         "root_z_adjusted": root_z_adjusted,
     }
     if reader_joint_limit_tolerance_rad is not None:
@@ -135,7 +136,7 @@ def write_dataset(
         "source_mjcf_sha256": "a" * 64,
         "quality_config_sha256": "c" * 64,
         "retarget_config_sha256": "b" * 64,
-        "ground_semantics": "legacy_body_origin_min_zero",
+        "ground_semantics": ground_semantics,
         "root_z_adjusted": root_z_adjusted,
     }
     torch.save(motion, root / "motions" / "sample.pt")

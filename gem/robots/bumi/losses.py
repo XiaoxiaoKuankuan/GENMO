@@ -136,9 +136,15 @@ class BumiRobotLosses(nn.Module):
         if self.auxiliary_warmup_steps < 0:
             raise ValueError("auxiliary_warmup_steps must be non-negative")
         if self.contract_version == "physical_v1":
-            if self.ground_semantics != "legacy_body_origin_min_zero":
+            supported_ground_semantics = {
+                "legacy_body_origin_min_zero",
+                "gmr_foot_sole_ground_zero_v1",
+                "mixed_floor_zero_no_contact_v1",
+            }
+            if self.ground_semantics not in supported_ground_semantics:
                 raise ValueError(
-                    "BUMI physical_v1 requires ground_semantics='legacy_body_origin_min_zero'"
+                    "BUMI physical_v1 requires an explicit supported ground_semantics; "
+                    f"got {self.ground_semantics!r}"
                 )
             forbidden = {
                 name: self.weights[name]
@@ -147,8 +153,8 @@ class BumiRobotLosses(nn.Module):
             }
             if forbidden:
                 raise ValueError(
-                    "Unadjusted legacy-body-origin data cannot enable contact/slide/"
-                    f"penetration losses: {forbidden}"
+                    "The selected BUMI ground contract cannot enable contact/slide/"
+                    f"penetration losses without authoritative contact labels: {forbidden}"
                 )
 
     @staticmethod

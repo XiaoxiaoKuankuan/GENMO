@@ -1,0 +1,41 @@
+# @package _global_
+# 人工评分 1 的 GMR temporal-bounded v3 四库与自建 BUMI 库联合训练入口。
+#
+# 四个 GMR 库保留足底网格地面与有界 Root Z，自建库沿用 body-origin 地面；因此本实验
+# 显式使用 mixed_floor_zero_no_contact_v1，并保持 contact/slide/penetration 权重为零，
+# 不从混合地面语义伪造接触监督。每卡 batch=192、8 卡全局 batch=1536；350k step 共
+# 5.376 亿个样本 draw，略高于旧 128×8×500k 的 5.12 亿，结合服务器既有吞吐预计约三天。
+defaults:
+  - gem_bumi_music_only_5set_mine_v1
+  - override /scheduler: iters_half_210k_315k
+  - _self_
+
+exp_name_base: gem_bumi_music_only_5set_manual_q1_v3_repr_v2_b192_s350k
+exp_name_var: ""
+exp_name: ${exp_name_base}${exp_name_var}
+data_name: gem_bumi_music_only_5set_manual_q1_v3
+output_dir: outputs/${exp_name}
+
+pipeline:
+  args:
+    ground_semantics: mixed_floor_zero_no_contact_v1
+
+data:
+  expected_train_sequences: 2891
+  dataset_probability_min: 0.03
+  dataset_sampling_weights:
+    aistpp_bumi: 0.29
+    aioz_gdance_bumi: 0.47
+    finedance_bumi: 0.16
+    compas3d_bumi: 0.03
+    mine_bumi: 0.05
+  loader_opts:
+    train:
+      batch_size: 192
+      num_workers: 6
+
+pl_trainer:
+  max_steps: 350000
+
+# 无人值守正式训练只写本地日志/checkpoint，避免外部 W&B 网络状态中断作业。
+use_wandb: false

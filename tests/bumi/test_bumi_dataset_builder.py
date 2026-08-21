@@ -212,3 +212,39 @@ def test_converter_sha_failure_leaves_no_published_or_staging_tree(
         )
     assert not output.exists()
     assert not list(tmp_path.glob(".failed_formal.staging-*"))
+
+
+def test_converter_propagates_versioned_root_z_selection_contract(
+    tmp_path: Path, test_kinematics_path: Path, monkeypatch
+) -> None:
+    arguments = _source_tree(tmp_path, test_kinematics_path)
+    monkeypatch.setattr(
+        builder, "EXPECTED_SOURCE_MJCF_SHA256", sha256_file(arguments["source_mjcf"])
+    )
+    selection_info = {
+        "contract_version": "genmo.bumi_gmr_manual_q1_selection.v1",
+        "ground_semantics": "gmr_foot_sole_ground_zero_v1",
+        "root_z_adjusted": True,
+        "root_z_adjustment_method": "foot_contact_bounded_qp",
+    }
+    info_path = arguments["selected_root"] / "meta" / "selection_info.json"
+    info_path.parent.mkdir(parents=True)
+    info_path.write_text(json.dumps(selection_info), encoding="utf-8")
+    output = tmp_path / "formal_gmr"
+    report = builder.convert_datasets(
+        **arguments,
+        output_root=output,
+        expected_total=4,
+        expected_splits={"train": 4, "val": 0, "test": 0},
+        expected_dataset_counts={name: 1 for name in SAMPLES},
+        expected_unique_music_features=4,
+    )
+    assert report["ground_semantics"] == "gmr_foot_sole_ground_zero_v1"
+    assert report["root_z_adjusted"] is True
+    motion = torch.load(
+        output / "AIST++" / "motions" / f"{SAMPLES['aistpp']}.pt",
+        map_location="cpu",
+        weights_only=False,
+    )
+    assert motion["ground_semantics"] == "gmr_foot_sole_ground_zero_v1"
+    assert motion["root_z_adjustment_method"] == "foot_contact_bounded_qp"
