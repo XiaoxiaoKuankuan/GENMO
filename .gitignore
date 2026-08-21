@@ -7,6 +7,7 @@ __pycache__/
 inputs
 outputs/
 wandb/
+logs/*.log
 .ruff_cache/
 *.lock
 *.ckpt
