@@ -3,8 +3,9 @@
 #
 # 四个 GMR 库保留足底网格地面与有界 Root Z，自建库沿用 body-origin 地面；因此本实验
 # 显式使用 mixed_floor_zero_no_contact_v1，并保持 contact/slide/penetration 权重为零，
-# 不从混合地面语义伪造接触监督。每卡 batch=192、8 卡全局 batch=1536；350k step 共
-# 5.376 亿个样本 draw，略高于旧 128×8×500k 的 5.12 亿，结合服务器既有吞吐预计约三天。
+# 不从混合地面语义伪造接触监督。四个 GMR 库使用 0.001 rad 严格 reader 容差，自建库
+# 保留其发布契约的 0.25 rad；每卡 batch=192、8 卡全局 batch=1536，350k step 共 5.376
+# 亿个样本 draw，略高于旧 128×8×500k 的 5.12 亿，结合服务器既有吞吐预计约三天。
 defaults:
   - gem_bumi_music_only_5set_mine_v1
   - override /scheduler: iters_half_210k_315k
@@ -33,6 +34,28 @@ data:
     train:
       batch_size: 192
       num_workers: 6
+
+train_datasets:
+  aistpp_bumi_train:
+    joint_limit_tolerance: 0.001
+  aioz_gdance_bumi_train:
+    joint_limit_tolerance: 0.001
+  finedance_bumi_train:
+    joint_limit_tolerance: 0.001
+  compas3d_bumi_train:
+    joint_limit_tolerance: 0.001
+  mine_bumi_train:
+    joint_limit_tolerance: 0.25
+
+test_datasets:
+  aistpp_bumi_music_eval:
+    joint_limit_tolerance: 0.001
+  aioz_gdance_bumi_music_eval:
+    joint_limit_tolerance: 0.001
+  finedance_bumi_music_eval:
+    joint_limit_tolerance: 0.001
+  compas3d_bumi_music_eval:
+    joint_limit_tolerance: 0.001
 
 pl_trainer:
   max_steps: 350000

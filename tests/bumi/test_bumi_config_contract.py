@@ -126,4 +126,19 @@ def test_manual_q1_v3_uses_large_batch_and_mixed_ground_contract() -> None:
     assert config.pipeline.args.weights.contact_bce == 0.0
     assert config.pipeline.args.weights.foot_slide == 0.0
     assert config.pipeline.args.weights.penetration == 0.0
+    for dataset_name in (
+        "aistpp_bumi_train",
+        "aioz_gdance_bumi_train",
+        "finedance_bumi_train",
+        "compas3d_bumi_train",
+    ):
+        assert config.train_datasets[dataset_name].joint_limit_tolerance == 0.001
+    assert config.train_datasets.mine_bumi_train.joint_limit_tolerance == 0.25
+    for dataset_name in (
+        "aistpp_bumi_music_eval",
+        "aioz_gdance_bumi_music_eval",
+        "finedance_bumi_music_eval",
+        "compas3d_bumi_music_eval",
+    ):
+        assert config.test_datasets[dataset_name].joint_limit_tolerance == 0.001
     assert config.use_wandb is False
