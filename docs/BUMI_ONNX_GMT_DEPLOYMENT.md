@@ -1,0 +1,305 @@
+# BUMI ONNX 到 GMT 部署链路
+
+本文对应 `feature/bumi-music-only` 分支。BUMI 模型输出的是机器人原生 93D 特征和
+MuJoCo 顺序 `qpos28`，链路中不再经过 SMPL/GMR：
+
+```text
+WAV
+  → EDGE35 @ 30 Hz
+  → BUMI ONNX/TensorRT 单步去噪 [1,120,93]
+  → DDIM 20 步 + 120/30 滑窗
+  → 连续世界系 qpos28 @ 30 Hz
+  → CRC/revision/模型指纹 + 实时安全门
+  → 线性插值/四元数 SLERP @ 50 Hz
+  → GMT trajectory_v1 110×55
+  → Redis + GMT ACK
+```
+
+## 两个术语
+
+多 checkpoint 批量评测、排序、选优，是让多个训练存档在同一套音乐、目标动作、seed、
+CFG 和 DDIM 步数下生成动作，汇总关节限位、穿地、滑脚、平滑性、根稳定性、节拍和可选
+GT 误差，先按硬安全门槛淘汰，再按归一化综合分排序。最优模型不保证是 step 最新、训练
+loss 最低的存档。
+
+Parity 是数值等价检查。本项目固定相同 checkpoint、输入和噪声，比较 PyTorch、ONNX
+Runtime、TensorRT 的单步 93D，以及完整 DDIM 后的 93D、qpos28 和 Torch FK；浮点算子
+实现不同，所以要求在明确容差内一致，不要求逐 bit 相同。
+
+## 本次模型和资产
+
+- 服务器 2 checkpoint：
+  `/data0/user/liwei/experiments/genmo/gem_bumi_music_only_4set_random_v1/version_0/checkpoints/s430000.ckpt`
+- 本地 checkpoint：
+  `/home/weili/GENMO/outputs/checkpoints/server2_bumi_random_v1/s430000.ckpt`
+- 本地训练统计：
+  `/home/weili/GENMO/outputs/checkpoints/server2_bumi_random_v1/bumi_93d_stats_train_v1.json`
+- 运动学：`/home/weili/GENMO/configs/bumi/bumi_kinematics_482138_v1.json`
+- GMT policy：
+  `/home/weili/docker_projects/bumi_GMT_deployment_listao/bumi_GMT_deployment_listao/src/legged_rl/rl_controller/rl_controllers/policy/bumi/0724_lab_148500.onnx`
+
+已核对运动学 SHA256 为
+`226306c217a39643a32ccc641b63e72c8ce0bf307af1fd6781b739fb694bcda0`，训练统计 SHA256
+为 `3c642a9b7fa07e5639a508ce7bf1fca9705615f6646097d81c9911c3b80c646a`，`s430000`
+checkpoint 的服务器端 SHA256 为
+`a61e4e4a7629304ed06e00f5479fcd059337bc7a9478b05bb8f7a04d5f501b58`。GMT policy
+中的 21 关节集合与 BUMI MuJoCo 顺序完全一致，发布边界使用显式 permutation，不在模型
+内部改变关节顺序。
+
+本次真实导出/验证结果：ONNX 大小 `864271583` bytes，SHA256 为
+`95bf637da38311d53150d8ba51d39ede9848859c81d59fcc08f83d5652ae1a56`；RTX 4090、
+TensorRT/libnvinfer 10.13.3 的 FP16 engine 大小 `433320476` bytes，SHA256 为
+`41dea596316e2d85f346ad3cb349efaff7083f8c297e15cd649e1543d54f1466`。PyTorch↔ONNX
+单步/20 步 DDIM 通过，三后端报告 `final_pass=true`。4 秒 MuJoCo+音乐验证视频保存在
+`outputs/onnx/bumi_music/s430000/demo_mJS3.mp4`。
+
+下面命令都从 `/home/weili/GENMO` 执行：
+
+```bash
+cd /home/weili/GENMO
+
+BUMI_TASK_CKPT=/home/weili/GENMO/outputs/checkpoints/server2_bumi_random_v1/s430000.ckpt
+BUMI_TASK_KIN=/home/weili/GENMO/configs/bumi/bumi_kinematics_482138_v1.json
+BUMI_TASK_STATS=/home/weili/GENMO/outputs/checkpoints/server2_bumi_random_v1/bumi_93d_stats_train_v1.json
+BUMI_TASK_ONNX=/home/weili/GENMO/outputs/onnx/bumi_music/s430000/bumi_music_denoiser_t120.onnx
+BUMI_TASK_AUDIO=/home/weili/datasets/AISTPP_official/music/wav/mJS3.wav
+BUMI_TASK_GMT=/home/weili/docker_projects/bumi_GMT_deployment_listao/bumi_GMT_deployment_listao/src/legged_rl/rl_controller/rl_controllers/policy/bumi/0724_lab_148500.onnx
+BUMI_TASK_ENGINE=/home/weili/GENMO/outputs/tensorrt/bumi/s430000/1d4dda3f78c62d99c2ffcfae71cdd1f64c8f176aafd5d86cae658d2768e815ab/bumi_music_denoiser.engine
+
+export BUMI_KINEMATICS_PATH="$BUMI_TASK_KIN"
+export BUMI_MUSIC_STATS_PATH="$BUMI_TASK_STATS"
+```
+
+## 导出 ONNX
+
+```bash
+.venv/bin/python tools/export/export_bumi_music_onnx.py \
+  --ckpt "$BUMI_TASK_CKPT" \
+  --output "$BUMI_TASK_ONNX" \
+  --exp gem_bumi_music_only_4set_random_v1 \
+  --kinematics "$BUMI_TASK_KIN" \
+  --stats "$BUMI_TASK_STATS" \
+  --seq-len 120 \
+  --opset 18 \
+  --device cuda:0 \
+  --overwrite
+```
+
+导出物包括 ONNX、可能的外部权重文件，以及
+`bumi_music_denoiser_t120.onnx.json`。JSON 记录 checkpoint/运动学/统计 SHA 和固定输入输出
+合约；后续 GMT demo 会强制核验，不能把不匹配的 stats 或 checkpoint 混进来。
+
+## ONNX 验证和渲染 demo
+
+先做单步与完整 20 步 DDIM parity：
+
+```bash
+.venv/bin/python tools/eval/validate_bumi_music_onnx.py \
+  --audio "$BUMI_TASK_AUDIO" \
+  --ckpt "$BUMI_TASK_CKPT" \
+  --onnx "$BUMI_TASK_ONNX" \
+  --exp gem_bumi_music_only_4set_random_v1 \
+  --kinematics "$BUMI_TASK_KIN" \
+  --stats "$BUMI_TASK_STATS" \
+  --seq-len 120 \
+  --provider cuda \
+  --device cuda:0 \
+  --full-ddim-steps 20 \
+  --output-dir outputs/onnx/bumi_music/s430000/validation
+```
+
+再用 checkpoint 路径运行正式生成、运动学指标和 MuJoCo 视频；这是可视化验证，不代表
+GMT 动力学已经通过：
+
+```bash
+.venv/bin/python scripts/demo/demo_music_bumi.py \
+  --wav "$BUMI_TASK_AUDIO" \
+  --checkpoint "$BUMI_TASK_CKPT" \
+  --output outputs/onnx/bumi_music/s430000/demo_mJS3.pt \
+  --report outputs/onnx/bumi_music/s430000/demo_mJS3.json \
+  --exp gem_bumi_music_only_4set_random_v1 \
+  --kinematics "$BUMI_TASK_KIN" \
+  --stats "$BUMI_TASK_STATS" \
+  --duration-sec 4 \
+  --ddim-steps 20 \
+  --cfg-scale 2.5 \
+  --seed 42 \
+  --device cuda:0 \
+  --render-mjcf /home/weili/GMR_minimal_robots_smplx.tar.gz/GMR-master/assets/bumi3/bumi3.xml \
+  --video outputs/onnx/bumi_music/s430000/demo_mJS3.mp4 \
+  --width 640 \
+  --height 480 \
+  --mux-audio
+```
+
+## TensorRT 构建与 parity
+
+TensorRT plan 与 GPU 型号、TensorRT/libnvinfer 主次版本绑定，应在最终部署机器上构建：
+
+```bash
+.venv/bin/python tools/export/build_bumi_music_tensorrt.py \
+  --onnx "$BUMI_TASK_ONNX" \
+  --checkpoint "$BUMI_TASK_CKPT" \
+  --output-dir outputs/tensorrt/bumi/s430000 \
+  --device cuda:0 \
+  --precision fp16
+```
+
+构建命令最后一行会打印实际 `.engine` 路径。上面的 `BUMI_TASK_ENGINE` 是本次 RTX 4090
+构建产物；换 GPU、TensorRT/libnvinfer 主次版本或 ONNX/checkpoint 后必须使用新路径。
+三后端 parity 命令：
+
+```bash
+.venv/bin/python tools/eval/validate_bumi_music_tensorrt.py \
+  --audio "$BUMI_TASK_AUDIO" \
+  --ckpt "$BUMI_TASK_CKPT" \
+  --onnx "$BUMI_TASK_ONNX" \
+  --engine "$BUMI_TASK_ENGINE" \
+  --exp gem_bumi_music_only_4set_random_v1 \
+  --kinematics "$BUMI_TASK_KIN" \
+  --stats "$BUMI_TASK_STATS" \
+  --device cuda:0 \
+  --onnx-provider cuda \
+  --ddim-steps 20 \
+  --output outputs/tensorrt/bumi/s430000/parity.json
+```
+
+只有 `final_pass=true` 的引擎才进入机器人链路。
+
+## 长音乐 ONNX + GMT
+
+先 dry-run。它会走完整安全流和 30→50/GMT 转换，只保存计划，不写 Redis：
+
+```bash
+.venv/bin/python scripts/demo/demo_bumi_onnx_gmt.py \
+  --audio "$BUMI_TASK_AUDIO" \
+  --duration-sec 20 \
+  --checkpoint "$BUMI_TASK_CKPT" \
+  --onnx "$BUMI_TASK_ONNX" \
+  --backend onnx \
+  --onnx-provider cuda \
+  --kinematics "$BUMI_TASK_KIN" \
+  --stats "$BUMI_TASK_STATS" \
+  --gmt-policy "$BUMI_TASK_GMT" \
+  --device cuda:0 \
+  --ddim-steps 20 \
+  --cfg-scale 2.5 \
+  --seed 42 \
+  --output outputs/bumi_onnx_gmt/s430000_mJS3_20s_plan.npz
+```
+
+`NPZ` 包含 `qpos_30hz`、`qpos_50hz`、`gmt_frames_50hz` 和 `native_to_gmt`；相邻 JSON
+记录所有模型/资产 SHA、安全阈值、分块数和执行状态。
+
+对本次 `s430000 + mJS3 + seed=42`，严格默认安全门会拒绝动作：最大关节限位样例是
+`r_arm_roll_joint=0.206278`，相对 XML 上限 0.14 在加 0.05 rad 容差后仍超 0.016278；
+按此前数据筛选约定显式改为 0.25 rad 后，最大手臂速度 28.781752 rad/s 仍超过默认
+18 rad/s，根角速度 15.373582 rad/s 也超过默认 8 rad/s。因此该样例不能进入实物执行。
+
+下面命令只用于证明 20 秒、7 个 120/30 滑窗、安全流编解码、600 帧 30 Hz→999 个动作
+采样点 50 Hz、过渡/未来上下文和 GMT 55D 数据契约完整贯通。它会产生 1200 帧含过渡的
+离线诊断计划；这些放宽值不得复制到 `--execute`：
+
+```bash
+.venv/bin/python scripts/demo/demo_bumi_onnx_gmt.py \
+  --audio "$BUMI_TASK_AUDIO" \
+  --duration-sec 20 \
+  --checkpoint "$BUMI_TASK_CKPT" \
+  --onnx "$BUMI_TASK_ONNX" \
+  --backend tensorrt \
+  --engine "$BUMI_TASK_ENGINE" \
+  --kinematics "$BUMI_TASK_KIN" \
+  --stats "$BUMI_TASK_STATS" \
+  --gmt-policy "$BUMI_TASK_GMT" \
+  --device cuda:0 \
+  --ddim-steps 20 \
+  --cfg-scale 2.5 \
+  --seed 42 \
+  --joint-limit-tolerance-rad 0.25 \
+  --max-joint-velocity-radps 35 \
+  --max-root-angular-velocity-radps 20 \
+  --output outputs/bumi_onnx_gmt/s430000_mJS3_20s_tensorrt_diagnostic_plan.npz
+```
+
+连接已经实现 `trajectory_v1` 和 ACK 的 GMT 进程后，实际发布必须显式双确认。以下命令
+保留默认安全阈值；当前 `s430000/mJS3/seed=42` 会在写 Redis 前被拒绝，必须先由多
+checkpoint 选优或模型改进得到通过默认安全门的候选：
+
+```bash
+.venv/bin/python scripts/demo/demo_bumi_onnx_gmt.py \
+  --audio "$BUMI_TASK_AUDIO" \
+  --duration-sec 20 \
+  --checkpoint "$BUMI_TASK_CKPT" \
+  --onnx "$BUMI_TASK_ONNX" \
+  --backend onnx \
+  --onnx-provider cuda \
+  --kinematics "$BUMI_TASK_KIN" \
+  --stats "$BUMI_TASK_STATS" \
+  --gmt-policy "$BUMI_TASK_GMT" \
+  --device cuda:0 \
+  --output outputs/bumi_onnx_gmt/s430000_mJS3_20s_execute.npz \
+  --redis-host 127.0.0.1 \
+  --redis-key gmt_online_frame_bumi \
+  --revision 1 \
+  --execute \
+  --confirm-robot-motion
+```
+
+TensorRT 版本只需改为：
+
+```bash
+--backend tensorrt --engine "$BUMI_TASK_ENGINE"
+```
+
+## 多 checkpoint 批量选优
+
+套件 JSON 固定评测样本。路径支持绝对路径、相对套件文件路径或环境变量：
+
+```json
+{
+  "contract_version": "genmo.bumi_checkpoint_suite.v1",
+  "samples": [
+    {
+      "id": "aist_mJS3_0s",
+      "dataset": "AIST++",
+      "wav": "$AISTPP_ROOT/music/wav/mJS3.wav",
+      "start_sec": 0.0,
+      "num_frames": 120
+    }
+  ]
+}
+```
+
+实际选优应从 FineDance、CoMPAS3D、AIOZ-GDance、AIST++ 各取多段固定样本，而不是只用
+上面的单条示例。运行命令：
+
+```bash
+export AISTPP_ROOT=/home/weili/datasets/AISTPP_official
+
+.venv/bin/python tools/eval/select_bumi_checkpoints.py \
+  --checkpoints outputs/checkpoints/server2_bumi_random_v1/s380000.ckpt \
+                outputs/checkpoints/server2_bumi_random_v1/s400000.ckpt \
+                outputs/checkpoints/server2_bumi_random_v1/s420000.ckpt \
+                outputs/checkpoints/server2_bumi_random_v1/s430000.ckpt \
+  --suite /absolute/path/bumi_checkpoint_suite.json \
+  --output-dir outputs/eval/bumi_checkpoint_selection_v1 \
+  --exp gem_bumi_music_only_4set_random_v1 \
+  --kinematics "$BUMI_TASK_KIN" \
+  --stats "$BUMI_TASK_STATS" \
+  --device cuda:0 \
+  --ddim-steps 20
+```
+
+脚本默认删除中间 motion `.pt`，保留逐样本 JSON、`selection.json` 和
+`best_checkpoint.txt`。如果没有候选通过关节限位、最大穿地和根倾角硬门槛，脚本会保留
+完整报告并以失败退出，不会在不安全候选中强行选一个。
+
+## 安全边界
+
+- 运行时拒绝 NaN/Inf、非单位 wxyz 四元数、XML 关节限位超界、根高度越界、根/关节速度
+  越界，并覆盖分块边界。
+- qpos 包拒绝 CRC 错误、帧号 gap/duplicate、旧 revision 及中途改变模型/引擎/运动学身份。
+- GMT 发布前检查 policy 的三个输入形状、关节 metadata 和显式 reorder；运动前必须收到
+  同一 stream/revision/plan 的 ACK，播放期间 ACK 过期立即终止。
+- dry-run、ONNX/TensorRT parity 和 MuJoCo 视频通过，只能证明数值/运动学/协议链路；真实
+  机器人仍必须先做仿真闭环、限速场地和急停值守测试。

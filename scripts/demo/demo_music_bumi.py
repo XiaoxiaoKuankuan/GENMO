@@ -451,24 +451,27 @@ def main(argv: list[str] | None = None) -> int:
         )
         if args.mux_audio:
             silent = final_video.with_name(final_video.stem + ".silent.mp4")
-            render_motion(
-                artifact=output,
-                mjcf=mjcf,
-                output=silent,
-                camera=args.camera,
-                width=args.width,
-                height=args.height,
-            )
-            selected_duration = float(
-                feature_metadata.get("selected_duration_sec", len(features) / 30.0)
-            )
-            mux_audio(
-                video=silent,
-                audio=source_path,
-                output=final_video,
-                start_sec=args.start_sec,
-                duration_sec=selected_duration,
-            )
+            try:
+                render_motion(
+                    artifact=output,
+                    mjcf=mjcf,
+                    output=silent,
+                    camera=args.camera,
+                    width=args.width,
+                    height=args.height,
+                )
+                selected_duration = float(
+                    feature_metadata.get("selected_duration_sec", len(features) / 30.0)
+                )
+                mux_audio(
+                    video=silent,
+                    audio=source_path,
+                    output=final_video,
+                    start_sec=args.start_sec,
+                    duration_sec=selected_duration,
+                )
+            finally:
+                silent.unlink(missing_ok=True)
         else:
             render_motion(
                 artifact=output,

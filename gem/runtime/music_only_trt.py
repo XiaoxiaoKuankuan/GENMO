@@ -198,13 +198,17 @@ class SlidingDDIMGenerator:
         device: torch.device | str,
         steps: int = DEFAULT_DDIM_STEPS,
         guidance_scale: float = DEFAULT_GUIDANCE_SCALE,
+        motion_dim: int = MOTION_DIM,
     ) -> None:
         if not math.isfinite(float(guidance_scale)) or guidance_scale < 0.0:
             raise ValueError("guidance_scale must be finite and >= 0")
+        if int(motion_dim) <= 0:
+            raise ValueError("motion_dim must be > 0")
         self.denoiser = denoiser
         self.device = torch.device(device)
         self.steps = int(steps)
         self.guidance_scale = float(guidance_scale)
+        self.motion_dim = int(motion_dim)
         self.diffusion = create_gaussian_diffusion(_diffusion_config(self.steps), training=False)
         if self.diffusion.num_timesteps != self.steps:
             raise RuntimeError("diffusion respacing did not produce the requested step count")
@@ -237,7 +241,7 @@ class SlidingDDIMGenerator:
         known_x0: torch.Tensor | None = None,
         trace_hook: Callable[[int, torch.Tensor, torch.Tensor | None], None] | None = None,
     ) -> torch.Tensor:
-        """Generate one normalized ``[120,151]`` window.
+        """Generate one normalized ``[120,motion_dim]`` window.
 
         ``trace_hook`` receives ``(step, x_t_after_overwrite, pred_x0)`` and is
         intended for contract tests and diagnostics only.
@@ -247,9 +251,9 @@ class SlidingDDIMGenerator:
         if not 1 <= int(valid_length) <= WINDOW_FRAMES:
             raise ValueError("valid_length must be in 1..120")
         if known_x0 is not None:
-            if known_x0.shape != (OVERLAP_FRAMES, MOTION_DIM):
+            if known_x0.shape != (OVERLAP_FRAMES, self.motion_dim):
                 raise ValueError(
-                    f"known_x0 must have shape [{OVERLAP_FRAMES},{MOTION_DIM}]"
+                    f"known_x0 must have shape [{OVERLAP_FRAMES},{self.motion_dim}]"
                 )
             if valid_length <= OVERLAP_FRAMES:
                 raise ValueError("an inpainted window must contain at least one new frame")
@@ -258,7 +262,7 @@ class SlidingDDIMGenerator:
         generator = torch.Generator(device=self.device)
         generator.manual_seed(int(seed))
         x_t = torch.randn(
-            (1, WINDOW_FRAMES, MOTION_DIM),
+            (1, WINDOW_FRAMES, self.motion_dim),
             device=self.device,
             dtype=torch.float32,
             generator=generator,

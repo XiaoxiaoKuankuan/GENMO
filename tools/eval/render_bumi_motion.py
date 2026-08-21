@@ -82,17 +82,18 @@ def main() -> None:
     data = mujoco.MjData(model)
     renderer = mujoco.Renderer(model, height=args.height, width=args.width)
     frames = []
+    camera: str | int = -1 if args.camera is None else args.camera
     try:
         for frame_qpos in qpos:
             data.qpos[:] = frame_qpos
             mujoco.mj_forward(model, data)
-            renderer.update_scene(data, camera=args.camera)
+            renderer.update_scene(data, camera=camera)
             frames.append(renderer.render().copy())
     finally:
         renderer.close()
     output = args.output.expanduser().resolve()
     output.parent.mkdir(parents=True, exist_ok=True)
-    iio.imwrite(output, np.stack(frames), fps=fps)
+    iio.imwrite(output, np.stack(frames), fps=fps, codec="libx264")
     print(f"Rendered {len(frames)} frames to {output}")
 
 
