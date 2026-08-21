@@ -7,7 +7,8 @@
 按完整名称重排到 GENMO/MuJoCo-native order，并按训练契约执行 body-origin 地面归一化。
 
 每项输出原数据集 BUMI 视频、模型生成视频的自包含硬链接/副本，以及带标签的左右同步
-对比视频；音轨统一来自同一 WAV。对比时长取原动作真实长度，因此 AIST++ 的 7–12 秒源
+对比视频；模型生成源发生变化时以临时硬链接/副本原子刷新旧文件。音轨统一来自同一 WAV。
+对比时长取原动作真实长度，因此 AIST++ 的 7–12 秒源
 片段不会被循环或拉伸来伪装成整首舞蹈，网页会明确显示源片段/完整音乐时长并提供完整模型
 视频。报告还在相同对比区间计算双方运动学指标和 0.25 rad 限位结果。该页面展示的是
 GMR 离线重定向轨迹和模型生成轨迹，不代表 GMT/真实机器人动力学跟踪效果。
@@ -90,22 +91,29 @@ def relative(path: Path, root: Path) -> str:
 
 
 def materialize_file(source: Path, target: Path) -> str:
-    """优先硬链接正式生成视频，跨文件系统时才复制。"""
+    """优先硬链接正式生成视频，并在源身份变化时原子刷新已有目标。"""
 
     source = source.resolve(strict=True)
     target.parent.mkdir(parents=True, exist_ok=True)
-    if target.is_file():
+    target_existed = target.is_file()
+    if target_existed:
         if target.stat().st_size == source.stat().st_size and sha256_file(target) == sha256_file(
             source
         ):
             return "reused"
-        raise FileExistsError(f"目标文件已存在但身份不同：{target}")
+    temporary = target.with_name(f".{target.name}.materialize.tmp")
+    temporary.unlink(missing_ok=True)
     try:
-        os.link(source, target)
-        return "hardlink"
-    except OSError:
-        shutil.copy2(source, target)
-        return "copy"
+        try:
+            os.link(source, temporary)
+            method = "hardlink"
+        except OSError:
+            shutil.copy2(source, temporary)
+            method = "copy"
+        temporary.replace(target)
+    finally:
+        temporary.unlink(missing_ok=True)
+    return f"refreshed_{method}" if target_existed else method
 
 
 def save_original_artifact(

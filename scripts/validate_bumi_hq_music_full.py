@@ -4,7 +4,8 @@
 本工具把人工评分、长音乐生成、BUMI 世界系轨迹、MuJoCo 视频和质量审计串成一个可恢复的
 离线流程。它只选择四张评分 CSV 中 ``score=1`` 的动作，再按数据集规则映射到音频并去重；
 每首音频保留全部对应的高质量动作名称，方便从页面和 JSON 追溯选择依据。生成阶段复用一次
-固定 120 帧的 BUMI ONNX 会话，通过 120/30 滑窗覆盖任意完整音频，输出连续世界系 qpos28。
+固定 120 帧的 BUMI ONNX 会话，通过 120/30 独立预测、世界对齐和几何感知 overlap-add
+覆盖任意完整音频，输出连续世界系 qpos28。
 
 质量报告同时给出严格 XML 原始限位和部署容差后的限位结果。每个超限关节都记录 0/1 基编号、
 名称、方向、最大超限弧度、发生帧、实际值、XML 边界和超限帧数；另外保留脚部穿地、根节点
@@ -42,6 +43,7 @@ from gem.robots.bumi.metrics import (  # noqa: E402
     metrics_to_json,
 )
 from gem.runtime.bumi_music_deploy import (  # noqa: E402
+    BUMI_SLIDING_QPOS_CONTRACT_VERSION,
     BumiOrtStepRunner,
     BumiSlidingQposGenerator,
 )
@@ -581,6 +583,7 @@ def completed_result(
     seed: int,
     cfg_scale: float,
     ddim_steps: int,
+    sliding_contract_version: str,
 ) -> dict[str, Any] | None:
     report_path = output_root / "reports" / item["dataset"] / f"{item['audio_key']}.json"
     if not report_path.is_file():
@@ -592,6 +595,7 @@ def completed_result(
         report.get("status") != "passed"
         or report.get("checkpoint_sha256") != checkpoint_sha256
         or report.get("onnx_sha256") != onnx_sha256
+        or report.get("sliding_qpos_contract_version") != sliding_contract_version
         or report.get("audio") != item["audio"]
         or not video.is_file()
         or not artifact.is_file()
@@ -611,6 +615,7 @@ def completed_result(
             "seed": seed,
             "cfg_scale": cfg_scale,
             "ddim_steps": ddim_steps,
+            "sliding_qpos_contract_version": sliding_contract_version,
         }.items()
     ):
         return None
@@ -686,7 +691,7 @@ def main() -> int:
         if identities[name] != value:
             raise ValueError(f"ONNX 身份不匹配：{name}")
     selection = {
-        "contract_version": "genmo.bumi_hq_full_music_selection.v1",
+        "contract_version": "genmo.bumi_hq_full_music_selection.v2",
         "selection_policy": "四张人工评分 CSV 的 score=1；按数据集映射音频键并去重；在音频键字典序全集上均匀取 N 首",
         "per_dataset_limit": args.per_dataset,
         "dataset_summary": dataset_summary,
@@ -695,6 +700,7 @@ def main() -> int:
             "full_audio": True,
             "sliding_window_frames": 120,
             "overlap_frames": 30,
+            "sliding_qpos_contract_version": BUMI_SLIDING_QPOS_CONTRACT_VERSION,
             "ddim_steps": args.ddim_steps,
             "cfg_scale": args.cfg_scale,
             "seed": args.seed,
@@ -746,6 +752,7 @@ def main() -> int:
             seed=args.seed,
             cfg_scale=args.cfg_scale,
             ddim_steps=args.ddim_steps,
+            sliding_contract_version=BUMI_SLIDING_QPOS_CONTRACT_VERSION,
         )
         if existing is not None:
             results.append(existing)
@@ -782,7 +789,7 @@ def main() -> int:
                 tolerance_rad=args.joint_limit_tolerance_rad,
             )
             artifact = {
-                "contract_version": "genmo.bumi_hq_full_music_prediction.v1",
+                "contract_version": "genmo.bumi_hq_full_music_prediction.v2",
                 "robot_name": "bumi",
                 "fps": 30,
                 "qpos": qpos,
@@ -795,6 +802,7 @@ def main() -> int:
                 "high_quality_source": item,
                 "checkpoint_sha256": identities["checkpoint_sha256"],
                 "onnx_sha256": identities["onnx_sha256"],
+                "sliding_qpos_contract_version": BUMI_SLIDING_QPOS_CONTRACT_VERSION,
                 "kinematics_sha256": identities["kinematics_sha256"],
                 "seed": args.seed,
                 "cfg_scale": args.cfg_scale,
@@ -818,7 +826,7 @@ def main() -> int:
                     f"视频/音频时长偏差过大：video={media['duration_sec']}, audio={source_duration}"
                 )
             report = {
-                "contract_version": "genmo.bumi_hq_full_music_sample_report.v1",
+                "contract_version": "genmo.bumi_hq_full_music_sample_report.v2",
                 "status": "passed",
                 **{key: item[key] for key in item},
                 "audio": str(audio_path),
@@ -830,6 +838,7 @@ def main() -> int:
                 "report_relative": _relative(report_path, output_root),
                 "checkpoint_sha256": identities["checkpoint_sha256"],
                 "onnx_sha256": identities["onnx_sha256"],
+                "sliding_qpos_contract_version": BUMI_SLIDING_QPOS_CONTRACT_VERSION,
                 "seed": args.seed,
                 "cfg_scale": args.cfg_scale,
                 "ddim_steps": args.ddim_steps,
@@ -841,13 +850,14 @@ def main() -> int:
             }
         except Exception as exc:
             report = {
-                "contract_version": "genmo.bumi_hq_full_music_sample_report.v1",
+                "contract_version": "genmo.bumi_hq_full_music_sample_report.v2",
                 "status": "failed",
                 **{key: item[key] for key in item},
                 "audio": str(audio_path),
                 "report_relative": _relative(report_path, output_root),
                 "checkpoint_sha256": identities["checkpoint_sha256"],
                 "onnx_sha256": identities["onnx_sha256"],
+                "sliding_qpos_contract_version": BUMI_SLIDING_QPOS_CONTRACT_VERSION,
                 "error": f"{type(exc).__name__}: {exc}",
                 "elapsed_seconds": time.perf_counter() - started,
             }

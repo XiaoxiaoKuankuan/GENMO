@@ -178,6 +178,58 @@ body_link_pos_local[t,j] = H0^-1 (body_pos_w[t,j] - p_anchor)
 
 因此第一帧水平位置和 yaw 为零，root 的 `z - z_default`、roll 和 pitch 仍保留。canonical qpos 的 root position 就是 `root_pos_local`；其局部地面高度为 `-z_default`。放回世界时，使用期望的 root XY/yaw（以及可选 anchor Z）左乘 heading 并加回 `[x, y, z_default]`。
 
+## 长序列重叠融合
+
+固定 120 帧 ONNX 的长序列运行时使用 `genmo.bumi_sliding_qpos_overlap_add.v2`。相邻窗口
+仍为 30 帧重叠、90 帧步长，但不再把上一窗口的 30 帧作为 DDIM 硬覆盖历史。每个窗口按
+训练时的独立完整 crop 分布生成，解码后先用候选首帧与已有世界轨迹重叠起点计算 Z-up
+平面刚体变换：根 XYZ 精确对齐，候选根轨迹和根朝向统一旋转到已有世界 yaw。随后在完整
+30 帧双侧预测上执行：
+
+- 根位置线性 overlap-add；
+- 根四元数先处理 `q/-q`，再执行最短弧 SLERP；
+- 21 个有界关节角线性交叉淡化；
+- 融合完整轨迹后统一修复四元数时间符号，再按绝对帧重建输出 chunks。
+
+不能直接平均 normalized 93D：不同窗口的 `root_pos_local`、`root_rot_local` 和
+`body_link_pos_local` 属于不同首帧锚点；rot6d 也不是可以保证单位旋转和最短路径的欧氏
+状态。运行时因此只把模型输出解码到完成几何对齐所需的 qpos，在统一世界系做流形正确的
+融合；最终 qpos 和其 Torch FK 是权威结果，raw 63D 辅助位置仍不参与控制。
+
+旧的无版本硬覆盖结果不会被批量脚本复用：selection、artifact、sample report 和 GMT demo
+都保存 `sliding_qpos_contract_version`。改变滑窗算法时必须生成新 artifact/video，不能只按
+checkpoint、ONNX、seed 和 DDIM 参数命中旧缓存。
+
+## `local_transl_vel` 表示可行性
+
+BUMI 可以像 SMPL 路径一样把前三维从 `root_pos_local` 改为
+`root_local_transl_delta`，在所有窗口融合后只做一次全局积分。维度仍可保持 93：
+
+| 字段 | Slice | 维度 | 建议 v2 语义 |
+|---|---|---:|---|
+| `root_local_transl_delta` | `[0:3]` | 3 | 当前帧根坐标系中的逐帧位移，米/帧 |
+| `root_rot_local` | `[3:9]` | 6 | 根旋转 rot6d |
+| `joint_dof` | `[9:30]` | 21 | MuJoCo-native 关节角 |
+| `body_link_pos_root` | `[30:93]` | 63 | 建议改成逐帧 root-relative 辅助几何 |
+
+完整轨迹先融合 `root_local_transl_delta`、旋转和关节，再从外部起始 qpos `p[0]` 递推：
+
+```text
+p[t + 1] = p[t] + R_root[t] root_local_transl_delta[t]
+```
+
+这样根位置 C0 连续由积分结构保证，窗口间只需平滑速度，不会产生单帧位置瞬移；代价是
+速度偏置会累积成长时间漂移，尤其要监控 Z 漂移。前三维不再保存第一帧高度，因此正式
+设计必须明确由 GMT 当前状态/默认 qpos 提供完整 `p[0]`，或扩为 94D 单独预测初始高度；
+不能在未声明的情况下把当前 `z-z_default` 静默解释成 `delta_z`。
+
+这属于新模型数据契约，不兼容当前 s430000。即使张量仍是 93D，也必须新建 feature/anchor
+contract、重算 train statistics 和 dataset fingerprint、修改 Endecoder/FK loss、重新训练
+checkpoint、重新导出 ONNX/TensorRT 并重做 parity 与 GMT 安全阈值验证。当前
+overlap-add v2 是兼容旧 checkpoint 的部署修复；`local_transl_vel` 应作为独立 BUMI
+representation v2 实验，且仍保留 overlap-add，因为积分只能保证根位置连续，不能自动
+消除根旋转和 21 个关节的接缝。
+
 ## 可微 BUMI FK 与资产契约
 
 `BumiKinematics` 加载 `genmo.bumi_kinematics.v1` JSON，至少严格保存并校验：

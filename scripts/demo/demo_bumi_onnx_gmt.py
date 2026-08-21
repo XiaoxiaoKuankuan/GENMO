@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """从 BUMI ONNX/TensorRT 音乐模型生成长轨迹并安全发布到 GMT。
 
-该入口完成部署全链路：WAV→30 Hz EDGE35→120/30 硬重叠 DDIM→连续世界系 qpos28→
+该入口完成部署全链路：WAV→30 Hz EDGE35→120/30 独立 DDIM+几何感知 overlap-add→
+连续世界系 qpos28→
 带 CRC/revision/模型指纹的 BUMI 安全流→跨分块物理边界检查→30→50 Hz SLERP→GMT
 110×55 ``trajectory_v1`` 滚动窗口→Redis→GMT ACK。BUMI 已直接输出机器人关节轨迹，
 所以此链路明确绕过 SMPL 和 GMR，避免对机器人动作重复重定向。
@@ -35,6 +36,7 @@ if str(REPO_ROOT) not in sys.path:
 from gem.robots.bumi.endecoder import BumiEndecoder  # noqa: E402
 from gem.runtime.bumi_gmt_plan import BumiIncrementalGmtPlanBuilder  # noqa: E402
 from gem.runtime.bumi_music_deploy import (  # noqa: E402
+    BUMI_SLIDING_QPOS_CONTRACT_VERSION,
     BumiOrtStepRunner,
     BumiSlidingQposGenerator,
     BumiTensorRTStepRunner,
@@ -88,9 +90,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-root-angular-velocity-radps", type=float, default=8.0)
     parser.add_argument("--min-root-height-m", type=float, default=0.25)
     parser.add_argument("--max-root-height-m", type=float, default=1.20)
-    parser.add_argument(
-        "--output", type=Path, default=Path("outputs/bumi_onnx_gmt/plan.npz")
-    )
+    parser.add_argument("--output", type=Path, default=Path("outputs/bumi_onnx_gmt/plan.npz"))
     parser.add_argument("--execute", action="store_true")
     parser.add_argument("--confirm-robot-motion", action="store_true")
     parser.add_argument("--redis-host", default="127.0.0.1")
@@ -137,7 +137,9 @@ def _validate_onnx_identity(
     return metadata
 
 
-def _start_audio(path: Path, start_sec: float, duration_sec: float) -> subprocess.Popen[bytes] | None:
+def _start_audio(
+    path: Path, start_sec: float, duration_sec: float
+) -> subprocess.Popen[bytes] | None:
     ffplay = shutil.which("ffplay")
     if ffplay is None:
         raise RuntimeError("--audio-playback=ffplay requires ffplay")
@@ -178,9 +180,7 @@ def _execute_plan(
         socket_connect_timeout=1.0,
     )
     client.ping()
-    publisher = RedisTrajectoryPublisher(
-        client, key=args.redis_key, ttl_ms=args.redis_ttl_ms
-    )
+    publisher = RedisTrajectoryPublisher(client, key=args.redis_key, ttl_ms=args.redis_ttl_ms)
     cursor = 0
     last_ack_sequence = -1
     submitted = time.monotonic()
@@ -233,8 +233,7 @@ def _execute_plan(
                         audio = _start_audio(
                             args.audio.expanduser().resolve(strict=True),
                             args.start_sec,
-                            snapshot.audio_end_frame / 50.0
-                            - snapshot.audio_start_frame / 50.0,
+                            snapshot.audio_end_frame / 50.0 - snapshot.audio_start_frame / 50.0,
                         )
                     audio_started = True
                 cursor = min(cursor + 1 + skipped, len(snapshot.frames) - 100)
@@ -308,9 +307,7 @@ def main(argv: list[str] | None = None) -> int:
         duration_sec=args.duration_sec,
         target_fps=30,
     )
-    total_frames = exact_motion_frame_count(
-        len(features), args.duration_sec, fps=30
-    )
+    total_frames = exact_motion_frame_count(len(features), args.duration_sec, fps=30)
     features = features[:total_frames].contiguous()
     endecoder = BumiEndecoder(
         kinematics_path=kinematics_path,
@@ -319,9 +316,7 @@ def main(argv: list[str] | None = None) -> int:
     ).to(device)
     engine_path = None
     if args.backend == "onnx":
-        step = BumiOrtStepRunner(
-            onnx_path, device=device, provider=args.onnx_provider
-        )
+        step = BumiOrtStepRunner(onnx_path, device=device, provider=args.onnx_provider)
         engine_sha = sha256_file(onnx_path)
     else:
         engine_path = args.engine.expanduser().resolve(strict=True)
@@ -407,9 +402,10 @@ def main(argv: list[str] | None = None) -> int:
     if args.execute:
         execution = _execute_plan(args, snapshot=snapshot, contract=contract)
     report = {
-        "contract_version": "genmo.bumi_onnx_gmt_demo.v1",
+        "contract_version": "genmo.bumi_onnx_gmt_demo.v2",
         "mode": "execute" if args.execute else "dry_run",
         "source_stream_contract": BUMI_QPOS_STREAM_CONTRACT,
+        "sliding_qpos_contract_version": BUMI_SLIDING_QPOS_CONTRACT_VERSION,
         "request_id": request_id,
         "revision": args.revision,
         "backend": args.backend,

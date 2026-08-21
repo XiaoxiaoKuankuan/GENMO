@@ -7,7 +7,8 @@ MuJoCo 顺序 `qpos28`，链路中不再经过 SMPL/GMR：
 WAV
   → EDGE35 @ 30 Hz
   → BUMI ONNX/TensorRT 单步去噪 [1,120,93]
-  → DDIM 20 步 + 120/30 滑窗
+  → DDIM 20 步 + 120/30 独立窗口
+  → 世界根对齐 + 根位置/关节 overlap-add + 根四元数 SLERP
   → 连续世界系 qpos28 @ 30 Hz
   → CRC/revision/模型指纹 + 实时安全门
   → 线性插值/四元数 SLERP @ 50 Hz
@@ -247,9 +248,13 @@ TensorRT plan 与 GPU 型号、TensorRT/libnvinfer 主次版本绑定，应在�
 ```
 
 `NPZ` 包含 `qpos_30hz`、`qpos_50hz`、`gmt_frames_50hz` 和 `native_to_gmt`；相邻 JSON
-记录所有模型/资产 SHA、安全阈值、分块数和执行状态。
+记录所有模型/资产 SHA、安全阈值、分块数、执行状态和
+`sliding_qpos_contract_version=genmo.bumi_sliding_qpos_overlap_add.v2`。v2 不再使用
+30 帧 DDIM 硬历史；每窗独立生成后先统一世界根坐标，再在完整重叠区做几何感知融合。
+旧硬拼接 artifact/report 没有该字段，批量验证不会把它们当作当前结果复用。
 
-对本次 `s430000 + mJS3 + seed=42`，严格默认安全门会拒绝动作：最大关节限位样例是
+以下数值是旧硬拼接运行时的历史诊断，不能代表 overlap-add v2；必须用当前代码重新生成
+后再决定安全门结果。旧 `s430000 + mJS3 + seed=42` 曾被严格默认安全门拒绝：最大关节限位样例是
 `r_arm_roll_joint=0.206278`，相对 XML 上限 0.14 在加 0.05 rad 容差后仍超 0.016278；
 按此前数据筛选约定显式改为 0.25 rad 后，最大手臂速度 28.781752 rad/s 仍超过默认
 18 rad/s，根角速度 15.373582 rad/s 也超过默认 8 rad/s。因此该样例不能进入实物执行。
