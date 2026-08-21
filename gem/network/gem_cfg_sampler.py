@@ -42,7 +42,20 @@ class ClassifierFreeSampleModel:
         out_uncond = self.model(x_uncond, timesteps, y_uncond, **kwargs)
         outputs = dict()
         for k in out:
-            outputs[k] = out_uncond[k] + y["scale"] * (out[k] - out_uncond[k])
+            # Parameterized heads may be disabled (for example BUMI has
+            # pred_cam_dim=0). Preserve a mutually absent optional output
+            # instead of trying to apply tensor CFG arithmetic to ``None``.
+            if out[k] is None and out_uncond[k] is None:
+                outputs[k] = None
+            elif isinstance(out[k], torch.Tensor) and isinstance(
+                out_uncond[k], torch.Tensor
+            ):
+                outputs[k] = out_uncond[k] + y["scale"] * (out[k] - out_uncond[k])
+            else:
+                raise TypeError(
+                    f"CFG output {k!r} must be tensors in both branches or None in both; "
+                    f"got {type(out[k]).__name__}/{type(out_uncond[k]).__name__}"
+                )
         return outputs
 
     def parameters(self):

@@ -7,6 +7,7 @@
 ProgressReporter。
 """
 
+import math
 from collections import OrderedDict, deque
 from datetime import datetime, timedelta
 from numbers import Number
@@ -128,6 +129,8 @@ class ProgressReporter(ProgressBar, pl.Callback):
         self.stage = stage
         self.time_exp_start = time()
         self.epoch_exp_start = trainer.current_epoch
+        self.step_exp_start = trainer.global_step
+        self.train_epoch_total = 0
 
         if self.exp_name is None:
             if hasattr(pl_module, "exp_name"):
@@ -164,6 +167,12 @@ class ProgressReporter(ProgressBar, pl.Callback):
 
     @rank_zero_only
     def on_train_epoch_start(self, trainer: "pl.Trainer", *_: Any) -> None:
+        raw_total = self.total_train_batches
+        self.train_epoch_total = (
+            int(raw_total)
+            if isinstance(raw_total, Number) and math.isfinite(raw_total) and raw_total > 0
+            else 0
+        )
         self.print("=" * 80)
         Log.info(
             f"{self.start_prompt}[FIT][Epoch {trainer.current_epoch}] Data: {self.data_name} Experiment: {self.exp_name}"
@@ -175,7 +184,11 @@ class ProgressReporter(ProgressBar, pl.Callback):
         super().on_train_batch_end(
             trainer, pl_module, outputs, batch, batch_idx
         )  # don't forget this :)
-        total = self.total_train_batches
+        # Lightning's ``total_train_batches`` can shrink after every batch in
+        # the final partial epoch when ``max_steps`` is reached before the
+        # DataLoader is exhausted.  Snapshot it at epoch start so percentages
+        # never exceed 100% and the ETA never becomes negative.
+        total = self.train_epoch_total
         if total <= 0:
             return
 
@@ -237,11 +250,17 @@ class ProgressReporter(ProgressBar, pl.Callback):
         self.batch_time_queue.clear()
 
         # Estimate Epoch time
-        n_finished = trainer.current_epoch + 1 - self.epoch_exp_start
-        n_to_finish = trainer.max_epochs - trainer.current_epoch - 1
         time_current = time()
         time_elapsed = time_current - self.time_exp_start
-        time_remaining = time_elapsed * n_to_finish / n_finished
+        if trainer.max_steps is not None and trainer.max_steps > 0:
+            n_finished = trainer.global_step - self.step_exp_start
+            n_to_finish = max(trainer.max_steps - trainer.global_step, 0)
+        else:
+            n_finished = trainer.current_epoch + 1 - self.epoch_exp_start
+            n_to_finish = max(trainer.max_epochs - trainer.current_epoch - 1, 0)
+        time_remaining = (
+            time_elapsed * n_to_finish / n_finished if n_finished > 0 else 0.0
+        )
         time_elapsed_str = convert_t_to_str(time_elapsed)
         time_remaining_str = convert_t_to_str(time_remaining)
 

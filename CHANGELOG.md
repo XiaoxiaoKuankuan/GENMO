@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+- Add a source-MJCF-bound BUMI3 legacy motion quality pipeline with strict NumPy pickle/
+  quaternion/joint-order contracts, OMG-style temporal anomaly statistics, sustained floor-style
+  rejection, auditable reports, safe PASS-only materialization, full-length review rendering, and
+  synthetic regression tests.
+- Clarify that ``legacy`` denotes the GMR pickle format rather than an old robot revision, bind the
+  plan to the user-confirmed production ``bumi3`` asset, and document generation-chain provenance,
+  MuJoCo FK parity, review, and formal GENMO conversion phases.
+
 ## 2026-08-18
 - 新增 `scripts/export_smplx_to_bumi3_offline_npz.py`：将 SMPL-X 动作先以
   SO(3) SLERP 重采样到 50 Hz，再逐帧调用无 Redis 的 GMR-CPP 同步 batch

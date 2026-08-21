@@ -1,0 +1,13 @@
+# BUMI assets are intentionally mandatory. Export real kinematics and compute
+# train-split window statistics before instantiating this formal config.
+_target_: gem.robots.bumi.endecoder.BumiEndecoder
+kinematics_path: ${oc.env:BUMI_KINEMATICS_PATH}
+stats_path: ${oc.env:BUMI_MUSIC_STATS_PATH}
+feat_dim: 93
+rotation_representation: rot6d
+anchor_mode: first_frame_xy_yaw_default_height
+clip_std_min: 1.0e-6
+allow_placeholder_stats: false
+fps: 30
+contact_height_threshold: 0.025
+contact_velocity_threshold: 0.05

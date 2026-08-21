@@ -1,0 +1,352 @@
+"""Normalization and encode/decode bridge for BUMI's 93D representation."""
+
+from __future__ import annotations
+
+import json
+from collections.abc import Mapping
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
+
+import torch
+import torch.nn as nn
+
+from .feature_codec import (
+    BUMI_ANCHOR_MODE,
+    BUMI_FEATURE_DIM,
+    BUMI_FEATURE_SLICES,
+    BUMI_QUATERNION_CONVENTION,
+    BumiMotionFeatureCodec,
+)
+from .kinematics import BumiKinematics, resolve_asset_path
+
+STATS_CONTRACT_VERSION = "genmo.bumi_stats.v1"
+
+
+@dataclass(frozen=True)
+class BumiEncodedMotion:
+    normalized_features: torch.Tensor
+    physical_features: torch.Tensor
+    canonical_qpos: torch.Tensor
+    target_body_link_pos_local: torch.Tensor
+    anchor_metadata: dict[str, torch.Tensor | str]
+    target_foot_contact: torch.Tensor
+    target_foot_contact_mask: torch.Tensor
+
+    @property
+    def body_link_pos_local(self) -> torch.Tensor:
+        return self.target_body_link_pos_local
+
+
+def _canonical_feature_slices(value: Any) -> dict[str, tuple[int, int]]:
+    if not isinstance(value, dict):
+        raise ValueError("BUMI stats feature_slices must be an object")
+    result: dict[str, tuple[int, int]] = {}
+    for name, expected in BUMI_FEATURE_SLICES.items():
+        raw = value.get(name)
+        if not isinstance(raw, (list, tuple)) or len(raw) != 2:
+            raise ValueError(f"BUMI stats feature_slices.{name} must contain [start, end]")
+        result[name] = (int(raw[0]), int(raw[1]))
+        if result[name] != expected:
+            raise ValueError(
+                f"BUMI stats feature_slices.{name} must be {expected}, got {result[name]}"
+            )
+    if set(value) != set(BUMI_FEATURE_SLICES):
+        raise ValueError(
+            "BUMI stats feature_slices must contain exactly "
+            f"{sorted(BUMI_FEATURE_SLICES)}, got {sorted(value)}"
+        )
+    return result
+
+
+class BumiEndecoder(nn.Module):
+    """Map BUMI qpos28 to normalized 93D features and back to authoritative FK."""
+
+    def __init__(
+        self,
+        kinematics_path: str | Path,
+        stats_path: str | Path,
+        feat_dim: int = 93,
+        rotation_representation: str = "rot6d",
+        anchor_mode: str = BUMI_ANCHOR_MODE,
+        clip_std_min: float = 1.0e-6,
+        allow_placeholder_stats: bool = False,
+        contact_height_threshold: float = 0.025,
+        contact_velocity_threshold: float = 0.05,
+        enable_contact_targets: bool = True,
+        fps: int = 30,
+    ) -> None:
+        super().__init__()
+        if int(feat_dim) != BUMI_FEATURE_DIM:
+            raise ValueError(f"BumiEndecoder feat_dim must be 93, got {feat_dim}")
+        if rotation_representation != "rot6d":
+            raise ValueError(
+                f"BumiEndecoder rotation_representation must be 'rot6d', got {rotation_representation!r}"
+            )
+        if anchor_mode != BUMI_ANCHOR_MODE:
+            raise ValueError(
+                f"BumiEndecoder anchor_mode must be {BUMI_ANCHOR_MODE!r}, got {anchor_mode!r}"
+            )
+        if not 0.0 < float(clip_std_min) <= 1.0:
+            raise ValueError("clip_std_min must be in (0, 1]")
+        if int(fps) != 30:
+            raise ValueError(f"BUMI music-native training is fixed at 30 FPS, got {fps}")
+        self.kinematics = BumiKinematics(kinematics_path)
+        self.codec = BumiMotionFeatureCodec(self.kinematics)
+        self.feat_dim = 93
+        self.rotation_representation = "rot6d"
+        self.anchor_mode = BUMI_ANCHOR_MODE
+        self.fps = 30
+        self.contact_height_threshold = float(contact_height_threshold)
+        self.contact_velocity_threshold = float(contact_velocity_threshold)
+        self.enable_contact_targets = bool(enable_contact_targets)
+        self.stats_path = str(resolve_asset_path(stats_path)) if str(stats_path).strip() else ""
+        if not self.stats_path:
+            raise ValueError(
+                "BUMI stats_path is required and must point to train-split 93D statistics"
+            )
+        stats_file = Path(self.stats_path)
+        if not stats_file.is_file():
+            raise FileNotFoundError(
+                f"BUMI stats JSON does not exist: {stats_file}. Compute it from the real train "
+                "split with tools/data/bumi/compute_bumi_93d_stats.py"
+            )
+        try:
+            stats = json.loads(stats_file.read_text(encoding="utf-8"))
+        except json.JSONDecodeError as exc:
+            raise ValueError(f"Invalid BUMI stats JSON {stats_file}: {exc}") from exc
+        self._validate_stats(stats, stats_file, allow_placeholder_stats)
+        mean = torch.as_tensor(stats["mean"], dtype=torch.float32)
+        std = torch.as_tensor(stats["std"], dtype=torch.float32)
+        if mean.shape != (93,) or std.shape != (93,):
+            raise ValueError(
+                f"BUMI stats {stats_file} must contain mean/std [93], got {mean.shape}/{std.shape}"
+            )
+        if not bool(torch.isfinite(mean).all()) or not bool(torch.isfinite(std).all()):
+            raise ValueError(f"BUMI stats {stats_file} contains NaN or Inf")
+        if bool((std < 0).any()):
+            raise ValueError(f"BUMI stats {stats_file} contains a negative std")
+        self.register_buffer("mean", mean, persistent=False)
+        self.register_buffer("std", std.clamp_min(float(clip_std_min)), persistent=False)
+        self.obs_indices_dict: dict[str, tuple[int, int]] | None = None
+        self.build_obs_indices_dict()
+
+    def _validate_stats(
+        self, stats: Any, path: Path, allow_placeholder_stats: bool
+    ) -> None:
+        if not isinstance(stats, dict):
+            raise ValueError(f"BUMI stats must be a JSON object: {path}")
+        if bool(stats.get("is_placeholder", False)) and not allow_placeholder_stats:
+            raise ValueError(
+                f"BUMI stats {path} is marked is_placeholder=true. Formal training refuses "
+                "placeholder/identity statistics unless allow_placeholder_stats=true is explicit."
+            )
+        expected = {
+            "contract_version": STATS_CONTRACT_VERSION,
+            "robot_name": "bumi",
+            "feature_dim": 93,
+            "anchor_mode": BUMI_ANCHOR_MODE,
+            "quaternion_convention": BUMI_QUATERNION_CONVENTION,
+        }
+        for key, expected_value in expected.items():
+            if stats.get(key) != expected_value:
+                raise ValueError(
+                    f"BUMI stats {path}: {key} must be {expected_value!r}, got {stats.get(key)!r}"
+                )
+        _canonical_feature_slices(stats.get("feature_slices"))
+        if tuple(map(str, stats.get("joint_names", ()))) != self.kinematics.joint_order:
+            raise ValueError(
+                f"BUMI stats {path} joint_names do not exactly match kinematics joint_order"
+            )
+        if stats.get("kinematics_sha256") != self.kinematics.kinematics_sha256:
+            raise ValueError(
+                f"BUMI stats {path} was computed with kinematics_sha256="
+                f"{stats.get('kinematics_sha256')!r}, but loaded kinematics is "
+                f"{self.kinematics.kinematics_sha256!r}"
+            )
+
+    def normalize(self, value: torch.Tensor, *_args: Any, **_kwargs: Any) -> torch.Tensor:
+        if value.shape[-1] != 93:
+            raise ValueError(f"BUMI normalization expects [...,93], got {value.shape}")
+        return (value - self.mean.to(value)) / self.std.to(value)
+
+    def denormalize(self, value: torch.Tensor, *_args: Any, **_kwargs: Any) -> torch.Tensor:
+        if value.shape[-1] != 93:
+            raise ValueError(f"BUMI denormalization expects [...,93], got {value.shape}")
+        return value * self.std.to(value) + self.mean.to(value)
+
+    def encode(self, inputs: Mapping[str, Any]) -> torch.Tensor:
+        return self.encode_with_aux(inputs).normalized_features
+
+    def encode_with_aux(self, inputs: Mapping[str, Any]) -> BumiEncodedMotion:
+        qpos = inputs.get("qpos")
+        if not isinstance(qpos, torch.Tensor):
+            raise KeyError("BumiEndecoder.encode_with_aux requires inputs['qpos'] tensor")
+        encoded = self.codec.encode(qpos)
+        normalized = self.normalize(encoded.physical_features)
+        valid = self._valid_mask(inputs, qpos)
+        if self.enable_contact_targets:
+            derived_contact = self.infer_foot_contact(encoded.normalized_world_qpos, valid)
+            target_contact, contact_mask = self._merge_contact_labels(
+                inputs, derived_contact, valid
+            )
+        else:
+            target_contact = torch.zeros(
+                (*valid.shape, 2), dtype=encoded.physical_features.dtype, device=valid.device
+            )
+            contact_mask = torch.zeros_like(target_contact, dtype=torch.bool)
+        anchor = encoded.anchor
+        return BumiEncodedMotion(
+            normalized_features=normalized,
+            physical_features=encoded.physical_features,
+            canonical_qpos=encoded.canonical_qpos,
+            target_body_link_pos_local=encoded.body_link_pos_local,
+            anchor_metadata={
+                "anchor_mode": BUMI_ANCHOR_MODE,
+                "position_w": anchor.position_w,
+                "heading_quat_wxyz": anchor.heading_quat_wxyz,
+                "heading_inverse_quat_wxyz": anchor.heading_inverse_quat_wxyz,
+                "yaw": anchor.yaw,
+                "default_root_height": anchor.default_root_height,
+            },
+            target_foot_contact=target_contact,
+            target_foot_contact_mask=contact_mask,
+        )
+
+    @staticmethod
+    def _valid_mask(inputs: Mapping[str, Any], qpos: torch.Tensor) -> torch.Tensor:
+        masks = inputs.get("mask")
+        valid = masks.get("valid") if isinstance(masks, Mapping) else None
+        if valid is None:
+            valid = torch.ones(qpos.shape[:-1], dtype=torch.bool, device=qpos.device)
+        if not isinstance(valid, torch.Tensor) or tuple(valid.shape) != tuple(qpos.shape[:-1]):
+            raise ValueError(
+                f"inputs['mask']['valid'] must have shape {qpos.shape[:-1]}, "
+                f"got {getattr(valid, 'shape', None)}"
+            )
+        return valid.bool()
+
+    def infer_foot_contact(
+        self,
+        qpos: torch.Tensor,
+        valid_mask: torch.Tensor,
+        *,
+        velocity_threshold: float | None = None,
+    ) -> torch.Tensor:
+        """Derive left/right contact from real sole height and horizontal speed."""
+
+        fk = self.kinematics.forward_kinematics(qpos)
+        sole = self.kinematics.aggregate_sole_by_foot(
+            fk["body_pos_w"], fk["body_quat_w"]
+        )
+        foot_xy = sole["foot_points_w"][..., :2]
+        if foot_xy.shape[-3] <= 1:
+            speed = torch.zeros(foot_xy.shape[:-1], dtype=foot_xy.dtype, device=foot_xy.device)
+        else:
+            velocity = torch.diff(foot_xy, dim=-3) * float(self.fps)
+            speed_delta = torch.linalg.vector_norm(velocity, dim=-1)
+            speed = torch.cat((speed_delta[..., :1, :], speed_delta), dim=-2)
+        contact = (
+            (sole["foot_bottom_height"] <= self.contact_height_threshold)
+            & (
+                speed
+                <= (
+                    self.contact_velocity_threshold
+                    if velocity_threshold is None
+                    else float(velocity_threshold)
+                )
+            )
+            & valid_mask[..., None]
+        )
+        return contact.float()
+
+    @staticmethod
+    def _merge_contact_labels(
+        inputs: Mapping[str, Any], derived: torch.Tensor, valid: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        supplied = inputs.get("foot_contact")
+        if supplied is None:
+            return derived, valid[..., None].expand_as(derived)
+        if not isinstance(supplied, torch.Tensor) or tuple(supplied.shape) != tuple(derived.shape):
+            raise ValueError(
+                f"foot_contact must have shape {tuple(derived.shape)}, "
+                f"got {getattr(supplied, 'shape', None)}"
+            )
+        if not bool(torch.isfinite(supplied).all()):
+            raise ValueError("foot_contact contains NaN or Inf")
+        supplied = supplied.to(derived).clamp(0.0, 1.0)
+        available = inputs.get("foot_contact_available")
+        if available is None:
+            available_mask = valid
+        else:
+            if not isinstance(available, torch.Tensor) or tuple(available.shape) != tuple(valid.shape):
+                raise ValueError(
+                    f"foot_contact_available must have shape {tuple(valid.shape)}, "
+                    f"got {getattr(available, 'shape', None)}"
+                )
+            available_mask = available.bool() & valid
+        target = torch.where(available_mask[..., None], supplied, derived)
+        # Missing dataset labels are replaced by a deterministic GT-qpos FK label,
+        # so every valid frame remains supervised without pretending zero is GT.
+        return target, valid[..., None].expand_as(target)
+
+    def decode(self, normalized: torch.Tensor) -> dict[str, torch.Tensor]:
+        physical = self.denormalize(normalized)
+        components = self.codec.split_features(physical)
+        rot_slice = BUMI_FEATURE_SLICES["root_rot_local"]
+        return {
+            "root_pos_local": components.root_pos_local,
+            "root_rot_local_6d": physical[..., rot_slice[0] : rot_slice[1]],
+            "root_rot_local_quat": components.root_rot_local_quat,
+            "joint_dof": components.joint_dof,
+            "body_link_pos_local_raw": components.body_link_pos_local,
+            "physical_features": physical,
+        }
+
+    def compose_qpos(
+        self,
+        decode_dict: Mapping[str, torch.Tensor],
+        world_anchor: Mapping[str, Any] | torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        required = ("root_pos_local", "root_rot_local_quat", "joint_dof")
+        missing = [key for key in required if key not in decode_dict]
+        if missing:
+            raise KeyError(f"BUMI decode_dict is missing {missing}")
+        canonical = torch.cat(
+            tuple(decode_dict[key] for key in required), dim=-1
+        )
+        canonical = self.codec.normalize_qpos_sequence(canonical)
+        if world_anchor is None:
+            return canonical
+        return self.codec.apply_world_anchor(canonical, world_anchor)
+
+    def authoritative_body_link_positions(
+        self, canonical_qpos: torch.Tensor
+    ) -> torch.Tensor:
+        return self.kinematics.forward_kinematics(canonical_qpos)["body_pos_w"][..., 1:, :]
+
+    def build_obs_indices_dict(self) -> None:
+        self.obs_indices_dict = dict(BUMI_FEATURE_SLICES)
+
+    def get_obs_indices(self, name: str) -> tuple[int, int]:
+        if self.obs_indices_dict is None:
+            self.build_obs_indices_dict()
+        if name not in self.obs_indices_dict:
+            raise KeyError(f"Unknown BUMI feature group {name!r}")
+        return self.obs_indices_dict[name]
+
+    def get_motion_dim(self) -> int:
+        return 93
+
+    def get_static_gt(self, inputs: Mapping[str, Any], vel_thr: float | None = None) -> torch.Tensor:
+        qpos = inputs.get("qpos")
+        if not isinstance(qpos, torch.Tensor):
+            raise KeyError("BUMI contact supervision requires inputs['qpos']")
+        valid = self._valid_mask(inputs, qpos)
+        derived = self.infer_foot_contact(
+            qpos, valid, velocity_threshold=None if vel_thr is None else float(vel_thr)
+        )
+        return self._merge_contact_labels(inputs, derived, valid)[0]
+
+
+__all__ = ["BumiEncodedMotion", "BumiEndecoder", "STATS_CONTRACT_VERSION"]

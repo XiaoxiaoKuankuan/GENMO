@@ -1,0 +1,32 @@
+_target_: gem.pipeline.bumi_music_pipeline.BumiMusicPipeline
+args_denoiser3d: ${network}
+args:
+  motion_backend: bumi
+  train_modes: [diffusion]
+  endecoder_opt: ${endecoder}
+  use_cfg_sampler_for_gen: true
+  encoded_music_dim: 35
+  in_attr: [encoded_music]
+  mask_out_attr: []
+  out_attr: []
+  loss_contract: physical_v1
+  auxiliary_warmup_steps: 10000
+  ground_semantics: legacy_body_origin_min_zero
+  weights:
+    repr_root_pos: 1.0
+    repr_root_rot: 1.0
+    repr_joint: 1.0
+    repr_body_pos: 1.0
+    root_pos: 0.1
+    root_rot: 0.1
+    joint_dof: 0.1
+    fk_body_pos: 0.5
+    fk_consistency: 0.1
+    joint_velocity: 0.01
+    joint_acceleration: 0.002
+    joint_jerk: 0.0
+    joint_limit: 0.01
+    contact_bce: 0.0
+    foot_slide: 0.0
+    penetration: 0.0
+    root_height: 0.05

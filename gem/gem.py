@@ -172,8 +172,17 @@ class GEM(pl.LightningModule):
         self.test_step = self.predict_step = self.validation_step
         self.timing = os.environ.get("DEBUG_TIMING", "FALSE") == "TRUE"
 
-        self.body_model_type = "smpl"
-        self.body_model = make_smplx("supermotion_v437coco17")
+        # Robot-native experiments opt in explicitly.  The default remains the
+        # historical SMPL path so existing configs/checkpoints are unchanged.
+        self.motion_backend = str(model_cfg.get("motion_backend", "smpl"))
+        if self.motion_backend not in {"smpl", "bumi"}:
+            raise ValueError(f"Unsupported motion_backend={self.motion_backend!r}")
+        self.body_model_type = "smpl" if self.motion_backend == "smpl" else "bumi"
+        self.body_model = (
+            make_smplx("supermotion_v437coco17")
+            if self.motion_backend == "smpl"
+            else None
+        )
 
         self.obs_num_joints = 17
         obs_num_joints = self.obs_num_joints
@@ -210,7 +219,7 @@ class GEM(pl.LightningModule):
             # "encoded_music": 438,
             "encoded_music": (self.pipeline.args.encoded_music_dim,),
             "encoded_audio": (128,),
-            "observed_motion_3d": (151,),
+            "observed_motion_3d": (self.endecoder.get_motion_dim(),),
         }
 
         self.not_add_features = [

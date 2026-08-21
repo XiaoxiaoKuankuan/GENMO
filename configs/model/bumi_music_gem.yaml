@@ -1,0 +1,19 @@
+_target_: gem.bumi_gem.BumiMusicGEM
+pipeline: ${pipeline}
+optimizer: ${optimizer}
+scheduler: ${scheduler}
+model_cfg:
+  motion_backend: bumi
+  train_modes:
+    - diffusion
+  text_encoder: null
+  cond_merge_strategy: add
+  use_cond_exists_as_input: true
+  normalize_cam_angvel: false
+  music_mask_prob: 0.1
+  audio_mask_prob: 0.0
+  checkpoint_adapter: null
+  condition_mask: {}
+  diffusion:
+    test_timestep_respacing: "50"
+    guidance_param: 2.5
