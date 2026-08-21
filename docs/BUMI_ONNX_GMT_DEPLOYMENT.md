@@ -169,6 +169,27 @@ MUJOCO_GL=egl .venv/bin/python scripts/validate_bumi_hq_music_full.py \
 访问。`quality_summary.json` 同时保留 0、0.05、0.10、0.15、0.20、0.25 rad 的样本级
 限位敏感性；页面中的关节编号为 1-based，JSON 同时保存 0-based 编号。
 
+在上面的 40 首模型视频完成后，可将每首 ``score=1`` 代表动作的原始 50 Hz GMR BUMI
+轨迹与模型结果做成同步左右对比。转换严格复用正式数据构建器的 50→30 Hz 插值、SLERP、
+关节重排和地面规范；AIST++ 原始动作只有 7–12 秒时按真实片段截断，不循环原动作：
+
+```bash
+MUJOCO_GL=egl .venv/bin/python scripts/build_bumi_hq_original_comparison.py \
+  --validation-root outputs/onnx/bumi_music/s430000/validation_hq_4set_full_20260821 \
+  --source-motion-root data/motions_npz_bumi3_smooth_q1 \
+  --quality-config configs/bumi/quality_filter_sonic_npz_50hz_auto025_v1.yaml \
+  --kinematics "$BUMI_TASK_KIN" \
+  --mjcf /home/weili/GMR_minimal_robots_smplx.tar.gz/GMR-master/assets/bumi3/bumi3.xml \
+  --output-root outputs/onnx/bumi_music/s430000/validation_hq_4set_full_20260821/comparison_original_vs_generated \
+  --joint-limit-tolerance-rad 0.25 \
+  --width 640 \
+  --height 480
+```
+
+输出对比视频为 1280×480：左侧 ``Original GMR BUMI``，右侧
+``s430000 Generated``。目录自包含原动作视频、模型视频和合成对比视频；同盘模型视频优先
+硬链接，跨盘才复制。`index.html` 提供合成播放、单独原动作、完整模型视频和同区间指标。
+
 ## TensorRT 构建与 parity
 
 TensorRT plan 与 GPU 型号、TensorRT/libnvinfer 主次版本绑定，应在最终部署机器上构建：
