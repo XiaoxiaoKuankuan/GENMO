@@ -3,12 +3,18 @@
 本文对应 `feature/bumi-music-only` 分支。BUMI 模型输出的是机器人原生 93D 特征和
 MuJoCo 顺序 `qpos28`，链路中不再经过 SMPL/GMR：
 
+> 重要：下文 `s430000`、旧 stats、ONNX、TensorRT 和视频是 v1 `root_pos_local`
+> 历史审计结果，只能用于对比，不能由当前 v2 代码加载或继续部署。当前代码要求
+> `genmo.bumi_motion_features.v2`，必须重算 stats、重新训练并导出新 ONNX/engine；这是
+> 有意的失败保护，不能因为张量同为 93D 而绕过。
+
 ```text
 WAV
   → EDGE35 @ 30 Hz
   → BUMI ONNX/TensorRT 单步去噪 [1,120,93]
   → DDIM 20 步 + 120/30 独立窗口
-  → 世界根对齐 + 根位置/关节 overlap-add + 根四元数 SLERP
+  → 世界水平增量/绝对根高/关节 overlap-add + 根四元数 SLERP
+  → 全序列只积分一次水平根位移
   → 连续世界系 qpos28 @ 30 Hz
   → CRC/revision/模型指纹 + 实时安全门
   → 线性插值/四元数 SLERP @ 50 Hz
@@ -27,7 +33,7 @@ Parity 是数值等价检查。本项目固定相同 checkpoint、输入和噪�
 Runtime、TensorRT 的单步 93D，以及完整 DDIM 后的 93D、qpos28 和 Torch FK；浮点算子
 实现不同，所以要求在明确容差内一致，不要求逐 bit 相同。
 
-## 本次模型和资产
+## 历史 v1 模型和资产（仅审计）
 
 - 服务器 2 checkpoint：
   `/data0/user/liwei/experiments/genmo/gem_bumi_music_only_4set_random_v1/version_0/checkpoints/s430000.ckpt`
@@ -54,7 +60,7 @@ TensorRT/libnvinfer 10.13.3 的 FP16 engine 大小 `433320476` bytes，SHA256 �
 单步/20 步 DDIM 通过，三后端报告 `final_pass=true`。4 秒 MuJoCo+音乐验证视频保存在
 `outputs/onnx/bumi_music/s430000/demo_mJS3.mp4`。
 
-下面命令都从 `/home/weili/GENMO` 执行：
+下面命令保留为历史复现记录；当前分支会明确拒绝旧 checkpoint/stats，因此不能直接执行：
 
 ```bash
 cd /home/weili/GENMO
@@ -249,9 +255,9 @@ TensorRT plan 与 GPU 型号、TensorRT/libnvinfer 主次版本绑定，应在�
 
 `NPZ` 包含 `qpos_30hz`、`qpos_50hz`、`gmt_frames_50hz` 和 `native_to_gmt`；相邻 JSON
 记录所有模型/资产 SHA、安全阈值、分块数、执行状态和
-`sliding_qpos_contract_version=genmo.bumi_sliding_qpos_overlap_add.v2`。v2 不再使用
-30 帧 DDIM 硬历史；每窗独立生成后先统一世界根坐标，再在完整重叠区做几何感知融合。
-旧硬拼接 artifact/report 没有该字段，批量验证不会把它们当作当前结果复用。
+`sliding_qpos_contract_version=genmo.bumi_sliding_motion_overlap_add.v3`。v3 不再使用
+30 帧 DDIM 硬历史；每窗独立生成后在完整重叠区融合物理水平增量、绝对根高、根旋转和
+关节，最后只积分一次水平轨迹。旧 v1/v2 artifact/report 不会被当作当前结果复用。
 
 以下数值是旧硬拼接运行时的历史诊断，不能代表 overlap-add v2；必须用当前代码重新生成
 后再决定安全门结果。旧 `s430000 + mJS3 + seed=42` 曾被严格默认安全门拒绝：最大关节限位样例是

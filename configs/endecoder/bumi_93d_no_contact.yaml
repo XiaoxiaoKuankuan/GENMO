@@ -3,7 +3,7 @@ kinematics_path: ${oc.env:BUMI_KINEMATICS_PATH}
 stats_path: ${oc.env:BUMI_MUSIC_STATS_PATH}
 feat_dim: 93
 rotation_representation: rot6d
-anchor_mode: first_frame_xy_yaw_default_height
+anchor_mode: first_frame_xy_yaw_heading_delta_absolute_height
 clip_std_min: 1.0e-6
 allow_placeholder_stats: false
 fps: 30

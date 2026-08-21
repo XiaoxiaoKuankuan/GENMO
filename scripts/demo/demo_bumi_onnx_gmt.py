@@ -34,6 +34,9 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from gem.robots.bumi.endecoder import BumiEndecoder  # noqa: E402
+from gem.robots.bumi.feature_codec import (  # noqa: E402
+    BUMI_REPRESENTATION_CONTRACT_VERSION,
+)
 from gem.runtime.bumi_gmt_plan import BumiIncrementalGmtPlanBuilder  # noqa: E402
 from gem.runtime.bumi_music_deploy import (  # noqa: E402
     BUMI_SLIDING_QPOS_CONTRACT_VERSION,
@@ -117,6 +120,8 @@ def _validate_onnx_identity(
     metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
     if metadata.get("contract_version") != BUMI_ONNX_CONTRACT_VERSION:
         raise ValueError("ONNX metadata is not the BUMI guided denoiser contract")
+    if metadata.get("representation_contract_version") != BUMI_REPRESENTATION_CONTRACT_VERSION:
+        raise ValueError("ONNX metadata is not the BUMI v2 motion representation")
     if int(metadata.get("sequence_length", -1)) != 120:
         raise ValueError("BUMI GMT runtime requires a fixed 120-frame ONNX export")
     expected = {

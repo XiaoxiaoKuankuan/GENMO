@@ -75,13 +75,17 @@ class BumiMusicPipeline(nn.Module):
         decode_dict = self.endecoder.decode(pred_x)
         pred_qpos_canonical = self.endecoder.compose_qpos(decode_dict)
         fk = self.endecoder.kinematics.forward_kinematics(pred_qpos_canonical)
-        pred_body_link_pos_local_fk = fk["body_pos_w"][..., 1:, :]
+        pred_body_link_pos_root_fk = self.endecoder.codec.body_positions_in_root_frame(
+            pred_qpos_canonical[..., :3],
+            pred_qpos_canonical[..., 3:7],
+            fk["body_pos_w"][..., 1:, :],
+        )
         outputs: dict[str, Any] = {
             "model_output": model_output,
             "decode_dict": decode_dict,
             "pred_qpos_canonical": pred_qpos_canonical,
-            "pred_body_link_pos_local_fk": pred_body_link_pos_local_fk,
-            "pred_body_link_pos_local_raw": decode_dict["body_link_pos_local_raw"],
+            "pred_body_link_pos_root_fk": pred_body_link_pos_root_fk,
+            "pred_body_link_pos_root_raw": decode_dict["body_link_pos_root_raw"],
             "pred_foot_contact_logits": model_output.get("static_conf_logits"),
         }
         world_anchor = inputs.get("world_anchor")
@@ -99,7 +103,7 @@ class BumiMusicPipeline(nn.Module):
             model_output,
             decode_dict,
             pred_qpos_canonical,
-            pred_body_link_pos_local_fk,
+            pred_body_link_pos_root_fk,
             fk["body_quat_w"],
             global_step=global_step,
         )

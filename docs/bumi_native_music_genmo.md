@@ -1,10 +1,14 @@
 # BUMI-native Music-only GENMO
 
+> 当前代码的数据表示已升级到 `genmo.bumi_motion_features.v2`。下方 2026-08-19 的训练
+> 状态和 `s430000` 属于旧 `root_pos_local` v1 历史，不能由当前代码加载；v2 必须重算
+> stats 并重新训练，尚不能借用旧视频宣称模型质量已经验证。
+
 > 本文是数据契约、工程实现、训练和验证说明。若要从方法角度理解模型为什么采用
 > qpos28、93D、canonicalization、音乐条件扩散和 Torch FK，请先读
 > [BUMI-GENMO 方法与框架讲解](BUMI_GENMO_METHOD_CN.md)。
 
-## 2026-08-19 本地与服务器 2 验收结论
+## 2026-08-19 v1 本地与服务器 2 历史验收结论
 
 结论：**正式数据、代码、CUDA 环境和训练配置均已具备训练条件，而且服务器 2
 上的正式随机初始化训练已经启动并稳定运行。当前不要再启动第二个同配置作业。**
@@ -157,12 +161,16 @@ root linear/angular velocity 异常、持续或碎片化贴地动作，以及低
 
 | 字段 | Slice | 维度 |
 |---|---|---:|
-| `root_pos_local` | `[0:3]` | 3 |
+| `root_delta_xy_heading` | `[0:2]` | 2 |
+| `root_height_offset` | `[2:3]` | 1 |
 | `root_rot_local`（rot6d） | `[3:9]` | 6 |
 | `joint_dof` | `[9:30]` | 21 |
-| `body_link_pos_local` | `[30:93]` | 21 × 3 |
+| `body_link_pos_root` | `[30:93]` | 21 × 3 |
 
-总维度为 93。后 63 维是辅助几何监督：它们是 21 个驱动关节对应 feature child-body 的位置，不是 GMR 直接输出，也不是 MJCF 的全部 body。推理时只使用前 30 维组成 qpos28，再通过 Torch FK 重新计算权威 body positions；不会对预测的 63D 位置执行 IK。
+总维度为 93，合约版本为 `genmo.bumi_motion_features.v2`。后 63 维是逐帧 root
+坐标系下的辅助几何监督：它们是 21 个驱动关节对应 feature child-body 的位置，不是 GMR
+直接输出，也不是 MJCF 的全部 body。推理时只使用前 30 维组成 qpos28，再通过 Torch FK
+重新计算权威 body positions；不会对预测的 63D 位置执行 IK。
 
 ## First-frame canonicalization
 
@@ -170,65 +178,53 @@ root linear/angular velocity 异常、持续或碎片化贴地动作，以及低
 
 ```text
 p_anchor = [p0.x, p0.y, z_default]
-
-root_pos_local[t] = H0^-1 (p[t] - p_anchor)
 root_rot_local[t] = H0^-1 q[t]
-body_link_pos_local[t,j] = H0^-1 (body_pos_w[t,j] - p_anchor)
+root_height_offset[t] = p[t].z - z_default
+root_delta_xy_heading[t] = Heading(root_rot_local[t])^-1 (p[t+1].xy - p[t].xy)
+body_link_pos_root[t,j] = q[t]^-1 (body_pos_w[t,j] - p[t])
 ```
 
-因此第一帧水平位置和 yaw 为零，root 的 `z - z_default`、roll 和 pitch 仍保留。canonical qpos 的 root position 就是 `root_pos_local`；其局部地面高度为 `-z_default`。放回世界时，使用期望的 root XY/yaw（以及可选 anchor Z）左乘 heading 并加回 `[x, y, z_default]`。
+最后一帧没有下一帧可求差分，重复最后一个真实水平增量；单帧序列使用零增量。解码时令
+canonical `p[0].xy=[0,0]`，按当前帧 heading 把 `root_delta_xy_heading[t]` 转回轨迹坐标并
+递推 `p[t+1].xy`；Z 不积分，始终直接取 `root_height_offset[t]`。因此第一帧水平位置和
+yaw 为零，root 的 `z-z_default`、roll 和 pitch 仍保留；水平运动没有窗口绝对位置歧义，
+竖直速度偏置也不会累积成持续下沉。放回世界时再使用期望的 root XY/yaw 和默认根高，
+不要求 GMT 知道地图意义上的全局 XY。
 
 ## 长序列重叠融合
 
-固定 120 帧 ONNX 的长序列运行时使用 `genmo.bumi_sliding_qpos_overlap_add.v2`。相邻窗口
-仍为 30 帧重叠、90 帧步长，但不再把上一窗口的 30 帧作为 DDIM 硬覆盖历史。每个窗口按
-训练时的独立完整 crop 分布生成，解码后先用候选首帧与已有世界轨迹重叠起点计算 Z-up
-平面刚体变换：根 XYZ 精确对齐，候选根轨迹和根朝向统一旋转到已有世界 yaw。随后在完整
-30 帧双侧预测上执行：
+固定 120 帧 ONNX 的长序列运行时使用 `genmo.bumi_sliding_motion_overlap_add.v3`。相邻窗口
+仍为 30 帧重叠、90 帧步长，每个窗口按训练时的独立完整 crop 分布生成。候选根旋转先以
+重叠首帧对齐到已有轨迹 yaw；heading-local 水平增量对全局平移和 yaw 不变，无需猜测或
+对齐世界 XY。随后在完整 30 帧双侧预测上执行：
 
-- 根位置线性 overlap-add；
+- 把两侧水平增量转到共同轨迹坐标后线性 overlap-add，再转回融合后 heading；
+- `z-z_default` 逐帧线性交叉淡化，不积分 Z；
 - 根四元数先处理 `q/-q`，再执行最短弧 SLERP；
 - 21 个有界关节角线性交叉淡化；
-- 融合完整轨迹后统一修复四元数时间符号，再按绝对帧重建输出 chunks。
+- 融合完整状态后统一修复四元数时间符号，全局只积分一次水平增量，再按绝对帧重建
+  qpos chunks。
 
-不能直接平均 normalized 93D：不同窗口的 `root_pos_local`、`root_rot_local` 和
-`body_link_pos_local` 属于不同首帧锚点；rot6d 也不是可以保证单位旋转和最短路径的欧氏
-状态。运行时因此只把模型输出解码到完成几何对齐所需的 qpos，在统一世界系做流形正确的
-融合；最终 qpos 和其 Torch FK 是权威结果，raw 63D 辅助位置仍不参与控制。
+不能直接平均 normalized 93D：各通道统计量不同，rot6d 也不能保证单位旋转和最短路径。
+运行时先反归一化，只融合物理量；最终 qpos 和其 Torch FK 是权威结果，raw 63D 辅助位置
+仍不参与控制。单一水平积分链从结构上保证根位置没有分块重置；旋转和关节仍必须
+overlap-add，因为平移积分无法约束这些自由度的窗口边界。
 
 旧的无版本硬覆盖结果不会被批量脚本复用：selection、artifact、sample report 和 GMT demo
 都保存 `sliding_qpos_contract_version`。改变滑窗算法时必须生成新 artifact/video，不能只按
 checkpoint、ONNX、seed 和 DDIM 参数命中旧缓存。
 
-## `local_transl_vel` 表示可行性
+## 为什么不是完整 XYZ 速度
 
-BUMI 可以像 SMPL 路径一样把前三维从 `root_pos_local` 改为
-`root_local_transl_delta`，在所有窗口融合后只做一次全局积分。维度仍可保持 93：
+完整 XYZ 局部速度也能保持 93D，但 Z 的微小预测偏置会在长音乐中逐帧累积，而且模型不再
+直接表达首帧蹲伏、跳起等非默认根高。v2 因此只积分水平 2D，把第三维保留为每帧绝对
+`z-z_default`。它不需要 94D，也不需要 GMT 提供世界 XY，同时保留机器人浮动基座的物理
+高度语义。代价是水平速度仍可能产生长期里程漂移；这是相对运动生成的固有限制，应由
+训练损失、运行时速度门和未来的接触/里程约束控制，不能伪装成地图定位。
 
-| 字段 | Slice | 维度 | 建议 v2 语义 |
-|---|---|---:|---|
-| `root_local_transl_delta` | `[0:3]` | 3 | 当前帧根坐标系中的逐帧位移，米/帧 |
-| `root_rot_local` | `[3:9]` | 6 | 根旋转 rot6d |
-| `joint_dof` | `[9:30]` | 21 | MuJoCo-native 关节角 |
-| `body_link_pos_root` | `[30:93]` | 63 | 建议改成逐帧 root-relative 辅助几何 |
-
-完整轨迹先融合 `root_local_transl_delta`、旋转和关节，再从外部起始 qpos `p[0]` 递推：
-
-```text
-p[t + 1] = p[t] + R_root[t] root_local_transl_delta[t]
-```
-
-这样根位置 C0 连续由积分结构保证，窗口间只需平滑速度，不会产生单帧位置瞬移；代价是
-速度偏置会累积成长时间漂移，尤其要监控 Z 漂移。前三维不再保存第一帧高度，因此正式
-设计必须明确由 GMT 当前状态/默认 qpos 提供完整 `p[0]`，或扩为 94D 单独预测初始高度；
-不能在未声明的情况下把当前 `z-z_default` 静默解释成 `delta_z`。
-
-这属于新模型数据契约，不兼容当前 s430000。即使张量仍是 93D，也必须新建 feature/anchor
-contract、重算 train statistics 和 dataset fingerprint、修改 Endecoder/FK loss、重新训练
-checkpoint、重新导出 ONNX/TensorRT 并重做 parity 与 GMT 安全阈值验证。当前
-overlap-add v2 是兼容旧 checkpoint 的部署修复；`local_transl_vel` 应作为独立 BUMI
-representation v2 实验，且仍保留 overlap-add，因为积分只能保证根位置连续，不能自动
-消除根旋转和 21 个关节的接缝。
+v2 与旧 s430000 不兼容。代码会检查 stats、checkpoint、ONNX 和 TensorRT 合约，拒绝把
+旧 93D 权重静默解释成新语义；必须重算 train statistics、重新训练、重新导出并重做
+parity、视频质量和 GMT 安全阈值验证。
 
 ## 可微 BUMI FK 与资产契约
 
@@ -325,7 +321,11 @@ Manifest 每行必须含 `sample_id`、`sequence_id`、`music_group_id`、`audio
 
 ## Stats 契约
 
-`BUMI_MUSIC_STATS_PATH` 必须指向 `genmo.bumi_stats.v1` JSON，包括 93 维 mean/std、固定 slices、真实 joint names、anchor mode、kinematics SHA 和各数据集 fingerprint。统计只使用 train split；每条序列按 stride 120 枚举 120 帧窗口并包含最后一个合法窗口，每个窗口独立以第一帧 canonicalize。短序列只让真实有效帧进入统计。
+`BUMI_MUSIC_STATS_PATH` 必须指向 `genmo.bumi_stats.v2` JSON，并显式声明
+`genmo.bumi_motion_features.v2`；其余仍包括 93 维 mean/std、固定 slices、真实 joint
+names、anchor mode、kinematics SHA 和各数据集 fingerprint。统计只使用 train split；
+每条序列按 stride 120 枚举 120 帧窗口并包含最后一个合法窗口。短序列只让真实有效帧
+进入统计。
 
 实现使用流式 Welford，不拼接全量数据。最终只执行 `std.clamp_min(1e-6)`，不会采用 SMPL 的 `std < 1 -> 1`。`is_placeholder=true` 默认被正式 Endecoder 拒绝；仓库不附带可被训练静默使用的 identity stats。
 正式 DataModule 还会在启动时重新计算四个 `dataset_info.json` 和 train manifest 的
@@ -412,7 +412,8 @@ joint_names             exact 21-name MuJoCo order
 quaternion_convention   wxyz
 qpos_order              mujoco_native
 feature_dim             93
-anchor_mode             first_frame_xy_yaw_default_height
+anchor_mode             first_frame_xy_yaw_heading_delta_absolute_height
+representation_contract_version  genmo.bumi_motion_features.v2
 music_path              source path
 normalized_motion_93d   [T,93]
 music_features          [T,35]

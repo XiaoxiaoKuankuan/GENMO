@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- 将 BUMI 93D 升级为 `heading-local ΔXY + (z-z_default)` 混合根运动表示，辅助 63D
+  改为逐帧 root-relative 几何；长音乐先融合物理增量、绝对根高、根旋转和关节，再对
+  完整时间轴只积分一次水平轨迹。stats/checkpoint/ONNX/TensorRT 合约同步升版并明确拒绝
+  旧 s430000，防止同维度特征被静默误解。
 - Add a source-MJCF-bound BUMI3 legacy motion quality pipeline with strict NumPy pickle/
   quaternion/joint-order contracts, OMG-style temporal anomaly statistics, sustained floor-style
   rejection, auditable reports, safe PASS-only materialization, full-length review rendering, and

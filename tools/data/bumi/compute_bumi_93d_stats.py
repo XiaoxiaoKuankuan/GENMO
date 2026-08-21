@@ -21,6 +21,7 @@ from gem.datasets.music_dance.music_dance_bumi import (  # noqa: E402
 from gem.robots.bumi.feature_codec import (  # noqa: E402
     BUMI_ANCHOR_MODE,
     BUMI_FEATURE_SLICES,
+    BUMI_REPRESENTATION_CONTRACT_VERSION,
     BumiMotionFeatureCodec,
 )
 from gem.robots.bumi.kinematics import BumiKinematics  # noqa: E402
@@ -146,7 +147,8 @@ def main() -> None:
         }
     mean, std = accumulator.finalize()
     report = {
-        "contract_version": "genmo.bumi_stats.v1",
+        "contract_version": "genmo.bumi_stats.v2",
+        "representation_contract_version": BUMI_REPRESENTATION_CONTRACT_VERSION,
         "robot_name": "bumi",
         "feature_dim": 93,
         "mean": mean.tolist(),

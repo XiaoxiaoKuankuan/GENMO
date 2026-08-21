@@ -8,6 +8,8 @@ import pytest
 import torch
 import torch.nn as nn
 
+from gem.bumi_gem import BumiMusicGEM
+from gem.robots.bumi.feature_codec import BUMI_REPRESENTATION_CONTRACT_VERSION
 from gem.runtime.bumi_music_onnx import (
     BumiMusicGuidedDenoiser,
     make_bumi_onnx_inputs,
@@ -39,16 +41,18 @@ class FakeDenoiser(nn.Module):
 
 class FakeEndecoder:
     feat_dim = 93
+    representation_contract_version = "genmo.bumi_motion_features.v2"
 
     def __init__(self):
         self.obs_indices_dict = None
 
     def build_obs_indices_dict(self):
         self.obs_indices_dict = {
-            "root_pos_local": (0, 3),
+            "root_delta_xy_heading": (0, 2),
+            "root_height_offset": (2, 3),
             "root_rot_local": (3, 9),
             "joint_dof": (9, 30),
-            "body_link_pos_local": (30, 93),
+            "body_link_pos_root": (30, 93),
         }
 
 
@@ -57,16 +61,12 @@ class FakeBumiModel(nn.Module):
         super().__init__()
         self.motion_backend = "bumi"
         self.music_embedder = nn.Linear(35, 8)
-        self.cond_exists_embedder = nn.ModuleDict(
-            {"encoded_music": nn.Linear(9, 8)}
-        )
+        self.cond_exists_embedder = nn.ModuleDict({"encoded_music": nn.Linear(9, 8)})
         self.model_cfg = SimpleNamespace(use_cond_exists_as_input=True)
         self.endecoder = FakeEndecoder()
         self.pipeline = SimpleNamespace(
             args=SimpleNamespace(in_attr=["encoded_music"]),
-            denoiser3d=SimpleNamespace(
-                denoiser=FakeDenoiser(), regression_only=False
-            ),
+            denoiser3d=SimpleNamespace(denoiser=FakeDenoiser(), regression_only=False),
         )
 
 
@@ -75,14 +75,10 @@ def test_bumi_cfg_is_internal_and_outputs_only_motion93() -> None:
     wrapper = BumiMusicGuidedDenoiser(FakeBumiModel()).eval()
     music = torch.randn(120, 35)
     noisy, timestep, music, length, _ = make_bumi_onnx_inputs(music, seed=7)
-    unconditional = wrapper(
-        noisy, timestep, music, length, torch.tensor([0.0])
-    )
+    unconditional = wrapper(noisy, timestep, music, length, torch.tensor([0.0]))
     conditional = wrapper(noisy, timestep, music, length, torch.tensor([1.0]))
     guided = wrapper(noisy, timestep, music, length, torch.tensor([2.5]))
-    torch.testing.assert_close(
-        guided, unconditional + 2.5 * (conditional - unconditional)
-    )
+    torch.testing.assert_close(guided, unconditional + 2.5 * (conditional - unconditional))
     assert guided.shape == (1, 120, 93)
     assert torch.isfinite(guided).all()
 
@@ -130,6 +126,14 @@ def test_checkpoint_contract_rejects_smpl151_and_optional_heads() -> None:
     wrong["pipeline.denoiser3d.denoiser.pred_cam_head.fc1.weight"] = torch.zeros(8, 8)
     with pytest.raises(ValueError, match="camera/static"):
         validate_bumi_checkpoint_state_dict(wrong)
+
+
+def test_bumi_checkpoint_requires_v2_representation_metadata() -> None:
+    with pytest.raises(RuntimeError, match="s430000"):
+        BumiMusicGEM._validate_representation_checkpoint({})
+    BumiMusicGEM._validate_representation_checkpoint(
+        {"bumi_representation_contract_version": (BUMI_REPRESENTATION_CONTRACT_VERSION)}
+    )
 
 
 def test_bumi_wrapper_exports_and_matches_onnxruntime(tmp_path) -> None:

@@ -75,9 +75,7 @@ def temporal_difference_mask(valid: torch.Tensor, order: int) -> torch.Tensor:
     length = valid.shape[1]
     if length <= order:
         return valid[:, :0]
-    result = torch.ones(
-        (valid.shape[0], length - order), dtype=torch.bool, device=valid.device
-    )
+    result = torch.ones((valid.shape[0], length - order), dtype=torch.bool, device=valid.device)
     for offset in range(order + 1):
         result &= valid[:, offset : offset + length - order]
     return result
@@ -128,19 +126,19 @@ class BumiRobotLosses(nn.Module):
         unknown = set(weights) - set(BUMI_LOSS_NAMES)
         if unknown:
             raise ValueError(f"Unknown BUMI loss weights: {sorted(unknown)}")
-        if any(not torch.isfinite(torch.tensor(value)) or value < 0.0 for value in self.weights.values()):
+        if any(
+            not torch.isfinite(torch.tensor(value)) or value < 0.0
+            for value in self.weights.values()
+        ):
             raise ValueError("BUMI loss weights must be finite and non-negative")
         if self.contract_version not in {"legacy_v0", "physical_v1"}:
-            raise ValueError(
-                "BUMI loss contract_version must be 'legacy_v0' or 'physical_v1'"
-            )
+            raise ValueError("BUMI loss contract_version must be 'legacy_v0' or 'physical_v1'")
         if self.auxiliary_warmup_steps < 0:
             raise ValueError("auxiliary_warmup_steps must be non-negative")
         if self.contract_version == "physical_v1":
             if self.ground_semantics != "legacy_body_origin_min_zero":
                 raise ValueError(
-                    "BUMI physical_v1 requires ground_semantics="
-                    "'legacy_body_origin_min_zero'"
+                    "BUMI physical_v1 requires ground_semantics='legacy_body_origin_min_zero'"
                 )
             forbidden = {
                 name: self.weights[name]
@@ -169,7 +167,7 @@ class BumiRobotLosses(nn.Module):
         model_output: Mapping[str, torch.Tensor | None],
         decode_dict: Mapping[str, torch.Tensor],
         pred_qpos_canonical: torch.Tensor,
-        pred_body_link_pos_local_fk: torch.Tensor,
+        pred_body_link_pos_root_fk: torch.Tensor,
         pred_body_quat_local_fk: torch.Tensor,
         global_step: int = 0,
     ) -> dict[str, torch.Tensor]:
@@ -178,7 +176,7 @@ class BumiRobotLosses(nn.Module):
             "target_x",
             "target_physical_features",
             "target_qpos_canonical",
-            "target_body_link_pos_local",
+            "target_body_link_pos_root",
             "target_foot_contact",
             "target_foot_contact_mask",
             "mask",
@@ -195,23 +193,21 @@ class BumiRobotLosses(nn.Module):
         target_norm = inputs["target_x"]
         target_physical = inputs["target_physical_features"]
         target_components = self.endecoder.codec.split_features(target_physical)
-        pred_body_raw = decode_dict["body_link_pos_local_raw"]
+        pred_body_raw = decode_dict["body_link_pos_root_raw"]
 
         terms: dict[str, torch.Tensor] = {}
-        terms["repr_root_pos"] = self._repr_loss(
-            pred_norm, target_norm, valid, "root_pos_local"
+        terms["repr_root_pos"] = _masked_mean(
+            (pred_norm[..., :3] - target_norm[..., :3]).square(), valid
         )
-        terms["repr_root_rot"] = self._repr_loss(
-            pred_norm, target_norm, valid, "root_rot_local"
-        )
+        terms["repr_root_rot"] = self._repr_loss(pred_norm, target_norm, valid, "root_rot_local")
         terms["repr_joint"] = self._repr_loss(pred_norm, target_norm, valid, "joint_dof")
         terms["repr_body_pos"] = self._repr_loss(
-            pred_norm, target_norm, valid, "body_link_pos_local"
+            pred_norm, target_norm, valid, "body_link_pos_root"
         )
         terms["root_pos"] = _masked_mean(
             F.smooth_l1_loss(
-                decode_dict["root_pos_local"],
-                target_components.root_pos_local,
+                pred_qpos_canonical[..., :3],
+                inputs["target_qpos_canonical"][..., :3],
                 reduction="none",
             ),
             valid,
@@ -219,9 +215,7 @@ class BumiRobotLosses(nn.Module):
         pred_rotation = rotation_6d_to_matrix(decode_dict["root_rot_local_6d"])
         rot_start, rot_end = BUMI_FEATURE_SLICES["root_rot_local"]
         target_rotation = rotation_6d_to_matrix(target_physical[..., rot_start:rot_end])
-        terms["root_rot"] = _masked_mean(
-            so3_geodesic_angle(pred_rotation, target_rotation), valid
-        )
+        terms["root_rot"] = _masked_mean(so3_geodesic_angle(pred_rotation, target_rotation), valid)
         terms["joint_dof"] = _masked_mean(
             F.smooth_l1_loss(
                 decode_dict["joint_dof"], target_components.joint_dof, reduction="none"
@@ -230,16 +224,14 @@ class BumiRobotLosses(nn.Module):
         )
         terms["fk_body_pos"] = _masked_mean(
             F.smooth_l1_loss(
-                pred_body_link_pos_local_fk,
-                inputs["target_body_link_pos_local"],
+                pred_body_link_pos_root_fk,
+                inputs["target_body_link_pos_root"],
                 reduction="none",
             ),
             valid,
         )
         terms["fk_consistency"] = _masked_mean(
-            F.smooth_l1_loss(
-                pred_body_raw, pred_body_link_pos_local_fk, reduction="none"
-            ),
+            F.smooth_l1_loss(pred_body_raw, pred_body_link_pos_root_fk, reduction="none"),
             valid,
         )
 
@@ -287,11 +279,9 @@ class BumiRobotLosses(nn.Module):
                 inputs["target_foot_contact_mask"].bool(),
             )
 
-        pred_body_pos_all = torch.cat(
-            (pred_qpos_canonical[..., None, :3], pred_body_link_pos_local_fk), dim=-2
-        )
+        pred_fk = self.kinematics.forward_kinematics(pred_qpos_canonical)
         pred_sole = self.kinematics.aggregate_sole_by_foot(
-            pred_body_pos_all, pred_body_quat_local_fk
+            pred_fk["body_pos_w"], pred_body_quat_local_fk
         )
         foot_xy = pred_sole["foot_points_w"][..., :2]
         foot_velocity = torch.diff(foot_xy, dim=1) * float(self.fps)
@@ -310,14 +300,12 @@ class BumiRobotLosses(nn.Module):
         # Canonical Z=0 is the default-root-height plane; world ground is
         # therefore at -default_root_height in canonical coordinates.
         ground_height_local = -self.kinematics.default_qpos[2].to(pred_norm)
-        penetration = F.relu(
-            ground_height_local - pred_sole["foot_bottom_height"]
-        )
+        penetration = F.relu(ground_height_local - pred_sole["foot_bottom_height"])
         terms["penetration"] = _masked_mean(penetration, valid)
         terms["root_height"] = _masked_mean(
             F.smooth_l1_loss(
-                decode_dict["root_pos_local"][..., 2],
-                target_components.root_pos_local[..., 2],
+                decode_dict["root_height_offset"][..., 0],
+                target_components.root_height_offset[..., 0],
                 reduction="none",
             ),
             valid,
@@ -341,9 +329,7 @@ class BumiRobotLosses(nn.Module):
     ) -> tuple[torch.Tensor, torch.Tensor]:
         error = prediction - target
         zero = torch.zeros_like(error)
-        raw = _masked_mean(
-            F.smooth_l1_loss(error, zero, beta=1.0, reduction="none"), mask
-        )
+        raw = _masked_mean(F.smooth_l1_loss(error, zero, beta=1.0, reduction="none"), mask)
         normalized = _masked_mean(
             F.smooth_l1_loss(error / float(scale), zero, beta=1.0, reduction="none"),
             mask,
@@ -356,17 +342,18 @@ class BumiRobotLosses(nn.Module):
         model_output: Mapping[str, torch.Tensor | None],
         decode_dict: Mapping[str, torch.Tensor],
         pred_qpos_canonical: torch.Tensor,
-        pred_body_link_pos_local_fk: torch.Tensor,
+        pred_body_link_pos_root_fk: torch.Tensor,
         pred_body_quat_local_fk: torch.Tensor,
         global_step: int = 0,
     ) -> dict[str, torch.Tensor]:
         """Low-weight GT derivative losses for the unadjusted BUMI corpus."""
 
-        del pred_qpos_canonical, pred_body_quat_local_fk
+        del pred_body_quat_local_fk
         required = (
             "target_x",
             "target_physical_features",
-            "target_body_link_pos_local",
+            "target_qpos_canonical",
+            "target_body_link_pos_root",
             "mask",
         )
         missing = [key for key in required if key not in inputs]
@@ -384,37 +371,38 @@ class BumiRobotLosses(nn.Module):
         pred_norm = pred_norm_source.float()
         target_norm = inputs["target_x"].float()
         target_physical = inputs["target_physical_features"].float()
-        pred_root_pos = decode_dict["root_pos_local"].float()
+        pred_root_position = pred_qpos_canonical[..., :3].float()
         pred_root_rot6d = decode_dict["root_rot_local_6d"].float()
         pred_joint = decode_dict["joint_dof"].float()
-        pred_body_raw = decode_dict["body_link_pos_local_raw"].float()
-        pred_body_fk = pred_body_link_pos_local_fk.float()
-        target_body_fk = inputs["target_body_link_pos_local"].float()
+        pred_body_raw = decode_dict["body_link_pos_root_raw"].float()
+        pred_body_fk = pred_body_link_pos_root_fk.float()
+        target_body_fk = inputs["target_body_link_pos_root"].float()
         target_components = self.endecoder.codec.split_features(target_physical)
 
         raw: dict[str, torch.Tensor] = {}
         normalized: dict[str, torch.Tensor] = {}
+        raw["repr_root_pos"] = _masked_mean(
+            (pred_norm[..., :3] - target_norm[..., :3]).square(), valid
+        )
+        normalized["repr_root_pos"] = raw["repr_root_pos"]
         for loss_name, feature_name in (
-            ("repr_root_pos", "root_pos_local"),
             ("repr_root_rot", "root_rot_local"),
             ("repr_joint", "joint_dof"),
-            ("repr_body_pos", "body_link_pos_local"),
+            ("repr_body_pos", "body_link_pos_root"),
         ):
             value = self._repr_loss(pred_norm, target_norm, valid, feature_name)
             raw[loss_name] = value
             normalized[loss_name] = value
 
         raw["root_pos"], normalized["root_pos"] = self._smooth_l1_pair(
-            pred_root_pos,
-            target_components.root_pos_local.float(),
+            pred_root_position,
+            inputs["target_qpos_canonical"][..., :3].float(),
             valid,
             BUMI_PHYSICAL_V1_SCALES["root_pos"],
         )
         pred_rotation = rotation_6d_to_matrix(pred_root_rot6d)
         rot_start, rot_end = BUMI_FEATURE_SLICES["root_rot_local"]
-        target_rotation = rotation_6d_to_matrix(
-            target_physical[..., rot_start:rot_end]
-        )
+        target_rotation = rotation_6d_to_matrix(target_physical[..., rot_start:rot_end])
         root_angle = so3_geodesic_angle(pred_rotation, target_rotation)
         raw["root_rot"] = _masked_mean(root_angle, valid)
         normalized["root_rot"] = _masked_mean(
@@ -470,8 +458,8 @@ class BumiRobotLosses(nn.Module):
             valid,
         )
         raw["root_height"], normalized["root_height"] = self._smooth_l1_pair(
-            pred_root_pos[..., 2],
-            target_components.root_pos_local[..., 2].float(),
+            decode_dict["root_height_offset"][..., 0].float(),
+            target_components.root_height_offset[..., 0].float(),
             valid,
             BUMI_PHYSICAL_V1_SCALES["root_height"],
         )
@@ -495,9 +483,7 @@ class BumiRobotLosses(nn.Module):
             "repr_body_pos",
         }
         total = zero
-        output: dict[str, torch.Tensor] = {
-            "auxiliary_warmup_factor": pred_norm.new_tensor(warmup)
-        }
+        output: dict[str, torch.Tensor] = {"auxiliary_warmup_factor": pred_norm.new_tensor(warmup)}
         for name in BUMI_LOSS_NAMES:
             factor = 1.0 if name in representation else warmup
             weighted = normalized[name] * (self.weights[name] * factor)
@@ -516,7 +502,7 @@ class BumiRobotLosses(nn.Module):
         model_output: Mapping[str, torch.Tensor | None],
         decode_dict: Mapping[str, torch.Tensor],
         pred_qpos_canonical: torch.Tensor,
-        pred_body_link_pos_local_fk: torch.Tensor,
+        pred_body_link_pos_root_fk: torch.Tensor,
         pred_body_quat_local_fk: torch.Tensor,
         global_step: int = 0,
     ) -> dict[str, torch.Tensor]:
@@ -530,7 +516,7 @@ class BumiRobotLosses(nn.Module):
             model_output,
             decode_dict,
             pred_qpos_canonical,
-            pred_body_link_pos_local_fk,
+            pred_body_link_pos_root_fk,
             pred_body_quat_local_fk,
             global_step=global_step,
         )

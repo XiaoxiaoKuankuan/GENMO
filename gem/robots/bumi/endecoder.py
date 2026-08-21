@@ -16,11 +16,12 @@ from .feature_codec import (
     BUMI_FEATURE_DIM,
     BUMI_FEATURE_SLICES,
     BUMI_QUATERNION_CONVENTION,
+    BUMI_REPRESENTATION_CONTRACT_VERSION,
     BumiMotionFeatureCodec,
 )
 from .kinematics import BumiKinematics, resolve_asset_path
 
-STATS_CONTRACT_VERSION = "genmo.bumi_stats.v1"
+STATS_CONTRACT_VERSION = "genmo.bumi_stats.v2"
 
 
 @dataclass(frozen=True)
@@ -28,14 +29,14 @@ class BumiEncodedMotion:
     normalized_features: torch.Tensor
     physical_features: torch.Tensor
     canonical_qpos: torch.Tensor
-    target_body_link_pos_local: torch.Tensor
+    target_body_link_pos_root: torch.Tensor
     anchor_metadata: dict[str, torch.Tensor | str]
     target_foot_contact: torch.Tensor
     target_foot_contact_mask: torch.Tensor
 
     @property
-    def body_link_pos_local(self) -> torch.Tensor:
-        return self.target_body_link_pos_local
+    def body_link_pos_root(self) -> torch.Tensor:
+        return self.target_body_link_pos_root
 
 
 def _canonical_feature_slices(value: Any) -> dict[str, tuple[int, int]]:
@@ -94,6 +95,7 @@ class BumiEndecoder(nn.Module):
         self.kinematics = BumiKinematics(kinematics_path)
         self.codec = BumiMotionFeatureCodec(self.kinematics)
         self.feat_dim = 93
+        self.representation_contract_version = BUMI_REPRESENTATION_CONTRACT_VERSION
         self.rotation_representation = "rot6d"
         self.anchor_mode = BUMI_ANCHOR_MODE
         self.fps = 30
@@ -131,9 +133,7 @@ class BumiEndecoder(nn.Module):
         self.obs_indices_dict: dict[str, tuple[int, int]] | None = None
         self.build_obs_indices_dict()
 
-    def _validate_stats(
-        self, stats: Any, path: Path, allow_placeholder_stats: bool
-    ) -> None:
+    def _validate_stats(self, stats: Any, path: Path, allow_placeholder_stats: bool) -> None:
         if not isinstance(stats, dict):
             raise ValueError(f"BUMI stats must be a JSON object: {path}")
         if bool(stats.get("is_placeholder", False)) and not allow_placeholder_stats:
@@ -143,6 +143,7 @@ class BumiEndecoder(nn.Module):
             )
         expected = {
             "contract_version": STATS_CONTRACT_VERSION,
+            "representation_contract_version": BUMI_REPRESENTATION_CONTRACT_VERSION,
             "robot_name": "bumi",
             "feature_dim": 93,
             "anchor_mode": BUMI_ANCHOR_MODE,
@@ -200,7 +201,7 @@ class BumiEndecoder(nn.Module):
             normalized_features=normalized,
             physical_features=encoded.physical_features,
             canonical_qpos=encoded.canonical_qpos,
-            target_body_link_pos_local=encoded.body_link_pos_local,
+            target_body_link_pos_root=encoded.body_link_pos_root,
             anchor_metadata={
                 "anchor_mode": BUMI_ANCHOR_MODE,
                 "position_w": anchor.position_w,
@@ -236,9 +237,7 @@ class BumiEndecoder(nn.Module):
         """Derive left/right contact from real sole height and horizontal speed."""
 
         fk = self.kinematics.forward_kinematics(qpos)
-        sole = self.kinematics.aggregate_sole_by_foot(
-            fk["body_pos_w"], fk["body_quat_w"]
-        )
+        sole = self.kinematics.aggregate_sole_by_foot(fk["body_pos_w"], fk["body_quat_w"])
         foot_xy = sole["foot_points_w"][..., :2]
         if foot_xy.shape[-3] <= 1:
             speed = torch.zeros(foot_xy.shape[:-1], dtype=foot_xy.dtype, device=foot_xy.device)
@@ -279,7 +278,9 @@ class BumiEndecoder(nn.Module):
         if available is None:
             available_mask = valid
         else:
-            if not isinstance(available, torch.Tensor) or tuple(available.shape) != tuple(valid.shape):
+            if not isinstance(available, torch.Tensor) or tuple(available.shape) != tuple(
+                valid.shape
+            ):
                 raise ValueError(
                     f"foot_contact_available must have shape {tuple(valid.shape)}, "
                     f"got {getattr(available, 'shape', None)}"
@@ -295,11 +296,12 @@ class BumiEndecoder(nn.Module):
         components = self.codec.split_features(physical)
         rot_slice = BUMI_FEATURE_SLICES["root_rot_local"]
         return {
-            "root_pos_local": components.root_pos_local,
+            "root_delta_xy_heading": components.root_delta_xy_heading,
+            "root_height_offset": components.root_height_offset,
             "root_rot_local_6d": physical[..., rot_slice[0] : rot_slice[1]],
             "root_rot_local_quat": components.root_rot_local_quat,
             "joint_dof": components.joint_dof,
-            "body_link_pos_local_raw": components.body_link_pos_local,
+            "body_link_pos_root_raw": components.body_link_pos_root,
             "physical_features": physical,
         }
 
@@ -308,22 +310,40 @@ class BumiEndecoder(nn.Module):
         decode_dict: Mapping[str, torch.Tensor],
         world_anchor: Mapping[str, Any] | torch.Tensor | None = None,
     ) -> torch.Tensor:
-        required = ("root_pos_local", "root_rot_local_quat", "joint_dof")
+        required = (
+            "root_delta_xy_heading",
+            "root_height_offset",
+            "root_rot_local_quat",
+            "joint_dof",
+        )
         missing = [key for key in required if key not in decode_dict]
         if missing:
             raise KeyError(f"BUMI decode_dict is missing {missing}")
+        root_position = self.codec.rollout_root_position(
+            decode_dict["root_delta_xy_heading"],
+            decode_dict["root_height_offset"],
+            decode_dict["root_rot_local_quat"],
+        )
         canonical = torch.cat(
-            tuple(decode_dict[key] for key in required), dim=-1
+            (
+                root_position,
+                decode_dict["root_rot_local_quat"],
+                decode_dict["joint_dof"],
+            ),
+            dim=-1,
         )
         canonical = self.codec.normalize_qpos_sequence(canonical)
         if world_anchor is None:
             return canonical
         return self.codec.apply_world_anchor(canonical, world_anchor)
 
-    def authoritative_body_link_positions(
-        self, canonical_qpos: torch.Tensor
-    ) -> torch.Tensor:
-        return self.kinematics.forward_kinematics(canonical_qpos)["body_pos_w"][..., 1:, :]
+    def authoritative_body_link_positions_root(self, canonical_qpos: torch.Tensor) -> torch.Tensor:
+        fk = self.kinematics.forward_kinematics(canonical_qpos)
+        return self.codec.body_positions_in_root_frame(
+            canonical_qpos[..., :3],
+            canonical_qpos[..., 3:7],
+            fk["body_pos_w"][..., 1:, :],
+        )
 
     def build_obs_indices_dict(self) -> None:
         self.obs_indices_dict = dict(BUMI_FEATURE_SLICES)
@@ -338,7 +358,9 @@ class BumiEndecoder(nn.Module):
     def get_motion_dim(self) -> int:
         return 93
 
-    def get_static_gt(self, inputs: Mapping[str, Any], vel_thr: float | None = None) -> torch.Tensor:
+    def get_static_gt(
+        self, inputs: Mapping[str, Any], vel_thr: float | None = None
+    ) -> torch.Tensor:
         qpos = inputs.get("qpos")
         if not isinstance(qpos, torch.Tensor):
             raise KeyError("BUMI contact supervision requires inputs['qpos']")

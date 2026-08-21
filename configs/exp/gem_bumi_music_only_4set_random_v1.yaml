@@ -26,7 +26,7 @@ defaults:
       - lr_monitor/pl
   - _self_
 
-exp_name_base: gem_bumi_music_only_4set_random_v1
+exp_name_base: gem_bumi_music_only_4set_random_v1_repr_v2
 exp_name_var: ""
 exp_name: ${exp_name_base}${exp_name_var}
 data_name: gem_bumi_music_only_4set_random_v1

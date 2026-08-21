@@ -76,25 +76,40 @@ def test_physical_v1_fp32_logs_and_warmup(test_kinematics_path) -> None:
     inputs = {
         "target_x": target,
         "target_physical_features": target,
-        "target_body_link_pos_local": encoded.body_link_pos_local,
+        "target_qpos_canonical": encoded.canonical_qpos,
+        "target_body_link_pos_root": encoded.body_link_pos_root,
         "mask": {"valid": torch.tensor([[True, True, True, True, False, False]])},
     }
     decode = {
-        "root_pos_local": parts.root_pos_local,
+        "root_delta_xy_heading": parts.root_delta_xy_heading,
+        "root_height_offset": parts.root_height_offset,
         "root_rot_local_6d": pred[..., 3:9],
         "joint_dof": parts.joint_dof,
-        "body_link_pos_local_raw": parts.body_link_pos_local,
+        "body_link_pos_root_raw": parts.body_link_pos_root,
     }
+    fk_body_root = codec.body_positions_in_root_frame(
+        pred_qpos[..., :3], pred_qpos[..., 3:7], fk["body_pos_w"][..., 1:, :]
+    )
     at_zero = loss(
-        inputs, {"pred_x": pred.half()}, decode, pred_qpos, fk["body_pos_w"][..., 1:, :],
-        fk["body_quat_w"], global_step=0
+        inputs,
+        {"pred_x": pred.half()},
+        decode,
+        pred_qpos,
+        fk_body_root,
+        fk["body_quat_w"],
+        global_step=0,
     )
     assert at_zero["loss"].dtype == torch.float32
     assert float(at_zero["weighted_joint_dof_loss"]) == 0.0
     assert float(at_zero["weighted_repr_joint_loss"]) > 0.0
     at_full = loss(
-        inputs, {"pred_x": pred.half()}, decode, pred_qpos, fk["body_pos_w"][..., 1:, :],
-        fk["body_quat_w"], global_step=10000
+        inputs,
+        {"pred_x": pred.half()},
+        decode,
+        pred_qpos,
+        fk_body_root,
+        fk["body_quat_w"],
+        global_step=10000,
     )
     assert float(at_full["weighted_joint_dof_loss"]) > 0.0
     for name in BUMI_LOSS_NAMES:
@@ -106,9 +121,7 @@ def test_physical_v1_fp32_logs_and_warmup(test_kinematics_path) -> None:
 
 def test_ground_losses_are_hard_disabled_for_legacy_ground(test_kinematics_path) -> None:
     kinematics = BumiKinematics(test_kinematics_path)
-    endecoder = SimpleNamespace(
-        kinematics=kinematics, codec=BumiMotionFeatureCodec(kinematics)
-    )
+    endecoder = SimpleNamespace(kinematics=kinematics, codec=BumiMotionFeatureCodec(kinematics))
     weights = _weights()
     weights["penetration"] = 0.001
     with pytest.raises(ValueError, match="cannot enable"):

@@ -22,12 +22,16 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
+from gem.robots.bumi.feature_codec import (  # noqa: E402
+    BUMI_REPRESENTATION_CONTRACT_VERSION,
+)
 from gem.runtime.bumi_music_deploy import (  # noqa: E402
     BUMI_ENGINE_CONTRACT,
     BUMI_MOTION_DIM,
     BumiTensorRTStepRunner,
     bumi_engine_cache_key,
 )
+from gem.runtime.bumi_music_onnx import BUMI_ONNX_CONTRACT_VERSION  # noqa: E402
 from gem.runtime.music_only_trt import (  # noqa: E402
     gpu_fingerprint,
     sha256_file,
@@ -74,6 +78,14 @@ def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     onnx_path = args.onnx.expanduser().resolve(strict=True)
     checkpoint = args.checkpoint.expanduser().resolve(strict=True)
+    onnx_metadata_path = onnx_path.with_suffix(onnx_path.suffix + ".json")
+    if not onnx_metadata_path.is_file():
+        raise FileNotFoundError(f"BUMI ONNX metadata is missing: {onnx_metadata_path}")
+    onnx_metadata = json.loads(onnx_metadata_path.read_text(encoding="utf-8"))
+    if onnx_metadata.get("contract_version") != BUMI_ONNX_CONTRACT_VERSION:
+        raise ValueError("TensorRT build requires the v2 BUMI ONNX contract")
+    if onnx_metadata.get("representation_contract_version") != BUMI_REPRESENTATION_CONTRACT_VERSION:
+        raise ValueError("TensorRT build requires the BUMI v2 motion representation")
     if args.workspace_gib <= 0.0:
         raise ValueError("--workspace-gib must be > 0")
     if not 0 <= args.optimization_level <= 5:
@@ -90,6 +102,8 @@ def main(argv: list[str] | None = None) -> int:
     gpu = gpu_fingerprint(args.device)
     onnx_sha = sha256_file(onnx_path)
     checkpoint_sha = sha256_file(checkpoint)
+    if (onnx_metadata.get("checkpoint") or {}).get("sha256") != checkpoint_sha:
+        raise ValueError("ONNX metadata checkpoint SHA does not match --checkpoint")
     cache_key = bumi_engine_cache_key(
         onnx_sha256=onnx_sha,
         checkpoint_sha256=checkpoint_sha,
@@ -107,18 +121,14 @@ def main(argv: list[str] | None = None) -> int:
 
     logger = trt.Logger(trt.Logger.INFO)
     builder = trt.Builder(logger)
-    network = builder.create_network(
-        1 << int(trt.NetworkDefinitionCreationFlag.EXPLICIT_BATCH)
-    )
+    network = builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.EXPLICIT_BATCH))
     parser = trt.OnnxParser(network, logger)
     if not parser.parse_from_file(str(onnx_path)):
         errors = [str(parser.get_error(index)) for index in range(parser.num_errors)]
         raise RuntimeError("BUMI TensorRT ONNX parse failed:\n" + "\n".join(errors))
     _network_contract(network, trt)
     config = builder.create_builder_config()
-    config.set_memory_pool_limit(
-        trt.MemoryPoolType.WORKSPACE, int(args.workspace_gib * 1024**3)
-    )
+    config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, int(args.workspace_gib * 1024**3))
     config.builder_optimization_level = int(args.optimization_level)
     if args.precision == "fp16":
         if not builder.platform_has_fast_fp16:
@@ -135,6 +145,7 @@ def main(argv: list[str] | None = None) -> int:
     elapsed = time.perf_counter() - started
     manifest = {
         "contract_version": BUMI_ENGINE_CONTRACT,
+        "representation_contract_version": BUMI_REPRESENTATION_CONTRACT_VERSION,
         "cache_key": cache_key,
         "engine": engine_path.name,
         "engine_sha256": sha256_file(engine_path),

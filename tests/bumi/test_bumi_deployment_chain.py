@@ -18,7 +18,11 @@ import pytest
 import torch
 
 from gem.robots.bumi.endecoder import BumiEndecoder
-from gem.robots.bumi.feature_codec import BUMI_ANCHOR_MODE, BUMI_FEATURE_SLICES
+from gem.robots.bumi.feature_codec import (
+    BUMI_ANCHOR_MODE,
+    BUMI_FEATURE_SLICES,
+    BUMI_REPRESENTATION_CONTRACT_VERSION,
+)
 from gem.robots.bumi.kinematics import BumiKinematics, sha256_file
 from gem.runtime.bumi_gmt_plan import BumiIncrementalGmtPlanBuilder
 from gem.runtime.bumi_music_deploy import BumiSlidingQposGenerator
@@ -34,7 +38,8 @@ from scripts.demo.demo_music_bumi import resolve_world_anchor
 
 def _stats(path: Path, kinematics: BumiKinematics) -> Path:
     payload = {
-        "contract_version": "genmo.bumi_stats.v1",
+        "contract_version": "genmo.bumi_stats.v2",
+        "representation_contract_version": BUMI_REPRESENTATION_CONTRACT_VERSION,
         "robot_name": "bumi",
         "feature_dim": 93,
         "anchor_mode": BUMI_ANCHOR_MODE,
@@ -47,6 +52,17 @@ def _stats(path: Path, kinematics: BumiKinematics) -> Path:
     }
     path.write_text(json.dumps(payload), encoding="utf-8")
     return path
+
+
+def test_old_root_position_stats_are_rejected(test_kinematics_path: Path, tmp_path: Path) -> None:
+    kinematics = BumiKinematics(test_kinematics_path)
+    stats = _stats(tmp_path / "old_stats.json", kinematics)
+    payload = json.loads(stats.read_text(encoding="utf-8"))
+    payload["contract_version"] = "genmo.bumi_stats.v1"
+    payload.pop("representation_contract_version")
+    stats.write_text(json.dumps(payload), encoding="utf-8")
+    with pytest.raises(ValueError, match="contract_version"):
+        BumiEndecoder(test_kinematics_path, stats, enable_contact_targets=False)
 
 
 class _FixedMotionStep:

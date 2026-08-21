@@ -3,10 +3,10 @@
 
 本模块把固定形状的 ``[1,120,93]`` 单步去噪图封装成统一调用接口，并在图外执行
 与训练仓库相同的确定性 DDIM。长音乐严格使用 120 帧窗口、30 帧重叠和 90 帧步长。
-每个窗口按训练时的独立完整 crop 分布生成，随后先把下一窗口的根轨迹刚性对齐到统一
-世界系，再在双侧真实预测的重叠区对根位置和关节执行线性 overlap-add、对根四元数执行
-最短弧 SLERP。融合完成后才重建可发送的连续 qpos chunks，避免把每段首帧 XY/航向角
-锚点不同的局部 93D 特征直接相加，也避免硬历史与首个自由生成帧之间产生周期性接缝。
+每个窗口按训练时的独立完整 crop 分布生成，随后把下一窗口的根旋转对齐到统一轨迹航向，
+在双侧真实预测的重叠区融合世界水平位移、绝对根高和关节，并对根四元数执行最短弧
+SLERP。全部窗口融合后只积分一次水平根位移，再重建可发送的连续 qpos chunks；根位置
+连续性因此来自单一积分链，而不是每个窗口各自积分后再修补位置。
 
 TensorRT 引擎使用独立的 BUMI 指纹合约，缓存键包含 ONNX、checkpoint、TensorRT ABI、
 精度和 GPU 指纹，避免误加载 SMPL 151D 引擎或在不同显卡上复用不兼容 plan。
@@ -26,6 +26,7 @@ import torch
 
 from gem.robots.bumi.endecoder import BumiEndecoder
 from gem.robots.bumi.feature_codec import (
+    BUMI_REPRESENTATION_CONTRACT_VERSION,
     make_quaternion_continuous,
     normalize_quaternion_wxyz,
 )
@@ -44,8 +45,8 @@ from gem.runtime.music_only_trt import (
 from gem.utils.rotation_conversions import quaternion_multiply
 
 BUMI_MOTION_DIM = 93
-BUMI_ENGINE_CONTRACT = "gem_bumi_music_trt_engine_v1"
-BUMI_SLIDING_QPOS_CONTRACT_VERSION = "genmo.bumi_sliding_qpos_overlap_add.v2"
+BUMI_ENGINE_CONTRACT = "gem_bumi_music_trt_engine_v2"
+BUMI_SLIDING_QPOS_CONTRACT_VERSION = "genmo.bumi_sliding_motion_overlap_add.v3"
 
 
 def bumi_engine_cache_key(
@@ -160,6 +161,8 @@ class BumiTensorRTStepRunner(TensorRTStepRunner):
         payload = json.loads(manifest_path.read_text(encoding="utf-8"))
         if payload.get("contract_version") != BUMI_ENGINE_CONTRACT:
             raise RuntimeError("unsupported BUMI TensorRT engine manifest contract")
+        if payload.get("representation_contract_version") != BUMI_REPRESENTATION_CONTRACT_VERSION:
+            raise RuntimeError("BUMI TensorRT engine uses the wrong motion representation")
         if payload.get("engine_sha256") != sha256_file(self.engine_path):
             raise RuntimeError("BUMI TensorRT engine SHA256 does not match its manifest")
         if payload.get("input_shape") != [1, WINDOW_FRAMES, BUMI_MOTION_DIM]:
@@ -247,30 +250,19 @@ def _slerp_wxyz(first: torch.Tensor, second: torch.Tensor, alpha: torch.Tensor) 
     return make_quaternion_continuous(normalize_quaternion_wxyz(result))
 
 
-def _align_qpos_window_to_reference(
+def _align_motion_state_rotation_to_reference(
     candidate: torch.Tensor, reference_first: torch.Tensor
 ) -> torch.Tensor:
-    """用 Z-up 平面刚体变换把候选窗口首帧根位置和 yaw 对齐到世界参考。"""
+    """只对齐候选状态的根 yaw；heading-local 位移无需旋转或平移。"""
 
     if candidate.ndim != 2 or candidate.shape[1] != 28 or len(candidate) <= 0:
-        raise ValueError("candidate qpos window must have shape [T,28] with T > 0")
+        raise ValueError("candidate motion state must have shape [T,28] with T > 0")
     if reference_first.shape != (28,):
         raise ValueError("reference_first must have shape [28]")
     candidate = candidate.clone()
     candidate_quat = normalize_quaternion_wxyz(candidate[:, 3:7])
     reference_quat = normalize_quaternion_wxyz(reference_first[3:7])
     delta_yaw = _yaw_from_wxyz(reference_quat) - _yaw_from_wxyz(candidate_quat[0])
-    cosine = torch.cos(delta_yaw)
-    sine = torch.sin(delta_yaw)
-    relative_position = candidate[:, :3] - candidate[0, :3]
-    rotated_position = torch.stack(
-        (
-            cosine * relative_position[:, 0] - sine * relative_position[:, 1],
-            sine * relative_position[:, 0] + cosine * relative_position[:, 1],
-            relative_position[:, 2],
-        ),
-        dim=-1,
-    )
     half_yaw = delta_yaw * 0.5
     delta_quaternion = torch.stack(
         (
@@ -285,7 +277,7 @@ def _align_qpos_window_to_reference(
     )
     return torch.cat(
         (
-            rotated_position + reference_first[:3],
+            candidate[:, :3],
             make_quaternion_continuous(aligned_quaternion),
             candidate[:, 7:],
         ),
@@ -293,21 +285,55 @@ def _align_qpos_window_to_reference(
     )
 
 
-def _blend_qpos_overlap(previous: torch.Tensor, candidate: torch.Tensor) -> torch.Tensor:
-    """以线性 overlap-add 和四元数 SLERP 融合两个等长世界系 qpos 重叠段。"""
+def _heading_delta_to_world(
+    delta_xy_heading: torch.Tensor, quaternion: torch.Tensor
+) -> torch.Tensor:
+    yaw = _yaw_from_wxyz(quaternion)
+    cosine = torch.cos(yaw)
+    sine = torch.sin(yaw)
+    return torch.stack(
+        (
+            cosine * delta_xy_heading[:, 0] - sine * delta_xy_heading[:, 1],
+            sine * delta_xy_heading[:, 0] + cosine * delta_xy_heading[:, 1],
+        ),
+        dim=-1,
+    )
+
+
+def _world_delta_to_heading(delta_xy_world: torch.Tensor, quaternion: torch.Tensor) -> torch.Tensor:
+    yaw = _yaw_from_wxyz(quaternion)
+    cosine = torch.cos(yaw)
+    sine = torch.sin(yaw)
+    return torch.stack(
+        (
+            cosine * delta_xy_world[:, 0] + sine * delta_xy_world[:, 1],
+            -sine * delta_xy_world[:, 0] + cosine * delta_xy_world[:, 1],
+        ),
+        dim=-1,
+    )
+
+
+def _blend_motion_state_overlap(previous: torch.Tensor, candidate: torch.Tensor) -> torch.Tensor:
+    """融合速度、高度、旋转和关节，不在窗口内独立积分根位置。"""
 
     if previous.shape != candidate.shape or previous.ndim != 2 or previous.shape[1] != 28:
-        raise ValueError("qpos overlap inputs must have the same [T,28] shape")
+        raise ValueError("motion state overlap inputs must have the same [T,28] shape")
     if len(previous) <= 0:
         raise ValueError("qpos overlap must not be empty")
     alpha = (
         torch.arange(1, len(previous) + 1, device=previous.device, dtype=previous.dtype)
         / float(len(previous) + 1)
     ).unsqueeze(-1)
+    blended_quaternion = _slerp_wxyz(previous[:, 3:7], candidate[:, 3:7], alpha)
+    previous_delta_world = _heading_delta_to_world(previous[:, :2], previous[:, 3:7])
+    candidate_delta_world = _heading_delta_to_world(candidate[:, :2], candidate[:, 3:7])
+    blended_delta_world = torch.lerp(previous_delta_world, candidate_delta_world, alpha)
+    blended_delta_heading = _world_delta_to_heading(blended_delta_world, blended_quaternion)
     return torch.cat(
         (
-            torch.lerp(previous[:, :3], candidate[:, :3], alpha),
-            _slerp_wxyz(previous[:, 3:7], candidate[:, 3:7], alpha),
+            blended_delta_heading,
+            torch.lerp(previous[:, 2:3], candidate[:, 2:3], alpha),
+            blended_quaternion,
             torch.lerp(previous[:, 7:], candidate[:, 7:], alpha),
         ),
         dim=-1,
@@ -315,7 +341,7 @@ def _blend_qpos_overlap(previous: torch.Tensor, candidate: torch.Tensor) -> torc
 
 
 class BumiSlidingQposGenerator:
-    """把独立 120 帧预测用 30 帧几何感知 overlap-add 融合为世界系 qpos28。"""
+    """融合独立 120 帧预测，并对最终水平根位移统一积分一次。"""
 
     def __init__(
         self,
@@ -359,15 +385,25 @@ class BumiSlidingQposGenerator:
     def _verify_alignment(
         self, reference_first: torch.Tensor, candidate_first: torch.Tensor, window_index: int
     ) -> None:
-        position_delta = (reference_first[:3] - candidate_first[:3]).abs().amax()
         yaw_delta = _yaw_from_wxyz(reference_first[3:7]) - _yaw_from_wxyz(candidate_first[3:7])
         yaw_delta = torch.atan2(torch.sin(yaw_delta), torch.cos(yaw_delta)).abs()
-        if float(position_delta) > self.overlap_atol or float(yaw_delta) > self.overlap_atol:
+        if float(yaw_delta) > self.overlap_atol:
             raise RuntimeError(
-                "BUMI sliding world alignment failed at window "
-                f"{window_index}: position_max={float(position_delta):.6g}, "
-                f"yaw_abs={float(yaw_delta):.6g}"
+                "BUMI sliding rotation alignment failed at window "
+                f"{window_index}: yaw_abs={float(yaw_delta):.6g}"
             )
+
+    @staticmethod
+    def _motion_state(decoded: dict[str, torch.Tensor]) -> torch.Tensor:
+        return torch.cat(
+            (
+                decoded["root_delta_xy_heading"],
+                decoded["root_height_offset"],
+                decoded["root_rot_local_quat"],
+                decoded["joint_dof"],
+            ),
+            dim=-1,
+        )
 
     @torch.inference_mode()
     def generate(self, music: torch.Tensor, *, seed: int = 42) -> BumiSlidingResult:
@@ -379,7 +415,7 @@ class BumiSlidingQposGenerator:
         if not bool(torch.isfinite(features).all()):
             raise ValueError("music contains NaN or Inf")
         total_frames = len(features)
-        stitched: torch.Tensor | None = None
+        stitched_state: torch.Tensor | None = None
         windows = plan_sliding_windows(total_frames)
         for window in windows:
             normalized = self.generator.generate_window(
@@ -389,38 +425,49 @@ class BumiSlidingQposGenerator:
                 known_x0=None,
             )[: window.valid_length]
             decoded = self.endecoder.decode(normalized)
-            canonical_window = self.endecoder.compose_qpos(decoded)
-            if stitched is None:
-                stitched = self.endecoder.compose_qpos(decoded, world_anchor=self._anchor_for(None))
+            candidate_state = self._motion_state(decoded)
+            if stitched_state is None:
+                stitched_state = candidate_state
                 continue
             if window.known_length != OVERLAP_FRAMES:
                 raise RuntimeError("BUMI sliding window must have a full 30-frame overlap")
             overlap_end = window.start + window.known_length
-            if overlap_end != len(stitched):
+            if overlap_end != len(stitched_state):
                 raise RuntimeError("BUMI stitched timeline does not end at the overlap boundary")
-            world_window = _align_qpos_window_to_reference(canonical_window, stitched[window.start])
-            self._verify_alignment(stitched[window.start], world_window[0], window.index)
-            blended_overlap = _blend_qpos_overlap(
-                stitched[window.start : overlap_end],
-                world_window[: window.known_length],
+            aligned_state = _align_motion_state_rotation_to_reference(
+                candidate_state, stitched_state[window.start]
             )
-            stitched = torch.cat(
+            self._verify_alignment(stitched_state[window.start], aligned_state[0], window.index)
+            blended_overlap = _blend_motion_state_overlap(
+                stitched_state[window.start : overlap_end],
+                aligned_state[: window.known_length],
+            )
+            stitched_state = torch.cat(
                 (
-                    stitched[: window.start],
+                    stitched_state[: window.start],
                     blended_overlap,
-                    world_window[window.known_length :],
+                    aligned_state[window.known_length :],
                 ),
                 dim=0,
             )
-        if stitched is None or len(stitched) != total_frames:
+        if stitched_state is None or len(stitched_state) != total_frames:
             raise RuntimeError("BUMI sliding generation did not cover the requested timeline")
-        stitched = torch.cat(
+        stitched_state = torch.cat(
             (
-                stitched[:, :3],
-                make_quaternion_continuous(stitched[:, 3:7]),
-                stitched[:, 7:],
+                stitched_state[:, :3],
+                make_quaternion_continuous(stitched_state[:, 3:7]),
+                stitched_state[:, 7:],
             ),
             dim=-1,
+        ).contiguous()
+        stitched = self.endecoder.compose_qpos(
+            {
+                "root_delta_xy_heading": stitched_state[:, :2],
+                "root_height_offset": stitched_state[:, 2:3],
+                "root_rot_local_quat": stitched_state[:, 3:7],
+                "joint_dof": stitched_state[:, 7:],
+            },
+            world_anchor=self._anchor_for(None),
         ).contiguous()
         chunks: list[BumiGeneratedChunk] = []
         for window in windows:

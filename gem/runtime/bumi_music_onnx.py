@@ -14,7 +14,9 @@ from typing import Any
 import torch
 import torch.nn as nn
 
-BUMI_ONNX_CONTRACT_VERSION = "genmo.bumi_music_guided_denoiser_step.v1"
+from gem.robots.bumi.feature_codec import BUMI_REPRESENTATION_CONTRACT_VERSION
+
+BUMI_ONNX_CONTRACT_VERSION = "genmo.bumi_music_guided_denoiser_step.v2"
 BUMI_MOTION_FEATURE_DIM = 93
 MUSIC_FEATURE_DIM = 35
 
@@ -29,23 +31,19 @@ def validate_bumi_checkpoint_state_dict(
     music = {
         str(key): list(value.shape)
         for key, value in state_dict.items()
-        if str(key).endswith("music_embedder.fc1.weight")
-        and isinstance(value, torch.Tensor)
+        if str(key).endswith("music_embedder.fc1.weight") and isinstance(value, torch.Tensor)
     }
     final = {
         str(key): list(value.shape)
         for key, value in state_dict.items()
-        if str(key).endswith("denoiser.final_layer.fc2.weight")
-        and isinstance(value, torch.Tensor)
+        if str(key).endswith("denoiser.final_layer.fc2.weight") and isinstance(value, torch.Tensor)
     }
     if len(music) != 1 or next(iter(music.values()))[-1] != MUSIC_FEATURE_DIM:
         raise ValueError(
             f"checkpoint must contain exactly one EDGE35 music fc1 weight; got {music}"
         )
     if len(final) != 1 or next(iter(final.values()))[0] != BUMI_MOTION_FEATURE_DIM:
-        raise ValueError(
-            f"checkpoint must contain exactly one 93D final fc2 weight; got {final}"
-        )
+        raise ValueError(f"checkpoint must contain exactly one 93D final fc2 weight; got {final}")
     forbidden = sorted(
         str(key)
         for key in state_dict
@@ -67,8 +65,7 @@ def validate_bumi_music_export_model(model: nn.Module) -> None:
     in_attr = list(model.pipeline.args.in_attr)
     if in_attr != ["encoded_music"]:
         raise RuntimeError(
-            "BUMI ONNX export requires pipeline.args.in_attr == "
-            f"['encoded_music']; got {in_attr}"
+            f"BUMI ONNX export requires pipeline.args.in_attr == ['encoded_music']; got {in_attr}"
         )
     if not hasattr(model, "music_embedder"):
         raise RuntimeError("BUMI music-only model has no music_embedder")
@@ -89,6 +86,14 @@ def validate_bumi_music_export_model(model: nn.Module) -> None:
     endecoder = getattr(model, "endecoder", None)
     if int(getattr(endecoder, "feat_dim", -1)) != BUMI_MOTION_FEATURE_DIM:
         raise RuntimeError("BUMI ONNX export requires the authoritative 93-D Endecoder")
+    if (
+        str(getattr(endecoder, "representation_contract_version", ""))
+        != BUMI_REPRESENTATION_CONTRACT_VERSION
+    ):
+        raise RuntimeError(
+            "BUMI ONNX export requires representation contract "
+            f"{BUMI_REPRESENTATION_CONTRACT_VERSION!r}"
+        )
 
     first_music_linear = next(
         (module for module in model.music_embedder.modules() if isinstance(module, nn.Linear)),
@@ -130,12 +135,8 @@ class BumiMusicGuidedDenoiser(nn.Module):
         if self.use_condition_exists:
             ones = torch.ones_like(conditional[..., :1])
             zeros = torch.zeros_like(conditional[..., :1])
-            conditional = self.music_exists_embedder(
-                torch.cat((conditional, ones), dim=-1)
-            )
-            unconditional = self.music_exists_embedder(
-                torch.cat((unconditional, zeros), dim=-1)
-            )
+            conditional = self.music_exists_embedder(torch.cat((conditional, ones), dim=-1))
+            unconditional = self.music_exists_embedder(torch.cat((unconditional, zeros), dim=-1))
         return conditional, unconditional
 
     def forward(
@@ -204,8 +205,7 @@ def make_bumi_onnx_inputs(
     length = torch.tensor([frames], dtype=torch.long)
     scale = scale_value.reshape(1)
     return tuple(
-        value.to(device)
-        for value in (noisy_motion, timestep_tensor, music.float(), length, scale)
+        value.to(device) for value in (noisy_motion, timestep_tensor, music.float(), length, scale)
     )
 
 

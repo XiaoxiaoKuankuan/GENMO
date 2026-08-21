@@ -95,9 +95,7 @@ def load_export_music(path: Path | None, seq_len: int) -> torch.Tensor:
 
 def checkpoint_summary(path: Path) -> dict[str, Any]:
     try:
-        checkpoint = torch.load(
-            path, map_location="cpu", mmap=True, weights_only=False
-        )
+        checkpoint = torch.load(path, map_location="cpu", mmap=True, weights_only=False)
     except TypeError:
         checkpoint = torch.load(path, map_location="cpu")
     try:
@@ -212,6 +210,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     metadata = {
         "contract_version": BUMI_ONNX_CONTRACT_VERSION,
+        "representation_contract_version": model.endecoder.representation_contract_version,
         "checkpoint": ckpt_info,
         "experiment": args.exp,
         "sequence_length": args.seq_len,

@@ -4,6 +4,9 @@
 
 本文说明 BUMI-GENMO 的**方法、表示、训练目标和整体框架**。它回答的是“模型在学什么、为什么这样设计、输入怎样变成机器人动作”，而不是逐个解释源码文件、类或命令。
 
+本文按当前 `genmo.bumi_motion_features.v2` 表示说明。旧 `s430000` 使用绝对
+`root_pos_local` v1，虽然同为 93D，也不能与本文的数据语义混用。
+
 工程实现、数据契约、部署命令和当前训练状态另见 [BUMI-native Music-only GENMO 工程说明](bumi_native_music_genmo.md)。
 
 ## 1. 方法目标
@@ -143,18 +146,20 @@ BumiMusicDanceDataset
 2. 单独监督关节角并不能直接告诉网络手、脚和躯干在空间中的几何结果。
 3. 数据中的世界平移和绝对朝向与舞蹈内容无关，会浪费模型容量。
 
-因此采用 93D 冗余表示：
+因此采用 v2 93D 冗余表示：
 
 ```text
-x_t = [p_t^local, r_t^6D, θ_t, b_t,1^local, ..., b_t,21^local]
+x_t = [Δp_t,xy^heading, z_t-z_default, r_t^6D, θ_t,
+       b_t,1^root, ..., b_t,21^root]
 ```
 
 | 分量 | 维度 | 作用 |
 |---|---:|---|
-| Root 局部位置 | 3 | 表示机器人整体轨迹和高度 |
+| Root heading-local 水平增量 | 2 | 表示逐帧水平运动，整段只积分一次 |
+| Root 高度偏移 | 1 | 每帧直接表示 `z-z_default`，不积分 Z |
 | Root 局部旋转 rot6d | 6 | 连续地表示完整 root 姿态 |
 | 21 个关节角 | 21 | 决定机器人的可执行构型 |
-| 21 个 link 局部位置 | 63 | 直接提供身体几何监督 |
+| 21 个 root-relative link 位置 | 63 | 直接提供姿态几何监督，不重复携带轨迹 |
 | 合计 | 93 | 扩散模型的输入和输出维度 |
 
 rot6d 解码为旋转矩阵后再转为单位四元数，所以最终 qpos 仍是 28 维：
@@ -165,7 +170,9 @@ rot6d 解码为旋转矩阵后再转为单位四元数，所以最终 qpos 仍�
 3 + 4 + 21 = 28D qpos
 ```
 
-后 63D 是“冗余但有用”的辅助表示。它让网络不仅拟合角度，还显式理解角度造成的身体空间位置；同时 FK 一致性损失约束它不能与前 30D 描述出两副互相矛盾的身体。
+后 63D 是“冗余但有用”的辅助表示。它让网络不仅拟合角度，还显式理解角度造成的身体
+几何；逐帧 root-relative 坐标去除了整段平移和朝向，避免辅助通道与水平积分轨迹重复。
+FK 一致性损失约束它不能与前 30D 描述出两副互相矛盾的身体。
 
 ## 6. First-frame canonicalization
 
@@ -183,12 +190,13 @@ rot6d 解码为旋转矩阵后再转为单位四元数，所以最终 qpos 仍�
 - `z_default` 为 BUMI 默认 root 高度；
 - `a = [p_0.x, p_0.y, z_default]` 为 anchor。
 
-局部 root 和 link 位置定义为：
+局部旋转、水平增量、高度和 link 位置定义为：
 
 ```text
-p_t^local   = H_0^-1 (p_t - a)
 R_t^local   = H_0^-1 R_t
-b_t,j^local = H_0^-1 (b_t,j - a)
+Δp_t,xy^heading = Heading(R_t^local)^-1 (p_t+1.xy - p_t.xy)
+h_t         = p_t.z - z_default
+b_t,j^root  = R_t^-1 (b_t,j - p_t)
 ```
 
 这里的 `b_t,j` 是从 qpos 经过 BUMI FK 得到的第 `j` 个驱动链节位置。
@@ -199,20 +207,27 @@ b_t,j^local = H_0^-1 (b_t,j - a)
 - 第一帧 yaw 被归零；
 - root 高度相对于默认站姿高度保留；
 - root roll、pitch 保留；
-- 后续水平位移和旋转变化完整保留。
+- 后续水平运动以当前 heading 下的米/帧增量保留；
+- link 辅助几何相对于每帧 root 表示，不携带世界轨迹。
 
 所以 canonicalization 不是把机器人强行摆成标准站姿，而是删除与舞蹈内容无关的“场地位置和初始朝向”。
 
 ### 6.3 canonical 与 world qpos
 
-模型天然生成 canonical qpos。若指定世界 anchor `(x, y, yaw)`，则可确定性地把局部轨迹旋转和平移回世界坐标：
+模型先生成 canonical motion。解码令 `p_0.xy=[0,0]`，只对水平增量积分，Z 每帧直接取
+`h_t`。若指定世界 anchor `(x, y, yaw)`，则可确定性地把局部轨迹旋转和平移回世界坐标：
 
 ```text
-p_t^world = H_world p_t^local + a_world
+p_t+1^local.xy = p_t^local.xy
+                 + Heading(R_t^local) Δp_t,xy^heading
+p_t^local.z = h_t
+p_t^world = H_world p_t^local + [x, y, z_default]
 R_t^world = H_world R_t^local
 ```
 
-这一步只改变整段舞蹈放在哪里、朝向哪里，不改变关节动作本身。
+这一步只改变整段舞蹈放在哪里、朝向哪里，不改变关节动作本身。GMT 不需要提供地图全局
+XY；默认局部原点就是 `[0,0]`。只积分水平运动避免分块位置重置，而保留绝对高度避免完整
+XYZ 速度积分的长期上浮/下沉。
 
 ## 7. 归一化与统计量
 
@@ -297,7 +312,7 @@ x0_cfg = x0_uncond + s (x0_cond - x0_uncond)
 93D 被分成四组，每组都在 normalized 空间使用 MSE，权重均为 1：
 
 ```text
-L_repr = L_root-pos + L_root-rot6d + L_joint + L_body-position
+L_repr = L_root-motion + L_root-rot6d + L_joint + L_body-position
 ```
 
 分组而不是整段 93D 一次平均，是为了避免 63 维 link position 仅凭维度数量压过 root 和关节分量。
@@ -306,7 +321,7 @@ L_repr = L_root-pos + L_root-rot6d + L_joint + L_body-position
 
 | 目标 | 含义 | 归一化尺度 | 权重 |
 |---|---|---:|---:|
-| Root 位置 | 匹配 GT 整体轨迹 | 1 m | 0.1 |
+| Root 位置 | 对水平增量积分后匹配 GT 整体轨迹，并直接匹配高度 | 1 m | 0.1 |
 | Root SO(3) | 匹配完整 root 姿态的测地角 | π | 0.1 |
 | 关节角 | 匹配 21 个机器人关节 | 1 rad | 0.1 |
 | FK body position | 由预测 qpos 做 FK 后匹配 GT 几何 | 1 m | 0.5 |
@@ -461,7 +476,8 @@ BUMI-native 的主要意义不是“模型更大”，而是把生成目标从�
 - 精确脚接触、零滑步和鞋底不穿地；
 - 自碰撞和环境碰撞；
 - GMT 对所有生成动作的稳定跟踪；
-- 任意长度流式生成的窗口边界质量；
+- 任意长度运行时已经从结构上消除水平根位置分块重置，但 v2 重训模型的窗口边界速度、
+  根旋转和关节质量仍需用新 checkpoint 实测；
 - 对未见音乐风格的强泛化。
 
 此外，模型会学习离线 GMR 中系统性的优点和缺陷。若教师轨迹包含扭曲姿态、异常 root 或不自然动作，数据筛选只能减少问题，不能从理论上完全消除它们。
@@ -471,7 +487,8 @@ BUMI-native 的主要意义不是“模型更大”，而是把生成目标从�
 可以把整个方法记成四句话：
 
 1. **数据层**：先把人体舞蹈离线变成经过筛选的 BUMI 教师轨迹，并与音乐逐帧配对。
-2. **表示层**：把 qpos 变成去掉初始位置/yaw、同时包含关节与 FK 几何的 normalized 93D。
+2. **表示层**：把 qpos 变成 heading-local 水平增量、绝对高度偏移、局部旋转、关节和
+   root-relative FK 几何组成的 normalized 93D。
 3. **生成层**：用音乐条件 RoPE 扩散 Transformer 从噪声恢复完整 93D 动作窗口。
 4. **机器人层**：只用预测 root 和关节组成 qpos28，再通过绑定 BUMI 资产的 FK 得到唯一可信的机器人几何。
 
