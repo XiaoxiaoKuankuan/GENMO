@@ -1,0 +1,23 @@
+# 自建 BUMI 音乐动作训练集配置。
+#
+# 本配置只接受已经发布为 ``genmo.bumi_music.v1`` 的正式数据根，不能直接读取
+# ``data/motions_npz_bumi3_smooth_q1/mine`` 中的 CSV/WAV。发布前需完成 CSV 的
+# xyzw→wxyz 四元数重排、50→30 Hz 重采样、逐序列地面高度归一化、WAV 的
+# EDGE35 提取、qpos/音乐严格等长、质量筛选、manifest/meta/SHA 生成。当前约定的
+# train manifest 含 99 条：排除时长相差约 60 秒的 APT啦啦操，其余尾部按共同有效
+# 时长裁齐。训练仍使用与 smooth_q1 auto025 四库一致的 0.25 rad reader 容差。
+mine_bumi_train:
+  _target_: gem.datasets.music_dance.music_dance_bumi.BumiMusicDanceDataset
+  root: ${oc.env:MINE_BUMI_ROOT}
+  dataset_name: mine_bumi
+  kinematics_path: ${oc.env:BUMI_KINEMATICS_PATH}
+  split: train
+  motion_frames: 120
+  duration_aware_sampling: false
+  strict_alignment: true
+  strict_contract: true
+  require_quality_filter: true
+  validate_payloads_on_init: false
+  validate_source_hashes_on_init: false
+  random_crop: false
+  joint_limit_tolerance: 0.25

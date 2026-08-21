@@ -1,0 +1,45 @@
+# @package _global_
+# 自建 99 条 BUMI 音乐动作与 smooth_q1 auto025 正式四库联合训练配置。
+#
+# 本入口继承四库 random-init、93D repr_v2、physical_v1、500k steps 和 8-GPU DDP
+# 训练契约，只扩展第五个 ``mine_bumi`` reader。自建数据仅约 1.40 小时，顶层权重
+# 固定为 5%，其余四库按原 30/50/17/3 比例近似缩放，避免小库重复过拟合。
+# ``BUMI_MUSIC_STATS_PATH`` 必须指向用五个 train manifest 联合重算的统计量；旧四库
+# stats 的 fingerprint 集合不含 mine_bumi，DataModule 会在训练启动前明确拒绝。
+defaults:
+  - gem_bumi_music_only_4set_smooth_q1_auto025_v1
+  - override /train_datasets:
+      - aistpp_bumi_balanced_train
+      - aioz_gdance_bumi_balanced_train
+      - finedance_bumi_balanced_train
+      - compas3d_bumi_balanced_train
+      - mine_bumi_balanced_train
+  - _self_
+
+exp_name_base: gem_bumi_music_only_5set_mine_v1_repr_v2
+exp_name_var: ""
+exp_name: ${exp_name_base}${exp_name_var}
+data_name: gem_bumi_music_only_5set_mine_v1
+output_dir: outputs/${exp_name}
+
+data:
+  expected_train_sequences: 2722
+  dataset_probability_min: 0.03
+  dataset_sampling_weights:
+    aistpp_bumi: 0.29
+    aioz_gdance_bumi: 0.47
+    finedance_bumi: 0.16
+    compas3d_bumi: 0.03
+    mine_bumi: 0.05
+
+train_datasets:
+  aistpp_bumi_train:
+    joint_limit_tolerance: 0.25
+  aioz_gdance_bumi_train:
+    joint_limit_tolerance: 0.25
+  finedance_bumi_train:
+    joint_limit_tolerance: 0.25
+  compas3d_bumi_train:
+    joint_limit_tolerance: 0.25
+  mine_bumi_train:
+    joint_limit_tolerance: 0.25

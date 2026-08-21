@@ -3,6 +3,8 @@ from __future__ import annotations
 from pathlib import Path
 
 import yaml
+from hydra import compose, initialize_config_dir
+from omegaconf import OmegaConf
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
@@ -79,3 +81,35 @@ def test_random_v1_disables_ground_contact_and_uses_balanced_sampling() -> None:
     assert experiment["data"]["expected_train_sequences"] == 5537
     assert experiment["pl_trainer"]["max_steps"] == 500000
     assert experiment["pl_trainer"]["devices"] == 8
+
+
+def test_mine_five_dataset_config_composes_with_exact_training_contract() -> None:
+    with initialize_config_dir(version_base="1.3", config_dir=str(REPO_ROOT / "configs")):
+        config = compose(
+            config_name="train", overrides=["exp=gem_bumi_music_only_5set_mine_v1"]
+        )
+
+    assert list(config.train_datasets) == [
+        "aistpp_bumi_train",
+        "aioz_gdance_bumi_train",
+        "finedance_bumi_train",
+        "compas3d_bumi_train",
+        "mine_bumi_train",
+    ]
+    mine_config = OmegaConf.to_container(
+        config.train_datasets.mine_bumi_train, resolve=False
+    )
+    assert mine_config["root"] == "${oc.env:MINE_BUMI_ROOT}"
+    assert config.train_datasets.mine_bumi_train.dataset_name == "mine_bumi"
+    assert all(
+        value.joint_limit_tolerance == 0.25 for value in config.train_datasets.values()
+    )
+    assert config.data.expected_train_sequences == 2623 + 99
+    assert dict(config.data.dataset_sampling_weights) == {
+        "aistpp_bumi": 0.29,
+        "aioz_gdance_bumi": 0.47,
+        "finedance_bumi": 0.16,
+        "compas3d_bumi": 0.03,
+        "mine_bumi": 0.05,
+    }
+    assert sum(config.data.dataset_sampling_weights.values()) == 1.0
