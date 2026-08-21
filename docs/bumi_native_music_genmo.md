@@ -180,7 +180,7 @@ root linear/angular velocity 异常、持续或碎片化贴地动作，以及低
 p_anchor = [p0.x, p0.y, z_default]
 root_rot_local[t] = H0^-1 q[t]
 root_height_offset[t] = p[t].z - z_default
-root_delta_xy_heading[t] = Heading(root_rot_local[t])^-1 (p[t+1].xy - p[t].xy)
+root_delta_xy_heading[t] = Heading(q[t])^-1 (p[t+1] - p[t]).xy
 body_link_pos_root[t,j] = q[t]^-1 (body_pos_w[t,j] - p[t])
 ```
 

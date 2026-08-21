@@ -194,7 +194,7 @@ FK 一致性损失约束它不能与前 30D 描述出两副互相矛盾的身体
 
 ```text
 R_t^local   = H_0^-1 R_t
-Δp_t,xy^heading = Heading(R_t^local)^-1 (p_t+1.xy - p_t.xy)
+Δp_t,xy^heading = Heading(R_t)^-1 (p_t+1 - p_t).xy
 h_t         = p_t.z - z_default
 b_t,j^root  = R_t^-1 (b_t,j - p_t)
 ```
