@@ -1,13 +1,19 @@
 #!/usr/bin/env python3
-"""Offline MuJoCo rendering of a BUMI qpos28 artifact (kinematics only)."""
+"""离线渲染 BUMI qpos28 轨迹（仅运动学，不执行动力学仿真）。
+
+工具严格校验轨迹的机器人标识、四元数约定、MuJoCo 原生关节顺序和 30 Hz 帧率，
+再逐帧执行 ``mj_forward`` 并写入 H.264 视频。视频帧采用流式编码，避免完整音乐对应的
+数千帧 RGB 图像同时驻留内存；因此既适合短片验证，也适合数分钟完整音频的批量评测。
+"""
 
 from __future__ import annotations
 
 import argparse
+import shutil
+import subprocess
 from pathlib import Path
 from typing import Any
 
-import imageio.v3 as iio
 import mujoco
 import numpy as np
 import torch
@@ -81,20 +87,68 @@ def main() -> None:
         )
     data = mujoco.MjData(model)
     renderer = mujoco.Renderer(model, height=args.height, width=args.width)
-    frames = []
     camera: str | int = -1 if args.camera is None else args.camera
+    output = args.output.expanduser().resolve()
+    output.parent.mkdir(parents=True, exist_ok=True)
+    ffmpeg = shutil.which("ffmpeg")
+    if ffmpeg is None:
+        raise RuntimeError("BUMI 视频渲染需要 ffmpeg")
+    encoder = subprocess.Popen(
+        [
+            ffmpeg,
+            "-y",
+            "-loglevel",
+            "error",
+            "-f",
+            "rawvideo",
+            "-pixel_format",
+            "rgb24",
+            "-video_size",
+            f"{args.width}x{args.height}",
+            "-framerate",
+            str(fps),
+            "-i",
+            "-",
+            "-an",
+            "-c:v",
+            "libx264",
+            "-pix_fmt",
+            "yuv420p",
+            str(output),
+        ],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
+    )
+    rendered_frames = 0
     try:
+        assert encoder.stdin is not None
         for frame_qpos in qpos:
             data.qpos[:] = frame_qpos
             mujoco.mj_forward(model, data)
             renderer.update_scene(data, camera=camera)
-            frames.append(renderer.render().copy())
+            frame = np.ascontiguousarray(renderer.render(), dtype=np.uint8)
+            if frame.shape != (args.height, args.width, 3):
+                raise RuntimeError(f"MuJoCo 返回了异常画面形状：{frame.shape}")
+            encoder.stdin.write(frame.tobytes())
+            rendered_frames += 1
+        encoder.stdin.close()
+        assert encoder.stderr is not None
+        error_text = encoder.stderr.read().decode("utf-8", errors="replace").strip()
+        returncode = encoder.wait()
+        if returncode != 0:
+            raise RuntimeError(f"ffmpeg 编码失败（{returncode}）：{error_text}")
+    except BaseException:
+        if encoder.stdin is not None and not encoder.stdin.closed:
+            encoder.stdin.close()
+        if encoder.poll() is None:
+            encoder.terminate()
+            encoder.wait()
+        output.unlink(missing_ok=True)
+        raise
     finally:
         renderer.close()
-    output = args.output.expanduser().resolve()
-    output.parent.mkdir(parents=True, exist_ok=True)
-    iio.imwrite(output, np.stack(frames), fps=fps, codec="libx264")
-    print(f"Rendered {len(frames)} frames to {output}")
+    print(f"Rendered {rendered_frames} frames to {output}")
 
 
 if __name__ == "__main__":

@@ -1,0 +1,869 @@
+#!/usr/bin/env python3
+"""批量验证四数据集人工高质量动作对应的完整音乐生成效果。
+
+本工具把人工评分、长音乐生成、BUMI 世界系轨迹、MuJoCo 视频和质量审计串成一个可恢复的
+离线流程。它只选择四张评分 CSV 中 ``score=1`` 的动作，再按数据集规则映射到音频并去重；
+每首音频保留全部对应的高质量动作名称，方便从页面和 JSON 追溯选择依据。生成阶段复用一次
+固定 120 帧的 BUMI ONNX 会话，通过 120/30 滑窗覆盖任意完整音频，输出连续世界系 qpos28。
+
+质量报告同时给出严格 XML 原始限位和部署容差后的限位结果。每个超限关节都记录 0/1 基编号、
+名称、方向、最大超限弧度、发生帧、实际值、XML 边界和超限帧数；另外保留脚部穿地、根节点
+倾斜、速度和节拍对齐等运动学指标。最终 ``index.html`` 按 FineDance、CoMPAS3D、
+AIOZ-GDance、AIST++ 分组展示带声音视频及逐关节统计。该评测不执行 GMT，也不代表真实机器人
+动力学可跟踪性。中断后再次运行会复用身份一致且已通过媒体校验的正式结果。
+"""
+
+from __future__ import annotations
+
+import argparse
+import csv
+import hashlib
+import html
+import json
+import math
+import re
+import subprocess
+import sys
+import time
+from collections import defaultdict
+from pathlib import Path
+from typing import Any
+
+import numpy as np
+import torch
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+from gem.robots.bumi.endecoder import BumiEndecoder  # noqa: E402
+from gem.robots.bumi.metrics import (  # noqa: E402
+    compute_bumi_kinematic_metrics,
+    metrics_to_json,
+)
+from gem.runtime.bumi_music_deploy import (  # noqa: E402
+    BumiOrtStepRunner,
+    BumiSlidingQposGenerator,
+)
+from gem.runtime.bumi_music_onnx import BUMI_ONNX_CONTRACT_VERSION  # noqa: E402
+from gem.utils.music_features import extract_edge_baseline35  # noqa: E402
+
+DATASETS = (
+    ("finedance", "FineDance", "bumi3_finedance_ratings.csv"),
+    ("compas3d", "CoMPAS3D", "bumi3_compas3d_ratings.csv"),
+    ("aioz_gdance", "AIOZ-GDance", "bumi3_aioz_gdance.csv"),
+    ("aistpp", "AIST++", "bumi3_aistpp_ratings.csv"),
+)
+DATASET_LABELS = {key: label for key, label, _ in DATASETS}
+RATING_COLUMNS = ("motion_name", "score")
+
+
+def sha256_file(path: Path, block_size: int = 16 * 1024 * 1024) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        while block := stream.read(block_size):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def atomic_json(path: Path, value: Any) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_suffix(path.suffix + ".tmp")
+    temporary.write_text(json.dumps(value, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    temporary.replace(path)
+
+
+def audio_key_for_motion(dataset: str, motion_name: str) -> str:
+    """把四库动作文件名严格映射到共享音频键。"""
+
+    if Path(motion_name).name != motion_name or not motion_name.endswith(".npz"):
+        raise ValueError(f"{dataset}: 非法动作文件名 {motion_name!r}")
+    if dataset == "finedance":
+        return Path(motion_name).stem
+    if dataset == "compas3d":
+        match = re.fullmatch(r"(.+)_(?:leader|follower)\.npz", motion_name)
+    elif dataset == "aioz_gdance":
+        match = re.fullmatch(r"(.+)_dancer_\d+\.npz", motion_name)
+    elif dataset == "aistpp":
+        match = re.search(r"_(m[A-Z]{2}\d)_", motion_name)
+    else:
+        raise ValueError(f"不支持的数据集：{dataset}")
+    if match is None:
+        raise ValueError(f"{dataset}: 无法从动作名映射音频 {motion_name!r}")
+    return match.group(1)
+
+
+def audio_path_for_key(audio_root: Path, dataset: str, audio_key: str) -> Path:
+    relative = (
+        Path("aistpp") / "wav" / f"{audio_key}.wav"
+        if dataset == "aistpp"
+        else Path(dataset) / f"{audio_key}.wav"
+    )
+    return (audio_root / relative).resolve()
+
+
+def select_hq_audio(
+    ratings_root: Path, audio_root: Path, *, per_dataset: int
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """读取 score=1，按音频去重并返回每库固定数量的可追溯选择。"""
+
+    if per_dataset <= 0:
+        raise ValueError("per_dataset 必须为正整数")
+    selected: list[dict[str, Any]] = []
+    dataset_summary: dict[str, Any] = {}
+    for dataset, label, filename in DATASETS:
+        path = (ratings_root / filename).resolve(strict=True)
+        grouped: dict[str, list[str]] = defaultdict(list)
+        total_rows = 0
+        high_quality_rows = 0
+        with path.open(newline="", encoding="utf-8-sig") as stream:
+            reader = csv.DictReader(stream)
+            if tuple(reader.fieldnames or ()) != RATING_COLUMNS:
+                raise ValueError(
+                    f"{path}: CSV 列必须严格为 {RATING_COLUMNS}，实际为 {reader.fieldnames}"
+                )
+            seen: set[str] = set()
+            for line_number, row in enumerate(reader, start=2):
+                total_rows += 1
+                motion_name = str(row["motion_name"]).strip()
+                if motion_name in seen:
+                    raise ValueError(f"{path}:{line_number}: 动作名重复 {motion_name!r}")
+                seen.add(motion_name)
+                try:
+                    score = int(str(row["score"]).strip())
+                except ValueError as exc:
+                    raise ValueError(f"{path}:{line_number}: score 不是整数") from exc
+                if score != 1:
+                    continue
+                high_quality_rows += 1
+                grouped[audio_key_for_motion(dataset, motion_name)].append(motion_name)
+
+        available: list[dict[str, Any]] = []
+        missing: list[str] = []
+        for audio_key in sorted(grouped):
+            audio_path = audio_path_for_key(audio_root, dataset, audio_key)
+            if not audio_path.is_file():
+                missing.append(str(audio_path))
+                continue
+            names = sorted(grouped[audio_key])
+            available.append(
+                {
+                    "dataset": dataset,
+                    "dataset_label": label,
+                    "audio_key": audio_key,
+                    "audio": str(audio_path),
+                    "representative_motion": names[0],
+                    "high_quality_motion_count": len(names),
+                    "high_quality_motion_names": names,
+                }
+            )
+        chosen_count = min(per_dataset, len(available))
+        if chosen_count <= 1:
+            chosen = available[:chosen_count]
+        else:
+            # 均匀覆盖完整音频键列表，避免字典序前十首集中在同一舞种或同一 Pair。
+            positions = [
+                round(index * (len(available) - 1) / (chosen_count - 1))
+                for index in range(chosen_count)
+            ]
+            chosen = [available[position] for position in positions]
+        selected.extend(chosen)
+        dataset_summary[dataset] = {
+            "dataset_label": label,
+            "rating_rows": total_rows,
+            "score_1_action_count": high_quality_rows,
+            "distinct_score_1_audio_count": len(grouped),
+            "available_score_1_audio_count": len(available),
+            "missing_audio_count": len(missing),
+            "missing_audio_examples": missing[:10],
+            "selected_audio_count": len(chosen),
+        }
+    return selected, dataset_summary
+
+
+def analyze_joint_limits(
+    qpos: torch.Tensor | np.ndarray,
+    kinematics: Any,
+    *,
+    tolerance_rad: float,
+) -> dict[str, Any]:
+    """逐关节审计严格 XML 超限和部署容差后的超限。"""
+
+    if not math.isfinite(tolerance_rad) or tolerance_rad < 0.0:
+        raise ValueError("tolerance_rad 必须是有限非负数")
+    values = np.asarray(torch.as_tensor(qpos).detach().cpu(), dtype=np.float64)
+    if values.ndim != 2 or values.shape[1] != 28 or len(values) <= 0:
+        raise ValueError(f"qpos 必须为 [T,28]，实际为 {values.shape}")
+    if not np.isfinite(values).all():
+        raise ValueError("qpos 包含 NaN/Inf")
+    lower = np.asarray(kinematics.joint_lower_limits.detach().cpu(), dtype=np.float64)
+    upper = np.asarray(kinematics.joint_upper_limits.detach().cpu(), dtype=np.float64)
+    names = tuple(map(str, kinematics.joint_order))
+    joints = values[:, 7:]
+    lower_excess = lower[None, :] - joints
+    upper_excess = joints - upper[None, :]
+    raw_excess = np.maximum(np.maximum(lower_excess, upper_excess), 0.0)
+    tolerated_excess = np.maximum(raw_excess - float(tolerance_rad), 0.0)
+    details = []
+    for joint_index, joint_name in enumerate(names):
+        column = raw_excess[:, joint_index]
+        if float(column.max(initial=0.0)) <= 0.0:
+            continue
+        frame = int(np.argmax(column))
+        lower_side = lower_excess[frame, joint_index] >= upper_excess[frame, joint_index]
+        side = "lower" if lower_side else "upper"
+        bound = lower[joint_index] if lower_side else upper[joint_index]
+        details.append(
+            {
+                "joint_index_0based": joint_index,
+                "joint_number_1based": joint_index + 1,
+                "joint_name": joint_name,
+                "side": side,
+                "max_excess_rad": float(column[frame]),
+                "max_excess_frame_0based": frame,
+                "value_rad": float(joints[frame, joint_index]),
+                "xml_bound_rad": float(bound),
+                "raw_violating_frames": int(np.count_nonzero(column > 0.0)),
+                "raw_violating_frame_rate": float(np.mean(column > 0.0)),
+                "max_excess_after_tolerance_rad": float(
+                    tolerated_excess[:, joint_index].max(initial=0.0)
+                ),
+                "violating_frames_after_tolerance": int(
+                    np.count_nonzero(tolerated_excess[:, joint_index] > 0.0)
+                ),
+            }
+        )
+    details.sort(key=lambda row: (-row["max_excess_rad"], row["joint_index_0based"]))
+    return {
+        "xml_source_sha256": str(kinematics.source_mjcf_sha256),
+        "tolerance_rad": float(tolerance_rad),
+        "strict_xml_limit_exceeded": bool(np.any(raw_excess > 0.0)),
+        "strict_xml_violating_joint_count": len(details),
+        "strict_xml_violating_frame_count": int(np.count_nonzero(np.any(raw_excess > 0.0, axis=1))),
+        "strict_xml_max_excess_rad": float(raw_excess.max(initial=0.0)),
+        "tolerance_limit_exceeded": bool(np.any(tolerated_excess > 0.0)),
+        "tolerance_violating_joint_count": int(
+            np.count_nonzero(np.any(tolerated_excess > 0.0, axis=0))
+        ),
+        "tolerance_violating_frame_count": int(
+            np.count_nonzero(np.any(tolerated_excess > 0.0, axis=1))
+        ),
+        "max_excess_after_tolerance_rad": float(tolerated_excess.max(initial=0.0)),
+        "joints": details,
+    }
+
+
+def media_probe(path: Path) -> dict[str, Any]:
+    result = subprocess.run(
+        [
+            "ffprobe",
+            "-v",
+            "error",
+            "-show_entries",
+            "stream=codec_type,codec_name,width,height,r_frame_rate:format=duration",
+            "-of",
+            "json",
+            str(path),
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    payload = json.loads(result.stdout)
+    streams = payload.get("streams", [])
+    video = [row for row in streams if row.get("codec_type") == "video"]
+    audio = [row for row in streams if row.get("codec_type") == "audio"]
+    if len(video) != 1 or not audio or video[0].get("r_frame_rate") != "30/1":
+        raise RuntimeError(f"媒体契约校验失败：{path}")
+    return {
+        "duration_sec": float(payload["format"]["duration"]),
+        "video_codec": video[0].get("codec_name"),
+        "audio_codec": audio[0].get("codec_name"),
+        "width": int(video[0]["width"]),
+        "height": int(video[0]["height"]),
+        "fps": 30,
+    }
+
+
+def render_and_mux(
+    *, artifact: Path, audio: Path, mjcf: Path, output: Path, width: int, height: int
+) -> dict[str, Any]:
+    silent = output.with_name(output.stem + ".silent.mp4")
+    temporary = output.with_name(output.stem + ".tmp.mp4")
+    output.parent.mkdir(parents=True, exist_ok=True)
+    silent.unlink(missing_ok=True)
+    temporary.unlink(missing_ok=True)
+    try:
+        subprocess.run(
+            [
+                sys.executable,
+                str(REPO_ROOT / "tools/eval/render_bumi_motion.py"),
+                "--motion",
+                str(artifact),
+                "--mjcf",
+                str(mjcf),
+                "--output",
+                str(silent),
+                "--width",
+                str(width),
+                "--height",
+                str(height),
+            ],
+            check=True,
+        )
+        subprocess.run(
+            [
+                "ffmpeg",
+                "-y",
+                "-loglevel",
+                "error",
+                "-i",
+                str(silent),
+                "-i",
+                str(audio),
+                "-map",
+                "0:v:0",
+                "-map",
+                "1:a:0",
+                "-c:v",
+                "copy",
+                "-c:a",
+                "aac",
+                "-shortest",
+                str(temporary),
+            ],
+            check=True,
+        )
+        probe = media_probe(temporary)
+        temporary.replace(output)
+        return probe
+    finally:
+        silent.unlink(missing_ok=True)
+        temporary.unlink(missing_ok=True)
+
+
+def _relative(path: Path, root: Path) -> str:
+    return path.resolve().relative_to(root.resolve()).as_posix()
+
+
+def build_summary(results: list[dict[str, Any]], *, tolerance_rad: float) -> dict[str, Any]:
+    passed = [row for row in results if row.get("status") == "passed"]
+    raw_samples = [row for row in passed if row["joint_limits"]["strict_xml_limit_exceeded"]]
+    tolerance_samples = [row for row in passed if row["joint_limits"]["tolerance_limit_exceeded"]]
+    aggregate: dict[tuple[int, str], dict[str, Any]] = {}
+    for row in passed:
+        for joint in row["joint_limits"]["joints"]:
+            key = (joint["joint_index_0based"], joint["joint_name"])
+            entry = aggregate.setdefault(
+                key,
+                {
+                    "joint_index_0based": key[0],
+                    "joint_number_1based": key[0] + 1,
+                    "joint_name": key[1],
+                    "strict_xml_exceed_sample_count": 0,
+                    "tolerance_exceed_sample_count": 0,
+                    "exceed_0_25_rad_sample_count": 0,
+                    "max_excess_rad": -1.0,
+                    "max_excess_sample": None,
+                    "max_excess_frame_0based": None,
+                },
+            )
+            entry["strict_xml_exceed_sample_count"] += 1
+            if joint["max_excess_after_tolerance_rad"] > 0.0:
+                entry["tolerance_exceed_sample_count"] += 1
+            if joint["max_excess_rad"] > 0.25:
+                entry["exceed_0_25_rad_sample_count"] += 1
+            if joint["max_excess_rad"] > entry["max_excess_rad"]:
+                entry["max_excess_rad"] = joint["max_excess_rad"]
+                entry["max_excess_sample"] = f"{row['dataset']}/{row['audio_key']}"
+                entry["max_excess_frame_0based"] = joint["max_excess_frame_0based"]
+
+    def summarize_motion_quality(rows: list[dict[str, Any]]) -> dict[str, Any]:
+        metric_keys = (
+            "foot_penetration_max_m",
+            "foot_penetration_mean_m",
+            "root_tilt_max_rad",
+            "joint_velocity_p95_radps",
+            "root_angular_velocity_p95_radps",
+            "beat_alignment_score",
+        )
+        metrics = {}
+        for metric_key in metric_keys:
+            values = [float(row["metrics"][metric_key]) for row in rows]
+            if not values:
+                metrics[metric_key] = {"mean": None, "max": None, "max_sample": None}
+                continue
+            max_index = int(np.argmax(values))
+            metrics[metric_key] = {
+                "mean": float(np.mean(values)),
+                "max": values[max_index],
+                "max_sample": f"{rows[max_index]['dataset']}/{rows[max_index]['audio_key']}",
+            }
+        return {
+            "samples": len(rows),
+            "total_frames": sum(int(row["frames"]) for row in rows),
+            "total_duration_sec": sum(float(row["source_duration_sec"]) for row in rows),
+            "foot_penetration_max_over_0_05m_samples": sum(
+                float(row["metrics"]["foot_penetration_max_m"]) > 0.05 for row in rows
+            ),
+            "root_tilt_max_over_0_5rad_samples": sum(
+                float(row["metrics"]["root_tilt_max_rad"]) > 0.5 for row in rows
+            ),
+            "metrics": metrics,
+        }
+
+    dataset_counts = {}
+    for dataset, label, _ in DATASETS:
+        rows = [row for row in passed if row["dataset"] == dataset]
+        dataset_counts[dataset] = {
+            "dataset_label": label,
+            "completed": len(rows),
+            "strict_xml_exceed_samples": sum(
+                bool(row["joint_limits"]["strict_xml_limit_exceeded"]) for row in rows
+            ),
+            "tolerance_exceed_samples": sum(
+                bool(row["joint_limits"]["tolerance_limit_exceeded"]) for row in rows
+            ),
+            "motion_quality": summarize_motion_quality(rows),
+        }
+    tolerance_sensitivity = []
+    for threshold in (0.0, 0.05, 0.10, 0.15, 0.20, 0.25):
+        count = sum(
+            max(
+                (joint["max_excess_rad"] for joint in row["joint_limits"]["joints"]),
+                default=0.0,
+            )
+            > threshold
+            for row in passed
+        )
+        tolerance_sensitivity.append(
+            {"tolerance_rad": threshold, "exceed_sample_count": int(count)}
+        )
+    tolerance_exceed_details = []
+    for row in passed:
+        joints = []
+        for joint in row["joint_limits"]["joints"]:
+            if joint["max_excess_rad"] <= tolerance_rad:
+                continue
+            joints.append(
+                {
+                    key: joint[key]
+                    for key in (
+                        "joint_index_0based",
+                        "joint_number_1based",
+                        "joint_name",
+                        "side",
+                        "max_excess_rad",
+                        "max_excess_after_tolerance_rad",
+                        "max_excess_frame_0based",
+                        "value_rad",
+                        "xml_bound_rad",
+                    )
+                }
+            )
+        if joints:
+            tolerance_exceed_details.append(
+                {
+                    "dataset": row["dataset"],
+                    "audio_key": row["audio_key"],
+                    "joints": joints,
+                }
+            )
+    return {
+        "contract_version": "genmo.bumi_hq_full_music_quality_summary.v1",
+        "evaluated_samples": len(results),
+        "completed_samples": len(passed),
+        "failed_samples": len(results) - len(passed),
+        "strict_xml_exceed_sample_count": len(raw_samples),
+        "joint_limit_tolerance_rad": float(tolerance_rad),
+        "tolerance_exceed_sample_count": len(tolerance_samples),
+        "tolerance_sensitivity": tolerance_sensitivity,
+        "tolerance_exceed_details": tolerance_exceed_details,
+        "datasets": dataset_counts,
+        "motion_quality": summarize_motion_quality(passed),
+        "joint_aggregate": sorted(aggregate.values(), key=lambda row: row["joint_index_0based"]),
+        "failed": [
+            {"dataset": row["dataset"], "audio_key": row["audio_key"], "error": row.get("error")}
+            for row in results
+            if row.get("status") != "passed"
+        ],
+    }
+
+
+def build_index(
+    output_root: Path,
+    results: list[dict[str, Any]],
+    summary: dict[str, Any],
+    selection: dict[str, Any],
+) -> None:
+    cards = []
+    for dataset, label, _ in DATASETS:
+        dataset_rows = [row for row in results if row["dataset"] == dataset]
+        item_html = []
+        for index, row in enumerate(dataset_rows, start=1):
+            if row.get("status") != "passed":
+                item_html.append(
+                    f'<article class="card failed"><h3>{index}. {html.escape(row["audio_key"])}</h3>'
+                    f"<p>生成失败：{html.escape(str(row.get('error', 'unknown')))}</p></article>"
+                )
+                continue
+            limits = row["joint_limits"]
+            badge = (
+                "容差后超限"
+                if limits["tolerance_limit_exceeded"]
+                else f"{limits['tolerance_rad']:.2f}rad 容差内"
+            )
+            joint_rows = []
+            for joint in limits["joints"]:
+                joint_rows.append(
+                    "<tr>"
+                    f"<td>{joint['joint_number_1based']}</td>"
+                    f"<td>{html.escape(joint['joint_name'])}</td>"
+                    f"<td>{joint['side']}</td>"
+                    f"<td>{joint['max_excess_rad']:.6f}</td>"
+                    f"<td>{joint['max_excess_frame_0based']}</td>"
+                    f"<td>{joint['raw_violating_frames']}</td>"
+                    f"<td>{joint['max_excess_after_tolerance_rad']:.6f}</td>"
+                    "</tr>"
+                )
+            if not joint_rows:
+                joint_rows.append('<tr><td colspan="7">没有严格 XML 关节超限</td></tr>')
+            video = html.escape(row["video_relative"])
+            report = html.escape(row["report_relative"])
+            representative = html.escape(row["representative_motion"])
+            metrics = row["metrics"]
+            item_html.append(
+                f'<article class="card"><h3>{index}. {html.escape(row["audio_key"])} '
+                f'<span class="badge">{badge}</span></h3>'
+                f'<video controls preload="metadata" src="{video}"></video>'
+                f"<p>高质量动作代表：<code>{representative}</code>；完整音频 "
+                f"{row['source_duration_sec']:.2f}s，生成 {row['frames']} 帧。</p>"
+                f"<p>严格 XML 最大超限 {limits['strict_xml_max_excess_rad']:.6f} rad；"
+                f"容差 {limits['tolerance_rad']:.3f} rad 后最大超限 "
+                f"{limits['max_excess_after_tolerance_rad']:.6f} rad；脚部最大穿地 "
+                f"{metrics['foot_penetration_max_m']:.4f}m；根节点最大倾斜 "
+                f'{metrics["root_tilt_max_rad"]:.4f}rad。 <a href="{report}">JSON 报告</a></p>'
+                '<details><summary>逐关节超限明细</summary><div class="table-wrap"><table>'
+                "<thead><tr><th>编号(1-based)</th><th>关节名</th><th>方向</th>"
+                "<th>最大超限(rad)</th><th>帧(0-based)</th><th>超限帧数</th>"
+                "<th>容差后超限(rad)</th></tr></thead><tbody>"
+                + "".join(joint_rows)
+                + "</tbody></table></div></details></article>"
+            )
+        cards.append(f"<section><h2>{label}</h2>{''.join(item_html)}</section>")
+    document = f"""<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>BUMI s430000 四库高质量完整音乐验证</title>
+<style>
+body{{margin:0;background:#10131a;color:#edf1f7;font:15px/1.55 system-ui,sans-serif}}main{{max-width:1500px;margin:auto;padding:28px}}
+a{{color:#78c5ff}}code{{overflow-wrap:anywhere}}.summary,.card{{background:#191f2b;border:1px solid #30394a;border-radius:12px;padding:16px;margin:14px 0}}
+section{{margin-top:34px}}video{{width:100%;max-height:620px;background:#000;border-radius:8px}}.badge{{font-size:12px;padding:3px 7px;background:#3b465b;border-radius:12px}}
+.failed{{border-color:#a74d4d}}.table-wrap{{overflow-x:auto}}table{{border-collapse:collapse;width:100%;margin-top:10px}}th,td{{padding:7px;border:1px solid #3a4354;text-align:left;white-space:nowrap}}
+@media(min-width:1000px){{section{{display:grid;grid-template-columns:1fr 1fr;gap:16px}}section h2{{grid-column:1/-1}}.card{{margin:0}}}}
+</style></head><body><main>
+<h1>BUMI s430000 四库人工高质量完整音乐验证</h1>
+<div class="summary"><p>共评测 {summary["evaluated_samples"]} 首，完成 {summary["completed_samples"]} 首；严格 XML 超限样本 {summary["strict_xml_exceed_sample_count"]} 首，部署容差 {summary["joint_limit_tolerance_rad"]:.3f}rad 后仍超限 {summary["tolerance_exceed_sample_count"]} 首。</p>
+<p>总音频 {summary["motion_quality"]["total_duration_sec"] / 60.0:.2f} 分钟、{summary["motion_quality"]["total_frames"]} 帧；脚部最大穿地超过 5cm 的样本 {summary["motion_quality"]["foot_penetration_max_over_0_05m_samples"]} 首，根节点最大倾斜超过 0.5rad 的样本 {summary["motion_quality"]["root_tilt_max_over_0_5rad_samples"]} 首。</p>
+<p>选择只来自人工评分 <code>score=1</code>，完整规则见 <a href="selection.json">selection.json</a>，汇总见 <a href="quality_summary.json">quality_summary.json</a>。所有编号同时在报告中提供 0-based 和 1-based。</p></div>
+{"".join(cards)}
+</main></body></html>"""
+    (output_root / "index.html").write_text(document, encoding="utf-8")
+
+
+def completed_result(
+    item: dict[str, Any],
+    output_root: Path,
+    *,
+    checkpoint_sha256: str,
+    onnx_sha256: str,
+    kinematics: Any,
+    tolerance_rad: float,
+    seed: int,
+    cfg_scale: float,
+    ddim_steps: int,
+) -> dict[str, Any] | None:
+    report_path = output_root / "reports" / item["dataset"] / f"{item['audio_key']}.json"
+    if not report_path.is_file():
+        return None
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    video = output_root / report.get("video_relative", "")
+    artifact = output_root / report.get("artifact_relative", "")
+    if (
+        report.get("status") != "passed"
+        or report.get("checkpoint_sha256") != checkpoint_sha256
+        or report.get("onnx_sha256") != onnx_sha256
+        or report.get("audio") != item["audio"]
+        or not video.is_file()
+        or not artifact.is_file()
+    ):
+        return None
+    media_probe(video)
+    try:
+        artifact_payload = torch.load(artifact, map_location="cpu", weights_only=False)
+    except TypeError:
+        artifact_payload = torch.load(artifact, map_location="cpu")
+    if not isinstance(artifact_payload, dict) or any(
+        artifact_payload.get(key) != value
+        for key, value in {
+            "checkpoint_sha256": checkpoint_sha256,
+            "onnx_sha256": onnx_sha256,
+            "audio": item["audio"],
+            "seed": seed,
+            "cfg_scale": cfg_scale,
+            "ddim_steps": ddim_steps,
+        }.items()
+    ):
+        return None
+    if report.get("joint_limits", {}).get("tolerance_rad") != tolerance_rad:
+        report["joint_limits"] = analyze_joint_limits(
+            artifact_payload["qpos"], kinematics, tolerance_rad=tolerance_rad
+        )
+        report["joint_limit_reaudited"] = True
+        atomic_json(report_path, report)
+    return report
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--audio-root", type=Path, required=True)
+    parser.add_argument("--ratings-root", type=Path, required=True)
+    parser.add_argument("--checkpoint", type=Path, required=True)
+    parser.add_argument("--onnx", type=Path, required=True)
+    parser.add_argument("--onnx-metadata", type=Path)
+    parser.add_argument("--kinematics", type=Path, required=True)
+    parser.add_argument("--stats", type=Path, required=True)
+    parser.add_argument("--mjcf", type=Path, required=True)
+    parser.add_argument("--output-root", type=Path, required=True)
+    parser.add_argument("--per-dataset", type=int, default=10)
+    parser.add_argument("--onnx-provider", choices=("cpu", "cuda"), default="cuda")
+    parser.add_argument("--device", default="cuda:0")
+    parser.add_argument("--ddim-steps", type=int, default=20)
+    parser.add_argument("--cfg-scale", type=float, default=2.5)
+    parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--joint-limit-tolerance-rad", type=float, default=0.25)
+    parser.add_argument("--width", type=int, default=640)
+    parser.add_argument("--height", type=int, default=480)
+    parser.add_argument("--selection-only", action="store_true")
+    return parser.parse_args()
+
+
+@torch.inference_mode()
+def main() -> int:
+    args = parse_args()
+    if not 2 <= args.ddim_steps <= 1000:
+        raise ValueError("ddim_steps 必须在 2..1000")
+    if not math.isfinite(args.cfg_scale) or args.cfg_scale < 0.0:
+        raise ValueError("cfg_scale 必须是有限非负数")
+    paths = {}
+    for name in ("audio_root", "ratings_root", "checkpoint", "onnx", "kinematics", "stats", "mjcf"):
+        paths[name] = getattr(args, name).expanduser().resolve(strict=True)
+    output_root = args.output_root.expanduser().resolve()
+    output_root.mkdir(parents=True, exist_ok=True)
+    selected, dataset_summary = select_hq_audio(
+        paths["ratings_root"], paths["audio_root"], per_dataset=args.per_dataset
+    )
+    metadata_path = (
+        args.onnx_metadata.expanduser().resolve(strict=True)
+        if args.onnx_metadata is not None
+        else paths["onnx"].with_suffix(paths["onnx"].suffix + ".json").resolve(strict=True)
+    )
+    metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    if metadata.get("contract_version") != BUMI_ONNX_CONTRACT_VERSION:
+        raise ValueError("ONNX metadata 不是 BUMI guided denoiser 合约")
+    identities = {
+        "checkpoint_sha256": sha256_file(paths["checkpoint"]),
+        "onnx_sha256": sha256_file(paths["onnx"]),
+        "kinematics_sha256": sha256_file(paths["kinematics"]),
+        "stats_sha256": sha256_file(paths["stats"]),
+        "mjcf_sha256": sha256_file(paths["mjcf"]),
+    }
+    expected = {
+        "checkpoint_sha256": (metadata.get("checkpoint") or {}).get("sha256"),
+        "kinematics_sha256": (metadata.get("kinematics") or {}).get("sha256"),
+        "stats_sha256": (metadata.get("stats") or {}).get("sha256"),
+    }
+    for name, value in expected.items():
+        if identities[name] != value:
+            raise ValueError(f"ONNX 身份不匹配：{name}")
+    selection = {
+        "contract_version": "genmo.bumi_hq_full_music_selection.v1",
+        "selection_policy": "四张人工评分 CSV 的 score=1；按数据集映射音频键并去重；在音频键字典序全集上均匀取 N 首",
+        "per_dataset_limit": args.per_dataset,
+        "dataset_summary": dataset_summary,
+        "model": {**identities, "onnx_metadata": str(metadata_path)},
+        "generation": {
+            "full_audio": True,
+            "sliding_window_frames": 120,
+            "overlap_frames": 30,
+            "ddim_steps": args.ddim_steps,
+            "cfg_scale": args.cfg_scale,
+            "seed": args.seed,
+        },
+        "quality_audit": {
+            "strict_xml_limits_reported": True,
+            "configured_tolerance_rad": args.joint_limit_tolerance_rad,
+            "sensitivity_thresholds_rad": [0.0, 0.05, 0.10, 0.15, 0.20, 0.25],
+        },
+        "items": selected,
+    }
+    atomic_json(output_root / "selection.json", selection)
+    if args.selection_only:
+        print(json.dumps(selection, indent=2, ensure_ascii=False))
+        return 0
+
+    device = torch.device(args.device)
+    if device.type == "cuda" and not torch.cuda.is_available():
+        raise RuntimeError("请求 CUDA，但当前不可用")
+    endecoder = (
+        BumiEndecoder(
+            kinematics_path=paths["kinematics"],
+            stats_path=paths["stats"],
+            enable_contact_targets=False,
+        )
+        .to(device)
+        .eval()
+    )
+    if endecoder.kinematics.source_mjcf_sha256 != identities["mjcf_sha256"]:
+        raise ValueError("--mjcf 与 kinematics JSON 的源 XML SHA256 不一致")
+    runner = BumiOrtStepRunner(paths["onnx"], device=device, provider=args.onnx_provider)
+    generator = BumiSlidingQposGenerator(
+        runner,
+        endecoder,
+        device=device,
+        steps=args.ddim_steps,
+        guidance_scale=args.cfg_scale,
+    )
+    results: list[dict[str, Any]] = []
+    total = len(selected)
+    for number, item in enumerate(selected, start=1):
+        existing = completed_result(
+            item,
+            output_root,
+            checkpoint_sha256=identities["checkpoint_sha256"],
+            onnx_sha256=identities["onnx_sha256"],
+            kinematics=endecoder.kinematics,
+            tolerance_rad=args.joint_limit_tolerance_rad,
+            seed=args.seed,
+            cfg_scale=args.cfg_scale,
+            ddim_steps=args.ddim_steps,
+        )
+        if existing is not None:
+            results.append(existing)
+            print(
+                f"[{number:02d}/{total:02d}] 复用 {item['dataset_label']}/{item['audio_key']}",
+                flush=True,
+            )
+            continue
+        started = time.perf_counter()
+        artifact_path = output_root / "artifacts" / item["dataset"] / f"{item['audio_key']}.pt"
+        report_path = output_root / "reports" / item["dataset"] / f"{item['audio_key']}.json"
+        video_path = output_root / "videos" / item["dataset"] / f"{item['audio_key']}.mp4"
+        audio_path = Path(item["audio"])
+        print(
+            f"[{number:02d}/{total:02d}] 生成 {item['dataset_label']}/{item['audio_key']}",
+            flush=True,
+        )
+        try:
+            features, feature_metadata = extract_edge_baseline35(audio_path, target_fps=30)
+            generated = generator.generate(features, seed=args.seed)
+            qpos = generated.qpos.float().contiguous()
+            canonical = endecoder.codec.encode(qpos.to(device)).canonical_qpos.detach().cpu()
+            metrics = metrics_to_json(
+                compute_bumi_kinematic_metrics(
+                    qpos.to(device),
+                    endecoder.kinematics,
+                    music_beats=features[:, 34].to(device),
+                    ground_height=0.0,
+                )
+            )
+            limits = analyze_joint_limits(
+                qpos,
+                endecoder.kinematics,
+                tolerance_rad=args.joint_limit_tolerance_rad,
+            )
+            artifact = {
+                "contract_version": "genmo.bumi_hq_full_music_prediction.v1",
+                "robot_name": "bumi",
+                "fps": 30,
+                "qpos": qpos,
+                "qpos_canonical": canonical,
+                "joint_names": list(endecoder.kinematics.joint_order),
+                "quaternion_convention": "wxyz",
+                "qpos_order": "mujoco_native",
+                "audio": str(audio_path),
+                "feature_metadata": feature_metadata,
+                "high_quality_source": item,
+                "checkpoint_sha256": identities["checkpoint_sha256"],
+                "onnx_sha256": identities["onnx_sha256"],
+                "kinematics_sha256": identities["kinematics_sha256"],
+                "seed": args.seed,
+                "cfg_scale": args.cfg_scale,
+                "ddim_steps": args.ddim_steps,
+            }
+            artifact_path.parent.mkdir(parents=True, exist_ok=True)
+            temporary_artifact = artifact_path.with_suffix(".tmp")
+            torch.save(artifact, temporary_artifact)
+            temporary_artifact.replace(artifact_path)
+            media = render_and_mux(
+                artifact=artifact_path,
+                audio=audio_path,
+                mjcf=paths["mjcf"],
+                output=video_path,
+                width=args.width,
+                height=args.height,
+            )
+            source_duration = float(feature_metadata["selected_duration_sec"])
+            if abs(media["duration_sec"] - source_duration) > 0.15:
+                raise RuntimeError(
+                    f"视频/音频时长偏差过大：video={media['duration_sec']}, audio={source_duration}"
+                )
+            report = {
+                "contract_version": "genmo.bumi_hq_full_music_sample_report.v1",
+                "status": "passed",
+                **{key: item[key] for key in item},
+                "audio": str(audio_path),
+                "source_duration_sec": source_duration,
+                "frames": len(qpos),
+                "windows": len(generated.chunks),
+                "artifact_relative": _relative(artifact_path, output_root),
+                "video_relative": _relative(video_path, output_root),
+                "report_relative": _relative(report_path, output_root),
+                "checkpoint_sha256": identities["checkpoint_sha256"],
+                "onnx_sha256": identities["onnx_sha256"],
+                "seed": args.seed,
+                "cfg_scale": args.cfg_scale,
+                "ddim_steps": args.ddim_steps,
+                "metrics": metrics,
+                "joint_limits": limits,
+                "media": media,
+                "elapsed_seconds": time.perf_counter() - started,
+                "scope": "运动学/关节限位离线评测；不代表 GMT 动力学可跟踪性",
+            }
+        except Exception as exc:
+            report = {
+                "contract_version": "genmo.bumi_hq_full_music_sample_report.v1",
+                "status": "failed",
+                **{key: item[key] for key in item},
+                "audio": str(audio_path),
+                "report_relative": _relative(report_path, output_root),
+                "checkpoint_sha256": identities["checkpoint_sha256"],
+                "onnx_sha256": identities["onnx_sha256"],
+                "error": f"{type(exc).__name__}: {exc}",
+                "elapsed_seconds": time.perf_counter() - started,
+            }
+            print(f"[{number:02d}/{total:02d}] 失败：{report['error']}", flush=True)
+        atomic_json(report_path, report)
+        results.append(report)
+        summary = build_summary(results, tolerance_rad=args.joint_limit_tolerance_rad)
+        atomic_json(output_root / "quality_summary.json", summary)
+        build_index(output_root, results, summary, selection)
+
+    summary = build_summary(results, tolerance_rad=args.joint_limit_tolerance_rad)
+    atomic_json(output_root / "quality_summary.json", summary)
+    build_index(output_root, results, summary, selection)
+    print(json.dumps(summary, indent=2, ensure_ascii=False))
+    return 0 if summary["failed_samples"] == 0 else 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

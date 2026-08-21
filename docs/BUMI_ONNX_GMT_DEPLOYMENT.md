@@ -139,6 +139,36 @@ BUMI 93D 训练表示是首帧 XY/yaw、默认根高归一化后的 canonical �
 世界坐标渲染。Demo 在启用 `--render-mjcf` 且没有显式给出世界位置时，会自动使用
 `root_xy=[0,0]、anchor_z=0.65、yaw=0`；上面的命令仍显式写出 XY/yaw，便于复现实验。
 
+四数据集人工高质量完整音乐批量验证使用评分表中的 `score=1`，按共享音频键去重并在每库
+候选全集上均匀取样。工具复用一次 ONNX 会话执行 120/30 长音乐滑窗，生成带声音视频、
+严格 XML/容差后逐关节限位报告和按 FineDance、CoMPAS3D、AIOZ-GDance、AIST++ 排序的
+网页；中断后用同一命令可复用已完成项：
+
+```bash
+MUJOCO_GL=egl .venv/bin/python scripts/validate_bumi_hq_music_full.py \
+  --audio-root outputs/server_music_wav_4set_all_20260818 \
+  --ratings-root data/motions_npz_bumi3_smooth_q1/rate \
+  --checkpoint "$BUMI_TASK_CKPT" \
+  --onnx "$BUMI_TASK_ONNX" \
+  --kinematics "$BUMI_TASK_KIN" \
+  --stats "$BUMI_TASK_STATS" \
+  --mjcf /home/weili/GMR_minimal_robots_smplx.tar.gz/GMR-master/assets/bumi3/bumi3.xml \
+  --output-root outputs/onnx/bumi_music/s430000/validation_hq_4set_full_20260821 \
+  --per-dataset 10 \
+  --onnx-provider cuda \
+  --device cuda:0 \
+  --ddim-steps 20 \
+  --cfg-scale 2.5 \
+  --seed 42 \
+  --joint-limit-tolerance-rad 0.25 \
+  --width 640 \
+  --height 480
+```
+
+输出根目录的 `index.html` 可直接打开，也可在该目录启动 `python -m http.server` 供浏览器
+访问。`quality_summary.json` 同时保留 0、0.05、0.10、0.15、0.20、0.25 rad 的样本级
+限位敏感性；页面中的关节编号为 1-based，JSON 同时保存 0-based 编号。
+
 ## TensorRT 构建与 parity
 
 TensorRT plan 与 GPU 型号、TensorRT/libnvinfer 主次版本绑定，应在最终部署机器上构建：
