@@ -686,11 +686,23 @@ export MINE_BUMI_ROOT=/data0/user/liwei/datasets/bumi_music_genmo_mine_v1
 export BUMI_MUSIC_STATS_PATH=/data0/user/liwei/datasets/bumi_music_genmo_5set_manual_q1_v3/meta/bumi_93d_stats_train_manual_q1_v3.json
 export BUMI_FINETUNE_CKPT=/data0/user/liwei/experiments/genmo/gem_bumi_music_only_5set_manual_q1_v3_repr_v2_b192_s350k/version_0/checkpoints/last.ckpt
 export BUMI_FINETUNE_OUTPUT=/data0/user/liwei/experiments/genmo/gem_bumi_music_only_5set_manual_q1_v3_finetune_physical_s350k_s50k
+export CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
 
-CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 $GENMO_PYTHON -u scripts/train.py \
+# 服务器 2 的 8 卡 DDP 必须固定使用这四项。尤其不能把
+# NCCL_CUMEM_HOST_ENABLE 误写成语义不同的 NCCL_CUMEM_ENABLE；当前驱动/NCCL 组合只有
+# 在禁用 cuMem host allocation、IB，并把 socket bootstrap 固定到回环接口后通过了 8 卡
+# 完整 forward/backward/optimizer smoke。
+export NCCL_CUMEM_HOST_ENABLE=0
+export NCCL_IB_DISABLE=1
+export NCCL_SOCKET_IFNAME=lo
+export TORCH_NCCL_BLOCKING_WAIT=1
+
+$GENMO_PYTHON -u scripts/train.py \
   exp=gem_bumi_music_only_5set_manual_q1_v3_finetune_50k \
   pretrain_ckpt="$BUMI_FINETUNE_CKPT" \
-  output_dir="$BUMI_FINETUNE_OUTPUT"
+  output_dir="$BUMI_FINETUNE_OUTPUT" \
+  pl_trainer.devices=8 \
+  pl_trainer.strategy=ddp
 ```
 
 ## 运动学评估与动力学验证
