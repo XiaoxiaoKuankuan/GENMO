@@ -1,17 +1,18 @@
 #!/usr/bin/env python3
 """构建人工高质量原动作与 BUMI 音乐模型生成动作的同步对比网页。
 
-输入是 ``validate_bumi_hq_music_full.py`` 已冻结的 40 首选择和模型生成产物，以及人工
+输入是 ``validate_bumi_hq_music_full.py`` 已冻结的可变数量选择和模型生成产物，以及人工
 ``score=1`` 对应的七字段 50 Hz SONIC/Isaac-Lab BUMI NPZ。工具严格复用正式数据构建器的
 50→30 Hz 语义：根位置和关节线性插值、wxyz 根四元数最短弧 SLERP、Isaac publish order
 按完整名称重排到 GENMO/MuJoCo-native order，并按训练契约执行 body-origin 地面归一化。
 
 每项输出原数据集 BUMI 视频、模型生成视频的自包含硬链接/副本，以及带标签的左右同步
 对比视频；模型生成源发生变化时以临时硬链接/副本原子刷新旧文件。音轨统一来自同一 WAV。
-对比时长取原动作真实长度，因此 AIST++ 的 7–12 秒源
-片段不会被循环或拉伸来伪装成整首舞蹈，网页会明确显示源片段/完整音乐时长并提供完整模型
-视频。报告还在相同对比区间计算双方运动学指标和 0.25 rad 限位结果。该页面展示的是
-GMR 离线重定向轨迹和模型生成轨迹，不代表 GMT/真实机器人动力学跟踪效果。
+对比时长取原动作与模型验证片段的共同真实长度，因此 AIST++ 的短源片段不会被循环或拉伸，
+其他长动作也不会超过模型实际生成长度。网页会明确显示源片段和生成片段时长。报告还在
+相同对比区间计算双方运动学指标和 0.25 rad 限位结果，并额外生成不含本地绝对路径的
+``site_data.json``，供公开验证网页直接消费。该页面展示的是 GMR 离线重定向轨迹和模型
+生成轨迹，不代表 GMT/真实机器人动力学跟踪效果。
 """
 
 from __future__ import annotations
@@ -21,6 +22,7 @@ import html
 import json
 import math
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -193,6 +195,8 @@ def render_original_video(
                 str(width),
                 "--height",
                 str(height),
+                "--max-frames",
+                str(round(duration_sec * 30.0)),
             ],
             check=True,
         )
@@ -236,6 +240,7 @@ def build_comparison_video(
     audio: Path,
     output: Path,
     duration_sec: float,
+    model_label: str,
     width: int,
     height: int,
 ) -> dict[str, Any]:
@@ -247,7 +252,7 @@ def build_comparison_video(
         "drawtext=text='Original GMR BUMI':x=18:y=18:fontsize=24:"
         "fontcolor=white:box=1:boxcolor=black@0.65[left];"
         f"[1:v]scale={width}:{height},setpts=PTS-STARTPTS,"
-        "drawtext=text='s430000 Generated':x=18:y=18:fontsize=24:"
+        f"drawtext=text='{model_label} Generated':x=18:y=18:fontsize=24:"
         "fontcolor=white:box=1:boxcolor=black@0.65[right];"
         "[left][right]hstack=inputs=2[video]"
     )
@@ -383,7 +388,76 @@ def summarize(results: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
-def build_index(output_root: Path, results: list[dict[str, Any]], summary: dict[str, Any]) -> None:
+def build_site_data(
+    results: list[dict[str, Any]],
+    summary: dict[str, Any],
+    *,
+    items: list[dict[str, Any]],
+    model_label: str,
+) -> dict[str, Any]:
+    """生成公开网页使用的最小可追溯数据，排除本地路径和服务端身份。"""
+
+    selected = {(item["dataset"], item["audio_key"]): item for item in items}
+    site_items = []
+    for row in results:
+        if row.get("status") != "passed":
+            continue
+        item = selected[(row["dataset"], row["audio_key"])]
+        site_items.append(
+            {
+                "dataset": row["dataset"],
+                "dataset_label": row["dataset_label"],
+                "audio_key": row["audio_key"],
+                "representative_motion": row["representative_motion"],
+                "high_quality_motion_count": item["high_quality_motion_count"],
+                "comparison_duration_sec": row["comparison_duration_sec"],
+                "generated_duration_sec": row["generated_duration_sec"],
+                "source_audio_duration_sec": row["source_audio_duration_sec"],
+                "source_clip_shorter_than_audio": row["source_clip_shorter_than_audio"],
+                "comparison_video": f"/{row['comparison_video_relative']}",
+                "original_metrics": row["original_metrics"],
+                "generated_metrics": row["generated_overlap_metrics"],
+                "original_joint_limits": {
+                    "strict_xml_limit_exceeded": row["original_joint_limits"][
+                        "strict_xml_limit_exceeded"
+                    ],
+                    "tolerance_limit_exceeded": row["original_joint_limits"][
+                        "tolerance_limit_exceeded"
+                    ],
+                    "max_excess_rad": row["original_joint_limits"]["strict_xml_max_excess_rad"],
+                },
+                "generated_joint_limits": {
+                    "strict_xml_limit_exceeded": row["generated_overlap_joint_limits"][
+                        "strict_xml_limit_exceeded"
+                    ],
+                    "tolerance_limit_exceeded": row["generated_overlap_joint_limits"][
+                        "tolerance_limit_exceeded"
+                    ],
+                    "max_excess_rad": row["generated_overlap_joint_limits"][
+                        "strict_xml_max_excess_rad"
+                    ],
+                },
+            }
+        )
+    return {
+        "contract_version": "genmo.bumi_hq_original_comparison_site.v1",
+        "model_label": model_label,
+        "comparison_policy": "原动作与模型生成在同一音乐、同一时间轴上并排对比；短源片段不循环或拉伸",
+        "summary": summary,
+        "items": site_items,
+    }
+
+
+def build_index(
+    output_root: Path,
+    results: list[dict[str, Any]],
+    summary: dict[str, Any],
+    *,
+    model_label: str,
+) -> None:
+    def metric_text(value: float | None) -> str:
+        return "n/a" if value is None else f"{value:.4f}"
+
     sections = []
     for dataset, label, _ in DATASETS:
         rows = [row for row in results if row["dataset"] == dataset]
@@ -403,15 +477,16 @@ def build_index(output_root: Path, results: list[dict[str, Any]], summary: dict[
             cards.append(
                 f'<article class="card"><h3>{index}. {html.escape(row["audio_key"])}</h3>'
                 f'<video controls preload="metadata" src="{html.escape(row["comparison_video_relative"])}"></video>'
-                f"<p>左：原数据集 GMR BUMI；右：s430000 模型生成。对比 {row['comparison_duration_sec']:.2f}s，"
-                f"完整音乐 {row['full_audio_duration_sec']:.2f}s{short_note}。</p>"
+                f"<p>左：原数据集 GMR BUMI；右：{html.escape(model_label)} 模型生成。对比 "
+                f"{row['comparison_duration_sec']:.2f}s，模型验证片段 "
+                f"{row['generated_duration_sec']:.2f}s{short_note}。</p>"
                 "<table><thead><tr><th>同区间指标</th><th>原数据集</th><th>模型生成</th></tr></thead><tbody>"
                 f"<tr><td>最大脚部穿地(m)</td><td>{original['foot_penetration_max_m']:.4f}</td><td>{generated['foot_penetration_max_m']:.4f}</td></tr>"
                 f"<tr><td>最大根倾角(rad)</td><td>{original['root_tilt_max_rad']:.4f}</td><td>{generated['root_tilt_max_rad']:.4f}</td></tr>"
                 f"<tr><td>关节速度P95(rad/s)</td><td>{original['joint_velocity_p95_radps']:.4f}</td><td>{generated['joint_velocity_p95_radps']:.4f}</td></tr>"
                 "</tbody></table>"
                 f'<p><a href="{html.escape(row["original_video_relative"])}">只看原动作</a> · '
-                f'<a href="{html.escape(row["generated_video_relative"])}">查看完整模型视频</a> · '
+                f'<a href="{html.escape(row["generated_video_relative"])}">只看模型动作</a> · '
                 f'<a href="{html.escape(row["report_relative"])}">JSON报告</a></p></article>'
             )
         sections.append(f"<section><h2>{label}</h2>{''.join(cards)}</section>")
@@ -423,10 +498,10 @@ body{{margin:0;background:#0e1219;color:#edf1f7;font:15px/1.55 system-ui,sans-se
 .summary,.card{{background:#191f2b;border:1px solid #30394a;border-radius:12px;padding:16px;margin:14px 0}}.failed{{border-color:#a74d4d}}video{{width:100%;background:#000;border-radius:8px}}
 table{{border-collapse:collapse;width:100%}}th,td{{padding:7px;border:1px solid #3a4354;text-align:left}}section{{margin-top:34px}}
 @media(min-width:1100px){{section{{display:grid;grid-template-columns:1fr 1fr;gap:16px}}section h2{{grid-column:1/-1}}.card{{margin:0}}}}</style></head><body><main>
-<h1>BUMI 人工高质量原动作 vs s430000 模型生成</h1><div class="summary">
+<h1>BUMI 人工高质量原动作 vs {html.escape(model_label)} 模型生成</h1><div class="summary">
 <p>完成 {summary["completed"]}/{summary["evaluated"]} 项，同步对比总时长 {summary["comparison_duration_sec"] / 60.0:.2f} 分钟。左侧是 score=1 对应的原始 GMR BUMI 轨迹，右侧是相同音乐的模型生成轨迹。</p>
-<p>同区间均值：最大脚部穿地 原始 {metrics["foot_penetration_max_m"]["original_mean"]:.4f}m / 生成 {metrics["foot_penetration_max_m"]["generated_mean"]:.4f}m；最大根倾角 原始 {metrics["root_tilt_max_rad"]["original_mean"]:.4f}rad / 生成 {metrics["root_tilt_max_rad"]["generated_mean"]:.4f}rad。</p>
-<p>0.25rad 容差后关节超限：原动作 {limits["original"]["exceed_0_25_rad_samples"]}/40，模型生成同区间 {limits["generated_same_interval"]["exceed_0_25_rad_samples"]}/40；严格 XML 原始边界触碰/超出分别为 {limits["original"]["strict_xml_exceed_samples"]}/40 和 {limits["generated_same_interval"]["strict_xml_exceed_samples"]}/40。</p>
+<p>同区间均值：最大脚部穿地 原始 {metric_text(metrics["foot_penetration_max_m"]["original_mean"])}m / 生成 {metric_text(metrics["foot_penetration_max_m"]["generated_mean"])}m；最大根倾角 原始 {metric_text(metrics["root_tilt_max_rad"]["original_mean"])}rad / 生成 {metric_text(metrics["root_tilt_max_rad"]["generated_mean"])}rad。</p>
+<p>0.25rad 容差后关节超限：原动作 {limits["original"]["exceed_0_25_rad_samples"]}/{summary["completed"]}，模型生成同区间 {limits["generated_same_interval"]["exceed_0_25_rad_samples"]}/{summary["completed"]}；严格 XML 原始边界触碰/超出分别为 {limits["original"]["strict_xml_exceed_samples"]}/{summary["completed"]} 和 {limits["generated_same_interval"]["strict_xml_exceed_samples"]}/{summary["completed"]}。</p>
 <p>AIST++ 原数据本身是短动作片段，对比不会循环原动作。<a href="summary.json">汇总 JSON</a> · <a href="selection.json">选择与契约</a></p></div>
 {"".join(sections)}</main></body></html>"""
     (output_root / "index.html").write_text(document, encoding="utf-8")
@@ -460,8 +535,12 @@ def main() -> int:
     output_root.mkdir(parents=True, exist_ok=True)
     selection = json.loads((validation_root / "selection.json").read_text(encoding="utf-8"))
     items = selection.get("items")
-    if not isinstance(items, list) or len(items) != 40:
-        raise ValueError("validation selection 必须严格包含 40 项")
+    if not isinstance(items, list) or not items:
+        raise ValueError("validation selection 必须包含至少一项")
+    model_label = str((selection.get("model") or {}).get("label", "checkpoint"))
+    if re.fullmatch(r"[A-Za-z0-9_.-]+", model_label) is None:
+        raise ValueError("selection model.label 含有不安全字符")
+    total = len(items)
     quality_config = load_config(config_path)
     kinematics = BumiKinematics(kinematics_path).eval()
     if kinematics.source_mjcf_sha256 != sha256_file(mjcf_path):
@@ -478,7 +557,8 @@ def main() -> int:
         "target_kinematics_sha256": kinematics.kinematics_sha256,
         "mjcf": str(mjcf_path),
         "mjcf_sha256": sha256_file(mjcf_path),
-        "comparison_policy": "原50Hz动作精确重采样到30Hz；对比截到原动作真实长度；不循环AIST短片段",
+        "model_label": model_label,
+        "comparison_policy": "原50Hz动作精确重采样到30Hz；对比截到原动作与模型生成的共同真实长度；不循环或拉伸短片段",
         "items": items,
     }
     atomic_json(output_root / "selection.json", frozen_selection)
@@ -502,14 +582,14 @@ def main() -> int:
         )
         if existing is not None:
             results.append(existing)
-            print(f"[{number:02d}/40] 复用 {item['dataset_label']}/{key}", flush=True)
+            print(f"[{number:02d}/{total:02d}] 复用 {item['dataset_label']}/{key}", flush=True)
             continue
         artifact_path = output_root / "artifacts" / "original" / dataset / f"{key}.pt"
         original_video = output_root / "videos" / "original" / dataset / f"{key}.mp4"
         generated_video = output_root / "videos" / "generated" / dataset / f"{key}.mp4"
         comparison_video = output_root / "videos" / "comparison" / dataset / f"{key}.mp4"
         started = time.perf_counter()
-        print(f"[{number:02d}/40] 对比 {item['dataset_label']}/{key}", flush=True)
+        print(f"[{number:02d}/{total:02d}] 对比 {item['dataset_label']}/{key}", flush=True)
         try:
             _, original_qpos = save_original_artifact(
                 source_motion=source_motion,
@@ -524,11 +604,16 @@ def main() -> int:
             if generated_qpos.ndim != 2 or generated_qpos.shape[1] != 28:
                 raise ValueError("模型生成 artifact qpos 不是 [T,28]")
             comparison_frames = min(len(original_qpos), len(generated_qpos))
-            if comparison_frames != len(original_qpos):
-                raise ValueError("模型生成视频短于原数据集动作，无法完整公平对比")
+            if comparison_frames < 120:
+                raise ValueError("原动作与模型生成的共同区间不足 120 帧")
             comparison_duration = comparison_frames / 30.0
-            full_audio_duration = float(
+            generated_duration = float(
                 generated_payload["feature_metadata"]["selected_duration_sec"]
+            )
+            source_audio_duration = float(
+                generated_payload["feature_metadata"].get(
+                    "original_selected_duration_sec", generated_duration
+                )
             )
             audio_path = Path(item["audio"]).resolve(strict=True)
             original_probe = render_original_video(
@@ -549,12 +634,14 @@ def main() -> int:
                 audio=audio_path,
                 output=comparison_video,
                 duration_sec=comparison_duration,
+                model_label=model_label,
                 width=args.width,
                 height=args.height,
             )
             if abs(comparison_probe["duration_sec"] - comparison_duration) > 0.15:
                 raise RuntimeError("对比视频时长误差超过 0.15 秒")
-            original_metrics = motion_metrics(original_qpos, kinematics)
+            original_overlap = original_qpos[:comparison_frames]
+            original_metrics = motion_metrics(original_overlap, kinematics)
             generated_metrics = motion_metrics(generated_qpos[:comparison_frames], kinematics)
             report = {
                 "contract_version": "genmo.bumi_hq_original_comparison_sample.v1",
@@ -573,8 +660,9 @@ def main() -> int:
                 "generated_full_frames_30hz": len(generated_qpos),
                 "comparison_frames_30hz": comparison_frames,
                 "comparison_duration_sec": comparison_duration,
-                "full_audio_duration_sec": full_audio_duration,
-                "source_clip_shorter_than_audio": comparison_duration + 0.15 < full_audio_duration,
+                "generated_duration_sec": generated_duration,
+                "source_audio_duration_sec": source_audio_duration,
+                "source_clip_shorter_than_audio": comparison_duration + 0.15 < generated_duration,
                 "original_artifact_relative": relative(artifact_path, output_root),
                 "original_video_relative": relative(original_video, output_root),
                 "generated_video_relative": relative(generated_video, output_root),
@@ -585,7 +673,7 @@ def main() -> int:
                 "comparison_media": comparison_probe,
                 "joint_limit_tolerance_rad": args.joint_limit_tolerance_rad,
                 "original_joint_limits": analyze_joint_limits(
-                    original_qpos,
+                    original_overlap,
                     kinematics,
                     tolerance_rad=args.joint_limit_tolerance_rad,
                 ),
@@ -611,15 +699,23 @@ def main() -> int:
                 "error": f"{type(exc).__name__}: {exc}",
                 "elapsed_seconds": time.perf_counter() - started,
             }
-            print(f"[{number:02d}/40] 失败：{report['error']}", flush=True)
+            print(f"[{number:02d}/{total:02d}] 失败：{report['error']}", flush=True)
         atomic_json(report_path, report)
         results.append(report)
         summary = summarize(results)
         atomic_json(output_root / "summary.json", summary)
-        build_index(output_root, results, summary)
+        atomic_json(
+            output_root / "site_data.json",
+            build_site_data(results, summary, items=items, model_label=model_label),
+        )
+        build_index(output_root, results, summary, model_label=model_label)
     summary = summarize(results)
     atomic_json(output_root / "summary.json", summary)
-    build_index(output_root, results, summary)
+    atomic_json(
+        output_root / "site_data.json",
+        build_site_data(results, summary, items=items, model_label=model_label),
+    )
+    build_index(output_root, results, summary, model_label=model_label)
     print(json.dumps(summary, indent=2, ensure_ascii=False))
     return 0 if summary["failed"] == 0 else 1
 

@@ -4,6 +4,8 @@
 工具严格校验轨迹的机器人标识、四元数约定、MuJoCo 原生关节顺序和 30 Hz 帧率，
 再逐帧执行 ``mj_forward`` 并写入 H.264 视频。视频帧采用流式编码，避免完整音乐对应的
 数千帧 RGB 图像同时驻留内存；因此既适合短片验证，也适合数分钟完整音频的批量评测。
+``--max-frames`` 可在加载并完成轨迹契约校验后只渲染前缀帧，供固定时长网页验收避免先渲染
+整段长动作再由 ffmpeg 截断；该选项不循环、不补帧，也不会改变源动作产物。
 """
 
 from __future__ import annotations
@@ -71,8 +73,13 @@ def main() -> None:
     parser.add_argument("--width", type=int, default=1280)
     parser.add_argument("--height", type=int, default=720)
     parser.add_argument("--camera")
+    parser.add_argument("--max-frames", type=int)
     args = parser.parse_args()
     qpos, fps, payload = load_qpos(args.motion.expanduser().resolve(), args.qpos_key)
+    if args.max_frames is not None:
+        if args.max_frames <= 0:
+            raise ValueError("--max-frames 必须为正整数")
+        qpos = qpos[: args.max_frames]
     if fps != 30:
         raise ValueError(f"BUMI render input must be 30 FPS, got {fps}")
     model = mujoco.MjModel.from_xml_path(str(args.mjcf.expanduser().resolve()))

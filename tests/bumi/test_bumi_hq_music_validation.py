@@ -2,7 +2,8 @@
 
 测试使用最小临时 CSV/空 WAV 和伪运动学对象，不加载真实 ONNX 或 MuJoCo。它覆盖四数据集
 动作名到音频键的严格映射、score=1 去重选择，以及 0/1 基关节编号、XML 原始超限和部署
-容差后超限之间的区别，防止批量页面给出错误的高质量来源或关节统计。
+容差后超限之间的区别，并校验渲染失败后只复用身份完全一致的动作产物，防止批量页面给出
+错误的高质量来源或关节统计，也避免恢复流程错误复用其他模型的推理结果。
 """
 
 from __future__ import annotations
@@ -17,7 +18,9 @@ from scripts.validate_bumi_hq_music_full import (
     DATASETS,
     analyze_joint_limits,
     audio_key_for_motion,
+    reusable_artifact,
     select_hq_audio,
+    truncate_music_features,
 )
 
 
@@ -71,6 +74,68 @@ def test_score_one_selection_deduplicates_shared_audio(tmp_path: Path) -> None:
     assert summary["compas3d"]["selected_audio_count"] == 1
     compas = next(row for row in selected if row["dataset"] == "compas3d")
     assert compas["high_quality_motion_count"] == 2
+
+    selected_by_dataset, summary_by_dataset = select_hq_audio(
+        ratings,
+        audio,
+        per_dataset={
+            "finedance": 3,
+            "compas3d": 2,
+            "aioz_gdance": 1,
+            "aistpp": 1,
+        },
+    )
+    assert len(selected_by_dataset) == 4
+    assert summary_by_dataset["finedance"]["requested_audio_count"] == 3
+    assert summary_by_dataset["finedance"]["selected_audio_count"] == 1
+
+
+def test_music_feature_truncation_preserves_original_duration() -> None:
+    features = torch.arange(300 * 35, dtype=torch.float32).reshape(300, 35)
+    clipped, metadata, original_duration = truncate_music_features(
+        features,
+        {"selected_duration_sec": 10.0, "feature_frames": 300},
+        max_duration_sec=8.0,
+    )
+    assert clipped.shape == (240, 35)
+    assert torch.equal(clipped, features[:240])
+    assert original_duration == 10.0
+    assert metadata["original_selected_duration_sec"] == 10.0
+    assert metadata["selected_duration_sec"] == 8.0
+    assert metadata["feature_frames"] == 240
+
+
+def test_reusable_artifact_requires_matching_identity(tmp_path: Path) -> None:
+    artifact_path = tmp_path / "motion.pt"
+    identity = {
+        "checkpoint_sha256": "a" * 64,
+        "onnx_sha256": "b" * 64,
+        "audio": "/music/example.wav",
+        "seed": 42,
+        "cfg_scale": 2.5,
+        "ddim_steps": 20,
+        "max_duration_sec": 8.0,
+        "sliding_qpos_contract_version": "contract-v1",
+    }
+    torch.save(
+        {
+            **identity,
+            "qpos": torch.zeros(240, 28),
+            "qpos_canonical": torch.zeros(240, 28),
+        },
+        artifact_path,
+    )
+    arguments = {
+        "item": {"audio": identity["audio"]},
+        **{
+            ("sliding_contract_version" if key == "sliding_qpos_contract_version" else key): value
+            for key, value in identity.items()
+            if key != "audio"
+        },
+    }
+    assert reusable_artifact(artifact_path, **arguments) is not None
+    arguments["onnx_sha256"] = "c" * 64
+    assert reusable_artifact(artifact_path, **arguments) is None
 
 
 def test_joint_limit_report_distinguishes_raw_and_tolerated_excess() -> None:

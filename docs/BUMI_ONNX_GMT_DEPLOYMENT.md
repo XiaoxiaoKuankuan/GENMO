@@ -33,6 +33,105 @@ Parity 是数值等价检查。本项目固定相同 checkpoint、输入和噪�
 Runtime、TensorRT 的单步 93D，以及完整 DDIM 后的 93D、qpos28 和 Torch FK；浮点算子
 实现不同，所以要求在明确容差内一致，不要求逐 bit 相同。
 
+## 当前 v2 s350000 导出与 50 首网页验证（2026-08-24）
+
+当前人工 q1 五库基线使用以下本地资产；`meshes/` 必须与 `bumi3.xml` 同目录，否则 MuJoCo
+会在推理产物已经生成后统一渲染失败：
+
+```bash
+cd /home/weili/GENMO
+
+BUMI_TASK_CKPT=inputs/checkpoints/bumi_5set_manual_q1_v3/s350000/last.ckpt
+BUMI_TASK_KIN=inputs/assets/bumi_manual_q1_v3/bumi_kinematics_482138_v1.json
+BUMI_TASK_STATS=inputs/assets/bumi_manual_q1_v3/bumi_93d_stats_train_manual_q1_v3.json
+BUMI_TASK_MJCF=inputs/assets/bumi_manual_q1_v3/bumi3.xml
+BUMI_TASK_ONNX=outputs/onnx/bumi_music/s350000_hq50/bumi_music_denoiser_t120.onnx
+BUMI_TASK_AUDIO=data/server_music_wav_4set_all_20260818/aistpp/wav/mJS5.wav
+BUMI_TASK_OUT=outputs/onnx/bumi_music/s350000_hq50
+```
+
+导出 120 帧、opset 18 的 guided denoiser：
+
+```bash
+.venv/bin/python tools/export/export_bumi_music_onnx.py \
+  --ckpt "$BUMI_TASK_CKPT" \
+  --output "$BUMI_TASK_ONNX" \
+  --exp gem_bumi_music_only_5set_manual_q1_v3 \
+  --kinematics "$BUMI_TASK_KIN" \
+  --stats "$BUMI_TASK_STATS" \
+  --seq-len 120 \
+  --opset 18 \
+  --device cuda:0 \
+  --overwrite
+```
+
+严格基准使用 CPU provider；CUDA provider 另跑一份诊断，不用 CUDA 中间 93D 的严格失败
+覆盖 CPU 的可移植导出结论：
+
+```bash
+.venv/bin/python tools/eval/validate_bumi_music_onnx.py \
+  --audio "$BUMI_TASK_AUDIO" \
+  --ckpt "$BUMI_TASK_CKPT" \
+  --onnx "$BUMI_TASK_ONNX" \
+  --exp gem_bumi_music_only_5set_manual_q1_v3 \
+  --kinematics "$BUMI_TASK_KIN" \
+  --stats "$BUMI_TASK_STATS" \
+  --seq-len 120 \
+  --provider cpu \
+  --device cpu \
+  --full-ddim-steps 20 \
+  --output-dir "$BUMI_TASK_OUT/parity_cpu"
+
+# 将 --provider/--device 改为 cuda/cuda:0，并把输出目录改为 $BUMI_TASK_OUT/parity，
+# 可复现 CUDA 诊断。
+```
+
+50 首验证固定取音乐起点的前 8 秒，以 `FineDance=30、CoMPAS3D=5、AIOZ-GDance=10、
+AIST++=5` 的配额从人工 `score=1` 音频全集均匀抽样；相同命令可恢复正式报告，也会复用
+已原子落盘但尚未成功渲染的动作产物：
+
+```bash
+MUJOCO_GL=egl .venv/bin/python scripts/validate_bumi_hq_music_full.py \
+  --audio-root data/server_music_wav_4set_all_20260818 \
+  --ratings-root data/motions_npz_bumi3_smooth_q1/rate \
+  --checkpoint "$BUMI_TASK_CKPT" \
+  --onnx "$BUMI_TASK_ONNX" \
+  --kinematics "$BUMI_TASK_KIN" \
+  --stats "$BUMI_TASK_STATS" \
+  --mjcf "$BUMI_TASK_MJCF" \
+  --output-root "$BUMI_TASK_OUT/validation_hq50_8s_20260824" \
+  --finedance-count 30 \
+  --compas3d-count 5 \
+  --aioz-gdance-count 10 \
+  --aistpp-count 5 \
+  --max-duration-sec 8 \
+  --onnx-provider cuda \
+  --device cuda:0 \
+  --ddim-steps 20 \
+  --cfg-scale 2.5 \
+  --seed 42 \
+  --joint-limit-tolerance-rad 0.25 \
+  --width 640 \
+  --height 480
+
+MUJOCO_GL=egl .venv/bin/python scripts/build_bumi_hq_original_comparison.py \
+  --validation-root "$BUMI_TASK_OUT/validation_hq50_8s_20260824" \
+  --source-motion-root data/motions_npz_bumi3_smooth_q1 \
+  --quality-config configs/bumi/quality_filter_sonic_npz_50hz_auto025_v1.yaml \
+  --kinematics "$BUMI_TASK_KIN" \
+  --mjcf "$BUMI_TASK_MJCF" \
+  --output-root "$BUMI_TASK_OUT/validation_hq50_8s_20260824/comparison_original_vs_generated" \
+  --joint-limit-tolerance-rad 0.25 \
+  --width 640 \
+  --height 480
+```
+
+实际导出 ONNX 为 `864271583` bytes，SHA256 是
+`1e6c1a73469785be646665fd3df8ef11bc9b40beacbdf0f0e5fd7e1a8897e670`。CPU 单步、完整
+93D、qpos 和 FK 全部通过；CUDA 的完整 qpos/FK 仍在 `0.02` 容差内，但单步和完整 93D
+未通过严格 allclose。50 项均完成生成与并排渲染，总对比 399.4 秒；AIST++ `mWA5` 的原
+动作只有 7.4 秒，按真实长度保留，没有循环或拉伸。
+
 ## 历史 v1 模型和资产（仅审计）
 
 - 服务器 2 checkpoint：

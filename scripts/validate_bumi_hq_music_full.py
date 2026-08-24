@@ -1,17 +1,20 @@
 #!/usr/bin/env python3
-"""批量验证四数据集人工高质量动作对应的完整音乐生成效果。
+"""批量验证四数据集人工高质量动作对应的音乐生成效果。
 
 本工具把人工评分、长音乐生成、BUMI 世界系轨迹、MuJoCo 视频和质量审计串成一个可恢复的
 离线流程。它只选择四张评分 CSV 中 ``score=1`` 的动作，再按数据集规则映射到音频并去重；
-每首音频保留全部对应的高质量动作名称，方便从页面和 JSON 追溯选择依据。生成阶段复用一次
-固定 120 帧的 BUMI ONNX 会话，通过 120/30 独立预测、世界对齐和几何感知 overlap-add
-覆盖任意完整音频，输出连续世界系 qpos28。
+每首音频保留全部对应的高质量动作名称，方便从页面和 JSON 追溯选择依据。各数据集可使用
+不同的抽样数量；生成既支持完整音乐，也支持为网页验收设置统一的前缀时长。生成阶段复用
+一次固定 120 帧的 BUMI ONNX 会话，通过 120/30 独立预测、世界对齐和几何感知
+overlap-add 输出连续世界系 qpos28。
 
 质量报告同时给出严格 XML 原始限位和部署容差后的限位结果。每个超限关节都记录 0/1 基编号、
 名称、方向、最大超限弧度、发生帧、实际值、XML 边界和超限帧数；另外保留脚部穿地、根节点
 倾斜、速度和节拍对齐等运动学指标。最终 ``index.html`` 按 FineDance、CoMPAS3D、
 AIOZ-GDance、AIST++ 分组展示带声音视频及逐关节统计。该评测不执行 GMT，也不代表真实机器人
-动力学可跟踪性。中断后再次运行会复用身份一致且已通过媒体校验的正式结果。
+动力学可跟踪性。中断后再次运行会复用身份一致且已通过媒体校验的正式结果；若推理产物已经
+原子落盘、但渲染阶段因外部资源缺失而失败，也会复用身份一致的动作产物，只补做指标、渲染
+与报告，避免重复执行昂贵的扩散推理。
 """
 
 from __future__ import annotations
@@ -48,6 +51,7 @@ from gem.runtime.bumi_music_deploy import (  # noqa: E402
     BumiSlidingQposGenerator,
 )
 from gem.runtime.bumi_music_onnx import BUMI_ONNX_CONTRACT_VERSION  # noqa: E402
+from gem.runtime.music_only_trt import plan_sliding_windows  # noqa: E402
 from gem.utils.music_features import extract_edge_baseline35  # noqa: E402
 
 DATASETS = (
@@ -105,12 +109,26 @@ def audio_path_for_key(audio_root: Path, dataset: str, audio_key: str) -> Path:
 
 
 def select_hq_audio(
-    ratings_root: Path, audio_root: Path, *, per_dataset: int
+    ratings_root: Path,
+    audio_root: Path,
+    *,
+    per_dataset: int | dict[str, int],
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
-    """读取 score=1，按音频去重并返回每库固定数量的可追溯选择。"""
+    """读取 score=1，按音频去重并返回每库指定数量的可追溯选择。"""
 
-    if per_dataset <= 0:
-        raise ValueError("per_dataset 必须为正整数")
+    dataset_keys = {dataset for dataset, _, _ in DATASETS}
+    if isinstance(per_dataset, int):
+        if per_dataset <= 0:
+            raise ValueError("per_dataset 必须为正整数")
+        limits = dict.fromkeys(dataset_keys, per_dataset)
+    elif isinstance(per_dataset, dict):
+        if set(per_dataset) != dataset_keys:
+            raise ValueError(f"per_dataset 必须精确覆盖 {sorted(dataset_keys)}")
+        limits = {key: int(value) for key, value in per_dataset.items()}
+        if any(value <= 0 for value in limits.values()):
+            raise ValueError("各数据集选择数量必须为正整数")
+    else:
+        raise TypeError("per_dataset 必须为整数或数据集到整数的映射")
     selected: list[dict[str, Any]] = []
     dataset_summary: dict[str, Any] = {}
     for dataset, label, filename in DATASETS:
@@ -159,7 +177,8 @@ def select_hq_audio(
                     "high_quality_motion_names": names,
                 }
             )
-        chosen_count = min(per_dataset, len(available))
+        requested_count = limits[dataset]
+        chosen_count = min(requested_count, len(available))
         if chosen_count <= 1:
             chosen = available[:chosen_count]
         else:
@@ -178,9 +197,41 @@ def select_hq_audio(
             "available_score_1_audio_count": len(available),
             "missing_audio_count": len(missing),
             "missing_audio_examples": missing[:10],
+            "requested_audio_count": requested_count,
             "selected_audio_count": len(chosen),
         }
     return selected, dataset_summary
+
+
+def truncate_music_features(
+    features: torch.Tensor,
+    metadata: dict[str, Any],
+    *,
+    max_duration_sec: float | None,
+) -> tuple[torch.Tensor, dict[str, Any], float]:
+    """按网页验证时长截取 EDGE35，同时保留原音乐时长和更新后的特征契约。"""
+
+    if features.ndim != 2 or features.shape[1] != 35 or not bool(torch.isfinite(features).all()):
+        raise ValueError(f"音乐特征必须是 finite [T,35]，实际为 {tuple(features.shape)}")
+    updated = dict(metadata)
+    original_duration_sec = float(updated["selected_duration_sec"])
+    if max_duration_sec is None:
+        return features, updated, original_duration_sec
+    if not math.isfinite(max_duration_sec) or max_duration_sec < 4.0:
+        raise ValueError("max_duration_sec 必须为空或至少为 4 秒的有限数")
+    target_frames = min(len(features), round(max_duration_sec * 30.0))
+    if target_frames < 120:
+        raise ValueError("截取后的音乐特征少于固定 ONNX 窗口 120 帧")
+    clipped = features[:target_frames].contiguous()
+    updated.update(
+        {
+            "original_selected_duration_sec": original_duration_sec,
+            "selected_duration_sec": len(clipped) / 30.0,
+            "feature_frames": len(clipped),
+            "validation_max_duration_sec": max_duration_sec,
+        }
+    )
+    return clipped, updated, original_duration_sec
 
 
 def analyze_joint_limits(
@@ -498,6 +549,12 @@ def build_index(
     summary: dict[str, Any],
     selection: dict[str, Any],
 ) -> None:
+    model_label = html.escape(str(selection["model"]["label"]))
+    duration_label = (
+        "完整音乐"
+        if selection["generation"]["full_audio"]
+        else f"前 {selection['generation']['max_duration_sec']:.1f} 秒"
+    )
     cards = []
     for dataset, label, _ in DATASETS:
         dataset_rows = [row for row in results if row["dataset"] == dataset]
@@ -538,7 +595,7 @@ def build_index(
                 f'<article class="card"><h3>{index}. {html.escape(row["audio_key"])} '
                 f'<span class="badge">{badge}</span></h3>'
                 f'<video controls preload="metadata" src="{video}"></video>'
-                f"<p>高质量动作代表：<code>{representative}</code>；完整音频 "
+                f"<p>高质量动作代表：<code>{representative}</code>；{duration_label} "
                 f"{row['source_duration_sec']:.2f}s，生成 {row['frames']} 帧。</p>"
                 f"<p>严格 XML 最大超限 {limits['strict_xml_max_excess_rad']:.6f} rad；"
                 f"容差 {limits['tolerance_rad']:.3f} rad 后最大超限 "
@@ -555,7 +612,7 @@ def build_index(
         cards.append(f"<section><h2>{label}</h2>{''.join(item_html)}</section>")
     document = f"""<!doctype html>
 <html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>BUMI s430000 四库高质量完整音乐验证</title>
+<title>BUMI {model_label} 四库高质量音乐验证</title>
 <style>
 body{{margin:0;background:#10131a;color:#edf1f7;font:15px/1.55 system-ui,sans-serif}}main{{max-width:1500px;margin:auto;padding:28px}}
 a{{color:#78c5ff}}code{{overflow-wrap:anywhere}}.summary,.card{{background:#191f2b;border:1px solid #30394a;border-radius:12px;padding:16px;margin:14px 0}}
@@ -563,7 +620,7 @@ section{{margin-top:34px}}video{{width:100%;max-height:620px;background:#000;bor
 .failed{{border-color:#a74d4d}}.table-wrap{{overflow-x:auto}}table{{border-collapse:collapse;width:100%;margin-top:10px}}th,td{{padding:7px;border:1px solid #3a4354;text-align:left;white-space:nowrap}}
 @media(min-width:1000px){{section{{display:grid;grid-template-columns:1fr 1fr;gap:16px}}section h2{{grid-column:1/-1}}.card{{margin:0}}}}
 </style></head><body><main>
-<h1>BUMI s430000 四库人工高质量完整音乐验证</h1>
+<h1>BUMI {model_label} 四库人工高质量音乐验证</h1>
 <div class="summary"><p>共评测 {summary["evaluated_samples"]} 首，完成 {summary["completed_samples"]} 首；严格 XML 超限样本 {summary["strict_xml_exceed_sample_count"]} 首，部署容差 {summary["joint_limit_tolerance_rad"]:.3f}rad 后仍超限 {summary["tolerance_exceed_sample_count"]} 首。</p>
 <p>总音频 {summary["motion_quality"]["total_duration_sec"] / 60.0:.2f} 分钟、{summary["motion_quality"]["total_frames"]} 帧；脚部最大穿地超过 5cm 的样本 {summary["motion_quality"]["foot_penetration_max_over_0_05m_samples"]} 首，根节点最大倾斜超过 0.5rad 的样本 {summary["motion_quality"]["root_tilt_max_over_0_5rad_samples"]} 首。</p>
 <p>选择只来自人工评分 <code>score=1</code>，完整规则见 <a href="selection.json">selection.json</a>，汇总见 <a href="quality_summary.json">quality_summary.json</a>。所有编号同时在报告中提供 0-based 和 1-based。</p></div>
@@ -583,6 +640,7 @@ def completed_result(
     seed: int,
     cfg_scale: float,
     ddim_steps: int,
+    max_duration_sec: float | None,
     sliding_contract_version: str,
 ) -> dict[str, Any] | None:
     report_path = output_root / "reports" / item["dataset"] / f"{item['audio_key']}.json"
@@ -615,6 +673,7 @@ def completed_result(
             "seed": seed,
             "cfg_scale": cfg_scale,
             "ddim_steps": ddim_steps,
+            "max_duration_sec": max_duration_sec,
             "sliding_qpos_contract_version": sliding_contract_version,
         }.items()
     ):
@@ -626,6 +685,51 @@ def completed_result(
         report["joint_limit_reaudited"] = True
         atomic_json(report_path, report)
     return report
+
+
+def reusable_artifact(
+    artifact_path: Path,
+    *,
+    item: dict[str, Any],
+    checkpoint_sha256: str,
+    onnx_sha256: str,
+    seed: int,
+    cfg_scale: float,
+    ddim_steps: int,
+    max_duration_sec: float | None,
+    sliding_contract_version: str,
+) -> dict[str, Any] | None:
+    """校验并读取渲染失败前已原子落盘的动作产物。"""
+
+    if not artifact_path.is_file():
+        return None
+    try:
+        try:
+            artifact = torch.load(artifact_path, map_location="cpu", weights_only=False)
+        except TypeError:
+            artifact = torch.load(artifact_path, map_location="cpu")
+    except Exception:
+        return None
+    expected = {
+        "checkpoint_sha256": checkpoint_sha256,
+        "onnx_sha256": onnx_sha256,
+        "audio": item["audio"],
+        "seed": seed,
+        "cfg_scale": cfg_scale,
+        "ddim_steps": ddim_steps,
+        "max_duration_sec": max_duration_sec,
+        "sliding_qpos_contract_version": sliding_contract_version,
+    }
+    if not isinstance(artifact, dict) or any(
+        artifact.get(key) != value for key, value in expected.items()
+    ):
+        return None
+    qpos = artifact.get("qpos")
+    if not isinstance(qpos, torch.Tensor) or qpos.ndim != 2 or qpos.shape[1] != 28:
+        return None
+    if len(qpos) <= 0 or not bool(torch.isfinite(qpos).all()):
+        return None
+    return artifact
 
 
 def parse_args() -> argparse.Namespace:
@@ -640,6 +744,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--mjcf", type=Path, required=True)
     parser.add_argument("--output-root", type=Path, required=True)
     parser.add_argument("--per-dataset", type=int, default=10)
+    parser.add_argument("--finedance-count", type=int)
+    parser.add_argument("--compas3d-count", type=int)
+    parser.add_argument("--aioz-gdance-count", type=int)
+    parser.add_argument("--aistpp-count", type=int)
+    parser.add_argument(
+        "--max-duration-sec",
+        type=float,
+        help="只评测每首音乐从起点开始的指定秒数；不传则使用完整音乐。",
+    )
     parser.add_argument("--onnx-provider", choices=("cpu", "cuda"), default="cuda")
     parser.add_argument("--device", default="cuda:0")
     parser.add_argument("--ddim-steps", type=int, default=20)
@@ -659,13 +772,23 @@ def main() -> int:
         raise ValueError("ddim_steps 必须在 2..1000")
     if not math.isfinite(args.cfg_scale) or args.cfg_scale < 0.0:
         raise ValueError("cfg_scale 必须是有限非负数")
+    if args.max_duration_sec is not None and (
+        not math.isfinite(args.max_duration_sec) or args.max_duration_sec < 4.0
+    ):
+        raise ValueError("max_duration_sec 必须为空或至少为 4 秒的有限数")
     paths = {}
     for name in ("audio_root", "ratings_root", "checkpoint", "onnx", "kinematics", "stats", "mjcf"):
         paths[name] = getattr(args, name).expanduser().resolve(strict=True)
     output_root = args.output_root.expanduser().resolve()
     output_root.mkdir(parents=True, exist_ok=True)
+    selection_limits = {
+        "finedance": args.finedance_count or args.per_dataset,
+        "compas3d": args.compas3d_count or args.per_dataset,
+        "aioz_gdance": args.aioz_gdance_count or args.per_dataset,
+        "aistpp": args.aistpp_count or args.per_dataset,
+    }
     selected, dataset_summary = select_hq_audio(
-        paths["ratings_root"], paths["audio_root"], per_dataset=args.per_dataset
+        paths["ratings_root"], paths["audio_root"], per_dataset=selection_limits
     )
     metadata_path = (
         args.onnx_metadata.expanduser().resolve(strict=True)
@@ -690,14 +813,22 @@ def main() -> int:
     for name, value in expected.items():
         if identities[name] != value:
             raise ValueError(f"ONNX 身份不匹配：{name}")
+    checkpoint_step = int((metadata.get("checkpoint") or {}).get("global_step", -1))
+    model_label = f"s{checkpoint_step:06d}" if checkpoint_step >= 0 else "checkpoint"
     selection = {
-        "contract_version": "genmo.bumi_hq_full_music_selection.v2",
-        "selection_policy": "四张人工评分 CSV 的 score=1；按数据集映射音频键并去重；在音频键字典序全集上均匀取 N 首",
-        "per_dataset_limit": args.per_dataset,
+        "contract_version": "genmo.bumi_hq_full_music_selection.v3",
+        "selection_policy": "四张人工评分 CSV 的 score=1；按数据集映射音频键并去重；在各自音频键字典序全集上均匀抽取指定数量",
+        "per_dataset_limits": selection_limits,
         "dataset_summary": dataset_summary,
-        "model": {**identities, "onnx_metadata": str(metadata_path)},
+        "model": {
+            **identities,
+            "label": model_label,
+            "checkpoint_global_step": checkpoint_step,
+            "onnx_metadata": str(metadata_path),
+        },
         "generation": {
-            "full_audio": True,
+            "full_audio": args.max_duration_sec is None,
+            "max_duration_sec": args.max_duration_sec,
             "sliding_window_frames": 120,
             "overlap_frames": 30,
             "sliding_qpos_contract_version": BUMI_SLIDING_QPOS_CONTRACT_VERSION,
@@ -752,6 +883,7 @@ def main() -> int:
             seed=args.seed,
             cfg_scale=args.cfg_scale,
             ddim_steps=args.ddim_steps,
+            max_duration_sec=args.max_duration_sec,
             sliding_contract_version=BUMI_SLIDING_QPOS_CONTRACT_VERSION,
         )
         if existing is not None:
@@ -772,9 +904,35 @@ def main() -> int:
         )
         try:
             features, feature_metadata = extract_edge_baseline35(audio_path, target_fps=30)
-            generated = generator.generate(features, seed=args.seed)
-            qpos = generated.qpos.float().contiguous()
-            canonical = endecoder.codec.encode(qpos.to(device)).canonical_qpos.detach().cpu()
+            features, feature_metadata, original_duration_sec = truncate_music_features(
+                features,
+                feature_metadata,
+                max_duration_sec=args.max_duration_sec,
+            )
+            artifact = reusable_artifact(
+                artifact_path,
+                item=item,
+                checkpoint_sha256=identities["checkpoint_sha256"],
+                onnx_sha256=identities["onnx_sha256"],
+                seed=args.seed,
+                cfg_scale=args.cfg_scale,
+                ddim_steps=args.ddim_steps,
+                max_duration_sec=args.max_duration_sec,
+                sliding_contract_version=BUMI_SLIDING_QPOS_CONTRACT_VERSION,
+            )
+            if artifact is None:
+                generated = generator.generate(features, seed=args.seed)
+                qpos = generated.qpos.float().contiguous()
+                canonical = endecoder.codec.encode(qpos.to(device)).canonical_qpos.detach().cpu()
+                windows = len(generated.chunks)
+            else:
+                qpos = artifact["qpos"].float().contiguous()
+                canonical = artifact["qpos_canonical"].float().contiguous()
+                windows = len(plan_sliding_windows(len(qpos)))
+                print(
+                    f"[{number:02d}/{total:02d}] 复用已生成动作，仅补渲染与审计",
+                    flush=True,
+                )
             metrics = metrics_to_json(
                 compute_bumi_kinematic_metrics(
                     qpos.to(device),
@@ -788,30 +946,32 @@ def main() -> int:
                 endecoder.kinematics,
                 tolerance_rad=args.joint_limit_tolerance_rad,
             )
-            artifact = {
-                "contract_version": "genmo.bumi_hq_full_music_prediction.v2",
-                "robot_name": "bumi",
-                "fps": 30,
-                "qpos": qpos,
-                "qpos_canonical": canonical,
-                "joint_names": list(endecoder.kinematics.joint_order),
-                "quaternion_convention": "wxyz",
-                "qpos_order": "mujoco_native",
-                "audio": str(audio_path),
-                "feature_metadata": feature_metadata,
-                "high_quality_source": item,
-                "checkpoint_sha256": identities["checkpoint_sha256"],
-                "onnx_sha256": identities["onnx_sha256"],
-                "sliding_qpos_contract_version": BUMI_SLIDING_QPOS_CONTRACT_VERSION,
-                "kinematics_sha256": identities["kinematics_sha256"],
-                "seed": args.seed,
-                "cfg_scale": args.cfg_scale,
-                "ddim_steps": args.ddim_steps,
-            }
-            artifact_path.parent.mkdir(parents=True, exist_ok=True)
-            temporary_artifact = artifact_path.with_suffix(".tmp")
-            torch.save(artifact, temporary_artifact)
-            temporary_artifact.replace(artifact_path)
+            if artifact is None:
+                artifact = {
+                    "contract_version": "genmo.bumi_hq_full_music_prediction.v2",
+                    "robot_name": "bumi",
+                    "fps": 30,
+                    "qpos": qpos,
+                    "qpos_canonical": canonical,
+                    "joint_names": list(endecoder.kinematics.joint_order),
+                    "quaternion_convention": "wxyz",
+                    "qpos_order": "mujoco_native",
+                    "audio": str(audio_path),
+                    "feature_metadata": feature_metadata,
+                    "high_quality_source": item,
+                    "checkpoint_sha256": identities["checkpoint_sha256"],
+                    "onnx_sha256": identities["onnx_sha256"],
+                    "sliding_qpos_contract_version": BUMI_SLIDING_QPOS_CONTRACT_VERSION,
+                    "kinematics_sha256": identities["kinematics_sha256"],
+                    "seed": args.seed,
+                    "cfg_scale": args.cfg_scale,
+                    "ddim_steps": args.ddim_steps,
+                    "max_duration_sec": args.max_duration_sec,
+                }
+                artifact_path.parent.mkdir(parents=True, exist_ok=True)
+                temporary_artifact = artifact_path.with_suffix(".tmp")
+                torch.save(artifact, temporary_artifact)
+                temporary_artifact.replace(artifact_path)
             media = render_and_mux(
                 artifact=artifact_path,
                 audio=audio_path,
@@ -831,8 +991,9 @@ def main() -> int:
                 **{key: item[key] for key in item},
                 "audio": str(audio_path),
                 "source_duration_sec": source_duration,
+                "original_audio_duration_sec": original_duration_sec,
                 "frames": len(qpos),
-                "windows": len(generated.chunks),
+                "windows": windows,
                 "artifact_relative": _relative(artifact_path, output_root),
                 "video_relative": _relative(video_path, output_root),
                 "report_relative": _relative(report_path, output_root),
@@ -842,6 +1003,7 @@ def main() -> int:
                 "seed": args.seed,
                 "cfg_scale": args.cfg_scale,
                 "ddim_steps": args.ddim_steps,
+                "max_duration_sec": args.max_duration_sec,
                 "metrics": metrics,
                 "joint_limits": limits,
                 "media": media,
@@ -858,6 +1020,7 @@ def main() -> int:
                 "checkpoint_sha256": identities["checkpoint_sha256"],
                 "onnx_sha256": identities["onnx_sha256"],
                 "sliding_qpos_contract_version": BUMI_SLIDING_QPOS_CONTRACT_VERSION,
+                "max_duration_sec": args.max_duration_sec,
                 "error": f"{type(exc).__name__}: {exc}",
                 "elapsed_seconds": time.perf_counter() - started,
             }
