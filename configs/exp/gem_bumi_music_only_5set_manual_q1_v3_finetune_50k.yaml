@@ -1,0 +1,53 @@
+# @package _global_
+# 人工 q1 GMR temporal-bounded v3 五库模型的 50k 低学习率物理微调入口。
+#
+# 本配置从已完成的 350k repr_v2 checkpoint 仅加载网络权重，重新初始化 AdamW、学习率
+# 调度器和 global step；因此 ``max_steps=50000`` 表示独立执行五万个 optimizer step，
+# 而不是把旧作业从 350k 恢复到一个更小的绝对步数。训练数据、29/47/16/3/5 采样比例、
+# 93D 表示、无 contact head 网络以及 mixed_floor_zero_no_contact_v1 地面契约全部保持不变。
+#
+# 350k TensorBoard 曲线显示总损失继续下降，但验证关节限位、速度/加速度/jerk 和节拍指标
+# 在中后期回摆；最终总损失又主要由 repr_body_pos 构成。这里使用比旧作业最终学习率更低的
+# 2e-5，并温和提高直接约束关节/FK/时序/限位的辅助项：保留四个表示损失权重，不通过削弱
+# 93D 主目标换取表面更低的物理指标。jerk 从 0 启用为 0.005，仍由继承的 10k-step warmup
+# 平滑引入；contact、滑脚和穿透继续严格为 0，因为混合地面语义没有统一的可信接触标签。
+defaults:
+  - gem_bumi_music_only_5set_manual_q1_v3
+  - override /optimizer: adamw_2e-5
+  - override /scheduler: iters_half_30k_45k
+  - override /callbacks:
+      - ckpt_saver/every5000s_top100
+      - prog_bar/prog_reporter_ed1
+      - train_speed_timer/base
+      - lr_monitor/pl
+  - _self_
+
+exp_name_base: gem_bumi_music_only_5set_manual_q1_v3_finetune_physical_s350k_s50k
+exp_name_var: ""
+exp_name: ${exp_name_base}${exp_name_var}
+data_name: gem_bumi_music_only_5set_manual_q1_v3_finetune_50k
+output_dir: outputs/${exp_name}
+
+# 正式命令必须显式传入已核对 SHA256 的 s350000/last checkpoint。weights-only 加载会
+# 保留 checkpoint 权重，但不会继承旧 optimizer、scheduler、epoch 或 global step。
+pretrain_ckpt: null
+ckpt_path: null
+resume_mode: null
+
+pipeline:
+  args:
+    weights:
+      root_pos: 0.2
+      root_rot: 0.2
+      joint_dof: 0.2
+      fk_body_pos: 1.0
+      fk_consistency: 0.2
+      joint_velocity: 0.1
+      joint_acceleration: 0.01
+      joint_jerk: 0.005
+      joint_limit: 0.5
+      root_height: 0.1
+
+pl_trainer:
+  max_steps: 50000
+  val_check_interval: 5000

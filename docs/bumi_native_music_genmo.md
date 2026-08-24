@@ -662,6 +662,37 @@ Root Z 不再套用旧 `legacy_body_origin_min_zero` 二次平移。四个 GMR �
 各衰减一半，略高于旧 128×8×500k 的 5.12 亿 draw，目标墙钟时间约三天。五库 stats
 必须用新四库与自建库的 train manifests 联合重算，旧四库或旧五库 fingerprint 会被拒绝。
 
+350k 训练完成后的低学习率物理微调入口为
+`gem_bumi_music_only_5set_manual_q1_v3_finetune_50k`。它必须通过
+`pretrain_ckpt=/absolute/path/to/s350000.ckpt` 以 weights-only 方式加载已完成模型，在新
+输出目录重新初始化 optimizer、scheduler 和 global step；不要用 `resume_mode`，否则
+`max_steps=50000` 会与旧 checkpoint 的 350k global step 冲突。微调保持网络、数据版本、
+五库采样比例和混合地面契约不变，AdamW 学习率为 2e-5，在 30k/45k 各减半；每 5k step
+验证并保存 checkpoint。根据 350k 曲线，关节速度、加速度、jerk、限位以及 FK/根监督被
+适度提高，但 contact/slide/penetration 仍为零，不会从两类地面定义伪造接触监督。
+
+服务器 2 的正式启动方式如下，环境变量路径必须与人工 q1 v3 发布包一致：
+
+```bash
+cd /home/user/liwei/GENMO
+export GENMO_PYTHON=/data0/user/liwei/envs/GENMO-cu128/bin/python
+export BUMI_BASE=/data0/user/liwei/datasets/bumi_music_genmo_manual_q1_gmr_v3
+export BUMI_KINEMATICS_PATH=/data0/user/liwei/datasets/bumi_assets_482138_v1/kinematics/bumi_kinematics_482138_v1.json
+export AISTPP_BUMI_ROOT=$BUMI_BASE/AIST++
+export AIOZ_GDANCE_BUMI_ROOT=$BUMI_BASE/AIOZ-GDANCE
+export FINEDANCE_BUMI_ROOT=$BUMI_BASE/FineDance
+export COMPAS3D_BUMI_ROOT=$BUMI_BASE/CoMPAS3D
+export MINE_BUMI_ROOT=/data0/user/liwei/datasets/bumi_music_genmo_mine_v1
+export BUMI_MUSIC_STATS_PATH=/data0/user/liwei/datasets/bumi_music_genmo_5set_manual_q1_v3/meta/bumi_93d_stats_train_manual_q1_v3.json
+export BUMI_FINETUNE_CKPT=/data0/user/liwei/experiments/genmo/gem_bumi_music_only_5set_manual_q1_v3_repr_v2_b192_s350k/version_0/checkpoints/last.ckpt
+export BUMI_FINETUNE_OUTPUT=/data0/user/liwei/experiments/genmo/gem_bumi_music_only_5set_manual_q1_v3_finetune_physical_s350k_s50k
+
+CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 $GENMO_PYTHON -u scripts/train.py \
+  exp=gem_bumi_music_only_5set_manual_q1_v3_finetune_50k \
+  pretrain_ckpt="$BUMI_FINETUNE_CKPT" \
+  output_dir="$BUMI_FINETUNE_OUTPUT"
+```
+
 ## 运动学评估与动力学验证
 
 `eval_bumi_music.py` 实现 joint angle MAE、root trajectory/FK error、joint limits/margin、sole penetration/sliding、root height/tilt、joint velocity/acceleration/jerk P95、root linear/angular velocity、contact accuracy、beat alignment 和 batch diversity。它们都是运动学质量指标。

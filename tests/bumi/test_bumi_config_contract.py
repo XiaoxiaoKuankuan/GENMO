@@ -142,3 +142,39 @@ def test_manual_q1_v3_uses_large_batch_and_mixed_ground_contract() -> None:
     ):
         assert config.test_datasets[dataset_name].joint_limit_tolerance == 0.001
     assert config.use_wandb is False
+
+
+def test_manual_q1_v3_finetune_50k_preserves_data_and_tunes_physics() -> None:
+    with initialize_config_dir(version_base="1.3", config_dir=str(REPO_ROOT / "configs")):
+        config = compose(
+            config_name="train",
+            overrides=["exp=gem_bumi_music_only_5set_manual_q1_v3_finetune_50k"],
+        )
+
+    assert config.pretrain_ckpt is None
+    assert config.ckpt_path is None
+    assert config.resume_mode is None
+    assert config.data.expected_train_sequences == 2792 + 99
+    assert dict(config.data.dataset_sampling_weights) == {
+        "aistpp_bumi": 0.29,
+        "aioz_gdance_bumi": 0.47,
+        "finedance_bumi": 0.16,
+        "compas3d_bumi": 0.03,
+        "mine_bumi": 0.05,
+    }
+    assert config.data.loader_opts.train.batch_size == 192
+    assert config.pl_trainer.devices == 8
+    assert config.pl_trainer.max_steps == 50000
+    assert config.pl_trainer.val_check_interval == 5000
+    assert config.optimizer.lr == 2e-5
+    assert list(config.scheduler.scheduler.milestones) == [30000, 45000]
+    assert config.pipeline.args.ground_semantics == "mixed_floor_zero_no_contact_v1"
+    assert config.pipeline.args.weights.repr_body_pos == 1.0
+    assert config.pipeline.args.weights.joint_velocity == 0.1
+    assert config.pipeline.args.weights.joint_acceleration == 0.01
+    assert config.pipeline.args.weights.joint_jerk == 0.005
+    assert config.pipeline.args.weights.joint_limit == 0.5
+    assert config.pipeline.args.weights.contact_bce == 0.0
+    assert config.pipeline.args.weights.foot_slide == 0.0
+    assert config.pipeline.args.weights.penetration == 0.0
+    assert config.use_wandb is False
