@@ -48,6 +48,12 @@ def test_plan_overlapping_windows_keeps_attention_bounded() -> None:
     assert covered.all()
 
 
+def test_plan_overlapping_windows_does_not_add_redundant_short_tail() -> None:
+    windows = plan_overlapping_windows(2929, chunk_frames=600, overlap_frames=120)
+    assert windows[-2:] == [(1920, 2520), (2400, 2929)]
+    assert len(windows) == 6
+
+
 def test_chunk_blend_weights_sum_to_one_in_regular_overlap() -> None:
     first = chunk_blend_weights(0, 600, 1080, 120)
     second = chunk_blend_weights(480, 1080, 1080, 120)

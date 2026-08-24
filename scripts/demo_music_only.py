@@ -54,6 +54,11 @@ def build_parser() -> argparse.ArgumentParser:
     source.add_argument("--audio", type=Path, help="Raw WAV/audio input")
     source.add_argument("--music-embed", type=Path, help="Precomputed [T,35] EDGE feature")
     parser.add_argument("--ckpt", type=Path, default=DEFAULT_CHECKPOINT)
+    parser.add_argument(
+        "--exp",
+        default="gem_smpl_music_only",
+        help="Hydra experiment used to reconstruct the checkpoint architecture.",
+    )
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--audio-start-sec", type=float, default=0.0)
     parser.add_argument(
@@ -155,10 +160,15 @@ def plan_overlapping_windows(
     if num_frames <= chunk_frames:
         return [(0, num_frames)]
     stride = chunk_frames - overlap_frames
-    return [
-        (start, min(start + chunk_frames, num_frames))
-        for start in range(0, num_frames, stride)
-    ]
+    windows: list[tuple[int, int]] = []
+    start = 0
+    while start < num_frames:
+        end = min(start + chunk_frames, num_frames)
+        windows.append((start, end))
+        if end == num_frames:
+            break
+        start += stride
+    return windows
 
 
 def chunk_blend_weights(
@@ -354,7 +364,7 @@ def main(argv: list[str] | None = None) -> int:
     torch.manual_seed(args.seed)
     torch.cuda.manual_seed_all(args.seed)
     with initialize_config_dir(version_base="1.3", config_dir=str(REPO_ROOT / "configs")):
-        cfg = compose(config_name="train", overrides=["exp=gem_smpl_music_only"])
+        cfg = compose(config_name="train", overrides=[f"exp={args.exp}"])
     cfg.model_cfg.diffusion.guidance_param = float(args.cfg_scale)
     with open_dict(cfg.model_cfg.diffusion):
         cfg.model_cfg.diffusion.gen_only_test_timestep_respacing = str(args.ddim_steps)
