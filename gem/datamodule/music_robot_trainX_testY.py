@@ -29,6 +29,7 @@ def bumi_collate_fn(batch: list[dict], mode: str = "train") -> dict:
         "music_embed",
         "music_beats",
         "foot_contact",
+        "foot_contact_available",
         "length",
         "fps",
         "mask",
@@ -40,7 +41,7 @@ def bumi_collate_fn(batch: list[dict], mode: str = "train") -> dict:
             raise ValueError(
                 f"BUMI {mode} item {item_index} contains unsupported fields {sorted(unknown)}"
             )
-        required = allowed - {"foot_contact"}
+        required = allowed - {"foot_contact", "foot_contact_available"}
         missing = required - set(item)
         if missing:
             raise ValueError(f"BUMI {mode} item {item_index} is missing {sorted(missing)}")
@@ -67,7 +68,10 @@ def bumi_collate_fn(batch: list[dict], mode: str = "train") -> dict:
                         f"mixed BUMI foot_contact shapes: {contact.shape} != {template.shape}"
                     )
                 contacts.append(contact)
-                available.append(item["mask"]["valid"].bool())
+                supplied_available = item.get("foot_contact_available")
+                if supplied_available is None:
+                    supplied_available = item["mask"]["valid"]
+                available.append(supplied_available.bool() & item["mask"]["valid"].bool())
             else:
                 # The value is never treated as a label: availability=False
                 # tells BumiEndecoder to derive contact from this sample's GT qpos FK.

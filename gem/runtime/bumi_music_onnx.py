@@ -1,8 +1,8 @@
-"""ONNX boundary for the BUMI-native music-only diffusion model.
+"""ONNX boundary for the BUMI-native qpos30 music-only diffusion model.
 
 The exported graph contains EDGE35 embedding, conditional/unconditional CFG and
-one 93-D x-start denoiser step.  DDIM scheduling and authoritative
-93D -> qpos28 -> Torch FK decoding deliberately stay outside the graph so the
+one 30-D x-start denoiser step plus two foot-contact logits. DDIM scheduling and
+authoritative 30D -> qpos28 -> Torch FK decoding deliberately stay outside the graph so the
 same repository diffusion equations and robot contract are used by PyTorch and
 ONNX Runtime.
 """
@@ -14,17 +14,21 @@ from typing import Any
 import torch
 import torch.nn as nn
 
-from gem.robots.bumi.feature_codec import BUMI_REPRESENTATION_CONTRACT_VERSION
+from gem.robots.bumi.feature_codec import (
+    BUMI_FEATURE_DIM,
+    BUMI_REPRESENTATION_CONTRACT_VERSION,
+)
 
-BUMI_ONNX_CONTRACT_VERSION = "genmo.bumi_music_guided_denoiser_step.v2"
-BUMI_MOTION_FEATURE_DIM = 93
+BUMI_ONNX_CONTRACT_VERSION = "genmo.bumi_music_guided_denoiser_step.qpos30_contact.v3"
+BUMI_MOTION_FEATURE_DIM = BUMI_FEATURE_DIM
+BUMI_CONTACT_DIM = 2
 MUSIC_FEATURE_DIM = 35
 
 
 def validate_bumi_checkpoint_state_dict(
     state_dict: dict[str, Any],
 ) -> dict[str, Any]:
-    """Validate the checkpoint-side 93D/music/no-head architecture before loading."""
+    """验证 checkpoint 的 qpos30、EDGE35 与两维接触 head 结构。"""
 
     if not isinstance(state_dict, dict) or not state_dict:
         raise ValueError("BUMI checkpoint state_dict must be a non-empty dictionary")
@@ -43,22 +47,34 @@ def validate_bumi_checkpoint_state_dict(
             f"checkpoint must contain exactly one EDGE35 music fc1 weight; got {music}"
         )
     if len(final) != 1 or next(iter(final.values()))[0] != BUMI_MOTION_FEATURE_DIM:
-        raise ValueError(f"checkpoint must contain exactly one 93D final fc2 weight; got {final}")
-    forbidden = sorted(
-        str(key)
-        for key in state_dict
-        if ".pred_cam_head." in str(key) or ".static_conf_head." in str(key)
-    )
+        raise ValueError(
+            f"checkpoint must contain exactly one {BUMI_MOTION_FEATURE_DIM}D final fc2 "
+            f"weight; got {final}"
+        )
+    contact = {
+        str(key): list(value.shape)
+        for key, value in state_dict.items()
+        if str(key).endswith("static_conf_head.fc2.weight") and isinstance(value, torch.Tensor)
+    }
+    if len(contact) != 1 or next(iter(contact.values()))[0] != BUMI_CONTACT_DIM:
+        raise ValueError(
+            f"checkpoint must contain exactly one {BUMI_CONTACT_DIM}D contact fc2 weight; "
+            f"got {contact}"
+        )
+    forbidden = sorted(str(key) for key in state_dict if ".pred_cam_head." in str(key))
     if forbidden:
         raise ValueError(
-            "formal BUMI no-contact checkpoint must not contain camera/static heads; "
-            f"found {forbidden[:4]}"
+            f"formal BUMI checkpoint must not contain a camera head; found {forbidden[:4]}"
         )
-    return {"music_weight_shapes": music, "final_layer_weight_shapes": final}
+    return {
+        "music_weight_shapes": music,
+        "final_layer_weight_shapes": final,
+        "contact_head_weight_shapes": contact,
+    }
 
 
 def validate_bumi_music_export_model(model: nn.Module) -> None:
-    """Reject anything other than the formal BUMI music-only 93-D model."""
+    """只接受正式 BUMI music-only qpos30 + contact 模型。"""
 
     if str(getattr(model, "motion_backend", "")) != "bumi":
         raise RuntimeError("BUMI ONNX export requires motion_backend='bumi'")
@@ -81,11 +97,13 @@ def validate_bumi_music_export_model(model: nn.Module) -> None:
         )
     if bool(getattr(denoiser, "pred_cam_head", False)):
         raise RuntimeError("formal BUMI ONNX export requires pred_cam_dim=0")
-    if bool(getattr(denoiser, "static_conf_head", False)):
-        raise RuntimeError("formal BUMI ONNX export requires static_conf_dim=0")
+    if not bool(getattr(denoiser, "static_conf_head", False)):
+        raise RuntimeError("formal BUMI ONNX export requires static_conf_dim=2")
     endecoder = getattr(model, "endecoder", None)
     if int(getattr(endecoder, "feat_dim", -1)) != BUMI_MOTION_FEATURE_DIM:
-        raise RuntimeError("BUMI ONNX export requires the authoritative 93-D Endecoder")
+        raise RuntimeError(
+            f"BUMI ONNX export requires the authoritative {BUMI_MOTION_FEATURE_DIM}-D Endecoder"
+        )
     if (
         str(getattr(endecoder, "representation_contract_version", ""))
         != BUMI_REPRESENTATION_CONTRACT_VERSION
@@ -108,8 +126,8 @@ class BumiMusicGuidedDenoiser(nn.Module):
 
     Conditional and unconditional samples are concatenated internally, so one
     Transformer invocation produces the two CFG branches.  The public graph is
-    intentionally fixed to batch=1 for TensorRT deployment and outputs only the
-    normalized 93-D x-start prediction used by DDIM.
+    intentionally fixed to batch=1 for TensorRT deployment and outputs the
+    normalized qpos30 x-start prediction plus left/right contact logits.
     """
 
     def __init__(self, model: nn.Module):
@@ -146,7 +164,7 @@ class BumiMusicGuidedDenoiser(nn.Module):
         music: torch.Tensor,
         length: torch.Tensor,
         guidance_scale: torch.Tensor,
-    ) -> torch.Tensor:
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         conditional, unconditional = self._condition_pair(music)
         paired_output = self.denoiser(
             torch.cat((noisy_motion, noisy_motion), dim=0),
@@ -157,13 +175,37 @@ class BumiMusicGuidedDenoiser(nn.Module):
             },
             inputs={},
             sample_indices_dict=self.sample_indices_dict,
-        )["pred_x_start"]
+        )
         # Export is fixed to public batch=1, therefore the paired tensor always
         # contains conditional at index 0 and unconditional at index 1.
-        pred_cond = paired_output[0:1]
-        pred_uncond = paired_output[1:2]
+        paired_motion = paired_output["pred_x_start"]
+        paired_contact = paired_output["static_conf_logits"]
+        if not torch.onnx.is_in_onnx_export():
+            if tuple(paired_motion.shape) != (
+                2,
+                noisy_motion.shape[1],
+                BUMI_MOTION_FEATURE_DIM,
+            ):
+                raise RuntimeError(
+                    f"BUMI paired motion output has invalid shape {paired_motion.shape}"
+                )
+            if not isinstance(paired_contact, torch.Tensor) or tuple(paired_contact.shape) != (
+                2,
+                noisy_motion.shape[1],
+                BUMI_CONTACT_DIM,
+            ):
+                raise RuntimeError(
+                    "BUMI contact head must return paired [2,T,2] logits, got "
+                    f"{getattr(paired_contact, 'shape', None)}"
+                )
+        pred_cond = paired_motion[0:1]
+        pred_uncond = paired_motion[1:2]
+        contact_cond = paired_contact[0:1]
+        contact_uncond = paired_contact[1:2]
         scale = guidance_scale.reshape(1, 1, 1).to(dtype=pred_cond.dtype)
-        return pred_uncond + scale * (pred_cond - pred_uncond)
+        pred_motion = pred_uncond + scale * (pred_cond - pred_uncond)
+        pred_contact = contact_uncond + scale * (contact_cond - contact_uncond)
+        return pred_motion, pred_contact
 
 
 def make_bumi_onnx_inputs(
@@ -223,6 +265,7 @@ def tensor_statistics(value: Any) -> dict[str, Any]:
 
 __all__ = [
     "BUMI_MOTION_FEATURE_DIM",
+    "BUMI_CONTACT_DIM",
     "BUMI_ONNX_CONTRACT_VERSION",
     "MUSIC_FEATURE_DIM",
     "BumiMusicGuidedDenoiser",

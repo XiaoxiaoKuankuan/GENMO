@@ -30,7 +30,10 @@ from gem.robots.bumi.metrics import (  # noqa: E402
     compute_bumi_kinematic_metrics,
     metrics_to_json,
 )
-from gem.runtime.bumi_music_onnx import validate_bumi_checkpoint_state_dict  # noqa: E402
+from gem.runtime.bumi_music_onnx import (  # noqa: E402
+    BUMI_MOTION_FEATURE_DIM,
+    validate_bumi_checkpoint_state_dict,
+)
 from gem.utils.music_features import EDGE_FEATURE_DIM, extract_edge_baseline35  # noqa: E402
 from gem.utils.net_utils import load_pretrained_model  # noqa: E402
 
@@ -62,9 +65,9 @@ def configure_assets(kinematics: Path | None, stats: Path | None) -> tuple[Path,
     if kinematics is not None:
         os.environ["BUMI_KINEMATICS_PATH"] = str(kinematics.expanduser().resolve())
     if stats is not None:
-        os.environ["BUMI_MUSIC_STATS_PATH"] = str(stats.expanduser().resolve())
+        os.environ["BUMI_MUSIC_QPOS30_STATS_PATH"] = str(stats.expanduser().resolve())
     result = []
-    for name in ("BUMI_KINEMATICS_PATH", "BUMI_MUSIC_STATS_PATH"):
+    for name in ("BUMI_KINEMATICS_PATH", "BUMI_MUSIC_QPOS30_STATS_PATH"):
         raw = os.environ.get(name)
         if not raw:
             raise RuntimeError(f"{name} is required; export it or pass the matching CLI option")
@@ -95,9 +98,7 @@ def align_music_frames(
     if target_frames <= 0:
         raise ValueError("--num-frames must be positive")
     if target_frames <= source_frames:
-        return features[:target_frames].contiguous(), torch.ones(
-            target_frames, dtype=torch.bool
-        )
+        return features[:target_frames].contiguous(), torch.ones(target_frames, dtype=torch.bool)
     padding = torch.zeros(target_frames - source_frames, 35, dtype=features.dtype)
     mask = torch.zeros(target_frames, dtype=torch.bool)
     mask[:source_frames] = True
@@ -149,8 +150,10 @@ def normalized_prediction(prediction: dict[str, Any], length: int) -> torch.Tens
     for name in ("pred_x", "pred_x_start", "pred_xstart"):
         value = model_output.get(name)
         if isinstance(value, torch.Tensor):
-            if value.shape[-1] != 93:
-                raise RuntimeError(f"BUMI denoiser output is not 93D: {value.shape}")
+            if value.shape[-1] != BUMI_MOTION_FEATURE_DIM:
+                raise RuntimeError(
+                    f"BUMI denoiser output is not {BUMI_MOTION_FEATURE_DIM}D: {value.shape}"
+                )
             return value[0, :length].detach().cpu()
     raise RuntimeError("BUMI prediction has no normalized pred_x")
 
@@ -254,7 +257,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--checkpoint", required=True, type=Path)
     parser.add_argument("--output", required=True, type=Path)
     parser.add_argument("--report", type=Path)
-    parser.add_argument("--exp", default="gem_bumi_music_only_4set_random_v1")
+    parser.add_argument("--exp", default="gem_bumi_music_only_5set_manual_q1_v3_qpos30_contact_50k")
     parser.add_argument("--kinematics", type=Path)
     parser.add_argument("--stats", type=Path)
     parser.add_argument("--num-frames", type=int)
@@ -272,6 +275,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--width", type=int, default=1280)
     parser.add_argument("--height", type=int, default=720)
     parser.add_argument("--mux-audio", action="store_true")
+    parser.add_argument(
+        "--no-foot-lock",
+        action="store_true",
+        help="保留模型原始 root XY；默认只用 contact head 做机器人 FK 足底锁定",
+    )
     parser.add_argument("--world-root-x", type=float)
     parser.add_argument("--world-root-y", type=float)
     parser.add_argument("--world-root-z", type=float)
@@ -326,9 +334,7 @@ def resolve_world_anchor(
         world_anchor = {"root_xy": [0.0, 0.0], "yaw": 0.0}
     if world_anchor is not None:
         world_anchor["anchor_z"] = (
-            float(default_root_height)
-            if args.world_root_z is None
-            else float(args.world_root_z)
+            float(default_root_height) if args.world_root_z is None else float(args.world_root_z)
         )
     return world_anchor
 
@@ -380,8 +386,10 @@ def main(argv: list[str] | None = None) -> int:
     if str(getattr(model, "motion_backend", "")) != "bumi":
         raise RuntimeError("selected experiment/checkpoint is not the BUMI backend")
     denoiser = model.pipeline.denoiser3d.denoiser
-    if int(getattr(denoiser, "output_dim", -1)) != 93:
-        raise RuntimeError("selected checkpoint does not use the BUMI 93D denoiser")
+    if int(getattr(denoiser, "output_dim", -1)) != BUMI_MOTION_FEATURE_DIM:
+        raise RuntimeError(
+            f"selected checkpoint does not use the BUMI {BUMI_MOTION_FEATURE_DIM}D denoiser"
+        )
     with open_dict(model.pipeline.denoiser3d.model_cfg.diffusion):
         diffusion_cfg = model.pipeline.denoiser3d.model_cfg.diffusion
         diffusion_cfg.guidance_param = float(args.cfg_scale)
@@ -405,20 +413,19 @@ def main(argv: list[str] | None = None) -> int:
             "length": len(features),
             "music_path": str(source_path),
             "world_anchor": world_anchor,
-        }
+        },
+        postproc=not args.no_foot_lock,
     )
     if device.type == "cuda":
         torch.cuda.synchronize(device)
     generation_seconds = time.perf_counter() - generation_started
-    normalized_93d = normalized_prediction(prediction, len(features))
+    normalized_30d = normalized_prediction(prediction, len(features))
 
-    artifact = {
-        key: cpu_tree(value) for key, value in prediction.items() if key != "net_outputs"
-    }
+    artifact = {key: cpu_tree(value) for key, value in prediction.items() if key != "net_outputs"}
     artifact.update(
         {
-            "contract_version": "genmo.bumi_motion_prediction.v1",
-            "normalized_motion_93d": normalized_93d,
+            "contract_version": "genmo.bumi_motion_prediction.qpos30_contact.v2",
+            "normalized_motion_30d": normalized_30d,
             "music_features": features,
             "has_music_mask": has_music,
             "feature_metadata": feature_metadata,
@@ -448,15 +455,37 @@ def main(argv: list[str] | None = None) -> int:
             length=len(features),
             model=model,
         )
-    ground_height = -float(model.endecoder.kinematics.default_qpos[2])
+    contact_logits = torch.as_tensor(artifact["pred_foot_contact_logits"]).float()
     metrics = compute_bumi_kinematic_metrics(
-        pred_canonical,
+        torch.as_tensor(artifact["qpos"]).float(),
         model.endecoder.kinematics,
-        target_qpos=target_canonical,
         valid_mask=has_music,
+        pred_contact_logits=contact_logits,
         music_beats=features[:, 34],
-        ground_height=ground_height,
+        ground_height=0.0,
     )
+    raw_metrics = compute_bumi_kinematic_metrics(
+        torch.as_tensor(artifact["qpos_raw"]).float(),
+        model.endecoder.kinematics,
+        valid_mask=has_music,
+        pred_contact_logits=contact_logits,
+        music_beats=features[:, 34],
+        ground_height=0.0,
+    )
+    if target_canonical is not None:
+        target_metrics = compute_bumi_kinematic_metrics(
+            pred_canonical,
+            model.endecoder.kinematics,
+            target_qpos=target_canonical,
+            valid_mask=has_music,
+            ground_height=-float(model.endecoder.kinematics.default_qpos[2]),
+        )
+        for name in (
+            "joint_angle_mae_rad",
+            "root_trajectory_error_m",
+            "fk_body_position_error_m",
+        ):
+            metrics[name] = target_metrics[name]
 
     rendered_video = None
     if args.render_mjcf is not None:
@@ -503,19 +532,21 @@ def main(argv: list[str] | None = None) -> int:
         rendered_video = str(final_video)
 
     report = {
-        "contract_version": "genmo.bumi_demo_report.v1",
+        "contract_version": "genmo.bumi_demo_report.qpos30_contact.v2",
         "output": str(output),
         "video": rendered_video,
         "source": str(source_path),
         "target": None if target_path is None else str(target_path),
         "qpos_shape": list(torch.as_tensor(artifact["qpos"]).shape),
-        "normalized_motion_shape": list(normalized_93d.shape),
+        "normalized_motion_shape": list(normalized_30d.shape),
+        "foot_lock_applied": not args.no_foot_lock,
         "fps": artifact["fps"],
         "seed": args.seed,
         "cfg_scale": args.cfg_scale,
         "ddim_steps": args.ddim_steps,
         "checkpoint": checkpoint_info,
         "metrics": metrics_to_json(metrics),
+        "raw_model_metrics": metrics_to_json(raw_metrics),
         "timing_seconds": {
             "feature_extraction": feature_seconds,
             "model_load": load_seconds,

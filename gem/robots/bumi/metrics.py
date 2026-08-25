@@ -98,7 +98,7 @@ def compute_bumi_kinematic_metrics(
     pred_contact_logits: torch.Tensor | None = None,
     music_beats: torch.Tensor | None = None,
     fps: int = 30,
-    ground_height: float = 0.0,
+    ground_height: float | torch.Tensor = 0.0,
     contact_height_threshold: float = 0.025,
     contact_velocity_threshold: float = 0.05,
 ) -> dict[str, torch.Tensor]:
@@ -117,9 +117,21 @@ def compute_bumi_kinematic_metrics(
         if valid.ndim == 1:
             valid = valid.unsqueeze(0)
         if tuple(valid.shape) != (batch_size, length):
-            raise ValueError(f"valid_mask must have shape {(batch_size, length)}, got {valid.shape}")
+            raise ValueError(
+                f"valid_mask must have shape {(batch_size, length)}, got {valid.shape}"
+            )
     fk = kinematics.forward_kinematics(pred)
     sole = kinematics.aggregate_sole_by_foot(fk["body_pos_w"], fk["body_quat_w"])
+    ground = torch.as_tensor(ground_height, dtype=pred.dtype, device=pred.device)
+    if not bool(torch.isfinite(ground).all()):
+        raise ValueError("ground_height contains NaN or Inf")
+    try:
+        ground = ground.expand(batch_size)
+    except RuntimeError as exc:
+        raise ValueError(
+            f"ground_height shape {tuple(ground.shape)} cannot broadcast to batch {batch_size}"
+        ) from exc
+    ground_per_foot = ground[:, None, None]
     joints = pred[..., 7:]
     lower = kinematics.joint_lower_limits.to(joints)
     upper = kinematics.joint_upper_limits.to(joints)
@@ -145,12 +157,24 @@ def compute_bumi_kinematic_metrics(
     else:
         padded_foot_speed = torch.cat((foot_speed[:, :1], foot_speed), dim=1)
     inferred_contact = (
-        (sole["foot_bottom_height"] <= float(ground_height + contact_height_threshold))
+        (sole["foot_bottom_height"] <= ground_per_foot + float(contact_height_threshold))
         & padded_foot_speed.le(contact_velocity_threshold)
         & valid[..., None]
     )
+    predicted_contact = None
+    if pred_contact_logits is not None:
+        predicted_contact = pred_contact_logits.to(pred).sigmoid() >= 0.5
+        if predicted_contact.ndim == 2:
+            predicted_contact = predicted_contact.unsqueeze(0)
+        if predicted_contact.shape != inferred_contact.shape:
+            raise ValueError(
+                "pred_contact_logits must have shape "
+                f"{inferred_contact.shape}, got {predicted_contact.shape}"
+            )
     if target_contact is None:
-        contact_gate = inferred_contact
+        # 有接触 head 时必须按模型声明的支撑区测脚滑，不能用“速度已经很低”反推接触，
+        # 否则快速滑动的脚会因超过速度阈值而被排除，产生虚假的零 foot-slide 指标。
+        contact_gate = inferred_contact if predicted_contact is None else predicted_contact
     else:
         contact_gate = target_contact.to(pred).bool()
         if contact_gate.ndim == 2:
@@ -160,11 +184,9 @@ def compute_bumi_kinematic_metrics(
                 f"target_contact must have shape {inferred_contact.shape}, got {contact_gate.shape}"
             )
     slide_mask = (
-        contact_gate[:, 1:]
-        & contact_gate[:, :-1]
-        & temporal_difference_mask(valid, 1)[..., None]
+        contact_gate[:, 1:] & contact_gate[:, :-1] & temporal_difference_mask(valid, 1)[..., None]
     )
-    penetration = F.relu(float(ground_height) - sole["foot_bottom_height"])
+    penetration = F.relu(ground_per_foot - sole["foot_bottom_height"])
 
     metrics = {
         "joint_limit_violation_rate": _masked_mean(violations.float(), valid),
@@ -182,9 +204,7 @@ def compute_bumi_kinematic_metrics(
         "joint_acceleration_p95_radps2": _masked_p95(
             joint_acceleration.abs(), temporal_difference_mask(valid, 2)
         ),
-        "joint_jerk_p95_radps3": _masked_p95(
-            joint_jerk.abs(), temporal_difference_mask(valid, 3)
-        ),
+        "joint_jerk_p95_radps3": _masked_p95(joint_jerk.abs(), temporal_difference_mask(valid, 3)),
         "root_linear_velocity_p95_mps": _masked_p95(
             torch.linalg.vector_norm(root_velocity, dim=-1), temporal_difference_mask(valid, 1)
         ),
@@ -205,26 +225,22 @@ def compute_bumi_kinematic_metrics(
                     torch.linalg.vector_norm(pred[..., :3] - target[..., :3], dim=-1), valid
                 ),
                 "fk_body_position_error_m": _masked_mean(
-                    torch.linalg.vector_norm(
-                        fk["body_pos_w"] - target_fk["body_pos_w"], dim=-1
-                    ),
+                    torch.linalg.vector_norm(fk["body_pos_w"] - target_fk["body_pos_w"], dim=-1),
                     valid,
                 ),
             }
         )
-    if target_contact is not None and pred_contact_logits is not None:
-        pred_contact = pred_contact_logits.to(pred).sigmoid() >= 0.5
-        if pred_contact.ndim == 2:
-            pred_contact = pred_contact.unsqueeze(0)
+    if target_contact is not None and predicted_contact is not None:
         target_contact_bool = target_contact.to(pred).bool()
         if target_contact_bool.ndim == 2:
             target_contact_bool = target_contact_bool.unsqueeze(0)
-        if pred_contact.shape != target_contact_bool.shape:
+        if predicted_contact.shape != target_contact_bool.shape:
             raise ValueError(
-                f"contact prediction/target shape mismatch: {pred_contact.shape}/{target_contact_bool.shape}"
+                "contact prediction/target shape mismatch: "
+                f"{predicted_contact.shape}/{target_contact_bool.shape}"
             )
         metrics["contact_accuracy"] = _masked_mean(
-            (pred_contact == target_contact_bool).float(), valid
+            (predicted_contact == target_contact_bool).float(), valid
         )
     if music_beats is not None:
         beats = music_beats.to(device=pred.device)

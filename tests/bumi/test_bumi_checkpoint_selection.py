@@ -57,13 +57,13 @@ def test_equal_metrics_prefer_newer_global_step() -> None:
 
 def test_cached_report_must_match_fixed_evaluation_identity() -> None:
     report = {
-        "contract_version": "genmo.bumi_demo_report.v1",
+        "contract_version": "genmo.bumi_demo_report.qpos30_contact.v2",
         "checkpoint": {"sha256": "a" * 64},
         "seed": 7,
         "cfg_scale": 2.5,
         "ddim_steps": 20,
         "qpos_shape": [120, 28],
-        "normalized_motion_shape": [120, 93],
+        "normalized_motion_shape": [120, 30],
     }
     validate_demo_report(
         report,

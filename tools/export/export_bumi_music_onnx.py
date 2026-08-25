@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""Export one BUMI-native music CFG denoiser step to fixed-shape ONNX.
+"""Export one BUMI-native qpos30/contact music CFG denoiser step to fixed-shape ONNX.
 
 The graph is fixed to batch=1 and a selected sequence length (normally 120).
-It outputs normalized motion93 only.  DDIM iteration and authoritative
-motion93 -> qpos28 -> Torch FK decoding remain in the repository runtime.
+It outputs normalized motion30 and left/right foot-contact logits. DDIM iteration,
+motion30 -> qpos28 -> Torch FK decoding and XY foot locking remain in the runtime.
 """
 
 from __future__ import annotations
@@ -25,6 +25,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from gem.runtime.bumi_music_onnx import (  # noqa: E402
+    BUMI_MOTION_FEATURE_DIM,
     BUMI_ONNX_CONTRACT_VERSION,
     BumiMusicGuidedDenoiser,
     make_bumi_onnx_inputs,
@@ -57,9 +58,9 @@ def configure_assets(kinematics: Path | None, stats: Path | None) -> tuple[Path,
     if kinematics is not None:
         os.environ["BUMI_KINEMATICS_PATH"] = str(kinematics.expanduser().resolve())
     if stats is not None:
-        os.environ["BUMI_MUSIC_STATS_PATH"] = str(stats.expanduser().resolve())
+        os.environ["BUMI_MUSIC_QPOS30_STATS_PATH"] = str(stats.expanduser().resolve())
     values = []
-    for name in ("BUMI_KINEMATICS_PATH", "BUMI_MUSIC_STATS_PATH"):
+    for name in ("BUMI_KINEMATICS_PATH", "BUMI_MUSIC_QPOS30_STATS_PATH"):
         raw = os.environ.get(name)
         if not raw:
             raise RuntimeError(f"{name} is required; export it or pass the matching CLI option")
@@ -120,7 +121,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--ckpt", type=Path, required=True)
     parser.add_argument("--output", type=Path, default=DEFAULT_OUTPUT)
-    parser.add_argument("--exp", default="gem_bumi_music_only_4set_random_v1")
+    parser.add_argument("--exp", default="gem_bumi_music_only_5set_manual_q1_v3_qpos30_contact_50k")
     parser.add_argument("--kinematics", type=Path)
     parser.add_argument("--stats", type=Path)
     parser.add_argument("--music-embed", type=Path)
@@ -179,9 +180,13 @@ def main(argv: list[str] | None = None) -> int:
         device=device,
     )
     reference = wrapper(*inputs)
-    if not bool(torch.isfinite(reference).all()):
+    if not all(bool(torch.isfinite(value).all()) for value in reference):
         raise RuntimeError("PyTorch BUMI ONNX reference contains NaN or Inf")
-    print(f"[BUMI ONNX] reference: {tensor_statistics(reference)}")
+    reference_stats = {
+        "pred_motion": tensor_statistics(reference[0]),
+        "pred_foot_contact_logits": tensor_statistics(reference[1]),
+    }
+    print(f"[BUMI ONNX] reference: {reference_stats}")
 
     input_names = [
         "noisy_motion",
@@ -197,7 +202,7 @@ def main(argv: list[str] | None = None) -> int:
         opset_version=args.opset,
         do_constant_folding=True,
         input_names=input_names,
-        output_names=["pred_motion"],
+        output_names=["pred_motion", "pred_foot_contact_logits"],
         dynamo=False,
         external_data=True,
     )
@@ -218,13 +223,16 @@ def main(argv: list[str] | None = None) -> int:
         "cfg_internal_batch": 2,
         "opset": args.opset,
         "input_contract": {
-            "noisy_motion": [1, args.seq_len, 93],
+            "noisy_motion": [1, args.seq_len, BUMI_MOTION_FEATURE_DIM],
             "diffusion_timestep": [1],
             "music": [1, args.seq_len, 35],
             "length": [1],
             "guidance_scale": [1],
         },
-        "output_contract": {"pred_motion": [1, args.seq_len, 93]},
+        "output_contract": {
+            "pred_motion": [1, args.seq_len, BUMI_MOTION_FEATURE_DIM],
+            "pred_foot_contact_logits": [1, args.seq_len, 2],
+        },
         "kinematics": {
             "path": str(kinematics_path),
             "sha256": sha256_file(kinematics_path),
@@ -232,9 +240,10 @@ def main(argv: list[str] | None = None) -> int:
         "stats": {"path": str(stats_path), "sha256": sha256_file(stats_path)},
         "export_boundary": (
             "EDGE35 embedding + batched conditional/unconditional CFG + one normalized "
-            "93-D x-start denoiser step. Python runtime owns DDIM and qpos/FK decoding."
+            "30-D x-start plus 2-D contact logits. Python runtime owns DDIM, qpos/FK "
+            "decoding and contact-gated XY foot locking."
         ),
-        "pytorch_reference": tensor_statistics(reference),
+        "pytorch_reference": reference_stats,
         "artifacts": [
             {
                 "path": path.name,

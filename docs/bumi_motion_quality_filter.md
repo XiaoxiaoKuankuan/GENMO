@@ -378,7 +378,7 @@ tools/data/bumi/build_bumi_music_dataset.py
 5. 根据各音乐数据集的 sample/song mapping 对齐 EDGE35 音乐特征；
 6. 动作与音乐帧数不一致时 fail closed，不做静默截断；
 7. 生成 `genmo.bumi_music.v1` manifest 和 dataset_info；
-8. 只在正式 train split 上计算 93D mean/std。
+8. 只在正式 train split 上计算当前 qpos30 mean/std；旧 93D 仅属历史表示。
 
 用于 GENMO 的 kinematics JSON 必须从同一生产 MJCF 导出：
 
@@ -446,7 +446,7 @@ commit。所有输入 SHA、配置 SHA 和 selection SHA 必须进入最终 data
 - PASS/REVIEW/REJECT 各数据集分层抽样；
 - PASS-only 物化后重新逐文件 SHA 校验；
 - 正式 dataset reader 全 payload 扫描；
-- 93D encode/decode、Torch/MuJoCo FK parity；
+- qpos30 encode/decode、link 全 FK、Torch/MuJoCo FK parity；
 - 单 batch forward/backward 和 100-step smoke。
 
 ## 10. 实施顺序与验收门槛
@@ -459,7 +459,7 @@ commit。所有输入 SHA、配置 SHA 和 selection SHA 必须进入最终 data
 6. PASS-only 物化，不改 `data/motions`；
 7. 从同一生产 MJCF 导出 GENMO kinematics；
 8. 构建四数据集音乐对齐的 `genmo.bumi_music.v1`；
-9. 校验、统计 93D、单 batch 和 smoke；
+9. 校验、统计 qpos30、接触标签、单 batch forward/backward 和 smoke；
 10. 才允许正式训练。
 
 进入正式转换前必须满足：

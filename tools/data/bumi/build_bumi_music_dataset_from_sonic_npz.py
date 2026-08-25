@@ -13,14 +13,16 @@ kinematics 的 MuJoCo-native order 通过完整关节名重排。根四元数先
 使用 50 Hz 末帧保持，不会外推未知姿态。输出前使用 GENMO kinematics 做 FK，并对
 每条轨迹施加一个常量
 root-Z 偏移，使全部 body origin 的全局最小 Z 精确为 0，从而与现有
-``legacy_body_origin_min_zero`` 93D/physical_v1 训练地面规范兼容；该平移会被明确记录
+``legacy_body_origin_min_zero`` 历史地面规范兼容；qpos30/contact 训练会按该语义用 GT
+FK 足底低分位估计等效地面，该平移会被明确记录
 为 ``root_z_adjusted=true``，不会伪装成未经调整的源轨迹。
 
 构建过程只读源动作、人体数据、EDGE35 和 WAV，在同盘优先硬链接音乐资产；motion、
 manifest、dataset_info 和报告全部先进入 staging，完整成功后才原子发布。工具不会
 覆盖既有数据版本，也不会把 REVIEW/REJECT、缺失音频或长度不一致样本静默混入。
-93D 不作为另一份轨迹缓存写入：训练仍以 qpos28 为权威状态，由固定 kinematics 和
-codec 在线确定性编码为 93D，随后由独立工具只基于 train split 重算统计量。
+qpos30 不作为另一份轨迹缓存写入：训练仍以 qpos28 为权威状态，由固定 kinematics 和
+codec 在线确定性编码为 30D，link 全部通过 FK 得到；随后由独立工具只基于 train split
+重算 qpos30 统计量。
 """
 
 from __future__ import annotations

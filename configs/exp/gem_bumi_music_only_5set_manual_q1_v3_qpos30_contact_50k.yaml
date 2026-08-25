@@ -1,0 +1,63 @@
+# @package _global_
+# BUMI 五库 qpos30/contact/FK 足滑修复的 50k、8 卡训练入口。
+#
+# 这是不兼容旧 93D 输出头的新实验：旧 BUMI checkpoint 和旧 stats 均不能直接加载。
+# 为在 50k 预算内继承 main 已学到的音乐条件能力，正式命令应显式传入用户自己的 main
+# music checkpoint，并由 smpl_music_to_bumi adapter 只迁移 EDGE35 embedder、Transformer、
+# timestep/位置编码和 add_cond 的条件列；qpos30 motion 列、输出层和两维 contact head 都
+# 保持新随机初始化。它是 weights-only 初始化，不恢复旧 optimizer/global step，也绝不把
+# SMPL 151D 或 BUMI 93D 输出按 30D 重新解释。
+defaults:
+  - gem_bumi_music_only_5set_manual_q1_v3
+  - override /network: diffusion_lg_bumi30_contact
+  - override /pipeline: music_only_bumi_qpos30_contact_v2
+  - override /endecoder: bumi_qpos30_contact
+  - override /scheduler: iters_half_30k_45k
+  - override /callbacks:
+      - ckpt_saver/every5000s_top100
+      - prog_bar/prog_reporter_ed1
+      - train_speed_timer/base
+      - lr_monitor/pl
+  - _self_
+
+exp_name_base: gem_bumi_music_only_5set_manual_q1_v3_qpos30_contact_s50k
+exp_name_var: ""
+exp_name: ${exp_name_base}${exp_name_var}
+data_name: gem_bumi_music_only_5set_manual_q1_v3_qpos30_contact_50k
+output_dir: outputs/${exp_name}
+
+# 运行时必须显式覆盖为已核对 SHA256 的 main 音乐 checkpoint 路径。
+pretrain_ckpt: null
+ckpt_path: null
+resume_mode: null
+
+model:
+  model_cfg:
+    checkpoint_adapter: smpl_music_to_bumi
+
+# 父实验为历史 no-contact 网络并在顶层把该值写成 0；这里必须显式恢复两维接触 head，
+# 防止 Hydra 的父级字段在切换 network group 后继续覆盖新网络默认值。
+network:
+  model_cfg:
+    denoiser:
+      static_conf_dim: 2
+
+# 同理覆盖父实验只适用于无接触训练的 mixed_floor_zero_no_contact_v1。
+pipeline:
+  args:
+    ground_semantics: mixed_floor_zero_fk_contact_v2
+
+data:
+  stats_path: ${oc.env:BUMI_MUSIC_QPOS30_STATS_PATH}
+
+optimizer:
+  lr: 0.0001
+
+pl_trainer:
+  max_steps: 50000
+  val_check_interval: 5000
+  devices: 8
+  strategy: ddp
+  use_distributed_sampler: false
+
+use_wandb: false

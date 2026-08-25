@@ -20,16 +20,15 @@ from gem.utils.rotation_conversions import (
 )
 
 
-def test_feature_slices_are_exactly_93d() -> None:
+def test_feature_slices_are_exactly_qpos30() -> None:
     assert dict(BUMI_FEATURE_SLICES) == {
         "root_delta_xy_heading": (0, 2),
         "root_height_offset": (2, 3),
         "root_rot_local": (3, 9),
         "joint_dof": (9, 30),
-        "body_link_pos_root": (30, 93),
     }
-    assert BUMI_FEATURE_DIM == 93
-    assert BUMI_REPRESENTATION_CONTRACT_VERSION == "genmo.bumi_motion_features.v2"
+    assert BUMI_FEATURE_DIM == 30
+    assert BUMI_REPRESENTATION_CONTRACT_VERSION == "genmo.bumi_motion_features.qpos30.v3"
     assert BUMI_ANCHOR_MODE == "first_frame_xy_yaw_heading_delta_absolute_height"
 
 
@@ -124,4 +123,22 @@ def test_real_bumi_codec_shape_only() -> None:
     kinematics = BumiKinematics(os.environ["BUMI_KINEMATICS_PATH"])
     codec = BumiMotionFeatureCodec(kinematics)
     qpos = kinematics.default_qpos.view(1, 28).repeat(2, 1)
-    assert codec.encode(qpos).physical_features.shape == (2, 93)
+    encoded = codec.encode(qpos)
+    assert encoded.physical_features.shape == (2, 30)
+    assert encoded.body_link_pos_root.shape == (2, 21, 3)
+
+
+def test_link_positions_are_fk_only_and_not_network_features(test_kinematics_path) -> None:
+    kinematics = BumiKinematics(test_kinematics_path)
+    codec = BumiMotionFeatureCodec(kinematics)
+    qpos = kinematics.default_qpos.view(1, 28).repeat(4, 1)
+    qpos[:, 7] = torch.linspace(0.0, 0.3, 4)
+    encoded = codec.encode(qpos)
+    split = codec.split_features(encoded.physical_features)
+    assert split.body_link_pos_root is None
+    decoded = codec.decode_to_canonical_qpos(encoded.physical_features)
+    fk = kinematics.forward_kinematics(decoded)
+    link_from_fk = codec.body_positions_in_root_frame(
+        decoded[:, :3], decoded[:, 3:7], fk["body_pos_w"][:, 1:]
+    )
+    torch.testing.assert_close(link_from_fk, encoded.body_link_pos_root)

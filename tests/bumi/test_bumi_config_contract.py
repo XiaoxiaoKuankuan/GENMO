@@ -178,3 +178,32 @@ def test_manual_q1_v3_finetune_50k_preserves_data_and_tunes_physics() -> None:
     assert config.pipeline.args.weights.foot_slide == 0.0
     assert config.pipeline.args.weights.penetration == 0.0
     assert config.use_wandb is False
+
+
+def test_qpos30_contact_50k_contract_restores_main_style_feet_and_root_losses() -> None:
+    with initialize_config_dir(version_base="1.3", config_dir=str(REPO_ROOT / "configs")):
+        config = compose(
+            config_name="train",
+            overrides=["exp=gem_bumi_music_only_5set_manual_q1_v3_qpos30_contact_50k"],
+        )
+
+    denoiser = config.network.model_cfg.denoiser
+    weights = config.pipeline.args.weights
+    assert denoiser.output_dim == denoiser.xt_dim == denoiser.njoints == 30
+    assert denoiser.static_conf_dim == 2
+    assert config.endecoder.feat_dim == 30
+    assert config.endecoder.clip_std_min == 0.01
+    assert config.pipeline.args.loss_contract == "physical_qpos30_contact_v2"
+    assert config.pipeline.args.ground_semantics == "mixed_floor_zero_fk_contact_v2"
+    assert "repr_body_pos" not in weights
+    assert "fk_consistency" not in weights
+    assert weights.repr_root_rot == 2.0
+    assert weights.root_rot == 1.0
+    assert weights.root_tilt == 1.0
+    assert 0.0 < weights.foot_slide <= 0.05
+    assert weights.contact_bce > 0.0
+    assert config.model.model_cfg.checkpoint_adapter == "smpl_music_to_bumi"
+    assert config.pretrain_ckpt is None
+    assert config.pl_trainer.devices == 8
+    assert config.pl_trainer.strategy == "ddp"
+    assert config.pl_trainer.max_steps == 50000

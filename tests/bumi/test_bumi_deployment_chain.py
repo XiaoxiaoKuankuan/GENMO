@@ -1,7 +1,7 @@
-"""BUMI ONNX→长音乐滑窗→安全流→50 Hz GMT 计划的纯 CPU 合约测试。
+"""BUMI qpos30/contact→长音乐滑窗→安全流→50 Hz GMT 计划的纯 CPU 合约测试。
 
-测试刻意不创建持久输出，也不依赖 Redis、TensorRT 或真实机器人。它覆盖 93D DDIM 的
-可配置维度、两窗 120/30 世界对齐与几何感知 overlap-add、qpos 二进制包
+测试刻意不创建持久输出，也不依赖 Redis、TensorRT 或真实机器人。它覆盖 30D DDIM 与
+接触 head、两窗 120/30 世界对齐与几何感知 overlap-add、FK 足底锁定、qpos 二进制包
 CRC/revision/绝对帧号、跨分块速度与 XML 关节限位安全门，以及增量 30→50 Hz 计划和
 离线重采样的一致性。
 所有临时运动学/统计文件由 pytest ``tmp_path`` 管理，测试结束会自动删除。
@@ -17,19 +17,19 @@ import numpy as np
 import pytest
 import torch
 
+from gem.robots.bumi.contacts import derive_bumi_foot_contact
 from gem.robots.bumi.endecoder import BumiEndecoder
 from gem.robots.bumi.feature_codec import (
     BUMI_ANCHOR_MODE,
+    BUMI_FEATURE_DIM,
     BUMI_FEATURE_SLICES,
     BUMI_REPRESENTATION_CONTRACT_VERSION,
 )
 from gem.robots.bumi.kinematics import BumiKinematics, sha256_file
+from gem.robots.bumi.metrics import compute_bumi_kinematic_metrics
+from gem.robots.bumi.postprocess import lock_bumi_foot_contacts
 from gem.runtime.bumi_gmt_plan import BumiIncrementalGmtPlanBuilder
-from gem.runtime.bumi_music_deploy import (
-    BumiSlidingQposGenerator,
-    lift_bumi_root_above_ground,
-    project_bumi_root_to_upright_heading,
-)
+from gem.runtime.bumi_music_deploy import BumiSlidingQposGenerator
 from gem.runtime.bumi_robot_stream import (
     BumiQposChunk,
     BumiQposRevisionTracker,
@@ -37,23 +37,23 @@ from gem.runtime.bumi_robot_stream import (
     bumi_joint_order_sha256,
 )
 from gem.runtime.gmt_trajectory import qpos_timeline_to_gmt_frames, resample_qpos_timeline
-from gem.utils.rotation_conversions import quaternion_apply, quaternion_multiply
 from scripts.demo.demo_music_bumi import resolve_world_anchor
 
 
 def _stats(path: Path, kinematics: BumiKinematics) -> Path:
     payload = {
-        "contract_version": "genmo.bumi_stats.v2",
+        "contract_version": "genmo.bumi_qpos30_stats.v3",
         "representation_contract_version": BUMI_REPRESENTATION_CONTRACT_VERSION,
         "robot_name": "bumi",
-        "feature_dim": 93,
+        "feature_dim": BUMI_FEATURE_DIM,
         "anchor_mode": BUMI_ANCHOR_MODE,
         "quaternion_convention": "wxyz",
         "feature_slices": {name: list(value) for name, value in BUMI_FEATURE_SLICES.items()},
         "joint_names": list(kinematics.joint_order),
         "kinematics_sha256": kinematics.kinematics_sha256,
-        "mean": [0.0] * 93,
-        "std": [1.0] * 93,
+        "mean": [0.0] * BUMI_FEATURE_DIM,
+        "std": [1.0] * BUMI_FEATURE_DIM,
+        "training_clip_std_min": 0.01,
     }
     path.write_text(json.dumps(payload), encoding="utf-8")
     return path
@@ -76,7 +76,9 @@ class _FixedMotionStep:
 
     def __call__(self, noisy, timestep, music, length, guidance):
         del timestep, music, length, guidance
-        return self.normalized.to(noisy).unsqueeze(0).expand_as(noisy)
+        motion = self.normalized.to(noisy).unsqueeze(0).expand_as(noisy)
+        contact = noisy.new_full((noisy.shape[0], noisy.shape[1], 2), -20.0)
+        return motion, contact
 
 
 class _MusicSelectedMotionStep:
@@ -89,7 +91,25 @@ class _MusicSelectedMotionStep:
     def __call__(self, noisy, timestep, music, length, guidance):
         del timestep, length, guidance
         selected = self.second if float(music[0, 0, 0]) > 0.5 else self.first
-        return selected.to(noisy).unsqueeze(0).expand_as(noisy)
+        motion = selected.to(noisy).unsqueeze(0).expand_as(noisy)
+        contact = noisy.new_full((noisy.shape[0], noisy.shape[1], 2), -20.0)
+        return motion, contact
+
+
+class _ReusedContactBufferStep:
+    """模拟 TensorRT 每次调用覆写同一个输出 buffer。"""
+
+    def __init__(self, normalized: torch.Tensor) -> None:
+        self.normalized = normalized
+        self.contact: torch.Tensor | None = None
+
+    def __call__(self, noisy, timestep, music, length, guidance):
+        del timestep, length, guidance
+        if self.contact is None:
+            self.contact = noisy.new_empty((noisy.shape[0], noisy.shape[1], 2))
+        value = 10.0 if float(music[0, 0, 0]) > 0.5 else -10.0
+        self.contact.fill_(value)
+        return self.normalized.to(noisy).unsqueeze(0).expand_as(noisy), self.contact
 
 
 def _qpos(frames: int, *, fps: float = 30.0, root_z: float = 1.0) -> np.ndarray:
@@ -168,81 +188,110 @@ def test_bumi_sliding_blends_independent_root_rotation_and_joint_predictions(
     assert float(angular_steps[89:121].max()) < 0.02
 
 
-def test_upright_projection_preserves_yaw_position_and_joints() -> None:
-    qpos = torch.from_numpy(_qpos(3))
-    yaw = torch.tensor((0.0, 0.7, -1.1))
-    roll = torch.tensor((1.2, -0.9, 0.6))
-    yaw_quaternion = torch.stack(
-        (
-            torch.cos(yaw * 0.5),
-            torch.zeros_like(yaw),
-            torch.zeros_like(yaw),
-            torch.sin(yaw * 0.5),
-        ),
-        dim=-1,
-    )
-    roll_quaternion = torch.stack(
-        (
-            torch.cos(roll * 0.5),
-            torch.sin(roll * 0.5),
-            torch.zeros_like(roll),
-            torch.zeros_like(roll),
-        ),
-        dim=-1,
-    )
-    qpos[:, 3:7] = quaternion_multiply(yaw_quaternion, roll_quaternion)
-    qpos[:, 7:] = torch.arange(63, dtype=torch.float32).reshape(3, 21) * 0.001
-
-    projected = project_bumi_root_to_upright_heading(
-        qpos, max_yaw_velocity_radps=None
-    )
-
-    torch.testing.assert_close(projected[:, :3], qpos[:, :3])
-    torch.testing.assert_close(projected[:, 7:], qpos[:, 7:])
-    torch.testing.assert_close(projected[:, 3:7], yaw_quaternion, atol=1.0e-6, rtol=0.0)
-    world_up = quaternion_apply(
-        projected[:, 3:7], torch.tensor((0.0, 0.0, 1.0)).expand(3, 3)
-    )
-    torch.testing.assert_close(
-        world_up, torch.tensor((0.0, 0.0, 1.0)).expand(3, 3), atol=1.0e-6, rtol=0.0
-    )
+def test_sliding_clones_reused_tensorrt_contact_output(
+    test_kinematics_path: Path, tmp_path: Path
+) -> None:
+    kinematics = BumiKinematics(test_kinematics_path)
+    stats = _stats(tmp_path / "stats.json", kinematics)
+    endecoder = BumiEndecoder(test_kinematics_path, stats, enable_contact_targets=False)
+    canonical = torch.from_numpy(_qpos(120))
+    normalized = endecoder.normalize(endecoder.codec.encode(canonical).physical_features)
+    music = torch.zeros(210, 35)
+    music[90:, 0] = 1.0
+    generated = BumiSlidingQposGenerator(
+        _ReusedContactBufferStep(normalized),
+        endecoder,
+        device="cpu",
+        steps=2,
+        apply_foot_lock=False,
+    ).generate(music, seed=17)
+    torch.testing.assert_close(generated.foot_contact_logits[:90], torch.full((90, 2), -10.0))
+    torch.testing.assert_close(generated.foot_contact_logits[120:], torch.full((90, 2), 10.0))
 
 
-def test_upright_projection_limits_unstable_heading_velocity() -> None:
-    qpos = torch.from_numpy(_qpos(5))
-    yaw = torch.tensor((0.0, 2.5, -2.5, 2.8, -2.8))
-    qpos[:, 3] = torch.cos(yaw * 0.5)
-    qpos[:, 6] = torch.sin(yaw * 0.5)
-
-    projected = project_bumi_root_to_upright_heading(
-        qpos, max_yaw_velocity_radps=4.0, fps=30
-    )
-
-    quaternion = projected[:, 3:7]
-    angular_step = 2.0 * torch.acos(
-        (quaternion[:-1] * quaternion[1:]).sum(dim=-1).abs().clamp(max=1.0)
-    )
-    assert float(angular_step.max()) <= 4.0 / 30.0 + 1.0e-6
-
-
-def test_penetration_lift_only_raises_frames_below_ground(
+def test_fk_foot_lock_only_changes_root_xy_and_reduces_slide(
     test_kinematics_path: Path,
 ) -> None:
     kinematics = BumiKinematics(test_kinematics_path)
-    qpos = torch.from_numpy(_qpos(2))
-    qpos[0, 2] = -1.0
-    qpos[1, 2] = 5.0
-    qpos[:, 7:] = torch.arange(42, dtype=torch.float32).reshape(2, 21) * 0.001
+    qpos = torch.from_numpy(_qpos(12))
+    qpos[:, 0] = torch.arange(12, dtype=torch.float32) * 0.01
+    original = qpos.clone()
+    result = lock_bumi_foot_contacts(
+        qpos,
+        torch.full((12, 2), 10.0),
+        kinematics,
+        max_correction_per_frame=0.08,
+    )
+    torch.testing.assert_close(result.qpos[:, 2:], original[:, 2:])
+    assert float(result.mean_contact_slide_after_mps) < 1.0e-5
+    assert float(result.mean_contact_slide_before_mps) > 0.2
 
-    lifted = lift_bumi_root_above_ground(qpos, kinematics)
 
-    assert float(lifted[0, 2]) > float(qpos[0, 2])
-    assert float(lifted[1, 2]) == pytest.approx(float(qpos[1, 2]), abs=1.0e-6)
-    torch.testing.assert_close(lifted[:, :2], qpos[:, :2])
-    torch.testing.assert_close(lifted[:, 3:], qpos[:, 3:])
-    fk = kinematics.forward_kinematics(lifted)
-    sole = kinematics.aggregate_sole_by_foot(fk["body_pos_w"], fk["body_quat_w"])
-    assert float(sole["foot_bottom_height"].min()) >= -1.0e-6
+def test_fk_contact_labels_respect_ground_semantics_and_speed(
+    test_kinematics_path: Path,
+) -> None:
+    kinematics = BumiKinematics(test_kinematics_path)
+    qpos = torch.from_numpy(_qpos(6))
+    qpos[:, 0] = 0.0
+    valid = torch.ones(6, dtype=torch.bool)
+    exact = derive_bumi_foot_contact(qpos, kinematics, valid_mask=valid)
+    assert bool(exact.contact.all())
+
+    shifted = qpos.clone()
+    shifted[:, 2] += 0.4
+    exact_shifted = derive_bumi_foot_contact(shifted, kinematics, valid_mask=valid)
+    assert not bool(exact_shifted.contact.any())
+    estimated = derive_bumi_foot_contact(
+        shifted,
+        kinematics,
+        valid_mask=valid,
+        ground_height=0.0,
+        estimate_ground_mask=torch.tensor(True),
+    )
+    assert bool(estimated.contact.all())
+    assert float(estimated.ground_height) == pytest.approx(0.4, abs=1.0e-5)
+
+    moving = qpos.clone()
+    moving[:, 0] = torch.arange(6, dtype=torch.float32) * 0.02
+    fast = derive_bumi_foot_contact(moving, kinematics, valid_mask=valid)
+    assert not bool(fast.contact.any())
+
+
+def test_fk_contact_mixed_ground_estimation_is_batched_and_ignores_invalid_frames(
+    test_kinematics_path: Path,
+) -> None:
+    kinematics = BumiKinematics(test_kinematics_path)
+    qpos = torch.from_numpy(_qpos(6)).unsqueeze(0).repeat(3, 1, 1)
+    qpos[:, :, 0] = 0.0
+    qpos[1, :, 2] += 0.4
+    qpos[2, :, 2] += 0.8
+    valid = torch.ones(3, 6, dtype=torch.bool)
+    valid[2] = False
+    targets = derive_bumi_foot_contact(
+        qpos,
+        kinematics,
+        valid_mask=valid,
+        ground_height=0.0,
+        estimate_ground_mask=torch.tensor([False, True, True]),
+    )
+    torch.testing.assert_close(targets.ground_height, torch.tensor([0.0, 0.4, 0.0]))
+    assert bool(targets.contact[0].all())
+    assert bool(targets.contact[1].all())
+    assert not bool(targets.contact[2].any())
+
+
+def test_kinematic_metrics_accept_per_sample_ground_height(test_kinematics_path: Path) -> None:
+    kinematics = BumiKinematics(test_kinematics_path)
+    qpos = torch.from_numpy(_qpos(6)).unsqueeze(0).repeat(2, 1, 1)
+    qpos[:, :, 0] = 0.0
+    qpos[1, :, 2] += 0.4
+    metrics = compute_bumi_kinematic_metrics(
+        qpos,
+        kinematics,
+        ground_height=torch.tensor([0.1, 0.4]),
+    )
+    assert float(metrics["foot_penetration_mean_m"]) == pytest.approx(0.05, abs=1.0e-6)
+    assert float(metrics["foot_penetration_max_m"]) == pytest.approx(0.1, abs=1.0e-6)
 
 
 def _chunk(qpos: np.ndarray, *, index: int, start: int, total: int, last: bool) -> BumiQposChunk:

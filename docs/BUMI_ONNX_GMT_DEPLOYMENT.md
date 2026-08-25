@@ -1,7 +1,13 @@
 # BUMI ONNX 到 GMT 部署链路
 
-本文对应 `feature/bumi-music-only` 分支。BUMI 模型输出的是机器人原生 93D 特征和
-MuJoCo 顺序 `qpos28`，链路中不再经过 SMPL/GMR：
+> 当前 ONNX 边界已升级为 `pred_motion[1,120,30]` 与
+> `pred_foot_contact_logits[1,120,2]` 双输出；link 全由 qpos FK 得到，正式后处理只允许
+> contact-gated root XY 足底锁定。新契约见
+> [BUMI qpos30、FK 接触与足底锁定 v3](BUMI_QPOS30_CONTACT_V3.md)。下文 93D 单输出内容
+> 仅作旧版部署记录，不能用于新模型。
+
+本文主体记录 `feature/bumi-music-only` 分支的历史 93D 部署链。该版本输出机器人原生
+93D 特征和 MuJoCo 顺序 `qpos28`，链路中不再经过 SMPL/GMR：
 
 > 重要：下文 `s430000`、旧 stats、ONNX、TensorRT 和视频是 v1 `root_pos_local`
 > 历史审计结果，只能用于对比，不能由当前 v2 代码加载或继续部署。当前代码要求
@@ -33,7 +39,7 @@ Parity 是数值等价检查。本项目固定相同 checkpoint、输入和噪�
 Runtime、TensorRT 的单步 93D，以及完整 DDIM 后的 93D、qpos28 和 Torch FK；浮点算子
 实现不同，所以要求在明确容差内一致，不要求逐 bit 相同。
 
-## 当前 v2 s350000 导出与 50 首网页验证（2026-08-24）
+## 历史 v2 s350000 导出与 50 首网页验证（2026-08-24）
 
 当前人工 q1 五库基线使用以下本地资产；`meshes/` 必须与 `bumi3.xml` 同目录，否则 MuJoCo
 会在推理产物已经生成后统一渲染失败：

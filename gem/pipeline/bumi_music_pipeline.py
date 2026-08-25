@@ -9,11 +9,12 @@ import torch.nn as nn
 from hydra.utils import instantiate
 
 from gem.robots.bumi.endecoder import BumiEndecoder
-from gem.robots.bumi.losses import BumiRobotLosses
+from gem.robots.bumi.feature_codec import BUMI_FEATURE_DIM
+from gem.robots.bumi.losses import BUMI_LOSS_CONTRACT_VERSION, BumiRobotLosses
 
 
 class BumiMusicPipeline(nn.Module):
-    """Denoise 93D features, compose qpos28, run Torch FK, and compute robot losses."""
+    """去噪 qpos30 特征、重建 qpos28，并只通过 Torch FK 计算机器人几何。"""
 
     def __init__(self, args, args_denoiser3d, **_kwargs: Any) -> None:
         super().__init__()
@@ -35,7 +36,7 @@ class BumiMusicPipeline(nn.Module):
             self.endecoder,
             args.weights,
             fps=30,
-            contract_version=args.get("loss_contract", "legacy_v0"),
+            contract_version=args.get("loss_contract", BUMI_LOSS_CONTRACT_VERSION),
             auxiliary_warmup_steps=args.get("auxiliary_warmup_steps", 0),
             ground_semantics=args.get("ground_semantics", None),
         )
@@ -70,8 +71,10 @@ class BumiMusicPipeline(nn.Module):
             normalizer_stats=normalizer_stats,
         )
         pred_x = self._prediction(model_output)
-        if pred_x.shape[-1] != 93:
-            raise RuntimeError(f"BUMI denoiser must output 93D motion, got {pred_x.shape}")
+        if pred_x.shape[-1] != BUMI_FEATURE_DIM:
+            raise RuntimeError(
+                f"BUMI denoiser must output {BUMI_FEATURE_DIM}D qpos motion, got {pred_x.shape}"
+            )
         decode_dict = self.endecoder.decode(pred_x)
         pred_qpos_canonical = self.endecoder.compose_qpos(decode_dict)
         fk = self.endecoder.kinematics.forward_kinematics(pred_qpos_canonical)
@@ -85,7 +88,6 @@ class BumiMusicPipeline(nn.Module):
             "decode_dict": decode_dict,
             "pred_qpos_canonical": pred_qpos_canonical,
             "pred_body_link_pos_root_fk": pred_body_link_pos_root_fk,
-            "pred_body_link_pos_root_raw": decode_dict["body_link_pos_root_raw"],
             "pred_foot_contact_logits": model_output.get("static_conf_logits"),
         }
         world_anchor = inputs.get("world_anchor")
@@ -103,8 +105,7 @@ class BumiMusicPipeline(nn.Module):
             model_output,
             decode_dict,
             pred_qpos_canonical,
-            pred_body_link_pos_root_fk,
-            fk["body_quat_w"],
+            fk,
             global_step=global_step,
         )
         outputs.update(loss_output)

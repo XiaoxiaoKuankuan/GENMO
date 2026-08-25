@@ -30,7 +30,7 @@ from typing import Any
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
 SUITE_CONTRACT = "genmo.bumi_checkpoint_suite.v1"
-SELECTION_CONTRACT = "genmo.bumi_checkpoint_selection.v1"
+SELECTION_CONTRACT = "genmo.bumi_checkpoint_selection.qpos30_contact.v2"
 
 LOWER_WEIGHTS = {
     "joint_limit_violation_rate": 4.0,
@@ -150,9 +150,7 @@ def _demo_command(
         command.extend(("--start-sec", str(float(sample.get("start_sec", 0.0)))))
         command.extend(("--duration-sec", "4.0"))
     else:
-        command.extend(
-            ("--edge35", str(Path(str(sample["edge35"])).expanduser().resolve()))
-        )
+        command.extend(("--edge35", str(Path(str(sample["edge35"])).expanduser().resolve())))
     if sample.get("target_motion"):
         command.extend(
             (
@@ -189,7 +187,7 @@ def validate_demo_report(
 ) -> None:
     """拒绝把旧参数或其他 checkpoint 的缓存报告混入本次固定评测。"""
 
-    if report.get("contract_version") != "genmo.bumi_demo_report.v1":
+    if report.get("contract_version") != "genmo.bumi_demo_report.qpos30_contact.v2":
         raise ValueError("cached report is not a BUMI demo report")
     if (report.get("checkpoint") or {}).get("sha256") != checkpoint_sha256:
         raise ValueError("cached report checkpoint SHA does not match this candidate")
@@ -201,7 +199,7 @@ def validate_demo_report(
         raise ValueError("cached report DDIM steps do not match this evaluation")
     if report.get("qpos_shape") != [120, 28] or report.get("normalized_motion_shape") != [
         120,
-        93,
+        30,
     ]:
         raise ValueError("cached report does not describe one fixed 120-frame BUMI sample")
 
@@ -271,7 +269,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--checkpoints", type=Path, nargs="+", required=True)
     parser.add_argument("--suite", type=Path, required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
-    parser.add_argument("--exp", default="gem_bumi_music_only_4set_random_v1")
+    parser.add_argument("--exp", default="gem_bumi_music_only_5set_manual_q1_v3_qpos30_contact_50k")
     parser.add_argument("--kinematics", type=Path, required=True)
     parser.add_argument("--stats", type=Path, required=True)
     parser.add_argument("--device", default="cuda")
@@ -337,7 +335,9 @@ def main(argv: list[str] | None = None) -> int:
                 "checkpoint": str(checkpoint),
                 "checkpoint_sha256": checkpoint_sha,
                 "global_step": _checkpoint_step(checkpoint),
-                "reports": [str(candidate_dir / f"{sample['id']}.json") for sample in suite["samples"]],
+                "reports": [
+                    str(candidate_dir / f"{sample['id']}.json") for sample in suite["samples"]
+                ],
                 "commands": commands,
                 "metrics": aggregate_metrics(reports),
             }

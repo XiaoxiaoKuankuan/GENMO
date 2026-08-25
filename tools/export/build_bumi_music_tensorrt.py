@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""构建并指纹化 BUMI 93D 音乐去噪 TensorRT 引擎。
+"""构建并指纹化 BUMI qpos30/contact 音乐去噪 TensorRT 引擎。
 
-脚本只接受导出合约为固定 batch=1、120 帧、93D 运动和 EDGE35 音乐的 ONNX 图；构建前
-检查五个输入和唯一输出的名称/形状，FP16 模式仍强制输出 float32 以减小 DDIM 累积误差。
+脚本只接受固定 batch=1、120 帧、30D 运动、2D 接触和 EDGE35 音乐的 ONNX 图；构建前
+检查五个输入和两个输出的名称/形状，FP16 模式仍强制输出 float32 以减小 DDIM 累积误差。
 引擎放在由 ONNX/checkpoint SHA256、TensorRT/libnvinfer、精度和当前 GPU 共同决定的缓存
 目录中，并写入 ``engine.json``。运行时会再次核验这些字段，不能把计划文件复制到不同
 GPU 或与另一个 checkpoint 混用。已有完整缓存默认复用，只有显式 ``--overwrite`` 才重建。
@@ -60,18 +60,18 @@ def _network_contract(network: object, trt: object) -> None:
         actual[str(tensor.name)] = tuple(int(value) for value in tensor.shape)
     if actual != expected:
         raise RuntimeError(f"BUMI TensorRT input contract mismatch: {actual}")
-    if network.num_outputs != 1:
-        raise RuntimeError("BUMI TensorRT graph must expose exactly one output")
-    output = network.get_output(0)
-    if str(output.name) != "pred_motion" or tuple(int(value) for value in output.shape) != (
-        1,
-        120,
-        BUMI_MOTION_DIM,
-    ):
-        raise RuntimeError(
-            f"BUMI TensorRT output contract mismatch: {output.name} {tuple(output.shape)}"
-        )
-    output.dtype = trt.float32
+    outputs = {
+        str(network.get_output(index).name): network.get_output(index)
+        for index in range(network.num_outputs)
+    }
+    expected_outputs = BumiTensorRTStepRunner.REQUIRED_OUTPUTS
+    actual_outputs = {
+        name: tuple(int(value) for value in tensor.shape) for name, tensor in outputs.items()
+    }
+    if actual_outputs != expected_outputs:
+        raise RuntimeError(f"BUMI TensorRT output contract mismatch: {actual_outputs}")
+    for output in outputs.values():
+        output.dtype = trt.float32
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -83,9 +83,9 @@ def main(argv: list[str] | None = None) -> int:
         raise FileNotFoundError(f"BUMI ONNX metadata is missing: {onnx_metadata_path}")
     onnx_metadata = json.loads(onnx_metadata_path.read_text(encoding="utf-8"))
     if onnx_metadata.get("contract_version") != BUMI_ONNX_CONTRACT_VERSION:
-        raise ValueError("TensorRT build requires the v2 BUMI ONNX contract")
+        raise ValueError("TensorRT build requires the current qpos30/contact BUMI ONNX contract")
     if onnx_metadata.get("representation_contract_version") != BUMI_REPRESENTATION_CONTRACT_VERSION:
-        raise ValueError("TensorRT build requires the BUMI v2 motion representation")
+        raise ValueError("TensorRT build requires the current BUMI qpos30 representation")
     if args.workspace_gib <= 0.0:
         raise ValueError("--workspace-gib must be > 0")
     if not 0 <= args.optimization_level <= 5:
@@ -161,7 +161,9 @@ def main(argv: list[str] | None = None) -> int:
         "gpu": gpu,
         "build_seconds": elapsed,
         "input_shape": [1, 120, BUMI_MOTION_DIM],
-        "output_shape": [1, 120, BUMI_MOTION_DIM],
+        "output_shapes": {
+            name: list(shape) for name, shape in BumiTensorRTStepRunner.REQUIRED_OUTPUTS.items()
+        },
     }
     manifest_path.write_text(
         json.dumps(manifest, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"

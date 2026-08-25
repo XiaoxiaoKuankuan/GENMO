@@ -46,12 +46,11 @@ from gem.robots.bumi.metrics import (  # noqa: E402
     compute_bumi_kinematic_metrics,
     metrics_to_json,
 )
+from gem.robots.bumi.postprocess import BUMI_FOOT_LOCK_CONTRACT_VERSION  # noqa: E402
 from gem.runtime.bumi_music_deploy import (  # noqa: E402
     BUMI_SLIDING_QPOS_CONTRACT_VERSION,
     BumiOrtStepRunner,
     BumiSlidingQposGenerator,
-    lift_bumi_root_above_ground,
-    project_bumi_root_to_upright_heading,
 )
 from gem.runtime.bumi_music_onnx import BUMI_ONNX_CONTRACT_VERSION  # noqa: E402
 from gem.runtime.music_only_trt import plan_sliding_windows  # noqa: E402
@@ -68,9 +67,6 @@ REPORT_DATASETS = DATASETS + (MINE_DATASET,)
 DATASET_LABELS = {key: label for key, label, _ in DATASETS}
 DATASET_LABELS[MINE_DATASET[0]] = MINE_DATASET[1]
 RATING_COLUMNS = ("motion_name", "score")
-UPRIGHT_ROOT_POSTPROCESS = (
-    "yaw_only_upright_projection_yawrate4_plus_penetration_lift_v1"
-)
 
 
 def sha256_file(path: Path, block_size: int = 16 * 1024 * 1024) -> str:
@@ -260,8 +256,7 @@ def select_mine_bumi(
             [0]
             if chosen_count == 1
             else [
-                int(index * (len(rows) - 1) / (chosen_count - 1))
-                for index in range(chosen_count)
+                int(index * (len(rows) - 1) / (chosen_count - 1)) for index in range(chosen_count)
             ]
         )
         selection_mode = "uniform_manifest_order"
@@ -270,7 +265,9 @@ def select_mine_bumi(
         row = rows[position]
         audio_path = (dataset_root / str(row["audio_path"])).resolve()
         motion_path = (dataset_root / str(row["motion_path"])).resolve()
-        if not audio_path.is_relative_to(dataset_root) or not motion_path.is_relative_to(dataset_root):
+        if not audio_path.is_relative_to(dataset_root) or not motion_path.is_relative_to(
+            dataset_root
+        ):
             raise ValueError("自建库 manifest 路径越出数据根")
         if not audio_path.is_file() or not motion_path.is_file():
             raise FileNotFoundError(f"自建库所选正式资产未传回本地：{audio_path} / {motion_path}")
@@ -656,6 +653,9 @@ def build_index(
     root_postprocess = html.escape(
         str(selection["generation"].get("root_orientation_postprocess") or "无")
     )
+    foot_lock_postprocess = html.escape(
+        str(selection["generation"].get("foot_lock_postprocess") or "无")
+    )
     cards = []
     for dataset, label, _ in REPORT_DATASETS:
         dataset_rows = [row for row in results if row["dataset"] == dataset]
@@ -724,7 +724,7 @@ section{{margin-top:34px}}video{{width:100%;max-height:620px;background:#000;bor
 <h1>BUMI {model_label} 多库人工高质量音乐验证</h1>
 <div class="summary"><p>共评测 {summary["evaluated_samples"]} 首，完成 {summary["completed_samples"]} 首；严格 XML 超限样本 {summary["strict_xml_exceed_sample_count"]} 首，部署容差 {summary["joint_limit_tolerance_rad"]:.3f}rad 后仍超限 {summary["tolerance_exceed_sample_count"]} 首。</p>
 <p>总音频 {summary["motion_quality"]["total_duration_sec"] / 60.0:.2f} 分钟、{summary["motion_quality"]["total_frames"]} 帧；脚部最大穿地超过 5cm 的样本 {summary["motion_quality"]["foot_penetration_max_over_0_05m_samples"]} 首，根节点最大倾斜超过 0.5rad 的样本 {summary["motion_quality"]["root_tilt_max_over_0_5rad_samples"]} 首。</p>
-<p>根姿态后处理：<code>{root_postprocess}</code>。启用时 artifact 同时保留 <code>qpos_raw</code> 供审计；页面播放的是保留连续根 yaw 与全部关节、移除根 roll/pitch、限制 yaw 角速度为 4rad/s，并仅在足底穿地帧向上抬高根 Z 后的部署轨迹。</p>
+	<p>根姿态后处理：<code>{root_postprocess}</code>；FK 足底锁定：<code>{foot_lock_postprocess}</code>。页面播放轨迹只根据 contact head 修正 root XY 来降低脚滑；root Z、root 四元数和全部关节保持模型原值，artifact 同时保存 <code>qpos_raw</code>、contact logits 和逐帧 XY 修正供审计。</p>
 <p>选择只来自人工评分 <code>score=1</code>，完整规则见 <a href="selection.json">selection.json</a>，汇总见 <a href="quality_summary.json">quality_summary.json</a>。所有编号同时在报告中提供 0-based 和 1-based。</p></div>
 {"".join(cards)}
 </main></body></html>"""
@@ -871,11 +871,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--joint-limit-tolerance-rad", type=float, default=0.25)
     parser.add_argument("--width", type=int, default=640)
     parser.add_argument("--height", type=int, default=480)
-    parser.add_argument(
-        "--project-root-upright",
-        action="store_true",
-        help="显式保留连续根 yaw、限制为4rad/s、移除根 roll/pitch，并只向上修正足底穿地。",
-    )
     parser.add_argument("--selection-only", action="store_true")
     return parser.parse_args()
 
@@ -918,9 +913,8 @@ def main() -> int:
         selected.extend(mine_selected)
         dataset_summary["mine_bumi"] = mine_summary
         selection_limits["mine_bumi"] = args.mine_count
-    root_orientation_postprocess = (
-        UPRIGHT_ROOT_POSTPROCESS if args.project_root_upright else None
-    )
+    # qpos30 模型必须自行学会 root roll/pitch；验证链路禁止直立投影。
+    root_orientation_postprocess = None
     metadata_path = (
         args.onnx_metadata.expanduser().resolve(strict=True)
         if args.onnx_metadata is not None
@@ -967,6 +961,7 @@ def main() -> int:
             "cfg_scale": args.cfg_scale,
             "seed": args.seed,
             "root_orientation_postprocess": root_orientation_postprocess,
+            "foot_lock_postprocess": BUMI_FOOT_LOCK_CONTRACT_VERSION,
         },
         "quality_audit": {
             "strict_xml_limits_reported": True,
@@ -1056,21 +1051,15 @@ def main() -> int:
             )
             if artifact is None:
                 generated = generator.generate(features, seed=args.seed)
-                raw_qpos = generated.qpos.float().contiguous()
-                if root_orientation_postprocess is not None:
-                    upright = project_bumi_root_to_upright_heading(
-                        raw_qpos, max_yaw_velocity_radps=4.0, fps=30
-                    ).to(device)
-                    qpos = lift_bumi_root_above_ground(
-                        upright, endecoder.kinematics, ground_height=0.0
-                    ).detach().cpu()
-                else:
-                    qpos = raw_qpos
+                raw_qpos = generated.qpos_raw.float().contiguous()
+                qpos = generated.qpos.float().contiguous()
+                contact_logits = generated.foot_contact_logits.float().contiguous()
                 canonical = endecoder.codec.encode(qpos.to(device)).canonical_qpos.detach().cpu()
                 windows = len(generated.chunks)
             else:
                 qpos = artifact["qpos"].float().contiguous()
                 raw_qpos = artifact.get("qpos_raw", qpos).float().contiguous()
+                contact_logits = artifact["foot_contact_logits"].float().contiguous()
                 canonical = artifact["qpos_canonical"].float().contiguous()
                 windows = len(plan_sliding_windows(len(qpos)))
                 print(
@@ -1081,6 +1070,16 @@ def main() -> int:
                 compute_bumi_kinematic_metrics(
                     qpos.to(device),
                     endecoder.kinematics,
+                    pred_contact_logits=contact_logits.to(device),
+                    music_beats=features[:, 34].to(device),
+                    ground_height=0.0,
+                )
+            )
+            raw_metrics = metrics_to_json(
+                compute_bumi_kinematic_metrics(
+                    raw_qpos.to(device),
+                    endecoder.kinematics,
+                    pred_contact_logits=contact_logits.to(device),
                     music_beats=features[:, 34].to(device),
                     ground_height=0.0,
                 )
@@ -1097,6 +1096,10 @@ def main() -> int:
                     "fps": 30,
                     "qpos": qpos,
                     "qpos_raw": raw_qpos,
+                    "foot_contact_logits": generated.foot_contact_logits,
+                    "foot_lock_correction_xy": generated.foot_lock_correction_xy,
+                    "foot_lock_active_contact": generated.foot_lock_active_contact,
+                    "foot_lock_contract_version": generated.foot_lock_contract_version,
                     "qpos_canonical": canonical,
                     "joint_names": list(endecoder.kinematics.joint_order),
                     "quaternion_convention": "wxyz",
@@ -1113,6 +1116,7 @@ def main() -> int:
                     "ddim_steps": args.ddim_steps,
                     "max_duration_sec": args.max_duration_sec,
                     "root_orientation_postprocess": root_orientation_postprocess,
+                    "foot_lock_postprocess": BUMI_FOOT_LOCK_CONTRACT_VERSION,
                 }
                 artifact_path.parent.mkdir(parents=True, exist_ok=True)
                 temporary_artifact = artifact_path.with_suffix(".tmp")
@@ -1151,7 +1155,9 @@ def main() -> int:
                 "ddim_steps": args.ddim_steps,
                 "max_duration_sec": args.max_duration_sec,
                 "root_orientation_postprocess": root_orientation_postprocess,
+                "foot_lock_postprocess": BUMI_FOOT_LOCK_CONTRACT_VERSION,
                 "metrics": metrics,
+                "raw_model_metrics": raw_metrics,
                 "joint_limits": limits,
                 "media": media,
                 "elapsed_seconds": time.perf_counter() - started,

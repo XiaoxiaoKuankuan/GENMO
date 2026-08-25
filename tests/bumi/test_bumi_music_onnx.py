@@ -19,11 +19,11 @@ from gem.runtime.bumi_music_onnx import (
 
 
 class FakeDenoiser(nn.Module):
-    output_dim = 93
+    output_dim = 30
     encode_text = False
     max_len = 120
     pred_cam_head = False
-    static_conf_head = False
+    static_conf_head = True
 
     def forward(self, xt, timesteps, y, inputs, sample_indices_dict):
         del inputs, sample_indices_dict
@@ -31,17 +31,18 @@ class FakeDenoiser(nn.Module):
         time = timesteps.float().view(-1, 1, 1) / 1000.0
         length_term = y["length"].float().view(-1, 1, 1) * 1.0e-5
         prediction = xt * 0.25 + condition.expand_as(xt) + time + length_term
+        contact = torch.cat((condition, -condition), dim=-1)
         return {
             "pred_x_start": prediction,
             "pred_x": prediction,
             "pred_cam": None,
-            "static_conf_logits": None,
+            "static_conf_logits": contact,
         }
 
 
 class FakeEndecoder:
-    feat_dim = 93
-    representation_contract_version = "genmo.bumi_motion_features.v2"
+    feat_dim = 30
+    representation_contract_version = BUMI_REPRESENTATION_CONTRACT_VERSION
 
     def __init__(self):
         self.obs_indices_dict = None
@@ -52,7 +53,6 @@ class FakeEndecoder:
             "root_height_offset": (2, 3),
             "root_rot_local": (3, 9),
             "joint_dof": (9, 30),
-            "body_link_pos_root": (30, 93),
         }
 
 
@@ -70,7 +70,7 @@ class FakeBumiModel(nn.Module):
         )
 
 
-def test_bumi_cfg_is_internal_and_outputs_only_motion93() -> None:
+def test_bumi_cfg_is_internal_and_outputs_motion30_plus_contact() -> None:
     torch.manual_seed(4)
     wrapper = BumiMusicGuidedDenoiser(FakeBumiModel()).eval()
     music = torch.randn(120, 35)
@@ -78,9 +78,16 @@ def test_bumi_cfg_is_internal_and_outputs_only_motion93() -> None:
     unconditional = wrapper(noisy, timestep, music, length, torch.tensor([0.0]))
     conditional = wrapper(noisy, timestep, music, length, torch.tensor([1.0]))
     guided = wrapper(noisy, timestep, music, length, torch.tensor([2.5]))
-    torch.testing.assert_close(guided, unconditional + 2.5 * (conditional - unconditional))
-    assert guided.shape == (1, 120, 93)
-    assert torch.isfinite(guided).all()
+    for guided_value, unconditional_value, conditional_value in zip(
+        guided, unconditional, conditional, strict=True
+    ):
+        torch.testing.assert_close(
+            guided_value,
+            unconditional_value + 2.5 * (conditional_value - unconditional_value),
+        )
+        assert torch.isfinite(guided_value).all()
+    assert guided[0].shape == (1, 120, 30)
+    assert guided[1].shape == (1, 120, 2)
 
 
 def test_bumi_onnx_inputs_are_deterministic_and_strict() -> None:
@@ -88,7 +95,7 @@ def test_bumi_onnx_inputs_are_deterministic_and_strict() -> None:
     first = make_bumi_onnx_inputs(music, seed=19)
     second = make_bumi_onnx_inputs(music, seed=19)
     assert all(torch.equal(left, right) for left, right in zip(first, second))
-    assert first[0].shape == (1, 120, 93)
+    assert first[0].shape == (1, 120, 30)
     assert first[1].dtype == torch.long
     with pytest.raises(ValueError, match="shape"):
         make_bumi_onnx_inputs(torch.zeros(2, 120, 35))
@@ -114,25 +121,37 @@ def test_bumi_export_rejects_wrong_backend_and_optional_heads() -> None:
 def test_checkpoint_contract_rejects_smpl151_and_optional_heads() -> None:
     valid = {
         "music_embedder.fc1.weight": torch.zeros(8, 35),
-        "pipeline.denoiser3d.denoiser.final_layer.fc2.weight": torch.zeros(93, 8),
+        "pipeline.denoiser3d.denoiser.final_layer.fc2.weight": torch.zeros(30, 8),
+        "pipeline.denoiser3d.denoiser.static_conf_head.fc2.weight": torch.zeros(2, 8),
     }
     report = validate_bumi_checkpoint_state_dict(valid)
-    assert next(iter(report["final_layer_weight_shapes"].values())) == [93, 8]
+    assert next(iter(report["final_layer_weight_shapes"].values())) == [30, 8]
+    assert next(iter(report["contact_head_weight_shapes"].values())) == [2, 8]
     wrong = dict(valid)
     wrong["pipeline.denoiser3d.denoiser.final_layer.fc2.weight"] = torch.zeros(151, 8)
-    with pytest.raises(ValueError, match="93D"):
+    with pytest.raises(ValueError, match="30D"):
         validate_bumi_checkpoint_state_dict(wrong)
     wrong = dict(valid)
     wrong["pipeline.denoiser3d.denoiser.pred_cam_head.fc1.weight"] = torch.zeros(8, 8)
-    with pytest.raises(ValueError, match="camera/static"):
+    with pytest.raises(ValueError, match="camera head"):
+        validate_bumi_checkpoint_state_dict(wrong)
+    wrong = dict(valid)
+    wrong.pop("pipeline.denoiser3d.denoiser.static_conf_head.fc2.weight")
+    with pytest.raises(ValueError, match="contact"):
         validate_bumi_checkpoint_state_dict(wrong)
 
 
-def test_bumi_checkpoint_requires_v2_representation_metadata() -> None:
-    with pytest.raises(RuntimeError, match="s430000"):
+def test_bumi_checkpoint_requires_qpos30_representation_metadata() -> None:
+    with pytest.raises(RuntimeError, match="qpos30"):
         BumiMusicGEM._validate_representation_checkpoint({})
     BumiMusicGEM._validate_representation_checkpoint(
-        {"bumi_representation_contract_version": (BUMI_REPRESENTATION_CONTRACT_VERSION)}
+        {
+            "bumi_representation_contract_version": BUMI_REPRESENTATION_CONTRACT_VERSION,
+            "state_dict": {
+                "pipeline.denoiser3d.denoiser.final_layer.fc2.weight": torch.zeros(30, 8),
+                "pipeline.denoiser3d.denoiser.static_conf_head.fc2.weight": torch.zeros(2, 8),
+            },
+        }
     )
 
 
@@ -142,7 +161,7 @@ def test_bumi_wrapper_exports_and_matches_onnxruntime(tmp_path) -> None:
     torch.manual_seed(5)
     wrapper = BumiMusicGuidedDenoiser(FakeBumiModel()).eval()
     inputs = make_bumi_onnx_inputs(torch.randn(12, 35), seed=23)
-    reference = wrapper(*inputs).detach().numpy()
+    reference = tuple(value.detach().numpy() for value in wrapper(*inputs))
     output = tmp_path / "fake_bumi.onnx"
     torch.onnx.export(
         wrapper,
@@ -156,7 +175,7 @@ def test_bumi_wrapper_exports_and_matches_onnxruntime(tmp_path) -> None:
             "length",
             "guidance_scale",
         ],
-        output_names=["pred_motion"],
+        output_names=["pred_motion", "pred_foot_contact_logits"],
         dynamo=False,
     )
     onnx.checker.check_model(str(output))
@@ -169,8 +188,9 @@ def test_bumi_wrapper_exports_and_matches_onnxruntime(tmp_path) -> None:
         "guidance_scale",
     )
     candidate = session.run(
-        ["pred_motion"],
+        ["pred_motion", "pred_foot_contact_logits"],
         {name: value.detach().numpy() for name, value in zip(names, inputs)},
-    )[0]
+    )
     np = pytest.importorskip("numpy")
-    np.testing.assert_allclose(reference, candidate, atol=1e-5, rtol=1e-5)
+    for reference_value, candidate_value in zip(reference, candidate, strict=True):
+        np.testing.assert_allclose(reference_value, candidate_value, atol=1e-5, rtol=1e-5)

@@ -1,7 +1,8 @@
 # SPDX-License-Identifier: LicenseRef-NVIDIA-OneWay-Noncommercial
 """BUMI 音乐模型的 ONNX/TensorRT 与长音乐滑窗部署运行时。
 
-本模块把固定形状的 ``[1,120,93]`` 单步去噪图封装成统一调用接口，并在图外执行
+本模块把固定形状的 ``[1,120,30]`` qpos 去噪图和 ``[1,120,2]`` 接触 head 封装成
+统一调用接口，并在图外执行
 与训练仓库相同的确定性 DDIM。长音乐严格使用 120 帧窗口、30 帧重叠和 90 帧步长。
 每个窗口按训练时的独立完整 crop 分布生成，随后把下一窗口的根旋转对齐到统一轨迹航向，
 在双侧真实预测的重叠区融合世界水平位移、绝对根高和关节，并对根四元数执行最短弧
@@ -26,9 +27,14 @@ import torch
 
 from gem.robots.bumi.endecoder import BumiEndecoder
 from gem.robots.bumi.feature_codec import (
+    BUMI_FEATURE_DIM,
     BUMI_REPRESENTATION_CONTRACT_VERSION,
     make_quaternion_continuous,
     normalize_quaternion_wxyz,
+)
+from gem.robots.bumi.postprocess import (
+    BUMI_FOOT_LOCK_CONTRACT_VERSION,
+    lock_bumi_foot_contacts,
 )
 from gem.runtime.music_only_trt import (
     MUSIC_DIM,
@@ -44,9 +50,9 @@ from gem.runtime.music_only_trt import (
 )
 from gem.utils.rotation_conversions import quaternion_multiply
 
-BUMI_MOTION_DIM = 93
-BUMI_ENGINE_CONTRACT = "gem_bumi_music_trt_engine_v2"
-BUMI_SLIDING_QPOS_CONTRACT_VERSION = "genmo.bumi_sliding_motion_overlap_add.v3"
+BUMI_MOTION_DIM = BUMI_FEATURE_DIM
+BUMI_ENGINE_CONTRACT = "gem_bumi_music_trt_engine_qpos30_contact_v3"
+BUMI_SLIDING_QPOS_CONTRACT_VERSION = "genmo.bumi_sliding_motion_overlap_add.qpos30_contact.v4"
 
 
 def bumi_engine_cache_key(
@@ -57,7 +63,7 @@ def bumi_engine_cache_key(
     precision: str,
     gpu: dict[str, object],
 ) -> str:
-    """返回只适用于 BUMI 93D 固定形状引擎的可复现缓存键。"""
+    """返回只适用于 BUMI qpos30/contact 固定形状引擎的可复现缓存键。"""
 
     value = {
         "contract": BUMI_ENGINE_CONTRACT,
@@ -111,13 +117,16 @@ class BumiOrtStepRunner:
         }
         if input_shapes != self.REQUIRED_INPUTS:
             raise RuntimeError(f"BUMI ONNX input contract mismatch: {input_shapes}")
-        outputs = self.session.get_outputs()
-        if (
-            len(outputs) != 1
-            or outputs[0].name != "pred_motion"
-            or tuple(int(item) for item in outputs[0].shape) != (1, WINDOW_FRAMES, BUMI_MOTION_DIM)
-        ):
-            raise RuntimeError("BUMI ONNX pred_motion output contract mismatch")
+        output_shapes = {
+            value.name: tuple(int(item) for item in value.shape)
+            for value in self.session.get_outputs()
+        }
+        expected_outputs = {
+            "pred_motion": (1, WINDOW_FRAMES, BUMI_MOTION_DIM),
+            "pred_foot_contact_logits": (1, WINDOW_FRAMES, 2),
+        }
+        if output_shapes != expected_outputs:
+            raise RuntimeError(f"BUMI ONNX output contract mismatch: {output_shapes}")
 
     def __call__(
         self,
@@ -126,9 +135,9 @@ class BumiOrtStepRunner:
         music: torch.Tensor,
         length: torch.Tensor,
         guidance_scale: torch.Tensor,
-    ) -> torch.Tensor:
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         values = self.session.run(
-            ["pred_motion"],
+            ["pred_motion", "pred_foot_contact_logits"],
             {
                 "noisy_motion": noisy_motion.detach().cpu().numpy().astype(np.float32),
                 "diffusion_timestep": diffusion_timestep.detach().cpu().numpy().astype(np.int64),
@@ -136,8 +145,8 @@ class BumiOrtStepRunner:
                 "length": length.detach().cpu().numpy().astype(np.int64),
                 "guidance_scale": guidance_scale.detach().cpu().numpy().astype(np.float32),
             },
-        )[0]
-        return torch.from_numpy(values).to(self.device)
+        )
+        return tuple(torch.from_numpy(value).to(self.device) for value in values)
 
 
 class BumiTensorRTStepRunner(TensorRTStepRunner):
@@ -150,7 +159,10 @@ class BumiTensorRTStepRunner(TensorRTStepRunner):
         "length": (1,),
         "guidance_scale": (1,),
     }
-    REQUIRED_OUTPUT = (1, WINDOW_FRAMES, BUMI_MOTION_DIM)
+    REQUIRED_OUTPUTS = {
+        "pred_motion": (1, WINDOW_FRAMES, BUMI_MOTION_DIM),
+        "pred_foot_contact_logits": (1, WINDOW_FRAMES, 2),
+    }
 
     def _validate_manifest(self, required: bool) -> dict[str, object] | None:
         manifest_path = self.engine_path.parent / "engine.json"
@@ -166,9 +178,16 @@ class BumiTensorRTStepRunner(TensorRTStepRunner):
         if payload.get("engine_sha256") != sha256_file(self.engine_path):
             raise RuntimeError("BUMI TensorRT engine SHA256 does not match its manifest")
         if payload.get("input_shape") != [1, WINDOW_FRAMES, BUMI_MOTION_DIM]:
-            raise RuntimeError("BUMI TensorRT manifest input_shape is not [1,120,93]")
-        if payload.get("output_shape") != [1, WINDOW_FRAMES, BUMI_MOTION_DIM]:
-            raise RuntimeError("BUMI TensorRT manifest output_shape is not [1,120,93]")
+            raise RuntimeError(
+                f"BUMI TensorRT manifest input_shape is not [1,120,{BUMI_MOTION_DIM}]"
+            )
+        expected_output_shapes = {
+            name: list(shape) for name, shape in self.REQUIRED_OUTPUTS.items()
+        }
+        if payload.get("output_shapes") != expected_output_shapes:
+            raise RuntimeError(
+                f"BUMI TensorRT manifest output_shapes mismatch: {payload.get('output_shapes')}"
+            )
         expected_version = str(payload.get("tensorrt_version", ""))
         actual_version = str(self.trt.__version__)
         if expected_version.split(".")[:2] != actual_version.split(".")[:2]:
@@ -200,6 +219,69 @@ class BumiTensorRTStepRunner(TensorRTStepRunner):
             raise RuntimeError("BUMI TensorRT engine cache fingerprint mismatch")
         return payload
 
+    def _allocate_and_bind(self) -> None:
+        trt = self.trt
+        self._output_names: set[str] = set()
+        for index in range(self.engine.num_io_tensors):
+            name = self.engine.get_tensor_name(index)
+            shape = tuple(int(value) for value in self.engine.get_tensor_shape(name))
+            if any(value <= 0 for value in shape):
+                raise RuntimeError(f"TensorRT engine has a dynamic/unresolved shape for {name}")
+            dtype = self._torch_dtype(np.dtype(trt.nptype(self.engine.get_tensor_dtype(name))))
+            tensor = torch.empty(shape, dtype=dtype, device=self.device).contiguous()
+            self._buffers[name] = tensor
+            self.context.set_tensor_address(name, tensor.data_ptr())
+            if self.engine.get_tensor_mode(name) == trt.TensorIOMode.INPUT:
+                self._input_names.add(name)
+            else:
+                self._output_names.add(name)
+        if self._input_names != set(self.REQUIRED_INPUTS):
+            raise RuntimeError(f"TensorRT input contract mismatch: {sorted(self._input_names)}")
+        for name, expected in self.REQUIRED_INPUTS.items():
+            if tuple(self._buffers[name].shape) != expected:
+                raise RuntimeError(
+                    f"TensorRT input {name} must be {expected}, got {tuple(self._buffers[name].shape)}"
+                )
+        if self._output_names != set(self.REQUIRED_OUTPUTS):
+            raise RuntimeError(f"TensorRT output contract mismatch: {sorted(self._output_names)}")
+        for name, expected in self.REQUIRED_OUTPUTS.items():
+            if tuple(self._buffers[name].shape) != expected:
+                raise RuntimeError(
+                    f"TensorRT output {name} must be {expected}, got {tuple(self._buffers[name].shape)}"
+                )
+
+    def __call__(
+        self,
+        noisy_motion: torch.Tensor,
+        diffusion_timestep: torch.Tensor,
+        music: torch.Tensor,
+        length: torch.Tensor,
+        guidance_scale: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        values = {
+            "noisy_motion": noisy_motion,
+            "diffusion_timestep": diffusion_timestep,
+            "music": music,
+            "length": length,
+            "guidance_scale": guidance_scale,
+        }
+        with self._lock:
+            for name, value in values.items():
+                destination = self._buffers[name]
+                if tuple(value.shape) != tuple(destination.shape):
+                    raise ValueError(
+                        f"{name} must be {tuple(destination.shape)}, got {tuple(value.shape)}"
+                    )
+                destination.copy_(value.to(device=self.device, dtype=destination.dtype))
+            if self.cuda_graph is None:
+                self._execute()
+            else:
+                self.cuda_graph.replay()
+            return (
+                self._buffers["pred_motion"],
+                self._buffers["pred_foot_contact_logits"],
+            )
+
 
 @dataclass(frozen=True, slots=True)
 class BumiGeneratedChunk:
@@ -217,6 +299,11 @@ class BumiSlidingResult:
     """长音乐生成结果；qpos 与 chunks 使用完全相同的提交边界。"""
 
     qpos: torch.Tensor
+    qpos_raw: torch.Tensor
+    foot_contact_logits: torch.Tensor
+    foot_lock_correction_xy: torch.Tensor
+    foot_lock_active_contact: torch.Tensor
+    foot_lock_contract_version: str | None
     chunks: tuple[BumiGeneratedChunk, ...]
 
 
@@ -224,88 +311,6 @@ def _yaw_from_wxyz(quaternion: torch.Tensor) -> torch.Tensor:
     value = quaternion / torch.linalg.vector_norm(quaternion, dim=-1, keepdim=True).clamp_min(1e-8)
     w, x, y, z = value.unbind(dim=-1)
     return torch.atan2(2.0 * (w * z + x * y), 1.0 - 2.0 * (y * y + z * z))
-
-
-def project_bumi_root_to_upright_heading(
-    qpos: torch.Tensor,
-    *,
-    max_yaw_velocity_radps: float | None = 4.0,
-    fps: int = 30,
-) -> torch.Tensor:
-    """保留世界位置、根 yaw 和全部关节，只移除导致机器人躺倒的根 roll/pitch。
-
-    人工 q1 v3 模型在音乐动态区间能够生成有效关节动作，但归一化 6D 根旋转的生成结果会
-    偶发退化到接近横躺的姿态。部署验收不能把这种姿态静默当作有效舞蹈。本函数是显式、
-    可审计的运动学安全投影：从原 wxyz 根四元数提取水平 heading，先对 yaw 做跨帧解包，
-    再按可选角速度上限抑制横躺奇异点造成的瞬时反转，最后重建纯 yaw 四元数；根位置和
-    21 个关节自由度逐值保持不变。调用方必须在 artifact 中记录该后处理，不能把投影后的
-    轨迹表述为模型未经处理的原始根旋转预测。
-    """
-
-    value = torch.as_tensor(qpos)
-    if value.ndim < 2 or value.shape[-1] != 28 or value.shape[-2] <= 0:
-        raise ValueError(f"qpos must have shape [...,T,28] with T > 0; got {value.shape}")
-    if not bool(torch.isfinite(value).all()):
-        raise ValueError("qpos contains NaN or Inf")
-    if int(fps) <= 0:
-        raise ValueError("fps must be positive")
-    if max_yaw_velocity_radps is not None and (
-        not math.isfinite(float(max_yaw_velocity_radps))
-        or float(max_yaw_velocity_radps) <= 0.0
-    ):
-        raise ValueError("max_yaw_velocity_radps must be None or finite and > 0")
-    result = value.clone()
-    yaw = _yaw_from_wxyz(normalize_quaternion_wxyz(result[..., 3:7]))
-    if yaw.shape[-1] > 1:
-        raw_delta = yaw[..., 1:] - yaw[..., :-1]
-        wrapped_delta = torch.atan2(torch.sin(raw_delta), torch.cos(raw_delta))
-        if max_yaw_velocity_radps is not None:
-            max_step = float(max_yaw_velocity_radps) / float(fps)
-            wrapped_delta = wrapped_delta.clamp(min=-max_step, max=max_step)
-        yaw = torch.cat(
-            (yaw[..., :1], yaw[..., :1] + torch.cumsum(wrapped_delta, dim=-1)), dim=-1
-        )
-    half_yaw = yaw * 0.5
-    result[..., 3:7] = torch.stack(
-        (
-            torch.cos(half_yaw),
-            torch.zeros_like(half_yaw),
-            torch.zeros_like(half_yaw),
-            torch.sin(half_yaw),
-        ),
-        dim=-1,
-    )
-    return result.contiguous()
-
-
-def lift_bumi_root_above_ground(
-    qpos: torch.Tensor,
-    kinematics: Any,
-    *,
-    ground_height: float = 0.0,
-) -> torch.Tensor:
-    """只在足底穿地时逐帧向上平移根 Z，保留腾空、XY、朝向和全部关节动作。
-
-    根直立投影会改变足底相对根节点的垂直几何，而模型原始根高度是针对退化横躺姿态预测的。
-    这里用权威 BUMI FK 和鞋底代理计算每帧最低足底，只对低于 ``ground_height`` 的帧增加
-    恰好消除穿透的根高度；本来高于地面的帧抬升量为零，因此不会把跳跃或腾空动作压回
-    地面。该步骤同样属于必须写入 artifact 的显式部署后处理。
-    """
-
-    value = torch.as_tensor(qpos)
-    if value.ndim < 2 or value.shape[-1] != 28 or value.shape[-2] <= 0:
-        raise ValueError(f"qpos must have shape [...,T,28] with T > 0; got {value.shape}")
-    if not bool(torch.isfinite(value).all()):
-        raise ValueError("qpos contains NaN or Inf")
-    if not math.isfinite(float(ground_height)):
-        raise ValueError("ground_height must be finite")
-    fk = kinematics.forward_kinematics(value)
-    sole = kinematics.aggregate_sole_by_foot(fk["body_pos_w"], fk["body_quat_w"])
-    lowest = sole["foot_bottom_height"].amin(dim=-1)
-    lift = (float(ground_height) - lowest).clamp_min(0.0)
-    result = value.clone()
-    result[..., 2] = result[..., 2] + lift
-    return result.contiguous()
 
 
 def _slerp_wxyz(first: torch.Tensor, second: torch.Tensor, alpha: torch.Tensor) -> torch.Tensor:
@@ -434,6 +439,7 @@ class BumiSlidingQposGenerator:
         steps: int = 20,
         guidance_scale: float = 2.5,
         overlap_atol: float = 2.0e-4,
+        apply_foot_lock: bool = True,
     ) -> None:
         if not isinstance(endecoder, BumiEndecoder):
             raise TypeError("BumiSlidingQposGenerator requires BumiEndecoder")
@@ -449,6 +455,7 @@ class BumiSlidingQposGenerator:
             motion_dim=BUMI_MOTION_DIM,
         )
         self.overlap_atol = float(overlap_atol)
+        self.apply_foot_lock = bool(apply_foot_lock)
 
     def _anchor_for(self, first_world_qpos: torch.Tensor | None) -> torch.Tensor:
         default_z = self.endecoder.kinematics.default_qpos[2].to(self.device)
@@ -498,6 +505,7 @@ class BumiSlidingQposGenerator:
             raise ValueError("music contains NaN or Inf")
         total_frames = len(features)
         stitched_state: torch.Tensor | None = None
+        stitched_contact_logits: torch.Tensor | None = None
         windows = plan_sliding_windows(total_frames)
         for window in windows:
             normalized = self.generator.generate_window(
@@ -506,10 +514,24 @@ class BumiSlidingQposGenerator:
                 seed=derive_window_seed(seed, window.index),
                 known_x0=None,
             )[: window.valid_length]
+            aux_output = self.generator.last_aux_output
+            if aux_output is None or len(aux_output) != 1:
+                raise RuntimeError(
+                    "BUMI qpos30 sliding generation requires one contact-head auxiliary output"
+                )
+            candidate_contact_logits = aux_output[0][0, : window.valid_length]
+            if candidate_contact_logits.shape != (window.valid_length, 2) or not bool(
+                torch.isfinite(candidate_contact_logits).all()
+            ):
+                raise RuntimeError(
+                    "BUMI contact head returned invalid shape/value: "
+                    f"{tuple(candidate_contact_logits.shape)}"
+                )
             decoded = self.endecoder.decode(normalized)
             candidate_state = self._motion_state(decoded)
             if stitched_state is None:
                 stitched_state = candidate_state
+                stitched_contact_logits = candidate_contact_logits
                 continue
             if window.known_length != OVERLAP_FRAMES:
                 raise RuntimeError("BUMI sliding window must have a full 30-frame overlap")
@@ -524,6 +546,22 @@ class BumiSlidingQposGenerator:
                 stitched_state[window.start : overlap_end],
                 aligned_state[: window.known_length],
             )
+            if stitched_contact_logits is None:
+                raise RuntimeError("BUMI contact timeline was not initialized")
+            alpha = (
+                torch.arange(
+                    1,
+                    window.known_length + 1,
+                    device=candidate_contact_logits.device,
+                    dtype=candidate_contact_logits.dtype,
+                )
+                / float(window.known_length + 1)
+            ).unsqueeze(-1)
+            blended_contact = torch.lerp(
+                stitched_contact_logits[window.start : overlap_end],
+                candidate_contact_logits[: window.known_length],
+                alpha,
+            )
             stitched_state = torch.cat(
                 (
                     stitched_state[: window.start],
@@ -532,7 +570,20 @@ class BumiSlidingQposGenerator:
                 ),
                 dim=0,
             )
-        if stitched_state is None or len(stitched_state) != total_frames:
+            stitched_contact_logits = torch.cat(
+                (
+                    stitched_contact_logits[: window.start],
+                    blended_contact,
+                    candidate_contact_logits[window.known_length :],
+                ),
+                dim=0,
+            )
+        if (
+            stitched_state is None
+            or stitched_contact_logits is None
+            or len(stitched_state) != total_frames
+            or len(stitched_contact_logits) != total_frames
+        ):
             raise RuntimeError("BUMI sliding generation did not cover the requested timeline")
         stitched_state = torch.cat(
             (
@@ -542,7 +593,7 @@ class BumiSlidingQposGenerator:
             ),
             dim=-1,
         ).contiguous()
-        stitched = self.endecoder.compose_qpos(
+        stitched_raw = self.endecoder.compose_qpos(
             {
                 "root_delta_xy_heading": stitched_state[:, :2],
                 "root_height_offset": stitched_state[:, 2:3],
@@ -551,6 +602,25 @@ class BumiSlidingQposGenerator:
             },
             world_anchor=self._anchor_for(None),
         ).contiguous()
+        if self.apply_foot_lock:
+            foot_lock = lock_bumi_foot_contacts(
+                stitched_raw,
+                stitched_contact_logits,
+                self.endecoder.kinematics,
+                contact_is_logits=True,
+                fps=30,
+            )
+            stitched = foot_lock.qpos
+            foot_lock_correction = foot_lock.correction_xy
+            foot_lock_active = foot_lock.active_contact
+            foot_lock_contract: str | None = BUMI_FOOT_LOCK_CONTRACT_VERSION
+        else:
+            stitched = stitched_raw
+            foot_lock_correction = stitched_raw.new_zeros((total_frames, 2))
+            foot_lock_active = torch.zeros(
+                (total_frames, 2), dtype=torch.bool, device=stitched_raw.device
+            )
+            foot_lock_contract = None
         chunks: list[BumiGeneratedChunk] = []
         for window in windows:
             absolute_start = window.start + window.known_length
@@ -568,7 +638,15 @@ class BumiSlidingQposGenerator:
             )
         if not chunks or not chunks[-1].is_last:
             raise RuntimeError("BUMI sliding generation did not produce a terminal chunk")
-        return BumiSlidingResult(qpos=stitched.detach().cpu(), chunks=tuple(chunks))
+        return BumiSlidingResult(
+            qpos=stitched.detach().cpu(),
+            qpos_raw=stitched_raw.detach().cpu(),
+            foot_contact_logits=stitched_contact_logits.detach().cpu(),
+            foot_lock_correction_xy=foot_lock_correction.detach().cpu(),
+            foot_lock_active_contact=foot_lock_active.detach().cpu(),
+            foot_lock_contract_version=foot_lock_contract,
+            chunks=tuple(chunks),
+        )
 
 
 __all__ = [
@@ -581,6 +659,4 @@ __all__ = [
     "BumiSlidingResult",
     "BumiTensorRTStepRunner",
     "bumi_engine_cache_key",
-    "lift_bumi_root_above_ground",
-    "project_bumi_root_to_upright_heading",
 ]

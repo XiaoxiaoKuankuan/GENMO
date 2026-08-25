@@ -12,6 +12,7 @@ import numpy as np
 import torch
 from torch.utils.data import Dataset
 
+from gem.robots.bumi.contacts import BUMI_CONTACT_CONTRACT_VERSION
 from gem.robots.bumi.feature_codec import (
     BUMI_QPOS_ORDER,
     BUMI_QUATERNION_CONVENTION,
@@ -389,7 +390,11 @@ class BumiMusicDatasetReader:
                 ((contact < 0.0) | (contact > 1.0)).any()
             ):
                 raise ValueError(f"{sample_id}: {path}: foot_contact must be finite in [0,1]")
-            result["foot_contact"] = contact.contiguous()
+            if payload.get("foot_contact_contract_version") == BUMI_CONTACT_CONTRACT_VERSION:
+                result["foot_contact"] = contact.contiguous()
+                result["foot_contact_available"] = torch.ones(qpos.shape[0], dtype=torch.bool)
+                result["foot_contact_contract_version"] = BUMI_CONTACT_CONTRACT_VERSION
+                result["foot_contact_source"] = "versioned_motion_payload"
         for key in ("source_dataset", "source_sample_id", "retarget_quality"):
             if key in payload:
                 result[key] = payload[key]
@@ -444,6 +449,9 @@ class BumiMusicDatasetReader:
         }
         if "foot_contact" in motion:
             result["foot_contact"] = motion["foot_contact"][:valid_frames]
+            result["foot_contact_available"] = motion["foot_contact_available"][:valid_frames]
+            result["foot_contact_contract_version"] = motion["foot_contact_contract_version"]
+            result["foot_contact_source"] = motion["foot_contact_source"]
         return result
 
 
@@ -604,12 +612,24 @@ class BumiMusicDanceDataset(Dataset):
                 "joint_names": list(self.kinematics.joint_order),
                 "quaternion_convention": BUMI_QUATERNION_CONVENTION,
                 "qpos_order": BUMI_QPOS_ORDER,
+                "ground_semantics": self.reader.dataset_info["ground_semantics"],
+                "foot_contact_contract_version": sequence.get(
+                    "foot_contact_contract_version", BUMI_CONTACT_CONTRACT_VERSION
+                ),
+                "foot_contact_source": sequence.get(
+                    "foot_contact_source", "derived_from_crop_qpos_fk"
+                ),
             },
         }
         if "foot_contact" in sequence:
             result["foot_contact"] = self._pad_last(
                 sequence["foot_contact"][start:end], self.motion_frames
             )
+            available = sequence["foot_contact_available"][start:end]
+            result["foot_contact_available"] = self._pad_zero(
+                available,
+                self.motion_frames,
+            ).bool()
         return result
 
     def __getitem__(self, index: int) -> dict[str, Any]:

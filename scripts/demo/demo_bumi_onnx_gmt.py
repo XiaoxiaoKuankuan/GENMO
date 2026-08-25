@@ -10,7 +10,8 @@
 默认是只生成、检查并保存计划的 dry-run，不会写 Redis。实际机器人执行必须同时传入
 ``--execute`` 和 ``--confirm-robot-motion``，并在运动开始前收到匹配 stream/revision/plan
 的 ACK；执行中 ACK 超时/陈旧、紧急停止文件、安全门失败或 Redis 异常都会终止发布。
-输出 NPZ 始终保存 30 Hz 原始 qpos、50 Hz 播放 qpos 和 GMT frames，便于离线复核。
+输出 NPZ 同时保存 30 Hz 模型原始 qpos、足底锁定 qpos、contact logits、50 Hz 播放 qpos
+和 GMT frames，便于确认后处理只改 root XY 而没有掩盖根旋转或关节错误。
 """
 
 from __future__ import annotations
@@ -85,6 +86,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--cfg-scale", type=float, default=2.5)
     parser.add_argument("--ddim-steps", type=int, default=20)
+    parser.add_argument(
+        "--no-foot-lock",
+        action="store_true",
+        help="诊断时保留原始 root XY；实际机器人默认启用 contact-gated FK 足底锁定",
+    )
     parser.add_argument("--blend-seconds", type=float, default=0.8)
     parser.add_argument("--return-seconds", type=float, default=1.0)
     parser.add_argument("--joint-limit-tolerance-rad", type=float, default=0.05)
@@ -121,7 +127,7 @@ def _validate_onnx_identity(
     if metadata.get("contract_version") != BUMI_ONNX_CONTRACT_VERSION:
         raise ValueError("ONNX metadata is not the BUMI guided denoiser contract")
     if metadata.get("representation_contract_version") != BUMI_REPRESENTATION_CONTRACT_VERSION:
-        raise ValueError("ONNX metadata is not the BUMI v2 motion representation")
+        raise ValueError("ONNX metadata is not the current BUMI qpos30 representation")
     if int(metadata.get("sequence_length", -1)) != 120:
         raise ValueError("BUMI GMT runtime requires a fixed 120-frame ONNX export")
     expected = {
@@ -339,6 +345,7 @@ def main(argv: list[str] | None = None) -> int:
         device=device,
         steps=args.ddim_steps,
         guidance_scale=args.cfg_scale,
+        apply_foot_lock=not args.no_foot_lock,
     ).generate(features, seed=args.seed)
 
     contract = GmtPolicyContract.from_onnx(args.gmt_policy)
@@ -399,6 +406,10 @@ def main(argv: list[str] | None = None) -> int:
     np.savez_compressed(
         output,
         qpos_30hz=generated.qpos.numpy().astype(np.float32),
+        qpos_raw_30hz=generated.qpos_raw.numpy().astype(np.float32),
+        foot_contact_logits_30hz=generated.foot_contact_logits.numpy().astype(np.float32),
+        foot_lock_correction_xy_30hz=generated.foot_lock_correction_xy.numpy().astype(np.float32),
+        foot_lock_active_contact_30hz=generated.foot_lock_active_contact.numpy(),
         qpos_50hz=snapshot.qpos.astype(np.float32),
         gmt_frames_50hz=snapshot.frames.astype(np.float32),
         native_to_gmt=native_to_gmt.astype(np.int64),
@@ -407,7 +418,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.execute:
         execution = _execute_plan(args, snapshot=snapshot, contract=contract)
     report = {
-        "contract_version": "genmo.bumi_onnx_gmt_demo.v2",
+        "contract_version": "genmo.bumi_onnx_gmt_demo.qpos30_contact.v3",
         "mode": "execute" if args.execute else "dry_run",
         "source_stream_contract": BUMI_QPOS_STREAM_CONTRACT,
         "sliding_qpos_contract_version": BUMI_SLIDING_QPOS_CONTRACT_VERSION,
@@ -428,6 +439,9 @@ def main(argv: list[str] | None = None) -> int:
         "stats": {"path": str(stats_path), "sha256": sha256_file(stats_path)},
         "gmt_policy": str(contract.path),
         "qpos_chunks": len(generated.chunks),
+        "foot_lock_applied": not args.no_foot_lock,
+        "foot_lock_contract_version": generated.foot_lock_contract_version,
+        "foot_lock_max_abs_correction_m": float(generated.foot_lock_correction_xy.abs().max()),
         "wire_bytes": wire_bytes,
         "output": str(output),
         "execution": execution,

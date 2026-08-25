@@ -1,8 +1,11 @@
 # BUMI-native Music-only GENMO
 
-> 当前代码的数据表示已升级到 `genmo.bumi_motion_features.v2`。下方 2026-08-19 的训练
-> 状态和 `s430000` 属于旧 `root_pos_local` v1 历史，不能由当前代码加载；v2 必须重算
-> stats 并重新训练，尚不能借用旧视频宣称模型质量已经验证。
+> 2026-08-25 起当前分支使用 qpos30 + 两维接触 head，并由 qpos 统一执行 FK。当前训练、
+> 后处理与 8 卡命令见 [BUMI qpos30、FK 接触与足底锁定 v3](BUMI_QPOS30_CONTACT_V3.md)。
+> 本文中大量 93D/无接触内容属于历史 repr-v2 实验记录，不能与 qpos30 checkpoint 混用。
+
+> 以下段落记录当时从 v1 升级到 93D v2 的历史边界；当前 qpos30 v3 同样拒绝加载两代
+> 旧 checkpoint/stats，不能借用旧视频宣称新模型质量已经验证。
 
 > 本文是数据契约、工程实现、训练和验证说明。若要从方法角度理解模型为什么采用
 > qpos28、93D、canonicalization、音乐条件扩散和 Torch FK，请先读

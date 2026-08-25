@@ -1,0 +1,37 @@
+# BUMI qpos30 + FK contact/slide 物理训练管线。
+#
+# Root rotation 比旧 physical_v1 显著加强，并加入 yaw 不敏感的 roll/pitch root_tilt。
+# foot-slide 只在 GT 连续接触帧生效，权重保持温和，避免以“少动”换低脚速；接触 head
+# 自训练开始即监督，其余辅助物理项在 5k step 内渐进启用。
+_target_: gem.pipeline.bumi_music_pipeline.BumiMusicPipeline
+args_denoiser3d: ${network}
+args:
+  motion_backend: bumi
+  train_modes: [diffusion]
+  endecoder_opt: ${endecoder}
+  use_cfg_sampler_for_gen: true
+  encoded_music_dim: 35
+  in_attr: [encoded_music]
+  mask_out_attr: []
+  out_attr:
+    static_conf_logits: 2
+  loss_contract: physical_qpos30_contact_v2
+  auxiliary_warmup_steps: 5000
+  ground_semantics: mixed_floor_zero_fk_contact_v2
+  weights:
+    repr_root_pos: 1.0
+    repr_root_rot: 2.0
+    repr_joint: 1.0
+    root_pos: 0.2
+    root_rot: 1.0
+    root_tilt: 1.0
+    joint_dof: 0.2
+    fk_body_pos: 1.0
+    joint_velocity: 0.05
+    joint_acceleration: 0.005
+    joint_jerk: 0.001
+    joint_limit: 0.1
+    contact_bce: 1.0
+    foot_slide: 0.05
+    penetration: 0.05
+    root_height: 0.1

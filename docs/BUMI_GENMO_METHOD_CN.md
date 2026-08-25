@@ -1,10 +1,14 @@
 # BUMI-GENMO：面向 BUMI 机器人的音乐条件动作扩散方法
 
+> 当前实现已升级为 qpos30/contact/FK v3。请以
+> [BUMI qpos30、FK 接触与足底锁定 v3](BUMI_QPOS30_CONTACT_V3.md) 为当前契约；本文后续
+> 93D 内容保留为 repr-v2 历史设计说明，不应再用于新 checkpoint、stats 或部署图。
+
 ## 文档定位
 
 本文说明 BUMI-GENMO 的**方法、表示、训练目标和整体框架**。它回答的是“模型在学什么、为什么这样设计、输入怎样变成机器人动作”，而不是逐个解释源码文件、类或命令。
 
-本文按当前 `genmo.bumi_motion_features.v2` 表示说明。旧 `s430000` 使用绝对
+本文主体按历史 `genmo.bumi_motion_features.v2` 表示说明。更旧的 `s430000` 使用绝对
 `root_pos_local` v1，虽然同为 93D，也不能与本文的数据语义混用。
 
 工程实现、数据契约、部署命令和当前训练状态另见 [BUMI-native Music-only GENMO 工程说明](bumi_native_music_genmo.md)。

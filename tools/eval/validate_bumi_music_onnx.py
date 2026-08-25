@@ -3,7 +3,7 @@
 
 The mandatory check compares one identical CFG denoising step.  With
 ``--full-ddim-steps`` the script also runs the repository DDIM scheduler twice,
-using PyTorch and ONNX Runtime denoiser callbacks, then compares normalized 93D,
+using PyTorch and ONNX Runtime denoiser callbacks, then compares normalized qpos30,
 authoritative qpos28 and Torch FK positions.
 """
 
@@ -28,6 +28,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from gem.runtime.bumi_music_onnx import (  # noqa: E402
+    BUMI_MOTION_FEATURE_DIM,
     BUMI_ONNX_CONTRACT_VERSION,
     BumiMusicGuidedDenoiser,
     make_bumi_onnx_inputs,
@@ -49,9 +50,9 @@ def configure_assets(kinematics: Path | None, stats: Path | None) -> tuple[Path,
     if kinematics is not None:
         os.environ["BUMI_KINEMATICS_PATH"] = str(kinematics.expanduser().resolve())
     if stats is not None:
-        os.environ["BUMI_MUSIC_STATS_PATH"] = str(stats.expanduser().resolve())
+        os.environ["BUMI_MUSIC_QPOS30_STATS_PATH"] = str(stats.expanduser().resolve())
     paths = []
-    for name in ("BUMI_KINEMATICS_PATH", "BUMI_MUSIC_STATS_PATH"):
+    for name in ("BUMI_KINEMATICS_PATH", "BUMI_MUSIC_QPOS30_STATS_PATH"):
         value = os.environ.get(name)
         if not value:
             raise RuntimeError(f"{name} is required; export it or pass the matching CLI option")
@@ -95,9 +96,7 @@ def load_music(args: argparse.Namespace) -> tuple[torch.Tensor, dict[str, Any]]:
     start = int(args.feature_start_frame)
     end = start + int(args.seq_len)
     if start < 0 or end > music.shape[0]:
-        raise ValueError(
-            f"requested feature range [{start}:{end}] exceeds {music.shape[0]} frames"
-        )
+        raise ValueError(f"requested feature range [{start}:{end}] exceeds {music.shape[0]} frames")
     selected = music[start:end].contiguous()
     metadata.update(
         {
@@ -164,12 +163,12 @@ class TorchDenoiserCall:
         self.scale = scale
 
     def __call__(self, x: torch.Tensor, timestep: torch.Tensor, **_kwargs: Any):
-        motion = self.wrapper(x, timestep, self.music, self.length, self.scale)
+        motion, contact = self.wrapper(x, timestep, self.music, self.length, self.scale)
         return {
             "pred_x_start": motion,
             "pred_x": motion,
             "pred_cam": None,
-            "static_conf_logits": None,
+            "static_conf_logits": contact,
         }
 
 
@@ -187,25 +186,22 @@ class OrtDenoiserCall:
         self.scale = scale
 
     def __call__(self, x: torch.Tensor, timestep: torch.Tensor, **_kwargs: Any):
-        motion = self.session.run(
-            ["pred_motion"],
+        motion, contact = self.session.run(
+            ["pred_motion", "pred_foot_contact_logits"],
             {
                 "noisy_motion": x.detach().cpu().numpy().astype(np.float32, copy=False),
-                "diffusion_timestep": timestep.detach()
-                .cpu()
-                .numpy()
-                .astype(np.int64, copy=False),
+                "diffusion_timestep": timestep.detach().cpu().numpy().astype(np.int64, copy=False),
                 "music": self.music,
                 "length": self.length,
                 "guidance_scale": self.scale,
             },
-        )[0]
+        )
         tensor = torch.from_numpy(motion)
         return {
             "pred_x_start": tensor,
             "pred_x": tensor,
             "pred_cam": None,
-            "static_conf_logits": None,
+            "static_conf_logits": torch.from_numpy(contact),
         }
 
 
@@ -214,7 +210,7 @@ def run_ddim(
     callable_model: Any,
     noise: torch.Tensor,
     device: torch.device,
-) -> torch.Tensor:
+) -> tuple[torch.Tensor, torch.Tensor]:
     result = diffusion.ddim_sample_loop_with_aux(
         callable_model,
         tuple(noise.shape),
@@ -225,17 +221,22 @@ def run_ddim(
         progress=True,
         eta=0.0,
     )
-    return result["sample"].detach().cpu()
+    contact = result.get("static_conf_logits")
+    if not isinstance(contact, torch.Tensor) or contact.shape[-1] != 2:
+        raise RuntimeError("full DDIM result is missing [B,T,2] contact logits")
+    return result["sample"].detach().cpu(), contact.detach().cpu()
 
 
 @torch.inference_mode()
-def decode_motion(model: Any, motion: torch.Tensor, device: torch.device) -> dict[str, torch.Tensor]:
+def decode_motion(
+    model: Any, motion: torch.Tensor, device: torch.device
+) -> dict[str, torch.Tensor]:
     normalized = motion.to(device)
     decoded = model.endecoder.decode(normalized)
     qpos = model.endecoder.compose_qpos(decoded)
     fk = model.endecoder.kinematics.forward_kinematics(qpos)
     return {
-        "normalized_motion_93d": normalized.detach().cpu(),
+        "normalized_motion_30d": normalized.detach().cpu(),
         "qpos_canonical": qpos.detach().cpu(),
         "body_position_fk": fk["body_pos_w"].detach().cpu(),
     }
@@ -254,11 +255,12 @@ def validate_metadata(
     metadata = json.loads(path.read_text(encoding="utf-8"))
     if metadata.get("contract_version") != BUMI_ONNX_CONTRACT_VERSION:
         raise ValueError(f"unexpected ONNX contract: {metadata.get('contract_version')!r}")
-    final_shapes = (metadata.get("checkpoint") or {}).get(
-        "final_layer_weight_shapes", {}
-    )
-    if len(final_shapes) != 1 or next(iter(final_shapes.values()))[0] != 93:
-        raise ValueError(f"ONNX metadata does not describe a 93D checkpoint: {final_shapes}")
+    final_shapes = (metadata.get("checkpoint") or {}).get("final_layer_weight_shapes", {})
+    if len(final_shapes) != 1 or next(iter(final_shapes.values()))[0] != BUMI_MOTION_FEATURE_DIM:
+        raise ValueError(
+            f"ONNX metadata does not describe a {BUMI_MOTION_FEATURE_DIM}D checkpoint: "
+            f"{final_shapes}"
+        )
     expected = {
         "checkpoint": (metadata.get("checkpoint") or {}).get("sha256"),
         "kinematics": (metadata.get("kinematics") or {}).get("sha256"),
@@ -287,7 +289,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--ckpt", type=Path, required=True)
     parser.add_argument("--onnx", type=Path, required=True)
     parser.add_argument("--onnx-metadata", type=Path)
-    parser.add_argument("--exp", default="gem_bumi_music_only_4set_random_v1")
+    parser.add_argument("--exp", default="gem_bumi_music_only_5set_manual_q1_v3_qpos30_contact_50k")
     parser.add_argument("--kinematics", type=Path)
     parser.add_argument("--stats", type=Path)
     parser.add_argument("--seq-len", type=int, default=120)
@@ -354,7 +356,9 @@ def main(argv: list[str] | None = None) -> int:
         guidance_scale=args.cfg_scale,
         device=device,
     )
-    pt_step = wrapper(*pt_inputs).detach().cpu().numpy()
+    pt_step_motion, pt_step_contact = tuple(
+        value.detach().cpu().numpy() for value in wrapper(*pt_inputs)
+    )
 
     import onnxruntime as ort
 
@@ -376,9 +380,16 @@ def main(argv: list[str] | None = None) -> int:
         "length": pt_inputs[3].detach().cpu().numpy(),
         "guidance_scale": pt_inputs[4].detach().cpu().numpy(),
     }
-    ort_step = session.run(["pred_motion"], ort_input)[0]
-    step_comparison = comparison(pt_step, ort_step, atol=args.atol, rtol=args.rtol)
-    step_pass = bool(step_comparison["finite"] and step_comparison["allclose"])
+    ort_step_motion, ort_step_contact = session.run(
+        ["pred_motion", "pred_foot_contact_logits"], ort_input
+    )
+    step_comparisons = {
+        "pred_motion": comparison(pt_step_motion, ort_step_motion, atol=args.atol, rtol=args.rtol),
+        "pred_foot_contact_logits": comparison(
+            pt_step_contact, ort_step_contact, atol=args.atol, rtol=args.rtol
+        ),
+    }
+    step_pass = all(value["finite"] and value["allclose"] for value in step_comparisons.values())
     report: dict[str, Any] = {
         "contract_version": "genmo.bumi_music_onnx_validation.v1",
         "checkpoint": str(checkpoint),
@@ -391,15 +402,22 @@ def main(argv: list[str] | None = None) -> int:
         "cfg_scale": args.cfg_scale,
         "providers_requested": selected_providers,
         "providers_active": session.get_providers(),
-        "pytorch_step_statistics": tensor_statistics(pt_step),
-        "onnx_step_statistics": tensor_statistics(ort_step),
-        "single_step_comparison": step_comparison,
+        "pytorch_step_statistics": {
+            "pred_motion": tensor_statistics(pt_step_motion),
+            "pred_foot_contact_logits": tensor_statistics(pt_step_contact),
+        },
+        "onnx_step_statistics": {
+            "pred_motion": tensor_statistics(ort_step_motion),
+            "pred_foot_contact_logits": tensor_statistics(ort_step_contact),
+        },
+        "single_step_comparisons": step_comparisons,
         "single_step_pass": step_pass,
         "full_ddim": None,
     }
     output_dir = args.output_dir.expanduser().resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
-    torch.save(torch.from_numpy(ort_step), output_dir / "onnx_pred_motion_step_93d.pt")
+    torch.save(torch.from_numpy(ort_step_motion), output_dir / "onnx_pred_motion_step_30d.pt")
+    torch.save(torch.from_numpy(ort_step_contact), output_dir / "onnx_pred_foot_contact_step.pt")
 
     full_pass = True
     if args.full_ddim_steps:
@@ -411,14 +429,14 @@ def main(argv: list[str] | None = None) -> int:
         diffusion = model.pipeline.denoiser3d.test_gen_only_diffusion
         noise = pt_inputs[0].detach().cpu()
         print(f"[BUMI ONNX] PyTorch DDIM steps={args.full_ddim_steps}")
-        pt_motion = run_ddim(
+        pt_motion, pt_contact = run_ddim(
             diffusion,
             TorchDenoiserCall(wrapper, pt_inputs[2], pt_inputs[3], pt_inputs[4]),
             noise,
             device,
         )
         print(f"[BUMI ONNX] ONNX Runtime DDIM steps={args.full_ddim_steps}")
-        ort_motion = run_ddim(
+        ort_motion, ort_contact = run_ddim(
             diffusion,
             OrtDenoiserCall(
                 session,
@@ -432,9 +450,15 @@ def main(argv: list[str] | None = None) -> int:
         pt_decoded = decode_motion(model, pt_motion, device)
         ort_decoded = decode_motion(model, ort_motion, device)
         comparisons = {
-            "normalized_motion_93d": comparison(
+            "normalized_motion_30d": comparison(
                 pt_motion.numpy(),
                 ort_motion.numpy(),
+                atol=args.full_atol,
+                rtol=args.full_rtol,
+            ),
+            "pred_foot_contact_logits": comparison(
+                pt_contact.numpy(),
+                ort_contact.numpy(),
                 atol=args.full_atol,
                 rtol=args.full_rtol,
             ),
@@ -459,21 +483,26 @@ def main(argv: list[str] | None = None) -> int:
             "scheduler": "repository Python/PyTorch DDIM for both denoiser backends",
         }
         canonical_qpos = ort_decoded["qpos_canonical"].to(device)
-        world_qpos = model.endecoder.codec.apply_world_anchor(
-            canonical_qpos,
-            torch.tensor([0.0, 0.0, 0.0], device=device),
-        ).detach().cpu()
+        world_qpos = (
+            model.endecoder.codec.apply_world_anchor(
+                canonical_qpos,
+                torch.tensor([0.0, 0.0, 0.0], device=device),
+            )
+            .detach()
+            .cpu()
+        )
         artifact = {
-            "contract_version": "genmo.bumi_motion_prediction.v1",
+            "contract_version": "genmo.bumi_motion_prediction.qpos30_contact.v2",
             "qpos": world_qpos[0],
             "qpos_canonical": ort_decoded["qpos_canonical"][0],
-            "normalized_motion_93d": ort_motion[0],
+            "normalized_motion_30d": ort_motion[0],
+            "pred_foot_contact_logits": ort_contact[0],
             "fps": 30,
             "robot_name": "bumi",
             "joint_names": list(model.endecoder.kinematics.joint_order),
             "quaternion_convention": "wxyz",
             "qpos_order": "mujoco_native",
-            "feature_dim": 93,
+            "feature_dim": BUMI_MOTION_FEATURE_DIM,
             "anchor_mode": model.endecoder.anchor_mode,
             "world_anchor_applied": True,
             "world_anchor": {"root_xy": [0.0, 0.0], "yaw": 0.0},

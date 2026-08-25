@@ -1,4 +1,4 @@
-"""Normalization and encode/decode bridge for BUMI's 93D representation."""
+"""BUMI qpos30 表示的归一化、编解码、FK 几何和足底接触监督桥接。"""
 
 from __future__ import annotations
 
@@ -11,6 +11,7 @@ from typing import Any
 import torch
 import torch.nn as nn
 
+from .contacts import BumiFootContactTargets, derive_bumi_foot_contact
 from .feature_codec import (
     BUMI_ANCHOR_MODE,
     BUMI_FEATURE_DIM,
@@ -21,7 +22,7 @@ from .feature_codec import (
 )
 from .kinematics import BumiKinematics, resolve_asset_path
 
-STATS_CONTRACT_VERSION = "genmo.bumi_stats.v2"
+STATS_CONTRACT_VERSION = "genmo.bumi_qpos30_stats.v3"
 
 
 @dataclass(frozen=True)
@@ -33,6 +34,7 @@ class BumiEncodedMotion:
     anchor_metadata: dict[str, torch.Tensor | str]
     target_foot_contact: torch.Tensor
     target_foot_contact_mask: torch.Tensor
+    target_contact_ground_height: torch.Tensor
 
     @property
     def body_link_pos_root(self) -> torch.Tensor:
@@ -61,25 +63,29 @@ def _canonical_feature_slices(value: Any) -> dict[str, tuple[int, int]]:
 
 
 class BumiEndecoder(nn.Module):
-    """Map BUMI qpos28 to normalized 93D features and back to authoritative FK."""
+    """在 BUMI qpos28、归一化 qpos30 特征和权威 FK link 几何间转换。"""
 
     def __init__(
         self,
         kinematics_path: str | Path,
         stats_path: str | Path,
-        feat_dim: int = 93,
+        feat_dim: int = BUMI_FEATURE_DIM,
         rotation_representation: str = "rot6d",
         anchor_mode: str = BUMI_ANCHOR_MODE,
-        clip_std_min: float = 1.0e-6,
+        clip_std_min: float = 0.01,
         allow_placeholder_stats: bool = False,
-        contact_height_threshold: float = 0.025,
-        contact_velocity_threshold: float = 0.05,
+        contact_height_threshold: float = 0.035,
+        contact_velocity_threshold: float = 0.15,
+        contact_exit_height_threshold: float = 0.055,
+        contact_exit_velocity_threshold: float = 0.25,
+        contact_ground_quantile: float = 0.02,
+        contact_min_frames: int = 2,
         enable_contact_targets: bool = True,
         fps: int = 30,
     ) -> None:
         super().__init__()
         if int(feat_dim) != BUMI_FEATURE_DIM:
-            raise ValueError(f"BumiEndecoder feat_dim must be 93, got {feat_dim}")
+            raise ValueError(f"BumiEndecoder feat_dim must be {BUMI_FEATURE_DIM}, got {feat_dim}")
         if rotation_representation != "rot6d":
             raise ValueError(
                 f"BumiEndecoder rotation_representation must be 'rot6d', got {rotation_representation!r}"
@@ -94,24 +100,29 @@ class BumiEndecoder(nn.Module):
             raise ValueError(f"BUMI music-native training is fixed at 30 FPS, got {fps}")
         self.kinematics = BumiKinematics(kinematics_path)
         self.codec = BumiMotionFeatureCodec(self.kinematics)
-        self.feat_dim = 93
+        self.feat_dim = BUMI_FEATURE_DIM
         self.representation_contract_version = BUMI_REPRESENTATION_CONTRACT_VERSION
         self.rotation_representation = "rot6d"
         self.anchor_mode = BUMI_ANCHOR_MODE
         self.fps = 30
         self.contact_height_threshold = float(contact_height_threshold)
         self.contact_velocity_threshold = float(contact_velocity_threshold)
+        self.contact_exit_height_threshold = float(contact_exit_height_threshold)
+        self.contact_exit_velocity_threshold = float(contact_exit_velocity_threshold)
+        self.contact_ground_quantile = float(contact_ground_quantile)
+        self.contact_min_frames = int(contact_min_frames)
         self.enable_contact_targets = bool(enable_contact_targets)
+        self.clip_std_min = float(clip_std_min)
         self.stats_path = str(resolve_asset_path(stats_path)) if str(stats_path).strip() else ""
         if not self.stats_path:
             raise ValueError(
-                "BUMI stats_path is required and must point to train-split 93D statistics"
+                "BUMI stats_path is required and must point to train-split qpos30 statistics"
             )
         stats_file = Path(self.stats_path)
         if not stats_file.is_file():
             raise FileNotFoundError(
                 f"BUMI stats JSON does not exist: {stats_file}. Compute it from the real train "
-                "split with tools/data/bumi/compute_bumi_93d_stats.py"
+                "split with tools/data/bumi/compute_bumi_30d_stats.py"
             )
         try:
             stats = json.loads(stats_file.read_text(encoding="utf-8"))
@@ -120,9 +131,10 @@ class BumiEndecoder(nn.Module):
         self._validate_stats(stats, stats_file, allow_placeholder_stats)
         mean = torch.as_tensor(stats["mean"], dtype=torch.float32)
         std = torch.as_tensor(stats["std"], dtype=torch.float32)
-        if mean.shape != (93,) or std.shape != (93,):
+        if mean.shape != (BUMI_FEATURE_DIM,) or std.shape != (BUMI_FEATURE_DIM,):
             raise ValueError(
-                f"BUMI stats {stats_file} must contain mean/std [93], got {mean.shape}/{std.shape}"
+                f"BUMI stats {stats_file} must contain mean/std [{BUMI_FEATURE_DIM}], "
+                f"got {mean.shape}/{std.shape}"
             )
         if not bool(torch.isfinite(mean).all()) or not bool(torch.isfinite(std).all()):
             raise ValueError(f"BUMI stats {stats_file} contains NaN or Inf")
@@ -145,9 +157,10 @@ class BumiEndecoder(nn.Module):
             "contract_version": STATS_CONTRACT_VERSION,
             "representation_contract_version": BUMI_REPRESENTATION_CONTRACT_VERSION,
             "robot_name": "bumi",
-            "feature_dim": 93,
+            "feature_dim": BUMI_FEATURE_DIM,
             "anchor_mode": BUMI_ANCHOR_MODE,
             "quaternion_convention": BUMI_QUATERNION_CONVENTION,
+            "training_clip_std_min": self.clip_std_min,
         }
         for key, expected_value in expected.items():
             if stats.get(key) != expected_value:
@@ -167,13 +180,17 @@ class BumiEndecoder(nn.Module):
             )
 
     def normalize(self, value: torch.Tensor, *_args: Any, **_kwargs: Any) -> torch.Tensor:
-        if value.shape[-1] != 93:
-            raise ValueError(f"BUMI normalization expects [...,93], got {value.shape}")
+        if value.shape[-1] != BUMI_FEATURE_DIM:
+            raise ValueError(
+                f"BUMI normalization expects [...,{BUMI_FEATURE_DIM}], got {value.shape}"
+            )
         return (value - self.mean.to(value)) / self.std.to(value)
 
     def denormalize(self, value: torch.Tensor, *_args: Any, **_kwargs: Any) -> torch.Tensor:
-        if value.shape[-1] != 93:
-            raise ValueError(f"BUMI denormalization expects [...,93], got {value.shape}")
+        if value.shape[-1] != BUMI_FEATURE_DIM:
+            raise ValueError(
+                f"BUMI denormalization expects [...,{BUMI_FEATURE_DIM}], got {value.shape}"
+            )
         return value * self.std.to(value) + self.mean.to(value)
 
     def encode(self, inputs: Mapping[str, Any]) -> torch.Tensor:
@@ -187,15 +204,28 @@ class BumiEndecoder(nn.Module):
         normalized = self.normalize(encoded.physical_features)
         valid = self._valid_mask(inputs, qpos)
         if self.enable_contact_targets:
-            derived_contact = self.infer_foot_contact(encoded.normalized_world_qpos, valid)
+            derived_targets = self.infer_foot_contact_targets(
+                encoded.normalized_world_qpos,
+                valid,
+                estimate_ground_mask=self._estimate_ground_mask(inputs, qpos),
+                fk={
+                    "body_pos_w": encoded.body_pos_w,
+                    "body_quat_w": encoded.body_quat_w,
+                },
+            )
+            derived_contact = derived_targets.contact
             target_contact, contact_mask = self._merge_contact_labels(
                 inputs, derived_contact, valid
             )
+            contact_ground_height = derived_targets.ground_height
         else:
             target_contact = torch.zeros(
                 (*valid.shape, 2), dtype=encoded.physical_features.dtype, device=valid.device
             )
             contact_mask = torch.zeros_like(target_contact, dtype=torch.bool)
+            contact_ground_height = torch.zeros(
+                qpos.shape[:-2], dtype=encoded.physical_features.dtype, device=qpos.device
+            )
         anchor = encoded.anchor
         return BumiEncodedMotion(
             normalized_features=normalized,
@@ -212,6 +242,7 @@ class BumiEndecoder(nn.Module):
             },
             target_foot_contact=target_contact,
             target_foot_contact_mask=contact_mask,
+            target_contact_ground_height=contact_ground_height,
         )
 
     @staticmethod
@@ -233,31 +264,86 @@ class BumiEndecoder(nn.Module):
         valid_mask: torch.Tensor,
         *,
         velocity_threshold: float | None = None,
+        estimate_ground_mask: torch.Tensor | None = None,
+        fk: Mapping[str, torch.Tensor] | None = None,
     ) -> torch.Tensor:
-        """Derive left/right contact from real sole height and horizontal speed."""
+        """用权威 FK 鞋底代理、迟滞阈值和最短持续时间生成左右接触。"""
 
-        fk = self.kinematics.forward_kinematics(qpos)
-        sole = self.kinematics.aggregate_sole_by_foot(fk["body_pos_w"], fk["body_quat_w"])
-        foot_xy = sole["foot_points_w"][..., :2]
-        if foot_xy.shape[-3] <= 1:
-            speed = torch.zeros(foot_xy.shape[:-1], dtype=foot_xy.dtype, device=foot_xy.device)
-        else:
-            velocity = torch.diff(foot_xy, dim=-3) * float(self.fps)
-            speed_delta = torch.linalg.vector_norm(velocity, dim=-1)
-            speed = torch.cat((speed_delta[..., :1, :], speed_delta), dim=-2)
-        contact = (
-            (sole["foot_bottom_height"] <= self.contact_height_threshold)
-            & (
-                speed
-                <= (
-                    self.contact_velocity_threshold
-                    if velocity_threshold is None
-                    else float(velocity_threshold)
-                )
-            )
-            & valid_mask[..., None]
+        return self.infer_foot_contact_targets(
+            qpos,
+            valid_mask,
+            velocity_threshold=velocity_threshold,
+            estimate_ground_mask=estimate_ground_mask,
+            fk=fk,
+        ).contact
+
+    def infer_foot_contact_targets(
+        self,
+        qpos: torch.Tensor,
+        valid_mask: torch.Tensor,
+        *,
+        velocity_threshold: float | None = None,
+        estimate_ground_mask: torch.Tensor | None = None,
+        fk: Mapping[str, torch.Tensor] | None = None,
+    ) -> BumiFootContactTargets:
+        """返回接触标签及其 FK 速度、足底高度和逐样本地面诊断。"""
+
+        return derive_bumi_foot_contact(
+            qpos,
+            self.kinematics,
+            valid_mask=valid_mask,
+            fps=self.fps,
+            ground_height=0.0,
+            estimate_ground_mask=estimate_ground_mask,
+            ground_quantile=self.contact_ground_quantile,
+            enter_height=self.contact_height_threshold,
+            exit_height=self.contact_exit_height_threshold,
+            enter_speed=(
+                self.contact_velocity_threshold
+                if velocity_threshold is None
+                else float(velocity_threshold)
+            ),
+            exit_speed=max(
+                self.contact_exit_velocity_threshold,
+                self.contact_velocity_threshold
+                if velocity_threshold is None
+                else float(velocity_threshold),
+            ),
+            min_contact_frames=self.contact_min_frames,
+            fk=fk,
         )
-        return contact.float()
+
+    @staticmethod
+    def _estimate_ground_mask(inputs: Mapping[str, Any], qpos: torch.Tensor) -> torch.Tensor | None:
+        """历史 body-origin 数据估地面；GMR 足底归零数据严格使用 Z=0。"""
+
+        metadata = inputs.get("meta")
+        if metadata is None:
+            return None
+        if isinstance(metadata, Mapping):
+            metadata = [metadata]
+        if not isinstance(metadata, (list, tuple)):
+            raise ValueError("BUMI batch meta must be a mapping or a sequence of mappings")
+        batch_shape = qpos.shape[:-2]
+        expected_samples = 1
+        for size in batch_shape:
+            expected_samples *= int(size)
+        if len(metadata) != expected_samples:
+            raise ValueError(
+                f"BUMI batch meta has {len(metadata)} samples, expected {expected_samples}"
+            )
+        modes: list[bool] = []
+        for item in metadata:
+            if not isinstance(item, Mapping):
+                raise ValueError("every BUMI batch meta item must be a mapping")
+            semantics = str(item.get("ground_semantics", ""))
+            if semantics == "legacy_body_origin_min_zero":
+                modes.append(True)
+            elif semantics == "gmr_foot_sole_ground_zero_v1":
+                modes.append(False)
+            else:
+                raise ValueError(f"unsupported BUMI ground_semantics={semantics!r}")
+        return torch.tensor(modes, dtype=torch.bool, device=qpos.device).reshape(batch_shape)
 
     @staticmethod
     def _merge_contact_labels(
@@ -301,7 +387,6 @@ class BumiEndecoder(nn.Module):
             "root_rot_local_6d": physical[..., rot_slice[0] : rot_slice[1]],
             "root_rot_local_quat": components.root_rot_local_quat,
             "joint_dof": components.joint_dof,
-            "body_link_pos_root_raw": components.body_link_pos_root,
             "physical_features": physical,
         }
 
@@ -356,7 +441,7 @@ class BumiEndecoder(nn.Module):
         return self.obs_indices_dict[name]
 
     def get_motion_dim(self) -> int:
-        return 93
+        return BUMI_FEATURE_DIM
 
     def get_static_gt(
         self, inputs: Mapping[str, Any], vel_thr: float | None = None
@@ -366,7 +451,10 @@ class BumiEndecoder(nn.Module):
             raise KeyError("BUMI contact supervision requires inputs['qpos']")
         valid = self._valid_mask(inputs, qpos)
         derived = self.infer_foot_contact(
-            qpos, valid, velocity_threshold=None if vel_thr is None else float(vel_thr)
+            qpos,
+            valid,
+            velocity_threshold=None if vel_thr is None else float(vel_thr),
+            estimate_ground_mask=self._estimate_ground_mask(inputs, qpos),
         )
         return self._merge_contact_labels(inputs, derived, valid)[0]
 

@@ -1,0 +1,41 @@
+# BUMI qpos30 音乐扩散网络。
+#
+# 30 维输出只包含能决定 qpos28 的根水平位移、根高、root rot6d 和 21 个关节角；
+# link 坐标全部在网络外由固定 FK 得到。两维 static_conf head 依次预测左、右足底接触，
+# 供 contact BCE、foot-slide loss 和部署足底锁定共同使用。
+_target_: gem.network.gem_diffusion.GEMDiffusion
+args: ${pipeline.args}
+latent_dim: ${.model_cfg.denoiser.latent_dim}
+cond_merge_strategy: add
+music_mask_prob: ${.model_cfg.denoiser.music_mask_prob}
+speech_mask_prob: 0.0
+encoded_music_dim: ${pipeline.args.encoded_music_dim}
+observed_motion_3d_dim: 30
+mask_localpose: false
+model_cfg:
+  regression_only: false
+  diffusion: ${model_cfg.diffusion}
+  denoiser:
+    _target_: gem.network.gem_denoiser.NetworkEncoderRoPE
+    args: ${pipeline.args}
+    output_dim: 30
+    xt_dim: 30
+    njoints: 30
+    pred_cam_dim: 0
+    static_conf_dim: 2
+    avgbeta: false
+    encode_text: false
+    encoded_text_dim: 1024
+    text_mask_prob: 0.0
+    music_mask_prob: 0.1
+    speech_mask_prob: 0.0
+    use_text_pos_enc: false
+    text_encoder_cfg:
+      mode: none
+      cross_attn_type: mha
+    input_remove_global: false
+    input_remove_condition: false
+    latent_dim: 1024
+    num_layers: 16
+    num_heads: 8
+    mlp_ratio: 4
