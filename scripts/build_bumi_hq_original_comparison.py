@@ -1,18 +1,21 @@
 #!/usr/bin/env python3
 """构建人工高质量原动作与 BUMI 音乐模型生成动作的同步对比网页。
 
-输入是 ``validate_bumi_hq_music_full.py`` 已冻结的可变数量选择和模型生成产物，以及人工
-``score=1`` 对应的七字段 50 Hz SONIC/Isaac-Lab BUMI NPZ。工具严格复用正式数据构建器的
+输入是 ``validate_bumi_hq_music_full.py`` 已冻结的可变数量选择和模型生成产物。公开四库的
+人工 ``score=1`` 七字段 50 Hz SONIC/Isaac-Lab BUMI NPZ 严格复用正式数据构建器的
 50→30 Hz 语义：根位置和关节线性插值、wxyz 根四元数最短弧 SLERP、Isaac publish order
-按完整名称重排到 GENMO/MuJoCo-native order，并按训练契约执行 body-origin 地面归一化。
+按完整名称重排到 GENMO/MuJoCo-native order，并按训练契约执行 body-origin 地面归一化；
+自建数据库则直接读取其正式发布、已经裁齐和地面规范化的 30 Hz qpos28 PT，不进行二次
+插值或二次落地。
 
-每项输出原数据集 BUMI 视频、模型生成视频的自包含硬链接/副本，以及带标签的左右同步
-对比视频；模型生成源发生变化时以临时硬链接/副本原子刷新旧文件。音轨统一来自同一 WAV。
-对比时长取原动作与模型验证片段的共同真实长度，因此 AIST++ 的短源片段不会被循环或拉伸，
-其他长动作也不会超过模型实际生成长度。网页会明确显示源片段和生成片段时长。报告还在
-相同对比区间计算双方运动学指标和 0.25 rad 限位结果，并额外生成不含本地绝对路径的
-``site_data.json``，供公开验证网页直接消费。该页面展示的是 GMR 离线重定向轨迹和模型
-生成轨迹，不代表 GMT/真实机器人动力学跟踪效果。
+每项按参考验收目录布局输出两个独立视频：``<key>_gmr_bumi3.mp4`` 是原数据集动作，
+``<key>_generated.mp4`` 是完整音乐长度的模型生成动作；模型生成源发生变化时以临时硬链接/
+副本原子刷新旧文件。网页提供成对播放、暂停、重播和时间轴同步，不再额外转码一份左右拼接
+视频，避免完整音乐验证重复占用磁盘。音轨统一来自同一 WAV，生成视频始终覆盖完整音乐；
+原动作按其真实长度渲染，因此 AIST++ 的短源片段不会被循环、拉伸或伪造成完整舞蹈，网页会
+明确显示这一数据边界。报告仍在双方共同真实区间计算运动学指标和 0.25 rad 限位结果，并
+额外生成不含本地绝对路径的 ``site_data.json``，供公开验证网页直接消费。该页面展示的是
+GMR 离线重定向轨迹和模型生成轨迹，不代表 GMT/真实机器人动力学跟踪效果。
 """
 
 from __future__ import annotations
@@ -43,7 +46,7 @@ from gem.robots.bumi.metrics import (  # noqa: E402
     metrics_to_json,
 )
 from scripts.validate_bumi_hq_music_full import (  # noqa: E402
-    DATASETS,
+    REPORT_DATASETS,
     analyze_joint_limits,
     atomic_json,
     media_probe,
@@ -127,6 +130,42 @@ def save_original_artifact(
     output: Path,
     item: dict[str, Any],
 ) -> tuple[dict[str, Any], torch.Tensor]:
+    if source_motion.suffix == ".pt":
+        source_payload = torch_load(source_motion)
+        if not isinstance(source_payload, dict):
+            raise ValueError("自建库正式动作必须是字典 PT")
+        qpos = torch.as_tensor(source_payload.get("qpos")).detach().cpu().float().contiguous()
+        if qpos.ndim != 2 or qpos.shape[1] != 28 or len(qpos) < 120:
+            raise ValueError(f"自建库正式 qpos 必须为至少 120 帧的 [T,28]，实际 {qpos.shape}")
+        if not bool(torch.isfinite(qpos).all()):
+            raise ValueError("自建库正式 qpos 包含 NaN/Inf")
+        if int(source_payload.get("fps", -1)) != 30:
+            raise ValueError("自建库正式动作必须为 30 Hz")
+        if source_payload.get("qpos_order") != "mujoco_native":
+            raise ValueError("自建库正式动作不是 MuJoCo-native qpos 顺序")
+        if source_payload.get("quaternion_convention") != "wxyz":
+            raise ValueError("自建库正式动作不是 wxyz 四元数")
+        if tuple(source_payload.get("joint_names") or ()) != tuple(kinematics.joint_order):
+            raise ValueError("自建库正式动作关节顺序与目标 kinematics 不一致")
+        if source_payload.get("source_mjcf_sha256") != kinematics.source_mjcf_sha256:
+            raise ValueError("自建库正式动作绑定的 MJCF 与目标 kinematics 不一致")
+        artifact = {
+            **source_payload,
+            "contract_version": "genmo.bumi_hq_original_comparison_motion.v1",
+            "source_motion": str(source_motion),
+            "source_motion_sha256": sha256_file(source_motion),
+            "source_preprocessed_30hz": True,
+            "target_frames_30hz": len(qpos),
+            "target_kinematics": str(kinematics_path),
+            "target_kinematics_sha256": kinematics.kinematics_sha256,
+            "high_quality_source": item,
+        }
+        output.parent.mkdir(parents=True, exist_ok=True)
+        temporary = output.with_suffix(".tmp")
+        torch.save(artifact, temporary)
+        temporary.replace(output)
+        return artifact, qpos
+
     arrays = load_motion_npz(source_motion, quality_config)
     target_frames = target_30hz_frames(len(arrays["joint_pos"]))
     qpos = resample_sonic_qpos_to_30hz(
@@ -233,76 +272,6 @@ def render_original_video(
         temporary.unlink(missing_ok=True)
 
 
-def build_comparison_video(
-    *,
-    original: Path,
-    generated: Path,
-    audio: Path,
-    output: Path,
-    duration_sec: float,
-    model_label: str,
-    width: int,
-    height: int,
-) -> dict[str, Any]:
-    temporary = output.with_name(output.stem + ".tmp.mp4")
-    temporary.unlink(missing_ok=True)
-    output.parent.mkdir(parents=True, exist_ok=True)
-    filter_graph = (
-        f"[0:v]scale={width}:{height},setpts=PTS-STARTPTS,"
-        "drawtext=text='Original GMR BUMI':x=18:y=18:fontsize=24:"
-        "fontcolor=white:box=1:boxcolor=black@0.65[left];"
-        f"[1:v]scale={width}:{height},setpts=PTS-STARTPTS,"
-        f"drawtext=text='{model_label} Generated':x=18:y=18:fontsize=24:"
-        "fontcolor=white:box=1:boxcolor=black@0.65[right];"
-        "[left][right]hstack=inputs=2[video]"
-    )
-    try:
-        subprocess.run(
-            [
-                "ffmpeg",
-                "-y",
-                "-loglevel",
-                "error",
-                "-i",
-                str(original),
-                "-i",
-                str(generated),
-                "-i",
-                str(audio),
-                "-filter_complex",
-                filter_graph,
-                "-map",
-                "[video]",
-                "-map",
-                "2:a:0",
-                "-t",
-                f"{duration_sec:.9f}",
-                "-r",
-                "30",
-                "-c:v",
-                "libx264",
-                "-preset",
-                "veryfast",
-                "-crf",
-                "20",
-                "-pix_fmt",
-                "yuv420p",
-                "-c:a",
-                "aac",
-                "-shortest",
-                str(temporary),
-            ],
-            check=True,
-        )
-        probe = media_probe(temporary)
-        if probe["width"] != width * 2 or probe["height"] != height:
-            raise RuntimeError(f"对比视频尺寸错误：{probe}")
-        temporary.replace(output)
-        return probe
-    finally:
-        temporary.unlink(missing_ok=True)
-
-
 def motion_metrics(qpos: torch.Tensor, kinematics: BumiKinematics) -> dict[str, Any]:
     return metrics_to_json(compute_bumi_kinematic_metrics(qpos, kinematics, ground_height=0.0))
 
@@ -319,6 +288,7 @@ def completed_report(
     report = json.loads(report_path.read_text(encoding="utf-8"))
     if (
         report.get("status") != "passed"
+        or report.get("contract_version") != "genmo.bumi_hq_original_comparison_sample.v2"
         or report.get("source_motion_sha256") != sha256_file(source_motion)
         or report.get("generated_source_sha256") != sha256_file(generated_source)
     ):
@@ -326,7 +296,6 @@ def completed_report(
     for field in (
         "original_video_relative",
         "generated_video_relative",
-        "comparison_video_relative",
     ):
         path = output_root / report.get(field, "")
         if not path.is_file():
@@ -337,13 +306,20 @@ def completed_report(
 
 def summarize(results: list[dict[str, Any]]) -> dict[str, Any]:
     passed = [row for row in results if row.get("status") == "passed"]
+    root_postprocesses = {
+        row.get("root_orientation_postprocess") for row in passed
+    }
     dataset_rows = {}
-    for dataset, label, _ in DATASETS:
+    for dataset, label, _ in REPORT_DATASETS:
         rows = [row for row in passed if row["dataset"] == dataset]
         dataset_rows[dataset] = {
             "dataset_label": label,
             "completed": len(rows),
             "comparison_duration_sec": sum(row["comparison_duration_sec"] for row in rows),
+            "original_video_duration_sec": sum(
+                row["original_video_duration_sec"] for row in rows
+            ),
+            "generated_full_duration_sec": sum(row["generated_duration_sec"] for row in rows),
             "source_clip_shorter_than_audio": sum(
                 row["source_clip_shorter_than_audio"] for row in rows
             ),
@@ -372,11 +348,22 @@ def summarize(results: list[dict[str, Any]]) -> dict[str, Any]:
             ),
         }
     return {
-        "contract_version": "genmo.bumi_hq_original_comparison_summary.v1",
+        "contract_version": "genmo.bumi_hq_original_comparison_summary.v2",
         "evaluated": len(results),
         "completed": len(passed),
         "failed": len(results) - len(passed),
         "comparison_duration_sec": sum(row["comparison_duration_sec"] for row in passed),
+        "original_video_duration_sec": sum(
+            row["original_video_duration_sec"] for row in passed
+        ),
+        "generated_full_duration_sec": sum(row["generated_duration_sec"] for row in passed),
+        "root_orientation_postprocess": (
+            None
+            if not root_postprocesses
+            else next(iter(root_postprocesses))
+            if len(root_postprocesses) == 1
+            else "mixed"
+        ),
         "dataset_summary": dataset_rows,
         "metric_comparison_same_interval": metric_comparison,
         "joint_limit_comparison": joint_limits,
@@ -411,10 +398,12 @@ def build_site_data(
                 "representative_motion": row["representative_motion"],
                 "high_quality_motion_count": item["high_quality_motion_count"],
                 "comparison_duration_sec": row["comparison_duration_sec"],
+                "original_video_duration_sec": row["original_video_duration_sec"],
                 "generated_duration_sec": row["generated_duration_sec"],
                 "source_audio_duration_sec": row["source_audio_duration_sec"],
                 "source_clip_shorter_than_audio": row["source_clip_shorter_than_audio"],
-                "comparison_video": f"/{row['comparison_video_relative']}",
+                "original_video": f"/{row['original_video_relative']}",
+                "generated_video": f"/{row['generated_video_relative']}",
                 "original_metrics": row["original_metrics"],
                 "generated_metrics": row["generated_overlap_metrics"],
                 "original_joint_limits": {
@@ -440,9 +429,10 @@ def build_site_data(
             }
         )
     return {
-        "contract_version": "genmo.bumi_hq_original_comparison_site.v1",
+        "contract_version": "genmo.bumi_hq_original_comparison_site.v2",
         "model_label": model_label,
-        "comparison_policy": "原动作与模型生成在同一音乐、同一时间轴上并排对比；短源片段不循环或拉伸",
+        "root_orientation_postprocess": summary.get("root_orientation_postprocess"),
+        "comparison_policy": "两个独立视频同页同步；生成覆盖完整音乐，原动作保留真实长度，短源片段不循环或拉伸",
         "summary": summary,
         "items": site_items,
     }
@@ -455,11 +445,13 @@ def build_index(
     *,
     model_label: str,
 ) -> None:
+    """生成与历史验收目录一致的双视频同步、筛选和懒加载页面。"""
+
     def metric_text(value: float | None) -> str:
         return "n/a" if value is None else f"{value:.4f}"
 
     sections = []
-    for dataset, label, _ in DATASETS:
+    for dataset, label, _ in REPORT_DATASETS:
         rows = [row for row in results if row["dataset"] == dataset]
         cards = []
         for index, row in enumerate(rows, start=1):
@@ -472,38 +464,84 @@ def build_index(
             original = row["original_metrics"]
             generated = row["generated_overlap_metrics"]
             short_note = (
-                "；原数据集只有该短片段，未循环" if row["source_clip_shorter_than_audio"] else ""
+                "原数据集只有该真实短片段，未循环或拉伸；右侧生成动作仍覆盖整首音乐。"
+                if row["source_clip_shorter_than_audio"]
+                else "原动作与整首音乐时长一致。"
+            )
+            query = html.escape(
+                f"{dataset} {label} {row['audio_key']} {row['representative_motion']}".lower(),
+                quote=True,
             )
             cards.append(
-                f'<article class="card"><h3>{index}. {html.escape(row["audio_key"])}</h3>'
-                f'<video controls preload="metadata" src="{html.escape(row["comparison_video_relative"])}"></video>'
-                f"<p>左：原数据集 GMR BUMI；右：{html.escape(model_label)} 模型生成。对比 "
-                f"{row['comparison_duration_sec']:.2f}s，模型验证片段 "
-                f"{row['generated_duration_sec']:.2f}s{short_note}。</p>"
+                f'<article class="card" data-dataset="{dataset}" data-query="{query}">'
+                f'<h3>{index}. {html.escape(row["audio_key"])}</h3>'
+                f'<p class="motion">人工高质量动作：<code>{html.escape(row["representative_motion"])}</code></p>'
+                '<div class="pair" data-sync-pair>'
+                '<div class="video-panel"><div class="video-label">原始 GMR BUMI3 动作</div>'
+                f'<video class="original" controls muted playsinline preload="none" data-src="{html.escape(row["original_video_relative"])}"></video></div>'
+                f'<div class="video-panel"><div class="video-label">{html.escape(model_label)} 模型生成（完整音乐）</div>'
+                f'<video class="generated" controls playsinline preload="none" data-src="{html.escape(row["generated_video_relative"])}"></video></div></div>'
+                '<div class="controls"><button type="button" data-action="play">同步播放</button>'
+                '<button type="button" data-action="pause">暂停</button>'
+                '<button type="button" data-action="restart">从头播放</button></div>'
+                f"<p>共同真实对比区间 {row['comparison_duration_sec']:.2f}s；原动作视频 "
+                f"{row['original_video_duration_sec']:.2f}s；模型生成/音乐 "
+                f"{row['generated_duration_sec']:.2f}s。{short_note}</p>"
                 "<table><thead><tr><th>同区间指标</th><th>原数据集</th><th>模型生成</th></tr></thead><tbody>"
                 f"<tr><td>最大脚部穿地(m)</td><td>{original['foot_penetration_max_m']:.4f}</td><td>{generated['foot_penetration_max_m']:.4f}</td></tr>"
                 f"<tr><td>最大根倾角(rad)</td><td>{original['root_tilt_max_rad']:.4f}</td><td>{generated['root_tilt_max_rad']:.4f}</td></tr>"
                 f"<tr><td>关节速度P95(rad/s)</td><td>{original['joint_velocity_p95_radps']:.4f}</td><td>{generated['joint_velocity_p95_radps']:.4f}</td></tr>"
                 "</tbody></table>"
-                f'<p><a href="{html.escape(row["original_video_relative"])}">只看原动作</a> · '
-                f'<a href="{html.escape(row["generated_video_relative"])}">只看模型动作</a> · '
+                f'<p><a href="{html.escape(row["original_video_relative"])}">下载原动作</a> · '
+                f'<a href="{html.escape(row["generated_video_relative"])}">下载模型生成</a> · '
                 f'<a href="{html.escape(row["report_relative"])}">JSON报告</a></p></article>'
             )
-        sections.append(f"<section><h2>{label}</h2>{''.join(cards)}</section>")
+        sections.append(
+            f'<section data-section="{dataset}"><h2>{label}</h2>{"".join(cards)}</section>'
+        )
     metrics = summary["metric_comparison_same_interval"]
     limits = summary["joint_limit_comparison"]
-    document = f"""<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>BUMI 原数据集与模型生成对比</title><style>
-body{{margin:0;background:#0e1219;color:#edf1f7;font:15px/1.55 system-ui,sans-serif}}main{{max-width:1500px;margin:auto;padding:28px}}a{{color:#78c5ff}}
-.summary,.card{{background:#191f2b;border:1px solid #30394a;border-radius:12px;padding:16px;margin:14px 0}}.failed{{border-color:#a74d4d}}video{{width:100%;background:#000;border-radius:8px}}
-table{{border-collapse:collapse;width:100%}}th,td{{padding:7px;border:1px solid #3a4354;text-align:left}}section{{margin-top:34px}}
-@media(min-width:1100px){{section{{display:grid;grid-template-columns:1fr 1fr;gap:16px}}section h2{{grid-column:1/-1}}.card{{margin:0}}}}</style></head><body><main>
+    document = f"""<!doctype html>
+<!--
+本页由 GENMO 高质量多库验证工具生成。每个样本保留两个独立视频：左侧是真实 GMR BUMI3
+原动作，右侧是模型对完整音乐的生成动作。页面以右侧生成视频作为有声音的主时间轴，并在
+原动作真实长度内同步左侧视频；AIST++ 短片段结束后不会循环或伪造剩余动作。
+-->
+<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>BUMI 原数据集与完整音乐生成对比</title><style>
+:root{{--bg:#0e1219;--panel:#191f2b;--line:#30394a;--text:#edf1f7;--muted:#9ca9ba;--accent:#78c5ff}}
+*{{box-sizing:border-box}}body{{margin:0;background:var(--bg);color:var(--text);font:15px/1.55 system-ui,sans-serif}}main{{max-width:1580px;margin:auto;padding:28px}}a{{color:var(--accent)}}code{{overflow-wrap:anywhere}}
+.summary,.toolbar,.card{{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:16px;margin:14px 0}}.failed{{border-color:#a74d4d}}.toolbar{{position:sticky;top:0;z-index:3;display:flex;gap:8px;flex-wrap:wrap;align-items:center}}
+.toolbar input{{min-width:260px;flex:1;background:#0f151e;color:var(--text);border:1px solid #3b4659;border-radius:8px;padding:9px 11px}}button{{cursor:pointer;background:#28364a;color:var(--text);border:1px solid #46556d;border-radius:8px;padding:8px 12px}}button.active{{background:#21679b;border-color:#53aeea}}
+.pair{{display:grid;grid-template-columns:1fr 1fr;gap:12px}}.video-panel{{min-width:0}}.video-label{{font-weight:700;margin:0 0 7px}}video{{display:block;width:100%;aspect-ratio:4/3;background:#000;border-radius:8px}}.controls{{display:flex;gap:8px;margin:10px 0;flex-wrap:wrap}}
+.motion{{color:var(--muted)}}table{{border-collapse:collapse;width:100%}}th,td{{padding:7px;border:1px solid #3a4354;text-align:left}}section{{margin-top:34px}}
+@media(max-width:850px){{main{{padding:14px}}.pair{{grid-template-columns:1fr}}.toolbar{{position:static}}}}</style></head><body><main>
 <h1>BUMI 人工高质量原动作 vs {html.escape(model_label)} 模型生成</h1><div class="summary">
-<p>完成 {summary["completed"]}/{summary["evaluated"]} 项，同步对比总时长 {summary["comparison_duration_sec"] / 60.0:.2f} 分钟。左侧是 score=1 对应的原始 GMR BUMI 轨迹，右侧是相同音乐的模型生成轨迹。</p>
+<p>完成 {summary["completed"]}/{summary["evaluated"]} 项；模型生成完整音乐总时长 {summary["generated_full_duration_sec"] / 60.0:.2f} 分钟，双方共同真实对比区间 {summary["comparison_duration_sec"] / 60.0:.2f} 分钟。左侧是 score=1 对应的原始 GMR BUMI3 轨迹，右侧是同一首完整音乐的模型生成轨迹。</p>
 <p>同区间均值：最大脚部穿地 原始 {metric_text(metrics["foot_penetration_max_m"]["original_mean"])}m / 生成 {metric_text(metrics["foot_penetration_max_m"]["generated_mean"])}m；最大根倾角 原始 {metric_text(metrics["root_tilt_max_rad"]["original_mean"])}rad / 生成 {metric_text(metrics["root_tilt_max_rad"]["generated_mean"])}rad。</p>
 <p>0.25rad 容差后关节超限：原动作 {limits["original"]["exceed_0_25_rad_samples"]}/{summary["completed"]}，模型生成同区间 {limits["generated_same_interval"]["exceed_0_25_rad_samples"]}/{summary["completed"]}；严格 XML 原始边界触碰/超出分别为 {limits["original"]["strict_xml_exceed_samples"]}/{summary["completed"]} 和 {limits["generated_same_interval"]["strict_xml_exceed_samples"]}/{summary["completed"]}。</p>
-<p>AIST++ 原数据本身是短动作片段，对比不会循环原动作。<a href="summary.json">汇总 JSON</a> · <a href="selection.json">选择与契约</a></p></div>
-{"".join(sections)}</main></body></html>"""
+<p>AIST++ 原数据本身是短动作片段，左侧到真实末帧即结束；右侧仍播放完整音乐和完整生成动作。<a href="summary.json">汇总 JSON</a> · <a href="selection.json">选择与契约</a></p>
+<p>生成动作根姿态后处理：<code>{html.escape(str(summary.get("root_orientation_postprocess") or "无"))}</code>；启用时保留模型全部关节和连续根 yaw，将 yaw 角速度限制为 4rad/s，移除导致横躺的根 roll/pitch，并只在足底穿地时向上抬根 Z；原始未投影轨迹保存在上游 artifact 的 <code>qpos_raw</code>。</p></div>
+<div class="toolbar"><button class="active" data-filter="all">全部</button><button data-filter="finedance">FineDance</button><button data-filter="compas3d">CoMPAS3D</button><button data-filter="aioz_gdance">AIOZ-GDance</button><button data-filter="aistpp">AIST++</button><button data-filter="mine_bumi">自建数据库</button><input id="search" type="search" placeholder="搜索音乐键或动作名"></div>
+{"".join(sections)}
+<script>
+const loadVideo=v=>{{if(!v.src){{v.src=v.dataset.src;v.load()}}}};
+const videos=[...document.querySelectorAll('video[data-src]')];
+if('IntersectionObserver'in window){{const observer=new IntersectionObserver(entries=>entries.forEach(entry=>{{if(entry.isIntersecting){{loadVideo(entry.target);observer.unobserve(entry.target)}}}}),{{rootMargin:'500px'}});videos.forEach(v=>observer.observe(v))}}else{{videos.forEach(loadVideo)}}
+const clampOriginal=(original,time)=>{{if(!Number.isFinite(original.duration)||original.duration<=0)return 0;return Math.min(time,Math.max(0,original.duration-.04))}};
+document.querySelectorAll('[data-sync-pair]').forEach(pair=>{{
+ const original=pair.querySelector('.original'),generated=pair.querySelector('.generated');original.muted=true;
+ const ensure=()=>{{loadVideo(original);loadVideo(generated)}};
+ const seekOriginal=()=>{{if(original.readyState<1)return;const target=clampOriginal(original,generated.currentTime);if(Math.abs(original.currentTime-target)>.12)original.currentTime=target}};
+ const play=restart=>{{ensure();if(restart){{generated.currentTime=0;if(original.readyState>=1)original.currentTime=0}}seekOriginal();generated.play().catch(()=>{{}});if(!Number.isFinite(original.duration)||generated.currentTime<original.duration-.04)original.play().catch(()=>{{}})}};
+ const card=pair.closest('.card');card.querySelector('[data-action="play"]').addEventListener('click',()=>play(false));card.querySelector('[data-action="restart"]').addEventListener('click',()=>play(true));card.querySelector('[data-action="pause"]').addEventListener('click',()=>{{generated.pause();original.pause()}});
+ generated.addEventListener('play',()=>{{seekOriginal();if(!Number.isFinite(original.duration)||generated.currentTime<original.duration-.04)original.play().catch(()=>{{}})}});generated.addEventListener('pause',()=>original.pause());generated.addEventListener('seeking',seekOriginal);
+ setInterval(()=>{{if(generated.paused)return;if(Number.isFinite(original.duration)&&generated.currentTime>=original.duration-.04){{original.pause();return}}seekOriginal();if(original.paused)original.play().catch(()=>{{}})}},250);
+}});
+let active='all';const search=document.querySelector('#search');
+const applyFilter=()=>{{const needle=search.value.trim().toLowerCase();document.querySelectorAll('.card').forEach(card=>{{card.hidden=!((active==='all'||card.dataset.dataset===active)&&(!needle||card.dataset.query.includes(needle)))}});document.querySelectorAll('section[data-section]').forEach(section=>{{section.hidden=![...section.querySelectorAll('.card')].some(card=>!card.hidden)}})}};
+document.querySelectorAll('[data-filter]').forEach(button=>button.addEventListener('click',()=>{{active=button.dataset.filter;document.querySelectorAll('[data-filter]').forEach(x=>x.classList.toggle('active',x===button));applyFilter()}}));search.addEventListener('input',applyFilter);
+</script></main></body></html>"""
     (output_root / "index.html").write_text(document, encoding="utf-8")
 
 
@@ -546,7 +584,7 @@ def main() -> int:
     if kinematics.source_mjcf_sha256 != sha256_file(mjcf_path):
         raise ValueError("目标 kinematics 与 --mjcf SHA256 不一致")
     frozen_selection = {
-        "contract_version": "genmo.bumi_hq_original_comparison_selection.v1",
+        "contract_version": "genmo.bumi_hq_original_comparison_selection.v2",
         "source_validation": str(validation_root),
         "source_selection_sha256": sha256_file(validation_root / "selection.json"),
         "source_motion_root": str(source_root),
@@ -558,7 +596,10 @@ def main() -> int:
         "mjcf": str(mjcf_path),
         "mjcf_sha256": sha256_file(mjcf_path),
         "model_label": model_label,
-        "comparison_policy": "原50Hz动作精确重采样到30Hz；对比截到原动作与模型生成的共同真实长度；不循环或拉伸短片段",
+        "root_orientation_postprocess": (selection.get("generation") or {}).get(
+            "root_orientation_postprocess"
+        ),
+        "comparison_policy": "公开四库原50Hz动作精确重采样到30Hz，自建库复用正式30Hz qpos28；生成视频覆盖完整音乐；原动作保留真实长度；网页双视频同步；不循环或拉伸短片段",
         "items": items,
     }
     atomic_json(output_root / "selection.json", frozen_selection)
@@ -566,7 +607,10 @@ def main() -> int:
     for number, item in enumerate(items, start=1):
         dataset = item["dataset"]
         key = item["audio_key"]
-        source_motion = (source_root / dataset / item["representative_motion"]).resolve(strict=True)
+        source_motion = Path(
+            item.get("source_motion")
+            or (source_root / dataset / item["representative_motion"])
+        ).resolve(strict=True)
         generated_artifact_source = (validation_root / "artifacts" / dataset / f"{key}.pt").resolve(
             strict=True
         )
@@ -585,13 +629,13 @@ def main() -> int:
             print(f"[{number:02d}/{total:02d}] 复用 {item['dataset_label']}/{key}", flush=True)
             continue
         artifact_path = output_root / "artifacts" / "original" / dataset / f"{key}.pt"
-        original_video = output_root / "videos" / "original" / dataset / f"{key}.mp4"
-        generated_video = output_root / "videos" / "generated" / dataset / f"{key}.mp4"
-        comparison_video = output_root / "videos" / "comparison" / dataset / f"{key}.mp4"
+        sample_directory = output_root / dataset / key
+        original_video = sample_directory / f"{key}_gmr_bumi3.mp4"
+        generated_video = sample_directory / f"{key}_generated.mp4"
         started = time.perf_counter()
         print(f"[{number:02d}/{total:02d}] 对比 {item['dataset_label']}/{key}", flush=True)
         try:
-            _, original_qpos = save_original_artifact(
+            original_artifact, original_qpos = save_original_artifact(
                 source_motion=source_motion,
                 quality_config=quality_config,
                 kinematics=kinematics,
@@ -610,6 +654,7 @@ def main() -> int:
             generated_duration = float(
                 generated_payload["feature_metadata"]["selected_duration_sec"]
             )
+            original_video_duration = min(len(original_qpos) / 30.0, generated_duration)
             source_audio_duration = float(
                 generated_payload["feature_metadata"].get(
                     "original_selected_duration_sec", generated_duration
@@ -621,30 +666,21 @@ def main() -> int:
                 audio=audio_path,
                 mjcf=mjcf_path,
                 output=original_video,
-                duration_sec=comparison_duration,
+                duration_sec=original_video_duration,
                 width=args.width,
                 height=args.height,
             )
-            if abs(original_probe["duration_sec"] - comparison_duration) > 0.15:
+            if abs(original_probe["duration_sec"] - original_video_duration) > 0.15:
                 raise RuntimeError("原动作视频时长误差超过 0.15 秒")
             generated_materialization = materialize_file(generated_video_source, generated_video)
-            comparison_probe = build_comparison_video(
-                original=original_video,
-                generated=generated_video,
-                audio=audio_path,
-                output=comparison_video,
-                duration_sec=comparison_duration,
-                model_label=model_label,
-                width=args.width,
-                height=args.height,
-            )
-            if abs(comparison_probe["duration_sec"] - comparison_duration) > 0.15:
-                raise RuntimeError("对比视频时长误差超过 0.15 秒")
+            generated_probe = media_probe(generated_video)
+            if abs(generated_probe["duration_sec"] - generated_duration) > 0.15:
+                raise RuntimeError("生成视频没有覆盖完整音乐")
             original_overlap = original_qpos[:comparison_frames]
             original_metrics = motion_metrics(original_overlap, kinematics)
             generated_metrics = motion_metrics(generated_qpos[:comparison_frames], kinematics)
             report = {
-                "contract_version": "genmo.bumi_hq_original_comparison_sample.v1",
+                "contract_version": "genmo.bumi_hq_original_comparison_sample.v2",
                 "status": "passed",
                 "dataset": dataset,
                 "dataset_label": item["dataset_label"],
@@ -655,22 +691,29 @@ def main() -> int:
                 "source_motion_sha256": sha256_file(source_motion),
                 "generated_source_artifact": str(generated_artifact_source),
                 "generated_source_sha256": sha256_file(generated_artifact_source),
-                "source_frames_50hz": torch_load(artifact_path)["source_frames_50hz"],
+                "source_frames": int(
+                    original_artifact.get("source_num_frames", len(original_qpos))
+                ),
+                "source_fps": int(original_artifact.get("source_fps", 50)),
+                "source_frames_50hz": original_artifact.get("source_frames_50hz"),
                 "original_frames_30hz": len(original_qpos),
                 "generated_full_frames_30hz": len(generated_qpos),
                 "comparison_frames_30hz": comparison_frames,
                 "comparison_duration_sec": comparison_duration,
+                "original_video_duration_sec": original_video_duration,
                 "generated_duration_sec": generated_duration,
+                "root_orientation_postprocess": generated_payload.get(
+                    "root_orientation_postprocess"
+                ),
                 "source_audio_duration_sec": source_audio_duration,
                 "source_clip_shorter_than_audio": comparison_duration + 0.15 < generated_duration,
                 "original_artifact_relative": relative(artifact_path, output_root),
                 "original_video_relative": relative(original_video, output_root),
                 "generated_video_relative": relative(generated_video, output_root),
-                "comparison_video_relative": relative(comparison_video, output_root),
                 "report_relative": relative(report_path, output_root),
                 "generated_materialization": generated_materialization,
                 "original_media": original_probe,
-                "comparison_media": comparison_probe,
+                "generated_media": generated_probe,
                 "joint_limit_tolerance_rad": args.joint_limit_tolerance_rad,
                 "original_joint_limits": analyze_joint_limits(
                     original_overlap,
@@ -689,7 +732,7 @@ def main() -> int:
             }
         except Exception as exc:
             report = {
-                "contract_version": "genmo.bumi_hq_original_comparison_sample.v1",
+                "contract_version": "genmo.bumi_hq_original_comparison_sample.v2",
                 "status": "failed",
                 "dataset": dataset,
                 "dataset_label": item["dataset_label"],

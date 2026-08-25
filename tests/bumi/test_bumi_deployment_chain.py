@@ -25,7 +25,11 @@ from gem.robots.bumi.feature_codec import (
 )
 from gem.robots.bumi.kinematics import BumiKinematics, sha256_file
 from gem.runtime.bumi_gmt_plan import BumiIncrementalGmtPlanBuilder
-from gem.runtime.bumi_music_deploy import BumiSlidingQposGenerator
+from gem.runtime.bumi_music_deploy import (
+    BumiSlidingQposGenerator,
+    lift_bumi_root_above_ground,
+    project_bumi_root_to_upright_heading,
+)
 from gem.runtime.bumi_robot_stream import (
     BumiQposChunk,
     BumiQposRevisionTracker,
@@ -33,6 +37,7 @@ from gem.runtime.bumi_robot_stream import (
     bumi_joint_order_sha256,
 )
 from gem.runtime.gmt_trajectory import qpos_timeline_to_gmt_frames, resample_qpos_timeline
+from gem.utils.rotation_conversions import quaternion_apply, quaternion_multiply
 from scripts.demo.demo_music_bumi import resolve_world_anchor
 
 
@@ -161,6 +166,83 @@ def test_bumi_sliding_blends_independent_root_rotation_and_joint_predictions(
         (quaternion[:-1] * quaternion[1:]).sum(dim=-1).abs().clamp(max=1.0)
     )
     assert float(angular_steps[89:121].max()) < 0.02
+
+
+def test_upright_projection_preserves_yaw_position_and_joints() -> None:
+    qpos = torch.from_numpy(_qpos(3))
+    yaw = torch.tensor((0.0, 0.7, -1.1))
+    roll = torch.tensor((1.2, -0.9, 0.6))
+    yaw_quaternion = torch.stack(
+        (
+            torch.cos(yaw * 0.5),
+            torch.zeros_like(yaw),
+            torch.zeros_like(yaw),
+            torch.sin(yaw * 0.5),
+        ),
+        dim=-1,
+    )
+    roll_quaternion = torch.stack(
+        (
+            torch.cos(roll * 0.5),
+            torch.sin(roll * 0.5),
+            torch.zeros_like(roll),
+            torch.zeros_like(roll),
+        ),
+        dim=-1,
+    )
+    qpos[:, 3:7] = quaternion_multiply(yaw_quaternion, roll_quaternion)
+    qpos[:, 7:] = torch.arange(63, dtype=torch.float32).reshape(3, 21) * 0.001
+
+    projected = project_bumi_root_to_upright_heading(
+        qpos, max_yaw_velocity_radps=None
+    )
+
+    torch.testing.assert_close(projected[:, :3], qpos[:, :3])
+    torch.testing.assert_close(projected[:, 7:], qpos[:, 7:])
+    torch.testing.assert_close(projected[:, 3:7], yaw_quaternion, atol=1.0e-6, rtol=0.0)
+    world_up = quaternion_apply(
+        projected[:, 3:7], torch.tensor((0.0, 0.0, 1.0)).expand(3, 3)
+    )
+    torch.testing.assert_close(
+        world_up, torch.tensor((0.0, 0.0, 1.0)).expand(3, 3), atol=1.0e-6, rtol=0.0
+    )
+
+
+def test_upright_projection_limits_unstable_heading_velocity() -> None:
+    qpos = torch.from_numpy(_qpos(5))
+    yaw = torch.tensor((0.0, 2.5, -2.5, 2.8, -2.8))
+    qpos[:, 3] = torch.cos(yaw * 0.5)
+    qpos[:, 6] = torch.sin(yaw * 0.5)
+
+    projected = project_bumi_root_to_upright_heading(
+        qpos, max_yaw_velocity_radps=4.0, fps=30
+    )
+
+    quaternion = projected[:, 3:7]
+    angular_step = 2.0 * torch.acos(
+        (quaternion[:-1] * quaternion[1:]).sum(dim=-1).abs().clamp(max=1.0)
+    )
+    assert float(angular_step.max()) <= 4.0 / 30.0 + 1.0e-6
+
+
+def test_penetration_lift_only_raises_frames_below_ground(
+    test_kinematics_path: Path,
+) -> None:
+    kinematics = BumiKinematics(test_kinematics_path)
+    qpos = torch.from_numpy(_qpos(2))
+    qpos[0, 2] = -1.0
+    qpos[1, 2] = 5.0
+    qpos[:, 7:] = torch.arange(42, dtype=torch.float32).reshape(2, 21) * 0.001
+
+    lifted = lift_bumi_root_above_ground(qpos, kinematics)
+
+    assert float(lifted[0, 2]) > float(qpos[0, 2])
+    assert float(lifted[1, 2]) == pytest.approx(float(qpos[1, 2]), abs=1.0e-6)
+    torch.testing.assert_close(lifted[:, :2], qpos[:, :2])
+    torch.testing.assert_close(lifted[:, 3:], qpos[:, 3:])
+    fk = kinematics.forward_kinematics(lifted)
+    sole = kinematics.aggregate_sole_by_foot(fk["body_pos_w"], fk["body_quat_w"])
+    assert float(sole["foot_bottom_height"].min()) >= -1.0e-6
 
 
 def _chunk(qpos: np.ndarray, *, index: int, start: int, total: int, last: bool) -> BumiQposChunk:

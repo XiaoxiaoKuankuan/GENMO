@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import csv
+import json
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -20,6 +21,7 @@ from scripts.validate_bumi_hq_music_full import (
     audio_key_for_motion,
     reusable_artifact,
     select_hq_audio,
+    select_mine_bumi,
     truncate_music_features,
 )
 
@@ -90,6 +92,47 @@ def test_score_one_selection_deduplicates_shared_audio(tmp_path: Path) -> None:
     assert summary_by_dataset["finedance"]["selected_audio_count"] == 1
 
 
+def test_mine_selection_uses_full_manifest_order_before_local_asset_check(tmp_path: Path) -> None:
+    root = tmp_path / "mine"
+    rows = []
+    selected_positions = {0, 2, 4}
+    for index in range(5):
+        key = f"dance__{index}"
+        rows.append(
+            {
+                "audio_key": key,
+                "audio_path": f"audio/{key}.wav",
+                "dataset": "mine_bumi",
+                "motion_path": f"motions/{key}.pt",
+                "quality_accepted": True,
+                "song_name": str(index),
+                "source_part": "dance",
+            }
+        )
+        if index in selected_positions:
+            for relative in (f"audio/{key}.wav", f"motions/{key}.pt"):
+                path = root / relative
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.touch()
+    manifest = root / "manifests" / "train.jsonl"
+    manifest.parent.mkdir(parents=True)
+    manifest.write_text(
+        "".join(json.dumps(row, ensure_ascii=False) + "\n" for row in rows),
+        encoding="utf-8",
+    )
+    selected, summary = select_mine_bumi(manifest, count=3)
+    assert [row["audio_key"] for row in selected] == ["dance__0", "dance__2", "dance__4"]
+    assert summary["quality_accepted_audio_count"] == 5
+    assert summary["selection_positions_0based"] == [0, 2, 4]
+    explicit, explicit_summary = select_mine_bumi(
+        manifest,
+        count=2,
+        audio_keys=["dance__4", "dance__0"],
+    )
+    assert [row["audio_key"] for row in explicit] == ["dance__4", "dance__0"]
+    assert explicit_summary["selection_mode"] == "explicit_vetted_audio_keys"
+
+
 def test_music_feature_truncation_preserves_original_duration() -> None:
     features = torch.arange(300 * 35, dtype=torch.float32).reshape(300, 35)
     clipped, metadata, original_duration = truncate_music_features(
@@ -116,6 +159,7 @@ def test_reusable_artifact_requires_matching_identity(tmp_path: Path) -> None:
         "ddim_steps": 20,
         "max_duration_sec": 8.0,
         "sliding_qpos_contract_version": "contract-v1",
+        "root_orientation_postprocess": "yaw_only_upright_projection_v1",
     }
     torch.save(
         {

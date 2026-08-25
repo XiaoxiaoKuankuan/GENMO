@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
-"""批量验证四数据集人工高质量动作对应的音乐生成效果。
+"""批量验证四个公开舞蹈库和可选自建数据库的高质量音乐生成效果。
 
 本工具把人工评分、长音乐生成、BUMI 世界系轨迹、MuJoCo 视频和质量审计串成一个可恢复的
-离线流程。它只选择四张评分 CSV 中 ``score=1`` 的动作，再按数据集规则映射到音频并去重；
+离线流程。公开四库只选择评分 CSV 中 ``score=1`` 的动作，再按数据集规则映射到音频并去重；
+自建库可选读取正式发布 manifest 中 ``quality_accepted=true`` 的 30 Hz BUMI 轨迹与裁齐音频；
 每首音频保留全部对应的高质量动作名称，方便从页面和 JSON 追溯选择依据。各数据集可使用
 不同的抽样数量；生成既支持完整音乐，也支持为网页验收设置统一的前缀时长。生成阶段复用
 一次固定 120 帧的 BUMI ONNX 会话，通过 120/30 独立预测、世界对齐和几何感知
@@ -11,7 +12,7 @@ overlap-add 输出连续世界系 qpos28。
 质量报告同时给出严格 XML 原始限位和部署容差后的限位结果。每个超限关节都记录 0/1 基编号、
 名称、方向、最大超限弧度、发生帧、实际值、XML 边界和超限帧数；另外保留脚部穿地、根节点
 倾斜、速度和节拍对齐等运动学指标。最终 ``index.html`` 按 FineDance、CoMPAS3D、
-AIOZ-GDance、AIST++ 分组展示带声音视频及逐关节统计。该评测不执行 GMT，也不代表真实机器人
+AIOZ-GDance、AIST++、自建数据库分组展示带声音视频及逐关节统计。该评测不执行 GMT，也不代表真实机器人
 动力学可跟踪性。中断后再次运行会复用身份一致且已通过媒体校验的正式结果；若推理产物已经
 原子落盘、但渲染阶段因外部资源缺失而失败，也会复用身份一致的动作产物，只补做指标、渲染
 与报告，避免重复执行昂贵的扩散推理。
@@ -49,6 +50,8 @@ from gem.runtime.bumi_music_deploy import (  # noqa: E402
     BUMI_SLIDING_QPOS_CONTRACT_VERSION,
     BumiOrtStepRunner,
     BumiSlidingQposGenerator,
+    lift_bumi_root_above_ground,
+    project_bumi_root_to_upright_heading,
 )
 from gem.runtime.bumi_music_onnx import BUMI_ONNX_CONTRACT_VERSION  # noqa: E402
 from gem.runtime.music_only_trt import plan_sliding_windows  # noqa: E402
@@ -60,8 +63,14 @@ DATASETS = (
     ("aioz_gdance", "AIOZ-GDance", "bumi3_aioz_gdance.csv"),
     ("aistpp", "AIST++", "bumi3_aistpp_ratings.csv"),
 )
+MINE_DATASET = ("mine_bumi", "自建数据库", None)
+REPORT_DATASETS = DATASETS + (MINE_DATASET,)
 DATASET_LABELS = {key: label for key, label, _ in DATASETS}
+DATASET_LABELS[MINE_DATASET[0]] = MINE_DATASET[1]
 RATING_COLUMNS = ("motion_name", "score")
+UPRIGHT_ROOT_POSTPROCESS = (
+    "yaw_only_upright_projection_yawrate4_plus_penetration_lift_v1"
+)
 
 
 def sha256_file(path: Path, block_size: int = 16 * 1024 * 1024) -> str:
@@ -201,6 +210,95 @@ def select_hq_audio(
             "selected_audio_count": len(chosen),
         }
     return selected, dataset_summary
+
+
+def select_mine_bumi(
+    manifest_path: Path,
+    *,
+    count: int,
+    audio_keys: list[str] | None = None,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """从正式自建库 manifest 的完整质量通过全集中均匀选择，并校验所选本地资产。
+
+    manifest 是正式数据库的选择权威；本地只需缓存本次选中的音频和动作，因此选择位置必须
+    先在全部 ``quality_accepted=true`` 条目上确定，再检查所选文件是否存在，不能先按本地
+    已下载文件过滤后再抽样。这样在工作站只传回 5 个样本时，选择仍与服务器 99 条正式库
+    的固定 manifest 行序全集一致，也不会把临时缓存误写成数据库总量。
+    """
+
+    if count <= 0:
+        raise ValueError("mine_bumi count 必须为正整数")
+    manifest_path = manifest_path.expanduser().resolve(strict=True)
+    dataset_root = manifest_path.parent.parent.resolve(strict=True)
+    rows = []
+    seen: set[str] = set()
+    for line_number, line in enumerate(manifest_path.read_text(encoding="utf-8").splitlines(), 1):
+        if not line.strip():
+            continue
+        row = json.loads(line)
+        if row.get("dataset") != "mine_bumi" or row.get("quality_accepted") is not True:
+            continue
+        audio_key = str(row.get("audio_key", ""))
+        if not audio_key or audio_key in seen:
+            raise ValueError(f"{manifest_path}:{line_number}: 自建库 audio_key 为空或重复")
+        seen.add(audio_key)
+        rows.append(row)
+    if not rows:
+        raise ValueError("自建库 manifest 没有 quality_accepted=true 条目")
+    if audio_keys:
+        if len(audio_keys) != count or len(set(audio_keys)) != len(audio_keys):
+            raise ValueError("显式 mine_bumi audio key 必须去重且数量等于 mine-count")
+        positions_by_key = {str(row["audio_key"]): index for index, row in enumerate(rows)}
+        missing_keys = [key for key in audio_keys if key not in positions_by_key]
+        if missing_keys:
+            raise ValueError(f"显式 mine_bumi audio key 不在正式 manifest：{missing_keys}")
+        positions = [positions_by_key[key] for key in audio_keys]
+        selection_mode = "explicit_vetted_audio_keys"
+    else:
+        chosen_count = min(count, len(rows))
+        positions = (
+            [0]
+            if chosen_count == 1
+            else [
+                int(index * (len(rows) - 1) / (chosen_count - 1))
+                for index in range(chosen_count)
+            ]
+        )
+        selection_mode = "uniform_manifest_order"
+    selected = []
+    for position in positions:
+        row = rows[position]
+        audio_path = (dataset_root / str(row["audio_path"])).resolve()
+        motion_path = (dataset_root / str(row["motion_path"])).resolve()
+        if not audio_path.is_relative_to(dataset_root) or not motion_path.is_relative_to(dataset_root):
+            raise ValueError("自建库 manifest 路径越出数据根")
+        if not audio_path.is_file() or not motion_path.is_file():
+            raise FileNotFoundError(f"自建库所选正式资产未传回本地：{audio_path} / {motion_path}")
+        selected.append(
+            {
+                "dataset": "mine_bumi",
+                "dataset_label": MINE_DATASET[1],
+                "audio_key": str(row["audio_key"]),
+                "audio": str(audio_path),
+                "representative_motion": motion_path.name,
+                "source_motion": str(motion_path),
+                "high_quality_motion_count": 1,
+                "high_quality_motion_names": [motion_path.name],
+                "selection_manifest_row": position,
+                "source_part": row.get("source_part"),
+                "song_name": row.get("song_name"),
+            }
+        )
+    return selected, {
+        "dataset_label": MINE_DATASET[1],
+        "manifest_rows": len(rows),
+        "quality_accepted_audio_count": len(rows),
+        "requested_audio_count": count,
+        "selected_audio_count": len(selected),
+        "selection_positions_0based": positions,
+        "selection_mode": selection_mode,
+        "selected_local_assets_present": len(selected),
+    }
 
 
 def truncate_music_features(
@@ -466,7 +564,7 @@ def build_summary(results: list[dict[str, Any]], *, tolerance_rad: float) -> dic
         }
 
     dataset_counts = {}
-    for dataset, label, _ in DATASETS:
+    for dataset, label, _ in REPORT_DATASETS:
         rows = [row for row in passed if row["dataset"] == dataset]
         dataset_counts[dataset] = {
             "dataset_label": label,
@@ -555,8 +653,11 @@ def build_index(
         if selection["generation"]["full_audio"]
         else f"前 {selection['generation']['max_duration_sec']:.1f} 秒"
     )
+    root_postprocess = html.escape(
+        str(selection["generation"].get("root_orientation_postprocess") or "无")
+    )
     cards = []
-    for dataset, label, _ in DATASETS:
+    for dataset, label, _ in REPORT_DATASETS:
         dataset_rows = [row for row in results if row["dataset"] == dataset]
         item_html = []
         for index, row in enumerate(dataset_rows, start=1):
@@ -612,7 +713,7 @@ def build_index(
         cards.append(f"<section><h2>{label}</h2>{''.join(item_html)}</section>")
     document = f"""<!doctype html>
 <html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>BUMI {model_label} 四库高质量音乐验证</title>
+<title>BUMI {model_label} 多库高质量音乐验证</title>
 <style>
 body{{margin:0;background:#10131a;color:#edf1f7;font:15px/1.55 system-ui,sans-serif}}main{{max-width:1500px;margin:auto;padding:28px}}
 a{{color:#78c5ff}}code{{overflow-wrap:anywhere}}.summary,.card{{background:#191f2b;border:1px solid #30394a;border-radius:12px;padding:16px;margin:14px 0}}
@@ -620,9 +721,10 @@ section{{margin-top:34px}}video{{width:100%;max-height:620px;background:#000;bor
 .failed{{border-color:#a74d4d}}.table-wrap{{overflow-x:auto}}table{{border-collapse:collapse;width:100%;margin-top:10px}}th,td{{padding:7px;border:1px solid #3a4354;text-align:left;white-space:nowrap}}
 @media(min-width:1000px){{section{{display:grid;grid-template-columns:1fr 1fr;gap:16px}}section h2{{grid-column:1/-1}}.card{{margin:0}}}}
 </style></head><body><main>
-<h1>BUMI {model_label} 四库人工高质量音乐验证</h1>
+<h1>BUMI {model_label} 多库人工高质量音乐验证</h1>
 <div class="summary"><p>共评测 {summary["evaluated_samples"]} 首，完成 {summary["completed_samples"]} 首；严格 XML 超限样本 {summary["strict_xml_exceed_sample_count"]} 首，部署容差 {summary["joint_limit_tolerance_rad"]:.3f}rad 后仍超限 {summary["tolerance_exceed_sample_count"]} 首。</p>
 <p>总音频 {summary["motion_quality"]["total_duration_sec"] / 60.0:.2f} 分钟、{summary["motion_quality"]["total_frames"]} 帧；脚部最大穿地超过 5cm 的样本 {summary["motion_quality"]["foot_penetration_max_over_0_05m_samples"]} 首，根节点最大倾斜超过 0.5rad 的样本 {summary["motion_quality"]["root_tilt_max_over_0_5rad_samples"]} 首。</p>
+<p>根姿态后处理：<code>{root_postprocess}</code>。启用时 artifact 同时保留 <code>qpos_raw</code> 供审计；页面播放的是保留连续根 yaw 与全部关节、移除根 roll/pitch、限制 yaw 角速度为 4rad/s，并仅在足底穿地帧向上抬高根 Z 后的部署轨迹。</p>
 <p>选择只来自人工评分 <code>score=1</code>，完整规则见 <a href="selection.json">selection.json</a>，汇总见 <a href="quality_summary.json">quality_summary.json</a>。所有编号同时在报告中提供 0-based 和 1-based。</p></div>
 {"".join(cards)}
 </main></body></html>"""
@@ -642,6 +744,7 @@ def completed_result(
     ddim_steps: int,
     max_duration_sec: float | None,
     sliding_contract_version: str,
+    root_orientation_postprocess: str | None,
 ) -> dict[str, Any] | None:
     report_path = output_root / "reports" / item["dataset"] / f"{item['audio_key']}.json"
     if not report_path.is_file():
@@ -654,6 +757,7 @@ def completed_result(
         or report.get("checkpoint_sha256") != checkpoint_sha256
         or report.get("onnx_sha256") != onnx_sha256
         or report.get("sliding_qpos_contract_version") != sliding_contract_version
+        or report.get("root_orientation_postprocess") != root_orientation_postprocess
         or report.get("audio") != item["audio"]
         or not video.is_file()
         or not artifact.is_file()
@@ -675,6 +779,7 @@ def completed_result(
             "ddim_steps": ddim_steps,
             "max_duration_sec": max_duration_sec,
             "sliding_qpos_contract_version": sliding_contract_version,
+            "root_orientation_postprocess": root_orientation_postprocess,
         }.items()
     ):
         return None
@@ -698,6 +803,7 @@ def reusable_artifact(
     ddim_steps: int,
     max_duration_sec: float | None,
     sliding_contract_version: str,
+    root_orientation_postprocess: str | None,
 ) -> dict[str, Any] | None:
     """校验并读取渲染失败前已原子落盘的动作产物。"""
 
@@ -719,6 +825,7 @@ def reusable_artifact(
         "ddim_steps": ddim_steps,
         "max_duration_sec": max_duration_sec,
         "sliding_qpos_contract_version": sliding_contract_version,
+        "root_orientation_postprocess": root_orientation_postprocess,
     }
     if not isinstance(artifact, dict) or any(
         artifact.get(key) != value for key, value in expected.items()
@@ -748,6 +855,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--compas3d-count", type=int)
     parser.add_argument("--aioz-gdance-count", type=int)
     parser.add_argument("--aistpp-count", type=int)
+    parser.add_argument("--mine-manifest", type=Path)
+    parser.add_argument("--mine-count", type=int, default=0)
+    parser.add_argument("--mine-audio-key", action="append", default=[])
     parser.add_argument(
         "--max-duration-sec",
         type=float,
@@ -761,6 +871,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--joint-limit-tolerance-rad", type=float, default=0.25)
     parser.add_argument("--width", type=int, default=640)
     parser.add_argument("--height", type=int, default=480)
+    parser.add_argument(
+        "--project-root-upright",
+        action="store_true",
+        help="显式保留连续根 yaw、限制为4rad/s、移除根 roll/pitch，并只向上修正足底穿地。",
+    )
     parser.add_argument("--selection-only", action="store_true")
     return parser.parse_args()
 
@@ -790,6 +905,22 @@ def main() -> int:
     selected, dataset_summary = select_hq_audio(
         paths["ratings_root"], paths["audio_root"], per_dataset=selection_limits
     )
+    if args.mine_count < 0:
+        raise ValueError("mine-count 不能为负数")
+    if args.mine_count:
+        if args.mine_manifest is None:
+            raise ValueError("mine-count 大于 0 时必须提供 --mine-manifest")
+        mine_selected, mine_summary = select_mine_bumi(
+            args.mine_manifest,
+            count=args.mine_count,
+            audio_keys=args.mine_audio_key or None,
+        )
+        selected.extend(mine_selected)
+        dataset_summary["mine_bumi"] = mine_summary
+        selection_limits["mine_bumi"] = args.mine_count
+    root_orientation_postprocess = (
+        UPRIGHT_ROOT_POSTPROCESS if args.project_root_upright else None
+    )
     metadata_path = (
         args.onnx_metadata.expanduser().resolve(strict=True)
         if args.onnx_metadata is not None
@@ -816,8 +947,8 @@ def main() -> int:
     checkpoint_step = int((metadata.get("checkpoint") or {}).get("global_step", -1))
     model_label = f"s{checkpoint_step:06d}" if checkpoint_step >= 0 else "checkpoint"
     selection = {
-        "contract_version": "genmo.bumi_hq_full_music_selection.v3",
-        "selection_policy": "四张人工评分 CSV 的 score=1；按数据集映射音频键并去重；在各自音频键字典序全集上均匀抽取指定数量",
+        "contract_version": "genmo.bumi_hq_full_music_selection.v5",
+        "selection_policy": "公开四库使用评分 CSV 的 score=1 并按音频键字典序抽样；自建库使用正式 manifest 的 quality_accepted=true 并按 manifest 固定行序均匀抽样",
         "per_dataset_limits": selection_limits,
         "dataset_summary": dataset_summary,
         "model": {
@@ -835,6 +966,7 @@ def main() -> int:
             "ddim_steps": args.ddim_steps,
             "cfg_scale": args.cfg_scale,
             "seed": args.seed,
+            "root_orientation_postprocess": root_orientation_postprocess,
         },
         "quality_audit": {
             "strict_xml_limits_reported": True,
@@ -885,6 +1017,7 @@ def main() -> int:
             ddim_steps=args.ddim_steps,
             max_duration_sec=args.max_duration_sec,
             sliding_contract_version=BUMI_SLIDING_QPOS_CONTRACT_VERSION,
+            root_orientation_postprocess=root_orientation_postprocess,
         )
         if existing is not None:
             results.append(existing)
@@ -919,14 +1052,25 @@ def main() -> int:
                 ddim_steps=args.ddim_steps,
                 max_duration_sec=args.max_duration_sec,
                 sliding_contract_version=BUMI_SLIDING_QPOS_CONTRACT_VERSION,
+                root_orientation_postprocess=root_orientation_postprocess,
             )
             if artifact is None:
                 generated = generator.generate(features, seed=args.seed)
-                qpos = generated.qpos.float().contiguous()
+                raw_qpos = generated.qpos.float().contiguous()
+                if root_orientation_postprocess is not None:
+                    upright = project_bumi_root_to_upright_heading(
+                        raw_qpos, max_yaw_velocity_radps=4.0, fps=30
+                    ).to(device)
+                    qpos = lift_bumi_root_above_ground(
+                        upright, endecoder.kinematics, ground_height=0.0
+                    ).detach().cpu()
+                else:
+                    qpos = raw_qpos
                 canonical = endecoder.codec.encode(qpos.to(device)).canonical_qpos.detach().cpu()
                 windows = len(generated.chunks)
             else:
                 qpos = artifact["qpos"].float().contiguous()
+                raw_qpos = artifact.get("qpos_raw", qpos).float().contiguous()
                 canonical = artifact["qpos_canonical"].float().contiguous()
                 windows = len(plan_sliding_windows(len(qpos)))
                 print(
@@ -948,10 +1092,11 @@ def main() -> int:
             )
             if artifact is None:
                 artifact = {
-                    "contract_version": "genmo.bumi_hq_full_music_prediction.v2",
+                    "contract_version": "genmo.bumi_hq_full_music_prediction.v3",
                     "robot_name": "bumi",
                     "fps": 30,
                     "qpos": qpos,
+                    "qpos_raw": raw_qpos,
                     "qpos_canonical": canonical,
                     "joint_names": list(endecoder.kinematics.joint_order),
                     "quaternion_convention": "wxyz",
@@ -967,6 +1112,7 @@ def main() -> int:
                     "cfg_scale": args.cfg_scale,
                     "ddim_steps": args.ddim_steps,
                     "max_duration_sec": args.max_duration_sec,
+                    "root_orientation_postprocess": root_orientation_postprocess,
                 }
                 artifact_path.parent.mkdir(parents=True, exist_ok=True)
                 temporary_artifact = artifact_path.with_suffix(".tmp")
@@ -986,7 +1132,7 @@ def main() -> int:
                     f"视频/音频时长偏差过大：video={media['duration_sec']}, audio={source_duration}"
                 )
             report = {
-                "contract_version": "genmo.bumi_hq_full_music_sample_report.v2",
+                "contract_version": "genmo.bumi_hq_full_music_sample_report.v3",
                 "status": "passed",
                 **{key: item[key] for key in item},
                 "audio": str(audio_path),
@@ -1004,6 +1150,7 @@ def main() -> int:
                 "cfg_scale": args.cfg_scale,
                 "ddim_steps": args.ddim_steps,
                 "max_duration_sec": args.max_duration_sec,
+                "root_orientation_postprocess": root_orientation_postprocess,
                 "metrics": metrics,
                 "joint_limits": limits,
                 "media": media,
@@ -1012,7 +1159,7 @@ def main() -> int:
             }
         except Exception as exc:
             report = {
-                "contract_version": "genmo.bumi_hq_full_music_sample_report.v2",
+                "contract_version": "genmo.bumi_hq_full_music_sample_report.v3",
                 "status": "failed",
                 **{key: item[key] for key in item},
                 "audio": str(audio_path),
@@ -1021,6 +1168,7 @@ def main() -> int:
                 "onnx_sha256": identities["onnx_sha256"],
                 "sliding_qpos_contract_version": BUMI_SLIDING_QPOS_CONTRACT_VERSION,
                 "max_duration_sec": args.max_duration_sec,
+                "root_orientation_postprocess": root_orientation_postprocess,
                 "error": f"{type(exc).__name__}: {exc}",
                 "elapsed_seconds": time.perf_counter() - started,
             }

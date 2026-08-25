@@ -226,6 +226,88 @@ def _yaw_from_wxyz(quaternion: torch.Tensor) -> torch.Tensor:
     return torch.atan2(2.0 * (w * z + x * y), 1.0 - 2.0 * (y * y + z * z))
 
 
+def project_bumi_root_to_upright_heading(
+    qpos: torch.Tensor,
+    *,
+    max_yaw_velocity_radps: float | None = 4.0,
+    fps: int = 30,
+) -> torch.Tensor:
+    """保留世界位置、根 yaw 和全部关节，只移除导致机器人躺倒的根 roll/pitch。
+
+    人工 q1 v3 模型在音乐动态区间能够生成有效关节动作，但归一化 6D 根旋转的生成结果会
+    偶发退化到接近横躺的姿态。部署验收不能把这种姿态静默当作有效舞蹈。本函数是显式、
+    可审计的运动学安全投影：从原 wxyz 根四元数提取水平 heading，先对 yaw 做跨帧解包，
+    再按可选角速度上限抑制横躺奇异点造成的瞬时反转，最后重建纯 yaw 四元数；根位置和
+    21 个关节自由度逐值保持不变。调用方必须在 artifact 中记录该后处理，不能把投影后的
+    轨迹表述为模型未经处理的原始根旋转预测。
+    """
+
+    value = torch.as_tensor(qpos)
+    if value.ndim < 2 or value.shape[-1] != 28 or value.shape[-2] <= 0:
+        raise ValueError(f"qpos must have shape [...,T,28] with T > 0; got {value.shape}")
+    if not bool(torch.isfinite(value).all()):
+        raise ValueError("qpos contains NaN or Inf")
+    if int(fps) <= 0:
+        raise ValueError("fps must be positive")
+    if max_yaw_velocity_radps is not None and (
+        not math.isfinite(float(max_yaw_velocity_radps))
+        or float(max_yaw_velocity_radps) <= 0.0
+    ):
+        raise ValueError("max_yaw_velocity_radps must be None or finite and > 0")
+    result = value.clone()
+    yaw = _yaw_from_wxyz(normalize_quaternion_wxyz(result[..., 3:7]))
+    if yaw.shape[-1] > 1:
+        raw_delta = yaw[..., 1:] - yaw[..., :-1]
+        wrapped_delta = torch.atan2(torch.sin(raw_delta), torch.cos(raw_delta))
+        if max_yaw_velocity_radps is not None:
+            max_step = float(max_yaw_velocity_radps) / float(fps)
+            wrapped_delta = wrapped_delta.clamp(min=-max_step, max=max_step)
+        yaw = torch.cat(
+            (yaw[..., :1], yaw[..., :1] + torch.cumsum(wrapped_delta, dim=-1)), dim=-1
+        )
+    half_yaw = yaw * 0.5
+    result[..., 3:7] = torch.stack(
+        (
+            torch.cos(half_yaw),
+            torch.zeros_like(half_yaw),
+            torch.zeros_like(half_yaw),
+            torch.sin(half_yaw),
+        ),
+        dim=-1,
+    )
+    return result.contiguous()
+
+
+def lift_bumi_root_above_ground(
+    qpos: torch.Tensor,
+    kinematics: Any,
+    *,
+    ground_height: float = 0.0,
+) -> torch.Tensor:
+    """只在足底穿地时逐帧向上平移根 Z，保留腾空、XY、朝向和全部关节动作。
+
+    根直立投影会改变足底相对根节点的垂直几何，而模型原始根高度是针对退化横躺姿态预测的。
+    这里用权威 BUMI FK 和鞋底代理计算每帧最低足底，只对低于 ``ground_height`` 的帧增加
+    恰好消除穿透的根高度；本来高于地面的帧抬升量为零，因此不会把跳跃或腾空动作压回
+    地面。该步骤同样属于必须写入 artifact 的显式部署后处理。
+    """
+
+    value = torch.as_tensor(qpos)
+    if value.ndim < 2 or value.shape[-1] != 28 or value.shape[-2] <= 0:
+        raise ValueError(f"qpos must have shape [...,T,28] with T > 0; got {value.shape}")
+    if not bool(torch.isfinite(value).all()):
+        raise ValueError("qpos contains NaN or Inf")
+    if not math.isfinite(float(ground_height)):
+        raise ValueError("ground_height must be finite")
+    fk = kinematics.forward_kinematics(value)
+    sole = kinematics.aggregate_sole_by_foot(fk["body_pos_w"], fk["body_quat_w"])
+    lowest = sole["foot_bottom_height"].amin(dim=-1)
+    lift = (float(ground_height) - lowest).clamp_min(0.0)
+    result = value.clone()
+    result[..., 2] = result[..., 2] + lift
+    return result.contiguous()
+
+
 def _slerp_wxyz(first: torch.Tensor, second: torch.Tensor, alpha: torch.Tensor) -> torch.Tensor:
     """沿最短弧插值一组 wxyz 四元数，并保持时间符号连续。"""
 
@@ -499,4 +581,6 @@ __all__ = [
     "BumiSlidingResult",
     "BumiTensorRTStepRunner",
     "bumi_engine_cache_key",
+    "lift_bumi_root_above_ground",
+    "project_bumi_root_to_upright_heading",
 ]
