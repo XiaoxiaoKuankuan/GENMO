@@ -93,13 +93,13 @@ $GENMO_PYTHON tools/data/bumi/compute_bumi_30d_stats.py \
   --output "$BUMI_MUSIC_QPOS30_STATS_PATH"
 ```
 
-## 8 卡 50k 训练
+## 8 卡 350k 完全从零训练
 
-实验入口：`gem_bumi_music_only_5set_manual_q1_v3_qpos30_contact_50k`。网络 qpos30 输入列、
-30 维输出层和两维 contact head 都是新参数。推荐用用户自己在 main 分支训练出的音乐模型
-通过 `smpl_music_to_bumi` adapter 做 weights-only 初始化：只迁移 EDGE35 embedder、共享
-Transformer、时刻/位置编码和条件投影列，不恢复 optimizer/global step，也不迁移 SMPL
-motion 列或输出 head。这不是开源预训练 BUMI 权重。
+实验入口：`gem_bumi_music_only_5set_manual_q1_v3_qpos30_contact_scratch_350k`。每卡
+batch=192、8 卡全局 batch=1536，训练 350k step；网络 qpos30 输入列、30 维输出层、两维
+contact head 与 Transformer 主干都从随机初始化开始。配置把 `pretrain_ckpt`、`ckpt_path`、
+`resume_mode` 和 `checkpoint_adapter` 全部固定为 null，因此不会加载 main/SMPL、旧 BUMI
+模型、optimizer 或 global step。
 
 ```bash
 cd /home/user/liwei/GENMO
@@ -110,16 +110,14 @@ export NCCL_SOCKET_IFNAME=lo
 export TORCH_NCCL_BLOCKING_WAIT=1
 
 $GENMO_PYTHON -u scripts/train.py \
-  exp=gem_bumi_music_only_5set_manual_q1_v3_qpos30_contact_50k \
-  pretrain_ckpt="$USER_MAIN_MUSIC_CKPT" \
+  exp=gem_bumi_music_only_5set_manual_q1_v3_qpos30_contact_scratch_350k \
   output_dir="$BUMI_QPOS30_OUTPUT" \
   pl_trainer.devices=8 \
   pl_trainer.strategy=ddp
 ```
 
-若明确要求完全从零训练，必须同时覆盖
-`pretrain_ckpt=null model.model_cfg.checkpoint_adapter=null`；但新输出 head 和 16 层主干都
-从零时，50k 不是与 main 初始化方案等价的预算，不能把两种实验曲线直接比较。
+正式启动命令仍应显式追加 `pretrain_ckpt=null model.model_cfg.checkpoint_adapter=null`，作为
+配置之外的第二道防护。学习率里程碑为 210k/315k，每 5k step 保存 checkpoint。
 
 原生 qpos30 checkpoint 保存表示版本。之后即使配置仍保留 adapter，加载该 checkpoint 时
 也会优先按原生权重完整加载，不会再次误走 SMPL adapter。

@@ -207,3 +207,31 @@ def test_qpos30_contact_50k_contract_restores_main_style_feet_and_root_losses() 
     assert config.pl_trainer.devices == 8
     assert config.pl_trainer.strategy == "ddp"
     assert config.pl_trainer.max_steps == 50000
+
+
+def test_qpos30_contact_scratch_350k_is_eight_gpu_random_initialization() -> None:
+    with initialize_config_dir(version_base="1.3", config_dir=str(REPO_ROOT / "configs")):
+        config = compose(
+            config_name="train",
+            overrides=[
+                "exp=gem_bumi_music_only_5set_manual_q1_v3_qpos30_contact_scratch_350k"
+            ],
+        )
+
+    denoiser = config.network.model_cfg.denoiser
+    assert denoiser.output_dim == denoiser.xt_dim == denoiser.njoints == 30
+    assert denoiser.static_conf_dim == 2
+    assert config.endecoder.feat_dim == 30
+    assert config.pretrain_ckpt is None
+    assert config.ckpt_path is None
+    assert config.resume_mode is None
+    assert config.model.model_cfg.checkpoint_adapter is None
+    assert config.data.loader_opts.train.batch_size == 192
+    assert config.pl_trainer.devices == 8
+    assert config.pl_trainer.strategy == "ddp"
+    assert config.pl_trainer.max_steps == 350000
+    assert config.pl_trainer.val_check_interval == 5000
+    assert config.optimizer.lr == 1.0e-4
+    assert list(config.scheduler.scheduler.milestones) == [210000, 315000]
+    assert config.pipeline.args.ground_semantics == "mixed_floor_zero_fk_contact_v2"
+    assert config.pipeline.args.loss_contract == "physical_qpos30_contact_v2"
