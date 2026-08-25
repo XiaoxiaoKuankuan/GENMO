@@ -174,6 +174,10 @@ BUMI `qpos[28]`，而不是 GMR 提前求解的未来窗口，因此可以与 Ga
 跟踪结果按时间直接比较。关闭 MuJoCo 窗口不会终止安全桥或 GMT；状态中的
 `gmr_viewer_alive` 会变为 `false`。
 
+安全桥的合成站姿默认让双臂相对贴身姿态向外打开 `10°`。启动命令无需增加参数；需要在
+仿真中微调时可显式传入 `--idle-arm-open-degrees 0..45`。该参数只改变无音乐、回站和
+故障回退使用的 SMPL-X 空闲目标，不改变 GENMO 生成动作、GMR IK 配置或 GMT policy。
+
 启动成功后应看到 GMR reset、控制 endpoint 和持续站姿发布。安全桥独占 GMT Redis
 key；不要再启动旧 GMR Redis publisher。
 

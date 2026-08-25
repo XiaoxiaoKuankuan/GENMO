@@ -239,6 +239,21 @@ def test_holding_continuously_returns_static_frames() -> None:
     assert torch.count_nonzero(pose).item() == 2
 
 
+def test_synthetic_idle_supports_small_symmetric_arm_opening() -> None:
+    idle = synthetic_idle_motion(arm_open_degrees=10.0)
+    pose = idle.body_pose.reshape(21, 3)
+    expected_rotation = math.radians(80.0)
+    assert pose[LEFT_SHOULDER_BODY_INDEX, 2].item() == pytest.approx(
+        -expected_rotation
+    )
+    assert pose[RIGHT_SHOULDER_BODY_INDEX, 2].item() == pytest.approx(
+        expected_rotation
+    )
+    assert idle.metadata["arm_open_degrees"] == 10.0
+    with pytest.raises(ValueError, match="within"):
+        synthetic_idle_motion(arm_open_degrees=45.1)
+
+
 def test_motion_end_returns_then_holds(tmp_path: Path) -> None:
     transl = torch.tensor([[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]])
     motion = load_smpl_motion(write_motion(tmp_path / "short.pt", length=2, fps=1, transl=transl))

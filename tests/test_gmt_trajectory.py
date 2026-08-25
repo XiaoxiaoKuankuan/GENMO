@@ -33,6 +33,12 @@ from scripts.demo.demo_music_robot_bridge import (
     _IncrementalPlanBuilder,
     _intermediate_qpos,
 )
+from scripts.demo.demo_music_robot_bridge import (
+    build_parser as build_bridge_parser,
+)
+from scripts.demo.demo_music_robot_bridge import (
+    validate_args as validate_bridge_args,
+)
 from scripts.demo.stream_smpl_params_to_gmt import _align_action_to_idle, parse_args
 
 
@@ -340,6 +346,15 @@ def test_cli_locks_protocol_to_50_hz() -> None:
     assert args.redis_key == "gmt_online_frame_bumi"
     with pytest.raises(ValueError, match="fixed"):
         parse_args(["--motion", "motion.pt", "--publish_fps", "30"])
+
+
+def test_music_robot_bridge_defaults_to_small_idle_arm_opening() -> None:
+    args = build_bridge_parser().parse_args([])
+    validate_bridge_args(args)
+    assert args.idle_arm_open_degrees == 10.0
+    args.idle_arm_open_degrees = 45.1
+    with pytest.raises(ValueError, match="idle-arm-open-degrees"):
+        validate_bridge_args(args)
 
 
 def test_packet_constant_contract_dimensions() -> None:

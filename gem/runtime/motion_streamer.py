@@ -202,14 +202,21 @@ def load_smpl_motion(
     )
 
 
-def synthetic_idle_motion(fps: float = 30.0) -> SMPLMotion:
-    """Return a simulation-only one-frame standing pose with both arms down."""
+def synthetic_idle_motion(
+    fps: float = 30.0, *, arm_open_degrees: float = 0.0
+) -> SMPLMotion:
+    """Return a one-frame standing pose with controllable outward arm opening."""
     if not math.isfinite(fps) or fps <= 0:
         raise ValueError("fps must be finite and > 0")
+    if not math.isfinite(arm_open_degrees) or not 0.0 <= arm_open_degrees <= 45.0:
+        raise ValueError("arm_open_degrees must be finite and within [0, 45]")
+    shoulder_rotation = SYNTHETIC_IDLE_ARM_ANGLE_RAD - math.radians(
+        arm_open_degrees
+    )
     body_pose = torch.zeros(1, 63)
     body_pose_aa = body_pose.reshape(1, 21, 3)
-    body_pose_aa[0, LEFT_SHOULDER_BODY_INDEX, 2] = -SYNTHETIC_IDLE_ARM_ANGLE_RAD
-    body_pose_aa[0, RIGHT_SHOULDER_BODY_INDEX, 2] = SYNTHETIC_IDLE_ARM_ANGLE_RAD
+    body_pose_aa[0, LEFT_SHOULDER_BODY_INDEX, 2] = -shoulder_rotation
+    body_pose_aa[0, RIGHT_SHOULDER_BODY_INDEX, 2] = shoulder_rotation
     return SMPLMotion(
         body_pose=body_pose,
         global_orient=torch.zeros(1, 3),
@@ -221,6 +228,7 @@ def synthetic_idle_motion(fps: float = 30.0) -> SMPLMotion:
             "source": "synthetic_idle_arms_down",
             "shape_mode": "zero",
             "arms": "down",
+            "arm_open_degrees": float(arm_open_degrees),
         },
     )
 

@@ -85,6 +85,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--redis-ttl-ms", type=int, default=250)
     parser.add_argument("--device", default="cuda:0")
     parser.add_argument("--audio-playback", choices=("off", "ffplay"), default="ffplay")
+    parser.add_argument(
+        "--idle-arm-open-degrees",
+        type=float,
+        default=10.0,
+        help="outward opening of both arms in the synthesized stand pose (0..45 deg)",
+    )
     parser.add_argument("--blend-seconds", type=float, default=0.8)
     parser.add_argument("--return-seconds", type=float, default=1.0)
     parser.add_argument("--ack-timeout-seconds", type=float, default=5.0)
@@ -110,6 +116,11 @@ def validate_args(args: argparse.Namespace) -> None:
             raise ValueError(f"--{name.replace('_', '-')} must be finite and > 0")
     if not math.isfinite(args.ground_clearance) or args.ground_clearance < 0.0:
         raise ValueError("--ground-clearance must be finite and >= 0")
+    if (
+        not math.isfinite(args.idle_arm_open_degrees)
+        or not 0.0 <= args.idle_arm_open_degrees <= 45.0
+    ):
+        raise ValueError("--idle-arm-open-degrees must be finite and within [0, 45]")
     if args.gmr_viewer_width < 160 or args.gmr_viewer_height < 120:
         raise ValueError("GMR viewer dimensions must be at least 160x120")
     if args.redis_ttl_ms <= 40:
@@ -487,7 +498,9 @@ class BridgeRuntime:
     def _make_idle_packet(self, device_value: str) -> bytes:
         device = torch.device(device_value if torch.cuda.is_available() else "cpu")
         endecoder = load_endecoder(device)
-        idle = synthetic_idle_motion(30.0)
+        idle = synthetic_idle_motion(
+            30.0, arm_open_degrees=self.args.idle_arm_open_degrees
+        )
         params = {
             "body_pose": idle.body_pose.to(device),
             "global_orient": idle.global_orient.to(device),
