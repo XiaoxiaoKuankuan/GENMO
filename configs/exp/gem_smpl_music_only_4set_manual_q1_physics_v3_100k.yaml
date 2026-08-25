@@ -1,0 +1,96 @@
+# @package _global_
+# 人工高质量 SMPL 四库的 physics_v3 权重微调配置。
+#
+# 本实验从已经完成 300k 人工高质量微调的模型权重继续学习，不恢复旧 optimizer、scheduler
+# 或 global step；网络、151D 表示和基础扩散/几何监督保持不变。训练数据固定为人工评分
+# score=1 的 manual_q1 发布，额外启用完整的 9 项 SMPL 时序/脚底穿地损失。所有 physics
+# 权重均为 physics_v2 的 2 倍，并用 15k step 渐进升权，降低强化物理约束对既有人体动作
+# 与音乐对应关系的突然扰动。正式训练为 8 卡、每卡 batch 192、100k optimizer step。
+defaults:
+  - gem_smpl_music_only_4set_curated
+  - override /optimizer: adamw_2e-5
+  - override /scheduler: iters_half_70k_100k
+  - override /callbacks:
+      - ckpt_saver/every5000s_top100
+      - prog_bar/prog_reporter_ed1
+      - train_speed_timer/base
+      - lr_monitor/pl
+  - _self_
+
+exp_name_base: gem_smpl_music_only_4set_manual_q1_physics_v3_100k
+exp_name_var: ""
+exp_name: ${exp_name_base}${exp_name_var}
+data_name: gem_smpl_music_only_4set_manual_q1_physics_v3_100k
+output_dir: outputs/${exp_name}
+
+curated_data_root: /data0/user/liwei/datasets/music_dance_curated/music_only_4set_manual_q1_human_v1
+
+# 仅加载 s300000 模型权重；checkpoint 路径由正式启动命令显式提供并记录哈希。
+pretrain_ckpt: null
+ckpt_path: null
+resume_mode: null
+
+train_datasets:
+  aistpp_train:
+    duration_aware_sampling: false
+    ground_sidecar_path: physics/ground_v1.jsonl
+    require_ground_sidecar: true
+  aioz_gdance_train:
+    duration_aware_sampling: false
+    ground_sidecar_path: physics/ground_v1.jsonl
+    require_ground_sidecar: true
+  finedance_train:
+    duration_aware_sampling: false
+    ground_sidecar_path: physics/ground_v1.jsonl
+    require_ground_sidecar: true
+  compas3d_train:
+    duration_aware_sampling: false
+    ground_sidecar_path: physics/ground_v1.jsonl
+    require_ground_sidecar: true
+
+data:
+  balanced_sampling:
+    enabled: true
+    samples_per_epoch: 52224
+    fps: 30.0
+    temperature: 0.5
+    minimum_dataset_probability: 0.05
+    maximum_dataset_probability: 0.50
+    seed: ${seed}
+  loader_opts:
+    train:
+      batch_size: 192
+
+pipeline:
+  args:
+    physics_losses:
+      enabled: true
+      fps: 30.0
+      warmup_steps: 15000
+      max_gt_root_speed: 6.0
+      max_gt_joint_angular_speed: 30.0
+      max_gt_fk_speed: 9.0
+      sole_tolerance_m: 0.01
+      dataset_ids: [aist++, aioz_gdance, finedance, compas3d]
+      root_velocity: {scale: 2.0, weight: 0.40}
+      root_acceleration: {scale: 20.0, weight: 0.080}
+      root_jerk: {scale: 600.0, weight: 0.008}
+      joint_angular_velocity: {scale: 6.0, weight: 0.20}
+      joint_angular_acceleration: {scale: 180.0, weight: 0.040}
+      fk_velocity: {scale: 2.0, weight: 0.40}
+      fk_acceleration: {scale: 30.0, weight: 0.080}
+      fk_jerk: {scale: 600.0, weight: 0.016}
+      sole_penetration: {scale: 0.03, weight: 0.040}
+
+optimizer:
+  # 从高质量 s300000 权重继续微调，使用比上一阶段 2e-5 更保守的初始学习率。
+  lr: 1e-5
+
+scheduler:
+  scheduler:
+    milestones: [60000, 85000]
+
+pl_trainer:
+  devices: 8
+  use_distributed_sampler: false
+  max_steps: 100000

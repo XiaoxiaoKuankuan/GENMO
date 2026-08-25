@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import math
-from types import SimpleNamespace
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -164,6 +163,70 @@ def test_physics_v2_is_a_long_scratch_run_with_calibrated_weights() -> None:
     assert v1.pipeline.args.physics_losses.sole_penetration.weight == pytest.approx(
         0.005
     )
+
+
+def test_manual_q1_physics_v3_uses_stronger_losses_and_requested_budget() -> None:
+    with initialize_config_dir(
+        version_base="1.3", config_dir=str(REPO_ROOT / "configs")
+    ):
+        curated = compose(
+            config_name="train",
+            overrides=["exp=gem_smpl_music_only_4set_curated"],
+        )
+        v2 = compose(
+            config_name="train",
+            overrides=["exp=gem_smpl_music_only_4set_physics_v2"],
+        )
+        v3 = compose(
+            config_name="train",
+            overrides=[
+                "exp=gem_smpl_music_only_4set_manual_q1_physics_v3_100k"
+            ],
+        )
+
+    assert v3.exp_name == "gem_smpl_music_only_4set_manual_q1_physics_v3_100k"
+    assert v3.curated_data_root.endswith("music_only_4set_manual_q1_human_v1")
+    assert v3.pretrain_ckpt is None
+    assert v3.ckpt_path is None
+    assert v3.resume_mode is None
+    assert v3.optimizer.lr == pytest.approx(1e-5)
+    assert list(v3.scheduler.scheduler.milestones) == [60000, 85000]
+    assert v3.pl_trainer.devices == 8
+    assert v3.pl_trainer.max_steps == 100000
+    assert v3.pl_trainer.use_distributed_sampler is False
+    assert v3.data.loader_opts.train.batch_size == 192
+    assert v3.data.balanced_sampling.samples_per_epoch == 52224
+    assert v3.pipeline.args.physics_losses.warmup_steps == 15000
+
+    for dataset in v3.train_datasets.values():
+        assert dataset.duration_aware_sampling is False
+        assert dataset.ground_sidecar_path == "physics/ground_v1.jsonl"
+        assert dataset.require_ground_sidecar is True
+
+    physics_names = (
+        "root_velocity",
+        "root_acceleration",
+        "root_jerk",
+        "joint_angular_velocity",
+        "joint_angular_acceleration",
+        "fk_velocity",
+        "fk_acceleration",
+        "fk_jerk",
+        "sole_penetration",
+    )
+    for name in physics_names:
+        assert v3.pipeline.args.physics_losses[name].weight == pytest.approx(
+            2.0 * v2.pipeline.args.physics_losses[name].weight
+        )
+
+    v3_network = OmegaConf.to_container(v3.network, resolve=True)
+    curated_network = OmegaConf.to_container(curated.network, resolve=True)
+    v3_network["args"].pop("physics_losses")
+    v3_network["model_cfg"]["denoiser"]["args"].pop("physics_losses")
+    assert v3_network == curated_network
+    assert OmegaConf.to_container(
+        v3.endecoder, resolve=True
+    ) == OmegaConf.to_container(curated.endecoder, resolve=True)
 
 
 def test_first_to_third_derivative_masks_exclude_padding_and_bad_intervals() -> None:
