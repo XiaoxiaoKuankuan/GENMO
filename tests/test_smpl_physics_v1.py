@@ -229,6 +229,31 @@ def test_manual_q1_physics_v3_uses_stronger_losses_and_requested_budget() -> Non
     ) == OmegaConf.to_container(curated.endecoder, resolve=True)
 
 
+def test_train_entrypoint_binds_nccl_to_current_cuda_device(monkeypatch) -> None:
+    from scripts import train as train_script
+
+    calls: dict[str, object] = {}
+    monkeypatch.setattr(train_script.torch.cuda, "current_device", lambda: 5)
+
+    def fake_init_process_group(backend, *, device_id) -> None:
+        calls["backend"] = backend
+        calls["device_id"] = device_id
+
+    def fake_barrier(*, device_ids) -> None:
+        calls["barrier_device_ids"] = device_ids
+
+    monkeypatch.setattr(train_script.dist, "init_process_group", fake_init_process_group)
+    monkeypatch.setattr(train_script.dist, "barrier", fake_barrier)
+
+    train_script._initialize_nccl_process_group()
+
+    assert calls == {
+        "backend": "nccl",
+        "device_id": torch.device("cuda", 5),
+        "barrier_device_ids": [5],
+    }
+
+
 def test_first_to_third_derivative_masks_exclude_padding_and_bad_intervals() -> None:
     frames = torch.tensor([[True, True, True, True, False, False]])
     assert consecutive_valid_mask(frames, 1).tolist() == [

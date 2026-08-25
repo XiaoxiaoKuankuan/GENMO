@@ -55,6 +55,20 @@ def _get_rank():
 global_rank = _get_rank()
 
 
+def _initialize_nccl_process_group() -> None:
+    """按当前 rank 已绑定的 CUDA 设备初始化单机/多机 NCCL。
+
+    新版 PyTorch/NCCL 在进程组初始化阶段需要明确的 ``device_id``，否则八卡进程组可能在
+    Lightning 的首个 barrier 才异步暴露 CUDA illegal memory access。这里同时把首次
+    barrier 限定到同一设备，确保 communicator 创建、当前 CUDA context 和 Lightning
+    后续使用的 local device 完全一致。
+    """
+    device_index = torch.cuda.current_device()
+    device = torch.device("cuda", device_index)
+    dist.init_process_group("nccl", device_id=device)
+    dist.barrier(device_ids=[device_index])
+
+
 def wandb_run_exists():
     return isinstance(wandb.run, wandb.sdk.wandb_run.Run)
 
@@ -226,8 +240,7 @@ def train(cfg: DictConfig) -> None:
             cfg.logger.id = wandb_run
 
         if cfg.pl_trainer.devices > 1 and "RANK" in os.environ:
-            dist.init_process_group("nccl")
-            dist.barrier()
+            _initialize_nccl_process_group()
 
         if global_rank != 0:
             if version is None:
