@@ -1053,7 +1053,7 @@ def write_index(args: argparse.Namespace, items: list[dict[str, Any]]) -> None:
                 + html.escape(f"{item['id']} · {item['music_key']}")
                 + "</h3></div><span class='duration'>"
                 + html.escape(f"{frames:,} 帧 · {frames / 30:.2f} 秒")
-                + "</span></header><video controls preload='metadata' src='"
+                + "</span></header><video controls preload='none' playsinline src='"
                 + media
                 + "'></video><p>左：SMPL-X　右：BUMI3　数据划分："
                 + html.escape(str(item.get("split")))

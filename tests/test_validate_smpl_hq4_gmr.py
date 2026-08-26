@@ -96,6 +96,8 @@ def test_full_music_index_uses_one_song_per_row(tmp_path: Path) -> None:
     assert "grid-template-columns" not in page
     assert ".dataset-group{display:block}" in page
     assert "aspect-ratio:32/9" in page
+    assert page.count("preload='none' playsinline") == 4
+    assert "preload='metadata'" not in page
     assert "完整源音乐从头到尾生成，无 20 秒截断" in page
     assert "3,000 帧 · 100.00 秒" in page
 
@@ -103,4 +105,3 @@ def test_full_music_index_uses_one_song_per_row(tmp_path: Path) -> None:
 def test_dynamic_frame_contract_keeps_legacy_read_compatibility() -> None:
     assert target.item_frames({"num_frames": 4_321}) == 4_321
     assert target.item_frames({"validation_frames": 600}) == 600
-
