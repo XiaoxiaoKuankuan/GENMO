@@ -2,7 +2,7 @@
 """批量验证 physics_v3 SMPL 音乐模型，并生成 SMPL-X 与 BUMI3 对照视频。
 
 本工具把一次正式视觉验证拆成可独立续跑的三个阶段。``generate`` 阶段读取冻结的
-高质量四库曲目清单，逐条调用仓库标准 ``demo_music_only.py``，从原始 WAV 提取
+高质量四库曲目清单，逐条调用仓库标准 ``demo_music_only.py``，读取由原始 WAV 冻结的
 EDGE35 条件并保存 30 Hz 全局 SMPL-X 参数；该阶段支持按条目编号分片，适合在服务器
 1 上用八张 GPU 并行执行。``render`` 阶段在本地加载指定 GMR-CPP 仓库的真实
 ``smplx_bumi3_batch_server``、IK JSON 与 BUMI3 MJCF，逐帧执行 SMPL-X FK、SMP1 编码
@@ -191,6 +191,11 @@ def load_selection(args: argparse.Namespace) -> tuple[dict[str, Any], list[dict[
         expected_hash = str(item.get("validation_audio_sha256"))
         if sha256_file(audio) != expected_hash:
             raise ValueError(f"{item.get('id')} 的 20 秒验证音频 SHA256 不匹配")
+        feature = validation_feature(args, item)
+        if not feature.is_file():
+            raise FileNotFoundError(feature)
+        if sha256_file(feature) != str(item.get("validation_music_feature_sha256")):
+            raise ValueError(f"{item.get('id')} 的冻结 EDGE35 SHA256 不匹配")
     if args.only_id is not None:
         requested = [item for item in items if item["id"] == args.only_id]
         if not requested:
@@ -204,6 +209,12 @@ def validation_audio(args: argparse.Namespace, item: dict[str, Any]) -> Path:
     """按输出根目录解析可跨服务器搬运的验证 WAV。"""
 
     return args.output_root / "audio" / item["dataset"] / f"{item['id']}.wav"
+
+
+def validation_feature(args: argparse.Namespace, item: dict[str, Any]) -> Path:
+    """解析由同一 20 秒 WAV 预先冻结、可跨机器复用的 EDGE35 tensor。"""
+
+    return args.output_root / "music_features" / item["dataset"] / f"{item['id']}.pt"
 
 
 def artifact_dir(args: argparse.Namespace, item: dict[str, Any]) -> Path:
@@ -231,6 +242,8 @@ def generation_is_complete(
             and report.get("generated_shape") == [600, 151]
             and sidecar.get("validation_audio_sha256")
             == item["validation_audio_sha256"]
+            and sidecar.get("validation_music_feature_sha256")
+            == item["validation_music_feature_sha256"]
             and sidecar.get("checkpoint_sha256") == args.checkpoint_sha256
         )
     except (OSError, ValueError, TypeError, RuntimeError):
@@ -279,6 +292,7 @@ def run_generation(args: argparse.Namespace, item: dict[str, Any]) -> None:
     staging_root.mkdir(parents=True, exist_ok=True)
     staging = Path(tempfile.mkdtemp(prefix=f"{item['id']}-", dir=staging_root))
     audio = validation_audio(args, item)
+    feature = validation_feature(args, item)
     log_dir = args.output_root / "logs" / "generation"
     log_dir.mkdir(parents=True, exist_ok=True)
     log_path = log_dir / f"{item['id']}.log"
@@ -286,10 +300,8 @@ def run_generation(args: argparse.Namespace, item: dict[str, Any]) -> None:
         sys.executable,
         "-u",
         str(REPO_ROOT / "scripts/demo_music_only.py"),
-        "--audio",
-        str(audio),
-        "--audio-duration-sec",
-        "20",
+        "--music-embed",
+        str(feature),
         "--num-frames",
         "600",
         "--max-frames",
@@ -340,6 +352,10 @@ def run_generation(args: argparse.Namespace, item: dict[str, Any]) -> None:
                 "dataset": item["dataset"],
                 "music_key": item["music_key"],
                 "validation_audio_sha256": item["validation_audio_sha256"],
+                "validation_music_feature": str(feature),
+                "validation_music_feature_sha256": item[
+                    "validation_music_feature_sha256"
+                ],
                 "checkpoint": str(args.ckpt),
                 "checkpoint_sha256": args.checkpoint_sha256,
                 "checkpoint_global_step": args.checkpoint_step,
