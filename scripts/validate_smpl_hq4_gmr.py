@@ -1,20 +1,24 @@
 #!/usr/bin/env python3
-"""批量验证 physics_v3 SMPL 音乐模型，并生成 SMPL-X 与 BUMI3 对照视频。
+"""批量验证 physics_v3 SMPL 音乐模型，并生成完整音乐的 SMPL-X/BUMI3 对照视频。
 
-本工具把一次正式视觉验证拆成可独立续跑的三个阶段。``generate`` 阶段读取冻结的
-高质量四库曲目清单，逐条调用仓库标准 ``demo_music_only.py``，读取由原始 WAV 冻结的
-EDGE35 条件并保存 30 Hz 全局 SMPL-X 参数；该阶段支持按条目编号分片，适合在服务器
-1 上用八张 GPU 并行执行。``render`` 阶段在本地加载指定 GMR-CPP 仓库的真实
+本工具把一次正式视觉验证拆成可独立续跑的四个阶段。``prepare`` 阶段只从人工评分
+``keep`` 且属于 ``train`` split 的四库清单中，按真实音频身份去重并稳定选择指定数量；
+它复制完整源 WAV、从头到尾提取 30 Hz EDGE35 条件，并冻结音频、特征、split 与哈希。
+``generate`` 阶段逐条调用仓库标准 ``demo_music_only.py``，以 600 帧窗口和 120 帧重叠
+拼接覆盖完整音乐，不再截成 20 秒；该阶段支持按条目编号分片，适合在服务器 1 上用八张
+GPU 并行执行。``render`` 阶段在本地加载指定 GMR-CPP 仓库的真实
 ``smplx_bumi3_batch_server``、IK JSON 与 BUMI3 MJCF，逐帧执行 SMPL-X FK、SMP1 编码
 和同步 C++ IK，得到 MuJoCo 原生顺序的 ``qpos[T,28]``。随后分别流式渲染完整
 SMPL-X 表面网格和 BUMI3 MuJoCo 机器人，不在内存中堆积整段 RGB，并为两段视频封装
-同一个验证音频。程序还生成横向对照视频、每条 sidecar、全局 summary 与 HTML 索引。
+同一首完整音乐。程序还生成横向对照视频、每条 sidecar、全局 summary 与 HTML 索引；
+网页严格一行一首、播放器使用整行宽度，避免多列卡片把横向对比视频压得过小。
 
-所有正式边界均为硬校验：清单数量、音频哈希、checkpoint step、SMPL 字段形状、GMR
-根四元数、MJCF 关节顺序以及最终 H.264/AAC/30 FPS/时长不一致时都会失败。生成结果先
-写入独立临时目录后再发布；已完成且身份匹配的条目会直接复用，因此服务器中断、网络
-回传或本地渲染失败后可以安全重跑同一命令。脚本不会修改 GMR 仓库中的源码、配置、
-XML 或构建目录，实际使用的 checkpoint、batch server、IK 与 MJCF SHA256 都会写入结果。
+所有正式边界均为硬校验：train/keep 来源、四库数量、完整音频及 EDGE35 哈希与帧数、
+checkpoint step、SMPL 字段形状、GMR 根四元数、MJCF 关节顺序以及最终
+H.264/AAC/30 FPS/完整时长不一致时都会失败。生成结果先写入独立临时目录后再发布；
+已完成且身份匹配的条目会直接复用，因此服务器中断、网络回传或本地渲染失败后可以安全
+重跑同一命令。脚本不会修改 GMR 仓库中的源码、配置、XML 或构建目录，实际使用的
+checkpoint、batch server、IK 与 MJCF SHA256 都会写入结果。
 """
 
 from __future__ import annotations
@@ -24,6 +28,7 @@ import hashlib
 import html
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -49,7 +54,9 @@ from gem.gmr_udp_bridge import SMP1PacketEncoder  # noqa: E402
 from gem.runtime.motion_streamer import SMPLMotion, load_smpl_motion  # noqa: E402
 from gem.runtime.robot_stream import GMRBatchClient  # noqa: E402
 from gem.smplx_gmr_reference import SMPLXGMRReference  # noqa: E402
+from gem.utils.music_features import extract_edge_baseline35  # noqa: E402
 from scripts.build_smpl_hq4_full_comparison import (  # noqa: E402
+    audio_duration,
     load_generated_body,
     mux_audio,
     probe_final_video,
@@ -63,13 +70,26 @@ EXPECTED_COUNTS = {
     "finedance": 30,
     "compas3d": 5,
 }
-DEFAULT_OUTPUT = Path("outputs/smpl_physics_v3_s100000_hq4_validation_20260826")
+DATASET_LABELS = {
+    "aistpp": "AIST++",
+    "aioz_gdance": "AIOZ-GDANCE",
+    "finedance": "FineDance",
+    "compas3d": "CoMPAS3D",
+}
+DEFAULT_OUTPUT = Path("outputs/smpl_physics_v3_s100000_hq4_train_full_20260826")
 DEFAULT_CHECKPOINT = Path(
     "outputs/gem_smpl_music_only_4set_manual_q1_physics_v3_100k/"
     "version_0/checkpoints/s100000.ckpt"
 )
 DEFAULT_GMR_ROOT = Path("/home/weili/GMR-CPP_e1jump_lowdpi")
-RENDER_CONTRACT = "smplx_bumi3_comparison.v1.camera_distance_2p2"
+DEFAULT_QUALITY_MANIFEST = Path(
+    "outputs/smpl_physics_v3_s100000_hq4_validation_20260826/"
+    "provenance/accepted_master.jsonl"
+)
+DEFAULT_AUDIO_ROOT = Path("data/server_music_wav_4set_all_20260818")
+SELECTION_CONTRACT = "genmo.smpl.physics_v3_hq4_train_full_visual_validation.v2"
+RESULT_CONTRACT = "genmo.smpl.physics_v3_hq4_train_full_visual_validation.result.v2"
+RENDER_CONTRACT = "smplx_bumi3_full_comparison.v2.camera_distance_2p2"
 
 
 def sha256_file(path: Path, block_size: int = 4 * 1024 * 1024) -> str:
@@ -105,13 +125,191 @@ def atomic_torch_save(path: Path, payload: Any) -> None:
         temporary.unlink(missing_ok=True)
 
 
+def source_audio_key(row: dict[str, Any]) -> str:
+    """把人工清单行映射到本地完整 WAV 的无后缀文件名。"""
+
+    dataset = str(row.get("dataset"))
+    if dataset == "aistpp":
+        key = str(row.get("music_id", "")).strip()
+    else:
+        feature_name = Path(str(row.get("music_feature_path", ""))).name
+        suffix = "_musicfeat_fps30.pt"
+        key = feature_name[: -len(suffix)] if feature_name.endswith(suffix) else ""
+    if not key or key in {".", ".."} or "/" in key or "\\" in key:
+        raise ValueError(f"无法从人工清单解析完整音频键：{row.get('review_id')}")
+    return key
+
+
+def select_train_quality_rows(
+    rows: list[dict[str, Any]], seed: int
+) -> list[dict[str, Any]]:
+    """只在 train/keep 内按真实音频去重，再用固定哈希顺序选足四库数量。"""
+
+    candidates: dict[tuple[str, str], dict[str, Any]] = {}
+    for row in rows:
+        dataset = str(row.get("dataset"))
+        if (
+            dataset not in EXPECTED_COUNTS
+            or row.get("decision") != "keep"
+            or row.get("split") != "train"
+        ):
+            continue
+        key = source_audio_key(row)
+        identity = (dataset, key)
+        previous = candidates.get(identity)
+        if previous is None or str(row.get("review_id")) < str(previous.get("review_id")):
+            candidates[identity] = row
+
+    selected: list[dict[str, Any]] = []
+    for dataset, count in EXPECTED_COUNTS.items():
+        available = [
+            (key, row)
+            for (row_dataset, key), row in candidates.items()
+            if row_dataset == dataset
+        ]
+        available.sort(
+            key=lambda value: hashlib.sha256(
+                f"{seed}:{dataset}:{value[0]}".encode()
+            ).hexdigest()
+        )
+        if len(available) < count:
+            raise ValueError(
+                f"{dataset} 的 train/keep 唯一音乐不足 {count}，实际 {len(available)}"
+            )
+        for dataset_index, (key, row) in enumerate(available[:count], start=1):
+            selected.append(
+                {
+                    "dataset": dataset,
+                    "dataset_label": DATASET_LABELS[dataset],
+                    "dataset_index": dataset_index,
+                    "id": f"{dataset}_{dataset_index:02d}",
+                    "music_key": key,
+                    "sample_id": str(row["sample_id"]),
+                    "split": "train",
+                    "quality_decision": "keep",
+                    "quality_manifest_review_id": str(row["review_id"]),
+                    "music_feature_relative_path": str(row["music_feature_path"]),
+                    "curated_feature_frames": int(row["music_num_frames"]),
+                }
+            )
+    for index, item in enumerate(selected):
+        item["seed"] = seed + index
+    return selected
+
+
+def resolve_source_audio(audio_root: Path, item: dict[str, Any]) -> Path:
+    """按四库真实命名约定解析人工训练样本对应的完整源 WAV。"""
+
+    dataset = str(item["dataset"])
+    directory = audio_root / dataset
+    if dataset == "aistpp":
+        directory = directory / "wav"
+    return directory / f"{item['music_key']}.wav"
+
+
+def prepare_selection(args: argparse.Namespace) -> dict[str, Any]:
+    """冻结 train/keep 完整音乐、全时长 EDGE35 与可跨服务器搬运的选择合同。"""
+
+    rows = [
+        json.loads(line)
+        for line in args.quality_manifest.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    items = select_train_quality_rows(rows, args.selection_seed)
+    for item in items:
+        source = resolve_source_audio(args.audio_root, item).resolve(strict=True)
+        source_hash = sha256_file(source)
+        audio = validation_audio(args, item)
+        audio.parent.mkdir(parents=True, exist_ok=True)
+        if not audio.is_file() or sha256_file(audio) != source_hash:
+            temporary = audio.with_name(f".{audio.name}.tmp-{os.getpid()}")
+            try:
+                shutil.copy2(source, temporary)
+                os.replace(temporary, audio)
+            finally:
+                temporary.unlink(missing_ok=True)
+        feature, extraction = extract_edge_baseline35(
+            audio, start_sec=0.0, duration_sec=None, target_fps=30
+        )
+        if feature.ndim != 2 or feature.shape[1] != 35 or feature.shape[0] < 2:
+            raise RuntimeError(f"{item['id']} 的完整 EDGE35 形状异常：{tuple(feature.shape)}")
+        feature = feature.detach().cpu().float().contiguous()
+        feature_path = validation_feature(args, item)
+        atomic_torch_save(feature_path, feature)
+        frames = int(feature.shape[0])
+        item.update(
+            {
+                "audio_path": str(source),
+                "full_audio_path": str(audio),
+                "full_audio_duration_sec": audio_duration(audio),
+                "full_audio_size_bytes": audio.stat().st_size,
+                "full_audio_sha256": source_hash,
+                "full_music_feature_path": str(feature_path),
+                "full_music_feature_sha256": sha256_file(feature_path),
+                "full_music_feature_shape": [frames, 35],
+                "full_music_feature_extraction": extraction,
+                "num_frames": frames,
+                "duration_sec": frames / 30.0,
+                "inference_condition": "完整源 WAV 从 0 秒到结尾提取 EDGE35，不截断、不循环、不外推",
+            }
+        )
+        print(
+            f"[准备] {item['id']} {item['music_key']}：{frames} 帧 / {frames / 30:.2f}s",
+            flush=True,
+        )
+    payload = {
+        "contract_version": SELECTION_CONTRACT,
+        "selection_policy": (
+            "仅人工评分 decision=keep 且 split=train；按数据集真实音频键去重；"
+            "同库按 selection_seed/dataset/music_key 的 SHA256 稳定排序"
+        ),
+        "selection_seed": args.selection_seed,
+        "clip_policy": "完整源 WAV，从 0 秒到结尾提取 EDGE35；不截断、不循环、不拉伸",
+        "requested_counts": EXPECTED_COUNTS,
+        "actual_counts": dict(Counter(item["dataset"] for item in items)),
+        "split_counts": dict(Counter(f"{item['dataset']}:train" for item in items)),
+        "quality_manifest": str(args.quality_manifest),
+        "quality_manifest_sha256": sha256_file(args.quality_manifest),
+        "audio_root": str(args.audio_root),
+        "items": items,
+    }
+    atomic_json(args.selection, payload)
+    return payload
+
+
+def item_frames(item: dict[str, Any]) -> int:
+    """统一读取 v2 完整音乐或历史 v1 固定片段的目标帧数。"""
+
+    if "num_frames" in item:
+        return int(item["num_frames"])
+    return int(item.get("validation_frames", -1))
+
+
+def item_audio_sha256(item: dict[str, Any]) -> str:
+    return str(item.get("full_audio_sha256", item.get("validation_audio_sha256", "")))
+
+
+def item_feature_sha256(item: dict[str, Any]) -> str:
+    return str(
+        item.get(
+            "full_music_feature_sha256",
+            item.get("validation_music_feature_sha256", ""),
+        )
+    )
+
+
 def build_parser() -> argparse.ArgumentParser:
     """构造服务器生成、本地 GMR 渲染和汇总共用的命令行。"""
 
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--stage", choices=("generate", "render", "summarize"), required=True)
+    parser.add_argument(
+        "--stage", choices=("prepare", "generate", "render", "summarize"), required=True
+    )
     parser.add_argument("--selection", type=Path)
     parser.add_argument("--output-root", type=Path, default=DEFAULT_OUTPUT)
+    parser.add_argument("--quality-manifest", type=Path, default=DEFAULT_QUALITY_MANIFEST)
+    parser.add_argument("--audio-root", type=Path, default=DEFAULT_AUDIO_ROOT)
+    parser.add_argument("--selection-seed", type=int, default=20260826)
     parser.add_argument("--ckpt", type=Path, default=DEFAULT_CHECKPOINT)
     parser.add_argument(
         "--exp", default="gem_smpl_music_only_4set_manual_q1_physics_v3_100k"
@@ -119,6 +317,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--checkpoint-step", type=int, default=100000)
     parser.add_argument("--ddim-steps", type=int, default=50)
     parser.add_argument("--cfg-scale", type=float, default=2.5)
+    parser.add_argument("--max-frames", type=int, default=30000)
+    parser.add_argument("--chunk-frames", type=int, default=600)
+    parser.add_argument("--chunk-overlap-frames", type=int, default=120)
     parser.add_argument("--shard-count", type=int, default=1)
     parser.add_argument("--shard-index", type=int, default=0)
     parser.add_argument("--only-id")
@@ -145,8 +346,15 @@ def resolve_args(args: argparse.Namespace) -> argparse.Namespace:
         else args.output_root / "selection.json"
     )
     args.ckpt = args.ckpt.expanduser().resolve()
-    if not args.selection.is_file():
+    args.quality_manifest = args.quality_manifest.expanduser().resolve()
+    args.audio_root = args.audio_root.expanduser().resolve()
+    if args.stage != "prepare" and not args.selection.is_file():
         raise FileNotFoundError(args.selection)
+    if args.stage == "prepare":
+        if not args.quality_manifest.is_file():
+            raise FileNotFoundError(args.quality_manifest)
+        if not args.audio_root.is_dir():
+            raise NotADirectoryError(args.audio_root)
     if args.stage == "generate" and not args.ckpt.is_file():
         raise FileNotFoundError(args.ckpt)
     if args.shard_count <= 0 or not 0 <= args.shard_index < args.shard_count:
@@ -155,6 +363,10 @@ def resolve_args(args: argparse.Namespace) -> argparse.Namespace:
         raise ValueError("--only-id 不能与多分片同时使用")
     if args.ddim_steps < 2 or args.checkpoint_step < 0:
         raise ValueError("DDIM step 至少为 2，checkpoint step 不能为负")
+    if args.max_frames <= 0 or args.chunk_frames <= 0:
+        raise ValueError("max/chunk frames 必须为正")
+    if not 0 <= args.chunk_overlap_frames < args.chunk_frames:
+        raise ValueError("chunk overlap 必须位于 [0, chunk_frames)")
     if args.width <= 0 or args.height <= 0:
         raise ValueError("渲染宽高必须为正")
     if args.reset_iterations <= 0 or args.fk_chunk_frames <= 0:
@@ -166,10 +378,12 @@ def resolve_args(args: argparse.Namespace) -> argparse.Namespace:
 
 
 def load_selection(args: argparse.Namespace) -> tuple[dict[str, Any], list[dict[str, Any]]]:
-    """验证冻结清单、四库数量、ID 和本次 20 秒音频。"""
+    """验证冻结清单、四库数量、训练划分与每首完整音乐身份。"""
 
     payload = json.loads(args.selection.read_text(encoding="utf-8"))
-    if payload.get("contract_version") != "genmo.smpl.physics_v3_hq4_visual_validation.v1":
+    contract = payload.get("contract_version")
+    legacy_contract = "genmo.smpl.physics_v3_hq4_visual_validation.v1"
+    if contract not in {SELECTION_CONTRACT, legacy_contract}:
         raise ValueError("selection contract_version 不匹配")
     items = payload.get("items")
     if not isinstance(items, list):
@@ -183,19 +397,32 @@ def load_selection(args: argparse.Namespace) -> tuple[dict[str, Any], list[dict[
     for item in items:
         if item.get("quality_decision") != "keep":
             raise ValueError(f"{item.get('id')} 未通过人工高质量 keep 门")
-        if int(item.get("validation_frames", -1)) != 600:
-            raise ValueError(f"{item.get('id')} 不是固定 600 帧验证")
+        if contract == SELECTION_CONTRACT and item.get("split") != "train":
+            raise ValueError(f"{item.get('id')} 不是训练集样本")
+        frames = item_frames(item)
+        if frames < 2 or frames > args.max_frames:
+            raise ValueError(
+                f"{item.get('id')} 帧数 {frames} 不在 [2,{args.max_frames}]"
+            )
         audio = validation_audio(args, item)
         if not audio.is_file():
             raise FileNotFoundError(audio)
-        expected_hash = str(item.get("validation_audio_sha256"))
+        expected_hash = item_audio_sha256(item)
         if sha256_file(audio) != expected_hash:
-            raise ValueError(f"{item.get('id')} 的 20 秒验证音频 SHA256 不匹配")
+            raise ValueError(f"{item.get('id')} 的完整音频 SHA256 不匹配")
         feature = validation_feature(args, item)
         if not feature.is_file():
             raise FileNotFoundError(feature)
-        if sha256_file(feature) != str(item.get("validation_music_feature_sha256")):
-            raise ValueError(f"{item.get('id')} 的冻结 EDGE35 SHA256 不匹配")
+        if sha256_file(feature) != item_feature_sha256(item):
+            raise ValueError(f"{item.get('id')} 的完整 EDGE35 SHA256 不匹配")
+        frozen = torch.load(feature, map_location="cpu", weights_only=True)
+        if not isinstance(frozen, torch.Tensor) or tuple(frozen.shape) != (frames, 35):
+            raise ValueError(
+                f"{item.get('id')} 的完整 EDGE35 应为 [{frames},35]，"
+                f"实际 {getattr(frozen, 'shape', None)}"
+            )
+        if not torch.isfinite(frozen).all():
+            raise ValueError(f"{item.get('id')} 的完整 EDGE35 含 NaN/Inf")
     if args.only_id is not None:
         requested = [item for item in items if item["id"] == args.only_id]
         if not requested:
@@ -206,13 +433,13 @@ def load_selection(args: argparse.Namespace) -> tuple[dict[str, Any], list[dict[
 
 
 def validation_audio(args: argparse.Namespace, item: dict[str, Any]) -> Path:
-    """按输出根目录解析可跨服务器搬运的验证 WAV。"""
+    """按输出根目录解析可跨服务器搬运的完整 WAV。"""
 
     return args.output_root / "audio" / item["dataset"] / f"{item['id']}.wav"
 
 
 def validation_feature(args: argparse.Namespace, item: dict[str, Any]) -> Path:
-    """解析由同一 20 秒 WAV 预先冻结、可跨机器复用的 EDGE35 tensor。"""
+    """解析由同一完整 WAV 冻结、可跨机器复用的 EDGE35 tensor。"""
 
     return args.output_root / "music_features" / item["dataset"] / f"{item['id']}.pt"
 
@@ -224,7 +451,7 @@ def artifact_dir(args: argparse.Namespace, item: dict[str, Any]) -> Path:
 def generation_is_complete(
     args: argparse.Namespace, item: dict[str, Any], directory: Path
 ) -> bool:
-    """只复用 checkpoint、种子、帧数和音频身份均匹配的生成结果。"""
+    """只复用 checkpoint、种子、动态帧数和完整音频身份均匹配的生成结果。"""
 
     report_path = directory / "demo_report.json"
     body_path = directory / "pred_body_params_global.pt"
@@ -235,15 +462,14 @@ def generation_is_complete(
     try:
         report = json.loads(report_path.read_text(encoding="utf-8"))
         sidecar = json.loads(sidecar_path.read_text(encoding="utf-8"))
+        frames = item_frames(item)
         return (
             int(report.get("checkpoint_global_step", -1)) == args.checkpoint_step
             and int(report.get("seed", -1)) == int(item["seed"])
-            and report.get("music_shape") == [600, 35]
-            and report.get("generated_shape") == [600, 151]
-            and sidecar.get("validation_audio_sha256")
-            == item["validation_audio_sha256"]
-            and sidecar.get("validation_music_feature_sha256")
-            == item["validation_music_feature_sha256"]
+            and report.get("music_shape") == [frames, 35]
+            and report.get("generated_shape") == [frames, 151]
+            and sidecar.get("audio_sha256") == item_audio_sha256(item)
+            and sidecar.get("music_feature_sha256") == item_feature_sha256(item)
             and sidecar.get("checkpoint_sha256") == args.checkpoint_sha256
         )
     except (OSError, ValueError, TypeError, RuntimeError):
@@ -256,13 +482,14 @@ def publish_smpl_wrapper(
     """把 demo 的纯 body 字典封装为 GMR 严格加载器使用的 SMPL artifact。"""
 
     body = load_generated_body(directory / "pred_body_params_global.pt")
-    if int(body["body_pose"].shape[0]) != 600:
-        raise ValueError(f"{item['id']} 的 SMPL 帧数不是 600")
+    frames = item_frames(item)
+    if int(body["body_pose"].shape[0]) != frames:
+        raise ValueError(f"{item['id']} 的 SMPL 帧数不是 {frames}")
     payload = {
         "body_params_global": body,
         "fps": 30.0,
-        "num_frames": 600,
-        "duration_sec": 20.0,
+        "num_frames": frames,
+        "duration_sec": frames / 30.0,
         "source": "music_only_physics_v3_s100000",
         "shape_mode": "zero",
         "audio_path": str(audio),
@@ -282,7 +509,7 @@ def publish_smpl_wrapper(
 
 
 def run_generation(args: argparse.Namespace, item: dict[str, Any]) -> None:
-    """在隔离 staging 目录运行一次 600 帧 PyTorch DDIM 生成。"""
+    """在隔离 staging 目录运行一次覆盖完整音乐的分块 PyTorch DDIM 生成。"""
 
     final = artifact_dir(args, item)
     if generation_is_complete(args, item, final):
@@ -296,6 +523,7 @@ def run_generation(args: argparse.Namespace, item: dict[str, Any]) -> None:
     log_dir = args.output_root / "logs" / "generation"
     log_dir.mkdir(parents=True, exist_ok=True)
     log_path = log_dir / f"{item['id']}.log"
+    frames = item_frames(item)
     command = [
         sys.executable,
         "-u",
@@ -303,13 +531,13 @@ def run_generation(args: argparse.Namespace, item: dict[str, Any]) -> None:
         "--music-embed",
         str(feature),
         "--num-frames",
-        "600",
+        str(frames),
         "--max-frames",
-        "600",
+        str(args.max_frames),
         "--chunk-frames",
-        "600",
+        str(args.chunk_frames),
         "--chunk-overlap-frames",
-        "120",
+        str(args.chunk_overlap_frames),
         "--ckpt",
         str(args.ckpt),
         "--exp",
@@ -351,11 +579,10 @@ def run_generation(args: argparse.Namespace, item: dict[str, Any]) -> None:
                 "selection_id": item["id"],
                 "dataset": item["dataset"],
                 "music_key": item["music_key"],
-                "validation_audio_sha256": item["validation_audio_sha256"],
-                "validation_music_feature": str(feature),
-                "validation_music_feature_sha256": item[
-                    "validation_music_feature_sha256"
-                ],
+                "split": item["split"],
+                "audio_sha256": item_audio_sha256(item),
+                "music_feature": str(feature),
+                "music_feature_sha256": item_feature_sha256(item),
                 "checkpoint": str(args.ckpt),
                 "checkpoint_sha256": args.checkpoint_sha256,
                 "checkpoint_global_step": args.checkpoint_step,
@@ -363,8 +590,12 @@ def run_generation(args: argparse.Namespace, item: dict[str, Any]) -> None:
                 "seed": item["seed"],
                 "ddim_steps": args.ddim_steps,
                 "cfg_scale": args.cfg_scale,
-                "frames": 600,
+                "frames": frames,
                 "fps": 30,
+                "duration_sec": frames / 30.0,
+                "complete_audio": True,
+                "chunk_frames": args.chunk_frames,
+                "chunk_overlap_frames": args.chunk_overlap_frames,
                 "motion_sanity": report.get("motion_sanity"),
                 "final_pass": report.get("final_pass"),
                 "wall_seconds": time.monotonic() - started,
@@ -608,8 +839,8 @@ def render_bumi(
 ) -> int:
     """用跟随根节点的 MuJoCo 相机把 BUMI3 逐帧流式写入 ffmpeg。"""
 
-    if qpos.shape != (600, 28):
-        raise ValueError(f"BUMI qpos 应为 [600,28]，实际 {qpos.shape}")
+    if qpos.ndim != 2 or qpos.shape[0] < 2 or qpos.shape[1] != 28:
+        raise ValueError(f"BUMI qpos 应为 [T,28] 且 T>=2，实际 {qpos.shape}")
     data = mujoco.MjData(model)
     renderer = mujoco.Renderer(model, height=height, width=width)
     camera = mujoco.MjvCamera()
@@ -698,7 +929,7 @@ def render_item(
     runner: OfflineGMRRunner,
     joint_names: list[str],
 ) -> None:
-    """完成单条 GMR、两种渲染、音频封装、对照视频和媒体硬校验。"""
+    """完成单首完整音乐的 GMR、两种渲染、音频封装、对照视频和硬校验。"""
 
     directory = artifact_dir(args, item)
     if not (directory / "generation.json").is_file():
@@ -709,6 +940,8 @@ def render_item(
     smpl_output = video_dir / f"{item['id']}_smpl.mp4"
     bumi_output = video_dir / f"{item['id']}_bumi.mp4"
     comparison_output = video_dir / f"{item['id']}_comparison.mp4"
+    source_motion = directory / "smpl_params.pt"
+    source_motion_sha = sha256_file(source_motion)
     if sidecar_path.is_file() and all(
         path.is_file() for path in (smpl_output, bumi_output, comparison_output)
     ):
@@ -716,11 +949,18 @@ def render_item(
         if (
             sidecar.get("selection_id") == item["id"]
             and sidecar.get("render_contract") == RENDER_CONTRACT
+            and int(sidecar.get("frames", -1)) == item_frames(item)
+            and sidecar.get("audio_sha256") == item_audio_sha256(item)
+            and sidecar.get("source_motion_sha256") == source_motion_sha
         ):
             print(f"[渲染] 复用 {item['id']}", flush=True)
             return
     started = time.monotonic()
+    frames = item_frames(item)
+    duration = frames / 30.0
     qpos, gmr_payload = load_or_run_gmr(args, item, runner, joint_names)
+    if tuple(qpos.shape) != (frames, 28):
+        raise ValueError(f"{item['id']} 的 GMR qpos 应为 [{frames},28]，实际 {qpos.shape}")
     generated_body = load_generated_body(directory / "pred_body_params_global.pt")
     work_root = args.output_root / "_render_work"
     work_root.mkdir(parents=True, exist_ok=True)
@@ -742,13 +982,13 @@ def render_item(
             work / "smpl_normals.f32",
         )
         render_bumi(robot_model, qpos, bumi_silent, args.width, args.height)
-        mux_audio(smpl_silent, audio, smpl_candidate, 20.0)
-        mux_audio(bumi_silent, audio, bumi_candidate, 20.0)
+        mux_audio(smpl_silent, audio, smpl_candidate, duration)
+        mux_audio(bumi_silent, audio, bumi_candidate, duration)
         make_comparison(smpl_candidate, bumi_candidate, comparison_candidate)
         media = {
-            "smpl": probe_final_video(smpl_candidate, 600),
-            "bumi": probe_final_video(bumi_candidate, 600),
-            "comparison": probe_final_video(comparison_candidate, 600),
+            "smpl": probe_final_video(smpl_candidate, frames),
+            "bumi": probe_final_video(bumi_candidate, frames),
+            "comparison": probe_final_video(comparison_candidate, frames),
         }
         os.replace(smpl_candidate, smpl_output)
         os.replace(bumi_candidate, bumi_output)
@@ -758,9 +998,13 @@ def render_item(
         "render_contract": RENDER_CONTRACT,
         "dataset": item["dataset"],
         "music_key": item["music_key"],
-        "frames": 600,
+        "split": item["split"],
+        "frames": frames,
         "fps": 30,
-        "duration_sec": 20.0,
+        "duration_sec": duration,
+        "complete_audio": True,
+        "audio_sha256": item_audio_sha256(item),
+        "source_motion_sha256": source_motion_sha,
         "smpl_video": str(smpl_output.relative_to(args.output_root)),
         "bumi_video": str(bumi_output.relative_to(args.output_root)),
         "comparison_video": str(comparison_output.relative_to(args.output_root)),
@@ -794,32 +1038,49 @@ def render_item(
 
 
 def write_index(args: argparse.Namespace, items: list[dict[str, Any]]) -> None:
-    """生成按数据集分组、默认展示横向对照视频的本地 HTML 索引。"""
+    """生成按数据集分组、一行严格只放一首完整音乐对照视频的 HTML。"""
 
     groups: list[str] = []
     for dataset in EXPECTED_COUNTS:
         cards: list[str] = []
         for item in [value for value in items if value["dataset"] == dataset]:
             media = f"videos/{quote(dataset)}/{quote(item['id'])}_comparison.mp4"
+            frames = item_frames(item)
             cards.append(
-                "<article><h3>"
+                "<article class='song'><header><div><span class='dataset'>"
+                + html.escape(DATASET_LABELS[dataset])
+                + "</span><h3>"
                 + html.escape(f"{item['id']} · {item['music_key']}")
-                + "</h3><video controls preload='metadata' src='"
+                + "</h3></div><span class='duration'>"
+                + html.escape(f"{frames:,} 帧 · {frames / 30:.2f} 秒")
+                + "</span></header><video controls preload='metadata' src='"
                 + media
-                + "'></video><p>左：SMPL-X　右：BUMI3　划分："
+                + "'></video><p>左：SMPL-X　右：BUMI3　数据划分："
                 + html.escape(str(item.get("split")))
-                + "</p></article>"
+                + "；完整源音乐从头到尾生成，无 20 秒截断。</p></article>"
             )
-        groups.append(f"<h2>{html.escape(dataset)}</h2><section>{''.join(cards)}</section>")
+        groups.append(
+            f"<section class='dataset-group'><h2>{html.escape(DATASET_LABELS[dataset])}"
+            f"（{len(cards)} 首）</h2>{''.join(cards)}</section>"
+        )
     page = """<!doctype html><html lang='zh-CN'><head><meta charset='utf-8'>
 <meta name='viewport' content='width=device-width,initial-scale=1'>
-<title>physics_v3 s100000：SMPL-X / BUMI3 验证</title>
-<style>body{font-family:sans-serif;margin:24px;background:#f5f5f5;color:#222}section{display:grid;
-grid-template-columns:repeat(auto-fit,minmax(420px,1fr));gap:18px}article{background:white;padding:12px;
-border-radius:10px;box-shadow:0 1px 5px #bbb}video{width:100%;background:#111}h2{margin-top:32px}
-p{color:#555}</style></head><body><h1>physics_v3 s100000：SMPL-X / BUMI3</h1>
-<p>每条 20 秒、30 FPS；左侧完整 SMPL-X 网格，右侧真实 GMR-CPP 重定向 BUMI3。</p>"""
-    page += "".join(groups) + "</body></html>\n"
+<title>physics_v3 s100000：训练集完整音乐 SMPL-X / BUMI3 验证</title>
+<style>:root{--bg:#0a0d13;--panel:#141923;--line:#2a3342;--text:#eef2f8;--muted:#a9b3c2;
+--blue:#73a9ff}*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);
+font:15px/1.55 system-ui,"Noto Sans SC",sans-serif}main{width:min(96vw,1600px);margin:auto;padding:28px 0 60px}
+.hero{background:linear-gradient(135deg,#172544,#141923);border:1px solid var(--line);border-radius:18px;
+padding:24px 28px}.hero h1{margin:0 0 8px}.hero p,.song p{color:var(--muted)}.dataset-group{display:block}
+h2{margin:38px 0 14px}.song{display:block;width:100%;background:var(--panel);border:1px solid var(--line);
+border-radius:16px;padding:18px;margin:0 0 22px}header{display:flex;justify-content:space-between;align-items:end;
+gap:18px;margin-bottom:12px}.dataset{font-size:12px;color:var(--blue)}h3{font-size:21px;margin:2px 0 0}
+.duration{color:var(--muted);white-space:nowrap}video{display:block;width:100%;aspect-ratio:32/9;
+background:#020305;border-radius:11px}.song p{margin:10px 0 0}@media(max-width:760px){main{width:100%;padding:12px}
+.hero,.song{border-radius:12px;padding:13px}header{display:block}.duration{display:block;margin-top:5px}}
+</style></head><body><main><section class='hero'><h1>physics_v3 s100000：训练集完整音乐 SMPL-X / BUMI3</h1>
+<p>共 60 首人工高质量训练集音乐。每行只展示一首横向对照视频；左侧为完整 SMPL-X 网格，
+右侧为真实 GMR-CPP 重定向 BUMI3。全部按源 WAV 完整时长生成，30 FPS，不截取 20 秒。</p></section>"""
+    page += "".join(groups) + "</main></body></html>\n"
     (args.output_root / "index.html").write_text(page, encoding="utf-8")
 
 
@@ -839,7 +1100,7 @@ def summarize(args: argparse.Namespace, selection: dict[str, Any]) -> dict[str, 
             raise ValueError(f"渲染 sidecar 身份不匹配：{path}")
         completed.append({**item, **sidecar})
     payload = {
-        "contract_version": "genmo.smpl.physics_v3_hq4_visual_validation.result.v1",
+        "contract_version": RESULT_CONTRACT,
         "selection": str(args.selection),
         "selection_sha256": sha256_file(args.selection),
         "requested_count": len(items),
@@ -858,9 +1119,13 @@ def summarize(args: argparse.Namespace, selection: dict[str, Any]) -> dict[str, 
 
 
 def main(argv: list[str] | None = None) -> int:
-    """按指定阶段执行可续跑的 60 条正式验证。"""
+    """按指定阶段执行可续跑的 60 首训练集完整音乐正式验证。"""
 
     args = resolve_args(build_parser().parse_args(argv))
+    if args.stage == "prepare":
+        prepared = prepare_selection(args)
+        print(f"[准备] 已冻结 {len(prepared['items'])} 首完整训练集音乐：{args.selection}")
+        return 0
     selection, requested = load_selection(args)
     if args.stage == "generate":
         args.checkpoint_sha256 = sha256_file(args.ckpt)
