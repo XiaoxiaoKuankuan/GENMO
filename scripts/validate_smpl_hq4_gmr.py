@@ -330,7 +330,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--batch-server", type=Path)
     parser.add_argument("--ik-config", type=Path)
     parser.add_argument("--robot-xml", type=Path)
-    parser.add_argument("--ground-clearance", type=float, default=0.05)
+    parser.add_argument("--ground-clearance", type=float, default=0.0)
+    parser.add_argument("--source-ground-clearance", type=float, default=0.0)
     parser.add_argument("--reset-iterations", type=int, default=1000)
     parser.add_argument("--fk-chunk-frames", type=int, default=128)
     return parser
@@ -373,6 +374,11 @@ def resolve_args(args: argparse.Namespace) -> argparse.Namespace:
         raise ValueError("GMR reset iteration 和 FK chunk 必须为正")
     if not np.isfinite(args.ground_clearance) or args.ground_clearance < 0:
         raise ValueError("GMR ground clearance 必须是有限非负数")
+    if (
+        not np.isfinite(args.source_ground_clearance)
+        or args.source_ground_clearance < 0
+    ):
+        raise ValueError("GMR source ground clearance 必须是有限非负数")
     args.output_root.mkdir(parents=True, exist_ok=True)
     return args
 
@@ -661,6 +667,8 @@ class OfflineGMRRunner:
             str(paths["ik"]),
             "--ground-clearance",
             f"{args.ground_clearance:.9g}",
+            "--source-ground-clearance",
+            f"{args.source_ground_clearance:.9g}",
             "--offset-to-ground",
         ]
         self.command = command
@@ -762,6 +770,10 @@ def load_or_run_gmr(
             payload.get("source_motion_sha256") == source_hash
             and all(payload.get(key) == value for key, value in asset_hashes.items())
             and payload.get("joint_names") == joint_names
+            and payload.get("ground_clearance_m") == args.ground_clearance
+            and payload.get("source_ground_clearance_m")
+            == args.source_ground_clearance
+            and payload.get("reset_iterations") == args.reset_iterations
         ):
             return torch.as_tensor(payload["qpos"]).numpy(), payload
     motion = load_smpl_motion(source, shape_mode="zero", min_frames=2)
@@ -782,6 +794,7 @@ def load_or_run_gmr(
         "gmr_xml": str(runner.paths["xml"]),
         **asset_hashes,
         "ground_clearance_m": args.ground_clearance,
+        "source_ground_clearance_m": args.source_ground_clearance,
         "reset_iterations": args.reset_iterations,
         "solver_elapsed_us": {
             "mean": float(np.mean(solve_times)),
@@ -952,6 +965,16 @@ def render_item(
             and int(sidecar.get("frames", -1)) == item_frames(item)
             and sidecar.get("audio_sha256") == item_audio_sha256(item)
             and sidecar.get("source_motion_sha256") == source_motion_sha
+            and sidecar.get("gmr", {}).get("gmr_batch_server_sha256")
+            == sha256_file(runner.paths["batch_server"])
+            and sidecar.get("gmr", {}).get("gmr_ik_config_sha256")
+            == sha256_file(runner.paths["ik"])
+            and sidecar.get("gmr", {}).get("gmr_xml_sha256")
+            == sha256_file(runner.paths["xml"])
+            and sidecar.get("gmr", {}).get("ground_clearance_m")
+            == args.ground_clearance
+            and sidecar.get("gmr", {}).get("source_ground_clearance_m")
+            == args.source_ground_clearance
         ):
             print(f"[渲染] 复用 {item['id']}", flush=True)
             return
@@ -1021,6 +1044,7 @@ def render_item(
                 "gmr_ik_config_sha256",
                 "gmr_xml_sha256",
                 "ground_clearance_m",
+                "source_ground_clearance_m",
                 "reset_iterations",
                 "solver_elapsed_us",
             )
