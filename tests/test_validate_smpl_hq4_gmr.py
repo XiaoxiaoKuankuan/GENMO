@@ -105,3 +105,9 @@ def test_full_music_index_uses_one_song_per_row(tmp_path: Path) -> None:
 def test_dynamic_frame_contract_keeps_legacy_read_compatibility() -> None:
     assert target.item_frames({"num_frames": 4_321}) == 4_321
     assert target.item_frames({"validation_frames": 600}) == 600
+
+
+def test_contact_render_defaults_do_not_lift_the_source_floor() -> None:
+    args = target.build_parser().parse_args(["--stage", "render"])
+    assert args.ground_clearance == 0.0
+    assert args.source_ground_clearance == 0.0
