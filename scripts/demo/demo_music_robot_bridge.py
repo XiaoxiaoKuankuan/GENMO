@@ -68,7 +68,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--gmr-binary", type=Path)
     parser.add_argument("--ik-config", type=Path)
     parser.add_argument("--robot-xml", type=Path)
-    parser.add_argument("--ground-clearance", type=float, default=0.05)
+    parser.add_argument("--ground-clearance", type=float, default=0.04)
     parser.add_argument(
         "--gmr-vis",
         action="store_true",

@@ -40,6 +40,12 @@ from scripts.demo.demo_music_robot_bridge import (
     validate_args as validate_bridge_args,
 )
 from scripts.demo.stream_smpl_params_to_gmt import _align_action_to_idle, parse_args
+from scripts.export_smplx_to_bumi3_offline_npz import (
+    build_parser as build_offline_npz_parser,
+)
+from scripts.retarget_smplx_to_bumi3_capture import (
+    build_parser as build_capture_parser,
+)
 
 
 def make_qpos(num_frames: int = 200, fps: float = 50.0) -> np.ndarray:
@@ -344,6 +350,7 @@ def test_cli_locks_protocol_to_50_hz() -> None:
     args = parse_args(["--motion", "motion.pt"])
     assert args.publish_fps == 50.0
     assert args.redis_key == "gmt_online_frame_bumi"
+    assert args.ground_clearance == 0.04
     with pytest.raises(ValueError, match="fixed"):
         parse_args(["--motion", "motion.pt", "--publish_fps", "30"])
 
@@ -352,9 +359,21 @@ def test_music_robot_bridge_defaults_to_small_idle_arm_opening() -> None:
     args = build_bridge_parser().parse_args([])
     validate_bridge_args(args)
     assert args.idle_arm_open_degrees == 10.0
+    assert args.ground_clearance == 0.04
     args.idle_arm_open_degrees = 45.1
     with pytest.raises(ValueError, match="idle-arm-open-degrees"):
         validate_bridge_args(args)
+
+
+def test_offline_bumi_retarget_defaults_match_realtime_clearance() -> None:
+    capture = build_capture_parser().parse_args(
+        ["--motion", "motion.pt", "--output-dir", "capture"]
+    )
+    offline_npz = build_offline_npz_parser().parse_args(
+        ["--motion", "motion.pt", "--output", "motion.npz"]
+    )
+    assert capture.ground_clearance == 0.04
+    assert offline_npz.ground_clearance == 0.04
 
 
 def test_packet_constant_contract_dimensions() -> None:

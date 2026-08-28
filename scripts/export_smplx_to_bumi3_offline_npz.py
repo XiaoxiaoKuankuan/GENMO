@@ -88,7 +88,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--batch-server", type=Path)
     parser.add_argument("--omg-root", type=Path, default=DEFAULT_OMG_ROOT)
     parser.add_argument("--kinematics", type=Path)
-    parser.add_argument("--ground-clearance", type=float, default=0.05)
+    parser.add_argument("--ground-clearance", type=float, default=0.04)
     parser.add_argument("--reset-iterations", type=int, default=1000)
     parser.add_argument("--fk-chunk-frames", type=int, default=256)
     parser.add_argument(

@@ -7,7 +7,7 @@
 #
 # 当前 NPZ 不包含 legacy 的 torso/hand virtual body。手部原本只用于诊断，不参与
 # 决策；torso 则使用左右 shoulder（l/r_arm_pitch_link）世界高度均值作为可审计代理。
-# GMR 导出采用 --offset-to-ground --ground-clearance 0.05，不能再使用 legacy 的
+# GMR 导出采用 --offset-to-ground --ground-clearance 0.04，不能再使用 legacy 的
 # “所有 body origin 全局最小值必须等于 0”门禁，因此这里只记录 body origin 最低点，
 # 不用它单独拒绝动作。该检查是离线运动学/动力学预筛选，不等价于 Isaac-Lab 物理
 # rollout 或 SONIC 策略可跟踪性验证。

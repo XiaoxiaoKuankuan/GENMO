@@ -10,7 +10,9 @@ GPU 并行执行。``render`` 阶段在本地加载指定 GMR-CPP 仓库的真�
 ``smplx_bumi3_batch_server``、IK JSON 与 BUMI3 MJCF，逐帧执行 SMPL-X FK、SMP1 编码
 和同步 C++ IK，得到 MuJoCo 原生顺序的 ``qpos[T,28]``。随后分别流式渲染完整
 SMPL-X 表面网格和 BUMI3 MuJoCo 机器人，不在内存中堆积整段 RGB，并为两段视频封装
-同一首完整音乐。程序还生成横向对照视频、每条 sidecar、全局 summary 与 HTML 索引；
+同一首完整音乐。只更新 GMR 时，程序会用曲目身份、人体动作、完整音频与既有文件哈希
+共同确认 SMPL 视频未变化，再只重算 BUMI 和横向对照视频。程序还生成每条 sidecar、
+全局 summary 与 HTML 索引；
 网页严格一行一首、播放器使用整行宽度，避免多列卡片把横向对比视频压得过小。
 
 所有正式边界均为硬校验：train/keep 来源、四库数量、完整音频及 EDGE35 哈希与帧数、
@@ -934,6 +936,42 @@ def make_comparison(smpl: Path, bumi: Path, output: Path) -> None:
         raise RuntimeError(f"SMPL/BUMI 对照视频编码失败：{result.stderr.strip()}")
 
 
+def can_reuse_smpl_video(
+    sidecar_path: Path,
+    smpl_output: Path,
+    output_root: Path,
+    item: dict[str, Any],
+    source_motion_sha: str,
+) -> bool:
+    """确认旧 SMPL 视频与当前人体动作、完整音乐和渲染合同完全相同。
+
+    这里故意不检查 GMR 二进制、IK 配置或机器人 XML，因为它们只会改变 BUMI 一侧。
+    旧 sidecar 记录的 SMPL 哈希还必须与磁盘文件重新计算的哈希一致，防止误复用被替换、
+    截断或属于其他曲目的文件；编码、帧率与完整时长随后仍由 ``probe_final_video`` 硬校验。
+    """
+
+    if not sidecar_path.is_file() or not smpl_output.is_file():
+        return False
+    try:
+        sidecar = json.loads(sidecar_path.read_text(encoding="utf-8"))
+        expected_relative_path = str(smpl_output.relative_to(output_root))
+        media = sidecar.get("media", {}).get("smpl", {})
+        return bool(
+            sidecar.get("selection_id") == item["id"]
+            and sidecar.get("render_contract") == RENDER_CONTRACT
+            and int(sidecar.get("frames", -1)) == item_frames(item)
+            and sidecar.get("fps") == 30
+            and sidecar.get("complete_audio") is True
+            and sidecar.get("audio_sha256") == item_audio_sha256(item)
+            and sidecar.get("source_motion_sha256") == source_motion_sha
+            and sidecar.get("smpl_video") == expected_relative_path
+            and isinstance(media.get("sha256"), str)
+            and media["sha256"] == sha256_file(smpl_output)
+        )
+    except (json.JSONDecodeError, OSError, TypeError, ValueError):
+        return False
+
+
 def render_item(
     args: argparse.Namespace,
     item: dict[str, Any],
@@ -978,13 +1016,26 @@ def render_item(
         ):
             print(f"[渲染] 复用 {item['id']}", flush=True)
             return
+    reuse_smpl = can_reuse_smpl_video(
+        sidecar_path,
+        smpl_output,
+        args.output_root,
+        item,
+        source_motion_sha,
+    )
     started = time.monotonic()
     frames = item_frames(item)
     duration = frames / 30.0
     qpos, gmr_payload = load_or_run_gmr(args, item, runner, joint_names)
     if tuple(qpos.shape) != (frames, 28):
         raise ValueError(f"{item['id']} 的 GMR qpos 应为 [{frames},28]，实际 {qpos.shape}")
-    generated_body = load_generated_body(directory / "pred_body_params_global.pt")
+    generated_body = (
+        None
+        if reuse_smpl
+        else load_generated_body(directory / "pred_body_params_global.pt")
+    )
+    if not reuse_smpl and body_model is None:
+        raise RuntimeError(f"{item['id']} 需要重画 SMPL，但人体模型尚未加载")
     work_root = args.output_root / "_render_work"
     work_root.mkdir(parents=True, exist_ok=True)
     audio = validation_audio(args, item)
@@ -995,25 +1046,33 @@ def render_item(
         smpl_candidate = work / "smpl.mp4"
         bumi_candidate = work / "bumi.mp4"
         comparison_candidate = work / "comparison.mp4"
-        render_smpl_mesh(
-            body_model,
-            generated_body,
-            smpl_silent,
-            args.width,
-            args.height,
-            work / "smpl_vertices.f32",
-            work / "smpl_normals.f32",
-        )
+        if reuse_smpl:
+            smpl_for_comparison = smpl_output
+            smpl_media = probe_final_video(smpl_output, frames)
+        else:
+            assert generated_body is not None
+            render_smpl_mesh(
+                body_model,
+                generated_body,
+                smpl_silent,
+                args.width,
+                args.height,
+                work / "smpl_vertices.f32",
+                work / "smpl_normals.f32",
+            )
+            mux_audio(smpl_silent, audio, smpl_candidate, duration)
+            smpl_for_comparison = smpl_candidate
+            smpl_media = probe_final_video(smpl_candidate, frames)
         render_bumi(robot_model, qpos, bumi_silent, args.width, args.height)
-        mux_audio(smpl_silent, audio, smpl_candidate, duration)
         mux_audio(bumi_silent, audio, bumi_candidate, duration)
-        make_comparison(smpl_candidate, bumi_candidate, comparison_candidate)
+        make_comparison(smpl_for_comparison, bumi_candidate, comparison_candidate)
         media = {
-            "smpl": probe_final_video(smpl_candidate, frames),
+            "smpl": smpl_media,
             "bumi": probe_final_video(bumi_candidate, frames),
             "comparison": probe_final_video(comparison_candidate, frames),
         }
-        os.replace(smpl_candidate, smpl_output)
+        if not reuse_smpl:
+            os.replace(smpl_candidate, smpl_output)
         os.replace(bumi_candidate, bumi_output)
         os.replace(comparison_candidate, comparison_output)
     sidecar = {
@@ -1026,6 +1085,7 @@ def render_item(
         "fps": 30,
         "duration_sec": duration,
         "complete_audio": True,
+        "smpl_reused_for_gmr_update": reuse_smpl,
         "audio_sha256": item_audio_sha256(item),
         "source_motion_sha256": source_motion_sha,
         "smpl_video": str(smpl_output.relative_to(args.output_root)),
@@ -1058,7 +1118,11 @@ def render_item(
     ):
         sidecar["media"][name]["sha256"] = sha256_file(path)
     atomic_json(sidecar_path, sidecar)
-    print(f"[渲染] 完成 {item['id']}，耗时 {sidecar['wall_seconds']:.1f}s", flush=True)
+    reuse_label = "复用 SMPL，仅更新 BUMI/对照" if reuse_smpl else "完整重画"
+    print(
+        f"[渲染] 完成 {item['id']}（{reuse_label}），耗时 {sidecar['wall_seconds']:.1f}s",
+        flush=True,
+    )
 
 
 def write_index(args: argparse.Namespace, items: list[dict[str, Any]]) -> None:

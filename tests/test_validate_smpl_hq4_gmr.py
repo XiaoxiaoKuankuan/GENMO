@@ -10,6 +10,7 @@ qpos 与 H.264/AAC 媒体验收仍由生产流水线执行并记录在结果 sid
 
 from __future__ import annotations
 
+import json
 from collections import Counter
 from pathlib import Path
 from types import SimpleNamespace
@@ -111,3 +112,52 @@ def test_contact_render_defaults_do_not_lift_the_source_floor() -> None:
     args = target.build_parser().parse_args(["--stage", "render"])
     assert args.ground_clearance == 0.0
     assert args.source_ground_clearance == 0.0
+
+
+def test_smpl_video_reuse_ignores_gmr_identity_but_checks_source_and_media(
+    tmp_path: Path,
+) -> None:
+    output_root = tmp_path / "delivery"
+    video_dir = output_root / "videos" / "finedance"
+    video_dir.mkdir(parents=True)
+    smpl_output = video_dir / "finedance_01_smpl.mp4"
+    smpl_output.write_bytes(b"unchanged-smpl-with-full-audio")
+    sidecar_path = video_dir / "finedance_01.json"
+    item = {
+        "id": "finedance_01",
+        "num_frames": 1_800,
+        "full_audio_sha256": "audio-current",
+    }
+    sidecar = {
+        "selection_id": item["id"],
+        "render_contract": target.RENDER_CONTRACT,
+        "frames": 1_800,
+        "fps": 30,
+        "complete_audio": True,
+        "audio_sha256": "audio-current",
+        "source_motion_sha256": "motion-current",
+        "smpl_video": "videos/finedance/finedance_01_smpl.mp4",
+        "media": {"smpl": {"sha256": target.sha256_file(smpl_output)}},
+        "gmr": {
+            "gmr_batch_server_sha256": "deliberately-stale-binary",
+            "gmr_ik_config_sha256": "deliberately-stale-config",
+        },
+    }
+    sidecar_path.write_text(json.dumps(sidecar), encoding="utf-8")
+
+    assert target.can_reuse_smpl_video(
+        sidecar_path, smpl_output, output_root, item, "motion-current"
+    )
+
+    sidecar["source_motion_sha256"] = "another-motion"
+    sidecar_path.write_text(json.dumps(sidecar), encoding="utf-8")
+    assert not target.can_reuse_smpl_video(
+        sidecar_path, smpl_output, output_root, item, "motion-current"
+    )
+
+    sidecar["source_motion_sha256"] = "motion-current"
+    sidecar_path.write_text(json.dumps(sidecar), encoding="utf-8")
+    smpl_output.write_bytes(b"tampered-or-truncated-video")
+    assert not target.can_reuse_smpl_video(
+        sidecar_path, smpl_output, output_root, item, "motion-current"
+    )

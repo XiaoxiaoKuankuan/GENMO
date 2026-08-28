@@ -96,7 +96,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--idle_motion", type=Path)
     parser.add_argument("--cache_root", type=Path, default=Path("outputs/gmr_bumi_cache"))
     parser.add_argument("--capture_port", type=int, default=17016)
-    parser.add_argument("--ground_clearance", type=float, default=0.05)
+    parser.add_argument("--ground_clearance", type=float, default=0.04)
     parser.add_argument("--redis_host", default="127.0.0.1")
     parser.add_argument("--redis_port", type=int, default=6379)
     parser.add_argument("--redis_db", type=int, default=0)
