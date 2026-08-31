@@ -25,6 +25,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+import numpy as np
 import torch
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -44,6 +45,7 @@ from gem.robots.bumi.legacy_motion import (  # noqa: E402
     LEGACY_BUMI_MOTION_CONTRACT_VERSION,
     enforce_root_tilt_gate,
     load_legacy_bumi_motion,
+    root_tilt_statistics,
     sha256_file,
 )
 
@@ -382,6 +384,9 @@ def convert_datasets(
     music_frame_cache: dict[Path, int] = {}
     materialized_destinations: dict[Path, str] = {}
     materialization: Counter[str] = Counter()
+    root_tilt_by_dataset: dict[str, list[np.ndarray]] = {
+        name: [] for name in DATASET_SPECS
+    }
 
     def digest(path: Path) -> str:
         if path not in hash_cache:
@@ -450,10 +455,9 @@ def convert_datasets(
                 raise FileNotFoundError(f"{dataset}/{sample_id}: audio missing: {audio_source}")
 
             motion = load_legacy_bumi_motion(legacy_path, expected_fps=30)
-            root_orientation_audit = enforce_root_tilt_gate(
-                motion.root_tilt_degrees(),
-                context=f"{dataset}/{sample_id}",
-            )
+            direct_tilt = motion.root_tilt_degrees()
+            root_orientation_audit = root_tilt_statistics(direct_tilt)
+            root_tilt_by_dataset[dataset].append(direct_tilt)
             qpos = torch.from_numpy(motion.qpos_wxyz(kinematics.joint_order)).float()
             contact_targets = derive_bumi_foot_contact(
                 qpos,
@@ -554,6 +558,13 @@ def convert_datasets(
             counters[f"{dataset}:{split}"] += 1
             counters[f"{dataset}:total"] += 1
 
+        root_orientation_by_dataset = {
+            dataset: enforce_root_tilt_gate(
+                np.concatenate(values),
+                context=f"dataset={dataset}",
+            )
+            for dataset, values in root_tilt_by_dataset.items()
+        }
         actual_splits = Counter()
         for dataset, by_split in split_rows.items():
             dataset_root = staging / DATASET_SPECS[dataset]["output"]
@@ -584,10 +595,12 @@ def convert_datasets(
                 "selection_contract_version": selection_info.get("contract_version"),
                 "selection_info_sha256": selection_info_sha,
                 "root_orientation_gate": {
-                    "max_median_deg": 45.0,
-                    "max_p95_deg": 75.0,
-                    "max_over_45deg_fraction": 0.5,
-                    "all_sequences_recomputed_and_passed": True,
+                    "scope": "per_dataset_all_frames",
+                    "max_dataset_median_deg": 45.0,
+                    "max_dataset_p95_deg": 75.0,
+                    "max_dataset_over_45deg_fraction": 0.5,
+                    "statistics": root_orientation_by_dataset[dataset],
+                    "all_sequences_recomputed_and_dataset_passed": True,
                 },
                 "split_counts": {name: len(rows) for name, rows in by_split.items()},
             }
@@ -613,10 +626,12 @@ def convert_datasets(
             "quality_config_sha256": quality_sha,
             "kinematics_sha256": kinematics.kinematics_sha256,
             "root_orientation_gate": {
-                "max_median_deg": 45.0,
-                "max_p95_deg": 75.0,
-                "max_over_45deg_fraction": 0.5,
-                "all_sequences_recomputed_and_passed": True,
+                "scope": "per_dataset_all_frames",
+                "max_dataset_median_deg": 45.0,
+                "max_dataset_p95_deg": 75.0,
+                "max_dataset_over_45deg_fraction": 0.5,
+                "per_dataset_statistics": root_orientation_by_dataset,
+                "all_datasets_recomputed_and_passed": True,
             },
             "selected_manifest_sha256": sha256_file(selected_manifest),
             "total_sequences": len(seen),

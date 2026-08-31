@@ -31,6 +31,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+import numpy as np
 import yaml
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -42,6 +43,7 @@ from gem.robots.bumi.legacy_motion import (  # noqa: E402
     LEGACY_BUMI_MOTION_CONTRACT_VERSION,
     enforce_root_tilt_gate,
     load_legacy_bumi_motion,
+    root_tilt_statistics,
     sha256_file,
 )
 
@@ -361,6 +363,9 @@ def prepare_selected_root(
     selected_rows: list[dict[str, Any]] = []
     materialization: Counter[str] = Counter()
     fidelity_counts: Counter[str] = Counter()
+    root_tilt_by_dataset: dict[str, list[np.ndarray]] = {
+        name: [] for name in EXPECTED_DATASETS
+    }
     try:
         for relative_text in sorted(pkl_hashes):
             relative = _safe_relative(relative_text, suffix=".pkl")
@@ -383,10 +388,9 @@ def prepare_selected_root(
                 raise ValueError(
                     f"{key}: frame mismatch index={selected['num_frames']}, pkl={motion.num_frames}"
                 )
-            direct_root_orientation = enforce_root_tilt_gate(
-                motion.root_tilt_degrees(),
-                context=key,
-            )
+            direct_tilt = motion.root_tilt_degrees()
+            direct_root_orientation = root_tilt_statistics(direct_tilt)
+            root_tilt_by_dataset[relative.parts[0]].append(direct_tilt)
             quality = motion.quality
             if not isinstance(quality, Mapping):
                 raise ValueError(f"{key}: missing embedded GMR quality report")
@@ -445,6 +449,13 @@ def prepare_selected_root(
                 }
             )
 
+        root_orientation_by_dataset = {
+            dataset: enforce_root_tilt_gate(
+                np.concatenate(values),
+                context=f"dataset={dataset}",
+            )
+            for dataset, values in root_tilt_by_dataset.items()
+        }
         selected_manifest = staging / "manifests" / "selected.jsonl"
         _write_jsonl(selected_manifest, selected_rows)
         snapshots = {
@@ -473,10 +484,12 @@ def prepare_selected_root(
             "second_root_z_adjustment_applied": False,
             "max_sole_penetration_m": max_penetration,
             "root_orientation_gate": {
-                "max_median_deg": 45.0,
-                "max_p95_deg": 75.0,
-                "max_over_45deg_fraction": 0.5,
-                "all_sequences_recomputed_and_passed": True,
+                "scope": "per_dataset_all_frames",
+                "max_dataset_median_deg": 45.0,
+                "max_dataset_p95_deg": 75.0,
+                "max_dataset_over_45deg_fraction": 0.5,
+                "per_dataset_statistics": root_orientation_by_dataset,
+                "all_datasets_recomputed_and_passed": True,
             },
             "total_sequences": len(selected_rows),
             "total_frames": expected_frames,

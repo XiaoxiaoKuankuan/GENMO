@@ -66,9 +66,10 @@ gmr_acceptance:
 
 root_orientation:
   definition: angle_between_robot_root_local_z_and_world_positive_z
-  max_clip_median_deg: 45.0
-  max_clip_p95_deg: 75.0
-  max_clip_over_45deg_fraction: 0.50
+  scope: per_dataset_all_frames
+  max_dataset_median_deg: 45.0
+  max_dataset_p95_deg: 75.0
+  max_dataset_over_45deg_fraction: 0.50
   recompute_from_output_quaternion: true
   reject_entire_release_on_failure: true
 

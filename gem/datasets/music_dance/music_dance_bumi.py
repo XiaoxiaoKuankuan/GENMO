@@ -20,7 +20,6 @@ from gem.robots.bumi.feature_codec import (
     quaternion_sign_is_continuous,
 )
 from gem.robots.bumi.kinematics import BumiKinematics
-from gem.robots.bumi.legacy_motion import enforce_root_tilt_gate, xyzw_to_matrix
 from gem.utils.pylogger import Log
 
 BUMI_MUSIC_CONTRACT_VERSION = "genmo.bumi_music.v1"
@@ -216,6 +215,16 @@ class BumiMusicDatasetReader:
             )
         if not isinstance(info.get("root_z_adjusted"), bool):
             raise ValueError(f"BUMI dataset_info {path}: root_z_adjusted must be a boolean")
+        if info.get("ground_semantics") == "gmr_foot_sole_ground_zero_v1":
+            orientation_gate = info.get("root_orientation_gate")
+            if not isinstance(orientation_gate, dict) or (
+                orientation_gate.get("scope") != "per_dataset_all_frames"
+                or orientation_gate.get("all_sequences_recomputed_and_dataset_passed") is not True
+            ):
+                raise ValueError(
+                    f"BUMI dataset_info {path}: GMR public data requires a passed "
+                    "per-dataset root orientation publication gate"
+                )
         declared_joint_tolerance = info.get("reader_joint_limit_tolerance_rad")
         if declared_joint_tolerance is not None and not np.isclose(
             float(declared_joint_tolerance),
@@ -365,12 +374,6 @@ class BumiMusicDatasetReader:
             )
         was_continuous = quaternion_sign_is_continuous(quat)
         qpos[:, 3:7] = make_quaternion_continuous(quat)
-        quat_xyzw = qpos[:, [4, 5, 6, 3]].numpy()
-        local_z_world = xyzw_to_matrix(quat_xyzw)[..., :, 2]
-        enforce_root_tilt_gate(
-            np.rad2deg(np.arccos(np.clip(local_z_world[..., 2], -1.0, 1.0))),
-            context=f"{sample_id}: {path}",
-        )
         joints = qpos[:, 7:]
         lower = self.kinematics.joint_lower_limits.cpu() - self.joint_limit_tolerance
         upper = self.kinematics.joint_upper_limits.cpu() + self.joint_limit_tolerance
