@@ -7,7 +7,7 @@
 输出的 ``source_video_mp4`` 只创建四个数据集空目录，不伪造或占位任何视频文件。
 
 工具在写入前验证坐标系、SMPL-X neutral/16 维 betas、30 Hz 帧数、BUMI3 qpos28、
-左右足接触、关节顺序和 WAV PCM 元数据；所有复制文件都在 ``dataset_contract.json``
+左右足接触、关节顺序和 WAV PCM 元数据；所有复制文件都在 ``config.json``
 中记录来源路径、大小和 SHA256。目录先写入同父级临时 staging，只有全部校验通过
 才原子改名为正式目录，随后生成包含唯一一级目录的 ``tar.gz``。
 """
@@ -463,7 +463,7 @@ def package_dataset(args: argparse.Namespace) -> dict[str, Any]:
                 "level_1": args.package_name,
                 "level_2": list(DATA_TYPES),
                 "level_3_datasets": list(DATASETS),
-                "metadata_json": "dataset_contract.json",
+                "metadata_json": "config.json",
                 "source_video_directories_are_intentionally_empty": True,
             },
             "source_inventory": source_inventory,
@@ -537,7 +537,7 @@ def package_dataset(args: argparse.Namespace) -> dict[str, Any]:
             },
             "samples": sorted(samples, key=lambda sample: (sample["dataset"], sample["sample_id"])),
         }
-        contract_path = staging / "dataset_contract.json"
+        contract_path = staging / "config.json"
         contract_path.write_text(
             json.dumps(contract, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
             encoding="utf-8",
@@ -576,7 +576,7 @@ def package_dataset(args: argparse.Namespace) -> dict[str, Any]:
             "package_archive": str(archive_path),
             "archive_size_bytes": archive_path.stat().st_size,
             "archive_sha256": sha256_file(archive_path),
-            "contract_sha256": sha256_file(output_root / "dataset_contract.json"),
+            "contract_sha256": sha256_file(output_root / "config.json"),
             "total_samples": len(samples),
             "samples_by_dataset": {
                 dataset: sum(sample["dataset"] == dataset for sample in samples)

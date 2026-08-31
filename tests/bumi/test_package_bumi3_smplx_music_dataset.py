@@ -124,7 +124,7 @@ def test_package_one_same_named_sample_per_dataset(tmp_path: Path) -> None:
     )
 
     package_root = Path(report["package_root"])
-    contract = json.loads((package_root / "dataset_contract.json").read_text())
+    contract = json.loads((package_root / "config.json").read_text())
     assert report["status"] == "passed"
     assert report["total_samples"] == 4
     assert contract["scope"]["source_videos_included"] is False
