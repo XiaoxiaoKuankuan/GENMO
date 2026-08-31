@@ -549,6 +549,37 @@ def evaluate_motion(
         "upper_non_hand_height_min": float(np.min(upper_height)),
         "ankle_height_min": float(np.min(ankle_height)),
     }
+    root_tilt_median = float(np.median(root_tilt))
+    root_tilt_p95 = float(np.percentile(root_tilt, 95.0))
+    root_tilt_over_45_fraction = float(np.mean(root_tilt > 45.0))
+    metrics["root_orientation"] = {
+        "median_degrees": root_tilt_median,
+        "p95_degrees": root_tilt_p95,
+        "maximum_degrees": float(np.max(root_tilt)),
+        "over_45deg_fraction": root_tilt_over_45_fraction,
+    }
+    # 50 Hz SONIC v1 没有逐条 Root 分布门禁，因此这些属性默认不存在并保持原行为。
+    # robot_retargeter 30 Hz 契约显式提供两级阈值：普通异常进入 REVIEW，明显躺倒
+    # 进入 REJECT；正式数据构建只消费 PASS。
+    root_review = (
+        getattr(config, "root_tilt_review_median_degrees", None),
+        getattr(config, "root_tilt_review_p95_degrees", None),
+        getattr(config, "root_tilt_review_over_45_fraction", None),
+    )
+    root_reject = (
+        getattr(config, "root_tilt_reject_median_degrees", None),
+        getattr(config, "root_tilt_reject_p95_degrees", None),
+        getattr(config, "root_tilt_reject_over_45_fraction", None),
+    )
+    root_values = (root_tilt_median, root_tilt_p95, root_tilt_over_45_fraction)
+    if all(value is not None for value in root_reject) and any(
+        actual > float(limit) for actual, limit in zip(root_values, root_reject, strict=True)
+    ):
+        flag("ROOT_TILT_DISTRIBUTION_REJECT", QualityStatus.REJECT)
+    elif all(value is not None for value in root_review) and any(
+        actual > float(limit) for actual, limit in zip(root_values, root_review, strict=True)
+    ):
+        flag("ROOT_TILT_DISTRIBUTION_REVIEW", QualityStatus.REVIEW)
     if floor_run >= config.floor_reject_consecutive_frames:
         flag("FLOOR_STYLE_SUSTAINED", QualityStatus.REJECT)
     elif floor_count >= config.floor_review_min_frames and floor_ratio >= config.floor_review_ratio:
@@ -731,6 +762,9 @@ def build_summary(
     config_sha256: str,
     config: SonicNpzQualityConfig,
     assets: Mapping[str, str],
+    report_version: str = REPORT_VERSION,
+    decision_scope: str | None = None,
+    compatibility_notes: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """汇总严格状态、去限位反事实状态、原因、分数据集结果和指标分布。"""
 
@@ -775,6 +809,21 @@ def build_summary(
             "metrics",
             "floor_style",
             "max_consecutive_frames",
+        ),
+        "root_tilt_median_degrees": (
+            "metrics",
+            "root_orientation",
+            "median_degrees",
+        ),
+        "root_tilt_p95_degrees": (
+            "metrics",
+            "root_orientation",
+            "p95_degrees",
+        ),
+        "root_tilt_over_45deg_fraction": (
+            "metrics",
+            "root_orientation",
+            "over_45deg_fraction",
         ),
         "joint_velocity_l2_p95": (
             "metrics",
@@ -859,7 +908,7 @@ def build_summary(
             "status_rates": rates(counts, len(rows)),
         }
     return {
-        "report_contract_version": REPORT_VERSION,
+        "report_contract_version": report_version,
         "generated_at_utc": datetime.now(timezone.utc).isoformat(),
         "git_commit": _git_commit(),
         "input_root": str(input_root),
@@ -884,8 +933,11 @@ def build_summary(
         "metric_distributions": distributions,
         "joint_limit_by_joint": joint_limit_by_joint,
         "joint_limit_tolerance_sensitivity": tolerance_sensitivity,
-        "decision_scope": ("离线 50Hz 运动学/动力学预检查；未执行 Isaac-Lab rollout 或 SONIC 跟踪"),
-        "compatibility_notes": {
+        "decision_scope": decision_scope
+        or "离线 50Hz 运动学/动力学预检查；未执行 Isaac-Lab rollout 或 SONIC 跟踪",
+        "compatibility_notes": dict(compatibility_notes)
+        if compatibility_notes is not None
+        else {
             "continuous_frame_thresholds_scaled_from_30hz_to_50hz": True,
             "torso_proxy": "mean(l_arm_pitch_link, r_arm_pitch_link)",
             "virtual_hand_rule_removed": "legacy hands only supplied diagnostics",

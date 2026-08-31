@@ -115,6 +115,14 @@ def write_dataset(
         "ground_semantics": ground_semantics,
         "root_z_adjusted": root_z_adjusted,
     }
+    if ground_semantics in {
+        "gmr_foot_sole_ground_zero_v1",
+        "robot_retargeter_floor_zero_v1",
+    }:
+        info["root_orientation_gate"] = {
+            "scope": "per_dataset_all_frames",
+            "all_sequences_recomputed_and_dataset_passed": True,
+        }
     if reader_joint_limit_tolerance_rad is not None:
         info["reader_joint_limit_tolerance_rad"] = reader_joint_limit_tolerance_rad
     (root / "meta" / "dataset_info.json").write_text(json.dumps(info), encoding="utf-8")

@@ -339,7 +339,10 @@ class BumiEndecoder(nn.Module):
             semantics = str(item.get("ground_semantics", ""))
             if semantics == "legacy_body_origin_min_zero":
                 modes.append(True)
-            elif semantics == "gmr_foot_sole_ground_zero_v1":
+            elif semantics in {
+                "gmr_foot_sole_ground_zero_v1",
+                "robot_retargeter_floor_zero_v1",
+            }:
                 modes.append(False)
             else:
                 raise ValueError(f"unsupported BUMI ground_semantics={semantics!r}")
