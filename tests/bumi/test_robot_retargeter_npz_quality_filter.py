@@ -15,6 +15,8 @@ import pytest
 
 from tools.data.bumi.filter_robot_retargeter_npz_motions import (
     DEFAULT_CONFIG,
+    REPORT_VERSION,
+    evaluate_path,
     load_config,
     load_motion_npz,
 )
@@ -119,3 +121,29 @@ def test_sustained_sideways_root_is_rejected(quality_config) -> None:
     assert decision["status"] == "REJECT"
     assert "ROOT_TILT_DISTRIBUTION_REJECT" in decision["reason_codes"]
     assert decision["metrics"]["root_orientation"]["median_degrees"] == pytest.approx(90.0)
+
+
+def test_robot_retargeter_record_overrides_generic_report_version(
+    tmp_path: Path, quality_config, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """通用 SONIC 评估结果不能覆盖新输入边界的逐条报告版本。"""
+
+    source_root = tmp_path / "root"
+    source = source_root / "aistpp" / "mimic_npz" / "bumi3" / "sample.npz"
+    source.parent.mkdir(parents=True)
+    _save_npz(source, _arrays(quality_config), quality_config.required_npz_keys)
+    monkeypatch.setattr(
+        "tools.data.bumi.filter_robot_retargeter_npz_motions._validate_sidecars",
+        lambda **_kwargs: {},
+    )
+
+    row = evaluate_path(
+        source,
+        input_root=source_root,
+        config=quality_config,
+        config_sha256="a" * 64,
+        release_row={},
+    )
+
+    assert row["status"] == "PASS"
+    assert row["report_contract_version"] == REPORT_VERSION

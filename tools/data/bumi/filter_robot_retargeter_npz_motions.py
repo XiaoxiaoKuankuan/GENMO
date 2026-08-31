@@ -588,6 +588,9 @@ def evaluate_path(
         "source_sha256": source_sha,
         **decision,
         **sidecars,
+        # 通用评估核心沿用 SONIC 报告版本；robot_retargeter 边界必须在合并后覆盖，
+        # 否则 summary 与逐条 JSONL 会出现不同契约，PASS-only 构建器应当拒绝。
+        "report_contract_version": REPORT_VERSION,
         "error_type": None,
         "error_message": None,
     }
