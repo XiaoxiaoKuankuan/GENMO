@@ -20,6 +20,7 @@ from gem.robots.bumi.feature_codec import (
     quaternion_sign_is_continuous,
 )
 from gem.robots.bumi.kinematics import BumiKinematics
+from gem.robots.bumi.legacy_motion import enforce_root_tilt_gate, xyzw_to_matrix
 from gem.utils.pylogger import Log
 
 BUMI_MUSIC_CONTRACT_VERSION = "genmo.bumi_music.v1"
@@ -364,6 +365,12 @@ class BumiMusicDatasetReader:
             )
         was_continuous = quaternion_sign_is_continuous(quat)
         qpos[:, 3:7] = make_quaternion_continuous(quat)
+        quat_xyzw = qpos[:, [4, 5, 6, 3]].numpy()
+        local_z_world = xyzw_to_matrix(quat_xyzw)[..., :, 2]
+        enforce_root_tilt_gate(
+            np.rad2deg(np.arccos(np.clip(local_z_world[..., 2], -1.0, 1.0))),
+            context=f"{sample_id}: {path}",
+        )
         joints = qpos[:, 7:]
         lower = self.kinematics.joint_lower_limits.cpu() - self.joint_limit_tolerance
         upper = self.kinematics.joint_upper_limits.cpu() + self.joint_limit_tolerance

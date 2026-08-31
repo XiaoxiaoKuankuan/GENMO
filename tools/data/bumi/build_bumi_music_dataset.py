@@ -4,10 +4,10 @@
 The quality-selected legacy pickle tree is immutable input.  This converter
 joins every accepted BUMI motion to the authoritative human-dataset split and
 EDGE35 artifact, converts xyzw/root + legacy joints to MuJoCo-native qpos28,
-and materializes auditable per-dataset roots.  It deliberately does not alter
-root height or infer contact labels.  A versioned ``selection_info.json`` may
-declare a newer source ground contract; that metadata is propagated without
-silently changing the trajectory.
+and materializes auditable per-dataset roots.  It does not alter GMR 已验收的 Root Z；对于
+``gmr_foot_sole_ground_zero_v1``，会在最终 qpos 上用同一 BUMI3 足底 FK、地面高度 0 和
+进入/退出滞回阈值重新生成整段左右脚接触标签。这样接触监督与正确坐标下的足底几何绑定，
+不会沿用旧错误坐标数据的标签。A versioned ``selection_info.json`` declares the ground contract.
 """
 
 from __future__ import annotations
@@ -36,8 +36,13 @@ from gem.datasets.music_dance.music_dance_bumi import (  # noqa: E402
     safe_torch_load,
 )
 from gem.robots.bumi.kinematics import BumiKinematics  # noqa: E402
+from gem.robots.bumi.contacts import (  # noqa: E402
+    BUMI_CONTACT_CONTRACT_VERSION,
+    derive_bumi_foot_contact,
+)
 from gem.robots.bumi.legacy_motion import (  # noqa: E402
     LEGACY_BUMI_MOTION_CONTRACT_VERSION,
+    enforce_root_tilt_gate,
     load_legacy_bumi_motion,
     sha256_file,
 )
@@ -445,7 +450,18 @@ def convert_datasets(
                 raise FileNotFoundError(f"{dataset}/{sample_id}: audio missing: {audio_source}")
 
             motion = load_legacy_bumi_motion(legacy_path, expected_fps=30)
+            root_orientation_audit = enforce_root_tilt_gate(
+                motion.root_tilt_degrees(),
+                context=f"{dataset}/{sample_id}",
+            )
             qpos = torch.from_numpy(motion.qpos_wxyz(kinematics.joint_order)).float()
+            contact_targets = derive_bumi_foot_contact(
+                qpos,
+                kinematics,
+                valid_mask=torch.ones(qpos.shape[0], dtype=torch.bool),
+                fps=30,
+                ground_height=0.0,
+            )
             if feature_source not in music_frame_cache:
                 music_frame_cache[feature_source] = int(
                     _music_tensor(feature_source, sample_id).shape[0]
@@ -487,6 +503,11 @@ def convert_datasets(
                 "ground_semantics": ground_semantics,
                 "selection_contract_version": selection_info.get("contract_version"),
                 "selection_info_sha256": selection_info_sha,
+                "root_orientation_audit": root_orientation_audit,
+                "foot_contact": contact_targets.contact.contiguous(),
+                "foot_contact_contract_version": BUMI_CONTACT_CONTRACT_VERSION,
+                "foot_contact_source": "derived_from_final_zup_gmr_qpos_fk_ground_zero",
+                "foot_contact_ground_height_m": float(contact_targets.ground_height),
             }
             motion_destination = dataset_root / motion_relative
             motion_destination.parent.mkdir(parents=True, exist_ok=True)
@@ -562,6 +583,12 @@ def convert_datasets(
                 "root_z_adjustment_method": root_z_adjustment_method,
                 "selection_contract_version": selection_info.get("contract_version"),
                 "selection_info_sha256": selection_info_sha,
+                "root_orientation_gate": {
+                    "max_median_deg": 45.0,
+                    "max_p95_deg": 75.0,
+                    "max_over_45deg_fraction": 0.5,
+                    "all_sequences_recomputed_and_passed": True,
+                },
                 "split_counts": {name: len(rows) for name, rows in by_split.items()},
             }
             _write_json(dataset_root / "meta" / "dataset_info.json", info)
@@ -585,6 +612,12 @@ def convert_datasets(
             "retarget_config_sha256": ik_sha,
             "quality_config_sha256": quality_sha,
             "kinematics_sha256": kinematics.kinematics_sha256,
+            "root_orientation_gate": {
+                "max_median_deg": 45.0,
+                "max_p95_deg": 75.0,
+                "max_over_45deg_fraction": 0.5,
+                "all_sequences_recomputed_and_passed": True,
+            },
             "selected_manifest_sha256": sha256_file(selected_manifest),
             "total_sequences": len(seen),
             "split_counts": dict(sorted(actual_splits.items())),

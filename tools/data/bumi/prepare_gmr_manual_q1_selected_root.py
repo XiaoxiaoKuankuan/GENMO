@@ -40,6 +40,7 @@ if str(REPO_ROOT) not in sys.path:
 from gem.robots.bumi.legacy_motion import (  # noqa: E402
     LEGACY_BUMI_JOINT_ORDER,
     LEGACY_BUMI_MOTION_CONTRACT_VERSION,
+    enforce_root_tilt_gate,
     load_legacy_bumi_motion,
     sha256_file,
 )
@@ -167,8 +168,9 @@ def _verify_release_contract(
     expected_frames: int,
     expected_dataset_counts: Mapping[str, int],
     pkl_manifest_sha256: str,
+    expected_schema: str = EXPECTED_RELEASE_SCHEMA,
 ) -> None:
-    if release.get("schema") != EXPECTED_RELEASE_SCHEMA:
+    if release.get("schema") != expected_schema:
         raise ValueError(f"unexpected GMR release schema={release.get('schema')!r}")
     selection = release.get("selection")
     dataset_contract = release.get("dataset_contract")
@@ -349,6 +351,9 @@ def prepare_selected_root(
         expected_frames=expected_frames,
         expected_dataset_counts=expected_dataset_counts,
         pkl_manifest_sha256=pkl_manifest_sha,
+        expected_schema=str(
+            config.get("source", {}).get("release_audit_schema", EXPECTED_RELEASE_SCHEMA)
+        ),
     )
 
     output_root.parent.mkdir(parents=True, exist_ok=True)
@@ -378,6 +383,10 @@ def prepare_selected_root(
                 raise ValueError(
                     f"{key}: frame mismatch index={selected['num_frames']}, pkl={motion.num_frames}"
                 )
+            direct_root_orientation = enforce_root_tilt_gate(
+                motion.root_tilt_degrees(),
+                context=key,
+            )
             quality = motion.quality
             if not isinstance(quality, Mapping):
                 raise ValueError(f"{key}: missing embedded GMR quality report")
@@ -432,6 +441,7 @@ def prepare_selected_root(
                     "gmr_fidelity_overall": fidelity,
                     "gmr_root_z_method": root_method,
                     "gmr_max_sole_penetration_m": penetration,
+                    "gmr_root_orientation": direct_root_orientation,
                 }
             )
 
@@ -462,6 +472,12 @@ def prepare_selected_root(
             "root_z_adjustment_method": root_method,
             "second_root_z_adjustment_applied": False,
             "max_sole_penetration_m": max_penetration,
+            "root_orientation_gate": {
+                "max_median_deg": 45.0,
+                "max_p95_deg": 75.0,
+                "max_over_45deg_fraction": 0.5,
+                "all_sequences_recomputed_and_passed": True,
+            },
             "total_sequences": len(selected_rows),
             "total_frames": expected_frames,
             "total_hours_at_30fps": expected_frames / 30.0 / 3600.0,

@@ -1,0 +1,80 @@
+# GMR 人工 q1、统一 Z-up 后重新重定向的正式发布门。
+#
+# 四个公开库的源动作均为右手 Y-up；正式链路先把全局 Root 与 translation 绕 X 轴
+# 正向旋转 90 度统一成右手 Z-up，再做人体 FK、足底接触、IK、Root Z 和轨迹约束。
+# 发布时还会从最终机器人四元数直接重算根倾角，任何异常动作都会阻断整批数据进入训练。
+contract_version: genmo.bumi_gmr_manual_q1_quality_gate.v1
+
+source:
+  motion_contract_version: genmo.bumi_legacy_motion.v1
+  pipeline_version: bumi3_temporal_bounded_zup_v2
+  release_audit_schema: gmr_bumi3_manual_q1_release_audit_zup_v2
+  source_coordinate_system: right_handed_y_up_metric
+  normalized_coordinate_system: right_handed_z_up_metric
+  coordinate_transform: rotate_global_root_and_translation_plus_90deg_about_x
+  mjcf_sha256: 482138b437dbdabd6171fa8d44b55db5d7125a228c95b69ce3d1159cafe8537c
+  fps: 30
+  quaternion_convention: xyzw
+  joint_order:
+    - l_leg_pitch_joint
+    - l_leg_roll_joint
+    - l_leg_yaw_joint
+    - l_knee_pitch_joint
+    - l_ankle_pitch_joint
+    - l_ankle_roll_joint
+    - r_leg_pitch_joint
+    - r_leg_roll_joint
+    - r_leg_yaw_joint
+    - r_knee_pitch_joint
+    - r_ankle_pitch_joint
+    - r_ankle_roll_joint
+    - waist_yaw_joint
+    - l_arm_pitch_joint
+    - l_arm_roll_joint
+    - l_arm_yaw_joint
+    - l_elbow_pitch_joint
+    - r_arm_pitch_joint
+    - r_arm_roll_joint
+    - r_arm_yaw_joint
+    - r_elbow_pitch_joint
+
+selection:
+  manual_rating_score: 1
+  expected_total: 3162
+  expected_dataset_counts:
+    aistpp: 963
+    aioz_gdance: 1978
+    finedance: 149
+    compas3d: 72
+  expected_split_counts:
+    train: 2792
+    val: 174
+    test: 196
+
+gmr_acceptance:
+  required_flags:
+    - finite
+    - xml_urdf_joint_limit_contract
+    - joint_position_velocity_acceleration
+    - upper_body_frame_delta
+    - root_height
+    - root_acceleration_not_worse
+    - root_orientation
+    - safety_overall
+  fidelity_flag: fidelity_overall
+  fidelity_policy: diagnostic_only
+
+root_orientation:
+  definition: angle_between_robot_root_local_z_and_world_positive_z
+  max_clip_median_deg: 45.0
+  max_clip_p95_deg: 75.0
+  max_clip_over_45deg_fraction: 0.50
+  recompute_from_output_quaternion: true
+  reject_entire_release_on_failure: true
+
+root_z:
+  ground_semantics: gmr_foot_sole_ground_zero_v1
+  required_method: foot_contact_bounded_qp
+  max_sole_penetration_m: 0.0021
+  require_finite_audit: true
+  apply_second_adjustment: false
