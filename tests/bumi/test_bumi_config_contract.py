@@ -235,3 +235,54 @@ def test_qpos30_contact_scratch_350k_is_eight_gpu_random_initialization() -> Non
     assert list(config.scheduler.scheduler.milestones) == [210000, 315000]
     assert config.pipeline.args.ground_semantics == "mixed_floor_zero_fk_contact_v2"
     assert config.pipeline.args.loss_contract == "physical_qpos30_contact_v2"
+
+
+def test_robot_retargeter_pass_v1_scratch_uses_only_new_four_set_contract() -> None:
+    """新资产四库必须 PASS-only、严格限位且不继承旧模型。"""
+
+    with initialize_config_dir(version_base="1.3", config_dir=str(REPO_ROOT / "configs")):
+        config = compose(
+            config_name="train",
+            overrides=[
+                "exp=gem_bumi_music_only_4set_robot_retargeter_pass_v1_"
+                "qpos30_contact_scratch_350k"
+            ],
+        )
+
+    assert list(config.train_datasets) == [
+        "aistpp_bumi_train",
+        "aioz_gdance_bumi_train",
+        "finedance_bumi_train",
+        "compas3d_bumi_train",
+    ]
+    assert "mine_bumi_train" not in config.train_datasets
+    assert config.data.expected_train_sequences == 2455
+    assert dict(config.data.dataset_sampling_weights) == {
+        "aistpp_bumi": 0.29,
+        "aioz_gdance_bumi": 0.60,
+        "finedance_bumi": 0.07,
+        "compas3d_bumi": 0.04,
+    }
+    assert sum(config.data.dataset_sampling_weights.values()) == 1.0
+    assert all(
+        value.joint_limit_tolerance == 0.0001
+        for value in config.train_datasets.values()
+    )
+    assert config.test_datasets.finedance_bumi_music_eval.split == "test"
+    data_config = OmegaConf.to_container(config.data, resolve=False)
+    assert data_config["stats_path"] == "${oc.env:BUMI_MUSIC_QPOS30_STATS_PATH}"
+    assert config.network.model_cfg.denoiser.output_dim == 30
+    assert config.network.model_cfg.denoiser.static_conf_dim == 2
+    assert config.endecoder.feat_dim == 30
+    assert config.pretrain_ckpt is None
+    assert config.ckpt_path is None
+    assert config.resume_mode is None
+    assert config.model.model_cfg.checkpoint_adapter is None
+    assert config.data.loader_opts.train.batch_size == 192
+    assert config.pl_trainer.devices == 8
+    assert config.pl_trainer.strategy == "ddp"
+    assert config.pl_trainer.max_steps == 350000
+    assert list(config.scheduler.scheduler.milestones) == [210000, 315000]
+    assert config.pipeline.args.ground_semantics == "mixed_floor_zero_fk_contact_v2"
+    assert config.pipeline.args.loss_contract == "physical_qpos30_contact_v2"
+    assert config.use_wandb is False
