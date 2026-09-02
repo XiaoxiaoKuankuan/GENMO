@@ -34,7 +34,7 @@ source:
     - robot_name
     - quaternion_order
   robot_xml_sha256: fe93472dd764704fe8389b0f82052ae84ed8bc90f6d71b1467872f86e08a9ad3
-  retarget_config_sha256: cab3d2a9c074f789e69533b150d79c771a79438c9593d5f7b2e7f3e11b8e0ab0
+  retarget_config_sha256: 95e0d1e9fa6fcfc143f55abc92afab2b87653f34c47c237a3d983be6c5fa05b1
   kinematics_sha256: c08731704dccece11351b6fa877e30bac5ca2a8d363de30af7ca2ea1398f4029
   coordinate_contract:
     source_coordinate_system: right_handed_z_up_metric

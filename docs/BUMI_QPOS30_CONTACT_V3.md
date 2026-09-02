@@ -68,6 +68,20 @@ joint_limit=0.1    contact_bce=1.0   foot_slide=0.05
 penetration=0.05   root_height=0.1
 ```
 
+从 robot_retargeter 全时域 QP 数据开始续训时使用
+`physical_qpos30_contact_v3`。它保留上述空间、FK、接触和根姿态监督，把三个导数 GT
+匹配权重调整为：
+
+```text
+joint_velocity=0.10  joint_acceleration=0.01  joint_jerk=0.003
+```
+
+并新增 `joint_acceleration_excess=0.05`、`joint_jerk_excess=0.003`。对每一帧和每一关节，
+超额项只计算 `ReLU(abs(pred_derivative) - abs(gt_derivative))` 的 Smooth-L1；预测不超过
+同帧 GT 幅值时为零。两项分别按 `180 rad/s^2`、`600 rad/s^3` 归一化，再与其他辅助项
+一起经过 5000-step warmup。这样可专门抑制生成结果高于数据参考的加速度/jerk 尖峰，
+而不是把目标本身包含的快速舞蹈统一拉向静止。
+
 foot-slide 权重保持温和，并在 5k step 内渐进启用，避免以“所有动作少动”换低脚速；root
 rotation、root tilt、接触 BCE 和三个直接表示损失从第一步生效。
 

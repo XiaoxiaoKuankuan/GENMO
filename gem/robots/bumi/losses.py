@@ -25,6 +25,7 @@ from .endecoder import BumiEndecoder
 from .feature_codec import BUMI_FEATURE_SLICES
 
 BUMI_LOSS_CONTRACT_VERSION = "physical_qpos30_contact_v2"
+BUMI_LOSS_CONTRACT_V3 = "physical_qpos30_contact_v3"
 BUMI_LOSS_NAMES = (
     "repr_root_pos",
     "repr_root_rot",
@@ -43,6 +44,14 @@ BUMI_LOSS_NAMES = (
     "penetration",
     "root_height",
 )
+BUMI_EXCESS_LOSS_NAMES = (
+    "joint_acceleration_excess",
+    "joint_jerk_excess",
+)
+BUMI_LOSS_NAMES_BY_CONTRACT = {
+    BUMI_LOSS_CONTRACT_VERSION: BUMI_LOSS_NAMES,
+    BUMI_LOSS_CONTRACT_V3: BUMI_LOSS_NAMES + BUMI_EXCESS_LOSS_NAMES,
+}
 
 BUMI_PHYSICAL_V2_SCALES = {
     "root_pos": 1.0,
@@ -53,6 +62,8 @@ BUMI_PHYSICAL_V2_SCALES = {
     "joint_velocity": 6.0,
     "joint_acceleration": 180.0,
     "joint_jerk": 600.0,
+    "joint_acceleration_excess": 180.0,
+    "joint_jerk_excess": 600.0,
     "joint_limit": 0.1,
     "contact_bce": 1.0,
     "foot_slide": 1.0,
@@ -91,6 +102,31 @@ def temporal_difference_mask(valid: torch.Tensor, order: int) -> torch.Tensor:
     for offset in range(order + 1):
         result &= valid[:, offset : offset + length - order]
     return result
+
+
+def derivative_excess_loss_values(
+    prediction: torch.Tensor,
+    target: torch.Tensor,
+    mask: torch.Tensor,
+    scale: float,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """只惩罚预测导数幅值超过同帧 GT 幅值的部分。"""
+
+    if prediction.shape != target.shape:
+        raise ValueError(
+            "derivative excess inputs must have matching shapes, got "
+            f"{prediction.shape}/{target.shape}"
+        )
+    if not torch.isfinite(torch.tensor(float(scale))) or float(scale) <= 0.0:
+        raise ValueError(f"derivative excess scale must be positive and finite, got {scale}")
+    excess = F.relu(prediction.abs() - target.abs())
+    zero = torch.zeros_like(excess)
+    raw = _masked_mean(F.smooth_l1_loss(excess, zero, beta=1.0, reduction="none"), mask)
+    normalized = _masked_mean(
+        F.smooth_l1_loss(excess / float(scale), zero, beta=1.0, reduction="none"),
+        mask,
+    )
+    return raw, normalized
 
 
 def so3_geodesic_angle(pred_rotation: torch.Tensor, target_rotation: torch.Tensor) -> torch.Tensor:
@@ -189,10 +225,10 @@ class BumiRobotLosses(nn.Module):
         self.ground_semantics = ground_semantics
         if self.fps != 30:
             raise ValueError(f"BUMI losses require 30 FPS, got {fps}")
-        if self.contract_version != BUMI_LOSS_CONTRACT_VERSION:
+        if self.contract_version not in BUMI_LOSS_NAMES_BY_CONTRACT:
             raise ValueError(
-                "qpos30 BUMI only supports loss contract "
-                f"{BUMI_LOSS_CONTRACT_VERSION!r}, got {self.contract_version!r}"
+                "qpos30 BUMI only supports loss contracts "
+                f"{sorted(BUMI_LOSS_NAMES_BY_CONTRACT)!r}, got {self.contract_version!r}"
             )
         if self.ground_semantics not in {
             "gmr_foot_sole_ground_zero_v1",
@@ -206,8 +242,9 @@ class BumiRobotLosses(nn.Module):
             )
         if self.auxiliary_warmup_steps < 0:
             raise ValueError("auxiliary_warmup_steps must be non-negative")
-        self.weights = {name: float(weights.get(name, 0.0)) for name in BUMI_LOSS_NAMES}
-        unknown = set(weights) - set(BUMI_LOSS_NAMES)
+        self.loss_names = BUMI_LOSS_NAMES_BY_CONTRACT[self.contract_version]
+        self.weights = {name: float(weights.get(name, 0.0)) for name in self.loss_names}
+        unknown = set(weights) - set(self.loss_names)
         if unknown:
             raise ValueError(f"Unknown BUMI loss weights: {sorted(unknown)}")
         if any(
@@ -330,6 +367,7 @@ class BumiRobotLosses(nn.Module):
         )
 
         target_joint = target_components.joint_dof.float()
+        temporal_values: dict[str, tuple[torch.Tensor, torch.Tensor, torch.Tensor]] = {}
         for order, name in (
             (1, "joint_velocity"),
             (2, "joint_acceleration"),
@@ -338,12 +376,27 @@ class BumiRobotLosses(nn.Module):
             multiplier = float(self.fps) ** order
             pred_delta = torch.diff(pred_joint, n=order, dim=1) * multiplier
             target_delta = torch.diff(target_joint, n=order, dim=1) * multiplier
+            difference_mask = temporal_difference_mask(valid, order)
             raw[name], normalized[name] = self._smooth_l1_pair(
                 pred_delta,
                 target_delta,
-                temporal_difference_mask(valid, order),
+                difference_mask,
                 BUMI_PHYSICAL_V2_SCALES[name],
             )
+            temporal_values[name] = (pred_delta, target_delta, difference_mask)
+
+        if self.contract_version == BUMI_LOSS_CONTRACT_V3:
+            for source_name, excess_name in (
+                ("joint_acceleration", "joint_acceleration_excess"),
+                ("joint_jerk", "joint_jerk_excess"),
+            ):
+                pred_delta, target_delta, difference_mask = temporal_values[source_name]
+                raw[excess_name], normalized[excess_name] = derivative_excess_loss_values(
+                    pred_delta,
+                    target_delta,
+                    difference_mask,
+                    BUMI_PHYSICAL_V2_SCALES[excess_name],
+                )
 
         lower = self.kinematics.joint_lower_limits.to(pred_joint)
         upper = self.kinematics.joint_upper_limits.to(pred_joint)
@@ -420,7 +473,7 @@ class BumiRobotLosses(nn.Module):
         }
         total = pred_norm.new_zeros(())
         output: dict[str, torch.Tensor] = {"auxiliary_warmup_factor": pred_norm.new_tensor(warmup)}
-        for name in BUMI_LOSS_NAMES:
+        for name in self.loss_names:
             factor = 1.0 if name in always_on else warmup
             weighted = normalized[name] * (self.weights[name] * factor)
             output[f"raw_{name}_loss"] = raw[name]
@@ -435,9 +488,13 @@ class BumiRobotLosses(nn.Module):
 
 __all__ = [
     "BUMI_LOSS_CONTRACT_VERSION",
+    "BUMI_LOSS_CONTRACT_V3",
+    "BUMI_EXCESS_LOSS_NAMES",
     "BUMI_LOSS_NAMES",
+    "BUMI_LOSS_NAMES_BY_CONTRACT",
     "BUMI_PHYSICAL_V2_SCALES",
     "BumiRobotLosses",
+    "derivative_excess_loss_values",
     "root_tilt_loss_values",
     "so3_geodesic_angle",
     "temporal_difference_mask",

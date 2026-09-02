@@ -19,11 +19,78 @@ from scripts.validate_bumi_hq_music_full import (
     DATASETS,
     analyze_joint_limits,
     audio_key_for_motion,
+    load_explicit_selection,
     reusable_artifact,
     select_hq_audio,
     select_mine_bumi,
     truncate_music_features,
 )
+
+
+def test_explicit_selection_binds_assets_and_exact_quotas(tmp_path: Path) -> None:
+    assets = tmp_path / "assets"
+    assets.mkdir()
+    items = []
+    for dataset, key in (("aistpp", "mBR0"), ("mine_bumi", "mine_01")):
+        audio = assets / f"{key}.wav"
+        motion = assets / f"{key}.pt"
+        audio.write_bytes(f"audio-{key}".encode())
+        motion.write_bytes(f"motion-{key}".encode())
+        items.append(
+            {
+                "dataset": dataset,
+                "audio_key": key,
+                "audio": f"assets/{audio.name}",
+                "source_motion": f"assets/{motion.name}",
+            }
+        )
+    manifest = tmp_path / "selection.json"
+    manifest.write_text(
+        json.dumps(
+            {
+                "contract_version": "genmo.bumi_hq_explicit_selection.v1",
+                "per_dataset_limits": {"aistpp": 1, "mine_bumi": 1},
+                "selection_policy": "test policy",
+                "items": items,
+            }
+        ),
+        encoding="utf-8",
+    )
+    selected, summary, limits, policy = load_explicit_selection(manifest)
+    assert limits == {"aistpp": 1, "mine_bumi": 1}
+    assert policy == "test policy"
+    assert summary["aistpp"]["selected_audio_count"] == 1
+    assert Path(selected[0]["audio"]).is_file()
+    assert len(selected[0]["audio_sha256"]) == 64
+
+
+def test_explicit_selection_rejects_duplicate_identity(tmp_path: Path) -> None:
+    audio = tmp_path / "audio.wav"
+    motion = tmp_path / "motion.pt"
+    audio.touch()
+    motion.touch()
+    row = {
+        "dataset": "aistpp",
+        "audio_key": "mBR0",
+        "audio": audio.name,
+        "source_motion": motion.name,
+    }
+    manifest = tmp_path / "selection.json"
+    manifest.write_text(
+        json.dumps(
+            {
+                "contract_version": "genmo.bumi_hq_explicit_selection.v1",
+                "items": [row, row],
+            }
+        ),
+        encoding="utf-8",
+    )
+    try:
+        load_explicit_selection(manifest)
+    except ValueError as exc:
+        assert "重复样本" in str(exc)
+    else:
+        raise AssertionError("重复显式样本必须失败")
 
 
 def test_fourset_audio_key_mapping() -> None:

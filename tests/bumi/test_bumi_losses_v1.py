@@ -16,9 +16,12 @@ import torch
 from gem.robots.bumi.feature_codec import BumiMotionFeatureCodec
 from gem.robots.bumi.kinematics import BumiKinematics
 from gem.robots.bumi.losses import (
+    BUMI_EXCESS_LOSS_NAMES,
+    BUMI_LOSS_CONTRACT_V3,
     BUMI_LOSS_CONTRACT_VERSION,
     BUMI_LOSS_NAMES,
     BumiRobotLosses,
+    derivative_excess_loss_values,
     root_tilt_loss_values,
     so3_geodesic_angle,
     temporal_difference_mask,
@@ -73,6 +76,19 @@ def test_difference_masks_require_two_three_four_real_frames() -> None:
     assert temporal_difference_mask(valid, 1).tolist() == [[True, True, False, False]]
     assert temporal_difference_mask(valid, 2).tolist() == [[True, False, False]]
     assert temporal_difference_mask(valid, 3).tolist() == [[False, False]]
+
+
+def test_derivative_excess_only_penalizes_prediction_above_target() -> None:
+    prediction = torch.tensor([[[3.0, -1.0], [9.0, -8.0]]], requires_grad=True)
+    target = torch.tensor([[[4.0, -1.0], [5.0, -10.0]]])
+    mask = torch.tensor([[True, True]])
+    raw, normalized = derivative_excess_loss_values(prediction, target, mask, scale=2.0)
+    assert float(raw) == pytest.approx(0.875)
+    assert float(normalized) == pytest.approx(0.375)
+    normalized.backward()
+    assert prediction.grad is not None
+    assert prediction.grad[0, 0].abs().sum().item() == pytest.approx(0.0)
+    assert prediction.grad[0, 1, 0].item() > 0.0
 
 
 def test_so3_wraparound_near_plus_minus_pi_is_continuous() -> None:
@@ -151,6 +167,68 @@ def test_contact_and_slide_weights_are_mandatory(test_kinematics_path) -> None:
     weights = _weights()
     weights["foot_slide"] = 0.0
     with pytest.raises(ValueError, match="positive contact_bce and foot_slide"):
+        BumiRobotLosses(
+            endecoder,
+            weights,
+            contract_version=BUMI_LOSS_CONTRACT_VERSION,
+            ground_semantics="mixed_floor_zero_fk_contact_v2",
+        )
+
+
+def test_v3_excess_losses_are_versioned_and_emitted(test_kinematics_path) -> None:
+    kinematics = BumiKinematics(test_kinematics_path)
+    codec = BumiMotionFeatureCodec(kinematics)
+    endecoder = SimpleNamespace(kinematics=kinematics, codec=codec)
+    weights = _weights()
+    weights.update(
+        {
+            "joint_acceleration_excess": 0.05,
+            "joint_jerk_excess": 0.003,
+        }
+    )
+    loss = BumiRobotLosses(
+        endecoder,
+        weights,
+        contract_version=BUMI_LOSS_CONTRACT_V3,
+        ground_semantics="mixed_floor_zero_fk_contact_v2",
+    )
+    qpos = kinematics.default_qpos.view(1, 1, 28).repeat(1, 6, 1)
+    encoded = codec.encode(qpos)
+    pred = encoded.physical_features.clone()
+    pred[0, :, 9] = torch.tensor([0.0, 0.1, -0.1, 0.1, -0.1, 0.0])
+    pred.requires_grad_(True)
+    parts = codec.split_features(pred)
+    pred_qpos = codec.decode_to_canonical_qpos(pred)
+    fk = kinematics.forward_kinematics(pred_qpos)
+    valid = torch.ones(1, 6, dtype=torch.bool)
+    contact = torch.ones(1, 6, 2)
+    output = loss(
+        _encoded_inputs(encoded, valid, contact),
+        {
+            "pred_x": pred,
+            "static_conf_logits": torch.zeros_like(contact, requires_grad=True),
+        },
+        {
+            "root_delta_xy_heading": parts.root_delta_xy_heading,
+            "root_height_offset": parts.root_height_offset,
+            "root_rot_local_6d": pred[..., 3:9],
+            "joint_dof": parts.joint_dof,
+        },
+        pred_qpos,
+        fk,
+    )
+    for name in BUMI_EXCESS_LOSS_NAMES:
+        assert float(output[f"weighted_{name}_loss"]) > 0.0
+    output["loss"].backward()
+    assert pred.grad is not None and bool(torch.isfinite(pred.grad).all())
+
+
+def test_v2_rejects_v3_only_excess_weights(test_kinematics_path) -> None:
+    kinematics = BumiKinematics(test_kinematics_path)
+    endecoder = SimpleNamespace(kinematics=kinematics, codec=BumiMotionFeatureCodec(kinematics))
+    weights = _weights()
+    weights["joint_acceleration_excess"] = 0.05
+    with pytest.raises(ValueError, match="Unknown BUMI loss weights"):
         BumiRobotLosses(
             endecoder,
             weights,

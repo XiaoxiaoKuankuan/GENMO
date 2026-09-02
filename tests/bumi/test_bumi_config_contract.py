@@ -213,9 +213,7 @@ def test_qpos30_contact_scratch_350k_is_eight_gpu_random_initialization() -> Non
     with initialize_config_dir(version_base="1.3", config_dir=str(REPO_ROOT / "configs")):
         config = compose(
             config_name="train",
-            overrides=[
-                "exp=gem_bumi_music_only_5set_manual_q1_v3_qpos30_contact_scratch_350k"
-            ],
+            overrides=["exp=gem_bumi_music_only_5set_manual_q1_v3_qpos30_contact_scratch_350k"],
         )
 
     denoiser = config.network.model_cfg.denoiser
@@ -244,8 +242,7 @@ def test_robot_retargeter_pass_v1_scratch_uses_only_new_four_set_contract() -> N
         config = compose(
             config_name="train",
             overrides=[
-                "exp=gem_bumi_music_only_4set_robot_retargeter_pass_v1_"
-                "qpos30_contact_scratch_350k"
+                "exp=gem_bumi_music_only_4set_robot_retargeter_pass_v1_qpos30_contact_scratch_350k"
             ],
         )
 
@@ -264,10 +261,7 @@ def test_robot_retargeter_pass_v1_scratch_uses_only_new_four_set_contract() -> N
         "compas3d_bumi": 0.04,
     }
     assert sum(config.data.dataset_sampling_weights.values()) == 1.0
-    assert all(
-        value.joint_limit_tolerance == 0.0001
-        for value in config.train_datasets.values()
-    )
+    assert all(value.joint_limit_tolerance == 0.0001 for value in config.train_datasets.values())
     assert config.test_datasets.finedance_bumi_music_eval.split == "test"
     data_config = OmegaConf.to_container(config.data, resolve=False)
     assert data_config["stats_path"] == "${oc.env:BUMI_MUSIC_QPOS30_STATS_PATH}"
@@ -286,3 +280,54 @@ def test_robot_retargeter_pass_v1_scratch_uses_only_new_four_set_contract() -> N
     assert config.pipeline.args.ground_semantics == "mixed_floor_zero_fk_contact_v2"
     assert config.pipeline.args.loss_contract == "physical_qpos30_contact_v2"
     assert config.use_wandb is False
+
+
+def test_qpos30_contact_v3_uses_stronger_temporal_and_excess_losses() -> None:
+    """v3 必须显式启用更强导数匹配及只惩罚预测超额的两个新项。"""
+
+    with initialize_config_dir(version_base="1.3", config_dir=str(REPO_ROOT / "configs")):
+        config = compose(
+            config_name="train",
+            overrides=[
+                "exp=gem_bumi_music_only_4set_robot_retargeter_pass_v1_qpos30_contact_scratch_350k",
+                "pipeline=music_only_bumi_qpos30_contact_v3",
+            ],
+        )
+
+    weights = config.pipeline.args.weights
+    assert config.pipeline.args.loss_contract == "physical_qpos30_contact_v3"
+    assert weights.joint_velocity == 0.10
+    assert weights.joint_acceleration == 0.01
+    assert weights.joint_jerk == 0.003
+    assert weights.joint_acceleration_excess == 0.05
+    assert weights.joint_jerk_excess == 0.003
+    assert config.pipeline.args.auxiliary_warmup_steps == 5000
+
+
+def test_robot_retargeter_pass_v2_continues_weights_for_new_200k_steps() -> None:
+    """QP PASS v2 必须使用 weights-only、batch256 和独立 200k 调度。"""
+
+    with initialize_config_dir(version_base="1.3", config_dir=str(REPO_ROOT / "configs")):
+        config = compose(
+            config_name="train",
+            overrides=[
+                "exp=gem_bumi_music_only_4set_robot_retargeter_pass_v2_"
+                "qpos30_contact_v3_continue_200k"
+            ],
+        )
+
+    assert config.pretrain_ckpt is None
+    assert config.ckpt_path is None
+    assert config.resume_mode is None
+    assert config.model.model_cfg.checkpoint_adapter is None
+    assert config.pipeline.args.loss_contract == "physical_qpos30_contact_v3"
+    assert config.data.expected_train_sequences == 2479
+    assert config.data.loader_opts.train.batch_size == 256
+    assert config.data.samples_per_epoch == 53248
+    assert config.data.samples_per_epoch % (8 * config.data.loader_opts.train.batch_size) == 0
+    assert config.optimizer.lr == 2.0e-5
+    assert config.pl_trainer.max_steps == 200000
+    assert config.pl_trainer.val_check_interval == 5000
+    assert list(config.scheduler.scheduler.milestones) == [120000, 180000]
+    assert config.pl_trainer.devices == 8
+    assert config.pl_trainer.strategy == "ddp"

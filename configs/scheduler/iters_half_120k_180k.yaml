@@ -1,0 +1,11 @@
+# 20 万 optimizer-step 权重续训的分段学习率配置。
+#
+# 新任务只加载上一轮最新完整 checkpoint 的模型权重，不继承旧 optimizer、scheduler、
+# epoch 或 global step；因此这里以新作业的第 120000/180000 step 作为 60%/90% 里程碑，
+# 每次把学习率乘以 0.5。该相对位置与现有 350k 配置保持一致，max_steps 由实验配置固定。
+scheduler:
+  _target_: torch.optim.lr_scheduler.MultiStepLR
+  milestones: [120000, 180000]
+  gamma: 0.5
+interval: step
+frequency: 1

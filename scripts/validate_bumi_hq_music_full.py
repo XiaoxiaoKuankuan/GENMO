@@ -298,6 +298,116 @@ def select_mine_bumi(
     }
 
 
+def load_explicit_selection(
+    manifest_path: Path,
+) -> tuple[list[dict[str, Any]], dict[str, Any], dict[str, int], str]:
+    """加载已经人工冻结且绑定资产 SHA256 的跨数据集评测清单。
+
+    显式清单用于某次训练绑定了新版正式 manifest、而旧评分表已不能代表实际数据契约的
+    情况。清单中的相对路径必须留在清单目录内；音频与原动作都必须存在，并在提供期望
+    SHA256 时逐文件核对。这样生成网页不会把旧数据版本的同名音频或动作误标成当前模型的
+    验证样本，也允许调用方明确区分 held-out 样本和域外自建样本。
+    """
+
+    manifest_path = manifest_path.expanduser().resolve(strict=True)
+    root = manifest_path.parent.resolve(strict=True)
+    payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    if payload.get("contract_version") != "genmo.bumi_hq_explicit_selection.v1":
+        raise ValueError("显式选择清单 contract_version 不受支持")
+    raw_items = payload.get("items")
+    if not isinstance(raw_items, list) or not raw_items:
+        raise ValueError("显式选择清单必须包含非空 items")
+
+    allowed = tuple(dataset for dataset, _, _ in REPORT_DATASETS)
+    allowed_set = set(allowed)
+    selected: list[dict[str, Any]] = []
+    seen: set[tuple[str, str]] = set()
+    counts = {dataset: 0 for dataset in allowed}
+    for index, raw in enumerate(raw_items):
+        if not isinstance(raw, dict):
+            raise ValueError(f"显式选择清单 items[{index}] 不是对象")
+        dataset = str(raw.get("dataset", ""))
+        audio_key = str(raw.get("audio_key", ""))
+        if (
+            dataset not in allowed_set
+            or audio_key in {"", ".", ".."}
+            or Path(audio_key).name != audio_key
+        ):
+            raise ValueError(f"显式选择清单 items[{index}] 数据集或 audio_key 非法")
+        identity = (dataset, audio_key)
+        if identity in seen:
+            raise ValueError(f"显式选择清单存在重复样本：{identity}")
+        seen.add(identity)
+
+        resolved_paths: dict[str, Path] = {}
+        for field in ("audio", "source_motion"):
+            value = raw.get(field)
+            if not isinstance(value, str) or not value:
+                raise ValueError(f"显式选择清单 items[{index}] 缺少 {field}")
+            candidate = Path(value).expanduser()
+            candidate = (
+                (root / candidate).resolve() if not candidate.is_absolute() else candidate.resolve()
+            )
+            if not candidate.is_file():
+                raise FileNotFoundError(f"显式选择资产不存在：{candidate}")
+            if not Path(value).is_absolute() and not candidate.is_relative_to(root):
+                raise ValueError(f"显式选择相对路径越出清单目录：{value}")
+            resolved_paths[field] = candidate
+
+        expected_hashes = {
+            "audio": raw.get("audio_sha256"),
+            "source_motion": raw.get("source_motion_sha256"),
+        }
+        actual_hashes = {field: sha256_file(path) for field, path in resolved_paths.items()}
+        for field, expected_sha256 in expected_hashes.items():
+            if expected_sha256 is not None and str(expected_sha256) != actual_hashes[field]:
+                raise ValueError(f"显式选择资产 SHA256 不匹配：{dataset}/{audio_key}/{field}")
+
+        row = dict(raw)
+        row.update(
+            {
+                "dataset": dataset,
+                "dataset_label": DATASET_LABELS[dataset],
+                "audio_key": audio_key,
+                "audio": str(resolved_paths["audio"]),
+                "source_motion": str(resolved_paths["source_motion"]),
+                "representative_motion": str(
+                    raw.get("representative_motion") or resolved_paths["source_motion"].name
+                ),
+                "high_quality_motion_count": int(raw.get("high_quality_motion_count", 1)),
+                "high_quality_motion_names": list(
+                    raw.get("high_quality_motion_names") or [resolved_paths["source_motion"].name]
+                ),
+                "audio_sha256": actual_hashes["audio"],
+                "source_motion_sha256": actual_hashes["source_motion"],
+                "selection_manifest_row": index,
+            }
+        )
+        selected.append(row)
+        counts[dataset] += 1
+
+    requested = payload.get("per_dataset_limits")
+    observed = {key: value for key, value in counts.items() if value}
+    if requested is not None:
+        requested = {str(key): int(value) for key, value in dict(requested).items()}
+        if requested != observed:
+            raise ValueError(f"显式选择清单配额不匹配：requested={requested}, observed={observed}")
+    summary = {
+        dataset: {
+            "dataset_label": DATASET_LABELS[dataset],
+            "requested_audio_count": count,
+            "selected_audio_count": count,
+            "selection_source": "explicit_sha256_bound_manifest",
+        }
+        for dataset, count in observed.items()
+    }
+    policy = str(
+        payload.get("selection_policy")
+        or "显式 SHA256 绑定清单，调用方负责记录数据 split 与选择依据"
+    )
+    return selected, summary, observed, policy
+
+
 def truncate_music_features(
     features: torch.Tensor,
     metadata: dict[str, Any],
@@ -841,8 +951,13 @@ def reusable_artifact(
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--audio-root", type=Path, required=True)
-    parser.add_argument("--ratings-root", type=Path, required=True)
+    parser.add_argument("--audio-root", type=Path)
+    parser.add_argument("--ratings-root", type=Path)
+    parser.add_argument(
+        "--selection-manifest",
+        type=Path,
+        help="使用显式 SHA256 绑定样本清单；此时不读取评分表或自建库 manifest。",
+    )
     parser.add_argument("--checkpoint", type=Path, required=True)
     parser.add_argument("--onnx", type=Path, required=True)
     parser.add_argument("--onnx-metadata", type=Path)
@@ -887,32 +1002,50 @@ def main() -> int:
     ):
         raise ValueError("max_duration_sec 必须为空或至少为 4 秒的有限数")
     paths = {}
-    for name in ("audio_root", "ratings_root", "checkpoint", "onnx", "kinematics", "stats", "mjcf"):
+    for name in ("checkpoint", "onnx", "kinematics", "stats", "mjcf"):
         paths[name] = getattr(args, name).expanduser().resolve(strict=True)
     output_root = args.output_root.expanduser().resolve()
     output_root.mkdir(parents=True, exist_ok=True)
-    selection_limits = {
-        "finedance": args.finedance_count or args.per_dataset,
-        "compas3d": args.compas3d_count or args.per_dataset,
-        "aioz_gdance": args.aioz_gdance_count or args.per_dataset,
-        "aistpp": args.aistpp_count or args.per_dataset,
-    }
-    selected, dataset_summary = select_hq_audio(
-        paths["ratings_root"], paths["audio_root"], per_dataset=selection_limits
-    )
-    if args.mine_count < 0:
-        raise ValueError("mine-count 不能为负数")
-    if args.mine_count:
-        if args.mine_manifest is None:
-            raise ValueError("mine-count 大于 0 时必须提供 --mine-manifest")
-        mine_selected, mine_summary = select_mine_bumi(
-            args.mine_manifest,
-            count=args.mine_count,
-            audio_keys=args.mine_audio_key or None,
+    explicit_selection_path = None
+    if args.selection_manifest is not None:
+        if args.audio_root is not None or args.ratings_root is not None or args.mine_count:
+            raise ValueError(
+                "--selection-manifest 不能与 --audio-root/--ratings-root/--mine-count 混用"
+            )
+        explicit_selection_path = args.selection_manifest.expanduser().resolve(strict=True)
+        selected, dataset_summary, selection_limits, selection_policy = load_explicit_selection(
+            explicit_selection_path
         )
-        selected.extend(mine_selected)
-        dataset_summary["mine_bumi"] = mine_summary
-        selection_limits["mine_bumi"] = args.mine_count
+    else:
+        if args.audio_root is None or args.ratings_root is None:
+            raise ValueError(
+                "未使用 --selection-manifest 时必须提供 --audio-root 和 --ratings-root"
+            )
+        paths["audio_root"] = args.audio_root.expanduser().resolve(strict=True)
+        paths["ratings_root"] = args.ratings_root.expanduser().resolve(strict=True)
+        selection_limits = {
+            "finedance": args.finedance_count or args.per_dataset,
+            "compas3d": args.compas3d_count or args.per_dataset,
+            "aioz_gdance": args.aioz_gdance_count or args.per_dataset,
+            "aistpp": args.aistpp_count or args.per_dataset,
+        }
+        selected, dataset_summary = select_hq_audio(
+            paths["ratings_root"], paths["audio_root"], per_dataset=selection_limits
+        )
+        if args.mine_count < 0:
+            raise ValueError("mine-count 不能为负数")
+        if args.mine_count:
+            if args.mine_manifest is None:
+                raise ValueError("mine-count 大于 0 时必须提供 --mine-manifest")
+            mine_selected, mine_summary = select_mine_bumi(
+                args.mine_manifest,
+                count=args.mine_count,
+                audio_keys=args.mine_audio_key or None,
+            )
+            selected.extend(mine_selected)
+            dataset_summary["mine_bumi"] = mine_summary
+            selection_limits["mine_bumi"] = args.mine_count
+        selection_policy = "公开四库使用评分 CSV 的 score=1 并按音频键字典序抽样；自建库使用正式 manifest 的 quality_accepted=true 并按 manifest 固定行序均匀抽样"
     # qpos30 模型必须自行学会 root roll/pitch；验证链路禁止直立投影。
     root_orientation_postprocess = None
     metadata_path = (
@@ -942,7 +1075,15 @@ def main() -> int:
     model_label = f"s{checkpoint_step:06d}" if checkpoint_step >= 0 else "checkpoint"
     selection = {
         "contract_version": "genmo.bumi_hq_full_music_selection.v5",
-        "selection_policy": "公开四库使用评分 CSV 的 score=1 并按音频键字典序抽样；自建库使用正式 manifest 的 quality_accepted=true 并按 manifest 固定行序均匀抽样",
+        "selection_policy": selection_policy,
+        "explicit_selection_manifest": (
+            None
+            if explicit_selection_path is None
+            else {
+                "path": str(explicit_selection_path),
+                "sha256": sha256_file(explicit_selection_path),
+            }
+        ),
         "per_dataset_limits": selection_limits,
         "dataset_summary": dataset_summary,
         "model": {
