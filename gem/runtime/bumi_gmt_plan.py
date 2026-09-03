@@ -22,7 +22,7 @@ from gem.runtime.gmt_trajectory import (
     IncrementalGmtFrameTimeline,
     qpos_timeline_to_gmt_frames,
 )
-from gem.runtime.robot_stream import IncrementalQposTimeline
+from gem.runtime.qpos_timeline import IncrementalQposTimeline
 
 
 def interpolate_qpos(start: np.ndarray, end: np.ndarray, count: int) -> np.ndarray:

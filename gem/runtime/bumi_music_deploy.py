@@ -34,6 +34,8 @@ from gem.robots.bumi.feature_codec import (
 )
 from gem.robots.bumi.postprocess import (
     BUMI_FOOT_LOCK_CONTRACT_VERSION,
+    BUMI_STREAMING_FOOT_LOCK_CONTRACT_VERSION,
+    BumiStreamingFootLocker,
     lock_bumi_foot_contacts,
 )
 from gem.runtime.music_only_trt import (
@@ -305,6 +307,21 @@ class BumiSlidingResult:
     foot_lock_active_contact: torch.Tensor
     foot_lock_contract_version: str | None
     chunks: tuple[BumiGeneratedChunk, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class BumiOnlineGeneratedChunk:
+    """在线窗口最终确定后立即提交的连续 qpos28 后缀及诊断量。"""
+
+    window_index: int
+    absolute_start_frame: int
+    total_frames: int
+    qpos: torch.Tensor
+    qpos_raw: torch.Tensor
+    foot_contact_logits: torch.Tensor
+    foot_lock_correction_xy: torch.Tensor
+    foot_lock_active_contact: torch.Tensor
+    is_last: bool
 
 
 def _yaw_from_wxyz(quaternion: torch.Tensor) -> torch.Tensor:
@@ -649,14 +666,203 @@ class BumiSlidingQposGenerator:
         )
 
 
+class BumiStreamingQposGenerator(BumiSlidingQposGenerator):
+    """常驻在线的 120/30/90 BUMI 生成器。
+
+    每个窗口都以 ``known_x0=None`` 独立 DDIM 生成。非末窗只提交已经最终确定的前
+    90 帧，并保留末尾 30 帧；下一窗先做航向对齐、线性 overlap-add 与根四元数
+    SLERP，再提交包含融合区的下一段。根水平位移只在最终提交顺序上积分一次，足底
+    接触状态、锚点和上一帧修正量也跨提交块保存。
+    """
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self.pending_frames = 0
+        self.emitted_frames = 0
+        self.windows_generated = 0
+        self._next_root_xy: torch.Tensor | None = None
+        self._previous_quaternion: torch.Tensor | None = None
+        self._foot_locker = BumiStreamingFootLocker(
+            self.endecoder.kinematics,
+            contact_is_logits=True,
+            fps=30,
+        )
+
+    def reset(self) -> None:
+        """开始新 revision 前清除积分、足锁和进度状态。"""
+
+        self.pending_frames = 0
+        self.emitted_frames = 0
+        self.windows_generated = 0
+        self._next_root_xy = None
+        self._previous_quaternion = None
+        self._foot_locker.reset()
+
+    def _compose_committed_qpos(self, state: torch.Tensor) -> torch.Tensor:
+        if state.ndim != 2 or state.shape[1] != 28 or len(state) <= 0:
+            raise ValueError("committed BUMI motion state must have shape [T,28]")
+        quaternion = state[:, 3:7]
+        if self._previous_quaternion is not None:
+            quaternion = make_quaternion_continuous(
+                torch.cat((self._previous_quaternion[None], quaternion), dim=0)
+            )[1:]
+        else:
+            quaternion = make_quaternion_continuous(quaternion)
+        world_delta = _heading_delta_to_world(state[:, :2], quaternion)
+        if self._next_root_xy is None:
+            self._next_root_xy = world_delta.new_zeros(2)
+        prefix = torch.cat((self._next_root_xy[None], world_delta[:-1]), dim=0)
+        horizontal = torch.cumsum(prefix, dim=0)
+        self._next_root_xy = horizontal[-1] + world_delta[-1]
+        default_z = self.endecoder.kinematics.default_qpos[2].to(state)
+        qpos = torch.cat(
+            (
+                horizontal,
+                state[:, 2:3] + default_z,
+                quaternion,
+                state[:, 7:],
+            ),
+            dim=-1,
+        )
+        self._previous_quaternion = quaternion[-1].detach().clone()
+        return qpos.contiguous()
+
+    @torch.inference_mode()
+    def generate(self, music: torch.Tensor, *, seed: int = 42):
+        """逐块产出最终 qpos；迭代器未取下一项时不会生成下一窗口。"""
+
+        features = torch.as_tensor(music).detach().float().cpu()
+        if features.ndim != 2 or features.shape[1] != MUSIC_DIM or len(features) <= 0:
+            raise ValueError(f"music must have shape [T,{MUSIC_DIM}] with T > 0")
+        if not bool(torch.isfinite(features).all()):
+            raise ValueError("music contains NaN or Inf")
+        self.reset()
+        total_frames = len(features)
+        windows = plan_sliding_windows(total_frames)
+        pending_state: torch.Tensor | None = None
+        pending_contact: torch.Tensor | None = None
+
+        for window_number, window in enumerate(windows):
+            normalized = self.generator.generate_window(
+                padded_music_window(features, window),
+                valid_length=window.valid_length,
+                seed=derive_window_seed(seed, window.index),
+                known_x0=None,
+            )[: window.valid_length]
+            auxiliary = self.generator.last_aux_output
+            if auxiliary is None or len(auxiliary) != 1:
+                raise RuntimeError(
+                    "BUMI online generation requires one contact-head auxiliary output"
+                )
+            candidate_contact = auxiliary[0][0, : window.valid_length]
+            if candidate_contact.shape != (window.valid_length, 2) or not bool(
+                torch.isfinite(candidate_contact).all()
+            ):
+                raise RuntimeError("BUMI online contact head returned an invalid tensor")
+            candidate_state = self._motion_state(self.endecoder.decode(normalized))
+            is_last_window = window_number == len(windows) - 1
+
+            if pending_state is None:
+                aligned_state = candidate_state
+                aligned_contact = candidate_contact
+                commit_end = (
+                    window.valid_length if is_last_window else window.valid_length - OVERLAP_FRAMES
+                )
+                committed_state = aligned_state[:commit_end]
+                committed_contact = aligned_contact[:commit_end]
+            else:
+                if (
+                    window.known_length != OVERLAP_FRAMES
+                    or len(pending_state) != OVERLAP_FRAMES
+                    or pending_contact is None
+                    or len(pending_contact) != OVERLAP_FRAMES
+                ):
+                    raise RuntimeError("BUMI online pending overlap must contain exactly 30 frames")
+                aligned_state = _align_motion_state_rotation_to_reference(
+                    candidate_state, pending_state[0]
+                )
+                self._verify_alignment(pending_state[0], aligned_state[0], window.index)
+                blended_state = _blend_motion_state_overlap(
+                    pending_state, aligned_state[:OVERLAP_FRAMES]
+                )
+                alpha = (
+                    torch.arange(
+                        1,
+                        OVERLAP_FRAMES + 1,
+                        device=candidate_contact.device,
+                        dtype=candidate_contact.dtype,
+                    )
+                    / float(OVERLAP_FRAMES + 1)
+                ).unsqueeze(-1)
+                blended_contact = torch.lerp(
+                    pending_contact, candidate_contact[:OVERLAP_FRAMES], alpha
+                )
+                aligned_contact = candidate_contact
+                commit_end = (
+                    window.valid_length if is_last_window else window.valid_length - OVERLAP_FRAMES
+                )
+                committed_state = torch.cat(
+                    (blended_state, aligned_state[OVERLAP_FRAMES:commit_end]), dim=0
+                )
+                committed_contact = torch.cat(
+                    (blended_contact, aligned_contact[OVERLAP_FRAMES:commit_end]), dim=0
+                )
+
+            if len(committed_state) <= 0:
+                raise RuntimeError("BUMI online window produced no committed frame")
+            if is_last_window:
+                pending_state = None
+                pending_contact = None
+            else:
+                pending_state = aligned_state[commit_end:].clone()
+                pending_contact = aligned_contact[commit_end:].clone()
+                if len(pending_state) != OVERLAP_FRAMES:
+                    raise RuntimeError("BUMI online window did not retain a 30-frame tail")
+            self.pending_frames = 0 if pending_state is None else len(pending_state)
+            self.windows_generated += 1
+
+            raw_qpos = self._compose_committed_qpos(committed_state)
+            if self.apply_foot_lock:
+                foot_lock = self._foot_locker.process(raw_qpos, committed_contact)
+                qpos = foot_lock.qpos
+                correction = foot_lock.correction_xy
+                active = foot_lock.active_contact
+            else:
+                qpos = raw_qpos
+                correction = raw_qpos.new_zeros((len(raw_qpos), 2))
+                active = torch.zeros((len(raw_qpos), 2), dtype=torch.bool, device=raw_qpos.device)
+            absolute_start = self.emitted_frames
+            self.emitted_frames += len(qpos)
+            is_last = self.emitted_frames == total_frames
+            if is_last != is_last_window:
+                raise RuntimeError("BUMI online final-window/frame accounting mismatch")
+            yield BumiOnlineGeneratedChunk(
+                window_index=window.index,
+                absolute_start_frame=absolute_start,
+                total_frames=total_frames,
+                qpos=qpos.detach().cpu(),
+                qpos_raw=raw_qpos.detach().cpu(),
+                foot_contact_logits=committed_contact.detach().cpu(),
+                foot_lock_correction_xy=correction.detach().cpu(),
+                foot_lock_active_contact=active.detach().cpu(),
+                is_last=is_last,
+            )
+
+        if self.emitted_frames != total_frames or self.pending_frames != 0:
+            raise RuntimeError("BUMI online generation did not flush the complete timeline")
+
+
 __all__ = [
     "BUMI_ENGINE_CONTRACT",
     "BUMI_MOTION_DIM",
     "BUMI_SLIDING_QPOS_CONTRACT_VERSION",
     "BumiGeneratedChunk",
+    "BumiOnlineGeneratedChunk",
     "BumiOrtStepRunner",
     "BumiSlidingQposGenerator",
     "BumiSlidingResult",
+    "BumiStreamingQposGenerator",
     "BumiTensorRTStepRunner",
+    "BUMI_STREAMING_FOOT_LOCK_CONTRACT_VERSION",
     "bumi_engine_cache_key",
 ]
