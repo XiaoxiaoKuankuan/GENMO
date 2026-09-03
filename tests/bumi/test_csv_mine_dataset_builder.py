@@ -204,3 +204,41 @@ def test_feature_failure_removes_staging_and_does_not_publish(
         )
     assert not output.exists()
     assert not list(tmp_path.glob(".failed.staging-*"))
+
+
+def test_verified_reference_reuses_only_audio_and_music_features(tmp_path: Path) -> None:
+    """参考库只复用同源WAV/EDGE35，动作、当前顺序和接触仍重新发布。"""
+
+    inputs = _source_tree(tmp_path)
+    reference = tmp_path / "reference"
+    convert_dataset(
+        source_root=inputs["source"],
+        output_root=reference,
+        kinematics_path=KINEMATICS_PATH,
+        quality_config_path=inputs["quality"],
+        retarget_config_path=inputs["retarget"],
+        feature_extractor=_fake_edge,
+    )
+
+    def must_not_extract(_audio_path: Path, *, target_fps: int):
+        raise AssertionError(f"参考复用模式不应重新提取EDGE35: {target_fps}")
+
+    output = tmp_path / "reused"
+    report = convert_dataset(
+        source_root=inputs["source"],
+        output_root=output,
+        kinematics_path=KINEMATICS_PATH,
+        quality_config_path=inputs["quality"],
+        retarget_config_path=inputs["retarget"],
+        reference_root=reference,
+        feature_extractor=must_not_extract,
+    )
+    assert report["music_audio_reused_from_reference"] is True
+    assert report["reference_root"] == str(reference.resolve())
+    for row in map(
+        json.loads,
+        (output / "manifests/train.jsonl").read_text(encoding="utf-8").splitlines(),
+    ):
+        payload = torch.load(output / row["motion_path"], map_location="cpu", weights_only=False)
+        assert payload["joint_order_conversion"]["method"] == "exact_name_reorder"
+        assert payload["foot_contact_contract_version"].startswith("genmo.bumi_foot_contact.")

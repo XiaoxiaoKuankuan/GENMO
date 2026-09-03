@@ -51,6 +51,7 @@ if str(REPO_ROOT) not in sys.path:
 from gem.datasets.music_dance.music_dance_bumi import (  # noqa: E402
     BUMI_MUSIC_CONTRACT_VERSION,
     BumiMusicDatasetReader,
+    resolve_contract_path,
     sha256_file,
 )
 from gem.robots.bumi.contacts import (  # noqa: E402
@@ -664,6 +665,7 @@ def convert_dataset(
     kinematics_path: Path,
     quality_config_path: Path,
     retarget_config_path: Path,
+    reference_root: Path | None = None,
     feature_extractor: Callable[..., tuple[torch.Tensor, dict[str, Any]]] = extract_edge_baseline35,
 ) -> dict[str, Any]:
     """全有或全无地构建一个正式 ``mine_bumi`` train 数据根。"""
@@ -673,6 +675,9 @@ def convert_dataset(
     kinematics_path = kinematics_path.expanduser().resolve(strict=True)
     quality_config_path = quality_config_path.expanduser().resolve(strict=True)
     retarget_config_path = retarget_config_path.expanduser().resolve(strict=True)
+    resolved_reference_root = (
+        None if reference_root is None else reference_root.expanduser().resolve(strict=True)
+    )
     if output_root.exists():
         raise FileExistsError(f"拒绝覆盖已有输出: {output_root}")
     config = load_quality_config(quality_config_path)
@@ -691,6 +696,26 @@ def convert_dataset(
         config=config,
         quality_config_sha256=quality_sha,
     )
+    reference_rows: dict[str, dict[str, Any]] = {}
+    if resolved_reference_root is not None:
+        reference_manifest = resolved_reference_root / "manifests" / "train.jsonl"
+        if not reference_manifest.is_file():
+            raise FileNotFoundError(f"参考数据缺少 train manifest: {reference_manifest}")
+        for line_number, line in enumerate(
+            reference_manifest.read_text(encoding="utf-8").splitlines(), 1
+        ):
+            row = json.loads(line)
+            sample_id = str(row.get("sample_id", ""))
+            if not sample_id or sample_id in reference_rows:
+                raise ValueError(f"{reference_manifest}:{line_number}: sample_id 为空或重复")
+            reference_rows[sample_id] = row
+        expected_ids = {item.source.sample_id for item in accepted}
+        if set(reference_rows) != expected_ids:
+            raise ValueError(
+                "参考数据 sample_id 与本次 PASS 集不完全一致: "
+                f"missing={sorted(expected_ids - set(reference_rows))}, "
+                f"extra={sorted(set(reference_rows) - expected_ids)}"
+            )
     output_root.parent.mkdir(parents=True, exist_ok=True)
     staging = Path(tempfile.mkdtemp(prefix=f".{output_root.name}.staging-", dir=output_root.parent))
     try:
@@ -711,11 +736,57 @@ def convert_dataset(
             feature_relative = Path("musicfeat_v2") / f"{sample_id}_musicfeat_fps30.pt"
             audio_relative = Path("audio") / f"{sample_id}.wav"
             audio_output = staging / audio_relative
-            output_audio_frames = write_cropped_wav(
-                pair.audio_path, audio_output, item.target_frames, config
-            )
-            music, music_metadata = feature_extractor(audio_output, target_fps=30)
-            music = torch.as_tensor(music).detach().cpu().float()
+            if resolved_reference_root is None:
+                output_audio_frames = write_cropped_wav(
+                    pair.audio_path, audio_output, item.target_frames, config
+                )
+                music, music_metadata = feature_extractor(audio_output, target_fps=30)
+                music = torch.as_tensor(music).detach().cpu().float()
+            else:
+                reference_row = reference_rows[sample_id]
+                if int(reference_row.get("num_frames", -1)) != item.target_frames:
+                    raise ValueError(
+                        f"{sample_id}: 参考帧数{reference_row.get('num_frames')}与目标"
+                        f"{item.target_frames}不一致"
+                    )
+                original_audio_sha = reference_row.get("original_source_audio_sha256")
+                if original_audio_sha not in (None, item.source_audio_sha256):
+                    raise ValueError(f"{sample_id}: 参考数据绑定的原始 WAV SHA 不一致")
+                reference_audio = resolve_contract_path(
+                    resolved_reference_root,
+                    reference_row.get("audio_path"),
+                    "audio_path",
+                    sample_id,
+                )
+                reference_feature = resolve_contract_path(
+                    resolved_reference_root,
+                    reference_row.get("music_feature_path"),
+                    "music_feature_path",
+                    sample_id,
+                )
+                audio_output.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(reference_audio, audio_output)
+                output_audio_frames, output_audio_duration = read_wav_metadata(audio_output, config)
+                if not math.isclose(
+                    output_audio_duration,
+                    item.target_frames / 30.0,
+                    rel_tol=0.0,
+                    abs_tol=1.0 / config.wav_sample_rate,
+                ):
+                    raise ValueError(f"{sample_id}: 参考 WAV 时长与目标 qpos 不一致")
+                music = (
+                    torch.as_tensor(
+                        torch.load(reference_feature, map_location="cpu", weights_only=False)
+                    )
+                    .detach()
+                    .cpu()
+                    .float()
+                )
+                music_metadata = {
+                    "feature_frames": int(len(music)),
+                    "feature_source": "verified_reference_dataset",
+                    "reference_root": str(resolved_reference_root),
+                }
             if music.ndim != 2 or music.shape[1] != 35 or not bool(torch.isfinite(music).all()):
                 raise ValueError(f"{sample_id}: EDGE35 必须为 finite [T,35]，实际 {music.shape}")
             if len(music) < item.target_frames:
@@ -885,6 +956,10 @@ def convert_dataset(
             "generated_at_utc": datetime.now(timezone.utc).isoformat(),
             "source_files_modified": False,
             "source_root": str(source_root),
+            "reference_root": (
+                None if resolved_reference_root is None else str(resolved_reference_root)
+            ),
+            "music_audio_reused_from_reference": resolved_reference_root is not None,
             "output_root": str(output_root),
             "dataset_name": config.dataset_name,
             "candidate_sequences": len(pairs),
@@ -943,6 +1018,14 @@ def main() -> None:
         default=(REPO_ROOT / "configs/bumi/quality_filter_csv_mine_robot_retargeter_fe934_v2.yaml"),
     )
     parser.add_argument("--retarget-config", required=True, type=Path)
+    parser.add_argument(
+        "--reference-root",
+        type=Path,
+        help=(
+            "可选的同一99条旧正式数据根；只复用经SHA和帧数验证的WAV/EDGE35，"
+            "qpos、关节顺序、落地和接触仍全部重新生成"
+        ),
+    )
     args = parser.parse_args()
     report = convert_dataset(
         source_root=args.source_root,
@@ -950,6 +1033,7 @@ def main() -> None:
         kinematics_path=args.kinematics,
         quality_config_path=args.quality_config,
         retarget_config_path=args.retarget_config,
+        reference_root=args.reference_root,
     )
     print(json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True))
 
