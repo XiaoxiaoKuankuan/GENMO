@@ -206,11 +206,43 @@ class ResidentBumiConsole:
         self.stop = threading.Event()
         self.generation_thread: threading.Thread | None = None
         self.heartbeat_thread = threading.Thread(target=self._heartbeat_loop, daemon=True)
+        # 生成线程、心跳线程和交互主线程都会读写当前请求。旧心跳响应可能晚于新 BEGIN
+        # 返回，必须把“读取身份”和“按身份清空”变成同一套受锁保护的条件操作，不能让旧
+        # revision 的 STAND 响应误删新任务。
+        self.request_state_lock = threading.RLock()
         self.current_revision = -1
         self.current_request_id: str | None = None
         self.last_error: str | None = None
         self.last_timing: dict[str, Any] = {}
         self.timing_lock = threading.Lock()
+
+    def _request_state(self) -> tuple[str | None, int]:
+        """返回供跨线程请求使用的一致 ``request_id/revision`` 快照。"""
+
+        with self.request_state_lock:
+            return self.current_request_id, self.current_revision
+
+    def _replace_request_state(self, request_id: str | None, revision: int) -> None:
+        """原子替换控制台当前请求身份。"""
+
+        with self.request_state_lock:
+            self.current_request_id = request_id
+            self.current_revision = int(revision)
+
+    def _clear_request_if_matches(self, request_id: str, revision: int) -> bool:
+        """只清理由同一次请求产生的状态，拒绝陈旧心跳响应跨 revision 清理。"""
+
+        with self.request_state_lock:
+            if self.current_request_id != request_id or self.current_revision != int(revision):
+                return False
+            self.current_request_id = None
+            return True
+
+    def _clear_request(self) -> None:
+        """由本地显式取消无条件清空当前活动请求。"""
+
+        with self.request_state_lock:
+            self.current_request_id = None
 
     def _validate_onnx_identity(self) -> dict[str, Any]:
         metadata = json.loads(self.metadata_path.read_text(encoding="utf-8"))
@@ -241,7 +273,7 @@ class ResidentBumiConsole:
         status = self.bridge.request({"command": "status"})
         if not status.get("ok"):
             raise RuntimeError(f"bridge status failed: {status}")
-        self.current_revision = int(status["revision"])
+        self._replace_request_state(None, int(status["revision"]))
         self.runner(
             torch.zeros(1, 120, 30, device=self.device),
             torch.tensor([999], device=self.device),
@@ -288,7 +320,7 @@ class ResidentBumiConsole:
 
     def _heartbeat_loop(self) -> None:
         while not self.stop.wait(self.args.heartbeat_seconds):
-            request_id = self.current_request_id
+            request_id, revision = self._request_state()
             if request_id is None:
                 continue
             try:
@@ -296,11 +328,11 @@ class ResidentBumiConsole:
                     {
                         "command": "heartbeat",
                         "request_id": request_id,
-                        "revision": self.current_revision,
+                        "revision": revision,
                     }
                 )
                 if response.get("state") == "STAND":
-                    self.current_request_id = None
+                    self._clear_request_if_matches(request_id, revision)
             except Exception as exc:
                 self.last_error = f"heartbeat: {type(exc).__name__}: {exc}"
 
@@ -327,8 +359,7 @@ class ResidentBumiConsole:
         self.cancel = threading.Event()
         revision = int(status["revision"]) + 1
         request_id = uuid.uuid4().hex
-        self.current_revision = revision
-        self.current_request_id = None
+        self._replace_request_state(None, revision)
         self.last_error = None
         self.generation_thread = threading.Thread(
             target=self._generate,
@@ -392,7 +423,10 @@ class ResidentBumiConsole:
             )
             if not begin.get("ok"):
                 raise RuntimeError(f"bridge rejected begin: {begin}")
-            self.current_request_id = request_id
+            with self.request_state_lock:
+                if self.current_revision != revision:
+                    raise RuntimeError("newer console revision superseded this BEGIN")
+                self.current_request_id = request_id
             if cancel.is_set():
                 self.bridge.request({"command": "stand"})
                 return
@@ -488,15 +522,16 @@ class ResidentBumiConsole:
                 self.bridge.request({"command": "stand"})
             except Exception:
                 pass
-            self.current_request_id = None
+            self._clear_request_if_matches(request_id, revision)
 
     def stand(self) -> dict[str, Any]:
         self.cancel.set()
-        self.current_request_id = None
+        self._clear_request()
         return self.bridge.request({"command": "stand"})
 
     def status(self) -> dict[str, Any]:
         bridge = self.bridge.request({"command": "status"})
+        request_id, revision = self._request_state()
         with self.timing_lock:
             timing = copy.deepcopy(self.last_timing)
         return {
@@ -505,8 +540,8 @@ class ResidentBumiConsole:
             "cuda_graph": getattr(self.runner, "cuda_graph", None) is not None,
             "generation_active": self.generation_thread is not None
             and self.generation_thread.is_alive(),
-            "request_id": self.current_request_id,
-            "revision": self.current_revision,
+            "request_id": request_id,
+            "revision": revision,
             "last_error": self.last_error,
             "last_timing": timing,
             "bridge": bridge,

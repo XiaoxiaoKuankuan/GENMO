@@ -199,6 +199,9 @@ class BumiOnlineBridge:
         self.audio_started = False
         self.stand_building = False
         self.last_error: str | None = None
+        # ``last_error`` 记录最近一次协议异常，迟到块可能更新它；安全返回的首要原因必须
+        # 独立保存，直到下一次 BEGIN 才清空，避免根因被次生的 stale/no-active 错误覆盖。
+        self.last_stand_reason: str | None = None
         self.plan_build_last_ms: float | None = None
         self.plan_build_max_ms = 0.0
         self.publish_ticks = 0
@@ -386,6 +389,8 @@ class BumiOnlineBridge:
             self.audio_started = False
             self.plan_build_last_ms = None
             self.plan_build_max_ms = 0.0
+            self.last_error = None
+            self.last_stand_reason = None
             self.request = {
                 "request_id": request_id,
                 "revision": revision,
@@ -411,12 +416,15 @@ class BumiOnlineBridge:
             started = time.perf_counter()
             snapshot = builder.append(safe_qpos, is_last=chunk.is_last)
             elapsed_ms = (time.perf_counter() - started) * 1000.0
-        except Exception:
-            self.request_stand("qpos safety/plan failure")
+        except Exception as exc:
+            self.request_stand(f"qpos safety/plan failure: {type(exc).__name__}: {exc}")
             raise
         with self.lock:
             if revision != self.tracker.revision or builder is not self.plan_builder:
                 raise ValueError("qpos chunk became stale while its plan was being built")
+            # 一个通过 CRC、revision、身份、安全门和增量计划检查的 qpos 块本身就是强
+            # 存活证据。即使独立心跳线程恰逢调度延迟，也不应在连续生成期间误判超时。
+            self.last_heartbeat = time.monotonic()
             self.plan_snapshot = snapshot
             self.accepted_chunks += 1
             self.plan_build_last_ms = elapsed_ms
@@ -441,6 +449,14 @@ class BumiOnlineBridge:
                 self.tracker.invalidate()
                 self.request = None
                 return
+            if self.state == "STAND_WAIT_ACK" and self.request is None:
+                # 原始失败已经使活动 revision 失效；生成线程随后补发的 stand 只是清理
+                # 动作，不应再次构造返回轨迹或重复提升 revision。
+                return
+            # 只让首次导致安全返回的原因成为本轮根因。返回途中收到的迟到块、重复 stand
+            # 或 ACK 次生错误仍可写入 last_error，但不得覆盖这里。
+            if self.request is not None or self.last_stand_reason is None:
+                self.last_stand_reason = str(reason)
             self.stand_building = True
             snapshot = self.plan_snapshot
             current = self.idle_qpos.copy()
@@ -520,6 +536,7 @@ class BumiOnlineBridge:
             "active_identity": None if self.request is None else self.request["identity"].as_dict(),
             "publish_hz": self.publish_ticks / max(1.0e-6, time.monotonic() - self.publish_started),
             "publish_p99_jitter_ms": self.publish_p99_jitter_ms,
+            "last_stand_reason": self.last_stand_reason,
             "last_error": self.last_error,
         }
 

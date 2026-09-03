@@ -10,6 +10,8 @@ from __future__ import annotations
 
 import ast
 import json
+import threading
+import time
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -48,6 +50,7 @@ from gem.runtime.bumi_online_stream import (
 from gem.runtime.gmt_trajectory import resample_qpos_timeline
 from gem.runtime.qpos_timeline import IncrementalQposTimeline
 from scripts.demo import demo_bumi_gmt_bridge as bridge_module
+from scripts.demo import demo_music_bumi_console as console_module
 
 
 def _stats(path: Path, kinematics: BumiKinematics) -> Path:
@@ -415,14 +418,59 @@ def test_bridge_primes_two_chunks_and_stand_invalidates_late_revision(
         is_last=True,
         identity=identity,
     )
+    bridge.last_heartbeat = 0.0
+    accepted_at = time.monotonic()
     assert bridge.accept_chunk(first)["state"] == "PRIMING"
+    assert bridge.last_heartbeat >= accepted_at
     ready = bridge.accept_chunk(second)
     assert ready["state"] == "WAIT_ACK"
     assert ready["action_complete"] and ready["accepted_source_frames"] == 210
     bridge.request_stand("test cancel")
     assert bridge.state == "STAND_WAIT_ACK" and bridge.tracker.revision == 10
+    assert bridge.status_locked()["last_stand_reason"] == "test cancel"
     with pytest.raises(ValueError, match="no active request"):
         bridge.accept_chunk(second)
+    bridge.last_error = "ValueError: no active request accepts qpos chunks"
+    bridge.request_stand("operator stand")
+    status = bridge.status_locked()
+    assert status["revision"] == 10
+    assert status["last_stand_reason"] == "test cancel"
+    assert status["last_error"] == "ValueError: no active request accepts qpos chunks"
+
+
+def test_console_stale_heartbeat_response_cannot_clear_new_request() -> None:
+    console = object.__new__(console_module.ResidentBumiConsole)
+    console.request_state_lock = threading.RLock()
+    console.current_request_id = "old-request"
+    console.current_revision = 19
+    console.last_error = None
+    console.args = SimpleNamespace(heartbeat_seconds=0.001)
+
+    class _StopAfterOneHeartbeat:
+        calls = 0
+
+        def wait(self, timeout: float) -> bool:
+            assert timeout == 0.001
+            self.calls += 1
+            return self.calls > 1
+
+    class _DelayedOldHeartbeatBridge:
+        def request(self, payload: dict[str, object]) -> dict[str, object]:
+            assert payload == {
+                "command": "heartbeat",
+                "request_id": "old-request",
+                "revision": 19,
+            }
+            # 模拟旧心跳在请求期间阻塞，而交互线程已经建立 revision=20 的新任务。
+            console._replace_request_state("new-request", 20)
+            return {"ok": True, "state": "STAND"}
+
+    console.stop = _StopAfterOneHeartbeat()
+    console.bridge = _DelayedOldHeartbeatBridge()
+    console._heartbeat_loop()
+    assert console._request_state() == ("new-request", 20)
+    assert console._clear_request_if_matches("new-request", 20)
+    assert console._request_state() == (None, 20)
 
 
 def test_new_online_imports_are_isolated_from_legacy_human_chain() -> None:
