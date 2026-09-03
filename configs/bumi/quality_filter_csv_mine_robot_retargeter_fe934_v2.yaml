@@ -1,12 +1,13 @@
-# 自建 BUMI CSV/WAV 数据的 0.25 rad 离线质量与发布规则。
+# 自建 BUMI CSV/WAV 对齐当前 robot_retargeter BUMI3 资产的离线质量与发布规则。
 #
-# 该配置绑定当前 GENMO BUMI kinematics，并描述原始 CSV 的 28 列 xyzw 契约、允许的
-# 30/50 Hz 帧率、48 kHz 双声道 PCM WAV、明确排除曲目及可由 qpos/FK 复算的质量阈值。
-# 它不声称原始 CSV 带有 SONIC 七字段 NPZ 的 body velocity，也不把离线 PASS 等同于
-# GMT 动力学跟踪或实物安全通过。发布工具会把本文件 SHA 写入 dataset_info 和 motion。
-contract_version: genmo.bumi_csv_quality_config.v1
+# 原始 CSV 来自旧 BUMI3 导出器，关节列为“腿、腰、手臂”；当前 fe934 MJCF 的 MuJoCo
+# qpos 顺序为“腰、手臂、腿”。发布工具必须按 source_joint_names 精确重排，禁止把列位置
+# 当作关节语义。源动作最多允许 0.01 rad 的新旧限位差，发布时会裁到当前 XML 限位，
+# 正式 reader 仍按 0.0001 rad 严格检查。PASS 只说明离线数据契约与运动学检查通过，
+# 不等同于 SONIC/GMT 动力学跟踪或实物安全通过。
+contract_version: genmo.bumi_csv_quality_config.v2
 dataset_name: mine_bumi
-expected_kinematics_sha256: 226306c217a39643a32ccc641b63e72c8ce0bf307af1fd6781b739fb694bcda0
+expected_kinematics_sha256: c08731704dccece11351b6fa877e30bac5ca2a8d363de30af7ca2ea1398f4029
 
 source:
   allowed_fps: [30, 50]
@@ -40,6 +41,28 @@ source:
     - arm.roll.r
     - arm.yaw.r
     - elbow.pitch.r
+  source_joint_names:
+    - l_leg_pitch_joint
+    - l_leg_roll_joint
+    - l_leg_yaw_joint
+    - l_knee_pitch_joint
+    - l_ankle_pitch_joint
+    - l_ankle_roll_joint
+    - r_leg_pitch_joint
+    - r_leg_roll_joint
+    - r_leg_yaw_joint
+    - r_knee_pitch_joint
+    - r_ankle_pitch_joint
+    - r_ankle_roll_joint
+    - waist_yaw_joint
+    - l_arm_pitch_joint
+    - l_arm_roll_joint
+    - l_arm_yaw_joint
+    - l_elbow_pitch_joint
+    - r_arm_pitch_joint
+    - r_arm_roll_joint
+    - r_arm_yaw_joint
+    - r_elbow_pitch_joint
   wav_sample_rate: 48000
   wav_channels: 2
   wav_sample_width_bytes: 2
@@ -53,7 +76,7 @@ selection:
 hard_thresholds:
   minimum_frames: 4
   quaternion_norm_error_max: 0.001
-  joint_limit_violation_max: 0.25
+  joint_limit_violation_max: 0.01
   root_height_min_absolute: -0.02
   root_height_max_absolute: 2.1
 

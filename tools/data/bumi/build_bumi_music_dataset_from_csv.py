@@ -4,14 +4,16 @@
 输入目录必须包含 ``dance_2_csv``、``dance_2_音频``、``dance_3_csv`` 和
 ``dance_3_音频``。工具先严格解析 ``bumi_<歌曲>_<fps>fps.csv``，核对唯一 WAV、
 28 列表头、帧率、finite、xyzw 单位四元数、关节限位、根高度、有限差分动力学和
-绑定 kinematics 的 FK 贴地规则；配置中排除的 APT啦啦操会进入审计报告，但绝不会
-进入正式 manifest。
+绑定 kinematics 的 FK 贴地规则；CSV 的 21 个关节按配置中的源关节名重排到目标
+kinematics 顺序，绝不假设新旧 BUMI3 MJCF 的 qpos 顺序相同。配置中排除的
+APT啦啦操会进入审计报告，但绝不会进入正式 manifest。
 
 通过项将根四元数改为连续 wxyz；50 Hz 的根位置/关节用线性插值、根旋转用最短弧
 SLERP 重采样到 30 Hz。目标帧数取动作和 WAV 在 30 Hz 下都能完整覆盖的整数帧下界，
 输出 WAV 精确裁成 ``T / 30`` 秒后才提取 EDGE baseline35，并将 EDGE35 显式裁成
-``[T,35]``。随后用同一 kinematics 对 qpos28 做 FK，给整条 root Z 加常量，使所有
-body origin 的最小 Z 为零。
+``[T,35]``。随后把仅由新旧 MJCF 关节上限微差造成的至多 0.01 rad 源越界裁回当前
+限位，用同一 kinematics 对 qpos28 做 FK，给整条 root Z 加常量，使所有 body origin
+的最小 Z 为零，并在完整序列上重算版本化左右脚接触标签。
 
 motion、EDGE35、裁后 WAV、train manifest、dataset_info、逐条质量报告和转换报告均
 先写入同盘 staging；完整 strict reader 与三类 SHA 验证通过后才原子发布。工具拒绝
@@ -51,6 +53,10 @@ from gem.datasets.music_dance.music_dance_bumi import (  # noqa: E402
     BumiMusicDatasetReader,
     sha256_file,
 )
+from gem.robots.bumi.contacts import (  # noqa: E402
+    BUMI_CONTACT_CONTRACT_VERSION,
+    derive_bumi_foot_contact,
+)
 from gem.robots.bumi.kinematics import BumiKinematics  # noqa: E402
 from gem.utils.music_features import extract_edge_baseline35  # noqa: E402
 from tools.data.bumi.build_bumi_music_dataset_from_sonic_npz import (  # noqa: E402
@@ -59,10 +65,11 @@ from tools.data.bumi.build_bumi_music_dataset_from_sonic_npz import (  # noqa: E
     normalize_body_origin_ground,
 )
 
-CSV_QUALITY_CONTRACT_VERSION = "genmo.bumi_csv_quality_config.v1"
-CSV_SOURCE_CONTRACT_VERSION = "genmo.bumi_csv_qpos_xyzw.v1"
+CSV_QUALITY_CONTRACT_VERSION = "genmo.bumi_csv_quality_config.v2"
+CSV_SOURCE_CONTRACT_VERSION = "genmo.bumi_csv_qpos_xyzw_named.v2"
 CSV_RESAMPLE_CONTRACT_VERSION = "genmo.bumi_csv_to_30hz.v1"
 GROUND_SEMANTICS = "legacy_body_origin_min_zero"
+OUTPUT_JOINT_LIMIT_TOLERANCE_RAD = 1.0e-4
 CSV_NAME = re.compile(r"^bumi_(.+)_(30|50)fps$")
 
 
@@ -72,6 +79,7 @@ class CsvQualityConfig:
     expected_kinematics_sha256: str
     allowed_fps: tuple[int, ...]
     csv_header: tuple[str, ...]
+    source_joint_names: tuple[str, ...]
     wav_sample_rate: int
     wav_channels: int
     wav_sample_width_bytes: int
@@ -152,6 +160,9 @@ def load_quality_config(path: str | Path) -> CsvQualityConfig:
         raise ValueError("source.allowed_fps 必须严格为 [30, 50]")
     if source.get("quaternion_convention") != "xyzw":
         raise ValueError("source.quaternion_convention 必须为 xyzw")
+    source_joint_names = tuple(map(str, source.get("source_joint_names", ())))
+    if len(source_joint_names) != 21 or len(set(source_joint_names)) != 21:
+        raise ValueError("source.source_joint_names 必须是 21 个不重复关节名")
     excluded = tuple(map(str, selection.get("excluded_songs", ())))
     if not excluded or len(excluded) != len(set(excluded)):
         raise ValueError("selection.excluded_songs 必须非空且不重复")
@@ -202,6 +213,7 @@ def load_quality_config(path: str | Path) -> CsvQualityConfig:
         expected_kinematics_sha256=digest,
         allowed_fps=allowed_fps,
         csv_header=header,
+        source_joint_names=source_joint_names,
         wav_sample_rate=_positive_int(source, "wav_sample_rate"),
         wav_channels=_positive_int(source, "wav_channels"),
         wav_sample_width_bytes=_positive_int(source, "wav_sample_width_bytes"),
@@ -263,7 +275,9 @@ def discover_source_pairs(source_root: Path, config: CsvQualityConfig) -> list[S
             )
         orphans = set(audio_paths) - consumed_audio
         if orphans:
-            raise ValueError(f"{audio_root}: 存在未配对 WAV: {[path.name for path in sorted(orphans)]}")
+            raise ValueError(
+                f"{audio_root}: 存在未配对 WAV: {[path.name for path in sorted(orphans)]}"
+            )
     sample_ids = [pair.sample_id for pair in pairs]
     if len(sample_ids) != len(set(sample_ids)):
         raise ValueError("自建数据 sample_id 重复")
@@ -274,8 +288,12 @@ def discover_source_pairs(source_root: Path, config: CsvQualityConfig) -> list[S
     return pairs
 
 
-def load_csv_qpos(pair: SourcePair, config: CsvQualityConfig) -> np.ndarray:
-    """读取 28 列 CSV，并把根四元数从 xyzw 变为连续 wxyz。"""
+def load_csv_qpos(
+    pair: SourcePair,
+    config: CsvQualityConfig,
+    target_joint_names: Sequence[str],
+) -> np.ndarray:
+    """读取 CSV，把 xyzw 变为 wxyz，并按名字转换到目标 MJCF 关节顺序。"""
 
     with pair.csv_path.open("r", encoding="utf-8-sig", newline="") as handle:
         header = tuple(next(csv.reader(handle)))
@@ -290,7 +308,19 @@ def load_csv_qpos(pair: SourcePair, config: CsvQualityConfig) -> np.ndarray:
         raise ValueError(f"{pair.csv_path}: 帧数不足或包含 NaN/Inf")
     quaternion_xyzw = value[:, 3:7]
     quaternion_wxyz = make_quaternion_continuous_np(quaternion_xyzw[:, [3, 0, 1, 2]])
-    qpos = np.concatenate((value[:, :3], quaternion_wxyz, value[:, 7:]), axis=-1)
+    target_names = tuple(map(str, target_joint_names))
+    if len(target_names) != 21 or len(set(target_names)) != 21:
+        raise ValueError("target_joint_names 必须是 21 个不重复关节名")
+    if set(target_names) != set(config.source_joint_names):
+        raise ValueError(
+            "CSV 源关节集合与目标 kinematics 不一致: "
+            f"source_only={sorted(set(config.source_joint_names) - set(target_names))}, "
+            f"target_only={sorted(set(target_names) - set(config.source_joint_names))}"
+        )
+    source_index = {name: index for index, name in enumerate(config.source_joint_names)}
+    reorder = [source_index[name] for name in target_names]
+    target_joints = value[:, 7:][:, reorder]
+    qpos = np.concatenate((value[:, :3], quaternion_wxyz, target_joints), axis=-1)
     return np.ascontiguousarray(qpos, dtype=np.float64)
 
 
@@ -382,9 +412,7 @@ def evaluate_qpos_quality(
     body_index = kinematics.body_name_to_index
     root_height = root[:, 2]
     root_tilt = np.degrees(
-        np.arccos(
-            np.clip(1.0 - 2.0 * (quaternion[:, 1] ** 2 + quaternion[:, 2] ** 2), -1.0, 1.0)
-        )
+        np.arccos(np.clip(1.0 - 2.0 * (quaternion[:, 1] ** 2 + quaternion[:, 2] ** 2), -1.0, 1.0))
     )
     torso_height = np.mean(
         body[:, [body_index["l_arm_pitch_link"], body_index["r_arm_pitch_link"]], 2], axis=1
@@ -404,10 +432,12 @@ def evaluate_qpos_quality(
         body[:, [body_index["l_ankle_roll_link"], body_index["r_ankle_roll_link"]], 2], axis=1
     )
     floor_evidence = (
-        (root_height < float(config.floor["root_low_height"]))
-        & (root_tilt > float(config.floor["root_low_tilt_degrees"]))
-    ) | (torso_height < float(config.floor["torso_ground_height"])) | (
-        upper_height < float(config.floor["upper_body_ground_height"])
+        (
+            (root_height < float(config.floor["root_low_height"]))
+            & (root_tilt > float(config.floor["root_low_tilt_degrees"]))
+        )
+        | (torso_height < float(config.floor["torso_ground_height"]))
+        | (upper_height < float(config.floor["upper_body_ground_height"]))
     )
     floor_gate = (
         (root_height < float(config.floor["gate_root_height"]))
@@ -418,9 +448,7 @@ def evaluate_qpos_quality(
     floor_count = int(np.count_nonzero(floor_mask))
     floor_ratio = float(np.mean(floor_mask))
     floor_run = _longest_true_run(floor_mask)
-    low_root_run = _longest_true_run(
-        root_height < float(config.floor["low_root_review_height"])
-    )
+    low_root_run = _longest_true_run(root_height < float(config.floor["low_root_review_height"]))
     reasons: list[str] = []
     if quaternion_norm_error > float(config.hard["quaternion_norm_error_max"]):
         reasons.append("ROOT_QUATERNION_NORM_REJECT")
@@ -444,8 +472,10 @@ def evaluate_qpos_quality(
         reason == "FLOOR_STYLE_REJECT" for reason in reasons
     ):
         reasons.append("LOW_ROOT_REVIEW")
-    status = "REJECT" if any(reason.endswith("REJECT") for reason in reasons) else (
-        "REVIEW" if reasons else "PASS"
+    status = (
+        "REJECT"
+        if any(reason.endswith("REJECT") for reason in reasons)
+        else ("REVIEW" if reasons else "PASS")
     )
     return {
         "status": status,
@@ -543,7 +573,9 @@ def write_cropped_wav(
 
 def _write_json(path: Path, value: Any) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(value, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    path.write_text(
+        json.dumps(value, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
 
 
 def _write_jsonl(path: Path, rows: Sequence[Mapping[str, Any]]) -> None:
@@ -564,9 +596,11 @@ def _audit_pairs(
     accepted: list[AuditedPair] = []
     report_rows: list[dict[str, Any]] = []
     for pair in pairs:
-        qpos = load_csv_qpos(pair, config)
+        qpos = load_csv_qpos(pair, config, kinematics.joint_order)
         audio_frames, audio_duration = read_wav_metadata(pair.audio_path, config)
-        target_frames = target_frame_count(len(qpos), pair.fps, audio_frames, config.wav_sample_rate)
+        target_frames = target_frame_count(
+            len(qpos), pair.fps, audio_frames, config.wav_sample_rate
+        )
         source_motion_sha = sha256_file(pair.csv_path)
         source_audio_sha = sha256_file(pair.audio_path)
         base = {
@@ -666,6 +700,7 @@ def convert_dataset(
         manifest_rows: list[dict[str, Any]] = []
         sequence_reports: list[dict[str, Any]] = []
         ground_offsets: list[float] = []
+        joint_limit_clips: list[float] = []
         total_source_motion_sec = 0.0
         total_source_audio_sec = 0.0
         total_target_frames = 0
@@ -692,7 +727,21 @@ def convert_dataset(
             feature_output.parent.mkdir(parents=True, exist_ok=True)
             torch.save(music, feature_output)
             qpos = resample_qpos_to_30hz(item.qpos, pair.fps, item.target_frames)
+            lower = kinematics.joint_lower_limits.detach().cpu()
+            upper = kinematics.joint_upper_limits.detach().cpu()
+            unclipped_joints = qpos[:, 7:].clone()
+            qpos[:, 7:] = torch.maximum(torch.minimum(unclipped_joints, upper), lower)
+            joint_limit_clip_max_rad = float((qpos[:, 7:] - unclipped_joints).abs().amax())
+            joint_limit_clips.append(joint_limit_clip_max_rad)
             qpos, ground_before, ground_after = normalize_body_origin_ground(qpos, kinematics)
+            contact = derive_bumi_foot_contact(
+                qpos,
+                kinematics,
+                valid_mask=torch.ones(len(qpos), dtype=torch.bool),
+                fps=30,
+                ground_height=None,
+                estimate_ground_mask=torch.tensor(True),
+            )
             ground_offsets.append(ground_before)
             motion_payload = {
                 "contract_version": BUMI_MUSIC_CONTRACT_VERSION,
@@ -727,6 +776,16 @@ def convert_dataset(
                 "body_origin_ground_after_adjustment_m": ground_after,
                 "ground_semantics": GROUND_SEMANTICS,
                 "root_z_adjusted": True,
+                "joint_order_conversion": {
+                    "source_joint_names": list(config.source_joint_names),
+                    "target_joint_names": list(kinematics.joint_order),
+                    "method": "exact_name_reorder",
+                },
+                "joint_limit_clip_max_rad": joint_limit_clip_max_rad,
+                "foot_contact": contact.contact.contiguous(),
+                "foot_contact_contract_version": BUMI_CONTACT_CONTRACT_VERSION,
+                "foot_contact_source": "derived_from_full_qpos_fk_estimated_legacy_ground",
+                "foot_contact_ground_height_m": float(contact.ground_height),
             }
             motion_output = staging / motion_relative
             motion_output.parent.mkdir(parents=True, exist_ok=True)
@@ -772,6 +831,9 @@ def convert_dataset(
                     "edge_raw_frames": int(music_metadata.get("feature_frames", len(music))),
                     "edge_output_frames": int(len(music)),
                     "root_z_adjustment_m": -ground_before,
+                    "joint_limit_clip_max_rad": joint_limit_clip_max_rad,
+                    "foot_contact_ratio_left": float(contact.contact[:, 0].float().mean()),
+                    "foot_contact_ratio_right": float(contact.contact[:, 1].float().mean()),
                     "source_motion_sha256": item.source_motion_sha256,
                     "original_source_audio_sha256": item.source_audio_sha256,
                     "output_audio_sha256": output_audio_sha,
@@ -798,9 +860,7 @@ def convert_dataset(
             "quality_joint_limit_violation_max_rad": float(
                 config.hard["joint_limit_violation_max"]
             ),
-            "reader_joint_limit_tolerance_rad": float(
-                config.hard["joint_limit_violation_max"]
-            ),
+            "reader_joint_limit_tolerance_rad": OUTPUT_JOINT_LIMIT_TOLERANCE_RAD,
             "mjcf_sha256": kinematics.source_mjcf_sha256,
             "source_mjcf_sha256": kinematics.source_mjcf_sha256,
             "feature_kinematics_source_mjcf_sha256": kinematics.source_mjcf_sha256,
@@ -809,6 +869,9 @@ def convert_dataset(
             "quality_config_sha256": quality_sha,
             "quality_report_sha256": quality_report_sha,
             "source_motion_contract_version": CSV_SOURCE_CONTRACT_VERSION,
+            "source_joint_names": list(config.source_joint_names),
+            "joint_order_conversion_method": "exact_name_reorder",
+            "output_joint_limit_policy": "clip_to_current_kinematics_limits",
             "resample_contract_version": CSV_RESAMPLE_CONTRACT_VERSION,
             "ground_semantics": GROUND_SEMANTICS,
             "root_z_adjusted": True,
@@ -844,6 +907,7 @@ def convert_dataset(
                 "max": max(-value for value in ground_offsets),
                 "mean": sum(-value for value in ground_offsets) / len(ground_offsets),
             },
+            "joint_limit_clip_max_rad": max(joint_limit_clips),
             "sequences": sequence_reports,
         }
         _write_json(staging / "reports" / "conversion_report.json", conversion_report)
@@ -855,7 +919,7 @@ def convert_dataset(
             strict_alignment=True,
             strict_contract=True,
             require_quality_filter=True,
-            joint_limit_tolerance=float(config.hard["joint_limit_violation_max"]),
+            joint_limit_tolerance=OUTPUT_JOINT_LIMIT_TOLERANCE_RAD,
             validate_payloads_on_init=True,
             validate_source_hashes_on_init=True,
         )
@@ -876,7 +940,7 @@ def main() -> None:
     parser.add_argument(
         "--quality-config",
         type=Path,
-        default=REPO_ROOT / "configs/bumi/quality_filter_csv_mine_auto025_v1.yaml",
+        default=(REPO_ROOT / "configs/bumi/quality_filter_csv_mine_robot_retargeter_fe934_v2.yaml"),
     )
     parser.add_argument("--retarget-config", required=True, type=Path)
     args = parser.parse_args()

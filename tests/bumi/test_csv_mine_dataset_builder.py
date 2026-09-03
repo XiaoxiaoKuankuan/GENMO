@@ -23,12 +23,16 @@ from gem.datasets.music_dance.music_dance_bumi import BumiMusicDatasetReader, sh
 from gem.robots.bumi.kinematics import BumiKinematics
 from tools.data.bumi.build_bumi_music_dataset_from_csv import (
     convert_dataset,
+    load_csv_qpos,
     resample_qpos_to_30hz,
     target_frame_count,
 )
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-KINEMATICS_PATH = REPO_ROOT / "configs/bumi/bumi_kinematics_482138_v1.json"
+KINEMATICS_PATH = REPO_ROOT / "configs/bumi/bumi_kinematics_robot_retargeter_fe934_v1.json"
+QUALITY_CONFIG_PATH = (
+    REPO_ROOT / "configs/bumi/quality_filter_csv_mine_robot_retargeter_fe934_v2.yaml"
+)
 
 
 def _write_wav(path: Path, *, seconds: float, sample_rate: int = 48000) -> None:
@@ -54,11 +58,7 @@ def _write_csv(path: Path, header: list[str], *, frames: int) -> None:
 
 
 def _source_tree(tmp_path: Path) -> dict[str, Path]:
-    raw = yaml.safe_load(
-        (REPO_ROOT / "configs/bumi/quality_filter_csv_mine_auto025_v1.yaml").read_text(
-            encoding="utf-8"
-        )
-    )
+    raw = yaml.safe_load(QUALITY_CONFIG_PATH.read_text(encoding="utf-8"))
     raw["selection"]["expected_candidates"] = 3
     raw["selection"]["expected_accepted"] = 2
     quality = tmp_path / "quality.yaml"
@@ -95,6 +95,33 @@ def test_frame_count_and_resampling_use_strict_common_tail() -> None:
     result = resample_qpos_to_30hz(qpos, 50, 12)
     torch.testing.assert_close(result[:, 0], torch.arange(12) / 30.0)
     torch.testing.assert_close(result[:, 3], torch.ones(12))
+
+
+def test_csv_joint_columns_are_reordered_by_name(tmp_path: Path) -> None:
+    """旧 CSV 列顺序必须按名字转成 fe934 顺序，不能原样拼到 qpos。"""
+
+    inputs = _source_tree(tmp_path)
+    raw = yaml.safe_load(inputs["quality"].read_text(encoding="utf-8"))
+    from tools.data.bumi.build_bumi_music_dataset_from_csv import (
+        discover_source_pairs,
+        load_quality_config,
+    )
+
+    config = load_quality_config(inputs["quality"])
+    pair = discover_source_pairs(inputs["source"], config)[0]
+    values = np.loadtxt(pair.csv_path, delimiter=",", skiprows=1)
+    source_index = raw["source"]["source_joint_names"].index("waist_yaw_joint")
+    values[:, 7 + source_index] = 0.1
+    with pair.csv_path.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.writer(handle)
+        writer.writerow(raw["source"]["csv_header"])
+        writer.writerows(values.tolist())
+    target_order = BumiKinematics(KINEMATICS_PATH).joint_order
+    qpos = load_csv_qpos(pair, config, target_order)
+    assert target_order[0] == "waist_yaw_joint"
+    torch.testing.assert_close(
+        torch.from_numpy(qpos[:, 7]), torch.full((12,), 0.1, dtype=torch.float64)
+    )
 
 
 def test_converter_excludes_apt_and_publishes_strict_dataset(
@@ -135,7 +162,7 @@ def test_converter_excludes_apt_and_publishes_strict_dataset(
         "mine_bumi",
         "train",
         kinematics,
-        joint_limit_tolerance=0.25,
+        joint_limit_tolerance=0.0001,
         validate_payloads_on_init=True,
         validate_source_hashes_on_init=True,
     )
@@ -145,6 +172,8 @@ def test_converter_excludes_apt_and_publishes_strict_dataset(
         assert sequence["music"].shape == (12, 35)
         torch.testing.assert_close(sequence["qpos"][:, 3], torch.ones(12))
         torch.testing.assert_close(sequence["qpos"][:, 4:7], torch.zeros(12, 3))
+        assert sequence["foot_contact"].shape == (12, 2)
+        assert sequence["foot_contact_available"].all()
         body = kinematics.forward_kinematics(sequence["qpos"])["body_pos_w"]
         assert float(body[..., 2].amin()) == pytest.approx(0.0, abs=2.0e-5)
         audio_path = output / row["audio_path"]

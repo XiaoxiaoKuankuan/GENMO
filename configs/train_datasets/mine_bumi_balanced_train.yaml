@@ -5,7 +5,8 @@
 # xyzw→wxyz 四元数重排、50→30 Hz 重采样、逐序列地面高度归一化、WAV 的
 # EDGE35 提取、qpos/音乐严格等长、质量筛选、manifest/meta/SHA 生成。当前约定的
 # train manifest 含 99 条：排除时长相差约 60 秒的 APT啦啦操，其余尾部按共同有效
-# 时长裁齐。训练仍使用与 smooth_q1 auto025 四库一致的 0.25 rad reader 容差。
+# 时长裁齐。正式 v2 发布必须先按名字转换到 fe934 关节顺序，并把至多 0.01 rad 的
+# 新旧 XML 限位差裁回当前限位，因此训练 reader 与四个公开库统一使用 0.0001 rad。
 mine_bumi_train:
   _target_: gem.datasets.music_dance.music_dance_bumi.BumiMusicDanceDataset
   root: ${oc.env:MINE_BUMI_ROOT}
@@ -20,4 +21,4 @@ mine_bumi_train:
   validate_payloads_on_init: false
   validate_source_hashes_on_init: false
   random_crop: false
-  joint_limit_tolerance: 0.25
+  joint_limit_tolerance: 0.0001
