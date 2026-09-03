@@ -395,6 +395,9 @@ def build_site_data(
                 "dataset": row["dataset"],
                 "dataset_label": row["dataset_label"],
                 "audio_key": row["audio_key"],
+                "source_split": row.get("source_split"),
+                "model_training_membership": row.get("model_training_membership"),
+                "selection_role": row.get("selection_role"),
                 "representative_motion": row["representative_motion"],
                 "high_quality_motion_count": item["high_quality_motion_count"],
                 "comparison_duration_sec": row["comparison_duration_sec"],
@@ -463,6 +466,10 @@ def build_index(
                 continue
             original = row["original_metrics"]
             generated = row["generated_overlap_metrics"]
+            source_split = str(row.get("source_split") or "unknown")
+            training_membership = str(
+                row.get("model_training_membership") or "未提供当前模型训练归属"
+            )
             short_note = (
                 "原数据集只有该真实短片段，未循环或拉伸；右侧生成动作仍覆盖整首音乐。"
                 if row["source_clip_shorter_than_audio"]
@@ -475,9 +482,11 @@ def build_index(
             cards.append(
                 f'<article class="card" data-dataset="{dataset}" data-query="{query}">'
                 f'<h3>{index}. {html.escape(row["audio_key"])}</h3>'
+                f'<p class="membership"><span class="split-badge">{html.escape(source_split)}</span> '
+                f'{html.escape(training_membership)}</p>'
                 f'<p class="motion">人工高质量动作：<code>{html.escape(row["representative_motion"])}</code></p>'
                 '<div class="pair" data-sync-pair>'
-                '<div class="video-panel"><div class="video-label">原始 GMR BUMI3 动作</div>'
+                '<div class="video-panel"><div class="video-label">原始/参考 BUMI3 动作</div>'
                 f'<video class="original" controls muted playsinline preload="none" data-src="{html.escape(row["original_video_relative"])}"></video></div>'
                 f'<div class="video-panel"><div class="video-label">{html.escape(model_label)} 模型生成（完整音乐）</div>'
                 f'<video class="generated" controls playsinline preload="none" data-src="{html.escape(row["generated_video_relative"])}"></video></div></div>'
@@ -503,7 +512,7 @@ def build_index(
     limits = summary["joint_limit_comparison"]
     document = f"""<!doctype html>
 <!--
-本页由 GENMO 高质量多库验证工具生成。每个样本保留两个独立视频：左侧是真实 GMR BUMI3
+本页由 GENMO 高质量多库验证工具生成。每个样本保留两个独立视频：左侧是清单绑定的原始/参考 BUMI3
 原动作，右侧是模型对完整音乐的生成动作。页面以右侧生成视频作为有声音的主时间轴，并在
 原动作真实长度内同步左侧视频；AIST++ 短片段结束后不会循环或伪造剩余动作。
 -->
@@ -515,12 +524,13 @@ def build_index(
 .toolbar input{{min-width:260px;flex:1;background:#0f151e;color:var(--text);border:1px solid #3b4659;border-radius:8px;padding:9px 11px}}button{{cursor:pointer;background:#28364a;color:var(--text);border:1px solid #46556d;border-radius:8px;padding:8px 12px}}button.active{{background:#21679b;border-color:#53aeea}}
 .pair{{display:grid;grid-template-columns:1fr 1fr;gap:12px}}.video-panel{{min-width:0}}.video-label{{font-weight:700;margin:0 0 7px}}video{{display:block;width:100%;aspect-ratio:4/3;background:#000;border-radius:8px}}.controls{{display:flex;gap:8px;margin:10px 0;flex-wrap:wrap}}
 .motion{{color:var(--muted)}}table{{border-collapse:collapse;width:100%}}th,td{{padding:7px;border:1px solid #3a4354;text-align:left}}section{{margin-top:34px}}
+.membership{{color:#dce9f5}}.split-badge{{display:inline-block;min-width:72px;text-align:center;margin-right:7px;padding:2px 8px;border-radius:999px;background:#24587b;color:#fff;font-weight:700}}
 @media(max-width:850px){{main{{padding:14px}}.pair{{grid-template-columns:1fr}}.toolbar{{position:static}}}}</style></head><body><main>
 <h1>BUMI 人工高质量原动作 vs {html.escape(model_label)} 模型生成</h1><div class="summary">
-<p>完成 {summary["completed"]}/{summary["evaluated"]} 项；模型生成完整音乐总时长 {summary["generated_full_duration_sec"] / 60.0:.2f} 分钟，双方共同真实对比区间 {summary["comparison_duration_sec"] / 60.0:.2f} 分钟。左侧是 score=1 对应的原始 GMR BUMI3 轨迹，右侧是同一首完整音乐的模型生成轨迹。</p>
+<p>完成 {summary["completed"]}/{summary["evaluated"]} 项；模型生成完整音乐总时长 {summary["generated_full_duration_sec"] / 60.0:.2f} 分钟，双方共同真实对比区间 {summary["comparison_duration_sec"] / 60.0:.2f} 分钟。左侧是显式清单绑定的原始/参考 BUMI3 轨迹，右侧是同一首完整音乐的模型生成轨迹；每项上方明确标出数据划分和是否实际参与当前模型训练。</p>
 <p>同区间均值：最大脚部穿地 原始 {metric_text(metrics["foot_penetration_max_m"]["original_mean"])}m / 生成 {metric_text(metrics["foot_penetration_max_m"]["generated_mean"])}m；最大根倾角 原始 {metric_text(metrics["root_tilt_max_rad"]["original_mean"])}rad / 生成 {metric_text(metrics["root_tilt_max_rad"]["generated_mean"])}rad。</p>
 <p>0.25rad 容差后关节超限：原动作 {limits["original"]["exceed_0_25_rad_samples"]}/{summary["completed"]}，模型生成同区间 {limits["generated_same_interval"]["exceed_0_25_rad_samples"]}/{summary["completed"]}；严格 XML 原始边界触碰/超出分别为 {limits["original"]["strict_xml_exceed_samples"]}/{summary["completed"]} 和 {limits["generated_same_interval"]["strict_xml_exceed_samples"]}/{summary["completed"]}。</p>
-<p>AIST++ 原数据本身是短动作片段，左侧到真实末帧即结束；右侧仍播放完整音乐和完整生成动作。<a href="summary.json">汇总 JSON</a> · <a href="selection.json">选择与契约</a></p>
+<p>若原数据本身是短动作片段，左侧到真实末帧即结束；右侧仍播放完整音乐和完整生成动作。<a href="summary.json">汇总 JSON</a> · <a href="selection.json">选择与契约</a></p>
 <p>生成动作根姿态后处理：<code>{html.escape(str(summary.get("root_orientation_postprocess") or "无"))}</code>；启用时保留模型全部关节和连续根 yaw，将 yaw 角速度限制为 4rad/s，移除导致横躺的根 roll/pitch，并只在足底穿地时向上抬根 Z；原始未投影轨迹保存在上游 artifact 的 <code>qpos_raw</code>。</p></div>
 <div class="toolbar"><button class="active" data-filter="all">全部</button><button data-filter="finedance">FineDance</button><button data-filter="compas3d">CoMPAS3D</button><button data-filter="aioz_gdance">AIOZ-GDance</button><button data-filter="aistpp">AIST++</button><button data-filter="mine_bumi">自建数据库</button><input id="search" type="search" placeholder="搜索音乐键或动作名"></div>
 {"".join(sections)}
@@ -599,7 +609,7 @@ def main() -> int:
         "root_orientation_postprocess": (selection.get("generation") or {}).get(
             "root_orientation_postprocess"
         ),
-        "comparison_policy": "公开四库原50Hz动作精确重采样到30Hz，自建库复用正式30Hz qpos28；生成视频覆盖完整音乐；原动作保留真实长度；网页双视频同步；不循环或拉伸短片段",
+        "comparison_policy": "原动作按输入资产契约转为或直接复用30Hz qpos28；生成视频覆盖完整音乐；原动作保留真实长度；网页双视频同步；不循环或拉伸短片段",
         "items": items,
     }
     atomic_json(output_root / "selection.json", frozen_selection)
@@ -685,6 +695,9 @@ def main() -> int:
                 "dataset": dataset,
                 "dataset_label": item["dataset_label"],
                 "audio_key": key,
+                "source_split": item.get("source_split"),
+                "model_training_membership": item.get("model_training_membership"),
+                "selection_role": item.get("selection_role"),
                 "audio": str(audio_path),
                 "representative_motion": item["representative_motion"],
                 "source_motion": str(source_motion),
