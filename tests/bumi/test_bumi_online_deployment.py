@@ -422,6 +422,21 @@ def test_bridge_primes_two_chunks_and_stand_invalidates_late_revision(
     accepted_at = time.monotonic()
     assert bridge.accept_chunk(first)["state"] == "PRIMING"
     assert bridge.last_heartbeat >= accepted_at
+    # 第一块已经形成 plan_snapshot，但两块预生成尚未完成，动作 publisher 仍为
+    # None。发布线程必须只发固定站姿，不能因为 ``None is None`` 而误跑 ACK 超时。
+    publish_thread = threading.Thread(target=bridge._publish_loop, daemon=True)
+    publish_thread.start()
+    try:
+        time.sleep(bridge.args.ack_timeout_seconds + 0.1)
+        with bridge.lock:
+            assert bridge.state == "PRIMING"
+            assert bridge.request is not None
+            assert bridge.publisher is None
+            assert bridge.last_stand_reason is None
+    finally:
+        bridge.stop_event.set()
+        publish_thread.join(timeout=1.0)
+        assert not publish_thread.is_alive()
     ready = bridge.accept_chunk(second)
     assert ready["state"] == "WAIT_ACK"
     assert ready["action_complete"] and ready["accepted_source_frames"] == 210

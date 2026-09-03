@@ -607,6 +607,7 @@ class BumiOnlineBridge:
                     continue
 
                 ack = None
+                published_plan = False
                 if state in {"STAND", "PREPARING", "PRIMING"}:
                     self.idle_publisher.publish(
                         self.idle_frames,
@@ -616,6 +617,7 @@ class BumiOnlineBridge:
                         flags=FLAG_FIXED_IDLE,
                     )
                 elif snapshot is not None and publisher is not None:
+                    published_plan = True
                     flags = (
                         FLAG_AUDIO
                         if snapshot.audio_start_frame <= cursor < snapshot.audio_end_frame
@@ -639,7 +641,11 @@ class BumiOnlineBridge:
                 after_publish = time.monotonic()
                 with self.lock:
                     if (
-                        generation == self.publish_generation
+                        # PREPARING/PRIMING 只发布固定站姿，此时动作 publisher 尚为
+                        # None。不能用 ``publisher is self.publisher`` 单独判断，因为
+                        # ``None is None`` 也成立，会在第一块计划生成后误跑 ACK 超时。
+                        published_plan
+                        and generation == self.publish_generation
                         and publisher is self.publisher
                         and snapshot is not None
                         and self.plan_snapshot is not None
