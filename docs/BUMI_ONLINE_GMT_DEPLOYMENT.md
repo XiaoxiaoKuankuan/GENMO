@@ -58,9 +58,15 @@ cd /home/weili/GENMO
   --redis-host 127.0.0.1 \
   --redis-port 6379 \
   --redis-key gmt_online_frame_bumi \
+  --joint-limit-tolerance-rad 0.4 \
   --audio-playback ffplay \
   --verbose
 ```
+
+当前新BUMI桥按用户联调要求将关节限位容差默认设为`0.4 rad`，上述命令仍显式写出该值，
+便于现场确认。该参数不会把qpos裁到XML机械限位，而是允许目标关节角落在
+`[lower - 0.4, upper + 0.4]`内；超过放宽范围、速度过大、根姿态异常等情况仍会由安全门
+拒绝。旧SMPL/GMR桥以及训练数据的严格限位契约不受此参数影响。
 
 正式 TensorRT 常驻控制台：
 
@@ -105,6 +111,7 @@ shutdown
 `status` 同时给出当前 revision、窗口耗时、生成窗口数、已提交帧、暂存重叠帧、未来
 缓冲秒数、后续窗口 P95、全部模型/资产/后处理指纹、GMT ACK 和 50 Hz 发布状态。默认
 两个有效块预生成后才允许 ACK 启动播放；播放中使用 12 秒高水位和 4 秒低水位控制生成。
+桥状态中的`joint_limit_tolerance_rad`会回显当前进程实际采用的限位容差。
 后续窗口 P95 达到 3 秒会触发性能门并请求返回站姿。控制台使用严格 REQ/REP，每次只允许
 一个 qpos 块在途；安全检查和增量计划完成并回复后才会生成下一块，因此桥端处理本身形成
 有界同步背压，不存在无界块队列。每个通过完整安全检查并成功纳入计划的 qpos 块也会刷新

@@ -91,7 +91,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--ack-stale-seconds", type=float, default=1.0)
     parser.add_argument("--heartbeat-timeout-seconds", type=float, default=1.5)
     parser.add_argument("--critical-buffer-seconds", type=float, default=2.2)
-    parser.add_argument("--joint-limit-tolerance-rad", type=float, default=0.05)
+    parser.add_argument("--joint-limit-tolerance-rad", type=float, default=0.4)
     parser.add_argument("--max-joint-velocity-radps", type=float, default=18.0)
     parser.add_argument("--max-root-linear-velocity-mps", type=float, default=4.0)
     parser.add_argument("--max-root-angular-velocity-radps", type=float, default=8.0)
@@ -530,6 +530,7 @@ class BumiOnlineBridge:
             "gmt_ack_latency_ms": self.ack_latency_ms,
             "incremental_plan_last_ms": self.plan_build_last_ms,
             "incremental_plan_max_ms": self.plan_build_max_ms,
+            "joint_limit_tolerance_rad": self.args.joint_limit_tolerance_rad,
             "kinematics_sha256": self.kinematics_sha256,
             "joint_order_sha256": self.joint_order_sha256,
             "gmt_policy_sha256": self.gmt_policy_sha256,

@@ -350,6 +350,15 @@ def _bridge_args(kinematics: Path, policy: Path, estop: Path) -> SimpleNamespace
     )
 
 
+def test_new_bumi_bridge_default_joint_limit_tolerance_is_point_four() -> None:
+    """锁定用户指定的新BUMI在线桥0.4 rad默认限位容差。"""
+
+    args = bridge_module.build_parser().parse_args(
+        ["--kinematics", "kinematics.json", "--gmt-policy", "policy.onnx"]
+    )
+    assert args.joint_limit_tolerance_rad == pytest.approx(0.4)
+
+
 def test_bridge_primes_two_chunks_and_stand_invalidates_late_revision(
     test_kinematics_path: Path,
     tmp_path: Path,
@@ -397,6 +406,7 @@ def test_bridge_primes_two_chunks_and_stand_invalidates_late_revision(
     bridge.args.estop_file.unlink()
     begin = bridge.begin(begin_payload)
     assert begin["state"] == "PREPARING"
+    assert begin["joint_limit_tolerance_rad"] == pytest.approx(0.05)
     qpos = _qpos(210).numpy()
     first = BumiOnlineQposChunk.from_qpos(
         qpos[:90],
