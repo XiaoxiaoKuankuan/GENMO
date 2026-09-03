@@ -39,6 +39,10 @@ class BumiMusicPipeline(nn.Module):
             contract_version=args.get("loss_contract", BUMI_LOSS_CONTRACT_VERSION),
             auxiliary_warmup_steps=args.get("auxiliary_warmup_steps", 0),
             ground_semantics=args.get("ground_semantics", None),
+            joint_limit_margin_rad=args.get("joint_limit_margin_rad", 0.0),
+            joint_limit_topk_fraction=args.get("joint_limit_topk_fraction", 0.01),
+            robust_joint_limit_start_step=args.get("robust_joint_limit_start_step", 0),
+            robust_joint_limit_warmup_steps=args.get("robust_joint_limit_warmup_steps", 0),
         )
 
     @staticmethod

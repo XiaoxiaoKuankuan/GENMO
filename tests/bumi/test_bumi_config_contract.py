@@ -331,3 +331,31 @@ def test_robot_retargeter_pass_v2_continues_weights_for_new_200k_steps() -> None
     assert list(config.scheduler.scheduler.milestones) == [120000, 180000]
     assert config.pl_trainer.devices == 8
     assert config.pl_trainer.strategy == "ddp"
+
+
+def test_qpos30_contact_v4_adds_margin_topk_max_and_full_resume_entry() -> None:
+    """v4必须显式强化稀疏越限，并保留从完整checkpoint恢复到20万步的入口。"""
+
+    with initialize_config_dir(version_base="1.3", config_dir=str(REPO_ROOT / "configs")):
+        config = compose(
+            config_name="train",
+            overrides=[
+                "exp=gem_bumi_music_only_4set_robot_retargeter_pass_v2_"
+                "qpos30_contact_v4_resume_200k"
+            ],
+        )
+
+    args = config.pipeline.args
+    assert args.loss_contract == "physical_qpos30_contact_v4"
+    assert args.joint_limit_margin_rad == 0.05
+    assert args.joint_limit_topk_fraction == 0.01
+    assert args.robust_joint_limit_warmup_steps == 5000
+    assert args.weights.joint_limit == 0.1
+    assert args.weights.joint_limit_margin == 0.2
+    assert args.weights.joint_limit_topk == 0.5
+    assert args.weights.joint_limit_max == 0.05
+    assert config.pretrain_ckpt is None
+    assert config.ckpt_path is None
+    assert config.resume_mode is None
+    assert config.pl_trainer.max_steps == 200000
+    assert list(config.scheduler.scheduler.milestones) == [120000, 180000]

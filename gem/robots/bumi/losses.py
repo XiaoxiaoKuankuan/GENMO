@@ -12,6 +12,7 @@ FP32 中计算，并同时记录原始量、按物理尺度归一化量和加权
 
 from __future__ import annotations
 
+import math
 from collections.abc import Mapping
 from typing import Any
 
@@ -26,6 +27,7 @@ from .feature_codec import BUMI_FEATURE_SLICES
 
 BUMI_LOSS_CONTRACT_VERSION = "physical_qpos30_contact_v2"
 BUMI_LOSS_CONTRACT_V3 = "physical_qpos30_contact_v3"
+BUMI_LOSS_CONTRACT_V4 = "physical_qpos30_contact_v4"
 BUMI_LOSS_NAMES = (
     "repr_root_pos",
     "repr_root_rot",
@@ -48,9 +50,17 @@ BUMI_EXCESS_LOSS_NAMES = (
     "joint_acceleration_excess",
     "joint_jerk_excess",
 )
+BUMI_ROBUST_JOINT_LIMIT_LOSS_NAMES = (
+    "joint_limit_margin",
+    "joint_limit_topk",
+    "joint_limit_max",
+)
 BUMI_LOSS_NAMES_BY_CONTRACT = {
     BUMI_LOSS_CONTRACT_VERSION: BUMI_LOSS_NAMES,
     BUMI_LOSS_CONTRACT_V3: BUMI_LOSS_NAMES + BUMI_EXCESS_LOSS_NAMES,
+    BUMI_LOSS_CONTRACT_V4: (
+        BUMI_LOSS_NAMES + BUMI_EXCESS_LOSS_NAMES + BUMI_ROBUST_JOINT_LIMIT_LOSS_NAMES
+    ),
 }
 
 BUMI_PHYSICAL_V2_SCALES = {
@@ -65,6 +75,9 @@ BUMI_PHYSICAL_V2_SCALES = {
     "joint_acceleration_excess": 180.0,
     "joint_jerk_excess": 600.0,
     "joint_limit": 0.1,
+    "joint_limit_margin": 0.1,
+    "joint_limit_topk": 0.1,
+    "joint_limit_max": 0.1,
     "contact_bce": 1.0,
     "foot_slide": 1.0,
     "penetration": 0.05,
@@ -86,6 +99,112 @@ def _masked_mean(value: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
         ) from exc
     weights = expanded.to(dtype=value.dtype)
     return (value * weights).sum() / weights.sum().clamp_min(1.0)
+
+
+def _masked_topk_mean(
+    value: torch.Tensor,
+    mask: torch.Tensor,
+    fraction: float,
+) -> torch.Tensor:
+    """逐条序列聚合最严重的一小部分有效关节帧，避免稀疏尖峰被全局平均稀释。"""
+
+    expanded = mask.bool()
+    while expanded.ndim < value.ndim:
+        expanded = expanded.unsqueeze(-1)
+    try:
+        expanded = expanded.expand_as(value)
+    except RuntimeError as exc:
+        raise ValueError(
+            f"mask shape {tuple(mask.shape)} cannot supervise value shape {tuple(value.shape)}"
+        ) from exc
+    flat_value = value.reshape(value.shape[0], -1)
+    flat_mask = expanded.reshape(value.shape[0], -1)
+    max_k = max(1, math.ceil(flat_value.shape[1] * float(fraction)))
+    masked_value = flat_value.masked_fill(~flat_mask, float("-inf"))
+    top_values = torch.topk(masked_value, k=max_k, dim=-1, sorted=True).values
+    valid_counts = flat_mask.sum(dim=-1)
+    selected_counts = torch.ceil(valid_counts.to(torch.float32) * float(fraction)).to(torch.long)
+    selected_counts = selected_counts.clamp(min=1, max=max_k)
+    ranks = torch.arange(max_k, device=value.device).unsqueeze(0)
+    selected = (ranks < selected_counts.unsqueeze(-1)) & (valid_counts.unsqueeze(-1) > 0)
+    selected_values = torch.where(selected, top_values, torch.zeros_like(top_values))
+    per_sequence = selected_values.sum(dim=-1) / selected.sum(dim=-1).clamp_min(1)
+    valid_sequences = valid_counts > 0
+    return (
+        per_sequence * valid_sequences.to(per_sequence)
+    ).sum() / valid_sequences.sum().clamp_min(1)
+
+
+def _masked_max_mean(value: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
+    """先取每条序列最严重的有效关节帧，再跨 batch 求均值。"""
+
+    expanded = mask.bool()
+    while expanded.ndim < value.ndim:
+        expanded = expanded.unsqueeze(-1)
+    try:
+        expanded = expanded.expand_as(value)
+    except RuntimeError as exc:
+        raise ValueError(
+            f"mask shape {tuple(mask.shape)} cannot supervise value shape {tuple(value.shape)}"
+        ) from exc
+    flat_value = value.reshape(value.shape[0], -1)
+    flat_mask = expanded.reshape(value.shape[0], -1)
+    valid_sequences = flat_mask.any(dim=-1)
+    per_sequence = flat_value.masked_fill(~flat_mask, float("-inf")).max(dim=-1).values
+    per_sequence = torch.where(valid_sequences, per_sequence, torch.zeros_like(per_sequence))
+    return (
+        per_sequence * valid_sequences.to(per_sequence)
+    ).sum() / valid_sequences.sum().clamp_min(1)
+
+
+def joint_limit_loss_values(
+    pred_joint: torch.Tensor,
+    lower: torch.Tensor,
+    upper: torch.Tensor,
+    valid: torch.Tensor,
+    *,
+    margin_rad: float,
+    topk_fraction: float,
+) -> dict[str, tuple[torch.Tensor, torch.Tensor]]:
+    """同时计算平均越限、安全边距、逐序列 top-k 和逐序列最大越限损失。"""
+
+    if not math.isfinite(float(margin_rad)) or float(margin_rad) < 0.0:
+        raise ValueError("joint limit margin must be finite and non-negative")
+    if not math.isfinite(float(topk_fraction)) or not (0.0 < float(topk_fraction) <= 1.0):
+        raise ValueError("joint limit top-k fraction must be in (0, 1]")
+    scale = BUMI_PHYSICAL_V2_SCALES["joint_limit"]
+    violation = F.relu(lower - pred_joint) + F.relu(pred_joint - upper)
+    margin_violation = F.relu(lower + float(margin_rad) - pred_joint) + F.relu(
+        pred_joint - (upper - float(margin_rad))
+    )
+    violation_normalized = F.smooth_l1_loss(
+        violation / scale,
+        torch.zeros_like(violation),
+        reduction="none",
+    )
+    margin_normalized = F.smooth_l1_loss(
+        margin_violation / scale,
+        torch.zeros_like(margin_violation),
+        reduction="none",
+    )
+    return {
+        "joint_limit": (
+            _masked_mean(violation, valid),
+            _masked_mean(violation_normalized, valid),
+        ),
+        "joint_limit_margin": (
+            _masked_mean(margin_violation, valid),
+            _masked_mean(margin_normalized, valid),
+        ),
+        "joint_limit_topk": (
+            _masked_topk_mean(violation, valid, topk_fraction),
+            _masked_topk_mean(violation_normalized, valid, topk_fraction),
+        ),
+        "joint_limit_max": (
+            _masked_max_mean(violation, valid),
+            _masked_max_mean(violation_normalized, valid),
+        ),
+    }
 
 
 def temporal_difference_mask(valid: torch.Tensor, order: int) -> torch.Tensor:
@@ -215,6 +334,10 @@ class BumiRobotLosses(nn.Module):
         contract_version: str = BUMI_LOSS_CONTRACT_VERSION,
         auxiliary_warmup_steps: int = 0,
         ground_semantics: str | None = None,
+        joint_limit_margin_rad: float = 0.0,
+        joint_limit_topk_fraction: float = 0.01,
+        robust_joint_limit_start_step: int = 0,
+        robust_joint_limit_warmup_steps: int = 0,
     ) -> None:
         super().__init__()
         self.endecoder = endecoder
@@ -223,6 +346,10 @@ class BumiRobotLosses(nn.Module):
         self.contract_version = str(contract_version)
         self.auxiliary_warmup_steps = int(auxiliary_warmup_steps)
         self.ground_semantics = ground_semantics
+        self.joint_limit_margin_rad = float(joint_limit_margin_rad)
+        self.joint_limit_topk_fraction = float(joint_limit_topk_fraction)
+        self.robust_joint_limit_start_step = int(robust_joint_limit_start_step)
+        self.robust_joint_limit_warmup_steps = int(robust_joint_limit_warmup_steps)
         if self.fps != 30:
             raise ValueError(f"BUMI losses require 30 FPS, got {fps}")
         if self.contract_version not in BUMI_LOSS_NAMES_BY_CONTRACT:
@@ -242,6 +369,20 @@ class BumiRobotLosses(nn.Module):
             )
         if self.auxiliary_warmup_steps < 0:
             raise ValueError("auxiliary_warmup_steps must be non-negative")
+        if self.robust_joint_limit_start_step < 0:
+            raise ValueError("robust_joint_limit_start_step must be non-negative")
+        if self.robust_joint_limit_warmup_steps < 0:
+            raise ValueError("robust_joint_limit_warmup_steps must be non-negative")
+        if self.contract_version == BUMI_LOSS_CONTRACT_V4:
+            if not math.isfinite(self.joint_limit_margin_rad) or self.joint_limit_margin_rad <= 0.0:
+                raise ValueError("v4 joint_limit_margin_rad must be finite and positive")
+            if not math.isfinite(self.joint_limit_topk_fraction) or not (
+                0.0 < self.joint_limit_topk_fraction <= 1.0
+            ):
+                raise ValueError("v4 joint_limit_topk_fraction must be in (0, 1]")
+            joint_width = self.kinematics.joint_upper_limits - self.kinematics.joint_lower_limits
+            if bool((joint_width <= 2.0 * self.joint_limit_margin_rad).any()):
+                raise ValueError("v4 joint limit margin must leave a non-empty safe interval")
         self.loss_names = BUMI_LOSS_NAMES_BY_CONTRACT[self.contract_version]
         self.weights = {name: float(weights.get(name, 0.0)) for name in self.loss_names}
         unknown = set(weights) - set(self.loss_names)
@@ -254,6 +395,10 @@ class BumiRobotLosses(nn.Module):
             raise ValueError("BUMI loss weights must be finite and non-negative")
         if self.weights["contact_bce"] <= 0.0 or self.weights["foot_slide"] <= 0.0:
             raise ValueError("qpos30 contact contract requires positive contact_bce and foot_slide")
+        if self.contract_version == BUMI_LOSS_CONTRACT_V4 and any(
+            self.weights[name] <= 0.0 for name in BUMI_ROBUST_JOINT_LIMIT_LOSS_NAMES
+        ):
+            raise ValueError("v4 requires positive margin, top-k and max joint-limit weights")
 
     @staticmethod
     def _repr_loss(
@@ -385,7 +530,7 @@ class BumiRobotLosses(nn.Module):
             )
             temporal_values[name] = (pred_delta, target_delta, difference_mask)
 
-        if self.contract_version == BUMI_LOSS_CONTRACT_V3:
+        if self.contract_version in {BUMI_LOSS_CONTRACT_V3, BUMI_LOSS_CONTRACT_V4}:
             for source_name, excess_name in (
                 ("joint_acceleration", "joint_acceleration_excess"),
                 ("joint_jerk", "joint_jerk_excess"),
@@ -400,16 +545,29 @@ class BumiRobotLosses(nn.Module):
 
         lower = self.kinematics.joint_lower_limits.to(pred_joint)
         upper = self.kinematics.joint_upper_limits.to(pred_joint)
-        violation = F.relu(lower - pred_joint) + F.relu(pred_joint - upper)
-        raw["joint_limit"] = _masked_mean(violation, valid)
-        normalized["joint_limit"] = _masked_mean(
-            F.smooth_l1_loss(
-                violation / BUMI_PHYSICAL_V2_SCALES["joint_limit"],
-                torch.zeros_like(violation),
-                reduction="none",
-            ),
-            valid,
-        )
+        if self.contract_version == BUMI_LOSS_CONTRACT_V4:
+            limit_losses = joint_limit_loss_values(
+                pred_joint,
+                lower,
+                upper,
+                valid,
+                margin_rad=self.joint_limit_margin_rad,
+                topk_fraction=self.joint_limit_topk_fraction,
+            )
+            raw["joint_limit"], normalized["joint_limit"] = limit_losses["joint_limit"]
+            for name in BUMI_ROBUST_JOINT_LIMIT_LOSS_NAMES:
+                raw[name], normalized[name] = limit_losses[name]
+        else:
+            violation = F.relu(lower - pred_joint) + F.relu(pred_joint - upper)
+            raw["joint_limit"] = _masked_mean(violation, valid)
+            normalized["joint_limit"] = _masked_mean(
+                F.smooth_l1_loss(
+                    violation / BUMI_PHYSICAL_V2_SCALES["joint_limit"],
+                    torch.zeros_like(violation),
+                    reduction="none",
+                ),
+                valid,
+            )
 
         contact_logits = model_output.get("static_conf_logits")
         if (
@@ -463,6 +621,14 @@ class BumiRobotLosses(nn.Module):
             warmup = 1.0
         else:
             warmup = min(max(float(global_step), 0.0) / self.auxiliary_warmup_steps, 1.0)
+        if self.robust_joint_limit_warmup_steps <= 0:
+            robust_joint_limit_warmup = 1.0
+        else:
+            robust_joint_limit_warmup = min(
+                max(float(global_step - self.robust_joint_limit_start_step), 0.0)
+                / self.robust_joint_limit_warmup_steps,
+                1.0,
+            )
         always_on = {
             "repr_root_pos",
             "repr_root_rot",
@@ -472,9 +638,15 @@ class BumiRobotLosses(nn.Module):
             "contact_bce",
         }
         total = pred_norm.new_zeros(())
-        output: dict[str, torch.Tensor] = {"auxiliary_warmup_factor": pred_norm.new_tensor(warmup)}
+        output: dict[str, torch.Tensor] = {
+            "auxiliary_warmup_factor": pred_norm.new_tensor(warmup),
+            "robust_joint_limit_warmup_factor": pred_norm.new_tensor(robust_joint_limit_warmup),
+        }
         for name in self.loss_names:
-            factor = 1.0 if name in always_on else warmup
+            if name in BUMI_ROBUST_JOINT_LIMIT_LOSS_NAMES:
+                factor = robust_joint_limit_warmup
+            else:
+                factor = 1.0 if name in always_on else warmup
             weighted = normalized[name] * (self.weights[name] * factor)
             output[f"raw_{name}_loss"] = raw[name]
             output[f"normalized_{name}_loss"] = normalized[name]
@@ -489,12 +661,15 @@ class BumiRobotLosses(nn.Module):
 __all__ = [
     "BUMI_LOSS_CONTRACT_VERSION",
     "BUMI_LOSS_CONTRACT_V3",
+    "BUMI_LOSS_CONTRACT_V4",
     "BUMI_EXCESS_LOSS_NAMES",
     "BUMI_LOSS_NAMES",
     "BUMI_LOSS_NAMES_BY_CONTRACT",
     "BUMI_PHYSICAL_V2_SCALES",
+    "BUMI_ROBUST_JOINT_LIMIT_LOSS_NAMES",
     "BumiRobotLosses",
     "derivative_excess_loss_values",
+    "joint_limit_loss_values",
     "root_tilt_loss_values",
     "so3_geodesic_angle",
     "temporal_difference_mask",

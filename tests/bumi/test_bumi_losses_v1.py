@@ -18,10 +18,13 @@ from gem.robots.bumi.kinematics import BumiKinematics
 from gem.robots.bumi.losses import (
     BUMI_EXCESS_LOSS_NAMES,
     BUMI_LOSS_CONTRACT_V3,
+    BUMI_LOSS_CONTRACT_V4,
     BUMI_LOSS_CONTRACT_VERSION,
     BUMI_LOSS_NAMES,
+    BUMI_ROBUST_JOINT_LIMIT_LOSS_NAMES,
     BumiRobotLosses,
     derivative_excess_loss_values,
+    joint_limit_loss_values,
     root_tilt_loss_values,
     so3_geodesic_angle,
     temporal_difference_mask,
@@ -89,6 +92,31 @@ def test_derivative_excess_only_penalizes_prediction_above_target() -> None:
     assert prediction.grad is not None
     assert prediction.grad[0, 0].abs().sum().item() == pytest.approx(0.0)
     assert prediction.grad[0, 1, 0].item() > 0.0
+
+
+def test_v4_joint_limit_margin_topk_and_max_keep_sparse_peak() -> None:
+    """安全边距应在越限前生效，top-k/max不能被大量零值平均掉。"""
+
+    prediction = torch.zeros(1, 10, 2, requires_grad=True)
+    with torch.no_grad():
+        prediction[0, 0, 0] = 0.975
+        prediction[0, 5, 1] = 1.25
+    values = joint_limit_loss_values(
+        prediction,
+        torch.tensor([-1.0, -1.0]),
+        torch.tensor([1.0, 1.0]),
+        torch.ones(1, 10, dtype=torch.bool),
+        margin_rad=0.05,
+        topk_fraction=0.1,
+    )
+    assert float(values["joint_limit_margin"][1]) > float(values["joint_limit"][1])
+    assert float(values["joint_limit_topk"][1]) == pytest.approx(1.0)
+    assert float(values["joint_limit_max"][1]) == pytest.approx(2.0)
+    total = sum(normalized for _, normalized in values.values())
+    total.backward()
+    assert prediction.grad is not None
+    assert prediction.grad[0, 0, 0].item() > 0.0
+    assert prediction.grad[0, 5, 1].item() > 0.0
 
 
 def test_so3_wraparound_near_plus_minus_pi_is_continuous() -> None:
@@ -221,6 +249,68 @@ def test_v3_excess_losses_are_versioned_and_emitted(test_kinematics_path) -> Non
         assert float(output[f"weighted_{name}_loss"]) > 0.0
     output["loss"].backward()
     assert pred.grad is not None and bool(torch.isfinite(pred.grad).all())
+
+
+def test_v4_robust_joint_limit_losses_warm_up_independently(test_kinematics_path) -> None:
+    """v4新增三项必须独立渐进启用，恢复旧训练时不能首步突增。"""
+
+    kinematics = BumiKinematics(test_kinematics_path)
+    codec = BumiMotionFeatureCodec(kinematics)
+    endecoder = SimpleNamespace(kinematics=kinematics, codec=codec)
+    weights = _weights()
+    weights.update(
+        {
+            "joint_acceleration_excess": 0.05,
+            "joint_jerk_excess": 0.003,
+            "joint_limit_margin": 0.2,
+            "joint_limit_topk": 0.5,
+            "joint_limit_max": 0.05,
+        }
+    )
+    loss = BumiRobotLosses(
+        endecoder,
+        weights,
+        contract_version=BUMI_LOSS_CONTRACT_V4,
+        ground_semantics="mixed_floor_zero_fk_contact_v2",
+        joint_limit_margin_rad=0.05,
+        joint_limit_topk_fraction=0.01,
+        robust_joint_limit_start_step=100,
+        robust_joint_limit_warmup_steps=100,
+    )
+    qpos = kinematics.default_qpos.view(1, 1, 28).repeat(1, 6, 1)
+    encoded = codec.encode(qpos)
+    pred = encoded.physical_features.clone()
+    pred[..., 9] = kinematics.joint_upper_limits[0] + 0.2
+    parts = codec.split_features(pred)
+    pred_qpos = codec.decode_to_canonical_qpos(pred)
+    fk = kinematics.forward_kinematics(pred_qpos)
+    valid = torch.ones(1, 6, dtype=torch.bool)
+    contact = torch.ones(1, 6, 2)
+
+    def run(step: int) -> dict[str, torch.Tensor]:
+        return loss(
+            _encoded_inputs(encoded, valid, contact),
+            {"pred_x": pred, "static_conf_logits": torch.zeros_like(contact)},
+            {
+                "root_delta_xy_heading": parts.root_delta_xy_heading,
+                "root_height_offset": parts.root_height_offset,
+                "root_rot_local_6d": pred[..., 3:9],
+                "joint_dof": parts.joint_dof,
+            },
+            pred_qpos,
+            fk,
+            global_step=step,
+        )
+
+    at_start = run(100)
+    at_half = run(150)
+    at_full = run(200)
+    for name in BUMI_ROBUST_JOINT_LIMIT_LOSS_NAMES:
+        assert float(at_start[f"weighted_{name}_loss"]) == pytest.approx(0.0)
+        assert float(at_half[f"weighted_{name}_loss"]) == pytest.approx(
+            float(at_full[f"weighted_{name}_loss"]) * 0.5
+        )
+    assert float(at_start["weighted_joint_limit_loss"]) > 0.0
 
 
 def test_v2_rejects_v3_only_excess_weights(test_kinematics_path) -> None:
