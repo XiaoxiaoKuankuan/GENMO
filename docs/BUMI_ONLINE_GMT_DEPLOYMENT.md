@@ -58,22 +58,21 @@ cd /home/weili/GENMO
   --redis-host 127.0.0.1 \
   --redis-port 6379 \
   --redis-key gmt_online_frame_bumi \
-  --joint-limit-tolerance-rad 0.48 \
-  --max-joint-velocity-radps 21.6 \
-  --max-root-linear-velocity-mps 4.8 \
-  --max-root-angular-velocity-radps 12 \
+  --joint-limit-tolerance-rad 0.576 \
+  --max-joint-velocity-radps 25.92 \
+  --max-root-linear-velocity-mps 5.76 \
+  --max-root-angular-velocity-radps 14.4 \
   --min-root-height-m 0.2083333333 \
   --max-root-height-m 1.44 \
   --audio-playback ffplay \
   --verbose
 ```
 
-当前新BUMI桥按用户联调要求，将六项可配置运动安全阈值在当前联调基准上统一放宽20%：
-关节限位容差`0.4→0.48 rad`、关节速度`18→21.6 rad/s`、根平移速度`4→4.8 m/s`、
-根旋转速度`10→12 rad/s`、根高度下限`0.25÷1.2→0.208333 m`、根高度上限
-`1.20×1.2→1.44 m`。其中限位容差不会把qpos裁到XML机械限位，而是允许目标关节角落在
-`[lower - 0.48, upper + 0.48]`内。旧SMPL/GMR桥、训练数据严格限位、CRC、身份、帧序、
-心跳、GMT ACK、缓冲欠载和急停保护不受影响。
+当前新BUMI桥按用户联调要求，先统一放宽六项阈值，再将其中前四项继续乘以`1.2`。最终值为：
+关节限位容差`0.576 rad`、关节速度`25.92 rad/s`、根平移速度`5.76 m/s`、根旋转速度
+`14.4 rad/s`；根高度上下限保持上一轮的`0.208333～1.44 m`。其中限位容差不会把qpos
+裁到XML机械限位，而是允许目标关节角落在`[lower - 0.576, upper + 0.576]`内。旧SMPL/GMR
+桥、训练数据严格限位、CRC、身份、帧序、心跳、GMT ACK、缓冲欠载和急停保护不受影响。
 
 正式 TensorRT 常驻控制台：
 

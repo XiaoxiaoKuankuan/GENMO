@@ -350,16 +350,16 @@ def _bridge_args(kinematics: Path, policy: Path, estop: Path) -> SimpleNamespace
     )
 
 
-def test_new_bumi_bridge_defaults_relax_motion_safety_thresholds_by_point_two() -> None:
-    """锁定用户指定的新BUMI在线桥六项运动安全阈值。"""
+def test_new_bumi_bridge_defaults_use_operator_selected_motion_thresholds() -> None:
+    """锁定用户逐次指定的新BUMI在线桥运动安全阈值。"""
 
     args = bridge_module.build_parser().parse_args(
         ["--kinematics", "kinematics.json", "--gmt-policy", "policy.onnx"]
     )
-    assert args.joint_limit_tolerance_rad == pytest.approx(0.48)
-    assert args.max_joint_velocity_radps == pytest.approx(21.6)
-    assert args.max_root_linear_velocity_mps == pytest.approx(4.8)
-    assert args.max_root_angular_velocity_radps == pytest.approx(12.0)
+    assert args.joint_limit_tolerance_rad == pytest.approx(0.576)
+    assert args.max_joint_velocity_radps == pytest.approx(25.92)
+    assert args.max_root_linear_velocity_mps == pytest.approx(5.76)
+    assert args.max_root_angular_velocity_radps == pytest.approx(14.4)
     assert args.min_root_height_m == pytest.approx(0.25 / 1.2)
     assert args.max_root_height_m == pytest.approx(1.44)
 
