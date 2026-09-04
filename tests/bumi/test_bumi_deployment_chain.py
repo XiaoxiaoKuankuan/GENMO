@@ -294,6 +294,35 @@ def test_kinematic_metrics_accept_per_sample_ground_height(test_kinematics_path:
     assert float(metrics["foot_penetration_max_m"]) == pytest.approx(0.1, abs=1.0e-6)
 
 
+def test_kinematic_metrics_report_tail_jumps_and_contact_slide(
+    test_kinematics_path: Path,
+) -> None:
+    """验证集必须同时回显P95与最大尖峰，不能只用均值掩盖单帧跳变。"""
+
+    kinematics = BumiKinematics(test_kinematics_path)
+    qpos = torch.from_numpy(_qpos(8)).unsqueeze(0)
+    qpos[0, :, 0] = torch.tensor([0.0, 0.0, 0.0, 0.3, 0.3, 0.3, 0.3, 0.3])
+    qpos[0, :, 7] = torch.tensor([0.0, 0.0, 0.0, 0.8, -0.8, 0.0, 0.0, 0.0])
+    metrics = compute_bumi_kinematic_metrics(
+        qpos,
+        kinematics,
+        target_contact=torch.ones(1, 8, 2),
+    )
+    for prefix, unit in (
+        ("foot_sliding", "mps"),
+        ("joint_velocity", "radps"),
+        ("joint_acceleration", "radps2"),
+        ("joint_jerk", "radps3"),
+        ("root_linear_velocity", "mps"),
+        ("root_angular_velocity", "radps"),
+    ):
+        assert torch.isfinite(metrics[f"{prefix}_p95_{unit}"])
+        assert torch.isfinite(metrics[f"{prefix}_max_{unit}"])
+        assert float(metrics[f"{prefix}_max_{unit}"]) >= float(metrics[f"{prefix}_p95_{unit}"])
+    assert float(metrics["foot_sliding_max_mps"]) > 0.0
+    assert float(metrics["joint_jerk_max_radps3"]) > 0.0
+
+
 def _chunk(qpos: np.ndarray, *, index: int, start: int, total: int, last: bool) -> BumiQposChunk:
     return BumiQposChunk.from_qpos(
         qpos,

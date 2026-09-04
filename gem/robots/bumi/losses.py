@@ -1,4 +1,4 @@
-"""BUMI qpos30 模型的表示、FK、接触、脚滑与根倾斜训练损失。
+"""BUMI qpos30 模型的表示、FK、接触、脚滑、限位与动态连续性训练损失。
 
 网络监督只覆盖能决定 qpos28 的 30 维，不存在可与 qpos 冲突的 link 回归分支。所有 link、
 鞋底和穿透几何均由预测 qpos 经过固定可微 FK 得到。Root rotation 使用完整 SO(3) 测地
@@ -7,7 +7,9 @@
 
 左右接触 head 使用版本化 FK 足底标签做 BCE；foot-slide loss 只在 GT 连续接触且两帧都
 有效时惩罚预测鞋底水平速度，避免模型通过把接触概率降为零逃避脚滑约束。所有物理项在
-FP32 中计算，并同时记录原始量、按物理尺度归一化量和加权量。
+FP32 中计算，并同时记录原始量、按物理尺度归一化量和加权量。v5 进一步监督根位姿与
+全身 FK 的速度/加速度，并对关节跳变、限位安全边距、脚滑、接触脚高度、穿地和异常
+倾斜保留 top-k/max 长尾；这些仍是运动学与有限差分代理，不包含力矩、接触力或闭环控制。
 """
 
 from __future__ import annotations
@@ -20,7 +22,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from gem.utils.rotation_conversions import rotation_6d_to_matrix
+from gem.utils.rotation_conversions import matrix_to_axis_angle, rotation_6d_to_matrix
 
 from .endecoder import BumiEndecoder
 from .feature_codec import BUMI_FEATURE_SLICES
@@ -28,6 +30,7 @@ from .feature_codec import BUMI_FEATURE_SLICES
 BUMI_LOSS_CONTRACT_VERSION = "physical_qpos30_contact_v2"
 BUMI_LOSS_CONTRACT_V3 = "physical_qpos30_contact_v3"
 BUMI_LOSS_CONTRACT_V4 = "physical_qpos30_contact_v4"
+BUMI_LOSS_CONTRACT_V5 = "physical_qpos30_contact_v5"
 BUMI_LOSS_NAMES = (
     "repr_root_pos",
     "repr_root_rot",
@@ -55,11 +58,36 @@ BUMI_ROBUST_JOINT_LIMIT_LOSS_NAMES = (
     "joint_limit_topk",
     "joint_limit_max",
 )
+BUMI_ADVANCED_PHYSICS_LOSS_NAMES = (
+    "root_velocity",
+    "root_acceleration",
+    "root_angular_velocity",
+    "root_angular_acceleration",
+    "fk_velocity",
+    "fk_acceleration",
+    "joint_acceleration_excess_topk",
+    "joint_jerk_excess_topk",
+    "joint_limit_margin_topk",
+    "foot_slide_topk",
+    "foot_slide_max",
+    "foot_contact_height",
+    "foot_contact_height_topk",
+    "penetration_topk",
+    "penetration_max",
+    "root_tilt_excess_topk",
+    "root_tilt_excess_max",
+)
 BUMI_LOSS_NAMES_BY_CONTRACT = {
     BUMI_LOSS_CONTRACT_VERSION: BUMI_LOSS_NAMES,
     BUMI_LOSS_CONTRACT_V3: BUMI_LOSS_NAMES + BUMI_EXCESS_LOSS_NAMES,
     BUMI_LOSS_CONTRACT_V4: (
         BUMI_LOSS_NAMES + BUMI_EXCESS_LOSS_NAMES + BUMI_ROBUST_JOINT_LIMIT_LOSS_NAMES
+    ),
+    BUMI_LOSS_CONTRACT_V5: (
+        BUMI_LOSS_NAMES
+        + BUMI_EXCESS_LOSS_NAMES
+        + BUMI_ROBUST_JOINT_LIMIT_LOSS_NAMES
+        + BUMI_ADVANCED_PHYSICS_LOSS_NAMES
     ),
 }
 
@@ -82,6 +110,23 @@ BUMI_PHYSICAL_V2_SCALES = {
     "foot_slide": 1.0,
     "penetration": 0.05,
     "root_height": 1.0,
+    "root_velocity": 2.0,
+    "root_acceleration": 30.0,
+    "root_angular_velocity": 6.0,
+    "root_angular_acceleration": 180.0,
+    "fk_velocity": 3.0,
+    "fk_acceleration": 90.0,
+    "joint_acceleration_excess_topk": 180.0,
+    "joint_jerk_excess_topk": 600.0,
+    "joint_limit_margin_topk": 0.1,
+    "foot_slide_topk": 1.0,
+    "foot_slide_max": 1.0,
+    "foot_contact_height": 0.03,
+    "foot_contact_height_topk": 0.03,
+    "penetration_topk": 0.05,
+    "penetration_max": 0.05,
+    "root_tilt_excess_topk": 0.35,
+    "root_tilt_excess_max": 0.35,
 }
 
 
@@ -157,6 +202,64 @@ def _masked_max_mean(value: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
     ).sum() / valid_sequences.sum().clamp_min(1)
 
 
+def _masked_tail_pairs(
+    raw_value: torch.Tensor,
+    normalized_value: torch.Tensor,
+    mask: torch.Tensor,
+    fraction: float,
+) -> dict[str, tuple[torch.Tensor, torch.Tensor]]:
+    """聚合逐序列 top-k 与最大值，两个分支必须使用相同的有效掩码。"""
+
+    if raw_value.shape != normalized_value.shape:
+        raise ValueError(
+            "tail raw/normalized values must have matching shapes, got "
+            f"{raw_value.shape}/{normalized_value.shape}"
+        )
+    if not math.isfinite(float(fraction)) or not (0.0 < float(fraction) <= 1.0):
+        raise ValueError("tail fraction must be finite and in (0, 1]")
+    return {
+        "topk": (
+            _masked_topk_mean(raw_value, mask, fraction),
+            _masked_topk_mean(normalized_value, mask, fraction),
+        ),
+        "max": (
+            _masked_max_mean(raw_value, mask),
+            _masked_max_mean(normalized_value, mask),
+        ),
+    }
+
+
+def nonnegative_tail_loss_values(
+    value: torch.Tensor,
+    mask: torch.Tensor,
+    *,
+    scale: float,
+    fraction: float,
+    smooth_l1: bool,
+) -> dict[str, tuple[torch.Tensor, torch.Tensor]]:
+    """把非负物理量转换为有量纲/归一化的逐序列长尾损失。"""
+
+    if not math.isfinite(float(scale)) or float(scale) <= 0.0:
+        raise ValueError("tail scale must be finite and positive")
+    if smooth_l1:
+        raw_value = F.smooth_l1_loss(
+            value,
+            torch.zeros_like(value),
+            beta=1.0,
+            reduction="none",
+        )
+        normalized_value = F.smooth_l1_loss(
+            value / float(scale),
+            torch.zeros_like(value),
+            beta=1.0,
+            reduction="none",
+        )
+    else:
+        raw_value = value
+        normalized_value = value / float(scale)
+    return _masked_tail_pairs(raw_value, normalized_value, mask, fraction)
+
+
 def joint_limit_loss_values(
     pred_joint: torch.Tensor,
     lower: torch.Tensor,
@@ -196,6 +299,10 @@ def joint_limit_loss_values(
             _masked_mean(margin_violation, valid),
             _masked_mean(margin_normalized, valid),
         ),
+        "joint_limit_margin_topk": (
+            _masked_topk_mean(margin_violation, valid, topk_fraction),
+            _masked_topk_mean(margin_normalized, valid, topk_fraction),
+        ),
         "joint_limit_topk": (
             _masked_topk_mean(violation, valid, topk_fraction),
             _masked_topk_mean(violation_normalized, valid, topk_fraction),
@@ -223,6 +330,27 @@ def temporal_difference_mask(valid: torch.Tensor, order: int) -> torch.Tensor:
     return result
 
 
+def finite_difference(value: torch.Tensor, order: int, fps: int) -> torch.Tensor:
+    """沿时间轴计算一至三阶、带真实秒单位的前向有限差分。"""
+
+    if int(order) not in (1, 2, 3):
+        raise ValueError("finite difference order must be 1, 2 or 3")
+    if int(fps) <= 0:
+        raise ValueError("finite difference fps must be positive")
+    return torch.diff(value, n=int(order), dim=1) * (float(fps) ** int(order))
+
+
+def so3_angular_velocity(rotation: torch.Tensor, fps: int) -> torch.Tensor:
+    """用相邻姿态的 SO(3) 对数映射计算局部角速度向量。"""
+
+    if rotation.ndim < 4 or rotation.shape[-2:] != (3, 3):
+        raise ValueError("rotation must contain a time axis and end in [3,3]")
+    if int(fps) <= 0:
+        raise ValueError("angular velocity fps must be positive")
+    relative = rotation[:, :-1].transpose(-1, -2) @ rotation[:, 1:]
+    return matrix_to_axis_angle(relative) * float(fps)
+
+
 def derivative_excess_loss_values(
     prediction: torch.Tensor,
     target: torch.Tensor,
@@ -248,6 +376,32 @@ def derivative_excess_loss_values(
     return raw, normalized
 
 
+def derivative_excess_tail_loss_values(
+    prediction: torch.Tensor,
+    target: torch.Tensor,
+    mask: torch.Tensor,
+    *,
+    scale: float,
+    fraction: float,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """保留预测导数超出 GT 幅值最严重的一小部分关节帧。"""
+
+    if prediction.shape != target.shape:
+        raise ValueError(
+            "derivative excess tail inputs must have matching shapes, got "
+            f"{prediction.shape}/{target.shape}"
+        )
+    excess = F.relu(prediction.abs() - target.abs())
+    values = nonnegative_tail_loss_values(
+        excess,
+        mask,
+        scale=scale,
+        fraction=fraction,
+        smooth_l1=True,
+    )
+    return values["topk"]
+
+
 def so3_geodesic_angle(pred_rotation: torch.Tensor, target_rotation: torch.Tensor) -> torch.Tensor:
     if pred_rotation.shape != target_rotation.shape or pred_rotation.shape[-2:] != (3, 3):
         raise ValueError(
@@ -270,15 +424,14 @@ def so3_geodesic_angle(pred_rotation: torch.Tensor, target_rotation: torch.Tenso
     return torch.atan2(sin_twice, cos_twice)
 
 
-def root_tilt_loss_values(
+def root_tilt_components(
     pred_rotation: torch.Tensor,
     target_rotation: torch.Tensor,
-    valid: torch.Tensor,
     *,
     upright_allowance_rad: float = 0.35,
     target_margin_rad: float = 0.10,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """返回 roll/pitch 定向误差和异常大倾角安全项。"""
+    """返回逐轴 roll/pitch 误差与超出 GT 包络的根倾角。"""
 
     def roll_pitch_zyx(rotation: torch.Tensor) -> torch.Tensor:
         # 对 R = Rz(yaw) @ Ry(pitch) @ Rx(roll) 显式取 roll/pitch；左乘任意 yaw
@@ -316,6 +469,25 @@ def root_tilt_loss_values(
         target_tilt.new_full((), float(upright_allowance_rad)),
     )
     excessive_tilt = F.relu(pred_tilt - allowance)
+    return direction_error, excessive_tilt
+
+
+def root_tilt_loss_values(
+    pred_rotation: torch.Tensor,
+    target_rotation: torch.Tensor,
+    valid: torch.Tensor,
+    *,
+    upright_allowance_rad: float = 0.35,
+    target_margin_rad: float = 0.10,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """返回 roll/pitch 定向误差和异常大倾角安全项。"""
+
+    direction_error, excessive_tilt = root_tilt_components(
+        pred_rotation,
+        target_rotation,
+        upright_allowance_rad=upright_allowance_rad,
+        target_margin_rad=target_margin_rad,
+    )
     raw = _masked_mean(direction_error, valid) + _masked_mean(excessive_tilt, valid)
     normalized = _masked_mean(direction_error / float(upright_allowance_rad), valid) + _masked_mean(
         excessive_tilt / float(upright_allowance_rad), valid
@@ -338,6 +510,11 @@ class BumiRobotLosses(nn.Module):
         joint_limit_topk_fraction: float = 0.01,
         robust_joint_limit_start_step: int = 0,
         robust_joint_limit_warmup_steps: int = 0,
+        advanced_physics_start_step: int = 0,
+        advanced_physics_warmup_steps: int = 0,
+        advanced_physics_topk_fraction: float = 0.05,
+        root_tilt_upright_allowance_rad: float = 0.35,
+        root_tilt_target_margin_rad: float = 0.10,
     ) -> None:
         super().__init__()
         self.endecoder = endecoder
@@ -350,6 +527,11 @@ class BumiRobotLosses(nn.Module):
         self.joint_limit_topk_fraction = float(joint_limit_topk_fraction)
         self.robust_joint_limit_start_step = int(robust_joint_limit_start_step)
         self.robust_joint_limit_warmup_steps = int(robust_joint_limit_warmup_steps)
+        self.advanced_physics_start_step = int(advanced_physics_start_step)
+        self.advanced_physics_warmup_steps = int(advanced_physics_warmup_steps)
+        self.advanced_physics_topk_fraction = float(advanced_physics_topk_fraction)
+        self.root_tilt_upright_allowance_rad = float(root_tilt_upright_allowance_rad)
+        self.root_tilt_target_margin_rad = float(root_tilt_target_margin_rad)
         if self.fps != 30:
             raise ValueError(f"BUMI losses require 30 FPS, got {fps}")
         if self.contract_version not in BUMI_LOSS_NAMES_BY_CONTRACT:
@@ -373,16 +555,35 @@ class BumiRobotLosses(nn.Module):
             raise ValueError("robust_joint_limit_start_step must be non-negative")
         if self.robust_joint_limit_warmup_steps < 0:
             raise ValueError("robust_joint_limit_warmup_steps must be non-negative")
-        if self.contract_version == BUMI_LOSS_CONTRACT_V4:
+        if self.advanced_physics_start_step < 0:
+            raise ValueError("advanced_physics_start_step must be non-negative")
+        if self.advanced_physics_warmup_steps < 0:
+            raise ValueError("advanced_physics_warmup_steps must be non-negative")
+        if self.contract_version in {BUMI_LOSS_CONTRACT_V4, BUMI_LOSS_CONTRACT_V5}:
             if not math.isfinite(self.joint_limit_margin_rad) or self.joint_limit_margin_rad <= 0.0:
-                raise ValueError("v4 joint_limit_margin_rad must be finite and positive")
+                raise ValueError("v4/v5 joint_limit_margin_rad must be finite and positive")
             if not math.isfinite(self.joint_limit_topk_fraction) or not (
                 0.0 < self.joint_limit_topk_fraction <= 1.0
             ):
-                raise ValueError("v4 joint_limit_topk_fraction must be in (0, 1]")
+                raise ValueError("v4/v5 joint_limit_topk_fraction must be in (0, 1]")
             joint_width = self.kinematics.joint_upper_limits - self.kinematics.joint_lower_limits
             if bool((joint_width <= 2.0 * self.joint_limit_margin_rad).any()):
-                raise ValueError("v4 joint limit margin must leave a non-empty safe interval")
+                raise ValueError("v4/v5 joint limit margin must leave a non-empty safe interval")
+        if self.contract_version == BUMI_LOSS_CONTRACT_V5:
+            if not math.isfinite(self.advanced_physics_topk_fraction) or not (
+                0.0 < self.advanced_physics_topk_fraction <= 1.0
+            ):
+                raise ValueError("v5 advanced_physics_topk_fraction must be in (0, 1]")
+            if (
+                not math.isfinite(self.root_tilt_upright_allowance_rad)
+                or self.root_tilt_upright_allowance_rad <= 0.0
+            ):
+                raise ValueError("v5 root tilt upright allowance must be finite and positive")
+            if (
+                not math.isfinite(self.root_tilt_target_margin_rad)
+                or self.root_tilt_target_margin_rad < 0.0
+            ):
+                raise ValueError("v5 root tilt target margin must be finite and non-negative")
         self.loss_names = BUMI_LOSS_NAMES_BY_CONTRACT[self.contract_version]
         self.weights = {name: float(weights.get(name, 0.0)) for name in self.loss_names}
         unknown = set(weights) - set(self.loss_names)
@@ -395,10 +596,14 @@ class BumiRobotLosses(nn.Module):
             raise ValueError("BUMI loss weights must be finite and non-negative")
         if self.weights["contact_bce"] <= 0.0 or self.weights["foot_slide"] <= 0.0:
             raise ValueError("qpos30 contact contract requires positive contact_bce and foot_slide")
-        if self.contract_version == BUMI_LOSS_CONTRACT_V4 and any(
+        if self.contract_version in {BUMI_LOSS_CONTRACT_V4, BUMI_LOSS_CONTRACT_V5} and any(
             self.weights[name] <= 0.0 for name in BUMI_ROBUST_JOINT_LIMIT_LOSS_NAMES
         ):
-            raise ValueError("v4 requires positive margin, top-k and max joint-limit weights")
+            raise ValueError("v4/v5 require positive margin, top-k and max joint-limit weights")
+        if self.contract_version == BUMI_LOSS_CONTRACT_V5 and any(
+            self.weights[name] <= 0.0 for name in BUMI_ADVANCED_PHYSICS_LOSS_NAMES
+        ):
+            raise ValueError("v5 requires every advanced physics weight to be positive")
 
     @staticmethod
     def _repr_loss(
@@ -460,6 +665,7 @@ class BumiRobotLosses(nn.Module):
         target_norm = inputs["target_x"].float()
         target_physical = inputs["target_physical_features"].float()
         pred_qpos = pred_qpos_canonical.float()
+        target_qpos = inputs["target_qpos_canonical"].float()
         pred_joint = decode_dict["joint_dof"].float()
         target_components = self.endecoder.codec.split_features(target_physical)
         pred_body_root = self.endecoder.codec.body_positions_in_root_frame(
@@ -481,7 +687,7 @@ class BumiRobotLosses(nn.Module):
 
         raw["root_pos"], normalized["root_pos"] = self._smooth_l1_pair(
             pred_qpos[..., :3],
-            inputs["target_qpos_canonical"].float()[..., :3],
+            target_qpos[..., :3],
             valid,
             BUMI_PHYSICAL_V2_SCALES["root_pos"],
         )
@@ -497,6 +703,8 @@ class BumiRobotLosses(nn.Module):
             pred_rotation,
             target_rotation,
             valid,
+            upright_allowance_rad=self.root_tilt_upright_allowance_rad,
+            target_margin_rad=self.root_tilt_target_margin_rad,
         )
         raw["joint_dof"], normalized["joint_dof"] = self._smooth_l1_pair(
             pred_joint,
@@ -530,7 +738,11 @@ class BumiRobotLosses(nn.Module):
             )
             temporal_values[name] = (pred_delta, target_delta, difference_mask)
 
-        if self.contract_version in {BUMI_LOSS_CONTRACT_V3, BUMI_LOSS_CONTRACT_V4}:
+        if self.contract_version in {
+            BUMI_LOSS_CONTRACT_V3,
+            BUMI_LOSS_CONTRACT_V4,
+            BUMI_LOSS_CONTRACT_V5,
+        }:
             for source_name, excess_name in (
                 ("joint_acceleration", "joint_acceleration_excess"),
                 ("joint_jerk", "joint_jerk_excess"),
@@ -543,9 +755,60 @@ class BumiRobotLosses(nn.Module):
                     BUMI_PHYSICAL_V2_SCALES[excess_name],
                 )
 
+        if self.contract_version == BUMI_LOSS_CONTRACT_V5:
+            for order, name in ((1, "root_velocity"), (2, "root_acceleration")):
+                difference_mask = temporal_difference_mask(valid, order)
+                raw[name], normalized[name] = self._smooth_l1_pair(
+                    finite_difference(pred_qpos[..., :3], order, self.fps),
+                    finite_difference(target_qpos[..., :3], order, self.fps),
+                    difference_mask,
+                    BUMI_PHYSICAL_V2_SCALES[name],
+                )
+
+            pred_root_angular_velocity = so3_angular_velocity(pred_rotation, self.fps)
+            target_root_angular_velocity = so3_angular_velocity(target_rotation, self.fps)
+            raw["root_angular_velocity"], normalized["root_angular_velocity"] = (
+                self._smooth_l1_pair(
+                    pred_root_angular_velocity,
+                    target_root_angular_velocity,
+                    temporal_difference_mask(valid, 1),
+                    BUMI_PHYSICAL_V2_SCALES["root_angular_velocity"],
+                )
+            )
+            raw["root_angular_acceleration"], normalized["root_angular_acceleration"] = (
+                self._smooth_l1_pair(
+                    finite_difference(pred_root_angular_velocity, 1, self.fps),
+                    finite_difference(target_root_angular_velocity, 1, self.fps),
+                    temporal_difference_mask(valid, 2),
+                    BUMI_PHYSICAL_V2_SCALES["root_angular_acceleration"],
+                )
+            )
+
+            target_body_root = inputs["target_body_link_pos_root"].float()
+            for order, name in ((1, "fk_velocity"), (2, "fk_acceleration")):
+                raw[name], normalized[name] = self._smooth_l1_pair(
+                    finite_difference(pred_body_root, order, self.fps),
+                    finite_difference(target_body_root, order, self.fps),
+                    temporal_difference_mask(valid, order),
+                    BUMI_PHYSICAL_V2_SCALES[name],
+                )
+
+            for source_name, tail_name in (
+                ("joint_acceleration", "joint_acceleration_excess_topk"),
+                ("joint_jerk", "joint_jerk_excess_topk"),
+            ):
+                pred_delta, target_delta, difference_mask = temporal_values[source_name]
+                raw[tail_name], normalized[tail_name] = derivative_excess_tail_loss_values(
+                    pred_delta,
+                    target_delta,
+                    difference_mask,
+                    scale=BUMI_PHYSICAL_V2_SCALES[tail_name],
+                    fraction=self.advanced_physics_topk_fraction,
+                )
+
         lower = self.kinematics.joint_lower_limits.to(pred_joint)
         upper = self.kinematics.joint_upper_limits.to(pred_joint)
-        if self.contract_version == BUMI_LOSS_CONTRACT_V4:
+        if self.contract_version in {BUMI_LOSS_CONTRACT_V4, BUMI_LOSS_CONTRACT_V5}:
             limit_losses = joint_limit_loss_values(
                 pred_joint,
                 lower,
@@ -557,6 +820,10 @@ class BumiRobotLosses(nn.Module):
             raw["joint_limit"], normalized["joint_limit"] = limit_losses["joint_limit"]
             for name in BUMI_ROBUST_JOINT_LIMIT_LOSS_NAMES:
                 raw[name], normalized[name] = limit_losses[name]
+            if self.contract_version == BUMI_LOSS_CONTRACT_V5:
+                raw["joint_limit_margin_topk"], normalized["joint_limit_margin_topk"] = (
+                    limit_losses["joint_limit_margin_topk"]
+                )
         else:
             violation = F.relu(lower - pred_joint) + F.relu(pred_joint - upper)
             raw["joint_limit"] = _masked_mean(violation, valid)
@@ -602,14 +869,79 @@ class BumiRobotLosses(nn.Module):
         )
         raw["foot_slide"] = _masked_mean(foot_speed, slide_gate)
         normalized["foot_slide"] = raw["foot_slide"] / BUMI_PHYSICAL_V2_SCALES["foot_slide"]
+        if self.contract_version == BUMI_LOSS_CONTRACT_V5:
+            slide_tail = nonnegative_tail_loss_values(
+                foot_speed,
+                slide_gate,
+                scale=BUMI_PHYSICAL_V2_SCALES["foot_slide_topk"],
+                fraction=self.advanced_physics_topk_fraction,
+                smooth_l1=False,
+            )
+            raw["foot_slide_topk"], normalized["foot_slide_topk"] = slide_tail["topk"]
+            raw["foot_slide_max"], normalized["foot_slide_max"] = slide_tail["max"]
 
         ground_height_local = inputs["target_contact_ground_height"].to(pred_norm)
         ground_height_local = ground_height_local - self.kinematics.default_qpos[2].to(pred_norm)
         while ground_height_local.ndim < pred_sole["foot_bottom_height"].ndim:
             ground_height_local = ground_height_local.unsqueeze(-1)
+        if self.contract_version == BUMI_LOSS_CONTRACT_V5:
+            contact_height_error = (pred_sole["foot_bottom_height"] - ground_height_local).abs()
+            contact_height_gate = contact_bool & contact_mask & valid[..., None]
+            contact_height_raw = F.smooth_l1_loss(
+                contact_height_error,
+                torch.zeros_like(contact_height_error),
+                beta=1.0,
+                reduction="none",
+            )
+            contact_height_normalized = F.smooth_l1_loss(
+                contact_height_error / BUMI_PHYSICAL_V2_SCALES["foot_contact_height"],
+                torch.zeros_like(contact_height_error),
+                beta=1.0,
+                reduction="none",
+            )
+            raw["foot_contact_height"] = _masked_mean(contact_height_raw, contact_height_gate)
+            normalized["foot_contact_height"] = _masked_mean(
+                contact_height_normalized, contact_height_gate
+            )
+            contact_height_tail = _masked_tail_pairs(
+                contact_height_raw,
+                contact_height_normalized,
+                contact_height_gate,
+                self.advanced_physics_topk_fraction,
+            )
+            (
+                raw["foot_contact_height_topk"],
+                normalized["foot_contact_height_topk"],
+            ) = contact_height_tail["topk"]
         penetration = F.relu(ground_height_local - pred_sole["foot_bottom_height"])
         raw["penetration"] = _masked_mean(penetration, valid)
         normalized["penetration"] = raw["penetration"] / BUMI_PHYSICAL_V2_SCALES["penetration"]
+        if self.contract_version == BUMI_LOSS_CONTRACT_V5:
+            penetration_tail = nonnegative_tail_loss_values(
+                penetration,
+                valid,
+                scale=BUMI_PHYSICAL_V2_SCALES["penetration_topk"],
+                fraction=self.advanced_physics_topk_fraction,
+                smooth_l1=False,
+            )
+            raw["penetration_topk"], normalized["penetration_topk"] = penetration_tail["topk"]
+            raw["penetration_max"], normalized["penetration_max"] = penetration_tail["max"]
+
+            _, excessive_tilt = root_tilt_components(
+                pred_rotation,
+                target_rotation,
+                upright_allowance_rad=self.root_tilt_upright_allowance_rad,
+                target_margin_rad=self.root_tilt_target_margin_rad,
+            )
+            tilt_tail = nonnegative_tail_loss_values(
+                excessive_tilt,
+                valid,
+                scale=BUMI_PHYSICAL_V2_SCALES["root_tilt_excess_topk"],
+                fraction=self.advanced_physics_topk_fraction,
+                smooth_l1=False,
+            )
+            raw["root_tilt_excess_topk"], normalized["root_tilt_excess_topk"] = tilt_tail["topk"]
+            raw["root_tilt_excess_max"], normalized["root_tilt_excess_max"] = tilt_tail["max"]
         raw["root_height"], normalized["root_height"] = self._smooth_l1_pair(
             decode_dict["root_height_offset"].float()[..., 0],
             target_components.root_height_offset.float()[..., 0],
@@ -629,6 +961,14 @@ class BumiRobotLosses(nn.Module):
                 / self.robust_joint_limit_warmup_steps,
                 1.0,
             )
+        if self.advanced_physics_warmup_steps <= 0:
+            advanced_physics_warmup = 1.0
+        else:
+            advanced_physics_warmup = min(
+                max(float(global_step - self.advanced_physics_start_step), 0.0)
+                / self.advanced_physics_warmup_steps,
+                1.0,
+            )
         always_on = {
             "repr_root_pos",
             "repr_root_rot",
@@ -641,9 +981,12 @@ class BumiRobotLosses(nn.Module):
         output: dict[str, torch.Tensor] = {
             "auxiliary_warmup_factor": pred_norm.new_tensor(warmup),
             "robust_joint_limit_warmup_factor": pred_norm.new_tensor(robust_joint_limit_warmup),
+            "advanced_physics_warmup_factor": pred_norm.new_tensor(advanced_physics_warmup),
         }
         for name in self.loss_names:
-            if name in BUMI_ROBUST_JOINT_LIMIT_LOSS_NAMES:
+            if name in BUMI_ADVANCED_PHYSICS_LOSS_NAMES:
+                factor = advanced_physics_warmup
+            elif name in BUMI_ROBUST_JOINT_LIMIT_LOSS_NAMES:
                 factor = robust_joint_limit_warmup
             else:
                 factor = 1.0 if name in always_on else warmup
@@ -659,9 +1002,11 @@ class BumiRobotLosses(nn.Module):
 
 
 __all__ = [
+    "BUMI_ADVANCED_PHYSICS_LOSS_NAMES",
     "BUMI_LOSS_CONTRACT_VERSION",
     "BUMI_LOSS_CONTRACT_V3",
     "BUMI_LOSS_CONTRACT_V4",
+    "BUMI_LOSS_CONTRACT_V5",
     "BUMI_EXCESS_LOSS_NAMES",
     "BUMI_LOSS_NAMES",
     "BUMI_LOSS_NAMES_BY_CONTRACT",
@@ -669,8 +1014,13 @@ __all__ = [
     "BUMI_ROBUST_JOINT_LIMIT_LOSS_NAMES",
     "BumiRobotLosses",
     "derivative_excess_loss_values",
+    "derivative_excess_tail_loss_values",
+    "finite_difference",
     "joint_limit_loss_values",
+    "nonnegative_tail_loss_values",
+    "root_tilt_components",
     "root_tilt_loss_values",
+    "so3_angular_velocity",
     "so3_geodesic_angle",
     "temporal_difference_mask",
 ]

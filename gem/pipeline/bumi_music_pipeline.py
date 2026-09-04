@@ -43,6 +43,11 @@ class BumiMusicPipeline(nn.Module):
             joint_limit_topk_fraction=args.get("joint_limit_topk_fraction", 0.01),
             robust_joint_limit_start_step=args.get("robust_joint_limit_start_step", 0),
             robust_joint_limit_warmup_steps=args.get("robust_joint_limit_warmup_steps", 0),
+            advanced_physics_start_step=args.get("advanced_physics_start_step", 0),
+            advanced_physics_warmup_steps=args.get("advanced_physics_warmup_steps", 0),
+            advanced_physics_topk_fraction=args.get("advanced_physics_topk_fraction", 0.05),
+            root_tilt_upright_allowance_rad=args.get("root_tilt_upright_allowance_rad", 0.35),
+            root_tilt_target_margin_rad=args.get("root_tilt_target_margin_rad", 0.10),
         )
 
     @staticmethod

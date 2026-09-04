@@ -1,0 +1,77 @@
+# BUMI qpos30/contact v5 物理长尾与动态连续性训练管线。
+#
+# 本配置不改变30D运动表示、2D接触head、模型参数形状、统计量或FK资产，因此可以从
+# v2/v3/v4的qpos30完整checkpoint提取权重继续训练。相对v4，v5除了保留关节速度、
+# 加速度、jerk、脚滑、穿地和四层关节限位约束，还补充以下可微运动学代理：
+#
+# 1. 根平移速度/加速度与SO(3)根角速度/角加速度匹配，抑制整机位姿突跳；
+# 2. 根坐标系全身FK速度/加速度匹配，约束各连杆的动态连续性；
+# 3. 对预测超出GT的关节加速度和jerk取逐序列最严重5%，防止短尖峰被均值稀释；
+# 4. 对限位安全边距、接触脚水平滑动、垂直接地误差、穿地和异常根倾斜计算top-k/max；
+# 5. 所有新增项独立做10000 step warmup，适配从已收敛checkpoint做weights-only续训。
+#
+# 这些项使用精确BUMI FK和真实时间单位，但仍是运动学/有限差分代理，不包含电机模型、
+# 接触力、逆动力学力矩或闭环控制器；因此训练通过不能替代MuJoCo/GMT跟踪和实机安全验证。
+_target_: gem.pipeline.bumi_music_pipeline.BumiMusicPipeline
+args_denoiser3d: ${network}
+args:
+  motion_backend: bumi
+  train_modes: [diffusion]
+  endecoder_opt: ${endecoder}
+  use_cfg_sampler_for_gen: true
+  encoded_music_dim: 35
+  in_attr: [encoded_music]
+  mask_out_attr: []
+  out_attr:
+    static_conf_logits: 2
+  loss_contract: physical_qpos30_contact_v5
+  auxiliary_warmup_steps: 10000
+  ground_semantics: mixed_floor_zero_fk_contact_v2
+  joint_limit_margin_rad: 0.05
+  joint_limit_topk_fraction: 0.01
+  robust_joint_limit_start_step: 0
+  robust_joint_limit_warmup_steps: 10000
+  advanced_physics_start_step: 0
+  advanced_physics_warmup_steps: 10000
+  advanced_physics_topk_fraction: 0.05
+  root_tilt_upright_allowance_rad: 0.35
+  root_tilt_target_margin_rad: 0.05
+  weights:
+    repr_root_pos: 1.0
+    repr_root_rot: 2.0
+    repr_joint: 1.0
+    root_pos: 0.2
+    root_rot: 1.0
+    root_tilt: 1.0
+    joint_dof: 0.2
+    fk_body_pos: 1.0
+    joint_velocity: 0.10
+    joint_acceleration: 0.02
+    joint_jerk: 0.003
+    joint_acceleration_excess: 0.10
+    joint_jerk_excess: 0.003
+    joint_limit: 0.20
+    joint_limit_margin: 0.40
+    joint_limit_topk: 1.00
+    joint_limit_max: 0.10
+    contact_bce: 1.0
+    foot_slide: 0.05
+    penetration: 0.05
+    root_height: 0.1
+    root_velocity: 0.05
+    root_acceleration: 0.02
+    root_angular_velocity: 0.05
+    root_angular_acceleration: 0.02
+    fk_velocity: 0.05
+    fk_acceleration: 0.02
+    joint_acceleration_excess_topk: 0.05
+    joint_jerk_excess_topk: 0.002
+    joint_limit_margin_topk: 0.50
+    foot_slide_topk: 0.10
+    foot_slide_max: 0.02
+    foot_contact_height: 0.10
+    foot_contact_height_topk: 0.05
+    penetration_topk: 0.05
+    penetration_max: 0.01
+    root_tilt_excess_topk: 0.20
+    root_tilt_excess_max: 0.05

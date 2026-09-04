@@ -249,8 +249,12 @@ def test_qpos30_contact_v3_uses_stronger_temporal_and_excess_losses() -> None:
     assert config.args.auxiliary_warmup_steps == 5000
 
 
-def test_latest_robot_retargeter_five_set_config_resumes_s120k_to_s220k() -> None:
-    """唯一最新入口必须联合五库、强化偏小损失并执行完整状态恢复。"""
+def test_latest_robot_retargeter_five_set_config_runs_v5_weights_only_200k(
+    monkeypatch,
+) -> None:
+    """唯一最新入口必须联合五库，从显式checkpoint做v5额外20万步续训。"""
+
+    monkeypatch.setenv("BUMI_PRETRAIN_CKPT", "/tmp/verified-latest.ckpt")
 
     with initialize_config_dir(version_base="1.3", config_dir=str(REPO_ROOT / "configs")):
         config = compose(
@@ -261,17 +265,32 @@ def test_latest_robot_retargeter_five_set_config_resumes_s120k_to_s220k() -> Non
         )
 
     args = config.pipeline.args
-    assert args.loss_contract == "physical_qpos30_contact_v4"
+    assert args.loss_contract == "physical_qpos30_contact_v5"
     assert args.joint_limit_margin_rad == 0.05
     assert args.joint_limit_topk_fraction == 0.01
-    assert args.robust_joint_limit_warmup_steps == 5000
-    assert args.robust_joint_limit_start_step == 120000
-    assert args.weights.joint_acceleration == 0.02
-    assert args.weights.joint_acceleration_excess == 0.10
-    assert args.weights.joint_limit == 0.20
-    assert args.weights.joint_limit_margin == 0.40
-    assert args.weights.joint_limit_topk == 1.00
-    assert args.weights.joint_limit_max == 0.10
+    assert args.robust_joint_limit_warmup_steps == 10000
+    assert args.robust_joint_limit_start_step == 0
+    assert args.advanced_physics_warmup_steps == 10000
+    assert args.advanced_physics_start_step == 0
+    assert args.advanced_physics_topk_fraction == 0.05
+    assert args.root_tilt_target_margin_rad == 0.05
+    assert args.weights.joint_velocity == 0.15
+    assert args.weights.joint_acceleration == 0.04
+    assert args.weights.joint_jerk == 0.006
+    assert args.weights.joint_acceleration_excess == 0.20
+    assert args.weights.joint_jerk_excess == 0.006
+    assert args.weights.joint_limit == 0.40
+    assert args.weights.joint_limit_margin == 0.80
+    assert args.weights.joint_limit_topk == 2.00
+    assert args.weights.joint_limit_max == 0.20
+    assert args.weights.joint_limit_margin_topk == 0.50
+    assert args.weights.foot_slide == 0.10
+    assert args.weights.foot_slide_topk == 0.10
+    assert args.weights.foot_contact_height == 0.10
+    assert args.weights.penetration == 0.10
+    assert args.weights.root_velocity == 0.05
+    assert args.weights.root_angular_acceleration == 0.02
+    assert args.weights.fk_acceleration == 0.02
     assert list(config.train_datasets) == [
         "aistpp_bumi_train",
         "aioz_gdance_bumi_train",
@@ -286,10 +305,11 @@ def test_latest_robot_retargeter_five_set_config_resumes_s120k_to_s220k() -> Non
     assert config.data.loader_opts.train.batch_size == 256
     assert config.data.samples_per_epoch == 53248
     assert config.data.samples_per_epoch % (8 * config.data.loader_opts.train.batch_size) == 0
-    assert config.pretrain_ckpt is None
+    assert config.pretrain_ckpt == "/tmp/verified-latest.ckpt"
     assert config.ckpt_path is None
     assert config.resume_mode is None
-    assert config.pl_trainer.max_steps == 220000
+    assert config.model.model_cfg.checkpoint_adapter is None
+    assert config.pl_trainer.max_steps == 200000
     assert list(config.scheduler.scheduler.milestones) == [120000, 180000]
     assert config.pl_trainer.devices == 8
     assert config.pl_trainer.strategy == "ddp"

@@ -1,19 +1,20 @@
 # @package _global_
-# 当前唯一的 BUMI3 robot_retargeter 五库 qpos30/contact 正式恢复训练入口。
+# 当前唯一的 BUMI3 robot_retargeter 五库 qpos30/contact 物理强化续训入口。
 #
 # 四个公开库使用 robot_retargeter 全时域 QP 后的 PASS-v2 数据；自建库使用同一 fe934
 # kinematics，先按关节名把旧 CSV 的“腿、腰、手臂”顺序转换成当前 MuJoCo 的
-# “腰、手臂、腿”顺序，再重采样、限位对齐、重算接触。正式命令必须把 resume_mode
-# 指向 s120000 完整 checkpoint；模型、AdamW、scheduler、epoch 和 global step 全状态恢复，
-# max_steps=220000 表示从全局 120000 再训练 100000 step，禁止改用 pretrain_ckpt。
+# “腰、手臂、腿”顺序，再重采样、限位对齐、重算接触。正式命令必须把环境变量
+# BUMI_PRETRAIN_CKPT 指向本次已核验的最新完整编号checkpoint；仅加载模型权重，AdamW、
+# scheduler、epoch和global step从0重新开始，max_steps=200000明确表示额外训练20万step。
 #
-# s120000 末段日志中，加速度匹配、加速度超额和平均限位的加权贡献只有约 3.9e-5、
-# 9.6e-5 和 1.5e-5，因此只把这几类及 v4 的 margin/top-k/max 限位保护提高 2 倍；
-# jerk、脚滑和三项主表示重建损失保持原权重，避免为了物理项牺牲舞蹈相似性。
+# v5在不改变网络参数形状的前提下强化脚滑、接触脚高度、穿地、限位长尾以及关节/FK/
+# 根位姿动态连续性。主要表示损失保持原权重；长尾项与既有辅助项分别渐进启用，避免
+# 从已收敛模型切换目标时突然压过音乐动作相似性。该入口不接受resume_mode真状态恢复，
+# 因为旧scheduler已完成原阶段里程碑且不适合新的20万step优化周期。
 defaults:
   - gem_bumi_music_only_4set_random_v1
   - override /network: diffusion_lg_bumi30_contact
-  - override /pipeline: music_only_bumi_qpos30_contact_v4
+  - override /pipeline: music_only_bumi_qpos30_contact_v5
   - override /endecoder: bumi_qpos30_contact
   - override /optimizer: adamw_2e-5
   - override /scheduler: iters_half_120k_180k
@@ -35,13 +36,13 @@ defaults:
       - lr_monitor/pl
   - _self_
 
-exp_name_base: gem_bumi_music_only_5set_robot_retargeter_pass_v2_qpos30_contact_resume_s120k_to_s220k
+exp_name_base: gem_bumi_music_only_5set_robot_retargeter_pass_v2_qpos30_contact_v5_continue_b256_s200k
 exp_name_var: ""
 exp_name: ${exp_name_base}${exp_name_var}
 data_name: gem_bumi_music_only_5set_robot_retargeter_pass_v2_qpos30_contact_latest
 output_dir: outputs/${exp_name}
 
-pretrain_ckpt: null
+pretrain_ckpt: ${oc.env:BUMI_PRETRAIN_CKPT}
 ckpt_path: null
 resume_mode: null
 
@@ -57,15 +58,24 @@ network:
 pipeline:
   args:
     ground_semantics: mixed_floor_zero_fk_contact_v2
-    robust_joint_limit_start_step: 120000
-    robust_joint_limit_warmup_steps: 5000
+    robust_joint_limit_start_step: 0
+    robust_joint_limit_warmup_steps: 10000
+    advanced_physics_start_step: 0
+    advanced_physics_warmup_steps: 10000
+    advanced_physics_topk_fraction: 0.05
     weights:
-      joint_acceleration: 0.02
-      joint_acceleration_excess: 0.10
-      joint_limit: 0.20
-      joint_limit_margin: 0.40
-      joint_limit_topk: 1.00
-      joint_limit_max: 0.10
+      joint_velocity: 0.15
+      joint_acceleration: 0.04
+      joint_jerk: 0.006
+      joint_acceleration_excess: 0.20
+      joint_jerk_excess: 0.006
+      joint_limit: 0.40
+      joint_limit_margin: 0.80
+      joint_limit_topk: 2.00
+      joint_limit_max: 0.20
+      foot_slide: 0.10
+      penetration: 0.10
+      root_height: 0.15
 
 data:
   expected_train_sequences: 2578
@@ -113,7 +123,7 @@ optimizer:
   lr: 0.00002
 
 pl_trainer:
-  max_steps: 220000
+  max_steps: 200000
   val_check_interval: 5000
   devices: 8
   strategy: ddp

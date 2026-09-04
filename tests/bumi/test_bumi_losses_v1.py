@@ -1,8 +1,9 @@
 """BUMI qpos30/contact/FK 物理损失的纯 CPU 合约测试。
 
 测试确认网络损失只接收 30 维 qpos 表示，link 监督来自预测 qpos 的可微 FK；同时覆盖
-完整 SO(3) 根旋转、专用 roll/pitch tilt、可靠 GT 接触门控 foot-slide、接触 head BCE 和
-辅助项 warmup。测试运动学由 ``conftest`` 临时生成，不写入正式训练目录。
+完整 SO(3) 根旋转、专用 roll/pitch tilt、可靠 GT 接触门控 foot-slide、接触 head BCE、
+v4限位长尾和v5根/FK动态连续性及物理长尾warmup。测试运动学由 ``conftest`` 临时生成，
+不写入正式训练目录。
 """
 
 from __future__ import annotations
@@ -16,20 +17,23 @@ import torch
 from gem.robots.bumi.feature_codec import BumiMotionFeatureCodec
 from gem.robots.bumi.kinematics import BumiKinematics
 from gem.robots.bumi.losses import (
+    BUMI_ADVANCED_PHYSICS_LOSS_NAMES,
     BUMI_EXCESS_LOSS_NAMES,
     BUMI_LOSS_CONTRACT_V3,
     BUMI_LOSS_CONTRACT_V4,
+    BUMI_LOSS_CONTRACT_V5,
     BUMI_LOSS_CONTRACT_VERSION,
     BUMI_LOSS_NAMES,
     BUMI_ROBUST_JOINT_LIMIT_LOSS_NAMES,
     BumiRobotLosses,
     derivative_excess_loss_values,
+    derivative_excess_tail_loss_values,
     joint_limit_loss_values,
     root_tilt_loss_values,
     so3_geodesic_angle,
     temporal_difference_mask,
 )
-from gem.utils.rotation_conversions import axis_angle_to_matrix
+from gem.utils.rotation_conversions import axis_angle_to_matrix, matrix_to_rotation_6d
 
 
 def _weights() -> dict[str, float]:
@@ -92,6 +96,26 @@ def test_derivative_excess_only_penalizes_prediction_above_target() -> None:
     assert prediction.grad is not None
     assert prediction.grad[0, 0].abs().sum().item() == pytest.approx(0.0)
     assert prediction.grad[0, 1, 0].item() > 0.0
+
+
+def test_derivative_excess_topk_keeps_sparse_jump() -> None:
+    prediction = torch.zeros(1, 20, 2, requires_grad=True)
+    target = torch.zeros_like(prediction)
+    with torch.no_grad():
+        prediction[0, 7, 1] = 6.0
+    raw, normalized = derivative_excess_tail_loss_values(
+        prediction,
+        target,
+        torch.ones(1, 20, dtype=torch.bool),
+        scale=2.0,
+        fraction=0.05,
+    )
+    # 20帧×2关节的5%会选中两个元素，因此单个尖峰与一个零值共同取均值。
+    assert float(raw) == pytest.approx(2.75)
+    assert float(normalized) == pytest.approx(1.25)
+    normalized.backward()
+    assert prediction.grad is not None
+    assert prediction.grad[0, 7, 1].item() > 0.0
 
 
 def test_v4_joint_limit_margin_topk_and_max_keep_sparse_peak() -> None:
@@ -311,6 +335,96 @@ def test_v4_robust_joint_limit_losses_warm_up_independently(test_kinematics_path
             float(at_full[f"weighted_{name}_loss"]) * 0.5
         )
     assert float(at_start["weighted_joint_limit_loss"]) > 0.0
+
+
+def test_v5_dynamic_and_tail_losses_warm_up_with_finite_gradients(
+    test_kinematics_path,
+) -> None:
+    """v5新增动态连续性和长尾项必须渐进启用，并能对稀疏坏帧反传。"""
+
+    kinematics = BumiKinematics(test_kinematics_path)
+    codec = BumiMotionFeatureCodec(kinematics)
+    endecoder = SimpleNamespace(kinematics=kinematics, codec=codec)
+    weights = _weights()
+    weights.update(
+        {
+            "joint_acceleration_excess": 0.05,
+            "joint_jerk_excess": 0.003,
+            "joint_limit_margin": 0.2,
+            "joint_limit_topk": 0.5,
+            "joint_limit_max": 0.05,
+            **{name: 0.1 for name in BUMI_ADVANCED_PHYSICS_LOSS_NAMES},
+        }
+    )
+    loss = BumiRobotLosses(
+        endecoder,
+        weights,
+        contract_version=BUMI_LOSS_CONTRACT_V5,
+        ground_semantics="mixed_floor_zero_fk_contact_v2",
+        joint_limit_margin_rad=0.05,
+        joint_limit_topk_fraction=0.1,
+        advanced_physics_topk_fraction=0.25,
+        advanced_physics_start_step=100,
+        advanced_physics_warmup_steps=100,
+    )
+    qpos = kinematics.default_qpos.view(1, 1, 28).repeat(1, 8, 1)
+    encoded = codec.encode(qpos)
+    pred = encoded.physical_features.clone()
+    pred[0, :, 0] = torch.tensor([0.00, 0.04, -0.03, 0.05, -0.04, 0.06, -0.05, 0.00])
+    pred[0, :, 2] = torch.tensor([0.00, 0.05, -0.08, 0.06, -0.10, 0.04, 0.00, 0.00])
+    root_axis_angle = torch.zeros(1, 8, 3)
+    root_axis_angle[0, :, 0] = torch.tensor([0.0, 0.1, -0.2, 0.6, -0.1, 0.8, 0.0, 0.0])
+    pred[0, :, 3:9] = matrix_to_rotation_6d(axis_angle_to_matrix(root_axis_angle))
+    pred[0, :, 9] = torch.tensor([0.0, 0.2, -0.3, 0.5, -0.4, 1.2, -0.2, 0.0])
+    pred.requires_grad_(True)
+    parts = codec.split_features(pred)
+    pred_qpos = codec.decode_to_canonical_qpos(pred)
+    fk = kinematics.forward_kinematics(pred_qpos)
+    valid = torch.ones(1, 8, dtype=torch.bool)
+    contact = torch.ones(1, 8, 2)
+
+    def run(step: int) -> dict[str, torch.Tensor]:
+        return loss(
+            _encoded_inputs(encoded, valid, contact),
+            {"pred_x": pred, "static_conf_logits": torch.zeros_like(contact)},
+            {
+                "root_delta_xy_heading": parts.root_delta_xy_heading,
+                "root_height_offset": parts.root_height_offset,
+                "root_rot_local_6d": pred[..., 3:9],
+                "joint_dof": parts.joint_dof,
+            },
+            pred_qpos,
+            fk,
+            global_step=step,
+        )
+
+    at_start = run(100)
+    at_half = run(150)
+    at_full = run(200)
+    assert float(at_start["advanced_physics_warmup_factor"]) == pytest.approx(0.0)
+    assert float(at_half["advanced_physics_warmup_factor"]) == pytest.approx(0.5)
+    assert float(at_full["advanced_physics_warmup_factor"]) == pytest.approx(1.0)
+    for name in BUMI_ADVANCED_PHYSICS_LOSS_NAMES:
+        assert torch.isfinite(at_full[f"raw_{name}_loss"])
+        assert torch.isfinite(at_full[f"normalized_{name}_loss"])
+        assert float(at_start[f"weighted_{name}_loss"]) == pytest.approx(0.0)
+        assert float(at_half[f"weighted_{name}_loss"]) == pytest.approx(
+            float(at_full[f"weighted_{name}_loss"]) * 0.5
+        )
+    for name in (
+        "root_acceleration",
+        "root_angular_acceleration",
+        "fk_acceleration",
+        "joint_jerk_excess_topk",
+        "joint_limit_margin_topk",
+        "foot_slide_topk",
+        "foot_contact_height_topk",
+        "penetration_max",
+        "root_tilt_excess_max",
+    ):
+        assert float(at_full[f"weighted_{name}_loss"]) > 0.0
+    at_full["loss"].backward()
+    assert pred.grad is not None and bool(torch.isfinite(pred.grad).all())
 
 
 def test_v2_rejects_v3_only_excess_weights(test_kinematics_path) -> None:

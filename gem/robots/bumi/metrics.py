@@ -47,6 +47,18 @@ def _masked_p95(value: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
     return torch.quantile(selected.float(), 0.95).to(value)
 
 
+def _masked_max(value: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
+    """返回全部有效元素的最大值；没有有效元素时返回同设备标量零。"""
+
+    expanded = mask.bool()
+    while expanded.ndim < value.ndim:
+        expanded = expanded.unsqueeze(-1)
+    expanded = expanded.expand_as(value)
+    if not bool(expanded.any()):
+        return value.new_zeros(())
+    return value.masked_fill(~expanded, float("-inf")).amax()
+
+
 def _derivative(value: torch.Tensor, order: int, fps: int) -> torch.Tensor:
     return torch.diff(value, n=order, dim=1) * (float(fps) ** order)
 
@@ -194,6 +206,8 @@ def compute_bumi_kinematic_metrics(
         "foot_penetration_mean_m": _masked_mean(penetration, valid),
         "foot_penetration_max_m": penetration.masked_fill(~valid[..., None], 0.0).amax(),
         "foot_sliding_mean_mps": _masked_mean(foot_speed, slide_mask),
+        "foot_sliding_p95_mps": _masked_p95(foot_speed, slide_mask),
+        "foot_sliding_max_mps": _masked_max(foot_speed, slide_mask),
         "root_height_mean_m": _masked_mean(pred[..., 2], valid),
         "root_height_min_m": pred[..., 2].masked_fill(~valid, torch.inf).amin(),
         "root_tilt_mean_rad": _masked_mean(root_tilt, valid),
@@ -201,14 +215,27 @@ def compute_bumi_kinematic_metrics(
         "joint_velocity_p95_radps": _masked_p95(
             joint_velocity.abs(), temporal_difference_mask(valid, 1)
         ),
+        "joint_velocity_max_radps": _masked_max(
+            joint_velocity.abs(), temporal_difference_mask(valid, 1)
+        ),
         "joint_acceleration_p95_radps2": _masked_p95(
             joint_acceleration.abs(), temporal_difference_mask(valid, 2)
         ),
+        "joint_acceleration_max_radps2": _masked_max(
+            joint_acceleration.abs(), temporal_difference_mask(valid, 2)
+        ),
         "joint_jerk_p95_radps3": _masked_p95(joint_jerk.abs(), temporal_difference_mask(valid, 3)),
+        "joint_jerk_max_radps3": _masked_max(joint_jerk.abs(), temporal_difference_mask(valid, 3)),
         "root_linear_velocity_p95_mps": _masked_p95(
             torch.linalg.vector_norm(root_velocity, dim=-1), temporal_difference_mask(valid, 1)
         ),
+        "root_linear_velocity_max_mps": _masked_max(
+            torch.linalg.vector_norm(root_velocity, dim=-1), temporal_difference_mask(valid, 1)
+        ),
         "root_angular_velocity_p95_radps": _masked_p95(
+            root_angular_velocity, temporal_difference_mask(valid, 1)
+        ),
+        "root_angular_velocity_max_radps": _masked_max(
             root_angular_velocity, temporal_difference_mask(valid, 1)
         ),
     }
