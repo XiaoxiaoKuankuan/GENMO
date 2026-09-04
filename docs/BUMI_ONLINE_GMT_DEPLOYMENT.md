@@ -104,6 +104,13 @@ CUDA_VISIBLE_DEVICES=0 .venv/bin/python -u scripts/demo/demo_music_bumi_console.
   --ddim-steps 2
 ```
 
+`--onnx-provider`只决定 ONNX 去噪图由 CPU EP 还是 CUDA EP 执行，`--device`决定图外
+DDIM 张量、解码和后处理所在设备。从 BUMI 滑窗 qpos v5 合约开始，初始噪声统一由 CPU
+随机数生成器按窗口 seed 产生，再复制到`--device`；因此在线使用 CUDA 时不会再因为
+PyTorch CPU/CUDA 随机数算法不同而生成另一支舞。模型和 DDIM 计算仍留在 CUDA，CPU/CUDA
+EP 之间可能存在很小的浮点误差，不承诺逐位一致。修改合约后必须同时重启控制台和安全桥，
+旧 v4 与新 v5 身份会被协议拒绝混用。
+
 交互命令：
 
 ```text

@@ -194,6 +194,7 @@ class SlidingDDIMGenerator:
         denoiser: DenoiserStep,
         *,
         device: torch.device | str,
+        noise_device: torch.device | str | None = None,
         steps: int = DEFAULT_DDIM_STEPS,
         guidance_scale: float = DEFAULT_GUIDANCE_SCALE,
         motion_dim: int = MOTION_DIM,
@@ -204,6 +205,7 @@ class SlidingDDIMGenerator:
             raise ValueError("motion_dim must be > 0")
         self.denoiser = denoiser
         self.device = torch.device(device)
+        self.noise_device = self.device if noise_device is None else torch.device(noise_device)
         self.steps = int(steps)
         self.guidance_scale = float(guidance_scale)
         self.motion_dim = int(motion_dim)
@@ -256,14 +258,14 @@ class SlidingDDIMGenerator:
                 raise ValueError("an inpainted window must contain at least one new frame")
 
         music_b = music.to(self.device, dtype=torch.float32).unsqueeze(0).contiguous()
-        generator = torch.Generator(device=self.device)
+        generator = torch.Generator(device=self.noise_device)
         generator.manual_seed(int(seed))
         x_t = torch.randn(
             (1, WINDOW_FRAMES, self.motion_dim),
-            device=self.device,
+            device=self.noise_device,
             dtype=torch.float32,
             generator=generator,
-        )
+        ).to(self.device)
         known = None if known_x0 is None else known_x0.to(self.device).float().unsqueeze(0)
         known_noise = None if known is None else x_t[:, :OVERLAP_FRAMES].clone()
         length = torch.tensor([int(valid_length)], device=self.device, dtype=torch.long)

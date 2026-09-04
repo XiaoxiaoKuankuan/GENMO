@@ -70,9 +70,9 @@ def test_hard_inpainting_is_applied_before_and_after_every_ddim_step() -> None:
 
     top_step, top_xt = before[0]
     top_alpha = float(generator.diffusion.alphas_cumprod[top_step])
-    known_noise = (
-        top_xt[0, :OVERLAP_FRAMES] - np.sqrt(top_alpha) * known
-    ) / np.sqrt(1.0 - top_alpha)
+    known_noise = (top_xt[0, :OVERLAP_FRAMES] - np.sqrt(top_alpha) * known) / np.sqrt(
+        1.0 - top_alpha
+    )
     for step, xt in before:
         expected = generator._q_sample_at(known.unsqueeze(0), step, known_noise.unsqueeze(0))
         torch.testing.assert_close(xt[:, :OVERLAP_FRAMES], expected)
@@ -82,9 +82,7 @@ def test_hard_inpainting_is_applied_before_and_after_every_ddim_step() -> None:
         expected = (
             known
             if step == 0
-            else generator._q_sample_at(
-                known.unsqueeze(0), step - 1, known_noise.unsqueeze(0)
-            )[0]
+            else generator._q_sample_at(known.unsqueeze(0), step - 1, known_noise.unsqueeze(0))[0]
         )
         torch.testing.assert_close(xt[0, :OVERLAP_FRAMES], expected)
 
@@ -99,6 +97,30 @@ def test_window_noise_is_deterministic() -> None:
     assert not torch.equal(first, third)
     assert derive_window_seed(42, 3) == derive_window_seed(42, 3)
     assert derive_window_seed(42, 3) != derive_window_seed(42, 4)
+
+
+def test_window_noise_can_use_an_explicit_canonical_rng_device() -> None:
+    generator = SlidingDDIMGenerator(FakeStep(), device="cpu", noise_device="cpu", steps=2)
+    music = torch.zeros(120, 35)
+    first_step_inputs: list[torch.Tensor] = []
+    generator.generate_window(
+        music,
+        valid_length=120,
+        seed=42,
+        trace_hook=lambda _step, x_t, pred: (
+            first_step_inputs.append(x_t) if pred is None and not first_step_inputs else None
+        ),
+    )
+    expected_rng = torch.Generator(device="cpu")
+    expected_rng.manual_seed(42)
+    expected = torch.randn(
+        (1, 120, MOTION_DIM),
+        device="cpu",
+        dtype=torch.float32,
+        generator=expected_rng,
+    )
+    assert generator.noise_device == torch.device("cpu")
+    assert torch.equal(first_step_inputs[0], expected)
 
 
 class FakeEndecoder(nn.Module):
@@ -121,22 +143,16 @@ def test_streaming_root_rollout_matches_one_shot_rollout() -> None:
     second_window = motion[90:]
     second = decoder.decode_new(second_window, start=30, end=len(second_window))
     streamed = torch.cat((first["transl"], second["transl"]), dim=0)
-    expected = rollout_local_transl_vel(
-        motion[None, :, 3:6], motion[None, :, :3]
-    )[0]
+    expected = rollout_local_transl_vel(motion[None, :, 3:6], motion[None, :, :3])[0]
     torch.testing.assert_close(streamed, expected, atol=1e-6, rtol=1e-6)
-    identity_camera_delta = torch.tensor(
-        [1.0, 0.0, 0.0, 0.0, 1.0, 0.0]
-    ).expand(1, len(motion), -1)
+    identity_camera_delta = torch.tensor([1.0, 0.0, 0.0, 0.0, 1.0, 0.0]).expand(1, len(motion), -1)
     batch_reference = get_body_params_w_Rt_v2(
         global_orient_gv=motion[None, :, :3],
         local_transl_vel=motion[None, :, 3:6],
         global_orient_c=motion[None, :, :3],
         cam_angvel=identity_camera_delta,
     )
-    torch.testing.assert_close(
-        streamed, batch_reference["transl"][0], atol=1e-6, rtol=1e-6
-    )
+    torch.testing.assert_close(streamed, batch_reference["transl"][0], atol=1e-6, rtol=1e-6)
     assert torch.equal(streamed[0], torch.zeros(3))
 
 

@@ -114,16 +114,18 @@ def test_online_120_30_90_matches_offline_and_flushes_tail(
         device="cpu",
         steps=2,
         apply_foot_lock=True,
-    ).generate(music, seed=71)
-    online_chunks = tuple(
-        BumiStreamingQposGenerator(
-            _FixedContactStep(normalized),
-            endecoder,
-            device="cpu",
-            steps=2,
-            apply_foot_lock=True,
-        ).generate(music, seed=71)
     )
+    assert offline.generator.noise_device == torch.device("cpu")
+    offline_result = offline.generate(music, seed=71)
+    online = BumiStreamingQposGenerator(
+        _FixedContactStep(normalized),
+        endecoder,
+        device="cpu",
+        steps=2,
+        apply_foot_lock=True,
+    )
+    assert online.generator.noise_device == torch.device("cpu")
+    online_chunks = tuple(online.generate(music, seed=71))
     assert online_chunks
     assert [chunk.absolute_start_frame for chunk in online_chunks] == list(
         np.cumsum([0, *[len(chunk.qpos) for chunk in online_chunks[:-1]]])
@@ -133,17 +135,17 @@ def test_online_120_30_90_matches_offline_and_flushes_tail(
     assert sum(len(chunk.qpos) for chunk in online_chunks) == total_frames
     torch.testing.assert_close(
         torch.cat([chunk.qpos_raw for chunk in online_chunks]),
-        offline.qpos_raw,
+        offline_result.qpos_raw,
         atol=2.0e-5,
         rtol=1.0e-5,
     )
     torch.testing.assert_close(
         torch.cat([chunk.foot_contact_logits for chunk in online_chunks]),
-        offline.foot_contact_logits,
+        offline_result.foot_contact_logits,
     )
     torch.testing.assert_close(
         torch.cat([chunk.qpos for chunk in online_chunks]),
-        offline.qpos,
+        offline_result.qpos,
         atol=2.0e-5,
         rtol=1.0e-5,
     )

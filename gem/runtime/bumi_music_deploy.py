@@ -3,7 +3,9 @@
 
 本模块把固定形状的 ``[1,120,30]`` qpos 去噪图和 ``[1,120,2]`` 接触 head 封装成
 统一调用接口，并在图外执行
-与训练仓库相同的确定性 DDIM。长音乐严格使用 120 帧窗口、30 帧重叠和 90 帧步长。
+与训练仓库相同的确定性 DDIM。BUMI 采样固定从 CPU 随机数生成器取得初始噪声，再复制到
+实际推理设备，保证同一个 seed 不会因 CPU/CUDA 设备不同而变成另一份动作。长音乐严格
+使用 120 帧窗口、30 帧重叠和 90 帧步长。
 每个窗口按训练时的独立完整 crop 分布生成，随后把下一窗口的根旋转对齐到统一轨迹航向，
 在双侧真实预测的重叠区融合世界水平位移、绝对根高和关节，并对根四元数执行最短弧
 SLERP。全部窗口融合后只积分一次水平根位移，再重建可发送的连续 qpos chunks；根位置
@@ -54,7 +56,7 @@ from gem.utils.rotation_conversions import quaternion_multiply
 
 BUMI_MOTION_DIM = BUMI_FEATURE_DIM
 BUMI_ENGINE_CONTRACT = "gem_bumi_music_trt_engine_qpos30_contact_v3"
-BUMI_SLIDING_QPOS_CONTRACT_VERSION = "genmo.bumi_sliding_motion_overlap_add.qpos30_contact.v4"
+BUMI_SLIDING_QPOS_CONTRACT_VERSION = "genmo.bumi_sliding_motion_overlap_add.qpos30_contact.v5"
 
 
 def bumi_engine_cache_key(
@@ -467,6 +469,9 @@ class BumiSlidingQposGenerator:
         self.generator = SlidingDDIMGenerator(
             denoiser,
             device=self.device,
+            # CPU 是 BUMI v5 的规范随机数源。这里只复制初始噪声，DDIM 与模型仍在
+            # self.device 上执行，因此 CUDA 在线推理保留原有性能。
+            noise_device="cpu",
             steps=steps,
             guidance_scale=guidance_scale,
             motion_dim=BUMI_MOTION_DIM,
