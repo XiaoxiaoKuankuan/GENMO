@@ -6,6 +6,7 @@ import zlib
 
 import numpy as np
 import pytest
+from scipy.spatial.transform import Rotation
 
 from gem.gmr_udp_bridge import PACKET_BYTES
 from gem.runtime.gmt_trajectory import (
@@ -223,9 +224,7 @@ def test_incremental_gmt_frames_patch_only_tail_derivative_and_new_suffix(
 
     timeline.append(qpos[199:349])
     timeline.append(qpos[349:])
-    expected = qpos_timeline_to_gmt_frames(
-        qpos, fps=50.0, native_to_gmt=np.arange(21)
-    )
+    expected = qpos_timeline_to_gmt_frames(qpos, fps=50.0, native_to_gmt=np.arange(21))
     np.testing.assert_allclose(timeline.frames, expected, atol=1e-6)
     np.testing.assert_array_equal(first_qpos, frozen_qpos)
     np.testing.assert_array_equal(first_frames, frozen_frames)
@@ -245,6 +244,46 @@ def test_quaternion_sign_slerp_and_pi_wrap_are_continuous() -> None:
     wrapped[:, 3] = np.sin(angles / 2.0)
     angular_velocity = body_angular_velocity(wrapped, 50.0)
     assert abs(float(angular_velocity[0, 2])) < 2.0
+
+
+def test_body_angular_velocity_matches_offline_centered_world_semantics() -> None:
+    fps = 50.0
+    euler_zyx = np.deg2rad(
+        np.asarray(
+            (
+                (2.0, -1.0, 3.0),
+                (5.0, 2.0, 6.0),
+                (14.0, 5.0, 4.0),
+                (29.0, -3.0, 11.0),
+                (51.0, 8.0, 17.0),
+            ),
+            dtype=np.float64,
+        )
+    )
+    rotations = Rotation.from_euler("zyx", euler_zyx)
+    xyzw = rotations.as_quat()
+    wxyz = xyzw[:, (3, 0, 1, 2)].astype(np.float32)
+    wxyz[2] *= -1.0
+
+    velocity_world = np.zeros((len(wxyz), 3), dtype=np.float32)
+
+    def world_delta(first: int, second: int) -> np.ndarray:
+        return (rotations[second] * rotations[first].inv()).as_rotvec().astype(np.float32)
+
+    velocity_world[0] = world_delta(0, 1) * np.float32(fps)
+    velocity_world[-1] = world_delta(-2, -1) * np.float32(fps)
+    for index in range(1, len(wxyz) - 1):
+        velocity_world[index] = world_delta(index - 1, index + 1) * np.float32(fps / 2.0)
+    expected_body = rotations.inv().apply(velocity_world).astype(np.float32)
+
+    actual = body_angular_velocity(wxyz, fps)
+    np.testing.assert_allclose(actual, expected_body, rtol=2e-6, atol=2e-6)
+
+    forward_world = np.stack(
+        [world_delta(index, index + 1) * np.float32(fps) for index in range(len(wxyz) - 1)]
+    )
+    forward_body = rotations[:-1].inv().apply(forward_world)
+    assert np.max(np.abs(actual[1:-1] - forward_body[1:])) > 1.0
 
 
 def test_console_grammar_supports_path_duration_full_and_commands() -> None:

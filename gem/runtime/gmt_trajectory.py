@@ -113,6 +113,20 @@ def _quat_to_rotvec_wxyz(quat: np.ndarray) -> np.ndarray:
     return (value[1:] / np.float32(length) * np.float32(angle)).astype(np.float32)
 
 
+def _world_rotvec_between(first_wxyz: np.ndarray, second_wxyz: np.ndarray) -> np.ndarray:
+    """计算从 first 到 second 的世界系最短相对旋转向量。"""
+    from scipy.spatial.transform import Rotation
+
+    first = np.asarray(first_wxyz, dtype=np.float64)
+    second = np.asarray(second_wxyz, dtype=np.float64)
+    first_xyzw = first[..., (1, 2, 3, 0)]
+    second_xyzw = second[..., (1, 2, 3, 0)]
+    first_rotation = Rotation.from_quat(first_xyzw.reshape(-1, 4))
+    second_rotation = Rotation.from_quat(second_xyzw.reshape(-1, 4))
+    rotvec = (second_rotation * first_rotation.inv()).as_rotvec()
+    return rotvec.reshape(first.shape[:-1] + (3,)).astype(np.float32)
+
+
 def finite_difference(values: np.ndarray, fps: float) -> np.ndarray:
     array = np.asarray(values, dtype=np.float32)
     if array.ndim < 1 or array.shape[0] <= 0:
@@ -130,15 +144,29 @@ def finite_difference(values: np.ndarray, fps: float) -> np.ndarray:
 
 
 def body_angular_velocity(quaternions_wxyz: np.ndarray, fps: float) -> np.ndarray:
+    """严格复用离线 NPZ 的角速度差分语义，再转换为当前机体系。
+
+    离线导出先在世界系对姿态做中心差分，只在首尾使用前向/后向差分；随后
+    ``MotionLoaderNPZ`` 按当前帧姿态把世界系角速度旋转到机体系。在线
+    ``trajectory_v1`` 直接保存机体系角速度，因此这里按相同顺序完成两步计算。
+    """
     quaternions = _continuous_quaternions(quaternions_wxyz)
-    output = np.zeros((len(quaternions), 3), dtype=np.float32)
+    velocity_world = np.zeros((len(quaternions), 3), dtype=np.float32)
     if len(quaternions) == 1:
-        return output
-    for index in range(len(quaternions) - 1):
-        delta_local = _quat_mul_wxyz(_quat_conj_wxyz(quaternions[index]), quaternions[index + 1])
-        output[index] = _quat_to_rotvec_wxyz(delta_local) * np.float32(fps)
-    output[-1] = output[-2]
-    return output
+        return velocity_world
+    velocity_world[0] = _world_rotvec_between(quaternions[0], quaternions[1]) * np.float32(fps)
+    velocity_world[-1] = _world_rotvec_between(quaternions[-2], quaternions[-1]) * np.float32(fps)
+    if len(quaternions) > 2:
+        velocity_world[1:-1] = _world_rotvec_between(
+            quaternions[:-2], quaternions[2:]
+        ) * np.float32(fps / 2.0)
+    return np.stack(
+        [
+            _quat_rotate_inverse_wxyz(quaternions[index], velocity_world[index])
+            for index in range(len(quaternions))
+        ],
+        axis=0,
+    )
 
 
 def resample_qpos_timeline(
@@ -335,9 +363,8 @@ class IncrementalGmtFrameTimeline:
                 qpos, fps=self.fps, native_to_gmt=self.native_to_gmt
             )
         else:
-            # Two prior qpos samples are sufficient for the centered linear
-            # velocity at the old tail.  SO(3) angular velocity only needs the
-            # immediately preceding sample, so it is covered by the same halo.
+            # Two prior qpos samples are sufficient for the centered linear and
+            # SO(3) angular velocities at the old tail.
             halo = min(2, old_count)
             patch_qpos = np.concatenate((self._qpos[-halo:], qpos), axis=0)
             patch_frames = qpos_timeline_to_gmt_frames(
