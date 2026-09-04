@@ -350,13 +350,18 @@ def _bridge_args(kinematics: Path, policy: Path, estop: Path) -> SimpleNamespace
     )
 
 
-def test_new_bumi_bridge_default_joint_limit_tolerance_is_point_four() -> None:
-    """锁定用户指定的新BUMI在线桥0.4 rad默认限位容差。"""
+def test_new_bumi_bridge_defaults_relax_motion_safety_thresholds_by_point_two() -> None:
+    """锁定用户指定的新BUMI在线桥六项运动安全阈值。"""
 
     args = bridge_module.build_parser().parse_args(
         ["--kinematics", "kinematics.json", "--gmt-policy", "policy.onnx"]
     )
-    assert args.joint_limit_tolerance_rad == pytest.approx(0.4)
+    assert args.joint_limit_tolerance_rad == pytest.approx(0.48)
+    assert args.max_joint_velocity_radps == pytest.approx(21.6)
+    assert args.max_root_linear_velocity_mps == pytest.approx(4.8)
+    assert args.max_root_angular_velocity_radps == pytest.approx(12.0)
+    assert args.min_root_height_m == pytest.approx(0.25 / 1.2)
+    assert args.max_root_height_m == pytest.approx(1.44)
 
 
 def test_bridge_primes_two_chunks_and_stand_invalidates_late_revision(
@@ -407,6 +412,11 @@ def test_bridge_primes_two_chunks_and_stand_invalidates_late_revision(
     begin = bridge.begin(begin_payload)
     assert begin["state"] == "PREPARING"
     assert begin["joint_limit_tolerance_rad"] == pytest.approx(0.05)
+    assert begin["max_joint_velocity_radps"] == pytest.approx(18.0)
+    assert begin["max_root_linear_velocity_mps"] == pytest.approx(4.0)
+    assert begin["max_root_angular_velocity_radps"] == pytest.approx(8.0)
+    assert begin["min_root_height_m"] == pytest.approx(0.25)
+    assert begin["max_root_height_m"] == pytest.approx(1.20)
     qpos = _qpos(210).numpy()
     first = BumiOnlineQposChunk.from_qpos(
         qpos[:90],
