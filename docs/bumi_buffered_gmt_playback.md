@@ -52,12 +52,14 @@ bash scripts/demo/run_bumi_buffered_console.sh
 Python 入口替换为 `demo_bumi_gmt_buffered_bridge.py` 和
 `demo_music_bumi_buffered_console.py`。缓存桥首次等待 GMT ACK 的默认期限为 300 秒。
 
-2026-09-07最新状态：用户反馈500 Hz试改后持续旋转、发抖，已撤销物理降频，恢复
-2000 Hz物理/基础控制、分频40，策略仍按仿真时间50 Hz推进；继续默认关闭GMT绘图和CSV。
-此次回退只改配置，无需重新编译，重启仿真生效。隔离运行已确认回退参数生效，但自动
-启动测试仍在进入行走模式时触发倒地保护，尚未通过稳定性验证，不能称为问题已解决。
-用户上一次2000 Hz运行的纯舞蹈约66秒、执行约110.68真实秒；详见
-[基线、500 Hz试验与回退记录](gmt_buffered_2000hz_baseline_20260907.md)。关闭绘图/CSV后的整首耗时尚未测得。
+2026-09-07最新状态：在排查开启控制即振荡的问题后，已重新启用500 Hz物理/基础控制、
+分频10，并同步修改Gazebo限力矩隐式PD、秒制姿态过渡和周期一致性检查；继续关闭绘图/CSV。
+这次涉及C++，本机已编译`legged_hw_sim`与`rl_controllers`两个库，重启仿真才能加载。
+同版本500 Hz定姿对照的速度RMS由10.656降至0.070 rad/s。完整离线NPZ测试中，66仿真秒
+用了72.4569真实秒，新策略平均45.5443 Hz，仍未达到真实50 Hz；本轮不是buffered全链路
+或运动质量完全等效验收。详见[500 Hz底层修复与实测](gmt_500hz_servo_audit_20260907.md)。
+用户之前2000 Hz buffered纯舞蹈约110.68真实秒，见[历史基线记录](gmt_buffered_2000hz_baseline_20260907.md)；
+两轮运行负载不同，不能直接作为严格提速对照。
 
 ## 接收端与编译
 
@@ -67,18 +69,21 @@ Python 入口替换为 `demo_bumi_gmt_buffered_bridge.py` 和
 /home/weili/docker_projects/bumi_GMT_deployment_listao/bumi_GMT_deployment_obs
 ```
 
-修改 `GmtTrajectoryProtocol.h`、`MotionLoaderRedis.h`、`AcController.cpp`，新增
-`simulation_buffered.sh`。接收端必须重新编译；仅重启 Python 不够。本次已经在 `noetic`
-容器编译 `rl_controllers` 成功，之后需要重新启动仿真以加载新库。重新编译命令：
+缓存协议修改涉及 `GmtTrajectoryProtocol.h`、`MotionLoaderRedis.h`、`AcController.cpp`，
+新增 `simulation_buffered.sh`；最新500 Hz底层修复还涉及`LeggedHWSim`、基础控制周期等。
+仅重启 Python 不够。本机已在`noetic`容器编译两个目标成功，需要重新启动仿真以加载新库。
+在其它构建环境重新编译的命令：
 
 ```bash
 source /opt/ros/noetic/setup.bash
 source /host/Documents/bumi_GMT_deployment_obs/devel/setup.bash
+cmake --build /host/Documents/bumi_GMT_deployment_obs/build/legged_gazebo --target legged_hw_sim -- -j2
 cmake --build /host/Documents/bumi_GMT_deployment_obs/build/rl_controllers --target rl_controllers -- -j2
 ```
 
 接收端必须显式 `gmt_mode:=buffered`，要求 `/use_sim_time=true` 且控制频率/decimation
-对应 0.02 秒策略步；拒绝直接用于实机。原 `simulation.sh` 和原实时 Python 命令行为不变。
+对应 0.02 秒策略步；拒绝直接用于实机。原实时 Python 命令及协议不变；`simulation.sh`
+与缓存入口共用新版500 Hz仿真底层，但原实时模式不会自动变成仿真步消费。
 部署工作树原本有大量既有修改；此次只局部修改上述文件，不提交或覆盖其他部署修改。
 
 ## 数据与时序
@@ -104,8 +109,9 @@ cmake --build /host/Documents/bumi_GMT_deployment_obs/build/rl_controllers --tar
 - 使用真实 CUDA ONNX s190000、DDIM 20、CFG 2.5、seed 42 生成《火力全开》：22 窗，
   1980 源帧，3500 个含过渡和尾垫的 50 Hz 缓存帧；实际 C++ Redis 接收器完整逐帧比对
   21×52 参考窗，最大绝对误差 `3.36506301e-7`。
-- 本次没有启动 Gazebo 闭环或实机；上述验证不代表策略动作输出、动态跟踪、正常速度
+- 上述缓存协议开发阶段没有启动 Gazebo 闭环或实机；这些验证不代表策略动作输出、动态跟踪、正常速度
   音乐同步或硬件安全通过。也不声称与旧 CPU 离线 NPZ 完全相同：原有 CPU/CUDA 微小
   差异及 1980/1981 源帧时长边界仍存在。
 
-测试均使用独立临时目录和专用 Redis 进程/键，不向生产 Redis 发送轨迹。
+缓存协议测试使用独立临时目录和专用 Redis 进程/键，不向生产 Redis 发送轨迹。后续用户
+buffered运行及最新500 Hz离线闭环测试分别记录在上面的基线、底层修复文档中，不能混为同一轮验收。
