@@ -52,6 +52,11 @@ bash scripts/demo/run_bumi_buffered_console.sh
 Python 入口替换为 `demo_bumi_gmt_buffered_bridge.py` 和
 `demo_music_bumi_buffered_console.py`。缓存桥首次等待 GMT ACK 的默认期限为 300 秒。
 
+2026-09-07配置更新：仿真入口现为500 Hz物理/基础控制、分频10，策略仍为50 Hz；
+默认不启动GMT绘图和CSV共用节点。此轮只改配置，无需重新编译，重启仿真即可生效。
+用户上一次2000 Hz运行的纯舞蹈约66秒、执行约110.68真实秒；详见
+[基线记录与500 Hz调整](gmt_buffered_2000hz_baseline_20260907.md)。新配置的真实速度仍待运行测量。
+
 ## 接收端与编译
 
 本机配套修改位于：
