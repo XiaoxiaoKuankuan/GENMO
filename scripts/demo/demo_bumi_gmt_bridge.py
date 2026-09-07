@@ -77,6 +77,7 @@ from gem.runtime.music_only_trt import sha256_file  # noqa: E402
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--bind", default="tcp://127.0.0.1:7022")
+    parser.add_argument("--playback-mode", choices=("realtime", "buffered"), default="realtime")
     parser.add_argument("--kinematics", type=Path, required=True)
     parser.add_argument("--gmt-policy", type=Path, required=True)
     parser.add_argument("--redis-host", default="127.0.0.1")
@@ -116,6 +117,10 @@ def validate_args(args: argparse.Namespace) -> None:
             raise ValueError(f"--{name.replace('_', '-')} must be finite and > 0")
     if args.redis_ttl_ms <= 40:
         raise ValueError("--redis-ttl-ms must exceed two 50 Hz periods")
+    if getattr(args, "playback_mode", "realtime") == "buffered" and args.audio_playback != "off":
+        raise ValueError(
+            "buffered 仿真播放目前必须 --audio-playback off，不能用真实时间音频冒充同步"
+        )
 
 
 class AudioController:
@@ -174,6 +179,19 @@ class AudioController:
 
 class BumiOnlineBridge:
     """在线协议、安全门、增量 GMT 计划和发布时钟的状态机。"""
+
+    @property
+    def buffered(self) -> bool:
+        return getattr(self.args, "playback_mode", "realtime") == "buffered"
+
+    def _new_plan_publisher(self):
+        """完整缓存与真实时间滚动发布使用不同魔数，禁止静默混用。"""
+        from gem.runtime.gmt_buffered_trajectory import RedisBufferedTrajectoryPublisher
+
+        publisher_type = (
+            RedisBufferedTrajectoryPublisher if self.buffered else RedisTrajectoryPublisher
+        )
+        return publisher_type(self.redis, key=self.args.redis_key, ttl_ms=self.args.redis_ttl_ms)
 
     def __init__(self, args: argparse.Namespace) -> None:
         self.args = args
@@ -350,7 +368,13 @@ class BumiOnlineBridge:
         if identity.joint_order_sha256 != self.joint_order_sha256:
             raise ValueError("begin native joint-order SHA does not match bridge kinematics")
         audio_path = Path(str(payload["audio_path"])).expanduser().resolve(strict=True)
+        if payload.get("playback_mode", "realtime") != (
+            "buffered" if self.buffered else "realtime"
+        ):
+            raise ValueError("Console/Bridge playback_mode mismatch")
         total_frames = int(payload["total_frames"])
+        if self.buffered and total_frames > 39000:
+            raise ValueError("buffered source clip is limited to 39000 frames at 30 Hz")
         revision = int(payload["revision"])
         request_id = str(payload["request_id"])
         prime_chunks = int(payload.get("prime_chunks", 2))
@@ -408,6 +432,10 @@ class BumiOnlineBridge:
         with self.lock:
             if self.request is None or self.plan_builder is None:
                 raise ValueError("no active request accepts qpos chunks")
+            if self.buffered and (
+                not chunk.is_last or chunk.chunk_index != 0 or chunk.absolute_start_frame != 0
+            ):
+                raise ValueError("buffered mode requires one complete final qpos chunk")
             self.tracker.accept(chunk)
             revision = self.tracker.revision
             builder = self.plan_builder
@@ -432,9 +460,7 @@ class BumiOnlineBridge:
             prime_ready = self.accepted_chunks >= self.request["prime_chunks"] or chunk.is_last
             if prime_ready and self.state in {"PREPARING", "PRIMING"}:
                 self.state = "WAIT_ACK"
-                self.publisher = RedisTrajectoryPublisher(
-                    self.redis, key=self.args.redis_key, ttl_ms=self.args.redis_ttl_ms
-                )
+                self.publisher = self._new_plan_publisher()
                 self.submitted_monotonic = time.monotonic()
                 self.last_ack_monotonic = self.submitted_monotonic
             elif self.state == "PREPARING":
@@ -497,9 +523,7 @@ class BumiOnlineBridge:
             self.publish_generation += 1
             self.plan_builder = None
             self.plan_snapshot = stand_snapshot
-            self.publisher = RedisTrajectoryPublisher(
-                self.redis, key=self.args.redis_key, ttl_ms=self.args.redis_ttl_ms
-            )
+            self.publisher = self._new_plan_publisher()
             self.cursor = 0
             self.acked = False
             self.last_ack_sequence = -1
@@ -518,6 +542,8 @@ class BumiOnlineBridge:
         future = 0.0 if snapshot is None else max(0, len(snapshot.frames) - 1 - self.cursor) / 50.0
         return {
             "state": self.state,
+            "playback_mode": "buffered" if self.buffered else "realtime",
+            "playback_clock": "gmt_policy_step" if self.buffered else "wall_monotonic",
             "request_id": None if self.request is None else self.request["request_id"],
             "revision": self.tracker.revision,
             "accepted_source_frames": self.tracker.next_frame,
@@ -657,6 +683,9 @@ class BumiOnlineBridge:
                         and self.plan_snapshot is not None
                     ):
                         live = self.plan_snapshot
+                        if self.buffered and ack is not None:
+                            # 消费端回报位置是唯一播放时钟；墙钟 tick/跳过的网络包不推进动作。
+                            self.cursor = publisher.current_frame
                         if ack is not None and ack.sequence > self.last_ack_sequence:
                             self.last_ack_sequence = ack.sequence
                             self.last_ack_monotonic = after_publish
@@ -676,6 +705,10 @@ class BumiOnlineBridge:
                             ack_timeout_seconds=self.args.ack_timeout_seconds,
                             ack_stale_seconds=self.args.ack_stale_seconds,
                         )
+                        if self.buffered and self.acked:
+                            # Gazebo 暂停不等于 Bridge 失联。仍持续发送心跳，接收端恢复后
+                            # 从同一缓存继续；发布器真正掉线仍由 GMT Redis TTL 保护。
+                            ack_failure = None
                         if ack_failure is not None:
                             self.last_error = ack_failure
                             if state == "STAND_WAIT_ACK" and ack_failure == "GMT ACK timeout":
@@ -714,7 +747,7 @@ class BumiOnlineBridge:
                             )
                             if buffer_failure is not None:
                                 stand_reason = buffer_failure
-                            elif can_advance:
+                            elif can_advance and not self.buffered:
                                 self.cursor = min(self.cursor + 1 + skipped, len(live.frames) - 1)
                             if self.cursor >= len(live.frames) - 101 and live.action_complete:
                                 audio_stop = True

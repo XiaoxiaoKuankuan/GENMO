@@ -71,6 +71,7 @@ from gem.utils.music_features import (  # noqa: E402
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--backend", choices=("tensorrt", "onnx"), default="tensorrt")
+    parser.add_argument("--playback-mode", choices=("realtime", "buffered"), default="realtime")
     parser.add_argument("--checkpoint", type=Path, required=True)
     parser.add_argument("--onnx", type=Path, required=True)
     parser.add_argument("--onnx-metadata", type=Path)
@@ -273,6 +274,10 @@ class ResidentBumiConsole:
         status = self.bridge.request({"command": "status"})
         if not status.get("ok"):
             raise RuntimeError(f"bridge status failed: {status}")
+        if status.get("playback_mode", "realtime") != getattr(
+            self.args, "playback_mode", "realtime"
+        ):
+            raise RuntimeError("Console/Bridge playback_mode 不一致，请使用配套入口")
         self._replace_request_state(None, int(status["revision"]))
         self.runner(
             torch.zeros(1, 120, 30, device=self.device),
@@ -405,10 +410,13 @@ class ResidentBumiConsole:
             duration = frame_count / 30.0
             windows = plan_sliding_windows(frame_count)
             prime_chunks = min(2, len(windows))
+            buffered = getattr(self.args, "playback_mode", "realtime") == "buffered"
+            pending_qpos = []
             begin = self.bridge.request(
                 {
                     "contract_version": BUMI_ONLINE_QPOS_STREAM_CONTRACT,
                     "command": "begin",
+                    "playback_mode": "buffered" if buffered else "realtime",
                     "request_id": request_id,
                     "revision": revision,
                     "audio_path": str(audio_path),
@@ -445,7 +453,7 @@ class ResidentBumiConsole:
             while True:
                 if cancel.is_set():
                     return
-                if chunk_index >= prime_chunks:
+                if not buffered and chunk_index >= prime_chunks:
                     while True:
                         bridge_status = self.bridge.request({"command": "status"})
                         if bridge_status.get("state") in {"STAND", "STAND_WAIT_ACK"}:
@@ -470,7 +478,7 @@ class ResidentBumiConsole:
                 window_times.append(elapsed)
                 continuation = window_times[1:]
                 p95 = None if not continuation else float(np.percentile(continuation, 95))
-                if p95 is not None and p95 >= 3.0:
+                if not buffered and p95 is not None and p95 >= 3.0:
                     raise RuntimeError(
                         f"real-time performance gate failed: continuation P95={p95:.3f}s >= 3s"
                     )
@@ -484,19 +492,44 @@ class ResidentBumiConsole:
                     is_last=generated.is_last,
                     identity=self.identity,
                 )
-                response = self.bridge.chunk(chunk)
+                if buffered:
+                    # 整首收齐前不把任何动作块送入桥，BEGIN/心跳仅保持准备状态。
+                    pending_qpos.append(generated.qpos.numpy().copy())
+                    response = {"ok": True}
+                    if generated.is_last:
+                        complete = BumiOnlineQposChunk.from_qpos(
+                            np.concatenate(pending_qpos),
+                            request_id=request_id,
+                            revision=revision,
+                            chunk_index=0,
+                            absolute_start_frame=0,
+                            total_frames=frame_count,
+                            is_last=True,
+                            identity=self.identity,
+                        )
+                        print(
+                            f"[BUMI Generate] 整段 {frame_count} 帧已生成，开始上传 GMT 缓存",
+                            flush=True,
+                        )
+                        response = self.bridge.chunk(complete)
+                else:
+                    response = self.bridge.chunk(chunk)
                 if not response.get("ok"):
                     raise RuntimeError(f"bridge rejected qpos chunk: {response}")
                 chunk_index += 1
                 with self.timing_lock:
                     self.last_timing.update(
                         {
-                            "phase": "queued" if generated.is_last else "streaming",
+                            "phase": "queued"
+                            if generated.is_last
+                            else ("generating_full" if buffered else "streaming"),
                             "feature_seconds": feature_seconds,
                             "feature_cache_hit": cache_hit,
                             "feature_metadata": metadata,
                             "generated_windows": generator.windows_generated,
-                            "submitted_frames": generator.emitted_frames,
+                            "submitted_frames": generator.emitted_frames
+                            if not buffered or generated.is_last
+                            else 0,
                             "pending_overlap_frames": generator.pending_frames,
                             "future_buffer_seconds": response.get("future_buffer_seconds"),
                             "window_seconds": list(window_times),
@@ -514,7 +547,10 @@ class ResidentBumiConsole:
                 )
             with self.timing_lock:
                 self.last_timing["total_generation_seconds"] = time.perf_counter() - started
-            print(f"[BUMI Generate] 已连续提交 {frame_count} 帧", flush=True)
+            print(
+                f"[BUMI Generate] 已提交 {frame_count} 帧，模式={'buffered' if buffered else 'realtime'}",
+                flush=True,
+            )
         except Exception as exc:
             self.last_error = f"{type(exc).__name__}: {exc}"
             print(f"[BUMI Generate ERROR] {self.last_error}", flush=True)
