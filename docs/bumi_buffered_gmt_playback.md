@@ -52,11 +52,11 @@ bash scripts/demo/run_bumi_buffered_console.sh
 Python 入口替换为 `demo_bumi_gmt_buffered_bridge.py` 和
 `demo_music_bumi_buffered_console.py`。缓存桥首次等待 GMT ACK 的默认期限为 300 秒。
 
-2026-09-07最新状态：用户反馈WALK和GMT仍异常，已按要求撤回隐式PD，生产插件恢复原显式
-力矩计算；仍为500 Hz物理/基础控制、分频10，保留秒制过渡与周期检查，继续关闭绘图/CSV。
-本机`legged_hw_sim`已重新编译，`rl_controllers`保留上轮版本；重启仿真才能加载。
-隔离DEFAULT模式已确认新库和2ms基础周期，但没有进入WALK/GMT，不代表跟踪问题已解决。
-详见[显式PD恢复与核查](gmt_explicit_pd_restore_20260907.md)。旧隐式版的定姿指标和45.54 Hz
+2026-09-07最新状态：用户要求恢复2000 Hz，现为0.0005秒物理步长、2000 Hz基础控制、
+分频40，仍使用此前已恢复并编译的原显式PD；保留0.5秒姿态过渡，继续关闭绘图/CSV。
+此次只改配置，本机无需再次编译，重启原仿真入口即可。三种仿真模式及SDF解析已核对，
+实机仍500/10；本轮没有重跑WALK/GMT，不把恢复配置当成稳定性或实际50 Hz验收。
+详见[显式PD与2000 Hz恢复记录](gmt_explicit_pd_restore_20260907.md)。旧隐式版的定姿指标和45.54 Hz
 离线整首数据仅作[历史实验记录](gmt_500hz_servo_audit_20260907.md)，不是当前版本性能。
 用户之前2000 Hz buffered纯舞蹈约110.68真实秒，见[历史基线记录](gmt_buffered_2000hz_baseline_20260907.md)；
 两轮运行负载不同，不能直接作为严格提速对照。
