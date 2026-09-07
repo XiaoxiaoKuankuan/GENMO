@@ -1,0 +1,415 @@
+{
+  "scope": "native dependency/inference only; no Gazebo/Redis/hardware",
+  "passed": true,
+  "model_sha256": {
+    "gmt": "d2e176657d72d1b0efcb04406abd17145fc45a3a5755b62aae7b866e0a6e3d1b",
+    "walk": "780591e53027ccf722d7cccbfb005bd4d6040cc0a739136886a12537c8afcb2e"
+  },
+  "configuration": {
+    "launch_cases": [
+      {
+        "real": false,
+        "mode": "online",
+        "provider": "cpu",
+        "host_nodes": [
+          "gazebo",
+          "gazebo_gui",
+          "spawn_urdf"
+        ],
+        "passed": true
+      },
+      {
+        "real": false,
+        "mode": "offline",
+        "provider": "cpu",
+        "host_nodes": [
+          "gazebo",
+          "gazebo_gui",
+          "spawn_urdf"
+        ],
+        "passed": true
+      },
+      {
+        "real": false,
+        "mode": "buffered",
+        "provider": "cpu",
+        "host_nodes": [
+          "gazebo",
+          "gazebo_gui",
+          "spawn_urdf"
+        ],
+        "passed": true
+      },
+      {
+        "real": false,
+        "mode": "online",
+        "provider": "cuda",
+        "host_nodes": [
+          "gazebo",
+          "gazebo_gui",
+          "spawn_urdf"
+        ],
+        "passed": true
+      },
+      {
+        "real": false,
+        "mode": "offline",
+        "provider": "cuda",
+        "host_nodes": [
+          "gazebo",
+          "gazebo_gui",
+          "spawn_urdf"
+        ],
+        "passed": true
+      },
+      {
+        "real": false,
+        "mode": "buffered",
+        "provider": "cuda",
+        "host_nodes": [
+          "gazebo",
+          "gazebo_gui",
+          "spawn_urdf"
+        ],
+        "passed": true
+      },
+      {
+        "real": true,
+        "mode": "online",
+        "provider": "cpu",
+        "host_nodes": [
+          "legged_bumi_hw"
+        ],
+        "passed": true
+      },
+      {
+        "real": true,
+        "mode": "online",
+        "provider": "cuda",
+        "host_nodes": [
+          "legged_bumi_hw"
+        ],
+        "passed": true
+      }
+    ],
+    "failure_dispatch_static_check": true,
+    "boundary": "launch/source parsing only; no ROS nodes or controller instances started"
+  },
+  "comparisons": {
+    "old_cpu_vs_new_cpu": {
+      "passed": true,
+      "elements": 21000,
+      "max_abs_error": 0,
+      "mean_abs_error": 0,
+      "maximum_at_frame_joint": [
+        0,
+        0
+      ],
+      "failed_elements": 0,
+      "first_failures": [],
+      "tolerance": "abs(candidate-cpu) <= 1e-4 + 1e-4*abs(cpu)"
+    },
+    "new_cpu_vs_cuda": {
+      "passed": true,
+      "elements": 21000,
+      "max_abs_error": 0.000004649162292480469,
+      "mean_abs_error": 5.27799979040754e-7,
+      "maximum_at_frame_joint": [
+        677,
+        11
+      ],
+      "failed_elements": 0,
+      "first_failures": [],
+      "tolerance": "abs(candidate-cpu) <= 1e-4 + 1e-4*abs(cpu)"
+    },
+    "old_cpu_vs_cuda": {
+      "passed": true,
+      "elements": 21000,
+      "max_abs_error": 0.000004649162292480469,
+      "mean_abs_error": 5.27799979040754e-7,
+      "maximum_at_frame_joint": [
+        677,
+        11
+      ],
+      "failed_elements": 0,
+      "first_failures": [],
+      "tolerance": "abs(candidate-cpu) <= 1e-4 + 1e-4*abs(cpu)"
+    }
+  },
+  "inference": {
+    "old_cpu": {
+      "fp32_tf32_disabled": true,
+      "input_fnv1a64": "17986607724145667776",
+      "input_shapes": [
+        [
+          1,
+          69
+        ],
+        [
+          1,
+          690
+        ],
+        [
+          1,
+          1092
+        ]
+      ],
+      "model": "/host/Documents/bumi_GMT_deployment_obs/src/legged_rl/rl_controller/rl_controllers/policy/bumi/model_135000_stage2.onnx",
+      "ort_library": "/usr/local/lib/libonnxruntime.so.1.19.0",
+      "ort_version": "1.19.0",
+      "output_shape": [
+        1,
+        21
+      ],
+      "provider": "cpu",
+      "seed": 42,
+      "synthetic_inputs": true,
+      "timing": [
+        {
+          "max_ms": 6.715968,
+          "mean_ms": 0.4856120375,
+          "over_20ms": 0,
+          "p50_ms": 0.351849,
+          "p95_ms": 1.275022,
+          "p99_ms": 2.469902,
+          "runs": 2000
+        },
+        {
+          "max_ms": 4.406041,
+          "mean_ms": 0.4399784119999998,
+          "over_20ms": 0,
+          "p50_ms": 0.362687,
+          "p95_ms": 0.839148,
+          "p99_ms": 1.925902,
+          "runs": 2000
+        },
+        {
+          "max_ms": 4.982692,
+          "mean_ms": 0.4383885909999997,
+          "over_20ms": 0,
+          "p50_ms": 0.371719,
+          "p95_ms": 0.748224,
+          "p99_ms": 1.668465,
+          "runs": 2000
+        }
+      ],
+      "sampled_peak_process_gpu_mib": null,
+      "gpu_memory_sampling": {
+        "interval_seconds": 0.5,
+        "nvml_pid": null,
+        "method": "native PID or unique new NVML compute PID; unknown if ambiguous"
+      },
+      "elapsed_process_seconds": 3.7561416079988703
+    },
+    "new_cpu": {
+      "fp32_tf32_disabled": true,
+      "input_fnv1a64": "17986607724145667776",
+      "input_shapes": [
+        [
+          1,
+          69
+        ],
+        [
+          1,
+          690
+        ],
+        [
+          1,
+          1092
+        ]
+      ],
+      "model": "/host/Documents/bumi_GMT_deployment_obs/src/legged_rl/rl_controller/rl_controllers/policy/bumi/model_135000_stage2.onnx",
+      "ort_library": "/opt/bumi-gmt-ort/1.19.0-cu124-cudnn9/ort/lib/libonnxruntime.so.1.19.0",
+      "ort_version": "1.19.0",
+      "output_shape": [
+        1,
+        21
+      ],
+      "provider": "cpu",
+      "seed": 42,
+      "synthetic_inputs": true,
+      "timing": [
+        {
+          "max_ms": 8.259552,
+          "mean_ms": 0.5894494774999994,
+          "over_20ms": 0,
+          "p50_ms": 0.371653,
+          "p95_ms": 1.441368,
+          "p99_ms": 4.932075,
+          "runs": 2000
+        },
+        {
+          "max_ms": 7.617147,
+          "mean_ms": 0.5616090185000007,
+          "over_20ms": 0,
+          "p50_ms": 0.370273,
+          "p95_ms": 1.284842,
+          "p99_ms": 4.736024,
+          "runs": 2000
+        },
+        {
+          "max_ms": 9.550999,
+          "mean_ms": 0.5139094700000003,
+          "over_20ms": 0,
+          "p50_ms": 0.369127,
+          "p95_ms": 1.034657,
+          "p99_ms": 3.393551,
+          "runs": 2000
+        }
+      ],
+      "sampled_peak_process_gpu_mib": null,
+      "gpu_memory_sampling": {
+        "interval_seconds": 0.5,
+        "nvml_pid": null,
+        "method": "native PID or unique new NVML compute PID; unknown if ambiguous"
+      },
+      "elapsed_process_seconds": 4.350799982028548
+    },
+    "cuda": {
+      "device": "device=0 name=NVIDIA GeForce RTX 4090 uuid=GPU-f8deea20-27d5-bf15-c16b-829578c94d0d",
+      "fp32_tf32_disabled": true,
+      "input_fnv1a64": "17986607724145667776",
+      "input_shapes": [
+        [
+          1,
+          69
+        ],
+        [
+          1,
+          690
+        ],
+        [
+          1,
+          1092
+        ]
+      ],
+      "model": "/host/Documents/bumi_GMT_deployment_obs/src/legged_rl/rl_controller/rl_controllers/policy/bumi/model_135000_stage2.onnx",
+      "ort_library": "/opt/bumi-gmt-ort/1.19.0-cu124-cudnn9/ort/lib/libonnxruntime.so.1.19.0",
+      "ort_version": "1.19.0",
+      "output_shape": [
+        1,
+        21
+      ],
+      "provider": "cuda",
+      "seed": 42,
+      "synthetic_inputs": true,
+      "timing": [
+        {
+          "max_ms": 4.969682,
+          "mean_ms": 0.5124553540000002,
+          "over_20ms": 0,
+          "p50_ms": 0.431049,
+          "p95_ms": 0.965773,
+          "p99_ms": 1.363716,
+          "runs": 2000
+        },
+        {
+          "max_ms": 3.374742,
+          "mean_ms": 0.47825560199999984,
+          "over_20ms": 0,
+          "p50_ms": 0.380344,
+          "p95_ms": 0.966694,
+          "p99_ms": 1.590896,
+          "runs": 2000
+        },
+        {
+          "max_ms": 3.980101,
+          "mean_ms": 0.48753285500000054,
+          "over_20ms": 0,
+          "p50_ms": 0.384254,
+          "p95_ms": 0.965797,
+          "p99_ms": 1.450123,
+          "runs": 2000
+        }
+      ],
+      "sampled_peak_process_gpu_mib": 474,
+      "gpu_memory_sampling": {
+        "interval_seconds": 0.5,
+        "nvml_pid": 3842366,
+        "method": "native PID or unique new NVML compute PID; unknown if ambiguous"
+      },
+      "elapsed_process_seconds": 4.207400526036508
+    }
+  },
+  "profile": {
+    "provider_operator_events": {
+      "CUDAExecutionProvider": {
+        "Split": 120,
+        "Reshape": 920,
+        "Concat": 160,
+        "Gemm": 840,
+        "Elu": 600,
+        "MatMul": 400,
+        "Add": 480,
+        "LayerNormalization": 200,
+        "Transpose": 480,
+        "Unsqueeze": 120,
+        "Squeeze": 320,
+        "FusedMatMul": 120,
+        "BiasSoftmax": 40,
+        "BiasGelu": 40,
+        "SkipLayerNormalization": 80,
+        "ReduceMax": 40,
+        "Softmax": 40,
+        "Sub": 40,
+        "Div": 40
+      }
+    },
+    "heavy_cuda_events": 1360,
+    "heavy_cpu_events": 0,
+    "passed": true
+  },
+  "walk_cpu_regression": {
+    "passed": true,
+    "elements": 21000,
+    "max_abs_error": 0,
+    "mean_abs_error": 0,
+    "maximum_at_frame_joint": [
+      0,
+      0
+    ],
+    "failed_elements": 0,
+    "first_failures": [],
+    "tolerance": "abs(candidate-cpu) <= 1e-4 + 1e-4*abs(cpu)"
+  },
+  "failures": {
+    "bad_provider": {
+      "passed": true,
+      "exit_code": 2,
+      "message": "FAIL gmt_onnx_provider 只接受 cpu 或 cuda：gpu\n"
+    },
+    "bad_device": {
+      "passed": true,
+      "exit_code": 2,
+      "message": "[GMT ONNX] requested=cuda version=1.19.0 library=/opt/bumi-gmt-ort/1.19.0-cu124-cudnn9/ort/lib/libonnxruntime.so.1.19.0\n[GMT ONNX] FAIL CUDA 设备编号不存在：9999\n"
+    },
+    "missing_cuda_runtime": {
+      "passed": true,
+      "exit_code": 2,
+      "message": "[GMT ONNX] requested=cuda version=1.19.0 library=/usr/local/lib/libonnxruntime.so.1.19.0\nFAIL CUDA 必须在进程启动前加载隔离 ORT 1.19.0；请重启承载控制器的进程\n"
+    },
+    "missing_model": {
+      "passed": true,
+      "exit_code": 2,
+      "message": "[GMT ONNX] requested=cpu version=1.19.0 library=/usr/local/lib/libonnxruntime.so.1.19.0\n[GMT ONNX] model=/tmp/gmt_cuda_validation.vosgxir6/missing.onnx\nFAIL Load model from /tmp/gmt_cuda_validation.vosgxir6/missing.onnx failed:Load model /tmp/gmt_cuda_validation.vosgxir6/missing.onnx failed. File doesn't exist\n"
+    },
+    "inference_bad_shape": {
+      "passed": true,
+      "exit_code": 2,
+      "message": "[GMT ONNX] requested=cuda version=1.19.0 library=/opt/bumi-gmt-ort/1.19.0-cu124-cudnn9/ort/lib/libonnxruntime.so.1.19.0\n[GMT ONNX] device=0 name=NVIDIA GeForce RTX 4090 uuid=GPU-f8deea20-27d5-bf15-c16b-829578c94d0d\n[GMT ONNX] CUDA registered; fp32 use_tf32=0 cuda_graph=0 synchronous_host_io=1\n[GMT ONNX] model=/host/Documents/bumi_GMT_deployment_obs/src/legged_rl/rl_controller/rl_controllers/policy/bumi/model_135000_stage2.onnx\n[GMT ONNX] input=policy shape=[1,69,]\n[GMT ONNX] input=history_obs shape=[1,690,]\n[GMT ONNX] input=command_window shape=[1,1092,]\n[GMT ONNX] output=actions shape=[1,21]\n[GMT ONNX] warmup=20 passed (outputs discarded)\nFAIL Got invalid dimensions for input: policy for the following indices\n index: 0 Got: 2 Expected: 1\n Please fix either the inputs/outputs or the model.\n"
+    },
+    "missing_cuda_userspace": {
+      "passed": true,
+      "exit_code": 2,
+      "message": "[GMT ONNX] requested=cuda version=1.19.0 library=/opt/bumi-gmt-ort/1.19.0-cu124-cudnn9/ort/lib/libonnxruntime.so.1.19.0\n[GMT ONNX] device=0 name=NVIDIA GeForce RTX 4090 uuid=GPU-f8deea20-27d5-bf15-c16b-829578c94d0d\nFAIL /onnxruntime_src/onnxruntime/core/session/provider_bridge_ort.cc:1637 onnxruntime::Provider& onnxruntime::ProviderLibrary::Get() [ONNXRuntimeError] : 1 : FAIL : Failed to load library libonnxruntime_providers_cuda.so with error: libcublasLt.so.12: cannot open shared object file: No such file or directory\n\n"
+    }
+  },
+  "raw_artifacts_cleanup": "TemporaryDirectory removes frames/profiles/logs on exit",
+  "build": {
+    "controller_sha256": "0e0095d6302990f15870ab0c3b3acfd299a58a23b3915ffafb5f24501be8f936",
+    "gazebo_plugin_sha256": "e7b19ad993f6d515f9915f87b689884ec7ac0e2ff3e0934500c25cd0257be6c2",
+    "onnxruntime_root": "/opt/bumi-gmt-ort/1.19.0-cu124-cudnn9/ort",
+    "compiler": "GCC 9.4.0",
+    "failure_output_gtest": "1 test passed; controller failure dispatch checked statically"
+  }
+}
