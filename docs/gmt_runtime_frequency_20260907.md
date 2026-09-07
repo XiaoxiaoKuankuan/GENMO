@@ -28,7 +28,7 @@
 下面仅为输出格式示例，不是本次实物实测数据：
 
 ```text
-[运行频率] mode=GMT provider=cuda wall=2.00s control=500.00/500.00Hz GMT_infer=50.00Hz GMT_command=50.00/50.00Hz 状态=平均接近目标(±1%，不保证无超时) gap_max=20.80ms gap>20.00ms=12 infer_failed=0 ros/wall=1.000
+[RATE] mode=GMT provider=cuda wall=2.00s control=500.00/500.00Hz GMT_infer=50.00Hz GMT_command=50.00/50.00Hz status=NEAR_TARGET(avg_within_1pct;not_hard_realtime) gap_max=20.80ms gap>20.00ms=12 infer_failed=0 ros/wall=1.000
 ```
 
 - `wall`：由 `std::chrono::steady_clock` 测量的真实经过时间；不受 `/clock` 暂停或系统日期调整影响。
@@ -43,10 +43,13 @@
 - `sim/wall`：仿真控制时钟推进量与真实时间的比值；实物显示 `ros/wall`，它是辅助时钟信息，不是频率计算分母。
 
 目标来自当前配置的 `control_frequency / decimation`，现有仿真2000/40、实物500/10均为50Hz。
-频率低于目标99%显示“**不足目标**”；99%～101%显示“**平均接近目标(±1%，不保证无超时)**”；
-高于101%显示“高于目标”。这是窗口平均值口径，不将容差冒充严格达到50Hz或硬实时保证。
-进入GMT/重置/模式切换的混合窗口显示等待完整窗口；非GMT不判定GMT频率。
-控制计数不再增加时，独立日志线程仍会提示“无控制更新”，不能把暂停时的仿真50Hz误报为真实50Hz。
+频率低于目标99%显示 `status=BELOW_TARGET`（不足目标）；99%～101%显示
+`status=NEAR_TARGET(avg_within_1pct;not_hard_realtime)`（平均接近目标，不保证无超时）；
+高于101%显示 `status=ABOVE_TARGET`。这是窗口平均值口径，不将容差冒充严格达到50Hz或硬实时保证。
+进入GMT/重置/模式切换的混合窗口显示 `WARMUP_OR_MODE_CHANGE`；非GMT显示 `NOT_GMT`，不判定GMT频率。
+控制计数不再增加时，独立日志线程仍提示 `NO_CONTROL_UPDATES(not_started/paused/stopped/blocked)`，
+不能把暂停时的仿真50Hz误报为真实50Hz。频率日志的标签、状态、初始化提示和异常消息统一为ASCII英文，
+避免中文在部署终端显示问号；代码注释和本文说明仍保留中文。
 日志线程自身仍受普通Linux调度、CPU负载及终端速度影响；统计字段之间允许一个控制周期左右的采样边界偏差。
 
 ## 修改内容和理由
@@ -69,7 +72,7 @@
 保持不变：2000Hz仿真物理步进、分频40、实物500/10、显式PD、模型/精度、关节和电机映射、
 Redis协议、轨迹、CPU默认/CUDA显式选择、WALK继续CPU。此前停止的仿真/实物未被本次启动。
 
-## 验证结果与边界
+## 初版验证结果与边界（20:10）
 
 - noetic `catkin build rl_controllers --no-deps -j4 -p1 --no-status --summarize` 成功；
   保留现有CMake/Python/gtest兼容性警告，TF未解析符号与对应依赖警告已消除。
@@ -88,3 +91,26 @@ Redis协议、轨迹、CPU默认/CUDA显式选择、WALK继续CPU。此前停止
 没有进行Gazebo闭环或实物控制测试，没有以此声明实际部署已达到50Hz；下一次用户启动后可直接观察新日志。
 旧库及修改前主要源码保留容器 `/opt/bumi-gmt-ort/backups/pre-frequency.SLlXkb`，为可恢复的正式备份。
 临时测试目录和本次构建日志在摘录结果后清理；测试源代码、正式编译产物及旧用户日志保留。
+
+## 20:21：终端乱码修复与日志解读
+
+用户贴出的日志中中文标签/状态显示问号。现将频率模块的前缀、状态、初始化提示和异常消息改为ASCII英文，
+保留中文代码注释；仅改RuntimeFrequencyMonitor.cpp、RLControllerBase.cpp中的文字，统计和控制逻辑不变。
+当前使用说明与上面的输出示例已更新；历史20:10版本的中文输出不再作为现行格式。
+
+用户日志显示的是仿真（目标2000Hz且有sim/wall），不是实物500Hz运行：
+
+- `control=1654.83/2000.00Hz`：控制器update每真实秒约1655次，目标2000次。
+- `GMT_infer=41.50Hz GMT_command=41.50/50.00Hz`：推理成功与新目标提交均为41.5Hz，低于50Hz目标。
+- `gap_max=30.12ms gap>20.00ms=83`：这2秒窗口内，最大新动作提交间隔30.12ms，83个间隔超过20ms；
+  不是推理耗时30.12ms，也不是推理失败83次。
+- `infer_failed=0`：本窗口未记录到GMT推理失败，不等于没有控制超时或跟踪误差。
+- `sim/wall=0.827`：仿真约为0.827倍实时，每2个真实秒只推进约1.654个仿真秒。
+- `GMT_DBG` 的pos/quat/linvel/angvel/joints来自目标轨迹变量，是参考动作调试信息，不是频率，也不是实测机器人状态。
+
+重新编译成功（5.9秒，无警告）；在LC_ALL=C、LANG=C下11项频率测试通过，新增测试逐字符验证六种状态全部ASCII。
+另重跑原3项ControlTiming、1项GMT输出失败检查，共15项通过。CPU/CUDA下ldd -r无缺库或未解析符号。
+现行控制器SHA256：`161988ba6dff824b6462b3b85684eece52037f71d03cb4806a1fd167bc923f84`；物理插件指纹不变。
+未启动/停止用户仿真或实物，不修改控制频率、PD、模型、日志周期或阈值；旧进程需重启承载控制器的进程才能加载新文本。
+正式备份保留容器 `/opt/bumi-gmt-ort/backups/pre-frequency-ascii.ak3Of2`；测试临时目录
+`/tmp/gmt_frequency_ascii.h0HTfv`、3个XML和13个本次构建日志已清理并复核无残留，测试源码与正式产物保留。
