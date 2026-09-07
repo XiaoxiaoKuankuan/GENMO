@@ -52,12 +52,12 @@ bash scripts/demo/run_bumi_buffered_console.sh
 Python 入口替换为 `demo_bumi_gmt_buffered_bridge.py` 和
 `demo_music_bumi_buffered_console.py`。缓存桥首次等待 GMT ACK 的默认期限为 300 秒。
 
-2026-09-07最新状态：在排查开启控制即振荡的问题后，已重新启用500 Hz物理/基础控制、
-分频10，并同步修改Gazebo限力矩隐式PD、秒制姿态过渡和周期一致性检查；继续关闭绘图/CSV。
-这次涉及C++，本机已编译`legged_hw_sim`与`rl_controllers`两个库，重启仿真才能加载。
-同版本500 Hz定姿对照的速度RMS由10.656降至0.070 rad/s。完整离线NPZ测试中，66仿真秒
-用了72.4569真实秒，新策略平均45.5443 Hz，仍未达到真实50 Hz；本轮不是buffered全链路
-或运动质量完全等效验收。详见[500 Hz底层修复与实测](gmt_500hz_servo_audit_20260907.md)。
+2026-09-07最新状态：用户反馈WALK和GMT仍异常，已按要求撤回隐式PD，生产插件恢复原显式
+力矩计算；仍为500 Hz物理/基础控制、分频10，保留秒制过渡与周期检查，继续关闭绘图/CSV。
+本机`legged_hw_sim`已重新编译，`rl_controllers`保留上轮版本；重启仿真才能加载。
+隔离DEFAULT模式已确认新库和2ms基础周期，但没有进入WALK/GMT，不代表跟踪问题已解决。
+详见[显式PD恢复与核查](gmt_explicit_pd_restore_20260907.md)。旧隐式版的定姿指标和45.54 Hz
+离线整首数据仅作[历史实验记录](gmt_500hz_servo_audit_20260907.md)，不是当前版本性能。
 用户之前2000 Hz buffered纯舞蹈约110.68真实秒，见[历史基线记录](gmt_buffered_2000hz_baseline_20260907.md)；
 两轮运行负载不同，不能直接作为严格提速对照。
 
