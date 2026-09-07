@@ -28,8 +28,12 @@
 下面仅为输出格式示例，不是本次实物实测数据：
 
 ```text
-[RATE] mode=GMT provider=cuda wall=2.00s control=500.00/500.00Hz GMT_infer=50.00Hz GMT_command=50.00/50.00Hz status=NEAR_TARGET(avg_within_1pct;not_hard_realtime) gap_max=20.80ms gap>20.00ms=12 infer_failed=0 ros/wall=1.000
+mode=GMT provider=cuda GMT_infer=41.50Hz status=BELOW_TARGET
 ```
+
+当前消息正文只显示模式、后端、GMT推理频率和状态；ROS自身的INFO/时间戳前缀不变。
+周期性GMT_DBG与频率初始化说明已移除，重要错误告警和ROS诊断话题保留。
+以下详细统计口径仍用于内部计数和状态判断，但不再全部展开打印：
 
 - `wall`：由 `std::chrono::steady_clock` 测量的真实经过时间；不受 `/clock` 暂停或系统日期调整影响。
 - `control`：控制器 `update()` 完成次数/真实秒，以及配置的基础目标频率。不是物理引擎内部迭代次数，
@@ -44,12 +48,14 @@
 
 目标来自当前配置的 `control_frequency / decimation`，现有仿真2000/40、实物500/10均为50Hz。
 频率低于目标99%显示 `status=BELOW_TARGET`（不足目标）；99%～101%显示
-`status=NEAR_TARGET(avg_within_1pct;not_hard_realtime)`（平均接近目标，不保证无超时）；
+`status=NEAR_TARGET`（平均接近目标，不保证无超时）；
 高于101%显示 `status=ABOVE_TARGET`。这是窗口平均值口径，不将容差冒充严格达到50Hz或硬实时保证。
 进入GMT/重置/模式切换的混合窗口显示 `WARMUP_OR_MODE_CHANGE`；非GMT显示 `NOT_GMT`，不判定GMT频率。
-控制计数不再增加时，独立日志线程仍提示 `NO_CONTROL_UPDATES(not_started/paused/stopped/blocked)`，
+控制计数不再增加时，独立日志线程仍提示 `NO_CONTROL_UPDATES`，
 不能把暂停时的仿真50Hz误报为真实50Hz。频率日志的标签、状态、初始化提示和异常消息统一为ASCII英文，
 避免中文在部署终端显示问号；代码注释和本文说明仍保留中文。
+status继续依据新动作提交频率判断，不因隐藏GMT_command而修改判定；正常同步执行时两者频率一致，
+若推理完成但动作未提交，则可能显示GMT_infer接近50而status仍为BELOW_TARGET。
 日志线程自身仍受普通Linux调度、CPU负载及终端速度影响；统计字段之间允许一个控制周期左右的采样边界偏差。
 
 ## 修改内容和理由
@@ -114,3 +120,16 @@ Redis协议、轨迹、CPU默认/CUDA显式选择、WALK继续CPU。此前停止
 未启动/停止用户仿真或实物，不修改控制频率、PD、模型、日志周期或阈值；旧进程需重启承载控制器的进程才能加载新文本。
 正式备份保留容器 `/opt/bumi-gmt-ort/backups/pre-frequency-ascii.ak3Of2`；测试临时目录
 `/tmp/gmt_frequency_ascii.h0HTfv`、3个XML和13个本次构建日志已清理并复核无残留，测试源码与正式产物保留。
+
+## 后续更新：按用户要求仅保留精简频率行
+
+- 正文严格为 `mode=GMT provider=cuda GMT_infer=41.50Hz status=BELOW_TARGET` 这样的格式；
+  移除RATE前缀和wall/control/GMT_command/gap/infer_failed/时钟比值显示，NEAR_TARGET与NO_CONTROL_UPDATES也不再带长解释。
+- RuntimeFrequencyMonitor只改格式，原计数、提交频率判定、±1%阈值、每2秒真实时间窗口保持不变。
+- 移除AcController中周期性GMT_DBG参考轨迹打印及RLControllerBase中的冗长频率初始化说明；
+  参考数据、ROS诊断话题、其它启动日志和重要失败告警保留，不改控制行为。
+- 原生频率测试增加精确字符串及禁止多余字段检查，共12项通过；加上3项ControlTiming和1项GMT输出失败检查，共16项通过。
+  LC_ALL=C/LANG=C下完成测试；控制器重编8.6秒成功、无警告，未启动仿真/实物。
+- 最新控制器SHA256：`1c94d1ba2b03fd1c591ff782c0f3ea6282c78dc33d93e3e53fbccb66cef3355b`；物理插件不变。
+- 旧库/源码备份保留容器 `/opt/bumi-gmt-ort/backups/pre-rate-compact.npg6vM`；临时目录
+  `/tmp/gmt_rate_compact.rsh1yh`、3个XML及13个本次构建日志已清理并检查无残留，正式测试源码与编译产物保留。
