@@ -4,6 +4,7 @@
 会在 pytest 临时目录编译实际 C++ 接收器并启动独立本机 Redis，逐帧比对 21×52 输入，
 覆盖快/慢网络心跳、重复包、暂停、末帧、错误模式、CRC 和掉线保护。不访问生产键，
 不启动 Gazebo 或实机；子进程在 fixture 结束时关闭，产物由任务清理临时目录。
+便捷脚本检查仅解析 Shell 参数，核对 v5 s200000 的统一路径和后置覆盖，不加载真实模型。
 """
 
 from __future__ import annotations
@@ -11,6 +12,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import shlex
 import socket
 import struct
 import subprocess
@@ -44,6 +46,55 @@ from scripts.demo import demo_music_bumi_console as console_module
 from tests.bumi.test_bumi_online_deployment import _bridge_args, _FakePolicy, _FakeRedis, _identity
 
 JOINT_HASH = hashlib.sha256("\n".join(f"joint_{i}" for i in range(21)).encode()).digest()
+
+
+def _buffered_wrapper_args(name):
+    """只解析固定 exec 行，拒绝执行模型加载、网络连接或控制操作。"""
+    script = Path(__file__).resolve().parents[2] / "scripts/demo" / name
+    tokens = shlex.split(script.read_text().split("\nexec ", 1)[1].replace("\\\n", " "))
+    assert tokens[:2] == [".venv/bin/python", "-u"]
+    assert tokens[-1] == "$@", "用户参数必须保留在默认参数之后"
+    return tokens[2], tokens[3:-1]
+
+
+def test_buffered_wrapper_console_v5_defaults():
+    entry, argv = _buffered_wrapper_args("run_bumi_buffered_console.sh")
+    assert entry == "scripts/demo/demo_music_bumi_buffered_console.py"
+    args = console_module.build_parser().parse_args(argv)
+    capture = Path(
+        "inputs/checkpoints/bumi_5set_robot_retargeter_pass_v2_qpos30_contact_v5_s200000_20260907"
+    )
+    assert args.checkpoint == capture / "s200000.ckpt"
+    assert args.kinematics == capture / "assets/bumi_kinematics_robot_retargeter_fe934_v1.json"
+    assert args.stats == capture / "assets/bumi_qpos30_stats_train_5set_pass_v2_mine_fe934_v2.json"
+    assert args.onnx == Path(
+        "outputs/onnx/bumi_music/rr_pass_v2_5set_v5_s200000_20260907/"
+        "bumi_music_denoiser_v5_s200000_t120_qpos30_contact.onnx"
+    )
+    assert (args.backend, args.onnx_provider, args.ddim_steps) == ("onnx", "cuda", 20)
+    assert args.guidance_scale == 2.5 and not args.no_foot_lock
+
+
+def test_buffered_wrapper_bridge_matches_console():
+    _, console_argv = _buffered_wrapper_args("run_bumi_buffered_console.sh")
+    entry, bridge_argv = _buffered_wrapper_args("run_bumi_buffered_bridge.sh")
+    assert entry == "scripts/demo/demo_bumi_gmt_buffered_bridge.py"
+    console = console_module.build_parser().parse_args(console_argv)
+    bridge = bridge_module.build_parser().parse_args(bridge_argv)
+    assert bridge.kinematics == console.kinematics
+    assert bridge.gmt_policy == Path(
+        "/home/weili/docker_projects/bumi_GMT_deployment_listao/bumi_GMT_deployment_obs/"
+        "src/legged_rl/rl_controller/rl_controllers/policy/bumi/model_135000_stage2.onnx"
+    )
+
+
+def test_buffered_wrapper_user_overrides_preserved():
+    _, argv = _buffered_wrapper_args("run_bumi_buffered_console.sh")
+    args = console_module.build_parser().parse_args(argv + ["--onnx-provider", "cpu"])
+    assert args.onnx_provider == "cpu"
+    _, argv = _buffered_wrapper_args("run_bumi_buffered_bridge.sh")
+    args = bridge_module.build_parser().parse_args(argv + ["--kinematics", "override.json"])
+    assert args.kinematics == Path("override.json")
 
 
 def frames(count=57):

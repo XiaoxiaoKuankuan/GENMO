@@ -8,19 +8,42 @@ SLERP/中心差分规则构建 50 Hz 轨迹，完整上传并缓存到 GMT；GMT
 
 此功能解决参考动作与慢仿真的时间轴错位，不提高 Gazebo 实时率，不意味着真实策略
 频率已经达到 50 Hz。当前新模式默认且要求关闭自动音频播放；正常速度音乐在慢仿真中
-仍无法同步。模型/checkpoint、CUDA ONNX EP、DDIM 20、CFG 2.5、seed 42、v5 CPU
-规范初始噪声、足锁及 30 Hz 源时间边界保持不变。
+仍无法同步。2026-09-08 起独立便捷入口统一使用 **v5 s200000** 配套文件；CUDA ONNX EP、
+DDIM 20、CFG 2.5、seed 42、v5 CPU 规范初始噪声、足锁及 30 Hz 源时间边界保持不变。
 
 ## 启动（三个终端）
 
 先关闭旧的仿真/Bridge/Console。不要在同一仿真中混用两个桥。
 
-容器内启动 GMT：
+容器内启动 GMT（2026-09-08 起，这个独立入口默认 CUDA 设备 0；普通 `simulation.sh` 仍默认 CPU）：
 
 ```bash
 cd /host/Documents/bumi_GMT_deployment_obs
 bash ./simulation_buffered.sh
 ```
+
+等效显式写法是 `bash ./simulation_buffered.sh gmt_onnx_provider:=cuda gmt_cuda_device_id:=0`。
+如需回退，使用 `bash ./simulation_buffered.sh gmt_onnx_provider:=cpu` 后重新启动仿真。
+只修改启动默认值，复用已编译的 GMT CUDA 支持，本机不需要重新编译；WALK 保持 CPU。
+直接 `roslaunch rl_controllers ac_start.launch gmt_mode:=buffered` 不经过这个脚本，仍需显式
+添加 `gmt_onnx_provider:=cuda gmt_cuda_device_id:=0`。现有运行进程不会随脚本修改热切换后端。
+
+### 30 Hz 和 50 Hz 分别是什么
+
+- Console 生成的源 qpos 是 **30 Hz 轨迹采样率**；Console 已使用 `--onnx-provider cuda`，
+  不是每秒只允许模型调用 30 次。Bridge 按既有插值和中心差分构建 **50 Hz GMT 参考轨迹**。
+- GMT 仍为 **2000 Hz 基础仿真控制 / 40 倍分频 = 每仿真秒 50 次策略更新**，没有配置成 30 Hz。
+- 如果终端显示 `GMT_infer=30.00Hz`，表示每真实秒完成约 30 次 GMT 推理；仿真若只有约 0.6 倍
+  实时率，就可能出现这个读数。仅凭这一读数不能确定瓶颈在模型、物理、通信还是调度。
+- 修改前，本独立仿真脚本没有指定 GMT 后端，因此不带参数启动会继承 CPU 默认值。
+  修改后，默认显式选择 CUDA 并通过原 launch 给 gzserver 优先加载隔离 GPU ORT。
+  这不改变物理步长、PD 或缓存推进方式，也不保证整条链路达到真实 50 Hz。
+
+启动应看到 `[GMT ONNX] requested=cuda`、RTX 4090 设备及 CUDA 注册/预热成功；进入 GMT 后，
+频率行保留 `mode=GMT provider=cuda GMT_infer=...Hz status=...`。实际频率仍要看本轮真实运行日志，
+不能由离线视频 30 fps 或独立推理测试推断。
+
+### 继续启动 Bridge 与 Console
 
 主机启动缓存桥（7023 端口，独立 Redis 键）：
 
@@ -48,9 +71,24 @@ bash scripts/demo/run_bumi_buffered_console.sh
 `status` 应显示 `playback_mode: buffered`、`playback_clock: gmt_policy_step`。
 其中 `publish_hz` 仍是网络心跳频率，不是策略执行频率。
 
-三个便捷脚本中的模型路径与用户当前 s190000 命令一致。也可以保留原全部参数，仅把
-Python 入口替换为 `demo_bumi_gmt_buffered_bridge.py` 和
-`demo_music_bumi_buffered_console.py`。缓存桥首次等待 GMT ACK 的默认期限为 300 秒。
+独立 Console 的 checkpoint、ONNX、kinematics、stats 已由 s190000 切为 v5 s200000，
+Bridge 的运动学路径同步指向同一归档；GMT 跟踪策略仍是 `model_135000_stage2.onnx`。
+本次只改两个便捷 Shell 脚本的模型路径，不改通用 Python 入口，也不会替换已有手写命令中的旧路径。
+缓存桥首次等待 GMT ACK 的默认期限仍为 300 秒。
+
+配套目录（相对 GENMO 根目录）：
+
+```text
+checkpoint: inputs/checkpoints/bumi_5set_robot_retargeter_pass_v2_qpos30_contact_v5_s200000_20260907/s200000.ckpt
+ONNX:       outputs/onnx/bumi_music/rr_pass_v2_5set_v5_s200000_20260907/bumi_music_denoiser_v5_s200000_t120_qpos30_contact.onnx
+kinematics: inputs/checkpoints/bumi_5set_robot_retargeter_pass_v2_qpos30_contact_v5_s200000_20260907/assets/bumi_kinematics_robot_retargeter_fe934_v1.json
+stats:      inputs/checkpoints/bumi_5set_robot_retargeter_pass_v2_qpos30_contact_v5_s200000_20260907/assets/bumi_qpos30_stats_train_5set_pass_v2_mine_fe934_v2.json
+```
+
+Console 自动读取 ONNX 同名 `.onnx.json` 元数据并校验 checkpoint、kinematics、stats 指纹。
+重启上述 Bridge 和 Console 两个便捷脚本即可加载新默认值，无需重新编译，也不因本次模型路径变更而要求
+重启已运行的 GMT/Gazebo；若还需应用前一次 GMT CPU→CUDA 后端切换，则仍须单独重启仿真。
+请在当前动作停止后切换，不在播放中混用新旧 Bridge。原始模型文件和用户已有轨迹均保留。
 
 2026-09-07最新状态：用户要求恢复2000 Hz，现为0.0005秒物理步长、2000 Hz基础控制、
 分频40，仍使用此前已恢复并编译的原显式PD；保留0.5秒姿态过渡，继续关闭绘图/CSV。
@@ -83,7 +121,7 @@ cmake --build /host/Documents/bumi_GMT_deployment_obs/build/rl_controllers --tar
 
 接收端必须显式 `gmt_mode:=buffered`，要求 `/use_sim_time=true` 且控制频率/decimation
 对应 0.02 秒策略步；拒绝直接用于实机。原实时 Python 命令及协议不变；`simulation.sh`
-与缓存入口共用新版500 Hz仿真底层，但原实时模式不会自动变成仿真步消费。
+与缓存入口共用当前2000 Hz仿真底层，但原实时模式不会自动变成仿真步消费。
 部署工作树原本有大量既有修改；此次只局部修改上述文件，不提交或覆盖其他部署修改。
 
 ## 数据与时序
@@ -103,6 +141,30 @@ cmake --build /host/Documents/bumi_GMT_deployment_obs/build/rl_controllers --tar
 仍触发 GMT 原有数据过期保护。未进入 GMT、退出 GMT 或暂停时，帧号不会按墙钟前进。
 
 ## 已验证与边界
+
+2026-09-08 独立生成模型升级到 v5 s200000：
+
+- checkpoint、ONNX、同名元数据、kinematics、stats 的实际 SHA256 均与归档清单一致，
+  ONNX 元数据中的 checkpoint/kinematics/stats 路径及指纹相互匹配，checkpoint 为 step 200000。
+- 两个 Shell 入口 `bash -n` 和真实 `--help` 参数解析通过；新增3项默认模型/两端运动学一致/用户覆盖检查，
+  加原3项伪模型及缓存步进测试共 `6 passed`，3项 C++/真实生成集成测试未执行。
+- 此轮只更新默认路径，不重新导出、修改或生成模型文件，不发音乐请求，不运行真实模型推理或闭环控制。
+  临时测试产物已清理；旧模型、既有轨迹及用户进程均未改动。
+
+2026-09-08 独立入口默认 CUDA 的本轮验证：
+
+- 六项回归通过：运行真实 Shell 参数链并拦截 roslaunch，仅用 XmlLoader 解析，验证默认 CUDA、显式 CPU、
+  设备覆盖、重复参数最后值生效，以及原在线入口默认 CPU/显式 CUDA 不变；gzserver 库路径、2000/40、
+  原显式 PD、绘图关闭均通过检查。永久测试位于部署仓库 `rl_controllers/test/test_buffered_launch.py`。
+- 原生 C++ 探针在设备 0 / RTX 4090 加载隔离 ORT 1.19.0，20 次初始化预热通过；8 组固定合成输入、
+  168 个输出与原 CPU ORT 对比，最大绝对误差 `2.384185791015625e-06`，按原 `1e-4 + 1e-4*abs(cpu)`
+  阈值没有超限。此为小规模接通回归，不替代此前完整数值/性能验收。
+- Profiling 中 Gemm、MatMul、FusedMatMul 共 952 个执行事件均在 CUDA EP；本次没有记录 CPU 算子事件。
+  因而不是仅凭配置或显存占用判断 GPU 生效。
+- 未启动 Gazebo、ROS 节点、Redis 或实物，未测本轮闭环真实频率；未重编译、替换模型或重启用户进程。
+  临时探针报告和 Profile 已自动清理，仅在文档与记录中保留结论。
+
+以下为原缓存协议实现阶段的历史验证，不是本轮 GPU 入口修改后重新执行：
 
 - 完整回归 `179 passed, 1 skipped`，包含既有实时链路；新测试覆盖生成收齐后才发送、完整缓存与 ACK 隔离、
   消费步/网络心跳解耦、重复包、暂停、末端夹持、错误模式、CRC 和过期保护。
