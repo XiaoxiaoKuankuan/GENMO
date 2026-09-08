@@ -12,6 +12,8 @@
 --audio-output off 仅用于无声测试，报告不会将它计为声卡音视频同步验收。
 --smpl-npz 可回放本入口保存的 generated_smpl.npz，以独立检查控制与同步。
 每次运行创建独立目录，保存资产散列、命令、源 SMPL、每窗耗时及真实仿真状态。
+不提供 --audio 或指定 --resident 时进入常驻控制台：持续发送略微外展的站姿，
+MuJoCo 按 ] 起控、9 松绳；终端输入音频路径播放，stop 或窗口 P 收尾后继续待机。
 """
 
 from __future__ import annotations
@@ -78,7 +80,12 @@ ENGINE_DIR = ROOT / "outputs/tensorrt/sonic_music_physics_v3_s100000/engines"
 def parser():
     """命令行只暴露文件演示所需选项；真机网络接口不在本入口范围内。"""
     p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument("--audio", type=Path, required=True)
+    p.add_argument("--audio", type=Path)
+    p.add_argument("--resident", action="store_true", help="常驻接收音乐，保留人工起控和松绳")
+    p.add_argument(
+        "--arm-open-degrees", type=float, default=15.0, help="常驻站姿双臂外展角，0 至 45 度"
+    )
+    p.add_argument("--hang-height", type=float, default=0.82, help="常驻准备的吊绳锚点高度，单位米")
     p.add_argument("--start-sec", type=float, default=0)
     p.add_argument("--duration-sec", type=float)
     p.add_argument("--seed", type=int, default=42)
@@ -258,8 +265,9 @@ def assets(args):
         sonic / "gear_sonic/data/robot_model/model_data/g1/g1_29dof_with_hand.xml",
         sonic / "gear_sonic/utils/mujoco_sim/wbc_configs/g1_29dof_sonic_model12.yaml",
         sonic / "gear_sonic_deploy/target/release/g1_deploy_onnx_ref",
-        args.audio.resolve(strict=True),
     ]
+    if args.audio is not None:
+        paths.append(args.audio.resolve(strict=True))
     result = {str(path): sha256_file(path) for path in paths}
     expected = (
         "013ab0287236aa2721e13f1e936d699db982302d0de0bfcdae76d5c3245362d3",
@@ -274,6 +282,7 @@ def assets(args):
         ROOT / "gem/network/endecoder.py",
         ROOT / "gem/network/stats_compose.py",
         Path(__file__),
+        ROOT / "scripts/demo/sonic_music_resident.py",
         sonic / "gear_sonic/utils/mujoco_sim/music_session.py",
         sonic / "gear_sonic/utils/mujoco_sim/base_sim.py",
         sonic
@@ -317,10 +326,11 @@ def summarize(rows, windows, duration, audio_output, error, stopped):
     )
 
 
-def run(args):
+def run(args, resident=None):
     """统一协调准备、预缓冲、预约起播、在线生产、自然结束以及故障冻结。"""
     torch.set_num_threads(2)
-    session_id = str(uuid.uuid4())
+    track_id = str(uuid.uuid4())
+    session_id = resident.session_id if resident else track_id
     output = (
         args.output_dir
         or ROOT
@@ -329,11 +339,18 @@ def run(args):
     ).resolve()
     output.mkdir(parents=True, exist_ok=False)
     print(f"session={session_id} output={output}", flush=True)
-    processes = LocalProcesses()
-    clients = [SessionClient(e, session_id) for e in (args.sonic_endpoint, args.sim_endpoint)]
+    processes = resident.processes if resident else LocalProcesses()
+    clients = (
+        resident.clients
+        if resident
+        else [SessionClient(e, session_id) for e in (args.sonic_endpoint, args.sim_endpoint)]
+    )
     sonic, sim = clients
-    quit_requested, producer_stop, playing = threading.Event(), threading.Event(), threading.Event()
-    original_handler = signal.signal(signal.SIGINT, lambda *_: quit_requested.set())
+    quit_requested = resident.stop_requested if resident else threading.Event()
+    producer_stop, playing = threading.Event(), threading.Event()
+    original_handler = (
+        None if resident else signal.signal(signal.SIGINT, lambda *_: quit_requested.set())
+    )
     producer = None
     audio = None
     windows, rows, decoded_chunks, worker_errors, committed = [], [], [], [], []
@@ -341,11 +358,14 @@ def run(args):
     error, user_stopped, prepared = "", False, []
     duration, epoch = 0.0, 0
     full_control_metrics = None
+    timeline = None
     gpu_handle = None
     telemetry = (output / "timeline.jsonl").open("x", encoding="utf-8")
     try:
         manifest = dict(
             session_id=session_id,
+            track_id=track_id,
+            resident=resident is not None,
             args={k: str(v) if isinstance(v, Path) else v for k, v in vars(args).items()},
             assets=assets(args),
             control_hz=50,
@@ -367,7 +387,12 @@ def run(args):
             duration_seconds=duration,
             selected_audio_sha256=sha256_file(output / "audio.wav"),
         )
-        timeline = PoseTimeline(args.sonic_root, duration)
+        timeline = PoseTimeline(
+            args.sonic_root,
+            duration,
+            arm_open_degrees=args.arm_open_degrees if resident else 0.0,
+            initial_root=resident.standing_root if resident else None,
+        )
         frame_count = math.ceil(duration * 30 - 1e-9)
         plan = plan_sliding_windows(frame_count)
         if args.smpl_npz:
@@ -385,23 +410,38 @@ def run(args):
                 if len(candidates) != 1:
                     raise ValueError("默认模型需要唯一 TensorRT engine，请显式指定 --engine")
                 engine = candidates[0]
-            runner = TensorRTStepRunner(engine)
+            runner = (
+                resident.model[0] if resident and resident.model else TensorRTStepRunner(engine)
+            )
             if (
                 runner.manifest["checkpoint_sha256"] != CHECKPOINT_SHA
                 or sha256_file(CHECKPOINT) != CHECKPOINT_SHA
             ):
                 raise ValueError("TensorRT engine 或 checkpoint 不属于选定的 physics_v3 s100000")
             manifest["engine"] = runner.manifest
-            generator = SlidingDDIMGenerator(
-                runner, device="cuda:0", steps=args.ddim_steps, guidance_scale=args.guidance_scale
+            generator = (
+                resident.model[1]
+                if resident and resident.model
+                else SlidingDDIMGenerator(
+                    runner,
+                    device="cuda:0",
+                    steps=args.ddim_steps,
+                    guidance_scale=args.guidance_scale,
+                )
             )
-            endecoder = EnDecoder(
-                stats_name="MM_V1_AMASS_LOCAL_BEDLAM_CAM",
-                encode_type="gvhmr",
-                feat_dim=151,
-                clip_std=True,
+            endecoder = (
+                resident.model[2]
+                if resident and resident.model
+                else EnDecoder(
+                    stats_name="MM_V1_AMASS_LOCAL_BEDLAM_CAM",
+                    encode_type="gvhmr",
+                    feat_dim=151,
+                    clip_std=True,
+                )
             )
             endecoder.build_obs_indices_dict()
+            if resident:
+                resident.model = runner, generator, endecoder
             decoder = StreamingSmplDecoder(endecoder, "cuda:0")
             manifest["endecoder"] = dict(
                 stats_name="MM_V1_AMASS_LOCAL_BEDLAM_CAM",
@@ -420,12 +460,13 @@ def run(args):
             )
             torch.cuda.synchronize()
         write_json(output / "manifest.json", manifest)
-        if args.launch_local:
+        if args.launch_local and not resident:
             processes.launch(args, output)
+        if processes.commands:
             manifest["processes"] = processes.commands
             write_json(output / "manifest.json", manifest)
         deadline = time.monotonic() + 120
-        for client in clients:
+        for client in [] if resident else clients:
             probe = SessionClient(client.endpoint, timeout_ms=100)
             try:
                 while True:
@@ -441,6 +482,8 @@ def run(args):
                         time.sleep(0.1)
             finally:
                 probe.close()
+        if quit_requested.is_set():
+            raise InterruptedError("用户取消音乐准备")
         sim.call("prepare")
         prepared.append(sim)
         sonic.call("prepare", audio_frames=timeline.target_frames, audio_start_frame=100)
@@ -529,13 +572,19 @@ def run(args):
             s, m = sonic.call("status"), sim.call("status")
             if worker_errors:
                 raise RuntimeError(worker_errors[0])
-            if quit_requested.is_set():
-                raise RuntimeError("用户在起播前取消")
+            if resident and resident.error:
+                raise RuntimeError(resident.error)
             if s["state"] == "fault" or m["state"] == "fault":
                 raise RuntimeError(s.get("error") or m.get("error"))
-            if prefilled.is_set() and s["control_ready"]:
+            if quit_requested.is_set():
+                raise InterruptedError("用户在起播前取消")
+            if (
+                prefilled.is_set()
+                and s["control_ready"]
+                and (not resident or resident.ground_ready())
+            ):
                 break
-            if time.monotonic() > preparation_deadline:
+            if time.monotonic() > preparation_deadline and (not resident or not prefilled.is_set()):
                 raise TimeoutError("动作预缓冲或控制器预热超时")
             time.sleep(0.05)
         epoch = time.monotonic_ns() + 800_000_000
@@ -600,6 +649,11 @@ def run(args):
                 if producer.is_alive():
                     raise RuntimeError("用户停止时生成线程未能及时退出")
                 s = sonic.call("status")
+                if resident and s["state"] == "armed" and time.monotonic_ns() < epoch:
+                    # 音乐尚未开始时立即撤销预约，避免关闭声卡的等待跨过起播时刻。
+                    audio.close(fault=True)
+                    resident.return_to_standing(resident.standing_root)
+                    raise InterruptedError("用户在预约起播前取消")
                 cut = s["used_frame"] + 25
                 if cut < s["received_frame"] - 59 and s["state"] == "playing":
                     tail = timeline.graceful_tail(cut)
@@ -621,15 +675,28 @@ def run(args):
                     sim.call("finish")
                     audio.close()
                     finished = True
-                    print("music completed; holding standing pose; Ctrl+C to close", flush=True)
-                if args.exit_on_finish or user_stopped or quit_requested.is_set():
+                    print(
+                        "music completed; returning to standing"
+                        if resident
+                        else "music completed; holding standing pose; Ctrl+C to close",
+                        flush=True,
+                    )
+                if resident or args.exit_on_finish or user_stopped or quit_requested.is_set():
                     break
             time.sleep(0.025)
+    except InterruptedError:
+        if resident:
+            user_stopped = True
+            epoch = 0
+        else:
+            error = traceback.format_exc()
     except Exception:
         error = traceback.format_exc()
         print(error, file=sys.stderr, flush=True)
     finally:
         producer_stop.set()
+        if resident and resident.error and not error:
+            error = resident.error
         if audio and error:
             audio.close(fault=True)
         if prepared and error:
@@ -644,9 +711,19 @@ def run(args):
             audio.close(fault=bool(error))
             if audio.fade_end_sample is not None:
                 sf.write(output / "played_audio.wav", audio.pcm, audio.sample_rate, subtype="FLOAT")
-        processes.close()
-        for client in clients:
-            client.close()
+        if resident:
+            if not error:
+                root = (
+                    timeline.standing_root
+                    if epoch and timeline is not None
+                    else resident.standing_root
+                )
+                resident.return_to_standing(root)
+            resident.save_sim_track(output, epoch)
+        else:
+            processes.close()
+            for client in clients:
+                client.close()
         telemetry.close()
         if decoded_chunks:
             np.savez_compressed(
@@ -678,7 +755,8 @@ def run(args):
             )
             pynvml.nvmlShutdown()
         write_json(output / "report.json", report)
-        signal.signal(signal.SIGINT, original_handler)
+        if original_handler is not None:
+            signal.signal(signal.SIGINT, original_handler)
         print(
             f"report={output / 'report.json'} completed={report['completed']} error={bool(error)}",
             flush=True,
@@ -687,4 +765,9 @@ def run(args):
 
 
 if __name__ == "__main__":
-    raise SystemExit(run(parser().parse_args()))
+    args = parser().parse_args()
+    if args.resident or args.audio is None:
+        from scripts.demo.sonic_music_resident import run_console
+
+        raise SystemExit(run_console(args))
+    raise SystemExit(run(args))

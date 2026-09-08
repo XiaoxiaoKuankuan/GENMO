@@ -1,17 +1,38 @@
 # GENMO SMPL music-only → SONIC → G1 MuJoCo
 
-本入口在本机运行 GENMO、SONIC C++ 与 MuJoCo 三个持续进程。GENMO 读取音频文件，先提取完整 EDGE35 特征，在播放过程中继续按窗口生成 SMPL。SONIC 固定使用当前 release 的 SMPL mode 2 控制 G1 的 29 个身体关节；手指沿用默认姿态。机器人跟踪人体局部姿态与根朝向，允许自然移动，GENMO 世界平移只用于诊断。
+本入口在本机运行 GENMO、SONIC C++ 与 MuJoCo 三个持续进程。常驻模式在没有音乐时持续发送双臂略微打开的站姿，收到音频文件后提取完整 EDGE35 特征，在播放过程中继续按窗口生成 SMPL；结束或主动停止后回到站姿，继续接收下一首。SONIC 固定使用当前 release 的 SMPL mode 2 控制 G1 的 29 个身体关节；手指沿用默认姿态。机器人跟踪人体局部姿态与根朝向，允许自然移动，GENMO 世界平移只用于诊断。
 
 ## 启动和退出
 
 在 `/home/weili/GENMO` 中执行：
 
 ```bash
-.venv/bin/python -B scripts/demo/demo_music_sonic.py \
-  --audio "/absolute/path/song.wav" --launch-local
+.venv/bin/python -B scripts/demo/demo_music_sonic.py --resident --launch-local
 ```
 
-程序自动完成模型预热、前两窗预缓冲、PD 初始化以及 SMPL 站立准备。预约时刻释放虚拟弹力带，先站立 1 秒，再用 1 秒过渡进入舞蹈；音乐第 0 个采样与会话第 100 帧对齐。正式音乐结束后，用 1 秒收尾并保持站立画面，按 Ctrl+C 关闭。播放中按 Ctrl+C 会在约 0.5 秒之后进入收尾，音频在切换前 250 ms 淡出。故障立即停止音乐并冻结物理推进。
+也可以省略 `--resident` 和 `--audio`，无音频启动自动进入常驻模式。默认手臂外展 15°，可用 `--arm-open-degrees 10` 调整到 0～45°。先保持 MuJoCo 吊绳开启并完成原有 PD 初始化，在 **MuJoCo 窗口按 `]` 进入 SONIC 控制，再按 `9` 松开吊绳落地**。没有音乐、提取特征和预缓冲时都会继续跟踪站姿；程序不自动起控或松绳。
+
+常驻准备默认把吊绳锚点平滑降到 0.82 m（`--hang-height`），减少策略长时间悬空摆腿后高处落地的相位敏感性；实际测试发现原 1 m 悬挂并非每次松绳都能稳定落地。按 `9` 后外部拉力实际归零，正式表演始终没有吊绳辅助。窗口按 `]` 时会恢复全身跟踪相机，避免 MuJoCo 原生同名快捷键把视角切到机载相机。
+
+在启动 GENMO 的终端输入以下命令并回车：
+
+```text
+play /absolute/path/song.wav
+stop
+status
+quit
+```
+
+直接输入完整文件路径也可以；带空格的路径可以加引号。`play` 开始准备当前音乐，`stop` 或 **MuJoCo 窗口的 `P`** 平滑停止表演，`status` 查看站姿/播放及吊绳状态，`quit` 收尾后退出全部自有进程。终端也接受 `]` 起控和 `9` 切换吊绳。表演期间 Ctrl+C 只停止当前表演；站姿待机时 Ctrl+C 退出常驻程序。正在播放时不会把新输入的歌曲自动插入队列，应先停止当前表演。
+
+每首音乐仍采用前两窗预缓冲和单独的媒体零点；松绳至少一秒后，先保持站姿一秒，再用一秒过渡接入首帧舞蹈，音乐第 0 个采样与本首歌第 100 帧参考对齐。结束后用一秒回到站姿，继续闭环控制；主动停止时提前 250 ms 淡出音乐。换歌不 reset MuJoCo、不重新吊起、不重新校准 heading，也不重新加载 TensorRT 模型。每首歌的首朝向接续当前站姿，收尾只保留末端 yaw 并恢复直立。故障停止音频并冻结仿真，不能用换歌清除故障。
+
+需要保留原来的单首自动起控/自动松绳验收行为时，显式提供 `--audio` 且不加 `--resident`：
+
+```bash
+.venv/bin/python -B scripts/demo/demo_music_sonic.py \
+  --audio "/absolute/path/song.wav" --launch-local --exit-on-finish
+```
 
 常用选项：
 
@@ -19,15 +40,16 @@
 |---|---|
 | `--start-sec 10 --duration-sec 30` | 选段后再提取特征，保持原始播放速度 |
 | `--seed 42` | 固定滚动窗口的派生随机种子 |
+| `--resident --audio /path/song.wav` | 常驻启动时预先选择一首歌，仍等待人工起控和松绳 |
 | `--output-dir /absolute/new/directory` | 使用新的输出目录；拒绝覆盖已有目录 |
 | `--audio-device pulse` | 选择 PortAudio 输出设备，也可传数字设备编号 |
-| `--exit-on-finish` | 自然收尾后自动退出，适合验收 |
+| `--exit-on-finish` | 单首模式自然收尾后退出；常驻模式继续站立 |
 | `--headless --audio-output off` | 显式无窗口、无声测试，不属于真实声卡验收 |
 | `--audit-observations` | 保存实际 C++ 编码器输入，供独立重组比较 |
 | `--smpl-npz .../generated_smpl.npz` | 固定片段回放，隔离生成速度对控制的影响 |
 | `--sonic-root ... --sim-python ...` | 覆盖 SONIC 路径和仿真 Python；默认使用 SONIC 的 `.venv_sim/bin/python` |
 
-不使用 `--launch-local` 时，需先按 SONIC 仓库 `docs/sonic_music_input.md` 的命令启动两个服务。本入口只连接 `127.0.0.1`；活动会话拒绝被另一个会话覆盖，退出时只终止自己启动的子进程。音乐模式由协调器管理，不使用摄像头模式的 Enter/T/R 或编码器切换按键。
+不使用 `--launch-local` 时，需先按 SONIC 仓库 `docs/sonic_music_input.md` 的命令启动两个服务。本入口只连接 `127.0.0.1`；活动会话拒绝被另一个会话覆盖，退出时只终止自己启动的子进程。音乐模式不使用摄像头模式的 Enter/T/R 或编码器切换按键。常驻控制台负责转发上述窗口起控和停止事件。
 
 ## 固定资产与环境
 
@@ -105,6 +127,8 @@ Linux 还需要 PortAudio 动态库。本机缺少系统 `libportaudio2`，已�
 
 每次会话包含 `manifest.json`、`audio.wav`、`generated_smpl.npz`、`reference_50hz.npz`、`windows.json`、`timeline.jsonl`、`sim_state.jsonl`、两个子进程日志和 `report.json`。用户淡出时另存 `played_audio.wav`。`evaluation.json` 为复算结果；录像来自真实 qpos/qvel 的时间戳回放，不是把生成参考直接贴到机器人上，也不替代现场主观视听复核。
 
+常驻目录的 `resident_timeline.jsonl` 记录待机、人工起控、吊绳和持续站姿包计数；`tracks/` 下每首歌保存独立的上述动作、音频和报告，公共 SONIC/MuJoCo 进程日志放在常驻目录。每首歌的 `sim_state.jsonl` 按预约 epoch 提取，避免混入前一首动作。`resident_report.json` 与 `tracks.json` 记录最终退出状态和各首歌目录。
+
 2026-09-08 首轮实测已经完成：固定片段 8 秒、在线 Compas3D 30 秒、在线 FineDance 原曲选段 180 秒以及三个故障用例。180 秒会话为 `outputs/sonic_music/20260908_190755_36ae39a4`：58 次播放中生产耗时平均 74.2 ms、P95 78.8 ms；音频/参考误差 P95 8.68 ms、最大 9.23 ms；完整控制周期 P99 1.76 ms，实际控制 50.00 Hz，仿真 200.000 Hz，RTF 1.000000。无弹力带、无跌倒和自动重置，最低基座 0.363 m、最大倾角 25.58°。
 
 固定片段 436 次 C++ 编码观测与 Python 重组最大误差 `8.47e-16`。180 秒双膝屈曲的相位估计为滞后约 20 ms，相关系数 0.958；这只是双膝指标，不能解释成全身固定延迟。足底接触点切向速度 RMS 约 0.124 m/s，仍有滑动，舞蹈质量结论以本次音乐、seed 和录像为限，不是零脚滑或真机验证。
@@ -125,3 +149,12 @@ Linux 还需要 PortAudio 动态库。本机缺少系统 `libportaudio2`，已�
 | 足底接触点切向速度 | RMS 0.108 m/s，P95 0.117 m/s，存在脚滑 |
 
 同目录 `dance_with_music.mp4` 是完整状态回放录像；`report.json`、`evaluation.json` 和 `manifest.json` 与该录像使用同一会话。`outputs/sonic_music/validation_20260908` 保存模型一致性、26 项单元测试、短尾窗、指纹复核及现场窗口截图。三进程故障注入结果另见 `outputs/sonic_music/fault_validation_20260908/results.json`。主观舞蹈与音乐观感仍需观看录像复核；本次没有开展真机或训练验证。
+
+
+## 常驻模式回归（2026-09-08）
+
+最终记录为 `outputs/sonic_music/20260908_resident_final_v3`。同一组进程运行 121.763 秒，完成准备取消、人工起控松绳、30 秒自然结束、窗口 P 中断、中断后再次播放 30 秒，以及结束后继续站姿 15 秒；七项验收通过。起控与 heading 校准均只有一次，始终 mode 2，无跌倒或仿真 reset，累计收到 1178 个站姿包。另通过初始化稳定后额外悬挂等待 2/10/20 秒的三次真实窗口松绳检查。
+
+两次完整播放使用真实声卡，音频/参考误差 P95 为 7.85/13.10 ms，最大 15.23/19.53 ms；生成耗时 P95 为 85.38/85.40 ms，控制计算 P99 为 1.82/1.77 ms。默认 15° 站姿和 0.82 m 吊绳锚点下，整场最低基座 0.682 m、最大倾角 14.09°；地面待机样本最大倾角 7.04°。这些结果只覆盖本次音乐、seed 和仿真场景，不能解释成无限时长或所有悬挂高度均已验证。
+
+该目录有 `standing_before_music.png`、`standing_after_music.png`、`acceptance.json` 和分曲报告；第一首完整音乐的 33 秒状态回放录像位于 `tracks/0002_25042946/dance_with_music.mp4`。30 项单元测试、编译、落地检查及旧单首兼容审计见 `outputs/sonic_music/validation_20260908_resident`。

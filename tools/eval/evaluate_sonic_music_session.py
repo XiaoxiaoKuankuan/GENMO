@@ -53,7 +53,11 @@ def evaluate(directory, render=False):
         if not audit:
             continue
         frame = audit["frame"]
-        indexes = frame + np.arange(10) if audit["play"] else np.repeat(frame, 10)
+        if frame == -1 and manifest.get("resident"):
+            # 常驻预约前仍消费站姿快照，对应本首前缀首帧，不能用负索引误读末尾朝向。
+            indexes = np.zeros(10, dtype=int)
+        else:
+            indexes = frame + np.arange(10) if audit["play"] else np.repeat(frame, 10)
         expected = np.zeros(1762)
         expected[0] = 2
         expected[922:1642] = reference["smpl_joints"][indexes].ravel()

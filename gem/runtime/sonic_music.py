@@ -81,7 +81,9 @@ class SessionClient:
 class PoseTimeline:
     """在整首音频的采样网格上重采样；跨窗口保留插值端点和六腕连续角度。"""
 
-    def __init__(self, sonic_root: Path, duration: float):
+    def __init__(
+        self, sonic_root: Path, duration: float, *, arm_open_degrees=0.0, initial_root=None
+    ):
         if not math.isfinite(duration) or duration <= 0:
             raise ValueError("音频时长必须为正有限数")
         self.converter = SonicSMPLConverter(sonic_root, enable_yaw_calibration=False)
@@ -93,6 +95,12 @@ class PoseTimeline:
         self.previous = None
         self.wrist_previous = None
         self.first_pose = self.last_pose = None
+        self.idle_pose = synthetic_idle_motion(arm_open_degrees=arm_open_degrees).body_pose.numpy()[
+            0
+        ]
+        self.initial_root = None if initial_root is None else np.asarray(initial_root).copy()
+        self.root_alignment = None
+        self.standing_root = self.initial_root
         self.pose_chunks = []
         self.bounds = np.zeros((29, 2), dtype=np.float64)
         xml = ET.parse(
@@ -160,6 +168,12 @@ class PoseTimeline:
             or not (np.isfinite(pose).all() and np.isfinite(root).all())
         ):
             raise ValueError("提交的 SMPL 参数形状错误或包含非有限数据")
+        if self.initial_root is not None:
+            # 常驻换歌只对齐首次朝向，保留本首歌内的转向，避免重新校准机器人。
+            if self.root_alignment is None:
+                delta = self.upright_root(self.initial_root) - self.upright_root(root[0])
+                self.root_alignment = Rotation.from_rotvec(delta)
+            root = (self.root_alignment * Rotation.from_rotvec(root)).as_rotvec()
         source_start = self.source_count
         self.source_count += len(pose)
         if self.previous is not None:
@@ -180,15 +194,29 @@ class PoseTimeline:
         self.last_pose = body[-1].copy(), orient[-1].copy()
         if self.first_pose is None:
             self.first_pose = body[0].copy(), orient[0].copy()
-            idle = synthetic_idle_motion()
-            idle_pose = idle.body_pose.numpy()[0]
-            idle_root = orient[0]
+            idle_pose = self.idle_pose
+            idle_root = orient[0] if self.initial_root is None else self.initial_root
             alpha = np.arange(1, 51) / 50
             alpha = alpha * alpha * (3 - 2 * alpha)
             p, r = self._blend(idle_pose, idle_root, body[0], orient[0], alpha)
             body = np.concatenate((np.repeat(idle_pose[None], 50, axis=0), p, body))
             orient = np.concatenate((np.repeat(idle_root[None], 50, axis=0), r, orient))
         return self._pack(body, orient)
+
+    @staticmethod
+    def upright_root(root):
+        """保留 SMPL Y-up 朝向并去掉俯仰和侧倾，作为常驻站姿的根参考。"""
+        matrix = Rotation.from_rotvec(root).as_matrix()
+        return np.array([0.0, math.atan2(matrix[0, 2], matrix[2, 2]), 0.0])
+
+    def idle_packet(self, root):
+        """构建十帧恒定站姿；调用者缓存并持续发送，不扩展音乐帧队列。"""
+        self.sent_count, self.wrist_previous = 0, None
+        self.pose_chunks.clear()
+        return self._pack(
+            np.repeat(self.idle_pose[None], 10, axis=0),
+            np.repeat(np.asarray(root)[None], 10, axis=0),
+        )
 
     @staticmethod
     def _blend(p0, r0, p1, r1, alpha):
@@ -211,10 +239,13 @@ class PoseTimeline:
         """音频结束后追加 1 秒站立过渡及十帧未来窗口保护。"""
         if self.output_count != self.target_frames or self.last_pose is None:
             raise RuntimeError("音频参考尚未全部生成，不能收尾")
-        idle = synthetic_idle_motion().body_pose.numpy()[0]
+        idle = self.idle_pose
+        self.standing_root = (
+            self.last_pose[1] if self.initial_root is None else self.upright_root(self.last_pose[1])
+        )
         alpha = np.arange(1, 51) / 50
         alpha = alpha * alpha * (3 - 2 * alpha)
-        p, r = self._blend(*self.last_pose, idle, self.last_pose[1], alpha)
+        p, r = self._blend(*self.last_pose, idle, self.standing_root, alpha)
         return self._pack(
             np.concatenate((p, np.repeat(p[-1:], 10, axis=0))),
             np.concatenate((r, np.repeat(r[-1:], 10, axis=0))),
@@ -229,11 +260,12 @@ class PoseTimeline:
         else:
             raise ValueError("停止帧尚未生成")
         alpha = np.linspace(0, 1, 50)
+        self.standing_root = r0 if self.initial_root is None else self.upright_root(r0)
         p, r = self._blend(
             p0,
             r0,
-            synthetic_idle_motion().body_pose.numpy()[0],
-            r0,
+            self.idle_pose,
+            self.standing_root,
             alpha * alpha * (3 - 2 * alpha),
         )
         self.sent_count, self.wrist_previous = int(cut_frame), None

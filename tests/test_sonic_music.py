@@ -130,3 +130,39 @@ def test_request_retry_keeps_same_sequence_and_payload():
     finally:
         client.close()
         context.term()
+
+
+def test_resident_stance_and_heading_survive_successive_tracks():
+    if not SONIC.exists():
+        pytest.skip("需要本地 SONIC FK 资产")
+    torch.set_num_threads(2)
+    from scipy.spatial.transform import Rotation
+
+    from gem.runtime.motion_streamer import synthetic_idle_motion
+
+    idle = synthetic_idle_motion(arm_open_degrees=15).body_pose.numpy()[0]
+    timeline = PoseTimeline(SONIC, 1, arm_open_degrees=15, initial_root=np.array([0, 2.8, 0]))
+    pose = torch.from_numpy(np.repeat(idle[None], 30, axis=0))
+    root = torch.zeros(30, 3)
+    root[:, 1] = torch.linspace(3.1, 3.5, 30)
+    first = timeline.push(dict(body_pose=pose, global_orient=root), is_last=True)
+    np.testing.assert_allclose(first["smpl_pose"][0].reshape(63), idle, atol=1e-6)
+    end = timeline.finish()
+    np.testing.assert_allclose(end["smpl_pose"][-1].reshape(63), idle, atol=1e-6)
+    expected = Rotation.from_rotvec([0, 3.2, 0]).as_matrix()
+    np.testing.assert_allclose(
+        Rotation.from_rotvec(timeline.standing_root).as_matrix(), expected, atol=1e-6
+    )
+    next_track = PoseTimeline(SONIC, 1, arm_open_degrees=15, initial_root=timeline.standing_root)
+    following = next_track.push(dict(body_pose=pose, global_orient=root), is_last=True)
+    # 四元数可能相差整体符号，比较旋转矩阵而非直接逐元素比较。
+    for q in (end["body_quat"][-1], following["body_quat"][0]):
+        assert np.isfinite(q).all()
+    np.testing.assert_allclose(
+        Rotation.from_quat(end["body_quat"][-1][[1, 2, 3, 0]]).as_matrix(),
+        Rotation.from_quat(following["body_quat"][0][[1, 2, 3, 0]]).as_matrix(),
+        atol=1e-6,
+    )
+    stopped = next_track.graceful_tail(120)
+    np.testing.assert_allclose(stopped["smpl_pose"][-1].reshape(63), idle, atol=1e-6)
+    assert len(stopped["frame_index"]) == 60
