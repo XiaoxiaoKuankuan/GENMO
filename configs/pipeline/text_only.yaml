@@ -1,0 +1,39 @@
+# MotionMillion SMPL 纯文本扩散 Pipeline。
+# 文本只经 T5 embedding cross-attention 注入；逐帧条件列表为空。151D 去噪、
+# 3D 关节/顶点、世界位移与静止接触仍是人体监督，不属于被关闭的输入模态。
+_target_: gem.pipeline.gem_pipeline.Pipeline
+args_denoiser3d: ${network}
+args:
+  train_modes:
+    - diffusion
+  endecoder_opt: ${endecoder}
+  use_regression_outputs_prob: 0.0
+  use_cfg_sampler_for_gen: true
+  inpaint_x_start_gt: false
+  regression_only: false
+  encoded_music_dim: 35
+  multicond_args: ${multicond_args}
+  infer_version: 2
+
+  # 整段文本 dropout 只在 denoiser 内执行一次；关闭旧逐帧随机空条件。
+  disable_random_null_condition: true
+
+  weights:
+    cr_j3d: 500.0
+    transl_c: 1.0
+    cr_verts: 500.0
+    j2d: 1000.0
+    j2d_17: 1000.0
+    verts2d: 1000.0
+    proj_gt_j2d_to_bi01: true
+    transl_w: 1.0
+    static_conf_bce: 1.0
+
+  static_conf:
+    vel_thr: 0.15
+
+  # 纯文本条件不进入逐帧 feature sum，而走 denoiser cross-attention。
+  in_attr: []
+  mask_out_attr: []
+  out_attr:
+    pred_cam: 3

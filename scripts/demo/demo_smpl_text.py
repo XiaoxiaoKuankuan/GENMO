@@ -68,11 +68,16 @@ def build_text_only_data(
         raise ValueError("bbox_scale must satisfy 0 < bbox_scale <= 1.5")
     if not isinstance(text_embed, torch.Tensor):
         raise TypeError("text_embed must be a torch.Tensor")
-    if tuple(text_embed.shape) != (MAX_TEXT_LEN, TEXT_EMBED_DIM):
+    if text_embed.ndim != 2 or text_embed.shape[0] <= 0 or text_embed.shape[1] != TEXT_EMBED_DIM:
         raise ValueError(
-            f"text_embed must have shape ({MAX_TEXT_LEN}, {TEXT_EMBED_DIM}); "
+            f"text_embed must have shape [T,{TEXT_EMBED_DIM}] with T > 0; "
             f"got {tuple(text_embed.shape)}"
         )
+    text_attention_mask = text_embed.detach().abs().any(dim=-1)
+    if not text_attention_mask.any():
+        # 仅兼容 dry-run/旧测试构造的全零占位符；正式 T5 编码不会走该路径。
+        text_attention_mask = text_attention_mask.clone()
+        text_attention_mask[0] = True
 
     from gem.utils.cam_utils import estimate_K
     from gem.utils.geo_transform import compute_cam_angvel
@@ -111,6 +116,7 @@ def build_text_only_data(
         "caption": prompt,
         "has_text": torch.tensor([True], dtype=torch.bool),
         "text_embed": text_embed.detach().float().cpu(),
+        "text_attention_mask": text_attention_mask.bool().cpu(),
         "length": torch.tensor(length, dtype=torch.long),
         "mask": {
             "has_img_mask": false_mask(),
@@ -236,7 +242,7 @@ def encode_prompt_t5(
             resolved_device,
             max_text_len,
         )
-        assert tuple(text_embed.shape) == (MAX_TEXT_LEN, TEXT_EMBED_DIM)
+        assert tuple(text_embed.shape) == (max_text_len, TEXT_EMBED_DIM)
         return text_embed
     except Exception as exc:
         if isinstance(exc, RuntimeError) and "T5 text embedding has shape" in str(exc):
@@ -273,8 +279,12 @@ def prompt_slug(prompt: str, max_length: int = 48) -> str:
     return slug or "text_motion"
 
 
-def validate_text_generation_checkpoint(ckpt_path: str | Path) -> None:
-    """Reject checkpoints that do not contain text-conditioned diffusion weights."""
+def validate_text_generation_checkpoint(ckpt_path: str | Path) -> dict[str, Any]:
+    """校验文本扩散权重并返回 checkpoint 自描述的文本契约。
+
+    2026-09-09 之前的 checkpoint 不含 ``genmo_text_contract``，按历史接口解析为
+    50 token；MotionMillion checkpoint 在保存时会声明 150 token。
+    """
     path = Path(ckpt_path)
     if not path.is_file():
         raise FileNotFoundError(f"GEM checkpoint does not exist: {path}")
@@ -291,6 +301,38 @@ def validate_text_generation_checkpoint(ckpt_path: str | Path) -> None:
         required_markers = ("embed_text", "text_encoder_layers", "gate_cross_attn")
         if not all(any(marker in key for key in keys) for marker in required_markers):
             raise RuntimeError(_TEXT_CHECKPOINT_ERROR)
+        raw_contract = checkpoint.get("genmo_text_contract")
+        if raw_contract is None:
+            contract = {
+                "schema_version": 0,
+                "max_text_len": MAX_TEXT_LEN,
+                "encoded_text_dim": TEXT_EMBED_DIM,
+                "text_only": False,
+                "exp_name": "gem_smpl",
+            }
+        elif not isinstance(raw_contract, dict):
+            raise RuntimeError("Checkpoint genmo_text_contract must be a dictionary")
+        else:
+            contract = {
+                "schema_version": int(raw_contract.get("schema_version", -1)),
+                "max_text_len": int(raw_contract.get("max_text_len", -1)),
+                "encoded_text_dim": int(raw_contract.get("encoded_text_dim", -1)),
+                "text_only": bool(raw_contract.get("text_only", False)),
+            }
+            if contract["schema_version"] != 1:
+                raise RuntimeError("Unsupported checkpoint text contract schema")
+            if not 1 <= contract["max_text_len"] <= 512:
+                raise RuntimeError("Checkpoint max_text_len is outside [1,512]")
+            if contract["encoded_text_dim"] != TEXT_EMBED_DIM:
+                raise RuntimeError(
+                    "Checkpoint encoded_text_dim does not match the T5-3B 1024D contract"
+                )
+            contract["exp_name"] = (
+                "gem_smpl_motionmillion_text_only"
+                if contract["text_only"]
+                else "gem_smpl"
+            )
+        return contract
     finally:
         del checkpoint
         gc.collect()
@@ -577,6 +619,8 @@ def main(argv: list[str] | None = None) -> int:
         parser.error(str(exc))
 
     if args.dry_run:
+        # dry-run 不读取或下载 checkpoint，沿用旧模型的 50-token 默认；正式推理
+        # 会在下方从 checkpoint 的 genmo_text_contract 解析 50/150。
         placeholder = torch.zeros(MAX_TEXT_LEN, TEXT_EMBED_DIM, dtype=torch.float32)
         data = build_text_only_data(
             prompt,
@@ -597,7 +641,12 @@ def main(argv: list[str] | None = None) -> int:
 
     ckpt_path = _download_or_resolve_checkpoint(args.ckpt_path)
     print(f"[Checkpoint] Validating text diffusion weights in {ckpt_path} ...")
-    validate_text_generation_checkpoint(ckpt_path)
+    text_contract = validate_text_generation_checkpoint(ckpt_path)
+    max_text_len = text_contract["max_text_len"]
+    print(
+        "[Checkpoint] Text contract: "
+        f"max_text_len={max_text_len}, encoded_text_dim={text_contract['encoded_text_dim']}"
+    )
 
     text_device, _, text_dtype = _resolve_text_encoder_settings(
         args.text_encoder_device, args.text_encoder_dtype
@@ -607,7 +656,7 @@ def main(argv: list[str] | None = None) -> int:
     text_embed = encode_prompt_t5(
         prompt=prompt,
         model_name_or_path=args.t5_model,
-        max_text_len=MAX_TEXT_LEN,
+        max_text_len=max_text_len,
         device=args.text_encoder_device,
         dtype=args.text_encoder_dtype,
         local_files_only=args.local_files_only,
@@ -630,7 +679,12 @@ def main(argv: list[str] | None = None) -> int:
         from scripts.demo.demo_utils import load_model
 
     print("[GEM] Loading full gem_smpl diffusion model (T5 remains unloaded) ...")
-    model = load_model(str(ckpt_path), load_text_encoder=False)
+    model = load_model(
+        str(ckpt_path),
+        load_text_encoder=False,
+        text_max_len_override=max_text_len,
+        exp_name_override=str(text_contract["exp_name"]),
+    )
     denoiser3d = model.pipeline.denoiser3d
     if denoiser3d.regression_only:
         raise RuntimeError(_TEXT_CHECKPOINT_ERROR)

@@ -38,6 +38,7 @@ from gem.runtime.artifact_publish import (
 MAX_TEXT_LEN = 50
 TEXT_EMBED_DIM = 1024
 GIB = float(1024**3)
+_CHECKPOINT_TEXT_CONTRACT_CACHE: dict[str, dict[str, Any]] = {}
 
 
 @dataclass(slots=True)
@@ -163,17 +164,22 @@ def _load_gem_model(checkpoint: Path) -> Any:
     except ModuleNotFoundError:
         from scripts.demo.demo_utils import load_model
 
+    contract = _CHECKPOINT_TEXT_CONTRACT_CACHE.get(str(checkpoint.resolve()), {})
     return load_model(
         str(checkpoint),
         load_text_encoder=False,
         defer_diffusion_init=True,
+        text_max_len_override=contract.get("max_text_len"),
+        exp_name_override=str(contract.get("exp_name", "gem_smpl")),
     )
 
 
-def _validate_checkpoint(checkpoint: Path) -> None:
+def _validate_checkpoint(checkpoint: Path) -> dict[str, int]:
     from scripts.demo.demo_smpl_text import validate_text_generation_checkpoint
 
-    validate_text_generation_checkpoint(checkpoint)
+    contract = validate_text_generation_checkpoint(checkpoint)
+    _CHECKPOINT_TEXT_CONTRACT_CACHE[str(checkpoint.resolve())] = contract
+    return contract
 
 
 def _text_demo_helpers() -> Any:
@@ -257,6 +263,7 @@ class ResidentTextMotionEngine:
             else self.output_root / "latest_ready.json"
         )
         self.max_frames = int(max_frames)
+        self.max_text_len = MAX_TEXT_LEN
         self._allow_cpu_for_tests = _allow_cpu_for_tests
 
         self.tokenizer: Any | None = None
@@ -326,7 +333,9 @@ class ResidentTextMotionEngine:
             stage = time.perf_counter()
             print("[Resident] CUDA initialized")
             self._log_memory("CUDA initialization")
-            _validate_checkpoint(self.ckpt_path)
+            contract = _validate_checkpoint(self.ckpt_path)
+            if contract is not None:
+                self.max_text_len = int(contract["max_text_len"])
             self.startup_timings["cuda_and_checkpoint_seconds"] = time.perf_counter() - stage
 
             stage = time.perf_counter()
@@ -350,6 +359,10 @@ class ResidentTextMotionEngine:
             print("[Resident] Loading GEM-SMPL")
             self.gem_model = _load_gem_model(self.ckpt_path)
             self.gem_model = self.gem_model.to(self.device).eval()
+            # 文本长度不改变网络权重 shape；新 checkpoint 由自描述契约提升为 150，
+            # 旧 checkpoint 或测试替身保持历史 50。
+            if hasattr(self.gem_model, "max_text_len"):
+                self.gem_model.max_text_len = self.max_text_len
             self.denoiser3d = self.gem_model.pipeline.denoiser3d
             if self.denoiser3d.regression_only:
                 raise RuntimeError(
@@ -380,7 +393,7 @@ class ResidentTextMotionEngine:
             print("[Resident] SERVICE READY")
 
     def _cache_key(self, prompt: str) -> tuple[str, str, int]:
-        return prompt, str(self.t5_model), MAX_TEXT_LEN
+        return prompt, str(self.t5_model), self.max_text_len
 
     def _encode_cached(self, prompt: str) -> tuple[torch.Tensor, bool]:
         normalized = normalize_prompt(prompt)
@@ -399,7 +412,7 @@ class ResidentTextMotionEngine:
             self.tokenizer,
             self.text_encoder,
             self.device,
-            MAX_TEXT_LEN,
+            self.max_text_len,
         )
         with self._cache_lock:
             if self.embedding_cache_size > 0:

@@ -15,12 +15,17 @@ def load_and_freeze_llm(llm_version):
     return model, tokenizer
 
 
-def encode_text_batch(raw_text, text_encoder, tokenizer, device="cuda"):
+def encode_text_batch(
+    raw_text,
+    text_encoder,
+    tokenizer,
+    device="cuda",
+    max_text_len=50,
+    return_attention_mask=False,
+):
     # raw_text - list (batch_size length) of strings with input text prompts
 
     with torch.no_grad():
-        max_text_len = 50
-
         tokenize = getattr(tokenizer, "batch_encode_plus", None)
         if tokenize is None:
             # transformers >=5 removed the public batch_encode_plus alias;
@@ -43,4 +48,6 @@ def encode_text_batch(raw_text, text_encoder, tokenizer, device="cuda"):
         attn_mask = attn_mask[:, :max_text_len]
         encoded_text *= attn_mask.unsqueeze(-1)
 
+    if return_attention_mask:
+        return encoded_text, attn_mask.bool()
     return encoded_text

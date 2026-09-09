@@ -21,6 +21,7 @@ from pytorch_lightning.utilities.combined_loader import CombinedLoader
 from torch.utils.data import ConcatDataset, DataLoader, Subset, default_collate
 
 from gem.datamodule.balanced_music_sampler import HierarchicalMusicDistributedSampler
+from gem.datamodule.motionmillion_sampler import ShardAwareDistributedSampler
 from gem.utils.pylogger import Log
 
 rlimit = resource.getrlimit(resource.RLIMIT_NOFILE)
@@ -143,6 +144,7 @@ class DataModule(pl.LightningDataModule):
         train_2d_only=False,
         collate_cfg: DictConfig = None,
         balanced_sampling: DictConfig | dict | None = None,
+        shard_aware_sampling: DictConfig | dict | None = None,
     ):
         """This is a general datamodule that can be used for any dataset.
         Train uses ConcatDataset
@@ -160,6 +162,7 @@ class DataModule(pl.LightningDataModule):
         self.train_2d_only = train_2d_only
         self.collate_cfg = collate_cfg
         self.balanced_sampling = balanced_sampling
+        self.shard_aware_sampling = shard_aware_sampling
         # Train uses concat dataset
         if "train" in dataset_opts:
             assert "train" in self.loader_opts, "train not in loader_opts"
@@ -239,6 +242,35 @@ class DataModule(pl.LightningDataModule):
     def train_dataloader(self):
         if hasattr(self, "trainset"):
             sampler = None
+            if self.shard_aware_sampling is not None and self.shard_aware_sampling.get(
+                "enabled", False
+            ):
+                if self.balanced_sampling is not None and self.balanced_sampling.get(
+                    "enabled", False
+                ):
+                    raise ValueError(
+                        "shard_aware_sampling 与 balanced_sampling 不能同时启用"
+                    )
+                if len(self.trainsets) != 1:
+                    raise ValueError(
+                        "MotionMillion shard-aware sampler 要求训练配置只有一个 Dataset"
+                    )
+                ddp_sampler_kwargs = _trainer_ddp_sampler_kwargs(
+                    getattr(self, "trainer", None)
+                )
+                sampler = ShardAwareDistributedSampler(
+                    self.trainsets[0],
+                    seed=int(self.shard_aware_sampling.get("seed", 20260909)),
+                    shuffle=bool(self.shard_aware_sampling.get("shuffle", True)),
+                    drop_last=True,
+                    **ddp_sampler_kwargs,
+                )
+                Log.info(
+                    "[Train Sampling][Shard-aware] "
+                    f"per_rank_samples={len(sampler)}, "
+                    f"dropped_global_samples={sampler.dropped_samples}, "
+                    f"rank={sampler.rank}/{sampler.num_replicas}"
+                )
             if self.balanced_sampling is not None and self.balanced_sampling.get(
                 "enabled", False
             ):

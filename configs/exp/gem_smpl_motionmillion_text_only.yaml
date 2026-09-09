@@ -1,0 +1,122 @@
+# @package _global_
+# MotionMillion 单数据集、纯文本条件、GEM-SMPL 151D 扩散器从零训练配置。
+# 首次训练不允许加载预训练权重；恢复时只能由命令行显式设置 resume_mode，使用同一
+# 实验的完整 Lightning checkpoint。正式开训前仍须单独确认服务器 GPU 空闲和授权。
+defaults:
+  - /diffusion@model_cfg.diffusion: ddim
+  - override /data: mocap/trainX_testY
+  - override /model: gem
+  - override /network: diffusion_lg
+  - override /pipeline: text_only
+  - override /endecoder: v1_smpl_amass_bedlam
+  - override /optimizer: adamw_2e-4
+  - override /scheduler: warmup_cosine_300k
+  - override /train_datasets:
+      - motionmillion_text_train
+  - override /test_datasets:
+      - motionmillion_text_val
+  - override /callbacks:
+      - ckpt_saver/every10000s_top100
+      - prog_bar/prog_reporter_ed1
+      - train_speed_timer/base
+      - lr_monitor/pl
+      - vis/vis_text
+  - _self_
+
+exp_name_base: gem_smpl_motionmillion_text_only
+exp_name_var: ""
+exp_name: ${exp_name_base}${exp_name_var}
+data_name: motionmillion_text_v1
+output_dir: outputs/${data_name}/${exp_name}
+pretrain_ckpt: null
+ckpt_path: null
+resume_mode: null
+seed: 20260909
+
+multicond_args: null
+
+model:
+  model_cfg:
+    motion_backend: smpl
+    body_model: smplx
+    noisy_2d_obs: false
+    perframe_condition_exists: false
+    train2d_mask_invis_obs: false
+    mask_occluded_imgfeats: false
+    use_cond_exists_as_input: false
+    normalize_cam_angvel: false
+    text_encoder:
+      load_llm: false
+      llm_version: t5-3b
+      max_text_len: 150
+
+    condition_mask:
+      mask_text_prob:
+        diffusion: 0.0
+      mask_img_prob: 0.0
+      mask_cam_prob: 0.0
+      mask_f_imgseq_prob: 0.0
+      reuse_regression_mask: false
+      regression_no_img_mask: false
+    music_mask_prob: 0.0
+    audio_mask_prob: 0.0
+
+network:
+  model_cfg:
+    regression_only: false
+    denoiser:
+      args: ${pipeline.args}
+      encode_text: true
+      encoded_text_dim: 1024
+      text_mask_prob: 0.1
+      music_mask_prob: 0.0
+      speech_mask_prob: 0.0
+      text_encoder_cfg:
+        mode: all
+        cross_attn_type: mha
+
+pipeline:
+  args:
+    extract_features: false
+    regression_only: false
+
+data:
+  shard_aware_sampling:
+    enabled: true
+    seed: 20260909
+    shuffle: true
+  collate_cfg:
+    default_seq_feature_dim:
+      text_embed: [150, 1024]
+      text_attention_mask: [150]
+  loader_opts:
+    train:
+      # Lightning batch_size 是每卡 micro-batch；64 x 8 = 全局 batch 512。
+      batch_size: 64
+      num_workers: 6
+    val:
+      batch_size: 1
+      num_workers: 1
+
+pl_trainer:
+  devices: 8
+  precision: bf16-mixed
+  accumulate_grad_batches: 1
+  log_every_n_steps: 10
+  gradient_clip_val: 0.5
+  max_epochs: null
+  check_val_every_n_epoch: null
+  val_check_interval: 5000
+  max_steps: 300000
+
+logger:
+  _target_: pytorch_lightning.loggers.WandbLogger
+  project: gem
+  save_dir: /tmp
+  name: ""
+  version: ""
+  resume: allow
+  dir: /tmp
+  id: null
+
+use_wandb: true

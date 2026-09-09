@@ -147,6 +147,8 @@ class GEMDiffusion(nn.Module):
         }
         if "encoded_text" in inputs:
             denoiser_kwargs["y"]["encoded_text"] = inputs["encoded_text"]
+        if "text_attention_mask" in inputs:
+            denoiser_kwargs["y"]["text_attention_mask"] = inputs["text_attention_mask"]
         if "observed_motion_3d" in inputs:
             denoiser_kwargs["observed_motion_3d"] = inputs["observed_motion_3d"]
             denoiser_kwargs["motion_mask_3d"] = inputs["motion_mask_3d"]
@@ -229,6 +231,8 @@ class GEMDiffusion(nn.Module):
         }
         if "encoded_text" in inputs:
             denoiser_kwargs["y"]["encoded_text"] = inputs["encoded_text"]
+        if "text_attention_mask" in inputs:
+            denoiser_kwargs["y"]["text_attention_mask"] = inputs["text_attention_mask"]
         if "meta" in inputs and "multi_text_data" in inputs["meta"][0]:
             denoiser_kwargs["y"]["multi_text_data"] = inputs["meta"][0]["multi_text_data"]
         if "observed_motion_3d" in inputs:

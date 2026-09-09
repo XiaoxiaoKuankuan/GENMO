@@ -1,0 +1,15 @@
+# MotionMillion 官方 val split 的固定中心裁剪健康检查集。
+# 这里只限制 Lightning 周期验证规模；官方全量指标由独立 evaluator 工具执行。
+motionmillion_text_val:
+  _target_: gem.datasets.pure_motion.motionmillion.MotionMillionDataset
+  root: inputs/MotionMillion
+  split: val
+  motion_frames: 120
+  motion_manifest_path: inputs/MotionMillion/genmo_smpl_v1/manifests/val.json
+  embedding_manifest_path: inputs/MotionMillion/t5_3b_v1_fp16/manifests/val.json
+  shard_cache_size: 2
+  random_seed: 20260909
+  source_up_axis: y
+  cam_augmentation: static
+  random_crop: false
+  limit_size: 16

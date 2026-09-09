@@ -1,0 +1,9 @@
+# MotionMillion 文本动作模型的 step 级学习率计划。
+# 前 5,000 step 线性预热到 AdamW 2e-4，随后余弦退火，300,000 step 到 2e-6。
+scheduler:
+  _target_: gem.utils.lr_scheduler.LinearWarmupCosineAnnealingLR
+  warmup_steps: 5000
+  total_steps: 300000
+  min_lr: 2e-6
+interval: step
+frequency: 1

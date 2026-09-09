@@ -135,6 +135,52 @@ def prepare_predict_text_condition(
     return caption, has_text, encoded_text
 
 
+def prepare_text_attention_mask(
+    text_embed: torch.Tensor,
+    text_attention_mask: torch.Tensor | None,
+    *,
+    has_text: torch.Tensor | None = None,
+) -> torch.Tensor:
+    """校验并补全 T5 token 有效位掩码。
+
+    新的 MotionMillion 数据会显式提供 mask；旧数据和旧 demo 没有该字段时，
+    从非零 embedding 推断。对于明确标记为无文本的兼容样本，只保留一个零
+    token 为有效位，避免 ``MultiheadAttention`` 收到整行全 padding 后产生 NaN。
+    有文本却没有任何有效 token 属于数据错误，会在进入 denoiser 前直接拒绝。
+    """
+    if text_embed.ndim != 3:
+        raise ValueError(f"text_embed must be [B,T,C], got {tuple(text_embed.shape)}")
+    batch_size, token_count = text_embed.shape[:2]
+    if text_attention_mask is None:
+        mask = text_embed.detach().abs().any(dim=-1)
+    else:
+        mask = torch.as_tensor(text_attention_mask, device=text_embed.device, dtype=torch.bool)
+        if mask.ndim == 1 and batch_size == 1:
+            mask = mask.unsqueeze(0)
+        if tuple(mask.shape) != (batch_size, token_count):
+            raise ValueError(
+                "text_attention_mask must match [B,T] of text_embed; "
+                f"got {tuple(mask.shape)} versus {(batch_size, token_count)}"
+            )
+
+    empty_rows = ~mask.any(dim=1)
+    if empty_rows.any():
+        if has_text is None:
+            raise ValueError("text_attention_mask contains an all-padding sample")
+        has_text = torch.as_tensor(has_text, device=text_embed.device, dtype=torch.bool).reshape(-1)
+        if has_text.numel() != batch_size:
+            raise ValueError(
+                f"has_text must have {batch_size} values, got {has_text.numel()}"
+            )
+        invalid = empty_rows & has_text
+        if invalid.any():
+            bad = invalid.nonzero(as_tuple=False).flatten().tolist()
+            raise ValueError(f"text samples {bad} are marked has_text=True but contain no valid token")
+        mask = mask.clone()
+        mask[empty_rows, 0] = True
+    return mask
+
+
 class GEM(pl.LightningModule):
     def __init__(
         self,
@@ -378,7 +424,7 @@ class GEM(pl.LightningModule):
             p.requires_grad = False
         return model, tokenizer
 
-    def encode_text(self, raw_text, has_text=None):
+    def encode_text(self, raw_text, has_text=None, *, return_attention_mask=False):
         # raw_text - list (batch_size length) of strings with input text prompts
         device = next(self.parameters()).device
         if self.tokenizer is None or self.text_encoder is None:
@@ -396,6 +442,16 @@ class GEM(pl.LightningModule):
             if has_text is not None:
                 no_text = ~has_text.to(device)
                 encoded_text[no_text] = 0
+            attention_mask = torch.zeros(
+                (batch_size, max_text_len), device=device, dtype=torch.bool
+            )
+            if has_text is not None:
+                attention_mask[~no_text, 0] = True
+                attention_mask[no_text, 0] = True
+            else:
+                attention_mask[:, 0] = True
+            if return_attention_mask:
+                return encoded_text, attention_mask
             return encoded_text
         with torch.no_grad():
             with torch.cuda.amp.autocast(enabled=False):
@@ -423,9 +479,39 @@ class GEM(pl.LightningModule):
                 #     nvalid_elem = attn_mask[bnum].sum().item()
                 #     encoded_text[bnum][nvalid_elem:] = 0
         if has_text is not None:
-            no_text = ~has_text
+            no_text = ~has_text.to(encoded_text.device)
             encoded_text[no_text] = 0
+            # 无文本兼容样本保留一个全零有效 token，避免全 padding 注意力。
+            attn_mask[no_text] = 0
+            attn_mask[no_text, 0] = 1
+        attention_mask = attn_mask.bool()
+        if return_attention_mask:
+            return encoded_text, attention_mask
         return encoded_text
+
+    def attach_text_condition(self, target_batch, source_batch=None):
+        """把预计算或在线 T5 条件及其 padding mask 放到目标 batch。"""
+        source_batch = target_batch if source_batch is None else source_batch
+        if not self.text_condition_enabled:
+            return
+        device = target_batch.get("device")
+        if device is None:
+            device = target_batch["target_x"].device
+        if "text_embed" in source_batch:
+            encoded_text = source_batch["text_embed"].to(device=device, dtype=torch.float32)
+            attention_mask = prepare_text_attention_mask(
+                encoded_text,
+                source_batch.get("text_attention_mask"),
+                has_text=source_batch.get("has_text"),
+            )
+        else:
+            encoded_text, attention_mask = self.encode_text(
+                source_batch["caption"],
+                source_batch.get("has_text"),
+                return_attention_mask=True,
+            )
+        target_batch["encoded_text"] = encoded_text
+        target_batch["text_attention_mask"] = attention_mask
 
     def generate_mask(self, mask_cfg, orig_mask, length):
         _cfg = mask_cfg
@@ -530,7 +616,9 @@ class GEM(pl.LightningModule):
                 self.log(
                     f"{k}",
                     v,
-                    on_step=False,
+                    # 文本 CFG 的实际丢弃比例需要逐 step 可见，其余历史指标
+                    # 继续保持只按 epoch 聚合，避免改变既有实验的日志行为。
+                    on_step=k.endswith("text_cfg_dropout_metric"),
                     on_epoch=True,
                     prog_bar=False,
                     logger=True,
@@ -540,6 +628,30 @@ class GEM(pl.LightningModule):
                 )
 
         return outputs
+
+    def on_before_optimizer_step(self, optimizer):
+        """为纯文本实验记录裁剪前的全模型 L2 梯度范数。"""
+        del optimizer
+        in_attr = self.pipeline.args.get("in_attr", None)
+        encode_text = bool(self.pipeline.denoiser3d.denoiser.encode_text)
+        if in_attr is None or len(in_attr) != 0 or not encode_text:
+            return
+        parameter_norms = [
+            parameter.grad.detach().norm(2)
+            for parameter in self.parameters()
+            if parameter.grad is not None
+        ]
+        if parameter_norms:
+            total_norm = torch.stack(parameter_norms).norm(2)
+            self.log(
+                "train/gradient_norm_2",
+                total_norm,
+                on_step=True,
+                on_epoch=False,
+                prog_bar=False,
+                logger=True,
+                sync_dist=True,
+            )
 
     def prepare_batch(self, batch, mode):
         target_x = self.endecoder.encode(batch)  # (B, L, C)
@@ -566,10 +678,7 @@ class GEM(pl.LightningModule):
         batch["device"] = batch["target_x"].device
         batch["B"], batch["L"] = B, L = batch["target_x"].shape[:2]
 
-        if self.text_condition_enabled and "text_embed" in batch:
-            batch["encoded_text"] = batch["text_embed"].cuda()
-        elif self.text_condition_enabled:
-            batch["encoded_text"] = self.encode_text(batch["caption"], batch["has_text"])
+        self.attach_text_condition(batch)
 
         # Create augmented noisy-obs : gt_j3d(coco17)
         with torch.cuda.amp.autocast(enabled=False):
@@ -931,9 +1040,17 @@ class GEM(pl.LightningModule):
                     )
                     f_empty_dict[k] = self.cond_exists_embedder[k](f_empty_dict[k])
 
-        f_cond = sum(f_cond_dict.values())
-        f_uncond = sum(f_uncond_dict.values())
-        f_empty = sum(f_empty_dict.values())
+        if f_cond_dict:
+            f_cond = sum(f_cond_dict.values())
+            f_uncond = sum(f_uncond_dict.values())
+            f_empty = sum(f_empty_dict.values())
+        else:
+            # 纯文本模型只用 cross-attention，不需要逐帧条件。显式构造同设备、
+            # 同 dtype 的零特征，避免 ``sum({}.values())`` 返回整数 0。
+            effective_length = batch["target_x"][:, :end_fr].shape[1]
+            f_cond = batch["target_x"].new_zeros((B, effective_length, self.latent_dim))
+            f_uncond = torch.zeros_like(f_cond)
+            f_empty = torch.zeros_like(f_cond)
         batch["f_cond"] = f_cond
         batch["f_uncond"] = f_uncond
         batch["f_empty"] = f_empty
@@ -965,6 +1082,10 @@ class GEM(pl.LightningModule):
             mode=mode,
             normalizer_stats=self.normalizer_stats,
         )
+        if "text_cfg_dropout_mask" in batch:
+            outputs["text_cfg_dropout_metric"] = batch[
+                "text_cfg_dropout_mask"
+            ].float().mean()
         outputs["batch_size"] = batch["B"]
         return outputs
 
@@ -1043,10 +1164,7 @@ class GEM(pl.LightningModule):
                 batch_["f_cam_angvel"] - self.cam_angvel_mean
             ) / self.cam_angvel_std
 
-        if self.text_condition_enabled and "text_embed" in batch:
-            batch_["encoded_text"] = batch["text_embed"].cuda()
-        elif self.text_condition_enabled:
-            batch_["encoded_text"] = self.encode_text(batch["caption"], batch["has_text"])
+        self.attach_text_condition(batch_, source_batch=batch)
 
         if test_mode == "infilling":
             batch["target_x"] = self.endecoder.encode(batch)  # (B, L, C)
@@ -1172,10 +1290,7 @@ class GEM(pl.LightningModule):
                 if k in batch_:
                     batch_[k] = self.normalize_attr(batch_[k], k)
 
-            if self.text_condition_enabled and "text_embed" in batch:
-                batch_["encoded_text"] = batch["text_embed"].cuda()
-            elif self.text_condition_enabled:
-                batch_["encoded_text"] = self.encode_text(batch["caption"], batch["has_text"])
+            self.attach_text_condition(batch_, source_batch=batch)
             batch_ = self.create_condition_mask(batch_, cond_mask_cfg=None, mode=None, train=False)
 
             flipped_outputs = self.pipeline.forward(
@@ -1283,6 +1398,11 @@ class GEM(pl.LightningModule):
         if self.text_condition_enabled and "text_embed" in batch:
             batch["encoded_text"] = batch["text_embed"]
             batch["caption"] = [str(data.get("caption", ""))]
+            batch["text_attention_mask"] = prepare_text_attention_mask(
+                batch["encoded_text"],
+                data.get("text_attention_mask"),
+                has_text=batch["has_text"],
+            )
         elif self.text_condition_enabled:
             caption, has_text, encoded_text = prepare_predict_text_condition(
                 data,
@@ -1294,6 +1414,11 @@ class GEM(pl.LightningModule):
             batch["caption"] = caption
             batch["has_text"] = has_text
             batch["encoded_text"] = encoded_text
+            # ``prepare_predict_text_condition`` 保留旧签名；在线推理的 padding
+            # embedding 已被置零，因此在这里恢复等价的有效 token mask。
+            batch["text_attention_mask"] = prepare_text_attention_mask(
+                encoded_text, None, has_text=has_text
+            )
         else:
             batch["caption"] = [""]
             batch["has_text"] = torch.zeros(1, dtype=torch.bool, device=batch["device"])
@@ -1398,6 +1523,18 @@ class GEM(pl.LightningModule):
 
     # ============== Utils ================= #
     def on_save_checkpoint(self, checkpoint) -> None:
+        # 新 checkpoint 显式携带文本长度契约；旧 checkpoint 没有该字段时，
+        # 推理端按历史默认 50 token 兼容解析。
+        if self.text_condition_enabled:
+            diffusion_model = self.pipeline.denoiser3d
+            denoiser = getattr(diffusion_model, "denoiser", diffusion_model)
+            checkpoint["genmo_text_contract"] = {
+                "schema_version": 1,
+                "max_text_len": int(self.max_text_len),
+                "encoded_text_dim": int(getattr(denoiser, "encoded_text_dim", 1024)),
+                "text_only": len(self.pipeline.args.in_attr) == 0,
+                "pipeline_in_attr": list(self.pipeline.args.in_attr),
+            }
         for ig_keys in self.ignored_weights_prefix:
             for k in list(checkpoint["state_dict"].keys()):
                 if k.startswith(ig_keys):

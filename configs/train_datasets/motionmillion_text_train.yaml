@@ -1,0 +1,14 @@
+# MotionMillion 官方 train split 的 120 帧纯文本 SMPL 训练集。
+# 路径通过 inputs/MotionMillion 软链接指向服务器数据根，仓库不保存数据制品。
+motionmillion_text_train:
+  _target_: gem.datasets.pure_motion.motionmillion.MotionMillionDataset
+  root: inputs/MotionMillion
+  split: train
+  motion_frames: 120
+  motion_manifest_path: inputs/MotionMillion/genmo_smpl_v1/manifests/train.json
+  embedding_manifest_path: inputs/MotionMillion/t5_3b_v1_fp16/manifests/train.json
+  shard_cache_size: 2
+  random_seed: 20260909
+  source_up_axis: y
+  cam_augmentation: static
+  random_crop: true

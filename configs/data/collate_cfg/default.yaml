@@ -11,6 +11,7 @@ default_frame_feature_dim:
 
 default_seq_feature_dim:
   text_embed: [50, 1024]
+  text_attention_mask: [50]
 
 default_seq_feature_length_multiplier:
   audio_array: 600
@@ -23,4 +24,5 @@ default_feature_val:
   # has_audio: False
   # has_music: False
 
-default_feature_type: {}
+default_feature_type:
+  text_attention_mask: torch.bool

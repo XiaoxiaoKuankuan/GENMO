@@ -28,6 +28,10 @@
 
 GEM 是一个用于人体动作估计与生成的统一生成式框架。GEM 可接收视频、2D 关键点、文本和音频等多种条件，并通过统一模型完成多类任务，无需为每项任务设计独立的专用头。
 
+MotionMillion 单数据集 SMPL 纯文本扩散训练的下载、转换、T5、训练与评测契约见
+[MotionMillion 纯文本训练文档](docs/MOTIONMILLION_TEXT_ONLY.md)。该流程涉及 gated
+非商业数据，代码就绪不代表已获准下载或启动训练。
+
 > 如需包含手部和面部的全身动作估计，请参阅 [GEM-X](https://github.com/NVlabs/GEM-X)。
 
 ---

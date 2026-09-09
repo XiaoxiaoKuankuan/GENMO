@@ -262,9 +262,37 @@ class NetworkEncoderRoPE(nn.Module):
 
         if self.encode_text and "encoded_text" in y and len(self.text_encode_layer_idx) > 0:
             enc_text = y["encoded_text"].clone()
-            if self.training and self.text_mask_prob > 0:
-                mask = torch.rand((B,), device=x.device) < self.text_mask_prob
-                enc_text = enc_text * (1 - mask[:, None, None].float())
+            text_attention_mask = y.get("text_attention_mask")
+            if text_attention_mask is None:
+                # 旧 checkpoint/调用方没有 mask 时保持历史行为：所有位置可见。
+                text_attention_mask = torch.ones(
+                    enc_text.shape[:2], device=enc_text.device, dtype=torch.bool
+                )
+            else:
+                text_attention_mask = text_attention_mask.to(
+                    device=enc_text.device, dtype=torch.bool
+                )
+                if tuple(text_attention_mask.shape) != tuple(enc_text.shape[:2]):
+                    raise ValueError(
+                        "text_attention_mask must match encoded_text [B,T]; "
+                        f"got {tuple(text_attention_mask.shape)} and {tuple(enc_text.shape[:2])}"
+                    )
+                if (~text_attention_mask.any(dim=1)).any():
+                    raise ValueError("text_attention_mask contains an all-padding sample")
+            if self.training:
+                # CFG 文本丢弃只在这里执行一次。把真实逐样本 mask 回写到本批次，
+                # 供 Lightning 记录实测比例；这比仅记录配置中的 0.1 更能发现
+                # 双重 dropout、配置未生效或随机逻辑偏差。
+                text_cfg_dropout_mask = torch.zeros(B, device=x.device, dtype=torch.bool)
+                if self.text_mask_prob > 0:
+                    text_cfg_dropout_mask = (
+                        torch.rand((B,), device=x.device) < self.text_mask_prob
+                    )
+                    enc_text = enc_text * (
+                        1 - text_cfg_dropout_mask[:, None, None].float()
+                    )
+                if inputs is not None:
+                    inputs["text_cfg_dropout_mask"] = text_cfg_dropout_mask.detach()
             if rm_text_flag is not None:
                 enc_text = enc_text * (1 - rm_text_flag[:, None, None].float())
             emb_text = self.embed_text(enc_text)
@@ -324,6 +352,7 @@ class NetworkEncoderRoPE(nn.Module):
                     emb_text,
                     attn_mask=attnmask,
                     tgt_key_padding_mask=pmask,
+                    memory_key_padding_mask=~text_attention_mask,
                     multi_text_data=multi_text_data,
                     motion_text_pos_enc=self.motion_text_pos_enc,
                 )

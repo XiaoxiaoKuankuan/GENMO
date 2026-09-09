@@ -348,6 +348,8 @@ def load_model(
     load_text_encoder: bool = False,
     *,
     defer_diffusion_init: bool = False,
+    text_max_len_override: int | None = None,
+    exp_name_override: str = "gem_smpl",
 ):
     """Load the GEM model with Hydra config composition.
 
@@ -356,6 +358,8 @@ def load_model(
         load_text_encoder: if True, load T5 text encoder for text-conditioned generation
         defer_diffusion_init: if True, let a resident caller configure and initialize
             the inference diffusion exactly once after model construction
+        text_max_len_override: checkpoint 声明的 T5 token 长度；旧模型保持默认 50
+        exp_name_override: checkpoint 对应实验结构；旧 checkpoint 默认完整 gem_smpl
 
     Returns the model (on CUDA, eval mode).
     """
@@ -369,12 +373,18 @@ def load_model(
     config_dir = str(_REPO_ROOT / "configs")
 
     overrides = [
-        "exp=gem_smpl",
+        f"exp={exp_name_override}",
         "ckpt_path=null",
         "video_name=demo",
     ]
     if load_text_encoder:
         overrides.append("model.model_cfg.text_encoder.load_llm=true")
+    if text_max_len_override is not None:
+        if int(text_max_len_override) <= 0:
+            raise ValueError("text_max_len_override must be positive")
+        overrides.append(
+            f"model.model_cfg.text_encoder.max_text_len={int(text_max_len_override)}"
+        )
     if defer_diffusion_init:
         overrides.append("+network.defer_diffusion_init=true")
 
