@@ -50,6 +50,7 @@ from tools.data.motionmillion.common import (
     smpl_to_272,
 )
 from tools.data.motionmillion.download_motionmillion import (
+    _matches_stage,
     _remote_file_row,
     _reuse_verified_progress,
 )
@@ -96,6 +97,8 @@ def test_download_inventory_ignores_huggingface_repo_folders() -> None:
         "remote_blob_id": "fixture-blob-id",
         "lfs_sha256": None,
     }
+    assert _matches_stage("assets/motionmillion_teaser.png", "metadata") is False
+    assert _matches_stage("assets/motionmillion_teaser.png", "full") is True
 
 
 def test_download_resume_reuses_only_identical_verified_prefix(tmp_path: Path) -> None:

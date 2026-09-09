@@ -47,7 +47,8 @@ METADATA_PATTERNS = [
     "data_process/**",
     ".gitattributes",
 ]
-FULL_PATTERNS = [*METADATA_PATTERNS, "motion_272rpr/**"]
+FULL_STATIC_PATTERNS = [*METADATA_PATTERNS, "assets/**"]
+FULL_PATTERNS = [*FULL_STATIC_PATTERNS, "motion_272rpr/**"]
 
 
 def _remote_file_row(entry: Any) -> dict[str, Any] | None:
@@ -83,7 +84,7 @@ def _matches_stage(path: str, stage: str) -> bool:
         return True
     if path.startswith("mean_std/") or path.startswith("data_process/"):
         return True
-    return stage == "full" and path.startswith("motion_272rpr/")
+    return stage == "full" and path.startswith(("assets/", "motion_272rpr/"))
 
 
 def _check_free_space(path: Path, minimum_tib: float) -> dict[str, int]:
@@ -285,7 +286,9 @@ def download_dataset(args: argparse.Namespace) -> dict[str, Any]:
             repo_type="dataset",
             revision=resolved_revision,
             local_dir=output_root,
-            allow_patterns=METADATA_PATTERNS,
+            allow_patterns=(
+                METADATA_PATTERNS if args.stage == "metadata" else FULL_STATIC_PATTERNS
+            ),
         )
         local_root = Path(snapshot_path).resolve()
         if args.stage == "full":

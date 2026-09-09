@@ -136,7 +136,8 @@ pilot 单卡 forward/backward、DataLoader 吞吐和显存检查属于独立运�
 ## 4. 阶段 C：全量 release
 
 不设置 `--motion-pattern` 即逐归档恢复下载。每个文件完成后立即校验远端大小、
-LFS/Xet SHA256 和 tar 完整性，并显示速度与 ETA：
+LFS/Xet SHA256 和 tar 完整性，并显示速度与 ETA。full 阶段同时包含官方 `assets/**`，
+使本地文件集合与该 revision 的完整仓库文件树一致：
 
 ```bash
 python tools/data/motionmillion/download_motionmillion.py \
