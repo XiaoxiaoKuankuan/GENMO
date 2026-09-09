@@ -117,8 +117,6 @@ def compact_caption_embeddings(
             if valid <= 0 or valid > MAX_TEXT_TOKENS:
                 raise MotionMillionError(f"caption 有效 token 数非法: {valid}")
             selected = embeddings[index, :valid].detach().cpu().to(torch.float16).contiguous()
-            if not torch.isfinite(selected).all():
-                raise MotionMillionError("FP16 转换产生 NaN 或 Inf")
             compact.append(selected)
             offsets.append(offsets[-1] + valid)
             raw_length = int(raw_lengths[index])
@@ -127,12 +125,62 @@ def compact_caption_embeddings(
             counters["raw_tokens"] += raw_length
             if raw_length > MAX_TEXT_TOKENS:
                 counters["truncated_captions"] += 1
+    packed = torch.cat(compact, dim=0).contiguous()
+    if not torch.isfinite(packed).all():
+        raise MotionMillionError("FP16 转换产生 NaN 或 Inf")
     result = {
-        "embeddings": torch.cat(compact, dim=0).contiguous(),
+        "embeddings": packed,
         "offsets": torch.tensor(offsets, dtype=torch.int64),
     }
     validate_embedding_record(result, caption_count=len(captions))
     return result, {key: int(value) for key, value in counters.items()}
+
+
+def compact_motion_caption_embeddings(
+    motion_records: Sequence[Mapping[str, Any]],
+    *,
+    encode_batch: Callable[[Sequence[str]], tuple[torch.Tensor, torch.Tensor, Sequence[int]]],
+    batch_size: int,
+) -> tuple[list[dict[str, torch.Tensor]], dict[str, int]]:
+    """把一个 motion shard 的 caption 合批编码，再按动作边界无损拆回。
+
+    MotionMillion 平均每个动作约 21 条 caption；若逐动作调用 T5，会让 64 的配置批量
+    长期只吃到约三分之一。这里保持原 motion/caption 顺序，把整个 shard 展平后按真实
+    batch size 编码，最后利用 caption token offset 恢复每个动作的紧凑格式。
+    """
+    caption_counts = [len(record["captions"]) for record in motion_records]
+    if not motion_records or any(count <= 0 for count in caption_counts):
+        raise MotionMillionError("motion shard 必须非空，且每条动作至少有一条 caption")
+    captions = [
+        str(caption)
+        for record in motion_records
+        for caption in record["captions"]
+    ]
+    packed, counters = compact_caption_embeddings(
+        captions,
+        encode_batch=encode_batch,
+        batch_size=batch_size,
+    )
+    embeddings = packed["embeddings"]
+    caption_offsets = packed["offsets"]
+    results: list[dict[str, torch.Tensor]] = []
+    caption_cursor = 0
+    for caption_count in caption_counts:
+        token_start = int(caption_offsets[caption_cursor])
+        caption_end = caption_cursor + caption_count
+        token_end = int(caption_offsets[caption_end])
+        results.append(
+            {
+                "embeddings": embeddings[token_start:token_end].contiguous(),
+                "offsets": (
+                    caption_offsets[caption_cursor : caption_end + 1] - token_start
+                ).clone(),
+            }
+        )
+        caption_cursor = caption_end
+    if caption_cursor != len(captions):
+        raise MotionMillionError("caption 合批拆分后的内部计数不一致")
+    return results, counters
 
 
 def _load_t5(
@@ -437,13 +485,13 @@ def extract_embeddings(
                 continue
 
             embedding_records: list[dict[str, Any]] = []
-            shard_counters = Counter()
-            for motion_record in motion_records:
-                compact, counters = compact_caption_embeddings(
-                    motion_record["captions"],
-                    encode_batch=encode_batch,
-                    batch_size=args.batch_size,
-                )
+            compact_records, counters = compact_motion_caption_embeddings(
+                motion_records,
+                encode_batch=encode_batch,
+                batch_size=args.batch_size,
+            )
+            shard_counters = Counter(counters)
+            for motion_record, compact in zip(motion_records, compact_records):
                 embedding_record = {
                     "motion_id": str(motion_record["motion_id"]),
                     **compact,
@@ -453,7 +501,6 @@ def extract_embeddings(
                     caption_count=len(motion_record["captions"]),
                 )
                 embedding_records.append(embedding_record)
-                shard_counters.update(counters)
             atomic_torch_save(embedding_records, output_path)
             rows = _validate_embedding_shard(output_path, motion_records)
             metadata = {

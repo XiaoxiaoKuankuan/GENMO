@@ -58,6 +58,7 @@ from tools.data.motionmillion.extract_t5_embeddings import (
     _fingerprint_model_files,
     _select_source_shards,
     compact_caption_embeddings,
+    compact_motion_caption_embeddings,
     extract_embeddings,
 )
 from tools.data.motionmillion.preflight_motionmillion import run_preflight
@@ -99,6 +100,39 @@ def test_t5_model_fingerprint_excludes_huggingface_cache_metadata(tmp_path: Path
     (cache / "download.metadata").write_text("volatile timestamp", encoding="utf-8")
     files = _fingerprint_model_files(tmp_path)
     assert [item["path"] for item in files] == ["config.json"]
+
+
+def test_t5_shard_caption_batching_preserves_motion_boundaries() -> None:
+    calls: list[list[str]] = []
+
+    def encode(captions: list[str]) -> tuple[torch.Tensor, torch.Tensor, list[int]]:
+        calls.append(list(captions))
+        values = torch.zeros(len(captions), MAX_TEXT_TOKENS, 1024)
+        mask = torch.zeros(len(captions), MAX_TEXT_TOKENS, dtype=torch.bool)
+        lengths = []
+        for index, caption in enumerate(captions):
+            length = len(caption)
+            values[index, :length] = float(ord(caption[0]))
+            mask[index, :length] = True
+            lengths.append(length)
+        return values, mask, lengths
+
+    records = [
+        {"captions": ["aa", "bbb"]},
+        {"captions": ["c", "dddd", "ee"]},
+    ]
+    compact, counters = compact_motion_caption_embeddings(
+        records,
+        encode_batch=encode,
+        batch_size=4,
+    )
+    assert calls == [["aa", "bbb", "c", "dddd"], ["ee"]]
+    assert counters == {"captions": 5, "valid_tokens": 12, "raw_tokens": 12}
+    assert compact[0]["offsets"].tolist() == [0, 2, 5]
+    assert compact[1]["offsets"].tolist() == [0, 1, 5, 7]
+    assert compact[0]["embeddings"].shape == (5, 1024)
+    assert compact[1]["embeddings"].shape == (7, 1024)
+    assert float(compact[1]["embeddings"][0, 0]) == float(ord("c"))
 
 
 def test_motionmillion_mirror_detection_covers_source_namespace() -> None:

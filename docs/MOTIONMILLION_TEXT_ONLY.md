@@ -144,6 +144,9 @@ worker 只写 `shard/meta` 和独立的 `workers/rank_NNN.json`，不会竞争�
 8 个 worker 全部成功后，必须再运行一次不带 worker 参数的单进程 `--resume`，逐 shard
 核验 motion/embedding SHA256、caption fingerprint、record 顺序并发布完整 release。
 任一 worker 失败时只恢复失败 rank，不能在 worker 未齐时把部分 manifest 用于训练。
+每个 worker 会先把一个 motion shard 的全部 caption 按原顺序展平，以真实 batch 64
+连续编码，再利用 token offset 拆回逐动作记录；该优化不改变 caption 顺序、紧凑存储
+schema 或数值，只避免平均约 21 条 caption/动作导致配置 batch 长期吃不满。
 
 渲染器固定选择 32 条并强制覆盖走跑、舞蹈、武术、地面、镜像和其他动作；类别不足
 即失败。preflight 重验 shard SHA/顺序/split，统计根高度、根速度、旋转幅度，并实际
