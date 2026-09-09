@@ -35,7 +35,10 @@ from scripts.demo.demo_smpl_text import (
     build_text_only_data,
     validate_text_generation_checkpoint,
 )
-from tools.data.motionmillion.build_motionmillion_genmo import build_dataset
+from tools.data.motionmillion.build_motionmillion_genmo import (
+    build_dataset,
+    prepare_metadata_database,
+)
 from tools.data.motionmillion.common import (
     MAX_TEXT_TOKENS,
     MotionMillionFilteredError,
@@ -209,6 +212,9 @@ def test_mirror_base_id_covers_official_style_variants() -> None:
     assert mirror_base_id("MotionGV/M000123") == base
     assert mirror_base_id("MotionGV/mirror_000123") == base
     assert mirror_base_id("MotionGV/000123_mirrored") == base
+    assert mirror_base_id("MotionUnion/idea/Thumbs_Up") != mirror_base_id(
+        "MotionUnion/idea/Thumbs_up"
+    )
 
 
 def test_compact_embedding_keeps_only_valid_fp16_tokens() -> None:
@@ -260,6 +266,53 @@ def _npy_bytes(value: np.ndarray) -> bytes:
     buffer = io.BytesIO()
     np.save(buffer, value, allow_pickle=False)
     return buffer.getvalue()
+
+
+def test_metadata_quarantines_cross_split_mirror_and_keeps_original_split(
+    tmp_path: Path,
+) -> None:
+    """跨 split 镜像写入排除表，canonical 原动作仍保留官方 split。"""
+    raw = tmp_path / "raw"
+    output = tmp_path / "output"
+    _write_tar(
+        raw / "split.tar.gz",
+        {
+            "split/version1/t2m_60_300/train.txt": b"MotionGV/folder0/000005\n",
+            "split/version1/t2m_60_300/val.txt": b"MotionGV/folder0/000017\n",
+            "split/version1/t2m_60_300/test.txt": b"Mirror_MotionGV/folder0/000005\n",
+        },
+    )
+    _write_tar(
+        raw / "texts.tar.gz",
+        {
+            "texts/MotionGV/folder0/000005.txt": b"walk forward\n",
+            "texts/MotionGV/folder0/000017.txt": b"turn left\n",
+            "texts/Mirror_MotionGV/folder0/000005.txt": b"walk forward mirrored\n",
+        },
+    )
+    connection, report = prepare_metadata_database(raw, output, resume=False)
+    try:
+        assert list(
+            connection.execute(
+                "SELECT motion_id, split FROM split_entries ORDER BY motion_id"
+            )
+        ) == [
+            ("MotionGV/folder0/000005", "train"),
+            ("MotionGV/folder0/000017", "val"),
+        ]
+        assert list(
+            connection.execute(
+                "SELECT motion_id, split, canonical_split FROM split_exclusions"
+            )
+        ) == [("Mirror_MotionGV/folder0/000005", "test", "train")]
+    finally:
+        connection.close()
+    exclusion = report["counts"]["mirror_cross_split_exclusions"]
+    assert exclusion["leaking_base_group_count"] == 1
+    assert exclusion["excluded_entry_count"] == 1
+    assert exclusion["eligible_by_split"] == {"train": 1, "val": 1, "test": 0}
+    report_path = output / "reports" / "mirror_cross_split_exclusions.jsonl"
+    assert "Mirror_MotionGV/folder0/000005" in report_path.read_text(encoding="utf-8")
 
 
 def test_tar_to_motion_embedding_shards_and_resume_closed_loop(

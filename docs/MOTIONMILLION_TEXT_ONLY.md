@@ -60,7 +60,10 @@ python tools/data/motionmillion/build_motionmillion_genmo.py \
 
 下载 manifest 记录完整远端文件树的文件数和压缩大小；metadata audit 记录
 `version1/t2m_60_300` 的 train/val/test 数量、caption 数、空行、重复文本、每动作
-caption 范围、缺文本数和镜像 base ID 泄漏。空间门为至少 1.5 TiB；200 万条全
+caption 范围、缺文本数和镜像 base ID 泄漏。若官方把原动作及其镜像分到不同 split，
+以非镜像原动作的官方 split 为 canonical：保留该 split 中的原动作/变体，把其他 split
+变体写入 `mirror_cross_split_exclusions.jsonl` 并排除，不重分配到别的 split。空间门为
+至少 1.5 TiB；200 万条全
 padding FP16 embedding 理论上约 572 GiB，正式格式只保存有效 token + offset。
 
 ## 3. 阶段 B：MotionGV 10,000 条 pilot

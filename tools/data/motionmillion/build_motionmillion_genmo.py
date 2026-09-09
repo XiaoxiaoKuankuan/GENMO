@@ -62,7 +62,7 @@ from tools.data.motionmillion.common import (  # noqa: E402
 
 DEFAULT_RAW_ROOT = Path("/data0/user/liwei/datasets/MotionMillion/raw_hf")
 DEFAULT_OUTPUT_ROOT = Path("/data0/user/liwei/datasets/MotionMillion/genmo_smpl_v1")
-BUILD_VERSION = 1
+BUILD_VERSION = 2
 
 
 def _source_subset(archive_relative: str, motion_id: str) -> str:
@@ -129,6 +129,13 @@ def _create_metadata_database(path: Path) -> sqlite3.Connection:
         );
         CREATE INDEX IF NOT EXISTS split_mirror_idx
             ON split_entries(mirror_base_id);
+        CREATE TABLE IF NOT EXISTS split_exclusions (
+            motion_id TEXT PRIMARY KEY,
+            split TEXT NOT NULL,
+            mirror_base_id TEXT NOT NULL,
+            canonical_split TEXT NOT NULL,
+            reason TEXT NOT NULL
+        );
         CREATE TABLE IF NOT EXISTS text_entries (
             motion_id TEXT PRIMARY KEY,
             captions_json TEXT NOT NULL,
@@ -292,6 +299,114 @@ def _index_texts(connection: sqlite3.Connection, texts_tar: Path) -> dict[str, i
     return {key: int(value) for key, value in sorted(counts.items())}
 
 
+def _quarantine_cross_split_mirrors(
+    connection: sqlite3.Connection,
+    output_root: Path,
+) -> dict[str, Any]:
+    """以非镜像原动作的官方 split 为准，隔离落到其他 split 的镜像条目。
+
+    MotionMillion 官方 ``t2m_60_300`` 会把部分原动作及镜像增强随机分到不同 split。
+    为同时保持原动作的官方 split 和零镜像泄漏，本分支不重分配条目：保留 canonical
+    原动作所在 split 及同 split 变体，把其他 split 变体写入可审计排除表后移出训练
+    eligibility。若一个 base 找不到唯一原动作 split，则拒绝猜测并阻断构建。
+    """
+    leaking_bases = [
+        str(row[0])
+        for row in connection.execute(
+            """
+            SELECT mirror_base_id
+            FROM split_entries
+            GROUP BY mirror_base_id
+            HAVING COUNT(DISTINCT split) > 1
+            ORDER BY mirror_base_id
+            """
+        )
+    ]
+    excluded_by_split = Counter()
+    retained_in_leaking_groups = Counter()
+    for base_id in leaking_bases:
+        rows = [
+            (str(row[0]), str(row[1]))
+            for row in connection.execute(
+                """
+                SELECT motion_id, split FROM split_entries
+                WHERE mirror_base_id = ? ORDER BY split, motion_id
+                """,
+                (base_id,),
+            )
+        ]
+        canonical_splits = {
+            split for motion_id, split in rows if motion_id == base_id
+        }
+        if len(canonical_splits) != 1:
+            raise MotionMillionError(
+                "镜像跨 split 组无法确定唯一非镜像原动作 split，拒绝猜测: "
+                f"base_id={base_id!r}, canonical_splits={sorted(canonical_splits)}, "
+                f"rows={rows}"
+            )
+        canonical_split = next(iter(canonical_splits))
+        for motion_id, split in rows:
+            if split == canonical_split:
+                retained_in_leaking_groups[split] += 1
+                continue
+            connection.execute(
+                """
+                INSERT INTO split_exclusions
+                (motion_id, split, mirror_base_id, canonical_split, reason)
+                VALUES (?, ?, ?, ?, 'mirror_cross_split')
+                """,
+                (motion_id, split, base_id, canonical_split),
+            )
+            excluded_by_split[split] += 1
+    connection.execute(
+        """
+        DELETE FROM split_entries
+        WHERE motion_id IN (SELECT motion_id FROM split_exclusions)
+        """
+    )
+    connection.commit()
+    report_path = output_root / "reports" / "mirror_cross_split_exclusions.jsonl"
+    atomic_write_jsonl(
+        report_path,
+        (
+            {
+                "motion_id": row[0],
+                "official_split": row[1],
+                "mirror_base_id": row[2],
+                "canonical_split": row[3],
+                "reason": row[4],
+            }
+            for row in connection.execute(
+                """
+                SELECT motion_id, split, mirror_base_id, canonical_split, reason
+                FROM split_exclusions ORDER BY mirror_base_id, split, motion_id
+                """
+            )
+        ),
+    )
+    eligible_by_split = {
+        split: int(
+            connection.execute(
+                "SELECT COUNT(*) FROM split_entries WHERE split = ?", (split,)
+            ).fetchone()[0]
+        )
+        for split in SPLITS
+    }
+    return {
+        "policy": "keep_canonical_original_split_and_quarantine_cross_split_variants",
+        "leaking_base_group_count": len(leaking_bases),
+        "excluded_entry_count": int(sum(excluded_by_split.values())),
+        "excluded_by_official_split": {
+            split: int(excluded_by_split[split]) for split in SPLITS
+        },
+        "retained_in_leaking_groups_by_split": {
+            split: int(retained_in_leaking_groups[split]) for split in SPLITS
+        },
+        "eligible_by_split": eligible_by_split,
+        "report_path": str(report_path),
+    }
+
+
 def prepare_metadata_database(
     raw_root: Path,
     output_root: Path,
@@ -326,6 +441,9 @@ def prepare_metadata_database(
     connection = _create_metadata_database(database_path)
     try:
         split_counts = _index_splits(connection, split_tar)
+        mirror_exclusions = _quarantine_cross_split_mirrors(
+            connection, output_root
+        )
         text_counts = _index_texts(connection, texts_tar)
         missing_text = int(
             connection.execute(
@@ -336,7 +454,7 @@ def prepare_metadata_database(
                 """
             ).fetchone()[0]
         )
-        mirror_leakage = list(
+        remaining_mirror_leakage = list(
             connection.execute(
                 """
                 SELECT mirror_base_id, GROUP_CONCAT(DISTINCT split), COUNT(*)
@@ -347,12 +465,15 @@ def prepare_metadata_database(
                 """
             )
         )
-        if mirror_leakage:
+        if remaining_mirror_leakage:
             raise MotionMillionError(
-                f"检测到原动作/镜像 base ID 跨 split，前 100 条: {mirror_leakage}"
+                "镜像隔离后仍检测到 base ID 跨 split，前 100 条: "
+                f"{remaining_mirror_leakage}"
             )
         counts = {
-            "split": split_counts,
+            "official_split": split_counts,
+            "eligible_split": mirror_exclusions["eligible_by_split"],
+            "mirror_cross_split_exclusions": mirror_exclusions,
             "text": text_counts,
             "split_entries_without_text": missing_text,
         }

@@ -219,14 +219,16 @@ _MIRROR_SUFFIX = re.compile(r"(?:[_-](?:mirror|mirrored))$", re.IGNORECASE)
 
 
 def mirror_base_id(motion_id: str) -> str:
-    """生成仅用于 split 泄漏审计的镜像归一化 ID。"""
+    """生成仅用于 split 泄漏审计、但保留路径大小写的镜像归一化 ID。"""
     parts = []
     for part in motion_id.replace("\\", "/").split("/"):
         value = _MIRROR_PREFIX.sub("", part)
         value = _MIRROR_SUFFIX.sub("", value)
         if value.lower() not in {"mirror", "mirrored"}:
             parts.append(value)
-    return "/".join(parts).lower()
+    # tar/Unix 路径大小写敏感；官方数据中确实存在只在 Up/up 上不同的两个 ID。
+    # 全量 lower 会把它们误合并为同一动作，进而制造虚假的跨 split 泄漏。
+    return "/".join(parts)
 
 
 def _as_float_motion(value: np.ndarray | torch.Tensor) -> torch.Tensor:
