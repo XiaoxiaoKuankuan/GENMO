@@ -62,7 +62,7 @@ from tools.data.motionmillion.common import (  # noqa: E402
 
 DEFAULT_RAW_ROOT = Path("/data0/user/liwei/datasets/MotionMillion/raw_hf")
 DEFAULT_OUTPUT_ROOT = Path("/data0/user/liwei/datasets/MotionMillion/genmo_smpl_v1")
-BUILD_VERSION = 2
+BUILD_VERSION = 3
 
 
 def _source_subset(archive_relative: str, motion_id: str) -> str:
@@ -656,6 +656,7 @@ def _write_split_release(
     sample_count = total_records
     sample_index = np.empty(sample_count, dtype=SAMPLE_INDEX_DTYPE)
     cursor = 0
+    total_frames = 0
     for shard_id, item in enumerate(shard_metadata):
         if int(item["shard_id"]) != shard_id:
             raise MotionMillionError(f"{split} shard_id 不连续")
@@ -667,6 +668,7 @@ def _write_split_release(
                 frames,
                 0,
             )
+            total_frames += frames
             cursor += 1
     if cursor != sample_count:
         raise MotionMillionError("sample index 内部计数不一致")
@@ -682,6 +684,11 @@ def _write_split_release(
         "motion_frames": motion_frames,
         "record_count": total_records,
         "sample_count": sample_count,
+        # 时长只统计真正通过转换、校验并写入 shard 的原始有效帧；不会把
+        # 60--119 帧样本训练时补齐到 120 的 padding 计入数据集时长。
+        "total_frames": total_frames,
+        "duration_seconds": total_frames / OFFICIAL_FPS,
+        "duration_hours": total_frames / OFFICIAL_FPS / 3600.0,
         "sample_index_path": index_relative.as_posix(),
         "sample_index_dtype": SAMPLE_INDEX_DTYPE.descr,
         "shards": [
@@ -1160,9 +1167,17 @@ def build_dataset(args: argparse.Namespace) -> dict[str, Any]:
                     "path": f"manifests/{split}.json",
                     "record_count": manifests[split]["record_count"],
                     "sample_count": manifests[split]["sample_count"],
+                    "total_frames": manifests[split]["total_frames"],
+                    "duration_seconds": manifests[split]["duration_seconds"],
+                    "duration_hours": manifests[split]["duration_hours"],
                 }
                 for split in SPLITS
             },
+            "total_frames": sum(manifests[split]["total_frames"] for split in SPLITS),
+            "duration_seconds": sum(
+                manifests[split]["duration_seconds"] for split in SPLITS
+            ),
+            "duration_hours": sum(manifests[split]["duration_hours"] for split in SPLITS),
             "accepted_this_run": accepted_this_run,
             "resumed_record_count": len(built_ids),
             "unavailable_by_release_count": unavailable_count,

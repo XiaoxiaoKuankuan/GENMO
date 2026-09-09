@@ -437,6 +437,11 @@ def test_tar_to_motion_embedding_shards_and_resume_closed_loop(
     )
     release = build_dataset(build_args)
     assert release["manifests"]["train"]["record_count"] == 1
+    assert release["manifests"]["train"]["total_frames"] == 60
+    assert release["manifests"]["train"]["duration_seconds"] == pytest.approx(2.0)
+    assert release["total_frames"] == 180
+    assert release["duration_seconds"] == pytest.approx(6.0)
+    assert release["duration_hours"] == pytest.approx(6.0 / 3600.0)
     assert release["unavailable_by_release_count"] == 0
     build_args.resume = True
     resumed = build_dataset(build_args)

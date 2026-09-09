@@ -100,6 +100,9 @@ heading 按 `R_rel @ R_previous` 累积；root rotation 为
 累加；translation Y 取局部 root 高度。输出固定 30 FPS、Y-up、米制
 `pose[F,66]`、`trans[F,3]` 和共享零 `beta[10]`。小于 60、大于 300、shape 错误、
 NaN/Inf 或旋转退化都持久化到拒绝表，不静默跳过，也不误记为未发布。
+每个 split manifest 和顶层 `dataset_release.json` 还会累加实际接收动作的
+`total_frames / duration_seconds / duration_hours`；该时长按原始有效帧和 30 FPS
+计算，不把短动作训练时补齐到 120 帧的 padding 计入统计。
 pilot 因 `archive_pattern/only_split/limit` 尚未观察到的 ID 写入
 `unresolved_by_scope.jsonl`；只有 metadata 已证明缺文本的记录会进入
 `unavailable_by_release.jsonl`，不能把 pilot 范围外数据误报为官方缺失。
