@@ -388,16 +388,19 @@ def test_tar_to_motion_embedding_shards_and_resume_closed_loop(
     text_members = {}
     motion_members = {}
     ids = {
-        "train": "MotionGV/000001",
-        "val": "MotionGV/000002",
-        "test": "MotionGV/000003",
+        "train": "MotionGV/folder0/000001",
+        "val": "MotionGV/folder0/000002",
+        "test": "MotionGV/folder0/000003",
     }
     for split, motion_id in ids.items():
         split_members[f"split/version1/t2m_60_300/{split}.txt"] = (
             motion_id + "\n"
         ).encode()
         text_members[f"texts/{motion_id}.txt"] = f"caption for {split}\n".encode()
-        motion_members[f"motion_data/vector_272/{motion_id}.npy"] = _npy_bytes(
+        # 官方 MotionGV 分卷内部没有 ``MotionGV/`` 顶层命名空间；构建器必须
+        # 根据归档路径补回此前缀，才能与 split/text ID 唯一闭环。
+        member_id = motion_id.removeprefix("MotionGV/")
+        motion_members[f"{member_id}.npy"] = _npy_bytes(
             _identity_motion(60).numpy()
         )
     _write_tar(raw / "split.tar.gz", split_members)

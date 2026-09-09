@@ -74,6 +74,31 @@ def _source_subset(archive_relative: str, motion_id: str) -> str:
     return "unknown"
 
 
+def _archive_identifier_candidates(
+    member_name: str,
+    archive_relative: str,
+) -> list[str]:
+    """补回官方分卷 tar 省略的顶层来源命名空间。
+
+    MotionGV、MotionLLAMA、MotionUnion 及其镜像归档位于
+    ``motion_272rpr/<来源>/<分卷>.tar.gz``，但 tar member 通常从 ``folder0``、
+    ``finedance`` 等下一层开始；官方 split ID 则保留 ``MotionGV/`` 等来源前缀。
+    根目录下的 PhantomDance 归档已经把数据集名写在 member 中，不需要补前缀。
+    所有候选最终仍必须唯一命中 split/text SQLite，不能凭路径推断直接接收。
+    """
+    candidates = identifier_candidates(member_name)
+    archive_parts = Path(archive_relative).parts
+    if len(archive_parts) < 3 or archive_parts[0] != "motion_272rpr":
+        return candidates
+    namespace = archive_parts[1]
+    prefixed = [
+        f"{namespace}/{candidate}"
+        for candidate in candidates
+        if candidate != namespace and not candidate.startswith(f"{namespace}/")
+    ]
+    return list(dict.fromkeys([*candidates, *prefixed]))
+
+
 def _open_tar(path: Path) -> tarfile.TarFile:
     try:
         return tarfile.open(path, mode="r:*")
@@ -859,7 +884,7 @@ def build_dataset(args: argparse.Namespace) -> dict[str, Any]:
                     try:
                         resolved = _resolve_candidate(
                             connection,
-                            identifier_candidates(member.name),
+                            _archive_identifier_candidates(member.name, archive_relative),
                             require_text=True,
                         )
                         if resolved is None:

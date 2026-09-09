@@ -103,6 +103,10 @@ NaN/Inf 或旋转退化都持久化到拒绝表，不静默跳过，也不误记
 每个 split manifest 和顶层 `dataset_release.json` 还会累加实际接收动作的
 `total_frames / duration_seconds / duration_hours`；该时长按原始有效帧和 30 FPS
 计算，不把短动作训练时补齐到 120 帧的 padding 计入统计。
+MotionGV、MotionLLAMA、MotionUnion 及镜像分卷的 tar member 会省略来源顶层目录；
+转换器依据受控归档相对路径补回该命名空间，再要求候选唯一命中官方 split 与文本索引。
+该规则不适用于已在 member 中携带完整名称的根目录 PhantomDance 归档，也不会仅按
+basename 猜测并接收动作。
 pilot 因 `archive_pattern/only_split/limit` 尚未观察到的 ID 写入
 `unresolved_by_scope.jsonl`；只有 metadata 已证明缺文本的记录会进入
 `unavailable_by_release.jsonl`，不能把 pilot 范围外数据误报为官方缺失。
