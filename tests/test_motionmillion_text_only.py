@@ -45,6 +45,7 @@ from tools.data.motionmillion.common import (
     recover_smpl_from_272,
     smpl_to_272,
 )
+from tools.data.motionmillion.download_motionmillion import _remote_file_row
 from tools.data.motionmillion.extract_t5_embeddings import (
     compact_caption_embeddings,
     extract_embeddings,
@@ -61,6 +62,33 @@ from tools.eval.run_motionmillion_official_metrics import (
 from tools.eval.summarize_motionmillion_metrics import choose_candidate, summarize
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
+
+
+def test_download_inventory_ignores_huggingface_repo_folders() -> None:
+    """新版 huggingface_hub 的 type=None 目录不能进入文件校验清单。"""
+    folder = SimpleNamespace(
+        path="data_process/AIST",
+        type=None,
+        tree_id="fixture-tree-id",
+        blob_id=None,
+        size=None,
+        lfs=None,
+    )
+    file_entry = SimpleNamespace(
+        path="data_process/AIST/README.md",
+        type=None,
+        tree_id=None,
+        blob_id="fixture-blob-id",
+        size=3264,
+        lfs=None,
+    )
+    assert _remote_file_row(folder) is None
+    assert _remote_file_row(file_entry) == {
+        "path": "data_process/AIST/README.md",
+        "remote_size_bytes": 3264,
+        "remote_blob_id": "fixture-blob-id",
+        "lfs_sha256": None,
+    }
 
 
 def _identity_motion(frames: int = 60) -> torch.Tensor:

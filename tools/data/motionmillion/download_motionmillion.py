@@ -54,7 +54,15 @@ def _remote_file_row(entry: Any) -> dict[str, Any] | None:
     """把 huggingface_hub 的 repo tree entry 规整为稳定 JSON 行。"""
     path = getattr(entry, "path", None)
     entry_type = getattr(entry, "type", None)
-    if not isinstance(path, str) or entry_type not in {"file", None}:
+    # huggingface_hub 1.25 的 RepoFile/RepoFolder 都不再提供 ``type``；目录
+    # 通过 ``tree_id`` 标识，文件则通过 ``blob_id`` 标识。不能继续把 type=None
+    # 一概视为文件，否则诸如 ``data_process/AIST`` 的目录会进入下载校验清单。
+    tree_id = getattr(entry, "tree_id", None)
+    if (
+        not isinstance(path, str)
+        or entry_type not in {"file", None}
+        or tree_id is not None
+    ):
         return None
     size = getattr(entry, "size", None)
     lfs = getattr(entry, "lfs", None)
