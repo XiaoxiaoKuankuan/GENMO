@@ -316,14 +316,21 @@ python tools/eval/build_motionmillion_review.py \
 
 分支代码覆盖下载、metadata audit、流式转换、紧凑 T5、Dataset、sampler、空条件、
 文本 mask、150-token checkpoint、配置、预检、272D 适配、官方 evaluator
-物化/指纹/单轮指标和人工页面。由于本轮没有
-gated 许可确认，也没有 GPU 运行授权，以下必须保持“待核验”：
+物化/指纹/单轮指标和人工页面。截至 2026-09-09，用户已完成 gated 许可，服务器 1
+已按不可变 revision `007582c4fc9637a3f36e548a67be1ef6eaf881a5` 将官方仓库
+77/77 文件、`307655361973` 字节完整下载到
+`/data0/user/liwei/datasets/MotionMillion/raw_hf`。60 个动作归档共
+`306985351080` 字节；77 个文件均有 SHA256，65 个 LFS/Xet SHA 全部匹配，62 个 tar
+共遍历 2932197 个成员，缺失和大小不一致均为 0。metadata 审计已完成，原始官方 split
+为 train/val/test=`700903/44044/131819`，镜像跨 split 隔离后 eligibility 为
+`624554/21211/70824`，其中 3 条缺文本。
 
-- 真实 metadata 的 ID/文件树统计。
+以下后续运行项仍保持“待核验”：
+
 - MotionGV 10,000 条 pilot、32 条视频与 1,000 条真实统计。
 - 在线 T5 快照和真实 FP16 cosine parity。
 - 单卡 forward/backward、吞吐与八卡 100-step smoke。
-- 308 GB 全量 release、300k 训练。
+- 272D→SMPL 全量转换、T5-3B 全量特征和 300k 训练。
 - 官方 val 20-seed 指标和 126 条真实视频评分。
 
 这些运行项完成后，必须记录绝对路径、revision/SHA、真实数量、拒绝原因、命令、环境、
