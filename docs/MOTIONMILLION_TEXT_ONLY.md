@@ -63,8 +63,11 @@ python tools/data/motionmillion/build_motionmillion_genmo.py \
 caption 范围、缺文本数和镜像 base ID 泄漏。若官方把原动作及其镜像分到不同 split，
 以非镜像原动作的官方 split 为 canonical：保留该 split 中的原动作/变体，把其他 split
 变体写入 `mirror_cross_split_exclusions.jsonl` 并排除，不重分配到别的 split。空间门为
-至少 1.5 TiB；200 万条全
-padding FP16 embedding 理论上约 572 GiB，正式格式只保存有效 token + offset。
+至少 1.5 TiB。约 200 万动作、每动作只取一条 caption 的 150-token 全 padding FP16
+参考值约为 572 GiB，但不能把它误当成全部 caption 的上限；本 release 隔离后有
+15,041,259 条 caption，全部保存 padding 的理论上限约 4.20 TiB。10,000 条 pilot 实测
+每条 caption 平均 32.166 个有效 token，紧凑格式按 caption 数线性外推约 923.4 GiB；
+正式格式只保存有效 token + offset，全量完成后以实际 shard 总大小为准。
 
 ## 3. 阶段 B：MotionGV 10,000 条 pilot
 
@@ -112,6 +115,8 @@ pilot 因 `archive_pattern/only_split/limit` 尚未观察到的 ID 写入
 `unavailable_by_release.jsonl`，不能把 pilot 范围外数据误报为官方缺失。
 
 T5 pilot 使用不可变模型 revision；工具会对快照内所有模型/分词器文件计算 SHA256：
+Hugging Face `local-dir` 自动生成的 `.cache` 下载时间戳不属于模型身份并明确排除，避免
+同一官方 commit 因重新下载时间不同而产生伪 fingerprint 漂移。
 
 ```bash
 python tools/data/motionmillion/extract_t5_embeddings.py \
@@ -131,6 +136,14 @@ python tools/data/motionmillion/render_motionmillion_pilot.py \
   --output-root /data0/user/liwei/datasets/MotionMillion/work/pilot_render_32 \
   --device cuda:0
 ```
+
+全量 T5 建议先用单进程 `--limit-shards 1` 建立三个 split 的共同 contract 和首批
+shard，再启动 8 个进程，各自设置 `CUDA_VISIBLE_DEVICES=<rank>`、
+`--device cuda:0 --batch-size 64 --resume --worker-rank <rank> --worker-world-size 8`。
+worker 只写 `shard/meta` 和独立的 `workers/rank_NNN.json`，不会竞争最终 manifest；
+8 个 worker 全部成功后，必须再运行一次不带 worker 参数的单进程 `--resume`，逐 shard
+核验 motion/embedding SHA256、caption fingerprint、record 顺序并发布完整 release。
+任一 worker 失败时只恢复失败 rank，不能在 worker 未齐时把部分 manifest 用于训练。
 
 渲染器固定选择 32 条并强制覆盖走跑、舞蹈、武术、地面、镜像和其他动作；类别不足
 即失败。preflight 重验 shard SHA/顺序/split，统计根高度、根速度、旋转幅度，并实际

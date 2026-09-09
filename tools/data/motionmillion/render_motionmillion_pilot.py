@@ -52,10 +52,14 @@ KEYWORDS = {
 
 
 def _is_mirror(motion_id: str) -> bool:
-    name = motion_id.replace("\\", "/").rsplit("/", 1)[-1].lower()
-    return name.startswith(("m_", "m-", "mirror_", "mirror-")) or (
-        len(name) > 1 and name[0] == "m" and name[1].isdigit()
-    ) or name.endswith(("_mirror", "-mirror", "_mirrored", "-mirrored"))
+    # MotionMillion 的镜像标记既可能位于来源命名空间（如
+    # ``Mirror_MotionGV/...``），也可能位于末级动作名；需要检查全部路径分量。
+    for name in motion_id.replace("\\", "/").lower().split("/"):
+        if name.startswith(("m_", "m-", "mirror_", "mirror-")) or (
+            len(name) > 1 and name[0] == "m" and name[1].isdigit()
+        ) or name.endswith(("_mirror", "-mirror", "_mirrored", "-mirrored")):
+            return True
+    return False
 
 
 def _category(record: dict[str, Any]) -> str:

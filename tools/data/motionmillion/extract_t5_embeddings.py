@@ -63,6 +63,23 @@ def _caption_fingerprint(records: Sequence[Mapping[str, Any]]) -> str:
     return digest.hexdigest()
 
 
+def _fingerprint_model_files(model_root: Path) -> list[dict[str, Any]]:
+    """指纹化实际模型文件，排除 HF local-dir 的易变下载缓存元数据。"""
+    model_files = []
+    for path in sorted(value for value in model_root.rglob("*") if value.is_file()):
+        relative_path = path.relative_to(model_root)
+        if any(part.startswith(".") for part in relative_path.parts):
+            continue
+        model_files.append(
+            {
+                "path": relative_path.as_posix(),
+                "size_bytes": path.stat().st_size,
+                "sha256": sha256_file(path),
+            }
+        )
+    return model_files
+
+
 def compact_caption_embeddings(
     captions: Sequence[str],
     *,
@@ -168,16 +185,7 @@ def _load_t5(
         raise MotionMillionError(
             f"T5 hidden dim={encoder.config.d_model}，要求 {TEXT_HIDDEN_DIM}"
         )
-    model_files = []
-    for path in sorted(value for value in model_root.rglob("*") if value.is_file()):
-        relative = path.relative_to(model_root).as_posix()
-        model_files.append(
-            {
-                "path": relative,
-                "size_bytes": path.stat().st_size,
-                "sha256": sha256_file(path),
-            }
-        )
+    model_files = _fingerprint_model_files(model_root)
     if not model_files:
         raise MotionMillionError(f"T5 模型快照没有可指纹化文件: {model_root}")
     encoder.eval().requires_grad_(False)
@@ -247,6 +255,26 @@ def _embedding_fingerprint(
     ).hexdigest()
 
 
+def _select_source_shards(
+    source_manifest: Mapping[str, Any],
+    *,
+    limit_shards: int | None,
+    worker_rank: int,
+    worker_world_size: int,
+) -> list[Mapping[str, Any]]:
+    """为多 GPU 离线提取器确定互不重叠、可复现的 source shard 集合。"""
+    selected = list(source_manifest["shards"])
+    if limit_shards is not None:
+        selected = selected[:limit_shards]
+    if worker_world_size > 1:
+        selected = [
+            item
+            for item in selected
+            if int(item["shard_id"]) % worker_world_size == worker_rank
+        ]
+    return selected
+
+
 def _validate_embedding_shard(
     path: Path,
     motion_records: Sequence[Mapping[str, Any]],
@@ -288,6 +316,13 @@ def extract_embeddings(
         raise FileNotFoundError(f"缺少 MotionMillion motion release: {release_path}")
     motion_release = read_json(release_path)
     output_root.mkdir(parents=True, exist_ok=True)
+    worker_rank = int(getattr(args, "worker_rank", 0))
+    worker_world_size = int(getattr(args, "worker_world_size", 1))
+    if worker_world_size <= 0 or not 0 <= worker_rank < worker_world_size:
+        raise ValueError(
+            f"非法 worker 拓扑: rank={worker_rank}, world_size={worker_world_size}"
+        )
+    distributed_worker = worker_world_size > 1
 
     if injected_encoder is None:
         encoder, tokenizer, resolved_revision, model_files = _load_t5(
@@ -314,9 +349,12 @@ def extract_embeddings(
     total_source_records = 0
     for split in SPLITS:
         source = read_json(motion_root / "manifests" / f"{split}.json")
-        selected = list(source["shards"])
-        if args.limit_shards is not None:
-            selected = selected[: args.limit_shards]
+        selected = _select_source_shards(
+            source,
+            limit_shards=args.limit_shards,
+            worker_rank=worker_rank,
+            worker_world_size=worker_world_size,
+        )
         total_source_records += sum(int(item["record_count"]) for item in selected)
     processed_records = 0
     for split in SPLITS:
@@ -355,9 +393,12 @@ def extract_embeddings(
             )
 
         output_shards: list[dict[str, Any]] = []
-        selected_source_shards = list(source_manifest["shards"])
-        if args.limit_shards is not None:
-            selected_source_shards = selected_source_shards[: args.limit_shards]
+        selected_source_shards = _select_source_shards(
+            source_manifest,
+            limit_shards=args.limit_shards,
+            worker_rank=worker_rank,
+            worker_world_size=worker_world_size,
+        )
         for source_shard in selected_source_shards:
             shard_id = int(source_shard["shard_id"])
             motion_path = motion_root / str(source_shard["path"])
@@ -479,7 +520,10 @@ def extract_embeddings(
                 for item in output_shards
             ],
         }
-        atomic_write_json(output_root / "manifests" / f"{split}.json", manifest)
+        # 多 GPU worker 只原子写自己负责的 shard/meta，避免多个进程竞争覆盖最终
+        # manifest。全部 worker 结束后再用单进程 ``--resume`` 复核 SHA/顺序并发布。
+        if not distributed_worker:
+            atomic_write_json(output_root / "manifests" / f"{split}.json", manifest)
         manifests[split] = manifest
 
     release = {
@@ -495,6 +539,9 @@ def extract_embeddings(
         "hidden_dim": TEXT_HIDDEN_DIM,
         "dtype": "float16",
         "storage": "compact_valid_tokens_with_offsets",
+        "mode": "distributed_worker" if distributed_worker else "complete_release",
+        "worker_rank": worker_rank,
+        "worker_world_size": worker_world_size,
         "manifests": {
             split: {
                 "path": f"manifests/{split}.json",
@@ -505,7 +552,13 @@ def extract_embeddings(
         "counters": {key: int(value) for key, value in global_counters.items()},
         "elapsed_seconds": time.monotonic() - started,
     }
-    atomic_write_json(output_root / "embedding_release.json", release)
+    if distributed_worker:
+        atomic_write_json(
+            output_root / "workers" / f"rank_{worker_rank:03d}.json",
+            release,
+        )
+    else:
+        atomic_write_json(output_root / "embedding_release.json", release)
     return release
 
 
@@ -525,6 +578,13 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--local-files-only", action="store_true")
     parser.add_argument("--limit-shards", type=int)
     parser.add_argument("--resume", action="store_true")
+    parser.add_argument(
+        "--worker-rank",
+        type=int,
+        default=0,
+        help="多 GPU 离线提取 worker 序号；world-size>1 时按 shard_id 取模分工",
+    )
+    parser.add_argument("--worker-world-size", type=int, default=1)
     return parser
 
 
@@ -532,9 +592,12 @@ def main() -> None:
     args = build_parser().parse_args()
     if args.batch_size <= 0 or (args.limit_shards is not None and args.limit_shards <= 0):
         raise SystemExit("batch-size 和 limit-shards 必须为正数")
+    if args.worker_world_size <= 0 or not 0 <= args.worker_rank < args.worker_world_size:
+        raise SystemExit("worker-rank 必须位于 [0, worker-world-size) 内")
     report = extract_embeddings(args)
     print(
-        "MotionMillion T5 release complete: "
+        "MotionMillion T5 "
+        + ("worker complete: " if args.worker_world_size > 1 else "release complete: ")
         + ", ".join(
             f"{split}={value['record_count']}"
             for split, value in report["manifests"].items()

@@ -55,10 +55,13 @@ from tools.data.motionmillion.download_motionmillion import (
     _reuse_verified_progress,
 )
 from tools.data.motionmillion.extract_t5_embeddings import (
+    _fingerprint_model_files,
+    _select_source_shards,
     compact_caption_embeddings,
     extract_embeddings,
 )
 from tools.data.motionmillion.preflight_motionmillion import run_preflight
+from tools.data.motionmillion.render_motionmillion_pilot import _is_mirror
 from tools.eval.build_motionmillion_review import build_review
 from tools.eval.generate_motionmillion_val_predictions import select_caption_and_seed
 from tools.eval.motionmillion_smpl_to_272 import export_motion
@@ -70,6 +73,38 @@ from tools.eval.run_motionmillion_official_metrics import (
 from tools.eval.summarize_motionmillion_metrics import choose_candidate, summarize
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
+
+
+def test_t5_distributed_workers_partition_shards_without_overlap() -> None:
+    manifest = {"shards": [{"shard_id": value} for value in range(11)]}
+    partitions = [
+        _select_source_shards(
+            manifest,
+            limit_shards=None,
+            worker_rank=rank,
+            worker_world_size=4,
+        )
+        for rank in range(4)
+    ]
+    ids = [[int(item["shard_id"]) for item in part] for part in partitions]
+    assert ids == [[0, 4, 8], [1, 5, 9], [2, 6, 10], [3, 7]]
+    assert sorted(value for part in ids for value in part) == list(range(11))
+    assert len({value for part in ids for value in part}) == 11
+
+
+def test_t5_model_fingerprint_excludes_huggingface_cache_metadata(tmp_path: Path) -> None:
+    (tmp_path / "config.json").write_text("{}", encoding="utf-8")
+    cache = tmp_path / ".cache" / "huggingface"
+    cache.mkdir(parents=True)
+    (cache / "download.metadata").write_text("volatile timestamp", encoding="utf-8")
+    files = _fingerprint_model_files(tmp_path)
+    assert [item["path"] for item in files] == ["config.json"]
+
+
+def test_motionmillion_mirror_detection_covers_source_namespace() -> None:
+    assert _is_mirror("Mirror_MotionGV/folder0/043161")
+    assert _is_mirror("MotionUnion/humanml/M011875_0")
+    assert not _is_mirror("MotionGV/folder0/043161")
 
 
 def test_download_inventory_ignores_huggingface_repo_folders() -> None:
@@ -427,6 +462,26 @@ def test_tar_to_motion_embedding_shards_and_resume_closed_loop(
     )
     assert pilot_release["unavailable_by_release_count"] == 0
     assert pilot_release["unresolved_by_scope_count"] == 2
+
+    metadata_only = build_dataset(
+        Namespace(
+            raw_root=raw,
+            output_root=tmp_path / "metadata_only",
+            records_per_shard=2,
+            motion_frames=120,
+            limit=None,
+            only_split=None,
+            archive_pattern=None,
+            resume=False,
+            strict=True,
+            progress_every=1000,
+            metadata_only=True,
+        )
+    )
+    budget = metadata_only["space_budget"]
+    assert budget["eligible_motion_count"] == 3
+    assert budget["eligible_caption_count"] == 3
+    assert budget["dense_all_caption_upper_bound_bytes"] == 3 * 150 * 1024 * 2
 
     build_args = Namespace(
         raw_root=raw,

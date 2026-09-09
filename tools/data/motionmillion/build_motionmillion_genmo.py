@@ -746,6 +746,13 @@ def build_dataset(args: argparse.Namespace) -> dict[str, Any]:
         raw_root, output_root, resume=args.resume
     )
     if getattr(args, "metadata_only", False):
+        eligible_motion_count = sum(
+            int(value)
+            for value in metadata_report["counts"]["eligible_split"].values()
+        )
+        eligible_caption_count = int(
+            metadata_report["counts"]["text"].get("captions", 0)
+        )
         report = {
             "schema_version": SCHEMA_VERSION,
             "mode": "metadata_only",
@@ -755,9 +762,14 @@ def build_dataset(args: argparse.Namespace) -> dict[str, Any]:
             "space_budget": {
                 "required_free_bytes": int(1.5 * 1024**4),
                 "converted_motion_reserved_bytes": 100 * 1024**3,
-                "dense_embedding_upper_bound_bytes": (
-                    2_000_000 * 150 * 1024 * 2
+                "dense_all_caption_upper_bound_bytes": (
+                    eligible_caption_count * 150 * 1024 * 2
                 ),
+                "one_caption_per_motion_dense_reference_bytes": (
+                    eligible_motion_count * 150 * 1024 * 2
+                ),
+                "eligible_motion_count": eligible_motion_count,
+                "eligible_caption_count": eligible_caption_count,
                 "embedding_storage": "compact_valid_tokens_with_offsets",
             },
         }
