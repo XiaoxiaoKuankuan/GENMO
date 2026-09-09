@@ -134,6 +134,70 @@ def _verify_downloaded_row(local_root: Path, row: dict[str, Any], *, skip_sha256
     row.update(_validate_archive(local_path))
 
 
+def _reuse_verified_progress(
+    output_root: Path,
+    *,
+    repo_id: str,
+    resolved_revision: str,
+    motion_pattern: str | None,
+    motion_rows: list[dict[str, Any]],
+) -> tuple[int, int]:
+    """复用身份和本地大小均未变化的已验证归档前缀。
+
+    每个 progress 行来自此前已完成的 SHA256 与 tar 全遍历。恢复时重新核对仓库、
+    revision、筛选范围、远端文件身份、顺序和本地文件大小；全部一致才复用已记录
+    的内容哈希及 tar 结果。任一字段漂移都拒绝混用，而不是悄悄退回不完整状态。
+    """
+    progress_path = output_root / "download_progress_full.json"
+    if not progress_path.is_file():
+        return 0, 0
+    progress = read_json(progress_path)
+    expected_header = {
+        "repo_id": repo_id,
+        "resolved_revision": resolved_revision,
+        "motion_pattern": motion_pattern,
+        "total_motion_file_count": len(motion_rows),
+    }
+    actual_header = {key: progress.get(key) for key in expected_header}
+    if actual_header != expected_header:
+        raise MotionMillionError(
+            "已有 full progress 与当前远端清单/参数不一致，拒绝复用: "
+            f"expected={expected_header}, actual={actual_header}"
+        )
+    completed_rows = progress.get("files")
+    completed_count = progress.get("completed_motion_file_count")
+    if not isinstance(completed_rows, list) or completed_count != len(completed_rows):
+        raise MotionMillionError("已有 full progress 的完成数量与文件行不一致")
+    if len(completed_rows) > len(motion_rows):
+        raise MotionMillionError("已有 full progress 比当前远端 motion 清单更长")
+
+    completed_bytes = 0
+    identity_keys = ("path", "remote_size_bytes", "remote_blob_id", "lfs_sha256")
+    for index, previous in enumerate(completed_rows):
+        current = motion_rows[index]
+        expected_identity = {key: current.get(key) for key in identity_keys}
+        previous_identity = {key: previous.get(key) for key in identity_keys}
+        if previous_identity != expected_identity:
+            raise MotionMillionError(
+                "已有 full progress 的归档身份/顺序与当前远端清单不一致: "
+                f"index={index}, expected={expected_identity}, actual={previous_identity}"
+            )
+        local_path = output_root / str(current["path"])
+        if not local_path.is_file():
+            raise MotionMillionError(f"已验证 progress 对应文件缺失: {current['path']}")
+        local_size = local_path.stat().st_size
+        if local_size != int(previous.get("local_size_bytes", -1)):
+            raise MotionMillionError(f"已验证 progress 对应文件大小已变化: {current['path']}")
+        if not previous.get("sha256") or previous.get("tar_checked") is not True:
+            raise MotionMillionError(f"已有 progress 行并非完整 SHA/tar 验证: {current['path']}")
+        lfs_sha = current.get("lfs_sha256")
+        if lfs_sha and str(lfs_sha).removeprefix("sha256:") != previous["sha256"]:
+            raise MotionMillionError(f"已有 progress SHA 与远端 LFS 不一致: {current['path']}")
+        current.update(previous)
+        completed_bytes += local_size
+    return len(completed_rows), completed_bytes
+
+
 def download_dataset(args: argparse.Namespace) -> dict[str, Any]:
     """解析官方 revision，分阶段下载并生成可追溯 manifest。"""
     try:
@@ -226,9 +290,25 @@ def download_dataset(args: argparse.Namespace) -> dict[str, Any]:
         local_root = Path(snapshot_path).resolve()
         if args.stage == "full":
             motion_rows = [row for row in remote_rows if row["path"].startswith("motion_272rpr/")]
-            completed_motion_bytes = 0
+            completed_prefix, completed_motion_bytes = _reuse_verified_progress(
+                output_root,
+                repo_id=args.repo_id,
+                resolved_revision=resolved_revision,
+                motion_pattern=args.motion_pattern,
+                motion_rows=motion_rows,
+            )
+            if completed_prefix:
+                print(
+                    "[MotionMillion download] resume_verified_prefix="
+                    f"{completed_prefix}/{len(motion_rows)}, "
+                    f"bytes={completed_motion_bytes}",
+                    flush=True,
+                )
             motion_started = time.monotonic()
-            for index, row in enumerate(motion_rows, start=1):
+            newly_completed_bytes = 0
+            for index, row in enumerate(
+                motion_rows[completed_prefix:], start=completed_prefix + 1
+            ):
                 file_started = time.monotonic()
                 snapshot_download(
                     repo_id=args.repo_id,
@@ -241,7 +321,8 @@ def download_dataset(args: argparse.Namespace) -> dict[str, Any]:
                 elapsed = max(time.monotonic() - file_started, 1.0e-9)
                 speed = int(row["local_size_bytes"]) / elapsed / 1024**2
                 completed_motion_bytes += int(row["local_size_bytes"])
-                aggregate_rate = completed_motion_bytes / max(
+                newly_completed_bytes += int(row["local_size_bytes"])
+                aggregate_rate = newly_completed_bytes / max(
                     time.monotonic() - motion_started, 1.0e-9
                 )
                 remaining_bytes = sum(

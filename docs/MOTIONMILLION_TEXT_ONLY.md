@@ -160,6 +160,11 @@ python tools/data/motionmillion/preflight_motionmillion.py \
   --normalized-stats-samples 1000
 ```
 
+full 下载恢复会读取 `download_progress_full.json`：只有 repo ID、不可变 revision、
+motion pattern、远端文件顺序/大小/blob/LFS 身份、本地大小、既有 SHA256 和 tar 完成
+状态全部一致时，才直接复用已验证归档前缀，避免重新读取数百 GB 做重复哈希；任一字段
+漂移都会阻断，不会降级成静默重下或混用。
+
 motion 与 embedding shard 一一对齐。训练索引是 mmap 结构化 NumPy，只含
 `shard_id/record_index/frames/window_index`；v1 每个 motion 只有一行且
 `window_index=0`，连续 120 帧窗口在 Dataset 读取时随机裁取。sampler 先打乱 shard、

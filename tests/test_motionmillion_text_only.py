@@ -41,6 +41,7 @@ from tools.data.motionmillion.build_motionmillion_genmo import (
 )
 from tools.data.motionmillion.common import (
     MAX_TEXT_TOKENS,
+    MotionMillionError,
     MotionMillionFilteredError,
     accumulate_heading_rotations,
     build_sample_index,
@@ -48,7 +49,10 @@ from tools.data.motionmillion.common import (
     recover_smpl_from_272,
     smpl_to_272,
 )
-from tools.data.motionmillion.download_motionmillion import _remote_file_row
+from tools.data.motionmillion.download_motionmillion import (
+    _remote_file_row,
+    _reuse_verified_progress,
+)
 from tools.data.motionmillion.extract_t5_embeddings import (
     compact_caption_embeddings,
     extract_embeddings,
@@ -92,6 +96,62 @@ def test_download_inventory_ignores_huggingface_repo_folders() -> None:
         "remote_blob_id": "fixture-blob-id",
         "lfs_sha256": None,
     }
+
+
+def test_download_resume_reuses_only_identical_verified_prefix(tmp_path: Path) -> None:
+    """已验证前缀可跳过重复哈希，远端身份漂移必须阻断。"""
+    relative = "motion_272rpr/MotionGV/folder0.tar.gz"
+    local_file = tmp_path / relative
+    local_file.parent.mkdir(parents=True)
+    local_file.write_bytes(b"abc")
+    current_rows = [
+        {
+            "path": relative,
+            "remote_size_bytes": 3,
+            "remote_blob_id": "blob-id",
+            "lfs_sha256": "a" * 64,
+        }
+    ]
+    progress_row = {
+        **current_rows[0],
+        "local_size_bytes": 3,
+        "sha256": "a" * 64,
+        "tar_checked": True,
+        "tar_members": 7,
+    }
+    (tmp_path / "download_progress_full.json").write_text(
+        __import__("json").dumps(
+            {
+                "repo_id": "InternRobotics/MotionMillion",
+                "resolved_revision": "fixture-revision",
+                "motion_pattern": None,
+                "completed_motion_file_count": 1,
+                "total_motion_file_count": 1,
+                "completed_motion_bytes": 3,
+                "files": [progress_row],
+            }
+        ),
+        encoding="utf-8",
+    )
+    count, size = _reuse_verified_progress(
+        tmp_path,
+        repo_id="InternRobotics/MotionMillion",
+        resolved_revision="fixture-revision",
+        motion_pattern=None,
+        motion_rows=current_rows,
+    )
+    assert (count, size) == (1, 3)
+    assert current_rows[0]["tar_members"] == 7
+
+    changed_rows = [{**current_rows[0], "remote_blob_id": "changed"}]
+    with pytest.raises(MotionMillionError, match="身份/顺序"):
+        _reuse_verified_progress(
+            tmp_path,
+            repo_id="InternRobotics/MotionMillion",
+            resolved_revision="fixture-revision",
+            motion_pattern=None,
+            motion_rows=changed_rows,
+        )
 
 
 def _identity_motion(frames: int = 60) -> torch.Tensor:
