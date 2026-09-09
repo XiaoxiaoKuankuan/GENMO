@@ -402,7 +402,8 @@ def compute_extra_incam_loss(inputs, outputs, ppl, mode):
         extra_loss_dict["cr_vert_loss"] = cr_vert_loss
 
     if weights.get("verts2d", 0) > 0:
-        gt_c_verts437 = inputs["gt_c_verts437"]  # (B, L, 437, 3)
+        # 投影防除零只改副本，保留真实网格供后续支撑标签使用；投影损失数值不变。
+        gt_c_verts437 = inputs["gt_c_verts437"].clone()  # (B, L, 437, 3)
 
         # prevent divide 0 or small value to overflow(fp16)
         reproj_z_thr = 0.3

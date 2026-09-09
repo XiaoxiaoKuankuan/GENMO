@@ -1,0 +1,40 @@
+# @package _global_
+# SMPL physics_v4 正式续训：由 physics_v3 s100000 完整恢复模型、优化器、scheduler 与步数。
+# 用户指定服务器1八卡、每卡 batch256，再训练100000个优化器 step，因此累计上限为200000。
+# 保留旧九项物理损失和已训练阶段的学习率状态；新九项以100000为起点，用5000步渐进升权。
+# 不重新启动优化器，不改 checkpoint 内容，不执行小样本校准；日志与新 checkpoint 写入独立实验。
+# 已核验旧 checkpoint SHA256: 98d70a145fb8f430ab557cdd0bde4af5f71e881b16f6976b385db6d172683136
+defaults:
+  - gem_smpl_music_only_4set_manual_q1_physics_v4_contact_30k
+  - _self_
+
+exp_name_base: gem_smpl_music_only_4set_manual_q1_physics_v4_resume_100k
+data_name: gem_smpl_music_only_4set_manual_q1_physics_v4_resume_100k
+pretrain_ckpt: null
+ckpt_path: null
+resume_mode: outputs/gem_smpl_music_only_4set_manual_q1_physics_v3_100k/version_0/checkpoints/s100000.ckpt
+
+pipeline:
+  args:
+    physics_losses:
+      support_losses:
+        warmup_start_step: 100000
+
+data:
+  loader_opts:
+    train:
+      batch_size: 256
+
+optimizer:
+  # 真正恢复后的值来自 checkpoint；此处与已核验的 checkpoint 当前 lr 保持一致。
+  lr: 2.5e-6
+scheduler:
+  scheduler:
+    # 保留旧 scheduler 状态和已走完的里程碑；恢复后不重启候选30k配置的学习率计划。
+    milestones: [60000, 85000]
+
+pl_trainer:
+  devices: 8
+  num_nodes: 1
+  accumulate_grad_batches: 1
+  max_steps: 200000

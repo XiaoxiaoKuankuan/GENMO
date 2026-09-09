@@ -1,6 +1,11 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: LicenseRef-NVIDIA-OneWay-Noncommercial
-"""Low-weight physical temporal losses for the 151D SMPL representation."""
+"""SMPL 151D 的时序匹配与足底穿地损失。
+
+保留 physics_v1/v2/v3 的原计算与日志契约；仅在 support_losses.enabled 显式开启时，
+复用当前预测足底、FK、角速度以及 batch 已有的真实网格，加入 v4 支撑和异常尖峰损失。
+旧配置不读取新增字段、不增加前向网格计算、不改变 checkpoint 结构或旧损失数值。
+"""
 
 from __future__ import annotations
 
@@ -393,6 +398,45 @@ def compute_smpl_physics_losses(
                 result[
                     f"physics_{slug}_{quality_name}_candidate_count_metric"
                 ] = candidate_count
+
+        support_config = _cfg_get(config, "support_losses")
+        if support_config is not None and _cfg_get(support_config, "enabled", False):
+            # 延迟导入以复用本文件的差分/mask工具，旧配置完全不进入新增计算分支。
+            from gem.pipeline.smpl_support_losses import (
+                canonical_sole_vertices,
+                compute_smpl_support_losses,
+            )
+
+            if "gt_c_verts437" not in inputs or "transl" not in inputs["smpl_params_c"]:
+                raise ValueError("physics_v4 requires cached GT camera vertices and translation")
+            with torch.no_grad():
+                gt_gv_sole = canonical_sole_vertices(
+                    inputs["gt_c_verts437"],
+                    inputs["smpl_params_c"]["transl"],
+                    inputs["R_c2gv"],
+                    gt_root_position,
+                )
+            support_loss, support_logs = compute_smpl_support_losses(
+                pred_sole=pred_gv_sole,
+                gt_sole=gt_gv_sole,
+                ground_y_local=inputs["physics"]["ground_y_local"],
+                ground_valid=inputs["physics"]["ground_valid"],
+                frame_valid=frame_valid,
+                pred_root=pred_root_position,
+                gt_root=gt_root_position,
+                pred_fk=pred_fk,
+                gt_fk=gt_fk,
+                pred_joint_velocity=pred_joint_angular_velocity,
+                gt_joint_velocity=gt_joint_angular_velocity,
+                root_accepted=root_accepted,
+                fk_accepted=fk_accepted,
+                joint_accepted=joint_accepted,
+                config=support_config,
+                global_step=global_step,
+                fps=fps,
+            )
+            total = total + support_loss
+            result.update(support_logs)
 
         result["physics_total_loss"] = total
         return total, result

@@ -1,0 +1,52 @@
+# @package _global_
+# SMPL 支撑接触与异常尖峰微调候选配置：从已验证的 physics_v3 s100000 仅加载权重。
+# 保持 151D 网络、人工高质量四库及旧九项损失；增加支撑点脚滑/离地、GT 平脚阶段的
+# 足底高度差、root/FK/关节角加速度与 jerk 超限项。无需重做数据或增加预测接触头。
+# 阈值和权重尚未经过真实数据梯度/动作质量标定；30k 是候选预算，不代表已授权启动。
+# 旧 checkpoint SHA256: 98d70a145fb8f430ab557cdd0bde4af5f71e881b16f6976b385db6d172683136
+defaults:
+  - gem_smpl_music_only_4set_manual_q1_physics_v3_100k
+  - _self_
+
+exp_name_base: gem_smpl_music_only_4set_manual_q1_physics_v4_contact_30k
+data_name: gem_smpl_music_only_4set_manual_q1_physics_v4_contact_30k
+pretrain_ckpt: outputs/gem_smpl_music_only_4set_manual_q1_physics_v3_100k/version_0/checkpoints/s100000.ckpt
+ckpt_path: null
+resume_mode: null
+
+pipeline:
+  args:
+    physics_losses:
+      support_losses:
+        enabled: true
+        contract_version: genmo.smpl_support_losses.v1
+        warmup_steps: 5000
+        topk_fraction: 0.05
+        # 接触看 GT 高度和竖直速度；稳定支撑另外检查水平速度，不把滑步当锁脚。
+        contact_height_m: 0.035
+        contact_vertical_speed_mps: 0.15
+        planted_speed_mps: 0.15
+        slide_margin_mps: 0.02
+        height_margin_m: 0.01
+        # 只有四点都稳定且 GT 高度差 <= 1.5cm 的脚才鼓励平放，保护踮脚/脚尖转动。
+        flat_gt_span_m: 0.015
+        flat_tolerance_m: 0.01
+        flat_margin_m: 0.005
+        foot_slide: {scale: 0.15, weight: 0.10, topk_weight: 0.05}
+        foot_contact_height: {scale: 0.03, weight: 0.10, topk_weight: 0.05}
+        foot_flat_support: {scale: 0.02, weight: 0.05, topk_weight: 0.025}
+        # 超限线=max(绝对容许量, GT幅度*1.25+余量)，不是要求快速舞蹈的导数为零。
+        root_acceleration_excess: {scale: 20.0, allowance: 10.0, target_multiplier: 1.25, target_margin: 2.0, weight: 0.04, topk_weight: 0.02}
+        root_jerk_excess: {scale: 600.0, allowance: 200.0, target_multiplier: 1.25, target_margin: 60.0, weight: 0.008, topk_weight: 0.004}
+        joint_angular_acceleration_excess: {scale: 180.0, allowance: 120.0, target_multiplier: 1.25, target_margin: 20.0, weight: 0.08, topk_weight: 0.04}
+        joint_angular_jerk_excess: {scale: 600.0, allowance: 600.0, target_multiplier: 1.25, target_margin: 100.0, weight: 0.008, topk_weight: 0.004}
+        fk_acceleration_excess: {scale: 30.0, allowance: 20.0, target_multiplier: 1.25, target_margin: 5.0, weight: 0.04, topk_weight: 0.02}
+        fk_jerk_excess: {scale: 600.0, allowance: 400.0, target_multiplier: 1.25, target_margin: 100.0, weight: 0.016, topk_weight: 0.008}
+
+optimizer:
+  lr: 5e-6
+scheduler:
+  scheduler:
+    milestones: [20000, 27000]
+pl_trainer:
+  max_steps: 30000
