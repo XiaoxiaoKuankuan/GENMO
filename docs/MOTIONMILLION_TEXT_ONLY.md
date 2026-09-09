@@ -1,6 +1,6 @@
 # MotionMillion → GENMO SMPL 纯文本动作模型
 
-本文记录 `codex/feature-smpl-text-motionmillion` 分支的数据、模型、训练与评测契约。
+本文记录 `feature/smpl-text-only` 分支的数据、模型、训练与评测契约。
 分支从 `main@966e4a2968c263593d7597b61d60fcf277ec622a` 创建，不包含 BUMI 或
 music-only 功能分支的改动。首版只接入 MotionMillion 官方发布数据，把 272D 动作
 恢复成 GENMO 151D SMPL 连续表示，并从随机初始化训练 GEM DDIM 扩散器；不复刻官方
