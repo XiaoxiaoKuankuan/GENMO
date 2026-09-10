@@ -218,8 +218,9 @@ Dataset 每次均匀选一个 caption，恢复 `[150,1024]` float32 与 `[150]` 
 ## 6. 阶段 D/E：smoke 与正式训练（需要单独授权）
 
 默认优先使用 256 × 8 × accumulate 1 = 全局 batch 2048。sampler 将完整 shard
-分配给唯一 rank，且每 rank 使用一个持久 worker，使同一 512-record shard 的连续
-两个 batch 复用 worker LRU；这既避免跨 rank 重复读取，也避免多 worker 重复解码。
+分配给唯一 rank，避免同一个大型 embedding shard 被 8 个 rank 重复加载；每 rank
+使用 4 个持久 worker 隐藏逐样本 SMPL 派生量的 CPU 构造延迟。由于一个约 512-record
+shard 对应两个 256 batch，rank 内最多发生受控的两次读取，但不再跨 rank 重复。
 若 20-step 探测 OOM，依次改为每卡 128、64，并以实测端到端吞吐选择配置：
 
 ```bash
@@ -234,10 +235,12 @@ python scripts/train.py exp=gem_smpl_motionmillion_text_only \
 并用独立测试输出目录跑 20-step OOM 探测及 100 optimizer step smoke；峰值低于
 80 GB/卡，无 OOM、NaN/Inf、DDP hang。smoke 只证明运行健康，不证明动作质量。
 
-正式配置：AdamW 2e-4，5,000 step 线性 warmup，余弦降至 2e-6，gradient clip 0.5，
-每 10 step 日志、5,000 step 验证、10,000 step checkpoint。正式总步数由连续
-100-step 的端到端墙钟吞吐按目标运行时长换算，并同步覆盖 scheduler total_steps；
-不能用排除 DataLoader 等待的纯计算吞吐估时。监控必须记录实际加权 loss、LR、
+正式配置：AdamW 2e-4，500 step 线性 warmup，余弦降至 2e-6，gradient clip 0.5，
+每 10 step 日志、1,000 step 验证和 checkpoint。63854 个样本/rank、每卡 batch 256
+时每 epoch 为 249 optimizer step；稳态端到端墙钟约 62.5 秒/step，因此 24 epoch
+即 5976 step 的纯训练约 103.8 小时，再给 validation/checkpoint 预留约 4 小时，完整
+运行目标接近 4.5 天；5976 同步作为 scheduler total_steps。该估时包含 shard/CPU
+数据等待，不能使用只统计 GPU 前后向的乐观吞吐。监控必须记录实际加权 loss、LR、
 gradient norm、文本 dropout 实测比、data wait、step time、samples/s、显存、利用率、
 最新完整 checkpoint 与稳定窗口 ETA。
 

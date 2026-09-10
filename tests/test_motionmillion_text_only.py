@@ -901,9 +901,14 @@ def test_motionmillion_text_only_hydra_contract() -> None:
     assert cfg.pretrain_ckpt is None and cfg.ckpt_path is None
     assert cfg.data.loader_opts.train.batch_size == 256
     assert cfg.data.loader_opts.train.batch_size * cfg.pl_trainer.devices == 2048
-    assert cfg.data.loader_opts.train.num_workers == 1
+    assert cfg.data.loader_opts.train.num_workers == 4
     assert cfg.pl_trainer.precision == "bf16-mixed"
-    assert cfg.pl_trainer.max_steps == 300000
+    assert cfg.pl_trainer.max_epochs == 24
+    assert cfg.pl_trainer.max_steps == 5976
+    assert cfg.pl_trainer.val_check_interval == 1000
+    assert cfg.scheduler.scheduler.warmup_steps == 500
+    assert cfg.scheduler.scheduler.total_steps == 5976
+    assert cfg.use_wandb is False
     assert cfg.data.shard_aware_sampling.enabled is True
 
 

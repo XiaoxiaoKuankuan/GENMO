@@ -16,7 +16,7 @@ defaults:
   - override /test_datasets:
       - motionmillion_text_val
   - override /callbacks:
-      - ckpt_saver/every10000s_top100
+      - ckpt_saver/every1000s_top100
       - prog_bar/prog_reporter_ed1
       - train_speed_timer/base
       - lr_monitor/pl
@@ -92,10 +92,10 @@ data:
   loader_opts:
     train:
       # Lightning batch_size 是每卡 micro-batch；256 x 8 = 全局 batch 2048。
-      # 整 shard sampler 已把每个 shard 固定给唯一 rank；每 rank 使用单 worker 可让
-      # 连续两个 256-record batch 复用同一份 512-record shard，避免多 worker 重复解码。
+      # 整 shard sampler 已把每个 shard 固定给唯一 rank；每 rank 使用 4 个 worker
+      # 隐藏逐样本 SMPL 派生量构造的 CPU 延迟，同时消除旧实现的跨 rank 重复读取。
       batch_size: 256
-      num_workers: 1
+      num_workers: 4
     val:
       batch_size: 1
       num_workers: 1
@@ -106,10 +106,18 @@ pl_trainer:
   accumulate_grad_batches: 1
   log_every_n_steps: 10
   gradient_clip_val: 0.5
-  max_epochs: null
+  # 63854 个样本/rank、batch 256 时每 epoch 为 249 step；24 epoch = 5976 step。
+  # 八卡稳态端到端约 62.5 秒/step，纯训练约 103.8 小时；其余约 4 小时留给
+  # validation/checkpoint，使完整运行目标接近 4.5 天。
+  max_epochs: 24
   check_val_every_n_epoch: null
-  val_check_interval: 5000
-  max_steps: 300000
+  val_check_interval: 1000
+  max_steps: 5976
+
+scheduler:
+  scheduler:
+    warmup_steps: 500
+    total_steps: 5976
 
 logger:
   _target_: pytorch_lightning.loggers.WandbLogger
@@ -121,4 +129,4 @@ logger:
   dir: /tmp
   id: null
 
-use_wandb: true
+use_wandb: false
