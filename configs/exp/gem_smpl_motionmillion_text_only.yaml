@@ -16,7 +16,7 @@ defaults:
   - override /test_datasets:
       - motionmillion_text_val
   - override /callbacks:
-      - ckpt_saver/every1000s_top100
+      - ckpt_saver/every10000s_top100
       - prog_bar/prog_reporter_ed1
       - train_speed_timer/base
       - lr_monitor/pl
@@ -109,18 +109,19 @@ pl_trainer:
   accumulate_grad_batches: 1
   log_every_n_steps: 10
   gradient_clip_val: 0.5
-  # 63854 个样本/rank、batch 256 时每 epoch 为 249 step；24 epoch = 5976 step。
-  # 八卡稳态端到端约 62.5 秒/step，纯训练约 103.8 小时；其余约 4 小时留给
-  # validation/checkpoint，使完整运行目标接近 4.5 天。
-  max_epochs: 24
+  # 关闭 Lightning 二次分片后，63854 个样本/rank、batch 256 时每 epoch 为 249 step。
+  # 连续 120-step 八卡实测约 1.7--1.8 秒/step；215000 step 的纯训练约
+  # 101.5--107.5 小时，并给 validation/checkpoint 留出余量，使总墙钟接近 4.5 天。
+  # 864 epoch 是覆盖 215000 step 所需的上界，最终由 max_steps 精确停止。
+  max_epochs: 864
   check_val_every_n_epoch: null
-  val_check_interval: 1000
-  max_steps: 5976
+  val_check_interval: 5000
+  max_steps: 215000
 
 scheduler:
   scheduler:
-    warmup_steps: 500
-    total_steps: 5976
+    warmup_steps: 5000
+    total_steps: 215000
 
 logger:
   _target_: pytorch_lightning.loggers.WandbLogger
