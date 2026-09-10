@@ -828,6 +828,43 @@ def test_shard_sampler_is_reproducible_and_rank_unique(world_size: int) -> None:
     assert len(flattened) == (len(dataset) // world_size) * world_size
 
 
+@pytest.mark.parametrize("world_size", [2, 8])
+def test_shard_sampler_assigns_each_complete_shard_to_one_rank(world_size: int) -> None:
+    class ManyShardDataset(torch.utils.data.Dataset):
+        def __init__(self) -> None:
+            self.shards = np.repeat(np.arange(16, dtype=np.int64), 4)
+
+        def __len__(self):
+            return len(self.shards)
+
+        def __getitem__(self, index):
+            return index
+
+        def sample_shard_ids(self):
+            return self.shards
+
+    dataset = ManyShardDataset()
+    rank_indices: list[list[int]] = []
+    rank_shards: list[set[int]] = []
+    for rank in range(world_size):
+        sampler = ShardAwareDistributedSampler(
+            dataset,
+            seed=17,
+            rank=rank,
+            num_replicas=world_size,
+            drop_last=True,
+        )
+        assert sampler.whole_shard_assignment is True
+        indices = list(sampler)
+        rank_indices.append(indices)
+        rank_shards.append(set(dataset.shards[indices].tolist()))
+    flattened = [index for values in rank_indices for index in values]
+    assert len(flattened) == len(set(flattened)) == len(dataset)
+    for left in range(world_size):
+        for right in range(left + 1, world_size):
+            assert rank_shards[left].isdisjoint(rank_shards[right])
+
+
 def test_scheduler_warmup_cosine_and_floor() -> None:
     parameter = nn.Parameter(torch.tensor(1.0))
     optimizer = torch.optim.AdamW([parameter], lr=2.0e-4)
@@ -862,7 +899,9 @@ def test_motionmillion_text_only_hydra_contract() -> None:
     assert cfg.model.model_cfg.text_encoder.max_text_len == MAX_TEXT_TOKENS
     assert cfg.model.model_cfg.condition_mask.mask_text_prob.diffusion == 0
     assert cfg.pretrain_ckpt is None and cfg.ckpt_path is None
-    assert cfg.data.loader_opts.train.batch_size * cfg.pl_trainer.devices == 512
+    assert cfg.data.loader_opts.train.batch_size == 256
+    assert cfg.data.loader_opts.train.batch_size * cfg.pl_trainer.devices == 2048
+    assert cfg.data.loader_opts.train.num_workers == 1
     assert cfg.pl_trainer.precision == "bf16-mixed"
     assert cfg.pl_trainer.max_steps == 300000
     assert cfg.data.shard_aware_sampling.enabled is True

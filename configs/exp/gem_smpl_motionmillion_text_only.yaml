@@ -91,9 +91,11 @@ data:
       text_attention_mask: [150]
   loader_opts:
     train:
-      # Lightning batch_size 是每卡 micro-batch；64 x 8 = 全局 batch 512。
-      batch_size: 64
-      num_workers: 6
+      # Lightning batch_size 是每卡 micro-batch；256 x 8 = 全局 batch 2048。
+      # 整 shard sampler 已把每个 shard 固定给唯一 rank；每 rank 使用单 worker 可让
+      # 连续两个 256-record batch 复用同一份 512-record shard，避免多 worker 重复解码。
+      batch_size: 256
+      num_workers: 1
     val:
       batch_size: 1
       num_workers: 1

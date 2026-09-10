@@ -217,23 +217,27 @@ Dataset 每次均匀选一个 caption，恢复 `[150,1024]` float32 与 `[150]` 
 
 ## 6. 阶段 D/E：smoke 与正式训练（需要单独授权）
 
-默认是 64 × 8 × accumulate 1 = 全局 batch 512。若 20-step 探测 OOM，依次改为：
+默认优先使用 256 × 8 × accumulate 1 = 全局 batch 2048。sampler 将完整 shard
+分配给唯一 rank，且每 rank 使用一个持久 worker，使同一 512-record shard 的连续
+两个 batch 复用 worker LRU；这既避免跨 rank 重复读取，也避免多 worker 重复解码。
+若 20-step 探测 OOM，依次改为每卡 128、64，并以实测端到端吞吐选择配置：
 
 ```bash
 python scripts/train.py exp=gem_smpl_motionmillion_text_only \
-  data.loader_opts.train.batch_size=32 pl_trainer.accumulate_grad_batches=2
+  data.loader_opts.train.batch_size=128
 
 python scripts/train.py exp=gem_smpl_motionmillion_text_only \
-  data.loader_opts.train.batch_size=16 pl_trainer.accumulate_grad_batches=4
+  data.loader_opts.train.batch_size=64
 ```
 
 不要直接用正式命令“试一下”。启动前需重新核对 `nvidia-smi`、进程归属和用户授权，
 并用独立测试输出目录跑 20-step OOM 探测及 100 optimizer step smoke；峰值低于
 80 GB/卡，无 OOM、NaN/Inf、DDP hang。smoke 只证明运行健康，不证明动作质量。
 
-正式配置：AdamW 2e-4，5,000 step 线性 warmup，余弦降至 2e-6，300,000 optimizer
-step，gradient clip 0.5，每 10 step 日志、5,000 step 验证、10,000 step checkpoint。
-300k 对应 `300000 × 512 = 1.536e8` 样本窗口。监控必须记录实际加权 loss、LR、
+正式配置：AdamW 2e-4，5,000 step 线性 warmup，余弦降至 2e-6，gradient clip 0.5，
+每 10 step 日志、5,000 step 验证、10,000 step checkpoint。正式总步数由连续
+100-step 的端到端墙钟吞吐按目标运行时长换算，并同步覆盖 scheduler total_steps；
+不能用排除 DataLoader 等待的纯计算吞吐估时。监控必须记录实际加权 loss、LR、
 gradient norm、文本 dropout 实测比、data wait、step time、samples/s、显存、利用率、
 最新完整 checkpoint 与稳定窗口 ETA。
 
