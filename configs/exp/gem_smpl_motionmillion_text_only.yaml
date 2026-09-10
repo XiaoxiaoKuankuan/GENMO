@@ -103,6 +103,9 @@ data:
 pl_trainer:
   devices: 8
   precision: bf16-mixed
+  # ShardAwareDistributedSampler 已显式按 Trainer rank/world_size 分片；禁止 Lightning
+  # 再包一层 DistributedSampler，否则每个 rank 会从 63854 条再次缩小到约 1/8。
+  use_distributed_sampler: false
   accumulate_grad_batches: 1
   log_every_n_steps: 10
   gradient_clip_val: 0.5

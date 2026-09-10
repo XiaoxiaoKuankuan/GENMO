@@ -903,6 +903,7 @@ def test_motionmillion_text_only_hydra_contract() -> None:
     assert cfg.data.loader_opts.train.batch_size * cfg.pl_trainer.devices == 2048
     assert cfg.data.loader_opts.train.num_workers == 4
     assert cfg.pl_trainer.precision == "bf16-mixed"
+    assert cfg.pl_trainer.use_distributed_sampler is False
     assert cfg.pl_trainer.max_epochs == 24
     assert cfg.pl_trainer.max_steps == 5976
     assert cfg.pl_trainer.val_check_interval == 1000

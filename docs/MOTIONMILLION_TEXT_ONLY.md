@@ -221,6 +221,9 @@ Dataset 每次均匀选一个 caption，恢复 `[150,1024]` float32 与 `[150]` 
 分配给唯一 rank，避免同一个大型 embedding shard 被 8 个 rank 重复加载；每 rank
 使用 4 个持久 worker 隐藏逐样本 SMPL 派生量的 CPU 构造延迟。由于一个约 512-record
 shard 对应两个 256 batch，rank 内最多发生受控的两次读取，但不再跨 rank 重复。
+`pl_trainer.use_distributed_sampler=false` 是该契约的一部分：自定义 sampler 已按
+rank/world-size 分片，必须禁止 Lightning 再次做分布式切分；正式日志每个 rank 应显示
+`per_rank_samples=63854`，进度条应为每 epoch 249 batch，而不是 31 batch。
 若 20-step 探测 OOM，依次改为每卡 128、64，并以实测端到端吞吐选择配置：
 
 ```bash
