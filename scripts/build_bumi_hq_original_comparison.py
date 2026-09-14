@@ -12,6 +12,8 @@
 ``<key>_generated.mp4`` 是完整音乐长度的模型生成动作；模型生成源发生变化时以临时硬链接/
 副本原子刷新旧文件。网页提供成对播放、暂停、重播和时间轴同步，不再额外转码一份左右拼接
 视频，避免完整音乐验证重复占用磁盘。音轨统一来自同一 WAV，生成视频始终覆盖完整音乐；
+每组额外提供秒数输入和同步跳转，便于直接检查55秒等指定时刻；跳转遵守原动作真实末帧边界，
+不依赖浏览器原生进度条的像素定位，也不修改视频内容或动作时间轴。
 原动作按其真实长度渲染，因此 AIST++ 的短源片段不会被循环、拉伸或伪造成完整舞蹈，网页会
 明确显示这一数据边界。报告仍在双方共同真实区间计算运动学指标和 0.25 rad 限位结果，并
 额外生成不含本地绝对路径的 ``site_data.json``，供公开验证网页直接消费。该页面展示的是
@@ -492,7 +494,10 @@ def build_index(
                 f'<video class="generated" controls playsinline preload="none" data-src="{html.escape(row["generated_video_relative"])}"></video></div></div>'
                 '<div class="controls"><button type="button" data-action="play">同步播放</button>'
                 '<button type="button" data-action="pause">暂停</button>'
-                '<button type="button" data-action="restart">从头播放</button></div>'
+                '<button type="button" data-action="restart">从头播放</button>'
+                '<label>跳转秒数 <input type="number" data-seek-seconds min="0" '
+                f'max="{row["generated_duration_sec"]:.6f}" step="any" value="0"></label>'
+                '<button type="button" data-action="seek">同步跳转</button></div>'
                 f"<p>共同真实对比区间 {row['comparison_duration_sec']:.2f}s；原动作视频 "
                 f"{row['original_video_duration_sec']:.2f}s；模型生成/音乐 "
                 f"{row['generated_duration_sec']:.2f}s。{short_note}</p>"
@@ -523,6 +528,7 @@ def build_index(
 .summary,.toolbar,.card{{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:16px;margin:14px 0}}.failed{{border-color:#a74d4d}}.toolbar{{position:sticky;top:0;z-index:3;display:flex;gap:8px;flex-wrap:wrap;align-items:center}}
 .toolbar input{{min-width:260px;flex:1;background:#0f151e;color:var(--text);border:1px solid #3b4659;border-radius:8px;padding:9px 11px}}button{{cursor:pointer;background:#28364a;color:var(--text);border:1px solid #46556d;border-radius:8px;padding:8px 12px}}button.active{{background:#21679b;border-color:#53aeea}}
 .pair{{display:grid;grid-template-columns:1fr 1fr;gap:12px}}.video-panel{{min-width:0}}.video-label{{font-weight:700;margin:0 0 7px}}video{{display:block;width:100%;aspect-ratio:4/3;background:#000;border-radius:8px}}.controls{{display:flex;gap:8px;margin:10px 0;flex-wrap:wrap}}
+.controls label{{display:flex;align-items:center;gap:6px}}.controls input{{width:100px;background:#0f151e;color:var(--text);border:1px solid #3b4659;border-radius:8px;padding:8px}}
 .motion{{color:var(--muted)}}table{{border-collapse:collapse;width:100%}}th,td{{padding:7px;border:1px solid #3a4354;text-align:left}}section{{margin-top:34px}}
 .membership{{color:#dce9f5}}.split-badge{{display:inline-block;min-width:72px;text-align:center;margin-right:7px;padding:2px 8px;border-radius:999px;background:#24587b;color:#fff;font-weight:700}}
 @media(max-width:850px){{main{{padding:14px}}.pair{{grid-template-columns:1fr}}.toolbar{{position:static}}}}</style></head><body><main>
@@ -545,6 +551,9 @@ document.querySelectorAll('[data-sync-pair]').forEach(pair=>{{
  const seekOriginal=()=>{{if(original.readyState<1)return;const target=clampOriginal(original,generated.currentTime);if(Math.abs(original.currentTime-target)>.12)original.currentTime=target}};
  const play=restart=>{{ensure();if(restart){{generated.currentTime=0;if(original.readyState>=1)original.currentTime=0}}seekOriginal();generated.play().catch(()=>{{}});if(!Number.isFinite(original.duration)||generated.currentTime<original.duration-.04)original.play().catch(()=>{{}})}};
  const card=pair.closest('.card');card.querySelector('[data-action="play"]').addEventListener('click',()=>play(false));card.querySelector('[data-action="restart"]').addEventListener('click',()=>play(true));card.querySelector('[data-action="pause"]').addEventListener('click',()=>{{generated.pause();original.pause()}});
+ const seekInput=card.querySelector('[data-seek-seconds]');
+ const jump=()=>{{const seconds=Number(seekInput.value);if(!seekInput.value.trim()||!Number.isFinite(seconds)||seconds<0)return;ensure();const apply=()=>{{if(!Number.isFinite(generated.duration)||generated.duration<=0)return;generated.currentTime=Math.min(seconds,Math.max(0,generated.duration-.04));if(original.readyState>=1)seekOriginal();else original.addEventListener('loadedmetadata',seekOriginal,{{once:true}})}};if(generated.readyState>=1)apply();else generated.addEventListener('loadedmetadata',apply,{{once:true}})}};
+ card.querySelector('[data-action="seek"]').addEventListener('click',jump);seekInput.addEventListener('keydown',event=>{{if(event.key==='Enter'){{event.preventDefault();jump()}}}});
  generated.addEventListener('play',()=>{{seekOriginal();if(!Number.isFinite(original.duration)||generated.currentTime<original.duration-.04)original.play().catch(()=>{{}})}});generated.addEventListener('pause',()=>original.pause());generated.addEventListener('seeking',seekOriginal);
  setInterval(()=>{{if(generated.paused)return;if(Number.isFinite(original.duration)&&generated.currentTime>=original.duration-.04){{original.pause();return}}seekOriginal();if(original.paused)original.play().catch(()=>{{}})}},250);
 }});

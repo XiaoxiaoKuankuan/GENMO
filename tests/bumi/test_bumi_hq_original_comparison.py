@@ -3,6 +3,7 @@
 这里不加载真实 MuJoCo 或长视频，只覆盖最容易造成对比错位的 50→30 Hz 帧数反解，以及
 自包含网页目录优先硬链接、源身份变化时原子刷新的规则，以及公开站点数据只暴露成对独立
 视频且不会泄露本地绝对路径的约束。完整可变数量媒体和轨迹由正式运行后的逐文件验证负责。
+网页回归还检查精确秒数跳转控件、元数据懒加载和短原动作末帧保护；真实跳转由浏览器验收。
 """
 
 from __future__ import annotations
@@ -85,7 +86,7 @@ def test_self_built_preprocessed_motion_is_not_resampled_twice(tmp_path: Path) -
     assert artifact["target_frames_30hz"] == 180
 
 
-def test_site_data_only_exposes_relative_public_media() -> None:
+def test_site_data_only_exposes_relative_public_media(tmp_path: Path) -> None:
     limits = {
         "strict_xml_limit_exceeded": False,
         "tolerance_limit_exceeded": False,
@@ -128,6 +129,14 @@ def test_site_data_only_exposes_relative_public_media() -> None:
         "/aistpp/mBR0/mBR0_generated.mp4"
     )
     assert "/private/" not in repr(site_data)
+    result["report_relative"] = "reports/aistpp/mBR0.json"
+    build_index(tmp_path, [result], summarize([result]), model_label="s350000")
+    document = (tmp_path / "index.html").read_text(encoding="utf-8")
+    assert 'data-action="seek">同步跳转' in document
+    assert 'data-seek-seconds min="0" max="120.000000"' in document
+    assert "original.duration-.04" in document
+    assert "generated.addEventListener('loadedmetadata',apply,{once:true})" in document
+    assert "!Number.isFinite(seconds)||seconds<0" in document
 
 
 def test_empty_partial_summary_still_builds_recovery_index(tmp_path: Path) -> None:
