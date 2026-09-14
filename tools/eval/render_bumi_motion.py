@@ -6,6 +6,9 @@
 数千帧 RGB 图像同时驻留内存；因此既适合短片验证，也适合数分钟完整音频的批量评测。
 ``--max-frames`` 可在加载并完成轨迹契约校验后只渲染前缀帧，供固定时长网页验收避免先渲染
 整段长动作再由 ffmpeg 截断；该选项不循环、不补帧，也不会改变源动作产物。
+``--follow-root`` 为长音乐对比提供可选的根平移跟随相机：保持默认相机的距离、
+方位角和俯角，仅逐帧把观察中心移到根位置，避免机器人随世界系位移走出画面。
+它不跟随根旋转，不修改 qpos、地面或动作指标；不传此选项时保留原来的固定相机。
 """
 
 from __future__ import annotations
@@ -73,8 +76,11 @@ def main() -> None:
     parser.add_argument("--width", type=int, default=1280)
     parser.add_argument("--height", type=int, default=720)
     parser.add_argument("--camera")
+    parser.add_argument("--follow-root", action="store_true", help="相机中心逐帧跟随根位置；不改变动作")
     parser.add_argument("--max-frames", type=int)
     args = parser.parse_args()
+    if args.follow_root and args.camera is not None:
+        parser.error("--follow-root 与命名 --camera 不能同时使用")
     qpos, fps, payload = load_qpos(args.motion.expanduser().resolve(), args.qpos_key)
     if args.max_frames is not None:
         if args.max_frames <= 0:
@@ -94,7 +100,10 @@ def main() -> None:
         )
     data = mujoco.MjData(model)
     renderer = mujoco.Renderer(model, height=args.height, width=args.width)
-    camera: str | int = -1 if args.camera is None else args.camera
+    camera: str | int | mujoco.MjvCamera = -1 if args.camera is None else args.camera
+    if args.follow_root:
+        camera = mujoco.MjvCamera()
+        mujoco.mjv_defaultFreeCamera(model, camera)
     output = args.output.expanduser().resolve()
     output.parent.mkdir(parents=True, exist_ok=True)
     ffmpeg = shutil.which("ffmpeg")
@@ -133,6 +142,8 @@ def main() -> None:
         for frame_qpos in qpos:
             data.qpos[:] = frame_qpos
             mujoco.mj_forward(model, data)
+            if args.follow_root:
+                camera.lookat[:] = frame_qpos[:3]
             renderer.update_scene(data, camera=camera)
             frame = np.ascontiguousarray(renderer.render(), dtype=np.uint8)
             if frame.shape != (args.height, args.width, 3):
