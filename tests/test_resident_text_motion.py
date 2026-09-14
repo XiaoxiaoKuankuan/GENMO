@@ -162,6 +162,52 @@ def test_two_requests_do_not_reload_models_or_ddim(engine_bundle) -> None:
     assert gem.pipeline.denoiser3d.init_calls == 1
 
 
+def test_set_ddim_rebuilds_both_samplers_without_reloading(engine_bundle) -> None:
+    engine, _, _, gem, calls = engine_bundle
+    engine.initialize()
+    assert engine.set_ddim_steps(20) is False
+    assert engine.set_ddim_steps(50) is True
+    diffusion = gem.pipeline.denoiser3d
+    assert diffusion.init_calls == 2
+    assert diffusion.model_cfg.diffusion.test_timestep_respacing == "50"
+    assert diffusion.model_cfg.diffusion.gen_only_test_timestep_respacing == "50"
+    result = engine.generate({"prompt": "walk", "num_frames": 2})
+    assert result["ok"]
+    assert json.loads((Path(result["output_dir"]) / "metadata.json").read_text())["ddim_steps"] == 50
+    assert calls["t5"] == calls["gem"] == 1
+
+
+@pytest.mark.parametrize("steps", [1, 1001, 2.5, True, "50"])
+def test_set_ddim_rejects_unsupported_values(engine_bundle, steps) -> None:
+    with pytest.raises(ValueError, match="ddim_steps"):
+        engine_bundle[0].set_ddim_steps(steps)
+
+
+def test_set_ddim_before_initialization(engine_bundle) -> None:
+    engine, _, _, gem, _ = engine_bundle
+    assert engine.set_ddim_steps(1000) is True
+    assert gem.pipeline.denoiser3d.init_calls == 0
+    engine.initialize()
+    assert gem.pipeline.denoiser3d.init_calls == 1
+    assert gem.pipeline.denoiser3d.model_cfg.diffusion.test_timestep_respacing == "1000"
+
+
+def test_set_ddim_failure_restores_previous_sampler(engine_bundle, monkeypatch) -> None:
+    engine, _, _, gem, _ = engine_bundle
+    engine.initialize()
+    diffusion = gem.pipeline.denoiser3d
+    original = diffusion.init_diffusion
+    def fail_for_50():
+        if diffusion.model_cfg.diffusion.test_timestep_respacing == "50":
+            raise RuntimeError("sampler init failure")
+        original()
+    monkeypatch.setattr(diffusion, "init_diffusion", fail_for_50)
+    with pytest.raises(RuntimeError, match="sampler init failure"):
+        engine.set_ddim_steps(50)
+    assert engine.ddim_steps == 20
+    assert diffusion.model_cfg.diffusion.gen_only_test_timestep_respacing == "20"
+
+
 def test_same_normalized_prompt_hits_cpu_embedding_cache(engine_bundle) -> None:
     engine, _, t5, _, _ = engine_bundle
     engine.initialize()

@@ -1,0 +1,45 @@
+<!-- GENMO 本地文本动作工作台：左侧选择模型和输入文本，右侧手动预览生成视频。
+     页面不自动播放；历史和任务状态由本地接口提供，固定推理参数不可在网页覆盖。 -->
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="在本机用 GENMO 将文本生成 SMPL 人体动作，预览视频并回看历史。">
+  <title>GENMO · 文本动作工作台</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+<header><a class="brand" href="/">GENMO<span>动作工作台</span></a><span class="local"><i></i> 本地运行 · SMPL</span></header>
+<main>
+  <div class="intro"><div><p class="eyebrow">TEXT TO MOTION</p><h1>让文字，成为动作。</h1><p class="muted">选择模型，描述动作，在这里预览你的创作。</p></div><span class="format">30 FPS <b>／</b> 1280 × 720</span></div>
+  <div class="workspace">
+    <aside class="panel settings">
+      <div class="section-title"><h2>生成设置</h2><span>01 — INPUT</span></div>
+      <form id="generate-form">
+        <label for="model">GENMO 模型</label>
+        <select id="model" required><option value="">正在发现本地文本模型…</option></select>
+        <p id="model-detail" class="hint">自动兼容 50 / 150 token 文本模型</p>
+        <details id="add-model"><summary>＋ 添加本地模型</summary><label for="model-path">Checkpoint 本地路径</label><input id="model-path" type="text" placeholder="/home/weili/GENMO/…/model.ckpt"><button id="register" class="secondary" type="button">校验并加入列表</button><p id="register-status" class="hint" role="status"></p></details>
+        <label for="prompt">动作描述 <span>Prompt</span></label>
+        <textarea id="prompt" rows="6" required placeholder="例如：A person walks forward, stops, and waves with their right hand."></textarea>
+        <p class="hint">描述主体、动作和顺序。建议使用英文动作描述。</p>
+        <div class="parameter-row"><div><label for="num-frames">动作帧数</label><input id="num-frames" type="number" min="1" max="900" step="1" value="120" required><p class="hint" id="duration">4 秒 · 30 FPS</p></div><div><label for="ddim-steps">DDIM 步数</label><input id="ddim-steps" type="number" min="2" max="1000" step="1" value="50" required><p class="hint">更多步数需要更久</p></div></div>
+        <button id="generate" type="submit" class="primary" disabled><span>生成动作视频</span><span>↗</span></button>
+      </form>
+      <div class="fixed"><span>CFG <b>2.5</b></span><span>Seed <b>42</b></span><span>Shape <b>zero</b></span></div>
+      <details class="encoder"><summary>T5-3B · 本地文本编码器</summary><p>/home/weili/.cache/huggingface/hub/models--t5-3b/snapshots/bed96aab9ee46012a5046386105ee5fd0ac572f0</p><p>仅加载本地文件 · 默认动作后处理</p></details>
+    </aside>
+    <section class="preview panel">
+      <div class="section-title"><h2>动作预览</h2><span>02 — PREVIEW</span></div>
+      <div class="screen"><div id="empty-preview"><div class="motion-mark">↗</div><h3>每一个动作，从一句话开始</h3><p>生成完成后，点击播放查看 SMPL 人体动作。</p><span>视频将在这里显示</span></div><video id="video" controls playsinline preload="metadata" hidden aria-label="SMPL 动作视频"></video></div>
+      <div class="video-caption"><div><h3 id="video-title">等待你的第一个动作</h3><p id="video-meta" class="muted">生成后手动播放，支持暂停、拖动进度和全屏。</p></div><a id="download" class="secondary" hidden download>下载视频 ↓</a></div>
+      <div id="task-status" role="status" aria-live="polite"><div class="status-heading"><span id="status-text">就绪</span><span id="elapsed">等待生成</span></div><ol class="steps"><li data-stage="loading">加载模型</li><li data-stage="generating">生成动作</li><li data-stage="rendering">渲染视频</li><li data-stage="done">完成</li></ol><p id="error" role="alert" hidden></p></div>
+    </section>
+  </div>
+  <section class="history"><div class="section-title"><div><h2>生成历史 <span id="history-count">0</span></h2><p class="muted">保留每次创作，随时回看或复用参数。</p></div><span>03 — LIBRARY</span></div><div id="history-list"><p class="history-empty">还没有生成记录。你的动作视频会保存在这里。</p></div></section>
+</main>
+<footer><span>GENMO / LOCAL MOTION STUDIO</span><span>文本 → SMPL → 视频</span></footer>
+<script src="{{ url_for('static', filename='app.js') }}" defer></script>
+</body>
+</html>

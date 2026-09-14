@@ -392,6 +392,28 @@ class ResidentTextMotionEngine:
             self._check_free_memory("warmup")
             print("[Resident] SERVICE READY")
 
+    def set_ddim_steps(self, steps: int) -> bool:
+        """串行更新两种推理采样器；相同步数不重建，不改变既有请求协议。"""
+        if type(steps) is not int or not 2 <= steps <= 1000:
+            raise ValueError("ddim_steps must be an integer in [2,1000]")
+        with self.generation_lock:
+            if steps == self.ddim_steps:
+                return False
+            previous = self.ddim_steps
+            if self.initialized:
+                config = self.denoiser3d.model_cfg.diffusion
+                config.test_timestep_respacing = str(steps)
+                config.gen_only_test_timestep_respacing = str(steps)
+                try:
+                    self.denoiser3d.init_diffusion()
+                except Exception:
+                    config.test_timestep_respacing = str(previous)
+                    config.gen_only_test_timestep_respacing = str(previous)
+                    self.denoiser3d.init_diffusion()
+                    raise
+            self.ddim_steps = steps
+            return True
+
     def _cache_key(self, prompt: str) -> tuple[str, str, int]:
         return prompt, str(self.t5_model), self.max_text_len
 

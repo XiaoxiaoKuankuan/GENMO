@@ -294,48 +294,53 @@ def validate_text_generation_checkpoint(ckpt_path: str | Path) -> dict[str, Any]
         raise RuntimeError(f"Unable to read GEM checkpoint '{path}': {exc}") from exc
 
     try:
-        state_dict = checkpoint.get("state_dict", checkpoint)
-        if not isinstance(state_dict, dict):
-            raise RuntimeError(f"Checkpoint '{path}' does not contain a valid state_dict")
-        keys = tuple(str(key) for key in state_dict)
-        required_markers = ("embed_text", "text_encoder_layers", "gate_cross_attn")
-        if not all(any(marker in key for key in keys) for marker in required_markers):
-            raise RuntimeError(_TEXT_CHECKPOINT_ERROR)
-        raw_contract = checkpoint.get("genmo_text_contract")
-        if raw_contract is None:
-            contract = {
-                "schema_version": 0,
-                "max_text_len": MAX_TEXT_LEN,
-                "encoded_text_dim": TEXT_EMBED_DIM,
-                "text_only": False,
-                "exp_name": "gem_smpl",
-            }
-        elif not isinstance(raw_contract, dict):
-            raise RuntimeError("Checkpoint genmo_text_contract must be a dictionary")
-        else:
-            contract = {
-                "schema_version": int(raw_contract.get("schema_version", -1)),
-                "max_text_len": int(raw_contract.get("max_text_len", -1)),
-                "encoded_text_dim": int(raw_contract.get("encoded_text_dim", -1)),
-                "text_only": bool(raw_contract.get("text_only", False)),
-            }
-            if contract["schema_version"] != 1:
-                raise RuntimeError("Unsupported checkpoint text contract schema")
-            if not 1 <= contract["max_text_len"] <= 512:
-                raise RuntimeError("Checkpoint max_text_len is outside [1,512]")
-            if contract["encoded_text_dim"] != TEXT_EMBED_DIM:
-                raise RuntimeError(
-                    "Checkpoint encoded_text_dim does not match the T5-3B 1024D contract"
-                )
-            contract["exp_name"] = (
-                "gem_smpl_motionmillion_text_only"
-                if contract["text_only"]
-                else "gem_smpl"
-            )
-        return contract
+        return validate_text_generation_payload(checkpoint, path)
     finally:
         del checkpoint
         gc.collect()
+
+
+def validate_text_generation_payload(checkpoint: dict[str, Any], path: str | Path) -> dict[str, Any]:
+    """复用已读取的 checkpoint 检查文本契约，避免网页扫描重复加载大文件。"""
+    state_dict = checkpoint.get("state_dict", checkpoint)
+    if not isinstance(state_dict, dict):
+        raise RuntimeError(f"Checkpoint '{path}' does not contain a valid state_dict")
+    keys = tuple(str(key) for key in state_dict)
+    required_markers = ("embed_text", "text_encoder_layers", "gate_cross_attn")
+    if not all(any(marker in key for key in keys) for marker in required_markers):
+        raise RuntimeError(_TEXT_CHECKPOINT_ERROR)
+    raw_contract = checkpoint.get("genmo_text_contract")
+    if raw_contract is None:
+        contract = {
+            "schema_version": 0,
+            "max_text_len": MAX_TEXT_LEN,
+            "encoded_text_dim": TEXT_EMBED_DIM,
+            "text_only": False,
+            "exp_name": "gem_smpl",
+        }
+    elif not isinstance(raw_contract, dict):
+        raise RuntimeError("Checkpoint genmo_text_contract must be a dictionary")
+    else:
+        contract = {
+            "schema_version": int(raw_contract.get("schema_version", -1)),
+            "max_text_len": int(raw_contract.get("max_text_len", -1)),
+            "encoded_text_dim": int(raw_contract.get("encoded_text_dim", -1)),
+            "text_only": bool(raw_contract.get("text_only", False)),
+        }
+        if contract["schema_version"] != 1:
+            raise RuntimeError("Unsupported checkpoint text contract schema")
+        if not 1 <= contract["max_text_len"] <= 512:
+            raise RuntimeError("Checkpoint max_text_len is outside [1,512]")
+        if contract["encoded_text_dim"] != TEXT_EMBED_DIM:
+            raise RuntimeError(
+                "Checkpoint encoded_text_dim does not match the T5-3B 1024D contract"
+            )
+        contract["exp_name"] = (
+            "gem_smpl_motionmillion_text_only"
+            if contract["text_only"]
+            else "gem_smpl"
+        )
+    return contract
 
 
 def validate_arguments(args: argparse.Namespace) -> None:
