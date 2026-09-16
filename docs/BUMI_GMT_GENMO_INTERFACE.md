@@ -1,57 +1,201 @@
-# GMT 中用于接入 GENMO 的改动
+# GMT 接入 GENMO：逐文件说明与移植清单
 
-本说明只针对容器 `/host/Documents/bumi_GMT_deployment_obs`，宿主机对应目录为
-`/home/weili/docker_projects/bumi_GMT_deployment_listao/bumi_GMT_deployment_obs`。
-本文不列出机器人描述、硬件驱动、其他动作模式等与 GENMO 在线接入无关的修改。
-GMT 本次仅被读取和用于独立协议验收，不修改其工作树。
+本次核对对象仅为：
 
-以下文件均相对于 `src/legged_rl/rl_controller/rl_controllers/`。
+```text
+宿主机 /home/weili/docker_projects/bumi_GMT_deployment_listao/bumi_GMT_deployment_obs
+容器内 /host/Documents/bumi_GMT_deployment_obs
+```
 
-| 文件 | GENMO 接入所需的功能 |
+下文文件相对于 `src/legged_rl/rl_controller/rl_controllers/`。这些是当前工作区已经存在、
+GENMO在线链路依赖的实现；本次不修改GMT。移植到别人GMT时应逐项核对其已有能力，
+按功能移植，不能覆盖对方整个AcController或把对方policy换成本项目旧文件。
+
+环境和运行命令见 [部署手册](BUMI_MUSIC_DEPLOYMENT.md)，其他控制器包括SONIC的适配见
+[通用适配指南](GENMO_CONTROLLER_ADAPTATION.md)。
+
+## 1. policy仍由GMT选择
+
+当前 `launch/load_ac_controller.launch` 在BUMI分支设置ROS参数 `gmtPolicyFile`；
+`AcController.cpp:loadModel()`通过 `nh.getParam("/gmtPolicyFile", ...)` 读取它，
+自行创建ORT session并读取joint_names、default_joint_pos、action_scale、PD等元数据。
+
+GENMO Bridge的新默认行为只是读同一个ROS参数，通过实际容器挂载定位文件，再获取
+关节顺序和默认姿态。Bridge不调用这个GMT模型做动作推理，也不写回参数。
+正常GENMO命令没有`--gmt-policy`；GENMO资产清单v2不携带GMT权重。
+
+这个自动发现方式没有新增GMT源码修改。若别人的GMT使用其他参数名、配置文件或不用ROS，
+在适配器提供对应的只读contract provider即可。更通用的接口可由控制器发布已加载策略的
+参考契约，避免生成端读取policy文件；这是后续设计，并非当前已有的GMT发布功能。
+
+## 2. 新增完整轨迹协议，而不是只收一帧
+
+**文件：`include/rl_controllers/GmtTrajectoryProtocol.h`**
+
+主要入口为 `GmtTrajectoryV1::parse()`、`commandWindow()` 以及 `GmtTrajectoryAckV1`。
+头注释明确说明GENMO与GMT的在线接口。移植时应把纯协议解析与ROS/硬件访问分离，使
+解析器可以独立编译测试。
+
+| 项目 | 当前trajectory_v1 |
 |---|---|
-| `include/rl_controllers/GmtTrajectoryProtocol.h` | 新增完整轨迹包解析、关节顺序/CRC/有限值/四元数检查、真实21帧命令窗口及ACK编码 |
-| `include/rl_controllers/MotionLoaderRedis.h` | 在原单帧Redis读取基础上增加trajectory_v1识别、整包验证后更新、stream/sequence状态、ACK和新鲜度处理 |
-| `include/rl_controllers/AcController.h`、`src/AcController.cpp` | 接入真实command window，向解析器传入policy关节契约，轨迹包绕过legacy centered-delay，无有效包/过期后回DEFAULT |
-| `launch/ac_start.launch`、`ac_start_real.launch`、`load_ac_controller.launch` | 配置online模式、Redis地址/DB/key、ACK key/TTL及0.2秒数据超时，并将参数传入控制器 |
-| `CMakeLists.txt` | 检查并链接hiredis，开启在线路径及相应协议测试 |
-| `test/test_gmt_trajectory_protocol.cpp` | 轨迹结构、真实窗口、错误包拒绝、sequence、ACK与legacy兼容验证 |
+| magic | `OMGBT001` |
+| 帧率 | 50Hz |
+| 窗口 | 110帧：过去10＋当前1＋未来99 |
+| 每帧 | 55个float32 |
+| 头部/总大小 | 104字节／24304字节 |
+| 数值布局 | 根xyz3、根wxyz4、body线速度3、body角速度3、q21、dq21 |
+| 时间/身份 | stream_id、sequence、发布时间、command_revision、plan_id、关节顺序SHA256 |
+| 完整性 | 版本、header/frame/payload长度、FPS、CRC32、有限值和四元数有效性 |
 
-`GmtTrajectoryProtocol.h` 的中文头注释明确将其定义为 GENMO 与 GMT 的在线协议。
-原接口已能读取单帧 Redis 数据；新增的关键能力是完整未来参考、严格契约以及 ACK。
+解析顺序应为：验证整包外壳→核对尺寸和身份→验证payload→构造临时轨迹→全部成功后
+更新可见快照。错误包不能先覆盖半个缓存，再试图回滚。
 
-## 数据内容与顺序
+移植新关节数或字段时，应升级协议和测试，不能只改`55`常量而继续发送同一magic/版本。
+完整布局以GENMO `gem/runtime/gmt_trajectory.py:GmtTrajectoryPacket`及C++解析器为共同依据。
 
-Bridge 根据与 GMT 相同的 `model_135000_stage2.onnx` 元数据计算关节重排。
-该文件 SHA256 为 `d2e176657d72d1b0efcb04406abd17145fc45a3a5755b62aae7b866e0a6e3d1b`。
-模型输入分别为 `policy[1,69]`、`history_obs[1,690]`、`command_window[1,1092]`，
-输出为 `actions[1,21]`。
+## 3. Redis loader区分旧协议和完整轨迹
 
-Redis 的 `gmt_online_frame_bumi` 值是小端二进制 `OMGBT001`：104字节头＋110×55个
-float32，总计24304字节，50 Hz。110帧包含过去10帧、当前1帧、未来99帧。
-每帧55维为根位置3、根四元数wxyz4、机体系根线速度3、根角速度3、关节位置21、
-关节速度21。接收端核验版本、形状、字节数、50 Hz、CRC32、joint_names SHA256、
-所有数值有限性及四元数有效性；验证失败不能覆盖最后合法窗口。
+**文件：`include/rl_controllers/MotionLoaderRedis.h`**
 
-GMT 取当前前后各10帧，逐帧转换为：根高度1＋机体系重力方向3＋根线速度3＋
-根角速度3＋关节位置21＋关节速度21＝52维，组成1092维命令输入。每个时间槽使用
-自己的真实参考，不把同一帧复制成整段未来。
+需要保留/新增以下行为：
 
-## 时间、ACK 与故障处理
+1. 在读取Redis值后识别`OMGBT001`，进入完整轨迹解析；保留对方原有单帧协议分支。
+2. 用**当前控制器实际加载的policy关节名字**计算期待hash，传给协议解析器。
+3. 整包通过后同时更新当前参考帧及过去/未来窗口。
+4. 记录stream、sequence、revision、plan；同一流重复或倒序sequence不能覆盖新数据。
+5. 新鲜度由有效新sequence到达的单调时间计算，不能由“Redis GET有返回值”刷新。
+6. 在完整轨迹路径直接采用包中的q/dq和根速度；旧单帧差分/未来预测不能覆盖真实字段。
+7. 只在合法新包接收后写ACK。
 
-- `trajectory_v1` 已提供真实未来帧，所以接收器和控制器都绕过 legacy centered-delay。
-  实机 launch 的 `gmt_online_centered_window=true` 不会给 GENMO 再叠加10帧延迟。
-- 接收合法新包后写入 `gmt_online_frame_bumi_ack`，magic为`OMGBTA01`，52字节，包含
-  stream、sequence、revision、plan和接收时间，默认TTL1000ms。
-- 同流重复或倒序sequence不替换窗口、不重发ACK，也不刷新数据的新鲜度。
-- 默认0.2秒没有有效新sequence，或尚无合法在线数据时，控制器切回DEFAULT并重置状态。
-- Bridge通过对应ACK启动播放/音乐；这证明消费者收到参考，不能作为动力学跟踪证据。
+当前原有接口如 `update()`、`commandWindow()`、`hasFreshData()` 对AcController提供上述能力。
+对方若使用共享内存、ROS消息或ZMQ，可换传输实现，保留同等轨迹/时间契约即可，不必引入Redis。
 
-Console到Bridge使用ZeroMQ，Bridge到GMT使用Redis SET/GET。此链路没有依赖通过
-ROS topic传递生成动作。当前 `noetic` 使用host网络，因此两侧Redis地址均为
-`127.0.0.1:6379`。本功能验收使用另一临时端口和测试key，不写生产动作key。
+## 4. 从真实轨迹构造策略参考输入
 
-## 验收边界
+**文件：`GmtTrajectoryProtocol.h`、`MotionLoaderRedis.h`、`AcController.h/.cpp`**
 
-原仓库验收脚本直接编译此工作区的协议单测和接收头文件，不启动ROS控制器。
-接收探针检查1092维窗口、finite、centered true/false结果一致、ACK和停止发送后的
-过期状态。它不加载GMT控制策略执行关节控制，因此协议通过不能表述为仿真或实机通过。
+当前GMT的输入接口为：
+
+```text
+policy         [1,69]     当前机器人本体观测
+history_obs    [1,690]    机器人状态/动作历史
+command_window [1,1092]   21帧真实运动参考
+```
+
+它们不是三个都由GENMO生成。GENMO只提供运动参考，69/690仍由控制器采集机器人状态。
+21帧命令窗口为当前前后各10帧，每个时间位置独立转换成：
+
+```text
+root_height1 + gravity_body3 + root_linear_velocity_body3
++ root_angular_velocity_body3 + joint_position21 + joint_velocity21 = 52
+21 × 52 = 1092
+```
+
+根四元数用于把世界重力方向旋转到body系，不能将四元数4列直接代替gravity3列。
+根线/角速度已经是约定body系，不要再次旋转；关节按名字对齐当前消费者顺序。
+关节顺序hash是协议校验，不是自动修正机制，发送前必须已经重排。
+
+`AcController.cpp:computeObservationGmt()`接入窗口；`handleGmtMode()`负责新鲜度和控制周期。
+`AcController.h`保留相应loader、窗口就绪和模式状态。移植到另一模型时，以它训练时的
+窗口/特征/展平顺序为准；1092不是所有GMT实现或所有控制器的固定输入。
+
+## 5. 避免重复centered-delay
+
+**文件：`AcController.cpp:handleGmtMode()`，以及loader的`commandWindow()`分流**
+
+旧单帧输入需要先积累未来帧，当前代码用`gmt_online_centered_window`控制这一等待。
+`trajectory_v1`已经携带真实未来，因此判断应按协议分流：
+
+```cpp
+// 逻辑示意：字段名参考当前源码，按对方控制器结构移植。
+const bool wait_legacy_future = online_centered_window &&
+                               protocol != TRAJECTORY_V1;
+```
+
+对于完整轨迹直接将窗口视为就绪，不能在已有未来参考之上再等待10帧。
+本工作区实机launch即使默认centered=true，trajectory_v1仍走即时窗口路径。
+验收探针比较同一轨迹在centered=true/false下的1092维结果，要求相等。
+
+## 6. ACK只确认对应参考已接收
+
+**文件：`GmtTrajectoryProtocol.h`、`MotionLoaderRedis.h`**
+
+合法新轨迹接收后写回默认key `gmt_online_frame_bumi_ack`，magic=`OMGBTA01`，52字节，
+包含stream、sequence、revision、plan和接收时间；TTL1000ms。
+
+Bridge必须核对这些字段属于当前任务后再推进播放、启动音频。不能把上一首歌的ACK用于
+新revision，不能把旧包反复ACK来掩盖发布端中断。ACK的时间戳和收到时间是通信诊断，
+不是关节已经到位或动作已经消费完毕的证据。
+
+如果对方需要严格按仿真步消费，应另提供消费游标/策略tick反馈及对应播放时钟；不能把
+当前真实时间ACK语义直接改名为消费确认。当前`buffered`路径也是另一个显式协议，不能混包。
+
+## 7. 断流与模式退出
+
+**文件：`MotionLoaderRedis.h`、`AcController.cpp:handleGmtMode()`**
+
+没有合法轨迹或trajectory_v1超过0.2秒无有效新序列时：
+
+- 停止使用过期在线参考，切回控制器已有的DEFAULT逻辑。
+- 重置首帧/窗口/观测初始化状态，防止下次上线沿用旧时间轴。
+- 保留错误原因用于诊断；错误包不更新最后合法包到达时间。
+
+不同控制器的DEFAULT/停止处理不同，应调用对方已有停止流程，不把切回某个模式当作
+跨机器人通用保护保证。GENMO Bridge也会处理心跳、缓冲和返回站姿，两端的处理需配合。
+
+## 8. launch和构建需要接上哪些参数
+
+**文件：`launch/ac_start.launch`、`ac_start_real.launch`、`load_ac_controller.launch`**
+
+上层入口应把参数传到真正初始化loader的地方，不能只在launch顶层声明：
+
+```text
+gmt_mode=online
+gmt_redis_host=127.0.0.1
+gmt_redis_port=6379
+gmt_redis_db=0
+gmt_redis_key=gmt_online_frame_bumi
+gmt_redis_ack_key=gmt_online_frame_bumi_ack
+gmt_redis_ack_ttl_ms=1000
+gmt_redis_timeout=0.2
+```
+
+ROS参数实际使用GMT现有命名，如`gmtMotionMode/gmtRedisHost/gmtRedisKey/gmtRedisAckKey`。
+保留对方policy配置和原有控制频率选择；确保参考/策略周期与消息50Hz契约一致。
+当前仿真2000/40和实机500/10均得到50Hz，这不意味着所有控制器都需要2000Hz基础循环。
+
+**文件：`CMakeLists.txt`**
+
+Redis实现需探测并链接hiredis、为在线代码启用相应编译宏，协议独立测试依赖Eigen/gtest等。
+移植时把依赖加到实际控制器target；只安装hiredis但没链接target，运行时仍没有在线路径。
+对方使用其他传输则替换对应依赖，协议数学逻辑不应强耦合ROS。
+
+在已配置的GMT容器工作区可以构建对应包，例如：
+
+```bash
+source /opt/ros/noetic/setup.bash
+cd /host/Documents/bumi_GMT_deployment_obs
+catkin build rl_controllers -j4 -p2 --no-status
+source devel/setup.bash
+```
+
+此处是移植后的构建指令，不表示本次执行过GMT重编或仿真。修改前后都保留对方原有有效改动。
+
+## 9. 测试哪些代码
+
+**GMT文件：`test/test_gmt_trajectory_protocol.cpp`**
+
+应覆盖：Python/C++关节hash一致，ACK字节布局，当前及21个真实参考帧，错误版本/长度/
+CRC/FPS/关节/非有限值/四元数拒绝，重复/旧sequence处理，ACK和旧单帧协议兼容。
+
+**GENMO文件：**
+
+- `tests/test_gmt_trajectory.py`：Python端轨迹协议和重采样相关回归。
+- `tests/bumi/test_bumi_online_deployment.py`：分块、帧序、revision、后处理和Bridge行为。
+- `tests/bumi/test_gmt_policy_source.py`：读取GMT自己的ROS参数、模型选择变化、容器挂载和失败边界。
+- `tests/fixtures/bumi_gmt_receiver_probe.cpp`：直接包含当前GMT头文件的独立接收探针。
+- `tools/eval/validate_bumi_gmt_deployment.py`：临时Redis/ZMQ/XML-RPC参数夹具，真实模型→Bridge→真实C++接收器。
+
+参数夹具只模拟ROS的只读getParam，并从当前obs的BUMI launch读取策略配置；不会启动ROS
+控制器。它验证自动发现路径和通信，不能替代真实控制器加载、仿真跟踪或硬件验收。
+本次GMT自身代码保持未修改；要把上述能力移植到别人工作区，应在对方分支独立验证。

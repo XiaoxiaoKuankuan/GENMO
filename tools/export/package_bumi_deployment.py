@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """在完整 GENMO 仓库中发布无需 checkpoint 的 BUMI 音乐运行资产包。
 
-本工具接收已经导出并验证的 ONNX、TensorRT engine、运动学、统计和 GMT policy，核验
-源 checkpoint 的 SHA256 后复制七项运行资产，生成相对路径清单，再调用部署端同一个
+本工具接收已经导出并验证的 ONNX、TensorRT engine、运动学和统计，核验
+源 checkpoint 的 SHA256 后复制六项GENMO运行资产，生成相对路径清单，再调用部署端同一个
 检查器验证跨文件契约。输出通过同一文件系统上的临时目录原子发布；不覆盖已有目录。
 临时目录无论成功或失败都会自动清理。checkpoint 本身只在原仓库读取，不进入部署包。
 
@@ -26,6 +26,7 @@ if str(ROOT) not in sys.path:
 
 from gem.runtime.bumi_deployment_bundle import (  # noqa: E402
     BUMI_DEPLOYMENT_CONTRACT,
+    BUMI_DEPLOYMENT_LEGACY_CONTRACT,
     file_sha256,
     load_bumi_deployment_manifest,
 )
@@ -33,8 +34,9 @@ from gem.runtime.bumi_deployment_bundle import (  # noqa: E402
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
-    for name in ("checkpoint", "onnx", "engine", "kinematics", "stats", "gmt-policy", "output-dir"):
+    for name in ("checkpoint", "onnx", "engine", "kinematics", "stats", "output-dir"):
         parser.add_argument(f"--{name}", type=Path, required=True)
+    parser.add_argument("--gmt-policy", type=Path, help="仅兼容旧v1打包；新部署不要传此参数")
     return parser
 
 
@@ -50,8 +52,9 @@ def main(argv: list[str] | None = None) -> int:
         "engine_metadata": (engine.parent / "engine.json").resolve(strict=True),
         "kinematics": args.kinematics.expanduser().resolve(strict=True),
         "stats": args.stats.expanduser().resolve(strict=True),
-        "gmt_policy": args.gmt_policy.expanduser().resolve(strict=True),
     }
+    if args.gmt_policy is not None:
+        sources["gmt_policy"] = args.gmt_policy.expanduser().resolve(strict=True)
     output = args.output_dir.expanduser().resolve()
     if output.exists():
         raise FileExistsError(f"refusing to overwrite deployment bundle: {output}")
@@ -88,7 +91,8 @@ def main(argv: list[str] | None = None) -> int:
                 "sha256": file_sha256(target),
             }
         payload = {
-            "contract_version": BUMI_DEPLOYMENT_CONTRACT,
+            "contract_version": BUMI_DEPLOYMENT_LEGACY_CONTRACT
+            if args.gmt_policy is not None else BUMI_DEPLOYMENT_CONTRACT,
             "source_checkpoint_sha256": file_sha256(checkpoint),
             "source_checkpoint_name": checkpoint.name,
             "source_git_commit": source_commit,

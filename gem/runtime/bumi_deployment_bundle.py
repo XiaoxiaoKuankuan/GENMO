@@ -1,7 +1,8 @@
 """读取并完整核验无需训练 checkpoint 的 BUMI 音乐部署资产包。
 
 部署清单只允许引用其所在目录内的相对路径，并对 ONNX、TensorRT engine、两份元数据、
-统计、运动学和 GMT policy 逐个核验字节数及 SHA256。源 checkpoint 的 SHA256 是原仓库
+统计和运动学逐个核验字节数及 SHA256。v2 不携带或选择 GMT policy，控制器自行管理；
+兼容旧 v1 七资产清单。源 checkpoint 的 SHA256 是原仓库
 导出时形成的来源记录，部署机器不重新读取 checkpoint；但它必须与 ONNX 元数据及
 engine 元数据一致，且所有实际执行的模型文件仍须通过完整哈希校验。
 
@@ -25,7 +26,8 @@ from gem.runtime.bumi_music_contract import (
     BUMI_ONNX_OUTPUTS,
 )
 
-BUMI_DEPLOYMENT_CONTRACT = "genmo.bumi_music_deployment.v1"
+BUMI_DEPLOYMENT_CONTRACT = "genmo.bumi_music_deployment.v2"
+BUMI_DEPLOYMENT_LEGACY_CONTRACT = "genmo.bumi_music_deployment.v1"
 ASSET_NAMES = (
     "onnx",
     "onnx_metadata",
@@ -33,7 +35,6 @@ ASSET_NAMES = (
     "engine_metadata",
     "kinematics",
     "stats",
-    "gmt_policy",
 )
 _SHA256 = re.compile(r"[0-9a-f]{64}\Z")
 
@@ -73,15 +74,17 @@ def load_bumi_deployment_manifest(path: str | Path) -> BumiDeploymentBundle:
     manifest = Path(path).expanduser().resolve(strict=True)
     root = manifest.parent
     payload = _json(manifest)
-    if payload.get("contract_version") != BUMI_DEPLOYMENT_CONTRACT:
+    version = payload.get("contract_version")
+    if version not in (BUMI_DEPLOYMENT_CONTRACT, BUMI_DEPLOYMENT_LEGACY_CONTRACT):
         raise ValueError("unsupported BUMI deployment manifest contract")
+    asset_names = ASSET_NAMES + (("gmt_policy",) if version == BUMI_DEPLOYMENT_LEGACY_CONTRACT else ())
     source_sha = _sha(payload.get("source_checkpoint_sha256"), "source_checkpoint_sha256")
     assets = payload.get("assets")
-    if not isinstance(assets, dict) or set(assets) != set(ASSET_NAMES):
-        raise ValueError(f"deployment assets must contain exactly {ASSET_NAMES}")
+    if not isinstance(assets, dict) or set(assets) != set(asset_names):
+        raise ValueError(f"deployment assets must contain exactly {asset_names}")
     paths: dict[str, Path] = {}
     hashes: dict[str, str] = {}
-    for name in ASSET_NAMES:
+    for name in asset_names:
         record = assets[name]
         if not isinstance(record, dict) or not isinstance(record.get("path"), str):
             raise ValueError(f"invalid deployment asset: {name}")

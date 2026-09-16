@@ -33,6 +33,7 @@ SEEDS = (
     "scripts/demo/check_bumi_deployment.py",
     "tests/bumi/test_bumi_deployment_bundle.py",
     "tests/bumi/test_bumi_online_deployment.py",
+    "tests/bumi/test_gmt_policy_source.py",
     "tests/bumi/conftest.py",
 )
 
@@ -119,6 +120,7 @@ def main(argv: list[str] | None = None) -> int:
         "pyproject.toml",
         "docs/BUMI_MUSIC_DEPLOYMENT.md",
         "docs/BUMI_GMT_GENMO_INTERFACE.md",
+        "docs/GENMO_CONTROLLER_ADAPTATION.md",
     }
     keep.update(
         path
@@ -152,6 +154,7 @@ def main(argv: list[str] | None = None) -> int:
             "不包含训练 checkpoint、模型导出或训练代码。\n\n"
             "- [环境安装、模型检查和三个终端启动](docs/BUMI_MUSIC_DEPLOYMENT.md)\n"
             "- [GMT 中直接用于 GENMO 接入的改动](docs/BUMI_GMT_GENMO_INTERFACE.md)\n"
+            "- [适配其他 GMT、SONIC 与通用控制器](docs/GENMO_CONTROLLER_ADAPTATION.md)\n"
             "- [依赖闭包清单](DEPLOYMENT_FILES.json)\n"
             "- [实现与实际验收记录](记录文本.md)\n\n"
             "默认 DDIM20、CFG2.5、seed42，生成30 Hz、GMT参考50 Hz。"

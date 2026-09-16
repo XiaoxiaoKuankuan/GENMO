@@ -16,6 +16,7 @@ import pytest
 from gem.robots.bumi.feature_codec import BUMI_REPRESENTATION_CONTRACT_VERSION
 from gem.runtime.bumi_deployment_bundle import (
     BUMI_DEPLOYMENT_CONTRACT,
+    BUMI_DEPLOYMENT_LEGACY_CONTRACT,
     file_sha256,
     load_bumi_deployment_manifest,
     resolve_console_assets,
@@ -58,10 +59,9 @@ def deployment_manifest(tmp_path: Path) -> Path:
             "engine_metadata": "engine/engine.json",
             "kinematics": "kinematics.json",
             "stats": "stats.json",
-            "gmt_policy": "gmt.onnx",
         }.items()
     }
-    for name in ("onnx", "engine", "gmt_policy"):
+    for name in ("onnx", "engine"):
         paths[name].parent.mkdir(parents=True, exist_ok=True)
         paths[name].write_bytes(("test " + name).encode())
     _write(paths["kinematics"], {"test": "kinematics"})
@@ -134,9 +134,32 @@ def test_relocated_bundle_needs_no_checkpoint(
     assert not list(moved.rglob("*.ckpt"))
 
 
+def test_v2_bundle_is_controller_independent(deployment_manifest):
+    bundle = load_bumi_deployment_manifest(deployment_manifest)
+    assert "gmt_policy" not in bundle.paths
+    assert len(bundle.paths) == 6
+
+
+def test_v1_seven_asset_bundle_still_loads(deployment_manifest):
+    policy = deployment_manifest.parent / "legacy_gmt.onnx"
+    policy.write_bytes(b"legacy policy")
+    data = json.loads(deployment_manifest.read_text())
+    data["contract_version"] = BUMI_DEPLOYMENT_LEGACY_CONTRACT
+    data["assets"]["gmt_policy"] = {
+        "path": policy.name,
+        "size_bytes": policy.stat().st_size,
+        "sha256": file_sha256(policy),
+    }
+    _write(deployment_manifest, data)
+    assert load_bumi_deployment_manifest(deployment_manifest).paths["gmt_policy"] == policy
+    policy.write_bytes(b"legacy tamper")
+    with pytest.raises(ValueError):
+        load_bumi_deployment_manifest(deployment_manifest)
+
+
 @pytest.mark.parametrize(
     "name",
-    ["onnx", "engine", "onnx_metadata", "engine_metadata", "stats", "kinematics", "gmt_policy"],
+    ["onnx", "engine", "onnx_metadata", "engine_metadata", "stats", "kinematics"],
 )
 def test_tampered_asset_rejected(deployment_manifest: Path, name: str) -> None:
     bundle = load_bumi_deployment_manifest(deployment_manifest)

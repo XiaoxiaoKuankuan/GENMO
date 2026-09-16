@@ -21,8 +21,11 @@ import socket
 import subprocess
 import sys
 import tempfile
+import threading
 import time
+import xml.etree.ElementTree as ET
 from pathlib import Path
+from xmlrpc.server import SimpleXMLRPCServer
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -73,7 +76,23 @@ def main(argv: list[str] | None = None) -> int:
     if not Path(console_module.__file__).resolve().is_relative_to(deployment_root):
         raise RuntimeError("Console import did not originate in deployment root")
     bundle = load_bumi_deployment_manifest(manifest_path)
-    policy = GmtPolicyContract.from_onnx(bundle.paths["gmt_policy"])
+    controller = gmt_root / "src/legged_rl/rl_controller/rl_controllers"
+    # 只为隔离验收构造只读参数夹具：取当前obs的BUMI分支，绝不启动ROS/Gazebo。
+    # 正常Bridge读取真实ROS master；此夹具不能被表述为真实ROS控制器已启动。
+    launch_xml = ET.parse(controller / "launch/load_ac_controller.launch").getroot()
+    values = [
+        param.attrib["value"]
+        for group in launch_xml.findall("group")
+        if group.get("if") == "$(eval robot_type=='bumi')"
+        for param in group.findall("param")
+        if param.get("name") == "gmtPolicyFile"
+    ]
+    if len(values) != 1:
+        raise ValueError("isolated obs fixture requires one BUMI gmtPolicyFile in its launch")
+    policy_path = Path(values[0].replace("$(find rl_controllers)", str(controller)))
+    if "$(" in str(policy_path):
+        raise ValueError("isolated obs fixture cannot resolve this launch substitution")
+    policy = GmtPolicyContract.from_onnx(policy_path)
     report = {
         "pass": False,
         "deployment_root": str(deployment_root),
@@ -82,11 +101,15 @@ def main(argv: list[str] | None = None) -> int:
         "audio": str(audio),
         "seconds": args.seconds,
         "source_checkpoint_sha256": bundle.source_checkpoint_sha256,
+        "policy_discovery": "isolated read-only XML-RPC fixture from obs launch; no real ROS started",
+        "gmt_policy_path": str(policy_path),
     }
     processes = []
     console = None
     log_streams = []
     error = None
+    ros_server = None
+    ros_thread = None
     with tempfile.TemporaryDirectory(prefix="genmo-gmt-deployment-") as temporary:
         tmp = Path(temporary)
         os.environ["NUMBA_CACHE_DIR"] = str(tmp / "numba")
@@ -105,7 +128,6 @@ def main(argv: list[str] | None = None) -> int:
         key = "genmo_deployment_validation"
         endpoint = f"tcp://127.0.0.1:{zmq_port}"
         report.update(redis_port=port, redis_key=key, bridge_endpoint=endpoint)
-        controller = gmt_root / "src/legged_rl/rl_controller/rl_controllers"
         cppflags = shlex.split(
             subprocess.check_output(
                 ["pkg-config", "--cflags", "--libs", "eigen3", "hiredis"], text=True
@@ -128,6 +150,17 @@ def main(argv: list[str] | None = None) -> int:
             return proc
 
         try:
+            ros_server = SimpleXMLRPCServer(("127.0.0.1", 0), logRequests=False)
+            parameters = {"/gmtPolicyFile": str(policy_path), "/robot_type": "bumi"}
+            ros_server.register_function(
+                lambda caller, name: [1, "ok", parameters[name]]
+                if name in parameters else [-1, "missing", ""],
+                "getParam",
+            )
+            ros_thread = threading.Thread(target=ros_server.serve_forever, daemon=True)
+            ros_thread.start()
+            ros_uri = f"http://127.0.0.1:{ros_server.server_address[1]}"
+            report["ros_parameter_fixture_uri"] = ros_uri
             common = [
                 "g++",
                 "-std=c++17",
@@ -211,8 +244,8 @@ def main(argv: list[str] | None = None) -> int:
                     key,
                     "--kinematics",
                     str(bundle.paths["kinematics"]),
-                    "--gmt-policy",
-                    str(bundle.paths["gmt_policy"]),
+                    "--ros-master-uri",
+                    ros_uri,
                     "--audio-playback",
                     "off",
                     "--estop-file",
@@ -308,6 +341,11 @@ def main(argv: list[str] | None = None) -> int:
                 stop_process(process)
             for stream in log_streams:
                 stream.close()
+            if ros_server is not None:
+                ros_server.shutdown()
+                ros_server.server_close()
+            if ros_thread is not None:
+                ros_thread.join(timeout=2)
             report["temporary_directory"] = temporary
     report["temporary_removed"] = not Path(report["temporary_directory"]).exists()
     output = args.output.expanduser().resolve()
