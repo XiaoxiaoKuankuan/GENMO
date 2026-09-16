@@ -251,7 +251,7 @@ def main(argv: list[str] | None = None) -> int:
             console.initialize()
             report["identity"] = console.identity.as_dict()
             command = parse_console_line(f"play {shlex.quote(str(audio))} {args.seconds} --seed 42")
-            console.play(command)
+            console.start_play(command)
             deadline = time.monotonic() + args.timeout
             saw_playing = False
             maximum_frames = 0
@@ -270,8 +270,13 @@ def main(argv: list[str] | None = None) -> int:
                 time.sleep(0.1)
             else:
                 raise TimeoutError("generation/playback did not complete")
-            if not saw_playing or maximum_frames < 1:
-                raise RuntimeError("no complete playback observed")
+            expected_frames = round(args.seconds * 30)
+            if (
+                not saw_playing
+                or maximum_frames != expected_frames
+                or status["last_timing"].get("submitted_frames") != expected_frames
+            ):
+                raise RuntimeError("playback did not submit/accept the complete requested sequence")
             p95 = status["last_timing"].get("continuation_p95_seconds")
             report.update(
                 saw_playing=saw_playing,

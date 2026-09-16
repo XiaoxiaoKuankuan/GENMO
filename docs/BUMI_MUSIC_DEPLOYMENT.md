@@ -23,6 +23,23 @@ checkpoint 的 SHA256 只作为来源记录，实际模型与资产逐文件验�
 在目标机重新验证一个并不存在的 checkpoint。ONNX/engine/stats/kinematics 必须来自同套
 发布。损坏文件、错误来源、越界路径、资产参数与清单混用都会拒绝启动。
 
+部署分支保留34个Python文件（含测试和包入口），具体闭包见 `DEPLOYMENT_FILES.json`。
+核心职责如下，网络构造、训练配置、checkpoint读取和导出工具仍在原仓库：
+
+| 代码 | 部署职责 |
+|---|---|
+| `scripts/demo/demo_music_bumi_console.py` | 音乐命令、常驻模型、特征缓存、换歌/取消/状态和滑窗提交 |
+| `scripts/demo/demo_bumi_gmt_bridge.py` | 独立播放与轨迹发布、ACK同步、站姿过渡、输入检查及故障处理 |
+| `gem/utils/music_features.py` | 本地音频解码与EDGE35提取 |
+| `gem/runtime/bumi_music_deploy.py`、`music_only_trt.py` | ORT/TRT单步执行、DDIM、120/30/90滑窗及确定性seed派生 |
+| `gem/robots/bumi/` | qpos30反归一化、qpos28解码、纯Torch FK、contact和因果足锁 |
+| `gem/runtime/bumi_online_stream.py`、`bumi_gmt_plan.py`、`qpos_timeline.py` | 在线身份/帧序、轨迹计划、增量时间轴和30→50 Hz重采样 |
+| `gem/runtime/gmt_trajectory.py`及桥接实际引用的辅助模块 | GMT policy关节契约、trajectory_v1/ACK编码和Redis发布 |
+| `gem/runtime/bumi_deployment_bundle.py`、`scripts/demo/check_bumi_deployment.py` | 相对路径资产清单、完整哈希、契约及安装检查 |
+
+`gem/diffusion_utils/` 只保留实际DDIM依赖的数学与采样模块；部署分支的
+`gem/runtime/__init__.py`不导入文本/人体/视频引擎。原仓库的包级接口不作此裁剪。
+
 ## 运行环境
 
 已选基线：Ubuntu 22.04 x86_64、Python 3.10、RTX 4090、NVIDIA 580.159.03，
@@ -38,6 +55,10 @@ python3.10 -m venv .venv
 # 先按 system-packages.txt 配好同版 libnvinfer/libnvinfer-plugin，再安装对应 binding。
 .venv/bin/python -m pip install --no-deps -r requirements/deployment/tensorrt-bindings.lock
 ```
+
+若使用uv安装第一份锁，需要显式选择 `--index-strategy unsafe-best-match`，因为本清单
+同时使用PyPI和PyTorch cu124索引；所有包仍按锁中版本安装。pytest仅用于开发回归，
+不属于运行依赖，本次干净环境另装pytest9.1.1完成测试。
 
 宿主机另需 Redis Server、FFmpeg/ffplay。GMT 继续运行在原 `noetic` 容器里。
 当前容器为 host 网络，GENMO 与 GMT 共用宿主机 `127.0.0.1:6379`。GMT CUDA 模式使用
@@ -151,3 +172,43 @@ GENMO 发出 30 Hz qpos28，Bridge 完成 30→50 Hz 插值与关节重排，再
 编译指定 `obs` 工作区的真实 C++ 接收器，对接部署目录的 Console。它只验证模型生成、
 协议、窗口、ACK、超时及实时性，不启动 ROS/Gazebo/实机。所有临时产物自动清理。
 上述发布/验收工具保留在原 GENMO 仓库，不进入最小部署分支。
+
+## 2026-09-16 实际交付与验收
+
+正式资产包约1.50 GB（十进制，不含Python环境），没有训练checkpoint。部署清单保留
+原仓库发布提交 `9e1706bd8977ed047d498a97b8e690bc8641abd9` 及 `source_git_dirty=false`。
+完整文件SHA均在清单中，其中模型身份为：
+
+| 项目 | SHA256 |
+|---|---|
+| 源s350000 checkpoint（不交付） | `fdf3bd67910b76b252d77932b485445258262fa24b5286850812fbe33aca51cc` |
+| ONNX | `b2d0ed2fba436459f57597dfb3976338426e063953d5a7d0b5770284abdb5481` |
+| 最终TensorRT engine | `ae5bc2eaab8c81b4652c064036e8501ed31010df91d0e92b98d24d97cb602a88` |
+| GMT policy | `d2e176657d72d1b0efcb04406abd17145fc45a3a5755b62aae7b866e0a6e3d1b` |
+
+- 原仓库重新导出结果与既有s350000 ONNX逐字节一致。
+- 普通FP16首次未通过既定数值阈值，最终交付采用 `attention_norm_heads_fp32_v1` 混合精度。
+  PyTorch/ONNX/TensorRT单步和完整20步DDIM全部通过原阈值；完整采样TRT对PyTorch的
+  qpos最大绝对差0.00343883，FK位置最大绝对差0.000800386米。contact最大绝对差
+  0.284624按既有 `atol=0.03, rtol=0.03` 联合容差通过，不是逐项绝对误差都小于0.03。
+- 原仓库回归83通过、3项条件跳过；最小部署目录全新环境45通过。真实engine单步输出
+  为 `[1,120,30]` 和 `[1,120,2]`，数值有限。
+- 将代码和模型迁到含中文/空格的系统临时目录，工作目录设在项目外，模块来源与资产解析
+  均通过；环境中Hydra、Lightning、Transformers、SMPL-X、Open3D均不存在。
+- 真实AIST mLH0前10秒生成3个窗口并提交300帧；部署目录Console→Bridge→真实GMT C++
+  接收器通过。续窗两次耗时0.08788/0.09449秒，P95为0.09416秒；这是本机本段音乐的
+  小样本，不是所有音乐的延迟保证。首次EDGE35提取（含冷启动）12.40秒，需与去噪耗时区分。
+- 隔离Redis端口59351、ZMQ47127，C++原有5项协议测试全部通过；实际接收1339个新包
+  （包括站姿与过渡），1092维窗口有限、centered true/false一致，ACK同步和停止发送后
+  0.2秒过期处理通过。Bridge发布频率约50.013 Hz。
+- 以上只验收导出、推理和通信；没有启动ROS控制器、仿真或实机，也没有修改GMT工作树。
+
+正式证据在原仓库 `outputs/deployment/bumi_music_v5_s350000/`：
+`export_verification.json`、`parity_sensitive.json`、`communication.json`、
+`relocation.json`、`unit_tests.txt`、`minimal_unit_tests.txt`。首版失败的数值报告保留供追溯，
+不合格engine及全部本轮临时目录/缓存已清理。
+
+便携交付包 `bumi_music_only_gmt_s350000.tar.gz` 放在同一证据目录，包含部署代码、模型和
+`validation/`验收结论，不包含`.git`工作树指针、`.venv`、训练checkpoint或训练数据。
+另一台电脑解压后按本说明创建环境，再执行安装检查和三个终端启动；Git分支仅含代码，
+单独clone分支后仍需另行复制整个 `models/bumi_v5_s350000/`。
