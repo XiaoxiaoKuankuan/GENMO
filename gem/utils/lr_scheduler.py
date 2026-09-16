@@ -6,6 +6,8 @@ MotionMillion 从零训练需要在前 5,000 个 optimizer step 将学习率稳�
 到 AdamW 基础学习率，随后在 300,000 step 内余弦下降到绝对下限 2e-6。本模块
 把该规则封装成标准 ``LambdaLR``，可由 Hydra 直接实例化，并支持 Lightning 完整
 checkpoint 恢复 ``last_epoch`` 状态；它不改变已有实验所使用的 MultiStepLR。
+ContinuationWarmupCosineLR 则用于完整恢复 optimizer 后开启新的绝对步数阶段，
+保留 AdamW 动量并防止旧 scheduler 的总步数覆盖新计划。
 """
 
 from __future__ import annotations

@@ -56,6 +56,9 @@ all-reduce/broadcast 检查。所有 smoke/回归测试输出只放系统临时�
 
 ```bash
 PYTHONDONTWRITEBYTECODE=1 OMP_NUM_THREADS=1 \
+CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 \
+NCCL_CUMEM_HOST_ENABLE=0 NCCL_IB_DISABLE=1 \
+NCCL_SOCKET_IFNAME=lo TORCH_NCCL_BLOCKING_WAIT=1 \
 .venv/bin/torchrun --standalone --nnodes=1 --nproc_per_node=8 \
   scripts/train.py exp=gem_smpl_motionmillion_continue \
   resume_mode=/absolute/path/to/s210000.ckpt \
@@ -64,3 +67,5 @@ PYTHONDONTWRITEBYTECODE=1 OMP_NUM_THREADS=1 \
 
 启动前先检查同分支工作树、GitHub 同步、GPU 空闲和 checkpoint 身份；依次完成本地
 回归、推送、服务器 ff-only 同步、完整拓扑检查和隔离短程恢复测试，再正式启动。
+服务器1以上四个 NCCL 环境变量沿用已完成的 215k 正式训练；完整拓扑检查也必须使用
+相同环境。不能用 `NCCL_CUMEM_ENABLE` 替代 `NCCL_CUMEM_HOST_ENABLE`。

@@ -313,6 +313,7 @@ class MotionMillionQualityMonitor(pl.Callback):
                             )
                             batch = model.transfer_batch_to_device(batch, model.device, 0)
                             loss_batch = copy.deepcopy(batch)
+                            loss_batch["_validation_loss"] = True
                             model.prepare_batch(loss_batch, "diffusion")
                             loss = model.train_step(loss_batch, ordinal, "diffusion")["loss"]
                             losses.append(float(loss.detach()))
@@ -343,6 +344,10 @@ class MotionMillionQualityMonitor(pl.Callback):
                     rows.append(
                         {
                             "ordinal": ordinal,
+                            "source_index": index,
+                            "sample_seeds": [
+                                (seed + index * 1009) % (2**31 - 1) for seed in self.seeds
+                            ],
                             "motion_id": sample["meta"]["motion_id"],
                             "caption": sample["caption"],
                             "length": int(sample["length"]),
@@ -389,10 +394,18 @@ class MotionMillionQualityMonitor(pl.Callback):
                             "fps": 30,
                             "seeds": self.seeds,
                             "cohort_fingerprint": self.cohort_fingerprint,
+                            "report": report,
                             "samples": [
                                 {
                                     key: row[key]
-                                    for key in ("ordinal", "motion_id", "caption", "length")
+                                    for key in (
+                                        "ordinal",
+                                        "source_index",
+                                        "sample_seeds",
+                                        "motion_id",
+                                        "caption",
+                                        "length",
+                                    )
                                 }
                                 for row in rows
                             ],

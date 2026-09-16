@@ -20,9 +20,7 @@ from gem.utils.net_utils import length_to_mask
 from .gem_cfg_sampler import ClassifierFreeSampleModel
 
 
-def apply_regression_targets_to_2d_only(
-    target_x: torch.Tensor, inputs: dict
-) -> torch.Tensor:
+def apply_regression_targets_to_2d_only(target_x: torch.Tensor, inputs: dict) -> torch.Tensor:
     """Replace only 2D-only targets with regression predictions when required.
 
     Fully supervised diffusion batches never need a regression pass.  A 2D-only
@@ -39,9 +37,7 @@ def apply_regression_targets_to_2d_only(
     if not bool(mask_2d_only.any()):
         return target_x
     if "regression_outputs" not in inputs:
-        raise RuntimeError(
-            "diffusion-only cannot train 2d_only samples without regression outputs"
-        )
+        raise RuntimeError("diffusion-only cannot train 2d_only samples without regression outputs")
     regression_target = inputs["regression_outputs"]["model_output"]["pred_x_start"].detach()
     target_x[mask_2d_only] = regression_target[mask_2d_only]
     return target_x
@@ -122,8 +118,16 @@ class GEMDiffusion(nn.Module):
         return
 
     def forward_train(self, inputs, mode):
-        assert self.training, "forward_train should only be called during training"
-        diffusion = self.train_diffusion if self.training else self.test_diffusion
+        # 固定质量监控显式请求原训练噪声分布下的验证损失；网络仍处于 eval，
+        # 关闭 CFG/text dropout，且必须 no_grad，不能借此旁路正常训练模式检查。
+        validation_loss = inputs.get("_validation_loss", False)
+        if validation_loss:
+            assert not self.training and not torch.is_grad_enabled(), (
+                "validation_loss requires eval mode and no_grad"
+            )
+        else:
+            assert self.training, "forward_train should only be called during training"
+        diffusion = self.train_diffusion
         length = inputs["length"]
         # target_x = inputs["target_x"]
         motion = inputs["motion"]

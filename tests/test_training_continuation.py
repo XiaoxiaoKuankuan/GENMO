@@ -10,6 +10,7 @@
 import copy
 import random
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -26,6 +27,7 @@ from gem.callbacks.motionmillion_quality import (
     quality_decision,
 )
 from gem.callbacks.simple_ckpt_saver import SimpleCkptSaver
+from gem.network.gem_diffusion import GEMDiffusion
 from gem.utils.lr_scheduler import ContinuationWarmupCosineLR, LinearWarmupCosineAnnealingLR
 
 
@@ -166,6 +168,41 @@ def test_slide_proxy_measures_horizontal_contact_motion():
     joints[0, 0, 0] = np.nan
     with pytest.raises(ValueError, match="有限"):
         motion_proxies(joints)
+
+
+def test_validation_loss_uses_train_noise_without_enabling_dropout():
+    diffusion = GEMDiffusion.__new__(GEMDiffusion)
+    torch.nn.Module.__init__(diffusion)
+    diffusion.train_diffusion = SimpleNamespace(
+        original_num_steps=1000, _scale_timesteps=lambda t: t
+    )
+    diffusion.regression_input_type = "zero"
+    diffusion.args = SimpleNamespace(out_attr=[])
+
+    class Denoiser(torch.nn.Module):
+        def forward(self, x, t, **kwargs):
+            assert not self.training
+            assert t.item() == 999
+            return {"pred_x": x}
+
+    diffusion.denoiser = Denoiser()
+    diffusion.eval()
+    inputs = {
+        "length": torch.tensor([3]),
+        "motion": torch.zeros(1, 3, 2),
+        "f_cond": torch.zeros(1, 3, 2),
+        "f_empty": torch.zeros(1, 3, 2),
+        "mask": {"valid": torch.ones(1, 3, dtype=torch.bool)},
+        "sample_indices_dict": {},
+    }
+    with pytest.raises(AssertionError, match="training"):
+        diffusion.forward_train(inputs, "regression")
+    inputs["_validation_loss"] = True
+    with pytest.raises(AssertionError, match="no_grad"):
+        diffusion.forward_train(inputs, "regression")
+    with torch.no_grad():
+        assert diffusion.forward_train(inputs, "regression")["pred_x"].shape == (1, 3, 2)
+    assert diffusion.training is False and diffusion.denoiser.training is False
 
 
 def test_quality_requires_reliable_improvement_and_no_collapse():
