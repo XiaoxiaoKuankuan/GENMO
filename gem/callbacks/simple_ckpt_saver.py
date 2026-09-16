@@ -35,6 +35,7 @@ class SimpleCkptSaver(Checkpoint):
         every_n_steps=None,
         save_last=None,
         save_weights_only=False,
+        save_on_train_end=False,
     ):
         super().__init__()
         self.output_dir = Path(output_dir)
@@ -44,6 +45,7 @@ class SimpleCkptSaver(Checkpoint):
         self.every_n_steps = every_n_steps
         self.save_last = save_last
         self.save_weights_only = save_weights_only
+        self.save_on_train_end = save_on_train_end
 
         # Setup output dir
         if rank_zero_only.rank == 0:
@@ -90,6 +92,16 @@ class SimpleCkptSaver(Checkpoint):
             trainer.strategy.save_checkpoint(checkpoint, lastpath)
             os.chmod(filepath, 0o755)
             os.chmod(lastpath, 0o755)
+
+    @rank_zero_only
+    def on_train_end(self, trainer, pl_module):
+        """显式启用时补存正常结束/质量早停的最终状态；旧实验默认行为保持不变。"""
+        if self.save_on_train_end and self.save_top_k != 0:
+            # 即使恰逢周期保存，也刷新回调/循环最终状态，方便正确恢复。
+            filepath = self.output_dir / f"s{trainer.global_step:06d}.ckpt"
+            checkpoint = trainer._checkpoint_connector.dump_checkpoint()
+            trainer.strategy.save_checkpoint(checkpoint, filepath)
+            trainer.strategy.save_checkpoint(checkpoint, self.output_dir / "last.ckpt")
 
     @rank_zero_only
     def on_train_batch_end(self, trainer, pl_module, outputs, batch, batch_idx: int) -> None:
