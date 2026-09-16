@@ -10,8 +10,9 @@
 桥在收到默认两个预生成块后进入 WAIT_ACK；只有匹配 stream/revision/plan 的 GMT ACK
 到达后才推进时钟并启动音频。ACK 超时或陈旧、心跳超时、缓冲欠载、急停、安全门失败、
 新 ``play`` 或 ``stand`` 都会提升 revision、清空旧请求，并用 smoothstep/SLERP 平滑返回
-保持当前 XY 的站姿。本入口不加载人体模型或重定向组件，且 ``--gmt-policy`` 没有隐式
-默认值，必须明确绑定当前 GMT 启动实际使用的策略文件。
+保持当前 XY 的站姿。本入口不加载人体模型或重定向组件。默认只读 GMT 自己的 ROS
+参数 /gmtPolicyFile，读取对应策略的关节顺序和默认姿态，不替 GMT 指定或修改 policy。
+容器路径通过实际 bind mount 解析；历史 --gmt-policy 命令仍可用于明确的离线兼容调用。
 """
 
 from __future__ import annotations
@@ -63,6 +64,7 @@ from gem.runtime.bumi_online_stream import (  # noqa: E402
     motion_buffer_failure,
 )
 from gem.runtime.bumi_robot_stream import BumiQposSafetyGate  # noqa: E402
+from gem.runtime.gmt_policy_source import resolve_bridge_policy  # noqa: E402
 from gem.runtime.gmt_trajectory import (  # noqa: E402
     FLAG_AUDIO,
     FLAG_FIXED_IDLE,
@@ -79,7 +81,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--bind", default="tcp://127.0.0.1:7022")
     parser.add_argument("--playback-mode", choices=("realtime", "buffered"), default="realtime")
     parser.add_argument("--kinematics", type=Path, required=True)
-    parser.add_argument("--gmt-policy", type=Path, required=True)
+    parser.add_argument("--gmt-policy", type=Path, help="旧命令兼容；默认读取GMT自身ROS参数")
+    parser.add_argument("--ros-master-uri", help="默认ROS_MASTER_URI或http://127.0.0.1:11311")
+    parser.add_argument("--gmt-container", default="noetic", help="容器路径的bind mount解析来源")
     parser.add_argument("--redis-host", default="127.0.0.1")
     parser.add_argument("--redis-port", type=int, default=6379)
     parser.add_argument("--redis-db", type=int, default=0)
@@ -228,7 +232,7 @@ class BumiOnlineBridge:
         self.publish_p99_jitter_ms: float | None = None
 
         self.kinematics_path = args.kinematics.expanduser().resolve(strict=True)
-        self.gmt_policy_path = args.gmt_policy.expanduser().resolve(strict=True)
+        self.gmt_policy_path, self.gmt_policy_source = resolve_bridge_policy(args)
         self.kinematics = BumiKinematics(self.kinematics_path)
         self.kinematics_sha256 = sha256_file(self.kinematics_path)
         self.joint_order_sha256 = bumi_joint_order_sha256(self.kinematics.joint_order)
@@ -565,6 +569,8 @@ class BumiOnlineBridge:
             "kinematics_sha256": self.kinematics_sha256,
             "joint_order_sha256": self.joint_order_sha256,
             "gmt_policy_sha256": self.gmt_policy_sha256,
+            "gmt_policy_path": str(self.gmt_policy_path),
+            "gmt_policy_source": self.gmt_policy_source,
             "active_identity": None if self.request is None else self.request["identity"].as_dict(),
             "publish_hz": self.publish_ticks / max(1.0e-6, time.monotonic() - self.publish_started),
             "publish_p99_jitter_ms": self.publish_p99_jitter_ms,

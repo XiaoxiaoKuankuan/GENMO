@@ -1,6 +1,6 @@
 {
   "description": "BUMI music-only 部署分支依赖闭包；模型文件不纳入Git",
-  "source_commit": "9e1706bd8977ed047d498a97b8e690bc8641abd9",
+  "source_commit": "341b5c3426b4216624fe4eeca541e0187753d0a9",
   "python_files": [
     "gem/__init__.py",
     "gem/diffusion_utils/gaussian_diffusion.py",
@@ -23,6 +23,7 @@
     "gem/runtime/bumi_online_stream.py",
     "gem/runtime/bumi_robot_stream.py",
     "gem/runtime/gmt_buffered_trajectory.py",
+    "gem/runtime/gmt_policy_source.py",
     "gem/runtime/gmt_trajectory.py",
     "gem/runtime/music_only_trt.py",
     "gem/runtime/qpos_timeline.py",
@@ -35,7 +36,8 @@
     "tests/bumi/__init__.py",
     "tests/bumi/conftest.py",
     "tests/bumi/test_bumi_deployment_bundle.py",
-    "tests/bumi/test_bumi_online_deployment.py"
+    "tests/bumi/test_bumi_online_deployment.py",
+    "tests/bumi/test_gmt_policy_source.py"
   ],
   "retained_files": [
     ".gitignore",
@@ -44,6 +46,7 @@
     "README.md",
     "docs/BUMI_GMT_GENMO_INTERFACE.md",
     "docs/BUMI_MUSIC_DEPLOYMENT.md",
+    "docs/GENMO_CONTROLLER_ADAPTATION.md",
     "gem/__init__.py",
     "gem/diffusion_utils/gaussian_diffusion.py",
     "gem/diffusion_utils/losses.py",
@@ -65,6 +68,7 @@
     "gem/runtime/bumi_online_stream.py",
     "gem/runtime/bumi_robot_stream.py",
     "gem/runtime/gmt_buffered_trajectory.py",
+    "gem/runtime/gmt_policy_source.py",
     "gem/runtime/gmt_trajectory.py",
     "gem/runtime/music_only_trt.py",
     "gem/runtime/qpos_timeline.py",
@@ -82,6 +86,7 @@
     "tests/bumi/conftest.py",
     "tests/bumi/test_bumi_deployment_bundle.py",
     "tests/bumi/test_bumi_online_deployment.py",
+    "tests/bumi/test_gmt_policy_source.py",
     "记录文本.md"
   ],
   "removed_tracked_count": 502,

@@ -4,7 +4,10 @@
 
 - [环境安装、模型检查和三个终端启动](docs/BUMI_MUSIC_DEPLOYMENT.md)
 - [GMT 中直接用于 GENMO 接入的改动](docs/BUMI_GMT_GENMO_INTERFACE.md)
+- [适配其他GMT、SONIC和通用控制器](docs/GENMO_CONTROLLER_ADAPTATION.md)
 - [依赖闭包清单](DEPLOYMENT_FILES.json)
 - [实现与实际验收记录](记录文本.md)
 
 默认 DDIM20、CFG2.5、seed42，生成30 Hz、GMT参考50 Hz。迁移时复制代码和完整模型目录，重新创建环境并运行模型检查；目标GPU或TensorRT环境不兼容时在原仓库重新构建engine。
+
+GMT由自身配置选择policy；Bridge默认只读其ROS参数，新版模型包不携带GMT权重。

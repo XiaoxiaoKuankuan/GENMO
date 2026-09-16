@@ -2,6 +2,8 @@
 # 宿主机：Ubuntu 22.04.5 x86_64，Python 3.10.12，RTX 4090，NVIDIA 580.159.03。
 libnvinfer10=10.13.3.9-1+cuda13.0
 libnvinfer-plugin10=10.13.3.9-1+cuda13.0
+# 原仓库TensorRT构建还使用ONNX parser；部署端不需要执行构建。
+libnvonnxparsers10=10.13.3.9-1+cuda13.0
 # 音乐播放和通信还需要 ffmpeg（含 ffplay）、redis-server，均使用发行版包。
 # 原仓库编译 C++ 接收探针另需 g++、libeigen3-dev、libhiredis-dev、zlib1g-dev、libgtest-dev。
 # GMT 容器沿用 ROS Noetic；显式 CUDA 后端使用其隔离 ORT 1.19.0/CUDA12.4/cuDNN9 目录。
