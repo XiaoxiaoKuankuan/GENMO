@@ -40,7 +40,8 @@ FPS 固定 **30**，120 帧即 4 秒，240 帧即 8 秒。CFG 为 2.5、seed 为
 及变更时间用于缓存失效，生成前也检查文件是否变化。请注册已经完整保存的 checkpoint。
 
 Python 环境需包含本仓库原有推理依赖、CUDA、SMPL-X 资产、Open3D、PyAV 和 Flask 3.1。
-Flask 作为可选 `web` 依赖声明；在已配置 GENMO 的环境可用 `pip install -e '.[web]'` 安装。
+Flask 与公开分享入口使用的 Waitress 作为可选 `web` 依赖声明；在已配置 GENMO 的环境
+可用 `pip install -e '.[web]'` 安装。
 系统需有包含 `libx264` 的 `ffmpeg`。当前运行入口依赖仓库内配置和模型资产，应从本仓库启动。
 
 ## 结果保存与故障恢复
@@ -84,3 +85,61 @@ outputs/text_motion_web/
 提交成功为 HTTP 202，非法参数为 400，已有活动任务为 409；POST 需要同源 JSON。
 媒体路径由任务 ID 映射，不支持通用文件路径读取。原有命令行 demo、stdin/ZMQ 文本服务的
 请求格式及默认参数保持兼容，网页新增 DDIM 更新方法仅由网页工作进程调用。
+
+## 无密码公网分享
+
+公开入口复用本地 8766 的 GPU 推理服务、已注册模型和历史。访客无需账户或密码，
+可以选择模型、输入文本、生成动作、播放和下载视频、回看历史。所有访客共用一个
+任务位；生成中另一请求返回 409。公开页面明确提示：文本与生成历史对其他访客可见。
+
+共享网关仅在回环地址 `127.0.0.1:8768` 监听，由 HTTPS 隧道转发。访客不能注册模型，
+也不会得到 checkpoint、T5、任务目录的本机绝对路径、文件指纹和内部异常堆栈。
+本机维护者继续用 **http://127.0.0.1:8766/** 添加 checkpoint，注册后公网页面刷新可选。
+现有 MotionMillion s190000 / s210000 自动使用 150 token，官方旧模型自动使用 50 token；
+共享网关不改变模型契约或固定推理参数。
+
+公网提交只接收原有四个生成字段，帧数和 DDIM 边界不变；额外限制 prompt 最多
+4096 个字符、JSON 请求体最多 16 KiB。后台继续保留原文，编码器按模型 token 上限截断。
+公开媒体接口保留 Range、HEAD、ETag 和条件请求，浏览器可以拖动进度。
+
+### 启动分享入口
+
+先确认本机 8766 服务已启动，再从
+[Cloudflare 官方下载页](https://developers.cloudflare.com/cloudflare-one/networks/connectors/cloudflare-tunnel/downloads/)
+安装 `cloudflared`。当前本机位于 `$HOME/.local/bin/cloudflared`。
+终端一启动隧道：
+
+```bash
+"$HOME/.local/bin/cloudflared" tunnel --no-autoupdate --protocol http2 \
+  --edge-ip-version 4 --url http://127.0.0.1:8768 --metrics 127.0.0.1:18768
+```
+
+日志出现 `https://….trycloudflare.com` 后，在终端二将它填入 `--public-origin`：
+
+```bash
+PYTHONDONTWRITEBYTECODE=1 .venv/bin/python scripts/demo/share_smpl_text_web.py \
+  --public-origin https://实际生成的域名.trycloudflare.com
+```
+
+在网关启动前隧道短暂返回 502 是因为 8768 尚未监听；网关启动后即可分享 HTTPS 地址。
+运行中的分享服务无需重复启动。首次交付已将两个进程独立于终端运行，状态保存在：
+
+```text
+outputs/text_motion_web/share/
+  share.json       # 当前实际公网 URL、上游地址以及两个进程的 PID
+  gateway.log      # Waitress 网关日志
+  gateway.pid
+  tunnel.log       # 隧道连接状态与随机域名
+  tunnel.pid
+```
+
+上述文件描述本次已启动的进程，手动重建时须以新进程和新隧道日志为准，不把旧 PID 或旧 URL
+当作当前状态。停止公开分享时，先用 `ps -p <PID> -o pid,lstart,args` 核对对应命令，再结束
+分享网关与 cloudflared 两个进程；保留 8766 本地推理服务和全部用户历史。前台启动时可在
+两个分享终端分别按 Ctrl+C。
+
+本机需保持开机，8766 服务、分享网关和隧道都需保持运行。
+[Quick Tunnel](https://developers.cloudflare.com/cloudflare-one/networks/connectors/cloudflare-tunnel/do-more-with-tunnels/trycloudflare/)
+无需 Cloudflare 账户，提供随机临时域名，隧道重新创建时网址可能改变，不承诺生产可用性。
+需要固定域名时，可让具备域名权限的维护者配置正式 Cloudflare Tunnel，并把固定 HTTPS
+origin 传给同一网关；无需迁移 GPU 模型或复制网页实现。本实现不修改训练服务器任务。

@@ -2,7 +2,7 @@
    所有模型路径和提示文本都作为纯文本显示，避免将输入解释为 HTML。 */
 "use strict";
 const $ = (id) => document.getElementById(id);
-const state = {models: [], jobs: [], activeId: null, selectedId: null, pending: false, lastSignature: "", lastStatusKey: "", connected: false};
+const state = {models: [], jobs: [], activeId: null, selectedId: null, pending: false, lastSignature: "", lastStatusKey: "", connected: false, canRegister: true};
 const stageNames = {queued: "等待开始", loading: "正在加载模型", generating: "正在生成动作", rendering: "正在渲染并检查视频", done: "生成完成 · 点击播放查看", failed: "生成失败 · 可以重新尝试"};
 
 async function api(path, payload) {
@@ -20,12 +20,14 @@ function busy() {
 }
 function modelDetail() {
   const model = state.models.find((m) => m.id === $("model").value);
-  $("model-detail").textContent = model ? `${model.contract.max_text_len} token · ${model.path}` : "未发现可用模型，请添加本地 checkpoint。";
+  $("model-detail").textContent = model ? `${model.contract.max_text_len} token · ${model.path || model.name}` : "未发现可用模型，请联系站点维护者。";
 }
 async function loadModels(selectedId) {
   const data = await api("/api/models");
   const previous = selectedId || $("model").value;
   state.models = data.models;
+  state.canRegister = data.capabilities?.register_models !== false;
+  if ($("add-model")) $("add-model").hidden = !state.canRegister;
   const options = data.models.map((model) => {
     const option = document.createElement("option");
     option.value = model.id;
@@ -66,8 +68,13 @@ function textNode(tag, text, className) {
 async function reuse(job) {
   try {
     if (!state.models.some((m) => m.id === job.model_id)) {
-      const data = await api("/api/models", {path: job.model.path});
-      await loadModels(data.model.id);
+      if (!state.canRegister || !job.model.path) {
+        await loadModels();
+        if (!state.models.some((m) => m.id === job.model_id)) throw new Error("此历史使用的模型暂不可用，请选择列表中的模型。");
+      } else {
+        const data = await api("/api/models", {path: job.model.path});
+        await loadModels(data.model.id);
+      }
     }
     $("model").value = job.model_id;
     $("prompt").value = job.prompt;
@@ -140,7 +147,7 @@ async function refreshHistory() {
 }
 $("num-frames").addEventListener("input", duration);
 $("model").addEventListener("change", modelDetail);
-$("register").addEventListener("click", async () => {
+$("register")?.addEventListener("click", async () => {
   $("register").disabled = true; $("register-status").textContent = "正在校验 checkpoint 内容…";
   try {
     const data = await api("/api/models", {path: $("model-path").value});

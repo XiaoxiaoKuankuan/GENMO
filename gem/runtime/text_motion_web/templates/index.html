@@ -10,7 +10,7 @@
   <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
 </head>
 <body>
-<header><a class="brand" href="/">GENMO<span>动作工作台</span></a><span class="local"><i></i> 本地运行 · SMPL</span></header>
+<header><a class="brand" href="/">GENMO<span>动作工作台</span></a><span class="local"><i></i> {{ '公开共享' if public_share else '本地运行' }} · SMPL</span></header>
 <main>
   <div class="intro"><div><p class="eyebrow">TEXT TO MOTION</p><h1>让文字，成为动作。</h1><p class="muted">选择模型，描述动作，在这里预览你的创作。</p></div><span class="format">30 FPS <b>／</b> 1280 × 720</span></div>
   <div class="workspace">
@@ -20,7 +20,7 @@
         <label for="model">GENMO 模型</label>
         <select id="model" required><option value="">正在发现本地文本模型…</option></select>
         <p id="model-detail" class="hint">自动兼容 50 / 150 token 文本模型</p>
-        <details id="add-model"><summary>＋ 添加本地模型</summary><label for="model-path">Checkpoint 本地路径</label><input id="model-path" type="text" placeholder="/home/weili/GENMO/…/model.ckpt"><button id="register" class="secondary" type="button">校验并加入列表</button><p id="register-status" class="hint" role="status"></p></details>
+        {% if not public_share %}<details id="add-model"><summary>＋ 添加本地模型</summary><label for="model-path">Checkpoint 本地路径</label><input id="model-path" type="text" placeholder="/home/weili/GENMO/…/model.ckpt"><button id="register" class="secondary" type="button">校验并加入列表</button><p id="register-status" class="hint" role="status"></p></details>{% endif %}
         <label for="prompt">动作描述 <span>Prompt</span></label>
         <textarea id="prompt" rows="6" required placeholder="例如：A person walks forward, stops, and waves with their right hand."></textarea>
         <p class="hint">描述主体、动作和顺序。建议使用英文动作描述。</p>
@@ -28,7 +28,7 @@
         <button id="generate" type="submit" class="primary" disabled><span>生成动作视频</span><span>↗</span></button>
       </form>
       <div class="fixed"><span>CFG <b>2.5</b></span><span>Seed <b>42</b></span><span>Shape <b>zero</b></span></div>
-      <details class="encoder"><summary>T5-3B · 本地文本编码器</summary><p>/home/weili/.cache/huggingface/hub/models--t5-3b/snapshots/bed96aab9ee46012a5046386105ee5fd0ac572f0</p><p>仅加载本地文件 · 默认动作后处理</p></details>
+      {% if public_share %}<p class="hint">T5-3B 文本编码 · 同时生成一个任务。这里是共享工作台，文本和生成历史对所有访客可见。</p>{% else %}<details class="encoder"><summary>T5-3B · 本地文本编码器</summary><p>/home/weili/.cache/huggingface/hub/models--t5-3b/snapshots/bed96aab9ee46012a5046386105ee5fd0ac572f0</p><p>仅加载本地文件 · 默认动作后处理</p></details>{% endif %}
     </aside>
     <section class="preview panel">
       <div class="section-title"><h2>动作预览</h2><span>02 — PREVIEW</span></div>
@@ -39,7 +39,7 @@
   </div>
   <section class="history"><div class="section-title"><div><h2>生成历史 <span id="history-count">0</span></h2><p class="muted">保留每次创作，随时回看或复用参数。</p></div><span>03 — LIBRARY</span></div><div id="history-list"><p class="history-empty">还没有生成记录。你的动作视频会保存在这里。</p></div></section>
 </main>
-<footer><span>GENMO / LOCAL MOTION STUDIO</span><span>文本 → SMPL → 视频</span></footer>
+<footer><span>GENMO / {{ 'SHARED' if public_share else 'LOCAL' }} MOTION STUDIO</span><span>文本 → SMPL → 视频</span></footer>
 <script src="{{ url_for('static', filename='app.js') }}" defer></script>
 </body>
 </html>
