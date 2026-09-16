@@ -12,6 +12,10 @@
 获得 GMT ACK 后才启动音乐和 50 Hz 播放。后续生成由 12 秒高水位、4 秒低水位节流，且
 持续窗口生成、拼接和后处理 P95 必须低于一个 90 帧步长对应的 3 秒。本文件不导入 GMR、
 SMPL、SMPL-X、SMP1 或旧 ``robot_stream.py``，不会改变既有部署入口。
+
+独立部署可通过 ``--deployment-manifest`` 使用原仓库发布的 ONNX、engine 和配套资产，
+无需训练 checkpoint；来源指纹与所有实际文件交叉核验。原 ``--checkpoint`` 路径保持
+兼容，两种资产指定方式互斥，避免不同训练版本混用。
 """
 
 from __future__ import annotations
@@ -41,13 +45,14 @@ from gem.robots.bumi.feature_codec import BUMI_REPRESENTATION_CONTRACT_VERSION  
 from gem.robots.bumi.postprocess import (  # noqa: E402
     BUMI_STREAMING_FOOT_LOCK_CONTRACT_VERSION,
 )
+from gem.runtime.bumi_deployment_bundle import resolve_console_assets  # noqa: E402
+from gem.runtime.bumi_music_contract import BUMI_ONNX_CONTRACT_VERSION  # noqa: E402
 from gem.runtime.bumi_music_deploy import (  # noqa: E402
     BUMI_SLIDING_QPOS_CONTRACT_VERSION,
     BumiOrtStepRunner,
     BumiStreamingQposGenerator,
     BumiTensorRTStepRunner,
 )
-from gem.runtime.bumi_music_onnx import BUMI_ONNX_CONTRACT_VERSION  # noqa: E402
 from gem.runtime.bumi_online_stream import (  # noqa: E402
     BUMI_ONLINE_QPOS_STREAM_CONTRACT,
     BumiOnlineIdentity,
@@ -72,12 +77,13 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--backend", choices=("tensorrt", "onnx"), default="tensorrt")
     parser.add_argument("--playback-mode", choices=("realtime", "buffered"), default="realtime")
-    parser.add_argument("--checkpoint", type=Path, required=True)
-    parser.add_argument("--onnx", type=Path, required=True)
+    parser.add_argument("--deployment-manifest", type=Path, help="无需 checkpoint 的完整部署清单")
+    parser.add_argument("--checkpoint", type=Path)
+    parser.add_argument("--onnx", type=Path)
     parser.add_argument("--onnx-metadata", type=Path)
     parser.add_argument("--engine", type=Path)
-    parser.add_argument("--kinematics", type=Path, required=True)
-    parser.add_argument("--stats", type=Path, required=True)
+    parser.add_argument("--kinematics", type=Path)
+    parser.add_argument("--stats", type=Path)
     parser.add_argument("--bridge", default="tcp://127.0.0.1:7022")
     parser.add_argument("--device", default="cuda:0")
     parser.add_argument("--onnx-provider", choices=("cpu", "cuda"), default="cpu")
@@ -135,11 +141,18 @@ class ResidentBumiConsole:
     """管理常驻推理后端、滚动生成线程、心跳和交互 revision。"""
 
     def __init__(self, args: argparse.Namespace) -> None:
+        args, self.deployment_bundle = resolve_console_assets(args)
         self.args = args
         self.device = torch.device(args.device)
         if self.device.type == "cuda" and not torch.cuda.is_available():
             raise RuntimeError("CUDA requested but unavailable")
-        self.checkpoint = args.checkpoint.expanduser().resolve(strict=True)
+        self.checkpoint = (
+            args.checkpoint.expanduser().resolve(strict=True) if args.checkpoint is not None else None
+        )
+        self.source_checkpoint_sha256 = (
+            self.deployment_bundle.source_checkpoint_sha256
+            if self.deployment_bundle is not None else sha256_file(self.checkpoint)
+        )
         self.onnx_path = args.onnx.expanduser().resolve(strict=True)
         self.kinematics_path = args.kinematics.expanduser().resolve(strict=True)
         self.stats_path = args.stats.expanduser().resolve(strict=True)
@@ -158,7 +171,7 @@ class ResidentBumiConsole:
             .to(self.device)
             .eval()
         )
-        checkpoint_sha = sha256_file(self.checkpoint)
+        checkpoint_sha = self.source_checkpoint_sha256
         onnx_sha = sha256_file(self.onnx_path)
         if args.backend == "onnx":
             self.runner = BumiOrtStepRunner(
@@ -259,7 +272,7 @@ class ResidentBumiConsole:
             "stats": (metadata.get("stats") or {}).get("sha256"),
         }
         actual = {
-            "checkpoint": sha256_file(self.checkpoint),
+            "checkpoint": self.source_checkpoint_sha256,
             "kinematics": sha256_file(self.kinematics_path),
             "stats": sha256_file(self.stats_path),
         }

@@ -66,6 +66,7 @@ def bumi_engine_cache_key(
     tensorrt_version: str,
     precision: str,
     gpu: dict[str, object],
+    precision_policy: str = "legacy",
 ) -> str:
     """返回只适用于 BUMI qpos30/contact 固定形状引擎的可复现缓存键。"""
 
@@ -78,6 +79,9 @@ def bumi_engine_cache_key(
         "gpu": gpu,
         "inputs": [1, WINDOW_FRAMES, BUMI_MOTION_DIM],
     }
+    # 未声明策略的历史引擎继续使用原缓存键；混合精度约束必须形成不同指纹。
+    if precision_policy != "legacy":
+        value["precision_policy"] = str(precision_policy)
     encoded = json.dumps(value, sort_keys=True, separators=(",", ":")).encode()
     return hashlib.sha256(encoded).hexdigest()
 
@@ -218,6 +222,7 @@ class BumiTensorRTStepRunner(TensorRTStepRunner):
             tensorrt_version=expected_version,
             precision=str(payload.get("precision", "")),
             gpu=actual_gpu,
+            precision_policy=str(payload.get("precision_policy", "legacy")),
         )
         if payload.get("cache_key") != expected_key:
             raise RuntimeError("BUMI TensorRT engine cache fingerprint mismatch")

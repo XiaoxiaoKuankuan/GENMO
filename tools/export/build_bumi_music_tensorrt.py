@@ -6,6 +6,10 @@
 引擎放在由 ONNX/checkpoint SHA256、TensorRT/libnvinfer、精度和当前 GPU 共同决定的缓存
 目录中，并写入 ``engine.json``。运行时会再次核验这些字段，不能把计划文件复制到不同
 GPU 或与另一个 checkpoint 混用。已有完整缓存默认复用，只有显式 ``--overwrite`` 才重建。
+
+可选 --fp32-sensitive 在 FP16 模式中将注意力、归一化、残差及输入/输出 head 的浮点
+计算固定为 FP32，并关闭 TF32；Transformer MLP 仍允许 FP16。该策略用于处理某些新
+checkpoint 的接触输出对低精度累积误差敏感的问题，使用独立缓存指纹，不放宽验证阈值。
 """
 
 from __future__ import annotations
@@ -46,6 +50,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--device", default="cuda:0")
     parser.add_argument("--precision", choices=("fp16", "fp32"), default="fp16")
+    parser.add_argument("--fp32-sensitive", action="store_true")
     parser.add_argument("--workspace-gib", type=float, default=8.0)
     parser.add_argument("--optimization-level", type=int, default=5)
     parser.add_argument("--overwrite", action="store_true")
@@ -74,6 +79,31 @@ def _network_contract(network: object, trt: object) -> None:
         output.dtype = trt.float32
 
 
+def _constrain_sensitive_layers(network: object, trt: object) -> list[str]:
+    """保留 Transformer MLP 的 FP16 加速，其余浮点计算使用 FP32 累积和输出。"""
+    arithmetic = {
+        trt.LayerType.MATRIX_MULTIPLY, trt.LayerType.ELEMENTWISE, trt.LayerType.UNARY,
+        trt.LayerType.ACTIVATION, trt.LayerType.SOFTMAX, trt.LayerType.NORMALIZATION,
+        trt.LayerType.REDUCE, trt.LayerType.SCALE,
+    }
+    constrained = []
+    for index in range(network.num_layers):
+        layer = network.get_layer(index)
+        if layer.type not in arithmetic or "/mlp/" in layer.name:
+            continue
+        floating = [i for i in range(layer.num_outputs)
+                    if layer.get_output(i).dtype in (trt.float32, trt.float16)]
+        if not floating:
+            continue
+        layer.precision = trt.float32
+        for output_index in floating:
+            layer.set_output_type(output_index, trt.float32)
+        constrained.append(layer.name)
+    if not constrained:
+        raise RuntimeError("FP32 sensitive policy did not match any layers")
+    return constrained
+
+
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     onnx_path = args.onnx.expanduser().resolve(strict=True)
@@ -90,6 +120,8 @@ def main(argv: list[str] | None = None) -> int:
         raise ValueError("--workspace-gib must be > 0")
     if not 0 <= args.optimization_level <= 5:
         raise ValueError("--optimization-level must be in 0..5")
+    if args.fp32_sensitive and args.precision != "fp16":
+        raise ValueError("--fp32-sensitive requires --precision=fp16")
     if not torch.cuda.is_available():
         raise RuntimeError("BUMI TensorRT engine building requires CUDA")
     try:
@@ -102,6 +134,7 @@ def main(argv: list[str] | None = None) -> int:
     gpu = gpu_fingerprint(args.device)
     onnx_sha = sha256_file(onnx_path)
     checkpoint_sha = sha256_file(checkpoint)
+    precision_policy = "attention_norm_heads_fp32_v1" if args.fp32_sensitive else "legacy"
     if (onnx_metadata.get("checkpoint") or {}).get("sha256") != checkpoint_sha:
         raise ValueError("ONNX metadata checkpoint SHA does not match --checkpoint")
     cache_key = bumi_engine_cache_key(
@@ -110,6 +143,7 @@ def main(argv: list[str] | None = None) -> int:
         tensorrt_version=trt.__version__,
         precision=args.precision,
         gpu=gpu,
+        precision_policy=precision_policy,
     )
     output_dir = args.output_dir.expanduser().resolve() / cache_key
     engine_path = output_dir / "bumi_music_denoiser.engine"
@@ -130,10 +164,15 @@ def main(argv: list[str] | None = None) -> int:
     config = builder.create_builder_config()
     config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, int(args.workspace_gib * 1024**3))
     config.builder_optimization_level = int(args.optimization_level)
+    constrained_layers = []
     if args.precision == "fp16":
         if not builder.platform_has_fast_fp16:
             raise RuntimeError("this GPU does not report fast FP16 support")
         config.set_flag(trt.BuilderFlag.FP16)
+    if args.fp32_sensitive:
+        config.clear_flag(trt.BuilderFlag.TF32)
+        config.set_flag(trt.BuilderFlag.OBEY_PRECISION_CONSTRAINTS)
+        constrained_layers = _constrain_sensitive_layers(network, trt)
 
     started = time.perf_counter()
     serialized = builder.build_serialized_network(network, config)
@@ -156,6 +195,8 @@ def main(argv: list[str] | None = None) -> int:
         "tensorrt_version": trt.__version__,
         "libnvinfer_version": libnvinfer_version,
         "precision": args.precision,
+        "precision_policy": precision_policy,
+        "fp32_constrained_layers": constrained_layers,
         "workspace_gib": args.workspace_gib,
         "optimization_level": args.optimization_level,
         "gpu": gpu,

@@ -18,8 +18,8 @@ from gem.robots.bumi.feature_codec import (
     BUMI_FEATURE_DIM,
     BUMI_REPRESENTATION_CONTRACT_VERSION,
 )
+from gem.runtime.bumi_music_contract import BUMI_ONNX_CONTRACT_VERSION
 
-BUMI_ONNX_CONTRACT_VERSION = "genmo.bumi_music_guided_denoiser_step.qpos30_contact.v3"
 BUMI_MOTION_FEATURE_DIM = BUMI_FEATURE_DIM
 BUMI_CONTACT_DIM = 2
 MUSIC_FEATURE_DIM = 35
