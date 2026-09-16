@@ -1,7 +1,0 @@
-# checkpoint 保存回调配置。
-# 每 10000 个 step 保存一次，最多保留 100 个，用于长训练的阶段性恢复/回溯。
-every10000s_top100:
-  _target_: gem.callbacks.simple_ckpt_saver.SimpleCkptSaver
-  output_dir: ${output_dir}/checkpoints/
-  every_n_steps: 10000
-  save_top_k: 100
