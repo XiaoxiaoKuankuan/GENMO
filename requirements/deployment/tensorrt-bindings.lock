@@ -1,0 +1,3 @@
+# 使用已有同版系统 libnvinfer；安装本文件时加 --no-deps，避免重复安装另一份系统库。
+tensorrt-cu13==10.13.3.9
+tensorrt-cu13-bindings==10.13.3.9

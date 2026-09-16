@@ -11,6 +11,7 @@ wandb/
 logs/*.log
 .ruff_cache/
 *.lock
+!requirements/deployment/*.lock
 *.ckpt
 *.zip
 *.pt
