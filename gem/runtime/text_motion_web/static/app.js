@@ -133,6 +133,15 @@ async function refreshHistory() {
   const previousActive = state.activeId;
   if (!state.connected) { showError(""); state.lastStatusKey = ""; }
   state.jobs = data.jobs; state.activeId = data.active_id; state.connected = true;
+  if (state.selectedId && !data.jobs.some((job) => job.id === state.selectedId)) {
+    // 其他访客生成新任务时，当前选中的旧视频可能已被自动清理。
+    const video = $("video");
+    video.pause(); video.removeAttribute("src"); video.removeAttribute("poster"); video.load();
+    video.hidden = true; $("empty-preview").hidden = false;
+    $("download").hidden = true; $("download").removeAttribute("href");
+    $("video-title").textContent = "等待生成动作"; $("video-meta").textContent = "";
+    state.selectedId = null;
+  }
   const completed = data.jobs.find((job) => job.id === previousActive && job.status === "done");
   if (completed) selectVideo(completed);
   if (!state.selectedId) {
@@ -170,7 +179,7 @@ $("generate-form").addEventListener("submit", async (event) => {
   } catch (error) { showError(error.message); }
   finally { state.pending = false; busy(); }
 });
-$("video").addEventListener("error", () => showError("浏览器未能读取视频，请从历史重新选择；详细动作和视频仍保存在本地任务目录。"));
+$("video").addEventListener("error", () => showError("浏览器未能读取视频，请从历史重新选择；超过保留上限的旧视频会自动删除。"));
 let scanning = true;
 async function poll() {
   try {

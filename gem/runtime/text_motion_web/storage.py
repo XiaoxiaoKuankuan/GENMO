@@ -29,6 +29,7 @@ FIXED = dict(
     postproc=True,
 )
 TERMINAL = {"done", "failed"}
+HISTORY_LIMIT = 60
 
 
 def now() -> str:

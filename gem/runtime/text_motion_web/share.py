@@ -217,6 +217,7 @@ def create_share_app(upstream_url, public_origin):
         data, _ = backend.json("/api/history")
         return jsonify(
             jobs=[public_job(job) for job in data["jobs"]], active_id=data.get("active_id"),
+            history_limit=data.get("history_limit", 60),
             recovery_errors=["部分历史暂不可用，请联系站点维护者。"] if data.get("recovery_errors") else [],
         )
 

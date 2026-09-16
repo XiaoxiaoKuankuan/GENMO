@@ -2,13 +2,16 @@
 
 测试只在 pytest 分配的临时目录写入小型 checkpoint 和媒体夹具，不加载真实 GPU。
 覆盖输入边界、文件变更、跨请求并发、阶段失败、进程重建、历史恢复与媒体路径约束；
+历史限额测试检查真实目录淘汰、重启恢复、活动任务保护以及删除失败/软链接隔离。
 真实动作质量与浏览器解码另由显式 GPU 验收确认，不以这些接口测试代替。
 """
 
 import copy
+import json
 import os
 import queue
 import time
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -154,6 +157,133 @@ def test_history_recovers_interrupted_and_done(web):
         assert restored.process is None and restored.active_id is None
     finally:
         restored.close()
+
+
+def seed_finished_history(service, model, count):
+    """在当前测试临时目录构造有固定先后顺序的小型历史，不运行推理。"""
+    jobs = []
+    for index in range(count):
+        job_id = f"{index:032x}"
+        directory = service.root / "tasks" / job_id
+        output = directory / "artifacts"
+        output.mkdir(parents=True)
+        for name in ("video.mp4", "thumbnail.jpg", "motion.npz", "smpl_params.pt", "render.log"):
+            (output / name).write_bytes(b"retention-fixture")
+        job = dict(
+            payload(model), id=job_id, model=copy.deepcopy(model), status="done",
+            created_at=(datetime(2000, 1, 1, tzinfo=timezone.utc) + timedelta(seconds=index)).isoformat(),
+            elapsed_seconds=0, fixed={"fps": 30}, task_dir=str(directory), output_dir=str(output),
+        )
+        service.jobs[job_id] = job
+        atomic_json(directory / "task.json", job)
+        jobs.append(job)
+    service._save_history()
+    return jobs
+
+
+def test_history_limit_at_startup_deletes_files_and_does_not_resurrect(web):
+    service, _, model = web
+    jobs = seed_finished_history(service, model, 61)
+    service.close()
+    for _ in range(2):
+        restored = JobService(service.root, registry=service.registry, discover=False)
+        try:
+            history = restored.history()
+            assert history["history_limit"] == 60 and len(history["jobs"]) == 60
+            assert {job["id"] for job in history["jobs"]} == {job["id"] for job in jobs[1:]}
+            assert not Path(jobs[0]["task_dir"]).exists()
+            assert Path(jobs[1]["output_dir"], "motion.npz").exists()
+            assert Path(model["path"]).exists()
+            assert not list((service.root / ".expired_tasks").iterdir())
+            assert len(json.loads((service.root / "history.json").read_text())["jobs"]) == 60
+            client = create_app(restored).test_client()
+            assert client.get(f"/api/jobs/{jobs[0]['id']}/video").status_code == 404
+            video = client.get(f"/api/jobs/{jobs[-1]['id']}/video", headers={"Range": "bytes=0-3"})
+            assert video.status_code == 206 and video.data == b"rete"
+            video.close()
+        finally:
+            restored.close()
+
+
+@pytest.mark.parametrize("result", ["done", "failed"])
+def test_history_limit_runs_after_completion_and_preserves_active_job(web, monkeypatch, result):
+    service, client, model = web
+    jobs = seed_finished_history(service, model, 60)
+    monkeypatch.setattr(service, "_start_worker", lambda: None)
+    service.commands = queue.Queue()
+    submitted = client.post("/api/jobs", json=payload(model)).json
+    service._update(dict(id=submitted["id"], status="generating"))
+    assert service.active_id == submitted["id"]
+    assert len(service.history()["jobs"]) == 61
+    assert Path(jobs[0]["task_dir"]).exists()
+    service._update(dict(id=submitted["id"], status=result, failed_stage="generating"))
+    assert service.active_id is None
+    assert service.get(submitted["id"])["status"] == result
+    assert len(client.get("/api/history").json["jobs"]) == 60
+    assert not Path(jobs[0]["task_dir"]).exists()
+
+
+def test_retention_retries_failed_deletion_after_restart(web, monkeypatch):
+    service, _, model = web
+    jobs = seed_finished_history(service, model, 61)
+    expired = service.root / ".expired_tasks" / jobs[0]["id"]
+
+    def unavailable(_):
+        raise PermissionError("fixture deletion temporarily denied")
+
+    with monkeypatch.context() as patch:
+        patch.setattr("gem.runtime.text_motion_web.service.shutil.rmtree", unavailable)
+        service._prune_history()
+        assert len(service.history()["jobs"]) == 60
+        assert expired.is_dir() and not Path(jobs[0]["task_dir"]).exists()
+        assert service.history()["recovery_errors"]
+    service.close()
+    restored = JobService(service.root, registry=service.registry, discover=False)
+    try:
+        assert not expired.exists()
+        assert len(restored.history()["jobs"]) == 60
+        assert not restored.history()["recovery_errors"]
+    finally:
+        restored.close()
+
+
+def test_retention_ignores_record_paths_and_does_not_follow_nested_symlinks(web):
+    service, _, model = web
+    jobs = seed_finished_history(service, model, 61)
+    protected = service.root / "protected-assets"
+    protected.mkdir()
+    checkpoint = protected / "keep.ckpt"
+    checkpoint.write_bytes(b"do-not-delete")
+    directory = Path(jobs[0]["task_dir"])
+    (directory / "external").symlink_to(protected, target_is_directory=True)
+    jobs[0].update(task_dir=str(protected), output_dir=str(protected))
+    service._prune_history()
+    assert not directory.exists()
+    assert checkpoint.read_bytes() == b"do-not-delete"
+    assert len(service.history()["jobs"]) == 60
+
+
+@pytest.mark.parametrize("link_kind", ["task", "tasks", "expired"])
+def test_retention_refuses_symlink_roots_and_keeps_files(web, link_kind):
+    service, _, model = web
+    jobs = seed_finished_history(service, model, 61)
+    protected = service.root / "protected"
+    if link_kind == "task":
+        source = Path(jobs[0]["task_dir"])
+        source.rename(protected)
+        source.symlink_to(protected, target_is_directory=True)
+    elif link_kind == "tasks":
+        (service.root / "tasks").rename(protected)
+        (service.root / "tasks").symlink_to(protected, target_is_directory=True)
+    else:
+        protected.mkdir()
+        (service.root / ".expired_tasks").symlink_to(protected, target_is_directory=True)
+    marker = protected / "keep.ckpt"
+    marker.write_bytes(b"untouched")
+    service._prune_history()
+    assert marker.read_bytes() == b"untouched"
+    assert len(service.history()["jobs"]) == 61
+    assert service.history()["recovery_errors"]
 
 
 def test_local_origin_json_and_media_containment(web, tmp_path):

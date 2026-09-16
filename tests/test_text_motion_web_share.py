@@ -103,6 +103,7 @@ def test_public_page_and_models_hide_management_and_paths(gateway):
     history = client.get("/api/history", base_url=ORIGIN)
     assert history.json["jobs"][0]["prompt"] == PAYLOAD["prompt"]
     assert history.json["jobs"][0]["video_url"] == f"/api/jobs/{JOB_ID}/video"
+    assert history.json["history_limit"] == 60
     assert "/home/private" not in history.text and "output_dir" not in history.text
 
 

@@ -37,7 +37,7 @@
       <div id="task-status" role="status" aria-live="polite"><div class="status-heading"><span id="status-text">就绪</span><span id="elapsed">等待生成</span></div><ol class="steps"><li data-stage="loading">加载模型</li><li data-stage="generating">生成动作</li><li data-stage="rendering">渲染视频</li><li data-stage="done">完成</li></ol><p id="error" role="alert" hidden></p></div>
     </section>
   </div>
-  <section class="history"><div class="section-title"><div><h2>生成历史 <span id="history-count">0</span></h2><p class="muted">保留每次创作，随时回看或复用参数。</p></div><span>03 — LIBRARY</span></div><div id="history-list"><p class="history-empty">还没有生成记录。你的动作视频会保存在这里。</p></div></section>
+  <section class="history"><div class="section-title"><div><h2>生成历史 <span id="history-count">0</span></h2><p class="muted">最多保留最近 60 条已结束记录，超出后自动删除最旧记录及文件；正在生成的任务会保留。</p></div><span>03 — LIBRARY</span></div><div id="history-list"><p class="history-empty">还没有生成记录。你的动作视频会保存在这里。</p></div></section>
 </main>
 <footer><span>GENMO / {{ 'SHARED' if public_share else 'LOCAL' }} MOTION STUDIO</span><span>文本 → SMPL → 视频</span></footer>
 <script src="{{ url_for('static', filename='app.js') }}" defer></script>
