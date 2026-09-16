@@ -41,6 +41,7 @@ from gem.runtime.music_only_trt import (  # noqa: E402
     sha256_file,
     validate_tensorrt_installation,
 )
+from gem.runtime.tensorrt_environment import prepare_tensorrt_libraries  # noqa: E402
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -125,6 +126,7 @@ def main(argv: list[str] | None = None) -> int:
     if not torch.cuda.is_available():
         raise RuntimeError("BUMI TensorRT engine building requires CUDA")
     try:
+        prepare_tensorrt_libraries()
         import tensorrt as trt
     except ImportError as exc:
         raise RuntimeError(

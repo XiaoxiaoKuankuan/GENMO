@@ -13,6 +13,8 @@ GENMO在线链路依赖的实现；本次不修改GMT。移植到别人GMT时应
 
 环境和运行命令见 [部署手册](BUMI_MUSIC_DEPLOYMENT.md)，其他控制器包括SONIC的适配见
 [通用适配指南](GENMO_CONTROLLER_ADAPTATION.md)。
+GENMO侧的日常地址/端口统一在根目录 `deployment.ini` 修改；7022、6379、11311的职责、
+ROS参数接口定义及GMT应修改的具体配置见部署手册第8.1–8.3节。
 
 ## 1. policy仍由GMT选择
 

@@ -31,9 +31,11 @@ SEEDS = (
     "scripts/demo/demo_music_bumi_console.py",
     "scripts/demo/demo_bumi_gmt_bridge.py",
     "scripts/demo/check_bumi_deployment.py",
+    "scripts/demo/run_bumi_deployment.py",
     "tests/bumi/test_bumi_deployment_bundle.py",
     "tests/bumi/test_bumi_online_deployment.py",
     "tests/bumi/test_gmt_policy_source.py",
+    "tests/bumi/test_bumi_deployment_config.py",
     "tests/bumi/conftest.py",
 )
 
@@ -118,6 +120,9 @@ def main(argv: list[str] | None = None) -> int:
         "AGENTS.md",
         "记录文本.md",
         "pyproject.toml",
+        "deployment.ini",
+        "install.sh",
+        "run.sh",
         "docs/BUMI_MUSIC_DEPLOYMENT.md",
         "docs/BUMI_GMT_GENMO_INTERFACE.md",
         "docs/GENMO_CONTROLLER_ADAPTATION.md",
@@ -145,13 +150,16 @@ def main(argv: list[str] | None = None) -> int:
             )
         (root / "gem/runtime/__init__.py").write_text(DEPLOYMENT_RUNTIME_INIT, encoding="utf-8")
         (root / ".gitignore").write_text(
-            ".venv/\nmodels/\noutputs/\n__pycache__/\n*.py[cod]\n.pytest_cache/\n.ruff_cache/\n",
+            ".venv/\n.tools/\nmodels/\noutputs/\n__pycache__/\n*.py[cod]\n.pytest_cache/\n.ruff_cache/\n",
             encoding="utf-8",
         )
         (root / "README.md").write_text(
             "# BUMI music-only GENMO＋GMT 部署\n\n"
             "本分支只运行原 GENMO 仓库导出的 BUMI 模型。模型资产位于 `models/bumi_v5_s350000/`，"
             "不包含训练 checkpoint、模型导出或训练代码。\n\n"
+            "首次运行 `bash install.sh`。先按控制器自己的方式启动 GMT，再分别运行 "
+            "`bash run.sh bridge` 和 `bash run.sh genmo`。用编辑器修改根目录 "
+            "`deployment.ini` 中的模型、GPU和通信配置；不需要在终端配置端口。\n\n"
             "- [环境安装、模型检查和三个终端启动](docs/BUMI_MUSIC_DEPLOYMENT.md)\n"
             "- [GMT 中直接用于 GENMO 接入的改动](docs/BUMI_GMT_GENMO_INTERFACE.md)\n"
             "- [适配其他 GMT、SONIC 与通用控制器](docs/GENMO_CONTROLLER_ADAPTATION.md)\n"

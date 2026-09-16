@@ -1,0 +1,5 @@
+# 新机器由 install.sh 自动安装的完整动态库；已有匹配系统库时跳过本文件。
+# 使用官方固定 wheel 与 SHA，绕开旧包依赖已废弃 nvidia-cuda-runtime-cu13 的元数据。
+# 与 tensorrt-bindings.lock 一起 --no-deps 安装；所有所需运行库均在这里显式给出。
+tensorrt-cu13-libs @ https://pypi.nvidia.com/tensorrt-cu13-libs/tensorrt_cu13_libs-10.13.3.9-py2.py3-none-manylinux_2_28_x86_64.whl#sha256=19a54f2106f7d9496433a01a596fa4e363f58901110306abe1ce7b6e9617c6a7
+nvidia-cuda-runtime==13.0.96

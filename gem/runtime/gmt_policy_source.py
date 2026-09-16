@@ -68,7 +68,8 @@ def discover_gmt_policy(
     except (OSError, xmlrpc.client.Error, ValueError) as exc:
         raise RuntimeError(
             f"无法从 GMT 的 ROS 参数读取策略：{uri} /gmtPolicyFile；"
-            "请先启动 GMT，并确认 ROS_MASTER_URI。GENMO 不会回退到固定 policy。"
+            "请先启动 GMT，并核对 deployment.ini 的 [gmt] ros_master_uri"
+            "（旧 demo 命令读取 ROS_MASTER_URI）。GENMO 不会回退到固定 policy。"
         ) from exc
     remote = PurePosixPath(value)
     if not remote.is_absolute() or ".." in remote.parts:
@@ -93,7 +94,8 @@ def discover_gmt_policy(
     except (OSError, subprocess.SubprocessError, ValueError, KeyError) as exc:
         raise RuntimeError(
             f"GMT policy 位于容器路径 {value}，无法通过容器 {container!r} 的实际 bind mount 读取；"
-            "请确认 --gmt-container 和工作区挂载。"
+            "请核对 deployment.ini 的 [gmt] container 和工作区挂载"
+            "（旧 demo 命令使用 --gmt-container）。"
         ) from exc
     return local, f"ROS {uri} /gmtPolicyFile={value}; Docker {container} bind mount"
 

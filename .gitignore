@@ -4,6 +4,7 @@ __pycache__/
 *.egg-info/
 .torch/
 .venv/
+.tools/
 agent.md
 inputs
 outputs/

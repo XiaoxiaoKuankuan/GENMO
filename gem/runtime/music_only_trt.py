@@ -8,8 +8,6 @@ window never performs a device-to-host round trip between denoising steps.
 
 from __future__ import annotations
 
-import ctypes
-import ctypes.util
 import hashlib
 import json
 import math
@@ -24,6 +22,7 @@ import numpy as np
 import torch
 
 from gem.diffusion_utils.model_util import create_gaussian_diffusion
+from gem.runtime.tensorrt_environment import linked_tensorrt_version, prepare_tensorrt_libraries
 from gem.utils.rotation_conversions import axis_angle_to_matrix
 
 WINDOW_FRAMES = 120
@@ -42,26 +41,6 @@ def _parse_version(value: str) -> tuple[int, int, int]:
         raise RuntimeError(f"cannot parse TensorRT version {value!r}")
     patch = int(parts[2]) if len(parts) > 2 and parts[2].isdigit() else 0
     return int(parts[0]), int(parts[1]), patch
-
-
-def linked_tensorrt_version() -> str:
-    """Read the actual local ``libnvinfer`` version, not package metadata."""
-    library_path = ctypes.util.find_library("nvinfer")
-    if not library_path:
-        raise RuntimeError("libnvinfer is not visible to the dynamic linker")
-    library = ctypes.CDLL(library_path)
-    try:
-        get_version = library.getInferLibVersion
-    except AttributeError as exc:
-        raise RuntimeError(f"{library_path} does not export getInferLibVersion") from exc
-    get_version.restype = ctypes.c_int32
-    encoded = int(get_version())
-    if encoded <= 0:
-        raise RuntimeError(f"libnvinfer returned an invalid version integer: {encoded}")
-    major = encoded // 10_000
-    minor = encoded % 10_000 // 100
-    patch = encoded % 100
-    return f"{major}.{minor}.{patch}"
 
 
 def validate_tensorrt_installation(trt_module: object) -> str:
@@ -441,6 +420,7 @@ class TensorRTStepRunner:
         if self.device.type != "cuda" or not torch.cuda.is_available():
             raise RuntimeError("TensorRTStepRunner requires a CUDA device")
         try:
+            prepare_tensorrt_libraries()
             import tensorrt as trt
         except ImportError as exc:
             raise RuntimeError(

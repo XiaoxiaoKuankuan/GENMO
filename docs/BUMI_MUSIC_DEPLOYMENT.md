@@ -43,107 +43,115 @@ Torch2.6.0+cu124，TensorRT Python10.13.3.9，系统libnvinfer10.13.3.9。
 `torch.version.cuda`的12.4与TensorRT系统包的`+cuda13.0`分别属于不同组件，不要求字符串相同；
 必须检查实际动态库、驱动和engine元数据，不能只看`nvidia-smi`显示的CUDA上限。
 
-## 3. 新电脑配置运行环境
+## 3. 新电脑：解压后一次安装
 
-### 3.1 系统工具和 NVIDIA 库
+### 3.1 只需执行一个安装入口
 
-先确认驱动能看到目标GPU：
-
-```bash
-nvidia-smi
-python3.10 --version
-```
-
-Ubuntu22.04的基础依赖：
-
-```bash
-sudo apt-get update
-sudo apt-get install python3.10-venv python3-pip git ffmpeg redis-server
-```
-
-TensorRT采用本项目已实测的“系统运行库＋虚拟环境Python binding”方式。
-先按[NVIDIA Debian安装说明](https://docs.nvidia.com/deeplearning/tensorrt/10.x.x/installing-tensorrt/install-debian.html)
-配置对应Ubuntu/CUDA的官方软件源，再查看所需版本是否可安装：
-
-```bash
-apt-cache policy libnvinfer10 libnvinfer-plugin10 libnvonnxparsers10
-```
-
-复用当前交付engine时，系统包版本为：
-
-```bash
-sudo apt-get install \
-  libnvinfer10=10.13.3.9-1+cuda13.0 \
-  libnvinfer-plugin10=10.13.3.9-1+cuda13.0 \
-  libnvonnxparsers10=10.13.3.9-1+cuda13.0
-```
-
-其中parser主要用于原仓库构建。若软件源没有这个版本，使用NVIDIA对应版本的本地仓库包，
-或选择目标机可用的统一版本并重建engine，不能用任意新版本假定旧engine兼容。
-本项目会检查GPU及版本指纹；常规序列化engine的跨平台/GPU/版本限制也见
-[NVIDIA支持矩阵](https://docs.nvidia.com/deeplearning/tensorrt/10.x.x/getting-started/support-matrix.html)。
-
-### 3.2 解压代码和模型，创建运行虚拟环境
-
-便携包包含代码、GENMO模型和验收结论，不包含GMT工作区、Docker镜像或Python环境。
-在准备放置项目的父目录执行（压缩包路径换成实际位置）：
+当前发布包面向 **Ubuntu 22.04 x86_64 / RTX 4090**。目标电脑先有能正常识别 GPU 的
+NVIDIA 驱动，并可访问 Python/NVIDIA 下载源。GENMO 部署环境由安装器准备：
 
 ```bash
 tar -xzf /path/to/bumi_music_only_gmt_s350000.tar.gz
 cd GENMO-deploy-bumi
-python3.10 -m venv .venv
-.venv/bin/python -m pip install -r requirements/deployment/runtime.lock
-.venv/bin/python -m pip install --no-deps -r requirements/deployment/tensorrt-bindings.lock
+bash install.sh
 ```
 
-`--no-deps`用于避免binding另外安装一套TensorRT运行库；前提是系统同版运行库已经准备好。
-如果使用uv，第一份锁涉及PyPI和PyTorch cu124两个索引，需要：
+也可以用文件管理器解压，再进入该目录执行最后一行。不要在完整训练仓库执行安装器；
+脚本会识别并拒绝，以免改变训练环境。当前已安装的部署目录可以重复运行，会复用匹配依赖。
 
-```bash
-uv pip install --python .venv/bin/python --index-strategy unsafe-best-match \
-  -r requirements/deployment/runtime.lock
-uv pip install --python .venv/bin/python --no-deps \
-  -r requirements/deployment/tensorrt-bindings.lock
-```
+安装器依次执行：
 
-版本仍由锁固定。pytest是开发测试依赖，不是运行所需依赖。
-部署分支直接从项目路径导入模块，不执行`pip install -e .`来重新安装完整训练包。
+1. 检查 NVIDIA 驱动和平台。
+2. 复用 uv；没有时将固定版本 uv 安装到项目 `.tools/`，不改 shell 配置。
+3. 创建 Python 3.10 `.venv`；缺 Python 时由 uv 自动下载，不需要先装 pip/venv 系统包。
+4. 安装 `runtime.lock` 的固定版本；已有匹配 TensorRT 直接复用，否则自动安装同版 binding
+   和虚拟环境内的 TensorRT 库。无需手动配置 NVIDIA APT 源或安装系统 libnvinfer。
+5. 缺 FFmpeg/ffplay、Redis 工具时通过 APT 安装；只有这一步可能要求输入 sudo 密码。
+6. 校验完整模型包及 GPU/engine 环境，并真实执行一次固定形状去噪。最后显示检查通过。
 
-### 3.3 检查运行环境和模型
+不自动安装/替换 NVIDIA 驱动或 GMT 的 ROS/Docker 环境。驱动需支持当前 CUDA 13 运行库，
+本机已验证版本是 580.159.03；新机是否兼容以最后的实际 engine 推理检查为准。
+第一次需要下载 PyTorch、CUDA、TensorRT 等大依赖；一键指操作入口少，不表示不用下载。
 
-```bash
-.venv/bin/python -c 'import torch,tensorrt; print(torch.__version__, torch.version.cuda, torch.cuda.is_available(), tensorrt.__version__)'
-.venv/bin/python -B scripts/demo/check_bumi_deployment.py \
-  --deployment-manifest models/bumi_v5_s350000/deployment.json --inference
-```
+### 3.2 之前为什么有很多安装命令
 
-这一步不要求GMT或ROS在线，不连接生产Redis，不发送机器人动作。检查资产哈希、配套
-stats/kinematics、engine环境以及单步输出`[1,120,30]`、`[1,120,2]`的形状和有限性。
+之前把底层的手工安装路线直接作为主流程展示。现由 `install.sh` 统一处理，用户不需要
+逐项执行，也不需要混用 pip 与 uv。
 
-### 3.4 准备GMT的独立运行环境
+| 项目 | 新机器是否需要用户先手动安装 | 作用 |
+|---|---|---|
+| `python3.10-venv`、`python3-pip` | 不需要，uv 处理 Python 和虚拟环境 | 之前的手工 venv/pip 路线所需 |
+| Git | 解压部署包不需要 | 只在用 Git 拉代码/同步代码时需要 |
+| uv | 不需要，安装器自动准备 | 下载 Python 和安装锁定依赖 |
+| FFmpeg/ffplay | 缺少时安装器自动装 | 音频处理/播放，不是 Python 的安装工具 |
+| Redis server/client | 缺少时安装器自动装 | Bridge 与 GMT 的轨迹/ACK 通信 |
+| TensorRT | 自动复用或安装到 `.venv` | 加载 GENMO engine 执行加速推理 |
+| pytest、训练框架、T5、SMPL | 运行包不需要 | 开发测试或训练/人体分支用途 |
 
-本机已有`noetic`容器，网络为host，实际工作区挂载如下：
+uv 不要求先安装 Python，见 [uv 官方 Python 管理说明](https://docs.astral.sh/uv/guides/install-python/)。
+TensorRT 可使用虚拟环境内的 Python 包及运行库，见
+[NVIDIA Python 安装说明](https://docs.nvidia.com/deeplearning/tensorrt/10.x.x/installing-tensorrt/install-pip.html)。
+
+`--no-deps` 仍可能出现在**安装器内部**：已存在同版系统库时只装 binding；缺库时安装器会
+显式安装锁定的全部所需库。旧 TensorRT 10.13.3.9 的 wheel 元数据引用已经废弃的
+`nvidia-cuda-runtime-cu13` 包，故另锁 `nvidia-cuda-runtime==13.0.96`，并处理其新库目录。
+这是安装器的兼容处理，用户不用再判断应装哪一套。不会安装完整训练包或执行 `pip install -e .`。
+
+### 3.3 TensorRT、ONNX、engine 分别是什么
 
 ```text
-宿主机 /home/weili/docker_projects/bumi_GMT_deployment_listao/bumi_GMT_deployment_obs
-容器内 /host/Documents/bumi_GMT_deployment_obs
+训练 checkpoint → 导出 ONNX → TensorRT 构建 engine → 部署程序加载 engine
+                    通用计算图     针对目标 GPU 优化      每个 DDIM 步调用一次
 ```
 
-检查已有容器，不创建替代工作区：
+TensorRT 是 NVIDIA 的神经网络推理优化和执行软件。ONNX 保存模型计算图及权重；
+`.engine` 保存 TensorRT 针对硬件/版本编译好的执行计划。它们描述的都是 **GENMO 生成模型**。
+GMT 仍由自己的代码加载控制策略，GENMO TensorRT 不替换 GMT。
 
-```bash
-docker inspect --format '{{.HostConfig.NetworkMode}}' noetic
-docker inspect --format '{{json .Mounts}}' noetic
-redis-cli -h 127.0.0.1 -p 6379 ping
+本部署中 TensorRT 加速去噪网络，Python/PyTorch 保留 EDGE35、DDIM 调度、滑窗和后处理。
+因此运行环境仍有 PyTorch，但没有训练框架。播放另一首音乐不需要重新导出或构建 engine。
+
+都是 RTX 4090 时可以复用已构建 engine，前提是平台、TensorRT 版本与模型契约匹配，
+每台电脑执行 `bash run.sh check`。仅同为 4090 不能保证任意 TensorRT/Linux/Windows 环境
+通用。当前未开启任意版本或跨平台兼容模式，见
+[NVIDIA engine 可移植性说明](https://docs.nvidia.com/deeplearning/tensorrt/10.x.x/getting-started/support-matrix.html)。
+
+### 3.4 可以直接压缩部署代码，以后只换模型
+
+可以。压缩 `GENMO-deploy-bumi` 中的代码、`deployment.ini`、依赖锁和完整 `models/`。
+不要包含 `.git`、`.venv`、`.tools`、测试缓存；虚拟环境中的解释器路径不能当作便携安装包。
+交付的 `bumi_music_only_gmt_s350000.tar.gz` 就是这种包，包含代码及 s350000 六项模型资产。
+Git 分支本身不包含被忽略的大模型文件，只压缩 Git 跟踪文件会漏掉模型。
+
+以后升级同一 BUMI qpos30/contact 契约的模型：
+
+1. 在完整仓库执行第 5–7 节的导出、构建、数值验证、资产打包。
+2. 将新**完整模型目录**复制到部署目录的 `models/新模型名/`。
+3. 用编辑器改 `deployment.ini` 的 `[model] manifest`，指向新目录的 `deployment.json`。
+4. 执行 `bash run.sh check`，然后重启 Bridge 和 GENMO。
+
+无需重装 Python 环境。不能只替换一个 `.ckpt`/`.engine` 而保留旧元数据、stats 或
+kinematics；完整 SHA256 校验会拒绝混用。变更模型形状/表示/机器人契约时还需适配代码。
+
+### 3.5 GMT 环境独立准备
+
+已有 GMT 的电脑沿用自己的环境；单独复制 GENMO 部署包不会同时安装 ROS、Docker、
+机器人模型或 GMT。当前 `noetic` 使用 host 网络，工作区是一个 bind mount：
+
+```text
+宿主机：/home/weili/docker_projects/bumi_GMT_deployment_listao/bumi_GMT_deployment_obs
+容器内：/host/Documents/bumi_GMT_deployment_obs
 ```
 
-新电脑需要准备自己的ROS Noetic/GMT容器、对应机器人资产和控制器环境，并将工作区
-bind mount到宿主机可读取的位置。Bridge通过`docker inspect`映射GMT参数中的容器路径，
-因此GENMO宿主机需能执行Docker命令。换容器名时给Bridge加`--gmt-container 新名称`。
-GMT不在容器内时，只要ROS参数指向宿主机可读文件，就不会执行Docker路径映射。
+同一份磁盘文件在容器内外具有不同路径。例如 ROS 参数给出容器内的
+`/host/Documents/bumi_GMT_deployment_obs/src/.../policy/bumi/某模型.onnx`，Bridge 在宿主机
+读取不到该路径，就通过 `docker inspect noetic` 找到挂载对应关系，读取宿主机的同一文件。
+**bind mount 是文件路径映射，不是端口转发。** 不下载、不复制或替换 GMT 的模型。
 
-本机GMT的CUDA后端使用容器内隔离ORT1.19.0/CUDA12.4/cuDNN9环境。迁移其他GMT时按其
-自己的安装说明配置ROS、ORT和构建，GENMO的TensorRT环境不能替代控制器环境。
+用编辑器在 `deployment.ini` 修改 `[gmt] container`；默认 `noetic`。GMT 不在容器运行，
+且 ROS 参数中的文件可直接读取时，不执行 Docker 映射。路径只在容器内部、未挂载到宿主机
+时，现有发现器无法读取，需要给工作区建立真实共享挂载或为该控制器实现契约接口。
+本机使用 host 网络，所以宿主机与容器访问 `127.0.0.1` 指向同一主机网络。
 
 ## 4. 需要重新导出时：准备完整仓库环境
 
@@ -161,10 +169,14 @@ python3.10 -m venv .venv
 .venv/bin/python -m pip install torchvision==0.21.0+cu124 --index-url https://download.pytorch.org/whl/cu124
 .venv/bin/python -m pip install -e .
 .venv/bin/python -m pip install onnx==1.18.0
-.venv/bin/python -m pip install --no-deps -r requirements/deployment/tensorrt-bindings.lock
+.venv/bin/python -m pip install --no-deps \
+  -r requirements/deployment/tensorrt-bindings.lock \
+  -r requirements/deployment/tensorrt-runtime.lock
 ```
 
 完整依赖来自`setup.cfg`，会包含训练/人体等模块的导入依赖，这是原仓库的职责。
+以上为新建完整导出环境的开发步骤；日常运行的目标机器只执行第3节一键安装。
+已有同版系统TensorRT的原仓库不必重复安装wheel库；BUMI构建工具兼容两种库来源。
 本次没有重建另一份完整导出环境；已实测原环境的关键版本包括Lightning2.3.0、
 Hydra1.3.0、hydra-zen0.16.0、ONNX1.18.0、Torch2.6.0+cu124。安装说明不冒充新的全环境验收。
 BUMI导出只读取本次checkpoint、stats和kinematics，不需要下载T5权重或SMPL身体模型文件。
@@ -324,40 +336,26 @@ rosparam get /gmtMotionMode
 rosparam get /gmtRedisKey
 ```
 
-### 终端二：启动Bridge，不指定policy
+### 终端二：启动 Bridge
 
 ```bash
 cd /home/weili/GENMO-deploy-bumi
-.venv/bin/python -u scripts/demo/demo_bumi_gmt_bridge.py \
-  --kinematics models/bumi_v5_s350000/assets/bumi_kinematics_robot_retargeter_fe934_v1.json \
-  --verbose
+bash run.sh bridge
 ```
 
-默认读取`ROS_MASTER_URI`，未设则为`http://127.0.0.1:11311`。路径不在宿主机时，通过
-`noetic`的实际bind mount映射。如果使用其他ROS master或容器名，追加：
+运动学文件从 `deployment.ini` 选定的完整模型包读取；不手写 kinematics 路径或 policy。
+启动时只读 GMT 参数服务，取得 GMT 自己配置的策略。只读检查可执行 `bash run.sh check-gmt`。
 
-```text
---ros-master-uri http://控制器主机:11311 --gmt-container 你的容器名
-```
-
-跨主机时ROS参数所指策略必须在GENMO侧有真实共享挂载；当前实现不会自动下载远端模型。
-不使用ROS的其他控制器按适配指南提供契约接口，不能仅填写一个不存在的ROS地址。
-
-可选只读检查GMT契约（要求终端一已经启动）：
-
-```bash
-.venv/bin/python -B scripts/demo/check_bumi_deployment.py \
-  --deployment-manifest models/bumi_v5_s350000/deployment.json --check-gmt
-```
-
-### 终端三：启动常驻GENMO
+### 终端三：启动常驻 GENMO
 
 ```bash
 cd /home/weili/GENMO-deploy-bumi
-CUDA_VISIBLE_DEVICES=0 .venv/bin/python -u scripts/demo/demo_music_bumi_console.py \
-  --backend tensorrt \
-  --deployment-manifest models/bumi_v5_s350000/deployment.json
+bash run.sh genmo
 ```
+
+模型、GPU、DDIM、CFG 与通信地址均用编辑器修改根目录 `deployment.ini`，重启生效。
+`bash run.sh show-config` 可以只读显示解析后的配置。原 demo 的长命令行接口仍兼容，
+但日常使用上述统一入口即可。统一入口显式使用文件中的 ROS URI，不受终端变量影响。
 
 Console输入：
 
@@ -372,6 +370,68 @@ quit
 默认DDIM20、CFG2.5、seed42，120帧窗口/30帧重叠/90帧步进，GENMO30Hz，Bridge50Hz。
 `play`换歌会取消旧revision；`stand`回站姿；`quit`退出Console；`shutdown`还请求关闭Bridge。
 相同模型常驻，音乐条件变化不重新导出engine。音频由Bridge取得对应ACK后按播放时间启动。
+
+### 8.1 一共有几个端口，哪些地方要同步
+
+**这条链路有三个固定服务端口。默认没有冲突时都不用改。** 它们是三个不同服务，
+不是需要全部改成相同数字。ROS 其他节点仍可能使用动态端口，此表不代表整个 ROS 系统
+只有三个网络端口。ACK、Redis key、容器名、CUDA device id 都不是新增端口。
+
+| 端口 | 谁连接谁 | 传什么 | 修改哪些文件 |
+|---|---|---|---|
+| 7022/TCP | GENMO Console → Bridge（ZeroMQ REQ/REP） | begin/chunk/status/stand 等命令和30Hz动作块 | 只改 `deployment.ini` 的 `[bridge] port`，两个进程自动使用同一值 |
+| 6379/TCP | Bridge → Redis ← GMT | 50Hz完整参考轨迹，GMT写回ACK | `deployment.ini` 的 `[redis] port`、实际Redis服务配置的 `port`、GMT launch 的 `gmt_redis_port` 三处必须一致 |
+| 11311/HTTP | Bridge → ROS1 master/参数服务 | 只读 `/gmtPolicyFile` 和 `/robot_type`，不传动作 | `deployment.ini` 的 `[gmt] ros_master_uri` 必须指向 GMT 实际连接的 ROS master |
+
+Redis 还需同步 host、db、轨迹 key；默认 `127.0.0.1`、`0`、`gmt_online_frame_bumi`。
+Bridge 的 ACK key 自动为轨迹 key 加 `_ack`，GMT 对应 `gmt_redis_ack_key` 必须一致；
+二者共用 Redis 6379，不另开 ACK 端口。默认超时和轨迹格式也必须匹配，不仅是端口号。
+
+### 8.2 代码在哪里改：GENMO 与 GMT 的具体位置
+
+GENMO 侧日常设置只改 **`deployment.ini`**。读取/转发代码分别是：
+
+- `gem/runtime/bumi_deployment_config.py`：解析配置并把同一个端点传给两个进程。
+- `scripts/demo/run_bumi_deployment.py`：调度既有 Console/Bridge/检查器。
+- `scripts/demo/demo_music_bumi_console.py`：实际 ZeroMQ 请求端。
+- `scripts/demo/demo_bumi_gmt_bridge.py`：实际 ZeroMQ 服务端、Redis 发布端。
+- `gem/runtime/gmt_policy_source.py` 的 `discover_gmt_policy()`：ROS XML-RPC 只读发现。
+
+当前 GMT 根目录为 `/home/weili/docker_projects/bumi_GMT_deployment_listao/bumi_GMT_deployment_obs`。
+以下路径相对于 GMT 根目录，在编辑器中修改并重启相关程序，不通过终端临时覆盖参数：
+
+| 文件 | 对应设置或逻辑 |
+|---|---|
+| `src/legged_rl/rl_controller/rl_controllers/launch/ac_start.launch` | 仿真入口的 `gmt_redis_host/port/db/key/ack_key` 默认值 |
+| `src/legged_rl/rl_controller/rl_controllers/launch/ac_start_real.launch` | 实机入口同名默认值 |
+| `src/legged_rl/rl_controller/rl_controllers/launch/load_ac_controller.launch` | 接收上层arg并写入 `gmtRedisHost/Port/Db/Key/AckKey`；独立调用时有自己的默认值 |
+| 同上 `load_ac_controller.launch` 中 BUMI group | `gmtPolicyFile`：只由 GMT 在这里选择自己的模型；不在 GENMO 指定 |
+| `src/legged_rl/rl_controller/rl_controllers/src/AcController.cpp` | 读取 `/gmtPolicyFile` 和 Redis 参数，初始化策略及接收器 |
+| `src/legged_rl/rl_controller/rl_controllers/include/rl_controllers/MotionLoaderRedis.h` | 实际连接 Redis，接收轨迹并写回 ACK |
+| Redis 实际服务配置 | Ubuntu 系统服务通常是 `/etc/redis/redis.conf` 的 `port`/`bind`；若 Redis 在容器内则改容器实际使用的配置 |
+
+使用仿真/实机两个入口时，上层 launch 会把参数传给 `load_ac_controller.launch`。
+因此只改后者的默认值可能被上层覆盖。若统一换 Redis 端口，三份 launch 的对应默认值
+一起保持一致，再与 Bridge 配置、Redis 服务匹配。本次只说明这些外部文件，不修改 GMT。
+
+### 8.3 `ROS_MASTER_URI` 是什么接口，11311 怎么确定
+
+这是 **ROS 1 标准 master 地址环境变量**。master 同时提供参数服务，协议是 HTTP 上的
+XML-RPC，不是 GENMO 视频网页或轨迹接口。Bridge 用 Python 标准库
+`xmlrpc.client.ServerProxy(uri).getParam(...)` 读取 `/gmtPolicyFile`；调用者 ID 为
+`/genmo_bumi_bridge`。该参数在 GMT 的 `load_ac_controller.launch` 定义，GMT 的
+`AcController.cpp` 也读取同一个参数，因此 GENMO 不再维护另一份 policy 选择。
+
+ROS Noetic 标准默认值定义在容器
+`/opt/ros/noetic/lib/python3/dist-packages/rosgraph/rosenv.py`：
+`DEFAULT_MASTER_PORT = 11311`，默认 URI 为 `http://localhost:11311/`。
+这是定义来源，**无需修改 ROS 安装目录的库文件**。GENMO 的旧 demo 接口未指定 URI 时
+读取环境变量，再回退 `http://127.0.0.1:11311`；新的 `run.sh` 始终以 `deployment.ini` 为准。
+
+通常保留 11311。确需更换 master 端口时，在 GMT 的 `simulation.sh`/`real.sh` 启动文件中
+持久设置 `ROS_MASTER_URI` 并使 `roslaunch -p 新端口 ...` 的端口一致，再修改 GENMO 配置
+文件中的 URI。其他连接该 ROS master 的 ROS 进程也必须使用同一地址；不能只改 Bridge。
+本次没有修改这些脚本、启动新 master 或改变现有端口。
 
 ## 9. 数据流：从音乐到电机之前的每个边界
 
