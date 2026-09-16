@@ -1,5 +1,10 @@
 # GMT 接入 GENMO：逐文件说明与移植清单
 
+**如果是同款GMT、仅尚未接过GENMO，GENMO与Bridge无需修改。** 直接使用
+[可复制的接收器文件与逐处合并步骤](../integrations/gmt/README.md)：复制两个头文件和
+一个测试文件，再合并AcController的三个接入点、launch参数与CMake依赖。
+下文是协议原理和逐文件分析；上面的移植说明给出具体代码片段。
+
 本次核对对象仅为：
 
 ```text
@@ -25,6 +30,11 @@ ROS参数接口定义及GMT应修改的具体配置见部署手册第8.1–8.3�
 GENMO Bridge的新默认行为只是读同一个ROS参数，通过实际容器挂载定位文件，再获取
 关节顺序和默认姿态。Bridge不调用这个GMT模型做动作推理，也不写回参数。
 正常GENMO命令没有`--gmt-policy`；GENMO资产清单v2不携带GMT权重。
+
+11311读取并非仅用于显示文件名：找到路径后，Bridge通过 `GmtPolicyContract.from_onnx`
+校验69/690/1092输入、读取joint_names与default_joint_pos，构造关节重排和站姿。
+当前GENMO运动学默认关节角全为0，GMT膝默认角约0.322rad，不能直接互换。
+因此本次保留该有实际用途的发现逻辑；去掉ROS发现需要另外提供等价契约并修改Bridge。
 
 这个自动发现方式没有新增GMT源码修改。若别人的GMT使用其他参数名、配置文件或不用ROS，
 在适配器提供对应的只读contract provider即可。更通用的接口可由控制器发布已加载策略的

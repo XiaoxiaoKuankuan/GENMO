@@ -9,6 +9,10 @@
 环境、导出和启动命令见 [完整部署手册](BUMI_MUSIC_DEPLOYMENT.md)；
 当前GMT的具体改动见 [GMT逐文件说明](BUMI_GMT_GENMO_INTERFACE.md)。
 
+如果你的“新适配”指同款GMT仅缺GENMO接收功能，直接使用
+[同款GMT移植包](../integrations/gmt/README.md)。**该情况不新增Bridge、不修改GENMO生成**；
+本文后面的新适配器设计针对接口不同的控制器，不是同款GMT首次接入的必要工作。
+
 ## 1. 首先确定连接边界
 
 GENMO生成期望运动参考；控制器结合参考与机器人当前状态，产生控制动作。

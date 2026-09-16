@@ -12,6 +12,7 @@ Bridge 正常启动不传 `--gmt-policy`，只读 GMT 已启动后的 ROS 参数
 相关文档：
 
 - [GMT 接收端逐文件移植说明](BUMI_GMT_GENMO_INTERFACE.md)
+- [同款 GMT 首次接入：可复制文件与具体代码修改](../integrations/gmt/README.md)
 - [适配其他 GMT、SONIC 或通用控制器的开发指南](GENMO_CONTROLLER_ADAPTATION.md)
 - [运行依赖锁](../requirements/deployment/runtime.lock)
 - [代码与验证历史](../记录文本.md)
@@ -421,6 +422,10 @@ XML-RPC，不是 GENMO 视频网页或轨迹接口。Bridge 用 Python 标准库
 `xmlrpc.client.ServerProxy(uri).getParam(...)` 读取 `/gmtPolicyFile`；调用者 ID 为
 `/genmo_bumi_bridge`。该参数在 GMT 的 `load_ac_controller.launch` 定义，GMT 的
 `AcController.cpp` 也读取同一个参数，因此 GENMO 不再维护另一份 policy 选择。
+
+取得路径之后，Bridge还读取该ONNX的joint_names、default_joint_pos，并校验输入形状，
+用于关节重排、站姿和兼容性检查。11311承担发现工作，有实际用途；本次保留。
+同款GMT移植只补接收端，不需在生成端改动这条已有逻辑，具体步骤见上方移植包。
 
 ROS Noetic 标准默认值定义在容器
 `/opt/ros/noetic/lib/python3/dist-packages/rosgraph/rosenv.py`：

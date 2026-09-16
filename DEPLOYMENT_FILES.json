@@ -1,6 +1,6 @@
 {
   "description": "BUMI music-only 部署分支依赖闭包；模型文件不纳入Git",
-  "source_commit": "2d20692603f3ed3f0b4a658f5e580e9c0b69b9cb",
+  "source_commit": "9046e36fee037cf65ff4d25f83cbefde63ad7506",
   "python_files": [
     "gem/__init__.py",
     "gem/diffusion_utils/gaussian_diffusion.py",
@@ -82,6 +82,11 @@
     "gem/utils/music_features.py",
     "gem/utils/rotation_conversions.py",
     "install.sh",
+    "integrations/gmt/README.md",
+    "integrations/gmt/SOURCE_MANIFEST.json",
+    "integrations/gmt/include/rl_controllers/GmtTrajectoryProtocol.h",
+    "integrations/gmt/include/rl_controllers/MotionLoaderRedis.h",
+    "integrations/gmt/test/test_gmt_trajectory_protocol.cpp",
     "pyproject.toml",
     "requirements/deployment/runtime.lock",
     "requirements/deployment/system-packages.txt",
