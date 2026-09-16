@@ -3,6 +3,8 @@
 本文以当前BUMI music-only链路为已实现基线，说明接入新控制器时保留什么、改哪里、
 如何验证。文中的“建议新增”文件和接口是后续开发设计，不是已经实现的SONIC在线部署。
 当前实际运行入口仍是 `demo_music_bumi_console.py` 和 `demo_bumi_gmt_bridge.py`。
+日常通过 `bash run.sh genmo` / `bash run.sh bridge` 调用这两个入口，持久配置在
+`deployment.ini`；接入不同控制器时仍需修改对应协议/参考适配层，不能只换端口。
 
 环境、导出和启动命令见 [完整部署手册](BUMI_MUSIC_DEPLOYMENT.md)；
 当前GMT的具体改动见 [GMT逐文件说明](BUMI_GMT_GENMO_INTERFACE.md)。

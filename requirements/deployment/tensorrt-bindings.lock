@@ -1,3 +1,4 @@
-# 使用已有同版系统 libnvinfer；安装本文件时加 --no-deps，避免重复安装另一份系统库。
+# 由 install.sh 管理：先复用已有同版库；缺少时自动补 tensorrt-runtime.lock 的完整库。
+# binding 单独安装时使用 --no-deps；不要让旧版元数据解析到已废弃的 CUDA 13 包。
 tensorrt-cu13==10.13.3.9
 tensorrt-cu13-bindings==10.13.3.9

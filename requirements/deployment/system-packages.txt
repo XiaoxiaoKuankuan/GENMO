@@ -1,7 +1,8 @@
-# BUMI music-only 当前实测系统依赖；本文件是环境清单，不是自动修改系统的安装脚本。
+# BUMI music-only 原机器的系统依赖基线；新机运行 bash install.sh，无需逐项安装本清单。
 # 宿主机：Ubuntu 22.04.5 x86_64，Python 3.10.12，RTX 4090，NVIDIA 580.159.03。
 libnvinfer10=10.13.3.9-1+cuda13.0
 libnvinfer-plugin10=10.13.3.9-1+cuda13.0
+# 上述系统库可以由 .venv 中的同版官方 wheel 代替，安装器自动处理。
 # 原仓库TensorRT构建还使用ONNX parser；部署端不需要执行构建。
 libnvonnxparsers10=10.13.3.9-1+cuda13.0
 # 音乐播放和通信还需要 ffmpeg（含 ffplay）、redis-server，均使用发行版包。
