@@ -1,0 +1,27 @@
+{
+  "description": "同款GMT接入GENMO：可复制的协议、Redis接收器与回归测试。控制器按README手工合并指定片段。",
+  "source_workspace": "/home/weili/docker_projects/bumi_GMT_deployment_listao/bumi_GMT_deployment_obs",
+  "source_controller_directory": "/home/weili/docker_projects/bumi_GMT_deployment_listao/bumi_GMT_deployment_obs/src/legged_rl/rl_controller/rl_controllers",
+  "source_head": "2b081d55e03218871c617e15375fedf82de429ec",
+  "source_is_working_tree_snapshot": true,
+  "files": {
+    "include/rl_controllers/GmtTrajectoryProtocol.h": {
+      "source_sha256": "d41abbf3efd9085d8d97ce9e30577b54b01d7b40e9560fe4f3ddeed2dbc0d556",
+      "bundled_sha256": "d41abbf3efd9085d8d97ce9e30577b54b01d7b40e9560fe4f3ddeed2dbc0d556",
+      "only_added_intro": false
+    },
+    "include/rl_controllers/MotionLoaderRedis.h": {
+      "source_sha256": "9148f39bc6677e702f3f6f04e66a1e9ca00ca8fdda24e871a24d8816c24a068a",
+      "bundled_sha256": "7592be8771f2e6f09a6facc6b00840763e5d654e41cd0ddc82872c8f2490df80",
+      "only_added_intro": true
+    },
+    "test/test_gmt_trajectory_protocol.cpp": {
+      "source_sha256": "e3c929fe75a2cfaa68c4cf0c657fd584d54f82d68569b83cfe5b2c8ec6b01875",
+      "bundled_sha256": "e3c929fe75a2cfaa68c4cf0c657fd584d54f82d68569b83cfe5b2c8ec6b01875",
+      "only_added_intro": false
+    }
+  },
+  "runtime_protocol": "trajectory_v1",
+  "default_playback_mode": "realtime",
+  "gmt_workspace_modified": false
+}

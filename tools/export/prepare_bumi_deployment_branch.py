@@ -131,6 +131,7 @@ def main(argv: list[str] | None = None) -> int:
         path
         for path in tracked
         if path.startswith("requirements/deployment/")
+        or path.startswith("integrations/gmt/")
         or Path(path).name.upper().startswith(("LICENSE", "NOTICE", "COPYING"))
     )
     remove = sorted(tracked - keep)
