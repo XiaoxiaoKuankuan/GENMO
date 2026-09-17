@@ -43,6 +43,8 @@ def summarize(paths: list[Path], *, required_runs: int = 20) -> dict[str, Any]:
     if len(paths) != required_runs:
         raise ValueError(f"正式评测要求 {required_runs} 个 seed，实际 {len(paths)}")
     rows = [json.loads(path.read_text(encoding="utf-8")) for path in paths]
+    if any(row.get("evaluation_scope", "full_validation") != "full_validation" for row in rows):
+        raise ValueError("小批 subset_smoke 不能作为完整验证集正式汇总")
     identity = {key: rows[0].get(key) for key in IDENTITY_KEYS}
     if any(value is None for value in identity.values()):
         raise ValueError("首份评测 JSON 缺少身份链")

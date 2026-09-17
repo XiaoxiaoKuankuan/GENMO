@@ -66,7 +66,11 @@ from tools.data.motionmillion.render_motionmillion_pilot import _is_mirror
 from tools.eval.build_motionmillion_review import build_review
 from tools.eval.generate_motionmillion_val_predictions import select_caption_and_seed
 from tools.eval.motionmillion_smpl_to_272 import export_motion
-from tools.eval.prepare_motionmillion_official_eval import prepare_official_eval
+from tools.eval.prepare_motionmillion_official_eval import (
+    load_official_statistics,
+    prepare_official_eval,
+    select_targets,
+)
 from tools.eval.run_motionmillion_official_metrics import (
     calculate_fid,
     calculate_r_precision,
@@ -74,6 +78,49 @@ from tools.eval.run_motionmillion_official_metrics import (
 from tools.eval.summarize_motionmillion_metrics import choose_candidate, summarize
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
+
+
+def test_evaluator_subset_is_deterministic_and_explicitly_scoped() -> None:
+    targets = {f"motion/{i}": {"source_archive": f"source/{i % 2}.tar.gz"} for i in range(20)}
+    selected, protocol = select_targets(
+        targets, max_samples=4, selection_seed=42, source_archives=["source/0.tar.gz"]
+    )
+    again, repeated = select_targets(
+        dict(reversed(list(targets.items()))), max_samples=4, selection_seed=42,
+        source_archives=["source/0.tar.gz"],
+    )
+    assert selected == again and protocol == repeated
+    assert len(selected) == 4 and protocol["scope"] == "subset_smoke"
+    assert protocol["candidate_count"] == 10 and protocol["full_eligible_count"] == 20
+    assert all(row["source_archive"] == "source/0.tar.gz" for row in selected.values())
+    assert select_targets(targets)[1]["scope"] == "full_validation"
+    with pytest.raises(ValueError, match="样本数"):
+        select_targets(targets, max_samples=21)
+    with pytest.raises(ValueError, match="没有合格"):
+        select_targets(targets, source_archives=["missing.tar.gz"])
+
+
+def test_evaluator_statistics_accept_release_layout_and_reject_conflicts(tmp_path: Path) -> None:
+    stats = tmp_path / "mean_std"
+    stats.mkdir()
+    np.save(stats / "Mean.npy", np.zeros(272))
+    np.save(stats / "Std.npy", np.ones(272))
+    assert load_official_statistics(tmp_path, "mean.npy")[0] == stats / "Mean.npy"
+    assert np.array_equal(load_official_statistics(tmp_path, "std.npy")[1], np.ones(272))
+    (stats / "vector_272").mkdir()
+    np.save(stats / "vector_272" / "mean.npy", np.ones(272))
+    with pytest.raises(ValueError, match="指纹不一致"):
+        load_official_statistics(tmp_path, "mean.npy")
+    np.save(stats / "Std.npy", np.zeros(272))
+    with pytest.raises(ValueError, match="全部为正数"):
+        load_official_statistics(tmp_path, "std.npy")
+
+
+def test_official_summary_rejects_subset_smoke(tmp_path: Path) -> None:
+    report = tmp_path / "metrics.json"
+    report.write_text('{"evaluation_scope":"subset_smoke"}', encoding="utf-8")
+    with pytest.raises(ValueError, match="subset_smoke"):
+        summarize([report], required_runs=1)
 
 
 def test_t5_distributed_workers_partition_shards_without_overlap() -> None:

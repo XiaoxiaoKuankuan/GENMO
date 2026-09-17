@@ -9,6 +9,9 @@
 272D 数组写入 ``official_evaluator/dataset/MotionMillion``。文本、split、mean/std 与
 每条输入指纹同时冻结到 ``eligibility.json``，供 20-seed 评测严格复用。
 
+小批链路检查可以显式限定来源归档与样本数，按 seed 和 motion_id 的 SHA256 排序
+选取固定集合。此模式标记为 subset_smoke，不冒充完整验证集；默认仍准备完整集合。
+
 这里的 200 帧上限不是训练过滤规则；它来自固定官方代码 commit 的
 ``dataset/dataset_TM_eval_motionmillion.py``。若未来官方代码改变资格规则，应升级本工具
 schema，而不能在一次报告中静默更改样本集合。
@@ -46,6 +49,58 @@ from tools.data.motionmillion.common import (  # noqa: E402
 OFFICIAL_CODE_COMMIT = "8a2a7dfa66ecb6a1533d3d9cb49c743a697e1e1c"
 OFFICIAL_EVAL_MIN_FRAMES = 60
 OFFICIAL_EVAL_MAX_FRAMES = 200
+
+
+def select_targets(
+    targets: dict[str, dict[str, Any]],
+    *,
+    max_samples: int | None = None,
+    selection_seed: int = 42,
+    source_archives: list[str] | None = None,
+) -> tuple[dict[str, dict[str, Any]], dict[str, Any]]:
+    """确定性选择小批验证集合，显式记录范围，避免把有限来源检查当成正式评测。"""
+    archives = sorted(set(source_archives or []))
+    available = {row["source_archive"] for row in targets.values()}
+    if set(archives) - available:
+        raise ValueError(f"指定归档没有合格 val 样本: {sorted(set(archives) - available)}")
+    candidates = {
+        key: row for key, row in targets.items()
+        if not archives or row["source_archive"] in archives
+    }
+    if max_samples is not None and not 1 <= max_samples <= len(candidates):
+        raise ValueError(f"样本数必须在 1–{len(candidates)}，实际 {max_samples}")
+    ids = sorted(candidates)
+    if max_samples is not None:
+        ids = sorted(ids, key=lambda key: (sha256_bytes(f"{selection_seed}:{key}".encode()), key))
+        ids = sorted(ids[:max_samples])
+    selection = {
+        "scope": "subset_smoke" if archives or max_samples is not None else "full_validation",
+        "selection_seed": selection_seed,
+        "max_samples": max_samples,
+        "source_archives": archives,
+        "full_eligible_count": len(targets),
+        "candidate_count": len(candidates),
+        "selected_count": len(ids),
+        "selected_ids_sha256": sha256_bytes(("\n".join(ids) + "\n").encode()),
+    }
+    return {key: candidates[key] for key in ids}, selection
+
+
+def load_official_statistics(raw_root: Path, name: str) -> tuple[Path, np.ndarray]:
+    """兼容官方代码视图和真实 HF release 的统计量路径，不重新估计或替换数值。"""
+    candidates = [raw_root / "mean_std" / "vector_272" / name,
+                  raw_root / "mean_std" / name.capitalize()]
+    existing = [path for path in candidates if path.is_file()]
+    if not existing:
+        raise FileNotFoundError(f"缺少官方 {name}: {candidates}")
+    if len({sha256_file(path) for path in existing}) != 1:
+        raise ValueError(f"两种路径的官方 {name} 指纹不一致: {existing}")
+    array = np.load(existing[0], allow_pickle=False)
+    if array.shape != (MOTION_DIM,) or not np.isfinite(array).all():
+        raise ValueError(f"官方 {name} shape/finite 异常")
+    if name == "std.npy" and np.any(array <= 0):
+        raise ValueError("官方 std 必须全部为正数")
+    return existing[0], array
 
 
 def _atomic_write_text(path: Path, value: str, *, resume: bool) -> None:
@@ -115,7 +170,20 @@ def prepare_official_eval(args: argparse.Namespace) -> dict[str, Any]:
     if eligibility_path.exists() and not args.resume:
         raise FileExistsError(f"已有 evaluator 数据身份: {eligibility_path}；请使用 --resume")
 
-    targets = _load_targets(motion_root)
+    statistics = {name: load_official_statistics(raw_root, name)
+                  for name in ("mean.npy", "std.npy")}
+    targets, selection = select_targets(
+        _load_targets(motion_root),
+        max_samples=getattr(args, "max_samples", None),
+        selection_seed=getattr(args, "selection_seed", 42),
+        source_archives=getattr(args, "source_archive", None),
+    )
+    if eligibility_path.exists():
+        previous = read_json(eligibility_path)
+        if previous.get("selection", selection) != selection:
+            raise ValueError("已有 evaluator 选择协议与当前请求不同")
+        if {row["motion_id"] for row in previous["records"]} != set(targets):
+            raise ValueError("已有 evaluator 样本集合与当前请求不同")
     by_archive: dict[str, dict[str, dict[str, Any]]] = defaultdict(dict)
     for target in targets.values():
         by_archive[target["source_archive"]][target["source_member"]] = target
@@ -125,6 +193,8 @@ def prepare_official_eval(args: argparse.Namespace) -> dict[str, Any]:
         archive_path = raw_root / archive_relative
         if not archive_path.is_file():
             raise FileNotFoundError(f"缺少来源归档: {archive_path}")
+        remaining = set(member_targets)
+        print(f"提取 {archive_relative}: {len(remaining)} 个 val 样本", flush=True)
         with tarfile.open(archive_path, mode="r:*") as archive:
             for member in archive:
                 normalized = normalize_member_name(member.name)
@@ -169,6 +239,9 @@ def prepare_official_eval(args: argparse.Namespace) -> dict[str, Any]:
                     "text_path": text_relative.as_posix(),
                     "text_sha256": sha256_file(dataset_root / text_relative),
                 }
+                remaining.discard(normalized)
+                if not remaining:
+                    break
 
     missing = sorted(set(targets) - set(written))
     if missing:
@@ -176,17 +249,13 @@ def prepare_official_eval(args: argparse.Namespace) -> dict[str, Any]:
 
     mean_std_rows = {}
     for name in ("mean.npy", "std.npy"):
-        source = raw_root / "mean_std" / "vector_272" / name
-        if not source.is_file():
-            raise FileNotFoundError(f"缺少官方 mean/std: {source}")
-        array = np.load(source, allow_pickle=False)
-        if array.shape != (MOTION_DIM,) or not np.isfinite(array).all():
-            raise ValueError(f"官方 {name} shape/finite 异常")
+        source, array = statistics[name]
         relative = Path("mean_std") / "vector_272" / name
         _save_or_verify_array(dataset_root / relative, array, resume=args.resume)
         mean_std_rows[name] = {
             "path": relative.as_posix(),
             "sha256": sha256_file(dataset_root / relative),
+            "source_path": str(source),
         }
 
     ordered = [written[motion_id] for motion_id in sorted(written)]
@@ -201,6 +270,7 @@ def prepare_official_eval(args: argparse.Namespace) -> dict[str, Any]:
         "schema_version": SCHEMA_VERSION,
         "official_code_commit": OFFICIAL_CODE_COMMIT,
         "official_loader_source": "dataset/dataset_TM_eval_motionmillion.py",
+        "selection": selection,
         "eligibility": {
             "split": "val",
             "min_frames_inclusive": OFFICIAL_EVAL_MIN_FRAMES,
@@ -228,6 +298,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--motion-root", type=Path, required=True)
     parser.add_argument("--output-root", type=Path, required=True)
     parser.add_argument("--resume", action="store_true")
+    parser.add_argument("--max-samples", type=int, help="只准备固定数量的小批样本，标记为 subset_smoke")
+    parser.add_argument("--selection-seed", type=int, default=42)
+    parser.add_argument("--source-archive", action="append", help="限定 raw-root 下的相对归档路径，可重复")
     return parser
 
 

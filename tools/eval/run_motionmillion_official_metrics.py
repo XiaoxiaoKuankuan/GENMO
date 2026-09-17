@@ -196,6 +196,8 @@ def run_metrics(args: argparse.Namespace) -> dict[str, Any]:
     generated_embeddings = []
     r_precision = np.zeros(3, dtype=np.float64)
     matching_score = 0.0
+    real_r_precision = np.zeros(3, dtype=np.float64)
+    real_matching_score = 0.0
     with torch.inference_mode(), _working_directory(evaluator_root):
         for start in range(0, usable_count, args.batch_size):
             ids = ordered_ids[start : start + args.batch_size]
@@ -237,6 +239,12 @@ def run_metrics(args: argparse.Namespace) -> dict[str, Any]:
             )
             r_precision += batch_r
             matching_score += batch_matching
+            # 同一批真实动作的检索结果作为解释参照，不把它作为生成模型得分。
+            real_r, real_matching = calculate_r_precision(
+                text_embedding.cpu().numpy(), real_embedding.cpu().numpy()
+            )
+            real_r_precision += real_r
+            real_matching_score += real_matching
 
     real = np.concatenate(real_embeddings)
     generated = np.concatenate(generated_embeddings)
@@ -256,6 +264,15 @@ def run_metrics(args: argparse.Namespace) -> dict[str, Any]:
         "evaluated_count": usable_count,
         "dropped_by_official_batch_rule": len(eligible) - usable_count,
         "batch_size": int(args.batch_size),
+        "evaluation_scope": eligibility.get("selection", {}).get("scope", "full_validation"),
+        "selection": eligibility.get("selection"),
+        "real_reference": {
+            "r_precision_1": float(real_r_precision[0] / usable_count),
+            "r_precision_2": float(real_r_precision[1] / usable_count),
+            "r_precision_3": float(real_r_precision[2] / usable_count),
+            "matching_score": float(real_matching_score / usable_count),
+            "diversity": calculate_diversity(real, int(args.seed)),
+        },
         "checkpoint_sha256": sha256_file(checkpoint),
         "experiment_config_sha256": sha256_file(config),
         "dataset_release_fingerprint": dataset_release["build_fingerprint"],
