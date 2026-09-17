@@ -12,7 +12,9 @@ Score、FID、Diversity 报告；服务器1原配置的
 训练 loss、固定小样本监控中的 FK diversity/足滑代理指标，都不能替代这些正式指标。
 
 本次已把自动 evaluator 的代码、权重、文本骨干、官方归一化统计量和126条人工评测
-prompt 放到本机，并完成 CPU 离线双编码器加载检查。没有执行完整验证集生成或质量评分。
+prompt 放到本机，并完成 CPU 离线双编码器加载检查。随后按用户指令完成了
+[s210000的128条固定小批链路验收](reports/motionmillion_s210000_eval128.md)，包含真实
+生成和六项指标；尚未执行完整验证集或20-seed正式评测。
 
 本地目录：
 
@@ -149,13 +151,18 @@ std 全正。临时目录 `/tmp/motionmillion-evaluator-smoke-5wjjd0ty` 已删�
 完整接口见 [现有文本训练与评测说明](MOTIONMILLION_TEXT_ONLY.md#7-推理与评测)。
 开始正式评测前还有两个已核实的准备点：
 
-- 当前 `prepare_motionmillion_official_eval.py` 要求 raw-root 下
-  `mean_std/vector_272/mean.npy`、`std.npy`，而真实 HF release 在 `mean_std/Mean.npy`、
-  `Std.npy`。本次本地 evaluator 已按要求摆放统计量；尚未修改该准备脚本或服务器数据布局。
-  后续运行准备脚本前须适配原始路径，不要直接复制旧命令宣称已经可跑完整评测。
+- `prepare_motionmillion_official_eval.py` 现已兼容 raw-root 下的
+  `mean_std/vector_272/mean.npy`、`std.npy`，以及真实 HF release 的 `mean_std/Mean.npy`、
+  `Std.npy`。两种路径同时存在时必须指纹一致；不重新估计统计量，不改正式服务器数据。
 - 固定版本官方 loader 过滤60–200帧，并按4帧单位随机裁剪；当前 GENMO v1 生成固定120帧，
   本仓库指标运行器读取 eligibility 原始长度。统一 evaluator 不等于整个论文协议相同。
   正式横向对比必须说明时长、裁剪、caption选择、测试集/验证集、候选batch和随机种子。
+
+小批检查可在准备命令中增加 `--max-samples 128 --selection-seed 42`，并可重复传入
+`--source-archive <raw-root下的相对归档路径>` 限定来源，减少仅检查链路时的解压工作。
+样本按seed与motion_id的SHA256确定性选取，eligibility记录完整候选数量、来源范围和
+选中ID指纹。受限集合标记 `subset_smoke`，汇总器拒绝把它作为完整验证集结果。
+指标输出另外包含同批真实动作的 `real_reference`，方便检查参考数据和理解分数尺度。
 
 ## 5. MotionMillion-Eval 人工评测是什么
 

@@ -1,0 +1,7 @@
+﻿指标,生成动作,同批真实动作参考,样本数,范围
+r_precision_1,0.453125,0.7109375,128,subset_smoke
+r_precision_2,0.6015625,0.859375,128,subset_smoke
+r_precision_3,0.6953125,0.921875,128,subset_smoke
+matching_score,29.140757083892822,20.864595413208008,128,subset_smoke
+fid,364.3581975551458,,128,subset_smoke
+diversity,43.94527816772461,42.299434661865234,128,subset_smoke
