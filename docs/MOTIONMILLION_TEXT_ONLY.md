@@ -257,6 +257,10 @@ gradient norm、文本 dropout 实测比、data wait、step time、samples/s、�
 
 ## 7. 推理与评测
 
+2026-09-17已在本机下载官方 evaluator、DistilBERT、mean/std 和126条人工prompt，并通过
+CPU离线编码检查；尚未执行正式质量指标。资产路径、PyTorch2.6加载兼容、原始统计量
+路径差异及人工评审方案见 [evaluator 与人工评测说明](motionmillion_evaluator_and_human_review.md)。
+
 新 checkpoint 写入 `genmo_text_contract`，声明 150 token、1024D 和 text-only pipeline；
 旧 checkpoint 缺少该字段时按历史 50 token + `gem_smpl` 解析。文本 demo 与 resident
 runtime 都按 checkpoint 设置长度。v1 验收固定 120 帧、30 FPS、DDIM-50、CFG 2.5；
