@@ -32,6 +32,8 @@ def config_path(tmp_path):
     directory.mkdir()
     target = directory / "deployment.ini"
     shutil.copyfile(ROOT / "deployment.ini", target)
+    # 本组验证 GMT 启动命令；只调整临时副本，不能依赖或覆盖用户的独立预览选择。
+    target.write_text(target.read_text().replace("mode = preview", "mode = gmt"))
     return target
 
 

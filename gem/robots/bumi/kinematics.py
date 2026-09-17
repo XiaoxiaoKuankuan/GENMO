@@ -3,6 +3,9 @@
 The module consumes a versioned JSON file exported from the real BUMI MJCF.
 It intentionally has no MuJoCo dependency: MuJoCo is confined to the exporter,
 offline parity validator, and renderer under ``tools/``.
+
+部署待机姿态通过 make_standing_qpos 单独计算贴地根高度；保留原始 default_qpos
+及模型资产指纹，不将待机对齐应用于模型生成的动作序列。
 """
 
 from __future__ import annotations
@@ -334,6 +337,26 @@ class BumiKinematics(nn.Module):
         return torch.cat(
             (qpos[..., :3], quaternion / quat_norm, qpos[..., 7:]), dim=-1
         )
+
+    @torch.no_grad()
+    def make_standing_qpos(self, joint_positions=None) -> torch.Tensor:
+        """按实际站姿的脚底代理点对齐地面，仅生成运行时待机姿态。
+
+        默认使用运动学关节零位；Bridge 可传入 GMT 的原生顺序默认关节角度。
+        先做 FK，再将最低脚底代理点放到 z=0.002m；当前 BUMI 可见脚底略低于
+        代理点，这对应约 1mm 的网格离地余量。仅改变根 z，不改变关节角、根旋转
+        或原始 default_qpos，也不对生成中的跳跃等动作逐帧执行贴地处理。
+        """
+        qpos = self.default_qpos.clone()
+        if joint_positions is not None:
+            joints = torch.as_tensor(joint_positions, dtype=qpos.dtype, device=qpos.device)
+            if joints.shape != (21,) or not bool(torch.isfinite(joints).all()):
+                raise ValueError("待机关节角必须为有限的 21 维原生顺序数组")
+            qpos[7:] = joints
+        fk = self.forward_kinematics(qpos)
+        sole = self.get_sole_proxy_points(fk["body_pos_w"], fk["body_quat_w"])
+        qpos[2] += 0.002 - sole["bottom_height"].amin()
+        return qpos
 
     def clamp_joint_positions(self, joint_dof: torch.Tensor) -> torch.Tensor:
         if joint_dof.shape[-1] != 21:

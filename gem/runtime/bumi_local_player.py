@@ -37,7 +37,7 @@ class LocalBumiPlayer:
         self.stop_event = threading.Event()
         self.kinematics_sha = hashlib.sha256(Path(kinematics_path).read_bytes()).hexdigest()
         self.joint_sha = bumi_joint_order_sha256(kinematics.joint_order)
-        self.idle = kinematics.default_qpos.detach().cpu().numpy().copy()
+        self.idle = kinematics.make_standing_qpos().cpu().numpy().copy()
         self.current_qpos = self.idle.copy()
         self.pose = PoseSnapshot(self.kinematics_sha)
         self.tracker = BumiOnlineRevisionTracker()

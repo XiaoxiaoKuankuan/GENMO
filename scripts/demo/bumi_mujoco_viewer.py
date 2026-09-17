@@ -23,6 +23,7 @@ from pathlib import Path
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+from gem.robots.bumi.kinematics import BumiKinematics
 from gem.runtime.bumi_preview import validate_robot_assets
 
 
@@ -78,9 +79,9 @@ def main():
     parser.add_argument("--robot-manifest", type=Path, required=True)
     parser.add_argument("--kinematics", type=Path, required=True)
     args = parser.parse_args()
-    model, spec = load_model(args.robot_manifest, args.kinematics)
+    model, _ = load_model(args.robot_manifest, args.kinematics)
     data = mujoco.MjData(model)
-    data.qpos[:] = spec["default_qpos"]
+    data.qpos[:] = BumiKinematics(args.kinematics).make_standing_qpos().numpy()
     mujoco.mj_forward(model, data)
     buffer = b""
     last_frame_time = time.monotonic()

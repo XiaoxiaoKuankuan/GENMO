@@ -33,6 +33,26 @@ from tests.bumi.test_bumi_online_deployment import _bridge_args, _FakePolicy, _F
 ROOT = Path(__file__).resolve().parents[2]
 
 
+@pytest.mark.parametrize("bent", [False, True])
+def test_standing_pose_grounds_feet_without_changing_model_asset(test_kinematics_path, bent):
+    spec = json.loads(test_kinematics_path.read_text())
+    # 使用俯仰关节，让屈膝姿态确实改变脚底高度，避免仅验证固定 z 偏移。
+    spec["joint_axes"] = [[0, 1, 0] for _ in range(21)]
+    test_kinematics_path.write_text(json.dumps(spec))
+    original = test_kinematics_path.read_bytes()
+    kinematics = BumiKinematics(test_kinematics_path)
+    default = kinematics.default_qpos.numpy().copy()
+    joints = np.full(21, 0.25 if bent else 0.0)
+    pose = kinematics.make_standing_qpos(joints if bent else None)
+    fk = kinematics.forward_kinematics(pose)
+    sole = kinematics.get_sole_proxy_points(fk["body_pos_w"], fk["body_quat_w"])
+    assert sole["bottom_height"].amin().item() == pytest.approx(0.002, abs=1e-6)
+    np.testing.assert_array_equal(kinematics.default_qpos.numpy(), default)
+    np.testing.assert_array_equal(pose.numpy()[[0, 1, 3, 4, 5, 6]], default[[0, 1, 3, 4, 5, 6]])
+    np.testing.assert_allclose(pose.numpy()[7:], joints)
+    assert test_kinematics_path.read_bytes() == original
+
+
 def test_viewer_waits_for_its_render_thread_before_glfw_cleanup(monkeypatch):
     import glfw
     import mujoco.viewer
