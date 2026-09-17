@@ -1,0 +1,848 @@
+MotionMillion 训练集动作文本（中英对照，共 200 条）
+
+数据来源：服务器 1，/data0/user/liwei/datasets/MotionMillion/genmo_smpl_v1/
+文本索引：reports/metadata.sqlite3，text_entries 与 built_entries 按 motion_id 对应，仅选 split=train 的已构建样本。
+训练配置：configs/train_datasets/motionmillion_text_train.yaml。
+说明：英文是训练集 caption 原文，保留其大小写、标点及原有编号；中文是本次整理的简短释义，并非数据集官方中文标注。每条第一行中文，第二行英文。
+选取方式：按动作类别精选，每类 25 条；共 200 个不同动作 ID 和 200 条不同英文，未选镜像样本，不是用于统计总体分布的随机样本。
+原文中的双人、物体、服装和场景描述按原意保留；此文件用于理解文本条件，不表示单人 SMPL 模型能够生成相应物体或多人场景。
+文末附编号、原始样本 ID、caption_index（从 0 开始）和原始文本成员路径，便于追溯。
+
+===============================================================================
+一、行走与步态（25 条）
+===============================================================================
+
+001  走近对方，将双手放在其肩上并向后推。
+     A person places hands on another's shoulders and pushes them back as they walk up.
+
+002  两人面对面站起，走向彼此并拥抱。
+     Face-to-face, two people stand up, walk towards each other, and receive a hug.
+
+003  走到另一个人面前，从侧面用肩膀碰对方。
+     A person walks up to another and bumps his/her shoulder sideways
+
+004  走近另一个人，搂住对方的腰并紧紧拥抱。
+     Someone walks up to another and gives a tight hug, holding them around the waist.
+
+005  走向另一个人，抬起右手并靠近对方。
+     A person walks up to another and raises his/her right hand, approaching closely
+
+006  走向另一个人，轻轻拍对方的背。
+     Someone is walking towards someone else and gives a gentle back pat.
+
+007  以恒定速度平稳地向后走。
+     The individual walks steadily in reverse at a constant speed.
+
+008  在海滩上张开双臂，随后放下手臂，向前迈步，用一只脚试探地面，再平静地行走。
+     A man stands on the beach with arms wide open, then lowers them and takes a step forward, checking the ground with one foot. He walks with a calm and focused demeanor.
+
+009  有节奏地行走，展示身体协调性。
+     A person demonstrates a rhythmic walking style, showcasing their coordination.
+
+010  以协调一致的动作交替跳跃和行走。
+     They jump and walk in a synchronized motion.
+
+011  步伐轻盈、均匀而平稳地行走。
+     The man's steady walk is defined by a light, even pace, conveying a sense of calmness.
+
+012  先静止站立，再以平稳、轻轻摆动的步态向前走。
+     She starts off by standing still, then begins to walk forward with a smooth, swaying motion.
+
+013  穿着传统服装，有分寸地迈步行走。
+     A man in traditional attire walks with calculated steps.
+
+014  向前行走时，双腿交替做踢出和支撑动作。
+     The person's legs alternate between kicking and stabilizing as they walk forward.
+
+015  缓慢而犹豫地行走，小心地交替抬起双脚。
+     The person is walking with a slow, hesitant gait, lifting one foot and then the other with care.
+
+016  一边行走，一边协调手臂和腿部动作给别人指引。
+     They're directing someone by walking and using coordinated arm and leg movements.
+
+017  悠闲地散步，重心移到一条腿上，手臂轻轻摆动。
+     A woman strolls leisurely, her weight shifting onto one leg as her arms move gently.
+
+018  含胸弓背地向前走，同时摆动一只手臂。
+     A young man walks with a slouch, swinging one arm as he paces forward.
+
+019  以犹豫而谨慎的步伐走进房间。
+     A man enters the room with a hesitant, deliberate walk.
+
+020  有意识地缓步行走，双臂随之摆动。
+     A man moves deliberately, swaying his arms as he walks.
+
+021  行走时把重心移到左脚，右手轻松地摆动。
+     As she walks, the woman in the yellow shirt shifts her weight onto her left foot, her right hand swinging gently in a relaxed motion.
+
+022  平稳行走，交替转移重心并摆动双臂。
+     A person in a relaxed outfit walks smoothly, transferring weight and swinging arms.
+
+023  自信地向前走，双手随动作摆动。
+     He walks forward with a confident gait, hands in motion.
+
+024  有意识地向前迈步，同时摆动双臂。
+     A young man walks deliberately, swinging his arms as he advances.
+
+025  抬起一只脚、转移重心，再让另一只脚跟上，形成流畅步态。
+     They walk by lifting one foot, shifting weight, and letting the other follow in a smooth gait.
+
+===============================================================================
+二、跑步、爬行与移动（25 条）
+===============================================================================
+
+026  沿着蜿蜒的小路坚定地跑步。
+     A young man runs along a winding path with a determined stride.
+
+027  进行动态健身，将慢跑与左右移动结合起来。
+     A woman performs a dynamic workout, combining jogging and side-to-side motions.
+
+028  精神活跃地慢跑。
+     A woman is jogging with a lively attitude.
+
+029  在室内充满活力地做慢跑练习。
+     She performs a lively jogging routine indoors, exuding energy and enthusiasm.
+
+030  原地慢跑，有节奏地交替高抬膝并摆动双臂。
+     A woman jogs in place, alternating high knee lifts and arm swings with a steady rhythm, exuding energy and focus through her determined posture.
+
+031  双手保持在身体前方跑步。
+     A person runs with his hands held forward.
+
+032  在户外以稳定、有节奏的速度慢跑。
+     A person jogs outdoors with a steady, rhythmic pace.
+
+033  进行高强度有氧训练，结合慢跑、抬膝和左右移动。
+     A woman does a high-intensity cardio workout that involves jogging, knee lifts, and side-to-side movements.
+
+034  进行高强度训练，结合慢跑、下蹲和爆发式跳跃。
+     A woman's high-intensity workout involves jogging, squatting, and explosive jumping motions.
+
+035  协调身体动作，平稳地向前爬行。
+     The man is doing Crawling man. A man crawls steadily, his movements synchronized to propel him forward.
+
+036  原地慢跑，腿部蹬动与手臂摆动同步进行。
+     A woman is jogging in place, her legs pumping and arms swinging in sync.
+
+037  充满活力地原地慢跑。
+     A woman is jogging in place with high-energy movements.
+
+038  做登山跑：保持平板支撑姿势和核心稳定，快速交替收腿。
+     A man does mountain climber exercise, rapidly switching legs in a plank position with a firm core.
+
+039  急促地做手势并向前跑，随后迅速向右转。
+     A person gestures frantically and runs forward, then swiftly turns to the right.
+
+040  握着手一边跑一边跳，向前移动。
+     Someone is running and jumping while grasping hands and making progress.
+
+041  向前跑时张开双手，然后再次放下。
+     A person opens his/her hands and puts them down again while running forward
+
+042  以协调一致的动作原地慢跑。
+     They're jogging in place with a synchronized motion.
+
+043  进行主动恢复练习，将慢跑与手臂动作结合起来。
+     He is doing an active rest exercise that combines jogging and arm movements, reflecting a dynamic and high-energy workout style.
+
+044  前面的人走到后方，弯腰并张开双臂，爬上另一个人的背。
+     The person in front walks to the back, bends down, and climbs onto the other person's back with arms outstretched.
+
+045  穿蓝色上衣，在绿色场地上以流畅、坚定的动作慢跑。
+     A blue-shirted jogger moves with fluid, determined movements on a green field.
+
+046  原地慢跑，手臂轻松地随之摆动。
+     Jogging in place, she moves her arms effortlessly.
+
+047  身体前倾，屈髋屈膝，双手撑地，从站立转换为爬行。
+     They transition from standing to crawling by leaning forward, bending at the hips and knees, and placing their hands on the ground.
+
+048  绕圈跑，试图追上另一个人，但没有成功。
+     A person is running in circles, futilely attempting to catch the other individual.
+
+049  做高抬腿跑，快速交替抬膝并让脚落地。
+     The person does a high-knee running exercise, rapidly alternating knee lifts with foot landings.
+
+050  左手被向后拉，同时向前跑。
+     A person is pulled back by the left hand and runs forward
+
+===============================================================================
+三、跳跃与跨越（25 条）
+===============================================================================
+
+051  双腿分开站立并蹲低，张开双臂向前跃出，轻轻落地后向侧面转身。
+     A man stands with legs apart, crouches low, and prepares to spring, then he leaps forward with arms outstretched, lands softly, and pivots sideways, maintaining balance.
+
+052  双脚宽站，下蹲、起跳，并流畅地将球投出。
+     Starting with a wide stance, they crouch, jump, and release the ball smoothly.
+
+053  进行包含爆发式跳跃的高强度训练。
+     The person is doing a high-intensity workout with explosive jumps.
+
+054  快速、用力地反复做蹲跳。
+     A man executes jump squats with intense speed.
+
+055  穿橙色衣服跳跃，同时交替抬膝并配合手臂动作。
+     A woman in an orange outfit is jumping with alternating knee lifts and arm movements.
+
+056  有控制地协调身体，完成跳跃动作。
+     The person's jumping movements are deliberate and synchronized.
+
+057  先下蹲，再起跳，双脚分开落地并保持平衡。
+     The sequence involves crouching, jumping, and landing with feet spread apart, showcasing energetic movements and balanced posture.
+
+058  灵活、有力地完成一套跳跃练习。
+     She performs a dynamic jumping routine, showcasing agility and determination.
+
+059  挺直身体、摆动双臂并用双脚起跳，进行剧烈运动。
+     A woman exercises vigorously by standing up straight, swinging her arms, and jumping on her feet.
+
+060  单脚跳起，同时抬起另一只脚。
+     Then, she hops on one foot and raises the other.
+
+061  流畅地在弓步和跳跃之间切换。
+     The person seamlessly transitions between lunges and jumps, demonstrating his coordination.
+
+062  有节奏地重复跳跃和抬起双臂的动作。
+     She repeats a rhythmic sequence, jumping and raising her arms.
+
+063  张开双臂，先蹲下再伸展起跳；空中双腿伸直，落地后放松手臂。
+     The person jumps with arms outstretched, crouching before extending them and leaping. Their legs remain straight. They maintain balance mid-air. Upon landing, their arms relax. They appear energetic and focused indoors.
+
+064  被踢中后，向侧面连续跳两次。
+     The person is kicked and jumps twice to the side.
+
+065  轻快地跳绳，进行有氧运动。
+     They jump rope with a playful and aerobic exercise.
+
+066  做波比跳，依次包含下蹲、平板支撑、俯卧撑、跳跃和站立。
+     The person executes a burpee, which involves a squat, plank, push-up, jump, and standing position.
+
+067  一边跳跃，一边大幅甩动双臂。
+     A person is jumping and flailing their arms.
+
+068  做小轮车跳跃：接近坡道、压低身体、腾空，再控制落地。
+     They perform a BMX jump, comprising ramp approach, crouch, launch, and controlled landing.
+
+069  被人指着时，迅速向后跳开。
+     The person jumps back quickly in response to being pointed at.
+
+070  向前跃出，发起突然袭击。
+     A person leaps forward to start a surprise attack.
+
+071  左脚踩地后向上跳起，并抓住右脚。
+     After stepping on their left foot, someone jumps up and holds their right foot.
+
+072  轻轻跳起，同时用左手与另一个人击掌。
+     A person is high-fiving another person with their left hand while jumping slightly
+
+073  模仿兴奋的足球球迷：下蹲、双手紧握、跳起，然后后仰观看。
+     The person reenacts a soccer fan's excitement, squatting, clasping hands, and leaping up, then leaning back to watch.
+
+074  受到突然跳动的惊吓，自己也跳了起来。
+     They jump up in surprise at the sudden jump.
+
+075  进行高强度踏步训练，配合抬膝、摆臂，并穿插短促跳跃。
+     A young woman does a high-intensity step workout, combining knee lifts and arm swings with energetic stepping and brief bursts of jumping.
+
+===============================================================================
+四、下蹲、俯身与坐起（25 条）
+===============================================================================
+
+076  交替换侧训练，转移重心、下蹲，再站起。
+     The person's workout involves shifting weight, squatting, and standing while switching sides.
+
+077  手持重物做弓步，从跪姿有控制地转换为站姿。
+     While holding a weight, a man executes a lunge, transitioning from a kneeling to a standing position with precision.
+
+078  放松地坐着，身体轻微活动，一边摆弄物品一边交谈。
+     They sit relaxed, with slight body movements, fidgeting with an object, and engaging in conversation.
+
+079  坐着说话，抬起双手流畅地比画，并通过指点和握拳强调观点。
+     A woman sits, gesturing as she speaks, with raised hands that move fluidly, pointing and then clenching to emphasize her point.
+
+080  两人相对坐在椅子上，双手放在桌上交谈。
+     Two people are sitting across chairs, placing their hands on the table, and talking.
+
+081  沮丧地蹲下，双臂无力垂落，缓缓摇头。
+     They crouch down, defeated, and shake their head slowly as their arms hang loose.
+
+082  采用下蹲起举的方式搬起重物，并保持背部挺直。
+     A man uses a squat lift technique to lift a heavy object, keeping his back straight and maintaining focus.
+
+083  在室内拉伸腿部，从跪姿转换为弓步姿势。
+     They stretch their legs indoors, starting with a kneeling position and moving into a lunge.
+
+084  平静地坐着，轻轻活动双手并歪头，显得若有所思。
+     The person sits calmly, their hands moving lightly as they tilt their head, showing thoughtfulness.
+
+085  右手持羽毛球拍，身体略微下蹲，摆出准备姿势。
+     The young man in the green sweatshirt assumes a badminton stance, holding the racket in his right hand and crouched slightly.
+
+086  坐在瑜伽垫上伸直双腿，然后向前俯身去触碰脚趾。
+     A woman on a yoga mat begins by sitting with her legs extended, then bends forward to touch her toes, highlighting her flexibility and concentration.
+
+087  从轻微下蹲开始，接着做一连串舒展、流畅的武术式动作。
+     A person is executing a series of fluid martial arts-like movements, starting with a slight crouch and progressing to a series of expansive gestures.
+
+088  平静地坐着，偶尔看向说话者，双手轻轻活动以示关注。
+     The woman sits calmly, occasionally glancing at the speaker, her hands moving gently as she shows engagement.
+
+089  做壶铃硬拉：弯腰抓住壶铃，再挺直身体站起。
+     To perform a kettlebell deadlift, the young man bends down, grasps the weight, and then stands up straight.
+
+090  坐着轻轻活动双手，先把一只手放到下巴上，另一只手保持放松。
+     A woman sits, softly moving her hands, first placing one on her chin and resting the other.
+
+091  右臂抬起、左手托腮作思考状，用右手轻拍胸口，然后站起来。
+     They pose thoughtfully, with their right arm up and left hand on their cheek, and tap their chest with their right hand. They then stand up.
+
+092  右手拿着水瓶坐下，把水瓶放下，再站起来。
+     The person holds the water bottle with their right hand, sits down, sets it down, and then stands up.
+
+093  坐着拿好筷子，准备吃饭。
+     A person sits with chopsticks, preparing to eat.
+
+094  专注地做小幅度下蹲训练，同时摆臂来保持平衡和稳定。
+     A woman's energetic and focused mini squat workout involves swinging her arms for balance and stability.
+
+095  站着向前伸出双手，抓住坐着的人的手，将对方向上拉起。
+     A person is standing, raising both hands forward, grabbing the hands of the sitting person, and pulling upwards, lifting him/her up
+
+096  身体半弯着，让一个坐着的人按摩自己的左腿。
+     A person, while half bending down, has their left leg massaged by someone who is sitting
+
+097  站起来，用左手处理其他事情，同时用右手写字。
+     A person stands up and employs their left hand for multitasking, writing with their right hand.
+
+098  坐着吹奏埙，用双手控制指孔。
+     A person sits, blowing into the xun, a traditional Chinese instrument, as they use both hands to control finger holes.
+
+099  蹲下后轻松地向侧面倒下。
+     They crouch down and fall to the side with ease.
+
+100  先挺直身体站立，然后跪下。
+     The character stands up straight, then kneels down.
+
+===============================================================================
+五、手臂动作与手势（25 条）
+===============================================================================
+
+101  跳一段活泼的舞蹈，配合拍手、伸展手臂和左右踏步。
+     The person is performing a dynamic dance, involving hand clapping, arm extension, and side-to-side stepping, exuding a lively and joyful atmosphere in an indoor setting.
+
+102  双脚并拢起始，向侧面迈步并抬臂，频繁转移重心，穿插短暂转身。
+     A woman dances with lively enthusiasm. She starts with her feet together, steps to the side, and raises her arms, frequently shifting her weight and incorporating brief turns.
+
+103  右臂高高举起，左臂保持在较低位置，专注而活泼地做动作。
+     A person in a blue outfit displays a concentrated gesture with their right arm raised high, their left arm steady and lower, conveying engagement and playfulness.
+
+104  自信而友好地握手，保持目光接触，身体略微前倾。
+     The man shakes hands with a confident yet friendly gesture, keeping eye contact and leaning forward slightly.
+
+105  自信、愉快地跳舞，左右踏步并摆臂，最后把双臂举过头顶。
+     A man in a suit dances with confidence and joy, moving his arms and stepping side to side, then raising them above his head in a triumphant gesture.
+
+106  练习舞步：转移重心、抬臂、扭转躯干、向侧面迈步，再恢复平衡。
+     A person is mastering a dance move by shifting weight, raising arms, twisting torso, stepping sideways, and regaining balance.
+
+107  有控制地做明确的手势，表达急切和期待。
+     A man in a green outfit conveys eagerness with deliberate hand gestures in a controlled and focused manner.
+
+108  两人面对面站立，等待对方伸出拳头，以碰拳表达友好。
+     Two people are standing face to face, waiting for a fist to be extended in a gesture of friendship.
+
+109  自信地站着说话，同时做有力、明确的手势。
+     The man in a uniform stands confidently, speaking with assertive gestures.
+
+110  热情地表达想法，配合大幅度挥臂和指点动作。
+     The young man in a purple shirt enthusiastically conveys his thoughts with sweeping motions and pointing gestures.
+
+111  在麦克风前热情地比画手势。
+     A man in a bright yellow suit gestures with passion at a microphone.
+
+112  与同伴做伸展练习：双臂举过头顶，身体侧弯，双腿保持稳定。
+     A woman is engaging in a stretching exercise with a partner, raising her arms overhead and bending sideways while keeping her legs stable.
+
+113  双臂抬起作防守姿势，重心在前后站姿之间转移。
+     A man in a martial arts outfit stands poised, raising his arms in a defensive position, as he shifts his weight between forward and backward stances, exuding focus and determination.
+
+114  站在原地，做出打电话的手势。
+     The person makes a phone call gesture while standing still.
+
+115  挥动右手，然后松开。
+     Someone waves their right hand before letting go.
+
+116  先指向前方，再把双臂交叉在胸前。
+     The person points ahead, then crosses their arms.
+
+117  跳舞时，在头顶上方挥动右手。
+     While dancing, the person waves their right hand above their head.
+
+118  先平静地站着，做一系列手势，再恢复自信、专注的站姿。
+     She stands serenely, then employs a range of hand gestures, and resumes her confident and focused stance.
+
+119  点头并保持目光接触，做出表示尊重的姿态。
+     He or she is making a respectful gesture with a nod and eye contact.
+
+120  经过一个坐着的人时，用右手挥手道别。
+     A person passes by a seated individual and waves goodbye with their right hand.
+
+121  用夸张手势表演孕妇坐下时的困难。
+     The comedian is using over-the-top gestures to portray the difficulties of sitting while pregnant.
+
+122  做一个有力的社交手势，动作开始较慢，随后迅速加快。
+     A man executes a swift and forceful social gesture, initially slow but rapidly increasing in speed.
+
+123  用手臂和腿部动作模仿骑马。
+     The person is imitating horse riding with arm and leg gestures.
+
+124  表演时结合歌唱、手势和富有情感的肢体语言。
+     Their act combines singing, hand gestures, and emotive body language.
+
+125  抬起手臂，触碰自己的腋下，然后放下手臂。
+     They are doing a self-armpit touch, raising their arm and then lowering it.
+
+===============================================================================
+六、踢腿、平衡与伸展（25 条）
+===============================================================================
+
+126  训练时交替踢腿，同时保持身体平衡。
+     She executes kicks during her workout routine, alternating leg movements with balance.
+
+127  手持旗子，以武术姿势单腿站立并保持平衡。
+     A person balances on one leg in a martial arts stance, holding flags and demonstrating focus.
+
+128  做深弓步拉伸，展示柔韧性和稳定性。
+     A woman demonstrates flexibility and poise through a deep lunge stretch movement.
+
+129  保持平板支撑，用一只手支撑身体，抬起另一只手。
+     A young man is in a plank position, balancing on one hand as he raises the other, demonstrating focus and determination.
+
+130  向前迈出一只脚并伸臂，再转移重心，有力地向前推出手臂。
+     The man executes a martial arts move, advancing one foot and stretching out his arm, before transferring his weight and driving his arm forward with force and concentration.
+
+131  做快速弓步，配合精确的长矛操控和有力的腿部动作。
+     A man's dynamic martial arts routine is characterized by swift lunges, precise spear control, and powerful leg movements.
+
+132  躺在地上，一条腿伸直、另一条腿弯曲，用手臂辅助深入拉伸。
+     She lies on the ground, extending one leg and bending the other, and uses her arms to help her stretch deeply.
+
+133  屈膝下蹲，同时向前伸出双臂，再用力站起。
+     They execute a squat by bending their knees and stretching their arms forward, then return to standing with focused effort.
+
+134  缓慢、有控制地做猫牛式伸展。
+     The woman's cat-cow stretch involves a series of slow, controlled movements that demonstrate her flexibility and concentration.
+
+135  做侧向抬腿，一只脚支撑身体并控制平衡。
+     She's doing a side leg lift, maintaining balance on one foot and controlling the movement.
+
+136  以太极式的流畅动作伸出、收回双臂，躯干轻轻倾斜。
+     A person engages in a fluid dance of movements, stretching their arms out and folding them in, with a gentle inclination of the torso, echoing the tranquil essence of Tai Chi.
+
+137  在树旁拉伸，抬起右腿并抓住树干。
+     A man in athletic gear stretches by a tree, lifting his right leg and grasping the trunk.
+
+138  伸手抓住对方左手，把对方向左拉。
+     A person stretches out their hand to grab the other person's left hand and pulls them left.
+
+139  双肘弯曲、双手置于腰部，掌心向上、手指张开地靠近对方，再伸臂碰掌。
+     A person approaches the other with their elbows bent and hands on their waist, palms up, fingers spread. They then stretch out their arms to touch palms.
+
+140  先闪避，再用右腿踢出。
+     A person dodges and kicks with their right leg.
+
+141  站着伸出双手，并在胸前挥动手。
+     A person, while standing, is stretching out his/her two hands and waving his/her hand on his/her chest
+
+142  双手支撑身体，做劈叉动作。
+     They execute a leg split, balancing on their hands.
+
+143  把头拉向对侧肩膀，以拉伸颈部。
+     To stretch the neck, she pulls her head toward the opposite shoulder.
+
+144  做花样滑冰贝尔曼旋转：一条腿向后抬起，抓住冰刀拉向头部，用另一只脚旋转。
+     A figure skater executes a Biellmann spin by stretching one leg behind, grasping the skate, and pulling it toward their head while spinning on the other foot.
+
+145  向胸前伸出右手试图阻挡，却被向前移动的人拨开。
+     Another person stretches his/her right hand towards his/her chest in an effort to obstruct but is brushed away by someone moving forward
+
+146  伸出双手，把面前的人推开。
+     A person is stretching out their hands to push the first person away
+
+147  伸出左手，用力打对方的右脸颊，然后打左脸颊。
+     A person stretches out his/her left hand and vigorously strikes the right cheek of the other person, followed by the left cheek
+
+148  单脚保持平衡，缓缓蹲低，完成手枪蹲。
+     Someone lowers down into a deep squat, performing a pistol squat while balancing on one foot.
+
+149  手持哑铃向前迈步，进入弓步姿势。
+     Someone is in a lunge position, stepping forward with dumbbells.
+
+150  练习武术弓步，向前迈步的同时伸出手臂。
+     A martial artist performs a lunge, extending their arm while stepping forward.
+
+===============================================================================
+七、拿放、推拉与日常动作（25 条）
+===============================================================================
+
+151  专注、平静地吃碗里的蓝色冰食。
+     A girl eats a bowl of blue ice with a focused, calm attitude.
+
+152  身体前倾，右手舀着吃碗里的冰食，左手支撑身体。
+     A woman concentrates on eating ice from a bowl, her right hand scooping and her left hand supporting her as she leans forward.
+
+153  做弹力带训练，双脚向前迈步，双手同时向后拉弹力带。
+     A man is performing resistance band exercises, stepping forward with his feet while pulling the bands back with both hands.
+
+154  慢慢吃零食，细细品尝味道。
+     A woman is eating a snack slowly and mindfully, savoring the flavors.
+
+155  专注地举起杠铃。
+     A weightlifter lifts a barbell with focused determination.
+
+156  专注、有力地举起重物。
+     With a competitive spirit, she lifts weights with focus and determination.
+
+157  抓住把手并拉动，尝试打开推拉门。
+     The man is doing Opening the sliding door. A person is trying to open a sliding door by grasping and pulling the handle.
+
+158  用双手小心地把食物送进嘴里。
+     He eats with both hands, carefully scooping food into his mouth.
+
+159  用手指拿食物吃，细细品尝每一口。
+     A woman eats, savoring each bite with her fingers.
+
+160  右手放在桌上，左肘弯曲并抬起前臂，准备掰手腕。
+     A person places their right hand on the table, flexes their left elbow, and raises their forearm to engage in arm wrestling.
+
+161  右手拿起电话，改用双手接听，最后用右手挂断。
+     They pick up the phone with their right hand, switch to both hands for the call, and hang up with their right hand.
+
+162  在户外一边行走，一边用右手拿水瓶喝水，左臂放松垂在身侧。
+     They are walking outdoors and drinking from a water bottle held in their right hand, with their left arm remaining relaxed by their side.
+
+163  从深蹲姿势举起杠铃，逐渐挺直身体站起。
+     5. With a deep squat stance, the athlete lifts the barbell, transitioning to an upright position.
+
+164  弯腰提起重物，过程中频繁调整站姿。
+     Bending to lift a weight, the man shifts his stance frequently.
+
+165  弯腰，用双手抓住重物，再站起来把它提起。
+     He lifts the weight by bending down, gripping it with his hands, and then standing up, showcasing his muscular strength and unwavering determination to succeed.
+
+166  右手放下水瓶，左手关上烤箱，然后拿起手提包。
+     A person sets the water bottle down with their right hand, closes the oven with their left hand, and then picks up their handbag.
+
+167  双手持哑铃放在身体两侧，屈肘做二头肌弯举，再放回起始位置。
+     With dumbbells at his sides, a person performs a bicep curl exercise, bending his elbows to lift the weights and then lowering them back to the starting position in an indoor setting.
+
+168  喝饮料时突然因不适而扭曲表情和身体，像是被冰得头疼。
+     A man enjoys his drink, but suddenly contorts in discomfort, suggesting a brain freeze.
+
+169  拿起手提包，用左手喝水，同时用右手操作鼠标。
+     A person picks up the handbag and drinks water with the left hand, and uses the right hand for the mouse.
+
+170  左手被对方拉住，随后右手也被对方扭转。
+     The person has their left hand pulled and then twists their right hand by the other.
+
+171  用手把汉堡送到嘴边吃，配合手指屈伸。
+     The person eats a burger, using hand-to-mouth coordination and flexing fingers.
+
+172  做土耳其起立：将重物举过头顶并保持稳定，身体从躺姿平稳过渡到站姿。
+     A man performs a Turkish get-up, lifting a weight overhead and smoothly transitioning from lying to standing while keeping the weight stable.
+
+173  被另一个人背在背上。
+     The man is being carried on his back.
+
+174  坐在长凳上，一只手拿着饮料小口喝，另一只手帮忙扶稳。
+     A man sits on a bench, sipping a drink with one hand while steadying it with the other.
+
+175  用右手小心地从托盘里拿起物品并查看。
+     With her right hand, a young woman carefully picks up and examines items from a tray.
+
+===============================================================================
+八、舞蹈与体育运动（25 条）
+===============================================================================
+
+176  练习羽毛球步法，快速转移重心、侧向迈步，并模拟挥拍。
+     He demonstrates determination and agility through swift, focused badminton footwork, shifting weight, side-stepping, and simulating racket swings.
+
+177  练习羽毛球，依次弯身、后撤步并向前挥拍。
+     Badminton practice involves a series of movements: bending, stepping back, and swinging the racket forward with focus.
+
+178  保持格斗架势，向前迈步出拳，再调整平衡并协调另一只手。
+     A martial artist in a fighting stance advances with one foot, throws a punch, adjusts his balance, and synchronizes his other hand, exuding strength and focus.
+
+179  充满活力地跳舞。
+     A woman performs a lively dance with energy.
+
+180  在海滩上平静地练习瑜伽。
+     A woman practices yoga on the beach in a serene atmosphere.
+
+181  流畅地完成一次羽毛球击球。
+     A young man executes a smooth badminton shot.
+
+182  先站定，挥动球拍并转移重心，然后回到中间位置练习羽毛球。
+     A man practicing badminton starts by standing still, swings his racket, shifts his weight, and returns to the center, demonstrating focus and determination.
+
+183  双脚分开、膝盖弯曲，手持球拍摆出羽毛球准备姿势。
+     A man assumes a badminton stance, feet apart, knees bent, and racket in hand, preparing to hit the shuttlecock.
+
+184  流畅、专注地打乒乓球。
+     A man in a red shirt plays table tennis with fluid movements, showcasing his focus and skill.
+
+185  先把羽毛球拍持在身体侧面，再迈出左脚，向前方轻轻挥拍。
+     A young man is playing badminton, holding the racket to the side before stepping forward with his left foot and swinging it slightly ahead.
+
+186  坐在瑜伽垫上向上伸展双臂，交替调整双手位置。
+     A woman is seated on a yoga mat, extending her arms upwards, alternating hand positions, and displaying a tranquil demeanor.
+
+187  足球守门员举着球，准备开始比赛。
+     A soccer goalkeeper, dressed in yellow and black, readies himself for play, holding a ball aloft.
+
+188  两人一起跳舞。
+     A couple is dancing together.
+
+189  完成一段优美的舞蹈。
+     A young woman executes a beautiful dance routine.
+
+190  抬起右腿，完成一个舞蹈动作。
+     A dancer is lifting their right leg to execute a move.
+
+191  被一记有力、向前推进的拳击打中。
+     He is punched with a forceful, driving motion.
+
+192  跳《江南 Style》舞：模仿骑马奔跑、交叉手腕，并交替摆胯。
+     The "Gangnam Style" dance features a galloping motion, crossed wrists, and alternating hip sways.
+
+193  做乒乓球正手击球：转移重心、转动躯干、向前挥臂，再回到起始位置。
+     They execute a forehand stroke in table tennis by shifting their weight, rotating their core, and swinging their arm forward, then returning to the start.
+
+194  向右旋转身体，并用右拳击打另一个人。
+     The person spins to the right and hits the other person with a right-handed punch.
+
+195  做一次羽毛球下手挥拍击球。
+     A woman performs an underswing shot in Badminton.
+
+196  向前迈步，用双拳快速击打对方肩部。
+     A person steps forward and rapidly punches the other person's shoulders with both hands.
+
+197  两名舞者背靠背站立，跳探戈。
+     Two dancers are standing back to back, performing a tango.
+
+198  两人牵着手跳舞，摆动双臂并转圈。
+     Two people are dancing together, swinging their arms and spinning around while holding hands.
+
+199  用拳头击打另一个人。
+     The performer punches the other with a fist.
+
+200  先犹豫一下，再用右拳击打另一个人。
+     A person hesitates, then hits another person with a right-handed punch.
+
+===============================================================================
+附录：训练集来源索引
+===============================================================================
+
+格式：编号 | motion_id | caption_index（从 0 开始） | 原始文本成员路径
+
+001 | MotionLLAMA/interx/standard_smplx/G038T001A007R013/P1 | 19 | texts/MotionLLAMA/interx/standard_smplx/G038T001A007R013/P1.txt
+002 | MotionLLAMA/interx/standard_smplx/G022T002A013R022/P1 | 14 | texts/MotionLLAMA/interx/standard_smplx/G022T002A013R022/P1.txt
+003 | MotionLLAMA/interx/standard_smplx/G019T002A014R028/P1 | 22 | texts/MotionLLAMA/interx/standard_smplx/G019T002A014R028/P1.txt
+004 | MotionLLAMA/interx/standard_smplx/G049T000A000R001/P1 | 2 | texts/MotionLLAMA/interx/standard_smplx/G049T000A000R001/P1.txt
+005 | MotionLLAMA/interx/standard_smplx/G017T001A007R010/P2 | 20 | texts/MotionLLAMA/interx/standard_smplx/G017T001A007R010/P2.txt
+006 | MotionLLAMA/interx/standard_smplx/G039T003A013R022/P1 | 2 | texts/MotionLLAMA/interx/standard_smplx/G039T003A013R022/P1.txt
+007 | MotionUnion/CombatMotion_seperate/CMP000011_0 | 3 | texts/MotionUnion/CombatMotion_seperate/CMP000011_0.txt
+008 | MotionGV/folder1/070012 | 11 | texts/MotionGV/folder1/070012.txt
+009 | MotionGV/folder0/002892 | 4 | texts/MotionGV/folder0/002892.txt
+010 | MotionUnion/idea400/walking_while_Jumping_1_clip1 | 15 | texts/MotionUnion/idea400/walking_while_Jumping_1_clip1.txt
+011 | MotionUnion/CombatMotion_seperate/CMP001943_1 | 15 | texts/MotionUnion/CombatMotion_seperate/CMP001943_1.txt
+012 | MotionGV/folder2/159661 | 15 | texts/MotionGV/folder2/159661.txt
+013 | MotionGV/folder1/078292 | 3 | texts/MotionGV/folder1/078292.txt
+014 | MotionUnion/idea400/Simultaneously_Kicking_something_and_walking_clip1 | 4 | texts/MotionUnion/idea400/Simultaneously_Kicking_something_and_walking_clip1.txt
+015 | MotionGV/folder1/109106 | 17 | texts/MotionGV/folder1/109106.txt
+016 | MotionUnion/idea400/walking_while_Command_2_clip1 | 3 | texts/MotionUnion/idea400/walking_while_Command_2_clip1.txt
+017 | MotionGV/folder4/253354 | 1 | texts/MotionGV/folder4/253354.txt
+018 | MotionGV/folder0/029560 | 12 | texts/MotionGV/folder0/029560.txt
+019 | MotionUnion/CombatMotion_seperate/CMP004227_1 | 15 | texts/MotionUnion/CombatMotion_seperate/CMP004227_1.txt
+020 | MotionGV/folder0/023418 | 0 | texts/MotionGV/folder0/023418.txt
+021 | MotionGV/folder4/230333 | 15 | texts/MotionGV/folder4/230333.txt
+022 | MotionGV/folder1/080183 | 13 | texts/MotionGV/folder1/080183.txt
+023 | MotionGV/folder6/382661 | 2 | texts/MotionGV/folder6/382661.txt
+024 | MotionGV/folder3/192304 | 0 | texts/MotionGV/folder3/192304.txt
+025 | MotionGV/folder0/051134 | 10 | texts/MotionGV/folder0/051134.txt
+026 | MotionGV/folder2/139174 | 0 | texts/MotionGV/folder2/139174.txt
+027 | MotionGV/folder0/005423 | 4 | texts/MotionGV/folder0/005423.txt
+028 | MotionGV/folder2/128006 | 12 | texts/MotionGV/folder2/128006.txt
+029 | MotionGV/folder7/395509 | 0 | texts/MotionGV/folder7/395509.txt
+030 | MotionGV/folder0/038107 | 10 | texts/MotionGV/folder0/038107.txt
+031 | MotionLLAMA/interx/standard_smplx/G049T008A038R019/P1 | 16 | texts/MotionLLAMA/interx/standard_smplx/G049T008A038R019/P1.txt
+032 | MotionGV/folder1/065678 | 1 | texts/MotionGV/folder1/065678.txt
+033 | MotionGV/folder2/139210 | 14 | texts/MotionGV/folder2/139210.txt
+034 | MotionGV/folder2/134033 | 5 | texts/MotionGV/folder2/134033.txt
+035 | MotionGV/folder9/514531 | 5 | texts/MotionGV/folder9/514531.txt
+036 | MotionGV/folder2/128993 | 1 | texts/MotionGV/folder2/128993.txt
+037 | MotionGV/folder2/134072 | 11 | texts/MotionGV/folder2/134072.txt
+038 | MotionGV/folder1/073316 | 1 | texts/MotionGV/folder1/073316.txt
+039 | MotionLLAMA/interx/standard_smplx/G055T003A017R016/P2 | 4 | texts/MotionLLAMA/interx/standard_smplx/G055T003A017R016/P2.txt
+040 | MotionLLAMA/interhuman/standard_smplx/4246/P2 | 10 | texts/MotionLLAMA/interhuman/standard_smplx/4246/P2.txt
+041 | MotionLLAMA/interx/standard_smplx/G035T007A038R016/P2 | 21 | texts/MotionLLAMA/interx/standard_smplx/G035T007A038R016/P2.txt
+042 | MotionUnion/haa500/running_in_place_7_clip1 | 10 | texts/MotionUnion/haa500/running_in_place_7_clip1.txt
+043 | MotionGV/folder0/003737 | 17 | texts/MotionGV/folder0/003737.txt
+044 | MotionLLAMA/interx/standard_smplx/G005T005A025R003/P1 | 16 | texts/MotionLLAMA/interx/standard_smplx/G005T005A025R003/P1.txt
+045 | MotionGV/folder0/003816 | 4 | texts/MotionGV/folder0/003816.txt
+046 | MotionGV/folder0/004135 | 6 | texts/MotionGV/folder0/004135.txt
+047 | MotionUnion/idea400/Simultaneously_standing_and_Crawling_clip1 | 0 | texts/MotionUnion/idea400/Simultaneously_standing_and_Crawling_clip1.txt
+048 | MotionLLAMA/interx/standard_smplx/G010T003A017R010/P2 | 2 | texts/MotionLLAMA/interx/standard_smplx/G010T003A017R010/P2.txt
+049 | MotionUnion/haa500/running_in_place_19_clip1 | 14 | texts/MotionUnion/haa500/running_in_place_19_clip1.txt
+050 | MotionLLAMA/interx/standard_smplx/G051T000A003R018/P2 | 22 | texts/MotionLLAMA/interx/standard_smplx/G051T000A003R018/P2.txt
+051 | MotionGV/folder9/553094 | 4 | texts/MotionGV/folder9/553094.txt
+052 | MotionUnion/haa500/basketball_shoot_16_clip1 | 16 | texts/MotionUnion/haa500/basketball_shoot_16_clip1.txt
+053 | MotionGV/folder2/122190 | 5 | texts/MotionGV/folder2/122190.txt
+054 | MotionGV/folder2/124676 | 12 | texts/MotionGV/folder2/124676.txt
+055 | MotionGV/folder2/127704 | 0 | texts/MotionGV/folder2/127704.txt
+056 | MotionGV/folder0/050990 | 14 | texts/MotionGV/folder0/050990.txt
+057 | MotionGV/folder6/372423 | 2 | texts/MotionGV/folder6/372423.txt
+058 | MotionGV/folder0/054975 | 11 | texts/MotionGV/folder0/054975.txt
+059 | MotionGV/folder2/141100 | 0 | texts/MotionGV/folder2/141100.txt
+060 | MotionGV/folder0/044491 | 2 | texts/MotionGV/folder0/044491.txt
+061 | MotionGV/folder0/002169 | 7 | texts/MotionGV/folder0/002169.txt
+062 | MotionGV/folder0/032991 | 2 | texts/MotionGV/folder0/032991.txt
+063 | MotionGV/folder5/306165 | 13 | texts/MotionGV/folder5/306165.txt
+064 | MotionLLAMA/interx/standard_smplx/G040T001A005R004/P2 | 11 | texts/MotionLLAMA/interx/standard_smplx/G040T001A005R004/P2.txt
+065 | MotionGV/folder0/003167 | 11 | texts/MotionGV/folder0/003167.txt
+066 | MotionUnion/haa500/burpee_15_clip1 | 3 | texts/MotionUnion/haa500/burpee_15_clip1.txt
+067 | MotionLLAMA/interhuman/standard_smplx/3375/P1 | 4 | texts/MotionLLAMA/interhuman/standard_smplx/3375/P1.txt
+068 | MotionUnion/haa500/bmx_jumping_4_clip1 | 14 | texts/MotionUnion/haa500/bmx_jumping_4_clip1.txt
+069 | MotionLLAMA/interx/standard_smplx/G020T002A012R013/P1 | 17 | texts/MotionLLAMA/interx/standard_smplx/G020T002A012R013/P1.txt
+070 | MotionLLAMA/interhuman/standard_smplx/1360/P2 | 17 | texts/MotionLLAMA/interhuman/standard_smplx/1360/P2.txt
+071 | MotionLLAMA/interx/standard_smplx/G056T003A015R000/P2 | 10 | texts/MotionLLAMA/interx/standard_smplx/G056T003A015R000/P2.txt
+072 | MotionLLAMA/interx/standard_smplx/G036T003A016R006/P2 | 21 | texts/MotionLLAMA/interx/standard_smplx/G036T003A016R006/P2.txt
+073 | MotionUnion/perform/watch_soccer_game_2_clip2 | 14 | texts/MotionUnion/perform/watch_soccer_game_2_clip2.txt
+074 | MotionLLAMA/interhuman/standard_smplx/4032/P1 | 1 | texts/MotionLLAMA/interhuman/standard_smplx/4032/P1.txt
+075 | MotionGV/folder0/003888 | 0 | texts/MotionGV/folder0/003888.txt
+076 | MotionGV/folder0/000076 | 14 | texts/MotionGV/folder0/000076.txt
+077 | MotionGV/folder0/000482 | 1 | texts/MotionGV/folder0/000482.txt
+078 | MotionGV/folder4/249724 | 3 | texts/MotionGV/folder4/249724.txt
+079 | MotionGV/folder2/154325 | 10 | texts/MotionGV/folder2/154325.txt
+080 | MotionLLAMA/interx/standard_smplx/G046T005A029R026/P2 | 12 | texts/MotionLLAMA/interx/standard_smplx/G046T005A029R026/P2.txt
+081 | MotionGV/folder9/509822 | 12 | texts/MotionGV/folder9/509822.txt
+082 | MotionGV/folder0/020901 | 16 | texts/MotionGV/folder0/020901.txt
+083 | MotionGV/folder0/001022 | 1 | texts/MotionGV/folder0/001022.txt
+084 | MotionGV/folder3/179338 | 3 | texts/MotionGV/folder3/179338.txt
+085 | MotionGV/folder4/236128 | 2 | texts/MotionGV/folder4/236128.txt
+086 | MotionGV/folder3/217800 | 3 | texts/MotionGV/folder3/217800.txt
+087 | MotionGV/folder1/097462 | 10 | texts/MotionGV/folder1/097462.txt
+088 | MotionGV/folder0/001178 | 8 | texts/MotionGV/folder0/001178.txt
+089 | MotionGV/folder3/205561 | 12 | texts/MotionGV/folder3/205561.txt
+090 | MotionGV/folder0/001823 | 10 | texts/MotionGV/folder0/001823.txt
+091 | MotionLLAMA/humansc3d/train/s06/standard_smplx/081 | 3 | texts/MotionLLAMA/humansc3d/train/s06/standard_smplx/081.txt
+092 | MotionLLAMA/trumans/slice_smplx_result/2023-02-11@19-43-08_slice_2 | 13 | texts/MotionLLAMA/trumans/slice_smplx_result/2023-02-11@19-43-08_slice_2.txt
+093 | MotionUnion/idea400/Holding_chopsticks_in_hand_and_sitting_at_the_same_time_clip1 | 11 | texts/MotionUnion/idea400/Holding_chopsticks_in_hand_and_sitting_at_the_same_time_clip1.txt
+094 | MotionGV/folder0/002790 | 16 | texts/MotionGV/folder0/002790.txt
+095 | MotionLLAMA/interx/standard_smplx/G002T001A008R019/P2 | 22 | texts/MotionLLAMA/interx/standard_smplx/G002T001A008R019/P2.txt
+096 | MotionLLAMA/interx/standard_smplx/G038T005A027R007/P1 | 21 | texts/MotionLLAMA/interx/standard_smplx/G038T005A027R007/P1.txt
+097 | MotionLLAMA/trumans/slice_smplx_result/2023-02-12@22-08-38_slice_2 | 7 | texts/MotionLLAMA/trumans/slice_smplx_result/2023-02-12@22-08-38_slice_2.txt
+098 | MotionUnion/music/Play_Xun_15_clip2 | 1 | texts/MotionUnion/music/Play_Xun_15_clip2.txt
+099 | MotionUnion/CombatMotion_seperate/CMP004420_2 | 4 | texts/MotionUnion/CombatMotion_seperate/CMP004420_2.txt
+100 | MotionUnion/CombatMotion_seperate/CMP008376_2 | 3 | texts/MotionUnion/CombatMotion_seperate/CMP008376_2.txt
+101 | MotionGV/folder6/381084 | 10 | texts/MotionGV/folder6/381084.txt
+102 | MotionGV/folder1/103237 | 13 | texts/MotionGV/folder1/103237.txt
+103 | MotionGV/folder8/449204 | 6 | texts/MotionGV/folder8/449204.txt
+104 | MotionGV/folder7/429109 | 13 | texts/MotionGV/folder7/429109.txt
+105 | MotionGV/folder8/481710 | 16 | texts/MotionGV/folder8/481710.txt
+106 | MotionGV/folder2/160721 | 11 | texts/MotionGV/folder2/160721.txt
+107 | MotionGV/folder9/529159 | 7 | texts/MotionGV/folder9/529159.txt
+108 | MotionLLAMA/interx/standard_smplx/G039T001A004R017/P1 | 9 | texts/MotionLLAMA/interx/standard_smplx/G039T001A004R017/P1.txt
+109 | MotionGV/folder8/456139 | 11 | texts/MotionGV/folder8/456139.txt
+110 | MotionGV/folder7/407483 | 11 | texts/MotionGV/folder7/407483.txt
+111 | MotionGV/folder7/437404 | 11 | texts/MotionGV/folder7/437404.txt
+112 | MotionGV/folder5/304464 | 10 | texts/MotionGV/folder5/304464.txt
+113 | MotionGV/folder2/112412 | 0 | texts/MotionGV/folder2/112412.txt
+114 | MotionUnion/idea400/Simultaneously_Phone_call_gesture_and_standing_1_clip1 | 0 | texts/MotionUnion/idea400/Simultaneously_Phone_call_gesture_and_standing_1_clip1.txt
+115 | MotionLLAMA/interx/standard_smplx/G032T000A002R011/P1 | 6 | texts/MotionLLAMA/interx/standard_smplx/G032T000A002R011/P1.txt
+116 | MotionLLAMA/interhuman/standard_smplx/3337/P2 | 3 | texts/MotionLLAMA/interhuman/standard_smplx/3337/P2.txt
+117 | MotionLLAMA/interx/standard_smplx/G001T004A021R011/P1 | 2 | texts/MotionLLAMA/interx/standard_smplx/G001T004A021R011/P1.txt
+118 | MotionGV/folder0/000084 | 13 | texts/MotionGV/folder0/000084.txt
+119 | MotionLLAMA/interhuman/standard_smplx/1274/P1 | 7 | texts/MotionLLAMA/interhuman/standard_smplx/1274/P1.txt
+120 | MotionLLAMA/interx/standard_smplx/G014T007A039R026/P1 | 1 | texts/MotionLLAMA/interx/standard_smplx/G014T007A039R026/P1.txt
+121 | MotionUnion/animation/Ways_to_Sit_Pregnant_clip1 | 11 | texts/MotionUnion/animation/Ways_to_Sit_Pregnant_clip1.txt
+122 | MotionUnion/CombatMotion_seperate/CMP004440_0 | 10 | texts/MotionUnion/CombatMotion_seperate/CMP004440_0.txt
+123 | MotionUnion/idea400/Riding_a_Carriage_during_walking_1_clip1 | 15 | texts/MotionUnion/idea400/Riding_a_Carriage_during_walking_1_clip1.txt
+124 | MotionUnion/idea400/Singing_while_standing_clip1 | 11 | texts/MotionUnion/idea400/Singing_while_standing_clip1.txt
+125 | MotionUnion/idea400/Hand_touches_armpit_while_standing_1_clip1 | 4 | texts/MotionUnion/idea400/Hand_touches_armpit_while_standing_1_clip1.txt
+126 | MotionGV/folder0/009763 | 1 | texts/MotionGV/folder0/009763.txt
+127 | MotionGV/folder0/039503 | 2 | texts/MotionGV/folder0/039503.txt
+128 | MotionGV/folder5/303518 | 14 | texts/MotionGV/folder5/303518.txt
+129 | MotionGV/folder4/251309 | 12 | texts/MotionGV/folder4/251309.txt
+130 | MotionGV/folder6/383198 | 11 | texts/MotionGV/folder6/383198.txt
+131 | MotionGV/folder9/525445 | 15 | texts/MotionGV/folder9/525445.txt
+132 | MotionGV/folder5/332089 | 6 | texts/MotionGV/folder5/332089.txt
+133 | MotionGV/folder5/319659 | 3 | texts/MotionGV/folder5/319659.txt
+134 | MotionGV/folder6/336237 | 4 | texts/MotionGV/folder6/336237.txt
+135 | MotionGV/folder6/362719 | 12 | texts/MotionGV/folder6/362719.txt
+136 | MotionGV/folder5/289714 | 12 | texts/MotionGV/folder5/289714.txt
+137 | MotionGV/folder0/044665 | 5 | texts/MotionGV/folder0/044665.txt
+138 | MotionLLAMA/interx/standard_smplx/G056T001A008R017/P1 | 9 | texts/MotionLLAMA/interx/standard_smplx/G056T001A008R017/P1.txt
+139 | MotionLLAMA/interhuman/standard_smplx/3510/P1 | 10 | texts/MotionLLAMA/interhuman/standard_smplx/3510/P1.txt
+140 | MotionLLAMA/interhuman/standard_smplx/1248/P1 | 3 | texts/MotionLLAMA/interhuman/standard_smplx/1248/P1.txt
+141 | MotionLLAMA/interx/standard_smplx/G052T006A031R008/P1 | 20 | texts/MotionLLAMA/interx/standard_smplx/G052T006A031R008/P1.txt
+142 | MotionUnion/haa500/leg_split_9_clip1 | 1 | texts/MotionUnion/haa500/leg_split_9_clip1.txt
+143 | MotionUnion/haa500/neck_side_pull_stretch_8_clip1 | 9 | texts/MotionUnion/haa500/neck_side_pull_stretch_8_clip1.txt
+144 | MotionUnion/haa500/figure_skate_bielman_spin_11_clip1 | 19 | texts/MotionUnion/haa500/figure_skate_bielman_spin_11_clip1.txt
+145 | MotionLLAMA/interx/standard_smplx/G018T008A038R014/P2 | 21 | texts/MotionLLAMA/interx/standard_smplx/G018T008A038R014/P2.txt
+146 | MotionLLAMA/interx/standard_smplx/G044T007A036R009/P2 | 22 | texts/MotionLLAMA/interx/standard_smplx/G044T007A036R009/P2.txt
+147 | MotionLLAMA/interx/standard_smplx/G043T002A010R003/P1 | 21 | texts/MotionLLAMA/interx/standard_smplx/G043T002A010R003/P1.txt
+148 | MotionUnion/humman/Pistol_Pistol_Squat_Squat_3_clip1_clip2 | 8 | texts/MotionUnion/humman/Pistol_Pistol_Squat_Squat_3_clip1_clip2.txt
+149 | MotionUnion/haa500/gym_lunges_10_clip1 | 15 | texts/MotionUnion/haa500/gym_lunges_10_clip1.txt
+150 | MotionGV/folder0/002018 | 1 | texts/MotionGV/folder0/002018.txt
+151 | MotionGV/folder0/001452 | 16 | texts/MotionGV/folder0/001452.txt
+152 | MotionGV/folder4/233343 | 15 | texts/MotionGV/folder4/233343.txt
+153 | MotionGV/folder7/407481 | 12 | texts/MotionGV/folder7/407481.txt
+154 | MotionGV/folder4/238267 | 7 | texts/MotionGV/folder4/238267.txt
+155 | MotionGV/folder0/001654 | 0 | texts/MotionGV/folder0/001654.txt
+156 | MotionGV/folder3/196199 | 6 | texts/MotionGV/folder3/196199.txt
+157 | MotionGV/folder9/531686 | 10 | texts/MotionGV/folder9/531686.txt
+158 | MotionGV/folder0/009068 | 3 | texts/MotionGV/folder0/009068.txt
+159 | MotionGV/folder4/262623 | 10 | texts/MotionGV/folder4/262623.txt
+160 | MotionLLAMA/interx/standard_smplx/G001T005A028R013/P1 | 4 | texts/MotionLLAMA/interx/standard_smplx/G001T005A028R013/P1.txt
+161 | MotionLLAMA/trumans/slice_smplx_result/2023-02-16@14-06-48_slice_1 | 6 | texts/MotionLLAMA/trumans/slice_smplx_result/2023-02-16@14-06-48_slice_1.txt
+162 | MotionGV/folder0/009286 | 1 | texts/MotionGV/folder0/009286.txt
+163 | MotionGV/folder0/011132 | 4 | texts/MotionGV/folder0/011132.txt
+164 | MotionGV/folder0/011821 | 3 | texts/MotionGV/folder0/011821.txt
+165 | MotionGV/folder0/021019 | 7 | texts/MotionGV/folder0/021019.txt
+166 | MotionLLAMA/trumans/slice_smplx_result/2023-02-18@17-22-30_slice_4 | 15 | texts/MotionLLAMA/trumans/slice_smplx_result/2023-02-18@17-22-30_slice_4.txt
+167 | MotionGV/folder6/364312 | 7 | texts/MotionGV/folder6/364312.txt
+168 | MotionGV/folder0/023095 | 2 | texts/MotionGV/folder0/023095.txt
+169 | MotionLLAMA/trumans/slice_smplx_result/2023-02-16@17-41-45_slice_3 | 5 | texts/MotionLLAMA/trumans/slice_smplx_result/2023-02-16@17-41-45_slice_3.txt
+170 | MotionLLAMA/interhuman/standard_smplx/2113/P2 | 5 | texts/MotionLLAMA/interhuman/standard_smplx/2113/P2.txt
+171 | MotionUnion/haa500/eat_burger_1_clip1 | 9 | texts/MotionUnion/haa500/eat_burger_1_clip1.txt
+172 | MotionGV/folder0/024638 | 11 | texts/MotionGV/folder0/024638.txt
+173 | MotionUnion/haa500/gym_squat_16_clip1 | 8 | texts/MotionUnion/haa500/gym_squat_16_clip1.txt
+174 | MotionGV/folder0/026446 | 0 | texts/MotionGV/folder0/026446.txt
+175 | MotionGV/folder0/000159 | 17 | texts/MotionGV/folder0/000159.txt
+176 | MotionGV/folder4/226771 | 4 | texts/MotionGV/folder4/226771.txt
+177 | MotionGV/folder4/264382 | 12 | texts/MotionGV/folder4/264382.txt
+178 | MotionGV/folder0/037025 | 16 | texts/MotionGV/folder0/037025.txt
+179 | MotionGV/folder1/111589 | 15 | texts/MotionGV/folder1/111589.txt
+180 | MotionGV/folder0/041489 | 0 | texts/MotionGV/folder0/041489.txt
+181 | MotionGV/folder3/204531 | 3 | texts/MotionGV/folder3/204531.txt
+182 | MotionGV/folder0/000005 | 3 | texts/MotionGV/folder0/000005.txt
+183 | MotionGV/folder3/190207 | 14 | texts/MotionGV/folder3/190207.txt
+184 | MotionGV/folder1/100126 | 0 | texts/MotionGV/folder1/100126.txt
+185 | MotionGV/folder2/154097 | 10 | texts/MotionGV/folder2/154097.txt
+186 | MotionGV/folder0/012127 | 3 | texts/MotionGV/folder0/012127.txt
+187 | MotionGV/folder0/037171 | 13 | texts/MotionGV/folder0/037171.txt
+188 | MotionLLAMA/hi4d/pair00/dance00/standard_smplx/P2 | 0 | texts/MotionLLAMA/hi4d/pair00/dance00/standard_smplx/P2.txt
+189 | MotionGV/folder0/000230 | 2 | texts/MotionGV/folder0/000230.txt
+190 | MotionLLAMA/interhuman/standard_smplx/1239/P1 | 10 | texts/MotionLLAMA/interhuman/standard_smplx/1239/P1.txt
+191 | MotionUnion/CombatMotion_seperate/CMP000986_0 | 15 | texts/MotionUnion/CombatMotion_seperate/CMP000986_0.txt
+192 | MotionUnion/haa500/gangnam_style_dance_4_clip2 | 11 | texts/MotionUnion/haa500/gangnam_style_dance_4_clip2.txt
+193 | MotionUnion/idea400/Simultaneously_standing_and_Playing_table_tennis_3_clip1 | 5 | texts/MotionUnion/idea400/Simultaneously_standing_and_Playing_table_tennis_3_clip1.txt
+194 | MotionLLAMA/interhuman/standard_smplx/4580/P1 | 14 | texts/MotionLLAMA/interhuman/standard_smplx/4580/P1.txt
+195 | MotionUnion/haa500/swinging_axe_on_a_tree_19_clip1 | 2 | texts/MotionUnion/haa500/swinging_axe_on_a_tree_19_clip1.txt
+196 | MotionLLAMA/interx/standard_smplx/G017T000A004R024/P1 | 10 | texts/MotionLLAMA/interx/standard_smplx/G017T000A004R024/P1.txt
+197 | MotionLLAMA/interx/standard_smplx/G046T004A021R005/P1 | 10 | texts/MotionLLAMA/interx/standard_smplx/G046T004A021R005/P1.txt
+198 | MotionLLAMA/interx/standard_smplx/G016T004A021R010/P2 | 0 | texts/MotionLLAMA/interx/standard_smplx/G016T004A021R010/P2.txt
+199 | MotionLLAMA/interhuman/standard_smplx/1842/P1 | 1 | texts/MotionLLAMA/interhuman/standard_smplx/1842/P1.txt
+200 | MotionLLAMA/interx/standard_smplx/G028T000A004R023/P2 | 15 | texts/MotionLLAMA/interx/standard_smplx/G028T000A004R023/P2.txt
