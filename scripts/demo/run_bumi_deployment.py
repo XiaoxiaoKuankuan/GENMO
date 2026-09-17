@@ -5,6 +5,7 @@
 然后通过 exec 替换当前进程，保留 Ctrl-C、Console 标准输入和原脚本退出码。它不启动
 GMT、Redis、仿真或实机，不修改 policy。show-config 只打印生效配置；check 仅执行
 模型安装验收；check-gmt 才只读在线 GMT 的 ROS 参数和策略契约。
+genmo 按配置选择 GMT 联动或独立播放器，并可拉起 MuJoCo 纯运动学窗口。
 """
 
 from __future__ import annotations

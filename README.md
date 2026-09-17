@@ -2,11 +2,13 @@
 
 本分支只运行原 GENMO 仓库导出的 BUMI 模型。模型资产位于 `models/bumi_v5_s350000/`，不包含训练 checkpoint、模型导出或训练代码。
 
-首次运行 `bash install.sh`。先按控制器自己的方式启动 GMT，再分别执行
+首次运行 `bash install.sh`。默认 GMT 联动模式，先按控制器自己的方式启动 GMT，再分别执行
 `bash run.sh bridge` 和 `bash run.sh genmo`。模型、GPU、端口与容器名用编辑器修改
 根目录 [deployment.ini](deployment.ini)，无需在终端临时配置。
 
 - [环境安装、模型检查和三个终端启动](docs/BUMI_MUSIC_DEPLOYMENT.md)
+- [MuJoCo 自动预览及不依赖 GMT 的独立播放](docs/BUMI_MUJOCO_PREVIEW.md)：在 `deployment.ini`
+  设置 `runtime.mode = preview`，只运行 `bash run.sh genmo`；默认 `gmt` 模式也会自动打开参考动作窗口。
 - [GMT 中直接用于 GENMO 接入的改动](docs/BUMI_GMT_GENMO_INTERFACE.md)
 - [适配其他GMT、SONIC和通用控制器](docs/GENMO_CONTROLLER_ADAPTATION.md)
 - [依赖闭包清单](DEPLOYMENT_FILES.json)

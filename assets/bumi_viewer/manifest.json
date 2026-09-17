@@ -1,0 +1,100 @@
+{
+  "contract_version": "genmo.bumi_viewer.v1",
+  "description": "BUMI 纯运动学预览资源；源 MJCF 必须与部署 kinematics 一致。",
+  "mjcf": "mjcf/bumi3_retarget.xml",
+  "kinematics_sha256": "c08731704dccece11351b6fa877e30bac5ca2a8d363de30af7ca2ea1398f4029",
+  "files": {
+    "meshes/base_link.STL": {
+      "size_bytes": 597784,
+      "sha256": "c288fe9d425ffdaf9c9cb034a021ef2e92b9adbe312804bdc8c1e84fe37613a4"
+    },
+    "meshes/l_ankle_pitch_link.STL": {
+      "size_bytes": 149484,
+      "sha256": "56d74b8d794e0eec37bb9411fc9d90cc0a9d906ae0aeade9e0de4b50cea656c0"
+    },
+    "meshes/l_ankle_roll_link.STL": {
+      "size_bytes": 1343884,
+      "sha256": "02ffd67b382031735f1749d89f1b573f1cff1d198b7dd3036da410ebda4f83dd"
+    },
+    "meshes/l_arm_pitch_link.STL": {
+      "size_bytes": 817284,
+      "sha256": "d2b4e486bd02aaf2d919b739d4422658e3aa8bc04252b5fa07f5ef4d3781a572"
+    },
+    "meshes/l_arm_roll_link.STL": {
+      "size_bytes": 1289684,
+      "sha256": "24a4e62aa69db8e790cece4d42dd50266df6f69726fbf006479ab9586a274080"
+    },
+    "meshes/l_arm_yaw_link.STL": {
+      "size_bytes": 1191884,
+      "sha256": "a2c1bdbe4ab7a4a026fc974cd0c3bb6593a8b521f6867e04a864f4b03a8fa227"
+    },
+    "meshes/l_elbow_pitch_link.STL": {
+      "size_bytes": 1603684,
+      "sha256": "b4ba8b3429984445ca07c19e0781f0518fd6807cf14c82d2116669d9b6cc94fe"
+    },
+    "meshes/l_knee_pitch_link.STL": {
+      "size_bytes": 2330184,
+      "sha256": "a97c8fd46eab59d3db482f7024d1c1f058b3444073d7aea62e354862ccb0322b"
+    },
+    "meshes/l_leg_pitch_link.STL": {
+      "size_bytes": 1045384,
+      "sha256": "4e304c7adc845feffbb7b50241b2bed6a92ecec6d3d8f47e167a39a43fc95ad9"
+    },
+    "meshes/l_leg_roll_link.STL": {
+      "size_bytes": 1238984,
+      "sha256": "7308669dbc4df6c39c1e484b5c459cc3568083b66517a334e523d268a68e64ab"
+    },
+    "meshes/l_leg_yaw_link.STL": {
+      "size_bytes": 634884,
+      "sha256": "54e1d8b923ea94ed5594cf6b0e38bc072fc893794f9212763af632f546c99d55"
+    },
+    "meshes/r_ankle_pitch_link.STL": {
+      "size_bytes": 149284,
+      "sha256": "3f60b7b8286b1d6bc36a6f836d591e066b7ac1b480eaa146e64cef5a91617065"
+    },
+    "meshes/r_ankle_roll_link.STL": {
+      "size_bytes": 1458884,
+      "sha256": "931cfc248e090d6aeddbc4ca35a2f1523aac8fa4f58a7d7db257bf48eff7c70e"
+    },
+    "meshes/r_arm_pitch_link.STL": {
+      "size_bytes": 817984,
+      "sha256": "2599dafb92e92a2d760f1c41595d05ca67b99ab4571a5d06fec10f51961a82b2"
+    },
+    "meshes/r_arm_roll_link.STL": {
+      "size_bytes": 1288584,
+      "sha256": "65cd6ecf48c88ff1bd5398e59c2be1c45da29f3bb8aa20e9d67ffb46dcb44f72"
+    },
+    "meshes/r_arm_yaw_link.STL": {
+      "size_bytes": 1189784,
+      "sha256": "63f0d50359ecd1f58ad5889b3b4ab10058171730ffe84a2138888fa2a077870b"
+    },
+    "meshes/r_elbow_pitch_link.STL": {
+      "size_bytes": 1601684,
+      "sha256": "4a4a40c67b81cf5a954b7297b069a251574b1d7e4190575b0b21721440d16977"
+    },
+    "meshes/r_knee_pitch_link.STL": {
+      "size_bytes": 2339284,
+      "sha256": "a2d4dfd441e49aafbb1339d923121f7ca3591c180ff831d7b6c57b367203760b"
+    },
+    "meshes/r_leg_pitch_link.STL": {
+      "size_bytes": 1041184,
+      "sha256": "a03b9cee58f5639478a8cf51d784cc54a736e65a5d4cb8c7c796ad62f902c739"
+    },
+    "meshes/r_leg_roll_link.STL": {
+      "size_bytes": 1244684,
+      "sha256": "de9ca72b00630c40f364005ca856c16ceb4cbc10842e2e2fa5966241341b6939"
+    },
+    "meshes/r_leg_yaw_link.STL": {
+      "size_bytes": 633784,
+      "sha256": "abe65bfcd1aa74d39cfa68d626733011cc7a37859dcafcd3ef9579609a569ceb"
+    },
+    "meshes/waist_yaw_link.STL": {
+      "size_bytes": 2500034,
+      "sha256": "4700f2d11d8790a02af1e8aa45421d8ba9982ff730eea95430c6533aa937c894"
+    },
+    "mjcf/bumi3_retarget.xml": {
+      "size_bytes": 17472,
+      "sha256": "fe93472dd764704fe8389b0f82052ae84ed8bc90f6d71b1467872f86e08a9ad3"
+    }
+  }
+}

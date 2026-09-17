@@ -8,6 +8,7 @@ ROS 参数服务和容器名。Console 和 Bridge 共用同一 ZeroMQ 配置，B
 本模块保留原 demo 的命令行接口，仅供 run.sh 的统一入口使用。相对路径以配置文件
 所在目录为基准，允许部署包整体移动；解析时拒绝拼错的字段、越界端口和非法采样参数。
 读取配置不启动推理或网络；只有构造 Bridge 命令时才校验模型清单。
+可选 runtime/preview 配置控制独立播放和动画窗口；旧四段配置保持 GMT 且关闭预览。
 """
 
 from __future__ import annotations
@@ -35,6 +36,9 @@ class DeploymentConfig:
     redis_key: str
     ros_master_uri: str
     container: str
+    runtime_mode: str = "gmt"
+    preview_enabled: bool = False
+    robot_manifest: Path | None = None
 
 
 def load_deployment_config(path: str | Path) -> DeploymentConfig:
@@ -48,8 +52,16 @@ def load_deployment_config(path: str | Path) -> DeploymentConfig:
         "redis": {"host", "port", "db", "key"},
         "gmt": {"ros_master_uri", "container"},
     }
-    if parser.defaults() or set(parser.sections()) != set(expected):
-        raise ValueError("deployment.ini 必须包含且仅包含 model/bridge/redis/gmt 四个配置段")
+    optional = {"runtime": {"mode"}, "preview": {"enabled", "robot_manifest"}}
+    if (
+        parser.defaults()
+        or not set(expected) <= set(parser.sections())
+        or set(parser.sections()) - set(expected) - set(optional)
+    ):
+        raise ValueError(
+            "deployment.ini 配置段无效；必需 model/bridge/redis/gmt，可选 runtime/preview"
+        )
+    expected.update({key: value for key, value in optional.items() if parser.has_section(key)})
     for section, keys in expected.items():
         if set(parser[section]) != keys:
             raise ValueError(f"{section} 字段不匹配，必须是 {sorted(keys)}")
@@ -98,6 +110,17 @@ def load_deployment_config(path: str | Path) -> DeploymentConfig:
     manifest = Path(parser["model"]["manifest"]).expanduser()
     if not manifest.is_absolute():
         manifest = path.parent / manifest
+    mode = parser.get("runtime", "mode", fallback="gmt")
+    if mode not in {"gmt", "preview"}:
+        raise ValueError("runtime.mode 必须为 gmt 或 preview")
+    preview = parser.getboolean("preview", "enabled", fallback=False)
+    robot_manifest = Path(
+        parser.get("preview", "robot_manifest", fallback="assets/bumi_viewer/manifest.json")
+    ).expanduser()
+    if not robot_manifest.is_absolute():
+        robot_manifest = path.parent / robot_manifest
+    if mode == "preview" and not preview:
+        raise ValueError("独立 preview 模式必须启用 preview.enabled")
     return DeploymentConfig(
         path,
         manifest.resolve(),
@@ -112,6 +135,9 @@ def load_deployment_config(path: str | Path) -> DeploymentConfig:
         parser["redis"]["key"],
         uri,
         parser["gmt"]["container"],
+        mode,
+        preview,
+        robot_manifest.resolve(),
     )
 
 
@@ -119,9 +145,17 @@ def deployment_command(config: DeploymentConfig, role: str) -> tuple[str, list[s
     """返回既有脚本和参数；不启动进程，不修改任何控制器配置。"""
     model = ["--deployment-manifest", str(config.manifest)]
     gmt = ["--ros-master-uri", config.ros_master_uri, "--gmt-container", config.container]
+    if config.runtime_mode == "preview" and role in {"bridge", "check-gmt"}:
+        raise ValueError("当前为独立 preview 模式，无需启动或检查 GMT Bridge")
     if role in {"check", "check-gmt"}:
         options = ["--check-gmt", *gmt] if role == "check-gmt" else ["--inference"]
-        return "check_bumi_deployment.py", [*model, "--device", config.device, *options]
+        return "check_bumi_deployment.py", [
+            *model,
+            "--device",
+            config.device,
+            *options,
+            *(["--robot-manifest", str(config.robot_manifest)] if config.preview_enabled else []),
+        ]
     if role == "genmo":
         return "demo_music_bumi_console.py", [
             *model,
@@ -135,6 +169,15 @@ def deployment_command(config: DeploymentConfig, role: str) -> tuple[str, list[s
             str(config.ddim_steps),
             "--guidance-scale",
             str(config.guidance_scale),
+            "--runtime-mode",
+            config.runtime_mode,
+            "--audio-playback",
+            config.audio_playback,
+            *(
+                ["--preview", "--robot-manifest", str(config.robot_manifest)]
+                if config.preview_enabled
+                else []
+            ),
         ]
     if role == "bridge":
         from gem.runtime.bumi_deployment_bundle import load_bumi_deployment_manifest

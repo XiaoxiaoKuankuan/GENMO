@@ -16,6 +16,10 @@ SMPL、SMPL-X、SMP1 或旧 ``robot_stream.py``，不会改变既有部署入口
 独立部署可通过 ``--deployment-manifest`` 使用原仓库发布的 ONNX、engine 和配套资产，
 无需训练 checkpoint；来源指纹与所有实际文件交叉核验。原 ``--checkpoint`` 路径保持
 兼容，两种资产指定方式互斥，避免不同训练版本混用。
+
+--runtime-mode=preview 使用内存本地播放器，不创建控制器网络连接；--preview 启动
+独立 MuJoCo 纯运动学窗口。GMT 模式从 Bridge 已发布的快照取样，本地模式读取本地
+时钟的当前姿态，查看器的生命周期、阻塞和异常不介入动作生成或控制器安全逻辑。
 """
 
 from __future__ import annotations
@@ -96,6 +100,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--heartbeat-seconds", type=float, default=0.5)
     parser.add_argument("--no-foot-lock", action="store_true")
     parser.add_argument("--no-cuda-graph", action="store_true")
+    parser.add_argument("--runtime-mode", choices=("gmt", "preview"), default="gmt")
+    parser.add_argument("--preview", action="store_true", help="自动启动纯运动学 MuJoCo 窗口")
+    parser.add_argument(
+        "--robot-manifest", type=Path, default=PROJECT_ROOT / "assets/bumi_viewer/manifest.json"
+    )
+    parser.add_argument("--audio-playback", choices=("ffplay", "off"), default="ffplay")
     return parser
 
 
@@ -143,15 +153,26 @@ class ResidentBumiConsole:
     def __init__(self, args: argparse.Namespace) -> None:
         args, self.deployment_bundle = resolve_console_assets(args)
         self.args = args
+        self.runtime_mode = getattr(args, "runtime_mode", "gmt")
+        self.preview = None
+        self.preview_error = None
+        if self.runtime_mode == "preview" and (
+            not getattr(args, "preview", False)
+            or getattr(args, "playback_mode", "realtime") != "realtime"
+        ):
+            raise ValueError("独立 preview 模式必须开启 --preview，并使用 realtime 播放")
         self.device = torch.device(args.device)
         if self.device.type == "cuda" and not torch.cuda.is_available():
             raise RuntimeError("CUDA requested but unavailable")
         self.checkpoint = (
-            args.checkpoint.expanduser().resolve(strict=True) if args.checkpoint is not None else None
+            args.checkpoint.expanduser().resolve(strict=True)
+            if args.checkpoint is not None
+            else None
         )
         self.source_checkpoint_sha256 = (
             self.deployment_bundle.source_checkpoint_sha256
-            if self.deployment_bundle is not None else sha256_file(self.checkpoint)
+            if self.deployment_bundle is not None
+            else sha256_file(self.checkpoint)
         )
         self.onnx_path = args.onnx.expanduser().resolve(strict=True)
         self.kinematics_path = args.kinematics.expanduser().resolve(strict=True)
@@ -211,7 +232,14 @@ class ResidentBumiConsole:
                 BUMI_STREAMING_FOOT_LOCK_CONTRACT_VERSION if not args.no_foot_lock else "disabled"
             ),
         )
-        self.bridge = BridgeClient(args.bridge, args.request_timeout_ms)
+        if self.runtime_mode == "preview":
+            from gem.runtime.bumi_local_player import LocalBumiPlayer
+
+            self.bridge = LocalBumiPlayer(
+                self.endecoder.kinematics, self.kinematics_path, audio_mode=args.audio_playback
+            )
+        else:
+            self.bridge = BridgeClient(args.bridge, args.request_timeout_ms)
         self.feature_cache: OrderedDict[tuple[Any, ...], tuple[torch.Tensor, dict[str, Any]]] = (
             OrderedDict()
         )
@@ -301,8 +329,30 @@ class ResidentBumiConsole:
         )
         if self.device.type == "cuda":
             torch.cuda.synchronize(self.device)
+        if getattr(self.args, "preview", False):
+            from gem.runtime.bumi_preview import LocalPreviewReader, MujocoPreview
+
+            source_factory = (
+                (lambda: LocalPreviewReader(self.bridge))
+                if self.runtime_mode == "preview"
+                else (lambda: BridgeClient(self.args.bridge, 100))
+            )
+            try:
+                self.preview = MujocoPreview(
+                    self.args.robot_manifest, self.kinematics_path, source_factory
+                )
+            except Exception as exc:
+                self.preview_error = f"{type(exc).__name__}: {exc}"
+                if self.runtime_mode == "preview":
+                    raise
+                print(f"[MuJoCo WARNING] {self.preview_error}；GMT 链路继续运行", flush=True)
         self.heartbeat_thread.start()
-        print(f"[BUMI Console] {self.args.backend} 后端已常驻，安全桥可达", flush=True)
+        target = (
+            "独立预览，无 GMT/Redis/ROS 连接"
+            if self.runtime_mode == "preview"
+            else "GMT 安全桥可达"
+        )
+        print(f"[BUMI Console] {self.args.backend} 后端已常驻，{target}", flush=True)
 
     def _feature_key(self, path: Path, start: float, duration: float | None) -> tuple[Any, ...]:
         stat = path.stat()
@@ -594,6 +644,10 @@ class ResidentBumiConsole:
             "last_error": self.last_error,
             "last_timing": timing,
             "bridge": bridge,
+            "runtime_mode": self.runtime_mode,
+            "preview": self.preview.status()
+            if self.preview is not None
+            else {"alive": False, "error": self.preview_error},
         }
 
     def serve(self) -> None:
@@ -641,6 +695,10 @@ class ResidentBumiConsole:
         self.stop.set()
         if self.generation_thread is not None:
             self.generation_thread.join(timeout=5.0)
+        if self.heartbeat_thread.is_alive():
+            self.heartbeat_thread.join(timeout=self.args.request_timeout_ms / 1000.0 + 1.0)
+        if self.preview is not None:
+            self.preview.close()
         self.bridge.close()
 
 

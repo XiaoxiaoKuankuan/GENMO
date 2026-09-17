@@ -3,6 +3,7 @@
 # 自动准备 uv、Python 3.10 虚拟环境和锁定的 Python/TensorRT 依赖；缺失时仅通过 APT
 # 安装 curl、FFmpeg、Redis 等系统工具。无需预先安装 python3-pip、python3.10-venv 或 Git。
 # 已有正确的 TensorRT 环境直接复用；新环境安装虚拟环境内的官方库，不更换系统驱动。
+# 固定安装 MuJoCo 3.2.3；检查器校验机器人资源和关节契约，不会打开窗口或启动 GMT。
 # 最后执行模型哈希、GPU/engine 兼容性和真实单步推理检查，不连接 GMT、不发送动作。
 # 只允许在精简部署目录运行，防止误修改完整训练仓库的 .venv；临时下载脚本自动清理。
 set -euo pipefail
@@ -83,4 +84,4 @@ else
     fi
 fi
 bash "$BUMI_ROOT/run.sh" check
-echo '安装与模型检查通过。先启动 GMT，然后分别执行 bash run.sh bridge 和 bash run.sh genmo。'
+echo '安装与模型检查通过。deployment.ini 中 gmt 模式沿用 GMT/Bridge/GENMO；preview 模式只执行 bash run.sh genmo。'

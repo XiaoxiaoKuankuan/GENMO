@@ -20,8 +20,6 @@ from __future__ import annotations
 import argparse
 import json
 import math
-import shutil
-import subprocess
 import sys
 import threading
 import time
@@ -43,6 +41,7 @@ from gem.robots.bumi.kinematics import BumiKinematics  # noqa: E402
 from gem.robots.bumi.postprocess import (  # noqa: E402
     BUMI_STREAMING_FOOT_LOCK_CONTRACT_VERSION,
 )
+from gem.runtime.bumi_audio import AudioController  # noqa: E402
 from gem.runtime.bumi_gmt_plan import (  # noqa: E402
     BumiGmtPlanSnapshot,
     BumiIncrementalGmtPlanBuilder,
@@ -63,6 +62,7 @@ from gem.runtime.bumi_online_stream import (  # noqa: E402
     heartbeat_expired,
     motion_buffer_failure,
 )
+from gem.runtime.bumi_preview import PoseSnapshot  # noqa: E402
 from gem.runtime.bumi_robot_stream import BumiQposSafetyGate  # noqa: E402
 from gem.runtime.gmt_policy_source import resolve_bridge_policy  # noqa: E402
 from gem.runtime.gmt_trajectory import (  # noqa: E402
@@ -127,60 +127,6 @@ def validate_args(args: argparse.Namespace) -> None:
         )
 
 
-class AudioController:
-    """非阻塞管理 ffplay，绝不让音频进程阻塞 50 Hz 安全发布线程。"""
-
-    def __init__(self, mode: str) -> None:
-        self.mode = mode
-        self.process: subprocess.Popen[bytes] | None = None
-        self.lock = threading.RLock()
-
-    def start(self, path: Path, start_sec: float, duration_sec: float) -> bool:
-        with self.lock:
-            self.stop("replace")
-            if self.mode == "off":
-                return False
-            ffplay = shutil.which("ffplay")
-            if ffplay is None:
-                print("[Audio WARNING] ffplay 不可用", flush=True)
-                return False
-            self.process = subprocess.Popen(
-                [
-                    ffplay,
-                    "-nodisp",
-                    "-autoexit",
-                    "-loglevel",
-                    "error",
-                    "-ss",
-                    f"{start_sec:.9f}",
-                    "-t",
-                    f"{duration_sec:.9f}",
-                    str(path),
-                ],
-                stdin=subprocess.DEVNULL,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-            )
-            return True
-
-    def stop(self, reason: str) -> None:
-        del reason
-        with self.lock:
-            process, self.process = self.process, None
-        if process is None or process.poll() is not None:
-            return
-        process.terminate()
-
-        def reap() -> None:
-            try:
-                process.wait(timeout=0.2)
-            except subprocess.TimeoutExpired:
-                process.kill()
-                process.wait()
-
-        threading.Thread(target=reap, daemon=True).start()
-
-
 class BumiOnlineBridge:
     """在线协议、安全门、增量 GMT 计划和发布时钟的状态机。"""
 
@@ -235,6 +181,7 @@ class BumiOnlineBridge:
         self.gmt_policy_path, self.gmt_policy_source = resolve_bridge_policy(args)
         self.kinematics = BumiKinematics(self.kinematics_path)
         self.kinematics_sha256 = sha256_file(self.kinematics_path)
+        self.preview_pose = PoseSnapshot(self.kinematics_sha256)
         self.joint_order_sha256 = bumi_joint_order_sha256(self.kinematics.joint_order)
         self.contract = GmtPolicyContract.from_onnx(self.gmt_policy_path)
         self.gmt_policy_sha256 = sha256_file(self.gmt_policy_path)
@@ -324,6 +271,8 @@ class BumiOnlineBridge:
             raise ValueError("control request must contain one JSON frame")
         payload = json.loads(parts[0].decode("utf-8"))
         command = str(payload.get("command", "")).lower()
+        if command == "preview_frame":
+            return self.preview_pose.read()
         if command == "status":
             with self.lock:
                 return {"ok": True, **self.status_locked()}
@@ -630,6 +579,8 @@ class BumiOnlineBridge:
                     cursor = self.cursor
                     revision = self.tracker.revision
                     request = self.request
+                    idle_qpos = self.idle_qpos.copy()
+                    idle_frames = self.idle_frames
                     publisher = self.publisher
                     heartbeat_failed = bool(
                         request is not None
@@ -647,12 +598,20 @@ class BumiOnlineBridge:
                 ack = None
                 published_plan = False
                 if state in {"STAND", "PREPARING", "PRIMING"}:
-                    self.idle_publisher.publish(
-                        self.idle_frames,
+                    preview_packet = self.idle_publisher.publish(
+                        idle_frames,
                         0,
                         fps=50.0,
                         joint_order_hash=self.contract.joint_order_hash,
                         flags=FLAG_FIXED_IDLE,
+                    )
+                    self.preview_pose.record(
+                        idle_qpos,
+                        frame_index=0,
+                        revision=revision,
+                        request_id=None,
+                        state=state,
+                        packet=preview_packet,
                     )
                 elif snapshot is not None and publisher is not None:
                     published_plan = True
@@ -661,7 +620,7 @@ class BumiOnlineBridge:
                         if snapshot.audio_start_frame <= cursor < snapshot.audio_end_frame
                         else FLAG_TRANSITION
                     )
-                    publisher.publish(
+                    preview_packet = publisher.publish(
                         snapshot.frames,
                         cursor,
                         fps=50.0,
@@ -669,6 +628,14 @@ class BumiOnlineBridge:
                         command_revision=revision,
                         plan_id=revision,
                         flags=flags,
+                    )
+                    self.preview_pose.record(
+                        snapshot.qpos[cursor],
+                        frame_index=cursor,
+                        revision=revision,
+                        request_id=None if request is None else request["request_id"],
+                        state=state,
+                        packet=preview_packet,
                     )
                     ack = publisher.matching_ack()
 

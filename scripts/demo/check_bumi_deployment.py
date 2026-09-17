@@ -34,6 +34,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--check-gmt", action="store_true")
     parser.add_argument("--ros-master-uri")
     parser.add_argument("--gmt-container", default="noetic")
+    parser.add_argument(
+        "--robot-manifest", type=Path, help="可选：检查 MuJoCo 资源及原生关节契约，不打开窗口"
+    )
     args = parser.parse_args(argv)
     import torch
 
@@ -56,6 +59,7 @@ def main(argv: list[str] | None = None) -> int:
         "onnxruntime",
         "redis",
         "pyzmq",
+        "mujoco",
     ):
         try:
             versions[name] = metadata.version(name)
@@ -79,6 +83,15 @@ def main(argv: list[str] | None = None) -> int:
         policy = GmtPolicyContract.from_onnx(path)
         policy.native_to_gmt_indices(endecoder.kinematics.joint_order)
         result.update(gmt_policy_path=str(path), gmt_policy_source=source)
+    if args.robot_manifest is not None:
+        from scripts.demo.bumi_mujoco_viewer import load_model
+
+        model, _ = load_model(args.robot_manifest, bundle.paths["kinematics"])
+        result["preview_model"] = {
+            "nq": model.nq,
+            "nv": model.nv,
+            "manifest": str(args.robot_manifest),
+        }
     if args.inference:
         device = torch.device(args.device)
         if args.backend == "tensorrt":

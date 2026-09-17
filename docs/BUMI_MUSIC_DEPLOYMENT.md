@@ -306,6 +306,10 @@ bumi_v5_s350000/
 
 ## 8. 本机三个终端的完整运行指令
 
+当前版本默认启动 MuJoCo 纯运动学窗口，查看 Bridge 当前参考动作；独立预览可在
+`deployment.ini` 设置 `runtime.mode = preview`，只运行终端三，不需要 GMT/Bridge。
+两种模式的安装、资源、窗口关闭和状态说明见 [MuJoCo 预览](BUMI_MUJOCO_PREVIEW.md)。
+
 ### 终端一：启动GMT，沿用GMT自己的模型配置
 
 ```bash
