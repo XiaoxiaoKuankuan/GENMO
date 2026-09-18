@@ -148,6 +148,23 @@ def test_pose_domain_and_fk(pose):
     assert torch.isfinite(decoded).all()
     fk = kin.forward_kinematics(qpos)
     assert torch.isfinite(fk["body_pos_w"]).all()
+    # 用真实MJCF的CPU前向运动学核对训练FK，渲染不依赖这里的替身。
+    import mujoco
+    from gem.runtime.bumi_preview import validate_robot_assets
+
+    xml, _ = validate_robot_assets(ROOT / "assets/bumi_viewer/manifest.json", KIN)
+    mj_model = mujoco.MjModel.from_xml_path(str(xml))
+    mj_data = mujoco.MjData(mj_model)
+    bodies = [
+        mujoco.mj_name2id(mj_model, mujoco.mjtObj.mjOBJ_BODY, name) for name in kin.body_order
+    ]
+    assert min(bodies) >= 0
+    for frame in (0, 48, 96):
+        mj_data.qpos[:] = qpos[frame].numpy()
+        mujoco.mj_forward(mj_model, mj_data)
+        np.testing.assert_allclose(mj_data.xpos[bodies], fk["body_pos_w"][frame].numpy(), atol=2e-6)
+        dot = (mj_data.xquat[bodies] * fk["body_quat_w"][frame].numpy()).sum(-1)
+        np.testing.assert_allclose(np.abs(dot), 1, atol=2e-6)
     # 只检查可表示性和竖直轨迹保留，不宣称姿态可跟踪。
     torch.testing.assert_close(encoded.physical_features[:, 2], qpos[:, 2] - kin.default_qpos[2])
 
@@ -424,7 +441,20 @@ def test_checkpoint_assets_can_move_without_changing_identity(small_checkpoint, 
 
 def test_public_model_keeps_backend_length_without_paths():
     from gem.runtime.text_motion_web.share import public_model
-    public = public_model(dict(id='test', motion_backend='bumi', min_frames=60, max_frames=300,
-        path='/private/model.ckpt', contract={'max_text_len':150,'assets':{'path':'private'}}))
-    assert (public['motion_backend'],public['min_frames'],public['max_frames']) == ('bumi',60,300)
-    assert 'path' not in public and 'assets' not in public['contract']
+
+    public = public_model(
+        dict(
+            id="test",
+            motion_backend="bumi",
+            min_frames=60,
+            max_frames=300,
+            path="/private/model.ckpt",
+            contract={"max_text_len": 150, "assets": {"path": "private"}},
+        )
+    )
+    assert (public["motion_backend"], public["min_frames"], public["max_frames"]) == (
+        "bumi",
+        60,
+        300,
+    )
+    assert "path" not in public and "assets" not in public["contract"]
