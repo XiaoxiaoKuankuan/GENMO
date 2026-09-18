@@ -1,0 +1,94 @@
+# @package _global_
+# BUMI文本A0：从零初始化；64×8×4只是待显存验证的候选，禁止直接声明多卡可运行。
+defaults:
+- gem_smpl_motionmillion_text_fullseq
+- override /network: diffusion_lg_bumi30_contact
+- override /pipeline: text_only_bumi_qpos30
+- override /endecoder: bumi_qpos30_contact
+- override /train_datasets:
+  - motionmillion_bumi_text_train
+  - humanml3d_bumi_text_train
+- override /test_datasets:
+  - motionmillion_bumi_text_val
+  - humanml3d_bumi_text_val
+- override /callbacks:
+  - ckpt_saver/every10000s_top100
+  - prog_bar/prog_reporter_ed1
+  - train_speed_timer/base
+  - lr_monitor/pl
+- _self_
+exp_name_base: gem_bumi_text_fullseq
+data_name: bumi_text_fullseq_v1
+output_dir: outputs/${data_name}/${exp_name}
+pretrain_ckpt: null
+ckpt_path: null
+resume_mode: null
+training_budget:
+  max_steps: 215000
+  warmup_steps: 5000
+  auxiliary_warmup_steps: 10000
+model:
+  model_cfg:
+    sequence_contract:
+      schema_version: 1
+      sequence_mode: full
+      min_frames: 60
+      max_frames: 300
+      pad_to_frames: ${data.dataset_opts.max_motion_frames}
+      fps: 30
+      attention_mode: ${network.model_cfg.denoiser.attention_mode}
+      attention_max_len: ${network.model_cfg.denoiser.max_len}
+      loss_reduction: ${pipeline.args.loss_reduction}
+      train_caption_sampling: random
+      val_caption_sampling: first
+    motion_backend: bumi
+    body_model: bumi
+    train_modes:
+    - diffusion
+  _target_: gem.bumi_text_gem.BumiTextGEM
+network:
+  model_cfg:
+    denoiser:
+      max_len: 120
+      attention_mode: valid_length
+      encode_text: true
+      encoded_text_dim: 1024
+      text_mask_prob: 0.1
+      music_mask_prob: 0.0
+      use_text_pos_enc: true
+      allow_autoregressive: false
+      text_encoder_cfg:
+        mode: all
+        cross_attn_type: mha
+pipeline:
+  args:
+    loss_reduction: valid_per_sample
+data:
+  dataset_opts:
+    max_motion_frames: 300
+  collate_cfg:
+    default_seq_feature_length_multiplier:
+      audio_array: 1
+  loader_opts:
+    train:
+      batch_size: 64
+    val:
+      batch_size: 1
+pl_trainer:
+  devices: 8
+  use_distributed_sampler: false
+  accumulate_grad_batches: 4
+  max_epochs: -1
+  max_steps: ${training_budget.max_steps}
+scheduler:
+  scheduler:
+    total_steps: ${training_budget.max_steps}
+    warmup_steps: ${training_budget.warmup_steps}
+callbacks:
+  ckpt_saver:
+    every10000s_top100:
+      save_on_train_end: true
+endecoder:
+  kinematics_path: ${oc.env:BUMI_KINEMATICS_PATH,configs/bumi/bumi_kinematics_robot_retargeter_fe934_v1.json}
+  stats_path: ${oc.env:BUMI_TEXT_STATS_PATH,inputs/bumi_text_fullseq/stats.json}
+  sequence_mode: full

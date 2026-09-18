@@ -1,0 +1,11 @@
+# 完整BUMI动作及原caption，T5引用由独立release绑定，不重新裁剪。
+motionmillion_bumi_text_train:
+  _target_: gem.datasets.pure_motion.bumi_text.BumiTextDataset
+  root: ${oc.env:BUMI_TEXT_DATA_ROOT,inputs/bumi_text_fullseq}
+  split: train
+  dataset: motionmillion
+  sequence_mode: full
+  pad_to_frames: 300
+  caption_sampling: random
+  random_seed: 20260909
+  shard_cache_size: 4

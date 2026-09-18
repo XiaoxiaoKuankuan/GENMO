@@ -1,8 +1,8 @@
-"""本地文本 SMPL checkpoint 发现与校验。
+"""本地 SMPL/BUMI 文本 checkpoint 发现与校验。
 
 按真实路径去重，使用文件身份、大小和纳秒时间戳缓存检查结果。扫描线程通过
-CPU mmap 读取权重元数据，复用文本契约检查，并要求 SMPL 151 维输出与扩散条件层。
-已知非文本、BUMI 和回归模型被排除；文件变化后重新读取，生成前再次核对文件身份。
+CPU mmap 读取权重元数据，分别核对 SMPL 151D 或 BUMI 30D/2D 与机器人资产契约。
+音乐和仅回归模型被排除；文件变化后重新读取，生成前再次核对文件身份。
 """
 
 from __future__ import annotations
@@ -29,6 +29,14 @@ def inspect_checkpoint(path: Path) -> dict:
         checkpoint = torch.load(path, map_location="cpu", weights_only=False)
     if not isinstance(checkpoint, dict):
         raise ValueError("checkpoint 必须包含权重字典")
+    if checkpoint.get("bumi_text_contract") is not None:
+        from gem.runtime.bumi_text_contract import inspect_payload, resolve_assets
+        robot = inspect_payload(checkpoint)
+        resolve_assets(robot, checkpoint=path)
+        return {"contract": {"max_text_len": 150, "encoded_text_dim": 1024,
+                             "sequence_contract": robot["sequence"]},
+                "motion_backend": "bumi", "min_frames": 60, "max_frames": 300,
+                "global_step": checkpoint.get("global_step")}
     contract = validate_text_generation_payload(checkpoint, path)
     state = checkpoint.get("state_dict", checkpoint)
     prefix = "pipeline.denoiser3d.denoiser."
@@ -54,7 +62,9 @@ def inspect_checkpoint(path: Path) -> dict:
 
     if rejects(checkpoint.get("hyper_parameters", {})):
         raise ValueError("checkpoint 声明为回归或非 SMPL 模型")
-    return {"contract": contract, "global_step": checkpoint.get("global_step")}
+    seq = contract.get("sequence_contract")
+    return {"contract": contract, "motion_backend": "smpl", "global_step": checkpoint.get("global_step"),
+            "min_frames": seq["min_frames"] if seq else 1, "max_frames": seq["max_frames"] if seq else 900}
 
 
 class ModelRegistry:

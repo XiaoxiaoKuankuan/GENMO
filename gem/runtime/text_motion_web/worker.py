@@ -74,17 +74,21 @@ def render_job(output: Path, frames: int) -> None:
     follow_parent()
     os.chdir(ROOT)
     os.environ.setdefault("EGL_PLATFORM", "surfaceless")
-    import torch
-
-    from scripts.demo.demo_smpl_text import render_global_video
-
-    check_motion(output / "motion.npz", frames)
-    payload = torch.load(output / "smpl_params.pt", map_location="cuda:0", weights_only=False)
-    with torch.inference_mode():
-        render_global_video(output, payload["body_params_global"], 1280, 720, 30)
+    metadata_path = output / "metadata.json"
+    metadata = json.loads(metadata_path.read_text()) if metadata_path.exists() else {}
+    if metadata.get("motion_backend") == "bumi":
+        from gem.runtime.bumi_text_viewer import render_bumi_video
+        render_bumi_video(output, frames)
+    else:
+        import torch
+        from scripts.demo.demo_smpl_text import render_global_video
+        check_motion(output / "motion.npz", frames)
+        payload = torch.load(output / "smpl_params.pt", map_location="cuda:0", weights_only=False)
+        with torch.inference_mode():
+            render_global_video(output, payload["body_params_global"], 1280, 720, 30)
     source = output / "global.mp4"
     if not source.is_file() or source.stat().st_size == 0:
-        raise RuntimeError("Open3D 未输出有效视频，请检查 render.log 中的原始错误")
+        raise RuntimeError("渲染器未输出有效视频，请检查 render.log 中的原始错误")
     converted = output / "video.pending.mp4"
     subprocess.run(
         [
@@ -197,7 +201,11 @@ def worker_main(commands, events):
                     if engine is not None:
                         engine.close()
                         engine = None
-                    engine = ResidentTextMotionEngine(
+                    engine_class = ResidentTextMotionEngine
+                    if model.get("motion_backend") == "bumi":
+                        from gem.runtime.bumi_text_runtime import ResidentBumiTextEngine
+                        engine_class = ResidentBumiTextEngine
+                    engine = engine_class(
                         ckpt_path=model["path"],
                         t5_model=T5_MODEL,
                         local_files_only=True,

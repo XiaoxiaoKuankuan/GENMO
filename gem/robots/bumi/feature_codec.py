@@ -1,7 +1,13 @@
-"""The canonical 93D BUMI motion representation.
+"""BUMI qpos30 神经表示与权威 FK 编解码。
 
-Feature slices live in this module and are imported everywhere else.  The
-codec uses a first-frame, Z-up horizontal/yaw anchor and never performs IK.
+网络只预测能够唯一决定 qpos28 的 30 个连续量：航向坐标系水平根位移 2 维、绝对根高
+1 维、根旋转 rot6d 6 维和 MuJoCo 原生顺序关节角 21 维。21 个机器人 link 的位置不再
+作为另一组可互相矛盾的网络输出；训练损失、指标和渲染需要 link 几何时，统一由这 30 维
+先重建 qpos28，再通过固定 BUMI 运动学执行可微 FK 得到。
+
+水平根运动继续使用逐帧 heading-local 位移，并在完整融合后的时间线上只积分一次；根高
+仍是相对默认高度的逐帧绝对量。这样既保留 v2 对长序列接缝的修复，又消除旧 93 维表示中
+63 维 link 回归目标压过真正 qpos 目标的问题。
 """
 
 from __future__ import annotations
@@ -27,26 +33,28 @@ from .kinematics import BumiKinematics
 
 BUMI_QPOS_DIM = 28
 BUMI_JOINT_DIM = 21
-BUMI_FEATURE_DIM = 93
+BUMI_FEATURE_DIM = 30
+BUMI_REPRESENTATION_CONTRACT_VERSION = "genmo.bumi_motion_features.qpos30.v3"
 BUMI_FEATURE_SLICES: Mapping[str, tuple[int, int]] = MappingProxyType(
     {
-        "root_pos_local": (0, 3),
+        "root_delta_xy_heading": (0, 2),
+        "root_height_offset": (2, 3),
         "root_rot_local": (3, 9),
         "joint_dof": (9, 30),
-        "body_link_pos_local": (30, 93),
     }
 )
-BUMI_ANCHOR_MODE = "first_frame_xy_yaw_default_height"
+BUMI_ANCHOR_MODE = "first_frame_xy_yaw_heading_delta_absolute_height"
 BUMI_QUATERNION_CONVENTION = "wxyz"
 BUMI_QPOS_ORDER = "mujoco_native"
 
 
 @dataclass(frozen=True)
 class BumiMotionComponents:
-    root_pos_local: torch.Tensor
+    root_delta_xy_heading: torch.Tensor
+    root_height_offset: torch.Tensor
     root_rot_local_quat: torch.Tensor
     joint_dof: torch.Tensor
-    body_link_pos_local: torch.Tensor
+    body_link_pos_root: torch.Tensor | None = None
 
 
 @dataclass(frozen=True)
@@ -62,9 +70,11 @@ class BumiCanonicalAnchor:
 class BumiEncodedFeatures:
     physical_features: torch.Tensor
     canonical_qpos: torch.Tensor
-    body_link_pos_local: torch.Tensor
+    body_link_pos_root: torch.Tensor
     anchor: BumiCanonicalAnchor
     normalized_world_qpos: torch.Tensor
+    body_pos_w: torch.Tensor
+    body_quat_w: torch.Tensor
 
 
 def normalize_quaternion_wxyz(quaternion: torch.Tensor) -> torch.Tensor:
@@ -81,9 +91,7 @@ def normalize_quaternion_wxyz(quaternion: torch.Tensor) -> torch.Tensor:
     return quaternion / norm
 
 
-def make_quaternion_continuous(
-    quaternion: torch.Tensor, *, time_dim: int = -2
-) -> torch.Tensor:
+def make_quaternion_continuous(quaternion: torch.Tensor, *, time_dim: int = -2) -> torch.Tensor:
     """Normalize wxyz quaternions and flip temporal signs when dot < 0."""
 
     quaternion = normalize_quaternion_wxyz(quaternion)
@@ -109,9 +117,7 @@ def make_quaternion_continuous(
     return moved.movedim(-2, resolved_time_dim)
 
 
-def quaternion_sign_is_continuous(
-    quaternion: torch.Tensor, *, tolerance: float = 1.0e-6
-) -> bool:
+def quaternion_sign_is_continuous(quaternion: torch.Tensor, *, tolerance: float = 1.0e-6) -> bool:
     quaternion = normalize_quaternion_wxyz(quaternion)
     if quaternion.shape[-2] <= 1:
         return True
@@ -120,7 +126,7 @@ def quaternion_sign_is_continuous(
 
 
 class BumiMotionFeatureCodec:
-    """Encode BUMI qpos28 and differentiable FK into physical 93D features."""
+    """在 qpos28、qpos30 表示和可微 FK link 几何之间转换。"""
 
     feature_dim = BUMI_FEATURE_DIM
     feature_slices = BUMI_FEATURE_SLICES
@@ -200,12 +206,94 @@ class BumiMotionFeatureCodec:
             raise ValueError(f"rot6d must have last dimension 6, got {rot6d.shape}")
         if not bool(torch.isfinite(rot6d).all()):
             raise ValueError("rot6d contains NaN or Inf")
-        quaternion = normalize_quaternion_wxyz(
-            matrix_to_quaternion(rotation_6d_to_matrix(rot6d))
-        )
+        quaternion = normalize_quaternion_wxyz(matrix_to_quaternion(rotation_6d_to_matrix(rot6d)))
         if quaternion.ndim >= 2:
             quaternion = make_quaternion_continuous(quaternion)
         return quaternion
+
+    @classmethod
+    def root_horizontal_delta_to_heading(
+        cls,
+        root_position: torch.Tensor,
+        root_quat_wxyz: torch.Tensor,
+    ) -> torch.Tensor:
+        """Encode ``p[t+1]-p[t]`` in frame ``t``'s horizontal heading.
+
+        The last value repeats the final real transition, matching the original
+        GENMO forward-difference convention.  A one-frame sequence has no
+        transition and therefore receives a zero displacement.
+        """
+
+        if root_position.shape[-1] != 3 or root_quat_wxyz.shape != (
+            *root_position.shape[:-1],
+            4,
+        ):
+            raise ValueError(
+                "root position/quaternion must have matching [...,T,3]/[...,T,4] shapes"
+            )
+        if root_position.shape[-2] <= 1:
+            return root_position[..., :2].new_zeros((*root_position.shape[:-1], 2))
+        delta_xy = root_position[..., 1:, :2] - root_position[..., :-1, :2]
+        delta_xy = torch.cat((delta_xy, delta_xy[..., -1:, :]), dim=-2)
+        delta_xyz = torch.cat((delta_xy, torch.zeros_like(delta_xy[..., :1])), dim=-1)
+        _, _, heading_inverse = cls._heading_from_root_quaternion(root_quat_wxyz)
+        return quaternion_apply(heading_inverse, delta_xyz)[..., :2]
+
+    @classmethod
+    def rollout_root_position(
+        cls,
+        root_delta_xy_heading: torch.Tensor,
+        root_height_offset: torch.Tensor,
+        root_quat_wxyz: torch.Tensor,
+    ) -> torch.Tensor:
+        """Integrate horizontal displacement once and attach absolute root height.
+
+        The horizontal trajectory starts at the canonical local origin.  Height
+        is not integrated: every frame remains ``z - z_default`` so vertical
+        prediction bias cannot accumulate into long-term sinking or rising.
+        """
+
+        prefix = root_delta_xy_heading.shape[:-1]
+        if root_delta_xy_heading.shape[-1] != 2:
+            raise ValueError("root_delta_xy_heading must end in 2 values")
+        if root_height_offset.shape != (*prefix, 1):
+            raise ValueError(
+                f"root_height_offset must have shape {(*prefix, 1)}, "
+                f"got {tuple(root_height_offset.shape)}"
+            )
+        if root_quat_wxyz.shape != (*prefix, 4):
+            raise ValueError(
+                f"root quaternion must have shape {(*prefix, 4)}, got {tuple(root_quat_wxyz.shape)}"
+            )
+        local_delta = torch.cat(
+            (root_delta_xy_heading, torch.zeros_like(root_height_offset)), dim=-1
+        )
+        _, heading, _ = cls._heading_from_root_quaternion(root_quat_wxyz)
+        world_delta_xy = quaternion_apply(heading, local_delta)[..., :2]
+        origin = world_delta_xy[..., :1, :].new_zeros((*world_delta_xy.shape[:-2], 1, 2))
+        horizontal = torch.cumsum(torch.cat((origin, world_delta_xy[..., :-1, :]), dim=-2), dim=-2)
+        return torch.cat((horizontal, root_height_offset), dim=-1)
+
+    @staticmethod
+    def body_positions_in_root_frame(
+        root_position: torch.Tensor,
+        root_quat_wxyz: torch.Tensor,
+        body_link_position: torch.Tensor,
+    ) -> torch.Tensor:
+        """Express 21 link origins relative to the current root pose."""
+
+        expected = (*root_position.shape[:-1], 21, 3)
+        if tuple(body_link_position.shape) != expected:
+            raise ValueError(
+                f"body_link_position must have shape {expected}, "
+                f"got {tuple(body_link_position.shape)}"
+            )
+        inverse = (
+            quaternion_invert(root_quat_wxyz)
+            .unsqueeze(-2)
+            .expand(*body_link_position.shape[:-1], 4)
+        )
+        return quaternion_apply(inverse, body_link_position - root_position.unsqueeze(-2))
 
     def canonicalize(
         self,
@@ -225,29 +313,27 @@ class BumiMotionFeatureCodec:
             )
         if not bool(torch.isfinite(body_pos_w).all()):
             raise ValueError("body_pos_w contains NaN or Inf")
-        del body_quat_w  # Body orientations are not part of the 93D representation.
+        del body_quat_w  # Link orientation is also derived by FK, not predicted as a feature.
         anchor = self.build_canonical_anchor(qpos) if anchor is None else anchor
         root_pos_w = qpos[..., :3]
         root_quat_w = qpos[..., 3:7]
         heading_inverse = anchor.heading_inverse_quat_wxyz.expand(*root_pos_w.shape[:-1], 4)
-        root_pos_local = quaternion_apply(
-            heading_inverse, root_pos_w - anchor.position_w
-        )
+        root_pos_local = quaternion_apply(heading_inverse, root_pos_w - anchor.position_w)
         root_rot_local = quaternion_multiply(heading_inverse, root_quat_w)
         root_rot_local = make_quaternion_continuous(root_rot_local)
-
         body_link_pos_w = body_pos_w[..., 1:, :]
-        heading_body = anchor.heading_inverse_quat_wxyz.unsqueeze(-2).expand(
-            *body_link_pos_w.shape[:-2], 21, 4
+        root_delta_xy_heading = self.root_horizontal_delta_to_heading(
+            root_pos_local, root_rot_local
         )
-        body_link_pos_local = quaternion_apply(
-            heading_body, body_link_pos_w - anchor.position_w.unsqueeze(-2)
+        body_link_pos_root = self.body_positions_in_root_frame(
+            root_pos_w, root_quat_w, body_link_pos_w
         )
         components = BumiMotionComponents(
-            root_pos_local=root_pos_local,
+            root_delta_xy_heading=root_delta_xy_heading,
+            root_height_offset=root_pos_local[..., 2:3],
             root_rot_local_quat=root_rot_local,
             joint_dof=qpos[..., 7:],
-            body_link_pos_local=body_link_pos_local,
+            body_link_pos_root=body_link_pos_root,
         )
         canonical_qpos = torch.cat(
             (
@@ -268,71 +354,82 @@ class BumiMotionFeatureCodec:
             fk["body_quat_w"],
         )
         physical = self.assemble_features(components)
+        if components.body_link_pos_root is None:
+            raise RuntimeError("encoded GT qpos must provide FK-derived body link positions")
         return BumiEncodedFeatures(
             physical_features=physical,
             canonical_qpos=canonical_qpos,
-            body_link_pos_local=components.body_link_pos_local,
+            body_link_pos_root=components.body_link_pos_root,
             anchor=anchor,
             normalized_world_qpos=normalized_qpos,
+            body_pos_w=fk["body_pos_w"],
+            body_quat_w=fk["body_quat_w"],
         )
 
     def assemble_features(self, components: BumiMotionComponents) -> torch.Tensor:
         expected = {
-            "root_pos_local": (components.root_pos_local, 3),
+            "root_delta_xy_heading": (components.root_delta_xy_heading, 2),
+            "root_height_offset": (components.root_height_offset, 1),
             "root_rot_local_quat": (components.root_rot_local_quat, 4),
             "joint_dof": (components.joint_dof, 21),
         }
-        prefix = components.root_pos_local.shape[:-1]
+        prefix = components.root_delta_xy_heading.shape[:-1]
         for name, (value, width) in expected.items():
             if value.shape[:-1] != prefix or value.shape[-1] != width:
                 raise ValueError(
                     f"{name} must have shape {(*prefix, width)}, got {tuple(value.shape)}"
                 )
-        if tuple(components.body_link_pos_local.shape) != (*prefix, 21, 3):
-            raise ValueError(
-                "body_link_pos_local must have shape [...,21,3], got "
-                f"{tuple(components.body_link_pos_local.shape)}"
-            )
         result = torch.cat(
             (
-                components.root_pos_local,
+                components.root_delta_xy_heading,
+                components.root_height_offset,
                 self.rotation_quat_to_features(components.root_rot_local_quat),
                 components.joint_dof,
-                components.body_link_pos_local.flatten(start_dim=-2),
             ),
             dim=-1,
         )
-        if result.shape[-1] != 93:
+        if result.shape[-1] != BUMI_FEATURE_DIM:
             raise RuntimeError(f"Internal BUMI feature dimension error: {result.shape}")
         return result
 
     def split_features(self, features: torch.Tensor) -> BumiMotionComponents:
-        if not isinstance(features, torch.Tensor) or features.shape[-1] != 93:
+        if not isinstance(features, torch.Tensor) or features.shape[-1] != BUMI_FEATURE_DIM:
             raise ValueError(
-                f"BUMI features must be a tensor with last dimension 93; "
+                f"BUMI features must be a tensor with last dimension {BUMI_FEATURE_DIM}; "
                 f"got {getattr(features, 'shape', None)}"
             )
         if not bool(torch.isfinite(features).all()):
             raise ValueError("BUMI features contain NaN or Inf")
         slices = BUMI_FEATURE_SLICES
         root_rot6d = features[..., slices["root_rot_local"][0] : slices["root_rot_local"][1]]
-        body_flat = features[
-            ..., slices["body_link_pos_local"][0] : slices["body_link_pos_local"][1]
+        root_delta = features[
+            ...,
+            slices["root_delta_xy_heading"][0] : slices["root_delta_xy_heading"][1],
         ]
+        root_height = features[
+            ...,
+            slices["root_height_offset"][0] : slices["root_height_offset"][1],
+        ]
+        root_quaternion = self.rotation_features_to_quat(root_rot6d)
+        joint_dof = features[..., slices["joint_dof"][0] : slices["joint_dof"][1]]
         return BumiMotionComponents(
-            root_pos_local=features[
-                ..., slices["root_pos_local"][0] : slices["root_pos_local"][1]
-            ],
-            root_rot_local_quat=self.rotation_features_to_quat(root_rot6d),
-            joint_dof=features[..., slices["joint_dof"][0] : slices["joint_dof"][1]],
-            body_link_pos_local=body_flat.reshape(*features.shape[:-1], 21, 3),
+            root_delta_xy_heading=root_delta,
+            root_height_offset=root_height,
+            root_rot_local_quat=root_quaternion,
+            joint_dof=joint_dof,
+            body_link_pos_root=None,
         )
 
     def decode_to_canonical_qpos(self, physical_features: torch.Tensor) -> torch.Tensor:
         components = self.split_features(physical_features)
+        root_position = self.rollout_root_position(
+            components.root_delta_xy_heading,
+            components.root_height_offset,
+            components.root_rot_local_quat,
+        )
         return torch.cat(
             (
-                components.root_pos_local,
+                root_position,
                 make_quaternion_continuous(components.root_rot_local_quat),
                 components.joint_dof,
             ),
@@ -408,6 +505,7 @@ __all__ = [
     "BUMI_QPOS_DIM",
     "BUMI_QPOS_ORDER",
     "BUMI_QUATERNION_CONVENTION",
+    "BUMI_REPRESENTATION_CONTRACT_VERSION",
     "BumiCanonicalAnchor",
     "BumiEncodedFeatures",
     "BumiMotionComponents",

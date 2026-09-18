@@ -1,0 +1,6 @@
+# TensorRT 10.13.3.9 完整运行栈；由部署安装器仅对TensorRT后端安装。
+# --no-deps避免绑定隐式拉取另一套版本，运行库及其CUDA runtime在下方显式固定。
+tensorrt-cu13==10.13.3.9
+tensorrt-cu13-bindings==10.13.3.9
+tensorrt-cu13-libs @ https://pypi.nvidia.com/tensorrt-cu13-libs/tensorrt_cu13_libs-10.13.3.9-py2.py3-none-manylinux_2_28_x86_64.whl#sha256=19a54f2106f7d9496433a01a596fa4e363f58901110306abe1ce7b6e9617c6a7
+nvidia-cuda-runtime==13.0.96

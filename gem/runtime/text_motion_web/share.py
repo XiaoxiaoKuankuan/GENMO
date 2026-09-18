@@ -97,6 +97,10 @@ class LoopbackBackend:
 
 def public_model(model):
     result = {key: model.get(key) for key in ("id", "name", "global_step", "is_default")}
+    # 后端与长度属于公开功能信息；本地模型/资产路径仍由原白名单隔离。
+    for key in ('motion_backend', 'min_frames', 'max_frames'):
+        if key in model:
+            result[key] = model[key]
     contract = model.get("contract", {})
     result["contract"] = {
         key: contract.get(key)

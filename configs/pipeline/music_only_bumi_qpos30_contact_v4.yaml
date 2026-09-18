@@ -1,0 +1,48 @@
+# BUMI qpos30/contact v4 关节限位强化训练管线。
+#
+# 本配置继承v3的30D表示、可微FK、接触、脚滑、穿透、根姿态和时序导数监督，并针对
+# “少数帧/少数关节的严重越限会被全时序平均稀释”增加三层保护：距离XML限位0.05rad
+# 即开始产生安全边距损失；每条序列取最严重1%有效关节帧计算top-k损失；每条序列的
+# 单点最大越限另计低权重max损失。max权重刻意低于top-k，避免单点梯度切换造成训练抖动。
+# 新增项支持独立起始step和5000步warmup，以便从v3完整checkpoint恢复时平稳接入。
+_target_: gem.pipeline.bumi_music_pipeline.BumiMusicPipeline
+args_denoiser3d: ${network}
+args:
+  motion_backend: bumi
+  train_modes: [diffusion]
+  endecoder_opt: ${endecoder}
+  use_cfg_sampler_for_gen: true
+  encoded_music_dim: 35
+  in_attr: [encoded_music]
+  mask_out_attr: []
+  out_attr:
+    static_conf_logits: 2
+  loss_contract: physical_qpos30_contact_v4
+  auxiliary_warmup_steps: 5000
+  ground_semantics: mixed_floor_zero_fk_contact_v2
+  joint_limit_margin_rad: 0.05
+  joint_limit_topk_fraction: 0.01
+  robust_joint_limit_start_step: 0
+  robust_joint_limit_warmup_steps: 5000
+  weights:
+    repr_root_pos: 1.0
+    repr_root_rot: 2.0
+    repr_joint: 1.0
+    root_pos: 0.2
+    root_rot: 1.0
+    root_tilt: 1.0
+    joint_dof: 0.2
+    fk_body_pos: 1.0
+    joint_velocity: 0.10
+    joint_acceleration: 0.01
+    joint_jerk: 0.003
+    joint_acceleration_excess: 0.05
+    joint_jerk_excess: 0.003
+    joint_limit: 0.1
+    joint_limit_margin: 0.2
+    joint_limit_topk: 0.5
+    joint_limit_max: 0.05
+    contact_bce: 1.0
+    foot_slide: 0.05
+    penetration: 0.05
+    root_height: 0.1

@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import hashlib
 import pickle
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -27,6 +27,48 @@ import numpy as np
 
 LEGACY_BUMI_MOTION_CONTRACT_VERSION = "genmo.bumi_legacy_motion.v1"
 LEGACY_BUMI_QUATERNION_CONVENTION = "xyzw"
+ROOT_TILT_MAX_MEDIAN_DEG = 45.0
+ROOT_TILT_MAX_P95_DEG = 75.0
+ROOT_TILT_MAX_OVER_45DEG_FRACTION = 0.50
+
+
+def root_tilt_statistics(tilt_degrees: np.ndarray) -> dict[str, float | int]:
+    """汇总根局部 Z 轴相对世界 Z 轴倾角，作为躺倒坐标错误的统一发布指标。"""
+
+    values = np.asarray(tilt_degrees, dtype=np.float64).reshape(-1)
+    if values.size == 0 or not np.isfinite(values).all():
+        raise ValueError("root tilt values must be a non-empty finite sequence")
+    return {
+        "num_frames": int(values.size),
+        "median_deg": float(np.median(values)),
+        "p95_deg": float(np.percentile(values, 95)),
+        "max_deg": float(np.max(values)),
+        "over_45deg_fraction": float(np.mean(values > 45.0)),
+    }
+
+
+def enforce_root_tilt_gate(
+    tilt_degrees: np.ndarray,
+    *,
+    context: str,
+    max_median_deg: float = ROOT_TILT_MAX_MEDIAN_DEG,
+    max_p95_deg: float = ROOT_TILT_MAX_P95_DEG,
+    max_over_45deg_fraction: float = ROOT_TILT_MAX_OVER_45DEG_FRACTION,
+) -> dict[str, float | int]:
+    """拒绝根倾角统计异常的动作，防止错误坐标数据进入发布、统计或训练。"""
+
+    stats = root_tilt_statistics(tilt_degrees)
+    if (
+        stats["median_deg"] > max_median_deg
+        or stats["p95_deg"] > max_p95_deg
+        or stats["over_45deg_fraction"] > max_over_45deg_fraction
+    ):
+        raise ValueError(
+            f"{context}: root orientation gate failed: {stats}; thresholds="
+            f"median<={max_median_deg}, p95<={max_p95_deg}, "
+            f"over45_fraction<={max_over_45deg_fraction}"
+        )
+    return stats
 
 # 该顺序来自生成 data/motions 的 GMR 生产 bumi3.xml 的 qpos address 7..27。
 LEGACY_BUMI_JOINT_ORDER = (
@@ -213,6 +255,8 @@ class LegacyBumiMotion:
     dof_pos: np.ndarray
     local_body_pos: np.ndarray
     body_names: tuple[str, ...]
+    declared_dof_names: tuple[str, ...] | None = None
+    quality: Mapping[str, Any] | None = None
 
     @property
     def num_frames(self) -> int:
@@ -306,6 +350,17 @@ def load_legacy_bumi_motion(
     quaternion_norm = np.linalg.norm(root_rot, axis=-1)
     if np.any(quaternion_norm < 1.0e-8):
         raise ValueError(f"{source}: root_rot contains a zero-norm quaternion")
+    declared_dof_names: tuple[str, ...] | None = None
+    if "dof_names" in payload:
+        declared_dof_names = tuple(map(str, payload["dof_names"]))
+        if declared_dof_names != LEGACY_BUMI_JOINT_ORDER:
+            raise ValueError(
+                f"{source}: dof_names does not match the legacy BUMI joint contract; "
+                f"expected={LEGACY_BUMI_JOINT_ORDER}, got={declared_dof_names}"
+            )
+    quality = payload.get("quality")
+    if quality is not None and not isinstance(quality, Mapping):
+        raise ValueError(f"{source}: quality must be a mapping when present")
     return LegacyBumiMotion(
         path=source,
         fps=int(expected_fps),
@@ -314,4 +369,6 @@ def load_legacy_bumi_motion(
         dof_pos=dof_pos,
         local_body_pos=local_body_pos,
         body_names=body_names,
+        declared_dof_names=declared_dof_names,
+        quality=quality,
     )

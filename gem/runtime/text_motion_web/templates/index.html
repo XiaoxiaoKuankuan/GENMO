@@ -5,12 +5,12 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="description" content="在本机用 GENMO 将文本生成 SMPL 人体动作，预览视频并回看历史。">
+  <meta name="description" content="在本机用 GENMO 将文本生成 SMPL 人体或 BUMI 机器人动作，预览视频并回看历史。">
   <title>GENMO · 文本动作工作台</title>
   <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
 </head>
 <body>
-<header><a class="brand" href="/">GENMO<span>动作工作台</span></a><span class="local"><i></i> {{ '公开共享' if public_share else '本地运行' }} · SMPL</span></header>
+<header><a class="brand" href="/">GENMO<span>动作工作台</span></a><span class="local"><i></i> {{ '公开共享' if public_share else '本地运行' }} · SMPL / BUMI</span></header>
 <main>
   <div class="intro"><div><p class="eyebrow">TEXT TO MOTION</p><h1>让文字，成为动作。</h1><p class="muted">选择模型，描述动作，在这里预览你的创作。</p></div><span class="format">30 FPS <b>／</b> 1280 × 720</span></div>
   <div class="workspace">
@@ -32,14 +32,14 @@
     </aside>
     <section class="preview panel">
       <div class="section-title"><h2>动作预览</h2><span>02 — PREVIEW</span></div>
-      <div class="screen"><div id="empty-preview"><div class="motion-mark">↗</div><h3>每一个动作，从一句话开始</h3><p>生成完成后，点击播放查看 SMPL 人体动作。</p><span>视频将在这里显示</span></div><video id="video" controls playsinline preload="metadata" hidden aria-label="SMPL 动作视频"></video></div>
+      <div class="screen"><div id="empty-preview"><div class="motion-mark">↗</div><h3>每一个动作，从一句话开始</h3><p>生成完成后，点击播放查看生成的动作。</p><span>视频将在这里显示</span></div><video id="video" controls playsinline preload="metadata" hidden aria-label="生成动作视频"></video></div>
       <div class="video-caption"><div><h3 id="video-title">等待你的第一个动作</h3><p id="video-meta" class="muted">生成后手动播放，支持暂停、拖动进度和全屏。</p></div><a id="download" class="secondary" hidden download>下载视频 ↓</a></div>
       <div id="task-status" role="status" aria-live="polite"><div class="status-heading"><span id="status-text">就绪</span><span id="elapsed">等待生成</span></div><ol class="steps"><li data-stage="loading">加载模型</li><li data-stage="generating">生成动作</li><li data-stage="rendering">渲染视频</li><li data-stage="done">完成</li></ol><p id="error" role="alert" hidden></p></div>
     </section>
   </div>
   <section class="history"><div class="section-title"><div><h2>生成历史 <span id="history-count">0</span></h2><p class="muted">最多保留最近 60 条已结束记录，超出后自动删除最旧记录及文件；正在生成的任务会保留。</p></div><span>03 — LIBRARY</span></div><div id="history-list"><p class="history-empty">还没有生成记录。你的动作视频会保存在这里。</p></div></section>
 </main>
-<footer><span>GENMO / {{ 'SHARED' if public_share else 'LOCAL' }} MOTION STUDIO</span><span>文本 → SMPL → 视频</span></footer>
+<footer><span>GENMO / {{ 'SHARED' if public_share else 'LOCAL' }} MOTION STUDIO</span><span>文本 → 人体 / 机器人动作 → 视频</span></footer>
 <script src="{{ url_for('static', filename='app.js') }}" defer></script>
 </body>
 </html>

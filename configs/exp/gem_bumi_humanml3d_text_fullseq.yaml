@@ -1,0 +1,13 @@
+# @package _global_
+# 单集对照采用该子集train统计量，其余结构和损失与联合实验一致。
+defaults:
+- gem_bumi_text_fullseq
+- override /train_datasets:
+  - humanml3d_bumi_text_train
+- override /test_datasets:
+  - humanml3d_bumi_text_val
+- _self_
+exp_name_base: gem_bumi_humanml3d_text_fullseq
+data_name: bumi_humanml3d_text_fullseq_v1
+endecoder:
+  stats_path: ${oc.env:BUMI_TEXT_STATS_PATH,inputs/bumi_text_fullseq/stats_humanml3d.json}

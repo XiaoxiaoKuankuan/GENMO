@@ -8,8 +8,6 @@ window never performs a device-to-host round trip between denoising steps.
 
 from __future__ import annotations
 
-import ctypes
-import ctypes.util
 import hashlib
 import json
 import math
@@ -24,6 +22,7 @@ import numpy as np
 import torch
 
 from gem.diffusion_utils.model_util import create_gaussian_diffusion
+from gem.runtime.tensorrt_environment import linked_tensorrt_version, prepare_tensorrt_libraries
 from gem.utils.rotation_conversions import axis_angle_to_matrix
 
 WINDOW_FRAMES = 120
@@ -42,28 +41,6 @@ def _parse_version(value: str) -> tuple[int, int, int]:
         raise RuntimeError(f"cannot parse TensorRT version {value!r}")
     patch = int(parts[2]) if len(parts) > 2 and parts[2].isdigit() else 0
     return int(parts[0]), int(parts[1]), patch
-
-
-def linked_tensorrt_version() -> str:
-    """Read the actual local ``libnvinfer`` version, not package metadata."""
-    library_path = ctypes.util.find_library("nvinfer")
-    if not library_path:
-        raise RuntimeError("libnvinfer is not visible to the dynamic linker")
-    library = ctypes.CDLL(library_path)
-    try:
-        get_version = library.getInferLibVersion
-    except AttributeError as exc:
-        raise RuntimeError(
-            f"{library_path} does not export getInferLibVersion"
-        ) from exc
-    get_version.restype = ctypes.c_int32
-    encoded = int(get_version())
-    if encoded <= 0:
-        raise RuntimeError(f"libnvinfer returned an invalid version integer: {encoded}")
-    major = encoded // 10_000
-    minor = encoded % 10_000 // 100
-    patch = encoded % 100
-    return f"{major}.{minor}.{patch}"
 
 
 def validate_tensorrt_installation(trt_module: object) -> str:
@@ -89,7 +66,7 @@ class DenoiserStep(Protocol):
         music: torch.Tensor,
         length: torch.Tensor,
         guidance_scale: torch.Tensor,
-    ) -> torch.Tensor: ...
+    ) -> torch.Tensor | tuple[torch.Tensor, ...]: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -196,15 +173,21 @@ class SlidingDDIMGenerator:
         denoiser: DenoiserStep,
         *,
         device: torch.device | str,
+        noise_device: torch.device | str | None = None,
         steps: int = DEFAULT_DDIM_STEPS,
         guidance_scale: float = DEFAULT_GUIDANCE_SCALE,
+        motion_dim: int = MOTION_DIM,
     ) -> None:
         if not math.isfinite(float(guidance_scale)) or guidance_scale < 0.0:
             raise ValueError("guidance_scale must be finite and >= 0")
+        if int(motion_dim) <= 0:
+            raise ValueError("motion_dim must be > 0")
         self.denoiser = denoiser
         self.device = torch.device(device)
+        self.noise_device = self.device if noise_device is None else torch.device(noise_device)
         self.steps = int(steps)
         self.guidance_scale = float(guidance_scale)
+        self.motion_dim = int(motion_dim)
         self.diffusion = create_gaussian_diffusion(_diffusion_config(self.steps), training=False)
         if self.diffusion.num_timesteps != self.steps:
             raise RuntimeError("diffusion respacing did not produce the requested step count")
@@ -217,6 +200,7 @@ class SlidingDDIMGenerator:
         self._timestep_map = torch.as_tensor(
             self.diffusion.timestep_map, device=self.device, dtype=torch.long
         )
+        self.last_aux_output: tuple[torch.Tensor, ...] | None = None
 
     def _q_sample_at(
         self,
@@ -237,7 +221,7 @@ class SlidingDDIMGenerator:
         known_x0: torch.Tensor | None = None,
         trace_hook: Callable[[int, torch.Tensor, torch.Tensor | None], None] | None = None,
     ) -> torch.Tensor:
-        """Generate one normalized ``[120,151]`` window.
+        """Generate one normalized ``[120,motion_dim]`` window.
 
         ``trace_hook`` receives ``(step, x_t_after_overwrite, pred_x0)`` and is
         intended for contract tests and diagnostics only.
@@ -247,28 +231,25 @@ class SlidingDDIMGenerator:
         if not 1 <= int(valid_length) <= WINDOW_FRAMES:
             raise ValueError("valid_length must be in 1..120")
         if known_x0 is not None:
-            if known_x0.shape != (OVERLAP_FRAMES, MOTION_DIM):
-                raise ValueError(
-                    f"known_x0 must have shape [{OVERLAP_FRAMES},{MOTION_DIM}]"
-                )
+            if known_x0.shape != (OVERLAP_FRAMES, self.motion_dim):
+                raise ValueError(f"known_x0 must have shape [{OVERLAP_FRAMES},{self.motion_dim}]")
             if valid_length <= OVERLAP_FRAMES:
                 raise ValueError("an inpainted window must contain at least one new frame")
 
         music_b = music.to(self.device, dtype=torch.float32).unsqueeze(0).contiguous()
-        generator = torch.Generator(device=self.device)
+        generator = torch.Generator(device=self.noise_device)
         generator.manual_seed(int(seed))
         x_t = torch.randn(
-            (1, WINDOW_FRAMES, MOTION_DIM),
-            device=self.device,
+            (1, WINDOW_FRAMES, self.motion_dim),
+            device=self.noise_device,
             dtype=torch.float32,
             generator=generator,
-        )
+        ).to(self.device)
         known = None if known_x0 is None else known_x0.to(self.device).float().unsqueeze(0)
         known_noise = None if known is None else x_t[:, :OVERLAP_FRAMES].clone()
         length = torch.tensor([int(valid_length)], device=self.device, dtype=torch.long)
-        guidance = torch.tensor(
-            [self.guidance_scale], device=self.device, dtype=torch.float32
-        )
+        guidance = torch.tensor([self.guidance_scale], device=self.device, dtype=torch.float32)
+        self.last_aux_output = None
 
         for step in range(self.steps - 1, -1, -1):
             if known is not None:
@@ -278,11 +259,24 @@ class SlidingDDIMGenerator:
                 trace_hook(step, x_t.detach().clone(), None)
 
             timestep = self._timestep_map[step : step + 1]
-            pred_x0 = self.denoiser(x_t, timestep, music_b, length, guidance).float()
+            denoiser_output = self.denoiser(x_t, timestep, music_b, length, guidance)
+            if isinstance(denoiser_output, tuple):
+                if not denoiser_output or not all(
+                    isinstance(value, torch.Tensor) for value in denoiser_output
+                ):
+                    raise RuntimeError("denoiser tuple output must contain only tensors")
+                pred_x0 = denoiser_output[0].float()
+                if step == 0:
+                    # TensorRT runner 会在下一次调用时原地复用输出 buffer。只在最终 DDIM
+                    # step 克隆辅助 head，既避免每步复制，也保证下一滑窗不会改写已提交的
+                    # contact timeline。
+                    self.last_aux_output = tuple(
+                        value.float().detach().clone() for value in denoiser_output[1:]
+                    )
+            else:
+                pred_x0 = denoiser_output.float()
             if pred_x0.shape != x_t.shape or not torch.isfinite(pred_x0).all():
-                raise RuntimeError(
-                    f"denoiser returned invalid pred_motion {tuple(pred_x0.shape)}"
-                )
+                raise RuntimeError(f"denoiser returned invalid pred_motion {tuple(pred_x0.shape)}")
             if known is not None:
                 pred_x0[:, :OVERLAP_FRAMES] = known
 
@@ -295,9 +289,7 @@ class SlidingDDIMGenerator:
                 if step == 0:
                     x_t[:, :OVERLAP_FRAMES] = known
                 else:
-                    x_t[:, :OVERLAP_FRAMES] = self._q_sample_at(
-                        known, step - 1, known_noise
-                    )
+                    x_t[:, :OVERLAP_FRAMES] = self._q_sample_at(known, step - 1, known_noise)
             if trace_hook is not None:
                 trace_hook(step, x_t.detach().clone(), pred_x0.detach().clone())
 
@@ -356,9 +348,7 @@ class StreamingSmplDecoder:
             "body_pose": body_pose,
             "global_orient": orient,
             "transl": transl,
-            "betas": torch.zeros(
-                len(body_pose), 10, device=self.device, dtype=body_pose.dtype
-            ),
+            "betas": torch.zeros(len(body_pose), 10, device=self.device, dtype=body_pose.dtype),
         }
 
 
@@ -430,6 +420,7 @@ class TensorRTStepRunner:
         if self.device.type != "cuda" or not torch.cuda.is_available():
             raise RuntimeError("TensorRTStepRunner requires a CUDA device")
         try:
+            prepare_tensorrt_libraries()
             import tensorrt as trt
         except ImportError as exc:
             raise RuntimeError(
@@ -499,9 +490,7 @@ class TensorRTStepRunner:
             gpu=actual_gpu,
         )
         if payload.get("cache_key") != expected_cache_key:
-            raise RuntimeError(
-                "TensorRT engine cache fingerprint does not match this runtime/GPU"
-            )
+            raise RuntimeError("TensorRT engine cache fingerprint does not match this runtime/GPU")
         return payload
 
     @staticmethod
@@ -536,17 +525,16 @@ class TensorRTStepRunner:
                     raise RuntimeError("deployment engine must expose exactly one output")
                 self._output_name = name
         if self._input_names != set(self.REQUIRED_INPUTS):
-            raise RuntimeError(
-                f"TensorRT input contract mismatch: {sorted(self._input_names)}"
-            )
+            raise RuntimeError(f"TensorRT input contract mismatch: {sorted(self._input_names)}")
         for name, expected in self.REQUIRED_INPUTS.items():
             if tuple(self._buffers[name].shape) != expected:
                 raise RuntimeError(
                     f"TensorRT input {name} must be {expected}, got {tuple(self._buffers[name].shape)}"
                 )
-        if self._output_name != "pred_motion" or tuple(
-            self._buffers[self._output_name].shape
-        ) != self.REQUIRED_OUTPUT:
+        if (
+            self._output_name != "pred_motion"
+            or tuple(self._buffers[self._output_name].shape) != self.REQUIRED_OUTPUT
+        ):
             raise RuntimeError("TensorRT pred_motion output contract mismatch")
 
     def _execute(self) -> None:

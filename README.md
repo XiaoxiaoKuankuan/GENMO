@@ -1,3 +1,8 @@
+> **当前分支：BUMI 文本生成动作。** 基于 SMPL 完整序列 A0，文本直接生成 BUMI
+> qpos28。数据交付规范、联合/单集训练、恢复、网页、MuJoCo预览和无checkpoint部署，
+> 见 [BUMI 文本完整序列说明](docs/BUMI_TEXT_FULLSEQ.md)。本阶段完成代码与CPU验证，
+> 真实数据、训练模型和GPU验收仍待后续阶段，不代表动作质量已验证。
+
 <p align="center">
   <h1 align="center">GEM：通用人体动作模型</h1>
   <p align="center">

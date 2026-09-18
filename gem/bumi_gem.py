@@ -1,4 +1,8 @@
-"""Lightning module for the independent BUMI-native music-only backend."""
+"""BUMI 机器人共用 Lightning 路径。
+
+复用 GEM 优化器、扩散与 checkpoint 机制，使用 qpos30/FK 绕开 SMPL。
+音乐和文本通过薄层条件入口区分，原 BumiMusicGEM 名称保留兼容。
+"""
 
 from __future__ import annotations
 
@@ -10,7 +14,15 @@ from typing import Any
 import torch
 
 from gem.gem import GEM
+from gem.robots.bumi.feature_codec import (
+    BUMI_FEATURE_DIM,
+    BUMI_REPRESENTATION_CONTRACT_VERSION,
+)
 from gem.robots.bumi.metrics import compute_bumi_kinematic_metrics
+from gem.robots.bumi.postprocess import (
+    BUMI_FOOT_LOCK_CONTRACT_VERSION,
+    lock_bumi_foot_contacts,
+)
 from gem.utils.bumi_checkpoint_adapter import adapt_smpl_music_checkpoint_to_bumi
 from gem.utils.pylogger import Log
 
@@ -29,16 +41,22 @@ def reorder_mujoco_joints_to_gmt(
     if len(source) != 21 or len(target) != 21:
         raise ValueError("Both MuJoCo and GMT joint orders must contain exactly 21 names")
     if len(set(source)) != 21 or len(set(target)) != 21 or set(source) != set(target):
-        raise ValueError("GMT reorder requires two duplicate-free joint orders with identical names")
+        raise ValueError(
+            "GMT reorder requires two duplicate-free joint orders with identical names"
+        )
     source_index = {name: index for index, name in enumerate(source)}
     permutation = torch.tensor(
         [source_index[name] for name in target], dtype=torch.long, device=qpos_mujoco.device
     )
-    return torch.cat((qpos_mujoco[..., :7], qpos_mujoco[..., 7:].index_select(-1, permutation)), dim=-1)
+    return torch.cat(
+        (qpos_mujoco[..., :7], qpos_mujoco[..., 7:].index_select(-1, permutation)), dim=-1
+    )
 
 
-class BumiMusicGEM(GEM):
+class BumiGEM(GEM):
     """Reuse GEM optimization/CFG infrastructure while bypassing every SMPL path."""
+
+    condition_type = "music"
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)
@@ -52,11 +70,52 @@ class BumiMusicGEM(GEM):
             raise ValueError(
                 f"BumiMusicGEM supports only train_modes=['diffusion'], got {self.train_modes}"
             )
-        if list(self.pipeline.args.in_attr) != ["encoded_music"]:
+        if self.condition_type == "music" and list(self.pipeline.args.in_attr) != ["encoded_music"]:
             raise ValueError("BumiMusicGEM accepts only the encoded_music condition")
-        if self.text_condition_enabled or self.denoiser_uses_text:
+        if self.condition_type == "music" and (self.text_condition_enabled or self.denoiser_uses_text):
             raise ValueError("BumiMusicGEM must disable text encoding in model and denoiser")
         self.checkpoint_adaptation_report: dict[str, Any] | None = None
+
+    @staticmethod
+    def _validate_representation_checkpoint(checkpoint: Mapping[str, Any]) -> None:
+        actual = checkpoint.get("bumi_representation_contract_version")
+        if actual != BUMI_REPRESENTATION_CONTRACT_VERSION:
+            raise RuntimeError(
+                "BUMI checkpoint representation mismatch: expected "
+                f"{BUMI_REPRESENTATION_CONTRACT_VERSION!r}, got {actual!r}. "
+                "旧 93D checkpoint 不能当作 qpos30 权重继续加载；请使用 qpos30 统计量"
+                "重新训练，或仅通过显式 SMPL music adapter 迁移共享条件/Transformer 权重。"
+            )
+        state = checkpoint.get("state_dict")
+        if not isinstance(state, Mapping):
+            raise RuntimeError("native BUMI qpos30 checkpoint is missing state_dict")
+        final_shapes = [
+            tuple(value.shape)
+            for key, value in state.items()
+            if str(key).endswith("denoiser.final_layer.fc2.weight")
+            and isinstance(value, torch.Tensor)
+        ]
+        contact_shapes = [
+            tuple(value.shape)
+            for key, value in state.items()
+            if str(key).endswith("static_conf_head.fc2.weight") and isinstance(value, torch.Tensor)
+        ]
+        if len(final_shapes) != 1 or final_shapes[0][0] != BUMI_FEATURE_DIM:
+            raise RuntimeError(
+                f"native BUMI checkpoint must contain one qpos30 output head, got {final_shapes}"
+            )
+        if len(contact_shapes) != 1 or contact_shapes[0][0] != 2:
+            raise RuntimeError(
+                f"native BUMI checkpoint must contain one 2D contact head, got {contact_shapes}"
+            )
+
+    def on_save_checkpoint(self, checkpoint: dict[str, Any]) -> None:
+        super().on_save_checkpoint(checkpoint)
+        checkpoint["bumi_representation_contract_version"] = BUMI_REPRESENTATION_CONTRACT_VERSION
+
+    def on_load_checkpoint(self, checkpoint: dict[str, Any]) -> None:
+        super().on_load_checkpoint(checkpoint)
+        self._validate_representation_checkpoint(checkpoint)
 
     def prepare_batch(self, batch: dict[str, Any], mode: str) -> None:
         if mode != "diffusion":
@@ -72,16 +131,18 @@ class BumiMusicGEM(GEM):
         batch["target_x_mask"] = valid[..., None].expand_as(encoded.normalized_features)
         batch["target_physical_features"] = encoded.physical_features
         batch["target_qpos_canonical"] = encoded.canonical_qpos
-        batch["target_body_link_pos_local"] = encoded.target_body_link_pos_local
+        batch["target_body_link_pos_root"] = encoded.target_body_link_pos_root
         batch["target_foot_contact"] = encoded.target_foot_contact
         batch["target_foot_contact_mask"] = encoded.target_foot_contact_mask
+        batch["target_contact_ground_height"] = encoded.target_contact_ground_height
         batch["canonical_anchor"] = encoded.anchor_metadata
         batch["sample_indices_dict"] = self.endecoder.obs_indices_dict
         batch["device"] = encoded.normalized_features.device
         batch["B"], batch["L"] = encoded.normalized_features.shape[:2]
-        batch["condition_mask"] = {
-            "has_music_mask": batch["mask"]["has_music_mask"].bool() & valid
-        }
+        if self.condition_type == "music":
+            batch["condition_mask"] = {"has_music_mask": batch["mask"]["has_music_mask"].bool() & valid}
+        else:
+            self.attach_text_condition(batch)
 
     def create_condition_mask(
         self,
@@ -123,18 +184,14 @@ class BumiMusicGEM(GEM):
         dropout = torch.zeros(batch_size, dtype=torch.bool, device=device)
         if train and self.music_mask_prob > 0.0:
             dropout = torch.rand(batch_size, device=device) < float(self.music_mask_prob)
-            conditional = torch.where(
-                dropout[:, None, None], unconditional, conditional
-            )
+            conditional = torch.where(dropout[:, None, None], unconditional, conditional)
         batch["music_dropout_mask"] = dropout
         batch["f_cond"] = conditional
         batch["f_uncond"] = unconditional
         batch["f_empty"] = empty
         length = batch["length"].to(device=device).long().clamp(max=end)
         batch["length"] = length
-        batch["motion"] = batch["target_x"][:, :end] * valid[..., None].to(
-            batch["target_x"]
-        )
+        batch["motion"] = batch["target_x"][:, :end] * valid[..., None].to(batch["target_x"])
         return batch
 
     def validation_step(self, batch, batch_idx, dataloader_idx=0):
@@ -144,19 +201,23 @@ class BumiMusicGEM(GEM):
         del batch_idx
         self.prepare_batch(batch, "diffusion")
         batch["target_x"] = torch.zeros_like(batch["target_x"])
-        batch = self.create_condition_mask(
-            batch, cond_mask_cfg=None, mode=None, train=False
-        )
+        batch = self.create_condition_mask(batch, cond_mask_cfg=None, mode=None, train=False)
         outputs = self.pipeline.forward(batch, train=False, test_mode=test_mode)
         outputs["target_qpos_canonical"] = batch["target_qpos_canonical"]
-        outputs["target_body_link_pos_local"] = batch["target_body_link_pos_local"]
+        outputs["target_body_link_pos_root"] = batch["target_body_link_pos_root"]
         metrics = compute_bumi_kinematic_metrics(
             outputs["pred_qpos_canonical"],
             self.endecoder.kinematics,
             target_qpos=batch["target_qpos_canonical"],
             valid_mask=batch["mask"]["valid"],
+            target_contact=batch["target_foot_contact"],
+            pred_contact_logits=outputs.get("pred_foot_contact_logits"),
             music_beats=batch.get("music_beats"),
             fps=30,
+            ground_height=(
+                batch["target_contact_ground_height"].to(outputs["pred_qpos_canonical"])
+                - self.endecoder.kinematics.default_qpos[2].to(outputs["pred_qpos_canonical"])
+            ),
         )
         report_names = (
             "joint_angle_mae_rad",
@@ -164,11 +225,24 @@ class BumiMusicGEM(GEM):
             "fk_body_position_error_m",
             "joint_limit_violation_rate",
             "minimum_joint_margin_rad",
+            "foot_penetration_mean_m",
+            "foot_penetration_max_m",
+            "foot_sliding_mean_mps",
+            "foot_sliding_p95_mps",
+            "foot_sliding_max_mps",
+            "root_height_min_m",
+            "root_tilt_mean_rad",
+            "root_tilt_max_rad",
             "joint_velocity_p95_radps",
+            "joint_velocity_max_radps",
             "joint_acceleration_p95_radps2",
+            "joint_acceleration_max_radps2",
             "joint_jerk_p95_radps3",
+            "joint_jerk_max_radps3",
             "root_linear_velocity_p95_mps",
+            "root_linear_velocity_max_mps",
             "root_angular_velocity_p95_radps",
+            "root_angular_velocity_max_radps",
             "beat_alignment_mean_distance_s",
             "beat_alignment_score",
         )
@@ -196,7 +270,7 @@ class BumiMusicGEM(GEM):
         static_cam: bool = False,
         postproc: bool = False,
     ) -> dict[str, Any]:
-        del static_cam, postproc
+        del static_cam
         music = data.get("music_embed")
         if not isinstance(music, torch.Tensor):
             raise KeyError("BumiMusicGEM.predict requires data['music_embed'] Tensor[T,35]")
@@ -215,9 +289,7 @@ class BumiMusicGEM(GEM):
         else:
             length_value = int(raw_length)
         if not 1 <= length_value <= sequence_frames:
-            raise ValueError(
-                f"predict length must be in [1,{sequence_frames}], got {length_value}"
-            )
+            raise ValueError(f"predict length must be in [1,{sequence_frames}], got {length_value}")
         valid = torch.arange(sequence_frames, device=device) < length_value
         raw_has_music = data.get("has_music_mask")
         if raw_has_music is None:
@@ -237,7 +309,7 @@ class BumiMusicGEM(GEM):
             "device": device,
             "length": torch.tensor([length_value], dtype=torch.long, device=device),
             "music_embed": music.unsqueeze(0),
-            "target_x": torch.zeros((1, sequence_frames, 93), device=device),
+            "target_x": torch.zeros((1, sequence_frames, BUMI_FEATURE_DIM), device=device),
             "sample_indices_dict": self.endecoder.obs_indices_dict,
             "mask": {
                 "valid": valid.unsqueeze(0),
@@ -247,35 +319,67 @@ class BumiMusicGEM(GEM):
         }
         if data.get("world_anchor") is not None:
             batch["world_anchor"] = data["world_anchor"]
-        batch = self.create_condition_mask(
-            batch, cond_mask_cfg=None, mode=None, train=False
-        )
+        batch = self.create_condition_mask(batch, cond_mask_cfg=None, mode=None, train=False)
         outputs = self.pipeline.forward(batch, train=False, test_mode="default")
-        qpos = outputs["pred_qpos"][0, :length_value]
+        qpos_raw = outputs["pred_qpos"][0, :length_value]
+        qpos = qpos_raw
         canonical = outputs["pred_qpos_canonical"][0, :length_value]
+        foot_lock = None
+        contact_logits = outputs.get("pred_foot_contact_logits")
+        if postproc:
+            if not isinstance(contact_logits, torch.Tensor):
+                raise RuntimeError("BUMI foot-lock postprocess requires the 2D contact head")
+            foot_lock = lock_bumi_foot_contacts(
+                qpos_raw,
+                contact_logits[0, :length_value],
+                self.endecoder.kinematics,
+                contact_is_logits=True,
+                fps=30,
+            )
+            qpos = foot_lock.qpos
         result = {
             "qpos": qpos,
+            "qpos_raw": qpos_raw,
             "qpos_canonical": canonical,
             "fps": 30,
             "robot_name": "bumi",
             "joint_names": list(self.endecoder.kinematics.joint_order),
             "quaternion_convention": "wxyz",
             "qpos_order": "mujoco_native",
-            "feature_dim": 93,
+            "feature_dim": BUMI_FEATURE_DIM,
             "anchor_mode": self.endecoder.anchor_mode,
+            "representation_contract_version": BUMI_REPRESENTATION_CONTRACT_VERSION,
             "music_path": str(data.get("music_path", "")),
             "world_anchor_applied": data.get("world_anchor") is not None,
+            "foot_lock_applied": bool(postproc),
             "net_outputs": outputs,
         }
-        contact_logits = outputs.get("pred_foot_contact_logits")
         if isinstance(contact_logits, torch.Tensor):
             result["pred_foot_contact_logits"] = contact_logits[0, :length_value]
+        if foot_lock is not None:
+            result["foot_lock_contract_version"] = BUMI_FOOT_LOCK_CONTRACT_VERSION
+            result["foot_lock_correction_xy"] = foot_lock.correction_xy
+            result["foot_lock_active_contact"] = foot_lock.active_contact
+            result["foot_slide_before_mps"] = foot_lock.mean_contact_slide_before_mps
+            result["foot_slide_after_mps"] = foot_lock.mean_contact_slide_after_mps
         return result
 
     def load_pretrained_model(self, ckpt_path):
         adapter = self.model_cfg.get("checkpoint_adapter", None)
-        if adapter in (None, "null", "none"):
+        try:
+            checkpoint = torch.load(ckpt_path, map_location="cpu", weights_only=False)
+        except TypeError:
+            checkpoint = torch.load(ckpt_path, map_location="cpu")
+        if not isinstance(checkpoint, dict):
+            raise ValueError("checkpoint payload must be a dictionary")
+
+        checkpoint_contract = checkpoint.get("bumi_representation_contract_version")
+        if checkpoint_contract is not None:
+            self._validate_representation_checkpoint(checkpoint)
+            Log.info(f"[BUMI CKPT] Loading native qpos30 checkpoint: {ckpt_path}")
             return super().load_pretrained_model(ckpt_path)
+        if adapter in (None, "null", "none"):
+            self._validate_representation_checkpoint(checkpoint)
         if adapter != "smpl_music_to_bumi":
             raise ValueError(f"Unknown BUMI checkpoint_adapter={adapter!r}")
         Log.info(f"[BUMI CKPT Adapter] Loading SMPL music checkpoint: {ckpt_path}")
@@ -284,14 +388,13 @@ class BumiMusicGEM(GEM):
         return checkpoint
 
     def on_fit_start(self) -> None:
+        super().on_fit_start()
         if self.checkpoint_adaptation_report is None:
             return
         trainer = self.trainer
         if not getattr(trainer, "is_global_zero", True):
             return
-        run_dir = getattr(trainer, "log_dir", None) or getattr(
-            trainer, "default_root_dir", "."
-        )
+        run_dir = getattr(trainer, "log_dir", None) or getattr(trainer, "default_root_dir", ".")
         path = Path(run_dir) / "checkpoint_adaptation_report.json"
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(
@@ -301,4 +404,8 @@ class BumiMusicGEM(GEM):
         Log.info(f"[BUMI CKPT Adapter] Wrote report: {path}")
 
 
-__all__ = ["BumiMusicGEM", "reorder_mujoco_joints_to_gmt"]
+class BumiMusicGEM(BumiGEM):
+    """旧音乐入口；机器人运算继续使用共用实现。"""
+
+
+__all__ = ["BumiGEM", "BumiMusicGEM", "reorder_mujoco_joints_to_gmt"]

@@ -1,0 +1,822 @@
+{
+  "body_name_to_index": {
+    "base_link": 0,
+    "l_ankle_pitch_link": 14,
+    "l_ankle_roll_link": 15,
+    "l_arm_pitch_link": 2,
+    "l_arm_roll_link": 3,
+    "l_arm_yaw_link": 4,
+    "l_elbow_pitch_link": 5,
+    "l_knee_pitch_link": 13,
+    "l_leg_pitch_link": 10,
+    "l_leg_roll_link": 11,
+    "l_leg_yaw_link": 12,
+    "r_ankle_pitch_link": 20,
+    "r_ankle_roll_link": 21,
+    "r_arm_pitch_link": 6,
+    "r_arm_roll_link": 7,
+    "r_arm_yaw_link": 8,
+    "r_elbow_pitch_link": 9,
+    "r_knee_pitch_link": 19,
+    "r_leg_pitch_link": 16,
+    "r_leg_roll_link": 17,
+    "r_leg_yaw_link": 18,
+    "waist_yaw_link": 1
+  },
+  "body_order": [
+    "base_link",
+    "waist_yaw_link",
+    "l_arm_pitch_link",
+    "l_arm_roll_link",
+    "l_arm_yaw_link",
+    "l_elbow_pitch_link",
+    "r_arm_pitch_link",
+    "r_arm_roll_link",
+    "r_arm_yaw_link",
+    "r_elbow_pitch_link",
+    "l_leg_pitch_link",
+    "l_leg_roll_link",
+    "l_leg_yaw_link",
+    "l_knee_pitch_link",
+    "l_ankle_pitch_link",
+    "l_ankle_roll_link",
+    "r_leg_pitch_link",
+    "r_leg_roll_link",
+    "r_leg_yaw_link",
+    "r_knee_pitch_link",
+    "r_ankle_pitch_link",
+    "r_ankle_roll_link"
+  ],
+  "child_body_indices": [
+    1,
+    2,
+    3,
+    4,
+    5,
+    6,
+    7,
+    8,
+    9,
+    10,
+    11,
+    12,
+    13,
+    14,
+    15,
+    16,
+    17,
+    18,
+    19,
+    20,
+    21
+  ],
+  "contract_version": "genmo.bumi_kinematics.v1",
+  "default_qpos": [
+    0.0,
+    0.0,
+    0.55,
+    1.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0
+  ],
+  "evaluation_proxies": [],
+  "feature_body_names": [
+    "waist_yaw_link",
+    "l_arm_pitch_link",
+    "l_arm_roll_link",
+    "l_arm_yaw_link",
+    "l_elbow_pitch_link",
+    "r_arm_pitch_link",
+    "r_arm_roll_link",
+    "r_arm_yaw_link",
+    "r_elbow_pitch_link",
+    "l_leg_pitch_link",
+    "l_leg_roll_link",
+    "l_leg_yaw_link",
+    "l_knee_pitch_link",
+    "l_ankle_pitch_link",
+    "l_ankle_roll_link",
+    "r_leg_pitch_link",
+    "r_leg_roll_link",
+    "r_leg_yaw_link",
+    "r_knee_pitch_link",
+    "r_ankle_pitch_link",
+    "r_ankle_roll_link"
+  ],
+  "joint_anchor_xyz": [
+    [
+      0.0,
+      0.0,
+      0.0
+    ],
+    [
+      0.0,
+      0.0,
+      0.0
+    ],
+    [
+      0.0,
+      0.0,
+      0.0
+    ],
+    [
+      0.0,
+      0.0,
+      0.0
+    ],
+    [
+      0.0,
+      0.0,
+      0.0
+    ],
+    [
+      0.0,
+      0.0,
+      0.0
+    ],
+    [
+      0.0,
+      0.0,
+      0.0
+    ],
+    [
+      0.0,
+      0.0,
+      0.0
+    ],
+    [
+      0.0,
+      0.0,
+      0.0
+    ],
+    [
+      0.0,
+      0.0,
+      0.0
+    ],
+    [
+      0.0,
+      0.0,
+      0.0
+    ],
+    [
+      0.0,
+      0.0,
+      0.0
+    ],
+    [
+      0.0,
+      0.0,
+      0.0
+    ],
+    [
+      0.0,
+      0.0,
+      0.0
+    ],
+    [
+      0.0,
+      0.0,
+      0.0
+    ],
+    [
+      0.0,
+      0.0,
+      0.0
+    ],
+    [
+      0.0,
+      0.0,
+      0.0
+    ],
+    [
+      0.0,
+      0.0,
+      0.0
+    ],
+    [
+      0.0,
+      0.0,
+      0.0
+    ],
+    [
+      0.0,
+      0.0,
+      0.0
+    ],
+    [
+      0.0,
+      0.0,
+      0.0
+    ]
+  ],
+  "joint_axes": [
+    [
+      0.0,
+      0.0,
+      1.0
+    ],
+    [
+      0.0,
+      1.0,
+      0.0
+    ],
+    [
+      1.0,
+      0.0,
+      0.0
+    ],
+    [
+      0.0,
+      0.0,
+      1.0
+    ],
+    [
+      0.0,
+      1.0,
+      0.0
+    ],
+    [
+      0.0,
+      1.0,
+      0.0
+    ],
+    [
+      1.0,
+      0.0,
+      0.0
+    ],
+    [
+      0.0,
+      0.0,
+      1.0
+    ],
+    [
+      0.0,
+      1.0,
+      0.0
+    ],
+    [
+      0.0,
+      1.0,
+      0.0
+    ],
+    [
+      1.0,
+      0.0,
+      0.0
+    ],
+    [
+      0.0,
+      0.0,
+      1.0
+    ],
+    [
+      0.0,
+      1.0,
+      0.0
+    ],
+    [
+      0.0,
+      1.0,
+      0.0
+    ],
+    [
+      1.0,
+      0.0,
+      0.0
+    ],
+    [
+      0.0,
+      1.0,
+      0.0
+    ],
+    [
+      1.0,
+      0.0,
+      0.0
+    ],
+    [
+      0.0,
+      0.0,
+      1.0
+    ],
+    [
+      0.0,
+      1.0,
+      0.0
+    ],
+    [
+      0.0,
+      1.0,
+      0.0
+    ],
+    [
+      1.0,
+      0.0,
+      0.0
+    ]
+  ],
+  "joint_dim": 21,
+  "joint_lower_limits": [
+    -1.57,
+    -3.14,
+    -0.14,
+    -1.57,
+    -2.26,
+    -3.14,
+    -1.94,
+    -1.57,
+    -2.26,
+    -2.09,
+    -0.66,
+    -2.53,
+    0.0,
+    -0.96,
+    -0.17,
+    -2.09,
+    -1.57,
+    -2.53,
+    0.0,
+    -0.96,
+    -0.17
+  ],
+  "joint_name_to_qpos_address": {
+    "l_ankle_pitch_joint": 20,
+    "l_ankle_roll_joint": 21,
+    "l_arm_pitch_joint": 8,
+    "l_arm_roll_joint": 9,
+    "l_arm_yaw_joint": 10,
+    "l_elbow_pitch_joint": 11,
+    "l_knee_pitch_joint": 19,
+    "l_leg_pitch_joint": 16,
+    "l_leg_roll_joint": 17,
+    "l_leg_yaw_joint": 18,
+    "r_ankle_pitch_joint": 26,
+    "r_ankle_roll_joint": 27,
+    "r_arm_pitch_joint": 12,
+    "r_arm_roll_joint": 13,
+    "r_arm_yaw_joint": 14,
+    "r_elbow_pitch_joint": 15,
+    "r_knee_pitch_joint": 25,
+    "r_leg_pitch_joint": 22,
+    "r_leg_roll_joint": 23,
+    "r_leg_yaw_joint": 24,
+    "waist_yaw_joint": 7
+  },
+  "joint_name_to_qpos_index": {
+    "l_ankle_pitch_joint": 13,
+    "l_ankle_roll_joint": 14,
+    "l_arm_pitch_joint": 1,
+    "l_arm_roll_joint": 2,
+    "l_arm_yaw_joint": 3,
+    "l_elbow_pitch_joint": 4,
+    "l_knee_pitch_joint": 12,
+    "l_leg_pitch_joint": 9,
+    "l_leg_roll_joint": 10,
+    "l_leg_yaw_joint": 11,
+    "r_ankle_pitch_joint": 19,
+    "r_ankle_roll_joint": 20,
+    "r_arm_pitch_joint": 5,
+    "r_arm_roll_joint": 6,
+    "r_arm_yaw_joint": 7,
+    "r_elbow_pitch_joint": 8,
+    "r_knee_pitch_joint": 18,
+    "r_leg_pitch_joint": 15,
+    "r_leg_roll_joint": 16,
+    "r_leg_yaw_joint": 17,
+    "waist_yaw_joint": 0
+  },
+  "joint_order": [
+    "waist_yaw_joint",
+    "l_arm_pitch_joint",
+    "l_arm_roll_joint",
+    "l_arm_yaw_joint",
+    "l_elbow_pitch_joint",
+    "r_arm_pitch_joint",
+    "r_arm_roll_joint",
+    "r_arm_yaw_joint",
+    "r_elbow_pitch_joint",
+    "l_leg_pitch_joint",
+    "l_leg_roll_joint",
+    "l_leg_yaw_joint",
+    "l_knee_pitch_joint",
+    "l_ankle_pitch_joint",
+    "l_ankle_roll_joint",
+    "r_leg_pitch_joint",
+    "r_leg_roll_joint",
+    "r_leg_yaw_joint",
+    "r_knee_pitch_joint",
+    "r_ankle_pitch_joint",
+    "r_ankle_roll_joint"
+  ],
+  "joint_origin_quat_wxyz": [
+    [
+      1.0,
+      0.0,
+      0.0,
+      0.0
+    ],
+    [
+      0.9914448214195315,
+      0.13052649570257138,
+      0.0,
+      0.0
+    ],
+    [
+      0.9914448214195315,
+      -0.13052649570257138,
+      0.0,
+      0.0
+    ],
+    [
+      0.9990482316708535,
+      0.04361915628872745,
+      0.0,
+      0.0
+    ],
+    [
+      0.9999999999999999,
+      0.0,
+      0.0,
+      0.0
+    ],
+    [
+      0.9914448214195315,
+      -0.13052649570257138,
+      0.0,
+      0.0
+    ],
+    [
+      0.9914448214195315,
+      0.13052649570257138,
+      0.0,
+      0.0
+    ],
+    [
+      0.9990482316708535,
+      -0.04361915628872745,
+      0.0,
+      0.0
+    ],
+    [
+      0.9999999999999999,
+      0.0,
+      0.0,
+      0.0
+    ],
+    [
+      1.0,
+      0.0,
+      0.0,
+      0.0
+    ],
+    [
+      1.0,
+      0.0,
+      0.0,
+      0.0
+    ],
+    [
+      1.0,
+      0.0,
+      0.0,
+      0.0
+    ],
+    [
+      1.0,
+      0.0,
+      0.0,
+      0.0
+    ],
+    [
+      1.0,
+      0.0,
+      0.0,
+      0.0
+    ],
+    [
+      1.0,
+      0.0,
+      0.0,
+      0.0
+    ],
+    [
+      1.0,
+      0.0,
+      0.0,
+      0.0
+    ],
+    [
+      1.0,
+      0.0,
+      0.0,
+      0.0
+    ],
+    [
+      1.0,
+      0.0,
+      0.0,
+      0.0
+    ],
+    [
+      1.0,
+      0.0,
+      0.0,
+      0.0
+    ],
+    [
+      1.0,
+      0.0,
+      0.0,
+      0.0
+    ],
+    [
+      1.0,
+      0.0,
+      0.0,
+      0.0
+    ]
+  ],
+  "joint_origin_xyz": [
+    [
+      0.0,
+      0.0,
+      0.129049999999987
+    ],
+    [
+      0.0010007,
+      0.083723,
+      0.17203999999999997
+    ],
+    [
+      -0.0010007,
+      0.04399999999999999,
+      -3.469446951953614e-18
+    ],
+    [
+      0.0010007,
+      0.02313499999999999,
+      -0.09234399999999998
+    ],
+    [
+      0.010307999999999996,
+      -1.0408340855860843e-17,
+      -0.06125199999999994
+    ],
+    [
+      0.0010007,
+      -0.083723,
+      0.17203999999999997
+    ],
+    [
+      -0.0010007,
+      -0.04399999999999999,
+      -3.469446951953614e-18
+    ],
+    [
+      0.0010007,
+      -0.02313499999999999,
+      -0.09234399999999998
+    ],
+    [
+      0.010307999999999996,
+      1.0408340855860843e-17,
+      -0.06125199999999994
+    ],
+    [
+      0.0010184,
+      0.1,
+      0.03874999999999995
+    ],
+    [
+      0.0,
+      0.0,
+      -0.0665
+    ],
+    [
+      0.0,
+      0.0,
+      -0.09799999999999998
+    ],
+    [
+      0.0,
+      0.0,
+      -0.10099999999999998
+    ],
+    [
+      0.0006680100000000001,
+      -0.0005000000000000004,
+      -0.20237
+    ],
+    [
+      0.0,
+      0.0,
+      0.0
+    ],
+    [
+      0.0010184,
+      -0.1,
+      0.03874999999999995
+    ],
+    [
+      0.0,
+      0.0,
+      -0.0665
+    ],
+    [
+      0.0,
+      0.0,
+      -0.09799999999999998
+    ],
+    [
+      0.0,
+      0.0,
+      -0.10099999999999998
+    ],
+    [
+      0.0006680100000000001,
+      0.0005000000000000004,
+      -0.20237
+    ],
+    [
+      0.0,
+      0.0,
+      0.0
+    ]
+  ],
+  "joint_qpos_addresses": [
+    7,
+    8,
+    9,
+    10,
+    11,
+    12,
+    13,
+    14,
+    15,
+    16,
+    17,
+    18,
+    19,
+    20,
+    21,
+    22,
+    23,
+    24,
+    25,
+    26,
+    27
+  ],
+  "joint_upper_limits": [
+    1.57,
+    1.57,
+    1.94,
+    1.57,
+    0.0,
+    1.57,
+    0.14,
+    1.57,
+    0.0,
+    2.09,
+    1.57,
+    2.53,
+    2.24,
+    0.44,
+    0.17,
+    2.09,
+    0.66,
+    2.53,
+    2.24,
+    0.44,
+    0.17
+  ],
+  "parent_body_indices": [
+    0,
+    1,
+    2,
+    3,
+    4,
+    1,
+    6,
+    7,
+    8,
+    0,
+    10,
+    11,
+    12,
+    13,
+    14,
+    0,
+    16,
+    17,
+    18,
+    19,
+    20
+  ],
+  "proxy_config_sha256": "05dc463173ed9f59cc0262b44e5460c37a94d57b45c0dda8e0e1d84323395ac6",
+  "qpos_dim": 28,
+  "qpos_layout": "root_xyz_3 + root_quaternion_wxyz_4 + joint_dof_21",
+  "qpos_order": "mujoco_native",
+  "quaternion_convention": "wxyz",
+  "robot_name": "bumi",
+  "root_body": "base_link",
+  "sole_proxies": [
+    {
+      "feature_body_index": 15,
+      "feature_body_name": "l_ankle_roll_link",
+      "foot_id": 0,
+      "local_position": [
+        -0.0565764183,
+        -0.0041646645400000015,
+        -0.0500890797
+      ],
+      "local_quat_wxyz": [
+        1.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "name": "left_heel",
+      "radius": 0.0
+    },
+    {
+      "feature_body_index": 15,
+      "feature_body_name": "l_ankle_roll_link",
+      "foot_id": 0,
+      "local_position": [
+        0.100305181,
+        -0.0041646645400000015,
+        -0.0500890797
+      ],
+      "local_quat_wxyz": [
+        1.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "name": "left_toe",
+      "radius": 0.0
+    },
+    {
+      "feature_body_index": 21,
+      "feature_body_name": "r_ankle_roll_link",
+      "foot_id": 1,
+      "local_position": [
+        -0.0564029129,
+        6.015891340638291e-09,
+        -0.050059268399999995
+      ],
+      "local_quat_wxyz": [
+        1.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "name": "right_heel",
+      "radius": 0.0
+    },
+    {
+      "feature_body_index": 21,
+      "feature_body_name": "r_ankle_roll_link",
+      "foot_id": 1,
+      "local_position": [
+        0.0997994379,
+        6.015891340638291e-09,
+        -0.050059268399999995
+      ],
+      "local_quat_wxyz": [
+        1.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "name": "right_toe",
+      "radius": 0.0
+    }
+  ],
+  "source_mjcf": "bumi3_retarget.xml",
+  "source_mjcf_sha256": "fe93472dd764704fe8389b0f82052ae84ed8bc90f6d71b1467872f86e08a9ad3"
+}

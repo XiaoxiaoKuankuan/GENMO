@@ -88,6 +88,7 @@ def validate_sequence_experiment(cfg):
     contract = normalize_sequence_contract(raw)
     if contract is None:
         return None
+    is_bumi = OmegaConf.select(cfg, "model.model_cfg.motion_backend") == "bumi"
     denoiser = cfg.network.model_cfg.denoiser
     if (
         denoiser.max_len != contract["attention_max_len"]
@@ -99,23 +100,33 @@ def validate_sequence_experiment(cfg):
     if cfg.data.dataset_opts.max_motion_frames != contract["pad_to_frames"]:
         raise ValueError("DataModule padding 与契约不一致")
     for split, configs in (("train", cfg.train_datasets), ("val", cfg.test_datasets)):
-        if len(configs) != 1:
+        if len(configs) != 1 and not is_bumi:
             raise ValueError("A0 仅支持单一 MotionMillion 数据集")
-        ds = next(iter(configs.values()))
-        if (ds.sequence_mode, ds.pad_to_frames, ds.caption_sampling) != (
-            contract["sequence_mode"],
-            contract["pad_to_frames"],
-            contract[f"{split}_caption_sampling"],
-        ):
-            raise ValueError(f"{split} Dataset 与 sequence contract 不一致")
-        if contract["sequence_mode"] == "full" and ds.get("random_crop") is not None:
-            raise ValueError("full 模式不接受 random_crop，使用独立 caption_sampling")
+        if not configs:
+            raise ValueError("序列实验需要非空 train/val 配置")
+        for ds in configs.values():
+            if (ds.sequence_mode, ds.pad_to_frames, ds.caption_sampling) != (
+                contract["sequence_mode"], contract["pad_to_frames"], contract[f"{split}_caption_sampling"],
+            ):
+                raise ValueError(f"{split} Dataset 与 sequence contract 不一致")
+            if contract["sequence_mode"] == "full" and ds.get("random_crop") is not None:
+                raise ValueError("full 模式不接受 random_crop，使用独立 caption_sampling")
     if cfg.pl_trainer.use_distributed_sampler or not cfg.data.shard_aware_sampling.enabled:
         raise ValueError("必须保留 shard-aware sampler，禁止 Lightning 二次分片")
     if cfg.model.model_cfg.text_encoder.max_text_len != 150 or denoiser.encoded_text_dim != 1024:
         raise ValueError("A0 必须保持 T5 150-token / 1024D")
-    if denoiser.output_dim != 151 or list(cfg.pipeline.args.in_attr):
-        raise ValueError("A0 必须保持 text-only 151D")
+    if denoiser.output_dim != (30 if is_bumi else 151) or list(cfg.pipeline.args.in_attr):
+        raise ValueError("A0 必须保持 text-only，并匹配后端运动维度（SMPL151/BUMI30）")
+    if is_bumi:
+        if (denoiser.xt_dim, denoiser.static_conf_dim, denoiser.pred_cam_dim) != (30, 2, 0):
+            raise ValueError("BUMI 必须30D运动、2D接触、无相机头")
+        if not denoiser.encode_text or denoiser.text_mask_prob != 0.1 or cfg.endecoder.sequence_mode != "full":
+            raise ValueError("BUMI 必须完整动作、文本交叉注意力及单处0.1 CFG dropout")
+        if cfg.pretrain_ckpt is not None or cfg.ckpt_path is not None:
+            raise ValueError("首版 BUMI 文本只允许从零训练或同契约 resume")
+        if not all(0 <= int(cfg.training_budget[k]) < int(cfg.training_budget.max_steps)
+                   for k in ("warmup_steps", "auxiliary_warmup_steps")):
+            raise ValueError("短程预算必须同时调整学习率和机器人辅助项warmup")
     if cfg.pipeline.args.get("physics_losses", {}).get("enabled", False):
         raise ValueError("A0 不增加额外 physics_losses")
     total = int(cfg.pl_trainer.max_steps)

@@ -10,6 +10,8 @@ wandb/
 logs/*.log
 .ruff_cache/
 *.lock
+!requirements/bumi_text_runtime.lock
+!requirements/bumi_text_tensorrt.lock
 *.ckpt
 *.zip
 *.pt

@@ -17,7 +17,26 @@ from collections.abc import Iterator
 import numpy as np
 import torch
 import torch.distributed as dist
-from torch.utils.data import Dataset, Sampler
+from torch.utils.data import Dataset, Sampler, ConcatDataset, Subset
+
+
+class ShardConcatDataset(ConcatDataset):
+    """多个文本数据集共享全局索引，各子集 shard 命名空间互不冲突。"""
+
+    def sample_shard_ids(self):
+        arrays = []
+        offset = 0
+        for dataset in self.datasets:
+            if isinstance(dataset, Subset):
+                values = np.asarray(dataset.dataset.sample_shard_ids())[dataset.indices]
+            else:
+                values = np.asarray(dataset.sample_shard_ids())
+            if len(values) != len(dataset) or (values < 0).any():
+                raise ValueError("子数据集 shard 索引不合法")
+            _, values = np.unique(values, return_inverse=True)
+            arrays.append(values + offset)
+            offset += int(values.max()) + 1 if len(values) else 0
+        return np.concatenate(arrays)
 
 
 class ShardAwareDistributedSampler(Sampler[int]):

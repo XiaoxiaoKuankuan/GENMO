@@ -21,7 +21,7 @@ from pytorch_lightning.utilities.combined_loader import CombinedLoader
 from torch.utils.data import ConcatDataset, DataLoader, Subset, default_collate
 
 from gem.datamodule.balanced_music_sampler import HierarchicalMusicDistributedSampler
-from gem.datamodule.motionmillion_sampler import ShardAwareDistributedSampler
+from gem.datamodule.motionmillion_sampler import ShardAwareDistributedSampler, ShardConcatDataset
 from gem.utils.pylogger import Log
 
 rlimit = resource.getrlimit(resource.RLIMIT_NOFILE)
@@ -251,15 +251,11 @@ class DataModule(pl.LightningDataModule):
                     raise ValueError(
                         "shard_aware_sampling 与 balanced_sampling 不能同时启用"
                     )
-                if len(self.trainsets) != 1:
-                    raise ValueError(
-                        "MotionMillion shard-aware sampler 要求训练配置只有一个 Dataset"
-                    )
                 ddp_sampler_kwargs = _trainer_ddp_sampler_kwargs(
                     getattr(self, "trainer", None)
                 )
                 sampler = ShardAwareDistributedSampler(
-                    self.trainsets[0],
+                    self.trainsets[0] if len(self.trainsets) == 1 else ShardConcatDataset(self.trainsets),
                     seed=int(self.shard_aware_sampling.get("seed", 20260909)),
                     shuffle=bool(self.shard_aware_sampling.get("shuffle", True)),
                     drop_last=True,

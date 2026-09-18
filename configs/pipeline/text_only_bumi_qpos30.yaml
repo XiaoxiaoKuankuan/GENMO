@@ -1,0 +1,67 @@
+# BUMI 文本完整动作：v5基础权重，逐样本有效元素归约，辅助warmup统一预算。
+_target_: gem.pipeline.bumi_music_pipeline.BumiPipeline
+args_denoiser3d: ${network}
+args:
+  motion_backend: bumi
+  train_modes:
+  - diffusion
+  endecoder_opt: ${endecoder}
+  use_cfg_sampler_for_gen: true
+  encoded_music_dim: 35
+  in_attr: []
+  mask_out_attr: []
+  out_attr:
+    static_conf_logits: 2
+  loss_contract: physical_qpos30_contact_v5
+  auxiliary_warmup_steps: ${training_budget.auxiliary_warmup_steps}
+  ground_semantics: retargeted_text_floor_zero_v1
+  joint_limit_margin_rad: 0.05
+  joint_limit_topk_fraction: 0.01
+  robust_joint_limit_start_step: 0
+  robust_joint_limit_warmup_steps: ${training_budget.auxiliary_warmup_steps}
+  advanced_physics_start_step: 0
+  advanced_physics_warmup_steps: ${training_budget.auxiliary_warmup_steps}
+  advanced_physics_topk_fraction: 0.05
+  root_tilt_upright_allowance_rad: 0.35
+  root_tilt_target_margin_rad: 0.05
+  weights:
+    repr_root_pos: 1.0
+    repr_root_rot: 2.0
+    repr_joint: 1.0
+    root_pos: 0.2
+    root_rot: 1.0
+    root_tilt: 1.0
+    joint_dof: 0.2
+    fk_body_pos: 1.0
+    joint_velocity: 0.1
+    joint_acceleration: 0.02
+    joint_jerk: 0.003
+    joint_acceleration_excess: 0.1
+    joint_jerk_excess: 0.003
+    joint_limit: 0.2
+    joint_limit_margin: 0.4
+    joint_limit_topk: 1.0
+    joint_limit_max: 0.1
+    contact_bce: 1.0
+    foot_slide: 0.05
+    penetration: 0.05
+    root_height: 0.1
+    root_velocity: 0.05
+    root_acceleration: 0.02
+    root_angular_velocity: 0.05
+    root_angular_acceleration: 0.02
+    fk_velocity: 0.05
+    fk_acceleration: 0.02
+    joint_acceleration_excess_topk: 0.05
+    joint_jerk_excess_topk: 0.002
+    joint_limit_margin_topk: 0.5
+    foot_slide_topk: 0.1
+    foot_slide_max: 0.02
+    foot_contact_height: 0.1
+    foot_contact_height_topk: 0.05
+    penetration_topk: 0.05
+    penetration_max: 0.01
+    root_tilt_excess_topk: 0.2
+    root_tilt_excess_max: 0.05
+  loss_reduction: valid_per_sample
+  disable_random_null_condition: true

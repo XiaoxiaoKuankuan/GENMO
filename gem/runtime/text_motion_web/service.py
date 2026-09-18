@@ -185,6 +185,9 @@ class JobService:
                 raise BusyError("已有任务正在生成，请等待完成后再提交")
         # 校验可能读大文件，不持有任务状态锁，确保轮询及时响应。
         model = self.registry.get(payload["model_id"])
+        lower, upper = model.get("min_frames", 1), model.get("max_frames", 900)
+        if not lower <= payload["num_frames"] <= upper:
+            raise ValueError(f"所选模型支持 {lower}–{upper} 帧")
         with self.lock:
             if self.active_id or self.closed.is_set():
                 raise BusyError("已有任务正在生成，请等待完成后再提交")

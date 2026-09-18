@@ -12,8 +12,8 @@ class FakeBumiModel(nn.Module):
         super().__init__()
         self.music_embedder = nn.Linear(35, latent)
         self.blocks = nn.Sequential(nn.Linear(latent, latent), nn.LayerNorm(latent))
-        self.add_cond_linear = nn.Linear(latent + 93, latent)
-        self.final_layer = nn.Linear(latent, 93)
+        self.add_cond_linear = nn.Linear(latent + 30, latent)
+        self.final_layer = nn.Linear(latent, 30)
 
 
 def source_state(model: FakeBumiModel) -> dict[str, torch.Tensor]:
@@ -27,9 +27,7 @@ def source_state(model: FakeBumiModel) -> dict[str, torch.Tensor]:
 def test_exact_partial_and_expected_skip_are_reported() -> None:
     model = FakeBumiModel()
     motion_columns_before = model.add_cond_linear.weight[:, 4:].detach().clone()
-    _, report = adapt_smpl_music_checkpoint_to_bumi(
-        model, {"state_dict": source_state(model)}
-    )
+    _, report = adapt_smpl_music_checkpoint_to_bumi(model, {"state_dict": source_state(model)})
     assert torch.all(model.music_embedder.weight == 3.0)
     assert torch.all(model.blocks[0].weight == 3.0)
     assert torch.all(model.add_cond_linear.weight[:, :4] == 7.0)
