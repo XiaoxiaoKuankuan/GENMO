@@ -9,7 +9,7 @@
 
 | 用途 | 服务器1绝对路径 |
 |---|---|
-| BUMI代码工作树 | `/home/user/liwei/GENMO-data-packaging` |
+| BUMI代码工作树 | `/home/user/liwei/GENMO-bumi-music` |
 | 训练Python | `/home/user/liwei/GENMO/.venv/bin/python` |
 | 正式训练数据 | `/data0/user/liwei/datasets/bumi_music_umr70_mine_pass_v1` |
 | 训练集统计量 | 上述数据目录的 `stats/qpos30_train_stats.json` |
@@ -19,18 +19,22 @@
 | 质量统计与配置快照 | `/data0/user/liwei/datasets/bumi_music_umr70_mine_quality_v1` |
 | 自建原始数据、参考版本和重建结果 | `/data0/user/liwei/datasets/bumi_music_umr70_mine_sources_v1` |
 
+2026-09-18按用户要求将原工作树目录重命名为 `GENMO-bumi-music`，
+使用 `git worktree move` 同步更新Git工作树登记。已有远程终端请重新 `cd` 到新路径。
+
 登录服务器1后执行：
 
 ```bash
-cd /home/user/liwei/GENMO-data-packaging
-bash scripts/train_bumi_music.sh
+cd /home/user/liwei/GENMO-bumi-music
+BUMI_OUTPUT_BASE=/data0/user/liwei/GENMO_outputs/bumi_music_umr70_mine \
+  bash scripts/train_bumi_music.sh
 ```
 
 需要断开SSH后继续运行时，用独立tmux会话启动同一入口：
 
 ```bash
 tmux new-session -d -s bumi_umr70_350k \
-  'cd /home/user/liwei/GENMO-data-packaging && bash scripts/train_bumi_music.sh'
+  'cd /home/user/liwei/GENMO-bumi-music && BUMI_OUTPUT_BASE=/data0/user/liwei/GENMO_outputs/bumi_music_umr70_mine bash scripts/train_bumi_music.sh'
 tmux attach -t bumi_umr70_350k
 ```
 
@@ -38,10 +42,47 @@ tmux attach -t bumi_umr70_350k
 [scripts/train_bumi_music.sh](../scripts/train_bumi_music.sh)，实验配置为
 [gem_bumi_music_only_umr70_mine_scratch_350k.yaml](../configs/exp/gem_bumi_music_only_umr70_mine_scratch_350k.yaml)。
 脚本读取本数据版本的统计量并严格校验来源指纹，自动设置四个数据根目录、8卡及NCCL环境。
-每次正式运行创建独立目录
-`/data0/user/liwei/GENMO_outputs/bumi_umr70_mine_s350k_<时间>_<提交短SHA>`，
-启动时打印完整路径；该目录中的 `launch.log` 可直接用 `tail -f` 查看。
-`BUMI_OUTPUT_BASE` 可覆盖输出根目录，正式checkpoint和既有实验保持独立。
+上述命令通过已有的 `BUMI_OUTPUT_BASE` 参数指定独立日志父目录，
+每次正式运行创建
+`/data0/user/liwei/GENMO_outputs/bumi_music_umr70_mine/bumi_umr70_mine_s350k_<时间>_<提交短SHA>`，
+启动时打印完整路径。以下用 `<运行目录>` 指代该路径：
+
+| 文件用途 | 实际保存位置 |
+|---|---|
+| 控制台训练日志 | `<运行目录>/launch.log` |
+| TensorBoard事件 | `<运行目录>/version_0/events.out.tfevents.*` |
+| 训练checkpoint | `<运行目录>/version_0/checkpoints/` |
+| 启动时Hydra配置 | `<运行目录>/hydra/.hydra/` |
+
+独立的新运行从 `version_0` 开始。TensorBoardLogger代码在
+[scripts/train.py](../scripts/train.py) 中明确将logger目录设为运行目录下的版本目录，
+保存回调随后使用同一个 `cfg.output_dir`。
+
+训练启动后，在服务器1查看最新一次控制台日志：
+
+```bash
+BUMI_RUN_DIR=$(ls -dt /data0/user/liwei/GENMO_outputs/bumi_music_umr70_mine/bumi_umr70_mine_s350k_* | head -n 1)
+tail -n 100 -f "$BUMI_RUN_DIR/launch.log"
+```
+
+在服务器1的另一个终端启动TensorBoard，读取固定的BUMI日志父目录：
+
+```bash
+/home/user/liwei/GENMO/.venv/bin/tensorboard \
+  --logdir /data0/user/liwei/GENMO_outputs/bumi_music_umr70_mine \
+  --host 127.0.0.1 \
+  --port 6006
+```
+
+在本地电脑终端建立转发，并保持该命令运行：
+
+```bash
+ssh -p 50030 -N -L 16006:127.0.0.1:6006 user@112.65.216.193
+```
+
+浏览器打开 `http://127.0.0.1:16006`。核验时服务器6006和本地16006均空闲，
+服务器TensorBoard可执行文件版本为2.21.0；本次只提供启动命令，未启动训练或新的TensorBoard服务。
+日志父目录和事件文件会在用户启动正式训练后生成。
 
 `bash scripts/train_bumi_music.sh --smoke` 只运行两步八卡训练和三来源各一个验证batch，
 输出使用 `/tmp/genmo-bumi-eight-gpu.*` 的独立目录并在退出时清理。
