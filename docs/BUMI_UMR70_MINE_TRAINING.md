@@ -3,7 +3,8 @@
 本文件记录 2026-09-18 实际完成的数据查找、服务器2到服务器1传输、统一质量筛选、
 训练格式发布、统计量计算和八卡验证。适用分支为 `feature/bumi-music-only`，
 代码验证提交为 `8aaa57e33c87b7f9534d5877b0c4e2ab3b6558b3`。
-最终数据已就绪；正式 350000 optimizer steps 训练尚未启动。
+最终数据已就绪；2026-09-18 17:02:56（Asia/Shanghai）已按用户授权启动正式
+350000 optimizer steps 八卡训练，启动代码提交为 `6ac1e6d3108dcbf10bb51d57ca656e75cd567aa4`。
 
 ## 1. 已发布位置与启动方法
 
@@ -22,7 +23,27 @@
 2026-09-18按用户要求将原工作树目录重命名为 `GENMO-bumi-music`，
 使用 `git worktree move` 同步更新Git工作树登记。已有远程终端请重新 `cd` 到新路径。
 
-登录服务器1后执行：
+当前正式任务的tmux会话为 `bumi_umr70_350k`，实际运行目录为：
+
+```text
+/data0/user/liwei/GENMO_outputs/bumi_music_umr70_mine/bumi_umr70_mine_s350k_20260918_170256_6ac1e6d
+```
+
+该目录的 `launch_verification.json` 保存启动代码、数据/统计量指纹、8个rank的PID和启动时间、
+NCCL环境、配置及TensorBoard核验摘要。2026-09-18 17:05:38检查时事件step=139，
+train/loss_step=1.711429，234个标量tag已有记录且全部有限，没有扫描到CUDA/OOM/NCCL/Traceback错误。
+每卡每epoch为6656个窗口、26个batch；首个checkpoint和正式验证在5000步，当前尚未触发。
+这是启动阶段记录，不表示训练已完成或生成质量已通过。
+
+数据集、stats、训练日志和checkpoint目录均位于 `/data0/user/liwei` 下；
+已确认正式数据中没有指向其它目录的软链接。已有HumanML3D UMR批处理任务保持运行。
+查看当前训练可直接执行：
+
+```bash
+tmux attach -t bumi_umr70_350k
+```
+
+以下保留启动入口供复现；本次已经通过后面的tmux命令启动：
 
 ```bash
 cd /home/user/liwei/GENMO-bumi-music
@@ -81,8 +102,8 @@ ssh -p 50030 -N -L 16006:127.0.0.1:6006 user@112.65.216.193
 ```
 
 浏览器打开 `http://127.0.0.1:16006`。核验时服务器6006和本地16006均空闲，
-服务器TensorBoard可执行文件版本为2.21.0；本次只提供启动命令，未启动训练或新的TensorBoard服务。
-日志父目录和事件文件会在用户启动正式训练后生成。
+服务器TensorBoard可执行文件版本为2.21.0。正式训练已创建日志目录和事件文件，
+TensorBoard服务按用户要求留给用户启动。
 
 `bash scripts/train_bumi_music.sh --smoke` 只运行两步八卡训练和三来源各一个验证batch，
 输出使用 `/tmp/genmo-bumi-eight-gpu.*` 的独立目录并在退出时清理。
