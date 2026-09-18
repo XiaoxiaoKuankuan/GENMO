@@ -47,6 +47,10 @@ def source(tmp_path, *, reverse=False, mutation=None):
     if mutation == "names":
         names[0] = names[1]
     path = root / "example_bumi3.npz"
+    human = tmp_path / "original/aistpp/example.npz"
+    human.parent.mkdir(parents=True)
+    np.savez(human, dataset="aistpp", sample_id="example", fps=30., num_frames=120,
+             coordinate_system="right_handed_z_up_metric")
     np.savez(
         path,
         qpos=qpos,
@@ -57,7 +61,7 @@ def source(tmp_path, *, reverse=False, mutation=None):
         robot_name="bumi3",
         source_format="smplx_npz",
         source_sequence_key="example",
-        source_data="/original/aistpp/example.npz",
+        source_data=str(human),
     )
     return kin, path, xml, expected
 
@@ -76,6 +80,25 @@ def test_umr_rejects_broken_contract(tmp_path, mutation):
     kin, path, xml, _ = source(tmp_path, mutation=mutation)
     with pytest.raises(ValueError):
         adapter.load_umr_qpos(path, kin, xml)
+
+
+def test_prefixed_umr_alias_keeps_original_dataset_identity(tmp_path):
+    kin, path, xml, expected = source(tmp_path)
+    original = tmp_path / "human" / "aistpp" / "example.npz"
+    original.parent.mkdir(parents=True)
+    np.savez(original, dataset="aistpp", sample_id="example", fps=30., num_frames=120,
+             coordinate_system="right_handed_z_up_metric")
+    alias = tmp_path / "aistpp__example.npz"
+    alias.symlink_to(original)
+    with np.load(path, allow_pickle=True) as archive:
+        payload = {key: archive[key] for key in archive.files}
+    payload.update(source_sequence_key="aistpp__example", source_data=str(alias))
+    np.savez(path, **payload)
+    qpos, _ = adapter.load_source(
+        {"dataset": "aistpp", "sample_id": "aistpp/example", "source_relative_path": path.name},
+        path.parent, None, kin, xml,
+    )
+    np.testing.assert_array_equal(qpos.numpy(), expected)
 
 
 def test_full_publish_and_source_tamper_rejection(tmp_path, monkeypatch):

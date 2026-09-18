@@ -138,10 +138,19 @@ def load_source(
     path = source_path(row, input_root, mine_root)
     if row["dataset"] != "mine":
         qpos, meta = load_umr_qpos(path, kin, robot_xml)
-        if meta["source_sequence_key"] != row["sample_id"].split("/", 1)[1]:
+        sequence_key = meta["source_sequence_key"].removeprefix(row["dataset"] + "__")
+        if sequence_key != row["sample_id"].split("/", 1)[1]:
             raise ValueError("UMR 清单文件名与 source_sequence_key 不一致")
-        if Path(meta["source_data"]).parent.name != row["dataset"]:
-            raise ValueError("UMR 源人体路径与 dataset 不一致")
+        source_data = Path(meta["source_data"]).resolve()
+        # 以减号开头的样本由上游复制成 dataset__sample 文件名；身份由人体NPZ元数据
+        # 复核，不把 motions_keep 目录名误当成数据集，也不放宽来源/坐标检查。
+        with np.load(source_data, allow_pickle=False) as human:
+            if (str(human["dataset"].item()) != row["dataset"]
+                    or str(human["sample_id"].item()) != sequence_key
+                    or str(human["coordinate_system"].item()) != "right_handed_z_up_metric"
+                    or float(human["fps"].item()) != 30.0
+                    or int(human["num_frames"].item()) != len(qpos)):
+                raise ValueError("UMR 源人体身份、Z-up坐标或帧数不一致")
         return qpos, meta
     payload = torch.load(path, map_location="cpu", weights_only=False)
     if (
