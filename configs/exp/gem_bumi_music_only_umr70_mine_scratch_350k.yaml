@@ -95,7 +95,8 @@ test_datasets:
   aioz_gdance_bumi_music_eval:
     joint_limit_tolerance: 0.0001
   finedance_bumi_music_eval:
-    split: test
+    # 此次原始val有1条PASS，恢复val监控，保留13条test用于独立评测。
+    split: val
     joint_limit_tolerance: 0.0001
 
 optimizer:
