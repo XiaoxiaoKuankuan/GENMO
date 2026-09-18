@@ -1,0 +1,16 @@
+# A0 验证：完整动作、固定第一条caption；Lightning小批健康检查不是正式质量评价。
+motionmillion_text_fullseq_val:
+  _target_: gem.datasets.pure_motion.motionmillion.MotionMillionDataset
+  root: inputs/MotionMillion
+  split: val
+  motion_frames: 120
+  sequence_mode: full
+  pad_to_frames: 300
+  caption_sampling: first
+  motion_manifest_path: inputs/MotionMillion/genmo_smpl_v1/manifests/val.json
+  embedding_manifest_path: inputs/MotionMillion/t5_3b_v1_fp16/manifests/val.json
+  shard_cache_size: 2
+  random_seed: 20260909
+  source_up_axis: y
+  cam_augmentation: static
+  limit_size: 16

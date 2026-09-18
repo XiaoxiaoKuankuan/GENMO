@@ -350,6 +350,7 @@ def load_model(
     defer_diffusion_init: bool = False,
     text_max_len_override: int | None = None,
     exp_name_override: str = "gem_smpl",
+    sequence_contract_override: dict | None = None,
 ):
     """Load the GEM model with Hydra config composition.
 
@@ -393,6 +394,16 @@ def load_model(
             config_name="demo",
             overrides=overrides,
         )
+
+    if sequence_contract_override is not None:
+        from gem.utils.sequence_contract import normalize_sequence_contract
+
+        contract = normalize_sequence_contract(sequence_contract_override)
+        # 推理结构仍复用文本实验；序列行为以checkpoint为准，而不是当前yaml默认值。
+        OmegaConf.update(cfg, "model.model_cfg.sequence_contract", contract, force_add=True)
+        OmegaConf.update(cfg, "network.model_cfg.denoiser.max_len", contract["attention_max_len"], force_add=True)
+        OmegaConf.update(cfg, "network.model_cfg.denoiser.attention_mode", contract["attention_mode"], force_add=True)
+        OmegaConf.update(cfg, "pipeline.args.loss_reduction", contract["loss_reduction"], force_add=True)
 
     print("[Stage 3] Instantiating GEM model ...")
     model = hydra.utils.instantiate(cfg.model, _recursive_=False)

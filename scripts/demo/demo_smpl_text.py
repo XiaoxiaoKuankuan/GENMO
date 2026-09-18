@@ -340,6 +340,13 @@ def validate_text_generation_payload(checkpoint: dict[str, Any], path: str | Pat
             if contract["text_only"]
             else "gem_smpl"
         )
+    from gem.utils.sequence_contract import normalize_sequence_contract
+
+    sequence_contract = normalize_sequence_contract(checkpoint.get("genmo_sequence_contract"))
+    if sequence_contract is not None:
+        if not contract["text_only"] or contract["max_text_len"] != 150:
+            raise RuntimeError("新序列契约必须绑定150-token文本模型")
+        contract["sequence_contract"] = sequence_contract
     return contract
 
 
@@ -509,6 +516,7 @@ def save_results(
         "checkpoint": str(ckpt_path),
         "source": "text_only",
         "shape_mode": args.shape_mode,
+        "sequence_contract": getattr(args, "sequence_contract", None),
     }
     torch.save(save_dict, output_dir / "smpl_params.pt")
     np.savez(
@@ -537,6 +545,7 @@ def save_results(
         "text_encoder_dtype": text_encoder_dtype,
         "source": "text_only",
         "shape_mode": args.shape_mode,
+        "sequence_contract": getattr(args, "sequence_contract", None),
         "completed_at": completed_at,
     }
     (output_dir / "metadata.json").write_text(
@@ -647,6 +656,11 @@ def main(argv: list[str] | None = None) -> int:
     ckpt_path = _download_or_resolve_checkpoint(args.ckpt_path)
     print(f"[Checkpoint] Validating text diffusion weights in {ckpt_path} ...")
     text_contract = validate_text_generation_checkpoint(ckpt_path)
+    from gem.utils.sequence_contract import validate_generation_length
+
+    sequence_contract = text_contract.get("sequence_contract")
+    validate_generation_length(sequence_contract, args.num_frames, args.fps)
+    args.sequence_contract = sequence_contract
     max_text_len = text_contract["max_text_len"]
     print(
         "[Checkpoint] Text contract: "
@@ -689,6 +703,7 @@ def main(argv: list[str] | None = None) -> int:
         load_text_encoder=False,
         text_max_len_override=max_text_len,
         exp_name_override=str(text_contract["exp_name"]),
+        sequence_contract_override=sequence_contract,
     )
     denoiser3d = model.pipeline.denoiser3d
     if denoiser3d.regression_only:

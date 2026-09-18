@@ -457,7 +457,7 @@ def validate_motion_record(record: Mapping[str, Any]) -> None:
         raise MotionMillionError("motion record 包含空 caption")
     if not pose.is_contiguous() or not trans.is_contiguous():
         raise MotionMillionError("motion record tensor 必须连续")
-    if not torch.isfinite(pose).all() or not torch.isfinite(trans).all():
+    if not torch.isfinite(pose).all() or not torch.isfinite(trans).all() or not torch.isfinite(beta).all():
         raise MotionMillionError("motion record tensor 包含 NaN 或 Inf")
 
 

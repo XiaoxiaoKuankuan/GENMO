@@ -16,6 +16,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 import time
 from collections import defaultdict
@@ -54,6 +55,8 @@ def _audit_release(
     *,
     verify_sha256: bool,
     max_shards: int | None,
+    sequence_mode: str = "crop",
+    pad_to_frames: int = 120,
 ) -> dict[str, Any]:
     """审计 release 闭环并返回 split/尺度/文本统计。"""
     motion_release = read_json(motion_root / "dataset_release.json")
@@ -86,6 +89,19 @@ def _audit_release(
         embedding_manifest = read_json(
             embedding_root / "manifests" / f"{split}.json"
         )
+        if sequence_mode == "full":
+            for name, manifest in (("motion", motion_manifest), ("embedding", embedding_manifest)):
+                if manifest.get("schema_version") != SCHEMA_VERSION or manifest.get("split") != split:
+                    raise MotionMillionError(f"{split}: {name} manifest schema/split不一致")
+            if (motion_manifest.get("build_fingerprint") != motion_release["build_fingerprint"]
+                    or embedding_manifest.get("source_build_fingerprint") != motion_release["build_fingerprint"]):
+                raise MotionMillionError(f"{split}: manifest/release数据身份不一致")
+            if (motion_manifest.get("fps"), motion_manifest.get("source_up_axis"), motion_manifest.get("motion_frames")) != (30, "y", 120):
+                raise MotionMillionError("A0预检要求原v1 release的30 FPS / Y-up / motion_frames=120")
+            if (embedding_manifest.get("max_text_tokens"), embedding_manifest.get("hidden_dim")) != (150, 1024):
+                raise MotionMillionError("A0预检要求150-token/1024D文本契约")
+            if len(motion_manifest["shards"]) != len(embedding_manifest["shards"]):
+                raise MotionMillionError(f"{split}:完整motion/T5 shard数量不一致")
         motion_shards = list(motion_manifest["shards"])
         embedding_shards = list(embedding_manifest["shards"])
         if max_shards is not None:
@@ -105,6 +121,7 @@ def _audit_release(
             raise MotionMillionError(f"{split}: sample index 数量与 manifest 不一致")
 
         counters = defaultdict(int)
+        checked_lengths = []
         for expected_shard, (motion_meta, embedding_meta) in enumerate(
             zip(motion_shards, embedding_shards)
         ):
@@ -114,6 +131,9 @@ def _audit_release(
                 raise MotionMillionError(f"{split}: shard_id 不连续")
             motion_path = motion_root / str(motion_meta["path"])
             embedding_path = embedding_root / str(embedding_meta["path"])
+            if (embedding_meta.get("source_motion_path") != motion_meta["path"]
+                    or embedding_meta.get("source_motion_sha256") != motion_meta["sha256"]):
+                raise MotionMillionError(f"{split}: motion/T5 shard SHA绑定不一致")
             if verify_sha256:
                 if sha256_file(motion_path) != motion_meta["sha256"]:
                     raise MotionMillionError(f"motion shard SHA256 不一致: {motion_path}")
@@ -127,12 +147,26 @@ def _audit_release(
                 raise MotionMillionError(f"{split}:{expected_shard} shard 必须为 list")
             if len(motions) != len(embeddings):
                 raise MotionMillionError(f"{split}:{expected_shard} record 数不一致")
-            for motion, embedding in zip(motions, embeddings):
+            if sequence_mode == "full" and (
+                len(motions) != int(motion_meta["record_count"])
+                or len(embeddings) != int(embedding_meta["record_count"])
+            ):
+                raise MotionMillionError("实际shard记录数与manifest不一致")
+            shard_index = index[index["shard_id"] == expected_shard]
+            if not np.array_equal(np.sort(shard_index["record_index"]), np.arange(len(motions))):
+                raise MotionMillionError("sample index 未恰好覆盖每条record一次")
+            indexed_lengths = {int(row["record_index"]): int(row["frames"]) for row in shard_index}
+            if (shard_index["window_index"] != 0).any():
+                raise MotionMillionError("v1不接受分窗重复索引")
+            for record_index, (motion, embedding) in enumerate(zip(motions, embeddings)):
                 validate_motion_record(motion)
                 validate_embedding_record(
                     embedding, caption_count=len(motion["captions"])
                 )
                 motion_id = str(motion["motion_id"])
+                if motion["split"] != split or indexed_lengths[record_index] != len(motion["pose"]):
+                    raise MotionMillionError("sample index frames / split 与实际pose/trans不一致")
+                checked_lengths.append(len(motion["pose"]))
                 if motion_id != str(embedding.get("motion_id")):
                     raise MotionMillionError(f"{split}: motion/embedding ID 顺序不一致")
                 if motion_id in split_ids[split]:
@@ -157,6 +191,7 @@ def _audit_release(
             "shards_checked": len(motion_shards),
             "manifest_records": int(motion_manifest["record_count"]),
             "manifest_samples": int(motion_manifest["sample_count"]),
+            "sequence_statistics": sequence_statistics(checked_lengths, sequence_mode, pad_to_frames),
         }
 
     for left_index, left in enumerate(SPLITS):
@@ -189,12 +224,36 @@ def _audit_release(
     return report
 
 
+def sequence_statistics(lengths, sequence_mode, pad_to_frames):
+    """按已实际读取的record统计有效帧、padding及裁剪；不把索引扫描说成制品核验。"""
+    if sequence_mode not in {"crop", "full"} or pad_to_frames <= 0:
+        raise ValueError("无效序列预检配置")
+    values = np.asarray(lengths, dtype=np.int64)
+    if len(values) == 0 or ((values < 60) | (values > 300)).any():
+        raise MotionMillionError("实际动作长度不在60—300帧")
+    clipped = int((values > pad_to_frames).sum())
+    if sequence_mode == "full" and (pad_to_frames != 300 or clipped):
+        raise MotionMillionError("full 模式必须pad300且裁剪计数为零")
+    effective = values if sequence_mode == "full" else np.minimum(values, pad_to_frames)
+    return {
+        "sequence_mode": sequence_mode, "pad_to_frames": pad_to_frames,
+        "source_frames": int(values.sum()), "valid_frames": int(effective.sum()),
+        "padding_frames": int(len(values) * pad_to_frames - effective.sum()),
+        "padding_ratio": float(1 - effective.sum() / (len(values) * pad_to_frames)),
+        "crop_count": clipped,
+        "min": int(values.min()), "max": int(values.max()), "mean": float(values.mean()),
+        "percentiles_0_25_50_75_100": np.percentile(values, [0, 25, 50, 75, 100]).tolist(),
+    }
+
+
 def _normalized_151d_statistics(
     motion_root: Path,
     embedding_root: Path,
     *,
     sample_count: int,
     z_threshold: float,
+    sequence_mode: str = "crop",
+    pad_to_frames: int = 120,
 ) -> dict[str, Any]:
     """实际执行 Dataset→EnDecoder，并统计现有 151D 归一化契约。"""
     from gem.datasets.pure_motion.motionmillion import MotionMillionDataset
@@ -212,7 +271,10 @@ def _normalized_151d_statistics(
         random_seed=20260909,
         source_up_axis="y",
         cam_augmentation="static",
-        random_crop=False,
+        random_crop=False if sequence_mode == "crop" else None,
+        sequence_mode=sequence_mode,
+        pad_to_frames=pad_to_frames,
+        caption_sampling="first",
     )
     count = min(int(sample_count), len(dataset))
     indices = np.linspace(0, len(dataset) - 1, count, dtype=np.int64)
@@ -226,6 +288,7 @@ def _normalized_151d_statistics(
     with torch.no_grad():
         for start in range(0, count, 8):
             batch = default_collate([dataset[int(index)] for index in indices[start : start + 8]])
+            batch["valid_length_processing"] = sequence_mode == "full"
             encoded = endecoder.encode(batch)
             valid = batch["mask"]["valid"].bool()
             chunks.append(encoded[valid].cpu())
@@ -262,6 +325,8 @@ def run_preflight(args: argparse.Namespace) -> dict[str, Any]:
         embedding_root,
         verify_sha256=args.verify_sha256,
         max_shards=args.max_shards,
+        sequence_mode=getattr(args, "sequence_mode", "crop"),
+        pad_to_frames=getattr(args, "pad_to_frames", 120),
     )
     if args.normalized_stats_samples > 0:
         normalized = _normalized_151d_statistics(
@@ -269,6 +334,8 @@ def run_preflight(args: argparse.Namespace) -> dict[str, Any]:
             embedding_root,
             sample_count=args.normalized_stats_samples,
             z_threshold=args.z_threshold,
+            sequence_mode=getattr(args, "sequence_mode", "crop"),
+            pad_to_frames=getattr(args, "pad_to_frames", 120),
         )
         report["normalized_151d"] = normalized
         if normalized["max_channel_outlier_fraction"] > args.max_outlier_fraction:
@@ -298,14 +365,37 @@ def build_parser() -> argparse.ArgumentParser:
         "--verify-sha256", action=argparse.BooleanOptionalAction, default=True
     )
     parser.add_argument("--max-shards", type=int)
+    parser.add_argument("--sequence-mode", choices=("crop", "full"), default="crop")
+    parser.add_argument("--pad-to-frames", type=int, default=120)
     parser.add_argument("--normalized-stats-samples", type=int, default=1000)
     parser.add_argument("--z-threshold", type=float, default=8.0)
     parser.add_argument("--max-outlier-fraction", type=float, default=0.25)
+    parser.add_argument("--config-only", action="store_true", help="只解析A0配置，不读真实分片、不建立模型、不访问GPU")
+    parser.add_argument("--config-override", action="append", default=[], help="Hydra配置覆盖，可重复传入")
     return parser
 
 
 def main() -> None:
     args = build_parser().parse_args()
+    if args.config_only:
+        import builtins
+        from hydra import compose, initialize_config_dir
+        from omegaconf import OmegaConf
+        from gem.utils.sequence_contract import validate_sequence_experiment
+
+        OmegaConf.register_new_resolver("eval", builtins.eval, replace=True)
+        with initialize_config_dir(config_dir=str(REPO_ROOT / "configs"), version_base="1.3"):
+            cfg = compose(config_name="train", overrides=["exp=gem_smpl_motionmillion_text_fullseq", *args.config_override])
+        contract = validate_sequence_experiment(cfg)
+        print(json.dumps({"status": "CONFIG_PASS", "sequence_contract": contract,
+                          "actual_release_verified": False,
+                          "effective_global_batch_candidate": cfg.data.loader_opts.train.batch_size * cfg.pl_trainer.devices * cfg.pl_trainer.accumulate_grad_batches,
+                          "gpu_memory_verified": False}, ensure_ascii=False, indent=2))
+        if args.report is not None:
+            # 可选保存完整解析配置，后续指标 --experiment-config 使用同一快照。
+            Path(args.report).parent.mkdir(parents=True, exist_ok=True)
+            OmegaConf.save(cfg, args.report, resolve=True)
+        return
     if args.max_shards is not None and args.max_shards <= 0:
         raise SystemExit("max-shards 必须为正数")
     if args.normalized_stats_samples < 0 or args.z_threshold <= 0:

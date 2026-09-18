@@ -143,6 +143,31 @@ def test_initialize_loads_tokenizer_t5_gem_once(engine_bundle) -> None:
     assert calls == {"classes": 1, "t5": 1, "gem": 1, "checkpoint": 1}
 
 
+@pytest.mark.parametrize("frames", [60, 97, 120, 183, 240, 299, 300])
+def test_fullseq_request_exports_exact_valid_frames(engine_bundle, monkeypatch, frames):
+    """CPU替身验证常驻请求→真实文件写出长度；不冒充GPU动作生成或视频渲染验收。"""
+    import numpy as np
+    engine, _, _, gem, _ = engine_bundle
+    contract = dict(schema_version=1,sequence_mode="full",min_frames=60,max_frames=300,
+                    pad_to_frames=300,fps=30,attention_mode="valid_length",attention_max_len=120,
+                    loss_reduction="valid_per_sample",train_caption_sampling="random",val_caption_sampling="first")
+    monkeypatch.setattr(resident, "_validate_checkpoint", lambda _: {"max_text_len":150,"sequence_contract":contract})
+    monkeypatch.setattr(resident, "encode_prompt_with_loaded_t5", lambda *a,**k: torch.ones(150,1024))
+    engine.initialize()
+    assert engine.max_frames == 300 and engine.warmup_frames == 60
+    result = engine.generate({"prompt":"walk forward", "num_frames":frames, "fps":30})
+    assert result["ok"], result
+    with np.load(result["motion_npz"]) as motion:
+        for key in ("body_pose","global_orient","transl","betas"):
+            assert motion[key].shape[0] == frames
+    metadata = json.loads((Path(result["output_dir"])/"metadata.json").read_text())
+    assert metadata["num_frames"] == frames
+    assert metadata["sequence_contract"] == contract
+    assert not engine.generate({"prompt":"walk", "num_frames":59})["ok"]
+    assert not engine.generate({"prompt":"walk", "num_frames":301})["ok"]
+    engine.close()
+
+
 def test_initialize_configures_and_initializes_ddim_once(engine_bundle) -> None:
     engine, _, _, gem, _ = engine_bundle
     engine.initialize()

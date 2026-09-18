@@ -271,6 +271,19 @@ class DataModule(pl.LightningDataModule):
                     f"dropped_global_samples={sampler.dropped_samples}, "
                     f"rank={sampler.rank}/{sampler.num_replicas}"
                 )
+                # 同时报告DataLoader drop_last和梯度累积，避免把每卡micro-batch
+                # 数误认为优化器步数。epoch尾部不足一次累积时，Lightning仍会更新。
+                batch_size = int(self.loader_opts.train.batch_size)
+                accumulation = int(getattr(getattr(self, "trainer", None), "accumulate_grad_batches", 1))
+                micro_batches = len(sampler) // batch_size
+                last_accumulation = (micro_batches % accumulation or accumulation) if micro_batches else 0
+                Log.info(
+                    "[Train Sampling][Batch budget] "
+                    f"micro_batches_per_rank={micro_batches}, loader_drop_last=True, "
+                    f"accumulate_grad_batches={accumulation}, "
+                    f"optimizer_steps_per_epoch={(micro_batches + accumulation - 1) // accumulation}, "
+                    f"last_accumulation_micro_batches={last_accumulation}"
+                )
             if self.balanced_sampling is not None and self.balanced_sampling.get(
                 "enabled", False
             ):

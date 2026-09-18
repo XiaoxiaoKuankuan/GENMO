@@ -30,6 +30,7 @@ from gem.utils.motion_utils import (
     get_tgtcoord_rootparam,
     rollout_local_transl_vel,
 )
+from gem.utils.masked_reduction import masked_reduce, temporal_valid_mask
 from gem.utils.net_utils import gaussian_smooth
 from gem.utils.rotation_conversions import (
     axis_angle_to_matrix,
@@ -44,6 +45,9 @@ class Pipeline(nn.Module):
         self.args = args
         self.args_denoiser3d = args_denoiser3d
         self.weights = args.weights  # loss weights
+        self.loss_reduction = args.get("loss_reduction", "legacy")
+        if self.loss_reduction not in {"legacy", "valid_per_sample"}:
+            raise ValueError("未知 loss reduction")
 
         # Networks
         self.denoiser3d = instantiate(args_denoiser3d, _recursive_=False)
@@ -65,6 +69,22 @@ class Pipeline(nn.Module):
         test_mode=None,
         normalizer_stats=None,
     ):
+        if not train and self.args.get("loss_reduction", "legacy") == "valid_per_sample":
+            lengths = inputs["length"]
+            tensor_length = inputs["motion"].shape[1]
+            if (lengths != tensor_length).any():
+                # 验证batch有padding时逐条在真实F上生成、恢复世界轨迹及后处理。
+                # padding仅在返回batch接口时延拓，绝不进入平滑、足锁或IK。
+                outputs = []
+                for index, frames in enumerate(lengths.tolist()):
+                    sample = slice_valid_inputs(inputs, index, len(lengths), tensor_length, frames)
+                    sample["B"], sample["L"] = 1, frames
+                    outputs.append(self.forward(
+                        sample, train=False, postproc=postproc, static_cam=static_cam,
+                        global_step=global_step, mode=mode, test_mode=test_mode,
+                        normalizer_stats=normalizer_stats,
+                    ))
+                return batch_valid_outputs(outputs, lengths.tolist(), tensor_length)
         outputs = dict()
         if self.endecoder.obs_indices_dict is None:
             self.endecoder.build_obs_indices_dict()
@@ -191,7 +211,7 @@ class Pipeline(nn.Module):
 
             simple_loss = F.mse_loss(pred_x, target_x, reduction="none")
 
-            simple_loss = (simple_loss * target_x_mask).mean()
+            simple_loss = reduce_supervision(self, outputs, simple_loss, target_x_mask)
             total_loss += simple_loss * self.weights.get("simple", 1.0)
             outputs["simple_loss"] = simple_loss
 
@@ -223,6 +243,45 @@ class Pipeline(nn.Module):
 
         outputs["loss"] = total_loss
         return outputs
+
+
+def slice_valid_inputs(value, index, batch_size, tensor_length, frames):
+    """裁出一个真实样本供评测后处理，保持原batch及文本token长度不变。"""
+    if isinstance(value, dict):
+        return {key: item if key == "sample_indices_dict" else slice_valid_inputs(item, index, batch_size, tensor_length, frames)
+                for key, item in value.items()}
+    if torch.is_tensor(value) and value.ndim and value.shape[0] == batch_size:
+        result = value[index:index + 1]
+        if value.ndim >= 2 and value.shape[1] == tensor_length:
+            result = result[:, :frames]
+        return result
+    if isinstance(value, list) and len(value) == batch_size:
+        return value[index:index + 1]
+    return value
+
+
+def batch_valid_outputs(values, lengths, tensor_length):
+    """逐条有效推理结果回填到验证batch；消费者仍使用原length mask。"""
+    first = values[0]
+    if isinstance(first, dict):
+        return {key: batch_valid_outputs([item[key] for item in values], lengths, tensor_length) for key in first}
+    if torch.is_tensor(first) and first.ndim and first.shape[0] == 1:
+        padded = []
+        for item, frames in zip(values, lengths):
+            if item.ndim >= 2 and item.shape[1] == frames:
+                item = torch.cat([item, item[:, -1:].expand(-1, tensor_length - frames, *item.shape[2:])], dim=1)
+            padded.append(item)
+        return torch.cat(padded, dim=0)
+    return first
+
+
+def reduce_supervision(ppl, outputs, residual, mask):
+    """所有实际监督共用相同有效元素分母及扩散采样权重；旧路径保留数值行为。"""
+    return masked_reduce(
+        residual, mask,
+        strategy=ppl.args.get("loss_reduction", "legacy"),
+        sample_weights=outputs["model_output"].get("t_weights"),
+    )
 
 
 def compute_extra_incam_loss(inputs, outputs, ppl, mode):
@@ -269,7 +328,7 @@ def compute_extra_incam_loss(inputs, outputs, ppl, mode):
         #     and "cr_j3d" not in gen_only_losses
         # ):
         #     cr_j3d_loss[gen_only] = 0
-        cr_j3d_loss = (cr_j3d_loss * mask[..., None, None] * jts_weights).mean()
+        cr_j3d_loss = reduce_supervision(ppl, outputs, cr_j3d_loss * jts_weights, mask[..., None, None])
         extra_loss += cr_j3d_loss * weights.cr_j3d
         extra_loss_dict["cr_j3d_loss"] = cr_j3d_loss
 
@@ -306,7 +365,7 @@ def compute_extra_incam_loss(inputs, outputs, ppl, mode):
         #     and "transl_c" not in gen_only_losses
         # ):
         #     transl_c_loss[gen_only] = 0
-        transl_c_loss = (transl_c_loss * mask[..., None] * valid_mask).mean()
+        transl_c_loss = reduce_supervision(ppl, outputs, transl_c_loss, mask[..., None] & valid_mask)
 
         extra_loss_dict["transl_c_loss"] = transl_c_loss
         extra_loss += transl_c_loss * weights.transl_c
@@ -366,7 +425,7 @@ def compute_extra_incam_loss(inputs, outputs, ppl, mode):
         #     and "j2d" not in gen_only_losses
         # ):
         #     j2d_loss[gen_only] = 0
-        j2d_loss = (j2d_loss * mask[..., None, None] * valid_mask * jts_weights).mean()
+        j2d_loss = reduce_supervision(ppl, outputs, j2d_loss * jts_weights, mask[..., None, None] & valid_mask)
         # j2d_17_loss = (
         #     j2d_17_loss * mask_reproj_17[..., None, None] * valid_mask_j17
         # ).mean()
@@ -397,7 +456,7 @@ def compute_extra_incam_loss(inputs, outputs, ppl, mode):
         #     and "cr_verts" not in gen_only_losses
         # ):
         #     cr_vert_loss[gen_only] = 0
-        cr_vert_loss = (cr_vert_loss * mask[:, :, None, None]).mean()
+        cr_vert_loss = reduce_supervision(ppl, outputs, cr_vert_loss, mask[:, :, None, None])
         extra_loss += cr_vert_loss * weights.cr_verts
         extra_loss_dict["cr_vert_loss"] = cr_vert_loss
 
@@ -447,7 +506,7 @@ def compute_extra_incam_loss(inputs, outputs, ppl, mode):
         #     and "verts2d" not in gen_only_losses
         # ):
         #     verts2d_loss[gen_only] = 0
-        verts2d_loss = (verts2d_loss * mask[..., None, None] * valid_mask).mean()
+        verts2d_loss = reduce_supervision(ppl, outputs, verts2d_loss, mask[..., None, None] & valid_mask)
 
         extra_loss += verts2d_loss * weights.verts2d
         extra_loss_dict["verts2d_loss"] = verts2d_loss
@@ -459,7 +518,7 @@ def compute_extra_incam_loss(inputs, outputs, ppl, mode):
                 inputs["smpl_params_c"]["betas"],
                 reduction="none",
             )
-            shape_loss = (shape_loss * mask[..., None]).mean()
+            shape_loss = reduce_supervision(ppl, outputs, shape_loss, mask[..., None])
             extra_loss += shape_loss * weights.shape_loss
             extra_loss_dict["shape_loss"] = shape_loss
 
@@ -493,6 +552,9 @@ def compute_extra_global_loss(inputs, outputs, ppl, mode):
     # if weights.get("gen_only_no_reg_loss", False) and mode == "regression":
     #     gen_only_losses = []
 
+    if ppl.args.get("loss_reduction", "legacy") == "valid_per_sample":
+        mask_contact &= temporal_valid_mask(inputs["mask"]["valid"], pad_last=True)
+
     if weights.transl_w > 0:
         # compute pred_transl_w by rollout
         gt_transl_w = inputs["smpl_params_w"]["transl"]
@@ -509,7 +571,7 @@ def compute_extra_global_loss(inputs, outputs, ppl, mode):
         #     and "transl_w" not in gen_only_losses
         # ):
         #     trans_w_loss[gen_only] = 0
-        trans_w_loss = (trans_w_loss * mask[..., None]).mean()
+        trans_w_loss = reduce_supervision(ppl, outputs, trans_w_loss, mask[..., None])
         extra_loss += trans_w_loss * weights.transl_w
         extra_loss_dict["transl_w_loss"] = trans_w_loss
 
@@ -534,7 +596,7 @@ def compute_extra_global_loss(inputs, outputs, ppl, mode):
         #     and "static_conf_bce" not in gen_only_losses
         # ):
         #     static_conf_loss[gen_only] = 0
-        static_conf_loss = (static_conf_loss * mask_contact[..., None]).mean()
+        static_conf_loss = reduce_supervision(ppl, outputs, static_conf_loss, mask_contact[..., None])
         extra_loss += static_conf_loss * weights.static_conf_bce
         extra_loss_dict["static_conf_loss"] = static_conf_loss
 

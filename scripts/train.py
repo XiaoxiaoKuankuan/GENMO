@@ -36,6 +36,7 @@ from gem.utils.tools import (
     rsync_file_from_remote,
 )
 from gem.utils.vis.rich_logger import print_cfg
+from gem.utils.sequence_contract import validate_sequence_experiment
 
 OmegaConf.register_new_resolver("eval", builtins.eval)
 
@@ -113,6 +114,7 @@ def get_callbacks(cfg: DictConfig) -> list:
 
 def train(cfg: DictConfig) -> None:
     """Train/Test"""
+    validate_sequence_experiment(cfg)
     Log.info(f"[Exp Name]: {cfg.exp_name}")
     # use total batch size
     if cfg.task == "fit":

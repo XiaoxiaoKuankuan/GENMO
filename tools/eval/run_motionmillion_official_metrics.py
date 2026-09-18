@@ -125,6 +125,9 @@ def _load_motion(path: Path, length: int, *, max_length: int = 300) -> torch.Ten
 
 
 def run_metrics(args: argparse.Namespace) -> dict[str, Any]:
+    from tools.eval.motionmillion_protocol import length_protocol, prediction_length
+
+    protocol = length_protocol(getattr(args, "length_mode", "fixed"), getattr(args, "num_frames", 120))
     identity_path = Path(args.evaluator_identity).expanduser().resolve()
     identity = read_json(identity_path)
     if identity.get("status") != "PASS" or not identity.get("evaluator_fingerprint"):
@@ -137,17 +140,22 @@ def run_metrics(args: argparse.Namespace) -> dict[str, Any]:
     eligibility = read_json(args.eligibility)
     dataset_root = Path(eligibility["dataset_root"])
     eligible = {row["motion_id"]: row for row in eligibility["records"]}
+    for row in eligible.values():
+        prediction_length(row, protocol)
     predictions = _read_jsonl(Path(args.predictions))
     generation_progress_path = Path(args.predictions).parent / "generation_progress.json"
     generation_progress = read_json(generation_progress_path)
     generation_identity = generation_progress.get("identity", {})
+    recorded_protocol = generation_identity.get("length_protocol", length_protocol("fixed", 120))
+    if recorded_protocol != protocol:
+        raise ValueError("预测与评分length protocol不一致，禁止混用fixed/gt协议")
     if generation_progress.get("status") != "complete":
         raise ValueError("验证集 prediction generation_progress 尚未 complete")
     expected_generation_identity = {
         "checkpoint_sha256": sha256_file(args.checkpoint),
         "eligibility_sha256": sha256_file(args.eligibility),
         "global_seed": int(args.seed),
-        "num_frames": 120,
+        "num_frames": protocol["fixed_num_frames"],
         "ddim_steps": int(args.ddim_steps),
         "cfg_scale": float(args.cfg_scale),
     }
@@ -166,6 +174,9 @@ def run_metrics(args: argparse.Namespace) -> dict[str, Any]:
         missing = sorted(set(eligible) - set(prediction_by_id))[:20]
         extra = sorted(set(prediction_by_id) - set(eligible))[:20]
         raise ValueError(f"prediction 与完整 eligibility 不闭环: missing={missing}, extra={extra}")
+    for motion_id, prediction in prediction_by_id.items():
+        if int(prediction["length"]) != prediction_length(eligible[motion_id], protocol):
+            raise ValueError(f"prediction长度与协议不一致: {motion_id}")
 
     generator = torch.Generator().manual_seed(int(args.seed))
     order = torch.randperm(len(eligible), generator=generator).tolist()
@@ -254,6 +265,8 @@ def run_metrics(args: argparse.Namespace) -> dict[str, Any]:
     result = {
         "schema_version": 1,
         "seed": int(args.seed),
+        "length_protocol": protocol,
+        "eligibility_sha256": sha256_file(args.eligibility),
         "fid": calculate_fid(real, generated),
         "diversity": calculate_diversity(generated, int(args.seed)),
         "r_precision_1": float(r_precision[0] / usable_count),
@@ -313,6 +326,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--device", default="cuda:0")
     parser.add_argument("--ddim-steps", type=int, default=50)
     parser.add_argument("--cfg-scale", type=float, default=2.5)
+    parser.add_argument("--length-mode", choices=("fixed", "gt"), default="fixed")
+    parser.add_argument("--num-frames", type=int, default=120)
     return parser
 
 

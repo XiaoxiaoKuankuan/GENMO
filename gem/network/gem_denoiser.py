@@ -21,6 +21,23 @@ from gem.network.base_arch.transformer.layer import zero_module
 from gem.utils.net_utils import length_to_mask
 
 
+def valid_length_attention_mask(length, tensor_length, max_len):
+    """在每条真实 [0,F) 上复用旧非自回归窗口，padding query 整行遮蔽。
+
+    F<=max_len 时有效帧全可见；长序列两端沿用旧窗口扩展规则。这里仍构造稠密
+    [B,L,L] mask，不是稀疏注意力，也不会把300帧计算开销降回120帧。
+    """
+    if length.ndim != 1 or ((length <= 0) | (length > tensor_length)).any():
+        raise ValueError("真实 length 必须在 [1,L]")
+    query = torch.arange(tensor_length, device=length.device)[None, :, None]
+    key = torch.arange(tensor_length, device=length.device)[None, None, :]
+    frames = length[:, None, None]
+    effective = frames.clamp(max=max_len)
+    left = torch.minimum(frames - effective, (query - max_len // 2).clamp_min(0))
+    right = torch.maximum(effective, torch.minimum(frames, query + max_len // 2))
+    return (key < left) | (key >= right) | (query >= frames)
+
+
 class TimestepEmbedder(nn.Module):
     def __init__(self, latent_dim, sequence_pos_encoder):
         super().__init__()
@@ -72,6 +89,7 @@ class NetworkEncoderRoPE(nn.Module):
         input_remove_global=False,
         input_remove_condition=False,
         allow_autoregressive=True,
+        attention_mode="legacy",
         args=None,
         **kwargs,
     ):
@@ -80,6 +98,9 @@ class NetworkEncoderRoPE(nn.Module):
         # input
         self.output_dim = output_dim
         self.max_len = max_len
+        if attention_mode not in {"legacy", "valid_length"} or max_len <= 0:
+            raise ValueError("attention_mode/max_len 无效")
+        self.attention_mode = attention_mode
 
         # condition
         self.cliffcam_dim = cliffcam_dim
@@ -310,13 +331,17 @@ class NetworkEncoderRoPE(nn.Module):
         assert B == length.size(0)
         pmask = ~length_to_mask(length, L)  # (B, L)
 
-        autoregressive_mask = inputs.get("has_humanoid_data", None)
+        autoregressive_mask = (inputs or {}).get("has_humanoid_data", None)
         use_autoregressive = (
             self.allow_autoregressive
             and autoregressive_mask is not None
             and autoregressive_mask.any()
         )
-        if L > self.max_len or use_autoregressive:
+        if self.attention_mode == "valid_length":
+            if use_autoregressive:
+                raise ValueError("valid_length 模式仅用于非自回归 SMPL 文本动作")
+            attnmask = valid_length_attention_mask(length, L, self.max_len)
+        elif L > self.max_len or use_autoregressive:
             attnmask = torch.ones((B, L, L), device=x.device, dtype=torch.bool)
             attnmask_noar = torch.ones((L, L), device=x.device, dtype=torch.bool)
             attnmask_ar = torch.ones((L, L), device=x.device, dtype=torch.bool)

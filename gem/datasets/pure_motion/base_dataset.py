@@ -93,7 +93,7 @@ class BaseDataset(Dataset):
                 None,
             )
             w_j3d = (
-                w_j3d.repeat_interleave(N, dim=0) + smpl_params_w["transl"][:, None]
+                w_j3d.repeat_interleave(N, dim=0)[:length] + smpl_params_w["transl"][:, None]
             )  # (F, 24, 3)
 
             width, height, K_fullimg = create_camera_sensor(1000, 1000, 43.3)  # WHAM
@@ -109,7 +109,7 @@ class BaseDataset(Dataset):
                 None,
             )
             w_j3d = (
-                w_j3d.repeat_interleave(N, dim=0) + smpl_params_w["transl"][:, None]
+                w_j3d.repeat_interleave(N, dim=0)[:length] + smpl_params_w["transl"][:, None]
             )  # (F, 24, 3)
 
             width, height, K_fullimg = create_camera_sensor(1000, 1000, 43.3)  # WHAM

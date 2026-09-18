@@ -195,6 +195,9 @@ class GEM(pl.LightningModule):
         self.endecoder = self.pipeline.endecoder
         self.optimizer = instantiate(optimizer, _partial_=True)
         self.model_cfg = model_cfg
+        from gem.utils.sequence_contract import normalize_sequence_contract
+
+        self.sequence_contract = normalize_sequence_contract(model_cfg.get("sequence_contract"))
         self.scheduler = scheduler
         self.enable_test_time_opt = model_cfg.get("enable_test_time_opt", False)
         self.train_modes = model_cfg.get("train_modes", [])
@@ -654,6 +657,7 @@ class GEM(pl.LightningModule):
             )
 
     def prepare_batch(self, batch, mode):
+        batch["valid_length_processing"] = self.pipeline.args.get("loss_reduction", "legacy") == "valid_per_sample"
         target_x = self.endecoder.encode(batch)  # (B, L, C)
         batch["sample_indices_dict"] = self.endecoder.obs_indices_dict
         if mode == "diffusion":
@@ -671,6 +675,13 @@ class GEM(pl.LightningModule):
         )
         target_x_mask[batch["mask"]["spv_incam_only"], :, global_sidx:] = False
         target_x_mask = target_x_mask & valid_mask[:, :, None]
+        if self.pipeline.args.get("loss_reduction", "legacy") == "valid_per_sample":
+            from gem.utils.masked_reduction import temporal_valid_mask
+
+            # 151D 的最后三维是 t→t+1 速度。最后真实帧无下一帧观测，不能把
+            # padding/末帧延拓当作静止监督；其余姿态通道仍监督全部 F 帧。
+            start, end = self.endecoder.obs_indices_dict["local_transl_vel"]
+            target_x_mask[..., start:end] &= temporal_valid_mask(valid_mask, pad_last=True)[..., None]
 
         batch["target_x"] = target_x
         batch["target_x_mask"] = target_x_mask
@@ -1227,11 +1238,15 @@ class GEM(pl.LightningModule):
         pred_body_params_global = get_pred_body_params_global(outputs)
         if pred_body_params_global is not None:
             outputs["pred_body_params_global"] = {
-                k: v[0] for k, v in pred_body_params_global.items()
+                k: v[0, :int(batch["length"][0])] if getattr(self, "sequence_contract", None) is not None else v[0]
+                for k, v in pred_body_params_global.items()
             }
         pred_body_params_incam = get_pred_body_params_incam(outputs)
         if pred_body_params_incam is not None:
-            outputs["pred_body_params_incam"] = {k: v[0] for k, v in pred_body_params_incam.items()}
+            outputs["pred_body_params_incam"] = {
+                k: v[0, :int(batch["length"][0])] if getattr(self, "sequence_contract", None) is not None else v[0]
+                for k, v in pred_body_params_incam.items()
+            }
 
         if test_mode == "infilling":
             outputs.update(mask_res)
@@ -1522,7 +1537,31 @@ class GEM(pl.LightningModule):
         return incompatible
 
     # ============== Utils ================= #
+    def on_load_checkpoint(self, checkpoint) -> None:
+        from gem.utils.sequence_contract import validate_resume_contract
+
+        validate_resume_contract(checkpoint.get("genmo_sequence_contract"), getattr(self, "sequence_contract", None))
+        self._resume_data_identity = checkpoint.get("genmo_data_identity")
+
+    def _sequence_data_identity(self):
+        trainer = getattr(self, "_trainer", None)
+        datamodule = getattr(trainer, "datamodule", None)
+        if datamodule is None:
+            return None
+        return {
+            split: [getattr(ds, "data_identity", None) for ds in getattr(datamodule, f"{split}sets", [])]
+            for split in ("train", "val")
+        }
+
+    def on_fit_start(self) -> None:
+        saved = getattr(self, "_resume_data_identity", None)
+        if saved is not None and saved != self._sequence_data_identity():
+            raise ValueError("完整 resume 的 MotionMillion 数据身份与当前release不一致")
+
     def on_save_checkpoint(self, checkpoint) -> None:
+        if getattr(self, "sequence_contract", None) is not None:
+            checkpoint["genmo_sequence_contract"] = dict(self.sequence_contract)
+            checkpoint["genmo_data_identity"] = self._sequence_data_identity()
         # 新 checkpoint 显式携带文本长度契约；旧 checkpoint 没有该字段时，
         # 推理端按历史默认 50 token 兼容解析。
         if self.text_condition_enabled:

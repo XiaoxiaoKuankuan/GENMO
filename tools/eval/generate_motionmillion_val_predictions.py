@@ -37,6 +37,7 @@ from tools.data.motionmillion.common import (  # noqa: E402
     sha256_file,
 )
 from tools.eval.motionmillion_smpl_to_272 import export_motion  # noqa: E402
+from tools.eval.motionmillion_protocol import length_protocol, prediction_length  # noqa: E402
 
 
 def select_caption_and_seed(
@@ -52,6 +53,7 @@ def select_caption_and_seed(
 
 
 def _identity(args: argparse.Namespace) -> dict[str, Any]:
+    protocol = length_protocol(getattr(args, "length_mode", "fixed"), args.num_frames)
     checkpoint = Path(args.checkpoint).expanduser().resolve()
     eligibility = Path(args.eligibility).expanduser().resolve()
     t5_model = Path(args.t5_model).expanduser().resolve()
@@ -79,7 +81,8 @@ def _identity(args: argparse.Namespace) -> dict[str, Any]:
         "t5_release_sha256": sha256_file(t5_release_path),
         "t5_resolved_revision": t5_release["resolved_revision"],
         "global_seed": int(args.seed),
-        "num_frames": int(args.num_frames),
+        "num_frames": protocol["fixed_num_frames"],
+        "length_protocol": protocol,
         "fps": 30.0,
         "ddim_steps": int(args.ddim_steps),
         "cfg_scale": float(args.cfg_scale),
@@ -88,18 +91,20 @@ def _identity(args: argparse.Namespace) -> dict[str, Any]:
 
 
 def generate_predictions(args: argparse.Namespace) -> dict[str, Any]:
-    if args.num_frames != 120:
-        raise ValueError("MotionMillion v1 正式评测只承诺 120 帧")
     output_root = Path(args.output_root).expanduser().resolve()
     output_root.mkdir(parents=True, exist_ok=True)
     progress_path = output_root / "generation_progress.json"
     identity = _identity(args)
+    protocol = identity["length_protocol"]
     completed: dict[str, dict[str, Any]] = {}
     if progress_path.is_file():
         if not args.resume:
             raise FileExistsError(f"已有生成进度: {progress_path}；请使用 --resume")
         previous = read_json(progress_path)
-        if previous.get("identity") != identity:
+        previous_identity = dict(previous.get("identity", {}))
+        if "length_protocol" not in previous_identity:
+            previous_identity["length_protocol"] = length_protocol("fixed", previous_identity.get("num_frames", 120))
+        if previous_identity != identity:
             raise ValueError("已有验证集生成进度与本次身份不一致")
         for row in previous.get("records", []):
             path = Path(row["path"])
@@ -109,6 +114,9 @@ def generate_predictions(args: argparse.Namespace) -> dict[str, Any]:
 
     eligibility = read_json(identity["eligibility"])
     source_rows = list(eligibility["records"])
+    requested_lengths = [prediction_length(row, protocol) for row in source_rows]
+    if not requested_lengths:
+        raise ValueError("eligibility 为空")
     engine = ResidentTextMotionEngine(
         ckpt_path=identity["checkpoint"],
         t5_model=identity["t5_model"],
@@ -121,7 +129,7 @@ def generate_predictions(args: argparse.Namespace) -> dict[str, Any]:
         postproc=not args.no_postprocess,
         shape_mode="zero",
         warmup_enabled=args.warmup,
-        max_frames=120,
+        max_frames=max(requested_lengths),
     )
     endecoder = EnDecoder(
         stats_name="MM_V1_AMASS_LOCAL_BEDLAM_CAM",
@@ -133,7 +141,10 @@ def generate_predictions(args: argparse.Namespace) -> dict[str, Any]:
     try:
         for index, source in enumerate(source_rows, start=1):
             motion_id = str(source["motion_id"])
+            frames = prediction_length(source, protocol)
             if motion_id in completed:
+                if int(completed[motion_id]["length"]) != frames:
+                    raise ValueError(f"已完成预测长度与当前协议不一致: {motion_id}")
                 continue
             text_index, caption, sample_seed = select_caption_and_seed(
                 motion_id, list(source["captions"]), args.seed
@@ -141,7 +152,7 @@ def generate_predictions(args: argparse.Namespace) -> dict[str, Any]:
             response = engine.generate(
                 TextMotionRequest(
                     prompt=caption,
-                    num_frames=120,
+                    num_frames=frames,
                     fps=30.0,
                     seed=sample_seed,
                     request_id=f"motionmillion-val-{motion_id}",
@@ -149,6 +160,7 @@ def generate_predictions(args: argparse.Namespace) -> dict[str, Any]:
                         "motion_id": motion_id,
                         "text_index": text_index,
                         "global_seed": args.seed,
+                        "length_protocol": protocol,
                     },
                 )
             )
@@ -163,6 +175,8 @@ def generate_predictions(args: argparse.Namespace) -> dict[str, Any]:
                 ),
                 endecoder=endecoder,
             )
+            if exported["frames"] != frames:
+                raise ValueError(f"导出的SMPL/272D长度不是请求的{frames}: {motion_id}")
             row = {
                 "motion_id": motion_id,
                 "caption": caption,
@@ -170,7 +184,7 @@ def generate_predictions(args: argparse.Namespace) -> dict[str, Any]:
                 "sample_seed": sample_seed,
                 "path": exported["output"],
                 "sha256": exported["output_sha256"],
-                "length": 120,
+                "length": frames,
                 "source_smpl": response["motion_npz"],
             }
             completed[motion_id] = row
@@ -225,6 +239,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--output-root", type=Path, required=True)
     parser.add_argument("--seed", type=int, required=True)
     parser.add_argument("--num-frames", type=int, default=120)
+    parser.add_argument("--length-mode", choices=("fixed", "gt"), default="fixed")
     parser.add_argument("--ddim-steps", type=int, default=50)
     parser.add_argument("--cfg-scale", type=float, default=2.5)
     parser.add_argument("--device", default="cuda:0")

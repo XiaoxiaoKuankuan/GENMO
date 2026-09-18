@@ -75,23 +75,29 @@ class RoPEAttention(nn.Module):
         xk = self.rope.rotate_queries_or_keys(xk)  # B, N, L_ctx, C
 
         attn_score = einsum(xq, xk, "b n i c, b n j c -> b n i j") / math.sqrt(self.head_dim)
+        blocked = torch.zeros((B, 1, L, L_ctx), device=x.device, dtype=torch.bool)
         if attn_mask is not None:
             if len(attn_mask.shape) == 2:
-                attn_mask = attn_mask.reshape(1, 1, L, L_ctx).expand(B, self.num_heads, -1, -1)
+                attn_mask = attn_mask.reshape(1, 1, L, L_ctx)
             else:
-                attn_mask = attn_mask.reshape(B, 1, L, L_ctx).expand(B, self.num_heads, -1, -1)
-            attn_score = attn_score.masked_fill(attn_mask, float("-inf"))
+                attn_mask = attn_mask.reshape(B, 1, L, L_ctx)
+            blocked = blocked | attn_mask
         if key_padding_mask is not None:
-            key_padding_mask = key_padding_mask.reshape(B, 1, 1, L_ctx).expand(
-                -1, self.num_heads, L, -1
-            )
-            attn_score = attn_score.masked_fill(key_padding_mask, float("-inf"))
+            blocked = blocked | key_padding_mask.reshape(B, 1, 1, L_ctx)
 
+        # 无效 query 的局部窗口可能没有任何有效 key。仅对结构上全遮蔽的行建立
+        # 有限 softmax 输入，再把整行权重和最终输出归零；不开放 padding key，
+        # 不吞掉有效 score 的 NaN/Inf。旧路径中非空行与原计算完全相同。
+        empty_row = blocked.all(dim=-1, keepdim=True)
+        attn_score = attn_score.masked_fill(blocked, float("-inf"))
+        attn_score = attn_score.masked_fill(empty_row, 0.0)
         attn_score = torch.softmax(attn_score, dim=-1)
+        attn_score = attn_score.masked_fill(empty_row, 0.0)
         attn_score = self.dropout(attn_score)
         output = einsum(attn_score, xv, "b n i j, b n j c -> b n i c")  # B, N, L, C
         output = output.transpose(1, 2).reshape(B, L, -1)  # B, L, C
         output = self.proj(output)  # B, L, C
+        output = output.masked_fill(empty_row[:, 0], 0.0)
         return output
 
 

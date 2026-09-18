@@ -97,6 +97,10 @@ class EnDecoder(nn.Module):
         gt_w_j3d = self.fk_v2(**inputs["smpl_params_w"])  # (B, L, J, 3)
         static_gt = get_static_joint_mask(gt_w_j3d, vel_thr=vel_thr, repeat_last=True)
         static_gt = static_gt[:, :, joint_ids].float()
+        if inputs.get("valid_length_processing", False):
+            from gem.utils.masked_reduction import temporal_valid_mask
+
+            static_gt = static_gt * temporal_valid_mask(inputs["mask"]["valid"], pad_last=True)[..., None]
         return static_gt
 
     def build_obs_indices_dict(self):
@@ -147,6 +151,10 @@ class EnDecoder(nn.Module):
         local_transl_vel = get_local_transl_vel(
             smpl_params_w["transl"], smpl_params_w["global_orient"]
         )
+        if inputs.get("valid_length_processing", False):
+            from gem.utils.masked_reduction import temporal_valid_mask
+
+            local_transl_vel = local_transl_vel * temporal_valid_mask(inputs["mask"]["valid"], pad_last=True)[..., None]
         x = torch.cat(
             [body_pose_r6d, betas, global_orient_r6d, global_orient_gv_r6d, local_transl_vel],
             dim=-1,

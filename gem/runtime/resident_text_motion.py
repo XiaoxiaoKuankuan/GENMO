@@ -171,6 +171,7 @@ def _load_gem_model(checkpoint: Path) -> Any:
         defer_diffusion_init=True,
         text_max_len_override=contract.get("max_text_len"),
         exp_name_override=str(contract.get("exp_name", "gem_smpl")),
+        **({"sequence_contract_override": contract["sequence_contract"]} if contract.get("sequence_contract") is not None else {}),
     )
 
 
@@ -264,6 +265,7 @@ class ResidentTextMotionEngine:
         )
         self.max_frames = int(max_frames)
         self.max_text_len = MAX_TEXT_LEN
+        self.sequence_contract = None
         self._allow_cpu_for_tests = _allow_cpu_for_tests
 
         self.tokenizer: Any | None = None
@@ -336,6 +338,12 @@ class ResidentTextMotionEngine:
             contract = _validate_checkpoint(self.ckpt_path)
             if contract is not None:
                 self.max_text_len = int(contract["max_text_len"])
+                self.sequence_contract = contract.get("sequence_contract")
+                if self.sequence_contract is not None and self.sequence_contract["sequence_mode"] == "full":
+                    self.max_frames = min(self.max_frames, self.sequence_contract["max_frames"])
+                    if self.max_frames < self.sequence_contract["min_frames"]:
+                        raise ValueError("max_frames 低于 fullseq checkpoint 的最小长度")
+                    self.warmup_frames = min(max(self.warmup_frames, 60), self.max_frames)
             self.startup_timings["cuda_and_checkpoint_seconds"] = time.perf_counter() - stage
 
             stage = time.perf_counter()
@@ -488,6 +496,9 @@ class ResidentTextMotionEngine:
         request.fps = float(request.fps)
         if not np.isfinite(request.fps) or request.fps <= 0:
             raise ValueError("fps must be finite and > 0")
+        from gem.utils.sequence_contract import validate_generation_length
+
+        validate_generation_length(self.sequence_contract, request.num_frames, request.fps)
         if not isinstance(request.seed, int) or isinstance(request.seed, bool):
             raise TypeError("seed must be an integer")
         if request.metadata is not None and not isinstance(request.metadata, dict):
@@ -585,6 +596,7 @@ class ResidentTextMotionEngine:
                     height=self.height,
                     bbox_scale=self.bbox_scale,
                     t5_model=self.t5_model,
+                    sequence_contract=self.sequence_contract,
                 )
                 demo.save_results(
                     temporary_dir,

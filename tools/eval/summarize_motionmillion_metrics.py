@@ -22,6 +22,12 @@ import statistics
 from pathlib import Path
 from typing import Any
 
+# 直接脚本运行时也可找到同目录协议模块；保持旧工具无训练框架依赖。
+try:
+    from tools.eval.motionmillion_protocol import length_protocol
+except ModuleNotFoundError:
+    from motionmillion_protocol import length_protocol
+
 IDENTITY_KEYS = (
     "checkpoint_sha256",
     "experiment_config_sha256",
@@ -48,8 +54,12 @@ def summarize(paths: list[Path], *, required_runs: int = 20) -> dict[str, Any]:
     identity = {key: rows[0].get(key) for key in IDENTITY_KEYS}
     if any(value is None for value in identity.values()):
         raise ValueError("首份评测 JSON 缺少身份链")
+    protocol = rows[0].get("length_protocol", length_protocol())
+    eligibility_sha = rows[0].get("eligibility_sha256")
     seeds = []
     for path, row in zip(paths, rows):
+        if row.get("length_protocol", length_protocol()) != protocol or row.get("eligibility_sha256") != eligibility_sha:
+            raise ValueError("评测长度协议或资格集合不一致，不能混合汇总")
         if any(row.get(key) != value for key, value in identity.items()):
             raise ValueError(f"评测身份链不一致: {path}")
         if any(key not in row for key in METRIC_KEYS) or "seed" not in row:
@@ -60,12 +70,18 @@ def summarize(paths: list[Path], *, required_runs: int = 20) -> dict[str, Any]:
     metrics = {
         key: _mean_ci([float(row[key]) for row in rows]) for key in METRIC_KEYS
     }
-    return {"schema_version": 1, **identity, "seeds": sorted(seeds), "metrics": metrics}
+    return {"schema_version": 1, **identity, "length_protocol": protocol,
+            "eligibility_sha256": eligibility_sha, "seeds": sorted(seeds), "metrics": metrics}
 
 
 def choose_candidate(summaries: list[dict[str, Any]], fid_tie: float) -> dict[str, Any]:
     if not summaries:
         raise ValueError("没有候选 summary")
+    comparable = ("length_protocol", "eligibility_sha256", "evaluator_fingerprint", "dataset_release_fingerprint", "ddim_steps", "cfg_scale")
+    for row in summaries[1:]:
+        for key in comparable:
+            if row.get(key) != summaries[0].get(key):
+                raise ValueError(f"候选比较的协议或评测身份不一致: {key}")
     best_fid = min(row["metrics"]["fid"]["mean"] for row in summaries)
     close = [
         row

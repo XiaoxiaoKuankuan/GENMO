@@ -6,6 +6,10 @@ music-only 功能分支的改动。首版只接入 MotionMillion 官方发布数
 恢复成 GENMO 151D SMPL 连续表示，并从随机初始化训练 GEM DDIM 扩散器；不复刻官方
 FSQ/VQ + LLaMA 模型。
 
+新增独立的完整动作实验见 [路线 A0：完整文本与完整动作训练](MOTIONMILLION_FULLSEQ_A0.md)。
+该实验保留完整 60—300 帧并补齐到 300，沿用 120 局部注意力；本文原 120 帧实验、
+数据身份和历史报告保留，两个实验及其 fixed/gt 评测协议不能混同。
+
 官方资料：
 
 - [项目页](https://vankouf.github.io/MotionMillion/)
