@@ -342,6 +342,7 @@ class BumiEndecoder(nn.Module):
             elif semantics in {
                 "gmr_foot_sole_ground_zero_v1",
                 "robot_retargeter_floor_zero_v1",
+                "umr_foot_sole_ground_zero_v1",
             }:
                 modes.append(False)
             else:

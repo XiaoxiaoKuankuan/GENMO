@@ -427,6 +427,9 @@ def convert_datasets(
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--input-format", choices=("robot-retargeter", "umr-qpos"), default="robot-retargeter")
+    parser.add_argument("--mine-root", type=Path)
+    parser.add_argument("--audio-root", action="append", default=[], type=_parse_mapping)
     parser.add_argument("--source-root", required=True, type=Path)
     parser.add_argument("--quality-report", required=True, type=Path)
     parser.add_argument("--quality-summary", required=True, type=Path)
@@ -438,6 +441,12 @@ def main() -> None:
     parser.add_argument("--output-root", required=True, type=Path)
     parser.add_argument("--expected-pass", type=int)
     args = parser.parse_args()
+    if args.input_format == "umr-qpos":
+        from tools.data.bumi.umr_qpos_adapter import build_main
+
+        report = build_main(args, dict(args.reference_root), dict(args.audio_root))
+        print(json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True))
+        return
     report = convert_datasets(
         source_root=args.source_root,
         quality_report=args.quality_report,

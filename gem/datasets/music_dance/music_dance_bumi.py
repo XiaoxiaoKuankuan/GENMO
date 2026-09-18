@@ -30,6 +30,7 @@ BUMI_GROUND_SEMANTICS = frozenset(
         "legacy_body_origin_min_zero",
         "gmr_foot_sole_ground_zero_v1",
         "robot_retargeter_floor_zero_v1",
+        "umr_foot_sole_ground_zero_v1",
     }
 )
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
@@ -219,6 +220,7 @@ class BumiMusicDatasetReader:
         if info.get("ground_semantics") in {
             "gmr_foot_sole_ground_zero_v1",
             "robot_retargeter_floor_zero_v1",
+            "umr_foot_sole_ground_zero_v1",
         }:
             orientation_gate = info.get("root_orientation_gate")
             if not isinstance(orientation_gate, dict) or (

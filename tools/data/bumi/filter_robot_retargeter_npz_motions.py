@@ -624,7 +624,10 @@ def _atomic_jsonl(path: Path, rows: list[Mapping[str, Any]]) -> None:
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--input-root", required=True, type=Path)
-    parser.add_argument("--release-report", required=True, type=Path)
+    parser.add_argument("--input-format", choices=("robot-retargeter", "umr-qpos"), default="robot-retargeter")
+    parser.add_argument("--release-report", type=Path)
+    parser.add_argument("--selection-manifest", type=Path, help="UMR 明确选择清单，禁止隐式扫描扩大范围")
+    parser.add_argument("--mine-root", type=Path, help="经 CSV 构建器验收的自建库，合并接受同一门禁")
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
     parser.add_argument("--robot-xml", required=True, type=Path)
     parser.add_argument("--retarget-config", required=True, type=Path)
@@ -644,6 +647,12 @@ def main(argv: list[str] | None = None) -> int:
         raise ValueError("--workers 必须为正整数")
     if args.limit is not None and args.limit <= 0:
         raise ValueError("--limit 必须为正整数")
+    if args.input_format == "umr-qpos":
+        from tools.data.bumi.umr_qpos_adapter import filter_main
+
+        return filter_main(args, load_config(args.config))
+    if args.release_report is None:
+        raise ValueError("robot-retargeter 输入必须提供 --release-report")
     input_root = args.input_root.expanduser().resolve(strict=True)
     output_dir = args.output_dir.expanduser().resolve()
     if output_dir == input_root or input_root in output_dir.parents:
