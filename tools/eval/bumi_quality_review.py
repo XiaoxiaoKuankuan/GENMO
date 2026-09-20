@@ -8,6 +8,8 @@ JSONL，核对完成状态、汇总SHA、记录数、状态、帧数与源字节
 低质量样本从60..300帧REJECT中覆盖脚滑、碰撞、穿地和突变。选择按来源目录均衡，
 使用原始来源ID排除重复，保留完整动作，不宣称这些目的性样本代表全库分布。
 仅保存少量候选池，避免把56万条完整指标加载入内存。实际渲染仍须校验动作SHA。
+REVIEW可单独选样：从完整60..300帧待复核动作中按生效原因分层，目录均衡并按
+来源哈希确定性挑选，避免只看极端峰值；不改变质量状态或训练候选集合。
 """
 
 from __future__ import annotations
@@ -81,6 +83,16 @@ def high_category(metrics):
 def candidate_scores(row):
     """低分优先；高组避免静止投机，低组按触发REJECT的原因分层。"""
     m = review_metrics(row)
+    if row["status"] == "REVIEW" and 60 <= row["frames"] <= 300:
+        if row["training_eligible"] or "REJECT" in row["reason_statuses"].values():
+            raise ValueError("REVIEW记录不得已入训练或包含REJECT原因")
+        families = {
+            reason_family(code)
+            for code, level in row["reason_statuses"].items()
+            if level == "REVIEW"
+        }
+        # 同层同目录采用稳定来源哈希排序，不以最坏峰值占满复核样本。
+        return [("review", family, 0.0) for family in sorted(families)]
     if row["status"] == "PASS" and row["training_eligible"]:
         if not 120 <= row["frames"] <= 300 or m["repeated_pose_fraction"] > 0.1:
             return []
@@ -145,6 +157,21 @@ class CandidatePool:
             ]
         )
         weights = [1] * 5 if group == "high_quality" else [10, 10, 6, 2, 2]
+        if group == "review":
+            categories = [
+                "foot_slide",
+                "self_collision",
+                "airborne",
+                "ground_penetration",
+                "motion_discontinuity",
+                "other",
+            ]
+            categories = [
+                c for c in categories if any(g == group and k == c for g, k, _ in self.pools)
+            ]
+            if not categories:
+                raise ValueError("没有可用REVIEW样本")
+            weights = [1] * len(categories)
         quotas = [count * w // sum(weights) for w in weights]
         for i in range(count - sum(quotas)):
             quotas[i % len(quotas)] += 1
@@ -185,7 +212,14 @@ class CandidatePool:
         return chosen
 
 
-def analyze_report(root, count=30):
+def analyze_report(root, count=30, groups=("high_quality", "low_quality")):
+    if (
+        count < 1
+        or not groups
+        or len(set(groups)) != len(groups)
+        or not set(groups) <= {"high_quality", "low_quality", "review"}
+    ):
+        raise ValueError("复核组或样本数量非法")
     root = Path(root).resolve(strict=True)
     run = json.loads((root / "run.json").read_text())
     summary = json.loads((root / "quality_summary.json").read_text())
@@ -247,8 +281,8 @@ def analyze_report(root, count=30):
                         raise ValueError("训练资格与状态/帧数不一致")
                     eligible += 1
                     eligible_folders[row["folder"]] += 1
-                groups = {reason_family(c) for c in row["reason_codes"]}
-                families[status].update(groups)
+                row_families = {reason_family(c) for c in row["reason_codes"]}
+                families[status].update(row_families)
                 rejected = {
                     reason_family(c)
                     for c, level in row.get("reason_statuses", {}).items()
@@ -257,7 +291,7 @@ def analyze_report(root, count=30):
                 reject_families.update(rejected)
                 if status == "REJECT":
                     intersections[" + ".join(sorted(rejected))] += 1
-                if status in {"PASS", "REJECT"}:
+                if status in {"PASS", "REJECT", "REVIEW"}:
                     pool.add(row)
         hashes[path.name] = digest.hexdigest()
         print(
@@ -295,8 +329,8 @@ def analyze_report(root, count=30):
         report_source_sequence_keys_top=source_keys.most_common(5),
         source_sequence_key_mismatches=sequence_key_mismatches,
         report_file_sha256=hashes,
-        selection_policy="目的性复核样本；高组分层选活动PASS，低组按REJECT原因分层；完整序列，非随机总体估计",
-        groups={g: pool.choose(g, count) for g in ("high_quality", "low_quality")},
+        selection_policy="目的性复核样本；高组分层选活动PASS，低组按REJECT原因分层，REVIEW组按生效复核原因分层并以来源哈希选样；完整序列，非总体比例估计",
+        groups={g: pool.choose(g, count) for g in groups},
     )
     binding = root / "text_binding.json"
     if binding.is_file():
@@ -376,6 +410,24 @@ def write_analysis_markdown(analysis, output):
         analysis["reject_trigger_families"].items(), key=lambda item: -item[1]
     ):
         lines.append(f"| {labels.get(family, family)} | {count:,} | {count / rejected:.2%} |")
+    if "review" in analysis["groups"]:
+        review_count = summary["status_counts"].get("REVIEW", 0)
+        lines += [
+            "",
+            "## 待复核REVIEW",
+            "",
+            "REVIEW当前不进入训练。视频仅从完整60–300帧REVIEW中按原因分层、来源目录均衡及哈希确定性选样；不按最坏峰值排序，不能用样本类型比例推断全库比例。原因可能重叠。",
+            "",
+            "| REVIEW原因 | 动作数 | 占全部REVIEW |",
+            "|---|---:|---:|",
+        ]
+        for family, count in sorted(
+            analysis["reason_families_by_status"].get("REVIEW", {}).items(),
+            key=lambda item: -item[1],
+        ):
+            lines.append(
+                f"| {labels.get(family, family)} | {count:,} | {count / review_count:.2%} |"
+            )
     lines += [
         "",
         "## 来源目录差异",
@@ -396,7 +448,7 @@ def write_analysis_markdown(analysis, output):
         f"- 来源命名空间统计：`{json.dumps(analysis['source_namespaces'], ensure_ascii=False)}`。结论对应这批实际转换数据，不能泛化为该数据集全部来源。",
         "- 筛选是数值与运动学门禁；凸包碰撞近似、接触候选脚滑与悬空规则仍需结合视频复核。根倾角按绑定配置判定，严格规则也会排除持续弯腰或躺姿；完整动作没有再次贴地或平滑。",
         "- 高组从有活动的PASS中按移动、转向、低姿态和关节活动分组，低组覆盖不同REJECT原因；两组均平衡目录并去重。视频样本用于看清差异，不是随机抽样估计全库比例。",
-        "- 视频为双视角、原始30Hz、完整动作顺序拼接。视角B地面半透明，便于观察穿地；相机变化不改变qpos。红框只标识当前帧命中原报告异常区间。",
+        "- 视频为双视角、原始30Hz、完整动作顺序拼接。视角B地面半透明，便于观察穿地；相机变化不改变qpos。异常帧边框仅标识当前帧命中原报告异常区间，REVIEW用黄色、REJECT用红色。",
     ]
     if analysis.get("text_binding"):
         value = analysis["text_binding"]
@@ -437,10 +489,12 @@ def write_analysis_markdown(analysis, output):
     for group, rows in analysis["groups"].items():
         lines += [
             "",
-            f"选样 `{group}` 类型构成：`{dict(Counter(r['selection_category'] for r in rows))}`。某类REJECT不存在或独立来源不足时，从其他实际问题类型补齐，不制造不存在的严重问题样本。",
+            f"选样 `{group}` 类型构成：`{dict(Counter(r['selection_category'] for r in rows))}`。某类原因不存在或独立来源不足时，从其他实际类型补齐，不制造不存在的问题样本。",
         ]
     for group, video in analysis["videos"].items():
-        title = ("高质量" if group == "high_quality" else "低质量") + f"{len(video['chapters'])}例"
+        title = {"high_quality": "高质量", "low_quality": "低质量", "review": "待复核REVIEW"}[
+            group
+        ] + f"{len(video['chapters'])}例"
         lines += [
             "",
             f"## {title}",

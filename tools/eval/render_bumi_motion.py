@@ -6,6 +6,8 @@
 标志与章节编号，保持原30Hz完整动作，不做贴地、平滑、时间裁剪或动力学推进。
 使用PyAV逐帧写入H.264，避免在内存保存整个合集；输出经解码帧数校验后原子发布。
 资产、选中机器人与人体SHA必须匹配原报告，历史配置从Git按SHA恢复为审计附件。
+--quality-groups可选high_quality/low_quality/review；待复核组使用黄色明确标注，
+沿用完整动作与文本身份核验，不改变筛选状态、不将REVIEW写入训练数据。
 """
 
 from __future__ import annotations
@@ -172,7 +174,11 @@ def montage_frames(qpos, row, group, index, count, model, data, renderer, width,
     distance = max(2.25, (top - bottom) * 1.5)
     for camera, azimuth in zip(cameras, (135, 225)):
         camera.distance, camera.azimuth, camera.elevation = distance, azimuth, -17
-    color = (58, 220, 146) if group == "high_quality" else (255, 113, 105)
+    color = {
+        "high_quality": (58, 220, 146),
+        "low_quality": (255, 113, 105),
+        "review": (255, 201, 74),
+    }[group]
     m = row["review_metrics"]
     panel_height = height - 190
     for frame_index, pose in enumerate(qpos):
@@ -190,7 +196,11 @@ def montage_frames(qpos, row, group, index, count, model, data, renderer, width,
         canvas = Image.new("RGB", (width, height), (16, 23, 35))
         canvas.paste(Image.fromarray(np.concatenate(views, axis=1)), (0, 90))
         draw = ImageDraw.Draw(canvas)
-        name = "HIGH QUALITY / PASS" if group == "high_quality" else "LOW QUALITY / REJECT"
+        name = {
+            "high_quality": "HIGH QUALITY / PASS",
+            "low_quality": "LOW QUALITY / REJECT",
+            "review": "REVIEW / NOT IN TRAINING",
+        }[group]
         draw.text(
             (20, 10),
             f"{'HumanML3D' if row.get('dataset') == 'humanml3d' else 'MotionMillion'}    {name}    {index + 1:02d}/{count:02d}",
@@ -244,6 +254,10 @@ def montage_frames(qpos, row, group, index, count, model, data, renderer, width,
             )
         if row["selection_category"] == "root_tilt":
             line = f"root tilt p95: {m['root_tilt_p95_deg']:.1f} deg  |  reject: >30 deg for >=15 frames"
+        if row["selection_category"] == "airborne":
+            intervals = row.get("issue_intervals", {}).get("LONG_AIRBORNE_REVIEW", [])
+            longest = max((b - a for a, b in intervals), default=0)
+            line = f"flagged both-feet airborne: longest {longest} frames ({longest / 30:.2f}s)  |  review: >=30 frames"
         draw.text((20, y + 30), line, font=small, fill=(222, 228, 237))
         status = (
             ("ISSUE NOW: " + " | ".join(active)) if active else "No flagged issue on this frame"
@@ -255,7 +269,11 @@ def montage_frames(qpos, row, group, index, count, model, data, renderer, width,
             fill=(255, 180, 115) if active else (156, 174, 193),
         )
         if active:
-            draw.rectangle((1, 90, width - 2, height - 102), outline=(230, 74, 65), width=3)
+            draw.rectangle(
+                (1, 90, width - 2, height - 102),
+                outline=color if group == "review" else (230, 74, 65),
+                width=3,
+            )
         yield np.asarray(canvas)
 
 
@@ -345,7 +363,7 @@ def render_quality_review(args):
     with tempfile.TemporaryDirectory(prefix=f".{output.name}.staging-", dir=output.parent) as temp:
         staged = Path(temp) / "review"
         staged.mkdir()
-        analysis, run = analyze_report(args.quality_report, args.per_group)
+        analysis, run = analyze_report(args.quality_report, args.per_group, args.quality_groups)
         if analysis.get("text_binding"):
             from tools.data.bumi.motionmillion_text import TextCatalog
 
@@ -447,6 +465,13 @@ def main() -> None:
     parser.add_argument("--quality-report", type=Path)
     parser.add_argument("--output-dir", type=Path)
     parser.add_argument("--per-group", type=int, default=30)
+    parser.add_argument(
+        "--quality-groups",
+        nargs="+",
+        choices=["high_quality", "low_quality", "review"],
+        default=["high_quality", "low_quality"],
+        help="指定复核组；默认仍渲染PASS/REJECT两组",
+    )
     parser.add_argument(
         "--font", type=Path, default=Path("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf")
     )

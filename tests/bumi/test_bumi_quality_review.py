@@ -79,6 +79,30 @@ def test_reject_categories_use_reject_reason_not_secondary_review():
     assert [c for _, c, _ in candidate_scores(row)] == ["root_tilt"]
 
 
+def test_review_selection_is_distinct_balanced_and_not_training():
+    pool = CandidatePool()
+    for i in range(100):
+        row = example(i, status="REVIEW", folder=f"folder{i % 10}")
+        code = "FOOT_SLIDE_left_REVIEW" if i < 50 else "LONG_AIRBORNE_REVIEW"
+        row["reason_codes"] = [code]
+        row["reason_statuses"] = {code: "REVIEW"}
+        pool.add(row)
+    chosen = pool.choose("review", 30)
+    assert Counter(r["selection_category"] for r in chosen) == {"foot_slide": 15, "airborne": 15}
+    assert len({r["canonical_source_id"] for r in chosen}) == 30
+    assert all(r["status"] == "REVIEW" and not r["training_eligible"] for r in chosen)
+    assert [r["source_motion_id"] for r in chosen] == [
+        r["source_motion_id"] for r in pool.choose("review", 30)
+    ]
+    for frames in (59, 301):
+        row["frames"] = frames
+        assert candidate_scores(row) == []
+    row["frames"] = 180
+    row["training_eligible"] = True
+    with pytest.raises(ValueError, match="不得"):
+        candidate_scores(row)
+
+
 def report_fixture(tmp_path):
     rows = [example(), example(1, status="REJECT")]
     rows[1]["reason_codes"] = ["FOOT_SLIDE_left_REJECT"]
@@ -129,6 +153,31 @@ def test_report_rejects_changed_summary(tmp_path):
     path.write_text(path.read_text() + "\n")
     with pytest.raises(ValueError, match="SHA"):
         analyze_report(tmp_path, count=1)
+
+
+def test_review_only_report_keeps_review_status_and_markdown(tmp_path):
+    path = report_fixture(tmp_path)
+    rows = [json.loads(line) for line in path.read_text().splitlines()]
+    rows[1].update(
+        status="REVIEW",
+        reason_codes=["FOOT_SLIDE_left_REVIEW"],
+        reason_statuses={"FOOT_SLIDE_left_REVIEW": "REVIEW"},
+    )
+    path.write_text("".join(json.dumps(r) + "\n" for r in rows))
+    summary_path = tmp_path / "quality_summary.json"
+    summary = json.loads(summary_path.read_text().replace('"REJECT"', '"REVIEW"'))
+    summary_path.write_text(json.dumps(summary))
+    run_path = tmp_path / "run.json"
+    run = json.loads(run_path.read_text())
+    run["summary_sha256"] = sha256(summary_path)
+    run_path.write_text(json.dumps(run))
+    result, _ = analyze_report(tmp_path, count=1, groups=("review",))
+    assert set(result["groups"]) == {"review"}
+    assert result["groups"]["review"][0]["status"] == "REVIEW"
+    assert result["reason_families_by_status"]["REVIEW"] == {"foot_slide": 1}
+    result["videos"] = {}
+    write_analysis_markdown(result, tmp_path / "review.md")
+    assert "REVIEW当前不进入训练" in (tmp_path / "review.md").read_text()
 
 
 def test_humanml_namespace_composition_and_report_title(tmp_path):

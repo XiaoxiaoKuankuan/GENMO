@@ -222,3 +222,16 @@ caption集合写入analysis.json；按母动作canonical_source_id去重，避�
 脚滑REJECT从70,459/9,845降至6,893/863；碰撞REJECT从21,400/512降至14,443/276；新增根倾角REJECT为169,107/5,874（依次MotionMillion/HumanML3D，各原因可能重叠）。MotionMillion旧PASS中79,385条、HumanML3D旧PASS中1,415条被新增根倾角约束淘汰。候选净增574/1,032；不是简单保留旧PASS并追加动作。
 
 MotionMillion原文本匹配559,922/559,924条，共11,791,690条caption。缺失ID为`Mirror_MotionGV/folder8/494361`与`Mirror_MotionGV/folder8/500208`，分别54/30帧，均不是训练候选；不生成替代文本。156,385条质量及长度候选全部有文本，共3,294,293条caption，并全部恢复官方t2m_60_300划分：train125,085、val7,987、test23,313。该官方划分保持原样；后续混合训练还需进行HumanML3D跨来源去重与泄漏检查，不能直接把156,385条全作为train。本轮MotionMillion交付为全量质量报告和绑定文本目录，尚未编码其新的BUMI T5或构建训练分片。
+
+### 待复核REVIEW第三组视频
+
+REVIEW当前不进入训练。复用原入口，加`--quality-groups review`只渲染待复核组，每个数据集各30条：
+
+```bash
+python tools/eval/render_bumi_motion.py \
+  --quality-report /data0/user/liwei/dataset_reports/humanml3d_umr_bumi3_latest \
+  --output-dir /data0/user/liwei/dataset_reports/humanml3d_umr_bumi3_latest/visual_review/review \
+  --quality-groups review --per-group 30
+```
+
+MotionMillion替换对应数据集目录名。仅选完整60–300帧、training_eligible=false的REVIEW，按实际生效复核原因分层，目录均衡、稳定哈希选样并去重；不只挑极端峰值，样本原因比例也不能代表总体。视频黄色标注REVIEW / NOT IN TRAINING，原动作、文本、配置和资产身份继续核验。默认PASS/REJECT入口行为不变；REVIEW子目录作为现有最新复核集合的第三组，保留前两组对照。
