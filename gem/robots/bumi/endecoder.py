@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -22,7 +23,8 @@ from .feature_codec import (
 )
 from .kinematics import BumiKinematics, resolve_asset_path
 
-STATS_CONTRACT_VERSION = "genmo.bumi_qpos30_stats.v3"
+STATS_CONTRACT_VERSION = "genmo.bumi_qpos30_stats.v4"
+LEGACY_STATS_CONTRACT_VERSION = "genmo.bumi_qpos30_stats.v3"
 
 
 @dataclass(frozen=True)
@@ -132,7 +134,9 @@ class BumiEndecoder(nn.Module):
             stats = json.loads(stats_file.read_text(encoding="utf-8"))
         except json.JSONDecodeError as exc:
             raise ValueError(f"Invalid BUMI stats JSON {stats_file}: {exc}") from exc
-        self._validate_stats(stats, stats_file, allow_placeholder_stats)
+        self.stats_root_height_reference_m = self._validate_stats(
+            stats, stats_file, allow_placeholder_stats
+        )
         mean = torch.as_tensor(stats["mean"], dtype=torch.float32)
         std = torch.as_tensor(stats["std"], dtype=torch.float32)
         if mean.shape != (BUMI_FEATURE_DIM,) or std.shape != (BUMI_FEATURE_DIM,):
@@ -144,12 +148,18 @@ class BumiEndecoder(nn.Module):
             raise ValueError(f"BUMI stats {stats_file} contains NaN or Inf")
         if bool((std < 0).any()):
             raise ValueError(f"BUMI stats {stats_file} contains a negative std")
+        # h = z - z_ref：同步平移高度均值，保持旧模型的归一化特征和世界 qpos 不变。
+        # 只调整内存中的均值；磁盘 stats/kinematics 及其 SHA 绑定保持原样。
+        height_start, height_end = BUMI_FEATURE_SLICES["root_height_offset"]
+        mean[height_start:height_end] += (
+            mean.new_tensor(self.stats_root_height_reference_m) - self.codec.default_root_height
+        )
         self.register_buffer("mean", mean, persistent=False)
         self.register_buffer("std", std.clamp_min(float(clip_std_min)), persistent=False)
         self.obs_indices_dict: dict[str, tuple[int, int]] | None = None
         self.build_obs_indices_dict()
 
-    def _validate_stats(self, stats: Any, path: Path, allow_placeholder_stats: bool) -> None:
+    def _validate_stats(self, stats: Any, path: Path, allow_placeholder_stats: bool) -> float:
         if not isinstance(stats, dict):
             raise ValueError(f"BUMI stats must be a JSON object: {path}")
         if bool(stats.get("is_placeholder", False)) and not allow_placeholder_stats:
@@ -157,8 +167,29 @@ class BumiEndecoder(nn.Module):
                 f"BUMI stats {path} is marked is_placeholder=true. Formal training refuses "
                 "placeholder/identity statistics unless allow_placeholder_stats=true is explicit."
             )
+        version = stats.get("contract_version")
+        if version == LEGACY_STATS_CONTRACT_VERSION:
+            if "root_height_reference_m" in stats:
+                raise ValueError(
+                    f"BUMI stats {path}: explicit root_height_reference_m requires "
+                    f"{STATS_CONTRACT_VERSION}"
+                )
+            reference = float(self.kinematics.source_default_qpos[2])
+        elif version == STATS_CONTRACT_VERSION:
+            reference = stats.get("root_height_reference_m")
+        else:
+            raise ValueError(
+                f"BUMI stats {path}: unsupported contract_version={version!r}; "
+                f"expected {STATS_CONTRACT_VERSION} or {LEGACY_STATS_CONTRACT_VERSION}"
+            )
+        if (
+            isinstance(reference, bool)
+            or not isinstance(reference, (int, float))
+            or not math.isfinite(reference)
+            or reference <= 0.0
+        ):
+            raise ValueError(f"BUMI stats {path}: root_height_reference_m must be finite and > 0")
         expected = {
-            "contract_version": STATS_CONTRACT_VERSION,
             "representation_contract_version": BUMI_REPRESENTATION_CONTRACT_VERSION,
             "robot_name": "bumi",
             "feature_dim": BUMI_FEATURE_DIM,
@@ -182,6 +213,7 @@ class BumiEndecoder(nn.Module):
                 f"{stats.get('kinematics_sha256')!r}, but loaded kinematics is "
                 f"{self.kinematics.kinematics_sha256!r}"
             )
+        return float(reference)
 
     def normalize(self, value: torch.Tensor, *_args: Any, **_kwargs: Any) -> torch.Tensor:
         if value.shape[-1] != BUMI_FEATURE_DIM:

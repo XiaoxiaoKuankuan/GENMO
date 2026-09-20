@@ -159,6 +159,8 @@ def test_full_frames_captions_cache_batch(text_release):
     assert sorted(map(int, report["length_distribution"])) == LENGTHS
     assert report["crop_count"] == 0
     stats = json.loads((root / "stats.json").read_text())
+    assert stats["contract_version"] == "genmo.bumi_qpos30_stats.v4"
+    assert stats["root_height_reference_m"] == pytest.approx(0.48120910, abs=1e-8)
     assert stats["valid_element_counts"][0] == sum(LENGTHS) - len(LENGTHS)
     assert stats["valid_element_counts"][2] == sum(LENGTHS)
 

@@ -91,11 +91,12 @@ class TextPreviewPlayer:
     """本地最新帧源：窗口关闭不停止引擎，慢渲染不阻塞播放或生成。"""
 
     def __init__(self, robot_manifest, kinematics):
-        _, spec = validate_robot_assets(robot_manifest, kinematics)
+        validate_robot_assets(robot_manifest, kinematics)
+        from gem.robots.bumi.kinematics import BumiKinematics
         from gem.runtime.bumi_text_contract import sha256_file
 
         self.pose = PoseSnapshot(sha256_file(kinematics))
-        self.standing = np.asarray(spec["default_qpos"], dtype=np.float32)
+        self.standing = BumiKinematics(kinematics).make_standing_qpos().cpu().numpy().copy()
         self.frames = None
         self.cursor = 0
         self.state = "STAND"

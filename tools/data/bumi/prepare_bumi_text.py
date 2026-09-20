@@ -304,6 +304,7 @@ def statistics(root, output, dataset=None):
     std = (squares / counts - mean.square()).clamp_min(0).sqrt()
     value = dict(
         contract_version=STATS_CONTRACT_VERSION,
+        root_height_reference_m=float(codec.default_root_height),
         representation_contract_version=BUMI_REPRESENTATION_CONTRACT_VERSION,
         robot_name="bumi",
         feature_dim=30,
