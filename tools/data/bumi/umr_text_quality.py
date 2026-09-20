@@ -360,7 +360,27 @@ class QualityEngine:
                         mask[offset : offset + len(values)] |= values > threshold
             mark(code, reasons[code], mask)
         foot_metrics, foot_flags = foot_diagnostics(heights, centers, self.rules)
+        # 文本包含躺/跪/手撑等动作；双脚离地不等于全身悬空。这里只用非足部
+        # body原点的低高度作为保守的支撑迹象，不把它当作精确接触标签。
+        nonfoot = [
+            i for i, name in enumerate(self.kin.body_order) if name not in self.config.ankle_bodies
+        ]
+        root_quat = qpos[:, 3:7] / np.linalg.norm(qpos[:, 3:7], axis=1, keepdims=True)
+        tilt_cos = 1 - 2 * (root_quat[:, 1] ** 2 + root_quat[:, 2] ** 2)
+        low_posture = (
+            qpos[:, 2] - self.rules["ground_height_m"] < self.config.floor_gate_root_height
+        ) | (tilt_cos < np.cos(np.deg2rad(self.config.floor_gate_tilt_degrees)))
+        nonfoot_support = low_posture & (
+            np.min(body[:, nonfoot, 2], axis=1) - self.rules["ground_height_m"]
+            <= self.config.upper_body_ground_height
+        )
+        foot_metrics["nonfoot_support_inferred_fraction"] = float(nonfoot_support.mean())
         for code, level, mask in foot_flags:
+            if code == "LONG_AIRBORNE_REVIEW" and self.rules["posture_policy"] == "diagnostic":
+                mask = mask & ~nonfoot_support
+                if _longest_true_run(mask) < self.rules["feet"]["airborne_review_frames"]:
+                    diagnostic_reasons["FEET_AIRBORNE_WITH_NONFOOT_SUPPORT"] = "REVIEW"
+                    continue
             mark(code, level, mask)
         collision_metrics = {}
         cfg = self.rules["collision"]

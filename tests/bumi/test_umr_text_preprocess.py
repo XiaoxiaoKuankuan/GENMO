@@ -193,6 +193,24 @@ def test_slide_is_not_hidden_by_contact_speed_gate():
     assert any(code == "LONG_AIRBORNE_REVIEW" and status == "REVIEW" for code, status, _ in flags)
 
 
+def test_low_posture_nonfoot_support_does_not_imply_airborne_failure(engine, monkeypatch):
+    # 隔离足部诊断信号，使用真实躯干FK检查策略合成；不声称此合成姿态整体质量通过。
+    qpos = grounded(engine)
+    qpos[:, 2] = 0.06
+    qpos[:, 3:7] = [2**-0.5, 2**-0.5, 0, 0]
+    import tools.data.bumi.umr_text_quality as quality
+
+    monkeypatch.setattr(
+        quality,
+        "foot_diagnostics",
+        lambda *args: ({}, [("LONG_AIRBORNE_REVIEW", "REVIEW", np.ones(60, dtype=bool))]),
+    )
+    result = engine.evaluate(qpos)
+    assert result["metrics"]["feet"]["nonfoot_support_inferred_fraction"] == 1
+    assert "LONG_AIRBORNE_REVIEW" not in result["reason_codes"]
+    assert "FEET_AIRBORNE_WITH_NONFOOT_SUPPORT" in result["diagnostic_reasons"]
+
+
 def test_native_loading_reorders_and_keeps_root(bundle, engine):
     paths, make, _, _ = bundle
     row, _ = make(reorder=True)
