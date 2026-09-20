@@ -123,8 +123,16 @@ class KitSource:
         if len(times) < 2 or not np.isfinite(times).all():
             raise ValueError("MMM 时间戳数量不足或不有限")
         delta = np.diff(times)
-        step = float(np.median(delta))
-        if step <= 0 or not np.allclose(delta, step, atol=1e-5, rtol=1e-3):
+        # 官方 XML 用约六位有效数字序列化，23.0833/23.1 的局部差值不再精确为 1/60。
+        # 用完整时间跨度估计采样周期，再按序列化精度核对绝对网格；不靠局部 median 猜 FPS。
+        step = float((times[-1] - times[0]) / (len(times) - 1))
+        tolerance = max(1e-6, float(np.max(np.abs(times))) * 5e-6)
+        expected = times[0] + np.arange(len(times)) * step
+        if (
+            step <= 0
+            or np.any(delta <= 0)
+            or not np.allclose(times, expected, atol=tolerance, rtol=0)
+        ):
             raise ValueError("MMM 时间戳不是严格递增的均匀采样")
         return {
             "frames": len(times),
@@ -132,6 +140,7 @@ class KitSource:
             "start_time": float(times[0]),
             "last_timestamp": float(times[-1]),
             "duration": float(times[-1] - times[0] + step),
+            "timestamp_tolerance_sec": tolerance,
         }
 
 

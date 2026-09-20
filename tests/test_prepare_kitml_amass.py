@@ -16,6 +16,7 @@ from scipy.spatial.transform import Rotation
 
 from tools.data.kitml.prepare_kitml_amass import (
     GenmoSource,
+    KitSource,
     build,
     load_motion,
     resample_motion,
@@ -196,3 +197,22 @@ def test_existing_genmo_embedded_source_identity_cannot_drift(tmp_path):
     torch.save({key: {"file_name": "other_stageii.npz"}}, path)
     with pytest.raises(ValueError, match="file_name"):
         GenmoSource(path)
+
+
+def test_mmm_six_significant_digit_timestamps_do_not_change_fps(tmp_path):
+    args, _ = fixture(tmp_path, frames=1387, fps=60)
+    path = args.kitml_root / "00001_mmm.xml"
+    text = (
+        "<MMM><Motion><MotionFrames>"
+        + "".join(
+            f"<MotionFrame><Timestep>{i / 60:.6g}</Timestep></MotionFrame>" for i in range(1387)
+        )
+        + "</MotionFrames></Motion></MMM>"
+    )
+    path.write_text(text)
+    source = KitSource(args.kitml_root)
+    assert source.mmm_timing("00001")["fps"] == pytest.approx(60.0)
+    # 一个完整帧的跳变仍须失败，不能以记录精度为由吸收实际时间错误。
+    path.write_text(text.replace("<Timestep>10</Timestep>", "<Timestep>10.01</Timestep>"))
+    with pytest.raises(ValueError, match="均匀采样"):
+        source.mmm_timing("00001")
