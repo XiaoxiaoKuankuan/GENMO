@@ -351,8 +351,9 @@ def main(argv: list[str] | None = None) -> int:
     contract = GmtPolicyContract.from_onnx(args.gmt_policy)
     native_names = endecoder.kinematics.joint_order
     native_to_gmt = contract.native_to_gmt_indices(native_names)
-    idle_qpos = endecoder.kinematics.default_qpos.detach().cpu().numpy().copy()
-    idle_qpos[7:] = contract.default_in_native_order(native_names)
+    idle_qpos = endecoder.kinematics.make_standing_qpos(
+        contract.default_in_native_order(native_names)
+    ).cpu().numpy().copy()
     builder = BumiIncrementalGmtPlanBuilder(
         idle_qpos,
         native_to_gmt,

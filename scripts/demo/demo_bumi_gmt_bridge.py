@@ -239,8 +239,9 @@ class BumiOnlineBridge:
         self.contract = GmtPolicyContract.from_onnx(self.gmt_policy_path)
         self.gmt_policy_sha256 = sha256_file(self.gmt_policy_path)
         self.native_to_gmt = self.contract.native_to_gmt_indices(self.kinematics.joint_order)
-        self.idle_qpos = self.kinematics.default_qpos.detach().cpu().numpy().copy()
-        self.idle_qpos[7:] = self.contract.default_in_native_order(self.kinematics.joint_order)
+        self.idle_qpos = self.kinematics.make_standing_qpos(
+            self.contract.default_in_native_order(self.kinematics.joint_order)
+        ).cpu().numpy().copy()
         self.idle_frames = qpos_timeline_to_gmt_frames(
             np.repeat(self.idle_qpos[None], 110, axis=0),
             fps=50.0,

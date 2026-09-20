@@ -3,6 +3,10 @@
 The module consumes a versioned JSON file exported from the real BUMI MJCF.
 It intentionally has no MuJoCo dependency: MuJoCo is confined to the exporter,
 offline parity validator, and renderer under ``tools/``.
+
+活动 default_qpos 的根高统一为 0.48120910 m，source_default_qpos 保留资产来源
+姿态，用于旧统计量的高度基准兼容。待机通过 make_standing_qpos 按实际关节姿态
+单独计算贴地根高；不改写原资产和指纹，也不逐帧对齐生成动作。
 """
 
 from __future__ import annotations
@@ -24,6 +28,8 @@ from gem.utils.rotation_conversions import (
 )
 
 KINEMATICS_CONTRACT_VERSION = "genmo.bumi_kinematics.v1"
+# 统一编解码参考高度：部署分支的零关节站姿，最低脚底代理点离地 2 mm。
+BUMI_DEFAULT_ROOT_HEIGHT_M = 0.48120910
 
 
 def resolve_asset_path(path: str | Path) -> Path:
@@ -161,6 +167,9 @@ class BumiKinematics(nn.Module):
         default_qpos[3:7] = default_qpos[3:7] / default_quat_norm
         if bool((default_qpos[7:] < lower).any()) or bool((default_qpos[7:] > upper).any()):
             raise ValueError(f"BUMI default_qpos joint values exceed exported ranges in {path}")
+        # 原始 qpos0 仅供旧统计量迁移和资产溯源；活动默认值统一使用部署参考高度。
+        self.register_buffer("source_default_qpos", default_qpos.clone(), persistent=False)
+        default_qpos[2] = BUMI_DEFAULT_ROOT_HEIGHT_M
         self.register_buffer("default_qpos", default_qpos, persistent=False)
 
         addresses = [int(value) for value in _require_list(spec, "joint_qpos_addresses", 21)]
@@ -334,6 +343,26 @@ class BumiKinematics(nn.Module):
         return torch.cat(
             (qpos[..., :3], quaternion / quat_norm, qpos[..., 7:]), dim=-1
         )
+
+    @torch.no_grad()
+    def make_standing_qpos(self, joint_positions=None) -> torch.Tensor:
+        """按实际站姿的脚底代理点对齐地面，仅生成运行时待机姿态。
+
+        默认使用运动学关节零位；Bridge 可传入 GMT 的原生顺序默认关节角度。
+        先做 FK，再将最低脚底代理点放到 z=0.002m；当前 BUMI 可见脚底略低于
+        代理点，这对应约 1mm 的网格离地余量。仅改变根 z，不改变关节角、根旋转
+        或原始 default_qpos，也不对生成中的跳跃等动作逐帧执行贴地处理。
+        """
+        qpos = self.default_qpos.clone()
+        if joint_positions is not None:
+            joints = torch.as_tensor(joint_positions, dtype=qpos.dtype, device=qpos.device)
+            if joints.shape != (21,) or not bool(torch.isfinite(joints).all()):
+                raise ValueError("待机关节角必须为有限的 21 维原生顺序数组")
+            qpos[7:] = joints
+        fk = self.forward_kinematics(qpos)
+        sole = self.get_sole_proxy_points(fk["body_pos_w"], fk["body_quat_w"])
+        qpos[2] += 0.002 - sole["bottom_height"].amin()
+        return qpos
 
     def clamp_joint_positions(self, joint_dof: torch.Tensor) -> torch.Tensor:
         if joint_dof.shape[-1] != 21:

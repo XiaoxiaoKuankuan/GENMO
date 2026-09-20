@@ -52,7 +52,7 @@ def test_canonical_anchor_and_qpos_round_trip(test_kinematics_path) -> None:
     encoded = codec.encode(qpos)
     torch.testing.assert_close(
         encoded.physical_features[0, :3],
-        torch.tensor([1.0, 0.0, 0.1]),
+        torch.tensor([1.0, 0.0, 1.1 - codec.default_root_height]),
         atol=1e-5,
         rtol=1e-5,
     )

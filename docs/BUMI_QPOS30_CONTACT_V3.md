@@ -87,7 +87,9 @@ rotation、root tilt、接触 BCE 和三个直接表示损失从第一步生效�
 
 ## 归一化
 
-stats 契约为 `genmo.bumi_qpos30_stats.v3`，运行环境变量改为
+新 stats 契约为 `genmo.bumi_qpos30_stats.v4`，写入 `root_height_reference_m`；
+默认根高为 **0.48120910 m**，兼容加载旧 v3 stats 并补偿高度均值。
+详见 [根高与旧模型兼容](BUMI_ROOT_HEIGHT.md)。运行环境变量为
 `BUMI_MUSIC_QPOS30_STATS_PATH`。现有五库 93D stats 显示 root XY 位移标准差约为
 `0.0055–0.0061 m/帧`；若机械照搬 SMPL 的 `std<1 -> 1`，根运动监督会缩小约 160 倍。
 因此仍采用“给 std 设下限”的 main 思想，但 BUMI 专用下限为 `0.01`。stats 文件会绑定

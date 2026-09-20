@@ -177,7 +177,7 @@ root linear/angular velocity 异常、持续或碎片化贴地动作，以及低
 
 ## First-frame canonicalization
 
-每个 120 帧训练 crop 独立建立 anchor，不使用 OMG 的 10 帧历史。设 crop 第一帧 root position 为 `p0`，root quaternion 为 `q0`；从 `q0` 提取绕世界 Z 轴的 yaw，并记对应 heading rotation 为 `H0`。`z_default` 来自真实 kinematics 资产中的 `default_qpos[2]`：
+每个 120 帧训练 crop 独立建立 anchor，不使用 OMG 的 10 帧历史。设 crop 第一帧 root position 为 `p0`，root quaternion 为 `q0`；从 `q0` 提取绕世界 Z 轴的 yaw，并记对应 heading rotation 为 `H0`。`z_default` 来自运行时 `BumiKinematics.default_qpos[2]`，统一为 **0.48120910 m**；原始资产值保留用于溯源和[旧统计量兼容](BUMI_ROOT_HEIGHT.md)：
 
 ```text
 p_anchor = [p0.x, p0.y, z_default]

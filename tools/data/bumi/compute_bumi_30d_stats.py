@@ -193,6 +193,7 @@ def main() -> None:
     mean, std = accumulator.finalize()
     report = {
         "contract_version": STATS_CONTRACT_VERSION,
+        "root_height_reference_m": float(codec.default_root_height),
         "representation_contract_version": BUMI_REPRESENTATION_CONTRACT_VERSION,
         "robot_name": "bumi",
         "feature_dim": BUMI_FEATURE_DIM,
