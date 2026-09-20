@@ -72,7 +72,7 @@ def mujoco_joint_order(model: mujoco.MjModel) -> list[str]:
     return [str(name) for name in names]
 
 
-def checked_umr_qpos(row, run, model):
+def checked_umr_qpos(row, run, model, source_engine=None):
     """直接验证原始UMR数组与双输入指纹，不依赖旧报告中误写的辅助sequence字段。"""
     from tools.data.bumi.umr_text_preprocess import read_npz
     from tools.eval.bumi_quality_review import sha256
@@ -84,6 +84,32 @@ def checked_umr_qpos(row, run, model):
         raise ValueError("动作路径越过原数据根目录")
     if sha256(motion) != row["source_sha256"] or sha256(human) != row["human_sha256"]:
         raise ValueError(f"动作或人体在筛选后改变: {motion}")
+    if run["identity"]["paths"].get("dataset") == "humanml3d":
+        from tools.data.bumi.umr_text_preprocess import load_umr
+
+        if source_engine is None:
+            raise ValueError("HumanML3D渲染必须提供报告绑定的源验证器")
+        ordered, metadata = load_umr(row, run["identity"]["paths"], source_engine)
+        for field in (
+            "source_motion_id",
+            "source_sequence_key",
+            "source_file",
+            "canonical_source_id",
+            "frames",
+        ):
+            if metadata[field] != row[field]:
+                raise ValueError(f"HumanML3D源身份与报告不同: {field}")
+        row["verified_source_sequence_key"] = metadata["source_sequence_key"]
+        row["verified_robot_xml"] = str(source_engine.xml)
+        row["verified_captions"] = source_engine.humanml_catalog[1][metadata["source_motion_id"]][
+            "captions"
+        ]
+        names, expected = list(source_engine.kin.joint_order), mujoco_joint_order(model)
+        if len(names) != 21 or set(names) != set(expected):
+            raise ValueError("HumanML3D机器人关节名称不匹配")
+        return np.concatenate(
+            (ordered[:, :7], ordered[:, [names.index(n) + 7 for n in expected]]), axis=1
+        )
     data = read_npz(motion, object_names=True)
     qpos = data["qpos"]
     if (
@@ -167,11 +193,16 @@ def montage_frames(qpos, row, group, index, count, model, data, renderer, width,
         name = "HIGH QUALITY / PASS" if group == "high_quality" else "LOW QUALITY / REJECT"
         draw.text(
             (20, 10),
-            f"MotionMillion    {name}    {index + 1:02d}/{count:02d}",
+            f"{'HumanML3D' if row.get('dataset') == 'humanml3d' else 'MotionMillion'}    {name}    {index + 1:02d}/{count:02d}",
             font=heading,
             fill=color,
         )
-        draw.text((20, 49), row["source_motion_id"], font=font, fill=(235, 240, 248))
+        caption = row["source_motion_id"]
+        if row.get("verified_captions"):
+            caption += "  |  " + row["verified_captions"][0]["caption"]
+        while draw.textlength(caption, font=font) > width - 45:
+            caption = caption[:-4] + "..."
+        draw.text((20, 49), caption, font=font, fill=(235, 240, 248))
         draw.line((width // 2, 90, width // 2, 90 + panel_height), fill=(80, 90, 110), width=2)
         draw.text(
             (16, 99),
@@ -241,7 +272,7 @@ def render_montage(rows, group, run, model, path, args):
             stream.options = {"crf": "23", "preset": "fast"}
             stream.thread_count = 4
             for index, row in enumerate(rows):
-                qpos = checked_umr_qpos(row, run, model)
+                qpos = checked_umr_qpos(row, run, model, getattr(args, "source_engine", None))
                 start = total
                 for pixels in montage_frames(
                     qpos,
@@ -293,7 +324,8 @@ def render_montage(rows, group, run, model, path, args):
 
 
 def render_quality_review(args):
-    from tools.data.bumi.umr_text_quality import verify_asset_files
+    from tools.data.bumi.umr_text_preprocess import source_contract_hashes
+    from tools.data.bumi.umr_text_quality import QualityEngine, load_rules, verify_asset_files
     from tools.eval.bumi_quality_review import analyze_report, sha256, write_analysis_markdown
 
     output = args.output_dir.resolve()
@@ -321,6 +353,20 @@ def render_quality_review(args):
         ):
             raise ValueError("机器人资产已改变")
         archive_config(run, staged)
+        if source_contract_hashes(paths) != run["identity"].get("source_contract_hashes", {}):
+            raise ValueError("报告绑定的源清单或文本已改变")
+        args.source_engine = None
+        if paths.get("dataset") == "humanml3d":
+            for field in ("retarget_config", "batch_config"):
+                if paths.get(field) and sha256(paths[field]) != run["identity"][field + "_sha256"]:
+                    raise ValueError(f"报告绑定的配置已改变: {field}")
+            args.source_engine = QualityEngine(
+                load_rules(staged / "filter_config.yaml"),
+                paths["robot_xml"],
+                paths["kinematics"],
+                paths["retarget_config"],
+                paths["batch_config"],
+            )
         model = mujoco.MjModel.from_xml_path(paths["robot_xml"])
         if model.nq != 28:
             raise ValueError("MJCF不是qpos28机器人")
@@ -350,8 +396,13 @@ def render_quality_review(args):
         for group in analysis["groups"].values():
             for row in group:
                 path = Path(paths["input_root"]) / row["relative_path"]
-                if sha256(path) != row["source_sha256"]:
+                if (
+                    sha256(path) != row["source_sha256"]
+                    or sha256(row["human_path"]) != row["human_sha256"]
+                ):
                     raise ValueError("渲染期间源动作改变")
+        if source_contract_hashes(paths) != run["identity"].get("source_contract_hashes", {}):
+            raise ValueError("渲染期间源清单或文本改变")
         (staged / "analysis.json").write_text(json.dumps(analysis, ensure_ascii=False, indent=2))
         (staged / "run.json").write_text(json.dumps(run, ensure_ascii=False, indent=2))
         write_analysis_markdown(analysis, staged / "分析报告.md")

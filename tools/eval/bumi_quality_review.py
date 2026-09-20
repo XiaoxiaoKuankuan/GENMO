@@ -189,7 +189,7 @@ def analyze_report(root, count=30):
     if sha256(root / "train_candidates.jsonl") != summary["candidate_manifest_sha256"]:
         raise ValueError("训练候选清单SHA不符")
     statuses, frames, lengths, eligible_folders, source_keys = (Counter() for _ in range(5))
-    cross = defaultdict(Counter)
+    cross, composition = defaultdict(Counter), defaultdict(Counter)
     families, reject_families = defaultdict(Counter), Counter()
     intersections, folders, sources = Counter(), defaultdict(Counter), Counter()
     total_bytes, eligible, sequence_key_mismatches = 0, 0, 0
@@ -205,7 +205,17 @@ def analyze_report(root, count=30):
                 frames[status] += n
                 total_bytes += row.get("source_bytes", 0)
                 folders[row["folder"]][status] += 1
-                sources[row.get("source_motion_id", "unknown").split("/", 1)[0]] += 1
+                namespace = (
+                    "humanml3d"
+                    if row.get("dataset") == "humanml3d"
+                    else row.get("source_motion_id", "unknown").split("/", 1)[0]
+                )
+                sources[namespace] += 1
+                if row.get("dataset") == "humanml3d":
+                    composition[status]["mirrored" if row["mirrored"] else "original"] += 1
+                    composition[status][
+                        "subclip" if "__seg_" in row["source_motion_id"] else "full_source"
+                    ] += 1
                 source_keys[row.get("source_sequence_key", "missing")] += 1
                 if (
                     row.get("human_path")
@@ -260,6 +270,8 @@ def analyze_report(root, count=30):
         raise ValueError("逐条报告与汇总记录数/状态/帧数/来源大小不一致")
     analysis = dict(
         schema="genmo.bumi_quality_review.v1",
+        dataset=run.get("identity", {}).get("paths", {}).get("dataset", "motionmillion"),
+        composition_by_status=dict(composition),
         report_root=str(root),
         run_fingerprint=run["fingerprint"],
         original_summary=summary,
@@ -277,6 +289,16 @@ def analyze_report(root, count=30):
         selection_policy="目的性复核样本；高组分层选活动PASS，低组按REJECT原因分层；完整序列，非随机总体估计",
         groups={g: pool.choose(g, count) for g in ("high_quality", "low_quality")},
     )
+    delivery = root / "delivery_summary.json"
+    if delivery.is_file():
+        value = json.loads(delivery.read_text())
+        if value["quality_fingerprint"] != run["fingerprint"] or value["train_records"] != eligible:
+            raise ValueError("训练交付与质量报告不一致")
+        for path, digest in value["files"].items():
+            if sha256(path) != digest:
+                raise ValueError(f"训练交付文件改变: {path}")
+        analysis["training_delivery"] = value
+        analysis["training_delivery_sha256"] = sha256(delivery)
     return analysis, run
 
 
@@ -286,8 +308,10 @@ def write_analysis_markdown(analysis, output):
     total = summary["processed_records"]
     passed = summary["status_counts"]["PASS"]
     eligible = summary["status_counts"]["TRAIN_ELIGIBLE"]
+    dataset_name = "HumanML3D" if analysis.get("dataset") == "humanml3d" else "MotionMillion"
+    sample_count = sum(len(rows) for rows in analysis["groups"].values())
     lines = [
-        "# MotionMillion UMR 动作质量分析与60条视频复核",
+        f"# {dataset_name} UMR 动作质量分析与{sample_count}条视频复核",
         "",
         f"报告身份：`{analysis['run_fingerprint']}`。全量逐条报告的数量、状态、帧数、字节数均与原汇总一致。",
         "",
@@ -311,7 +335,7 @@ def write_analysis_markdown(analysis, output):
     lines += [
         "",
         f"质量PASS中有{passed - eligible:,}条因长度不适用而未进入训练候选：不足60帧{length.get('under_60', 0):,}条，超过300帧{length.get('over_300', 0):,}条。长度不适用不等同于动作质量差。",
-        f"输入共{hours:.2f}小时，机器人NPZ {summary['source_bytes'] / 1e9:.3f} GB；训练候选{summary['hours_by_status']['TRAIN_ELIGIBLE']:.2f}小时，对应原NPZ {summary['eligible_source_bytes'] / 1e9:.3f} GB。候选仍需文本、T5、split绑定后才能称为训练release。",
+        f"输入共{hours:.2f}小时，机器人NPZ {summary['source_bytes'] / 1e9:.3f} GB；训练候选{summary['hours_by_status']['TRAIN_ELIGIBLE']:.2f}小时，对应原NPZ {summary['eligible_source_bytes'] / 1e9:.3f} GB。训练交付状态另按绑定的交付报告说明，不能仅由筛选候选数推断。",
         "",
         "## 质量问题",
         "",
@@ -350,7 +374,7 @@ def write_analysis_markdown(analysis, output):
         "",
         "## 解释与边界",
         "",
-        f"- 来源命名空间统计：`{json.dumps(analysis['source_namespaces'], ensure_ascii=False)}`。结论对应这批实际转换数据，不能泛化为MotionMillion全部来源。",
+        f"- 来源命名空间统计：`{json.dumps(analysis['source_namespaces'], ensure_ascii=False)}`。结论对应这批实际转换数据，不能泛化为该数据集全部来源。",
         "- 筛选是数值与运动学门禁；凸包碰撞近似、接触候选脚滑与悬空规则仍需结合视频复核。姿态低不直接等于质量差，完整动作没有再次贴地或平滑。",
         "- 高组从有活动的PASS中按移动、转向、低姿态和关节活动分组，低组覆盖不同REJECT原因；两组均平衡目录并去重。视频样本用于看清差异，不是随机抽样估计全库比例。",
         "- 视频为双视角、原始30Hz、完整动作顺序拼接。视角B地面半透明，便于观察穿地；相机变化不改变qpos。红框只标识当前帧命中原报告异常区间。",
@@ -359,8 +383,36 @@ def write_analysis_markdown(analysis, output):
         lines.append(
             f"- 旧报告{analysis['source_sequence_key_mismatches']:,}条的辅助source_sequence_key字段与人体文件名不一致，源于旧适配器循环变量覆盖。原始source_motion_id、文件SHA和质量计算不受该字段影响；本次视频另存verified_source_sequence_key并逐条核验原NPZ。原报告未改写，后续输出的代码已修正。"
         )
+    if analysis.get("composition_by_status"):
+        lines += [
+            "",
+            "## 原动作、镜像与子片段",
+            "",
+            "| 状态 | 原动作 | 镜像 | 完整源动作 | 子片段 |",
+            "|---|---:|---:|---:|---:|",
+        ]
+        for status, values in analysis["composition_by_status"].items():
+            lines.append(
+                f"| {status} | {values.get('original', 0):,} | {values.get('mirrored', 0):,} | {values.get('full_source', 0):,} | {values.get('subclip', 0):,} |"
+            )
+        lines.append(
+            "原动作/镜像与完整源动作/子片段是两种交叉维度，不能把四列相加；视频按canonical_source_id去重，同组不会重复选择同一母动作的镜像或子片段。"
+        )
+    if analysis.get("training_delivery"):
+        value = analysis["training_delivery"]
+        lines += [
+            "",
+            "## 已有训练交付",
+            "",
+            f"交付报告与本次筛选fingerprint、候选数及所列关键文件SHA一致。已构建{value['train_records']:,}条、{value['train_captions']:,}条caption；split为`{value['splits']}`。动作release {value['storage']['train_release']['bytes'] / 1e9:.3f} GB，T5 {value['storage']['t5_features']['bytes'] / 1e9:.3f} GB，合计{value['train_and_t5_bytes'] / 1e9:.3f} GB。本次仅复核既有交付，不重建数据或启动训练。",
+        ]
+    for group, rows in analysis["groups"].items():
+        lines += [
+            "",
+            f"选样 `{group}` 类型构成：`{dict(Counter(r['selection_category'] for r in rows))}`。某类REJECT不存在或独立来源不足时，从其他实际问题类型补齐，不制造不存在的严重问题样本。",
+        ]
     for group, video in analysis["videos"].items():
-        title = "高质量30例" if group == "high_quality" else "低质量30例"
+        title = ("高质量" if group == "high_quality" else "低质量") + f"{len(video['chapters'])}例"
         lines += [
             "",
             f"## {title}",

@@ -11,7 +11,13 @@ from collections import Counter
 
 import pytest
 
-from tools.eval.bumi_quality_review import CandidatePool, analyze_report, candidate_scores, sha256
+from tools.eval.bumi_quality_review import (
+    CandidatePool,
+    analyze_report,
+    candidate_scores,
+    sha256,
+    write_analysis_markdown,
+)
 
 
 def example(number=0, status="PASS", folder="folder0"):
@@ -82,6 +88,9 @@ def report_fixture(tmp_path):
     candidates.write_text(json.dumps(rows[0]) + "\n")
     summary = dict(
         run_fingerprint="fixture",
+        processed_records=2,
+        hours_by_status={"PASS": 1 / 600, "REJECT": 1 / 600, "TRAIN_ELIGIBLE": 1 / 600},
+        eligible_source_bytes=100,
         status_counts={"PASS": 1, "REJECT": 1, "TRAIN_ELIGIBLE": 1},
         frames_by_status={"PASS": 180, "REJECT": 180, "TRAIN_ELIGIBLE": 180},
         source_bytes=200,
@@ -118,3 +127,27 @@ def test_report_rejects_changed_summary(tmp_path):
     path.write_text(path.read_text() + "\n")
     with pytest.raises(ValueError, match="SHA"):
         analyze_report(tmp_path, count=1)
+
+
+def test_humanml_namespace_composition_and_report_title(tmp_path):
+    path = report_fixture(tmp_path)
+    rows = [json.loads(line) for line in path.read_text().splitlines()]
+    for index, row in enumerate(rows):
+        row.update(dataset="humanml3d", mirrored=bool(index))
+        row["source_motion_id"] = "M000002__seg_1000_7000" if index else "000002"
+    path.write_text("".join(json.dumps(row) + "\n" for row in rows))
+    run_path = tmp_path / "run.json"
+    run = json.loads(run_path.read_text())
+    run["identity"] = {"paths": {"dataset": "humanml3d"}}
+    run_path.write_text(json.dumps(run))
+    analysis, _ = analyze_report(tmp_path, count=1)
+    assert analysis["source_namespaces"] == {"humanml3d": 2}
+    assert analysis["composition_by_status"] == {
+        "PASS": {"original": 1, "full_source": 1},
+        "REJECT": {"mirrored": 1, "subclip": 1},
+    }
+    analysis["videos"] = {}
+    output = tmp_path / "analysis.md"
+    write_analysis_markdown(analysis, output)
+    assert output.read_text().startswith("# HumanML3D UMR 动作质量分析与2条视频复核")
+    assert "MotionMillion" not in output.read_text()

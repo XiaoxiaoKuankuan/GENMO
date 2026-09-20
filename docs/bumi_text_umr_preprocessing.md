@@ -214,3 +214,17 @@ H.264/1280×720/30FPS，两端完整解码与原始帧数一致；7个交付文�
 `分析报告.md`包含汇总、目录差异和每条动作的视频时间索引，`analysis.json`包含全部
 60条原报告指标、选样类别和验证身份；同时交付原run/summary及按SHA恢复的原筛选配置。
 日志`/data0/user/liwei/logs/bumi_text_umr/motionmillion_quality_review.log`退出码0。
+
+### HumanML3D复核使用同一入口
+
+将上述`--quality-report`改为`/data0/user/liwei/dataset_reports/humanml3d_umr_bumi3_v1`，
+`--output-dir`改为该目录下的`visual_review`即可。入口自动识别报告数据集，复用原
+HumanML3D加载器校验源交付清单、机器人/人体SHA、迁移前路径、XML与镜像/子片段
+身份，不对已经Z-up的机器人输出再次旋转。视频额外显示第一条原始caption，完整
+caption集合写入analysis.json；按母动作canonical_source_id去重，避免同组被镜像
+或同一母动作的子片段重复占据。不存在的REJECT类型由其他实际问题类别补齐。
+
+分析中分别统计原动作/镜像和完整源动作/子片段，避免将两个交叉维度相加。若原报告
+已有delivery_summary.json，还须核对其筛选身份、训练条数和关键文件SHA后记录
+已有训练交付；不能仅根据筛选候选数宣称训练数据已经构建。不同数据集的视频属于
+不同复核场景，本次HumanML3D不替换此前用户要求保留的MotionMillion交付。

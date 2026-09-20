@@ -523,6 +523,8 @@ def humanml_bundle(tmp_path, bundle, engine):
 def test_humanml_full_source_check_mirrors_segments_and_training_build(
     humanml_bundle, tmp_path, engine
 ):
+    from tools.eval.render_bumi_motion import checked_umr_qpos
+
     options, robot, _ = humanml_bundle
     assert run_filter(options) == 0
     summary = json.loads((options.output / "quality_summary.json").read_text())
@@ -540,6 +542,14 @@ def test_humanml_full_source_check_mirrors_segments_and_training_build(
             record["embeddings"] = embedding_payload["records"][0]["embeddings"]
             qpos, _ = gate.read_candidate(path, record)
             np.testing.assert_array_equal(qpos.numpy(), grounded(engine))
+            rendered = checked_umr_qpos(row, gate.run, gate.engine.model, gate.engine)
+            np.testing.assert_array_equal(rendered, qpos.numpy())
+            assert row["verified_source_sequence_key"] == record["motion_id"]
+            assert row["verified_captions"][0]["caption"] == record["captions"][0]
+            with pytest.raises(ValueError, match="源身份"):
+                checked_umr_qpos(
+                    dict(row, source_motion_id="wrong"), gate.run, gate.engine.model, gate.engine
+                )
         bad = dict(payload["records"][0], split="val")
         with pytest.raises(InputContractError, match="训练集"):
             gate.validate_identity(gate.lookup(Path(bad["qpos_path"])), bad)
