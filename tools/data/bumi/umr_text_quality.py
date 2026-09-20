@@ -5,7 +5,8 @@ XML 的 MuJoCo FK 补充完整脚网格穿地、独立支撑候选滑移、悬�
 机器人关节按名称映射，并取 XML 与 UMR 生成配置限位的交集，避免遗漏双膝0.1rad
 下界。每个批处理 worker 常驻一个模型，逐帧 FK 不启动渲染、不使用 GPU。
 
-文本完整动作默认只记录坐躺等姿态，不执行音乐库的站立风格淘汰。所有坏帧区间为
+文本完整动作不执行音乐库的复合站立风格淘汰；root_tilt可独立启用根相对世界竖直
+方向的持续倾角淘汰，不能被diagnostic姿态策略移除。所有坏帧区间为
 左闭右开，仅供定位，不裁剪动作或复用整段 caption 标注局部动作。碰撞为凸包近似，
 脚滑为网格高度与垂向速度推定支撑后的诊断，PASS不代表动力学或实机质量验收。
 """
@@ -44,6 +45,20 @@ def load_rules(path):
     require(raw["schema"] == CONFIG_SCHEMA, "不支持的UMR文本质量配置")
     require(raw["training_frames"] == [60, 300], "文本分支要求完整60..300帧")
     require(raw["posture_policy"] in {"diagnostic", "standing"}, "未知姿态策略")
+    if "root_tilt" in raw:
+        tilt = raw["root_tilt"]
+        require(set(tilt) == {"reject_degrees", "consecutive_frames"}, "根倾角配置字段错误")
+        require(
+            not isinstance(tilt["reject_degrees"], bool)
+            and isinstance(tilt["reject_degrees"], (int, float))
+            and np.isfinite(tilt["reject_degrees"])
+            and 0 < tilt["reject_degrees"] < 180,
+            "根倾角阈值必须在0..180度之间",
+        )
+        require(
+            type(tilt["consecutive_frames"]) is int and tilt["consecutive_frames"] >= 1,
+            "根倾角持续帧数必须为正整数",
+        )
     require(
         raw["source_contracts"]
         == {
@@ -375,6 +390,17 @@ class QualityEngine:
         ]
         root_quat = qpos[:, 3:7] / np.linalg.norm(qpos[:, 3:7], axis=1, keepdims=True)
         tilt_cos = 1 - 2 * (root_quat[:, 1] ** 2 + root_quat[:, 2] ** 2)
+        tilt_degrees = np.rad2deg(np.arccos(np.clip(tilt_cos, -1, 1)))
+        tilt_metrics = None
+        if "root_tilt" in self.rules:
+            cfg = self.rules["root_tilt"]
+            tilt_metrics = _signal_metrics(tilt_degrees, cfg["reject_degrees"])
+            tilt_metrics.update(
+                threshold_degrees=cfg["reject_degrees"],
+                reject_consecutive_frames=cfg["consecutive_frames"],
+            )
+            if tilt_metrics["max_consecutive_exceed_frames"] >= cfg["consecutive_frames"]:
+                mark("ROOT_TILT_SUSTAINED", "REJECT", tilt_degrees > cfg["reject_degrees"])
         low_posture = (
             qpos[:, 2] - self.rules["ground_height_m"] < self.config.floor_gate_root_height
         ) | (tilt_cos < np.cos(np.deg2rad(self.config.floor_gate_tilt_degrees)))
@@ -411,6 +437,8 @@ class QualityEngine:
                 if _longest_true_run(mask) >= cfg["consecutive_frames"]:
                     mark(f"SELF_COLLISION_{pair}", level, mask)
         metrics = decision["metrics"]
+        if tilt_metrics is not None:
+            metrics["root_tilt"] = tilt_metrics
         metrics.update(
             feet=foot_metrics,
             collisions=collision_metrics,

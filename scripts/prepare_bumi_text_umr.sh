@@ -19,14 +19,14 @@ BUMI_EXTRA_ARGS=()
 if [[ "$BUMI_DATASET" == humanml3d ]]; then
   BUMI_INPUT_ROOT="${BUMI_INPUT_ROOT:-/data2/user/liwei/hml3d_umr}"
   BUMI_SOURCE_ROOT="${BUMI_SOURCE_ROOT:-/data0/user/liwei/datasets/humanml3d_umr_source_v1}"
-  BUMI_REPORT_ROOT="${BUMI_REPORT_ROOT:-/data0/user/liwei/dataset_reports/humanml3d_umr_bumi3_v1}"
+  BUMI_REPORT_ROOT="${BUMI_REPORT_ROOT:-/data0/user/liwei/dataset_reports/humanml3d_umr_bumi3_latest}"
   BUMI_EXPECTED_RECORDS="${BUMI_EXPECTED_RECORDS:-23242}"
   BUMI_EXTRA_ARGS=(--recorded-output-root "${BUMI_RECORDED_OUTPUT_ROOT:-/home/user/hml3d_umr/out_umr/bumi3}"
                    --recorded-robot-xml "${BUMI_RECORDED_ROBOT_XML:-/home/user/UMR/assets/bumi3/mjcf/bumi3_retarget.xml}")
 else
   BUMI_INPUT_ROOT="${BUMI_INPUT_ROOT:-/data2/user/motion_dataset/millionmotion/umr_change/all}"
   BUMI_SOURCE_ROOT="${BUMI_SOURCE_ROOT:-/data2/user/motion_dataset/millionmotion/pre_change/all}"
-  BUMI_REPORT_ROOT="${BUMI_REPORT_ROOT:-/data0/user/liwei/dataset_reports/motionmillion_umr_bumi3_v1}"
+  BUMI_REPORT_ROOT="${BUMI_REPORT_ROOT:-/data0/user/liwei/dataset_reports/motionmillion_umr_bumi3_latest}"
   BUMI_EXPECTED_RECORDS="${BUMI_EXPECTED_RECORDS:-559924}"
 fi
 export OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1
@@ -46,7 +46,7 @@ CUDA_VISIBLE_DEVICES="" "$BUMI_PYTHON" -u -B tools/data/bumi/prepare_bumi_text.p
 
 if [[ "${BUMI_BUILD_TRAINING:-0}" == 1 ]]; then
   [[ "$BUMI_DATASET" == humanml3d ]] || { echo '自动文本清单构建仅支持HumanML3D' >&2; exit 2; }
-  BUMI_RELEASE_ROOT="${BUMI_RELEASE_ROOT:-/data0/user/liwei/datasets/bumi_text_humanml3d_umr_pass_v1}"
+  BUMI_RELEASE_ROOT="${BUMI_RELEASE_ROOT:-/data0/user/liwei/datasets/bumi_text_humanml3d_umr_pass_latest}"
   BUMI_T5_ROOT="${BUMI_T5_ROOT:-${BUMI_RELEASE_ROOT}_t5}"
   BUMI_T5_MODEL="${BUMI_T5_MODEL:-/data0/user/liwei/models/t5-3b_bed96aab}"
   BUMI_ENCODE_PYTHON="${BUMI_ENCODE_PYTHON:-/data0/user/liwei/envs/GENMO-cu128/bin/python}"

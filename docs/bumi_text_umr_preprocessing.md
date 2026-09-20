@@ -267,3 +267,16 @@ ERROR为0。PASS仅419条因长度排除（不足60帧405、超过300帧14），
 和文本可读后原子发布；图像检查不代表动力学验收。第一条caption过长时画面省略，
 完整caption集合保留在analysis.json。日志`/data0/user/liwei/logs/bumi_text_umr/humanml3d_quality_review.log`
 退出码0，临时QA图、incoming与服务器staging均已清理。
+
+## 2026-09-20用户确认的新筛选规则
+
+脚滑REVIEW/REJECT分别改为>0.75/>1.5 m/s，仍需连续6个相邻帧区间。
+自碰撞额外深度阈值保留>1/>5 cm，REVIEW/REJECT均需连续超过10帧，即至少11帧。
+新增独立根倾角规则：根竖直轴相对世界Z轴倾角>30度，连续至少15帧即REJECT；
+绕世界Z轴的纯转向不触发。它独立于旧的坐躺诊断策略，因此弯腰/侧倾/躺姿持续超限
+也会被淘汰。其他数值、穿地、悬空及完整60–300帧要求不变。
+
+启动器默认新报告目录改为`humanml3d_umr_bumi3_latest`和
+`motionmillion_umr_bumi3_latest`；HumanML3D训练输出改为
+`bumi_text_humanml3d_umr_pass_latest`及对应`_t5`。新一轮全量结果核验通过后删除
+被替代的旧报告和旧质量视频，保留用户原始数据；旧结果的数量记录仅作变更历史。

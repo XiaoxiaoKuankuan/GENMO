@@ -1,5 +1,7 @@
 # MotionMillion/HumanML3D -> UMR -> BUMI 文本完整动作的共用离线筛选配置。
-# 复用音乐分支的30Hz连续性阈值；坐、跪、躺和根倾角只报告，不作为站立风格淘汰。
+# 复用音乐分支的30Hz连续性阈值；增加用户指定的根倾角持续超限淘汰。
+# 2026-09-20：脚滑REVIEW/REJECT为0.75/1.5m/s；碰撞连续超过10帧；
+# 根相对世界竖直倾角大于30度连续至少15帧即REJECT，俯仰/侧倾合并计算。
 # 新增脚网格穿地、独立候选支撑滑移、连续悬空及凸包碰撞诊断。阈值是首版离线
 # 数据门禁，需结合报告和回放校准，不代表动力学或实机验收。原始qpos不修正、不裁剪。
 schema: genmo.bumi_umr_text_quality_config.v1
@@ -16,6 +18,9 @@ source_contracts:
 ground_height_m: 0.0
 training_frames: [60, 300]
 posture_policy: diagnostic
+root_tilt:
+  reject_degrees: 30.0
+  consecutive_frames: 15
 core:
   minimum_frames: 4
   quaternion_norm_error_max: 0.001
@@ -59,8 +64,8 @@ feet:
   support_height_max_m: 0.035
   support_vertical_speed_max_m_s: 0.20
   support_min_frames: 3
-  slide_review_m_s: 0.25
-  slide_reject_m_s: 0.75
+  slide_review_m_s: 0.75
+  slide_reject_m_s: 1.5
   slide_consecutive_frames: 6
   airborne_height_m: 0.05
   airborne_review_frames: 30
@@ -68,5 +73,5 @@ collision:
   # 使用每个刚体对相对XML默认姿态的额外穿透深度；原始深度也保留。
   review_extra_depth_m: 0.01
   reject_extra_depth_m: 0.05
-  consecutive_frames: 3
+  consecutive_frames: 11
   allowed_body_pairs: []

@@ -191,9 +191,50 @@ def test_slide_is_not_hidden_by_contact_speed_gate():
     centers[:, :, 0] = np.arange(60)[:, None] / 30
     metrics, flags = foot_diagnostics(heights, centers, rules)
     assert metrics["left"]["support_edge_fraction"] == 1
+    assert any(code == "FOOT_SLIDE_left_REVIEW" for code, _, _ in flags)
+    assert not any(code.endswith("REJECT") for code, _, _ in flags)
+    _, flags = foot_diagnostics(heights, centers * 2, rules)
     assert any(code == "FOOT_SLIDE_left_REJECT" for code, _, _ in flags)
     _, flags = foot_diagnostics(heights + 0.06, centers * 0, rules)
     assert any(code == "LONG_AIRBORNE_REVIEW" and status == "REVIEW" for code, status, _ in flags)
+
+
+@pytest.mark.parametrize(
+    "degrees,frames,rejected", [(29.9, 20, False), (30.1, 14, False), (30.1, 15, True)]
+)
+def test_root_tilt_threshold_and_duration(engine, degrees, frames, rejected):
+    qpos = grounded(engine, frames=frames)
+    angle = np.deg2rad(degrees) / 2
+    qpos[:, 3:7] = [np.cos(angle), np.sin(angle), 0, 0]
+    result = engine.evaluate(qpos)
+    assert ("ROOT_TILT_SUSTAINED" in result["reason_codes"]) == rejected
+    if rejected:
+        assert result["reason_statuses"]["ROOT_TILT_SUSTAINED"] == "REJECT"
+        assert result["issue_intervals"]["ROOT_TILT_SUSTAINED"] == [[0, frames]]
+    qpos[:, 3:7] = [np.cos(angle), 0, 0, np.sin(angle)]
+    assert "ROOT_TILT_SUSTAINED" not in engine.evaluate(qpos)["reason_codes"]
+
+
+@pytest.mark.parametrize(
+    "depth,frames,level",
+    [
+        (0.009, 20, None),
+        (0.02, 10, None),
+        (0.02, 11, "REVIEW"),
+        (0.06, 10, None),
+        (0.06, 11, "REJECT"),
+    ],
+)
+def test_collision_requires_more_than_ten_frames(engine, monkeypatch, depth, frames, level):
+    qpos = grounded(engine, frames=30)
+    pair = "l_arm_yaw_link / r_arm_yaw_link"
+    baseline = engine.reference_depths.get(pair, 0)
+    calls = iter(range(len(qpos)))
+    monkeypatch.setattr(
+        engine, "collision_depths", lambda: {pair: baseline + depth} if next(calls) < frames else {}
+    )
+    result = engine.evaluate(qpos)
+    assert result["reason_statuses"].get("SELF_COLLISION_" + pair) == level
 
 
 def test_low_posture_nonfoot_support_does_not_imply_airborne_failure(engine, monkeypatch):
