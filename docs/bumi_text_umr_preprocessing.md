@@ -153,3 +153,25 @@ python tools/data/bumi/prepare_bumi_text.py build \
 ## 验证范围
 
 `tests/bumi/test_umr_text_preprocess.py` 用真实XML和网格、合成源数据测试数值异常、关节顺序、时间线、源SHA变化、有效限位、脚滑/悬空、凸包默认重叠、并行与续跑、长度策略、PASS构建与失败清理。真实数据验证的条数和结果记录在根目录 `记录文本.md`；不得将小样本比例写成559924条的全量质量结果。
+
+## 已有筛选结果分析与高低质量视频
+
+复用原`tools/eval/render_bumi_motion.py`，质量复核模式按报告原判定选样并渲染，不重跑
+全量筛选、不改写历史报告。分析模块`tools/eval/bumi_quality_review.py`核对汇总SHA、
+完整JSONL统计、候选清单SHA，按动作归并原因，并区分质量状态和长度资格。
+
+```bash
+cd /home/user/liwei/GENMO-bumi-text
+MUJOCO_GL=egl MUJOCO_EGL_DEVICE_ID=0 PYTHONDONTWRITEBYTECODE=1 \
+  /home/user/miniconda3/envs/ykj_umr/bin/python -B -u tools/eval/render_bumi_motion.py \
+  --quality-report /data0/user/liwei/dataset_reports/motionmillion_umr_bumi3_v1 \
+  --output-dir /data0/user/liwei/dataset_reports/motionmillion_umr_bumi3_v1/visual_review \
+  --per-group 30
+```
+
+输出两段H.264/30FPS双视角视频、中文`分析报告.md`、含每条动作完整指标和视频时间
+索引的`analysis.json`，以及原run/summary/按SHA从Git恢复的筛选配置。高组按活动类型
+和目录均衡选PASS，低组按脚滑、自碰撞、穿地、突变选REJECT；都是目的性复核样本，
+不能拿60条的分布估计全库比例。每条完整播放，原qpos/帧率不修改；右视角半透明地面
+便于观察穿地，红框对应原报告当前异常帧。原始动作和人体SHA、真实XML/全部网格须
+匹配报告；渲染结束核对解码帧数后原子发布。新结果须用独立目录，验收后替换旧合集。

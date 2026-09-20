@@ -356,7 +356,7 @@ def load_umr(row, paths, engine):
     check(
         human["pose_aa"].shape == (n, 66) and human["trans"].shape == (n, 3), "源人体帧数/维度不同"
     )
-    for key, shape in {
+    for field, shape in {
         "pose_aa": (n, 66),
         "trans": (n, 3),
         "poses": (n, 22, 3),
@@ -364,10 +364,10 @@ def load_umr(row, paths, engine):
         "pose_body": (n, 63),
         "trans_orig": (n, 3),
     }.items():
-        if key in human:
+        if field in human:
             check(
-                human[key].shape == shape and human[key].dtype.kind == "f",
-                f"源人体{key}形状或类型不符",
+                human[field].shape == shape and human[field].dtype.kind == "f",
+                f"源人体{field}形状或类型不符",
             )
     check(float(_scalar(human, "fps")) == 30.0, "源人体不是30Hz")
     for fps_key in ("mocap_framerate", "mocap_frame_rate"):

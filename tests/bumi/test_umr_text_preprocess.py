@@ -221,6 +221,7 @@ def test_native_loading_reorders_and_keeps_root(bundle, engine):
     np.testing.assert_allclose(qpos, grounded(engine))
     assert meta["source_up"] == "y" and meta["output_up"] == "z"
     assert meta["source_motion_id"] == "MotionGV/fixture/000000"
+    assert meta["source_sequence_key"] == Path(row["human_path"]).stem
 
 
 @pytest.mark.parametrize(
