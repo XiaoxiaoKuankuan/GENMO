@@ -47,6 +47,17 @@ BUMI_DATASET=humanml3d BUMI_BUILD_TRAINING=1 BUMI_WORKERS=32 \
 release的`train_stats.json`，全量读取结果位于报告目录`training_preflight.json`。
 该脚本准备数据，不启动模型训练。
 
+2026-09-20服务器2全量验收：23,242条全部完成，PASS8,048、REVIEW4,976、REJECT10,218，
+INVALID/ERROR均为0。PASS中419条不满足60–300帧，最终train7,629条、1,570,581帧、
+14.5424小时、20,608条caption，保留32.8242%，val/test为0。训练时应关闭验证或另配
+真实验证集，不能把该训练派生包的动作随机冒充官方验证数据。
+最终15个动作分片及资产/统计合计209,464,943字节，60个T5分片及清单6,357,787,606字节，
+两者合计6,567,252,549字节。全部7,629条通过现有loader逐caption核验，crop_count=0；
+train统计量为v4、dataset=humanml3d，现有BumiEndecoder读取与实际样本编码有限值通过。
+报告目录中的`delivery_summary.json`记录完整数量、大小、来源构成、运行身份和关键文件SHA；
+`quality_summary.json`是质量汇总，`reports/out_umr.jsonl`是逐条判定，
+`training_preflight.json`是最终全量训练加载核验。
+
 下文默认路径和folder分片约定针对MotionMillion；通用质量规则与报告机制共用。
 
 ## 数据与判定契约
