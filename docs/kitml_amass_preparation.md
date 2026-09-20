@@ -8,7 +8,11 @@
 `/home/weili/GENMO/inputs/AMASS/hmr4d_support/smplxpose_v2.pth`。
 此文件含 18,086 条 GENMO 预处理记录，来源模型明确为 SMPL-X，保存身体姿态
 `pose[T,66]`、平移 `trans[T,3]`、形状 `beta[10]` 和性别。
-帧率依据现有 `gem/datasets/pure_motion/amass.py` 的 30 Hz 契约；容器没有原始帧率字段。
+现有 `gem/datasets/pure_motion/amass.py` 名义上以 30 Hz 读取，但容器没有原始帧率字段。
+全量对照发现 KIT 的 100 Hz 序列帧数符合每三帧抽样，实际有效采样率应为 100/3 Hz；
+例如 00001 的 378 个原始帧对应容器126帧，直接按30Hz会把3.78秒误当4.2秒。
+因此本工具按 MMM 时间轴和精确整数抽帧帧数推导有效采样时钟，再重新采样至30Hz；
+`source_clock_inferred`、`source_clock_method` 和 `mmm_subsample_stride` 保存该推导边界。
 本次不重新拟合人体，不补造手部/面部参数，也不把该容器声明为原始 SMPL+H G。
 
 官方 KIT-ML 2017-06-22 包有 3,911 条动作和 6,353 条文本，保留原始 ZIP。
@@ -60,7 +64,9 @@ PYTHONDONTWRITEBYTECODE=1 /data0/user/liwei/envs/GENMO-cu128/bin/python \
   未获得有效动作的 end 为 null，不借 MMM 时长冒充 AMASS 时长。
 - GENMO 来源只删除固定容器前缀和重复的子集目录，将 `_stageii.npz` 对应到 `_poses.npz`，
   子集、被试和完整动作名必须相同，不模糊匹配 basename、不自动修正空格。
-- GENMO 来源用 MMM 的真实 timestamps 对照 `T/30`，只允许一个 MMM 源帧加一个 30 Hz 帧的量化差；
+- GENMO 来源先核对 `ceil(MMM帧数 / floor(MMM帧率/30))` 是否严格等于容器帧数，
+  吻合时按 MMM 帧率/步长恢复时钟；未吻合时仅允许名义 `T/30` 与 MMM 时长相差一个源帧加一个目标帧。
+  原始时间戳六位有效数字的记录误差通过完整时间网格校验处理，不逐帧累计近似间隔。
   原始 SMPL+H 来源另要求原始帧数相等，并检查帧率对应时长。错配写入 `alignment_mismatch`。
 - NPZ 保留 `poses[T,66]`（根轴角 3 + 身体轴角 63）、`trans[T,3]`、`betas[10]`、gender、
   `mocap_framerate=30`、SMPL-X 模型身份、缺失手脸字段清单。沿用原 AMASS/GENMO 世界坐标，

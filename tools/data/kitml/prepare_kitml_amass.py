@@ -12,8 +12,10 @@ SMPL+H 姿态、形状、性别和可选 DMPL；沿用 AMASS 原世界坐标，�
 
 也可读取 GENMO 已有的 smplxpose_v2.pth：仅接受明确标记 model=smplx 的 66 维身体
 姿态，按 AMASS 子集/被试/完整动作名精确对应 stageii 与 poses 名称，不补造手脸姿态。
-该来源按现有 AmassDataset 的 30 Hz 契约解释，并以 MMM 原始时长交叉检查；它不包含
-原始帧率，不能再做原始帧数相等的判断，允许的时长差仅一个源帧加一个 30 Hz 帧。
+该来源的消费者名义上按 30 Hz 读取，但 KIT 的帧数符合原 100 Hz 每三帧抽样；仅当
+完整动作名和 ceil(MMM帧数/整数步长) 精确吻合时，依据 MMM 时钟推导有效帧率，再
+重采样为真正 30 Hz。推导标志与步长显式保存，不冒充容器具有原始帧率 metadata。
+无法解释为整数抽帧或名义 30 Hz 时间量化的错配不导出。
 
 metadata.json 包含所有原始 ID（未完成动作的 end 为 null），metadata_ready.json
 只包含已验证并导出动作的条目。这是重定向前的人体源数据，不冒充完整 SMPL-X 拟合、
@@ -127,6 +129,13 @@ class KitSource:
         # 用完整时间跨度估计采样周期，再按序列化精度核对绝对网格；不靠局部 median 猜 FPS。
         step = float((times[-1] - times[0]) / (len(times) - 1))
         tolerance = max(1e-6, float(np.max(np.abs(times))) * 5e-6)
+        # 末时间戳自身也有舍入误差；只有整个整数 FPS 网格吻合时才恢复标准采样周期。
+        # 否则 120 Hz 被误估为 119.9996 Hz 会影响后续整数抽帧步长的判断。
+        integer_fps = round(1 / step) if step > 0 else 0
+        if integer_fps > 0 and np.allclose(
+            times, times[0] + np.arange(len(times)) / integer_fps, atol=tolerance, rtol=0
+        ):
+            step = 1 / integer_fps
         expected = times[0] + np.arange(len(times)) * step
         if (
             step <= 0
@@ -275,6 +284,32 @@ def resample_motion(data: dict) -> dict:
     return result
 
 
+def infer_genmo_clock(frames: int, timing: dict) -> dict:
+    """用原始 MMM 时钟核对整数抽帧关系，保留推导证据而不猜测原始 AMASS FPS。"""
+    stride = max(1, math.floor(timing["fps"] / TARGET_FPS + 1e-5))
+    expected = (timing["frames"] + stride - 1) // stride
+    if frames == expected:
+        return {
+            "source_fps": timing["fps"] / stride,
+            "source_clock_method": "inferred_integer_decimation_from_mmm",
+            "source_clock_inferred": True,
+            "mmm_subsample_stride": stride,
+            "mmm_expected_decimated_frames": expected,
+            "nominal_source_fps": TARGET_FPS,
+            "nominal_source_duration": frames / TARGET_FPS,
+        }
+    difference = abs(frames / TARGET_FPS - timing["duration"])
+    if difference <= 1 / TARGET_FPS + 1 / timing["fps"] + 1e-6:
+        return {
+            "source_fps": TARGET_FPS,
+            "source_clock_method": "genmo_nominal_30hz_duration_checked",
+            "source_clock_inferred": False,
+            "nominal_source_fps": TARGET_FPS,
+            "nominal_source_duration": frames / TARGET_FPS,
+        }
+    raise ValueError("GENMO 帧数既不符合 MMM 整数抽帧关系，也不符合 30 Hz 时长")
+
+
 def write_motion(path: Path, data: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_name(path.name + ".tmp")
@@ -349,15 +384,28 @@ def build(args) -> dict:
                         row.update(
                             source_container=str(genmo_path.resolve()),
                             source_key=genmo.index[relative],
-                            source_fps_evidence="GENMO AmassDataset fixed 30 Hz contract, cross-checked with MMM timestamps",
+                            source_fps_evidence="MMM timestamps and exact integer decimation frame count, or checked nominal 30 Hz",
                             original_amass_fps=None,
                             full_pose_available=False,
                             missing_parameters=data["missing_parameters"].tolist(),
                             alignment_method="exact_subset_subject_clip_and_duration",
                         )
-                        mismatch = (
-                            abs(duration - timing["duration"]) > 1 / fps + 1 / timing["fps"] + 1e-6
-                        )
+                        try:
+                            clock = infer_genmo_clock(frames, timing)
+                            row.update(clock)
+                            fps = clock["source_fps"]
+                            duration = frames / fps
+                            row.update(
+                                source_end_time=duration,
+                                alignment_duration_delta_sec=duration - timing["duration"],
+                            )
+                            data["mocap_framerate"] = np.array(fps)
+                            data["source_clock_method"] = np.array(clock["source_clock_method"])
+                            data["reference_mmm_duration"] = np.array(timing["duration"])
+                            mismatch = False
+                        except ValueError as exc:
+                            row["alignment_error"] = str(exc)
+                            mismatch = True
                     else:
                         row["alignment_method"] = "exact_path_framecount_and_duration"
                         mismatch = (
@@ -371,6 +419,15 @@ def build(args) -> dict:
                         row["status"] = "no_text"
                     else:
                         motion = resample_motion(data)
+                        if genmo:
+                            # 仅裁掉整数抽帧的末端量化余量，采样时刻仍是 k/30，不拉伸动作。
+                            target_frames = max(
+                                1, int(round(timing["duration"] * TARGET_FPS + 1e-9))
+                            )
+                            if target_frames < len(motion["poses"]):
+                                for name in ("poses", "trans", "dmpls"):
+                                    if name in motion:
+                                        motion[name] = motion[name][:target_frames].copy()
                         target = f"motions_30hz/{row['motion_id']}_poses.npz"
                         write_motion(args.output_root / target, motion)
                         count = len(motion["poses"])
@@ -428,6 +485,12 @@ def build(args) -> dict:
         "ready_motions": len(ready),
         "ready_captions": sum(len(row["texts"]) for row in ready),
         "ready_duration_hours": sum(row["end"] for row in ready) / 3600,
+        "ready_clock_methods": dict(
+            Counter(row.get("source_clock_method", "original_amass_metadata") for row in ready)
+        ),
+        "ready_clock_rate_corrected": sum(
+            abs(row["source_fps"] - TARGET_FPS) > 1e-5 for row in ready
+        ),
         "same_source_motion_groups": {
             key: value for key, value in groups.items() if len(value) > 1
         },
@@ -464,7 +527,7 @@ def main(argv=None) -> int:
     source.add_argument(
         "--amass-genmo-file",
         type=Path,
-        help="用户已有的可信 GENMO smplxpose_v2.pth，30 Hz SMPL-X 身体参数",
+        help="用户已有的可信 GENMO smplxpose_v2.pth，需对照 MMM 核验实际采样时钟",
     )
     parser.add_argument("--output-root", type=Path, required=True)
     parser.add_argument("--report-root", type=Path, required=True)

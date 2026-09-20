@@ -18,6 +18,7 @@ from tools.data.kitml.prepare_kitml_amass import (
     GenmoSource,
     KitSource,
     build,
+    infer_genmo_clock,
     load_motion,
     resample_motion,
     resolve_mapping,
@@ -199,20 +200,53 @@ def test_existing_genmo_embedded_source_identity_cannot_drift(tmp_path):
         GenmoSource(path)
 
 
-def test_mmm_six_significant_digit_timestamps_do_not_change_fps(tmp_path):
-    args, _ = fixture(tmp_path, frames=1387, fps=60)
+@pytest.mark.parametrize("frames,fps", [(1387, 60), (1247, 120)])
+def test_mmm_six_significant_digit_timestamps_do_not_change_fps(tmp_path, frames, fps):
+    args, _ = fixture(tmp_path, frames=frames, fps=fps)
     path = args.kitml_root / "00001_mmm.xml"
     text = (
         "<MMM><Motion><MotionFrames>"
         + "".join(
-            f"<MotionFrame><Timestep>{i / 60:.6g}</Timestep></MotionFrame>" for i in range(1387)
+            f"<MotionFrame><Timestep>{i / fps:.6g}</Timestep></MotionFrame>" for i in range(frames)
         )
         + "</MotionFrames></Motion></MMM>"
     )
     path.write_text(text)
     source = KitSource(args.kitml_root)
-    assert source.mmm_timing("00001")["fps"] == pytest.approx(60.0)
+    assert source.mmm_timing("00001")["fps"] == pytest.approx(fps)
     # 一个完整帧的跳变仍须失败，不能以记录精度为由吸收实际时间错误。
     path.write_text(text.replace("<Timestep>10</Timestep>", "<Timestep>10.01</Timestep>"))
     with pytest.raises(ValueError, match="均匀采样"):
         source.mmm_timing("00001")
+
+
+def test_100hz_every_third_frame_is_resampled_to_true_30hz(tmp_path):
+    args, _ = fixture(tmp_path, frames=378, fps=100)
+    key = "inputs/smplx_amass/smplxn_raw/KIT/KIT/1/walk_stageii.npz"
+    trans = torch.zeros(126, 3)
+    trans[:, 0] = torch.arange(126) * 0.03  # 1 m/s，原始每三帧取样，实际 100/3 Hz。
+    record = {
+        "pose": torch.zeros(126, 66),
+        "trans": trans,
+        "beta": torch.zeros(10),
+        "gender": "neutral",
+        "model": "smplx",
+        "file_name": key,
+    }
+    args.amass_genmo_file = tmp_path / "smplxpose_v2.pth"
+    args.amass_root = None
+    torch.save({key: record}, args.amass_genmo_file)
+    report = build(args)
+    assert report["ready_clock_rate_corrected"] == 1
+    row = json.loads((args.output_root / "metadata_ready.json").read_text())[0]
+    assert row["source_fps"] == pytest.approx(100 / 3)
+    assert row["source_clock_inferred"] and row["mmm_subsample_stride"] == 3
+    assert row["num_frames"] == 113  # 3.78 * 30 最近整数，而不是名义30Hz下的126帧。
+    out = load_motion(args.output_root / row["motion_path"])
+    np.testing.assert_allclose(out["trans"][:, 0], np.arange(113) / 30, atol=3e-7)
+
+
+def test_integer_decimation_requires_exact_frame_count():
+    timing = {"frames": 890, "fps": 100.0, "duration": 8.9}
+    with pytest.raises(ValueError, match="整数抽帧"):
+        infer_genmo_clock(91, timing)
