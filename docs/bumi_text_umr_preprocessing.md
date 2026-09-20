@@ -13,9 +13,9 @@ HumanML3D 与 MotionMillion 的 UMR 机器人输出都按 Z-up 处理。配置�
 |---|---|
 | 原始机器人交付 | `/data2/user/liwei/hml3d_umr` |
 | 补齐的原始人体包 | `/data0/user/liwei/datasets/humanml3d_umr_source_v1` |
-| 筛选报告 | `/data0/user/liwei/dataset_reports/humanml3d_umr_bumi3_v1` |
-| 最终完整动作训练分片 | `/data0/user/liwei/datasets/bumi_text_humanml3d_umr_pass_v1` |
-| 配套T5特征 | `/data0/user/liwei/datasets/bumi_text_humanml3d_umr_pass_v1_t5` |
+| 筛选报告 | `/data0/user/liwei/dataset_reports/humanml3d_umr_bumi3_latest` |
+| 最终完整动作训练分片 | `/data0/user/liwei/datasets/bumi_text_humanml3d_umr_pass_latest` |
+| 配套T5特征 | `/data0/user/liwei/datasets/bumi_text_humanml3d_umr_pass_latest_t5` |
 
 原人体包须与交付的 `source_metadata` 三个文件逐字节一致。适配器核对交付
 `SHA256SUMS`、源manifest SHA、机器人/人体的全部数值及完整时间线；缺少原人体
@@ -47,16 +47,9 @@ BUMI_DATASET=humanml3d BUMI_BUILD_TRAINING=1 BUMI_WORKERS=32 \
 release的`train_stats.json`，全量读取结果位于报告目录`training_preflight.json`。
 该脚本准备数据，不启动模型训练。
 
-2026-09-20服务器2全量验收：23,242条全部完成，PASS8,048、REVIEW4,976、REJECT10,218，
-INVALID/ERROR均为0。PASS中419条不满足60–300帧，最终train7,629条、1,570,581帧、
-14.5424小时、20,608条caption，保留32.8242%，val/test为0。训练时应关闭验证或另配
-真实验证集，不能把该训练派生包的动作随机冒充官方验证数据。
-最终15个动作分片及资产/统计合计209,464,943字节，60个T5分片及清单6,357,787,606字节，
-两者合计6,567,252,549字节。全部7,629条通过现有loader逐caption核验，crop_count=0；
-train统计量为v4、dataset=humanml3d，现有BumiEndecoder读取与实际样本编码有限值通过。
-报告目录中的`delivery_summary.json`记录完整数量、大小、来源构成、运行身份和关键文件SHA；
-`quality_summary.json`是质量汇总，`reports/out_umr.jsonl`是逐条判定，
-`training_preflight.json`是最终全量训练加载核验。
+2026-09-20新规则全量验收：23,242条，PASS9,060、REVIEW7,644、REJECT6,538，INVALID/ERROR均为0。PASS中390条不足60帧、9条超过300帧，最终train8,661条、1,777,644帧、16.4597小时、23,387条caption，保留37.2644%，val/test为0。原动作4,322、镜像4,339，母来源4,206；完整源7,793、既有子片段868，两组是交叉维度。
+
+训练release含17动作分片及资产/统计，共23文件237,211,713字节；T5为68分片及清单，共69文件7,215,192,474字节，合计7,452,404,187字节。全部8,661条通过现有loader逐caption核验，crop_count=0，train统计量为v4且非placeholder。报告目录`delivery_summary.json`绑定指纹、文件SHA及数量，`training_preflight.json`是全量加载结果；原包仍仅含训练身份，val/test清单为空。
 
 下文默认路径和folder分片约定针对MotionMillion；通用质量规则与报告机制共用。
 
@@ -70,7 +63,7 @@ train统计量为v4、dataset=humanml3d，现有BumiEndecoder读取与实际样�
 - 支撑候选依据脚底高度、垂向速度、持续时间，不使用水平速度提前排除滑动帧。
 - 低姿态存在非足部刚体低高度支撑迹象时，双脚离地只保留诊断，避免把躺/跪/手撑动作误当全身悬空；该迹象不是精确接触测量。
 - 凸包碰撞逐刚体对报告原始深度及XML默认姿态基线，以额外穿透判定；默认已有的踝部结构重叠不会直接淘汰全部动作。
-- `posture_policy: diagnostic` 默认保留坐、跪、躺等姿态的诊断，不执行音乐任务的站立风格门禁。穿地、滑移、碰撞等独立质量规则仍生效。
+- `posture_policy: diagnostic` 保留既有低姿态诊断，不执行音乐任务的站立风格门禁。新增`root_tilt`是独立门禁：根倾角>30°连续至少15帧会淘汰，包括满足该条件的弯腰或躺姿；不受diagnostic策略豁免。穿地、滑移、碰撞等独立规则仍生效。
 - 状态分为 `PASS / REVIEW / REJECT / INVALID / ERROR`。INVALID是输入合同失败，ERROR是执行失败；存在ERROR时程序退出码为2，禁止构建正式数据。
 - 质量状态和训练适用性分开。仅PASS且完整60–300帧进入训练候选；15帧、301帧等不通过长度条件，不因此伪称数值损坏。
 - 不平移Root、不归一化坏四元数、不截取局部动作、不循环补长。异常区间只用于定位，不能沿用整段caption作为局部标注。
@@ -87,7 +80,7 @@ train统计量为v4、dataset=humanml3d，现有BumiEndecoder读取与实际样�
 默认校验清单条数必须为559924，报告放到：
 
 ```text
-/data0/user/liwei/dataset_reports/motionmillion_umr_bumi3_v1/
+/data0/user/liwei/dataset_reports/motionmillion_umr_bumi3_latest/
 ```
 
 首次执行：
@@ -142,7 +135,7 @@ bash scripts/prepare_bumi_text_umr.sh --resume 2>&1 | tee -a /data0/user/liwei/l
 ```bash
 python tools/data/bumi/prepare_bumi_text.py build \
   --source /path/to/verified_conversion.json \
-  --quality-report /data0/user/liwei/dataset_reports/motionmillion_umr_bumi3_v1 \
+  --quality-report /data0/user/liwei/dataset_reports/motionmillion_umr_bumi3_latest \
   --output /data0/user/liwei/datasets/bumi_text_motionmillion_umr_pass_v1
 ```
 
@@ -164,8 +157,8 @@ python tools/data/bumi/prepare_bumi_text.py build \
 cd /home/user/liwei/GENMO-bumi-text
 MUJOCO_GL=egl MUJOCO_EGL_DEVICE_ID=0 PYTHONDONTWRITEBYTECODE=1 \
   /home/user/miniconda3/envs/ykj_umr/bin/python -B -u tools/eval/render_bumi_motion.py \
-  --quality-report /data0/user/liwei/dataset_reports/motionmillion_umr_bumi3_v1 \
-  --output-dir /data0/user/liwei/dataset_reports/motionmillion_umr_bumi3_v1/visual_review \
+  --quality-report /data0/user/liwei/dataset_reports/motionmillion_umr_bumi3_latest \
+  --output-dir /data0/user/liwei/dataset_reports/motionmillion_umr_bumi3_latest/visual_review \
   --per-group 30
 ```
 
@@ -176,48 +169,13 @@ MUJOCO_GL=egl MUJOCO_EGL_DEVICE_ID=0 PYTHONDONTWRITEBYTECODE=1 \
 便于观察穿地，红框对应原报告当前异常帧。原始动作和人体SHA、真实XML/全部网格须
 匹配报告；渲染结束核对解码帧数后原子发布。新结果须用独立目录，验收后替换旧合集。
 
-### 2026-09-20 MotionMillion 实际复核结果
+### MotionMillion当前复核
 
-服务器2报告`motionmillion_umr_bumi3_v1`全量559,924条逐项汇总校验通过：PASS
-291,348（52.03%）、REVIEW 175,478（31.34%）、REJECT 93,098（16.63%），
-INVALID/ERROR为0。PASS中105,559条不足60帧、29,978条超过300帧，完整训练候选
-155,811条（27.83%）/181.32小时。原机器人NPZ为9.604 GB，候选对应原NPZ为
-2.441 GB；尚不能将候选大小称为包含文本特征的训练release大小。
-
-按真正触发REJECT的原因、逐动作去重：脚滑70,459、自碰撞21,400、脚穿地2,662、
-根高度越界1,160、速度/旋转/关节突变96。脚滑与自碰撞合并去重90,067条，占REJECT
-96.74%；REVIEW中138,890条有脚滑信号，占79.15%。这使支撑脚滑移和碰撞成为优先
-复核方向；长短不适用应继续与动作质量问题分开。目录差异不能直接解释为语义来源差异：
-folder7的PASS率65.64%、候选率37.00%，folder9分别28.49%、6.06%。另读两目录
-原报告确认folder9的15,952条PASS中12,267条不足60帧，短序列也是候选率低的主要因素。
-
-该批全部原始来源标识为`Mirror_MotionGV`，结论仅覆盖当前转换集合。旧辅助
-`source_sequence_key`字段被变量覆盖为`trans_orig`的问题已修正未来输出，原报告
-不改写；本次60条视频另以原机器人/人体SHA、NPZ身份与source_file核对来源。
-
-正式复核保存在服务器2：
-`/data0/user/liwei/dataset_reports/motionmillion_umr_bumi3_v1/visual_review`。
-本地验收结果：`/home/weili/GENMO-bumi-text/outputs/motionmillion_umr_quality_review`。
-
-| 文件 | 完整动作数 | 帧数 | 时长 | 字节数 |
-|---|---:|---:|---:|---:|
-| high_quality_30.mp4 | 30 | 5,638 | 187.933秒 | 11,574,780 |
-| low_quality_30.mp4 | 30 | 4,589 | 152.967秒 | 20,626,277 |
-
-高组移动/转向/低姿态/较活跃肢体/一般肢体各6条，10个目录各3条；低组脚滑10、
-碰撞10、穿地6、突变4条，覆盖10个目录。低姿态是当前文本筛选的诊断类别，不自动
-淘汰，故高组13–18号含地面动作。两组用于复核当前规则，不是全库随机抽样或全局排名。
-H.264/1280×720/30FPS，两端完整解码与原始帧数一致；7个交付文件跨机SHA全部相同。
-人工查看60条中点联系表及4张详细帧，确认画面、双视角和标记可读；这是离线可视化
-验收，不作为动力学或控制跟踪证明。原输入Z-up qpos不变、完整播放，没有二次旋转或裁剪。
-
-`分析报告.md`包含汇总、目录差异和每条动作的视频时间索引，`analysis.json`包含全部
-60条原报告指标、选样类别和验证身份；同时交付原run/summary及按SHA恢复的原筛选配置。
-日志`/data0/user/liwei/logs/bumi_text_umr/motionmillion_quality_review.log`退出码0。
+服务器2正式视频位于`/data0/user/liwei/dataset_reports/motionmillion_umr_bumi3_latest/visual_review`；本地位于`/home/weili/GENMO-bumi-text/outputs/motionmillion_umr_quality_review`。高组30条5,551帧/185.0333秒，低组30条3,906帧/130.2秒。高组五种活动类别各6条；低组根倾角10、脚滑10、碰撞6、穿地2、突变2。两组共60个不同母来源，原caption与文本SHA附在analysis.json，数据统计和文本覆盖见本文末尾当前结果。
 
 ### HumanML3D复核使用同一入口
 
-将上述`--quality-report`改为`/data0/user/liwei/dataset_reports/humanml3d_umr_bumi3_v1`，
+将上述`--quality-report`改为`/data0/user/liwei/dataset_reports/humanml3d_umr_bumi3_latest`，
 `--output-dir`改为该目录下的`visual_review`即可。入口自动识别报告数据集，复用原
 HumanML3D加载器校验源交付清单、机器人/人体SHA、迁移前路径、XML与镜像/子片段
 身份，不对已经Z-up的机器人输出再次旋转。视频额外显示第一条原始caption，完整
@@ -229,44 +187,11 @@ caption集合写入analysis.json；按母动作canonical_source_id去重，避�
 已有训练交付；不能仅根据筛选候选数宣称训练数据已经构建。不同数据集的视频属于
 不同复核场景，本次HumanML3D不替换此前用户要求保留的MotionMillion交付。
 
-### 2026-09-20 HumanML3D实际复核结果
+### HumanML3D当前复核
 
-全量23,242条/5,044,068帧/46.7043小时，原机器人NPZ591,122,487字节。PASS
-8,048（34.63%）、REVIEW4,976（21.41%）、REJECT10,218（43.96%），INVALID/
-ERROR为0。PASS仅419条因长度排除（不足60帧405、超过300帧14），其余7,629条
-占输入32.82%，占PASS94.79%，共14.5424小时。因此本批主要损失来自质量问题，
-与MotionMillion中大量PASS因长度不适用被排除的情况不同。
+服务器2正式视频位于`/data0/user/liwei/dataset_reports/humanml3d_umr_bumi3_latest/visual_review`；本地位于`/home/weili/GENMO-bumi-text/outputs/humanml3d_umr_quality_review`。高组30条6,763帧/225.4333秒，低组30条5,837帧/194.5667秒。高组五类各6条，低组根倾角14、脚滑10、碰撞6；没有用不存在的穿地或突变REJECT凑数。两组共60个不同母来源。
 
-真正触发REJECT的只有脚滑9,845条和自碰撞512条，重叠139条；互斥计数为仅脚滑
-9,706、仅自碰撞373、两者同时139，恰好合计10,218。REVIEW中脚滑4,005、碰撞821、
-持续悬空688、轻度脚穿地25、根运动连续性13，存在重叠。REJECT动作中附带的轻度
-穿地/悬空/连续性问题不能改写为该动作的REJECT触发原因。
-
-输入非镜像与镜像各11,621条；按canonical_source_id归并母来源为10,589个。
-训练候选非镜像3,799、镜像3,830，其中完整源动作6,877、子片段752，母来源3,629个。
-样本数包括增强和子片段，不等于独立母动作数。已有训练交付关键文件SHA及实际目录
-文件数/字节数再次核对一致：动作21文件/209,464,943字节，T5 61文件/6,357,787,606
-字节；合计6,567,252,549字节，train7,629/val0/test0，20,608条caption。本轮不重建。
-
-服务器2正式视频位于`/data0/user/liwei/dataset_reports/humanml3d_umr_bumi3_v1/visual_review`；
-本地位于`/home/weili/GENMO-bumi-text/outputs/humanml3d_umr_quality_review`。
-
-| 文件 | 动作数 | 帧数 | 时长 | 字节数 |
-|---|---:|---:|---:|---:|
-| high_quality_30.mp4 | 30 | 6,557 | 218.567秒 | 12,826,384 |
-| low_quality_30.mp4 | 30 | 5,374 | 179.133秒 | 21,451,859 |
-
-高组五类各6条，低组脚滑20、自碰撞10；低组1–10与21–30号为脚滑，11–20号为碰撞。
-总共60个不同母来源。高组脚滑p95不超过0.0658 m/s、最大脚穿地1.457 mm、额外碰撞
-深度1.488 mm；低组脚滑p95最高4.1504 m/s、额外碰撞深度最高11.2945 cm。以上是
-精选样本指标，不能当作全库极值。高组13–18号包括弯腰、鞠躬等姿态，类别仅是按
-运动学指标划分，不能当作独立人工语义标注。
-
-两端完整解码H.264/1280×720/30FPS，帧数与原动作总和一致，7个交付文件共
-35,073,096字节且跨机SHA全部一致。人工查看60条中点联系表与4张详细帧，确认画面
-和文本可读后原子发布；图像检查不代表动力学验收。第一条caption过长时画面省略，
-完整caption集合保留在analysis.json。日志`/data0/user/liwei/logs/bumi_text_umr/humanml3d_quality_review.log`
-退出码0，临时QA图、incoming与服务器staging均已清理。
+两数据集视频均为H.264/1280×720/30FPS，原qpos/完整时序保持，仅mj_forward，无动力学推进。全部四视频两端SHA和完整解码通过，120条中点及详细帧画面复核通过。高组是按当前规则通过且有活动的目的性样本，不是随机总体抽样或实机证明。服务器与本地旧完整报告/视频均由上述最新结果替代；HumanML3D旧训练release/T5也在新加载验证后清理。
 
 ## 2026-09-20用户确认的新筛选规则
 
@@ -284,3 +209,16 @@ ERROR为0。PASS仅419条因长度排除（不足60帧405、超过300帧14），
 ### 原生UMR MotionMillion文本绑定
 
 通过`prepare_bumi_text.py motionmillion-texts --quality-report REPORT --texts-archive texts.tar.gz --split-archive split.tar.gz --output CATALOG`构建文本SQLite目录，再用`bind-motionmillion-texts --quality-report REPORT --text-catalog CATALOG`核验全量动作来源并写入`text_binding.json`。索引保存原始文本字节、完整来源ID、双输入SHA及官方t2m_60_300划分；缺失文本或split明确报告，不推断。原文本包放在服务器2`/data0/user/liwei/datasets/motionmillion_text_source_v1/`，最新匹配目录为`/data0/user/liwei/datasets/motionmillion_umr_text_latest/`。文本绑定不等同于T5特征编码或可训练分片构建。最新报告带text_binding时，已有质量视频入口自动核验并显示MotionMillion原caption。
+
+## 当前最新全量重筛结果
+
+2026-09-20按已确认新规则执行，报告根目录均改为`*_latest`。两批complete且partial_scan=false，INVALID/ERROR均为0。逐条核对新旧relative_path、完整来源ID、双输入SHA及帧数完全一致；`refilter_comparison.json`只保留状态变化汇总，旧完整报告和旧合集在新结果验收后删除。
+
+| 数据集 | 原始动作 | PASS | REVIEW | REJECT | 完整60–300帧PASS候选 | 保留比例 |
+|---|---:|---:|---:|---:|---:|---:|
+| MotionMillion | 559,924 | 310,023 | 66,942 | 182,959 | 156,385 | 27.9297% |
+| HumanML3D | 23,242 | 9,060 | 7,644 | 6,538 | 8,661 | 37.2644% |
+
+脚滑REJECT从70,459/9,845降至6,893/863；碰撞REJECT从21,400/512降至14,443/276；新增根倾角REJECT为169,107/5,874（依次MotionMillion/HumanML3D，各原因可能重叠）。MotionMillion旧PASS中79,385条、HumanML3D旧PASS中1,415条被新增根倾角约束淘汰。候选净增574/1,032；不是简单保留旧PASS并追加动作。
+
+MotionMillion原文本匹配559,922/559,924条，共11,791,690条caption。缺失ID为`Mirror_MotionGV/folder8/494361`与`Mirror_MotionGV/folder8/500208`，分别54/30帧，均不是训练候选；不生成替代文本。156,385条质量及长度候选全部有文本，共3,294,293条caption，并全部恢复官方t2m_60_300划分：train125,085、val7,987、test23,313。该官方划分保持原样；后续混合训练还需进行HumanML3D跨来源去重与泄漏检查，不能直接把156,385条全作为train。本轮MotionMillion交付为全量质量报告和绑定文本目录，尚未编码其新的BUMI T5或构建训练分片。
