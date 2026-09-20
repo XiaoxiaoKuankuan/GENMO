@@ -1,0 +1,67 @@
+# MotionMillion -> UMR -> BUMI 文本完整动作的离线筛选配置。
+# 复用音乐分支的30Hz连续性阈值；坐、跪、躺和根倾角只报告，不作为站立风格淘汰。
+# 新增脚网格穿地、独立候选支撑滑移、连续悬空及凸包碰撞诊断。阈值是首版离线
+# 数据门禁，需结合报告和回放校准，不代表动力学或实机验收。原始qpos不修正、不裁剪。
+schema: genmo.bumi_umr_text_quality_config.v1
+robot_xml_sha256: fe93472dd764704fe8389b0f82052ae84ed8bc90f6d71b1467872f86e08a9ad3
+kinematics_sha256: c08731704dccece11351b6fa877e30bac5ca2a8d363de30af7ca2ea1398f4029
+source_format: motionmillion_272
+source_up: y
+source_id_marker: motion_272rpr_unpacked
+ground_height_m: 0.0
+training_frames: [60, 300]
+posture_policy: diagnostic
+core:
+  minimum_frames: 4
+  quaternion_norm_error_max: 0.001
+  joint_limit_violation_max: 0.0001
+  minimum_joint_limit_margin_warn: 0.01
+  root_height_min_absolute: -0.02
+  root_height_max_absolute: 2.1
+  exceed_ratio_max: 0.08
+  consecutive_exceed_frames: 6
+  severe_multiplier: 3.0
+  root_low_height: 0.30
+  root_low_tilt_degrees: 45.0
+  torso_ground_height: 0.30
+  upper_body_ground_height: 0.08
+  floor_gate_root_height: 0.34
+  floor_gate_tilt_degrees: 40.0
+  ankles_airborne_height: 0.08
+  floor_reject_consecutive_frames: 15
+  floor_review_ratio: 0.02
+  floor_review_min_frames: 15
+  low_root_review_height: 0.22
+  low_root_review_consecutive_frames: 15
+  safe_interval_halo_frames: 15
+  minimum_safe_interval_frames: 60
+  torso_proxy_bodies: [l_arm_pitch_link, r_arm_pitch_link]
+  upper_non_hand_bodies: [l_arm_pitch_link, l_arm_roll_link, l_arm_yaw_link, l_elbow_pitch_link,
+                        r_arm_pitch_link, r_arm_roll_link, r_arm_yaw_link, r_elbow_pitch_link]
+  ankle_bodies: [l_ankle_roll_link, r_ankle_roll_link]
+dynamics:
+  joint_velocity_l2: [30.0, rad/s]
+  joint_acceleration_l2: [1200.0, rad/s^2]
+  joint_jerk_l2: [60000.0, rad/s^3]
+  root_linear_velocity: [3.0, m/s]
+  root_angular_velocity: [12.0, rad/s]
+feet:
+  penetration_review_m: 0.005
+  penetration_reject_m: 0.03
+  penetration_severe_m: 0.10
+  penetration_consecutive_frames: 3
+  support_height_min_m: -0.01
+  support_height_max_m: 0.035
+  support_vertical_speed_max_m_s: 0.20
+  support_min_frames: 3
+  slide_review_m_s: 0.25
+  slide_reject_m_s: 0.75
+  slide_consecutive_frames: 6
+  airborne_height_m: 0.05
+  airborne_review_frames: 30
+collision:
+  # 使用每个刚体对相对XML默认姿态的额外穿透深度；原始深度也保留。
+  review_extra_depth_m: 0.01
+  reject_extra_depth_m: 0.05
+  consecutive_frames: 3
+  allowed_body_pairs: []

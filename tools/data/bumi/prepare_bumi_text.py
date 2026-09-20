@@ -5,6 +5,9 @@ build 读取 conversion.json 中的原生 NPZ 与文本特征引用，验证后�
 按来源区间排除 train/held-out 重叠及精确重复，原 NPZ/T5 文件不改写。不执行重定向、
 人体转换或自动地面修正。stats 只遍历 train，有效XY差分不包含每条动作最后一帧。
 preflight 报告真实长度、padding和裁剪计数。所有写入要求显式输出路径且拒绝覆盖。
+filter-umr 接入MotionMillion原生UMR的全量数值/质量筛选与可恢复报告。build可通过
+--quality-report只接收完整报告中的PASS，并核对UMR源身份、双输入SHA和完整文本对应。
+此模式不裁剪长动作、不自动生成caption或split，构建成功后同盘原子发布release。
 """
 
 from __future__ import annotations
@@ -12,9 +15,10 @@ from __future__ import annotations
 import argparse
 import copy
 import json
+import sys
+import tempfile
 from collections import Counter, defaultdict
 from pathlib import Path
-import sys
 
 ROOT = Path(__file__).resolve().parents[3]
 if str(ROOT) not in sys.path:
@@ -24,22 +28,22 @@ import numpy as np
 import torch
 
 from gem.datasets.pure_motion.bumi_text import (
+    SCHEMA,
     AssetCache,
     BumiTextDataset,
-    SCHEMA,
     read_embedding,
     resolve_reference,
     validate_record,
 )
-from gem.runtime.bumi_text_contract import MJCF_SHA256, sha256_file
-from gem.robots.bumi.kinematics import BumiKinematics
-from gem.robots.bumi.feature_codec import (
-    BumiMotionFeatureCodec,
-    BUMI_FEATURE_SLICES,
-    BUMI_ANCHOR_MODE,
-    BUMI_REPRESENTATION_CONTRACT_VERSION,
-)
 from gem.robots.bumi.endecoder import STATS_CONTRACT_VERSION
+from gem.robots.bumi.feature_codec import (
+    BUMI_ANCHOR_MODE,
+    BUMI_FEATURE_SLICES,
+    BUMI_REPRESENTATION_CONTRACT_VERSION,
+    BumiMotionFeatureCodec,
+)
+from gem.robots.bumi.kinematics import BumiKinematics
+from gem.runtime.bumi_text_contract import MJCF_SHA256, sha256_file
 
 
 def write_json(path, value):
@@ -86,7 +90,33 @@ def select_records(records):
     return accepted, {"excluded": rejected, "unverified_cross_dataset_lineage": unknown}
 
 
-def build(source, output, *, records_per_shard=512):
+def build(source, output, *, records_per_shard=512, quality_report=None):
+    """所有模式在隔离staging构建，失败自动清理，完成后才发布正式release。"""
+    output = Path(output).resolve()
+    if output.exists():
+        raise FileExistsError("使用新的release目录，不能覆盖原数据")
+    output.parent.mkdir(parents=True, exist_ok=True)
+    gate = None
+    if quality_report is not None:
+        from tools.data.bumi.umr_text_preprocess import QualityGate
+
+        gate = QualityGate(quality_report)
+    try:
+        with tempfile.TemporaryDirectory(
+            prefix=f".{output.name}.staging-", dir=output.parent
+        ) as temp:
+            staged = Path(temp) / "release"
+            result = _build(source, staged, records_per_shard=records_per_shard, quality_gate=gate)
+            if output.exists():
+                raise FileExistsError("构建期间目标目录被创建，拒绝覆盖")
+            staged.rename(output)
+            return result
+    finally:
+        if gate is not None:
+            gate.close()
+
+
+def _build(source, output, *, records_per_shard=512, quality_gate=None):
     source, output = Path(source).resolve(), Path(output).resolve()
     if records_per_shard < 1:
         raise ValueError("records_per_shard必须为正")
@@ -101,7 +131,31 @@ def build(source, output, *, records_per_shard=512):
     kin = BumiKinematics(kin_path)
     if kin.source_mjcf_sha256 != MJCF_SHA256:
         raise ValueError("仅接受fe934 BUMI")
+    quality_excluded = []
+    if quality_gate is not None:
+        if kin.kinematics_sha256 != quality_gate.engine.kin.kinematics_sha256:
+            raise ValueError("构建运动学与质量报告指纹不同")
+        # 在来源分组之前绑定canonical ID，防止镜像跨split时沿用不完整的调用者ID。
+        eligible = []
+        for record in payload["records"]:
+            path = resolve_reference(record["qpos_path"], source.parent)
+            row = quality_gate.lookup(path)
+            if not row["training_eligible"] or row["status"] != "PASS":
+                quality_excluded.append(
+                    dict(
+                        dataset=record["dataset"],
+                        motion_id=record["motion_id"],
+                        reason="umr_quality_or_length",
+                        status=row["status"],
+                    )
+                )
+                continue
+            quality_gate.validate_identity(row, record)
+            record["provenance"]["canonical_source_id"] = row["canonical_source_id"]
+            eligible.append(record)
+        payload["records"] = eligible
     rows, report = select_records(payload["records"])
+    report["excluded"].extend(quality_excluded)
     output.mkdir(parents=True)
     (output / "shards").mkdir()
     # 固定资产复制一份到新release，源文件与原fingerprint保持不变。
@@ -141,15 +195,48 @@ def build(source, output, *, records_per_shard=512):
                 continue
             record = copy.deepcopy(original)
             path = resolve_reference(record.pop("qpos_path"), source.parent)
-            with np.load(path, allow_pickle=False) as npz:
-                if float(npz["fps"]) != 30 or list(npz["joint_names"].astype(str)) != list(
-                    kin.joint_order
-                ):
-                    raise ValueError(f"NPZ FPS/关节顺序错误: {path}")
-                record["qpos"] = torch.from_numpy(np.asarray(npz["qpos"], dtype=np.float32).copy())
-                for key in ("foot_contact", "foot_contact_available"):
-                    if key in npz:
-                        record[key] = torch.from_numpy(npz[key].copy())
+            if quality_gate is not None:
+                qpos, quality = quality_gate.read_candidate(path, record)
+                if qpos is None:
+                    report["excluded"].append(
+                        dict(
+                            dataset=record["dataset"],
+                            motion_id=record["motion_id"],
+                            reason="umr_quality_or_length",
+                            status=quality["status"],
+                        )
+                    )
+                    continue
+                record["qpos"] = qpos
+                record["ground_alignment"] = dict(
+                    applied=False,
+                    offset_z=0.0,
+                    reference="UMR world-Z=0; source_ground_z is preprocessing metadata",
+                )
+                from gem.datasets.pure_motion.bumi_text import GROUND
+                from gem.robots.bumi.contacts import derive_bumi_foot_contact
+
+                record["ground_semantics"] = GROUND
+                contact = derive_bumi_foot_contact(qpos, kin, ground_height=0.0)
+                record["foot_contact"] = contact.contact
+                record["foot_contact_available"] = contact.valid_mask
+                record["quality_provenance"] = dict(
+                    run_fingerprint=quality_gate.run["fingerprint"],
+                    human_sha256=quality["human_sha256"],
+                    status="PASS",
+                )
+            else:
+                with np.load(path, allow_pickle=False) as npz:
+                    if float(npz["fps"]) != 30 or list(npz["joint_names"].astype(str)) != list(
+                        kin.joint_order
+                    ):
+                        raise ValueError(f"NPZ FPS/关节顺序错误: {path}")
+                    record["qpos"] = torch.from_numpy(
+                        np.asarray(npz["qpos"], dtype=np.float32).copy()
+                    )
+                    for key in ("foot_contact", "foot_contact_available"):
+                        if key in npz:
+                            record[key] = torch.from_numpy(npz[key].copy())
             record["source_qpos_sha256"] = sha256_file(path)
             record["frames"] = len(record["qpos"])
             if not 60 <= record["frames"] <= 300:
@@ -189,6 +276,7 @@ def build(source, output, *, records_per_shard=512):
             shards=shards,
             full_sequence=True,
             crop_count=0,
+            quality_run_fingerprint=quality_gate.run["fingerprint"] if quality_gate else None,
         )
         write_json(output / "manifests" / f"{split}.json", manifest)
     report.update(counts=dict(counts), crop_count=0)
@@ -290,6 +378,34 @@ def main():
     p.add_argument("--source", type=Path, required=True)
     p.add_argument("--output", type=Path, required=True)
     p.add_argument("--records-per-shard", type=int, default=512)
+    p.add_argument(
+        "--quality-report", type=Path, help="完整UMR筛选报告目录；该模式读取原生UMR qpos"
+    )
+    # 只在执行filter时导入MuJoCo，原有build/stats/preflight保持原依赖边界。
+    p = sub.add_parser("filter-umr", help="全量筛选MotionMillion UMR，支持断点续跑")
+    for name in (
+        "input-root",
+        "source-root",
+        "robot-xml",
+        "retarget-config",
+        "asset-manifest",
+        "output",
+    ):
+        p.add_argument("--" + name, type=Path, required=True)
+    p.add_argument("--batch-config", type=Path)
+    p.add_argument(
+        "--config", type=Path, default=ROOT / "configs/bumi/quality_filter_umr_text_30hz_v1.yaml"
+    )
+    p.add_argument(
+        "--kinematics",
+        type=Path,
+        default=ROOT / "configs/bumi/bumi_kinematics_robot_retargeter_fe934_v1.json",
+    )
+    p.add_argument("--workers", type=int, default=16)
+    p.add_argument("--expected-records", type=int, help="校验全量清单条数，防止漏目录")
+    p.add_argument("--folders", nargs="+", help="只检查指定folder；报告标记为partial")
+    p.add_argument("--limit", type=int, help="有界验证；报告标记为partial")
+    p.add_argument("--resume", action="store_true")
     for command in ("stats", "preflight"):
         p = sub.add_parser(command)
         p.add_argument("--root", type=Path, required=True)
@@ -299,8 +415,17 @@ def main():
             p.add_argument("--split", default="train", choices=["train", "val", "test"])
             p.add_argument("--limit", type=int, default=128)
     args = parser.parse_args()
+    if args.command == "filter-umr":
+        from tools.data.bumi.umr_text_preprocess import run_filter
+
+        raise SystemExit(run_filter(args))
     if args.command == "build":
-        result = build(args.source, args.output, records_per_shard=args.records_per_shard)
+        result = build(
+            args.source,
+            args.output,
+            records_per_shard=args.records_per_shard,
+            quality_report=args.quality_report,
+        )
     elif args.command == "stats":
         result = statistics(args.root, args.output, args.dataset)
     else:
