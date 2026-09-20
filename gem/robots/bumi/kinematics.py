@@ -4,8 +4,9 @@ The module consumes a versioned JSON file exported from the real BUMI MJCF.
 It intentionally has no MuJoCo dependency: MuJoCo is confined to the exporter,
 offline parity validator, and renderer under ``tools/``.
 
-部署待机姿态通过 make_standing_qpos 单独计算贴地根高度；保留原始 default_qpos
-及模型资产指纹，不将待机对齐应用于模型生成的动作序列。
+活动 default_qpos 的根高统一为 0.48120910 m，source_default_qpos 保留资产来源
+姿态，用于旧统计量的高度基准兼容。待机通过 make_standing_qpos 按实际关节姿态
+单独计算贴地根高；不改写原资产和指纹，也不逐帧对齐生成动作。
 """
 
 from __future__ import annotations
@@ -27,6 +28,8 @@ from gem.utils.rotation_conversions import (
 )
 
 KINEMATICS_CONTRACT_VERSION = "genmo.bumi_kinematics.v1"
+# 统一编解码参考高度：部署分支的零关节站姿，最低脚底代理点离地 2 mm。
+BUMI_DEFAULT_ROOT_HEIGHT_M = 0.48120910
 
 
 def resolve_asset_path(path: str | Path) -> Path:
@@ -164,6 +167,9 @@ class BumiKinematics(nn.Module):
         default_qpos[3:7] = default_qpos[3:7] / default_quat_norm
         if bool((default_qpos[7:] < lower).any()) or bool((default_qpos[7:] > upper).any()):
             raise ValueError(f"BUMI default_qpos joint values exceed exported ranges in {path}")
+        # 原始 qpos0 仅供旧统计量迁移和资产溯源；活动默认值统一使用部署参考高度。
+        self.register_buffer("source_default_qpos", default_qpos.clone(), persistent=False)
+        default_qpos[2] = BUMI_DEFAULT_ROOT_HEIGHT_M
         self.register_buffer("default_qpos", default_qpos, persistent=False)
 
         addresses = [int(value) for value in _require_list(spec, "joint_qpos_addresses", 21)]

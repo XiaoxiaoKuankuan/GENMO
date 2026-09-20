@@ -12,6 +12,7 @@
 - [GMT 中直接用于 GENMO 接入的改动](docs/BUMI_GMT_GENMO_INTERFACE.md)
 - [适配其他GMT、SONIC和通用控制器](docs/GENMO_CONTROLLER_ADAPTATION.md)
 - [依赖闭包清单](DEPLOYMENT_FILES.json)
+- [统一根高 0.48120910 m 与旧模型兼容](docs/BUMI_ROOT_HEIGHT.md)
 - [实现与实际验收记录](记录文本.md)
 
 默认 DDIM20、CFG2.5、seed42，生成30 Hz、GMT参考50 Hz。迁移时复制代码和完整模型目录，重新创建环境并运行模型检查；目标GPU或TensorRT环境不兼容时在原仓库重新构建engine。

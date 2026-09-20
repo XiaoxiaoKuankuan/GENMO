@@ -46,6 +46,7 @@
     "tests/bumi/test_bumi_deployment_config.py",
     "tests/bumi/test_bumi_online_deployment.py",
     "tests/bumi/test_bumi_preview.py",
+    "tests/bumi/test_bumi_root_height.py",
     "tests/bumi/test_gmt_policy_source.py",
     "tests/bumi/validate_bumi_preview_runtime.py"
   ],
@@ -83,6 +84,7 @@
     "docs/BUMI_GMT_GENMO_INTERFACE.md",
     "docs/BUMI_MUJOCO_PREVIEW.md",
     "docs/BUMI_MUSIC_DEPLOYMENT.md",
+    "docs/BUMI_ROOT_HEIGHT.md",
     "docs/GENMO_CONTROLLER_ADAPTATION.md",
     "gem/__init__.py",
     "gem/diffusion_utils/gaussian_diffusion.py",
@@ -140,6 +142,7 @@
     "tests/bumi/test_bumi_deployment_config.py",
     "tests/bumi/test_bumi_online_deployment.py",
     "tests/bumi/test_bumi_preview.py",
+    "tests/bumi/test_bumi_root_height.py",
     "tests/bumi/test_gmt_policy_source.py",
     "tests/bumi/validate_bumi_preview_runtime.py",
     "记录文本.md"
