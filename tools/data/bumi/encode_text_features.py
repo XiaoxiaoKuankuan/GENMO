@@ -2,15 +2,15 @@
 """为转换清单中尚无特征的caption生成本地T5-3B 150-token特征。
 
 只处理embeddings为空的记录；已有MotionMillion引用不重算，旧50-token不能伪装为150。
-输出新的清单和分片，不改原清单/数据。真实T5/GPU执行需另行授权；本轮仅实现入口。
+输出新的清单和分片，不改原清单/数据。用于已授权的数据准备任务，使用本地真实T5模型。
 原文本逐字保留，编码时沿用GENMO去除首尾空白规则，索引与caption SHA同时记录。
 """
 
-from pathlib import Path
 import argparse
 import copy
 import json
 import sys
+from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[3]
 if str(ROOT) not in sys.path:
@@ -19,9 +19,10 @@ if str(ROOT) not in sys.path:
 
 def encode(source, output, t5_model, device="cuda:0", records_per_shard=128):
     import torch
-    from gem.runtime.bumi_text_runtime import ResidentBumiTextEngine
-    from gem.runtime.bumi_text_contract import sha256_file
+
     from gem.datasets.pure_motion.bumi_text import caption_hash, resolve_reference
+    from gem.runtime.bumi_text_contract import sha256_file
+    from gem.runtime.bumi_text_runtime import ResidentBumiTextEngine
     from tools.data.bumi.prepare_bumi_text import write_json
 
     source, output = Path(source).resolve(), Path(output).resolve()
@@ -67,6 +68,9 @@ def encode(source, output, t5_model, device="cuda:0", records_per_shard=128):
         pending.clear()
         records.clear()
         shard_id += 1
+        print(
+            json.dumps(dict(stage="t5", completed_shards=shard_id), ensure_ascii=False), flush=True
+        )
 
     try:
         for record in payload["records"]:

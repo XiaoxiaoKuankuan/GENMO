@@ -1,8 +1,10 @@
-"""为56万级 MotionMillion UMR 输出提供可恢复的全量预处理筛选。
+"""为 MotionMillion 与 HumanML3D UMR 输出提供可恢复的全量预处理筛选。
 
 入口由已有 prepare_bumi_text.py 的 filter-umr 子命令提供。逐目录核对 batch_summary
 与实际文件集合，以相对路径建立唯一身份，检查原生 qpos、具名关节、源人体数值、
-30Hz完整时间线和 Y-up 来源；不把源坐标再旋转到已是Z-up的机器人输出上。
+30Hz完整时间线及各自的人体来源；不把源坐标再旋转到已是Z-up的机器人输出上。
+HumanML3D核对交付SHA、源人体SHA、文本和镜像/子片段身份，显式映射迁移前路径，
+逐条读取补齐的原始人体NPZ。两种来源共用机器人质量阈值，不跳过源数值检查。
 
 任务目录使用进程锁与SQLite事务，常驻worker通过有限队列计算，不把全库指标装入
 内存。续跑仍重新计算动作和源人体SHA；配置、资产、代码或输入清单变化时拒绝复用。
@@ -20,6 +22,7 @@ import hashlib
 import json
 import multiprocessing
 import os
+import re
 import sqlite3
 import time
 import zipfile
@@ -40,6 +43,7 @@ ROOT = Path(__file__).resolve().parents[3]
 SCHEMA = "genmo.bumi_umr_text_quality.v1"
 DEFAULT_CONFIG = ROOT / "configs/bumi/quality_filter_umr_text_30hz_v1.yaml"
 DEFAULT_KINEMATICS = ROOT / "configs/bumi/bumi_kinematics_robot_retargeter_fe934_v1.json"
+HML_ID = re.compile(r"^(M?)(\d{6})(?:__seg_(\d+)_(\d+))?$")
 _ENGINE = None
 _PATHS = None
 
@@ -116,10 +120,122 @@ def read_npz(path, *, object_names=False):
     return result
 
 
+def humanml_lineage(motion_id, frames, parent_frames=None):
+    """保留镜像身份，按原动作分组防泄漏；子片段ID中的边界单位为毫秒。"""
+    match = HML_ID.fullmatch(motion_id)
+    check(match is not None, f"未知HumanML3D动作ID: {motion_id}")
+    mirrored, base, start, end = match.groups()
+    begin = int(start) / 1000 if start is not None else 0.0
+    annotation_end = int(end) / 1000 if end is not None else frames / 30
+    clipped = False
+    if end is not None:
+        difference = (annotation_end - begin) * 30 - frames
+        # 原导出器按人体数组边界取片段；已知原动作不足标注终点时记录真实区间。
+        clipped = (
+            difference > 1.01
+            and parent_frames is not None
+            and abs(begin * 30 + frames - parent_frames) <= 1.01
+        )
+        check(
+            annotation_end > begin and (abs(difference) <= 1.01 or clipped),
+            "HumanML3D子片段时间范围与帧数不同",
+        )
+    return dict(
+        canonical_source_id="humanml3d:" + base,
+        interval_seconds=[begin, begin + frames / 30],
+        mirrored=bool(mirrored),
+        annotation_interval_seconds=[begin, annotation_end],
+        source_end_clipped=clipped,
+    )
+
+
+def humanml_catalog(paths):
+    """验证源清单/文本与迁移交付的一致性，返回按动作ID索引的原始身份。"""
+    root, source = Path(paths["input_root"]), Path(paths["source_root"])
+    meta = json.loads((source / "metadata.json").read_text())
+    check(
+        meta["schema"] == "humanml3d_umr_npz_v1"
+        and meta["coordinate_system"] == "right_handed_z_up"
+        and meta["fps"] == 30
+        and meta["dataset"] == "GENMO HumanML3D training derivative",
+        "HumanML3D源包版本、坐标或训练派生身份错误",
+    )
+    for name in ("metadata.json", "manifest.jsonl", "texts.json"):
+        check(
+            sha256_file(source / name) == sha256_file(root / "source_metadata" / name),
+            f"补齐的源包与UMR交付元数据不同: {name}",
+        )
+    hashes = {}
+    for line in (root / "SHA256SUMS").read_text().splitlines():
+        digest, name = line.split(maxsplit=1)
+        name = name.lstrip("*")
+        check(
+            re.fullmatch(r"[0-9a-f]{64}", digest) is not None
+            and not Path(name).is_absolute()
+            and ".." not in Path(name).parts
+            and name not in hashes,
+            "交付SHA清单格式错误或路径重复",
+        )
+        hashes[name] = digest
+    for name in ("metadata.json", "manifest.jsonl", "texts.json"):
+        relative = "source_metadata/" + name
+        check(hashes.get(relative) == sha256_file(root / relative), "交付元数据SHA不符")
+    check(
+        hashes.get("out_umr/bumi3/batch_summary.json")
+        == sha256_file(root / "out_umr/bumi3/batch_summary.json"),
+        "转换清单SHA不符",
+    )
+    texts = json.loads((source / "texts.json").read_text())
+    rows = {}
+    for line in (source / "manifest.jsonl").read_text().splitlines():
+        row = json.loads(line)
+        key = row["motion_id"]
+        check(
+            key not in rows
+            and HML_ID.fullmatch(key) is not None
+            and row["file"] == f"motions/{key}.npz",
+            "源清单身份重复或路径不符",
+        )
+        captions = texts.get(key)
+        check(
+            isinstance(captions, list)
+            and len(captions) == row["caption_count"]
+            and captions
+            and all(isinstance(c.get("caption"), str) and c["caption"].strip() for c in captions),
+            "源文本缺失或caption数量不同",
+        )
+        relative = f"out_umr/bumi3/{key}_bumi3.npz"
+        check(relative in hashes, "机器人动作缺少交付SHA")
+        rows[key] = dict(row, captions=captions, output_sha256=hashes[relative])
+    check(len(rows) == meta["motion_count"] and set(rows) == set(texts), "源动作/文本集合不同")
+    check(sum(r["frames"] for r in rows.values()) == meta["total_frames"], "源清单总帧数不同")
+    return meta, rows
+
+
+def source_contract_hashes(paths):
+    if paths.get("dataset", "motionmillion") != "humanml3d":
+        return {}
+    root, source = Path(paths["input_root"]), Path(paths["source_root"])
+    files = [root / "SHA256SUMS"]
+    files += [
+        base / name
+        for base in (source, root / "source_metadata")
+        for name in ("metadata.json", "manifest.jsonl", "texts.json")
+    ]
+    return {str(p): sha256_file(p) for p in files}
+
+
 def load_umr(row, paths, engine):
     """严格对应summary、qpos、原SMPL-X时间线，并保留原始来源ID。"""
     path = Path(paths["input_root"]) / row["relative_path"]
     source = Path(row["human_path"])
+    dataset = paths.get("dataset", "motionmillion")
+    hml_meta = hml_row = None
+    if dataset == "humanml3d":
+        if not hasattr(engine, "humanml_catalog"):
+            engine.humanml_catalog = humanml_catalog(paths)
+        hml_meta, catalog = engine.humanml_catalog
+        hml_row = catalog[path.stem.removesuffix("_bumi3")]
     z = read_npz(path, object_names=True)
     required = {
         "qpos",
@@ -153,9 +269,17 @@ def load_umr(row, paths, engine):
         _scalar(z, "robot_name") == "bumi3" and _scalar(z, "source_format") == "smplx_npz",
         "机器人或输出来源格式错误",
     )
-    check(Path(_scalar(z, "robot_xml")).resolve() == engine.xml, "逐条XML路径不匹配")
+    xml_path = str(Path(_scalar(z, "robot_xml")).resolve())
+    allowed_xml = {str(engine.xml)}
+    if dataset == "humanml3d" and paths.get("recorded_robot_xml"):
+        allowed_xml.add(paths["recorded_robot_xml"])
+    check(xml_path in allowed_xml, "逐条XML路径不匹配")
+    recorded_source = (
+        source if hml_meta is None else (Path(hml_meta["output_directory"]) / hml_row["file"])
+    )
     check(
-        Path(_scalar(z, "source_data")).resolve() == source.resolve(), "summary与源人体路径不一致"
+        Path(_scalar(z, "source_data")).resolve() == recorded_source.resolve(),
+        "summary与源人体路径不一致",
     )
     key = str(_scalar(z, "source_sequence_key"))
     check(key == source.stem and path.stem == key + "_bumi3", "动作身份与源文件名不一致")
@@ -174,6 +298,59 @@ def load_umr(row, paths, engine):
     check(z["zero_source_finger_pose"].dtype == np.bool_, "手指姿态标记必须为bool")
     _scalar(z, "zero_source_finger_pose")
     human = read_npz(source)
+    if dataset == "humanml3d":
+        check(sha256_file(path) == hml_row["output_sha256"], "机器人交付SHA不符")
+        check(sha256_file(source) == hml_row["sha256"], "HumanML3D源人体SHA不符")
+        check(
+            source.stat().st_size == hml_row["bytes"] and n == hml_row["frames"],
+            "HumanML3D源文件大小或完整帧数不同",
+        )
+        required_human = {
+            "root_orient",
+            "pose_body",
+            "trans",
+            "betas",
+            "gender",
+            "mocap_frame_rate",
+            "output_up",
+        }
+        check(required_human <= set(human), "HumanML3D源人体字段缺失")
+        for name, shape in {
+            "root_orient": (n, 3),
+            "pose_body": (n, 63),
+            "trans": (n, 3),
+            "betas": (10,),
+        }.items():
+            check(
+                human[name].shape == shape and human[name].dtype.kind == "f",
+                f"HumanML3D源人体{name}形状或类型不符",
+            )
+        check(
+            _scalar(human, "mocap_frame_rate") == 30
+            and _scalar(human, "output_up") == "z"
+            and _scalar(human, "gender") in {"neutral", "male", "female"},
+            "HumanML3D源人体FPS/坐标/性别不符",
+        )
+        ordered = np.concatenate(
+            (qpos[:, :7], qpos[:, [names.index(name) + 7 for name in engine.kin.joint_order]]),
+            axis=1,
+        )
+        return ordered, dict(
+            dataset="humanml3d",
+            frames=n,
+            fps=30,
+            duration_seconds=n / 30,
+            source_motion_id=key,
+            source_sequence_key=key,
+            source_file=str(recorded_source),
+            source_up="z",
+            output_up="z",
+            smpl_scale=scale,
+            source_ground_z=ground,
+            ground_height_m=engine.rules["ground_height_m"],
+            source_validation="full_npz_numerical_and_manifest_sha256",
+            **humanml_lineage(key, n, catalog.get(key.split("__seg_", 1)[0], {}).get("frames")),
+        )
     keys = {"pose_aa", "trans", "fps", "output_up", "source_format", "source_file"}
     check(keys <= set(human), f"源人体字段缺失: {sorted(keys - set(human))}")
     check(
@@ -196,10 +373,11 @@ def load_umr(row, paths, engine):
     for fps_key in ("mocap_framerate", "mocap_frame_rate"):
         if fps_key in human:
             check(float(_scalar(human, fps_key)) == 30.0, "源人体FPS字段矛盾")
-    check(_scalar(human, "output_up") == engine.rules["source_up"], "源人体up轴契约不符")
-    check(_scalar(human, "source_format") == engine.rules["source_format"], "非MotionMillion来源")
+    source_rules = engine.rules["source_contracts"]["motionmillion"]
+    check(_scalar(human, "output_up") == source_rules["up"], "源人体up轴契约不符")
+    check(_scalar(human, "source_format") == source_rules["format"], "非MotionMillion来源")
     source_file = str(_scalar(human, "source_file"))
-    marker = engine.rules["source_id_marker"] + "/"
+    marker = source_rules["id_marker"] + "/"
     check(source_file.count(marker) == 1, "原始MotionMillion来源路径缺少唯一身份锚点")
     original = Path(source_file.split(marker, 1)[1])
     check(
@@ -318,6 +496,9 @@ def _summaries(root, folders):
 def index_inputs(db, paths, summaries):
     """一次仅持有一个上游分片，精确识别缺失输出和未登记输出。"""
     root, source_root = Path(paths["input_root"]), Path(paths["source_root"])
+    hml_meta = hml_rows = None
+    if paths.get("dataset", "motionmillion") == "humanml3d":
+        hml_meta, hml_rows = humanml_catalog(paths)
     with db:
         db.execute("DELETE FROM inputs")
         for summary in summaries:
@@ -327,6 +508,21 @@ def index_inputs(db, paths, summaries):
             seen = set()
             for item in payload["results"]:
                 path, human = Path(item["out"]).resolve(), Path(item["motion"]).resolve()
+                if hml_rows is not None:
+                    key = path.stem.removesuffix("_bumi3")
+                    check(
+                        key in hml_rows and path.name == key + "_bumi3.npz",
+                        "HumanML3D转换清单出现未知身份",
+                    )
+                    check(
+                        human == Path(hml_meta["output_directory"]) / hml_rows[key]["file"],
+                        "HumanML3D转换清单源路径不符",
+                    )
+                    check(
+                        path.parent == Path(paths["recorded_output_root"]),
+                        "HumanML3D旧输出路径不符合显式映射",
+                    )
+                    path, human = summary.parent / path.name, source_root / hml_rows[key]["file"]
                 if path.parent != summary.parent or not human.is_relative_to(source_root):
                     raise ValueError("summary路径越过声明的数据根目录")
                 relative = path.relative_to(root).as_posix()
@@ -343,6 +539,11 @@ def index_inputs(db, paths, summaries):
                 db.execute(
                     "INSERT INTO inputs VALUES (?,?,?,?)",
                     (path.relative_to(root).as_posix(), folder, str(expected), "unrecorded"),
+                )
+            if hml_rows is not None:
+                check(
+                    seen == {key + "_bumi3.npz" for key in hml_rows},
+                    "HumanML3D转换清单与源清单集合不同",
                 )
             print(
                 json.dumps(
@@ -418,7 +619,12 @@ def publish_reports(db, output, run, limit):
                 handles[folder].write(payload + "\n")
                 counts[status] += 1
                 by_folder[folder][status] += 1
-                by_source[row.get("source_motion_id", "unknown").split("/", 1)[0]][status] += 1
+                source_group = (
+                    "humanml3d"
+                    if row.get("dataset") == "humanml3d"
+                    else row.get("source_motion_id", "unknown").split("/", 1)[0]
+                )
+                by_source[source_group][status] += 1
                 reasons.update(row["reason_codes"])
                 length_reasons.update(row["training_exclusion_reasons"])
                 frames[status] += row["frames"]
@@ -493,6 +699,17 @@ def run_filter(args):
     paths["batch_config"] = (
         str(args.batch_config.resolve(strict=True)) if args.batch_config else None
     )
+    paths["dataset"] = getattr(args, "dataset", "motionmillion")
+    if paths["dataset"] == "humanml3d":
+        check(not args.folders, "HumanML3D不使用MotionMillion folder选择")
+        check(
+            getattr(args, "recorded_output_root", None)
+            and getattr(args, "recorded_robot_xml", None),
+            "必须显式声明迁移前的输出和XML路径",
+        )
+        paths["recorded_output_root"] = str(args.recorded_output_root.resolve())
+        paths["recorded_robot_xml"] = str(args.recorded_robot_xml.resolve())
+        humanml_catalog(paths)
     output = args.output.resolve()
     for root in (Path(paths["input_root"]), Path(paths["source_root"])):
         if output == root or output.is_relative_to(root) or root.is_relative_to(output):
@@ -511,7 +728,11 @@ def run_filter(args):
         paths["retarget_config"],
         paths["batch_config"],
     )
-    summaries = _summaries(Path(paths["input_root"]), args.folders)
+    summaries = (
+        [Path(paths["input_root"]) / "out_umr/bumi3/batch_summary.json"]
+        if paths["dataset"] == "humanml3d"
+        else _summaries(Path(paths["input_root"]), args.folders)
+    )
     code_paths = [
         Path(__file__),
         Path(__file__).with_name("umr_text_quality.py"),
@@ -536,6 +757,7 @@ def run_filter(args):
         retarget_config_sha256=sha256_file(paths["retarget_config"]),
         batch_config_sha256=sha256_file(paths["batch_config"]) if paths["batch_config"] else None,
         summaries={str(p): sha256_file(p) for p in summaries},
+        source_contract_hashes=source_contract_hashes(paths),
         code={str(p.relative_to(ROOT)): sha256_file(p) for p in code_paths},
         effective_limits={
             n: [float(a), float(b)]
@@ -625,6 +847,10 @@ def run_filter(args):
                 != assets
             ):
                 raise RuntimeError("检查期间资产发生改变")
+            check(
+                source_contract_hashes(paths) == identity["source_contract_hashes"],
+                "检查期间源清单或文本发生改变",
+            )
             report = publish_reports(db, output, run, args.limit)
             run.update(
                 state="complete" if not counts["ERROR"] else "complete_with_errors",
@@ -678,6 +904,11 @@ class QualityGate:
             "训练候选清单发生改变",
         )
         self.paths = self.run["identity"]["paths"]
+        check(
+            source_contract_hashes(self.paths)
+            == self.run["identity"].get("source_contract_hashes", {}),
+            "源清单或文本已改变",
+        )
         for field, key in (
             ("config", "config_sha256"),
             ("retarget_config", "retarget_config_sha256"),
@@ -730,15 +961,21 @@ class QualityGate:
 
     @staticmethod
     def validate_identity(row, record):
-        check(record["dataset"] == "motionmillion", "UMR报告仅对应MotionMillion")
+        check(record["dataset"] == row.get("dataset", "motionmillion"), "UMR报告数据集身份不符")
         source_id = row["source_motion_id"]
         check(
             record["provenance"]["source_id"] == source_id
             and record.get("text_source_motion_id", record["motion_id"]) == source_id,
-            "caption来源ID与原始MotionMillion文件身份不匹配",
+            "caption来源ID与原始动作文件身份不匹配",
         )
         canonical = record["provenance"].get("canonical_source_id")
         check(canonical in (None, row["canonical_source_id"]), "镜像归一化来源ID不一致")
+        if row.get("dataset") == "humanml3d":
+            check(record["split"] == "train", "当前HumanML3D交付只包含训练集派生数据")
+            check(
+                record["provenance"]["interval_seconds"] == row["interval_seconds"],
+                "HumanML3D文本区间与源子片段不符",
+            )
 
     def read_candidate(self, path, record):
         row = self.lookup(path)
@@ -746,6 +983,12 @@ class QualityGate:
             return None, row
         self.validate_identity(row, record)
         qpos, meta = load_umr(row, self.paths, self.engine)
+        if row.get("dataset") == "humanml3d":
+            original = self.engine.humanml_catalog[1][row["source_motion_id"]]
+            check(
+                record["captions"] == [c["caption"] for c in original["captions"]],
+                "HumanML3D caption与源文本不同",
+            )
         check(meta["frames"] == row["frames"], "读取帧数与质量报告不同")
         check(
             sha256_file(path) == row["source_sha256"]

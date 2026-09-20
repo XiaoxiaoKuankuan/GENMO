@@ -5,7 +5,9 @@ build 读取 conversion.json 中的原生 NPZ 与文本特征引用，验证后�
 按来源区间排除 train/held-out 重叠及精确重复，原 NPZ/T5 文件不改写。不执行重定向、
 人体转换或自动地面修正。stats 只遍历 train，有效XY差分不包含每条动作最后一帧。
 preflight 报告真实长度、padding和裁剪计数。所有写入要求显式输出路径且拒绝覆盖。
-filter-umr 接入MotionMillion原生UMR的全量数值/质量筛选与可恢复报告。build可通过
+filter-umr 接入MotionMillion/HumanML3D原生UMR的全量数值/质量筛选与可恢复报告。
+humanml-conversion仅从完整PASS报告和逐字匹配的原文本生成训练派生清单，不创造验证集。
+build可通过
 --quality-report只接收完整报告中的PASS，并核对UMR源身份、双输入SHA和完整文本对应。
 此模式不裁剪长动作、不自动生成caption或split，构建成功后同盘原子发布release。
 """
@@ -77,7 +79,8 @@ def select_records(records):
             reason = None
             if item["split"] == "train" and any(max(a, c) < min(b, d) for c, d in held):
                 reason = "train_overlaps_held_out"
-            identity = (item["split"], a, b)
+            # 镜像共享防泄漏分组，但属于不同训练样本，不能按时间区间误删镜像。
+            identity = (item["split"], item["provenance"]["source_id"], a, b)
             if identity in seen:
                 reason = "duplicate_source_interval"
             if reason:
@@ -88,6 +91,69 @@ def select_records(records):
                 accepted.append(item)
                 seen.add(identity)
     return accepted, {"excluded": rejected, "unverified_cross_dataset_lineage": unknown}
+
+
+def humanml_conversion(quality_report, output):
+    """把完整HumanML3D PASS报告与原caption绑定，供T5编码及现有build入口使用。"""
+    from tools.data.bumi.umr_text_preprocess import QualityGate, humanml_catalog
+
+    gate = QualityGate(quality_report)
+    try:
+        if gate.paths.get("dataset") != "humanml3d":
+            raise ValueError("需要HumanML3D的完整筛选报告")
+        _, catalog = humanml_catalog(gate.paths)
+        records = []
+        for line in (gate.root / "train_candidates.jsonl").read_text().splitlines():
+            candidate = json.loads(line)
+            path = Path(gate.paths["input_root"]) / candidate["relative_path"]
+            row = gate.lookup(path)
+            if row["status"] != "PASS" or not row["training_eligible"]:
+                raise ValueError("候选与质量数据库不一致")
+            key = row["source_motion_id"]
+            texts = catalog[key]["captions"]
+            records.append(
+                dict(
+                    dataset="humanml3d",
+                    motion_id=key,
+                    text_source_motion_id=key,
+                    split="train",
+                    qpos_path=str(path),
+                    fps=30,
+                    captions=[c["caption"] for c in texts],
+                    caption_ids=[f"{key}:{i}" for i in range(len(texts))],
+                    embeddings=[],
+                    provenance=dict(
+                        source_id=key,
+                        canonical_source_id=row["canonical_source_id"],
+                        interval_seconds=row["interval_seconds"],
+                        mirrored=row["mirrored"],
+                        annotation_interval_seconds=row["annotation_interval_seconds"],
+                        source_end_clipped=row["source_end_clipped"],
+                        retargeter="UMR",
+                        retarget_version=gate.run["fingerprint"],
+                        source_dataset="GENMO HumanML3D training derivative",
+                    ),
+                )
+            )
+        if not records:
+            raise ValueError("没有满足训练要求的PASS动作，拒绝发布空训练数据")
+        payload = dict(
+            schema="genmo.bumi_text_conversion.v1",
+            kinematics=dict(
+                path=gate.paths["kinematics"], sha256=sha256_file(gate.paths["kinematics"])
+            ),
+            quality_report=str(gate.root),
+            split_policy="source_training_derivative_only_no_invented_heldout",
+            records=records,
+        )
+        write_json(output, payload)
+        return dict(
+            records=len(records),
+            captions=sum(len(r["captions"]) for r in records),
+            output=str(Path(output).resolve()),
+        )
+    finally:
+        gate.close()
 
 
 def build(source, output, *, records_per_shard=512, quality_report=None):
@@ -383,7 +449,13 @@ def main():
         "--quality-report", type=Path, help="完整UMR筛选报告目录；该模式读取原生UMR qpos"
     )
     # 只在执行filter时导入MuJoCo，原有build/stats/preflight保持原依赖边界。
-    p = sub.add_parser("filter-umr", help="全量筛选MotionMillion UMR，支持断点续跑")
+    p = sub.add_parser("humanml-conversion", help="由完整HumanML3D PASS报告构建文本转换清单")
+    p.add_argument("--quality-report", type=Path, required=True)
+    p.add_argument("--output", type=Path, required=True)
+    p = sub.add_parser("filter-umr", help="全量筛选MotionMillion/HumanML3D UMR，支持断点续跑")
+    p.add_argument("--dataset", choices=["motionmillion", "humanml3d"], default="motionmillion")
+    p.add_argument("--recorded-output-root", type=Path, help="HumanML3D迁移前输出目录的显式映射")
+    p.add_argument("--recorded-robot-xml", type=Path, help="经资产SHA核验后允许的旧XML绝对路径")
     for name in (
         "input-root",
         "source-root",
@@ -420,7 +492,9 @@ def main():
         from tools.data.bumi.umr_text_preprocess import run_filter
 
         raise SystemExit(run_filter(args))
-    if args.command == "build":
+    if args.command == "humanml-conversion":
+        result = humanml_conversion(args.quality_report, args.output)
+    elif args.command == "build":
         result = build(
             args.source,
             args.output,

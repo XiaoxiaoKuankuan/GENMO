@@ -1,7 +1,53 @@
-# MotionMillion UMR → BUMI 文本动作预处理
+# MotionMillion / HumanML3D UMR → BUMI 文本动作预处理
 
 适用分支：`feature/bumi-text-only`。入口复用 `tools/data/bumi/prepare_bumi_text.py`。
 质量计算复用音乐分支的 `filter_sonic_npz_motions.evaluate_motion`，原音乐代码和阈值配置不改动。
+
+## HumanML3D 交付适配与完整训练数据
+
+HumanML3D 与 MotionMillion 的 UMR 机器人输出都按 Z-up 处理。配置的
+`source_contracts` 仅区分重定向前的人体来源，不对机器人 qpos 再旋转或贴地。
+以下默认目录针对服务器2的23,242条HumanML3D训练派生交付：
+
+| 用途 | 路径 |
+|---|---|
+| 原始机器人交付 | `/data2/user/liwei/hml3d_umr` |
+| 补齐的原始人体包 | `/data0/user/liwei/datasets/humanml3d_umr_source_v1` |
+| 筛选报告 | `/data0/user/liwei/dataset_reports/humanml3d_umr_bumi3_v1` |
+| 最终完整动作训练分片 | `/data0/user/liwei/datasets/bumi_text_humanml3d_umr_pass_v1` |
+| 配套T5特征 | `/data0/user/liwei/datasets/bumi_text_humanml3d_umr_pass_v1_t5` |
+
+原人体包须与交付的 `source_metadata` 三个文件逐字节一致。适配器核对交付
+`SHA256SUMS`、源manifest SHA、机器人/人体的全部数值及完整时间线；缺少原人体
+文件会明确INVALID，不降级为只检查元数据。旧输出目录、旧XML路径通过参数显式
+映射；使用前必须核验生成端和当前端XML、网格与重定向配置身份相同。
+
+```bash
+cd /home/user/liwei/GENMO-bumi-text
+# 仅全量筛选，CPU执行；中断时追加 --resume。
+BUMI_DATASET=humanml3d bash scripts/prepare_bumi_text_umr.sh
+
+# 首次完整流水线：筛选 -> 原caption绑定 -> GPU T5编码 -> PASS分片 -> train统计 -> 全量加载核验。
+BUMI_DATASET=humanml3d BUMI_BUILD_TRAINING=1 BUMI_WORKERS=32 \
+  bash scripts/prepare_bumi_text_umr.sh
+```
+
+上述两种首次命令选择其一。若已完成筛选而未构建，可在完整流水线命令后追加
+`--resume` 复用筛选结果；已经存在的conversion、T5目录或release不会覆盖。
+后半程失败时根据已完成阶段单独使用 `humanml-conversion`、`encode_text_features.py`、
+`build`、`stats`、`preflight` 继续，不把已存在release当作全部完成。
+`BUMI_ENCODE_PYTHON` 默认使用服务器2的GENMO-cu128环境，`BUMI_TEXT_DEVICE`
+默认cuda:0，`BUMI_T5_MODEL`默认本地`/data0/user/liwei/models/t5-3b_bed96aab`。
+
+完整保留原训练身份和caption；`M`前缀镜像保留为独立训练样本，同时与原动作共享
+防泄漏分组。`__seg_起点毫秒_终点毫秒`记录真实完整区间；原序列不足标注终点时，
+仅在母序列帧数能够证明边界截取的情况下接受，并同时保存原标注区间。没有重新
+裁剪动作或随机生成val/test。最终只有train记录，val/test清单为空。
+训练分片内保存qpos、接触及文本引用；T5分片也必须随训练数据保留。统计量位于
+release的`train_stats.json`，全量读取结果位于报告目录`training_preflight.json`。
+该脚本准备数据，不启动模型训练。
+
+下文默认路径和folder分片约定针对MotionMillion；通用质量规则与报告机制共用。
 
 ## 数据与判定契约
 

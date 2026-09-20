@@ -45,8 +45,16 @@ def load_rules(path):
     require(raw["training_frames"] == [60, 300], "文本分支要求完整60..300帧")
     require(raw["posture_policy"] in {"diagnostic", "standing"}, "未知姿态策略")
     require(
-        raw["source_up"] == "y" and raw["source_format"] == "motionmillion_272",
-        "此适配器需要明确的MotionMillion Y-up源契约",
+        raw["source_contracts"]
+        == {
+            "motionmillion": {
+                "format": "motionmillion_272",
+                "up": "y",
+                "id_marker": "motion_272rpr_unpacked",
+            },
+            "humanml3d": {"format": "humanml3d_umr_npz_v1", "up": "z"},
+        },
+        "需要明确区分人体来源契约；机器人输出统一为Z-up",
     )
     require(np.isfinite(raw["ground_height_m"]), "地面高度必须有限")
     require(

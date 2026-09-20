@@ -4,6 +4,8 @@
 字段、名字重排、Y-up来源、时间线、数值异常、有效膝限位、脚滑/悬空、默认碰撞扣除、
 有限队列多进程、断点续跑、源SHA变化和正式构建质量门禁。文本特征明确为测试替身，
 不把这些测试当成真实生成质量或动力学验证。全部运行产物仅写pytest的tmp_path。
+HumanML3D回归覆盖迁移路径、双输入SHA、原文本绑定、Z-up不重复旋转、镜像保留和
+子片段时间范围，以及训练派生包禁止伪造held-out身份。
 """
 
 import json
@@ -17,13 +19,14 @@ import torch
 
 from gem.datasets.pure_motion.bumi_text import BumiTextDataset, caption_hash
 from gem.robots.bumi.kinematics import sha256_file
-from tools.data.bumi.prepare_bumi_text import build
+from tools.data.bumi.prepare_bumi_text import build, humanml_conversion
 from tools.data.bumi.umr_text_preprocess import (
     DEFAULT_CONFIG,
     DEFAULT_KINEMATICS,
     InputContractError,
     QualityGate,
     evaluate_row,
+    humanml_lineage,
     init_worker,
     load_umr,
     run_filter,
@@ -429,3 +432,162 @@ def test_mirror_lineage_blocks_cross_split_training_leak(bundle, tmp_path):
     assert result["counts"] == {"val/motionmillion": 1}
     assert result["excluded"][0]["reason"] == "train_overlaps_held_out"
     assert len(BumiTextDataset(tmp_path / "release", "val")) == 1
+
+
+@pytest.fixture
+def humanml_bundle(tmp_path, bundle, engine):
+    paths, _, args, _ = bundle
+    root, source = Path(paths["input_root"]), Path(paths["source_root"])
+    robot = root / "out_umr/bumi3"
+    robot.mkdir(parents=True)
+    (root / "source_metadata").mkdir()
+    (source / "motions").mkdir(parents=True)
+    old_source, old_output = Path("/old/humanml"), Path("/old/umr/out_umr/bumi3")
+    old_xml = Path("/old/UMR/assets/bumi3/mjcf/bumi3_retarget.xml")
+    manifest, results, texts = [], [], {}
+    for key in ("000002", "M000002", "000002__seg_1000_3000"):
+        human = source / "motions" / (key + ".npz")
+        np.savez_compressed(
+            human,
+            root_orient=np.zeros((60, 3), np.float32),
+            pose_body=np.zeros((60, 63), np.float32),
+            trans=np.zeros((60, 3), np.float32),
+            betas=np.zeros(10, np.float32),
+            gender="neutral",
+            mocap_frame_rate=np.float32(30),
+            output_up="z",
+        )
+        path = robot / (key + "_bumi3.npz")
+        np.savez_compressed(
+            path,
+            qpos=grounded(engine),
+            fps=np.float32(30),
+            frame_ids=np.arange(60, dtype=np.int32),
+            robot_xml=str(old_xml),
+            robot_name="bumi3",
+            robot_joint_names=np.array(engine.kin.joint_order),
+            source_data=str(old_source / "motions" / human.name),
+            source_sequence_key=key,
+            source_format="smplx_npz",
+            smpl_scale=np.float32(0.573),
+            ground_z=np.float32(0.01),
+            zero_source_finger_pose=np.bool_(True),
+        )
+        manifest.append(
+            dict(
+                motion_id=key,
+                file=f"motions/{key}.npz",
+                frames=60,
+                caption_count=1,
+                bytes=human.stat().st_size,
+                sha256=sha256_file(human),
+            )
+        )
+        texts[key] = [dict(caption="synthetic test only: a robot is standing", tokens=[])]
+        results.append(
+            dict(
+                motion=str(old_source / "motions" / human.name),
+                out=str(old_output / path.name),
+                status="ok",
+            )
+        )
+    metadata = dict(
+        schema="humanml3d_umr_npz_v1",
+        coordinate_system="right_handed_z_up",
+        fps=30,
+        dataset="GENMO HumanML3D training derivative",
+        motion_count=3,
+        total_frames=180,
+        output_directory=str(old_source),
+    )
+    (source / "manifest.jsonl").write_text("".join(json.dumps(r) + "\n" for r in manifest))
+    (source / "metadata.json").write_text(json.dumps(metadata))
+    (source / "texts.json").write_text(json.dumps(texts))
+    for name in ("manifest.jsonl", "metadata.json", "texts.json"):
+        (root / "source_metadata" / name).write_bytes((source / name).read_bytes())
+    (robot / "batch_summary.json").write_text(json.dumps(dict(results=results)))
+    files = sorted(p for p in root.rglob("*") if p.is_file())
+    (root / "SHA256SUMS").write_text(
+        "".join(f"{sha256_file(p)}  {p.relative_to(root).as_posix()}\n" for p in files)
+    )
+    options = args(
+        dataset="humanml3d",
+        recorded_output_root=old_output,
+        recorded_robot_xml=old_xml,
+        expected_records=3,
+    )
+    return options, robot, source
+
+
+def test_humanml_full_source_check_mirrors_segments_and_training_build(
+    humanml_bundle, tmp_path, engine
+):
+    options, robot, _ = humanml_bundle
+    assert run_filter(options) == 0
+    summary = json.loads((options.output / "quality_summary.json").read_text())
+    assert summary["status_counts"] == {"PASS": 3, "TRAIN_ELIGIBLE": 3}
+    conversion = tmp_path / "conversion.json"
+    assert humanml_conversion(options.output, conversion)["records"] == 3
+    payload = json.loads(conversion.read_text())
+    gate = QualityGate(options.output)
+    try:
+        for record in payload["records"]:
+            path = Path(record["qpos_path"])
+            row = gate.lookup(path)
+            assert row["source_up"] == row["output_up"] == "z"
+            _, embedding_payload = make_conversion(tmp_path / record["motion_id"], path, row)
+            record["embeddings"] = embedding_payload["records"][0]["embeddings"]
+            qpos, _ = gate.read_candidate(path, record)
+            np.testing.assert_array_equal(qpos.numpy(), grounded(engine))
+        bad = dict(payload["records"][0], split="val")
+        with pytest.raises(InputContractError, match="训练集"):
+            gate.validate_identity(gate.lookup(Path(bad["qpos_path"])), bad)
+        bad = dict(payload["records"][0], captions=["wrong caption"])
+        with pytest.raises(InputContractError, match="caption"):
+            gate.read_candidate(Path(bad["qpos_path"]), bad)
+    finally:
+        gate.close()
+    conversion.write_text(json.dumps(payload))
+    report = build(conversion, tmp_path / "release", quality_report=options.output)
+    assert report["counts"] == {"train/humanml3d": 3}
+    dataset = BumiTextDataset(tmp_path / "release", "train")
+    assert len(dataset) == 3
+    intervals = {
+        dataset.read_record(i)["motion_id"]: dataset.read_record(i)["provenance"][
+            "interval_seconds"
+        ]
+        for i in range(3)
+    }
+    assert intervals["000002__seg_1000_3000"] == [1.0, 3.0]
+    options.resume = True
+    assert run_filter(options) == 0
+    assert json.loads((options.output / "run.json").read_text())["resumed_records"] == 3
+
+
+@pytest.mark.parametrize(
+    "change", ["source_missing", "source_tampered", "robot_tampered", "old_path"]
+)
+def test_humanml_rejects_missing_tampered_or_mismapped_inputs(humanml_bundle, change):
+    options, robot, source = humanml_bundle
+    human = source / "motions/000002.npz"
+    output = robot / "000002_bumi3.npz"
+    if change == "source_missing":
+        human.unlink()
+    elif change == "source_tampered":
+        rewrite(human, output_up="y")
+    elif change == "robot_tampered":
+        rewrite(output, ground_z=np.float32(2))
+    else:
+        options.recorded_robot_xml = Path("/wrong/model.xml")
+    assert run_filter(options) == 0
+    summary = json.loads((options.output / "quality_summary.json").read_text())
+    assert summary["status_counts"]["INVALID"] == (3 if change == "old_path" else 1)
+
+
+def test_humanml_short_source_boundary_preserves_actual_caption_interval():
+    value = humanml_lineage("003037__seg_1000_5000", 118, parent_frames=148)
+    assert value["source_end_clipped"]
+    assert value["interval_seconds"] == [1.0, 1 + 118 / 30]
+    assert value["annotation_interval_seconds"] == [1.0, 5.0]
+    with pytest.raises(InputContractError, match="时间范围"):
+        humanml_lineage("003037__seg_1000_5000", 118, parent_frames=300)

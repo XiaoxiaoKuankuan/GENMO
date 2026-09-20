@@ -1,13 +1,18 @@
-# MotionMillion -> UMR -> BUMI 文本完整动作的离线筛选配置。
+# MotionMillion/HumanML3D -> UMR -> BUMI 文本完整动作的共用离线筛选配置。
 # 复用音乐分支的30Hz连续性阈值；坐、跪、躺和根倾角只报告，不作为站立风格淘汰。
 # 新增脚网格穿地、独立候选支撑滑移、连续悬空及凸包碰撞诊断。阈值是首版离线
 # 数据门禁，需结合报告和回放校准，不代表动力学或实机验收。原始qpos不修正、不裁剪。
 schema: genmo.bumi_umr_text_quality_config.v1
 robot_xml_sha256: fe93472dd764704fe8389b0f82052ae84ed8bc90f6d71b1467872f86e08a9ad3
 kinematics_sha256: c08731704dccece11351b6fa877e30bac5ca2a8d363de30af7ca2ea1398f4029
-source_format: motionmillion_272
-source_up: y
-source_id_marker: motion_272rpr_unpacked
+source_contracts:
+  motionmillion:
+    format: motionmillion_272
+    up: y
+    id_marker: motion_272rpr_unpacked
+  humanml3d:
+    format: humanml3d_umr_npz_v1
+    up: z
 ground_height_m: 0.0
 training_frames: [60, 300]
 posture_policy: diagnostic
