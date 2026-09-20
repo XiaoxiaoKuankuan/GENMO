@@ -242,6 +242,8 @@ def montage_frames(qpos, row, group, index, count, model, data, renderer, width,
                 f"root angular speed max: {m['root_angular_speed_max_rad_s']:.2f} rad/s   "
                 f"joint speed p95: {m['joint_speed_p95_rad_s']:.2f} rad/s"
             )
+        if row["selection_category"] == "root_tilt":
+            line = f"root tilt p95: {m['root_tilt_p95_deg']:.1f} deg  |  reject: >30 deg for >=15 frames"
         draw.text((20, y + 30), line, font=small, fill=(222, 228, 237))
         status = (
             ("ISSUE NOW: " + " | ".join(active)) if active else "No flagged issue on this frame"
@@ -344,6 +346,26 @@ def render_quality_review(args):
         staged = Path(temp) / "review"
         staged.mkdir()
         analysis, run = analyze_report(args.quality_report, args.per_group)
+        if analysis.get("text_binding"):
+            from tools.data.bumi.motionmillion_text import TextCatalog
+
+            binding = analysis["text_binding"]
+            catalog = TextCatalog(binding["text_catalog"])
+            try:
+                if (
+                    catalog.metadata["database_sha256"] != binding["database_sha256"]
+                    or sha256(catalog.root / "metadata.json") != binding["metadata_sha256"]
+                ):
+                    raise ValueError("文本目录与报告绑定SHA不符")
+                for rows in analysis["groups"].values():
+                    for row in rows:
+                        text = catalog.lookup(row)
+                        if text:
+                            row["verified_captions"] = [{"caption": c} for c in text["captions"]]
+                            row["verified_text_sha256"] = text["text_sha256"]
+                            row["official_split"] = text["official_split"]
+            finally:
+                catalog.close()
         paths, assets = run["identity"]["paths"], run["identity"]["assets"]
         if (
             verify_asset_files(

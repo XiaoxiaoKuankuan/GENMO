@@ -75,6 +75,8 @@ def test_reject_categories_use_reject_reason_not_secondary_review():
     }
     row["reason_codes"] = list(row["reason_statuses"])
     assert [c for _, c, _ in candidate_scores(row)] == ["self_collision"]
+    row["reason_statuses"] = {"ROOT_TILT_SUSTAINED": "REJECT"}
+    assert [c for _, c, _ in candidate_scores(row)] == ["root_tilt"]
 
 
 def report_fixture(tmp_path):

@@ -461,6 +461,14 @@ def main():
     p.add_argument(
         "--quality-report", type=Path, help="完整UMR筛选报告目录；该模式读取原生UMR qpos"
     )
+    p = sub.add_parser("motionmillion-texts", help="从官方归档构建原生UMR动作文本索引")
+    p.add_argument("--quality-report", type=Path, required=True)
+    p.add_argument("--texts-archive", type=Path, required=True)
+    p.add_argument("--split-archive", type=Path, required=True)
+    p.add_argument("--output", type=Path, required=True)
+    p = sub.add_parser("bind-motionmillion-texts", help="核验动作来源并绑定新筛选报告文本")
+    p.add_argument("--quality-report", type=Path, required=True)
+    p.add_argument("--text-catalog", type=Path, required=True)
     # 只在执行filter时导入MuJoCo，原有build/stats/preflight保持原依赖边界。
     p = sub.add_parser("humanml-conversion", help="由完整HumanML3D PASS报告构建文本转换清单")
     p.add_argument("--quality-report", type=Path, required=True)
@@ -505,7 +513,17 @@ def main():
         from tools.data.bumi.umr_text_preprocess import run_filter
 
         raise SystemExit(run_filter(args))
-    if args.command == "humanml-conversion":
+    if args.command == "motionmillion-texts":
+        from tools.data.bumi.motionmillion_text import build_catalog
+
+        result = build_catalog(
+            args.quality_report, args.texts_archive, args.split_archive, args.output
+        )
+    elif args.command == "bind-motionmillion-texts":
+        from tools.data.bumi.motionmillion_text import bind_report
+
+        result = bind_report(args.quality_report, args.text_catalog)
+    elif args.command == "humanml-conversion":
         result = humanml_conversion(args.quality_report, args.output)
     elif args.command == "build":
         result = build(

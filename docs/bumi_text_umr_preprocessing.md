@@ -280,3 +280,7 @@ ERROR为0。PASS仅419条因长度排除（不足60帧405、超过300帧14），
 `motionmillion_umr_bumi3_latest`；HumanML3D训练输出改为
 `bumi_text_humanml3d_umr_pass_latest`及对应`_t5`。新一轮全量结果核验通过后删除
 被替代的旧报告和旧质量视频，保留用户原始数据；旧结果的数量记录仅作变更历史。
+
+### 原生UMR MotionMillion文本绑定
+
+通过`prepare_bumi_text.py motionmillion-texts --quality-report REPORT --texts-archive texts.tar.gz --split-archive split.tar.gz --output CATALOG`构建文本SQLite目录，再用`bind-motionmillion-texts --quality-report REPORT --text-catalog CATALOG`核验全量动作来源并写入`text_binding.json`。索引保存原始文本字节、完整来源ID、双输入SHA及官方t2m_60_300划分；缺失文本或split明确报告，不推断。原文本包放在服务器2`/data0/user/liwei/datasets/motionmillion_text_source_v1/`，最新匹配目录为`/data0/user/liwei/datasets/motionmillion_umr_text_latest/`。文本绑定不等同于T5特征编码或可训练分片构建。最新报告带text_binding时，已有质量视频入口自动核验并显示MotionMillion原caption。

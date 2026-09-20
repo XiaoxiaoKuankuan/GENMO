@@ -33,6 +33,7 @@ def reason_family(code):
         ("SELF_COLLISION", "self_collision"),
         ("FOOT_PENETRATION", "ground_penetration"),
         ("ROOT_HEIGHT", "root_height"),
+        ("ROOT_TILT", "root_tilt"),
         ("LONG_AIRBORNE", "airborne"),
         ("SOURCE_JOINT_LIMIT", "joint_limits"),
     ):
@@ -98,6 +99,8 @@ def candidate_scores(row):
         reason_family(code) for code, level in row["reason_statuses"].items() if level == "REJECT"
     }
     scores = []
+    if "root_tilt" in families:
+        scores.append(("low_quality", "root_tilt", -m["root_tilt_p95_deg"]))
     if "foot_slide" in families:
         scores.append(("low_quality", "foot_slide", -m["foot_slide_p95_m_s"]))
     if "self_collision" in families:
@@ -133,9 +136,15 @@ class CandidatePool:
         categories = (
             ["travel", "turning", "low_posture", "active_limbs", "limb_motion"]
             if group == "high_quality"
-            else ["foot_slide", "self_collision", "ground_penetration", "motion_discontinuity"]
+            else [
+                "root_tilt",
+                "foot_slide",
+                "self_collision",
+                "ground_penetration",
+                "motion_discontinuity",
+            ]
         )
-        weights = [1] * 5 if group == "high_quality" else [10, 10, 6, 4]
+        weights = [1] * 5 if group == "high_quality" else [10, 10, 6, 2, 2]
         quotas = [count * w // sum(weights) for w in weights]
         for i in range(count - sum(quotas)):
             quotas[i % len(quotas)] += 1
@@ -289,6 +298,15 @@ def analyze_report(root, count=30):
         selection_policy="目的性复核样本；高组分层选活动PASS，低组按REJECT原因分层；完整序列，非随机总体估计",
         groups={g: pool.choose(g, count) for g in ("high_quality", "low_quality")},
     )
+    binding = root / "text_binding.json"
+    if binding.is_file():
+        value = json.loads(binding.read_text())
+        if (
+            value["run_fingerprint"] != run["fingerprint"]
+            or value["counts"]["records"] != run["indexed_records"]
+        ):
+            raise ValueError("文本绑定报告与质量报告身份不符")
+        analysis["text_binding"] = value
     delivery = root / "delivery_summary.json"
     if delivery.is_file():
         value = json.loads(delivery.read_text())
@@ -349,6 +367,7 @@ def write_analysis_markdown(analysis, output):
         self_collision="自碰撞",
         ground_penetration="脚部穿地",
         root_height="根高度越界",
+        root_tilt="根倾角持续超限",
         motion_discontinuity="速度/旋转/关节突变",
         airborne="持续悬空",
     )
@@ -375,10 +394,19 @@ def write_analysis_markdown(analysis, output):
         "## 解释与边界",
         "",
         f"- 来源命名空间统计：`{json.dumps(analysis['source_namespaces'], ensure_ascii=False)}`。结论对应这批实际转换数据，不能泛化为该数据集全部来源。",
-        "- 筛选是数值与运动学门禁；凸包碰撞近似、接触候选脚滑与悬空规则仍需结合视频复核。姿态低不直接等于质量差，完整动作没有再次贴地或平滑。",
+        "- 筛选是数值与运动学门禁；凸包碰撞近似、接触候选脚滑与悬空规则仍需结合视频复核。根倾角按绑定配置判定，严格规则也会排除持续弯腰或躺姿；完整动作没有再次贴地或平滑。",
         "- 高组从有活动的PASS中按移动、转向、低姿态和关节活动分组，低组覆盖不同REJECT原因；两组均平衡目录并去重。视频样本用于看清差异，不是随机抽样估计全库比例。",
         "- 视频为双视角、原始30Hz、完整动作顺序拼接。视角B地面半透明，便于观察穿地；相机变化不改变qpos。红框只标识当前帧命中原报告异常区间。",
     ]
+    if analysis.get("text_binding"):
+        value = analysis["text_binding"]
+        lines += [
+            "",
+            "## MotionMillion原始文本绑定",
+            "",
+            f"完整来源ID及机器人/人体双输入SHA校验；覆盖计数：`{json.dumps(value['counts'], ensure_ascii=False)}`。",
+            f"候选官方划分：`{json.dumps(value['eligible_official_splits'], ensure_ascii=False)}`。未列入官方划分不伪造train；文本索引不等于T5特征或完整训练交付。",
+        ]
     if analysis["source_sequence_key_mismatches"]:
         lines.append(
             f"- 旧报告{analysis['source_sequence_key_mismatches']:,}条的辅助source_sequence_key字段与人体文件名不一致，源于旧适配器循环变量覆盖。原始source_motion_id、文件SHA和质量计算不受该字段影响；本次视频另存verified_source_sequence_key并逐条核验原NPZ。原报告未改写，后续输出的代码已修正。"
