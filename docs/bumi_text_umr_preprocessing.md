@@ -235,3 +235,5 @@ python tools/eval/render_bumi_motion.py \
 ```
 
 MotionMillion替换对应数据集目录名。仅选完整60–300帧、training_eligible=false的REVIEW，按实际生效复核原因分层，目录均衡、稳定哈希选样并去重；不只挑极端峰值，样本原因比例也不能代表总体。视频黄色标注REVIEW / NOT IN TRAINING，原动作、文本、配置和资产身份继续核验。默认PASS/REJECT入口行为不变；REVIEW子目录作为现有最新复核集合的第三组，保留前两组对照。
+
+已交付：MotionMillion REVIEW30条，5,020帧/167.3333秒，选样类别脚滑8、碰撞8、悬空7、穿地7；HumanML3D REVIEW30条，6,307帧/210.2333秒，脚滑8、碰撞6、悬空6、穿地4、连续性6。两段均1280×720/30FPS，文件名`review_30.mp4`，附analysis.json、分析报告.md、原run/summary/config。本地位于既有`outputs/{motionmillion,humanml3d}_umr_quality_review/review/`；每库30个不同母来源，文本/动作SHA和完整解码通过。REVIEW仍不进入训练；所选HumanML3D动作与现有8,661条train清单交集为空。
