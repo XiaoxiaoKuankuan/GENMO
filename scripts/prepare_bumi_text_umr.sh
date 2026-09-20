@@ -59,7 +59,7 @@ if [[ "${BUMI_BUILD_TRAINING:-0}" == 1 ]]; then
     --source "$BUMI_T5_ROOT/conversion.json" --output "$BUMI_RELEASE_ROOT" \
     --quality-report "$BUMI_REPORT_ROOT"
   "$BUMI_PYTHON" -u -B tools/data/bumi/prepare_bumi_text.py stats \
-    --root "$BUMI_RELEASE_ROOT" --output "$BUMI_RELEASE_ROOT/train_stats.json"
+    --root "$BUMI_RELEASE_ROOT" --dataset humanml3d --output "$BUMI_RELEASE_ROOT/train_stats.json"
   "$BUMI_PYTHON" -u -B tools/data/bumi/prepare_bumi_text.py preflight \
-    --root "$BUMI_RELEASE_ROOT" --limit 0 --output "$BUMI_REPORT_ROOT/training_preflight.json"
+    --root "$BUMI_RELEASE_ROOT" --dataset humanml3d --limit 0 --output "$BUMI_REPORT_ROOT/training_preflight.json"
 fi

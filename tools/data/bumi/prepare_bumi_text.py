@@ -350,8 +350,21 @@ def _build(source, output, *, records_per_shard=512, quality_gate=None):
     return report
 
 
+def _report_dataset(root, split, dataset):
+    """单来源release自动绑定单集身份，避免统计和预检报告误标为联合数据。"""
+    ds = BumiTextDataset(root, split, dataset=dataset, caption_sampling="first")
+    if dataset is None:
+        available = {row[2]["dataset"] for row in ds.index}
+        if len(available) == 1:
+            # 单来源release必须写单集统计身份，否则BumiTextGEM会按联合实验拒绝加载。
+            dataset = next(iter(available))
+            ds = BumiTextDataset(root, split, dataset=dataset, caption_sampling="first")
+    return ds
+
+
 def statistics(root, output, dataset=None):
-    ds = BumiTextDataset(root, "train", dataset=dataset, caption_sampling="first")
+    ds = _report_dataset(root, "train", dataset)
+    dataset = ds.dataset
     kin_path = resolve_reference(ds.manifest["kinematics"]["path"], ds.root)
     kin = BumiKinematics(kin_path)
     codec = BumiMotionFeatureCodec(kin)
@@ -398,7 +411,7 @@ def statistics(root, output, dataset=None):
 def preflight(root, split="train", dataset=None, limit=128):
     if limit < 0:
         raise ValueError("limit不能为负；0表示全量")
-    ds = BumiTextDataset(root, split, dataset=dataset, caption_sampling="first")
+    ds = _report_dataset(root, split, dataset)
     lengths = []
     posture_diagnostics = []
     for i in range(min(limit, len(ds)) if limit else len(ds)):

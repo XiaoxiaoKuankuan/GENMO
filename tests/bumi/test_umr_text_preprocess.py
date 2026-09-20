@@ -19,7 +19,7 @@ import torch
 
 from gem.datasets.pure_motion.bumi_text import BumiTextDataset, caption_hash
 from gem.robots.bumi.kinematics import sha256_file
-from tools.data.bumi.prepare_bumi_text import build, humanml_conversion
+from tools.data.bumi.prepare_bumi_text import build, humanml_conversion, preflight, statistics
 from tools.data.bumi.umr_text_preprocess import (
     DEFAULT_CONFIG,
     DEFAULT_KINEMATICS,
@@ -559,6 +559,10 @@ def test_humanml_full_source_check_mirrors_segments_and_training_build(
         for i in range(3)
     }
     assert intervals["000002__seg_1000_3000"] == [1.0, 3.0]
+    stats = statistics(tmp_path / "release", tmp_path / "stats.json")
+    assert stats["dataset"] == stats["data_identity"]["dataset"] == "humanml3d"
+    assert stats["records"] == 3
+    assert preflight(tmp_path / "release", limit=0)["data_identity"]["dataset"] == "humanml3d"
     options.resume = True
     assert run_filter(options) == 0
     assert json.loads((options.output / "run.json").read_text())["resumed_records"] == 3
