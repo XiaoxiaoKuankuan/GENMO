@@ -1,4 +1,4 @@
-# MotionMillion / HumanML3D UMR → BUMI 文本动作预处理
+# MotionMillion / HumanML3D / BONES-SEED UMR → BUMI 文本动作预处理
 
 适用分支：`feature/bumi-text-only`。入口复用 `tools/data/bumi/prepare_bumi_text.py`。
 质量计算复用音乐分支的 `filter_sonic_npz_motions.evaluate_motion`，原音乐代码和阈值配置不改动。
@@ -36,6 +36,34 @@ MUJOCO_GL=egl MUJOCO_EGL_DEVICE_ID=0 PYTHONDONTWRITEBYTECODE=1 \
 
 渲染仍从完整报告按状态/原因选择30条PASS与30条REJECT，双视角完整回放，输出两份
 合集及`pass/`、`reject/`中的逐条视频和原生NPZ；每个视频解码核对30Hz和完整帧数。
+候选池先按母来源去重再限制容量，镜像或子片段不挤占不同来源的名额；选样仍保留
+原有活动/时长条件，不能把目的性视频样本的类型比例作为总体估计。
+
+2026-09-21全量筛选结果：131,454条，PASS772（0.5873%）、REVIEW485（0.3690%）、
+REJECT130,197（99.0438%），INVALID/ERROR均0。全部772条PASS已发布到
+`/data0/user/liwei/datasets/bones_seed_umr_pass_latest`，与既有MotionMillion/HumanML3D
+发布目录同级；194,450帧/1.800463小时，其中553条为60..300帧，另外219条长动作
+仍完整保留。全库文本覆盖131,418条/525,672条caption；PASS有文本766条/3,064条
+caption，缺失文本6条，其余30条文本缺失属于非PASS。
+
+报告位于`/data0/user/liwei/dataset_reports/bones_seed_umr_bumi3_latest`。逐动作合并
+左右脚/多个碰撞对后，REJECT触发原因包括：根倾角130,116、根高度35,534、脚穿地
+25,743、连续性20,879、自碰撞13,137、支撑脚滑移26条；原因重叠，不能相加。
+多数淘汰来自>30度连续至少15帧的根倾角规则，不能用放宽脚滑阈值解释或消除。
+这些统计反映当前重定向产物和门禁规则，未证明上游人体坐标及机器人根朝向的语义
+正确性，也不等同于动力学、控制器跟踪或实机验证。
+
+`delivery_verification.json`记录对全部131,454条文本绑定的独立复核，以及全部772个
+交付NPZ的源SHA、30Hz、有限qpos[T,28]、完整帧数及文件集合一致性；数据根目录
+另有`README.md`和`SHA256SUMS`。本次筛选fingerprint：
+`686fee77c3d0fbd72fea15b30e82e21ec67812eae9f42f94bd4417980e945cdb`。
+
+视频交付在报告的`visual_review/`：`high_quality_30.mp4`为5,433帧/181.1秒，
+`low_quality_30.mp4`为5,795帧/193.1667秒；另有`pass/`与`reject/`各30个完整
+MP4及对应原生NPZ。全部视频H.264、1280×720、30Hz，60条来自60个不同母来源。
+PASS选样类型为转向4/低姿态26；REJECT为根倾角10/脚滑10/碰撞6/穿地2/突变2，
+只是目的性复核样本。`verification.json`记录完整帧数、视频/轨迹SHA和渲染commit。
+本地查看目录：`/home/weili/GENMO-bumi-text/outputs/bones_seed_umr_quality_review`。
 
 ## HumanML3D 交付适配与完整训练数据
 
