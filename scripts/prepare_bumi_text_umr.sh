@@ -9,6 +9,7 @@
 # BUMI_DATASET=humanml3d选择HumanML3D交付与补齐源包；机器人输出仍为Z-up。
 # BUMI_BUILD_TRAINING=1在全量完成后绑定PASS文本、编码T5、构建分片并计算train统计量。
 # 所有正式产物默认位于/data0/user/liwei；不修改data2原始机器人动作、不启动模型训练。
+# BUMI_DATASET=bones_seed使用50Hz源人体到30Hz机器人契约，绑定原始SMPL目录及官方文本。
 
 set -euo pipefail
 BUMI_REPO_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -23,11 +24,22 @@ if [[ "$BUMI_DATASET" == humanml3d ]]; then
   BUMI_EXPECTED_RECORDS="${BUMI_EXPECTED_RECORDS:-23242}"
   BUMI_EXTRA_ARGS=(--recorded-output-root "${BUMI_RECORDED_OUTPUT_ROOT:-/home/user/hml3d_umr/out_umr/bumi3}"
                    --recorded-robot-xml "${BUMI_RECORDED_ROBOT_XML:-/home/user/UMR/assets/bumi3/mjcf/bumi3_retarget.xml}")
-else
+elif [[ "$BUMI_DATASET" == bones_seed ]]; then
+  BUMI_UMR_ROOT="${BUMI_BONES_UMR_ROOT:-/home/user/ykj/code/UMR-main}"
+  BUMI_INPUT_ROOT="${BUMI_INPUT_ROOT:-/data0/user/liwei/datasets/BONES-SEED-SMPL/data/ykj/umr_change}"
+  BUMI_SOURCE_ROOT="${BUMI_SOURCE_ROOT:-/data0/user/liwei/datasets/BONES-SEED-SMPL/data/ykj/pre_change}"
+  BUMI_REPORT_ROOT="${BUMI_REPORT_ROOT:-/data0/user/liwei/dataset_reports/bones_seed_umr_bumi3_latest}"
+  BUMI_EXPECTED_RECORDS="${BUMI_EXPECTED_RECORDS:-131454}"
+  BUMI_EXTRA_ARGS=(--metadata-csv "${BUMI_METADATA_CSV:-/data0/user/liwei/datasets/BONES-SEED/metadata/seed_metadata_v004.csv}"
+                   --original-source-root "${BUMI_ORIGINAL_SOURCE_ROOT:-/data0/user/liwei/datasets/BONES-SEED-SMPL/data/smpl_filtered}")
+elif [[ "$BUMI_DATASET" == motionmillion ]]; then
   BUMI_INPUT_ROOT="${BUMI_INPUT_ROOT:-/data2/user/motion_dataset/millionmotion/umr_change/all}"
   BUMI_SOURCE_ROOT="${BUMI_SOURCE_ROOT:-/data2/user/motion_dataset/millionmotion/pre_change/all}"
   BUMI_REPORT_ROOT="${BUMI_REPORT_ROOT:-/data0/user/liwei/dataset_reports/motionmillion_umr_bumi3_latest}"
   BUMI_EXPECTED_RECORDS="${BUMI_EXPECTED_RECORDS:-559924}"
+else
+  echo "未知数据集: $BUMI_DATASET" >&2
+  exit 2
 fi
 export OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1
 export PYTHONDONTWRITEBYTECODE=1

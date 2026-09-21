@@ -473,8 +473,15 @@ def main():
     p = sub.add_parser("humanml-conversion", help="由完整HumanML3D PASS报告构建文本转换清单")
     p.add_argument("--quality-report", type=Path, required=True)
     p.add_argument("--output", type=Path, required=True)
-    p = sub.add_parser("filter-umr", help="全量筛选MotionMillion/HumanML3D UMR，支持断点续跑")
-    p.add_argument("--dataset", choices=["motionmillion", "humanml3d"], default="motionmillion")
+    p = sub.add_parser("bones-pass", help="发布BONES-SEED全部PASS原生轨迹并精确核验官方文本")
+    p.add_argument("--quality-report", type=Path, required=True)
+    p.add_argument("--output", type=Path, required=True)
+    p = sub.add_parser("filter-umr", help="全量筛选MotionMillion/HumanML3D/BONES-SEED UMR")
+    p.add_argument(
+        "--dataset", choices=["motionmillion", "humanml3d", "bones_seed"], default="motionmillion"
+    )
+    p.add_argument("--metadata-csv", type=Path, help="BONES-SEED官方完整动作文本CSV")
+    p.add_argument("--original-source-root", type=Path, help="BONES-SEED原始SMPL pickle目录")
     p.add_argument("--recorded-output-root", type=Path, help="HumanML3D迁移前输出目录的显式映射")
     p.add_argument("--recorded-robot-xml", type=Path, help="经资产SHA核验后允许的旧XML绝对路径")
     for name in (
@@ -513,7 +520,11 @@ def main():
         from tools.data.bumi.umr_text_preprocess import run_filter
 
         raise SystemExit(run_filter(args))
-    if args.command == "motionmillion-texts":
+    if args.command == "bones-pass":
+        from tools.data.bumi.umr_text_preprocess import publish_bones_pass
+
+        result = publish_bones_pass(args.quality_report, args.output)
+    elif args.command == "motionmillion-texts":
         from tools.data.bumi.motionmillion_text import build_catalog
 
         result = build_catalog(

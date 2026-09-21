@@ -3,6 +3,40 @@
 适用分支：`feature/bumi-text-only`。入口复用 `tools/data/bumi/prepare_bumi_text.py`。
 质量计算复用音乐分支的 `filter_sonic_npz_motions.evaluate_motion`，原音乐代码和阈值配置不改动。
 
+## BONES-SEED-SMPL：完整轨迹筛选与文本核验（2026-09-21）
+
+复用原筛选器和渲染器，`BUMI_DATASET=bones_seed`接受单批`bumi3/batch_summary.json`。
+源人体是Z-up、50Hz的72维姿态，输出是30Hz原生qpos28；逐条验证完整NPZ、原始PKL
+身份和`floor((源帧数-1)/50*30+1e-9)+1`输出帧数，不再次重采样或修正动作。
+共享质量配置的支撑脚滑移REJECT从1.5改为3.0m/s，REVIEW仍为0.75m/s，连续阈值
+仍为6帧；其他质量规则保持不变。历史MotionMillion/HumanML3D结果仍绑定旧配置SHA，
+本次不重写历史报告。
+
+```bash
+cd /home/user/liwei/GENMO-bumi-text
+BUMI_DATASET=bones_seed BUMI_WORKERS=64 bash scripts/prepare_bumi_text_umr.sh
+/home/user/miniconda3/envs/ykj_umr/bin/python -B tools/data/bumi/prepare_bumi_text.py bones-pass \
+  --quality-report /data0/user/liwei/dataset_reports/bones_seed_umr_bumi3_latest \
+  --output /data0/user/liwei/datasets/bones_seed_umr_pass_latest
+MUJOCO_GL=egl MUJOCO_EGL_DEVICE_ID=0 PYTHONDONTWRITEBYTECODE=1 \
+  /home/user/miniconda3/envs/ykj_umr/bin/python -B -u tools/eval/render_bumi_motion.py \
+  --quality-report /data0/user/liwei/dataset_reports/bones_seed_umr_bumi3_latest \
+  --output-dir /data0/user/liwei/dataset_reports/bones_seed_umr_bumi3_latest/visual_review \
+  --per-group 30 --individual-clips
+```
+
+`bones-pass`发布全部PASS原生NPZ及`manifests/pass.jsonl`，不按训练候选的60..300帧
+额外删除短/长动作；`all_records.jsonl`保存全体质量状态与文本匹配结果。文本来自
+`/data0/user/liwei/datasets/BONES-SEED/metadata/seed_metadata_v004.csv`的四条原始
+自然语言描述，严格按移除转换后缀的`filename`匹配；缺失文本保留为空并分别输出
+`missing_text_ids.txt`、`pass_missing_text_ids.txt`。源标注的原始帧数不冒充50/30Hz
+帧数。没有生成caption、T5特征或虚构train/val/test划分，split明确为unassigned。
+分段描述另外存在于原始`seed_metadata_v002_temporal_labels.jsonl`，本次不把子段
+标注当成完整动作描述。`dataset_info.json`绑定质量身份、文本和manifest SHA。
+
+渲染仍从完整报告按状态/原因选择30条PASS与30条REJECT，双视角完整回放，输出两份
+合集及`pass/`、`reject/`中的逐条视频和原生NPZ；每个视频解码核对30Hz和完整帧数。
+
 ## HumanML3D 交付适配与完整训练数据
 
 HumanML3D 与 MotionMillion 的 UMR 机器人输出都按 Z-up 处理。配置的

@@ -249,8 +249,8 @@ def analyze_report(root, count=30, groups=("high_quality", "low_quality")):
                 total_bytes += row.get("source_bytes", 0)
                 folders[row["folder"]][status] += 1
                 namespace = (
-                    "humanml3d"
-                    if row.get("dataset") == "humanml3d"
+                    row["dataset"]
+                    if row.get("dataset") in {"humanml3d", "bones_seed"}
                     else row.get("source_motion_id", "unknown").split("/", 1)[0]
                 )
                 sources[namespace] += 1
@@ -360,7 +360,9 @@ def write_analysis_markdown(analysis, output):
     total = summary["processed_records"]
     passed = summary["status_counts"]["PASS"]
     eligible = summary["status_counts"]["TRAIN_ELIGIBLE"]
-    dataset_name = "HumanML3D" if analysis.get("dataset") == "humanml3d" else "MotionMillion"
+    dataset_name = {"humanml3d": "HumanML3D", "bones_seed": "BONES-SEED-SMPL"}.get(
+        analysis.get("dataset"), "MotionMillion"
+    )
     sample_count = sum(len(rows) for rows in analysis["groups"].values())
     lines = [
         f"# {dataset_name} UMR 动作质量分析与{sample_count}条视频复核",

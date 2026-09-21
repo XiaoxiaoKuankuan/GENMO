@@ -1,4 +1,4 @@
-"""为 MotionMillion 与 HumanML3D UMR 输出提供可恢复的全量预处理筛选。
+"""为 MotionMillion、HumanML3D 与 BONES-SEED UMR 输出提供可恢复的全量筛选。
 
 入口由已有 prepare_bumi_text.py 的 filter-umr 子命令提供。逐目录核对 batch_summary
 与实际文件集合，以相对路径建立唯一身份，检查原生 qpos、具名关节、源人体数值、
@@ -13,17 +13,22 @@ JSONL按数据库流式原子发布，候选仅包含完整60..300帧PASS，不�
 
 训练构建器可以用完整报告验证原生UMR输入，重新核对源文件指纹后按标准顺序读取，
 沿用已有完整文本/T5配对验证。质量报告本身不创造文本、split或embedding对应关系。
+BONES-SEED校验50Hz人体与30Hz完整重采样时间线；按原始filename精确绑定官方描述，
+保留缺失文本状态。PASS原生轨迹单独发布，不将60..300帧训练候选限制用于数据保留。
 """
 
 from __future__ import annotations
 
+import csv
 import fcntl
 import hashlib
 import json
 import multiprocessing
 import os
 import re
+import shutil
 import sqlite3
+import tempfile
 import time
 import zipfile
 from collections import Counter, defaultdict
@@ -213,6 +218,9 @@ def humanml_catalog(paths):
 
 
 def source_contract_hashes(paths):
+    if paths.get("dataset") == "bones_seed":
+        path = Path(paths["metadata_csv"])
+        return {str(path): sha256_file(path)}
     if paths.get("dataset", "motionmillion") != "humanml3d":
         return {}
     root, source = Path(paths["input_root"]), Path(paths["source_root"])
@@ -223,6 +231,167 @@ def source_contract_hashes(paths):
         for name in ("metadata.json", "manifest.jsonl", "texts.json")
     ]
     return {str(p): sha256_file(p) for p in files}
+
+
+def bones_text_catalog(path):
+    """只用官方filename精确绑定四条原始完整动作描述，不推测缺失ID或改写镜像文本。"""
+    catalog = {}
+    fields = [f"content_natural_desc_{i}" for i in range(1, 5)]
+    with Path(path).open(newline="") as stream:
+        reader = csv.DictReader(stream)
+        check(
+            {"filename", "is_mirror", *fields} <= set(reader.fieldnames or ()),
+            "BONES-SEED文本CSV缺少字段",
+        )
+        for row in reader:
+            key = row["filename"]
+            check(key and key not in catalog, "BONES-SEED文本身份为空或重复")
+            check(row["is_mirror"].lower() in {"true", "false"}, "非法镜像标记")
+            catalog[key] = dict(
+                captions=[dict(caption=row[f].strip(), field=f) for f in fields if row[f].strip()],
+                mirrored=row["is_mirror"].lower() == "true",
+                package=row.get("package", ""),
+                category=row.get("category", ""),
+                original_metadata_frames=row.get("move_duration_frames", ""),
+            )
+    return catalog
+
+
+def publish_bones_pass(report_root, output):
+    """原子发布全部PASS原生NPZ和逐条文本索引；缺失文本单列，不裁剪或套用训练长度限制。"""
+    report_root, output = Path(report_root).resolve(strict=True), Path(output).resolve()
+    run = json.loads((report_root / "run.json").read_text())
+    summary = json.loads((report_root / "quality_summary.json").read_text())
+    paths = run["identity"]["paths"]
+    check(
+        paths["dataset"] == "bones_seed" and run["state"] == "complete" and not run["partial_scan"],
+        "发布必须使用完整且无执行错误的BONES-SEED筛选",
+    )
+    check(
+        sha256_file(report_root / "quality_summary.json") == run["summary_sha256"]
+        and summary["run_fingerprint"] == run["fingerprint"],
+        "质量汇总身份错误",
+    )
+    check(
+        source_contract_hashes(paths) == run["identity"]["source_contract_hashes"], "官方文本已改变"
+    )
+    for source_root in (report_root, Path(paths["input_root"]), Path(paths["source_root"])):
+        check(
+            not output.is_relative_to(source_root) and not source_root.is_relative_to(output),
+            "发布目录必须与源数据和质量报告分离",
+        )
+    if output.exists():
+        raise FileExistsError(output)
+    catalog = bones_text_catalog(paths["metadata_csv"])
+    counts, statuses, frames = Counter(), Counter(), Counter()
+    missing, pass_missing = [], []
+    output.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix=f".{output.name}.staging-", dir=output.parent) as tmp:
+        staged = Path(tmp) / "dataset"
+        (staged / "motions").mkdir(parents=True)
+        (staged / "manifests").mkdir()
+        with (
+            (staged / "manifests/all_records.jsonl").open("w") as all_out,
+            (staged / "manifests/pass.jsonl").open("w") as pass_out,
+        ):
+            for report in sorted((report_root / "reports").glob("*.jsonl")):
+                with report.open() as stream:
+                    for line in stream:
+                        row = json.loads(line)
+                        status = row["status"]
+                        statuses[status] += 1
+                        key = row.get(
+                            "source_motion_id",
+                            Path(row["relative_path"])
+                            .stem.removesuffix("_bumi3")
+                            .removesuffix("_smplx"),
+                        )
+                        text = catalog.get(key)
+                        captions = text["captions"] if text else []
+                        counts["records"] += 1
+                        counts["with_text" if captions else "without_text"] += 1
+                        counts["caption_entries"] += len(captions)
+                        if text and "mirrored" in row:
+                            check(text["mirrored"] == row["mirrored"], "原始文本镜像身份不符")
+                        if not captions:
+                            missing.append(key)
+                        item = dict(
+                            motion_id=key,
+                            status=status,
+                            source_path=str(Path(paths["input_root"]) / row["relative_path"]),
+                            qpos_sha256=row["source_sha256"],
+                            human_path=row["human_path"],
+                            human_sha256=row["human_sha256"],
+                            frames=row["frames"],
+                            fps=30,
+                            canonical_source_id=row.get("canonical_source_id"),
+                            mirrored=row.get("mirrored"),
+                            captions=captions,
+                            text_status="matched_exact_filename" if captions else "missing",
+                            text_metadata_sha256=run["identity"]["source_contract_hashes"][
+                                paths["metadata_csv"]
+                            ],
+                            metadata=text,
+                            split="unassigned",
+                            crop_count=0,
+                        )
+                        if status == "PASS":
+                            source = Path(item["source_path"])
+                            check(
+                                sha256_file(source) == row["source_sha256"]
+                                and sha256_file(row["human_path"]) == row["human_sha256"],
+                                "PASS发布前机器人或源人体已改变",
+                            )
+                            target = staged / "motions" / source.name
+                            try:
+                                os.link(source, target)
+                            except OSError:
+                                shutil.copy2(source, target)
+                            check(sha256_file(target) == row["source_sha256"], "发布NPZ校验失败")
+                            item["motion_path"] = target.relative_to(staged).as_posix()
+                            pass_out.write(json.dumps(item, ensure_ascii=False) + "\n")
+                            counts["pass_with_text" if captions else "pass_without_text"] += 1
+                            counts["pass_caption_entries"] += len(captions)
+                            counts["pass_bytes"] += target.stat().st_size
+                            frames["PASS"] += row["frames"]
+                            if not captions:
+                                pass_missing.append(key)
+                        all_out.write(json.dumps(item, ensure_ascii=False) + "\n")
+        expected = {k: v for k, v in summary["status_counts"].items() if k != "TRAIN_ELIGIBLE"}
+        check(
+            dict(statuses) == expected and counts["records"] == run["indexed_records"],
+            "发布读取的逐条状态与完整汇总不符",
+        )
+        check(
+            source_contract_hashes(paths) == run["identity"]["source_contract_hashes"],
+            "发布期间原始文本发生改变",
+        )
+        (staged / "missing_text_ids.txt").write_text("".join(k + "\n" for k in missing))
+        (staged / "pass_missing_text_ids.txt").write_text("".join(k + "\n" for k in pass_missing))
+        result = dict(
+            schema="genmo.bones_seed_umr_pass.v1",
+            quality_report=str(report_root),
+            quality_fingerprint=run["fingerprint"],
+            output=str(output),
+            status_counts=dict(statuses),
+            text_counts=dict(counts),
+            pass_frames=frames["PASS"],
+            pass_hours=frames["PASS"] / 30 / 3600,
+            metadata_csv=paths["metadata_csv"],
+            metadata_csv_sha256=sha256_file(paths["metadata_csv"]),
+            missing_text_ids=missing,
+            pass_missing_text_ids=pass_missing,
+            full_sequence=True,
+            crop_count=0,
+            selection="ALL_PASS_WITHOUT_LENGTH_RESTRICTION",
+            split="unassigned",
+            text_embeddings_built=False,
+            manifests={p.name: sha256_file(p) for p in (staged / "manifests").iterdir()},
+        )
+        write_json(staged / "dataset_info.json", result)
+        staged.rename(output)
+    write_json(report_root / "bones_text_audit.json", result)
+    return result
 
 
 def load_umr(row, paths, engine):
@@ -298,6 +467,102 @@ def load_umr(row, paths, engine):
     check(z["zero_source_finger_pose"].dtype == np.bool_, "手指姿态标记必须为bool")
     _scalar(z, "zero_source_finger_pose")
     human = read_npz(source)
+    if dataset == "bones_seed":
+        rules = engine.rules["source_contracts"]["bones_seed"]
+        required_human = {
+            "pose_aa",
+            "poses",
+            "root_orient",
+            "pose_body",
+            "trans",
+            "trans_orig",
+            "fps",
+            "mocap_framerate",
+            "mocap_frame_rate",
+            "output_up",
+            "source_format",
+            "source_file",
+            "model_type",
+            "gender",
+            "betas",
+        }
+        check(required_human <= set(human), "BONES-SEED源人体字段缺失")
+        source_frames = len(human["pose_aa"])
+        check(source_frames > 0, "源人体时间线为空")
+        for name, shape in {
+            "pose_aa": (source_frames, 72),
+            "poses": (source_frames, 24, 3),
+            "root_orient": (source_frames, 3),
+            "pose_body": (source_frames, 63),
+            "trans": (source_frames, 3),
+            "trans_orig": (source_frames, 3),
+            "betas": (10,),
+        }.items():
+            check(
+                human[name].shape == shape and human[name].dtype.kind == "f",
+                f"BONES-SEED源人体{name}形状或类型不符",
+            )
+        check(
+            np.array_equal(human["poses"].reshape(source_frames, 72), human["pose_aa"])
+            and np.array_equal(human["root_orient"], human["pose_aa"][:, :3])
+            and np.array_equal(human["pose_body"], human["pose_aa"][:, 3:66]),
+            "BONES-SEED人体姿态字段互相矛盾",
+        )
+        check(
+            all(
+                float(_scalar(human, k)) == rules["source_fps"]
+                for k in ("fps", "mocap_framerate", "mocap_frame_rate")
+            ),
+            "BONES-SEED源人体必须为50Hz",
+        )
+        check(
+            _scalar(human, "output_up") == rules["up"]
+            and _scalar(human, "source_format") == rules["format"]
+            and _scalar(human, "model_type") == "smplx"
+            and _scalar(human, "gender") in {"neutral", "male", "female"},
+            "BONES-SEED人体格式或坐标不符",
+        )
+        check(
+            {"source_fps", "target_fps"} <= set(z)
+            and float(_scalar(z, "source_fps")) == 50
+            and float(_scalar(z, "target_fps")) == 30,
+            "BONES-SEED重采样帧率元数据不符",
+        )
+        # 与UMR resample_smplx_motion_sequence一致，按最后一个源采样时刻保留完整时间线。
+        expected_frames = max(1, int(np.floor((source_frames - 1) / 50 * 30 + 1e-9)) + 1)
+        check(n == expected_frames, "BONES-SEED输出不是完整50到30Hz重采样时间线")
+        check(key.endswith("_smplx"), "BONES-SEED转换身份缺少_smplx后缀")
+        source_id = key.removesuffix("_smplx")
+        original = Path(str(_scalar(human, "source_file"))).resolve()
+        check(
+            original.parent == Path(paths["original_source_root"])
+            and original.name == source_id + ".pkl"
+            and original.is_file(),
+            "BONES-SEED原始SMPL文件身份或路径不符",
+        )
+        ordered = np.concatenate(
+            (qpos[:, :7], qpos[:, [names.index(name) + 7 for name in engine.kin.joint_order]]),
+            axis=1,
+        )
+        return ordered, dict(
+            dataset="bones_seed",
+            frames=n,
+            fps=30,
+            duration_seconds=n / 30,
+            source_motion_id=source_id,
+            source_sequence_key=key,
+            source_file=str(original),
+            canonical_source_id="bones_seed:" + source_id.removesuffix("_M"),
+            mirrored=source_id.endswith("_M"),
+            source_frames=source_frames,
+            source_fps=50,
+            source_up="z",
+            output_up="z",
+            smpl_scale=scale,
+            source_ground_z=ground,
+            ground_height_m=engine.rules["ground_height_m"],
+            source_validation="full_npz_numerical_and_complete_50_to_30hz_timeline",
+        )
     if dataset == "humanml3d":
         check(sha256_file(path) == hml_row["output_sha256"], "机器人交付SHA不符")
         check(sha256_file(source) == hml_row["sha256"], "HumanML3D源人体SHA不符")
@@ -535,7 +800,9 @@ def index_inputs(db, paths, summaries):
                 )
             for name in sorted(actual - seen):
                 path = summary.parent / name
-                expected = source_root / folder / (path.stem.removesuffix("_bumi3") + ".npz")
+                expected = source_root / (path.stem.removesuffix("_bumi3") + ".npz")
+                if paths.get("dataset", "motionmillion") == "motionmillion":
+                    expected = source_root / folder / expected.name
                 db.execute(
                     "INSERT INTO inputs VALUES (?,?,?,?)",
                     (path.relative_to(root).as_posix(), folder, str(expected), "unrecorded"),
@@ -620,8 +887,8 @@ def publish_reports(db, output, run, limit):
                 counts[status] += 1
                 by_folder[folder][status] += 1
                 source_group = (
-                    "humanml3d"
-                    if row.get("dataset") == "humanml3d"
+                    row["dataset"]
+                    if row.get("dataset") in {"humanml3d", "bones_seed"}
                     else row.get("source_motion_id", "unknown").split("/", 1)[0]
                 )
                 by_source[source_group][status] += 1
@@ -700,6 +967,11 @@ def run_filter(args):
         str(args.batch_config.resolve(strict=True)) if args.batch_config else None
     )
     paths["dataset"] = getattr(args, "dataset", "motionmillion")
+    if paths["dataset"] == "bones_seed":
+        check(not args.folders, "BONES-SEED使用完整单批清单，不使用folder选择")
+        for name in ("metadata_csv", "original_source_root"):
+            check(getattr(args, name, None) is not None, f"BONES-SEED必须提供{name}")
+            paths[name] = str(getattr(args, name).resolve(strict=True))
     if paths["dataset"] == "humanml3d":
         check(not args.folders, "HumanML3D不使用MotionMillion folder选择")
         check(
@@ -728,11 +1000,12 @@ def run_filter(args):
         paths["retarget_config"],
         paths["batch_config"],
     )
-    summaries = (
-        [Path(paths["input_root"]) / "out_umr/bumi3/batch_summary.json"]
-        if paths["dataset"] == "humanml3d"
-        else _summaries(Path(paths["input_root"]), args.folders)
-    )
+    if paths["dataset"] == "humanml3d":
+        summaries = [Path(paths["input_root"]) / "out_umr/bumi3/batch_summary.json"]
+    elif paths["dataset"] == "bones_seed":
+        summaries = [Path(paths["input_root"]) / "bumi3/batch_summary.json"]
+    else:
+        summaries = _summaries(Path(paths["input_root"]), args.folders)
     code_paths = [
         Path(__file__),
         Path(__file__).with_name("umr_text_quality.py"),

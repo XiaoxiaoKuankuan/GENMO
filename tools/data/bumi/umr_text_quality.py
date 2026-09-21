@@ -60,7 +60,7 @@ def load_rules(path):
             "根倾角持续帧数必须为正整数",
         )
     require(
-        raw["source_contracts"]
+        {k: v for k, v in raw["source_contracts"].items() if k != "bones_seed"}
         == {
             "motionmillion": {
                 "format": "motionmillion_272",
@@ -71,6 +71,12 @@ def load_rules(path):
         },
         "需要明确区分人体来源契约；机器人输出统一为Z-up",
     )
+    if "bones_seed" in raw["source_contracts"]:
+        require(
+            raw["source_contracts"]["bones_seed"]
+            == dict(format="bumi_smpl_pkl", up="z", source_fps=50, target_fps=30),
+            "BONES-SEED必须显式声明Z-up及50到30Hz契约",
+        )
     require(np.isfinite(raw["ground_height_m"]), "地面高度必须有限")
     require(
         set(raw["dynamics"])

@@ -8,6 +8,8 @@
 资产、选中机器人与人体SHA必须匹配原报告，历史配置从Git按SHA恢复为审计附件。
 --quality-groups可选high_quality/low_quality/review；待复核组使用黄色明确标注，
 沿用完整动作与文本身份核验，不改变筛选状态、不将REVIEW写入训练数据。
+BONES-SEED使用同一源验证器核对50到30Hz时间线并显示原始文本；可额外逐条导出
+完整视频与未修改的原生NPZ，独立视频逐个解码验证帧数后随合集原子发布。
 """
 
 from __future__ import annotations
@@ -15,6 +17,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -86,7 +89,7 @@ def checked_umr_qpos(row, run, model, source_engine=None):
         raise ValueError("动作路径越过原数据根目录")
     if sha256(motion) != row["source_sha256"] or sha256(human) != row["human_sha256"]:
         raise ValueError(f"动作或人体在筛选后改变: {motion}")
-    if run["identity"]["paths"].get("dataset") == "humanml3d":
+    if run["identity"]["paths"].get("dataset") in {"humanml3d", "bones_seed"}:
         from tools.data.bumi.umr_text_preprocess import load_umr
 
         if source_engine is None:
@@ -103,9 +106,20 @@ def checked_umr_qpos(row, run, model, source_engine=None):
                 raise ValueError(f"HumanML3D源身份与报告不同: {field}")
         row["verified_source_sequence_key"] = metadata["source_sequence_key"]
         row["verified_robot_xml"] = str(source_engine.xml)
-        row["verified_captions"] = source_engine.humanml_catalog[1][metadata["source_motion_id"]][
-            "captions"
-        ]
+        if metadata.get("dataset") == "bones_seed":
+            from tools.data.bumi.umr_text_preprocess import bones_text_catalog
+
+            if not hasattr(source_engine, "bones_catalog"):
+                source_engine.bones_catalog = bones_text_catalog(
+                    run["identity"]["paths"]["metadata_csv"]
+                )
+            row["verified_captions"] = source_engine.bones_catalog.get(
+                metadata["source_motion_id"], {}
+            ).get("captions", [])
+        else:
+            row["verified_captions"] = source_engine.humanml_catalog[1][
+                metadata["source_motion_id"]
+            ]["captions"]
         names, expected = list(source_engine.kin.joint_order), mujoco_joint_order(model)
         if len(names) != 21 or set(names) != set(expected):
             raise ValueError("HumanML3D机器人关节名称不匹配")
@@ -203,7 +217,7 @@ def montage_frames(qpos, row, group, index, count, model, data, renderer, width,
         }[group]
         draw.text(
             (20, 10),
-            f"{'HumanML3D' if row.get('dataset') == 'humanml3d' else 'MotionMillion'}    {name}    {index + 1:02d}/{count:02d}",
+            f"{dict(humanml3d='HumanML3D', bones_seed='BONES-SEED-SMPL').get(row.get('dataset'), 'MotionMillion')}    {name}    {index + 1:02d}/{count:02d}",
             font=heading,
             fill=color,
         )
@@ -343,6 +357,67 @@ def render_montage(rows, group, run, model, path, args):
     )
 
 
+def export_review_clips(montage, chapters, rows, paths):
+    """顺序解码合集并按已验证章节精确分片，保存完整视频及对应原始轨迹。"""
+    import av
+
+    from tools.eval.bumi_quality_review import sha256
+
+    directory = montage.parent / (
+        "pass"
+        if montage.name.startswith("high_quality")
+        else "reject"
+        if montage.name.startswith("low_quality")
+        else "review"
+    )
+    directory.mkdir()
+    outputs = []
+    with av.open(str(montage)) as source_video:
+        frames = iter(source_video.decode(video=0))
+        for chapter, row in zip(chapters, rows, strict=True):
+            stem = f"{chapter['index']:02d}_{row['source_motion_id'].replace('/', '__')}"
+            video_path, motion_path = directory / (stem + ".mp4"), directory / (stem + ".npz")
+            with av.open(str(video_path), mode="w", options={"movflags": "+faststart"}) as out:
+                stream = out.add_stream("libx264", rate=30)
+                original = source_video.streams.video[0]
+                stream.width, stream.height, stream.pix_fmt = (
+                    original.width,
+                    original.height,
+                    "yuv420p",
+                )
+                stream.options = {"crf": "20", "preset": "fast"}
+                stream.thread_count = 4
+                for _ in range(chapter["frames"]):
+                    frame = av.VideoFrame.from_ndarray(
+                        next(frames).to_ndarray(format="rgb24"), format="rgb24"
+                    )
+                    for packet in stream.encode(frame):
+                        out.mux(packet)
+                for packet in stream.encode():
+                    out.mux(packet)
+            with av.open(str(video_path)) as check:
+                if (
+                    check.streams.video[0].average_rate != 30
+                    or sum(1 for _ in check.decode(video=0)) != chapter["frames"]
+                ):
+                    raise ValueError("独立视频FPS或完整帧数错误")
+            shutil.copy2(Path(paths["input_root"]) / row["relative_path"], motion_path)
+            if sha256(motion_path) != row["source_sha256"]:
+                raise ValueError("独立视频配套轨迹与筛选SHA不同")
+            outputs.append(
+                dict(
+                    video=video_path.relative_to(montage.parent).as_posix(),
+                    motion=motion_path.relative_to(montage.parent).as_posix(),
+                    frames=chapter["frames"],
+                    video_sha256=sha256(video_path),
+                    motion_sha256=row["source_sha256"],
+                )
+            )
+        if next(frames, None) is not None:
+            raise ValueError("合集包含未被章节覆盖的额外帧")
+    return outputs
+
+
 def render_quality_review(args):
     from tools.data.bumi.umr_text_preprocess import source_contract_hashes
     from tools.data.bumi.umr_text_quality import QualityEngine, load_rules, verify_asset_files
@@ -396,7 +471,7 @@ def render_quality_review(args):
         if source_contract_hashes(paths) != run["identity"].get("source_contract_hashes", {}):
             raise ValueError("报告绑定的源清单或文本已改变")
         args.source_engine = None
-        if paths.get("dataset") == "humanml3d":
+        if paths.get("dataset") in {"humanml3d", "bones_seed"}:
             for field in ("retarget_config", "batch_config"):
                 if paths.get(field) and sha256(paths[field]) != run["identity"][field + "_sha256"]:
                     raise ValueError(f"报告绑定的配置已改变: {field}")
@@ -418,6 +493,10 @@ def render_quality_review(args):
             name = f"{group}_{args.per_group}.mp4"
             result = render_montage(rows, group, run, model, staged / name, args)
             result.update(sha256=sha256(staged / name), bytes=(staged / name).stat().st_size)
+            if getattr(args, "individual_clips", False):
+                result["individual_clips"] = export_review_clips(
+                    staged / name, result["chapters"], rows, paths
+                )
             analysis["videos"][group] = result
         analysis["render_contract"] = dict(
             robot_xml=paths["robot_xml"],
@@ -465,6 +544,9 @@ def main() -> None:
     parser.add_argument("--quality-report", type=Path)
     parser.add_argument("--output-dir", type=Path)
     parser.add_argument("--per-group", type=int, default=30)
+    parser.add_argument(
+        "--individual-clips", action="store_true", help="同时导出每条完整视频和原生NPZ轨迹"
+    )
     parser.add_argument(
         "--quality-groups",
         nargs="+",

@@ -8,6 +8,7 @@ HumanML3D回归覆盖迁移路径、双输入SHA、原文本绑定、Z-up不重�
 子片段时间范围，以及训练派生包禁止伪造held-out身份。
 """
 
+import csv
 import json
 import os
 from argparse import Namespace
@@ -25,10 +26,12 @@ from tools.data.bumi.umr_text_preprocess import (
     DEFAULT_KINEMATICS,
     InputContractError,
     QualityGate,
+    bones_text_catalog,
     evaluate_row,
     humanml_lineage,
     init_worker,
     load_umr,
+    publish_bones_pass,
     run_filter,
 )
 from tools.data.bumi.umr_text_quality import (
@@ -194,9 +197,92 @@ def test_slide_is_not_hidden_by_contact_speed_gate():
     assert any(code == "FOOT_SLIDE_left_REVIEW" for code, _, _ in flags)
     assert not any(code.endswith("REJECT") for code, _, _ in flags)
     _, flags = foot_diagnostics(heights, centers * 2, rules)
+    assert not any(code.endswith("REJECT") for code, _, _ in flags)
+    _, flags = foot_diagnostics(heights, centers * 3.1, rules)
     assert any(code == "FOOT_SLIDE_left_REJECT" for code, _, _ in flags)
     _, flags = foot_diagnostics(heights + 0.06, centers * 0, rules)
     assert any(code == "LONG_AIRBORNE_REVIEW" and status == "REVIEW" for code, status, _ in flags)
+
+
+def test_bones_source_timeline_text_and_all_pass_publication(bundle, engine, tmp_path):
+    """真实模型验证BONES时间线、源身份、缺失文本和超300帧PASS的完整发布。"""
+    paths, make, _, _ = bundle
+    paths = dict(paths, dataset="bones_seed")
+    original = tmp_path / "smpl_filtered"
+    original.mkdir()
+    paths["original_source_root"] = str(original)
+    csv_path = tmp_path / "metadata.csv"
+    paths["metadata_csv"] = str(csv_path)
+    rows = []
+    for count in (100, 501):
+        frames = int(np.floor((count - 1) / 50 * 30 + 1e-9)) + 1
+        row, path = make(frames=frames)
+        key = Path(row["human_path"]).stem.removesuffix("_smplx")
+        raw_path = original / (key + ".pkl")
+        raw_path.write_bytes(b"source identity fixture only")
+        np.savez_compressed(
+            row["human_path"],
+            pose_aa=np.zeros((count, 72), np.float32),
+            poses=np.zeros((count, 24, 3), np.float32),
+            root_orient=np.zeros((count, 3), np.float32),
+            pose_body=np.zeros((count, 63), np.float32),
+            trans=np.zeros((count, 3), np.float32),
+            trans_orig=np.zeros((count, 3), np.float32),
+            betas=np.zeros(10, np.float32),
+            fps=np.float32(50),
+            mocap_framerate=np.float32(50),
+            mocap_frame_rate=np.float32(50),
+            output_up="z",
+            source_format="bumi_smpl_pkl",
+            source_file=str(raw_path),
+            model_type="smplx",
+            gender="neutral",
+        )
+        rewrite(path, source_fps=np.array([50], np.float32), target_fps=np.array([30], np.float32))
+        rows.append((row, path, key))
+    paths["input_root"] = str(Path(paths["input_root"]) / "folder0")
+    fields = ["filename", "is_mirror"] + [f"content_natural_desc_{i}" for i in range(1, 5)]
+    with csv_path.open("w", newline="") as out:
+        writer = csv.DictWriter(out, fieldnames=fields)
+        writer.writeheader()
+        writer.writerow(
+            dict(filename=rows[0][2], is_mirror="False", content_natural_desc_1="Standing still.")
+        )
+    for row, path, _ in rows:
+        row["relative_path"] = path.relative_to(paths["input_root"]).as_posix()
+        qpos, meta = load_umr(row, paths, engine)
+        assert len(qpos) == meta["frames"] and meta["source_fps"] == 50
+    rewrite(rows[0][1], source_fps=np.array([30], np.float32))
+    with pytest.raises(InputContractError, match="重采样帧率"):
+        load_umr(rows[0][0], paths, engine)
+    rewrite(rows[0][1], source_fps=np.array([50], np.float32))
+    args = Namespace(
+        **{k: Path(v) if k != "dataset" else v for k, v in paths.items()},
+        output=tmp_path / "report",
+        workers=1,
+        folders=None,
+        limit=None,
+        expected_records=2,
+        resume=False,
+    )
+    assert run_filter(args) == 0
+    result = publish_bones_pass(args.output, tmp_path / "release")
+    assert result["status_counts"] == {"PASS": 2}
+    assert result["text_counts"]["with_text"] == 1
+    assert result["pass_missing_text_ids"] == [rows[1][2]]
+    published = [
+        json.loads(line)
+        for line in (tmp_path / "release/manifests/pass.jsonl").read_text().splitlines()
+    ]
+    assert [r["frames"] for r in published] == [60, 301]
+    assert published[0]["captions"][0]["caption"] == "Standing still."
+    assert published[1]["captions"] == []
+    with pytest.raises(FileExistsError):
+        publish_bones_pass(args.output, tmp_path / "release")
+    with csv_path.open("a") as out:
+        out.write(f"{rows[0][2]},False,Duplicate,,,\n")
+    with pytest.raises(InputContractError, match="身份为空或重复"):
+        bones_text_catalog(csv_path)
 
 
 @pytest.mark.parametrize(
