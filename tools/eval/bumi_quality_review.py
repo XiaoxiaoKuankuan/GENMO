@@ -128,7 +128,7 @@ def candidate_scores(row):
 
 
 class CandidatePool:
-    """每组/类型/来源目录只保留固定数量候选；目录均衡在最终挑选时执行。"""
+    """每组/类型/来源目录保留固定数量母来源，镜像不挤占候选名额。"""
 
     def __init__(self, capacity=30):
         self.capacity = capacity
@@ -139,6 +139,21 @@ class CandidatePool:
         for group, category, score in candidate_scores(row):
             heap = self.pools[group, category, row["folder"]]
             item = (-score, tie, row)
+            # 保留同一母来源中排名更优的版本，先去重再执行容量限制；否则镜像
+            # 或子片段会占满堆，最终choose去重后可能错误报告可用来源不足。
+            existing = next(
+                (
+                    i
+                    for i, entry in enumerate(heap)
+                    if entry[2]["canonical_source_id"] == row["canonical_source_id"]
+                ),
+                None,
+            )
+            if existing is not None:
+                if item[:2] > heap[existing][:2]:
+                    heap[existing] = item
+                    heapq.heapify(heap)
+                continue
             if len(heap) < self.capacity:
                 heapq.heappush(heap, item)
             elif item[:2] > heap[0][:2]:
@@ -236,7 +251,7 @@ def analyze_report(root, count=30, groups=("high_quality", "low_quality")):
     families, reject_families = defaultdict(Counter), Counter()
     intersections, folders, sources = Counter(), defaultdict(Counter), Counter()
     total_bytes, eligible, sequence_key_mismatches = 0, 0, 0
-    pool, hashes = CandidatePool(), {}
+    pool, hashes = CandidatePool(capacity=max(30, count)), {}
     for path in sorted((root / "reports").glob("*.jsonl")):
         digest = hashlib.sha256()
         with path.open("rb") as stream:

@@ -79,6 +79,29 @@ def test_reject_categories_use_reject_reason_not_secondary_review():
     assert [c for _, c, _ in candidate_scores(row)] == ["root_tilt"]
 
 
+def test_mirrors_do_not_exhaust_distinct_candidate_capacity():
+    rows = []
+    for i in range(45):
+        row = example(i)
+        row["metrics"]["feet"]["left"]["slide"]["p95"] = (i + 1) / 100
+        mirror = copy.deepcopy(row)
+        mirror["relative_path"] = f"folder0/{i}_mirror.npz"
+        # 镜像的排名稍差，仍与原版本一起排在后续母来源之前。
+        mirror["metrics"]["feet"]["left"]["slide"]["p95"] += 0.001
+        rows.extend((row, mirror))
+    selections = []
+    for order in (rows, list(reversed(rows))):
+        pool = CandidatePool()
+        for row in order:
+            pool.add(row)
+        chosen = pool.choose("high_quality", 30)
+        assert {r["canonical_source_id"] for r in chosen} == {f"source/{i}" for i in range(30)}
+        assert all("mirror" not in r["relative_path"] for r in chosen)
+        assert all(len(heap) <= 30 for heap in pool.pools.values())
+        selections.append([r["relative_path"] for r in chosen])
+    assert selections[0] == selections[1]
+
+
 def test_review_selection_is_distinct_balanced_and_not_training():
     pool = CandidatePool()
     for i in range(100):
