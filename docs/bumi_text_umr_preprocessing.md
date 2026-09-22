@@ -30,6 +30,44 @@ split，未列入者保持unassigned。缺文本PASS明确单列，不作为监�
 本轮不改变训练长度、网络、T5或采样实现。以下旧轮次统计和视频路径仅作为实现历史，
 旧产物按用户要求删除，不代表当前交付；新全量统计见本次最终汇总。
 
+## 四库本轮全量交付（2026-09-22，二分类）
+
+| 数据集 | 输入 | PASS | REJECT | PASS比例 | PASS小时 |
+|---|---:|---:|---:|---:|---:|
+| MotionMillion | 559,924 | 426,846 | 133,078 | 76.2328% | 517.449102 |
+| HumanML3D | 23,242 | 18,842 | 4,400 | 81.0688% | 36.325380 |
+| KIT-ML | 2,884 | 2,507 | 377 | 86.9279% | 5.014287 |
+| BONES-SEED | 131,454 | 103,070 | 28,384 | 78.4077% | 196.806324 |
+
+合计717,504条，PASS551,265（76.8309%）/REJECT166,239（23.1691%），
+PASS755.595093小时，无REVIEW/INVALID/ERROR，旧缓存复用0条。51项回归测试通过。
+PASS有文本551,242条；缺文本23条（MotionMillion1、BONES22），不伪造监督文本。
+
+服务器2完整汇总：`/data0/user/liwei/dataset_reports/bumi_umr_binary_latest/README.md`；
+本地核验副本：`/home/weili/GENMO-bumi-text/outputs/bumi_umr_binary_latest/README.md`。
+四库报告为`/data0/user/liwei/dataset_reports/{motionmillion,humanml3d,kitml,bones_seed}_umr_bumi3_latest`；
+PASS交付为`/data0/user/liwei/datasets/{motionmillion,humanml3d,kitml,bones_seed}_umr_pass_latest`。
+MotionMillion/HumanML清单引用已校验的绝对源NPZ，BONES/KIT保留原生motions链接/副本。
+旧GENMO筛选报告、PASS与HumanML旧筛选训练派生/T5、四套旧本地质量视频均已删除，
+无备份；原始数据、原始文本及独立训练交付保留。未重渲染、未重建训练分片或启动训练。
+
+当前60..300帧训练长度下，PASS候选316,780条；缺文本排除后316,766条，另需遵守
+官方split与来源分组。自然PASS条数占比MM/HML/KIT/BONES为77.4303/3.4180/0.4548/18.6970%。
+先排除MotionMillion官方val/test、合并镜像/片段，按现有候选母来源数平方根并将KIT
+上限设为5%，建议首轮MM/BONES/HML/KIT=55/28/12/5；需在最终split与跨库来源核验后重算。
+这是设计建议，当前文本shard-aware自然采样代码未改变。
+
+MotionMillion本批均Mirror_MotionGV，caption无细时间字段；KIT白名单均whole_motion，
+起止只是全段范围；HumanML有2,068条原标注子片段，PASS1,702条，区间保存在ID和
+interval_seconds；BONES独立时间标注匹配103,048条PASS、247,198个事件。114条BONES
+末端标注越界0.0367..0.0667秒，已独立列出，后续裁片应核验并限制到真实轨迹范围。
+BONES当前发布仍是完整动作caption，事件标注未假装已经接入训练。
+
+全部PASS中58.7307%不足120帧，MM为68.1724%；不建议全库硬裁/硬凑4秒。
+当前推理本来默认num_frames=120并支持60..300；训练仍是完整60..300/pad300。
+建议保留完整语义配对、后续做长度分桶/动态padding，BONES另验证事件对齐的120帧
+上限支路并保留短动作mask。没有细标注的整段多事件文本不应直接绑定任意4秒窗口。
+
 ## BONES-SEED-SMPL：Y-up人体输入与Z-up机器人输出（2026-09-22）
 
 源人体`pose_aa/trans`为Y-up、50Hz、72维姿态，`output_up`和`samp_output_up`
