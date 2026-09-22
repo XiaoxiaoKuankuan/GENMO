@@ -1,4 +1,4 @@
-# MotionMillion / HumanML3D / BONES-SEED UMR → BUMI 文本动作预处理
+# MotionMillion / HumanML3D / BONES-SEED / KIT-ML UMR → BUMI 文本动作预处理
 
 适用分支：`feature/bumi-text-only`。入口复用 `tools/data/bumi/prepare_bumi_text.py`。
 质量计算复用音乐分支的 `filter_sonic_npz_motions.evaluate_motion`，原音乐代码和阈值配置不改动。
@@ -99,6 +99,34 @@ MUJOCO_GL=egl MUJOCO_EGL_DEVICE_ID=0 PYTHONDONTWRITEBYTECODE=1 \
 门禁沿用脚滑REVIEW0.75/REJECT3.0m/s连续6帧、根倾角>30度连续15帧及其他既定规则。
 渲染沿用按状态/原因分层和母来源去重，导出30 PASS/30 REJECT的完整双视角视频，
 保留原caption、异常帧标记与配套原生NPZ，逐个解码核验后发布。
+
+### KIT-ML本轮全量结果
+
+2,884条中PASS **611（21.1859%）**、REVIEW **1,755（60.8530%）**、REJECT
+**518（17.9612%）**，INVALID/ERROR均0。质量计算7.571446秒，全部完整动作共
+688,026帧/6.370611小时；fingerprint为
+`962fa72609706e6748be56b87454fcac2aa9e01b0d3a2f363f603287eedcc23b`。
+
+全部611条PASS完整发布，132,354帧/1.2255小时/1,276条原caption；其中430条在
+60..300帧训练候选范围，另181条仍完整保留。全库6,079条caption、缺失0。独立验收
+核对全部2,884条机器人及源人体SHA、原文annotation、帧数，以及全部PASS的有限
+qpos28/单位wxyz/30Hz/连续frame_ids和目录文件集合，全部通过。
+
+REJECT实际触发：持续根倾角512条、自碰撞12条，存在重叠；没有脚滑或穿地REJECT。
+REVIEW实际触发：支撑脚滑移1,678条、持续悬空77条、自碰撞30条、脚穿地18条、
+连续性6条，原因同样可重叠。REVIEW占比高主要来自0.75m/s复核规则，不能把它等同
+于3m/s淘汰规则，也不能把姿态门禁触发一概解释为源坐标错误。
+
+视频流水线于2026-09-22 11:21:15正常退出。30条PASS合集5,921帧/197.3667秒，
+30条REJECT合集4,785帧/159.5秒，另有60个完整独立视频和60个配套原生NPZ；
+60个不同母来源，全部1280×720/30Hz。PASS分层移动12/转向6/低姿态1/活跃肢体5/
+肢体动作6，REJECT根倾角27/自碰撞3，属于目的性复核样本。
+
+本地交付`/home/weili/GENMO-bumi-text/outputs/kitml_umr_quality_review`核对服务器
+130条SHA及完整文件集合，并完整解码62视频；独立视频和合集各10,706帧，与轨迹
+一致。检查全部60条中点及2张全尺寸画面，REJECT中可见原caption描述的倒立、
+侧手翻等大倾角动作，因此该标签是现有姿态门禁结论，不代表这些动作都坐标错误。
+本地`local_verification.json`保留实际验收范围，临时拼图已清理。
 
 ## HumanML3D 交付适配与完整训练数据
 
