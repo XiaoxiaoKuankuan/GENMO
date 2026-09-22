@@ -18,7 +18,8 @@ source_contracts:
     up: z
   bones_seed:
     format: bumi_smpl_pkl
-    up: z
+    # 源pose_aa/trans为Y-up；UMR已将机器人qpos转换到Z-up，筛选不再次旋转。
+    up: y
     source_fps: 50
     target_fps: 30
 ground_height_m: 0.0

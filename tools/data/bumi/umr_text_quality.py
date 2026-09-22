@@ -74,8 +74,8 @@ def load_rules(path):
     if "bones_seed" in raw["source_contracts"]:
         require(
             raw["source_contracts"]["bones_seed"]
-            == dict(format="bumi_smpl_pkl", up="z", source_fps=50, target_fps=30),
-            "BONES-SEED必须显式声明Z-up及50到30Hz契约",
+            == dict(format="bumi_smpl_pkl", up="y", source_fps=50, target_fps=30),
+            "BONES-SEED必须显式声明源人体Y-up及50到30Hz契约；机器人输出为Z-up",
         )
     require(np.isfinite(raw["ground_height_m"]), "地面高度必须有限")
     require(

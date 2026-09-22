@@ -3,18 +3,28 @@
 适用分支：`feature/bumi-text-only`。入口复用 `tools/data/bumi/prepare_bumi_text.py`。
 质量计算复用音乐分支的 `filter_sonic_npz_motions.evaluate_motion`，原音乐代码和阈值配置不改动。
 
-## BONES-SEED-SMPL：完整轨迹筛选与文本核验（2026-09-21）
+## BONES-SEED-SMPL：Y-up人体输入与Z-up机器人输出（2026-09-22）
 
-复用原筛选器和渲染器，`BUMI_DATASET=bones_seed`接受单批`bumi3/batch_summary.json`。
-源人体是Z-up、50Hz的72维姿态，输出是30Hz原生qpos28；逐条验证完整NPZ、原始PKL
-身份和`floor((源帧数-1)/50*30+1e-9)+1`输出帧数，不再次重采样或修正动作。
-共享质量配置的支撑脚滑移REJECT从1.5改为3.0m/s，REVIEW仍为0.75m/s，连续阈值
-仍为6帧；其他质量规则保持不变。历史MotionMillion/HumanML3D结果仍绑定旧配置SHA，
-本次不重写历史报告。
+源人体`pose_aa/trans`为Y-up、50Hz、72维姿态，`output_up`和`samp_output_up`
+必须同时为`y`。UMR在人体特征进入机器人求解器前执行Y-up到Z-up转换，输出为30Hz
+原生`qpos[T,28]`、世界Z向上。GENMO机器人筛选和读取不再次转轴、贴地或裁剪；
+筛选记录分别保存`source_up=y`和`output_up=z`，不把源人体方向误当成机器人方向。
+
+2026-09-21的BONES筛选基于错误坐标声明，已失效。用户要求删除旧报告、PASS交付和
+本地/服务器视频，不保留备份；旧统计不得作为9月22日重新生成数据的质量结论。
+
+正式完整输出复制到`/data0/user/liwei/datasets/bones_seed_umr_latest/bumi3/`，
+与既有MotionMillion/HumanML3D交付同在`datasets/`下。复制保留原NPZ和原始
+`batch_summary.json`字节，通过`--recorded-output-root`显式映射原生成目录，
+逐文件SHA256核验后发布。人体源文件保留原路径，来源身份和完整50到30Hz时间线
+继续逐条验证；不修改上游文件以适应筛选器。
 
 ```bash
 cd /home/user/liwei/GENMO-bumi-text
-BUMI_DATASET=bones_seed BUMI_WORKERS=64 bash scripts/prepare_bumi_text_umr.sh
+BUMI_DATASET=bones_seed BUMI_WORKERS=64 \
+  BUMI_INPUT_ROOT=/data0/user/liwei/datasets/bones_seed_umr_latest \
+  bash scripts/prepare_bumi_text_umr.sh \
+  --recorded-output-root /data0/user/liwei/datasets/BONES-SEED-SMPL/data/ykj/umr_change/bumi3
 /home/user/miniconda3/envs/ykj_umr/bin/python -B tools/data/bumi/prepare_bumi_text.py bones-pass \
   --quality-report /data0/user/liwei/dataset_reports/bones_seed_umr_bumi3_latest \
   --output /data0/user/liwei/datasets/bones_seed_umr_pass_latest
@@ -25,45 +35,16 @@ MUJOCO_GL=egl MUJOCO_EGL_DEVICE_ID=0 PYTHONDONTWRITEBYTECODE=1 \
   --per-group 30 --individual-clips
 ```
 
-`bones-pass`发布全部PASS原生NPZ及`manifests/pass.jsonl`，不按训练候选的60..300帧
-额外删除短/长动作；`all_records.jsonl`保存全体质量状态与文本匹配结果。文本来自
-`/data0/user/liwei/datasets/BONES-SEED/metadata/seed_metadata_v004.csv`的四条原始
-自然语言描述，严格按移除转换后缀的`filename`匹配；缺失文本保留为空并分别输出
-`missing_text_ids.txt`、`pass_missing_text_ids.txt`。源标注的原始帧数不冒充50/30Hz
-帧数。没有生成caption、T5特征或虚构train/val/test划分，split明确为unassigned。
-分段描述另外存在于原始`seed_metadata_v002_temporal_labels.jsonl`，本次不把子段
-标注当成完整动作描述。`dataset_info.json`绑定质量身份、文本和manifest SHA。
+共享质量配置保持支撑脚滑移REJECT为3.0m/s、REVIEW为0.75m/s、连续6帧；根倾角
+超过30度连续15帧及其他门禁不变。本次不重新筛选MotionMillion/HumanML3D。
+`bones-pass`发布全部PASS原生轨迹，不受训练候选60..300帧限制。官方文本从
+`/data0/user/liwei/datasets/BONES-SEED/metadata/seed_metadata_v004.csv`按filename
+精确绑定四条描述，缺失项明确单列，不伪造caption、T5特征或train/val/test划分。
 
-渲染仍从完整报告按状态/原因选择30条PASS与30条REJECT，双视角完整回放，输出两份
-合集及`pass/`、`reject/`中的逐条视频和原生NPZ；每个视频解码核对30Hz和完整帧数。
-候选池先按母来源去重再限制容量，镜像或子片段不挤占不同来源的名额；选样仍保留
-原有活动/时长条件，不能把目的性视频样本的类型比例作为总体估计。
-
-2026-09-21全量筛选结果：131,454条，PASS772（0.5873%）、REVIEW485（0.3690%）、
-REJECT130,197（99.0438%），INVALID/ERROR均0。全部772条PASS已发布到
-`/data0/user/liwei/datasets/bones_seed_umr_pass_latest`，与既有MotionMillion/HumanML3D
-发布目录同级；194,450帧/1.800463小时，其中553条为60..300帧，另外219条长动作
-仍完整保留。全库文本覆盖131,418条/525,672条caption；PASS有文本766条/3,064条
-caption，缺失文本6条，其余30条文本缺失属于非PASS。
-
-报告位于`/data0/user/liwei/dataset_reports/bones_seed_umr_bumi3_latest`。逐动作合并
-左右脚/多个碰撞对后，REJECT触发原因包括：根倾角130,116、根高度35,534、脚穿地
-25,743、连续性20,879、自碰撞13,137、支撑脚滑移26条；原因重叠，不能相加。
-多数淘汰来自>30度连续至少15帧的根倾角规则，不能用放宽脚滑阈值解释或消除。
-这些统计反映当前重定向产物和门禁规则，未证明上游人体坐标及机器人根朝向的语义
-正确性，也不等同于动力学、控制器跟踪或实机验证。
-
-`delivery_verification.json`记录对全部131,454条文本绑定的独立复核，以及全部772个
-交付NPZ的源SHA、30Hz、有限qpos[T,28]、完整帧数及文件集合一致性；数据根目录
-另有`README.md`和`SHA256SUMS`。本次筛选fingerprint：
-`686fee77c3d0fbd72fea15b30e82e21ec67812eae9f42f94bd4417980e945cdb`。
-
-视频交付在报告的`visual_review/`：`high_quality_30.mp4`为5,433帧/181.1秒，
-`low_quality_30.mp4`为5,795帧/193.1667秒；另有`pass/`与`reject/`各30个完整
-MP4及对应原生NPZ。全部视频H.264、1280×720、30Hz，60条来自60个不同母来源。
-PASS选样类型为转向4/低姿态26；REJECT为根倾角10/脚滑10/碰撞6/穿地2/突变2，
-只是目的性复核样本。`verification.json`记录完整帧数、视频/轨迹SHA和渲染commit。
-本地查看目录：`/home/weili/GENMO-bumi-text/outputs/bones_seed_umr_quality_review`。
+视频复用既有渲染器，按质量/实际原因选择30条PASS和30条REJECT、母来源去重，
+完整双视角回放并导出两份合集、60个独立MP4和60个原生NPZ。本地最新交付路径为
+`/home/weili/GENMO-bumi-text/outputs/bones_seed_umr_quality_review`。
+离线PASS与有限视频复核不代表动力学、控制器跟踪或实机验证。
 
 ## HumanML3D 交付适配与完整训练数据
 

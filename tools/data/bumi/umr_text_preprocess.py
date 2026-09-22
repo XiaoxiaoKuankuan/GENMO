@@ -480,6 +480,7 @@ def load_umr(row, paths, engine):
             "mocap_framerate",
             "mocap_frame_rate",
             "output_up",
+            "samp_output_up",
             "source_format",
             "source_file",
             "model_type",
@@ -517,6 +518,7 @@ def load_umr(row, paths, engine):
         )
         check(
             _scalar(human, "output_up") == rules["up"]
+            and _scalar(human, "samp_output_up") == rules["up"]
             and _scalar(human, "source_format") == rules["format"]
             and _scalar(human, "model_type") == "smplx"
             and _scalar(human, "gender") in {"neutral", "male", "female"},
@@ -556,7 +558,7 @@ def load_umr(row, paths, engine):
             mirrored=source_id.endswith("_M"),
             source_frames=source_frames,
             source_fps=50,
-            source_up="z",
+            source_up=rules["up"],
             output_up="z",
             smpl_scale=scale,
             source_ground_z=ground,
@@ -788,6 +790,12 @@ def index_inputs(db, paths, summaries):
                         "HumanML3D旧输出路径不符合显式映射",
                     )
                     path, human = summary.parent / path.name, source_root / hml_rows[key]["file"]
+                elif paths.get("dataset") == "bones_seed" and paths.get("recorded_output_root"):
+                    check(
+                        path.parent == Path(paths["recorded_output_root"]),
+                        "BONES-SEED旧输出路径不符合显式映射",
+                    )
+                    path = summary.parent / path.name
                 if path.parent != summary.parent or not human.is_relative_to(source_root):
                     raise ValueError("summary路径越过声明的数据根目录")
                 relative = path.relative_to(root).as_posix()
@@ -972,6 +980,8 @@ def run_filter(args):
         for name in ("metadata_csv", "original_source_root"):
             check(getattr(args, name, None) is not None, f"BONES-SEED必须提供{name}")
             paths[name] = str(getattr(args, name).resolve(strict=True))
+        if getattr(args, "recorded_output_root", None):
+            paths["recorded_output_root"] = str(args.recorded_output_root.resolve())
     if paths["dataset"] == "humanml3d":
         check(not args.folders, "HumanML3D不使用MotionMillion folder选择")
         check(

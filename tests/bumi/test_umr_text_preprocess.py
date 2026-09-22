@@ -11,6 +11,7 @@ HumanML3D回归覆盖迁移路径、双输入SHA、原文本绑定、Z-up不重�
 import csv
 import json
 import os
+import shutil
 from argparse import Namespace
 from pathlib import Path
 
@@ -232,7 +233,8 @@ def test_bones_source_timeline_text_and_all_pass_publication(bundle, engine, tmp
             fps=np.float32(50),
             mocap_framerate=np.float32(50),
             mocap_frame_rate=np.float32(50),
-            output_up="z",
+            output_up="y",
+            samp_output_up="y",
             source_format="bumi_smpl_pkl",
             source_file=str(raw_path),
             model_type="smplx",
@@ -252,10 +254,24 @@ def test_bones_source_timeline_text_and_all_pass_publication(bundle, engine, tmp
         row["relative_path"] = path.relative_to(paths["input_root"]).as_posix()
         qpos, meta = load_umr(row, paths, engine)
         assert len(qpos) == meta["frames"] and meta["source_fps"] == 50
+        assert meta["source_up"] == "y" and meta["output_up"] == "z"
+        with np.load(path, allow_pickle=True) as payload:
+            np.testing.assert_array_equal(qpos, payload["qpos"])
+    for field in ("output_up", "samp_output_up"):
+        rewrite(rows[0][0]["human_path"], **{field: "z"})
+        with pytest.raises(InputContractError, match="格式或坐标"):
+            load_umr(rows[0][0], paths, engine)
+        rewrite(rows[0][0]["human_path"], **{field: "y"})
     rewrite(rows[0][1], source_fps=np.array([30], np.float32))
     with pytest.raises(InputContractError, match="重采样帧率"):
         load_umr(rows[0][0], paths, engine)
     rewrite(rows[0][1], source_fps=np.array([50], np.float32))
+    # 保留原始summary绝对路径，验证迁移目录必须显式绑定且qpos不变。
+    recorded_output = Path(paths["input_root"]) / "bumi3"
+    relocated = tmp_path / "relocated"
+    shutil.copytree(Path(paths["input_root"]), relocated)
+    paths["input_root"] = str(relocated)
+    paths["recorded_output_root"] = str(recorded_output)
     args = Namespace(
         **{k: Path(v) if k != "dataset" else v for k, v in paths.items()},
         output=tmp_path / "report",

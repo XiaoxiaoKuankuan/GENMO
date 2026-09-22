@@ -482,7 +482,9 @@ def main():
     )
     p.add_argument("--metadata-csv", type=Path, help="BONES-SEED官方完整动作文本CSV")
     p.add_argument("--original-source-root", type=Path, help="BONES-SEED原始SMPL pickle目录")
-    p.add_argument("--recorded-output-root", type=Path, help="HumanML3D迁移前输出目录的显式映射")
+    p.add_argument(
+        "--recorded-output-root", type=Path, help="HumanML3D/BONES-SEED迁移前输出目录的显式映射"
+    )
     p.add_argument("--recorded-robot-xml", type=Path, help="经资产SHA核验后允许的旧XML绝对路径")
     for name in (
         "input-root",
