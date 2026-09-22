@@ -1,65 +1,121 @@
 # @package _global_
-# BUMI 五库 qpos30/contact/FK 物理约束模型的 350k、8 卡、完全从零训练入口。
-#
-# 本配置把“禁止加载旧模型”固化为配置契约：pretrain_ckpt、ckpt_path、resume_mode 与
-# checkpoint_adapter 均为 null，既不迁移 main/SMPL 音乐模型，也不恢复旧 BUMI checkpoint
-# 或 optimizer/global step。网络的 30 维 qpos 输出、2 维接触 head 和 Transformer 主干全部
-# 随机初始化。每卡 batch=192、8 卡全局 batch=1536，训练 350k step；学习率在 210k/315k
-# 衰减，保持父实验 350k 预算的 60%/90% 相对里程碑。该配置与旧 93D 输出不兼容，只允许
-# 使用 genmo.bumi_qpos30_stats.v3 五库统计量。
+# BUMI qpos30 音乐实验：展开已退役 93D 父配置，保留原最终训练参数。
 defaults:
-  - gem_bumi_music_only_5set_manual_q1_v3
-  - override /network: diffusion_lg_bumi30_contact
-  - override /pipeline: music_only_bumi_qpos30_contact_v2
-  - override /endecoder: bumi_qpos30_contact
-  - override /scheduler: iters_half_210k_315k
-  - override /callbacks:
-      - ckpt_saver/every5000s_top100
-      - prog_bar/prog_reporter_ed1
-      - train_speed_timer/base
-      - lr_monitor/pl
-  - _self_
-
+- /diffusion@model_cfg.diffusion: ddim
+- override /data: music_robot/trainX_testY
+- override /model: bumi_music_gem
+- override /network: diffusion_lg_bumi30_contact
+- override /pipeline: music_only_bumi_qpos30_contact_v2
+- override /endecoder: bumi_qpos30_contact
+- override /optimizer: adamw_2e-4
+- override /scheduler: iters_half_210k_315k
+- override /train_datasets:
+  - aistpp_bumi_balanced_train
+  - aioz_gdance_bumi_balanced_train
+  - finedance_bumi_balanced_train
+  - compas3d_bumi_balanced_train
+  - mine_bumi_balanced_train
+- override /test_datasets:
+  - aistpp_bumi_music_eval_v1
+  - aioz_gdance_bumi_music_eval
+  - finedance_bumi_music_eval
+  - compas3d_bumi_music_eval
+- override /callbacks:
+  - ckpt_saver/every5000s_top100
+  - prog_bar/prog_reporter_ed1
+  - train_speed_timer/base
+  - lr_monitor/pl
+- _self_
 exp_name_base: gem_bumi_music_only_5set_manual_q1_v3_qpos30_contact_scratch_b192_s350k
-exp_name_var: ""
+exp_name_var: ''
 exp_name: ${exp_name_base}${exp_name_var}
 data_name: gem_bumi_music_only_5set_manual_q1_v3_qpos30_contact_scratch_350k
 output_dir: outputs/${exp_name}
-
-# 四个入口全部为空，保证本实验只能从随机初始化的 step 0 开始。
 pretrain_ckpt: null
 ckpt_path: null
-resume_mode: null
-
+multicond_args: null
 model:
   model_cfg:
+    motion_backend: bumi
     checkpoint_adapter: null
-
-# 父实验为历史 no-contact 网络，需恢复两维接触 head。
+    text_encoder: null
+    music_mask_prob: 0.1
+    audio_mask_prob: 0.0
+    normalize_cam_angvel: false
 network:
   model_cfg:
+    regression_only: false
     denoiser:
+      encode_text: false
+      input_remove_global: false
       static_conf_dim: 2
-
-# 父实验是无接触 ground 语义；qpos30 使用 FK 足底标签与接触/足滑损失。
-pipeline:
-  args:
-    ground_semantics: mixed_floor_zero_fk_contact_v2
-
 data:
+  sampling_strategy: deduplicated_hierarchical
+  samples_per_epoch: 52224
+  sampler_seed: ${seed}
+  dataset_probability_min: 0.03
+  dataset_probability_max: 0.5
   stats_path: ${oc.env:BUMI_MUSIC_QPOS30_STATS_PATH}
+  require_stats_fingerprint_match: true
+  expected_train_sequences: 2891
   loader_opts:
     train:
       batch_size: 192
-
-optimizer:
-  lr: 0.0001
-
+      num_workers: 6
+    val:
+      batch_size: 1
+      num_workers: 1
+  dataset_sampling_weights:
+    aistpp_bumi: 0.29
+    aioz_gdance_bumi: 0.47
+    finedance_bumi: 0.16
+    compas3d_bumi: 0.03
+    mine_bumi: 0.05
 pl_trainer:
-  max_steps: 350000
+  precision: 16-mixed
+  log_every_n_steps: 10
+  gradient_clip_val: 0.5
+  max_epochs: null
+  check_val_every_n_epoch: null
   val_check_interval: 5000
+  max_steps: 350000
   devices: 8
   strategy: ddp
   use_distributed_sampler: false
-
+logger:
+  _target_: pytorch_lightning.loggers.WandbLogger
+  project: gem
+  save_dir: /tmp
+  name: ''
+  version: ''
+  resume: allow
+  dir: /tmp
+  id: null
 use_wandb: false
+train_datasets:
+  aistpp_bumi_train:
+    joint_limit_tolerance: 0.001
+  aioz_gdance_bumi_train:
+    joint_limit_tolerance: 0.001
+  finedance_bumi_train:
+    joint_limit_tolerance: 0.001
+  compas3d_bumi_train:
+    joint_limit_tolerance: 0.001
+  mine_bumi_train:
+    joint_limit_tolerance: 0.25
+test_datasets:
+  aistpp_bumi_music_eval:
+    joint_limit_tolerance: 0.001
+  aioz_gdance_bumi_music_eval:
+    joint_limit_tolerance: 0.001
+  finedance_bumi_music_eval:
+    split: test
+    joint_limit_tolerance: 0.001
+  compas3d_bumi_music_eval:
+    joint_limit_tolerance: 0.001
+pipeline:
+  args:
+    ground_semantics: mixed_floor_zero_fk_contact_v2
+resume_mode: null
+optimizer:
+  lr: 0.0001

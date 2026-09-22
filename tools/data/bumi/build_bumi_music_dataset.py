@@ -691,7 +691,8 @@ def main() -> None:
     parser.add_argument(
         "--quality-config",
         type=Path,
-        default=REPO_ROOT / "configs" / "bumi" / "quality_filter_v1.yaml",
+        required=True,
+        help="显式指定产生输入筛选报告的质量规则；旧默认规则已退役",
     )
     parser.add_argument("--kinematics", required=True, type=Path)
     parser.add_argument("--output-root", required=True, type=Path)

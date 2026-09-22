@@ -1,45 +1,96 @@
 # @package _global_
-# UMR 前70%动作与自建音乐库经过统一PASS门禁后的四来源训练配置。
-# 对齐已保存的五库v5 350000-step实验：8卡、每卡256、FP16、AdamW 1e-4、
-# 210k/315k衰减、120帧窗口和原物理损失权重。此次从零训练，不加载旧权重或优化器。
-# CoMPAS3D未出现在UMR选择清单中，因此删除该来源；其余旧权重按总和0.965归一化。
-# 数据条数和统计量由实际发布目录提供，正式reader与stats指纹继续严格核验。
+# BUMI qpos30 音乐实验：展开已退役 93D 父配置，保留原最终训练参数。
 defaults:
-  - gem_bumi_music_only_4set_random_v1
-  - override /network: diffusion_lg_bumi30_contact
-  - override /pipeline: music_only_bumi_qpos30_contact_v5
-  - override /endecoder: bumi_qpos30_contact
-  - override /scheduler: iters_half_210k_315k
-  - override /train_datasets:
-      - aistpp_bumi_balanced_train
-      - aioz_gdance_bumi_balanced_train
-      - finedance_bumi_balanced_train
-      - mine_bumi_balanced_train
-  - override /test_datasets:
-      - aistpp_bumi_music_eval_v1
-      - aioz_gdance_bumi_music_eval
-      - finedance_bumi_music_eval
-  - override /callbacks:
-      - ckpt_saver/every5000s_top100
-      - prog_bar/prog_reporter_ed1
-      - train_speed_timer/base
-      - lr_monitor/pl
-  - _self_
-
+- /diffusion@model_cfg.diffusion: ddim
+- override /data: music_robot/trainX_testY
+- override /model: bumi_music_gem
+- override /network: diffusion_lg_bumi30_contact
+- override /pipeline: music_only_bumi_qpos30_contact_v5
+- override /endecoder: bumi_qpos30_contact
+- override /optimizer: adamw_2e-4
+- override /scheduler: iters_half_210k_315k
+- override /train_datasets:
+  - aistpp_bumi_balanced_train
+  - aioz_gdance_bumi_balanced_train
+  - finedance_bumi_balanced_train
+  - mine_bumi_balanced_train
+- override /test_datasets:
+  - aistpp_bumi_music_eval_v1
+  - aioz_gdance_bumi_music_eval
+  - finedance_bumi_music_eval
+- override /callbacks:
+  - ckpt_saver/every5000s_top100
+  - prog_bar/prog_reporter_ed1
+  - train_speed_timer/base
+  - lr_monitor/pl
+- _self_
 exp_name_base: gem_bumi_music_only_umr70_mine_qpos30_contact_v5_scratch_b256_s350k
-exp_name_var: ""
+exp_name_var: ''
 exp_name: ${exp_name_base}${exp_name_var}
 data_name: bumi_music_umr70_mine_pass_v1
+output_dir: outputs/${exp_name}
 pretrain_ckpt: null
 ckpt_path: null
-resume_mode: null
-use_wandb: false
-
+multicond_args: null
+model:
+  model_cfg:
+    motion_backend: bumi
+    checkpoint_adapter: null
+    text_encoder: null
+    music_mask_prob: 0.1
+    audio_mask_prob: 0.0
+    normalize_cam_angvel: false
 network:
   model_cfg:
+    regression_only: false
     denoiser:
+      encode_text: false
+      input_remove_global: false
       static_conf_dim: 2
-
+data:
+  sampling_strategy: deduplicated_hierarchical
+  samples_per_epoch: 53248
+  sampler_seed: ${seed}
+  dataset_probability_min: 0.03
+  dataset_probability_max: 0.65
+  stats_path: ${oc.env:BUMI_MUSIC_QPOS30_STATS_PATH}
+  require_stats_fingerprint_match: true
+  expected_train_sequences: ${oc.env:BUMI_EXPECTED_TRAIN_SEQUENCES}
+  loader_opts:
+    train:
+      batch_size: 256
+      num_workers: 6
+    val:
+      batch_size: 1
+      num_workers: 1
+  dataset_sampling_weights:
+    aistpp_bumi: 0.28
+    aioz_gdance_bumi: 0.57
+    finedance_bumi: 0.065
+    mine_bumi: 0.05
+pl_trainer:
+  precision: 16-mixed
+  log_every_n_steps: 10
+  gradient_clip_val: 0.5
+  max_epochs: null
+  check_val_every_n_epoch: null
+  val_check_interval: 5000
+  max_steps: 350000
+  devices: 8
+  strategy: ddp
+  use_distributed_sampler: false
+  accumulate_grad_batches: 1
+logger:
+  _target_: pytorch_lightning.loggers.WandbLogger
+  project: gem
+  save_dir: /tmp
+  name: ''
+  version: ''
+  resume: allow
+  dir: /tmp
+  id: null
+use_wandb: false
+resume_mode: null
 pipeline:
   args:
     ground_semantics: mixed_floor_zero_fk_contact_v2
@@ -52,33 +103,15 @@ pipeline:
       joint_velocity: 0.15
       joint_acceleration: 0.04
       joint_jerk: 0.006
-      joint_acceleration_excess: 0.20
+      joint_acceleration_excess: 0.2
       joint_jerk_excess: 0.006
-      joint_limit: 0.40
-      joint_limit_margin: 0.80
-      joint_limit_topk: 2.00
-      joint_limit_max: 0.20
-      foot_slide: 0.10
-      penetration: 0.10
+      joint_limit: 0.4
+      joint_limit_margin: 0.8
+      joint_limit_topk: 2.0
+      joint_limit_max: 0.2
+      foot_slide: 0.1
+      penetration: 0.1
       root_height: 0.15
-
-data:
-  expected_train_sequences: ${oc.env:BUMI_EXPECTED_TRAIN_SEQUENCES}
-  samples_per_epoch: 53248
-  dataset_probability_min: 0.03
-  dataset_probability_max: 0.65
-  dataset_sampling_weights:
-    aistpp_bumi: 0.28
-    aioz_gdance_bumi: 0.57
-    finedance_bumi: 0.065
-    mine_bumi: 0.05
-  stats_path: ${oc.env:BUMI_MUSIC_QPOS30_STATS_PATH}
-  require_stats_fingerprint_match: true
-  loader_opts:
-    train:
-      batch_size: 256
-      num_workers: 6
-
 train_datasets:
   aistpp_bumi_train:
     joint_limit_tolerance: 0.0001
@@ -88,24 +121,13 @@ train_datasets:
     joint_limit_tolerance: 0.0001
   mine_bumi_train:
     joint_limit_tolerance: 0.0001
-
 test_datasets:
   aistpp_bumi_music_eval:
     joint_limit_tolerance: 0.0001
   aioz_gdance_bumi_music_eval:
     joint_limit_tolerance: 0.0001
   finedance_bumi_music_eval:
-    # 此次原始val有1条PASS，恢复val监控，保留13条test用于独立评测。
     split: val
     joint_limit_tolerance: 0.0001
-
 optimizer:
   lr: 0.0001
-
-pl_trainer:
-  max_steps: 350000
-  val_check_interval: 5000
-  devices: 8
-  strategy: ddp
-  use_distributed_sampler: false
-  accumulate_grad_batches: 1
