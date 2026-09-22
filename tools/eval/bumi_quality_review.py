@@ -61,6 +61,8 @@ def review_metrics(row):
         root_travel_m=metrics["root_travel_m"],
         root_height_min_m=metrics["root_height_min"],
         root_tilt_p95_deg=metrics["floor_style"]["root_tilt_p95_degrees"],
+        root_tilt_reject_degrees=metrics.get("root_tilt", {}).get("threshold_degrees"),
+        root_tilt_reject_frames=metrics.get("root_tilt", {}).get("reject_consecutive_frames"),
         joint_speed_p95_rad_s=dynamics["joint_velocity_l2"]["p95"],
         root_speed_max_m_s=dynamics["root_linear_velocity"]["max"],
         root_angular_speed_max_rad_s=dynamics["root_angular_velocity"]["max"],

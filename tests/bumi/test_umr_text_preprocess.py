@@ -201,7 +201,7 @@ def test_slide_is_not_hidden_by_contact_speed_gate():
     assert not any(code.endswith("REJECT") for code, _, _ in flags)
     _, flags = foot_diagnostics(heights, centers * 2, rules)
     assert not any(code.endswith("REJECT") for code, _, _ in flags)
-    _, flags = foot_diagnostics(heights, centers * 3.1, rules)
+    _, flags = foot_diagnostics(heights, centers * 4.3, rules)
     assert any(code == "FOOT_SLIDE_left_REJECT" for code, _, _ in flags)
     _, flags = foot_diagnostics(heights + 0.06, centers * 0, rules)
     assert any(code == "LONG_AIRBORNE_REVIEW" and status == "REVIEW" for code, status, _ in flags)
@@ -430,7 +430,7 @@ def test_kitml_whitelist_timeline_text_and_publication(bundle, engine, tmp_path)
 
 
 @pytest.mark.parametrize(
-    "degrees,frames,rejected", [(29.9, 20, False), (30.1, 14, False), (30.1, 15, True)]
+    "degrees,frames,rejected", [(29.9, 40, False), (30.1, 29, False), (30.1, 30, True)]
 )
 def test_root_tilt_threshold_and_duration(engine, degrees, frames, rejected):
     qpos = grounded(engine, frames=frames)
@@ -450,9 +450,10 @@ def test_root_tilt_threshold_and_duration(engine, degrees, frames, rejected):
     [
         (0.009, 20, None),
         (0.02, 10, None),
-        (0.02, 11, "REVIEW"),
-        (0.06, 10, None),
-        (0.06, 11, "REJECT"),
+        (0.02, 11, None),
+        (0.0599, 11, None),
+        (0.0601, 10, None),
+        (0.0601, 11, "REJECT"),
     ],
 )
 def test_collision_requires_more_than_ten_frames(engine, monkeypatch, depth, frames, level):
@@ -465,6 +466,36 @@ def test_collision_requires_more_than_ten_frames(engine, monkeypatch, depth, fra
     )
     result = engine.evaluate(qpos)
     assert result["reason_statuses"].get("SELF_COLLISION_" + pair) == level
+    if depth > 0.01 and frames >= 11 and level is None:
+        assert result["diagnostic_reasons"]["SELF_COLLISION_" + pair] == "DIAGNOSTIC"
+
+
+def test_binary_review_is_pass_with_diagnostic_intervals(engine, monkeypatch):
+    import tools.data.bumi.umr_text_quality as quality
+
+    qpos = grounded(engine)
+    monkeypatch.setattr(
+        quality,
+        "foot_diagnostics",
+        lambda *args: ({}, [("FOOT_SLIDE_left_REVIEW", "REVIEW", np.ones(60, dtype=bool))]),
+    )
+    result = engine.evaluate(qpos)
+    assert result["status"] == "PASS"
+    assert result["reason_codes"] == result["bad_intervals"] == []
+    assert result["issue_intervals"] == {}
+    assert result["diagnostic_intervals"]["FOOT_SLIDE_left_REVIEW"] == [[0, 60]]
+    monkeypatch.setitem(engine.rules, "classification_mode", "three_way")
+    assert engine.evaluate(qpos)["status"] == "REVIEW"
+
+
+@pytest.mark.parametrize(
+    "speed,edges,rejected", [(4.199, 8, False), (4.201, 5, False), (4.201, 6, True)]
+)
+def test_slide_new_reject_threshold(speed, edges, rejected):
+    centers = np.zeros((edges + 1, 2, 3))
+    centers[:, :, 0] = np.arange(edges + 1)[:, None] * speed / 30
+    _, flags = foot_diagnostics(np.zeros((edges + 1, 2)), centers, load_rules(DEFAULT_CONFIG))
+    assert any(code == "FOOT_SLIDE_left_REJECT" for code, _, _ in flags) == rejected
 
 
 def test_low_posture_nonfoot_support_does_not_imply_airborne_failure(engine, monkeypatch):
@@ -800,6 +831,15 @@ def test_humanml_full_source_check_mirrors_segments_and_training_build(
     assert run_filter(options) == 0
     summary = json.loads((options.output / "quality_summary.json").read_text())
     assert summary["status_counts"] == {"PASS": 3, "TRAIN_ELIGIBLE": 3}
+    native = tmp_path / "native_pass"
+    info = publish_umr_text_pass(options.output, native, "humanml3d", reference_only=True)
+    assert info["text_counts"]["pass_with_text"] == 3
+    assert info["motion_storage"] == "absolute_source_reference"
+    records = [
+        json.loads(line) for line in (native / "manifests/pass.jsonl").read_text().splitlines()
+    ]
+    assert all(Path(row["motion_path"]).is_file() and row["split"] == "train" for row in records)
+    assert all(row["interval_seconds"] for row in records)
     conversion = tmp_path / "conversion.json"
     assert humanml_conversion(options.output, conversion)["records"] == 3
     payload = json.loads(conversion.read_text())

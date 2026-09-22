@@ -6,6 +6,8 @@ build 读取 conversion.json 中的原生 NPZ 与文本特征引用，验证后�
 人体转换或自动地面修正。stats 只遍历 train，有效XY差分不包含每条动作最后一帧。
 preflight 报告真实长度、padding和裁剪计数。所有写入要求显式输出路径且拒绝覆盖。
 filter-umr 接入MotionMillion/HumanML3D原生UMR的全量数值/质量筛选与可恢复报告。
+umr-pass统一发布四库所有长度的PASS和原文本，支持只引用已校验的原始NPZ；
+bones-pass/kitml-pass保持兼容，原始文本索引不随质量规则改变而重新生成。
 humanml-conversion仅从完整PASS报告和逐字匹配的原文本生成训练派生清单，不创造验证集。
 build可通过
 --quality-report只接收完整报告中的PASS，并核对UMR源身份、双输入SHA和完整文本对应。
@@ -479,6 +481,16 @@ def main():
     p = sub.add_parser("kitml-pass", help="发布KIT-ML全部PASS原生轨迹和白名单原文本")
     p.add_argument("--quality-report", type=Path, required=True)
     p.add_argument("--output", type=Path, required=True)
+    p = sub.add_parser("umr-pass", help="统一发布四个UMR数据集的全部PASS与原文本")
+    p.add_argument("--quality-report", type=Path, required=True)
+    p.add_argument("--output", type=Path, required=True)
+    p.add_argument(
+        "--dataset", required=True, choices=["motionmillion", "humanml3d", "bones_seed", "kitml"]
+    )
+    p.add_argument("--text-catalog", type=Path, help="MotionMillion原始文本SQLite索引")
+    p.add_argument(
+        "--reference-only", action="store_true", help="清单引用已核验原始NPZ，避免跨盘复制"
+    )
     p = sub.add_parser("filter-umr", help="全量筛选MotionMillion/HumanML3D/BONES-SEED/KIT-ML UMR")
     p.add_argument(
         "--dataset",
@@ -528,13 +540,19 @@ def main():
         from tools.data.bumi.umr_text_preprocess import run_filter
 
         raise SystemExit(run_filter(args))
-    if args.command in {"bones-pass", "kitml-pass"}:
+    if args.command in {"bones-pass", "kitml-pass", "umr-pass"}:
         from tools.data.bumi.umr_text_preprocess import publish_umr_text_pass
 
         result = publish_umr_text_pass(
             args.quality_report,
             args.output,
-            dataset="bones_seed" if args.command == "bones-pass" else "kitml",
+            dataset=args.dataset
+            if args.command == "umr-pass"
+            else "bones_seed"
+            if args.command == "bones-pass"
+            else "kitml",
+            text_catalog=getattr(args, "text_catalog", None),
+            reference_only=getattr(args, "reference_only", False),
         )
     elif args.command == "motionmillion-texts":
         from tools.data.bumi.motionmillion_text import build_catalog

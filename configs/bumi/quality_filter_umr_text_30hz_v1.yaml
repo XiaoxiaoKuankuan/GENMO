@@ -3,6 +3,8 @@
 # 2026-09-20：脚滑REVIEW/REJECT为0.75/1.5m/s；碰撞连续超过10帧；
 # 根相对世界竖直倾角大于30度连续至少15帧即REJECT，俯仰/侧倾合并计算。
 # 2026-09-21：按用户要求将支撑脚滑移REJECT从1.5提高到3.0m/s，REVIEW仍为0.75。
+# 2026-09-22：正式质量二分类；旧REVIEW仅诊断且合格。脚滑>4.2m/s连续6帧，
+# 根倾角>30度连续30帧，碰撞额外穿透>0.06m连续11帧时REJECT。
 # 新增脚网格穿地、独立候选支撑滑移、连续悬空及凸包碰撞诊断。阈值是首版离线
 # 数据门禁，需结合报告和回放校准，不代表动力学或实机验收。原始qpos不修正、不裁剪。
 schema: genmo.bumi_umr_text_quality_config.v1
@@ -30,9 +32,10 @@ source_contracts:
 ground_height_m: 0.0
 training_frames: [60, 300]
 posture_policy: diagnostic
+classification_mode: binary
 root_tilt:
   reject_degrees: 30.0
-  consecutive_frames: 15
+  consecutive_frames: 30
 core:
   minimum_frames: 4
   quaternion_norm_error_max: 0.001
@@ -77,13 +80,13 @@ feet:
   support_vertical_speed_max_m_s: 0.20
   support_min_frames: 3
   slide_review_m_s: 0.75
-  slide_reject_m_s: 3.0
+  slide_reject_m_s: 4.2
   slide_consecutive_frames: 6
   airborne_height_m: 0.05
   airborne_review_frames: 30
 collision:
   # 使用每个刚体对相对XML默认姿态的额外穿透深度；原始深度也保留。
   review_extra_depth_m: 0.01
-  reject_extra_depth_m: 0.05
+  reject_extra_depth_m: 0.06
   consecutive_frames: 11
   allowed_body_pairs: []

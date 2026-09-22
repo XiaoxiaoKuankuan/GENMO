@@ -9,6 +9,8 @@ XML 的 MuJoCo FK 补充完整脚网格穿地、独立支撑候选滑移、悬�
 方向的持续倾角淘汰，不能被diagnostic姿态策略移除。所有坏帧区间为
 左闭右开，仅供定位，不裁剪动作或复用整段 caption 标注局部动作。碰撞为凸包近似，
 脚滑为网格高度与垂向速度推定支撑后的诊断，PASS不代表动力学或实机质量验收。
+binary模式将旧REVIEW移动到独立诊断原因和区间，PASS的坏帧并集为空；缺省模式
+保留旧三分类配置的兼容行为，当前正式配置显式选择binary。
 """
 
 from __future__ import annotations
@@ -45,6 +47,10 @@ def load_rules(path):
     require(raw["schema"] == CONFIG_SCHEMA, "不支持的UMR文本质量配置")
     require(raw["training_frames"] == [60, 300], "文本分支要求完整60..300帧")
     require(raw["posture_policy"] in {"diagnostic", "standing"}, "未知姿态策略")
+    require(
+        raw.get("classification_mode", "three_way") in {"binary", "three_way"},
+        "未知质量分类模式",
+    )
     if "root_tilt" in raw:
         tilt = raw["root_tilt"]
         require(set(tilt) == {"reject_degrees", "consecutive_frames"}, "根倾角配置字段错误")
@@ -472,6 +478,19 @@ class QualityEngine:
             ),
             root_travel_m=float(np.linalg.norm(np.diff(qpos[:, :3], axis=0), axis=1).sum()),
         )
+        diagnostic_intervals = {}
+        if self.rules.get("classification_mode", "three_way") == "binary":
+            # 旧REVIEW保留观测值和区间，但不再阻止PASS，也不能污染坏帧并集。
+            for code, level in list(reasons.items()):
+                if level == "REVIEW":
+                    diagnostic_reasons[code] = "DIAGNOSTIC"
+                    diagnostic_intervals[code] = issues.pop(code, [])
+                    del reasons[code]
+            diagnostic_reasons = dict.fromkeys(diagnostic_reasons, "DIAGNOSTIC")
+            bad[:] = False
+            for intervals in issues.values():
+                for start, end in intervals:
+                    bad[start:end] = True
         status = "REJECT" if "REJECT" in reasons.values() else "REVIEW" if reasons else "PASS"
         return dict(
             status=status,
@@ -479,6 +498,7 @@ class QualityEngine:
             reason_codes=list(reasons),
             reason_statuses=reasons,
             diagnostic_reasons=diagnostic_reasons,
+            diagnostic_intervals=diagnostic_intervals,
             issue_intervals=issues,
             bad_intervals=[list(x) for x in mask_to_intervals(bad)],
             full_sequence=True,

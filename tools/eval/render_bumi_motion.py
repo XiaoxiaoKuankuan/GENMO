@@ -271,7 +271,11 @@ def montage_frames(qpos, row, group, index, count, model, data, renderer, width,
                 f"joint speed p95: {m['joint_speed_p95_rad_s']:.2f} rad/s"
             )
         if row["selection_category"] == "root_tilt":
-            line = f"root tilt p95: {m['root_tilt_p95_deg']:.1f} deg  |  reject: >30 deg for >=15 frames"
+            line = (
+                f"root tilt p95: {m['root_tilt_p95_deg']:.1f} deg  |  "
+                f"reject: >{m.get('root_tilt_reject_degrees')} deg "
+                f"for >={m.get('root_tilt_reject_frames')} frames"
+            )
         if row["selection_category"] == "airborne":
             intervals = row.get("issue_intervals", {}).get("LONG_AIRBORNE_REVIEW", [])
             longest = max((b - a for a, b in intervals), default=0)

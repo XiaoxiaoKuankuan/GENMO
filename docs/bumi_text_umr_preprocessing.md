@@ -3,6 +3,33 @@
 适用分支：`feature/bumi-text-only`。入口复用 `tools/data/bumi/prepare_bumi_text.py`。
 质量计算复用音乐分支的 `filter_sonic_npz_motions.evaluate_motion`，原音乐代码和阈值配置不改动。
 
+## 当前正式规则：二分类（2026-09-22）
+
+四库统一使用`classification_mode: binary`。质量只分PASS和REJECT，旧REVIEW全部
+降为诊断且不阻止PASS；原因与帧区间保存在`diagnostic_reasons/diagnostic_intervals`，
+不会进入`reason_codes/issue_intervals/bad_intervals`。输入契约错误INVALID与执行
+错误ERROR仍独立记录，绝不能把错误当作PASS；正式交付要求全量完成且无ERROR。
+
+- 支撑脚滑移严格大于4.2m/s，连续至少6个30Hz速度采样时REJECT。
+- 根相对世界竖直倾角严格大于30度，连续至少30帧时REJECT。
+- 自碰撞相对XML默认姿态的额外穿透严格大于0.06m，连续至少11帧时REJECT。
+- 其他原有REJECT规则不变。完整PASS保留所有长度，60..300帧只约束当前训练候选。
+
+`run.json`保存完整规则和配置/代码/资产/输入指纹。旧三分类配置省略
+`classification_mode`时仍按旧语义运行；旧结果不得混入本次正式筛选。
+
+四库统一通过`prepare_bumi_text.py umr-pass --dataset <名称> --quality-report <报告>
+--output <输出>`发布全部PASS与精确匹配的原文本；MotionMillion另传
+`--text-catalog /data0/user/liwei/datasets/motionmillion_umr_text_latest`。
+`--reference-only`输出引用原始NPZ绝对路径的清单，逐条重验机器人与人体SHA，
+避免MotionMillion跨盘复制；默认仍以硬链接/复制发布原生NPZ。
+HumanML3D保留训练派生身份和片段区间，不能伪造val/test；MotionMillion保留官方
+split，未列入者保持unassigned。缺文本PASS明确单列，不作为监督文本样本。
+原始文本索引未包含筛选标签，重筛时重新核验绑定即可，不必重建原始索引。
+
+本轮不改变训练长度、网络、T5或采样实现。以下旧轮次统计和视频路径仅作为实现历史，
+旧产物按用户要求删除，不代表当前交付；新全量统计见本次最终汇总。
+
 ## BONES-SEED-SMPL：Y-up人体输入与Z-up机器人输出（2026-09-22）
 
 源人体`pose_aa/trans`为Y-up、50Hz、72维姿态，`output_up`和`samp_output_up`

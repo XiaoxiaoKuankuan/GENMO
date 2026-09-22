@@ -8,7 +8,8 @@ HumanML3D核对交付SHA、源人体SHA、文本和镜像/子片段身份，显�
 
 任务目录使用进程锁与SQLite事务，常驻worker通过有限队列计算，不把全库指标装入
 内存。续跑仍重新计算动作和源人体SHA；配置、资产、代码或输入清单变化时拒绝复用。
-每条保存PASS/REVIEW/REJECT/INVALID/ERROR、指标和异常帧区间。报告分片和训练候选
+正式配置仅以PASS/REJECT判断质量，原REVIEW只保留诊断；INVALID/ERROR独立记录
+输入契约和执行失败，禁止当作合格。报告分片和训练候选
 JSONL按数据库流式原子发布，候选仅包含完整60..300帧PASS，不裁剪、不移动源文件。
 
 训练构建器可以用完整报告验证原生UMR输入，重新核对源文件指纹后按标准顺序读取，
@@ -17,6 +18,8 @@ BONES-SEED校验50Hz人体与30Hz完整重采样时间线；按原始filename精
 保留缺失文本状态。PASS原生轨迹单独发布，不将60..300帧训练候选限制用于数据保留。
 KIT-ML绑定metadata_ready白名单、完整SMPL-X身体时间线与原caption，源和机器人均
 为Z-up/30Hz，不对已经校准的MMM来源时钟再次重采样；复用原生PASS发布与渲染。
+统一原生发布器覆盖四库，MotionMillion复用原始文本索引并校验双输入SHA；可显式
+选择绝对源路径引用，避免大型跨盘复制，不伪造已构建的训练分片或文本时间标注。
 """
 
 from __future__ import annotations
@@ -35,6 +38,7 @@ import time
 import zipfile
 from collections import Counter, defaultdict
 from concurrent.futures import FIRST_COMPLETED, ProcessPoolExecutor, wait
+from contextlib import ExitStack
 from pathlib import Path
 from urllib.parse import quote
 
@@ -314,14 +318,14 @@ def publish_bones_pass(report_root, output):
     return publish_umr_text_pass(report_root, output, dataset="bones_seed")
 
 
-def publish_umr_text_pass(report_root, output, dataset):
+def publish_umr_text_pass(report_root, output, dataset, text_catalog=None, reference_only=False):
     """原子发布全部PASS原生NPZ和逐条文本索引；缺失文本单列，不裁剪或套用训练长度限制。"""
     report_root, output = Path(report_root).resolve(strict=True), Path(output).resolve()
     run = json.loads((report_root / "run.json").read_text())
     summary = json.loads((report_root / "quality_summary.json").read_text())
     paths = run["identity"]["paths"]
     check(
-        dataset in {"bones_seed", "kitml"}
+        dataset in {"bones_seed", "kitml", "humanml3d", "motionmillion"}
         and paths["dataset"] == dataset
         and run["state"] == "complete"
         and not run["partial_scan"],
@@ -342,13 +346,34 @@ def publish_umr_text_pass(report_root, output, dataset):
         )
     if output.exists():
         raise FileExistsError(output)
-    metadata_field = "metadata_csv" if dataset == "bones_seed" else "metadata_json"
-    metadata_path = paths[metadata_field]
-    catalog = bones_text_catalog(metadata_path) if dataset == "bones_seed" else kitml_catalog(paths)
+    if dataset == "bones_seed":
+        metadata_field, metadata_path = "metadata_csv", paths["metadata_csv"]
+        catalog = bones_text_catalog(metadata_path)
+    elif dataset == "kitml":
+        metadata_field, metadata_path = "metadata_json", paths["metadata_json"]
+        catalog = kitml_catalog(paths)
+    elif dataset == "humanml3d":
+        metadata_field = "texts_json"
+        metadata_path = str(Path(paths["source_root"]) / "texts.json")
+        _, catalog = humanml_catalog(paths)
+    else:
+        check(text_catalog is not None, "MotionMillion发布必须指定经过核验的文本索引")
+        metadata_field = "text_catalog_metadata"
+        metadata_path = str(Path(text_catalog).resolve(strict=True) / "metadata.json")
+        catalog = None
+    metadata_sha = sha256_file(metadata_path)
     counts, statuses, frames = Counter(), Counter(), Counter()
     missing, pass_missing = [], []
     output.parent.mkdir(parents=True, exist_ok=True)
-    with tempfile.TemporaryDirectory(prefix=f".{output.name}.staging-", dir=output.parent) as tmp:
+    with (
+        ExitStack() as resources,
+        tempfile.TemporaryDirectory(prefix=f".{output.name}.staging-", dir=output.parent) as tmp,
+    ):
+        if dataset == "motionmillion":
+            from tools.data.bumi.motionmillion_text import TextCatalog
+
+            catalog = TextCatalog(text_catalog)
+            resources.callback(catalog.close)
         staged = Path(tmp) / "dataset"
         (staged / "motions").mkdir(parents=True)
         (staged / "manifests").mkdir()
@@ -368,12 +393,14 @@ def publish_umr_text_pass(report_root, output, dataset):
                             .stem.removesuffix("_bumi3")
                             .removesuffix("_smplx"),
                         )
-                        text = catalog.get(key)
+                        text = (
+                            catalog.lookup(row) if dataset == "motionmillion" else catalog.get(key)
+                        )
                         captions = text["captions"] if text else []
                         counts["records"] += 1
                         counts["with_text" if captions else "without_text"] += 1
                         counts["caption_entries"] += len(captions)
-                        if text and "mirrored" in row:
+                        if text and "mirrored" in text and "mirrored" in row:
                             check(text["mirrored"] == row["mirrored"], "原始文本镜像身份不符")
                         if not captions:
                             missing.append(key)
@@ -390,11 +417,15 @@ def publish_umr_text_pass(report_root, output, dataset):
                             mirrored=row.get("mirrored"),
                             captions=captions,
                             text_status="matched_exact_filename" if captions else "missing",
-                            text_metadata_sha256=run["identity"]["source_contract_hashes"][
-                                metadata_path
-                            ],
+                            text_metadata_sha256=metadata_sha,
                             metadata=text,
-                            split="unassigned",
+                            split=(text.get("official_split") or "unassigned")
+                            if dataset == "motionmillion" and text
+                            else "train"
+                            if dataset == "humanml3d"
+                            else "unassigned",
+                            interval_seconds=row.get("interval_seconds"),
+                            annotation_interval_seconds=row.get("annotation_interval_seconds"),
                             crop_count=0,
                         )
                         if status == "PASS":
@@ -404,13 +435,26 @@ def publish_umr_text_pass(report_root, output, dataset):
                                 and sha256_file(row["human_path"]) == row["human_sha256"],
                                 "PASS发布前机器人或源人体已改变",
                             )
-                            target = staged / "motions" / source.name
-                            try:
-                                os.link(source, target)
-                            except OSError:
-                                shutil.copy2(source, target)
+                            target = source
+                            if not reference_only:
+                                relative = (
+                                    row["relative_path"]
+                                    if dataset == "motionmillion"
+                                    else source.name
+                                )
+                                target = staged / "motions" / relative
+                                target.parent.mkdir(parents=True, exist_ok=True)
+                                check(not target.exists(), "PASS发布目标动作重名")
+                                try:
+                                    os.link(source, target)
+                                except OSError:
+                                    shutil.copy2(source, target)
                             check(sha256_file(target) == row["source_sha256"], "发布NPZ校验失败")
-                            item["motion_path"] = target.relative_to(staged).as_posix()
+                            item["motion_path"] = (
+                                str(target)
+                                if reference_only
+                                else target.relative_to(staged).as_posix()
+                            )
                             pass_out.write(json.dumps(item, ensure_ascii=False) + "\n")
                             counts["pass_with_text" if captions else "pass_without_text"] += 1
                             counts["pass_caption_entries"] += len(captions)
@@ -428,6 +472,7 @@ def publish_umr_text_pass(report_root, output, dataset):
             source_contract_hashes(paths) == run["identity"]["source_contract_hashes"],
             "发布期间原始文本发生改变",
         )
+        check(sha256_file(metadata_path) == metadata_sha, "发布期间文本元数据发生改变")
         (staged / "missing_text_ids.txt").write_text("".join(k + "\n" for k in missing))
         (staged / "pass_missing_text_ids.txt").write_text("".join(k + "\n" for k in pass_missing))
         result = dict(
@@ -446,15 +491,16 @@ def publish_umr_text_pass(report_root, output, dataset):
             selection="ALL_PASS_WITHOUT_LENGTH_RESTRICTION",
             split="unassigned",
             text_embeddings_built=False,
+            motion_storage="absolute_source_reference" if reference_only else "hardlink_or_copy",
             manifests={p.name: sha256_file(p) for p in (staged / "manifests").iterdir()},
         )
         result[metadata_field] = metadata_path
-        result[metadata_field + "_sha256"] = sha256_file(metadata_path)
+        result[metadata_field + "_sha256"] = metadata_sha
         write_json(staged / "dataset_info.json", result)
         staged.rename(output)
     write_json(
         report_root
-        / ("bones_text_audit.json" if dataset == "bones_seed" else "kitml_text_audit.json"),
+        / ("bones_text_audit.json" if dataset == "bones_seed" else f"{dataset}_text_audit.json"),
         result,
     )
     return result
@@ -1090,6 +1136,9 @@ def publish_reports(db, output, run, limit):
     measured_frames = sum(frames[k] for k in ("PASS", "REVIEW", "REJECT", "INVALID", "ERROR"))
     summary = dict(
         schema=SCHEMA,
+        classification_mode=run["identity"]
+        .get("rules", {})
+        .get("classification_mode", "three_way"),
         run_fingerprint=run["fingerprint"],
         partial_scan=run["partial_scan"],
         indexed_records=run["indexed_records"],
@@ -1205,6 +1254,7 @@ def run_filter(args):
         expected_records=args.expected_records,
         libraries=dict(numpy=np.__version__, torch=torch.__version__, mujoco=mujoco.__version__),
         config_sha256=sha256_file(paths["config"]),
+        rules=rules,
         retarget_config_sha256=sha256_file(paths["retarget_config"]),
         batch_config_sha256=sha256_file(paths["batch_config"]) if paths["batch_config"] else None,
         summaries={str(p): sha256_file(p) for p in summaries},

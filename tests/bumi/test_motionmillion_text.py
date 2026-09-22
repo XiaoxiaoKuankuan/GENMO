@@ -111,6 +111,56 @@ def test_duplicate_text_is_rejected_without_publishing(tmp_path):
     assert not list(tmp_path.glob(".catalog.staging-*"))
 
 
+def test_publish_all_pass_keeps_namespace_text_and_missing(tmp_path):
+    from tools.data.bumi.umr_text_preprocess import publish_umr_text_pass
+
+    report, texts, splits, rows = fixture(tmp_path)
+    inputs, humans = tmp_path / "inputs", tmp_path / "humans"
+    inputs.mkdir()
+    humans.mkdir()
+    for i, row in enumerate(rows):
+        relative = f"folder{i}/same_basename.npz"
+        motion = inputs / relative
+        motion.parent.mkdir()
+        motion.write_bytes(f"synthetic publisher payload {i}".encode())
+        human = humans / f"{i}.npz"
+        human.write_bytes(b"synthetic human payload")
+        row.update(
+            dataset="motionmillion",
+            relative_path=relative,
+            status="PASS",
+            frames=301,
+            source_sha256=sha256_file(motion),
+            human_sha256=sha256_file(human),
+            human_path=str(human),
+        )
+    (report / "reports/folder.jsonl").write_text("".join(json.dumps(r) + "\n" for r in rows))
+    summary = dict(run_fingerprint="test", processed_records=3, status_counts={"PASS": 3})
+    (report / "quality_summary.json").write_text(json.dumps(summary))
+    run = json.loads((report / "run.json").read_text())
+    run.update(
+        summary_sha256=sha256_file(report / "quality_summary.json"),
+        identity=dict(
+            paths=dict(dataset="motionmillion", input_root=str(inputs), source_root=str(humans)),
+            source_contract_hashes={},
+        ),
+    )
+    (report / "run.json").write_text(json.dumps(run))
+    catalog = tmp_path / "catalog"
+    build_catalog(report, texts, splits, catalog)
+    output = tmp_path / "pass"
+    info = publish_umr_text_pass(report, output, "motionmillion", text_catalog=catalog)
+    assert info["pass_frames"] == 903
+    assert info["text_counts"]["pass_with_text"] == 2
+    assert info["text_counts"]["pass_without_text"] == 1
+    result = [
+        json.loads(line) for line in (output / "manifests/pass.jsonl").read_text().splitlines()
+    ]
+    assert [row["split"] for row in result] == ["train", "val", "unassigned"]
+    assert len({row["motion_path"] for row in result}) == 3
+    assert all((output / row["motion_path"]).is_file() for row in result)
+
+
 def test_conflicting_official_split_rejected(tmp_path):
     report, texts, splits, rows = fixture(tmp_path)
     archive(
