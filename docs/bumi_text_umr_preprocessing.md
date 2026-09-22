@@ -46,6 +46,31 @@ MUJOCO_GL=egl MUJOCO_EGL_DEVICE_ID=0 PYTHONDONTWRITEBYTECODE=1 \
 `/home/weili/GENMO-bumi-text/outputs/bones_seed_umr_quality_review`。
 离线PASS与有限视频复核不代表动力学、控制器跟踪或实机验证。
 
+### 2026-09-22重新筛选结果
+
+131,454条完整动作中，PASS **59,018（44.8963%）**、REVIEW **34,751（26.4359%）**、
+REJECT **37,685（28.6678%）**，INVALID/ERROR均0。质量计算用时118.119秒，
+fingerprint为`d965fd59ce7941b441d840929cee233b8a81ab9ed6b8b255e1ed93d6b5be5fc4`。
+
+全部PASS含11,863,182帧/109.844278小时，均已发布到
+`/data0/user/liwei/datasets/bones_seed_umr_pass_latest`。其中48,711条满足现有文本
+训练候选60..300帧，另10,307条仍在完整PASS交付中保留；PASS不按该长度规则删减。
+官方文本覆盖131,418条，缺36条；PASS中59,004条有236,016条caption，14条缺失。
+`delivery_verification.json`独立核对全库文本精确绑定、全部PASS的SHA/有限qpos28/
+30Hz/完整帧数，以及全部131,454条报告的source_up=y/output_up=z。
+
+按动作去重的REJECT触发原因：持续根倾角35,399、自碰撞3,705、连续性46、穿地24、
+支撑脚滑移18；原因可能重叠。REVIEW中的触发原因：支撑脚滑移31,783、自碰撞3,937、
+穿地220、持续悬空97、连续性29。根倾角>30度连续15帧仍是主要淘汰条件，不能把所有
+REJECT都解释为坐标错误。当前交付是原生动作与文本清单，尚未制作T5、数据划分和
+GENMO训练分片；现有训练loader还需相应BONES数据集接入。
+
+视频于2026-09-22 10:55正常完成，30条PASS合集5,932帧/197.7333秒，30条REJECT合集
+6,099帧/203.3秒，另有60个独立MP4和60个对应原生NPZ；来自60个不同母来源。
+两端SHA一致，本地再次完整解码62个视频，独立视频及合集分别共12,031帧，均为
+1280×720/30Hz。人工检查60条中点拼图及2张全尺寸画面，双视角、caption和质量
+标签可见；临时PNG检查目录已删除。本地`local_verification.json`记录实际检查范围。
+
 ## HumanML3D 交付适配与完整训练数据
 
 HumanML3D 与 MotionMillion 的 UMR 机器人输出都按 Z-up 处理。配置的
