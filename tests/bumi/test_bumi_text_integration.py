@@ -108,21 +108,16 @@ def test_multi_dataset_sampler_and_config(text_release):
     for sampler in ranks:
         sampler.set_epoch(3)
     assert [list(s) for s in ranks] != samples
-    for exp in (
-        "gem_bumi_text_fullseq",
-        "gem_bumi_motionmillion_text_fullseq",
-        "gem_bumi_humanml3d_text_fullseq",
-    ):
-        with initialize_config_dir(config_dir=str(ROOT / "configs"), version_base="1.3"):
-            cfg = compose(config_name="train", overrides=["exp=" + exp])
+    with initialize_config_dir(config_dir=str(ROOT / "configs"), version_base="1.3"):
+        cfg = compose(config_name="train", overrides=["exp=gem_bumi_text_fullseq"])
+    validate_sequence_experiment(cfg)
+    assert not cfg.pl_trainer.use_distributed_sampler and cfg.pl_trainer.max_epochs == -1
+    assert cfg.pipeline.args.weights.root_tilt == 1.0
+    cfg.training_budget.max_steps = 8
+    with pytest.raises(ValueError, match="预算"):
         validate_sequence_experiment(cfg)
-        assert not cfg.pl_trainer.use_distributed_sampler and cfg.pl_trainer.max_epochs == -1
-        assert cfg.pipeline.args.weights.root_tilt == 1.0
-        cfg.training_budget.max_steps = 8
-        with pytest.raises(ValueError, match="预算"):
-            validate_sequence_experiment(cfg)
-        cfg.training_budget.warmup_steps = cfg.training_budget.auxiliary_warmup_steps = 2
-        validate_sequence_experiment(cfg)
+    cfg.training_budget.warmup_steps = cfg.training_budget.auxiliary_warmup_steps = 2
+    validate_sequence_experiment(cfg)
 
 
 @pytest.mark.parametrize("pose", ["stand", "walk", "jump", "crouch", "lie"])

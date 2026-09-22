@@ -22,7 +22,7 @@ defaults:
   - refiner: null
 
   # global-override
-  - exp: mixed # set "data, model and callbacks" in yaml
+  - exp: gem_bumi_text_fullseq # 本分支唯一实验入口：BUMI四库文本crop120
   - global/task: null # dump/test
   - global/hsearch: null # hyper-param search
   - global/debug: null # debug mode

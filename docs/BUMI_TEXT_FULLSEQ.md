@@ -204,8 +204,8 @@ PY
 "$PY" scripts/train.py exp=gem_bumi_text_fullseq --cfg job --resolve
 ```
 
-三个实验入口为`gem_bumi_text_fullseq`、`gem_bumi_motionmillion_text_fullseq`、
-`gem_bumi_humanml3d_text_fullseq`。后两者需对应单集stats。
+当前文本专用分支仅保留`gem_bumi_text_fullseq`这一实验入口，两个单库入口已删除。
+本文件以下命令为历史full300记录；当前四库crop120用法见[BUMI_TEXT_CROP120.md](BUMI_TEXT_CROP120.md)。
 候选64×8×4=2048有效global batch **尚未显存验证**。默认AdamW2e-4，215000步，
 LR warmup5000，机器人辅助项warmup10000；不能沿用120帧实验墙钟估计。
 

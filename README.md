@@ -1,7 +1,8 @@
-> **当前分支：BUMI 文本生成动作。** 基于 SMPL 完整序列 A0，文本直接生成 BUMI
-> qpos28。数据交付规范、联合/单集训练、恢复、网页、MuJoCo预览和无checkpoint部署，
-> 见 [BUMI 文本完整序列说明](docs/BUMI_TEXT_FULLSEQ.md)。本阶段完成代码与CPU验证，
-> 真实数据、训练模型和GPU验收仍待后续阶段，不代表动作质量已验证。
+> **当前分支：BUMI 四库文本生成动作。** `configs/exp/`只保留
+> `gem_bumi_text_fullseq.yaml`一个实验入口；`configs/train.yaml`默认选择它。
+> 源动作完整保存，训练随机120帧，短动作保留mask，验证固定窗口；BONES使用事件时间。
+> 数据准备、采样比例和训练命令见[当前BUMI文本训练说明](docs/BUMI_TEXT_CROP120.md)。
+> 下方上游SMPL/音乐功能介绍与保留源码供历史参考，相关实验在对应功能分支运行。
 
 <p align="center">
   <h1 align="center">GEM：通用人体动作模型</h1>

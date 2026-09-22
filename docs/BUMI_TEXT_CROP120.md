@@ -1,7 +1,8 @@
 # BUMI四库120帧文本训练
 
 2026-09-22，`feature/bumi-text-only` 默认配置恢复4秒/120帧训练窗口。主入口仍为
-`configs/exp/gem_bumi_text_fullseq.yaml`，保留文件名方便原启动脚本使用；实际实验名为
+`configs/exp/gem_bumi_text_fullseq.yaml`；此文件是本分支`configs/exp/`下唯一入口，
+直接选择组件，不再继承SMPL实验配置。`configs/train.yaml`也默认选择它。实际实验名为
 `gem_bumi_text_crop120`，序列契约为v2。原full300 checkpoint继续按自己的v1契约读取，
 不能用新配置完整resume旧模型。相同契约可以恢复模型、优化器及调度器；当前普通
 DataLoader不保存epoch中途的逐抽样游标，不承诺中途断点后逐batch完全复现原顺序。
@@ -96,7 +97,10 @@ python scripts/train.py exp=gem_bumi_text_fullseq
 ```
 
 原生UMR构建依赖MuJoCo及资产核验，训练依赖GENMO完整环境。不要只因为Python可执行
-就假定两个环境依赖相同。单库对照入口保留，但继承crop120并关闭四库混采。
+就假定两个环境依赖相同。旧单库、SMPL及音乐实验入口已从本分支删除；相关独立功能
+应在对应功能分支运行。`network`、`pipeline`、`endecoder`、四库Dataset、优化器等组件
+配置仍被唯一入口实际引用，属于当前配置组成部分。测试源代码保留；验证本分支时使用
+BUMI文本测试，不把依赖已删除实验入口的其他功能测试作为本分支训练入口。
 固定评测复用`tools/eval/evaluate_bumi_text.py cohort --sequence-mode crop`，四库分别固定
 验证窗口，GT渲染与模型生成按相同有效帧数比较。运行时、ONNX和TensorRT接口形状根据
 checkpoint读取120或300，网页长度范围也来自模型契约；TensorRT须在目标GPU另行验收。
