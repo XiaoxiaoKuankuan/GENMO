@@ -1,14 +1,14 @@
-# BUMI humanml3d文本数据配置：完整源动作保存在同一release中，读取时选择120帧窗口。
+# BUMI bones_seed文本数据配置：完整源动作保存在同一release中，读取时选择120帧窗口。
 # 训练随机选择caption和窗口；验证固定第一条caption的中心窗口；短动作补齐并保留mask。
 # BONES必须绑定独立事件时间区间，不能用整段描述替代事件监督。
-humanml3d_bumi_text_train:
+bones_seed_bumi_text_val:
   _target_: gem.datasets.pure_motion.bumi_text.BumiTextDataset
   root: ${oc.env:BUMI_TEXT_DATA_ROOT,inputs/bumi_text_crop120}
-  split: train
-  dataset: humanml3d
+  split: val
+  dataset: bones_seed
   sequence_mode: crop
   pad_to_frames: 120
-  caption_sampling: random
-  require_temporal_annotations: false
+  caption_sampling: first
+  require_temporal_annotations: true
   random_seed: 20260922
   shard_cache_size: 4

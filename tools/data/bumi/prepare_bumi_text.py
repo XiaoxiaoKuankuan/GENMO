@@ -4,7 +4,8 @@
 build 读取 conversion.json 中的原生 NPZ 与文本特征引用，验证后形成完整动作分片；
 按来源区间排除 train/held-out 重叠及精确重复，原 NPZ/T5 文件不改写。不执行重定向、
 人体转换或自动地面修正。stats 只遍历 train，有效XY差分不包含每条动作最后一帧。
-preflight 报告真实长度、padding和裁剪计数。所有写入要求显式输出路径且拒绝覆盖。
+four-conversion接入四库完整PASS源动作和BONES真实事件时间；crop统计按确定性区间窗口计算。
+preflight 报告真实长度、padding和源文件裁剪计数（训练随机窗口不改源文件）。所有写入要求显式输出路径且拒绝覆盖。
 filter-umr 接入MotionMillion/HumanML3D原生UMR的全量数值/质量筛选与可恢复报告。
 umr-pass统一发布四库所有长度的PASS和原文本，支持只引用已校验的原始NPZ；
 bones-pass/kitml-pass保持兼容，原始文本索引不随质量规则改变而重新生成。
@@ -22,6 +23,7 @@ import json
 import sys
 import tempfile
 from collections import Counter, defaultdict
+from contextlib import ExitStack
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[3]
@@ -35,9 +37,11 @@ from gem.datasets.pure_motion.bumi_text import (
     SCHEMA,
     AssetCache,
     BumiTextDataset,
+    caption_intervals,
     read_embedding,
     resolve_reference,
     validate_record,
+    window_bounds,
 )
 from gem.robots.bumi.endecoder import STATS_CONTRACT_VERSION
 from gem.robots.bumi.feature_codec import (
@@ -67,9 +71,10 @@ def select_records(records):
     for item in records:
         p = item["provenance"]
         key = p.get("canonical_source_id")
+        if not key or p.get("cross_dataset_lineage_verified") is False:
+            unknown.append([item["dataset"], item["motion_id"]])
         if not key:
             key = item["dataset"] + ":" + p["source_id"]
-            unknown.append([item["dataset"], item["motion_id"]])
         groups[key].append(item)
     for group in groups.values():
         held = [r["provenance"]["interval_seconds"] for r in group if r["split"] != "train"]
@@ -164,27 +169,34 @@ def build(source, output, *, records_per_shard=512, quality_report=None):
     if output.exists():
         raise FileExistsError("使用新的release目录，不能覆盖原数据")
     output.parent.mkdir(parents=True, exist_ok=True)
-    gate = None
-    if quality_report is not None:
-        from tools.data.bumi.umr_text_preprocess import QualityGate
+    payload = json.loads(Path(source).read_text())
+    reports = payload.get("quality_reports", {})
+    if quality_report is not None and reports:
+        raise ValueError("联合转换已绑定四库质量报告，不能再覆盖单个report")
+    with ExitStack() as resources:
+        gates = {}
+        for dataset, report in (
+            reports or ({"*": quality_report} if quality_report else {})
+        ).items():
+            from tools.data.bumi.umr_text_preprocess import QualityGate
 
-        gate = QualityGate(quality_report)
-    try:
+            gate = QualityGate(report)
+            resources.callback(gate.close)
+            gates[dataset] = gate
         with tempfile.TemporaryDirectory(
             prefix=f".{output.name}.staging-", dir=output.parent
         ) as temp:
             staged = Path(temp) / "release"
-            result = _build(source, staged, records_per_shard=records_per_shard, quality_gate=gate)
+            result = _build(
+                source, staged, records_per_shard=records_per_shard, quality_gates=gates
+            )
             if output.exists():
                 raise FileExistsError("构建期间目标目录被创建，拒绝覆盖")
             staged.rename(output)
             return result
-    finally:
-        if gate is not None:
-            gate.close()
 
 
-def _build(source, output, *, records_per_shard=512, quality_gate=None):
+def _build(source, output, *, records_per_shard=512, quality_gates=None):
     source, output = Path(source).resolve(), Path(output).resolve()
     if records_per_shard < 1:
         raise ValueError("records_per_shard必须为正")
@@ -199,16 +211,24 @@ def _build(source, output, *, records_per_shard=512, quality_gate=None):
     kin = BumiKinematics(kin_path)
     if kin.source_mjcf_sha256 != MJCF_SHA256:
         raise ValueError("仅接受fe934 BUMI")
+    quality_gates = quality_gates or {}
+    all_lengths = payload.get("source_storage") == "full"
     quality_excluded = []
-    if quality_gate is not None:
-        if kin.kinematics_sha256 != quality_gate.engine.kin.kinematics_sha256:
+    if quality_gates:
+        if any(
+            kin.kinematics_sha256 != gate.engine.kin.kinematics_sha256
+            for gate in quality_gates.values()
+        ):
             raise ValueError("构建运动学与质量报告指纹不同")
         # 在来源分组之前绑定canonical ID，防止镜像跨split时沿用不完整的调用者ID。
         eligible = []
         for record in payload["records"]:
+            quality_gate = quality_gates.get(record["dataset"], quality_gates.get("*"))
+            if quality_gate is None:
+                raise ValueError("数据集缺少对应的质量报告")
             path = resolve_reference(record["qpos_path"], source.parent)
             row = quality_gate.lookup(path)
-            if not row["training_eligible"] or row["status"] != "PASS":
+            if row["status"] != "PASS" or (not all_lengths and not row["training_eligible"]):
                 quality_excluded.append(
                     dict(
                         dataset=record["dataset"],
@@ -251,6 +271,7 @@ def _build(source, output, *, records_per_shard=512, quality_gate=None):
                             frames=r["frames"],
                             dataset=r["dataset"],
                             motion_id=r["motion_id"],
+                            canonical_source_id=r["provenance"].get("canonical_source_id"),
                         )
                         for i, r in enumerate(chunk)
                     ],
@@ -263,8 +284,11 @@ def _build(source, output, *, records_per_shard=512, quality_gate=None):
                 continue
             record = copy.deepcopy(original)
             path = resolve_reference(record.pop("qpos_path"), source.parent)
+            quality_gate = quality_gates.get(record["dataset"], quality_gates.get("*"))
             if quality_gate is not None:
-                qpos, quality = quality_gate.read_candidate(path, record)
+                qpos, quality = quality_gate.read_candidate(
+                    path, record, allow_all_pass=all_lengths
+                )
                 if qpos is None:
                     report["excluded"].append(
                         dict(
@@ -307,7 +331,7 @@ def _build(source, output, *, records_per_shard=512, quality_gate=None):
                             record[key] = torch.from_numpy(npz[key].copy())
             record["source_qpos_sha256"] = sha256_file(path)
             record["frames"] = len(record["qpos"])
-            if not 60 <= record["frames"] <= 300:
+            if record["frames"] < 4 or (not all_lengths and not 60 <= record["frames"] <= 300):
                 report["excluded"].append(
                     dict(
                         dataset=record["dataset"],
@@ -344,7 +368,9 @@ def _build(source, output, *, records_per_shard=512, quality_gate=None):
             shards=shards,
             full_sequence=True,
             crop_count=0,
-            quality_run_fingerprint=quality_gate.run["fingerprint"] if quality_gate else None,
+            quality_run_fingerprints={
+                key: gate.run["fingerprint"] for key, gate in quality_gates.items()
+            },
         )
         write_json(output / "manifests" / f"{split}.json", manifest)
     report.update(counts=dict(counts), crop_count=0)
@@ -352,20 +378,21 @@ def _build(source, output, *, records_per_shard=512, quality_gate=None):
     return report
 
 
-def _report_dataset(root, split, dataset):
+def _report_dataset(root, split, dataset, sequence_mode="full"):
+    opts = dict(sequence_mode=sequence_mode, pad_to_frames=120 if sequence_mode == "crop" else 300)
     """单来源release自动绑定单集身份，避免统计和预检报告误标为联合数据。"""
-    ds = BumiTextDataset(root, split, dataset=dataset, caption_sampling="first")
+    ds = BumiTextDataset(root, split, dataset=dataset, caption_sampling="first", **opts)
     if dataset is None:
         available = {row[2]["dataset"] for row in ds.index}
         if len(available) == 1:
             # 单来源release必须写单集统计身份，否则BumiTextGEM会按联合实验拒绝加载。
             dataset = next(iter(available))
-            ds = BumiTextDataset(root, split, dataset=dataset, caption_sampling="first")
+            ds = BumiTextDataset(root, split, dataset=dataset, caption_sampling="first", **opts)
     return ds
 
 
-def statistics(root, output, dataset=None):
-    ds = _report_dataset(root, "train", dataset)
+def statistics(root, output, dataset=None, sequence_mode="full"):
+    ds = _report_dataset(root, "train", dataset, sequence_mode)
     dataset = ds.dataset
     kin_path = resolve_reference(ds.manifest["kinematics"]["path"], ds.root)
     kin = BumiKinematics(kin_path)
@@ -374,13 +401,22 @@ def statistics(root, output, dataset=None):
     frames_total = 0
     for i in range(len(ds)):
         record = ds.read_record(i)
-        features = codec.encode(record["qpos"]).physical_features.double()
-        mask = torch.ones_like(features, dtype=torch.bool)
-        mask[-1, :2] = False
-        sums += torch.where(mask, features, 0).sum(0)
-        squares += torch.where(mask, features.square(), 0).sum(0)
-        counts += mask.sum(0)
-        frames_total += len(features)
+        intervals = (
+            caption_intervals(record) if sequence_mode == "crop" else [[0, record["frames"]]]
+        )
+        seen = set()
+        for tid, interval in enumerate(intervals):
+            if tuple(interval) in seen:
+                continue
+            seen.add(tuple(interval))
+            a, b = window_bounds(record, tid, sequence_mode, ds.pad_to_frames)
+            features = codec.encode(record["qpos"][a:b]).physical_features.double()
+            mask = torch.ones_like(features, dtype=torch.bool)
+            mask[-1, :2] = False
+            sums += torch.where(mask, features, 0).sum(0)
+            squares += torch.where(mask, features.square(), 0).sum(0)
+            counts += mask.sum(0)
+            frames_total += len(features)
     mean = sums / counts
     std = (squares / counts - mean.square()).clamp_min(0).sqrt()
     value = dict(
@@ -395,7 +431,11 @@ def statistics(root, output, dataset=None):
         feature_slices=dict(BUMI_FEATURE_SLICES),
         joint_names=list(kin.joint_order),
         kinematics_sha256=kin.kinematics_sha256,
-        data_kind="bumi_text_fullseq",
+        data_kind="bumi_text_crop120" if sequence_mode == "crop" else "bumi_text_fullseq",
+        datasets=sorted({row[2]["dataset"] for row in ds.index}),
+        window_policy="unique_annotation_intervals_center_window"
+        if sequence_mode == "crop"
+        else "full",
         split="train",
         dataset=dataset,
         data_identity=ds.data_identity,
@@ -410,10 +450,10 @@ def statistics(root, output, dataset=None):
     return value
 
 
-def preflight(root, split="train", dataset=None, limit=128):
+def preflight(root, split="train", dataset=None, limit=128, sequence_mode="full"):
     if limit < 0:
         raise ValueError("limit不能为负；0表示全量")
-    ds = _report_dataset(root, split, dataset)
+    ds = _report_dataset(root, split, dataset, sequence_mode)
     lengths = []
     posture_diagnostics = []
     for i in range(min(limit, len(ds)) if limit else len(ds)):
@@ -421,7 +461,9 @@ def preflight(root, split="train", dataset=None, limit=128):
         for text, ref in zip(record["captions"], record["embeddings"]):
             read_embedding(ref, text, ds.cache, ds.root, expected_frames=record["frames"])
         sample = ds[i]
-        if sample["meta"]["crop_start"] != 0 or sample["mask"]["valid"].sum() != sample["length"]:
+        if (sequence_mode == "full" and sample["meta"]["crop_start"] != 0) or sample["mask"][
+            "valid"
+        ].sum() != sample["length"]:
             raise ValueError("发现裁剪或真实长度错误")
         lengths.append(sample["length"])
         from gem.utils.rotation_conversions import quaternion_to_matrix
@@ -445,8 +487,8 @@ def preflight(root, split="train", dataset=None, limit=128):
         records_total=len(ds),
         length_distribution=dict(Counter(lengths)),
         valid_frames=sum(lengths),
-        padding_frames=300 * len(lengths) - sum(lengths),
-        padding_fraction=1 - sum(lengths) / (300 * len(lengths)),
+        padding_frames=ds.pad_to_frames * len(lengths) - sum(lengths),
+        padding_fraction=1 - sum(lengths) / (ds.pad_to_frames * len(lengths)),
         crop_count=0,
         data_identity=ds.data_identity,
         low_or_tilted_postures=posture_diagnostics,
@@ -456,6 +498,11 @@ def preflight(root, split="train", dataset=None, limit=128):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest="command", required=True)
+    p = sub.add_parser("four-conversion", help="保留四库完整源动作并接入BONES事件时间")
+    p.add_argument("--releases", type=Path, nargs=4, required=True)
+    p.add_argument("--bones-temporal", type=Path, required=True)
+    p.add_argument("--output", type=Path, required=True)
+    p.add_argument("--split-seed", type=int, default=20260922)
     p = sub.add_parser("build")
     p.add_argument("--source", type=Path, required=True)
     p.add_argument("--output", type=Path, required=True)
@@ -531,7 +578,8 @@ def main():
         p = sub.add_parser(command)
         p.add_argument("--root", type=Path, required=True)
         p.add_argument("--output", type=Path, required=True)
-        p.add_argument("--dataset", choices=["motionmillion", "humanml3d"])
+        p.add_argument("--dataset", choices=["motionmillion", "humanml3d", "kitml", "bones_seed"])
+        p.add_argument("--sequence-mode", choices=["crop", "full"], default="crop")
         if command == "preflight":
             p.add_argument("--split", default="train", choices=["train", "val", "test"])
             p.add_argument("--limit", type=int, default=128)
@@ -564,6 +612,12 @@ def main():
         from tools.data.bumi.motionmillion_text import bind_report
 
         result = bind_report(args.quality_report, args.text_catalog)
+    elif args.command == "four-conversion":
+        from tools.data.bumi.text_windows import four_dataset_conversion
+
+        result = four_dataset_conversion(
+            args.releases, args.bones_temporal, args.output, split_seed=args.split_seed
+        )
     elif args.command == "humanml-conversion":
         result = humanml_conversion(args.quality_report, args.output)
     elif args.command == "build":
@@ -574,9 +628,9 @@ def main():
             quality_report=args.quality_report,
         )
     elif args.command == "stats":
-        result = statistics(args.root, args.output, args.dataset)
+        result = statistics(args.root, args.output, args.dataset, args.sequence_mode)
     else:
-        result = preflight(args.root, args.split, args.dataset, args.limit)
+        result = preflight(args.root, args.split, args.dataset, args.limit, args.sequence_mode)
         write_json(args.output, result)
     print(json.dumps(result, ensure_ascii=False, indent=2))
 

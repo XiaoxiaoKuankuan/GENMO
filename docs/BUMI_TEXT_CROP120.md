@@ -1,0 +1,105 @@
+# BUMI四库120帧文本训练
+
+2026-09-22，`feature/bumi-text-only` 默认配置恢复4秒/120帧训练窗口。主入口仍为
+`configs/exp/gem_bumi_text_fullseq.yaml`，保留文件名方便原启动脚本使用；实际实验名为
+`gem_bumi_text_crop120`，序列契约为v2。原full300 checkpoint继续按自己的v1契约读取，
+不能用新配置完整resume旧模型。相同契约可以恢复模型、优化器及调度器；当前普通
+DataLoader不保存epoch中途的逐抽样游标，不承诺中途断点后逐batch完全复现原顺序。
+
+## 完整存储与训练窗口
+
+- 磁盘保留完整源qpos，`source_storage: full`转换清单通过全部PASS质量门禁，取消
+  60–300帧训练候选限制；源动作仍须至少4帧。旧转换清单的历史长度策略兼容保留。
+- Dataset在训练时随机选择caption，然后在该caption有效区间内均匀随机选连续120帧。
+  区间不足120帧时重复最后一帧补齐，同时保留真实`length`及布尔`mask.valid`。
+  padding不参与有效帧loss、时序差分或接触监督。完整qpos和完整文本索引不被改写。
+- 验证固定第一条caption及其区间的中心窗口；不依赖worker或训练随机种子。
+- 30Hz、Z-up、fe934资产、21关节顺序、qpos30表示及150-token T5-3B保持一致。
+  `endecoder.sequence_mode: full`表示编解码按真实length处理边界，与Dataset的crop取窗
+  职责不同，不能一起改成会破坏有效长度处理的模式。
+- stats只使用train源中的不重复文本区间，确定性中心取窗，每窗口最后XY差分无效。
+  它是可复现的归一化参考，不声称精确等于训练随机加权分布；必须使用新生成的
+  `data_kind: bumi_text_crop120`统计量。
+
+## 数据集与采样
+
+| 数据集 | 默认概率 | 当前文本时间范围 |
+|---|---:|---|
+| BONES-SEED | 60% | 独立事件级秒标注，按事件description和区间训练 |
+| HumanML3D | 25% | 本批部分记录已经按原文本时间裁剪，其余为整段文本 |
+| KIT-ML | 10% | 本批whole_motion标注，有全段起止，不能视为事件级标注 |
+| MotionMillion | 5% | 本批无可靠事件级时间，使用完整记录文本 |
+
+比例是初始训练策略，可在`data.text_sampling.dataset_probabilities`调整。每次抽样先选
+数据集，再均匀选canonical母来源，再选其镜像/子片段记录、caption和窗口。动作长、
+caption多、镜像多不会自动增加母来源权重。每epoch默认262144次有放回抽样，DDP各rank
+分担互不重叠的全局抽样序号；同一动作可以重复抽中。概率是长期期望，并非每个batch配额。
+抽样由seed、epoch、全局抽样序号确定，worker数量不改变窗口随机序列。
+
+MotionMillion有官方split的母来源保持官方分组；无官方split的来源，以及HumanML3D
+train派生数据、KIT-ML、BONES按母来源的固定hash分为90%/5%/5%内部train/val/test。
+该比例是哈希分布期望，不保证有限数据恰好占比。镜像与同源子片段同组。
+HumanML3D内部留出不冒充官方val/test。当前四库间尚无完整统一母来源映射，报告明确
+`cross_dataset_lineage_verified: false`；内部验证不用于宣称官方无泄漏基准成绩。
+
+## BONES时间标注无需物理预裁
+
+原始文件为
+`/data0/user/liwei/datasets/BONES-SEED/metadata/seed_metadata_v002_temporal_labels.jsonl`。
+按完整文件名精确关联，使用事件原文`description`。秒数映射到机器人30Hz帧时间线：
+`start = ceil(start_time * 30)`，`end = floor(end_time * 30)`，区间为半开`[start,end)`。
+禁止使用原人体50Hz直接计算机器人帧号。最多允许尾部0.1秒重采样差异并显式记录截边；
+更大错位直接报错。没有可用事件或换算后不足4帧的事件不进入文本训练。
+
+例如事件位于10–16秒，对应`[300,480)`：训练每次从该事件内随机取120帧，并使用该事件
+文本；验证取第一事件的中心窗口。若事件只有2秒，则60帧有效、60帧padding；不借用
+相邻事件凑满4秒。文件仍保存整段源动作，release记录每条caption的`caption_intervals`。
+QualityGate在构建时再次核对时间文件SHA、事件原文与范围。BONES Dataset启用
+`require_temporal_annotations: true`，旧的只有整段caption的release会明确失败。
+
+## 四库数据准备与启动
+
+以下在服务器2代码成功同步后执行。每一步输出须为不存在的新路径；命令不覆盖原始
+PASS数据。生产T5编码、分片与统计量需要实际执行后才算训练数据就绪。
+
+```bash
+cd /home/user/liwei/GENMO-bumi-text
+export BUMI_TEXT_PREP_ROOT=/data0/user/liwei/datasets/bumi_text_crop120_prepare_v2
+export BUMI_TEXT_DATA_ROOT=/data0/user/liwei/datasets/bumi_text_crop120_v2
+
+python tools/data/bumi/prepare_bumi_text.py four-conversion \
+  --releases \
+    /data0/user/liwei/datasets/motionmillion_umr_pass_latest \
+    /data0/user/liwei/datasets/humanml3d_umr_pass_latest \
+    /data0/user/liwei/datasets/kitml_umr_pass_latest \
+    /data0/user/liwei/datasets/bones_seed_umr_pass_latest \
+  --bones-temporal /data0/user/liwei/datasets/BONES-SEED/metadata/seed_metadata_v002_temporal_labels.jsonl \
+  --output "$BUMI_TEXT_PREP_ROOT/conversion.json"
+
+# T5模型路径需指向服务器已安装且验证过的本地T5-3B目录。
+python tools/data/bumi/encode_text_features.py \
+  --source "$BUMI_TEXT_PREP_ROOT/conversion.json" \
+  --output "$BUMI_TEXT_PREP_ROOT/t5" --t5-model "$T5_MODEL_PATH" --device cuda:0
+
+python tools/data/bumi/prepare_bumi_text.py build \
+  --source "$BUMI_TEXT_PREP_ROOT/t5/conversion.json" --output "$BUMI_TEXT_DATA_ROOT"
+python tools/data/bumi/prepare_bumi_text.py stats --sequence-mode crop \
+  --root "$BUMI_TEXT_DATA_ROOT" --output "$BUMI_TEXT_DATA_ROOT/stats.json"
+export BUMI_TEXT_STATS_PATH="$BUMI_TEXT_DATA_ROOT/stats.json"
+
+# 预检报告是临时诊断产物，用后按agent.md精确路径清理。
+python tools/data/bumi/prepare_bumi_text.py preflight --sequence-mode crop \
+  --root "$BUMI_TEXT_DATA_ROOT" --split train --limit 0 \
+  --output /tmp/bumi_text_crop120_preflight.json
+
+python scripts/train.py exp=gem_bumi_text_fullseq
+```
+
+原生UMR构建依赖MuJoCo及资产核验，训练依赖GENMO完整环境。不要只因为Python可执行
+就假定两个环境依赖相同。单库对照入口保留，但继承crop120并关闭四库混采。
+固定评测复用`tools/eval/evaluate_bumi_text.py cohort --sequence-mode crop`，四库分别固定
+验证窗口，GT渲染与模型生成按相同有效帧数比较。运行时、ONNX和TensorRT接口形状根据
+checkpoint读取120或300，网页长度范围也来自模型契约；TensorRT须在目标GPU另行验收。
+
+CPU合成数据、缩小网络测试只能证明这些代码路径及契约行为；不代表四库生产T5已完成、
+正式训练已启动、模型语义质量已提高或机器人闭环跟踪已通过。

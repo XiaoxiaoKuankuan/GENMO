@@ -1,5 +1,6 @@
 # @package _global_
-# BUMI文本A0：从零初始化；64×8×4只是待显存验证的候选，禁止直接声明多卡可运行。
+# BUMI四库文本：源动作完整保存，训练随机120帧窗口，验证固定中心窗口。
+# BONES按事件caption区间取窗；短窗口mask补齐，MM采样概率最低。文件名保留旧入口兼容。
 defaults:
 - gem_smpl_motionmillion_text_fullseq
 - override /network: diffusion_lg_bumi30_contact
@@ -8,17 +9,21 @@ defaults:
 - override /train_datasets:
   - motionmillion_bumi_text_train
   - humanml3d_bumi_text_train
+  - kitml_bumi_text_train
+  - bones_seed_bumi_text_train
 - override /test_datasets:
   - motionmillion_bumi_text_val
   - humanml3d_bumi_text_val
+  - kitml_bumi_text_val
+  - bones_seed_bumi_text_val
 - override /callbacks:
   - ckpt_saver/every10000s_top100
   - prog_bar/prog_reporter_ed1
   - train_speed_timer/base
   - lr_monitor/pl
 - _self_
-exp_name_base: gem_bumi_text_fullseq
-data_name: bumi_text_fullseq_v1
+exp_name_base: gem_bumi_text_crop120
+data_name: bumi_text_crop120_v2
 output_dir: outputs/${data_name}/${exp_name}
 pretrain_ckpt: null
 ckpt_path: null
@@ -29,11 +34,13 @@ training_budget:
   auxiliary_warmup_steps: 10000
 model:
   model_cfg:
+    sampling_contract: ${data.text_sampling}
     sequence_contract:
-      schema_version: 1
-      sequence_mode: full
-      min_frames: 60
-      max_frames: 300
+      schema_version: 2
+      sequence_mode: crop
+      # v2记录实际有效窗口范围；完整源动作不设300帧上限。
+      min_frames: 4
+      max_frames: 120
       pad_to_frames: ${data.dataset_opts.max_motion_frames}
       fps: 30
       attention_mode: ${network.model_cfg.denoiser.attention_mode}
@@ -65,7 +72,18 @@ pipeline:
     loss_reduction: valid_per_sample
 data:
   dataset_opts:
-    max_motion_frames: 300
+    max_motion_frames: 120
+  shard_aware_sampling:
+    enabled: false
+  text_sampling:
+    enabled: true
+    seed: 20260922
+    samples_per_epoch: 262144
+    dataset_probabilities:
+      motionmillion: 0.05
+      humanml3d: 0.25
+      kitml: 0.10
+      bones_seed: 0.60
   collate_cfg:
     default_seq_feature_length_multiplier:
       audio_array: 1
@@ -90,5 +108,6 @@ callbacks:
       save_on_train_end: true
 endecoder:
   kinematics_path: ${oc.env:BUMI_KINEMATICS_PATH,configs/bumi/bumi_kinematics_robot_retargeter_fe934_v1.json}
-  stats_path: ${oc.env:BUMI_TEXT_STATS_PATH,inputs/bumi_text_fullseq/stats.json}
+  stats_path: ${oc.env:BUMI_TEXT_STATS_PATH,inputs/bumi_text_crop120/stats.json}
+  # 编解码保留有效长度边界处理；与Dataset的crop取样模式是不同职责。
   sequence_mode: full

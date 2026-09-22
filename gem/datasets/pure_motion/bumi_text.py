@@ -3,7 +3,9 @@
 直接读取 qpos28 分片，不构造人体、相机或音乐条件。动作分片独立于文本特征：
 引用旧 MotionMillion T5 时同时验证源 motion/embedding manifest、分片 SHA 和 caption；
 原资产不改写。每个 worker 使用有界 LRU，文件身份变化才重新哈希，返回值均为副本。
-训练每条完整动作随机取一条 caption，验证固定第一条；尾部补齐到300，length仍为F。
+源分片始终保存完整动作。full模式兼容原pad300；crop模式在所选caption的标注区间内
+随机取120帧，验证取中心窗口，短动作补末帧且mask为无效。BONES必须使用事件级
+caption_intervals，禁止把完整描述当成事件描述；裁窗同时同步接触标签和来源边界。
 """
 
 from __future__ import annotations
@@ -21,6 +23,38 @@ from gem.runtime.bumi_text_contract import MJCF_SHA256, sha256_file
 
 SCHEMA = "genmo.bumi_text_release.v1"
 GROUND = "retargeted_text_floor_zero_v1"
+DATASETS = {"motionmillion", "humanml3d", "kitml", "bones_seed"}
+
+
+def caption_intervals(record):
+    """返回每条caption相对于完整源qpos的左闭右开帧区间。"""
+    intervals = record.get("caption_intervals")
+    if intervals is None:
+        return [[0, record["frames"]] for _ in record["captions"]]
+    if len(intervals) != len(record["captions"]):
+        raise ValueError("caption与时间区间数量不符")
+    for interval in intervals:
+        if (
+            len(interval) != 2
+            or any(type(v) is not int for v in interval)
+            or not 0 <= interval[0] < interval[1] <= record["frames"]
+            or interval[1] - interval[0] < 4
+        ):
+            raise ValueError("caption区间必须在完整动作内且至少4帧")
+    return intervals
+
+
+def window_bounds(record, text_index, sequence_mode, pad_to_frames, rng=None):
+    """先选文本适用范围，再选窗口；rng为空时固定取中心，源记录保持不变。"""
+    begin, end = caption_intervals(record)[text_index]
+    if sequence_mode == "full":
+        if (begin, end) != (0, record["frames"]):
+            raise ValueError("事件级文本不能监督full模式的整条动作")
+        return begin, end
+    length = min(end - begin, pad_to_frames)
+    choices = end - begin - length
+    start = begin + (int(rng.randint(choices + 1)) if rng is not None else choices // 2)
+    return start, start + length
 
 
 def caption_hash(text):
@@ -164,7 +198,7 @@ def validate_record(record, *, split=None):
     if not isinstance(qpos, torch.Tensor) or qpos.ndim != 2 or qpos.shape[1] != 28:
         raise ValueError("qpos 必须为 [F,28] Tensor")
     frames = len(qpos)
-    if not 60 <= frames <= 300 or not torch.isfinite(qpos).all() or record.get("frames") != frames:
+    if frames < 4 or not torch.isfinite(qpos).all() or record.get("frames") != frames:
         raise ValueError("动作真实长度/shape/有限性错误，禁止静默裁剪")
     norm = torch.linalg.vector_norm(qpos[:, 3:7].float(), dim=-1)
     if not torch.allclose(norm, torch.ones_like(norm), atol=1e-3, rtol=0):
@@ -173,9 +207,7 @@ def validate_record(record, *, split=None):
         split is not None and split != record["split"]
     ):
         raise ValueError("记录 split 不匹配")
-    if record.get("dataset") not in {"motionmillion", "humanml3d"} or not str(
-        record.get("motion_id", "")
-    ):
+    if record.get("dataset") not in DATASETS or not str(record.get("motion_id", "")):
         raise ValueError("缺少数据集或motion_id")
     captions = record.get("captions", [])
     if not captions or not all(isinstance(c, str) and c.strip() for c in captions):
@@ -186,6 +218,7 @@ def validate_record(record, *, split=None):
         raise ValueError("caption、ID与embedding数量不符")
     if len(set(record["caption_ids"])) != len(captions):
         raise ValueError("重复 caption ID")
+    caption_intervals(record)
     if record.get("ground_semantics") != GROUND or record.get("fps") != 30:
         raise ValueError("需要确认的 Z-up 地面零点、30FPS契约")
     ground = record.get("ground_alignment", {})
@@ -244,15 +277,22 @@ class BumiTextDataset(Dataset):
         caption_sampling="random",
         random_seed=20260909,
         shard_cache_size=2,
+        require_temporal_annotations=False,
         **unused,
     ):
         if unused:
             raise TypeError(f"未知 Dataset 参数: {sorted(unused)}")
-        if (sequence_mode, pad_to_frames) != ("full", 300) or caption_sampling not in {
+        if (sequence_mode, pad_to_frames) not in {
+            ("full", 300),
+            ("crop", 120),
+        } or caption_sampling not in {
             "random",
             "first",
         }:
-            raise ValueError("BUMI 文本要求完整动作/pad300和独立caption策略")
+            raise ValueError("BUMI文本要求full/pad300或crop/pad120及独立caption策略")
+        if dataset is not None and dataset not in DATASETS:
+            raise ValueError("未知BUMI文本数据集")
+        self.require_temporal_annotations = require_temporal_annotations
         self.root = Path(root).expanduser().resolve()
         manifest_path = self.root / "manifests" / f"{split}.json"
         self.manifest = json.loads(manifest_path.read_text())
@@ -291,10 +331,12 @@ class BumiTextDataset(Dataset):
                 raise ValueError("分片顺序/索引数不一致")
             for rid, row in enumerate(shard["records"]):
                 identity = (row["dataset"], row["motion_id"])
-                if identity in seen or row["record_index"] != rid or not 60 <= row["frames"] <= 300:
+                if identity in seen or row["record_index"] != rid or row["frames"] < 4:
                     raise ValueError("重复记录、非法长度或错误索引")
                 seen.add(identity)
                 if dataset is None or row["dataset"] == dataset:
+                    if sequence_mode == "full" and not 60 <= row["frames"] <= 300:
+                        continue
                     self.index.append((sid, rid, row))
         if not self.index:
             raise ValueError(f"{split}/{dataset} 没有可用完整动作")
@@ -304,6 +346,12 @@ class BumiTextDataset(Dataset):
             "dataset": dataset,
             "kinematics_sha256": manifest["kinematics"]["sha256"],
         }
+        if sequence_mode == "crop":
+            self.data_identity.update(
+                datasets=sorted({row[2]["dataset"] for row in self.index}),
+                sequence_mode=sequence_mode,
+                pad_to_frames=pad_to_frames,
+            )
 
     def __len__(self):
         return len(self.index)
@@ -316,6 +364,18 @@ class BumiTextDataset(Dataset):
 
     def sample_shard_ids(self):
         return np.asarray([row[0] for row in self.index], dtype=np.int64)
+
+    def sample_source_groups(self):
+        """分层采样按母来源合并镜像/子片段；新release在轻量索引中保存该字段。"""
+        groups = []
+        for i, (_, _, row) in enumerate(self.index):
+            key = row.get("canonical_source_id")
+            if not key:
+                key = self.read_record(i)["provenance"].get("canonical_source_id")
+            if not key:
+                raise ValueError("分层采样缺少canonical_source_id，禁止按镜像重复加权")
+            groups.append(key)
+        return groups
 
     def _get_rng(self):
         worker = get_worker_info()
@@ -338,31 +398,47 @@ class BumiTextDataset(Dataset):
         return record
 
     def __getitem__(self, index):
+        return self.get_window(index)
+
+    def get_window(self, index, *, random_seed=None):
         record = self.read_record(index)
         frames = record["frames"]
+        if self.require_temporal_annotations and (
+            record.get("text_annotation_scope") != "temporal" or "caption_intervals" not in record
+        ):
+            raise ValueError("BONES训练要求真实事件文本与caption_intervals，先运行时间标注接入")
+        rng = self._get_rng() if random_seed is None else np.random.RandomState(random_seed)
         tid = (
-            int(self._get_rng().randint(len(record["captions"])))
-            if self.caption_sampling == "random"
+            int(rng.randint(len(record["captions"])))
+            if self.caption_sampling == "random" and self.split == "train"
             else 0
         )
         caption = record["captions"][tid]
         embedding, text_mask = read_embedding(
             record["embeddings"][tid], caption, self.cache, self.root, expected_frames=frames
         )
-        qpos = record["qpos"].float().clone()
-        qpos = torch.cat((qpos, qpos[-1:].expand(300 - frames, -1)))
-        valid = torch.arange(300) < frames
-        contact = torch.zeros(300, 2)
-        available = torch.zeros(300, 2, dtype=torch.bool)
+        start, end = window_bounds(
+            record,
+            tid,
+            self.sequence_mode,
+            self.pad_to_frames,
+            rng if self.split == "train" else None,
+        )
+        length = end - start
+        qpos = record["qpos"][start:end].float().clone()
+        qpos = torch.cat((qpos, qpos[-1:].expand(self.pad_to_frames - length, -1)))
+        valid = torch.arange(self.pad_to_frames) < length
+        contact = torch.zeros(self.pad_to_frames, 2)
+        available = torch.zeros(self.pad_to_frames, 2, dtype=torch.bool)
         if "foot_contact" in record:
-            contact[:frames] = record["foot_contact"]
-            available[:frames] = record.get(
+            contact[:length] = record["foot_contact"][start:end]
+            available[:length] = record.get(
                 "foot_contact_available", torch.ones(frames, 2, dtype=torch.bool)
-            )
+            )[start:end]
         return dict(
             qpos=qpos,
-            length=frames,
-            valid_length=frames,
+            length=length,
+            valid_length=length,
             caption=caption,
             has_text=True,
             text_embed=embedding,
@@ -374,10 +450,16 @@ class BumiTextDataset(Dataset):
                 dataset_id=record["dataset"],
                 motion_id=record["motion_id"],
                 source_frames=frames,
-                valid_length=frames,
-                crop_start=0,
-                sequence_mode="full",
-                pad_to_frames=300,
+                valid_length=length,
+                crop_start=start,
+                crop_end=end,
+                annotation_interval_frames=caption_intervals(record)[tid],
+                window_interval_seconds=[
+                    record["provenance"]["interval_seconds"][0] + start / 30,
+                    record["provenance"]["interval_seconds"][0] + end / 30,
+                ],
+                sequence_mode=self.sequence_mode,
+                pad_to_frames=self.pad_to_frames,
                 text_index=tid,
                 caption_id=record["caption_ids"][tid],
                 ground_semantics=GROUND,

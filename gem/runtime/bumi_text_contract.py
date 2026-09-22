@@ -47,8 +47,10 @@ def validate_contract(contract):
     if len(names) != 21 or len(set(names)) != 21:
         raise ValueError("需要21个不重复的有序关节名")
     sequence = normalize_sequence_contract(contract.get("sequence"))
-    if sequence is None or sequence["sequence_mode"] != "full":
-        raise ValueError("BUMI 文本首版只接受 full sequence")
+    if sequence is None or (
+        sequence["sequence_mode"] != "full" and sequence["schema_version"] != 2
+    ):
+        raise ValueError("BUMI文本接受旧full300或v2 crop120契约")
     if contract.get("loss_reduction") != "valid_per_sample":
         raise ValueError("BUMI 文本必须使用 valid_per_sample")
     for key in ("kinematics", "stats"):
@@ -74,7 +76,10 @@ def inspect_payload(payload):
         raise ValueError("checkpoint 文本字段与 BUMI 契约矛盾")
     state = payload.get("state_dict", {})
     prefix = "pipeline.denoiser3d.denoiser."
-    shape = lambda name: tuple(getattr(state.get(prefix + name), "shape", ()))
+
+    def shape(name):
+        return tuple(getattr(state.get(prefix + name), "shape", ()))
+
     out = shape("final_layer.fc2.weight")
     contact = shape("static_conf_head.fc2.weight")
     if len(out) != 2 or out[0] != 30 or len(contact) != 2 or contact[0] != 2:

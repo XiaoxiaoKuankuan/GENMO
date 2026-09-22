@@ -6,29 +6,42 @@ run同时记录GT、原始与足锁结果的运动学指标，另给人工1–5�
 不输出R-Precision/FID，不以运动学指标证明语义匹配或闭环可跟踪。
 """
 
-from pathlib import Path
 import argparse
 import csv
 import json
 import sys
+from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from gem.datasets.pure_motion.bumi_text import BumiTextDataset
+from gem.datasets.pure_motion.bumi_text import BumiTextDataset, window_bounds
 from gem.runtime.bumi_text_contract import sha256_file
 from tools.data.bumi.prepare_bumi_text import write_json
 
 
-def cohort(root, output, per_dataset=64, seed=42):
+def cohort(root, output, per_dataset=64, seed=42, sequence_mode="full"):
     import random
 
     if per_dataset < 1:
         raise ValueError("per_dataset必须为正")
     rows, identities = [], {}
-    for name in ("motionmillion", "humanml3d"):
-        ds = BumiTextDataset(root, "val", dataset=name, caption_sampling="first")
+    names = (
+        ("motionmillion", "humanml3d", "kitml", "bones_seed")
+        if sequence_mode == "crop"
+        else ("motionmillion", "humanml3d")
+    )
+    for name in names:
+        ds = BumiTextDataset(
+            root,
+            "val",
+            dataset=name,
+            caption_sampling="first",
+            sequence_mode=sequence_mode,
+            pad_to_frames=120 if sequence_mode == "crop" else 300,
+            require_temporal_annotations=sequence_mode == "crop" and name == "bones_seed",
+        )
         ordered = sorted(range(len(ds)), key=lambda i: ds.index[i][2]["motion_id"])
         if len(ordered) < per_dataset:
             raise ValueError(f"{name}验证记录不足{per_dataset}条")
@@ -36,11 +49,14 @@ def cohort(root, output, per_dataset=64, seed=42):
         identities[name] = ds.data_identity
         for i in indices:
             record = ds.read_record(i)
+            start, end = window_bounds(record, 0, sequence_mode, ds.pad_to_frames)
             rows.append(
                 dict(
                     dataset=name,
                     motion_id=record["motion_id"],
-                    frames=record["frames"],
+                    frames=end - start,
+                    window_frames=[start, end],
+                    source_frames=record["frames"],
                     caption=record["captions"][0],
                     caption_id=record["caption_ids"][0],
                     text_index=0,
@@ -49,7 +65,10 @@ def cohort(root, output, per_dataset=64, seed=42):
             )
     payload = dict(
         schema="genmo.bumi_text_eval.v1",
-        protocol="full_sequence_matched_length",
+        protocol="annotation_center_window"
+        if sequence_mode == "crop"
+        else "full_sequence_matched_length",
+        sequence_mode=sequence_mode,
         split="val",
         data_identity=identities,
         ddim_steps=50,
@@ -65,17 +84,18 @@ def cohort(root, output, per_dataset=64, seed=42):
 def run(root, cohort_path, checkpoint, output, device="cuda:0", render=False):
     import numpy as np
     import torch
-    from gem.runtime.bumi_text_runtime import ResidentBumiTextEngine
+
     from gem.robots.bumi.metrics import compute_bumi_kinematic_metrics
+    from gem.runtime.bumi_text_runtime import ResidentBumiTextEngine
 
     output = Path(output).resolve()
     if output.exists():
         raise FileExistsError("诊断报告必须使用新目录")
     payload = json.loads(Path(cohort_path).read_text())
-    if (
-        payload["schema"] != "genmo.bumi_text_eval.v1"
-        or payload["protocol"] != "full_sequence_matched_length"
-    ):
+    if payload["schema"] != "genmo.bumi_text_eval.v1" or payload["protocol"] not in {
+        "full_sequence_matched_length",
+        "annotation_center_window",
+    }:
         raise ValueError("验证协议不匹配")
     if (payload["ddim_steps"], payload["guidance_scale"], payload["fps"], payload["split"]) != (
         50,
@@ -84,9 +104,18 @@ def run(root, cohort_path, checkpoint, output, device="cuda:0", render=False):
         "val",
     ):
         raise ValueError("首批固定验证使用DDIM50/CFG2.5/30FPS/val")
+    mode = payload.get("sequence_mode", "full")
     datasets = {
-        name: BumiTextDataset(root, "val", dataset=name, caption_sampling="first")
-        for name in ("motionmillion", "humanml3d")
+        name: BumiTextDataset(
+            root,
+            "val",
+            dataset=name,
+            caption_sampling="first",
+            sequence_mode=mode,
+            pad_to_frames=120 if mode == "crop" else 300,
+            require_temporal_annotations=mode == "crop" and name == "bones_seed",
+        )
+        for name in payload["data_identity"]
     }
     for name, ds in datasets.items():
         if ds.data_identity != payload["data_identity"][name]:
@@ -104,7 +133,12 @@ def run(root, cohort_path, checkpoint, output, device="cuda:0", render=False):
             ds = datasets[row["dataset"]]
             index = lookups[row["dataset"]][row["motion_id"]]
             sample = ds[index]
-            source = ds.read_record(index)
+            gt = sample["qpos"][: sample["length"]]
+            if "window_frames" in row and row["window_frames"] != [
+                sample["meta"]["crop_start"],
+                sample["meta"]["crop_end"],
+            ]:
+                raise ValueError("验证窗口改变")
             if (
                 sample["length"],
                 sample["caption"],
@@ -121,7 +155,7 @@ def run(root, cohort_path, checkpoint, output, device="cuda:0", render=False):
             job = output / f"{number:03d}"
             job.mkdir()
             np.savez_compressed(job / "motion.npz", **arrays)
-            np.savez_compressed(job / "gt.npz", qpos=source["qpos"].numpy(), fps=30)
+            np.savez_compressed(job / "gt.npz", qpos=gt.numpy(), fps=30)
             write_json(
                 job / "metadata.json",
                 dict(
@@ -133,7 +167,7 @@ def run(root, cohort_path, checkpoint, output, device="cuda:0", render=False):
             )
             metrics = {}
             for key, qpos in [
-                ("gt", source["qpos"]),
+                ("gt", gt),
                 ("raw", torch.from_numpy(arrays["qpos_raw"])),
                 ("postprocessed", torch.from_numpy(arrays["qpos"])),
             ]:
@@ -198,6 +232,7 @@ if __name__ == "__main__":
         if name == "cohort":
             c.add_argument("--per-dataset", type=int, default=64)
             c.add_argument("--seed", type=int, default=42)
+            c.add_argument("--sequence-mode", choices=["crop", "full"], default="crop")
         else:
             c.add_argument("--cohort", type=Path, required=True)
             c.add_argument("--checkpoint", type=Path, required=True)
@@ -205,6 +240,6 @@ if __name__ == "__main__":
             c.add_argument("--render", action="store_true")
     a = p.parse_args()
     if a.command == "cohort":
-        cohort(a.root, a.output, a.per_dataset, a.seed)
+        cohort(a.root, a.output, a.per_dataset, a.seed, a.sequence_mode)
     else:
         run(a.root, a.cohort, a.checkpoint, a.output, a.device, a.render)

@@ -7,6 +7,7 @@
 """
 
 from __future__ import annotations
+
 import argparse
 import json
 import sys
@@ -18,7 +19,7 @@ if str(ROOT) not in sys.path:
 
 
 def main():
-    from gem.runtime.bumi_text_runtime import ResidentBumiTextEngine, T5_DEFAULT
+    from gem.runtime.bumi_text_runtime import T5_DEFAULT, ResidentBumiTextEngine
 
     parser = argparse.ArgumentParser(description=__doc__)
     source = parser.add_mutually_exclusive_group(required=True)
@@ -99,8 +100,9 @@ def main():
                 try:
                     if line.startswith("frames "):
                         value = int(line.split()[1])
-                        if not 60 <= value <= 300:
-                            raise ValueError("帧数需要60–300")
+                        from gem.utils.sequence_contract import validate_generation_length
+
+                        validate_generation_length(engine.contract["sequence"], value)
                         args.num_frames = value
                     elif line.startswith("steps "):
                         engine.set_ddim_steps(int(line.split()[1]))

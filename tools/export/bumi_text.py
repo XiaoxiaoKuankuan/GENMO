@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """BUMI 文本模型的导出、TensorRT构建、数值验证及部署资产打包入口。
 
-导出固定300帧单步去噪图并记录真实length输入；外部权重文件逐一指纹绑定。
+按checkpoint契约导出120或300帧单步去噪图并记录真实length输入；外部权重文件逐一指纹绑定。
 构建沿用音乐部署的TensorRT环境检查和敏感层FP32策略，GPU工作只在显式build执行。
 validate固定有效噪声比较单步和完整DDIM；package不携带训练checkpoint或数据集。
 """
@@ -11,8 +11,8 @@ from __future__ import annotations
 import argparse
 import json
 import shutil
-from pathlib import Path
 import sys
+from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
@@ -20,14 +20,15 @@ if str(ROOT) not in sys.path:
 
 import torch
 
-from gem.runtime.bumi_text_contract import sha256_file, resolve_assets
+from gem.runtime.bumi_text_contract import resolve_assets, sha256_file
 from gem.runtime.bumi_text_runtime import (
+    BUNDLE_SCHEMA,
+    EXPORT_SCHEMA,
     INPUTS,
     OUTPUTS,
-    EXPORT_SCHEMA,
-    BUNDLE_SCHEMA,
     BumiTextSampler,
     OnnxTextStep,
+    io_shapes,
     load_checkpoint_step,
     read_export_metadata,
 )
@@ -43,10 +44,10 @@ def write_json(path, value):
     pending.replace(path)
 
 
-def sample_inputs(device="cpu", frames=97):
+def sample_inputs(device="cpu", frames=97, tensor_frames=300):
     generator = torch.Generator(device=device).manual_seed(42)
     return (
-        torch.randn(1, 300, 30, generator=generator, device=device),
+        torch.randn(1, tensor_frames, 30, generator=generator, device=device),
         torch.tensor([500], device=device),
         torch.randn(1, 150, 1024, generator=generator, device=device),
         (torch.arange(150, device=device)[None] < 17),
@@ -69,7 +70,7 @@ def export(checkpoint, output, device="cpu"):
         torch.backends.mha.set_fastpath_enabled(False)
         torch.onnx.export(
             wrapper,
-            sample_inputs(device),
+            sample_inputs(device, tensor_frames=contract["sequence"]["pad_to_frames"]),
             str(output),
             opset_version=17,
             dynamo=False,
@@ -99,8 +100,8 @@ def export(checkpoint, output, device="cpu"):
         source_checkpoint_sha256=sha256_file(checkpoint),
         model_contract=contract,
         diffusion_config=diffusion,
-        inputs=INPUTS,
-        outputs=OUTPUTS,
+        inputs=io_shapes(contract)[0],
+        outputs=io_shapes(contract)[1],
     )
     meta["asset_locations"] = {name: str(path) for name, path in assets.items()}
     write_json(output.with_suffix(output.suffix + ".json"), meta)
@@ -140,9 +141,9 @@ def constrain_sensitive_layers(network, trt):
 
 
 def build_engine(onnx_path, output, device="cuda:0", precision="fp16"):
+    from gem.runtime.bumi_text_tensorrt import ENGINE_SCHEMA, TextTensorRTStep
     from gem.runtime.music_only_trt import gpu_fingerprint, validate_tensorrt_installation
     from gem.runtime.tensorrt_environment import prepare_tensorrt_libraries
-    from gem.runtime.bumi_text_tensorrt import ENGINE_SCHEMA, TextTensorRTStep
 
     meta = read_export_metadata(onnx_path)
     output = Path(output).resolve()
@@ -161,8 +162,8 @@ def build_engine(onnx_path, output, device="cuda:0", precision="fp16"):
     if not parser.parse_from_file(str(Path(onnx_path).resolve())):
         raise RuntimeError("\n".join(str(parser.get_error(i)) for i in range(parser.num_errors)))
     for count, getter, expected in [
-        (network.num_inputs, network.get_input, INPUTS),
-        (network.num_outputs, network.get_output, OUTPUTS),
+        (network.num_inputs, network.get_input, io_shapes(meta["model_contract"])[0]),
+        (network.num_outputs, network.get_output, io_shapes(meta["model_contract"])[1]),
     ]:
         if {getter(i).name: tuple(getter(i).shape) for i in range(count)} != expected:
             raise ValueError("TensorRT图接口不符")
@@ -244,8 +245,11 @@ def validate(checkpoint, onnx_path, output, *, engine=None, device="cpu", ddim_s
 
     assets = resolve_assets(contract, checkpoint=checkpoint)
     decoder = BumiEndecoder(assets["kinematics"], assets["stats"], sequence_mode="full").to(device)
-    for frames in [60, 97, 120, 183, 240, 299, 300]:
-        inputs = sample_inputs(device, frames)
+    sequence = contract["sequence"]
+    for frames in sorted({sequence["min_frames"], 60, 97, 120, 183, 240, 299, 300}):
+        if not sequence["min_frames"] <= frames <= sequence["max_frames"]:
+            continue
+        inputs = sample_inputs(device, frames, sequence["pad_to_frames"])
         with torch.no_grad():
             a, b = wrapper(*inputs), candidate(*inputs)
             noise = torch.randn(
@@ -255,8 +259,12 @@ def validate(checkpoint, onnx_path, output, *, engine=None, device="cpu", ddim_s
                 generator=torch.Generator(device=device).manual_seed(42),
                 device=device,
             )
-            aa = left.generate(inputs[2], inputs[3], frames, noise=noise)
-            bb = right.generate(inputs[2], inputs[3], frames, noise=noise)
+            aa = left.generate(
+                inputs[2], inputs[3], frames, noise=noise, tensor_frames=sequence["pad_to_frames"]
+            )
+            bb = right.generate(
+                inputs[2], inputs[3], frames, noise=noise, tensor_frames=sequence["pad_to_frames"]
+            )
             qa = decoder.compose_qpos(decoder.decode(aa[0]))
             qb = decoder.compose_qpos(decoder.decode(bb[0]))
         errors = {

@@ -1472,15 +1472,27 @@ class QualityGate:
         canonical = record["provenance"].get("canonical_source_id")
         check(canonical in (None, row["canonical_source_id"]), "镜像归一化来源ID不一致")
         if row.get("dataset") == "humanml3d":
-            check(record["split"] == "train", "当前HumanML3D交付只包含训练集派生数据")
+            p = record["provenance"]
+            internal = (
+                p.get("split_origin") == "internal_group_holdout"
+                and p.get("source_split") == "train"
+            )
+            if internal:
+                from tools.data.bumi.text_windows import internal_split
+
+                check(
+                    record["split"] == internal_split(row["canonical_source_id"], p["split_seed"]),
+                    "内部划分与母来源不符",
+                )
+            check(record["split"] == "train" or internal, "当前HumanML3D交付只包含训练集派生数据")
             check(
                 record["provenance"]["interval_seconds"] == row["interval_seconds"],
                 "HumanML3D文本区间与源子片段不符",
             )
 
-    def read_candidate(self, path, record):
+    def read_candidate(self, path, record, *, allow_all_pass=False):
         row = self.lookup(path)
-        if not row["training_eligible"] or row["status"] != "PASS":
+        if row["status"] != "PASS" or (not allow_all_pass and not row["training_eligible"]):
             return None, row
         self.validate_identity(row, record)
         qpos, meta = load_umr(row, self.paths, self.engine)
@@ -1489,6 +1501,33 @@ class QualityGate:
             check(
                 record["captions"] == [c["caption"] for c in original["captions"]],
                 "HumanML3D caption与源文本不同",
+            )
+        if row.get("dataset") == "bones_seed" and record.get("text_annotation_scope") == "temporal":
+            from tools.data.bumi.text_windows import temporal_captions
+
+            annotation = record["provenance"]["temporal_annotations"]
+            cache = getattr(self, "_temporal_cache", None)
+            if cache is None:
+                check(
+                    sha256_file(annotation["path"]) == annotation["sha256"], "BONES时间标注已改变"
+                )
+                with Path(annotation["path"]).open() as stream:
+                    entries = [json.loads(line) for line in stream]
+                cache = (
+                    annotation["path"],
+                    annotation["sha256"],
+                    {r["filename"]: r["events"] for r in entries},
+                )
+                self._temporal_cache = cache
+            check((annotation["path"], annotation["sha256"]) == cache[:2], "BONES时间标注来源混用")
+            texts, intervals, provenance = temporal_captions(
+                cache[2][row["source_motion_id"]], row["frames"]
+            )
+            check(
+                record["captions"] == texts
+                and record["caption_intervals"] == intervals
+                and annotation["events"] == provenance,
+                "BONES事件原文或时间区间不符",
             )
         check(meta["frames"] == row["frames"], "读取帧数与质量报告不同")
         check(

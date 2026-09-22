@@ -1,4 +1,8 @@
-# BUMI 文本生成动作：完整序列 A0
+# BUMI 文本生成动作：历史完整序列 A0
+
+> 2026-09-22：默认实验已改为四库crop120。当前用法、BONES事件时间和采样比例见
+> [BUMI四库120帧文本训练](BUMI_TEXT_CROP120.md)。下文保留旧full300设计及已有模型的说明，
+> 不能再将旧实验文件名中的fullseq当作当前训练长度；新训练必须重新生成crop120统计量。
 
 本分支 `feature/bumi-text-only` 从 SMPL A0 提交
 `460c2c9260b10ebb28f36da3c989ace05c7f4c8f` 创建；机器人 qpos30、FK、接触和 v5

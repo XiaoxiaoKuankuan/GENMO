@@ -7,7 +7,14 @@ defaults:
 - override /test_datasets:
   - humanml3d_bumi_text_val
 - _self_
-exp_name_base: gem_bumi_humanml3d_text_fullseq
-data_name: bumi_humanml3d_text_fullseq_v1
+exp_name_base: gem_bumi_humanml3d_text_crop120
+data_name: bumi_humanml3d_text_crop120_v2
 endecoder:
-  stats_path: ${oc.env:BUMI_TEXT_STATS_PATH,inputs/bumi_text_fullseq/stats_humanml3d.json}
+  stats_path: ${oc.env:BUMI_TEXT_STATS_PATH,inputs/bumi_text_crop120/stats_humanml3d.json}
+
+# 单库对照使用既有分片采样，避免继承四库概率。
+data:
+  shard_aware_sampling:
+    enabled: true
+  text_sampling:
+    enabled: false

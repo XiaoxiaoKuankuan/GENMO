@@ -1,11 +1,14 @@
-# 完整BUMI动作及原caption，T5引用由独立release绑定，不重新裁剪。
+# BUMI motionmillion文本数据配置：完整源动作保存在同一release中，读取时选择120帧窗口。
+# 训练随机选择caption和窗口；验证固定第一条caption的中心窗口；短动作补齐并保留mask。
+# BONES必须绑定独立事件时间区间，不能用整段描述替代事件监督。
 motionmillion_bumi_text_val:
   _target_: gem.datasets.pure_motion.bumi_text.BumiTextDataset
-  root: ${oc.env:BUMI_TEXT_DATA_ROOT,inputs/bumi_text_fullseq}
+  root: ${oc.env:BUMI_TEXT_DATA_ROOT,inputs/bumi_text_crop120}
   split: val
   dataset: motionmillion
-  sequence_mode: full
-  pad_to_frames: 300
+  sequence_mode: crop
+  pad_to_frames: 120
   caption_sampling: first
-  random_seed: 20260909
+  require_temporal_annotations: false
+  random_seed: 20260922
   shard_cache_size: 4

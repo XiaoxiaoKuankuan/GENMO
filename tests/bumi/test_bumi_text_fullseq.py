@@ -14,12 +14,13 @@ import pytest
 import torch
 from hydra import compose, initialize_config_dir
 from hydra.utils import instantiate
+from omegaconf import OmegaConf
 
-from gem.datasets.pure_motion.bumi_text import BumiTextDataset, caption_hash, GROUND
 from gem.datamodule.mocap_trainX_testY import collate_fn
+from gem.datasets.pure_motion.bumi_text import GROUND, BumiTextDataset, caption_hash
 from gem.runtime.bumi_text_contract import inspect_payload, sha256_file
 from gem.utils.sequence_contract import validate_sequence_experiment
-from tools.data.bumi.prepare_bumi_text import build, preflight, statistics, select_records
+from tools.data.bumi.prepare_bumi_text import build, preflight, select_records, statistics
 
 ROOT = Path(__file__).resolve().parents[2]
 KIN = ROOT / "configs/bumi/bumi_kinematics_robot_retargeter_fe934_v1.json"
@@ -118,6 +119,19 @@ def config(root):
     for values in [cfg.train_datasets, cfg.test_datasets]:
         for ds in values.values():
             ds.root = str(root)
+    # 历史full300回归显式恢复旧契约；默认生产入口已经切换crop120四库。
+    cfg.model.model_cfg.sequence_contract.update(
+        schema_version=1, sequence_mode="full", min_frames=60, max_frames=300)
+    cfg.data.dataset_opts.max_motion_frames = 300
+    cfg.data.text_sampling.enabled = False
+    cfg.data.shard_aware_sampling.enabled = True
+    for values in (cfg.train_datasets, cfg.test_datasets):
+        OmegaConf.set_struct(values, False)
+        for key in list(values):
+            if values[key].dataset not in {"motionmillion", "humanml3d"}:
+                del values[key]
+        for ds in values.values():
+            ds.sequence_mode, ds.pad_to_frames = "full", 300
     validate_sequence_experiment(cfg)
     return cfg
 

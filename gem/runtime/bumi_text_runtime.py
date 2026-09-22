@@ -2,7 +2,7 @@
 
 训练端只需提供带自描述契约的checkpoint；部署端仅加载deployment.json及导出资产，
 不导入Lightning/Hydra，不加载训练权重。T5本地常驻，GENMO单步后端可为PyTorch、
-ONNX或TensorRT，DDIM、qpos解码和足锁共用。固定300张量以真实length屏蔽padding，
+ONNX或TensorRT，DDIM、qpos解码和足锁共用。按checkpoint使用120或300帧张量，以真实length屏蔽padding，
 最终只解码和保存F帧；初始噪声按F生成后补零，便于不同计算长度做数值对照。
 """
 
@@ -37,6 +37,17 @@ INPUTS = {
     "guidance_scale": (1,),
 }
 OUTPUTS = {"pred_motion": (1, 300, 30), "pred_foot_contact_logits": (1, 300, 2)}
+
+
+def io_shapes(contract):
+    """导出图长度来自checkpoint契约，旧full300与新crop120分别校验。"""
+    frames = contract["sequence"]["pad_to_frames"]
+    return (
+        dict(INPUTS, noisy_motion=(1, frames, 30)),
+        dict(pred_motion=(1, frames, 30), pred_foot_contact_logits=(1, frames, 2)),
+    )
+
+
 EXPORT_SCHEMA = "genmo.bumi_text_onnx.v1"
 BUNDLE_SCHEMA = "genmo.bumi_text_deployment.v1"
 T5_DEFAULT = "/home/weili/.cache/huggingface/hub/models--t5-3b/snapshots/bed96aab9ee46012a5046386105ee5fd0ac572f0"
@@ -128,8 +139,8 @@ class BumiTextSampler:
 
     @torch.no_grad()
     def generate(self, text, mask, frames, *, guidance=2.5, seed=42, noise=None, tensor_frames=300):
-        if type(frames) is not int or not 60 <= frames <= 300 or not frames <= tensor_frames <= 300:
-            raise ValueError("num_frames必须为60–300，计算长度不得小于真实长度")
+        if type(frames) is not int or not 4 <= frames <= 300 or not frames <= tensor_frames <= 300:
+            raise ValueError("num_frames必须为4–300，计算长度不得小于真实长度")
         if (
             text.shape != (1, 150, 1024)
             or mask.shape != (1, 150)
@@ -175,9 +186,10 @@ def read_export_metadata(onnx_path):
         asset = (path.parent / name).resolve(strict=True)
         if not asset.is_relative_to(path.parent) or sha256_file(asset) != record["sha256"]:
             raise ValueError("ONNX外部权重指纹不符")
-    if {k: tuple(v) for k, v in meta["inputs"].items()} != INPUTS or {
+    inputs, outputs = io_shapes(meta["model_contract"])
+    if {k: tuple(v) for k, v in meta["inputs"].items()} != inputs or {
         k: tuple(v) for k, v in meta["outputs"].items()
-    } != OUTPUTS:
+    } != outputs:
         raise ValueError("ONNX文本输入输出契约错误")
     return meta
 
@@ -190,9 +202,10 @@ class OnnxTextStep:
         self.session = ort.InferenceSession(
             str(path), providers=providers or ["CPUExecutionProvider"]
         )
-        if {v.name: tuple(v.shape) for v in self.session.get_inputs()} != INPUTS or {
+        inputs, outputs = io_shapes(self.metadata["model_contract"])
+        if {v.name: tuple(v.shape) for v in self.session.get_inputs()} != inputs or {
             v.name: tuple(v.shape) for v in self.session.get_outputs()
-        } != OUTPUTS:
+        } != outputs:
             raise ValueError("ONNX真实图形状不符")
 
     def __call__(self, *args):
@@ -337,7 +350,8 @@ class ResidentBumiTextEngine:
             return changed
 
     def encode_prompt(self, prompt):
-        from transformers import T5Tokenizer, T5EncoderModel
+        from transformers import T5EncoderModel, T5Tokenizer
+
         from gem.runtime.resident_text_motion import encode_prompt_with_loaded_t5
 
         if self.text_encoder is None:
@@ -369,8 +383,17 @@ class ResidentBumiTextEngine:
         from gem.robots.bumi.postprocess import lock_bumi_foot_contacts
 
         self.initialize()
+        from gem.utils.sequence_contract import validate_generation_length
+
+        validate_generation_length(self.contract["sequence"], frames)
         features, contact = self.sampler.generate(
-            text, mask, frames, seed=seed, guidance=self.guidance_scale, noise=noise
+            text,
+            mask,
+            frames,
+            seed=seed,
+            guidance=self.guidance_scale,
+            noise=noise,
+            tensor_frames=self.contract["sequence"]["pad_to_frames"],
         )
         decoded = self.endecoder.decode(features)
         raw = self.endecoder.compose_qpos(
@@ -405,11 +428,16 @@ class ResidentBumiTextEngine:
                 frames = request.get("num_frames", 120)
                 if (
                     type(frames) is not int
-                    or not 60 <= frames <= 300
+                    or not 4 <= frames <= 300
                     or request.get("fps", 30) != 30
                 ):
-                    raise ValueError("BUMI文本需要60–300帧、30FPS")
+                    raise ValueError("BUMI文本需要4–300帧、30FPS，具体范围由模型契约确定")
                 self.initialize()
+                from gem.utils.sequence_contract import validate_generation_length
+
+                validate_generation_length(
+                    self.contract["sequence"], frames, request.get("fps", 30)
+                )
                 text, mask = self.encode_prompt(prompt)
                 arrays = self.generate_arrays(
                     text,

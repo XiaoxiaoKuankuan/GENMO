@@ -145,6 +145,7 @@ class DataModule(pl.LightningDataModule):
         collate_cfg: DictConfig = None,
         balanced_sampling: DictConfig | dict | None = None,
         shard_aware_sampling: DictConfig | dict | None = None,
+        text_sampling: DictConfig | dict | None = None,
     ):
         """This is a general datamodule that can be used for any dataset.
         Train uses ConcatDataset
@@ -163,6 +164,12 @@ class DataModule(pl.LightningDataModule):
         self.collate_cfg = collate_cfg
         self.balanced_sampling = balanced_sampling
         self.shard_aware_sampling = shard_aware_sampling
+        self.text_sampling = text_sampling
+        if text_sampling is not None and text_sampling.get("enabled", False):
+            if any(c is not None and c.get("enabled", False) for c in (balanced_sampling, shard_aware_sampling)):
+                raise ValueError("文本分层采样不能与其他采样器同时启用")
+            if limit_each_trainset or train_subset_ratio is not None:
+                raise ValueError("文本分层采样不支持改变母来源的随机Subset，请用独立测试release")
         # Train uses concat dataset
         if "train" in dataset_opts:
             assert "train" in self.loader_opts, "train not in loader_opts"
@@ -215,6 +222,10 @@ class DataModule(pl.LightningDataModule):
             self.trainsets = dataset
             self.trainset_names = dataset_names
             dataset = ConcatDataset(dataset)
+            if getattr(self, "text_sampling", None) is not None and self.text_sampling.get("enabled", False):
+                from gem.datamodule.bumi_text_sampler import BumiTextMixture
+
+                dataset = BumiTextMixture(self.trainsets)
             self.trainset = dataset
             Log.info(f"[Train Dataset][All]: ConcatDataset size={len(dataset)}")
             Log.info("")
@@ -242,6 +253,20 @@ class DataModule(pl.LightningDataModule):
     def train_dataloader(self):
         if hasattr(self, "trainset"):
             sampler = None
+            if getattr(self, "text_sampling", None) is not None and self.text_sampling.get("enabled", False):
+                from gem.datamodule.bumi_text_sampler import BumiTextDistributedSampler
+
+                sampler = BumiTextDistributedSampler(
+                    self.trainsets,
+                    dataset_probabilities=self.text_sampling["dataset_probabilities"],
+                    samples_per_epoch=int(self.text_sampling["samples_per_epoch"]),
+                    seed=int(self.text_sampling.get("seed", 20260922)),
+                    **_trainer_ddp_sampler_kwargs(getattr(self, "trainer", None)),
+                )
+                Log.info(
+                    f"[BUMI文本采样] 概率={dict(zip(sampler.names, sampler.probabilities.tolist()))}, "
+                    f"母来源数={[len(g) for g in sampler.groups]}, 每rank样本={len(sampler)}"
+                )
             if self.shard_aware_sampling is not None and self.shard_aware_sampling.get(
                 "enabled", False
             ):

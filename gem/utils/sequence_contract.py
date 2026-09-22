@@ -40,10 +40,17 @@ def normalize_sequence_contract(value):
     for key in ("schema_version", "min_frames", "max_frames", "pad_to_frames", "attention_max_len"):
         if type(result[key]) is not int:
             raise ValueError(f"sequence contract {key} 必须为整数")
-    if result["schema_version"] != 1 or result["sequence_mode"] not in {"full", "crop"}:
+    if result["schema_version"] not in {1, 2} or result["sequence_mode"] not in {"full", "crop"}:
         raise ValueError("不支持的 sequence contract 版本或模式")
-    if (result["min_frames"], result["max_frames"], result["fps"]) != (60, 300, 30):
-        raise ValueError("MotionMillion 源动作契约必须为 60—300 帧、30 FPS")
+    expected_range = (60, 300, 30) if result["schema_version"] == 1 else (4, 120, 30)
+    if (result["min_frames"], result["max_frames"], result["fps"]) != expected_range:
+        raise ValueError(f"序列长度/FPS与版本契约不符：要求{expected_range}")
+    if result["schema_version"] == 2 and (
+        result["sequence_mode"] != "crop"
+        or result["attention_mode"] != "valid_length"
+        or result["loss_reduction"] != "valid_per_sample"
+    ):
+        raise ValueError("v2要求crop120、有效长度注意力及有效帧损失")
     expected_pad = 300 if result["sequence_mode"] == "full" else 120
     if result["pad_to_frames"] != expected_pad:
         raise ValueError(f"{result['sequence_mode']} 模式 padding 必须为 {expected_pad}")
@@ -75,9 +82,15 @@ def validate_resume_contract(saved, current):
 
 def validate_generation_length(contract, num_frames, fps=30):
     contract = normalize_sequence_contract(contract)
-    if contract is not None and contract["sequence_mode"] == "full":
+    if type(num_frames) is not int:
+        raise ValueError("num_frames必须为整数")
+    if contract is not None and (
+        contract["sequence_mode"] == "full" or contract["schema_version"] == 2
+    ):
         if not contract["min_frames"] <= num_frames <= contract["max_frames"]:
-            raise ValueError("fullseq checkpoint 的 num_frames 必须在 [60, 300]")
+            raise ValueError(
+                f"checkpoint的num_frames必须在[{contract['min_frames']}, {contract['max_frames']}]"
+            )
         if fps != contract["fps"]:
             raise ValueError("fullseq checkpoint 固定 30 FPS，不能改变动作时间尺度")
 
@@ -106,13 +119,31 @@ def validate_sequence_experiment(cfg):
             raise ValueError("序列实验需要非空 train/val 配置")
         for ds in configs.values():
             if (ds.sequence_mode, ds.pad_to_frames, ds.caption_sampling) != (
-                contract["sequence_mode"], contract["pad_to_frames"], contract[f"{split}_caption_sampling"],
+                contract["sequence_mode"],
+                contract["pad_to_frames"],
+                contract[f"{split}_caption_sampling"],
             ):
                 raise ValueError(f"{split} Dataset 与 sequence contract 不一致")
             if contract["sequence_mode"] == "full" and ds.get("random_crop") is not None:
                 raise ValueError("full 模式不接受 random_crop，使用独立 caption_sampling")
-    if cfg.pl_trainer.use_distributed_sampler or not cfg.data.shard_aware_sampling.enabled:
-        raise ValueError("必须保留 shard-aware sampler，禁止 Lightning 二次分片")
+    text_sampling = OmegaConf.select(cfg, "data.text_sampling.enabled", default=False)
+    if cfg.pl_trainer.use_distributed_sampler or (
+        bool(cfg.data.shard_aware_sampling.enabled) == bool(text_sampling)
+    ):
+        raise ValueError("必须选择且仅选择shard-aware或文本分层采样，禁止Lightning二次分片")
+    if text_sampling:
+        probabilities = OmegaConf.to_container(
+            cfg.data.text_sampling.dataset_probabilities, resolve=True
+        )
+        names = {ds.dataset for ds in cfg.train_datasets.values()}
+        if not is_bumi or contract["sequence_mode"] != "crop" or set(probabilities) != names:
+            raise ValueError("文本分层概率必须精确覆盖BUMI crop训练数据集")
+        import math
+
+        if any(
+            not math.isfinite(float(v)) or float(v) <= 0 for v in probabilities.values()
+        ) or not math.isclose(sum(map(float, probabilities.values())), 1.0, abs_tol=1e-8):
+            raise ValueError("文本采样概率必须为有限正数且总和为1")
     if cfg.model.model_cfg.text_encoder.max_text_len != 150 or denoiser.encoded_text_dim != 1024:
         raise ValueError("A0 必须保持 T5 150-token / 1024D")
     if denoiser.output_dim != (30 if is_bumi else 151) or list(cfg.pipeline.args.in_attr):
@@ -120,12 +151,18 @@ def validate_sequence_experiment(cfg):
     if is_bumi:
         if (denoiser.xt_dim, denoiser.static_conf_dim, denoiser.pred_cam_dim) != (30, 2, 0):
             raise ValueError("BUMI 必须30D运动、2D接触、无相机头")
-        if not denoiser.encode_text or denoiser.text_mask_prob != 0.1 or cfg.endecoder.sequence_mode != "full":
+        if (
+            not denoiser.encode_text
+            or denoiser.text_mask_prob != 0.1
+            or cfg.endecoder.sequence_mode != "full"
+        ):
             raise ValueError("BUMI 必须完整动作、文本交叉注意力及单处0.1 CFG dropout")
         if cfg.pretrain_ckpt is not None or cfg.ckpt_path is not None:
             raise ValueError("首版 BUMI 文本只允许从零训练或同契约 resume")
-        if not all(0 <= int(cfg.training_budget[k]) < int(cfg.training_budget.max_steps)
-                   for k in ("warmup_steps", "auxiliary_warmup_steps")):
+        if not all(
+            0 <= int(cfg.training_budget[k]) < int(cfg.training_budget.max_steps)
+            for k in ("warmup_steps", "auxiliary_warmup_steps")
+        ):
             raise ValueError("短程预算必须同时调整学习率和机器人辅助项warmup")
     if cfg.pipeline.args.get("physics_losses", {}).get("enabled", False):
         raise ValueError("A0 不增加额外 physics_losses")

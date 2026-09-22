@@ -35,7 +35,8 @@ def inspect_checkpoint(path: Path) -> dict:
         resolve_assets(robot, checkpoint=path)
         return {"contract": {"max_text_len": 150, "encoded_text_dim": 1024,
                              "sequence_contract": robot["sequence"]},
-                "motion_backend": "bumi", "min_frames": 60, "max_frames": 300,
+                "motion_backend": "bumi", "min_frames": robot["sequence"]["min_frames"],
+                "max_frames": robot["sequence"]["max_frames"],
                 "global_step": checkpoint.get("global_step")}
     contract = validate_text_generation_payload(checkpoint, path)
     state = checkpoint.get("state_dict", checkpoint)

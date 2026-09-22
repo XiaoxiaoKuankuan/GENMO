@@ -1,4 +1,4 @@
-"""BUMI 文本固定300帧 TensorRT 单步后端。
+"""BUMI 文本按契约120或300帧 TensorRT 单步后端。
 
 复用原部署的运行库发现、GPU指纹和执行上下文，实现文本六输入与动作/接触双输出。
 仅接受与ONNX、来源checkpoint、GPU和运行库匹配的engine；不连接任何控制器。
@@ -9,9 +9,9 @@ import json
 import numpy as np
 import torch
 
-from gem.runtime.music_only_trt import TensorRTStepRunner, gpu_fingerprint
 from gem.runtime.bumi_text_contract import sha256_file
-from gem.runtime.bumi_text_runtime import INPUTS, OUTPUTS
+from gem.runtime.bumi_text_runtime import INPUTS, OUTPUTS, io_shapes
+from gem.runtime.music_only_trt import TensorRTStepRunner, gpu_fingerprint
 
 ENGINE_SCHEMA = "genmo.bumi_text_engine.v1"
 
@@ -20,6 +20,8 @@ class TextTensorRTStep(TensorRTStepRunner):
     REQUIRED_INPUTS = INPUTS
 
     def __init__(self, engine_path, *, onnx_metadata, device="cuda:0"):
+        self.inputs, self.outputs = io_shapes(onnx_metadata["model_contract"])
+        self.REQUIRED_INPUTS = self.inputs
         self.onnx_metadata = onnx_metadata
         super().__init__(engine_path, device=device, use_cuda_graph=False, require_manifest=True)
 
@@ -44,7 +46,7 @@ class TextTensorRTStep(TensorRTStepRunner):
         return value
 
     def _allocate_and_bind(self):
-        expected = {**INPUTS, **OUTPUTS}
+        expected = {**self.inputs, **self.outputs}
         seen = set()
         for i in range(self.engine.num_io_tensors):
             name = self.engine.get_tensor_name(i)
@@ -69,7 +71,7 @@ class TextTensorRTStep(TensorRTStepRunner):
             raise ValueError("文本TensorRT需要六个输入")
         with self._lock:
             for name, value in zip(INPUTS, args):
-                if tuple(value.shape) != INPUTS[name]:
+                if tuple(value.shape) != self.inputs[name]:
                     raise ValueError(f"TensorRT {name} 形状错误")
                 self._buffers[name].copy_(
                     value.to(device=self.device, dtype=self._buffers[name].dtype)
