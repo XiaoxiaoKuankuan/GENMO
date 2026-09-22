@@ -1,0 +1,243 @@
+# BUMI closed-loop Stage 1 条件契约；这是静态协议，不是 Hydra 可实例化组件。
+# 本文件不实现真实数据构造、网络改造、GMT 通信、Stage 2 或 DPPO。
+contract_version: genmo.bumi_closedloop.stage1.v1
+scope: condition_only
+implementation_status: contract_only
+
+stage1:
+  training: supervised_diffusion
+  input_modalities:
+    - future_music
+    - actual_proprio_history
+    - committed_qpos30_prefix
+  required_condition_fields:
+    - music_features
+    - music_valid
+    - proprio_history
+    - proprio_history_valid
+    - proprio_history_times
+    - known_qpos30
+    - known_qpos30_mask
+    - future_valid
+    - future_times
+    - decision_time
+  outputs:
+    future_motion_qpos30: [B, 120, 30]
+    future_contact_logits: [B, 120, 2]
+    contact_semantics: contact2_separate_head
+  preserved_checkpoint_contract: true
+
+stage2:
+  implementation_status: not_implemented
+  pipeline: stage1_genmo_to_frozen_gmt_to_bumi_dynamics_to_reward_and_next_observation
+  optimization: critic_plus_dppo
+  trainable_components: [genmo, upper_critic]
+  frozen_components: [gmt]
+
+motion:
+  representation_contract_version: genmo.bumi_motion_features.qpos30.v3
+  value_domain: physical_before_qpos30_stats_normalization
+  fps: 30
+  frames: 120
+  feature_dim: 30
+  sample_times: "t0 + i / 30, i=0..119"
+  first_last_sample_span_seconds: 3.9666666666666668
+  colloquial_window_duration_seconds: 4.0
+  fields:
+    - {name: root_delta_xy_heading, slice: [0, 2], next_sample_dependent: true}
+    - {name: root_height_offset, slice: [2, 3], next_sample_dependent: false}
+    - {name: root_rotation_6d, code_name: root_rot_local, slice: [3, 9], next_sample_dependent: false}
+    - {name: joint_dof, slice: [9, 30], next_sample_dependent: false}
+  contact:
+    feature_dim: 2
+    order: [left, right]
+    separate_from_qpos30: true
+  forbidden_changes:
+    predict_joint_velocity: false
+    change_bumi_feature_dim: false
+    create_motion51_representation: false
+    recompute_51d_stats: false
+    mutate_legacy_checkpoint_contract: false
+
+music:
+  representation: edge_baseline35
+  fps: 30
+  frames: 120
+  feature_dim: 35
+  channel_groups:
+    onset_strength: 1
+    mfcc: 20
+    chroma_cens: 12
+    onset_peak: 1
+    beat_peak: 1
+  shares_future_times_with_motion: true
+
+proprio:
+  contract_version: genmo.bumi_proprio48.v1
+  value_domain: physical_before_noise_and_normalization
+  fps: 50
+  history_steps: 50
+  feature_dim: 48
+  sample_times: "t_k - 49 / 50, ..., t_k"
+  first_last_sample_span_seconds: 0.98
+  colloquial_history_duration_seconds: 1.0
+  include_last_action: false
+  fields:
+    - name: projected_gravity
+      slice: [0, 3]
+      unit: dimensionless_unit_direction
+      frame: base_link_root_actor
+      semantics: normalized_world_gravity_direction_inverse_rotated_by_root_link_quaternion
+      upright_value: [0.0, 0.0, -1.0]
+    - name: base_ang_vel
+      slice: [3, 6]
+      unit: rad_per_second
+      frame: base_link_root_actor
+      semantics: root_com_world_angular_velocity_inverse_rotated_to_root_frame
+    - name: joint_pos_rel
+      slice: [6, 27]
+      unit: rad
+      semantics: joint_pos_minus_active_per_environment_default_joint_pos
+    - name: joint_vel_rel
+      slice: [27, 48]
+      unit: rad_per_second
+      semantics: joint_vel_minus_default_joint_vel
+      current_default_joint_vel_is_zero: true
+  joint_order_source: gmt_physx_native_dof_order
+  joint_order_runtime_assertion_required: true
+  joint_order:
+    - l_leg_pitch_joint
+    - r_leg_pitch_joint
+    - waist_yaw_joint
+    - l_leg_roll_joint
+    - r_leg_roll_joint
+    - l_arm_pitch_joint
+    - r_arm_pitch_joint
+    - l_leg_yaw_joint
+    - r_leg_yaw_joint
+    - l_arm_roll_joint
+    - r_arm_roll_joint
+    - l_knee_pitch_joint
+    - r_knee_pitch_joint
+    - l_arm_yaw_joint
+    - r_arm_yaw_joint
+    - l_ankle_pitch_joint
+    - r_ankle_pitch_joint
+    - l_elbow_pitch_joint
+    - r_elbow_pitch_joint
+    - l_ankle_roll_joint
+    - r_ankle_roll_joint
+  nominal_default_joint_pos_rad:
+    [-0.1495, -0.1495, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.3, -0.3,
+     0.3215, 0.3215, 0.0, 0.0, -0.172, -0.172, 0.0, 0.0, 0.0, 0.0]
+  gmt_training_active_default_startup_offset_rad: [-0.02, 0.02]
+  normalization:
+    gmt_policy_69d_normalizer_reused: false
+    genmo_condition_normalization: future_separate_design
+
+# 训练 corruption 只是匹配 GMT policy 的现状记录，不属于上面的物理观测定义。
+gmt_policy_training_corruption_reference:
+  applied_to_genmo_proprio48_contract_values: false
+  distribution: additive_uniform_per_element
+  projected_gravity: [-0.05, 0.05]
+  base_ang_vel_rad_per_second: [-0.2, 0.2]
+  joint_pos_rel_rad: [-0.01, 0.01]
+  joint_vel_rel_rad_per_second: [-0.5, 0.5]
+  gmt_history_obs_corruption_enabled: false
+
+time:
+  unit: second
+  coordinate: same_per_sample_clock_for_history_future_and_decision
+  recommended_dtype: float64
+  history_valid_not_later_than_decision_time: true
+  history_strictly_increasing: true
+  future_strictly_increasing: true
+  future_start_not_before_decision_time: true
+  future_start_equals_decision_time: not_required
+  music_and_motion_share_single_future_times_tensor: true
+
+stage1_condition_batch:
+  music_features: [B, 120, 35]
+  music_valid: [B, 120]
+  proprio_history: [B, 50, 48]
+  proprio_history_valid: [B, 50]
+  proprio_history_times: [B, 50]
+  known_qpos30: [B, 120, 30]
+  known_qpos30_mask: [B, 120, 30]
+  future_valid: [B, 120]
+  future_times: [B, 120]
+  decision_time: [B]
+  mask_dtype: bool
+  padding_semantics: mask_is_authoritative_and_zero_is_not_implicitly_padding
+
+prefix:
+  source: previous_genmo_reference_plan_already_published_and_not_immediately_rewritable
+  not_source: actual_robot_state_history
+  representation_contract_version: genmo.bumi_motion_features.qpos30.v3
+  value_domain: physical_before_qpos30_stats_normalization
+  mask_granularity: per_coordinate
+  allow_empty: true
+  nominal_commit_duration_seconds: null
+  root_delta_boundary_rule: >-
+    known_qpos30_mask[t,0:2] may be true only when the source plan contains both
+    root_position[t] and root_position[t+1]; truncating a prefix must not use terminal
+    delta padding or future ground truth to manufacture the boundary value.
+  contact_condition: not_defined_in_v1
+
+# 这些 target 只保留给后续第 3 步；本轮 Python batch 类型和数据路径均不创建它们。
+reserved_stage3_targets:
+  implementation_status: not_implemented
+  target_qpos30: [B, 120, 30]
+  target_contact: [B, 120, 2]
+  target_contact_valid: [B, 120, 2]
+  contact_valid_shape_may_follow_existing_loss_contract_after_verification: true
+
+downstream_gmt:
+  task: mimic_noetix_bumi3_mha_sonic
+  frozen_in_stage2: true
+  policy:
+    shape: [B, 69]
+    fields: proprio48_plus_last_action21
+  history_obs:
+    shape: [B, 690]
+    steps: 10
+    single_step_dim: 69
+  command_window:
+    shape: [B, 1092]
+    single_frame_dim: 52
+    past_frames: 10
+    current_frames: 1
+    future_frames: 10
+    total_frames: 21
+  policy_fps: 50
+  policy_step_seconds: 0.02
+  physics_fps: 200
+  physics_step_seconds: 0.005
+  physics_steps_per_policy_step: 4
+  stage1_reimplements_command_window: false
+
+authoritative_execution_adapter:
+  steps:
+    - physical_qpos30_to_qpos28
+    - compose_final_continuous_30hz_qpos
+    - resample_final_qpos_30hz_to_50hz
+    - derive_root_linear_velocity_from_final_50hz_qpos
+    - derive_root_angular_velocity_from_final_50hz_qpos
+    - derive_joint_velocity_from_final_50hz_qpos
+    - build_gmt_reference
+  qpos_decode: gem.robots.bumi.endecoder.BumiEndecoder
+  continuous_resampler: gem.runtime.qpos_timeline.IncrementalQposTimeline
+  offline_resampler: gem.runtime.gmt_trajectory.resample_qpos_timeline
+  gmt_frame_derivation: gem.runtime.gmt_trajectory.qpos_timeline_to_gmt_frames
+  allow_duplicate_velocity_implementation: false
+
+replanning:
+  nominal_commit_duration_seconds: null
+  candidate_test_rates_hz: [1.0, 2.0]
+  status: planned_not_measured
+
+pending_work:
+  stage3_real_dataset_and_targets: not_implemented
+  stage4_network_conditioning_changes: not_implemented
+  gmt_communication: not_implemented
+  stage2_critic_and_dppo: not_implemented
