@@ -59,7 +59,6 @@ from gem.robots.bumi.quality_filter import (  # noqa: E402
 
 CONFIG_VERSION = "genmo.bumi_sonic_npz_quality_config.v1"
 REPORT_VERSION = "genmo.bumi_quality_report.sonic_npz_50hz.v1"
-DEFAULT_CONFIG = REPO_ROOT / "configs/bumi/quality_filter_sonic_npz_50hz_v1.yaml"
 DEFAULT_PRESET = Path("/home/weili/GMR-CPP_e1jump_lowdpi/config/robot_presets/bumi3.json")
 DEFAULT_ROBOT_XML = Path("/home/weili/GMR-CPP_e1jump_lowdpi/assets/bumi3/mjcf/bumi3.xml")
 DEFAULT_KINEMATICS = Path("/home/weili/OMG/assets/robots/bumi/bumi_kinematics.json")
@@ -1030,7 +1029,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--input-root", type=Path, default=REPO_ROOT / "data/motions_npz_bumi3_smooth_q1"
     )
-    parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
+    parser.add_argument("--config", type=Path, required=True, help="显式指定与输入资产、帧率匹配的质量规则；旧默认规则已退役")
     parser.add_argument("--preset", type=Path, default=DEFAULT_PRESET)
     parser.add_argument("--robot-xml", type=Path, default=DEFAULT_ROBOT_XML)
     parser.add_argument("--kinematics", type=Path, default=DEFAULT_KINEMATICS)

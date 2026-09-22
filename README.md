@@ -1,3 +1,5 @@
+> 旧BUMI资产与93D入口已退役，范围及当前功能边界见 [说明](docs/RETIRED_BUMI_ASSETS.md)。
+
 <p align="center">
   <h1 align="center">GEM：通用人体动作模型</h1>
   <p align="center">

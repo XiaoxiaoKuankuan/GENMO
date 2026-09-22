@@ -50,7 +50,6 @@ from gem.robots.bumi.quality_filter import (  # noqa: E402
     load_bumi_quality_config,
 )
 
-DEFAULT_CONFIG = REPO_ROOT / "configs" / "bumi" / "quality_filter_v1.yaml"
 REPORT_FILENAMES = (
     "quality_report.jsonl",
     "quality_report.csv",
@@ -573,7 +572,7 @@ def _ensure_output_outside_source(output: Path, source: Path, name: str) -> Path
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--input-root", type=Path, default=REPO_ROOT / "data" / "motions")
-    parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
+    parser.add_argument("--config", type=Path, required=True, help="显式指定与输入资产、帧率匹配的质量规则；旧默认规则已退役")
     parser.add_argument(
         "--source-mjcf",
         type=Path,
