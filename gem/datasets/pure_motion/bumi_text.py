@@ -89,7 +89,7 @@ class AssetCache:
             value = (
                 json.loads(path.read_text())
                 if json_file
-                else torch.load(path, map_location="cpu", weights_only=False)
+                else torch.load(path, map_location="cpu", weights_only=False, mmap=True)
             )
             self.values[key] = value
         self.values.move_to_end(key)
@@ -212,9 +212,12 @@ def validate_record(record, *, split=None):
     captions = record.get("captions", [])
     if not captions or not all(isinstance(c, str) and c.strip() for c in captions):
         raise ValueError("caption不能为空")
-    if len(record.get("embeddings", [])) != len(captions) or len(
-        record.get("caption_ids", [])
-    ) != len(captions):
+    text_mode = record.get("text_feature_mode", "precomputed")
+    if text_mode not in {"precomputed", "online_t5"}:
+        raise ValueError("未知文本特征模式")
+    if len(record.get("embeddings", [])) != (
+        0 if text_mode == "online_t5" else len(captions)
+    ) or len(record.get("caption_ids", [])) != len(captions):
         raise ValueError("caption、ID与embedding数量不符")
     if len(set(record["caption_ids"])) != len(captions):
         raise ValueError("重复 caption ID")
@@ -297,6 +300,7 @@ class BumiTextDataset(Dataset):
         manifest_path = self.root / "manifests" / f"{split}.json"
         self.manifest = json.loads(manifest_path.read_text())
         manifest = self.manifest
+        self.text_feature_mode = manifest.get("text_feature_mode", "precomputed")
         if manifest.get("schema") != SCHEMA or manifest.get("split") != split:
             raise ValueError("release schema/split错误")
         if (
@@ -393,6 +397,8 @@ class BumiTextDataset(Dataset):
             raise ValueError("实际分片记录数不符")
         record = records[rid]
         validate_record(record, split=self.split)
+        if record.get("text_feature_mode", "precomputed") != self.text_feature_mode:
+            raise ValueError("文本特征模式与 release 不一致")
         if any(record[k] != row[k] for k in ("frames", "dataset", "motion_id")):
             raise ValueError("索引与实际记录不符")
         return record
@@ -414,9 +420,12 @@ class BumiTextDataset(Dataset):
             else 0
         )
         caption = record["captions"][tid]
-        embedding, text_mask = read_embedding(
-            record["embeddings"][tid], caption, self.cache, self.root, expected_frames=frames
-        )
+        text_features = {}
+        if self.text_feature_mode == "precomputed":
+            embedding, text_mask = read_embedding(
+                record["embeddings"][tid], caption, self.cache, self.root, expected_frames=frames
+            )
+            text_features = dict(text_embed=embedding, text_attention_mask=text_mask)
         start, end = window_bounds(
             record,
             tid,
@@ -441,8 +450,7 @@ class BumiTextDataset(Dataset):
             valid_length=length,
             caption=caption,
             has_text=True,
-            text_embed=embedding,
-            text_attention_mask=text_mask,
+            **text_features,
             foot_contact=contact,
             foot_contact_available=available,
             mask={"valid": valid},
@@ -462,6 +470,7 @@ class BumiTextDataset(Dataset):
                 pad_to_frames=self.pad_to_frames,
                 text_index=tid,
                 caption_id=record["caption_ids"][tid],
+                text_feature_mode=self.text_feature_mode,
                 ground_semantics=GROUND,
             ),
         )

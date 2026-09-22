@@ -107,3 +107,21 @@ checkpoint读取120或300，网页长度范围也来自模型契约；TensorRT�
 
 CPU合成数据、缩小网络测试只能证明这些代码路径及契约行为；不代表四库生产T5已完成、
 正式训练已启动、模型语义质量已提高或机器人闭环跟踪已通过。
+# 服务器2大显存训练接入补充（2026-09-22）
+
+四库完整PASS转换后有551242条带可用文本的完整动作。MotionMillion约899万条caption，
+不要求先物化全部150-token特征；`build --text-feature-mode online_t5 --workers 32`
+显式发布在线文本release，训练设置`BUMI_TEXT_ONLINE_T5=true`和本地
+`BUMI_T5_MODEL_PATH`。同一冻结T5-3B按抽到的原文批量编码，CPU LRU仅缓存有效token；
+输出仍为150×1024，缓存保存FP16，网络接收FP32特征并进行bf16混合精度计算。
+权重、config及SentencePiece指纹进入checkpoint资产契约；T5不进入优化器或checkpoint权重。
+未配置在线编码器时读取在线release会报错，禁止把缺失特征当作全零文本训练。
+
+原预计算release保持默认兼容。完整源qpos、BONES事件配对、随机120帧、短动作mask和
+验证中心窗口均保持；`stats --workers 32`并行计算全部train样本的确定性区间窗口，
+不读取验证/测试动作计算均值方差。并行构建仍在实际读取前后验证机器人/人体SHA。
+
+大batch容量测量复用`tools/train/preflight_distributed.py --bumi-batch-size N
+--bumi-data-root RELEASE --bumi-stats STATS --t5-path MODEL`，通过torchrun执行。
+测量包括完整网络、实际T5、完整辅助损失、反向及AdamW状态；输出显存峰值、loss、
+梯度范数和后续步骤耗时，不产生正式checkpoint。最终batch及真实运行结果另行记录。

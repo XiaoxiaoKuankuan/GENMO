@@ -49,10 +49,48 @@ class BumiTextGEM(BumiGEM):
         if stats.get("data_kind") != expected_kind or stats.get("split") != "train":
             raise ValueError("必须使用 BUMI 文本 train 有效元素统计量")
         self.stats_identity = stats
+        self.online_text_encoder = None
+        online = self.model_cfg.text_encoder.get("online", {})
+        if online.get("enabled", False):
+            if self.model_cfg.text_encoder.get("load_llm", False):
+                raise ValueError("在线冻结 T5 与旧 load_llm 不能同时启用")
+            from gem.runtime.frozen_text_encoder import FrozenTextEncoder
+
+            self.online_text_encoder = FrozenTextEncoder(
+                online["model_path"],
+                micro_batch_size=online.get("micro_batch_size", 32),
+                cache_entries=online.get("cache_entries", 100000),
+            )
+
+    def attach_text_condition(self, target_batch, source_batch=None):
+        source = target_batch if source_batch is None else source_batch
+        modes = {m.get("text_feature_mode", "precomputed") for m in source.get("meta", [])}
+        if modes == {"online_t5"}:
+            if self.online_text_encoder is None or "text_embed" in source:
+                raise ValueError("在线文本 release 需要显式冻结 T5，禁止使用补零文本")
+            features, mask = self.online_text_encoder.encode(
+                source["caption"], target_batch["device"]
+            )
+            target_batch.update(encoded_text=features, text_attention_mask=mask)
+            return
+        if "online_t5" in modes:
+            raise ValueError("同一 batch 文本特征模式不一致")
+        if "text_embed" not in source and self.online_text_encoder is not None:
+            features, mask = self.online_text_encoder.encode(
+                source["caption"], target_batch["device"]
+            )
+            target_batch.update(encoded_text=features, text_attention_mask=mask)
+            return
+        return super().attach_text_condition(target_batch, source_batch)
 
     def on_fit_start(self):
         super().on_fit_start()
         datasets = self.trainer.datamodule.trainsets
+        if any(
+            (d.text_feature_mode == "online_t5") != (self.online_text_encoder is not None)
+            for d in datasets
+        ):
+            raise ValueError("训练数据与在线 T5 配置不一致")
         identities = [dataset.data_identity for dataset in datasets]
         if any(
             identity["manifest_sha256"] != self.stats_identity["data_identity"]["manifest_sha256"]
@@ -116,6 +154,7 @@ class BumiTextGEM(BumiGEM):
                 loss_contract=self.pipeline.args.loss_contract,
                 loss_config=OmegaConf.to_container(self.pipeline.args, resolve=True),
                 assets={
+                    **(self.online_text_encoder.assets if self.online_text_encoder else {}),
                     "kinematics": {
                         "path": str(kin.kinematics_path),
                         "sha256": kin.kinematics_sha256,

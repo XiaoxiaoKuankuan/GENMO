@@ -20,11 +20,14 @@ from __future__ import annotations
 import argparse
 import copy
 import json
+import multiprocessing
+import sqlite3
 import sys
 import tempfile
 from collections import Counter, defaultdict
 from contextlib import ExitStack
 from pathlib import Path
+from urllib.parse import quote
 
 ROOT = Path(__file__).resolve().parents[3]
 if str(ROOT) not in sys.path:
@@ -163,7 +166,15 @@ def humanml_conversion(quality_report, output):
         gate.close()
 
 
-def build(source, output, *, records_per_shard=512, quality_report=None):
+def build(
+    source,
+    output,
+    *,
+    records_per_shard=512,
+    quality_report=None,
+    workers=1,
+    text_feature_mode="precomputed",
+):
     """所有模式在隔离staging构建，失败自动清理，完成后才发布正式release。"""
     output = Path(output).resolve()
     if output.exists():
@@ -188,7 +199,12 @@ def build(source, output, *, records_per_shard=512, quality_report=None):
         ) as temp:
             staged = Path(temp) / "release"
             result = _build(
-                source, staged, records_per_shard=records_per_shard, quality_gates=gates
+                source,
+                staged,
+                records_per_shard=records_per_shard,
+                quality_gates=gates,
+                workers=workers,
+                text_feature_mode=text_feature_mode,
             )
             if output.exists():
                 raise FileExistsError("构建期间目标目录被创建，拒绝覆盖")
@@ -196,10 +212,84 @@ def build(source, output, *, records_per_shard=512, quality_report=None):
             return result
 
 
-def _build(source, output, *, records_per_shard=512, quality_gates=None):
+_BUILD_STATE = None
+
+
+def _init_build_worker(gates, kin, base, all_lengths, text_mode):
+    """每个子进程独立打开只读 SQLite；不跨进程复用父进程连接。"""
+    global _BUILD_STATE
+    torch.set_num_threads(1)
+    for gate in gates.values():
+        gate.db.close()
+        path = quote(str(gate.root / "quality.sqlite"), safe="/")
+        gate.db = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+    _BUILD_STATE = (gates, kin, base, all_lengths, text_mode)
+
+
+def _prepare_record(original):
+    """并行读取完整源动作并重复校验输入身份，接触标签仍由同一 FK 实现生成。"""
+    gates, kin, base, all_lengths, text_mode = _BUILD_STATE
+    record = copy.deepcopy(original)
+    path = resolve_reference(record.pop("qpos_path"), base)
+    gate = gates.get(record["dataset"], gates.get("*"))
+    if gate is not None:
+        qpos, quality = gate.read_candidate(path, record, allow_all_pass=all_lengths)
+        if qpos is None:
+            raise ValueError("分组后动作不再满足 PASS，禁止发布不完整 release")
+        from gem.datasets.pure_motion.bumi_text import GROUND
+        from gem.robots.bumi.contacts import derive_bumi_foot_contact
+
+        record["qpos"] = qpos
+        record["ground_alignment"] = dict(
+            applied=False,
+            offset_z=0.0,
+            reference="UMR world-Z=0; source_ground_z is preprocessing metadata",
+        )
+        record["ground_semantics"] = GROUND
+        contact = derive_bumi_foot_contact(qpos, kin, ground_height=0.0)
+        record["foot_contact"], record["foot_contact_available"] = (
+            contact.contact,
+            contact.valid_mask,
+        )
+        record["quality_provenance"] = dict(
+            run_fingerprint=gate.run["fingerprint"],
+            human_sha256=quality["human_sha256"],
+            status="PASS",
+        )
+    else:
+        with np.load(path, allow_pickle=False) as npz:
+            if float(npz["fps"]) != 30 or list(npz["joint_names"].astype(str)) != list(
+                kin.joint_order
+            ):
+                raise ValueError(f"NPZ FPS/关节顺序错误: {path}")
+            record["qpos"] = torch.from_numpy(np.asarray(npz["qpos"], dtype=np.float32).copy())
+            for key in ("foot_contact", "foot_contact_available"):
+                if key in npz:
+                    record[key] = torch.from_numpy(npz[key].copy())
+    record["source_qpos_sha256"] = sha256_file(path)
+    record["frames"] = len(record["qpos"])
+    if text_mode == "online_t5":
+        if record.get("embeddings"):
+            raise ValueError("在线文本构建不接受未使用的预计算引用")
+        record["text_feature_mode"] = text_mode
+    validate_record(record, split=record["split"])
+    return record
+
+
+def _build(
+    source,
+    output,
+    *,
+    records_per_shard=512,
+    quality_gates=None,
+    workers=1,
+    text_feature_mode="precomputed",
+):
     source, output = Path(source).resolve(), Path(output).resolve()
     if records_per_shard < 1:
         raise ValueError("records_per_shard必须为正")
+    if workers < 1 or text_feature_mode not in {"precomputed", "online_t5"}:
+        raise ValueError("非法构建 workers 或文本模式")
     if output.exists():
         raise FileExistsError("使用新的release目录，不能覆盖原数据")
     payload = json.loads(source.read_text())
@@ -227,7 +317,7 @@ def _build(source, output, *, records_per_shard=512, quality_gates=None):
             if quality_gate is None:
                 raise ValueError("数据集缺少对应的质量报告")
             path = resolve_reference(record["qpos_path"], source.parent)
-            row = quality_gate.lookup(path)
+            row = quality_gate.lookup(path, verify_inputs=False)
             if row["status"] != "PASS" or (not all_lengths and not row["training_eligible"]):
                 quality_excluded.append(
                     dict(
@@ -250,6 +340,48 @@ def _build(source, output, *, records_per_shard=512, quality_gates=None):
     (output / "kinematics.json").write_bytes(kin_path.read_bytes())
     cache = AssetCache(4)
     counts = Counter()
+    global _BUILD_STATE
+    _BUILD_STATE = (quality_gates, kin, source.parent, all_lengths, text_feature_mode)
+    with ExitStack() as resources:
+        pool = None
+        if workers > 1:
+            pool = resources.enter_context(
+                multiprocessing.get_context("fork").Pool(
+                    workers,
+                    initializer=_init_build_worker,
+                    initargs=_BUILD_STATE,
+                )
+            )
+        return _write_release(
+            rows,
+            report,
+            counts,
+            pool,
+            output,
+            source,
+            kin,
+            quality_gates,
+            all_lengths,
+            records_per_shard,
+            cache,
+            text_feature_mode,
+        )
+
+
+def _write_release(
+    rows,
+    report,
+    counts,
+    pool,
+    output,
+    source,
+    kin,
+    quality_gates,
+    all_lengths,
+    records_per_shard,
+    cache,
+    text_feature_mode,
+):
     for split in ("train", "val", "test"):
         shards, chunk = [], []
 
@@ -279,58 +411,13 @@ def _build(source, output, *, records_per_shard=512, quality_gates=None):
             )
             chunk.clear()
 
-        for original in rows:
-            if original["split"] != split:
-                continue
-            record = copy.deepcopy(original)
-            path = resolve_reference(record.pop("qpos_path"), source.parent)
-            quality_gate = quality_gates.get(record["dataset"], quality_gates.get("*"))
-            if quality_gate is not None:
-                qpos, quality = quality_gate.read_candidate(
-                    path, record, allow_all_pass=all_lengths
-                )
-                if qpos is None:
-                    report["excluded"].append(
-                        dict(
-                            dataset=record["dataset"],
-                            motion_id=record["motion_id"],
-                            reason="umr_quality_or_length",
-                            status=quality["status"],
-                        )
-                    )
-                    continue
-                record["qpos"] = qpos
-                record["ground_alignment"] = dict(
-                    applied=False,
-                    offset_z=0.0,
-                    reference="UMR world-Z=0; source_ground_z is preprocessing metadata",
-                )
-                from gem.datasets.pure_motion.bumi_text import GROUND
-                from gem.robots.bumi.contacts import derive_bumi_foot_contact
-
-                record["ground_semantics"] = GROUND
-                contact = derive_bumi_foot_contact(qpos, kin, ground_height=0.0)
-                record["foot_contact"] = contact.contact
-                record["foot_contact_available"] = contact.valid_mask
-                record["quality_provenance"] = dict(
-                    run_fingerprint=quality_gate.run["fingerprint"],
-                    human_sha256=quality["human_sha256"],
-                    status="PASS",
-                )
-            else:
-                with np.load(path, allow_pickle=False) as npz:
-                    if float(npz["fps"]) != 30 or list(npz["joint_names"].astype(str)) != list(
-                        kin.joint_order
-                    ):
-                        raise ValueError(f"NPZ FPS/关节顺序错误: {path}")
-                    record["qpos"] = torch.from_numpy(
-                        np.asarray(npz["qpos"], dtype=np.float32).copy()
-                    )
-                    for key in ("foot_contact", "foot_contact_available"):
-                        if key in npz:
-                            record[key] = torch.from_numpy(npz[key].copy())
-            record["source_qpos_sha256"] = sha256_file(path)
-            record["frames"] = len(record["qpos"])
+        originals = (r for r in rows if r["split"] == split)
+        prepared = (
+            pool.imap(_prepare_record, originals, chunksize=8)
+            if pool
+            else map(_prepare_record, originals)
+        )
+        for record in prepared:
             if record["frames"] < 4 or (not all_lengths and not 60 <= record["frames"] <= 300):
                 report["excluded"].append(
                     dict(
@@ -351,6 +438,13 @@ def _build(source, output, *, records_per_shard=512, quality_gates=None):
                 read_embedding(ref, caption, cache, output, expected_frames=record["frames"])
             chunk.append(record)
             counts[f"{split}/{record['dataset']}"] += 1
+            if sum(counts.values()) % 5000 == 0:
+                print(
+                    json.dumps(
+                        dict(stage="build", records=sum(counts.values()), counts=dict(counts))
+                    ),
+                    flush=True,
+                )
             if len(chunk) >= records_per_shard:
                 flush()
         flush()
@@ -368,6 +462,7 @@ def _build(source, output, *, records_per_shard=512, quality_gates=None):
             shards=shards,
             full_sequence=True,
             crop_count=0,
+            text_feature_mode=text_feature_mode,
             quality_run_fingerprints={
                 key: gate.run["fingerprint"] for key, gate in quality_gates.items()
             },
@@ -391,15 +486,15 @@ def _report_dataset(root, split, dataset, sequence_mode="full"):
     return ds
 
 
-def statistics(root, output, dataset=None, sequence_mode="full"):
-    ds = _report_dataset(root, "train", dataset, sequence_mode)
-    dataset = ds.dataset
-    kin_path = resolve_reference(ds.manifest["kinematics"]["path"], ds.root)
-    kin = BumiKinematics(kin_path)
-    codec = BumiMotionFeatureCodec(kin)
+_STATS_STATE = None
+
+
+def _statistics_chunk(indices):
+    ds, codec, sequence_mode = _STATS_STATE
+    torch.set_num_threads(1)
     sums, squares, counts = (torch.zeros(30, dtype=torch.float64) for _ in range(3))
     frames_total = 0
-    for i in range(len(ds)):
+    for i in indices:
         record = ds.read_record(i)
         intervals = (
             caption_intervals(record) if sequence_mode == "crop" else [[0, record["frames"]]]
@@ -417,6 +512,39 @@ def statistics(root, output, dataset=None, sequence_mode="full"):
             squares += torch.where(mask, features.square(), 0).sum(0)
             counts += mask.sum(0)
             frames_total += len(features)
+    return sums, squares, counts, frames_total
+
+
+def statistics(root, output, dataset=None, sequence_mode="full", workers=1):
+    ds = _report_dataset(root, "train", dataset, sequence_mode)
+    dataset = ds.dataset
+    kin_path = resolve_reference(ds.manifest["kinematics"]["path"], ds.root)
+    kin = BumiKinematics(kin_path)
+    codec = BumiMotionFeatureCodec(kin)
+    sums, squares, counts = (torch.zeros(30, dtype=torch.float64) for _ in range(3))
+    frames_total = 0
+    if workers < 1:
+        raise ValueError("stats workers 必须为正")
+    global _STATS_STATE
+    _STATS_STATE = (ds, codec, sequence_mode)
+    chunks = (range(i, min(i + 256, len(ds))) for i in range(0, len(ds), 256))
+    with ExitStack() as resources:
+        pool = (
+            resources.enter_context(multiprocessing.get_context("fork").Pool(workers))
+            if workers > 1
+            else None
+        )
+        results = pool.imap(_statistics_chunk, chunks) if pool else map(_statistics_chunk, chunks)
+        for index, (s, sq, c, frames) in enumerate(results):
+            sums += s
+            squares += sq
+            counts += c
+            frames_total += frames
+            if (index + 1) % 40 == 0:
+                print(
+                    json.dumps(dict(stage="stats", records=min((index + 1) * 256, len(ds)))),
+                    flush=True,
+                )
     mean = sums / counts
     std = (squares / counts - mean.square()).clamp_min(0).sqrt()
     value = dict(
@@ -507,6 +635,10 @@ def main():
     p.add_argument("--source", type=Path, required=True)
     p.add_argument("--output", type=Path, required=True)
     p.add_argument("--records-per-shard", type=int, default=512)
+    p.add_argument("--workers", type=int, default=1)
+    p.add_argument(
+        "--text-feature-mode", choices=["precomputed", "online_t5"], default="precomputed"
+    )
     p.add_argument(
         "--quality-report", type=Path, help="完整UMR筛选报告目录；该模式读取原生UMR qpos"
     )
@@ -580,6 +712,8 @@ def main():
         p.add_argument("--output", type=Path, required=True)
         p.add_argument("--dataset", choices=["motionmillion", "humanml3d", "kitml", "bones_seed"])
         p.add_argument("--sequence-mode", choices=["crop", "full"], default="crop")
+        if command == "stats":
+            p.add_argument("--workers", type=int, default=1)
         if command == "preflight":
             p.add_argument("--split", default="train", choices=["train", "val", "test"])
             p.add_argument("--limit", type=int, default=128)
@@ -626,9 +760,13 @@ def main():
             args.output,
             records_per_shard=args.records_per_shard,
             quality_report=args.quality_report,
+            workers=args.workers,
+            text_feature_mode=args.text_feature_mode,
         )
     elif args.command == "stats":
-        result = statistics(args.root, args.output, args.dataset, args.sequence_mode)
+        result = statistics(
+            args.root, args.output, args.dataset, args.sequence_mode, workers=args.workers
+        )
     else:
         result = preflight(args.root, args.split, args.dataset, args.limit, args.sequence_mode)
         write_json(args.output, result)

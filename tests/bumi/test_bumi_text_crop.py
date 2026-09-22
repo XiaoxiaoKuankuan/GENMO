@@ -122,6 +122,34 @@ def test_bones_event_pairing_and_short_event(crop_release):
         ds[0]
 
 
+def test_online_release_parallel_build_stats_and_no_zero_text(crop_release, tmp_path):
+    source = json.loads((tmp_path / "crop_conversion.json").read_text())
+    for record in source["records"]:
+        record["embeddings"] = []
+    path = tmp_path / "online_conversion.json"
+    path.write_text(json.dumps(source))
+    with pytest.raises(ValueError, match="数量"):
+        build(path, tmp_path / "missing_embeddings")
+    root = tmp_path / "online_release"
+    build(path, root, records_per_shard=2, workers=2, text_feature_mode="online_t5")
+    serial = statistics(root, root / "stats.json", sequence_mode="crop")
+    parallel = statistics(root, root / "stats_parallel.json", sequence_mode="crop", workers=2)
+    for key in ("mean", "std", "valid_element_counts"):
+        np.testing.assert_allclose(serial[key], parallel[key], atol=1e-10)
+    sample = dataset(root, "bones_seed").get_window(0, random_seed=42)
+    assert "text_embed" not in sample and sample["meta"]["text_feature_mode"] == "online_t5"
+    cfg = crop_config(root)
+    batch = collate_fn([sample], "train", cfg.data.collate_cfg)
+    assert "text_embed" not in batch
+    model = instantiate(cfg.model, _recursive_=False).cpu()
+    with pytest.raises(ValueError, match="冻结 T5"):
+        model.prepare_batch(batch, "diffusion")
+    offline = dataset(crop_release, "bones_seed")[0]
+    with pytest.raises(ValueError, match="混用"):
+        collate_fn([sample, offline], "train", cfg.data.collate_cfg)
+    assert not (tmp_path / "missing_embeddings").exists()
+
+
 def test_temporal_seconds_resampling_and_invalid_ranges():
     events = [
         dict(start_time=1.88, end_time=3.53, description="原始事件描述"),

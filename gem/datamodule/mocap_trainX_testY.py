@@ -80,6 +80,11 @@ def collate_fn(batch, mode, collate_cfg=None):
     keys = set(mandatory_keys)
     for item in batch:
         keys.update(item.keys())
+    online_text = [d.get("meta", {}).get("text_feature_mode") == "online_t5" for d in batch]
+    if any(online_text):
+        if not all(online_text) or any("text_embed" in d for d in batch):
+            raise ValueError("同一 batch 禁止混用在线 T5 和预计算文本")
+        keys.discard("text_embed")
     keys = sorted(keys)
 
     for k in keys:

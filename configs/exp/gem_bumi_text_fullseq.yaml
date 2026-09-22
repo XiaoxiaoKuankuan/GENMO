@@ -56,6 +56,11 @@ model:
       load_llm: false
       llm_version: t5-3b
       max_text_len: 150
+      online:
+        enabled: ${oc.decode:${oc.env:BUMI_TEXT_ONLINE_T5,false}}
+        model_path: ${oc.env:BUMI_T5_MODEL_PATH,inputs/t5-3b}
+        micro_batch_size: 32
+        cache_entries: 100000
     condition_mask:
       mask_text_prob:
         diffusion: 0.0

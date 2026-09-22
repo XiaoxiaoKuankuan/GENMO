@@ -1443,7 +1443,8 @@ class QualityGate:
         self.db.close()
         self._lock.close()
 
-    def lookup(self, path):
+    def lookup(self, path, *, verify_inputs=True):
+        """分组阶段可只读已绑定的报告身份；实际构建读取始终校验双输入 SHA。"""
         path = Path(path).resolve(strict=True)
         check(path.is_relative_to(Path(self.paths["input_root"])), "qpos不在已筛选的源目录内")
         relative = path.relative_to(self.paths["input_root"]).as_posix()
@@ -1453,11 +1454,12 @@ class QualityGate:
         ).fetchone()
         check(item is not None, "动作没有质量记录")
         row = json.loads(item[0])
-        check(
-            sha256_file(path) == row["source_sha256"]
-            and sha256_file(row["human_path"]) == row["human_sha256"],
-            "动作或源人体在筛选后改变",
-        )
+        if verify_inputs:
+            check(
+                sha256_file(path) == row["source_sha256"]
+                and sha256_file(row["human_path"]) == row["human_sha256"],
+                "动作或源人体在筛选后改变",
+            )
         return row
 
     @staticmethod
