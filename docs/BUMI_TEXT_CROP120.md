@@ -130,9 +130,33 @@ CPU合成数据、缩小网络测试只能证明这些代码路径及契约行�
 测量包括完整网络、实际T5、完整辅助损失、反向及AdamW状态；输出显存峰值、loss、
 梯度范数和后续步骤耗时，不产生正式checkpoint。
 
-完整网络含496545824个可训练参数。单卡实测batch256峰值分配64858.7 MiB、
+完整网络总参数496545824，其中约409M可训练、87M冻结（另驻留的T5不计入此数）。
+单卡实测batch256峰值分配64858.7 MiB、
 预留66524 MiB；batch320分配78940.4 MiB、预留80992 MiB。单卡后续步骤分别
 1.977/2.383秒，均包括原文编码与真实AdamW更新；这只是容量用小型真实数据集上的
 测量，正式8卡速度另行记录。选择256为DDP及运行波动保留余量，8×256×1=2048，
 全局batch与原64×8×4相同，学习率2e-4及215000步预算保持。训练8个worker/rank；
 每5000步在线验证每库固定前64条中心窗口（8批×8），不把该小规模检查当作全量成绩。
+
+
+## 本次正式运行位置
+
+2026-09-22服务器2以实现提交`5c85104`从零启动8卡，tmux为`bumi-text-crop120-8gpu:train`。
+正式release为`/data0/user/liwei/datasets/bumi_text_crop120_v2`，train/val/test分别
+474919/27695/48628条，原始完整动作保留；统计量为该目录`stats.json`，只用全部train。
+命令、环境和容量验收摘要记录在
+`/data0/user/liwei/training_logs/bumi_text_crop120_8gpu/launch.json`；控制台日志同目录`train.log`。
+TensorBoard、恢复checkpoint及meta位于
+`/data0/user/liwei/GENMO_outputs/bumi_text_crop120_4set_bs256_8gpu_20260922/version_0`，
+每10000步保存checkpoint，正常训练结束也保存。
+
+```bash
+ssh -p 50031 user@112.65.216.193
+tmux attach -t bumi-text-crop120-8gpu
+# Ctrl-b，然后按d，仅退出查看，训练继续。
+tail -n 80 -f /data0/user/liwei/training_logs/bumi_text_crop120_8gpu/train.log
+```
+
+启动验收记录于记录文本.md；它证明8个rank、真实数据、有限loss和持续步进，不代表
+训练已完成或文本动作质量已收敛。容量及DDP检查的临时数据、checkpoint已清除，
+正式运行与其统计量均不依赖/tmp测试目录。
