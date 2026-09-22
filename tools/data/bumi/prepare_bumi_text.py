@@ -273,7 +273,12 @@ def _prepare_record(original):
             raise ValueError("在线文本构建不接受未使用的预计算引用")
         record["text_feature_mode"] = text_mode
     validate_record(record, split=record["split"])
-    return record
+    # Pool 的 Tensor reducer 会为每条完整动作传递共享内存文件描述符；大规模流水线
+    # 会耗尽默认 1024 个 FD。进程边界只传普通 NumPy，父进程写分片前再恢复 Tensor。
+    return {
+        key: value.numpy() if isinstance(value, torch.Tensor) else value
+        for key, value in record.items()
+    }
 
 
 def _build(
@@ -418,6 +423,9 @@ def _write_release(
             else map(_prepare_record, originals)
         )
         for record in prepared:
+            for key in ("qpos", "foot_contact", "foot_contact_available"):
+                if key in record and isinstance(record[key], np.ndarray):
+                    record[key] = torch.from_numpy(record[key])
             if record["frames"] < 4 or (not all_lengths and not 60 <= record["frames"] <= 300):
                 report["excluded"].append(
                     dict(
@@ -512,7 +520,7 @@ def _statistics_chunk(indices):
             squares += torch.where(mask, features.square(), 0).sum(0)
             counts += mask.sum(0)
             frames_total += len(features)
-    return sums, squares, counts, frames_total
+    return sums.numpy(), squares.numpy(), counts.numpy(), frames_total
 
 
 def statistics(root, output, dataset=None, sequence_mode="full", workers=1):
@@ -536,9 +544,9 @@ def statistics(root, output, dataset=None, sequence_mode="full", workers=1):
         )
         results = pool.imap(_statistics_chunk, chunks) if pool else map(_statistics_chunk, chunks)
         for index, (s, sq, c, frames) in enumerate(results):
-            sums += s
-            squares += sq
-            counts += c
+            sums += torch.from_numpy(s)
+            squares += torch.from_numpy(sq)
+            counts += torch.from_numpy(c)
             frames_total += frames
             if (index + 1) % 40 == 0:
                 print(
