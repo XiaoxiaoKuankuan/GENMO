@@ -4,7 +4,7 @@
 
 ```bash
 PYTHONDONTWRITEBYTECODE=1 OMP_NUM_THREADS=4 OPENBLAS_NUM_THREADS=4 \
-  .venv/bin/python scripts/demo/demo_smpl_text_web.py
+  .venv/bin/python scripts/demo/demo_bumi_text_web.py
 ```
 
 打开 **http://127.0.0.1:8766**。服务只绑定本机回环地址，前端不需要 Node 或联网。
@@ -14,15 +14,15 @@ PYTHONDONTWRITEBYTECODE=1 OMP_NUM_THREADS=4 OPENBLAS_NUM_THREADS=4 \
 
 ## 使用方法
 
-1. 下拉选择模型，默认使用本地 MotionMillion `s190000.ckpt`。需要其他模型时，展开
+1. 下拉选择模型，默认候选路径为 `inputs/checkpoints/bumi_text/model.ckpt`，需由用户放置实际模型。需要其他模型时，展开
    “添加本地模型”，粘贴 `.ckpt` 路径并校验；路径注册后重启仍保留。
 2. 输入 prompt、动作帧数和 DDIM 步数，点击“生成动作视频”。生成期间可以编辑下一次
    参数，但当前任务使用提交时的副本，同时只允许一个任务。
 3. 完成后手动点击视频播放。支持暂停、拖动、全屏和下载；新视频从零开始且不会自动播放。
 4. 历史中的“回看视频”切换播放器，“复用参数”回填模型、原文、帧数和 DDIM，均不会自动生成。
 
-帧数为 **1–900** 的整数，默认 **120**；DDIM 为 **2–1000** 的整数，默认 **50**。
-FPS 固定 **30**，120 帧即 4 秒，240 帧即 8 秒。CFG 为 2.5、seed 为 42、shape 为 zero，
+帧数按所选模型的真实契约校验：当前 crop120 为 **4–120**，历史 full300 为 **60–300**，默认 **120**；DDIM 为 **2–1000** 的整数，默认 **50**。
+FPS 固定 **30**，120 帧即 4 秒，240 帧即 8 秒。CFG 为 2.5、seed 为 42、
 沿用 demo 默认后处理，渲染分辨率为 1280×720。文本使用 T5，建议英文动作描述；服务不会翻译。
 任务记录保留提交的 prompt 原文；T5 推理沿用原接口去除首尾空白，超长文本按模型 token 上限截断。
 
@@ -35,11 +35,11 @@ FPS 固定 **30**，120 帧即 4 秒，240 帧即 8 秒。CFG 为 2.5、seed 为
 ## 模型与依赖
 
 自动扫描 `inputs/pretrained` 和 `inputs/checkpoints` 的 `.ckpt` 文件；CPU mmap 检查真实权重，
-仅列出带文本编码层、交叉注意力和 151 维 SMPL 扩散输出的模型。已知 BUMI、音乐和回归权重
-不会进入列表。模型契约自动解析旧版 50 token 和新版 150 token；路径、文件身份、大小、修改
+仅列出包含有效 `bumi_text_contract`、30D动作输出、2D接触输出且资产指纹匹配的BUMI文本模型。
+SMPL、音乐和缺少契约的权重不会进入列表。文本固定150 token；路径、文件身份、大小、修改
 及变更时间用于缓存失效，生成前也检查文件是否变化。请注册已经完整保存的 checkpoint。
 
-Python 环境需包含本仓库原有推理依赖、CUDA、SMPL-X 资产、Open3D、PyAV 和 Flask 3.1。
+Python 环境需包含本仓库文本推理依赖、CUDA、当前BUMI资产、MuJoCo、PyAV 和 Flask 3.1。
 Flask 与公开分享入口使用的 Waitress 作为可选 `web` 依赖声明；在已配置 GENMO 的环境
 可用 `pip install -e '.[web]'` 安装。
 系统需有包含 `libx264` 的 `ffmpeg`。当前运行入口依赖仓库内配置和模型资产，应从本仓库启动。
@@ -63,7 +63,6 @@ outputs/text_motion_web/
   tasks/<任务 ID>/
     task.json                       # 原始参数、冻结模型、固定设置、阶段和耗时
     artifacts/<动作目录>/
-      smpl_params.pt                # 全局与相机坐标的 SMPL 参数
       motion.npz                    # body_pose、global_orient、transl、betas、fps
       metadata.json / prompt.txt    # 原 demo 的推理元数据和规范化文本
       READY                         # 原动作产物契约，不代表网页视频完成
@@ -127,7 +126,7 @@ outputs/text_motion_web/
 日志出现 `https://….trycloudflare.com` 后，在终端二将它填入 `--public-origin`：
 
 ```bash
-PYTHONDONTWRITEBYTECODE=1 .venv/bin/python scripts/demo/share_smpl_text_web.py \
+PYTHONDONTWRITEBYTECODE=1 .venv/bin/python scripts/demo/share_bumi_text_web.py \
   --public-origin https://实际生成的域名.trycloudflare.com
 ```
 

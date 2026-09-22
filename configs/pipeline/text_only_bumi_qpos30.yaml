@@ -1,5 +1,5 @@
 # BUMI 文本完整动作：v5基础权重，逐样本有效元素归约，辅助warmup统一预算。
-_target_: gem.pipeline.bumi_music_pipeline.BumiPipeline
+_target_: gem.pipeline.bumi_pipeline.BumiPipeline
 args_denoiser3d: ${network}
 args:
   motion_backend: bumi

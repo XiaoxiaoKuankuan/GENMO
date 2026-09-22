@@ -42,7 +42,7 @@ REPO_ROOT = Path(__file__).resolve().parents[3]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from tools.data.music_dance.aioz.common import (  # noqa: E402
+from gem.utils.motion_resampling import (  # noqa: E402
     _resample_axis_angle,
     _resample_linear,
 )

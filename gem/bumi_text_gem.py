@@ -1,6 +1,6 @@
 """BUMI 文本生成训练入口，支持历史full300及完整源动作上的crop120窗口。
 
-机器人编解码、FK、优化和验证复用 BumiGEM；文本通过 GEM 的 T5 条件接口进入
+机器人编解码、FK、优化和验证复用 BumiGEM；文本通过独立训练基类的 T5 条件接口进入
 共享 Transformer，逐帧条件置零，不伪造音乐。完整恢复额外核对机器人资产和损失。
 本模块属于训练侧；无 checkpoint 部署由 gem.runtime.bumi_text_runtime 实现。
 """

@@ -11,7 +11,7 @@ import torch
 
 from gem.runtime.bumi_text_contract import sha256_file
 from gem.runtime.bumi_text_runtime import INPUTS, OUTPUTS, io_shapes
-from gem.runtime.music_only_trt import TensorRTStepRunner, gpu_fingerprint
+from gem.runtime.tensorrt_core import TensorRTStepRunner, gpu_fingerprint
 
 ENGINE_SCHEMA = "genmo.bumi_text_engine.v1"
 

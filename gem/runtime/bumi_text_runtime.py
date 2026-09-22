@@ -352,7 +352,7 @@ class ResidentBumiTextEngine:
     def encode_prompt(self, prompt):
         from transformers import T5EncoderModel, T5Tokenizer
 
-        from gem.runtime.resident_text_motion import encode_prompt_with_loaded_t5
+        from gem.runtime.text_encoding import encode_prompt_with_loaded_t5
 
         if self.text_encoder is None:
             source = Path(self.t5_model).expanduser().resolve(strict=True)

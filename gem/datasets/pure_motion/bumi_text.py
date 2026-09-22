@@ -141,7 +141,7 @@ def read_embedding(ref, caption, cache, base, *, expected_frames=None):
         if rid >= len(motions) or rid >= len(embeds):
             raise ValueError("embedding record_index 越界")
         motion, record = motions[rid], embeds[rid]
-        from tools.data.motionmillion.common import validate_motion_record
+        from gem.datasets.text_source_contract import validate_motion_record
 
         validate_motion_record(motion)
         if motion["split"] != mo["split"] or (
@@ -155,7 +155,7 @@ def read_embedding(ref, caption, cache, base, *, expected_frames=None):
             raise ValueError("motion_id 对应关系错误")
         if tid >= len(texts) or texts[tid] != caption:
             raise ValueError("原motion中的caption/text_index不对应")
-        from tools.data.motionmillion.common import validate_embedding_record
+        from gem.datasets.text_source_contract import validate_embedding_record
 
         validate_embedding_record(record, caption_count=len(texts))
         a, b = map(int, record["offsets"][tid : tid + 2])

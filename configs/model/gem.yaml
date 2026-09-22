@@ -1,15 +1,15 @@
 # GEM LightningModule 配置。
-# `_target_` 指向 gem.gem.GEM，并把 pipeline、optimizer、scheduler 和模型级训练
+# `_target_` 指向 gem.bumi_text_gem.BumiTextGEM，并把 pipeline、optimizer、scheduler 和模型级训练
 # 选项传进去；这里的 model_cfg 会控制条件 mask、文本编码器、2D 噪声等训练行为。
-_target_: gem.gem.GEM
+_target_: gem.bumi_text_gem.BumiTextGEM
 
 pipeline: ${pipeline}
 optimizer: ${optimizer}
 scheduler: ${scheduler}
 
 model_cfg:
-  # Backward-compatible default; robot-native experiments override explicitly.
-  motion_backend: smpl
+  # 本分支仅支持 BUMI 文本模型，实际参数由唯一实验入口覆盖。
+  motion_backend: bumi
   train_modes: ${pipeline.args.train_modes}
   noisy_2d_obs: true
   kp2d_noise_scale: 0.5

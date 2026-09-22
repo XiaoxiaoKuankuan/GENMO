@@ -20,7 +20,7 @@ function busy() {
 }
 function modelDetail() {
   const model = state.models.find((m) => m.id === $("model").value);
-  $("model-detail").textContent = model ? `${(model.motion_backend || 'smpl').toUpperCase()} · ${model.contract.max_text_len} token · ${model.min_frames || 1}–${model.max_frames || 900} 帧 · ${model.path || model.name}` : "未发现可用模型，请联系站点维护者。";
+  $("model-detail").textContent = model ? `${(model.motion_backend || 'bumi').toUpperCase()} · ${model.contract.max_text_len} token · ${model.min_frames || 1}–${model.max_frames || 900} 帧 · ${model.path || model.name}` : "未发现可用模型，请联系站点维护者。";
   $("num-frames").min = model?.min_frames || 1;
   $("num-frames").max = model?.max_frames || 900;
 }
@@ -33,7 +33,7 @@ async function loadModels(selectedId) {
   const options = data.models.map((model) => {
     const option = document.createElement("option");
     option.value = model.id;
-    option.textContent = `${model.is_default ? "默认 · " : ""}${(model.motion_backend || 'smpl').toUpperCase()} · ${model.name} · step ${model.global_step ?? "未知"}`;
+    option.textContent = `${model.is_default ? "默认 · " : ""}${(model.motion_backend || 'bumi').toUpperCase()} · ${model.name} · step ${model.global_step ?? "未知"}`;
     return option;
   });
   if (!options.length) {

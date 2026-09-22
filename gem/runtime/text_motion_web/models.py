@@ -1,7 +1,7 @@
-"""本地 SMPL/BUMI 文本 checkpoint 发现与校验。
+"""本地 BUMI 文本 checkpoint 发现与校验。
 
 按真实路径去重，使用文件身份、大小和纳秒时间戳缓存检查结果。扫描线程通过
-CPU mmap 读取权重元数据，分别核对 SMPL 151D 或 BUMI 30D/2D 与机器人资产契约。
+CPU mmap 读取权重元数据，核对 BUMI 30D/2D 与机器人资产契约。
 音乐和仅回归模型被排除；文件变化后重新读取，生成前再次核对文件身份。
 """
 
@@ -10,7 +10,6 @@ from __future__ import annotations
 import hashlib
 import json
 import threading
-from collections.abc import Mapping
 from pathlib import Path
 
 from .storage import DEFAULT_CHECKPOINT, ROOT, atomic_json, fingerprint
@@ -18,8 +17,6 @@ from .storage import DEFAULT_CHECKPOINT, ROOT, atomic_json, fingerprint
 
 def inspect_checkpoint(path: Path) -> dict:
     import torch
-
-    from scripts.demo.demo_smpl_text import validate_text_generation_payload
 
     try:
         checkpoint = torch.load(path, map_location="cpu", weights_only=False, mmap=True)
@@ -31,41 +28,21 @@ def inspect_checkpoint(path: Path) -> dict:
         raise ValueError("checkpoint 必须包含权重字典")
     if checkpoint.get("bumi_text_contract") is not None:
         from gem.runtime.bumi_text_contract import inspect_payload, resolve_assets
+
         robot = inspect_payload(checkpoint)
         resolve_assets(robot, checkpoint=path)
-        return {"contract": {"max_text_len": 150, "encoded_text_dim": 1024,
-                             "sequence_contract": robot["sequence"]},
-                "motion_backend": "bumi", "min_frames": robot["sequence"]["min_frames"],
-                "max_frames": robot["sequence"]["max_frames"],
-                "global_step": checkpoint.get("global_step")}
-    contract = validate_text_generation_payload(checkpoint, path)
-    state = checkpoint.get("state_dict", checkpoint)
-    prefix = "pipeline.denoiser3d.denoiser."
-    output = state.get(prefix + "final_layer.fc2.weight")
-    conditioning = state.get(prefix + "add_cond_linear.weight")
-    if output is None or output.ndim != 2 or output.shape[0] != 151:
-        raise ValueError("仅支持输出为 151 维的 SMPL 文本模型，不能加载 BUMI 模型")
-    if conditioning is None or tuple(conditioning.shape) != (
-        output.shape[1],
-        output.shape[1] + 151,
-    ):
-        raise ValueError("缺少 SMPL 扩散条件权重，不能加载仅回归模型")
-
-    def rejects(value):
-        if isinstance(value, Mapping):
-            return any(
-                (key == "regression_only" and bool(item))
-                or (key == "motion_backend" and item != "smpl")
-                or rejects(item)
-                for key, item in value.items()
-            )
-        return False
-
-    if rejects(checkpoint.get("hyper_parameters", {})):
-        raise ValueError("checkpoint 声明为回归或非 SMPL 模型")
-    seq = contract.get("sequence_contract")
-    return {"contract": contract, "motion_backend": "smpl", "global_step": checkpoint.get("global_step"),
-            "min_frames": seq["min_frames"] if seq else 1, "max_frames": seq["max_frames"] if seq else 900}
+        return {
+            "contract": {
+                "max_text_len": 150,
+                "encoded_text_dim": 1024,
+                "sequence_contract": robot["sequence"],
+            },
+            "motion_backend": "bumi",
+            "min_frames": robot["sequence"]["min_frames"],
+            "max_frames": robot["sequence"]["max_frames"],
+            "global_step": checkpoint.get("global_step"),
+        }
+    raise ValueError("本分支只支持包含 bumi_text_contract 的 BUMI 文本模型")
 
 
 class ModelRegistry:

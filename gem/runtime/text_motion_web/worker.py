@@ -76,16 +76,11 @@ def render_job(output: Path, frames: int) -> None:
     os.environ.setdefault("EGL_PLATFORM", "surfaceless")
     metadata_path = output / "metadata.json"
     metadata = json.loads(metadata_path.read_text()) if metadata_path.exists() else {}
-    if metadata.get("motion_backend") == "bumi":
-        from gem.runtime.bumi_text_viewer import render_bumi_video
-        render_bumi_video(output, frames)
-    else:
-        import torch
-        from scripts.demo.demo_smpl_text import render_global_video
-        check_motion(output / "motion.npz", frames)
-        payload = torch.load(output / "smpl_params.pt", map_location="cuda:0", weights_only=False)
-        with torch.inference_mode():
-            render_global_video(output, payload["body_params_global"], 1280, 720, 30)
+    if metadata.get("motion_backend") != "bumi":
+        raise ValueError("文本分支仅渲染 BUMI 动作")
+    from gem.runtime.bumi_text_viewer import render_bumi_video
+
+    render_bumi_video(output, frames)
     source = output / "global.mp4"
     if not source.is_file() or source.stat().st_size == 0:
         raise RuntimeError("渲染器未输出有效视频，请检查 render.log 中的原始错误")
@@ -167,7 +162,7 @@ def run_renderer(output: Path, frames: int) -> dict:
 def worker_main(commands, events):
     follow_parent()
     os.chdir(ROOT)
-    from gem.runtime.resident_text_motion import ResidentTextMotionEngine
+    from gem.runtime.bumi_text_runtime import ResidentBumiTextEngine
 
     engine = None
     loaded = None
@@ -201,11 +196,9 @@ def worker_main(commands, events):
                     if engine is not None:
                         engine.close()
                         engine = None
-                    engine_class = ResidentTextMotionEngine
-                    if model.get("motion_backend") == "bumi":
-                        from gem.runtime.bumi_text_runtime import ResidentBumiTextEngine
-                        engine_class = ResidentBumiTextEngine
-                    engine = engine_class(
+                    if model.get("motion_backend") != "bumi":
+                        raise ValueError("本分支仅支持 BUMI 文本模型")
+                    engine = ResidentBumiTextEngine(
                         ckpt_path=model["path"],
                         t5_model=T5_MODEL,
                         local_files_only=True,

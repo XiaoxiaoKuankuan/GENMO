@@ -170,9 +170,17 @@ def seed_finished_history(service, model, count):
         for name in ("video.mp4", "thumbnail.jpg", "motion.npz", "smpl_params.pt", "render.log"):
             (output / name).write_bytes(b"retention-fixture")
         job = dict(
-            payload(model), id=job_id, model=copy.deepcopy(model), status="done",
-            created_at=(datetime(2000, 1, 1, tzinfo=timezone.utc) + timedelta(seconds=index)).isoformat(),
-            elapsed_seconds=0, fixed={"fps": 30}, task_dir=str(directory), output_dir=str(output),
+            payload(model),
+            id=job_id,
+            model=copy.deepcopy(model),
+            status="done",
+            created_at=(
+                datetime(2000, 1, 1, tzinfo=timezone.utc) + timedelta(seconds=index)
+            ).isoformat(),
+            elapsed_seconds=0,
+            fixed={"fps": 30},
+            task_dir=str(directory),
+            output_dir=str(output),
         )
         service.jobs[job_id] = job
         atomic_json(directory / "task.json", job)
@@ -334,45 +342,29 @@ def test_registry_invalidates_changed_file_and_deduplicates(tmp_path):
 
 
 def test_real_checkpoint_content_contract_filter(tmp_path):
+    # 人体模型即使包含文本权重也不属于本分支；不能仅凭输出头维数伪装为 BUMI。
     prefix = "pipeline.denoiser3d.denoiser."
-    state = {
-        prefix + "embed_text.weight": torch.zeros(4, 1024),
-        prefix + "text_encoder_layers.gate_cross_attn": torch.zeros(1),
-        prefix + "final_layer.fc2.weight": torch.zeros(151, 4),
-        prefix + "add_cond_linear.weight": torch.zeros(4, 155),
-    }
     path = tmp_path / "contract.ckpt"
-    checkpoint = {"state_dict": state, "global_step": 123}
-    torch.save(checkpoint, path)
-    assert inspect_checkpoint(path)["contract"]["max_text_len"] == 50
-    checkpoint["genmo_text_contract"] = dict(
-        schema_version=1, max_text_len=150, encoded_text_dim=1024, text_only=True
-    )
-    torch.save(checkpoint, path)
-    assert inspect_checkpoint(path)["contract"]["max_text_len"] == 150
-    checkpoint["hyper_parameters"] = {"network": {"regression_only": True}}
-    torch.save(checkpoint, path)
-    with pytest.raises(ValueError, match="回归"):
-        inspect_checkpoint(path)
-    del checkpoint["hyper_parameters"]
-    state[prefix + "final_layer.fc2.weight"] = torch.zeros(30, 4)
-    torch.save(checkpoint, path)
-    with pytest.raises(ValueError, match="BUMI"):
-        inspect_checkpoint(path)
-    del state[prefix + "embed_text.weight"]
-    torch.save(checkpoint, path)
-    with pytest.raises(RuntimeError, match="text-conditioned"):
-        inspect_checkpoint(path)
+    for dim in (151, 93, 30):
+        torch.save(
+            {
+                "state_dict": {prefix + "final_layer.fc2.weight": torch.zeros(dim, 4)},
+                "genmo_text_contract": {"max_text_len": 150},
+            },
+            path,
+        )
+        with pytest.raises(ValueError, match="bumi_text_contract"):
+            inspect_checkpoint(path)
 
 
 def test_worker_reuses_engine_updates_ddim_and_switches_contract(tmp_path, monkeypatch):
-    import gem.runtime.resident_text_motion as resident
+    import gem.runtime.bumi_text_runtime as resident
 
     calls, created = [], []
 
     class Engine:
         def __init__(self, **kwargs):
-            self.max_text_len = 150 if "new" in kwargs["ckpt_path"] else 50
+            self.max_text_len = 150
             self.path = kwargs["ckpt_path"]
             created.append(kwargs)
 
@@ -388,7 +380,7 @@ def test_worker_reuses_engine_updates_ddim_and_switches_contract(tmp_path, monke
         def close(self):
             calls.append(("close", self.max_text_len))
 
-    monkeypatch.setattr(resident, "ResidentTextMotionEngine", Engine)
+    monkeypatch.setattr(resident, "ResidentBumiTextEngine", Engine)
     monkeypatch.setattr(worker, "follow_parent", lambda: None)
     monkeypatch.setattr(worker, "run_renderer", lambda *_: {"fully_decoded": True})
     commands, events = queue.Queue(), queue.Queue()
@@ -399,7 +391,11 @@ def test_worker_reuses_engine_updates_ddim_and_switches_contract(tmp_path, monke
         commands.put(
             dict(
                 id=str(index),
-                model={"path": str(path), "fingerprint": worker.fingerprint(path)},
+                model={
+                    "path": str(path),
+                    "fingerprint": worker.fingerprint(path),
+                    "motion_backend": "bumi",
+                },
                 prompt="walk",
                 num_frames=120,
                 ddim_steps=steps,
@@ -413,18 +409,17 @@ def test_worker_reuses_engine_updates_ddim_and_switches_contract(tmp_path, monke
         ("initialize", 150),
         ("ddim", 50),
         ("close", 150),
-        ("initialize", 50),
-        ("close", 50),
+        ("initialize", 150),
+        ("close", 150),
     ]
     assert [events.get()["status"] for _ in range(events.qsize())].count("done") == 3
 
 
 def test_renderer_warning_without_video_is_failure(tmp_path, monkeypatch):
-    from scripts.demo import demo_smpl_text
+    import gem.runtime.bumi_text_viewer as viewer
 
     monkeypatch.setattr(worker, "follow_parent", lambda: None)
-    monkeypatch.setattr(worker, "check_motion", lambda *_: None)
-    monkeypatch.setattr(torch, "load", lambda *_, **__: {"body_params_global": {}})
-    monkeypatch.setattr(demo_smpl_text, "render_global_video", lambda *_: None)
+    monkeypatch.setattr(viewer, "render_bumi_video", lambda *_: None)
+    (tmp_path / "metadata.json").write_text(json.dumps({"motion_backend": "bumi"}))
     with pytest.raises(RuntimeError, match="未输出有效视频"):
         worker.render_job(tmp_path, 120)

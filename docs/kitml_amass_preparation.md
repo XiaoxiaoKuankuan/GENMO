@@ -71,7 +71,7 @@ PYTHONDONTWRITEBYTECODE=1 /data0/user/liwei/envs/GENMO-cu128/bin/python \
 - NPZ 保留 `poses[T,66]`（根轴角 3 + 身体轴角 63）、`trans[T,3]`、`betas[10]`、gender、
   `mocap_framerate=30`、SMPL-X 模型身份、缺失手脸字段清单。沿用原 AMASS/GENMO 世界坐标，
   `coordinate_transform=identity`，不二次执行 Y-up/Z-up 变换或接地平移。
-- 原始 SMPL+H 分支保存 156 维身体和手部参数、完整 betas 和可选 DMPL，复用已有音乐数据的
+- 原始 SMPL+H 分支保存 156 维身体和手部参数、完整 betas 和可选 DMPL，使用独立公共模块 `gem/utils/motion_resampling.py` 的
   SLERP/线性重采样，不做轴角逐元素插值；原始形状/性别保留。
 - `summary.json` 汇总全部状态、caption、时长、映射指纹与相同 AMASS 源动作组。
   后续划分 train/val/test 必须以 AMASS 来源组去重；还需核对与 HumanML3D 的 AMASS 来源交集。

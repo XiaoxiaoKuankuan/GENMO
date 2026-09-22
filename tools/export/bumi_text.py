@@ -142,7 +142,7 @@ def constrain_sensitive_layers(network, trt):
 
 def build_engine(onnx_path, output, device="cuda:0", precision="fp16"):
     from gem.runtime.bumi_text_tensorrt import ENGINE_SCHEMA, TextTensorRTStep
-    from gem.runtime.music_only_trt import gpu_fingerprint, validate_tensorrt_installation
+    from gem.runtime.tensorrt_core import gpu_fingerprint, validate_tensorrt_installation
     from gem.runtime.tensorrt_environment import prepare_tensorrt_libraries
 
     meta = read_export_metadata(onnx_path)
@@ -363,10 +363,9 @@ def package(
         "gem/runtime/bumi_text_contract.py",
         "gem/runtime/bumi_text_runtime.py",
         "gem/runtime/bumi_text_tensorrt.py",
-        "gem/runtime/music_only_trt.py",
+        "gem/runtime/tensorrt_core.py",
         "gem/runtime/tensorrt_environment.py",
-        "gem/runtime/resident_text_motion.py",
-        "gem/runtime/artifact_publish.py",
+        "gem/runtime/text_encoding.py",
         "gem/runtime/bumi_preview.py",
         "gem/runtime/bumi_text_viewer.py",
         "gem/runtime/bumi_text_launcher.py",

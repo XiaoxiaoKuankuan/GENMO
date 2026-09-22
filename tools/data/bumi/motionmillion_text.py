@@ -19,11 +19,9 @@ from collections import Counter
 from pathlib import Path
 from urllib.parse import quote
 
-from tools.data.motionmillion.build_motionmillion_genmo import (
+from gem.datasets.text_source_contract import (
     _normalize_split_id,
     _split_from_member,
-)
-from tools.data.motionmillion.common import (
     atomic_write_json,
     identifier_candidates,
     sha256_file,

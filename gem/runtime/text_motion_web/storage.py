@@ -13,9 +13,7 @@ from pathlib import Path
 from uuid import uuid4
 
 ROOT = Path(__file__).resolve().parents[3]
-DEFAULT_CHECKPOINT = (
-    ROOT / "inputs/checkpoints/motionmillion_text_only_s190000_20260914/s190000.ckpt"
-)
+DEFAULT_CHECKPOINT = ROOT / "inputs/checkpoints/bumi_text/model.ckpt"
 T5_MODEL = "/home/weili/.cache/huggingface/hub/models--t5-3b/snapshots/bed96aab9ee46012a5046386105ee5fd0ac572f0"
 FIXED = dict(
     fps=30,

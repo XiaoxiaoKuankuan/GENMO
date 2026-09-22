@@ -5,12 +5,12 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="description" content="在本机用 GENMO 将文本生成 SMPL 人体或 BUMI 机器人动作，预览视频并回看历史。">
+  <meta name="description" content="在本机用 GENMO 将文本生成 BUMI 机器人动作，预览视频并回看历史。">
   <title>GENMO · 文本动作工作台</title>
   <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
 </head>
 <body>
-<header><a class="brand" href="/">GENMO<span>动作工作台</span></a><span class="local"><i></i> {{ '公开共享' if public_share else '本地运行' }} · SMPL / BUMI</span></header>
+<header><a class="brand" href="/">GENMO<span>动作工作台</span></a><span class="local"><i></i> {{ '公开共享' if public_share else '本地运行' }} · BUMI</span></header>
 <main>
   <div class="intro"><div><p class="eyebrow">TEXT TO MOTION</p><h1>让文字，成为动作。</h1><p class="muted">选择模型，描述动作，在这里预览你的创作。</p></div><span class="format">30 FPS <b>／</b> 1280 × 720</span></div>
   <div class="workspace">
@@ -19,7 +19,7 @@
       <form id="generate-form">
         <label for="model">GENMO 模型</label>
         <select id="model" required><option value="">正在发现本地文本模型…</option></select>
-        <p id="model-detail" class="hint">自动兼容 50 / 150 token 文本模型</p>
+        <p id="model-detail" class="hint">支持 BUMI 150 token 文本模型</p>
         {% if not public_share %}<details id="add-model"><summary>＋ 添加本地模型</summary><label for="model-path">Checkpoint 本地路径</label><input id="model-path" type="text" placeholder="/home/weili/GENMO/…/model.ckpt"><button id="register" class="secondary" type="button">校验并加入列表</button><p id="register-status" class="hint" role="status"></p></details>{% endif %}
         <label for="prompt">动作描述 <span>Prompt</span></label>
         <textarea id="prompt" rows="6" required placeholder="例如：A person walks forward, stops, and waves with their right hand."></textarea>

@@ -24,6 +24,3 @@ ignore = [
 
 [tool.ruff.lint.isort]
 known-first-party = ["gem", "tools"]
-
-[tool.pytest.ini_options]
-testpaths = ["tests"]

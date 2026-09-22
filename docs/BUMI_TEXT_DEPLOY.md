@@ -1,7 +1,7 @@
 # BUMI 文本模型独立运行包
 
 这个包只运行已经导出的BUMI文本模型，不携带训练checkpoint，不连接GMT/ROS/Redis。
-用文本直接生成60–300帧、30FPS的机器人qpos28，可在MuJoCo窗口查看纯运动学动画。
+按模型自身契约生成30FPS的机器人qpos28（当前crop120为4–120帧，历史full300为60–300帧），可在MuJoCo窗口查看纯运动学动画。
 
 1. 目标环境为Ubuntu22.04、x86_64、Python3.10及可用的NVIDIA驱动。engine要求匹配
    构建GPU与TensorRT10.13.3.9；同为4090也必须通过启动检查。不兼容时在训练仓库对应
@@ -15,7 +15,7 @@
 5. 运行`bash run.sh`。无需先activate环境。默认打开MuJoCo窗口；不需要窗口时将
    `[preview] enabled=false`。
 
-控制台输入文本，或`play Walk forward.`。`frames 240`和`steps 50`修改后续生成参数；
+控制台输入文本，或`play Walk forward.`。`frames 120`和`steps 50`修改后续生成参数；
 `pause/resume/stand`控制本地动作播放，`status`查看状态，`quit`退出。默认CFG2.5、
 seed42、DDIM50、120帧，T5最大150token。关闭窗口不关闭控制台，窗口不会执行动力学。
 
@@ -32,5 +32,5 @@ qpos_raw、足锁后的qpos、左右脚接触logits、关节顺序与FPS；足�
 窗口/GPU体验需在该机器验证。
 
 训练、数据、导出与数值对照工具均在`feature/bumi-text-only`训练仓库，详见其中
-`docs/BUMI_TEXT_FULLSEQ.md`。压缩/搬运本包时排除`.venv`和`outputs`，到新电脑重新
+`docs/BUMI_TEXT_CROP120.md`。压缩/搬运本包时排除`.venv`和`outputs`，到新电脑重新
 执行安装器；不要复制依赖原绝对路径的虚拟环境。

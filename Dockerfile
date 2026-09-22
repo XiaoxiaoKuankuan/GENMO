@@ -25,8 +25,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 RUN pip install uv
 
 # Set up workspace
-WORKDIR /workspace/gem-smpl
-COPY . /workspace/gem-smpl
+WORKDIR /workspace/bumi-text
+COPY . /workspace/bumi-text
 
 # Create virtual environment
 RUN uv venv .venv --python 3.10
@@ -35,7 +35,7 @@ RUN uv venv .venv --python 3.10
 RUN . .venv/bin/activate && \
     uv pip install torch torchvision --index-url https://download.pytorch.org/whl/cu124
 
-# Install GEM-SMPL and dependencies
+# Install BUMI text and dependencies
 RUN . .venv/bin/activate && \
     bash scripts/install_env.sh
 
@@ -44,8 +44,8 @@ ENV PYOPENGL_PLATFORM=egl
 ENV EGL_PLATFORM=surfaceless
 
 # Activate venv by default
-ENV PATH="/workspace/gem-smpl/.venv/bin:${PATH}"
-ENV VIRTUAL_ENV="/workspace/gem-smpl/.venv"
+ENV PATH="/workspace/bumi-text/.venv/bin:${PATH}"
+ENV VIRTUAL_ENV="/workspace/bumi-text/.venv"
 
 ENTRYPOINT ["tools/docker-entrypoint.sh"]
 CMD ["bash"]

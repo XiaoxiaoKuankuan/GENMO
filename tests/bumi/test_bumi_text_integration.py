@@ -7,24 +7,25 @@
 
 import copy
 import json
-from pathlib import Path
 import time
+from pathlib import Path
 
 import numpy as np
 import pytest
 import torch
 
-from tests.bumi.test_bumi_text_fullseq import text_release as text_release, KIN, ROOT
-from tests.bumi.test_bumi_text_runtime import small_checkpoint as small_checkpoint
-from tests.test_motionmillion_fullseq import release as release
-from tests.test_text_motion_web import fake_worker, wait_job, payload
 from gem.datasets.pure_motion.bumi_text import (
-    BumiTextDataset,
-    validate_record,
-    read_embedding,
     AssetCache,
+    BumiTextDataset,
+    read_embedding,
+    validate_record,
 )
 from gem.runtime.bumi_text_contract import sha256_file
+from tests.bumi.test_bumi_text_fullseq import KIN, ROOT
+from tests.bumi.test_bumi_text_fullseq import text_release as text_release
+from tests.bumi.test_bumi_text_runtime import small_checkpoint as small_checkpoint
+from tests.bumi.text_source_fixtures import release as release
+from tests.test_text_motion_web import fake_worker, payload, wait_job
 
 
 @pytest.mark.parametrize(
@@ -86,11 +87,12 @@ def test_embeddings_index_joint_contract_and_source_unchanged(text_release):
 
 
 def test_multi_dataset_sampler_and_config(text_release):
-    from gem.datamodule.motionmillion_sampler import (
-        ShardConcatDataset,
+    from hydra import compose, initialize_config_dir
+
+    from gem.datamodule.sequence_sampler import (
         ShardAwareDistributedSampler,
+        ShardConcatDataset,
     )
-    from hydra import initialize_config_dir, compose
     from gem.utils.sequence_contract import validate_sequence_experiment
 
     root = text_release[0]
@@ -122,8 +124,8 @@ def test_multi_dataset_sampler_and_config(text_release):
 
 @pytest.mark.parametrize("pose", ["stand", "walk", "jump", "crouch", "lie"])
 def test_pose_domain_and_fk(pose):
-    from gem.robots.bumi.kinematics import BumiKinematics
     from gem.robots.bumi.feature_codec import BumiMotionFeatureCodec
+    from gem.robots.bumi.kinematics import BumiKinematics
 
     kin = BumiKinematics(KIN)
     codec = BumiMotionFeatureCodec(kin)
@@ -145,6 +147,7 @@ def test_pose_domain_and_fk(pose):
     assert torch.isfinite(fk["body_pos_w"]).all()
     # 用真实MJCF的CPU前向运动学核对训练FK，渲染不依赖这里的替身。
     import mujoco
+
     from gem.runtime.bumi_preview import validate_robot_assets
 
     xml, _ = validate_robot_assets(ROOT / "assets/bumi_viewer/manifest.json", KIN)
@@ -165,9 +168,9 @@ def test_pose_domain_and_fk(pose):
 
 
 def test_bumi_web_contract_range_and_recovery(small_checkpoint, tmp_path):
+    from gem.runtime.text_motion_web.app import create_app
     from gem.runtime.text_motion_web.models import ModelRegistry
     from gem.runtime.text_motion_web.service import JobService
-    from gem.runtime.text_motion_web.app import create_app
 
     registry = ModelRegistry(tmp_path / "web", roots=[])
     model = registry.add(str(small_checkpoint))
@@ -197,8 +200,9 @@ def test_bumi_web_contract_range_and_recovery(small_checkpoint, tmp_path):
 
 def test_cpu_video_artifact_and_no_network_preview(tmp_path, monkeypatch):
     import mujoco
+
     from gem.runtime.bumi_text_viewer import TextPreviewPlayer
-    from gem.runtime.text_motion_web.worker import render_job, check_video
+    from gem.runtime.text_motion_web.worker import check_video, render_job
 
     spec = json.loads(KIN.read_text())
     qpos = np.tile(spec["default_qpos"], (60, 1))
@@ -310,8 +314,8 @@ def test_reuse_original_motionmillion_embeddings(release):
 
 
 def test_new_feature_writer_only_encodes_missing(text_release, tmp_path, monkeypatch):
-    from tools.data.bumi.encode_text_features import encode
     from gem.runtime.bumi_text_runtime import ResidentBumiTextEngine
+    from tools.data.bumi.encode_text_features import encode
 
     root, _, records = text_release
     rows = copy.deepcopy(records)
@@ -354,11 +358,11 @@ def test_cpu_small_model_diagnostic_report(text_release, small_checkpoint, tmp_p
         assert set(row["metrics"]) == {"gt", "raw", "postprocessed"}
 
 
-def test_web_switches_bumi_and_smpl_with_separate_engines(tmp_path, monkeypatch):
+def test_web_reuses_bumi_engine_and_rejects_smpl(tmp_path, monkeypatch):
     import queue
-    from gem.runtime.text_motion_web import worker
+
     import gem.runtime.bumi_text_runtime as bumi
-    import gem.runtime.resident_text_motion as smpl
+    from gem.runtime.text_motion_web import worker
 
     calls = []
 
@@ -384,7 +388,6 @@ def test_web_switches_bumi_and_smpl_with_separate_engines(tmp_path, monkeypatch)
     class RobotStub(EngineStub):
         backend = "bumi"
 
-    monkeypatch.setattr(smpl, "ResidentTextMotionEngine", EngineStub)
     monkeypatch.setattr(bumi, "ResidentBumiTextEngine", RobotStub)
     monkeypatch.setattr(worker, "follow_parent", lambda: None)
     monkeypatch.setattr(worker, "run_renderer", lambda *args: {"fully_decoded": True})
@@ -411,16 +414,15 @@ def test_web_switches_bumi_and_smpl_with_separate_engines(tmp_path, monkeypatch)
         ("create", "bumi"),
         ("ddim", 21),
         ("close", "bumi"),
-        ("create", "smpl"),
-        ("close", "smpl"),
         ("create", "bumi"),
         ("close", "bumi"),
     ]
-    assert sum(events.get()["status"] == "done" for _ in range(events.qsize())) == 4
+    assert sum(events.get()["status"] == "done" for _ in range(events.qsize())) == 3
 
 
 def test_checkpoint_assets_can_move_without_changing_identity(small_checkpoint, tmp_path):
     import shutil
+
     from gem.runtime.text_motion_web.models import inspect_checkpoint
 
     payload = torch.load(small_checkpoint, weights_only=False)

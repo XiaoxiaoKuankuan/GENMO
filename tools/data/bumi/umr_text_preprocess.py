@@ -45,10 +45,10 @@ from urllib.parse import quote
 import numpy as np
 import torch
 
+from gem.datasets.text_source_contract import mirror_base_id
 from gem.robots.bumi.kinematics import sha256_file
-from gem.robots.bumi.legacy_motion import _NumpyCompatibleUnpickler
+from gem.utils.pickle_compat import _NumpyCompatibleUnpickler
 from tools.data.bumi.umr_text_quality import QualityEngine, load_rules, verify_asset_files
-from tools.data.motionmillion.common import mirror_base_id
 
 ROOT = Path(__file__).resolve().parents[3]
 SCHEMA = "genmo.bumi_umr_text_quality.v1"
@@ -1236,12 +1236,11 @@ def run_filter(args):
     code_paths = [
         Path(__file__),
         Path(__file__).with_name("umr_text_quality.py"),
-        Path(__file__).with_name("filter_sonic_npz_motions.py"),
         ROOT / "gem/robots/bumi/kinematics.py",
-        ROOT / "gem/robots/bumi/quality_filter.py",
-        ROOT / "gem/robots/bumi/legacy_motion.py",
+        ROOT / "gem/robots/bumi/motion_quality.py",
+        ROOT / "gem/utils/pickle_compat.py",
         ROOT / "gem/utils/rotation_conversions.py",
-        ROOT / "tools/data/motionmillion/common.py",
+        ROOT / "gem/datasets/text_source_contract.py",
     ]
     import mujoco
 

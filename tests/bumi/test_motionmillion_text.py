@@ -12,8 +12,8 @@ import tarfile
 
 import pytest
 
+from gem.datasets.text_source_contract import sha256_file
 from tools.data.bumi.motionmillion_text import TextCatalog, bind_report, build_catalog
-from tools.data.motionmillion.common import sha256_file
 
 
 def archive(path, entries):

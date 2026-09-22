@@ -20,8 +20,7 @@ from omegaconf import DictConfig
 from pytorch_lightning.utilities.combined_loader import CombinedLoader
 from torch.utils.data import ConcatDataset, DataLoader, Subset, default_collate
 
-from gem.datamodule.balanced_music_sampler import HierarchicalMusicDistributedSampler
-from gem.datamodule.motionmillion_sampler import ShardAwareDistributedSampler, ShardConcatDataset
+from gem.datamodule.sequence_sampler import ShardAwareDistributedSampler, ShardConcatDataset
 from gem.utils.pylogger import Log
 
 rlimit = resource.getrlimit(resource.RLIMIT_NOFILE)
@@ -171,7 +170,10 @@ class DataModule(pl.LightningDataModule):
         self.shard_aware_sampling = shard_aware_sampling
         self.text_sampling = text_sampling
         if text_sampling is not None and text_sampling.get("enabled", False):
-            if any(c is not None and c.get("enabled", False) for c in (balanced_sampling, shard_aware_sampling)):
+            if any(
+                c is not None and c.get("enabled", False)
+                for c in (balanced_sampling, shard_aware_sampling)
+            ):
                 raise ValueError("文本分层采样不能与其他采样器同时启用")
             if limit_each_trainset or train_subset_ratio is not None:
                 raise ValueError("文本分层采样不支持改变母来源的随机Subset，请用独立测试release")
@@ -179,9 +181,9 @@ class DataModule(pl.LightningDataModule):
         if "train" in dataset_opts:
             assert "train" in self.loader_opts, "train not in loader_opts"
             split_opts = dataset_opts.get("train")
-            assert isinstance(
-                split_opts, DictConfig
-            ), "split_opts should be a dict for each dataset"
+            assert isinstance(split_opts, DictConfig), (
+                "split_opts should be a dict for each dataset"
+            )
             dataset = []
             dataset_names = []
             sampling_records = []
@@ -211,11 +213,7 @@ class DataModule(pl.LightningDataModule):
             # legacy datasets without a sampling_summary attribute.
             effective_total = sum(len(value) for value in dataset)
             for name, summary, effective_len in sampling_records:
-                fraction = (
-                    effective_len / effective_total
-                    if effective_total > 0
-                    else 0.0
-                )
+                fraction = effective_len / effective_total if effective_total > 0 else 0.0
                 Log.info(
                     "[Train Sampling] "
                     f"name={name}, raw_sequences={summary['raw_sequences']}, "
@@ -227,7 +225,9 @@ class DataModule(pl.LightningDataModule):
             self.trainsets = dataset
             self.trainset_names = dataset_names
             dataset = ConcatDataset(dataset)
-            if getattr(self, "text_sampling", None) is not None and self.text_sampling.get("enabled", False):
+            if getattr(self, "text_sampling", None) is not None and self.text_sampling.get(
+                "enabled", False
+            ):
                 from gem.datamodule.bumi_text_sampler import BumiTextMixture
 
                 dataset = BumiTextMixture(self.trainsets)
@@ -241,9 +241,9 @@ class DataModule(pl.LightningDataModule):
                 continue
             assert split in self.loader_opts, f"split={split} not in loader_opts"
             split_opts = dataset_opts.get(split)
-            assert isinstance(
-                split_opts, DictConfig
-            ), "split_opts should be a dict for each dataset"
+            assert isinstance(split_opts, DictConfig), (
+                "split_opts should be a dict for each dataset"
+            )
             dataset = []
             dataset_num = len(split_opts)
             for idx, (k, v) in enumerate(split_opts.items()):
@@ -258,7 +258,9 @@ class DataModule(pl.LightningDataModule):
     def train_dataloader(self):
         if hasattr(self, "trainset"):
             sampler = None
-            if getattr(self, "text_sampling", None) is not None and self.text_sampling.get("enabled", False):
+            if getattr(self, "text_sampling", None) is not None and self.text_sampling.get(
+                "enabled", False
+            ):
                 from gem.datamodule.bumi_text_sampler import BumiTextDistributedSampler
 
                 sampler = BumiTextDistributedSampler(
@@ -278,14 +280,12 @@ class DataModule(pl.LightningDataModule):
                 if self.balanced_sampling is not None and self.balanced_sampling.get(
                     "enabled", False
                 ):
-                    raise ValueError(
-                        "shard_aware_sampling 与 balanced_sampling 不能同时启用"
-                    )
-                ddp_sampler_kwargs = _trainer_ddp_sampler_kwargs(
-                    getattr(self, "trainer", None)
-                )
+                    raise ValueError("shard_aware_sampling 与 balanced_sampling 不能同时启用")
+                ddp_sampler_kwargs = _trainer_ddp_sampler_kwargs(getattr(self, "trainer", None))
                 sampler = ShardAwareDistributedSampler(
-                    self.trainsets[0] if len(self.trainsets) == 1 else ShardConcatDataset(self.trainsets),
+                    self.trainsets[0]
+                    if len(self.trainsets) == 1
+                    else ShardConcatDataset(self.trainsets),
                     seed=int(self.shard_aware_sampling.get("seed", 20260909)),
                     shuffle=bool(self.shard_aware_sampling.get("shuffle", True)),
                     drop_last=True,
@@ -300,9 +300,13 @@ class DataModule(pl.LightningDataModule):
                 # 同时报告DataLoader drop_last和梯度累积，避免把每卡micro-batch
                 # 数误认为优化器步数。epoch尾部不足一次累积时，Lightning仍会更新。
                 batch_size = int(self.loader_opts.train.batch_size)
-                accumulation = int(getattr(getattr(self, "trainer", None), "accumulate_grad_batches", 1))
+                accumulation = int(
+                    getattr(getattr(self, "trainer", None), "accumulate_grad_batches", 1)
+                )
                 micro_batches = len(sampler) // batch_size
-                last_accumulation = (micro_batches % accumulation or accumulation) if micro_batches else 0
+                last_accumulation = (
+                    (micro_batches % accumulation or accumulation) if micro_batches else 0
+                )
                 Log.info(
                     "[Train Sampling][Batch budget] "
                     f"micro_batches_per_rank={micro_batches}, loader_drop_last=True, "
@@ -310,49 +314,8 @@ class DataModule(pl.LightningDataModule):
                     f"optimizer_steps_per_epoch={(micro_batches + accumulation - 1) // accumulation}, "
                     f"last_accumulation_micro_batches={last_accumulation}"
                 )
-            if self.balanced_sampling is not None and self.balanced_sampling.get(
-                "enabled", False
-            ):
-                ddp_sampler_kwargs = _trainer_ddp_sampler_kwargs(
-                    getattr(self, "trainer", None)
-                )
-                sampler = HierarchicalMusicDistributedSampler(
-                    self.trainsets,
-                    dataset_names=self.trainset_names,
-                    samples_per_epoch=int(
-                        self.balanced_sampling.get("samples_per_epoch", 52224)
-                    ),
-                    fps=float(self.balanced_sampling.get("fps", 30.0)),
-                    temperature=float(
-                        self.balanced_sampling.get("temperature", 0.5)
-                    ),
-                    minimum_dataset_probability=float(
-                        self.balanced_sampling.get(
-                            "minimum_dataset_probability", 0.05
-                        )
-                    ),
-                    maximum_dataset_probability=float(
-                        self.balanced_sampling.get(
-                            "maximum_dataset_probability", 0.50
-                        )
-                    ),
-                    seed=int(self.balanced_sampling.get("seed", 42)),
-                    **ddp_sampler_kwargs,
-                )
-                summary = ", ".join(
-                    f"{name}={probability:.4%} (H={hours:.4f}h)"
-                    for name, probability, hours in zip(
-                        sampler.dataset_names,
-                        sampler.dataset_probabilities,
-                        sampler.unique_music_hours,
-                    )
-                )
-                Log.info(
-                    "[Train Sampling][Deduplicated hierarchical] "
-                    f"global_samples={sampler.samples_per_epoch}, "
-                    f"per_rank_samples={len(sampler)}, "
-                    f"rank={sampler.rank}/{sampler.num_replicas}, {summary}"
-                )
+            if self.balanced_sampling is not None and self.balanced_sampling.get("enabled", False):
+                raise ValueError("音乐采样已迁至音乐分支")
             return DataLoader(
                 self.trainset,
                 shuffle=sampler is None,

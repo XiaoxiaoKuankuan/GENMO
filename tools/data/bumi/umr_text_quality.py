@@ -23,14 +23,14 @@ import numpy as np
 import yaml
 
 from gem.robots.bumi.kinematics import BumiKinematics, sha256_file
-from gem.robots.bumi.quality_filter import mask_to_intervals
-from tools.data.bumi.filter_sonic_npz_motions import (
-    SonicNpzQualityConfig,
+from gem.robots.bumi.motion_quality import (
+    MotionQualityConfig,
     _angular_speed_wxyz,
     _central_difference,
     _longest_true_run,
     _signal_metrics,
     evaluate_motion,
+    mask_to_intervals,
 )
 
 CONFIG_SCHEMA = "genmo.bumi_umr_text_quality_config.v1"
@@ -252,7 +252,7 @@ class QualityEngine:
             require(lo < hi, f"有效关节限位无交集: {name}")
             lower.append(lo)
             upper.append(hi)
-        self.config = SonicNpzQualityConfig(
+        self.config = MotionQualityConfig(
             motion_contract_version="umr.bumi_text_qpos30.v1",
             fps=30,
             required_keys=(),
