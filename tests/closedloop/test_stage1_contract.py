@@ -1,9 +1,9 @@
-"""BUMI closed-loop Stage 1 契约的纯结构回归测试。
+"""BUMI closed-loop Stage 1 条件与监督契约的纯结构回归测试。
 
-测试只构造小型内存张量，核对 qpos30/EDGE35/proprio48 的版本、shape、时间轴和逐坐标
-prefix mask 规则；不会读取真实训练数据、生成 target、启动 Isaac/GMT、运行网络或写出
-rollout。测试通过只能证明静态 contract 自洽，不能证明 producer 的状态确实来自真实机器人、
-不存在未来泄漏，也不能证明 Stage 2、动力学或实机能力。
+测试只构造小型内存张量，核对 qpos30/EDGE35/proprio48 的版本、shape、时间轴、逐坐标
+prefix/target mask 规则；不会读取真实训练数据、启动 Isaac/GMT、运行网络或写出 rollout。
+测试通过只能证明静态 contract 自洽，不能把示范 proxy 当作真实机器人反馈，也不能证明
+Stage 2、动力学或实机能力。
 """
 
 from __future__ import annotations
@@ -35,8 +35,11 @@ from gem.closedloop.contracts import (
     QPOS30_NEXT_SAMPLE_DEPENDENT_FIELDS,
     STAGE1_CONDITION_KEYS,
     STAGE1_CONTRACT_VERSION,
+    STAGE1_TARGET_KEYS,
     Stage1ConditionBatch,
+    Stage1TrainingBatch,
     validate_stage1_condition_batch,
+    validate_stage1_training_batch,
 )
 from gem.robots.bumi.feature_codec import (
     BUMI_FEATURE_DIM,
@@ -285,14 +288,69 @@ def test_condition_type_does_not_claim_stage3_targets() -> None:
     assert not {"target_qpos30", "target_contact", "target_contact_valid"} & set(
         Stage1ConditionBatch.__annotations__
     )
+    assert set(STAGE1_TARGET_KEYS) == {
+        "target_qpos30",
+        "target_qpos30_valid",
+        "target_contact",
+        "target_contact_valid",
+    }
+    assert set(STAGE1_TARGET_KEYS) <= set(Stage1TrainingBatch.__annotations__)
+
+
+def test_training_batch_checks_coordinate_validity_and_unknown_supervision() -> None:
+    batch = _make_valid_batch(batch_size=1)
+    training = dict(batch)
+    training.update(
+        {
+            "target_qpos30": torch.zeros(1, 120, 30),
+            "target_qpos30_valid": torch.ones(1, 120, 30, dtype=torch.bool),
+            "target_contact": torch.zeros(1, 120, 2),
+            "target_contact_valid": torch.ones(1, 120, 2, dtype=torch.bool),
+        }
+    )
+    validate_stage1_training_batch(training)
+
+    training["target_qpos30_valid"][:, -1, :2] = False
+    validate_stage1_training_batch(training)
+
+    training["known_qpos30_mask"] = training["target_qpos30_valid"].clone()
+    with pytest.raises(ValueError, match="retain at least one valid unknown"):
+        validate_stage1_training_batch(training)
+
+
+def test_training_batch_rejects_an_internal_root_delta_validity_hole() -> None:
+    batch = _make_valid_batch(batch_size=1)
+    training = dict(batch)
+    target_valid = torch.ones(1, 120, 30, dtype=torch.bool)
+    target_valid[:, 37, :2] = False
+    training.update(
+        {
+            "target_qpos30": torch.zeros(1, 120, 30),
+            "target_qpos30_valid": target_valid,
+            "target_contact": torch.zeros(1, 120, 2),
+            "target_contact_valid": torch.ones(1, 120, 2, dtype=torch.bool),
+        }
+    )
+    with pytest.raises(ValueError, match=r"state at t\+1 is valid"):
+        validate_stage1_training_batch(training)
+
+
+def test_condition_validator_accepts_configured_history_length() -> None:
+    batch = _make_valid_batch(batch_size=1)
+    for key in ("proprio_history", "proprio_history_valid", "proprio_history_times"):
+        batch[key] = batch[key][:, -7:]
+    validate_stage1_condition_batch(batch, history_steps=7)
+    with pytest.raises(ValueError, match="proprio_history must have shape"):
+        validate_stage1_condition_batch(batch)
 
 
 def test_yaml_and_document_match_python_contract() -> None:
     raw = yaml.safe_load(CONTRACT_CONFIG.read_text(encoding="utf-8"))
     assert raw["contract_version"] == STAGE1_CONTRACT_VERSION
-    assert raw["scope"] == "condition_only"
-    assert raw["implementation_status"] == "contract_only"
+    assert raw["scope"] == "conditions_and_supervised_targets"
+    assert raw["implementation_status"] == "stage3_dataset_available_stage4_network_not_implemented"
     assert raw["stage1"]["required_condition_fields"] == list(STAGE1_CONDITION_KEYS)
+    assert raw["stage1"]["required_target_fields"] == list(STAGE1_TARGET_KEYS)
     assert raw["stage1"]["outputs"]["future_motion_qpos30"] == ["B", 120, 30]
     assert raw["stage1"]["outputs"]["future_contact_logits"] == ["B", 120, 2]
     assert raw["stage2"]["implementation_status"] == "not_implemented"
@@ -316,7 +374,10 @@ def test_yaml_and_document_match_python_contract() -> None:
     assert raw["prefix"]["allow_empty"] is True
     assert raw["prefix"]["nominal_commit_duration_seconds"] is None
     assert "root_position[t+1]" in raw["prefix"]["root_delta_boundary_rule"]
-    assert raw["reserved_stage3_targets"]["implementation_status"] == "not_implemented"
+    assert raw["stage3_targets"]["implementation_status"] == "implemented"
+    assert raw["stage3_targets"]["target_qpos30_valid"] == ["B", 120, 30]
+    assert "future_valid[t+1]" in raw["stage1_training_batch"]["internal_root_delta_validity"]
+    assert raw["stage3_demo_proprio_construction"]["uses_future_source_sample"] is False
 
     downstream = raw["downstream_gmt"]
     assert downstream["policy"]["shape"] == ["B", GMT_POLICY_DIM]
@@ -332,5 +393,5 @@ def test_yaml_and_document_match_python_contract() -> None:
     assert "future_times[119] = t0 + 119/30" in document
     assert "不能写成最后采样点位于 `t0+4.0`" in document
     assert "GMT 权重始终冻结" in document
-    assert "尚未完成的第 3 步" in document
+    assert "第 3 步已完成" in document
     assert "尚未完成的第 4 步" in document

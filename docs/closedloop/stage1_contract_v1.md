@@ -1,19 +1,22 @@
-# BUMI closed-loop Stage 1 条件契约 v1
+# BUMI closed-loop Stage 1 条件与监督数据契约 v1
 
-本文定义 `genmo.bumi_closedloop.stage1.v1`。本轮只固定接口、物理语义、时间轴和因果
-边界，不生成真实训练样本，不改网络，也不实现 GENMO↔GMT 通信、Stage 2 或 DPPO。
+本文定义 `genmo.bumi_closedloop.stage1.v1`。第 2 步固定接口、物理语义、时间轴和因果
+边界；第 3 步已经新增独立的音乐—BUMI监督样本构造，但仍不改网络，也不实现
+GENMO↔GMT 通信、Stage 2 或 DPPO。
 
 核验基线：
 
-- GENMO：`feature/bumi-music-closedloop@df8e12d`，继承
+- GENMO：`feature/bumi-music-closedloop`，继承自
   `feature/bumi-music-only` 的 qpos30/contact2 正式实现；
 - GMT：`feature/bumi-frozen-gmt-backend@be05067c`；
 - 匹配任务：`mimic_noetix_bumi3_mha_sonic`，Gym ID
   `gmt-bumi3-MHA-him-v0`；
 - Isaac Lab builtin observation 实现来自当前 `/home/weili/IsaacLab` checkout。
 
-配置的机器可读副本在 `configs/closedloop/stage1_contract_v1.yaml`，Python 类型和只做
-结构检查的 validator 在 `gem/closedloop/contracts.py`。
+配置的机器可读副本在 `configs/closedloop/stage1_contract_v1.yaml`，Python 类型和
+validator 在 `gem/closedloop/contracts.py`，第 3 步 Dataset 在
+`gem/closedloop/stage1_dataset.py`。服务器1四库实例配置在
+`configs/closedloop/stage1_dataset_server1_fourset_v1.yaml`。
 
 ## 1. 两阶段方法和本轮边界
 
@@ -255,9 +258,39 @@ decision_time          [B]
   零”自动解释成真实静止状态或 padding；
 - 后续 Stage 1 数据构造只能使用 decision cutoff 之前实际可获得的因果信息。
 
-需要特别区分：从目标/示范 qpos 运动学计算出的理想状态不等同于经过 frozen GMT 和 BUMI
-dynamics 后的实际机器人状态。真实 rollout、示范可构造子集及其使用范围要在第 3 步另行
-定义；本轮 validator 无法证明 provenance。
+需要特别区分：第 3 步从目标/示范 qpos 构造的是
+`causal_demo_kinematic_proxy_not_actual_gmt_rollout`，不等同于经过 frozen GMT 和 BUMI
+dynamics 后的实际机器人状态。训练样本 metadata 明确记录该 provenance；部署时
+`proprio_history` 仍必须来自实际机器人/控制器观测。validator 可以检查时间和 mask，却不能
+仅凭张量数值证明外部 producer 的来源。
+
+### 5.1 第 3 步的严格因果 demo 30→50 Hz 规则
+
+令 decision frame 为 `d`，示范源帧 `n` 的时刻为 `n/30`。历史槽 `j=0...H-1` 使用
+150 Hz 整数公共时基：
+
+```text
+history_tick[j] = 5*d - 3*(H-1-j)
+latest_source[j] = floor(history_tick[j] / 5)
+```
+
+负 tick 是左侧 padding。非负 tick 只读取时间不晚于该槽的最新 30 Hz 源帧，并将该源帧
+proprio 保持到 50 Hz 槽；不做需要右侧括点的线性插值、SLERP、中心差分或滤波。源速度先在
+30 Hz 上用 `n-1 -> n` 后向差分得到，再随当前观测一起保持：
+
+- `projected_gravity[n] = inverse(q[n]) * [0,0,-1]`；
+- `base_ang_vel[n]` 使用 `R[n] R[n-1]^T` 的世界系最短旋转向量乘 30，再由当前
+  `inverse(q[n])` 转入当前机体系；
+- `joint_pos_rel[n]` 先按名字从 MuJoCo-native 顺序置换到 GMT 顺序，再减 GMT 名义 default；
+- `joint_vel_rel[n] = (joint[n]-joint[n-1])*30`，同样按名字置换，default velocity 为零。
+
+第 0 个源帧没有过去样本。由于当前只有整帧 `[H]` mask，它的 48 维槽整体
+`proprio_history_valid=false`，有限零速度只作占位，不能冒充真实静止；也不会用第 1 帧做
+前向差分。示范数据没有 GMT startup 时每环境的随机 default offset，因此这里明确使用 GMT
+名义 default，不随机伪造 active default。将来实际 rollout producer 必须改用其真实 active
+default。实现虽然要求调用方只交出 `0..d` 的完整 causal prefix 来封闭未来边界，但实际计算
+只截取 H 个历史槽所需的最小过去范围，并额外向左取一个速度前驱，不会随 decision frame
+线性重算全部久远历史。
 
 ## 6. 120 点、30 Hz 的共享未来时间轴
 
@@ -343,44 +376,65 @@ padding，并且 decode 只积分 `delta[:-1]`。数据构造绝不能把 prefix
 作为 condition。窗口最后一个 delta 若没有显式的窗口外 `t+1` provenance，同样不得标 known。
 
 若未来发现其他派生字段依赖未知后续，也必须单独缩短对应坐标的 known 区域。contact 标签
-当前由足底高度、水平速度和迟滞规则产生，其 prefix 可见范围要在第 3 步单独定义，本轮不
-提前实现切片逻辑。
+继续复用版本化 payload；只有 payload 缺失时才复用现有完整序列 FK、高度、forward foot
+speed 与迟滞规则派生。contact 始终只是监督 target，不创建 contact prefix，因此其未来依赖
+不会进入 GENMO 条件。
 
-## 8. Stage 1 条件 batch
+## 8. Stage 1 条件与监督 batch
 
-本轮 Python 类型只定义以下输入：
+第 3 步返回以下输入；`H` 可配置，默认 50：
 
 | 字段 | shape | 语义 |
 |---|---:|---|
 | `music_features` | `[B,120,35]` | EDGE35，沿共享 future 时间轴 |
 | `music_valid` | `[B,120]` | 音乐采样有效 mask |
-| `proprio_history` | `[B,50,48]` | 原始物理 proprio48 历史 |
-| `proprio_history_valid` | `[B,50]` | 历史有效 mask |
-| `proprio_history_times` | `[B,50]` | 50 Hz 历史时间戳 |
+| `proprio_history` | `[B,H,48]` | 原始物理 proprio48 历史，默认 `H=50` |
+| `proprio_history_valid` | `[B,H]` | 历史有效 mask |
+| `proprio_history_times` | `[B,H]` | 50 Hz 历史时间戳 |
 | `known_qpos30` | `[B,120,30]` | 上一轮已承诺的 physical qpos30 |
 | `known_qpos30_mask` | `[B,120,30]` | 逐坐标 known mask |
 | `future_valid` | `[B,120]` | 未来动作/监督时间点有效 mask |
 | `future_times` | `[B,120]` | 音乐与动作共享的 30 Hz 时间轴 |
 | `decision_time` | `[B]` | 本次决策可用信息截止时间 |
 
-`gem.closedloop.validate_stage1_condition_batch()` fail-closed 检查：必需字段集合、shape、bool
+`gem.closedloop.validate_stage1_condition_batch()` 接受显式 `history_steps`，fail-closed
+检查：必需字段集合、shape、bool
 mask、有限值、50/30 Hz 时间步长、历史因果边界、invalid future 上不可 known、逐坐标 prefix
 单调性、future 首点不早于 decision time，以及无窗口外 provenance 时末帧 root delta 不可
 known。它不填数据、不自动修 mask，也不证明中间帧 root delta 的 `p[t+1]` 来自上一轮计划；
 qpos30 不保存绝对 root XY，不能拿其他 28 个 known 坐标伪装这项证明。样本 ID、provenance
 或后续独立 target 可以作为附加键存在，但必须由各自契约另行验证，不能替代这里的必需
-条件键。
-
-第 3 步才增加且构造：
+条件键。第 3 步同时构造：
 
 ```text
 target_qpos30          [B,120,30]
+target_qpos30_valid    [B,120,30]
 target_contact         [B,120,2]
 target_contact_valid   [B,120,2]
 ```
 
-最后一个 valid shape 可以在核验现有正式 loss 后采用严格兼容形式。本轮只在配置里保留这些
-名称，不把它们加入 Python batch type，也不产生任何真实 target。
+`target_qpos30_valid` 必须逐坐标：若真实序列最后一帧存在，它的 height、rotation 和 joints
+仍有效；只有缺少 `root_position[t+1]` 的 `[0:2]` 无效。padding 的全部坐标无效。
+`target_contact_valid` 固定为 `[B,120,2]`，与现行左右足独立 contact loss 兼容。训练 validator
+还要求窗口内部 `root_delta_xy_heading[t]` 的有效性严格等于 `future_valid[t+1]`，不允许内部
+挖洞；第 119 点则由窗口外第 121 帧 halo 是否存在决定。除此之外，音乐与 future mask 必须
+对齐、known mask 不得暴露无效 label，并且每条样本至少保留一个有效 unknown qpos30 坐标。
+
+### 8.1 qpos30 halo、prefix 与尾部处理
+
+target 编码以 decision frame 为 crop anchor，但最多读取 `qpos[t:t+121]`：前 120 帧是窗口，
+第 121 帧只提供窗口末帧 root XY delta 的真实下一点。若 halo 不存在，codec 产生的 terminal
+repeat 会立即被清零并由逐坐标 mask 标无效。
+
+P 通过 `prefix_min_frames/prefix_max_frames` 配置：二者相等为固定 P，不等为闭区间内的稳定
+可复现可变 P，二者都可以为 0；没有把 P 固定为 0.4 秒。对尾部样本，effective P 会裁到
+`future_valid_frames-1`，从而始终留下真实 unknown target。teacher-forced 数据 prefix 的
+metadata 值是 `teacher_forced_demo_reference_v1`；部署语义仍是“上一轮已发布计划”，两者不
+得混写成实际 robot state。
+
+known tensor 先全零，再只向 mask=true 的坐标复制 target：状态字段 `[2:30]` 可覆盖前 P 帧，
+root delta `[0:2]` 最多覆盖前 `P-1` 帧。未知区域的有限零只是占位，绝不是由完整未来标签先
+复制后再隐藏。
 
 ## 9. GMT 69/690/1092 下游契约
 
@@ -439,6 +493,10 @@ physical qpos30
 50 Hz 时间线上求。Stage 1 不新建 dq 算法、root velocity 算法或第二套 command-window
 逻辑，也不从 30 Hz 预测 dq 后再冒充 50 Hz consumer reference。
 
+这里的“执行适配”与第 3 步 demo history builder 是两个不同用途：执行适配拥有完整参考轨迹，
+必须继续复用上述权威插值/中心差分；训练 history 必须模拟 decision cutoff，因而只能使用
+后向差分和 latest-available hold。后者不生成 GMT command，不应替代前者。
+
 按现有端点计数规则，一个独立 120 点、30 Hz 序列的首尾跨度为 `119/30 s`，离线重采样会
 得到 `floor((119/30)*50)+1 = 199` 个 50 Hz 点，而不是简单按 `4*50` 写成 200。在线连续
 链路应使用全局增量时间栅格，避免逐窗舍入和重复端点。
@@ -461,16 +519,22 @@ policy/physics     1:4
 不是当前已实现、已计时或已在仿真/真机达成的能力。commit horizon 也必须在新模型的端到端
 P50/P95/P99 延迟和 GMT 前瞻需求已知后再确定。
 
-## 12. 后续第 3、4 步
+## 12. 第 3 步已完成、尚未完成的第 4 步
 
-尚未完成的第 3 步数据构造至少要解决：
+第 3 步已经实现并由合成配对数据测试覆盖：
 
-- actual rollout 与示范可构造 proprio 的来源、provenance 和 split；
-- active default pose、runtime joint order、task/asset/policy 指纹；
-- history padding、decision cutoff 和无未来泄漏；
-- previous-plan prefix 的真实来源，不能总由本轮 GT future 复制；
-- root-delta 与 contact label 在 prefix 边界的可见范围；
-- target 与 contact-valid 的正式 loss 兼容 shape。
+- 独立 `BumiClosedLoopStage1Dataset`，不改变旧 `BumiMusicDanceDataset`；
+- 每个 split 各自打开 `manifests/<split>.jsonl`，不会跨集合切片；
+- configurable H、固定/可变/P=0 prefix、序列头尾 padding 和共享时间戳；
+- 因果 demo proprio48、按名字的关节置换和 GMT 名义 default provenance；
+- qpos30 右侧 halo、逐坐标 target/known mask 与有限占位；
+- 版本化 contact payload 优先，缺失时复用现有全序列 FK contact；
+- train-only proprio48 stats 手动入口，拒绝覆盖已有输出；
+- 服务器1 UMR70+Mine 四来源实例配置，继续只读引用正式 qpos30 stats。
+
+仍未完成的是实际 frozen-GMT/BUMI dynamics rollout 历史。当前监督数据里的 history 和
+prefix 分别是 demo-derived causal proxy 与 teacher-forced reference；它们已显式标 provenance，
+但还不能替代部署分布或证明闭环恢复能力。
 
 尚未完成的第 4 步网络改造至少要解决：
 
@@ -481,5 +545,6 @@ P50/P95/P99 延迟和 GMT 前瞻需求已知后再确定。
 - 新 condition normalization 与 CFG/dropout 语义；
 - mask 全关时对现有 music-only baseline 的回归一致性。
 
-本文的静态类型、配置和单元测试只证明契约内部一致，不证明数据真实、训练收敛、GMT
-dynamics 稳定、sim2sim、实时 2 Hz 或实机安全。
+本文的类型、Dataset、配置和合成单元测试只证明代码构造与契约一致，不证明服务器1全量
+数据已在本轮重跑、网络能够消费新字段、训练收敛、GMT dynamics 稳定、sim2sim、实时
+2 Hz 或实机安全。

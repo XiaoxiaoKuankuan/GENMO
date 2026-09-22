@@ -1,8 +1,8 @@
-# BUMI closed-loop Stage 1 条件契约；这是静态协议，不是 Hydra 可实例化组件。
-# 本文件不实现真实数据构造、网络改造、GMT 通信、Stage 2 或 DPPO。
+# BUMI closed-loop Stage 1 条件与监督契约；Dataset 已实现，网络仍未改造。
+# 本文件不实现网络、GMT 通信、Stage 2 或 DPPO。
 contract_version: genmo.bumi_closedloop.stage1.v1
-scope: condition_only
-implementation_status: contract_only
+scope: conditions_and_supervised_targets
+implementation_status: stage3_dataset_available_stage4_network_not_implemented
 
 stage1:
   training: supervised_diffusion
@@ -21,6 +21,11 @@ stage1:
     - future_valid
     - future_times
     - decision_time
+  required_target_fields:
+    - target_qpos30
+    - target_qpos30_valid
+    - target_contact
+    - target_contact_valid
   outputs:
     future_motion_qpos30: [B, 120, 30]
     future_contact_logits: [B, 120, 2]
@@ -159,9 +164,10 @@ time:
 stage1_condition_batch:
   music_features: [B, 120, 35]
   music_valid: [B, 120]
-  proprio_history: [B, 50, 48]
-  proprio_history_valid: [B, 50]
-  proprio_history_times: [B, 50]
+  proprio_history: [B, H, 48]
+  proprio_history_valid: [B, H]
+  proprio_history_times: [B, H]
+  default_history_steps: 50
   known_qpos30: [B, 120, 30]
   known_qpos30_mask: [B, 120, 30]
   future_valid: [B, 120]
@@ -169,6 +175,19 @@ stage1_condition_batch:
   decision_time: [B]
   mask_dtype: bool
   padding_semantics: mask_is_authoritative_and_zero_is_not_implicitly_padding
+
+stage1_training_batch:
+  target_qpos30: [B, 120, 30]
+  target_qpos30_valid: [B, 120, 30]
+  target_contact: [B, 120, 2]
+  target_contact_valid: [B, 120, 2]
+  retain_at_least_one_valid_unknown_qpos30_coordinate_per_sample: true
+  missing_next_frame_rule: >-
+    A real final state frame keeps target_qpos30_valid[t,2:30]=true, while
+    target_qpos30_valid[t,0:2]=false when root_position[t+1] does not exist.
+  internal_root_delta_validity: >-
+    For t=0..118, target_qpos30_valid[t,0:2] equals future_valid[t+1].
+    Frame 119 may additionally be valid only when an explicit frame-120 halo exists.
 
 prefix:
   source: previous_genmo_reference_plan_already_published_and_not_immediately_rewritable
@@ -183,14 +202,40 @@ prefix:
     root_position[t] and root_position[t+1]; truncating a prefix must not use terminal
     delta padding or future ground truth to manufacture the boundary value.
   contact_condition: not_defined_in_v1
+  supervised_dataset_source: teacher_forced_demo_reference_v1
+  deployment_source_remains: previous_published_genmo_reference_plan
+  configured_frames:
+    mode: inclusive_min_max_range
+    allow_fixed_when_min_equals_max: true
+    default_min: 0
+    default_max: 0
+    maximum_exclusive: 120
+    per_sample_tail_clamp_retains_unknown_target: true
 
-# 这些 target 只保留给后续第 3 步；本轮 Python batch 类型和数据路径均不创建它们。
-reserved_stage3_targets:
-  implementation_status: not_implemented
+# 第 3 步已实现；target 与 condition 都保持标准化前物理语义。
+stage3_targets:
+  implementation_status: implemented
   target_qpos30: [B, 120, 30]
+  target_qpos30_valid: [B, 120, 30]
   target_contact: [B, 120, 2]
   target_contact_valid: [B, 120, 2]
-  contact_valid_shape_may_follow_existing_loss_contract_after_verification: true
+  qpos30_value_domain: physical_before_existing_stats_normalization
+  contact_order: [left, right]
+  contact_is_prefix_condition: false
+
+stage3_demo_proprio_construction:
+  implementation: gem.closedloop.stage1_dataset.CausalDemoProprio48Builder
+  construction_version: genmo.bumi_demo_proprio48.causal_hold.v1
+  source_fps: 30
+  target_fps: 50
+  common_integer_timebase_hz: 150
+  resampling: latest_available_source_observation_hold
+  velocity: backward_difference_at_30hz_then_hold
+  uses_future_source_sample: false
+  source_frame_zero_valid: false
+  demo_default_joint_pos: gmt_nominal_without_startup_randomization
+  provenance: causal_demo_kinematic_proxy_not_actual_gmt_rollout
+  excluded_fields: [last_action, root_linear_velocity, root_height, contact_observation]
 
 downstream_gmt:
   task: mimic_noetix_bumi3_mha_sonic
@@ -237,7 +282,8 @@ replanning:
   status: planned_not_measured
 
 pending_work:
-  stage3_real_dataset_and_targets: not_implemented
+  stage3_real_dataset_and_targets: implemented_for_paired_demo_data
+  stage3_actual_gmt_rollout_history: not_implemented
   stage4_network_conditioning_changes: not_implemented
   gmt_communication: not_implemented
   stage2_critic_and_dppo: not_implemented

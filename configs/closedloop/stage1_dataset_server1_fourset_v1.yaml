@@ -1,0 +1,145 @@
+# BUMI closed-loop Stage 1 数据构造示例：服务器1已筛选的 UMR70 + Mine 四来源。
+#
+# 本文件只描述独立 Dataset 的 train/val/test 实例，不接入现有 music-only DataModule，因而
+# 不会在第3步误启动尚未改造的网络。四来源严格是 AIST++、AIOZ-GDANCE、FineDance、Mine；
+# Mine 只有 train，公开库继续读取各自原 manifest 的 split，切片不会跨 manifest。
+# target_qpos30 保持 physical qpos30，后续第4步必须继续使用下方已有只读 stats 归一化；
+# 本配置不会重算或覆盖它。proprio48 stats 默认为 null，只有显式运行 train-only 工具才生成。
+contract_version: genmo.bumi_closedloop.stage1_dataset.v1
+implementation_status: dataset_and_targets_available_network_not_modified
+
+server1_example:
+  root: ${oc.env:BUMI_CLOSEDLOOP_FOURSET_ROOT,/data0/user/liwei/datasets/bumi_music_umr70_mine_pass_v1}
+  sources: [AIST++, AIOZ-GDANCE, FineDance, Mine]
+  excludes: [CoMPAS3D]
+  documented_split_counts:
+    train: 4149
+    val: 296
+    test: 320
+
+qpos30_stats:
+  mode: reuse_existing_read_only
+  path: ${oc.env:BUMI_MUSIC_QPOS30_STATS_PATH,${server1_example.root}/stats/qpos30_train_stats.json}
+  documented_sha256: a695a1bb09bb9a936869aefb87672e4895bc4f35ab23efb40047bf335fa4d8fc
+  overwrite: false
+
+proprio48_stats:
+  path: null
+  auto_compute: false
+  allowed_split: train
+  entrypoint: tools/data/bumi/compute_closedloop_proprio48_stats.py
+  overwrite: false
+
+sample_contract:
+  history_steps: 50
+  # 固定 P：令 min=max；允许 P=0。可变 P：显式把 max 改为大于 min 的帧数。
+  # Dataset 会按每条样本的真实 future 长度裁短 P，并始终保留至少一个有效 unknown target。
+  prefix_min_frames: 0
+  prefix_max_frames: 0
+  prefix_random_seed: 42
+  nominal_commit_duration_seconds: null
+  future_frames: 120
+  motion_fps: 30
+  proprio_fps: 50
+
+dataset_defaults: &dataset_defaults
+  _target_: gem.closedloop.stage1_dataset.BumiClosedLoopStage1Dataset
+  kinematics_path: ${oc.env:BUMI_KINEMATICS_PATH,configs/bumi/bumi_kinematics_robot_retargeter_fe934_v1.json}
+  history_steps: ${sample_contract.history_steps}
+  prefix_min_frames: ${sample_contract.prefix_min_frames}
+  prefix_max_frames: ${sample_contract.prefix_max_frames}
+  prefix_random_seed: ${sample_contract.prefix_random_seed}
+  strict_alignment: true
+  strict_contract: true
+  require_quality_filter: true
+  validate_payloads_on_init: false
+  validate_source_hashes_on_init: false
+  joint_limit_tolerance: 0.0001
+
+datasets:
+  train:
+    aistpp:
+      <<: *dataset_defaults
+      root: ${server1_example.root}/AIST++
+      dataset_name: aistpp_bumi
+      split: train
+      duration_aware_sampling: true
+      random_decision: true
+    aioz_gdance:
+      <<: *dataset_defaults
+      root: ${server1_example.root}/AIOZ-GDANCE
+      dataset_name: aioz_gdance_bumi
+      split: train
+      duration_aware_sampling: true
+      random_decision: true
+    finedance:
+      <<: *dataset_defaults
+      root: ${server1_example.root}/FineDance
+      dataset_name: finedance_bumi
+      split: train
+      duration_aware_sampling: true
+      random_decision: true
+    mine:
+      <<: *dataset_defaults
+      root: ${server1_example.root}/Mine
+      dataset_name: mine_bumi
+      split: train
+      duration_aware_sampling: true
+      random_decision: true
+  val:
+    aistpp:
+      <<: *dataset_defaults
+      root: ${server1_example.root}/AIST++
+      dataset_name: aistpp_bumi
+      split: val
+      duration_aware_sampling: false
+      random_decision: false
+      eval_decision_mode: center
+    aioz_gdance:
+      <<: *dataset_defaults
+      root: ${server1_example.root}/AIOZ-GDANCE
+      dataset_name: aioz_gdance_bumi
+      split: val
+      duration_aware_sampling: false
+      random_decision: false
+      eval_decision_mode: center
+    finedance:
+      <<: *dataset_defaults
+      root: ${server1_example.root}/FineDance
+      dataset_name: finedance_bumi
+      split: val
+      duration_aware_sampling: false
+      random_decision: false
+      eval_decision_mode: center
+  test:
+    aistpp:
+      <<: *dataset_defaults
+      root: ${server1_example.root}/AIST++
+      dataset_name: aistpp_bumi
+      split: test
+      duration_aware_sampling: false
+      random_decision: false
+      eval_decision_mode: center
+    aioz_gdance:
+      <<: *dataset_defaults
+      root: ${server1_example.root}/AIOZ-GDANCE
+      dataset_name: aioz_gdance_bumi
+      split: test
+      duration_aware_sampling: false
+      random_decision: false
+      eval_decision_mode: center
+    finedance:
+      <<: *dataset_defaults
+      root: ${server1_example.root}/FineDance
+      dataset_name: finedance_bumi
+      split: test
+      duration_aware_sampling: false
+      random_decision: false
+      eval_decision_mode: center
+
+train_sampling_reference:
+  # 只记录原四库训练的相对权重；第4步接新 DataModule 时再接入 sampler。
+  aistpp_bumi: 0.28
+  aioz_gdance_bumi: 0.57
+  finedance_bumi: 0.065
+  mine_bumi: 0.05

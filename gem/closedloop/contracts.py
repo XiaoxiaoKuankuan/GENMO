@@ -1,13 +1,12 @@
-"""BUMI closed-loop Stage 1 的纯条件批次契约。
+"""BUMI closed-loop Stage 1 的条件与监督批次契约。
 
 本模块只固定第一版上层 GENMO 所消费的数据结构、物理语义和可机械检查的因果边界：
 音乐与未来 qpos30 共用 30 Hz、120 点时间轴，机器人真实状态使用 50 Hz、48 维历史，
 上一轮已发布且短期内不可改写的参考使用现有 physical qpos30 与逐坐标 known mask。
 
-这里刻意不生成训练数据、不构造 target、不修改 qpos30/contact2 表示，也不实现 GMT 的
-69/690/1092 维输入、30→50 Hz 重采样、速度派生、通信、Stage 2 或 DPPO。校验器只能
-检查张量、时间和 mask 的结构约束；producer 是否确实只使用了 decision_time 之前的真实
-状态，仍须由后续数据构造与 provenance 审计证明。
+本模块不修改 qpos30/contact2 表示，也不实现 GMT 的 69/690/1092 维输入、执行侧 30→50 Hz
+参考重采样、通信、Stage 2 或 DPPO。第 3 步数据 producer 可以返回监督 target；校验器只
+检查张量、时间和 mask 的结构约束，producer 的状态来源与因果 provenance 仍须单独记录。
 """
 
 from __future__ import annotations
@@ -188,7 +187,7 @@ GMT_POLICY_TRAINING_NOISE_UNIFORM_RANGES: Mapping[str, tuple[float, float]] = Ma
 
 
 class Stage1ConditionBatch(TypedDict):
-    """Stage 1 条件批次；不含尚未实现的监督 target。"""
+    """Stage 1 条件批次。"""
 
     music_features: torch.Tensor
     music_valid: torch.Tensor
@@ -202,6 +201,15 @@ class Stage1ConditionBatch(TypedDict):
     decision_time: torch.Tensor
 
 
+class Stage1TrainingBatch(Stage1ConditionBatch):
+    """Stage 1 监督训练批次；target 仍保持 qpos30 + 独立 contact2。"""
+
+    target_qpos30: torch.Tensor
+    target_qpos30_valid: torch.Tensor
+    target_contact: torch.Tensor
+    target_contact_valid: torch.Tensor
+
+
 STAGE1_CONDITION_KEYS = (
     "music_features",
     "music_valid",
@@ -213,6 +221,13 @@ STAGE1_CONDITION_KEYS = (
     "future_valid",
     "future_times",
     "decision_time",
+)
+
+STAGE1_TARGET_KEYS = (
+    "target_qpos30",
+    "target_qpos30_valid",
+    "target_contact",
+    "target_contact_valid",
 )
 
 
@@ -254,7 +269,11 @@ def _require_regular_time_axis(
         raise ValueError(f"{key} must advance by {expected_step_seconds:.12g} seconds per sample")
 
 
-def validate_stage1_condition_batch(batch: Mapping[str, Any]) -> None:
+def validate_stage1_condition_batch(
+    batch: Mapping[str, Any],
+    *,
+    history_steps: int = PROPRIO_HISTORY_STEPS,
+) -> None:
     """Fail closed on Stage 1 条件张量的 shape、时间和 known-mask 约束。
 
     `known_qpos30` 是 standardization 前的 physical qpos30。padding 槽位可以包含任意有限
@@ -262,6 +281,9 @@ def validate_stage1_condition_batch(batch: Mapping[str, Any]) -> None:
     本函数不填充、不归一化、不修改输入，也不能替代 producer 的因果 provenance 审计。
     """
 
+    history_steps = int(history_steps)
+    if history_steps <= 0:
+        raise ValueError("history_steps must be positive")
     missing = sorted(set(STAGE1_CONDITION_KEYS) - set(batch))
     if missing:
         raise ValueError(f"Stage1 condition batch is missing required keys: {missing}")
@@ -277,9 +299,9 @@ def validate_stage1_condition_batch(batch: Mapping[str, Any]) -> None:
     expected_shapes = {
         "music_features": (batch_size, MOTION_WINDOW_FRAMES, MUSIC_FEATURE_DIM),
         "music_valid": (batch_size, MOTION_WINDOW_FRAMES),
-        "proprio_history": (batch_size, PROPRIO_HISTORY_STEPS, PROPRIO_DIM),
-        "proprio_history_valid": (batch_size, PROPRIO_HISTORY_STEPS),
-        "proprio_history_times": (batch_size, PROPRIO_HISTORY_STEPS),
+        "proprio_history": (batch_size, history_steps, PROPRIO_DIM),
+        "proprio_history_valid": (batch_size, history_steps),
+        "proprio_history_times": (batch_size, history_steps),
         "known_qpos30": (batch_size, MOTION_WINDOW_FRAMES, QPOS30_DIM),
         "known_qpos30_mask": (batch_size, MOTION_WINDOW_FRAMES, QPOS30_DIM),
         "future_valid": (batch_size, MOTION_WINDOW_FRAMES),
@@ -335,6 +357,9 @@ def validate_stage1_condition_batch(batch: Mapping[str, Any]) -> None:
     if bool((known_mask & ~future_valid[:, :, None]).any()):
         raise ValueError("known_qpos30_mask must be false where future_valid is false")
 
+    if bool(((~future_valid[:, :-1]) & future_valid[:, 1:]).any()):
+        raise ValueError("future_valid must form a temporal prefix")
+
     # 每个坐标的 known 区域都必须是时间前缀；允许所有坐标全 false，即 prefix 长度为 0。
     if bool(((~known_mask[:, :-1]) & known_mask[:, 1:]).any()):
         raise ValueError("each known_qpos30 coordinate mask must form a temporal prefix")
@@ -353,6 +378,78 @@ def validate_stage1_condition_batch(batch: Mapping[str, Any]) -> None:
         )
 
 
+def validate_stage1_training_batch(
+    batch: Mapping[str, Any],
+    *,
+    history_steps: int = PROPRIO_HISTORY_STEPS,
+) -> None:
+    """校验第 3 步条件、qpos30/contact2 target 及逐坐标有效性。
+
+    ``future_valid`` 表示该 30 Hz 时间点存在真实、对齐的音乐与 qpos 状态；
+    ``target_qpos30_valid`` 进一步表达同一真实帧的 root XY 位移可能因缺少 ``t+1`` 而无效。
+    未知 target 可以保存任意有限占位值，只有 bool mask 具有有效性语义。
+    """
+
+    validate_stage1_condition_batch(batch, history_steps=history_steps)
+    missing = sorted(set(STAGE1_TARGET_KEYS) - set(batch))
+    if missing:
+        raise ValueError(f"Stage1 training batch is missing required keys: {missing}")
+
+    decision_time = _require_tensor(batch, "decision_time")
+    batch_size = int(decision_time.shape[0])
+    values = {key: _require_tensor(batch, key) for key in STAGE1_TARGET_KEYS}
+    expected_shapes = {
+        "target_qpos30": (batch_size, MOTION_WINDOW_FRAMES, QPOS30_DIM),
+        "target_qpos30_valid": (batch_size, MOTION_WINDOW_FRAMES, QPOS30_DIM),
+        "target_contact": (batch_size, MOTION_WINDOW_FRAMES, CONTACT_DIM),
+        "target_contact_valid": (batch_size, MOTION_WINDOW_FRAMES, CONTACT_DIM),
+    }
+    for key, expected in expected_shapes.items():
+        _require_shape(values[key], key, expected)
+    for key in ("target_qpos30", "target_contact"):
+        _require_float_finite(values[key], key)
+    for key in ("target_qpos30_valid", "target_contact_valid"):
+        _require_bool(values[key], key)
+
+    condition_devices = {_require_tensor(batch, key).device for key in STAGE1_CONDITION_KEYS}
+    target_devices = {value.device for value in values.values()}
+    if len(condition_devices | target_devices) != 1:
+        raise ValueError("all Stage1 training tensors must share one device")
+
+    future_valid = _require_tensor(batch, "future_valid")
+    music_valid = _require_tensor(batch, "music_valid")
+    if not torch.equal(music_valid, future_valid):
+        raise ValueError("music_valid must exactly equal future_valid for paired Stage1 data")
+    qpos_valid = values["target_qpos30_valid"]
+    contact_valid = values["target_contact_valid"]
+    if bool((qpos_valid & ~future_valid[:, :, None]).any()):
+        raise ValueError("target_qpos30_valid must be false where future_valid is false")
+    if bool((contact_valid & ~future_valid[:, :, None]).any()):
+        raise ValueError("target_contact_valid must be false where future_valid is false")
+
+    # 当 qpos 状态帧存在时，当前帧可确定的 height/rotation/joints 必须有效；只有依赖
+    # 下一帧的 root XY delta 允许在真实序列末端单独失效。
+    if not torch.equal(qpos_valid[:, :, 2:], future_valid[:, :, None].expand(-1, -1, 28)):
+        raise ValueError("target_qpos30_valid[...,2:30] must exactly match future_valid")
+    delta_start, delta_stop = BUMI_FEATURE_SLICES["root_delta_xy_heading"]
+    delta_valid = qpos_valid[:, :, delta_start:delta_stop]
+    if bool((delta_valid[:, :, 0] != delta_valid[:, :, 1]).any()):
+        raise ValueError("target root_delta_xy_heading x/y validity must match")
+    expected_internal_delta = future_valid[:, 1:, None].expand(-1, -1, delta_stop - delta_start)
+    if not torch.equal(delta_valid[:, :-1], expected_internal_delta):
+        raise ValueError(
+            "target root_delta_xy_heading[t] must be valid exactly when the in-window "
+            "state at t+1 is valid"
+        )
+
+    known_mask = _require_tensor(batch, "known_qpos30_mask")
+    if bool((known_mask & ~qpos_valid).any()):
+        raise ValueError("known_qpos30_mask cannot expose an invalid qpos30 target coordinate")
+    unknown_valid = qpos_valid & ~known_mask
+    if bool((~unknown_valid.reshape(batch_size, -1).any(dim=1)).any()):
+        raise ValueError("every Stage1 sample must retain at least one valid unknown qpos30 target")
+
+
 def stage1_contract_summary() -> Mapping[str, Any]:
     """Return an immutable, dependency-light summary for diagnostics and tests."""
 
@@ -364,6 +461,7 @@ def stage1_contract_summary() -> Mapping[str, Any]:
             "music_shape": (MOTION_WINDOW_FRAMES, MUSIC_FEATURE_DIM),
             "proprio_history_shape": (PROPRIO_HISTORY_STEPS, PROPRIO_DIM),
             "known_qpos30_shape": (MOTION_WINDOW_FRAMES, QPOS30_DIM),
+            "target_qpos30_shape": (MOTION_WINDOW_FRAMES, QPOS30_DIM),
             "contact_shape": (MOTION_WINDOW_FRAMES, CONTACT_DIM),
         }
     )
