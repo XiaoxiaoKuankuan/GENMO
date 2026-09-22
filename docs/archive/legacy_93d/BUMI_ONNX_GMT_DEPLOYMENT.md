@@ -1,9 +1,16 @@
 # BUMI ONNX 到 GMT 部署链路
 
+> [!CAUTION]
+> **归档状态：已退役。** 本文保存 93D/482138 阶段的历史部署记录，其中的配置、
+> checkpoint、stats、ONNX/TensorRT 路径和命令不得在当前分支直接执行。现行实现以
+> [BUMI qpos30、FK 接触与足底锁定 v3](../../BUMI_QPOS30_CONTACT_V3.md) 和
+> [BUMI 音乐部署说明](../../BUMI_MUSIC_DEPLOYMENT.md) 为准；归档边界见
+> [本目录说明](README.md)。
+
 > 当前 ONNX 边界已升级为 `pred_motion[1,120,30]` 与
 > `pred_foot_contact_logits[1,120,2]` 双输出；link 全由 qpos FK 得到，正式后处理只允许
 > contact-gated root XY 足底锁定。新契约见
-> [BUMI qpos30、FK 接触与足底锁定 v3](BUMI_QPOS30_CONTACT_V3.md)。下文 93D 单输出内容
+> [BUMI qpos30、FK 接触与足底锁定 v3](../../BUMI_QPOS30_CONTACT_V3.md)。下文 93D 单输出内容
 > 仅作旧版部署记录，不能用于新模型。
 
 本文主体记录 `feature/bumi-music-only` 分支的历史 93D 部署链。该版本输出机器人原生

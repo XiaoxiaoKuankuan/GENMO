@@ -1,67 +1,38 @@
-#!/usr/bin/env python3
-"""对实际 50 Hz BUMI3 SONIC/Isaac-Lab NPZ 执行自动物理预检查。
+"""BUMI NPZ 质量评估、汇总和报告发布的 producer 中性实现。
 
-这个脚本用于检查离线 GMR 导出并可能经过平滑处理的部署轨迹，而不是旧的 30 Hz
-legacy pickle。它严格验证七字段 NPZ 的键、float32、帧率、帧数、形状、有限值与
-wxyz 四元数；按照 GMR preset 的 Isaac-Lab publish order 检查 21 个关节限位；
-直接使用文件中的 22-body 世界状态检查根高度、根倾角和贴地风格；最后从真实
-50 Hz ``joint_pos``、根位置和根朝向重新计算速度、加速度与 jerk。存储的速度字段
-与中心差分之间的误差会被记录，但由于部署契约没有规定唯一离散化实现，v1 不用
-该误差单独改变状态。
+本模块集中保存当前 robot_retargeter 与 UMR qpos 共同使用的纯数组质量算法：
+中心差分、四元数角速度、关节限位与倒地/Root 倾角判定、三态决策、跨数据集统计
+汇总，以及 JSONL/CSV/文本清单的原子报告写出。模块只要求配置对象提供约定字段，
+不导入任何具体 producer 的配置 dataclass、NPZ reader、资产路径或命令行入口。
 
-阈值来自版本化 YAML。动力学阈值保持物理单位不变，所有持续帧阈值按时间由旧
-30 Hz 规则换算到 50 Hz。当前 22-body 契约没有 legacy virtual torso/hand：手部
-原本不参与拒绝；躯干高度改用左右肩根 body 的平均世界高度作为代理。GMR 使用
-0.05 m ground clearance，因此旧的“body origin 最低点必须为 0”不再适用，只作为
-诊断值保存。脚本只读源 NPZ，在独立目录原子写 JSONL、CSV、汇总和配置快照；不会
-删除、移动、重写或物化任何动作。这里的 PASS 只表示离线数据预检查通过，不代表
-已经通过 Isaac-Lab 物理 rollout 或 SONIC 策略跟踪测试。
-
-典型用法：
-
-.. code-block:: bash
-
-   python tools/data/bumi/filter_sonic_npz_motions.py \
-     --input-root data/motions_npz_bumi3_smooth_q1 \
-     --output-dir outputs/bumi_quality_smooth_q1_50hz_v1
+通用评估只发布中性内部版本；robot_retargeter 和 UMR 边界在各自入口显式覆盖最终
+契约版本。报告写出规则、字段顺序、容差扫描及 PASS/REVIEW/REJECT 排序保持迁移前
+行为，不扩大质量结论到仿真 rollout、控制器可跟踪性或实机安全。
 """
 
 from __future__ import annotations
 
-import argparse
 import csv
-import hashlib
 import json
 import os
 import subprocess
-import sys
 import tempfile
 from collections import Counter, defaultdict
 from collections.abc import Iterable, Mapping
-from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 import numpy as np
-import yaml
-from tqdm import tqdm
 
-REPO_ROOT = Path(__file__).resolve().parents[3]
-if str(REPO_ROOT) not in sys.path:
-    sys.path.insert(0, str(REPO_ROOT))
-
-from gem.robots.bumi.quality_filter import (  # noqa: E402
+from gem.robots.bumi.quality_common import (
     QualityStatus,
     mask_to_intervals,
     safe_intervals_from_bad_mask,
 )
 
-CONFIG_VERSION = "genmo.bumi_sonic_npz_quality_config.v1"
-REPORT_VERSION = "genmo.bumi_quality_report.sonic_npz_50hz.v1"
-DEFAULT_PRESET = Path("/home/weili/GMR-CPP_e1jump_lowdpi/config/robot_presets/bumi3.json")
-DEFAULT_ROBOT_XML = Path("/home/weili/GMR-CPP_e1jump_lowdpi/assets/bumi3/mjcf/bumi3.xml")
-DEFAULT_KINEMATICS = Path("/home/weili/OMG/assets/robots/bumi/bumi_kinematics.json")
+REPO_ROOT = Path(__file__).resolve().parents[3]
+REPORT_VERSION = "genmo.bumi_quality_report.npz_common.v1"
 REPORT_FILENAMES = (
     "quality_report.jsonl",
     "quality_report.csv",
@@ -73,308 +44,6 @@ REPORT_FILENAMES = (
     "without_joint_limit_review.txt",
     "without_joint_limit_reject.txt",
 )
-
-
-@dataclass(frozen=True)
-class SonicNpzQualityConfig:
-    """已经完成结构和语义校验的 50 Hz NPZ 质量规则。"""
-
-    motion_contract_version: str
-    fps: int
-    required_keys: tuple[str, ...]
-    robot_xml_sha256: str
-    preset_sha256: str
-    kinematics_sha256: str
-    joint_order: tuple[str, ...]
-    joint_lower_limits: np.ndarray
-    joint_upper_limits: np.ndarray
-    body_order: tuple[str, ...]
-    minimum_frames: int
-    quaternion_norm_error_max: float
-    joint_limit_violation_max: float
-    minimum_joint_limit_margin_warn: float
-    root_height_min_absolute: float
-    root_height_max_absolute: float
-    exceed_ratio_max: float
-    consecutive_exceed_frames: int
-    severe_multiplier: float
-    dynamics: Mapping[str, tuple[float, str]]
-    root_low_height: float
-    root_low_tilt_degrees: float
-    torso_ground_height: float
-    upper_body_ground_height: float
-    floor_gate_root_height: float
-    floor_gate_tilt_degrees: float
-    ankles_airborne_height: float
-    floor_reject_consecutive_frames: int
-    floor_review_ratio: float
-    floor_review_min_frames: int
-    low_root_review_height: float
-    low_root_review_consecutive_frames: int
-    safe_interval_halo_frames: int
-    minimum_safe_interval_frames: int
-    torso_proxy_bodies: tuple[str, ...]
-    upper_non_hand_bodies: tuple[str, ...]
-    ankle_bodies: tuple[str, ...]
-
-
-def _mapping(parent: Mapping[str, Any], key: str) -> Mapping[str, Any]:
-    value = parent.get(key)
-    if not isinstance(value, Mapping):
-        raise ValueError(f"{key} 必须是 mapping")
-    return value
-
-
-def _finite_float(parent: Mapping[str, Any], key: str) -> float:
-    try:
-        value = float(parent[key])
-    except (KeyError, TypeError, ValueError) as exc:
-        raise ValueError(f"{key} 必须是有限数值") from exc
-    if not np.isfinite(value):
-        raise ValueError(f"{key} 必须是有限数值")
-    return value
-
-
-def _integer(parent: Mapping[str, Any], key: str, *, allow_zero: bool = False) -> int:
-    value = parent.get(key)
-    minimum = 0 if allow_zero else 1
-    if isinstance(value, bool) or not isinstance(value, int) or value < minimum:
-        raise ValueError(f"{key} 必须是 >= {minimum} 的整数")
-    return value
-
-
-def _names(parent: Mapping[str, Any], key: str, length: int | None = None) -> tuple[str, ...]:
-    values = tuple(map(str, parent.get(key, ())))
-    if not values or len(values) != len(set(values)):
-        raise ValueError(f"{key} 必须是非空且不重复的名称列表")
-    if length is not None and len(values) != length:
-        raise ValueError(f"{key} 长度必须为 {length}，实际为 {len(values)}")
-    return values
-
-
-def _vector(parent: Mapping[str, Any], key: str, length: int) -> np.ndarray:
-    value = np.asarray(parent.get(key), dtype=np.float64)
-    if value.shape != (length,) or not np.isfinite(value).all():
-        raise ValueError(f"{key} 必须是长度 {length} 的有限向量")
-    return value
-
-
-def load_config(path: str | Path) -> SonicNpzQualityConfig:
-    """读取并严格验证 50 Hz 规则，拒绝不完整或自相矛盾的配置。"""
-
-    config_path = Path(path).expanduser().resolve(strict=True)
-    raw = yaml.safe_load(config_path.read_text(encoding="utf-8"))
-    if not isinstance(raw, Mapping) or raw.get("contract_version") != CONFIG_VERSION:
-        raise ValueError(f"质量配置 contract_version 必须为 {CONFIG_VERSION}")
-    source = _mapping(raw, "source")
-    hard = _mapping(raw, "hard_thresholds")
-    soft = _mapping(raw, "soft_policy")
-    floor = _mapping(raw, "floor_style")
-    body_groups = _mapping(floor, "body_groups")
-    fps = _integer(source, "fps")
-    if fps != 50:
-        raise ValueError(f"SONIC 离线质量检查固定要求 50 Hz，实际为 {fps}")
-    if source.get("quaternion_convention") != "wxyz":
-        raise ValueError("source.quaternion_convention 必须为 wxyz")
-    joint_order = _names(source, "joint_order", 21)
-    body_order = _names(source, "body_order", 22)
-    lower = _vector(source, "joint_lower_limits", 21)
-    upper = _vector(source, "joint_upper_limits", 21)
-    if np.any(lower >= upper):
-        raise ValueError("每个关节必须满足 lower < upper")
-    dynamics_raw = _mapping(raw, "dynamics")
-    expected_dynamics = {
-        "joint_velocity_l2",
-        "joint_acceleration_l2",
-        "joint_jerk_l2",
-        "root_linear_velocity",
-        "root_angular_velocity",
-    }
-    if set(dynamics_raw) != expected_dynamics:
-        raise ValueError(f"dynamics 键必须严格为 {sorted(expected_dynamics)}")
-    dynamics: dict[str, tuple[float, str]] = {}
-    for name in sorted(expected_dynamics):
-        item = _mapping(dynamics_raw, name)
-        threshold = _finite_float(item, "threshold")
-        unit = str(item.get("unit", "")).strip()
-        if threshold <= 0.0 or not unit:
-            raise ValueError(f"dynamics.{name} 的 threshold/unit 非法")
-        dynamics[name] = (threshold, unit)
-    torso = _names(body_groups, "torso_proxy", 2)
-    upper_bodies = _names(body_groups, "upper_non_hand")
-    ankles = _names(body_groups, "ankles", 2)
-    missing = set(torso + upper_bodies + ankles) - set(body_order)
-    if missing:
-        raise ValueError(f"floor_style 使用未知 body: {sorted(missing)}")
-    status = str(soft.get("soft_failure_status", "")).upper()
-    if status != QualityStatus.REVIEW.value:
-        raise ValueError("v1 soft_failure_status 必须为 REVIEW")
-    exceed_ratio = _finite_float(soft, "exceed_ratio_max")
-    review_ratio = _finite_float(floor, "review_ratio")
-    severe_multiplier = _finite_float(soft, "severe_multiplier")
-    if not 0.0 <= exceed_ratio <= 1.0 or not 0.0 <= review_ratio <= 1.0:
-        raise ValueError("ratio 必须位于 [0,1]")
-    if severe_multiplier <= 1.0:
-        raise ValueError("severe_multiplier 必须大于 1")
-    root_min = _finite_float(hard, "root_height_min_absolute")
-    root_max = _finite_float(hard, "root_height_max_absolute")
-    if root_min >= root_max:
-        raise ValueError("root height absolute bounds 非法")
-    return SonicNpzQualityConfig(
-        motion_contract_version=str(source["motion_contract_version"]),
-        fps=fps,
-        required_keys=_names(source, "required_keys", 7),
-        robot_xml_sha256=str(source["robot_xml_sha256"]),
-        preset_sha256=str(source["preset_sha256"]),
-        kinematics_sha256=str(source["kinematics_sha256"]),
-        joint_order=joint_order,
-        joint_lower_limits=lower,
-        joint_upper_limits=upper,
-        body_order=body_order,
-        minimum_frames=_integer(hard, "minimum_frames"),
-        quaternion_norm_error_max=_finite_float(hard, "quaternion_norm_error_max"),
-        joint_limit_violation_max=_finite_float(hard, "joint_limit_violation_max"),
-        minimum_joint_limit_margin_warn=_finite_float(hard, "minimum_joint_limit_margin_warn"),
-        root_height_min_absolute=root_min,
-        root_height_max_absolute=root_max,
-        exceed_ratio_max=exceed_ratio,
-        consecutive_exceed_frames=_integer(soft, "consecutive_exceed_frames"),
-        severe_multiplier=severe_multiplier,
-        dynamics=dynamics,
-        root_low_height=_finite_float(floor, "root_low_height"),
-        root_low_tilt_degrees=_finite_float(floor, "root_low_tilt_degrees"),
-        torso_ground_height=_finite_float(floor, "torso_ground_height"),
-        upper_body_ground_height=_finite_float(floor, "upper_body_ground_height"),
-        floor_gate_root_height=_finite_float(floor, "gate_root_height"),
-        floor_gate_tilt_degrees=_finite_float(floor, "gate_tilt_degrees"),
-        ankles_airborne_height=_finite_float(floor, "ankles_airborne_height"),
-        floor_reject_consecutive_frames=_integer(floor, "reject_consecutive_frames"),
-        floor_review_ratio=review_ratio,
-        floor_review_min_frames=_integer(floor, "review_min_frames"),
-        low_root_review_height=_finite_float(floor, "low_root_review_height"),
-        low_root_review_consecutive_frames=_integer(floor, "low_root_review_consecutive_frames"),
-        safe_interval_halo_frames=_integer(floor, "safe_interval_halo_frames", allow_zero=True),
-        minimum_safe_interval_frames=_integer(floor, "minimum_safe_interval_frames"),
-        torso_proxy_bodies=torso,
-        upper_non_hand_bodies=upper_bodies,
-        ankle_bodies=ankles,
-    )
-
-
-def sha256_file(path: str | Path) -> str:
-    """流式计算资产或动作 SHA256，避免一次性复制压缩 NPZ。"""
-
-    digest = hashlib.sha256()
-    with Path(path).open("rb") as handle:
-        for block in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(block)
-    return digest.hexdigest()
-
-
-def verify_assets(
-    config: SonicNpzQualityConfig,
-    *,
-    preset_path: Path,
-    robot_xml_path: Path,
-    kinematics_path: Path,
-) -> dict[str, str]:
-    """同时校验三个生产资产的哈希、名称顺序和关节限位。"""
-
-    paths = {
-        "preset": preset_path.expanduser().resolve(strict=True),
-        "robot_xml": robot_xml_path.expanduser().resolve(strict=True),
-        "kinematics": kinematics_path.expanduser().resolve(strict=True),
-    }
-    expected_hashes = {
-        "preset": config.preset_sha256,
-        "robot_xml": config.robot_xml_sha256,
-        "kinematics": config.kinematics_sha256,
-    }
-    actual_hashes = {name: sha256_file(path) for name, path in paths.items()}
-    for name, expected in expected_hashes.items():
-        if actual_hashes[name] != expected:
-            raise ValueError(
-                f"{name} SHA256 不匹配: expected={expected}, actual={actual_hashes[name]}"
-            )
-    preset = json.loads(paths["preset"].read_text(encoding="utf-8"))
-    if tuple(map(str, preset["joint_names_publish_order"])) != config.joint_order:
-        raise ValueError("preset publish order 与质量配置不一致")
-    kinematics = json.loads(paths["kinematics"].read_text(encoding="utf-8"))
-    native_names = tuple(map(str, kinematics["joint_order"]))
-    if tuple(map(str, kinematics["body_order"])) != config.body_order:
-        raise ValueError("kinematics body order 与质量配置不一致")
-    lower_by_name = dict(zip(native_names, map(float, kinematics["joint_lower_limits"])))
-    upper_by_name = dict(zip(native_names, map(float, kinematics["joint_upper_limits"])))
-    np.testing.assert_allclose(
-        [lower_by_name[name] for name in config.joint_order],
-        config.joint_lower_limits,
-        rtol=0.0,
-        atol=1e-12,
-    )
-    np.testing.assert_allclose(
-        [upper_by_name[name] for name in config.joint_order],
-        config.joint_upper_limits,
-        rtol=0.0,
-        atol=1e-12,
-    )
-    return {
-        **{f"{name}_path": str(path) for name, path in paths.items()},
-        **{f"{name}_sha256": value for name, value in actual_hashes.items()},
-    }
-
-
-def discover_motion_paths(input_root: str | Path) -> list[Path]:
-    """确定性发现 NPZ，并拒绝指向输入 root 外部的符号链接。"""
-
-    root = Path(input_root).expanduser().resolve(strict=True)
-    if not root.is_dir():
-        raise NotADirectoryError(root)
-    paths: list[Path] = []
-    for candidate in root.rglob("*.npz"):
-        if candidate.is_file():
-            resolved = candidate.resolve(strict=True)
-            resolved.relative_to(root)
-            paths.append(resolved)
-    paths.sort(key=lambda value: value.relative_to(root).as_posix())
-    if not paths:
-        raise ValueError(f"{root} 下没有 NPZ")
-    return paths
-
-
-def load_motion_npz(path: str | Path, config: SonicNpzQualityConfig) -> dict[str, np.ndarray]:
-    """加载一条部署 NPZ，并执行不允许隐式转换的严格数据契约校验。"""
-
-    source = Path(path)
-    with np.load(source, allow_pickle=False) as archive:
-        if tuple(archive.files) != config.required_keys:
-            raise ValueError(
-                f"NPZ keys/order 应为 {config.required_keys}，实际为 {tuple(archive.files)}"
-            )
-        arrays = {name: archive[name] for name in config.required_keys}
-    frames = int(arrays["joint_pos"].shape[0]) if arrays["joint_pos"].ndim == 2 else -1
-    expected_shapes = {
-        "fps": (1,),
-        "joint_pos": (frames, 21),
-        "joint_vel": (frames, 21),
-        "body_pos_w": (frames, 22, 3),
-        "body_quat_w": (frames, 22, 4),
-        "body_lin_vel_w": (frames, 22, 3),
-        "body_ang_vel_w": (frames, 22, 3),
-    }
-    if frames < config.minimum_frames:
-        raise ValueError(f"帧数 {frames} 小于最低要求 {config.minimum_frames}")
-    for name in config.required_keys:
-        value = arrays[name]
-        if value.shape != expected_shapes[name]:
-            raise ValueError(f"{name} shape 应为 {expected_shapes[name]}，实际为 {value.shape}")
-        if value.dtype != np.float32:
-            raise ValueError(f"{name} dtype 应为 float32，实际为 {value.dtype}")
-        if not np.isfinite(value).all():
-            raise ValueError(f"{name} 含 NaN/Inf")
-    expected_fps = np.asarray([config.fps], dtype=np.float32)
-    if arrays["fps"].tobytes() != expected_fps.tobytes():
-        raise ValueError(f"fps 必须精确为 float32 [{config.fps}.0]")
-    return arrays
 
 
 def _longest_true_run(mask: np.ndarray) -> int:
@@ -405,7 +74,7 @@ def _signal_metrics(values: np.ndarray, threshold: float) -> dict[str, float | i
     }
 
 
-def _central_difference(values: np.ndarray, fps: float) -> np.ndarray:
+def central_difference(values: np.ndarray, fps: float) -> np.ndarray:
     array = np.asarray(values, dtype=np.float32)
     output = np.zeros_like(array)
     if len(array) <= 1:
@@ -439,9 +108,7 @@ def _priority(status: QualityStatus) -> int:
     }[status]
 
 
-def evaluate_motion(
-    arrays: Mapping[str, np.ndarray], config: SonicNpzQualityConfig
-) -> dict[str, Any]:
+def evaluate_motion(arrays: Mapping[str, np.ndarray], config: Any) -> dict[str, Any]:
     """在已通过契约校验的实际数组上计算物理指标和三态结论。"""
 
     status = QualityStatus.PASS
@@ -557,9 +224,8 @@ def evaluate_motion(
         "maximum_degrees": float(np.max(root_tilt)),
         "over_45deg_fraction": root_tilt_over_45_fraction,
     }
-    # 50 Hz SONIC v1 没有逐条 Root 分布门禁，因此这些属性默认不存在并保持原行为。
-    # robot_retargeter 30 Hz 契约显式提供两级阈值：普通异常进入 REVIEW，明显躺倒
-    # 进入 REJECT；正式数据构建只消费 PASS。
+    # Root 分布门禁是可选配置能力。robot_retargeter 30 Hz 契约显式提供两级阈值：
+    # 普通异常进入 REVIEW，明显躺倒进入 REJECT；正式数据构建只消费 PASS。
     root_review = (
         getattr(config, "root_tilt_review_median_degrees", None),
         getattr(config, "root_tilt_review_p95_degrees", None),
@@ -621,8 +287,8 @@ def evaluate_motion(
             flag(f"{code}_SOFT", QualityStatus.REVIEW)
     metrics["dynamics"] = dynamic_metrics
 
-    joint_vel_expected = _central_difference(arrays["joint_pos"], fps)
-    body_lin_expected = _central_difference(arrays["body_pos_w"], fps)
+    joint_vel_expected = central_difference(arrays["joint_pos"], fps)
+    body_lin_expected = central_difference(arrays["body_pos_w"], fps)
     metrics["stored_velocity_consistency"] = {
         "joint_velocity_central_difference_max_abs_error": float(
             np.max(np.abs(arrays["joint_vel"] - joint_vel_expected))
@@ -655,61 +321,6 @@ def evaluate_motion(
         "metrics": metrics,
         "floor_intervals": [list(interval) for interval in floor_intervals],
         "valid_intervals": [list(interval) for interval in valid_intervals],
-    }
-
-
-def _identity(path: Path, input_root: Path) -> dict[str, str]:
-    relative = path.relative_to(input_root)
-    if len(relative.parts) < 2:
-        raise ValueError(f"动作必须位于数据集子目录下: {relative}")
-    return {
-        "dataset": relative.parts[0],
-        "sample_id": relative.with_suffix("").as_posix(),
-        "source_relative_path": relative.as_posix(),
-    }
-
-
-def evaluate_path(
-    path: Path,
-    *,
-    input_root: Path,
-    config: SonicNpzQualityConfig,
-    config_sha256: str,
-) -> dict[str, Any]:
-    """把文件读取或契约异常稳定映射为一条 REJECT 记录。"""
-
-    identity = _identity(path, input_root)
-    base = {
-        "report_contract_version": REPORT_VERSION,
-        "source_motion_contract_version": config.motion_contract_version,
-        **identity,
-        "quality_config_sha256": config_sha256,
-    }
-    try:
-        source_sha = sha256_file(path)
-        arrays = load_motion_npz(path, config)
-        decision = evaluate_motion(arrays, config)
-    except Exception as exc:
-        return {
-            **base,
-            "source_sha256": locals().get("source_sha"),
-            "status": QualityStatus.REJECT.value,
-            "status_without_joint_limit": QualityStatus.REJECT.value,
-            "quality_accepted": False,
-            "reason_codes": ["MOTION_CONTRACT_ERROR"],
-            "reason_statuses": {"MOTION_CONTRACT_ERROR": QualityStatus.REJECT.value},
-            "metrics": {},
-            "floor_intervals": [],
-            "valid_intervals": [],
-            "error_type": type(exc).__name__,
-            "error_message": str(exc)[:2000],
-        }
-    return {
-        **base,
-        "source_sha256": source_sha,
-        **decision,
-        "error_type": None,
-        "error_message": None,
     }
 
 
@@ -759,7 +370,7 @@ def build_summary(
     input_root: Path,
     config_path: Path,
     config_sha256: str,
-    config: SonicNpzQualityConfig,
+    config: Any,
     assets: Mapping[str, str],
     report_version: str = REPORT_VERSION,
     decision_scope: str | None = None,
@@ -933,16 +544,11 @@ def build_summary(
         "joint_limit_by_joint": joint_limit_by_joint,
         "joint_limit_tolerance_sensitivity": tolerance_sensitivity,
         "decision_scope": decision_scope
-        or "离线 50Hz 运动学/动力学预检查；未执行 Isaac-Lab rollout 或 SONIC 跟踪",
+        or "离线 NPZ 运动学/动力学预检查；未执行控制器、仿真 rollout 或实机测试",
         "compatibility_notes": dict(compatibility_notes)
         if compatibility_notes is not None
         else {
-            "continuous_frame_thresholds_scaled_from_30hz_to_50hz": True,
-            "torso_proxy": "mean(l_arm_pitch_link, r_arm_pitch_link)",
-            "virtual_hand_rule_removed": "legacy hands only supplied diagnostics",
-            "legacy_zero_body_origin_ground_gauge_disabled": (
-                "GMR export uses offset_to_ground with 0.05m clearance"
-            ),
+            "producer_specific_compatibility_notes_required": True,
             "stored_velocity_consistency_is_diagnostic_only": True,
             "status_without_joint_limit_is_diagnostic_only": True,
         },
@@ -1074,79 +680,3 @@ def write_reports(
     except Exception:
         temporary.unlink(missing_ok=True)
         raise
-
-
-def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument(
-        "--input-root", type=Path, default=REPO_ROOT / "data/motions_npz_bumi3_smooth_q1"
-    )
-    parser.add_argument("--config", type=Path, required=True, help="显式指定与输入资产、帧率匹配的质量规则；旧默认规则已退役")
-    parser.add_argument("--preset", type=Path, default=DEFAULT_PRESET)
-    parser.add_argument("--robot-xml", type=Path, default=DEFAULT_ROBOT_XML)
-    parser.add_argument("--kinematics", type=Path, default=DEFAULT_KINEMATICS)
-    parser.add_argument("--output-dir", type=Path, required=True)
-    parser.add_argument("--limit", type=int, help="仅检查排序后的前 N 条，用于代码验证")
-    parser.add_argument("--overwrite", action="store_true")
-    return parser.parse_args(argv)
-
-
-def main(argv: list[str] | None = None) -> int:
-    """绑定生产资产、扫描真实 NPZ 并输出只读检查报告。"""
-
-    args = parse_args(argv)
-    if args.limit is not None and args.limit <= 0:
-        raise ValueError("--limit 必须为正整数")
-    input_root = args.input_root.expanduser().resolve(strict=True)
-    output_dir = args.output_dir.expanduser().resolve()
-    if output_dir == input_root or input_root in output_dir.parents:
-        raise ValueError("--output-dir 必须位于输入目录之外")
-    config_path = args.config.expanduser().resolve(strict=True)
-    config = load_config(config_path)
-    assets = verify_assets(
-        config,
-        preset_path=args.preset,
-        robot_xml_path=args.robot_xml,
-        kinematics_path=args.kinematics,
-    )
-    config_sha256 = sha256_file(config_path)
-    paths = discover_motion_paths(input_root)
-    if args.limit is not None:
-        paths = paths[: args.limit]
-    rows = [
-        evaluate_path(
-            path,
-            input_root=input_root,
-            config=config,
-            config_sha256=config_sha256,
-        )
-        for path in tqdm(paths, desc="BUMI 50Hz physical quality")
-    ]
-    summary = build_summary(
-        rows,
-        input_root=input_root,
-        config_path=config_path,
-        config_sha256=config_sha256,
-        config=config,
-        assets=assets,
-    )
-    write_reports(output_dir, rows, summary, config_path, overwrite=args.overwrite)
-    print(
-        json.dumps(
-            {
-                "report_dir": str(output_dir),
-                "sequences": len(rows),
-                "status_counts": summary["status_counts"],
-                "status_without_joint_limit_counts": summary["status_without_joint_limit_counts"],
-                "source_files_modified": False,
-            },
-            indent=2,
-            ensure_ascii=False,
-            sort_keys=True,
-        )
-    )
-    return 0
-
-
-if __name__ == "__main__":
-    raise SystemExit(main())

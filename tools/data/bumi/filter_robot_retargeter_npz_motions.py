@@ -43,9 +43,9 @@ if str(REPO_ROOT) not in os.sys.path:
     os.sys.path.insert(0, str(REPO_ROOT))
 
 from gem.robots.bumi.kinematics import BumiKinematics  # noqa: E402
-from gem.robots.bumi.legacy_motion import sha256_file  # noqa: E402
-from gem.robots.bumi.quality_filter import QualityStatus  # noqa: E402
-from tools.data.bumi.filter_sonic_npz_motions import (  # noqa: E402
+from gem.robots.bumi.motion_utils import sha256_file  # noqa: E402
+from gem.robots.bumi.quality_common import QualityStatus  # noqa: E402
+from tools.data.bumi.npz_quality_utils import (  # noqa: E402
     build_summary,
     evaluate_motion,
     write_reports,
@@ -192,8 +192,12 @@ def load_config(path: str | Path) -> RobotRetargeterQualityConfig:
     }
     if dict(coordinate) != expected_coordinate:
         raise ValueError(f"source.coordinate_contract 必须精确为 {expected_coordinate}")
-    expected_counts = {str(k): int(v) for k, v in _mapping(upstream, "expected_completed_by_dataset").items()}
-    if set(expected_counts) != set(EXPECTED_DATASETS) or any(v <= 0 for v in expected_counts.values()):
+    expected_counts = {
+        str(k): int(v) for k, v in _mapping(upstream, "expected_completed_by_dataset").items()
+    }
+    if set(expected_counts) != set(EXPECTED_DATASETS) or any(
+        v <= 0 for v in expected_counts.values()
+    ):
         raise ValueError("expected_completed_by_dataset 必须完整覆盖四库且数量为正")
     completed = _positive_int(upstream, "expected_completed")
     failed = _positive_int(upstream, "expected_failed")
@@ -415,13 +419,17 @@ def verify_release_report(
             "NPZ集合与 release completed 集合不一致: "
             f"missing={len(expected_paths - actual_paths)}, extra={len(actual_paths - expected_paths)}"
         )
-    return index, [dict(row) for row in failures], {
-        "release_report": str(release_path),
-        "release_report_sha256": sha256_file(release_path),
-        "upstream_selected": config.expected_selected,
-        "upstream_completed": config.expected_completed,
-        "upstream_failed_excluded": config.expected_failed,
-    }
+    return (
+        index,
+        [dict(row) for row in failures],
+        {
+            "release_report": str(release_path),
+            "release_report_sha256": sha256_file(release_path),
+            "upstream_selected": config.expected_selected,
+            "upstream_completed": config.expected_completed,
+            "upstream_failed_excluded": config.expected_failed,
+        },
+    )
 
 
 def load_motion_npz(
@@ -521,7 +529,10 @@ def _validate_sidecars(
     motion = _mapping(_mapping(report, "checks"), "motion")
     if dict(_mapping(motion, "coordinate_contract")) != dict(config.coordinate_contract):
         raise ValueError(f"{dataset}/{stem}: 坐标契约不匹配")
-    if list(motion.get("csv_shape", ())) != [frames, 28] or int(motion.get("nan_inf_count", -1)) != 0:
+    if (
+        list(motion.get("csv_shape", ())) != [frames, 28]
+        or int(motion.get("nan_inf_count", -1)) != 0
+    ):
         raise ValueError(f"{dataset}/{stem}: 上游 CSV shape/finite 门禁不匹配")
     warnings = list(map(str, report.get("warnings", ())))
     return {
@@ -588,7 +599,7 @@ def evaluate_path(
         "source_sha256": source_sha,
         **decision,
         **sidecars,
-        # 通用评估核心沿用 SONIC 报告版本；robot_retargeter 边界必须在合并后覆盖，
+        # 中性评估核心只给出内部版本；robot_retargeter 边界必须在合并后覆盖，
         # 否则 summary 与逐条 JSONL 会出现不同契约，PASS-only 构建器应当拒绝。
         "report_contract_version": REPORT_VERSION,
         "error_type": None,
@@ -596,7 +607,9 @@ def evaluate_path(
     }
 
 
-def _worker(argument: tuple[str, str, RobotRetargeterQualityConfig, str, dict[str, Any]]) -> dict[str, Any]:
+def _worker(
+    argument: tuple[str, str, RobotRetargeterQualityConfig, str, dict[str, Any]],
+) -> dict[str, Any]:
     path, input_root, config, config_sha256, release_row = argument
     return evaluate_path(
         Path(path),
@@ -613,7 +626,11 @@ def _atomic_jsonl(path: Path, rows: list[Mapping[str, Any]]) -> None:
         mode="w", encoding="utf-8", dir=path.parent, prefix=f".{path.name}.", delete=False
     ) as handle:
         temporary = Path(handle.name)
-        handle.write("".join(json.dumps(dict(row), ensure_ascii=False, sort_keys=True) + "\n" for row in rows))
+        handle.write(
+            "".join(
+                json.dumps(dict(row), ensure_ascii=False, sort_keys=True) + "\n" for row in rows
+            )
+        )
     try:
         os.replace(temporary, path)
     except Exception:
@@ -624,10 +641,16 @@ def _atomic_jsonl(path: Path, rows: list[Mapping[str, Any]]) -> None:
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--input-root", required=True, type=Path)
-    parser.add_argument("--input-format", choices=("robot-retargeter", "umr-qpos"), default="robot-retargeter")
+    parser.add_argument(
+        "--input-format", choices=("robot-retargeter", "umr-qpos"), default="robot-retargeter"
+    )
     parser.add_argument("--release-report", type=Path)
-    parser.add_argument("--selection-manifest", type=Path, help="UMR 明确选择清单，禁止隐式扫描扩大范围")
-    parser.add_argument("--mine-root", type=Path, help="经 CSV 构建器验收的自建库，合并接受同一门禁")
+    parser.add_argument(
+        "--selection-manifest", type=Path, help="UMR 明确选择清单，禁止隐式扫描扩大范围"
+    )
+    parser.add_argument(
+        "--mine-root", type=Path, help="经 CSV 构建器验收的自建库，合并接受同一门禁"
+    )
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
     parser.add_argument("--robot-xml", required=True, type=Path)
     parser.add_argument("--retarget-config", required=True, type=Path)

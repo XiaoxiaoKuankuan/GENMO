@@ -2,6 +2,21 @@
 
 ## Unreleased
 
+- 将 BUMI 音乐主链统一为 `genmo.bumi_motion_features.qpos30.v3`：模型输出 30 维 qpos
+  与 2 维足接触 logits，link 几何统一由 qpos FK 计算，现行物理损失使用 v5 pipeline。
+  当前 checkpoint、stats、ONNX/TensorRT 和 fe934 运动学资产必须成套匹配，不能与历史
+  93D/482138 资产混用。
+- 将旧 93D/482138 方法、质量筛选和部署说明移入 `docs/archive/legacy_93d/`，保留历史正文
+  供审计，但明确禁止把其中的旧配置、资产路径和命令直接用于当前 qpos30/v5 链路。
+- 冻结正式 v5 scratch s350000 的 Hydra 源配置，要求 `configs/train.yaml` 显式选择实验，
+  并将 demo、checkpoint 选择、ONNX 导出及 ONNX/TensorRT parity CLI 默认值统一到该配置。
+- 提取中性 motion、quality、dataset publish 与 qpos 数值 helper，使 UMR、
+  robot_retargeter、CSV 和 transfer 当前 producer 不再反向依赖旧 GMR/legacy/SONIC 入口。
+- 成组删除 GMR manual-q1、legacy pickle、SONIC 50 Hz、qpos30 v2 loss 旧生产链及对应测试；
+  同时删除零引用配置和误跟踪运行日志，新增当前 producer 与 import closure 回归测试。
+
+## 历史：BUMI 93D/482138 阶段
+
 - 将 BUMI 93D 升级为 `heading-local ΔXY + (z-z_default)` 混合根运动表示，辅助 63D
   改为逐帧 root-relative 几何；长音乐先融合物理增量、绝对根高、根旋转和关节，再对
   完整时间轴只积分一次水平轨迹。stats/checkpoint/ONNX/TensorRT 合约同步升版并明确拒绝

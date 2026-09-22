@@ -20,7 +20,7 @@ from tools.data.bumi.filter_robot_retargeter_npz_motions import (
     load_config,
     load_motion_npz,
 )
-from tools.data.bumi.filter_sonic_npz_motions import evaluate_motion
+from tools.data.bumi.npz_quality_utils import evaluate_motion
 
 
 @pytest.fixture(scope="module")
@@ -126,7 +126,7 @@ def test_sustained_sideways_root_is_rejected(quality_config) -> None:
 def test_robot_retargeter_record_overrides_generic_report_version(
     tmp_path: Path, quality_config, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """通用 SONIC 评估结果不能覆盖新输入边界的逐条报告版本。"""
+    """中性评估结果不能覆盖 robot_retargeter 边界的逐条报告版本。"""
 
     source_root = tmp_path / "root"
     source = source_root / "aistpp" / "mimic_npz" / "bumi3" / "sample.npz"

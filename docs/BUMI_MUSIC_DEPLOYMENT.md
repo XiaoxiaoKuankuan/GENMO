@@ -200,7 +200,7 @@ BUMI_CKPT_DIR="$PWD/inputs/checkpoints/bumi_5set_robot_retargeter_pass_v2_qpos30
 BUMI_CKPT="$BUMI_CKPT_DIR/s350000.ckpt"
 BUMI_KIN="$BUMI_CKPT_DIR/assets/bumi_kinematics_robot_retargeter_fe934_v1.json"
 BUMI_STATS="$BUMI_CKPT_DIR/assets/bumi_qpos30_stats_train_5set_pass_v2_mine_fe934_v2.json"
-BUMI_EXP=gem_bumi_music_only_5set_robot_retargeter_pass_v2_qpos30_contact_latest
+BUMI_EXP=gem_bumi_music_only_5set_robot_retargeter_pass_v2_qpos30_contact_v5_scratch_s350000
 BUMI_ONNX="$PWD/outputs/onnx/bumi_music/rr_pass_v2_5set_v5_scratch_s350000_20260914/bumi_music_denoiser_s350000_t120_qpos30_contact.onnx"
 ```
 

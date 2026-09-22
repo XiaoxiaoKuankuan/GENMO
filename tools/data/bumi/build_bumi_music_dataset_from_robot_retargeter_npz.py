@@ -33,26 +33,25 @@ REPO_ROOT = Path(__file__).resolve().parents[3]
 if str(REPO_ROOT) not in os.sys.path:
     os.sys.path.insert(0, str(REPO_ROOT))
 
-from gem.datasets.music_dance.music_dance_bumi import BUMI_MUSIC_CONTRACT_VERSION  # noqa: E402
+from gem.datasets.music_dance.music_dance_bumi import (  # noqa: E402, I001
+    BUMI_MUSIC_CONTRACT_VERSION,
+)
 from gem.robots.bumi.contacts import (  # noqa: E402
     BUMI_CONTACT_CONTRACT_VERSION,
     derive_bumi_foot_contact,
 )
 from gem.robots.bumi.kinematics import BumiKinematics  # noqa: E402
-from gem.robots.bumi.legacy_motion import root_tilt_statistics, sha256_file  # noqa: E402
-from tools.data.bumi.build_bumi_music_dataset import (  # noqa: E402
+from gem.robots.bumi.motion_utils import root_tilt_statistics, sha256_file  # noqa: E402
+from tools.data.bumi.dataset_publish_utils import (  # noqa: E402, I001
     DATASET_SPECS,
-    _check_digest,
-    _mapping,
-    _materialize,
-    _music_tensor,
-    _parse_mapping,
-    _relative_file,
-    _write_json,
-    _write_jsonl,
-)
-from tools.data.bumi.build_bumi_music_dataset_from_sonic_npz import (  # noqa: E402
-    make_quaternion_continuous_np,
+    load_music_tensor as _music_tensor,
+    materialize_file as _materialize,
+    parse_dataset_mapping as _parse_mapping,
+    require_dataset_mapping as _mapping,
+    resolve_relative_file as _relative_file,
+    validate_sha256 as _check_digest,
+    write_json as _write_json,
+    write_jsonl as _write_jsonl,
 )
 from tools.data.bumi.filter_robot_retargeter_npz_motions import (  # noqa: E402
     REPORT_VERSION,
@@ -60,6 +59,9 @@ from tools.data.bumi.filter_robot_retargeter_npz_motions import (  # noqa: E402
     load_config,
     load_motion_npz,
     verify_assets,
+)
+from tools.data.bumi.qpos_resample_utils import (  # noqa: E402
+    make_quaternion_continuous_np,
 )
 
 GROUND_SEMANTICS = "robot_retargeter_floor_zero_v1"
@@ -134,7 +136,9 @@ def load_reference_indices(roots: Mapping[str, Path]) -> dict[str, dict[str, dic
 
 
 def qpos30_from_npz(
-    arrays: Mapping[str, np.ndarray], source_joint_order: tuple[str, ...], kinematics: BumiKinematics
+    arrays: Mapping[str, np.ndarray],
+    source_joint_order: tuple[str, ...],
+    kinematics: BumiKinematics,
 ) -> torch.Tensor:
     """保留源 Root 位置，把 30 Hz NPZ 按名称无损重排成 MuJoCo qpos28。"""
 
@@ -195,9 +199,7 @@ def convert_datasets(
         raise FileExistsError(f"拒绝覆盖已有正式数据目录: {output_root}")
     output_root.parent.mkdir(parents=True, exist_ok=True)
     staging = Path(tempfile.mkdtemp(prefix=f".{output_root.name}.staging-", dir=output_root.parent))
-    split_rows = {
-        name: {split: [] for split in ("train", "val", "test")} for name in DATASET_SPECS
-    }
+    split_rows = {name: {split: [] for split in ("train", "val", "test")} for name in DATASET_SPECS}
     counts: Counter[str] = Counter()
     materialized: dict[Path, str] = {}
     materialization: Counter[str] = Counter()
@@ -427,7 +429,9 @@ def convert_datasets(
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--input-format", choices=("robot-retargeter", "umr-qpos"), default="robot-retargeter")
+    parser.add_argument(
+        "--input-format", choices=("robot-retargeter", "umr-qpos"), default="robot-retargeter"
+    )
     parser.add_argument("--mine-root", type=Path)
     parser.add_argument("--audio-root", action="append", default=[], type=_parse_mapping)
     parser.add_argument("--source-root", required=True, type=Path)

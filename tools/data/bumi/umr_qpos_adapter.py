@@ -30,27 +30,43 @@ from tqdm import tqdm
 from gem.datasets.music_dance.music_dance_bumi import BUMI_MUSIC_CONTRACT_VERSION
 from gem.robots.bumi.contacts import BUMI_CONTACT_CONTRACT_VERSION, derive_bumi_foot_contact
 from gem.robots.bumi.kinematics import BumiKinematics
-from gem.robots.bumi.legacy_motion import (
-    _NumpyCompatibleUnpickler,
+from gem.robots.bumi.motion_utils import (
+    NumpyCompatibleUnpickler,
     root_tilt_statistics,
     sha256_file,
 )
-from tools.data.bumi.build_bumi_music_dataset import (
+from tools.data.bumi.dataset_publish_utils import (
     DATASET_SPECS,
-    _aist_index,
-    _human_jsonl_index,
-    _materialize,
-    _music_tensor,
-    _relative_file,
-    _write_json,
-    _write_jsonl,
     pairing_fields,
 )
-from tools.data.bumi.filter_sonic_npz_motions import (
-    _central_difference,
+from tools.data.bumi.dataset_publish_utils import (
+    aist_index as _aist_index,
+)
+from tools.data.bumi.dataset_publish_utils import (
+    human_jsonl_index as _human_jsonl_index,
+)
+from tools.data.bumi.dataset_publish_utils import (
+    load_music_tensor as _music_tensor,
+)
+from tools.data.bumi.dataset_publish_utils import (
+    materialize_file as _materialize,
+)
+from tools.data.bumi.dataset_publish_utils import (
+    resolve_relative_file as _relative_file,
+)
+from tools.data.bumi.dataset_publish_utils import (
+    write_json as _write_json,
+)
+from tools.data.bumi.dataset_publish_utils import (
+    write_jsonl as _write_jsonl,
+)
+from tools.data.bumi.npz_quality_utils import (
     build_summary,
     evaluate_motion,
     write_reports,
+)
+from tools.data.bumi.npz_quality_utils import (
+    central_difference as _central_difference,
 )
 
 REPORT_VERSION = "genmo.bumi_quality_report.umr_and_mine_qpos30.v1"
@@ -90,7 +106,7 @@ def load_umr_qpos(path: Path, kin: BumiKinematics, robot_xml: Path) -> tuple[tor
             _, _, dtype = np.lib.format.read_array_header_2_0(handle)
         else:
             raise ValueError(f"不支持的关节名称 NPY 版本: {version}")
-        names_value = _NumpyCompatibleUnpickler(handle).load() if dtype.hasobject else None
+        names_value = NumpyCompatibleUnpickler(handle).load() if dtype.hasobject else None
     with np.load(path, allow_pickle=False) as z:
         if names_value is None:
             names_value = z["robot_joint_names"]
@@ -145,11 +161,13 @@ def load_source(
         # 以减号开头的样本由上游复制成 dataset__sample 文件名；身份由人体NPZ元数据
         # 复核，不把 motions_keep 目录名误当成数据集，也不放宽来源/坐标检查。
         with np.load(source_data, allow_pickle=False) as human:
-            if (str(human["dataset"].item()) != row["dataset"]
-                    or str(human["sample_id"].item()) != sequence_key
-                    or str(human["coordinate_system"].item()) != "right_handed_z_up_metric"
-                    or float(human["fps"].item()) != 30.0
-                    or int(human["num_frames"].item()) != len(qpos)):
+            if (
+                str(human["dataset"].item()) != row["dataset"]
+                or str(human["sample_id"].item()) != sequence_key
+                or str(human["coordinate_system"].item()) != "right_handed_z_up_metric"
+                or float(human["fps"].item()) != 30.0
+                or int(human["num_frames"].item()) != len(qpos)
+            ):
                 raise ValueError("UMR 源人体身份、Z-up坐标或帧数不一致")
         return qpos, meta
     payload = torch.load(path, map_location="cpu", weights_only=False)

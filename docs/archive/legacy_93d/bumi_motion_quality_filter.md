@@ -1,5 +1,12 @@
 # GMR 生产版 BUMI3 动作预筛选与 GENMO 接入方案（修订版）
 
+> [!CAUTION]
+> **归档状态：已退役。** 本文绑定历史 482138 机器人资产与 legacy pickle/旧质量规则，
+> 其中的本地路径、配置和筛选命令不得在当前分支直接执行。现行 BUMI 音乐训练使用
+> fe934 资产、qpos30/contact/FK 契约及与具体数据生产者匹配的显式质量配置；当前入口见
+> [BUMI qpos30、FK 接触与足底锁定 v3](../../BUMI_QPOS30_CONTACT_V3.md)，归档边界见
+> [本目录说明](README.md)。
+
 ## 1. 结论
 
 当前 `data/motions` 应按用户确认的 **GMR 生产版 BUMI3** 解释。文档和代码中的

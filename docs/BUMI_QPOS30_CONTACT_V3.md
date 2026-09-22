@@ -1,7 +1,7 @@
 # BUMI qpos30、FK 接触与足底锁定 v3
 
-本文档说明 `feature/bumi-music-only` 分支从 2026-08-25 起采用的 BUMI 当前训练与部署
-契约。它针对旧 93D 表示中“网络同时预测 qpos 决定量和 63 维 link 位置、但最终机器人
+本文档说明仓库当前采用的 BUMI qpos30/v5 训练与部署契约。它针对旧 93D 表示中“网络
+同时预测 qpos 决定量和 63 维 link 位置、但最终机器人
 只执行 qpos”的冲突，统一规定网络只生成真正决定 qpos28 的 30 个连续量；所有 link、
 鞋底与穿透几何必须由同一份 qpos 经权威 BUMI FK 得到。文档同时给出版本边界、可靠接触
 标签、foot-slide、root tilt、仅修脚滑的后处理，以及服务器 2 固定 8 卡启动命令。
@@ -44,9 +44,9 @@ normalized qpos30 -> physical qpos30 -> qpos28 -> BumiKinematics FK -> link/sole
 左右鞋底 FK 锚点，只修改 floating root 世界 XY。root Z、root quaternion 和 21 个关节角
 逐值不变。原先用于遮掩躺倒的强制 root 直立/抬升接口已从正式运行时移除。
 
-## Root rotation 与 tilt
+## Root rotation、tilt 与 v5 动态长尾
 
-当前损失契约：`physical_qpos30_contact_v2`。根姿态由三层监督共同约束：
+当前正式损失契约：`physical_qpos30_contact_v5`。根姿态仍由三层监督共同约束：
 
 - normalized rot6d 表示损失 `repr_root_rot=2.0`；
 - 完整 SO(3) 测地误差 `root_rot=1.0`；
@@ -57,40 +57,30 @@ root tilt 在机器人已倾斜时仍对左乘 yaw 不敏感，不会把舞蹈�
 的角度公式带可微数值下限，已验证 forward/backward 不产生 NaN。防躺倒属于模型训练
 目标，不由后处理改四元数。
 
-主要权重为：
+v5 在 qpos30、contact head 和 FK 语义不变的前提下，继续约束关节速度、加速度、jerk、
+限位、脚滑、穿地和根高，并新增根平移/旋转动态、root-frame FK 动态和长尾 top-k/max 项。
+正式 s350000 scratch 配置在 v5 基础上冻结的主要动态与安全权重为：
 
 ```text
-repr_root_pos=1.0  repr_root_rot=2.0  repr_joint=1.0
-root_pos=0.2       root_rot=1.0       root_tilt=1.0
-joint_dof=0.2      fk_body_pos=1.0
-joint_velocity=0.05  joint_acceleration=0.005  joint_jerk=0.001
-joint_limit=0.1    contact_bce=1.0   foot_slide=0.05
-penetration=0.05   root_height=0.1
+joint_velocity=0.15  joint_acceleration=0.04  joint_jerk=0.006
+joint_acceleration_excess=0.20  joint_jerk_excess=0.006
+joint_limit=0.40  joint_limit_margin=0.80
+joint_limit_topk=2.00  joint_limit_max=0.20
+foot_slide=0.10  penetration=0.10  root_height=0.15
+root_velocity=0.05  root_angular_acceleration=0.02  fk_acceleration=0.02
 ```
 
-从 robot_retargeter 全时域 QP 数据开始续训时使用
-`physical_qpos30_contact_v3`。它保留上述空间、FK、接触和根姿态监督，把三个导数 GT
-匹配权重调整为：
-
-```text
-joint_velocity=0.10  joint_acceleration=0.01  joint_jerk=0.003
-```
-
-并新增 `joint_acceleration_excess=0.05`、`joint_jerk_excess=0.003`。对每一帧和每一关节，
-超额项只计算 `ReLU(abs(pred_derivative) - abs(gt_derivative))` 的 Smooth-L1；预测不超过
-同帧 GT 幅值时为零。两项分别按 `180 rad/s^2`、`600 rad/s^3` 归一化，再与其他辅助项
-一起经过 5000-step warmup。这样可专门抑制生成结果高于数据参考的加速度/jerk 尖峰，
-而不是把目标本身包含的快速舞蹈统一拉向静止。
-
-foot-slide 权重保持温和，并在 5k step 内渐进启用，避免以“所有动作少动”换低脚速；root
-rotation、root tilt、接触 BCE 和三个直接表示损失从第一步生效。
+超额项只惩罚预测导数超过同帧 GT 幅值的部分；top-k/max 项避免短时尖峰被全序列均值
+稀释。v5 的 robust joint-limit 和 advanced-physics 项分别在 10000 step 内 warmup；直接
+表示、root rotation/root tilt 与 contact BCE 从第一步生效。它们仍是运动学与有限差分
+代理，不等价于控制器闭环、接触力、扭矩或实机安全验证。
 
 ## 归一化
 
 新 stats 契约为 `genmo.bumi_qpos30_stats.v4`，写入 `root_height_reference_m`；
 默认根高为 **0.48120910 m**，兼容加载旧 v3 stats 并补偿高度均值。
 详见 [根高与旧模型兼容](BUMI_ROOT_HEIGHT.md)。运行环境变量为
-`BUMI_MUSIC_QPOS30_STATS_PATH`。现有五库 93D stats 显示 root XY 位移标准差约为
+`BUMI_MUSIC_QPOS30_STATS_PATH`。构建五库 qpos30 stats 时，root XY 位移标准差约为
 `0.0055–0.0061 m/帧`；若机械照搬 SMPL 的 `std<1 -> 1`，根运动监督会缩小约 160 倍。
 因此仍采用“给 std 设下限”的 main 思想，但 BUMI 专用下限为 `0.01`。stats 文件会绑定
 该值、kinematics SHA、表示版本和五库 manifest 指纹。
@@ -105,17 +95,17 @@ $GENMO_PYTHON tools/data/bumi/compute_bumi_30d_stats.py \
   --dataset "finedance_bumi=$FINEDANCE_BUMI_ROOT" \
   --dataset "compas3d_bumi=$COMPAS3D_BUMI_ROOT" \
   --dataset "mine_bumi=$MINE_BUMI_ROOT" \
-  --dataset-joint-limit-tolerance mine_bumi=0.25 \
   --output "$BUMI_MUSIC_QPOS30_STATS_PATH"
 ```
 
 ## 8 卡 350k 完全从零训练
 
-实验入口：`gem_bumi_music_only_5set_manual_q1_v3_qpos30_contact_scratch_350k`。每卡
-batch=192、8 卡全局 batch=1536，训练 350k step；网络 qpos30 输入列、30 维输出层、两维
-contact head 与 Transformer 主干都从随机初始化开始。配置把 `pretrain_ckpt`、`ckpt_path`、
-`resume_mode` 和 `checkpoint_adapter` 全部固定为 null，因此不会加载 main/SMPL、旧 BUMI
-模型、optimizer 或 global step。
+冻结入口：
+`gem_bumi_music_only_5set_robot_retargeter_pass_v2_qpos30_contact_v5_scratch_s350000`。
+每卡 batch=256、8 卡全局 batch=2048，五库共 2578 条 train 序列，训练 350k step；网络
+qpos30 输入列、30 维输出层、两维 contact head 与 Transformer 主干都从随机初始化开始。
+配置把 `pretrain_ckpt`、`ckpt_path`、`resume_mode` 和 `checkpoint_adapter` 全部固定为 null，
+因此不会加载 SMPL、旧 BUMI 模型、optimizer 或 global step。
 
 ```bash
 cd /home/user/liwei/GENMO
@@ -126,17 +116,16 @@ export NCCL_SOCKET_IFNAME=lo
 export TORCH_NCCL_BLOCKING_WAIT=1
 
 $GENMO_PYTHON -u scripts/train.py \
-  exp=gem_bumi_music_only_5set_manual_q1_v3_qpos30_contact_scratch_350k \
+  exp=gem_bumi_music_only_5set_robot_retargeter_pass_v2_qpos30_contact_v5_scratch_s350000 \
   output_dir="$BUMI_QPOS30_OUTPUT" \
   pl_trainer.devices=8 \
   pl_trainer.strategy=ddp
 ```
 
-正式启动命令仍应显式追加 `pretrain_ckpt=null model.model_cfg.checkpoint_adapter=null`，作为
-配置之外的第二道防护。学习率里程碑为 210k/315k，每 5k step 保存 checkpoint。
-
-原生 qpos30 checkpoint 保存表示版本。之后即使配置仍保留 adapter，加载该 checkpoint 时
-也会优先按原生权重完整加载，不会再次误走 SMPL adapter。
+正式启动命令仍可显式追加 `pretrain_ckpt=null model.model_cfg.checkpoint_adapter=null`，作为
+配置之外的第二道防护。学习率为 `1e-4`，里程碑为 210k/315k，每 5k step 保存 checkpoint。
+该版本化入口来自正式运行目录的 Hydra config/overrides；除将服务器绝对 `output_dir`
+规范化为仓库相对路径外，模型、数据、损失、优化器、scheduler 和 trainer 字段逐项一致。
 
 ## 验收边界
 

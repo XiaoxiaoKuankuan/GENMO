@@ -1,7 +1,13 @@
 # BUMI-GENMO：面向 BUMI 机器人的音乐条件动作扩散方法
 
+> [!CAUTION]
+> **归档状态：已退役。** 本文说明历史 93D/482138 表示，不是当前 qpos30/v5 方法说明；
+> 文中的旧 checkpoint、stats、配置和部署命令不得在当前分支直接执行。现行契约见
+> [BUMI qpos30、FK 接触与足底锁定 v3](../../BUMI_QPOS30_CONTACT_V3.md)，归档边界见
+> [本目录说明](README.md)。
+
 > 当前实现已升级为 qpos30/contact/FK v3。请以
-> [BUMI qpos30、FK 接触与足底锁定 v3](BUMI_QPOS30_CONTACT_V3.md) 为当前契约；本文后续
+> [BUMI qpos30、FK 接触与足底锁定 v3](../../BUMI_QPOS30_CONTACT_V3.md) 为当前契约；本文后续
 > 93D 内容保留为 repr-v2 历史设计说明，不应再用于新 checkpoint、stats 或部署图。
 
 ## 文档定位

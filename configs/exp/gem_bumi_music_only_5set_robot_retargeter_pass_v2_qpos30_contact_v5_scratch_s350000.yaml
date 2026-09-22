@@ -1,0 +1,161 @@
+# @package _global_
+# 正式 BUMI 音乐生成 v5 scratch s350000 可复现实验配置。
+#
+# 本文件把 2026-09-09 正式训练运行目录中的 Hydra config/overrides 冻结回版本化源码：
+# 五个 robot_retargeter PASS v2 数据集、30D qpos + 2D contact、fe934 运动学资产、
+# physical_qpos30_contact_v5、batch 256、8 GPU、1e-4 学习率以及 210k/315k 学习率
+# 里程碑。它是从随机初始化训练 350000 step 的独立入口，不读取
+# BUMI_PRETRAIN_CKPT，也不允许 SMPL checkpoint adapter。数据根、统计量和运动学资产
+# 仍通过环境变量绑定，调用者必须保证它们的指纹与正式 checkpoint bundle 一致。
+# 归档中仅与服务器目录绑定的绝对 output_dir 被规范化为仓库相对路径；其余解析配置
+# 与归档 training/config.yaml 逐字段一致，输出路径本身不参与模型或优化器计算。
+# 配置只能复现训练软件与超参数；它不等价于模型质量、仿真稳定性或实机安全证明。
+defaults:
+- /diffusion@model_cfg.diffusion: ddim
+- override /data: music_robot/trainX_testY
+- override /model: bumi_music_gem
+- override /network: diffusion_lg_bumi30_contact
+- override /pipeline: music_only_bumi_qpos30_contact_v5
+- override /endecoder: bumi_qpos30_contact
+- override /optimizer: adamw_2e-4
+- override /scheduler: iters_half_210k_315k
+- override /train_datasets:
+  - aistpp_bumi_balanced_train
+  - aioz_gdance_bumi_balanced_train
+  - finedance_bumi_balanced_train
+  - compas3d_bumi_balanced_train
+  - mine_bumi_balanced_train
+- override /test_datasets:
+  - aistpp_bumi_music_eval_v1
+  - aioz_gdance_bumi_music_eval
+  - finedance_bumi_music_eval
+  - compas3d_bumi_music_eval
+- override /callbacks:
+  - ckpt_saver/every5000s_top100
+  - prog_bar/prog_reporter_ed1
+  - train_speed_timer/base
+  - lr_monitor/pl
+- _self_
+
+exp_name_base: gem_bumi_music_only_5set_robot_retargeter_pass_v2_qpos30_contact_v5_scratch_b256_s350k_20260909
+exp_name_var: ''
+exp_name: ${exp_name_base}${exp_name_var}
+data_name: gem_bumi_music_only_5set_robot_retargeter_pass_v2_qpos30_contact_v5_scratch_b256_s350k_20260909
+output_dir: outputs/${exp_name}
+pretrain_ckpt: null
+ckpt_path: null
+resume_mode: null
+multicond_args: null
+
+model:
+  model_cfg:
+    motion_backend: bumi
+    checkpoint_adapter: null
+    text_encoder: null
+    music_mask_prob: 0.1
+    audio_mask_prob: 0.0
+    normalize_cam_angvel: false
+
+network:
+  model_cfg:
+    regression_only: false
+    denoiser:
+      encode_text: false
+      input_remove_global: false
+      static_conf_dim: 2
+
+data:
+  sampling_strategy: deduplicated_hierarchical
+  samples_per_epoch: 53248
+  sampler_seed: ${seed}
+  dataset_probability_min: 0.03
+  dataset_probability_max: 0.65
+  stats_path: ${oc.env:BUMI_MUSIC_QPOS30_STATS_PATH}
+  require_stats_fingerprint_match: true
+  expected_train_sequences: 2578
+  loader_opts:
+    train:
+      batch_size: 256
+      num_workers: 6
+    val:
+      batch_size: 1
+      num_workers: 1
+  dataset_sampling_weights:
+    aistpp_bumi: 0.28
+    aioz_gdance_bumi: 0.57
+    finedance_bumi: 0.065
+    compas3d_bumi: 0.035
+    mine_bumi: 0.05
+
+pl_trainer:
+  precision: 16-mixed
+  log_every_n_steps: 10
+  gradient_clip_val: 0.5
+  max_epochs: null
+  check_val_every_n_epoch: null
+  val_check_interval: 5000
+  max_steps: 350000
+  devices: 8
+  strategy: ddp
+  use_distributed_sampler: false
+  accumulate_grad_batches: 1
+
+logger:
+  _target_: pytorch_lightning.loggers.WandbLogger
+  project: gem
+  save_dir: /tmp
+  name: ''
+  version: ''
+  resume: allow
+  dir: /tmp
+  id: null
+
+use_wandb: false
+
+pipeline:
+  args:
+    ground_semantics: mixed_floor_zero_fk_contact_v2
+    robust_joint_limit_start_step: 0
+    robust_joint_limit_warmup_steps: 10000
+    advanced_physics_start_step: 0
+    advanced_physics_warmup_steps: 10000
+    advanced_physics_topk_fraction: 0.05
+    weights:
+      joint_velocity: 0.15
+      joint_acceleration: 0.04
+      joint_jerk: 0.006
+      joint_acceleration_excess: 0.2
+      joint_jerk_excess: 0.006
+      joint_limit: 0.4
+      joint_limit_margin: 0.8
+      joint_limit_topk: 2.0
+      joint_limit_max: 0.2
+      foot_slide: 0.1
+      penetration: 0.1
+      root_height: 0.15
+
+train_datasets:
+  aistpp_bumi_train:
+    joint_limit_tolerance: 0.0001
+  aioz_gdance_bumi_train:
+    joint_limit_tolerance: 0.0001
+  finedance_bumi_train:
+    joint_limit_tolerance: 0.0001
+  compas3d_bumi_train:
+    joint_limit_tolerance: 0.0001
+  mine_bumi_train:
+    joint_limit_tolerance: 0.0001
+
+test_datasets:
+  aistpp_bumi_music_eval:
+    joint_limit_tolerance: 0.0001
+  aioz_gdance_bumi_music_eval:
+    joint_limit_tolerance: 0.0001
+  finedance_bumi_music_eval:
+    split: test
+    joint_limit_tolerance: 0.0001
+  compas3d_bumi_music_eval:
+    joint_limit_tolerance: 0.0001
+
+optimizer:
+  lr: 0.0001

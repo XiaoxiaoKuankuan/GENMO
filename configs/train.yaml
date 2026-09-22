@@ -22,7 +22,8 @@ defaults:
   - refiner: null
 
   # global-override
-  - exp: mixed # set "data, model and callbacks" in yaml
+  # 不提供隐式实验默认值；训练、导出和评测入口必须显式传入 exp=<配置名>。
+  - exp: ??? # set "data, model and callbacks" in yaml
   - global/task: null # dump/test
   - global/hsearch: null # hyper-param search
   - global/debug: null # debug mode

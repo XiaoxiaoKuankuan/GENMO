@@ -48,22 +48,22 @@ REPO_ROOT = Path(__file__).resolve().parents[3]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from gem.datasets.music_dance.music_dance_bumi import (  # noqa: E402
+from gem.datasets.music_dance.music_dance_bumi import (  # noqa: E402, I001
     BUMI_MUSIC_CONTRACT_VERSION,
     BumiMusicDatasetReader,
     resolve_contract_path,
-    sha256_file,
 )
 from gem.robots.bumi.contacts import (  # noqa: E402
     BUMI_CONTACT_CONTRACT_VERSION,
     derive_bumi_foot_contact,
 )
 from gem.robots.bumi.kinematics import BumiKinematics  # noqa: E402
+from gem.robots.bumi.motion_utils import sha256_file  # noqa: E402
 from gem.utils.music_features import extract_edge_baseline35  # noqa: E402
-from tools.data.bumi.build_bumi_music_dataset_from_sonic_npz import (  # noqa: E402
-    _slerp_pairs,
+from tools.data.bumi.qpos_resample_utils import (  # noqa: E402, I001
     make_quaternion_continuous_np,
     normalize_body_origin_ground,
+    slerp_pairs as _slerp_pairs,
 )
 
 CSV_QUALITY_CONTRACT_VERSION = "genmo.bumi_csv_quality_config.v2"

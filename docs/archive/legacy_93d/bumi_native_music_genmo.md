@@ -1,7 +1,14 @@
 # BUMI-native Music-only GENMO
 
+> [!CAUTION]
+> **归档状态：已退役。** 本文主体记录 93D/482138 阶段的工程实现与历史验收，所列
+> 数据路径、配置、训练和部署命令不得在当前分支直接执行。现行训练契约见
+> [BUMI qpos30、FK 接触与足底锁定 v3](../../BUMI_QPOS30_CONTACT_V3.md) 与
+> [BUMI UMR70 + Mine 训练说明](../../BUMI_UMR70_MINE_TRAINING.md)；归档边界见
+> [本目录说明](README.md)。
+
 > 2026-08-25 起当前分支使用 qpos30 + 两维接触 head，并由 qpos 统一执行 FK。当前训练、
-> 后处理与 8 卡命令见 [BUMI qpos30、FK 接触与足底锁定 v3](BUMI_QPOS30_CONTACT_V3.md)。
+> 后处理与 8 卡命令见 [BUMI qpos30、FK 接触与足底锁定 v3](../../BUMI_QPOS30_CONTACT_V3.md)。
 > 本文中大量 93D/无接触内容属于历史 repr-v2 实验记录，不能与 qpos30 checkpoint 混用。
 
 > 以下段落记录当时从 v1 升级到 93D v2 的历史边界；当前 qpos30 v3 同样拒绝加载两代
@@ -177,7 +184,7 @@ root linear/angular velocity 异常、持续或碎片化贴地动作，以及低
 
 ## First-frame canonicalization
 
-每个 120 帧训练 crop 独立建立 anchor，不使用 OMG 的 10 帧历史。设 crop 第一帧 root position 为 `p0`，root quaternion 为 `q0`；从 `q0` 提取绕世界 Z 轴的 yaw，并记对应 heading rotation 为 `H0`。`z_default` 来自运行时 `BumiKinematics.default_qpos[2]`，统一为 **0.48120910 m**；原始资产值保留用于溯源和[旧统计量兼容](BUMI_ROOT_HEIGHT.md)：
+每个 120 帧训练 crop 独立建立 anchor，不使用 OMG 的 10 帧历史。设 crop 第一帧 root position 为 `p0`，root quaternion 为 `q0`；从 `q0` 提取绕世界 Z 轴的 yaw，并记对应 heading rotation 为 `H0`。`z_default` 来自运行时 `BumiKinematics.default_qpos[2]`，统一为 **0.48120910 m**；原始资产值保留用于溯源和[旧统计量兼容](../../BUMI_ROOT_HEIGHT.md)：
 
 ```text
 p_anchor = [p0.x, p0.y, z_default]

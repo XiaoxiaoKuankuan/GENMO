@@ -15,7 +15,7 @@ import pytest
 import torch
 
 from gem.robots.bumi.kinematics import BumiKinematics
-from gem.robots.bumi.legacy_motion import sha256_file
+from gem.robots.bumi.motion_utils import sha256_file
 from tools.data.bumi import umr_qpos_adapter as adapter
 from tools.data.bumi.filter_robot_retargeter_npz_motions import DEFAULT_CONFIG, load_config
 
@@ -49,8 +49,14 @@ def source(tmp_path, *, reverse=False, mutation=None):
     path = root / "example_bumi3.npz"
     human = tmp_path / "original/aistpp/example.npz"
     human.parent.mkdir(parents=True)
-    np.savez(human, dataset="aistpp", sample_id="example", fps=30., num_frames=120,
-             coordinate_system="right_handed_z_up_metric")
+    np.savez(
+        human,
+        dataset="aistpp",
+        sample_id="example",
+        fps=30.0,
+        num_frames=120,
+        coordinate_system="right_handed_z_up_metric",
+    )
     np.savez(
         path,
         qpos=qpos,
@@ -86,8 +92,14 @@ def test_prefixed_umr_alias_keeps_original_dataset_identity(tmp_path):
     kin, path, xml, expected = source(tmp_path)
     original = tmp_path / "human" / "aistpp" / "example.npz"
     original.parent.mkdir(parents=True)
-    np.savez(original, dataset="aistpp", sample_id="example", fps=30., num_frames=120,
-             coordinate_system="right_handed_z_up_metric")
+    np.savez(
+        original,
+        dataset="aistpp",
+        sample_id="example",
+        fps=30.0,
+        num_frames=120,
+        coordinate_system="right_handed_z_up_metric",
+    )
     alias = tmp_path / "aistpp__example.npz"
     alias.symlink_to(original)
     with np.load(path, allow_pickle=True) as archive:
@@ -96,7 +108,10 @@ def test_prefixed_umr_alias_keeps_original_dataset_identity(tmp_path):
     np.savez(path, **payload)
     qpos, _ = adapter.load_source(
         {"dataset": "aistpp", "sample_id": "aistpp/example", "source_relative_path": path.name},
-        path.parent, None, kin, xml,
+        path.parent,
+        None,
+        kin,
+        xml,
     )
     np.testing.assert_array_equal(qpos.numpy(), expected)
 

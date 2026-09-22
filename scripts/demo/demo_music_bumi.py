@@ -257,7 +257,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--checkpoint", required=True, type=Path)
     parser.add_argument("--output", required=True, type=Path)
     parser.add_argument("--report", type=Path)
-    parser.add_argument("--exp", default="gem_bumi_music_only_5set_manual_q1_v3_qpos30_contact_50k")
+    parser.add_argument(
+        "--exp",
+        default=(
+            "gem_bumi_music_only_5set_robot_retargeter_pass_v2_qpos30_contact_v5_scratch_s350000"
+        ),
+    )
     parser.add_argument("--kinematics", type=Path)
     parser.add_argument("--stats", type=Path)
     parser.add_argument("--num-frames", type=int)

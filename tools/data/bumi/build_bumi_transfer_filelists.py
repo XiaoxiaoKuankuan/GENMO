@@ -14,14 +14,14 @@ REPO_ROOT = Path(__file__).resolve().parents[3]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from tools.data.bumi.build_bumi_music_dataset import (  # noqa: E402
+from tools.data.bumi.dataset_publish_utils import (  # noqa: E402, I001
     DATASET_SPECS,
-    _mapping,
-    _parse_mapping,
-    _read_jsonl,
-    _sample_basename,
     load_human_indices,
+    parse_dataset_mapping as _parse_mapping,
     pairing_fields,
+    read_jsonl as _read_jsonl,
+    require_dataset_mapping as _mapping,
+    sample_basename as _sample_basename,
 )
 
 
@@ -40,9 +40,7 @@ def _audio_key_from_selected_id(dataset: str, sample_id: str) -> str:
     raise ValueError(dataset)
 
 
-def build_filelists(
-    selected_root: Path, human_roots: dict[str, Path] | None, output: Path
-) -> dict:
+def build_filelists(selected_root: Path, human_roots: dict[str, Path] | None, output: Path) -> dict:
     selected_root = selected_root.expanduser().resolve()
     output = output.expanduser().resolve()
     indices = None if human_roots is None else load_human_indices(human_roots)
@@ -83,9 +81,7 @@ def build_filelists(
             "unique_audio": len(audio_values),
             "unique_edge35": len(feature_values),
             "audio_filelist": f"{dataset}_audio.txt",
-            "edge35_filelist": (
-                f"{dataset}_edge35.txt" if indices is not None else None
-            ),
+            "edge35_filelist": (f"{dataset}_edge35.txt" if indices is not None else None),
         }
     (output / "transfer_plan.json").write_text(
         json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8"
