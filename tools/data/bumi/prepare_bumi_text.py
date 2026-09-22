@@ -476,10 +476,16 @@ def main():
     p = sub.add_parser("bones-pass", help="发布BONES-SEED全部PASS原生轨迹并精确核验官方文本")
     p.add_argument("--quality-report", type=Path, required=True)
     p.add_argument("--output", type=Path, required=True)
-    p = sub.add_parser("filter-umr", help="全量筛选MotionMillion/HumanML3D/BONES-SEED UMR")
+    p = sub.add_parser("kitml-pass", help="发布KIT-ML全部PASS原生轨迹和白名单原文本")
+    p.add_argument("--quality-report", type=Path, required=True)
+    p.add_argument("--output", type=Path, required=True)
+    p = sub.add_parser("filter-umr", help="全量筛选MotionMillion/HumanML3D/BONES-SEED/KIT-ML UMR")
     p.add_argument(
-        "--dataset", choices=["motionmillion", "humanml3d", "bones_seed"], default="motionmillion"
+        "--dataset",
+        choices=["motionmillion", "humanml3d", "bones_seed", "kitml"],
+        default="motionmillion",
     )
+    p.add_argument("--metadata-json", type=Path, help="KIT-ML metadata_ready.json完整动作白名单")
     p.add_argument("--metadata-csv", type=Path, help="BONES-SEED官方完整动作文本CSV")
     p.add_argument("--original-source-root", type=Path, help="BONES-SEED原始SMPL pickle目录")
     p.add_argument(
@@ -522,10 +528,14 @@ def main():
         from tools.data.bumi.umr_text_preprocess import run_filter
 
         raise SystemExit(run_filter(args))
-    if args.command == "bones-pass":
-        from tools.data.bumi.umr_text_preprocess import publish_bones_pass
+    if args.command in {"bones-pass", "kitml-pass"}:
+        from tools.data.bumi.umr_text_preprocess import publish_umr_text_pass
 
-        result = publish_bones_pass(args.quality_report, args.output)
+        result = publish_umr_text_pass(
+            args.quality_report,
+            args.output,
+            dataset="bones_seed" if args.command == "bones-pass" else "kitml",
+        )
     elif args.command == "motionmillion-texts":
         from tools.data.bumi.motionmillion_text import build_catalog
 

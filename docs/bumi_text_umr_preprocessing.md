@@ -71,6 +71,35 @@ GENMO训练分片；现有训练loader还需相应BONES数据集接入。
 1280×720/30Hz。人工检查60条中点拼图及2张全尺寸画面，双视角、caption和质量
 标签可见；临时PNG检查目录已删除。本地`local_verification.json`记录实际检查范围。
 
+## KIT-ML：原生UMR完整轨迹筛选与文本视频（2026-09-22）
+
+KIT-ML入口为同一个`filter-umr --dataset kitml`，使用`metadata_ready.json`白名单，
+逐条核对`kitml_XXXXX`、原SMPL-X身体`poses[T,66]`/`trans[T,3]`、源身份和已校准
+的30Hz完整时间线。人体来源为Z-up，机器人同为Z-up/30Hz，不重复旋转或重采样。
+原MMM推断时钟作为来源元数据保留，不误当成当前NPZ帧率。白名单caption必须与
+完整动作时间范围一致，原文和原annotation字段直接绑定，不虚构文本或训练划分。
+
+```bash
+cd /home/user/liwei/GENMO-bumi-text
+BUMI_DATASET=kitml BUMI_WORKERS=32 bash scripts/prepare_bumi_text_umr.sh
+/home/user/miniconda3/envs/ykj_umr/bin/python -B tools/data/bumi/prepare_bumi_text.py kitml-pass \
+  --quality-report /data0/user/liwei/dataset_reports/kitml_umr_bumi3_latest \
+  --output /data0/user/liwei/datasets/kitml_umr_pass_latest
+MUJOCO_GL=egl MUJOCO_EGL_DEVICE_ID=0 PYTHONDONTWRITEBYTECODE=1 \
+  /home/user/miniconda3/envs/ykj_umr/bin/python -B -u tools/eval/render_bumi_motion.py \
+  --quality-report /data0/user/liwei/dataset_reports/kitml_umr_bumi3_latest \
+  --output-dir /data0/user/liwei/dataset_reports/kitml_umr_bumi3_latest/visual_review \
+  --per-group 30 --individual-clips
+```
+
+输入仍为用户指定的`/data0/user/liwei/datasets/KIT-ML/genmo_30hz/ykj_umr_genmo_30hz`，
+不改动原数据；报告、PASS和本地`outputs/kitml_umr_quality_review`使用独立目录。
+复用BONES的原生PASS发布核心，既有`bones-pass`及Python API保持兼容；所有PASS
+保留完整轨迹，60..300帧仅是训练候选诊断，尚未构建KIT-ML训练loader/T5/split。
+门禁沿用脚滑REVIEW0.75/REJECT3.0m/s连续6帧、根倾角>30度连续15帧及其他既定规则。
+渲染沿用按状态/原因分层和母来源去重，导出30 PASS/30 REJECT的完整双视角视频，
+保留原caption、异常帧标记与配套原生NPZ，逐个解码核验后发布。
+
 ## HumanML3D 交付适配与完整训练数据
 
 HumanML3D 与 MotionMillion 的 UMR 机器人输出都按 Z-up 处理。配置的

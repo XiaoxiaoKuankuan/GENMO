@@ -31,8 +31,10 @@ from tools.data.bumi.umr_text_preprocess import (
     evaluate_row,
     humanml_lineage,
     init_worker,
+    kitml_catalog,
     load_umr,
     publish_bones_pass,
+    publish_umr_text_pass,
     run_filter,
 )
 from tools.data.bumi.umr_text_quality import (
@@ -299,6 +301,132 @@ def test_bones_source_timeline_text_and_all_pass_publication(bundle, engine, tmp
         out.write(f"{rows[0][2]},False,Duplicate,,,\n")
     with pytest.raises(InputContractError, match="身份为空或重复"):
         bones_text_catalog(csv_path)
+
+
+def test_kitml_whitelist_timeline_text_and_publication(bundle, engine, tmp_path):
+    """真实模型验证KIT白名单、Z-up不旋转、时钟/文本身份及长动作PASS完整发布。"""
+    original_paths, make, _, _ = bundle
+    source_root = tmp_path / "kit/motions_30hz"
+    source_root.mkdir(parents=True)
+    root = tmp_path / "kit_output"
+    (root / "bumi3").mkdir(parents=True)
+    metadata = source_root.parent / "metadata_ready.json"
+    paths = dict(
+        original_paths,
+        dataset="kitml",
+        input_root=str(root),
+        source_root=str(source_root),
+        metadata_json=str(metadata),
+    )
+    records, results, rows = [], [], []
+    for i, frames in enumerate((60, 301), 1):
+        _, original = make(frames=frames, reorder=True)
+        key = f"kitml_{i:05d}"
+        source = source_root / (key + "_poses.npz")
+        source_key = f"inputs/smplx_amass/KIT/example_{i}.npz"
+        np.savez_compressed(
+            source,
+            poses=np.zeros((frames, 66), np.float32),
+            trans=np.zeros((frames, 3), np.float32),
+            betas=np.zeros(10, np.float32),
+            gender="neutral",
+            mocap_framerate=30.0,
+            source_model_type="smplx",
+            source_key=source_key,
+            source_pose_components="global_orient3+body_pose63",
+            coordinate_transform="identity",
+            full_pose_available=False,
+            source_clock_method="inferred_integer_decimation_from_mmm",
+            source_mocap_framerate=100 / 3,
+            source_num_frames=frames + 10,
+        )
+        path = root / "bumi3" / (key + "_poses_bumi3.npz")
+        shutil.copy2(original, path)
+        rewrite(
+            path,
+            source_data=str(source),
+            source_sequence_key=source.stem,
+            source_fps=np.array([30], np.float32),
+            target_fps=np.array([30], np.float32),
+        )
+        record = dict(
+            motion_id=key,
+            kitml_id=f"{i:05d}",
+            motion_path=f"motions_30hz/{source.name}",
+            status="ready",
+            fps=30,
+            source_model_type="smplx",
+            coordinate_transform="identity",
+            annotation_scope="whole_motion",
+            num_frames=frames,
+            start=0,
+            end=frames / 30,
+            texts=["A person stands."],
+            annotations=[dict(caption="A person stands.", start_time=0, end_time=frames / 30)],
+            source_key=source_key,
+            amass_path=f"KIT/example_{i}_poses.npz",
+            source_clock_method="inferred_integer_decimation_from_mmm",
+            source_fps=100 / 3,
+            source_num_frames=frames + 10,
+        )
+        records.append(record)
+        results.append(dict(motion=str(source), out=str(path), status="ok"))
+        rows.append(
+            dict(
+                relative_path=path.relative_to(root).as_posix(),
+                folder=root.name,
+                human_path=str(source),
+                upstream_status="ok",
+            )
+        )
+    metadata.write_text(json.dumps(records))
+    engine.__dict__.pop("kitml_catalog", None)
+    for row in rows:
+        qpos, meta = load_umr(row, paths, engine)
+        assert meta["source_up"] == meta["output_up"] == "z"
+        assert meta["caption_count"] == 1 and meta["source_frames"] == len(qpos)
+        np.testing.assert_array_equal(qpos, grounded(engine, len(qpos)))
+    source = Path(rows[0]["human_path"])
+    for field, wrong, restored, pattern in (
+        ("mocap_framerate", 50.0, 30.0, "来源、Z-up"),
+        ("output_up", "y", "z", "来源、Z-up"),
+        ("source_num_frames", 999, 70, "来源时钟"),
+        ("source_key", "wrong", records[0]["source_key"], "来源、Z-up"),
+    ):
+        rewrite(source, **{field: wrong})
+        with pytest.raises(InputContractError, match=pattern):
+            load_umr(rows[0], paths, engine)
+        rewrite(source, **{field: restored})
+    metadata.write_text(json.dumps(records + records[:1]))
+    with pytest.raises(InputContractError, match="身份重复"):
+        kitml_catalog(paths)
+    metadata.write_text(json.dumps(records))
+    summary_path = root / "bumi3/batch_summary.json"
+    summary_path.write_text(json.dumps(dict(results=results[:1])))
+    args = Namespace(
+        **{k: Path(v) if k != "dataset" else v for k, v in paths.items()},
+        output=tmp_path / "incomplete_report",
+        workers=1,
+        folders=None,
+        limit=None,
+        expected_records=2,
+        resume=False,
+    )
+    with pytest.raises(InputContractError, match="白名单集合不同"):
+        run_filter(args)
+    summary_path.write_text(json.dumps(dict(results=results)))
+    args.output = tmp_path / "kit_report"
+    assert run_filter(args) == 0
+    info = publish_umr_text_pass(args.output, tmp_path / "kit_pass", dataset="kitml")
+    assert info["status_counts"] == {"PASS": 2} and info["pass_frames"] == 361
+    assert info["text_counts"]["pass_with_text"] == 2
+    published = [
+        json.loads(line)
+        for line in (tmp_path / "kit_pass/manifests/pass.jsonl").read_text().splitlines()
+    ]
+    assert [row["frames"] for row in published] == [60, 301]
+    assert published[0]["captions"] == records[0]["annotations"]
+    assert published[0]["canonical_source_id"] == "kitml:" + records[0]["source_key"]
 
 
 @pytest.mark.parametrize(

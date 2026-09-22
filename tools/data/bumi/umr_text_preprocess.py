@@ -1,4 +1,4 @@
-"""为 MotionMillion、HumanML3D 与 BONES-SEED UMR 输出提供可恢复的全量筛选。
+"""为 MotionMillion、HumanML3D、BONES-SEED 与 KIT-ML UMR 输出提供全量筛选。
 
 入口由已有 prepare_bumi_text.py 的 filter-umr 子命令提供。逐目录核对 batch_summary
 与实际文件集合，以相对路径建立唯一身份，检查原生 qpos、具名关节、源人体数值、
@@ -15,6 +15,8 @@ JSONL按数据库流式原子发布，候选仅包含完整60..300帧PASS，不�
 沿用已有完整文本/T5配对验证。质量报告本身不创造文本、split或embedding对应关系。
 BONES-SEED校验50Hz人体与30Hz完整重采样时间线；按原始filename精确绑定官方描述，
 保留缺失文本状态。PASS原生轨迹单独发布，不将60..300帧训练候选限制用于数据保留。
+KIT-ML绑定metadata_ready白名单、完整SMPL-X身体时间线与原caption，源和机器人均
+为Z-up/30Hz，不对已经校准的MMM来源时钟再次重采样；复用原生PASS发布与渲染。
 """
 
 from __future__ import annotations
@@ -218,6 +220,9 @@ def humanml_catalog(paths):
 
 
 def source_contract_hashes(paths):
+    if paths.get("dataset") == "kitml":
+        path = Path(paths["metadata_json"])
+        return {str(path): sha256_file(path)}
     if paths.get("dataset") == "bones_seed":
         path = Path(paths["metadata_csv"])
         return {str(path): sha256_file(path)}
@@ -257,15 +262,70 @@ def bones_text_catalog(path):
     return catalog
 
 
+def kitml_catalog(paths):
+    """核对KIT-ML完整动作白名单、原文本、身份和已校准的30Hz时间线。"""
+    metadata = Path(paths["metadata_json"])
+    payload = json.loads(metadata.read_text())
+    check(isinstance(payload, list) and payload, "KIT-ML白名单必须为非空列表")
+    result = {}
+    for row in payload:
+        key = row["motion_id"]
+        check(re.fullmatch(r"kitml_\d{5}", key) is not None, "KIT-ML动作ID错误")
+        check(
+            row["motion_path"] == f"motions_30hz/{key}_poses.npz"
+            and row["kitml_id"] == key.removeprefix("kitml_")
+            and key not in result,
+            "KIT-ML身份重复或源文件路径不符",
+        )
+        source = (metadata.parent / row["motion_path"]).resolve()
+        check(source.parent == Path(paths["source_root"]), "KIT-ML源路径越过声明目录")
+        check(
+            row["status"] == "ready"
+            and row["fps"] == 30
+            and row["source_model_type"] == "smplx"
+            and row["coordinate_transform"] == "identity"
+            and row["annotation_scope"] == "whole_motion"
+            and type(row["num_frames"]) is int
+            and row["num_frames"] > 0
+            and row["start"] == 0
+            and abs(row["end"] - row["num_frames"] / 30) < 1e-6,
+            "KIT-ML白名单不是已校准的完整Z-up/30Hz身体动作",
+        )
+        texts, annotations = row["texts"], row["annotations"]
+        check(
+            isinstance(texts, list)
+            and texts
+            and all(isinstance(t, str) and t.strip() for t in texts)
+            and [a["caption"] for a in annotations] == texts
+            and all(
+                abs(a["start_time"] - row["start"]) < 1e-6
+                and abs(a["end_time"] - row["end"]) < 1e-6
+                for a in annotations
+            ),
+            "KIT-ML原文本或完整标注时间范围不符",
+        )
+        check(isinstance(row["source_key"], str) and row["source_key"], "KIT-ML缺少源身份")
+        result[key] = dict(row, captions=annotations, mirrored=False)
+    return result
+
+
 def publish_bones_pass(report_root, output):
+    """保留既有BONES发布API，实际复用多数据集的原生PASS发布器。"""
+    return publish_umr_text_pass(report_root, output, dataset="bones_seed")
+
+
+def publish_umr_text_pass(report_root, output, dataset):
     """原子发布全部PASS原生NPZ和逐条文本索引；缺失文本单列，不裁剪或套用训练长度限制。"""
     report_root, output = Path(report_root).resolve(strict=True), Path(output).resolve()
     run = json.loads((report_root / "run.json").read_text())
     summary = json.loads((report_root / "quality_summary.json").read_text())
     paths = run["identity"]["paths"]
     check(
-        paths["dataset"] == "bones_seed" and run["state"] == "complete" and not run["partial_scan"],
-        "发布必须使用完整且无执行错误的BONES-SEED筛选",
+        dataset in {"bones_seed", "kitml"}
+        and paths["dataset"] == dataset
+        and run["state"] == "complete"
+        and not run["partial_scan"],
+        "发布必须使用指定数据集完整且无执行错误的筛选",
     )
     check(
         sha256_file(report_root / "quality_summary.json") == run["summary_sha256"]
@@ -282,7 +342,9 @@ def publish_bones_pass(report_root, output):
         )
     if output.exists():
         raise FileExistsError(output)
-    catalog = bones_text_catalog(paths["metadata_csv"])
+    metadata_field = "metadata_csv" if dataset == "bones_seed" else "metadata_json"
+    metadata_path = paths[metadata_field]
+    catalog = bones_text_catalog(metadata_path) if dataset == "bones_seed" else kitml_catalog(paths)
     counts, statuses, frames = Counter(), Counter(), Counter()
     missing, pass_missing = [], []
     output.parent.mkdir(parents=True, exist_ok=True)
@@ -329,7 +391,7 @@ def publish_bones_pass(report_root, output):
                             captions=captions,
                             text_status="matched_exact_filename" if captions else "missing",
                             text_metadata_sha256=run["identity"]["source_contract_hashes"][
-                                paths["metadata_csv"]
+                                metadata_path
                             ],
                             metadata=text,
                             split="unassigned",
@@ -369,7 +431,7 @@ def publish_bones_pass(report_root, output):
         (staged / "missing_text_ids.txt").write_text("".join(k + "\n" for k in missing))
         (staged / "pass_missing_text_ids.txt").write_text("".join(k + "\n" for k in pass_missing))
         result = dict(
-            schema="genmo.bones_seed_umr_pass.v1",
+            schema=f"genmo.{dataset}_umr_pass.v1",
             quality_report=str(report_root),
             quality_fingerprint=run["fingerprint"],
             output=str(output),
@@ -377,8 +439,6 @@ def publish_bones_pass(report_root, output):
             text_counts=dict(counts),
             pass_frames=frames["PASS"],
             pass_hours=frames["PASS"] / 30 / 3600,
-            metadata_csv=paths["metadata_csv"],
-            metadata_csv_sha256=sha256_file(paths["metadata_csv"]),
             missing_text_ids=missing,
             pass_missing_text_ids=pass_missing,
             full_sequence=True,
@@ -388,9 +448,15 @@ def publish_bones_pass(report_root, output):
             text_embeddings_built=False,
             manifests={p.name: sha256_file(p) for p in (staged / "manifests").iterdir()},
         )
+        result[metadata_field] = metadata_path
+        result[metadata_field + "_sha256"] = sha256_file(metadata_path)
         write_json(staged / "dataset_info.json", result)
         staged.rename(output)
-    write_json(report_root / "bones_text_audit.json", result)
+    write_json(
+        report_root
+        / ("bones_text_audit.json" if dataset == "bones_seed" else "kitml_text_audit.json"),
+        result,
+    )
     return result
 
 
@@ -467,6 +533,87 @@ def load_umr(row, paths, engine):
     check(z["zero_source_finger_pose"].dtype == np.bool_, "手指姿态标记必须为bool")
     _scalar(z, "zero_source_finger_pose")
     human = read_npz(source)
+    if dataset == "kitml":
+        if not hasattr(engine, "kitml_catalog"):
+            engine.kitml_catalog = kitml_catalog(paths)
+        source_id = key.removesuffix("_poses")
+        check(source_id in engine.kitml_catalog, "KIT-ML动作不在ready白名单")
+        record = engine.kitml_catalog[source_id]
+        check(
+            key == source_id + "_poses" and n == record["num_frames"],
+            "KIT-ML输出不是白名单完整时间线",
+        )
+        required_human = {
+            "poses",
+            "trans",
+            "betas",
+            "gender",
+            "mocap_framerate",
+            "source_model_type",
+            "source_key",
+            "source_pose_components",
+            "coordinate_transform",
+            "full_pose_available",
+            "source_clock_method",
+            "source_mocap_framerate",
+            "source_num_frames",
+        }
+        check(required_human <= set(human), "KIT-ML源人体字段缺失")
+        for name, shape in {"poses": (n, 66), "trans": (n, 3), "betas": (10,)}.items():
+            check(
+                human[name].shape == shape and human[name].dtype.kind == "f",
+                f"KIT-ML源人体{name}形状或类型不符",
+            )
+        check(
+            _scalar(human, "mocap_framerate") == 30
+            and _scalar(human, "source_model_type") == "smplx"
+            and _scalar(human, "source_pose_components") == "global_orient3+body_pose63"
+            and _scalar(human, "coordinate_transform") == "identity"
+            and _scalar(human, "source_key") == record["source_key"]
+            and _scalar(human, "gender") in {"neutral", "male", "female"}
+            and not bool(_scalar(human, "full_pose_available"))
+            and all(
+                _scalar(human, field) == "z"
+                for field in ("output_up", "samp_output_up")
+                if field in human
+            ),
+            "KIT-ML人体来源、Z-up坐标或身体模型不符",
+        )
+        check(
+            _scalar(human, "source_clock_method") == record["source_clock_method"]
+            and _scalar(human, "source_num_frames") == record["source_num_frames"]
+            and abs(_scalar(human, "source_mocap_framerate") - record["source_fps"]) < 1e-6
+            and {"source_fps", "target_fps"} <= set(z)
+            and _scalar(z, "source_fps") == _scalar(z, "target_fps") == 30,
+            "KIT-ML来源时钟或30Hz机器人时间线元数据不符",
+        )
+        ordered = np.concatenate(
+            (qpos[:, :7], qpos[:, [names.index(name) + 7 for name in engine.kin.joint_order]]),
+            axis=1,
+        )
+        return ordered, dict(
+            dataset="kitml",
+            frames=n,
+            fps=30,
+            duration_seconds=n / 30,
+            source_motion_id=source_id,
+            source_sequence_key=key,
+            source_file=record["amass_path"],
+            canonical_source_id="kitml:" + record["source_key"],
+            mirrored=False,
+            source_frames=n,
+            source_fps=30,
+            source_up="z",
+            output_up="z",
+            source_clock_method=record["source_clock_method"],
+            upstream_source_fps=record["source_fps"],
+            upstream_source_frames=record["source_num_frames"],
+            caption_count=len(record["captions"]),
+            smpl_scale=scale,
+            source_ground_z=ground,
+            ground_height_m=engine.rules["ground_height_m"],
+            source_validation="ready_whitelist_full_npz_numerical_and_complete_30hz_timeline",
+        )
     if dataset == "bones_seed":
         rules = engine.rules["source_contracts"]["bones_seed"]
         required_human = {
@@ -766,6 +913,7 @@ def index_inputs(db, paths, summaries):
     hml_meta = hml_rows = None
     if paths.get("dataset", "motionmillion") == "humanml3d":
         hml_meta, hml_rows = humanml_catalog(paths)
+    kit_rows = kitml_catalog(paths) if paths.get("dataset") == "kitml" else None
     with db:
         db.execute("DELETE FROM inputs")
         for summary in summaries:
@@ -775,6 +923,14 @@ def index_inputs(db, paths, summaries):
             seen = set()
             for item in payload["results"]:
                 path, human = Path(item["out"]).resolve(), Path(item["motion"]).resolve()
+                if kit_rows is not None:
+                    key = human.stem.removesuffix("_poses")
+                    check(
+                        key in kit_rows
+                        and human == source_root / (key + "_poses.npz")
+                        and path.name == key + "_poses_bumi3.npz",
+                        "KIT-ML转换清单不符合ready白名单身份",
+                    )
                 if hml_rows is not None:
                     key = path.stem.removesuffix("_bumi3")
                     check(
@@ -819,6 +975,11 @@ def index_inputs(db, paths, summaries):
                 check(
                     seen == {key + "_bumi3.npz" for key in hml_rows},
                     "HumanML3D转换清单与源清单集合不同",
+                )
+            if kit_rows is not None:
+                check(
+                    seen == {key + "_poses_bumi3.npz" for key in kit_rows},
+                    "KIT-ML转换清单与ready白名单集合不同",
                 )
             print(
                 json.dumps(
@@ -896,7 +1057,7 @@ def publish_reports(db, output, run, limit):
                 by_folder[folder][status] += 1
                 source_group = (
                     row["dataset"]
-                    if row.get("dataset") in {"humanml3d", "bones_seed"}
+                    if row.get("dataset") in {"humanml3d", "bones_seed", "kitml"}
                     else row.get("source_motion_id", "unknown").split("/", 1)[0]
                 )
                 by_source[source_group][status] += 1
@@ -975,6 +1136,13 @@ def run_filter(args):
         str(args.batch_config.resolve(strict=True)) if args.batch_config else None
     )
     paths["dataset"] = getattr(args, "dataset", "motionmillion")
+    if paths["dataset"] == "kitml":
+        check(
+            not args.folders and getattr(args, "metadata_json", None),
+            "KIT-ML必须提供ready白名单且不使用folder选择",
+        )
+        paths["metadata_json"] = str(args.metadata_json.resolve(strict=True))
+        kitml_catalog(paths)
     if paths["dataset"] == "bones_seed":
         check(not args.folders, "BONES-SEED使用完整单批清单，不使用folder选择")
         for name in ("metadata_csv", "original_source_root"):
@@ -1012,7 +1180,7 @@ def run_filter(args):
     )
     if paths["dataset"] == "humanml3d":
         summaries = [Path(paths["input_root"]) / "out_umr/bumi3/batch_summary.json"]
-    elif paths["dataset"] == "bones_seed":
+    elif paths["dataset"] in {"bones_seed", "kitml"}:
         summaries = [Path(paths["input_root"]) / "bumi3/batch_summary.json"]
     else:
         summaries = _summaries(Path(paths["input_root"]), args.folders)

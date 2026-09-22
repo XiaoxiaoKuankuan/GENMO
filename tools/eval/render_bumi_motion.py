@@ -89,11 +89,11 @@ def checked_umr_qpos(row, run, model, source_engine=None):
         raise ValueError("动作路径越过原数据根目录")
     if sha256(motion) != row["source_sha256"] or sha256(human) != row["human_sha256"]:
         raise ValueError(f"动作或人体在筛选后改变: {motion}")
-    if run["identity"]["paths"].get("dataset") in {"humanml3d", "bones_seed"}:
+    if run["identity"]["paths"].get("dataset") in {"humanml3d", "bones_seed", "kitml"}:
         from tools.data.bumi.umr_text_preprocess import load_umr
 
         if source_engine is None:
-            raise ValueError("HumanML3D渲染必须提供报告绑定的源验证器")
+            raise ValueError("文本动作渲染必须提供报告绑定的源验证器")
         ordered, metadata = load_umr(row, run["identity"]["paths"], source_engine)
         for field in (
             "source_motion_id",
@@ -103,7 +103,7 @@ def checked_umr_qpos(row, run, model, source_engine=None):
             "frames",
         ):
             if metadata[field] != row[field]:
-                raise ValueError(f"HumanML3D源身份与报告不同: {field}")
+                raise ValueError(f"文本动作源身份与报告不同: {field}")
         row["verified_source_sequence_key"] = metadata["source_sequence_key"]
         row["verified_robot_xml"] = str(source_engine.xml)
         if metadata.get("dataset") == "bones_seed":
@@ -116,13 +116,17 @@ def checked_umr_qpos(row, run, model, source_engine=None):
             row["verified_captions"] = source_engine.bones_catalog.get(
                 metadata["source_motion_id"], {}
             ).get("captions", [])
+        elif metadata.get("dataset") == "kitml":
+            row["verified_captions"] = source_engine.kitml_catalog[metadata["source_motion_id"]][
+                "captions"
+            ]
         else:
             row["verified_captions"] = source_engine.humanml_catalog[1][
                 metadata["source_motion_id"]
             ]["captions"]
         names, expected = list(source_engine.kin.joint_order), mujoco_joint_order(model)
         if len(names) != 21 or set(names) != set(expected):
-            raise ValueError("HumanML3D机器人关节名称不匹配")
+            raise ValueError("文本动作机器人关节名称不匹配")
         return np.concatenate(
             (ordered[:, :7], ordered[:, [names.index(n) + 7 for n in expected]]), axis=1
         )
@@ -217,7 +221,7 @@ def montage_frames(qpos, row, group, index, count, model, data, renderer, width,
         }[group]
         draw.text(
             (20, 10),
-            f"{dict(humanml3d='HumanML3D', bones_seed='BONES-SEED-SMPL').get(row.get('dataset'), 'MotionMillion')}    {name}    {index + 1:02d}/{count:02d}",
+            f"{dict(humanml3d='HumanML3D', bones_seed='BONES-SEED-SMPL', kitml='KIT-ML').get(row.get('dataset'), 'MotionMillion')}    {name}    {index + 1:02d}/{count:02d}",
             font=heading,
             fill=color,
         )
@@ -471,7 +475,7 @@ def render_quality_review(args):
         if source_contract_hashes(paths) != run["identity"].get("source_contract_hashes", {}):
             raise ValueError("报告绑定的源清单或文本已改变")
         args.source_engine = None
-        if paths.get("dataset") in {"humanml3d", "bones_seed"}:
+        if paths.get("dataset") in {"humanml3d", "bones_seed", "kitml"}:
             for field in ("retarget_config", "batch_config"):
                 if paths.get(field) and sha256(paths[field]) != run["identity"][field + "_sha256"]:
                     raise ValueError(f"报告绑定的配置已改变: {field}")

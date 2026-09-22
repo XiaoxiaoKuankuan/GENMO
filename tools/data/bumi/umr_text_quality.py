@@ -60,7 +60,7 @@ def load_rules(path):
             "根倾角持续帧数必须为正整数",
         )
     require(
-        {k: v for k, v in raw["source_contracts"].items() if k != "bones_seed"}
+        {k: v for k, v in raw["source_contracts"].items() if k not in {"bones_seed", "kitml"}}
         == {
             "motionmillion": {
                 "format": "motionmillion_272",
@@ -76,6 +76,12 @@ def load_rules(path):
             raw["source_contracts"]["bones_seed"]
             == dict(format="bumi_smpl_pkl", up="y", source_fps=50, target_fps=30),
             "BONES-SEED必须显式声明源人体Y-up及50到30Hz契约；机器人输出为Z-up",
+        )
+    if "kitml" in raw["source_contracts"]:
+        require(
+            raw["source_contracts"]["kitml"]
+            == dict(format="kitml_genmo_smplx_body66", up="z", source_fps=30, target_fps=30),
+            "KIT-ML必须声明完整SMPL-X身体、Z-up和30Hz输入输出契约",
         )
     require(np.isfinite(raw["ground_height_m"]), "地面高度必须有限")
     require(

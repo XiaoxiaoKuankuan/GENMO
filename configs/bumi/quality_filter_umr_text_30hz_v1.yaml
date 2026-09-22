@@ -1,4 +1,4 @@
-# MotionMillion/HumanML3D/BONES-SEED -> UMR -> BUMI 完整动作的共用离线筛选配置。
+# MotionMillion/HumanML3D/BONES-SEED/KIT-ML -> UMR -> BUMI 完整动作共用筛选配置。
 # 复用音乐分支的30Hz连续性阈值；增加用户指定的根倾角持续超限淘汰。
 # 2026-09-20：脚滑REVIEW/REJECT为0.75/1.5m/s；碰撞连续超过10帧；
 # 根相对世界竖直倾角大于30度连续至少15帧即REJECT，俯仰/侧倾合并计算。
@@ -16,6 +16,11 @@ source_contracts:
   humanml3d:
     format: humanml3d_umr_npz_v1
     up: z
+  kitml:
+    format: kitml_genmo_smplx_body66
+    up: z
+    source_fps: 30
+    target_fps: 30
   bones_seed:
     format: bumi_smpl_pkl
     # 源pose_aa/trans为Y-up；UMR已将机器人qpos转换到Z-up，筛选不再次旋转。

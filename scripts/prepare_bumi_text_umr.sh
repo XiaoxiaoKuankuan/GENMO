@@ -10,6 +10,7 @@
 # BUMI_BUILD_TRAINING=1在全量完成后绑定PASS文本、编码T5、构建分片并计算train统计量。
 # 所有正式产物默认位于/data0/user/liwei；不修改data2原始机器人动作、不启动模型训练。
 # BUMI_DATASET=bones_seed使用50Hz源人体到30Hz机器人契约，绑定原始SMPL目录及官方文本。
+# BUMI_DATASET=kitml绑定metadata_ready白名单，人体与机器人均为Z-up/30Hz，不再次转轴。
 
 set -euo pipefail
 BUMI_REPO_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -32,6 +33,13 @@ elif [[ "$BUMI_DATASET" == bones_seed ]]; then
   BUMI_EXPECTED_RECORDS="${BUMI_EXPECTED_RECORDS:-131454}"
   BUMI_EXTRA_ARGS=(--metadata-csv "${BUMI_METADATA_CSV:-/data0/user/liwei/datasets/BONES-SEED/metadata/seed_metadata_v004.csv}"
                    --original-source-root "${BUMI_ORIGINAL_SOURCE_ROOT:-/data0/user/liwei/datasets/BONES-SEED-SMPL/data/smpl_filtered}")
+elif [[ "$BUMI_DATASET" == kitml ]]; then
+  BUMI_UMR_ROOT="${BUMI_KITML_UMR_ROOT:-/home/user/ykj/code/UMR-main}"
+  BUMI_INPUT_ROOT="${BUMI_INPUT_ROOT:-/data0/user/liwei/datasets/KIT-ML/genmo_30hz/ykj_umr_genmo_30hz}"
+  BUMI_SOURCE_ROOT="${BUMI_SOURCE_ROOT:-/data0/user/liwei/datasets/KIT-ML/genmo_30hz/motions_30hz}"
+  BUMI_REPORT_ROOT="${BUMI_REPORT_ROOT:-/data0/user/liwei/dataset_reports/kitml_umr_bumi3_latest}"
+  BUMI_EXPECTED_RECORDS="${BUMI_EXPECTED_RECORDS:-2884}"
+  BUMI_EXTRA_ARGS=(--metadata-json "${BUMI_METADATA_JSON:-/data0/user/liwei/datasets/KIT-ML/genmo_30hz/metadata_ready.json}")
 elif [[ "$BUMI_DATASET" == motionmillion ]]; then
   BUMI_INPUT_ROOT="${BUMI_INPUT_ROOT:-/data2/user/motion_dataset/millionmotion/umr_change/all}"
   BUMI_SOURCE_ROOT="${BUMI_SOURCE_ROOT:-/data2/user/motion_dataset/millionmotion/pre_change/all}"
