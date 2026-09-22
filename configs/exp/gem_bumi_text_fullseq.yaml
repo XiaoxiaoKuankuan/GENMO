@@ -134,11 +134,12 @@ data:
       audio_array: 1
   loader_opts:
     train:
-      batch_size: 64
-      num_workers: 4
+      # 8×256×1=2048；服务器2实测含T5/AdamW峰值约65GiB，预留DDP通信空间。
+      batch_size: 256
+      num_workers: 8
     val:
-      batch_size: 1
-      num_workers: 1
+      batch_size: 8
+      num_workers: 2
 pl_trainer:
   devices: 8
   precision: bf16-mixed
@@ -146,8 +147,10 @@ pl_trainer:
   gradient_clip_val: 0.5
   check_val_every_n_epoch: null
   val_check_interval: 5000
+  # 在线检查每库固定前64条的确定性窗口；全量评测使用独立评测入口。
+  limit_val_batches: 8
   use_distributed_sampler: false
-  accumulate_grad_batches: 4
+  accumulate_grad_batches: 1
   max_epochs: -1
   max_steps: ${training_budget.max_steps}
 scheduler:

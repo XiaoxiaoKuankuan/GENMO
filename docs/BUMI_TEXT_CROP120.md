@@ -60,15 +60,19 @@ QualityGate在构建时再次核对时间文件SHA、事件原文与范围。BON
 
 ## 四库数据准备与启动
 
-以下在服务器2代码成功同步后执行。每一步输出须为不存在的新路径；命令不覆盖原始
-PASS数据。生产T5编码、分片与统计量需要实际执行后才算训练数据就绪。
+以下使用服务器2实际训练环境。准备命令仅用于尚不存在的新输出目录；已完成的正式
+release不重复构建。在线T5按采样文本编码，完整分片和train统计量须先完成。
 
 ```bash
 cd /home/user/liwei/GENMO-bumi-text
+export BUMI_TRAIN_PYTHON=/data0/user/liwei/envs/GENMO-cu128/bin/python
 export BUMI_TEXT_PREP_ROOT=/data0/user/liwei/datasets/bumi_text_crop120_prepare_v2
 export BUMI_TEXT_DATA_ROOT=/data0/user/liwei/datasets/bumi_text_crop120_v2
+export BUMI_TEXT_ONLINE_T5=true
+export BUMI_T5_MODEL_PATH=/data0/user/liwei/models/t5-3b_bed96aab
+export PYTHONDONTWRITEBYTECODE=1 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1
 
-python tools/data/bumi/prepare_bumi_text.py four-conversion \
+"$BUMI_TRAIN_PYTHON" tools/data/bumi/prepare_bumi_text.py four-conversion \
   --releases \
     /data0/user/liwei/datasets/motionmillion_umr_pass_latest \
     /data0/user/liwei/datasets/humanml3d_umr_pass_latest \
@@ -77,23 +81,22 @@ python tools/data/bumi/prepare_bumi_text.py four-conversion \
   --bones-temporal /data0/user/liwei/datasets/BONES-SEED/metadata/seed_metadata_v002_temporal_labels.jsonl \
   --output "$BUMI_TEXT_PREP_ROOT/conversion.json"
 
-# T5模型路径需指向服务器已安装且验证过的本地T5-3B目录。
-python tools/data/bumi/encode_text_features.py \
-  --source "$BUMI_TEXT_PREP_ROOT/conversion.json" \
-  --output "$BUMI_TEXT_PREP_ROOT/t5" --t5-model "$T5_MODEL_PATH" --device cuda:0
-
-python tools/data/bumi/prepare_bumi_text.py build \
-  --source "$BUMI_TEXT_PREP_ROOT/t5/conversion.json" --output "$BUMI_TEXT_DATA_ROOT"
-python tools/data/bumi/prepare_bumi_text.py stats --sequence-mode crop \
+"$BUMI_TRAIN_PYTHON" tools/data/bumi/prepare_bumi_text.py build \
+  --source "$BUMI_TEXT_PREP_ROOT/conversion.json" --output "$BUMI_TEXT_DATA_ROOT" \
+  --text-feature-mode online_t5 --workers 32 --records-per-shard 64
+"$BUMI_TRAIN_PYTHON" tools/data/bumi/prepare_bumi_text.py stats --sequence-mode crop --workers 32 \
   --root "$BUMI_TEXT_DATA_ROOT" --output "$BUMI_TEXT_DATA_ROOT/stats.json"
 export BUMI_TEXT_STATS_PATH="$BUMI_TEXT_DATA_ROOT/stats.json"
 
 # 预检报告是临时诊断产物，用后按agent.md精确路径清理。
-python tools/data/bumi/prepare_bumi_text.py preflight --sequence-mode crop \
+"$BUMI_TRAIN_PYTHON" tools/data/bumi/prepare_bumi_text.py preflight --sequence-mode crop \
   --root "$BUMI_TEXT_DATA_ROOT" --split train --limit 0 \
   --output /tmp/bumi_text_crop120_preflight.json
 
-python scripts/train.py exp=gem_bumi_text_fullseq
+export CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
+export NCCL_CUMEM_HOST_ENABLE=0 NCCL_IB_DISABLE=1 NCCL_SOCKET_IFNAME=lo TORCH_NCCL_BLOCKING_WAIT=1
+"$BUMI_TRAIN_PYTHON" -m torch.distributed.run --standalone --nnodes=1 --nproc_per_node=8 \
+  scripts/train.py exp=gem_bumi_text_fullseq
 ```
 
 原生UMR构建依赖MuJoCo及资产核验，训练依赖GENMO完整环境。不要只因为Python可执行
@@ -105,9 +108,10 @@ BUMI文本测试，不把依赖已删除实验入口的其他功能测试作为�
 验证窗口，GT渲染与模型生成按相同有效帧数比较。运行时、ONNX和TensorRT接口形状根据
 checkpoint读取120或300，网页长度范围也来自模型契约；TensorRT须在目标GPU另行验收。
 
-CPU合成数据、缩小网络测试只能证明这些代码路径及契约行为；不代表四库生产T5已完成、
-正式训练已启动、模型语义质量已提高或机器人闭环跟踪已通过。
-# 服务器2大显存训练接入补充（2026-09-22）
+CPU合成数据、缩小网络测试只能证明这些代码路径及契约行为；生产数据、GPU训练、
+生成质量及机器人闭环跟踪分别验收，实际运行证据追加于记录文本.md。
+
+## 服务器2大显存训练接入补充（2026-09-22）
 
 四库完整PASS转换后有551242条带可用文本的完整动作。MotionMillion约899万条caption，
 不要求先物化全部150-token特征；`build --text-feature-mode online_t5 --workers 32`
@@ -124,4 +128,11 @@ CPU合成数据、缩小网络测试只能证明这些代码路径及契约行�
 大batch容量测量复用`tools/train/preflight_distributed.py --bumi-batch-size N
 --bumi-data-root RELEASE --bumi-stats STATS --t5-path MODEL`，通过torchrun执行。
 测量包括完整网络、实际T5、完整辅助损失、反向及AdamW状态；输出显存峰值、loss、
-梯度范数和后续步骤耗时，不产生正式checkpoint。最终batch及真实运行结果另行记录。
+梯度范数和后续步骤耗时，不产生正式checkpoint。
+
+完整网络含496545824个可训练参数。单卡实测batch256峰值分配64858.7 MiB、
+预留66524 MiB；batch320分配78940.4 MiB、预留80992 MiB。单卡后续步骤分别
+1.977/2.383秒，均包括原文编码与真实AdamW更新；这只是容量用小型真实数据集上的
+测量，正式8卡速度另行记录。选择256为DDP及运行波动保留余量，8×256×1=2048，
+全局batch与原64×8×4相同，学习率2e-4及215000步预算保持。训练8个worker/rank；
+每5000步在线验证每库固定前64条中心窗口（8批×8），不把该小规模检查当作全量成绩。
