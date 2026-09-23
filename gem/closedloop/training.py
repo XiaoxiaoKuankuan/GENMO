@@ -148,6 +148,10 @@ def build_stage1_loader(
     num_workers: int = 0,
     seed: int = 42,
     samples_per_epoch: int | None = None,
+    rank: int = 0,
+    world_size: int = 1,
+    resumable: bool = False,
+    pin_memory: bool = False,
 ) -> DataLoader:
     """直接实例化第 3 步 Dataset，训练保留四来源相对采样权重。"""
 
@@ -164,15 +168,16 @@ def build_stage1_loader(
         dataset = BumiClosedLoopStage1Dataset(**options)
         ground = dataset.reader.dataset_info.get("ground_semantics")
         if ground not in {
+            "legacy_body_origin_min_zero",
             "gmr_foot_sole_ground_zero_v1",
             "robot_retargeter_floor_zero_v1",
             "umr_foot_sole_ground_zero_v1",
             "mixed_floor_zero_fk_contact_v2",
         }:
             raise ValueError(
-                f"Stage 1 FK/contact losses require explicit floor-zero data; "
+                f"Stage 1 FK/contact losses require supported ground provenance; "
                 f"got {ground!r} for {dataset.dataset_name}. "
-                "The existing Stage 1 batch has no per-sequence ground-height field."
+                "Legacy data must carry full-sequence ground supervision in existing meta."
             )
         if len(dataset) == 0:
             raise ValueError(f"empty Stage 1 dataset: {dataset.dataset_name}/{split}")
@@ -193,9 +198,27 @@ def build_stage1_loader(
         draws = len(merged) if samples_per_epoch is None else int(samples_per_epoch)
         if draws <= 0:
             raise ValueError("samples_per_epoch must be positive")
-        sampler = WeightedRandomSampler(
-            sample_weights, num_samples=draws, replacement=True, generator=generator
-        )
+        if resumable:
+            from gem.closedloop.sampling import (
+                DeterministicDrawDataset,
+                ResumableDistributedWeightedSampler,
+            )
+
+            sampler = ResumableDistributedWeightedSampler(
+                sample_weights,
+                draws,
+                seed,
+                rank=rank,
+                world_size=world_size,
+                emit_draw_keys=True,
+            )
+            merged = DeterministicDrawDataset(merged, seed=seed)
+        else:
+            if world_size != 1 or rank != 0:
+                raise ValueError("Distributed training requires resumable sharded sampling")
+            sampler = WeightedRandomSampler(
+                sample_weights, num_samples=draws, replacement=True, generator=generator
+            )
     return DataLoader(
         merged,
         batch_size=int(batch_size),
@@ -205,6 +228,7 @@ def build_stage1_loader(
         collate_fn=collate_stage1_training_samples,
         generator=generator,
         drop_last=False,
+        pin_memory=pin_memory,
     )
 
 

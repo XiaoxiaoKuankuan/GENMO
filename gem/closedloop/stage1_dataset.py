@@ -17,11 +17,16 @@ qpos30 target 始终是 stats 标准化前的 physical 表示。构造时额外�
 不会用 codec 的 terminal-repeat 值冒充标签。known prefix 从有限零占位开始，仅复制逐坐标
 mask 为真的 teacher-forced 值；contact2 只作为监督，不进入 prefix。本模块不改网络、不启动
 训练/GMT/Isaac Lab，也不实现 Stage 2、Critic 或 DPPO。
+
+地面只属于损失监督 provenance：已有 floor-zero 来源继续使用世界 Z=0；legacy body-origin
+来源在完整未裁剪源序列上复用原接触标签器的足底分位估计，按源文件身份缓存一个标量。
+该标量放在既有 meta 中，不新增条件字段，不改变 root Z、接触 payload 或 qpos30 anchor。
 """
 
 from __future__ import annotations
 
 import hashlib
+import inspect
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
@@ -35,7 +40,7 @@ from gem.datasets.music_dance.music_dance_bumi import (
     BumiMusicDatasetReader,
     duration_repeat_count,
 )
-from gem.robots.bumi.contacts import derive_bumi_foot_contact
+from gem.robots.bumi.contacts import _resolve_ground_height, derive_bumi_foot_contact
 from gem.robots.bumi.feature_codec import (
     BumiMotionFeatureCodec,
     make_quaternion_continuous,
@@ -65,6 +70,19 @@ from .contracts import (
 
 CAUSAL_PROPRIO_CONSTRUCTION_VERSION = "genmo.bumi_demo_proprio48.causal_hold.v1"
 PREFIX_SOURCE = "teacher_forced_demo_reference_v1"
+STAGE1_GROUND_SUPERVISION_VERSION = "genmo.bumi_closedloop.full_sequence_ground.v1"
+# 读取既有标签器默认值，防止新路径复制后悄悄漂移成另一套估地阈值。
+STAGE1_CONTACT_GROUND_QUANTILE = float(
+    inspect.signature(derive_bumi_foot_contact).parameters["ground_quantile"].default
+)
+STAGE1_FLOOR_ZERO_SEMANTICS = frozenset(
+    {
+        "gmr_foot_sole_ground_zero_v1",
+        "robot_retargeter_floor_zero_v1",
+        "umr_foot_sole_ground_zero_v1",
+        "mixed_floor_zero_fk_contact_v2",
+    }
+)
 _COMMON_TIMEBASE_HZ = 150
 _MOTION_TICKS = _COMMON_TIMEBASE_HZ // MOTION_FPS
 _PROPRIO_TICKS = _COMMON_TIMEBASE_HZ // PROPRIO_FPS
@@ -285,6 +303,8 @@ class BumiClosedLoopStage1Dataset(Dataset):
         self.rows = self.reader.rows
         self.codec = BumiMotionFeatureCodec(self.kinematics)
         self.proprio_builder = CausalDemoProprio48Builder(self.kinematics)
+        # 只缓存标量与来源，不保存完整 FK 或动作；文件变化会触发重新估计。
+        self._ground_supervision_cache: dict[tuple[Any, ...], dict[str, Any]] = {}
         self.idx2meta: list[int] = []
         for row_index, row in enumerate(self.rows):
             repeats = (
@@ -360,6 +380,68 @@ class BumiClosedLoopStage1Dataset(Dataset):
             raise ValueError("foot_contact_available must have shape [T]")
         merged = torch.where(available[:, None], supplied.to(derived.contact), derived.contact)
         return merged.contiguous(), derived.valid_mask, "payload_with_fk_fallback"
+
+    @torch.no_grad()
+    def _ground_supervision(self, sequence: Mapping[str, Any]) -> dict[str, Any]:
+        """返回损失专用世界地面与可复核来源，绝不从当前 crop 估计地面。"""
+
+        semantics = str(self.reader.dataset_info["ground_semantics"])
+        if semantics not in STAGE1_FLOOR_ZERO_SEMANTICS | {"legacy_body_origin_min_zero"}:
+            raise ValueError(f"Stage1 unsupported ground semantics: {semantics!r}")
+        qpos = sequence["qpos"]
+        source_frames = int(sequence["source_lengths"]["qpos"])
+        if semantics == "legacy_body_origin_min_zero" and source_frames != len(qpos):
+            raise ValueError(
+                "legacy ground supervision requires the full uncropped source sequence"
+            )
+        motion_path = Path(sequence["motion_path"]).resolve()
+        stat = motion_path.stat()
+        source_sha = str(sequence["row"]["source_motion_sha256"])
+        cache_key = (
+            str(motion_path),
+            stat.st_mtime_ns,
+            stat.st_size,
+            source_sha,
+            self.kinematics.kinematics_sha256,
+            source_frames,
+            semantics,
+        )
+        if cache_key in self._ground_supervision_cache:
+            return dict(self._ground_supervision_cache[cache_key])
+
+        height = 0.0
+        ground_quantile = None
+        method = "explicit_floor_zero"
+        if semantics == "legacy_body_origin_min_zero":
+            # 与 derive_bumi_foot_contact 默认 ground_quantile=0.02 的同一个实现；
+            # 不计算或替换已有 contact 标签，且不对验证集拟合归一化统计量。
+            ground_quantile = STAGE1_CONTACT_GROUND_QUANTILE
+            fk = self.kinematics.forward_kinematics(qpos)
+            sole = self.kinematics.aggregate_sole_by_foot(fk["body_pos_w"], fk["body_quat_w"])
+            height = float(
+                _resolve_ground_height(
+                    sole["foot_bottom_height"],
+                    torch.ones(len(qpos), dtype=torch.bool, device=qpos.device),
+                    0.0,
+                    ground_quantile,
+                    torch.tensor(True, device=qpos.device),
+                )
+            )
+            method = "full_sequence_fk_sole_quantile"
+        result = {
+            "contract_version": STAGE1_GROUND_SUPERVISION_VERSION,
+            "ground_semantics": semantics,
+            "ground_height_world_m": height,
+            "method": method,
+            "ground_quantile": ground_quantile,
+            "source_sequence_frames": source_frames,
+            "source_motion_path": str(motion_path),
+            "source_motion_sha256": source_sha,
+            "kinematics_sha256": self.kinematics.kinematics_sha256,
+            "scope": "loss_supervision_only_not_actor_condition",
+        }
+        self._ground_supervision_cache[cache_key] = result
+        return dict(result)
 
     def get_window(self, row_index: int, start_frame: int | None = None) -> dict[str, Any]:
         """构造一条样本；``start_frame`` 即 decision frame，可显式落在序列尾部。"""
@@ -468,6 +550,8 @@ class BumiClosedLoopStage1Dataset(Dataset):
                 "proprio_construction_version": CAUSAL_PROPRIO_CONSTRUCTION_VERSION,
                 "proprio_joint_default": "gmt_nominal_default_no_startup_randomization",
                 "contact_source": contact_source,
+                "ground_semantics": self.reader.dataset_info["ground_semantics"],
+                "ground_supervision": self._ground_supervision(sequence),
                 "qpos30_value_domain": "physical_before_existing_stats_normalization",
                 "source_manifest": str(self.reader.manifest_path),
                 "motion_path": str(sequence["motion_path"]),
@@ -506,6 +590,8 @@ def collate_stage1_training_samples(batch: Sequence[Mapping[str, Any]]) -> dict[
 __all__ = [
     "CAUSAL_PROPRIO_CONSTRUCTION_VERSION",
     "PREFIX_SOURCE",
+    "STAGE1_GROUND_SUPERVISION_VERSION",
+    "STAGE1_FLOOR_ZERO_SEMANTICS",
     "BumiClosedLoopStage1Dataset",
     "CausalDemoProprio48Builder",
     "collate_stage1_training_samples",

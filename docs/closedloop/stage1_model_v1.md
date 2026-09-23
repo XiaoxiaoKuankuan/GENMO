@@ -104,8 +104,16 @@ FK、SO(3)、有限差分、限位、物理尺度与 top-k/max 数学，但独�
 当前全部 v5 权重、长尾及 warmup 均支持；未知权重会报错。小规模配置明确把 warmup
 设为零，使第 4 步验证实际覆盖全部损失，不从旧 global_step 推导权重进度。
 
-此路径要求 floor-zero 数据。第 3 步 batch 没有提供 legacy 数据所需的全序列地面估计，
-因此加载器明确拒绝 `legacy_body_origin_min_zero`，不会从裁剪验证窗口伪造地面。
+第 5 步训练准备已补齐混合地面监督：floor-zero 来源保持世界地面 Z=0；Mine 的
+`legacy_body_origin_min_zero` 在完整未裁剪源序列上，复用原接触标签器的 FK 足底分位
+估计（默认 2%），不修改原 Root Z、qpos30 anchor 或已存 contact 标签。Dataset 将结果
+放入既有 `meta.ground_supervision`，版本为
+`genmo.bumi_closedloop.full_sequence_ground.v1`，记录源文件路径/SHA、全序列帧数、
+运动学 SHA、估计方法与 loss-only scope；按源文件身份缓存标量，文件变化后重新计算。
+`Stage1BumiLosses` 使用 `mixed_floor_zero_fk_contact_v2`，将各样本世界地面减去
+`default_root_height` 后计算接触高度和穿地项。缺失或不一致的 legacy provenance 会拒绝。
+地面不进入 Actor 条件，不从当前 crop、预测值或验证集统计拟合，不增加 batch 顶层字段；
+旧无 meta 的 floor-zero batch 保持兼容。本地契约与损失一致性测试不等于真实 GPU 短训验收。
 Dataset 每个实际 entry 的运动学 SHA 必须与 Actor 相同，随后 reader 继续核验数据资产
 和有序关节，避免同为 30D 却使用不同 BUMI 资产。
 

@@ -58,8 +58,9 @@ proprio48 继续使用 Stage1 明确物理尺度，不自动拟合统计量。
   新stats可由原BumiEndecoder严格加载并归一化出有限值。该验收没有运行Actor训练。
 - 新train统计量SHA256：`f51df1c167ba953b87953d7efb7a611c92e0e2da7616a8b88b18eb8c79c3df79`。
   原统计量仍为 `a695a1bb09bb9a936869aefb87672e4895bc4f35ab23efb40047bf335fa4d8fc`。
-- `build_stage1_loader` 的Mine地面准入拒绝也已实际复现，并保存在验收报告中；没有把
-  Dataset可读误写成四库训练可启动。默认验证的2个batch仍只是接通检查，不是全量评测。
+- 重新划分验收时，`build_stage1_loader` 的 Mine 地面准入拒绝已实际复现并保存在当时
+  报告中；该结果是历史边界。第 5 步准备已补齐下述完整源序列地面监督并允许 Mine 加载。
+  默认验证的 2 个 batch 仍只是接通检查，不是全量评测。
 
 **旧 checkpoint 的边界不因换 split 而消失。** 报告逐库给出新 val/test 来自旧 train 的
 条数；从已见过这些样本的旧模型 warm start 后，不能声称它们是整个模型的未见数据。
@@ -67,5 +68,10 @@ proprio48 继续使用 Stage1 明确物理尺度，不自动拟合统计量。
 绕过。需要严格新留出实验时，使用遵守新划分的训练起点；历史模型仍使用原 stats/config。
 
 Mine 元数据为 `legacy_body_origin_min_zero`，公开库为 `umr_foot_sole_ground_zero_v1`。
-本任务不修改 Root Z、地面或接触标签，现有 Stage1 训练器拒绝 Mine 的旧地面语义这一
-边界仍存在。重新划分并通过数据契约不等于已通过四库 Stage1 训练准入；本任务不启动训练。
+重新划分没有修改 Root Z、地面或接触标签。后续第 5 步训练准备通过既有
+`meta.ground_supervision` 携带完整源序列的 loss-only 地面监督，解决了这一加载阻塞：
+Mine 复用原接触标签器的 FK 足底 2% 分位估计，公开库保持世界地面 Z=0；估计绑定源
+文件与运动学身份并缓存，混合损失统一转换到原 canonical Z。原动作、接触 payload、
+表示与 Actor 条件字段均不改变，也不使用当前 crop 或网络预测估计地面。
+本地 loader 集成与损失一致性测试已通过；真实 GPU、完整模型短训结果由第 5 步独立
+验收报告记录，不能以重新划分或本地契约测试替代。本数据重新划分任务本身没有启动训练。

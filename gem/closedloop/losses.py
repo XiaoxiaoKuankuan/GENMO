@@ -10,20 +10,29 @@
 在这里明确传入适用的坐标或支持点 mask。无效 target、padding 和未知条件占位在算术、
 rotation/FK 之前均替换为有限的中性值，末帧无 halo 的 root XY 不进入任何监督。
 
-contact 仅使用独立标签及有效 mask，不进入前缀条件。本路径的地面必须明确为 floor-zero；
-旧 legacy_body_origin_min_zero 需要未裁剪序列的地面估计，本 batch 未携带该量，因此拒绝
-该配置，不从当前验证窗口伪造地面。这里全部为运动学监督，不包含 GMT、Critic 或动力学。
+contact 仅使用独立标签及有效 mask，不进入前缀条件。混合来源使用既有 meta 中版本化的
+ground_supervision：floor-zero 为世界 Z=0，legacy body-origin 为 Dataset 在完整源序列
+上估计并绑定源文件与 FK 身份的地面；这里只做 canonical Z 平移，不读取裁剪 target 来
+估地面，也不把该监督量送入 Actor。缺失 metadata 的旧 floor-zero batch 保持兼容。
+这里全部为运动学监督，不包含 GMT、Critic 或动力学。
 """
 
 from __future__ import annotations
 
+import math
 from collections.abc import Mapping
+from pathlib import Path
 from typing import Any
 
 import torch
 import torch.nn.functional as F
 
 from gem.closedloop.contracts import validate_stage1_training_batch
+from gem.closedloop.stage1_dataset import (
+    STAGE1_CONTACT_GROUND_QUANTILE,
+    STAGE1_FLOOR_ZERO_SEMANTICS,
+    STAGE1_GROUND_SUPERVISION_VERSION,
+)
 from gem.robots.bumi.endecoder import BumiEndecoder
 from gem.robots.bumi.losses import (
     BUMI_ADVANCED_PHYSICS_LOSS_NAMES,
@@ -72,9 +81,73 @@ class Stage1BumiLosses(BumiRobotLosses):
         **kwargs: Any,
     ) -> None:
         if ground_semantics == "legacy_body_origin_min_zero":
-            raise ValueError("Stage1 losses require explicit floor-zero ground semantics")
+            raise ValueError(
+                "Stage1 losses use mixed_floor_zero_fk_contact_v2 for mixed legacy/floor-zero data"
+            )
         super().__init__(endecoder, weights, ground_semantics=ground_semantics, **kwargs)
         self.stage1_contract_version = STAGE1_LOSS_CONTRACT_VERSION
+
+    def _ground_height_world(self, batch: Mapping[str, Any], pred: torch.Tensor) -> torch.Tensor:
+        """验证已有 meta 中的损失监督来源；旧无 meta batch 维持明确的 floor-zero 语义。"""
+
+        metadata = batch.get("meta")
+        if metadata is None:
+            return pred.new_zeros((len(pred), 1, 1))
+        if not isinstance(metadata, (list, tuple)) or len(metadata) != len(pred):
+            raise ValueError("Stage1 ground supervision meta must contain one mapping per sample")
+        heights = []
+        for item in metadata:
+            if not isinstance(item, Mapping):
+                raise ValueError("Stage1 ground supervision sample metadata must be a mapping")
+            semantics = item.get("ground_semantics")
+            ground = item.get("ground_supervision")
+            if ground is None:
+                if semantics not in (None, *STAGE1_FLOOR_ZERO_SEMANTICS):
+                    raise ValueError(
+                        "legacy/unknown ground requires full-sequence ground supervision"
+                    )
+                heights.append(0.0)
+                continue
+            if not isinstance(ground, Mapping):
+                raise ValueError("Stage1 ground_supervision must be a mapping")
+            if ground.get("contract_version") != STAGE1_GROUND_SUPERVISION_VERSION:
+                raise ValueError("Stage1 ground supervision contract mismatch")
+            if ground.get("ground_semantics") != semantics:
+                raise ValueError("Stage1 ground supervision semantics mismatch")
+            if ground.get("scope") != "loss_supervision_only_not_actor_condition":
+                raise ValueError("Stage1 ground supervision scope mismatch")
+            if ground.get("kinematics_sha256") != self.kinematics.kinematics_sha256:
+                raise ValueError("Stage1 ground supervision kinematics mismatch")
+            if ground.get("source_sequence_frames") != item.get("source_sequence_frames"):
+                raise ValueError("Stage1 ground supervision must identify the full source sequence")
+            if ground.get("source_motion_path") != str(Path(item["motion_path"]).resolve()):
+                raise ValueError("Stage1 ground supervision source motion mismatch")
+            digest = ground.get("source_motion_sha256", "")
+            if (
+                not isinstance(digest, str)
+                or len(digest) != 64
+                or any(char not in "0123456789abcdef" for char in digest.lower())
+            ):
+                raise ValueError("Stage1 ground supervision requires source motion SHA256")
+            height = float(ground["ground_height_world_m"])
+            if not math.isfinite(height):
+                raise ValueError("Stage1 ground supervision height must be finite")
+            if semantics == "legacy_body_origin_min_zero":
+                if self.ground_semantics != "mixed_floor_zero_fk_contact_v2":
+                    raise ValueError("legacy ground requires mixed_floor_zero_fk_contact_v2 losses")
+                if ground.get("method") != "full_sequence_fk_sole_quantile" or (
+                    ground.get("ground_quantile") != STAGE1_CONTACT_GROUND_QUANTILE
+                ):
+                    raise ValueError(
+                        "legacy ground requires the existing full-sequence FK estimator"
+                    )
+            elif semantics in STAGE1_FLOOR_ZERO_SEMANTICS:
+                if height != 0.0 or ground.get("method") != "explicit_floor_zero":
+                    raise ValueError("floor-zero ground supervision must remain world Z=0")
+            else:
+                raise ValueError(f"Stage1 unsupported ground semantics: {semantics!r}")
+            heights.append(height)
+        return pred.new_tensor(heights).view(-1, 1, 1)
 
     def forward(
         self,
@@ -279,8 +352,10 @@ class Stage1BumiLosses(BumiRobotLosses):
         )
         put("foot_slide_topk", slide_tail["topk"])
         put("foot_slide_max", slide_tail["max"])
-        # codec 的 canonical Z = world Z - default_root_height；统一 floor-zero 的世界地面为 0。
-        ground = -self.endecoder.codec.default_root_height.to(pred)
+        # 与旧 BumiRobotLosses 的 mixed ground 路径一致：world Z 转同一 canonical Z。
+        ground = self._ground_height_world(
+            batch, pred
+        ) - self.endecoder.codec.default_root_height.to(pred)
         height_error = (sole["foot_bottom_height"] - ground).abs()
         height_gate = contact_bool & contact_valid & body_valid[..., None]
         height_raw = F.smooth_l1_loss(

@@ -1,0 +1,82 @@
+# 服务器1 Stage1 正式训练配置：8卡真实DDP与音乐权重warm start。
+#
+# 仍复用GRU历史、MLP前缀、1024维16层8头Transformer、qpos30/contact2和120帧30Hz。
+# 数据使用筛选后90/5/5四库；网络归一化明确绑定原音乐s350000训练时的stats，而不是
+# 新划分重算stats，保证旧权重数值空间一致。该旧模型/统计已经见过部分新留出样本，
+# 本实验的val/test用于闭环适配监控，不宣称整个预训练模型的严格未见音乐评测。
+# 首次训练必须weights-only初始化；真正续训只能使用本实验full-state checkpoint。
+# 默认50000个优化步，固定warmup/cosine总周期；短程验收只显式覆盖max_steps等测试值。
+# 命令仅由用户启动，配置本身不会创建进程、tmux或自动任务。正式输出与短程临时目录分开。
+base_config: stage1_train.yaml
+config_version: genmo.bumi_closedloop.stage1_run.v1
+mode: train
+warm_start_checkpoint: /data0/user/liwei/GENMO_outputs/bumi_music_umr70_mine/bumi_umr70_mine_s350k_20260918_170256_6ac1e6d/version_0/checkpoints/s350000.ckpt
+warm_start_checkpoint_sha256: aa1f98c19294f9e1f16bd0391d4cd811267950f9914a9d7563e3ba79fc16cb00
+resume_checkpoint: null
+warm_start_source_assets:
+  stats_path: /data0/user/liwei/datasets/bumi_music_umr70_mine_pass_v1/stats/qpos30_train_stats.json
+  stats_sha256: a695a1bb09bb9a936869aefb87672e4895bc4f35ab23efb40047bf335fa4d8fc
+  kinematics_path: /home/user/liwei/GENMO-bumi-closedloop/configs/bumi/bumi_kinematics_robot_retargeter_fe934_v1.json
+  kinematics_sha256: c08731704dccece11351b6fa877e30bac5ca2a8d363de30af7ca2ea1398f4029
+  joint_order: [waist_yaw_joint, l_arm_pitch_joint, l_arm_roll_joint, l_arm_yaw_joint, l_elbow_pitch_joint, r_arm_pitch_joint, r_arm_roll_joint, r_arm_yaw_joint, r_elbow_pitch_joint, l_leg_pitch_joint, l_leg_roll_joint, l_leg_yaw_joint, l_knee_pitch_joint, l_ankle_pitch_joint, l_ankle_roll_joint, r_leg_pitch_joint, r_leg_roll_joint, r_leg_yaw_joint, r_knee_pitch_joint, r_ankle_pitch_joint, r_ankle_roll_joint]
+  clip_std_min: 0.01
+  representation_contract_version: genmo.bumi_motion_features.qpos30.v3
+warm_start_source_model_config:
+  backbone:
+    class: NetworkEncoderRoPE
+    latent_dim: 1024
+    num_layers: 16
+    num_heads: 8
+    dropout: 0.1
+    allow_autoregressive: true
+  noise_schedule: cosine
+  diffusion_steps: 1000
+  condition_modules:
+    music:
+      - {name: '', class: Mlp}
+      - {name: fc1, class: Linear}
+      - {name: act, class: GELU, approximate: none}
+      - {name: drop1, class: Dropout, probability: 0.1}
+      - {name: fc2, class: Linear}
+      - {name: drop2, class: Dropout, probability: 0.1}
+    exists:
+      - {name: '', class: Sequential}
+      - {name: '0', class: Linear}
+      - {name: '1', class: SiLU}
+      - {name: '2', class: Linear}
+endecoder:
+  kinematics_path: /home/user/liwei/GENMO-bumi-closedloop/configs/bumi/bumi_kinematics_robot_retargeter_fe934_v1.json
+  stats_path: /data0/user/liwei/datasets/bumi_music_umr70_mine_pass_v1/stats/qpos30_train_stats.json
+data_loader:
+  batch_size: 32
+  num_workers: 2
+  # 每rank的epoch长度固定，不能随短程max_steps改变，否则无法精确恢复。
+  samples_per_epoch: 8192
+train:
+  max_steps: 50000
+  learning_rate: 0.00001
+  weight_decay: 0.01
+  grad_clip_norm: 1.0
+scheduler:
+  total_steps: 50000
+  warmup_steps: 500
+  min_lr_ratio: 0.1
+trainer:
+  enabled: true
+  require_warm_start: true
+  precision: bf16
+  gradient_accumulation: 1
+  log_every_steps: 10
+  validate_every_steps: 500
+  save_every_steps: 1000
+validation:
+  split: val
+  samples_per_source: 2
+  sample_steps: 20
+  guidance_scale: 2.5
+  seed: 12345
+runtime:
+  seed: 42
+  device: cuda
+  cpu_threads: 1
+  output_dir: /data0/user/liwei/GENMO_outputs/bumi_closedloop_stage1_90505_warm_s350000_8gpu_v1

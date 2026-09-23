@@ -213,16 +213,23 @@ def test_builder_rejects_different_dataset_asset(actor_factory, tmp_path):
         build_stage1_actor(config, data)
 
 
-def test_loader_rejects_legacy_ground_contract(actor_factory, tmp_path):
+def test_loader_supports_legacy_full_sequence_ground(actor_factory, tmp_path):
     reference, _ = actor_factory(history_steps=4, starts=(45,))
     root = _write_dataset(tmp_path / "legacy_ground_dataset", length=130)
     path = root / "meta/dataset_info.json"
     info = json.loads(path.read_text())
     info["ground_semantics"] = "legacy_body_origin_min_zero"
     path.write_text(json.dumps(info), encoding="utf-8")
+    motion_path = root / "motions/sample.pt"
+    payload = torch.load(motion_path, weights_only=False)
+    payload["ground_semantics"] = "legacy_body_origin_min_zero"
+    torch.save(payload, motion_path)
     data = _data_config(root, reference.endecoder.stats_path)
-    with pytest.raises(ValueError, match="require explicit floor-zero"):
-        build_stage1_loader(data, split="train", batch_size=1)
+    loader = build_stage1_loader(data, split="train", batch_size=1)
+    batch = next(iter(loader))
+    assert (
+        batch["meta"][0]["ground_supervision"]["ground_semantics"] == "legacy_body_origin_min_zero"
+    )
 
 
 def test_cli_train_checkpoint_then_strict_condition_validation(actor_factory, tmp_path, capsys):

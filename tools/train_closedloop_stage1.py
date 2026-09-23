@@ -1,4 +1,4 @@
-"""BUMI closed-loop 第4步的小规模训练/验证命令行入口。
+"""BUMI closed-loop Stage1 小规模检查与正式持久训练的统一命令行入口。
 
 该入口完全独立于旧music-only训练脚本，读取已有四库Dataset配置，构建可被后续阶段复用
 的Stage1Actor，并运行配置中明确限定的监督步数或采样验证batch数。默认配置为只验证；
@@ -6,13 +6,17 @@
 
 默认所有运行产物位于系统临时目录，退出后自动删除；显式传入 --output-dir 才保留完整
 参数迁移报告、运行配置、验证结果和新接口权重。输出目录必须不存在或为空，旧文件绝不
-覆盖。原checkpoint只进行weights-only warm start，旧optimizer和global_step不恢复。
+覆盖。原checkpoint只进行weights-only warm start；服务器正式配置显式启用DDP/full-state
+执行器，--resume-checkpoint才恢复新Stage1模型、optimizer、scheduler/AMP、步数与每rank
+随机/采样状态。新实验拒绝非空目录；resume允许向原实验追加新编号checkpoint和会话报告。
+torchrun只由rank0写公共产物，默认小规模单进程接口仍保留；不创建后台任务。
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+import os
 import random
 import sys
 import tempfile
@@ -104,9 +108,30 @@ def main(argv: list[str] | None = None) -> dict:
     parser.add_argument(
         "--output-dir", type=Path, help="保留运行产物的独立空目录；省略则使用并自动清理系统临时目录"
     )
+    parser.add_argument(
+        "--resume-checkpoint",
+        type=Path,
+        help="严格恢复完整Stage1训练状态，不是旧音乐权重warm start",
+    )
     arguments = parser.parse_args(argv)
     config = load_stage1_config(arguments.config, arguments.set)
+    if arguments.resume_checkpoint:
+        config.resume_checkpoint = str(arguments.resume_checkpoint.expanduser().resolve())
+        config.warm_start_checkpoint = None
+        config.stage1_checkpoint = None
     explicit = arguments.output_dir or config.runtime.get("output_dir")
+    persistent = bool(config.get("trainer", {}).get("enabled", False))
+    if persistent:
+        if not explicit:
+            raise ValueError("Persistent/DDP training requires an explicit shared output directory")
+        from gem.closedloop.runner import run_persistent
+
+        report = run_persistent(config, Path(explicit).expanduser().resolve())
+        if int(os.environ.get("RANK", "0")) == 0:
+            print(json.dumps(report, ensure_ascii=False, indent=2))
+        return report
+    if arguments.resume_checkpoint or int(os.environ.get("WORLD_SIZE", "1")) > 1:
+        raise ValueError("DDP/resume requires a configuration with trainer.enabled=true")
     if explicit:
         output = Path(explicit).expanduser().resolve()
         if output.exists() and any(output.iterdir()):
