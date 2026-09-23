@@ -1,0 +1,74 @@
+# BUMI closed-loop Stage 1 的独立小规模监督训练配置。
+#
+# 直接读取第3步四来源 Dataset 配置，不写回原文件；H=50，可变前缀 P∈[0,24]，
+# 已有 qpos30 stats 只读复用。默认8个优化步用于第4步接通验证，不是第5步正式训练。
+# 模型默认保持旧1024维/16层音乐Transformer结构，匹配checkpoint可weights-only初始化。
+# proprio_scales依次是重力方向、角速度、关节位置、关节速度的显式物理参考尺度，
+# 默认恒等变换，不宣称经验统计量；不读取验证集或GMT 69维normalizer。
+config_version: genmo.bumi_closedloop.stage1_run.v1
+mode: train
+dataset_config: configs/closedloop/stage1_dataset_server1_fourset_v1.yaml
+sample_contract:
+  history_steps: 50
+  prefix_min_frames: 0
+  prefix_max_frames: 24
+  prefix_random_seed: 42
+warm_start_checkpoint: null
+# 可提供checkpoint捕获包内已核验的asset_identity；没有旧metadata时报告证据缺口。
+warm_start_source_assets: null
+# 可从原运行配置提供backbone/noise_schedule等字段；缺省时报告原checkpoint未内嵌。
+warm_start_source_model_config: null
+stage1_checkpoint: null
+endecoder:
+  kinematics_path: null
+  stats_path: null
+  clip_std_min: 0.01
+  allow_placeholder_stats: false
+  fps: 30
+model:
+  latent_dim: 1024
+  num_layers: 16
+  num_heads: 8
+  mlp_ratio: 4.0
+  dropout: 0.1
+  use_cond_exists_as_input: true
+  music_mask_prob: 0.1
+  history_hidden_dim: 128
+  proprio_scales: [1.0, 1.0, 1.0, 1.0]
+  noise_schedule: cosine
+  diffusion_steps: 1000
+loss:
+  weights_from: configs/pipeline/music_only_bumi_qpos30_contact_v5.yaml
+  weights: {}
+  options:
+    ground_semantics: mixed_floor_zero_fk_contact_v2
+    contract_version: physical_qpos30_contact_v5
+    # 小规模检查立即打开辅助项，正式训练需独立确定warmup，不沿用旧step。
+    auxiliary_warmup_steps: 0
+    joint_limit_margin_rad: 0.05
+    joint_limit_topk_fraction: 0.01
+    robust_joint_limit_start_step: 0
+    robust_joint_limit_warmup_steps: 0
+    advanced_physics_start_step: 0
+    advanced_physics_warmup_steps: 0
+    advanced_physics_topk_fraction: 0.05
+    root_tilt_upright_allowance_rad: 0.35
+    root_tilt_target_margin_rad: 0.05
+data_loader:
+  batch_size: 2
+  num_workers: 0
+train:
+  max_steps: 8
+  learning_rate: 0.00001
+  weight_decay: 0.01
+  grad_clip_norm: 1.0
+validation:
+  split: val
+  max_batches: 2
+  sample_steps: 10
+  guidance_scale: 1.0
+runtime:
+  seed: 42
+  device: cuda
+  # null使用系统临时目录且退出自动清理。显式路径才保留报告和Stage1权重。
+  output_dir: null

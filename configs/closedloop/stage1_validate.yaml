@@ -1,0 +1,12 @@
+# BUMI closed-loop Stage 1 独立条件采样验证配置。
+#
+# 与Stage1训练共用同一Actor、Dataset、qpos30 stats及loss，仅执行有上限的验证。
+# sample调用只接收契约条件；标签在生成后才用于损失。已有Stage1 checkpoint使用
+# stage1_checkpoint严格加载；原music-only模型使用warm_start_checkpoint权重迁移。
+base_config: stage1_train.yaml
+mode: validate
+validation:
+  split: val
+  max_batches: 2
+  sample_steps: 10
+  guidance_scale: 2.5
