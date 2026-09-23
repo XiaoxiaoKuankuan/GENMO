@@ -127,6 +127,7 @@ def save_original_artifact(
     *,
     source_motion: Path,
     quality_config: Any,
+    quality_config_sha256: str | None = None,
     kinematics: BumiKinematics,
     kinematics_path: Path,
     output: Path,
@@ -151,6 +152,13 @@ def save_original_artifact(
             raise ValueError("自建库正式动作关节顺序与目标 kinematics 不一致")
         if source_payload.get("source_mjcf_sha256") != kinematics.source_mjcf_sha256:
             raise ValueError("自建库正式动作绑定的 MJCF 与目标 kinematics 不一致")
+        payload_quality_sha256 = source_payload.get("quality_config_sha256")
+        if (
+            quality_config_sha256 is not None
+            and payload_quality_sha256 is not None
+            and payload_quality_sha256 != quality_config_sha256
+        ):
+            raise ValueError("正式 qpos30 动作绑定的质量配置与当前验证配置不一致")
         artifact = {
             **source_payload,
             "contract_version": "genmo.bumi_hq_original_comparison_motion.v1",
@@ -308,9 +316,7 @@ def completed_report(
 
 def summarize(results: list[dict[str, Any]]) -> dict[str, Any]:
     passed = [row for row in results if row.get("status") == "passed"]
-    root_postprocesses = {
-        row.get("root_orientation_postprocess") for row in passed
-    }
+    root_postprocesses = {row.get("root_orientation_postprocess") for row in passed}
     dataset_rows = {}
     for dataset, label, _ in REPORT_DATASETS:
         rows = [row for row in passed if row["dataset"] == dataset]
@@ -318,9 +324,7 @@ def summarize(results: list[dict[str, Any]]) -> dict[str, Any]:
             "dataset_label": label,
             "completed": len(rows),
             "comparison_duration_sec": sum(row["comparison_duration_sec"] for row in rows),
-            "original_video_duration_sec": sum(
-                row["original_video_duration_sec"] for row in rows
-            ),
+            "original_video_duration_sec": sum(row["original_video_duration_sec"] for row in rows),
             "generated_full_duration_sec": sum(row["generated_duration_sec"] for row in rows),
             "source_clip_shorter_than_audio": sum(
                 row["source_clip_shorter_than_audio"] for row in rows
@@ -355,9 +359,7 @@ def summarize(results: list[dict[str, Any]]) -> dict[str, Any]:
         "completed": len(passed),
         "failed": len(results) - len(passed),
         "comparison_duration_sec": sum(row["comparison_duration_sec"] for row in passed),
-        "original_video_duration_sec": sum(
-            row["original_video_duration_sec"] for row in passed
-        ),
+        "original_video_duration_sec": sum(row["original_video_duration_sec"] for row in passed),
         "generated_full_duration_sec": sum(row["generated_duration_sec"] for row in passed),
         "root_orientation_postprocess": (
             None
@@ -483,9 +485,9 @@ def build_index(
             )
             cards.append(
                 f'<article class="card" data-dataset="{dataset}" data-query="{query}">'
-                f'<h3>{index}. {html.escape(row["audio_key"])}</h3>'
+                f"<h3>{index}. {html.escape(row['audio_key'])}</h3>"
                 f'<p class="membership"><span class="split-badge">{html.escape(source_split)}</span> '
-                f'{html.escape(training_membership)}</p>'
+                f"{html.escape(training_membership)}</p>"
                 f'<p class="motion">人工高质量动作：<code>{html.escape(row["representative_motion"])}</code></p>'
                 '<div class="pair" data-sync-pair>'
                 '<div class="video-panel"><div class="video-label">原始/参考 BUMI3 动作</div>'
@@ -598,18 +600,34 @@ def main() -> int:
     if re.fullmatch(r"[A-Za-z0-9_.-]+", model_label) is None:
         raise ValueError("selection model.label 含有不安全字符")
     total = len(items)
-    quality_config = load_config(config_path)
     kinematics = BumiKinematics(kinematics_path).eval()
     if kinematics.source_mjcf_sha256 != sha256_file(mjcf_path):
         raise ValueError("目标 kinematics 与 --mjcf SHA256 不一致")
+    quality_config_sha256 = sha256_file(config_path)
+    source_paths = [
+        Path(
+            item.get("source_motion")
+            or (source_root / item["dataset"] / item["representative_motion"])
+        ).resolve(strict=True)
+        for item in items
+    ]
+    uses_legacy_sonic_npz = any(path.suffix != ".pt" for path in source_paths)
+    quality_config = load_config(config_path) if uses_legacy_sonic_npz else None
     frozen_selection = {
         "contract_version": "genmo.bumi_hq_original_comparison_selection.v2",
         "source_validation": str(validation_root),
         "source_selection_sha256": sha256_file(validation_root / "selection.json"),
         "source_motion_root": str(source_root),
         "quality_config": str(config_path),
-        "quality_config_sha256": sha256_file(config_path),
-        "source_joint_order": list(quality_config.joint_order),
+        "quality_config_sha256": quality_config_sha256,
+        "quality_config_mode": (
+            "legacy_sonic_npz_conversion"
+            if uses_legacy_sonic_npz
+            else "direct_qpos30_payload_sha256_binding"
+        ),
+        "source_joint_order": list(
+            quality_config.joint_order if quality_config is not None else kinematics.joint_order
+        ),
         "target_kinematics": str(kinematics_path),
         "target_kinematics_sha256": kinematics.kinematics_sha256,
         "mjcf": str(mjcf_path),
@@ -627,8 +645,7 @@ def main() -> int:
         dataset = item["dataset"]
         key = item["audio_key"]
         source_motion = Path(
-            item.get("source_motion")
-            or (source_root / dataset / item["representative_motion"])
+            item.get("source_motion") or (source_root / dataset / item["representative_motion"])
         ).resolve(strict=True)
         generated_artifact_source = (validation_root / "artifacts" / dataset / f"{key}.pt").resolve(
             strict=True
@@ -657,6 +674,7 @@ def main() -> int:
             original_artifact, original_qpos = save_original_artifact(
                 source_motion=source_motion,
                 quality_config=quality_config,
+                quality_config_sha256=quality_config_sha256,
                 kinematics=kinematics,
                 kinematics_path=kinematics_path,
                 output=artifact_path,

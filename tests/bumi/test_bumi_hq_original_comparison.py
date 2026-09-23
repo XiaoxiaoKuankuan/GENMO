@@ -64,6 +64,7 @@ def test_self_built_preprocessed_motion_is_not_resampled_twice(tmp_path: Path) -
             "quaternion_convention": "wxyz",
             "joint_names": list(joint_order),
             "source_mjcf_sha256": "a" * 64,
+            "quality_config_sha256": "c" * 64,
             "source_fps": 50,
             "source_num_frames": 300,
         },
@@ -72,6 +73,7 @@ def test_self_built_preprocessed_motion_is_not_resampled_twice(tmp_path: Path) -
     artifact, loaded = save_original_artifact(
         source_motion=source,
         quality_config=None,
+        quality_config_sha256="c" * 64,
         kinematics=SimpleNamespace(
             joint_order=joint_order,
             source_mjcf_sha256="a" * 64,
@@ -84,6 +86,21 @@ def test_self_built_preprocessed_motion_is_not_resampled_twice(tmp_path: Path) -
     assert torch.equal(loaded, qpos)
     assert artifact["source_preprocessed_30hz"] is True
     assert artifact["target_frames_30hz"] == 180
+
+    with pytest.raises(ValueError, match="质量配置"):
+        save_original_artifact(
+            source_motion=source,
+            quality_config=None,
+            quality_config_sha256="d" * 64,
+            kinematics=SimpleNamespace(
+                joint_order=joint_order,
+                source_mjcf_sha256="a" * 64,
+                kinematics_sha256="b" * 64,
+            ),
+            kinematics_path=tmp_path / "kinematics.json",
+            output=tmp_path / "mismatched.pt",
+            item={"dataset": "mine_bumi", "audio_key": "dance"},
+        )
 
 
 def test_site_data_only_exposes_relative_public_media(tmp_path: Path) -> None:
@@ -122,12 +139,8 @@ def test_site_data_only_exposes_relative_public_media(tmp_path: Path) -> None:
         items=[{"dataset": "aistpp", "audio_key": "mBR0", "high_quality_motion_count": 2}],
         model_label="s350000",
     )
-    assert site_data["items"][0]["original_video"] == (
-        "/aistpp/mBR0/mBR0_gmr_bumi3.mp4"
-    )
-    assert site_data["items"][0]["generated_video"] == (
-        "/aistpp/mBR0/mBR0_generated.mp4"
-    )
+    assert site_data["items"][0]["original_video"] == ("/aistpp/mBR0/mBR0_gmr_bumi3.mp4")
+    assert site_data["items"][0]["generated_video"] == ("/aistpp/mBR0/mBR0_generated.mp4")
     assert "/private/" not in repr(site_data)
     result["report_relative"] = "reports/aistpp/mBR0.json"
     build_index(tmp_path, [result], summarize([result]), model_label="s350000")
