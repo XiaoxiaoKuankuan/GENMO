@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-"""Validate the four materialized curated datasets and optional loader smoke batch."""
+"""核验 BUMI 音乐上游的四库源动作、EDGE35、划分与审核清单。
+
+旧 SMPL 实验和其 loader/151D 编码烟测已经退役；本入口仅验证源数据的配对、
+长度、数值、去重与文件边界，不再实例化已删除的训练实验，也不运行生成模型。
+"""
 
 from __future__ import annotations
 
@@ -11,19 +15,16 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
-import torch
 
 REPO_ROOT = Path(__file__).resolve().parents[4]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from gem.datasets.aistpp.aistplusplus import (  # noqa: E402
-    AISTPlusPlusSmplDataset,
     load_aist_artifact,
     load_music_feature_tensor,
     validate_musicfeat_v2,
 )
-from gem.datasets.music_dance.music_dance_smpl import MusicDanceSmplDataset  # noqa: E402
 from tools.data.music_dance.curation.common import (  # noqa: E402
     DATASET_DIRS,
     DATASET_ORDER,
@@ -120,65 +121,7 @@ def _validate_manifest_dataset(
             errors.append(f"{dataset} {sample_id}: {exc}")
 
 
-def _loader_smoke(root: Path, accepted: list[dict[str, Any]]) -> dict[str, Any]:
-    from hydra import compose, initialize_config_dir
-    from hydra.utils import instantiate
-
-    from gem.datamodule.mocap_trainX_testY import collate_fn
-
-    rows_by_dataset = {
-        dataset: [row for row in accepted if row["dataset"] == dataset and row["split"] == "train"]
-        for dataset in DATASET_ORDER
-    }
-    if any(not rows for rows in rows_by_dataset.values()):
-        missing = [dataset for dataset, rows in rows_by_dataset.items() if not rows]
-        raise ValueError(f"loader smoke requires at least one retained train sample per dataset: {missing}")
-    samples = []
-    aist = AISTPlusPlusSmplDataset(
-        root=root / DATASET_DIRS["aistpp"],
-        split="train",
-        motion_frames=120,
-        feat_version="v2",
-        strict_music_alignment=True,
-        max_music_motion_frame_mismatch=2,
-        load_raw_music_audio=False,
-        music_only_conditioning=True,
-        enable_contact_supervision=True,
-    )
-    samples.append(aist[0])
-    for dataset in DATASET_ORDER[1:]:
-        value = MusicDanceSmplDataset(
-            root=root / DATASET_DIRS[dataset],
-            dataset_name=dataset,
-            split="train",
-            motion_frames=120,
-            strict_alignment=True,
-            enable_contact_supervision=True,
-        )
-        samples.append(value[0])
-    with initialize_config_dir(version_base="1.3", config_dir=str(REPO_ROOT / "configs")):
-        cfg = compose(config_name="train", overrides=["exp=gem_smpl_music_only_4set_curated"])
-    batch = collate_fn(samples, mode="train", collate_cfg=cfg.data.collate_cfg)
-    endecoder = instantiate(cfg.endecoder)
-    with torch.no_grad():
-        target = endecoder.encode(batch)
-    if tuple(batch["music_embed"].shape) != (4, 120, 35):
-        raise ValueError(f"mixed music shape is {tuple(batch['music_embed'].shape)}")
-    if tuple(target.shape) != (4, 120, 151) or not torch.isfinite(target).all():
-        raise ValueError(f"mixed target shape/finite failed: {tuple(target.shape)}")
-    return {
-        "music_shape": list(batch["music_embed"].shape),
-        "target_shape": list(target.shape),
-        "music_mask_all_true": bool(batch["mask"]["has_music_mask"].all()),
-        "image_mask_any_true": bool(batch["mask"]["has_img_mask"].any()),
-        "audio_mask_any_true": bool(batch["mask"]["has_audio_mask"].any()),
-        "target_finite": bool(torch.isfinite(target).all()),
-    }
-
-
-def validate_curated(
-    root: str | Path, *, strict: bool = False, loader_smoke: bool = False
-) -> dict[str, Any]:
+def validate_curated(root: str | Path, *, strict: bool = False) -> dict[str, Any]:
     root = Path(root).expanduser().resolve()
     accepted_path = root / "reports" / "accepted_master.jsonl"
     rejected_path = root / "reports" / "rejected_samples.jsonl"
@@ -237,12 +180,6 @@ def validate_curated(
     if forbidden_raw_audio:
         errors.append(f"curated root unexpectedly contains raw audio: {forbidden_raw_audio[:10]}")
 
-    smoke = None
-    if loader_smoke and not errors:
-        try:
-            smoke = _loader_smoke(root, accepted)
-        except Exception as exc:
-            errors.append(f"loader smoke failed: {exc}")
     if int(curation_report.get("accepted_sample_count", -1)) != len(accepted):
         errors.append("curation report accepted count differs from accepted master")
     if strict and curation_report.get("pending_sample_count") != 0:
@@ -256,7 +193,7 @@ def validate_curated(
         "accepted_hours": sum(int(row["num_frames"]) for row in accepted) / 30.0 / 3600.0,
         "active_music_feature_count": len(actual_music),
         "raw_audio_file_count": len(forbidden_raw_audio),
-        "loader_smoke": smoke,
+        "validation_scope": "source_motion_music_only",
         "error_count": len(errors),
         "errors": errors[:100],
         "final_pass": not errors,
@@ -271,12 +208,10 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--root", required=True)
     parser.add_argument("--strict", action="store_true")
-    parser.add_argument("--loader-smoke", action="store_true")
     args = parser.parse_args()
-    report = validate_curated(args.root, strict=args.strict, loader_smoke=args.loader_smoke)
+    report = validate_curated(args.root, strict=args.strict)
     print(json.dumps(report, indent=2, ensure_ascii=False))
 
 
 if __name__ == "__main__":
     main()
-

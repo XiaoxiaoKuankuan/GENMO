@@ -6,12 +6,9 @@ import json
 import math
 from types import SimpleNamespace
 from pathlib import Path
-from types import SimpleNamespace
 
 import pytest
 import torch
-from hydra import compose, initialize_config_dir
-from omegaconf import OmegaConf
 from torch.utils.data import Dataset
 
 from gem.datamodule.balanced_music_sampler import (
@@ -20,7 +17,6 @@ from gem.datamodule.balanced_music_sampler import (
 )
 from gem.datamodule.mocap_trainX_testY import _trainer_ddp_sampler_kwargs
 from gem.pipeline.smpl_physics_losses import (
-    compute_smpl_physics_losses,
     consecutive_valid_mask,
     derivative_valid_mask,
     finite_difference,
@@ -75,95 +71,6 @@ def test_aist_ground_sources_accept_official_72d_pose_contract(
     assert sources[0]["motion"]["body_pose"].shape == (num_frames, 63)
     assert torch.equal(sources[0]["motion"]["global_orient"], pose[:, :3])
     assert torch.equal(sources[0]["motion"]["body_pose"], pose[:, 3:66])
-
-
-def test_physics_experiment_is_derived_without_mutating_baseline() -> None:
-    with initialize_config_dir(
-        version_base="1.3", config_dir=str(REPO_ROOT / "configs")
-    ):
-        physics = compose(
-            config_name="train",
-            overrides=["exp=gem_smpl_music_only_4set_physics_v1"],
-        )
-        baseline = compose(
-            config_name="train", overrides=["exp=gem_smpl_music_only_4set"]
-        )
-    assert physics.optimizer.lr == pytest.approx(2e-5)
-    assert list(physics.scheduler.scheduler.milestones) == [30000, 45000]
-    assert physics.pl_trainer.max_steps == 50000
-    assert physics.pl_trainer.use_distributed_sampler is False
-    assert physics.data.balanced_sampling.samples_per_epoch == 52224
-    assert physics.pipeline.args.physics_losses.sole_penetration.weight == 0.005
-    assert all(
-        value.duration_aware_sampling is False
-        for value in physics.train_datasets.values()
-    )
-    assert all(
-        value.duration_aware_sampling is True
-        for value in baseline.train_datasets.values()
-    )
-    assert "physics_losses" not in baseline.pipeline.args
-    physics_network = OmegaConf.to_container(physics.network, resolve=True)
-    baseline_network = OmegaConf.to_container(baseline.network, resolve=True)
-    physics_network["args"].pop("physics_losses")
-    physics_network["model_cfg"]["denoiser"]["args"].pop("physics_losses")
-    assert physics_network == baseline_network
-    assert OmegaConf.to_container(
-        physics.endecoder, resolve=True
-    ) == OmegaConf.to_container(baseline.endecoder, resolve=True)
-
-
-def test_physics_v2_is_a_long_scratch_run_with_calibrated_weights() -> None:
-    with initialize_config_dir(
-        version_base="1.3", config_dir=str(REPO_ROOT / "configs")
-    ):
-        v1 = compose(
-            config_name="train",
-            overrides=["exp=gem_smpl_music_only_4set_physics_v1"],
-        )
-        v2 = compose(
-            config_name="train",
-            overrides=["exp=gem_smpl_music_only_4set_physics_v2"],
-        )
-
-    assert v2.exp_name == "gem_smpl_music_only_4set_physics_v2"
-    assert v2.pretrain_ckpt is None
-    assert v2.ckpt_path is None
-    assert v2.resume_mode is None
-    assert v2.optimizer.lr == pytest.approx(3e-4)
-    assert list(v2.scheduler.scheduler.milestones) == [100000, 150000]
-    assert v2.pl_trainer.max_steps == 170000
-    assert v2.pipeline.args.physics_losses.warmup_steps == 6667
-    assert v2.data.loader_opts.train.batch_size == 384
-    assert v2.data.balanced_sampling.samples_per_epoch == 52224
-    assert (
-        v2.data.balanced_sampling.samples_per_epoch // 8
-        // v2.data.loader_opts.train.batch_size
-        == 17
-    )
-
-    expected_weights = {
-        "root_velocity": 0.20,
-        "root_acceleration": 0.040,
-        "root_jerk": 0.004,
-        "joint_angular_velocity": 0.10,
-        "joint_angular_acceleration": 0.020,
-        "fk_velocity": 0.20,
-        "fk_acceleration": 0.040,
-        "fk_jerk": 0.008,
-        "sole_penetration": 0.020,
-    }
-    for name, weight in expected_weights.items():
-        assert v2.pipeline.args.physics_losses[name].weight == pytest.approx(weight)
-
-    # The completed v1 run remains reproducible and unchanged.
-    assert v1.optimizer.lr == pytest.approx(2e-5)
-    assert v1.pl_trainer.max_steps == 50000
-    assert v1.pipeline.args.physics_losses.warmup_steps == 10000
-    assert v1.pipeline.args.physics_losses.fk_jerk.weight == pytest.approx(0.0002)
-    assert v1.pipeline.args.physics_losses.sole_penetration.weight == pytest.approx(
-        0.005
-    )
 
 
 def test_first_to_third_derivative_masks_exclude_padding_and_bad_intervals() -> None:
@@ -255,6 +162,8 @@ def test_ground_estimator_hash_contract_and_invalid_path(tmp_path: Path) -> None
 
 def test_sole_proxy_indices_match_the_versioned_smplx_vertex_mapping() -> None:
     mapping_path = REPO_ROOT / "gem/utils/body_model/smplx_verts437.pt"
+    if not mapping_path.is_file():
+        pytest.skip("需要另行安装的 SMPL-X 顶点映射资产 smplx_verts437.pt")
     mapping = torch.load(mapping_path, map_location="cpu", weights_only=False)
     actual = torch.as_tensor(mapping)[list(SOLE_V437_INDICES)].tolist()
     assert actual == list(SOLE_SMPLX_VERTEX_IDS)
@@ -307,80 +216,6 @@ def test_held_out_metrics_report_temporal_errors_and_five_percent_guard() -> Non
     assert penetration["sole_penetration_frame_ratio"] == pytest.approx(0.5)
     assert relative_regression(1.04, 1.0) < 0.05
     assert relative_regression(1.06, 1.0) > 0.05
-
-
-class _FakeEndecoder:
-    def fk_v2(self, *, body_pose, betas, global_orient, transl):
-        del betas, global_orient
-        pose_offset = body_pose[..., :3].unsqueeze(-2) * 0.001
-        return transl.unsqueeze(-2).expand(-1, -1, 22, -1) + pose_offset
-
-
-def test_complete_physics_loss_ramps_and_backpropagates_in_fp32() -> None:
-    with initialize_config_dir(
-        version_base="1.3", config_dir=str(REPO_ROOT / "configs")
-    ):
-        config = compose(
-            config_name="train",
-            overrides=["exp=gem_smpl_music_only_4set_physics_v1"],
-        ).pipeline.args.physics_losses
-    batch, frames = 1, 5
-    pred_pose = torch.zeros(batch, frames, 63, requires_grad=True)
-    pred_betas = torch.zeros(batch, frames, 10, requires_grad=True)
-    pred_root = torch.zeros(batch, frames, 3, requires_grad=True)
-    pred_velocity = torch.zeros(batch, frames, 3, requires_grad=True)
-    pred_verts = torch.zeros(batch, frames, 437, 3, requires_grad=True)
-    pred_verts.data[..., 1] = -0.03
-    zeros3 = torch.zeros(batch, frames, 3)
-    inputs = {
-        "mask": {
-            "valid": torch.ones(batch, frames, dtype=torch.bool),
-            "spv_incam_only": torch.zeros(batch, dtype=torch.bool),
-            "2d_only": torch.zeros(batch, dtype=torch.bool),
-        },
-        "smpl_params_w": {
-            "body_pose": torch.zeros(batch, frames, 63),
-            "betas": torch.zeros(batch, frames, 10),
-            "global_orient": zeros3,
-            "transl": zeros3,
-        },
-        "smpl_params_c": {"global_orient": zeros3},
-        "R_c2gv": torch.eye(3).reshape(1, 1, 3, 3).expand(batch, frames, -1, -1),
-        "physics": {
-            "ground_y_local": torch.zeros(batch),
-            "ground_valid": torch.ones(batch, dtype=torch.bool),
-        },
-        "meta": [{"dataset_id": "aist++"}],
-    }
-    outputs = {
-        "decode_dict": {
-            "body_pose": pred_pose,
-            "betas": pred_betas,
-            "global_orient": pred_root,
-            "global_orient_gv": pred_root,
-            "local_transl_vel": pred_velocity,
-        },
-        "pred_body_params_incam": {"transl": zeros3},
-        "_pred_c_verts437": pred_verts,
-    }
-    pipeline = SimpleNamespace(
-        args={"physics_losses": config}, endecoder=_FakeEndecoder()
-    )
-    zero_loss, _ = compute_smpl_physics_losses(
-        inputs, outputs, pipeline, global_step=0
-    )
-    assert zero_loss == 0
-    full_loss, logs = compute_smpl_physics_losses(
-        inputs, outputs, pipeline, global_step=10000
-    )
-    assert full_loss.dtype == torch.float32 and full_loss > 0
-    assert logs["physics_weight_ramp_metric"] == 1
-    assert logs["physics_sole_penetration_weighted_loss"] == pytest.approx(
-        float(logs["physics_sole_penetration_normalized_loss"]) * 0.005
-    )
-    full_loss.backward()
-    assert torch.isfinite(pred_verts.grad).all()
-    assert pred_verts.grad[..., 1].min() < 0
 
 
 class _SamplingDataset(Dataset):

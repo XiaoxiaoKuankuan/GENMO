@@ -209,7 +209,7 @@ def render_sample(
 ) -> dict[str, Any]:
     from gem.utils.smplx_utils import make_smplx
     from gem.utils.video_io_utils import save_video
-    from scripts.demo.demo_utils import render_global_frames
+    from tools.data.music_dance.render_utils import render_global_frames
 
     payload = safe_torch_load(_resolve(root, manifest["motion_path"], "motion_path"))
     total = int(payload["num_frames"])

@@ -8,7 +8,6 @@ from types import SimpleNamespace
 import pytest
 import torch
 import torch.nn as nn
-from hydra import compose, initialize_config_dir
 from omegaconf import OmegaConf
 
 from gem.datasets.aistpp.aistplusplus import (
@@ -28,42 +27,6 @@ from gem.pipeline.gem_pipeline import compute_extra_global_loss
 from gem.utils.ckpt_compat import remap_legacy_state_dict
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-
-
-def _compose(exp: str):
-    with initialize_config_dir(
-        version_base="1.3", config_dir=str(REPO_ROOT / "configs")
-    ):
-        return compose(config_name="train", overrides=[f"exp={exp}"])
-
-
-def test_music_only_and_generalist_configs_compose() -> None:
-    specialist = _compose("gem_smpl_music_only")
-    assert list(specialist.train_datasets) == ["aistpp_train"]
-    assert list(specialist.pipeline.args.train_modes) == ["diffusion"]
-    assert list(specialist.pipeline.args.in_attr) == ["encoded_music"]
-    assert specialist.pipeline.args.encoded_music_dim == 35
-    assert specialist.pipeline.args.disable_random_null_condition is True
-    assert specialist.model.model_cfg.text_encoder is None
-    assert specialist.network.model_cfg.denoiser.encode_text is False
-    assert specialist.train_datasets.aistpp_train.strict_music_alignment is True
-    assert specialist.train_datasets.aistpp_train.load_raw_music_audio is False
-    assert specialist.train_datasets.aistpp_train.enable_contact_supervision is True
-    assert specialist.train_datasets.aistpp_train.aist_world_up_axis == "y"
-    assert specialist.train_datasets.aistpp_train.validate_metric_translation is True
-    assert specialist.test_datasets.aistpp_music_eval.enable_contact_supervision is True
-    assert specialist.test_datasets.aistpp_music_eval.aist_world_up_axis == "y"
-    assert specialist.scheduler.interval == "step"
-    assert list(specialist.scheduler.scheduler.milestones) == [70000, 100000]
-
-    generalist = _compose("gem_smpl")
-    assert list(generalist.pipeline.args.train_modes) == ["regression", "diffusion"]
-    assert "encoded_music" in generalist.pipeline.args.in_attr
-    assert "f_imgseq" in generalist.pipeline.args.in_attr
-    assert generalist.network.model_cfg.denoiser.encode_text is True
-    assert generalist.train_datasets.aistpp_train.enable_contact_supervision is False
-    assert "aist_world_up_axis" not in generalist.train_datasets.aistpp_train
-    assert generalist.scheduler.interval == "epoch"
 
 
 def _static_contact_loss(enabled: bool) -> tuple[torch.Tensor, torch.Tensor]:

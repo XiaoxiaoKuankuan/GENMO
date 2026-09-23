@@ -1,5 +1,12 @@
 # BUMI 整首生成后按 GMT 仿真步播放
 
+> 当前分支提示（2026-09-23）：下文是旧 s200000 / 外部 Gazebo 工程的历史记录，
+> 不是 closed-loop Frozen GMT 训练任务的物理频率或性能契约。文中的
+> `run_bumi_buffered_bridge.sh` 和 `run_bumi_buffered_console.sh` 已删除。
+> buffered 功能仍保留在 `scripts/demo/demo_bumi_gmt_buffered_bridge.py` 与
+> `scripts/demo/demo_music_bumi_buffered_console.py`；先用 `--help` 查看参数，再显式传入
+> 当前匹配的发布清单与资产，不继承本文旧路径。现行入口见[仓库首页](../README.md)。
+
 ## 使用范围
 
 这是与原实时模式并存的新模式：在 `bumi>` 输入音乐，先生成完整 30 Hz qpos，再按原有

@@ -1,5 +1,9 @@
 # FAQ / Troubleshooting
 
+> 当前分支提示（2026-09-23）：本文涉及的 SMPL 实验、人体/文本/Webcam Demo 和旧专属
+> 训练/导出/评测命令已退役，相关段落仅作历史说明，不可直接执行。仍保留的共享数据、
+> 环境和底层实现不因此失效。BUMI / closed-loop 的现行入口请以 [仓库首页](../README.md) 为准。
+
 **Hydra config errors** — Ensure you are using the correct experiment config name (`gem_smpl_regression` or `gem_smpl`). Run `python scripts/train.py --help` to see available options.
 
 **Body model** — This repo uses SMPL (body only). For full-body estimation with [SOMA](https://github.com/NVlabs/SOMA-X) including hands and face, see [GEM-X](https://github.com/NVlabs/GEM-X).

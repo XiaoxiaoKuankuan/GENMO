@@ -1,36 +1,6 @@
 # SPDX-License-Identifier: LicenseRef-NVIDIA-OneWay-Noncommercial
-"""现行 GENMO 运行时公共接口。"""
+"""闭环 BUMI 运行时包：通过明确的子模块提供生成、轨迹和部署能力。
 
-from .resident_multimodal_motion import (
-    MultimodalMotionRequest,
-    ResidentMultimodalMotionEngine,
-    UnsupportedModeError,
-    build_text_music_data,
-)
-from .resident_text_motion import (
-    ResidentTextMotionEngine,
-    TextMotionRequest,
-    encode_prompt_with_loaded_t5,
-    get_cuda_memory_snapshot,
-)
-from .resident_video_session import (
-    ResidentVideoModelStack,
-    ResidentVideoSession,
-    VideoSourceSession,
-)
-from .smpl_frame import SMPLFrame
-
-__all__ = [
-    "MultimodalMotionRequest",
-    "ResidentMultimodalMotionEngine",
-    "ResidentTextMotionEngine",
-    "ResidentVideoModelStack",
-    "ResidentVideoSession",
-    "SMPLFrame",
-    "TextMotionRequest",
-    "UnsupportedModeError",
-    "VideoSourceSession",
-    "build_text_music_data",
-    "encode_prompt_with_loaded_t5",
-    "get_cuda_memory_snapshot",
-]
+不再在包初始化时导入已退役的 SMPL、文本、视频和多模态常驻服务；当前 BUMI
+消费者继续显式导入 bumi_*、gmt_* 等子模块，不改变 qpos30、采样、速度派生或协议。
+"""

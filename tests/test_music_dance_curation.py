@@ -9,7 +9,6 @@ from pathlib import Path
 import numpy as np
 import pytest
 import torch
-from hydra import compose, initialize_config_dir
 
 from gem.utils.rotation_conversions import axis_angle_to_matrix
 from tools.data.music_dance.curation.apply_review_results import apply_results
@@ -275,7 +274,8 @@ def test_review_export_decision_and_shared_music_roundtrip(
     assert (curated / "quarantine/CoMPAS3D/musicfeat_v2/pair_music.pt").is_file()
     # Source artifacts remain intact and recoverable.
     assert (roots["compas3d"] / "musicfeat_v2/pair_music.pt").is_file()
-    validated = validate_curated(curated, strict=True, loader_smoke=False)
+    validated = validate_curated(curated, strict=True)
+    assert validated["validation_scope"] == "source_motion_music_only"
     assert validated["final_pass"]
     assert validated["active_music_feature_count"] == 2
 
@@ -342,21 +342,6 @@ def test_refresh_aist_only_preserves_other_motions_and_decisions(tmp_path: Path)
         write_report=False,
     )
     assert package["final_pass"]
-
-
-def test_curated_experiment_composes_without_changing_condition_contract() -> None:
-    with initialize_config_dir(version_base="1.3", config_dir=str(REPO_ROOT / "configs")):
-        cfg = compose(config_name="train", overrides=["exp=gem_smpl_music_only_4set_curated"])
-    assert list(cfg.train_datasets) == [
-        "aistpp_train",
-        "aioz_gdance_train",
-        "finedance_train",
-        "compas3d_train",
-    ]
-    assert list(cfg.pipeline.args.in_attr) == ["encoded_music"]
-    assert list(cfg.pipeline.args.train_modes) == ["diffusion"]
-    assert cfg.train_datasets.aistpp_train.root.endswith("/AIST++")
-    assert cfg.test_datasets.aistpp_music_eval.root.endswith("/AIST++")
 
 
 def _write_quality_ratings(root: Path) -> None:

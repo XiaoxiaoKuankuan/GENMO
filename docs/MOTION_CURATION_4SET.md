@@ -125,8 +125,7 @@ reject 必须填写至少一个受支持的问题代码。`unsure` 用于二次�
 
 .venv/bin/python tools/data/music_dance/curation/validate_curated_datasets.py \
   --root /data0/user/liwei/datasets/music_dance_curated/music_only_4set_v1 \
-  --strict \
-  --loader-smoke
+  --strict
 ```
 
 工具先从 split/manifest 移除 reject 动作，再计算全局剩余音乐引用。curated 数据只包含保留
@@ -167,24 +166,13 @@ FineDance 149、CoMPAS3D 72。输出保留源 split、`music_key` 和 `source_ma
 本备用包只物化人体 NPZ，不包含 WAV 或 EDGE35；正式后训练前应据
 `index/selected.jsonl` 重建音乐闭包、manifest 和训练统计量。
 
-## 使用筛选后的训练集
+## 与当前 BUMI 训练的边界
 
-筛选结果验证通过后使用独立实验，不覆盖原四数据集实验：
+本工具保留源动作与音乐的审核功能，报告中的 `validation_scope` 为
+`source_motion_music_only`。旧 SMPL 实验和 `--loader-smoke` 已退役；源数据审核通过
+不等于 BUMI 重定向、qpos30 编码或 closed-loop batch 已通过验证。
 
-```bash
-NCCL_CUMEM_HOST_ENABLE=0 \
-NCCL_IB_DISABLE=1 \
-NCCL_SOCKET_IFNAME=lo \
-TORCH_NCCL_BLOCKING_WAIT=1 \
-CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 \
-.venv/bin/python -u scripts/train.py \
-  exp=gem_smpl_music_only_4set_curated \
-  pl_trainer.devices=8
-```
-
-该配置仍然满足：
-
-```python
-pipeline.args.in_attr == ["encoded_music"]
-pipeline.args.train_modes == ["diffusion"]
-```
+BUMI 训练仍须使用经过匹配核验的机器人动作、统计量和划分。当前 closed-loop
+四库（AIST++、AIOZ-GDANCE、FineDance、Mine）的配置与历史/prefix 构造见
+[Stage 1 契约](closedloop/stage1_contract_v1.md)和
+[Stage 1 模型与训练入口](closedloop/stage1_model_v1.md)，不能直接把本页的人体源数据当作 qpos30。

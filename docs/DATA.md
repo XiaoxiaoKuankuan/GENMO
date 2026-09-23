@@ -1,5 +1,9 @@
 # Dataset Preparation
 
+> 当前分支提示（2026-09-23）：本文涉及的 SMPL 实验、人体/文本/Webcam Demo 和旧专属
+> 训练/导出/评测命令已退役，相关段落仅作历史说明，不可直接执行。仍保留的共享数据、
+> 环境和底层实现不因此失效。BUMI / closed-loop 的现行入口请以 [仓库首页](../README.md) 为准。
+
 GEM uses preprocessed datasets from [GVHMR](https://github.com/zju3dv/GVHMR). Download the `*_hmr4d_support.tar.gz` archives from [GVHMR's Google Drive](https://drive.google.com/drive/folders/10sEef1V_tULzddFxzCmDUpsIqfv7eP-P?usp=drive_link) and extract them under `inputs/`:
 
 ```

@@ -1,5 +1,9 @@
 # Music-only GEM-SMPL 训练与验证
 
+> 当前分支提示（2026-09-23）：本文涉及的 SMPL 实验、人体/文本/Webcam Demo 和旧专属
+> 训练/导出/评测命令已退役，相关段落仅作历史说明，不可直接执行。仍保留的共享数据、
+> 环境和底层实现不因此失效。BUMI / closed-loop 的现行入口请以 [仓库首页](../README.md) 为准。
+
 本文档描述独立的 `gem_smpl_music_only` specialist。它不是把 generalist 的图像、
 相机、音频和文本条件填零，而是在配置和网络入口层只保留一个条件：
 
