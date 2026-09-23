@@ -1,8 +1,7 @@
 # BUMI qpos30、FK 接触与足底锁定 v3
 
-本文档说明仓库当前采用的 BUMI qpos30/v5 训练与部署契约。它针对旧 93D 表示中“网络
-同时预测 qpos 决定量和 63 维 link 位置、但最终机器人
-只执行 qpos”的冲突，统一规定网络只生成真正决定 qpos28 的 30 个连续量；所有 link、
+本文档说明仓库当前采用的 BUMI qpos30/v5 训练与部署契约。网络只生成真正决定 qpos28
+的 30 个连续量；所有 link、
 鞋底与穿透几何必须由同一份 qpos 经权威 BUMI FK 得到。文档同时给出版本边界、可靠接触
 标签、foot-slide、root tilt、仅修脚滑的后处理，以及服务器 2 固定 8 卡启动命令。
 
@@ -24,8 +23,8 @@ rot6d 确定一个单位根旋转，配合 3 维根位置和 21 个关节角可�
 normalized qpos30 -> physical qpos30 -> qpos28 -> BumiKinematics FK -> link/sole geometry
 ```
 
-旧 93D checkpoint、旧 stats、旧单输出 ONNX 和旧 TensorRT engine 都不兼容；加载边界会
-明确失败，不能按前 30 维截断后冒充新模型。
+维度、表示版本、输出头或统计契约不匹配的 artifact 会在加载边界明确失败，不能截断后
+冒充当前 qpos30 模型。
 
 ## 接触标签与脚滑
 
@@ -104,7 +103,7 @@ $GENMO_PYTHON tools/data/bumi/compute_bumi_30d_stats.py \
 `gem_bumi_music_only_5set_robot_retargeter_pass_v2_qpos30_contact_v5_scratch_s350000`。
 每卡 batch=256、8 卡全局 batch=2048，五库共 2578 条 train 序列，训练 350k step；网络
 qpos30 输入列、30 维输出层、两维 contact head 与 Transformer 主干都从随机初始化开始。
-配置把 `pretrain_ckpt`、`ckpt_path`、`resume_mode` 和 `checkpoint_adapter` 全部固定为 null，
+配置把 `pretrain_ckpt`、`ckpt_path` 和 `resume_mode` 全部固定为 null，
 因此不会加载 SMPL、旧 BUMI 模型、optimizer 或 global step。
 
 ```bash
@@ -122,7 +121,7 @@ $GENMO_PYTHON -u scripts/train.py \
   pl_trainer.strategy=ddp
 ```
 
-正式启动命令仍可显式追加 `pretrain_ckpt=null model.model_cfg.checkpoint_adapter=null`，作为
+正式启动命令仍可显式追加 `pretrain_ckpt=null`，作为
 配置之外的第二道防护。学习率为 `1e-4`，里程碑为 210k/315k，每 5k step 保存 checkpoint。
 该版本化入口来自正式运行目录的 Hydra config/overrides；除将服务器绝对 `output_dir`
 规范化为仓库相对路径外，模型、数据、损失、优化器、scheduler 和 trainer 字段逐项一致。

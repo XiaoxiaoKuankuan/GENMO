@@ -3,12 +3,11 @@
 测试使用临时运动学/统计文件和确定性伪去噪器，不启动 Redis、GMT、TensorRT、仿真或
 实机。覆盖单窗、两窗、普通长序列及非 90 倍数尾窗，验证 120/30/90 在线提交无重复、
 缺帧和丢尾；在线 raw qpos、contact、因果足锁结果与既有整首离线基准一致；同时覆盖
-CRC、身份固定、revision/帧序、心跳、发布上下文和新入口的依赖隔离。
+CRC、身份固定、revision/帧序、心跳和发布上下文。
 """
 
 from __future__ import annotations
 
-import ast
 import json
 import threading
 import time
@@ -508,34 +507,3 @@ def test_console_stale_heartbeat_response_cannot_clear_new_request() -> None:
     assert console._request_state() == ("new-request", 20)
     assert console._clear_request_if_matches("new-request", 20)
     assert console._request_state() == (None, 20)
-
-
-def test_new_online_imports_are_isolated_from_legacy_human_chain() -> None:
-    root = Path(__file__).resolve().parents[2]
-    paths = (
-        root / "gem/runtime/bumi_online_stream.py",
-        root / "gem/runtime/qpos_timeline.py",
-        root / "gem/runtime/bumi_gmt_plan.py",
-        root / "scripts/demo/demo_music_bumi_console.py",
-        root / "scripts/demo/demo_bumi_gmt_bridge.py",
-    )
-    forbidden = {
-        "gem.runtime.robot_stream",
-        "gem.gmr_udp_bridge",
-        "gem.smplx_gmr_reference",
-        "scripts.demo.stream_smpl_params_to_gmr",
-    }
-    for path in paths:
-        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
-        imports = {
-            node.module
-            for node in ast.walk(tree)
-            if isinstance(node, ast.ImportFrom) and node.module is not None
-        }
-        imports.update(
-            alias.name
-            for node in ast.walk(tree)
-            if isinstance(node, ast.Import)
-            for alias in node.names
-        )
-        assert not (imports & forbidden), f"{path} imports {imports & forbidden}"

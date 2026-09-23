@@ -1,11 +1,9 @@
 # SPDX-License-Identifier: LicenseRef-NVIDIA-OneWay-Noncommercial
 """BUMI GMT ``trajectory_v1`` contract and rolling reference windows.
 
-The legacy GMR Redis packet contains one 35-float reference frame.  GMT's
-current BUMI policy, however, consumes a 21 x 52 command window.  This module
-builds the native trajectory packet expected by ``MotionLoaderRedis`` so every
-slot comes from its own point on a complete, already-retargeted BUMI qpos
-timeline.
+The current BUMI policy consumes a 21 x 52 command window. This module builds
+the native trajectory packet expected by ``MotionLoaderRedis`` so every slot
+comes from its own point on a complete BUMI qpos timeline.
 """
 
 from __future__ import annotations

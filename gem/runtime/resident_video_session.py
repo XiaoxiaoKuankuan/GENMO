@@ -16,7 +16,7 @@ from typing import Any
 import numpy as np
 import torch
 
-from gem.runtime.motion_streamer import SMPLFrame
+from gem.runtime.smpl_frame import SMPLFrame
 
 
 def _load_endecoder(device: torch.device) -> torch.nn.Module:
@@ -315,13 +315,8 @@ class ResidentVideoSession:
             display=False,
             async_pipeline=False,
             no_async_pipeline=True,
-            gmr_host=None,
-            gmr_port=7006,
-            gmr_protocol="smplx1",
-            gmr_scale=1.0,
             shape_mode=self.shape_mode,
             shape_warmup=self.shape_warmup,
-            smplx_yaw_deg=0.0,
         )
 
     def start_source(
@@ -349,7 +344,6 @@ class ResidentVideoSession:
             args,
             frame_sink=self.frame_sink,
             model_stack=self.model_stack,
-            create_gmr_bridge=False,
         )
         if camera_id is not None:
             kind, value = "camera", int(camera_id)

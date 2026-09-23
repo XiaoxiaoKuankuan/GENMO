@@ -1,7 +1,7 @@
 # BUMI qpos30 Endecoder 与 FK 足底接触契约。
 #
-# 新统计量必须使用 compute_bumi_30d_stats.py 从当前 train manifests 重算；旧 93D stats
-# 会因维度和契约版本同时不符而被拒绝。沿用 main 对 std 设下限的思想，但 BUMI 根水平
+# 正式统计量必须使用 compute_bumi_30d_stats.py 从当前 train manifests 重算；维度或契约
+# 不匹配的 stats 会被拒绝。沿用 main 对 std 设下限的思想，但 BUMI 根水平
 # 位移实际 std 约 0.006 m/帧，若机械裁到 1 会把运动目标缩小约 160 倍；因此使用机器人
 # 专用 0.01 下限，在防止近常量通道爆炸的同时保留可学习的位移幅度。
 _target_: gem.robots.bumi.endecoder.BumiEndecoder

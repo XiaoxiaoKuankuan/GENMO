@@ -1,12 +1,8 @@
-"""Protocol and timeline tests for strict GENMO -> GMR -> BUMI GMT streaming."""
+"""GMT qpos reference 协议、重采样、滚动窗口和发布确认的纯 CPU 测试。"""
 
 from __future__ import annotations
 
-import threading
 import time
-from collections import deque
-from pathlib import Path
-from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -27,13 +23,6 @@ from gem.runtime.gmt_trajectory import (
     resample_qpos_timeline,
     rolling_window_indices,
 )
-from scripts.demo.demo_music_robot_bridge import (
-    BridgeRuntime,
-    _align_action,
-    _IncrementalPlanBuilder,
-    _intermediate_qpos,
-)
-from scripts.demo.stream_smpl_params_to_gmt import _align_action_to_idle, parse_args
 
 
 def make_qpos(num_frames: int = 200, fps: float = 50.0) -> np.ndarray:
@@ -169,139 +158,6 @@ def test_resample_and_playback_have_real_context() -> None:
     assert not np.array_equal(playback.qpos[50], playback.qpos[51])
 
 
-def test_incremental_plan_snapshots_match_complete_offline_plan() -> None:
-    source = make_qpos(390, fps=30.0)
-    idle = make_qpos(1)[0]
-    idle[:2] = [2.0, -1.0]
-    builder = _IncrementalPlanBuilder(
-        idle,
-        np.arange(21),
-        blend_seconds=0.8,
-        return_seconds=1.0,
-    )
-    snapshots = []
-    for start, end in ((0, 120), (120, 210), (210, 300), (300, 390)):
-        snapshots.append(builder.append(source[start:end], is_last=end == len(source)))
-
-    final = snapshots[-1]
-    action = _align_action(resample_qpos_timeline(source, 30.0, 50.0), idle)
-    prefix = np.repeat(idle[None], 10, axis=0)
-    blend = _intermediate_qpos(idle, action[0], 40)
-    target_idle = idle.copy()
-    target_idle[:2] = action[-1, :2]
-    returning = _intermediate_qpos(action[-1], target_idle, 50)
-    expected_qpos = np.concatenate(
-        (
-            prefix,
-            blend,
-            action,
-            returning,
-            np.repeat(target_idle[None], 101, axis=0),
-        ),
-        axis=0,
-    )
-    expected_frames = qpos_timeline_to_gmt_frames(
-        expected_qpos, fps=50.0, native_to_gmt=np.arange(21)
-    )
-    np.testing.assert_allclose(final.qpos, expected_qpos, atol=1e-6)
-    np.testing.assert_allclose(final.frames, expected_frames, atol=1e-5)
-    assert final.audio_start_frame == 50
-    assert final.audio_end_frame == 50 + len(action)
-    assert final.action_complete
-    assert all(not snapshot.qpos.flags.writeable for snapshot in snapshots)
-    assert all(not snapshot.frames.flags.writeable for snapshot in snapshots)
-
-
-def test_50hz_publisher_does_not_hold_state_lock_during_redis_io(
-    tmp_path: Path,
-) -> None:
-    entered_publish = threading.Event()
-    release_publish = threading.Event()
-
-    class BlockingPublisher:
-        def publish(self, *args, **kwargs):
-            del args, kwargs
-            entered_publish.set()
-            assert release_publish.wait(timeout=1.0)
-            runtime.stop_event.set()
-
-    class FakeAudio:
-        def stop(self, reason):
-            del reason
-
-    runtime = BridgeRuntime.__new__(BridgeRuntime)
-    runtime.args = SimpleNamespace(
-        estop_file=tmp_path / "estop",
-        heartbeat_timeout_seconds=1.5,
-        ack_timeout_seconds=5.0,
-        ack_stale_seconds=1.0,
-        critical_buffer_seconds=2.2,
-        redis_key="test",
-        redis_ttl_ms=250,
-        verbose=False,
-    )
-    runtime.lock = threading.RLock()
-    runtime.stop_event = threading.Event()
-    runtime.shutdown_requested = False
-    runtime.state = "PREPARING"
-    runtime.request = None
-    runtime.plan_builder = _IncrementalPlanBuilder(
-        make_qpos(1)[0],
-        np.arange(21),
-        blend_seconds=0.8,
-        return_seconds=1.0,
-    )
-    runtime.plan_snapshot = runtime.plan_builder.append(
-        make_qpos(120, fps=30.0), is_last=False
-    )
-    runtime.publish_generation = 0
-    runtime.cursor = 0
-    runtime.tracker = SimpleNamespace(revision=0)
-    runtime.publisher = None
-    runtime.acked = True
-    runtime.last_ack_sequence = 0
-    runtime.last_ack_monotonic = time.monotonic()
-    runtime.submitted_monotonic = time.monotonic()
-    runtime.ack_latency_ms = None
-    runtime.audio_started = False
-    runtime.idle_publisher = BlockingPublisher()
-    runtime.idle_frames = make_frames(110)
-    runtime.idle_qpos = make_qpos(1)[0]
-    runtime.contract = SimpleNamespace(joint_order_hash=order_hash())
-    runtime.gmr_viewer = None
-    runtime.gmr = None
-    runtime.audio = FakeAudio()
-    runtime.publish_ticks = 0
-    runtime.publish_started = time.monotonic()
-    runtime.publish_jitter_ms = deque(maxlen=30_000)
-    runtime.publish_p99_jitter_ms = None
-    runtime.publish_max_lock_wait_ms = 0.0
-    runtime.last_heartbeat = time.monotonic()
-
-    thread = threading.Thread(target=runtime._publish_loop)
-    thread.start()
-    assert entered_publish.wait(timeout=1.0)
-    # Redis is deliberately blocked, yet control/retarget code can still take
-    # the state lock immediately because publication uses an immutable snapshot.
-    assert runtime.lock.acquire(blocking=False)
-    runtime.lock.release()
-    release_publish.set()
-    thread.join(timeout=1.0)
-    assert not thread.is_alive()
-    assert runtime.state == "PREPARING"
-    assert runtime.cursor == 0
-
-
-def test_planar_alignment_moves_complete_action_without_collapsing_it() -> None:
-    action = make_qpos(20)
-    idle = make_qpos(1)[0]
-    idle[:2] = [4.0, -3.0]
-    aligned = _align_action_to_idle(action, idle)
-    np.testing.assert_allclose(aligned[0, :2], idle[:2], atol=1e-6)
-    np.testing.assert_allclose(np.diff(aligned[:, 0]), np.diff(action[:, 0]), atol=1e-6)
-    assert np.unique(aligned[:, 0]).size == len(aligned)
-
-
 class FakeRedis:
     def __init__(self) -> None:
         self.values: dict[str, bytes] = {}
@@ -332,14 +188,6 @@ def test_publisher_requires_matching_stream_revision_and_plan_ack() -> None:
     correct = GmtTrajectoryAck(99, packet.sequence, 4, 5, time.time_ns())
     client.values[publisher.ack_key] = correct.encode()
     assert publisher.matching_ack() == correct
-
-
-def test_cli_locks_protocol_to_50_hz() -> None:
-    args = parse_args(["--motion", "motion.pt"])
-    assert args.publish_fps == 50.0
-    assert args.redis_key == "gmt_online_frame_bumi"
-    with pytest.raises(ValueError, match="fixed"):
-        parse_args(["--motion", "motion.pt", "--publish_fps", "30"])
 
 
 def test_packet_constant_contract_dimensions() -> None:

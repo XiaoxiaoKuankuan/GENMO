@@ -68,72 +68,6 @@ def test_qpos30_v5_pipeline_excludes_smpl_losses() -> None:
     assert pipeline["weights"]["foot_slide_topk"] > 0.0
 
 
-def test_latest_robot_retargeter_five_set_config_runs_v5_weights_only_200k(
-    monkeypatch,
-) -> None:
-    """唯一最新入口必须联合五库，从显式checkpoint做v5额外20万步续训。"""
-
-    monkeypatch.setenv("BUMI_PRETRAIN_CKPT", "/tmp/verified-latest.ckpt")
-
-    with initialize_config_dir(version_base="1.3", config_dir=str(REPO_ROOT / "configs")):
-        config = compose(
-            config_name="train",
-            overrides=[
-                "exp=gem_bumi_music_only_5set_robot_retargeter_pass_v2_qpos30_contact_latest"
-            ],
-        )
-
-    args = config.pipeline.args
-    assert args.loss_contract == "physical_qpos30_contact_v5"
-    assert args.joint_limit_margin_rad == 0.05
-    assert args.joint_limit_topk_fraction == 0.01
-    assert args.robust_joint_limit_warmup_steps == 10000
-    assert args.robust_joint_limit_start_step == 0
-    assert args.advanced_physics_warmup_steps == 10000
-    assert args.advanced_physics_start_step == 0
-    assert args.advanced_physics_topk_fraction == 0.05
-    assert args.root_tilt_target_margin_rad == 0.05
-    assert args.weights.joint_velocity == 0.15
-    assert args.weights.joint_acceleration == 0.04
-    assert args.weights.joint_jerk == 0.006
-    assert args.weights.joint_acceleration_excess == 0.20
-    assert args.weights.joint_jerk_excess == 0.006
-    assert args.weights.joint_limit == 0.40
-    assert args.weights.joint_limit_margin == 0.80
-    assert args.weights.joint_limit_topk == 2.00
-    assert args.weights.joint_limit_max == 0.20
-    assert args.weights.joint_limit_margin_topk == 0.50
-    assert args.weights.foot_slide == 0.10
-    assert args.weights.foot_slide_topk == 0.10
-    assert args.weights.foot_contact_height == 0.10
-    assert args.weights.penetration == 0.10
-    assert args.weights.root_velocity == 0.05
-    assert args.weights.root_angular_acceleration == 0.02
-    assert args.weights.fk_acceleration == 0.02
-    assert list(config.train_datasets) == [
-        "aistpp_bumi_train",
-        "aioz_gdance_bumi_train",
-        "finedance_bumi_train",
-        "compas3d_bumi_train",
-        "mine_bumi_train",
-    ]
-    assert all(value.joint_limit_tolerance == 0.0001 for value in config.train_datasets.values())
-    assert config.data.expected_train_sequences == 2479 + 99
-    assert sum(config.data.dataset_sampling_weights.values()) == 1.0
-    assert config.data.dataset_sampling_weights.mine_bumi == 0.05
-    assert config.data.loader_opts.train.batch_size == 256
-    assert config.data.samples_per_epoch == 53248
-    assert config.data.samples_per_epoch % (8 * config.data.loader_opts.train.batch_size) == 0
-    assert config.pretrain_ckpt == "/tmp/verified-latest.ckpt"
-    assert config.ckpt_path is None
-    assert config.resume_mode is None
-    assert config.model.model_cfg.checkpoint_adapter is None
-    assert config.pl_trainer.max_steps == 200000
-    assert list(config.scheduler.scheduler.milestones) == [120000, 180000]
-    assert config.pl_trainer.devices == 8
-    assert config.pl_trainer.strategy == "ddp"
-
-
 def test_formal_v5_scratch_s350000_config_matches_archived_training_contract() -> None:
     """正式配置必须冻结 2026-09-09 s350000 训练快照的关键超参数。"""
 
@@ -151,7 +85,6 @@ def test_formal_v5_scratch_s350000_config_matches_archived_training_contract() -
     assert config.pretrain_ckpt is None
     assert config.ckpt_path is None
     assert config.resume_mode is None
-    assert config.model.model_cfg.checkpoint_adapter is None
     assert config.pipeline.args.loss_contract == "physical_qpos30_contact_v5"
     assert config.network.model_cfg.denoiser.output_dim == 30
     assert config.network.model_cfg.denoiser.static_conf_dim == 2

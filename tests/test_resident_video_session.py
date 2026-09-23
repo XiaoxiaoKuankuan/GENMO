@@ -7,7 +7,7 @@ import time
 import numpy as np
 import torch
 
-from gem.runtime.motion_streamer import SMPLFrame
+from gem.runtime.smpl_frame import SMPLFrame
 from gem.runtime.resident_video_session import (
     ResidentVideoModelStack,
     ResidentVideoSession,
@@ -82,7 +82,7 @@ def test_model_stack_loads_exactly_once() -> None:
     assert stack.endecoder is first_endecoder
 
 
-def test_video_start_stop_reuses_models_and_disables_direct_gmr() -> None:
+def test_video_start_stop_reuses_models_and_forwards_frames() -> None:
     stack = ResidentVideoModelStack(
         device="cpu",
         warmup_enabled=False,
@@ -109,7 +109,6 @@ def test_video_start_stop_reuses_models_and_disables_direct_gmr() -> None:
     session.stop_source()
     assert stack.load_count == 1
     assert len(demos) == 2
-    assert all(demo.kwargs["create_gmr_bridge"] is False for demo in demos)
     assert all(demo.kwargs["model_stack"] is stack for demo in demos)
     assert frames
     assert all(torch.count_nonzero(frame.betas) == 0 for frame in frames)
@@ -174,11 +173,10 @@ def test_every_source_gets_fresh_session_state() -> None:
     assert first.kind == "camera" and second.kind == "video"
     assert demos[0].closed
     assert second.demo.args.no_async_pipeline is True
-    assert second.demo.args.gmr_host is None
     session.close()
 
 
-def test_status_exposes_residency_without_udp_objects() -> None:
+def test_status_exposes_model_residency() -> None:
     stack = ResidentVideoModelStack(
         device="cpu",
         warmup_enabled=False,
@@ -192,5 +190,4 @@ def test_status_exposes_residency_without_udp_objects() -> None:
     session.start_source(camera_id=0)
     status = session.status()
     assert status["model_stack"]["load_count"] == 1
-    assert not hasattr(session, "gmr_bridge")
     session.close()

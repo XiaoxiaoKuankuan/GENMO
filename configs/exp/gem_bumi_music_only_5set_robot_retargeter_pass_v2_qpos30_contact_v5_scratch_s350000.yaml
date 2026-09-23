@@ -5,7 +5,7 @@
 # 五个 robot_retargeter PASS v2 数据集、30D qpos + 2D contact、fe934 运动学资产、
 # physical_qpos30_contact_v5、batch 256、8 GPU、1e-4 学习率以及 210k/315k 学习率
 # 里程碑。它是从随机初始化训练 350000 step 的独立入口，不读取
-# BUMI_PRETRAIN_CKPT，也不允许 SMPL checkpoint adapter。数据根、统计量和运动学资产
+# BUMI_PRETRAIN_CKPT，也不接受 SMPL checkpoint。数据根、统计量和运动学资产
 # 仍通过环境变量绑定，调用者必须保证它们的指纹与正式 checkpoint bundle 一致。
 # 归档中仅与服务器目录绑定的绝对 output_dir 被规范化为仓库相对路径；其余解析配置
 # 与归档 training/config.yaml 逐字段一致，输出路径本身不参与模型或优化器计算。
@@ -50,7 +50,6 @@ multicond_args: null
 model:
   model_cfg:
     motion_backend: bumi
-    checkpoint_adapter: null
     text_encoder: null
     music_mask_prob: 0.1
     audio_mask_prob: 0.0

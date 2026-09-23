@@ -81,8 +81,7 @@ from gem.utils.cam_utils import compute_transl_full_cam, estimate_K
 from gem.utils.geo_transform import compute_cam_angvel, get_bbx_xys_from_xyxy
 from gem.utils.motion_utils import init_rollout_w_Rt_state, rollout_step_w_Rt
 from gem.utils.pylogger import Log
-from gem.gmr_udp_bridge import GMRUDPBridge
-from gem.smplx_gmr_reference import BetaStabilizer, SMPLXGMRReference
+from gem.utils.body_shape import BetaStabilizer
 
 from onnx_runners import (
     load_denoiser,
@@ -152,7 +151,7 @@ def resolve_effective_betas(
     *,
     reference: torch.Tensor,
 ) -> torch.Tensor:
-    """Resolve the body shape used by rendering and GMR FK."""
+    """解析渲染和视频会话共用的稳定身体形状。"""
     if not isinstance(reference, torch.Tensor):
         raise TypeError("reference must be a torch.Tensor")
     if reference.ndim < 1:
@@ -351,24 +350,18 @@ class WebcamGEMSMPLDemo:
         *,
         frame_sink=None,
         model_stack=None,
-        create_gmr_bridge=True,
         capture=None,
     ):
-        """Create the legacy demo or a reusable source session.
+        """创建独立视频演示或可复用的视频源会话。
 
-        The optional arguments are used only by the unified resident service:
-        ``model_stack`` reuses already loaded video models, ``frame_sink``
-        receives zero-shape :class:`SMPLFrame` objects, and
-        ``create_gmr_bridge=False`` guarantees that the service's
-        ``MotionSourceMux`` remains the sole UDP sender.  Existing CLI callers
-        use the defaults and therefore retain the original behaviour.
+        ``model_stack`` 复用已经加载的视频模型，``frame_sink`` 接收零形状
+        :class:`SMPLFrame`，二者均不创建机器人通信或重定向连接。
         """
         torch.backends.cudnn.benchmark = True
 
         self.args = args
         self.frame_sink = frame_sink
         self.model_stack = model_stack
-        self._create_gmr_bridge = bool(create_gmr_bridge)
         self._closed = False
         self.context_frames = args.context_frames
         self.yolo_period = args.yolo_period
@@ -377,33 +370,13 @@ class WebcamGEMSMPLDemo:
         self.render_enabled = args.render
         self.display_enabled = args.display
 
-        # One body-shape policy feeds every downstream consumer.  It is
-        # intentionally independent of whether rendering or GMR is enabled.
+        # 一个身体形状策略供渲染与视频会话共同使用。
         self.shape_stabilizer = BetaStabilizer(
             mode=args.shape_mode,
             warmup=args.shape_warmup,
         )
         self._shape_logged = False
         Log.info(f"[Shape] mode={args.shape_mode}, warmup={args.shape_warmup}")
-
-        # Optional GEM SMPL-X FK -> original-GMR SMP1 UDP path.
-        self.gmr_bridge = None
-        self.gmr_adapter = None
-        if self._create_gmr_bridge and args.gmr_host:
-            self.gmr_bridge = GMRUDPBridge(
-                host=args.gmr_host,
-                port=args.gmr_port,
-            )
-            self.gmr_adapter = SMPLXGMRReference(
-                user_yaw_deg=args.smplx_yaw_deg,
-                global_scale=args.gmr_scale,
-            )
-            Log.info(
-                f"[GMR SMP1] SMPL-X FK targets, "
-                f"shape={args.shape_mode}, "
-                f"yaw={args.smplx_yaw_deg:.1f} deg, scale={args.gmr_scale:.3f}"
-            )
-        self._last_gmr_error_log = 0.0
 
         self._async = args.async_pipeline and not args.no_async_pipeline
         Log.info(
@@ -591,9 +564,6 @@ class WebcamGEMSMPLDemo:
         if self._closed:
             return
         self._closed = True
-        if self.gmr_bridge is not None:
-            self.gmr_bridge.close()
-            self.gmr_bridge = None
         self.cap.release()
         if self._denoiser_executor is not None:
             self._denoiser_executor.shutdown(wait=True, cancel_futures=True)
@@ -817,36 +787,6 @@ class WebcamGEMSMPLDemo:
             w, h = (xmax - xmin) * 1.1, (ymax - ymin) * 1.1
             updated_bbox = np.array([cx - w / 2, cy - h / 2, cx + w / 2, cy + h / 2])
 
-        if self.gmr_bridge is not None:
-            try:
-                body_pose_fk = pred_body_params_incam["body_pose"].reshape(1, 1, 63)
-                betas_fk = effective_betas.reshape(1, 1, 10)
-                global_orient_fk = body_params_global["global_orient"].reshape(1, 1, 3)
-                transl_fk = body_params_global["transl"].reshape(1, 1, 3)
-                joints, _, fk_mat = self.endecoder.fk_v2(
-                    body_pose=body_pose_fk,
-                    betas=betas_fk,
-                    global_orient=global_orient_fk,
-                    transl=transl_fk,
-                    get_intermediate=True,
-                )
-                stamp_ns = time.monotonic_ns()
-                adapter_frame = self.gmr_adapter.adapt(
-                    joints[0, 0, :22],
-                    fk_mat[0, 0, :22, :3, :3],
-                    frame_id=self.gmr_bridge.sequence,
-                    timestamp_ns=stamp_ns,
-                )
-                self.gmr_bridge.send_smplx_targets(
-                    adapter_frame.scaled_targets,
-                    source_stamp_ns=stamp_ns,
-                )
-            except Exception as exc:
-                now = time.monotonic()
-                if now - self._last_gmr_error_log >= 2.0:
-                    print(f"\n[GMR UDP ERROR] {type(exc).__name__}: {exc}")
-                    self._last_gmr_error_log = now
-
         body_params_incam_cpu = {
             key: value.detach().cpu() for key, value in pred_body_params_incam.items()
         }
@@ -855,7 +795,7 @@ class WebcamGEMSMPLDemo:
         }
         frame_sink = getattr(self, "frame_sink", None)
         if frame_sink is not None:
-            from gem.runtime.motion_streamer import SMPLFrame
+            from gem.runtime.smpl_frame import SMPLFrame
 
             stream_frame = SMPLFrame(
                 body_pose=body_params_incam_cpu["body_pose"][0].clone(),
@@ -1060,15 +1000,9 @@ class WebcamGEMSMPLDemo:
             state = "READY"
             state_color = (70, 220, 70)
 
-        if self.gmr_bridge is None:
-            udp = "GMR UDP: off"
-        else:
-            udp = f"GMR UDP: on seq={self.gmr_bridge.sequence}"
-
         lines = (
             (state, state_color),
             (f"FPS: {fps:.1f}", (255, 255, 255)),
-            (udp, (255, 255, 255)),
             ("q: quit", (200, 200, 200)),
         )
         y = 28
@@ -1262,43 +1196,21 @@ def parse_args(argv: list[str] | None = None):
         help="Disable async pipeline (force synchronous mode)",
     )
     parser.add_argument(
-        "--gmr_host", type=str, default=None,
-        help="GMR-CPP UDP destination IP; omit to disable streaming",
-    )
-    parser.add_argument(
-        "--gmr_port", type=int, default=7005,
-        help="GMR-CPP SMP1 UDP destination port (E1 default: 7005)",
-    )
-    parser.add_argument(
-        "--gmr_protocol", choices=["smplx1"], default="smplx1",
-        help="Compatibility flag; the supported protocol is SMP1",
-    )
-    parser.add_argument(
-        "--gmr_scale", type=float, default=1.0,
-        help="Global position scale applied to SMP1 targets",
-    )
-    parser.add_argument(
         "--shape_mode",
-        "--gmr_shape_mode",
         dest="shape_mode",
         choices=["zero", "first", "mean", "ema", "per_frame"],
         default="zero",
         help=(
-            "SMPL-X body-shape policy used consistently for rendering and GMR FK. "
+            "SMPL-X body-shape policy used consistently for rendering and video sessions. "
             "'zero' uses the fixed neutral mean body shape."
         ),
     )
     parser.add_argument(
         "--shape_warmup",
-        "--gmr_shape_warmup",
         dest="shape_warmup",
         type=int,
         default=30,
         help="Warmup frames used by mean shape mode.",
-    )
-    parser.add_argument(
-        "--smplx_yaw_deg", type=float, default=0.0,
-        help="Additional Z-up yaw for SMP1 targets",
     )
     return parser.parse_args(argv)
 

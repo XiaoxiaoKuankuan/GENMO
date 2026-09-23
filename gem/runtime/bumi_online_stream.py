@@ -1,15 +1,15 @@
 # SPDX-License-Identifier: LicenseRef-NVIDIA-OneWay-Noncommercial
 """BUMI 常驻滚动生成专用的控制语法、身份合约和 qpos 二进制协议。
 
-协议 ``bumi_online_qpos_stream_v1`` 与旧 ``robot_stream_v1``、SMP1/GMR 数据包以及
-离线 ``bumi_qpos_stream_v1`` 完全隔离。每个负载是连续的 MuJoCo 原生
+协议 ``bumi_online_qpos_stream_v1`` 只接收当前 BUMI 原生 qpos，不接收人体重定向数据包。
+每个负载是连续的 MuJoCo 原生
 ``float32[T,28]``、30 Hz、根四元数 ``wxyz``。JSON 头固定 request/revision、绝对帧号、
 CRC32，并绑定 checkpoint、ONNX、实际推理 artifact/manifest、stats、kinematics、21
 关节顺序、表示、120/30/90 overlap-add 和因果足锁版本；接收端在一个 revision 中要求
 身份逐字段不变且帧号无重复、无缺口。
 
 本文件还承载新控制台和新安全桥都需要的少量无状态逻辑：交互命令解析、心跳判定和
-50 Hz 单调时钟。它不导入 SMPL、SMPL-X、SMP1、GMR 或旧 ``robot_stream.py``。
+50 Hz 单调时钟。它只接受原生 BUMI qpos30/contact2 生成结果。
 """
 
 from __future__ import annotations

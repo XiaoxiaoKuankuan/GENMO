@@ -1,5 +1,5 @@
 # @package _global_
-# BUMI qpos30 音乐实验：展开已退役 93D 父配置，保留原最终训练参数。
+# BUMI qpos30 音乐实验：显式定义当前数据、模型、损失与训练参数。
 defaults:
 - /diffusion@model_cfg.diffusion: ddim
 - override /data: music_robot/trainX_testY
@@ -35,7 +35,6 @@ multicond_args: null
 model:
   model_cfg:
     motion_backend: bumi
-    checkpoint_adapter: null
     text_encoder: null
     music_mask_prob: 0.1
     audio_mask_prob: 0.0

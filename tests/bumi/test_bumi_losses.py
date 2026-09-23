@@ -1,8 +1,8 @@
-"""BUMI qpos30/contact/FK 物理损失的纯 CPU 合约测试。
+"""当前 BUMI qpos30/contact/FK v5 物理损失的纯 CPU 合约测试。
 
 测试确认网络损失只接收 30 维 qpos 表示，link 监督来自预测 qpos 的可微 FK；同时覆盖
 完整 SO(3) 根旋转、专用 roll/pitch tilt、可靠 GT 接触门控 foot-slide、接触 head BCE、
-v4限位长尾和v5根/FK动态连续性及物理长尾warmup。测试运动学由 ``conftest`` 临时生成，
+限位长尾和当前 v5 根/FK动态连续性及物理长尾 warmup。测试运动学由 ``conftest`` 临时生成，
 不写入正式训练目录。
 """
 
@@ -19,9 +19,6 @@ from gem.robots.bumi.kinematics import BumiKinematics
 from gem.robots.bumi.losses import (
     BUMI_ADVANCED_PHYSICS_LOSS_NAMES,
     BUMI_EXCESS_LOSS_NAMES,
-    BUMI_LOSS_CONTRACT_V3,
-    BUMI_LOSS_CONTRACT_V4,
-    BUMI_LOSS_CONTRACT_V5,
     BUMI_LOSS_CONTRACT_VERSION,
     BUMI_LOSS_NAMES,
     BUMI_ROBUST_JOINT_LIMIT_LOSS_NAMES,
@@ -37,7 +34,15 @@ from gem.utils.rotation_conversions import axis_angle_to_matrix, matrix_to_rotat
 
 
 def _weights() -> dict[str, float]:
-    values = {name: 0.0 for name in BUMI_LOSS_NAMES}
+    values = {
+        name: 0.1
+        for name in (
+            *BUMI_LOSS_NAMES,
+            *BUMI_EXCESS_LOSS_NAMES,
+            *BUMI_ROBUST_JOINT_LIMIT_LOSS_NAMES,
+            *BUMI_ADVANCED_PHYSICS_LOSS_NAMES,
+        )
+    }
     values.update(
         {
             "repr_root_pos": 1.0,
@@ -118,7 +123,7 @@ def test_derivative_excess_topk_keeps_sparse_jump() -> None:
     assert prediction.grad[0, 7, 1].item() > 0.0
 
 
-def test_v4_joint_limit_margin_topk_and_max_keep_sparse_peak() -> None:
+def test_joint_limit_margin_topk_and_max_keep_sparse_peak() -> None:
     """安全边距应在越限前生效，top-k/max不能被大量零值平均掉。"""
 
     prediction = torch.zeros(1, 10, 2, requires_grad=True)
@@ -227,7 +232,7 @@ def test_contact_and_slide_weights_are_mandatory(test_kinematics_path) -> None:
         )
 
 
-def test_v3_excess_losses_are_versioned_and_emitted(test_kinematics_path) -> None:
+def test_current_excess_losses_are_emitted(test_kinematics_path) -> None:
     kinematics = BumiKinematics(test_kinematics_path)
     codec = BumiMotionFeatureCodec(kinematics)
     endecoder = SimpleNamespace(kinematics=kinematics, codec=codec)
@@ -241,7 +246,7 @@ def test_v3_excess_losses_are_versioned_and_emitted(test_kinematics_path) -> Non
     loss = BumiRobotLosses(
         endecoder,
         weights,
-        contract_version=BUMI_LOSS_CONTRACT_V3,
+        contract_version=BUMI_LOSS_CONTRACT_VERSION,
         ground_semantics="mixed_floor_zero_fk_contact_v2",
     )
     qpos = kinematics.default_qpos.view(1, 1, 28).repeat(1, 6, 1)
@@ -275,8 +280,8 @@ def test_v3_excess_losses_are_versioned_and_emitted(test_kinematics_path) -> Non
     assert pred.grad is not None and bool(torch.isfinite(pred.grad).all())
 
 
-def test_v4_robust_joint_limit_losses_warm_up_independently(test_kinematics_path) -> None:
-    """v4新增三项必须独立渐进启用，恢复旧训练时不能首步突增。"""
+def test_robust_joint_limit_losses_warm_up_independently(test_kinematics_path) -> None:
+    """当前限位长尾三项必须按独立 warmup 渐进启用。"""
 
     kinematics = BumiKinematics(test_kinematics_path)
     codec = BumiMotionFeatureCodec(kinematics)
@@ -294,7 +299,7 @@ def test_v4_robust_joint_limit_losses_warm_up_independently(test_kinematics_path
     loss = BumiRobotLosses(
         endecoder,
         weights,
-        contract_version=BUMI_LOSS_CONTRACT_V4,
+        contract_version=BUMI_LOSS_CONTRACT_VERSION,
         ground_semantics="mixed_floor_zero_fk_contact_v2",
         joint_limit_margin_rad=0.05,
         joint_limit_topk_fraction=0.01,
@@ -337,10 +342,10 @@ def test_v4_robust_joint_limit_losses_warm_up_independently(test_kinematics_path
     assert float(at_start["weighted_joint_limit_loss"]) > 0.0
 
 
-def test_v5_dynamic_and_tail_losses_warm_up_with_finite_gradients(
+def test_dynamic_and_tail_losses_warm_up_with_finite_gradients(
     test_kinematics_path,
 ) -> None:
-    """v5新增动态连续性和长尾项必须渐进启用，并能对稀疏坏帧反传。"""
+    """当前动态连续性和长尾项必须渐进启用，并能对稀疏坏帧反传。"""
 
     kinematics = BumiKinematics(test_kinematics_path)
     codec = BumiMotionFeatureCodec(kinematics)
@@ -359,7 +364,7 @@ def test_v5_dynamic_and_tail_losses_warm_up_with_finite_gradients(
     loss = BumiRobotLosses(
         endecoder,
         weights,
-        contract_version=BUMI_LOSS_CONTRACT_V5,
+        contract_version=BUMI_LOSS_CONTRACT_VERSION,
         ground_semantics="mixed_floor_zero_fk_contact_v2",
         joint_limit_margin_rad=0.05,
         joint_limit_topk_fraction=0.1,
@@ -427,27 +432,13 @@ def test_v5_dynamic_and_tail_losses_warm_up_with_finite_gradients(
     assert pred.grad is not None and bool(torch.isfinite(pred.grad).all())
 
 
-def test_v2_rejects_v3_only_excess_weights(test_kinematics_path) -> None:
-    kinematics = BumiKinematics(test_kinematics_path)
-    endecoder = SimpleNamespace(kinematics=kinematics, codec=BumiMotionFeatureCodec(kinematics))
-    weights = _weights()
-    weights["joint_acceleration_excess"] = 0.05
-    with pytest.raises(ValueError, match="Unknown BUMI loss weights"):
-        BumiRobotLosses(
-            endecoder,
-            weights,
-            contract_version=BUMI_LOSS_CONTRACT_VERSION,
-            ground_semantics="mixed_floor_zero_fk_contact_v2",
-        )
-
-
-def test_old_loss_contract_is_rejected(test_kinematics_path) -> None:
+def test_non_v5_loss_contract_is_rejected(test_kinematics_path) -> None:
     kinematics = BumiKinematics(test_kinematics_path)
     endecoder = SimpleNamespace(kinematics=kinematics, codec=BumiMotionFeatureCodec(kinematics))
     with pytest.raises(ValueError, match="qpos30"):
         BumiRobotLosses(
             endecoder,
             _weights(),
-            contract_version="physical_v1",
-            ground_semantics="legacy_body_origin_min_zero",
+            contract_version="unsupported_contract",
+            ground_semantics="mixed_floor_zero_fk_contact_v2",
         )

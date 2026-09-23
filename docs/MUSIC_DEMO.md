@@ -1,4 +1,4 @@
-# 音乐动作生成与机器人实时播放
+# 音乐动作生成
 
 `scripts/demo/demo_music.py` 将已有的 WAV、MP3 或 FLAC 音乐文件转换为 SMPL-X 人体动作。它**不会生成音乐音频**：
 
@@ -198,7 +198,7 @@ python scripts/demo/music_motion_client.py \
 
 成功响应包含输出路径、帧数、30 FPS、BPM、缓存命中状态、特征提取/输入构造/生成/保存/总耗时和 GPU 显存快照。单个错误返回结构化 JSON，服务继续处理后续请求。
 
-### 常驻服务输出与 streamer
+### 常驻服务输出
 
 常驻服务复用单次 Demo 的 body 参数校验、151 维诊断输出、zero shape、制品写入和 READY 原子发布函数。每个成功请求仍产生：
 
@@ -212,13 +212,13 @@ source_audio.txt
 READY
 ```
 
-metadata 额外记录 `request_id`、`request_metadata` 和 `service=resident_music_motion`，`source` 仍为 `music_only`。因此现有 `MotionWatcher(source_filter=music_only)`、GMR streamer 和 SMP1 完全不需要修改。
+metadata 额外记录 `request_id`、`request_metadata` 和 `service=resident_music_motion`，`source` 仍为 `music_only`。
 
-常驻服务 v1 不渲染、不执行 ffmpeg mux，避免 Open3D、额外 body model 和 ffmpeg 影响低延迟与显存稳定。需要渲染或合成视频时使用单次 `demo_music.py`。streamer 的 `--audio_playback ffplay` 仍可独立进行 best-effort 音频播放，动作安全和 GMR 定频发送不依赖音频播放成功。
+常驻服务 v1 不渲染、不执行 ffmpeg mux，避免 Open3D、额外 body model 和 ffmpeg 影响低延迟与显存稳定。需要渲染或合成视频时使用单次 `demo_music.py`。
 
 ## 原子输出协议
 
-每个 sample 都是 `output_root` 的直接子目录，因此 `MotionWatcher` 可以直接发现：
+每个 sample 都是 `output_root` 的直接子目录：
 
 ```text
 outputs/music_motion/
@@ -247,117 +247,7 @@ betas:         [L, 10]
 
 global 和 incam 两组参数还包含相机张量、FPS、音频选择范围、特征设置、checkpoint、seed 和元数据。两组 betas 均严格为全零，`motion.npz` 中的 betas 也为全零。
 
-`raw_motion_151d.pt` 保留 GEM 扩散模型的原始诊断输出，其中的 shape 分量不会被伪装成已经覆盖。GMR 永远不会读取该文件；GMR 只读取 `smpl_params.pt -> body_params_global`。
-
-## 音乐动作到机器人实时播放
-
-> 本节下面的 `stream_smpl_params_to_gmr.py` 是兼容旧 GMR 单帧 Redis 输入的路径。
-> BUMI GMT 若需要真实的“过去 10 + 当前 + 未来 10”参考窗口，请使用
-> [GENMO → 完整 GMR → BUMI GMT 时序链路](GENMO_GMR_GMT_TRAJECTORY.md)，不要让
-> legacy publisher 和 `trajectory_v1` publisher 同时写同一个 Redis key。
-
-以下四个程序相互解耦：
-
-```text
-demo_music.py                       音乐 -> 完整 SMPL-X + READY
-stream_smpl_params_to_gmr.py        监视/缓存/插值 -> SMP1 UDP
-run_smplx_bumi3.sh                  SMPL-X 目标 -> BUMI3 重定向
-GMT                                 参考轨迹 -> tracking policy -> 机器人
-```
-
-### 终端 1：GMR-CPP/MuJoCo
-
-```bash
-cd /home/weili/GMR-CPP_e1jump_lowdpi
-./run_smplx_bumi3.sh \
-  --always \
-  --vis \
-  --vis-smplx-targets \
-  --vis-smplx-frames
-```
-
-### 终端 2：常驻仿真 streamer
-
-```bash
-cd /home/weili/GENMO
-source .venv/bin/activate
-python scripts/demo/stream_smpl_params_to_gmr.py \
-  --watch_dir outputs/music_motion \
-  --source_filter music_only \
-  --gmr_host 127.0.0.1 \
-  --gmr_port 7006 \
-  --publish_fps 30 \
-  --shape_mode zero \
-  --mode sim \
-  --new_motion_policy queue
-```
-
-增加 `--audio_playback ffplay` 可以进行尽力而为的本地音乐播放。ffplay 子进程只在 `BLENDING` 进入 `PLAYING` 时启动，并在进入 `RETURNING`、`ERROR`、`ESTOP`、interrupt 或 streamer 退出时终止。
-
-`--audio_offset_sec` 会加到原音频 seek 起点，用于补偿本机 ffplay 或声卡启动延迟。这不是硬实时音频时钟，GMR 定频发送也不会依赖 ffplay 是否成功。
-
-### 终端 3：按需生成音乐动作
-
-使用前面的生成命令即可。创建 READY 后，运行中的 watcher 会把该 generation 加入队列。如果动作目录在 watcher 启动前已经存在，请增加 `--replay_existing`，也可以直接播放指定动作：
-
-```bash
-python scripts/demo/stream_smpl_params_to_gmr.py \
-  --motion outputs/music_motion/<generation>/smpl_params.pt \
-  --gmr_host 127.0.0.1 \
-  --gmr_port 7006 \
-  --publish_fps 30 \
-  --shape_mode zero \
-  --mode sim \
-  --once
-```
-
-### 实物机器人模式
-
-必须提供已经在仿真和目标平台上验证过的站立动作：
-
-```bash
-python scripts/demo/stream_smpl_params_to_gmr.py \
-  --watch_dir outputs/music_motion \
-  --source_filter music_only \
-  --gmr_host 127.0.0.1 \
-  --gmr_port 7006 \
-  --publish_fps 30 \
-  --shape_mode zero \
-  --mode robot \
-  --idle_motion inputs/motions/smplx_idle_stand.pt \
-  --new_motion_policy queue \
-  --estop_file /tmp/genmo_estop
-```
-
-streamer 对文本和音乐动作复用同一套经过验证的状态机和 SMP1 路径：
-
-```text
-STARTING
-  -> HOLDING
-  -> BLENDING
-  -> PLAYING
-  -> RETURNING
-  -> HOLDING
-```
-
-没有动作时，它仍按 `publish_fps` 持续发送 idle。新动作在根节点平移和 yaw 对齐后，从当前姿态平滑过渡。动作完成后进入 `RETURNING` 并回到 idle，不会保持可能危险的舞蹈最后一帧。
-
-源动作中的 betas 会被忽略，每次调用 `EnDecoder.fk_v2()` 都会传入严格的 `zeros(1,1,10)`。
-
-`--source_filter music_only` 会读取 `metadata.json`。文本动作、损坏目录和未完成目录都会被忽略，也不会被标记为 consumed。现有 412 字节 SMP1 包、14 个目标的名称与顺序、坐标转换、GMR-CPP、BUMI3、Redis 和 GMT 接口均未修改。
-
-## 安全说明
-
-输出是 SMPL-X 人体动作，不是电机力矩。默认模式为 `mode=sim`。
-
-robot 模式：
-
-- 必须提供经过验证的 idle motion；
-- 默认使用 queue；
-- 除非显式覆盖，否则禁止 interrupt；
-- 软件 ESTOP 会返回 idle，但不能替代物理急停。
-
-实物测试前，请先在 MuJoCo 中检查足部、根节点、动作速度和姿态范围，然后使用低速、吊装保护及机器人原有硬件安全系统。
+`raw_motion_151d.pt` 保留 GEM 扩散模型的原始诊断输出，其中的 shape 分量不会被伪装成已经覆盖；正式输出使用 `smpl_params.pt -> body_params_global`。
 
 ## AIST++ 数据准备
 

@@ -2,7 +2,7 @@
 #
 # 本契约只接受 `/home/weili/robot_retargeter` feature/bumi3 生产链生成的 30 Hz、
 # 13 字段 Mimic NPZ，并同时复核同名 retarget metadata、逐条验证报告和全量 release
-# report。它不兼容旧 GMR legacy pickle，也不兼容 50 Hz SONIC 七字段 NPZ。
+# report。其他载荷格式、字段集合或采样率都会被明确拒绝。
 #
 # 状态分为 PASS / REVIEW / REJECT；正式训练构建器只消费 PASS。关节限位是硬门禁，
 # 动力学普通持续超限进入 REVIEW、三倍严重峰值进入 REJECT。Root 倾角既参与倒地组合

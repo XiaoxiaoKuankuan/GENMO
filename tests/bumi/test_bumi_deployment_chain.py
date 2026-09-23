@@ -1,9 +1,8 @@
-"""BUMI qpos30/contact→长音乐滑窗→安全流→50 Hz GMT 计划的纯 CPU 合约测试。
+"""BUMI qpos30/contact→长音乐滑窗→安全门→50 Hz GMT 计划的纯 CPU 合约测试。
 
 测试刻意不创建持久输出，也不依赖 Redis、TensorRT 或真实机器人。它覆盖 30D DDIM 与
-接触 head、两窗 120/30 世界对齐与几何感知 overlap-add、FK 足底锁定、qpos 二进制包
-CRC/revision/绝对帧号、跨分块速度与 XML 关节限位安全门，以及增量 30→50 Hz 计划和
-离线重采样的一致性。
+接触 head、两窗 120/30 世界对齐与几何感知 overlap-add、FK 足底锁定、跨分块速度与
+XML 关节限位安全门，以及增量 30→50 Hz 计划和离线重采样的一致性。
 所有临时运动学/统计文件由 pytest ``tmp_path`` 管理，测试结束会自动删除。
 """
 
@@ -30,12 +29,8 @@ from gem.robots.bumi.metrics import compute_bumi_kinematic_metrics
 from gem.robots.bumi.postprocess import lock_bumi_foot_contacts
 from gem.runtime.bumi_gmt_plan import BumiIncrementalGmtPlanBuilder
 from gem.runtime.bumi_music_deploy import BumiSlidingQposGenerator
-from gem.runtime.bumi_robot_stream import (
-    BumiQposChunk,
-    BumiQposRevisionTracker,
-    BumiQposSafetyGate,
-    bumi_joint_order_sha256,
-)
+from gem.runtime.bumi_online_stream import bumi_joint_order_sha256
+from gem.runtime.bumi_qpos_safety import BumiQposSafetyGate
 from gem.runtime.gmt_trajectory import qpos_timeline_to_gmt_frames, resample_qpos_timeline
 from scripts.demo.demo_music_bumi import resolve_world_anchor
 
@@ -321,48 +316,6 @@ def test_kinematic_metrics_report_tail_jumps_and_contact_slide(
         assert float(metrics[f"{prefix}_max_{unit}"]) >= float(metrics[f"{prefix}_p95_{unit}"])
     assert float(metrics["foot_sliding_max_mps"]) > 0.0
     assert float(metrics["joint_jerk_max_radps3"]) > 0.0
-
-
-def _chunk(qpos: np.ndarray, *, index: int, start: int, total: int, last: bool) -> BumiQposChunk:
-    return BumiQposChunk.from_qpos(
-        qpos,
-        request_id="request-a",
-        revision=3,
-        chunk_index=index,
-        absolute_start_frame=start,
-        total_frames=total,
-        is_last=last,
-        checkpoint_sha256="c" * 64,
-        engine_sha256="e" * 64,
-        kinematics_sha256="a" * 64,
-        joint_order_sha256="b" * 64,
-    )
-
-
-def test_bumi_qpos_wire_crc_revision_and_identity() -> None:
-    first = _chunk(_qpos(2), index=0, start=0, total=4, last=False)
-    decoded = BumiQposChunk.from_multipart(first.multipart())
-    np.testing.assert_array_equal(decoded.qpos(), first.qpos())
-    corrupted = first.multipart()
-    corrupted[1] = corrupted[1][:-1] + bytes((corrupted[1][-1] ^ 1,))
-    with pytest.raises(ValueError, match="CRC32"):
-        BumiQposChunk.from_multipart(corrupted)
-    tracker = BumiQposRevisionTracker()
-    tracker.begin("request-a", 3, 4)
-    tracker.accept(decoded)
-    with pytest.raises(ValueError, match="index"):
-        tracker.accept(decoded)
-    tracker.accept(_chunk(_qpos(2), index=1, start=2, total=4, last=True))
-    assert tracker.complete
-    with pytest.raises(ValueError, match="already complete"):
-        tracker.accept(_chunk(_qpos(2), index=1, start=2, total=4, last=True))
-    with pytest.raises(ValueError, match="newer revision"):
-        tracker.begin("request-b", 3, 1)
-
-
-def test_bumi_qpos_terminal_chunk_requires_last_marker() -> None:
-    with pytest.raises(ValueError, match="must be marked is_last"):
-        _chunk(_qpos(2), index=0, start=0, total=2, last=False)
 
 
 def test_bumi_safety_gate_checks_chunk_boundary_and_xml_limits(

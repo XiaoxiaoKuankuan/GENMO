@@ -63,7 +63,7 @@ from gem.runtime.bumi_online_stream import (  # noqa: E402
     heartbeat_expired,
     motion_buffer_failure,
 )
-from gem.runtime.bumi_robot_stream import BumiQposSafetyGate  # noqa: E402
+from gem.runtime.bumi_qpos_safety import BumiQposSafetyGate  # noqa: E402
 from gem.runtime.gmt_policy_source import resolve_bridge_policy  # noqa: E402
 from gem.runtime.gmt_trajectory import (  # noqa: E402
     FLAG_AUDIO,

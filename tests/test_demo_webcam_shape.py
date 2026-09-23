@@ -1,14 +1,12 @@
-"""Tests for the unified webcam rendering/GMR SMPL-X shape policy."""
+"""视频推理和渲染共用 SMPL-X 身体形状策略的测试。"""
 
 from __future__ import annotations
-
-from types import SimpleNamespace
 
 import pytest
 import torch
 
 import scripts.demo.demo_webcam as demo_webcam
-from gem.smplx_gmr_reference import BetaStabilizer
+from gem.utils.body_shape import BetaStabilizer
 from scripts.demo.demo_webcam import (
     WebcamGEMSMPLDemo,
     parse_args,
@@ -81,22 +79,16 @@ def test_resolve_effective_betas_rejects_nonfinite_result() -> None:
 def test_shape_cli_default_and_both_names() -> None:
     assert parse_args([]).shape_mode == "zero"
     assert parse_args(["--shape_mode", "zero"]).shape_mode == "zero"
-    assert parse_args(["--gmr_shape_mode", "mean"]).shape_mode == "mean"
-    args = parse_args(["--gmr_shape_warmup", "7"])
+    args = parse_args(["--shape_warmup", "7"])
     assert args.shape_warmup == 7
-    assert not hasattr(args, "gmr_shape_mode")
-    assert not hasattr(args, "gmr_shape_warmup")
 
 
-def test_backend_zero_shape_is_shared_by_results_and_gmr_fk(monkeypatch) -> None:
+def test_backend_zero_shape_is_shared_by_results_and_video_sink(monkeypatch) -> None:
     """Exercise the backend handoff without loading camera or ONNX models."""
     device = demo_webcam._DEVICE
     frame_count = 2
 
     class FakeEnDecoder:
-        def __init__(self) -> None:
-            self.fk_betas = None
-
         def decode(self, _pred_x: torch.Tensor) -> dict[str, torch.Tensor]:
             return {
                 "body_pose": torch.zeros(1, frame_count, 63, device=device),
@@ -105,28 +97,6 @@ def test_backend_zero_shape_is_shared_by_results_and_gmr_fk(monkeypatch) -> None
                 "local_transl_vel": torch.zeros(1, frame_count, 3, device=device),
                 "betas": torch.full((1, frame_count, 10), 3.0, device=device),
             }
-
-        def fk_v2(self, *, betas: torch.Tensor, **_kwargs):
-            self.fk_betas = betas.detach().clone()
-            joints = torch.zeros(1, 1, 22, 3, device=betas.device)
-            fk_mat = torch.eye(4, device=betas.device).reshape(1, 1, 1, 4, 4)
-            fk_mat = fk_mat.repeat(1, 1, 22, 1, 1)
-            return joints, None, fk_mat
-
-    class FakeBridge:
-        sequence = 0
-
-        def __init__(self) -> None:
-            self.sent = False
-
-        def send_smplx_targets(self, _targets, *, source_stamp_ns: int) -> None:
-            assert source_stamp_ns > 0
-            self.sent = True
-
-    class FakeAdapter:
-        @staticmethod
-        def adapt(*_args, **_kwargs):
-            return SimpleNamespace(scaled_targets={})
 
     monkeypatch.setattr(
         demo_webcam,
@@ -165,9 +135,8 @@ def test_backend_zero_shape_is_shared_by_results_and_gmr_fk(monkeypatch) -> None
     backend.rollout_state = None
     backend.shape_stabilizer = BetaStabilizer("zero")
     backend._shape_logged = False
-    backend.gmr_bridge = FakeBridge()
-    backend.gmr_adapter = FakeAdapter()
-    backend._last_gmr_error_log = 0.0
+    sink_frames = []
+    backend.frame_sink = sink_frames.append
 
     result = backend._run_backend(
         torch.ones(frame_count, 3),
@@ -182,6 +151,5 @@ def test_backend_zero_shape_is_shared_by_results_and_gmr_fk(monkeypatch) -> None
     assert global_betas.shape == (1, 10)
     assert torch.count_nonzero(incam_betas) == 0
     assert torch.count_nonzero(global_betas) == 0
-    assert backend.endecoder.fk_betas.shape == (1, 1, 10)
-    assert torch.count_nonzero(backend.endecoder.fk_betas) == 0
-    assert backend.gmr_bridge.sent
+    assert len(sink_frames) == 1
+    assert torch.count_nonzero(sink_frames[0].betas) == 0

@@ -2,9 +2,7 @@
 
 from __future__ import annotations
 
-import json
 from collections.abc import Mapping, Sequence
-from pathlib import Path
 from typing import Any
 
 import torch
@@ -19,7 +17,6 @@ from gem.robots.bumi.postprocess import (
     BUMI_FOOT_LOCK_CONTRACT_VERSION,
     lock_bumi_foot_contacts,
 )
-from gem.utils.bumi_checkpoint_adapter import adapt_smpl_music_checkpoint_to_bumi
 from gem.utils.pylogger import Log
 
 
@@ -68,7 +65,6 @@ class BumiMusicGEM(GEM):
             raise ValueError("BumiMusicGEM accepts only the encoded_music condition")
         if self.text_condition_enabled or self.denoiser_uses_text:
             raise ValueError("BumiMusicGEM must disable text encoding in model and denoiser")
-        self.checkpoint_adaptation_report: dict[str, Any] | None = None
 
     @staticmethod
     def _validate_representation_checkpoint(checkpoint: Mapping[str, Any]) -> None:
@@ -77,8 +73,8 @@ class BumiMusicGEM(GEM):
             raise RuntimeError(
                 "BUMI checkpoint representation mismatch: expected "
                 f"{BUMI_REPRESENTATION_CONTRACT_VERSION!r}, got {actual!r}. "
-                "旧 93D checkpoint 不能当作 qpos30 权重继续加载；请使用 qpos30 统计量"
-                "重新训练，或仅通过显式 SMPL music adapter 迁移共享条件/Transformer 权重。"
+                "Only native qpos30 checkpoints with the current representation contract "
+                "are accepted."
             )
         state = checkpoint.get("state_dict")
         if not isinstance(state, Mapping):
@@ -355,7 +351,6 @@ class BumiMusicGEM(GEM):
         return result
 
     def load_pretrained_model(self, ckpt_path):
-        adapter = self.model_cfg.get("checkpoint_adapter", None)
         try:
             checkpoint = torch.load(ckpt_path, map_location="cpu", weights_only=False)
         except TypeError:
@@ -363,34 +358,9 @@ class BumiMusicGEM(GEM):
         if not isinstance(checkpoint, dict):
             raise ValueError("checkpoint payload must be a dictionary")
 
-        checkpoint_contract = checkpoint.get("bumi_representation_contract_version")
-        if checkpoint_contract is not None:
-            self._validate_representation_checkpoint(checkpoint)
-            Log.info(f"[BUMI CKPT] Loading native qpos30 checkpoint: {ckpt_path}")
-            return super().load_pretrained_model(ckpt_path)
-        if adapter in (None, "null", "none"):
-            self._validate_representation_checkpoint(checkpoint)
-        if adapter != "smpl_music_to_bumi":
-            raise ValueError(f"Unknown BUMI checkpoint_adapter={adapter!r}")
-        Log.info(f"[BUMI CKPT Adapter] Loading SMPL music checkpoint: {ckpt_path}")
-        checkpoint, report = adapt_smpl_music_checkpoint_to_bumi(self, ckpt_path)
-        self.checkpoint_adaptation_report = report
-        return checkpoint
-
-    def on_fit_start(self) -> None:
-        if self.checkpoint_adaptation_report is None:
-            return
-        trainer = self.trainer
-        if not getattr(trainer, "is_global_zero", True):
-            return
-        run_dir = getattr(trainer, "log_dir", None) or getattr(trainer, "default_root_dir", ".")
-        path = Path(run_dir) / "checkpoint_adaptation_report.json"
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(
-            json.dumps(self.checkpoint_adaptation_report, indent=2, sort_keys=True) + "\n",
-            encoding="utf-8",
-        )
-        Log.info(f"[BUMI CKPT Adapter] Wrote report: {path}")
+        self._validate_representation_checkpoint(checkpoint)
+        Log.info(f"[BUMI CKPT] Loading native qpos30 checkpoint: {ckpt_path}")
+        return super().load_pretrained_model(ckpt_path)
 
 
 __all__ = ["BumiMusicGEM", "reorder_mujoco_joints_to_gmt"]

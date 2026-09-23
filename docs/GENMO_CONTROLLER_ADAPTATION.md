@@ -84,7 +84,7 @@ source_fps、qpos_dim、quaternion_convention、qpos_order、CRC和完整生成�
 | `gem/robots/bumi/postprocess.py` | 因果足锁与连续后处理 | 不在新适配器重复叠加足锁 |
 | `gem/runtime/bumi_online_stream.py` | 帧身份、CRC、revision、心跳和分块对象 | 其中仍有GMT窗口相关辅助逻辑，不能把整个文件称为完全通用 |
 | `gem/runtime/qpos_timeline.py` | 跨块连续30→50Hz插值 | 当前实现针对30/50Hz；改频率需修改并测试，不能只改消息fps |
-| `gem/runtime/bumi_robot_stream.py:BumiQposSafetyGate` | 有限性、根高、关节和速度检查 | 限值针对当前BUMI配置，按目标资产核验 |
+| `gem/runtime/bumi_qpos_safety.py:BumiQposSafetyGate` | 有限性、根高、关节和速度检查 | 限值针对当前BUMI配置，按目标资产核验 |
 | `scripts/demo/demo_music_bumi_console.py:BridgeClient` | begin/chunk/status/stand/heartbeat发送 | 新Bridge要兼容回复字段及状态语义 |
 
 GENMO已经完成120/30滑窗融合，适配器收到的是连续最终qpos后缀；不要把每个chunk再当

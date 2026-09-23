@@ -1,5 +1,3 @@
-> 旧BUMI资产与93D入口已退役，范围及当前功能边界见 [说明](docs/RETIRED_BUMI_ASSETS.md)。
-
 <p align="center">
   <h1 align="center">GEM：通用人体动作模型</h1>
   <p align="center">
@@ -222,144 +220,15 @@ python scripts/demo/text_motion_client.py \
   --timeout_seconds 30
 ```
 
-每次成功请求仍按现有协议生成直接位于 `outputs/text_motion/` 下的唯一 READY 目录，其中包含 `smpl_params.pt`、`motion.npz`、`prompt.txt` 和 `metadata.json`；同时原子更新 `outputs/text_motion/latest_ready.json`。现有 GMR streamer 已直接监视 READY 目录，不需要读取 latest 文件，也不需要改变 SMP1：
-
-```bash
-python scripts/demo/stream_smpl_params_to_gmr.py \
-  --watch_dir outputs/text_motion \
-  --source_filter text_only \
-  --gmr_host 127.0.0.1 \
-  --gmr_port 7006 \
-  --publish_fps 30 \
-  --shape_mode zero \
-  --mode sim \
-  --new_motion_policy queue
-```
+每次成功请求仍按现有协议生成直接位于 `outputs/text_motion/` 下的唯一 READY 目录，其中包含 `smpl_params.pt`、`motion.npz`、`prompt.txt` 和 `metadata.json`；同时原子更新 `outputs/text_motion/latest_ready.json`。
 
 RTX 4090 实测：T5 加载后 allocated 约 3.061 GiB，T5+GEM 加载后约 5.041 GiB，预热后约 5.048 GiB；120 帧请求约 0.51～0.55 秒，300 帧请求约 0.79 秒。连续 50 次混合请求后 PyTorch allocated 增长为 0 MiB。该性能取决于 GPU、CUDA、checkpoint、磁盘与是否命中文本缓存。
 
-### 文本动作到机器人实时播放
-
-文本生成器与机器人播放器是两个独立进程。即使 GEM 生成一整段动作的速度慢于实时，常驻 streamer 仍会以固定频率向 GMR-CPP 发送缓存动作、安全过渡姿态或 idle 姿态：
-
-```text
-demo_smpl_text.py                  文本 -> 完整 SMPL-X 动作 + READY
-stream_smpl_params_to_gmr.py       监视/缓存/插值 -> SMP1 UDP
-run_smplx_bumi3.sh                 SMPL-X 目标 -> BUMI3 重定向
-GMT                                参考轨迹 -> tracking policy
-```
-
-终端 1：启动 GMR-CPP 与 MuJoCo 可视化。
-
-```bash
-cd /home/weili/GMR-CPP_e1jump_lowdpi
-./run_smplx_bumi3.sh \
-  --always \
-  --vis \
-  --vis-smplx-targets \
-  --vis-smplx-frames
-```
-
-终端 2：保持仿真 streamer 常驻运行。
-
-```bash
-cd /home/weili/GENMO
-source .venv/bin/activate
-python scripts/demo/stream_smpl_params_to_gmr.py \
-  --watch_dir outputs/text_motion \
-  --gmr_host 127.0.0.1 \
-  --gmr_port 7006 \
-  --publish_fps 30 \
-  --shape_mode zero \
-  --mode sim \
-  --new_motion_policy queue
-```
-
-终端 3：按需生成新动作。
-
-```bash
-python scripts/demo/demo_smpl_text.py \
-  --prompt "A person walks forward, turns left, raises both arms and returns to a standing pose." \
-  --ckpt_path inputs/pretrained/gem_smpl.ckpt \
-  --num_frames 300 \
-  --fps 30 \
-  --seed 42 \
-  --shape_mode zero \
-  --no_render
-```
-
-实物机器人模式下，首先从已在仿真和目标平台上验证过的站立动作中提取一帧：
-
-```bash
-python scripts/tools/extract_smpl_idle_pose.py \
-  --motion outputs/verified_stand/smpl_params.pt \
-  --frame 0 \
-  --output inputs/motions/smplx_idle_stand.pt \
-  --shape_mode zero
-
-python scripts/demo/stream_smpl_params_to_gmr.py \
-  --watch_dir outputs/text_motion \
-  --gmr_host 127.0.0.1 \
-  --gmr_port 7006 \
-  --publish_fps 30 \
-  --shape_mode zero \
-  --mode robot \
-  --idle_motion inputs/motions/smplx_idle_stand.pt \
-  --new_motion_policy queue \
-  --estop_file /tmp/genmo_estop
-```
-
-播放器采用基于单调时钟的重采样、四元数最短路径插值、根节点位置/yaw 对齐，并使用明确的 `BLENDING`、`PLAYING`、`RETURNING`、`HOLDING`、`ERROR` 和 `ESTOP` 状态。没有动作时仍持续发送 idle 目标；默认仿真 idle 是双臂下垂的站立姿态，而不是 SMPL-X 双臂水平展开的 T-pose。每段动作结束后会平滑返回对齐后的 idle，不会停留在最后一帧。
-
-`queue` 是实物机器人推荐策略。除非显式允许，否则 robot 模式拒绝 `interrupt`。仿真用的合成双臂下垂姿态不能直接用于实物；robot 模式仍要求传入经过验证的 `--idle_motion`。
-
-`--shape_mode zero` 是 streamer 唯一支持的体型策略：忽略源动作中的 betas，每次 SMPL-X FK 都接收 `zeros(1, 1, 10)`。软件 ESTOP 文件触发后，播放器会在有限时间内返回 idle 并保持锁存，直到文件删除且有新动作到达。软件 ESTOP 不能替代机器人硬件急停。
-
-streamer 只发送姿态参考，不发送电机力矩，也不会修改 SMP1、GMR-CPP、BUMI3、Redis 或 GMT 协议。实机测试前必须先在 MuJoCo 中验证 idle 和动作，并使用低速、吊装保护及机器人原有安全系统。
-
-不创建 UDP socket 的动作验证命令：
-
-```bash
-python scripts/demo/stream_smpl_params_to_gmr.py \
-  --motion outputs/text_motion/example/smpl_params.pt \
-  --shape_mode zero \
-  --publish_fps 30 \
-  --mode sim \
-  --dry_run
-```
-
-### 音乐动作到机器人实时播放
+### 音乐动作生成服务
 
 无需视频、YOLO、ViTPose、HMR2 或 T5，直接从 WAV、MP3 或 FLAC 生成 SMPL-X 人体动作。该路径使用 EDGE baseline35 和完整 PyTorch `gem_smpl.ckpt` 的 DDIM/CFG；回归型 ONNX 导出不能进行音乐条件动作生成。
 
-终端 1：启动 GMR-CPP/MuJoCo。
-
-```bash
-cd /home/weili/GMR-CPP_e1jump_lowdpi
-./run_smplx_bumi3.sh \
-  --always \
-  --vis \
-  --vis-smplx-targets \
-  --vis-smplx-frames
-```
-
-终端 2：保持音乐动作 streamer 常驻运行。
-
-```bash
-cd /home/weili/GENMO
-source .venv/bin/activate
-python scripts/demo/stream_smpl_params_to_gmr.py \
-  --watch_dir outputs/music_motion \
-  --source_filter music_only \
-  --gmr_host 127.0.0.1 \
-  --gmr_port 7006 \
-  --publish_fps 30 \
-  --shape_mode zero \
-  --mode sim \
-  --new_motion_policy queue
-```
-
-终端 3：生成完整动作并原子发布 READY。
+单次生成命令：
 
 ```bash
 python scripts/demo/demo_music.py \
@@ -446,183 +315,13 @@ python scripts/demo/music_motion_client.py \
   --timeout_seconds 60
 ```
 
-服务从选定音频范围提取固定 30 FPS 的 35 维特征，生成帧数由实际特征长度决定。相同文件和范围的第二次请求会命中特征缓存。每次成功请求仍在 `outputs/music_motion/` 下发布现有 `music_only` READY 直接子目录，现有 `MotionWatcher(source_filter=music_only)` 无需修改即可消费。
+服务从选定音频范围提取固定 30 FPS 的 35 维特征，生成帧数由实际特征长度决定。相同文件和范围的第二次请求会命中特征缓存。每次成功请求仍在 `outputs/music_motion/` 下发布现有 `music_only` READY 直接子目录。
 
-常驻音乐服务 v1 专注低延迟参数生成，不执行 Open3D 渲染和 ffmpeg mux。需要离线视频时继续使用单次 `demo_music.py`；需要播放原音乐时继续由 streamer 的 `--audio_playback ffplay` 控制。音频播放仍是 best-effort，不属于机器人硬实时控制时钟。
+常驻音乐服务 v1 专注低延迟参数生成，不执行 Open3D 渲染和 ffmpeg mux。需要离线视频时继续使用单次 `demo_music.py`。
 
-每个 sample 都是 `outputs/music_motion/<generation>/` 的直接子目录，包含 SMPL 参数、原始诊断数据、音乐特征、元数据，以及最后创建的 READY。保存的 global/incam betas 和 streamer 每次 FK 使用的 betas 都是全零。没有动作时 streamer 继续定频发送 idle；动作结束后平滑返回 idle，不保持最后一帧。
+每个 sample 都是 `outputs/music_motion/<generation>/` 的直接子目录，包含 SMPL 参数、原始诊断数据、音乐特征、元数据，以及最后创建的 READY。保存的 global/incam betas 均为全零。
 
-终端 2 增加 `--audio_playback ffplay` 可同时进行尽力而为的本地音乐播放。音频失败不会中断控制流，这也不是硬实时音频时钟。robot 模式必须提供 `--idle_motion inputs/motions/smplx_idle_stand.pt`。先在 MuJoCo 中验证，再使用低速、吊装保护、物理急停和机器人正常硬件保护；软件 ESTOP 不能替代物理急停。
-
-完整的 35 通道契约、dry-run、原子输出协议、长音频限制、直接播放命令和安全说明请参阅 [音乐动作生成与机器人实时播放](docs/MUSIC_DEMO.md)。
-
-### 统一多模态常驻服务
-
-`demo_multimodal_server.py` 将实时视频跟随、文本动作生成、音乐动作生成和文本+音乐联合生成放在同一个常驻进程中，并统一交给一个 30 Hz GMR 输出端。它不会创建 `ResidentTextMotionEngine` 和 `ResidentMusicMotionEngine` 两套模型，而是由 `ResidentMultimodalMotionEngine` 只持有一个 T5 tokenizer、一个 FP16 T5-3B、一个完整 GEM-SMPL 和一个初始化后的 DDIM。文本 embedding 与 EDGE baseline35 音乐特征仅缓存在 CPU。
-
-支持的生成模式：
-
-| 模式 | GEM 条件 | 输出 `source` |
-|---|---|---|
-| `text` | `[50,1024]` T5 文本特征 | `text_only` |
-| `music` | `[L,35]` EDGE baseline35 | `music_only` |
-| `text_music` | 同一个 GEM batch 中同时包含文本和音乐条件，只调用一次 `GEM.predict()` | `text_music` |
-
-`text_music` 不是分别生成两条动作后混合。它在同一个完整 PyTorch GEM DDIM/CFG 请求中同时设置 `text_embed`、`has_text=true`、`music_embed` 和全 True 的 `has_music_mask`，元数据会记录 `fusion_mode=joint_gem_condition` 与 `fusion_training_status=zero_shot_cross_dataset`。所有图像、2D、相机和 speech/audio 条件 mask 都保持关闭。
-
-第一版明确不支持 `video_text`、`video_music` 和 `video_text_music`。实时视频走 ONNX regression denoiser，其输入只有 `obs`、`bbx_xys`、`K_fullimg`、`f_imgseq` 和 `f_cam_angvel`，没有文本或音乐输入。收到这些模式时服务返回 `UnsupportedModeError`，不会静默退化成视频、文本或音乐模式。真正的视频多条件融合需要完整 PyTorch diffusion 的固定窗口方案和额外验证。
-
-先启动 GMR-CPP/MuJoCo：
-
-```bash
-cd /home/weili/GMR-CPP_e1jump_lowdpi
-
-./run_smplx_bumi3.sh \
-  --always \
-  --vis \
-  --vis-smplx-targets \
-  --vis-smplx-frames
-```
-
-再启动统一服务。下面的 eager 模式会在启动阶段依次加载 T5、完整 GEM 和视频模型栈，后续切换相机或视频文件不会重新加载模型：
-
-```bash
-cd /home/weili/GENMO
-source .venv/bin/activate
-
-CUDA_VISIBLE_DEVICES=0 \
-python scripts/demo/demo_multimodal_server.py \
-  --ckpt_path inputs/pretrained/gem_smpl.ckpt \
-  --t5_model t5-3b \
-  --local_files_only \
-  --device cuda:0 \
-  --video_init eager \
-  --no_imgfeat \
-  --clip_frames 120 \
-  --clip_fps 30 \
-  --ddim_steps 20 \
-  --guidance_scale 2.5 \
-  --output_root outputs/multimodal_motion \
-  --bind tcp://127.0.0.1:7020 \
-  --gmr_host 127.0.0.1 \
-  --gmr_port 7006 \
-  --publish_fps 30 \
-  --shape_mode zero \
-  --mode sim
-```
-
-实物机器人模式必须改用经过 MuJoCo 和实机低速验证的站立动作，并保持安全的 `queue` 策略：
-
-```bash
-CUDA_VISIBLE_DEVICES=0 \
-python scripts/demo/demo_multimodal_server.py \
-  --ckpt_path inputs/pretrained/gem_smpl.ckpt \
-  --t5_model t5-3b \
-  --local_files_only \
-  --device cuda:0 \
-  --video_init eager \
-  --no_imgfeat \
-  --clip_frames 120 \
-  --clip_fps 30 \
-  --ddim_steps 20 \
-  --output_root outputs/multimodal_motion \
-  --bind tcp://127.0.0.1:7020 \
-  --gmr_host 127.0.0.1 \
-  --gmr_port 7006 \
-  --publish_fps 30 \
-  --shape_mode zero \
-  --mode robot \
-  --idle_motion inputs/motions/smplx_idle_stand.pt \
-  --new_motion_policy queue
-```
-
-`clip_fps` 固定为 30，`clip_frames` 是服务级固定长度，请求不能覆盖。音乐和文本+音乐会从 `start_sec` 提取恰好 `clip_frames / 30` 秒音频；librosa 边界造成的 ±2 帧差异可用显式 `trim_or_pad_last` 对齐，更大的差异会拒绝请求。
-
-另一个终端使用统一客户端：
-
-```bash
-# 启动实时摄像头跟随
-python scripts/demo/multimodal_motion_client.py \
-  --endpoint tcp://127.0.0.1:7020 \
-  --video_start \
-  --camera_id 0
-
-# 启动服务端路径中的视频文件
-python scripts/demo/multimodal_motion_client.py \
-  --endpoint tcp://127.0.0.1:7020 \
-  --video_start \
-  --video_path /server/path/demo.mp4
-
-# 文本动作
-python scripts/demo/multimodal_motion_client.py \
-  --endpoint tcp://127.0.0.1:7020 \
-  --mode text \
-  --prompt "A person walks forward and raises both arms." \
-  --seed 42
-
-# 音乐动作
-python scripts/demo/multimodal_motion_client.py \
-  --endpoint tcp://127.0.0.1:7020 \
-  --mode music \
-  --audio /server/path/song.wav \
-  --start_sec 0 \
-  --seed 42
-
-# 文本+音乐联合条件
-python scripts/demo/multimodal_motion_client.py \
-  --endpoint tcp://127.0.0.1:7020 \
-  --mode text_music \
-  --prompt "A person dances energetically and turns once." \
-  --audio /server/path/song.wav \
-  --start_sec 10 \
-  --seed 42
-
-# 状态、停止视频、静止、软件急停、清除急停和关闭
-python scripts/demo/multimodal_motion_client.py --status
-python scripts/demo/multimodal_motion_client.py --video_stop
-python scripts/demo/multimodal_motion_client.py --idle
-python scripts/demo/multimodal_motion_client.py --estop
-python scripts/demo/multimodal_motion_client.py --clear_estop
-python scripts/demo/multimodal_motion_client.py --shutdown
-```
-
-客户端中的音频和视频都是服务端本地路径，不会上传文件。可重复指定 `--allowed_audio_root` 和 `--allowed_video_root` 限制服务可读取的目录；服务会执行 `expanduser()`、`resolve(strict=True)`，拒绝 `..`、软链接越界、非普通文件和不支持的扩展名。摄像头 ID 不经过路径检查。
-
-统一服务也支持本机 JSON 行诊断：
-
-```bash
-python scripts/demo/demo_multimodal_server.py \
-  --transport stdin \
-  --video_init lazy \
-  --no_imgfeat \
-  --mode sim
-```
-
-每行输入一个 JSON 对象，例如：
-
-```json
-{"op":"generate","mode":"text","request_id":"text-001","prompt":"A person waves.","seed":42}
-{"op":"generate","mode":"music","request_id":"music-001","audio_path":"/server/path/song.wav","start_sec":0,"seed":42}
-{"op":"generate","mode":"text_music","request_id":"mix-001","prompt":"A person dances.","audio_path":"/server/path/song.wav","start_sec":0,"seed":42}
-{"op":"video_start","camera_id":0}
-{"op":"video_stop"}
-{"op":"idle"}
-{"op":"estop"}
-{"op":"clear_estop"}
-{"op":"status"}
-{"op":"clear_cache","target":"all"}
-{"op":"shutdown"}
-```
-
-所有生成结果都是 `outputs/multimodal_motion/` 的直接子目录。文本结果包含 `smpl_params.pt`、`motion.npz`、`metadata.json`、`prompt.txt`；音乐结果增加 `music_features.pt` 和 `source_audio.txt`；联合结果同时包含文本与音乐文件。普通文件全部写完、关闭并 fsync 后才原子重命名目录并最后创建 `READY`。global/incam betas 都被强制为全零。
-
-`MotionSourceMux` 是统一服务中唯一持有 `GMRUDPBridge`、`SMPLXGMRReference` 和 GMR FK 发送循环的组件。Webcam 只通过 `frame_sink(SMPLFrame)` 提交最新帧，不创建第二个 UDP socket。生成期间视频 GPU 推理暂停，但 Mux 的 30 Hz 线程继续发送最后一个新鲜视频帧或安全 idle；READY 后平滑切入生成 clip，动作结束后平滑返回视频快照或 idle，恢复视频前会请求清空 tracker、滑窗、rollout state 和 frame index。视频帧超过 `--video_stale_sec` 未更新时自动回到 idle，ESTOP 始终具有最高优先级。
-
-每次新执行 `video_start` 时，视频 rollout 第一帧会对齐当前正在发送的根节点水平位置和 yaw，后续帧复用同一个刚体变换，并在 `blend_seconds` 内平滑进入视频姿态。因此先前文本或音乐动作已经移动到其他位置时，启动视频不会把人物拉回视频自身的局部原点；视频暂时过期并回到安全 idle 时也会保留当前脚下的水平位置。
-
-`mode=robot` 必须提供经过 MuJoCo 和实机验证的 `--idle_motion`，默认禁止 interrupt；`shape_mode` 只允许 `zero`，保存的 global/incam betas 以及每次 EnDecoder FK 的 betas 都是全零。软件 ESTOP 不能替代物理急停。实机前必须先验证根节点、足部接触、速度和姿态范围，并使用低速、吊装保护和机器人原有硬件安全系统。
-
-原有 `demo_smpl_text_server.py`、`demo_music_server.py`、`demo_webcam.py` 和 `stream_smpl_params_to_gmr.py` 仍可独立运行，接口没有被统一服务替换。SMP1 magic/version、14 个目标名称和顺序、GMR-CPP、BUMI3、Redis 与 GMT 协议均未修改。
+完整的 35 通道契约、dry-run、原子输出协议和长音频限制请参阅 [音乐动作生成](docs/MUSIC_DEMO.md)。
 
 ### 纯视频演示
 
@@ -649,10 +348,9 @@ python scripts/demo/demo_webcam.py \
   --camera_id 0 --no_imgfeat \
   --render --render_mode viser
 
-# Webcam：中性 SMPL-X 体型，并通过 SMP1 向 GMR-CPP 实时发送
+# Webcam：使用中性 SMPL-X 体型并显示结果
 python scripts/demo/demo_webcam.py \
   --camera_id 2 --no_imgfeat --display \
-  --gmr_host 127.0.0.1 --gmr_port 7006 \
   --shape_mode zero
 ```
 
@@ -662,10 +360,10 @@ python scripts/demo/demo_webcam.py \
 | `--context_frames` | `120` | 滑动窗口长度，必须与导出 denoiser 时的 `--seq_len` 一致 |
 | `--no_imgfeat` | 关闭 | 使用无图像特征版本的 denoiser，完全跳过 HMR2 |
 | `--render_mode {opencv,viser}` | `viser` | 人体网格叠加窗口或 Web 三维查看器 |
-| `--shape_mode {zero,first,mean,ema,per_frame}` | `zero` | 统一控制渲染和 GMR FK 的 SMPL-X 体型；`zero` 使用中性平均体型，避免不同帧或不同运行之间人体比例变化 |
+| `--shape_mode {zero,first,mean,ema,per_frame}` | `zero` | 统一控制渲染和视频会话的 SMPL-X 体型；`zero` 使用中性平均体型，避免不同帧或不同运行之间人体比例变化 |
 | `--no_async_pipeline` | 关闭 | 强制同步运行，降低吞吐量但消除流水线延迟 |
 
-`--shape_mode` 会统一控制渲染与 GMR FK 使用的 SMPL-X 体型。默认 `zero` 使用中性平均 SMPL-X 体型，避免身体比例逐帧变化或不同运行之间发生变化。
+`--shape_mode` 会统一控制渲染与视频会话使用的 SMPL-X 体型。默认 `zero` 使用中性平均 SMPL-X 体型，避免身体比例逐帧变化或不同运行之间发生变化。
 
 各模块延迟分析命令：
 

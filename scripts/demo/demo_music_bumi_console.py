@@ -10,8 +10,8 @@
 
 控制台支持 ``play/stand/status/quit/shutdown``，默认先生成两个有效块；桥收到预生成块并
 获得 GMT ACK 后才启动音乐和 50 Hz 播放。后续生成由 12 秒高水位、4 秒低水位节流，且
-持续窗口生成、拼接和后处理 P95 必须低于一个 90 帧步长对应的 3 秒。本文件不导入 GMR、
-SMPL、SMPL-X、SMP1 或旧 ``robot_stream.py``，不会改变既有部署入口。
+持续窗口生成、拼接和后处理 P95 必须低于一个 90 帧步长对应的 3 秒。本文件只处理原生
+BUMI qpos30/contact2 生成结果，不加载人体动作重定向或其他部署入口。
 
 独立部署可通过 ``--deployment-manifest`` 使用原仓库发布的 ONNX、engine 和配套资产，
 无需训练 checkpoint；来源指纹与所有实际文件交叉核验。原 ``--checkpoint`` 路径保持

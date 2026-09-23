@@ -1,15 +1,13 @@
-"""回归验证当前 BUMI producer 只依赖中性共享 helper。
+"""回归验证当前 BUMI producer 复用统一的共享 helper。
 
 本测试不读取服务器数据，也不执行训练、仿真或控制器回放。它检查 UMR、
-robot_retargeter、CSV 和 transfer filelist 的源码 import closure 不会重新指向已经退役的
-legacy/SONIC producer，并确认运行时实际绑定的是中性 hash、manifest、配对、发布、
-四元数、落地、质量判定和报告实现。测试还用临时目录执行这些关键路径，但不把离线
-通过解释为动力学可跟踪或实机安全。
+robot_retargeter、CSV 和 transfer filelist 运行时实际绑定的是统一的 hash、manifest、
+配对、发布、四元数、落地、质量判定和报告实现。测试还用临时目录执行这些关键路径，
+但不把离线通过解释为动力学可跟踪或实机安全。
 """
 
 from __future__ import annotations
 
-import ast
 import hashlib
 import json
 from pathlib import Path
@@ -40,60 +38,8 @@ from tools.data.bumi import (
 )
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-CURRENT_PRODUCERS = (
-    REPO_ROOT / "tools/data/bumi/umr_qpos_adapter.py",
-    REPO_ROOT / "tools/data/bumi/filter_robot_retargeter_npz_motions.py",
-    REPO_ROOT / "tools/data/bumi/build_bumi_music_dataset_from_robot_retargeter_npz.py",
-    REPO_ROOT / "tools/data/bumi/build_bumi_music_dataset_from_csv.py",
-    REPO_ROOT / "tools/data/bumi/build_bumi_transfer_filelists.py",
-)
-FORBIDDEN_PRODUCER_IMPORTS = {
-    "gem.robots.bumi.legacy_motion",
-    "gem.robots.bumi.quality_filter",
-    "tools.data.bumi.build_bumi_music_dataset",
-    "tools.data.bumi.build_bumi_music_dataset_from_sonic_npz",
-    "tools.data.bumi.filter_sonic_npz_motions",
-}
-RETIRED_PRODUCTION_PATHS = (
-    "configs/bumi/quality_filter_gmr_manual_q1_v3.yaml",
-    "configs/exp/gem_bumi_music_only_5set_manual_q1_v3_qpos30_contact_50k.yaml",
-    "configs/exp/gem_bumi_music_only_5set_manual_q1_v3_qpos30_contact_scratch_350k.yaml",
-    "configs/pipeline/music_only_bumi_qpos30_contact_v2.yaml",
-    "gem/robots/bumi/legacy_motion.py",
-    "gem/robots/bumi/quality_filter.py",
-    "scripts/build_bumi_hq_original_comparison.py",
-    "scripts/export_smplx_to_bumi3_offline_npz.py",
-    "tools/data/bumi/build_bumi_music_dataset.py",
-    "tools/data/bumi/build_bumi_music_dataset_from_sonic_npz.py",
-    "tools/data/bumi/filter_legacy_bumi_motions.py",
-    "tools/data/bumi/filter_sonic_npz_motions.py",
-    "tools/data/bumi/prepare_gmr_manual_q1_selected_root.py",
-    "tools/eval/render_legacy_bumi_motion.py",
-)
-
-
-def test_retired_legacy_gmr_and_sonic_production_paths_stay_absent() -> None:
-    """旧生产入口只能从 Git 历史复现，不能再次混入现行工作树。"""
-
-    assert [
-        relative for relative in RETIRED_PRODUCTION_PATHS if (REPO_ROOT / relative).exists()
-    ] == []
-
-
-def test_current_producer_import_closure_has_no_legacy_or_sonic_edge() -> None:
-    """当前 producer 不能通过直接 import 再次依赖旧 producer。"""
-
-    violations: list[str] = []
-    for path in CURRENT_PRODUCERS:
-        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
-        for node in ast.walk(tree):
-            if isinstance(node, ast.ImportFrom) and node.module in FORBIDDEN_PRODUCER_IMPORTS:
-                violations.append(f"{path.relative_to(REPO_ROOT)}:{node.lineno}:{node.module}")
-    assert violations == []
-
-
 def test_current_producers_bind_the_neutral_implementations() -> None:
-    """运行时绑定也必须指向中性模块，而不是复制或转调旧实现。"""
+    """运行时绑定必须指向统一模块，不能复制出分叉实现。"""
 
     assert umr_qpos_adapter.sha256_file is motion_utils.sha256_file
     assert umr_qpos_adapter.NumpyCompatibleUnpickler is motion_utils.NumpyCompatibleUnpickler
