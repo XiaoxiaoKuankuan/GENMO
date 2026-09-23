@@ -1,0 +1,161 @@
+# BUMI closed-loop Stage1：质量筛选后的四库按动作组重新划分90/5/5。
+#
+# 由resplit_bumi_music_dataset.py消费全部旧PASS清单后发布，保持原payload、坐标、FPS、
+# 接触与来源字段；以音乐/原视频/动作关联组为单位划分，不从重叠窗口随机拆集合。
+# 四库均有train/val/test；仅引用新train计算的qpos30 stats，旧清单与stats原样保留。
+# proprio48仍使用Actor的显式物理尺度；训练来源采样20/35/25/20与留出比例相互独立。
+# Mine旧地面语义原样保留，Stage1训练器的地面准入限制仍需在正式训练前解决。
+contract_version: genmo.bumi_closedloop.stage1_dataset.v1
+implementation_status: grouped_90505_dataset_release
+
+server1_example:
+  root: ${oc.env:BUMI_CLOSEDLOOP_90505_ROOT,/data0/user/liwei/datasets/bumi_music_umr70_mine_pass_90505_v1}
+  sources: [AIST++, AIOZ-GDANCE, FineDance, Mine]
+  excludes: [CoMPAS3D]
+  documented_split_counts:
+    train: 4287
+    val: 239
+    test: 239
+
+qpos30_stats:
+  mode: new_train_only_read_only
+  path: ${oc.env:BUMI_CLOSEDLOOP_90505_STATS_PATH,${server1_example.root}/stats/qpos30_train_stats.json}
+  overwrite: false
+
+proprio48_stats:
+  path: null
+  auto_compute: false
+  allowed_split: train
+  entrypoint: tools/data/bumi/compute_closedloop_proprio48_stats.py
+  overwrite: false
+
+sample_contract:
+  history_steps: 50
+  # 固定 P：令 min=max；允许 P=0。可变 P：显式把 max 改为大于 min 的帧数。
+  # Dataset 会按每条样本的真实 future 长度裁短 P，并始终保留至少一个有效 unknown target。
+  prefix_min_frames: 0
+  prefix_max_frames: 0
+  prefix_random_seed: 42
+  nominal_commit_duration_seconds: null
+  future_frames: 120
+  motion_fps: 30
+  proprio_fps: 50
+
+dataset_defaults: &dataset_defaults
+  _target_: gem.closedloop.stage1_dataset.BumiClosedLoopStage1Dataset
+  kinematics_path: ${oc.env:BUMI_KINEMATICS_PATH,configs/bumi/bumi_kinematics_robot_retargeter_fe934_v1.json}
+  history_steps: ${sample_contract.history_steps}
+  prefix_min_frames: ${sample_contract.prefix_min_frames}
+  prefix_max_frames: ${sample_contract.prefix_max_frames}
+  prefix_random_seed: ${sample_contract.prefix_random_seed}
+  strict_alignment: true
+  strict_contract: true
+  require_quality_filter: true
+  validate_payloads_on_init: false
+  validate_source_hashes_on_init: false
+  joint_limit_tolerance: 0.0001
+
+datasets:
+  train:
+    aistpp:
+      <<: *dataset_defaults
+      root: ${server1_example.root}/AIST++
+      dataset_name: aistpp_bumi
+      split: train
+      duration_aware_sampling: true
+      random_decision: true
+    aioz_gdance:
+      <<: *dataset_defaults
+      root: ${server1_example.root}/AIOZ-GDANCE
+      dataset_name: aioz_gdance_bumi
+      split: train
+      duration_aware_sampling: true
+      random_decision: true
+    finedance:
+      <<: *dataset_defaults
+      root: ${server1_example.root}/FineDance
+      dataset_name: finedance_bumi
+      split: train
+      duration_aware_sampling: true
+      random_decision: true
+    mine:
+      <<: *dataset_defaults
+      root: ${server1_example.root}/Mine
+      dataset_name: mine_bumi
+      split: train
+      duration_aware_sampling: true
+      random_decision: true
+  val:
+    aistpp:
+      <<: *dataset_defaults
+      root: ${server1_example.root}/AIST++
+      dataset_name: aistpp_bumi
+      split: val
+      duration_aware_sampling: false
+      random_decision: false
+      eval_decision_mode: center
+    aioz_gdance:
+      <<: *dataset_defaults
+      root: ${server1_example.root}/AIOZ-GDANCE
+      dataset_name: aioz_gdance_bumi
+      split: val
+      duration_aware_sampling: false
+      random_decision: false
+      eval_decision_mode: center
+    finedance:
+      <<: *dataset_defaults
+      root: ${server1_example.root}/FineDance
+      dataset_name: finedance_bumi
+      split: val
+      duration_aware_sampling: false
+      random_decision: false
+      eval_decision_mode: center
+    mine:
+      <<: *dataset_defaults
+      root: ${server1_example.root}/Mine
+      dataset_name: mine_bumi
+      split: val
+      duration_aware_sampling: false
+      random_decision: false
+      eval_decision_mode: center
+  test:
+    aistpp:
+      <<: *dataset_defaults
+      root: ${server1_example.root}/AIST++
+      dataset_name: aistpp_bumi
+      split: test
+      duration_aware_sampling: false
+      random_decision: false
+      eval_decision_mode: center
+    aioz_gdance:
+      <<: *dataset_defaults
+      root: ${server1_example.root}/AIOZ-GDANCE
+      dataset_name: aioz_gdance_bumi
+      split: test
+      duration_aware_sampling: false
+      random_decision: false
+      eval_decision_mode: center
+    finedance:
+      <<: *dataset_defaults
+      root: ${server1_example.root}/FineDance
+      dataset_name: finedance_bumi
+      split: test
+      duration_aware_sampling: false
+      random_decision: false
+      eval_decision_mode: center
+    mine:
+      <<: *dataset_defaults
+      root: ${server1_example.root}/Mine
+      dataset_name: mine_bumi
+      split: test
+      duration_aware_sampling: false
+      random_decision: false
+      eval_decision_mode: center
+
+train_sampling_reference:
+  # Stage1 WeightedRandomSampler 实际消费的来源权重；四项和为1，即实际抽样概率。
+  # 按用户选择提高高质量小库 FineDance/Mine 的覆盖率，库内仍使用 duration-aware 索引。
+  aistpp_bumi: 0.20
+  aioz_gdance_bumi: 0.35
+  finedance_bumi: 0.25
+  mine_bumi: 0.20

@@ -160,17 +160,23 @@ FineDance 与 Mine 合计由此前约 11.92% 提高到 45%；固定训练步数�
 配额；库内继续使用既有 duration-aware 索引和随机 decision frame，验证/测试不使用
 这组训练权重。此调整体现用户对数据质量的取舍，生成质量收益仍需后续正式对照验证。
 
-在四库数据、已有 stats 与匹配权重实际可用的机器上，显式设置本机绝对路径后执行：
+默认数据配置现指向筛选后重新 90/5/5 划分的独立发布版本，详见
+[划分与评估边界](stage1_resplit_90505_v1.md)。新 train 的 stats 不能自动替换旧权重的 stats。
+原始划分配置保留；以下历史 warm-start 示例显式指定原数据配置，避免混用新统计量。
+Mine 的旧地面语义仍会被训练器拒绝，必须在后续独立地面适配完成后才能运行四库训练。
+在数据、stats 与匹配权重实际可用且地面准入满足的机器上，显式设置路径后执行：
 
 ```bash
 export BUMI_CLOSEDLOOP_FOURSET_ROOT=/实际路径/bumi_music_umr70_mine_pass_v1
 export BUMI_MUSIC_QPOS30_STATS_PATH=/与所选权重匹配的已有qpos30_stats.json
 python tools/train_closedloop_stage1.py \
   --config configs/closedloop/stage1_validate.yaml \
+  --set dataset_config=configs/closedloop/stage1_dataset_server1_fourset_v1.yaml \
   --set warm_start_checkpoint=/匹配的原qpos30_contact2.ckpt
 
 python tools/train_closedloop_stage1.py \
   --config configs/closedloop/stage1_train.yaml \
+  --set dataset_config=configs/closedloop/stage1_dataset_server1_fourset_v1.yaml \
   --set warm_start_checkpoint=/匹配的原qpos30_contact2.ckpt \
   --set train.max_steps=8
 ```
