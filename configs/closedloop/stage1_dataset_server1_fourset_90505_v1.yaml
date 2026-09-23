@@ -4,7 +4,7 @@
 # 接触与来源字段；以音乐/原视频/动作关联组为单位划分，不从重叠窗口随机拆集合。
 # 四库均有train/val/test；仅引用新train计算的qpos30 stats，旧清单与stats原样保留。
 # proprio48仍使用Actor的显式物理尺度；训练来源采样20/35/25/20与留出比例相互独立。
-# Mine旧地面语义原样保留，Stage1训练器的地面准入限制仍需在正式训练前解决。
+# Mine旧地面语义原样保留；Stage1通过完整源序列FK估地，仅向损失提供地面元数据。
 contract_version: genmo.bumi_closedloop.stage1_dataset.v1
 implementation_status: grouped_90505_dataset_release
 

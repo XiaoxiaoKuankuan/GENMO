@@ -6,6 +6,8 @@ Stage1Actor，在系统临时测试目录内检查训练入口实际保存和加
 消耗训练 RNG。另以两进程 CPU/Gloo 实际执行 DDP.forward、梯度累计 no_sync 和 rank0
 写入，检查模型参数同步及各 rank 的采样流不同。小网络、合成数据和 CPU 结果只证明
 执行器逻辑，不代表用户要求的完整模型、真实四库数据、单卡/八卡 CUDA 短程验证已完成。
+通过验证报告落盘后注入中断，核验从同一 checkpoint 再次恢复会分配新的 attempt 名称，
+并保留旧配置、事件日志和验证产物；存在更晚完整 checkpoint 时仍必须拒绝回退。
 
 所有 stats、清单、checkpoint、TensorBoard 和子进程日志均在 pytest 的 tmp_path 内创建；
 调用测试时必须使用显式系统临时 basetemp，并在命令结束后的 finally 清理该精确目录。
@@ -15,6 +17,7 @@ Stage1Actor，在系统临时测试目录内检查训练入口实际保存和加
 from __future__ import annotations
 
 import copy
+import hashlib
 import json
 import os
 import subprocess
@@ -22,6 +25,7 @@ import sys
 from pathlib import Path
 
 import numpy as np
+import pytest
 import torch
 from omegaconf import OmegaConf
 
@@ -160,3 +164,70 @@ def test_real_two_process_cpu_ddp_accumulation_and_rank_writes(tmp_path, actor_f
     assert any(len({rank["sample_signature"] for rank in row["ranks"]}) == 2 for row in rows)
     assert len(list((output / "checkpoints").iterdir())) == 1
     assert len(list((output / "tensorboard").glob("events.*"))) == 1
+
+
+def test_interrupted_resume_retries_without_overwriting_previous_attempt(
+    tmp_path, actor_factory, monkeypatch
+):
+    config, _ = _configuration(tmp_path, actor_factory, workers=0)
+    uninterrupted = runner.run_persistent(config, tmp_path / "reference")
+    initial_config = copy.deepcopy(config)
+    initial_config.train.max_steps = 2
+    output = tmp_path / "retry"
+    initial = runner.run_persistent(initial_config, output)
+    resume_config = copy.deepcopy(config)
+    resume_config.resume_checkpoint = initial["last_checkpoint"]
+    base_session = "from_s000002_to_s000004"
+    original_write = runner.write_json
+
+    def fail_after_validation(path, value):
+        original_write(path, value)
+        if Path(path) == output / "validation" / base_session / "s000003.json":
+            raise RuntimeError("simulated interruption before the next checkpoint")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(runner, "write_json", fail_after_validation)
+        with pytest.raises(RuntimeError, match="simulated interruption"):
+            runner.run_persistent(resume_config, output)
+    assert not (output / "checkpoints/s000004.pt").exists()
+    assert (output / "validation" / base_session / "s000003.json").exists()
+    previous_files = {
+        path.relative_to(output): hashlib.sha256(path.read_bytes()).hexdigest()
+        for path in output.rglob("*")
+        if path.is_file() and path.name not in {"train_metrics.jsonl", "latest.json"}
+    }
+    previous_log = (output / "train_metrics.jsonl").read_bytes()
+    resumed = runner.run_persistent(resume_config, output)
+    session = f"{base_session}_attempt002"
+    assert resumed["session"] == resumed["resume"]["session"] == session
+    assert resumed["executed_optimizer_steps"] == 2
+    assert (output / f"config_{session}.yaml").exists()
+    assert (output / "reports" / f"resume_{session}.json").exists()
+    assert (output / "reports" / f"{session}.json").exists()
+    assert (output / "validation" / session / "s000003.json").exists()
+    for relative, digest in previous_files.items():
+        assert hashlib.sha256((output / relative).read_bytes()).hexdigest() == digest
+    assert (output / "train_metrics.jsonl").read_bytes().startswith(previous_log)
+    rows = [json.loads(row) for row in (output / "train_metrics.jsonl").read_text().splitlines()]
+    assert [row["session"] for row in rows if row["step"] == 3] == [base_session, session]
+    expected = torch.load(uninterrupted["last_checkpoint"], map_location="cpu", weights_only=False)
+    actual = torch.load(resumed["last_checkpoint"], map_location="cpu", weights_only=False)
+    for key in ("state_dict", "optimizer_state_dict", "scheduler", "runtime_state"):
+        _assert_tree_equal(expected[key], actual[key])
+
+
+def test_resume_session_names_advance_and_later_checkpoint_still_blocks_rollback(tmp_path):
+    session = "from_s000010_to_s000015"
+    contract = {"test_contract": 1}
+    (tmp_path / "run_contract.json").write_text(json.dumps(contract))
+    (tmp_path / f"config_{session}.yaml").write_text("previous: true\n")
+    (tmp_path / "validation" / f"{session}_attempt002").mkdir(parents=True)
+    assert runner.check_output_session(tmp_path, session, 10, True, contract) == f"{session}_attempt003"
+    with pytest.raises(FileExistsError, match="already exists"):
+        runner.check_output_session(tmp_path, session, 10, False, contract)
+    with pytest.raises(ValueError, match="different training contract"):
+        runner.check_output_session(tmp_path, session, 10, True, {"test_contract": 2})
+    (tmp_path / "checkpoints").mkdir()
+    (tmp_path / "checkpoints/s000011.pt").write_bytes(b"complete checkpoint sentinel")
+    with pytest.raises(ValueError, match="roll back newer complete checkpoints"):
+        runner.check_output_session(tmp_path, session, 10, True, contract)

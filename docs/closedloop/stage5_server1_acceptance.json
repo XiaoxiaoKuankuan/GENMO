@@ -1,0 +1,1299 @@
+{
+  "description": "服务器1 Stage1 第5步真实四库完整模型有限训练验收；仅保留精简证据，临时模型和运行目录在本轮结束前清理。正式50000步命令只提供给用户手动执行。",
+  "schema_version": "genmo.bumi_closedloop.stage5_acceptance.v1",
+  "date": "2026-09-23",
+  "gpu_validation_commit": "97e7d7902ee333fc0e3f79e1076c56633ae84930",
+  "branch": "feature/bumi-music-closedloop",
+  "environment": {
+    "host": "ZP-NC578",
+    "gpu_count": 8,
+    "gpu_model": "NVIDIA RTX 6000D",
+    "memory_total_mib_per_gpu": 85651,
+    "python": "/home/user/liwei/GENMO/.venv/bin/python",
+    "torch": "2.7.1+cu128",
+    "cuda": "12.8",
+    "code_root": "/home/user/liwei/GENMO-bumi-closedloop"
+  },
+  "runs": {
+    "single/from_s000000_to_s000010": {
+      "batch_size_per_rank": 8,
+      "effective_global_batch": 8,
+      "executed_optimizer_steps": 10,
+      "global_step": 10,
+      "gradient_accumulation": 1,
+      "last_checkpoint": "/data0/user/liwei/tmp/genmo-stage5-acceptance-e81pvcyt/single/checkpoints/s000010.pt",
+      "precision": "bf16",
+      "rank_weights_identical": true,
+      "ranks": [
+        {
+          "peak_allocated_mib": 4114.99755859375,
+          "peak_reserved_mib": 4278.0,
+          "rank": 0,
+          "state_sha256": "f9f38c2a3ca1775e1b323ad6b2dc8d6c725374530a29e1c21e636107fe439a40"
+        }
+      ],
+      "resume": null,
+      "start_step": 0,
+      "status": "completed",
+      "steps": [
+        {
+          "gradient_norm": 2.45894193649292,
+          "learning_rate": 1e-05,
+          "loss": 0.10060326755046844,
+          "step": 1,
+          "step_seconds": 0.8290718090029259
+        },
+        {
+          "gradient_norm": 3.380725145339966,
+          "learning_rate": 9.999999991117356e-06,
+          "loss": 0.11230231076478958,
+          "step": 2,
+          "step_seconds": 0.1305199630005518
+        },
+        {
+          "gradient_norm": 50.61326599121094,
+          "learning_rate": 9.999999964469425e-06,
+          "loss": 1.293526530265808,
+          "step": 3,
+          "step_seconds": 0.1279161069978727
+        },
+        {
+          "gradient_norm": 3.8229498863220215,
+          "learning_rate": 9.999999920056205e-06,
+          "loss": 0.26844802498817444,
+          "step": 4,
+          "step_seconds": 0.12740517200290924
+        },
+        {
+          "gradient_norm": 20.514814376831055,
+          "learning_rate": 9.9999998578777e-06,
+          "loss": 1.5839639902114868,
+          "step": 5,
+          "step_seconds": 0.12448158699771739
+        },
+        {
+          "gradient_norm": 4.886781215667725,
+          "learning_rate": 9.999999777933903e-06,
+          "loss": 0.2169230580329895,
+          "step": 6,
+          "step_seconds": 0.12660747499830904
+        },
+        {
+          "gradient_norm": 17.938575744628906,
+          "learning_rate": 9.999999680224823e-06,
+          "loss": 1.0360664129257202,
+          "step": 7,
+          "step_seconds": 0.1241589000019303
+        },
+        {
+          "gradient_norm": 7.1538777351379395,
+          "learning_rate": 9.999999564750454e-06,
+          "loss": 0.35765624046325684,
+          "step": 8,
+          "step_seconds": 0.12483517500004382
+        },
+        {
+          "gradient_norm": 9.346948623657227,
+          "learning_rate": 9.999999431510799e-06,
+          "loss": 0.6841331720352173,
+          "step": 9,
+          "step_seconds": 0.12493516800168436
+        },
+        {
+          "gradient_norm": 3.6481831073760986,
+          "learning_rate": 9.999999280505858e-06,
+          "loss": 0.16099314391613007,
+          "step": 10,
+          "step_seconds": 0.12761687899910612
+        }
+      ],
+      "validation_steps": [
+        10
+      ],
+      "wall_seconds_including_validation_checkpoint": 6.051120724998327,
+      "warm_start_mode": "weights_only_warm_start",
+      "world_size": 1,
+      "mean_step_seconds_excluding_first": 0.12649738066668054,
+      "loss_min_max": [
+        0.10060326755046844,
+        1.5839639902114868
+      ],
+      "gradient_norm_min_max": [
+        2.45894193649292,
+        50.61326599121094
+      ],
+      "all_logged_scalar_metrics_finite": true,
+      "rank_sample_signatures_distinct_every_step": true,
+      "mean_weighted_loss_components": {
+        "weighted_repr_root_pos_loss": 0.04441282907500863,
+        "weighted_repr_root_rot_loss": 0.14548214352689684,
+        "weighted_repr_joint_loss": 0.09003219194710255,
+        "weighted_root_pos_loss": 5.814224687128444e-05,
+        "weighted_root_rot_loss": 0.01923634111881256,
+        "weighted_root_tilt_loss": 0.0012480722063628491,
+        "weighted_joint_dof_loss": 0.0008702280756551772,
+        "weighted_fk_body_pos_loss": 7.179540207289393e-05,
+        "weighted_joint_velocity_loss": 0.0007954567932756618,
+        "weighted_joint_acceleration_loss": 0.00010445086772961076,
+        "weighted_joint_jerk_loss": 0.001091422332683578,
+        "weighted_joint_limit_loss": 9.462973670002973e-18,
+        "weighted_contact_bce_loss": 0.20745731319766492,
+        "weighted_foot_slide_loss": 0.0018407668452709914,
+        "weighted_penetration_loss": 6.006064674295431e-05,
+        "weighted_root_height_loss": 1.353625816591375e-06,
+        "weighted_joint_acceleration_excess_loss": 0.00018463794767740183,
+        "weighted_joint_jerk_excess_loss": 0.00040479580929968505,
+        "weighted_joint_limit_margin_loss": 0.00022518803089042195,
+        "weighted_joint_limit_topk_loss": 4.440892267907216e-15,
+        "weighted_joint_limit_max_loss": 1.7763568394002505e-15,
+        "weighted_root_velocity_loss": 2.0394650846355944e-05,
+        "weighted_root_acceleration_loss": 1.1819387964351336e-05,
+        "weighted_root_angular_velocity_loss": 8.76479043654399e-05,
+        "weighted_root_angular_acceleration_loss": 3.116354782832787e-05,
+        "weighted_fk_velocity_loss": 2.1537896463996732e-05,
+        "weighted_fk_acceleration_loss": 6.26900091447169e-06,
+        "weighted_joint_acceleration_excess_topk_loss": 0.0018567859195172786,
+        "weighted_joint_jerk_excess_topk_loss": 0.003924097097478807,
+        "weighted_joint_limit_margin_topk_loss": 0.021296651847660542,
+        "weighted_foot_slide_topk_loss": 0.02067517600953579,
+        "weighted_foot_slide_max_loss": 0.01263627796433866,
+        "weighted_foot_contact_height_loss": 0.002216390150715597,
+        "weighted_foot_contact_height_topk_loss": 0.004676489334087819,
+        "weighted_penetration_topk_loss": 0.0003045651841603103,
+        "weighted_penetration_max_loss": 0.00011914089163838071,
+        "weighted_root_tilt_excess_topk_loss": 0.0,
+        "weighted_root_tilt_excess_max_loss": 0.0
+      }
+    },
+    "ddp/from_s000000_to_s000010": {
+      "batch_size_per_rank": 32,
+      "effective_global_batch": 256,
+      "executed_optimizer_steps": 10,
+      "global_step": 10,
+      "gradient_accumulation": 1,
+      "last_checkpoint": "/data0/user/liwei/tmp/genmo-stage5-acceptance-e81pvcyt/ddp/checkpoints/s000010.pt",
+      "precision": "bf16",
+      "rank_weights_identical": true,
+      "ranks": [
+        {
+          "peak_allocated_mib": 7352.65576171875,
+          "peak_reserved_mib": 7720.0,
+          "rank": 0,
+          "state_sha256": "afbd5326370b4de56f110d5dfe02aaf8fd7656056544014f73779fb114a9f064"
+        },
+        {
+          "peak_allocated_mib": 7352.66748046875,
+          "peak_reserved_mib": 7720.0,
+          "rank": 1,
+          "state_sha256": "afbd5326370b4de56f110d5dfe02aaf8fd7656056544014f73779fb114a9f064"
+        },
+        {
+          "peak_allocated_mib": 7352.66943359375,
+          "peak_reserved_mib": 7722.0,
+          "rank": 2,
+          "state_sha256": "afbd5326370b4de56f110d5dfe02aaf8fd7656056544014f73779fb114a9f064"
+        },
+        {
+          "peak_allocated_mib": 7352.66748046875,
+          "peak_reserved_mib": 7722.0,
+          "rank": 3,
+          "state_sha256": "afbd5326370b4de56f110d5dfe02aaf8fd7656056544014f73779fb114a9f064"
+        },
+        {
+          "peak_allocated_mib": 7352.42041015625,
+          "peak_reserved_mib": 7722.0,
+          "rank": 4,
+          "state_sha256": "afbd5326370b4de56f110d5dfe02aaf8fd7656056544014f73779fb114a9f064"
+        },
+        {
+          "peak_allocated_mib": 7352.41943359375,
+          "peak_reserved_mib": 7724.0,
+          "rank": 5,
+          "state_sha256": "afbd5326370b4de56f110d5dfe02aaf8fd7656056544014f73779fb114a9f064"
+        },
+        {
+          "peak_allocated_mib": 7352.65576171875,
+          "peak_reserved_mib": 7720.0,
+          "rank": 6,
+          "state_sha256": "afbd5326370b4de56f110d5dfe02aaf8fd7656056544014f73779fb114a9f064"
+        },
+        {
+          "peak_allocated_mib": 7352.41845703125,
+          "peak_reserved_mib": 7722.0,
+          "rank": 7,
+          "state_sha256": "afbd5326370b4de56f110d5dfe02aaf8fd7656056544014f73779fb114a9f064"
+        }
+      ],
+      "resume": null,
+      "start_step": 0,
+      "status": "completed",
+      "steps": [
+        {
+          "gradient_norm": 3.9885642528533936,
+          "learning_rate": 1e-05,
+          "loss": 0.5486569460481405,
+          "step": 1,
+          "step_seconds": 1.117656464000902
+        },
+        {
+          "gradient_norm": 2.4510257244110107,
+          "learning_rate": 9.999999991117356e-06,
+          "loss": 0.36025294102728367,
+          "step": 2,
+          "step_seconds": 0.2566658439973253
+        },
+        {
+          "gradient_norm": 2.3923745155334473,
+          "learning_rate": 9.999999964469425e-06,
+          "loss": 0.3552779071033001,
+          "step": 3,
+          "step_seconds": 0.19458430799932103
+        },
+        {
+          "gradient_norm": 2.0244393348693848,
+          "learning_rate": 9.999999920056205e-06,
+          "loss": 0.406592283397913,
+          "step": 4,
+          "step_seconds": 0.1959713370015379
+        },
+        {
+          "gradient_norm": 3.0993411540985107,
+          "learning_rate": 9.9999998578777e-06,
+          "loss": 0.4315829761326313,
+          "step": 5,
+          "step_seconds": 0.19956771999932243
+        },
+        {
+          "gradient_norm": 3.1141231060028076,
+          "learning_rate": 9.999999777933903e-06,
+          "loss": 0.5151401087641716,
+          "step": 6,
+          "step_seconds": 0.1974943120003445
+        },
+        {
+          "gradient_norm": 1.313745141029358,
+          "learning_rate": 9.999999680224823e-06,
+          "loss": 0.3165964763611555,
+          "step": 7,
+          "step_seconds": 0.20238364599936176
+        },
+        {
+          "gradient_norm": 2.795978307723999,
+          "learning_rate": 9.999999564750454e-06,
+          "loss": 0.39593339525163174,
+          "step": 8,
+          "step_seconds": 0.19779263500095112
+        },
+        {
+          "gradient_norm": 3.194911241531372,
+          "learning_rate": 9.999999431510799e-06,
+          "loss": 0.42059191316366196,
+          "step": 9,
+          "step_seconds": 0.21669780999945942
+        },
+        {
+          "gradient_norm": 1.3339085578918457,
+          "learning_rate": 9.999999280505858e-06,
+          "loss": 0.39139422960579395,
+          "step": 10,
+          "step_seconds": 0.199222284998541
+        }
+      ],
+      "validation_steps": [
+        10
+      ],
+      "wall_seconds_including_validation_checkpoint": 7.10478630900252,
+      "warm_start_mode": "weights_only_warm_start",
+      "world_size": 8,
+      "mean_step_seconds_excluding_first": 0.20670887744401828,
+      "loss_min_max": [
+        0.3165964763611555,
+        0.5486569460481405
+      ],
+      "gradient_norm_min_max": [
+        1.313745141029358,
+        3.9885642528533936
+      ],
+      "all_logged_scalar_metrics_finite": true,
+      "rank_sample_signatures_distinct_every_step": true,
+      "mean_weighted_loss_components": {
+        "weighted_repr_root_pos_loss": 0.03858519741334021,
+        "weighted_repr_root_rot_loss": 0.08195336767239496,
+        "weighted_repr_joint_loss": 0.08017829773016275,
+        "weighted_root_pos_loss": 0.00010167297245970986,
+        "weighted_root_rot_loss": 0.016357278276700526,
+        "weighted_root_tilt_loss": 0.0012838356908105198,
+        "weighted_joint_dof_loss": 0.0008006111267604866,
+        "weighted_fk_body_pos_loss": 6.439930455144349e-05,
+        "weighted_joint_velocity_loss": 0.0006799786715419032,
+        "weighted_joint_acceleration_loss": 9.368402324980707e-05,
+        "weighted_joint_jerk_loss": 0.0010415205339086241,
+        "weighted_joint_limit_loss": 7.471111731394888e-09,
+        "weighted_contact_bce_loss": 0.11226949136471376,
+        "weighted_foot_slide_loss": 0.0019300956279039382,
+        "weighted_penetration_loss": 5.785707243717297e-05,
+        "weighted_root_height_loss": 1.5997017428048821e-06,
+        "weighted_joint_acceleration_excess_loss": 0.00017547235647725757,
+        "weighted_joint_jerk_excess_loss": 0.0004215222124912543,
+        "weighted_joint_limit_margin_loss": 0.00023656450084672543,
+        "weighted_joint_limit_topk_loss": 3.43392748726491e-06,
+        "weighted_joint_limit_max_loss": 8.928211901554351e-06,
+        "weighted_root_velocity_loss": 1.635243638133943e-05,
+        "weighted_root_acceleration_loss": 1.1351097015221967e-05,
+        "weighted_root_angular_velocity_loss": 7.750232234684517e-05,
+        "weighted_root_angular_acceleration_loss": 3.2834269495651826e-05,
+        "weighted_fk_velocity_loss": 1.8659028182810288e-05,
+        "weighted_fk_acceleration_loss": 5.966773832710714e-06,
+        "weighted_joint_acceleration_excess_topk_loss": 0.0021831822261447085,
+        "weighted_joint_jerk_excess_topk_loss": 0.00429573462170083,
+        "weighted_joint_limit_margin_topk_loss": 0.021583536686375738,
+        "weighted_foot_slide_topk_loss": 0.026174189057201147,
+        "weighted_foot_slide_max_loss": 0.014708411239553243,
+        "weighted_foot_contact_height_loss": 0.002237641005194746,
+        "weighted_foot_contact_height_topk_loss": 0.005656182035454549,
+        "weighted_penetration_topk_loss": 0.0003332192709422088,
+        "weighted_penetration_max_loss": 0.00013307388426255783,
+        "weighted_root_tilt_excess_topk_loss": 0.00036092721326923537,
+        "weighted_root_tilt_excess_max_loss": 0.0001283498813990036
+      }
+    },
+    "ddp/from_s000010_to_s000015": {
+      "batch_size_per_rank": 32,
+      "effective_global_batch": 256,
+      "executed_optimizer_steps": 5,
+      "global_step": 15,
+      "gradient_accumulation": 1,
+      "last_checkpoint": "/data0/user/liwei/tmp/genmo-stage5-acceptance-e81pvcyt/ddp/checkpoints/s000015.pt",
+      "precision": "bf16",
+      "rank_weights_identical": true,
+      "ranks": [
+        {
+          "peak_allocated_mib": 7354.76171875,
+          "peak_reserved_mib": 7738.0,
+          "rank": 0,
+          "state_sha256": "782abaf8b409eb0ecffdcf1aec61a54084cf00a50f342e7a222fcb4bde0e153e"
+        },
+        {
+          "peak_allocated_mib": 7353.40869140625,
+          "peak_reserved_mib": 7730.0,
+          "rank": 1,
+          "state_sha256": "782abaf8b409eb0ecffdcf1aec61a54084cf00a50f342e7a222fcb4bde0e153e"
+        },
+        {
+          "peak_allocated_mib": 7354.5419921875,
+          "peak_reserved_mib": 7740.0,
+          "rank": 2,
+          "state_sha256": "782abaf8b409eb0ecffdcf1aec61a54084cf00a50f342e7a222fcb4bde0e153e"
+        },
+        {
+          "peak_allocated_mib": 7353.44775390625,
+          "peak_reserved_mib": 7730.0,
+          "rank": 3,
+          "state_sha256": "782abaf8b409eb0ecffdcf1aec61a54084cf00a50f342e7a222fcb4bde0e153e"
+        },
+        {
+          "peak_allocated_mib": 7354.54052734375,
+          "peak_reserved_mib": 7738.0,
+          "rank": 4,
+          "state_sha256": "782abaf8b409eb0ecffdcf1aec61a54084cf00a50f342e7a222fcb4bde0e153e"
+        },
+        {
+          "peak_allocated_mib": 7353.43408203125,
+          "peak_reserved_mib": 7730.0,
+          "rank": 5,
+          "state_sha256": "782abaf8b409eb0ecffdcf1aec61a54084cf00a50f342e7a222fcb4bde0e153e"
+        },
+        {
+          "peak_allocated_mib": 7353.43603515625,
+          "peak_reserved_mib": 7730.0,
+          "rank": 6,
+          "state_sha256": "782abaf8b409eb0ecffdcf1aec61a54084cf00a50f342e7a222fcb4bde0e153e"
+        },
+        {
+          "peak_allocated_mib": 7354.54052734375,
+          "peak_reserved_mib": 7738.0,
+          "rank": 7,
+          "state_sha256": "782abaf8b409eb0ecffdcf1aec61a54084cf00a50f342e7a222fcb4bde0e153e"
+        }
+      ],
+      "resume": {
+        "global_step": 10,
+        "global_step_restored": true,
+        "mode": "stage1_training_resume",
+        "model_restored": true,
+        "optimizer_restored": true,
+        "rng_restored": true,
+        "runtime_contract_checked": [
+          "batch_size",
+          "data_fingerprint",
+          "gradient_accumulation",
+          "precision",
+          "sampling",
+          "training_contract",
+          "world_size"
+        ],
+        "runtime_rng_and_sampler_restored_by": "caller_per_rank",
+        "sampler_epoch": 0,
+        "sampler_offset": 320,
+        "sampler_restored": true,
+        "scaler_restored": false,
+        "scaler_used": false,
+        "scheduler_restored": true,
+        "scheduler_used": true
+      },
+      "start_step": 10,
+      "status": "completed",
+      "steps": [
+        {
+          "gradient_norm": 1.7546491622924805,
+          "learning_rate": 9.999999111735633e-06,
+          "loss": 0.36448387056589127,
+          "step": 11,
+          "step_seconds": 1.1428555169986794
+        },
+        {
+          "gradient_norm": 1.2922948598861694,
+          "learning_rate": 9.999998925200124e-06,
+          "loss": 0.2977406345307827,
+          "step": 12,
+          "step_seconds": 0.1993867239980318
+        },
+        {
+          "gradient_norm": 1.0939559936523438,
+          "learning_rate": 9.999998720899332e-06,
+          "loss": 0.39858101680874825,
+          "step": 13,
+          "step_seconds": 0.19677544400110492
+        },
+        {
+          "gradient_norm": 1.2919700145721436,
+          "learning_rate": 9.999998498833255e-06,
+          "loss": 0.31702133268117905,
+          "step": 14,
+          "step_seconds": 0.19321354000203428
+        },
+        {
+          "gradient_norm": 1.0230488777160645,
+          "learning_rate": 9.999998259001898e-06,
+          "loss": 0.3476434238255024,
+          "step": 15,
+          "step_seconds": 0.19506398899829946
+        }
+      ],
+      "validation_steps": [
+        15
+      ],
+      "wall_seconds_including_validation_checkpoint": 6.1399479899992,
+      "warm_start_mode": "weights_only_warm_start",
+      "world_size": 8,
+      "mean_step_seconds_excluding_first": 0.19610992424986762,
+      "loss_min_max": [
+        0.2977406345307827,
+        0.39858101680874825
+      ],
+      "gradient_norm_min_max": [
+        1.0230488777160645,
+        1.7546491622924805
+      ],
+      "all_logged_scalar_metrics_finite": true,
+      "rank_sample_signatures_distinct_every_step": true,
+      "mean_weighted_loss_components": {
+        "weighted_repr_root_pos_loss": 0.038911751471459866,
+        "weighted_repr_root_rot_loss": 0.06369938300922513,
+        "weighted_repr_joint_loss": 0.07479251958429814,
+        "weighted_root_pos_loss": 7.99725441083865e-05,
+        "weighted_root_rot_loss": 0.015188987413421274,
+        "weighted_root_tilt_loss": 0.0012241915108461398,
+        "weighted_joint_dof_loss": 0.0007736488922091666,
+        "weighted_fk_body_pos_loss": 6.061834710635594e-05,
+        "weighted_joint_velocity_loss": 0.000697357132594334,
+        "weighted_joint_acceleration_loss": 9.393178534082836e-05,
+        "weighted_joint_jerk_loss": 0.0010477134710527025,
+        "weighted_joint_limit_loss": 5.081301489236768e-10,
+        "weighted_contact_bce_loss": 0.07094799126498401,
+        "weighted_foot_slide_loss": 0.0019200637529138477,
+        "weighted_penetration_loss": 3.293596084859018e-05,
+        "weighted_root_height_loss": 1.6104201598921009e-06,
+        "weighted_joint_acceleration_excess_loss": 0.0001688578426183085,
+        "weighted_joint_jerk_excess_loss": 0.0004120762285310775,
+        "weighted_joint_limit_margin_loss": 0.00023293026242754422,
+        "weighted_joint_limit_topk_loss": 2.2521578723693313e-07,
+        "weighted_joint_limit_max_loss": 5.855610539451383e-07,
+        "weighted_root_velocity_loss": 1.63524889785549e-05,
+        "weighted_root_acceleration_loss": 1.193714070950591e-05,
+        "weighted_root_angular_velocity_loss": 7.188762383520952e-05,
+        "weighted_root_angular_acceleration_loss": 3.353147512825671e-05,
+        "weighted_fk_velocity_loss": 1.8409396307106363e-05,
+        "weighted_fk_acceleration_loss": 5.794591322683118e-06,
+        "weighted_joint_acceleration_excess_topk_loss": 0.0022430656128562985,
+        "weighted_joint_jerk_excess_topk_loss": 0.0042185149621218445,
+        "weighted_joint_limit_margin_topk_loss": 0.021172115625813604,
+        "weighted_foot_slide_topk_loss": 0.024663510732352734,
+        "weighted_foot_slide_max_loss": 0.013803550228476524,
+        "weighted_foot_contact_height_loss": 0.0021376254328060893,
+        "weighted_foot_contact_height_topk_loss": 0.005453473178204149,
+        "weighted_penetration_topk_loss": 0.0002711665771130356,
+        "weighted_penetration_max_loss": 0.00012364167432679096,
+        "weighted_root_tilt_excess_topk_loss": 0.0004117526747904776,
+        "weighted_root_tilt_excess_max_loss": 0.00015037091970953042
+      }
+    }
+  },
+  "validation": {
+    "single/from_s000000_to_s000010": {
+      "global_step": 10,
+      "sample_steps": 10,
+      "guidance_scale": 2.5,
+      "seed": 12345,
+      "condition_only_sample_call": true,
+      "finite_outputs": true,
+      "sources": {
+        "aioz_gdance": [
+          {
+            "contact_shape": [
+              1,
+              120,
+              2
+            ],
+            "known_coordinates": 178,
+            "known_max_abs_error": 0.0,
+            "loss": 0.13248324394226074,
+            "qpos30_shape": [
+              1,
+              120,
+              30
+            ],
+            "trace_known_max_abs_error": 0.0
+          }
+        ],
+        "aistpp": [
+          {
+            "contact_shape": [
+              1,
+              120,
+              2
+            ],
+            "known_coordinates": 58,
+            "known_max_abs_error": 0.0,
+            "loss": 3.340500831604004,
+            "qpos30_shape": [
+              1,
+              120,
+              30
+            ],
+            "trace_known_max_abs_error": 0.0
+          }
+        ],
+        "finedance": [
+          {
+            "contact_shape": [
+              1,
+              120,
+              2
+            ],
+            "known_coordinates": 298,
+            "known_max_abs_error": 0.0,
+            "loss": 0.31911739706993103,
+            "qpos30_shape": [
+              1,
+              120,
+              30
+            ],
+            "trace_known_max_abs_error": 0.0
+          }
+        ],
+        "mine": [
+          {
+            "contact_shape": [
+              1,
+              120,
+              2
+            ],
+            "known_coordinates": 268,
+            "known_max_abs_error": 0.0,
+            "loss": 0.19898203015327454,
+            "qpos30_shape": [
+              1,
+              120,
+              30
+            ],
+            "trace_known_max_abs_error": 0.0
+          }
+        ]
+      }
+    },
+    "ddp/from_s000000_to_s000010": {
+      "global_step": 10,
+      "sample_steps": 10,
+      "guidance_scale": 2.5,
+      "seed": 12345,
+      "condition_only_sample_call": true,
+      "finite_outputs": true,
+      "sources": {
+        "aioz_gdance": [
+          {
+            "contact_shape": [
+              1,
+              120,
+              2
+            ],
+            "known_coordinates": 178,
+            "known_max_abs_error": 0.0,
+            "loss": 0.16913895308971405,
+            "qpos30_shape": [
+              1,
+              120,
+              30
+            ],
+            "trace_known_max_abs_error": 0.0
+          }
+        ],
+        "aistpp": [
+          {
+            "contact_shape": [
+              1,
+              120,
+              2
+            ],
+            "known_coordinates": 58,
+            "known_max_abs_error": 0.0,
+            "loss": 4.306487083435059,
+            "qpos30_shape": [
+              1,
+              120,
+              30
+            ],
+            "trace_known_max_abs_error": 0.0
+          }
+        ],
+        "finedance": [
+          {
+            "contact_shape": [
+              1,
+              120,
+              2
+            ],
+            "known_coordinates": 298,
+            "known_max_abs_error": 0.0,
+            "loss": 0.28227758407592773,
+            "qpos30_shape": [
+              1,
+              120,
+              30
+            ],
+            "trace_known_max_abs_error": 0.0
+          }
+        ],
+        "mine": [
+          {
+            "contact_shape": [
+              1,
+              120,
+              2
+            ],
+            "known_coordinates": 268,
+            "known_max_abs_error": 0.0,
+            "loss": 0.21473616361618042,
+            "qpos30_shape": [
+              1,
+              120,
+              30
+            ],
+            "trace_known_max_abs_error": 0.0
+          }
+        ]
+      }
+    },
+    "ddp/from_s000010_to_s000015": {
+      "global_step": 15,
+      "sample_steps": 10,
+      "guidance_scale": 2.5,
+      "seed": 12345,
+      "condition_only_sample_call": true,
+      "finite_outputs": true,
+      "sources": {
+        "aioz_gdance": [
+          {
+            "contact_shape": [
+              1,
+              120,
+              2
+            ],
+            "known_coordinates": 178,
+            "known_max_abs_error": 0.0,
+            "loss": 0.18486346304416656,
+            "qpos30_shape": [
+              1,
+              120,
+              30
+            ],
+            "trace_known_max_abs_error": 0.0
+          }
+        ],
+        "aistpp": [
+          {
+            "contact_shape": [
+              1,
+              120,
+              2
+            ],
+            "known_coordinates": 58,
+            "known_max_abs_error": 0.0,
+            "loss": 4.118117332458496,
+            "qpos30_shape": [
+              1,
+              120,
+              30
+            ],
+            "trace_known_max_abs_error": 0.0
+          }
+        ],
+        "finedance": [
+          {
+            "contact_shape": [
+              1,
+              120,
+              2
+            ],
+            "known_coordinates": 298,
+            "known_max_abs_error": 0.0,
+            "loss": 0.3033463954925537,
+            "qpos30_shape": [
+              1,
+              120,
+              30
+            ],
+            "trace_known_max_abs_error": 0.0
+          }
+        ],
+        "mine": [
+          {
+            "contact_shape": [
+              1,
+              120,
+              2
+            ],
+            "known_coordinates": 268,
+            "known_max_abs_error": 0.0,
+            "loss": 0.2242426872253418,
+            "qpos30_shape": [
+              1,
+              120,
+              30
+            ],
+            "trace_known_max_abs_error": 0.0
+          }
+        ]
+      }
+    }
+  },
+  "checkpoint_evidence": {
+    "single/checkpoints/s000010.pt": {
+      "keys": [
+        "checkpoint_version",
+        "condition_interface_version",
+        "stage1_contract_version",
+        "bumi_representation_contract_version",
+        "actor_interface_config",
+        "config",
+        "asset_identity",
+        "global_step",
+        "state_dict",
+        "optimizer_layout",
+        "optimizer_state_dict",
+        "scheduler",
+        "scaler",
+        "runtime_state",
+        "warm_start_report",
+        "training_state"
+      ],
+      "global_step": 10,
+      "state_entries": 322,
+      "state_elements": 221736736,
+      "optimizer_state_dict": {
+        "num_parameter_states": 320,
+        "adam_steps": [
+          10.0
+        ]
+      },
+      "scheduler": {
+        "class": "torch.optim.lr_scheduler.LambdaLR",
+        "state_dict": {
+          "base_lrs": [
+            1e-05
+          ],
+          "last_epoch": 10,
+          "_step_count": 11,
+          "_get_lr_called_within_step": false,
+          "_last_lr": [
+            9.999999111735633e-06
+          ],
+          "lr_lambdas": [
+            null
+          ]
+        }
+      },
+      "scaler": null,
+      "runtime_state": {
+        "world_size": 1,
+        "batch_size": 8,
+        "gradient_accumulation": 1,
+        "precision": "bf16",
+        "data_fingerprint": "5b3c950d1cdbb7e1cd4d4600ed524a80fd14cc70b7072dee8ee53223ef3aa3e7",
+        "sampling": {
+          "contract": "global_weighted_rank_stride_deterministic_draw.v1",
+          "seed": 42,
+          "epoch_size_per_rank": 8192,
+          "weights": {
+            "aistpp_bumi": 0.2,
+            "aioz_gdance_bumi": 0.35,
+            "finedance_bumi": 0.25,
+            "mine_bumi": 0.2
+          }
+        },
+        "training_contract": {
+          "learning_rate": 1e-05,
+          "weight_decay": 0.01,
+          "grad_clip_norm": 1.0,
+          "scheduler": {
+            "total_steps": 50000,
+            "warmup_steps": 0,
+            "min_lr_ratio": 0.1
+          },
+          "loss": {
+            "weights_from": "configs/pipeline/music_only_bumi_qpos30_contact_v5.yaml",
+            "weights": {},
+            "options": {
+              "ground_semantics": "mixed_floor_zero_fk_contact_v2",
+              "contract_version": "physical_qpos30_contact_v5",
+              "auxiliary_warmup_steps": 0,
+              "joint_limit_margin_rad": 0.05,
+              "joint_limit_topk_fraction": 0.01,
+              "robust_joint_limit_start_step": 0,
+              "robust_joint_limit_warmup_steps": 0,
+              "advanced_physics_start_step": 0,
+              "advanced_physics_warmup_steps": 0,
+              "advanced_physics_topk_fraction": 0.05,
+              "root_tilt_upright_allowance_rad": 0.35,
+              "root_tilt_target_margin_rad": 0.05
+            }
+          },
+          "loss_weights_file_sha256": "d8e929044d860bf89317b02c8d356f07d0aaf1a1da74c50aa09bbee7b02f4fd2"
+        },
+        "completed_steps": 10
+      },
+      "rank_cursors": [
+        {
+          "rank": 0,
+          "sampler_epoch": 0,
+          "sampler_offset": 80
+        }
+      ]
+    },
+    "ddp/checkpoints/s000010.pt": {
+      "keys": [
+        "checkpoint_version",
+        "condition_interface_version",
+        "stage1_contract_version",
+        "bumi_representation_contract_version",
+        "actor_interface_config",
+        "config",
+        "asset_identity",
+        "global_step",
+        "state_dict",
+        "optimizer_layout",
+        "optimizer_state_dict",
+        "scheduler",
+        "scaler",
+        "runtime_state",
+        "warm_start_report",
+        "training_state"
+      ],
+      "global_step": 10,
+      "state_entries": 322,
+      "state_elements": 221736736,
+      "optimizer_state_dict": {
+        "num_parameter_states": 320,
+        "adam_steps": [
+          10.0
+        ]
+      },
+      "scheduler": {
+        "class": "torch.optim.lr_scheduler.LambdaLR",
+        "state_dict": {
+          "base_lrs": [
+            1e-05
+          ],
+          "last_epoch": 10,
+          "_step_count": 11,
+          "_get_lr_called_within_step": false,
+          "_last_lr": [
+            9.999999111735633e-06
+          ],
+          "lr_lambdas": [
+            null
+          ]
+        }
+      },
+      "scaler": null,
+      "runtime_state": {
+        "world_size": 8,
+        "batch_size": 32,
+        "gradient_accumulation": 1,
+        "precision": "bf16",
+        "data_fingerprint": "5b3c950d1cdbb7e1cd4d4600ed524a80fd14cc70b7072dee8ee53223ef3aa3e7",
+        "sampling": {
+          "contract": "global_weighted_rank_stride_deterministic_draw.v1",
+          "seed": 42,
+          "epoch_size_per_rank": 8192,
+          "weights": {
+            "aistpp_bumi": 0.2,
+            "aioz_gdance_bumi": 0.35,
+            "finedance_bumi": 0.25,
+            "mine_bumi": 0.2
+          }
+        },
+        "training_contract": {
+          "learning_rate": 1e-05,
+          "weight_decay": 0.01,
+          "grad_clip_norm": 1.0,
+          "scheduler": {
+            "total_steps": 50000,
+            "warmup_steps": 0,
+            "min_lr_ratio": 0.1
+          },
+          "loss": {
+            "weights_from": "configs/pipeline/music_only_bumi_qpos30_contact_v5.yaml",
+            "weights": {},
+            "options": {
+              "ground_semantics": "mixed_floor_zero_fk_contact_v2",
+              "contract_version": "physical_qpos30_contact_v5",
+              "auxiliary_warmup_steps": 0,
+              "joint_limit_margin_rad": 0.05,
+              "joint_limit_topk_fraction": 0.01,
+              "robust_joint_limit_start_step": 0,
+              "robust_joint_limit_warmup_steps": 0,
+              "advanced_physics_start_step": 0,
+              "advanced_physics_warmup_steps": 0,
+              "advanced_physics_topk_fraction": 0.05,
+              "root_tilt_upright_allowance_rad": 0.35,
+              "root_tilt_target_margin_rad": 0.05
+            }
+          },
+          "loss_weights_file_sha256": "d8e929044d860bf89317b02c8d356f07d0aaf1a1da74c50aa09bbee7b02f4fd2"
+        },
+        "completed_steps": 10
+      },
+      "rank_cursors": [
+        {
+          "rank": 0,
+          "sampler_epoch": 0,
+          "sampler_offset": 320
+        },
+        {
+          "rank": 1,
+          "sampler_epoch": 0,
+          "sampler_offset": 320
+        },
+        {
+          "rank": 2,
+          "sampler_epoch": 0,
+          "sampler_offset": 320
+        },
+        {
+          "rank": 3,
+          "sampler_epoch": 0,
+          "sampler_offset": 320
+        },
+        {
+          "rank": 4,
+          "sampler_epoch": 0,
+          "sampler_offset": 320
+        },
+        {
+          "rank": 5,
+          "sampler_epoch": 0,
+          "sampler_offset": 320
+        },
+        {
+          "rank": 6,
+          "sampler_epoch": 0,
+          "sampler_offset": 320
+        },
+        {
+          "rank": 7,
+          "sampler_epoch": 0,
+          "sampler_offset": 320
+        }
+      ]
+    },
+    "ddp/checkpoints/s000015.pt": {
+      "keys": [
+        "checkpoint_version",
+        "condition_interface_version",
+        "stage1_contract_version",
+        "bumi_representation_contract_version",
+        "actor_interface_config",
+        "config",
+        "asset_identity",
+        "global_step",
+        "state_dict",
+        "optimizer_layout",
+        "optimizer_state_dict",
+        "scheduler",
+        "scaler",
+        "runtime_state",
+        "warm_start_report",
+        "training_state"
+      ],
+      "global_step": 15,
+      "state_entries": 322,
+      "state_elements": 221736736,
+      "optimizer_state_dict": {
+        "num_parameter_states": 320,
+        "adam_steps": [
+          15.0
+        ]
+      },
+      "scheduler": {
+        "class": "torch.optim.lr_scheduler.LambdaLR",
+        "state_dict": {
+          "base_lrs": [
+            1e-05
+          ],
+          "last_epoch": 15,
+          "_step_count": 16,
+          "_get_lr_called_within_step": false,
+          "_last_lr": [
+            9.999998001405257e-06
+          ],
+          "lr_lambdas": [
+            null
+          ]
+        }
+      },
+      "scaler": null,
+      "runtime_state": {
+        "world_size": 8,
+        "batch_size": 32,
+        "gradient_accumulation": 1,
+        "precision": "bf16",
+        "data_fingerprint": "5b3c950d1cdbb7e1cd4d4600ed524a80fd14cc70b7072dee8ee53223ef3aa3e7",
+        "sampling": {
+          "contract": "global_weighted_rank_stride_deterministic_draw.v1",
+          "seed": 42,
+          "epoch_size_per_rank": 8192,
+          "weights": {
+            "aistpp_bumi": 0.2,
+            "aioz_gdance_bumi": 0.35,
+            "finedance_bumi": 0.25,
+            "mine_bumi": 0.2
+          }
+        },
+        "training_contract": {
+          "learning_rate": 1e-05,
+          "weight_decay": 0.01,
+          "grad_clip_norm": 1.0,
+          "scheduler": {
+            "total_steps": 50000,
+            "warmup_steps": 0,
+            "min_lr_ratio": 0.1
+          },
+          "loss": {
+            "weights_from": "configs/pipeline/music_only_bumi_qpos30_contact_v5.yaml",
+            "weights": {},
+            "options": {
+              "ground_semantics": "mixed_floor_zero_fk_contact_v2",
+              "contract_version": "physical_qpos30_contact_v5",
+              "auxiliary_warmup_steps": 0,
+              "joint_limit_margin_rad": 0.05,
+              "joint_limit_topk_fraction": 0.01,
+              "robust_joint_limit_start_step": 0,
+              "robust_joint_limit_warmup_steps": 0,
+              "advanced_physics_start_step": 0,
+              "advanced_physics_warmup_steps": 0,
+              "advanced_physics_topk_fraction": 0.05,
+              "root_tilt_upright_allowance_rad": 0.35,
+              "root_tilt_target_margin_rad": 0.05
+            }
+          },
+          "loss_weights_file_sha256": "d8e929044d860bf89317b02c8d356f07d0aaf1a1da74c50aa09bbee7b02f4fd2"
+        },
+        "completed_steps": 15
+      },
+      "rank_cursors": [
+        {
+          "rank": 0,
+          "sampler_epoch": 0,
+          "sampler_offset": 480
+        },
+        {
+          "rank": 1,
+          "sampler_epoch": 0,
+          "sampler_offset": 480
+        },
+        {
+          "rank": 2,
+          "sampler_epoch": 0,
+          "sampler_offset": 480
+        },
+        {
+          "rank": 3,
+          "sampler_epoch": 0,
+          "sampler_offset": 480
+        },
+        {
+          "rank": 4,
+          "sampler_epoch": 0,
+          "sampler_offset": 480
+        },
+        {
+          "rank": 5,
+          "sampler_epoch": 0,
+          "sampler_offset": 480
+        },
+        {
+          "rank": 6,
+          "sampler_epoch": 0,
+          "sampler_offset": 480
+        },
+        {
+          "rank": 7,
+          "sampler_epoch": 0,
+          "sampler_offset": 480
+        }
+      ]
+    }
+  },
+  "evidence_sha256": {
+    "single/reports/from_s000000_to_s000010.json": "1aa3f13b98712654f2e456ff69b7c7c80bf2da291f6332c86306689a26795cf3",
+    "single/validation/from_s000000_to_s000010/s000010.json": "3b78eb57a78737177cadb239bda5727a51ef78baa86477b3cecab73890737de4",
+    "single/train_metrics.jsonl": "93808e7d76cd6c23e7d752c8bfec87d9f1028b3bc3f36d4613f15c0b5925e672",
+    "single/config_from_s000000_to_s000010.yaml": "c5a452a7c7899e8dd96424cd20d0f29a8e2503cfe532cc3a941783e287a7f9ef",
+    "ddp/reports/from_s000000_to_s000010.json": "91d95b198007969c5a887fbff708ecda7971496c1ed9821f0af78d1fffb0b74d",
+    "ddp/validation/from_s000000_to_s000010/s000010.json": "b6cd446901bc14b3354875a981ac606f07a8bcde416f24c290215661e9bc4761",
+    "ddp/train_metrics.jsonl": "e7c7bbdbd484b7dac45bfb0ca8a229f830742a490d427ef27bda0fa519011ebf",
+    "ddp/config_from_s000000_to_s000010.yaml": "1d57fa53893d7bd1b740b5bb5e669442ad16c3b230e304e239ae4ce5ef5ee1c8",
+    "ddp/reports/from_s000010_to_s000015.json": "8e09395c4207baa4aeee672bb9eb3cff0a80a42b5fe76856f4b6180261df3364",
+    "ddp/validation/from_s000010_to_s000015/s000015.json": "31ad485c3ea676efb5cbde51edbb38443c3d87388ae0ad77b7deeb1fb301de20",
+    "ddp/config_from_s000010_to_s000015.yaml": "5900e08515e4cbf94b0a518a7f9e8f5b9ea5ad53e1f2c144d8fc521b98642277"
+  },
+  "cleanup": {
+    "status": "completed",
+    "removed_remote_path": "/data0/user/liwei/tmp/genmo-stage5-acceptance-e81pvcyt",
+    "removed_files": 27,
+    "removed_bytes": 7739639675,
+    "training_pids_after": [],
+    "gpu_compute_processes_after": "",
+    "formal_output_exists": false,
+    "remote_path_absent_verified": true,
+    "gpu_state_after": "0, 0 MiB, 0 %\n1, 0 MiB, 0 %\n2, 0 MiB, 0 %\n3, 0 MiB, 0 %\n4, 0 MiB, 0 %\n5, 0 MiB, 0 %\n6, 0 MiB, 0 %\n7, 0 MiB, 0 %\n",
+    "removed_local_path": "/tmp/genmo-stage5-acceptance-local-m8ozhtwt",
+    "local_path_absent_verified": true
+  },
+  "warm_start": {
+    "global_step_restored": false,
+    "loaded": 312,
+    "missing": 0,
+    "mode": "weights_only_warm_start",
+    "new": 10,
+    "optimizer_restored": false,
+    "shape_conflicts": 0,
+    "source_asset_identity": "verified_exact_content",
+    "source_checkpoint_path": "/data0/user/liwei/GENMO_outputs/bumi_music_umr70_mine/bumi_umr70_mine_s350k_20260918_170256_6ac1e6d/version_0/checkpoints/s350000.ckpt",
+    "source_checkpoint_sha256": "aa1f98c19294f9e1f16bd0391d4cd811267950f9914a9d7563e3ba79fc16cb00",
+    "source_global_step_for_provenance_only": 350000,
+    "source_model_configuration": {
+      "fields": [
+        "backbone",
+        "condition_modules",
+        "diffusion_steps",
+        "noise_schedule"
+      ],
+      "status": "verified_explicit_fields"
+    },
+    "unexpected": 0,
+    "new_parameter_names": [
+      "history_encoder.cell.bias_hh",
+      "history_encoder.cell.bias_ih",
+      "history_encoder.cell.weight_hh",
+      "history_encoder.cell.weight_ih",
+      "history_encoder.out_proj.bias",
+      "history_encoder.out_proj.weight",
+      "prefix_encoder.input_proj.bias",
+      "prefix_encoder.input_proj.weight",
+      "prefix_encoder.out_proj.bias",
+      "prefix_encoder.out_proj.weight"
+    ]
+  },
+  "data": {
+    "root": "/data0/user/liwei/datasets/bumi_music_umr70_mine_pass_90505_v1",
+    "split_counts": {
+      "aistpp": [
+        351,
+        20,
+        20
+      ],
+      "aioz_gdance": [
+        3745,
+        208,
+        208
+      ],
+      "finedance": [
+        102,
+        6,
+        6
+      ],
+      "mine": [
+        89,
+        5,
+        5
+      ]
+    },
+    "split_order": [
+      "train",
+      "val",
+      "test"
+    ],
+    "train_sampling_probabilities": {
+      "aistpp": 0.2,
+      "aioz_gdance": 0.35,
+      "finedance": 0.25,
+      "mine": 0.2
+    },
+    "matched_pretrain_stats": "/data0/user/liwei/datasets/bumi_music_umr70_mine_pass_v1/stats/qpos30_train_stats.json",
+    "stats_sha256": "a695a1bb09bb9a936869aefb87672e4895bc4f35ab23efb40047bf335fa4d8fc",
+    "kinematics_sha256": "c08731704dccece11351b6fa877e30bac5ca2a8d363de30af7ca2ea1398f4029"
+  },
+  "formal_recommendation": {
+    "config": "configs/closedloop/stage1_server1_8gpu.yaml",
+    "batch_size_per_rank": 32,
+    "gradient_accumulation": 1,
+    "world_size": 8,
+    "effective_global_batch": 256,
+    "max_optimizer_steps": 50000,
+    "precision": "bf16",
+    "learning_rate": 1e-05,
+    "scheduler_warmup_steps": 500,
+    "output_dir": "/data0/user/liwei/GENMO_outputs/bumi_closedloop_stage1_90505_warm_s350000_8gpu_v1",
+    "launched": false
+  },
+  "evidence_limits": [
+    "No formal long training or background job was launched.",
+    "GPU tests used scheduler warmup 0; formal configuration uses 500, all use cosine total_steps 50000.",
+    "GPU tests validated one sample per source with 10 DDIM steps; formal monitoring uses two per source with 20 DDIM steps.",
+    "GPU tests used full 1024/16/8 actor and original music checkpoint; state_dict contains 221736736 elements.",
+    "Step timing includes batch retrieval and forward/backward/update, excludes subsequent metrics gathering, validation, checkpoint, and process/model/data startup.",
+    "No maximum batch search, convergence, motion quality, dynamics, deployment, or hardware safety claim.",
+    "Some new holdout data was seen during old music pretraining and original statistics computation; not strict unseen-pretrain generalization.",
+    "After GPU acceptance only retry-session naming/output preservation and documentation were adjusted; training/CUDA/DDP math unchanged."
+  ],
+  "local_regression": {
+    "suite": "tests/closedloop",
+    "passed": 141,
+    "warnings": 3,
+    "seconds": 15.9,
+    "warning_type": "existing AMP deprecation",
+    "real_gpu_replaced_by_unit_tests": false
+  }
+}

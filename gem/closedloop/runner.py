@@ -10,6 +10,8 @@ qpos30/contact2 或 120帧布局。torchrun 的每个进程绑定 LOCAL_RANK，�
 AdamW、调度器、AMP（若用）、各 rank RNG 与实际消费的采样游标，并绑定数据指纹和训练
 关键配置；旧音乐权重仅用于显式 warm start，绝不冒充 resume。验证使用各库固定子集、
 固定随机种子，只向 sample 传条件并检查每步及最终物理前缀；验证结束恢复训练 RNG。
+从同一 checkpoint 恢复后若在下次保存前中断，可以再次使用同一命令：输出会话自动增加
+attempt 后缀，保留前次配置、日志和验证报告；存在更晚完整 checkpoint 时仍拒绝回退。
 所有循环有明确 max_steps；本模块不会创建后台任务或自动启动其他实验。
 """
 
@@ -273,11 +275,8 @@ def model_digest(actor):
 
 
 def check_output_session(output, session, start_step, resume, contract):
-    """拒绝回退覆盖完整进度；崩溃后未保存的日志保留并以session明确区分。"""
-    if (output / f"config_{session}.yaml").exists():
-        raise FileExistsError(
-            f"Session already attempted; use a separate output for retry: {session}"
-        )
+    """核验输出归属并选取未用会话名，让保存前崩溃的 resume 可安全重试。"""
+    output = Path(output)
     if resume:
         later = [p for p in (output / "checkpoints").glob("s*.pt") if int(p.stem[1:]) > start_step]
         if later:
@@ -287,6 +286,24 @@ def check_output_session(output, session, start_step, resume, contract):
         previous = output / "run_contract.json"
         if previous.exists() and json.loads(previous.read_text()) != contract:
             raise ValueError("Existing output directory belongs to a different training contract")
+
+    def occupied(candidate):
+        # 配置通常最先落盘；也检查其他产物，防止中断或手动归档后覆盖旧报告。
+        return (
+            (output / f"config_{candidate}.yaml").exists()
+            or (output / "reports" / f"{candidate}.json").exists()
+            or (output / "reports" / f"resume_{candidate}.json").exists()
+            or (output / "validation" / candidate).exists()
+            or any((output / "tensorboard").glob(f"events.*.{candidate}"))
+        )
+
+    candidate, attempt = session, 1
+    while occupied(candidate):
+        if not resume:
+            raise FileExistsError(f"Training session already exists: {candidate}")
+        attempt += 1
+        candidate = f"{session}_attempt{attempt:03d}"
+    return candidate
 
 
 def run_persistent(config, output_dir):
@@ -440,17 +457,21 @@ def run_persistent(config, output_dir):
             )
         session = f"from_s{start_step:06d}_to_s{maximum:06d}"
         if rank == 0:
-            check_output_session(output, session, start_step, resume, contract)
-            write_json(output / "run_contract.json", contract)
+            session = check_output_session(output, session, start_step, resume, contract)
+            if not (output / "run_contract.json").exists():
+                write_json(output / "run_contract.json", contract)
             if not (output / "weight_loading_report.json").exists():
                 write_json(output / "weight_loading_report.json", weight_report)
             if restore_report:
-                write_json(output / "reports" / f"resume_s{start_step:06d}.json", restore_report)
+                restore_report["session"] = session
+                write_json(output / "reports" / f"resume_{session}.json", restore_report)
             OmegaConf.save(config, output / f"config_{session}.yaml", resolve=True)
             from torch.utils.tensorboard import SummaryWriter
 
             writer = SummaryWriter(
-                str(output / "tensorboard"), purge_step=start_step + 1 if resume else None
+                str(output / "tensorboard"),
+                purge_step=start_step + 1 if resume else None,
+                filename_suffix=f".{session}",
             )
         if resume:
             restore_rng(rank_state["rng"], device)
@@ -640,6 +661,7 @@ def run_persistent(config, output_dir):
             raise AssertionError("DDP rank model states diverged")
         report = {
             "status": "completed",
+            "session": session,
             "start_step": start_step,
             "global_step": step,
             "executed_optimizer_steps": step - start_step,
