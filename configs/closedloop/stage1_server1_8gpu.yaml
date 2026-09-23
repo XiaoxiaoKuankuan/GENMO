@@ -7,9 +7,20 @@
 # 首次训练必须weights-only初始化；真正续训只能使用本实验full-state checkpoint。
 # 默认50000个优化步，固定warmup/cosine总周期；短程验收只显式覆盖max_steps等测试值。
 # 命令仅由用户启动，配置本身不会创建进程、tmux或自动任务。正式输出与短程临时目录分开。
+# 前缀以15%概率取P=0，其余均匀取6～18帧；12帧是非零区间中心及首版部署约定。
 base_config: stage1_train.yaml
 config_version: genmo.bumi_closedloop.stage1_run.v1
 mode: train
+sample_contract:
+  prefix_min_frames: 6
+  prefix_max_frames: 18
+  prefix_zero_probability: 0.15
+# 记录首版在线调用者应采用的前缀策略；训练采样不读取该字段，不自动修改GMT运行端。
+# 后续按实际端到端P95延迟调整，Actor仍严格服从调用者给出的逐坐标known mask。
+deployment_reference:
+  prefix_frames: 12
+  motion_fps: 30
+  adjustment_basis: measured_end_to_end_p95_latency
 warm_start_checkpoint: /data0/user/liwei/GENMO_outputs/bumi_music_umr70_mine/bumi_umr70_mine_s350k_20260918_170256_6ac1e6d/version_0/checkpoints/s350000.ckpt
 warm_start_checkpoint_sha256: aa1f98c19294f9e1f16bd0391d4cd811267950f9914a9d7563e3ba79fc16cb00
 resume_checkpoint: null

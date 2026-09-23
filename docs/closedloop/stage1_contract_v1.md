@@ -427,7 +427,11 @@ target 编码以 decision frame 为 crop anchor，但最多读取 `qpos[t:t+121]
 repeat 会立即被清零并由逐坐标 mask 标无效。
 
 P 通过 `prefix_min_frames/prefix_max_frames` 配置：二者相等为固定 P，不等为闭区间内的稳定
-可复现可变 P，二者都可以为 0；没有把 P 固定为 0.4 秒。对尾部样本，effective P 会裁到
+可复现可变 P，二者都可以为 0。可选 `prefix_zero_probability` 默认 0，保持旧采样结果；
+大于 0 时要求 min/max 为正，以该独立概率取 P=0，其余在正整数区间均匀取值。服务器1
+正式配置采用 15% P=0、85% P∈[6,18]，非零区间中心值12；首版部署约定12帧，后续按
+实际端到端 P95 延迟调整。这是运行策略，不把通用契约或 Actor 的 P 固定为 0.4 秒。
+对尾部样本，effective P 会裁到
 `future_valid_frames-1`，从而始终留下真实 unknown target。teacher-forced 数据 prefix 的
 metadata 值是 `teacher_forced_demo_reference_v1`；部署语义仍是“上一轮已发布计划”，两者不
 得混写成实际 robot state。

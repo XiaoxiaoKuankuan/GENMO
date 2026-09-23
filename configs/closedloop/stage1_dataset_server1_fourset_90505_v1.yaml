@@ -36,6 +36,8 @@ sample_contract:
   # Dataset 会按每条样本的真实 future 长度裁短 P，并始终保留至少一个有效 unknown target。
   prefix_min_frames: 0
   prefix_max_frames: 0
+  # 大于0时，min/max须为正：以该概率单独选P=0，其余在正整数区间取值。
+  prefix_zero_probability: 0.0
   prefix_random_seed: 42
   nominal_commit_duration_seconds: null
   future_frames: 120
@@ -48,6 +50,7 @@ dataset_defaults: &dataset_defaults
   history_steps: ${sample_contract.history_steps}
   prefix_min_frames: ${sample_contract.prefix_min_frames}
   prefix_max_frames: ${sample_contract.prefix_max_frames}
+  prefix_zero_probability: ${sample_contract.prefix_zero_probability}
   prefix_random_seed: ${sample_contract.prefix_random_seed}
   strict_alignment: true
   strict_contract: true

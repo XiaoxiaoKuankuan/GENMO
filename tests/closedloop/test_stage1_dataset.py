@@ -3,7 +3,8 @@
 本文件只在 pytest 的临时目录中创建极小的版本化 qpos28/EDGE35 配对数据，并使用仓库内
 fe934 运动学 JSON。测试覆盖 30→50 Hz 最新可见样本保持、30 Hz 后向速度、GMT 关节具名
 置换、历史起点 padding、qpos30 右侧 halo、逐坐标 known/target mask、P=0/可变P、contact
-监督、动态 H、collate 和 train-only proprio stats 入口。所有产物均位于 ``tmp_path``，不会
+监督、动态 H、collate、独立P=0混合概率及其确定性/旧采样兼容、train-only proprio stats入口。
+所有产物均位于 ``tmp_path``，不会
 读取或覆盖服务器正式数据、qpos30 stats、checkpoint、训练日志，也不会启动训练或 Isaac/GMT。
 
 这些测试证明的是示范数据 producer 的静态/运动学因果契约；它们不能把 demo proxy 解释为
@@ -17,6 +18,7 @@ import hashlib
 import json
 import math
 import sys
+from collections import Counter
 from pathlib import Path
 
 import pytest
@@ -372,6 +374,96 @@ def test_empty_and_variable_prefix_are_supported_without_contact_condition(tmp_p
     assert 0 <= int(first["prefix_frames"]) <= 8
     assert int(first["prefix_frames"]) == int(second["prefix_frames"])
     torch.testing.assert_close(first["known_qpos30"], second["known_qpos30"])
+
+
+def test_zero_prefix_mixture_distribution_determinism_and_legacy(tmp_path: Path) -> None:
+    """验证混合概率和非零均匀性；关闭混合时旧样本键仍给出完全相同的P。"""
+    root = _write_dataset(tmp_path / "mixture", length=140)
+    dataset = _dataset(
+        root,
+        prefix_min_frames=6,
+        prefix_max_frames=18,
+        prefix_zero_probability=0.15,
+    )
+    draws = [dataset._requested_prefix_frames(f"sample_{i}", i % 97) for i in range(100000)]
+    counts = Counter(draws)
+    assert set(counts) == {0, *range(6, 19)}
+    assert abs(counts[0] / len(draws) - 0.15) < 0.005
+    for prefix in range(6, 19):
+        assert abs(counts[prefix] / len(draws) - 0.85 / 13) < 0.003
+    assert draws[:100] == [
+        dataset._requested_prefix_frames(f"sample_{i}", i % 97) for i in range(100)
+    ]
+
+    legacy = _dataset(root, prefix_min_frames=6, prefix_max_frames=18)
+    for i in range(100):
+        key = (
+            f"{legacy.prefix_random_seed}\0{legacy.dataset_name}\0{legacy.split}\0"
+            f"sample_{i}\0{i % 97}"
+        ).encode()
+        old_draw = int.from_bytes(hashlib.sha256(key).digest()[:8], byteorder="big")
+        assert legacy._requested_prefix_frames(f"sample_{i}", i % 97) == 6 + old_draw % 13
+    all_empty = _dataset(
+        root, prefix_min_frames=12, prefix_max_frames=12, prefix_zero_probability=1.0
+    )
+    assert all(all_empty._requested_prefix_frames("sample", i) == 0 for i in range(30))
+
+
+def test_zero_prefix_mixture_reaches_existing_coordinate_mask_and_tail(tmp_path: Path) -> None:
+    root = _write_dataset(tmp_path / "mixture-mask", length=200)
+    dataset = _dataset(
+        root, prefix_min_frames=6, prefix_max_frames=18, prefix_zero_probability=0.15
+    )
+    examples = {}
+    sample_id = str(dataset.rows[0]["sample_id"])
+    for frame in range(80):
+        prefix = dataset._requested_prefix_frames(sample_id, frame)
+        kind = "zero" if prefix == 0 else "positive"
+        if kind not in examples:
+            examples[kind] = dataset.get_window(0, start_frame=frame)
+    assert set(examples) == {"zero", "positive"}
+    assert not examples["zero"]["known_qpos30_mask"].any()
+    positive = examples["positive"]
+    p = int(positive["prefix_frames"])
+    assert 6 <= p <= 18
+    assert positive["known_qpos30_mask"][:p, 2:].all()
+    assert positive["known_qpos30_mask"][: p - 1, :2].all()
+    assert not positive["known_qpos30_mask"][p - 1 :, :2].any()
+    assert not positive["known_qpos30_mask"][p:].any()
+    tail = dataset.get_window(0, start_frame=199)
+    assert tail["meta"]["effective_prefix_frames"] == 0
+    validate_stage1_training_batch(
+        collate_stage1_training_samples([*examples.values(), tail]), history_steps=50
+    )
+
+
+@pytest.mark.parametrize("probability", [-0.1, 1.1, float("nan"), float("inf")])
+def test_zero_prefix_probability_rejects_invalid_values(tmp_path: Path, probability: float) -> None:
+    with pytest.raises(ValueError, match="prefix_zero_probability"):
+        _dataset(
+            tmp_path, prefix_min_frames=6, prefix_max_frames=18, prefix_zero_probability=probability
+        )
+
+
+def test_zero_prefix_mixture_requires_positive_nonzero_range(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="positive prefix_min_frames"):
+        _dataset(tmp_path, prefix_min_frames=0, prefix_max_frames=18, prefix_zero_probability=0.15)
+
+
+def test_formal_config_applies_prefix_mixture_to_all_sources() -> None:
+    from gem.closedloop.training import load_stage1_config, load_stage1_data_config
+
+    formal = load_stage1_config("configs/closedloop/stage1_server1_8gpu.yaml")
+    data = load_stage1_data_config(formal)
+    for split in data.datasets.values():
+        for source in split.values():
+            assert source.prefix_min_frames == 6
+            assert source.prefix_max_frames == 18
+            assert source.prefix_zero_probability == 0.15
+    assert formal.deployment_reference.prefix_frames == 12
+    assert formal.deployment_reference.motion_fps == 30
+    smoke_data = load_stage1_data_config(load_stage1_config("configs/closedloop/stage1_train.yaml"))
+    assert smoke_data.datasets.train.aistpp.prefix_zero_probability == 0.0
 
 
 def test_missing_contact_uses_existing_fk_label_contract_only_as_target(tmp_path: Path) -> None:

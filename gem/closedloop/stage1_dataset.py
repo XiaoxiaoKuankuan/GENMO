@@ -21,6 +21,10 @@ mask 为真的 teacher-forced 值；contact2 只作为监督，不进入 prefix�
 地面只属于损失监督 provenance：已有 floor-zero 来源继续使用世界 Z=0；legacy body-origin
 来源在完整未裁剪源序列上复用原接触标签器的足底分位估计，按源文件身份缓存一个标量。
 该标量放在既有 meta 中，不新增条件字段，不改变 root Z、接触 payload 或 qpos30 anchor。
+
+前缀长度可配置为正整数区间与独立 P=0 概率的混合：例如 85% 使用 6～18 帧、15% 无
+前缀。两次抽样使用同一稳定样本键的独立哈希段，不消费全局 RNG，支持 DDP/worker 精确
+恢复；概率缺省为零时保留原来的固定/可变前缀行为。序列尾部仍裁短以保留有效未知目标。
 """
 
 from __future__ import annotations
@@ -257,6 +261,7 @@ class BumiClosedLoopStage1Dataset(Dataset):
         quaternion_norm_tolerance: float = 1.0e-3,
         joint_limit_tolerance: float = 1.0e-3,
         limit_size: int | None = None,
+        prefix_zero_probability: float = 0.0,
     ) -> None:
         super().__init__()
         self.motion_frames = MOTION_WINDOW_FRAMES
@@ -264,6 +269,7 @@ class BumiClosedLoopStage1Dataset(Dataset):
         self.prefix_min_frames = int(prefix_min_frames)
         self.prefix_max_frames = int(prefix_max_frames)
         self.prefix_random_seed = int(prefix_random_seed)
+        self.prefix_zero_probability = float(prefix_zero_probability)
         self.dataset_name = str(dataset_name)
         self.split = str(split)
         self.duration_aware_sampling = bool(duration_aware_sampling)
@@ -282,6 +288,10 @@ class BumiClosedLoopStage1Dataset(Dataset):
             raise ValueError(
                 f"prefix_max_frames must be < {MOTION_WINDOW_FRAMES} so unknown future remains"
             )
+        if not 0.0 <= self.prefix_zero_probability <= 1.0:
+            raise ValueError("prefix_zero_probability must be finite and in [0, 1]")
+        if self.prefix_zero_probability > 0.0 and self.prefix_min_frames == 0:
+            raise ValueError("P=0 mixture requires a positive prefix_min_frames")
         if self.eval_decision_mode not in {"start", "center", "end"}:
             raise ValueError("eval_decision_mode must be 'start', 'center', or 'end'")
 
@@ -338,13 +348,18 @@ class BumiClosedLoopStage1Dataset(Dataset):
         return (sequence_length - 1) // 2
 
     def _requested_prefix_frames(self, sample_id: str, decision_frame: int) -> int:
-        if self.prefix_min_frames == self.prefix_max_frames:
+        if self.prefix_min_frames == self.prefix_max_frames and self.prefix_zero_probability == 0:
             return self.prefix_min_frames
         key = (
             f"{self.prefix_random_seed}\0{self.dataset_name}\0{self.split}\0"
             f"{sample_id}\0{int(decision_frame)}"
         ).encode()
-        draw = int.from_bytes(hashlib.sha256(key).digest()[:8], byteorder="big")
+        digest = hashlib.sha256(key).digest()
+        # 独立哈希段控制空前缀，避免 P=0 判定与非零长度的取模选择相互偏置。
+        empty_draw = int.from_bytes(digest[8:16], byteorder="big")
+        if empty_draw < int(self.prefix_zero_probability * (1 << 64)):
+            return 0
+        draw = int.from_bytes(digest[:8], byteorder="big")
         width = self.prefix_max_frames - self.prefix_min_frames + 1
         return self.prefix_min_frames + draw % width
 
