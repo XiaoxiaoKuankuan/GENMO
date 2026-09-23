@@ -138,8 +138,9 @@ datasets:
       eval_decision_mode: center
 
 train_sampling_reference:
-  # 只记录原四库训练的相对权重；第4步接新 DataModule 时再接入 sampler。
-  aistpp_bumi: 0.28
-  aioz_gdance_bumi: 0.57
-  finedance_bumi: 0.065
-  mine_bumi: 0.05
+  # Stage1 WeightedRandomSampler 实际消费的来源权重；四项和为1，即实际抽样概率。
+  # 按用户选择提高高质量小库 FineDance/Mine 的覆盖率，库内仍使用 duration-aware 索引。
+  aistpp_bumi: 0.20
+  aioz_gdance_bumi: 0.35
+  finedance_bumi: 0.25
+  mine_bumi: 0.20

@@ -144,6 +144,22 @@ SHA、有序关节、权重和 warm-start 来源报告。新 checkpoint 同样�
 - [`tools/train_closedloop_stage1.py`](../../tools/train_closedloop_stage1.py)：独立 CLI；
   默认选择 validate，所有默认产物写系统临时目录并自动删除。
 
+四库训练来源权重位于既有 Dataset 配置的 `train_sampling_reference`，由 Stage1
+`WeightedRandomSampler(replacement=True)` 实际读取。2026-09-23 按用户选择提高
+高质量小库的覆盖率，当前权重和为 1，实际抽样概率为：
+
+| 来源 | 训练抽样概率 |
+|---|---:|
+| AIST++ | 20% |
+| AIOZ-GDANCE | 35% |
+| FineDance | 25% |
+| Mine | 20% |
+
+FineDance 与 Mine 合计由此前约 11.92% 提高到 45%；固定训练步数下，两库预期抽样次数
+分别变为此前约 3.71 倍和 3.86 倍。比例描述长期随机抽样期望，单个 batch 不保证固定
+配额；库内继续使用既有 duration-aware 索引和随机 decision frame，验证/测试不使用
+这组训练权重。此调整体现用户对数据质量的取舍，生成质量收益仍需后续正式对照验证。
+
 在四库数据、已有 stats 与匹配权重实际可用的机器上，显式设置本机绝对路径后执行：
 
 ```bash
