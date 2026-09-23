@@ -5,7 +5,8 @@
 # 新划分重算stats，保证旧权重数值空间一致。该旧模型/统计已经见过部分新留出样本，
 # 本实验的val/test用于闭环适配监控，不宣称整个预训练模型的严格未见音乐评测。
 # 首次训练必须weights-only初始化；真正续训只能使用本实验full-state checkpoint。
-# 默认50000个优化步，固定warmup/cosine总周期；短程验收只显式覆盖max_steps等测试值。
+# 正式沿用每卡256/8卡全局2048、350000个优化步；warmup/cosine总周期随之设为350000。
+# 短程验收只覆盖max_steps与日志频率，不改变正式batch、前缀分布或调度周期。
 # 命令仅由用户启动，配置本身不会创建进程、tmux或自动任务。正式输出与短程临时目录分开。
 # 前缀以15%概率取P=0，其余均匀取6～18帧；12帧是非零区间中心及首版部署约定。
 base_config: stage1_train.yaml
@@ -59,17 +60,17 @@ endecoder:
   kinematics_path: /home/user/liwei/GENMO-bumi-closedloop/configs/bumi/bumi_kinematics_robot_retargeter_fe934_v1.json
   stats_path: /data0/user/liwei/datasets/bumi_music_umr70_mine_pass_v1/stats/qpos30_train_stats.json
 data_loader:
-  batch_size: 32
+  batch_size: 256
   num_workers: 2
   # 每rank的epoch长度固定，不能随短程max_steps改变，否则无法精确恢复。
   samples_per_epoch: 8192
 train:
-  max_steps: 50000
+  max_steps: 350000
   learning_rate: 0.00001
   weight_decay: 0.01
   grad_clip_norm: 1.0
 scheduler:
-  total_steps: 50000
+  total_steps: 350000
   warmup_steps: 500
   min_lr_ratio: 0.1
 trainer:
@@ -90,4 +91,4 @@ runtime:
   seed: 42
   device: cuda
   cpu_threads: 1
-  output_dir: /data0/user/liwei/GENMO_outputs/bumi_closedloop_stage1_90505_warm_s350000_8gpu_v1
+  output_dir: /data0/user/liwei/GENMO_outputs/bumi_closedloop_stage1_90505_p6to18_z15_b256_s350k_8gpu_v1
