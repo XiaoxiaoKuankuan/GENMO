@@ -17,7 +17,7 @@ Dataset 生成 120 帧窗口。训练来源抽样仍为 AIST++/AIOZ/FineDance/Mi
 - 同条动作在新清单中恰好出现一次。逐条增加 `resplit_provenance` 记录原 split、组 ID
   和版本，其余生产者字段保持原值。
 
-实际服务器元数据预演得到以下可达计数，正式发布后以报告指纹为准：
+服务器1已实际发布并全量验证，计数如下（序列数占比约89.9685%/5.0157%/5.0157%）：
 
 | 来源 | train | val | test | 总条数 |
 |---|---:|---:|---:|---:|
@@ -46,6 +46,20 @@ python tools/data/bumi/resplit_bumi_music_dataset.py \
 音乐对齐、质量/资产/接触契约和来源哈希。复用 `compute_bumi_30d_stats.py` 只遍历新 train，
 生成新目录下的 `stats/qpos30_train_stats.json`，其四库 train manifest SHA 必须匹配。
 proprio48 继续使用 Stage1 明确物理尺度，不自动拟合统计量。
+
+2026-09-23 服务器1验收记录：
+
+- 发布位置：`/data0/user/liwei/datasets/bumi_music_umr70_mine_pass_90505_v1`。
+- `split_report.json` 保存划分、12套严格校验结果、源/新manifest指纹及旧train进入留出集
+  的条数；`stage1_dataset_verification.json` 保存独立逐条核对和Stage1实际batch探针。
+- 4765条原动作恰好出现一次；8277个payload文件全部硬链接原字节，独立核验同inode；
+  原manifest/meta/stats指纹保持不变。固定seed重算归属一致，已知音频哈希跨split交集为0。
+- 四库各train/val/test共12个真实Stage1 Dataset batch均通过现有collate/validator；
+  新stats可由原BumiEndecoder严格加载并归一化出有限值。该验收没有运行Actor训练。
+- 新train统计量SHA256：`f51df1c167ba953b87953d7efb7a611c92e0e2da7616a8b88b18eb8c79c3df79`。
+  原统计量仍为 `a695a1bb09bb9a936869aefb87672e4895bc4f35ab23efb40047bf335fa4d8fc`。
+- `build_stage1_loader` 的Mine地面准入拒绝也已实际复现，并保存在验收报告中；没有把
+  Dataset可读误写成四库训练可启动。默认验证的2个batch仍只是接通检查，不是全量评测。
 
 **旧 checkpoint 的边界不因换 split 而消失。** 报告逐库给出新 val/test 来自旧 train 的
 条数；从已见过这些样本的旧模型 warm start 后，不能声称它们是整个模型的未见数据。

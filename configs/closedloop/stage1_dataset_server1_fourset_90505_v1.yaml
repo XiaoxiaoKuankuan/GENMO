@@ -20,6 +20,7 @@ server1_example:
 qpos30_stats:
   mode: new_train_only_read_only
   path: ${oc.env:BUMI_CLOSEDLOOP_90505_STATS_PATH,${server1_example.root}/stats/qpos30_train_stats.json}
+  documented_sha256: f51df1c167ba953b87953d7efb7a611c92e0e2da7616a8b88b18eb8c79c3df79
   overwrite: false
 
 proprio48_stats:
