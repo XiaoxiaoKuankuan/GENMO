@@ -22,7 +22,7 @@ defaults:
   - refiner: null
 
   # global-override
-  - exp: mixed # set "data, model and callbacks" in yaml
+  - exp: gem_bumi_music_only_umr70_mine_scratch_350k # 当前 BUMI 音乐主线
   - global/task: null # dump/test
   - global/hsearch: null # hyper-param search
   - global/debug: null # debug mode

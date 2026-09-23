@@ -1,8 +1,12 @@
 # BUMI music-only：环境、导出、TensorRT、运行与数据流手册
 
 适用分支：完整仓库 `feature/bumi-music-only`；运行分支 `deploy/bumi-music-only-gmt`。
-本机完整仓库 `/home/weili/GENMO`，部署目录 `/home/weili/GENMO-deploy-bumi`。
+本机音乐开发工作树 `/home/weili/GENMO-bumi-music`，部署目录 `/home/weili/GENMO-deploy-bumi`。
+`/home/weili/GENMO/.venv` 可作为共享开发解释器；历史命令中的完整仓库 cwd 应改为音乐工作树。
 模型为 BUMI v5 scratch s350000。本手册的命令按当前实测环境编写，目标机路径可以调整。
+
+2026-09-23 音乐分支清理只调整开发侧默认实验和入口，不替换部署分支的模型包、配置或 engine。
+下文已交付模型/环境是对应交付时的记录；同为 s350000 不代表不同训练来源的资产可互换。
 
 **控制器自己选择 policy。** GENMO 的 ONNX/engine 描述音乐生成模型，不描述 GMT 控制策略。
 Bridge 正常启动不传 `--gmt-policy`，只读 GMT 已启动后的 ROS 参数 `/gmtPolicyFile`，

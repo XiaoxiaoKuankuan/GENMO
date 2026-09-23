@@ -60,7 +60,7 @@ from gem.runtime.gmt_trajectory import (  # noqa: E402
     GmtPolicyContract,
     RedisTrajectoryPublisher,
 )
-from gem.runtime.motion_streamer import MonotonicDeadline  # noqa: E402
+from gem.runtime.playback_timing import MonotonicDeadline  # noqa: E402
 from gem.runtime.music_only_trt import (  # noqa: E402
     exact_motion_frame_count,
     sha256_file,

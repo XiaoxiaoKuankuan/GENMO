@@ -1,5 +1,9 @@
 # Motion-X++ 三维动作与文本训练支持
 
+> 历史文档：2026-09-23 起，本分支不再提供人体/文本/Webcam/多模态和旧 GMR 专用入口。
+> 本文的旧命令与资产默认值不作为当前启动指引；BUMI 音乐任务请从
+> [分支说明](../README.md) 和 [部署主文档](BUMI_MUSIC_DEPLOYMENT.md) 进入。
+
 本工具链把 Motion-X++ 的 `smplx322` 三维动作和 `semantic_label` 转成
 GENMO 可延迟加载的动作分片与 T5-3B 文本分片。它不解压全部 ZIP，不会修改原始
 数据，也不会在内存中一次加载全部动作或 embedding。

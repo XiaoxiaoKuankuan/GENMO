@@ -1,5 +1,9 @@
 # Music-only GEM-SMPL 训练与验证
 
+> 历史文档：2026-09-23 起，本分支不再提供人体/文本/Webcam/多模态和旧 GMR 专用入口。
+> 本文的旧命令与资产默认值不作为当前启动指引；BUMI 音乐任务请从
+> [分支说明](../README.md) 和 [部署主文档](BUMI_MUSIC_DEPLOYMENT.md) 进入。
+
 本文档描述独立的 `gem_smpl_music_only` specialist。它不是把 generalist 的图像、
 相机、音频和文本条件填零，而是在配置和网络入口层只保留一个条件：
 

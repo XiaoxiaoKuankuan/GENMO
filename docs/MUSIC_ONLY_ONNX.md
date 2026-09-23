@@ -1,5 +1,9 @@
 # AIST++ music-only checkpoint：音乐验证与 ONNX
 
+> 历史文档：2026-09-23 起，本分支不再提供人体/文本/Webcam/多模态和旧 GMR 专用入口。
+> 本文的旧命令与资产默认值不作为当前启动指引；BUMI 音乐任务请从
+> [分支说明](../README.md) 和 [部署主文档](BUMI_MUSIC_DEPLOYMENT.md) 进入。
+
 ## 本次模型
 
 服务器训练产物：

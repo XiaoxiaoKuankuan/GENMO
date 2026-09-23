@@ -1,5 +1,32 @@
 # BUMI 整首生成后按 GMT 仿真步播放
 
+## 2026-09-23 当前入口
+
+缓存模式及其协议测试继续保留；旧硬编码 s200000 资产路径的两个 Shell 包装已经从
+`feature/bumi-music-only` 移除。现在使用 Python 入口并显式传入经过核验的配套资产：
+
+```bash
+cd /home/weili/GENMO-bumi-music
+python scripts/demo/demo_bumi_gmt_buffered_bridge.py \
+  --kinematics /path/to/matched/kinematics.json
+```
+
+另一个终端：
+
+```bash
+cd /home/weili/GENMO-bumi-music
+python scripts/demo/demo_music_bumi_buffered_console.py \
+  --deployment-manifest /path/to/matched/deployment_manifest.json
+```
+
+以上路径是必须替换的占位，不是已存在的正式模型。两端使用同一机器人资产；控制器自己
+选择策略，桥默认读取 GMT 的 ROS 参数，不绑定文中历史策略文件名。
+此处不启动控制器；接收端仍必须明确支持 buffered 仿真模式，不能用于实机。
+新环境安装和当前部署包核验参阅 [部署主文档](BUMI_MUSIC_DEPLOYMENT.md)。
+
+**以下保留为 2026-09-07/08 历史实现与验收记录，其中旧 Shell 命令、资产路径和性能数据
+不作为当前分支的启动默认值。历史测试数量也不代表本次回归结果。**
+
 ## 使用范围
 
 这是与原实时模式并存的新模式：在 `bumi>` 输入音乐，先生成完整 30 Hz qpos，再按原有

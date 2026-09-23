@@ -111,14 +111,14 @@ $GENMO_PYTHON tools/data/bumi/compute_bumi_30d_stats.py \
 
 ## 8 卡 350k 完全从零训练
 
-实验入口：`gem_bumi_music_only_5set_manual_q1_v3_qpos30_contact_scratch_350k`。每卡
-batch=192、8 卡全局 batch=1536，训练 350k step；网络 qpos30 输入列、30 维输出层、两维
+当前实验入口：`gem_bumi_music_only_umr70_mine_scratch_350k`。每卡
+batch=256、8 卡全局 batch=2048，训练 350k step；网络 qpos30 输入列、30 维输出层、两维
 contact head 与 Transformer 主干都从随机初始化开始。配置把 `pretrain_ckpt`、`ckpt_path`、
 `resume_mode` 和 `checkpoint_adapter` 全部固定为 null，因此不会加载 main/SMPL、旧 BUMI
 模型、optimizer 或 global step。
 
 ```bash
-cd /home/user/liwei/GENMO
+cd /home/user/liwei/GENMO-bumi-music
 export CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
 export NCCL_CUMEM_HOST_ENABLE=0
 export NCCL_IB_DISABLE=1
@@ -126,12 +126,15 @@ export NCCL_SOCKET_IFNAME=lo
 export TORCH_NCCL_BLOCKING_WAIT=1
 
 $GENMO_PYTHON -u scripts/train.py \
-  exp=gem_bumi_music_only_5set_manual_q1_v3_qpos30_contact_scratch_350k \
+  exp=gem_bumi_music_only_umr70_mine_scratch_350k \
   output_dir="$BUMI_QPOS30_OUTPUT" \
   pl_trainer.devices=8 \
   pl_trainer.strategy=ddp
 ```
 
+当前 UMR70+Mine 四来源数据、4149 条 train 的统计量指纹及完整环境变量设置以
+[训练交付](BUMI_UMR70_MINE_TRAINING.md) 和 `scripts/train_bumi_music.sh` 为准。
+上节五库统计命令仅是历史兼容示例，不是当前四库统计量重算要求；不要覆盖正式 stats。
 正式启动命令仍应显式追加 `pretrain_ckpt=null model.model_cfg.checkpoint_adapter=null`，作为
 配置之外的第二道防护。学习率里程碑为 210k/315k，每 5k step 保存 checkpoint。
 

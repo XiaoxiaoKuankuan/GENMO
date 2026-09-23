@@ -1,8 +1,12 @@
 # Music-only 四数据集人工动作筛选
 
-本文说明如何把 AIST++、AIOZ-GDANCE、FineDance、CoMPAS3D 当前实际用于 GENMO
-训练的 body motion 导出给外部人员筛选，并在结果回来后安全恢复动作与 EDGE baseline35
+本文说明如何把 AIST++、AIOZ-GDANCE、FineDance、CoMPAS3D 的上游音乐 body motion
+导出给外部人员筛选，并在结果回来后安全恢复动作与 EDGE baseline35
 音乐特征的对应关系。
+
+2026-09-23：这些源数据工具仍为 BUMI 音乐生产保留；下文数据数量与服务器路径是
+既有交付记录，不代表当前训练集规模。旧 SMPL 训练实验及 `--loader-smoke` 已退役，
+当前四来源 BUMI 训练见 [UMR70+Mine 交付](BUMI_UMR70_MINE_TRAINING.md)。
 
 ## 数据范围与筛选单位
 
@@ -35,7 +39,7 @@ review_id  dataset__sample_id
 ```
 
 `pose[:, :3]` 是 global orientation，`pose[:, 3:66]` 是 21 个 body joint。手、脸、眼睛
-和表情不在 GENMO 当前 151D motion contract 中，因此不会伪造或导出。
+和表情不在这份 body-only 源数据审阅契约中，因此不会伪造或导出；这不是 BUMI 网络输出表示。
 
 AIOZ、FineDance、CoMPAS3D 当前转换产物已经是 Y-up。AIST++ 官方 SMPL 参数在把
 `smpl_trans` 除以每条序列的 `smpl_scaling` 后同样是米制 Y-up；导出时必须保持 identity，
@@ -125,8 +129,7 @@ reject 必须填写至少一个受支持的问题代码。`unsure` 用于二次�
 
 .venv/bin/python tools/data/music_dance/curation/validate_curated_datasets.py \
   --root /data0/user/liwei/datasets/music_dance_curated/music_only_4set_v1 \
-  --strict \
-  --loader-smoke
+  --strict
 ```
 
 工具先从 split/manifest 移除 reject 动作，再计算全局剩余音乐引用。curated 数据只包含保留
@@ -167,9 +170,10 @@ FineDance 149、CoMPAS3D 72。输出保留源 split、`music_key` 和 `source_ma
 本备用包只物化人体 NPZ，不包含 WAV 或 EDGE35；正式后训练前应据
 `index/selected.jsonl` 重建音乐闭包、manifest 和训练统计量。
 
-## 使用筛选后的训练集
+## 历史 SMPL 训练示例（已退役）
 
-筛选结果验证通过后使用独立实验，不覆盖原四数据集实验：
+以下实验已经从本分支删除，命令仅保留作历史记录，不应再执行。
+当前 BUMI 训练必须先完成对应机器人数据生产与统计量校验，不能直接输入人体审阅包。
 
 ```bash
 NCCL_CUMEM_HOST_ENABLE=0 \
