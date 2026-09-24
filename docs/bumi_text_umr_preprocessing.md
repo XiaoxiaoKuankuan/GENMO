@@ -339,6 +339,11 @@ python tools/data/bumi/prepare_bumi_text.py build \
 
 ## 已有筛选结果分析与高低质量视频
 
+单视角复核使用 `--quality-view single --individual-clips --per-group 30`：
+每库输出30条PASS、30条REJECT完整独立视频及两段合集，统一135度视角。
+不传`--quality-view`时保留历史双视角默认。视角、原报告fingerprint、源SHA和章节
+均保存在`analysis.json`；单视角只改变画面布局，不修改筛选判定或原始qpos。
+
 复用原`tools/eval/render_bumi_motion.py`，质量复核模式按报告原判定选样并渲染，不重跑
 全量筛选、不改写历史报告。分析模块`tools/eval/bumi_quality_review.py`核对汇总SHA、
 完整JSONL统计、候选清单SHA，按动作归并原因，并区分质量状态和长度资格。

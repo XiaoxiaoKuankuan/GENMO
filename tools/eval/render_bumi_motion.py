@@ -2,7 +2,9 @@
 """BUMI qpos28离线渲染与UMR质量报告的视频复核入口。
 
 保留原单动作artifact入口，增加--quality-report模式：流式分析完整质量报告，选择
-高/低质量动作各N条，以同一真实MJCF渲染双视角合集。视频叠加来源、指标、异常帧
+高/低质量动作各N条，以同一真实MJCF渲染合集。--quality-view single仅渲染135度
+单视角；默认dual保留原135/225度双视角。合集与逐条视频使用相同视角和完整时序。
+视频叠加来源、指标、异常帧
 标志与章节编号，保持原30Hz完整动作，不做贴地、平滑、时间裁剪或动力学推进。
 使用PyAV逐帧写入H.264，避免在内存保存整个合集；输出经解码帧数校验后原子发布。
 资产、选中机器人与人体SHA必须匹配原报告，历史配置从Git按SHA恢复为审计附件。
@@ -179,18 +181,21 @@ def archive_config(run, output):
     (output / "filter_config.yaml").write_bytes(data)
 
 
-def montage_frames(qpos, row, group, index, count, model, data, renderer, width, height, font_path):
+def montage_frames(
+    qpos, row, group, index, count, model, data, renderer, width, height, font_path,
+    azimuths=(135, 225),
+):
     from PIL import Image, ImageDraw, ImageFont
 
     heading = ImageFont.truetype(str(font_path), 27)
     font = ImageFont.truetype(str(font_path), 19)
     small = ImageFont.truetype(str(font_path), 17)
-    cameras = [mujoco.MjvCamera(), mujoco.MjvCamera()]
+    cameras = [mujoco.MjvCamera() for _ in azimuths]
     ground_id = model.geom("ground").id
     bottom, top = min(float(qpos[:, 2].min()) - 0.55, 0), max(float(qpos[:, 2].max()) + 0.65, 1)
     target_z = (bottom + top) / 2 if bottom < -0.65 or top > 1.8 else 0.48
     distance = max(2.25, (top - bottom) * 1.5)
-    for camera, azimuth in zip(cameras, (135, 225)):
+    for camera, azimuth in zip(cameras, azimuths, strict=True):
         camera.distance, camera.azimuth, camera.elevation = distance, azimuth, -17
     color = {
         "high_quality": (58, 220, 146),
@@ -231,23 +236,25 @@ def montage_frames(qpos, row, group, index, count, model, data, renderer, width,
         while draw.textlength(caption, font=font) > width - 45:
             caption = caption[:-4] + "..."
         draw.text((20, 49), caption, font=font, fill=(235, 240, 248))
-        draw.line((width // 2, 90, width // 2, 90 + panel_height), fill=(80, 90, 110), width=2)
+        if len(cameras) == 2:
+            draw.line((width // 2, 90, width // 2, 90 + panel_height), fill=(80, 90, 110), width=2)
         draw.text(
             (16, 99),
-            "VIEW A",
+            "SINGLE VIEW" if len(cameras) == 1 else "VIEW A",
             font=small,
             fill=(255, 255, 255),
             stroke_width=1,
             stroke_fill=(20, 20, 20),
         )
-        draw.text(
-            (width // 2 + 16, 99),
-            "VIEW B / transparent ground",
-            font=small,
-            fill=(255, 255, 255),
-            stroke_width=1,
-            stroke_fill=(20, 20, 20),
-        )
+        if len(cameras) == 2:
+            draw.text(
+                (width // 2 + 16, 99),
+                "VIEW B / transparent ground",
+                font=small,
+                fill=(255, 255, 255),
+                stroke_width=1,
+                stroke_fill=(20, 20, 20),
+            )
         active = [
             reason
             for reason, intervals in row.get("issue_intervals", {}).items()
@@ -303,9 +310,11 @@ def render_montage(rows, group, run, model, path, args):
     import av
 
     data = mujoco.MjData(model)
-    model.vis.global_.offwidth = max(model.vis.global_.offwidth, args.width // 2)
+    azimuths = (135,) if args.quality_view == "single" else (135, 225)
+    panel_width = args.width // len(azimuths)
+    model.vis.global_.offwidth = max(model.vis.global_.offwidth, panel_width)
     model.vis.global_.offheight = max(model.vis.global_.offheight, args.height - 190)
-    renderer = mujoco.Renderer(model, height=args.height - 190, width=args.width // 2)
+    renderer = mujoco.Renderer(model, height=args.height - 190, width=panel_width)
     total, chapters = 0, []
     try:
         with av.open(str(path), mode="w", options={"movflags": "+faststart"}) as container:
@@ -328,6 +337,7 @@ def render_montage(rows, group, run, model, path, args):
                     args.width,
                     args.height,
                     args.font,
+                    azimuths,
                 ):
                     frame = av.VideoFrame.from_ndarray(pixels, format="rgb24")
                     for packet in stream.encode(frame):
@@ -494,6 +504,9 @@ def render_quality_review(args):
         if model.nq != 28:
             raise ValueError("MJCF不是qpos28机器人")
         analysis["videos"] = {}
+        analysis["render_contract"] = dict(
+            views=[135] if args.quality_view == "single" else [135, 225]
+        )
         # 在正式渲染前保存分析快照，供同一任务观察进度；失败时随staging清理。
         (staged / "analysis.json").write_text(json.dumps(analysis, ensure_ascii=False, indent=2))
         write_analysis_markdown(analysis, staged / "分析报告.md")
@@ -513,7 +526,7 @@ def render_quality_review(args):
             qpos_modified=False,
             crop_count=0,
             fps=30,
-            views=[135, 225],
+            views=[135] if args.quality_view == "single" else [135, 225],
             camera_follow="root XY only",
             physics="mj_forward only; no dynamics",
             code_commit=subprocess.check_output(
@@ -552,6 +565,10 @@ def main() -> None:
     parser.add_argument("--quality-report", type=Path)
     parser.add_argument("--output-dir", type=Path)
     parser.add_argument("--per-group", type=int, default=30)
+    parser.add_argument(
+        "--quality-view", choices=["single", "dual"], default="dual",
+        help="质量复核视角：single为135度单视角，dual保留原双视角",
+    )
     parser.add_argument(
         "--individual-clips", action="store_true", help="同时导出每条完整视频和原生NPZ轨迹"
     )

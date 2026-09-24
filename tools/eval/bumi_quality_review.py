@@ -469,7 +469,12 @@ def write_analysis_markdown(analysis, output):
         f"- 来源命名空间统计：`{json.dumps(analysis['source_namespaces'], ensure_ascii=False)}`。结论对应这批实际转换数据，不能泛化为该数据集全部来源。",
         "- 筛选是数值与运动学门禁；凸包碰撞近似、接触候选脚滑与悬空规则仍需结合视频复核。根倾角按绑定配置判定，严格规则也会排除持续弯腰或躺姿；完整动作没有再次贴地或平滑。",
         "- 高组从有活动的PASS中按移动、转向、低姿态和关节活动分组，低组覆盖不同REJECT原因；两组均平衡目录并去重。视频样本用于看清差异，不是随机抽样估计全库比例。",
-        "- 视频为双视角、原始30Hz、完整动作顺序拼接。视角B地面半透明，便于观察穿地；相机变化不改变qpos。异常帧边框仅标识当前帧命中原报告异常区间，REVIEW用黄色、REJECT用红色。",
+        (
+            "- 视频为135度单视角、原始30Hz、完整动作顺序拼接；相机跟随根XY，不改变qpos。"
+            if len(analysis.get("render_contract", {}).get("views", [135, 225])) == 1
+            else "- 视频为双视角、原始30Hz、完整动作顺序拼接。视角B地面半透明，便于观察穿地；相机变化不改变qpos。"
+        )
+        + "异常帧边框仅标识当前帧命中原报告异常区间，REVIEW用黄色、REJECT用红色。",
     ]
     if analysis.get("text_binding"):
         value = analysis["text_binding"]
