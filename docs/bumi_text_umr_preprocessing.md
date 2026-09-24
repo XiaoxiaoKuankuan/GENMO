@@ -1,7 +1,28 @@
 # MotionMillion / HumanML3D / BONES-SEED / KIT-ML UMR → BUMI 文本动作预处理
 
 适用分支：`feature/bumi-text-only`。入口复用 `tools/data/bumi/prepare_bumi_text.py`。
-质量计算复用音乐分支的 `filter_sonic_npz_motions.evaluate_motion`，原音乐代码和阈值配置不改动。
+质量计算复用公共实现 `gem.robots.bumi.motion_quality.evaluate_motion`。
+
+## 当前视频交付（2026-09-24，单视角）
+
+按9月22日最新二分类报告，为MotionMillion、HumanML3D、KIT-ML、BONES-SEED
+各渲染30条PASS与30条REJECT。合计240条独立视频、8段合集，均为135度单视角、
+1280×720、H.264、30 FPS；保持选中原始动作完整时序和qpos。
+
+- 本地：`/home/weili/GENMO-bumi-text/outputs/bumi_umr_singleview_latest/`。
+- 服务器2：`/data0/user/liwei/dataset_reports/bumi_umr_singleview_latest/`。
+- 本地浏览：`http://127.0.0.1:8766/`，服务运行信息保存在交付目录`http_service.json`。
+
+四个子目录为`motionmillion/`、`humanml3d/`、`kitml/`、`bones_seed/`。每库的
+`pass/`与`reject/`各含30个MP4及同名原生NPZ；`high_quality_30.mp4`与
+`low_quality_30.mp4`为两段合集。`analysis.json`和`分析报告.md`保留来源、文本、
+筛选原因、SHA及章节索引。具体时长与验收结果见交付根目录`README.md`和
+`local_verification.json`。248个视频已在本地完整解码，513个服务器文件SHA匹配，
+240个原生NPZ与筛选源SHA一致。下文旧轮次视频路径仍仅作历史记录。
+
+复用`tools/eval/render_bumi_motion.py --quality-view single --individual-clips
+--per-group 30`，渲染代码提交`1ca877e`。仅变更视角布局，不重新筛选；沿用活动
+PASS分层、REJECT原因分层与组内母来源去重，不将目的性样本当作全库随机样本。
 
 ## 当前正式规则：二分类（2026-09-22）
 
