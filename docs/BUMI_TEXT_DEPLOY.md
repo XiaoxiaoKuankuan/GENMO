@@ -31,6 +31,13 @@ qpos_raw、足锁后的qpos、左右脚接触logits、关节顺序与FPS；足�
 相应数值测试通过，不代表动作语义、平衡、动力学或实物跟踪通过。真实新电脑安装和
 窗口/GPU体验需在该机器验证。
 
+真实模型导出验证可在原仓库使用 `tools/export/bumi_text.py validate --t5-model 本地T5目录`，
+默认对走路、举双臂和下蹲三条真实文本执行契约内的多帧长单步与DDIM对照，
+也可用多个 `--prompt` 指定固定文本集合。T5三项资产必须与checkpoint的训练指纹一致。
+不传 `--t5-model` 时保留原随机高斯条件压力测试；它与真实T5输入测试分别出报告，
+不降低误差阈值，也不能用其中一个通过掩盖另一个失败。`validation.json`中的
+`text_condition`和部署清单`validation_scope`记录实际验收范围。
+
 训练、数据、导出与数值对照工具均在`feature/bumi-text-only`训练仓库，详见其中
 `docs/BUMI_TEXT_CROP120.md`。压缩/搬运本包时排除`.venv`和`outputs`，到新电脑重新
 执行安装器；不要复制依赖原绝对路径的虚拟环境。

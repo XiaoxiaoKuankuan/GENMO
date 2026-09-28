@@ -98,7 +98,12 @@ def resolve_assets(contract, *, kinematics=None, stats=None, checkpoint=None):
     result = {}
     for name, override in (("kinematics", kinematics), ("stats", stats)):
         path = Path(override or contract["assets"][name]["path"]).expanduser()
-        if override is None and not path.is_file() and checkpoint is not None:
+        try:
+            source_available = path.is_file()
+        except PermissionError:
+            # 异机绝对路径可能存在但不可访问；仍只接受同 SHA 的随包资产。
+            source_available = False
+        if override is None and not source_available and checkpoint is not None:
             # 迁回本地后可以携带同SHA的assets，不编辑训练checkpoint或信任同名异物。
             directory = Path(checkpoint).expanduser().resolve().parent / "assets"
             candidates = [directory / path.name, directory / (name + ".json")]

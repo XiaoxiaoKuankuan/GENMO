@@ -28,6 +28,7 @@ from gem.runtime.bumi_text_runtime import (
     OUTPUTS,
     BumiTextSampler,
     OnnxTextStep,
+    ResidentBumiTextEngine,
     io_shapes,
     load_checkpoint_step,
     onnx_providers,
@@ -207,7 +208,10 @@ def build_engine(onnx_path, output, device="cuda:0", precision="fp16"):
     return record
 
 
-def validate(checkpoint, onnx_path, output, *, engine=None, device="cpu", ddim_steps=50):
+def validate(
+    checkpoint, onnx_path, output, *, engine=None, device="cpu", ddim_steps=50,
+    t5_model=None, prompts=None,
+):
     wrapper, contract, diffusion = load_checkpoint_step(checkpoint, device)
     meta = read_export_metadata(onnx_path)
     if (
@@ -249,15 +253,52 @@ def validate(checkpoint, onnx_path, output, *, engine=None, device="cpu", ddim_s
         BumiTextSampler(wrapper, diffusion, ddim_steps),
         BumiTextSampler(candidate, diffusion, ddim_steps),
     )
+    conditions = [(None, None, None)]
+    report["text_condition"] = {"kind": "synthetic_gaussian_stress"}
+    if prompts and t5_model is None:
+        raise ValueError("真实文本对照必须显式指定 --t5-model")
+    if t5_model is not None:
+        prompts = prompts or [
+            "A person walks forward.",
+            "A person raises both arms above their head.",
+            "A person squats down and stands up.",
+        ]
+        t5_assets = {}
+        for key, filename in [
+            ("t5_model_safetensors", "model.safetensors"),
+            ("t5_config_json", "config.json"),
+            ("t5_spiece_model", "spiece.model"),
+        ]:
+            digest = sha256_file(Path(t5_model) / filename)
+            if digest != contract["assets"][key]["sha256"]:
+                raise ValueError(f"真实文本对照的 {filename} 与训练 T5 指纹不符")
+            t5_assets[filename] = digest
+        encoder = ResidentBumiTextEngine(checkpoint, t5_model=t5_model, device=device)
+        try:
+            conditions = [(prompt, *encoder.encode_prompt(prompt)) for prompt in prompts]
+        finally:
+            encoder.close()
+        report["text_condition"] = {
+            "kind": "training_t5_real_prompts", "prompts": prompts,
+            "t5_assets_sha256": t5_assets,
+            "scope": "Listed prompts and lengths only; synthetic stress is a separate test.",
+        }
     from gem.robots.bumi.endecoder import BumiEndecoder
 
     assets = resolve_assets(contract, checkpoint=checkpoint)
     decoder = BumiEndecoder(assets["kinematics"], assets["stats"], sequence_mode="full").to(device)
     sequence = contract["sequence"]
-    for frames in sorted({sequence["min_frames"], 60, 97, 120, 183, 240, 299, 300}):
+    cases = [
+        (frames, condition)
+        for frames in sorted({sequence["min_frames"], 60, 97, 120, 183, 240, 299, 300})
+        for condition in conditions
+    ]
+    for frames, (prompt, text, mask) in cases:
         if not sequence["min_frames"] <= frames <= sequence["max_frames"]:
             continue
-        inputs = sample_inputs(device, frames, sequence["pad_to_frames"])
+        inputs = list(sample_inputs(device, frames, sequence["pad_to_frames"]))
+        if text is not None:
+            inputs[2:4] = text, mask
         with torch.no_grad():
             a, b = wrapper(*inputs), candidate(*inputs)
             noise = torch.randn(
@@ -295,7 +336,9 @@ def validate(checkpoint, onnx_path, output, *, engine=None, device="cpu", ddim_s
             )
         else:
             passed = all(0 <= errors[key] <= limit for key, limit in limits.items())
-        report["frames"].append(dict(frames=frames, max_abs_errors=errors, passed=bool(passed)))
+        report["frames"].append(dict(
+            frames=frames, prompt=prompt, max_abs_errors=errors, passed=bool(passed)
+        ))
         report["passed"] &= bool(passed)
     write_json(output, report)
     if not report["passed"]:
@@ -423,6 +466,7 @@ def package(
         files=files,
         software_inventory=software,
         validation_status="passed" if validation_report else "not_validated",
+        validation_scope=report.get("text_condition", {"kind": "unspecified"}) if validation_report else None,
     )
     write_json(output / "deployment.json", value)
     return value
@@ -446,6 +490,8 @@ def main():
             p.add_argument("--precision", choices=["fp16", "fp32"], default="fp16")
         if command == "validate":
             p.add_argument("--ddim-steps", type=int, default=50)
+            p.add_argument("--t5-model", type=Path, help="使用指纹匹配的训练T5作真实文本对照；省略时执行随机条件压力测试")
+            p.add_argument("--prompt", action="append", help="真实文本对照输入，可重复指定；默认走路、举双臂、下蹲三条")
         if command == "package":
             p.add_argument("--validation-report", type=Path)
     a = parser.parse_args()
@@ -461,6 +507,8 @@ def main():
             engine=a.engine,
             device=a.device,
             ddim_steps=a.ddim_steps,
+            t5_model=a.t5_model,
+            prompts=a.prompt,
         )
     else:
         result = package(a.onnx, a.output, engine=a.engine, validation_report=a.validation_report)

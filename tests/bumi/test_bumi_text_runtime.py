@@ -6,6 +6,8 @@
 """
 
 import os
+import copy
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -23,6 +25,30 @@ from gem.runtime.bumi_text_runtime import (
     read_bundle,
 )
 from tools.export.bumi_text import export, sample_inputs, package
+
+
+def test_checkpoint_assets_relocate_when_original_directory_is_inaccessible(small_checkpoint, monkeypatch):
+    from gem.runtime.bumi_text_contract import resolve_assets
+
+    payload = torch.load(small_checkpoint, map_location="cpu", weights_only=False)
+    contract = copy.deepcopy(payload["bumi_text_contract"])
+    assets = small_checkpoint.parent / "assets"
+    assets.mkdir()
+    shutil.copy2(contract["assets"]["kinematics"]["path"], assets / "kinematics.json")
+    denied = Path("/inaccessible-training-host/kinematics.json")
+    contract["assets"]["kinematics"]["path"] = str(denied)
+    original = Path.is_file
+
+    def check(path):
+        if path == denied:
+            raise PermissionError("training host directory is inaccessible")
+        return original(path)
+
+    monkeypatch.setattr(Path, "is_file", check)
+    assert resolve_assets(contract, checkpoint=small_checkpoint)["kinematics"] == assets / "kinematics.json"
+    (assets / "kinematics.json").write_text("{}")
+    with pytest.raises((PermissionError, FileNotFoundError, ValueError)):
+        resolve_assets(contract, checkpoint=small_checkpoint)
 
 
 @pytest.fixture
