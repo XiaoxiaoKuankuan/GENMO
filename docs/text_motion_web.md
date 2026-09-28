@@ -1,5 +1,21 @@
 # GENMO 本地文本动作工作台
 
+## 2026-09-28：服务器2 s215000 ONNX网页交付
+
+- 本机验证入口：**http://127.0.0.1:8767/**；原8766继续提供UMR视频。
+- 本次公网入口：**https://rivers-sunrise-sake-vip.trycloudflare.com/**。域名随临时隧道重建可能变化，
+  当前进程/地址记录在`outputs/text_motion_web/share/share.json`，本机必须保持运行。
+- 默认已注册模型：`BUMI ONNX · bumi_text_crop120_s215000 / deployment.json · step 215000`。
+  实际使用ONNX Runtime CUDA，默认120帧、30FPS、DDIM50、CFG2.5、seed42，契约范围4–120帧。
+- 完整checkpoint：`inputs/checkpoints/bumi_text_crop120_s215000/s215000.ckpt`，来源/SHA见同目录`source.json`。
+  ONNX和整套资产：`inputs/deployments/bumi_text_crop120_s215000/`，主文件为`models/model.onnx`。
+- 已保留走路、举双臂、下蹲三条实际生成视频，均为单视角1280×720、H.264、120帧；网页历史可回看。
+  数值验收为同训练T5的三条文本×四种帧长共12组，报告在部署包`validation.json`。
+  随机高斯文本条件压力测试未通过，独立报告保留在`outputs/text_motion_web/release/validation_synthetic_stress.json`；
+  不将真实T5验收推广到任意随机文本特征。网页、来源和诊断证据见同目录`release.json`、`web_validation.json`。
+- 浏览器模型选择/表单提交已实测；后续浏览器控制超时，因此不宣称自动播放交互验收通过。
+  三个视频完整解码、公网下载SHA及HTTP Range均通过，生成后可手动播放检查。
+
 在仓库根目录运行：
 
 ```bash
