@@ -96,8 +96,18 @@ def test_ground_cache_invalidates_when_source_payload_changes(tmp_path):
     )
 
 
-def test_explicit_floor_zero_does_not_estimate_ground(tmp_path, monkeypatch):
-    dataset = _dataset(_write_dataset(tmp_path / "floor", length=8))
+@pytest.mark.parametrize("semantics", ["umr_foot_sole_ground_zero_v1", "source_csv_root_z_preserved_v1"])
+def test_explicit_floor_zero_does_not_estimate_ground(tmp_path, monkeypatch, semantics):
+    root = _write_dataset(tmp_path / "floor", length=8)
+    info_path = root / "meta/dataset_info.json"
+    info = json.loads(info_path.read_text())
+    info["ground_semantics"] = semantics
+    info_path.write_text(json.dumps(info))
+    path = root / "motions/sample.pt"
+    payload = torch.load(path, weights_only=True)
+    payload["ground_semantics"] = semantics
+    torch.save(payload, path)
+    dataset = _dataset(root)
     sequence = dataset.reader.load_aligned_sequence(dataset.rows[0])
 
     def no_estimate(*_args, **_kwargs):

@@ -2,7 +2,7 @@
 
 本测试不读取服务器数据，也不执行训练、仿真或控制器回放。它检查 UMR、
 robot_retargeter、CSV 和 transfer filelist 运行时实际绑定的是统一的 hash、manifest、
-配对、发布、四元数、落地、质量判定和报告实现。测试还用临时目录执行这些关键路径，
+配对、发布、四元数、质量判定和报告实现。测试还用临时目录执行这些关键路径，
 但不把离线通过解释为动力学可跟踪或实机安全。
 """
 
@@ -70,9 +70,8 @@ def test_current_producers_bind_the_neutral_implementations() -> None:
         csv_builder.make_quaternion_continuous_np
         is qpos_resample_utils.make_quaternion_continuous_np
     )
-    assert (
-        csv_builder.normalize_body_origin_ground is qpos_resample_utils.normalize_body_origin_ground
-    )
+    assert not hasattr(csv_builder, "normalize_body_origin_ground")
+    assert not hasattr(qpos_resample_utils, "normalize_body_origin_ground")
 
     assert transfer_filelists.DATASET_SPECS is dataset_publish_utils.DATASET_SPECS
     assert transfer_filelists._read_jsonl is dataset_publish_utils.read_jsonl
@@ -80,9 +79,7 @@ def test_current_producers_bind_the_neutral_implementations() -> None:
     assert transfer_filelists.load_human_indices is dataset_publish_utils.load_human_indices
 
 
-def test_neutral_file_tilt_quaternion_and_ground_helpers(
-    tmp_path: Path, test_kinematics_path: Path
-) -> None:
+def test_neutral_file_tilt_quaternion_helpers(tmp_path: Path) -> None:
     """用小型输入确认迁移后的共享数值与发布基础行为。"""
 
     source = tmp_path / "source.bin"
@@ -110,16 +107,6 @@ def test_neutral_file_tilt_quaternion_and_ground_helpers(
     continuous = qpos_resample_utils.make_quaternion_continuous_np(quaternion)
     assert np.all(np.sum(continuous[1:] * continuous[:-1], axis=-1) >= 0.0)
     np.testing.assert_allclose(np.linalg.norm(continuous, axis=-1), 1.0)
-
-    kinematics = BumiKinematics(test_kinematics_path)
-    qpos = torch.zeros(4, 28)
-    qpos[:, 2] = 1.0
-    qpos[:, 3] = 1.0
-    normalized, before, after = qpos_resample_utils.normalize_body_origin_ground(qpos, kinematics)
-    assert before == pytest.approx(0.5)
-    assert after == pytest.approx(0.0, abs=1.0e-6)
-    torch.testing.assert_close(normalized[:, 2], torch.full((4,), 0.5))
-
 
 def test_neutral_quality_intervals_keep_half_open_halo_semantics() -> None:
     """公共区间 helper 必须保持左闭右开和 halo 后最短片段语义。"""

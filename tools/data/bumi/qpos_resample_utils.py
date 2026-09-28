@@ -1,21 +1,17 @@
-"""BUMI qpos 四元数插值与 body-origin 落地共享工具。
+"""BUMI qpos 四元数连续化与插值共享工具。
 
 本模块承载与数据来源无关的数值步骤：规范化连续 ``wxyz`` 根四元数、批量最短弧
-SLERP，以及通过绑定 BUMI kinematics 对整条轨迹施加常量 Root-Z 偏移。当前 CSV
+SLERP。当前 CSV
 producer 直接依赖这些数学 helper；robot_retargeter producer 也复用同一四元数连续化，
 因此它们不需要从任一特定历史数据入口间接导入公共数值逻辑。
 
-这些函数不会猜测关节顺序、调整关节限位或生成接触标签。落地只移动 Root Z，并继续
-以 FK 后所有 body origin 的全局最小 Z 为零作为兼容语义，因此迁移不改变当前 CSV
-producer 的既有数据数值。
+这些函数不会猜测关节顺序、调整关节限位、平移根高度或生成接触标签。
+历史 body-origin 归零函数已移除；不同来源的地面语义由显式数据契约处理。
 """
 
 from __future__ import annotations
 
 import numpy as np
-import torch
-
-from gem.robots.bumi.kinematics import BumiKinematics
 
 
 def make_quaternion_continuous_np(quaternion_wxyz: np.ndarray) -> np.ndarray:
@@ -56,17 +52,3 @@ def slerp_pairs(q0: np.ndarray, q1: np.ndarray, alpha: np.ndarray) -> np.ndarray
     result = weight0[:, None] * q0 + weight1[:, None] * q1_short
     return result / np.linalg.norm(result, axis=-1, keepdims=True)
 
-
-def normalize_body_origin_ground(
-    qpos: torch.Tensor, kinematics: BumiKinematics
-) -> tuple[torch.Tensor, float, float]:
-    """施加常量 Root-Z 偏移，使 FK 的 body-origin 全局最小 Z 为零。"""
-
-    value = qpos.detach().cpu().float().clone()
-    with torch.no_grad():
-        before = float(kinematics.forward_kinematics(value)["body_pos_w"][..., 2].amin().item())
-        value[:, 2] -= before
-        after = float(kinematics.forward_kinematics(value)["body_pos_w"][..., 2].amin().item())
-    if abs(after) > 2.0e-5:
-        raise RuntimeError(f"root-Z 归一化后 body-origin ground={after:.8g}，不接近 0")
-    return value.contiguous(), before, after
