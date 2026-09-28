@@ -18,10 +18,10 @@ from __future__ import annotations
 import argparse
 import json
 import os
-from pathlib import Path
 import shutil
 import sys
 import tempfile
+from pathlib import Path
 
 import numpy as np
 import torch
@@ -29,13 +29,16 @@ import torch
 REPO = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(REPO))
 
-from gem.datasets.music_dance.music_dance_bumi import BumiMusicDatasetReader
-from gem.robots.bumi.contacts import BUMI_CONTACT_CONTRACT_VERSION, derive_bumi_foot_contact
-from gem.robots.bumi.kinematics import BumiKinematics
-from gem.robots.bumi.motion_utils import sha256_file
-from tools.data.bumi.filter_robot_retargeter_npz_motions import load_config
-from tools.data.bumi.npz_quality_utils import evaluate_motion
-from tools.data.bumi.umr_qpos_adapter import qpos_arrays
+from gem.datasets.music_dance.music_dance_bumi import BumiMusicDatasetReader  # noqa: E402
+from gem.robots.bumi.contacts import (  # noqa: E402
+    BUMI_CONTACT_CONTRACT_VERSION,
+    derive_bumi_foot_contact,
+)
+from gem.robots.bumi.kinematics import BumiKinematics  # noqa: E402
+from gem.robots.bumi.motion_utils import sha256_file  # noqa: E402
+from tools.data.bumi.filter_robot_retargeter_npz_motions import load_config  # noqa: E402
+from tools.data.bumi.npz_quality_utils import evaluate_motion  # noqa: E402
+from tools.data.bumi.umr_qpos_adapter import qpos_arrays  # noqa: E402
 
 SEMANTICS = "source_csv_root_z_preserved_v1"
 VERSION = "genmo.mine_restore_csv_root_z.v1"

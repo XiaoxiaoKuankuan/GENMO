@@ -51,4 +51,3 @@ def slerp_pairs(q0: np.ndarray, q1: np.ndarray, alpha: np.ndarray) -> np.ndarray
     weight1[stable] = np.sin(a[stable] * angle[stable]) / sin_angle[stable]
     result = weight0[:, None] * q0 + weight1[:, None] * q1_short
     return result / np.linalg.norm(result, axis=-1, keepdims=True)
-
