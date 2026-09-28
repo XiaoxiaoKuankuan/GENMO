@@ -375,6 +375,7 @@ class BumiEndecoder(nn.Module):
                 "gmr_foot_sole_ground_zero_v1",
                 "robot_retargeter_floor_zero_v1",
                 "umr_foot_sole_ground_zero_v1",
+                "source_csv_root_z_preserved_v1",
             }:
                 modes.append(False)
             else:

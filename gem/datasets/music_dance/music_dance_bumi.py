@@ -31,6 +31,7 @@ BUMI_GROUND_SEMANTICS = frozenset(
         "gmr_foot_sole_ground_zero_v1",
         "robot_retargeter_floor_zero_v1",
         "umr_foot_sole_ground_zero_v1",
+        "source_csv_root_z_preserved_v1",
     }
 )
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")

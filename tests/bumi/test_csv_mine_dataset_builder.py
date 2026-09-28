@@ -2,7 +2,7 @@
 
 测试只使用系统临时目录中的极小合成 CSV、PCM WAV 和测试 kinematics，不读取或改写
 真实自建数据。它覆盖 APT啦啦操显式排除、普通/帧率别名配对、xyzw→wxyz、50→30 Hz、
-动作与裁后音频/EDGE35 等长、FK 地面归一化、正式 reader/SHA 校验，以及特征提取失败
+动作与裁后音频/EDGE35 等长、原始 root Z 保持、正式 reader/SHA 校验，以及特征提取失败
 时不发布目标目录并清理 staging 的全有或全无语义。
 """
 
@@ -175,7 +175,13 @@ def test_converter_excludes_apt_and_publishes_strict_dataset(
         assert sequence["foot_contact"].shape == (12, 2)
         assert sequence["foot_contact_available"].all()
         body = kinematics.forward_kinematics(sequence["qpos"])["body_pos_w"]
-        assert float(body[..., 2].amin()) == pytest.approx(0.0, abs=2.0e-5)
+        torch.testing.assert_close(sequence["qpos"][:, 2], torch.full((12,), 0.7))
+        assert float(body[..., 2].amin()) > 0.1  # 不再把刚体原点最低点移到零。
+        payload = torch.load(output / row["motion_path"], weights_only=False)
+        assert payload["ground_semantics"] == "source_csv_root_z_preserved_v1"
+        assert payload["root_z_adjusted"] is False
+        assert payload["foot_contact_ground_height_m"] == 0.0
+        assert payload["root_z_adjustment_m"] == 0.0
         audio_path = output / row["audio_path"]
         with wave.open(str(audio_path), "rb") as handle:
             assert handle.getnframes() == 12 * 1600
@@ -204,6 +210,41 @@ def test_feature_failure_removes_staging_and_does_not_publish(
         )
     assert not output.exists()
     assert not list(tmp_path.glob(".failed.staging-*"))
+
+
+def test_restore_legacy_height_preserves_csv_and_is_idempotent(tmp_path: Path) -> None:
+    """恢复发布必须保留原高度、其他坐标和音频；错误偏移不能混入正式目录。"""
+    from tools.data.bumi.restore_mine_source_height import restore, restore_tensor
+
+    inputs = _source_tree(tmp_path)
+    root = tmp_path / "mine"
+    convert_dataset(source_root=inputs["source"], output_root=root,
+                    kinematics_path=KINEMATICS_PATH, quality_config_path=inputs["quality"],
+                    retarget_config_path=inputs["retarget"], feature_extractor=_fake_edge)
+    meta_path = root / "meta/dataset_info.json"
+    meta = json.loads(meta_path.read_text())
+    meta.update(ground_semantics="legacy_body_origin_min_zero", root_z_adjusted=True)
+    meta_path.write_text(json.dumps(meta))
+    for path in (root / "motions").glob("*.pt"):
+        p = torch.load(path, weights_only=False)
+        p["qpos"][:, 2] -= 0.05
+        p.update(ground_semantics="legacy_body_origin_min_zero", root_z_adjusted=True,
+                 root_z_adjustment_m=-0.05)
+        torch.save(p, path)
+    audio_before = {p.name: sha256_file(p) for p in (root / "audio").glob("*.wav")}
+    report = restore(root, inputs["source"], KINEMATICS_PATH)
+    assert report["status"] == "PASS" and report["motions"] == 2
+    assert Path(report["backup"]).is_dir()
+    for path in (root / "motions").glob("*.pt"):
+        p = torch.load(path, weights_only=False)
+        old = torch.load(Path(report["backup"]) / "motions" / path.name, weights_only=False)
+        torch.testing.assert_close(p["qpos"][:, 2], torch.full((12,), 0.7))
+        assert torch.equal(p["qpos"][:, :2], old["qpos"][:, :2])
+        assert torch.equal(p["qpos"][:, 3:], old["qpos"][:, 3:])
+        with pytest.raises(ValueError, match="不匹配"):
+            restore_tensor(old["qpos"], p["qpos"][:, 2], 0.05)
+    assert audio_before == {p.name: sha256_file(p) for p in (root / "audio").glob("*.wav")}
+    assert restore(root, inputs["source"], KINEMATICS_PATH)["status"] == "ALREADY_RESTORED"
 
 
 def test_verified_reference_reuses_only_audio_and_music_features(tmp_path: Path) -> None:

@@ -12,8 +12,8 @@ APT啦啦操会进入审计报告，但绝不会进入正式 manifest。
 SLERP 重采样到 30 Hz。目标帧数取动作和 WAV 在 30 Hz 下都能完整覆盖的整数帧下界，
 输出 WAV 精确裁成 ``T / 30`` 秒后才提取 EDGE baseline35，并将 EDGE35 显式裁成
 ``[T,35]``。随后把仅由新旧 MJCF 关节上限微差造成的至多 0.01 rad 源越界裁回当前
-限位，用同一 kinematics 对 qpos28 做 FK，给整条 root Z 加常量，使所有 body origin
-的最小 Z 为零，并在完整序列上重算版本化左右脚接触标签。
+限位，保留原 CSV 的 root Z，不做整段或逐帧高度平移。FK 仅用于质量审计及以固定
+世界地面 z=0 重算完整序列的左右脚接触标签，不能把刚体原点当作足底。
 
 motion、EDGE35、裁后 WAV、train manifest、dataset_info、逐条质量报告和转换报告均
 先写入同盘 staging；完整 strict reader 与三类 SHA 验证通过后才原子发布。工具拒绝
@@ -62,14 +62,13 @@ from gem.robots.bumi.motion_utils import sha256_file  # noqa: E402
 from gem.utils.music_features import extract_edge_baseline35  # noqa: E402
 from tools.data.bumi.qpos_resample_utils import (  # noqa: E402, I001
     make_quaternion_continuous_np,
-    normalize_body_origin_ground,
     slerp_pairs as _slerp_pairs,
 )
 
 CSV_QUALITY_CONTRACT_VERSION = "genmo.bumi_csv_quality_config.v2"
 CSV_SOURCE_CONTRACT_VERSION = "genmo.bumi_csv_qpos_xyzw_named.v2"
 CSV_RESAMPLE_CONTRACT_VERSION = "genmo.bumi_csv_to_30hz.v1"
-GROUND_SEMANTICS = "legacy_body_origin_min_zero"
+GROUND_SEMANTICS = "source_csv_root_z_preserved_v1"
 OUTPUT_JOINT_LIMIT_TOLERANCE_RAD = 1.0e-4
 CSV_NAME = re.compile(r"^bumi_(.+)_(30|50)fps$")
 
@@ -804,16 +803,18 @@ def convert_dataset(
             qpos[:, 7:] = torch.maximum(torch.minimum(unclipped_joints, upper), lower)
             joint_limit_clip_max_rad = float((qpos[:, 7:] - unclipped_joints).abs().amax())
             joint_limit_clips.append(joint_limit_clip_max_rad)
-            qpos, ground_before, ground_after = normalize_body_origin_ground(qpos, kinematics)
+            with torch.no_grad():
+                ground_before = float(kinematics.forward_kinematics(qpos)["body_pos_w"][..., 2].amin())
+            ground_after = ground_before
             contact = derive_bumi_foot_contact(
                 qpos,
                 kinematics,
                 valid_mask=torch.ones(len(qpos), dtype=torch.bool),
                 fps=30,
-                ground_height=None,
-                estimate_ground_mask=torch.tensor(True),
+                ground_height=0.0,
+                estimate_ground_mask=torch.tensor(False),
             )
-            ground_offsets.append(ground_before)
+            ground_offsets.append(0.0)
             motion_payload = {
                 "contract_version": BUMI_MUSIC_CONTRACT_VERSION,
                 "source_motion_contract_version": CSV_SOURCE_CONTRACT_VERSION,
@@ -842,11 +843,11 @@ def convert_dataset(
                 "source_fps": pair.fps,
                 "source_num_frames": int(len(item.qpos)),
                 "resample_contract_version": CSV_RESAMPLE_CONTRACT_VERSION,
-                "root_z_adjustment_m": -ground_before,
+                "root_z_adjustment_m": 0.0,
                 "body_origin_ground_before_adjustment_m": ground_before,
                 "body_origin_ground_after_adjustment_m": ground_after,
                 "ground_semantics": GROUND_SEMANTICS,
-                "root_z_adjusted": True,
+                "root_z_adjusted": False,
                 "joint_order_conversion": {
                     "source_joint_names": list(config.source_joint_names),
                     "target_joint_names": list(kinematics.joint_order),
@@ -855,7 +856,7 @@ def convert_dataset(
                 "joint_limit_clip_max_rad": joint_limit_clip_max_rad,
                 "foot_contact": contact.contact.contiguous(),
                 "foot_contact_contract_version": BUMI_CONTACT_CONTRACT_VERSION,
-                "foot_contact_source": "derived_from_full_qpos_fk_estimated_legacy_ground",
+                "foot_contact_source": "derived_from_full_qpos_fk_fixed_world_zero",
                 "foot_contact_ground_height_m": float(contact.ground_height),
             }
             motion_output = staging / motion_relative
@@ -901,7 +902,7 @@ def convert_dataset(
                     "output_audio_sample_frames": output_audio_frames,
                     "edge_raw_frames": int(music_metadata.get("feature_frames", len(music))),
                     "edge_output_frames": int(len(music)),
-                    "root_z_adjustment_m": -ground_before,
+                    "root_z_adjustment_m": 0.0,
                     "joint_limit_clip_max_rad": joint_limit_clip_max_rad,
                     "foot_contact_ratio_left": float(contact.contact[:, 0].float().mean()),
                     "foot_contact_ratio_right": float(contact.contact[:, 1].float().mean()),
@@ -945,7 +946,7 @@ def convert_dataset(
             "output_joint_limit_policy": "clip_to_current_kinematics_limits",
             "resample_contract_version": CSV_RESAMPLE_CONTRACT_VERSION,
             "ground_semantics": GROUND_SEMANTICS,
-            "root_z_adjusted": True,
+            "root_z_adjusted": False,
             "split_counts": {"train": len(manifest_rows), "val": 0, "test": 0},
             "excluded_songs": list(config.excluded_songs),
         }

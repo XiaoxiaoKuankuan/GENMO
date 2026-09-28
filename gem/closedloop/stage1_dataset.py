@@ -84,6 +84,7 @@ STAGE1_FLOOR_ZERO_SEMANTICS = frozenset(
         "gmr_foot_sole_ground_zero_v1",
         "robot_retargeter_floor_zero_v1",
         "umr_foot_sole_ground_zero_v1",
+        "source_csv_root_z_preserved_v1",
         "mixed_floor_zero_fk_contact_v2",
     }
 )

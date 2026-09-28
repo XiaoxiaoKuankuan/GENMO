@@ -7,7 +7,8 @@ CSV 先由原有构建器完成原始配对审计、重采样及限位迁移，�
 
 发布仅消费完整报告中的 PASS，绑定源文件、选择清单、配置和资产 SHA256。公开库
 沿用人体库的音乐特征及 split，自建库沿用已核验的 WAV/EDGE35 配对。UMR 的世界
-地面为零，保留原始 Root Z；自建库保留原先 body-origin 地面语义，分别计算接触。
+地面为零，保留原始 Root Z；自建库也必须保留 CSV 高度，并以固定 z=0 计算接触。
+旧 body-origin 版本应先显式恢复，不允许再次作为新发布的源数据。
 所有正式文件先写同盘 staging，成功后原子发布，失败时清理精确 staging 路径。
 入口继续使用 filter_robot_retargeter_npz_motions.py 和对应 build 脚本的
 --input-format umr-qpos 参数，不按日期或 checkpoint 复制运行脚本。
@@ -176,7 +177,8 @@ def load_source(
         or payload["fps"] != 30
         or payload["source_mjcf_sha256"] != kin.source_mjcf_sha256
         or payload["quaternion_convention"] != "wxyz"
-        or payload["ground_semantics"] != "legacy_body_origin_min_zero"
+        or payload["ground_semantics"] != "source_csv_root_z_preserved_v1"
+        or payload["root_z_adjusted"] is not False
     ):
         raise ValueError("自建库资产、关节、帧率或地面契约不一致")
     qpos = torch.as_tensor(payload["qpos"]).float().contiguous()
@@ -419,7 +421,7 @@ def build_main(args, human_roots: dict, audio_roots: dict) -> dict:
         return cache[path]
 
     def semantics(ds):
-        return "legacy_body_origin_min_zero" if ds == "mine" else GROUND
+        return "source_csv_root_z_preserved_v1" if ds == "mine" else GROUND
 
     def retarget_sha(ds):
         return (
@@ -446,8 +448,8 @@ def build_main(args, human_roots: dict, audio_roots: dict) -> dict:
                 kin,
                 fps=30,
                 valid_mask=torch.ones(len(qpos), dtype=torch.bool),
-                ground_height=None if ds == "mine" else 0.0,
-                estimate_ground_mask=torch.tensor(ds == "mine"),
+                ground_height=0.0,
+                estimate_ground_mask=torch.tensor(False),
             )
             dst = staging / SPECS[ds]["output"]
             motion_rel = Path("motions") / f"{sid}.pt"
@@ -471,7 +473,7 @@ def build_main(args, human_roots: dict, audio_roots: dict) -> dict:
                 "quality_accepted": True,
                 "retarget_quality": {"status": "PASS", "reason_codes": row["reason_codes"]},
                 "ground_semantics": semantics(ds),
-                "root_z_adjusted": ds == "mine",
+                "root_z_adjusted": False,
                 "root_z_second_adjustment_applied": False,
                 "foot_contact": contact.contact.contiguous(),
                 "foot_contact_contract_version": BUMI_CONTACT_CONTRACT_VERSION,
@@ -533,7 +535,7 @@ def build_main(args, human_roots: dict, audio_roots: dict) -> dict:
                 "quality_config_sha256": config_sha,
                 "quality_report_sha256": quality_sha,
                 "ground_semantics": semantics(ds),
-                "root_z_adjusted": ds == "mine",
+                "root_z_adjusted": False,
                 "root_orientation_gate": {
                     "scope": "per_dataset_all_frames",
                     "all_sequences_recomputed_and_dataset_passed": True,
