@@ -14,8 +14,12 @@ PYTHONDONTWRITEBYTECODE=1 OMP_NUM_THREADS=4 OPENBLAS_NUM_THREADS=4 \
 
 ## 使用方法
 
-1. 下拉选择模型，默认候选路径为 `inputs/checkpoints/bumi_text/model.ckpt`，需由用户放置实际模型。需要其他模型时，展开
-   “添加本地模型”，粘贴 `.ckpt` 路径并校验；路径注册后重启仍保留。
+1. 下拉选择模型，支持训练 `.ckpt` 和由 `tools/export/bumi_text.py package`
+   生成的 ONNX 部署包 `deployment.json`。默认 checkpoint 候选路径为
+   `inputs/checkpoints/bumi_text/model.ckpt`。需要其他模型时，展开“添加本地模型”，
+   粘贴 checkpoint 或部署清单路径并校验；路径注册后重启仍保留。
+   模型列表明确显示 `TORCH` / `ONNX`，同训练步数优先列出 ONNX；选择 ONNX 后
+   网页实际使用 ONNX Runtime CUDA 执行单步去噪，T5、DDIM 调度和 qpos 解码仍由公共运行时执行。
 2. 输入 prompt、动作帧数和 DDIM 步数，点击“生成动作视频”。生成期间可以编辑下一次
    参数，但当前任务使用提交时的副本，同时只允许一个任务。
 3. 完成后手动点击视频播放。支持暂停、拖动、全屏和下载；新视频从零开始且不会自动播放。
@@ -34,10 +38,13 @@ FPS 固定 **30**，120 帧即 4 秒，240 帧即 8 秒。CFG 为 2.5、seed 为
 
 ## 模型与依赖
 
-自动扫描 `inputs/pretrained` 和 `inputs/checkpoints` 的 `.ckpt` 文件；CPU mmap 检查真实权重，
+自动扫描 `inputs/pretrained`、`inputs/checkpoints`、`inputs/deployments` 的 `.ckpt` 和
+`deployment.json`；CPU mmap 检查 checkpoint 真实权重，
 仅列出包含有效 `bumi_text_contract`、30D动作输出、2D接触输出且资产指纹匹配的BUMI文本模型。
 SMPL、音乐和缺少契约的权重不会进入列表。文本固定150 token；路径、文件身份、大小、修改
-及变更时间用于缓存失效，生成前也检查文件是否变化。请注册已经完整保存的 checkpoint。
+及变更时间用于缓存失效，生成前也检查文件是否变化。部署包另外校验 ONNX、外部权重、
+统计和机器人资产的 SHA，缓存绑定全部部署资产的文件身份；任何资产变化后重新校验，
+不复用旧引擎。请注册已经完整保存并通过数值对照的模型。
 
 Python 环境需包含本仓库文本推理依赖、CUDA、当前BUMI资产、MuJoCo、PyAV 和 Flask 3.1。
 Flask 与公开分享入口使用的 Waitress 作为可选 `web` 依赖声明；在已配置 GENMO 的环境
@@ -63,15 +70,14 @@ outputs/text_motion_web/
   tasks/<任务 ID>/
     task.json                       # 原始参数、冻结模型、固定设置、阶段和耗时
     artifacts/<动作目录>/
-      motion.npz                    # body_pose、global_orient、transl、betas、fps
-      metadata.json / prompt.txt    # 原 demo 的推理元数据和规范化文本
-      READY                         # 原动作产物契约，不代表网页视频完成
+      motion.npz                    # qpos、qpos_raw、接触logits、关节顺序、fps
+      metadata.json                 # 文本、模型SHA、实际后端及ORT providers、模型契约
       video.mp4 / thumbnail.jpg
       media_checks.json             # 视频编码、帧数、FPS 和完整解码结果
       render.log                    # 本次独立渲染进程日志
 ```
 
-网页只有在动作数组有限、零体型和 FPS 契约满足，且 H.264/yuv420p 视频完整解码、帧数正确后
+网页只有在 qpos28 动作数组有限、关节顺序/四元数/FPS 契约满足，且 H.264/yuv420p 视频完整解码、帧数正确后
 才标记完成。动作生成但渲染失败时，动作文件仍保留，历史显示失败及所在阶段，上一条成功视频
 在未超过保留上限时保持可用。若当前选中的旧视频被淘汰，页面切换到仍保留的最新成功视频，
 仍需手动播放；没有成功视频时显示空预览。显存不足时可以降低帧数重试；切换 checkpoint
@@ -84,7 +90,7 @@ outputs/text_motion_web/
 | 方法与路径 | 内容 |
 |---|---|
 | `GET /api/models` | 已校验模型、扫描状态和固定参数 |
-| `POST /api/models` | JSON `{"path":"/absolute/model.ckpt"}`，校验并注册 |
+| `POST /api/models` | JSON `{"path":"/absolute/model.ckpt"}` 或部署包 `deployment.json` 路径，校验并注册 |
 | `POST /api/jobs` | 仅接受 `model_id`、`prompt`、`num_frames`、`ddim_steps` |
 | `GET /api/jobs/<id>` | 单任务状态、错误、冻结参数和结果 URL |
 | `GET /api/history` | 倒序历史、当前活动任务和历史读取错误 |
@@ -103,9 +109,8 @@ outputs/text_motion_web/
 
 共享网关仅在回环地址 `127.0.0.1:8768` 监听，由 HTTPS 隧道转发。访客不能注册模型，
 也不会得到 checkpoint、T5、任务目录的本机绝对路径、文件指纹和内部异常堆栈。
-本机维护者继续用 **http://127.0.0.1:8766/** 添加 checkpoint，注册后公网页面刷新可选。
-现有 MotionMillion s190000 / s210000 自动使用 150 token，官方旧模型自动使用 50 token；
-共享网关不改变模型契约或固定推理参数。
+本机维护者通过本地服务端口添加 checkpoint 或 ONNX 部署清单，注册后公网页面刷新可选。
+本分支只接受 BUMI 150 token 文本模型；共享网关不改变模型契约或固定推理参数。
 
 公网提交只接收原有四个生成字段，帧数和 DDIM 边界不变；额外限制 prompt 最多
 4096 个字符、JSON 请求体最多 16 KiB。后台继续保留原文，编码器按模型 token 上限截断。

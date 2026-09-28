@@ -1,8 +1,9 @@
-"""本地 BUMI 文本 checkpoint 发现与校验。
+"""本地 BUMI 文本 checkpoint 和 ONNX 部署包发现与校验。
 
 按真实路径去重，使用文件身份、大小和纳秒时间戳缓存检查结果。扫描线程通过
 CPU mmap 读取权重元数据，核对 BUMI 30D/2D 与机器人资产契约。
-音乐和仅回归模型被排除；文件变化后重新读取，生成前再次核对文件身份。
+音乐和仅回归模型被排除；部署包逐一校验模型、统计和机器人资产指纹，
+缓存同时绑定全部资产文件身份，生成前再次核对，避免替换权重后复用旧引擎。
 """
 
 from __future__ import annotations
@@ -16,6 +17,24 @@ from .storage import DEFAULT_CHECKPOINT, ROOT, atomic_json, fingerprint
 
 
 def inspect_checkpoint(path: Path) -> dict:
+    if path.name == "deployment.json":
+        from gem.runtime.bumi_text_runtime import read_bundle
+
+        payload, files, meta = read_bundle(path)
+        robot = payload["model_contract"]
+        return {
+            "contract": {
+                "max_text_len": 150,
+                "encoded_text_dim": 1024,
+                "sequence_contract": robot["sequence"],
+            },
+            "motion_backend": "bumi",
+            "inference_backend": "onnx",
+            "min_frames": robot["sequence"]["min_frames"],
+            "max_frames": robot["sequence"]["max_frames"],
+            "global_step": meta.get("source_global_step"),
+            "asset_fingerprints": {str(p): fingerprint(p) for p in files.values()},
+        }
     import torch
 
     try:
@@ -38,6 +57,7 @@ def inspect_checkpoint(path: Path) -> dict:
                 "sequence_contract": robot["sequence"],
             },
             "motion_backend": "bumi",
+            "inference_backend": "torch",
             "min_frames": robot["sequence"]["min_frames"],
             "max_frames": robot["sequence"]["max_frames"],
             "global_step": checkpoint.get("global_step"),
@@ -51,7 +71,10 @@ class ModelRegistry:
         self.roots = (
             list(roots)
             if roots is not None
-            else [ROOT / "inputs/pretrained", ROOT / "inputs/checkpoints"]
+            else [
+                ROOT / "inputs/pretrained", ROOT / "inputs/checkpoints",
+                ROOT / "inputs/deployments",
+            ]
         )
         self.inspector = inspector
         self.lock = threading.RLock()
@@ -68,14 +91,25 @@ class ModelRegistry:
 
     def add(self, value: str, *, persist=True) -> dict:
         if not isinstance(value, str) or not value.strip():
-            raise ValueError("请输入 checkpoint 本地路径")
+            raise ValueError("请输入 checkpoint 或 deployment.json 本地路径")
         path = Path(value.strip()).expanduser().resolve(strict=True)
-        if not path.is_file() or path.suffix.lower() != ".ckpt":
-            raise ValueError("请选择本地 .ckpt 文件")
+        if not path.is_file() or not (
+            path.suffix.lower() == ".ckpt" or path.name == "deployment.json"
+        ):
+            raise ValueError("请选择本地 .ckpt 文件或部署包 deployment.json")
         key = str(path)
         identity = fingerprint(path)
         with self.scan_lock:
             cached = self.cache.get(key)
+            if cached and isinstance(cached[1], dict):
+                try:
+                    if any(
+                        fingerprint(Path(p)) != value
+                        for p, value in cached[1].get("asset_fingerprints", {}).items()
+                    ):
+                        cached = None
+                except OSError:
+                    cached = None
             if cached and cached[0] == identity:
                 if isinstance(cached[1], str):
                     raise ValueError(cached[1])
@@ -120,7 +154,10 @@ class ModelRegistry:
             return {
                 "models": sorted(
                     self.models.values(),
-                    key=lambda m: (not m["is_default"], -(m["global_step"] or 0), m["name"]),
+                    key=lambda m: (
+                        not m["is_default"], -(m["global_step"] or 0),
+                        m.get("inference_backend") != "onnx", m["name"],
+                    ),
                 ),
                 "scanning": self.scanning,
                 "error": self.error,
@@ -132,6 +169,7 @@ class ModelRegistry:
                 candidates = [DEFAULT_CHECKPOINT, *map(Path, self.registered)]
                 for root in self.roots:
                     candidates.extend(sorted(root.rglob("*.ckpt")))
+                    candidates.extend(sorted(root.rglob("deployment.json")))
                 for path in dict.fromkeys(candidates):
                     if self.closed.is_set():
                         break

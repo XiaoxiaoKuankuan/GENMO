@@ -114,6 +114,18 @@ engine.close()
         [sys.executable, "-c", script], cwd=bundle, env=env, capture_output=True, text=True
     )
     assert result.returncode == 0, result.stdout + result.stderr
+    # 网页注册使用真实部署包；缓存失效后必须拒绝被改写的资产。
+    from gem.runtime.text_motion_web.models import ModelRegistry
+
+    registry = ModelRegistry(tmp_path / "web", roots=[])
+    model = registry.add(str(bundle / "deployment.json"))
+    assert model["inference_backend"] == "onnx"
+    assert model["max_frames"] == 300
+    assert registry.get(model["id"])["asset_fingerprints"]
+    (bundle / "models/stats.json").write_text("{}")
+    with pytest.raises(ValueError, match="指纹"):
+        registry.get(model["id"])
+    assert not registry.snapshot()["models"]
 
 
 def test_engine_outputs_only_requested_frames(small_checkpoint, tmp_path, monkeypatch):

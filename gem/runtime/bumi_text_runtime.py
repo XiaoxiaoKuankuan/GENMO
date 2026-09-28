@@ -214,6 +214,18 @@ class OnnxTextStep:
         return tuple(torch.from_numpy(value).to(args[0].device) for value in result)
 
 
+def onnx_providers(device):
+    """按请求选择 ORT 设备；禁用 TF32，保持 FP32 导出验证和网页推理一致。"""
+    import onnxruntime as ort
+
+    device = torch.device(device)
+    if device.type != "cuda":
+        return ["CPUExecutionProvider"]
+    if "CUDAExecutionProvider" not in ort.get_available_providers():
+        raise RuntimeError("请求 CUDA ONNX 后端，但当前 ORT 不支持 CUDA")
+    return [("CUDAExecutionProvider", {"device_id": device.index or 0, "use_tf32": 0}), "CPUExecutionProvider"]
+
+
 def read_bundle(path):
     path = Path(path).expanduser().resolve(strict=True)
     payload = json.loads(path.read_text())
@@ -294,17 +306,7 @@ class ResidentBumiTextEngine:
                 self.source_checkpoint_sha256 = payload["source_checkpoint_sha256"]
                 diffusion = meta["diffusion_config"]
                 if self.backend == "onnx":
-                    providers = ["CPUExecutionProvider"]
-                    if self.device.type == "cuda":
-                        import onnxruntime as ort
-
-                        if "CUDAExecutionProvider" not in ort.get_available_providers():
-                            raise RuntimeError("请求CUDA ONNX后端，但当前ORT不支持CUDA")
-                        providers = [
-                            ("CUDAExecutionProvider", {"device_id": self.device.index or 0}),
-                            "CPUExecutionProvider",
-                        ]
-                    self.step = OnnxTextStep(files["onnx"], providers=providers)
+                    self.step = OnnxTextStep(files["onnx"], providers=onnx_providers(self.device))
                     if (
                         self.device.type == "cuda"
                         and "CUDAExecutionProvider" not in self.step.session.get_providers()
@@ -451,6 +453,8 @@ class ResidentBumiTextEngine:
                 np.savez_compressed(output / "motion.npz", **arrays)
                 metadata = dict(
                     motion_backend="bumi",
+                    inference_backend=self.backend,
+                    execution_providers=(self.step.session.get_providers() if self.backend == "onnx" else None),
                     prompt=prompt,
                     num_frames=frames,
                     fps=30,

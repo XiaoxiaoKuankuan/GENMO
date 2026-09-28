@@ -24,6 +24,7 @@ JOB_ID = "b" * 32
 MODEL = {
     "id": MODEL_ID, "name": "MotionMillion / s210000.ckpt", "global_step": 210000,
     "is_default": False, "path": "/home/private/checkpoint.ckpt", "fingerprint": [12, 34],
+    "inference_backend": "onnx", "asset_fingerprints": {"/home/private/model.onnx": [12, 34]},
     "contract": {"schema_version": 1, "max_text_len": 150, "encoded_text_dim": 1024, "text_only": True},
 }
 PAYLOAD = {"model_id": MODEL_ID, "prompt": "  A person walks forward.  ", "num_frames": 120, "ddim_steps": 50}

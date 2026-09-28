@@ -188,9 +188,15 @@ def worker_main(commands, events):
             try:
                 report(stage)
                 model = job["model"]
-                identity = (model["path"], tuple(model["fingerprint"]))
+                assets = model.get("asset_fingerprints", {})
+                identity = (
+                    model["path"], tuple(model["fingerprint"]),
+                    tuple((p, tuple(v)) for p, v in sorted(assets.items())),
+                )
                 if fingerprint(Path(model["path"])) != model["fingerprint"]:
-                    raise ValueError("checkpoint 已发生变化，请重新选择模型后生成")
+                    raise ValueError("模型文件已发生变化，请重新选择模型后生成")
+                if any(fingerprint(Path(p)) != value for p, value in assets.items()):
+                    raise ValueError("部署资产已发生变化，请重新校验模型后生成")
                 reused = engine is not None and loaded == identity
                 if not reused:
                     if engine is not None:
@@ -199,7 +205,9 @@ def worker_main(commands, events):
                     if model.get("motion_backend") != "bumi":
                         raise ValueError("本分支仅支持 BUMI 文本模型")
                     engine = ResidentBumiTextEngine(
-                        ckpt_path=model["path"],
+                        **({"deployment_manifest": model["path"], "backend": "onnx"}
+                           if model.get("inference_backend") == "onnx"
+                           else {"ckpt_path": model["path"]}),
                         t5_model=T5_MODEL,
                         local_files_only=True,
                         ddim_steps=job["ddim_steps"],

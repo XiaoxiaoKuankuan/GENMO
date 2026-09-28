@@ -30,6 +30,7 @@ from gem.runtime.bumi_text_runtime import (
     OnnxTextStep,
     io_shapes,
     load_checkpoint_step,
+    onnx_providers,
     read_export_metadata,
 )
 
@@ -98,6 +99,9 @@ def export(checkpoint, output, device="cpu"):
         onnx_sha256=sha256_file(output),
         external_data=external,
         source_checkpoint_sha256=sha256_file(checkpoint),
+        source_global_step=torch.load(
+            checkpoint, map_location="cpu", weights_only=False, mmap=True
+        ).get("global_step"),
         model_contract=contract,
         diffusion_config=diffusion,
         inputs=io_shapes(contract)[0],
@@ -211,7 +215,9 @@ def validate(checkpoint, onnx_path, output, *, engine=None, device="cpu", ddim_s
         or meta["model_contract"] != contract
     ):
         raise ValueError("验证必须使用同一checkpoint和资产")
-    candidate = OnnxTextStep(onnx_path)
+    candidate = OnnxTextStep(onnx_path, providers=onnx_providers(device))
+    if torch.device(device).type == "cuda" and "CUDAExecutionProvider" not in candidate.session.get_providers():
+        raise RuntimeError("ORT CUDA初始化失败，不允许静默回退CPU验证")
     if engine is not None:
         from gem.runtime.bumi_text_tensorrt import TextTensorRTStep
 
@@ -231,6 +237,8 @@ def validate(checkpoint, onnx_path, output, *, engine=None, device="cpu", ddim_s
         onnx_sha256=meta["onnx_sha256"],
         engine_sha256=None if engine is None else sha256_file(engine),
         ddim_steps=ddim_steps,
+        device=device,
+        execution_providers=candidate.session.get_providers() if engine is None else ["TensorRT"],
         seed=42,
         frames=[],
         passed=True,

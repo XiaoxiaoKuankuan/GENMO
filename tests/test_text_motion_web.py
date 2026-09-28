@@ -357,7 +357,8 @@ def test_real_checkpoint_content_contract_filter(tmp_path):
             inspect_checkpoint(path)
 
 
-def test_worker_reuses_engine_updates_ddim_and_switches_contract(tmp_path, monkeypatch):
+@pytest.mark.parametrize("backend", ["torch", "onnx"])
+def test_worker_reuses_engine_updates_ddim_and_switches_contract(tmp_path, monkeypatch, backend):
     import gem.runtime.bumi_text_runtime as resident
 
     calls, created = [], []
@@ -365,7 +366,9 @@ def test_worker_reuses_engine_updates_ddim_and_switches_contract(tmp_path, monke
     class Engine:
         def __init__(self, **kwargs):
             self.max_text_len = 150
-            self.path = kwargs["ckpt_path"]
+            self.path = kwargs["deployment_manifest" if backend == "onnx" else "ckpt_path"]
+            if backend == "onnx":
+                assert kwargs["backend"] == "onnx" and "ckpt_path" not in kwargs
             created.append(kwargs)
 
         def initialize(self):
@@ -395,6 +398,7 @@ def test_worker_reuses_engine_updates_ddim_and_switches_contract(tmp_path, monke
                     "path": str(path),
                     "fingerprint": worker.fingerprint(path),
                     "motion_backend": "bumi",
+                    "inference_backend": backend,
                 },
                 prompt="walk",
                 num_frames=120,
