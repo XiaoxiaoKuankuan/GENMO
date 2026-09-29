@@ -104,3 +104,38 @@ cd /home/weili/bumi-closedloop-worktrees/GENMO
 20首不同val音乐×两模式共40集及40段配乐视频已完成，初态40次读回余量约0.999814mm。暂停/延迟均16首正常结束、4首姿态跟踪终止，失败率20%；BangBang两模式连续30秒，Talkdirty仍在25.72/25.76秒终止。54,946帧同步与固定相机、历史/时序/计划保护审计通过，2121次提交保护区修改0。两个模型冻结，运行源码91文件不变。此专项完成不代表原48集矩阵重跑或全部跟踪质量通过。
 
 交付目录：`/home/weili/bumi-closedloop-worktrees/GENMO/outputs/closedloop_stage8/grounded1mm_music20_20260929/`。打开`README.md`看验收解释，`run/music_sweep_videos.html`看40段视频，`run/music_sweep_report.md`看逐曲指标，`failure_analysis.md`看失败轨迹分析。
+
+
+## 训练集200首、单延迟模式统计专项（2026-09-29）
+
+独立配置为 `configs/closedloop/stage8_train200_latency_isaac.yaml`。沿用冻结的s350000与135000 ONNX、1mm初态、CPU PhysX、固定平地和零随机化；只评估，不训练。完整train清单从服务器1原数据根按原样获取，四库选择40/70/50/40组，以seed42散列排序，每组最长条目并按音频SHA去重。不按本地文件是否存在或模型表现挑样。每首seed42，只latency、最多30秒，无video；62条不足30秒时自然结束。
+
+独立终止配置：根高度误差0.20m、各自去世界yaw后的姿态测地角0.60rad、最短yaw差1.50rad、脚/肘相对根高度误差0.15m，均严格大于才触发。新模式不继续用整体四元数角1.2rad作终止，但保留整体角诊断。阈值不同，不能直接把本轮完成率与旧val宽松阈值结果当成同条件对比。
+
+输入目录 `inputs/evals/stage8_train200_20260929` 保存完整清单、SHA、固定选样及原始EDGE35特征。无视频时可不下载WAV，节拍指标来自已核验的EDGE35特征；这不构成原音频文件已在本机验证的声明。所有选样均属于train，不声称未见音乐泛化。
+
+运行前必须检查GPU余量，现有8GiB预检保持。既有用户训练和文本服务不能由此入口停止。资源满足后命令如下（目录须未存在）：
+
+```bash
+cd /home/weili/bumi-closedloop-worktrees/GENMO
+PYTHONDONTWRITEBYTECODE=1 /home/weili/GENMO/.venv/bin/python -B tools/eval/run_closedloop_baseline.py \
+  --config configs/closedloop/stage8_train200_latency_isaac.yaml \
+  --output-dir outputs/closedloop_stage8/train200_latency_yaw15_20260929/run
+```
+
+完成后使用既有 `report_stage8_music_sweep.py` 的train/单模式/无视频选项生成汇总，分别报告请求数、已尝试数、系统异常、启动失败、跟踪失败、短条目自然结束、达到30秒及按目标时长完成率。未实际运行时这些指标必须保持未测，不能以单元测试替代。
+
+
+用户随后指定改到服务器1运行。对应配置为 `configs/closedloop/stage8_train200_latency_server1.yaml`，使用该机已有正式checkpoint与四库数据，独立Isaac环境位于 `/data0/user/liwei/closedloop_stage8_runtime/env_isaaclab`，不修改旧GENMO解释器。服务器命令：
+
+```bash
+cd /home/user/liwei/GENMO-bumi-closedloop
+PYTHONDONTWRITEBYTECODE=1 /home/user/liwei/GENMO/.venv/bin/python -B tools/eval/run_closedloop_baseline.py \
+  --config configs/closedloop/stage8_train200_latency_server1.yaml \
+  --output-dir /data0/user/liwei/GENMO_outputs/closedloop_stage8/train200_latency_yaw15_20260929/run
+PYTHONDONTWRITEBYTECODE=1 /home/user/liwei/GENMO/.venv/bin/python -B tools/eval/report_stage8_music_sweep.py \
+  /data0/user/liwei/GENMO_outputs/closedloop_stage8/train200_latency_yaw15_20260929/run \
+  --expected-music 200 --expected-modes latency --expected-split train --no-video --maximum-seconds 30
+```
+
+运行前重新测量10+100请求延迟，不复用本地4090的校准值；不同硬件导致的延迟/P差异必须写入报告。以上是准备中的复现命令，实际运行结果以该实验目录中的运行清单与报告为准。

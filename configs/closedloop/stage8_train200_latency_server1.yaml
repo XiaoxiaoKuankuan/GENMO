@@ -1,0 +1,80 @@
+# 服务器1训练集200首统计专项：固定40/70/50/40组，只latency，每曲最多30秒，不渲染视频。
+# 使用原s350000和135000 ONNX的SHA绑定资产；GENMO旧环境不变，Isaac放入独立匹配版本环境。
+# 根高0.20m、去yaw姿态0.60rad、最短yaw差1.50rad、末端相对高度0.15m；新旧评估分开。
+# 仅在选定GPU空闲且余量通过检查时运行；不会停止已有进程，不创建训练或自动启动任务。
+version: genmo.gmt_frozen_isaac.v1
+paths:
+  genmo_repo: /home/user/liwei/GENMO-bumi-closedloop
+  gmt_repo: /home/user/liwei/legged_lab_gmt
+  genmo_python: /home/user/liwei/GENMO/.venv/bin/python
+  isaac_python: /data0/user/liwei/closedloop_stage8_runtime/env_isaaclab/bin/python
+  checkpoint: /data0/user/liwei/GENMO_outputs/bumi_closedloop_stage1_90505_p6to18_z15_b256_s350k_8gpu_v1/checkpoints/s350000.pt
+  stats: /data0/user/liwei/datasets/bumi_music_umr70_mine_pass_v1/stats/qpos30_train_stats.json
+  kinematics: /home/user/liwei/GENMO-bumi-closedloop/configs/bumi/bumi_kinematics_robot_retargeter_fe934_v1.json
+  gmt_policy: /data0/user/liwei/closedloop_stage8_assets/gmt_model135000/model_135000_stage2.onnx
+  compat_profile: /home/user/liwei/legged_lab_gmt/configs/sim2sim/model_135000_stage2.json
+  isaac_contract: /data0/user/liwei/closedloop_stage8_assets/gmt_model135000/isaac_contract.json
+  data_root: /data0/user/liwei/datasets/bumi_music_umr70_mine_pass_90505_v1
+runtime:
+  genmo_device: cuda:0
+  allow_shared_gpu: false
+  physics_device: cpu
+  headless: true
+  num_envs: 1
+  torch_threads: 4
+  rpc_timeout_s: 120
+  worker_start_timeout_s: 600
+model:
+  history_steps: 50
+  ddim_steps: 20
+  guidance_scale: 2.5
+timing:
+  clock_hz: 600
+  decision_ticks: 300
+  control_ticks: 12
+  physics_ticks: 3
+  warmup_ticks: 600
+  min_prefix_frames: 12
+  lookahead_control_steps: 10
+  latency_guard_s: 0.04
+  calibration_warmup: 10
+  calibration_samples: 100
+environment:
+  terrain: plane
+  ground_height_m: 0.0
+  initial_foot_clearance_m: 0.001
+  domain_randomization: false
+  observation_noise: false
+  external_perturbations: false
+  reset_randomization: false
+  actuator_delay_steps: 0
+  curriculum: false
+termination:
+  orientation_mode: separated_yaw
+  root_height_error_m: 0.2
+  non_yaw_orientation_error_rad: 0.6
+  yaw_error_rad: 1.5
+  end_effector_relative_height_error_m: 0.15
+diagnostics:
+  record_original_threshold_crossings: true
+  verify_actor_condition_edges: true
+evaluation:
+  datasets:
+  - AIST++
+  - AIOZ-GDANCE
+  - FineDance
+  - Mine
+  seeds:
+  - 42
+  seconds: 30
+  modes:
+  - latency
+  groups_per_dataset:
+    AIST++: 40
+    AIOZ-GDANCE: 70
+    FineDance: 50
+    Mine: 40
+  split: train
+  require_audio: false
+  selection_seed: 42
+output_root: /data0/user/liwei/GENMO_outputs/closedloop_stage8

@@ -45,6 +45,8 @@ SOURCE_FILES = {
             "gem/runtime/closedloop_protocol.py", "tools/eval/run_closedloop_baseline.py",
             "configs/closedloop/stage8_frozen_isaac.yaml",
             "configs/closedloop/stage8_grounded20_isaac.yaml",
+            "configs/closedloop/stage8_train200_latency_isaac.yaml",
+            "configs/closedloop/stage8_train200_latency_server1.yaml",
         ),
         "reused_actor_and_sampling": (
             "gem/closedloop/__init__.py", "gem/closedloop/actor.py", "gem/closedloop/contracts.py",
@@ -71,7 +73,7 @@ SOURCE_FILES = {
             "scripts/motion/bumi4340_reference_kinematics.py",
             *(f"{TASK}/closedloop/{name}.py" for name in
               ("__init__", "backend", "command", "config", "env", "history", "scene_evidence",
-               "render_sync", "physical_diagnostics", "initial_ground_pose")),
+               "render_sync", "physical_diagnostics", "initial_ground_pose", "orientation_errors")),
         ),
         "reused_task_and_observations": (
             f"{TASK}/__init__.py", f"{TASK}/tracking_env_cfg.py",

@@ -8,6 +8,8 @@ Actor与Isaac worker。默认完整评估包含10+100延迟校准、四库各两
 模型或仿真；可选--video为每个episode启用真实Isaac摄像机，关闭writer后按真实控制帧
 同步原验证音乐，校验H264/AAC/50fps后清理无声中间片。关闭后独立审计时序与历史，
 同时复核启动前捕获的源码指纹，不把进程正常退出当作动力学验收通过。
+训练集专项通过独立配置选择完整 train 清单中的独立音乐，允许无音频、无录像运行，
+并显式使用 yaw 分离终止配置。旧四库 val/48集验收仍保持原阈值、选择和判定边界。
 """
 from __future__ import annotations
 
@@ -36,7 +38,7 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 
 from gem.closedloop.evaluation_music import (  # noqa: E402
-    check_music_files, load_music_features, music_path, select_val_music, sha256_file,
+    check_music_files, load_music_features, music_path, select_val_music, select_train_music, sha256_file,
 )
 from gem.runtime.closedloop_protocol import RpcClient  # noqa: E402
 from gem.closedloop.baseline_provenance import (  # noqa: E402
@@ -73,10 +75,23 @@ def validate_config(config):
         for key, expected in fields.items():
             if config[section].get(key) != expected:
                 raise ValueError(f"Stage8 requires {section}.{key}={expected!r}")
-    for key, expected in (("root_height_error_m", .4), ("global_orientation_error_rad", 1.2),
-                          ("end_effector_relative_height_error_m", .3)):
+    termination = config["termination"]
+    orientation_mode = termination.get("orientation_mode", "global_quaternion")
+    if orientation_mode == "global_quaternion":
+        thresholds = {"root_height_error_m": .4, "global_orientation_error_rad": 1.2,
+                      "end_effector_relative_height_error_m": .3}
+        if any(key in termination for key in ("non_yaw_orientation_error_rad", "yaw_error_rad")):
+            raise ValueError("Global quaternion mode cannot include separated yaw thresholds")
+    elif orientation_mode == "separated_yaw":
+        thresholds = {"root_height_error_m": .2, "non_yaw_orientation_error_rad": .6,
+                      "yaw_error_rad": 1.5, "end_effector_relative_height_error_m": .15}
+        if "global_orientation_error_rad" in termination:
+            raise ValueError("Separated yaw mode cannot also specify a global orientation threshold")
+    else:
+        raise ValueError("Unknown Stage8 orientation_mode")
+    for key, expected in thresholds.items():
         if config["termination"].get(key) != expected:
-            raise ValueError(f"Stage8 relaxed baseline requires termination.{key}={expected}")
+            raise ValueError(f"Stage8 {orientation_mode} requires termination.{key}={expected}")
     if config["runtime"].get("num_envs") != 1 or config["model"].get("history_steps") != 50:
         raise ValueError("Stage8 checkpoint/runtime requires B=1 and H=50")
     if config["runtime"].get("physics_device") != "cpu":
@@ -99,6 +114,13 @@ def validate_config(config):
         if isinstance(value, bool) or not isinstance(value, int) or not lower <= value <= upper:
             raise ValueError(f"timing.{key} must be an integer in [{lower},{upper}]")
     evaluation = config["evaluation"]
+    if evaluation.get("split", "val") not in ("train", "val"):
+        raise ValueError("Stage8 evaluation split must be explicitly train or val")
+    if not isinstance(evaluation.get("require_audio", True), bool):
+        raise ValueError("evaluation.require_audio must be boolean")
+    selection_seed = evaluation.get("selection_seed", 42)
+    if isinstance(selection_seed, bool) or not isinstance(selection_seed, int):
+        raise ValueError("evaluation.selection_seed must be an integer")
     if float(evaluation["seconds"]) > 30:
         raise ValueError("Stage8 evaluation duration is bounded at 30 seconds per episode")
     for key, allowed in (("datasets", FULL_DATASETS), ("modes", {"paused", "latency"})):
@@ -124,7 +146,8 @@ def preflight(config, selected, *, check_gpu=True):
     paths = config["paths"]
     required = ("checkpoint", "stats", "kinematics", "gmt_policy", "compat_profile", "isaac_contract", "genmo_python", "isaac_python")
     absent = [paths[k] for k in required if not Path(paths[k]).is_file()]
-    files = check_music_files(paths["data_root"], selected)
+    files = check_music_files(paths["data_root"], selected,
+                              require_audio=config["evaluation"].get("require_audio", True))
     repo_state = {}
     for key in ("genmo_repo", "gmt_repo"):
         root = Path(paths[key]).resolve()
@@ -222,12 +245,16 @@ def validation_scope(config, selected, episode_count, calibration, *, video=Fals
                       and len({(s["dataset"], s["group_id"]) for s in selected}) == 8)
     evaluation = config["evaluation"]
     full_matrix = (not preflight_only and not video and full_selection
+                   and evaluation.get("split", "val") == "val"
+                   and config["termination"].get("orientation_mode", "global_quaternion") == "global_quaternion"
                    and set(evaluation["seeds"]) == {42, 43, 44}
                    and set(evaluation["modes"]) == {"paused", "latency"}
                    and float(evaluation["seconds"]) == 30 and episode_count == 48)
     full_calibration = bool(calibration and calibration.get("full_calibration"))
     expected = len(selected) * len(evaluation["seeds"]) * len(evaluation["modes"])
     return {"episode_count": episode_count, "requested_episode_count": expected,
+            "dataset_split": evaluation.get("split", "val"),
+            "termination": config["termination"],
             "requested_matrix_completed": not preflight_only and episode_count == expected,
             "selected_music_groups": len(selected),
             "unique_audio_sha256_count": len({s.get("row", {}).get("source_audio_sha256") for s in selected}
@@ -394,13 +421,19 @@ def main(argv=None):
         validate_config(config)
     except (KeyError, TypeError, ValueError) as exc:
         parser.error(str(exc))
-    selected = select_val_music(config["paths"]["data_root"], config["evaluation"]["datasets"],
-                                config["evaluation"]["groups_per_dataset"])
+    if config["evaluation"].get("split", "val") == "train":
+        selected = select_train_music(config["paths"]["data_root"], config["evaluation"]["datasets"],
+                                      config["evaluation"]["groups_per_dataset"],
+                                      seed=config["evaluation"].get("selection_seed", 42))
+    else:
+        selected = select_val_music(config["paths"]["data_root"], config["evaluation"]["datasets"],
+                                    config["evaluation"]["groups_per_dataset"])
     output = (args.output_dir or Path(config["output_root"]) / datetime.now().strftime("%Y%m%d_%H%M%S_%f")).resolve()
     if output.exists():
         raise FileExistsError(f"Refusing to overwrite experiment: {output}")
     output.mkdir(parents=True)
     if args.video:
+        config["evaluation"]["require_audio"] = True
         config["runtime"]["video_path"] = str(output / "isaac_video.mp4")
     config_path = output / "resolved_config.yaml"
     config_path.write_text(yaml.safe_dump(config, allow_unicode=True, sort_keys=False))
@@ -452,10 +485,21 @@ def main(argv=None):
                     result = loop.run_episode(sample, music, seed=seed, mode=mode,
                                               latency_budget_s=calibration["latency_budget_seconds"])
                     episodes.append(result)
+                    write_json(output / "progress.json", {
+                        "completed_episodes": len(episodes),
+                        "requested_episodes": len(selected) * len(config["evaluation"]["modes"]) * len(config["evaluation"]["seeds"]),
+                        "last_dataset": sample["dataset"], "last_sample_id": sample["row"]["sample_id"],
+                        "last_reason": result.get("reason"),
+                        "failures": sum(bool(item.get("failed")) for item in episodes),
+                        "music_exposure_seconds": sum(item.get("music_duration_seconds", 0.) for item in episodes),
+                    })
                     print(f"[EPISODE] {len(episodes)} {mode} {sample['dataset']} {sample['row']['sample_id']} seed={seed}: {result.get('reason')}", flush=True)
         summary = recorder.summarize()
     except BaseException as exc:
         code, error = 1, {"type": type(exc).__name__, "message": str(exc), "traceback": traceback.format_exc()}
+        # 大批量评估的中途系统异常不能抹去已经完成的独立episode证据。
+        if not summary and episodes:
+            summary = {"episodes": episodes, "partial_run": True}
         write_json(output / "failure.json", error)
         traceback.print_exc()
     finally:
@@ -497,7 +541,8 @@ def main(argv=None):
                 error = error or video_error
         scope = validation_scope(config, selected, len(episodes), calibration, video=args.video, preflight_only=args.preflight)
         flags = acceptance_flags(summary, scope, workers.shutdown if workers is not None else {}, code=code, error=error)
-        summary.update(validation_scope=scope, acceptance=flags, exit_code=code)
+        summary.update(validation_scope=scope, acceptance=flags, exit_code=code,
+                       selection=selected, evaluation=config["evaluation"], termination=config["termination"])
         write_json(output / "run_summary.json", summary)
         if summary.get("episodes"):
             from tools.eval.audit_closedloop_baseline import audit_experiment

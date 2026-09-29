@@ -3,10 +3,13 @@
 临时夹具提供小型JSONL、验收清单和占位视频文件，只验证报告对于独立音乐身份、
 40格模式矩阵、启动/音乐分段、空节拍、精确控制步分位数、逐曲展示原指标语义、
 相对视频与JSON路径和不覆盖
-的处理。占位视频不会被当作真实渲染证明；真实视频解码由baseline_video负责。
+的处理。新增200首train单latency无视频矩阵、按实际音乐长度计算的完成率与Wilson
+区间、启动/控制/基础设施故障分类、独立组与节拍缺测、50Hz差分支持点、关节限位、
+分离yaw阈值首次越界和中断后落盘恢复测试。占位视频不会被当作真实渲染证明；真实视频解码由baseline_video负责。
 全部产物限定pytest临时目录，既有实验数据不修改。
 """
 import copy
+import csv
 import hashlib
 import json
 from pathlib import Path
@@ -23,16 +26,17 @@ def write_json(path, value):
     path.write_text(json.dumps(value, ensure_ascii=False), encoding="utf-8")
 
 
-def make_run(root, songs=1, *, music_steps=60, startup_failure=None):
+def make_run(root, songs=1, *, music_steps=60, startup_failure=None, modes=("paused", "latency")):
     root.mkdir(exist_ok=True)
     episodes, audit_episodes, videos, events = [], [], [], []
     frame_index = 0
     for song in range(songs):
         sha = hashlib.sha256(f"song {song}".encode()).hexdigest()
-        for mode in ("paused", "latency"):
+        for mode in modes:
             episode_id = f"{song}:{mode}"
             startup = episode_id == startup_failure
-            warmup_count, music_count = (7, 0) if startup else (50, music_steps)
+            step_count = music_steps[song] if isinstance(music_steps, list) else music_steps
+            warmup_count, music_count = (7, 0) if startup else (50, step_count)
             directory = root / "episodes" / episode_id.replace(":", "_")
             directory.mkdir(parents=True)
             qpos = [0., 0., .48, 1., 0., 0., 0.]+[0.]*21
@@ -274,3 +278,159 @@ def test_per_music_missing_beat_is_not_displayed_as_zero_distance(tmp_path):
     ep["music"]["reference"]["mean_beat_distance_seconds"] = .0891
     assert "未记录 / 0.0891" in render_markdown(report)
     assert "未记录 / 0.0891" in render_video_index(report)
+
+
+def train_no_video(root, *, songs=1, music_steps=5, frames=None, startup_failure=None):
+    summary = make_run(root, songs=songs, music_steps=music_steps, modes=("latency",), startup_failure=startup_failure)
+    for i, ep in enumerate(summary["episodes"]):
+        ep["sample"]["row"].update(split="train", num_frames=frames[i] if isinstance(frames, list) else (frames or 3))
+        ep["sample"]["dataset"] = "Mine" if i % 2 == 0 else "AIST++"
+        ep["music"] = {"status": "no_music_beats", "actual": None, "reference": None}
+        path = root / ep["artifacts"]["trace"]
+        rows = [json.loads(line) for line in path.read_text().splitlines()]
+        for row in rows:
+            row.pop("video_frame_index")
+            row.pop("video_capture_seconds")
+        path.write_text(''.join(json.dumps(row)+'\n' for row in rows))
+    summary.pop("videos")
+    summary["selection"] = [e["sample"] for e in summary["episodes"]]
+    summary["termination"] = {"orientation_mode": "separated_yaw", "root_height_error_m": .2,
+        "non_yaw_orientation_error_rad": .6, "yaw_error_rad": 1.5, "end_effector_relative_height_error_m": .15}
+    write_json(root / "run_summary.json", summary)
+    audit = json.loads((root/"audit.json").read_text())
+    for ep in audit["episodes"]:
+        ep["visual_evidence"] = {"status": "not_recorded"}
+    write_json(root/"audit.json", audit)
+    return summary
+
+
+def train_report(root, count):
+    return build_music_sweep_report(root, expected_music=count, expected_modes=("latency",), expected_split="train", require_video=False)
+
+
+def test_two_hundred_train_groups_single_latency_without_video_or_audio(tmp_path):
+    summary = train_no_video(tmp_path, songs=200)
+    # 无源音频仍可按独立音乐组核验；缺音频不会被误报成视频不完整。
+    for ep in summary["episodes"]:
+        ep["sample"]["row"].pop("source_audio_sha256")
+    write_json(tmp_path/"run_summary.json", summary)
+    result, outputs = write_music_sweep_report(tmp_path, expected_music=200, expected_modes=("latency",), expected_split="train", require_video=False)
+    assert result["coverage"]["complete"]
+    assert result["coverage"]["unique_music_group_count"] == 200
+    assert result["coverage"]["unique_audio_sha256_count"] == 0
+    assert result["evidence"]["collection_complete"]
+    assert result["evidence"]["visual_all_passed"] is None
+    assert result["evidence"]["video_index"]["status"] == "not_requested"
+    completion = result["modes"]["latency"]["completion"]
+    assert completion["normal_completion"]["successes"] == 200
+    assert completion["normal_completion"]["fraction"] == 1.
+    assert completion["normal_completion"]["ci95_low"] == pytest.approx(.9811547, abs=1e-6)
+    assert completion["reached_30s_among_eligible"]["total"] == 0
+    assert completion["total_execution_coverage_fraction"] == pytest.approx(1.)
+    beat = result["modes"]["latency"]["beat"]["actual"]
+    assert beat["available_episodes"] == 0 and beat["music_beat_weighted_distance_seconds"] is None
+    assert beat["unavailable_reason_counts"] == {"no_music_beats": 200}
+    assert len(list(csv.DictReader(Path(outputs["csv"]).open()))) == 200
+    webpage = Path(outputs["html"]).read_text()
+    assert "<video" not in webpage and "纯数据评估" in webpage
+    assert "200 首音乐" in Path(outputs["markdown"]).read_text()
+
+
+def test_completion_denominators_short_music_startup_control_and_infra_are_distinct(tmp_path):
+    summary = train_no_video(tmp_path, songs=5, music_steps=[1500, 500, 0, 350, 100],
+        frames=[1200, 300, 1200, 1200, 1200], startup_failure="2:latency")
+    for ep, reason, failed in zip(summary["episodes"], ["duration_limit", "music_end", "startup_failure", "global_anchor_yaw", "infrastructure_error"], [False, False, True, True, True]):
+        ep.update(reason=reason, failed=failed)
+    write_json(tmp_path/"run_summary.json", summary)
+    report = train_report(tmp_path, 5)
+    completion = report["modes"]["latency"]["completion"]
+    assert completion["normal_completion"]["successes"] == 2
+    assert completion["normal_completion"]["total"] == 5
+    assert completion["reached_30s_among_eligible"]["successes"] == 1
+    assert completion["reached_30s_among_eligible"]["total"] == 4
+    assert completion["ending_category_counts"] == {"duration_limit": 1, "natural_music_end": 1, "startup_failure": 1, "control_failure": 1, "infrastructure_error": 1}
+    assert completion["requested_music_seconds_for_attempted"] == 130.
+    assert completion["executed_music_seconds"] == 49.
+    assert completion["total_execution_coverage_fraction"] == pytest.approx(49/130)
+    assert completion["failure_music_seconds"]["mean"] == 3.5
+    assert report["modes"]["latency"]["by_dataset"]["Mine"]["completion"]["attempted_episodes"] == 3
+    assert report["episodes"][3]["completion"]["failure_music_seconds"] == 7.
+
+
+def test_smoothness_has_supported_points_and_threshold_strict_comparison(tmp_path):
+    summary = train_no_video(tmp_path)
+    ep = summary["episodes"][0]
+    path = tmp_path/ep["artifacts"]["trace"]
+    rows = [json.loads(line) for line in path.read_text().splitlines()]
+    for i, row in enumerate(rows):
+        row["actual_joint_pos_gmt"] = [0.]*21
+        row["actual_joint_vel_gmt"] = [float(max(0, i-50)**2)]*21
+        row["reference"] = {"joint_pos": [0.]*21, "joint_vel": [0.]*21, "body_pos_w": [[0., 0., .48]]}
+        row["reference_plan_id"] = "plan1"
+        row["errors"] = {"root_height_error_m": .2, "non_yaw_orientation_error_rad": .6,
+                         "yaw_error_rad": 1.5 if i <= 51 else 1.51, "global_orientation_error_rad": 1.6}
+    path.write_text(''.join(json.dumps(row)+'\n' for row in rows))
+    result = train_report(tmp_path, 1)
+    extended = result["episodes"][0]["startup_diagnostics"]["extended"]
+    assert extended["threshold_first_crossing"]["yaw_error_rad"]["music_seconds"] == .06
+    assert "root_height_error_m" not in extended["threshold_first_crossing"]
+    assert "non_yaw_orientation_error_rad" not in extended["threshold_first_crossing"]
+    assert "global_orientation_error_rad" not in extended["threshold_crossing_counts"]
+    assert extended["threshold_crossing_counts"]["yaw_error_rad"] == 3
+    motion = result["modes"]["latency"]["motion_pooled_music_control_steps"]
+    assert motion["actual_joint_speed_rms_rad_s"]["count"] == 5
+    assert motion["actual_joint_acceleration_rms_rad_s2"]["count"] == 4
+    assert motion["actual_joint_jerk_rms_rad_s3"]["count"] == 3
+    assert motion["actual_joint_jerk_rms_rad_s3"]["mean"] == pytest.approx(5000.)
+    assert result["modes"]["latency"]["physical_pooled_music_control_steps"]["both_feet_contact_above_1n"]["mean"] == 1.
+
+
+def test_interrupted_run_recovers_finished_and_partial_disk_evidence(tmp_path):
+    summary = train_no_video(tmp_path, songs=2)
+    first, second = summary["episodes"]
+    write_json((tmp_path/first["artifacts"]["trace"]).with_name("summary.json"), first)
+    second_initial = (tmp_path/second["artifacts"]["trace"]).with_name("initial.json")
+    initial = json.loads(second_initial.read_text())
+    initial.update(sample=second["sample"], mode="latency", seed=42)
+    write_json(second_initial, initial)
+    summary["episodes"] = []
+    summary["exit_code"] = 1
+    write_json(tmp_path/"run_summary.json", summary)
+    write_json(tmp_path/"failure.json", {"type": "TimeoutError", "message": "fixture worker timeout"})
+    report = train_report(tmp_path, 3)
+    assert report["coverage"]["attempted_episodes"] == 2
+    assert report["coverage"]["not_attempted_episodes"] == 1
+    assert not report["evidence"]["collection_complete"]
+    assert report["episodes"][1]["completion"]["category"] == "infrastructure_error"
+    assert report["modes"]["latency"]["completion"]["normal_completion_fraction_of_requested"] == pytest.approx(1/3)
+    assert report["run_infrastructure_error"]["type"] == "TimeoutError"
+
+
+def test_runtime_limits_and_contact_torque_diagnostics_have_correct_order_and_units(tmp_path):
+    summary = train_no_video(tmp_path)
+    identity = json.loads((tmp_path/"gmt_identity.json").read_text())
+    names = [f"j{i}" for i in range(21)]
+    identity["runtime_fingerprint"] = {"parameters": {"joint_names": names,
+        "joint_pos_limits": [[[-1., 1.]]*21], "joint_vel_limits": [[2.]*21], "joint_effort_limits": [[4.]*21]}}
+    write_json(tmp_path/"gmt_identity.json", identity)
+    path = tmp_path/summary["episodes"][0]["artifacts"]["trace"]
+    rows = [json.loads(line) for line in path.read_text().splitlines()]
+    for row in rows:
+        row["actual_joint_pos_gmt"] = [1.1]+[0.]*20
+        row["actual_joint_vel_gmt"] = [3.]*21
+        row["physical_diagnostics"].update(joint_names=names, computed_joint_torque_nm=[8.]*21,
+            applied_joint_torque_nm=[4.]*21, contact_body_names=["base_link", "l_ankle_roll_link", "r_ankle_roll_link"],
+            net_contact_forces_w_n=[[0., 0., 2.], [0., 0., 100.], [0., 0., 100.]])
+    path.write_text(''.join(json.dumps(row)+'\n' for row in rows))
+    result = train_report(tmp_path, 1)
+    physical = result["modes"]["latency"]["physical_pooled_music_control_steps"]
+    assert physical["joint_position_limit_exceeded"]["mean"] == 1.
+    assert physical["joint_position_limit_violation_max_rad"]["max"] == pytest.approx(.1)
+    assert physical["joint_speed_limit_ratio_max"]["max"] == 1.5
+    assert physical["computed_torque_estimate_limit_ratio_max"]["max"] == 2.
+    assert physical["applied_torque_estimate_limit_ratio_max"]["max"] == 1.
+    assert physical["nonfoot_contact_above_1n"]["mean"] == 1.
+    rows[-1]["physical_diagnostics"]["joint_names"] = list(reversed(names))
+    path.write_text(''.join(json.dumps(row)+'\n' for row in rows))
+    with pytest.raises(ValueError, match="names/order differ"):
+        train_report(tmp_path, 1)
