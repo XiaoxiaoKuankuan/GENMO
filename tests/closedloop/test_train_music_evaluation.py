@@ -1,6 +1,7 @@
 """训练音乐专项的选样、输入缺失策略和阈值配置回归测试。
 
-使用临时清单验证固定种子选样不受清单行顺序影响、同组最长条目和跨组音频去重、
+使用临时清单验证固定种子选样不受清单行顺序影响、同组最长条目、跨库全局音乐组
+与音频 SHA 双重去重（同歌不同裁剪/编码仍只算一首）、固定排序补足各库配额、
 train/val 隔离及无视频时可省略音频。配置测试确认新 yaw 分离模式不误用整体姿态
 阈值，且训练集专项不会被报告为原四库 val 的48集验收；不加载模型或启动仿真。
 """
@@ -32,8 +33,8 @@ def _row(name, group, frames=900, audio=None):
             "source_audio_sha256": hashlib.sha256((audio or name).encode()).hexdigest()}
 
 
-def _manifest(tmp_path, rows):
-    path = tmp_path / "Mine/manifests/train.jsonl"
+def _manifest(tmp_path, rows, dataset="Mine"):
+    path = tmp_path / dataset / "manifests/train.jsonl"
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text("".join(json.dumps(row) + "\n" for row in rows))
     return path
@@ -55,6 +56,38 @@ def test_duplicate_audio_cannot_fill_requested_song_count(tmp_path):
     _manifest(tmp_path, [_row("one", "g1", audio="same"), _row("two", "g2", audio="same")])
     with pytest.raises(ValueError, match="requested 2 independent train songs, found 1"):
         select_train_music(tmp_path, ["Mine"], 2)
+
+
+def test_same_global_song_with_different_audio_cannot_fill_cross_dataset_quota(tmp_path):
+    _manifest(tmp_path, [_row("208", "tomboy", audio="FineDance crop")], "FineDance")
+    _manifest(tmp_path, [_row("dance_3__TOMBOY", "tomboy", audio="Mine crop")])
+    with pytest.raises(ValueError, match="Mine: requested 1 independent train songs, found 0"):
+        select_train_music(tmp_path, ["FineDance", "Mine"], 1)
+
+
+def test_cross_dataset_global_group_dedup_refills_quota_deterministically(tmp_path):
+    _manifest(tmp_path, [_row("208", "tomboy", audio="FineDance crop")], "FineDance")
+    mine = [_row("dance_3__TOMBOY", "tomboy", audio="Mine crop"),
+            _row("replacement_short", "new_song", frames=300),
+            _row("replacement_long", "new_song", frames=1000), _row("another", "other_song")]
+    path = _manifest(tmp_path, mine)
+    chosen = select_train_music(tmp_path, ["FineDance", "Mine"], {"FineDance": 1, "Mine": 2})
+    path.write_text("".join(json.dumps(row) + "\n" for row in reversed(mine)))
+    repeated = select_train_music(tmp_path, ["FineDance", "Mine"], {"FineDance": 1, "Mine": 2})
+    assert [s["row"]["sample_id"] for s in chosen] == [s["row"]["sample_id"] for s in repeated]
+    assert chosen[0]["row"]["sample_id"] == "208"
+    assert {s["row"]["sample_id"] for s in chosen[1:]} == {"replacement_long", "another"}
+    assert len({s["group_id"] for s in chosen}) == len(chosen) == 3
+    assert len({s["row"]["source_audio_sha256"] for s in chosen}) == 3
+    assert all(s["selection_policy"] == "seeded_group_longest_unique_global_group_and_audio_sha256"
+               for s in chosen)
+
+
+def test_audio_sha_still_deduplicates_different_global_groups_across_datasets(tmp_path):
+    _manifest(tmp_path, [_row("first", "first_group", audio="same bytes")], "FineDance")
+    _manifest(tmp_path, [_row("second", "different_group", audio="same bytes")])
+    with pytest.raises(ValueError, match="Mine: requested 1 independent train songs, found 0"):
+        select_train_music(tmp_path, ["FineDance", "Mine"], 1)
 
 
 def test_train_selector_rejects_val_rows_even_if_filename_says_train(tmp_path):

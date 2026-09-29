@@ -4,7 +4,9 @@
 排序。在线模型只读取音乐特征，不打开动作文件或监督标签。音频保留给同步视频，两个
 文件均按 manifest SHA 验证；本模块不修改数据划分，也不把旧预训练见过的 val 声称为未见。
 训练集专项显式读取 train 清单，按固定种子散列排列关联组，组内仍取最长条目，
-并按音频内容 SHA 全局去重，避免把同一音乐的不同舞者计为不同歌曲。选样不依赖
+并按重划分关联组 ID 和音频内容 SHA 同时全局去重，避免把跨库同歌的不同裁剪、
+编码或舞者计为不同歌曲。关联组 ID 不加数据集命名空间，先出现的数据集优先占用；
+后续数据集沿固定种子的原排序继续补足各自配额。选样不依赖
 模型输出或文件是否已下载。无视频评估可只要求音乐特征；缺少的音频单独报告，
 不伪造已验证音频，也不影响基于 EDGE35 节拍特征的指标计算。
 """
@@ -76,11 +78,16 @@ def music_path(data_root, sample, key):
 
 
 def select_train_music(data_root, datasets, groups_per_dataset, *, seed=42):
-    """从完整 train manifest 确定性抽取独立音乐；不足时明确失败，不混入 val/test。"""
+    """按全局关联组和音频双重去重抽取 train 音乐，保持种子排序与各库配额。
+
+    resplit_provenance.group_id 已关联跨库的同一首音乐。不同库中的同歌可能裁剪或
+    重新编码，导致音频 SHA 不同，因此必须同时检查全局组 ID；不能通过添加库名
+    把它们当成不同歌曲。遇到重复项只沿既定排序继续取下一组，不依据模型表现选样。
+    """
     if isinstance(seed, bool) or not isinstance(seed, int):
         raise ValueError("Music selection seed must be an integer")
     root = Path(data_root).resolve()
-    selected, seen_audio = [], set()
+    selected, seen_groups, seen_audio = [], set(), set()
     for dataset in datasets:
         count = groups_per_dataset[dataset] if isinstance(groups_per_dataset, Mapping) else groups_per_dataset
         if isinstance(count, bool) or not isinstance(count, int) or count < 1:
@@ -98,6 +105,8 @@ def select_train_music(data_root, datasets, groups_per_dataset, *, seed=42):
             hashlib.sha256(f"{seed}/{dataset}/{group}".encode("utf-8")).hexdigest(), group))
         chosen = []
         for group in ranked:
+            if group in seen_groups:
+                continue
             row = sorted(groups[group], key=lambda item: (-int(item["num_frames"]), item["sample_id"]))[0]
             audio_sha = row.get("source_audio_sha256")
             if not isinstance(audio_sha, str) or len(audio_sha) != 64:
@@ -106,8 +115,9 @@ def select_train_music(data_root, datasets, groups_per_dataset, *, seed=42):
                 continue
             chosen.append({"dataset": dataset, "group_id": group, "row": row,
                            "manifest_sha256": sha256_file(manifest), "selection_seed": seed,
-                           "selection_policy": "seeded_group_longest_unique_audio_sha256",
+                           "selection_policy": "seeded_group_longest_unique_global_group_and_audio_sha256",
                            "pretraining_unseen_claim": False})
+            seen_groups.add(group)
             seen_audio.add(audio_sha)
             if len(chosen) == count:
                 break

@@ -10,6 +10,8 @@ Actor与Isaac worker。默认完整评估包含10+100延迟校准、四库各两
 同时复核启动前捕获的源码指纹，不把进程正常退出当作动力学验收通过。
 训练集专项通过独立配置选择完整 train 清单中的独立音乐，允许无音频、无录像运行，
 并显式使用 yaw 分离终止配置。旧四库 val/48集验收仍保持原阈值、选择和判定边界。
+--only-sample只从完整确定性清单精确选取指定数据集/样本，供显式补测；记录父清单
+SHA和原始数量，不重排、不跨split补样，不把单曲补测冒充整套评估。
 """
 from __future__ import annotations
 
@@ -48,6 +50,26 @@ from gem.closedloop.baseline_provenance import (  # noqa: E402
 
 def write_json(path, value):
     Path(path).write_text(json.dumps(value, ensure_ascii=False, indent=2, allow_nan=False), encoding="utf-8")
+
+
+def select_evaluation_subset(selected, sample_keys=None):
+    """在已确定的完整音乐清单上做精确白名单，留下可复核的父清单身份。"""
+    keys = [f"{sample['dataset']}/{sample['row']['sample_id']}" for sample in selected]
+    if len(set(keys)) != len(keys):
+        raise ValueError("Parent music selection contains duplicate dataset/sample keys")
+    requested = None if sample_keys is None else list(sample_keys)
+    if requested is not None:
+        if not requested or len(set(requested)) != len(requested):
+            raise ValueError("Explicit sample subset must be nonempty and unique")
+        missing = sorted(set(requested) - set(keys))
+        if missing:
+            raise ValueError(f"Requested samples not in the deterministic parent selection: {missing}")
+    parent_bytes = json.dumps(selected, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    result = selected if requested is None else [sample for sample, key in zip(selected, keys) if key in set(requested)]
+    return result, {"parent_selection_sha256": hashlib.sha256(parent_bytes).hexdigest(),
+                    "parent_music_count": len(selected), "selected_music_count": len(result),
+                    "requested_sample_keys": requested,
+                    "parent_order_preserved": True}
 
 
 def _command(args, cwd=None):
@@ -391,6 +413,8 @@ def main(argv=None):
     parser.add_argument("--preflight", action="store_true")
     parser.add_argument("--datasets", nargs="+")
     parser.add_argument("--max-episodes", type=int)
+    parser.add_argument("--only-sample", action="append", metavar="DATASET/SAMPLE_ID",
+                        help="精确补测完整确定性清单中的样本；可重复指定，不重新选样")
     parser.add_argument("--seconds", type=float)
     parser.add_argument("--modes", nargs="+", choices=("paused", "latency"))
     parser.add_argument("--calibration-warmup", type=int)
@@ -428,6 +452,11 @@ def main(argv=None):
     else:
         selected = select_val_music(config["paths"]["data_root"], config["evaluation"]["datasets"],
                                     config["evaluation"]["groups_per_dataset"])
+    try:
+        selected, selection_scope = select_evaluation_subset(selected, args.only_sample)
+    except ValueError as exc:
+        parser.error(str(exc))
+    config["evaluation"]["selection_scope"] = selection_scope
     output = (args.output_dir or Path(config["output_root"]) / datetime.now().strftime("%Y%m%d_%H%M%S_%f")).resolve()
     if output.exists():
         raise FileExistsError(f"Refusing to overwrite experiment: {output}")
@@ -542,7 +571,8 @@ def main(argv=None):
         scope = validation_scope(config, selected, len(episodes), calibration, video=args.video, preflight_only=args.preflight)
         flags = acceptance_flags(summary, scope, workers.shutdown if workers is not None else {}, code=code, error=error)
         summary.update(validation_scope=scope, acceptance=flags, exit_code=code,
-                       selection=selected, evaluation=config["evaluation"], termination=config["termination"])
+                       selection=selected, selection_scope=selection_scope,
+                       evaluation=config["evaluation"], termination=config["termination"])
         write_json(output / "run_summary.json", summary)
         if summary.get("episodes"):
             from tools.eval.audit_closedloop_baseline import audit_experiment
