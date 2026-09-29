@@ -1,0 +1,63 @@
+# 第8步固定环境闭环：权重及统计量冻结，两个worker使用独立解释器，不包含训练配置。
+version: genmo.gmt_frozen_isaac.v1
+paths:
+  genmo_repo: /home/weili/bumi-closedloop-worktrees/GENMO
+  gmt_repo: /home/weili/bumi-closedloop-worktrees/legged_lab_gmt
+  genmo_python: /home/weili/GENMO/.venv/bin/python
+  isaac_python: /home/weili/miniconda3/envs/env_isaaclab/bin/python
+  checkpoint: /home/weili/bumi-closedloop-worktrees/GENMO/inputs/checkpoints/stage1_s350000_20260928/s350000.pt
+  stats: /home/weili/bumi-closedloop-worktrees/GENMO/inputs/checkpoints/stage1_s350000_20260928/qpos30_train_stats.json
+  kinematics: /home/weili/bumi-closedloop-worktrees/GENMO/inputs/checkpoints/stage1_s350000_20260928/assets/bumi_kinematics_robot_retargeter_fe934_v1.json
+  gmt_policy: /home/weili/bumi-closedloop-worktrees/legged_lab_gmt/logs/rsl_rl/model_135000_stage2.onnx
+  compat_profile: /home/weili/bumi-closedloop-worktrees/legged_lab_gmt/configs/sim2sim/model_135000_stage2.json
+  isaac_contract: /home/weili/bumi-closedloop-worktrees/legged_lab_gmt/outputs/datasets/volc_gmt_mine99_20260928/records/root_z_restoration_20260928/isaac_contract.json
+  data_root: /home/weili/bumi-closedloop-worktrees/GENMO/inputs/evals/stage1_fourset_20260928/data
+runtime:
+  genmo_device: cuda:0
+  # 用户明确授权本轮B=1短程推理共享GPU，保留已常驻的文本演示服务。
+  allow_shared_gpu: true
+  physics_device: cpu
+  headless: true
+  num_envs: 1
+  torch_threads: 4
+  rpc_timeout_s: 120
+  worker_start_timeout_s: 180
+model:
+  history_steps: 50
+  ddim_steps: 20
+  guidance_scale: 2.5
+timing:
+  clock_hz: 600
+  decision_ticks: 300
+  control_ticks: 12
+  physics_ticks: 3
+  warmup_ticks: 600
+  min_prefix_frames: 12
+  lookahead_control_steps: 10
+  latency_guard_s: 0.04
+  calibration_warmup: 10
+  calibration_samples: 100
+environment:
+  terrain: plane
+  ground_height_m: 0.0
+  initial_foot_clearance_m: 0.001
+  domain_randomization: false
+  observation_noise: false
+  external_perturbations: false
+  reset_randomization: false
+  actuator_delay_steps: 0
+  curriculum: false
+termination:
+  root_height_error_m: 0.40
+  global_orientation_error_rad: 1.20
+  end_effector_relative_height_error_m: 0.30
+diagnostics:
+  record_original_threshold_crossings: true
+  verify_actor_condition_edges: true
+evaluation:
+  datasets: [AIST++, AIOZ-GDANCE, FineDance, Mine]
+  seeds: [42, 43, 44]
+  seconds: 30
+  modes: [paused, latency]
+  groups_per_dataset: 2
+output_root: /home/weili/bumi-closedloop-worktrees/GENMO/outputs/closedloop_stage8

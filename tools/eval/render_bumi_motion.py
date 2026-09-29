@@ -9,6 +9,7 @@
 ``--follow-root`` 为长音乐对比提供可选的根平移跟随相机：保持默认相机的距离、
 方位角和俯角，仅逐帧把观察中心移到根位置，避免机器人随世界系位移走出画面。
 它不跟随根旋转，不修改 qpos、地面或动作指标；不传此选项时保留原来的固定相机。
+离屏缓冲在内存中按请求分辨率扩容，不改写带SHA身份的源XML及任何动力学参数。
 """
 
 from __future__ import annotations
@@ -76,7 +77,9 @@ def main() -> None:
     parser.add_argument("--width", type=int, default=1280)
     parser.add_argument("--height", type=int, default=720)
     parser.add_argument("--camera")
-    parser.add_argument("--follow-root", action="store_true", help="相机中心逐帧跟随根位置；不改变动作")
+    parser.add_argument(
+        "--follow-root", action="store_true", help="相机中心逐帧跟随根位置；不改变动作"
+    )
     parser.add_argument("--max-frames", type=int)
     args = parser.parse_args()
     if args.follow_root and args.camera is not None:
@@ -99,6 +102,8 @@ def main() -> None:
             "rendering refuses to guess a reorder"
         )
     data = mujoco.MjData(model)
+    model.vis.global_.offwidth = max(model.vis.global_.offwidth, args.width)
+    model.vis.global_.offheight = max(model.vis.global_.offheight, args.height)
     renderer = mujoco.Renderer(model, height=args.height, width=args.width)
     camera: str | int | mujoco.MjvCamera = -1 if args.camera is None else args.camera
     if args.follow_root:
