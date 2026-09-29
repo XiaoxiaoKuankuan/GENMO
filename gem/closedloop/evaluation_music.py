@@ -12,10 +12,26 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 from collections.abc import Mapping
+from numbers import Integral
 from pathlib import Path
 
 import numpy as np
+
+
+def music_control_steps(feature_frames, maximum_seconds):
+    """把30Hz音乐长度映射到50Hz可执行步数，协调器和报告共用同一边界。
+
+    音乐帧数用整数有理数计算，避免492帧的16.4秒在浮点乘50后成为
+    819.999...并少执行一步。显式秒上限只容忍1e-9步的浮点舍入误差，
+    不把不足一个控制周期的音乐尾部补齐或循环。
+    """
+    if isinstance(feature_frames, bool) or not isinstance(feature_frames, Integral) or feature_frames < 0:
+        raise ValueError("Music feature frame count must be a nonnegative integer")
+    if isinstance(maximum_seconds, bool) or not math.isfinite(float(maximum_seconds)) or maximum_seconds <= 0:
+        raise ValueError("Maximum music seconds must be finite and positive")
+    return min(int(feature_frames) * 50 // 30, math.floor(float(maximum_seconds) * 50 + 1e-9))
 
 
 def sha256_file(path):

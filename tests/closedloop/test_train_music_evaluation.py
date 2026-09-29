@@ -14,10 +14,15 @@ from pathlib import Path
 import pytest
 import yaml
 
-from gem.closedloop.evaluation_music import check_music_files, select_train_music
+from gem.closedloop.evaluation_music import check_music_files, select_train_music, music_control_steps
 from tools.eval.run_closedloop_baseline import validate_config, validation_scope
 
 ROOT = Path(__file__).resolve().parents[2]
+
+
+@pytest.mark.parametrize("frames,seconds,steps", [(492, 30., 820), (901, 30., 1500), (900, 16.4, 820)])
+def test_music_duration_control_boundary_avoids_float_underflow(frames, seconds, steps):
+    assert music_control_steps(frames, seconds) == steps
 
 
 def _row(name, group, frames=900, audio=None):

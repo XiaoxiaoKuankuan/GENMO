@@ -5,6 +5,8 @@ GMT预留前缀，再把同一时刻实际历史交给现有Actor。暂停模式
 模式把完整生成/通信/转换wall耗时映射到600Hz仿真时间，等待期间消费旧参考。一次最多
 一个候选，跨决策周期仍未到达时记录漏决策；永远不补发旧时刻条件、不回填过去。
 advance RPC具有唯一编号和episode身份，反馈逐条交给recorder，失败后不自动reset。
+音乐长度到控制步数使用整数帧换算，并与统计报告共用边界，避免浮点舍入造成正常
+短音乐少执行20ms后被错误判为未完成。
 """
 from __future__ import annotations
 
@@ -14,6 +16,7 @@ import time
 import numpy as np
 
 from gem.runtime.closedloop_protocol import CLOCK_HZ, CONTROL_TICKS, DECISION_TICKS, RemoteError
+from gem.closedloop.evaluation_music import music_control_steps
 
 
 def ceil_control_tick(tick):
@@ -180,8 +183,7 @@ class ClosedLoopCoordinator:
         requested = float(self.config["evaluation"]["seconds"] if seconds is None else seconds)
         if requested <= 0:
             raise ValueError("Episode seconds must be positive")
-        duration = min(requested, len(music) / 30.)
-        end_tick = self.warmup_ticks + int(math.floor(duration * 50)) * CONTROL_TICKS
+        end_tick = self.warmup_ticks + music_control_steps(len(music), requested) * CONTROL_TICKS
         snapshot = self._start(sample, seed, mode)
         if snapshot["done"]:
             return self.recorder.finish_episode(snapshot, "startup_failure")

@@ -9,11 +9,12 @@ episode 的初态/逐控制步轨迹。逐条流式读取体积较大的 JSONL�
 报告按音频 SHA 或明确的独立音乐组身份核验不同音乐，模式、数据划分与目标首数
 由调用方明确指定；默认仍为旧二十首 val 双模式视频报告，不改变已有验收规则。
 纯数据模式无需视频或源音频，但特征来源及独立组仍须可追溯；缺测项保留 null。
+已明确系统异常的末步记录缺失和EOF无换行JSON残片允许只读恢复，保留原文件SHA、
+最后有效时刻和残片摘要，归为基础设施异常；中间坏行仍拒绝，不补造物理步。
 新增逐曲CSV、完成率Wilson区间、按库统计、时长覆盖、运动平滑性、物理诊断及
 分离yaw终止阈值统计。完成率按实际达到min(时长上限,音乐特征长度)判定；基础
 设施故障、启动失败、跟踪失败与自然结束分别计数，30秒率只统计足够长的音乐。
-同曲多种子不能
-冒充不同歌曲。startup 失败、music 失败和音乐自然结束分别统计，主误差只使用
+同曲多种子不能冒充不同歌曲。startup 失败、music 失败和音乐自然结束分别统计，主误差只使用
 music 控制步。warmup 前五步、末十步及 music 首一秒另外汇总实际姿态/速度/接触，
 不引入稳定阈值，不丢弃 music 初段，也不将诊断冒充额外的终止判定。节拍结果复用
 已有指标，缺失值保留 null；跨曲分位数从控制步重新汇总，绝不平均各曲 P95。
@@ -46,6 +47,7 @@ ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 from gem.closedloop.baseline_metrics import distribution, json_value  # noqa: E402
+from gem.closedloop.evaluation_music import music_control_steps  # noqa: E402
 
 
 def _json(path):
@@ -65,6 +67,30 @@ def _array(value, shape, name):
     if array.shape != shape or not np.isfinite(array).all():
         raise ValueError(f"Invalid {name}: expected finite {shape}, got {array.shape}")
     return array
+
+
+def _trace_rows(stream, integrity, *, digest=None):
+    """只恢复EOF处无换行的坏JSON残片；中间坏行和完整换行坏行仍拒绝。
+
+    只消费完整记录，不修补或猜测残片字段。残片长度、SHA及原始行号进入
+    基础设施异常证据；digest仍覆盖完整原文件字节，不能用恢复视图改写SHA。
+    """
+    for line_number, line in enumerate(stream, 1):
+        if digest is not None:
+            digest.update(line)
+        if not line.strip():
+            continue
+        try:
+            row = json.loads(line)
+        except (json.JSONDecodeError, UnicodeDecodeError) as error:
+            if line.endswith(b"\n") or stream.read(1):
+                raise ValueError(f"Invalid trace JSON at {stream.name}:{line_number}") from error
+            integrity.update(complete=False, system_error=integrity.get("system_error") or "truncated_trace_final_line",
+                             truncated_final_line={"line_number": line_number, "byte_count": len(line),
+                                                   "sha256": hashlib.sha256(line).hexdigest(),
+                                                   "error_type": type(error).__name__})
+            return
+        yield line_number, row
 
 
 def _diagnostic(row, previous_qpos):
@@ -155,12 +181,18 @@ def _motion_step(row, state, motion, physical, limits):
                     motion[kind+"_joint_jerk_abs_max_rad_s3"].append(float(np.abs(jerk).max()))
                 state[kind+"_acceleration"] = acceleration
             state[kind+"_velocity"] = velocity
+        else:
+            # 某步缺速度后，下一条有效值不能与两步前的状态当作相邻20ms差分。
+            state.pop(kind+"_velocity", None)
+            state.pop(kind+"_acceleration", None)
         if root is not None:
             root = _array(root, (3,), kind+" root")
             previous = state.get(kind+"_root")
             if previous is not None:
                 motion[kind+"_root_xy_speed_m_s"].append(float(np.linalg.norm(root[:2]-previous[:2])*50.))
             state[kind+"_root"] = root
+        else:
+            state.pop(kind+"_root", None)
     diagnostic = row.get("physical_diagnostics") or {}
     if diagnostic.get("joint_names") and limits.get("joint_names") and limits["joint_names"] != diagnostic["joint_names"]:
         raise ValueError("Physical diagnostics and runtime joint-limit names/order differ")
@@ -219,14 +251,11 @@ def _trace(root, episode, pool, *, limits=None, thresholds=None):
     state, extras, physical, first_crossings = {}, defaultdict(list), defaultdict(list), {}
     own_errors, boundaries = defaultdict(list), defaultdict(list)
     previous_reference = None
+    trace_integrity = dict(episode.get("trace_integrity") or {})
     for name in ("errors", "latency"):
         pool.setdefault(name, defaultdict(list))
     with path.open("rb") as stream:
-        for line_number, line in enumerate(stream, 1):
-            digest.update(line)
-            if not line.strip():
-                continue
-            row = json.loads(line)
+        for line_number, row in _trace_rows(stream, trace_integrity, digest=digest):
             if row["episode_id"] != episode["episode_id"] or row["tick"] != previous_tick+12:
                 raise ValueError(f"Trace episode/tick mismatch at {path}:{line_number}")
             if row.get("control_tick_begin") != previous_tick:
@@ -276,10 +305,19 @@ def _trace(root, episode, pool, *, limits=None, thresholds=None):
                 first_frame = frame if first_frame is None else first_frame
                 last_frame, frame_count = frame, frame_count+1
             previous_tick = row["tick"]
-    if previous_tick != episode["terminal_snapshot"]["tick"]:
-        raise ValueError("Trace does not reach terminal snapshot")
+    terminal_tick = int(episode["terminal_snapshot"]["tick"])
+    known_incomplete = bool(trace_integrity.get("system_error"))
+    if previous_tick != terminal_tick:
+        if not known_incomplete or terminal_tick < previous_tick or (terminal_tick-previous_tick) % 12:
+            raise ValueError("Trace does not reach terminal snapshot")
+        trace_integrity.update(complete=False, recorded_trace_last_tick=previous_tick,
+                               terminal_snapshot_tick=terminal_tick,
+                               missing_trailing_control_step_records=(terminal_tick-previous_tick)//12)
     if phase_counts["music"] != episode["recorded_music_control_steps"]:
-        raise ValueError("Trace music frame count differs from summary")
+        if not known_incomplete:
+            raise ValueError("Trace music frame count differs from summary")
+        trace_integrity.update(complete=False, recovered_music_control_step_records=phase_counts["music"],
+                               summary_music_control_step_records=episode["recorded_music_control_steps"])
     for name, collection in (("motion", extras), ("physical", physical), ("boundaries", boundaries)):
         pool.setdefault(name, defaultdict(list))
         for key, values in collection.items():
@@ -289,6 +327,7 @@ def _trace(root, episode, pool, *, limits=None, thresholds=None):
         joints = state.get(kind+"_joints", [])
         amplitudes[kind] = ((np.percentile(joints, 95, axis=0)-np.percentile(joints, 5, axis=0)).tolist() if joints else None)
     return {"trace_sha256": digest.hexdigest(), "control_steps": sum(phase_counts.values()),
+            "trace_integrity": trace_integrity,
             "phase_counts": dict(phase_counts),
             "warmup_all": _window(phase_rows["warmup"]), "music_all": _window(phase_rows["music"]),
             "warmup_first_5": _window(warmup_first), "warmup_last_10": _window(list(warmup_last)),
@@ -447,7 +486,7 @@ def _completion(original, maximum_seconds):
         raise ValueError("Music feature duration must be finite and positive")
     target = min(maximum_seconds, feature_seconds) if feature_seconds is not None else None
     # 控制时间网格向下取整与coordinator完全一致；余下不足20ms不能当失败。
-    executable_target = math.floor(target*50.+1e-9)/50. if target is not None else None
+    executable_target = music_control_steps(feature_frames, maximum_seconds)/50. if feature_frames is not None else None
     elapsed = float(original.get("music_duration_seconds") or 0.)
     reason = original.get("reason") or "unknown"
     integrity = original.get("trace_integrity") or {}
@@ -573,18 +612,17 @@ def _partial_episodes(root, summary):
             if not trace.is_file() or "sample" not in initial:
                 continue
             music_count, count, last_tick = 0, 0, snapshot["tick"]
-            with trace.open(encoding="utf-8") as stream:
-                for line in stream:
-                    if line.strip():
-                        row = json.loads(line)
-                        count += 1
-                        music_count += row.get("phase") == "music"
-                        last_tick = row["tick"]
+            trace_integrity = {"complete": False, "system_error": "episode_summary_missing"}
+            with trace.open("rb") as stream:
+                for _, row in _trace_rows(stream, trace_integrity):
+                    count += 1
+                    music_count += row.get("phase") == "music"
+                    last_tick = row["tick"]
             episode = {"episode_id": snapshot["episode_id"], "sample": initial["sample"], "seed": initial["seed"], "mode": initial["mode"],
                        "reason": "infrastructure_error", "backend_reason": None, "failed": True, "startup_failure": False,
                        "music_duration_seconds": music_count/50., "warmup_duration_seconds": (count-music_count)/50., "total_duration_seconds": count/50.,
                        "recorded_music_control_steps": music_count, "artifacts": {"trace": str(trace.relative_to(root))},
-                       "terminal_snapshot": {**snapshot, "tick": last_tick}, "trace_integrity": {"complete": False, "system_error": "episode_summary_missing"}}
+                       "terminal_snapshot": {**snapshot, "tick": last_tick}, "trace_integrity": trace_integrity}
         source.append(episode)
         indexed.add(episode["episode_id"])
     return [e for e in source if e.get("mode") != "calibration"]
@@ -620,6 +658,7 @@ def build_music_sweep_report(run_dir, *, expected_music=20, expected_modes=("pau
             raise ValueError(f"Missing audio SHA for {episode_id}")
         episode_pool = _new_pool()
         trace = _trace(root, original, episode_pool, limits=limits, thresholds=thresholds)
+        original = {**original, "trace_integrity": trace["trace_integrity"]}
         ep = {key: original.get(key) for key in ("episode_id", "mode", "seed", "reason", "backend_reason", "failed", "startup_failure",
                 "music_duration_seconds", "warmup_duration_seconds", "total_duration_seconds", "replan_count", "errors", "music", "motion",
                 "reference_boundaries", "protected_reference", "prefix_frames", "prefix_over_18_count", "reference_buffer", "event_counts", "rejection_codes",
@@ -637,6 +676,8 @@ def build_music_sweep_report(run_dir, *, expected_music=20, expected_modes=("pau
             issues.append(f"{episode_id}: independent music group ID missing")
         if expected_split == "train" and ep["completion"]["feature_duration_seconds"] is None:
             issues.append(f"{episode_id}: music feature duration missing")
+        if trace["trace_integrity"].get("system_error"):
+            issues.append(f"{episode_id}: incomplete trace infrastructure evidence: {trace['trace_integrity']['system_error']}")
         for target in (pools[original["mode"]], dataset_pools[(original["mode"], ep["dataset"])]):
             for category in ("errors", "latency", "motion", "physical", "boundaries"):
                 for key, values in episode_pool[category].items():

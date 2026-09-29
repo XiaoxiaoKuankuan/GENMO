@@ -130,6 +130,7 @@ PYTHONDONTWRITEBYTECODE=1 /home/weili/GENMO/.venv/bin/python -B tools/eval/run_c
 
 ```bash
 cd /home/user/liwei/GENMO-bumi-closedloop
+export LD_LIBRARY_PATH="/data0/user/liwei/closedloop_stage8_runtime/sysroot/usr/lib/x86_64-linux-gnu${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 PYTHONDONTWRITEBYTECODE=1 /home/user/liwei/GENMO/.venv/bin/python -B tools/eval/run_closedloop_baseline.py \
   --config configs/closedloop/stage8_train200_latency_server1.yaml \
   --output-dir /data0/user/liwei/GENMO_outputs/closedloop_stage8/train200_latency_yaw15_20260929/run

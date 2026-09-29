@@ -6,6 +6,8 @@
 的处理。新增200首train单latency无视频矩阵、按实际音乐长度计算的完成率与Wilson
 区间、启动/控制/基础设施故障分类、独立组与节拍缺测、50Hz差分支持点、关节限位、
 分离yaw阈值首次越界和中断后落盘恢复测试。占位视频不会被当作真实渲染证明；真实视频解码由baseline_video负责。
+恢复回归另覆盖已知缺失末步、EOF半行与中间坏行的区分、原SHA不变，以及速度
+缺测后清空差分支持和492音乐帧对应820控制步的共同整数时钟边界。
 全部产物限定pytest临时目录，既有实验数据不修改。
 """
 import copy
@@ -18,7 +20,7 @@ import numpy as np
 import pytest
 
 from tools.eval.report_stage8_music_sweep import (
-    build_music_sweep_report, render_markdown, render_video_index, write_music_sweep_report,
+    _motion_step, build_music_sweep_report, render_markdown, render_video_index, write_music_sweep_report,
 )
 
 
@@ -434,3 +436,100 @@ def test_runtime_limits_and_contact_torque_diagnostics_have_correct_order_and_un
     path.write_text(''.join(json.dumps(row)+'\n' for row in rows))
     with pytest.raises(ValueError, match="names/order differ"):
         train_report(tmp_path, 1)
+
+
+def test_missing_velocity_breaks_acceleration_and_jerk_support():
+    """缺测点前后不做差分，连续支持恢复两/三点后才恢复加速度/jerk。"""
+    from collections import defaultdict
+    state, motion, physical = {}, defaultdict(list), defaultdict(list)
+    for index, speed in enumerate((0., None, 2., 3., 5.), 1):
+        row = {"tick": index*12, "actual_qpos": [0., 0., .48, 1., 0., 0., 0.]+[0.]*21,
+               "actual_joint_vel_gmt": None if speed is None else [speed]*21,
+               "reference": {"joint_vel": None if speed is None else [speed]*21}}
+        _motion_step(row, state, motion, physical, {})
+    for kind in ("actual", "reference"):
+        assert motion[kind+"_joint_acceleration_rms_rad_s2"] == [50., 100.]
+        assert motion[kind+"_joint_jerk_rms_rad_s3"] == [2500.]
+
+
+def test_known_missing_trace_tail_reports_infrastructure_failure_without_fabricating_steps(tmp_path):
+    summary = train_no_video(tmp_path, music_steps=5)
+    ep = summary["episodes"][0]
+    path = tmp_path/ep["artifacts"]["trace"]
+    lines = path.read_text().splitlines()
+    path.write_text('\n'.join(lines[:-1])+'\n')
+    ep["trace_integrity"] = {"complete": False, "system_error": "executed_steps_missing_trace", "missing_control_step_records": 1}
+    ep["recorded_music_control_steps"] -= 1
+    ep.update(reason="nonfinite_state", failed=True)
+    write_json(tmp_path/"run_summary.json", summary)
+    result = train_report(tmp_path, 1)
+    episode = result["episodes"][0]
+    assert episode["completion"]["category"] == "infrastructure_error"
+    assert episode["music_duration_seconds"] == .1
+    assert episode["startup_diagnostics"]["phase_counts"]["music"] == 4
+    assert episode["trace_integrity"]["missing_trailing_control_step_records"] == 1
+    assert episode["trace_integrity"]["recorded_trace_last_tick"] == 648
+    assert episode["trace_integrity"]["terminal_snapshot_tick"] == 660
+    assert not result["evidence"]["collection_complete"]
+    assert result["modes"]["latency"]["completion"]["ending_category_counts"] == {"infrastructure_error": 1}
+
+
+def test_unknown_missing_trace_tail_still_rejects_summary_mismatch(tmp_path):
+    summary = train_no_video(tmp_path)
+    ep = summary["episodes"][0]
+    path = tmp_path/ep["artifacts"]["trace"]
+    path.write_text('\n'.join(path.read_text().splitlines()[:-1])+'\n')
+    with pytest.raises(ValueError, match="does not reach terminal"):
+        train_report(tmp_path, 1)
+
+
+@pytest.mark.parametrize("has_finished_summary", [False, True])
+def test_truncated_final_json_fragment_recovers_full_rows_and_preserves_original_sha(tmp_path, has_finished_summary):
+    summary = train_no_video(tmp_path, music_steps=5)
+    ep = summary["episodes"][0]
+    path = tmp_path/ep["artifacts"]["trace"]
+    if not has_finished_summary:
+        initial_path = path.with_name("initial.json")
+        initial = json.loads(initial_path.read_text())
+        initial.update(sample=ep["sample"], mode="latency", seed=42)
+        write_json(initial_path, initial)
+        summary["episodes"] = []
+        summary["exit_code"] = 1
+    fragment = b'{"episode_id":'
+    with path.open("ab") as stream:
+        stream.write(fragment)
+    original_bytes = path.read_bytes()
+    write_json(tmp_path/"run_summary.json", summary)
+    report = train_report(tmp_path, 1)
+    recovered = report["episodes"][0]
+    assert recovered["completion"]["category"] == "infrastructure_error"
+    assert recovered["startup_diagnostics"]["phase_counts"]["music"] == 5
+    assert recovered["trace_integrity"]["truncated_final_line"] == {
+        "line_number": 56, "byte_count": len(fragment), "sha256": hashlib.sha256(fragment).hexdigest(),
+        "error_type": "JSONDecodeError"}
+    assert recovered["startup_diagnostics"]["trace_sha256"] == hashlib.sha256(original_bytes).hexdigest()
+    assert path.read_bytes() == original_bytes
+    assert not report["evidence"]["collection_complete"]
+
+
+@pytest.mark.parametrize("corruption", ["middle", "final_with_newline"])
+def test_incomplete_recovery_never_accepts_middle_or_complete_bad_json_line(tmp_path, corruption):
+    summary = train_no_video(tmp_path)
+    path = tmp_path/summary["episodes"][0]["artifacts"]["trace"]
+    lines = path.read_bytes().splitlines(keepends=True)
+    if corruption == "middle":
+        lines[2] = b'{"episode_id":\n'
+    else:
+        lines.append(b'{"episode_id":\n')
+    path.write_bytes(b''.join(lines))
+    with pytest.raises(ValueError, match="Invalid trace JSON"):
+        train_report(tmp_path, 1)
+
+
+def test_music_duration_completion_matches_integer_clock_for_492_feature_frames(tmp_path):
+    summary = train_no_video(tmp_path, frames=492, music_steps=820)
+    summary["episodes"][0].update(reason="music_end", failed=False)
+    write_json(tmp_path/"run_summary.json", summary)
+    completion = train_report(tmp_path, 1)["episodes"][0]["completion"]
+    assert completion["executable_target_seconds"] == 16.4
+    assert completion["normal_complete"] is True

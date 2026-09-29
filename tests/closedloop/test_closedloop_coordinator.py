@@ -304,3 +304,13 @@ def test_reference_consumption_remains_associated_with_old_plan_until_arrival(ha
 @pytest.mark.parametrize("value,expected", [(0, 0), (600, 600), (600.01, 612), (611.99, 612), (612, 612)])
 def test_control_tick_ceiling(value, expected):
     assert ceil_control_tick(value) == expected
+
+
+def test_short_music_finishes_on_exact_rational_control_boundary(harness):
+    coordinator, _, _, recorder = harness([.08])
+    # 492/30恰为16.4秒；旧浮点连乘会得到819.999...，错误地只执行819步。
+    music = np.ones((492, 35), dtype=np.float32)
+    report = coordinator.run_episode(SAMPLE, music, seed=42, mode="latency", latency_budget_s=.2)
+    assert report["reason"] == "music_end"
+    assert report["snapshot"]["tick"] == 600 + 820*12
+    assert len([row for row in recorder.steps if row["phase"] == "music"]) == 820
