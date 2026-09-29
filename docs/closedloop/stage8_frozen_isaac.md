@@ -108,7 +108,7 @@ cd /home/weili/bumi-closedloop-worktrees/GENMO
 
 ## 训练集200首、单延迟模式统计专项（2026-09-29）
 
-独立配置为 `configs/closedloop/stage8_train200_latency_isaac.yaml`。沿用冻结的s350000与135000 ONNX、1mm初态、CPU PhysX、固定平地和零随机化；只评估，不训练。完整train清单从服务器1原数据根按原样获取，四库选择40/70/50/40组，以seed42散列排序，每组最长条目并按音频SHA去重。不按本地文件是否存在或模型表现挑样。每首seed42，只latency、最多30秒，无video；62条不足30秒时自然结束。
+独立配置为 `configs/closedloop/stage8_train200_latency_isaac.yaml`。沿用冻结的s350000与135000 ONNX、1mm初态、CPU PhysX、固定平地和零随机化；只评估，不训练。完整train清单从服务器1原数据根按原样获取，四库选择40/70/50/40组，以seed42散列排序，每组取最长条目，并同时按**全局 `resplit_provenance.group_id` 与音频SHA**去重。全局组不添加数据集命名空间：跨库同歌即使裁剪或编码不同、音频SHA不同，也只选一次；按既定库次序与散列排序继续补足配额，不按本地文件是否存在或模型表现挑样。选择策略记录为 `seeded_group_longest_unique_global_group_and_audio_sha256`。每首seed42，只latency、最多30秒，无video；62条不足30秒的条目按实际可执行音乐长度设定上限，跟踪失败仍可提前终止。
 
 独立终止配置：根高度误差0.20m、各自去世界yaw后的姿态测地角0.60rad、最短yaw差1.50rad、脚/肘相对根高度误差0.15m，均严格大于才触发。新模式不继续用整体四元数角1.2rad作终止，但保留整体角诊断。阈值不同，不能直接把本轮完成率与旧val宽松阈值结果当成同条件对比。
 
@@ -118,25 +118,38 @@ cd /home/weili/bumi-closedloop-worktrees/GENMO
 
 ```bash
 cd /home/weili/bumi-closedloop-worktrees/GENMO
+stage8_train200_run="outputs/closedloop_stage8/train200_latency_yaw15_repro_$(date +%Y%m%d_%H%M%S)/run"
 PYTHONDONTWRITEBYTECODE=1 /home/weili/GENMO/.venv/bin/python -B tools/eval/run_closedloop_baseline.py \
   --config configs/closedloop/stage8_train200_latency_isaac.yaml \
-  --output-dir outputs/closedloop_stage8/train200_latency_yaw15_20260929/run
+  --output-dir "$stage8_train200_run"
 ```
 
 完成后使用既有 `report_stage8_music_sweep.py` 的train/单模式/无视频选项生成汇总，分别报告请求数、已尝试数、系统异常、启动失败、跟踪失败、短条目自然结束、达到30秒及按目标时长完成率。未实际运行时这些指标必须保持未测，不能以单元测试替代。
 
 
-用户随后指定改到服务器1运行。对应配置为 `configs/closedloop/stage8_train200_latency_server1.yaml`，使用该机已有正式checkpoint与四库数据，独立Isaac环境位于 `/data0/user/liwei/closedloop_stage8_runtime/env_isaaclab`，不修改旧GENMO解释器。服务器命令：
+用户随后指定改到服务器1运行。对应配置为 `configs/closedloop/stage8_train200_latency_server1.yaml`，使用该机已有正式checkpoint与四库数据，独立Isaac环境位于 `/data0/user/liwei/closedloop_stage8_runtime/env_isaaclab`，不修改旧GENMO解释器。以下复现命令沿用已确认的 `CUDA_VISIBLE_DEVICES=0`、`OMNI_KIT_ACCEPT_EULA=YES` 与隔离sysroot，每次生成新的时间戳实验目录，不覆盖本轮已有结果；仍需在运行前确认所选GPU空闲：
 
 ```bash
 cd /home/user/liwei/GENMO-bumi-closedloop
+stage8_train200_run="/data0/user/liwei/GENMO_outputs/closedloop_stage8/train200_latency_yaw15_repro_$(date +%Y%m%d_%H%M%S)/run"
 export LD_LIBRARY_PATH="/data0/user/liwei/closedloop_stage8_runtime/sysroot/usr/lib/x86_64-linux-gnu${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
-PYTHONDONTWRITEBYTECODE=1 /home/user/liwei/GENMO/.venv/bin/python -B tools/eval/run_closedloop_baseline.py \
+CUDA_VISIBLE_DEVICES=0 OMNI_KIT_ACCEPT_EULA=YES PYTHONDONTWRITEBYTECODE=1 \
+  /home/user/liwei/GENMO/.venv/bin/python -B tools/eval/run_closedloop_baseline.py \
   --config configs/closedloop/stage8_train200_latency_server1.yaml \
-  --output-dir /data0/user/liwei/GENMO_outputs/closedloop_stage8/train200_latency_yaw15_20260929/run
+  --output-dir "$stage8_train200_run"
 PYTHONDONTWRITEBYTECODE=1 /home/user/liwei/GENMO/.venv/bin/python -B tools/eval/report_stage8_music_sweep.py \
-  /data0/user/liwei/GENMO_outputs/closedloop_stage8/train200_latency_yaw15_20260929/run \
+  "$stage8_train200_run" \
   --expected-music 200 --expected-modes latency --expected-split train --no-video --maximum-seconds 30
 ```
 
-运行前重新测量10+100请求延迟，不复用本地4090的校准值；不同硬件导致的延迟/P差异必须写入报告。以上是准备中的复现命令，实际运行结果以该实验目录中的运行清单与报告为准。
+上述新的完整复现会重新测量10+100请求延迟，不复用本地4090的校准值；不同硬件导致的延迟/P差异必须写入报告。命令仅供复现，不创建自动启动任务。
+
+### train200 实际完成与跨库重复修正
+
+本轮已在服务器1完成。GENMO使用单张 **NVIDIA RTX 6000D（GPU0）**，GMT ONNX与PhysX使用CPU（AMD EPYC 9575F），B=1，两个模型冻结，无视频。原200次执行中，FineDance `208` 与Mine `dance_3__TOMBOY` 实为同一个全局音乐组，但音频SHA不同。独立复核发现后保留原run与失败验收证据，修复全局组去重；固定seed42的新选择只移除Mine这一条重复项，并按原排序补入 `dance_3__Abracadabra`（1716帧、57.2秒，实际评估30秒），不依据成功或失败挑样。
+
+最终统计集合为 **原199条＋独立补测1条**，通过来源清单关联原 `run/` 与 `supplement_unique_group/`，保留40/70/50/40配额，现为200个全局音乐组、200个不同音频SHA。补测复用服务器1原10+100校准，除 `reused_from` 外校准内容完全一致；校准P95为0.278634秒，保护预算0.318634秒，实际前缀均P=18。补测的1次迟到计划与1次漏决策保留在最终统计中。
+
+最终 **187/200正常完成（93.50%）**，13次跟踪终止；只有138条特征长度至少30秒，因此达到30秒的完成率为 **127/138（92.03%）**，不把62条短音乐直接计为未完成30秒。累计执行4981.16/5081.16秒，时长覆盖98.03%。200条选中结果的参考保护与时钟/历史审计全部通过；两个来源运行均完成模型、buffer、统计量、资产与环境冻结核验，并正常关闭worker。此结果采用本节0.20m／非yaw0.60rad／yaw1.50rad／末端0.15m阈值；与旧val宽松阈值、双模式、本地4090的视频结果在数据划分、阈值、硬件和延迟条件上均不同，不能直接据此宣称跟踪质量改善或未见音乐泛化。
+
+详细结果见 [train200验收报告](stage8_train200_results_20260929.md)。最终集合与重新聚合的逐曲指标位于 [`outputs/closedloop_stage8/train200_latency_yaw15_20260929/final200/`](../../outputs/closedloop_stage8/train200_latency_yaw15_20260929/final200/)，以其中 `collection_manifest.json` 和 `music_sweep_report.md` 为本轮交付入口；原run的聚合报告保留为修正前证据，不作为最终200首的指标。
