@@ -5,10 +5,13 @@
 相对视频与JSON路径和不覆盖
 的处理。新增200首train单latency无视频矩阵、按实际音乐长度计算的完成率与Wilson
 区间、启动/控制/基础设施故障分类、独立组与节拍缺测、50Hz差分支持点、关节限位、
+跨库同一全局组具有不同裁剪音频SHA时的拒绝，以及合法双模式共享组的保留、
 分离yaw阈值首次越界和中断后落盘恢复测试。占位视频不会被当作真实渲染证明；真实视频解码由baseline_video负责。
 恢复回归另覆盖已知缺失末步、EOF半行与中间坏行的区分、原SHA不变，以及速度
 缺测后清空差分支持和492音乐帧对应820控制步的共同整数时钟边界。
 全部产物限定pytest临时目录，既有实验数据不修改。
+显式多run集合测试另外构造关闭/冻结/源码/SHA证据，验证同名episode不会串源、
+未选曲目不混入分位数与事件，及资产、校准、核心源码或trace被改写时必须报错。
 """
 import copy
 import csv
@@ -111,6 +114,8 @@ def test_complete_twenty_song_forty_episode_matrix(tmp_path):
     assert report["coverage"]["complete"]
     assert report["coverage"]["unique_audio_sha256_count"] == 20
     assert report["coverage"]["evaluation_episode_count"] == 40
+    assert report["coverage"]["unique_music_group_count"] == 20
+    assert report["coverage"]["global_music_group_conflicts"] == []
     assert report["evidence"]["collection_complete"]
     assert len(report["episodes"]) == 40
     assert report["modes"]["paused"]["errors_pooled_music_control_steps"]["root_height_error_m"]["count"] == 60
@@ -336,6 +341,152 @@ def test_two_hundred_train_groups_single_latency_without_video_or_audio(tmp_path
     webpage = Path(outputs["html"]).read_text()
     assert "<video" not in webpage and "纯数据评估" in webpage
     assert "200 首音乐" in Path(outputs["markdown"]).read_text()
+
+
+@pytest.mark.parametrize("audio_present", [True, False])
+def test_same_global_group_in_two_datasets_is_not_two_independent_songs(tmp_path, audio_present):
+    summary = train_no_video(tmp_path, songs=2)
+    first, second = summary["episodes"]
+    second["sample"]["group_id"] = first["sample"]["group_id"]
+    # 模拟同曲在 Mine 和 AIST++ 中采用不同裁剪，因此文件 SHA 不同。
+    assert first["sample"]["dataset"] != second["sample"]["dataset"]
+    assert first["sample"]["row"]["source_audio_sha256"] != second["sample"]["row"]["source_audio_sha256"]
+    if not audio_present:
+        for episode in summary["episodes"]:
+            episode["sample"]["row"].pop("source_audio_sha256")
+    write_json(tmp_path/"run_summary.json", summary)
+    result = train_report(tmp_path, 2)
+    assert result["coverage"]["unique_music_group_count"] == 1
+    assert result["coverage"]["unique_audio_sha256_count"] == (2 if audio_present else 0)
+    assert result["coverage"]["evaluation_episode_count"] == 2  # 原始证据不自动删样。
+    assert not result["coverage"]["complete"] and not result["evidence"]["collection_complete"]
+    conflict, = result["coverage"]["global_music_group_conflicts"]
+    assert conflict["group_id"] == first["sample"]["group_id"]
+    assert conflict["mode_counts"] == {"latency": 2}
+    assert {e["episode_id"] for e in conflict["episodes"]} == {first["episode_id"], second["episode_id"]}
+    assert any("expected 2 independent music groups, got 1" in issue for issue in result["coverage"]["issues"])
+
+
+def test_dual_mode_global_group_must_keep_same_source_sample(tmp_path):
+    summary = make_run(tmp_path)
+    summary["episodes"][1]["sample"]["dataset"] = "FineDance"
+    summary["episodes"][1]["sample"]["row"]["sample_id"] = "different_crop"
+    write_json(tmp_path/"run_summary.json", summary)
+    result = build_music_sweep_report(tmp_path, expected_music=1)
+    conflict, = result["coverage"]["global_music_group_conflicts"]
+    assert conflict["mode_counts"] == {"paused": 1, "latency": 1}
+    assert not result["coverage"]["complete"]
+
+
+def collection_fixture(root):
+    """只生成小型源证据；所有身份值均为显式测试夹具，不运行真实模型。"""
+    from tools.eval.stage8_collection import REQUIRED_ARTIFACTS
+    output = root/"final"
+    output.mkdir()
+    specs = []
+    for label, count, steps in (("original", 2, [3, 90]), ("supplement", 1, 7)):
+        source = root/label
+        summary = train_no_video(source, songs=count, music_steps=steps, frames=30)
+        if label == "supplement":
+            sample = summary["episodes"][0]["sample"]
+            sample["group_id"] = "new_music_group"
+            sample["row"]["source_audio_sha256"] = "e"*64
+        verification = {"unchanged": True, "changed_files": [], "initial_manifest_sha256": "f"*64}
+        summary.update(exit_code=0, source_verification=verification,
+                       acceptance={"frozen_models_and_environment": True})
+        write_json(source/"run_summary.json", summary)
+        write_json(source/"source_verification.json", verification)
+        write_json(source/"source_provenance.json", {"source_manifest_sha256": "f"*64, "files": [
+            {"repository": "genmo_repo", "relative_path": "gem/closedloop/actor.py", "sha256": "d"*64},
+            {"repository": "genmo_repo", "relative_path": "gem/closedloop/evaluation_music.py", "sha256": label}]})
+        actor = {"parameter_fingerprint": "a"*64, "sha256": {"checkpoint": "b"*64}, "interface": {"history_steps": 50}}
+        write_json(source/"actor_identity.json", actor)
+        gmt = json.loads((source/"gmt_identity.json").read_text())
+        gmt["runtime_fingerprint"] = {"sha256": "c"*64, "parameters": {}}
+        write_json(source/"gmt_identity.json", gmt)
+        write_json(source/"worker_shutdown.json", {
+            "gmt": {"closed": True, "process_exit_code": 0, "policy_unchanged": True, "runtime_parameters_unchanged": True,
+                    "policy_sha256": gmt["policy_sha256"], "runtime_fingerprint_sha256": "c"*64},
+            "actor": {"closed": True, "process_exit_code": 0, "parameter_fingerprint": "a"*64, "sha256": actor["sha256"],
+                      "frozen_checks": dict.fromkeys(("eval_and_no_grad", "parameters_and_buffers_unchanged", "asset_files_unchanged"), True)}})
+        calibration = {"full_calibration": True, "warmup_requests": 10, "measured_requests": 100,
+                       "end_to_end_seconds": [.25]*100, "p95_seconds": .25, "guard_seconds": .04, "latency_budget_seconds": .29,
+                       "identity": {"host": "fixture", "device": "cpu"}}
+        if label == "supplement":
+            calibration["reused_from"] = str(root/"original"/"calibration.json")
+        write_json(source/"calibration.json", calibration)
+        ep = summary["episodes"][0]
+        specs.append({"source_run_id": label, "run_dir": f"../{label}",
+            "run_summary_sha256": hashlib.sha256((source/"run_summary.json").read_bytes()).hexdigest(),
+            "artifact_sha256": {name: hashlib.sha256((source/name).read_bytes()).hexdigest() for name in REQUIRED_ARTIFACTS},
+            "episodes": [{"episode_id": ep["episode_id"], "trace_sha256": hashlib.sha256((source/ep["artifacts"]["trace"]).read_bytes()).hexdigest()}]})
+    manifest = {"schema": "genmo.closedloop_collection.v1", "sources": specs,
+                "selection_provenance": "显式源选择，与执行成功失败无关"}
+    write_json(output/"collection_manifest.json", manifest)
+    return output, manifest
+
+
+def test_collection_reloads_selected_traces_events_without_rewriting_source_identity(tmp_path):
+    output, manifest = collection_fixture(tmp_path)
+    report, paths = write_music_sweep_report(output, expected_music=2, expected_modes=("latency",),
+        expected_split="train", require_video=False, collection_manifest="collection_manifest.json")
+    assert report["evidence"]["collection_complete"]
+    assert report["collection"]["source_count"] == 2
+    assert report["coverage"]["unique_music_group_count"] == 2
+    assert [e["episode_id"] for e in report["episodes"]] == ["0:latency", "0:latency"]
+    assert [e["source_run_id"] for e in report["episodes"]] == ["original", "supplement"]
+    assert all(e["startup_diagnostics"]["initial_snapshot"]["episode_id"] == "0:latency" for e in report["episodes"])
+    mode = report["modes"]["latency"]
+    assert mode["errors_pooled_music_control_steps"]["root_height_error_m"]["count"] == 10
+    assert mode["errors_pooled_music_control_steps"]["root_height_error_m"]["p95"] == pytest.approx(5.55)
+    assert mode["events"]["plan_prepared"] == 2  # 未选原run第二首事件不进入集合。
+    assert mode["control_timing_over_20ms"]["step_seconds"] == {
+        "supported_steps": 10, "over_20ms_count": 10, "over_20ms_fraction": 1.}
+    assert report["collection"]["sources"][0]["excluded_episode_ids"] == ["1:latency"]
+    assert not (output/"run_summary.json").exists()
+    assert "显式多次运行的派生集合" in Path(paths["markdown"]).read_text()
+    assert len(list(csv.DictReader(Path(paths["csv"]).open()))) == 2
+    for spec in manifest["sources"]:
+        source = (output/spec["run_dir"]).resolve()
+        assert hashlib.sha256((source/"run_summary.json").read_bytes()).hexdigest() == spec["run_summary_sha256"]
+
+
+@pytest.mark.parametrize("change,match", [
+    ("artifact", "SHA mismatch"), ("trace", "trace SHA mismatch"), ("core", "core source mismatch"),
+    ("calibration", "calibration mismatch"), ("frozen", "freeze mismatch"),
+    ("runtime", "initial/final identity mismatch"), ("duplicate_episode", "Duplicate selected episode"),
+])
+def test_collection_rejects_incompatible_or_modified_source_evidence(tmp_path, change, match):
+    output, manifest = collection_fixture(tmp_path)
+    spec = manifest["sources"][1]
+    source = tmp_path/"supplement"
+    filename = None
+    if change == "trace":
+        trace = source/"episodes/0_latency/trace.jsonl"
+        trace.write_text(trace.read_text()+"\n")
+    elif change == "duplicate_episode":
+        spec["episodes"].append(copy.deepcopy(spec["episodes"][0]))
+    else:
+        filename = {"artifact": "audit.json", "core": "source_provenance.json", "calibration": "calibration.json",
+                    "frozen": "worker_shutdown.json", "runtime": "gmt_identity.json"}[change]
+        value = json.loads((source/filename).read_text())
+        if change == "artifact":
+            value["extra"] = "changed"
+        elif change == "core":
+            value["files"][0]["sha256"] = "1"*64
+        elif change == "calibration":
+            value["latency_budget_seconds"] = .3
+        elif change == "frozen":
+            value["actor"]["frozen_checks"]["parameters_and_buffers_unchanged"] = False
+        elif change == "runtime":
+            value["runtime_fingerprint"]["sha256"] = "2"*64
+        write_json(source/filename, value)
+        if change != "artifact":
+            spec["artifact_sha256"][filename] = hashlib.sha256((source/filename).read_bytes()).hexdigest()
+    write_json(output/"collection_manifest.json", manifest)
+    with pytest.raises(ValueError, match=match):
+        build_music_sweep_report(output, expected_music=2, expected_modes=("latency",), expected_split="train",
+            require_video=False, collection_manifest="collection_manifest.json")
 
 
 def test_completion_denominators_short_music_startup_control_and_infra_are_distinct(tmp_path):

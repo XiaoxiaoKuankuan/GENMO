@@ -6,7 +6,7 @@
 episode 的初态/逐控制步轨迹。逐条流式读取体积较大的 JSONL，只保存统计所需的
 标量、很短的启动窗口和数组摘要，不把四十条完整物理/渲染轨迹同时载入内存。
 
-报告按音频 SHA 或明确的独立音乐组身份核验不同音乐，模式、数据划分与目标首数
+报告按音频 SHA 及跨数据集共享的全局音乐组身份核验不同音乐，模式、数据划分与目标首数
 由调用方明确指定；默认仍为旧二十首 val 双模式视频报告，不改变已有验收规则。
 纯数据模式无需视频或源音频，但特征来源及独立组仍须可追溯；缺测项保留 null。
 已明确系统异常的末步记录缺失和EOF无换行JSON残片允许只读恢复，保留原文件SHA、
@@ -14,7 +14,11 @@ episode 的初态/逐控制步轨迹。逐条流式读取体积较大的 JSONL�
 新增逐曲CSV、完成率Wilson区间、按库统计、时长覆盖、运动平滑性、物理诊断及
 分离yaw终止阈值统计。完成率按实际达到min(时长上限,音乐特征长度)判定；基础
 设施故障、启动失败、跟踪失败与自然结束分别计数，30秒率只统计足够长的音乐。
-同曲多种子不能冒充不同歌曲。startup 失败、music 失败和音乐自然结束分别统计，主误差只使用
+同曲多种子、跨库收录或不同音频裁剪 SHA 均不能冒充不同歌曲；同一全局组仅允许
+每种指定模式一个 episode，并保留冲突组及源 episode 身份供审计，绝不自动删样。
+显式多run集合由独立SHA绑定清单加载，每条轨迹/事件仍从原run读取并保留原编号；
+只在报告增加source_run_id，不生成假的合并run_summary，也不平均各run的分位数。
+startup 失败、music 失败和音乐自然结束分别统计，主误差只使用
 music 控制步。warmup 前五步、末十步及 music 首一秒另外汇总实际姿态/速度/接触，
 不引入稳定阈值，不丢弃 music 初段，也不将诊断冒充额外的终止判定。节拍结果复用
 已有指标，缺失值保留 null；跨曲分位数从控制步重新汇总，绝不平均各曲 P95。
@@ -36,6 +40,7 @@ import html
 import io
 import json
 import math
+import os
 from pathlib import Path
 import re
 import sys
@@ -48,6 +53,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 from gem.closedloop.baseline_metrics import distribution, json_value  # noqa: E402
 from gem.closedloop.evaluation_music import music_control_steps  # noqa: E402
+from tools.eval.stage8_collection import load_collection  # noqa: E402
 
 
 def _json(path):
@@ -548,6 +554,11 @@ def _pooled_diagnostics(pool):
                                                     for key, values in pool["physical"].items()},
             "reference_boundary_changes": {key: distribution(values) for key, values in pool["boundaries"].items()},
             "latency_seconds": {key: distribution(values) for key, values in pool["latency"].items()},
+            "control_timing_over_20ms": {key: {"supported_steps": len(pool["latency"].get(key, [])),
+                "over_20ms_count": sum(value > .02 for value in pool["latency"].get(key, [])),
+                "over_20ms_fraction": (sum(value > .02 for value in pool["latency"].get(key, []))/len(pool["latency"][key]))
+                                      if pool["latency"].get(key) else None}
+                for key in ("step_seconds", "gmt_inference_seconds", "physics_seconds")},
             "prefix_frames": distribution(pool["prefix"]),
             "prefix_frame_counts": dict(sorted(Counter(map(str, pool["prefix"])).items())),
             "prefix_over_18_fraction": sum(p > 18 for p in pool["prefix"])/len(pool["prefix"]) if pool["prefix"] else None,
@@ -629,14 +640,30 @@ def _partial_episodes(root, summary):
 
 
 def build_music_sweep_report(run_dir, *, expected_music=20, expected_modes=("paused", "latency"),
-                             expected_split="val", require_video=True, maximum_seconds=30.):
+                             expected_split="val", require_video=True, maximum_seconds=30., collection_manifest=None):
     """构建 JSON 可序列化报告，不写文件；调用方须等 worker 和视频封装均结束。"""
     root = Path(run_dir).resolve()
-    summary = _json(root / "run_summary.json")
-    audit = _json(root / "audit.json") if (root / "audit.json").is_file() else {}
-    identity = _json(root / "gmt_identity.json") if (root / "gmt_identity.json").is_file() else {}
-    source = _partial_episodes(root, summary)
-    audit_by_id = {e["episode_id"]: e for e in audit.get("episodes", [])}
+    collection = None
+    if collection_manifest is not None:
+        if require_video:
+            raise ValueError("Explicit collections currently require no-video mode")
+        manifest_path = Path(collection_manifest)
+        contexts, collection = load_collection(manifest_path if manifest_path.is_absolute() else root/manifest_path)
+        identity = contexts[0]["identity"]
+        # 这里只整理内存中的统计上下文；不落盘、不伪造合并 run_summary，所有原始
+        # episode/plan 身份与实际 trace 路径仍归属于各自 source_run_id。
+        summary = {"termination": contexts[0]["summary"].get("termination", {}), "exit_code": 0,
+            "selection": [e["sample"] for context in contexts for e in context["episodes"]],
+            "source_verification": {"unchanged": True, "source_count": len(contexts)},
+            "acceptance": {"collection_source_checks_passed": True, "source_runs":
+                {context["source_run_id"]: context["summary"].get("acceptance") for context in contexts}}}
+    else:
+        summary = _json(root / "run_summary.json")
+        audit = _json(root / "audit.json") if (root / "audit.json").is_file() else {}
+        identity = _json(root / "gmt_identity.json") if (root / "gmt_identity.json").is_file() else {}
+        contexts = [{"source_run_id": None, "root": root, "summary": summary, "audit": audit,
+                     "identity": identity, "episodes": _partial_episodes(root, summary)}]
+    source = [(context, episode) for context in contexts for episode in context["episodes"]]
     pools, dataset_pools = defaultdict(_new_pool), defaultdict(_new_pool)
     termination = summary.get("termination", {})
     thresholds = {key: float(value) for key, value in termination.items() if key.endswith("_error_m") or key.endswith("_error_rad")}
@@ -644,11 +671,14 @@ def build_music_sweep_report(run_dir, *, expected_music=20, expected_modes=("pau
         thresholds.pop("global_orientation_error_rad", None)
     limits = _limits(identity)
     episodes, issues, ids = [], [], set()
-    for original in source:
+    for context, original in source:
         episode_id = original["episode_id"]
-        if episode_id in ids:
-            raise ValueError(f"Duplicate episode id: {episode_id}")
-        ids.add(episode_id)
+        source_id, source_root = context["source_run_id"], context["root"]
+        identity_key = (source_id, episode_id)
+        if identity_key in ids:
+            raise ValueError(f"Duplicate source/episode id: {identity_key}")
+        ids.add(identity_key)
+        audit_by_id = {e["episode_id"]: e for e in context["audit"].get("episodes", [])}
         sample = original["sample"]
         row = sample["row"]
         sha = row.get("source_audio_sha256", "")
@@ -657,7 +687,9 @@ def build_music_sweep_report(run_dir, *, expected_music=20, expected_modes=("pau
         if re.fullmatch(r"[0-9a-f]{64}", sha) is None and require_video:
             raise ValueError(f"Missing audio SHA for {episode_id}")
         episode_pool = _new_pool()
-        trace = _trace(root, original, episode_pool, limits=limits, thresholds=thresholds)
+        trace = _trace(source_root, original, episode_pool, limits=limits, thresholds=thresholds)
+        if collection is not None and trace["trace_sha256"] != context["selected_by_id"][episode_id]["trace_sha256"]:
+            raise ValueError(f"Selected source trace SHA mismatch: {source_id}/{episode_id}")
         original = {**original, "trace_integrity": trace["trace_integrity"]}
         ep = {key: original.get(key) for key in ("episode_id", "mode", "seed", "reason", "backend_reason", "failed", "startup_failure",
                 "music_duration_seconds", "warmup_duration_seconds", "total_duration_seconds", "replan_count", "errors", "music", "motion",
@@ -667,8 +699,11 @@ def build_music_sweep_report(run_dir, *, expected_music=20, expected_modes=("pau
                   audio_sha256=sha, music_feature_sha256=row.get("source_music_feature_sha256"), manifest_sha256=sample.get("manifest_sha256"),
                   split=row.get("split"), startup_diagnostics=trace, completion=_completion(original, maximum_seconds),
                   audit=audit_by_id.get(episode_id, {"status": "not_recorded"}))
-        detail_path = _local(root, original["artifacts"]["trace"]).with_name("summary.json")
-        ep["detail_json_relative_path"] = (detail_path.relative_to(root).as_posix()
+        if collection is not None:
+            ep.update(source_run_id=source_id, source_run_dir=str(source_root),
+                      source_trace_relative_path=str(original["artifacts"]["trace"]))
+        detail_path = _local(source_root, original["artifacts"]["trace"]).with_name("summary.json")
+        ep["detail_json_relative_path"] = (Path(os.path.relpath(detail_path, root)).as_posix()
                                            if detail_path.is_file() else "music_sweep_report.json")
         if ep["split"] != expected_split:
             issues.append(f"{episode_id}: split is not {expected_split}")
@@ -683,16 +718,19 @@ def build_music_sweep_report(run_dir, *, expected_music=20, expected_modes=("pau
                 for key, values in episode_pool[category].items():
                     target[category][key].extend(values)
         episodes.append(ep)
-    index = {ep["episode_id"]: ep for ep in episodes}
+    index = {(ep.get("source_run_id"), ep["episode_id"]): ep for ep in episodes}
     event_counts = defaultdict(Counter)
-    path = root / "events.jsonl"
-    if path.is_file():
+    for context in contexts:
+        path = context["root"] / "events.jsonl"
+        if not path.is_file():
+            issues.append(f"{context['source_run_id']}: events.jsonl missing: pooled request timing/prefix unavailable")
+            continue
         with path.open(encoding="utf-8") as stream:
             for line in stream:
                 if not line.strip():
                     continue
                 event = json.loads(line)
-                ep = index.get(event.get("episode_id"))
+                ep = index.get((context["source_run_id"], event.get("episode_id")))
                 if ep is None:
                     continue
                 mode, name = ep["mode"], event["event"]
@@ -710,11 +748,9 @@ def build_music_sweep_report(run_dir, *, expected_music=20, expected_modes=("pau
                         pool["rejections"][event.get("code", "unknown")] += 1
                     if name == "advance" and event.get("phase") == "music" and event.get("reference_valid_end_tick") is not None:
                         pool["buffers"].append((event["reference_valid_end_tick"]-event["end_tick"])/600.)
-    else:
-        issues.append("events.jsonl missing: pooled request timing/prefix unavailable")
     songs = defaultdict(list)
     for ep in episodes:
-        key = ep["audio_sha256"] or f"group:{ep['dataset']}:{ep['group_id']}"
+        key = ep["audio_sha256"] or f"group:{ep['group_id']}"
         songs[key].append(ep)
     for sha, entries in songs.items():
         counts = Counter(e["mode"] for e in entries)
@@ -729,7 +765,23 @@ def build_music_sweep_report(run_dir, *, expected_music=20, expected_modes=("pau
     expected_episodes = expected_music*len(expected_modes)
     if len(episodes) != expected_episodes:
         issues.append(f"expected {expected_episodes} episodes, got {len(episodes)}")
-    independent_groups = {(e["dataset"], e["group_id"]) for e in episodes}
+    # Stage1 resplit 的 group_id 已跨数据集统一：数据集前缀或音频裁剪 SHA 不能使
+    # 同一首音乐成为两个独立样本。双模式复用同一曲是合法的，其模式矩阵单独核验。
+    groups = defaultdict(list)
+    for ep in episodes:
+        if ep["group_id"]:
+            groups[ep["group_id"]].append(ep)
+    independent_groups = set(groups)
+    group_conflicts = []
+    for group_id, entries in groups.items():
+        counts = Counter(e["mode"] for e in entries)
+        sources = {(e["dataset"], e["sample_id"], e["audio_sha256"]) for e in entries}
+        if counts != Counter({mode: 1 for mode in expected_modes}) or len(sources) != 1:
+            group_conflicts.append({"group_id": group_id, "mode_counts": dict(counts),
+                "episodes": [{key: e.get(key) for key in ("source_run_id", "episode_id", "dataset", "sample_id", "audio_sha256", "mode")}
+                             for e in entries]})
+            issues.append(f"global music group {group_id}: expected one source and one episode per mode, "
+                          f"got {len(sources)} sources and {dict(counts)}")
     if len(independent_groups) != expected_music:
         issues.append(f"expected {expected_music} independent music groups, got {len(independent_groups)}")
     if require_video:
@@ -794,6 +846,7 @@ def build_music_sweep_report(run_dir, *, expected_music=20, expected_modes=("pau
     report = {"schema": "genmo.closedloop_music_sweep_report.v1", "run_dir": str(root),
         "coverage": {"unique_audio_sha256_count": len({e["audio_sha256"] for e in episodes if e["audio_sha256"]}),
                      "unique_music_group_count": len(independent_groups), "evaluation_episode_count": len(episodes),
+                     "global_music_group_conflicts": group_conflicts,
                      "expected_music_count": expected_music, "expected_episode_count": expected_episodes,
                      "expected_modes": list(expected_modes), "expected_split": expected_split,
                      "requested_episodes": expected_episodes, "attempted_episodes": len(episodes),
@@ -807,6 +860,7 @@ def build_music_sweep_report(run_dir, *, expected_music=20, expected_modes=("pau
                      "interpretation": "采集/证据完整不代表跟踪成功或音乐质量通过；失败和实际执行时长必须单独阅读"},
         "gmt_identity": {k: identity.get(k) for k in ("policy_sha256", "asset_sha256", "physics_device", "control_hz", "physics_hz", "runtime_fingerprint", "initial_ground_pose", "initial_ground_pose_actual")},
         "source_verification": summary.get("source_verification"), "run_acceptance": summary.get("acceptance"),
+        "collection": collection,
         "termination": termination, "maximum_seconds": maximum_seconds,
         "run_infrastructure_error": _json(root/"failure.json") if (root/"failure.json").is_file() else None,
         "modes": modes, "episodes": episodes,
@@ -821,7 +875,7 @@ def build_music_sweep_report(run_dir, *, expected_music=20, expected_modes=("pau
             "latency": "以上是当前实际代码计时口径，未拆出独立纯物理求解耗时，不用带渲染的控制步耗时声称无渲染部署吞吐",
             "old_thresholds": "原阈值越界仅作诊断，不能解释为严格阈值下重跑得到的失败率",
             "comparison": "数据划分、终止阈值、渲染和初始化配置不同的实验不能直接合并成功率；本轮真实运行阈值见termination",
-            "completion": "正常完成率使用每条min(上限,特征长度)并按50Hz向下取整；短曲自然结束是完成，但不进入足够长音乐的30秒率。Wilson区间按独立音乐条目估计，不代表训练集测评是未见数据泛化。",
+            "completion": "正常完成率使用每条min(上限,特征长度)并按50Hz向下取整；短曲自然结束是完成，但不进入足够长音乐的30秒率。Wilson区间按音乐条目计算；只有全局音乐组核验通过时才满足独立条目口径，且不代表训练集测评是未见数据泛化。",
             "smoothness": "速度、加速度和jerk仅用music连续有效支持点；加速度=diff(速度)*50，jerk=diff(加速度)*50。逐步RMS/max分位数不等于把所有关节元素展开后的分位数。",
             "thresholds": "non_yaw_orientation_error_rad与yaw_error_rad沿用本轮后端定义；global_orientation_error_rad仍作完整四元数误差诊断，不与新分离阈值混用。缺失的诊断不补零。",
             "music_source": "节拍来自已核验EDGE35特征的节拍通道，独立于是否读取/渲染音频；无特征节拍或无运动节拍时保留不可用原因。"}}
@@ -871,6 +925,10 @@ def render_markdown(report):
              "采集完整与跟踪成功分开判断。固定 1 s 真实 warmup，未增加稳定阈值；music 首 1 s 仍计入全部主指标。", "",
              f"1 mm初态：{evidence['grounded_initialization']['status']}，实际验证reset数：{evidence['grounded_initialization']['verified_resets']}；配置根Z：{_fmt(evidence['grounded_initialization'].get('configured_root_z_m'))} m。", "",
              "## 分模式结果", "", "|模式|启动失败/总数|music失败/已启动|music总秒数|每分钟失败|重规划|保护区修改|", "|---|---:|---:|---:|---:|---:|---:|"]
+    if report.get("collection"):
+        collection = report["collection"]
+        lines[4:4] = ["本报告是显式多次运行的派生集合，按原始trace重新汇总；不是一次进程连续执行全部曲目。", "",
+            f"集合清单SHA：`{collection['manifest_sha256']}`；源运行数：{collection['source_count']}；原运行冻结与源码证据全部通过。", ""]
     for mode, value in report["modes"].items():
         lines.append(f"|{mode}|{value['startup_failures']}/{value['episodes']}|{value['music_failures']}/{value['music_started_episodes']}|{_fmt(value['music_exposure_seconds'],2)}|{_fmt(value['music_failures_per_minute'])}|{value['replans']}|{_fmt(value['protected_reference']['modification_count'])}|")
     lines.extend(["", "## 完成率与按库覆盖", "",
@@ -964,9 +1022,11 @@ def render_video_index(report):
         cards.append(f'<article><h2>{esc(ep["dataset"])} / {esc(ep["sample_id"])}</h2>'
                      f'<p>{esc(ep["mode"])} · seed {esc(ep["seed"])} · music {esc(ep["music_duration_seconds"])} s</p>'
                      f'<p>终止：{esc(ep["reason"])}；后端：{esc(ep["backend_reason"])}</p>{tag}{diagnostics}'
-                     f'<p><a href="{detail}">详细 JSON：{esc(ep["episode_id"])}</a></p></article>')
+                     f'<p><a href="{detail}">详细 JSON：{esc((ep["source_run_id"]+"/") if ep.get("source_run_id") else "")}{esc(ep["episode_id"])}</a></p></article>')
     title = "Stage8 音乐视频索引" if report["evidence"]["video_required"] else "Stage8 音乐数据索引"
     introduction = "逐曲实际 Isaac 渲染。前 1 秒为真实 warmup；启动失败视频可能只有静音。" if report["evidence"]["video_required"] else "本轮仅统计真实 Isaac 轨迹，未渲染视频。前 1 秒为真实 warmup。"
+    if report.get("collection"):
+        introduction += f"这是{report['collection']['source_count']}次原始运行的显式派生集合，逐条保留source_run_id和原episode编号。"
     return ('<!doctype html><html lang="zh-CN"><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">'
             f'<title>{title}</title><style>body{{font:16px sans-serif;max-width:1280px;margin:2rem auto;padding:0 1rem;background:#f4f5f7;color:#20252a}}'
             'main{display:grid;grid-template-columns:repeat(auto-fit,minmax(340px,1fr));gap:1rem}article{background:white;padding:1rem;border-radius:8px}'
@@ -984,7 +1044,7 @@ def render_csv(report):
     rows = []
     for episode in report["episodes"]:
         completion = episode["completion"]
-        row = {key: episode.get(key) for key in ("episode_id", "dataset", "group_id", "sample_id", "split", "mode", "seed", "reason", "backend_reason", "audio_sha256", "music_feature_sha256", "manifest_sha256", "music_duration_seconds", "warmup_duration_seconds", "total_duration_seconds", "replan_count", "prefix_over_18_count")}
+        row = {key: episode.get(key) for key in ("source_run_id", "episode_id", "source_trace_relative_path", "dataset", "group_id", "sample_id", "split", "mode", "seed", "reason", "backend_reason", "audio_sha256", "music_feature_sha256", "manifest_sha256", "music_duration_seconds", "warmup_duration_seconds", "total_duration_seconds", "replan_count", "prefix_over_18_count")}
         row.update({key: completion.get(key) for key in ("category", "feature_duration_seconds", "target_duration_seconds", "executable_target_seconds", "normal_complete", "duration_completion_fraction", "eligible_for_30s", "reached_30s_without_failure", "failure_music_seconds", "failure_total_seconds")})
         extended = episode["startup_diagnostics"]["extended"]
         for category in ("errors", "motion", "physical", "boundary_changes"):
@@ -1023,14 +1083,15 @@ def render_csv(report):
 
 
 def write_music_sweep_report(run_dir, *, expected_music=20, expected_modes=("paused", "latency"),
-                            expected_split="val", require_video=True, maximum_seconds=30.):
+                            expected_split="val", require_video=True, maximum_seconds=30., collection_manifest=None):
     root = Path(run_dir).resolve()
     outputs = {"json": root/"music_sweep_report.json", "markdown": root/"music_sweep_report.md",
                "csv": root/"music_sweep_rows.csv", "html": root/("music_sweep_videos.html" if require_video else "music_sweep_data.html")}
     if any(path.exists() for path in outputs.values()):
         raise FileExistsError("Music sweep report already exists; refusing overwrite")
     report = build_music_sweep_report(root, expected_music=expected_music, expected_modes=expected_modes,
-                                      expected_split=expected_split, require_video=require_video, maximum_seconds=maximum_seconds)
+                                      expected_split=expected_split, require_video=require_video, maximum_seconds=maximum_seconds,
+                                      collection_manifest=collection_manifest)
     contents = {"json": json.dumps(report, ensure_ascii=False, indent=2, allow_nan=False)+"\n",
                 "markdown": render_markdown(report), "html": render_video_index(report), "csv": render_csv(report)}
     for key, path in outputs.items():
@@ -1047,6 +1108,7 @@ def main(argv=None):
     parser.add_argument("--expected-split", choices=("train", "val", "test"), default="val")
     parser.add_argument("--no-video", action="store_true", help="明确不要求视频证据；不影响物理/协议核验")
     parser.add_argument("--maximum-seconds", type=float, default=30.)
+    parser.add_argument("--collection-manifest", type=Path, help="显式多run集合清单；不创建/要求假的合并run_summary")
     args = parser.parse_args(argv)
     if args.expected_music <= 0:
         parser.error("expected-music must be positive")
@@ -1056,7 +1118,7 @@ def main(argv=None):
         parser.error("expected-modes must not contain duplicates")
     report, outputs = write_music_sweep_report(args.run_dir, expected_music=args.expected_music,
         expected_modes=tuple(args.expected_modes), expected_split=args.expected_split,
-        require_video=not args.no_video, maximum_seconds=args.maximum_seconds)
+        require_video=not args.no_video, maximum_seconds=args.maximum_seconds, collection_manifest=args.collection_manifest)
     print(json.dumps({"coverage": report["coverage"], "evidence": report["evidence"], "outputs": outputs}, ensure_ascii=False))
     return 0 if report["evidence"]["collection_complete"] else 1
 
