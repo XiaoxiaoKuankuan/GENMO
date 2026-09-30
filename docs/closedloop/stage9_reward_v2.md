@@ -19,17 +19,15 @@ raw、normalized、score、weight、gate、weighted_rate 和 integrated_reward�
 
 ## 跟踪、稳定与 alive
 
-全部误差直接读取 `backend.errors`，没有重新对齐 reference：
+当前 Tracking 内部版本为 `gmt.motion_tracking.v1`，消费 backend 新增的
+`motion_tracking`。六项是 anchor 位置/姿态、body 相对位置/姿态、关节位置/速度，
+std 依次为 `.30/.40/.30/.40/.25/1.40`，内部权重为 `1/7,1/7,2/7,2/7,1/7,0`。
+每项使用原 GMT 定义的平方误差 E，计算 `exp(-E/std²)`。坐标、具名选择、原函数、
+来源边界和配置位置详见[Stage9 Tracking 对齐说明](stage9_dppo.md#tracking-与-frozen-gmt-当前任务对齐)。
+原五项 RMSE/末端高度/yaw/根位置混合式仅属于此前 v2 采集与训练报告，不再用于新采集。
+外层权重仍为 2.5，音乐、门控与物理代价不变。
 
-| 项 | 权重 | scale | backend 字段 |
-| --- | ---: | ---: | --- |
-| 关节位置 | .45 | .22 rad | joint_position_rmse_rad |
-| 关节速度 | .25 | 1.40 rad/s | joint_velocity_rmse_rad_s |
-| 末端相对高度 | .15 | .07 m | end_effector_relative_height_error_m |
-| yaw | .10 | .60 rad | yaw_error_rad |
-| 世界根位置 | .05 | .40 m | root_position_error_m |
-
-每项先算 `exp(-(error/scale)^2)`，再按上表加权。稳定性为根高/.05 m 和 non-yaw/.12 rad
+稳定性继续消费 `backend.errors`，为根高/.05 m 和 non-yaw/.12 rad
 的相同指数分数，各占 .5；没有角速度或加速度项。完整有效控制区间 alive=1；真实
 执行失败步 alive=0，并另记一次性失败罚分。alive 不能抵消或掩盖执行失败的标记。
 

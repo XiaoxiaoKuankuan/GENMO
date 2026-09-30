@@ -22,6 +22,7 @@ from gem.closedloop.dppo.critic import UpperCritic
 from gem.closedloop.dppo.music_tasks import SOURCES, TrainMusicSampler
 from gem.closedloop.dppo.returns import compute_gae
 from gem.closedloop.dppo.rewards import ExecutionReward
+from gem.closedloop.contracts import GMT_EXPECTED_JOINT_ORDER
 
 
 def context(batch=1):
@@ -181,6 +182,54 @@ def test_value_loss_updates_only_critic_and_copies_statistics():
     assert all(torch.equal(value, before[key]) for key, value in actor.state_dict().items())
 
 
+def motion_tracking_fixture(tick, *, speed=0., position=0.):
+    """构造冻结任务顺序的零误差诊断；平方误差由 backend 提供，奖励端只消费。"""
+    body_names = [
+        "base_link", "waist_yaw_link", "l_arm_pitch_link", "l_arm_roll_link",
+        "l_arm_yaw_link", "l_elbow_pitch_link", "r_arm_pitch_link", "r_arm_roll_link",
+        "r_arm_yaw_link", "r_elbow_pitch_link", "l_leg_pitch_link", "l_leg_roll_link",
+        "l_leg_yaw_link", "l_knee_pitch_link", "l_ankle_pitch_link", "l_ankle_roll_link",
+        "r_leg_pitch_link", "r_leg_roll_link", "r_leg_yaw_link", "r_knee_pitch_link",
+        "r_ankle_pitch_link", "r_ankle_roll_link",
+    ]
+    joint_names = list(GMT_EXPECTED_JOINT_ORDER)
+    actual = {
+        "anchor_pos_w": np.array([0., 0., 1.]), "anchor_quat_w": np.array([1., 0., 0., 0.]),
+        "body_pos_w": np.tile([0., 0., 1.], (len(body_names), 1)),
+        "body_quat_w": np.tile([1., 0., 0., 0.], (len(body_names), 1)),
+        "joint_pos": np.full(21, position), "joint_vel": np.full(21, speed),
+    }
+    reference = copy.deepcopy(actual)
+    reference["body_pos_relative_w"] = reference["body_pos_w"].copy()
+    reference["body_quat_relative_w"] = reference["body_quat_w"].copy()
+    terms = {}
+    descriptions = (
+        ("anchor_pos", "motion_global_anchor_position_error_exp", "motion_global_anchor_pos", .3, .5),
+        ("anchor_ori", "motion_global_anchor_orientation_error_exp", "motion_global_anchor_ori", .4, .5),
+        ("body_pos", "motion_relative_body_position_error_exp", "motion_body_pos", .3, 1.),
+        ("body_ori", "motion_relative_body_orientation_error_exp", "motion_body_ori", .4, 1.),
+        ("joint_pos", "motion_joint_position_error_exp", "motion_leg_joint_pos", .25, .5),
+        ("joint_vel", "motion_joint_velocity_error_exp", None, None, 0.),
+    )
+    for key, function, source_term, source_std, source_weight in descriptions:
+        item = {"error": 0., "function": function, "source_term": source_term,
+                "source_std": source_std, "source_weight": source_weight,
+                "source_enabled": source_weight != 0}
+        if key.startswith("body_"):
+            item.update(body_indices=list(range(22)), body_names=body_names.copy())
+        elif key.startswith("joint_"):
+            indices = ([0, 3, 7, 11, 15, 19, 1, 4, 8, 12, 16, 20]
+                       if key == "joint_pos" else list(range(21)))
+            item.update(joint_indices=indices, joint_names=[joint_names[i] for i in indices])
+        if source_weight:
+            item["source_score"] = 1.
+        terms[key] = item
+    return {"schema": "gmt.motion_tracking.v1", "control_tick": tick, "reference_tick": tick,
+            "coordinate_frame": "world", "quaternion_order": "wxyz",
+            "anchor_body_name": "base_link", "body_names": body_names, "joint_names": joint_names,
+            "reference": reference, "actual": actual, "terms": terms}
+
+
 def actual_step(index=0, *, speed=0., position=0.):
     names = ["root", "left_foot", "right_foot", "left_elbow", "right_elbow"]
     tick = 612 + 12 * index
@@ -215,6 +264,7 @@ def actual_step(index=0, *, speed=0., position=0.):
                        "root_height_error_m": 0., "non_yaw_orientation_error_rad": 0.,
                        "yaw_error_rad": 0., "end_effector_relative_height_error_m": 0.},
             "reference_consistency": {"valid": True, "joint_vel_rms_rad_s": 0., "root_lin_vel_rms_m_s": 0., "root_ang_vel_rms_rad_s": 0.},
+            "motion_tracking": motion_tracking_fixture(tick, speed=speed, position=position),
             "physical_diagnostics": physical, "physics_substeps": substeps}
 
 
@@ -237,7 +287,7 @@ def test_actual_tracking_and_stability_reward_prefers_controlled_pose():
     bad_row = actual_step(speed=1.)
     bad_row["errors"]["root_height_error_m"] = .5
     bad_row["errors"]["non_yaw_orientation_error_rad"] = 1.
-    bad_row["errors"]["joint_position_rmse_rad"] = 1.
+    bad_row["motion_tracking"]["terms"]["joint_pos"]["error"] = 1.
     bad = ExecutionReward(music_features=music_fixture(), target_activity=target_activity_fixture).evaluate_step(bad_row)
     assert good["transition_valid"] and bad["transition_valid"]
     assert good["reward"] == pytest.approx(.092)

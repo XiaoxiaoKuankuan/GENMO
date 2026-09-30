@@ -5,6 +5,8 @@
 69/690/1092 推理链、50 Hz 控制和 200 Hz PhysX。默认执行模式为 latency，默认入口
 模式为 collect；这不构成实机实时性或训练效果改善的证明。
 当前默认奖励为 `stage9.execution_reward.v2`，按照用户新的活动门控与物理代价公式。
+其中 Tracking 已改为 `gmt.motion_tracking.v1`，对齐 Frozen GMT **当前任务**的六项
+motion-tracking 定义及已启用项的权重比例；其余奖励和学习算法保持不变。
 此前 2026-09-30 的第一轮 DPPO/恢复验收使用奖励 v1，其报告保持不变；后续奖励v2
 也已完成真实训练、同批学习率校准及恢复，见[奖励v2训练验收](stage9_reward_v2_training.md)。
 不同奖励和源码身份的checkpoint不能无条件完整续训。
@@ -63,8 +65,7 @@ Actor 参数，不作为可学习策略转移。
 
 `r = .02 * (2.5*gate*track + 2*gate*music + stable + .5*alive - .15*cmd - .10*torque - .20*contact - .50*joint_limit)`。
 
-跟踪直接使用 backend 的关节位置/速度 RMSE、末端相对高度、yaw 和世界根位置误差，
-分项权重为 .45/.25/.15/.10/.05。稳定性只评价根高与 non-yaw，不抑制正常舞蹈角速度
+跟踪采用下文六项 GMT motion-tracking 指数分数。稳定性只评价根高与 non-yaw，不抑制正常舞蹈角速度
 或关节加速度。音乐节拍复用原函数；强度改为实际与配对示范同时间窗活动度的对数
 比值匹配，完全移除旧 onset 强度代理。门控同时作用于跟踪和音乐，活动度采用最近
 0.5 秒关节速度 RMS。配对动作仅作 reward 监督，不进入 Actor/Critic 条件；缺失、
@@ -84,6 +85,56 @@ score、gate、weighted_rate、分项积分及最终奖励。真正执行失败�
 候选一次扣 .5，均不乘 dt；正常结束/截断不罚。late_plan保留为到达时序事件，不当作
 非法生成参考；RPC/程序故障保存 invalid 转移，未知执行计数为 null，不送入训练。
 完整字段、公式与本轮验证见[奖励v2说明](stage9_reward_v2.md)。
+
+### Tracking 与 Frozen GMT 当前任务对齐
+
+原定义来自 GMT 的 `mimic_noetix_bumi4340_mha_sonic/mdp/rewards.py`；std、选择集合和
+源权重从当前任务 `tracking_env_cfg.py::RewardsCfg` 在冻结关闭奖励前读取。每项为
+`R_i = exp(-E_i / std_i²)`，这里 `E_i` **已经是平方误差**，不会再次平方。
+
+| 配置键 | 原 GMT 函数 | 平方误差 E 的定义 | std | Stage9 内部权重 |
+| --- | --- | --- | ---: | ---: |
+| `anchor_pos` | `motion_global_anchor_position_error_exp` | 世界 anchor 位置差的三轴平方和 | 0.30 m | 1/7 |
+| `anchor_ori` | `motion_global_anchor_orientation_error_exp` | 世界 anchor 完整四元数最短旋转角的平方 | 0.40 rad | 1/7 |
+| `body_pos` | `motion_relative_body_position_error_exp` | 原 MotionCommand 对齐后的 body 位置差，先三轴平方和，再对 body 平均 | 0.30 m | 2/7 |
+| `body_ori` | `motion_relative_body_orientation_error_exp` | 同一对齐后的 body 完整最短旋转角平方，对 body 平均 | 0.40 rad | 2/7 |
+| `joint_pos` | `motion_joint_position_error_exp` | 原任务选中的 12 个腿关节位置平方差的均值 | 0.25 rad | 1/7 |
+| `joint_vel` | `motion_joint_velocity_error_exp` | 原函数默认全部 21 个原生关节的速度平方差均值 | 1.40 rad/s | 0 |
+
+原任务对应五个启用项的权重为 `0.5:0.5:1:1:0.5`，这里除以总和 3.5，保持原比例，
+同时让 `R_track` 落在 [0,1]。外层仍为 `2.5 * activity_gate * R_track`，统一乘 .02。
+`joint_vel` 原配置未启用，1.40 是 Stage9 的预留 std，不冒称原训练参数；误差及分数
+始终记录。需要启用时改配置并重新分配六项权重，使其非负且总和为 1。
+
+body 保持当前 `MotionCommand.cfg.body_names` 的 22 个 body 顺序，实际状态严格按
+`body_indexes` 取出；anchor 为 `base_link`。关节数组保持实际机器人/ONNX 的原生
+21 关节顺序。位置奖励沿用原 `motion_leg_joint_pos` 的左腿六关节、右腿六关节选择，
+在原生数组中的索引为 `[0,3,7,11,15,19,1,4,8,12,16,20]`，不会误把腰或手臂加进去。
+每步同时记录完整名称、所选名称/索引、参考值、实际值和源函数配置，供复核对应关系。
+
+body 的对齐严格复用原 MotionCommand 公式：参考 anchor 的 XY 平移到实际 anchor，
+Z 保持参考高度；用实际 anchor 与参考 anchor 相对旋转的 yaw 旋转参考 body。
+global anchor 两项仍使用未经对齐的世界误差。姿态直接调用 IsaacLab 原
+`quat_error_magnitude`，跨 ±π 使用最短旋转，四元数 q 与 -q 等价，不将 yaw 欧拉角
+相减当作完整姿态误差。既有稳定性中的 non-yaw 和根高定义不变。
+
+StreamingMotionCommand 的 inherited relative 缓存没有随流式参考刷新；新增只读
+`TrackingDiagnostics` 在完整 50 Hz 区间末端、同一实际消费 tick 上构造局部参考视图，
+逐项调用原 GMT 奖励函数核验 `source_score`。它不调用带采样副作用的 `_update_command`，
+也不写回旧缓存或改变 GMT 的观察、策略、归一化、PD、控制时钟。诊断失败沿用最小
+trace 记录，已执行步数不会丢失，转移标记 invalid。
+
+参数均在 `reward.tracking.{objective,std,weights}`，已同步两份 `stage9_dppo*.yaml`
+及共用奖励实现的两份 Stage10 配置。六项 raw 平方误差、error/std²、分数和权重均
+随奖励保存。新增诊断文件纳入跨仓库源码指纹；缺少新字段或名称/时刻/坐标契约错误
+会拒绝该转移，没有旧五项回退。
+
+这里对齐的是**当前可核验的任务定义及这六项子目标**，不是复制 GMT 全部训练奖励。
+`model_135000_stage2.json` 明确历史 `source_training_config_available=false`，因此不
+声称完整还原这个 ONNX 检查点当年的训练配置。此前 v2/Stage10 的真实训练与全 val
+报告使用旧五项 Tracking，保留为历史结果；不能与新定义的累计奖励直接比较。
+奖励身份绑定完整配置，旧 checkpoint 不能完整续训到新版；需新 run、新执行采集和
+新基线。原 Stage1 的 weights-only Actor 初始化仍可使用，Critic/优化器重新建立。
 
 独立 Critic 输入同一音乐、50×48 实际历史、相同已承诺前缀及真实音乐剩余秒数。
 历史 GRU 128，音乐和前缀各 MLP 128，拼接 385→256→128→1。没有 Actor/GMT 参数

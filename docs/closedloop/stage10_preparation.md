@@ -4,6 +4,13 @@
 全部train/val/test，不使用200首音乐选择文件。代码能力、文件审计、真实物理执行
 覆盖和模型质量分别报告，不能把全量文件检查说成每条训练数据都已物理执行。
 
+**当前奖励更新边界（2026-09-30）：** Stage9/Stage10 共用的 Tracking 已改成
+`gmt.motion_tracking.v1`，参数和语义见[六项 Tracking 说明](stage9_dppo.md#tracking-与-frozen-gmt-当前任务对齐)。
+本文下面的三轮恢复验收与全 val 数字来自旧五项 Tracking，作为历史证据保留。
+`preparation_contract_v2_20260930` 也属于旧奖励身份，不能在当前代码下直接
+`--resume latest` 或用 `--initialize-stage9` 绕过奖励身份检查。新版需建立独立 run、
+重新采集执行奖励并建立初始评估基线；训练器、采样、Critic、DPPO 与 KL 门槛未更改。
+
 ## 入口与配置
 
 - `tools/train_closedloop_stage10.py`支持`preflight/train/eval`；默认preflight。
@@ -188,10 +195,11 @@ passed且exit0，第1轮→恢复第2轮→显式扩限恢复第3轮，全部正
 本轮完成的是正式训练前工程准备及有限验收，没有启动长期正式训练，也未验证收敛、
 长曲播放、域随机化、多环境训练或真实硬件。
 
-## 正式首段续训命令（交付命令，本轮未执行）
+## 历史旧 Tracking 续训命令（当前版本不适用）
 
-工程检查已支持单环境正式首段训练。该run已在第3轮结束，总40轮预算扩展记录已发布，
-后续无需重复传扩限参数。建议先到总第10轮，再独立评估；初始对照使用本run的initial.pt。
+下面命令记录的是旧 Tracking 验收后给出的续训方案，未执行。该 run 在旧奖励身份下
+结束于第3轮并发布了40轮预算扩展；当前奖励已变化，恢复检查会拒绝它，不能继续
+执行这条命令作为新 Tracking 正式训练。保留命令是为了历史可追溯，不放宽身份校验。
 
 ```bash
 cd /home/user/liwei/GENMO-bumi-closedloop
@@ -203,5 +211,6 @@ CUDA_VISIBLE_DEVICES=0 PYTHONDONTWRITEBYTECODE=1 OMP_NUM_THREADS=1 MKL_NUM_THREA
   --resume latest --stop-after-iteration 10
 ```
 
-这是从已验收第3轮模型、优化器、采样器和计数继续到第10轮，不是随机权重初始化，
-也不是只加载Actor权重。GMT物理session仍新建并reset，不恢复旧PhysX内部状态。
+该命令在原奖励及代码身份下的语义是完整恢复第3轮；当前版本须使用新的独立运行
+目录，沿用 Stage1 Actor weights-only 初始化，再重新建立 Critic、优化器及新基线。
+本次 Tracking 修改没有启动任何正式训练，也没有将旧全 val 报告当作新奖励验收。

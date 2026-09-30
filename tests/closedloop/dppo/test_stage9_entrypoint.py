@@ -73,7 +73,9 @@ def test_configuration_contains_resolved_reward_and_keeps_latency():
     assert reward['version'] == 'stage9.execution_reward.v2'
     assert reward['track_weight'] == 2.5 and reward['music_weight'] == 2.
     assert reward['activity']['window_s'] == .5
-    assert reward['scales']['joint_vel_rad_s'] == 1.4
+    assert reward['tracking']['std']['joint_vel'] == 1.4
+    assert reward['tracking']['objective'] == 'gmt.motion_tracking.v1'
+    assert reward['tracking']['weights']['joint_vel'] == 0.
     assert reward['consistency']['joint_vel_rms_rad_s'] == 1e-4
     assert 'angular_velocity_rad_s' not in reward['scales']
     assert 'joint_acceleration_rad_s2' not in reward['scales']

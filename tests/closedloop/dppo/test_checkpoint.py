@@ -15,6 +15,7 @@ import pytest
 import torch
 
 from gem.closedloop.dppo.checkpoint import capture_rng, load_checkpoint, restore_rng, save_checkpoint
+from gem.closedloop.dppo.rewards import resolve_reward_config
 
 
 class Sampler:
@@ -142,3 +143,42 @@ def test_checkpoint_requires_collection_boundary_and_cleans_failed_atomic_write(
         _save(path, objects)
     assert path.read_bytes() == previous
     assert list(tmp_path.iterdir()) == [path]
+
+
+@pytest.mark.parametrize('mismatch', ['legacy_tracking', 'tracking_std', 'tracking_weights'])
+def test_tracking_reward_identity_change_rejects_full_resume_before_any_state_mutation(tmp_path, mismatch):
+    """Tracking 定义或参数变化必须形成新奖励身份，不能继续旧 Critic/Adam/GAE 语义。"""
+    objects = _objects()
+    current = resolve_reward_config()
+    saved_reward = copy.deepcopy(current)
+    if mismatch == 'legacy_tracking':
+        saved_reward.pop('tracking')
+        saved_reward['track_mix'] = dict(joint_pos=.45, joint_vel=.25, ee_height=.15,
+                                         yaw=.10, root_position=.05)
+        saved_reward['scales'].update(joint_pos_rad=.22, joint_vel_rad_s=1.4,
+                                     ee_height_m=.07, yaw_rad=.6, root_position_m=.4)
+    elif mismatch == 'tracking_std':
+        saved_reward['tracking']['std']['joint_pos'] *= 2
+    else:
+        saved_reward['tracking']['weights']['joint_pos'] -= .1
+        saved_reward['tracking']['weights']['joint_vel'] += .1
+    objects['identity']['reward'] = saved_reward
+    path = tmp_path / 'previous_tracking.pt'
+    _save(path, objects)
+    objects['identity']['reward'] = current
+    with torch.no_grad():
+        next(objects['actor'].parameters()).add_(5)
+        next(objects['critic'].parameters()).sub_(3)
+    objects['samplers']['music'].position = 77
+    before = {name: copy.deepcopy(objects[name].state_dict())
+              for name in ('actor', 'critic', 'actor_optimizer', 'critic_optimizer')}
+    # 用抽样结果而非重新实现 RNG 编码，验证拒绝路径没有消耗任何独立随机流。
+    rng_before = capture_rng(objects['generators'])
+    expected_draw = _draw(objects)
+    restore_rng(rng_before, objects['generators'])
+    with pytest.raises(ValueError, match='identity mismatch'):
+        load_checkpoint(path, **objects)
+    for name, expected in before.items():
+        _equal(expected, objects[name].state_dict())
+    assert objects['samplers']['music'].position == 77
+    _equal(expected_draw, _draw(objects))

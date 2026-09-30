@@ -8,7 +8,6 @@
 """
 from __future__ import annotations
 
-import copy
 import math
 
 import numpy as np
@@ -47,19 +46,28 @@ def test_formula_integrates_once_and_event_penalties_do_not_use_dt():
         assert calculator.event_reward(reason) == 0.
 
 
-@pytest.mark.parametrize("error_key,scale,weight", [
-    ("joint_position_rmse_rad", .22, .45), ("joint_velocity_rmse_rad_s", 1.4, .25),
-    ("end_effector_relative_height_error_m", .07, .15), ("yaw_error_rad", .6, .1),
-    ("root_position_error_m", .4, .05)])
-def test_tracking_uses_backend_scalar_errors_without_realigning(error_key, scale, weight):
+@pytest.mark.parametrize("key,error_key,std,weight", [
+    ("anchor_pos", "anchor_position_error_sq_m2", .3, 1 / 7),
+    ("anchor_ori", "anchor_orientation_error_sq_rad2", .4, 1 / 7),
+    ("body_pos", "body_position_mean_error_sq_m2", .3, 2 / 7),
+    ("body_ori", "body_orientation_mean_error_sq_rad2", .4, 2 / 7),
+    ("joint_pos", "joint_position_mean_error_sq_rad2", .25, 1 / 7),
+    ("joint_vel", "joint_velocity_mean_error_sq_rad2_s2", 1.4, 0.),
+])
+def test_tracking_uses_gmt_squared_errors_without_realigning(key, error_key, std, weight):
     row = actual_step(speed=1.)
-    row["errors"][error_key] = scale
-    # 改变参考/实际世界姿态不能覆盖 backend 已经判定的世界位置或 yaw 误差。
+    row["motion_tracking"]["terms"][key]["error"] = std ** 2
+    # GENMO 不另造坐标对齐，也不使用旧 RMSE/yaw 标量替代当前 MotionCommand 诊断。
     row["actual_qpos"][:3] = 999.
     row["reference"]["body_pos_w"][:] = 999.
+    for legacy_key in ("joint_position_rmse_rad", "joint_velocity_rmse_rad_s",
+                       "end_effector_relative_height_error_m", "yaw_error_rad", "root_position_error_m"):
+        row["errors"][legacy_key] = 999.
     result = component(row, "track")
     assert result["score"] == pytest.approx(1 - weight + weight * math.exp(-1))
-    assert result["raw"][error_key] == scale
+    assert result["raw"][error_key] == std ** 2
+    assert result["normalized"]["error_over_std_squared"][key] == pytest.approx(1.)
+    assert result["normalized"]["scores"][key] == pytest.approx(math.exp(-1))
 
 
 def test_stability_only_height_and_non_yaw_not_dynamic_motion_penalty():
@@ -290,8 +298,9 @@ def test_reference_consistency_is_integrity_gate_not_reward(key):
 @pytest.mark.parametrize("overrides", [
     {"dt": .01}, {"version": "stage9.execution_reward.v1"}, {"failure_penalty": -5},
     {"diagnostics": {"mechanical_power_weight": .1}}, {"diagnostics": {"impact_weight": 1}},
-    {"torque": {"free_ratio": 1}}, {"scales": {"joint_pos_rad": 0}},
-    {"activity": {"window_s": .51}}, {"track_mix": {"joint_pos": .9}}, {"unexpected": 1}])
+    {"torque": {"free_ratio": 1}}, {"tracking": {"std": {"joint_pos": 0}}},
+    {"activity": {"window_s": .51}}, {"tracking": {"weights": {"joint_pos": .9}}},
+    {"scales": {"joint_pos_rad": .22}}, {"track_mix": {"joint_pos": .45}}, {"unexpected": 1}])
 def test_config_is_validated_before_data_or_physics(overrides):
     with pytest.raises(ValueError):
         resolve_reward_config(overrides)

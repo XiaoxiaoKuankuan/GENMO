@@ -142,20 +142,29 @@ stage10:
     failure_penalty: 5.0
     rejected_plan_penalty: 0.5
     scales:
-      joint_pos_rad: 0.22
-      joint_vel_rad_s: 1.4
-      ee_height_m: 0.07
-      yaw_rad: 0.6
-      root_position_m: 0.4
       root_height_m: 0.05
       non_yaw_rad: 0.12
       slide_m_s: 0.15
-    track_mix:
-      joint_pos: 0.45
-      joint_vel: 0.25
-      ee_height: 0.15
-      yaw: 0.1
-      root_position: 0.05
+    tracking:
+      objective: gmt.motion_tracking.v1
+      # 误差来自冻结GMT当前任务的原motion-tracking定义，均为平方误差。
+      # joint_pos沿用原12腿关节选择；joint_vel当前未启用，保留原函数默认全21关节。
+      std:
+        anchor_pos: 0.3
+        anchor_ori: 0.4
+        body_pos: 0.3
+        body_ori: 0.4
+        joint_pos: 0.25
+        # 原GMT未启用velocity，此std是Stage9预留参数，默认不参与奖励。
+        joint_vel: 1.4
+      # 原启用比例0.5:0.5:1:1:0.5除以3.5，保持R_track在[0,1]。
+      weights:
+        anchor_pos: 0.14285714285714285
+        anchor_ori: 0.14285714285714285
+        body_pos: 0.2857142857142857
+        body_ori: 0.2857142857142857
+        joint_pos: 0.14285714285714285
+        joint_vel: 0.0
     stable_mix:
       root_height: 0.5
       non_yaw: 0.5

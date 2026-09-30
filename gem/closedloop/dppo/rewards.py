@@ -1,6 +1,11 @@
 """第九步第二版实际执行奖励、活动监督与物理诊断。
 
-本模块只评价已经执行的 50Hz 控制区间。跟踪与稳定性直接消费 backend 的误差，
+本模块只评价已经执行的 50Hz 控制区间。跟踪消费冻结 GMT 原 motion-tracking 六项
+平方误差：世界 anchor 位置/完整姿态、原 MotionCommand 对齐后的 body 位置/姿态、
+原任务选择的关节位置及可选关节速度。使用 exp(-error/std²)，不再次平方 error，
+不重新构造坐标系或用旧 RMSE/末端高度/yaw 混合项回退；名称、选择、时刻和原值
+证据随 backend 诊断保存。内部 objective 版本独立标识这次 tracking 语义变化。
+稳定性仍直接消费原 backend 的根高与 non-yaw 误差，其余 v2 奖励公式保持不变。
 活动门控同时作用于跟踪和音乐；目标活动度来自配对训练动作的同一因果时间窗，
 绝不使用 GENMO 生成参考代替监督。音乐节拍复用 BUMI 原有动作节拍和对齐函数。
 连续奖励率统一乘 0.02 秒，失败及有限非法参考的事件罚分由调用方单独加入一次。
@@ -25,6 +30,26 @@ import numpy as np
 import torch
 
 from gem.robots.bumi.metrics import _derive_motion_beats, _beat_alignment
+from gem.closedloop.contracts import GMT_EXPECTED_JOINT_ORDER
+
+
+TRACKING_OBJECTIVE = "gmt.motion_tracking.v1"
+TRACKING_FUNCTIONS = {
+    "anchor_pos": "motion_global_anchor_position_error_exp",
+    "anchor_ori": "motion_global_anchor_orientation_error_exp",
+    "body_pos": "motion_relative_body_position_error_exp",
+    "body_ori": "motion_relative_body_orientation_error_exp",
+    "joint_pos": "motion_joint_position_error_exp",
+    "joint_vel": "motion_joint_velocity_error_exp",
+}
+TRACKING_ERROR_FIELDS = {
+    "anchor_pos": "anchor_position_error_sq_m2",
+    "anchor_ori": "anchor_orientation_error_sq_rad2",
+    "body_pos": "body_position_mean_error_sq_m2",
+    "body_ori": "body_orientation_mean_error_sq_rad2",
+    "joint_pos": "joint_position_mean_error_sq_rad2",
+    "joint_vel": "joint_velocity_mean_error_sq_rad2_s2",
+}
 
 
 DEFAULT_CONFIG = {
@@ -34,11 +59,16 @@ DEFAULT_CONFIG = {
     "cmd_penalty_weight": .15, "torque_penalty_weight": .10,
     "contact_penalty_weight": .20, "joint_limit_penalty_weight": .50,
     "failure_penalty": 5., "rejected_plan_penalty": .5,
-    "scales": {"joint_pos_rad": .22, "joint_vel_rad_s": 1.40, "ee_height_m": .07,
-               "yaw_rad": .60, "root_position_m": .40, "root_height_m": .05,
+    "scales": {"root_height_m": .05,
                "non_yaw_rad": .12, "slide_m_s": .15},
-    "track_mix": {"joint_pos": .45, "joint_vel": .25, "ee_height": .15,
-                  "yaw": .10, "root_position": .05},
+    "tracking": {
+        "objective": TRACKING_OBJECTIVE,
+        "std": {"anchor_pos": .3, "anchor_ori": .4, "body_pos": .3,
+                "body_ori": .4, "joint_pos": .25, "joint_vel": 1.4},
+        # 对应当前 GMT 启用的 .5/.5/1/1/.5 比例；joint_vel 原任务未启用。
+        "weights": {"anchor_pos": 1/7, "anchor_ori": 1/7, "body_pos": 2/7,
+                    "body_ori": 2/7, "joint_pos": 1/7, "joint_vel": 0.},
+    },
     "stable_mix": {"root_height": .5, "non_yaw": .5},
     "music_mix": {"beat": .7, "intensity": .3},
     "torque": {"free_ratio": .8, "mean_weight": .5, "max_weight": .5},
@@ -129,7 +159,19 @@ class ExecutionReward:
         for group in ("scales", "consistency"):
             for name, value in config[group].items():
                 finite_nonnegative(value, f"{group}.{name}", positive=True)
-        for group in ("track_mix", "stable_mix", "music_mix"):
+        tracking = config["tracking"]
+        if tracking["objective"] != TRACKING_OBJECTIVE:
+            raise ValueError(f"tracking.objective must be {TRACKING_OBJECTIVE}")
+        for name, value in tracking["std"].items():
+            finite_nonnegative(value, f"tracking.std.{name}", positive=True)
+            squared = float(value) * float(value)
+            if not math.isfinite(squared) or squared <= 0:
+                raise ValueError(f"tracking.std.{name} squared must be finite and positive")
+        for name, value in tracking["weights"].items():
+            finite_nonnegative(value, f"tracking.weights.{name}")
+        if not math.isclose(sum(tracking["weights"].values()), 1., abs_tol=1e-12):
+            raise ValueError("tracking.weights must sum to one")
+        for group in ("stable_mix", "music_mix"):
             for name, value in config[group].items():
                 finite_nonnegative(value, f"{group}.{name}")
             if not math.isclose(sum(config[group].values()), 1., abs_tol=1e-12):
@@ -257,18 +299,64 @@ class ExecutionReward:
         return score, True, raw, {"beat": beat, "intensity": intensity}
 
     def _track(self, row):
-        mapping = {"joint_pos": ("joint_position_rmse_rad", "joint_pos_rad"),
-                   "joint_vel": ("joint_velocity_rmse_rad_s", "joint_vel_rad_s"),
-                   "ee_height": ("end_effector_relative_height_error_m", "ee_height_m"),
-                   "yaw": ("yaw_error_rad", "yaw_rad"), "root_position": ("root_position_error_m", "root_position_m")}
+        """消费 GMT 原误差和选择证据；这里不重新对齐参考、不从评分反推误差。"""
+        diagnostic = row.get("motion_tracking")
+        if not isinstance(diagnostic, dict) or diagnostic.get("schema") != TRACKING_OBJECTIVE:
+            raise ValueError("missing or incompatible frozen GMT motion_tracking diagnostics")
+        if diagnostic.get("coordinate_frame") != "world" or diagnostic.get("quaternion_order") != "wxyz":
+            raise ValueError("motion_tracking must retain GMT world coordinates and wxyz quaternions")
+        if diagnostic.get("control_tick") != row["tick"] or diagnostic.get("reference_tick") != row["tick"]:
+            raise ValueError("motion_tracking must use the actually consumed control/reference tick")
+        body_names, joint_names = diagnostic.get("body_names"), diagnostic.get("joint_names")
+        if not isinstance(body_names, (list, tuple)) or not body_names or any(not isinstance(n, str) or not n for n in body_names):
+            raise ValueError("motion_tracking requires named MotionCommand bodies")
+        if len(set(body_names)) != len(body_names) or diagnostic.get("anchor_body_name") not in body_names:
+            raise ValueError("motion_tracking body order contains duplicates or lacks its anchor")
+        if not isinstance(joint_names, (list, tuple)) or tuple(joint_names) != GMT_EXPECTED_JOINT_ORDER:
+            raise ValueError("motion_tracking joint order must match frozen GMT native order")
+        for side in ("reference", "actual"):
+            values = diagnostic.get(side)
+            if not isinstance(values, dict):
+                raise ValueError(f"motion_tracking requires {side} state evidence")
+            for field, shape in (("anchor_pos_w", (3,)), ("anchor_quat_w", (4,)),
+                                 ("body_pos_w", (len(body_names), 3)), ("body_quat_w", (len(body_names), 4)),
+                                 ("joint_pos", (len(joint_names),)), ("joint_vel", (len(joint_names),))):
+                _array(values.get(field), f"motion_tracking.{side}.{field}", shape)
+        for field, shape in (("body_pos_relative_w", (len(body_names), 3)), ("body_quat_relative_w", (len(body_names), 4))):
+            _array(diagnostic["reference"].get(field), f"motion_tracking.reference.{field}", shape)
+        terms = diagnostic.get("terms")
+        if not isinstance(terms, dict) or set(terms) != set(TRACKING_FUNCTIONS):
+            raise ValueError("motion_tracking requires all six original GMT terms")
         raw, normalized, scores = {}, {}, {}
-        for name, (key, scale) in mapping.items():
-            raw[key] = _scalar(row["errors"].get(key), key)
-            if raw[key] < 0:
-                raise ValueError(f"backend tracking error must be nonnegative: {key}")
-            scores[name], normalized[name] = _score(raw[key], self.config["scales"][scale])
-        raw["source"] = "backend.errors_without_reference_realignment"
-        return sum(self.config["track_mix"][name] * score for name, score in scores.items()), True, raw, {"errors_over_scale": normalized, "scores": scores}
+        for name, function in TRACKING_FUNCTIONS.items():
+            term = terms[name]
+            if not isinstance(term, dict) or term.get("function") != function:
+                raise ValueError(f"motion_tracking.{name} is not the original GMT function")
+            if name.startswith(("body_", "joint_")):
+                kind = "body" if name.startswith("body_") else "joint"
+                names = body_names if kind == "body" else joint_names
+                indices, selected = term.get(f"{kind}_indices"), term.get(f"{kind}_names")
+                if (not isinstance(indices, (list, tuple)) or not indices
+                        or any(type(i) is not int or not 0 <= i < len(names) for i in indices)
+                        or len(set(indices)) != len(indices)
+                        or list(selected or []) != [names[i] for i in indices]):
+                    raise ValueError(f"motion_tracking.{name} selected {kind} names/order differ from indices")
+            error = _scalar(term.get("error"), f"motion_tracking.{name}.error")
+            if error < 0:
+                raise ValueError(f"motion_tracking.{name} squared error must be nonnegative")
+            std = self.config["tracking"]["std"][name]
+            normalized[name] = error / std ** 2
+            if not math.isfinite(normalized[name]):
+                raise ValueError(f"nonfinite motion_tracking.{name} normalized error")
+            scores[name] = math.exp(-normalized[name])
+            raw[TRACKING_ERROR_FIELDS[name]] = error
+        raw.update(source="frozen_gmt_current_motion_command", objective=TRACKING_OBJECTIVE,
+                   anchor_body_name=diagnostic["anchor_body_name"], body_names=list(body_names),
+                   joint_names=list(joint_names), terms=copy.deepcopy(terms), control_tick=int(row["tick"]))
+        cfg = self.config["tracking"]
+        score = sum(cfg["weights"][name] * value for name, value in scores.items())
+        return score, True, raw, {"error_over_std_squared": normalized, "scores": scores,
+                                 "std": copy.deepcopy(cfg["std"]), "weights": copy.deepcopy(cfg["weights"])}
 
     def _stable(self, row):
         raw, normalized, scores = {}, {}, {}

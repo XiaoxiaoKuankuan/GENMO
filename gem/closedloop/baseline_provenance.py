@@ -73,7 +73,7 @@ SOURCE_FILES = {
             "scripts/motion/bumi4340_reference_kinematics.py",
             *(f"{TASK}/closedloop/{name}.py" for name in
               ("__init__", "backend", "command", "config", "env", "history", "scene_evidence",
-               "render_sync", "physical_diagnostics", "initial_ground_pose", "orientation_errors")),
+               "render_sync", "physical_diagnostics", "tracking_diagnostics", "initial_ground_pose", "orientation_errors")),
         ),
         "reused_task_and_observations": (
             f"{TASK}/__init__.py", f"{TASK}/tracking_env_cfg.py",
