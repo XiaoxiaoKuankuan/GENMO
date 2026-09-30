@@ -84,7 +84,22 @@ CUDA_VISIBLE_DEVICES=0 PYTHONDONTWRITEBYTECODE=1 OMP_NUM_THREADS=1 MKL_NUM_THREA
 执行；默认全val，`--eval-split test`选择独立test。相同checkpoint/清单/种子可重复
 对照，但实际latency执行仍受测得推理/I/O耗时影响，不宣称位级相同物理轨迹。
 
+## 完整评估分片与配对比较
+
+`tools/eval/run_closedloop_stage10_shard.py`显式加载完整checkpoint，使用同一父计划
+按样本索引mod N分片，同样本全部seed保留。每片使用独立GPU、运行目录和执行
+journal；新增工具实现单独保存SHA，原训练身份仍严格校验。通过每片原审计后，
+`python -B -m gem.closedloop.dppo.evaluation_shards`核完整父任务集合恰出现一次，
+重算整体/来源/seed统计；预算总和仍须符合一次完整评估上限。
+
+`tools/eval/compare_closedloop_stage10.py --initial-report <初始merged/report.json>
+--final-report <更新后merged/report.json> --output <新文件>`执行CPU只读配对比较。
+两个checkpoint必须不同，其余父任务、噪声、时长、训练和评估身份必须一致；同时
+报告任务总回报、实际时长、失败，以及实际控制区间均值，防止失败后少执行造成
+表面奖励率上涨。四轮比较只验证小步变化，不能宣称收敛。latency执行受实际耗时
+影响，相同任务/噪声不保证跨负载逐位相同轨迹。
+
 ## 当前验收状态
 
-实现与CPU回归进行中。服务器已只读确认全4765条路径存在及清单划分无泄漏；完整
-文件内容审计、真实多轮/续训/评估结果由后续日志补充，当前不预写全部通过。
+服务器已完成全4765条内容与身份审计；前两轮真实训练及正常退出通过，完整恢复至
+四轮与全量初始/更新后评估正在进行。最终验收结果后续更新，当前不预写全部通过。
