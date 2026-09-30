@@ -82,6 +82,8 @@ EDGE35 节拍字段。窗口不足或没有音乐拍点时，beat 明确无效�
 - `c_joint_limit=.5*max(actual_cost)+.5*max(current_reference_cost)`。优先实际
   soft limits，没有则使用硬范围内侧5%安全区；安全区内成本0，穿入边距至硬限位
   线性升至1，越界饱和1。只检查当前消费参考，不扫描整段120帧未来轨迹。
+  soft limits 与硬边界在 1e-6 rad 内的浮点构造误差允许数值夹回边界，保留原始
+  soft 值与校正标记；超过该容差仍视为无效限位证据。
 
 ## 一致性与版本边界
 
@@ -92,3 +94,52 @@ EDGE35 节拍字段。窗口不足或没有音乐拍点时，beat 明确无效�
 配置集中在两个 stage9_dppo YAML，完整解析值写入 resolved_config；reward 字典及
 源码 manifest 都绑定 checkpoint 身份，因此旧 v1 checkpoint 不能静默完整续训为
 v2。只读审计器按版本分别核对历史 v1 和当前 v2，不修改旧数据或旧验收结论。
+
+## 2026-09-30 实际验证与交付
+
+本地完整集成230 passed（仅既有rotary autocast弃用warning），覆盖整个dppo、
+协调器、条件及源码身份；预热目标初始化补修后，奖励/数据/环境定向82 passed。
+GMT 136 passed、1 skipped，跳过项为本地GENMO环境缺IsaacLab的配置构建测试，
+随后在服务器真实启动执行中验证。测试临时目录已清理。新审计器读取旧v1本地归档
+仍为28 passed/4 not_run（仅缺远端checkpoint），不使用新公式解释旧数据。
+
+服务器1进行了两轮collect，各64条上层转移，未调用Actor或Critic优化。初版GENMO
+`c8628a0`的采集/字段校验通过，但复查发现首音乐步没有承接预热上一目标，该轮
+只保留作修正前诊断。修正版GENMO `d6423b7`、GMT `4e7927c`的最终轮逐步检查
+通过，首音乐步上一目标与SQLite预热末步的实际提交目标逐元素一致，跳变正常计价。
+
+最终轮有64条上层转移、1600音乐控制步、5个episode；完整journal为386次mutation、
+140次advance、1900控制/7600物理步（含预热和校准）。每步8项奖励、配对目标、
+4物理子步和参考一致性有效，cmd包括首音乐步均有效。跟踪/稳定性/cmd独立重算
+误差0，torque最大差5.5511e-17；积分、门控/强度、事件及执行身份检查通过。
+零更新log-prob和ratio差均0。真实批次没有执行失败，故障分支由CPU测试覆盖。
+
+| 实际分布 | 最小 | 平均 | 最大 |
+| --- | ---: | ---: | ---: |
+| activity_gate | .053804 | .953010 | 1.000000 |
+| A_actual，rad/s | .061918 | .705889 | 1.876646 |
+| A_target，rad/s | .002172 | 1.057168 | 3.064273 |
+| intensity | 3.07e-9 | .722238 | .99999999 |
+| 每控制步积分奖励 | .027382 | .075080 | .104938 |
+
+这些值证明活动监督有实际区分，不能证明策略改善；本轮没有网络更新，奖励尺度
+也与v1不同，不能直接跨版本比较累计分数。原模型、统计量及GMT运行指纹保持不变，
+GMT正常退出；结束时8张GPU均0MiB，无本轮计算进程。两轮共享预算累计160生成、
+3800控制、15200物理步、0次优化，没有重置首轮消耗。
+
+完整原始去噪链、SQLite、rollout和报告保留在服务器：
+
+```text
+/data0/user/liwei/GENMO_outputs/closedloop_stage9/reward_v2_collect_20260930
+/data0/user/liwei/GENMO_outputs/closedloop_stage9/reward_v2_collect_20260930_run02
+/data0/user/liwei/GENMO_outputs/closedloop_stage9/reward_v2_20260930_budget.json
+```
+
+最终轮92文件/383055883字节，SHA清单为artifact_manifest.json。9个JSON/YAML报告
+回传本地同名outputs/closedloop_stage9目录且逐SHA一致，83个原始执行文件留服务器。
+独立结果为reward_v2_execution_audit.json，回传证明为local_report_verification.json。
+这些是用户要求的决策记录与奖励验收证据；初版用于预热边界诊断，不与最终数据混用。
+
+本次单独调用现有审计器的journal/rollout/probability/frozen检查，并从真实字段
+独立重算公式。完整audit_closedloop_dppo.py CLI的train＋resume门禁仍要求价值更新、
+Actor更新和checkpoint，不能把本次collect-only结果冒充完整训练验收。
