@@ -143,3 +143,7 @@ GMT正常退出；结束时8张GPU均0MiB，无本轮计算进程。两轮共享
 本次单独调用现有审计器的journal/rollout/probability/frozen检查，并从真实字段
 独立重算公式。完整audit_closedloop_dppo.py CLI的train＋resume门禁仍要求价值更新、
 Actor更新和checkpoint，不能把本次collect-only结果冒充完整训练验收。
+
+后续已在独立训练campaign完成奖励v2的Critic、DPPO、checkpoint、恢复及32项完整
+审计，并在同批固定梯度上实测三个Actor学习率；见[奖励v2训练验收](stage9_reward_v2_training.md)。
+上文两轮collect的原始记录及零更新结论继续保留，不改写为训练结果。
