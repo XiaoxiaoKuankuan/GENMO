@@ -118,7 +118,8 @@ def _file_record(root, relative, category):
             "mtime_ns": after.st_mtime_ns}
 
 
-def collect_source_provenance(paths: Mapping, *, repository_state: Mapping | None = None) -> dict:
+def collect_source_provenance(paths: Mapping, *, repository_state: Mapping | None = None,
+                              additional_files: Mapping | None = None) -> dict:
     """接受 Stage8 config.paths；可复用 preflight.repositories，返回可直接写 JSON 的证据。"""
     repositories, records = {}, []
     for repository, categories in SOURCE_FILES.items():
@@ -134,6 +135,8 @@ def collect_source_provenance(paths: Mapping, *, repository_state: Mapping | Non
         state["dirty"] = bool(state["status"])
         repositories[repository] = state
         entries = {relative: category for category, relatives in categories.items() for relative in relatives}
+        for relative in (additional_files or {}).get(repository, ()):
+            entries[relative] = "stage9_training"
         if repository == "gmt_repo":
             urdf = (root / ROBOT_URDF).resolve()
             if not urdf.is_relative_to(root):

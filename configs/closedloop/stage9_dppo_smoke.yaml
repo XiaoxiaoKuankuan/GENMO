@@ -1,0 +1,43 @@
+# 第九步本机有限验收：继承已跑通的严格第八步环境，仅新增训练侧配置。
+# 默认入口collect只采集；train才更新Critic和一次Actor。全部模式共享输出目录预算，
+# 随机噪声在normalized qpos30空间定义，FP32网络与FP64联合概率，不启用混合精度。
+base_config: stage8_train200_latency_isaac.yaml
+runtime:
+  allow_shared_gpu: false
+timing:
+  calibration_warmup: 4
+  calibration_samples: 12
+diagnostics:
+  reward_substeps: true
+stage9:
+  version: genmo.closedloop.stage9.v1
+  run_id: assigned_from_output_directory
+  seed: 42
+  execution_mode: latency
+  denoising_steps: 20
+  guidance_scale: 2.5
+  eta: 0.1
+  std_floor: 0.001
+  log_probability_reduction: joint_sum
+  rollout_upper_steps: 64
+  ppo_epochs: 1
+  actor_lr: 0.000001
+  critic_lr: 0.0001
+  critic_steps: 20
+  critic_batch: 32
+  grad_clip_norm: 1.0
+  gamma_upper: 0.99
+  lambda_upper: 0.95
+  gamma_denoising: 0.99
+  ppo_clip: 0.01
+  kl_stop_joint: 0.02
+  bc_weight: 0.1
+  bc_batch: 2
+  denoising_microbatch: 1
+  episode_seconds: 30
+  latency_budget_s: 0.5
+  max_generations: 256
+  max_control_steps: 10000
+  max_iterations: 3
+  music_selection: /home/weili/bumi-closedloop-worktrees/GENMO/inputs/evals/stage8_train200_20260929/corrected_selection.json
+  bc_data_root: /home/weili/bumi-closedloop-worktrees/GENMO/inputs/evals/stage1_fourset_20260928/training_selected_data

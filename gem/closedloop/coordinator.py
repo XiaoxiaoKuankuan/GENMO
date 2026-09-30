@@ -47,6 +47,10 @@ class ClosedLoopCoordinator:
                     advance_id=f"{snapshot['episode_id']}:advance:{self.advance_counter}",
                     expected_episode_id=snapshot["episode_id"])
         actual = int(result["executed_control_steps"])
+        if len(result["trace"]) != actual:
+            raise RuntimeError("Execution trace length differs from actual control steps")
+        if not result.get("transition_valid", True) or not result.get("physics_count_exact", True):
+            raise RuntimeError("Backend returned an invalid or physically uncertain transition")
         physics = int(result["executed_physics_steps"])
         new = result["snapshot"]
         if new["episode_id"] != snapshot["episode_id"]:

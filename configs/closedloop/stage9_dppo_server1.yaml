@@ -1,0 +1,42 @@
+# 第九步服务器1有限验收配置：沿用独立Isaac环境和严格第八步物理基线。
+# 仅使用单张空闲GPU训练GENMO与Critic；GMT ONNX和PhysX继续CPU执行。
+base_config: stage8_train200_latency_server1.yaml
+runtime:
+  allow_shared_gpu: false
+timing:
+  calibration_warmup: 4
+  calibration_samples: 12
+diagnostics:
+  reward_substeps: true
+stage9:
+  version: genmo.closedloop.stage9.v1
+  run_id: assigned_from_output_directory
+  seed: 42
+  execution_mode: latency
+  denoising_steps: 20
+  guidance_scale: 2.5
+  eta: 0.1
+  std_floor: 0.001
+  log_probability_reduction: joint_sum
+  rollout_upper_steps: 64
+  ppo_epochs: 1
+  actor_lr: 1.0e-06
+  critic_lr: 0.0001
+  critic_steps: 20
+  critic_batch: 32
+  grad_clip_norm: 1.0
+  gamma_upper: 0.99
+  lambda_upper: 0.95
+  gamma_denoising: 0.99
+  ppo_clip: 0.01
+  kl_stop_joint: 0.02
+  bc_weight: 0.1
+  bc_batch: 2
+  denoising_microbatch: 1
+  episode_seconds: 30
+  latency_budget_s: 0.5
+  max_generations: 256
+  max_control_steps: 10000
+  max_iterations: 3
+  music_selection: /data0/user/liwei/closedloop_stage9_assets/corrected_selection.json
+  bc_data_root: /data0/user/liwei/datasets/bumi_music_umr70_mine_pass_90505_v1
