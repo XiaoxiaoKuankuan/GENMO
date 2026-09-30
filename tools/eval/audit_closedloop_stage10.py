@@ -40,6 +40,7 @@ from gem.closedloop.dppo.evaluation import aggregate_evaluation
 
 VERSION = 'genmo.closedloop.stage10.audit.v1'
 BUDGET_KEYS = {'accepted_iterations', 'optimizer_attempts', 'generations', 'control_steps', 'physics_steps'}
+ROLLOUT_IDENTITY_KEYS = ('run_id', 'backend_session_id', 'episode_id', 'decision_id', 'policy_version')
 
 
 def require(condition, message):
@@ -149,7 +150,10 @@ def audit_rollout(root, summary, data_lookup, contract, seen_paths):
             seen_paths.add(record_path)
             require(record_path.stat().st_size==record['size_bytes'] and sha256(record_path)==record['sha256'], 'Transition file size/SHA mismatch')
             item = torch.load(record_path, map_location='cpu', weights_only=False, mmap=True)
-            require(item.identity==record['identity'] and item.identity['policy_version']==before, 'Stored transition policy identity differs')
+            # Writer 的清单只发布稳定五键；原始转移另有 env/request/plan/parent 诊断身份。
+            require(set(record['identity'])==set(ROLLOUT_IDENTITY_KEYS), 'Rollout manifest identity must contain exactly the five published keys')
+            require({key: item.identity[key] for key in ROLLOUT_IDENTITY_KEYS}==record['identity']
+                    and item.identity['policy_version']==before, 'Stored transition policy identity differs')
             require(item.transition_valid is True, 'Invalid transition entered accepted rollout')
             count = integer(item.executed_control_steps, 'executed control steps')
             require(count==record['executed_control_steps'] and item.executed_physics_steps==record['executed_physics_steps']==4*count, 'Actual control/physics counts differ')

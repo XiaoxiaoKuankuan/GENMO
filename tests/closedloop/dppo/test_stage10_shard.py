@@ -8,21 +8,27 @@
 """
 from __future__ import annotations
 
+import fcntl
 import json
-from pathlib import Path
 import signal
+import subprocess
+import sys
+import threading
+import time
+from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
-import torch
-
 import test_stage10_lifecycle as lifecycle_fixtures
+import torch
 from test_stage10_lifecycle import latest, run
+
 from gem.closedloop.dppo.buffer import StepJournal
 from gem.closedloop.dppo.run_management import RunManager
-
-lifecycle = lifecycle_fixtures.lifecycle
 from tools import train_closedloop_stage10 as training
 from tools.eval import run_closedloop_stage10_shard as shard
+
+lifecycle = lifecycle_fixtures.lifecycle
 
 
 def reply(*, sequence=1, count=1, session='synthetic-worker'):
@@ -96,6 +102,11 @@ def evaluation(lifecycle, tmp_path, monkeypatch):
             value['execution_journal'].update(backend_session_id=self.session_id, outstanding_seq=None)
             return value
     monkeypatch.setattr(training, 'AcknowledgedBackend', Backend)
+    serialized = shard.start_worker_serialized
+    def temporary_startup(*args, **kwargs):
+        kwargs.update(lock_path=tmp_path/'startup.lock', post_ready_guard_s=.001, poll_s=.001)
+        return serialized(*args, **kwargs)
+    monkeypatch.setattr(shard, 'start_worker_serialized', temporary_startup)
     return lifecycle
 
 
@@ -215,6 +226,32 @@ def test_session_end_failure_cannot_publish_completion_or_shard(evaluation, tmp_
         pass
 
 
+def test_main_cancelled_while_waiting_for_startup_preserves_incomplete_status(evaluation, tmp_path, monkeypatch):
+    class WaitingWorkers:
+        def __init__(self, *args):
+            self.entries, self.shutdown = [], {}
+            self.temp = SimpleNamespace(name=str(tmp_path/'unstarted-worker'))
+
+        def start(self, *args):
+            pytest.fail('Cancelled startup must not start a worker')
+
+        def close(self):
+            assert not self.entries
+
+    def cancelled(*args, **kwargs):
+        raise shard.EvaluationInterrupted('Stop requested while waiting for serialized GMT startup')
+
+    monkeypatch.setattr(training, 'Workers', WaitingWorkers)
+    monkeypatch.setattr(shard, 'start_worker_serialized', cancelled)
+    output = tmp_path/'shard'
+    assert evaluate_main(evaluation, output) == 130
+    summary = json.loads(next(output.glob('sessions/*/summary.json')).read_text())
+    assert summary['status'] == 'incomplete' and summary['worker_shutdown'] == {}
+    assert not (output/'shard_manifest.json').exists()
+    with RunManager(output, resume=True):
+        pass
+
+
 def test_execution_journal_proves_exact_physics_and_ack_watermark(tmp_path):
     path = tmp_path/'execution.sqlite'
     with StepJournal(path) as journal:
@@ -240,3 +277,96 @@ def test_execution_journal_rejects_missing_trace_sequence_sha_or_ack(tmp_path, f
         state['execution_journal']['acked_seq'] = 0
     with pytest.raises((ValueError, RuntimeError)):
         shard.verify_execution_journal(path, state)
+
+
+@pytest.fixture
+def another_process_holds_lock(tmp_path):
+    path = tmp_path/'startup.lock'
+    code = ('import fcntl,sys; stream=open(sys.argv[1],"a+b"); '
+            'fcntl.flock(stream,fcntl.LOCK_EX); print("locked",flush=True); '
+            'sys.stdin.readline(); stream.close()')
+    process = subprocess.Popen([sys.executable, '-B', '-c', code, str(path)],
+        stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    try:
+        assert process.stdout.readline().strip() == 'locked'
+        yield path
+    finally:
+        try:
+            process.communicate('release\n', timeout=5)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.communicate(timeout=5)
+        assert process.returncode == 0
+
+
+def startup(workers, path, *, stop=None, telemetry=None, timeout=.05, guard=.005):
+    return shard.start_worker_serialized(workers, [], '.', path.parent/'gmt.sock',
+        stop=stop or SimpleNamespace(stop_requested=False), timeout_s=timeout,
+        telemetry=telemetry, lock_path=path, post_ready_guard_s=guard, poll_s=.002)
+
+
+def test_worker_start_lock_excludes_another_process_and_times_out(another_process_holds_lock):
+    calls, evidence = [], {}
+    worker = SimpleNamespace(start=lambda *args: calls.append(args))
+    with pytest.raises(TimeoutError, match='startup lock'):
+        startup(worker, another_process_holds_lock, telemetry=evidence)
+    assert not calls
+    assert evidence['status'] == 'failed' and evidence['lock_held_seconds'] == 0.
+    assert evidence['wait_seconds'] >= .05
+
+
+def test_worker_start_lock_wait_responds_to_stop_signal(another_process_holds_lock):
+    stop = SimpleNamespace(stop_requested=False)
+    calls, evidence = [], {}
+    timer = threading.Timer(.015, lambda: setattr(stop, 'stop_requested', True))
+    timer.start()
+    try:
+        with pytest.raises(shard.EvaluationInterrupted, match='waiting'):
+            startup(SimpleNamespace(start=lambda *args: calls.append(args)),
+                another_process_holds_lock, stop=stop, telemetry=evidence, timeout=2.)
+    finally:
+        timer.join(timeout=2)
+    assert not calls and evidence['status'] == 'cancelled'
+    assert evidence['wait_seconds'] < 1.
+
+
+def test_startup_failure_releases_shared_lock_for_next_worker(tmp_path):
+    path, evidence = tmp_path/'startup.lock', {}
+    def fail(*_):
+        raise RuntimeError('synthetic worker startup failure')
+    with pytest.raises(RuntimeError, match='startup failure'):
+        startup(SimpleNamespace(start=fail), path, telemetry=evidence)
+    with path.open('a+b') as stream:
+        fcntl.flock(stream, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    expected = object()
+    assert startup(SimpleNamespace(start=lambda *_: expected), path) is expected
+    assert evidence['status'] == 'failed'
+
+
+def test_ready_guard_keeps_lock_until_interval_then_releases_it(tmp_path):
+    path, evidence = tmp_path/'startup.lock', {}
+    expected = object()
+    def ready(*_):
+        with path.open('a+b') as second:
+            with pytest.raises(BlockingIOError):
+                fcntl.flock(second, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        time.sleep(.005)
+        return expected
+    assert startup(SimpleNamespace(start=ready), path, telemetry=evidence, guard=.03) is expected
+    assert evidence['status'] == 'ready'
+    assert evidence['worker_start_seconds'] >= .005
+    assert evidence['lock_held_seconds'] >= evidence['worker_start_seconds'] + .03
+    with path.open('a+b') as stream:
+        fcntl.flock(stream, fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+
+def test_stop_during_ready_guard_releases_startup_lock(tmp_path):
+    path, stop, evidence = tmp_path/'startup.lock', SimpleNamespace(stop_requested=False), {}
+    def ready(*_):
+        stop.stop_requested = True
+        return object()
+    with pytest.raises(shard.EvaluationInterrupted, match='became ready'):
+        startup(SimpleNamespace(start=ready), path, stop=stop, telemetry=evidence)
+    assert evidence['status'] == 'cancelled'
+    with path.open('a+b') as stream:
+        fcntl.flock(stream, fcntl.LOCK_EX | fcntl.LOCK_NB)

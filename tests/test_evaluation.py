@@ -261,7 +261,8 @@ def _stage10_archive(root):
             'future_valid': torch.ones(1, 120, dtype=torch.bool),
             'future_times': (torch.arange(120, dtype=torch.float64)/30)[None], 'decision_time': torch.tensor([1.], dtype=torch.float64)}
         item = UpperTransition(identity={'run_id': 'r', 'backend_session_id': f'worker:{session}', 'episode_id': f'e:{index}',
-                  'decision_id': 0, 'policy_version': index-1}, context=context, next_context=context,
+                  'decision_id': 0, 'policy_version': index-1, 'env_id': 'env:0', 'request_id': f'request:{index}',
+                  'plan_id': f'plan:{index}', 'parent_plan_id': None}, context=context, next_context=context,
             chain=torch.zeros(3, 120, 30), old_log_prob=torch.zeros(2, dtype=torch.float64), free_mask=torch.ones(120, 30, dtype=torch.bool),
             rewards=torch.tensor([.1, .2], dtype=torch.float64), old_value=.5, next_value=.7,
             control_tick_begin=600, control_tick_end=624, executed_control_steps=2, executed_physics_steps=8,
@@ -273,7 +274,8 @@ def _stage10_archive(root):
         record_path.parent.mkdir(parents=True)
         torch.save(item, record_path)
         record = {'path': record_path.name, 'sha256': sha256(record_path), 'size_bytes': record_path.stat().st_size,
-                  'identity': item.identity, 'executed_control_steps': 2, 'executed_physics_steps': 8}
+                  'identity': {key: item.identity[key] for key in ('run_id', 'backend_session_id', 'episode_id', 'decision_id', 'policy_version')},
+                  'executed_control_steps': 2, 'executed_physics_steps': 8}
         chunk_path = record_path.parent/'manifest.json'
         write(chunk_path, {'schema': 'genmo.closedloop.stage10.rollout_chunk.v1', 'policy_version': index-1,
                            'records': [record], 'record_count': 1})
@@ -342,6 +344,29 @@ def test_stage10_audit_requires_multiple_fresh_policies_and_resume_then_real_upd
     assert checks['multiple_fresh_policy_iterations']['details']['fresh_policy_versions']==[0, 1, 2]
     assert checks['resume_then_optimize']['details'][0]['final_iteration']==3
     assert checks['iteration:1']['details']['fixed_targets']['max_abs_differences']['returns'] < 1e-12
+
+
+@pytest.mark.parametrize('key', ['run_id', 'backend_session_id', 'episode_id', 'decision_id', 'policy_version'])
+@pytest.mark.parametrize('mutation', ['missing', 'changed'])
+def test_rollout_published_identity_keys_cannot_be_missing_or_changed(tmp_path, key, mutation):
+    from tools.eval.audit_closedloop_stage10 import audit_run, sha256
+    root = _stage10_archive(tmp_path/'run')
+    directory = root/'sessions/s1/iterations/000001/rollout'
+    chunk_path = directory/'chunk_000000/manifest.json'
+    chunk = json.loads(chunk_path.read_text())
+    if mutation=='missing':
+        del chunk['records'][0]['identity'][key]
+    else:
+        chunk['records'][0]['identity'][key] = 'changed_identity'
+    chunk_path.write_text(json.dumps(chunk))
+    manifest_path = directory/'manifest.json'
+    manifest = json.loads(manifest_path.read_text())
+    manifest['chunks'][0]['sha256'] = sha256(chunk_path)
+    manifest_path.write_text(json.dumps(manifest))
+    result = audit_run(root)
+    assert result['status']=='failed'
+    first = next(check for check in result['checks'] if check['name']=='iteration:1')
+    assert first['status']=='failed' and 'identity' in first['error']
 
 
 @pytest.mark.parametrize('fault', ['old_value', 'probability', 'kl', 'budget', 'resume_without_update', 'same_worker', 'wrong_policy', 'checkpoint_bytes', 'ledger_rollback', 'malformed_session'])

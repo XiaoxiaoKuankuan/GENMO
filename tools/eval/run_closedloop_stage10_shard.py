@@ -11,34 +11,97 @@ Actor、Critic、优化器、音乐采样器和全部RNG，再按配对样本索
 正常关闭、session_end指标与completion落盘后，才允许发布shard_manifest供严格
 合并器读取。SIGINT/SIGTERM只在episode边界中断；未完成的分片明确为incomplete，
 不发布成功清单。这里没有训练或优化步骤，不修改任何已有正式证据。
+
+IsaacLab资产转换器的临时目录由秒级时间和随机数拼成；相同seed的多个worker同秒
+启动会命中相同USD输出。故本入口用同UID共享文件锁串行化启动直至GMT ready，
+ready后再保留至少1.05秒保护间隔，随后释放锁允许物理评估并行。等待锁可超时或
+响应停止信号，失败和取消均释放锁；不修改IsaacLab安装、原训练入口或训练配置。
 """
 from __future__ import annotations
 
 import argparse
+import fcntl
 import hashlib
 import json
-from pathlib import Path
+import math
+import os
 import random
 import sqlite3
 import sys
+import time
 import traceback
+from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 
-import numpy as np
-import torch
-import yaml
+import numpy as np  # noqa: E402
+import torch  # noqa: E402
+import yaml  # noqa: E402
 
-from tools import train_closedloop_stage10 as training
-from gem.closedloop.dppo.evaluation_shards import (
-    extension_provenance, partition_evaluation_plan, publish_shard_manifest,
+from gem.closedloop.dppo.evaluation_shards import (  # noqa: E402
+    extension_provenance,
+    partition_evaluation_plan,
+    publish_shard_manifest,
     verify_extension_provenance,
 )
+from tools import train_closedloop_stage10 as training  # noqa: E402
 
 
 class EvaluationInterrupted(RuntimeError):
     """信号请求在任务边界结束，保留已有episode但不冒称分片完成。"""
+
+
+def start_worker_serialized(workers, command, cwd, socket_path, *, stop, timeout_s,
+                            telemetry=None, lock_path=None, post_ready_guard_s=1.05, poll_s=.1):
+    """共享flock只保护启动；legacy Workers.start内部仍使用其原有启动超时。"""
+    for name, value in (('timeout_s', timeout_s), ('post_ready_guard_s', post_ready_guard_s), ('poll_s', poll_s)):
+        if isinstance(value, bool) or not math.isfinite(float(value)) or value <= 0:
+            raise ValueError(f'{name} must be positive and finite')
+    lock_path = Path(lock_path) if lock_path is not None else Path('/tmp/IsaacLab')/f'genmo_stage10_worker_start_{os.getuid()}.lock'
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    evidence = telemetry if telemetry is not None else {}
+    evidence.update(lock_path=str(lock_path), status='waiting', wait_seconds=0.,
+                    worker_start_seconds=None, post_ready_guard_s=post_ready_guard_s)
+    beginning, acquired = time.monotonic(), None
+    with lock_path.open('a+b') as stream:
+        try:
+            while acquired is None:
+                if stop.stop_requested:
+                    raise EvaluationInterrupted('Stop requested while waiting for serialized GMT startup')
+                try:
+                    fcntl.flock(stream, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    acquired = time.monotonic()
+                except BlockingIOError:
+                    remaining = timeout_s - (time.monotonic() - beginning)
+                    if remaining <= 0:
+                        raise TimeoutError('Timed out waiting for the shared GMT startup lock') from None
+                    time.sleep(min(poll_s, remaining))
+            evidence.update(status='starting', wait_seconds=acquired-beginning)
+            if stop.stop_requested:
+                raise EvaluationInterrupted('Stop requested before starting the GMT worker')
+            client = workers.start('gmt', command, cwd, socket_path)
+            ready = time.monotonic()
+            evidence.update(status='ready_guard', worker_start_seconds=ready-acquired)
+            # 下一worker只能在上一ready后跨过完整的一秒；避免同seed/秒级USD目录碰撞。
+            while time.monotonic() - ready < post_ready_guard_s:
+                if stop.stop_requested:
+                    raise EvaluationInterrupted('Stop requested after the GMT worker became ready')
+                time.sleep(min(poll_s, max(0., post_ready_guard_s - (time.monotonic() - ready))))
+            evidence['status'] = 'ready'
+            return client
+        except BaseException as exc:
+            evidence.update(status='cancelled' if isinstance(exc, EvaluationInterrupted) else 'failed',
+                            error=dict(type=type(exc).__name__, message=str(exc)))
+            raise
+        finally:
+            now = time.monotonic()
+            if acquired is not None:
+                evidence['lock_held_seconds'] = now-acquired
+                fcntl.flock(stream, fcntl.LOCK_UN)
+            else:
+                evidence['wait_seconds'] = now-beginning
+                evidence['lock_held_seconds'] = 0.
 
 
 def verify_execution_journal(path, frozen):
@@ -154,7 +217,9 @@ def main(argv=None):
         config_path.write_text(yaml.safe_dump(config, allow_unicode=True, sort_keys=False))
         budget = manager.budget(stage['limits'])
         stop.install()
-        random.seed(stage['seed']); np.random.seed(stage['seed']); torch.manual_seed(stage['seed'])
+        random.seed(stage['seed'])
+        np.random.seed(stage['seed'])
+        torch.manual_seed(stage['seed'])
         torch.set_num_threads(config['runtime']['torch_threads'])
         torch.backends.cuda.matmul.allow_tf32 = False
         torch.backends.cudnn.allow_tf32 = False
@@ -195,9 +260,11 @@ def main(argv=None):
             raise EvaluationInterrupted('Stop requested before physical evaluation')
         workers = training.Workers(config, session)
         socket = Path(workers.temp.name)/'gmt.sock'
-        client = workers.start('gmt', [config['paths']['isaac_python'], '-B',
+        client = start_worker_serialized(workers, [config['paths']['isaac_python'], '-B',
             str(Path(config['paths']['gmt_repo'])/'scripts/rsl_rl/serve_frozen_gmt.py'),
-            '--config', str(config_path), '--socket', str(socket), '--headless'], config['paths']['gmt_repo'], socket)
+            '--config', str(config_path), '--socket', str(socket), '--headless'], config['paths']['gmt_repo'], socket,
+            stop=stop, timeout_s=config['runtime']['worker_start_timeout_s'],
+            telemetry=report.setdefault('worker_startup', {}))
         journal = training.GuardedStepJournal(session/'execution_journal.sqlite', manager.disk_guard)
         backend = training.AcknowledgedBackend(client, journal, socket_path=socket,
                                                 timeout_s=config['runtime']['rpc_timeout_s'])
@@ -242,7 +309,8 @@ def main(argv=None):
                 workers.close()
                 report['worker_shutdown'] = workers.shutdown
                 gmt = workers.shutdown.get('gmt', {})
-                if (gmt.get('close_error') or gmt.get('forced_shutdown') or gmt.get('process_exit_code') != 0
+                gmt_started = bool(workers.entries) or 'gmt' in workers.shutdown
+                if gmt_started and (gmt.get('close_error') or gmt.get('forced_shutdown') or gmt.get('process_exit_code') != 0
                         or gmt.get('policy_unchanged') is not True or gmt.get('runtime_parameters_unchanged') is not True):
                     report['status'], code = 'failed', 1
             if journal is not None:
