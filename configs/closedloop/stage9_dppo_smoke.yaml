@@ -42,3 +42,71 @@ stage9:
   max_iterations: 3
   music_selection: /home/weili/bumi-closedloop-worktrees/GENMO/inputs/evals/stage8_train200_20260929/corrected_selection.json
   bc_data_root: /home/weili/bumi-closedloop-worktrees/GENMO/inputs/evals/stage1_fourset_20260928/training_selected_data
+  # v2：连续奖励率只乘一次20ms；事件惩罚独立。配对活动度仅用于奖励。
+  reward:
+    version: stage9.execution_reward.v2
+    dt: 0.02
+    track_weight: 2.5
+    music_weight: 2.0
+    stable_weight: 1.0
+    alive_weight: 0.5
+    cmd_penalty_weight: 0.15
+    torque_penalty_weight: 0.1
+    contact_penalty_weight: 0.2
+    joint_limit_penalty_weight: 0.5
+    failure_penalty: 5.0
+    rejected_plan_penalty: 0.5
+    scales:
+      joint_pos_rad: 0.22
+      joint_vel_rad_s: 1.4
+      ee_height_m: 0.07
+      yaw_rad: 0.6
+      root_position_m: 0.4
+      root_height_m: 0.05
+      non_yaw_rad: 0.12
+      slide_m_s: 0.15
+    track_mix:
+      joint_pos: 0.45
+      joint_vel: 0.25
+      ee_height: 0.15
+      yaw: 0.1
+      root_position: 0.05
+    stable_mix:
+      root_height: 0.5
+      non_yaw: 0.5
+    music_mix:
+      beat: 0.7
+      intensity: 0.3
+    torque:
+      free_ratio: 0.8
+      mean_weight: 0.5
+      max_weight: 0.5
+    activity:
+      window_s: 0.5
+      inactive_target_rad_s: 0.1
+      full_gate_ratio: 0.5
+      epsilon: 1.0e-08
+      intensity_epsilon: 0.05
+      intensity_log_ratio: 2.0
+    music:
+      beat_window_s: 1.0
+      feature_fps: 30
+      beat_column: 34
+      beat_threshold: 0.5
+    contact:
+      slide_weight: 0.7
+      bad_contact_weight: 0.3
+      support_clearance_m: 0.025
+    joint_limit:
+      hard_range_margin_fraction: 0.05
+      numeric_tolerance_rad: 1.0e-06
+      actual_weight: 0.5
+      reference_weight: 0.5
+    consistency:
+      joint_vel_rms_rad_s: 0.0001
+      root_lin_vel_rms_m_s: 0.0001
+      root_ang_vel_rms_rad_s: 0.0001
+    diagnostics:
+      mechanical_power_weight: 0.0
+      impact_weight: 0.0
+    require_substeps: true

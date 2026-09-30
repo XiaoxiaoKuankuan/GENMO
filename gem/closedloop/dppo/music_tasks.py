@@ -8,6 +8,8 @@
 采样器拥有独立 NumPy Generator，checkpoint 保存 RNG、各库排列和游标以及清单内容
 身份。恢复必须匹配原清单，不能在缺文件时静默改用 val 或另选一首歌。任务总时长
 来自真实音乐帧数，采集 30 秒上限属于行政截断，不改变这个有限音乐任务的终止语义。
+配对动作活动度由独立 ``target_activity.load_paired_activity`` 显式从 bc_data_root
+加载，仅交给奖励；本采样器继续支持音乐独立部署，不把监督活动度加入网络条件。
 """
 from __future__ import annotations
 

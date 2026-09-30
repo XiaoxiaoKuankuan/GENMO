@@ -19,6 +19,7 @@ import torch
 from gem.closedloop.coordinator import ceil_control_tick
 from gem.closedloop.dppo.buffer import UpperTransition
 from gem.closedloop.dppo.rewards import ExecutionReward
+from gem.closedloop.dppo.target_activity import load_paired_activity
 from gem.closedloop.frozen_actor import stable_noise_seed
 from gem.runtime.closedloop_protocol import RemoteError
 
@@ -82,6 +83,11 @@ class UpperEnvironment:
         return rows
 
     def reset_task(self, sample, music, *, seed, phase='main'):
+        # 配对动作只进入奖励；在reset/物理推进前验证，绝不加入builder的Actor条件。
+        reward_config = self.config['stage9'].get('reward', {})
+        target = load_paired_activity(self.config['stage9']['bc_data_root'], sample,
+            music_start_tick=600, window_s=reward_config.get('activity', {}).get('window_s', .5),
+            dt=reward_config.get('dt', .02))
         self.phase, self.sample, self.music, self.seed = phase, sample, np.array(music, copy=True), int(seed)
         self.episode_count += 1
         self.snapshot = self.backend.call('reset_episode', seed=self.seed,
@@ -92,7 +98,8 @@ class UpperEnvironment:
             raise ExecutionIntegrityError('Warmup terminated before any policy sample')
         self.music_end_tick = 600 + (len(music)*50//30)*12
         self.soft_end_tick = 600 + int(float(self.config['stage9']['episode_seconds'])*600)
-        self.reward = ExecutionReward(self.config['stage9'].get('reward'), self.music, music_start_tick=600)
+        self.reward = ExecutionReward(reward_config, self.music, music_start_tick=600,
+                                      target_activity=target)
         return self.preview_context()[0]
 
     def _request(self):
@@ -150,20 +157,39 @@ class UpperEnvironment:
         try:
             prepared = self.backend.call('prepare_plan', generated_plan=generated)
         except RemoteError as exc:
-            if exc.code not in {'invalid_qpos','invalid_quaternion','invalid_reference_arrays',
-                                'invalid_plan_output','known_source_changed','protected_reference_changed',
-                                'locked_source_changed','protection_advanced'}:
+            if exc.code not in {'invalid_qpos','invalid_quaternion','invalid_plan_output','known_source_changed'}:
                 raise
-            rejection = dict(code=exc.code, message=str(exc))
+            rejection = dict(code=exc.code, message=str(exc), policy_penalty=True,
+                             category='finite_invalid_reference')
         elapsed = time.perf_counter()-started
         return dict(context=context,meta=meta,generated=generated,trace=trace,prepared=prepared,
                     rejection=rejection,elapsed=elapsed,seed=seed,raw_path=str(raw_path))
 
     def step(self, *, deterministic=False):
+        """程序/RPC故障单独落盘为invalid，不用策略惩罚替代未知执行后果。"""
+        self._inflight_sample = None
+        start = int(self.snapshot['tick'])
+        try:
+            return self._step_impl(deterministic=deterministic)
+        except Exception as exc:
+            invalid = dict(transition_valid=False, reason='infrastructure_failure',
+                error_type=type(exc).__name__, error=str(exc), event_penalty_total=0.,
+                reward=None, control_tick_begin=start,
+                last_trusted_snapshot=cpu_copy(self.snapshot),
+                executed_control_steps=None, executed_physics_steps=None,
+                execution_evidence='execution_journal.sqlite',
+                last_backend_envelope=cpu_copy(getattr(self.backend, 'last_envelope', None)),
+                sample=cpu_copy(self._inflight_sample))
+            path = self.output/f'invalid_transition_{self.episode_count}_{self.decision}_{self.attempt}.pt'
+            torch.save(invalid, path)
+            raise
+
+    def _step_impl(self, *, deterministic=False):
         start = int(self.snapshot['tick'])
         if start%300:
             raise ExecutionIntegrityError('Upper action requested outside the decision grid')
         generated = self.generate(deterministic=deterministic)
+        self._inflight_sample = generated
         candidate = generated['prepared']
         arrival = start if self.mode=='paused' else ceil_control_tick(start+600*generated['elapsed'])
         ready_tick = max(start+300, int(math.ceil(arrival/300))*300)
@@ -178,10 +204,11 @@ class UpperEnvironment:
                     commit = self.backend.call('commit_plan', prepared_plan_id=candidate['prepared_plan_id'],
                                                expected_control_tick=tick)
                 except RemoteError as exc:
-                    if exc.code not in {'late_plan','protected_reference_changed','stale_plan',
-                                        'locked_source_changed','protection_advanced'}:
+                    if exc.code != 'late_plan':
                         raise
-                    rejection = dict(code=exc.code,message=str(exc))
+                    # 延迟到达不是有限但非法的动作；保留事件，不让策略替时序故障付罚分。
+                    rejection = dict(code=exc.code, message=str(exc), policy_penalty=False,
+                                     category='late_arrival')
                 generated['commit_seconds'] = time.perf_counter()-commit_begin
                 pending = False
             if not pending and tick >= ready_tick:
@@ -207,9 +234,11 @@ class UpperEnvironment:
         terminated = bool(self.snapshot.get('terminated',False) or end >= self.music_end_tick)
         truncated = bool(self.snapshot.get('truncated',False) or (not terminated and end>=self.soft_end_tick))
         reason = self.snapshot.get('reason') or ('music_end' if terminated else 'collection_limit' if truncated else None)
-        event_reward = (-1. if rejection else 0.)
-        if terminated and reason != 'music_end':
-            event_reward -= 5.
+        rejected_action = bool(rejection and rejection.get('policy_penalty',
+            rejection.get('code') in {'invalid_qpos','invalid_quaternion','invalid_plan_output','known_source_changed'}))
+        event_reward = self.reward.event_reward('reference_rejected') if rejected_action else 0.
+        if self.snapshot.get('terminated', False):
+            event_reward += self.reward.event_reward('physical_failure')
         if rewards:
             rewards[-1] += event_reward
             zero_step_event = 0.

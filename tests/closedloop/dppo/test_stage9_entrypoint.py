@@ -68,10 +68,16 @@ def test_configuration_contains_resolved_reward_and_keeps_latency():
     config = entry.configuration(entry.ROOT / "configs/closedloop/stage9_dppo_smoke.yaml")
     reward = config["stage9"]["reward"]
     assert config["stage9"]["execution_mode"] == "latency"
-    assert reward["scales"]["angular_velocity_rad_s"] == 6
-    assert reward["scales"]["joint_acceleration_rad_s2"] == 50
-    assert reward["scales"]["consistency_joint_rad_s"] == 1e-4
-    assert reward["weights"] == {"music": 2., "track": 2., "stable": 1., "actuator": -.2, "contact": -.5, "consistency": -.5}
+    assert reward['version'] == 'stage9.execution_reward.v2'
+    assert reward['track_weight'] == 2.5 and reward['music_weight'] == 2.
+    assert reward['activity']['window_s'] == .5
+    assert reward['scales']['joint_vel_rad_s'] == 1.4
+    assert reward['consistency']['joint_vel_rms_rad_s'] == 1e-4
+    assert 'angular_velocity_rad_s' not in reward['scales']
+    assert 'joint_acceleration_rad_s2' not in reward['scales']
+    assert reward['diagnostics'] == {'mechanical_power_weight': 0., 'impact_weight': 0.}
+    server = entry.configuration(entry.ROOT/'configs/closedloop/stage9_dppo_server1.yaml')
+    assert server['stage9']['reward'] == reward
 
 
 def test_eval_shutdown_failure_is_nonzero_exit(monkeypatch, tmp_path):

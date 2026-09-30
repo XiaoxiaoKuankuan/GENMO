@@ -7,7 +7,9 @@ Actor/Critic、不初始化 GPU、不运行物理仿真。主采集 64 条与恢
 
 负面样例覆盖落盘后缺失 trace、200Hz 子步时刻错误、SHA/序号篡改、错误 dt、
 事件重复惩罚、旧价值未保存、优势递推错误、策略版本串用、GMT 非冻结、联合 KL
-超限和预算回退。还检查 WAL 未 checkpoint 时的只读快照、源文件无变化，以及
+超限和预算回退。奖励夹具使用第二版实际执行公式及独立配对活动度，另外验证活动
+门控被篡改、一致性超容差、诊断功率被赋奖励权重、版本错配均不能通过；第一版
+归档仍按自己的旧公式核验，不把旧验收重新标成第二版。还检查 WAL 未 checkpoint 时的只读快照、源文件无变化，以及
 大 checkpoint 的 mmap 参数和显式输出拒绝覆盖语义。所有文件仅写 pytest 临时目录。
 """
 from __future__ import annotations
@@ -25,6 +27,7 @@ import yaml
 from gem.closedloop.dppo.buffer import StepJournal, UpperTransition
 from gem.closedloop.dppo.returns import compute_gae
 from gem.closedloop.dppo.rewards import DEFAULT_CONFIG, ExecutionReward
+from tests.closedloop.dppo.test_data_learning import actual_step, target_activity_fixture
 from tools.eval import audit_closedloop_dppo as audit
 
 
@@ -44,24 +47,17 @@ def context(tick):
 
 
 def physical_step(session, sequence, episode, start):
-    names = ["root", "left_foot", "right_foot"]
-    physical = dict(body_names=names, foot_body_names=names[1:], body_link_lin_vel_w=np.zeros((3, 3)),
-                    applied_joint_torque_nm=np.zeros(21), joint_effort_limits_nm=np.ones(21)*40,
-                    joint_velocity_limits_rad_s=np.ones(21)*10, foot_min_support_clearance_m=np.zeros(2),
-                    foot_net_contact_forces_w_n=np.array([[0., 0., 10.], [0., 0., 10.]]),
-                    contact_body_names=names, net_contact_forces_w_n=np.array([[0., 0., 0.], [0., 0., 10.], [0., 0., 10.]]))
-    return dict(backend_session_id=session, mutation_seq=sequence, episode_id=episode,
-                tick=start+12, control_tick_begin=start, completed_physics_steps=4, transition_valid=True, state_valid=True,
-                actual_joint_pos_gmt=np.zeros(21), actual_joint_vel_gmt=np.zeros(21),
-                actual_qpos=np.r_[0., 0., 1., 1., 0., 0., 0., np.zeros(21)], actual_root_ang_vel_b=np.zeros(3),
-                joint_position_target=np.zeros(21), reference=dict(joint_pos=np.zeros(21), joint_vel=np.zeros(21),
-                    body_pos_w=np.array([[0., 0., 1.]]*3), body_quat_w=np.array([[1., 0., 0., 0.]]*3)),
-                errors=dict(root_height_error_m=0., non_yaw_orientation_error_rad=0., yaw_error_rad=0.,
-                            end_effector_relative_height_error_m=0.),
-                reference_consistency=dict(valid=True, joint_vel_rms_rad_s=0., root_lin_vel_rms_m_s=0., root_ang_vel_rms_rad_s=0.),
-                physical_diagnostics=physical,
-                physics_substeps=[dict(physics_tick=start+j*3, dt_s=.005, joint_vel_gmt=np.zeros(21),
-                                       joint_position_target=np.zeros(21), physical_diagnostics=physical) for j in range(1, 5)])
+    row = actual_step(start // 12 - 50, speed=1.)
+    row.update(backend_session_id=session, mutation_seq=sequence, episode_id=episode)
+    return row
+
+
+def activity_from_tick_zero(tick):
+    """把复用目标夹具的600Hz warmup原点平移至本审计夹具的episode零点。"""
+    result = target_activity_fixture(tick + 600)
+    result["window_begin_tick"] -= 600
+    result["window_end_tick"] -= 600
+    return result
 
 
 def envelope(session, sequence, operation, result):
@@ -80,9 +76,12 @@ def phase_artifacts(directory, count, version, config):
             if i%2 == 0:
                 seq += 1
                 journal.append_result(envelope(session, seq, "reset_episode", dict(episode_id=episode)))
-                reward = ExecutionReward(music_features=np.zeros((150, 35)))
+                reward = ExecutionReward(config["stage9"]["reward"], music_features=np.zeros((150, 35)),
+                                         music_start_tick=0, target_activity=activity_from_tick_zero)
             seq += 1
             step = physical_step(session, seq, episode, start)
+            terminal, truncated = i%4 == 1, i%4 == 3
+            step.update(terminated=terminal, truncated=truncated)
             feedback = dict(backend_session_id=session, mutation_seq=seq, episode_id=episode,
                             transition_valid=True, physics_count_exact=True, partial_control_step=None,
                             control_tick_begin=start, control_tick_end=start+12, executed_control_steps=1,
@@ -91,7 +90,8 @@ def phase_artifacts(directory, count, version, config):
             assert journal.append_result(reply)
             assert not journal.append_result(reply)  # 正常重发不会重复落盘。
             detail = reward.evaluate_step(step)
-            terminal, truncated = i%4 == 1, i%4 == 3
+            assert detail["transition_valid"], detail["errors"]
+            assert detail["components"]["alive"]["score"] == float(not terminal)
             penalty = -5. if terminal else 0.
             row = UpperTransition(identity=dict(run_id="fixture", backend_session_id=session, episode_id=episode,
                 decision_id=i%2, policy_version=version), context=context(start),
@@ -210,7 +210,8 @@ def test_complete_audit_mmap_no_input_changes_and_cli(run_dir, monkeypatch, tmp_
     assert all(c["mmap"] is True and c["map_location"] == "cpu" for c in calls)
     assert check(report, "main.rollout.integrity")["details"]["bootstrap_mask"][3]
     assert not check(report, "main.rollout.integrity")["details"]["continuation_mask"][3]
-    assert check(report, "main.rollout.integrity")["details"]["music_invalid_counts"] == {"insufficient_causal_history": 64}
+    assert check(report, "main.rollout.integrity")["details"]["music_invalid_counts"] == {"first_cmd_step": 32}
+    assert check(report, "main.rollout.integrity")["details"]["reward_valid_counts"]["music"] == 64
     assert check(report, "budget.cumulative")["details"]["unobserved_consumption"]["control_steps"] == 100
     json.dumps(report, allow_nan=False)
     after = {str(p.relative_to(run_dir)): hashlib.sha256(p.read_bytes()).hexdigest() for p in run_dir.rglob("*") if p.is_file()}
@@ -259,6 +260,54 @@ def test_rollout_consequences_and_masks_are_checked(run_dir, mutation, error):
     report = audit.audit_run(run_dir)
     assert report["status"] == "failed"
     assert error in check(report, "main.rollout.integrity")["error"]
+
+
+@pytest.mark.parametrize("mutation,error", [
+    (lambda detail: detail["activity"].update(gate=.25), "activity gate formula"),
+    (lambda detail: detail["components"]["track"].update(gate=.25), "track activity gate"),
+    (lambda detail: detail["diagnostics"]["consistency"]["raw"].update(joint_vel_rms_rad_s=2e-4),
+     "reference consistency gate exceeded"),
+    (lambda detail: detail["diagnostics"]["power"].update(reward_weight=.1), "power must not be a reward"),
+    (lambda detail: detail["activity"].update(valid=False), "paired target activity unavailable"),
+])
+def test_v2_reward_gates_and_diagnostic_only_contract(run_dir, mutation, error):
+    path = run_dir / "acceptance" / "rollout.pt"
+    rows = torch.load(path, weights_only=False)
+    mutation(rows[0].metadata["reward_details"][0])
+    torch.save(rows, path)
+    report = audit.audit_run(run_dir)
+    assert report["status"] == "failed"
+    assert error in check(report, "main.rollout.integrity")["error"]
+
+
+def test_v2_archive_cannot_be_checked_with_v1_config(run_dir):
+    path = run_dir / "acceptance" / "resolved_config.yaml"
+    config = yaml.safe_load(path.read_text())
+    config["stage9"]["reward"]["version"] = "stage9.execution_reward.v1"
+    path.write_text(yaml.safe_dump(config))
+    report = audit.audit_run(run_dir)
+    assert report["status"] == "failed"
+    assert "reward/config version mismatch" in check(report, "main.rollout.integrity")["error"]
+
+
+def test_v1_archived_reward_still_uses_its_original_formula(tmp_path):
+    weights = dict(music=2., track=2., stable=1., actuator=-.2, contact=-.5, consistency=-.5)
+    components = {
+        name: dict(enabled=True, valid=name != "music", score=.5 if name != "music" else 0., weight=weight,
+                   weighted_rate=.5 * weight if name != "music" else 0.,
+                   raw={} if name != "music" else {"reason": "insufficient_causal_history"})
+        for name, weight in weights.items()
+    }
+    detail = dict(version="stage9.execution_reward.v1", components=components,
+                  reward=.02 * sum(component["weighted_rate"] for component in components.values()))
+    archive = tmp_path / "legacy_reward.json"
+    write_json(archive, dict(detail=detail, config=dict(weights=weights)))
+    restored = json.loads(archive.read_text())
+    counts, unavailable = audit.check_reward_arithmetic(restored["detail"], restored["config"])
+    assert dict(counts) == {name: 1 for name in weights if name != "music"}
+    assert dict(unavailable) == {"insufficient_causal_history": 1}
+    with pytest.raises(ValueError, match="reward/config version mismatch"):
+        audit.check_reward_arithmetic(restored["detail"], DEFAULT_CONFIG)
 
 
 @pytest.mark.parametrize("mutation,error", [

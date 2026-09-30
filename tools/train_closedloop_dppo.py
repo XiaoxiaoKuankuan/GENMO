@@ -36,7 +36,7 @@ from gem.closedloop.dppo.env_adapter import UpperEnvironment
 from gem.closedloop.dppo.music_tasks import TrainMusicSampler
 from gem.closedloop.dppo.policy import DPPODiffusionPolicy
 from gem.closedloop.dppo.rpc import AcknowledgedBackend
-from gem.closedloop.dppo.rewards import DEFAULT_CONFIG
+from gem.closedloop.dppo.rewards import resolve_reward_config
 from gem.closedloop.dppo.trainer import (load_actor, fixed_targets, critic_update, actor_update,
     probability_check, analytic_kl, SupervisedAnchor)
 from gem.closedloop.evaluation_music import load_music_features, sha256_file
@@ -58,10 +58,7 @@ def configuration(path):
             else:
                 target[key]=value
     merge(config,override)
-    import copy
-    reward=copy.deepcopy(DEFAULT_CONFIG)
-    merge(reward,config['stage9'].get('reward',{}))
-    config['stage9']['reward']=reward
+    config['stage9']['reward']=resolve_reward_config(config['stage9'].get('reward',{}))
     s=config['stage9']
     required=dict(rollout_upper_steps=64,ppo_epochs=1,denoising_steps=20,
                   critic_lr=1e-4,gamma_upper=.99,lambda_upper=.95,gamma_denoising=.99,
@@ -208,7 +205,7 @@ def main(argv=None):
             raise RuntimeError('Assets or train music did not pass preflight')
         stage9_sources={
             'genmo_repo':[*(f'gem/closedloop/dppo/{name}.py' for name in
-                ('__init__','policy','buffer','rewards','critic','returns','music_tasks','env_adapter','rpc','budget','trainer','checkpoint')),
+                ('__init__','policy','buffer','rewards','critic','returns','music_tasks','target_activity','env_adapter','rpc','budget','trainer','checkpoint')),
                 'tools/train_closedloop_dppo.py','gem/closedloop/losses.py','gem/closedloop/stage1_dataset.py',
                 'configs/closedloop/stage9_dppo_smoke.yaml','configs/closedloop/stage9_dppo_server1.yaml'],
             'gmt_repo':['source/NoetixRobot/NoetixRobot/tasks/mimic/mimic_noetix_bumi4340_mha_sonic/closedloop/execution_journal.py']}

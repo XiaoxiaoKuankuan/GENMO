@@ -18,7 +18,7 @@ from gem.closedloop.dppo.buffer import RolloutBuffer
 from gem.closedloop.dppo.env_adapter import ExecutionIntegrityError, UpperEnvironment
 from gem.closedloop.dppo.rewards import ExecutionReward
 from gem.runtime.closedloop_protocol import RemoteError
-from tests.closedloop.dppo.test_data_learning import actual_step, context, music_fixture
+from tests.closedloop.dppo.test_data_learning import actual_step, context, music_fixture, target_activity_fixture
 
 
 class FakeBudget:
@@ -60,6 +60,7 @@ class FakeBackend:
                 self.tick += 12
                 rows.append(actual_step((self.tick - 612) // 12))
                 if self.snapshot()["done"]:
+                    rows[-1].update(terminated=True, reason='physical_failure')
                     break
             m = len(rows)
             if self.corrupt_trace:
@@ -94,7 +95,7 @@ def adapter(tmp_path, *, elapsed=.75, mode="latency", prepared=True):
     env.music = music_fixture()
     env.music_end_tick = 600 + 3000
     env.soft_end_tick = 600 + 30 * 600
-    env.reward = ExecutionReward(music_features=env.music)
+    env.reward = ExecutionReward(music_features=env.music, target_activity=target_activity_fixture)
     sample = dict(context=context(), meta={"request_id": "req", "plan_id": "p", "parent_plan_id": "old"},
                   generated={}, trace={"chain": torch.zeros(1, 3, 120, 30), "old_log_probs": torch.zeros(1, 2, dtype=torch.float64),
                                        "free_mask": torch.ones(1, 120, 30, dtype=torch.bool)},
@@ -134,7 +135,7 @@ def test_finite_rejected_plan_retains_chain_and_exactly_one_event(tmp_path, phas
     assert result.metadata["rejection"]
     assert result.chain.shape == (3, 120, 30)
     baseline_sum = sum(item["reward"] for item in result.metadata["reward_details"])
-    assert result.rewards.sum().item() == pytest.approx(baseline_sum - 1.)
+    assert result.rewards.sum().item() == pytest.approx(baseline_sum - (.5 if phase == 'prepare' else 0.))
     assert result.metadata["event_reward"] == 0
     assert result.transition_valid
 
@@ -145,6 +146,7 @@ def test_physical_failure_while_waiting_keeps_failure_step_and_discards_pending(
     result = env.step()
     assert result.terminated and not result.truncated and result.next_context is None
     assert result.executed_control_steps == 10 and len(result.rewards) == 10
+    assert result.metadata['reward_details'][-1]['components']['alive']['score'] == 0.
     assert not any(name == "commit_plan" for name, _ in backend.calls)
     assert any(name == "discard_plan" for name, _ in backend.calls)
     baseline = sum(item["reward"] for item in result.metadata["reward_details"])
@@ -173,6 +175,46 @@ def test_missing_execution_trace_cannot_enter_rewards_or_buffer(tmp_path):
         env.step()
     assert env.snapshot["tick"] == 600
     assert backend.tick > 600
+    invalid = torch.load(next(tmp_path.glob('invalid_transition_*.pt')), weights_only=False)
+    assert invalid['transition_valid'] is False and invalid['event_penalty_total'] == 0.
+    assert invalid['executed_control_steps'] is None and invalid['reward'] is None
+
+
+@pytest.mark.parametrize('code', ['protected_reference_changed', 'locked_source_changed', 'protection_advanced'])
+def test_reference_program_error_is_invalid_without_policy_penalty(tmp_path, code):
+    env, backend = adapter(tmp_path, mode='paused')
+    call = backend.call
+    def fail(method, **payload):
+        if method == 'commit_plan':
+            raise RemoteError({'code': code, 'message': 'injected reference construction fault'})
+        return call(method, **payload)
+    backend.call = fail
+    with pytest.raises(RemoteError):
+        env.step()
+    invalid = torch.load(next(tmp_path.glob('invalid_transition_*.pt')), weights_only=False)
+    assert not invalid['transition_valid'] and invalid['event_penalty_total'] == 0.
+
+
+def test_rpc_fault_does_not_become_policy_failure(tmp_path):
+    env, backend = adapter(tmp_path)
+    def fail(*args, **kwargs):
+        raise ConnectionError('injected RPC disconnect')
+    backend.call = fail
+    with pytest.raises(ConnectionError):
+        env.step()
+    invalid = torch.load(next(tmp_path.glob('invalid_transition_*.pt')), weights_only=False)
+    assert not invalid['transition_valid'] and invalid['event_penalty_total'] == 0.
+
+
+def test_paired_target_required_before_reset_physics(monkeypatch, tmp_path):
+    env, backend = adapter(tmp_path)
+    env.config['stage9']['bc_data_root'] = '/explicit/paired-data'
+    def missing(*args, **kwargs):
+        raise FileNotFoundError('paired motion unavailable')
+    monkeypatch.setattr('gem.closedloop.dppo.env_adapter.load_paired_activity', missing)
+    with pytest.raises(FileNotFoundError, match='paired motion'):
+        env.reset_task({'row': {'sample_id': 'x'}, 'dataset': 'Mine'}, env.music, seed=42)
+    assert backend.calls == []
 
 
 def test_bootstrap_preview_does_not_reserve_another_prefix(tmp_path):

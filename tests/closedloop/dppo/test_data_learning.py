@@ -182,25 +182,47 @@ def test_value_loss_updates_only_critic_and_copies_statistics():
 
 
 def actual_step(index=0, *, speed=0., position=0.):
-    names = ["root", "left_foot", "right_foot"]
-    physical = {"body_names": names, "foot_body_names": names[1:],
-                "body_link_lin_vel_w": np.zeros((3, 3)), "applied_joint_torque_nm": np.zeros(21),
+    names = ["root", "left_foot", "right_foot", "left_elbow", "right_elbow"]
+    tick = 612 + 12 * index
+    physical = {"body_names": names, "foot_body_names": names[1:3],
+                "body_link_lin_vel_w": np.zeros((5, 3)), "pd_torque_estimate_nm": np.zeros(21),
                 "joint_effort_limits_nm": np.ones(21) * 40, "joint_velocity_limits_rad_s": np.ones(21) * 10,
-                "foot_net_contact_forces_w_n": np.array([[0., 0., 10.], [0., 0., 10.]]),
+                "joint_pos_limits_rad": np.tile([-2., 2.], (21, 1)), "soft_joint_pos_limits_rad": None,
+                "foot_net_contact_forces_w_n": np.array([[0., 0., 20.], [0., 0., 20.]]),
                 "foot_min_support_clearance_m": np.zeros(2), "contact_body_names": names,
-                "net_contact_forces_w_n": np.array([[0., 0., 0.], [0., 0., 10.], [0., 0., 10.]])}
-    return {"episode_id": "e", "tick": 612 + 12 * index,
+                "allowed_contact_body_names": names[1:], "undesired_contact_force_threshold_n": 1.,
+                "foot_contact_force_threshold_n": 10.,
+                "net_contact_forces_w_n": np.array([[0., 0., 0.], [0., 0., 20.], [0., 0., 20.], [0., 0., 0.], [0., 0., 0.]])}
+    substeps = []
+    for substep in range(4):
+        physics_tick = tick - 12 + (substep + 1) * 3
+        diagnostic = copy.deepcopy(physical)
+        diagnostic["mechanical_power_pd_estimate"] = {"torque_sample_tick": physics_tick - 3,
+            "velocity_sample_tick": physics_tick, "time_s": physics_tick / 600,
+            "sampling_synchronized": False}
+        substeps.append({"physics_tick": physics_tick, "dt_s": .005, "physical_diagnostics": diagnostic,
+                         "joint_vel_gmt": np.full(21, speed), "joint_position_target": np.zeros(21)})
+    physical["mechanical_power_pd_estimate"] = copy.deepcopy(substeps[-1]["physical_diagnostics"]["mechanical_power_pd_estimate"])
+    return {"episode_id": "e", "tick": tick, "control_tick_begin": tick - 12,
+            "completed_physics_steps": 4, "transition_valid": True, "state_valid": True,
+            "terminated": False, "truncated": False,
             "actual_joint_pos_gmt": np.full(21, position), "actual_joint_vel_gmt": np.full(21, speed),
             "actual_qpos": np.r_[0., 0., 1., 1., 0., 0., 0., np.full(21, position)],
             "actual_root_ang_vel_b": np.zeros(3), "joint_position_target": np.zeros(21),
             "reference": {"joint_pos": np.full(21, position), "joint_vel": np.full(21, speed),
                           "body_pos_w": np.array([[0., 0., 1.]] * 3), "body_quat_w": np.array([[1., 0., 0., 0.]] * 3)},
-            "errors": {"root_height_error_m": 0., "non_yaw_orientation_error_rad": 0.,
+            "errors": {"joint_position_rmse_rad": 0., "joint_velocity_rmse_rad_s": 0., "root_position_error_m": 0.,
+                       "root_height_error_m": 0., "non_yaw_orientation_error_rad": 0.,
                        "yaw_error_rad": 0., "end_effector_relative_height_error_m": 0.},
             "reference_consistency": {"valid": True, "joint_vel_rms_rad_s": 0., "root_lin_vel_rms_m_s": 0., "root_ang_vel_rms_rad_s": 0.},
-            "physical_diagnostics": copy.deepcopy(physical),
-            "physics_substeps": [{"dt_s": .005, "physical_diagnostics": copy.deepcopy(physical),
-                                  "joint_vel_gmt": np.full(21, speed), "joint_position_target": np.zeros(21)} for _ in range(4)]}
+            "physical_diagnostics": physical, "physics_substeps": substeps}
+
+
+def target_activity_fixture(tick):
+    count = min(25, (tick - 600) // 12)
+    return {"valid": True, "activity_rad_s": 1., "window_count": count, "window_complete": count == 25,
+            "window_begin_tick": tick - count * 12, "window_end_tick": tick,
+            "source": {"kind": "paired_train_fixture", "sample_id": "fixture", "velocity_unit": "rad/s"}}
 
 
 def music_fixture():
@@ -211,57 +233,58 @@ def music_fixture():
 
 
 def test_actual_tracking_and_stability_reward_prefers_controlled_pose():
-    good = ExecutionReward(music_features=music_fixture()).evaluate_step(actual_step())
-    bad_row = actual_step()
+    good = ExecutionReward(music_features=music_fixture(), target_activity=target_activity_fixture).evaluate_step(actual_step(speed=1.))
+    bad_row = actual_step(speed=1.)
     bad_row["errors"]["root_height_error_m"] = .5
     bad_row["errors"]["non_yaw_orientation_error_rad"] = 1.
-    bad_row["actual_root_ang_vel_b"][:] = 20
-    bad_row["actual_joint_pos_gmt"][:] = 1
-    bad = ExecutionReward(music_features=music_fixture()).evaluate_step(bad_row)
+    bad_row["errors"]["joint_position_rmse_rad"] = 1.
+    bad = ExecutionReward(music_features=music_fixture(), target_activity=target_activity_fixture).evaluate_step(bad_row)
     assert good["transition_valid"] and bad["transition_valid"]
-    assert good["reward"] == pytest.approx(.06)
+    assert good["reward"] == pytest.approx(.092)
     assert bad["reward"] < good["reward"]
 
 
 def test_missing_or_nonfinite_actual_diagnostics_marks_invalid():
     missing = actual_step()
-    del missing["actual_root_ang_vel_b"]
-    result = ExecutionReward().evaluate_step(missing)
+    del missing["errors"]["root_height_error_m"]
+    result = ExecutionReward(music_features=music_fixture(), target_activity=target_activity_fixture).evaluate_step(missing)
     assert not result["transition_valid"] and not result["components"]["stable"]["valid"]
     invalid = actual_step()
-    invalid["physics_substeps"][0]["physical_diagnostics"]["applied_joint_torque_nm"][0] = float("nan")
-    result = ExecutionReward().evaluate_step(invalid)
+    invalid["physics_substeps"][0]["physical_diagnostics"]["pd_torque_estimate_nm"][0] = float("nan")
+    result = ExecutionReward(music_features=music_fixture(), target_activity=target_activity_fixture).evaluate_step(invalid)
     assert not result["transition_valid"] and any("nonfinite" in error for error in result["errors"])
 
 
 def test_substep_peak_is_not_replaced_with_last_control_snapshot():
     row = actual_step()
-    row["physics_substeps"][0]["physical_diagnostics"]["applied_joint_torque_nm"][0] = 40
-    result = ExecutionReward().evaluate_step(row)
+    row["physics_substeps"][0]["physical_diagnostics"]["pd_torque_estimate_nm"][0] = 40
+    result = ExecutionReward(music_features=music_fixture(), target_activity=target_activity_fixture).evaluate_step(row)
     assert result["transition_valid"]
-    raw = result["components"]["actuator"]["raw"]
-    assert raw["sampled_peak_estimated_torque_nm"] == 40
+    raw = result["components"]["torque"]["raw"]
+    assert raw["max_torque_ratio"] == 1
     assert raw["sampling"] == "four_physics_substeps"
     row.pop("physics_substeps")
-    assert not ExecutionReward().evaluate_step(row)["transition_valid"]
-    result = ExecutionReward({"require_substeps": False}).evaluate_step(row)
-    assert result["components"]["actuator"]["raw"]["sampling"] == "control_end_proxy"
+    assert not ExecutionReward(music_features=music_fixture(), target_activity=target_activity_fixture).evaluate_step(row)["transition_valid"]
+    result = ExecutionReward({"require_substeps": False}, music_features=music_fixture(), target_activity=target_activity_fixture).evaluate_step(row)
+    assert result["components"]["torque"]["raw"]["sampling"] == "control_end_proxy"
 
 
-def test_stationary_music_reward_zero_and_high_activity_bounded():
-    stationary = ExecutionReward(music_features=music_fixture())
-    active = ExecutionReward(music_features=music_fixture())
+def test_stationary_music_reward_is_gated_and_high_activity_bounded():
+    stationary = ExecutionReward(music_features=music_fixture(), target_activity=target_activity_fixture)
+    active = ExecutionReward(music_features=music_fixture(), target_activity=target_activity_fixture)
     for i in range(70):
         zero = stationary.evaluate_step(actual_step(i))
         moving = active.evaluate_step(actual_step(i, speed=1e3 * (1. + abs(math.sin(i))), position=math.sin(i)))
     assert zero["components"]["music"]["valid"]
-    assert zero["components"]["music"]["score"] == 0
+    assert zero["components"]["music"]["weighted_rate"] == 0
+    assert zero["components"]["track"]["weighted_rate"] == 0
     assert 0 <= moving["components"]["music"]["score"] <= 1
 
 
 def test_music_reward_is_causal_and_rpc_segmentation_independent():
     traces = [actual_step(i, speed=abs(math.sin(i / 4)), position=.3 * math.cos(i / 4)) for i in range(75)]
-    one, split = ExecutionReward(music_features=music_fixture()), ExecutionReward(music_features=music_fixture())
+    one = ExecutionReward(music_features=music_fixture(), target_activity=target_activity_fixture)
+    split = ExecutionReward(music_features=music_fixture(), target_activity=target_activity_fixture)
     expected = [one.evaluate_step(row)["reward"] for row in traces]
     actual = []
     for segment in (traces[:7], traces[7:25], traces[25:]):
@@ -269,11 +292,11 @@ def test_music_reward_is_causal_and_rpc_segmentation_independent():
     np.testing.assert_array_equal(actual, expected)
     changed = music_fixture()
     changed[100:] = 300
-    other = ExecutionReward(music_features=changed)
+    other = ExecutionReward(music_features=changed, target_activity=target_activity_fixture)
     assert [other.evaluate_step(row)["reward"] for row in traces] == expected
     with pytest.raises(ValueError, match="continuous"):
         split.evaluate_step(traces[-1])
-    assert one.event_reward("plan_rejected") == -1 and one.event_reward("physical_failure") == -5
+    assert one.event_reward("plan_rejected") == -.5 and one.event_reward("physical_failure") == -5
 
 
 def write_music_tasks(tmp_path):
@@ -313,6 +336,10 @@ def test_train_music_first_four_cover_sources_and_resume_exactly(tmp_path):
     sample = restored.next_task()
     assert sample["music"].shape == (150, 35)
     assert sample["sample"]["row"]["split"] == "train"
+    # 配对动作只由奖励路径显式加载：音乐采样本身仍能在没有任何动作文件时运行。
+    assert not any(root.glob("*/motions"))
+    assert "target_activity" not in sample and "activity_target" not in sample
+    assert "target_qpos30" not in sample and "qpos" not in sample
 
 
 def test_train_music_cannot_accept_val_or_modified_features(tmp_path):

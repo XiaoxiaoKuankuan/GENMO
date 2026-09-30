@@ -43,6 +43,9 @@ from gem.closedloop.dppo.buffer import UpperTransition
 
 
 COMPONENTS = ("music", "track", "stable", "actuator", "contact", "consistency")
+V2_WEIGHT_KEYS = {"track": "track_weight", "music": "music_weight", "stable": "stable_weight",
+    "alive": "alive_weight", "cmd": "cmd_penalty_weight", "torque": "torque_penalty_weight",
+    "contact": "contact_penalty_weight", "joint_limit": "joint_limit_penalty_weight"}
 HARD_LIMITS = dict(generations=256, control_steps=10000, physics_steps=40000, iterations=3)
 PHASE_LIMITS = dict(calibration=150, main=6500, resume=1800, comparison_A=300,
                     comparison_B=300, comparison_C=300, diagnostic=650)
@@ -265,9 +268,10 @@ def check_journal(path):
                     near(sample["dt_s"], .005, "physics dt")
                     require(all(k in sample for k in ("joint_vel_gmt", "joint_position_target", "physical_diagnostics")), "missing actual substep state")
                     physical = sample["physical_diagnostics"]
-                    required = ("body_link_lin_vel_w", "applied_joint_torque_nm", "joint_effort_limits_nm",
+                    required = ("body_link_lin_vel_w", "joint_effort_limits_nm",
                                 "joint_velocity_limits_rad_s", "foot_net_contact_forces_w_n", "foot_min_support_clearance_m")
                     require(all(k in physical for k in required), f"advance {sequence}: physical proxy evidence missing")
+                    require('applied_joint_torque_nm' in physical or 'pd_torque_estimate_nm' in physical, 'PD torque estimate missing')
                     require("__nonfinite__" not in json.dumps(sample), f"advance {sequence}: nonfinite physics substep")
                 key = (session, episode, tick)
                 require(key not in ticks, "executed control step journaled twice")
@@ -288,6 +292,68 @@ def check_count(rows, expected, partial, summary):
     if summary is not None:
         require(summary.get("collected_upper_transitions") == expected, "summary/rollout count mismatch")
     return dict(upper_transitions=len(rows))
+
+
+def check_reward_arithmetic(detail, reward_config):
+    """版本化复核积分与门控；保留旧v1归档审计，不把旧结果冒充新公式。"""
+    version = detail.get('version')
+    require(version in ('stage9.execution_reward.v1', 'stage9.execution_reward.v2'), 'unknown reward version')
+    v2 = version.endswith('.v2')
+    require(v2 == (reward_config.get('version') == 'stage9.execution_reward.v2'), 'reward/config version mismatch')
+    names = V2_WEIGHT_KEYS if v2 else COMPONENTS
+    require(set(detail['components']) == set(names), 'reward component set mismatch')
+    gate, intensity = 1., None
+    if v2:
+        activity = detail['activity']
+        require(activity.get('valid') is True and activity.get('target_source'), 'paired target activity unavailable')
+        actual = number(activity['actual_activity_rad_s'], 'actual activity')
+        target = number(activity['target_activity_rad_s'], 'target activity')
+        require(actual >= 0 and target >= 0, 'negative activity')
+        cfg = reward_config['activity']
+        gate = 1. if target <= cfg['inactive_target_rad_s'] else min(1., actual/(cfg['full_gate_ratio']*target+cfg['epsilon']))
+        near(activity['gate'], gate, 'activity gate formula')
+        ratio = math.log((actual+cfg['intensity_epsilon'])/(target+cfg['intensity_epsilon']))/math.log(cfg['intensity_log_ratio'])
+        intensity = math.exp(-min(abs(ratio), 1e150)**2)
+        near(activity['intensity_score'], intensity, 'paired intensity formula')
+        for name in ('consistency', 'power'):
+            diagnostic = detail['diagnostics'][name]
+            require(diagnostic.get('valid') is True, f'invalid {name} diagnostic')
+            near(diagnostic['reward_weight'], 0., f'{name} must not be a reward')
+        consistency = detail['diagnostics']['consistency']
+        for key, tolerance in reward_config['consistency'].items():
+            require(abs(number(consistency['raw'][key], key)) <= tolerance, 'reference consistency gate exceeded')
+    counts, unavailable, rate = Counter(), Counter(), 0.
+    for name in names:
+        component = detail['components'][name]
+        require(component['enabled'] is True, f'{name} reward disabled')
+        score = number(component['score'], f'{name} score')
+        require(0. <= score <= 1., f'{name} must be bounded in [0,1]')
+        if v2:
+            key = V2_WEIGHT_KEYS[name]
+            weight = reward_config[key]*(-1 if 'penalty' in key else 1)
+        else:
+            weight = reward_config['weights'][name]
+        multiplier = gate if v2 and name in ('track', 'music') else 1.
+        near(component['weight'], weight, f'{name} weight')
+        if v2:
+            near(component['gate'], multiplier, f'{name} activity gate')
+            require(isinstance(component.get('raw'), dict) and isinstance(component.get('normalized'), dict), 'raw/normalized evidence missing')
+            near(component['integrated_reward'], component['weighted_rate']*.02, f'{name} integrated reward')
+        near(component['weighted_rate'], score*weight*multiplier, f'{name} weighted rate')
+        if not component['valid']:
+            reason = component.get('raw', {}).get('reason')
+            first_cmd = v2 and name == 'cmd' and component['raw'].get('first_step') is True
+            old_music = not v2 and name == 'music' and reason in ('insufficient_causal_history', 'no_music_beats')
+            require(first_cmd or old_music, f'invalid {name} reward: {reason}')
+            near(score, 0., 'unsupported reward must have zero score')
+            unavailable['first_cmd_step' if first_cmd else reason] += 1
+        else:
+            counts[name] += 1
+        rate += component['weighted_rate']
+    if v2:
+        near(detail['reward_rate'], rate, 'reward rate sum')
+    near(detail['reward'], rate*.02, 'reward dt integral')
+    return counts, unavailable
 
 
 def check_rollout(rows, journal, config, *, partial=False):
@@ -323,24 +389,20 @@ def check_rollout(rows, journal, config, *, partial=False):
             require(detail.get("transition_valid") is True and not detail.get("errors"), "invalid reward diagnostics")
             require(detail.get("reward_is_integrated") is True, "reward is not dt-integrated")
             near(detail["dt_s"], .02, "control reward dt")
-            rate = 0.
-            for name in COMPONENTS:
-                component = detail["components"][name]
-                require(component["enabled"] is True, f"{name} reward disabled")
-                near(component["weight"], config["stage9"]["reward"]["weights"][name], f"{name} weight")
-                near(component["weighted_rate"], component["score"]*component["weight"], f"{name} weighted rate")
-                if not component["valid"]:
-                    reason = component.get("raw", {}).get("reason")
-                    require(name == "music" and reason in ("insufficient_causal_history", "no_music_beats"), f"invalid {name} reward: {reason}")
-                    near(component["score"], 0., "unsupported music must have zero score")
-                    music_invalid[reason] += 1
-                else:
-                    counts[name] += 1
-                rate += component["weighted_rate"]
-            near(detail["reward"], rate*.02, f"row {index}: reward dt integral")
+            supported, unavailable = check_reward_arithmetic(detail, config['stage9']['reward'])
+            counts.update(supported)
+            music_invalid.update(unavailable)
             reconstructed.append(detail["reward"])
-        penalty = (-1. if item.metadata.get("rejection") else 0.)
-        penalty -= 5. if item.terminated and item.reason != "music_end" else 0.
+        reward_config = config['stage9']['reward']
+        rejection = item.metadata.get('rejection')
+        if reward_config.get('version') == 'stage9.execution_reward.v2':
+            rejected_action = bool(rejection and rejection.get('policy_penalty',
+                rejection.get('code') in {'invalid_qpos','invalid_quaternion','invalid_plan_output','known_source_changed'}))
+            penalty = -reward_config['rejected_plan_penalty'] if rejected_action else 0.
+            penalty -= reward_config['failure_penalty'] if item.terminated and item.reason not in ('music_end','task_complete') else 0.
+        else:
+            penalty = (-1. if rejection else 0.)
+            penalty -= 5. if item.terminated and item.reason != 'music_end' else 0.
         near(item.metadata["event_penalty_total"], penalty, "once-only event penalty")
         event = item.metadata.get("event_reward", 0.)
         if reconstructed:
