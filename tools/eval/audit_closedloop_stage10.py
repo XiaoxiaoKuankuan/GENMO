@@ -19,6 +19,9 @@ fixed_targets.pt 中冻结的 old/next values 与逐条归档值先交叉核对�
 checkpoint 使用 CPU mmap，仅检查元信息与状态布局，不遍历大模型权重，不重新
 跑 Actor、Critic、GMT、PhysX 或 GPU。清单 SHA 是当前文件内容核验；网络更新及
 冻结语义来自运行时证据，不能据此宣称收敛、动作质量提高或真实硬件安全。
+长期运行可将执行文件无损归档；审计逐轮在临时目录解包并核对每个原文件 SHA，
+结束即清理。已按明确保留策略回收的旧 checkpoint 必须具备不可变 retirement
+记录和发布时元数据，报告明确标记仅复核留存元数据，不能重新核验已删除权重。
 
 --allow-incomplete 仅把缺失的后续证据列为 not_run；已存在的不一致、失败、预算
 超限或旧数据跨策略版本仍然失败。只在显式 --output 指定路径创建一个新的报告，
@@ -33,8 +36,13 @@ import json
 import math
 import sys
 from collections import Counter
+from contextlib import contextmanager
+from contextvars import ContextVar
 from datetime import datetime
 from pathlib import Path
+import shutil
+import tarfile
+import tempfile
 
 import numpy as np
 import torch
@@ -48,6 +56,77 @@ from gem.closedloop.dppo.run_management import TrainingBudget, validate_budget_p
 VERSION = 'genmo.closedloop.stage10.audit.v1'
 BUDGET_KEYS = {'accepted_iterations', 'optimizer_attempts', 'generations', 'control_steps', 'physics_steps'}
 ROLLOUT_IDENTITY_KEYS = ('run_id', 'backend_session_id', 'episode_id', 'decision_id', 'policy_version')
+_ARCHIVED_FILES = ContextVar('stage10_audit_archived_files', default={})
+
+
+def _physical(path):
+    """保留逻辑路径用于身份校验，只把文件读取映射到本轮临时解包位置。"""
+    path = Path(path).resolve()
+    return _ARCHIVED_FILES.get().get(path, path)
+
+
+@contextmanager
+def archived_execution(root, summary):
+    """只读恢复一轮原始字节；拒绝重复成员、链接及越界路径，临时占用有界。"""
+    directory = resolve(root, summary['targets_path']).parent
+    manifest_path = directory/'archive_manifest.json'
+    if not manifest_path.exists():
+        yield None
+        return
+    manifest = read_json(manifest_path)
+    require(manifest.get('schema')=='genmo.closedloop.stage10.execution_archive.v1', 'Wrong execution archive schema')
+    require(manifest.get('archive')=='execution_evidence.tar.gz', 'Unexpected execution archive filename')
+    archive = directory/manifest['archive']
+    require(archive.is_file() and not archive.is_symlink(), 'Execution archive must be a regular file')
+    require(archive.stat().st_size==manifest['archive_size_bytes'] and sha256(archive)==manifest['archive_sha256'],
+            'Execution archive size/SHA mismatch')
+    records = {}
+    for record in manifest['members']:
+        name = record['path']
+        relative = Path(name)
+        require(isinstance(name, str) and name and not relative.is_absolute()
+                and '..' not in relative.parts and str(relative)==name, 'Execution archive member path escapes iteration')
+        require(name not in records, 'Duplicate execution archive manifest member')
+        require(name not in ('summary.json', 'lr_progress.json', 'archive_manifest.json', 'execution_evidence.tar.gz'),
+                'Execution archive cannot replace retained publication metadata')
+        integer(record['size_bytes'], 'archive member size')
+        records[name] = record
+    require(records and sum(row['size_bytes'] for row in records.values())==manifest['original_size_bytes'],
+            'Execution archive original byte count differs')
+    with tempfile.TemporaryDirectory(prefix='stage10-audit-execution-') as temporary:
+        mapping, seen = {}, set()
+        with tarfile.open(archive, 'r:gz') as stream:
+            for member in stream:
+                relative = Path(member.name)
+                require(not relative.is_absolute() and '..' not in relative.parts,
+                        'Execution archive tar member escapes iteration')
+                if member.isdir():
+                    continue
+                require(member.isfile() and member.name in records and member.name not in seen,
+                        'Execution archive unexpected, duplicate or nonregular member')
+                seen.add(member.name)
+                record = records[member.name]
+                require(member.size==record['size_bytes'], 'Execution archive member size differs')
+                destination = Path(temporary)/relative
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                with stream.extractfile(member) as source, destination.open('xb') as output:
+                    shutil.copyfileobj(source, output, 1024*1024)
+                require(sha256(destination)==record['sha256'], 'Execution archive member SHA mismatch')
+                logical = (directory/relative).resolve()
+                require(logical.is_relative_to(directory), 'Execution archive logical member escapes iteration')
+                if logical.exists():
+                    require(logical.is_file() and not logical.is_symlink()
+                            and logical.stat().st_size==record['size_bytes'] and sha256(logical)==record['sha256'],
+                            'Remaining original file differs from execution archive')
+                mapping[logical] = destination
+        require(seen==set(records), 'Execution archive is missing manifest members')
+        token = _ARCHIVED_FILES.set(mapping)
+        try:
+            yield dict(manifest=str(manifest_path.relative_to(root)), archive_sha256=manifest['archive_sha256'],
+                       original_bytes=manifest['original_size_bytes'], archive_bytes=manifest['archive_size_bytes'],
+                       verified_original_members=len(records), lossless_original_bytes_verified=True)
+        finally:
+            _ARCHIVED_FILES.reset(token)
 
 
 def require(condition, message):
@@ -56,13 +135,13 @@ def require(condition, message):
 
 
 def read_json(path):
-    return json.loads(Path(path).read_text(encoding='utf-8'),
+    return json.loads(_physical(path).read_text(encoding='utf-8'),
                       parse_constant=lambda value: (_ for _ in ()).throw(ValueError(f'Nonfinite JSON {value}')))
 
 
 def sha256(path):
     value = hashlib.sha256()
-    with Path(path).open('rb') as stream:
+    with _physical(path).open('rb') as stream:
         for block in iter(lambda: stream.read(8*1024*1024), b''):
             value.update(block)
     return value.hexdigest()
@@ -86,7 +165,7 @@ def resolve(root, reference, base=None):
     require(isinstance(reference, str) and bool(reference), 'Missing run artifact reference')
     value = Path(reference)
     candidates = [value] if value.is_absolute() else [root/value, (base or root)/value]
-    path = next((item.resolve() for item in candidates if item.exists()), candidates[0].resolve())
+    path = next((item.resolve() for item in candidates if _physical(item).exists()), candidates[0].resolve())
     require(path.is_relative_to(root), f'Artifact reference escapes run: {reference}')
     return path
 
@@ -155,8 +234,8 @@ def audit_rollout(root, summary, data_lookup, contract, seen_paths):
             record_path = resolve(root, record['path'], chunk_path.parent)
             require(record_path not in seen_paths, 'A rollout transition file was reused across iterations')
             seen_paths.add(record_path)
-            require(record_path.stat().st_size==record['size_bytes'] and sha256(record_path)==record['sha256'], 'Transition file size/SHA mismatch')
-            item = torch.load(record_path, map_location='cpu', weights_only=False, mmap=True)
+            require(_physical(record_path).stat().st_size==record['size_bytes'] and sha256(record_path)==record['sha256'], 'Transition file size/SHA mismatch')
+            item = torch.load(_physical(record_path), map_location='cpu', weights_only=False, mmap=True)
             # Writer 的清单只发布稳定五键；原始转移另有 env/request/plan/parent 诊断身份。
             require(set(record['identity'])==set(ROLLOUT_IDENTITY_KEYS), 'Rollout manifest identity must contain exactly the five published keys')
             require({key: item.identity[key] for key in ROLLOUT_IDENTITY_KEYS}==record['identity']
@@ -197,7 +276,7 @@ def audit_rollout(root, summary, data_lookup, contract, seen_paths):
 
 
 def audit_targets(root, summary, rows, contract):
-    target = torch.load(resolve(root, summary['targets_path']), map_location='cpu', weights_only=False, mmap=True)
+    target = torch.load(_physical(resolve(root, summary['targets_path'])), map_location='cpu', weights_only=False, mmap=True)
     size = len(rows)
     def vector(name):
         result = torch.as_tensor(target[name]).double().cpu().numpy()
@@ -301,6 +380,44 @@ def _execution_counters(state, identity, rows=None):
     return result
 
 
+def _retired_checkpoint(root, path, publication):
+    """核验旧权重的有意回收证据；只返回删除前留存的元数据，不伪造权重复核。"""
+    retirement_path = root/'checkpoints'/'retired'/f'{path.stem}.json'
+    require(retirement_path.is_file() and not retirement_path.is_symlink(),
+            'Missing checkpoint has no immutable retirement record')
+    retirement = read_json(retirement_path)
+    require(retirement.get('schema')=='genmo.closedloop.stage10.checkpoint_retirement.v1'
+            and retirement.get('purpose')=='bounded_checkpoint_retention', 'Wrong checkpoint retirement schema/purpose')
+    require(path.parent==root/'checkpoints' and path.name!='initial.pt', 'Retirement may only reference old run checkpoints')
+    for key in ('iteration', 'path', 'sha256', 'size_bytes'):
+        require(retirement.get(key)==publication[key], 'Checkpoint retirement differs from original publication')
+    original_publication = resolve(root, retirement['publication'])
+    require(original_publication.parent==root/'checkpoints'/'publications'
+            and read_json(original_publication)==publication, 'Retirement names another immutable publication')
+    policy = retirement['policy']
+    keep_last = integer(policy['keep_last'], 'checkpoint keep_last', 2)
+    keep_every = integer(policy['keep_every'], 'checkpoint keep_every', 1)
+    require(publication['iteration'] % keep_every != 0, 'Retirement cannot remove a milestone checkpoint')
+    replacement = retirement['replacement']
+    replacement_publication_path = resolve(root, replacement['publication'])
+    require(replacement_publication_path.parent==root/'checkpoints'/'publications',
+            'Retirement replacement must name a run publication')
+    replacement_publication = read_json(replacement_publication_path)
+    require(replacement_publication.get('schema')=='genmo.closedloop.stage10.checkpoint_publication.v1',
+            'Retirement replacement has invalid publication schema')
+    for key in ('iteration', 'path', 'sha256'):
+        require(replacement.get(key)==replacement_publication[key], 'Retirement replacement publication differs')
+    require(replacement['iteration']>=publication['iteration']+keep_last,
+            'Retirement removed one of the latest protected checkpoints')
+    latest = read_json(root/'latest.json')
+    require(latest['iteration']>=replacement['iteration'] and latest['path']!=publication['path'],
+            'Retirement preceded replacement publication or removed latest')
+    saved = retirement.get('audit_state')
+    require(isinstance(saved, dict), 'Retirement lacks original checkpoint audit metadata')
+    return saved, dict(storage='retired_metadata_only', original_bytes_revalidated=False,
+                       retirement=str(retirement_path.relative_to(root)), sha256=publication['sha256'])
+
+
 def audit_checkpoint(root, summary, identity, update, publication=None, rows=None):
     path = resolve(root, summary['checkpoint'])
     if publication is None:
@@ -313,13 +430,18 @@ def audit_checkpoint(root, summary, identity, update, publication=None, rows=Non
         publication = publications[0]
     require(publication.get('schema')=='genmo.closedloop.stage10.checkpoint_publication.v1'
             and resolve(root, publication['path'])==path, 'Checkpoint publication schema/path differs')
-    require(path.stat().st_size==publication['size_bytes'] and sha256(path)==publication['sha256'],
-            'Accepted checkpoint bytes differ from immutable publication')
     require(publication['budget']==summary['budget'], 'Checkpoint publication budget differs')
     published_summary = read_json(resolve(root, publication['metadata']['iteration_summary']))
     require(published_summary==summary, 'Checkpoint publication binds another iteration summary')
-    saved = torch.load(path, map_location='cpu', weights_only=False, mmap=True)
-    required = {'actor', 'critic', 'actor_optimizer', 'critic_optimizer', 'state', 'rng', 'samplers', 'identity', 'config', 'optimizer_layout'}
+    if path.is_file():
+        require(path.stat().st_size==publication['size_bytes'] and sha256(path)==publication['sha256'],
+                'Accepted checkpoint bytes differ from immutable publication')
+        saved = torch.load(path, map_location='cpu', weights_only=False, mmap=True)
+        required = {'actor', 'critic', 'actor_optimizer', 'critic_optimizer', 'state', 'rng', 'samplers', 'identity', 'config', 'optimizer_layout'}
+        storage = dict(storage='complete_checkpoint', original_bytes_revalidated=True, sha256=publication['sha256'])
+    else:
+        saved, storage = _retired_checkpoint(root, path, publication)
+        required = {'actor_optimizer', 'state', 'samplers', 'identity', 'restore_environment'}
     require(saved.get('version')=='genmo.closedloop.stage9.full_state.v1' and required.issubset(saved), 'Checkpoint lacks full training state')
     require(saved['identity']==identity and saved.get('restore_environment')=='new_worker_session_and_reset', 'Checkpoint identity/environment restore semantics differ')
     state = saved['state']
@@ -334,7 +456,7 @@ def audit_checkpoint(root, summary, identity, update, publication=None, rows=Non
     require(state['budget']==summary['budget'], 'Checkpoint and iteration budget snapshots differ')
     result = dict(path=str(path.relative_to(root)), iteration=state['iteration'], policy_version=state['policy_version'],
                   actor_updates=state['actor_updates'], critic_updates=state['critic_updates'], session_id=state.get('session_id'),
-                  optimizer_attempts=state['budget']['used']['optimizer_attempts'])
+                  optimizer_attempts=state['budget']['used']['optimizer_attempts'], **storage)
     require(rows is not None or _counter_contract(identity)=='legacy_not_recorded', 'New checkpoint counters require real archived rollout rows')
     result['execution_counters'] = _execution_counters(state, identity, rows)
     del saved
@@ -628,8 +750,11 @@ def _audit_training(root, run, audit, result, minimum_iterations, require_resume
             require(summary.get('status')=='accepted' and summary['policy_version_after']==summary['policy_version_before']+1, 'Iteration has no accepted policy advancement')
             require(summary['policy_version_before']==index-1, 'Logical iteration and policy version differ')
             require(data_lookup is not None, 'No validated complete dataset evidence')
-            rows, rollout = audit_rollout(root, summary, data_lookup, identity['training_contract'], seen_paths)
-            targets = audit_targets(root, summary, rows, identity['training_contract'])
+            with archived_execution(root, summary) as archive:
+                rows, rollout = audit_rollout(root, summary, data_lookup, identity['training_contract'], seen_paths)
+                targets = audit_targets(root, summary, rows, identity['training_contract'])
+                if archive is not None:
+                    rollout['execution_archive'] = archive
             update = audit_update(summary, identity['training_contract'])
             budget_check(summary['budget'], last_budget)
             checkpoint = audit_checkpoint(root, summary, identity, update, publication, rows)
@@ -646,6 +771,10 @@ def _audit_training(root, run, audit, result, minimum_iterations, require_resume
             total_controls += rollout['control_steps']
             return dict(iteration=index, rollout=rollout, fixed_targets=targets, update=update, checkpoint=checkpoint)
         audit.check(f'iteration:{index}', check_iteration)
+    retired_count = sum(row['storage']=='retired_metadata_only' for row in checkpoints.values())
+    result['checkpoint_storage'] = dict(complete_checkpoints=len(checkpoints)-retired_count,
+        intentionally_retired_checkpoints=retired_count, all_historical_weight_bytes_revalidated=retired_count==0,
+        retired_scope='Original publication and retirement metadata only; deleted weight bytes cannot be revalidated')
     def continuity():
         indices = [summary['iteration'] for summary, _, _, _ in selected]
         require(len(indices)>=minimum_iterations, f'Need at least {minimum_iterations} accepted iterations')
@@ -672,7 +801,13 @@ def _audit_training(root, run, audit, result, minimum_iterations, require_resume
                 previous = next(summary for summary, _, _, _ in selected if summary['iteration']==initial)
                 old_worker = previous['gmt_frozen']['execution_journal'].get('backend_session_id')
                 require(old_worker and old_worker!=new_worker, 'Resume reused an old physical worker session')
-                require(sha256(resolve(root, resume['checkpoint']))==resume['sha256'], 'Resumed checkpoint bytes changed')
+                path = resolve(root, resume['checkpoint'])
+                if path.is_file():
+                    require(sha256(path)==resume['sha256'], 'Resumed checkpoint bytes changed')
+                else:
+                    require(checkpoints[initial]['storage']=='retired_metadata_only'
+                            and checkpoints[initial]['sha256']==resume['sha256'],
+                            'Retired resumed checkpoint lacks verified retirement evidence')
             record = dict(initial_iteration=initial, final_iteration=final, new_backend_session_id=new_worker)
             if _counter_contract(identity)!='legacy_not_recorded':
                 if initial:

@@ -6,8 +6,9 @@
 其他七张卡只参与同一模型的 Actor/Critic 梯度计算，所有 rank 同步更新同一组
 参数并逐轮核验一致性。默认只运行一轮启动验收，不自动启动长期训练。
 
-首版仅支持单机八卡新 run；拒绝 resume、跨 Stage9 初始化和单卡入口伪装多卡。
-未来正式恢复必须单独扩展并验收各 rank 状态。本脚本不读取 200 首音乐名单，
+支持单机八卡新 run 和 --resume latest；主进程沿用既有checkpoint身份、预算、
+采样器和随机状态校验，再把模型及完整优化器同步到其余rank。不接受跨 Stage9
+初始化和单卡入口伪装多卡。本脚本不读取 200 首音乐名单，
 仍由原训练入口审计完整数据集。失败时以非零状态交给 torchrun 终止整个作业。
 """
 from __future__ import annotations
@@ -55,6 +56,7 @@ def main(argv=None):
     parser.add_argument('--config', type=Path, default=ROOT/'configs/closedloop/stage10_8gpu_server1.yaml')
     parser.add_argument('--output-dir', type=Path, required=True)
     parser.add_argument('--stop-after-iteration', type=int, default=1)
+    parser.add_argument('--resume', help='Resume latest or the latest published checkpoint in this run')
     args = parser.parse_args(argv)
     rank, world, local_rank = (int(os.environ.get(key, '-1')) for key in ('RANK', 'WORLD_SIZE', 'LOCAL_RANK'))
     if world != 8 or not 0 <= rank < world or local_rank != rank:
@@ -93,8 +95,11 @@ def main(argv=None):
         print('[DISTRIBUTED] eight GPU NCCL all_reduce=36; shared Actor/Critic training', flush=True)
     learner = DistributedLearner(collectives, args.output_dir, preflight=startup[0]['check'])
     if rank == 0:
-        code = training.main(['--config', str(args.config), '--mode', 'train', '--output-dir', str(args.output_dir),
-                              '--stop-after-iteration', str(args.stop_after_iteration)], learner=learner)
+        arguments = ['--config', str(args.config), '--mode', 'train', '--output-dir', str(args.output_dir),
+                     '--stop-after-iteration', str(args.stop_after_iteration)]
+        if args.resume:
+            arguments.extend(['--resume', args.resume])
+        code = training.main(arguments, learner=learner)
         if code:
             # 不在可能已失配的collective上广播stop，非零退出由elastic统一终止。
             return code
@@ -106,7 +111,7 @@ def main(argv=None):
     dist.destroy_process_group()
     if rank == 0:
         print(json.dumps(dict(status='passed', world_size=world, shared_model=True,
-                              completed_iteration=args.stop_after_iteration)), flush=True)
+                              requested_stop_iteration=args.stop_after_iteration, resumed=bool(args.resume))), flush=True)
     return 0
 
 

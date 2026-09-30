@@ -258,11 +258,10 @@ bash scripts/train_stage10_8gpu_server1.sh \
 启动脚本不自动删除输出目录，也不覆盖已有run。启动验收产生的临时数据、日志和
 checkpoint须按仓库测试产物约定，在核验并记录结果后精确清理；正式训练产物保留。
 
-此版聚焦八卡正确启动并共同更新，**多卡完整恢复尚未验收**，因此入口暂不支持
-`--resume` 和 `--initialize-stage9`。模型从配置指定的 Stage1 Actor checkpoint
-按 weights-only 初始化，Critic、优化器和运行账本重新建立；旧 Tracking run、
-单卡 run 及本版多卡 checkpoint 均不能通过它静默续训。达到停止轮次后的继续训练
-仍需完成多卡恢复实现与验收，不能把同一输出目录再次启动当作恢复。
+首版八卡启动验收只支持新的run，未实现多卡完整恢复。当时的模型从配置指定的
+Stage1 Actor checkpoint 按 weights-only 初始化，Critic、优化器和运行账本重新建立。
+下节七天运行版本增加了同一训练身份下的显式恢复；旧 Tracking run、单卡 run 和
+旧版源码身份仍不得静默混入。跨 Stage9 初始化不在此八卡入口的支持范围内。
 
 八卡通信、一次共同更新与长时间稳定／恢复是不同的验收范围；启动成功不代表训练
 已经收敛，也不代表吞吐会获得8倍加速。应以本次运行的真实共同更新、参数一致性和
@@ -277,5 +276,67 @@ checkpoint须按仓库测试产物约定，在核验并记录结果后精确清�
 运行参数/归一化指纹不变。唯一主进程成功保存并发布checkpoint，全部rank与GMT
 正常退出，作业exit0。验收临时run随后精确清理；摘要写入根日志。
 
-这证明八卡共同更新同一个模型已可启动，未执行40轮长训练、完整多卡resume或
-新模型全val质量评估。40轮命令是显式新run训练命令，不能用于接续已结束的1轮验收。
+这次历史验收证明八卡共同更新同一个模型已可启动，当时未执行40轮长训练、完整
+多卡resume或新模型全val质量评估。40轮命令是显式新run训练命令，不能用于接续
+已经清理的1轮临时验收。
+
+## 七天正式八卡训练与显式恢复
+
+`configs/closedloop/stage10_8gpu_server1_7day.yaml` 保持八卡同步学习、rank0单GMT
+采集结构，训练仍使用完整train池，全局64条转移／轮。六项GMT Tracking、音乐奖励、
+Activity Gate、Stable／Physics、Critic、DPPO、BC、Actor学习率候选和联合KL
+门槛均与八卡启动配置相同。本配置只扩展运行时间、计算预算与存储管理：
+
+| 参数 | 七天配置 | 含义 |
+|---|---:|---|
+| `run_control.max_walltime_seconds` | 604800 | 从`run_manifest.created_at`起的七天绝对截止，恢复不延长；到期在完整轮次边界受控停止 |
+| `limits.accepted_iterations` | 10000 | 接受更新轮数的独立硬上限，并非预计七天完成量 |
+| `limits.optimizer_attempts` | 30000 | 每轮最多三个学习率候选的总尝试预算 |
+| `limits.generations` | 1000000 | 真实生成总预算，包含校准等额外生成 |
+| `limits.control_steps` | 25000000 | 50Hz实际控制步预算，包含校准、预热和训练执行 |
+| `limits.physics_steps` | 100000000 | 200Hz物理步预算，保持控制步预算的4倍 |
+| `storage.max_run_bytes` | 2 TiB | 本run最大存储配额，正式输出放在服务器1的`/data1` |
+| `storage.min_free_bytes` | 100 GiB | 文件系统最低剩余空间 |
+| `storage.checkpoint_keep_last` | 2 | 保留最近两份已发布checkpoint |
+| `storage.checkpoint_keep_every` | 100 | 额外保留每100轮的里程碑checkpoint |
+| `storage.archive_completed_iterations` | true | 对已完成轮次的完整执行证据归档保存 |
+
+新run按配置中的Stage1 checkpoint进行Actor weights-only初始化；新建Critic、
+优化器、采样器与预算账本。下面命令会持续训练到七天时间上限或其他预算／保护条件
+先到达，不会因为原启动脚本默认1轮而提前结束。应在 `tmux` 等持久会话中运行：
+
+```bash
+cd /home/user/liwei/GENMO-bumi-closedloop
+STAGE10_8GPU_CONFIG=configs/closedloop/stage10_8gpu_server1_7day.yaml \
+  bash scripts/train_stage10_8gpu_server1.sh \
+  --output-dir /data1/user/liwei/GENMO_outputs/closedloop_stage10/gmt_tracking_8gpu_7day \
+  --stop-after-iteration 10000
+```
+
+中断后的恢复使用**同一run目录、同一七天配置及明确的`--resume latest`**。恢复
+Actor／Critic、优化器和运行状态，实际执行消耗不会清零；它不是重新从Stage1权重
+开始，也不能把旧奖励版本或不同训练身份的checkpoint当作兼容来源。七天截止时间
+以首次创建run为准，包含作业中断时间，执行恢复命令不会重新获得七天额度：
+
+```bash
+cd /home/user/liwei/GENMO-bumi-closedloop
+STAGE10_8GPU_CONFIG=configs/closedloop/stage10_8gpu_server1_7day.yaml \
+  bash scripts/train_stage10_8gpu_server1.sh \
+  --output-dir /data1/user/liwei/GENMO_outputs/closedloop_stage10/gmt_tracking_8gpu_7day \
+  --stop-after-iteration 10000 \
+  --resume latest
+```
+
+存储管理继续保留`initial.pt`，以及最近两份和每100轮的里程碑checkpoint。只有
+已经满足保留策略、且新的checkpoint已经成功发布后，旧的非里程碑checkpoint才
+回收。每轮`summary.json`和`lr_progress.json`仍可直接读取；rollout、raw_samples、
+SQLite和fixed targets等完整执行证据采用无损`tar.gz`归档，`archive_manifest`
+记录逐文件SHA和归档SHA。只有验证归档完整并发布清单后才回收对应的原文件，
+不能把它理解为丢弃执行轨迹或只留奖励摘要。归档和checkpoint回收不会重置训练
+预算；七天、10000轮及其他计算／磁盘保护条件择先停止。2TiB配额或100GiB剩余
+空间保护先触发时不能为了凑满七天静默删除正式执行证据。
+
+七天是运行时长目标，不是收敛保证。rank0单环境采集阶段可能使其他GPU等待，八卡
+共同更新也不等于端到端8倍吞吐。训练质量仍需后续使用独立val评估；正式启动的
+实际run路径、代码版本、启动时间及检查结果应另行记录，不能把本节命令当作已启动
+七天作业的证据。

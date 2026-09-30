@@ -11,8 +11,11 @@
 每次更新核对所有 rank 的 Actor/Critic 参数及 buffer 指纹，任何不一致立即停止。
 BC 仅主进程采样并反传一次，trainer 负责将其梯度准确合并到同步 PPO 梯度。
 
-本版只支持单机新运行，明确不支持分布式 resume。多卡优化器虽然保持同步，
-checkpoint 仍由既有单采集主进程保存；不能据此宣称全部 rank 随机状态恢复已验收。
+新运行和 resume 均由既有单采集主进程恢复权威状态：Actor/Critic、两个优化器、
+音乐及 BC 采样器、随机状态、预算和策略版本。初始化时把已恢复模型和完整优化器
+状态同步给所有 rank，并核验 optimizer 的动量、步数及参数组指纹。其他 rank 不
+独立采样轨迹或 BC；Critic minibatch 由主进程广播，因此无需引入另一套续训随机源。
+仅恢复已发布 checkpoint，丢弃中断时未接受的 rollout；不支持跨拓扑或跨任务身份。
 异常交由 torchrun 终止同一作业的其他进程，不继续不完整的分布式更新。
 """
 from __future__ import annotations
@@ -20,6 +23,7 @@ from __future__ import annotations
 import copy
 import hashlib
 from pathlib import Path
+from uuid import uuid4
 
 import torch
 import torch.distributed as dist
@@ -28,6 +32,32 @@ from gem.closedloop.dppo import trainer
 from gem.closedloop.dppo.critic import UpperCritic
 from gem.closedloop.dppo.policy import DPPODiffusionPolicy
 from gem.closedloop.frozen_actor import _fingerprint
+from gem.robots.bumi.kinematics import sha256_file
+
+
+def _optimizer_fingerprint(optimizer):
+    """核验完整优化器状态；设备位置允许随rank变化，数值、精度和参数组必须一致。"""
+    digest = hashlib.sha256()
+
+    def visit(value):
+        if isinstance(value, torch.Tensor):
+            tensor = value.detach().cpu().contiguous()
+            digest.update(f'tensor:{tensor.dtype}:{tuple(tensor.shape)}:'.encode())
+            digest.update(memoryview(tensor.reshape(-1).view(torch.uint8).numpy()))
+        elif isinstance(value, dict):
+            digest.update(b'dict:')
+            for key in sorted(value, key=lambda item: (type(item).__name__, repr(item))):
+                visit(key)
+                visit(value[key])
+        elif isinstance(value, (tuple, list)):
+            digest.update(f'{type(value).__name__}:{len(value)}:'.encode())
+            for item in value:
+                visit(item)
+        else:
+            digest.update(f'{type(value).__name__}:{value!r}:'.encode())
+
+    visit(optimizer.state_dict())
+    return digest.hexdigest()
 
 
 class DistributedCollectives:
@@ -117,11 +147,43 @@ class DistributedLearner:
     def _synchronize_initial(self):
         self.distributed.broadcast_module(self.actor)
         self.distributed.broadcast_module(self.critic)
+        optimizer_evidence = self._synchronize_optimizers()
         evidence = self.distributed.fingerprints(self.actor, self.critic, 'initialization')
+        evidence['optimizers'] = optimizer_evidence
         self.evidence.append(evidence)
         self.attached = True
         if self.distributed.rank == 0:
             print(f'[DISTRIBUTED] {self.distributed.world_size} GPU replicas initialized and identical', flush=True)
+
+    def _synchronize_optimizers(self):
+        """初始化时共享完整Adam状态，防止resume后worker错误地从空动量重新开始。"""
+        path = None
+        message = None
+        if self.distributed.rank == 0:
+            directory = self.output_dir / 'distributed_exchange'
+            directory.mkdir(parents=True, exist_ok=True)
+            path = directory / f'optimizers_{uuid4().hex}.pt'
+            torch.save(dict(actor=self.actor_optimizer.state_dict(), critic=self.critic_optimizer.state_dict()), path)
+            message = dict(path=str(path), sha256=sha256_file(path))
+        message = self.distributed.broadcast_object(message)
+        source = Path(message['path'])
+        if source.parent != self.output_dir / 'distributed_exchange' or sha256_file(source) != message['sha256']:
+            raise ValueError('Distributed optimizer path or SHA mismatch')
+        if self.distributed.rank != 0:
+            payload = torch.load(source, map_location='cpu', weights_only=False)
+            self.actor_optimizer.load_state_dict(payload['actor'])
+            self.critic_optimizer.load_state_dict(payload['critic'])
+            del payload
+        local = dict(rank=self.distributed.rank, actor=_optimizer_fingerprint(self.actor_optimizer),
+                     critic=_optimizer_fingerprint(self.critic_optimizer))
+        gathered = [None] * self.distributed.world_size
+        dist.all_gather_object(gathered, local, group=self.distributed.control_group)
+        if len({(row['actor'], row['critic']) for row in gathered}) != 1:
+            raise RuntimeError('Distributed optimizer replicas differ after initialization or resume')
+        dist.barrier(group=self.distributed.control_group)
+        if path is not None:
+            path.unlink()
+        return dict(replicas_identical=True, state_source='rank0_authoritative_checkpoint_or_new_state', ranks=gathered)
 
     def _publish(self, operation, transitions, targets, kwargs):
         self.sequence += 1

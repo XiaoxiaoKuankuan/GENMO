@@ -53,6 +53,7 @@ from gem.closedloop.dppo.policy import DPPODiffusionPolicy
 from gem.closedloop.dppo.rewards import resolve_reward_config
 from gem.closedloop.dppo.rpc import AcknowledgedBackend
 from gem.closedloop.dppo.run_management import RunManager, GuardedStepJournal, RolloutWriter, StopSignal
+from gem.closedloop.dppo.long_run import LongRunMaintenance, validate_long_run_settings
 from gem.closedloop.dppo.trainer import (load_actor, fixed_targets, critic_update, actor_update,
     probability_check, analytic_kl, SupervisedAnchor, populate_values)
 from gem.closedloop.evaluation_music import sha256_file
@@ -129,6 +130,7 @@ def configuration(path):
     storage = stage['storage']
     for key in ('min_free_bytes', 'max_run_bytes', 'checkpoint_reserve_bytes', 'rollout_chunk_size'):
         _positive(storage[key], key, integer=True)
+    validate_long_run_settings(stage)
     if stage['dataset']['split'] != 'train' or not isinstance(stage['dataset']['random_start'], bool):
         raise ValueError('Training must use the complete train split with an explicit start policy')
     probabilities = stage['dataset']['source_probabilities']
@@ -157,7 +159,7 @@ def runtime_preflight(config, *, check_gpu):
 def _sources(config, check):
     names = ('policy', 'buffer', 'rewards', 'critic', 'returns', 'music_tasks', 'target_activity',
              'env_adapter', 'rpc', 'budget', 'trainer', 'checkpoint', 'lr_calibration',
-             'full_dataset', 'run_management', 'evaluation')
+             'full_dataset', 'run_management', 'evaluation', 'long_run')
     return collect_source_provenance(config['paths'], repository_state=check['repositories'], additional_files={
         'genmo_repo': [*(f'gem/closedloop/dppo/{n}.py' for n in names),
             'tools/train_closedloop_stage10.py',
@@ -341,8 +343,8 @@ def main(argv=None, *, learner=None):
     parser.add_argument('--eval-count', help='all or count from the complete held-out catalog')
     parser.add_argument('--eval-split', choices=('val', 'test'))
     args = parser.parse_args(argv)
-    if learner is not None and (args.mode != 'train' or args.resume or args.initialize_stage9):
-        parser.error('Distributed startup currently requires a new train run; resume is not supported')
+    if learner is not None and (args.mode != 'train' or args.initialize_stage9):
+        parser.error('Distributed training supports new runs and full-state resume only')
     if args.resume and args.mode != 'train':
         parser.error('--resume is only for continued train mode')
     if bool(args.checkpoint) != (args.mode == 'eval'):
@@ -373,13 +375,14 @@ def main(argv=None, *, learner=None):
         config_path = session/'resolved_config.yaml'
         config_path.write_text(yaml.safe_dump(config, allow_unicode=True, sort_keys=False))
         budget = manager.budget(stage['limits'], for_extension=args.extend_budget_reason is not None)
+        maintenance = LongRunMaintenance(manager, stage)
     except BaseException:
         manager.close()
         raise
     report = dict(schema=VERSION, mode=args.mode, status='running', session_id=manager.session_id,
                   iterations=[], evaluations=[], initialization=None, resume=None, budget_extension=None,
                   input_config_path=str(args.config.resolve()), input_config_sha256=sha256_file(args.config),
-                  resolved_config_sha256=sha256_file(config_path))
+                  resolved_config_sha256=sha256_file(config_path), long_run_policy=maintenance.policy)
     workers = journal = backend = None
     provenance = check = None
     code = 0
@@ -516,6 +519,9 @@ def main(argv=None, *, learner=None):
                     samplers=samplers, generators=generators)
                 manager.disk_guard.account_file(initial)
             while state['iteration'] < stop_at and not stop.stop_requested:
+                if maintenance.expired():
+                    report['stop_reason'] = 'walltime_limit'
+                    break
                 capacity = budget.iteration_capacity(len(s['actor_lr_candidates']))
                 if not capacity['can_start']:
                     report.update(stop_reason='budget_exhausted', budget_stop_details=capacity)
@@ -603,6 +609,13 @@ def main(argv=None, *, learner=None):
                         actor_lr=state['selected_actor_lr'], critic_mse=step_report['critic']['mse']))
                     print(f'[ACCEPTED] iteration={index} lr={state["selected_actor_lr"]} '
                           f'KL={step_report["kl"]["mean_joint_kl"]:.8g}', flush=True)
+                    # 只有已发布 checkpoint 的完整轮次可进入归档/保留；SQLite 必须先关闭。
+                    journal.close()
+                    archive = maintenance.archive_iteration(iteration_output)
+                    retired = maintenance.prune_checkpoints()
+                    if archive is not None:
+                        print(f'[ARCHIVED] iteration={index} bytes={archive["archive_size_bytes"]} '
+                              f'retired_checkpoints={len(retired)}', flush=True)
                 except BaseException as exc:
                     if not published:
                         step_report.update(status='failed', error=dict(type=type(exc).__name__, message=str(exc)),
