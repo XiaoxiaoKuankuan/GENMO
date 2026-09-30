@@ -90,6 +90,12 @@ SHA和原因，上限只能单调增加。若事件写成、账本替换失败�
 建议按10/20/30/40总轮次边界停止训练，分别运行独立全val评估并审阅失败、活动度、
 奖励分项和KL后继续；test保留给最终报告。当前没有后台自动无限续训或自动删除证据。
 
+新版正式运行的配对基线使用本run的`checkpoints/initial.pt`，后续与第10/20/30/40轮
+使用同一版本、同一完整任务计划分别评估后比较。旧5f33e3e初始/第4轮的全val结果
+保留为本次工程与算法路径验收证据；其训练身份不同，不能直接作为新版正式模型的
+配对比较输入，比较工具会拒绝这种身份混用。新版三轮恢复测试不冒称又完成了全量
+模型质量评估；控制管理修复的真实验收与旧四轮质量对照分别报告。
+
 ## 独立评估
 
 eval必须显式提供完整Stage10 checkpoint。它不自动加载Stage1来冒充当前策略，也
@@ -97,16 +103,21 @@ eval必须显式提供完整Stage10 checkpoint。它不自动加载Stage1来冒�
 `eval_count: all`遍历该划分全部配对样本；同歌多舞者合法存在，另记独立audio/group
 数量，不把239个配对样本说成239首独立歌曲。
 
-默认val全239样本×seed42/1729，每样本至多10秒；输出逐episode和按来源/种子
+默认val全239样本×seed42/1729，每样本以10秒为行政截断目标，在合法决策边界结束，
+实际时长以真实执行步数为准；输出逐episode和按来源/种子
 聚合的奖励分项、原始误差、活动度、失败/拒绝、延迟和前缀。有限时长行政截断明确
 记录，不称全曲验收。评估恢复其自身随机状态，不推进训练采样器，也不进入训练Buffer。
 
 ## 服务器1有限检查命令
 
-以下使用独立准备验收目录；先完成CPU测试和代码同步，再执行。该配置不关联旧200首
-清单。长训练需另建明确预算和输出目录，不能靠重置准备账本延长本轮运行。
+以下记录新版独立准备验收流程；已存在的成功目录不能作为新run重复创建。该配置
+不关联旧200首清单。正式继续使用同run、同状态和显式预算，不重置账本。旧版
+preparation_20260930的checkpoint缺少decision计数，只作历史训练与全val对照证据，
+新版入口明确拒绝从该旧checkpoint续训；使用下面的preparation_contract_v2_20260930。
 
 ```bash
+export LD_LIBRARY_PATH=/data0/user/liwei/closedloop_stage8_runtime/sysroot/usr/lib/x86_64-linux-gnu
+
 CUDA_VISIBLE_DEVICES=0 PYTHONDONTWRITEBYTECODE=1 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 \
   /home/user/liwei/GENMO/.venv/bin/python -B tools/train_closedloop_stage10.py \
   --config configs/closedloop/stage10_prepare_server1.yaml --mode preflight \
@@ -115,14 +126,22 @@ CUDA_VISIBLE_DEVICES=0 PYTHONDONTWRITEBYTECODE=1 OMP_NUM_THREADS=1 MKL_NUM_THREA
 CUDA_VISIBLE_DEVICES=0 PYTHONDONTWRITEBYTECODE=1 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 \
   /home/user/liwei/GENMO/.venv/bin/python -B tools/train_closedloop_stage10.py \
   --config configs/closedloop/stage10_prepare_server1.yaml --mode train \
-  --output-dir /data0/user/liwei/GENMO_outputs/closedloop_stage10/preparation_20260930 \
-  --stop-after-iteration 2
+  --output-dir /data0/user/liwei/GENMO_outputs/closedloop_stage10/preparation_contract_v2_20260930 \
+  --stop-after-iteration 1
 
 CUDA_VISIBLE_DEVICES=0 PYTHONDONTWRITEBYTECODE=1 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 \
   /home/user/liwei/GENMO/.venv/bin/python -B tools/train_closedloop_stage10.py \
   --config configs/closedloop/stage10_prepare_server1.yaml --mode train \
-  --output-dir /data0/user/liwei/GENMO_outputs/closedloop_stage10/preparation_20260930 \
-  --resume latest --stop-after-iteration 4
+  --output-dir /data0/user/liwei/GENMO_outputs/closedloop_stage10/preparation_contract_v2_20260930 \
+  --resume latest --stop-after-iteration 2
+
+# 容量检查通过后，明确扩展总预算，但本次验收只到第3轮。
+CUDA_VISIBLE_DEVICES=0 PYTHONDONTWRITEBYTECODE=1 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 \
+  /home/user/liwei/GENMO/.venv/bin/python -B tools/train_closedloop_stage10.py \
+  --config configs/closedloop/stage10_formal_server1.yaml --mode train \
+  --output-dir /data0/user/liwei/GENMO_outputs/closedloop_stage10/preparation_contract_v2_20260930 \
+  --resume latest --extend-budget-reason '正式训练前验证同run预算扩展；本次只执行至第3轮' \
+  --stop-after-iteration 3
 ```
 
 评估命令通过`--mode eval --checkpoint <latest.json指向的完整文件> --output-dir <新目录>`
@@ -147,8 +166,42 @@ journal；新增工具实现单独保存SHA，原训练身份仍严格校验。�
 ## 当前验收状态
 
 服务器已完成全4765条内容与身份审计，版本5f33e3e的四轮真实训练、2→4恢复后更新、
-19项独立训练审计和物理journal审计通过；同版本初始/第4轮完整val评估仍在进行。
-本地恢复计数、恢复审计和预算扩展修复正在完成最后回归；服务器评估期间不换源码。
+19项独立训练审计和物理journal审计通过；同版本初始/第4轮完整val各478任务、全集
+合并、独立审计和配对比较均passed。平均任务回报39.25925125→39.25328172，整体
+基本持平（约-0.0152%），每组物理/基础设施失败均0；不能称为学习质量提高。
+最终代码2ffb58d完整GENMO CPU回归546项通过，GMT相关38项通过。全val结束、进程
+退出后才pull新版服务器源码，并完成新目录三轮恢复与预算扩展验收：三个session均
+passed且exit0，第1轮→恢复第2轮→显式扩限恢复第3轮，全部正常关闭GMT。
 旧报告标注的完整恢复不包含后来发现遗漏的decision计数，不能把旧标记当作无遗漏
-证明。后续将用新目录执行新版1→恢复2→显式扩限且停止在3轮的有限GPU验证，旧四轮与其
-全量对照继续保留原版本身份，不冒称是新版第3轮模型的质量结果。最终结果完成后更新。
+证明。新版独立训练审计19/19通过，execution_counter_contract=verified；旧四轮与其
+全量对照继续保留原版本身份，不冒称是新版第3轮模型的质量结果。
+
+新版每轮64条，共192条转移、4785训练控制步；含校准/预热共5435控制/21740物理，
+与独立journal审计相符。三轮均选2e-9，mean joint KL为0.00834182/0.00380293/
+0.00103455。3 worker的实际观测历史、trace/ACK/物理计数通过；legacy cache0，
+窗口最多source129/reference214，208次prepare均9.443ms、P95 12.904ms。
+正式容量扩限前预估148.58GiB，第3轮后复核147.89GiB，均低于180GiB配额并保留
+文件系统30GiB余量；实际写入继续受磁盘守卫控制。奖励v2、GMT参数与归一化未改。
+
+完整证据在服务器`/data0/user/liwei/GENMO_outputs/closedloop_stage10/`，本地详细说明
+和小报告副本在`/home/weili/bumi-closedloop-worktrees/stage10_preparation_results_20260930/`。
+本轮完成的是正式训练前工程准备及有限验收，没有启动长期正式训练，也未验证收敛、
+长曲播放、域随机化、多环境训练或真实硬件。
+
+## 正式首段续训命令（交付命令，本轮未执行）
+
+工程检查已支持单环境正式首段训练。该run已在第3轮结束，总40轮预算扩展记录已发布，
+后续无需重复传扩限参数。建议先到总第10轮，再独立评估；初始对照使用本run的initial.pt。
+
+```bash
+cd /home/user/liwei/GENMO-bumi-closedloop
+CUDA_VISIBLE_DEVICES=0 PYTHONDONTWRITEBYTECODE=1 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 \
+  LD_LIBRARY_PATH=/data0/user/liwei/closedloop_stage8_runtime/sysroot/usr/lib/x86_64-linux-gnu \
+  /home/user/liwei/GENMO/.venv/bin/python -B tools/train_closedloop_stage10.py \
+  --config configs/closedloop/stage10_formal_server1.yaml --mode train \
+  --output-dir /data0/user/liwei/GENMO_outputs/closedloop_stage10/preparation_contract_v2_20260930 \
+  --resume latest --stop-after-iteration 10
+```
+
+这是从已验收第3轮模型、优化器、采样器和计数继续到第10轮，不是随机权重初始化，
+也不是只加载Actor权重。GMT物理session仍新建并reset，不恢复旧PhysX内部状态。
