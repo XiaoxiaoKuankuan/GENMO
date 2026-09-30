@@ -6,6 +6,8 @@ UUID 的正式格式证据。数据目录、概率/KL 与网络隔离报告使�
 只证明审计如何选择真实恢复链、保留失败历史及拒绝篡改，不证明 GPU 训练或动力学。
 注入窗口包括：接受轮次后进程中断而无 session 摘要、不可变 publication 已写但
 latest 写失败、失败后重试同一逻辑轮次，以及已恢复历史中的完成标记被篡改。
+新执行契约另核 checkpoint 的噪声计数与真实归档 decision；负例重写外层 SHA 后
+仍必须由计数语义校验拒绝，旧证据则明确标记 legacy_not_recorded。
 所有文件位于 pytest 临时目录；无需服务器、GPU 或外部数据，统一测试入口负责清理。
 """
 from __future__ import annotations
@@ -41,6 +43,10 @@ class Lifecycle:
         self.limits = dict(accepted_iterations=8, optimizer_attempts=20, generations=100, control_steps=1000, physics_steps=4000)
         self.manager = None
 
+    def with_counter_contract(self):
+        self.identity.update(base_seed=42, execution_contract={'protocol_version':'synthetic-execution-contract'})
+        return self
+
     def start(self, checkpoint=None):
         self.manager = management.RunManager(self.root, resume=self.root.exists())
         self.budget = self.manager.budget(self.limits)
@@ -58,6 +64,8 @@ class Lifecycle:
         self.state = dict(iteration=0, policy_version=0, actor_updates=0, critic_updates=0,
                           buffer_size=0, pending_plan=False, selected_actor_lr=1e-8,
                           session_id=self.manager.session_id, budget=self.budget.state_dict())
+        if 'execution_contract' in self.identity:
+            self.state.update(decision=0, attempt=0, episode_count=0, latency_budget_s=.5)
         resume = None
         if checkpoint is not None:
             self.state = load_checkpoint(checkpoint, actor=self.actor, critic=self.critic,
@@ -85,6 +93,8 @@ class Lifecycle:
         item = copy.deepcopy(self.template_item)
         item.identity.update(run_id=self.manager.run_id, backend_session_id='worker:'+self.manager.session_id,
                              episode_id=f'{self.manager.session_id}:{index}', policy_version=index-1)
+        if 'execution_contract' in self.identity:
+            item.identity['decision_id'] = self.state['decision']
         writer = management.RolloutWriter(directory/'rollout', policy_version=index-1)
         writer.append(item)
         manifest = writer.finish()
@@ -98,6 +108,9 @@ class Lifecycle:
         self.budget.accept_iteration()
         self.state.update(iteration=index, policy_version=index, actor_updates=index, critic_updates=index*20,
                           session_id=self.manager.session_id, budget=self.budget.state_dict())
+        if 'execution_contract' in self.identity:
+            self.state.update(decision=self.state['decision']+1, attempt=self.budget.state_dict()['used']['generations'],
+                              episode_count=self.state['episode_count']+1)
         checkpoint = self.root/'checkpoints'/f'{index:06d}-{self.manager.session_id}.pt'
         self.save(checkpoint)
         summary = copy.deepcopy(self.template_iteration)
@@ -158,6 +171,7 @@ def test_failed_session_then_real_resume_is_audited_without_erasing_history(life
     life.finish()
     result = audit_run(life.root)
     assert result['status']=='passed', result
+    assert result['execution_counter_contract']=='legacy_not_recorded'
     history = {row['session_id']:row for row in result['recovery_history']['sessions']}
     assert history[failed.name]['status']=='failed'
     assert history[failed.name]['disposition']=='recovered_history'
@@ -167,8 +181,9 @@ def test_failed_session_then_real_resume_is_audited_without_erasing_history(life
     assert read_json(destination)['status']=='passed'
 
 
-def test_immutable_publication_then_latest_failure_retry_selects_actual_chain(lifecycle):
-    life = lifecycle.start()
+@pytest.mark.parametrize('counter_contract', [False, True])
+def test_immutable_publication_then_latest_failure_retry_selects_actual_chain(lifecycle, counter_contract):
+    life = (lifecycle.with_counter_contract() if counter_contract else lifecycle).start()
     first = life.publish()
     life.publish(fail_latest=True)
     failed = life.finish(status='failed')
@@ -179,6 +194,9 @@ def test_immutable_publication_then_latest_failure_retry_selects_actual_chain(li
     rejected = result['recovery_history']['unselected_publications']
     assert len(rejected)==1 and rejected[0]['iteration']==2 and rejected[0]['session_id']==failed.name
     assert len(list((life.root/'checkpoints/publications').glob('000000002-*.json')))==2
+    if counter_contract:
+        counters = next(row for row in result['checks'] if row['name']=='iteration:2')['details']['checkpoint']['execution_counters']
+        assert counters['decision']==2 and counters['attempt']==3
 
 
 def test_latest_without_session_summary_is_checked_then_recovered(lifecycle):
@@ -336,3 +354,83 @@ def test_interrupted_partial_metrics_tail_is_retained_and_reported(lifecycle):
     assert result['status']=='passed', result
     assert next(row for row in result['recovery_history']['sessions'] if row['session_id']==interrupted.name)['trailing_partial_metrics']
     assert path.read_bytes().endswith(b'{"event": "unfinished')
+
+
+def _rewrite_latest_checkpoint(life, mutation):
+    """故意更新 SHA/大小，确保负例依靠计数语义而非旧文件哈希拒绝。"""
+    latest = read_json(life.root/'latest.json')
+    path = life.root/latest['path']
+    saved = torch.load(path, weights_only=False)
+    mutation(saved['state'])
+    torch.save(saved, path)
+    latest.update(sha256=sha256(path), size_bytes=path.stat().st_size)
+    write(life.root/latest['publication'], {key:value for key,value in latest.items() if key!='publication'})
+    write(life.root/'latest.json', latest)
+
+
+def test_new_execution_contract_checks_rows_counters_and_resume_continuity(lifecycle):
+    life = lifecycle.with_counter_contract().start()
+    life.budget.reserve('calibration', generations=4)
+    life.state.update(decision=4, attempt=4, episode_count=1, budget=life.budget.state_dict())
+    life.save(life.root/'checkpoints/initial.pt')
+    first = life.publish()
+    life.finish()
+    life.start(first).publish()
+    life.publish()
+    life.finish()
+    result = audit_run(life.root)
+    assert result['status']=='passed' and result['execution_counter_contract']=='verified', result
+    checks = {row['name']:row for row in result['checks']}
+    counters = checks['iteration:3']['details']['checkpoint']['execution_counters']
+    assert counters['decision']==7 and counters['attempt']==7 and counters['episode_count']==4
+    assert counters['first_archived_decision_id']==counters['last_archived_decision_id']==6
+    resumed = checks['resume_then_optimize']['details'][0]['execution_counters']
+    assert resumed['saved']['decision']==resumed['next_first_decision_id']==5
+    assert resumed['decision_continuous'] is True
+
+
+@pytest.mark.parametrize('field,value,error', [
+    ('decision', 1, 'last archived decision plus one'),
+    ('attempt', 3, 'spent generation budget'),
+    ('episode_count', -1, 'episode_count'),
+    ('latency_budget_s', 0., 'latency budget'),
+    ('decision', True, 'integer'),
+])
+def test_new_counter_tampering_fails_after_checkpoint_publication_sha_is_updated(lifecycle, field, value, error):
+    life = lifecycle.with_counter_contract().start()
+    first = life.publish()
+    life.finish()
+    life.start(first).publish()
+    life.finish()
+    _rewrite_latest_checkpoint(life, lambda state:state.update({field:value}))
+    result = audit_run(life.root)
+    assert result['status']=='failed' and result['execution_counter_contract']=='required_not_verified', result
+    check = next(row for row in result['checks'] if row['name']=='iteration:2')
+    assert error in check['error'] and 'SHA' not in check['error']
+
+
+def test_new_counter_resume_reset_cannot_hide_behind_self_consistent_last_row(lifecycle):
+    life = lifecycle.with_counter_contract().start()
+    first = life.publish()
+    life.finish()
+    life.start(first).publish()
+    directory = life.directory/'iterations/000002/rollout'
+    life.finish()
+    chunk_path = directory/'chunk_000000/manifest.json'
+    chunk = read_json(chunk_path)
+    record = chunk['records'][0]
+    path = chunk_path.parent/record['path']
+    item = torch.load(path, weights_only=False)
+    item.identity['decision_id'] = 0
+    torch.save(item, path)
+    record.update(sha256=sha256(path), size_bytes=path.stat().st_size)
+    record['identity']['decision_id'] = 0
+    write(chunk_path, chunk)
+    manifest = read_json(directory/'manifest.json')
+    manifest['chunks'][0]['sha256'] = sha256(chunk_path)
+    write(directory/'manifest.json', manifest)
+    _rewrite_latest_checkpoint(life, lambda state:state.update(decision=1))
+    result = audit_run(life.root)
+    assert result['status']=='failed', result
+    check = next(row for row in result['checks'] if row['name']=='iteration:2')
+    assert 'does not continue the saved checkpoint' in check['error']

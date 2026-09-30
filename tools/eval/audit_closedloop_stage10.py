@@ -10,6 +10,9 @@ fixed_targets.pt 中冻结的 old/next values 与逐条归档值先交叉核对�
 训练发布链从 latest 和实际恢复的 checkpoint 路径/SHA 回溯；失败尝试和未选发布
 保留在报告中，不再按全目录同一轮编号合并。硬中断缺少 session 摘要时，可用已
 落盘的 session_start 与不可变发布继续检查已接受轮次，但未恢复的终态仍不通过。
+新 identity 的 base_seed/execution_contract 同时触发执行计数强校验：decision
+对应真实归档最后一条加一，attempt 对应已耗 generation，恢复后的首 decision
+必须延续所加载状态。旧 identity 明示 legacy_not_recorded，不冒称噪声计数完整。
 
 评估分支核对显式 checkpoint 身份、完整 val/test 池计划、多 seed、网络不变和
 逐 episode 文件，独立重算其聚合统计；评估不进入训练 Buffer。所有输入只读，
@@ -270,7 +273,35 @@ def audit_update(summary, contract):
     return dict(optimizer_attempts=len(candidates), selected_lr=chosen['lr'], mean_joint_kl=summary['kl']['mean_joint_kl'])
 
 
-def audit_checkpoint(root, summary, identity, update, publication=None):
+def _counter_contract(identity):
+    present = {key for key in ('base_seed', 'execution_contract') if key in identity}
+    if not present:
+        return 'legacy_not_recorded'
+    require(len(present)==2, 'Execution counter identity requires both base_seed and execution_contract')
+    require(integer(identity['base_seed'], 'base_seed')<2**32, 'base_seed must fit uint32')
+    require(isinstance(identity['execution_contract'], dict) and bool(identity['execution_contract']), 'Missing execution contract')
+    return 'required'
+
+
+def _execution_counters(state, identity, rows=None):
+    if _counter_contract(identity)=='legacy_not_recorded':
+        return dict(contract='legacy_not_recorded')
+    result = {key:integer(state.get(key), f'checkpoint {key}') for key in ('decision', 'attempt', 'episode_count')}
+    result['latency_budget_s'] = number(state.get('latency_budget_s'), 'checkpoint latency_budget_s')
+    require(result['latency_budget_s']>0, 'Checkpoint latency budget must be positive')
+    require(result['decision']<=result['attempt'], 'Checkpoint decision exceeds generation attempts')
+    require(result['attempt']==state['budget']['used']['generations'], 'Checkpoint attempt differs from spent generation budget')
+    if rows is not None:
+        decisions = [integer(row['identity']['decision_id'], 'archived decision_id') for row in rows]
+        require(decisions, 'Execution counter verification requires archived rollout rows')
+        require(all(right==left+1 for left, right in zip(decisions, decisions[1:])), 'Archived decision IDs are not contiguous')
+        require(result['decision']==decisions[-1]+1, 'Checkpoint decision differs from last archived decision plus one')
+        result.update(first_archived_decision_id=decisions[0], last_archived_decision_id=decisions[-1])
+    result['contract'] = 'verified'
+    return result
+
+
+def audit_checkpoint(root, summary, identity, update, publication=None, rows=None):
     path = resolve(root, summary['checkpoint'])
     if publication is None:
         publications = []
@@ -304,6 +335,8 @@ def audit_checkpoint(root, summary, identity, update, publication=None):
     result = dict(path=str(path.relative_to(root)), iteration=state['iteration'], policy_version=state['policy_version'],
                   actor_updates=state['actor_updates'], critic_updates=state['critic_updates'], session_id=state.get('session_id'),
                   optimizer_attempts=state['budget']['used']['optimizer_attempts'])
+    require(rows is not None or _counter_contract(identity)=='legacy_not_recorded', 'New checkpoint counters require real archived rollout rows')
+    result['execution_counters'] = _execution_counters(state, identity, rows)
     del saved
     return result
 
@@ -513,6 +546,7 @@ def _select_publication_chain(root, sessions):
 
 def _audit_training(root, run, audit, result, minimum_iterations, require_resume):
     identity = run['identity']
+    result['execution_counter_contract'] = _counter_contract(identity)
     sessions = {}
     directories = set((root/'sessions').glob('*'))
     directories.update(root/'sessions'/path.stem for path in (root/'metrics').glob('*.jsonl'))
@@ -598,8 +632,14 @@ def _audit_training(root, run, audit, result, minimum_iterations, require_resume
             targets = audit_targets(root, summary, rows, identity['training_contract'])
             update = audit_update(summary, identity['training_contract'])
             budget_check(summary['budget'], last_budget)
-            checkpoint = audit_checkpoint(root, summary, identity, update, publication)
+            checkpoint = audit_checkpoint(root, summary, identity, update, publication, rows)
             require(checkpoint['session_id']==context['session_id'], 'Checkpoint belongs to a different training session')
+            counters = checkpoint['execution_counters']
+            if counters['contract']=='verified' and index>1:
+                require(index-1 in checkpoints, 'Previous checkpoint counter evidence failed verification')
+                previous = checkpoints[index-1]['execution_counters']
+                require(counters['first_archived_decision_id']==previous['decision'], 'Next rollout first decision does not continue the saved checkpoint')
+                require(counters['episode_count']>=previous['episode_count'], 'Checkpoint episode counter rolled back')
             checkpoints[index] = checkpoint
             last_budget = summary['budget']
             total_attempts += update['optimizer_attempts']
@@ -633,11 +673,30 @@ def _audit_training(root, run, audit, result, minimum_iterations, require_resume
                 old_worker = previous['gmt_frozen']['execution_journal'].get('backend_session_id')
                 require(old_worker and old_worker!=new_worker, 'Resume reused an old physical worker session')
                 require(sha256(resolve(root, resume['checkpoint']))==resume['sha256'], 'Resumed checkpoint bytes changed')
-            continued.append(dict(initial_iteration=initial, final_iteration=final, new_backend_session_id=new_worker))
+            record = dict(initial_iteration=initial, final_iteration=final, new_backend_session_id=new_worker)
+            if _counter_contract(identity)!='legacy_not_recorded':
+                if initial:
+                    saved_counters = checkpoints[initial]['execution_counters']
+                else:
+                    saved = torch.load(resolve(root, resume['checkpoint']), map_location='cpu', weights_only=False, mmap=True)
+                    saved_counters = _execution_counters(saved['state'], identity)
+                    del saved
+                require(initial+1 in checkpoints, 'First resumed checkpoint counters failed validation')
+                next_counters = checkpoints[initial+1]['execution_counters']
+                require(saved_counters['decision']==next_counters['first_archived_decision_id'], 'Resumed first decision differs from restored execution counter')
+                record['execution_counters'] = dict(saved={key:saved_counters[key] for key in
+                    ('decision', 'attempt', 'episode_count', 'latency_budget_s')},
+                    next_first_decision_id=next_counters['first_archived_decision_id'], decision_continuous=True)
+            else:
+                record['execution_counter_contract'] = 'legacy_not_recorded'
+            continued.append(record)
         if require_resume:
             require(continued, 'No complete-state resume followed by a real Actor update')
         return continued
-    audit.check('resume_then_optimize', resumes)
+    resume_result = audit.check('resume_then_optimize', resumes)
+    if result['execution_counter_contract']!='legacy_not_recorded':
+        result['execution_counter_contract'] = ('verified' if len(checkpoints)==len(selected) and resume_result is not None
+                                                else 'required_not_verified')
     def check_latest():
         require(checkpoints and latest['iteration']==max(checkpoints), 'Latest pointer differs from final validated iteration')
         path = resolve(root, latest['path'])
