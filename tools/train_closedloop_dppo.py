@@ -63,12 +63,14 @@ def configuration(path):
     merge(reward,config['stage9'].get('reward',{}))
     config['stage9']['reward']=reward
     s=config['stage9']
-    required=dict(rollout_upper_steps=64,ppo_epochs=1,denoising_steps=20,actor_lr=1e-6,
+    required=dict(rollout_upper_steps=64,ppo_epochs=1,denoising_steps=20,
                   critic_lr=1e-4,gamma_upper=.99,lambda_upper=.95,gamma_denoising=.99,
                   ppo_clip=.01,grad_clip_norm=1.,denoising_microbatch=1,bc_batch=2)
     for key,value in required.items():
         if s[key]!=value:
             raise ValueError(f'This bounded acceptance requires {key}={value}')
+    if not math.isfinite(float(s['actor_lr'])) or not 0<float(s['actor_lr'])<=1e-6:
+        raise ValueError('Bounded Actor learning rate must be in (0,1e-6]')
     if s['execution_mode'] not in ('latency','paused'):
         raise ValueError('Invalid execution mode')
     if any(s[key]>limit for key,limit in (('max_generations',256),('max_control_steps',10000),('max_iterations',3))):
@@ -281,7 +283,10 @@ def main(argv=None):
             report['prefix_over_18_fraction']=sum(int(t.context['known_qpos30_mask'].any(-1).sum())>18 for t in buffer.transitions)/count
             if args.mode in ('critic','train'):
                 targets=fixed_targets(buffer.transitions,critic,config['runtime']['genmo_device'])
+                targets['old_values']=torch.tensor([t.old_value for t in buffer.transitions],dtype=torch.float64)
+                targets['next_values']=torch.tensor([t.next_value for t in buffer.transitions],dtype=torch.float64)
                 torch.save(targets,report_output/'fixed_targets.pt')
+                torch.save(buffer.transitions,report_output/'rollout.pt')
                 initial_actor=_fingerprint(actor)
                 report['critic']=critic_update(critic,critic_optimizer,buffer.transitions,targets,generator=generator)
                 report['critic']['actor_unchanged']=initial_actor==_fingerprint(actor)

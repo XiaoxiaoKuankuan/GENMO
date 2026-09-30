@@ -21,7 +21,8 @@ stage9:
   log_probability_reduction: joint_sum
   rollout_upper_steps: 64
   ppo_epochs: 1
-  actor_lr: 0.000001
+  # 首次真实joint_sum验收1e-6产生KL2964.81；仅降低步长，不放宽KL=.02或修改噪声。
+  actor_lr: 0.000000001
   critic_lr: 0.0001
   critic_steps: 20
   critic_batch: 32

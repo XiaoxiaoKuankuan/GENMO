@@ -117,7 +117,7 @@ class UpperEnvironment:
         reservation = self.backend.call('reserve_prefix', request=request)
         context, meta = self.builder.build(self.snapshot, reservation, self.music, music_start_tick=600)
         self.attempt += 1
-        key = f"{self.iteration}:{self.episode_count}:{self.decision}:{self.attempt}"
+        key = f"{self.config['stage9']['run_id']}:{self.iteration}:{self.episode_count}:{self.decision}:{self.attempt}"
         seed = stable_noise_seed(self.config['stage9']['seed'], key)
         if self.comparison_noise_index is not None:
             seed = stable_noise_seed(1729, str(self.comparison_noise_index))
