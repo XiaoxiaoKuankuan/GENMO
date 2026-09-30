@@ -17,6 +17,9 @@ val/test歌曲与种子输出逐episode证据。源码、模型、奖励、完�
 管理，不依赖某个固定准备YAML的源码哈希。decision、attempt、episode_count共同
 参与请求和显式噪声种子，必须在初始及逐轮checkpoint中保存并完整恢复；缺失字段
 的旧Stage10状态明确拒绝，不猜测为零。每个session另保存实际输入和解析配置SHA。
+
+八卡入口可显式注入同步learner：主进程保持单GMT采集、全局GAE、预算与发布，
+Actor/Critic更新交给多GPU共同计算。普通单卡入口不接受八卡配置，避免静默降级。
 """
 from __future__ import annotations
 
@@ -159,7 +162,9 @@ def _sources(config, check):
         'genmo_repo': [*(f'gem/closedloop/dppo/{n}.py' for n in names),
             'tools/train_closedloop_stage10.py',
             'configs/closedloop/stage1_dataset_server1_fourset_90505_v1.yaml',
-            'gem/closedloop/stage1_dataset.py', 'gem/closedloop/losses.py'],
+            'gem/closedloop/stage1_dataset.py', 'gem/closedloop/losses.py',
+            *(['gem/closedloop/dppo/distributed_runtime.py', 'tools/train_closedloop_stage10_8gpu.py']
+              if config['stage10'].get('distributed') else [])],
         'gmt_repo': ['source/NoetixRobot/NoetixRobot/tasks/mimic/mimic_noetix_bumi4340_mha_sonic/closedloop/execution_journal.py']})
 
 
@@ -172,7 +177,9 @@ def identity(config, check, provenance, catalog, data_audit, actor):
         training_contract=config['stage10']['training'], reward=config['stage9']['reward'],
         environment=config['environment'], termination=config['termination'],
         dataset=catalog.identity, data_content_sha256=data_audit['data_content_sha256'],
-        sampling=config['stage10']['dataset'], source_manifest_sha256=provenance['source_manifest_sha256'])
+        sampling=config['stage10']['dataset'], source_manifest_sha256=provenance['source_manifest_sha256'],
+        **({'distributed_training': copy.deepcopy(config['stage10']['distributed'])}
+           if config['stage10'].get('distributed') else {}))
 
 
 def validate_execution_state(state):
@@ -321,7 +328,7 @@ def calibrate(env, catalog, output, warmup, samples):
     return report
 
 
-def main(argv=None):
+def main(argv=None, *, learner=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--config', type=Path, default=ROOT/'configs/closedloop/stage10_prepare_server1.yaml')
     parser.add_argument('--mode', choices=('preflight', 'train', 'eval'), default='preflight')
@@ -334,6 +341,8 @@ def main(argv=None):
     parser.add_argument('--eval-count', help='all or count from the complete held-out catalog')
     parser.add_argument('--eval-split', choices=('val', 'test'))
     args = parser.parse_args(argv)
+    if learner is not None and (args.mode != 'train' or args.resume or args.initialize_stage9):
+        parser.error('Distributed startup currently requires a new train run; resume is not supported')
     if args.resume and args.mode != 'train':
         parser.error('--resume is only for continued train mode')
     if bool(args.checkpoint) != (args.mode == 'eval'):
@@ -346,6 +355,8 @@ def main(argv=None):
     if (args.eval_count is not None or args.eval_split is not None) and args.mode != 'eval':
         parser.error('Evaluation overrides are only valid in eval mode')
     config = configuration(args.config)
+    if config['stage10'].get('distributed') and learner is None:
+        parser.error('Use train_closedloop_stage10_8gpu.py for distributed configurations')
     stage, s = config['stage10'], config['stage9']
     storage = stage['storage']
     output = args.output_dir.resolve()
@@ -380,7 +391,8 @@ def main(argv=None):
         torch.backends.cuda.matmul.allow_tf32 = False
         torch.backends.cudnn.allow_tf32 = False
         torch.backends.cudnn.benchmark = False
-        check = runtime_preflight(config, check_gpu=args.mode != 'preflight')
+        check = (runtime_preflight(config, check_gpu=args.mode != 'preflight') if learner is None
+                 else learner.preflight(config, check_gpu=True))
         atomic_json(session/'preflight.json', check)
         if not check['ready']:
             raise RuntimeError('Runtime assets did not pass preflight')
@@ -443,6 +455,8 @@ def main(argv=None):
         report['initial_iteration'] = state['iteration']
         if args.mode == 'train' and state['iteration'] >= stop_at:
             raise ValueError('Requested stop iteration must exceed the restored iteration')
+        if learner is not None:
+            learner.attach(config, actor, critic, actor_optimizer, critic_optimizer, policy)
         if args.resume:
             previous = json.loads((output/'run.json').read_text())
             if previous['identity'] != expected:
@@ -536,7 +550,7 @@ def main(argv=None):
                     torch.save(targets, targets_path)
                     step_report['targets_path'] = _relative(targets_path, output)
                     initial_actor = _fingerprint(actor)
-                    step_report['critic'] = critic_update(critic, critic_optimizer, buffer.transitions, targets,
+                    step_report['critic'] = (critic_update if learner is None else learner.critic_update)(critic, critic_optimizer, buffer.transitions, targets,
                         steps=s['critic_steps'], batch_size=s['critic_batch'], generator=generator,
                         grad_clip_norm=s['critic_grad_clip_norm'])
                     step_report['critic']['actor_unchanged'] = initial_actor == _fingerprint(actor)
@@ -547,13 +561,13 @@ def main(argv=None):
                     def progress(event):
                         events.append(event)
                         atomic_json(iteration_output/'lr_progress.json', dict(events=events))
-                    step_report['actor'] = actor_update(policy, actor_optimizer, buffer.transitions, targets,
+                    step_report['actor'] = (actor_update if learner is None else learner.actor_update)(policy, actor_optimizer, buffer.transitions, targets,
                         bc=bc, bc_weight=s['bc_weight'], clip=s['ppo_clip'], gamma_denoising=s['gamma_denoising'],
                         grad_clip_norm=s['grad_clip_norm'], learning_rate_candidates=s['actor_lr_candidates'],
                         kl_limit=s['kl_stop_joint'], reserve_attempt=lambda:budget.reserve('update',optimizer_attempts=1),
                         calibration_progress=progress)
                     step_report['actor']['critic_unchanged'] = initial_critic == _fingerprint(critic)
-                    step_report['kl'] = analytic_kl(policy, buffer.transitions)
+                    step_report['kl'] = (analytic_kl if learner is None else learner.analytic_kl)(policy, buffer.transitions)
                     if not step_report['actor']['critic_unchanged'] or step_report['kl']['mean_joint_kl'] > s['kl_stop_joint']:
                         raise RuntimeError('Actor isolation or accepted KL verification failed')
                     step_report['gmt_frozen'] = backend.call('verify_frozen')
@@ -630,6 +644,8 @@ def main(argv=None):
                 if not report['original_assets_unchanged']:
                     report['status'], code = 'failed', 1
             report.update(exit_code=code, budget=budget.state_dict())
+            if learner is not None:
+                report['distributed_checks'] = learner.evidence
             atomic_json(session/'summary.json', report)
             manager.append_metrics(dict(event='session_end', status=report['status'], exit_code=code,
                                         summary=_relative(session/'summary.json', output)))

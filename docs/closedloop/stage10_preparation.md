@@ -214,3 +214,56 @@ CUDA_VISIBLE_DEVICES=0 PYTHONDONTWRITEBYTECODE=1 OMP_NUM_THREADS=1 MKL_NUM_THREA
 该命令在原奖励及代码身份下的语义是完整恢复第3轮；当前版本须使用新的独立运行
 目录，沿用 Stage1 Actor weights-only 初始化，再重新建立 Critic、优化器及新基线。
 本次 Tracking 修改没有启动任何正式训练，也没有将旧全 val 报告当作新奖励验收。
+
+## 八卡共同更新同一模型的启动入口
+
+新增 `tools/train_closedloop_stage10_8gpu.py` 和
+`configs/closedloop/stage10_8gpu_server1.yaml`。八个 GPU 进程共同训练同一个 Actor
+与同一个 Critic：rank0 用一个冻结 GMT／CPU PhysX 环境采集本轮完整执行转移，
+将本轮数据发给其他 rank，八卡分担更新计算并同步梯度，rank0 统一发布 checkpoint
+和运行账本。它不是八个独立训练，也不是八个并行 GMT 环境；采集阶段仍是单环境。
+
+本入口继续读取完整 train 数据池，与旧200首清单无关。全局每轮仍为64条上层转移，
+不会变成每卡64条；每条轨迹的奖励、GAE、旧采样概率及去噪自由动作掩码语义保持原样。
+新配置逐项保留正式单卡配置的六项 GMT Tracking、Critic／DPPO／BC 参数、
+Actor 学习率候选 `5e-10 / 1e-9 / 2e-9` 和联合 KL 门槛 `0.02`，仅新增：
+
+```yaml
+stage10:
+  distributed:
+    world_size: 8
+    backend: nccl
+    collection: rank0
+```
+
+启动脚本默认使用服务器1的GPU `0,1,2,3,4,5,6,7`，通过单节点 `torchrun` 启动8个
+进程。必须指定新的运行目录；默认只运行到第1个接受更新，以便先核验启动与共同更新：
+
+```bash
+cd /home/user/liwei/GENMO-bumi-closedloop
+bash scripts/train_stage10_8gpu_server1.sh \
+  --output-dir /data0/user/liwei/GENMO_outputs/closedloop_stage10/gmt_tracking_8gpu_new_run \
+  --stop-after-iteration 1
+```
+
+需要连续执行首段时，在**新的独立运行目录**显式选择40轮，并在 `tmux` 中运行：
+
+```bash
+cd /home/user/liwei/GENMO-bumi-closedloop
+bash scripts/train_stage10_8gpu_server1.sh \
+  --output-dir /data0/user/liwei/GENMO_outputs/closedloop_stage10/gmt_tracking_8gpu_first40 \
+  --stop-after-iteration 40
+```
+
+启动脚本不自动删除输出目录，也不覆盖已有run。启动验收产生的临时数据、日志和
+checkpoint须按仓库测试产物约定，在核验并记录结果后精确清理；正式训练产物保留。
+
+此版聚焦八卡正确启动并共同更新，**多卡完整恢复尚未验收**，因此入口暂不支持
+`--resume` 和 `--initialize-stage9`。模型从配置指定的 Stage1 Actor checkpoint
+按 weights-only 初始化，Critic、优化器和运行账本重新建立；旧 Tracking run、
+单卡 run 及本版多卡 checkpoint 均不能通过它静默续训。达到停止轮次后的继续训练
+仍需完成多卡恢复实现与验收，不能把同一输出目录再次启动当作恢复。
+
+八卡通信、一次共同更新与长时间稳定／恢复是不同的验收范围；启动成功不代表训练
+已经收敛，也不代表吞吐会获得8倍加速。应以本次运行的真实共同更新、参数一致性和
+冻结 GMT 检查记录判断启动是否通过，不以GPU显存占用代替训练正确性的证据。

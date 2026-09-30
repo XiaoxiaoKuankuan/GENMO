@@ -1,9 +1,15 @@
-"""第九步单环境 DPPO 的模型装配、固定回报目标和有限优化。
+"""第九步 DPPO 的模型装配、固定回报目标和单卡／协同多卡有限优化。
 
 Actor 从已验收 Stage1 权重初始化，独立 Critic 与优化器从零建立。采集策略固定，
 价值目标在更新前一次性计算；DPPO 按内部每个去噪转移的联合概率比累计梯度，不对
 最终动作文件套 PPO，也不反传穿过 GMT 或仿真。每轮默认只执行一次 Actor 优化步，
 监督保持使用原 Stage1 loss 并独立记录监督更新次数；所有异常概率和梯度立即报错。
+
+可选 distributed 协作者让各卡分担同一批上层转移的计算：每张卡按全局分母累计
+局部损失，随后对梯度求和，因而保持单卡全局 batch 的更新语义。Critic 使用同一
+全局 minibatch 的分片，Actor 按完整去噪链分片，KL 与概率统计恢复为完整全局顺序。
+BC 只由 rank 0 执行一次；同步后的 PPO 梯度与该次 BC 梯度相加后统一裁剪、更新。
+采集、运行目录和 checkpoint 仍由运行层统一管理，默认 distributed=None 保持旧路径。
 """
 from __future__ import annotations
 
@@ -78,7 +84,7 @@ def fixed_targets(transitions, critic, device, *, gamma_upper=.99, lambda_upper=
 
 
 def critic_update(critic, optimizer, transitions, targets, *, steps=20, batch_size=32, generator=None,
-                  grad_clip_norm=1.):
+                  grad_clip_norm=1., distributed=None):
     if type(steps) is not int or steps < 1 or type(batch_size) is not int or batch_size < 1:
         raise ValueError('Critic steps and batch size must be positive integers')
     if not math.isfinite(float(grad_clip_norm)) or grad_clip_norm <= 0:
@@ -97,13 +103,26 @@ def critic_update(critic, optimizer, transitions, targets, *, steps=20, batch_si
             torch.var(target-initial_values, unbiased=False))/initial_variance
     for _ in range(steps):
         indices = torch.randperm(len(transitions),generator=generator)[:batch_size].tolist()
-        items = [transitions[i] for i in indices]
-        value = critic(batch_context(items,device),torch.tensor([t.metadata['remaining_music_seconds'] for t in items],device=device))
-        loss = .5*(value-target[indices]).square().mean()
+        if distributed is not None:
+            indices = distributed.broadcast_object(indices if distributed.rank == 0 else None)
+        local_indices = indices if distributed is None else indices[distributed.rank::distributed.world_size]
+        optimizer.zero_grad(set_to_none=True)
+        if local_indices:
+            items = [transitions[i] for i in local_indices]
+            value = critic(batch_context(items,device),torch.tensor(
+                [t.metadata['remaining_music_seconds'] for t in items],device=device))
+            squared_error = (value-target[local_indices]).square()
+            loss = (.5*squared_error.mean() if distributed is None
+                    else .5*squared_error.sum()/len(indices))
+        else:
+            loss = torch.zeros((), device=device)
         if not torch.isfinite(loss):
             raise FloatingPointError('Nonfinite value loss')
-        optimizer.zero_grad(set_to_none=True)
-        loss.backward()
+        if local_indices:
+            loss.backward()
+        if distributed is not None:
+            distributed.sum_gradients(critic)
+            loss = distributed.sum_tensor(loss.detach())
         norms.append(float(torch.nn.utils.clip_grad_norm_(critic.parameters(),grad_clip_norm,error_if_nonfinite=True)))
         optimizer.step()
         losses.append(float(loss.detach()))
@@ -194,12 +213,19 @@ def probability_check(policy, transitions, *, clip=.01):
                 passed=True, **_ratio_report(values, clip=clip))
 
 
-def analytic_kl(policy, transitions):
+def analytic_kl(policy, transitions, *, distributed=None):
     _validate_actor_transitions(policy, transitions)
     values, per_dimension = [], []
     device = next(policy.actor.parameters()).device
+    selected = [item for item in transitions if item.free_mask.any()]
+    if not selected:
+        raise ValueError('Analytic KL requires at least one free action coordinate')
+    indices = list(range(len(selected)))
+    if distributed is not None:
+        indices = indices[distributed.rank::distributed.world_size]
     with torch.no_grad():
-        for item in transitions:
+        for index in indices:
+            item = selected[index]
             count = int(item.free_mask.sum())
             if not count:
                 continue
@@ -216,24 +242,26 @@ def analytic_kl(policy, transitions):
                 joint=terms.masked_select(mask).sum()
                 row.append(float(joint));dimension_row.append(float(joint)/count)
             values.append(row);per_dimension.append(dimension_row)
-    if not values:
-        raise ValueError('Analytic KL requires at least one free action coordinate')
-    result=torch.tensor(values,dtype=torch.float64)
+    result=torch.tensor(values,dtype=torch.float64).reshape(-1, policy.steps)
+    dimensions=torch.tensor(per_dimension,dtype=torch.float32).reshape(-1, policy.steps)
+    if distributed is not None:
+        result = distributed.gather_rows(result, indices, len(selected))
+        dimensions = distributed.gather_rows(dimensions, indices, len(selected))
     if not torch.isfinite(result).all():
         raise FloatingPointError('Nonfinite analytic joint KL')
     return dict(mean_joint_kl=float(result.mean()),p95_joint_kl=float(torch.quantile(result,.95)),
-                max_joint_kl=float(result.max()),mean_per_dimension_kl=float(torch.tensor(per_dimension).mean()),
+                max_joint_kl=float(result.max()),mean_per_dimension_kl=float(dimensions.mean()),
                 joint_kl_scope='sum_free_coordinates_per_internal_transition_then_mean',
                 mean_chain_joint_kl=float(result.sum(1).mean()),
                 per_denoising_step=[dict(step_index=i, mean_joint_kl=float(result[:, i].mean()),
                     max_joint_kl=float(result[:, i].max()),
-                    mean_per_dimension_kl=float(torch.tensor(per_dimension)[:, i].mean()))
+                    mean_per_dimension_kl=float(dimensions[:, i].mean()))
                     for i in range(policy.steps)])
 
 
 def actor_update(policy, optimizer, transitions, targets, *, bc=None, bc_weight=.1, clip=.01,
                  gamma_denoising=.99, grad_clip_norm=1., learning_rate_candidates=None,
-                 kl_limit=.02, reserve_attempt=None, calibration_progress=None):
+                 kl_limit=.02, reserve_attempt=None, calibration_progress=None, distributed=None):
     _validate_actor_transitions(policy, transitions)
     if not math.isfinite(clip) or not 0 < clip < 1 or not 0 < gamma_denoising <= 1:
         raise ValueError('Invalid PPO clip or denoising discount')
@@ -253,7 +281,11 @@ def actor_update(policy, optimizer, transitions, targets, *, bc=None, bc_weight=
         raise ValueError('No valid free action remains for Actor update')
     total=len(selected)*policy.steps
     loss_sum=0.; all_log_ratios=[]; step_losses=[0.]*policy.steps
-    for index,item in selected:
+    local_positions = list(range(len(selected)))
+    if distributed is not None:
+        local_positions = local_positions[distributed.rank::distributed.world_size]
+    for position in local_positions:
+        index, item = selected[position]
         context={k:v.to(device) for k,v in item.context.items()}
         row=[]
         for step in range(policy.steps):
@@ -271,8 +303,15 @@ def actor_update(policy, optimizer, transitions, targets, *, bc=None, bc_weight=
             step_losses[step]+=float(loss.detach())
             row.append(float(log_ratio.detach()))
         all_log_ratios.append(row)
-        if (index+1)%8==0:
+        if (index+1)%8==0 and (distributed is None or distributed.rank == 0):
             print(f'[DPPO] accumulated {index+1}/{len(transitions)} upper transitions',flush=True)
+    if distributed is not None:
+        distributed.sum_gradients(actor)
+        totals = distributed.sum_tensor(torch.tensor([loss_sum, *step_losses], device=device, dtype=torch.float64))
+        loss_sum, *step_losses = totals.tolist()
+        all_log_ratios = distributed.gather_rows(
+            torch.tensor(all_log_ratios, dtype=torch.float64).reshape(-1, policy.steps),
+            local_positions, len(selected))
     # 在加入BC之前核验，防止只有监督损失产生梯度却被误称DPPO成功。
     ppo_norm=torch.nn.utils.clip_grad_norm_(actor.parameters(),float('inf'),error_if_nonfinite=True)
     if not float(ppo_norm)>0:
@@ -280,19 +319,32 @@ def actor_update(policy, optimizer, transitions, targets, *, bc=None, bc_weight=
     ppo_modules={prefix:sum(float(p.grad.detach().double().square().sum()) for name,p in actor.named_parameters()
         if name.startswith(prefix) and p.grad is not None)**.5 for prefix in ('denoiser','history_encoder','prefix_encoder','music_embedder')}
     bc_report=None
-    if bc is not None and bc_weight>0:
-        bc_report=bc.backward(actor,weight=bc_weight)
+    bc_enabled = bc is not None and bc_weight>0
+    if distributed is not None:
+        bc_enabled = distributed.broadcast_object(bc_enabled if distributed.rank == 0 else None)
+    if bc_enabled:
+        if distributed is None or distributed.rank == 0:
+            bc_report=bc.backward(actor,weight=bc_weight)
+        else:
+            # rank 0 已持有完整 PPO 梯度，其余 rank 必须清空，避免第二次 SUM 乘卡数。
+            optimizer.zero_grad(set_to_none=True)
+        if distributed is not None:
+            distributed.sum_gradients(actor)
+            bc_report = distributed.broadcast_object(bc_report if distributed.rank == 0 else None)
     actor.eval()
     gradient=float(torch.nn.utils.clip_grad_norm_(actor.parameters(),grad_clip_norm,error_if_nonfinite=True))
     calibration = None
     if learning_rate_candidates:
         def progress(event):
-            print('[LR_CALIBRATION] '+str({key:value for key,value in event.items()
-                if key!='candidate'}), flush=True)
+            if distributed is None or distributed.rank == 0:
+                print('[LR_CALIBRATION] '+str({key:value for key,value in event.items()
+                    if key!='candidate'}), flush=True)
             if calibration_progress is not None:
                 calibration_progress(event)
         calibration = calibrated_optimizer_step(actor, optimizer,
-            evaluate_kl=lambda: analytic_kl(policy, transitions), candidates=learning_rate_candidates,
+            evaluate_kl=lambda: (analytic_kl(policy, transitions) if distributed is None
+                                 else analytic_kl(policy, transitions, distributed=distributed)),
+            candidates=learning_rate_candidates,
             kl_limit=kl_limit, reserve_attempt=reserve_attempt, progress=progress)
     else:
         if reserve_attempt is not None:
