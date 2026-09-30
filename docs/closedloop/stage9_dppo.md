@@ -136,6 +136,15 @@ trace 记录，已执行步数不会丢失，转移标记 invalid。
 奖励身份绑定完整配置，旧 checkpoint 不能完整续训到新版；需新 run、新执行采集和
 新基线。原 Stage1 的 weights-only Actor 初始化仍可使用，Critic/优化器重新建立。
 
+2026-09-30 本次验证：GENMO 相关 CPU 回归 561 项通过，GMT 相关回归 155 项通过，
+另有 1 项旧 IsaacLab 包导入测试跳过；新增 Tracking 测试全部执行。服务器 1 使用
+GENMO `81de6e5` / GMT `59ab0a7`，在真实冻结 GMT/PhysX 上跨两次 reset 执行了
+60 个控制区间、240 个物理步；六项与原函数分数的最大差为 `3.21e-8`，逐步参考与
+实际关节值、trace、journal SHA/序号/ACK 全部一致，GMT 模型与运行参数/归一化
+指纹保持不变，worker 正常退出。此短测使用静止 bootstrap，只验证诊断与评分接口；
+没有加载 Actor/Critic、没有更新网络，也不代表新 Tracking 的音乐训练效果或全量
+质量评估。临时日志、执行 journal、socket 和本轮 USD 均已清理，摘要保存在根日志。
+
 独立 Critic 输入同一音乐、50×48 实际历史、相同已承诺前缀及真实音乐剩余秒数。
 历史 GRU 128，音乐和前缀各 MLP 128，拼接 385→256→128→1。没有 Actor/GMT 参数
 共享，不输入本轮新动作或行政采集额度；只估计可见条件下的价值，不声称完全 Markov。
