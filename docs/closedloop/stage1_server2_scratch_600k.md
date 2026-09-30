@@ -74,6 +74,28 @@ bash scripts/train_stage1_8gpu_server2_scratch.sh
 ## 准备检查与执行边界
 
 已完成两台服务器代码/数据同步、12套严格数据检查、新train统计量生成、99条Mine
-高度/接触来源核验，以及启动脚本语法、配置合并和随机初始化入口检查。正式启动状态
-将追加到本文件和根目录`记录文本.md`。数据、接口或早期loss有限只证明启动条件，
-不代表600000步已完成或模型质量已达到目标。
+高度/接触来源核验，以及启动脚本语法、配置合并和随机初始化入口检查。
+
+2026-09-30 21:09:30（UTC+8）在服务器2 ZP-NC579正式启动，启动代码为`f2ca92f`。
+tmux会话为`genmo_stage1_scratch600k_s2`，GPU0～7对应rank0～7，训练PID为
+96637～96644。21:11:15实际核验已完成107个优化步，采样epoch=3、每rank offset=2816；
+前107步的loss、梯度、学习率和耗时均有限，所有日志均包含8个rank且采样游标一致。
+观测loss范围5.09466～5.52455，每卡峰值allocated约32329～32335MiB。
+
+实际`weight_loading_report.json`为`random_initialization`，
+`global_step_restored=false`、`optimizer_restored=false`。已解析训练器落盘配置确认
+max_steps和scheduler.total_steps均为600000，三类已有权重/恢复入口均为null。
+截至上述核验时刻，尚未到5000步保存点，checkpoint数量为0；不将目标步数冒充完成步数。
+
+- console：`/data0/user/liwei/GENMO_outputs/launch_logs/stage1_scratch600k_server2_20260930.console.log`
+- 启动和运行核验：资产目录中的`launch_manifest.json`、`launch_precheck.log`、`launch_audit.json`。
+- 本地数据与启动证据：`/home/weili/bumi-closedloop-worktrees/stage1_server2_scratch600k_20260930/`。
+
+查看日志或接入会话：
+
+```bash
+ssh 6000D-Server-2 'tail -n 20 /data0/user/liwei/GENMO_outputs/launch_logs/stage1_scratch600k_server2_20260930.console.log'
+ssh -t 6000D-Server-2 'tmux attach -t genmo_stage1_scratch600k_s2'
+```
+
+早期loss有限和八卡运行只证明训练已正常开始，不代表600000步已完成或模型质量已达标。
