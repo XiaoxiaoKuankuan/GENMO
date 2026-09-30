@@ -78,7 +78,8 @@ Critic 默认 lr=1e-4、20 步、batch=32，值目标不随 Critic 更新而改�
 入口为 `tools/train_closedloop_dppo.py`，支持 preflight、collect、critic、train、
 resume-check、eval。必须显式传独立 `--output-dir`，默认模式 collect。本机配置为
 `configs/closedloop/stage9_dppo_smoke.yaml`，服务器配置为 `stage9_dppo_server1.yaml`。
-正式执行命令及实际验证结果以本轮验收报告为准，以下是 CLI 结构，不表示已验收：
+正式执行命令及实际验证结果见[服务器1有限验收报告](stage9_dppo_acceptance_20260930.md)。
+该报告保留首轮 KL 超限、第二轮通过及重启恢复的完整边界；以下仅展示 CLI 结构：
 
 ```bash
 python tools/train_closedloop_dppo.py --config CONFIG --mode preflight --output-dir NEW_PREFLIGHT_DIR
@@ -97,6 +98,21 @@ Stage1 s350000 只作 weights-only 初始化，不恢复旧优化器或 global_s
 checkpoint 单独保存 Actor、Critic、两优化器、随机状态、音乐/BC 采样器、策略版本、
 预算和身份。resume 在对象构造后恢复 RNG，创建新 worker session 并 reset；不声称
 恢复 PhysX 内部状态。通过报告同时保存模型资产 SHA、实际源码/解释器和 GMT 冻结证据。
+
+已有产物可通过 `tools/eval/audit_closedloop_dppo.py` 只读审计：
+
+```bash
+python -B tools/eval/audit_closedloop_dppo.py \
+  --run-dir RUN_DIR --budget-file CAMPAIGN_BUDGET_JSON --output NEW_AUDIT_JSON
+```
+
+该工具不启动网络或仿真：从 SQLite 回复独立核对执行计数、trace、四个子步及身份，
+关联 rollout 奖励，独立重算固定价值目标与变长 GAE，并交叉检查概率、梯度、KL、
+冻结报告和完整 checkpoint 元数据。checkpoint 使用 CPU mmap，不扫描大权重；
+概率与网络梯度依赖真实运行保存的测量报告，不声称再次运行网络验证。
+审计输出排他创建，不能覆盖原报告。默认必须具备完整 64+16 条及 checkpoint；
+`--allow-incomplete` 仅允许缺失阶段标记为 not_run，已有失败或损坏仍然失败。
+SQLite 在临时快照中读取，避免在源目录创建 shm；临时文件退出回收。
 
 ## 验收边界
 

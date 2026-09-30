@@ -1,0 +1,607 @@
+#!/usr/bin/env python3
+"""只读审计第九步 DPPO 的真实执行、固定目标、网络更新及恢复证据。
+
+输入是包含 acceptance/ 与 resume_check/ 的运行目录。审计器逐条读取 SQLite
+ACK 日志，独立核对 session/seq、控制时钟、四个 200Hz 子步，再把 rollout 中
+每个实际奖励与同 session、episode、tick 的物理记录关联。奖励只复核已记录分项
+的权重与 dt 积分；不启动 Actor、GMT、Isaac 或 GPU，也不声称重新验证完整奖励
+算法或物理质量。半马尔可夫 GAE 直接按存储值独立重算，不调用训练用 returns。
+
+大 checkpoint 仅通过 CPU mmap 读取元数据与键集合，不遍历模型或优化器张量。
+PyTorch 文件必须来自可信运行，因为 UpperTransition 需要 weights_only=False。
+SQLite 原库及 WAL 先复制到临时目录，避免只读 SQLite 连接仍创建源目录 shm；
+复制期间源文件变化则拒绝把不一致快照当作证据。临时文件退出时自动清理。
+
+默认完整门禁要求主训练 64 条、恢复 16 条及完整 checkpoint。--allow-incomplete
+仅把缺失或尚未运行的阶段标成 not_run，绝不豁免已有 failed、损坏记录或 KL 超限。
+所有输入保持不变；只有显式 --output 指定的新文件会被排他创建，已有文件不覆盖。
+源码与资产冻结结论来自归档清单、运行末尾复核及恢复身份的交叉核对，不冒充重新
+哈希当前工作树，也不证明网络重试场景已覆盖或训练质量已收敛。
+"""
+from __future__ import annotations
+
+import argparse
+from collections import Counter
+from contextlib import contextmanager
+import copy
+import hashlib
+import json
+import math
+from pathlib import Path
+import shutil
+import sqlite3
+import sys
+import tempfile
+
+import torch
+import yaml
+
+if __package__ in (None, ""):
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+
+from gem.closedloop.dppo.buffer import UpperTransition
+
+
+COMPONENTS = ("music", "track", "stable", "actuator", "contact", "consistency")
+HARD_LIMITS = dict(generations=256, control_steps=10000, physics_steps=40000, iterations=3)
+PHASE_LIMITS = dict(calibration=150, main=6500, resume=1800, comparison_A=300,
+                    comparison_B=300, comparison_C=300, diagnostic=650)
+
+
+class NotRun(Exception):
+    """仅表示缺少后续阶段的证据；不能用来表示实际数据不合法。"""
+
+
+def require(condition, message):
+    if not condition:
+        raise ValueError(message)
+
+
+def integer(value, label):
+    require(type(value) is int and value >= 0, f"{label}: expected nonnegative integer")
+    return value
+
+
+def number(value, label):
+    require(isinstance(value, (int, float)) and not isinstance(value, bool), f"{label}: expected number")
+    require(math.isfinite(value), f"{label}: nonfinite number")
+    return float(value)
+
+
+def near(a, b, label, atol=1e-9):
+    a, b = number(a, label), number(b, label)
+    require(math.isclose(a, b, abs_tol=atol, rel_tol=1e-9), f"{label}: {a} != {b}")
+
+
+def read_json(path):
+    return json.loads(Path(path).read_text(encoding="utf-8"),
+                      parse_constant=lambda value: (_ for _ in ()).throw(ValueError(f"nonfinite JSON: {value}")))
+
+
+def load_torch(path):
+    # 禁止退回会一次性复制全部大权重的加载路径。
+    return torch.load(path, map_location="cpu", weights_only=False, mmap=True)
+
+
+class Audit:
+    def __init__(self, root, allow_incomplete):
+        self.root, self.allow_incomplete = root, allow_incomplete
+        self.checks = []
+
+    def check(self, name, function):
+        try:
+            result = function()
+            self.checks.append(dict(name=name, status="passed", details=result))
+            return result
+        except (FileNotFoundError, NotRun) as error:
+            self.checks.append(dict(name=name, status="not_run" if self.allow_incomplete else "failed", error=str(error)))
+        except Exception as error:
+            self.checks.append(dict(name=name, status="failed", error=f"{type(error).__name__}: {error}"))
+        return None
+
+
+def need(value, label):
+    if value is None:
+        raise NotRun(f"{label}: prerequisite artifact unavailable; see its own check")
+    return value
+
+
+def check_summary(summary, mode):
+    need(summary, "summary")
+    require(summary.get("mode") == mode, f"expected mode {mode}")
+    if summary.get("status") == "running":
+        raise NotRun("summary still reports running")
+    require(summary.get("status") == "passed", f"run status={summary.get('status')}: {summary.get('error')}")
+    require(summary.get("exit_code") == 0, "nonzero or missing process exit code")
+    return dict(status=summary["status"], mode=mode)
+
+
+def check_probability(summary):
+    need(summary, "summary")
+    report = summary.get("probability_check")
+    if report is None:
+        raise NotRun("zero-update probability check has not been recorded")
+    require(report.get("passed") is True, "probability check did not pass")
+    tolerances = dict(max_abs_log_probability_difference=1e-4, max_abs_ratio_minus_one=1e-3,
+                      max_abs_independent_gaussian_difference=1e-8)
+    for key, limit in tolerances.items():
+        require(0 <= number(report[key], key) <= limit, f"{key} exceeds {limit}")
+    return {key: report[key] for key in tolerances}
+
+
+def check_frozen(summary, source, preflight):
+    need(summary, "summary"); need(source, "source identity"); need(preflight, "preflight")
+    require(preflight.get("ready") is True, "preflight was not ready")
+    records = source["files"]
+    require(bool(records) and source["file_count"] == len(records), "source inventory count mismatch")
+    inventory = [(r["repository"], r["relative_path"], r["sha256"]) for r in records]
+    require(len(set((r[0], r[1]) for r in inventory)) == len(inventory), "duplicate source inventory entry")
+    digest = hashlib.sha256(json.dumps(inventory, ensure_ascii=False, separators=(",", ":")).encode()).hexdigest()
+    require(digest == source["source_manifest_sha256"], "source manifest content digest mismatch")
+    proof = summary.get("source_unchanged")
+    if proof is None:
+        raise NotRun("end-of-run source freeze verification missing")
+    require(proof.get("unchanged") is True, "runtime source changed")
+    if "initial_manifest_sha256" in proof:
+        require(proof["initial_manifest_sha256"] == digest, "source verification refers to different inventory")
+    require(summary.get("original_assets_unchanged") is True, "original assets not verified unchanged")
+    require(bool(preflight["asset_sha256"]), "empty asset inventory")
+    gmt = summary.get("worker_shutdown", {}).get("gmt")
+    if gmt is None:
+        raise NotRun("GMT shutdown proof missing")
+    require(gmt.get("policy_unchanged") is True, "GMT policy changed or was not checked")
+    require(gmt.get("runtime_parameters_unchanged") is True, "GMT parameters/normalization changed or were not checked")
+    require(gmt.get("closed") is True and gmt.get("process_exit_code") == 0, "GMT did not close cleanly")
+    require(not gmt.get("close_error") and not gmt.get("forced_shutdown"), "GMT close error or forced shutdown")
+    return dict(source_manifest_sha256=digest, asset_count=len(preflight["asset_sha256"]),
+                policy_unchanged=True, runtime_parameters_unchanged=True,
+                evidence="archived identities and end-of-run freeze reports; no live source/asset rehash")
+
+
+def checkpoint_metadata(root, summary):
+    need(summary, "main summary")
+    if not summary.get("checkpoint"):
+        raise NotRun("training checkpoint was not published")
+    declared = Path(summary["checkpoint"])
+    archived = root / "checkpoints" / declared.name
+    path = archived if archived.is_file() else declared
+    payload = load_torch(path)
+    require(payload.get("version") == "genmo.closedloop.stage9.full_state.v1", "unsupported checkpoint version")
+    keys = ("actor", "critic", "actor_optimizer", "critic_optimizer", "state", "identity", "config", "rng",
+            "samplers", "optimizer_layout", "restore_environment")
+    require(all(key in payload for key in keys), "full-state checkpoint fields missing")
+    # 只复制小型 Python 元数据；模型权重和 Adam 状态只检查键存在，不触碰页内容。
+    result = {key: copy.deepcopy(payload[key]) for key in ("state", "identity", "config", "restore_environment")}
+    result.update(path=str(path), rng_keys=sorted(payload["rng"]), sampler_names=sorted(payload["samplers"]),
+                  optimizer_layout_names=sorted(payload["optimizer_layout"]))
+    del payload
+    require(result["restore_environment"] == "new_worker_session_and_reset", "resume must reconstruct physics in a new worker")
+    state = result["state"]
+    require(state.get("buffer_size") == 0 and state.get("pending_plan") is False, "checkpoint not at empty-buffer/no-pending boundary")
+    require(state.get("actor_updates") == 1 and state.get("iteration") == 1, "expected one accepted Actor update")
+    require(state.get("critic_updates") == 20, "expected 20 Critic updates")
+    require(set(result["rng_keys"]) >= {"python", "numpy", "torch", "cuda", "generators", "generator_devices"}, "full RNG state missing")
+    require(set(result["sampler_names"]) == {"music", "bc"}, "music/BC sampler state missing")
+    require(set(result["optimizer_layout_names"]) == {"actor", "critic"}, "optimizer name binding missing")
+    return result
+
+
+def _file_signature(path):
+    if not path.exists():
+        return None
+    stat = path.stat()
+    return stat.st_size, stat.st_mtime_ns, stat.st_ino
+
+
+@contextmanager
+def journal_snapshot(path):
+    """WAL 感知磁盘快照；不让 SQLite 在输入目录创建/更新共享内存文件。"""
+    path = Path(path)
+    if not path.is_file():
+        raise FileNotFoundError(path)
+    sources = [path, Path(str(path) + "-wal")]
+    before = [_file_signature(p) for p in sources]
+    with tempfile.TemporaryDirectory(prefix="stage9-audit-sqlite-") as directory:
+        copy_path = Path(directory) / "journal.sqlite"
+        for source, suffix, signature in zip(sources, ("", "-wal"), before):
+            if signature is not None:
+                shutil.copyfile(source, Path(str(copy_path) + suffix))
+        require(before == [_file_signature(p) for p in sources], "journal changed while snapshotting; retry at a stable boundary")
+        connection = sqlite3.connect(copy_path.as_uri() + "?mode=ro", uri=True)
+        try:
+            connection.execute("PRAGMA query_only=ON")
+            yield connection
+        finally:
+            connection.close()
+
+
+def check_journal(path):
+    sequences, ticks, episode_end = {}, {}, {}
+    counts = Counter()
+    with journal_snapshot(path) as connection:
+        require(connection.execute("PRAGMA integrity_check").fetchone()[0] == "ok", "SQLite integrity failure")
+        for row_number, (identity, digest, payload) in enumerate(connection.execute("SELECT identity,sha256,payload FROM replies ORDER BY rowid"), 1):
+            require(hashlib.sha256(payload.encode()).hexdigest() == digest, f"reply {row_number}: SHA256 mismatch")
+            reply = json.loads(payload)
+            require(reply.get("execution_protocol") == "ack.v2", f"reply {row_number}: unsupported ACK protocol")
+            session = reply["backend_session_id"]
+            sequence = integer(reply["mutation_seq"], "mutation_seq")
+            require(bool(session) and sequence == sequences.get(session, 0) + 1, f"reply {row_number}: session sequence gap/reuse")
+            sequences[session] = sequence
+            require(json.loads(identity) == [session, sequence], f"reply {row_number}: stored identity differs from envelope")
+            counts["mutations"] += 1
+            if reply.get("operation") != "advance":
+                continue
+            counts["advances"] += 1
+            body = reply.get("result")
+            require("__nonfinite__" not in payload, f"advance {sequence}: nonfinite execution evidence")
+            require(reply.get("ok") is True and isinstance(body, dict), f"advance {sequence}: missing/failed result")
+            require(body.get("transition_valid") is True and body.get("physics_count_exact") is True,
+                    f"advance {sequence}: invalid transition or uncertain physics count")
+            require(not body.get("partial_control_step"), f"advance {sequence}: partial control step")
+            require(body.get("backend_session_id") == session and body.get("mutation_seq") == sequence,
+                    f"advance {sequence}: nested identity mismatch")
+            episode = body["episode_id"]
+            m = integer(body["executed_control_steps"], "executed_control_steps")
+            physics = integer(body["executed_physics_steps"], "executed_physics_steps")
+            begin, end = integer(body["control_tick_begin"], "begin tick"), integer(body["control_tick_end"], "end tick")
+            require(physics == 4*m and end-begin == 12*m, f"advance {sequence}: tick/physics != actual m")
+            trace = body["trace"]
+            require(len(trace) == m, f"advance {sequence}: len(trace)={len(trace)} != m={m}")
+            pair = (session, episode)
+            require(begin == episode_end.get(pair, 0), f"advance {sequence}: episode tick gap")
+            episode_end[pair] = end
+            for i, row in enumerate(trace):
+                start, tick = begin + 12*i, begin + 12*(i+1)
+                require(row.get("tick") == tick and row.get("control_tick_begin") == start, f"advance {sequence}: trace tick gap")
+                require(row.get("backend_session_id") == session and row.get("mutation_seq") == sequence and row.get("episode_id") == episode,
+                        f"advance {sequence}: trace identity mismatch")
+                require(row.get("transition_valid") is True and row.get("state_valid") is True and row.get("completed_physics_steps") == 4,
+                        f"advance {sequence}: incomplete post-physics record at {tick}")
+                samples = row["physics_substeps"]
+                require(len(samples) == 4, f"advance {sequence}: expected four actual reward substeps")
+                for j, sample in enumerate(samples, 1):
+                    require(sample["physics_tick"] == start + 3*j, f"advance {sequence}: substep clock mismatch")
+                    near(sample["dt_s"], .005, "physics dt")
+                    require(all(k in sample for k in ("joint_vel_gmt", "joint_position_target", "physical_diagnostics")), "missing actual substep state")
+                    physical = sample["physical_diagnostics"]
+                    required = ("body_link_lin_vel_w", "applied_joint_torque_nm", "joint_effort_limits_nm",
+                                "joint_velocity_limits_rad_s", "foot_net_contact_forces_w_n", "foot_min_support_clearance_m")
+                    require(all(k in physical for k in required), f"advance {sequence}: physical proxy evidence missing")
+                    require("__nonfinite__" not in json.dumps(sample), f"advance {sequence}: nonfinite physics substep")
+                key = (session, episode, tick)
+                require(key not in ticks, "executed control step journaled twice")
+                ticks[key] = sequence
+            counts["control_steps"] += m
+            counts["physics_steps"] += physics
+    require(counts["mutations"] > 0, "empty execution journal")
+    return dict(counts=dict(counts), sessions=sequences, episodes=len(episode_end), ticks=ticks)
+
+
+def check_count(rows, expected, partial, summary):
+    need(rows, "rollout")
+    require(isinstance(rows, (list, tuple)) and all(isinstance(row, UpperTransition) for row in rows), "rollout must contain real UpperTransition records")
+    require(len(rows) <= expected, f"rollout has more than {expected} transitions")
+    if partial:
+        raise NotRun(f"only rollout.partial.pt exists: {len(rows)}/{expected} complete decisions")
+    require(len(rows) == expected, f"rollout requires {expected}, got {len(rows)}")
+    if summary is not None:
+        require(summary.get("collected_upper_transitions") == expected, "summary/rollout count mismatch")
+    return dict(upper_transitions=len(rows))
+
+
+def check_rollout(rows, journal, config, *, partial=False):
+    need(rows, "rollout"); need(journal, "journal"); need(config, "resolved config")
+    require(len(rows) > 0, "empty rollout")
+    versions, used, boundaries = set(), set(), []
+    counts, music_invalid = Counter(), Counter()
+    bootstrap, continuation = [], [False]*len(rows)
+    for index, item in enumerate(rows):
+        require(isinstance(item, UpperTransition), "rollout item type is not UpperTransition")
+        item.validate()
+        require(item.transition_valid, f"row {index}: invalid transition entered training rollout")
+        require(item.chain.shape[0] == config["stage9"]["denoising_steps"] + 1, "denoising step count mismatch")
+        versions.add(item.identity["policy_version"])
+        require(item.identity["backend_session_id"] in journal["sessions"], "rollout refers to unknown backend session")
+        near(float(item.context["decision_time"][0]), item.control_tick_begin/600, "sample decision time")
+        if item.next_context is not None:
+            near(float(item.next_context["decision_time"][0]), item.control_tick_end/600, "next decision time")
+        remaining = number(item.metadata["remaining_music_seconds"], "remaining music seconds")
+        require(remaining >= 0., "negative remaining music duration")
+        near(item.metadata["next_remaining_music_seconds"], max(0., remaining-item.executed_control_steps*.02),
+             "remaining music duration", atol=1e-7)
+        details = item.metadata["reward_details"]
+        require(len(details) == item.executed_control_steps, f"row {index}: reward detail count != m")
+        reconstructed = []
+        for step, detail in enumerate(details, 1):
+            tick = item.control_tick_begin + 12*step
+            key = (item.identity["backend_session_id"], item.identity["episode_id"], tick)
+            require(key in journal["ticks"], f"row {index}: executed reward at {tick} has no journal evidence")
+            require(key not in used, "same executed consequence used by multiple upper transitions")
+            used.add(key)
+            require(detail["tick"] == tick and detail["episode_id"] == item.identity["episode_id"], "reward identity/time mismatch")
+            require(detail.get("transition_valid") is True and not detail.get("errors"), "invalid reward diagnostics")
+            require(detail.get("reward_is_integrated") is True, "reward is not dt-integrated")
+            near(detail["dt_s"], .02, "control reward dt")
+            rate = 0.
+            for name in COMPONENTS:
+                component = detail["components"][name]
+                require(component["enabled"] is True, f"{name} reward disabled")
+                near(component["weight"], config["stage9"]["reward"]["weights"][name], f"{name} weight")
+                near(component["weighted_rate"], component["score"]*component["weight"], f"{name} weighted rate")
+                if not component["valid"]:
+                    reason = component.get("raw", {}).get("reason")
+                    require(name == "music" and reason in ("insufficient_causal_history", "no_music_beats"), f"invalid {name} reward: {reason}")
+                    near(component["score"], 0., "unsupported music must have zero score")
+                    music_invalid[reason] += 1
+                else:
+                    counts[name] += 1
+                rate += component["weighted_rate"]
+            near(detail["reward"], rate*.02, f"row {index}: reward dt integral")
+            reconstructed.append(detail["reward"])
+        penalty = (-1. if item.metadata.get("rejection") else 0.)
+        penalty -= 5. if item.terminated and item.reason != "music_end" else 0.
+        near(item.metadata["event_penalty_total"], penalty, "once-only event penalty")
+        event = item.metadata.get("event_reward", 0.)
+        if reconstructed:
+            near(event, 0., "nonzero-step event duplicated separately")
+            reconstructed[-1] += penalty
+        else:
+            near(event, penalty, "zero-step event missing")
+        require(torch.allclose(item.rewards.double(), torch.tensor(reconstructed, dtype=torch.float64), atol=1e-9, rtol=1e-9),
+                f"row {index}: stored rewards differ from dt-integrated details plus event")
+        bootstrap.append(not item.terminated and item.next_context is not None)
+        if index:
+            previous = rows[index-1]
+            same = all(previous.identity[k] == item.identity[k] for k in ("backend_session_id", "episode_id", "policy_version"))
+            if not previous.terminated and not previous.truncated:
+                require(same and previous.control_tick_end == item.control_tick_begin, "nonterminal episode discontinuity/gap")
+                require(previous.next_context is not None and all(torch.equal(previous.next_context[k], item.context[k]) for k in item.context),
+                        "next observation/committed-prefix conditions differ from following sample")
+                continuation[index-1] = True
+            else:
+                require(not same, "collection continued in a terminated/truncated episode")
+                boundaries.append(index)
+    require(len(versions) == 1, "mixed policy versions in one rollout")
+    if not partial:
+        require(rows[-1].terminated or rows[-1].truncated, "final rollout row has no collection boundary")
+    return dict(policy_version=next(iter(versions)), control_steps=len(used), bootstrap_mask=bootstrap,
+                continuation_mask=continuation, episode_boundaries=boundaries,
+                reward_valid_counts=dict(counts), music_invalid_counts=dict(music_invalid))
+
+
+def check_targets(rows, targets, rollout, config):
+    need(rows, "rollout"); need(targets, "fixed targets"); need(rollout, "rollout integrity"); need(config, "config")
+    n = len(rows)
+    vectors = {}
+    for name in ("old_values", "next_values", "discounted_rewards", "advantages_raw", "returns", "advantages", "valid"):
+        value = torch.as_tensor(targets[name]).detach().cpu()
+        require(value.shape == (n,) and torch.isfinite(value).all(), f"fixed target {name} shape/nonfinite")
+        vectors[name] = value
+    require(vectors["valid"].dtype == torch.bool and vectors["valid"].all(), "invalid targets entered optimizer")
+    old = torch.tensor([row.old_value for row in rows], dtype=torch.float64)
+    nxt = torch.tensor([row.next_value for row in rows], dtype=torch.float64)
+    require(torch.equal(old, vectors["old_values"]) and torch.equal(nxt, vectors["next_values"]), "rollout values differ from frozen target values")
+    require(torch.allclose(vectors["returns"]-vectors["advantages_raw"], old, atol=1e-10, rtol=1e-9),
+            "old_value != fixed target - raw advantage")
+    gamma = config["stage9"]["gamma_upper"] ** (1/25)
+    lam = config["stage9"]["lambda_upper"] ** (1/25)
+    near(targets["gamma_low"], gamma, "gamma per control step")
+    near(targets["lambda_low"], lam, "lambda per control step")
+    discounted = [sum(gamma**j*float(r) for j, r in enumerate(row.rewards)) +
+                  gamma**max(row.executed_control_steps-1, 0)*row.metadata.get("event_reward", 0.) for row in rows]
+    raw = [0.]*n
+    for i in range(n-1, -1, -1):
+        m = rows[i].executed_control_steps
+        raw[i] = discounted[i]-float(old[i]) + (gamma**m*float(nxt[i]) if rollout["bootstrap_mask"][i] else 0.)
+        if rollout["continuation_mask"][i]:
+            raw[i] += (gamma*lam)**m*raw[i+1]
+    advantage = torch.tensor(raw, dtype=torch.float64)
+    expected = dict(discounted_rewards=torch.tensor(discounted, dtype=torch.float64), advantages_raw=advantage,
+                    returns=advantage+old, advantages=(advantage-advantage.mean())/advantage.std(unbiased=False).clamp_min(1e-8))
+    errors = {}
+    for name, value in expected.items():
+        errors[name] = float((vectors[name]-value).abs().max())
+        require(torch.allclose(vectors[name], value, atol=1e-9, rtol=1e-8), f"independent semi-Markov recomputation differs: {name}")
+    return dict(max_errors=errors, gamma_low=gamma, lambda_low=lam, old_values_match=True)
+
+
+def check_updates(summary, config):
+    need(summary, "main summary"); need(config, "config")
+    if "actor" not in summary or "critic" not in summary:
+        raise NotRun("Actor/Critic update evidence missing")
+    actor, critic = summary["actor"], summary["critic"]
+    require(actor.get("parameters_changed") is True and actor.get("critic_unchanged") is True, "Actor update changed wrong network or did not occur")
+    require(critic.get("parameters_changed") is True and critic.get("actor_unchanged") is True, "Critic update changed wrong network or did not occur")
+    require(actor["optimizer_steps"] == 1, "expected one Actor optimizer step")
+    for key in ("ppo_only_gradient_norm", "total_gradient_norm"):
+        require(number(actor[key], key) > 0, f"{key} is not positive")
+    require(actor.get("ratio_scope") == "before_single_optimizer_step", "PPO ratio measurement scope differs")
+    modules = actor["ppo_module_gradients"]
+    norms = [number(value, key) for key, value in modules.items()]
+    require(bool(norms) and min(norms) >= 0 and max(norms) > 0, "no finite positive module PPO-only gradient")
+    for key in ("losses", "gradient_norms"):
+        require(len(critic[key]) == 20 and all(math.isfinite(number(v, key)) for v in critic[key]), f"Critic {key} missing/nonfinite")
+    require(any(v > 0 for v in critic["gradient_norms"]), "Critic value-loss gradients are zero")
+    if config["stage9"]["bc_weight"] > 0:
+        bc = actor.get("bc")
+        require(isinstance(bc, dict) and bc.get("bc_update_steps") == 1, "enabled original-pair supervision was not used")
+        near(bc["weight"], config["stage9"]["bc_weight"], "BC weight")
+        number(bc["loss"], "BC loss")
+    return dict(ppo_only_gradient_norm=actor["ppo_only_gradient_norm"], total_gradient_norm=actor["total_gradient_norm"],
+                actor_updates=1, critic_updates=20, actor_critic_isolation=True)
+
+
+def check_kl(summary, config):
+    need(summary, "main summary"); need(config, "config")
+    if "kl" not in summary:
+        raise NotRun("post-update KL was not measured")
+    kl = summary["kl"]
+    limit = number(config["stage9"]["kl_stop_joint"], "KL threshold")
+    require(0 < limit <= .02, "joint KL threshold exceeds bounded acceptance contract")
+    require(kl["joint_kl_scope"] == "sum_free_coordinates_per_internal_transition_then_mean", "KL uses wrong reduction")
+    value = number(kl["mean_joint_kl"], "mean joint KL")
+    require(-1e-10 <= value <= limit, f"joint KL {value} exceeds {limit}")
+    for name in ("p95_joint_kl", "max_joint_kl", "mean_per_dimension_kl", "mean_chain_joint_kl"):
+        require(number(kl[name], name) >= -1e-10, f"negative {name}")
+    near(kl["mean_chain_joint_kl"], value*config["stage9"]["denoising_steps"], "chain vs transition KL", atol=1e-7)
+    return dict(mean_joint_kl=value, threshold=limit, reduction=kl["joint_kl_scope"])
+
+
+def check_identity(checkpoint, phases):
+    need(checkpoint, "checkpoint metadata")
+    identity = checkpoint["identity"]
+    for name, phase in phases.items():
+        need(phase["source"], f"{name} source"); need(phase["preflight"], f"{name} preflight"); need(phase["config"], f"{name} config")
+        require(identity["source_manifest_sha256"] == phase["source"]["source_manifest_sha256"], f"{name}: checkpoint/source mismatch")
+        require(identity["assets"] == phase["preflight"]["asset_sha256"], f"{name}: checkpoint/assets mismatch")
+        config = phase["config"]
+        require(identity["reward"] == config["stage9"]["reward"], f"{name}: checkpoint/reward mismatch")
+        require(all(config["stage9"][key] == value for key, value in identity["training_contract"].items()), f"{name}: training contract mismatch")
+        for key in ("environment", "termination"):
+            require(identity[key] == config[key], f"{name}: {key} mismatch")
+    require(set(identity["bc_manifests"]) == {"AIST++", "AIOZ-GDANCE", "FineDance", "Mine"}, "BC train provenance missing")
+    require(bool(identity["music_selection_sha256"]), "music selection identity missing")
+    require(checkpoint["config"]["stage9"]["reward"] == identity["reward"], "checkpoint internal reward mismatch")
+    return dict(source_and_assets_match=True, original_paired_sources=sorted(identity["bc_manifests"]))
+
+
+def check_resume(checkpoint, phases):
+    need(checkpoint, "checkpoint metadata")
+    main, resume = phases["main"], phases["resume"]
+    for label, phase in phases.items():
+        need(phase["rollout_audit"], f"{label} rollout integrity"); need(phase["journal"], f"{label} journal")
+    summary = need(resume["summary"], "resume summary")
+    proof = summary["resume"]
+    require(proof.get("restored_full_state") is True and proof.get("old_buffer_discarded") is True, "resume did not restore full state/discard old buffer")
+    require(proof["restored_actor_updates"] == checkpoint["state"]["actor_updates"], "restored update count mismatch")
+    old, new = main["rollout_audit"]["policy_version"], resume["rollout_audit"]["policy_version"]
+    require(new == old+1 == checkpoint["state"]["policy_version"], "resume policy version mismatch")
+    require(not (set(main["journal"]["sessions"]) & set(resume["journal"]["sessions"])), "resume reused a physical worker session")
+    require(proof["new_backend_session_id"] in resume["journal"]["sessions"], "resume report session not found in journal")
+    require("actor" not in summary and "critic" not in summary, "resume-check unexpectedly updated parameters")
+    return dict(main_policy_version=old, resume_policy_version=new, new_physics_session=True)
+
+
+def check_budget(phases, ledger, checkpoint):
+    snapshots = []
+    for name in ("main", "resume"):
+        summary = phases[name]["summary"]
+        if summary is not None:
+            snapshots.append((name, summary["budget"]))
+    if checkpoint is not None:
+        snapshots.insert(1, ("checkpoint", checkpoint["state"]["budget"]))
+    if ledger is not None:
+        snapshots.append(("ledger", ledger))
+    if not snapshots:
+        raise NotRun("no budget snapshot")
+    previous = None
+    for label, current in snapshots:
+        require(set(current["limits"]) == set(HARD_LIMITS) and set(current["used"]) == set(HARD_LIMITS), f"{label}: incomplete budget counters")
+        for key, hard in HARD_LIMITS.items():
+            limit = integer(current["limits"][key], f"{label} {key} limit")
+            used = integer(current["used"][key], f"{label} {key} used")
+            require(0 < limit <= hard and used <= limit, f"{label}: {key} hard limit exceeded")
+            require(sum(integer(p.get(key, 0), f"phase {key}") for p in current["phases"].values()) == used, f"{label}: phase totals != {key} used")
+        require(current["limits"]["physics_steps"] == 4*current["limits"]["control_steps"], "physics budget limit != 4*control limit")
+        for name, cap in PHASE_LIMITS.items():
+            require(current["phases"].get(name, {}).get("control_steps", 0) <= cap, f"{label}: {name} phase limit exceeded")
+        if previous is not None:
+            require(previous["limits"] == current["limits"], "budget limits changed during resume")
+            require(all(current["used"][key] >= previous["used"][key] for key in HARD_LIMITS), f"{label}: budget rolled back")
+            for name, values in previous["phases"].items():
+                require(all(current["phases"].get(name, {}).get(key, 0) >= value for key, value in values.items()), f"{label}: phase budget rolled back")
+        previous = current
+    observed = Counter()
+    for phase in phases.values():
+        if phase["journal"] is not None:
+            for key in ("control_steps", "physics_steps"):
+                observed[key] += phase["journal"]["counts"].get(key, 0)
+        if phase["rows"] is not None:
+            observed["generations"] += len(phase["rows"])
+    for key, value in observed.items():
+        require(previous["used"][key] >= value, f"budget undercounts observed {key}")
+    main, resume = phases["main"], phases["resume"]
+    if main["summary"] is not None and resume["summary"] is not None and resume["journal"] is not None:
+        for key in ("control_steps", "physics_steps"):
+            delta = resume["summary"]["budget"]["used"][key]-main["summary"]["budget"]["used"][key]
+            require(delta >= resume["journal"]["counts"].get(key, 0), f"resume budget undercounts its actual {key}")
+    return dict(snapshots=[name for name, _ in snapshots], limits=previous["limits"], used=previous["used"],
+                observed_lower_bound=dict(observed), unobserved_consumption={key: previous["used"][key]-value for key, value in observed.items()},
+                note="shared ledger may include earlier failed attempts/calibration; lower bounds do not identify every generation")
+
+
+def audit_run(run_dir, allow_incomplete=False, budget_file=None):
+    root = Path(run_dir).expanduser().resolve()
+    audit = Audit(root, allow_incomplete)
+    phases = {}
+    for name, subdir, expected, mode in (("main", "acceptance", 64, "train"), ("resume", "resume_check", 16, "resume-check")):
+        directory = root/subdir
+        phase = {}
+        for key, filename in (("summary", "summary.json"), ("source", "source_identity.json"), ("preflight", "preflight.json")):
+            phase[key] = audit.check(f"{name}.{key}.read", lambda p=directory/filename: read_json(p))
+        phase["config"] = audit.check(f"{name}.config.read", lambda p=directory/"resolved_config.yaml": yaml.safe_load(p.read_text()))
+        audit.check(f"{name}.completed", lambda: check_summary(phase["summary"], mode))
+        audit.check(f"{name}.probability_before_update", lambda: check_probability(phase["summary"]))
+        audit.check(f"{name}.frozen", lambda: check_frozen(phase["summary"], phase["source"], phase["preflight"]))
+        phase["journal"] = audit.check(f"{name}.journal", lambda: check_journal(directory/"execution_journal.sqlite"))
+        partial = not (directory/"rollout.pt").exists() and (directory/"rollout.partial.pt").exists()
+        path = directory/("rollout.partial.pt" if partial else "rollout.pt")
+        phase["rows"] = audit.check(f"{name}.rollout.read", lambda: load_torch(path))
+        audit.check(f"{name}.rollout.count", lambda: check_count(phase["rows"], expected, partial, phase["summary"]))
+        phase["rollout_audit"] = audit.check(f"{name}.rollout.integrity", lambda: check_rollout(phase["rows"], phase["journal"], phase["config"], partial=partial))
+        if name == "main":
+            targets = audit.check("main.fixed_targets.read", lambda: load_torch(directory/"fixed_targets.pt"))
+            audit.check("main.fixed_targets.independent_gae", lambda: check_targets(phase["rows"], targets, phase["rollout_audit"], phase["config"]))
+            audit.check("main.network_updates", lambda: check_updates(phase["summary"], phase["config"]))
+            audit.check("main.joint_kl", lambda: check_kl(phase["summary"], phase["config"]))
+        phases[name] = phase
+    checkpoint = audit.check("checkpoint.metadata", lambda: checkpoint_metadata(root, phases["main"]["summary"]))
+    audit.check("checkpoint.identity_main", lambda: check_identity(checkpoint, {"main": phases["main"]}))
+    audit.check("checkpoint.identity_resume", lambda: check_identity(checkpoint, phases))
+    audit.check("resume.full_state_and_new_physics", lambda: check_resume(checkpoint, phases))
+    ledger_path = Path(budget_file).expanduser().resolve() if budget_file is not None else root/"budget.json"
+    ledger = audit.check("budget.ledger.read", lambda: read_json(ledger_path))
+    audit.check("budget.cumulative", lambda: check_budget(phases, ledger, checkpoint))
+    # 输出仅保留可复核的小型统计，不把完整 rollout、checkpoint 元数据或 tick 索引再次序列化。
+    for check in audit.checks:
+        if "details" not in check:
+            continue
+        if check["name"].endswith(".read"):
+            check["details"] = dict(loaded=True)
+        elif check["name"].endswith(".journal"):
+            check["details"] = {k: v for k, v in check["details"].items() if k != "ticks"}
+        elif check["name"] == "checkpoint.metadata":
+            check["details"] = {k: checkpoint[k] for k in ("path", "restore_environment", "rng_keys", "sampler_names", "optimizer_layout_names")}
+            check["details"]["state"] = checkpoint["state"]
+    counts = Counter(check["status"] for check in audit.checks)
+    status = "failed" if counts["failed"] else "incomplete" if counts["not_run"] else "passed"
+    return dict(schema="genmo.closedloop.stage9.audit.v1", run_dir=str(root), budget_file=str(ledger_path), status=status,
+                stage9_passed=status == "passed", allow_incomplete=bool(allow_incomplete),
+                check_counts=dict(counts), checks=audit.checks,
+                evidence_boundary=["No Actor/GMT/simulator/GPU loaded or executed.",
+                    "Checkpoint tensor payloads are memory mapped; only metadata is audited.",
+                    "Gaussian ratio, PPO gradient and frozen-network reports are cross-checked; not recomputed by rerunning networks.",
+                    "Reward component arithmetic and time integration are audited; reward quality/convergence is not established.",
+                    "Idempotency identities and recorded consequences are audited; no network retries are injected."])
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--run-dir", type=Path, required=True)
+    parser.add_argument("--output", type=Path, required=True, help="仅创建新的审计 JSON，拒绝覆盖已有文件")
+    parser.add_argument("--allow-incomplete", action="store_true")
+    parser.add_argument("--budget-file", type=Path, help="显式指定跨多次尝试的共享账本；缺省为 run-dir/budget.json")
+    args = parser.parse_args(argv)
+    if args.output.exists():
+        parser.error(f"output already exists; refusing to overwrite: {args.output}")
+    report = audit_run(args.run_dir, allow_incomplete=args.allow_incomplete, budget_file=args.budget_file)
+    with args.output.open("x", encoding="utf-8") as stream:
+        json.dump(report, stream, ensure_ascii=False, indent=2, allow_nan=False)
+        stream.write("\n")
+    print(json.dumps(dict(status=report["status"], output=str(args.output), check_counts=report["check_counts"]), ensure_ascii=False))
+    return 1 if report["status"] == "failed" else 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
