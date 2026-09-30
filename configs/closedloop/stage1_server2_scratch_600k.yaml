@@ -1,0 +1,70 @@
+# 服务器2 Stage1 随机初始化正式训练配置，目标为600000个优化步，而不是600000个数据epoch。
+#
+# 复用当前Stage1 Actor、示范历史、逐坐标前缀和原有损失：1024维16层8头Transformer，
+# H=50，120帧30Hz，qpos30/contact2。仅调整本次用户指定的前缀分布、数据/统计量身份、
+# 随机初始化和训练总步数；不引入第二阶段奖励、真实历史适配或新的衔接损失。
+# 数据使用当前90/5/5四库；Mine必须是source_csv_root_z_preserved_v1及恢复后的接触标签。
+# 统计量仅由当前4287条train序列重新计算，独立存放，不覆盖旧checkpoint依赖的统计量。
+# warm_start、stage1_checkpoint和resume均显式关闭；已有零初始化条件残差沿用架构定义，
+# 不从任何已训练模型加载参数。优化器、调度器和global_step从头建立。
+# 八卡DDP，每卡batch256，全局2048；warmup500和原学习率不变，cosine周期同步到600000。
+# 每5000步保留完整断点，共120份约310GB，避免原1000步频率在60万步时耗尽数据盘。
+base_config: stage1_train.yaml
+config_version: genmo.bumi_closedloop.stage1_run.v1
+mode: train
+sample_contract:
+  history_steps: 50
+  prefix_min_frames: 6
+  prefix_max_frames: 30
+  prefix_zero_probability: 0.15
+  prefix_random_seed: 42
+deployment_reference:
+  min_prefix_frames: 12
+  motion_fps: 30
+  adjustment_basis: runtime_reserve_prefix_with_latency_lookahead_and_velocity_support
+warm_start_checkpoint: null
+warm_start_checkpoint_sha256: null
+warm_start_source_assets: null
+warm_start_source_model_config: null
+stage1_checkpoint: null
+resume_checkpoint: null
+endecoder:
+  kinematics_path: /home/user/liwei/GENMO-bumi-closedloop/configs/bumi/bumi_kinematics_robot_retargeter_fe934_v1.json
+  stats_path: /data0/user/liwei/GENMO_assets/stage1_scratch600k_20260930/qpos30_train_stats.json
+input_identity:
+  dataset_root: /data0/user/liwei/datasets/bumi_music_umr70_mine_pass_90505_v1
+  mine_ground_semantics: source_csv_root_z_preserved_v1
+  mine_height_restoration_version: genmo.mine_restore_csv_root_z.v1
+  stats_sha256: c7c0acb0e7a38797adb38ce0be41ee72820e34daed4e780275c64fb55c3e5326
+data_loader:
+  batch_size: 256
+  num_workers: 2
+  samples_per_epoch: 8192
+train:
+  max_steps: 600000
+  learning_rate: 0.00001
+  weight_decay: 0.01
+  grad_clip_norm: 1.0
+scheduler:
+  total_steps: 600000
+  warmup_steps: 500
+  min_lr_ratio: 0.1
+trainer:
+  enabled: true
+  require_warm_start: false
+  precision: bf16
+  gradient_accumulation: 1
+  log_every_steps: 10
+  validate_every_steps: 500
+  save_every_steps: 5000
+validation:
+  split: val
+  samples_per_source: 2
+  sample_steps: 20
+  guidance_scale: 2.5
+  seed: 12345
+runtime:
+  seed: 42
+  device: cuda
+  cpu_threads: 1
+  output_dir: /data0/user/liwei/GENMO_outputs/bumi_closedloop_stage1_90505_height20260928_p6to30_z15_scratch_b256_s600k_8gpu_20260930
