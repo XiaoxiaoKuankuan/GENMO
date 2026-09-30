@@ -36,6 +36,11 @@ physics_steps。候选失败不退还尝试；不确定物理消耗不退款。c
 重写逻辑轮次。新worker session重新reset，旧Buffer/pending不复用。模型、优化器、
 随机状态、采样游标、BC计步、实际lr和版本都恢复，随后继续采集和优化。
 
+执行请求与显式噪声种子使用的decision/attempt/episode_count也全部保存；缺少decision
+的旧Stage10 checkpoint明确拒绝，不默认为零。恢复身份显式绑定base seed、模型、
+timing、runtime与diagnostics；实际输入配置和解析配置另外保存SHA。换一个YAML路径
+不能绕过这些校验。预算及容量属于下面说明的操作配置，不混入模型算法身份。
+
 首次保存`checkpoints/initial.pt`；若第一轮尚未发布成功，可显式恢复这个完整初始
 边界并保留已消耗预算。`--initialize-stage9`是明确的Actor/Critic权重迁移，验证
 资产、条件、奖励、随机核和物理契约；优化器/采样器/计步重新建立，不称full resume。
@@ -44,6 +49,46 @@ physics_steps。候选失败不退还尝试；不确定物理消耗不退款。c
 session并保留证据，恢复最近完整checkpoint；不在部分更新的Critic/BC状态上继续。
 各session/轮次目录不覆盖旧证据；运行时磁盘余量、配额和checkpoint预留均检查。
 不自动删除原始执行数据或正式checkpoint。
+
+轮前检查完整的下一轮接受更新及候选尝试额度，不够就以budget_exhausted在采集前
+正常停止。采集过程若提前耗尽生成/控制/物理预算，保留已执行证据并明确失败退出，
+恢复最近完整checkpoint；不会把未完整落盘的半轮称为成功。初始校准还没有形成
+initial.pt时的故障需要新建运行目录，此时没有任何已接受训练更新丢失。
+
+审计器从latest沿实际session的resume路径和SHA选择有效发布链。历史失败、缺尾行
+日志及未被采用的publication保留并明确报告；故障后成功恢复可以验收，未恢复的
+末次故障仍失败。硬中断前已发布、尚未写session摘要的轮次，从已fsync的session_start
+和immutable publication核验，不依赖目录排序猜恢复关系，也不删除历史来换取通过。
+
+## 正式首段预算、容量及受控扩展
+
+`configs/closedloop/stage10_formal_server1.yaml`保持算法/奖励/采样/执行契约，仅将总
+预算改为40接受轮、120候选、32000生成、1000000控制、4000000物理步。40是这个run
+的总上限，不是每次resume额外增加40。run配额180GiB、文件系统至少30GiB空闲、
+checkpoint暂存预留4GiB保持不变；该配置不等于已经授权或启动长训练。
+
+容量规划工具只读已完成运行的实际文件大小，以每轮checkpoint和证据最大值、额外
+两轮失败重试及25%余量估算，再独立检查run配额和文件系统空闲。已有目录的全部
+字节都计入；抵扣已完成轮数时必须验证latest、publication、checkpoint大小和SHA，
+只有accepted摘要却未发布的中断尝试不抵扣。它不删除文件，也不自动扩预算。
+
+```bash
+PYTHONDONTWRITEBYTECODE=1 /home/user/liwei/GENMO/.venv/bin/python -B \
+  tools/eval/plan_closedloop_stage10_capacity.py \
+  --reference-run /data0/user/liwei/GENMO_outputs/closedloop_stage10/preparation_20260930 \
+  --target-run /data0/user/liwei/GENMO_outputs/closedloop_stage10/preparation_contract_v2_20260930 \
+  --config configs/closedloop/stage10_formal_server1.yaml \
+  --output /data0/user/liwei/GENMO_outputs/closedloop_stage10/formal_capacity_20260930.json
+```
+
+准备预算接正式预算使用同一个run的`--resume latest --extend-budget-reason <明确理由>`，
+并传formal配置。入口先核完整checkpoint和模型/数据/执行身份，再写不可覆盖的扩展
+事件，最后原子替换账本；原used和阶段计数不归零。事件绑定父checkpoint SHA、配置
+SHA和原因，上限只能单调增加。若事件写成、账本替换失败，该孤立事件不授权扩限，
+下次重试保留它并重新发布。后续恢复只传formal配置及`--resume latest`，无需重复扩限。
+
+建议按10/20/30/40总轮次边界停止训练，分别运行独立全val评估并审阅失败、活动度、
+奖励分项和KL后继续；test保留给最终报告。当前没有后台自动无限续训或自动删除证据。
 
 ## 独立评估
 
@@ -101,5 +146,8 @@ journal；新增工具实现单独保存SHA，原训练身份仍严格校验。�
 
 ## 当前验收状态
 
-服务器已完成全4765条内容与身份审计；前两轮真实训练及正常退出通过，完整恢复至
-四轮与全量初始/更新后评估正在进行。最终验收结果后续更新，当前不预写全部通过。
+服务器已完成全4765条内容与身份审计，版本5f33e3e的四轮真实训练、2→4完整恢复、
+19项独立训练审计和物理journal审计通过；同版本初始/第4轮完整val评估仍在进行。
+本地恢复计数、恢复审计和预算扩展修复正在完成最后回归；服务器评估期间不换源码。
+后续将用新目录执行新版1→恢复2→显式扩限且停止在3轮的有限GPU验证，旧四轮与其
+全量对照继续保留原版本身份，不冒称是新版第3轮模型的质量结果。最终结果完成后更新。

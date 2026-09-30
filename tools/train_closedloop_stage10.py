@@ -12,6 +12,11 @@ checkpoint。恢复重新创建物理session，不复用旧Buffer或假称恢复
 eval必须显式传入本入口的完整checkpoint，恢复其Actor/Critic并禁止优化；固定
 val/test歌曲与种子输出逐episode证据。源码、模型、奖励、完整数据身份严格绑定，
 跨Stage9初始化仅允许明确的Actor/Critic权重迁移，优化器和采样器重新建立。
+
+恢复身份显式绑定基础种子、模型/时钟/运行时/诊断配置；预算和磁盘容量另由运行账本
+管理，不依赖某个固定准备YAML的源码哈希。decision、attempt、episode_count共同
+参与请求和显式噪声种子，必须在初始及逐轮checkpoint中保存并完整恢复；缺失字段
+的旧Stage10状态明确拒绝，不猜测为零。每个session另保存实际输入和解析配置SHA。
 """
 from __future__ import annotations
 
@@ -73,6 +78,8 @@ def configuration(path):
     if 'base_config' in config or config.get('stage10', {}).get('version') != VERSION:
         raise ValueError('Stage10 requires its own explicit full-dataset configuration')
     stage = config['stage10']
+    if type(stage['seed']) is not int or not 0 <= stage['seed'] < 2**32:
+        raise ValueError('Stage10 base seed must be an integer in [0, 2**32)')
     train = stage['training']
     forbidden = {'music_selection', 'selection_path', 'groups_per_dataset'}
     if forbidden.intersection(train) or forbidden.intersection(stage['dataset']):
@@ -150,7 +157,7 @@ def _sources(config, check):
              'full_dataset', 'run_management', 'evaluation')
     return collect_source_provenance(config['paths'], repository_state=check['repositories'], additional_files={
         'genmo_repo': [*(f'gem/closedloop/dppo/{n}.py' for n in names),
-            'tools/train_closedloop_stage10.py', 'configs/closedloop/stage10_prepare_server1.yaml',
+            'tools/train_closedloop_stage10.py',
             'configs/closedloop/stage1_dataset_server1_fourset_90505_v1.yaml',
             'gem/closedloop/stage1_dataset.py', 'gem/closedloop/losses.py'],
         'gmt_repo': ['source/NoetixRobot/NoetixRobot/tasks/mimic/mimic_noetix_bumi4340_mha_sonic/closedloop/execution_journal.py']})
@@ -158,10 +165,50 @@ def _sources(config, check):
 
 def identity(config, check, provenance, catalog, data_audit, actor):
     return dict(stage10=VERSION, assets=check['asset_sha256'], actor_interface=dict(actor.interface_config),
+        base_seed=config['stage10']['seed'], execution_contract=dict(protocol_version=config['version'],
+            model=copy.deepcopy(config['model']), timing=copy.deepcopy(config['timing']),
+            runtime=copy.deepcopy(config['runtime']), diagnostics=copy.deepcopy(config['diagnostics']),
+            interpreters={name:config['paths'][name] for name in ('genmo_python', 'isaac_python')}),
         training_contract=config['stage10']['training'], reward=config['stage9']['reward'],
         environment=config['environment'], termination=config['termination'],
         dataset=catalog.identity, data_content_sha256=data_audit['data_content_sha256'],
         sampling=config['stage10']['dataset'], source_manifest_sha256=provenance['source_manifest_sha256'])
+
+
+def validate_execution_state(state):
+    """旧状态缺失噪声计数时拒绝恢复；不能把显式采样种子的组成部分猜成零。"""
+    for name in ('decision', 'attempt', 'episode_count'):
+        if name not in state or type(state[name]) is not int or state[name] < 0:
+            raise ValueError(f'Stage10 checkpoint requires explicit nonnegative integer execution state: {name}')
+    if state['decision'] > state['attempt']:
+        raise ValueError('Stage10 decision count cannot exceed generation attempts')
+    _positive(state.get('latency_budget_s'), 'checkpoint latency_budget_s')
+
+
+def capture_execution_state(env):
+    """初始校准后及每轮发布前共用的执行计数快照，不保存PhysX内部状态。"""
+    result = {name:getattr(env,name) for name in ('decision', 'attempt', 'episode_count', 'latency_budget_s')}
+    validate_execution_state(result)
+    return result
+
+
+def restore_execution_state(env, state, *, spent_generations=None):
+    """恢复显式种子计数；失败尝试已消耗的generation编号仍不复用。"""
+    validate_execution_state(state)
+    if spent_generations is not None and (type(spent_generations) is not int or spent_generations < 0):
+        raise ValueError('Spent generation counter must be a nonnegative integer')
+    env.policy_version, env.iteration = state['policy_version'], state['iteration']
+    env.decision, env.episode_count = state['decision'], state['episode_count']
+    env.attempt = max(state['attempt'], state['attempt'] if spent_generations is None else spent_generations)
+    env.latency_budget_s = state['latency_budget_s']
+
+
+def load_stage10_checkpoint(path, **kwargs):
+    """在原完整恢复前先检查执行计数；公共Stage9 checkpoint读取契约保持原样。"""
+    payload = torch.load(path, map_location='cpu', weights_only=False, mmap=True)
+    validate_execution_state(payload.get('state', {}))
+    del payload
+    return load_checkpoint(path, **kwargs)
 
 
 def initialize_stage9_weights(path, actor, critic, expected):
@@ -187,8 +234,8 @@ def initialize_stage9_weights(path, actor, critic, expected):
 
 
 def validate_resume_budget(saved, live):
-    if saved['limits'] != live['limits'] or any(live['used'][key] < value for key, value in saved['used'].items()):
-        raise ValueError('Resume cannot change limits or roll back spent budget')
+    from gem.closedloop.dppo.run_management import validate_budget_progress
+    return validate_budget_progress(saved, live)
 
 
 def collect_rollout(env, sampler, count, writer, *, check_disk=None, value_snapshot=None):
@@ -282,6 +329,7 @@ def main(argv=None):
     parser.add_argument('--resume', help='Same Stage10 run: latest or an exact complete checkpoint path')
     parser.add_argument('--checkpoint', type=Path, help='Required model to evaluate; never selects Stage1 implicitly')
     parser.add_argument('--initialize-stage9', type=Path, help='Explicit Actor/Critic weights-only migration for a new run')
+    parser.add_argument('--extend-budget-reason', help='Explicit same-run resume budget extension reason; used counts never reset')
     parser.add_argument('--stop-after-iteration', type=int, help='Stop at this accepted logical iteration boundary')
     parser.add_argument('--eval-count', help='all or count from the complete held-out catalog')
     parser.add_argument('--eval-split', choices=('val', 'test'))
@@ -292,6 +340,9 @@ def main(argv=None):
         parser.error('eval requires --checkpoint; other modes cannot use it')
     if args.initialize_stage9 and (args.mode != 'train' or args.resume):
         parser.error('--initialize-stage9 is only for new training runs')
+    if args.extend_budget_reason is not None and (args.mode != 'train' or args.resume != 'latest'
+                                                  or not args.extend_budget_reason.strip()):
+        parser.error('--extend-budget-reason requires train --resume latest and a nonempty reason')
     if (args.eval_count is not None or args.eval_split is not None) and args.mode != 'eval':
         parser.error('Evaluation overrides are only valid in eval mode')
     config = configuration(args.config)
@@ -310,12 +361,14 @@ def main(argv=None):
         config['output_root'] = str(output)
         config_path = session/'resolved_config.yaml'
         config_path.write_text(yaml.safe_dump(config, allow_unicode=True, sort_keys=False))
-        budget = manager.budget(stage['limits'])
+        budget = manager.budget(stage['limits'], for_extension=args.extend_budget_reason is not None)
     except BaseException:
         manager.close()
         raise
     report = dict(schema=VERSION, mode=args.mode, status='running', session_id=manager.session_id,
-                  iterations=[], evaluations=[], initialization=None, resume=None)
+                  iterations=[], evaluations=[], initialization=None, resume=None, budget_extension=None,
+                  input_config_path=str(args.config.resolve()), input_config_sha256=sha256_file(args.config),
+                  resolved_config_sha256=sha256_file(config_path))
     workers = journal = backend = None
     provenance = check = None
     code = 0
@@ -362,7 +415,7 @@ def main(argv=None):
         expected = identity(config, check, provenance, catalog, data_audit, actor)
         state = dict(iteration=0, policy_version=0, actor_updates=0, critic_updates=0,
             buffer_size=0, pending_plan=False, selected_actor_lr=s['actor_lr'], optimizer_attempts=0,
-            latency_budget_s=s['latency_budget_s'], attempt=0, episode_count=0, session_id=manager.session_id)
+            latency_budget_s=s['latency_budget_s'], decision=0, attempt=0, episode_count=0, session_id=manager.session_id)
         if args.initialize_stage9:
             report['initialization'] = initialize_stage9_weights(args.initialize_stage9, actor, critic, expected)
         else:
@@ -375,7 +428,7 @@ def main(argv=None):
                 allowed = manager.latest_checkpoint() if (output/'latest.json').exists() else output/'checkpoints/initial.pt'
                 if resume_path.resolve() != allowed.resolve():
                     raise ValueError('Training resume must use the latest published checkpoint of this run')
-            state = load_checkpoint(resume_path, actor=actor, critic=critic,
+            state = load_stage10_checkpoint(resume_path, actor=actor, critic=critic,
                 actor_optimizer=actor_optimizer, critic_optimizer=critic_optimizer,
                 identity=expected, samplers=samplers, generators=generators)
             if args.resume:
@@ -398,6 +451,9 @@ def main(argv=None):
             atomic_json(output/'run.json', dict(schema='genmo.closedloop.stage10.run.v1', identity=expected,
                 config_sha256=sha256_file(args.config), dataset_identity=catalog.identity,
                 initialization=report['initialization'], mode=args.mode))
+        if args.extend_budget_reason is not None:
+            report['budget_extension'] = budget.extend_limits(stage['limits'], reason=args.extend_budget_reason.strip(),
+                checkpoint_sha256=report['resume']['sha256'], config_sha256=sha256_file(args.config))
         workers = Workers(config, session)
         socket = Path(workers.temp.name)/'gmt.sock'
         client = workers.start('gmt', [config['paths']['isaac_python'], '-B',
@@ -408,10 +464,7 @@ def main(argv=None):
         builder = OnlineConditionBuilder(BumiMotionFeatureCodec(BumiKinematics(config['paths']['kinematics'])))
         env = UpperEnvironment(config, backend, builder, policy, budget, session/'bootstrap')
         env.disk_guard = manager.disk_guard
-        env.policy_version, env.iteration = state['policy_version'], state['iteration']
-        env.episode_count = state['episode_count']
-        env.attempt = max(state['attempt'], budget.state_dict()['used']['generations'])
-        env.latency_budget_s = state['latency_budget_s']
+        restore_execution_state(env, state, spent_generations=budget.state_dict()['used']['generations'])
         if report['resume'] is not None:
             report['resume']['new_backend_session_id'] = backend.session_id
         else:
@@ -441,8 +494,7 @@ def main(argv=None):
         else:
             # 保存迭代零的完整状态，首次候选失败也有明确的新任务恢复边界。
             if not args.resume:
-                state.update(budget=budget.state_dict(), latency_budget_s=env.latency_budget_s,
-                             attempt=env.attempt, episode_count=env.episode_count)
+                state.update(budget=budget.state_dict(), **capture_execution_state(env))
                 initial = output/'checkpoints'/'initial.pt'
                 manager.check_disk(storage['checkpoint_reserve_bytes'], refresh=True)
                 save_checkpoint(initial, actor=actor, critic=critic, actor_optimizer=actor_optimizer,
@@ -450,6 +502,10 @@ def main(argv=None):
                     samplers=samplers, generators=generators)
                 manager.disk_guard.account_file(initial)
             while state['iteration'] < stop_at and not stop.stop_requested:
+                capacity = budget.iteration_capacity(len(s['actor_lr_candidates']))
+                if not capacity['can_start']:
+                    report.update(stop_reason='budget_exhausted', budget_stop_details=capacity)
+                    break
                 index = state['iteration'] + 1
                 iteration_output = session/'iterations'/f'{index:06d}'
                 iteration_output.mkdir(parents=True, exist_ok=False)
@@ -513,8 +569,8 @@ def main(argv=None):
                         actor_updates=state['actor_updates']+1, critic_updates=state['critic_updates']+s['critic_steps'],
                         selected_actor_lr=float(actor_optimizer.param_groups[0]['lr']),
                         optimizer_attempts=budget.state_dict()['used']['optimizer_attempts'],
-                        budget=budget.state_dict(), latency_budget_s=env.latency_budget_s, attempt=env.attempt,
-                        episode_count=env.episode_count, session_id=manager.session_id, buffer_size=0, pending_plan=False)
+                        budget=budget.state_dict(), **capture_execution_state(env),
+                        session_id=manager.session_id, buffer_size=0, pending_plan=False)
                     env.policy_version, env.iteration = state['policy_version'], state['iteration']
                     checkpoint = output/'checkpoints'/f'stage10_{index:06d}_{manager.session_id}.pt'
                     manager.check_disk(storage['checkpoint_reserve_bytes'], refresh=True)
@@ -542,7 +598,9 @@ def main(argv=None):
                         atomic_json(iteration_output/'summary.json', step_report)
                     raise
         report.update(status='passed', final_iteration=state['iteration'], stopped_on_signal=stop.stop_requested,
-                      full_dataset_checked=True, sampling_coverage=sampler.coverage())
+                      full_dataset_checked=True, sampling_coverage=sampler.coverage(),
+                      stop_reason=report.get('stop_reason', 'signal' if stop.stop_requested else
+                                             ('evaluation_complete' if args.mode == 'eval' else 'iteration_target')))
     except _PreflightComplete:
         pass
     except BaseException as exc:

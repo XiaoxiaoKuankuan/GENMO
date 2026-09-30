@@ -7,6 +7,9 @@ fixed_targets.pt 中冻结的 old/next values 与逐条归档值先交叉核对�
 恢复完整状态后再次接受更新，不能把恢复后只采集当作续训成功。
 成功 session 还必须有 session_end 指标成功写入后发布的 completion.json；完成标记
 绑定 summary.json 的文件 SHA、成功状态和零退出码，避免把中途写出的摘要当作完成。
+训练发布链从 latest 和实际恢复的 checkpoint 路径/SHA 回溯；失败尝试和未选发布
+保留在报告中，不再按全目录同一轮编号合并。硬中断缺少 session 摘要时，可用已
+落盘的 session_start 与不可变发布继续检查已接受轮次，但未恢复的终态仍不通过。
 
 评估分支核对显式 checkpoint 身份、完整 val/test 池计划、多 seed、网络不变和
 逐 episode 文件，独立重算其聚合统计；评估不进入训练 Buffer。所有输入只读，
@@ -22,12 +25,13 @@ checkpoint 使用 CPU mmap，仅检查元信息与状态布局，不遍历大模
 from __future__ import annotations
 
 import argparse
-from collections import Counter
 import hashlib
 import json
 import math
-from pathlib import Path
 import sys
+from collections import Counter
+from datetime import datetime
+from pathlib import Path
 
 import numpy as np
 import torch
@@ -36,7 +40,7 @@ if __package__ in (None, ''):
     sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from gem.closedloop.dppo.evaluation import aggregate_evaluation
-
+from gem.closedloop.dppo.run_management import TrainingBudget, validate_budget_progress
 
 VERSION = 'genmo.closedloop.stage10.audit.v1'
 BUDGET_KEYS = {'accepted_iterations', 'optimizer_attempts', 'generations', 'control_steps', 'physics_steps'}
@@ -92,8 +96,8 @@ def budget_check(budget, previous=None):
         limit = integer(budget['limits'][key], f'{key} limit', 1)
         require(used <= limit, f'{key} exceeds persisted budget')
         require(sum(integer(phase.get(key, 0), key) for phase in budget['phases'].values())==used, f'{key} phase sum differs')
-        if previous is not None:
-            require(budget['limits']==previous['limits'] and used>=previous['used'][key], f'{key} budget rolled back')
+    if previous is not None:
+        validate_budget_progress(previous, budget)
     require(budget['limits']['physics_steps']==4*budget['limits']['control_steps'], 'Physics limit must contain four substeps/control')
     return budget
 
@@ -266,15 +270,16 @@ def audit_update(summary, contract):
     return dict(optimizer_attempts=len(candidates), selected_lr=chosen['lr'], mean_joint_kl=summary['kl']['mean_joint_kl'])
 
 
-def audit_checkpoint(root, summary, identity, update):
+def audit_checkpoint(root, summary, identity, update, publication=None):
     path = resolve(root, summary['checkpoint'])
-    publications = []
-    for publication_path in (root/'checkpoints/publications').glob('*.json'):
-        candidate = read_json(publication_path)
-        if candidate.get('iteration')==summary['iteration']:
-            publications.append(candidate)
-    require(len(publications)==1, 'Accepted checkpoint requires exactly one immutable publication')
-    publication = publications[0]
+    if publication is None:
+        publications = []
+        for publication_path in (root/'checkpoints/publications').glob('*.json'):
+            candidate = read_json(publication_path)
+            if candidate.get('iteration')==summary['iteration'] and resolve(root, candidate['path'])==path:
+                publications.append(candidate)
+        require(len(publications)==1, 'Accepted checkpoint requires exactly one matching immutable publication')
+        publication = publications[0]
     require(publication.get('schema')=='genmo.closedloop.stage10.checkpoint_publication.v1'
             and resolve(root, publication['path'])==path, 'Checkpoint publication schema/path differs')
     require(path.stat().st_size==publication['size_bytes'] and sha256(path)==publication['sha256'],
@@ -353,6 +358,317 @@ class Audit:
         return None
 
 
+def _session_evidence(root, directory):
+    """读取真实启动日志；只有末尾未写完的 JSON 行可作为中断证据保留。"""
+    session_id = directory.name
+    summary_path = directory/'summary.json'
+    summary = read_json(summary_path) if summary_path.exists() else None
+    if summary is not None:
+        require(summary.get('session_id')==session_id, 'Session directory identity differs')
+    metrics_path = root/'metrics'/f'{session_id}.jsonl'
+    records, trailing_partial = [], False
+    if metrics_path.exists():
+        lines = metrics_path.read_bytes().splitlines(keepends=True)
+        for index, line in enumerate(lines):
+            try:
+                record = json.loads(line)
+            except (ValueError, UnicodeError):
+                require(index==len(lines)-1 and not line.endswith(b'\n'), 'Malformed complete metrics record')
+                trailing_partial = True
+                continue
+            require(record.get('session_id')==session_id, 'Metrics session identity differs')
+            timestamp = datetime.fromisoformat(record['time_utc'])
+            require(timestamp.tzinfo is not None, 'Metrics timestamp must include its timezone')
+            records.append((record, timestamp))
+    starts = [record for record, _ in records if record.get('event')=='session_start']
+    require(len(starts)<=1, 'Duplicated session_start evidence')
+    start = starts[0] if starts else None
+    if start is not None and summary is not None:
+        require(start['initial_iteration']==summary.get('initial_iteration') and start.get('resume')==summary.get('resume'),
+                'Session summary differs from durable start/resume evidence')
+    context = summary
+    if context is None and start is not None:
+        context = dict(session_id=session_id, mode=start['mode'], initial_iteration=start['initial_iteration'],
+                       resume=start.get('resume'), data_audit=str((directory/'data_audit.json').relative_to(root)))
+    return dict(session_id=session_id, directory=directory, summary_path=summary_path, summary=summary,
+                context=context, start=start, records=records, trailing_partial=trailing_partial,
+                first_time=records[0][1] if records else None, last_time=records[-1][1] if records else None)
+
+
+def _completion(evidence, *, recovered=False):
+    """历史中断允许没有结束标记；已经存在的标记始终校验，不能掩盖改写。"""
+    summary = evidence['summary']
+    marker = evidence['directory']/'completion.json'
+    if summary is None:
+        require(not marker.exists(), 'Completion exists without its bound session summary')
+        if not recovered:
+            raise FileNotFoundError(evidence['summary_path'])
+        return {'completion': 'missing_after_recovered_interruption'}
+    completion = read_json(marker) if marker.exists() else None
+    if completion is not None:
+        require(completion.get('schema')=='genmo.closedloop.stage10.session_completion.v1', 'Wrong session completion schema')
+        require(completion.get('summary_sha256')==sha256(evidence['summary_path']), 'Session summary differs from completion marker')
+        require(completion.get('status')==summary.get('status') and completion.get('exit_code')==summary.get('exit_code'),
+                'Session completion status/exit code differs from summary')
+    elif not recovered:
+        raise FileNotFoundError(marker)
+    if not recovered:
+        require(summary.get('status')=='passed' and summary.get('exit_code')==0, 'Session did not exit successfully')
+        if (summary.get('resume') or {}).get('training_resume') and summary.get('final_iteration')==summary.get('initial_iteration'):
+            require(summary.get('stop_reason')=='budget_exhausted' or summary.get('stopped_on_signal') is True,
+                    'Resume without an accepted update requires an explicit normal budget/signal stop')
+        require(summary['source_unchanged'].get('unchanged') is True and summary.get('original_assets_unchanged') is True, 'Session source/assets changed')
+        gmt = summary['worker_shutdown']['gmt']
+        require(gmt.get('policy_unchanged') is True and gmt.get('runtime_parameters_unchanged') is True
+                and gmt.get('process_exit_code')==0 and not gmt.get('forced_shutdown') and not gmt.get('close_error'), 'Worker did not close with frozen-state proof')
+    else:
+        # 恢复可处理进程死亡，不可把已知源文件或资产改变解释成普通中断。
+        if 'source_unchanged' in summary:
+            require(summary['source_unchanged'].get('unchanged') is True, 'Recovered session reports changed sources')
+        if 'original_assets_unchanged' in summary:
+            require(summary['original_assets_unchanged'] is True, 'Recovered session reports changed original assets')
+    if 'budget' in summary:
+        budget_check(summary['budget'])
+    return dict(session_id=evidence['session_id'], completion='verified' if completion else 'missing_after_recovered_interruption',
+                recovered=recovered, status=summary.get('status'), initial_iteration=summary.get('initial_iteration'),
+                final_iteration=summary.get('final_iteration'))
+
+
+def _select_publication_chain(root, sessions):
+    """不依赖目录排序/mtime：只沿 latest、同 session 连续轮次和实际 resume 选链。"""
+    latest = read_json(root/'latest.json')
+    require(latest.get('schema')=='genmo.closedloop.stage10.checkpoint_publication.v1', 'Wrong latest publication schema')
+    latest_path = resolve(root, latest['publication'])
+    require(read_json(latest_path)=={key: value for key, value in latest.items() if key!='publication'}, 'Latest and immutable publication disagree')
+    publications, inventory = {}, []
+    for path in sorted((root/'checkpoints/publications').glob('*.json')):
+        relative = str(path.relative_to(root))
+        try:
+            value = read_json(path)
+            require(value.get('schema')=='genmo.closedloop.stage10.checkpoint_publication.v1', 'Wrong publication schema')
+            integer(value['iteration'], 'published iteration', 1)
+            require(isinstance(value['session_id'], str), 'Missing publication session')
+            resolve(root, value['path'])
+            publications[path.resolve()] = value
+            inventory.append(dict(path=relative, iteration=value['iteration'], session_id=value['session_id'],
+                                  checkpoint=value['path'], sha256=value['sha256'],
+                                  iteration_summary=value.get('metadata', {}).get('iteration_summary')))
+        except Exception as error:
+            inventory.append(dict(path=relative, error=f'{type(error).__name__}: {error}'))
+    require(latest_path in publications, 'Latest publication is not an immutable publication in this run')
+    selected, contexts, visited = [], {}, set()
+    current = latest_path
+    while current is not None:
+        require(current not in visited, 'Cyclic checkpoint recovery chain')
+        visited.add(current)
+        publication = publications[current]
+        owner = publication['session_id']
+        require(owner in sessions and sessions[owner]['context'] is not None, 'Published checkpoint lacks session summary or durable session_start')
+        context = sessions[owner]['context']
+        require(context.get('mode')=='train', 'Training publication belongs to a different mode')
+        initial = integer(context['initial_iteration'], 'session initial iteration')
+        index = publication['iteration']
+        require(index>initial, 'Published update did not advance its restored state')
+        summary_path = resolve(root, publication['metadata']['iteration_summary'])
+        require(summary_path.is_relative_to(root/'sessions'/owner), 'Published iteration summary belongs to another session')
+        summary = read_json(summary_path)
+        require(summary['iteration']==index, 'Published iteration summary number differs')
+        if context.get('status')=='passed':
+            require(str(summary_path.relative_to(root)) in context.get('iterations', []), 'Successful session omitted its published iteration')
+        selected.append((summary, context, publication, current))
+        contexts[owner] = context
+        if index>initial+1:
+            matches = [path for path, value in publications.items() if value['session_id']==owner and value['iteration']==index-1]
+            require(len(matches)==1, 'Same-session accepted sequence is missing or ambiguous')
+            current = matches[0]
+            continue
+        resume = context.get('resume')
+        if initial==0:
+            if resume is not None:
+                require(resume.get('training_resume') is True and resume.get('restored_full_state') is True
+                        and resume.get('old_buffer_discarded') is True and resume.get('initial_iteration')==0, 'Invalid initial-state resume')
+                path = resolve(root, resume['checkpoint'])
+                require(sha256(path)==resume['sha256'], 'Initial resume checkpoint SHA differs')
+                saved = torch.load(path, map_location='cpu', weights_only=False, mmap=True)
+                require(saved.get('version')=='genmo.closedloop.stage9.full_state.v1'
+                        and saved['identity']==read_json(root/'run.json')['identity']
+                        and saved['state']['iteration']==saved['state']['policy_version']==0
+                        and saved['state'].get('buffer_size')==0 and saved['state'].get('pending_plan') is False,
+                        'Initial resume did not load a complete iteration-zero checkpoint')
+            current = None
+        else:
+            require(resume and resume.get('training_resume') is True and resume.get('restored_full_state') is True
+                    and resume.get('old_buffer_discarded') is True and resume.get('initial_iteration')==initial,
+                    'Recovery link lacks full-state resume evidence')
+            path = resolve(root, resume['checkpoint'])
+            matches = [key for key, value in publications.items() if value['iteration']==initial
+                       and resolve(root, value['path'])==path and value['sha256']==resume['sha256']]
+            require(len(matches)==1, 'Resume does not identify exactly one previous publication')
+            require(publications[matches[0]]['session_id']!=owner, 'Resume did not create a new run session')
+            current = matches[0]
+    selected.reverse()
+    return dict(latest=latest, selected=selected, contexts=contexts,
+                unselected_publications=[value for value in inventory if resolve(root, value['path']) not in visited])
+
+
+def _audit_training(root, run, audit, result, minimum_iterations, require_resume):
+    identity = run['identity']
+    sessions = {}
+    directories = set((root/'sessions').glob('*'))
+    directories.update(root/'sessions'/path.stem for path in (root/'metrics').glob('*.jsonl'))
+    for directory in sorted(directories):
+        evidence = audit.check(f'session_json:{directory.name}', lambda directory=directory: _session_evidence(root, directory))
+        if evidence is not None:
+            sessions[directory.name] = evidence
+            audit.checks[-1]['details'] = dict(session_id=directory.name,
+                summary_present=evidence['summary'] is not None, durable_start_present=evidence['start'] is not None,
+                metrics_records=len(evidence['records']), trailing_partial_metrics=evidence['trailing_partial'])
+    chain = audit.check('canonical_publication_chain', lambda: _select_publication_chain(root, sessions))
+    if chain is None:
+        return
+    # Path/对象仅供内部校验；输出只保留可复核的相对引用。
+    audit.checks[-1]['details'] = dict(publications=[str(path.relative_to(root)) for _, _, _, path in chain['selected']],
+                                     unselected_publications=chain['unselected_publications'])
+    selected = chain['selected']
+    canonical_ids = set(chain['contexts'])
+    latest = chain['latest']
+    # 已发布后立即在下一 session 因预算/信号正常停止，也能提供完整终态；不能要求其再更新。
+    terminal_ids = {latest['session_id']}
+    for name, evidence in sessions.items():
+        context = evidence['context'] or {}
+        resume = context.get('resume') or {}
+        if (context.get('status')=='passed' and context.get('final_iteration')==latest['iteration']
+                and context.get('initial_iteration')==latest['iteration'] and resume.get('training_resume') is True
+                and (context.get('stop_reason')=='budget_exhausted' or context.get('stopped_on_signal') is True)
+                and resume.get('restored_full_state') is True and resume.get('old_buffer_discarded') is True
+                and resume.get('sha256')==latest['sha256']
+                and resolve(root, resume.get('checkpoint', 'missing'))==resolve(root, latest['path'])):
+            terminal_ids.add(name)
+    history = []
+    for name, evidence in sessions.items():
+        summary = evidence['summary'] or {}
+        completed = summary.get('status')=='passed' and summary.get('exit_code')==0 and (evidence['directory']/'completion.json').exists()
+        successors = []
+        if not completed:
+            for other in canonical_ids | terminal_ids:
+                if other==name:
+                    continue
+                candidate = sessions[other]
+                context = candidate['context'] or {}
+                resume = context.get('resume') or {}
+                if not resume.get('training_resume'):
+                    continue
+                direct = any(publication['session_id']==name and publication['sha256']==resume.get('sha256')
+                             and resolve(root, publication['path'])==resolve(root, resume['checkpoint'])
+                             for _, _, publication, _ in selected)
+                ordered = (evidence['last_time'] is not None and candidate['first_time'] is not None
+                           and candidate['first_time']>evidence['last_time'])
+                if direct or ordered:
+                    successors.append(other)
+        recovered = bool(successors)
+        audit.check(f'session:{name}', lambda evidence=evidence, recovered=recovered: _completion(evidence, recovered=recovered))
+        history.append(dict(session_id=name, status=summary.get('status', 'incomplete'), selected=name in canonical_ids,
+                            recovered_by=sorted(successors), disposition='recovered_history' if recovered else 'completed' if completed else 'unrecovered',
+                            trailing_partial_metrics=evidence['trailing_partial'],
+                            error=summary.get('error'),
+                            summary=str(evidence['summary_path'].relative_to(root)) if evidence['summary'] is not None else None))
+    result['recovery_history'] = dict(sessions=history, unselected_publications=chain['unselected_publications'])
+    data_lookup = None
+    for name in sorted(canonical_ids | terminal_ids):
+        context = sessions[name]['context']
+        def check_data(context=context):
+            data = read_json(resolve(root, context['data_audit']))
+            lookup = audit_data(data)
+            require(data['identity']==identity['dataset'] and data['data_content_sha256']==identity['data_content_sha256'], 'Data identity changed between sessions')
+            return lookup
+        lookup = audit.check(f'data:{name}', check_data)
+        if lookup is not None:
+            data_lookup = lookup
+            audit.checks[-1]['details'] = dict(sample_count=len(lookup), full_manifest_scan=True)
+    seen_paths, checkpoints = set(), {}
+    last_budget, total_attempts, total_controls = None, 0, 0
+    for summary, context, publication, _ in selected:
+        index = summary['iteration']
+        def check_iteration(summary=summary, context=context, publication=publication, index=index):
+            nonlocal last_budget, total_attempts, total_controls
+            require(summary.get('status')=='accepted' and summary['policy_version_after']==summary['policy_version_before']+1, 'Iteration has no accepted policy advancement')
+            require(summary['policy_version_before']==index-1, 'Logical iteration and policy version differ')
+            require(data_lookup is not None, 'No validated complete dataset evidence')
+            rows, rollout = audit_rollout(root, summary, data_lookup, identity['training_contract'], seen_paths)
+            targets = audit_targets(root, summary, rows, identity['training_contract'])
+            update = audit_update(summary, identity['training_contract'])
+            budget_check(summary['budget'], last_budget)
+            checkpoint = audit_checkpoint(root, summary, identity, update, publication)
+            require(checkpoint['session_id']==context['session_id'], 'Checkpoint belongs to a different training session')
+            checkpoints[index] = checkpoint
+            last_budget = summary['budget']
+            total_attempts += update['optimizer_attempts']
+            total_controls += rollout['control_steps']
+            return dict(iteration=index, rollout=rollout, fixed_targets=targets, update=update, checkpoint=checkpoint)
+        audit.check(f'iteration:{index}', check_iteration)
+    def continuity():
+        indices = [summary['iteration'] for summary, _, _, _ in selected]
+        require(len(indices)>=minimum_iterations, f'Need at least {minimum_iterations} accepted iterations')
+        require(indices==list(range(1, latest['iteration']+1)), 'Accepted iteration sequence has gaps or duplicates')
+        return dict(accepted_iterations=len(indices), fresh_policy_versions=[summary['policy_version_before'] for summary, _, _, _ in selected])
+    audit.check('multiple_fresh_policy_iterations', continuity)
+    def resumes():
+        continued = []
+        for context in chain['contexts'].values():
+            resume = context.get('resume')
+            if not resume or not resume.get('training_resume'):
+                continue
+            initial = integer(resume['initial_iteration'], 'resume initial iteration')
+            following = [summary for summary, owner, _, _ in selected if owner is context]
+            require(following and following[0]['iteration']==initial+1, 'Resume first update is not the next policy version')
+            final = following[-1]['iteration']
+            if context.get('status')=='passed':
+                require(context.get('final_iteration')==final and final>initial, 'Resume did not perform a new accepted optimization')
+            require(bool(resume.get('new_backend_session_id')), 'Resume physical worker identity is missing')
+            new_worker = following[0]['gmt_frozen']['execution_journal'].get('backend_session_id')
+            require(new_worker==resume['new_backend_session_id'], 'Resume physical worker differs from accepted execution')
+            if initial:
+                require(initial in checkpoints, 'Resume initial checkpoint failed validation')
+                previous = next(summary for summary, _, _, _ in selected if summary['iteration']==initial)
+                old_worker = previous['gmt_frozen']['execution_journal'].get('backend_session_id')
+                require(old_worker and old_worker!=new_worker, 'Resume reused an old physical worker session')
+                require(sha256(resolve(root, resume['checkpoint']))==resume['sha256'], 'Resumed checkpoint bytes changed')
+            continued.append(dict(initial_iteration=initial, final_iteration=final, new_backend_session_id=new_worker))
+        if require_resume:
+            require(continued, 'No complete-state resume followed by a real Actor update')
+        return continued
+    audit.check('resume_then_optimize', resumes)
+    def check_latest():
+        require(checkpoints and latest['iteration']==max(checkpoints), 'Latest pointer differs from final validated iteration')
+        path = resolve(root, latest['path'])
+        require(str(path.relative_to(root))==checkpoints[latest['iteration']]['path'] and path.stat().st_size==latest['size_bytes'] and sha256(path)==latest['sha256'], 'Latest checkpoint file differs from publication')
+        budget_check(latest['budget'], last_budget)
+        require(latest['budget']['used']['optimizer_attempts']>=total_attempts and latest['budget']['used']['control_steps']>=total_controls, 'Budget omitted actual optimizer/physical consumption')
+        require(latest['budget']['used']['accepted_iterations']>=len(checkpoints), 'Accepted iteration budget is too small')
+        return dict(iteration=latest['iteration'], optimizer_attempts=total_attempts, validated_rollout_controls=total_controls)
+    audit.check('published_checkpoint_and_budget', check_latest)
+    def persisted_budget():
+        persisted = budget_check(read_json(root/'budget.json'))
+        # 构造器在已有账本时只读，复核全部扩限文件 SHA/原因/链及单调消耗。
+        TrainingBudget(root/'budget.json', persisted['limits'])
+        for evidence in sessions.values():
+            if evidence['summary'] and 'budget' in evidence['summary']:
+                budget_check(persisted, evidence['summary']['budget'])
+        for summary, _, _, _ in selected:
+            budget_check(persisted, summary['budget'])
+        budget_check(persisted, latest['budget'])
+        return dict(used=persisted['used'], session_count=len(sessions))
+    audit.check('persisted_budget_monotonic', persisted_budget)
+
+
+def _finish_report(result, audit, minimum_iterations, require_resume):
+    statuses = [item['status'] for item in audit.checks]
+    result.update(status='failed' if 'failed' in statuses else 'incomplete' if 'not_run' in statuses else 'passed',
+                  checks=audit.checks, passed_checks=statuses.count('passed'), failed_checks=statuses.count('failed'),
+                  not_run_checks=statuses.count('not_run'), minimum_iterations=minimum_iterations, require_resume=require_resume)
+    return result
+
+
 def audit_run(run_dir, *, allow_incomplete=False, minimum_iterations=2, require_resume=True):
     root = Path(run_dir).resolve()
     audit = Audit(allow_incomplete)
@@ -368,6 +684,9 @@ def audit_run(run_dir, *, allow_incomplete=False, minimum_iterations=2, require_
         result.update(status='failed' if any(item['status']=='failed' for item in audit.checks) else 'incomplete', checks=audit.checks)
         return result
     identity = run['identity']
+    if run['mode']=='train':
+        audit.check('training_recovery_audit', lambda: _audit_training(root, run, audit, result, minimum_iterations, require_resume))
+        return _finish_report(result, audit, minimum_iterations, require_resume)
     sessions = sorted((root/'sessions').glob('*/summary.json'))
     summaries, data_lookup, iteration_summaries = [], None, []
     for path in sessions:

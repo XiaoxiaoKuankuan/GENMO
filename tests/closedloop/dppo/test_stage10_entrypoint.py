@@ -134,9 +134,10 @@ def test_config_accepts_real_hyperparameters_and_rejects_subset(tmp_path):
 
 
 def test_resume_budget_cannot_rewind_or_expand_limits():
-    a={'limits':{'optimizer_attempts':9},'used':{'optimizer_attempts':3}}
-    entry.validate_resume_budget(a,{'limits':a['limits'],'used':{'optimizer_attempts':4}})
+    a={'limits':dict(accepted_iterations=6,optimizer_attempts=9,generations=100,control_steps=200,physics_steps=800),
+       'used':dict(accepted_iterations=1,optimizer_attempts=3,generations=5,control_steps=10,physics_steps=40)}
+    entry.validate_resume_budget(a,{'limits':a['limits'],'used':dict(a['used'],optimizer_attempts=4)})
     with pytest.raises(ValueError):
-        entry.validate_resume_budget(a,{'limits':a['limits'],'used':{'optimizer_attempts':2}})
+        entry.validate_resume_budget(a,{'limits':a['limits'],'used':dict(a['used'],optimizer_attempts=2)})
     with pytest.raises(ValueError):
-        entry.validate_resume_budget(a,{'limits':{'optimizer_attempts':10},'used':a['used']})
+        entry.validate_resume_budget(a,{'limits':dict(a['limits'],optimizer_attempts=10),'used':a['used']})

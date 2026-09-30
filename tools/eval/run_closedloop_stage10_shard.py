@@ -166,7 +166,7 @@ def _models(config, catalog, check, provenance, data_audit, checkpoint):
     generator = torch.Generator().manual_seed(stage['seed'] + 2002)
     expected = training.identity(config, check, provenance, catalog, data_audit, actor)
     checkpoint_sha256 = training.sha256_file(checkpoint)
-    state = training.load_checkpoint(checkpoint, actor=actor, critic=critic,
+    state = training.load_stage10_checkpoint(checkpoint, actor=actor, critic=critic,
         actor_optimizer=actor_optimizer, critic_optimizer=critic_optimizer, identity=expected,
         samplers=dict(music=sampler, bc=bc), generators=dict(critic=generator))
     if training.sha256_file(checkpoint) != checkpoint_sha256:
@@ -272,9 +272,7 @@ def main(argv=None):
             training.BumiKinematics(config['paths']['kinematics'])))
         env = training.UpperEnvironment(config, backend, builder, policy, budget, session/'evaluation')
         env.disk_guard = manager.disk_guard
-        env.policy_version, env.iteration = state['policy_version'], state['iteration']
-        env.episode_count, env.attempt = state['episode_count'], state['attempt']
-        env.latency_budget_s = state['latency_budget_s']
+        training.restore_execution_state(env, state)
         restored['new_backend_session_id'] = backend.session_id
         manager.append_metrics(dict(event='session_start', mode='eval', initial_iteration=state['iteration'],
             checkpoint_sha256=restored['sha256'], shard_index=args.shard_index, shard_count=args.shard_count))

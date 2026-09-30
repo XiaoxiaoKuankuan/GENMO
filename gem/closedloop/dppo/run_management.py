@@ -14,6 +14,10 @@ rollout 每条转移只写一次，按小块发布 SHA 清单，完整清单最�
 SHA 并原子更新 latest 指针，不复制或重新序列化大模型。信号处理只设置停止标志，
 实际停止必须由训练入口在无 pending、已完成落盘的合法边界执行。本模块不冒充恢复
 PhysX 内部状态，也不允许未完成 rollout 自动混入下一轮 on-policy 数据。
+
+同一运行的预算只允许经显式扩展入口单调提高：旧消耗原样保留，扩展原因、配置和父
+checkpoint 的 SHA 写入不可覆盖的事件，再原子更新账本引用。恢复验证这条证据链，
+未引用的中断事件不授权扩限；不能手工修改上限或把准备运行的计数归零后冒充续训。
 """
 from __future__ import annotations
 
@@ -38,6 +42,37 @@ from .checkpoint import VERSION as CHECKPOINT_VERSION
 
 
 BUDGET_KEYS = ('accepted_iterations', 'optimizer_attempts', 'generations', 'control_steps', 'physics_steps')
+
+
+def _budget_limits(limits):
+    if set(limits) != set(BUDGET_KEYS):
+        raise ValueError(f'budget limits must contain exactly {BUDGET_KEYS}')
+    result = {key: _integer(limits[key], key, 1) for key in BUDGET_KEYS}
+    if result['physics_steps'] != 4 * result['control_steps']:
+        raise ValueError('physics budget must equal four times control budget')
+    return result
+
+
+def validate_budget_progress(saved, live):
+    """恢复允许已有证据的单调扩限，但不接受消耗回退或替换原扩展链。"""
+    saved_limits, live_limits = _budget_limits(saved['limits']), _budget_limits(live['limits'])
+    before, after = saved.get('limit_extensions', []), live.get('limit_extensions', [])
+    if after[:len(before)] != before or len(after) < len(before):
+        raise ValueError('Resume cannot replace or roll back budget extension history')
+    limits = saved_limits
+    for entry in after[len(before):]:
+        if entry.get('previous_limits') != limits:
+            raise ValueError('Resume budget extension does not continue checkpoint limits')
+        updated = _budget_limits(entry['new_limits'])
+        if updated == limits or any(updated[key] < limits[key] for key in BUDGET_KEYS):
+            raise ValueError('Resume budget extension must increase limits monotonically')
+        limits = updated
+    if limits != live_limits:
+        raise ValueError('Resume cannot change limits without budget extension evidence')
+    if set(saved.get('used', {})) != set(BUDGET_KEYS) or set(live.get('used', {})) != set(BUDGET_KEYS):
+        raise ValueError('Resume requires all spent budget counters')
+    if any(_integer(live['used'][key], key) < _integer(saved['used'][key], key) for key in BUDGET_KEYS):
+        raise ValueError('Resume cannot roll back spent budget')
 
 
 def _integer(value, name, minimum=0):
@@ -185,11 +220,7 @@ class TrainingBudget:
     """单写入者预算，接口兼容 UpperEnvironment；运行锁由 RunManager 持有。"""
     def __init__(self, path, limits, *, disk_guard=None):
         self.path, self.disk_guard = Path(path), disk_guard
-        if set(limits) != set(BUDGET_KEYS):
-            raise ValueError(f'budget limits must contain exactly {BUDGET_KEYS}')
-        self.limits = {key: _integer(limits[key], key, 1) for key in BUDGET_KEYS}
-        if self.limits['physics_steps'] != 4 * self.limits['control_steps']:
-            raise ValueError('physics budget must equal four times control budget')
+        self.limits = _budget_limits(limits)
         if self.path.exists():
             self.state = _read_json(self.path)
             self._validate()
@@ -212,6 +243,89 @@ class TrainingBudget:
                 raise ValueError('persistent budget totals disagree or exceed limits')
         if any(set(phase) - set(BUDGET_KEYS) for phase in self.state['phases'].values()):
             raise ValueError('unknown persistent budget counter')
+        self._validate_extensions()
+
+    def _validate_extensions(self):
+        entries = self.state.get('limit_extensions', [])
+        if not isinstance(entries, list):
+            raise ValueError('invalid budget extension history')
+        previous_limits, previous_used, seen = None, {key: 0 for key in BUDGET_KEYS}, set()
+        for index, entry in enumerate(entries):
+            if set(entry) != {'path', 'sha256', 'previous_limits', 'new_limits'}:
+                raise ValueError('invalid budget extension descriptor')
+            relative = Path(entry['path'])
+            if (relative.is_absolute() or relative.parent != Path('budget_extensions')
+                    or not re.fullmatch(r'[a-f0-9-]{36}\.json', relative.name) or str(relative) in seen):
+                raise ValueError('invalid or duplicate budget extension path')
+            seen.add(str(relative))
+            path = self.path.parent / relative
+            if path.is_symlink() or path.parent.is_symlink() or file_sha256(path) != entry['sha256']:
+                raise ValueError('budget extension SHA mismatch')
+            event = _read_json(path)
+            if (event.get('schema') != 'genmo.closedloop.stage10.budget_extension.v1'
+                    or event.get('previous_extensions') != entries[:index]
+                    or event.get('previous_limits') != entry['previous_limits']
+                    or event.get('new_limits') != entry['new_limits']):
+                raise ValueError('budget extension identity mismatch')
+            old, new = _budget_limits(event['previous_limits']), _budget_limits(event['new_limits'])
+            if previous_limits is not None and old != previous_limits:
+                raise ValueError('budget extension limits are not contiguous')
+            if old == new or any(new[key] < old[key] for key in BUDGET_KEYS):
+                raise ValueError('budget extension must increase limits monotonically')
+            if (not isinstance(event.get('reason'), str) or not event['reason'].strip()
+                    or any(not re.fullmatch(r'[0-9a-f]{64}', event.get(key, ''))
+                           for key in ('checkpoint_sha256', 'config_sha256'))):
+                raise ValueError('budget extension requires reason and checkpoint/config SHA')
+            used, phases = event.get('used', {}), event.get('phases', {})
+            if set(used) != set(BUDGET_KEYS) or not isinstance(phases, dict):
+                raise ValueError('budget extension lacks spent counters')
+            for key in BUDGET_KEYS:
+                count = _integer(used[key], key)
+                if (not previous_used[key] <= count <= min(old[key], self.state['used'][key])
+                        or sum(_integer(phase.get(key, 0), key) for phase in phases.values()) != count):
+                    raise ValueError('budget extension spent counters disagree or roll back')
+            if any(set(phase) - set(BUDGET_KEYS) for phase in phases.values()):
+                raise ValueError('budget extension contains unknown phase counters')
+            previous_limits, previous_used = new, used
+        if entries and previous_limits != self.state['limits']:
+            raise ValueError('persistent limits do not match the budget extension chain')
+
+    def extend_limits(self, limits, *, reason, checkpoint_sha256, config_sha256):
+        """调用者持有RunManager锁并核验最新checkpoint后，显式扩展同一运行预算。"""
+        updated_limits = _budget_limits(limits)
+        if updated_limits == self.limits or any(updated_limits[key] < self.limits[key] for key in BUDGET_KEYS):
+            raise ValueError('explicit budget extension must increase at least one limit and decrease none')
+        if not isinstance(reason, str) or not reason.strip():
+            raise ValueError('explicit budget extension requires a nonempty reason')
+        if any(not isinstance(value, str) or not re.fullmatch(r'[0-9a-f]{64}', value)
+               for value in (checkpoint_sha256, config_sha256)):
+            raise ValueError('explicit budget extension requires checkpoint and config SHA256')
+        self._validate()
+        relative = Path('budget_extensions') / f'{uuid.uuid4()}.json'
+        event = dict(schema='genmo.closedloop.stage10.budget_extension.v1',
+            created_at=datetime.now(timezone.utc).isoformat(), reason=reason.strip(),
+            checkpoint_sha256=checkpoint_sha256, config_sha256=config_sha256,
+            previous_limits=copy.deepcopy(self.limits), new_limits=updated_limits,
+            used=copy.deepcopy(self.state['used']), phases=copy.deepcopy(self.state['phases']),
+            previous_extensions=copy.deepcopy(self.state.get('limit_extensions', [])))
+        path = self.path.parent / relative
+        _atomic_json(path, event, disk_guard=self.disk_guard)
+        descriptor = dict(path=str(relative), sha256=file_sha256(path),
+                          previous_limits=copy.deepcopy(self.limits), new_limits=copy.deepcopy(updated_limits))
+        updated = copy.deepcopy(self.state)
+        updated.update(limits=updated_limits,
+                       limit_extensions=[*updated.get('limit_extensions', []), descriptor])
+        self._save(updated)
+        self.state, self.limits = updated, copy.deepcopy(updated_limits)
+        return copy.deepcopy(descriptor)
+
+    def iteration_capacity(self, optimizer_attempts):
+        """在采集前核对可精确预知的更新预算，避免采完一轮才发现候选次数不足。"""
+        _integer(optimizer_attempts, 'optimizer attempts per iteration', 1)
+        required = dict(accepted_iterations=1, optimizer_attempts=optimizer_attempts)
+        exhausted = {key: dict(required=count, remaining=self.limits[key]-self.state['used'][key])
+                     for key, count in required.items() if self.limits[key]-self.state['used'][key] < count}
+        return dict(can_start=not exhausted, exhausted=exhausted)
 
     def _save(self, value):
         _atomic_json(self.path, value, replace=True, disk_guard=self.disk_guard)
@@ -457,8 +571,11 @@ class RunManager:
         if self._closed:
             raise RuntimeError('run manager is closed; no writer lock is held')
 
-    def budget(self, limits):
+    def budget(self, limits, *, for_extension=False):
         self._ensure_open()
+        if for_extension:
+            # 扩展前先按旧账本构造；入口完成checkpoint和配置身份校验后才提交扩展事件。
+            limits = _read_json(self.run_dir / 'budget.json')['limits']
         if self._budget is None:
             self._budget = TrainingBudget(self.run_dir / 'budget.json', limits, disk_guard=self.disk_guard)
         elif self._budget.limits != limits:
