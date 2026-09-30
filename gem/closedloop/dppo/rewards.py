@@ -108,6 +108,12 @@ class ExecutionReward:
         self.window = deque(maxlen=max(self.activity_steps, self.beat_steps))
         self._last_tick = self._episode = self._previous_target = None
 
+    def seed_previous_target(self, target):
+        """奖励开始前承接预热最后一个实际PD目标，不把预热加入音乐活动窗。"""
+        if self._last_tick is not None or self._previous_target is not None:
+            raise ValueError('previous target can only be seeded before the first reward step')
+        self._previous_target = _array(target, 'previous actual submitted joint target', (21,)).copy()
+
     def _validate_config(self):
         config = self.config
         if config["version"] != "stage9.execution_reward.v2":

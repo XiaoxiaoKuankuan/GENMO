@@ -65,6 +65,8 @@ EDGE35 节拍字段。窗口不足或没有音乐拍点时，beat 明确无效�
 - `c_cmd`：实际提交 PhysX 的 `_joint_pos_target_sim` 在相邻控制区间的差/.02，
   除实际关节限速，平方后 clamp 至 [0,1] 再求均值。reset 后首步为 0、valid=false，
   同时保留 first_step；不是引用 q_ref，也不按 .005 把目标跳变放大。
+  有站立预热时承接预热最后一条真实目标，因此首个音乐步仍计算实际目标变化；
+  只有确实没有上一目标的奖励流首步才返回无效零代价。
 - `c_torque`：明确使用未裁剪 `ImplicitActuator.computed_effort` 的
   `pd_torque_estimate_nm`。每关节 `u=abs(tau)/effort_limit`、
   `h=clip((u-.8)/.2,0,1)^2`；子步成本为 `.5*mean(h)+.5*max(h)`，再对四子步平均。

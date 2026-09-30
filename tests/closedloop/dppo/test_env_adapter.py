@@ -217,6 +217,31 @@ def test_paired_target_required_before_reset_physics(monkeypatch, tmp_path):
     assert backend.calls == []
 
 
+def test_first_music_command_uses_last_warmup_submitted_target(monkeypatch, tmp_path):
+    env, backend = adapter(tmp_path, mode='paused')
+    env.config['stage9']['bc_data_root'] = '/explicit/paired-data'
+    monkeypatch.setattr('gem.closedloop.dppo.env_adapter.load_paired_activity',
+                        lambda *args, **kwargs: target_activity_fixture)
+    original = backend.call
+    def call(method, **payload):
+        if method == 'reset_episode':
+            backend.tick = 0
+            return backend.snapshot()
+        reply = original(method, **payload)
+        if method == 'advance':
+            for row in reply['trace']:
+                if row['tick'] <= 600:
+                    row['joint_position_target'].fill(.2)
+        return reply
+    backend.call = call
+    env.reset_task({'row': {'sample_id': 'x'}, 'dataset': 'Mine'}, env.music, seed=42)
+    transition = env.step()
+    cmd = transition.metadata['reward_details'][0]['components']['cmd']
+    assert cmd['valid'] and not cmd['raw']['first_step']
+    assert cmd['raw']['previous_joint_position_target_rad'] == pytest.approx([.2]*21)
+    assert cmd['score'] == pytest.approx(1.)  # .2/.02/10=1，不能把这个真实跳变免费忽略。
+
+
 def test_bootstrap_preview_does_not_reserve_another_prefix(tmp_path):
     env, backend = adapter(tmp_path)
     result = env.step()

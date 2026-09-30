@@ -92,14 +92,19 @@ class UpperEnvironment:
         self.episode_count += 1
         self.snapshot = self.backend.call('reset_episode', seed=self.seed,
             episode_spec={'sample_id':sample['row']['sample_id'], 'dataset':sample['dataset'], 'mode':self.mode})
+        last_warmup_row = None
         while self.snapshot['tick'] < 600 and not self.snapshot['done']:
-            self._advance(min(25, (600-self.snapshot['tick'])//12))
+            warmup_rows = self._advance(min(25, (600-self.snapshot['tick'])//12))
+            if warmup_rows:
+                last_warmup_row = warmup_rows[-1]
         if self.snapshot['done']:
             raise ExecutionIntegrityError('Warmup terminated before any policy sample')
         self.music_end_tick = 600 + (len(music)*50//30)*12
         self.soft_end_tick = 600 + int(float(self.config['stage9']['episode_seconds'])*600)
         self.reward = ExecutionReward(reward_config, self.music, music_start_tick=600,
                                       target_activity=target)
+        if last_warmup_row is not None:
+            self.reward.seed_previous_target(last_warmup_row.get('joint_position_target'))
         return self.preview_context()[0]
 
     def _request(self):
