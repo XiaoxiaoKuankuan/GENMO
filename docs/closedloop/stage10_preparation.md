@@ -340,3 +340,41 @@ SQLite和fixed targets等完整执行证据采用无损`tar.gz`归档，`archive
 共同更新也不等于端到端8倍吞吐。训练质量仍需后续使用独立val评估；正式启动的
 实际run路径、代码版本、启动时间及检查结果应另行记录，不能把本节命令当作已启动
 七天作业的证据。
+
+### 2026-09-30 七天正式八卡作业已启动
+
+用户授权七天正式训练后，服务器1于北京时间2026-09-30 21:04:42启动新run，
+执行代码GENMO `6374f40` / GMT `b17ab9c`。run首次创建于21:04:53，
+绝对截止为2026-10-07 21:04:53；到期在完整轮次保存边界停止。
+
+- tmux：`stage10_7d_20260930_210442`。
+- 正式run：`/data1/user/liwei/GENMO_outputs/closedloop_stage10/formal_8gpu_7day_20260930_210442`。
+- 持久日志：`/data1/user/liwei/GENMO_outputs/closedloop_stage10/jobs/formal_8gpu_7day_20260930_210442/training.log`。
+- 外层启动记录、脚本和最终退出状态位于同一jobs目录；断开SSH不影响运行。
+- 新run Actor从Stage1 `s350000.pt`权重初始化，Critic/两个优化器新建；先完成正式前2轮，
+  再从该run第2轮完整checkpoint恢复至第3轮，沿用原采样器、RNG、预算和截止时间。
+
+截至21:17:55，第3轮已经接受、保存并归档，后台继续第4轮。全量4765条
+配对数据审计passed，实际训练使用4287条完整train池。前3轮各64转移，
+Actor学习率均选2e-9，joint KL依次0.008900037656、0.004438272735、0.001220771161，
+均满足原0.02上限。更新前ratio-1最大误差均0，各更新阶段八rank Actor/Critic
+参数及buffer一致，两个网络更新彼此隔离，GMT参数/运行统计未变。
+
+首2轮执行归档分别163507881/163418935字节，第3轮164120822字节；
+第三轮已触发有记录的第1轮旧checkpoint回收，initial及第2/3轮完整状态保留。
+前2轮独立CPU只读审计报告为jobs目录`first_two_readonly_audit.json`，
+对完整执行转移、去噪链、GAE、checkpoint字节和计数核验passed；临时解包已清理。
+完整八卡恢复与恢复后真实更新已实际验证，尚未声称七天完成或模型质量提升。
+
+第二轮归档间隔约216秒，按早期速度粗算七天约2800更新；10000只是高预算上限。
+实际完成量受采样/优化/归档速度和故障影响，以持续metrics和latest为准。
+
+查看当前日志，无需重复启动：
+
+```bash
+ssh 6000D-Server-1
+tail -f /data1/user/liwei/GENMO_outputs/closedloop_stage10/jobs/formal_8gpu_7day_20260930_210442/training.log
+```
+
+`latest.json`给出最新完整checkpoint；`metrics/*.jsonl`按session记录每轮更新、
+归档、回收和恢复，`long_run_policy.json`记录不可在恢复时重置的截止时间。
