@@ -23,6 +23,10 @@ stage9:
   # 首次真实joint_sum验收1e-6产生KL2964.81；这是一轮显式保守修正。
   actor_lr: 1.0e-09
   critic_lr: 0.0001
+  # 同一批固定DPPO+BC梯度、同一Adam起点，最多三次独立试探；只保留最大合格候选。
+  # 每次试探均占用iterations预算，不累计三步，也不修改std或joint_sum门槛。
+  actor_lr_candidates: [1.0e-09, 3.0e-09, 1.0e-08]
+  actor_lr_selection: largest_candidate_below_joint_kl_limit
   critic_steps: 20
   critic_batch: 32
   grad_clip_norm: 1.0

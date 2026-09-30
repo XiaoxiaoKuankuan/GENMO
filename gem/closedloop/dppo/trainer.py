@@ -18,6 +18,7 @@ from omegaconf import OmegaConf
 
 from gem.closedloop.checkpoint import load_stage1_checkpoint
 from gem.closedloop.dppo.returns import compute_gae
+from gem.closedloop.dppo.lr_calibration import calibrated_optimizer_step
 from gem.closedloop.frozen_actor import _fingerprint
 from gem.closedloop.training import build_stage1_actor, build_stage1_losses, batch_to_device
 
@@ -76,6 +77,13 @@ def critic_update(critic, optimizer, transitions, targets, *, steps=20, batch_si
     target = targets['returns'].detach().float().to(device)
     losses, norms = [], []
     before = _fingerprint(critic)
+    with torch.no_grad():
+        initial_values = critic(batch_context(transitions, device), torch.tensor(
+            [t.metadata['remaining_music_seconds'] for t in transitions], device=device))
+        initial_mse = float((initial_values-target).square().mean())
+        initial_variance = float(torch.var(target, unbiased=False))
+        initial_ev = None if initial_variance <= 1e-12 else 1.-float(
+            torch.var(target-initial_values, unbiased=False))/initial_variance
     for _ in range(steps):
         indices = torch.randperm(len(transitions),generator=generator)[:batch_size].tolist()
         items = [transitions[i] for i in indices]
@@ -94,6 +102,7 @@ def critic_update(critic, optimizer, transitions, targets, *, steps=20, batch_si
         variance = float(torch.var(target,unbiased=False))
         ev = None if variance <= 1e-12 else 1.-float(torch.var(target-values,unbiased=False))/variance
     return dict(losses=losses,gradient_norms=norms,parameters_changed=before!=_fingerprint(critic),
+                initial_mse=initial_mse,initial_explained_variance=initial_ev,
                 mse=float((values-target).square().mean()),explained_variance=ev,
                 value_range=[float(values.min()),float(values.max())],return_range=[float(target.min()),float(target.max())])
 
@@ -212,7 +221,8 @@ def analytic_kl(policy, transitions):
 
 
 def actor_update(policy, optimizer, transitions, targets, *, bc=None, bc_weight=.1, clip=.01,
-                 gamma_denoising=.99, grad_clip_norm=1.):
+                 gamma_denoising=.99, grad_clip_norm=1., learning_rate_candidates=None,
+                 kl_limit=.02, reserve_attempt=None, calibration_progress=None):
     _validate_actor_transitions(policy, transitions)
     if not math.isfinite(clip) or not 0 < clip < 1 or not 0 < gamma_denoising <= 1:
         raise ValueError('Invalid PPO clip or denoising discount')
@@ -263,7 +273,20 @@ def actor_update(policy, optimizer, transitions, targets, *, bc=None, bc_weight=
         bc_report=bc.backward(actor,weight=bc_weight)
     actor.eval()
     gradient=float(torch.nn.utils.clip_grad_norm_(actor.parameters(),grad_clip_norm,error_if_nonfinite=True))
-    optimizer.step()
+    calibration = None
+    if learning_rate_candidates:
+        def progress(event):
+            print('[LR_CALIBRATION] '+str({key:value for key,value in event.items()
+                if key!='candidate'}), flush=True)
+            if calibration_progress is not None:
+                calibration_progress(event)
+        calibration = calibrated_optimizer_step(actor, optimizer,
+            evaluate_kl=lambda: analytic_kl(policy, transitions), candidates=learning_rate_candidates,
+            kl_limit=kl_limit, reserve_attempt=reserve_attempt, progress=progress)
+    else:
+        if reserve_attempt is not None:
+            reserve_attempt()
+        optimizer.step()
     changed=initial!=_fingerprint(actor)
     if not changed:
         raise RuntimeError('Actor optimizer step did not change any parameter')
@@ -272,6 +295,7 @@ def actor_update(policy, optimizer, transitions, targets, *, bc=None, bc_weight=
         row.update(ppo_loss_contribution=loss, denoising_discount=gamma_denoising**(policy.steps-1-row['step_index']))
     return dict(ppo_loss=loss_sum,ppo_only_gradient_norm=float(ppo_norm),ppo_module_gradients=ppo_modules,
                 total_gradient_norm=gradient,parameters_changed=changed,optimizer_steps=1,
+                lr_calibration=calibration,
                 ratio_range=[ratios['ratio_quantiles']['min'],ratios['ratio_quantiles']['max']],bc=bc_report,
                 included_upper_transitions=len(selected), excluded_upper_transitions=len(transitions)-len(selected),
                 ratio_scope='before_single_optimizer_step', **ratios)

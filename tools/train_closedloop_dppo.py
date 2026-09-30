@@ -3,7 +3,9 @@
 本入口默认只采集，使用 train 音乐、单环境 latency 执行以及独立 Stage9 输出目录。
 真实环境始终由另一个解释器运行既有 GMT worker；Actor、Critic 和优化器只在本进程。
 preflight 不加载大模型或启动仿真；train 才按校准、零更新对照、64条采集、Critic、
-一次DPPO及BC、更新后对照的顺序运行。resume-check 恢复完整状态后重建 worker 并
+一次DPPO及BC、更新后对照的顺序运行。可选学习率校准复用同批固定梯度，从同一
+模型和优化器状态试探最多三个候选，只保留满足原联合KL门槛的最大候选；每次试探
+独立计入预算，checkpoint和恢复报告绑定实际选中的学习率。resume-check 恢复完整状态后重建 worker 并
 采集16条新转移，不重复使用旧 Buffer。所有模式共享不可重置的磁盘预算。
 """
 from __future__ import annotations
@@ -68,6 +70,17 @@ def configuration(path):
             raise ValueError(f'This bounded acceptance requires {key}={value}')
     if not math.isfinite(float(s['actor_lr'])) or not 0<float(s['actor_lr'])<=1e-6:
         raise ValueError('Bounded Actor learning rate must be in (0,1e-6]')
+    candidates=s.get('actor_lr_candidates',[])
+    if (not isinstance(candidates,list) or len(candidates)>3 or any(
+            isinstance(v,bool) or not isinstance(v,(int,float)) or not math.isfinite(v)
+            or not 0<v<=1e-6 for v in candidates)
+            or any(a>=b for a,b in zip(candidates,candidates[1:]))):
+        raise ValueError('Actor learning-rate candidates require up to three increasing finite rates')
+    if candidates and (candidates[0]!=s['actor_lr'] or len(candidates)>s['max_iterations']
+            or s.get('actor_lr_selection')!='largest_candidate_below_joint_kl_limit'):
+        raise ValueError('Actor learning-rate calibration must preserve base rate, rule and attempt budget')
+    if s['critic_steps']!=20 or s['critic_batch']!=32 or s['guidance_scale']!=2.5:
+        raise ValueError('This bounded acceptance requires critic_steps=20, critic_batch=32 and guidance_scale=2.5')
     if s['execution_mode'] not in ('latency','paused'):
         raise ValueError('Invalid execution mode')
     if any(s[key]>limit for key,limit in (('max_generations',256),('max_control_steps',10000),('max_iterations',3))):
@@ -196,6 +209,7 @@ def main(argv=None):
     budget=RunBudget(args.budget_file or output/'budget.json',generations=s['max_generations'],control_steps=s['max_control_steps'],iterations=s['max_iterations'])
     sampler=TrainMusicSampler(config['paths']['data_root'],s['music_selection'],seed=s['seed'])
     workers=journal=backend=check=None
+    lr_progress=None
     report=dict(mode=args.mode,status='running',stage9_passed=False)
     code=0
     try:
@@ -205,7 +219,7 @@ def main(argv=None):
             raise RuntimeError('Assets or train music did not pass preflight')
         stage9_sources={
             'genmo_repo':[*(f'gem/closedloop/dppo/{name}.py' for name in
-                ('__init__','policy','buffer','rewards','critic','returns','music_tasks','target_activity','env_adapter','rpc','budget','trainer','checkpoint')),
+                ('__init__','policy','buffer','rewards','critic','returns','music_tasks','target_activity','env_adapter','rpc','budget','trainer','checkpoint','lr_calibration')),
                 'tools/train_closedloop_dppo.py','gem/closedloop/losses.py','gem/closedloop/stage1_dataset.py',
                 'configs/closedloop/stage9_dppo_smoke.yaml','configs/closedloop/stage9_dppo_server1.yaml'],
             'gmt_repo':['source/NoetixRobot/NoetixRobot/tasks/mimic/mimic_noetix_bumi4340_mha_sonic/closedloop/execution_journal.py']}
@@ -220,11 +234,11 @@ def main(argv=None):
             proprio_scales=tuple(train_config.model.proprio_scales)).to(config['runtime']['genmo_device'])
         actor_optimizer=torch.optim.AdamW(actor.parameters(),lr=s['actor_lr'],weight_decay=0.)
         critic_optimizer=torch.optim.AdamW(critic.parameters(),lr=s['critic_lr'],weight_decay=0.)
-        policy=DPPODiffusionPolicy(actor,steps=s['denoising_steps'],eta=s['eta'],std_floor=s['std_floor'],guidance_scale=2.5)
+        policy=DPPODiffusionPolicy(actor,steps=s['denoising_steps'],eta=s['eta'],std_floor=s['std_floor'],guidance_scale=s['guidance_scale'])
         bc=SupervisedAnchor(config,actor,train_config) if args.mode in ('train','resume-check') else None
         generator=torch.Generator().manual_seed(s['seed']+2002)
         identity=dict(assets=check['asset_sha256'],actor_interface=dict(actor.interface_config),
-                      sampler=dict(steps=s['denoising_steps'],eta=s['eta'],std_floor=s['std_floor'],guidance_scale=2.5),
+                      sampler=dict(steps=s['denoising_steps'],eta=s['eta'],std_floor=s['std_floor'],guidance_scale=s['guidance_scale']),
                       environment=config['environment'],termination=config['termination'],
                       source_manifest_sha256=provenance['source_manifest_sha256'],
                       reward=s['reward'],training_contract={k:s[k] for k in
@@ -232,6 +246,9 @@ def main(argv=None):
                       music_selection_sha256=sampler.selection_sha256,
                       bc_manifests={name:sha256_file(Path(s['bc_data_root'])/name/'manifests/train.jsonl')
                           for name in ('AIST++','AIOZ-GDANCE','FineDance','Mine')})
+        if s.get('actor_lr_candidates'):
+            identity['training_contract'].update(actor_lr_candidates=s['actor_lr_candidates'],
+                actor_lr_selection=s['actor_lr_selection'])
         state=dict(iteration=0,policy_version=0,actor_updates=0,critic_updates=0,buffer_size=0,pending_plan=False)
         samplers=dict(music=sampler)
         if bc is not None:
@@ -258,7 +275,12 @@ def main(argv=None):
             env.attempt=max(state['attempt'],budget.state_dict()['used']['generations'])
             env.episode_count=state['episode_count']
             report['resume']=dict(restored_full_state=True,new_backend_session_id=backend.session_id,
-                restored_actor_updates=state['actor_updates'],old_buffer_discarded=True)
+                restored_actor_updates=state['actor_updates'],old_buffer_discarded=True,
+                actor_optimizer_lrs=[group['lr'] for group in actor_optimizer.param_groups],
+                critic_optimizer_lrs=[group['lr'] for group in critic_optimizer.param_groups])
+            if state.get('selected_actor_lr') is not None and any(
+                    group['lr']!=state['selected_actor_lr'] for group in actor_optimizer.param_groups):
+                raise RuntimeError('Restored Actor optimizer learning rate differs from accepted candidate')
         else:
             report['calibration']=calibrate(env,sampler,report_output)
             # 校准和对照不得消费正式采集音乐采样顺序。
@@ -285,22 +307,37 @@ def main(argv=None):
                 torch.save(targets,report_output/'fixed_targets.pt')
                 torch.save(buffer.transitions,report_output/'rollout.pt')
                 initial_actor=_fingerprint(actor)
-                report['critic']=critic_update(critic,critic_optimizer,buffer.transitions,targets,generator=generator)
+                report['critic']=critic_update(critic,critic_optimizer,buffer.transitions,targets,
+                    steps=s['critic_steps'],batch_size=s['critic_batch'],generator=generator)
                 report['critic']['actor_unchanged']=initial_actor==_fingerprint(actor)
                 if not report['critic']['actor_unchanged']:
                     raise RuntimeError('Value loss altered Actor parameters')
-                state['critic_updates']+=20
+                state['critic_updates']+=s['critic_steps']
             if args.mode=='train':
-                budget.reserve('update',iterations=1)
                 before_critic=_fingerprint(critic)
+                lr_progress=dict(status='running',events=[])
+                def record_lr_progress(event):
+                    lr_progress['events'].append(event)
+                    atomic_json(report_output/'lr_calibration_progress.json',lr_progress)
                 report['actor']=actor_update(policy,actor_optimizer,buffer.transitions,targets,bc=bc,bc_weight=s['bc_weight'],
-                    clip=s['ppo_clip'],gamma_denoising=s['gamma_denoising'],grad_clip_norm=s['grad_clip_norm'])
+                    clip=s['ppo_clip'],gamma_denoising=s['gamma_denoising'],grad_clip_norm=s['grad_clip_norm'],
+                    learning_rate_candidates=s.get('actor_lr_candidates'),kl_limit=s['kl_stop_joint'],
+                    reserve_attempt=lambda:budget.reserve('update',iterations=1),
+                    calibration_progress=record_lr_progress)
+                if report['actor'].get('lr_calibration'):
+                    atomic_json(report_output/'lr_calibration.json',report['actor']['lr_calibration'])
+                    lr_progress['status']='completed'
+                    atomic_json(report_output/'lr_calibration_progress.json',lr_progress)
                 report['actor']['critic_unchanged']=before_critic==_fingerprint(critic)
                 report['kl']=analytic_kl(policy,buffer.transitions)
+                if not report['actor']['critic_unchanged']:
+                    raise RuntimeError('Actor update altered Critic parameters')
                 if report['kl']['mean_joint_kl']>s['kl_stop_joint']:
                     torch.save(dict(actor=actor.state_dict(),report=report),report_output/'failed_update_candidate.pt')
                     raise RuntimeError('Joint analytic KL exceeded configured stop threshold')
                 state['actor_updates']+=1;state['iteration']+=1;state['policy_version']+=1
+                state['selected_actor_lr']=float(actor_optimizer.param_groups[0]['lr'])
+                state['optimizer_attempts']=(report['actor'].get('lr_calibration') or {}).get('attempt_count',1)
                 env.policy_version=state['policy_version'];env.iteration=state['iteration']
                 report['comparison_C']=comparison(env,sampler,'C',report_output)
             buffer.clear()
@@ -329,6 +366,13 @@ def main(argv=None):
     except BaseException as exc:
         code=1
         report.update(status='failed',error=dict(type=type(exc).__name__,message=str(exc),traceback=traceback.format_exc()))
+        calibration_failure=getattr(exc,'lr_calibration_report',None)
+        if calibration_failure is not None:
+            report['lr_calibration_failure']=calibration_failure
+            atomic_json(report_output/'lr_calibration_failure.json',calibration_failure)
+        if lr_progress is not None:
+            lr_progress['status']='failed'
+            atomic_json(report_output/'lr_calibration_progress.json',lr_progress)
         traceback.print_exc()
     finally:
         if workers is not None:

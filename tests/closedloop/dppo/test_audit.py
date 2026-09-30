@@ -11,6 +11,10 @@ Actor/Critic、不初始化 GPU、不运行物理仿真。主采集 64 条与恢
 门控被篡改、一致性超容差、诊断功率被赋奖励权重、版本错配均不能通过；第一版
 归档仍按自己的旧公式核验，不把旧验收重新标成第二版。还检查 WAL 未 checkpoint 时的只读快照、源文件无变化，以及
 大 checkpoint 的 mmap 参数和显式输出拒绝覆盖语义。所有文件仅写 pytest 临时目录。
+
+可选学习率搜索夹具保留三次同起点候选中的最大合格一步，同时把三次尝试完整记入
+预算。故障注入覆盖选择错误、KL与胜出权重不对应、梯度/起点未复用、checkpoint及
+恢复学习率错配、候选身份遗漏和少记尝试预算；原无候选归档仍保持兼容。
 """
 from __future__ import annotations
 
@@ -372,3 +376,153 @@ def test_wal_snapshot_is_read_only_and_includes_uncheckpointed_replies(tmp_path)
         assert report["counts"]["mutations"] == 1
         after = {p.name: (p.stat().st_size, p.stat().st_mtime_ns, hashlib.sha256(p.read_bytes()).hexdigest()) for p in tmp_path.iterdir()}
         assert after == before
+
+
+@pytest.fixture
+def calibrated_run_dir(run_dir):
+    """三次尝试仅保留第二候选；第三次因KL超限拒绝，所有预算仍累计三次。"""
+    paths = [run_dir / phase / 'resolved_config.yaml' for phase in ('acceptance', 'resume_check')]
+    for path in paths:
+        config = yaml.safe_load(path.read_text())
+        config['stage9'].update(actor_lr_candidates=[1e-9, 3e-9, 1e-8],
+            actor_lr_selection='largest_candidate_below_joint_kl_limit', critic_lr=1e-4)
+        path.write_text(yaml.safe_dump(config))
+    main = json.loads((run_dir / 'acceptance' / 'summary.json').read_text())
+    candidates = []
+    for lr, factor, accepted in ((1e-9, 1., True), (3e-9, 9., True), (1e-8, 100., False)):
+        kl = {key: value * factor if isinstance(value, float) else value for key, value in main['kl'].items()}
+        change = dict(changed_count=50, parameter_count=100, changed_fraction=.5,
+                      l2=lr * 1e6, max_abs=lr * 1e5, per_module=dict(denoiser=dict(changed_count=50)))
+        candidates.append(dict(lr=lr, kl=kl, parameter_change=change, accepted=accepted))
+    main['actor']['lr_calibration'] = dict(candidates=candidates, selected_lr=3e-9, attempt_count=3,
+        accepted_updates=1, selection_rule='largest_candidate_below_joint_kl_limit', kl_limit=.02,
+        base_state_restored_per_candidate=True, gradients_reused=True)
+    main['kl'] = copy.deepcopy(candidates[1]['kl'])
+    resume = json.loads((run_dir / 'resume_check' / 'summary.json').read_text())
+    resume['resume'].update(actor_optimizer_lrs=[3e-9], critic_optimizer_lrs=[1e-4])
+    checkpoint_path = run_dir / 'checkpoints' / 'stage9_000001.pt'
+    checkpoint = torch.load(checkpoint_path, weights_only=False)
+    checkpoint['config'] = copy.deepcopy(config)
+    checkpoint['identity']['training_contract'].update(
+        actor_lr_candidates=config['stage9']['actor_lr_candidates'],
+        actor_lr_selection=config['stage9']['actor_lr_selection'])
+    checkpoint['state'].update(selected_actor_lr=3e-9, optimizer_attempts=3)
+    checkpoint['actor_optimizer'] = dict(param_groups=[dict(lr=3e-9)])
+    checkpoint['critic_optimizer'] = dict(param_groups=[dict(lr=1e-4)])
+    ledger = json.loads((run_dir / 'budget.json').read_text())
+    for budget in (main['budget'], resume['budget'], checkpoint['state']['budget'], ledger):
+        budget['used']['iterations'] = 3
+        budget['phases']['update']['iterations'] = 3
+    torch.save(checkpoint, checkpoint_path)
+    write_json(run_dir / 'acceptance' / 'summary.json', main)
+    write_json(run_dir / 'resume_check' / 'summary.json', resume)
+    write_json(run_dir / 'budget.json', ledger)
+    return run_dir
+
+
+def test_calibrated_update_complete_checkpoint_resume_and_attempts(calibrated_run_dir):
+    report = audit.audit_run(calibrated_run_dir)
+    assert report['status'] == 'passed', report
+    metadata = check(report, 'checkpoint.metadata')['details']
+    assert metadata['optimizer_lrs'] == dict(actor=[3e-9], critic=[1e-4])
+    assert metadata['state']['actor_updates'] == metadata['state']['iteration'] == 1
+    assert check(report, 'main.network_updates')['details']['lr_calibration']['optimizer_attempts'] == 3
+    assert check(report, 'budget.cumulative')['details']['observed_lower_bound']['iterations'] == 3
+    assert check(report, 'resume.full_state_and_new_physics')['details']['optimizer_lrs']['actor'] == [3e-9]
+
+
+@pytest.mark.parametrize('mutation,error', [
+    (lambda c: c.update(selected_lr=1e-9), 'largest qualifying candidate'),
+    (lambda c: c.update(selected_lr=3.1e-9), 'largest qualifying candidate'),
+    (lambda c: c.update(attempt_count=2), 'attempt count'),
+    (lambda c: c.update(accepted_updates=3), 'exactly one accepted'),
+    (lambda c: c.update(base_state_restored_per_candidate=False), 'same initial state'),
+    (lambda c: c.update(gradients_reused=False), 'one fixed gradient'),
+    (lambda c: c.update(kl_limit=.2), 'candidate KL threshold'),
+    (lambda c: c['candidates'][2].update(accepted=True), 'candidate acceptance'),
+    (lambda c: c['candidates'][0].update(lr=2e-9), 'learning-rate order'),
+    (lambda c: c['candidates'][0]['parameter_change'].update(changed_fraction=.7), 'changed parameter fraction'),
+    (lambda c: c['candidates'][0]['parameter_change'].update(l2=0.), 'delta norms'),
+    (lambda c: c['candidates'][0]['parameter_change'].update(per_module={}), 'per-module parameter deltas'),
+    (lambda c: c['candidates'][0]['kl'].update(mean_joint_kl=float('nan')), 'nonfinite'),
+])
+def test_lr_candidate_evidence_cannot_fake_an_accepted_update(calibrated_run_dir, mutation, error):
+    path = calibrated_run_dir / 'acceptance' / 'summary.json'
+    mutate_json(path, lambda s: mutation(s['actor']['lr_calibration']))
+    # 非有限JSON在读取层即被拒绝，其余都应在候选独立检查失败。
+    report = audit.audit_run(calibrated_run_dir)
+    assert report['status'] == 'failed'
+    name = 'main.summary.read' if error == 'nonfinite' else 'main.network_updates'
+    assert error in check(report, name)['error']
+
+
+def test_zero_parameter_change_is_a_rejected_candidate(calibrated_run_dir):
+    def zero_first(summary):
+        candidate = summary['actor']['lr_calibration']['candidates'][0]
+        candidate['accepted'] = False
+        candidate['parameter_change'].update(changed_count=0, changed_fraction=0., l2=0., max_abs=0.)
+    mutate_json(calibrated_run_dir / 'acceptance' / 'summary.json', zero_first)
+    report = audit.audit_run(calibrated_run_dir)
+    assert report['status'] == 'passed', report
+
+
+def test_selected_candidate_requires_final_kl_recomputation(calibrated_run_dir):
+    mutate_json(calibrated_run_dir / 'acceptance' / 'summary.json', lambda s: s['kl'].update(max_joint_kl=.123))
+    report = audit.audit_run(calibrated_run_dir)
+    assert report['status'] == 'failed'
+    assert 'final KL differs from selected candidate' in check(report, 'main.network_updates')['error']
+
+
+def test_configured_calibration_cannot_omit_the_report(calibrated_run_dir):
+    mutate_json(calibrated_run_dir / 'acceptance' / 'summary.json', lambda s: s['actor'].pop('lr_calibration'))
+    assert 'calibration report missing' in check(audit.audit_run(calibrated_run_dir), 'main.network_updates')['error']
+
+
+@pytest.mark.parametrize('mutation,error', [
+    (lambda p: p['state'].update(selected_actor_lr=1e-9), 'checkpoint selected learning rate'),
+    (lambda p: p['state'].update(optimizer_attempts=1), 'optimizer attempt count'),
+    (lambda p: p['actor_optimizer']['param_groups'][0].update(lr=1e-9), 'checkpoint Actor'),
+    (lambda p: p['critic_optimizer']['param_groups'][0].update(lr=2e-4), 'checkpoint Critic'),
+    (lambda p: p['actor_optimizer'].update(param_groups=[]), 'parameter groups missing'),
+])
+def test_checkpoint_must_keep_the_winning_optimizer(calibrated_run_dir, mutation, error):
+    path = calibrated_run_dir / 'checkpoints' / 'stage9_000001.pt'
+    payload = torch.load(path, weights_only=False)
+    mutation(payload)
+    torch.save(payload, path)
+    report = audit.audit_run(calibrated_run_dir)
+    assert report['status'] == 'failed'
+    assert error in check(report, 'checkpoint.metadata')['error']
+
+
+def test_candidate_rules_are_bound_to_checkpoint_identity(calibrated_run_dir):
+    path = calibrated_run_dir / 'checkpoints' / 'stage9_000001.pt'
+    payload = torch.load(path, weights_only=False)
+    payload['identity']['training_contract'].pop('actor_lr_candidates')
+    torch.save(payload, path)
+    assert 'candidate identity missing' in check(audit.audit_run(calibrated_run_dir), 'checkpoint.identity_main')['error']
+
+
+@pytest.mark.parametrize('field,rates', [('actor_optimizer_lrs', [1e-9]), ('critic_optimizer_lrs', [2e-4]),
+                                      ('actor_optimizer_lrs', [])])
+def test_resume_must_restore_actual_winning_learning_rates(calibrated_run_dir, field, rates):
+    mutate_json(calibrated_run_dir / 'resume_check' / 'summary.json', lambda s: s['resume'].update({field: rates}))
+    report = audit.audit_run(calibrated_run_dir)
+    assert report['status'] == 'failed'
+    assert 'optimizer learning' in check(report, 'resume.full_state_and_new_physics')['error']
+
+
+def test_budget_counts_all_candidates_even_when_only_one_is_kept(calibrated_run_dir):
+    def undercount(budget):
+        budget['used']['iterations'] = 1
+        budget['phases']['update']['iterations'] = 1
+    for phase in ('acceptance', 'resume_check'):
+        mutate_json(calibrated_run_dir / phase / 'summary.json', lambda s: undercount(s['budget']))
+    mutate_json(calibrated_run_dir / 'budget.json', undercount)
+    path = calibrated_run_dir / 'checkpoints' / 'stage9_000001.pt'
+    payload = torch.load(path, weights_only=False)
+    undercount(payload['state']['budget'])
+    torch.save(payload, path)
+    report = audit.audit_run(calibrated_run_dir)
+    assert report['status'] == 'failed'
+    assert 'budget undercounts optimizer attempts' in check(report, 'budget.cumulative')['error']

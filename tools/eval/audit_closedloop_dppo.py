@@ -17,6 +17,10 @@ SQLite 原库及 WAL 先复制到临时目录，避免只读 SQLite 连接仍创
 所有输入保持不变；只有显式 --output 指定的新文件会被排他创建，已有文件不覆盖。
 源码与资产冻结结论来自归档清单、运行末尾复核及恢复身份的交叉核对，不冒充重新
 哈希当前工作树，也不证明网络重试场景已覆盖或训练质量已收敛。
+
+显式启用学习率候选时，另核验同一起点/梯度、候选KL与最大合格选择、一次保留更新
+及所有候选尝试预算。checkpoint仅额外读取优化器参数组学习率，不扫描大张量；恢复
+后的实际学习率必须与胜出候选一致。没有候选配置的既有归档保持原验收语义。
 """
 from __future__ import annotations
 
@@ -132,6 +136,86 @@ def check_probability(summary):
     return {key: report[key] for key in tolerances}
 
 
+def check_lr_calibration(summary, config):
+    """独立核对可选学习率试验；拒绝用最后一次试验或累计更新冒充最大合格候选。"""
+    configured = config['stage9'].get('actor_lr_candidates')
+    calibration = summary.get('actor', {}).get('lr_calibration')
+    if not configured and calibration is None:
+        return None
+    require(isinstance(configured, list) and 1 <= len(configured) <= HARD_LIMITS['iterations'],
+            'learning-rate candidates missing or outside bounded attempt count')
+    learning_rates = [number(value, 'candidate learning rate') for value in configured]
+    require(all(0 < value <= 1e-6 for value in learning_rates)
+            and learning_rates == sorted(set(learning_rates)), 'candidate learning rates must be positive, sorted and unique')
+    rule = 'largest_candidate_below_joint_kl_limit'
+    require(config['stage9'].get('actor_lr_selection') == rule, 'unsupported learning-rate selection rule')
+    require(isinstance(calibration, dict), 'configured learning-rate calibration report missing')
+    require(calibration.get('selection_rule') == rule, 'reported learning-rate selection rule differs')
+    require(calibration.get('base_state_restored_per_candidate') is True, 'candidates did not restore the same initial state')
+    require(calibration.get('gradients_reused') is True, 'candidates did not reuse one fixed gradient')
+    attempts = integer(calibration.get('attempt_count'), 'optimizer attempt count')
+    require(attempts == len(learning_rates), 'candidate attempt count differs from configured rates')
+    require(type(calibration.get('accepted_updates')) is int and calibration['accepted_updates'] == 1,
+            'candidate search must retain exactly one accepted update')
+    limit = number(config['stage9']['kl_stop_joint'], 'KL threshold')
+    require(0 < limit <= .02, 'joint KL threshold exceeds bounded acceptance contract')
+    near(calibration.get('kl_limit'), limit, 'candidate KL threshold', atol=1e-12)
+    candidates = calibration.get('candidates')
+    require(isinstance(candidates, list) and len(candidates) == attempts, 'candidate evidence count differs from attempts')
+    accepted = []
+    for expected_lr, candidate in zip(learning_rates, candidates):
+        lr = number(candidate['lr'], 'candidate learning rate')
+        near(lr, expected_lr, 'candidate learning-rate order', atol=0.)
+        change = candidate['parameter_change']
+        changed = integer(change['changed_count'], 'changed parameter count')
+        total = integer(change['parameter_count'], 'parameter count')
+        require(total > 0 and changed <= total, 'invalid changed parameter count')
+        near(change['changed_fraction'], changed / total, 'changed parameter fraction', atol=1e-12)
+        l2, maximum = number(change['l2'], 'parameter delta L2'), number(change['max_abs'], 'maximum parameter delta')
+        require((l2 > 0 and maximum > 0) if changed else (l2 == 0 and maximum == 0),
+                'parameter delta norms disagree with changed count')
+        require(maximum <= l2 + 1e-12, 'maximum parameter delta exceeds total L2')
+        require(isinstance(change.get('per_module'), dict) and bool(change['per_module']), 'per-module parameter deltas missing')
+        kl = candidate['kl']
+        require(kl['joint_kl_scope'] == 'sum_free_coordinates_per_internal_transition_then_mean',
+                'candidate KL uses wrong reduction')
+        mean = number(kl['mean_joint_kl'], 'candidate mean joint KL')
+        require(mean >= -1e-10, 'negative candidate mean joint KL')
+        for name in ('p95_joint_kl', 'max_joint_kl', 'mean_per_dimension_kl', 'mean_chain_joint_kl'):
+            require(number(kl[name], name) >= -1e-10, f'negative candidate {name}')
+        near(kl['mean_chain_joint_kl'], mean * config['stage9']['denoising_steps'], 'candidate chain KL', atol=1e-7)
+        qualifies = changed > 0 and mean <= limit
+        require(type(candidate.get('accepted')) is bool and candidate['accepted'] == qualifies,
+                'candidate acceptance differs from finite parameter change and joint KL gate')
+        if qualifies:
+            accepted.append(candidate)
+    require(bool(accepted), 'no changed candidate passed joint KL gate')
+    selected = max(accepted, key=lambda item: item['lr'])
+    near(calibration.get('selected_lr'), selected['lr'], 'selected learning rate must be largest qualifying candidate', atol=0.)
+    final_kl = summary.get('kl')
+    require(isinstance(final_kl, dict), 'final restored candidate KL missing')
+    require(final_kl.get('joint_kl_scope') == selected['kl']['joint_kl_scope'], 'final KL scope differs from selected candidate')
+    for name in ('mean_joint_kl', 'p95_joint_kl', 'max_joint_kl', 'mean_per_dimension_kl', 'mean_chain_joint_kl'):
+        near(final_kl[name], selected['kl'][name], f'final KL differs from selected candidate: {name}', atol=1e-10)
+    return dict(selected_lr=float(selected['lr']), optimizer_attempts=attempts, accepted_updates=1,
+                selection_rule=rule, fixed_gradient_candidates=True)
+
+
+def optimizer_group_lrs(optimizer, label):
+    """只读参数组小元数据；不访问Adam动量或模型张量的实际内容。"""
+    groups = optimizer.get('param_groups')
+    require(isinstance(groups, list) and bool(groups), f'{label}: optimizer parameter groups missing')
+    rates = [number(group.get('lr'), f'{label} learning rate') for group in groups]
+    require(all(rate > 0 for rate in rates), f'{label}: nonpositive optimizer learning rate')
+    return rates
+
+
+def check_group_lrs(actual, expected, label):
+    require(isinstance(actual, list) and len(actual) == len(expected), f'{label}: optimizer learning-rate groups differ')
+    for actual_lr, expected_lr in zip(actual, expected):
+        near(actual_lr, expected_lr, f'{label}: optimizer learning rate differs', atol=0.)
+
+
 def check_frozen(summary, source, preflight):
     need(summary, "summary"); need(source, "source identity"); need(preflight, "preflight")
     require(preflight.get("ready") is True, "preflight was not ready")
@@ -177,6 +261,17 @@ def checkpoint_metadata(root, summary):
     result = {key: copy.deepcopy(payload[key]) for key in ("state", "identity", "config", "restore_environment")}
     result.update(path=str(path), rng_keys=sorted(payload["rng"]), sampler_names=sorted(payload["samplers"]),
                   optimizer_layout_names=sorted(payload["optimizer_layout"]))
+    calibration = check_lr_calibration(summary, result['config'])
+    if calibration is not None:
+        rates = {name: optimizer_group_lrs(payload[f'{name}_optimizer'], name) for name in ('actor', 'critic')}
+        check_group_lrs(rates['actor'], [calibration['selected_lr']] * len(rates['actor']), 'checkpoint Actor')
+        check_group_lrs(rates['critic'], [result['config']['stage9']['critic_lr']] * len(rates['critic']), 'checkpoint Critic')
+        near(result['state'].get('selected_actor_lr'), calibration['selected_lr'], 'checkpoint selected learning rate', atol=0.)
+        require(type(result['state'].get('optimizer_attempts')) is int
+                and result['state']['optimizer_attempts'] == calibration['optimizer_attempts'],
+                'checkpoint optimizer attempt count differs from candidate report')
+        result['optimizer_lrs'] = rates
+        result['lr_calibration'] = calibration
     del payload
     require(result["restore_environment"] == "new_worker_session_and_reset", "resume must reconstruct physics in a new worker")
     state = result["state"]
@@ -490,8 +585,12 @@ def check_updates(summary, config):
         require(isinstance(bc, dict) and bc.get("bc_update_steps") == 1, "enabled original-pair supervision was not used")
         near(bc["weight"], config["stage9"]["bc_weight"], "BC weight")
         number(bc["loss"], "BC loss")
-    return dict(ppo_only_gradient_norm=actor["ppo_only_gradient_norm"], total_gradient_norm=actor["total_gradient_norm"],
-                actor_updates=1, critic_updates=20, actor_critic_isolation=True)
+    result = dict(ppo_only_gradient_norm=actor["ppo_only_gradient_norm"], total_gradient_norm=actor["total_gradient_norm"],
+                  actor_updates=1, critic_updates=20, actor_critic_isolation=True)
+    calibration = check_lr_calibration(summary, config)
+    if calibration is not None:
+        result['lr_calibration'] = calibration
+    return result
 
 
 def check_kl(summary, config):
@@ -519,6 +618,9 @@ def check_identity(checkpoint, phases):
         require(identity["assets"] == phase["preflight"]["asset_sha256"], f"{name}: checkpoint/assets mismatch")
         config = phase["config"]
         require(identity["reward"] == config["stage9"]["reward"], f"{name}: checkpoint/reward mismatch")
+        if config['stage9'].get('actor_lr_candidates'):
+            require(all(key in identity['training_contract'] for key in ('actor_lr_candidates', 'actor_lr_selection')),
+                    f'{name}: learning-rate candidate identity missing')
         require(all(config["stage9"][key] == value for key, value in identity["training_contract"].items()), f"{name}: training contract mismatch")
         for key in ("environment", "termination"):
             require(identity[key] == config[key], f"{name}: {key} mismatch")
@@ -542,7 +644,12 @@ def check_resume(checkpoint, phases):
     require(not (set(main["journal"]["sessions"]) & set(resume["journal"]["sessions"])), "resume reused a physical worker session")
     require(proof["new_backend_session_id"] in resume["journal"]["sessions"], "resume report session not found in journal")
     require("actor" not in summary and "critic" not in summary, "resume-check unexpectedly updated parameters")
-    return dict(main_policy_version=old, resume_policy_version=new, new_physics_session=True)
+    result = dict(main_policy_version=old, resume_policy_version=new, new_physics_session=True)
+    if checkpoint.get('lr_calibration') is not None:
+        for name in ('actor', 'critic'):
+            check_group_lrs(proof.get(f'{name}_optimizer_lrs'), checkpoint['optimizer_lrs'][name], f'restored {name}')
+        result['optimizer_lrs'] = checkpoint['optimizer_lrs']
+    return result
 
 
 def check_budget(phases, ledger, checkpoint):
@@ -557,6 +664,12 @@ def check_budget(phases, ledger, checkpoint):
         snapshots.append(("ledger", ledger))
     if not snapshots:
         raise NotRun("no budget snapshot")
+    main_actor = (phases['main']['summary'] or {}).get('actor')
+    attempts = 0
+    if main_actor is not None:
+        calibration = main_actor.get('lr_calibration')
+        attempts = integer(calibration['attempt_count'], 'budget optimizer attempts') if calibration is not None else 1
+        require(1 <= attempts <= HARD_LIMITS['iterations'], 'invalid optimizer attempt budget')
     previous = None
     for label, current in snapshots:
         require(set(current["limits"]) == set(HARD_LIMITS) and set(current["used"]) == set(HARD_LIMITS), f"{label}: incomplete budget counters")
@@ -565,6 +678,7 @@ def check_budget(phases, ledger, checkpoint):
             used = integer(current["used"][key], f"{label} {key} used")
             require(0 < limit <= hard and used <= limit, f"{label}: {key} hard limit exceeded")
             require(sum(integer(p.get(key, 0), f"phase {key}") for p in current["phases"].values()) == used, f"{label}: phase totals != {key} used")
+        require(current['used']['iterations'] >= attempts, f'{label}: budget undercounts optimizer attempts')
         require(current["limits"]["physics_steps"] == 4*current["limits"]["control_steps"], "physics budget limit != 4*control limit")
         for name, cap in PHASE_LIMITS.items():
             require(current["phases"].get(name, {}).get("control_steps", 0) <= cap, f"{label}: {name} phase limit exceeded")
@@ -574,7 +688,7 @@ def check_budget(phases, ledger, checkpoint):
             for name, values in previous["phases"].items():
                 require(all(current["phases"].get(name, {}).get(key, 0) >= value for key, value in values.items()), f"{label}: phase budget rolled back")
         previous = current
-    observed = Counter()
+    observed = Counter(iterations=attempts) if attempts else Counter()
     for phase in phases.values():
         if phase["journal"] is not None:
             for key in ("control_steps", "physics_steps"):
@@ -636,6 +750,8 @@ def audit_run(run_dir, allow_incomplete=False, budget_file=None):
         elif check["name"] == "checkpoint.metadata":
             check["details"] = {k: checkpoint[k] for k in ("path", "restore_environment", "rng_keys", "sampler_names", "optimizer_layout_names")}
             check["details"]["state"] = checkpoint["state"]
+            if checkpoint.get('lr_calibration') is not None:
+                check['details'].update(optimizer_lrs=checkpoint['optimizer_lrs'], lr_calibration=checkpoint['lr_calibration'])
     counts = Counter(check["status"] for check in audit.checks)
     status = "failed" if counts["failed"] else "incomplete" if counts["not_run"] else "passed"
     return dict(schema="genmo.closedloop.stage9.audit.v1", run_dir=str(root), budget_file=str(ledger_path), status=status,

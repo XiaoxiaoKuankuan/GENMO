@@ -21,7 +21,8 @@ from gem.closedloop.dppo.policy import DPPODiffusionPolicy
 from gem.closedloop.dppo.trainer import SupervisedAnchor, actor_update, analytic_kl, probability_check
 from gem.closedloop.frozen_actor import _fingerprint
 from gem.closedloop.losses import Stage1BumiLosses
-from tests.closedloop.test_stage1_actor import actor_factory, _activate_branches, _conditions
+from tests.closedloop.test_stage1_actor import actor_factory as actor_factory
+from tests.closedloop.test_stage1_actor import _activate_branches, _conditions
 from tests.closedloop.test_stage1_losses import _weights
 
 
@@ -91,6 +92,33 @@ def test_analytic_kl_matches_independent_normal_oracle(actor_factory):
             oracle.append(float(divergence.masked_select(item.free_mask[None]).sum()))
     report=analytic_kl(policy,rows)
     assert report['mean_joint_kl'] == pytest.approx(sum(oracle)/len(oracle), rel=1e-9, abs=1e-10)
+
+
+def test_lr_candidates_reuse_one_backward_and_bc_batch(actor_factory, monkeypatch):
+    actor,batch=actor_factory(starts=(45,))
+    _activate_branches(actor)
+    policy,rows=_rollouts(actor,batch)
+    optimizer=torch.optim.AdamW(actor.parameters(),lr=1e-7,weight_decay=0.)
+    class Anchor:
+        calls=0
+        def backward(self,model,weight):
+            self.calls+=1
+            loss=next(model.parameters()).square().mean()*weight
+            loss.backward()
+            return {'calls':self.calls}
+    anchor=Anchor()
+    attempts=[]
+    monkeypatch.setattr('gem.closedloop.dppo.trainer.analytic_kl',
+        lambda *_args:{'mean_joint_kl':0.001})
+    report=actor_update(policy,optimizer,rows,
+        {'advantages':torch.tensor([1.,-1.])},bc=anchor,
+        learning_rate_candidates=[1e-7,3e-7,1e-6],
+        reserve_attempt=lambda:attempts.append(True))
+    assert anchor.calls==1 and len(attempts)==3
+    assert report['optimizer_steps']==1 and report['lr_calibration']['attempt_count']==3
+    assert report['lr_calibration']['selected_lr']==1e-6
+    assert optimizer.param_groups[0]['lr']==1e-6
+    assert all(float(value['step'])==1 for value in optimizer.state.values())
 
 
 @pytest.mark.parametrize('field', ['kernel', 'mask', 'old_probability'])

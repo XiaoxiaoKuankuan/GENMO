@@ -12,6 +12,8 @@ import json
 from types import SimpleNamespace
 
 import torch
+import pytest
+import yaml
 
 from tools import train_closedloop_dppo as entry
 
@@ -78,6 +80,31 @@ def test_configuration_contains_resolved_reward_and_keeps_latency():
     assert reward['diagnostics'] == {'mechanical_power_weight': 0., 'impact_weight': 0.}
     server = entry.configuration(entry.ROOT/'configs/closedloop/stage9_dppo_server1.yaml')
     assert server['stage9']['reward'] == reward
+    assert server['stage9']['actor_lr_candidates'] == [1e-9,3e-9,1e-8]
+    assert server['stage9']['actor_lr_selection'] == 'largest_candidate_below_joint_kl_limit'
+
+
+@pytest.mark.parametrize('overrides', [
+    {'actor_lr_candidates':[1e-9,1e-9]},
+    {'actor_lr_candidates':[3e-9,1e-9]},
+    {'actor_lr_candidates':[1e-9,float('nan')]},
+    {'actor_lr_candidates':[1e-9,1e-8,1e-7,1e-6]},
+    {'actor_lr_candidates':[3e-9,1e-8]},
+    {'actor_lr_selection':'ignore_kl'},
+    {'max_iterations':2},
+    {'guidance_scale':3.},
+    {'critic_steps':21},
+    {'critic_batch':64},
+])
+def test_configuration_rejects_ambiguous_or_unbudgeted_calibration(tmp_path, overrides):
+    source=entry.ROOT/'configs/closedloop/stage9_dppo_smoke.yaml'
+    config=yaml.safe_load(source.read_text())
+    config['base_config']=str((source.parent/config['base_config']).resolve())
+    config['stage9'].update(overrides)
+    path=tmp_path/'config.yaml'
+    path.write_text(yaml.safe_dump(config))
+    with pytest.raises(ValueError):
+        entry.configuration(path)
 
 
 def test_eval_shutdown_failure_is_nonzero_exit(monkeypatch, tmp_path):
