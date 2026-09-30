@@ -111,6 +111,13 @@ C 的奖励低于 B。单曲、单 seed、两秒结果只作为更新前后执�
   回归 59 passed。仅有原 rotary autocast 弃用 warning。
 - GMT 故障注入及参考/配置/诊断回归 119 passed、1 skipped；跳过项因本地 GENMO
   解释器不包含 IsaacLab，之后真实服务器执行单独验证动力学路径。
+- 新增只读审计器 29 项故障测试通过。服务器上读取全量执行数据和完整 checkpoint
+  运行 `audit_closedloop_dppo.py`，独立验收 **32 项全部通过**，结果为
+  `independent_audit.json`。主轮 journal 为 455 次 mutation、170 次 advance、
+  2350 个控制步；恢复为 92 次 mutation、40 次 advance、600 个控制步。
+  训练/恢复 rollout 的 1600/400 个音乐控制步全部关联到原始执行记录；固定 GAE
+  与 return 独立重算最大差 3.3751e-13。审计包括完整恢复元数据与新物理 session，
+  不重新运行网络或仿真；概率与梯度交叉核对原真实运行报告。
 - 参考时间线 60 秒、120 次合成移动参考重规划逐轮核验六数组和来源；准备时最多
   129 个源姿态/214 个参考点，裁剪后最多 114/189。这个合成长度测试不冒充真实
   长期训练或物理稳定性测试。
@@ -142,6 +149,11 @@ C 的奖励低于 B。单曲、单 seed、两秒结果只作为更新前后执�
 `local_transfer_verification.json`；服务器完整文件清单为 `artifact_manifest.json`。
 完整 checkpoint 为 2602826754 字节，SHA256 为
 `088d9bb23ec3cfce66edfe66450c9e382b6e8384980c0981238884314eb08e11`。
+独立审计 JSON 已回传，SHA256 为
+`38bfb4551c99dd78aef4383f62197b0e16e12ac08da9eeb34a90dc3ca9ee9305`。
+审计完成后重新哈希服务器原有 135 个文件、3033612926 字节，全部与审计前清单一致，
+结果为 `audit_input_integrity.json`。审计工具提交为 `4ec8e1f`，独立于执行训练的
+`4f7eb45`；后续只增文档/日志，未改变已验收训练源码。
 
 真实执行时在 `/home/user/liwei/GENMO-bumi-closedloop` 使用以下入口；两个命令按
 顺序执行，恢复命令沿用同一个输出目录与共享预算。复现新实验需使用新的目录和
@@ -166,3 +178,13 @@ env PYTHONDONTWRITEBYTECODE=1 CUDA_VISIBLE_DEVICES=0 \
 
 默认入口模式仍为 collect，便于单独验证冻结采集。完整恢复绑定资产、配置与执行
 源码身份；不能未经核对把服务器 checkpoint 当成在任意本地路径都可无条件续训。
+
+复核服务器已有产物的命令如下，输出路径必须是尚不存在的新文件，不会占用 GPU：
+
+```bash
+env PYTHONDONTWRITEBYTECODE=1 CUDA_VISIBLE_DEVICES="" \
+  /home/user/liwei/GENMO/.venv/bin/python -B tools/eval/audit_closedloop_dppo.py \
+  --run-dir /data0/user/liwei/GENMO_outputs/closedloop_stage9/acceptance_20260930_run02 \
+  --budget-file /data0/user/liwei/GENMO_outputs/closedloop_stage9/campaign_20260930_budget.json \
+  --output /tmp/stage9_audit_$(date +%Y%m%d_%H%M%S).json
+```
