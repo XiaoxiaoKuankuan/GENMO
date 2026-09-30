@@ -5,10 +5,13 @@
 去噪链而不调用神经网络，因此这些测试证明协调逻辑，不证明真实模型或动力学表现。
 磁盘输出全部位于 pytest tmp_path；物理步数直接来自替身的推进记录，不能伪造 GPU
 或机器人验收。
+第十步补充可选磁盘预算测试：检查原始/异常证据的精确字节预检、原子发布、
+增量记账及容量不足时的零物理推进，未配置预算时继续覆盖原第九步保存路径。
 """
 from __future__ import annotations
 
 import copy
+import io
 from types import SimpleNamespace
 
 import pytest
@@ -17,6 +20,7 @@ import torch
 from gem.closedloop.dppo.buffer import RolloutBuffer
 from gem.closedloop.dppo.env_adapter import ExecutionIntegrityError, UpperEnvironment
 from gem.closedloop.dppo.rewards import ExecutionReward
+from gem.closedloop.dppo.run_management import DiskCapacityError, DiskGuard
 from gem.runtime.closedloop_protocol import RemoteError
 from tests.closedloop.dppo.test_data_learning import actual_step, context, music_fixture, target_activity_fixture
 
@@ -104,6 +108,51 @@ def adapter(tmp_path, *, elapsed=.75, mode="latency", prepared=True):
                   seed=42, raw_path="synthetic_only")
     env.generate = lambda **kwargs: copy.deepcopy(sample)
     return env, backend
+
+
+def test_evidence_exact_bytes_atomic_publish_and_incremental_disk_accounting(tmp_path, monkeypatch):
+    env, _ = adapter(tmp_path)
+    guard = DiskGuard(tmp_path, max_run_bytes=1_000_000)
+    env.disk_guard = guard
+    payload = {'chain': torch.arange(64), 'transition_valid': False}
+    serialized = io.BytesIO()
+    torch.save(payload, serialized)
+    expected = serialized.tell()
+    checks, original_check = [], guard.check
+    def check(size=0):
+        checks.append(size)
+        return original_check(size)
+    monkeypatch.setattr(guard, 'check', check)
+    path = tmp_path/'raw_samples'/'exact.pt'
+    env._save_evidence(payload, path)
+    assert checks == [expected, 0]
+    assert path.stat().st_size == expected == guard.used_bytes
+    assert torch.equal(torch.load(path, weights_only=False)['chain'], payload['chain'])
+    assert not list(path.parent.glob('*.tmp'))
+    with pytest.raises(FileExistsError):
+        env._save_evidence(payload, path)
+
+
+def test_insufficient_evidence_space_rejects_before_physical_advance(tmp_path):
+    env, backend = adapter(tmp_path)
+    env.disk_guard = DiskGuard(tmp_path, max_run_bytes=1)
+    env.generate = lambda **kwargs: env._save_evidence({'chain':torch.zeros(32)}, tmp_path/'raw_samples'/'raw.pt')
+    with pytest.raises(DiskCapacityError, match='byte quota'):
+        env.step()
+    assert backend.tick == 600 and not backend.calls
+    assert env.budget.actual == []
+    assert not list(tmp_path.rglob('*.pt')) and not list(tmp_path.rglob('*.tmp'))
+
+
+def test_invalid_transition_uses_same_disk_accounting(tmp_path):
+    env, backend = adapter(tmp_path)
+    backend.corrupt_trace = True
+    env.disk_guard = DiskGuard(tmp_path, max_run_bytes=1_000_000)
+    with pytest.raises(ExecutionIntegrityError):
+        env.step()
+    saved = next(tmp_path.glob('invalid_transition_*.pt'))
+    assert env.disk_guard.used_bytes == saved.stat().st_size
+    assert torch.load(saved, weights_only=False)['transition_valid'] is False
 
 
 def test_latency_spans_multiple_control_batches_and_missed_decision(tmp_path):

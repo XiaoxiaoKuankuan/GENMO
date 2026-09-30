@@ -190,6 +190,7 @@ def _anchor(actor,batch):
     anchor.python_rng=random.Random(184).getstate()
     anchor.cuda_rng=None
     anchor.batch_size=2
+    anchor.prefix_contract=dict(min_frames=6,max_frames=18,zero_probability=.15)
     anchor.bc_update_steps=3
     return anchor
 

@@ -5,12 +5,20 @@
 新状态只在没有 pending 的共同决策网格读取，通过无副作用 preview 构造 bootstrap。
 音乐结束是真终止，采集时长上限在合法边界截断。全部实际轨迹先由 RPC journal 保存
 再 ACK；此处再次核对计数与逐步记录，并按完整执行区间计算奖励，不按新计划筛帧。
+第十步可显式指定 music_start_frame，把已核验的完整音乐和奖励配对动作同步从该帧
+开始；音乐保留到真实文件末尾，行政 episode 上限不改变 Critic 的真实剩余时长。
+可选 disk_guard 将原始去噪样本和异常证据纳入同一运行磁盘预算：先序列化得到精确
+字节数并检查容量，再原子发布和记账；保存耗时仍包含在生成延迟内。未提供 guard
+时保留第九步的直接保存行为，不改变奖励、物理推进或计时定义。
 """
 from __future__ import annotations
 
-import dataclasses
+import io
 import math
+import os
+import tempfile
 import time
+from numbers import Integral
 from pathlib import Path
 
 import numpy as np
@@ -52,7 +60,42 @@ class UpperEnvironment:
         self.policy_version = 0
         self.iteration = 0
         self.comparison_noise_index = None
+        self.disk_guard = None
         self.output.joinpath('raw_samples').mkdir(parents=True, exist_ok=True)
+
+    def _save_evidence(self, value, path):
+        """按精确序列化大小预检，完整落盘后发布；容量不足时不触发物理推进。"""
+        guard = self.disk_guard
+        if guard is None:
+            torch.save(value, path)
+            return
+        path = guard._path(path)
+        if path.exists():
+            raise FileExistsError(f'Evidence already exists: {path}')
+        with io.BytesIO() as serialized:
+            torch.save(value, serialized)
+            guard.check(serialized.tell())
+            path.parent.mkdir(parents=True, exist_ok=True)
+            descriptor, name = tempfile.mkstemp(prefix='.'+path.name+'.', suffix='.tmp', dir=path.parent)
+            temporary = Path(name)
+            try:
+                with os.fdopen(descriptor, 'wb') as stream:
+                    with serialized.getbuffer() as content:
+                        stream.write(content)
+                    stream.flush()
+                    os.fsync(stream.fileno())
+                # 排他原子发布，避免已有正式样本被覆盖。
+                os.link(temporary, path)
+                temporary.unlink()
+                descriptor = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
+                try:
+                    os.fsync(descriptor)
+                finally:
+                    os.close(descriptor)
+            finally:
+                temporary.unlink(missing_ok=True)
+                guard.account_file(path)
+            guard.check()
 
     def _advance(self, count):
         count = int(count)
@@ -82,13 +125,23 @@ class UpperEnvironment:
         self.snapshot = snapshot
         return rows
 
-    def reset_task(self, sample, music, *, seed, phase='main'):
+    def reset_task(self, sample, music, *, seed, phase='main', music_start_frame=0):
         # 配对动作只进入奖励；在reset/物理推进前验证，绝不加入builder的Actor条件。
+        music = np.asarray(music)
+        if music.ndim != 2 or music.shape[1] != 35 or len(music) < 2 or not np.isfinite(music).all():
+            raise ValueError('Task music must contain finite full [T>=2,35] features')
+        if (isinstance(music_start_frame, bool) or not isinstance(music_start_frame, Integral)
+                or not 0 <= music_start_frame <= len(music)-2):
+            raise ValueError('music_start_frame must leave at least two real music frames')
+        if sample['row'].get('num_frames', len(music)) != len(music):
+            raise ValueError('reset_task requires full music before applying music_start_frame')
+        split = sample['row'].get('split', 'train')
         reward_config = self.config['stage9'].get('reward', {})
         target = load_paired_activity(self.config['stage9']['bc_data_root'], sample,
             music_start_tick=600, window_s=reward_config.get('activity', {}).get('window_s', .5),
-            dt=reward_config.get('dt', .02))
-        self.phase, self.sample, self.music, self.seed = phase, sample, np.array(music, copy=True), int(seed)
+            dt=reward_config.get('dt', .02), split=split, music_start_frame=music_start_frame)
+        self.full_music_num_frames, self.music_start_frame, self.data_split = len(music), int(music_start_frame), split
+        self.phase, self.sample, self.music, self.seed = phase, sample, np.array(music[self.music_start_frame:], copy=True), int(seed)
         self.episode_count += 1
         self.snapshot = self.backend.call('reset_episode', seed=self.seed,
             episode_spec={'sample_id':sample['row']['sample_id'], 'dataset':sample['dataset'], 'mode':self.mode})
@@ -99,7 +152,7 @@ class UpperEnvironment:
                 last_warmup_row = warmup_rows[-1]
         if self.snapshot['done']:
             raise ExecutionIntegrityError('Warmup terminated before any policy sample')
-        self.music_end_tick = 600 + (len(music)*50//30)*12
+        self.music_end_tick = 600 + (len(self.music)*50//30)*12
         self.soft_end_tick = 600 + int(float(self.config['stage9']['episode_seconds'])*600)
         self.reward = ExecutionReward(reward_config, self.music, music_start_tick=600,
                                       target_activity=target)
@@ -157,7 +210,7 @@ class UpperEnvironment:
             generated[name] = value[0].detach().cpu().numpy().copy()
         trace = cpu_copy(trace)
         raw_path = self.output/'raw_samples'/f'{self.phase}_{self.attempt:06d}.pt'
-        torch.save({'trace':trace,'generated':generated,'policy_version':self.policy_version},raw_path)
+        self._save_evidence({'trace':trace,'generated':generated,'policy_version':self.policy_version},raw_path)
         rejection, prepared = None, None
         try:
             prepared = self.backend.call('prepare_plan', generated_plan=generated)
@@ -186,7 +239,7 @@ class UpperEnvironment:
                 last_backend_envelope=cpu_copy(getattr(self.backend, 'last_envelope', None)),
                 sample=cpu_copy(self._inflight_sample))
             path = self.output/f'invalid_transition_{self.episode_count}_{self.decision}_{self.attempt}.pt'
-            torch.save(invalid, path)
+            self._save_evidence(invalid, path)
             raise
 
     def _step_impl(self, *, deterministic=False):
@@ -223,7 +276,7 @@ class UpperEnvironment:
             for row in self._advance(min(25,(stop-tick)//12)):
                 result = self.reward.evaluate_step(row)
                 if not result.get('transition_valid',False):
-                    torch.save({'row':row,'reward':result,'raw_sample_path':generated['raw_path']},
+                    self._save_evidence({'row':row,'reward':result,'raw_sample_path':generated['raw_path']},
                                self.output/'invalid_reward.pt')
                     raise ExecutionIntegrityError(f"Invalid execution reward: {result.get('errors')}")
                 rows.append(row)
@@ -260,6 +313,9 @@ class UpperEnvironment:
         consumed = sorted({str(p) for row in rows for p in row.get('consumed_plan_ids', [row.get('active_plan_id')]) if p is not None})
         metadata = dict(remaining_music_seconds=self.remaining_music(start),
             next_remaining_music_seconds=self.remaining_music(end), sampler_trace=trace,
+            music_start_frame=getattr(self, 'music_start_frame', 0),
+            full_music_num_frames=getattr(self, 'full_music_num_frames', len(self.music)),
+            data_split=getattr(self, 'data_split', 'train'),
             generated=generated['generated'],published=commit,rejection=rejection,reward_details=details,
             events=events,consumed_plan_ids=consumed,event_reward=zero_step_event,event_penalty_total=event_reward,
             raw_sample_path=generated['raw_path'],latency_seconds=generated['elapsed'],

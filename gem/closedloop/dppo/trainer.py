@@ -48,7 +48,8 @@ def batch_context(transitions, device, *, next_state=False):
     return {key:torch.cat([c[key] for c in contexts],0).to(device) for key in contexts[0]}
 
 
-def fixed_targets(transitions, critic, device):
+def populate_values(transitions, critic, device):
+    """使用当前冻结价值参数填入旧/下一价值，供逐条持久化和固定目标共同复用。"""
     critic.eval()
     with torch.no_grad():
         for row in transitions:
@@ -58,6 +59,10 @@ def fixed_targets(transitions, critic, device):
             if row.next_context is not None and not row.terminated:
                 nxt = {k:v.to(device) for k,v in row.next_context.items()}
                 row.next_value = float(critic(nxt,torch.tensor([row.metadata['next_remaining_music_seconds']],device=device))[0])
+
+
+def fixed_targets(transitions, critic, device, *, gamma_upper=.99, lambda_upper=.95):
+    populate_values(transitions, critic, device)
     continuation = [False]*len(transitions)
     for i in range(len(transitions)-1):
         a,b=transitions[i:i+2]
@@ -68,10 +73,16 @@ def fixed_targets(transitions, critic, device):
         next_values=[t.next_value for t in transitions],executed_steps=[t.executed_control_steps for t in transitions],
         bootstrap_mask=[not t.terminated and t.next_context is not None for t in transitions],
         continuation_mask=continuation,valid=[t.transition_valid for t in transitions],
-        event_rewards=[t.metadata.get('event_reward',0.) for t in transitions])
+        event_rewards=[t.metadata.get('event_reward',0.) for t in transitions],
+        gamma_upper=gamma_upper,lambda_upper=lambda_upper)
 
 
-def critic_update(critic, optimizer, transitions, targets, *, steps=20, batch_size=32, generator=None):
+def critic_update(critic, optimizer, transitions, targets, *, steps=20, batch_size=32, generator=None,
+                  grad_clip_norm=1.):
+    if type(steps) is not int or steps < 1 or type(batch_size) is not int or batch_size < 1:
+        raise ValueError('Critic steps and batch size must be positive integers')
+    if not math.isfinite(float(grad_clip_norm)) or grad_clip_norm <= 0:
+        raise ValueError('Critic gradient clip must be finite and positive')
     device = next(critic.parameters()).device
     critic.train()
     target = targets['returns'].detach().float().to(device)
@@ -93,7 +104,7 @@ def critic_update(critic, optimizer, transitions, targets, *, steps=20, batch_si
             raise FloatingPointError('Nonfinite value loss')
         optimizer.zero_grad(set_to_none=True)
         loss.backward()
-        norms.append(float(torch.nn.utils.clip_grad_norm_(critic.parameters(),1.,error_if_nonfinite=True)))
+        norms.append(float(torch.nn.utils.clip_grad_norm_(critic.parameters(),grad_clip_norm,error_if_nonfinite=True)))
         optimizer.step()
         losses.append(float(loss.detach()))
     critic.eval()
@@ -309,7 +320,14 @@ class SupervisedAnchor:
         data.server1_example.root=config['stage9']['bc_data_root']
         data.qpos30_stats.path=config['paths']['stats']
         data.dataset_defaults.kinematics_path=config['paths']['kinematics']
-        data.sample_contract.update(prefix_min_frames=6,prefix_max_frames=18,prefix_zero_probability=.15)
+        prefix=config['stage9'].get('bc_prefix',dict(min_frames=6,max_frames=18,zero_probability=.15))
+        if (type(prefix['min_frames']) is not int or type(prefix['max_frames']) is not int
+                or not 1 <= prefix['min_frames'] <= prefix['max_frames'] < 120
+                or not 0 <= prefix['zero_probability'] < 1):
+            raise ValueError('BC prefix range must preserve at least one free future frame')
+        data.sample_contract.update(prefix_min_frames=prefix['min_frames'],prefix_max_frames=prefix['max_frames'],
+                                    prefix_zero_probability=prefix['zero_probability'])
+        self.prefix_contract=dict(prefix)
         self.datasets=[]
         for entry in data.datasets.train.values():
             opts=OmegaConf.to_container(entry,resolve=True)
@@ -379,7 +397,7 @@ class SupervisedAnchor:
         finally:
             actor.eval()
         return dict(loss=sum(values)/self.batch_size,weight=weight,bc_update_steps=self.bc_update_steps,samples=samples,
-                    batch_size=self.batch_size,warmup_step=self.bc_update_steps-1,
+                    batch_size=self.batch_size,prefix_contract=self.prefix_contract,warmup_step=self.bc_update_steps-1,
                     warmup_origin='independent_bc_updates_from_zero',warmup_factors=warmup_factors,
                     weighted_gradient_norm_per_microbatch=micro_gradient_norms)
 

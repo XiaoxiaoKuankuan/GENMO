@@ -1,6 +1,8 @@
 """第九步奖励专用的配对示范活动度，不参与 Actor 或 Critic 的输入。
 
-本模块从 ``stage9.bc_data_root`` 的 train 清单读取当前音乐严格对应的 BUMI 动作，
+本模块从 ``stage9.bc_data_root`` 的清单读取当前音乐严格对应的 BUMI 动作，默认仅
+接受 train；第十步可以显式选择 val/test 作只读评价，并以 music_start_frame 同时
+移动音乐与示范起点。完整源文件先核验再切片，裁剪不改清单身份或 Actor 条件。
 核对清单行、音乐身份、动作来源 SHA、元数据和关节名称，再把 30 Hz 示范关节角按时间
 线性插值到 50 Hz 区间端点，用每个真实控制区间的后向位置差计算 rad/s 速度。奖励只
 读取与实际执行窗口相同的最近 0.5 秒速度 RMS；reset 后尚不足半秒时双方使用已经
@@ -124,8 +126,9 @@ class PairedActivityTarget:
                 "source": copy.deepcopy(self.source)}
 
 
-def load_paired_activity(data_root, sample, *, music_start_tick=600, window_s=0.5, dt=0.02):
-    """严格加载当前 train 音乐对应的动作；缺失/不匹配直接抛错。"""
+def load_paired_activity(data_root, sample, *, music_start_tick=600, window_s=0.5, dt=0.02,
+                         split="train", music_start_frame=0):
+    """严格加载指定划分对应动作；旧调用默认 train，偏移仅作用于核验后的源数组。"""
     root = Path(data_root).expanduser().resolve()
     if not isinstance(sample, dict) or not isinstance(sample.get("row"), dict):
         raise ValueError("paired activity requires a selected train music sample")
@@ -134,17 +137,30 @@ def load_paired_activity(data_root, sample, *, music_start_tick=600, window_s=0.
         raise ValueError("paired activity requires explicit sample and music group identities")
     if not isinstance(folder, str) or folder not in SOURCES:
         raise ValueError("paired activity dataset must name one of the four training sources")
+    if split not in ("train", "val", "test"):
+        raise ValueError("paired activity split must be train, val or test")
     # 本地选取数据通过这四个明确的目录 symlink 复用既有数据；解析后的目录是文件边界。
     source_root = (root / folder).resolve()
-    manifest_path = _path(source_root, "manifests/train.jsonl", "train manifest")
+    manifest_path = _path(source_root, f"manifests/{split}.jsonl", f"{split} manifest")
     manifest_bytes = manifest_path.read_bytes()
     manifest_sha = hashlib.sha256(manifest_bytes).hexdigest()
     if manifest_sha != _sha(sample.get("manifest_sha256"), "manifest_sha256"):
         raise ValueError("paired activity selected train manifest SHA mismatch")
     rows = [json.loads(line) for line in manifest_bytes.decode().splitlines() if line.strip()]
     matches = [item for item in rows if item.get("sample_id") == row.get("sample_id")]
-    if len(matches) != 1 or matches[0] != row or row.get("split") != "train" or row.get("fps") != 30:
-        raise ValueError("paired activity row must exactly match its unique train manifest row")
+    if len(matches) != 1 or matches[0] != row or row.get("split") != split or row.get("fps") != 30:
+        raise ValueError(f"paired activity row must exactly match its unique {split} manifest row")
+    return _load_verified_pair(root, sample, manifest_path, manifest_sha, split=split,
+        music_start_tick=music_start_tick, window_s=window_s, dt=dt, music_start_frame=music_start_frame)
+
+
+def _load_verified_pair(root, sample, manifest_path, manifest_sha, *, split,
+                        music_start_tick=600, window_s=0.5, dt=0.02, music_start_frame=0):
+    """共享文件核验核心；调用方必须已完整核验所属清单及唯一行，避免全量审计重复解析。"""
+    folder, row = sample["dataset"], sample["row"]
+    source_root = (root / folder).resolve()
+    if row.get("split") != split or row.get("fps") != 30:
+        raise ValueError("paired activity verified row split/fps mismatch")
     if isinstance(row.get("num_frames"), bool) or not isinstance(row.get("num_frames"), Integral) or row["num_frames"] < 2:
         raise ValueError("paired activity requires at least two aligned source frames")
     if row.get("quality_accepted") is not True:
@@ -168,6 +184,9 @@ def load_paired_activity(data_root, sample, *, music_start_tick=600, window_s=0.
         raise ValueError("paired activity dataset name differs from manifest")
     motion_path = _path(source_root, row.get("motion_path"), "motion_path")
     motion_bytes = motion_path.read_bytes()
+    motion_file_sha = hashlib.sha256(motion_bytes).hexdigest()
+    if sample.get("motion_file_sha256") is not None and motion_file_sha != _sha(sample["motion_file_sha256"], "motion_file_sha256"):
+        raise ValueError("paired activity motion file changed after full dataset audit")
     payload = torch.load(io.BytesIO(motion_bytes), map_location="cpu", weights_only=False)
     if not isinstance(payload, dict):
         raise ValueError("paired activity motion payload must be a dictionary")
@@ -193,15 +212,20 @@ def load_paired_activity(data_root, sample, *, music_start_tick=600, window_s=0.
         raise ValueError("paired activity qpos shape, frame alignment or finite-value validation failed")
     if np.max(np.abs(np.linalg.norm(qpos[:, 3:7], axis=1) - 1)) > 1e-3:
         raise ValueError("paired activity root quaternion is not normalized")
+    if (isinstance(music_start_frame, bool) or not isinstance(music_start_frame, Integral)
+            or not 0 <= music_start_frame <= len(qpos) - 2):
+        raise ValueError("paired activity music_start_frame must leave at least two source frames")
     provenance = {"dataset": folder, "sample_id": row["sample_id"], "group_id": sample["group_id"],
-                  "split": "train", "data_root": str(root), "resolved_source_root": str(source_root),
+                  "split": split, "data_root": str(root), "resolved_source_root": str(source_root),
                   "manifest_path": str(manifest_path),
                   "manifest_sha256": manifest_sha, "motion_path": str(motion_path),
-                  "motion_file_sha256": hashlib.sha256(motion_bytes).hexdigest(),
+                  "motion_file_sha256": motion_file_sha,
                   "source_motion_sha256": row["source_motion_sha256"],
-                  "source_motion_sha_validation": "payload_equals_verified_train_manifest_declaration",
+                  "source_motion_sha_validation": f"payload_equals_verified_{split}_manifest_declaration",
                   "source_music_feature_sha256": row["source_music_feature_sha256"],
                   "source_audio_sha256": row["source_audio_sha256"],
-                  "dataset_info_sha256": hashlib.sha256(info_bytes).hexdigest()}
-    return PairedActivityTarget(qpos[:, 7:], joint_names=payload["joint_names"], source=provenance,
+                  "dataset_info_sha256": hashlib.sha256(info_bytes).hexdigest(),
+                  "music_start_frame": int(music_start_frame), "full_source_num_frames": len(qpos),
+                  "music_offset_seconds": int(music_start_frame) / 30.}
+    return PairedActivityTarget(qpos[int(music_start_frame):, 7:], joint_names=payload["joint_names"], source=provenance,
                                 music_start_tick=music_start_tick, window_s=window_s, dt=dt)

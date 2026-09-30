@@ -1,0 +1,196 @@
+# 第十步正式训练前的服务器1完整数据集准备配置。
+# 独立配置，不继承200首选择；四库全部train/val/test逐文件检查，训练池为完整train。
+# 本文件仅批准有限连续训练检查：最多6次接受更新/18次真实候选尝试；CLI可在合法轮次
+# 边界停止后用--resume latest继续，预算不会重置。评估默认遍历全部val、两个seed，
+# 每首最多10秒并记录行政截断；完整长音乐可单独指定配置episode_seconds=null。
+# 当前保持单环境、冻结GMT/CPU PhysX、FP32 Actor及FP64联合概率，不启动多卡或长训练。
+# BC前缀6..30覆盖当前在线P约21；活动度target仅奖励监督，未加入Actor/Critic条件。
+version: genmo.gmt_frozen_isaac.v1
+paths:
+  genmo_repo: /home/user/liwei/GENMO-bumi-closedloop
+  gmt_repo: /home/user/liwei/legged_lab_gmt
+  genmo_python: /home/user/liwei/GENMO/.venv/bin/python
+  isaac_python: /data0/user/liwei/closedloop_stage8_runtime/env_isaaclab/bin/python
+  checkpoint: /data0/user/liwei/GENMO_outputs/bumi_closedloop_stage1_90505_p6to18_z15_b256_s350k_8gpu_v1/checkpoints/s350000.pt
+  stats: /data0/user/liwei/datasets/bumi_music_umr70_mine_pass_v1/stats/qpos30_train_stats.json
+  kinematics: /home/user/liwei/GENMO-bumi-closedloop/configs/bumi/bumi_kinematics_robot_retargeter_fe934_v1.json
+  gmt_policy: /data0/user/liwei/closedloop_stage8_assets/gmt_model135000/model_135000_stage2.onnx
+  compat_profile: /home/user/liwei/legged_lab_gmt/configs/sim2sim/model_135000_stage2.json
+  isaac_contract: /data0/user/liwei/closedloop_stage8_assets/gmt_model135000/isaac_contract.json
+  data_root: /data0/user/liwei/datasets/bumi_music_umr70_mine_pass_90505_v1
+runtime:
+  genmo_device: cuda:0
+  allow_shared_gpu: false
+  physics_device: cpu
+  headless: true
+  num_envs: 1
+  torch_threads: 4
+  rpc_timeout_s: 120
+  worker_start_timeout_s: 600
+model:
+  history_steps: 50
+  ddim_steps: 20
+  guidance_scale: 2.5
+timing:
+  clock_hz: 600
+  decision_ticks: 300
+  control_ticks: 12
+  physics_ticks: 3
+  warmup_ticks: 600
+  min_prefix_frames: 12
+  lookahead_control_steps: 10
+  latency_guard_s: 0.04
+  calibration_warmup: 4
+  calibration_samples: 12
+environment:
+  terrain: plane
+  ground_height_m: 0.0
+  initial_foot_clearance_m: 0.001
+  domain_randomization: false
+  observation_noise: false
+  external_perturbations: false
+  reset_randomization: false
+  actuator_delay_steps: 0
+  curriculum: false
+termination:
+  orientation_mode: separated_yaw
+  root_height_error_m: 0.2
+  non_yaw_orientation_error_rad: 0.6
+  yaw_error_rad: 1.5
+  end_effector_relative_height_error_m: 0.15
+diagnostics:
+  record_original_threshold_crossings: true
+  verify_actor_condition_edges: true
+  reward_substeps: true
+stage10:
+  version: genmo.closedloop.stage10.v1
+  seed: 42
+  training:
+    execution_mode: latency
+    denoising_steps: 20
+    guidance_scale: 2.5
+    eta: 0.1
+    std_floor: 0.001
+    log_probability_reduction: joint_sum
+    rollout_upper_steps: 64
+    ppo_epochs: 1
+    actor_lr: 1.0e-09
+    critic_lr: 0.0001
+    actor_lr_candidates:
+    - 5.0e-10
+    - 1.0e-09
+    - 2.0e-09
+    critic_steps: 80
+    critic_batch: 32
+    grad_clip_norm: 1.0
+    gamma_upper: 0.99
+    lambda_upper: 0.95
+    gamma_denoising: 0.99
+    ppo_clip: 0.01
+    kl_stop_joint: 0.02
+    bc_weight: 0.1
+    bc_batch: 2
+    denoising_microbatch: 1
+    episode_seconds: 10.0
+    latency_budget_s: 0.5
+    critic_grad_clip_norm: 1.0
+    bc_prefix:
+      min_frames: 6
+      max_frames: 30
+      zero_probability: 0.15
+  dataset:
+    split: train
+    random_start: true
+    source_probabilities:
+    - 0.2
+    - 0.35
+    - 0.25
+    - 0.2
+    require_audio: true
+  evaluation:
+    split: val
+    eval_count: all
+    seeds:
+    - 42
+    - 1729
+    selection_seed: 42
+    start_mode: beginning
+    episode_seconds: 10.0
+  limits:
+    accepted_iterations: 6
+    optimizer_attempts: 18
+    generations: 16000
+    control_steps: 500000
+    physics_steps: 2000000
+  storage:
+    min_free_bytes: 32212254720
+    max_run_bytes: 193273528320
+    checkpoint_reserve_bytes: 4294967296
+    rollout_chunk_size: 16
+  reward:
+    version: stage9.execution_reward.v2
+    dt: 0.02
+    track_weight: 2.5
+    music_weight: 2.0
+    stable_weight: 1.0
+    alive_weight: 0.5
+    cmd_penalty_weight: 0.15
+    torque_penalty_weight: 0.1
+    contact_penalty_weight: 0.2
+    joint_limit_penalty_weight: 0.5
+    failure_penalty: 5.0
+    rejected_plan_penalty: 0.5
+    scales:
+      joint_pos_rad: 0.22
+      joint_vel_rad_s: 1.4
+      ee_height_m: 0.07
+      yaw_rad: 0.6
+      root_position_m: 0.4
+      root_height_m: 0.05
+      non_yaw_rad: 0.12
+      slide_m_s: 0.15
+    track_mix:
+      joint_pos: 0.45
+      joint_vel: 0.25
+      ee_height: 0.15
+      yaw: 0.1
+      root_position: 0.05
+    stable_mix:
+      root_height: 0.5
+      non_yaw: 0.5
+    music_mix:
+      beat: 0.7
+      intensity: 0.3
+    torque:
+      free_ratio: 0.8
+      mean_weight: 0.5
+      max_weight: 0.5
+    activity:
+      window_s: 0.5
+      inactive_target_rad_s: 0.1
+      full_gate_ratio: 0.5
+      epsilon: 1.0e-08
+      intensity_epsilon: 0.05
+      intensity_log_ratio: 2.0
+    music:
+      beat_window_s: 1.0
+      feature_fps: 30
+      beat_column: 34
+      beat_threshold: 0.5
+    contact:
+      slide_weight: 0.7
+      bad_contact_weight: 0.3
+      support_clearance_m: 0.025
+    joint_limit:
+      hard_range_margin_fraction: 0.05
+      numeric_tolerance_rad: 1.0e-06
+      actual_weight: 0.5
+      reference_weight: 0.5
+    consistency:
+      joint_vel_rms_rad_s: 0.0001
+      root_lin_vel_rms_m_s: 0.0001
+      root_ang_vel_rms_rad_s: 0.0001
+    diagnostics:
+      mechanical_power_weight: 0.0
+      impact_weight: 0.0
+    require_substeps: true

@@ -1,0 +1,519 @@
+#!/usr/bin/env python3
+"""第十步连续训练、恢复后再优化和独立评估产物的只读 CPU 审计。
+
+审计逐轮 rollout/chunk/transition 清单、SHA、策略版本、实际执行步数、旧概率精度、
+固定目标、网络隔离报告、联合 KL、完整 checkpoint 元数据与预算。固定 GAE 使用
+fixed_targets.pt 中冻结的 old/next values 与逐条归档值先交叉核对，再独立重算。默认训练验收要求至少两轮接受更新，以及新 session
+恢复完整状态后再次接受更新，不能把恢复后只采集当作续训成功。
+成功 session 还必须有 session_end 指标成功写入后发布的 completion.json；完成标记
+绑定 summary.json 的文件 SHA、成功状态和零退出码，避免把中途写出的摘要当作完成。
+
+评估分支核对显式 checkpoint 身份、完整 val/test 池计划、多 seed、网络不变和
+逐 episode 文件，独立重算其聚合统计；评估不进入训练 Buffer。所有输入只读，
+checkpoint 使用 CPU mmap，仅检查元信息与状态布局，不遍历大模型权重，不重新
+跑 Actor、Critic、GMT、PhysX 或 GPU。清单 SHA 是当前文件内容核验；网络更新及
+冻结语义来自运行时证据，不能据此宣称收敛、动作质量提高或真实硬件安全。
+
+--allow-incomplete 仅把缺失的后续证据列为 not_run；已存在的不一致、失败、预算
+超限或旧数据跨策略版本仍然失败。只在显式 --output 指定路径创建一个新的报告，
+绝不覆盖原始运行产物。PyTorch 文件必须来自可信运行，需 weights_only=False
+读取原始 UpperTransition；评估不执行文件内定义的模型 forward。
+"""
+from __future__ import annotations
+
+import argparse
+from collections import Counter
+import hashlib
+import json
+import math
+from pathlib import Path
+import sys
+
+import numpy as np
+import torch
+
+if __package__ in (None, ''):
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+
+from gem.closedloop.dppo.evaluation import aggregate_evaluation
+
+
+VERSION = 'genmo.closedloop.stage10.audit.v1'
+BUDGET_KEYS = {'accepted_iterations', 'optimizer_attempts', 'generations', 'control_steps', 'physics_steps'}
+
+
+def require(condition, message):
+    if not condition:
+        raise ValueError(message)
+
+
+def read_json(path):
+    return json.loads(Path(path).read_text(encoding='utf-8'),
+                      parse_constant=lambda value: (_ for _ in ()).throw(ValueError(f'Nonfinite JSON {value}')))
+
+
+def sha256(path):
+    value = hashlib.sha256()
+    with Path(path).open('rb') as stream:
+        for block in iter(lambda: stream.read(8*1024*1024), b''):
+            value.update(block)
+    return value.hexdigest()
+
+
+def number(value, name):
+    require(isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value), f'{name}: finite number required')
+    return float(value)
+
+
+def integer(value, name, minimum=0):
+    require(type(value) is int and value >= minimum, f'{name}: integer >= {minimum} required')
+    return value
+
+
+def close(left, right, name, tolerance=1e-8):
+    require(math.isclose(number(left, name), number(right, name), abs_tol=tolerance, rel_tol=1e-8), f'{name}: {left} != {right}')
+
+
+def resolve(root, reference, base=None):
+    require(isinstance(reference, str) and bool(reference), 'Missing run artifact reference')
+    value = Path(reference)
+    candidates = [value] if value.is_absolute() else [root/value, (base or root)/value]
+    path = next((item.resolve() for item in candidates if item.exists()), candidates[0].resolve())
+    require(path.is_relative_to(root), f'Artifact reference escapes run: {reference}')
+    return path
+
+
+def budget_check(budget, previous=None):
+    require(budget.get('schema')=='genmo.closedloop.stage10.budget.v1', 'Wrong Stage10 budget schema')
+    require(set(budget['used'])==BUDGET_KEYS and set(budget['limits'])==BUDGET_KEYS, 'Incomplete Stage10 budget counters')
+    for key in BUDGET_KEYS:
+        used = integer(budget['used'][key], key)
+        limit = integer(budget['limits'][key], f'{key} limit', 1)
+        require(used <= limit, f'{key} exceeds persisted budget')
+        require(sum(integer(phase.get(key, 0), key) for phase in budget['phases'].values())==used, f'{key} phase sum differs')
+        if previous is not None:
+            require(budget['limits']==previous['limits'] and used>=previous['used'][key], f'{key} budget rolled back')
+    require(budget['limits']['physics_steps']==4*budget['limits']['control_steps'], 'Physics limit must contain four substeps/control')
+    return budget
+
+
+def audit_data(data):
+    require(data.get('status')=='passed' and data.get('complete_manifest_scan') is True, 'Data scan is not complete/passed')
+    identity = data['identity']
+    manifests, counts = identity['manifest_sha256'], identity['sample_counts']
+    expected_sources = {'AIST++', 'AIOZ-GDANCE', 'FineDance', 'Mine'}
+    require(set(counts)=={'train', 'val', 'test'}, 'All train/val/test splits are required')
+    require(len(manifests)==12 and all(set(counts[split])==expected_sources for split in counts), 'All twelve source/split manifests are required')
+    records = data['records']
+    require(len(records)==data['sample_count']==sum(sum(values.values()) for values in counts.values()), 'Full data audit record count differs')
+    observed, lookup, owners = Counter(), {}, {key: {} for key in ('group_id', 'audio_sha256', 'source_motion_sha256')}
+    for record in records:
+        source, split, sample = record['dataset'], record['split'], str(record['sample_id'])
+        key = (source, split, sample)
+        require(key not in lookup, 'Duplicated audited source/split/sample')
+        require(record['manifest_sha256']==manifests[f'{source}/{split}'], 'Data record manifest SHA mismatch')
+        require(bool(record.get('motion_payload_sha256')) and bool(record.get('music_feature_sha256')), 'Motion/music payload identity missing')
+        if data.get('require_audio'):
+            require(record.get('audio_verified') is True and bool(record.get('audio_sha256')), 'Required audio was not verified')
+        for field, mapping in owners.items():
+            value = record.get(field)
+            if value:
+                require(mapping.get(value, split)==split, f'Data leakage across splits: {field}')
+                mapping[value] = split
+        observed[(source, split)] += 1
+        lookup[key] = record
+    for split, values in counts.items():
+        for source, count in values.items():
+            require(observed[(source, split)]==count, 'Per-source full dataset count differs')
+    digest = hashlib.sha256(json.dumps(records, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
+    require(digest==data['data_content_sha256'], 'Full data content record digest mismatch')
+    return lookup
+
+
+def audit_rollout(root, summary, data_lookup, contract, seen_paths):
+    path = resolve(root, summary['rollout_manifest'])
+    manifest = read_json(path)
+    before = summary['policy_version_before']
+    require(manifest.get('schema')=='genmo.closedloop.stage10.rollout.v1' and manifest.get('complete') is True, 'Rollout has no complete publication')
+    require(manifest['policy_version']==before, 'Rollout policy version differs from iteration')
+    rows, controls, physics, sources = [], 0, 0, Counter()
+    for chunk_reference in manifest['chunks']:
+        chunk_path = resolve(root, chunk_reference['path'], path.parent)
+        require(sha256(chunk_path)==chunk_reference['sha256'], 'Chunk manifest SHA mismatch')
+        chunk = read_json(chunk_path)
+        require(chunk.get('schema')=='genmo.closedloop.stage10.rollout_chunk.v1' and chunk['policy_version']==before, 'Chunk schema or policy version differs')
+        require(len(chunk['records'])==chunk['record_count']==chunk_reference['record_count'], 'Chunk record counts differ')
+        for record in chunk['records']:
+            record_path = resolve(root, record['path'], chunk_path.parent)
+            require(record_path not in seen_paths, 'A rollout transition file was reused across iterations')
+            seen_paths.add(record_path)
+            require(record_path.stat().st_size==record['size_bytes'] and sha256(record_path)==record['sha256'], 'Transition file size/SHA mismatch')
+            item = torch.load(record_path, map_location='cpu', weights_only=False, mmap=True)
+            require(item.identity==record['identity'] and item.identity['policy_version']==before, 'Stored transition policy identity differs')
+            require(item.transition_valid is True, 'Invalid transition entered accepted rollout')
+            count = integer(item.executed_control_steps, 'executed control steps')
+            require(count==record['executed_control_steps'] and item.executed_physics_steps==record['executed_physics_steps']==4*count, 'Actual control/physics counts differ')
+            require(item.control_tick_end-item.control_tick_begin==12*count, 'Actual time differs from control count')
+            require(item.rewards.shape==(count,) and bool(torch.isfinite(item.rewards).all()), 'Actual rewards incomplete or nonfinite')
+            steps = int(contract['denoising_steps'])
+            require(item.old_log_prob.dtype==torch.float64 and item.old_log_prob.shape==(steps,) and bool(torch.isfinite(item.old_log_prob).all()), 'Old denoising probabilities are invalid')
+            require(item.chain.dtype==torch.float32 and item.chain.shape==(steps+1, 120, 30), 'Stored denoising chain dtype/shape differs')
+            expected_mask = (item.context['future_valid'][..., None] & ~item.context['known_qpos30_mask'])[0]
+            require(torch.equal(item.free_mask, expected_mask), 'Committed prefix/padding differs from free action mask')
+            kernel = item.metadata['sampler_trace']['kernel_config']
+            for key, config_key in (('steps', 'denoising_steps'), ('eta', 'eta'), ('std_floor', 'std_floor'), ('guidance_scale', 'guidance_scale')):
+                require(kernel[key]==contract[config_key], f'Stored denoising kernel differs: {key}')
+            require(kernel['log_prob_reduction']=='joint_sum_fp64' and kernel['cfg_policy']=='music_only_shared_history_and_prefix', 'Wrong probability reduction or CFG policy')
+            task = item.metadata['training_task']
+            require(task['split']=='train', 'val/test sample leaked into training Buffer')
+            audited = data_lookup[(task['dataset'], 'train', str(task['sample_id']))]
+            require(task['manifest_sha256']==audited['manifest_sha256'], 'Training task does not match complete train manifest')
+            integer(task['music_start_frame'], 'training music start')
+            require(task['music_start_frame']<audited['num_frames'], 'Training music start outside real song')
+            rows.append(dict(identity=dict(item.identity), rewards=item.rewards.double().tolist(),
+                count=count, begin=item.control_tick_begin, end=item.control_tick_end,
+                terminated=bool(item.terminated), truncated=bool(item.truncated),
+                has_next=item.next_context is not None, event_reward=float(item.metadata.get('event_reward', 0.)),
+                old_value=float(item.old_value), next_value=float(item.next_value)))
+            controls += count
+            physics += item.executed_physics_steps
+            sources[task['dataset']] += 1
+            del item
+    require(len(rows)==manifest['transition_count']==summary['collected_upper_transitions'], 'Published rollout transition count differs')
+    require(controls==manifest['executed_control_steps']==summary['collection']['control_steps'] and physics==manifest['executed_physics_steps'], 'Rollout totals differ')
+    require(summary['collection'].get('full_train_pool') is True, 'Training collection used a preselected subset')
+    return rows, dict(transition_count=len(rows), control_steps=controls, physics_steps=physics, source_transition_counts=dict(sources))
+
+
+def audit_targets(root, summary, rows, contract):
+    target = torch.load(resolve(root, summary['targets_path']), map_location='cpu', weights_only=False, mmap=True)
+    size = len(rows)
+    def vector(name):
+        result = torch.as_tensor(target[name]).double().cpu().numpy()
+        require(result.shape==(size,) and np.isfinite(result).all(), f'Invalid fixed target vector: {name}')
+        return result
+    old, nxt = vector('old_values'), vector('next_values')
+    require(np.allclose(old, [row['old_value'] for row in rows], atol=1e-7, rtol=0)
+            and np.allclose(nxt, [row['next_value'] for row in rows], atol=1e-7, rtol=0),
+            'Fixed old/next values differ from immutable rollout pre-update values')
+    gamma, lam = float(contract['gamma_upper'])**(1/25), float(contract['lambda_upper'])**(1/25)
+    close(target['gamma_low'], gamma, 'gamma_low')
+    close(target['lambda_low'], lam, 'lambda_low')
+    require(torch.as_tensor(target['valid']).bool().shape==(size,) and bool(torch.as_tensor(target['valid']).all()), 'Accepted rollout contains invalid fixed targets')
+    discounted = np.asarray([sum((gamma**i)*reward for i, reward in enumerate(row['rewards']))+
+                             (gamma**max(row['count']-1, 0))*row['event_reward'] for row in rows], dtype=np.float64)
+    advantages = np.zeros(size)
+    for index in range(size-1, -1, -1):
+        row = rows[index]
+        advantages[index] = discounted[index]-old[index]
+        if not row['terminated'] and row['has_next']:
+            advantages[index] += gamma**row['count']*nxt[index]
+        if index+1<size:
+            following = rows[index+1]
+            continuous = (not row['terminated'] and not row['truncated'] and row['end']==following['begin']
+                and all(row['identity'][key]==following['identity'][key] for key in ('backend_session_id', 'episode_id', 'policy_version')))
+            if continuous:
+                advantages[index] += (gamma*lam)**row['count']*advantages[index+1]
+    normalized = (advantages-advantages.mean())/max(float(advantages.std()), 1e-8)
+    differences = {}
+    for name, expected in (('discounted_rewards', discounted), ('advantages_raw', advantages), ('returns', advantages+old), ('advantages', normalized)):
+        difference = float(np.max(np.abs(vector(name)-expected)))
+        require(difference<=1e-7, f'Independent fixed-target/GAE mismatch: {name} {difference}')
+        differences[name] = difference
+    return dict(max_abs_differences=differences, value_source='fixed_targets.pt cross-checked against immutable pre-update rollout values')
+
+
+def audit_update(summary, contract):
+    probability = summary['probability_check']
+    require(probability.get('passed') is True, 'Old-policy probability check failed')
+    for key, threshold in (('max_abs_log_probability_difference', 1e-4), ('max_abs_ratio_minus_one', 1e-3), ('max_abs_independent_gaussian_difference', 1e-8)):
+        require(0<=number(probability[key], key)<=threshold, f'Pre-update probability check exceeded tolerance: {key}')
+    actor, critic = summary['actor'], summary['critic']
+    require(actor.get('parameters_changed') is True and actor.get('critic_unchanged') is True and actor.get('optimizer_steps')==1, 'Actor update or Critic isolation evidence failed')
+    require(critic.get('parameters_changed') is True and critic.get('actor_unchanged') is True, 'Critic update or Actor isolation evidence failed')
+    require(number(actor['ppo_only_gradient_norm'], 'PPO-only gradient')>0, 'DPPO itself has no positive gradient')
+    limit = number(summary.get('kl_limit', contract['kl_stop_joint']), 'joint KL limit')
+    require(0<=number(summary['kl']['mean_joint_kl'], 'accepted joint KL')<=limit, 'Accepted update exceeds joint KL limit')
+    calibration = actor.get('lr_calibration')
+    require(isinstance(calibration, dict) and calibration.get('accepted_updates')==1
+            and calibration.get('base_state_restored_per_candidate') is True and calibration.get('gradients_reused') is True,
+            'Accepted Actor step has no valid bounded LR calibration evidence')
+    candidates = calibration['candidates']
+    require(1<=len(candidates)<=3 and calibration['attempt_count']==len(candidates), 'Optimizer candidate attempt counts differ')
+    valid = []
+    rates = []
+    for candidate in candidates:
+        rate = number(candidate['lr'], 'candidate lr')
+        require(0<rate<=1e-6, 'Unbounded Actor LR candidate')
+        rates.append(rate)
+        eligible = number(candidate['kl']['mean_joint_kl'], 'candidate KL')<=limit and candidate['parameter_change']['changed_count']>0
+        require(candidate['accepted']==eligible, 'Candidate acceptance does not match KL and real parameter change')
+        if eligible:
+            valid.append(candidate)
+    require(all(left<right for left, right in zip(rates, rates[1:])) and valid, 'Candidate LR order or acceptance invalid')
+    chosen = max(valid, key=lambda item: item['lr'])
+    close(calibration['selected_lr'], chosen['lr'], 'maximum eligible learning rate', 0.)
+    close(summary['kl']['mean_joint_kl'], chosen['kl']['mean_joint_kl'], 'selected checkpoint KL')
+    gmt = summary['gmt_frozen']
+    require(gmt.get('policy_unchanged') is True and gmt.get('runtime_parameters_unchanged') is True, 'GMT changed during accepted update')
+    watermarks = gmt.get('execution_journal', {})
+    require(watermarks.get('executed_seq')==watermarks.get('acked_seq'), 'Accepted update has outstanding physics mutation')
+    require(summary['source_unchanged'].get('unchanged') is True, 'Sources changed during accepted update')
+    return dict(optimizer_attempts=len(candidates), selected_lr=chosen['lr'], mean_joint_kl=summary['kl']['mean_joint_kl'])
+
+
+def audit_checkpoint(root, summary, identity, update):
+    path = resolve(root, summary['checkpoint'])
+    publications = []
+    for publication_path in (root/'checkpoints/publications').glob('*.json'):
+        candidate = read_json(publication_path)
+        if candidate.get('iteration')==summary['iteration']:
+            publications.append(candidate)
+    require(len(publications)==1, 'Accepted checkpoint requires exactly one immutable publication')
+    publication = publications[0]
+    require(publication.get('schema')=='genmo.closedloop.stage10.checkpoint_publication.v1'
+            and resolve(root, publication['path'])==path, 'Checkpoint publication schema/path differs')
+    require(path.stat().st_size==publication['size_bytes'] and sha256(path)==publication['sha256'],
+            'Accepted checkpoint bytes differ from immutable publication')
+    require(publication['budget']==summary['budget'], 'Checkpoint publication budget differs')
+    published_summary = read_json(resolve(root, publication['metadata']['iteration_summary']))
+    require(published_summary==summary, 'Checkpoint publication binds another iteration summary')
+    saved = torch.load(path, map_location='cpu', weights_only=False, mmap=True)
+    required = {'actor', 'critic', 'actor_optimizer', 'critic_optimizer', 'state', 'rng', 'samplers', 'identity', 'config', 'optimizer_layout'}
+    require(saved.get('version')=='genmo.closedloop.stage9.full_state.v1' and required.issubset(saved), 'Checkpoint lacks full training state')
+    require(saved['identity']==identity and saved.get('restore_environment')=='new_worker_session_and_reset', 'Checkpoint identity/environment restore semantics differ')
+    state = saved['state']
+    require(publication['session_id']==state.get('session_id'), 'Checkpoint publication belongs to another session')
+    require(state['iteration']==summary['iteration'] and state['policy_version']==summary['policy_version_after'], 'Checkpoint iteration/policy watermark differs')
+    require(state['actor_updates']==state['iteration'] and state['buffer_size']==0 and state['pending_plan'] is False, 'Checkpoint is not a complete accepted-update boundary')
+    require(saved['samplers']['music']['split']=='train' and saved['samplers']['music']['catalog_identity']==identity['dataset'], 'Checkpoint sampler does not bind the complete train catalog')
+    for group in saved['actor_optimizer']['param_groups']:
+        close(group['lr'], update['selected_lr'], 'Checkpoint optimizer selected LR', 0.)
+    close(state['selected_actor_lr'], update['selected_lr'], 'Checkpoint selected LR', 0.)
+    budget_check(state['budget'])
+    require(state['budget']==summary['budget'], 'Checkpoint and iteration budget snapshots differ')
+    result = dict(path=str(path.relative_to(root)), iteration=state['iteration'], policy_version=state['policy_version'],
+                  actor_updates=state['actor_updates'], critic_updates=state['critic_updates'], session_id=state.get('session_id'),
+                  optimizer_attempts=state['budget']['used']['optimizer_attempts'])
+    del saved
+    return result
+
+
+def audit_evaluation(root, path, data_lookup, dataset_identity):
+    report = read_json(path)
+    require(report.get('status')=='passed' and report.get('updates_performed') is False and report.get('training_buffer_used') is False, 'Evaluation optimized weights or did not pass')
+    require(report.get('actor_gradients_unchanged') is True and report.get('rng_restored') is True and all(report['networks_unchanged'].values()), 'Evaluation changed network/gradient/RNG state')
+    require(report['network_fingerprints_before']==report['network_fingerprints_after'], 'Evaluation network fingerprints differ')
+    require(bool(report['actor_identity'].get('checkpoint')) and bool(report['actor_identity'].get('sha256')), 'Evaluation does not name the actually loaded checkpoint')
+    plan = read_json(resolve(root, report['selection_path'], path.parent))
+    require(plan['catalog_identity']==dataset_identity and plan['split'] in ('val', 'test'), 'Evaluation pool identity differs')
+    unsigned = {key: value for key, value in plan.items() if key!='plan_sha256'}
+    expected = hashlib.sha256(json.dumps(unsigned, ensure_ascii=False, sort_keys=True, separators=(',', ':'), allow_nan=False).encode()).hexdigest()
+    require(expected==plan['plan_sha256']==report['plan_sha256'], 'Evaluation plan digest differs')
+    require(len(plan['seeds'])>=2, 'Stage10 evaluation acceptance requires multiple explicit seeds')
+    expected_pool = sum(dataset_identity['sample_counts'][plan['split']].values())
+    require(plan['complete_pool_count']==expected_pool, 'Evaluation selection was not based on the complete held-out pool')
+    if plan['requested_eval_count']=='all':
+        require(plan['selected_sample_count']==expected_pool, 'all evaluation omitted held-out paired samples')
+    require(len(plan['tasks'])==plan['selected_sample_count']*len(plan['seeds'])==report['requested_task_count'], 'Evaluation Cartesian task count differs')
+    episodes = []
+    require(len(report['episode_manifests'])==len(plan['tasks'])==report['completed_episode_count'], 'Evaluation stopped before its planned episodes')
+    for reference, task in zip(report['episode_manifests'], plan['tasks']):
+        require(task['sample']['row']['split']==plan['split'], 'Evaluation includes a different split')
+        audited = data_lookup[(task['dataset'], plan['split'], str(task['sample_id']))]
+        require(task['sample']['manifest_sha256']==audited['manifest_sha256'], 'Evaluation paired sample differs from full manifest')
+        episode_path = resolve(root, reference['path'], path.parent)
+        require(sha256(episode_path)==reference['sha256'], 'Evaluation episode SHA differs')
+        episode = read_json(episode_path)
+        require(episode.get('transition_valid') is True and episode['task_id']==task['task_id']==reference['task_id'], 'Evaluation episode invalid or out of order')
+        require(episode['seed']==task['seed'] and episode['sample_id']==task['sample_id'] and episode['dataset']==task['dataset'], 'Evaluation episode task identity differs')
+        close(episode['reward_sum'], sum(item['reward_sum'] for item in episode['decisions']), 'Evaluation episode reward')
+        episodes.append(episode)
+    require(aggregate_evaluation(episodes)==report['aggregate'], 'Evaluation aggregate cannot be independently reproduced')
+    return dict(episodes=len(episodes), seeds=plan['seeds'], distinct_paired_samples=plan['selected_sample_count'],
+                unique_audio_count=plan['selected_unique_audio_count'], split=plan['split'], complete_pool=expected_pool)
+
+
+class Audit:
+    def __init__(self, allow_incomplete):
+        self.allow_incomplete, self.checks = allow_incomplete, []
+    def check(self, name, function):
+        try:
+            result = function()
+            self.checks.append({'name': name, 'status': 'passed', 'details': result})
+            return result
+        except FileNotFoundError as error:
+            self.checks.append({'name': name, 'status': 'not_run' if self.allow_incomplete else 'failed', 'error': str(error)})
+        except Exception as error:
+            self.checks.append({'name': name, 'status': 'failed', 'error': f'{type(error).__name__}: {error}'})
+        return None
+
+
+def audit_run(run_dir, *, allow_incomplete=False, minimum_iterations=2, require_resume=True):
+    root = Path(run_dir).resolve()
+    audit = Audit(allow_incomplete)
+    result = {'version': VERSION, 'run_dir': str(root), 'audit_scope': 'CPU artifacts and metadata; no network forward or physics replay'}
+    def check_run():
+        value = read_json(root/'run.json')
+        require(value.get('schema')=='genmo.closedloop.stage10.run.v1', 'Wrong Stage10 run schema')
+        require(isinstance(value.get('identity'), dict) and {'dataset', 'data_content_sha256', 'training_contract'}.issubset(value['identity']), 'Missing Stage10 run identity')
+        require(value.get('mode') in ('train', 'eval', 'preflight'), 'Unknown Stage10 run mode')
+        return value
+    run = audit.check('run_identity', check_run)
+    if run is None:
+        result.update(status='failed' if any(item['status']=='failed' for item in audit.checks) else 'incomplete', checks=audit.checks)
+        return result
+    identity = run['identity']
+    sessions = sorted((root/'sessions').glob('*/summary.json'))
+    summaries, data_lookup, iteration_summaries = [], None, []
+    for path in sessions:
+        summary = audit.check(f'session_json:{path.parent.name}', lambda path=path: read_json(path))
+        if summary is None:
+            continue
+        def check_session(summary=summary, path=path):
+            require(summary.get('status')=='passed' and summary.get('exit_code')==0, 'Session did not exit successfully')
+            completion = read_json(path.parent/'completion.json')
+            require(completion.get('schema')=='genmo.closedloop.stage10.session_completion.v1', 'Wrong session completion schema')
+            require(completion.get('summary_sha256')==sha256(path), 'Session summary differs from completion marker')
+            require(completion.get('status')==summary['status'] and completion.get('exit_code')==summary['exit_code']==0,
+                    'Session completion status/exit code differs from successful summary')
+            require(summary['source_unchanged'].get('unchanged') is True and summary.get('original_assets_unchanged') is True, 'Session source/assets changed')
+            if summary['mode']!='preflight':
+                gmt = summary['worker_shutdown']['gmt']
+                require(gmt.get('policy_unchanged') is True and gmt.get('runtime_parameters_unchanged') is True
+                        and gmt.get('process_exit_code')==0 and not gmt.get('forced_shutdown') and not gmt.get('close_error'), 'Worker did not close with frozen-state proof')
+            budget_check(summary['budget'])
+            return dict(session_id=summary['session_id'], mode=summary['mode'], initial_iteration=summary.get('initial_iteration'),
+                        final_iteration=summary.get('final_iteration'), completion_summary_sha256=completion['summary_sha256'])
+        audit.check(f'session:{path.parent.name}', check_session)
+        try:
+            data = read_json(resolve(root, summary['data_audit']))
+            lookup = audit_data(data)
+            require(data['identity']==identity['dataset'] and data['data_content_sha256']==identity['data_content_sha256'], 'Data identity changed between sessions')
+            data_lookup = lookup
+            audit.checks.append(dict(name=f'data:{path.parent.name}', status='passed', details={'sample_count': len(lookup), 'full_manifest_scan': True}))
+        except Exception as error:
+            audit.checks.append(dict(name=f'data:{path.parent.name}', status='failed', error=f'{type(error).__name__}: {error}'))
+        summaries.append(summary)
+        for reference in summary.get('iterations', []):
+            def load_iteration(reference=reference):
+                value = read_json(resolve(root, reference))
+                integer(value['iteration'], 'iteration', 1)
+                return value
+            iteration = audit.check(f'iteration_json:{reference}', load_iteration)
+            if iteration is not None:
+                iteration_summaries.append((iteration, summary))
+    if not sessions:
+        audit.check('sessions_present', lambda: (_ for _ in ()).throw(FileNotFoundError('No session summary has been published')))
+    if data_lookup is not None:
+        for session in summaries:
+            for reference in session.get('evaluations', []):
+                audit.check(f'evaluation:{reference}', lambda reference=reference: audit_evaluation(root, resolve(root, reference), data_lookup, identity['dataset']))
+    if run.get('mode')=='eval':
+        audit.check('explicit_evaluation_present', lambda: require(any(session.get('evaluations') for session in summaries), 'No explicit-checkpoint evaluation was published') or {'present': True})
+    else:
+        iteration_summaries.sort(key=lambda pair: pair[0]['iteration'])
+        seen_paths, last_budget, total_attempts, total_controls, checkpoints = set(), None, 0, 0, {}
+        for summary, session in iteration_summaries:
+            index = summary['iteration']
+            def check_iteration(summary=summary, session=session, index=index):
+                nonlocal last_budget, total_attempts, total_controls
+                require(summary.get('status')=='accepted' and summary['policy_version_after']==summary['policy_version_before']+1, 'Iteration has no accepted policy advancement')
+                require(summary['policy_version_before']==index-1, 'Logical iteration and policy version differ')
+                if data_lookup is None:
+                    raise ValueError('No validated complete dataset evidence')
+                rows, rollout = audit_rollout(root, summary, data_lookup, identity['training_contract'], seen_paths)
+                targets = audit_targets(root, summary, rows, identity['training_contract'])
+                update = audit_update(summary, identity['training_contract'])
+                budget_check(summary['budget'], last_budget)
+                checkpoint = audit_checkpoint(root, summary, identity, update)
+                require(checkpoint['session_id']==session['session_id'], 'Checkpoint belongs to a different training session')
+                checkpoints[index] = checkpoint
+                last_budget = summary['budget']
+                total_attempts += update['optimizer_attempts']
+                total_controls += rollout['control_steps']
+                return dict(iteration=index, rollout=rollout, fixed_targets=targets, update=update, checkpoint=checkpoint)
+            audit.check(f'iteration:{index}', check_iteration)
+        def check_continuity():
+            indices = [summary['iteration'] for summary, _ in iteration_summaries]
+            require(len(indices)>=minimum_iterations, f'Need at least {minimum_iterations} accepted iterations')
+            require(indices==list(range(1, max(indices)+1)), 'Accepted iteration sequence has gaps or duplicates')
+            return dict(accepted_iterations=len(indices), fresh_policy_versions=[summary['policy_version_before'] for summary, _ in iteration_summaries])
+        audit.check('multiple_fresh_policy_iterations', check_continuity)
+        if require_resume:
+            def check_resume():
+                continued = []
+                for session in summaries:
+                    resume = session.get('resume')
+                    if session.get('mode')!='train' or not resume or not resume.get('training_resume'):
+                        continue
+                    require(resume.get('restored_full_state') is True and resume.get('old_buffer_discarded') is True, 'Resume reused old Buffer or did not restore full state')
+                    initial = integer(resume['initial_iteration'], 'resume initial iteration')
+                    require(initial==session['initial_iteration'] and session['final_iteration']>initial, 'Resume did not perform a new accepted optimization')
+                    require(initial in checkpoints and bool(resume.get('new_backend_session_id')), 'Resume initial checkpoint/session evidence is missing')
+                    path = resolve(root, resume['checkpoint'])
+                    require(str(path.relative_to(root))==checkpoints[initial]['path'] and sha256(path)==resume['sha256'], 'Resumed checkpoint differs from the previous accepted publication')
+                    following = [summary for summary, owner in iteration_summaries if owner is session]
+                    require(following and following[0]['iteration']==initial+1, 'Resume first update is not the next policy version')
+                    # worker UUID 必须和旧物理session不同，而非只换上层run session。
+                    previous_summary = next(summary for summary, _ in iteration_summaries if summary['iteration']==initial)
+                    old_session = previous_summary['gmt_frozen'].get('execution_journal', {}).get('backend_session_id')
+                    require(old_session and resume['new_backend_session_id']!=old_session, 'Resume reused an old physical worker session')
+                    continued.append(dict(initial_iteration=initial, final_iteration=session['final_iteration'], new_backend_session_id=resume['new_backend_session_id']))
+                require(continued, 'No complete-state resume followed by a real Actor update')
+                return continued
+            audit.check('resume_then_optimize', check_resume)
+        def check_latest():
+            latest = read_json(root/'latest.json')
+            require(latest.get('schema')=='genmo.closedloop.stage10.checkpoint_publication.v1', 'Wrong latest publication schema')
+            require(latest['iteration']==max(checkpoints), 'Latest pointer differs from final validated iteration')
+            path = resolve(root, latest['path'])
+            require(str(path.relative_to(root))==checkpoints[latest['iteration']]['path'] and path.stat().st_size==latest['size_bytes'] and sha256(path)==latest['sha256'], 'Latest checkpoint file differs from publication')
+            publication = read_json(resolve(root, latest['publication']))
+            require(publication=={key: value for key, value in latest.items() if key!='publication'}, 'Latest and immutable publication disagree')
+            budget_check(latest['budget'], last_budget)
+            require(latest['budget']['used']['optimizer_attempts']>=total_attempts and latest['budget']['used']['control_steps']>=total_controls, 'Budget omitted actual optimizer/physical consumption')
+            require(latest['budget']['used']['accepted_iterations']>=len(checkpoints), 'Accepted iteration budget is too small')
+            return dict(iteration=latest['iteration'], optimizer_attempts=total_attempts, validated_rollout_controls=total_controls)
+        audit.check('published_checkpoint_and_budget', check_latest)
+    def check_persisted_budget():
+        persisted = budget_check(read_json(root/'budget.json'))
+        for session in summaries:
+            budget_check(persisted, session['budget'])
+        for summary, _ in iteration_summaries:
+            budget_check(persisted, summary['budget'])
+        if (root/'latest.json').exists():
+            budget_check(persisted, read_json(root/'latest.json')['budget'])
+        return {'used': persisted['used'], 'session_count': len(summaries)}
+    audit.check('persisted_budget_monotonic', check_persisted_budget)
+    statuses = [item['status'] for item in audit.checks]
+    result.update(status='failed' if 'failed' in statuses else 'incomplete' if 'not_run' in statuses else 'passed',
+                  checks=audit.checks, passed_checks=statuses.count('passed'), failed_checks=statuses.count('failed'),
+                  not_run_checks=statuses.count('not_run'))
+    return result
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--run-dir', type=Path, required=True)
+    parser.add_argument('--output', type=Path)
+    parser.add_argument('--allow-incomplete', action='store_true')
+    parser.add_argument('--minimum-iterations', type=int, default=2)
+    parser.add_argument('--no-require-resume', action='store_true', help='Explicitly report a pre-resume partial acceptance scope')
+    args = parser.parse_args(argv)
+    if args.minimum_iterations<1:
+        parser.error('--minimum-iterations must be >=1')
+    report = audit_run(args.run_dir, allow_incomplete=args.allow_incomplete,
+                       minimum_iterations=args.minimum_iterations, require_resume=not args.no_require_resume)
+    if args.output:
+        args.output.parent.mkdir(parents=True, exist_ok=True)
+        with args.output.open('x', encoding='utf-8') as stream:
+            json.dump(report, stream, ensure_ascii=False, indent=2, allow_nan=False)
+            stream.write('\n')
+    print(json.dumps({'status': report['status'], 'passed_checks': report.get('passed_checks', 0),
+                      'failed_checks': report.get('failed_checks', 0)}, ensure_ascii=False))
+    return 0 if report['status']=='passed' else 1
+
+
+if __name__=='__main__':
+    raise SystemExit(main())
