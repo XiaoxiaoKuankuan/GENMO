@@ -159,19 +159,26 @@ def _calibrate_and_profile(c, restored=False):
     c.env.budget, c.env.output = budget, path
     path.joinpath('raw_samples').mkdir()
     def perform():
-        calibration = calibrate(c.env, c.catalog, path, c.base_config['timing']['calibration_warmup'],
-                                c.base_config['timing']['calibration_samples'])
+        source = next(iter(c.catalog.samples['train']))
+        sample = c.catalog.samples['train'][source][0]
+        c.env.reset_task(sample, c.catalog.load_music(sample), seed=c.env.config['stage9']['seed'], phase='calibration')
         conditions, _ = c.env.preview_context()
         conditions = {key: value.to(c.distributed.device) for key, value in conditions.items()}
-        profiles = probe_profiles(c.policy, conditions,
+        return probe_profiles(c.policy, conditions,
             maximum_microbatch=c.settings['denoising_microbatch'], seed=c.stage['seed']+c.distributed.rank,
             reserve_generation=lambda: budget.reserve('profile', generations=1))
-        atomic_json(path/'profile.json', dict(calibration=calibration, profiles=profiles))
-        return profiles
     reports = c.distributed.all_gather_object(local_call(c.distributed, perform))
     profile = select_profile(reports, required=c.state.get('execution_profile') if restored else None)
+    c.profile = profile
+    c.policy.cfg_batch = profile['cfg_batch']
+    # 校准必须使用最终通过概率门槛的执行方式；CFG回退后不可沿用更快路径的时延。
+    calibration = local_call(c.distributed, lambda: calibrate(c.env, c.catalog, path,
+        c.base_config['timing']['calibration_warmup'], c.base_config['timing']['calibration_samples']))
+    atomic_json(path/'profile.json', dict(calibration=calibration, profiles=reports[c.distributed.rank], selected=profile))
     if restored:
         # 新环境只校验运行路径，恢复已有延迟合同；校准的请求编号仍消耗，不复用。
+        if max(calibration['durations']) > previous['latency_budget_s']:
+            raise RuntimeError('Restored latency contract is insufficient for the selected execution profile')
         attempts = c.env.attempt
         restore_execution_state(c.env, dict(previous, policy_version=c.state['policy_version'],
                                            iteration=c.state['iteration']), spent_generations=attempts)
@@ -538,6 +545,7 @@ def run_parallel(args, config, collective, preflight):
                 print(f'[DATA_AUDIT] {audit_count} {record["dataset"]}/{record["split"]}', flush=True)
         audit = root_call(collective, lambda: c.catalog.audit_files(audit_progress,
             require_audio=c.stage['dataset']['require_audio']))
+        local_call(collective, lambda: c.catalog.apply_audit(audit))
         provenance = root_call(collective, lambda: legacy._sources(config, preflight))
         c.actor, train_config, loading = local_call(collective, lambda: load_actor(c.config))
         loading.update(source_checkpoint_sha256=preflight['asset_sha256']['checkpoint'])

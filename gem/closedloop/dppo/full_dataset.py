@@ -5,6 +5,8 @@
 音频及原动作身份的跨划分泄漏；同一划分内同音乐的不同舞者/裁剪合法保留。显式调用
 audit_files 才扫描全部音乐、音频与动作，逐条记录当前 motion.pt 内容 SHA 和原动作
 来源声明的区别。只读 CPU 审计，不加载 Actor，也不修改源数据或划分。
+并行 rank 可通过 apply_audit 验证并原子绑定 root 广播的完整报告，不重复全量读文件；
+绑定同时更新逐样本payload身份、采样清单和目录身份，避免只同步汇总SHA。
 
 FullMusicSampler 先按 20/35/25/20 抽来源，再在来源完整清单中按独立 RNG 打乱、
 无放回抽样。随机起点以 30 Hz 源帧计数，返回完整音乐和 start_frame；环境必须对音乐
@@ -143,6 +145,79 @@ class FullMusicCatalog:
         if sha256_file(path) != expected["manifest_sha256"]:
             raise ValueError("full catalog manifest changed before music load")
         return load_music_features(self.data_root, expected)
+
+    def apply_audit(self, audit):
+        """验证并绑定 root 的完整文件审计，失败时不部分修改当前目录快照。
+
+        本 rank 已构造的十二份清单身份必须与报告相同，逐条记录须完整覆盖且
+        与本地原始清单字段/路径一致，记录摘要必须可重算。此处只复核清单和
+        元数据文件身份，不重读全部音乐、动作或音频；实际加载仍沿用原逐次SHA
+        核验。全部通过后同时发布 lookup、samples 和 audited identity。
+        """
+        if (not isinstance(audit, dict) or audit.get("version") != "genmo.closedloop.full_dataset_audit.v1"
+                or audit.get("status") != "passed" or audit.get("complete_manifest_scan") is not True
+                or type(audit.get("require_audio")) is not bool or not isinstance(audit.get("identity"), dict)):
+            raise ValueError("broadcast dataset audit must be a complete passed report")
+        base = copy.deepcopy(self.identity)
+        base.pop("audited_data_content_sha256", None)
+        reported = copy.deepcopy(audit["identity"])
+        content_sha = _sha(audit.get("data_content_sha256"), "audited data content")
+        if reported.pop("audited_data_content_sha256", None) != content_sha or reported != base:
+            raise ValueError("broadcast dataset audit differs from local manifest identity")
+        if self.identity.get("audited_data_content_sha256", content_sha) != content_sha:
+            raise ValueError("broadcast dataset audit changes already bound content identity")
+        records = audit.get("records")
+        if (not isinstance(records, list) or type(audit.get("sample_count")) is not int
+                or len(records) != audit["sample_count"] or len(records) != len(self._lookup)):
+            raise ValueError("broadcast dataset audit must cover every local manifest sample")
+        digest = hashlib.sha256(json.dumps(records, sort_keys=True, separators=(",", ":"),
+                                           allow_nan=False).encode()).hexdigest()
+        if digest != content_sha:
+            raise ValueError("broadcast dataset audit record content SHA mismatch")
+        payloads = {}
+        for record in records:
+            if not isinstance(record, dict):
+                raise ValueError("broadcast dataset audit contains a non-record")
+            key = (record.get("split"), record.get("dataset"), record.get("sample_id"))
+            if key not in self._lookup or key in payloads:
+                raise ValueError("broadcast dataset audit has duplicate or unknown sample keys")
+            sample = self._lookup[key]
+            row, source = sample["row"], sample["dataset"]
+            expected = dict(group_id=sample["group_id"], num_frames=row["num_frames"],
+                manifest_sha256=sample["manifest_sha256"], source_motion_sha256=row["source_motion_sha256"],
+                music_feature_sha256=row["source_music_feature_sha256"],
+                dataset_info_sha256=base["dataset_info_sha256"][source],
+                source_motion_sha_validation=f"payload_equals_verified_{sample['split']}_manifest_declaration")
+            if any(record.get(field) != value for field, value in expected.items()):
+                raise ValueError("broadcast dataset audit record differs from local manifest sample")
+            root = self.data_root / source
+            for field, row_field in (("motion_path", "motion_path"), ("music_feature_path", "music_feature_path"),
+                                     ("audio_path", "audio_path")):
+                if (not isinstance(record.get(field), str)
+                        or Path(record[field]).resolve() != (root / row[row_field]).resolve()):
+                    raise ValueError("broadcast dataset audit record path differs from local manifest")
+            payload = _sha(record.get("motion_payload_sha256"), "audited motion payload")
+            declared_payload = row.get("motion_file_sha256")
+            if (record.get("payload_sha256") != payload
+                    or declared_payload is not None and declared_payload != payload):
+                raise ValueError("broadcast dataset audit motion payload identities differ")
+            if (type(record.get("audio_verified")) is not bool
+                    or (audit["require_audio"] and record["audio_verified"] is not True)
+                    or (record["audio_verified"] and record.get("audio_sha256") != row["source_audio_sha256"])
+                    or (not record["audio_verified"] and record.get("audio_sha256") is not None)):
+                raise ValueError("broadcast dataset audit audio identity differs")
+            payloads[key] = payload
+        if set(payloads) != set(self._lookup):
+            raise ValueError("broadcast dataset audit is missing local manifest samples")
+        self._verify_identity()
+        lookup = copy.deepcopy(self._lookup)
+        for key, payload in payloads.items():
+            lookup[key]["motion_file_sha256"] = payload
+        samples = {split: {source: tuple(copy.deepcopy(lookup[(split, source, item["row"]["sample_id"])])
+                    for item in self.samples[split][source]) for source in SOURCES} for split in SPLITS}
+        identity = copy.deepcopy(audit["identity"])
+        self._lookup, self.samples, self.identity = lookup, samples, identity
+        return True
 
     def audit_files(self, progress=None, *, require_audio=True):
         """扫描全部记录并返回逐条证据；任何缺失/不匹配直接报错，不静默缩小池。"""

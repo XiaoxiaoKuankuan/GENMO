@@ -17,6 +17,7 @@ import pytest
 import torch
 
 from gem.closedloop.contracts import GMT_EXPECTED_JOINT_ORDER
+import gem.closedloop.dppo.full_dataset as full_dataset
 from gem.closedloop.dppo.full_dataset import FullMusicCatalog, FullMusicSampler, SOURCES, SPLITS
 from gem.closedloop.dppo.target_activity import load_paired_activity
 
@@ -195,6 +196,101 @@ def test_audited_motion_contents_remain_bound_during_reward_loading(tmp_path):
     torch.save(payload, path)
     with pytest.raises(ValueError, match="changed after full dataset audit"):
         load_paired_activity(root, sample)
+
+
+def test_broadcast_audit_binds_reconstructed_catalog_without_rescanning(tmp_path, monkeypatch):
+    root = make_catalog_data(tmp_path)
+    audited = FullMusicCatalog(root)
+    report = audited.audit_files()
+    reconstructed = FullMusicCatalog(root)
+    assert reconstructed.identity != audited.identity
+
+    def no_payload_scan(*args, **kwargs):
+        raise AssertionError("apply_audit must not rescan payload files")
+
+    with monkeypatch.context() as isolated:
+        isolated.setattr(full_dataset, "load_music_features", no_payload_scan)
+        isolated.setattr(full_dataset, "_load_verified_pair", no_payload_scan)
+        isolated.setattr(reconstructed, "audit_files", no_payload_scan)
+        assert reconstructed.apply_audit(report) is True
+        assert reconstructed.apply_audit(report) is True  # root也可同值再次绑定。
+    assert reconstructed.identity == audited.identity
+    assert reconstructed.samples == audited.samples and reconstructed._lookup == audited._lookup
+    for split in SPLITS:
+        for source in SOURCES:
+            sample = reconstructed.samples[split][source][0]
+            np.testing.assert_array_equal(reconstructed.load_music(sample), audited.load_music(sample))
+            assert reconstructed.validate_sample(sample)["motion_file_sha256"]
+    first = FullMusicSampler(audited, seed=19)
+    second = FullMusicSampler(reconstructed, seed=21)
+    second.load_state_dict(first.state_dict())
+    assert second.next_task()["sample"] == first.next_task()["sample"]
+    report["identity"]["catalog_sha256"] = "0" * 64
+    assert reconstructed.identity == audited.identity  # 不保留广播输入可写别名。
+
+
+@pytest.mark.parametrize("fault", ["status", "identity", "content_sha", "missing", "duplicate", "unknown",
+                                  "manifest", "payload", "audio", "path", "group"])
+def test_broadcast_bad_audit_never_partially_changes_catalog(tmp_path, fault):
+    root = make_catalog_data(tmp_path)
+    report = FullMusicCatalog(root).audit_files()
+    catalog = FullMusicCatalog(root)
+    before = copy.deepcopy((catalog.identity, catalog.samples, catalog._lookup))
+    record = report["records"][-1]
+    if fault == "status":
+        report["status"] = "failed"
+    elif fault == "identity":
+        report["identity"]["catalog_sha256"] = "0" * 64
+    elif fault == "content_sha":
+        report["data_content_sha256"] = "0" * 64
+    elif fault == "missing":
+        report["records"].pop()
+    elif fault == "duplicate":
+        report["records"][-1] = copy.deepcopy(report["records"][0])
+    elif fault == "unknown":
+        record["sample_id"] = "unknown"
+    elif fault == "manifest":
+        record["manifest_sha256"] = "0" * 64
+    elif fault == "payload":
+        record["payload_sha256"] = "0" * 64
+    elif fault == "audio":
+        record["audio_sha256"] = "0" * 64
+    elif fault == "path":
+        record["motion_path"] = "/tmp/wrong_dataset_payload.pt"
+    else:
+        record["group_id"] = "wrong-group"
+    if fault not in ("status", "identity", "content_sha"):
+        content = hashlib.sha256(json.dumps(report["records"], sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+        report["data_content_sha256"] = content
+        report["identity"]["audited_data_content_sha256"] = content
+        report["sample_count"] = len(report["records"])
+    with pytest.raises(ValueError):
+        catalog.apply_audit(report)
+    assert (catalog.identity, catalog.samples, catalog._lookup) == before
+
+
+def test_broadcast_audit_keeps_motion_payload_drift_detection(tmp_path):
+    root = make_catalog_data(tmp_path)
+    report = FullMusicCatalog(root).audit_files()
+    catalog = FullMusicCatalog(root)
+    catalog.apply_audit(report)
+    sample = catalog.samples["train"][SOURCES[0]][0]
+    path = root / SOURCES[0] / sample["row"]["motion_path"]
+    payload = torch.load(path, weights_only=False)
+    payload["qpos"][:, 7:] += .1
+    torch.save(payload, path)
+    with pytest.raises(ValueError, match="changed after full dataset audit"):
+        load_paired_activity(root, sample)
+
+
+def test_broadcast_audit_accepts_existing_optional_null_payload_declaration(tmp_path):
+    root = make_catalog_data(tmp_path)
+    rewrite_row(root, SOURCES[0], "train", lambda rows: rows[0].update(motion_file_sha256=None))
+    audited = FullMusicCatalog(root)
+    report = audited.audit_files()
+    catalog = FullMusicCatalog(root)
+    catalog.apply_audit(report)
+    assert catalog.samples == audited.samples and catalog.identity == audited.identity
 
 
 def test_mutating_public_sample_does_not_mutate_catalog_validation_snapshot(tmp_path):

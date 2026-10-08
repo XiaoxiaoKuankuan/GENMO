@@ -28,6 +28,9 @@ class Solo:
     def broadcast_object(self, value):
         return value
 
+    def all_gather_object(self, value):
+        return [value]
+
 
 def test_formal_configuration_and_outer_save_boundaries():
     root = Path(__file__).resolve().parents[3]
@@ -62,6 +65,31 @@ def test_global_collection_credit_rejected_before_any_rank_reservation(tmp_path)
         begin_lease(Solo(), None, budget, tmp_path, 'collect', credits)
     assert budget.state_dict() == before
     assert not (tmp_path/'resource_lease.json').exists()
+
+
+def test_calibration_measures_selected_cfg_after_numeric_fallback(tmp_path, monkeypatch):
+    from tools import train_closedloop_stage10 as entry
+    events = []
+    env = SimpleNamespace(latency_budget_s=.26, config={'stage9':{'seed':42}},
+        reset_task=lambda *a, **k: events.append('reset'),
+        preview_context=lambda: ({'value':torch.zeros(1)}, None))
+    context = SimpleNamespace(env=env, generators={}, base_config={'timing':{'calibration_warmup':1,'calibration_samples':2}},
+        settings={'episode_seconds':10.,'denoising_microbatch':4}, distributed=Solo(), stage={'seed':42},
+        state={}, policy=SimpleNamespace(cfg_batch=True), catalog=SimpleNamespace(
+            samples={'train':{'Mine':[{}]}}, load_music=lambda _: None), budget=None)
+    monkeypatch.setattr(training, '_new_phase', lambda *args: (tmp_path, 'profile', SimpleNamespace(reserve=lambda *a, **k:None)))
+    monkeypatch.setattr(training, 'probe_profiles', lambda *a, **k: [dict(microbatch=1,cfg_batch=False,passed=True)])
+    monkeypatch.setattr(training, 'finish_lease', lambda *args: {'used':{}})
+    def calibrate(*args):
+        assert context.policy.cfg_batch is False
+        events.append('calibrate_separate_cfg')
+        env.latency_budget_s=.4
+        return dict(durations=[.3,.31],latency_budget_s=.4)
+    monkeypatch.setattr(entry, 'calibrate', calibrate)
+    training._calibrate_and_profile(context)
+    assert events == ['reset','calibrate_separate_cfg']
+    assert env.latency_budget_s == .4
+    assert context.state['execution_profile']['microbatch'] == 1
 
 
 @pytest.mark.parametrize('failure', ['critic', 'actor', 'kl'])
