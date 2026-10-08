@@ -1,4 +1,8 @@
-"""服务器单机八卡同步 Stage10 学习入口，使用真实单采集器执行数据。
+"""服务器单机八卡同步 Stage10 入口，默认八个独立冻结 GMT 采集器。
+
+v2 每卡采集二十条真实转移，使用固定 5e-9 学习率的多 minibatch PPO，整轮 KL
+验收通过后才发布下一轮策略。各卡持有独立物理环境、随机数和音乐游标，共享同步
+更新的模型。显式传入 v1 配置仍使用下面描述的历史单采集流程，不能交叉完整恢复。
 
 由 torchrun 创建八个 rank，首先在建立 CUDA 上下文前核验全部可见 GPU 空闲及
 既有资产，然后初始化 Gloo 控制通信与 NCCL 梯度通信。rank 0 复用已验收的完整
@@ -53,7 +57,7 @@ def _available_gpus():
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--config', type=Path, default=ROOT/'configs/closedloop/stage10_8gpu_server1.yaml')
+    parser.add_argument('--config', type=Path, default=ROOT/'configs/closedloop/stage10_8gpu_server1_v2.yaml')
     parser.add_argument('--output-dir', type=Path, required=True)
     parser.add_argument('--stop-after-iteration', type=int, default=1)
     parser.add_argument('--resume', help='Resume latest or the latest published checkpoint in this run')
@@ -62,7 +66,8 @@ def main(argv=None):
     if world != 8 or not 0 <= rank < world or local_rank != rank:
         parser.error('Use single-node torchrun --standalone --nproc_per_node=8')
     config = training.configuration(args.config)
-    if config['stage10'].get('distributed') != dict(world_size=8, backend='nccl', collection='rank0'):
+    parallel_v2 = config['stage10']['version'] == training.VERSION_V2
+    if config['stage10'].get('distributed') != dict(world_size=8, backend='nccl', collection='all_ranks' if parallel_v2 else 'rank0'):
         parser.error('Expected explicit 8 GPU synchronous learner configuration')
     if not 1 <= args.stop_after_iteration <= config['stage10']['limits']['accepted_iterations']:
         parser.error('Stop iteration must fit the configured budget')
@@ -93,6 +98,15 @@ def main(argv=None):
         raise RuntimeError('Eight GPU NCCL all-reduce failed')
     if rank == 0:
         print('[DISTRIBUTED] eight GPU NCCL all_reduce=36; shared Actor/Critic training', flush=True)
+    if parallel_v2:
+        from gem.closedloop.dppo.parallel_training import run_parallel
+        code = run_parallel(args, config, collectives, startup[0]['check'])
+        if code:
+            return code
+        dist.barrier()
+        dist.destroy_process_group(tensor_group)
+        dist.destroy_process_group()
+        return 0
     learner = DistributedLearner(collectives, args.output_dir, preflight=startup[0]['check'])
     if rank == 0:
         arguments = ['--config', str(args.config), '--mode', 'train', '--output-dir', str(args.output_dir),

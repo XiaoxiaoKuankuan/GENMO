@@ -74,7 +74,16 @@ def archived_execution(root, summary):
         yield None
         return
     manifest = read_json(manifest_path)
-    require(manifest.get('schema')=='genmo.closedloop.stage10.execution_archive.v1', 'Wrong execution archive schema')
+    require(manifest.get('schema') in ('genmo.closedloop.stage10.execution_archive.v1',
+            'genmo.closedloop.stage10.execution_archive.v2'), 'Wrong execution archive schema')
+    if manifest['schema'].endswith('.v2'):
+        seal_path = directory/'seal_manifest.json'
+        seal = read_json(seal_path)
+        require(seal.get('schema')=='genmo.closedloop.stage10.iteration_seal.v2'
+                and seal.get('journals_closed') is True
+                and sha256(seal_path)==manifest.get('seal_sha256')
+                and seal.get('members')==manifest.get('members')
+                and seal.get('iteration')==manifest.get('iteration'), 'Execution archive differs from immutable seal')
     require(manifest.get('archive')=='execution_evidence.tar.gz', 'Unexpected execution archive filename')
     archive = directory/manifest['archive']
     require(archive.is_file() and not archive.is_symlink(), 'Execution archive must be a regular file')
@@ -87,7 +96,8 @@ def archived_execution(root, summary):
         require(isinstance(name, str) and name and not relative.is_absolute()
                 and '..' not in relative.parts and str(relative)==name, 'Execution archive member path escapes iteration')
         require(name not in records, 'Duplicate execution archive manifest member')
-        require(name not in ('summary.json', 'lr_progress.json', 'archive_manifest.json', 'execution_evidence.tar.gz'),
+        require(name not in ('summary.json', 'lr_progress.json', 'seal_manifest.json', 'superseded.json',
+                'archive_manifest.json', 'execution_evidence.tar.gz'),
                 'Execution archive cannot replace retained publication metadata')
         integer(record['size_bytes'], 'archive member size')
         records[name] = record
@@ -264,7 +274,8 @@ def audit_rollout(root, summary, data_lookup, contract, seen_paths):
                 count=count, begin=item.control_tick_begin, end=item.control_tick_end,
                 terminated=bool(item.terminated), truncated=bool(item.truncated),
                 has_next=item.next_context is not None, event_reward=float(item.metadata.get('event_reward', 0.)),
-                old_value=float(item.old_value), next_value=float(item.next_value)))
+                old_value=float(item.old_value), next_value=float(item.next_value),
+                free_coordinate_count=int(item.free_mask.sum())))
             controls += count
             physics += item.executed_physics_steps
             sources[task['dataset']] += 1
@@ -275,7 +286,7 @@ def audit_rollout(root, summary, data_lookup, contract, seen_paths):
     return rows, dict(transition_count=len(rows), control_steps=controls, physics_steps=physics, source_transition_counts=dict(sources))
 
 
-def audit_targets(root, summary, rows, contract):
+def audit_targets(root, summary, rows, contract, *, normalization=None):
     target = torch.load(_physical(resolve(root, summary['targets_path'])), map_location='cpu', weights_only=False, mmap=True)
     size = len(rows)
     def vector(name):
@@ -304,7 +315,13 @@ def audit_targets(root, summary, rows, contract):
                 and all(row['identity'][key]==following['identity'][key] for key in ('backend_session_id', 'episode_id', 'policy_version')))
             if continuous:
                 advantages[index] += (gamma*lam)**row['count']*advantages[index+1]
-    normalized = (advantages-advantages.mean())/max(float(advantages.std()), 1e-8)
+    mean, std = (advantages.mean(), float(advantages.std())) if normalization is None else normalization
+    normalized = (advantages-mean)/max(float(std), 1e-8)
+    if normalization is not None:
+        require(target.get('advantage_normalization_scope')=='global_valid_upper_transitions',
+                'V2 advantages must use global upper-transition normalization')
+        close(target['advantage_global_mean'], mean, 'Global advantage mean')
+        close(target['advantage_global_std'], std, 'Global advantage std')
     differences = {}
     for name, expected in (('discounted_rewards', discounted), ('advantages_raw', advantages), ('returns', advantages+old), ('advantages', normalized)):
         difference = float(np.max(np.abs(vector(name)-expected)))
@@ -407,12 +424,17 @@ def _retired_checkpoint(root, path, publication):
             'Retirement replacement has invalid publication schema')
     for key in ('iteration', 'path', 'sha256'):
         require(replacement.get(key)==replacement_publication[key], 'Retirement replacement publication differs')
-    require(replacement['iteration']>=publication['iteration']+keep_last,
-            'Retirement removed one of the latest protected checkpoints')
+    saved = retirement.get('audit_state')
+    if isinstance(saved, dict) and saved.get('version')=='genmo.closedloop.stage10.full_state.v2':
+        successors = {read_json(path)['iteration'] for path in (root/'checkpoints/publications').glob('*.json')
+                      if publication['iteration']<read_json(path)['iteration']<=replacement['iteration']}
+        require(len(successors)>=keep_last, 'Retirement removed one of the latest protected checkpoints')
+    else:
+        require(replacement['iteration']>=publication['iteration']+keep_last,
+                'Retirement removed one of the latest protected checkpoints')
     latest = read_json(root/'latest.json')
     require(latest['iteration']>=replacement['iteration'] and latest['path']!=publication['path'],
             'Retirement preceded replacement publication or removed latest')
-    saved = retirement.get('audit_state')
     require(isinstance(saved, dict), 'Retirement lacks original checkpoint audit metadata')
     return saved, dict(storage='retired_metadata_only', original_bytes_revalidated=False,
                        retirement=str(retirement_path.relative_to(root)), sha256=publication['sha256'])
@@ -463,12 +485,16 @@ def audit_checkpoint(root, summary, identity, update, publication=None, rows=Non
     return result
 
 
-def audit_evaluation(root, path, data_lookup, dataset_identity):
+def audit_evaluation(root, path, data_lookup, dataset_identity, *, loaded_checkpoint=None):
     report = read_json(path)
     require(report.get('status')=='passed' and report.get('updates_performed') is False and report.get('training_buffer_used') is False, 'Evaluation optimized weights or did not pass')
     require(report.get('actor_gradients_unchanged') is True and report.get('rng_restored') is True and all(report['networks_unchanged'].values()), 'Evaluation changed network/gradient/RNG state')
     require(report['network_fingerprints_before']==report['network_fingerprints_after'], 'Evaluation network fingerprints differ')
     require(bool(report['actor_identity'].get('checkpoint')) and bool(report['actor_identity'].get('sha256')), 'Evaluation does not name the actually loaded checkpoint')
+    if loaded_checkpoint is not None:
+        require(str(Path(report['actor_identity']['checkpoint']).resolve())==loaded_checkpoint['path']
+                and report['actor_identity']['sha256']==loaded_checkpoint['sha256'],
+                'V2 evaluation does not use the declared weights-only checkpoint')
     plan = read_json(resolve(root, report['selection_path'], path.parent))
     require(plan['catalog_identity']==dataset_identity and plan['split'] in ('val', 'test'), 'Evaluation pool identity differs')
     unsigned = {key: value for key, value in plan.items() if key!='plan_sha256'}
@@ -496,6 +522,23 @@ def audit_evaluation(root, path, data_lookup, dataset_identity):
     require(aggregate_evaluation(episodes)==report['aggregate'], 'Evaluation aggregate cannot be independently reproduced')
     return dict(episodes=len(episodes), seeds=plan['seeds'], distinct_paired_samples=plan['selected_sample_count'],
                 unique_audio_count=plan['selected_unique_audio_count'], split=plan['split'], complete_pool=expected_pool)
+
+
+def audit_evaluation_restore(session, identity):
+    """v2 独立评估只核权重来源；不要求或解析多 rank 完整恢复的执行/RNG状态。"""
+    resume = session.get('resume') or {}
+    require(resume.get('restore_mode')=='weights_only' and resume.get('restored_full_state') is False
+            and resume.get('training_resume') is False, 'V2 evaluation falsely claims a full training resume')
+    path = Path(resume['checkpoint']).resolve()
+    require(path.is_file() and sha256(path)==resume['sha256'], 'V2 evaluation source checkpoint SHA differs')
+    saved = torch.load(path, map_location='cpu', weights_only=False, mmap=True)
+    require(saved.get('version')=='genmo.closedloop.stage10.full_state.v2'
+            and saved.get('identity')==identity and {'actor', 'critic', 'state'}.issubset(saved),
+            'V2 evaluation checkpoint model identity differs')
+    require(saved['state']['iteration']==session['initial_iteration'], 'V2 evaluation loaded another model iteration')
+    return dict(path=str(path), sha256=resume['sha256'], restore_mode='weights_only',
+                optimizer_restored=False, rng_restored=False,
+                rank_execution_state_scope='Not interpreted as evaluation full-state resume')
 
 
 class Audit:
@@ -869,7 +912,8 @@ def audit_run(run_dir, *, allow_incomplete=False, minimum_iterations=2, require_
     result = {'version': VERSION, 'run_dir': str(root), 'audit_scope': 'CPU artifacts and metadata; no network forward or physics replay'}
     def check_run():
         value = read_json(root/'run.json')
-        require(value.get('schema')=='genmo.closedloop.stage10.run.v1', 'Wrong Stage10 run schema')
+        require(value.get('schema') in ('genmo.closedloop.stage10.run.v1',
+                'genmo.closedloop.stage10.run.v2'), 'Wrong Stage10 run schema')
         require(isinstance(value.get('identity'), dict) and {'dataset', 'data_content_sha256', 'training_contract'}.issubset(value['identity']), 'Missing Stage10 run identity')
         require(value.get('mode') in ('train', 'eval', 'preflight'), 'Unknown Stage10 run mode')
         return value
@@ -878,11 +922,16 @@ def audit_run(run_dir, *, allow_incomplete=False, minimum_iterations=2, require_
         result.update(status='failed' if any(item['status']=='failed' for item in audit.checks) else 'incomplete', checks=audit.checks)
         return result
     identity = run['identity']
+    if run['schema']=='genmo.closedloop.stage10.run.v2':
+        from tools.eval.audit_closedloop_stage10_v2 import audit_training_v2
+        audit.check('parallel_training_recovery_audit', lambda: audit_training_v2(
+            root, run, audit, result, minimum_iterations, require_resume))
+        return _finish_report(result, audit, minimum_iterations, require_resume)
     if run['mode']=='train':
         audit.check('training_recovery_audit', lambda: _audit_training(root, run, audit, result, minimum_iterations, require_resume))
         return _finish_report(result, audit, minimum_iterations, require_resume)
     sessions = sorted((root/'sessions').glob('*/summary.json'))
-    summaries, data_lookup, iteration_summaries = [], None, []
+    summaries, data_lookup, iteration_summaries, evaluation_checkpoints = [], None, [], {}
     for path in sessions:
         summary = audit.check(f'session_json:{path.parent.name}', lambda path=path: read_json(path))
         if summary is None:
@@ -903,6 +952,11 @@ def audit_run(run_dir, *, allow_incomplete=False, minimum_iterations=2, require_
             return dict(session_id=summary['session_id'], mode=summary['mode'], initial_iteration=summary.get('initial_iteration'),
                         final_iteration=summary.get('final_iteration'), completion_summary_sha256=completion['summary_sha256'])
         audit.check(f'session:{path.parent.name}', check_session)
+        if run['mode']=='eval' and identity.get('stage10')=='genmo.closedloop.stage10.v2':
+            loaded = audit.check(f'evaluation_weights_only:{path.parent.name}',
+                lambda summary=summary: audit_evaluation_restore(summary, identity))
+            if loaded is not None:
+                evaluation_checkpoints[summary['session_id']] = loaded
         try:
             data = read_json(resolve(root, summary['data_audit']))
             lookup = audit_data(data)
@@ -925,7 +979,9 @@ def audit_run(run_dir, *, allow_incomplete=False, minimum_iterations=2, require_
     if data_lookup is not None:
         for session in summaries:
             for reference in session.get('evaluations', []):
-                audit.check(f'evaluation:{reference}', lambda reference=reference: audit_evaluation(root, resolve(root, reference), data_lookup, identity['dataset']))
+                audit.check(f'evaluation:{reference}', lambda reference=reference, session=session: audit_evaluation(
+                    root, resolve(root, reference), data_lookup, identity['dataset'],
+                    loaded_checkpoint=evaluation_checkpoints.get(session['session_id'])))
     if run.get('mode')=='eval':
         audit.check('explicit_evaluation_present', lambda: require(any(session.get('evaluations') for session in summaries), 'No explicit-checkpoint evaluation was published') or {'present': True})
     else:

@@ -305,9 +305,11 @@ class FullMusicSampler:
             rng=self.rng.bit_generator.state, draw_count=self.draw_count, orders=self.orders, cursors=self.cursors,
             counts=self._counts, drawn={k: sorted(v) for k, v in self._drawn.items()}, intervals=self._intervals, active=self._active))
 
-    def load_state_dict(self, state):
+    def _validated_state(self, state):
+        """仅复制轻量采样状态进行验证，不复制只读 catalog 或读取音乐数据。"""
         state = copy.deepcopy(state)
-        expected = self.state_dict()
+        expected = dict(version=SAMPLER_VERSION, catalog_identity=self.catalog.identity, split=self.split,
+            window_seconds=self.window_seconds, random_start=self.random_start, source_probabilities=self.probabilities.tolist())
         for key in ("version", "catalog_identity", "split", "window_seconds", "random_start", "source_probabilities"):
             if state.get(key) != expected[key]:
                 raise ValueError(f"full sampler checkpoint identity differs: {key}")
@@ -357,7 +359,16 @@ class FullMusicSampler:
             raise ValueError("nonempty sampler checkpoint is missing active task")
         rng = np.random.default_rng()
         rng.bit_generator.state = state["rng"]
+        return state, rng, count
+
+    def validate_state_dict(self, state):
+        """恢复前无副作用检查；不改当前游标/RNG，也不触发 catalog 深拷贝。"""
+        self._validated_state(state)
+        return True
+
+    def load_state_dict(self, state):
+        state, rng, count = self._validated_state(state)
         self.rng, self.draw_count = rng, count
         self.orders, self.cursors, self._counts = state["orders"], state["cursors"], state["counts"]
         self._drawn = {source: set(state["drawn"][source]) for source in SOURCES}
-        self._intervals, self._active = state["intervals"], active
+        self._intervals, self._active = state["intervals"], state['active']

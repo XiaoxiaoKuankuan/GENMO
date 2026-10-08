@@ -22,6 +22,7 @@ checkpoint 的 SHA 写入不可覆盖的事件，再原子更新账本引用。�
 from __future__ import annotations
 
 import copy
+from contextlib import contextmanager
 from datetime import datetime, timezone
 import fcntl
 import hashlib
@@ -32,13 +33,14 @@ import re
 import shutil
 import signal
 import tempfile
+import threading
 import uuid
 
 import torch
 
 from .budget import BudgetExceeded
 from .buffer import StepJournal, UpperTransition, _journal_value
-from .checkpoint import VERSION as CHECKPOINT_VERSION
+from .checkpoint import VERSION as CHECKPOINT_VERSION, VERSION_V2, _validate_rank_states
 
 
 BUDGET_KEYS = ('accepted_iterations', 'optimizer_attempts', 'generations', 'control_steps', 'physics_steps')
@@ -73,6 +75,9 @@ def validate_budget_progress(saved, live):
         raise ValueError('Resume requires all spent budget counters')
     if any(_integer(live['used'][key], key) < _integer(saved['used'][key], key) for key in BUDGET_KEYS):
         raise ValueError('Resume cannot roll back spent budget')
+    if any(live.get('lease_settlements', {}).get(key) != value
+           for key, value in saved.get('lease_settlements', {}).items()):
+        raise ValueError('Resume cannot remove or replace a settled lease')
 
 
 def _integer(value, name, minimum=0):
@@ -167,6 +172,8 @@ class DiskGuard:
         self.min_free_bytes = _integer(min_free_bytes, 'min_free_bytes')
         self.max_run_bytes = None if max_run_bytes is None else _integer(max_run_bytes, 'max_run_bytes', 1)
         self._sizes = {}
+        self._mutex = threading.RLock()
+        self._reserved_bytes = 0
         self.refresh()
 
     def _path(self, path):
@@ -180,9 +187,14 @@ class DiskGuard:
 
     @property
     def used_bytes(self):
-        return self._used_bytes
+        with self._mutex:
+            return self._used_bytes
 
     def refresh(self):
+        with self._mutex:
+            return self._refresh_locked()
+
+    def _refresh_locked(self):
         sizes = {}
         for directory, folders, files in os.walk(self.run_dir, followlinks=False):
             if any((Path(directory) / name).is_symlink() for name in folders):
@@ -191,29 +203,51 @@ class DiskGuard:
                 path = Path(directory) / name
                 if path.is_symlink():
                     raise ValueError(f'run evidence cannot be a symlink: {path}')
-                sizes[path.resolve()] = path.stat().st_size
+                try:
+                    sizes[path.resolve()] = path.stat().st_size
+                except FileNotFoundError:
+                    # 异步 worker 可能正回收已归档文件；消失文件不计入刷新快照。
+                    continue
         self._sizes = sizes
         self._used_bytes = sum(sizes.values())
         return self.used_bytes
 
     def account_file(self, path):
         path = self._path(path)
-        previous = self._sizes.get(path, 0)
-        if path.exists():
-            self._sizes[path] = path.stat().st_size
-        else:
-            self._sizes.pop(path, None)
-        self._used_bytes += self._sizes.get(path, 0) - previous
+        with self._mutex:
+            previous = self._sizes.get(path, 0)
+            if path.exists():
+                self._sizes[path] = path.stat().st_size
+            else:
+                self._sizes.pop(path, None)
+            self._used_bytes += self._sizes.get(path, 0) - previous
 
     def check(self, required_bytes=0):
+        with self._mutex:
+            return self._check_locked(required_bytes)
+
+    def _check_locked(self, required_bytes=0):
         required = _integer(required_bytes, 'required_bytes')
         free = shutil.disk_usage(self.run_dir).free
-        if free - required < self.min_free_bytes:
+        if free - required - self._reserved_bytes < self.min_free_bytes:
             raise DiskCapacityError('filesystem free space would fall below the configured reserve')
-        if self.max_run_bytes is not None and self.used_bytes + required > self.max_run_bytes:
+        if self.max_run_bytes is not None and self.used_bytes + required + self._reserved_bytes > self.max_run_bytes:
             raise DiskCapacityError('run evidence would exceed its configured byte quota')
         return dict(free_bytes=free, used_bytes=self.used_bytes, required_bytes=required,
                     min_free_bytes=self.min_free_bytes, max_run_bytes=self.max_run_bytes)
+
+    @contextmanager
+    def reservation(self, required_bytes):
+        """后台归档的临时空间仍占用配额，防止前台同时写入时重复使用相同余量。"""
+        required = _integer(required_bytes, 'reserved bytes')
+        with self._mutex:
+            self._check_locked(required)
+            self._reserved_bytes += required
+        try:
+            yield
+        finally:
+            with self._mutex:
+                self._reserved_bytes -= required
 
 
 class TrainingBudget:
@@ -243,6 +277,27 @@ class TrainingBudget:
                 raise ValueError('persistent budget totals disagree or exceed limits')
         if any(set(phase) - set(BUDGET_KEYS) for phase in self.state['phases'].values()):
             raise ValueError('unknown persistent budget counter')
+        settled_phases = set()
+        for lease_id, record in self.state.get('lease_settlements', {}).items():
+            if (not isinstance(lease_id, str) or not lease_id
+                    or set(record) != {'phase', 'reserved', 'used'}
+                    or not isinstance(record['phase'], str) or not record['phase']
+                    or record['phase'] in settled_phases):
+                raise ValueError('invalid or duplicate persistent lease settlement')
+            settled_phases.add(record['phase'])
+            reserved, used = record['reserved'], record['used']
+            if not reserved or set(reserved) != set(used) or set(reserved) - set(BUDGET_KEYS):
+                raise ValueError('invalid persistent lease counters')
+            for key in reserved:
+                if not _integer(used[key], key) <= _integer(reserved[key], key):
+                    raise ValueError('persistent lease usage exceeds reservation')
+                if used[key] > self.state['phases'].get(record['phase'], {}).get(key, 0):
+                    raise ValueError('persistent lease usage exceeds recorded phase')
+            for counters in (reserved, used):
+                if ('control_steps' in counters or 'physics_steps' in counters) and (
+                        set(counters) & {'control_steps', 'physics_steps'} != {'control_steps', 'physics_steps'}
+                        or counters['physics_steps'] != 4 * counters['control_steps']):
+                    raise ValueError('persistent lease physics counter differs from controls')
         self._validate_extensions()
 
     def _validate_extensions(self):
@@ -333,6 +388,8 @@ class TrainingBudget:
     def reserve(self, phase, **amounts):
         if not isinstance(phase, str) or not phase or not amounts:
             raise ValueError('budget reservation requires a named phase and amounts')
+        if any(record['phase'] == phase for record in self.state.get('lease_settlements', {}).values()):
+            raise ValueError('A settled lease phase cannot be reserved again')
         updated = copy.deepcopy(self.state)
         for key, count in amounts.items():
             if key not in BUDGET_KEYS:
@@ -369,6 +426,44 @@ class TrainingBudget:
             updated['phases'][phase][key] -= count
         self._save(updated)
         self.state = updated
+
+    def settle_lease(self, phase, reserved, used, *, lease_id):
+        """仅精确完成的多 rank 租约可退未用额度；持久唯一 ID 阻止重启后二次退款。"""
+        if not isinstance(phase, str) or not phase or not isinstance(lease_id, str) or not lease_id:
+            raise ValueError('Lease settlement requires a phase and a unique lease ID')
+        if not isinstance(reserved, dict) or not isinstance(used, dict) or set(reserved) != set(used):
+            raise ValueError('Lease settlement requires matching reserved and used counters')
+        if not reserved or set(reserved) - set(BUDGET_KEYS):
+            raise ValueError('Invalid lease counters')
+        for key in reserved:
+            _integer(reserved[key], key)
+            _integer(used[key], key)
+            if used[key] > reserved[key]:
+                raise ValueError('Lease used counters exceed reservation')
+        for counters in (reserved, used):
+            if ('control_steps' in counters or 'physics_steps' in counters) and (
+                    set(counters) & {'control_steps', 'physics_steps'} != {'control_steps', 'physics_steps'}
+                    or counters['physics_steps'] != 4 * counters['control_steps']):
+                raise ValueError('Lease physics counter must equal four times controls')
+        record = dict(phase=phase, reserved=copy.deepcopy(reserved), used=copy.deepcopy(used))
+        previous = self.state.get('lease_settlements', {}).get(lease_id)
+        if previous is not None:
+            if previous != record:
+                raise ValueError('Lease ID was already settled with different counters')
+            return copy.deepcopy(previous)
+        if any(item['phase'] == phase for item in self.state.get('lease_settlements', {}).values()):
+            raise ValueError('Each lease phase may be settled only once')
+        updated = copy.deepcopy(self.state)
+        for key, amount in reserved.items():
+            if amount > updated['phases'].get(phase, {}).get(key, 0):
+                raise ValueError('Lease reservation exceeds recorded phase usage')
+            refund = amount - used[key]
+            updated['used'][key] -= refund
+            updated['phases'][phase][key] -= refund
+        updated.setdefault('lease_settlements', {})[lease_id] = record
+        self._save(updated)
+        self.state = updated
+        return copy.deepcopy(record)
 
     def state_dict(self):
         return copy.deepcopy(self.state)
@@ -495,6 +590,10 @@ class GuardedStepJournal:
             self._closed = True
             self._account()
 
+    @property
+    def closed(self):
+        return self._closed
+
 
 class StopSignal:
     """信号处理器只置位，训练入口在合法保存边界读取stop_requested并结束。"""
@@ -542,6 +641,8 @@ class RunManager:
         self._lock = (self.run_dir / '.run.lock').open('a+b')
         self._closed, self._journals, self._directories = False, [], {}
         self._budget = None
+        self._metrics_mutex = threading.RLock()
+        self._maintenance = []
         self.session_id = str(uuid.uuid4())
         try:
             fcntl.flock(self._lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -611,6 +712,10 @@ class RunManager:
         return self.disk_guard.check(required_bytes)
 
     def append_metrics(self, record):
+        with self._metrics_mutex:
+            return self._append_metrics_locked(record)
+
+    def _append_metrics_locked(self, record):
         self._ensure_open()
         if not isinstance(record, dict):
             raise TypeError('metrics require a dictionary')
@@ -629,6 +734,87 @@ class RunManager:
         self.disk_guard.account_file(path)
         return path
 
+    def seal_iteration(self, directory, iteration, *, metadata=None, closed_journals=()):
+        """发布独立接受水位及不可变文件清单；普通轮不要求写完整模型 checkpoint。"""
+        self._ensure_open()
+        iteration = _integer(iteration, 'accepted iteration', 1)
+        directory = self.disk_guard._path(directory)
+        summary_path = directory / 'summary.json'
+        summary = _read_json(summary_path)
+        if summary.get('status') != 'accepted' or summary.get('iteration') != iteration:
+            raise ValueError('Only the matching accepted iteration can be sealed')
+        known_closed = set()
+        for journal in [*self._journals, *closed_journals]:
+            if isinstance(journal, (str, Path)):
+                # 路径表示调用方已在全 rank barrier 后确认关闭的远端 journal。
+                path = self.disk_guard._path(journal)
+            else:
+                path = self.disk_guard._path(journal.path)
+                if not getattr(journal, 'closed', getattr(journal, '_closed', False)):
+                    if path.is_relative_to(directory):
+                        raise ValueError('Cannot seal an open execution journal')
+                    continue
+            known_closed.add(path)
+        preserved = {'summary.json', 'lr_progress.json', 'seal_manifest.json',
+                     'archive_manifest.json', 'execution_evidence.tar.gz', 'superseded.json'}
+        members = []
+        for path in sorted(directory.rglob('*')):
+            self.disk_guard._path(path)
+            if not path.is_file() or path.parent == directory and path.name in preserved:
+                continue
+            if path.name.endswith(('-wal', '-shm')):
+                raise ValueError('SQLite WAL/SHM must be closed and removed before sealing')
+            if path.suffix == '.sqlite' and path not in known_closed:
+                raise ValueError('Every execution journal requires an explicit closed declaration')
+            if path.name.endswith('.tmp'):
+                raise ValueError('Incomplete temporary evidence cannot be sealed')
+            members.append(dict(path=str(path.relative_to(directory)), size_bytes=path.stat().st_size,
+                                sha256=file_sha256(path)))
+        if not members:
+            raise ValueError('Cannot seal an empty execution record')
+        seal_path = directory / 'seal_manifest.json'
+        seal = dict(schema='genmo.closedloop.stage10.iteration_seal.v2', iteration=iteration,
+                    session_id=self.session_id, summary_sha256=file_sha256(summary_path),
+                    journals_closed=True, members=members, metadata=copy.deepcopy(metadata or {}))
+        if seal_path.exists():
+            if _read_json(seal_path) != seal:
+                raise ValueError('Iteration seal differs from its immutable evidence')
+        else:
+            _atomic_json(seal_path, seal, disk_guard=self.disk_guard)
+        accepted_path = self.run_dir / 'accepted.json'
+        descriptor = dict(schema='genmo.closedloop.stage10.accepted_iteration.v2', iteration=iteration,
+                          seal=str(seal_path.relative_to(self.run_dir)), seal_sha256=file_sha256(seal_path),
+                          session_id=self.session_id)
+        if accepted_path.exists():
+            previous = _read_json(accepted_path)
+            if previous['iteration'] > iteration or previous['iteration'] == iteration and previous != descriptor:
+                raise ValueError('Accepted watermark must advance; reconcile stale tail before resume')
+        _atomic_json(accepted_path, descriptor, replace=True, disk_guard=self.disk_guard)
+        return seal_path
+
+    def reconcile_accepted(self, durable_iteration):
+        """恢复较早完整 checkpoint 时标记未持久训练尾部作废；已花资源不回退。"""
+        self._ensure_open()
+        durable_iteration = _integer(durable_iteration, 'durable iteration')
+        accepted_path = self.run_dir / 'accepted.json'
+        if not accepted_path.exists():
+            return None
+        previous = _read_json(accepted_path)
+        if previous['iteration'] <= durable_iteration:
+            return None
+        event = dict(schema='genmo.closedloop.stage10.superseded_tail.v2',
+                     session_id=self.session_id, durable_iteration=durable_iteration,
+                     previous_accepted=previous, spent_budget_preserved=True)
+        path = self.run_dir / 'superseded_tails' / f'{self.session_id}.json'
+        _atomic_json(path, event, disk_guard=self.disk_guard)
+        _atomic_json(accepted_path, dict(schema='genmo.closedloop.stage10.accepted_iteration.v2',
+                     iteration=durable_iteration, session_id=self.session_id,
+                     reconciliation=str(path.relative_to(self.run_dir))), replace=True,
+                     disk_guard=self.disk_guard)
+        self.append_metrics(dict(event='unsaved_training_tail_superseded',
+                            durable_iteration=durable_iteration, accepted_iteration=previous['iteration']))
+        return path
+
     def publish_checkpoint(self, iteration, checkpoint_path, metadata=None):
         self._ensure_open()
         iteration = _integer(iteration, 'checkpoint iteration', 1)
@@ -639,10 +825,14 @@ class RunManager:
         if latest_path.exists() and _read_json(latest_path)['iteration'] >= iteration:
             raise ValueError('checkpoint publication must advance the accepted iteration watermark')
         payload = torch.load(path, map_location='cpu', weights_only=False, mmap=True)
-        required = {'actor', 'critic', 'actor_optimizer', 'critic_optimizer', 'rng', 'samplers', 'identity',
+        required = {'actor', 'critic', 'actor_optimizer', 'critic_optimizer', 'identity',
                     'config', 'state', 'optimizer_layout', 'restore_environment'}
-        if payload.get('version') != CHECKPOINT_VERSION or not required.issubset(payload):
+        version = payload.get('version')
+        required.update({'rank_states', 'world_size'} if version == VERSION_V2 else {'rng', 'samplers'})
+        if version not in (CHECKPOINT_VERSION, VERSION_V2) or not required.issubset(payload):
             raise ValueError('latest requires a complete Actor/Critic training checkpoint')
+        if version == VERSION_V2 and payload['world_size'] != _validate_rank_states(payload['rank_states']):
+            raise ValueError('Checkpoint rank count differs from its world size')
         state = payload['state']
         if state.get('buffer_size') != 0 or state.get('pending_plan') is not False or state.get('iteration') != iteration:
             raise ValueError('checkpoint must match the iteration at an empty-buffer/no-pending boundary')
@@ -676,6 +866,11 @@ class RunManager:
         if not self._closed:
             failure = None
             try:
+                for maintenance in self._maintenance:
+                    try:
+                        maintenance.close()
+                    except Exception as error:
+                        failure = failure or error
                 for journal in self._journals:
                     try:
                         journal.close()

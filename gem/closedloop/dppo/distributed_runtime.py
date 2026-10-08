@@ -76,17 +76,54 @@ class DistributedCollectives:
         dist.all_reduce(result, op=dist.ReduceOp.SUM, group=self.tensor_group)
         return result.to(tensor.device)
 
+    def all_gather_object(self, value):
+        """仅交换小型索引、计数和恢复状态；随机链保留在所属 rank。"""
+        values = [None] * self.world_size
+        dist.all_gather_object(values, value, group=self.control_group)
+        return values
+
+    def max_tensor(self, tensor):
+        result = tensor.detach().to(self.device).clone()
+        dist.all_reduce(result, op=dist.ReduceOp.MAX, group=self.tensor_group)
+        return result.to(tensor.device)
+
+    def barrier(self):
+        dist.barrier(group=self.control_group)
+
     def sum_gradients(self, module):
         parameters = list(module.parameters())
         present = torch.tensor([p.grad is not None for p in parameters], dtype=torch.int32, device=self.device)
         dist.all_reduce(present, op=dist.ReduceOp.SUM, group=self.tensor_group)
+        buckets = {}
         for parameter, count in zip(parameters, present.tolist()):
             if count == 0:
                 parameter.grad = None
                 continue
             gradient = torch.zeros_like(parameter) if parameter.grad is None else parameter.grad.contiguous()
-            dist.all_reduce(gradient, op=dist.ReduceOp.SUM, group=self.tensor_group)
-            parameter.grad = gradient
+            buckets.setdefault((gradient.device, gradient.dtype), []).append((parameter, gradient))
+        # 已按全局 minibatch 分母归一化，只 SUM，不再除以 world_size。
+        # 分桶最多 32 MiB；超大单个参数独占桶，避免为全模型再分配一份梯度。
+        limit = 32 * 1024 * 1024
+        for entries in buckets.values():
+            pending, size = [], 0
+            def flush():
+                if not pending:
+                    return
+                flat = torch.cat([gradient.reshape(-1) for _, gradient in pending])
+                dist.all_reduce(flat, op=dist.ReduceOp.SUM, group=self.tensor_group)
+                offset = 0
+                for parameter, gradient in pending:
+                    gradient.copy_(flat[offset:offset + gradient.numel()].view_as(gradient))
+                    parameter.grad = gradient
+                    offset += gradient.numel()
+            for parameter, gradient in entries:
+                required = gradient.numel() * gradient.element_size()
+                if pending and size + required > limit:
+                    flush()
+                    pending, size = [], 0
+                pending.append((parameter, gradient))
+                size += required
+            flush()
 
     def gather_rows(self, local_rows, local_indices, total_count):
         entries = [None] * self.world_size

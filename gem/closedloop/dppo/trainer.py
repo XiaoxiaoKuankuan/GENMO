@@ -10,6 +10,10 @@ Actor 从已验收 Stage1 权重初始化，独立 Critic 与优化器从零建�
 全局 minibatch 的分片，Actor 按完整去噪链分片，KL 与概率统计恢复为完整全局顺序。
 BC 只由 rank 0 执行一次；同步后的 PPO 梯度与该次 BC 梯度相加后统一裁剪、更新。
 采集、运行目录和 checkpoint 仍由运行层统一管理，默认 distributed=None 保持旧路径。
+
+新增 v2 更新器在文件末尾显式导出：各 rank 持有本地采样分片，支持多个真实 minibatch
+参数更新；旧 actor_update 保持 Stage9 兼容。模型装配保留架构的冻结规则并核验规范
+位置表，旧表污染须显式 weights-only 修复。固定价值可按明确 Critic 版本复用。
 """
 from __future__ import annotations
 
@@ -39,14 +43,30 @@ def load_actor(config):
     data = OmegaConf.create(dict(qpos30_stats=dict(path=paths['stats']),
         dataset_defaults=dict(kinematics_path=paths['kinematics']),sample_contract=dict(history_steps=50),datasets={}))
     actor = build_stage1_actor(train,data)
+    from gem.closedloop.dppo.position_repair import canonical_position_tables, audit_position_tables
+    canonical = canonical_position_tables(actor)
     report = load_stage1_checkpoint(actor,payload)
+    report['fixed_position_tables'] = audit_position_tables(actor, canonical=canonical)
+    if report['fixed_position_tables']['modified_before_repair']:
+        raise ValueError('Source fixed position tables differ from the architecture; explicit weights-only repair is required')
     for key, value in actor.state_dict().items():
         if not torch.isfinite(value).all():
             raise FloatingPointError(f'Nonfinite checkpoint parameter: {key}')
     report.update(parameter_count=sum(p.numel() for p in actor.parameters()),
                   source_global_step=payload.get('global_step'),optimizer_restored=False,
                   global_step_restored=False)
-    return actor.float().eval().requires_grad_(True).to(config['runtime']['genmo_device']), train, report
+    # 保留构建时的逐参数冻结规则，尤其不能解冻固定正余弦位置表。
+    report.update(trainable_parameter_names=[name for name, value in actor.named_parameters() if value.requires_grad],
+                  frozen_parameter_names=[name for name, value in actor.named_parameters() if not value.requires_grad])
+    return actor.float().eval().to(config['runtime']['genmo_device']), train, report
+
+
+def trainable_actor_parameters(actor):
+    """仅将架构明确允许训练的参数交给新优化器；不迁移旧位置表 Adam 状态。"""
+    parameters = [parameter for parameter in actor.parameters() if parameter.requires_grad]
+    if not parameters:
+        raise ValueError('Actor has no explicitly trainable parameters')
+    return parameters
 
 
 def batch_context(transitions, device, *, next_state=False):
@@ -54,7 +74,7 @@ def batch_context(transitions, device, *, next_state=False):
     return {key:torch.cat([c[key] for c in contexts],0).to(device) for key in contexts[0]}
 
 
-def populate_values(transitions, critic, device):
+def populate_values(transitions, critic, device, *, critic_version=None):
     """使用当前冻结价值参数填入旧/下一价值，供逐条持久化和固定目标共同复用。"""
     critic.eval()
     with torch.no_grad():
@@ -65,10 +85,22 @@ def populate_values(transitions, critic, device):
             if row.next_context is not None and not row.terminated:
                 nxt = {k:v.to(device) for k,v in row.next_context.items()}
                 row.next_value = float(critic(nxt,torch.tensor([row.metadata['next_remaining_music_seconds']],device=device))[0])
+            if critic_version is not None:
+                row.metadata['value_snapshot_version'] = critic_version
 
 
-def fixed_targets(transitions, critic, device, *, gamma_upper=.99, lambda_upper=.95):
-    populate_values(transitions, critic, device)
+def fixed_targets(transitions, critic, device, *, gamma_upper=.99, lambda_upper=.95,
+                  reuse_values=False, critic_version=None, normalize=True):
+    if reuse_values:
+        if critic_version is None:
+            raise ValueError('Reusing populated values requires an explicit Critic version')
+        for row in transitions:
+            if row.metadata.get('value_snapshot_version') != critic_version:
+                raise ValueError('Stale or missing Critic value snapshot version')
+            if not math.isfinite(row.old_value) or not math.isfinite(row.next_value):
+                raise FloatingPointError('Nonfinite cached Critic values')
+    else:
+        populate_values(transitions, critic, device, critic_version=critic_version)
     continuation = [False]*len(transitions)
     for i in range(len(transitions)-1):
         a,b=transitions[i:i+2]
@@ -80,7 +112,7 @@ def fixed_targets(transitions, critic, device, *, gamma_upper=.99, lambda_upper=
         bootstrap_mask=[not t.terminated and t.next_context is not None for t in transitions],
         continuation_mask=continuation,valid=[t.transition_valid for t in transitions],
         event_rewards=[t.metadata.get('event_reward',0.) for t in transitions],
-        gamma_upper=gamma_upper,lambda_upper=lambda_upper)
+        gamma_upper=gamma_upper,lambda_upper=lambda_upper,normalize=normalize)
 
 
 def critic_update(critic, optimizer, transitions, targets, *, steps=20, batch_size=32, generator=None,
@@ -396,6 +428,7 @@ class SupervisedAnchor:
         self.numpy_rng=np.random.RandomState(int(config['stage9']['seed'])+1003).get_state()
         self.python_rng=random.Random(int(config['stage9']['seed'])+1004).getstate()
         device=next(actor.parameters()).device
+        self.cuda_rng_device = device if device.type == 'cuda' else None
         self.cuda_rng=(torch.Generator(device=device).manual_seed(int(config['stage9']['seed'])+1005).get_state()
                        if device.type=='cuda' else None)
 
@@ -458,11 +491,32 @@ class SupervisedAnchor:
                     torch_rng=self.torch_rng.clone(),numpy_rng=self.numpy_rng,python_rng=self.python_rng,
                     cuda_rng=self.cuda_rng.clone() if self.cuda_rng is not None else None,batch_size=self.batch_size)
 
-    def load_state_dict(self,state):
-        if state['batch_size']!=self.batch_size or int(state['bc_update_steps'])<0:
+    def validate_state_dict(self, state):
+        """用独立 RNG 对象验证断点，不拷贝 Dataset/Actor，也不触碰当前或全局随机状态。"""
+        if (type(state['batch_size']) is not int or state['batch_size'] != self.batch_size
+                or type(state['bc_update_steps']) is not int or state['bc_update_steps'] < 0):
             raise ValueError('BC state batch or update count differs')
+        torch.Generator(device='cpu').set_state(state['generator'])
+        torch.Generator(device='cpu').set_state(state['torch_rng'])
+        np.random.RandomState().set_state(state['numpy_rng'])
+        random.Random().setstate(state['python_rng'])
+        if (state['cuda_rng'] is None) != (self.cuda_rng is None):
+            raise ValueError('BC CUDA RNG topology differs')
+        if state['cuda_rng'] is not None:
+            torch.Generator(device=self.cuda_rng_device).set_state(state['cuda_rng'])
+        return True
+
+    def load_state_dict(self,state):
+        self.validate_state_dict(state)
         self.generator.set_state(state['generator']);self.bc_update_steps=int(state['bc_update_steps'])
         self.torch_rng=state['torch_rng'].clone();self.numpy_rng=state['numpy_rng'];self.python_rng=state['python_rng']
-        if (state['cuda_rng'] is None)!=(self.cuda_rng is None):
-            raise ValueError('BC CUDA RNG topology differs')
         self.cuda_rng=state['cuda_rng'].clone() if state['cuda_rng'] is not None else None
+
+
+# 新训练入口显式选择 v2；Stage9 和旧测试继续使用原单步更新接口。
+from gem.closedloop.dppo.updater_v2 import (  # noqa: E402
+    actor_update_v2 as actor_update_v2,
+    analytic_kl_local as analytic_kl_local,
+    critic_update_local as critic_update_local,
+    probability_check_local as probability_check_local,
+)

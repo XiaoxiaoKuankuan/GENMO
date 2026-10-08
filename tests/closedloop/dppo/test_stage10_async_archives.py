@@ -1,0 +1,237 @@
+"""稀疏模型保存下的执行证据封存、异步背压和崩溃恢复测试。
+
+本文件使用临时目录、微型 SQLite journal 与事件同步，不启动实际训练。覆盖普通
+接受轮无需 checkpoint 即可归档、开放 journal 拒绝入队、归档损坏不得删原件、
+原子包/清单两个崩溃窗口的幂等恢复，以及单线程最多四个在途任务和关闭 drain。
+另检查恢复时接受水位可标记作废、资源消耗保留，以及精确租约结算不能二次退款。
+"""
+import tarfile
+import threading
+from pathlib import Path
+
+import pytest
+
+from gem.closedloop.dppo import long_run
+from gem.closedloop.dppo.archives import ArchiveWorkerError, BoundedArchiveWorker
+from gem.closedloop.dppo.long_run import LongRunMaintenance
+from gem.closedloop.dppo.run_management import RunManager, _atomic_json, _read_json, file_sha256
+
+
+def stage():
+    return dict(run_control={}, storage=dict(archive_completed_iterations=True))
+
+
+def iteration(manager, number=1, *, close=True):
+    directory = manager.iteration_dir(number)
+    journal = manager.journal(number)
+    journal.append_result(dict(backend_session_id='session', mutation_seq=number, result=dict(answer=number)))
+    if close:
+        journal.close()
+    (directory / 'fixed_targets.pt').write_bytes(b'fixed-on-policy-targets')
+    _atomic_json(directory / 'summary.json', dict(iteration=number, status='accepted'))
+    return directory, journal
+
+
+def test_sealed_noncheckpoint_iteration_archives_and_close_drains(tmp_path):
+    with RunManager(tmp_path / 'run') as manager:
+        maintenance = LongRunMaintenance(manager, stage())
+        directory, journal = iteration(manager)
+        manager.seal_iteration(directory, 1, closed_journals=[journal])
+        assert not (manager.run_dir / 'latest.json').exists()
+        assert maintenance.enqueue_archive(directory)
+    manifest = _read_json(directory / 'archive_manifest.json')
+    assert manifest['schema'].endswith('.v2') and manifest['iteration'] == 1
+    assert file_sha256(directory / manifest['archive']) == manifest['archive_sha256']
+    assert not (directory / 'execution_journal.sqlite').exists()
+    assert not (directory / 'fixed_targets.pt').exists()
+
+
+def test_open_journal_or_unsealed_directory_never_enters_queue(tmp_path):
+    with RunManager(tmp_path / 'run') as manager:
+        maintenance = LongRunMaintenance(manager, stage())
+        directory, journal = iteration(manager, close=False)
+        with pytest.raises(ValueError, match='open execution journal'):
+            manager.seal_iteration(directory, 1, closed_journals=[journal])
+        with pytest.raises(FileNotFoundError):
+            maintenance.enqueue_archive(directory)
+        assert maintenance._archive_worker is None
+
+
+def test_changed_original_stays_after_seal_failure(tmp_path):
+    with RunManager(tmp_path / 'run') as manager:
+        maintenance = LongRunMaintenance(manager, stage())
+        directory, journal = iteration(manager)
+        manager.seal_iteration(directory, 1, closed_journals=[journal])
+        (directory / 'fixed_targets.pt').write_bytes(b'changed')
+        with pytest.raises(ValueError, match='differs from immutable seal'):
+            maintenance.archive_iteration(directory)
+        assert (directory / 'execution_journal.sqlite').exists()
+        assert not (directory / 'archive_manifest.json').exists()
+
+
+def test_archive_published_before_manifest_recovers_without_recompression(tmp_path, monkeypatch):
+    with RunManager(tmp_path / 'run') as manager:
+        maintenance = LongRunMaintenance(manager, stage())
+        directory, journal = iteration(manager)
+        manager.seal_iteration(directory, 1, closed_journals=[journal])
+        atomic = long_run._atomic_json
+        def fail_manifest(path, *args, **kwargs):
+            if Path(path).name == 'archive_manifest.json':
+                raise OSError('injected publication interruption')
+            return atomic(path, *args, **kwargs)
+        monkeypatch.setattr(long_run, '_atomic_json', fail_manifest)
+        with pytest.raises(OSError, match='interruption'):
+            maintenance.archive_iteration(directory)
+        archive = directory / 'execution_evidence.tar.gz'
+        sha = file_sha256(archive)
+        assert (directory / 'execution_journal.sqlite').exists()
+        monkeypatch.setattr(long_run, '_atomic_json', atomic)
+        result = maintenance.archive_iteration(directory)
+        assert result['archive_sha256'] == sha
+        assert maintenance.archive_iteration(directory) == result
+
+
+def test_partial_original_removal_recovers_from_verified_manifest(tmp_path, monkeypatch):
+    with RunManager(tmp_path / 'run') as manager:
+        maintenance = LongRunMaintenance(manager, stage())
+        directory, journal = iteration(manager)
+        manager.seal_iteration(directory, 1, closed_journals=[journal])
+        unlink = Path.unlink
+        def fail_second(path, *args, **kwargs):
+            if path == directory / 'fixed_targets.pt':
+                raise OSError('injected removal interruption')
+            return unlink(path, *args, **kwargs)
+        monkeypatch.setattr(Path, 'unlink', fail_second)
+        with pytest.raises(OSError, match='removal interruption'):
+            maintenance.archive_iteration(directory)
+        assert (directory / 'archive_manifest.json').exists()
+        assert not (directory / 'execution_journal.sqlite').exists()
+        assert (directory / 'fixed_targets.pt').exists()
+        monkeypatch.setattr(Path, 'unlink', unlink)
+        maintenance.enqueue_archive(directory)
+        maintenance.drain()
+        assert not (directory / 'fixed_targets.pt').exists()
+
+
+def test_restart_recovers_only_sealed_completed_directories(tmp_path):
+    with RunManager(tmp_path / 'run') as manager:
+        directory, journal = iteration(manager, 1)
+        manager.seal_iteration(directory, 1, closed_journals=[journal])
+        unsealed, _ = iteration(manager, 2)
+    with RunManager(tmp_path / 'run', resume=True) as manager:
+        maintenance = LongRunMaintenance(manager, stage())
+        queued = maintenance.recover_archives()
+        assert len(queued) == 1 and Path(queued[0]).name == directory.name
+        maintenance.drain()
+        assert maintenance.recover_archives() == []
+        assert not (directory / 'fixed_targets.pt').exists()
+        assert (unsealed / 'fixed_targets.pt').exists()
+
+
+def test_corrupt_archive_never_removes_remaining_originals(tmp_path, monkeypatch):
+    with RunManager(tmp_path / 'run') as manager:
+        maintenance = LongRunMaintenance(manager, stage())
+        directory, journal = iteration(manager)
+        manager.seal_iteration(directory, 1, closed_journals=[journal])
+        atomic = long_run._atomic_json
+        monkeypatch.setattr(long_run, '_atomic_json', lambda *args, **kwargs: (_ for _ in ()).throw(OSError('stop')))
+        with pytest.raises(OSError):
+            maintenance.archive_iteration(directory)
+        monkeypatch.setattr(long_run, '_atomic_json', atomic)
+        (directory / 'execution_evidence.tar.gz').write_bytes(b'corrupt')
+        with pytest.raises(tarfile.ReadError):
+            maintenance.archive_iteration(directory)
+        assert (directory / 'execution_journal.sqlite').exists()
+        assert (directory / 'fixed_targets.pt').exists()
+
+
+def test_worker_bounds_inflight_and_backpressures_then_drains(tmp_path):
+    started, release, submitted = threading.Event(), threading.Event(), threading.Event()
+    completed = []
+    def archive(path):
+        started.set()
+        assert release.wait(5)
+        completed.append(path)
+    worker = BoundedArchiveWorker(archive, max_pending=4)
+    producer = None
+    try:
+        for number in range(4):
+            assert worker.submit(tmp_path / str(number))
+        assert started.wait(1) and worker.pending_count == 4
+        assert not worker.submit(tmp_path / '0')
+        producer = threading.Thread(target=lambda: (worker.submit(tmp_path / '4'), submitted.set()))
+        producer.start()
+        assert not submitted.wait(.1)
+        release.set()
+        producer.join(2)
+        assert submitted.is_set()
+        worker.drain()
+        assert len(completed) == 5 and worker.pending_count == 0
+    finally:
+        release.set()
+        if producer is not None:
+            producer.join(2)
+        worker.close()
+
+
+def test_worker_failure_surfaces_and_retains_queued_tasks(tmp_path):
+    release = threading.Event()
+    calls = []
+    def archive(path):
+        calls.append(path)
+        assert release.wait(3)
+        raise OSError('injected background failure')
+    worker = BoundedArchiveWorker(archive)
+    worker.submit(tmp_path / 'first')
+    worker.submit(tmp_path / 'second')
+    release.set()
+    with pytest.raises(ArchiveWorkerError):
+        worker.drain()
+    assert len(calls) == 1
+    with pytest.raises(ArchiveWorkerError):
+        worker.submit(tmp_path / 'third')
+    with pytest.raises(ArchiveWorkerError):
+        worker.close()
+
+
+def limits():
+    return dict(accepted_iterations=20, optimizer_attempts=200, generations=200,
+                control_steps=200, physics_steps=800)
+
+
+def test_lease_settlement_is_atomic_idempotent_and_survives_resume(tmp_path):
+    with RunManager(tmp_path / 'run') as manager:
+        budget = manager.budget(limits())
+        reserved = dict(generations=10, control_steps=20, physics_steps=80)
+        used = dict(generations=7, control_steps=13, physics_steps=52)
+        budget.reserve('collect-rank0-iteration1', **reserved)
+        record = budget.settle_lease('collect-rank0-iteration1', reserved, used, lease_id='lease-1')
+        assert budget.state_dict()['used']['control_steps'] == 13
+        assert budget.settle_lease('collect-rank0-iteration1', reserved, used, lease_id='lease-1') == record
+        with pytest.raises(ValueError, match='only once'):
+            budget.settle_lease('collect-rank0-iteration1', used, used, lease_id='lease-2')
+    with RunManager(tmp_path / 'run', resume=True) as manager:
+        budget = manager.budget(limits())
+        assert budget.settle_lease('collect-rank0-iteration1', reserved, used, lease_id='lease-1') == record
+        with pytest.raises(ValueError, match='four times'):
+            budget.settle_lease('other', dict(control_steps=2, physics_steps=8),
+                                dict(control_steps=1, physics_steps=8), lease_id='bad')
+
+
+def test_reconcile_marks_unsaved_tail_and_preserves_spent_budget(tmp_path):
+    with RunManager(tmp_path / 'run') as manager:
+        budget = manager.budget(limits())
+        budget.reserve('updates', accepted_iterations=2, optimizer_attempts=7)
+        for number in (1, 2):
+            directory, journal = iteration(manager, number)
+            manager.seal_iteration(directory, number, closed_journals=[journal])
+        before = budget.state_dict()
+    with RunManager(tmp_path / 'run', resume=True) as manager:
+        budget = manager.budget(limits())
+        event = manager.reconcile_accepted(1)
+        assert _read_json(event)['previous_accepted']['iteration'] == 2
+        assert _read_json(manager.run_dir / 'accepted.json')['iteration'] == 1
+        assert budget.state_dict() == before
+        directory, journal = iteration(manager, 2)
+        manager.seal_iteration(directory, 2, closed_journals=[journal])
+        assert _read_json(manager.run_dir / 'accepted.json')['iteration'] == 2

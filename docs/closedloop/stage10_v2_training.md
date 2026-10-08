@@ -1,0 +1,54 @@
+# 第二阶段八卡训练 v2 实施与运行说明
+
+本版按最终授权配置实施。Actor 固定学习率 **5e-9**，正式训练不扫描候选、不自动降低学习率。正式入口 `scripts/train_stage10_8gpu_server1.sh` 默认使用 `configs/closedloop/stage10_8gpu_server1_v2.yaml`，默认仅运行一轮；长期训练必须显式给定停止轮次。
+
+## 更新流程和配置
+
+八个 rank 各自持有一个冻结 GMT/CPU PhysX 后端，使用同一模型版本分别采集 20 条上层转移（全局 160）。真实执行时长决定 GAE，环境/episode/连续区间之间不串接；old log-prob、old/next value、returns 和全局标准化 advantage 整轮固定。每条链 20 步，完整链组成 1600 内部转移的优化器 minibatch，2 个 epoch 最多 4 次 Actor 参数更新。计算 microbatch 启动依次校验 4、2、1 并记录共同通过的配置，独立于优化器 minibatch。
+
+Actor `AdamW(lr=5e-9, weight_decay=0)`，PPO clip 0.01；BC 每次参数更新由 rank0 计算全局 2 条样本、权重 0.1。PPO 按全局实际有效内部样本数归一化，再做梯度 SUM；BC 只加入一次，不乘或除以 8。Critic 默认 80 次、全局 batch32、学习率 1e-4；可显式配置20/40/80进行对照。
+
+随机核默认 eta=0.1、std_floor=0.001、CFG=2.5，不删除末端去噪 loss。精确 joint_sum 为默认概率目标；free_coordinate_mean 必须显式确认学习率/clip/BC配置，属于算法对照，真实 joint KL 仍保留。std_schedule 改变会改变核身份，不允许混用旧轨迹。
+
+## 拒绝、冻结与恢复
+
+每个 minibatch 对本轮采集策略检查 KL，达到0.015停止后续步；最终全 rollout、全20步平均内部 joint KL不得超过0.02。20步固定时平均链KL阈值换算为0.4。链KL是旧策略采样路径估计，不是最终动作分布或机器人轨迹的精确KL。最大内部/逐步均值/链最大KL为独立可空阈值。
+
+任何更新阶段数值异常或最终KL拒绝均恢复整轮 Actor、Critic、优化器、BC与更新RNG并停止；已经发生的优化尝试和物理消耗保留。故障诊断会写 `rejected_*.json`，不会暗中换小学习率。
+
+load_actor保留构造时的冻结规则，优化器排除固定编码表。旧Stage2若编码污染，使用 `tools/repair_stage2_position_encoding.py --help` 的审计和新产物weights-only分支，原件不变，旧Adam/RNG不冒充已修复完整恢复。新v2断点与旧v1拓扑不允许交叉完整续训。
+
+## 保存、预算和证据
+
+完整恢复点按外层300、600、900轮同步原子发布；初始化、正常结束、状态一致的受控退出可额外保存。保存共享模型/优化器和8份本地RNG、采样游标及执行计数。latest只指向已发布完整断点。崩溃后未保存尾部写入 superseded_tails；预算账本不回退。
+
+执行证据在所有journal关闭、immutable seal建立后进入单后台归档队列，在途与排队合计最多4轮。压缩逐成员校验并原子发布后才回收原件；失败背压/停止，恢复可幂等补齐。每轮轻量JSONL和TensorBoard不会替代完整执行证据。初始化模型、每300轮模型和最近两份完整断点保留。
+
+根进程预占整轮各卡最大执行额度，各卡先持久化实际执行再ACK，正常完成后只退还可证明没有使用的额度。原总预算未扩大；八路160条/轮不保证仍能完成旧额度对应的外层轮数。
+
+## 延迟、评估和曲线
+
+`deployment_critical.v2` 将必要的前缀请求、条件构建、传输、GENMO推理、坐标转换和GMT参考准备计入 `critical_ready_seconds`。训练链保存、journal持久化和归档单独计时；commit单列。模拟参考到达和校准使用同一新口径，保留执行结果先持久化再ACK的恢复机制。新旧计时曲线必须分开，计时改动不能算作学习收益。
+
+初始化、每100轮和正常结束使用独立评估状态，四来源各4条固定验证样本、42/1729两种子、每条10秒，共32任务，评估不额外保存模型。使用内存权重，恢复训练RNG和游标。最佳观测与最佳已保存模型分别记录；物理失败不增加、平均时长不下降后才比较四来源等权回报。
+
+固定初始链漂移用于诊断相对Stage1概率变化，不能替代闭环配对评估。训练曲线同时看reward/执行秒、分项奖励、真实执行时长、失败/拒绝、KL、clip、真实Actor步数、PPO/BC梯度、裁剪系数及Critic新批误差，不能仅凭loss平稳认定学到或退化。周期子集比较必须显式 `--mode periodic_subset`，不冒称全验证集验收。
+
+## 命令（服务器1本机）
+
+```bash
+cd /home/user/liwei/GENMO-bumi-closedloop
+source /home/user/liwei/GENMO/.venv/bin/activate
+bash scripts/train_stage10_8gpu_server1.sh --output-dir /data1/user/liwei/GENMO_outputs/closedloop_stage10/新运行目录 --stop-after-iteration 1
+bash scripts/train_stage10_8gpu_server1.sh --output-dir /data1/user/liwei/GENMO_outputs/closedloop_stage10/同一运行目录 --stop-after-iteration 2 --resume latest
+python -B tools/eval/audit_closedloop_stage10.py --help
+python -B tools/eval/compare_closedloop_stage10.py --mode periodic_subset --initial-report 初始评估.json --final-report 后续评估.json --output 新对照报告.json
+```
+
+完整val评估入口继续保留，并支持v2权重的显式只读加载，不恢复训练优化器/RNG：
+
+```bash
+CUDA_VISIBLE_DEVICES=0 python -B tools/train_closedloop_stage10.py --config configs/closedloop/stage10_8gpu_server1_v2.yaml --mode eval --checkpoint 完整模型.pt --eval-count all --output-dir 独立完整验证目录
+```
+
+本轮实际服务器有限验收结果、同步提交及尚未通过的条件以 `记录文本.md` 最终记录为准。上述命令说明不代表已经开启长期训练，也不代表相对Stage1效果已提升。

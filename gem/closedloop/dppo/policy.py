@@ -19,6 +19,7 @@ padding 每步固定为零，两者均不进入高斯概率；contact2 仍是确
 from __future__ import annotations
 
 import math
+import time
 from collections.abc import Mapping
 from typing import Any
 
@@ -26,7 +27,6 @@ import torch
 
 from gem.closedloop.actor import Stage1Actor
 from gem.closedloop.contracts import STAGE1_CONDITION_KEYS
-
 
 DPPO_KERNEL_VERSION = "genmo.bumi_closedloop.stochastic_ddim_joint_sum.v1"
 
@@ -66,6 +66,8 @@ class DPPODiffusionPolicy:
         eta: float = 0.1,
         std_floor: float = 0.001,
         guidance_scale: float = 2.5,
+        cfg_batch: bool = False,
+        std_schedule: list[float] | tuple[float, ...] | None = None,
     ) -> None:
         if not isinstance(actor, Stage1Actor):
             raise TypeError("DPPO policy requires the existing Stage1Actor")
@@ -77,11 +79,21 @@ class DPPODiffusionPolicy:
             raise ValueError("std_floor must be finite and strictly positive")
         if not math.isfinite(guidance_scale):
             raise ValueError("guidance_scale must be finite")
+        if type(cfg_batch) is not bool:
+            raise TypeError("cfg_batch must be boolean")
+        if std_schedule is not None and (len(std_schedule) != steps or any(
+            isinstance(value, bool) or not math.isfinite(value) or value < std_floor for value in std_schedule
+        )):
+            raise ValueError("std_schedule must contain one finite floor >= std_floor per denoising step")
         self.actor = actor
         self.steps = steps
         self.eta = float(eta)
         self.std_floor = float(std_floor)
         self.guidance_scale = float(guidance_scale)
+        self._cfg_batch = cfg_batch
+        self.std_schedule = None if std_schedule is None else tuple(float(v) for v in std_schedule)
+        self._device_coefficients = {}
+        self.last_sample_timing = {}
         self.diffusion = actor._diffusion(steps)
         self.timestep_map = tuple(reversed(self.diffusion.timestep_map))
         self.kernel_config = {
@@ -100,7 +112,68 @@ class DPPODiffusionPolicy:
             "cfg_policy": "music_only_shared_history_and_prefix",
             "timestep_map": list(self.timestep_map),
         }
+        if cfg_batch or self.std_schedule is not None:
+            self.kernel_config.update(version="genmo.bumi_closedloop.stochastic_ddim_joint_sum.v2",
+                cfg_forward="batched" if cfg_batch else "separate",
+                effective_std_floors=list(self.std_schedule or (self.std_floor,) * steps))
         self._prepare_actor()
+
+    @property
+    def cfg_batch(self):
+        return self._cfg_batch
+
+    @cfg_batch.setter
+    def cfg_batch(self, enabled):
+        """数值验收可回退CFG双前向；执行方式随随机核身份一同更新。"""
+        if type(enabled) is not bool:
+            raise TypeError("cfg_batch must be boolean")
+        self._cfg_batch = enabled
+        if hasattr(self, 'kernel_config'):
+            self.kernel_config.update(version="genmo.bumi_closedloop.stochastic_ddim_joint_sum.v2",
+                cfg_forward="batched" if enabled else "separate",
+                effective_std_floors=list(self.std_schedule or (self.std_floor,) * self.steps))
+
+    @staticmethod
+    def _input_signature(conditions):
+        return tuple((key, value.data_ptr(), value._version, tuple(value.shape), value.dtype, value.device)
+                     for key, value in sorted(conditions.items()))
+
+    def _parameter_signature(self):
+        # 原地optimizer.step/load_state_dict均改变Tensor版本，无需把权重复制到CPU求hash。
+        return tuple((id(p), p._version, p.requires_grad) for p in self.actor.parameters())
+
+    def prepare_conditions(self, conditions):
+        """单链/单微批条件准备；保留encoder梯度，禁止跨参数更新或grad模式复用。
+
+        采样在外层no_grad内调用一次；训练在每个microbatch内创建有梯度图并只
+        backward一次。这里detach的是环境输入，而不是可学习历史/前缀/音乐编码。
+        """
+        self._prepare_actor()
+        selected = self._conditions(conditions)
+        with torch.autocast(device_type=selected['known_qpos30'].device.type, enabled=False):
+            adapted = self.actor.adapt_conditions(selected)
+            residual = self.actor._residual(adapted)
+            conditional = self.actor._music_condition(adapted) + residual
+            unconditional = None
+            if self.guidance_scale != 1.:
+                drop = torch.ones(conditional.shape[0], dtype=torch.bool, device=conditional.device)
+                unconditional = self.actor._music_condition(adapted, drop) + residual
+        return dict(adapted=adapted, conditional=conditional, unconditional=unconditional,
+            owner=id(self), inputs=self._input_signature(selected), parameters=self._parameter_signature(),
+            grad_enabled=torch.is_grad_enabled())
+
+    def _coefficients(self, device):
+        device = torch.device(device)
+        if device not in self._device_coefficients:
+            alpha = torch.as_tensor(self.diffusion.alphas_cumprod, device=device, dtype=torch.float32)
+            previous = torch.as_tensor(self.diffusion.alphas_cumprod_prev, device=device, dtype=torch.float32)
+            base = self.eta * ((1. - previous) / (1. - alpha)).sqrt()
+            base = base * (1. - alpha / previous).clamp_min(0.).sqrt()
+            self._device_coefficients[device] = dict(alpha=alpha, previous=previous, base=base,
+                timesteps=torch.as_tensor(self.timestep_map, dtype=torch.long, device=device),
+                floors=torch.tensor(self.std_schedule or (self.std_floor,) * self.steps,
+                                    dtype=torch.float32, device=device))
+        return self._device_coefficients[device]
 
     def _prepare_actor(self) -> None:
         if any(parameter.dtype != torch.float32 for parameter in self.actor.parameters()):
@@ -144,42 +217,55 @@ class DPPODiffusionPolicy:
         conditions: Mapping[str, torch.Tensor],
         x_k: torch.Tensor,
         step_index: int | torch.Tensor,
+        *, prepared: dict | None = None,
     ) -> dict[str, torch.Tensor]:
         """返回带参数梯度的 Gaussian 参数；输入 x_k 固定，允许每样本不同去噪步。"""
         self._prepare_actor()
         selected = self._conditions(conditions)
         with torch.autocast(device_type=selected["known_qpos30"].device.type, enabled=False):
-            adapted = self.actor.adapt_conditions(selected)
+            if prepared is None:
+                prepared = self.prepare_conditions(conditions)
+            elif (prepared.get('owner') != id(self)
+                    or prepared.get('inputs') != self._input_signature(selected)
+                    or prepared.get('parameters') != self._parameter_signature()
+                    or prepared.get('grad_enabled') != torch.is_grad_enabled()):
+                raise ValueError('Prepared conditions differ from inputs, Actor version or grad mode')
+            adapted = prepared['adapted']
             state = self._state(x_k, adapted["known_x"], "x_k")
             state = self.actor._constrain(state, adapted)
             indices = self._step_indices(step_index, state)
-            original_t = torch.as_tensor(self.timestep_map, dtype=torch.long, device=state.device)[indices]
-            residual = self.actor._residual(adapted)
-            conditional = self.actor._music_condition(adapted) + residual
-            conditional_output = self.actor._denoise(state, original_t, adapted, conditional)
+            coefficients = self._coefficients(state.device)
+            original_t = coefficients['timesteps'][indices]
+            conditional, unconditional = prepared['conditional'], prepared['unconditional']
+            if self.cfg_batch and unconditional is not None:
+                combined = {key: torch.cat((value, value), dim=0) for key, value in adapted.items()}
+                output = self.actor._denoise(torch.cat((state, state), dim=0),
+                    torch.cat((original_t, original_t), dim=0), combined,
+                    torch.cat((conditional, unconditional), dim=0))
+                conditional_output = {key: value[:state.shape[0]] for key, value in output.items()}
+                unconditional_output = {key: value[state.shape[0]:] for key, value in output.items()}
+            else:
+                conditional_output = self.actor._denoise(state, original_t, adapted, conditional)
+                unconditional_output = None
             prediction = conditional_output["pred_x_start"]
             logits = conditional_output["static_conf_logits"]
             if self.guidance_scale != 1.0:
-                drop_music = torch.ones(state.shape[0], dtype=torch.bool, device=state.device)
-                unconditional = self.actor._music_condition(adapted, drop_music) + residual
-                output = self.actor._denoise(state, original_t, adapted, unconditional)
+                output = (unconditional_output if unconditional_output is not None else
+                          self.actor._denoise(state, original_t, adapted, unconditional))
                 prediction = output["pred_x_start"] + self.guidance_scale * (
                     prediction - output["pred_x_start"])
                 logits = output["static_conf_logits"] + self.guidance_scale * (
                     logits - output["static_conf_logits"])
             prediction = self.actor._constrain(prediction, adapted)
             spaced_t = self.steps - 1 - indices
-            alpha = torch.as_tensor(self.diffusion.alphas_cumprod, device=state.device,
-                                    dtype=torch.float32)[spaced_t, None, None]
-            previous_alpha = torch.as_tensor(self.diffusion.alphas_cumprod_prev, device=state.device,
-                                             dtype=torch.float32)[spaced_t, None, None]
-            base_std = self.eta * ((1.0 - previous_alpha) / (1.0 - alpha)).sqrt()
-            base_std = base_std * (1.0 - alpha / previous_alpha).clamp_min(0.0).sqrt()
+            alpha = coefficients['alpha'][spaced_t, None, None]
+            previous_alpha = coefficients['previous'][spaced_t, None, None]
+            base_std = coefficients['base'][spaced_t, None, None]
             epsilon = (state - alpha.sqrt() * prediction) / (1.0 - alpha).sqrt()
             direction = (1.0 - previous_alpha - base_std.square()).clamp_min(0.0).sqrt()
             mean = previous_alpha.sqrt() * prediction + direction * epsilon
             mean = self.actor._constrain(mean, adapted)
-            std = base_std.clamp_min(self.std_floor)
+            std = torch.maximum(base_std, coefficients['floors'][indices, None, None])
             if not bool(torch.isfinite(mean).all()) or not bool(torch.isfinite(std).all()):
                 raise FloatingPointError("DPPO transition parameters are nonfinite")
             return {
@@ -197,9 +283,10 @@ class DPPODiffusionPolicy:
         x_k: torch.Tensor,
         x_next: torch.Tensor,
         step_index: int | torch.Tensor,
+        *, prepared: dict | None = None,
     ) -> torch.Tensor:
         """重算一个或混合内部决策的 log probability，返回 FP64 [B]。"""
-        parameters = self.transition_parameters(conditions, x_k, step_index)
+        parameters = self.transition_parameters(conditions, x_k, step_index, prepared=prepared)
         observed = self._state(x_next, parameters["mean"], "x_next")
         return masked_joint_log_prob(observed, parameters["mean"], parameters["std"],
                                      parameters["free_mask"])
@@ -216,7 +303,16 @@ class DPPODiffusionPolicy:
         self._prepare_actor()
         snapshot = self._conditions(conditions, clone=True)
         with torch.autocast(device_type=snapshot["known_qpos30"].device.type, enabled=False):
-            adapted = self.actor.adapt_conditions(snapshot)
+            device = snapshot['known_qpos30'].device
+            def synchronize():
+                if device.type == 'cuda':
+                    torch.cuda.synchronize(device)
+            synchronize()
+            beginning = time.perf_counter()
+            prepared = self.prepare_conditions(snapshot)
+            adapted = prepared['adapted']
+            synchronize()
+            conditioned = time.perf_counter()
             template = adapted["known_x"]
             noise = (torch.randn(template.shape, device=template.device, dtype=torch.float32,
                                  generator=generator) if initial_noise is None
@@ -224,7 +320,7 @@ class DPPODiffusionPolicy:
             state = self.actor._constrain(noise, adapted)
             chain, means, stds, probabilities = [state.clone()], [], [], []
             for index in range(self.steps):
-                parameters = self.transition_parameters(snapshot, state, index)
+                parameters = self.transition_parameters(snapshot, state, index, prepared=prepared)
                 noise = torch.randn(state.shape, device=state.device, dtype=torch.float32, generator=generator)
                 following = self.actor._constrain(parameters["mean"] + parameters["std"] * noise, adapted)
                 probabilities.append(masked_joint_log_prob(following, parameters["mean"],
@@ -233,12 +329,17 @@ class DPPODiffusionPolicy:
                 stds.append(parameters["std"].clone())
                 chain.append(following.clone())
                 state = following
+            synchronize()
+            denoised = time.perf_counter()
             physical = self.actor.endecoder.denormalize(state)
             physical = torch.where(adapted["known_mask"], adapted["known_physical"], physical)
             physical = torch.where(adapted["future_valid"][..., None], physical, 0.0)
             qpos = self.actor.endecoder.codec.decode_to_canonical_qpos(physical)
             qpos = torch.where(adapted["future_valid"][..., None], qpos, 0.0)
             logits = parameters["contact_logits"]
+            synchronize()
+            self.last_sample_timing = dict(condition_prepare_seconds=conditioned-beginning,
+                denoising_seconds=denoised-conditioned, decode_seconds=time.perf_counter()-denoised)
             return {
                 "chain": torch.stack(chain, dim=1),
                 "old_log_probs": torch.stack(probabilities, dim=1),

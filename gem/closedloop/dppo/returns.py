@@ -15,7 +15,7 @@ import torch
 
 
 def compute_gae(rewards, values, next_values, executed_steps, bootstrap_mask, continuation_mask,
-                valid=None, *, gamma_upper=.99, lambda_upper=.95, event_rewards=None):
+                valid=None, *, gamma_upper=.99, lambda_upper=.95, event_rewards=None, normalize=True):
     if not 0 < float(gamma_upper) <= 1 or not 0 < float(lambda_upper) <= 1:
         raise ValueError("gamma_upper and lambda_upper must be in (0,1]")
     n = len(rewards)
@@ -62,11 +62,45 @@ def compute_gae(rewards, values, next_values, executed_steps, bootstrap_mask, co
             advantage[i] += gamma * lambda_low ** int(steps[i]) * advantage[i + 1]
     targets = torch.where(mask, advantage + torch.where(mask, old, 0.), 0.)
     normalized = torch.zeros_like(advantage)
-    if mask.any():
+    if mask.any() and normalize:
         selected = advantage[mask]
         std = selected.std(unbiased=False)
         normalized[mask] = (selected - selected.mean()) / std.clamp_min(1e-8)
+    elif mask.any():
+        normalized[mask] = advantage[mask]
     if not all(torch.isfinite(value[mask]).all() for value in (discounted, advantage, targets, normalized)):
         raise FloatingPointError("nonfinite return or advantage; refusing a corrupt optimization target")
     return {"discounted_rewards": discounted, "advantages_raw": advantage, "returns": targets,
-            "advantages": normalized, "valid": mask, "gamma_low": gamma_low, "lambda_low": lambda_low}
+            "advantages": normalized, "valid": mask, "gamma_low": gamma_low, "lambda_low": lambda_low,
+            "advantages_normalized": bool(normalize)}
+
+
+def normalize_advantages_global(targets, *, distributed=None):
+    """只汇总有效上层状态的 FP64 统计量；不跨环境拼接 GAE，不按 Actor 自由度筛选。
+
+    调用前各卡先对独立连续轨迹计算 normalize=False 的 GAE。返回新的映射，不覆盖
+    old value、returns 或 raw advantage；方差采用全局总体方差，空卡也参加相同归约。
+    """
+    raw = torch.as_tensor(targets['advantages_raw'], dtype=torch.float64).detach()
+    valid = torch.as_tensor(targets['valid'], dtype=torch.bool, device=raw.device)
+    if raw.shape != valid.shape or not torch.isfinite(raw[valid]).all():
+        raise ValueError('Global advantage normalization requires finite aligned valid values')
+    selected = raw[valid]
+    statistics = torch.stack((raw.new_tensor(selected.numel()), selected.sum(), selected.square().sum()))
+    if distributed is not None:
+        statistics = distributed.sum_tensor(statistics)
+    if not torch.isfinite(statistics).all():
+        raise FloatingPointError('Nonfinite global advantage normalization statistics')
+    count, total, squared = statistics
+    if count <= 0:
+        raise ValueError('No valid upper transition remains for global advantage normalization')
+    mean = total / count
+    variance = (squared / count - mean.square()).clamp_min(0.)
+    normalized = torch.zeros_like(raw)
+    normalized[valid] = (raw[valid] - mean) / variance.sqrt().clamp_min(1e-8)
+    if not torch.isfinite(normalized[valid]).all():
+        raise FloatingPointError('Nonfinite globally normalized advantages')
+    return {**targets, 'advantages': normalized, 'advantages_normalized': True,
+            'advantage_normalization_scope': 'global_valid_upper_transitions',
+            'advantage_global_count': int(count), 'advantage_global_mean': float(mean),
+            'advantage_global_std': float(variance.sqrt())}

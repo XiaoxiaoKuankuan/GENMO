@@ -15,20 +15,22 @@ task_id 集合、采样噪声起点、音乐切点、最长 episode 时长、训
 
 命令行只在指定的新 output 文件发布比较 JSON，不修改输入、源代码、checkpoint
 或原始评估证据；正式原始记录必须来自可信运行。临时文件原子发布且拒绝覆盖。
+显式--mode periodic_subset可比较周期均衡子集的内存模型评估：要求原32任务计划、
+逐episode来源文件SHA和模型指纹一致性证据，结果明确不是完整val/test验收；默认
+full_val仍保留原完整checkpoint/分片/独立审计的严格要求，不自动降级成小子集。
 """
 from __future__ import annotations
 
 import argparse
 import math
-from pathlib import Path
 import sys
+from pathlib import Path
 
 if __package__ in (None, ''):
     sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from gem.closedloop.dppo.evaluation import aggregate_evaluation, _digest, _publish_json, _stats
+from gem.closedloop.dppo.evaluation import _digest, _publish_json, _stats, aggregate_evaluation
 from tools.eval.audit_closedloop_stage10 import read_json, require, sha256
-
 
 VERSION = 'genmo.closedloop.stage10.paired_comparison.v1'
 MERGE_VERSION = 'genmo.closedloop.stage10.evaluation_merge.v1'
@@ -129,6 +131,42 @@ def _episode_metrics(episode):
     return result
 
 
+def _load_periodic(report_path):
+    """显式小子集路径；核验不可变来源文件，不要求训练先落checkpoint。"""
+    from gem.closedloop.dppo.periodic_monitor import VERSION as PERIODIC_VERSION
+    from gem.closedloop.dppo.periodic_monitor import _episode_row, _plan_valid, _verify_episode
+    report_path = Path(report_path).resolve(strict=True)
+    report = read_json(report_path)
+    require(report.get('schema') == PERIODIC_VERSION+'.merge' and report.get('status') == 'passed'
+            and report.get('mode') == 'periodic_subset', 'Input is not a complete periodic subset merge')
+    plan = report['plan']
+    _plan_valid(plan)
+    require(report['plan_sha256'] == plan['plan_sha256'] and 'periodic_partition' not in plan,
+            'Periodic comparison requires the full fixed subset parent plan')
+    assertions = report['assertions']
+    require(assertions.get('all_fixed_tasks_included') is True and assertions.get('rank_models_unchanged') is True
+            and assertions.get('original_task_identity_and_noise_preserved') is True
+            and assertions.get('full_heldout_acceptance') is False, 'Periodic evidence assertions incomplete')
+    require(report.get('evaluation_identity') is not None and bool(report['actor_identity'].get('model_fingerprint')),
+            'Periodic comparison requires explicit execution/reward identity and memory model fingerprint')
+    episodes = report['episodes']
+    references = report['source_episode_manifests']
+    require(len(episodes) == len(references) == plan['task_count'] == report['task_count'], 'Periodic report omits tasks')
+    for task, episode, reference in zip(plan['tasks'], episodes, references):
+        path = Path(reference['path']).resolve(strict=True)
+        require(path.is_file() and sha256(path) == reference['sha256'] and read_json(path) == episode,
+                'Periodic original episode bytes differ')
+        require(episode.get('transition_valid') is True and reference['task_id'] == task['task_id'],
+                'Periodic episode invalid or out of order')
+        _verify_episode(episode, task, plan['episode_seconds'])
+    require(aggregate_evaluation(episodes) == report['aggregate']
+            and [_episode_row(e) for e in episodes] == report['episode_metrics'], 'Periodic aggregate cannot be reproduced')
+    adapted = dict(report, episode_seconds_limit=plan['episode_seconds'],
+        training_identity=report['evaluation_identity'],
+        extension_provenance=dict(source_manifest_sha256=sha256(Path(__file__))))
+    return adapted, plan, episodes, dict(path=str(report_path), sha256=sha256(report_path))
+
+
 def _comparison_group(pairs, initial_episodes, final_episodes):
     metrics = sorted({name for row in pairs for name in row['initial']})
     task_statistics = {}
@@ -142,12 +180,15 @@ def _comparison_group(pairs, initial_episodes, final_episodes):
             'failure_pair_counts': {name: sum(row['failure_pair']==name for row in pairs) for name in FAILURE_GROUPS}}
 
 
-def compare_evaluations(initial_report, final_report):
+def compare_evaluations(initial_report, final_report, *, mode='full_val'):
     """完整读取和核验后生成比较；调用方负责选择新的输出文件，函数不写输入。"""
-    initial, parent, initial_episodes, initial_source = _load_merged(initial_report)
-    final, other_parent, final_episodes, final_source = _load_merged(final_report)
+    require(mode in ('full_val', 'periodic_subset'), 'Unknown comparison mode')
+    loader = _load_merged if mode == 'full_val' else _load_periodic
+    initial, parent, initial_episodes, initial_source = loader(initial_report)
+    final, other_parent, final_episodes, final_source = loader(final_report)
     require(parent==other_parent, 'Initial/final full parent plan, task noise or episode duration differs')
-    require(initial['actor_identity']['sha256']!=final['actor_identity']['sha256'], 'Comparison requires two different checkpoint files')
+    if mode == 'full_val':
+        require(initial['actor_identity']['sha256']!=final['actor_identity']['sha256'], 'Comparison requires two different checkpoint files')
     require(initial['training_identity']==final['training_identity'], 'Initial/final training, reward or execution identity differs')
     require(initial['extension_provenance']['source_manifest_sha256']==final['extension_provenance']['source_manifest_sha256'], 'Initial/final evaluation implementation SHA differs')
     require(initial['episode_seconds_limit']==final['episode_seconds_limit'] and initial['deterministic']==final['deterministic'], 'Initial/final evaluation semantics differ')
@@ -182,6 +223,7 @@ def compare_evaluations(initial_report, final_report):
               'by_seed': {str(seed): group([index for index in indices if pairs[index]['seed']==seed]) for seed in parent['seeds']},
               'by_failure_pair': {name: group([index for index in indices if pairs[index]['failure_pair']==name]) for name in FAILURE_GROUPS},
               'pairs': pairs}
+    result.update(mode=mode, full_heldout_acceptance=(mode == 'full_val'))
     return result
 
 
@@ -190,8 +232,9 @@ def main(argv=None):
     parser.add_argument('--initial-report', required=True, type=Path)
     parser.add_argument('--final-report', required=True, type=Path)
     parser.add_argument('--output', required=True, type=Path)
+    parser.add_argument('--mode', choices=('full_val', 'periodic_subset'), default='full_val')
     args = parser.parse_args(argv)
-    result = compare_evaluations(args.initial_report, args.final_report)
+    result = compare_evaluations(args.initial_report, args.final_report, mode=args.mode)
     _publish_json(args.output, result)
     print(f"Stage10 paired comparison passed: {result['paired_task_count']} tasks; output={args.output}")
     return 0

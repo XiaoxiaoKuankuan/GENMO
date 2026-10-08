@@ -23,16 +23,15 @@ import hashlib
 import json
 import math
 import os
-from pathlib import Path
 import random
 import tempfile
+from pathlib import Path
 
 import numpy as np
 import torch
 
 from gem.closedloop.evaluation_music import load_music_features
 from gem.closedloop.frozen_actor import stable_noise_seed
-
 
 VERSION = 'genmo.closedloop.stage10.evaluation.v1'
 
@@ -165,9 +164,15 @@ def _model_fingerprint(module, *, gradients=False):
     return digest.hexdigest()
 
 
-def _capture_rng():
+def _capture_rng(*, local_cuda_only=False):
+    # torchrun 的每个 rank 只保存自己绑定设备，避免 get_rng_state_all 初始化其他 GPU。
+    device = torch.cuda.current_device() if local_cuda_only and torch.cuda.is_initialized() else None
+    cuda = None
+    if torch.cuda.is_initialized():
+        cuda = torch.cuda.get_rng_state(device).clone() if local_cuda_only else torch.cuda.get_rng_state_all()
     return {'python': random.getstate(), 'numpy': copy.deepcopy(np.random.get_state()),
-            'torch': torch.get_rng_state().clone(), 'cuda': torch.cuda.get_rng_state_all() if torch.cuda.is_initialized() else None}
+            'torch': torch.get_rng_state().clone(), 'cuda': cuda, 'cuda_device': device,
+            'local_cuda_only': bool(local_cuda_only)}
 
 
 def _restore_rng(state):
@@ -175,7 +180,10 @@ def _restore_rng(state):
     np.random.set_state(state['numpy'])
     torch.set_rng_state(state['torch'])
     if state['cuda'] is not None:
-        torch.cuda.set_rng_state_all(state['cuda'])
+        if state.get('local_cuda_only', False):
+            torch.cuda.set_rng_state(state['cuda'], device=state['cuda_device'])
+        else:
+            torch.cuda.set_rng_state_all(state['cuda'])
 
 
 def _field(result, key, default=None):
@@ -326,7 +334,8 @@ def aggregate_evaluation(episodes):
 
 
 def evaluate_policy(env, policy, task_plan, output_dir, *, catalog=None, episode_seconds=None,
-                    deterministic=False, actor_identity=None, frozen_modules=None, progress=None):
+                    deterministic=False, actor_identity=None, frozen_modules=None, progress=None,
+                    local_cuda_only=False):
     """只评估显式 policy，返回可重算报告；故障时先写报告再抛错，绝不开始优化。"""
     if env.policy is not policy:
         raise ValueError('Evaluation environment must use the explicitly supplied loaded Actor policy')
@@ -352,13 +361,13 @@ def evaluate_policy(env, policy, task_plan, output_dir, *, catalog=None, episode
     before = {name: _model_fingerprint(module) for name, module in modules.items()}
     gradient_before = _model_fingerprint(policy.actor, gradients=True)
     modes = {name: {child_name: child.training for child_name, child in module.named_modules()} for name, module in modules.items()}
-    rng = _capture_rng()
+    rng = _capture_rng(local_cuda_only=local_cuda_only)
     original_limit = env.config['stage9']['episode_seconds']
     original_noise_index = env.comparison_noise_index
     episodes, manifests = [], []
     error = None
     try:
-        for name, module in modules.items():
+        for module in modules.values():
             module.eval()
         for index, task in enumerate(plan['tasks']):
             if task['sample']['row'].get('split') != plan['split']:
@@ -422,6 +431,7 @@ def evaluate_policy(env, policy, task_plan, output_dir, *, catalog=None, episode
         error = RuntimeError('Evaluation changed model parameters/buffers or Actor gradients')
     report = {'version': VERSION, 'status': 'failed' if error is not None else 'passed',
               'actor_identity': _plain(actor_identity or {}), 'plan_sha256': declared, 'selection_path': 'selection.json',
+              'rng_scope': 'current_cuda_device' if local_cuda_only else 'all_initialized_cuda_devices',
               'split': plan['split'], 'requested_task_count': len(plan['tasks']), 'completed_episode_count': len(episodes),
               'episode_manifests': manifests, 'aggregate': aggregate_evaluation(episodes),
               'network_fingerprints_before': before, 'network_fingerprints_after': after, 'networks_unchanged': unchanged,

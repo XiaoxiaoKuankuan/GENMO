@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # 第十步服务器1八卡共同训练启动脚本：八个进程使用同一套Actor/Critic参数和同步梯度。
-# rank0从完整训练池采样并独占冻结GMT/CPU PhysX采集，八卡分担本轮优化，rank0写唯一
-# 运行账本和checkpoint；这不是八个独立实验，也不承诺八个物理环境的采集加速。
+# 默认 v2 每卡一个独立冻结 GMT/CPU PhysX 采集器，各采20条转移后同步多次更新；
+# rank0写唯一预算账本，每300个外层轮次保存完整模型与各卡恢复状态。
 # 为便于先验证正常启动，默认只运行到第1个接受更新；持续首段需显式传入
 # --stop-after-iteration N。续训使用同一目录加--resume latest，恢复已发布checkpoint，
 # 同步模型、优化器动量和步数；采样器、BC、随机状态和累计预算由rank0恢复。
@@ -13,7 +13,7 @@ set -euo pipefail
 
 TASK_REPO_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 TASK_PYTHON="${GENMO_PYTHON:-/home/user/liwei/GENMO/.venv/bin/python}"
-TASK_CONFIG="${STAGE10_8GPU_CONFIG:-$TASK_REPO_ROOT/configs/closedloop/stage10_8gpu_server1.yaml}"
+TASK_CONFIG="${STAGE10_8GPU_CONFIG:-$TASK_REPO_ROOT/configs/closedloop/stage10_8gpu_server1_v2.yaml}"
 TASK_OUTPUT=""
 TASK_STOP=1
 TASK_RESUME=""
@@ -76,7 +76,7 @@ export TORCH_NCCL_BLOCKING_WAIT=1
 export LD_LIBRARY_PATH="/data0/user/liwei/closedloop_stage8_runtime/sysroot/usr/lib/x86_64-linux-gnu${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 
 cd "$TASK_REPO_ROOT"
-printf '八卡共同更新同一模型；rank0单GMT采集\n配置=%s\n输出=%s\n停止轮次=%s\nGPU=%s\n' \
+printf '八卡独立GMT采集并同步更新同一模型（显式旧v1配置仍为单采集）\n配置=%s\n输出=%s\n停止轮次=%s\nGPU=%s\n' \
   "$TASK_CONFIG" "$TASK_OUTPUT" "$TASK_STOP" "$CUDA_VISIBLE_DEVICES"
 exec "$TASK_PYTHON" -B -m torch.distributed.run --standalone --nproc_per_node=8 \
   tools/train_closedloop_stage10_8gpu.py --config "$TASK_CONFIG" \

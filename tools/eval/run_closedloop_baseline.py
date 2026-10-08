@@ -325,13 +325,29 @@ class Workers:
         self.temp = tempfile.TemporaryDirectory(prefix="stage8_rpc_")
         self.shutdown = {}
 
-    def start(self, name, command, cwd, socket_path):
+    def start(self, name, command, cwd, socket_path, *, environment=None, strip_distributed=False):
         log = (self.output / f"{name}_worker.log").open("w")
         env = os.environ.copy()
+        if strip_distributed:
+            for key in tuple(env):
+                if key in {'RANK', 'LOCAL_RANK', 'WORLD_SIZE', 'LOCAL_WORLD_SIZE', 'GROUP_RANK',
+                           'ROLE_RANK', 'ROLE_WORLD_SIZE', 'MASTER_ADDR', 'MASTER_PORT'} or key.startswith('TORCHELASTIC_'):
+                    env.pop(key, None)
+        env.update(environment or {})
         env.update(PYTHONDONTWRITEBYTECODE="1", OMP_NUM_THREADS=str(self.config["runtime"]["torch_threads"]))
         env["PYTHONPATH"] = str(ROOT) + os.pathsep + env.get("PYTHONPATH", "")
+        parent_guard = None
+        if strip_distributed and sys.platform == 'linux':
+            # torchrun 异常终止 rank 时，其独立会话中的 GMT 也必须退出，避免孤儿占卡。
+            import ctypes
+            libc, parent = ctypes.CDLL(None), os.getpid()
+            def parent_guard():
+                libc.prctl(1, signal.SIGTERM)
+                if os.getppid() != parent:
+                    os._exit(125)
         try:
-            proc = subprocess.Popen(command, cwd=cwd, env=env, stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
+            proc = subprocess.Popen(command, cwd=cwd, env=env, stdout=log, stderr=subprocess.STDOUT,
+                                    start_new_session=True, preexec_fn=parent_guard)
         except BaseException:
             log.close()
             raise

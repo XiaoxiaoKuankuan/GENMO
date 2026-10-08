@@ -64,6 +64,7 @@ from gem.robots.bumi.kinematics import BumiKinematics
 from tools.eval.run_closedloop_baseline import Workers, preflight
 
 VERSION = 'genmo.closedloop.stage10.v1'
+VERSION_V2 = 'genmo.closedloop.stage10.v2'
 
 
 class _PreflightComplete(Exception):
@@ -79,9 +80,10 @@ def _positive(value, name, *, integer=False):
 
 def configuration(path):
     config = yaml.safe_load(Path(path).read_text())
-    if 'base_config' in config or config.get('stage10', {}).get('version') != VERSION:
+    if 'base_config' in config or config.get('stage10', {}).get('version') not in (VERSION, VERSION_V2):
         raise ValueError('Stage10 requires its own explicit full-dataset configuration')
     stage = config['stage10']
+    parallel_v2 = stage['version'] == VERSION_V2
     if type(stage['seed']) is not int or not 0 <= stage['seed'] < 2**32:
         raise ValueError('Stage10 base seed must be an integer in [0, 2**32)')
     train = stage['training']
@@ -97,11 +99,13 @@ def configuration(path):
         _positive(train[key], key)
         if train[key] > 1:
             raise ValueError(f'{key} must be <= 1')
-    if not 0 < train['ppo_clip'] < 1 or train['ppo_epochs'] != 1 or train['denoising_microbatch'] != 1:
+    if not 0 < train['ppo_clip'] < 1:
+        raise ValueError('PPO clip must be between zero and one')
+    if not parallel_v2 and (train['ppo_epochs'] != 1 or train['denoising_microbatch'] != 1):
         raise ValueError('This version preserves one accumulated Actor step and microbatch=1')
     if train['log_probability_reduction'] != 'joint_sum' or train['execution_mode'] != 'latency':
         raise ValueError('Stage10 preserves joint_sum and the verified latency execution semantics')
-    candidates = train['actor_lr_candidates']
+    candidates = train.get('actor_lr_candidates', [train['actor_lr']])
     if (not isinstance(candidates, list) or not 1 <= len(candidates) <= 3
             or any(isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v)
                    or not 0 < v <= 1e-6 for v in candidates)
@@ -109,6 +113,9 @@ def configuration(path):
         raise ValueError('Require one to three increasing finite Actor learning-rate candidates')
     if train['actor_lr'] not in candidates:
         raise ValueError('Initial Actor learning rate must belong to the tested candidates')
+    if parallel_v2:
+        from gem.closedloop.dppo.parallel_support import validate_v2_configuration
+        validate_v2_configuration(config)
     if not math.isfinite(train['bc_weight']) or train['bc_weight'] < 0:
         raise ValueError('BC weight must be finite and nonnegative')
     if train['denoising_steps'] != config['model']['ddim_steps'] or train['guidance_scale'] != config['model']['guidance_scale']:
@@ -160,6 +167,9 @@ def _sources(config, check):
     names = ('policy', 'buffer', 'rewards', 'critic', 'returns', 'music_tasks', 'target_activity',
              'env_adapter', 'rpc', 'budget', 'trainer', 'checkpoint', 'lr_calibration',
              'full_dataset', 'run_management', 'evaluation', 'long_run')
+    if config['stage10']['version'] == VERSION_V2:
+        names += ('parallel_support', 'parallel_training', 'execution_profile', 'periodic_monitor',
+                  'updater_v2', 'position_repair', 'archives')
     return collect_source_provenance(config['paths'], repository_state=check['repositories'], additional_files={
         'genmo_repo': [*(f'gem/closedloop/dppo/{n}.py' for n in names),
             'tools/train_closedloop_stage10.py',
@@ -171,7 +181,7 @@ def _sources(config, check):
 
 
 def identity(config, check, provenance, catalog, data_audit, actor):
-    return dict(stage10=VERSION, assets=check['asset_sha256'], actor_interface=dict(actor.interface_config),
+    return dict(stage10=config['stage10']['version'], assets=check['asset_sha256'], actor_interface=dict(actor.interface_config),
         base_seed=config['stage10']['seed'], execution_contract=dict(protocol_version=config['version'],
             model=copy.deepcopy(config['model']), timing=copy.deepcopy(config['timing']),
             runtime=copy.deepcopy(config['runtime']), diagnostics=copy.deepcopy(config['diagnostics']),
@@ -308,7 +318,8 @@ def calibrate(env, catalog, output, warmup, samples):
     source = next(iter(catalog.samples['train']))
     sample = catalog.samples['train'][source][0]
     env.reset_task(sample, catalog.load_music(sample), seed=env.config['stage9']['seed'], phase='calibration')
-    durations = []
+    durations, commit_durations = [], []
+    timing_v2 = env.config['runtime'].get('timing_contract') == 'deployment_critical.v2'
     for i in range(warmup + samples):
         generated = env.generate()
         if generated['rejection'] or generated['prepared'] is None:
@@ -316,16 +327,20 @@ def calibrate(env, catalog, output, warmup, samples):
         started = time.perf_counter()
         env.backend.call('commit_plan', prepared_plan_id=generated['prepared']['prepared_plan_id'],
                          expected_control_tick=env.snapshot['tick'])
-        elapsed = generated['elapsed'] + time.perf_counter() - started
+        commit_seconds = time.perf_counter() - started
+        elapsed = generated['critical_ready_seconds'] if timing_v2 else generated['elapsed'] + commit_seconds
         env.snapshot = env.backend.call('snapshot')
         env.decision += 1
         if i >= warmup:
             durations.append(elapsed)
+            commit_durations.append(commit_seconds)
         print(f'[CALIBRATION] {i+1}/{warmup+samples} {elapsed:.4f}s', flush=True)
     peak = max(durations)
     env.latency_budget_s = math.ceil((peak + max(.04, .25*peak))*50)/50
-    report = dict(durations=durations, latency_budget_s=env.latency_budget_s,
-                  scope='measured_generation_prepare_commit; not hard realtime', source='full_train_catalog')
+    report = dict(durations=durations, commit_seconds=commit_durations, latency_budget_s=env.latency_budget_s,
+                  timing_contract=env.config['runtime'].get('timing_contract', 'legacy_audit_inclusive.v1'),
+                  scope='deployment_critical_ready' if timing_v2 else 'measured_generation_prepare_commit; not hard realtime',
+                  source='full_train_catalog')
     atomic_json(output / 'calibration.json', report)
     return report
 
@@ -357,7 +372,7 @@ def main(argv=None, *, learner=None):
     if (args.eval_count is not None or args.eval_split is not None) and args.mode != 'eval':
         parser.error('Evaluation overrides are only valid in eval mode')
     config = configuration(args.config)
-    if config['stage10'].get('distributed') and learner is None:
+    if config['stage10'].get('distributed') and learner is None and args.mode == 'train':
         parser.error('Use train_closedloop_stage10_8gpu.py for distributed configurations')
     stage, s = config['stage10'], config['stage9']
     storage = stage['storage']
@@ -421,7 +436,8 @@ def main(argv=None, *, learner=None):
         actor_optimizer = torch.optim.AdamW(actor.parameters(), lr=s['actor_lr'], weight_decay=0.)
         critic_optimizer = torch.optim.AdamW(critic.parameters(), lr=s['critic_lr'], weight_decay=0.)
         policy = DPPODiffusionPolicy(actor, steps=s['denoising_steps'], eta=s['eta'],
-                                     std_floor=s['std_floor'], guidance_scale=s['guidance_scale'])
+                                     std_floor=s['std_floor'], guidance_scale=s['guidance_scale'],
+                                     cfg_batch=s.get('cfg_batch', False), std_schedule=s.get('std_schedule'))
         sampler = FullMusicSampler(catalog, split='train', seed=stage['seed'], window_seconds=s['episode_seconds'],
             random_start=stage['dataset']['random_start'], source_probabilities=stage['dataset']['source_probabilities'])
         bc = SupervisedAnchor(config, actor, train_config)
@@ -443,15 +459,26 @@ def main(argv=None, *, learner=None):
                 allowed = manager.latest_checkpoint() if (output/'latest.json').exists() else output/'checkpoints/initial.pt'
                 if resume_path.resolve() != allowed.resolve():
                     raise ValueError('Training resume must use the latest published checkpoint of this run')
-            state = load_stage10_checkpoint(resume_path, actor=actor, critic=critic,
-                actor_optimizer=actor_optimizer, critic_optimizer=critic_optimizer,
-                identity=expected, samplers=samplers, generators=generators)
+            weights_eval = args.mode == 'eval' and stage['version'] == VERSION_V2
+            if weights_eval:
+                from gem.closedloop.dppo.checkpoint import load_weights_checkpoint
+                loaded = load_weights_checkpoint(resume_path, actor=actor, critic=critic, identity=expected)
+                state.update(loaded['state'])
+                # 独立评估从新执行计数开始，仅沿用训练时已定义的延迟预算与计算方式。
+                state.update(decision=0, attempt=0, episode_count=0,
+                    latency_budget_s=loaded['rank_execution_states'][0]['latency_budget_s'])
+                policy.cfg_batch = state['execution_profile']['cfg_batch']
+            else:
+                state = load_stage10_checkpoint(resume_path, actor=actor, critic=critic,
+                    actor_optimizer=actor_optimizer, critic_optimizer=critic_optimizer,
+                    identity=expected, samplers=samplers, generators=generators)
             if args.resume:
                 validate_resume_budget(state['budget'], budget.state_dict())
             if any(group['lr'] != state['selected_actor_lr'] for group in actor_optimizer.param_groups):
                 raise RuntimeError('Restored optimizer learning rate differs from accepted state')
             report['resume'] = dict(checkpoint=str(resume_path), sha256=sha256_file(resume_path),
-                restored_full_state=True, initial_iteration=state['iteration'], old_buffer_discarded=True,
+                restored_full_state=not weights_eval, restore_mode='weights_only' if weights_eval else 'full_state',
+                initial_iteration=state['iteration'], old_buffer_discarded=True,
                 actor_optimizer_lrs=[g['lr'] for g in actor_optimizer.param_groups],
                 critic_optimizer_lrs=[g['lr'] for g in critic_optimizer.param_groups],
                 training_resume=bool(args.resume))

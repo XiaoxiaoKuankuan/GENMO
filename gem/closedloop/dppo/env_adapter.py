@@ -8,8 +8,10 @@
 第十步可显式指定 music_start_frame，把已核验的完整音乐和奖励配对动作同步从该帧
 开始；音乐保留到真实文件末尾，行政 episode 上限不改变 Critic 的真实剩余时长。
 可选 disk_guard 将原始去噪样本和异常证据纳入同一运行磁盘预算：先序列化得到精确
-字节数并检查容量，再原子发布和记账；保存耗时仍包含在生成延迟内。未提供 guard
-时保留第九步的直接保存行为，不改变奖励、物理推进或计时定义。
+字节数并检查容量，再原子发布和记账。旧v1仍把训练证据IO算入生成延迟；显式选择
+deployment_critical.v2时仅部署必需条件、推理、输出转换/拷贝和参考RPC计入到达延迟，
+训练trace拷贝、原始证据落盘及RPC journal另行记录。证据依然在物理推进前可靠保存，
+副作用回复仍先落盘再ACK；新旧延迟合同必须在训练身份和基线中明确区分。
 """
 from __future__ import annotations
 
@@ -61,6 +63,13 @@ class UpperEnvironment:
         self.iteration = 0
         self.comparison_noise_index = None
         self.disk_guard = None
+        runtime = config.get('runtime', {})
+        self.timing_contract = runtime.get('timing_contract', 'legacy_audit_inclusive.v1')
+        if self.timing_contract not in {'legacy_audit_inclusive.v1', 'deployment_critical.v2'}:
+            raise ValueError('Unsupported upper environment timing_contract')
+        self.rank = runtime.get('rank')
+        if self.rank is not None and (type(self.rank) is not int or self.rank < 0):
+            raise ValueError('runtime.rank must be a nonnegative integer')
         self.output.joinpath('raw_samples').mkdir(parents=True, exist_ok=True)
 
     def _save_evidence(self, value, path):
@@ -162,8 +171,11 @@ class UpperEnvironment:
 
     def _request(self):
         tick = int(self.snapshot['tick'])
+        request_id = f"{self.snapshot['episode_id']}:decision:{self.decision}"
+        if self.rank is not None:
+            request_id += f':rank:{self.rank}'
         return dict(env_id=self.snapshot['env_id'], episode_id=self.snapshot['episode_id'],
-            request_id=f"{self.snapshot['episode_id']}:decision:{self.decision}", decision_tick=tick,
+            request_id=request_id, decision_tick=tick,
             deadline_tick=tick+ceil_control_tick(self.latency_budget_s*600), min_prefix=12)
 
     def preview_context(self):
@@ -178,11 +190,23 @@ class UpperEnvironment:
     def generate(self, *, deterministic=False):
         self.budget.reserve(self.phase, generations=1)
         started = time.perf_counter()
+        timings = dict(timing_contract=self.timing_contract, journal_seconds=0.)
+        def journal_seconds(method):
+            record = getattr(self.backend, 'last_call_timing', None)
+            return (float(record['journal_seconds']) if isinstance(record, dict)
+                    and record.get('method') == method else 0.)
         request = self._request()
         reservation = self.backend.call('reserve_prefix', request=request)
+        prefix_end = time.perf_counter()
+        timings['prefix_rpc_seconds'] = prefix_end-started
+        timings['journal_seconds'] += journal_seconds('reserve_prefix')
         context, meta = self.builder.build(self.snapshot, reservation, self.music, music_start_tick=600)
+        condition_end = time.perf_counter()
+        timings['condition_build_seconds'] = condition_end-prefix_end
         self.attempt += 1
         key = f"{self.config['stage9']['run_id']}:{self.iteration}:{self.episode_count}:{self.decision}:{self.attempt}"
+        if self.rank is not None:
+            key += f':rank:{self.rank}'
         seed = stable_noise_seed(self.config['stage9']['seed'], key)
         if self.comparison_noise_index is not None:
             seed = stable_noise_seed(1729, str(self.comparison_noise_index))
@@ -190,6 +214,10 @@ class UpperEnvironment:
         device = next(self.policy.actor.parameters()).device
         batch = {k: v.to(device) for k,v in context.items()}
         generator = torch.Generator(device=device).manual_seed(seed)
+        if device.type == 'cuda':
+            torch.cuda.synchronize(device)
+        transferred = time.perf_counter()
+        timings['input_transfer_seconds'] = transferred-condition_end
         if deterministic:
             with torch.no_grad():
                 noise = torch.randn((1,120,30),device=device,generator=generator)
@@ -199,6 +227,12 @@ class UpperEnvironment:
         else:
             trace = self.policy.sample_rollout(batch, generator=generator)
             sample = trace
+        if device.type == 'cuda':
+            torch.cuda.synchronize(device)
+        sampled = time.perf_counter()
+        timings['actor_seconds'] = sampled-transferred
+        if not deterministic:
+            timings['actor_phases'] = dict(getattr(self.policy, 'last_sample_timing', {}))
         meta.update(seed=seed, decision_id=self.decision, plan_id=f"{request['request_id']}:plan")
         anchor = torch.as_tensor(meta['world_anchor'], dtype=torch.float32,device=device)
         with torch.no_grad():
@@ -208,10 +242,21 @@ class UpperEnvironment:
             if not torch.isfinite(value).all():
                 raise FloatingPointError(f'Nonfinite generated {name}')
             generated[name] = value[0].detach().cpu().numpy().copy()
-        trace = cpu_copy(trace)
+        outputs_ready = time.perf_counter()
+        timings['output_conversion_transfer_seconds'] = outputs_ready-sampled
         raw_path = self.output/'raw_samples'/f'{self.phase}_{self.attempt:06d}.pt'
-        self._save_evidence({'trace':trace,'generated':generated,'policy_version':self.policy_version},raw_path)
+        def save_trace():
+            nonlocal trace
+            beginning = time.perf_counter()
+            trace = cpu_copy(trace)
+            copied = time.perf_counter()
+            self._save_evidence({'trace':trace,'generated':generated,'policy_version':self.policy_version},raw_path)
+            timings['trace_copy_seconds'] = copied-beginning
+            timings['raw_evidence_seconds'] = time.perf_counter()-copied
+        if self.timing_contract == 'legacy_audit_inclusive.v1':
+            save_trace()
         rejection, prepared = None, None
+        preparing = time.perf_counter()
         try:
             prepared = self.backend.call('prepare_plan', generated_plan=generated)
         except RemoteError as exc:
@@ -219,9 +264,22 @@ class UpperEnvironment:
                 raise
             rejection = dict(code=exc.code, message=str(exc), policy_penalty=True,
                              category='finite_invalid_reference')
+        prepared_at = time.perf_counter()
+        timings['prepare_rpc_seconds'] = prepared_at-preparing
+        timings['journal_seconds'] += journal_seconds('prepare_plan')
+        if self.timing_contract == 'deployment_critical.v2':
+            # 实际wall时间仍包含journal；仿真到达只映射部署必需路径，ACK没有被扣除。
+            critical = max(0., prepared_at-started-timings['journal_seconds'])
+            save_trace()
+        else:
+            critical = prepared_at-started
         elapsed = time.perf_counter()-started
+        timings.update(critical_ready_seconds=critical, total_wall_seconds=elapsed,
+            excluded_audit_seconds=(timings['trace_copy_seconds']+timings['raw_evidence_seconds']
+                +timings['journal_seconds']) if self.timing_contract == 'deployment_critical.v2' else 0.)
         return dict(context=context,meta=meta,generated=generated,trace=trace,prepared=prepared,
-                    rejection=rejection,elapsed=elapsed,seed=seed,raw_path=str(raw_path))
+                    rejection=rejection,elapsed=elapsed,critical_ready_seconds=critical,
+                    timing=timings,seed=seed,raw_path=str(raw_path))
 
     def step(self, *, deterministic=False):
         """程序/RPC故障单独落盘为invalid，不用策略惩罚替代未知执行后果。"""
@@ -249,7 +307,9 @@ class UpperEnvironment:
         generated = self.generate(deterministic=deterministic)
         self._inflight_sample = generated
         candidate = generated['prepared']
-        arrival = start if self.mode=='paused' else ceil_control_tick(start+600*generated['elapsed'])
+        delay = (generated.get('critical_ready_seconds', generated['elapsed'])
+                 if self.timing_contract == 'deployment_critical.v2' else generated['elapsed'])
+        arrival = start if self.mode=='paused' else ceil_control_tick(start+600*delay)
         ready_tick = max(start+300, int(math.ceil(arrival/300))*300)
         rows, rewards, details, events = [], [], [], []
         commit, rejection = None, generated['rejection']
@@ -319,6 +379,8 @@ class UpperEnvironment:
             generated=generated['generated'],published=commit,rejection=rejection,reward_details=details,
             events=events,consumed_plan_ids=consumed,event_reward=zero_step_event,event_penalty_total=event_reward,
             raw_sample_path=generated['raw_path'],latency_seconds=generated['elapsed'],
+            timing_contract=self.timing_contract, timing=generated.get('timing', {}),
+            critical_ready_seconds=generated.get('critical_ready_seconds', generated['elapsed']),
             commit_seconds=generated.get('commit_seconds',0.),terminal_snapshot=cpu_copy(self.snapshot))
         if deterministic:
             return dict(metadata=metadata,rewards=rewards,terminated=terminated,truncated=truncated,
