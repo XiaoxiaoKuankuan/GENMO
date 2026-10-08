@@ -9,20 +9,41 @@
 from __future__ import annotations
 
 import math
+import time
 
 import torch
+from .policy import masked_joint_log_prob
 
 
-def _log_probs(policy, context, trace, microbatch):
-    values = []
+def _log_probs(policy, context, trace, microbatch, *, details=False):
+    values, parameters = [], []
     for start in range(0, policy.steps, microbatch):
         count = min(microbatch, policy.steps-start)
         batch = {key: value.expand(count, *value.shape[1:]).contiguous() for key, value in context.items()}
         steps = torch.arange(start, start+count, device=trace['chain'].device)
         prepared = policy.prepare_conditions(batch)
-        values.append(policy.evaluate_log_probs(batch, trace['chain'][0, start:start+count],
-            trace['chain'][0, start+1:start+count+1], steps, prepared=prepared))
-    return torch.cat(values)
+        result = policy.transition_parameters(batch, trace['chain'][0, start:start+count], steps,
+                                              prepared=prepared, diagnostics=details)
+        observed = trace['chain'][0, start+1:start+count+1]
+        values.append(masked_joint_log_prob(observed, result['mean'], result['std'], result['free_mask']))
+        if details:
+            coordinate = torch.distributions.Normal(result['mean'].double(), result['std'].double()).log_prob(observed.double())
+            result['coordinate_log_probability'] = coordinate.masked_fill(~result['free_mask'], 0.)
+            parameters.append({key: value.detach() for key, value in result.items() if value is not None})
+    probability = torch.cat(values)
+    if not details:
+        return probability
+    return probability, {key: torch.cat([item[key] for item in parameters]) for key in parameters[0]}
+
+
+def _step_differences(candidate, reference):
+    """固定输入下逐层误差；掩码为精确比较，浮点量报告每步最大绝对差。"""
+    result = {}
+    for key in candidate.keys() & reference.keys():
+        left, right = candidate[key], reference[key]
+        error = (left != right).double() if left.dtype == torch.bool else (left.double()-right.double()).abs()
+        result[key] = error.reshape(len(error), -1).amax(1).cpu().tolist()
+    return result
 
 
 def probe_profiles(policy, context, *, maximum_microbatch=4, seed=12345, reserve_generation=None):
@@ -41,17 +62,21 @@ def probe_profiles(policy, context, *, maximum_microbatch=4, seed=12345, reserve
             generator = torch.Generator(device=device).manual_seed(seed)
             chains[cfg] = policy.sample_rollout(context, generator=generator)
         reference = chains[False]
+        policy.cfg_batch = False
+        with torch.no_grad():
+            reference_probability, reference_parameters = _log_probs(policy, context, reference, 1, details=True)
         for micro in (size for size in (4, 2, 1) if size <= maximum_microbatch):
             for cfg in (True, False):
                 policy.cfg_batch = cfg
                 report = dict(microbatch=micro, cfg_batch=cfg, passed=False)
+                started = time.perf_counter()
                 try:
                     if device.type == 'cuda':
                         torch.cuda.reset_peak_memory_stats(device)
                     trace = chains[cfg]
                     with torch.no_grad():
                         own = _log_probs(policy, context, trace, micro)
-                        base = _log_probs(policy, context, reference, micro)
+                        base, parameters = _log_probs(policy, context, reference, micro, details=True)
                         own_delta = own - trace['old_log_probs'][0]
                         base_delta = base - reference['old_log_probs'][0]
                         density = torch.distributions.Normal(trace['old_means'].double(), trace['old_stds'].double())
@@ -60,18 +85,32 @@ def probe_profiles(policy, context, *, maximum_microbatch=4, seed=12345, reserve
                         oracle_error = float((oracle-trace['old_log_probs']).abs().max())
                         max_log = max(float(own_delta.abs().max()), float(base_delta.abs().max()))
                         max_ratio = max(float(torch.expm1(own_delta).abs().max()), float(torch.expm1(base_delta).abs().max()))
+                        report.update(self_consistency=dict(max_logprob_error=float(own_delta.abs().max()),
+                            max_ratio_error=float(torch.expm1(own_delta).abs().max()),
+                            per_step_logprob_error=own_delta.abs().cpu().tolist()),
+                            cross_execution=dict(max_logprob_error=float(base_delta.abs().max()),
+                                max_ratio_error=float(torch.expm1(base_delta).abs().max()),
+                                per_step_logprob_error=base_delta.abs().cpu().tolist(),
+                                layer_max_abs_error=_step_differences(parameters, reference_parameters)),
+                            validation_scope='all_denoising_steps_separate_self_and_cross_execution')
                     actor.zero_grad(set_to_none=True)
-                    count = min(micro, policy.steps)
-                    batch = {key: value.expand(count, *value.shape[1:]).contiguous() for key, value in context.items()}
-                    steps = torch.arange(count, device=device)
-                    with torch.enable_grad():
-                        prepared = policy.prepare_conditions(batch)
-                        probability = policy.evaluate_log_probs(batch, trace['chain'][0, :count],
-                            trace['chain'][0, 1:count+1], steps, prepared=prepared)
-                        (-probability.mean()).backward()
+                    losses = []
+                    for start in range(0, policy.steps, micro):
+                        count = min(micro, policy.steps-start)
+                        batch = {key: value.expand(count, *value.shape[1:]).contiguous() for key, value in context.items()}
+                        steps = torch.arange(start, start+count, device=device)
+                        with torch.enable_grad():
+                            prepared = policy.prepare_conditions(batch)
+                            probability = policy.evaluate_log_probs(batch, trace['chain'][0, start:start+count],
+                                trace['chain'][0, start+1:start+count+1], steps, prepared=prepared)
+                            loss = -probability.sum()/policy.steps
+                            loss.backward()
+                            losses.append(loss.detach())
                     gradients = [parameter.grad for parameter in actor.parameters() if parameter.grad is not None]
                     finite = bool(gradients) and all(bool(torch.isfinite(gradient).all()) for gradient in gradients)
                     report.update(max_logprob_error=max_log, max_ratio_error=max_ratio,
+                                  backward_denoising_steps=policy.steps,
+                                  backward_loss=float(torch.stack(losses).sum()),
                                   independent_gaussian_error=oracle_error, finite_gradients=finite,
                                   peak_memory_bytes=torch.cuda.max_memory_allocated(device) if device.type == 'cuda' else None,
                                   passed=finite and all(math.isfinite(v) for v in (max_log, max_ratio, oracle_error))
@@ -81,6 +120,7 @@ def probe_profiles(policy, context, *, maximum_microbatch=4, seed=12345, reserve
                     actor.zero_grad(set_to_none=True)
                     torch.cuda.empty_cache()
                 reports.append(report)
+                report['probe_wall_seconds'] = time.perf_counter()-started
                 actor.zero_grad(set_to_none=True)
         return reports
     finally:

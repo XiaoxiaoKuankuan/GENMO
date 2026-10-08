@@ -10,6 +10,7 @@ from __future__ import annotations
 import time
 
 from gem.runtime.closedloop_protocol import RemoteError, RpcClient
+from .performance import measure, profiled
 
 
 class AcknowledgedBackend:
@@ -30,6 +31,7 @@ class AcknowledgedBackend:
         self.last_envelope = None
         self.last_call_timing = None
 
+    @profiled('rpc.transport_including_remote_execution')
     def _transport(self, method, **payload):
         try:
             return self.client.call(method, **payload)
@@ -87,12 +89,14 @@ class AcknowledgedBackend:
         self.last_envelope = envelope
         beginning = time.perf_counter()
         try:
-            self.journal.append_result(envelope)
+            with measure('rpc.journal'):
+                self.journal.append_result(envelope)
         finally:
             timing['journal_seconds'] = time.perf_counter()-beginning
         beginning = time.perf_counter()
         try:
-            self._transport('ack', backend_session_id=self.session_id, through_seq=seq)
+            with measure('rpc.ack'):
+                self._transport('ack', backend_session_id=self.session_id, through_seq=seq)
         finally:
             timing['ack_seconds'] = time.perf_counter()-beginning
         self.sequence = seq

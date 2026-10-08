@@ -22,6 +22,7 @@ from contextlib import contextmanager
 import torch
 
 from gem.closedloop.dppo.policy import masked_joint_log_prob
+from .performance import measure, profiled
 
 
 @contextmanager
@@ -33,7 +34,8 @@ def _local_phase(distributed, phase):
     """
     error = None
     try:
-        yield
+        with measure(f'compute.{phase}', gpu=True):
+            yield
     except BaseException as caught:
         error = caught
     if distributed is None:
@@ -41,7 +43,8 @@ def _local_phase(distributed, phase):
             raise error
         return
     local = None if error is None else dict(rank=distributed.rank, type=type(error).__name__, message=str(error))
-    failures = [item for item in distributed.all_gather_object(local) if item is not None]
+    with measure(f'wait.{phase}'):
+        failures = [item for item in distributed.all_gather_object(local) if item is not None]
     if failures:
         raise RuntimeError(f'Cooperative local phase failed ({phase}): {failures}') from error
 
@@ -87,10 +90,12 @@ def _owned(global_indices, manifest, distributed):
             if manifest[index]['owner_rank'] == _rank(distributed)]
 
 
+@profiled('learning.prepare_context', gpu=True)
 def _context(rows, device):
     return {key: torch.cat([row.context[key] for row in rows], 0).to(device) for key in rows[0].context}
 
 
+@profiled('learning.parameters', gpu=True)
 def _parameters(policy, rows, steps, device):
     context = _context(rows, device)
     state = torch.stack([row.chain[step] for row, step in zip(rows, steps)]).to(device)
@@ -142,6 +147,7 @@ def _kl_report(values, free_counts):
 
 
 @torch.no_grad()
+@profiled('learning.analytic_kl', gpu=True)
 def analytic_kl_local(policy, transitions, *, global_manifest=None, distributed=None,
                       denoising_microbatch=4, global_indices=None):
     """按各卡本地链计算精确条件高斯 KL；跨卡仅收集小型逐步 KL 矩阵。"""
@@ -195,6 +201,7 @@ def analytic_kl_local(policy, transitions, *, global_manifest=None, distributed=
 
 
 @torch.no_grad()
+@profiled('learning.probability_check', gpu=True)
 def probability_check_local(policy, transitions, *, global_manifest=None, distributed=None,
                             denoising_microbatch=4, global_indices=None):
     """完整零更新检查仅用于启动／周期诊断；原始概率、ratio 和独立公式门槛不放宽。"""
@@ -355,7 +362,8 @@ def actor_update_v2(policy, optimizer, transitions, targets, *, global_manifest=
                                              for index, step in chunk]).to(device)
                     objective = torch.minimum(ratio * advantage, ratio.clamp(1 - clip, 1 + clip) * advantage)
                     loss = -objective.sum() / denominator
-                    loss.backward()
+                    with measure('actor.ppo_backward', gpu=True):
+                        loss.backward()
                     old_mean, old_std = _old_kernel(rows, steps, device)
                     kl = _joint_kl(parameters, mask, old_mean, old_std).detach()
                     summary += torch.stack((loss.detach(), ((ratio < 1 - clip) | (ratio > 1 + clip)).double().sum(),

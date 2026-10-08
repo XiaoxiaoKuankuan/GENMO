@@ -27,6 +27,7 @@ import torch
 
 from gem.closedloop.actor import Stage1Actor
 from gem.closedloop.contracts import STAGE1_CONDITION_KEYS
+from .performance import profiled
 
 DPPO_KERNEL_VERSION = "genmo.bumi_closedloop.stochastic_ddim_joint_sum.v1"
 
@@ -142,6 +143,7 @@ class DPPODiffusionPolicy:
         # 原地optimizer.step/load_state_dict均改变Tensor版本，无需把权重复制到CPU求hash。
         return tuple((id(p), p._version, p.requires_grad) for p in self.actor.parameters())
 
+    @profiled('policy.condition_encoding', gpu=True)
     def prepare_conditions(self, conditions):
         """单链/单微批条件准备；保留encoder梯度，禁止跨参数更新或grad模式复用。
 
@@ -212,12 +214,13 @@ class DPPODiffusionPolicy:
             raise ValueError(f"{name} must be finite")
         return value.detach()
 
+    @profiled('policy.transition', gpu=True)
     def transition_parameters(
         self,
         conditions: Mapping[str, torch.Tensor],
         x_k: torch.Tensor,
         step_index: int | torch.Tensor,
-        *, prepared: dict | None = None,
+        *, prepared: dict | None = None, diagnostics: bool = False,
     ) -> dict[str, torch.Tensor]:
         """返回带参数梯度的 Gaussian 参数；输入 x_k 固定，允许每样本不同去噪步。"""
         self._prepare_actor()
@@ -268,7 +271,7 @@ class DPPODiffusionPolicy:
             std = torch.maximum(base_std, coefficients['floors'][indices, None, None])
             if not bool(torch.isfinite(mean).all()) or not bool(torch.isfinite(std).all()):
                 raise FloatingPointError("DPPO transition parameters are nonfinite")
-            return {
+            result = {
                 "mean": mean,
                 "std": std,
                 "base_std": base_std,
@@ -276,6 +279,12 @@ class DPPODiffusionPolicy:
                 "pred_x_start": prediction,
                 "contact_logits": logits,
             }
+            if diagnostics:
+                result.update(conditional_encoding=conditional,
+                    unconditional_encoding=unconditional,
+                    conditional_prediction=conditional_output['pred_x_start'],
+                    unconditional_prediction=(output['pred_x_start'] if self.guidance_scale != 1. else None))
+            return result
 
     def evaluate_log_probs(
         self,

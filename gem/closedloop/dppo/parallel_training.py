@@ -38,6 +38,7 @@ from .critic import UpperCritic
 from .env_adapter import UpperEnvironment
 from .evaluation import evaluate_policy
 from .execution_profile import probe_profiles, select_profile
+from .performance import PhaseProfiler, activate, deactivate, measure
 from .full_dataset import FullMusicCatalog, FullMusicSampler
 from .long_run import LongRunMaintenance
 from .parallel_support import (begin_lease, broadcast_state, build_global_manifest, capture_local_rng,
@@ -475,11 +476,15 @@ def _collect(c, index):
                           chunk_size=c.stage['storage']['rollout_chunk_size'], disk_guard=c.guard)
     started = time.perf_counter()
     def perform():
-        return collect_rollout(c.env, c.sampler, count, writer, check_disk=c.guard.check,
+        local_started = time.perf_counter()
+        result, local_report = collect_rollout(c.env, c.sampler, count, writer, check_disk=c.guard.check,
             value_snapshot=lambda row: populate_values([row], c.critic, c.distributed.device,
                                                        critic_version=c.state['critic_updates']))
+        local_report['local_compute_seconds'] = time.perf_counter()-local_started
+        return result, local_report
     buffer, report = local_call(c.distributed, perform)
     report['seconds'] = time.perf_counter()-started
+    report['synchronization_wait_seconds'] = max(0., report['seconds']-report['local_compute_seconds'])
     report['rank'] = c.distributed.rank
     report['gpu_peak_allocated_bytes'] = torch.cuda.max_memory_allocated(c.distributed.device)
     report['rejections'] = sum(bool(row.metadata.get('rejection')) for row in buffer.transitions)
@@ -548,9 +553,10 @@ def _update(c, buffer, targets, manifest, index):
     if coverage is not None:
         check['sentinel_coverage'] = coverage
     # 一份共享模型/Adam 快照只在 rank0 创建；各 rank 只保存自己的轻量更新随机状态。
-    backup = (cpu_snapshot(dict(actor=c.actor.state_dict(), critic=c.critic.state_dict(),
-        actor_optimizer=c.actor_optimizer.state_dict(), critic_optimizer=c.critic_optimizer.state_dict(),
-        bc=None if c.bc is None else c.bc.state_dict())) if c.distributed.rank == 0 else None)
+    with measure('update.rollback_cpu_snapshot', gpu=True):
+        backup = (cpu_snapshot(dict(actor=c.actor.state_dict(), critic=c.critic.state_dict(),
+            actor_optimizer=c.actor_optimizer.state_dict(), critic_optimizer=c.critic_optimizer.state_dict(),
+            bc=None if c.bc is None else c.bc.state_dict())) if c.distributed.rank == 0 else None)
     rng = capture_local_rng(c.generators)
     actor, critic, kl = {}, {}, {}
     timings = dict(critic_seconds=0., actor_seconds=0., kl_seconds=0.)
@@ -755,6 +761,9 @@ def run_parallel(args, config, collective, preflight):
             root_call(collective, lambda: atomic_json(baseline_path, baseline))
         from .periodic_monitor import log_metrics
         while c.state['iteration'] < args.stop_after_iteration:
+            iteration_start = time.perf_counter()
+            profiler = PhaseProfiler(collective.device, collective.rank)
+            c.performance_token = activate(profiler)
             latencies = collective.all_gather_object(c.env.latency_budget_s)
             def capacity():
                 result = c.budget.iteration_capacity(c.settings['max_actor_optimizer_steps'])
@@ -775,14 +784,18 @@ def run_parallel(args, config, collective, preflight):
                             includes_final_evaluation_reserve=True)
                 result['can_start'] = not result['exhausted']
                 return dict(stop=stop.stop_requested or c.maintenance.expired(), capacity=result)
-            control = root_call(collective, capacity)
+            with measure('iteration.budget_preflight'):
+                control = root_call(collective, capacity)
             requested = collective.all_gather_object(stop.stop_requested)
             if control['stop'] or any(requested) or not control['capacity']['can_start']:
                 report['stop_reason'] = 'signal_walltime_or_budget'
                 report['stop_details'] = control
+                deactivate(c.performance_token)
+                c.performance_token = None
                 break
             index = c.state['iteration'] + 1
-            root_call(collective, lambda: c.manager.check_disk(c.stage['storage']['checkpoint_reserve_bytes'], refresh=True))
+            with measure('iteration.disk_preflight'):
+                root_call(collective, lambda: c.manager.check_disk(c.stage['storage']['checkpoint_reserve_bytes'], refresh=True))
             torch.cuda.reset_peak_memory_stats(collective.device)
             start = time.perf_counter()
             buffer, targets, manifest, directory, path, collection = _collect(c, index)
@@ -830,7 +843,7 @@ def run_parallel(args, config, collective, preflight):
                 curves['actor_minibatches'] = {f'step{i+1}': row for i, row in enumerate(update['actor']['steps'])}
                 curves['denoising_steps'] = {f'step{i}': row for i, row in enumerate(update['kl']['per_denoising_step'])}
                 curves['collectors'] = {f'rank{i}': dict(row, wait_after_collection_seconds=
-                    max(r['seconds'] for r in summaries)-row['seconds']) for i, row in enumerate(summaries)}
+                    row['synchronization_wait_seconds']) for i, row in enumerate(summaries)}
                 log_metrics(c.writer, c.output/'curves.jsonl', index, curves)
                 return True
             root_call(collective, seal)
@@ -841,8 +854,15 @@ def run_parallel(args, config, collective, preflight):
             periodic_evaluation = index % c.stage['evaluation']['every_iterations'] == 0
             if periodic_evaluation:
                 _evaluate_and_record(c, report, f'{index:06d}', legacy_label=index)
-            walltime = _record_iteration_walltime(c, index, start, core_seconds=seconds,
+            walltime = _record_iteration_walltime(c, index, iteration_start, core_seconds=seconds,
                                                  periodic_evaluation=periodic_evaluation)
+            performance = local_call(collective, profiler.report)
+            by_rank = collective.all_gather_object(performance)
+            root_call(collective, lambda: atomic_json(c.session/f'performance_{index:06d}.json', dict(
+                schema='genmo.stage10.performance.v1', iteration=index, ranks=by_rank,
+                wall_includes_preflight=True, core_seconds=seconds, wall_seconds=walltime['seconds'])))
+            deactivate(c.performance_token)
+            c.performance_token = None
             report['iterations'].append(index)
             if collective.rank == 0:
                 print(f'[ACCEPTED v2] iteration={index} actor_steps={update["actor"]["optimizer_steps"]} '
@@ -855,6 +875,9 @@ def run_parallel(args, config, collective, preflight):
         report.update(status='failed', error=dict(type=type(caught).__name__, message=str(caught), traceback=traceback.format_exc()))
         traceback.print_exc()
     finally:
+        if getattr(c, 'performance_token', None) is not None:
+            deactivate(c.performance_token)
+            c.performance_token = None
         if c.workers is not None:
             if c.backend is not None and c.workers.entries:
                 c.workers.entries[-1]['client'] = c.backend.client

@@ -41,6 +41,7 @@ import torch
 from .budget import BudgetExceeded
 from .buffer import StepJournal, UpperTransition, _journal_value
 from .checkpoint import VERSION as CHECKPOINT_VERSION, VERSION_V2, _validate_rank_states
+from .performance import profiled
 
 
 BUDGET_KEYS = ('accepted_iterations', 'optimizer_attempts', 'generations', 'control_steps', 'physics_steps')
@@ -382,9 +383,11 @@ class TrainingBudget:
                      for key, count in required.items() if self.limits[key]-self.state['used'][key] < count}
         return dict(can_start=not exhausted, exhausted=exhausted)
 
+    @profiled('storage.budget_write')
     def _save(self, value):
         _atomic_json(self.path, value, replace=True, disk_guard=self.disk_guard)
 
+    @profiled('storage.budget_reserve')
     def reserve(self, phase, **amounts):
         if not isinstance(phase, str) or not phase or not amounts:
             raise ValueError('budget reservation requires a named phase and amounts')
@@ -409,6 +412,7 @@ class TrainingBudget:
         # 接受后发布失败也不回退资源消耗；latest checkpoint独立给出可恢复进度。
         self.reserve(phase, accepted_iterations=1)
 
+    @profiled('storage.budget_settle_control')
     def settle_control(self, phase, requested, result):
         _integer(requested, 'requested controls')
         if not result.get('physics_count_exact', True):
@@ -705,6 +709,7 @@ class RunManager:
         self._journals.append(journal)
         return journal
 
+    @profiled('storage.disk_check')
     def check_disk(self, required_bytes=0, *, refresh=False):
         self._ensure_open()
         if refresh:
@@ -734,6 +739,7 @@ class RunManager:
         self.disk_guard.account_file(path)
         return path
 
+    @profiled('storage.seal')
     def seal_iteration(self, directory, iteration, *, metadata=None, closed_journals=()):
         """发布独立接受水位及不可变文件清单；普通轮不要求写完整模型 checkpoint。"""
         self._ensure_open()
