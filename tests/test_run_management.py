@@ -98,6 +98,47 @@ def test_budget_write_failure_leaves_the_previous_state(tmp_path, monkeypatch):
     assert json.loads(budget.path.read_text()) == before
 
 
+def test_full_control_settlement_validates_without_copy_or_write(tmp_path, monkeypatch):
+    budget = TrainingBudget(tmp_path/'budget.json', limits())
+    budget.reserve('main', control_steps=25, physics_steps=100)
+    before = budget.path.read_bytes()
+    monkeypatch.setattr(budget, '_save', lambda *_: pytest.fail('Zero refund must not write'))
+    monkeypatch.setattr(management.copy, 'deepcopy', lambda *_: pytest.fail('Zero refund must not copy history'))
+    budget.settle_control('main', 25, dict(executed_control_steps=25, executed_physics_steps=100))
+    assert budget.path.read_bytes() == before
+    with pytest.raises(ValueError, match='reserved'):
+        budget.settle_control('unknown', 25, dict(executed_control_steps=25, executed_physics_steps=100))
+    with pytest.raises(ValueError, match='inconsistent'):
+        budget.settle_control('main', 25, dict(executed_control_steps=25, executed_physics_steps=99))
+
+
+def test_guarded_journal_encodes_once_and_keeps_original_payload_sha(tmp_path, monkeypatch):
+    import hashlib
+    import numpy as np
+    from gem.closedloop.dppo import buffer as buffer_module
+    reply = dict(backend_session_id='会话', mutation_seq=1, result=dict(
+        array=np.arange(24, dtype=np.float32).reshape(3, 8), nonfinite=float('nan')))
+    original = buffer_module._journal_value
+    expected = json.dumps(original(reply), ensure_ascii=False, sort_keys=True,
+                          separators=(',', ':'), allow_nan=False)
+    calls = []
+    def counted(value):
+        if value is reply:
+            calls.append(1)
+        return original(value)
+    monkeypatch.setattr(buffer_module, '_journal_value', counted)
+    guard = DiskGuard(tmp_path, max_run_bytes=10**8, min_free_bytes=0)
+    journal = GuardedStepJournal(tmp_path/'execution.sqlite', guard)
+    try:
+        assert journal.append_result(reply)
+        assert calls == [1]
+        payload, digest = journal._journal.connection.execute('SELECT payload, sha256 FROM replies').fetchone()
+        assert payload == expected and digest == hashlib.sha256(expected.encode()).hexdigest()
+        assert not journal.append_result(reply)
+    finally:
+        journal.close()
+
+
 def test_corrupt_budget_totals_and_unknown_counters_are_rejected(tmp_path):
     path = tmp_path / 'budget.json'
     budget = TrainingBudget(path, limits())

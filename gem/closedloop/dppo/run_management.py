@@ -39,7 +39,7 @@ import uuid
 import torch
 
 from .budget import BudgetExceeded
-from .buffer import StepJournal, UpperTransition, _journal_value
+from .buffer import StepJournal, UpperTransition
 from .checkpoint import VERSION as CHECKPOINT_VERSION, VERSION_V2, _validate_rank_states
 from .performance import profiled
 
@@ -422,10 +422,16 @@ class TrainingBudget:
         if not 0 <= actual <= requested or not 4 * actual <= physics <= 4 * requested:
             raise ValueError('cannot settle inconsistent physical execution')
         refunds = dict(control_steps=requested - actual, physics_steps=4 * requested - physics)
+        phase_used = self.state['phases'].get(phase)
+        if phase_used is None or phase_used.get('control_steps', 0) < requested or phase_used.get('physics_steps', 0) < 4*requested:
+            raise ValueError('control settlement requires a sufficient reserved phase budget')
+        for key, count in refunds.items():
+            if count > self.state['used'][key] or count > self.state['phases'].get(phase, {}).get(key, 0):
+                raise ValueError('control settlement exceeds its reserved phase budget')
+        if not any(refunds.values()):
+            return
         updated = copy.deepcopy(self.state)
         for key, count in refunds.items():
-            if count > updated['used'][key] or count > updated['phases'].get(phase, {}).get(key, 0):
-                raise ValueError('control settlement exceeds its reserved phase budget')
             updated['used'][key] -= count
             updated['phases'][phase][key] -= count
         self._save(updated)
@@ -579,9 +585,10 @@ class GuardedStepJournal:
             self.disk_guard.account_file(Path(str(self.path) + suffix))
 
     def append_result(self, result):
-        self.disk_guard.check(2 * len(_json_bytes(_journal_value(result))) + 65536)
+        encoded = self._journal.encode_result(result)
+        self.disk_guard.check(2 * len(encoded.payload) + 65536)
         try:
-            return self._journal.append_result(result)
+            return self._journal.append_encoded(encoded)
         finally:
             self._account()
 

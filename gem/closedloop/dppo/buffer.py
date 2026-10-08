@@ -180,6 +180,14 @@ def _journal_value(value):
     return value
 
 
+@dataclass(frozen=True)
+class EncodedJournalReply:
+    """一次规范化后的不可变执行回复；复用同一UTF-8字节容量、SHA与SQL内容。"""
+    identity: str
+    payload: bytes
+    sha256: str
+
+
 class StepJournal:
     """同步落盘的幂等执行回复日志；成功返回后调用方才可发送后端 ACK。"""
     def __init__(self, path: str | Path):
@@ -191,7 +199,8 @@ class StepJournal:
         self.connection.execute("CREATE TABLE IF NOT EXISTS replies (identity TEXT PRIMARY KEY, sha256 TEXT NOT NULL, payload TEXT NOT NULL)")
         self.connection.commit()
 
-    def append_result(self, result: Mapping[str, Any]) -> bool:
+    @staticmethod
+    def encode_result(result: Mapping[str, Any]) -> EncodedJournalReply:
         body = result.get("result", result)
         if not isinstance(body, Mapping):
             body = result
@@ -201,15 +210,24 @@ class StepJournal:
             raise ValueError("durable execution reply requires session and mutation/request identity")
         # ack.v2 的序号在整个 worker session 单调增长，不能通过改变 episode 绕过冲突检测。
         identity = json.dumps([session, sequence], separators=(",", ":"))
-        payload = json.dumps(_journal_value(result), ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False)
-        digest = hashlib.sha256(payload.encode()).hexdigest()
+        payload = json.dumps(_journal_value(result), ensure_ascii=False, sort_keys=True,
+                             separators=(",", ":"), allow_nan=False).encode('utf-8')
+        return EncodedJournalReply(identity, payload, hashlib.sha256(payload).hexdigest())
+
+    def append_result(self, result: Mapping[str, Any]) -> bool:
+        return self.append_encoded(self.encode_result(result))
+
+    def append_encoded(self, encoded: EncodedJournalReply) -> bool:
+        if not isinstance(encoded, EncodedJournalReply):
+            raise TypeError('Journal requires a canonical immutable encoded reply')
+        identity, digest = encoded.identity, encoded.sha256
         with self.connection:
             existing = self.connection.execute("SELECT sha256 FROM replies WHERE identity=?", (identity,)).fetchone()
             if existing:
                 if existing[0] != digest:
                     raise ValueError("same execution identity returned different payload")
                 return False
-            self.connection.execute("INSERT INTO replies VALUES (?,?,?)", (identity, digest, payload))
+            self.connection.execute("INSERT INTO replies VALUES (?,?,?)", (identity, digest, encoded.payload.decode('utf-8')))
         return True
 
     def __len__(self):
