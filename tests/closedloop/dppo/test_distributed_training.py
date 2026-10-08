@@ -149,6 +149,10 @@ def _worker(rank, directory):
         for size in (1, 3):
             result[f"critic_{size}"] = _run_critic(distributed, batch_size=size)
         torch.save(result, directory / f"rank_{rank}.pt")
+        # 先让两个rank完成结果落盘，再共同销毁Gloo连接。否则较快的子进程可能
+        # 已退出，较慢进程仍在ProcessGroup析构中等待；这与训练数值断言无关。
+        # 此屏障仅在成功路径执行，异常仍交给有界spawn传播，不能吞掉失败。
+        dist.barrier()
     finally:
         dist.destroy_process_group()
         faulthandler.cancel_dump_traceback_later()

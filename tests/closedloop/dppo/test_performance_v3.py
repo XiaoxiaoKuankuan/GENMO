@@ -21,6 +21,36 @@ from tests.closedloop.test_stage1_actor import _activate_branches, _conditions
 from tests.closedloop.test_stage1_actor import actor_factory as actor_factory
 
 
+@pytest.mark.parametrize('name', ['performance', 'tensor_cache', 'asset_cache', 'rollout_storage', 'budget_ledger'])
+def test_new_runtime_source_mutation_is_detected_by_training_inventory(tmp_path, monkeypatch, name):
+    """实际训练入口的源码清单必须保护新增执行模块，不能只有Git HEAD而漏掉文件SHA。"""
+    from gem.closedloop.baseline_provenance import _file_record, verify_source_provenance
+    from tools import train_closedloop_stage10 as entry
+    from pathlib import Path
+
+    def capture(paths, *, repository_state, additional_files):
+        records = []
+        for relative in additional_files['genmo_repo']:
+            path = tmp_path/relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(b'# immutable runtime source\n')
+            record = _file_record(tmp_path, relative, 'stage9_training')
+            record['repository'] = 'genmo_repo'
+            records.append(record)
+        return dict(schema='genmo.closedloop_stage8_source_provenance.v1', files=records,
+                    repositories={'genmo_repo': {'path': str(tmp_path)}}, source_manifest_sha256='f'*64)
+
+    monkeypatch.setattr(entry, 'collect_source_provenance', capture)
+    snapshot = entry._sources({'paths': {}, 'stage10': {'version': entry.VERSION_V2}}, {'repositories': {}})
+    assert verify_source_provenance(snapshot)['unchanged']
+    target = tmp_path/f'gem/closedloop/dppo/{name}.py'
+    assert target.is_file(), f'{name} was omitted from the production source inventory'
+    target.write_bytes(b'# MODIFIED runtime source!\n')
+    observed = verify_source_provenance(snapshot)
+    assert not observed['unchanged']
+    assert [Path(row['path']).name for row in observed['changed_files']] == [f'{name}.py']
+
+
 def test_performance_counts_and_preserves_rng_and_gradients():
     rng = torch.get_rng_state().clone()
     parameter = torch.tensor(2., requires_grad=True)
