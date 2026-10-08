@@ -7,6 +7,9 @@
 周期评估夹具复用真实 CPU evaluate_policy，生成八 rank 分片中的四个有效分片、
 四来源各一样本和两个 seed；检查终态缺失、报告/episode SHA、计划、指标篡改和
 旧格式证据缺口。有效物理失败必须保留为效果指标，不能被审计器误报为基础设施失败。
+固定目标直接调用生产 fixed_targets 与 normalize_advantages_global，不人为添加旧版
+审计器才需要的 old_values/next_values；另行验证可选重复列及篡改拒绝，防止合成
+夹具与真实八卡写盘格式分叉后再次产生错误的通过结论。
 """
 from __future__ import annotations
 
@@ -25,7 +28,8 @@ from gem.closedloop.dppo.checkpoint import (
     save_checkpoint,
 )
 from gem.closedloop.dppo.long_run import LongRunMaintenance
-from gem.closedloop.dppo.returns import compute_gae
+from gem.closedloop.dppo.returns import normalize_advantages_global
+from gem.closedloop.dppo.trainer import fixed_targets
 from gem.closedloop.dppo.run_management import GuardedStepJournal, RolloutWriter, RunManager
 from tests import test_evaluation as fixtures
 from tests.closedloop.dppo.test_stage10_audit_recovery import write
@@ -149,6 +153,7 @@ class ParallelLifecycle:
             item.identity.update(run_id=self.manager.run_id, backend_session_id=f'{self.manager.session_id}:rank{rank}',
                 episode_id=f'{self.manager.session_id}:rank{rank}:iteration{index}', decision_id=index-1, policy_version=index-1)
             item.rewards *= rank+1
+            item.metadata['value_snapshot_version'] = self.state['critic_updates']
             journal = GuardedStepJournal(path/'execution_journal.sqlite', self.manager.disk_guard)
             journal.append_result(dict(backend_session_id=item.identity['backend_session_id'], mutation_seq=index,
                 result=dict(executed_control_steps=2, executed_physics_steps=8)))
@@ -158,15 +163,16 @@ class ParallelLifecycle:
             writer.append(item)
             manifest = writer.finish()
             collectors.append(dict(full_train_pool=True, transition_count=1, control_steps=2, rollout_manifest=str(manifest)))
-            targets = compute_gae([item.rewards], [item.old_value], [item.next_value], [2], [True], [False], normalize=False)
-            targets.update(old_values=torch.tensor([item.old_value], dtype=torch.float64),
-                next_values=torch.tensor([item.next_value], dtype=torch.float64))
+            targets = fixed_targets([item], None, 'cpu', reuse_values=True,
+                critic_version=self.state['critic_updates'], normalize=False,
+                gamma_upper=self.contract['gamma_upper'], lambda_upper=self.contract['lambda_upper'])
             raw_targets.append(targets)
         raw = torch.cat([target['advantages_raw'] for target in raw_targets])
+        statistics = torch.stack((raw.new_tensor(raw.numel()), raw.sum(), raw.square().sum()))
+        collective = SimpleNamespace(sum_tensor=lambda local_statistics: statistics.clone())
         for rank, target in enumerate(raw_targets):
-            target.update(advantages=(target['advantages_raw']-raw.mean())/raw.std(unbiased=False),
-                advantage_normalization_scope='global_valid_upper_transitions', advantage_global_count=8,
-                advantage_global_mean=float(raw.mean()), advantage_global_std=float(raw.std(unbiased=False)))
+            target = normalize_advantages_global(target, distributed=collective)
+            assert 'old_values' not in target and 'next_values' not in target
             torch.save(target, directory/f'rank{rank:02d}'/'fixed_targets.pt')
         for model, optimizer, steps in ((self.actor, self.optimizers['actor_optimizer'], 4),
                                          (self.critic, self.optimizers['critic_optimizer'], 2)):
@@ -474,3 +480,52 @@ def test_v2_legacy_missing_evaluation_sha_is_readable_but_not_full_acceptance(li
     assert next(row for row in result['checks'] if row['name']=='v2_iteration:2')['status']=='passed'
     legacy = next(row for row in result['checks'] if row['name'].startswith('v2_periodic_evaluations:'))
     assert legacy['status']=='not_run' and 'legacy V2' in legacy['error']
+
+
+@pytest.mark.parametrize('variant', ['production', 'matching_optional_values', 'wrong_old',
+    'wrong_next', 'wrong_return', 'wrong_advantage', 'not_normalized'])
+def test_v2_targets_use_production_schema_and_independent_rollout_values(lifecycle, variant):
+    """目标由真实生产函数生成；重签封存 SHA 后仍独立识别值/GAE/归一化错误。"""
+    life = lifecycle.start()
+    life.accept()
+    life.accept(save=True)
+    life.finish()
+    directory = life.directory/'iterations/000002'
+    path = directory/'rank00/fixed_targets.pt'
+    target = torch.load(path, weights_only=False)
+    assert 'old_values' not in target and 'next_values' not in target
+    item = torch.load(next((directory/'rank00/rollout').rglob('transition_*.pt')), weights_only=False)
+    if variant in ('matching_optional_values', 'wrong_old', 'wrong_next'):
+        target.update(old_values=torch.tensor([item.old_value], dtype=torch.float64),
+                      next_values=torch.tensor([item.next_value], dtype=torch.float64))
+        if variant=='wrong_old':
+            target['old_values'] += 1.
+        elif variant=='wrong_next':
+            target['next_values'] += 1.
+    elif variant=='wrong_return':
+        target['returns'] += 1.
+    elif variant=='wrong_advantage':
+        target['advantages'] += .1
+    elif variant=='not_normalized':
+        target['advantages_normalized'] = False
+    torch.save(target, path)
+    seal_path = directory/'seal_manifest.json'
+    seal = read_json(seal_path)
+    for member in seal['members']:
+        member_path = directory/member['path']
+        member.update(sha256=sha256(member_path), size_bytes=member_path.stat().st_size)
+    write(seal_path, seal)
+    pointer = read_json(life.root/'accepted.json')
+    pointer['seal_sha256'] = sha256(seal_path)
+    write(life.root/'accepted.json', pointer)
+    result = audit_run(life.root, require_resume=False)
+    if variant in ('production', 'matching_optional_values'):
+        assert result['status']=='passed', result['checks']
+        detail = next(row for row in result['checks'] if row['name']=='v2_iteration:2')['details']
+        target_audit = detail['fixed_targets_by_rank'][0]
+        assert target_audit['value_source'].startswith('SHA-verified immutable rollout')
+        assert target_audit['optional_duplicate_columns_verified']==(
+            ['old_values', 'next_values'] if variant=='matching_optional_values' else [])
+    else:
+        assert result['status']=='failed'
+        assert next(row for row in result['checks'] if row['name']=='v2_iteration:2')['status']=='failed'

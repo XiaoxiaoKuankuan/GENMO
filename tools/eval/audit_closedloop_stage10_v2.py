@@ -17,6 +17,10 @@
 初始基线比较。物理跌倒是有效的策略评估结果，不冒充基础设施故障；缺任务、
 证据不一致或评估改变模型/RNG 才使这项审计失败。旧 v2 缺少新增证据时仍能读取
 其他历史，但评估项明确缺失，不补写历史，也不宣称已经通过完整正式训练验收。
+
+v2 的 old/next value 权威来源是已经核验 SHA 的不可变 rollout；生产 fixed_targets
+只保存 GAE 结果，不强制重复序列化这两列。审计用独立 NumPy 递推重算目标，若
+历史目标文件包含可选的重复旧值则额外交叉核验，不补写文件或改变原始归档 SHA。
 """
 from __future__ import annotations
 
@@ -35,7 +39,6 @@ from tools.eval.audit_closedloop_stage10 import (
     archived_execution,
     audit_data,
     audit_rollout,
-    audit_targets,
     budget_check,
     close,
     integer,
@@ -194,6 +197,62 @@ def _periodic_evaluations(root, session, identity, *, require_final=False):
                 'V2 successful terminal session has no final-policy evaluation')
     return dict(reports=records, full_heldout_acceptance=False,
                 scope='SHA-bound fixed periodic subset and independently recomputed execution metrics')
+
+
+def _targets(root, summary, rows, contract, *, normalization):
+    """兼容生产 v2 目标格式；旧值来自不可变链，独立重算按真实时间的 GAE。"""
+    target = torch.load(_physical(resolve(root, summary['targets_path'])), map_location='cpu',
+                        weights_only=False, mmap=True)
+    size = len(rows)
+    def vector(name):
+        value = torch.as_tensor(target[name]).double().cpu().numpy()
+        require(value.shape==(size,) and np.isfinite(value).all(), f'Invalid V2 target vector: {name}')
+        return value
+    old = np.asarray([row['old_value'] for row in rows], dtype=np.float64)
+    nxt = np.asarray([row['next_value'] for row in rows], dtype=np.float64)
+    require(np.isfinite(old).all() and np.isfinite(nxt).all(), 'V2 immutable rollout values are nonfinite')
+    duplicates = []
+    for name, expected in (('old_values', old), ('next_values', nxt)):
+        if name in target:
+            require(np.allclose(vector(name), expected, atol=1e-7, rtol=0),
+                    'V2 duplicated old/next values differ from immutable rollout values')
+            duplicates.append(name)
+    gamma, lam = float(contract['gamma_upper'])**(1/25), float(contract['lambda_upper'])**(1/25)
+    close(target['gamma_low'], gamma, 'V2 gamma_low')
+    close(target['lambda_low'], lam, 'V2 lambda_low')
+    valid = torch.as_tensor(target['valid'])
+    require(valid.dtype==torch.bool and valid.shape==(size,) and bool(valid.all()),
+            'Accepted V2 rollout contains invalid fixed targets')
+    discounted = np.asarray([sum((gamma**i)*reward for i, reward in enumerate(row['rewards']))+
+        (gamma**max(row['count']-1, 0))*row['event_reward'] for row in rows], dtype=np.float64)
+    advantages = np.zeros(size, dtype=np.float64)
+    for index in range(size-1, -1, -1):
+        row = rows[index]
+        advantages[index] = discounted[index]-old[index]
+        if not row['terminated'] and row['has_next']:
+            advantages[index] += gamma**row['count']*nxt[index]
+        if index+1<size:
+            following = rows[index+1]
+            continuous = (not row['terminated'] and not row['truncated'] and row['end']==following['begin']
+                and all(row['identity'][key]==following['identity'][key]
+                        for key in ('backend_session_id', 'episode_id', 'policy_version')))
+            if continuous:
+                advantages[index] += (gamma*lam)**row['count']*advantages[index+1]
+    mean, std = normalization
+    require(target.get('advantages_normalized') is True and
+            target.get('advantage_normalization_scope')=='global_valid_upper_transitions',
+            'V2 advantages must be globally normalized exactly once')
+    close(target['advantage_global_mean'], mean, 'V2 global advantage mean')
+    close(target['advantage_global_std'], std, 'V2 global advantage std')
+    differences = {}
+    for name, expected in (('discounted_rewards', discounted), ('advantages_raw', advantages),
+            ('returns', advantages+old), ('advantages', (advantages-mean)/max(float(std), 1e-8))):
+        difference = float(np.max(np.abs(vector(name)-expected)))
+        require(difference<=1e-7, f'Independent V2 fixed-target/GAE mismatch: {name} {difference}')
+        differences[name] = difference
+    return dict(max_abs_differences=differences,
+        value_source='SHA-verified immutable rollout pre-update old_value/next_value',
+        optional_duplicate_columns_verified=duplicates)
 
 
 def _seal(root, path):
@@ -531,7 +590,7 @@ def audit_training_v2(root, run, audit, result, minimum_iterations, require_resu
                     target = torch.load(_physical(resolve(root, local['targets_path'])), weights_only=False, map_location='cpu', mmap=True)
                     raw.extend(torch.as_tensor(target['advantages_raw']).double().tolist())
                 mean, std = float(np.mean(raw)), float(np.std(raw))
-                targets = [audit_targets(root, local, rows, contract, normalization=(mean, std))
+                targets = [_targets(root, local, rows, contract, normalization=(mean, std))
                            for local, rows in zip(rank_summaries, rank_rows)]
                 for local in rank_summaries:
                     target = torch.load(_physical(resolve(root, local['targets_path'])), weights_only=False, map_location='cpu', mmap=True)
