@@ -28,6 +28,7 @@ from __future__ import annotations
 import copy
 import hashlib
 import time
+import weakref
 from pathlib import Path
 from uuid import uuid4
 
@@ -39,6 +40,7 @@ from gem.closedloop.dppo.critic import UpperCritic
 from gem.closedloop.dppo.policy import DPPODiffusionPolicy
 from gem.closedloop.frozen_actor import _fingerprint
 from gem.robots.bumi.kinematics import sha256_file
+from .performance import measure
 
 
 def _optimizer_fingerprint(optimizer):
@@ -75,6 +77,8 @@ class DistributedCollectives:
         self._gradient_timing_pending = []
         self._gradient_timing_sequence = 0
         self._gradient_timing_enabled = bool(measure_gradient_communication)
+        self._gradient_layouts = weakref.WeakKeyDictionary()
+        self._gradient_buffers = {}
 
     def enable_gradient_timing(self, enabled=True):
         """新监视入口显式开启；旧入口没有consumer时不积压CUDA事件或历史记录。"""
@@ -184,36 +188,55 @@ class DistributedCollectives:
         parameters = list(module.parameters())
         present = torch.tensor([p.grad is not None for p in parameters], dtype=torch.int32, device=self.device)
         self._timed_gradient_reduce(present, timing, 'gradient_presence')
-        buckets = {}
-        for parameter, count in zip(parameters, present.tolist()):
-            if count == 0:
+        active = tuple(value > 0 for value in present.tolist())
+        signature = (tuple((id(p), tuple(p.shape), p.dtype, p.device) for p in parameters), active)
+        layouts = self._gradient_layouts.setdefault(module, {})
+        if signature not in layouts:
+            groups = {}
+            for parameter, used in zip(parameters, active):
+                if used:
+                    groups.setdefault((parameter.device, parameter.dtype), []).append(parameter)
+            layout = []
+            limit = 32*1024*1024
+            for key, entries in groups.items():
+                pending, size = [], 0
+                for parameter in entries:
+                    required = parameter.numel()*parameter.element_size()
+                    if pending and size+required > limit:
+                        layout.append((key, pending)); pending, size = [], 0
+                    pending.append(parameter); size += required
+                if pending:
+                    layout.append((key, pending))
+            if len(layouts) >= 4:
+                layouts.pop(next(iter(layouts)))
+            layouts[signature] = layout
+        else:
+            layout = layouts[signature]
+        for parameter, used in zip(parameters, active):
+            if not used:
                 parameter.grad = None
-                continue
-            gradient = torch.zeros_like(parameter) if parameter.grad is None else parameter.grad.contiguous()
-            buckets.setdefault((gradient.device, gradient.dtype), []).append((parameter, gradient))
-        # 已按全局 minibatch 分母归一化，只 SUM，不再除以 world_size。
-        # 分桶最多 32 MiB；超大单个参数独占桶，避免为全模型再分配一份梯度。
-        limit = 32 * 1024 * 1024
-        for entries in buckets.values():
-            pending, size = [], 0
-            def flush(batch):
-                if not batch:
-                    return
-                flat = torch.cat([gradient.reshape(-1) for _, gradient in batch])
-                self._timed_gradient_reduce(flat, timing, 'gradient_bucket')
-                offset = 0
-                for parameter, gradient in batch:
-                    gradient.copy_(flat[offset:offset + gradient.numel()].view_as(gradient))
-                    parameter.grad = gradient
-                    offset += gradient.numel()
-            for parameter, gradient in entries:
-                required = gradient.numel() * gradient.element_size()
-                if pending and size + required > limit:
-                    flush(pending)
-                    pending, size = [], 0
-                pending.append((parameter, gradient))
-                size += required
-            flush(pending)
+        # 每种device/dtype只复用最大单桶缓冲，避免缓存一份完整模型梯度。
+        # 同stream的pack -> SUM -> copy按序执行，不额外除以world_size。
+        for key, entries in layout:
+            count = sum(parameter.numel() for parameter in entries)
+            buffer = self._gradient_buffers.get(key)
+            if buffer is None or buffer.numel() < count:
+                buffer = torch.empty(count, device=key[0], dtype=key[1])
+                self._gradient_buffers[key] = buffer
+            flat, offset = buffer[:count], 0
+            with measure('communication.gradient_pack', gpu=True):
+                for parameter in entries:
+                    target = flat[offset:offset+parameter.numel()].view_as(parameter)
+                    target.zero_() if parameter.grad is None else target.copy_(parameter.grad)
+                    offset += parameter.numel()
+            self._timed_gradient_reduce(flat, timing, 'gradient_bucket')
+            offset = 0
+            with measure('communication.gradient_unpack', gpu=True):
+                for parameter in entries:
+                    if parameter.grad is None:
+                        parameter.grad = torch.empty_like(parameter)
+                    parameter.grad.copy_(flat[offset:offset+parameter.numel()].view_as(parameter))
+                    offset += parameter.numel()
         if timing is not None:
             timing['call_wall_seconds'] = time.perf_counter()-started
             self._gradient_timing_pending.append(timing)

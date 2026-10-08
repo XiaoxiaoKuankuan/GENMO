@@ -31,6 +31,7 @@ from gem.closedloop.dppo.returns import compute_gae
 from gem.closedloop.dppo.lr_calibration import calibrated_optimizer_step
 from gem.closedloop.frozen_actor import _fingerprint
 from gem.closedloop.training import build_stage1_actor, build_stage1_losses, batch_to_device
+from .performance import measure
 
 
 def load_actor(config):
@@ -422,6 +423,7 @@ class SupervisedAnchor:
         self.generator=torch.Generator().manual_seed(int(config['stage9']['seed'])+1001)
         self.bc_update_steps=0
         self.batch_size=int(config['stage9'].get('bc_batch',2))
+        self.batch_forward = config.get('stage10', {}).get('performance', {}).get('bc_batch_forward', False)
         if self.batch_size < 1:
             raise ValueError('BC batch must be positive')
         self.torch_rng=torch.Generator().manual_seed(int(config['stage9']['seed'])+1002).get_state()
@@ -453,6 +455,8 @@ class SupervisedAnchor:
                 np.random.set_state(old_numpy);random.setstate(old_python)
 
     def backward(self, actor, weight):
+        if getattr(self, 'batch_forward', False):
+            return self._backward_batch(actor, weight)
         from gem.closedloop.stage1_dataset import collate_stage1_training_samples
         values=[]; samples=[]; micro_gradient_norms=[]; warmup_factors=[]
         actor.train()
@@ -486,13 +490,70 @@ class SupervisedAnchor:
                     warmup_origin='independent_bc_updates_from_zero',warmup_factors=warmup_factors,
                     weighted_gradient_norm_per_microbatch=micro_gradient_norms)
 
+    def _backward_batch(self, actor, weight):
+        """两条监督样本一次前向，损失仍逐样本归约后等权平均；使用独立新RNG执行身份。"""
+        from gem.closedloop.stage1_dataset import collate_stage1_training_samples
+        device = next(actor.parameters()).device
+        actor.train()
+        try:
+            with self._rng_scope(actor), torch.autocast(device_type=device.type, enabled=False):
+                with measure('bc.data_prepare'):
+                    samples = []
+                    for _ in range(self.batch_size):
+                        source = int(torch.multinomial(torch.tensor([.2,.35,.25,.2]), 1, generator=self.generator))
+                        dataset = self.datasets[source]
+                        index = int(torch.randint(len(dataset), (1,), generator=self.generator))
+                        samples.append(dataset[index])
+                    cpu_batch = collate_stage1_training_samples(samples)
+                with measure('bc.transfer', gpu=True):
+                    batch = batch_to_device(cpu_batch, device)
+                with measure('bc.forward', gpu=True):
+                    prediction = actor.training_forward(batch)
+                    values, warmup = [], []
+                    for i in range(self.batch_size):
+                        single = {key: value[i:i+1] if isinstance(value, (torch.Tensor, list, tuple)) else value
+                                  for key, value in batch.items()}
+                        if 'B' in single:
+                            single['B'] = 1
+                        loss, details = self.losses(single, prediction['pred_x_start'][i:i+1],
+                            prediction['static_conf_logits'][i:i+1], global_step=self.bc_update_steps)
+                        values.append(loss)
+                        warmup.append({key: float(value.detach()) for key, value in details.items() if key.endswith('warmup_factor')})
+                    mean_loss = torch.stack(values).mean()
+                    if not torch.isfinite(mean_loss):
+                        raise FloatingPointError('Nonfinite batched Stage1 supervised retention loss')
+                squares = []
+                hooks = [p.register_hook(lambda gradient: squares.append(gradient.detach().double().square().sum()))
+                         for p in actor.parameters() if p.requires_grad]
+                try:
+                    with measure('bc.backward', gpu=True):
+                        (weight*mean_loss).backward()
+                finally:
+                    for hook in hooks:
+                        hook.remove()
+                norm = float(torch.stack(squares).sum().sqrt()) if squares else 0.
+                self.bc_update_steps += 1
+        finally:
+            actor.eval()
+        return dict(loss=float(mean_loss.detach()), weight=weight, bc_update_steps=self.bc_update_steps,
+            samples=[[sample['meta']] for sample in samples], batch_size=self.batch_size,
+            prefix_contract=self.prefix_contract, warmup_step=self.bc_update_steps-1,
+            warmup_origin='independent_bc_updates_from_zero', warmup_factors=warmup,
+            weighted_gradient_norm_per_microbatch=[norm], execution_contract='batched_forward_samplewise_loss_rng.v1')
+
     def state_dict(self):
-        return dict(generator=self.generator.get_state(),bc_update_steps=self.bc_update_steps,
+        result = dict(generator=self.generator.get_state(),bc_update_steps=self.bc_update_steps,
                     torch_rng=self.torch_rng.clone(),numpy_rng=self.numpy_rng,python_rng=self.python_rng,
                     cuda_rng=self.cuda_rng.clone() if self.cuda_rng is not None else None,batch_size=self.batch_size)
+        if getattr(self, 'batch_forward', False):
+            result['execution_contract'] = 'batched_forward_samplewise_loss_rng.v1'
+        return result
 
     def validate_state_dict(self, state):
         """用独立 RNG 对象验证断点，不拷贝 Dataset/Actor，也不触碰当前或全局随机状态。"""
+        expected = 'batched_forward_samplewise_loss_rng.v1' if getattr(self, 'batch_forward', False) else None
+        if state.get('execution_contract') != expected:
+            raise ValueError('BC execution/RNG contract differs from checkpoint')
         if (type(state['batch_size']) is not int or state['batch_size'] != self.batch_size
                 or type(state['bc_update_steps']) is not int or state['bc_update_steps'] < 0):
             raise ValueError('BC state batch or update count differs')

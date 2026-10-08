@@ -190,6 +190,8 @@ def identity(config, check, provenance, catalog, data_audit, actor):
         environment=config['environment'], termination=config['termination'],
         dataset=catalog.identity, data_content_sha256=data_audit['data_content_sha256'],
         sampling=config['stage10']['dataset'], source_manifest_sha256=provenance['source_manifest_sha256'],
+        **({'performance_contract': copy.deepcopy(config['stage10']['performance'])}
+           if config['stage10'].get('performance') else {}),
         **({'distributed_training': copy.deepcopy(config['stage10']['distributed'])}
            if config['stage10'].get('distributed') else {}))
 

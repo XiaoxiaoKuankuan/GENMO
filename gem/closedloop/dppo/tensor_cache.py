@@ -188,3 +188,27 @@ class ConditionGraphCache:
                         torch.autograd.backward(outputs, gradients)
         self.finished = True
         self.entries.clear()
+
+
+class KLResultCache:
+    """同一参数版本的逐链完整KL/噪声诊断缓存；任何身份变化都拒绝复用。"""
+    def __init__(self, policy, transitions, records, manifest=None):
+        self.identity = self._identity(policy, transitions, manifest)
+        self.records = {index: tuple(value.detach().clone() for value in values)
+                        for index, values in records.items()}
+
+    @staticmethod
+    def _identity(policy, transitions, manifest):
+        def row_identity(row):
+            trace = row.metadata.get('sampler_trace', {})
+            tensors = [row.chain, row.old_log_prob, row.free_mask, trace.get('old_means'), trace.get('old_stds'), *row.context.values()]
+            return (id(row), tuple((id(value), value._version) for value in tensors if isinstance(value, torch.Tensor)))
+        return (tuple(row_identity(row) for row in transitions),
+                tuple((id(p), p._version) for p in policy.actor.parameters()),
+                json.dumps(policy.kernel_config, sort_keys=True),
+                json.dumps(manifest, sort_keys=True),
+                'old_path_joint_free_sum_per_internal.v1')
+
+    def validate(self, policy, transitions, manifest=None):
+        if self.identity != self._identity(policy, transitions, manifest):
+            raise ValueError('KL cache rollout, Actor parameter version, kernel or aggregation changed')

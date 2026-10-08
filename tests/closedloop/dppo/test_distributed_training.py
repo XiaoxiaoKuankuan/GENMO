@@ -18,7 +18,6 @@ from types import SimpleNamespace
 import pytest
 import torch
 import torch.distributed as dist
-import torch.multiprocessing as mp
 
 from gem.closedloop.dppo.distributed_runtime import DistributedCollectives
 from gem.closedloop.dppo.trainer import actor_update, analytic_kl, critic_update
@@ -136,6 +135,8 @@ def _run_critic(distributed, *, batch_size):
 
 
 def _worker(rank, directory):
+    import faulthandler
+    faulthandler.dump_traceback_later(30, repeat=True)
     torch.set_num_threads(1)
     directory = Path(directory)
     dist.init_process_group("gloo", init_method=(directory / "rendezvous").as_uri(),
@@ -150,6 +151,7 @@ def _worker(rank, directory):
         torch.save(result, directory / f"rank_{rank}.pt")
     finally:
         dist.destroy_process_group()
+        faulthandler.cancel_dump_traceback_later()
 
 
 ACTOR_CASES = {
@@ -168,7 +170,8 @@ def distributed_results(tmp_path_factory):
     torch.set_num_threads(1)
     try:
         directory = tmp_path_factory.mktemp("distributed_training")
-        mp.spawn(_worker, args=(str(directory),), nprocs=2, join=True)
+        from tests.closedloop.dppo.test_updater_v2 import _spawn_bounded
+        _spawn_bounded(_worker, directory)
         ranks = [torch.load(directory / f"rank_{rank}.pt", weights_only=False) for rank in range(2)]
         single = {name: _run_actor(None, **options) for name, options in ACTOR_CASES.items()}
         single.update({f"critic_{size}": _run_critic(None, batch_size=size) for size in (1, 3)})

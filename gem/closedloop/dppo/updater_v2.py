@@ -17,13 +17,14 @@ BC 每个真实 Actor 更新只由 rank 0 计算全局监督批，与同步后�
 from __future__ import annotations
 
 import math
+from collections import deque
 from contextlib import contextmanager
 
 import torch
 
 from gem.closedloop.dppo.policy import masked_joint_log_prob
 from .performance import measure, profiled
-from .tensor_cache import ConditionGraphCache
+from .tensor_cache import ConditionGraphCache, KLResultCache
 
 
 @contextmanager
@@ -91,6 +92,23 @@ def _owned(global_indices, manifest, distributed):
             if manifest[index]['owner_rank'] == _rank(distributed)]
 
 
+def balanced_epoch_order(selected, manifest, generator):
+    """每rank独立打乱后轮询交织；完整覆盖、无丢弃/重复，随机状态可恢复。"""
+    buckets = {}
+    for index in selected:
+        buckets.setdefault(manifest[index]['owner_rank'], []).append(index)
+    for rank, values in buckets.items():
+        buckets[rank] = deque(values[i] for i in torch.randperm(len(values), generator=generator).tolist())
+    ranks = sorted(buckets)
+    ranks = [ranks[i] for i in torch.randperm(len(ranks), generator=generator).tolist()]
+    result = []
+    while len(result) < len(selected):
+        for rank in ranks:
+            if buckets[rank]:
+                result.append(buckets[rank].popleft())
+    return result
+
+
 @profiled('learning.prepare_context', gpu=True)
 def _context(rows, device):
     return {key: torch.cat([row.context[key] for row in rows], 0).to(device) for key in rows[0].context}
@@ -153,7 +171,8 @@ def _kl_report(values, free_counts):
 @torch.no_grad()
 @profiled('learning.analytic_kl', gpu=True)
 def analytic_kl_local(policy, transitions, *, global_manifest=None, distributed=None,
-                      denoising_microbatch=4, global_indices=None, tensor_cache=None):
+                      denoising_microbatch=4, global_indices=None, tensor_cache=None,
+                      reuse_cache=None, return_cache=False):
     """按各卡本地链计算精确条件高斯 KL；跨卡仅收集小型逐步 KL 矩阵。"""
     from gem.closedloop.dppo.trainer import _validate_actor_transitions
     if type(denoising_microbatch) is not int or denoising_microbatch < 1:
@@ -173,7 +192,15 @@ def analytic_kl_local(policy, transitions, *, global_manifest=None, distributed=
         # 与 KL 共用本次前向；不为噪声核和输出位移日志再遍历整条链。
         diagnostics = torch.zeros((len(owned), 4, policy.steps), dtype=torch.float64, device=device)
         counts = torch.tensor([int(row.free_mask.sum()) for row in local_rows], device=device, dtype=torch.float64)
-        flat = [(index, step) for index in range(len(local_rows)) for step in range(policy.steps)]
+        if reuse_cache is not None:
+            reuse_cache.validate(policy, transitions, manifest)
+        reused = set()
+        for index, (position, _) in enumerate(owned):
+            global_index = selected[position]
+            if reuse_cache is not None and global_index in reuse_cache.records:
+                output[index], diagnostics[index], counts[index] = reuse_cache.records[global_index]
+                reused.add(index)
+        flat = [(index, step) for index in range(len(local_rows)) if index not in reused for step in range(policy.steps)]
         conditions = ConditionGraphCache(policy, tensor_cache) if tensor_cache is not None and hasattr(policy, 'prepare_conditions') else None
         for start in range(0, len(flat), denoising_microbatch):
             chunk = flat[start:start + denoising_microbatch]
@@ -190,6 +217,8 @@ def analytic_kl_local(policy, transitions, *, global_manifest=None, distributed=
             for offset, (index, step) in enumerate(chunk):
                 output[index, step] = values[offset]
                 diagnostics[index, :, step] = noise[offset]
+        cache = (KLResultCache(policy, transitions, {selected[position]: (output[i], diagnostics[i], counts[i])
+                 for i, (position, _) in enumerate(owned)}, manifest) if return_cache else None)
     if distributed is not None:
         combined = distributed.gather_rows(torch.cat((output, diagnostics.reshape(len(owned), 4 * policy.steps), counts[:, None]), 1),
                                             [position for position, _ in owned], len(selected))
@@ -202,7 +231,12 @@ def analytic_kl_local(policy, transitions, *, global_manifest=None, distributed=
                      mean_std=float(diagnostics[:, 1, step].mean()), mean_base_std=float(diagnostics[:, 2, step].mean()),
                      mean_normalized_mean_shift_rms=float(diagnostics[:, 3, step].mean()))
     report['free_coordinate_count'] = dict(min=int(counts.min()), max=int(counts.max()), mean=float(counts.mean()))
-    return report
+    reuse_count = torch.tensor(len(reused), device=device, dtype=torch.long)
+    if distributed is not None:
+        reuse_count = distributed.sum_tensor(reuse_count)
+    report['reused_upper_transitions'] = int(reuse_count)
+    report['fresh_internal_forwards'] = (len(selected)-int(reuse_count))*policy.steps
+    return (report, cache) if return_cache else report
 
 
 @torch.no_grad()
@@ -253,9 +287,10 @@ def probability_check_local(policy, transitions, *, global_manifest=None, distri
                 max_abs_ratio_minus_one=float(maximum[1]), max_abs_independent_gaussian_difference=float(maximum[2]))
 
 
-def _gradient_pair_report(actor, ppo_gradients):
+def _gradient_pair_report(actor, ppo_gradients, *, module_details=True):
     """在同一参数版本上分离 PPO 与加权 BC，公共分支与独立头分开报告。"""
-    groups = {'all': [0., 0., 0., 0., 0.], 'shared': [0., 0., 0., 0., 0.]}
+    device = next(actor.parameters()).device
+    groups = {key: torch.zeros(5, dtype=torch.float64, device=device) for key in ('all', 'shared')}
     for name, parameter in actor.named_parameters():
         if not parameter.requires_grad:
             continue
@@ -266,20 +301,21 @@ def _gradient_pair_report(actor, ppo_gradients):
         ppo = torch.zeros_like(merged) if old is None else old
         total = torch.zeros_like(ppo) if merged is None else merged
         bc = total - ppo
-        numbers = torch.stack((ppo.double().square().sum(), bc.double().square().sum(),
-                               (ppo.double() * bc.double()).sum(), total.double().square().sum(),
-                               ppo.new_tensor(1., dtype=torch.float64))).cpu().tolist()
-        labels = ['all', name.split('.')[0]]
-        if old is not None and bool(bc.count_nonzero()):
-            labels.append('shared')
+        ppo64, bc64, total64 = ppo.double(), bc.double(), total.double()
+        numbers = torch.stack((ppo64.square().sum(), bc64.square().sum(),
+                               (ppo64 * bc64).sum(), total64.square().sum(),
+                               ppo.new_tensor(1., dtype=torch.float64)))
+        labels = ['all', name.split('.')[0]] if module_details else ['all']
+        if old is not None:
+            groups['shared'] += numbers*(numbers[1] > 0)
         if 'contact' in name or 'static_conf' in name:
             labels.append('contact_head')
         for label in set(labels):
-            accumulator = groups.setdefault(label, [0.] * 5)
-            for index, value in enumerate(numbers):
-                accumulator[index] += value
+            if label not in groups:
+                groups[label] = torch.zeros_like(numbers)
+            groups[label] += numbers
     result = {}
-    for group, (ppo2, bc2, dot, merged2, count) in groups.items():
+    for group, (ppo2, bc2, dot, merged2, count) in zip(groups, torch.stack(list(groups.values())).cpu().tolist()):
         result[group] = dict(ppo_norm=math.sqrt(ppo2), weighted_bc_norm=math.sqrt(bc2),
             cosine=None if ppo2 <= 0 or bc2 <= 0 else max(-1., min(1., dot / math.sqrt(ppo2 * bc2))),
             merged_norm=math.sqrt(merged2), contributing_parameter_tensors=int(count))
@@ -292,7 +328,8 @@ def actor_update_v2(policy, optimizer, transitions, targets, *, global_manifest=
                     bc=None, bc_weight=.1, clip=.01, gamma_denoising=.99, grad_clip_norm=1.,
                     soft_kl_limit=.015, objective_logprob_reduction='joint_sum',
                     reserve_attempt=None, verify_initial_probability=False,
-                    gradient_diagnostics=True, step_callback=None, tensor_cache=None):
+                    gradient_diagnostics=True, step_callback=None, tensor_cache=None,
+                    balanced_minibatches=False, gradient_module_details=True, kl_cache_sink=None):
     """执行真实多次 PPO 参数更新；完整硬 KL 与整轮回滚明确由外层事务负责。"""
     from gem.closedloop.dppo.trainer import _validate_actor_transitions
     for name, value in (('ppo_epochs', ppo_epochs), ('actor minibatch', actor_minibatch_internal_transitions),
@@ -334,7 +371,8 @@ def actor_update_v2(policy, optimizer, transitions, targets, *, global_manifest=
         if epoch_orders is not None:
             order = list(epoch_orders[epoch])
         elif distributed is None or _rank(distributed) == 0:
-            order = [selected[i] for i in torch.randperm(len(selected), generator=generator).tolist()]
+            order = (balanced_epoch_order(selected, manifest, generator) if balanced_minibatches else
+                     [selected[i] for i in torch.randperm(len(selected), generator=generator).tolist()])
         else:
             order = None
         if distributed is not None:
@@ -408,7 +446,7 @@ def actor_update_v2(policy, optimizer, transitions, targets, *, global_manifest=
                     bc_report = distributed.broadcast_object(bc_report if _rank(distributed) == 0 else None)
             actor.eval()
             with _local_phase(distributed, 'actor_gradient_diagnostics'):
-                diagnostics = (_gradient_pair_report(actor, ppo_gradients)
+                diagnostics = (_gradient_pair_report(actor, ppo_gradients, module_details=gradient_module_details)
                                if gradient_diagnostics and _rank(distributed) == 0 else None)
                 del ppo_gradients
             if distributed is not None and gradient_diagnostics:
@@ -420,7 +458,10 @@ def actor_update_v2(policy, optimizer, transitions, targets, *, global_manifest=
             with _local_phase(distributed, 'actor_optimizer_step'):
                 optimizer.step()
             post = analytic_kl_local(policy, transitions, global_manifest=global_manifest, distributed=distributed,
-                                      denoising_microbatch=denoising_microbatch, global_indices=indices, tensor_cache=tensor_cache)
+                                      denoising_microbatch=denoising_microbatch, global_indices=indices, tensor_cache=tensor_cache,
+                                      return_cache=kl_cache_sink is not None)
+            if kl_cache_sink is not None:
+                post, kl_cache_sink['cache'] = post
             record = dict(epoch=epoch, optimizer_step=len(reports) + 1, global_upper_indices=indices,
                 internal_transitions=denominator, ppo_loss=float(summary[0]),
                 clip_fraction=float(summary[1] / summary[5]), mean_ratio=float(summary[2] / summary[5]),
@@ -446,6 +487,7 @@ def actor_update_v2(policy, optimizer, transitions, targets, *, global_manifest=
         included_upper_transitions=len(selected), excluded_upper_transitions=len(manifest) - len(selected),
         probability_check=probability, objective_logprob_reduction=objective_logprob_reduction,
         old_statistics_fixed=True, hard_kl_pending=True, rollback_scope='caller_owned_whole_rollout',
+        minibatch_order_contract='owner_balanced_complete_chains.v1' if balanced_minibatches else 'global_shuffle.v1',
         bc_global_samples=sum((item['bc'] or {}).get('batch_size', 0) for item in reports))
 
 

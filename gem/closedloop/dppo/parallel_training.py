@@ -576,6 +576,8 @@ def _update(c, buffer, targets, manifest, index):
 
 def _update_cached(c, buffer, targets, manifest, index):
     rows = buffer.transitions
+    performance = getattr(c, 'stage', {}).get('performance', {})
+    kl_cache = {} if performance.get('reuse_final_kl', False) else None
     full = index == c.initial_iteration+1 or index % c.stage['checks']['full_probability_every'] == 0
     indices, coverage = (None, None) if full else _probability_sentinels(manifest,
         world_size=c.distributed.world_size, chains_per_rank=c.stage['checks']['sentinel_chains_per_rank'])
@@ -620,13 +622,17 @@ def _update_cached(c, buffer, targets, manifest, index):
             denoising_microbatch=c.profile['microbatch'], max_optimizer_steps=c.settings['max_actor_optimizer_steps'],
             soft_kl_limit=c.settings['kl_soft_stop_joint'], objective_logprob_reduction=c.settings['objective_logprob_reduction'],
             generator=c.generators['actor'], gradient_diagnostics=True, tensor_cache=c.tensor_cache,
+            balanced_minibatches=performance.get('balanced_minibatches', False),
+            gradient_module_details=index % performance.get('module_gradient_every', 1) == 0,
+            kl_cache_sink=kl_cache,
             reserve_attempt=lambda: root_call(c.distributed,
                 lambda: c.budget.reserve('update', optimizer_attempts=1)))
         timings[active_phase] = time.perf_counter()-started
         active_phase = 'kl_seconds'
         started = time.perf_counter()
         kl = analytic_kl_local(c.policy, rows, global_manifest=manifest, distributed=c.distributed,
-                               denoising_microbatch=c.profile['microbatch'], tensor_cache=c.tensor_cache)
+                               denoising_microbatch=c.profile['microbatch'], tensor_cache=c.tensor_cache,
+                               reuse_cache=None if kl_cache is None else kl_cache.get('cache'))
         timings[active_phase] = time.perf_counter()-started
         active_phase = None
         check_kl_limits(kl, c.settings)

@@ -73,6 +73,10 @@ stage10:
     optimizer_probe: true
     tensor_cache: true
     tensor_cache_max_bytes: 268435456
+    balanced_minibatches: true
+    reuse_final_kl: true
+    module_gradient_every: 100
+    bc_batch_forward: true
   run_control:
     max_walltime_seconds: 604800
   distributed:

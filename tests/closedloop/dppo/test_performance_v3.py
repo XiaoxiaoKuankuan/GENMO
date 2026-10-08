@@ -16,6 +16,7 @@ from gem.closedloop.dppo.performance import PhaseProfiler, activate, deactivate,
 from gem.closedloop.dppo.policy import DPPODiffusionPolicy
 from gem.closedloop.dppo.tensor_cache import ConditionGraphCache, RolloutTensorCache
 from gem.closedloop.dppo.updater_v2 import _parameters, probability_check_local, analytic_kl_local
+from gem.closedloop.dppo.updater_v2 import balanced_epoch_order
 from tests.closedloop.test_stage1_actor import _activate_branches, _conditions
 from tests.closedloop.test_stage1_actor import actor_factory as actor_factory
 
@@ -163,5 +164,79 @@ def test_fixed_shape_probe_keeps_strict_gate_and_restores_temporary_optimizer(ac
         for name, value in actor.state_dict().items():
             torch.testing.assert_close(value, before[name], rtol=0, atol=0)
         assert policy.execution_batch_size is None
+    finally:
+        torch.set_num_threads(previous_threads)
+
+
+@pytest.mark.parametrize('counts', [[20]*8, [0, 1, 4, 20, 2, 0, 3, 1]])
+def test_balanced_epoch_keeps_all_data_and_rng_restore(counts):
+    manifest = [dict(owner_rank=rank, local_index=i) for rank, count in enumerate(counts) for i in range(count)]
+    generator = torch.Generator().manual_seed(93)
+    state = generator.get_state()
+    order = balanced_epoch_order(list(range(len(manifest))), manifest, generator)
+    assert sorted(order) == list(range(len(manifest)))
+    generator.set_state(state)
+    assert balanced_epoch_order(list(range(len(manifest))), manifest, generator) == order
+    if counts == [20]*8:
+        for start in (0, 80):
+            assert [sum(manifest[i]['owner_rank'] == rank for i in order[start:start+80]) for rank in range(8)] == [10]*8
+
+
+def test_final_kl_reuses_only_unchanged_version_and_matches_authoritative():
+    from tests.closedloop.dppo.test_updater_v2 import BatchGaussianPolicy, rows
+    policy = BatchGaussianPolicy()
+    samples = rows(policy, 4)
+    with torch.no_grad():
+        policy.actor.denoiser.weight.add_(.01)
+    _, cache = analytic_kl_local(policy, samples, global_indices=[1, 3], return_cache=True)
+    calls = []
+    original = policy.transition_parameters
+    def counted(context, state, steps):
+        calls.append(len(state))
+        return original(context, state, steps)
+    policy.transition_parameters = counted
+    actual = analytic_kl_local(policy, samples, reuse_cache=cache)
+    assert sum(calls) == 4 and actual['reused_upper_transitions'] == 2
+    expected = analytic_kl_local(policy, samples)
+    for name in expected:
+        if name not in ('reused_upper_transitions', 'fresh_internal_forwards'):
+            assert actual[name] == expected[name]
+    with torch.no_grad():
+        policy.actor.denoiser.weight.add_(.001)
+    with pytest.raises(ValueError, match='KL cache'):
+        analytic_kl_local(policy, samples, reuse_cache=cache)
+    _, fresh = analytic_kl_local(policy, samples, return_cache=True)
+    samples[0].chain.add_(.1)
+    with pytest.raises(ValueError, match='KL cache'):
+        analytic_kl_local(policy, samples, reuse_cache=fresh)
+
+
+def test_batched_bc_samplewise_loss_and_independent_rng_restore(actor_factory):
+    from tests.closedloop.dppo.test_trainer import _anchor
+    previous_threads = torch.get_num_threads()
+    torch.set_num_threads(1)
+    try:
+        actor, batch = actor_factory(starts=(45,))
+        anchor = _anchor(actor, batch)
+        legacy = copy.deepcopy(anchor.state_dict())
+        anchor.batch_forward = True
+        with pytest.raises(ValueError, match='execution/RNG'):
+            anchor.validate_state_dict(legacy)
+        saved = copy.deepcopy(anchor.state_dict())
+        global_rng = torch.get_rng_state().clone()
+        first = anchor.backward(actor, .1)
+        grads = {name: p.grad.clone() for name, p in actor.named_parameters() if p.grad is not None}
+        assert first['batch_size'] == 2 and first['bc_update_steps'] == 4
+        assert len(first['weighted_gradient_norm_per_microbatch']) == 1
+        assert all(row['auxiliary_warmup_factor'] == pytest.approx(.3) for row in first['warmup_factors'])
+        assert any('static_conf' in name and value.abs().sum() > 0 for name, value in grads.items())
+        assert torch.equal(torch.get_rng_state(), global_rng)
+        anchor.load_state_dict(saved)
+        actor.zero_grad(set_to_none=True)
+        second = anchor.backward(actor, .1)
+        assert first == second
+        for name, p in actor.named_parameters():
+            if name in grads:
+                torch.testing.assert_close(p.grad, grads[name], rtol=0, atol=0)
     finally:
         torch.set_num_threads(previous_threads)
