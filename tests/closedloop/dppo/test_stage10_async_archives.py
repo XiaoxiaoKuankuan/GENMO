@@ -2,17 +2,25 @@
 
 本文件使用临时目录、微型 SQLite journal 与事件同步，不启动实际训练。覆盖普通
 接受轮无需 checkpoint 即可归档、开放 journal 拒绝入队、归档损坏不得删原件、
-原子包/清单两个崩溃窗口的幂等恢复，以及单线程最多四个在途任务和关闭 drain。
+原子包/清单两个崩溃窗口的幂等恢复，以及单调度线程最多四个在途任务和关闭 drain。
+正式v2还检查实际独立进程PID、无CUDA/torchrun环境和写锁FD、进程死亡/超时先回收
+再归还磁盘预留，以及Linux父进程死亡后子进程跟随退出并由测试精确wait回收。
 另检查恢复时接受水位可标记作废、资源消耗保留，以及精确租约结算不能二次退款。
 """
 import tarfile
 import threading
+import ctypes
+import os
+import signal
+import subprocess
+import sys
+import time
 from pathlib import Path
 
 import pytest
 
 from gem.closedloop.dppo import long_run
-from gem.closedloop.dppo.archives import ArchiveWorkerError, BoundedArchiveWorker
+from gem.closedloop.dppo.archives import ArchiveProcessClient, ArchiveWorkerError, BoundedArchiveWorker
 from gem.closedloop.dppo.long_run import LongRunMaintenance
 from gem.closedloop.dppo.run_management import RunManager, _atomic_json, _read_json, file_sha256
 
@@ -192,6 +200,133 @@ def test_worker_failure_surfaces_and_retains_queued_tasks(tmp_path):
         worker.submit(tmp_path / 'third')
     with pytest.raises(ArchiveWorkerError):
         worker.close()
+
+
+def eventually(predicate, timeout=5):
+    deadline = time.monotonic()+timeout
+    while time.monotonic() < deadline:
+        if predicate():
+            return
+        time.sleep(.01)
+    raise AssertionError('Expected archive process state was not reached')
+
+
+def test_real_process_is_single_cpu_worker_with_backpressure_and_no_run_lock(tmp_path, monkeypatch):
+    monkeypatch.setenv('RANK', '5')
+    monkeypatch.setenv('TORCHELASTIC_RUN_ID', 'inherited-training')
+    monkeypatch.setenv('CUDA_VISIBLE_DEVICES', '0,1')
+    with RunManager(tmp_path/'run') as manager:
+        maintenance = LongRunMaintenance(manager, stage())
+        directories = []
+        producer, pid = None, None
+        try:
+            for number in range(1, 6):
+                directory, journal = iteration(manager, number)
+                manager.seal_iteration(directory, number, closed_journals=[journal])
+                directories.append(directory)
+            for directory in directories[:4]:
+                maintenance.enqueue_archive(directory)
+            eventually(lambda: maintenance._archive_process is not None)
+            pid = maintenance._archive_process.pid
+            assert pid != os.getpid()
+            os.kill(pid, signal.SIGSTOP)
+            submitted = threading.Event()
+            producer = threading.Thread(target=lambda: (maintenance.enqueue_archive(directories[4]), submitted.set()))
+            producer.start()
+            assert not submitted.wait(.1) and maintenance._archive_worker.pending_count == 4
+            environment = dict(value.split(b'=', 1) for value in (Path('/proc')/str(pid)/'environ').read_bytes().split(b'\0') if value)
+            assert environment[b'CUDA_VISIBLE_DEVICES'] == b''
+            assert b'RANK' not in environment and b'TORCHELASTIC_RUN_ID' not in environment
+            descriptors = [str(path.resolve()) for path in (Path('/proc')/str(pid)/'fd').iterdir()]
+            assert str(manager.run_dir/'.run.lock') not in descriptors
+            os.kill(pid, signal.SIGCONT)
+            producer.join(5)
+            assert submitted.is_set()
+            maintenance.drain()
+            records = maintenance.drain_archive_timings()['records']
+            assert len(records) == 5
+            assert {row['archive_process_pid'] for row in records} == {pid}
+            assert all(row['execution_backend']=='independent_cpu_process' for row in records)
+            assert manager.disk_guard._reserved_bytes == 0
+            for directory in directories:
+                manifest = _read_json(directory/'archive_manifest.json')
+                assert file_sha256(directory/manifest['archive']) == manifest['archive_sha256']
+                assert not (directory/'fixed_targets.pt').exists()
+        finally:
+            if pid is not None and maintenance._archive_process._process.poll() is None:
+                os.kill(pid, signal.SIGCONT)
+            if producer is not None:
+                producer.join(5)
+            maintenance.close()
+        assert maintenance._archive_process._process.returncode == 0
+
+
+@pytest.mark.parametrize('failure', ['killed', 'timeout'])
+def test_process_failure_reaped_before_reservation_release_and_keeps_originals(tmp_path, monkeypatch, failure):
+    with RunManager(tmp_path/'run') as manager:
+        maintenance = LongRunMaintenance(manager, stage())
+        directory, journal = iteration(manager)
+        manager.seal_iteration(directory, 1, closed_journals=[journal])
+        if failure == 'timeout':
+            monkeypatch.setattr(long_run, 'ArchiveProcessClient', lambda: ArchiveProcessClient(response_timeout_s=.02))
+        maintenance.enqueue_archive(directory)
+        eventually(lambda: maintenance._archive_process is not None)
+        client = maintenance._archive_process
+        if failure == 'killed':
+            os.kill(client.pid, signal.SIGKILL)
+        with pytest.raises(ArchiveWorkerError):
+            maintenance.drain()
+        assert client._process.returncode is not None
+        assert manager.disk_guard._reserved_bytes == 0
+        assert (directory/'fixed_targets.pt').exists() and (directory/'execution_journal.sqlite').exists()
+        assert not (directory/'archive_manifest.json').exists()
+        with pytest.raises(ArchiveWorkerError):
+            maintenance.close()
+
+
+@pytest.mark.skipif(not sys.platform.startswith('linux'), reason='Linux PDEATHSIG/subreaper contract')
+def test_parent_sigkill_stops_and_reaps_real_archive_process(tmp_path):
+    # 临时成为subreaper，精确wait已归属的孙进程，避免容器PID1不回收测试僵尸。
+    libc = ctypes.CDLL(None, use_errno=True)
+    previous = ctypes.c_int()
+    assert libc.prctl(37, ctypes.byref(previous), 0, 0, 0) == 0  # PR_GET_CHILD_SUBREAPER
+    assert libc.prctl(36, 1, 0, 0, 0) == 0  # PR_SET_CHILD_SUBREAPER
+    code = ('from gem.closedloop.dppo.archives import ArchiveProcessClient; import time; '
+            'client=ArchiveProcessClient(); print(client.pid,flush=True); time.sleep(120)')
+    parent = subprocess.Popen([sys.executable, '-c', code], stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                              text=True, env={**os.environ, 'PYTHONDONTWRITEBYTECODE':'1'})
+    pid, reaped = None, False
+    try:
+        pid = int(parent.stdout.readline())
+        assert (Path('/proc')/str(pid)).exists()
+        parent.kill()
+        parent.wait(timeout=5)
+
+        def child_exited():
+            nonlocal reaped
+            found, status = os.waitpid(pid, os.WNOHANG)
+            reaped = found == pid
+            if reaped:
+                assert os.WIFEXITED(status) or os.WIFSIGNALED(status)
+            return reaped
+
+        eventually(child_exited)
+        assert not (Path('/proc')/str(pid)).exists()
+    finally:
+        if parent.poll() is None:
+            parent.kill()
+            parent.wait(timeout=5)
+        if pid is not None and not reaped:
+            try:
+                found, _ = os.waitpid(pid, os.WNOHANG)
+                if found == 0:
+                    os.kill(pid, signal.SIGKILL)
+                    os.waitpid(pid, 0)
+            except ChildProcessError:
+                pass
+        parent.stdout.close()
+        parent.stderr.close()
+        assert libc.prctl(36, previous.value, 0, 0, 0) == 0
 
 
 def limits():

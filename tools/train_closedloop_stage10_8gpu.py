@@ -101,12 +101,13 @@ def main(argv=None):
     if parallel_v2:
         from gem.closedloop.dppo.parallel_training import run_parallel
         code = run_parallel(args, config, collectives, startup[0]['check'])
-        if code:
-            return code
-        dist.barrier()
+        # v2 返回前已经汇总各 rank 的退出状态；KL 拒绝也正常释放通信组。
+        # 失败路径不再增加 barrier，避免把故障退出变为新的同步等待。
+        if not code:
+            dist.barrier()
         dist.destroy_process_group(tensor_group)
         dist.destroy_process_group()
-        return 0
+        return code
     learner = DistributedLearner(collectives, args.output_dir, preflight=startup[0]['check'])
     if rank == 0:
         arguments = ['--config', str(args.config), '--mode', 'train', '--output-dir', str(args.output_dir),

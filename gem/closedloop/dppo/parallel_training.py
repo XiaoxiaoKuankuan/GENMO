@@ -3,7 +3,8 @@
 八个 rank 各自运行 GENMO 采样与独立冻结 GMT/CPU PhysX 后端，每轮各采二十条真实
 上层转移；完整链留在本 rank，统一的样本索引、全局优势和 SUM 梯度连接成同一个
 Actor/Critic 训练任务。Actor 固定学习率由配置指定，默认 5e-9，每轮两个 epoch、
-最多四次 minibatch 更新；旧概率和价值目标不随 minibatch 改写。
+最多四次 minibatch 更新；旧概率和价值目标不随 minibatch 改写。每次 Actor step
+记录 PPO／BC 分解梯度，rank 0 因而会临时保留一份 PPO 梯度快照。
 
 根进程独占预算、日志与完整断点发布，先向每个采集器预占有界额度，再按确认的本地
 持久账本结算。所有副作用仍由 journal 先记录再确认；故障丢弃本轮并交给 torchrun
@@ -446,12 +447,15 @@ def _update(c, buffer, targets, manifest, index):
         bc=None if c.bc is None else c.bc.state_dict())) if c.distributed.rank == 0 else None)
     rng = capture_local_rng(c.generators)
     actor, critic, kl = {}, {}, {}
+    timings = dict(critic_seconds=0., actor_seconds=0., kl_seconds=0.)
+    active_phase = None
     x0_reference = None
     if c.settings.get('x0_diagnostic_every', 0) and index % c.settings['x0_diagnostic_every'] == 0:
         from .optional_diagnostics import capture_x0_reference
         x0_reference = capture_x0_reference(c.policy, rows, global_manifest=manifest, distributed=c.distributed,
             denoising_microbatch=c.profile['microbatch'])
     try:
+        active_phase = 'critic_seconds'
         started = time.perf_counter()
         critic_updater = critic_update_local
         if c.settings.get('critic_update_mode', 'distributed') == 'rank0_broadcast':
@@ -461,7 +465,8 @@ def _update(c, buffer, targets, manifest, index):
             global_manifest=manifest, distributed=c.distributed, steps=c.settings['critic_steps'],
             batch_size=c.settings['critic_batch'], generator=c.generators['critic'],
             grad_clip_norm=c.settings['critic_grad_clip_norm'])
-        critic_seconds = time.perf_counter()-started
+        timings[active_phase] = time.perf_counter()-started
+        active_phase = 'actor_seconds'
         started = time.perf_counter()
         actor = actor_update_v2(c.policy, c.actor_optimizer, rows, targets, global_manifest=manifest,
             distributed=c.distributed, bc=c.bc, bc_weight=c.settings['bc_weight'], clip=c.settings['ppo_clip'],
@@ -469,20 +474,24 @@ def _update(c, buffer, targets, manifest, index):
             ppo_epochs=c.settings['ppo_epochs'], actor_minibatch_internal_transitions=c.settings['actor_minibatch_internal_transitions'],
             denoising_microbatch=c.profile['microbatch'], max_optimizer_steps=c.settings['max_actor_optimizer_steps'],
             soft_kl_limit=c.settings['kl_soft_stop_joint'], objective_logprob_reduction=c.settings['objective_logprob_reduction'],
-            generator=c.generators['actor'], gradient_diagnostics=full,
+            generator=c.generators['actor'], gradient_diagnostics=True,
             reserve_attempt=lambda: root_call(c.distributed,
                 lambda: c.budget.reserve('update', optimizer_attempts=1)))
-        actor_seconds = time.perf_counter()-started
+        timings[active_phase] = time.perf_counter()-started
+        active_phase = 'kl_seconds'
         started = time.perf_counter()
         kl = analytic_kl_local(c.policy, rows, global_manifest=manifest, distributed=c.distributed,
                                denoising_microbatch=c.profile['microbatch'])
-        kl_seconds = time.perf_counter()-started
+        timings[active_phase] = time.perf_counter()-started
+        active_phase = None
         check_kl_limits(kl, c.settings)
         if x0_reference is not None:
             from .optional_diagnostics import x0_change_local
             kl['x0_diagnostic'] = x0_change_local(c.policy, rows, x0_reference,
                 global_manifest=manifest, distributed=c.distributed, denoising_microbatch=c.profile['microbatch'])
     except Exception as failure:
+        if active_phase is not None:
+            timings[active_phase] = time.perf_counter()-started
         error_message = str(failure)
         restored = broadcast_state(backup, c.distributed)
         c.actor.load_state_dict(restored['actor']); c.critic.load_state_dict(restored['critic'])
@@ -494,13 +503,14 @@ def _update(c, buffer, targets, manifest, index):
         c.actor_optimizer.zero_grad(set_to_none=True); c.critic_optimizer.zero_grad(set_to_none=True)
         root_call(c.distributed, lambda: atomic_json(c.session/f'rejected_{index:06d}.json',
             dict(iteration=index, actor=actor, critic=critic, kl=kl, rolled_back=True, error=error_message,
-                 actor_lr=c.settings['actor_lr'], optimizer_attempts_charged=True)))
+                 actor_lr=c.settings['actor_lr'], optimizer_attempts_charged=True,
+                 probability_check=check, timings=timings)))
         raise
     del backup
     communication = (c.distributed.collect_gradient_timings(synchronize=True)
                      if hasattr(c.distributed, 'collect_gradient_timings') else {'scope':'unavailable'})
     return dict(communication=communication, actor=actor, critic=critic, kl=kl, probability_check=check,
-                timings=dict(critic_seconds=critic_seconds, actor_seconds=actor_seconds, kl_seconds=kl_seconds))
+                timings=timings)
 
 
 def run_parallel(args, config, collective, preflight):

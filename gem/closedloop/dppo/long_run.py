@@ -15,7 +15,8 @@ best_saved 指向的本运行已发布完整模型也始终保留，指针路径
 先拒绝本次回收，不能删掉模型后才发现最佳指针已经失效。
 
 新 v2 路径以不可变 seal_manifest 证明本轮接受且全部 journal 已关闭，不再要求
-本轮恰好有 latest checkpoint。单工作线程最多四个在途轮；满队列产生背压，异常
+本轮恰好有 latest checkpoint。单调度线程最多四个在途轮，正式 v2 压缩/校验/发布/
+回收由独立单 CPU 子进程执行，不 fork 已有 CUDA；满队列产生背压，异常
 回传训练主线程，停止前 drain。包、清单和原件回收之间发生崩溃时，恢复重新校验
 已发布归档并幂等补齐，完整模型保存与 latest 发布始终留在同步主线程。
 
@@ -38,7 +39,7 @@ from pathlib import Path
 
 import torch
 
-from .archives import BoundedArchiveWorker
+from .archives import ArchiveProcessClient, BoundedArchiveWorker
 from .checkpoint import VERSION_V2
 from .run_management import _atomic_json, _read_json, _sync_dir, file_sha256
 
@@ -84,6 +85,7 @@ class LongRunMaintenance:
             _atomic_json(path, policy, disk_guard=self.guard)
         self.policy = policy
         self._archive_worker = None
+        self._archive_process = None
         self._closed = False
         self._timing_mutex = threading.RLock()
         self._archive_timings, self._enqueue_timings = [], []
@@ -341,6 +343,57 @@ class LongRunMaintenance:
             original_size_bytes=original_size, archive_size_bytes=result['archive_size_bytes']))
         return result
 
+    def _account_process_archive(self, directory, seal, touched):
+        """只更新本轮文件账本；不扫描其它轮历史，异常进程的临时文件也计入。"""
+        paths = {directory/'execution_evidence.tar.gz', directory/'archive_manifest.json'}
+        paths.update(directory/record['path'] for record in seal['members'])
+        paths.update(Path(path) for path in touched)
+        paths.update(directory.glob('.*.tmp'))
+        # 前台刷新可能在压缩期间记录过临时文件，IPC中断也须移除已消失的账本项。
+        with self.guard._mutex:
+            paths.update(path for path in self.guard._sizes
+                         if path.parent == directory and path.name.startswith('.') and path.name.endswith('.tmp'))
+        for path in paths:
+            if not self.guard._path(path).is_relative_to(directory):
+                raise ValueError('Archive process accounting escapes the sealed iteration')
+            self.guard.account_file(path)
+
+    def _archive_via_process(self, directory):
+        """正式v2异步归档回调：父进程预占额度，子进程处理字节，父进程接收证据。"""
+        started, stages, result, response, failure = time.perf_counter(), {}, None, None, None
+        seal = self._seal(directory)
+        pid = None
+        try:
+            # reservation只在修改计数时持锁，等待子进程期间前台仍可检查/写文件。
+            with self.guard.reservation(sum(row['size_bytes'] for row in seal['members'])+1048576):
+                try:
+                    if self._archive_process is None:
+                        self._archive_process = ArchiveProcessClient()
+                    pid = self._archive_process.pid
+                    response = self._archive_process.archive(directory, run_dir=self.manager.run_dir,
+                                                             min_free_bytes=self.guard.min_free_bytes)
+                    result = response['result']
+                    stages.update(response['stage_seconds'])
+                finally:
+                    # 在归还预留空间前计入已公开文件；进程死亡时也保留临时文件占用。
+                    self._account_process_archive(directory, seal,
+                        [] if response is None else response.get('accounted_paths', []))
+            for record in response['metrics']:
+                self.manager.append_metrics(record)
+            return result
+        except BaseException as error:
+            failure = dict(type=type(error).__name__, message=str(error))
+            if hasattr(error, 'response'):
+                stages.update(error.response.get('stage_seconds', {}))
+            raise
+        finally:
+            record = dict(directory=str(directory), iteration=seal['iteration'],
+                status='passed' if failure is None else 'failed', total_seconds=time.perf_counter()-started,
+                stage_seconds=stages, thread=threading.current_thread().name, error=failure,
+                execution_backend='independent_cpu_process', archive_process_pid=pid)
+            with self._timing_mutex:
+                self._archive_timings.append(record)
+
     def enqueue_archive(self, directory):
         if self._closed:
             raise RuntimeError('Long-run maintenance is closed')
@@ -352,7 +405,8 @@ class LongRunMaintenance:
                 directory = self.guard._path(directory)
                 self._seal(directory)  # 未封存或 journal 未关闭的目录绝不进入后台队列。
             if self._archive_worker is None:
-                self._archive_worker = BoundedArchiveWorker(self.archive_iteration, max_pending=4)
+                self._archive_worker = BoundedArchiveWorker(self._archive_via_process, max_pending=4,
+                                                            on_close=self._close_archive_process)
             with self._archive_stage(stages, 'submit_wall_seconds'):
                 queued = self._archive_worker.submit(directory)
             return queued
@@ -382,11 +436,20 @@ class LongRunMaintenance:
         if self._archive_worker is not None:
             self._archive_worker.drain()
 
+    def _close_archive_process(self):
+        """在创建子进程的调度线程退出前完成EOF/wait，避免PDEATHSIG误杀正常关闭。"""
+        if self._archive_process is not None:
+            self._archive_process.close()
+
     def close(self):
         if not self._closed:
             self._closed = True
-            if self._archive_worker is not None:
-                self._archive_worker.close()
+            try:
+                if self._archive_worker is not None:
+                    self._archive_worker.close()
+            finally:
+                if self._archive_process is not None:
+                    self._archive_process.close()
 
     def prune_checkpoints(self):
         keep_last = self.storage.get('checkpoint_keep_last')

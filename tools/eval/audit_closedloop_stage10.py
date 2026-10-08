@@ -923,6 +923,7 @@ def audit_run(run_dir, *, allow_incomplete=False, minimum_iterations=2, require_
         return result
     identity = run['identity']
     if run['schema']=='genmo.closedloop.stage10.run.v2':
+        result['version'] = 'genmo.closedloop.stage10.audit.v2'
         from tools.eval.audit_closedloop_stage10_v2 import audit_training_v2
         audit.check('parallel_training_recovery_audit', lambda: audit_training_v2(
             root, run, audit, result, minimum_iterations, require_resume))

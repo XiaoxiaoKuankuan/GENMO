@@ -4,6 +4,8 @@
 注入 Critic 后异常、Actor 后异常及最终 KL 超限。检查模型、优化器和随机数确实
 退回整轮起点，而已经持久化的优化尝试数保持不变；不把 helper 的单元通过当作
 真实八卡物理执行验收。所有文件仅位于 pytest tmp_path，不读取正式训练模型。
+普通非周期轮次另外经过真实小型 PPO 更新器，检查每个 step 的 PPO／BC 分解梯度
+都由根调用启用，而不是只在首轮或每一百轮完整概率诊断时才输出。
 """
 from __future__ import annotations
 
@@ -134,4 +136,52 @@ def test_whole_iteration_rollback_preserves_spent_budget(tmp_path, monkeypatch, 
     assert not aopt.state and not copt.state
     assert torch.equal(torch.get_rng_state(), rng)
     assert budget.state_dict()['used']['optimizer_attempts'] == (0 if failure == 'critic' else 1)
-    assert json.loads((tmp_path/'rejected_000001.json').read_text())['rolled_back']
+    rejected = json.loads((tmp_path/'rejected_000001.json').read_text())
+    assert rejected['rolled_back']
+    assert rejected['probability_check'] == dict(passed=True, scope='full_rollout_before_first_step')
+    assert rejected['timings']['critic_seconds'] > 0
+    assert (rejected['timings']['actor_seconds'] > 0) == (failure != 'critic')
+    assert (rejected['timings']['kl_seconds'] > 0) == (failure == 'kl')
+
+
+def test_ordinary_iteration_records_decomposed_gradients_on_every_actor_step(tmp_path):
+    from tests.closedloop.dppo.test_distributed_training import SmallCritic
+    from tests.closedloop.dppo.test_updater_v2 import Anchor, BatchGaussianPolicy, rows
+
+    class SingleRank(Solo):
+        def sum_gradients(self, module):
+            pass
+
+        def sum_tensor(self, value):
+            return value
+
+        def gather_rows(self, values, positions, count):
+            assert sorted(positions) == list(range(count))
+            return values[torch.tensor(positions).argsort()].double()
+
+    config = configuration(Path(__file__).resolve().parents[3]/'configs/closedloop/stage10_8gpu_server1_v2.yaml')
+    config['stage9'].update(actor_minibatch_internal_transitions=4, critic_steps=2)
+    policy, critic, anchor = BatchGaussianPolicy(), SmallCritic(), Anchor()
+    samples = rows(policy)
+    manifest = [dict(owner_rank=0, local_index=index, valid=True, has_free=True) for index in range(len(samples))]
+    budget = TrainingBudget(tmp_path/'budget.json', dict(accepted_iterations=2, optimizer_attempts=8,
+        generations=20, control_steps=100, physics_steps=400))
+    # 使用真实状态接口让主循环也执行根进程不可变快照，而不绕过事务边界。
+    anchor.state_dict = lambda: {'calls':anchor.calls}
+    context = SimpleNamespace(distributed=SingleRank(), initial_iteration=0, stage=config['stage10'],
+        settings=config['stage9'], policy=policy, actor=policy.actor, critic=critic,
+        actor_optimizer=torch.optim.AdamW(policy.actor.parameters(), lr=5e-9, weight_decay=0.),
+        critic_optimizer=torch.optim.AdamW(critic.parameters(), lr=1e-4, weight_decay=0.),
+        bc=anchor, budget=budget, session=tmp_path, profile={'microbatch':3},
+        generators={key:torch.Generator().manual_seed(13) for key in ('actor','critic')})
+    targets = dict(advantages=torch.tensor([1., -.3, .4, -.7]), returns=torch.tensor([1., -.2, .7, 1.3]))
+    report = training._update(context, SimpleNamespace(transitions=samples), targets, manifest, 2)
+    assert report['probability_check']['scope'] == 'rank_sentinel_all_denoising_steps'
+    assert report['actor']['optimizer_steps'] == 4
+    assert report['actor']['bc_global_samples'] == 8
+    for step in report['actor']['steps']:
+        gradients = step['gradient_contributions']
+        assert gradients['all']['ppo_norm'] > 0
+        assert gradients['all']['weighted_bc_norm'] > 0
+        assert gradients['shared']['cosine'] is not None
+    assert budget.state_dict()['used']['optimizer_attempts'] == 4

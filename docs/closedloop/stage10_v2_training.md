@@ -22,7 +22,7 @@ load_actor保留构造时的冻结规则，优化器排除固定编码表。旧S
 
 完整恢复点按外层300、600、900轮同步原子发布；初始化、正常结束、状态一致的受控退出可额外保存。保存共享模型/优化器和8份本地RNG、采样游标及执行计数。latest只指向已发布完整断点。崩溃后未保存尾部写入 superseded_tails；预算账本不回退。
 
-执行证据在所有journal关闭、immutable seal建立后进入单后台归档队列，在途与排队合计最多4轮。压缩逐成员校验并原子发布后才回收原件；失败背压/停止，恢复可幂等补齐。每轮轻量JSONL和TensorBoard不会替代完整执行证据。初始化模型、每300轮模型和最近两份完整断点保留。
+执行证据在所有journal关闭、immutable seal建立后进入单个独立CPU归档进程，线程只负责有界调度，在途与排队合计最多4轮。压缩逐成员校验并原子发布后才回收原件；失败背压/停止，恢复可幂等补齐。每轮轻量JSONL和TensorBoard不会替代完整执行证据。初始化模型、每300轮模型和最近两份完整断点保留。
 
 根进程预占整轮各卡最大执行额度，各卡先持久化实际执行再ACK，正常完成后只退还可证明没有使用的额度。原总预算未扩大；八路160条/轮不保证仍能完成旧额度对应的外层轮数。
 
@@ -32,7 +32,7 @@ load_actor保留构造时的冻结规则，优化器排除固定编码表。旧S
 
 初始化、每100轮和正常结束使用独立评估状态，四来源各4条固定验证样本、42/1729两种子、每条10秒，共32任务，评估不额外保存模型。使用内存权重，恢复训练RNG和游标。最佳观测与最佳已保存模型分别记录；物理失败不增加、平均时长不下降后才比较四来源等权回报。
 
-固定初始链漂移用于诊断相对Stage1概率变化，不能替代闭环配对评估。训练曲线同时看reward/执行秒、分项奖励、真实执行时长、失败/拒绝、KL、clip、真实Actor步数、PPO/BC梯度、裁剪系数及Critic新批误差，不能仅凭loss平稳认定学到或退化。周期子集比较必须显式 `--mode periodic_subset`，不冒称全验证集验收。
+固定初始链漂移用于诊断相对Stage1概率变化，不能替代闭环配对评估。训练曲线同时看reward/执行秒、分项奖励、真实执行时长、失败/拒绝、KL、clip、真实Actor步数、PPO/BC梯度、裁剪系数及Critic新批误差，不能仅凭loss平稳认定学到或退化。每次Actor step都记录PPO/加权BC/合并梯度范数及夹角，代价是rank0临时保留一份PPO梯度快照，不随完整概率检查频率关闭。周期子集比较必须显式 `--mode periodic_subset`，不冒称全验证集验收。
 
 并行GMT的 `asset_conversion_dir` 由入口分配到各rank私有目录，避免固定环境种子导致IsaacLab默认秒级USD目录碰撞。路径不参与实际物理指纹；不更换URDF或转换选项。通信耗时明确为梯度SUM的CUDA stream event时间，不冒称全部Gloo/RPC通信；异步归档仅由训练主线程写入TensorBoard。
 
@@ -44,10 +44,35 @@ source /home/user/liwei/GENMO/.venv/bin/activate
 bash scripts/train_stage10_8gpu_server1.sh --output-dir /data1/user/liwei/GENMO_outputs/closedloop_stage10/新运行目录 --stop-after-iteration 1
 bash scripts/train_stage10_8gpu_server1.sh --output-dir /data1/user/liwei/GENMO_outputs/closedloop_stage10/同一运行目录 --stop-after-iteration 2 --resume latest
 python -B tools/eval/audit_closedloop_stage10.py --help
-python -B tools/eval/compare_closedloop_stage10.py --mode periodic_subset --initial-report 初始评估.json --final-report 后续评估.json --output 新对照报告.json
+TASK_RUN=/data1/user/liwei/GENMO_outputs/closedloop_stage10/同一运行目录
+TASK_SESSION=替换为实际会话ID
+python -B tools/eval/compare_closedloop_stage10.py --mode periodic_subset \
+  --initial-report "$TASK_RUN/evaluation_baseline.json" \
+  --final-report "$TASK_RUN/sessions/$TASK_SESSION/evaluations/000100.json" \
+  --output "$TASK_RUN/periodic_000100_comparison.json"
 ```
 
-完整val评估入口继续保留，并支持v2权重的显式只读加载，不恢复训练优化器/RNG：
+初始化汇总固定在运行根目录的 `evaluation_baseline.json`；周期汇总位于本次会话的
+`sessions/<session_id>/evaluations/000100.json`、`000200.json` 等文件。正常结束的
+额外评估可能使用 `final_000301.json` 这样的名称，以实际文件为准。比较时选择当前
+有效训练分支的报告，不能使用已在 `superseded_tails` 中作废的历史尾部报告。
+
+在已激活环境的服务器1终端启动 TensorBoard，日志目录是同一运行根目录下的
+`tensorboard`，横轴使用外层训练轮次：
+
+```bash
+tensorboard --logdir "$TASK_RUN/tensorboard" --host 127.0.0.1 --port 6006
+```
+
+需要从本地浏览器查看时，在本地终端建立端口转发，再打开 `http://127.0.0.1:6006`：
+
+```bash
+ssh -N -p 50030 -L 6006:127.0.0.1:6006 user@112.65.216.193
+```
+
+完整val评估入口继续保留，并支持v2权重的显式只读加载，不恢复训练优化器/RNG。
+下列 `--eval-count all` 覆盖完整验证样本池及配置中的两种子，但当前v2配置仍按每条
+音乐的前10秒窗口评估；它不等于评估每条音乐的全部时长：
 
 ```bash
 CUDA_VISIBLE_DEVICES=0 python -B tools/train_closedloop_stage10.py --config configs/closedloop/stage10_8gpu_server1_v2.yaml --mode eval --checkpoint 完整模型.pt --eval-count all --output-dir 独立完整验证目录

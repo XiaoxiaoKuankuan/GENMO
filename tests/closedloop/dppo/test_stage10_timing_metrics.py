@@ -143,12 +143,12 @@ def test_archive_thread_and_consumer_drain_never_lose_or_duplicate_records(tmp_p
     with RunManager(tmp_path/'run') as manager:
         maintenance = LongRunMaintenance(manager, stage())
         started, release, stop, consumed = (threading.Event() for _ in range(4))
-        actual = maintenance._archive_iteration
-        def blocked(directory, timings):
+        actual = maintenance._archive_via_process
+        def blocked(directory):
             started.set()
             assert release.wait(5)
-            return actual(directory, timings)
-        monkeypatch.setattr(maintenance, '_archive_iteration', blocked)
+            return actual(directory)
+        monkeypatch.setattr(maintenance, '_archive_via_process', blocked)
         snapshots = []
         consumer = None
         try:

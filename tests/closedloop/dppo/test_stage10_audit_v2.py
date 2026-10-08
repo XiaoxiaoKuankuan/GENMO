@@ -226,6 +226,18 @@ def test_v2_eight_rank_multistep_sparse_checkpoint_and_sealed_archives(lifecycle
     assert before=={str(path.relative_to(life.root)):sha256(path) for path in life.root.rglob('*') if path.is_file()}
 
 
+def test_v2_failure_before_first_accept_keeps_its_audit_version(lifecycle):
+    life = lifecycle.start()
+    life.finish(failed=True)
+    assert not (life.root/'accepted.json').exists()
+    result = audit_run(life.root)
+    assert result['status']=='failed'
+    assert result['version']=='genmo.closedloop.stage10.audit.v2'
+    failure = next(row for row in result['checks'] if row['name']=='parallel_training_recovery_audit')
+    assert failure['status']=='failed' and 'accepted.json' in failure['error']
+    assert result['minimum_iterations']==2 and result['require_resume'] is True
+
+
 def test_v2_resume_supersedes_unsaved_tail_without_refunding_resources(lifecycle):
     life = lifecycle.start()
     life.accept(archive=True)
