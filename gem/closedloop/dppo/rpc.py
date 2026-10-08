@@ -10,7 +10,7 @@ from __future__ import annotations
 import time
 
 from gem.runtime.closedloop_protocol import RemoteError, RpcClient
-from .performance import measure, profiled
+from .performance import measure, profiled, record_cpu
 
 
 class AcknowledgedBackend:
@@ -34,7 +34,7 @@ class AcknowledgedBackend:
     @profiled('rpc.transport_including_remote_execution')
     def _transport(self, method, **payload):
         try:
-            return self.client.call(method, **payload)
+            return self._client_call(method, **payload)
         except (OSError, EOFError):
             if self.socket_path is None:
                 raise
@@ -44,7 +44,15 @@ class AcknowledgedBackend:
             if hello.get('backend_session_id') != self.session_id:
                 raise RuntimeError('Worker session changed during uncertain execution') from None
             # 传输层sequence重新开始，业务mutation_seq保持不变。
+            return self._client_call(method, **payload)
+
+    def _client_call(self, method, **payload):
+        try:
             return self.client.call(method, **payload)
+        finally:
+            for name, seconds in getattr(self.client, 'last_call_timing', {}).items():
+                if name.endswith('_seconds'):
+                    record_cpu('rpc.protocol.'+name, seconds)
 
     def call(self, method, **payload):
         if method not in self.MUTATIONS:

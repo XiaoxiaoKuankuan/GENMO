@@ -259,7 +259,7 @@ def validate_resume_budget(saved, live):
     return validate_budget_progress(saved, live)
 
 
-def collect_rollout(env, sampler, count, writer, *, check_disk=None, value_snapshot=None):
+def collect_rollout(env, sampler, count, writer, *, check_disk=None, value_snapshot=None, batch_value_snapshot=None):
     """完整train池采集；仅自然终止、行政窗口及整批边界截断，不含首三曲特例。"""
     buffer = RolloutBuffer(count)
     tasks, sources = [], {}
@@ -287,7 +287,8 @@ def collect_rollout(env, sampler, count, writer, *, check_disk=None, value_snaps
             if value_snapshot is not None:
                 value_snapshot(transition)
             buffer.append(transition)
-            writer.append(buffer.transitions[-1])
+            if batch_value_snapshot is None:
+                writer.append(buffer.transitions[-1])
             sampler.record_execution(task, transition.executed_control_steps)
             source = sample['dataset']
             item = sources.setdefault(source, dict(transitions=0, control_steps=0))
@@ -297,6 +298,10 @@ def collect_rollout(env, sampler, count, writer, *, check_disk=None, value_snaps
                   f'm={transition.executed_control_steps} start={task["music_start_frame"]}', flush=True)
             if transition.terminated or transition.truncated:
                 break
+    if batch_value_snapshot is not None:
+        batch_value_snapshot(buffer.transitions)
+        for row in buffer.transitions:
+            writer.append(row)
     manifest = writer.finish()
     return buffer, dict(full_train_pool=True, transition_count=len(buffer),
         control_steps=sum(t.executed_control_steps for t in buffer.transitions), source_counts=sources,

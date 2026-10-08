@@ -19,7 +19,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import torch
 import yaml
 
-from gem.closedloop.dppo.execution_profile import probe_profiles, select_profile
+from gem.closedloop.dppo.execution_profile import probe_profiles, select_profile, compare_learning_execution
 from gem.closedloop.dppo.policy import DPPODiffusionPolicy
 from gem.closedloop.dppo.run_management import file_sha256
 from gem.closedloop.dppo.trainer import load_actor
@@ -56,7 +56,12 @@ def main():
         selected = select_profile([candidate])
     except RuntimeError as error:
         selected = dict(blocked=str(error))
-    report = dict(schema='genmo.stage10.real_actor_execution_probe.v1', device=args.device,
+    learning = None
+    if 'blocked' not in selected:
+        policy.execution_batch_size = selected.get('execution_batch_size')
+        policy.cfg_batch = selected['cfg_batch']
+        learning = compare_learning_execution(policy, context, microbatch=selected['microbatch'], actor_lr=settings['actor_lr'])
+    report = dict(learning_comparison=learning, schema='genmo.stage10.real_actor_execution_probe.v1', device=args.device,
         source_checkpoint_sha256=file_sha256(config['paths']['checkpoint']),
         context_raw_sha256=file_sha256(args.context_raw), source_model=source,
         baseline=baseline, candidate=candidate, selected=selected,

@@ -1,6 +1,6 @@
 """真实 Actor 的计算微批与 CFG 执行方式预检。
 
-预检不更新权重，不放宽已有概率阈值。使用固定条件、同一显式随机种子分别生成
+预检不留下权重更新，不放宽已有概率阈值。可选临时Adam诊断会精确恢复原状态。使用固定条件、同一显式随机种子分别生成
 标量参考链与候选执行链，验证候选在自己采集的数据上复算概率，也在同一参考链上
 检查 CFG 合批的数值变化。每个候选再做一次有梯度的微批前向反传检查显存与有限性。
 所有 rank 的报告汇总后选择共同通过的配置，选择结果进入完整 checkpoint，恢复时
@@ -152,7 +152,6 @@ def probe_profiles(policy, context, *, maximum_microbatch=4, seed=12345, reserve
                             finite=bool(torch.isfinite(updated).all()), scope='temporary_adam_first_step_negative_logprob_restored')
                         report['passed'] = report['passed'] and report['optimizer_probe']['finite']
                         del optimizer
-                        actor.load_state_dict(saved_weights)
                 except torch.cuda.OutOfMemoryError as error:
                     report['error'] = f'CUDA memory: {error}'
                     actor.zero_grad(set_to_none=True)
@@ -194,3 +193,77 @@ def select_profile(reports_by_rank, required=None):
                 result.update(execution_batch_size=shape, execution_contract='fixed_shape_step_lane_single_condition_fp32.v1')
             return result
     raise RuntimeError('No common microbatch/CFG profile passes unchanged probability gates')
+
+
+def compare_learning_execution(policy, context, *, microbatch=4, actor_lr=5e-9):
+    """独立诊断同一新核下标量重算与设备/梯度缓存的所有模块及一次Adam结果。"""
+    from collections import defaultdict
+    from types import SimpleNamespace
+    from .parallel_support import cpu_snapshot
+    from .tensor_cache import RolloutTensorCache, ConditionGraphCache
+    from .updater_v2 import _parameters
+    actor = policy.actor
+    saved = cpu_snapshot(actor.state_dict())
+    gradients_before = {name: p.grad for name, p in actor.named_parameters()}
+    was_training = actor.training
+    device = next(actor.parameters()).device
+    actor.eval()
+    trace = policy.sample_rollout(context, generator=torch.Generator(device=device).manual_seed(8173))
+    row = SimpleNamespace(context=trace['conditions'], chain=trace['chain'][0],
+        old_log_prob=trace['old_log_probs'][0], free_mask=trace['free_mask'][0],
+        next_context=None, transition_valid=True, identity=dict(policy_version=0),
+        metadata=dict(sampler_trace=trace, remaining_music_seconds=10., next_remaining_music_seconds=0.))
+    results = []
+    try:
+        for size, cached in ((1, False), (microbatch, True)):
+            actor.load_state_dict(saved); actor.zero_grad(set_to_none=True)
+            tensor_cache = RolloutTensorCache([row], dict(advantages=torch.ones(1), returns=torch.ones(1)), device) if cached else None
+            graph = ConditionGraphCache(policy, tensor_cache) if cached else None
+            probabilities = []
+            try:
+                for start in range(0, policy.steps, size):
+                    steps = list(range(start, min(start+size, policy.steps)))
+                    parameters, mask = _parameters(policy, [row]*len(steps), steps, device, cache=tensor_cache,
+                                                   conditions=graph)
+                    observed = torch.stack([row.chain[step+1] for step in steps])
+                    values = masked_joint_log_prob(observed, parameters['mean'], parameters['std'], mask)
+                    (-values.sum()/policy.steps).backward()
+                    probabilities.append(values.detach())
+                if graph is not None:
+                    graph.backward()
+                gradients = {name: p.grad.detach().cpu().clone() for name, p in actor.named_parameters() if p.grad is not None}
+                optimizer = torch.optim.AdamW([p for p in actor.parameters() if p.requires_grad], lr=actor_lr, weight_decay=0.)
+                norm = torch.nn.utils.clip_grad_norm_(actor.parameters(), 1., error_if_nonfinite=True)
+                optimizer.step()
+                results.append(dict(gradients=gradients, weights=cpu_snapshot(actor.state_dict()),
+                    optimizer=cpu_snapshot(optimizer.state_dict()), probability=torch.cat(probabilities).cpu(), norm=float(norm)))
+                del optimizer
+            finally:
+                if tensor_cache is not None:
+                    tensor_cache.close()
+        scalar, batch = results
+        groups = defaultdict(lambda: dict(reference_squared=0., difference_squared=0., max_abs=0., parameters=0))
+        if scalar['gradients'].keys() != batch['gradients'].keys():
+            raise ValueError('Batched gradient cache changed trainable gradient presence')
+        for name, reference in scalar['gradients'].items():
+            difference = batch['gradients'][name].double()-reference.double()
+            group = groups[name.split('.')[0]]
+            group['parameters'] += reference.numel()
+            group['reference_squared'] += float(reference.double().square().sum())
+            group['difference_squared'] += float(difference.square().sum())
+            group['max_abs'] = max(group['max_abs'], float(difference.abs().max()))
+        for group in groups.values():
+            group['relative_l2'] = math.sqrt(group['difference_squared']/max(group['reference_squared'], 1e-300))
+        optimizer_error = max(float((item.double()-batch['optimizer']['state'][index][key].double()).abs().max())
+            for index, state in scalar['optimizer']['state'].items() for key, item in state.items() if torch.is_tensor(item))
+        return dict(scope='same_fixed_shape_kernel_scalar_vs_cached_all_steps_temporary_adam',
+            denoising_steps=policy.steps, learning_rate=actor_lr, modules=dict(groups),
+            scalar_loss=float(-scalar['probability'].mean()), cached_loss=float(-batch['probability'].mean()),
+            max_logprob_difference=float((scalar['probability']-batch['probability']).abs().max()),
+            scalar_gradient_norm=scalar['norm'], cached_gradient_norm=batch['norm'],
+            max_parameter_difference=max(float((value.double()-batch['weights'][name].double()).abs().max()) for name, value in scalar['weights'].items()),
+            max_optimizer_state_difference=optimizer_error)
+    finally:
+        actor.load_state_dict(saved); actor.train(was_training)
+        for name, parameter in actor.named_parameters():
+            parameter.grad = gradients_before[name]

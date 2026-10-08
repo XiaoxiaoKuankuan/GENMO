@@ -31,6 +31,7 @@ import torch
 
 from gem.robots.bumi.metrics import _derive_motion_beats, _beat_alignment
 from gem.closedloop.contracts import GMT_EXPECTED_JOINT_ORDER
+from .performance import profiled
 
 
 TRACKING_OBJECTIVE = "gmt.motion_tracking.v1"
@@ -133,10 +134,19 @@ class ExecutionReward:
         self.music = self._music_array(music_features)
         self.music_start_tick = int(music_start_tick)
         self.target_activity = target_activity
+        self._cache_music_beats()
         self.activity_steps = int(round(self.config["activity"]["window_s"] / self.config["dt"]))
         self.beat_steps = int(round(self.config["music"]["beat_window_s"] / self.config["dt"]))
         self.window = deque(maxlen=max(self.activity_steps, self.beat_steps))
         self._last_tick = self._episode = self._previous_target = None
+
+    def _cache_music_beats(self):
+        """每次绑定音乐或起点后计算一次，保持原30Hz到50Hz的round映射。"""
+        cfg = self.config['music']
+        source = (np.empty(0, dtype=np.int64) if self.music is None else
+                  np.flatnonzero(self.music[:, cfg['beat_column']] > cfg['beat_threshold']))
+        self._beat_ticks = self.music_start_tick + np.rint(source * 20 / 12).astype(np.int64) * 12
+        self._beat_ticks.setflags(write=False)
 
     def seed_previous_target(self, target):
         """奖励开始前承接预热最后一个实际PD目标，不把预热加入音乐活动窗。"""
@@ -220,6 +230,7 @@ class ExecutionReward:
             self.music_start_tick = int(music_start_tick)
         # 换 episode 后不允许无意沿用上一首配对动作监督。
         self.target_activity = target_activity
+        self._cache_music_beats()
         self.window.clear()
         self._last_tick = self._episode = self._previous_target = None
 
@@ -277,13 +288,9 @@ class ExecutionReward:
             raw["beat_reason"] = "insufficient_causal_history"
         else:
             ticks = np.asarray([row[0] for row in rows])
-            idx = (ticks - self.music_start_tick) // 20
             if not ((ticks >= self.music_start_tick) & (ticks <= self.music_start_tick + len(self.music) * 20)).all():
                 raise ValueError("music outside paired task")
-            cfg = self.config["music"]
-            beat_source = np.flatnonzero(self.music[:, cfg["beat_column"]] > cfg["beat_threshold"])
-            beat_ticks = self.music_start_tick + np.rint(beat_source * 20 / 12).astype(np.int64) * 12
-            music_beats = torch.from_numpy(np.isin(ticks, beat_ticks))[None]
+            music_beats = torch.from_numpy(np.isin(ticks, self._beat_ticks))[None]
             speeds = np.stack([np.abs(row[2]) for row in rows])
             valid = torch.ones((1, len(rows)), dtype=torch.bool)
             motion_beats = _derive_motion_beats(torch.from_numpy(speeds)[None], valid)
@@ -559,6 +566,7 @@ class ExecutionReward:
             "samples": details, "mean_w": float(np.mean([item["mean_w"] for item in details])),
             "mean_sum_w": float(np.mean([item["sum_w"] for item in details])), "max_w": max(item["max_w"] for item in details), "reward_weight": 0.}
 
+    @profiled('collection.reward')
     def evaluate_step(self, trace):
         tick = trace.get("tick")
         if isinstance(tick, bool) or not isinstance(tick, (int, np.integer)) or tick % 12:

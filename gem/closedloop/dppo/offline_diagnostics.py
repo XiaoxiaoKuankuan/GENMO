@@ -20,6 +20,7 @@ from pathlib import Path
 import torch
 
 from .buffer import UpperTransition
+from .rollout_storage import load_rollout_record
 from .position_repair import file_sha256
 from .policy import masked_joint_log_prob
 from .updater_v2 import _parameters, critic_update_local
@@ -43,7 +44,7 @@ def load_immutable_rollouts(manifests, target_paths, *, max_chains=8):
     for manifest_path, target_path in zip(manifests, target_paths):
         manifest_path, target_path = Path(manifest_path).resolve(strict=True), Path(target_path).resolve(strict=True)
         manifest = json.loads(manifest_path.read_text())
-        if manifest.get('schema') != 'genmo.closedloop.stage10.rollout.v1' or manifest.get('complete') is not True:
+        if manifest.get('schema') not in ('genmo.closedloop.stage10.rollout.v1', 'genmo.closedloop.stage10.rollout.v2') or manifest.get('complete') is not True:
             raise ValueError('Diagnostic rollout must have a complete publication')
         versions.add(manifest['policy_version'])
         fixed = torch.load(target_path, map_location='cpu', weights_only=False)
@@ -55,12 +56,13 @@ def load_immutable_rollouts(manifests, target_paths, *, max_chains=8):
         references.extend([dict(path=str(manifest_path), sha256=file_sha256(manifest_path)),
                            dict(path=str(target_path), sha256=file_sha256(target_path))])
         local_index = 0
+        block_cache = {}
         for reference in manifest['chunks']:
             chunk_path = _inside(manifest_path.parent, reference['path'])
             if file_sha256(chunk_path) != reference['sha256']:
                 raise ValueError('Diagnostic rollout chunk SHA mismatch')
             chunk = json.loads(chunk_path.read_text())
-            if (chunk.get('schema') != 'genmo.closedloop.stage10.rollout_chunk.v1'
+            if (chunk.get('schema') not in ('genmo.closedloop.stage10.rollout_chunk.v1', 'genmo.closedloop.stage10.rollout_chunk.v2')
                     or chunk.get('policy_version') != manifest['policy_version']
                     or len(chunk['records']) != chunk['record_count'] or chunk['record_count'] != reference['record_count']):
                 raise ValueError('Diagnostic rollout chunk identity/count mismatch')
@@ -70,7 +72,7 @@ def load_immutable_rollouts(manifests, target_paths, *, max_chains=8):
                     path = _inside(manifest_path.parent, str(chunk_path.parent.relative_to(manifest_path.parent) / record['path']))
                     if path.stat().st_size != record['size_bytes'] or file_sha256(path) != record['sha256']:
                         raise ValueError('Diagnostic transition size/SHA mismatch')
-                    row = torch.load(path, map_location='cpu', weights_only=False, mmap=True)
+                    row = load_rollout_record(path, record, rank_directory=manifest_path.parent.parent, cache=block_cache)
                     if not isinstance(row, UpperTransition):
                         raise TypeError('Diagnostic input must contain original UpperTransition objects')
                     row.validate()

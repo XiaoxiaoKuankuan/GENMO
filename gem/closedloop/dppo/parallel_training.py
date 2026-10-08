@@ -458,7 +458,7 @@ def _record_iteration_walltime(c, index, started, *, core_seconds, periodic_eval
         scope='outer_loop_through_seal_checkpoint_archive_enqueue_and_periodic_evaluation_excludes_final_evaluation_and_shutdown')
     def publish():
         c.manager.append_metrics(dict(event='iteration_walltime', **timing))
-        log_metrics(c.writer, c.output/'curves.jsonl', index, timing, prefix='iteration_walltime')
+        log_metrics(c.writer, c.output/'curves.jsonl', index, timing, prefix='iteration_walltime', durable=False)
     root_call(c.distributed, publish)
     return timing
 
@@ -485,14 +485,19 @@ def _collect(c, index):
     c.backend.journal = c.journal
     c.env.output, c.env.budget = path, budget
     path.joinpath('raw_samples').mkdir()
-    writer = RolloutWriter(path/'rollout', policy_version=c.state['policy_version'],
+    from .rollout_storage import BlockRolloutWriter
+    writer_type = BlockRolloutWriter if c.stage.get('performance', {}).get('block_rollout', False) else RolloutWriter
+    writer = writer_type(path/'rollout', policy_version=c.state['policy_version'],
                           chunk_size=c.stage['storage']['rollout_chunk_size'], disk_guard=c.guard)
     started = time.perf_counter()
     def perform():
         local_started = time.perf_counter()
-        result, local_report = collect_rollout(c.env, c.sampler, count, writer, check_disk=c.guard.check,
-            value_snapshot=lambda row: populate_values([row], c.critic, c.distributed.device,
-                                                       critic_version=c.state['critic_updates']))
+        batch_size = c.stage.get('performance', {}).get('value_snapshot_batch_size', 1)
+        arguments = (dict(batch_value_snapshot=lambda rows: populate_values(rows, c.critic, c.distributed.device,
+                         critic_version=c.state['critic_updates'], batch_size=batch_size)) if batch_size > 1 else
+                     dict(value_snapshot=lambda row: populate_values([row], c.critic, c.distributed.device,
+                         critic_version=c.state['critic_updates'])))
+        result, local_report = collect_rollout(c.env, c.sampler, count, writer, check_disk=c.guard.check, **arguments)
         local_report['local_compute_seconds'] = time.perf_counter()-local_started
         return result, local_report
     buffer, report = local_call(c.distributed, perform)
@@ -505,7 +510,10 @@ def _collect(c, index):
     report['generation_timing_totals'] = {}
     report['actor_phase_totals'] = {}
     report['reward_component_sums'] = {}
+    report['backend_cpu_totals'] = {}
     for row in buffer.transitions:
+        for key, value in row.metadata.get('backend_cpu_totals', {}).items():
+            report['backend_cpu_totals'][key] = report['backend_cpu_totals'].get(key, 0.) + value
         for key, value in row.metadata.get('timing', {}).items():
             if isinstance(value, (int, float)):
                 report['generation_timing_totals'][key] = report['generation_timing_totals'].get(key, 0.) + value
@@ -682,7 +690,7 @@ def run_parallel(args, config, collective, preflight):
         def initialize():
             c.manager = RunManager(c.output, resume=bool(args.resume),
                 min_free_bytes=c.stage['storage']['min_free_bytes'], max_run_bytes=c.stage['storage']['max_run_bytes'])
-            c.budget = c.manager.budget(c.stage['limits'])
+            c.budget = c.manager.budget(c.stage['limits'], incremental=c.stage.get('performance', {}).get('incremental_budget', False))
             c.maintenance = LongRunMaintenance(c.manager, c.stage)
             return dict(session_id=c.manager.session_id, run_id=c.manager.run_id)
         run = root_call(collective, initialize)
@@ -793,7 +801,7 @@ def run_parallel(args, config, collective, preflight):
             _write_checkpoint(c, reason='initial')
         if collective.rank == 0:
             from torch.utils.tensorboard import SummaryWriter
-            c.writer = SummaryWriter(str(c.output/'tensorboard'))
+            c.writer = SummaryWriter(str(c.output/'tensorboard'), max_queue=256, flush_secs=30)
         baseline_path = c.output/'evaluation_baseline.json'
         if not baseline_path.exists():
             baseline = _evaluate_and_record(c, report, 'initial')
@@ -815,7 +823,7 @@ def run_parallel(args, config, collective, preflight):
                                    collection_credit(decisions, evaluation['episode_seconds'], latency)):
                         for key, value in credit.items():
                             required[key] += value
-                state = c.budget.state_dict()
+                state = c.budget.summary()
                 for key, value in required.items():
                     left = state['limits'][key]-state['used'][key]
                     if left < value:
@@ -833,8 +841,12 @@ def run_parallel(args, config, collective, preflight):
                 c.performance_token = None
                 break
             index = c.state['iteration'] + 1
+            if index % c.stage.get('performance', {}).get('asset_full_check_every', 100) == 0:
+                from .asset_cache import ASSET_BYTES
+                ASSET_BYTES.clear()
             with measure('iteration.disk_preflight'):
-                root_call(collective, lambda: c.manager.check_disk(c.stage['storage']['checkpoint_reserve_bytes'], refresh=True))
+                root_call(collective, lambda: c.manager.check_disk(c.stage['storage']['checkpoint_reserve_bytes'],
+                    refresh=(index == c.initial_iteration+1 or index % c.stage.get('performance', {}).get('disk_full_scan_every', 1) == 0)))
             torch.cuda.reset_peak_memory_stats(collective.device)
             start = time.perf_counter()
             buffer, targets, manifest, directory, path, collection = _collect(c, index)
@@ -843,9 +855,11 @@ def run_parallel(args, config, collective, preflight):
                 allocated_bytes=torch.cuda.memory_allocated(collective.device),
                 reserved_bytes=torch.cuda.memory_reserved(collective.device),
                 peak_allocated_bytes=torch.cuda.max_memory_allocated(collective.device))))}
-            gmt = local_call(collective, lambda: c.backend.call('verify_frozen'))
+            with measure('verification.gmt_frozen'):
+                gmt = local_call(collective, lambda: c.backend.call('verify_frozen'))
             local_call(collective, lambda: legacy._assert_frozen(gmt))
-            sources_ok = root_call(collective, lambda: verify_source_provenance(provenance)['unchanged'])
+            with measure('verification.source_sha'):
+                sources_ok = root_call(collective, lambda: verify_source_provenance(provenance)['unchanged'])
             if not sources_ok:
                 raise RuntimeError('Training source changed during the run')
             replica = _synchronize_models(c, full=index % c.stage['checks']['full_fingerprint_every'] == 0)
@@ -857,7 +871,7 @@ def run_parallel(args, config, collective, preflight):
             buffer.clear()
             c.journal.close()
             closed = collective.all_gather_object(str(c.journal.path))
-            budget = root_call(collective, lambda: (c.budget.accept_iteration(), c.budget.state_dict())[1])
+            budget = root_call(collective, lambda: (c.budget.accept_iteration(identity=f'{c.session.name}/iteration{index}'), c.budget.summary())[1])
             c.state.update(iteration=index, policy_version=c.state['policy_version']+1,
                 actor_updates=c.state['actor_updates']+update['actor']['optimizer_steps'],
                 critic_updates=c.state['critic_updates']+update['critic']['optimizer_steps'],
@@ -883,12 +897,13 @@ def run_parallel(args, config, collective, preflight):
                 curves['denoising_steps'] = {f'step{i}': row for i, row in enumerate(update['kl']['per_denoising_step'])}
                 curves['collectors'] = {f'rank{i}': dict(row, wait_after_collection_seconds=
                     row['synchronization_wait_seconds']) for i, row in enumerate(summaries)}
-                log_metrics(c.writer, c.output/'curves.jsonl', index, curves)
+                log_metrics(c.writer, c.output/'curves.jsonl', index, curves, durable=False)
                 return True
             root_call(collective, seal)
             if checkpoint_due(index, c.stage['storage']['checkpoint_every_iterations'], normal_end=index == args.stop_after_iteration):
                 _write_checkpoint(c, reason='periodic' if index % c.stage['storage']['checkpoint_every_iterations'] == 0 else 'normal_end')
-            root_call(collective, lambda: c.maintenance.enqueue_archive(directory))
+            with measure('storage.archive_enqueue'):
+                root_call(collective, lambda: c.maintenance.enqueue_archive(directory))
             root_call(collective, lambda: _flush_archive_metrics(c))
             periodic_evaluation = index % c.stage['evaluation']['every_iterations'] == 0
             if periodic_evaluation:

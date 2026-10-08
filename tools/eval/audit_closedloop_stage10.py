@@ -51,6 +51,7 @@ if __package__ in (None, ''):
     sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from gem.closedloop.dppo.evaluation import aggregate_evaluation
+from gem.closedloop.dppo.rollout_storage import load_rollout_record
 from gem.closedloop.dppo.run_management import TrainingBudget, validate_budget_progress
 
 VERSION = 'genmo.closedloop.stage10.audit.v1'
@@ -231,21 +232,23 @@ def audit_rollout(root, summary, data_lookup, contract, seen_paths):
     path = resolve(root, summary['rollout_manifest'])
     manifest = read_json(path)
     before = summary['policy_version_before']
-    require(manifest.get('schema')=='genmo.closedloop.stage10.rollout.v1' and manifest.get('complete') is True, 'Rollout has no complete publication')
+    require(manifest.get('schema') in ('genmo.closedloop.stage10.rollout.v1', 'genmo.closedloop.stage10.rollout.v2') and manifest.get('complete') is True, 'Rollout has no complete publication')
     require(manifest['policy_version']==before, 'Rollout policy version differs from iteration')
     rows, controls, physics, sources = [], 0, 0, Counter()
+    block_cache = {}
     for chunk_reference in manifest['chunks']:
         chunk_path = resolve(root, chunk_reference['path'], path.parent)
         require(sha256(chunk_path)==chunk_reference['sha256'], 'Chunk manifest SHA mismatch')
         chunk = read_json(chunk_path)
-        require(chunk.get('schema')=='genmo.closedloop.stage10.rollout_chunk.v1' and chunk['policy_version']==before, 'Chunk schema or policy version differs')
+        require(chunk.get('schema') in ('genmo.closedloop.stage10.rollout_chunk.v1', 'genmo.closedloop.stage10.rollout_chunk.v2') and chunk['policy_version']==before, 'Chunk schema or policy version differs')
         require(len(chunk['records'])==chunk['record_count']==chunk_reference['record_count'], 'Chunk record counts differ')
         for record in chunk['records']:
             record_path = resolve(root, record['path'], chunk_path.parent)
-            require(record_path not in seen_paths, 'A rollout transition file was reused across iterations')
-            seen_paths.add(record_path)
-            require(_physical(record_path).stat().st_size==record['size_bytes'] and sha256(record_path)==record['sha256'], 'Transition file size/SHA mismatch')
-            item = torch.load(_physical(record_path), map_location='cpu', weights_only=False, mmap=True)
+            record_identity = (record_path, record.get('index'))
+            require(record_identity not in seen_paths, 'A rollout transition file/index was reused across iterations')
+            seen_paths.add(record_identity)
+            item = load_rollout_record(record_path, record, rank_directory=path.parent.parent,
+                                       physical=_physical, cache=block_cache)
             # Writer 的清单只发布稳定五键；原始转移另有 env/request/plan/parent 诊断身份。
             require(set(record['identity'])==set(ROLLOUT_IDENTITY_KEYS), 'Rollout manifest identity must contain exactly the five published keys')
             require({key: item.identity[key] for key in ROLLOUT_IDENTITY_KEYS}==record['identity']

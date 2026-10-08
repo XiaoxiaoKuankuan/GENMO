@@ -408,7 +408,7 @@ class TrainingBudget:
         self._save(updated)
         self.state = updated
 
-    def accept_iteration(self, phase='update'):
+    def accept_iteration(self, phase='update', *, identity=None):
         # 接受后发布失败也不回退资源消耗；latest checkpoint独立给出可恢复进度。
         self.reserve(phase, accepted_iterations=1)
 
@@ -474,6 +474,9 @@ class TrainingBudget:
         self._save(updated)
         self.state = updated
         return copy.deepcopy(record)
+
+    def summary(self):
+        return self.state_dict()
 
     def state_dict(self):
         return copy.deepcopy(self.state)
@@ -683,13 +686,18 @@ class RunManager:
         if self._closed:
             raise RuntimeError('run manager is closed; no writer lock is held')
 
-    def budget(self, limits, *, for_extension=False):
+    def budget(self, limits, *, for_extension=False, incremental=False):
         self._ensure_open()
         if for_extension:
             # 扩展前先按旧账本构造；入口完成checkpoint和配置身份校验后才提交扩展事件。
             limits = _read_json(self.run_dir / 'budget.json')['limits']
         if self._budget is None:
-            self._budget = TrainingBudget(self.run_dir / 'budget.json', limits, disk_guard=self.disk_guard)
+            path = self.run_dir / 'budget.json'
+            if incremental or (path.exists() and _read_json(path).get('schema') == 'genmo.closedloop.stage10.budget_ledger.v2'):
+                from .budget_ledger import IncrementalBudget
+                self._budget = IncrementalBudget(path, limits, disk_guard=self.disk_guard)
+            else:
+                self._budget = TrainingBudget(path, limits, disk_guard=self.disk_guard)
         elif self._budget.limits != limits:
             raise ValueError('cannot change active run budget limits')
         return self._budget
@@ -781,6 +789,7 @@ class RunManager:
                 raise ValueError('Every execution journal requires an explicit closed declaration')
             if path.name.endswith('.tmp'):
                 raise ValueError('Incomplete temporary evidence cannot be sealed')
+            self.disk_guard.account_file(path)
             members.append(dict(path=str(path.relative_to(directory)), size_bytes=path.stat().st_size,
                                 sha256=file_sha256(path)))
         if not members:
@@ -890,6 +899,8 @@ class RunManager:
                     except Exception as error:
                         failure = failure or error
             finally:
+                if self._budget is not None and hasattr(self._budget, "close"):
+                    self._budget.close()
                 fcntl.flock(self._lock, fcntl.LOCK_UN)
                 self._lock.close()
                 self._closed = True

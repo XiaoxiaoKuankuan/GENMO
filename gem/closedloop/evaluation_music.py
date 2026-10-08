@@ -145,12 +145,15 @@ def check_music_files(data_root, selected, *, require_audio=True):
 
 
 def load_music_features(data_root, sample):
+    import io
     import torch
+    from gem.closedloop.dppo.asset_cache import ASSET_BYTES
 
     path = music_path(data_root, sample, "music_feature_path")
-    if sha256_file(path) != sample["row"]["source_music_feature_sha256"]:
+    data, digest = ASSET_BYTES.read(path)
+    if digest != sample["row"]["source_music_feature_sha256"]:
         raise ValueError(f"Music feature SHA mismatch: {path}")
-    payload = torch.load(path, map_location="cpu", weights_only=False)
+    payload = torch.load(io.BytesIO(data), map_location="cpu", weights_only=False)
     if not isinstance(payload, torch.Tensor):
         raise ValueError("Existing genmo.bumi_music.v1 requires a raw EDGE35 tensor")
     values = payload.detach().cpu().float().numpy()

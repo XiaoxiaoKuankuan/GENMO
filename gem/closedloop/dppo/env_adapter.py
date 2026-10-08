@@ -16,6 +16,7 @@ deployment_critical.v2时仅部署必需条件、推理、输出转换/拷贝和
 from __future__ import annotations
 
 import io
+import hashlib
 import math
 import os
 import tempfile
@@ -28,6 +29,7 @@ import torch
 
 from gem.closedloop.coordinator import ceil_control_tick
 from gem.closedloop.dppo.buffer import UpperTransition
+from gem.closedloop.dppo.performance import measure, profiled
 from gem.closedloop.dppo.rewards import ExecutionReward
 from gem.closedloop.dppo.target_activity import load_paired_activity
 from gem.closedloop.frozen_actor import stable_noise_seed
@@ -72,27 +74,33 @@ class UpperEnvironment:
             raise ValueError('runtime.rank must be a nonnegative integer')
         self.output.joinpath('raw_samples').mkdir(parents=True, exist_ok=True)
 
+    @profiled("storage.raw_evidence")
     def _save_evidence(self, value, path):
         """按精确序列化大小预检，完整落盘后发布；容量不足时不触发物理推进。"""
         guard = self.disk_guard
         if guard is None:
             torch.save(value, path)
-            return
+            content = Path(path).read_bytes()
+            return dict(sha256=hashlib.sha256(content).hexdigest(), size_bytes=len(content))
         path = guard._path(path)
         if path.exists():
             raise FileExistsError(f'Evidence already exists: {path}')
         with io.BytesIO() as serialized:
-            torch.save(value, serialized)
+            with measure("storage.raw_serialize"):
+                torch.save(value, serialized)
             guard.check(serialized.tell())
             path.parent.mkdir(parents=True, exist_ok=True)
             descriptor, name = tempfile.mkstemp(prefix='.'+path.name+'.', suffix='.tmp', dir=path.parent)
             temporary = Path(name)
             try:
                 with os.fdopen(descriptor, 'wb') as stream:
-                    with serialized.getbuffer() as content:
-                        stream.write(content)
-                    stream.flush()
-                    os.fsync(stream.fileno())
+                    with measure("storage.raw_write"):
+                        with serialized.getbuffer() as content:
+                            digest = hashlib.sha256(content).hexdigest()
+                            stream.write(content)
+                        stream.flush()
+                    with measure("storage.raw_fsync"):
+                        os.fsync(stream.fileno())
                 # 排他原子发布，避免已有正式样本被覆盖。
                 os.link(temporary, path)
                 temporary.unlink()
@@ -105,7 +113,9 @@ class UpperEnvironment:
                 temporary.unlink(missing_ok=True)
                 guard.account_file(path)
             guard.check()
+            return dict(sha256=digest, size_bytes=path.stat().st_size)
 
+    @profiled("collection.advance_including_rpc")
     def _advance(self, count):
         count = int(count)
         if not 1 <= count <= 25:
@@ -248,9 +258,11 @@ class UpperEnvironment:
         def save_trace():
             nonlocal trace
             beginning = time.perf_counter()
-            trace = cpu_copy(trace)
+            with measure("storage.raw_cpu_copy"):
+                trace = cpu_copy(trace)
             copied = time.perf_counter()
-            self._save_evidence({'trace':trace,'generated':generated,'policy_version':self.policy_version},raw_path)
+            evidence = self._save_evidence({'trace':trace,'generated':generated,'policy_version':self.policy_version},raw_path)
+            timings['raw_evidence_identity'] = evidence
             timings['trace_copy_seconds'] = copied-beginning
             timings['raw_evidence_seconds'] = time.perf_counter()-copied
         if self.timing_contract == 'legacy_audit_inclusive.v1':
@@ -370,15 +382,22 @@ class UpperEnvironment:
             # 不在非法时间网格虚构可bootstrap条件。
             raise ExecutionIntegrityError('Backend truncation lacks a legal trusted next condition')
         trace = generated['trace']
+        backend_cpu_totals = {}
+        for row in rows:
+            for name, seconds in {**row.get('cpu_timing', {}), **{
+                    key: row[key] for key in ('gmt_inference_seconds', 'physics_seconds', 'step_seconds')
+                    if key in row}}.items():
+                backend_cpu_totals[name] = backend_cpu_totals.get(name, 0.) + float(seconds)
         consumed = sorted({str(p) for row in rows for p in row.get('consumed_plan_ids', [row.get('active_plan_id')]) if p is not None})
         metadata = dict(remaining_music_seconds=self.remaining_music(start),
             next_remaining_music_seconds=self.remaining_music(end), sampler_trace=trace,
             music_start_frame=getattr(self, 'music_start_frame', 0),
             full_music_num_frames=getattr(self, 'full_music_num_frames', len(self.music)),
-            data_split=getattr(self, 'data_split', 'train'),
+            data_split=getattr(self, 'data_split', 'train'), backend_cpu_totals=backend_cpu_totals,
             generated=generated['generated'],published=commit,rejection=rejection,reward_details=details,
             events=events,consumed_plan_ids=consumed,event_reward=zero_step_event,event_penalty_total=event_reward,
             raw_sample_path=generated['raw_path'],latency_seconds=generated['elapsed'],
+            raw_evidence_identity=generated.get('timing', {}).get('raw_evidence_identity'),
             timing_contract=self.timing_contract, timing=generated.get('timing', {}),
             critical_ready_seconds=generated.get('critical_ready_seconds', generated['elapsed']),
             commit_seconds=generated.get('commit_seconds',0.),terminal_snapshot=cpu_copy(self.snapshot))

@@ -29,6 +29,7 @@ from pathlib import Path
 
 import numpy as np
 
+from .asset_cache import ASSET_BYTES
 from gem.closedloop.dppo.music_tasks import SOURCES, SOURCE_PROBABILITIES
 from gem.closedloop.dppo.target_activity import _load_verified_pair, _path, _sha
 from gem.closedloop.evaluation_music import load_music_features, sha256_file
@@ -142,7 +143,7 @@ class FullMusicCatalog:
     def load_music(self, sample):
         expected = self.validate_sample(sample)
         path = self._manifest_paths[(expected["split"], expected["dataset"])]
-        if sha256_file(path) != expected["manifest_sha256"]:
+        if ASSET_BYTES.read(path)[1] != expected["manifest_sha256"]:
             raise ValueError("full catalog manifest changed before music load")
         return load_music_features(self.data_root, expected)
 

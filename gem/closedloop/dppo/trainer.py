@@ -75,19 +75,30 @@ def batch_context(transitions, device, *, next_state=False):
     return {key:torch.cat([c[key] for c in contexts],0).to(device) for key in contexts[0]}
 
 
-def populate_values(transitions, critic, device, *, critic_version=None):
-    """使用当前冻结价值参数填入旧/下一价值，供逐条持久化和固定目标共同复用。"""
+def populate_values(transitions, critic, device, *, critic_version=None, batch_size=1):
+    """固定版本价值快照；终止置零，自举条件合批但不跨环境重组GAE。"""
+    if type(batch_size) is not int or batch_size < 1:
+        raise ValueError('value batch_size must be positive')
     critic.eval()
-    with torch.no_grad():
+    work = []
+    for row in transitions:
+        work.append((row, 'old_value', row.context, row.metadata['remaining_music_seconds']))
+        row.next_value = 0.
+        if row.next_context is not None and not row.terminated:
+            work.append((row, 'next_value', row.next_context, row.metadata['next_remaining_music_seconds']))
+    with torch.no_grad(), measure('critic.fixed_value_snapshot', gpu=True):
+        for start in range(0, len(work), batch_size):
+            chunk = work[start:start+batch_size]
+            context = {key: torch.cat([item[2][key] for item in chunk]).to(device) for key in chunk[0][2]}
+            remaining = torch.tensor([item[3] for item in chunk], device=device)
+            values = critic(context, remaining).detach().cpu().tolist()
+            if not all(math.isfinite(value) for value in values):
+                raise FloatingPointError('Nonfinite frozen Critic snapshot')
+            for item, value in zip(chunk, values):
+                setattr(item[0], item[1], value)
+    if critic_version is not None:
         for row in transitions:
-            context = {k:v.to(device) for k,v in row.context.items()}
-            row.old_value = float(critic(context, torch.tensor([row.metadata['remaining_music_seconds']],device=device))[0])
-            row.next_value = 0.
-            if row.next_context is not None and not row.terminated:
-                nxt = {k:v.to(device) for k,v in row.next_context.items()}
-                row.next_value = float(critic(nxt,torch.tensor([row.metadata['next_remaining_music_seconds']],device=device))[0])
-            if critic_version is not None:
-                row.metadata['value_snapshot_version'] = critic_version
+            row.metadata['value_snapshot_version'] = critic_version
 
 
 def fixed_targets(transitions, critic, device, *, gamma_upper=.99, lambda_upper=.95,

@@ -25,6 +25,15 @@ from .run_management import TrainingBudget
 
 def validate_v2_configuration(config):
     stage, settings = config['stage10'], config['stage10']['training']
+    performance = stage.get('performance', {})
+    for key in ('tensor_cache_max_bytes', 'module_gradient_every', 'value_snapshot_batch_size',
+                'disk_full_scan_every', 'asset_full_check_every'):
+        if key in performance and (type(performance[key]) is not int or performance[key] < 1):
+            raise ValueError(f'performance.{key} must be a positive integer')
+    shape = performance.get('execution_batch_size')
+    if shape is not None and (type(shape) is not int or shape not in (1, 2, 4)
+                              or settings['denoising_steps'] % shape):
+        raise ValueError('execution_batch_size must divide all denoising steps and be 1/2/4')
     if stage.get('distributed') != dict(world_size=8, backend='nccl', collection='all_ranks'):
         raise ValueError('Stage10 v2 requires eight synchronous independent collectors')
     if 'actor_lr_candidates' in settings:
@@ -160,12 +169,16 @@ def broadcast_state(value, collective):
 def begin_lease(collective, manager, root_budget, directory, phase, per_rank, guard=None):
     """按 rank 单独预占，失败/中断时保守保留预占消耗；成功才能对账退款。"""
     def allocate():
-        current = root_budget.state_dict()
+        current = root_budget.summary()
         total = {key: sum(item[key] for item in per_rank) for key in per_rank[0]}
         if any(current['used'][key] + count > current['limits'][key] for key, count in total.items()):
             raise RuntimeError('Insufficient global budget for the complete parallel collection lease')
-        for rank, amounts in enumerate(per_rank):
-            root_budget.reserve(f'{phase}/rank{rank}', **amounts)
+        entries = [(f'{phase}/rank{rank}', amounts) for rank, amounts in enumerate(per_rank)]
+        if hasattr(root_budget, 'reserve_many'):
+            root_budget.reserve_many(entries)
+        else:
+            for name, amounts in entries:
+                root_budget.reserve(name, **amounts)
         return True
     root_call(collective, allocate)
     credit = per_rank[collective.rank]
@@ -178,11 +191,15 @@ def begin_lease(collective, manager, root_budget, directory, phase, per_rank, gu
 def finish_lease(collective, root_budget, local_budget, phase, per_rank):
     reports = collective.all_gather_object(local_budget.state_dict())
     def settle():
-        for rank, report in enumerate(reports):
-            used = {key: report['used'][key] for key in per_rank[rank]}
-            root_budget.settle_lease(f'{phase}/rank{rank}', per_rank[rank], used,
-                                    lease_id=f'{phase}/rank{rank}')
-        return root_budget.state_dict()
+        entries = [(f'{phase}/rank{rank}', per_rank[rank],
+                    {key: report['used'][key] for key in per_rank[rank]}, f'{phase}/rank{rank}')
+                   for rank, report in enumerate(reports)]
+        if hasattr(root_budget, 'settle_many'):
+            root_budget.settle_many(entries)
+        else:
+            for name, reserved, used, identity in entries:
+                root_budget.settle_lease(name, reserved, used, lease_id=identity)
+        return root_budget.summary()
     return root_call(collective, settle)
 
 

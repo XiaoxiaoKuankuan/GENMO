@@ -30,6 +30,7 @@ import numpy as np
 import torch
 import yaml
 
+from gem.closedloop.dppo.budget_ledger import expand_budget_reference, read_budget_state
 from gem.closedloop.dppo.checkpoint import VERSION_V2, _validate_rank_states
 from gem.closedloop.dppo.run_management import TrainingBudget
 from tools.eval.audit_closedloop_stage10 import (
@@ -424,7 +425,7 @@ def _checkpoint(root, publication, identity, summary, actor_updates, critic_upda
         require(item['rng'].get('cuda_scope')=='local_device', 'V2 RNG must have rank-local scope')
         counters.append(dict(rank=rank, decision=decision, attempt=attempt, episode_count=local['episode_count']))
     require(state['budget']==publication['budget'], 'V2 checkpoint/publication budget differs')
-    budget_check(state['budget'], summary['budget'])
+    budget_check(expand_budget_reference(root, state['budget']), expand_budget_reference(root, summary['budget']))
     for group in saved['actor_optimizer']['param_groups']:
         close(group['lr'], identity['training_contract']['actor_lr'], 'V2 checkpoint fixed LR', 0.)
     return dict(path=str(path.relative_to(root)), iteration=state['iteration'], actor_updates=actor_updates,
@@ -603,7 +604,7 @@ def audit_training_v2(root, run, audit, result, minimum_iterations, require_resu
             critic_total += update['critic_optimizer_steps']
             require(summary['actor_updates_total']==actor_total and summary['critic_updates_total']==critic_total,
                     'V2 cumulative optimizer counts differ from accepted minibatches')
-            budget_check(summary['budget'], previous_budget)
+            budget_check(expand_budget_reference(root, summary['budget']), expand_budget_reference(root, previous_budget))
             previous_budget = summary['budget']
             controls += sum(row['control_steps'] for row in rollouts)
             key = (record['seal']['session_id'], index)
@@ -645,17 +646,18 @@ def audit_training_v2(root, run, audit, result, minimum_iterations, require_resu
             final_state = sessions[terminal]['summary']['final_state']
             require(final_state['iteration']==accepted['iteration'] and final_state['actor_updates']==actor_total
                     and final_state['critic_updates']==critic_total, 'V2 final session optimizer/outer counters differ')
-            budget_check(final_state['budget'], latest['budget'])
+            budget_check(expand_budget_reference(root, final_state['budget']), expand_budget_reference(root, latest['budget']))
         return dict(accepted_iteration=accepted['iteration'], durable_iteration=latest['iteration'])
     audit.check('published_checkpoint_and_budget', durable_check)
     def persisted():
-        budget = budget_check(read_json(root/'budget.json'))
-        TrainingBudget(root/'budget.json', budget['limits'])
+        budget = budget_check(read_budget_state(root/'budget.json'))
+        if read_json(root/'budget.json').get('schema') == 'genmo.closedloop.stage10.budget.v1':
+            TrainingBudget(root/'budget.json', budget['limits'])
         for record in records.values():
-            budget_check(budget, record['summary']['budget'])
+            budget_check(budget, expand_budget_reference(root, record['summary']['budget']))
         for session in sessions.values():
             if session['summary'] is not None and 'final_state' in session['summary']:
-                budget_check(budget, session['summary']['final_state']['budget'])
+                budget_check(budget, expand_budget_reference(root, session['summary']['final_state']['budget']))
         require(budget['used']['accepted_iterations']>=len(selected)
                 and budget['used']['optimizer_attempts']>=actor_total
                 and budget['used']['control_steps']>=controls, 'V2 budget omitted accepted execution/optimizer consumption')

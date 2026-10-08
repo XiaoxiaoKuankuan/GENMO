@@ -77,6 +77,11 @@ stage10:
     reuse_final_kl: true
     module_gradient_every: 100
     bc_batch_forward: true
+    value_snapshot_batch_size: 32
+    incremental_budget: true
+    block_rollout: true
+    disk_full_scan_every: 100
+    asset_full_check_every: 100
   run_control:
     max_walltime_seconds: 604800
   distributed:

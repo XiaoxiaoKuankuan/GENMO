@@ -86,3 +86,12 @@ def profiled(name, *, gpu=False):
                 return function(*args, **kwargs)
         return wrapper
     return decorate
+
+
+def record_cpu(name, seconds, *, calls=1):
+    """接入无torch依赖的RPC/物理进程计时，不将远程等待伪装成GPU计算。"""
+    profiler = _ACTIVE.get()
+    if profiler is not None:
+        row = profiler.rows[name]
+        row['calls'] += calls
+        row['host_seconds'] += float(seconds)

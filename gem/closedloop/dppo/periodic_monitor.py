@@ -32,6 +32,7 @@ from gem.closedloop.dppo.evaluation import (
     build_evaluation_tasks,
 )
 from gem.closedloop.dppo.full_dataset import SOURCES
+from .performance import profiled
 from gem.closedloop.frozen_actor import stable_noise_seed
 
 VERSION = 'genmo.closedloop.stage10.periodic_monitor.v1'
@@ -438,21 +439,24 @@ def numeric_metrics(value, prefix=''):
     return result
 
 
-def log_metrics(writer, jsonl_path, step, metrics, *, prefix=''):
+@profiled('storage.monitor')
+def log_metrics(writer, jsonl_path, step, metrics, *, prefix='', durable=True):
     """同一外层轮次写TensorBoard和JSONL；调用者持有唯一writer，不创建新训练进程。"""
     _require(type(step) is int and step >= 0, 'Monitor step must be nonnegative')
     values = numeric_metrics(metrics, prefix)
     if writer is not None:
         for tag, value in values.items():
             writer.add_scalar(tag, value, step)
-        writer.flush()
+        if durable:
+            writer.flush()
     if jsonl_path is not None:
         path = Path(jsonl_path)
         path.parent.mkdir(parents=True, exist_ok=True)
         with path.open('a', encoding='utf-8') as stream:
             stream.write(json.dumps(dict(step=step, metrics=values), ensure_ascii=False, allow_nan=False)+'\n')
             stream.flush()
-            os.fsync(stream.fileno())
+            if durable:
+                os.fsync(stream.fileno())
     return values
 
 

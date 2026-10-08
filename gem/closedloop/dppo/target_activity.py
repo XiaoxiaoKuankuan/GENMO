@@ -19,6 +19,8 @@
 """
 from __future__ import annotations
 
+from .asset_cache import ASSET_BYTES
+
 import copy
 import hashlib
 import io
@@ -142,8 +144,7 @@ def load_paired_activity(data_root, sample, *, music_start_tick=600, window_s=0.
     # 本地选取数据通过这四个明确的目录 symlink 复用既有数据；解析后的目录是文件边界。
     source_root = (root / folder).resolve()
     manifest_path = _path(source_root, f"manifests/{split}.jsonl", f"{split} manifest")
-    manifest_bytes = manifest_path.read_bytes()
-    manifest_sha = hashlib.sha256(manifest_bytes).hexdigest()
+    manifest_bytes, manifest_sha = ASSET_BYTES.read(manifest_path)
     if manifest_sha != _sha(sample.get("manifest_sha256"), "manifest_sha256"):
         raise ValueError("paired activity selected train manifest SHA mismatch")
     rows = [json.loads(line) for line in manifest_bytes.decode().splitlines() if line.strip()]
@@ -170,10 +171,10 @@ def _load_verified_pair(root, sample, manifest_path, manifest_sha, *, split,
     for name in ("source_motion_sha256", "source_music_feature_sha256", "source_audio_sha256"):
         _sha(row.get(name), name)
     music_path = _path(source_root, row.get("music_feature_path"), "music_feature_path")
-    if hashlib.sha256(music_path.read_bytes()).hexdigest() != row["source_music_feature_sha256"]:
+    if ASSET_BYTES.read(music_path)[1] != row["source_music_feature_sha256"]:
         raise ValueError("paired activity music feature SHA mismatch")
     info_path = _path(source_root, "meta/dataset_info.json", "dataset_info")
-    info_bytes = info_path.read_bytes()
+    info_bytes, _ = ASSET_BYTES.read(info_path)
     info = json.loads(info_bytes)
     expected = {"contract_version": "genmo.bumi_music.v1", "fps": 30, "robot_name": "bumi",
                 "qpos_order": "mujoco_native", "quaternion_convention": "wxyz"}
@@ -183,8 +184,7 @@ def _load_verified_pair(root, sample, manifest_path, manifest_sha, *, split,
     if row.get("dataset") != info.get("dataset_name"):
         raise ValueError("paired activity dataset name differs from manifest")
     motion_path = _path(source_root, row.get("motion_path"), "motion_path")
-    motion_bytes = motion_path.read_bytes()
-    motion_file_sha = hashlib.sha256(motion_bytes).hexdigest()
+    motion_bytes, motion_file_sha = ASSET_BYTES.read(motion_path)
     if sample.get("motion_file_sha256") is not None and motion_file_sha != _sha(sample["motion_file_sha256"], "motion_file_sha256"):
         raise ValueError("paired activity motion file changed after full dataset audit")
     payload = torch.load(io.BytesIO(motion_bytes), map_location="cpu", weights_only=False)

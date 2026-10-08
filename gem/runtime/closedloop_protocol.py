@@ -9,15 +9,19 @@ socket 只在指定私有目录创建，退出删除本进程创建的 socket，
 from __future__ import annotations
 
 import dataclasses
+from contextvars import ContextVar
 import io
 import json
 import socket
 import struct
+import time
 import zipfile
 from pathlib import Path
 from typing import Any, TypedDict
 
 import numpy as np
+
+_CALL_TIMING = ContextVar("rpc_call_timing", default=None)
 
 PROTOCOL_VERSION = "genmo.gmt_frozen_isaac.v1"
 CLOCK_HZ = 600
@@ -87,7 +91,8 @@ def _pack(value: Any) -> tuple[bytes, bytes]:
             if item.dtype.hasobject or item.dtype.kind not in "biufUS":
                 raise TypeError(f"Unsupported array dtype: {item.dtype}")
             key = f"a{len(arrays)}"
-            arrays[key] = np.array(item, copy=True, order="C")
+            # 单连接同步编码完成才返回；连续数组直接读取，np.savez写入独立字节快照。
+            arrays[key] = item if item.flags.c_contiguous else np.ascontiguousarray(item)
             return {"__array__": key}
         if isinstance(item, np.generic):
             return item.item()
@@ -113,7 +118,8 @@ def _unpack(metadata: bytes, payload: bytes):
     arrays = {}
     if payload:
         with np.load(io.BytesIO(payload), allow_pickle=False) as archive:
-            arrays = {k: archive[k].copy() for k in archive.files}
+            # NPZ解码已分配独立数组；不再复制第二份，关闭archive不影响数组。
+            arrays = {k: archive[k] for k in archive.files}
             if any(a.dtype.hasobject or a.dtype.kind not in "biufUS" for a in arrays.values()):
                 raise TypeError("Unsupported received RPC array dtype")
 
@@ -139,18 +145,34 @@ def _read_exact(connection: socket.socket, size: int) -> bytes:
     return bytes(chunks)
 
 
-def send_message(connection: socket.socket, value):
+def send_message(connection: socket.socket, value, *, timing=None):
+    timing = _CALL_TIMING.get() if timing is None else timing
+    started = time.perf_counter()
     metadata, payload = _pack(value)
+    encoded = time.perf_counter()
+    if timing is not None:
+        timing["encode_seconds"] = encoded-started
+        timing["sent_bytes"] = 16+len(metadata)+len(payload)
     if len(metadata) + len(payload) > MAX_PACKET_BYTES:
         raise ValueError("RPC packet exceeds 64 MiB")
     connection.sendall(struct.pack("!QQ", len(metadata), len(payload)) + metadata + payload)
+    if timing is not None:
+        timing["send_seconds"] = time.perf_counter()-encoded
 
 
-def receive_message(connection: socket.socket):
+def receive_message(connection: socket.socket, *, timing=None):
+    timing = _CALL_TIMING.get() if timing is None else timing
+    started = time.perf_counter()
     meta_size, payload_size = struct.unpack("!QQ", _read_exact(connection, 16))
     if not meta_size or meta_size + payload_size > MAX_PACKET_BYTES:
         raise ValueError("Invalid RPC packet length")
-    return _unpack(_read_exact(connection, meta_size), _read_exact(connection, payload_size))
+    metadata, payload = _read_exact(connection, meta_size), _read_exact(connection, payload_size)
+    received = time.perf_counter()
+    result = _unpack(metadata, payload)
+    if timing is not None:
+        timing.update(receive_including_remote_seconds=received-started,
+                      decode_seconds=time.perf_counter()-received, received_bytes=16+meta_size+payload_size)
+    return result
 
 
 class RpcClient:
@@ -163,12 +185,18 @@ class RpcClient:
             self.connection.close()
             raise
         self.sequence = 0
+        self.last_call_timing = {}
 
     def call(self, method: str, **payload):
         self.sequence += 1
-        send_message(self.connection, {"version": PROTOCOL_VERSION, "sequence": self.sequence,
-                                       "method": method, "payload": payload})
-        response = receive_message(self.connection)
+        timing = self.last_call_timing = {}
+        token = _CALL_TIMING.set(timing)
+        try:
+            send_message(self.connection, {"version": PROTOCOL_VERSION, "sequence": self.sequence,
+                                           "method": method, "payload": payload})
+            response = receive_message(self.connection)
+        finally:
+            _CALL_TIMING.reset(token)
         if response.get("sequence") != self.sequence or response.get("version") != PROTOCOL_VERSION:
             raise RuntimeError("RPC response identity/version mismatch")
         if not response.get("ok"):

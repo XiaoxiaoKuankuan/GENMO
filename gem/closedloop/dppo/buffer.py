@@ -66,15 +66,15 @@ class UpperTransition:
 
     def snapshot(self) -> "UpperTransition":
         result = UpperTransition(**{key: cpu_snapshot(value) for key, value in vars(self).items()})
-        result.rewards = torch.as_tensor(result.rewards, dtype=torch.float64).clone()
+        result.rewards = torch.as_tensor(result.rewards, dtype=torch.float64)
         if result.chain is not None:
-            result.chain = torch.as_tensor(result.chain).clone()
+            result.chain = torch.as_tensor(result.chain)
             if result.chain.ndim == 4 and result.chain.shape[0] == 1:
                 result.chain = result.chain[0]
         for key in ("old_log_prob", "free_mask"):
             value = getattr(result, key)
             if value is not None:
-                value = torch.as_tensor(value).clone()
+                value = torch.as_tensor(value)
                 expected_ndim = 1 if key == "old_log_prob" else 2
                 if value.ndim == expected_ndim + 1 and value.shape[0] == 1:
                     value = value[0]

@@ -240,3 +240,24 @@ def test_batched_bc_samplewise_loss_and_independent_rng_restore(actor_factory):
                 torch.testing.assert_close(p.grad, grads[name], rtol=0, atol=0)
     finally:
         torch.set_num_threads(previous_threads)
+
+
+def test_full_learning_probe_restores_weights_and_reports_all_encoder_gradients(actor_factory):
+    from gem.closedloop.dppo.execution_profile import compare_learning_execution
+    old_threads = torch.get_num_threads()
+    torch.set_num_threads(1)
+    try:
+        actor, batch = actor_factory(starts=(45,))
+        _activate_branches(actor)
+        policy = DPPODiffusionPolicy(actor, steps=20, cfg_batch=True, execution_batch_size=4)
+        saved = copy.deepcopy(actor.state_dict())
+        report = compare_learning_execution(policy, _conditions(batch))
+        assert report['max_logprob_difference'] <= 1e-4
+        assert report['max_parameter_difference'] < 1e-7
+        assert report['max_optimizer_state_difference'] < 1e-6
+        assert any('history' in name for name in report['modules'])
+        assert len(report['modules']) > 3
+        for name, value in actor.state_dict().items():
+            torch.testing.assert_close(value, saved[name], rtol=0, atol=0)
+    finally:
+        torch.set_num_threads(old_threads)
