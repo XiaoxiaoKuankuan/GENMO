@@ -90,6 +90,7 @@ def _worker(rank, directory):
             results[name] = dict(initial=initial, after=_snapshot(actor, critic, actor_optimizer, critic_optimizer),
                                  initialization=learner.evidence[0], update=evidence)
         torch.save(results, directory/f'rank_{rank}.pt')
+        dist.barrier()  # 两卡完整恢复结果均发布后再退出通信组。
     finally:
         dist.destroy_process_group()
 

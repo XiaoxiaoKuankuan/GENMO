@@ -86,7 +86,8 @@ def archived_execution(root, summary):
                 and seal.get('members')==manifest.get('members')
                 and seal.get('iteration')==manifest.get('iteration'), 'Execution archive differs from immutable seal')
     require(manifest.get('archive')=='execution_evidence.tar.gz', 'Unexpected execution archive filename')
-    archive = directory/manifest['archive']
+    from gem.closedloop.dppo.archive_store import archive_path
+    archive = archive_path(root, directory)
     require(archive.is_file() and not archive.is_symlink(), 'Execution archive must be a regular file')
     require(archive.stat().st_size==manifest['archive_size_bytes'] and sha256(archive)==manifest['archive_sha256'],
             'Execution archive size/SHA mismatch')

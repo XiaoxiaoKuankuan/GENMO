@@ -40,6 +40,7 @@ from pathlib import Path
 import torch
 
 from .archives import ArchiveProcessClient, BoundedArchiveWorker
+from .archive_store import archive_guard, archive_path, prepare_secondary_store, validate_secondary_store
 from .checkpoint import VERSION_V2
 from .run_management import _atomic_json, _read_json, _sync_dir, file_sha256
 
@@ -52,6 +53,9 @@ def validate_long_run_settings(stage):
     if seconds is not None and (type(seconds) is not int or seconds <= 0):
         raise ValueError('max_walltime_seconds must be a positive integer')
     storage = stage['storage']
+    validate_secondary_store(storage)
+    if storage.get('archive_secondary') and stage.get('version') not in (None, 'genmo.closedloop.stage10.v2'):
+        raise ValueError('Secondary archive storage requires the sealed v2 training format')
     last, every = storage.get('checkpoint_keep_last'), storage.get('checkpoint_keep_every')
     if (last is None) != (every is None):
         raise ValueError('Checkpoint retention requires both keep_last and keep_every')
@@ -78,6 +82,9 @@ class LongRunMaintenance:
                       checkpoint_keep_every=self.storage.get('checkpoint_keep_every'),
                       archive_completed_iterations=self.storage.get('archive_completed_iterations', False))
         path = manager.run_dir / 'long_run_policy.json'
+        if self.storage.get('archive_secondary') is not None:
+            policy['archive_secondary'] = self.storage['archive_secondary']
+            prepare_secondary_store(manager.run_dir, policy['archive_secondary'], resume=path.exists())
         if path.exists():
             if _read_json(path) != policy:
                 raise ValueError('Resume cannot change the original long-run deadline or retention policy')
@@ -265,7 +272,7 @@ class LongRunMaintenance:
             seal = self._seal(directory)
         members = seal['members']
         manifest_path = directory / 'archive_manifest.json'
-        archive = directory / 'execution_evidence.tar.gz'
+        archive, destination_guard = archive_guard(self.manager.run_dir, directory, self.guard)
         original_size = sum(record['size_bytes'] for record in members)
         seal_sha = file_sha256(directory / 'seal_manifest.json')
         # 清单已发布但原件回收中断时，校验完整包后幂等继续回收，不重新压缩。
@@ -288,8 +295,8 @@ class LongRunMaintenance:
                 with self._archive_stage(timings, 'verification_seconds'):
                     self._verify_archive(archive, members)
             else:
-                with self.guard.reservation(original_size + 1048576):
-                    descriptor, temporary_name = tempfile.mkstemp(prefix='.execution.', suffix='.tmp', dir=directory)
+                with destination_guard.reservation(original_size + 1048576):
+                    descriptor, temporary_name = tempfile.mkstemp(prefix='.execution.', suffix='.tmp', dir=archive.parent)
                     os.close(descriptor)
                     temporary = Path(temporary_name)
                     try:
@@ -306,19 +313,20 @@ class LongRunMaintenance:
                         with self._archive_stage(timings, 'publish_seconds'):
                             os.link(temporary, archive)
                             temporary.unlink()
-                            _sync_dir(directory)
+                            _sync_dir(archive.parent)
                         # 在归还临时空间预留前计入完整包，前台不能看见一瞬间的虚假余量。
-                        self.guard.account_file(archive)
+                        destination_guard.account_file(archive)
                     finally:
                         temporary.unlink(missing_ok=True)
-                        self.guard.account_file(temporary)
-            self.guard.account_file(archive)
+                        destination_guard.account_file(temporary)
+            destination_guard.account_file(archive)
             result = dict(schema='genmo.closedloop.stage10.execution_archive.v2',
                           archive=archive.name, archive_sha256=file_sha256(archive),
                           original_size_bytes=original_size, archive_size_bytes=archive.stat().st_size,
                           seal_sha256=seal_sha, iteration=seal['iteration'], members=members)
             with self._archive_stage(timings, 'publish_seconds'):
                 _atomic_json(manifest_path, result, disk_guard=self.guard)
+        destination_guard.account_file(archive)
         # 删除原件前再次核验；失败时保留剩余原件和已验证包作为可恢复证据。
         for record in members:
             path = self.guard._path(directory / record['path'])
@@ -329,10 +337,10 @@ class LongRunMaintenance:
                     path.unlink()
                     self.guard.account_file(path)
         with self._archive_stage(timings, 'reclaim_seconds'):
-            for temporary in directory.glob('.execution.*.tmp'):
-                self.guard._path(temporary)
+            for temporary in archive.parent.glob('.execution.*.tmp'):
+                destination_guard._path(temporary)
                 temporary.unlink()
-                self.guard.account_file(temporary)
+                destination_guard.account_file(temporary)
             for folder in sorted((path for path in directory.rglob('*') if path.is_dir()),
                                  key=lambda path: len(path.parts), reverse=True):
                 if not any(folder.iterdir()):
@@ -427,6 +435,10 @@ class LongRunMaintenance:
             directory = path.parent
             seal = self._seal(directory)
             manifest = directory / 'archive_manifest.json'
+            if manifest.exists():
+                location = archive_path(self.manager.run_dir, directory)
+                if not location.is_file() or location.stat().st_size != _read_json(manifest)['archive_size_bytes']:
+                    raise ValueError('Published archive is missing or has changed size during recovery')
             if not manifest.exists() or any((directory / item['path']).exists() for item in seal['members']):
                 if self.enqueue_archive(directory):
                     queued.append(str(directory.relative_to(self.manager.run_dir)))

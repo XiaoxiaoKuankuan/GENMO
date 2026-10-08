@@ -54,6 +54,10 @@ def test_formal_configuration_and_outer_save_boundaries():
     assert settings['ppo_epochs'] == 2
     assert settings['actor_minibatch_internal_transitions'] == 1600
     assert settings['bc_batch'] == 2
+    interval = config['stage10']['storage']['checkpoint_every_iterations']
+    assert interval == config['stage10']['storage']['checkpoint_keep_every'] == 500
+    assert [i for i in range(1, 1001) if training.checkpoint_due(i, interval)] == [500, 1000]
+    # 历史300轮配置仍可恢复；保存判断只接收外层轮次，不使用内部Actor步数。
     assert [i for i in range(1, 601) if training.checkpoint_due(i)] == [300, 600]
     assert training.checkpoint_due(1, normal_end=True)
     assert not training.checkpoint_due(4)
@@ -219,6 +223,7 @@ def _resume_calibration_worker(rank, directory):
             assert torch.equal(torch.get_rng_state(), original_rng)
             collective.barrier()
         torch.save(outcomes, directory/f'resume_rank{rank}.pt')
+        dist.barrier()  # 仅同步成功落盘，不在异常finally中新增可能阻塞的collective。
     finally:
         training._new_phase, training.probe_profiles, training.finish_lease = saved['new_phase'], saved['probe'], saved['settle']
         training.restore_local_rng, training.atomic_json = saved['rng'], saved['atomic']
@@ -341,6 +346,7 @@ def _evaluation_cleanup_worker(rank, directory):
             # 若失败卡先退出、健康卡误入计时，双方不可能正常到达同一 barrier。
             distributed.barrier()
         torch.save(outcomes, directory/f'cleanup_rank{rank}.pt')
+        dist.barrier()  # 故障注入已完成，统一测试进程退出边界。
     finally:
         training.restore_local_rng = actual_restore
         dist.destroy_process_group()

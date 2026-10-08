@@ -21,7 +21,7 @@ from tests.closedloop.test_stage1_actor import _activate_branches, _conditions
 from tests.closedloop.test_stage1_actor import actor_factory as actor_factory
 
 
-@pytest.mark.parametrize('name', ['performance', 'tensor_cache', 'asset_cache', 'rollout_storage', 'budget_ledger'])
+@pytest.mark.parametrize('name', ['performance', 'tensor_cache', 'asset_cache', 'rollout_storage', 'budget_ledger', 'archive_store'])
 def test_new_runtime_source_mutation_is_detected_by_training_inventory(tmp_path, monkeypatch, name):
     """实际训练入口的源码清单必须保护新增执行模块，不能只有Git HEAD而漏掉文件SHA。"""
     from gem.closedloop.baseline_provenance import _file_record, verify_source_provenance

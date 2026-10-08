@@ -68,6 +68,9 @@ def plan_capacity(reference_run, target_run, configuration, *, safety_factor=1.2
     if type(retry_iterations) is not int or retry_iterations < 0:
         raise ValueError('retry_iterations must be a nonnegative integer')
     stage = configuration['stage10']
+    if stage.get('version') == 'genmo.closedloop.stage10.v2':
+        return _plan_parallel_capacity(reference_run, target_run, stage,
+            safety_factor=safety_factor, retry_iterations=retry_iterations, free_bytes=free_bytes)
     target_iterations = stage['limits']['accepted_iterations']
     if type(target_iterations) is not int or target_iterations < 1:
         raise ValueError('Target accepted iterations must be positive')
@@ -116,6 +119,87 @@ def plan_capacity(reference_run, target_run, configuration, *, safety_factor=1.2
         projected_total_bytes=projected_total, max_run_bytes=quota,
         filesystem_free_bytes=free_bytes, min_free_bytes=reserve,
         semantics='Storage estimate from measured maxima; actual writes remain guarded; no deletion, budget extension or training performed.')
+
+
+def _plan_parallel_capacity(reference_run, target_run, stage, *, safety_factor, retry_iterations, free_bytes):
+    """新八卡运行按稀疏checkpoint、逐轮归档和独立评估分别估算，不沿用每轮存模型假设。
+
+    该入口要求空的新目录，完整恢复的旧目录继续使用原预算。第二盘的配额和物理
+    空闲分别验收；两根目录若位于同一文件系统，合并实际新增占用检查，不能把相同
+    空闲计算两遍。测量来自至少两份真实已归档轮次和真实评估，不编造压缩率。
+    """
+    from gem.closedloop.dppo.archive_store import archive_path, validate_secondary_store
+    validate_secondary_store(stage['storage'])
+    if target_run.exists():
+        raise ValueError('Parallel capacity planning requires a fresh target run directory')
+    observed = []
+    for path in sorted(reference_run.glob('sessions/*/iterations/*/summary.json')):
+        summary = json.loads(path.read_text())
+        if summary.get('status') != 'accepted':
+            continue
+        manifest = json.loads((path.parent/'archive_manifest.json').read_text())
+        archive = archive_path(reference_run, path.parent)
+        if archive.stat().st_size != manifest['archive_size_bytes']:
+            raise ValueError('Capacity reference archive size differs from its published manifest')
+        observed.append(dict(iteration=summary['iteration'], archive_bytes=manifest['archive_size_bytes'],
+            retained_metadata_bytes=_bytes(path.parent)-(archive.stat().st_size if archive.parent == path.parent else 0)))
+    checkpoints = [p.stat().st_size for p in (reference_run/'checkpoints').glob('*.pt')]
+    phases = [_bytes(p) for p in reference_run.glob('sessions/*/phases/eval_*')]
+    reports = [p.stat().st_size for p in reference_run.glob('sessions/*/evaluations/*.json')]
+    if len(observed) < 2 or not checkpoints or not phases or not reports:
+        raise ValueError('Parallel capacity planning needs two archived rounds, checkpoints and full evaluation evidence')
+    target = stage['limits']['accepted_iterations']
+    if type(target) is not int or target < 1:
+        raise ValueError('Target accepted iterations must be positive')
+    storage, evaluation = stage['storage'], stage['evaluation']
+    secondary = storage.get('archive_secondary')
+    total_rounds = target+retry_iterations
+    secondary_rounds = (target//2+retry_iterations) if secondary else 0
+    primary_rounds = total_rounds-(target//2 if secondary else 0)
+    archive_bytes = max(row['archive_bytes'] for row in observed)
+    metadata_bytes = max(row['retained_metadata_bytes'] for row in observed)
+    checkpoint_count = math.ceil(target/storage['checkpoint_every_iterations'])+4
+    evaluation_count = math.ceil(target/evaluation['every_iterations'])+2
+    # 参考运行全部非训练、非评估、非模型字节额外作为启动/校准开销保留。
+    startup = _bytes(reference_run)-sum(_bytes(p) for p in reference_run.glob('sessions/*/iterations/*'))
+    startup -= _bytes(reference_run/'checkpoints')+sum(phases)+sum(reports)
+    startup = max(startup, 0)
+    primary_raw = (primary_rounds*archive_bytes+total_rounds*metadata_bytes
+        +checkpoint_count*max(checkpoints)+evaluation_count*(max(phases)+2*max(reports))+startup)
+    secondary_raw = secondary_rounds*archive_bytes
+    primary_bytes = math.ceil(primary_raw*safety_factor)+storage['checkpoint_reserve_bytes']
+    secondary_bytes = math.ceil(secondary_raw*safety_factor)
+    def existing_parent(path):
+        while not path.exists():
+            path = path.parent
+        return path
+    primary_fs = existing_parent(target_run)
+    primary_free = shutil.disk_usage(primary_fs).free if free_bytes is None else int(free_bytes)
+    checks = dict(within_run_quota=primary_bytes <= storage['max_run_bytes'],
+        filesystem_keeps_free_reserve=primary_free-primary_bytes >= storage['min_free_bytes'])
+    secondary_report = None
+    if secondary:
+        secondary_fs = existing_parent(Path(secondary['root']))
+        secondary_free = shutil.disk_usage(secondary_fs).free
+        same_filesystem = primary_fs.stat().st_dev == secondary_fs.stat().st_dev
+        checks['within_secondary_quota'] = secondary_bytes <= secondary['max_bytes']
+        checks['secondary_keeps_free_reserve'] = secondary_free-secondary_bytes >= secondary['min_free_bytes']
+        if same_filesystem:
+            checks['shared_filesystem_keeps_combined_reserve'] = (
+                primary_free-primary_bytes-secondary_bytes >= max(storage['min_free_bytes'], secondary['min_free_bytes']))
+        secondary_report = dict(root=secondary['root'], projected_additional_bytes=secondary_bytes,
+            filesystem_free_bytes=secondary_free, max_bytes=secondary['max_bytes'], same_filesystem=same_filesystem)
+    return dict(schema='genmo.closedloop.stage10.capacity_plan.v2',
+        status='passed' if all(checks.values()) else 'failed', checks=checks,
+        reference_run=str(reference_run), target_run=str(target_run), measurements=observed,
+        target_total_iterations=target, retry_iterations=retry_iterations, safety_factor=safety_factor,
+        checkpoint_count=checkpoint_count, checkpoint_max_bytes=max(checkpoints),
+        evaluation_count=evaluation_count, evaluation_max_bytes=max(phases)+2*max(reports),
+        observed_startup_bytes=startup, projected_additional_bytes=primary_bytes,
+        projected_total_bytes=primary_bytes, max_run_bytes=storage['max_run_bytes'],
+        filesystem_free_bytes=primary_free, secondary=secondary_report,
+        combined_projected_bytes=primary_bytes+secondary_bytes,
+        semantics='Measured full evidence; 25 percent default margin; separate disk quotas; no deletion or training.')
 
 
 def main(argv=None):

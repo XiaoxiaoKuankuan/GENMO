@@ -6,9 +6,10 @@
 # 形状4已通过正确性验收，但单环境采样填充跨过0.5秒决策边界，实测整轮反而更慢。
 # BC 每次 Actor 更新全局两条；Critic 80 次、全局批 32，冻结 GMT 与原固定编码表。
 # 使用版本化部署关键路径延迟，训练审计落盘不改变模拟参考到达时刻。
-# 完整恢复点每 300 个外层轮保存，评估每 100 轮只用内存参数；证据异步归档。
+# 完整恢复点每 500 个外层轮保存，评估每 100 轮只用内存参数；证据异步归档。
 # 旧 v1 配置和历史 checkpoint 保留，只允许本 v2 身份和八个 rank 状态的完整续训。
-# 沿用原资产和资源总上限，不自动切换初始化模型或扩大预算，不自动启动七天训练。
+# 按2026-10-08明确授权建立10000轮新run；有限预算包含评估、预占及恢复余量。
+# 两盘交替存放完整执行归档，各自保留100GiB空闲；旧运行预算和历史产物不修改。
 version: genmo.gmt_frozen_isaac.v1
 paths:
   genmo_repo: /home/user/liwei/GENMO-bumi-closedloop
@@ -86,7 +87,7 @@ stage10:
     disk_full_scan_every: 100
     asset_full_check_every: 100
   run_control:
-    max_walltime_seconds: 604800
+    max_walltime_seconds: 864000
   distributed:
     world_size: 8
     backend: nccl
@@ -156,20 +157,25 @@ stage10:
     samples_per_source: 4
   limits:
     accepted_iterations: 10000
-    optimizer_attempts: 30000
-    generations: 1000000
-    control_steps: 25000000
-    physics_steps: 100000000
+    optimizer_attempts: 45000
+    generations: 2000000
+    control_steps: 60000000
+    physics_steps: 240000000
   storage:
     min_free_bytes: 107374182400
-    max_run_bytes: 2199023255552
+    max_run_bytes: 2473901162496
     checkpoint_reserve_bytes: 4294967296
     rollout_chunk_size: 16
     checkpoint_keep_last: 2
-    checkpoint_keep_every: 300
+    checkpoint_keep_every: 500
     archive_completed_iterations: true
-    checkpoint_every_iterations: 300
+    checkpoint_every_iterations: 500
     archive_queue_size: 4
+    # 偶数外层轮归档进入副盘的run身份隔离目录；原件校验后才回收，单盘旧格式可读。
+    archive_secondary:
+      root: /data0/user/liwei/GENMO_outputs/closedloop_stage10_execution_archives
+      max_bytes: 1869169767219
+      min_free_bytes: 107374182400
   reward:
     version: stage9.execution_reward.v2
     dt: 0.02

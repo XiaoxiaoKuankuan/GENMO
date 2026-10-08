@@ -166,7 +166,7 @@ def runtime_preflight(config, *, check_gpu):
 def _sources(config, check):
     names = ('policy', 'buffer', 'rewards', 'critic', 'returns', 'music_tasks', 'target_activity',
              'env_adapter', 'rpc', 'budget', 'trainer', 'checkpoint', 'lr_calibration',
-             'full_dataset', 'run_management', 'evaluation', 'long_run')
+             'full_dataset', 'run_management', 'evaluation', 'long_run', 'archive_store')
     if config['stage10']['version'] == VERSION_V2:
         names += ('parallel_support', 'parallel_training', 'execution_profile', 'periodic_monitor',
                   'updater_v2', 'position_repair', 'archives', 'archive_process', 'optional_diagnostics',

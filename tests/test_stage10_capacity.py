@@ -105,3 +105,34 @@ def test_capacity_rejects_invalid_margin_parameters(tmp_path,factor,retries):
     with pytest.raises(ValueError):
         plan_capacity(reference(tmp_path),tmp_path/'new',configuration(),
                       free_bytes=1000000,safety_factor=factor,retry_iterations=retries)
+
+
+def test_parallel_capacity_counts_sparse_models_evaluations_and_both_disks(tmp_path):
+    root = reference(tmp_path)
+    for directory in root.glob('sessions/*/iterations/*'):
+        archive = directory/'execution_evidence.tar.gz'
+        archive.write_bytes(b'a'*10000)
+        (directory/'archive_manifest.json').write_text(json.dumps(dict(archive_size_bytes=archive.stat().st_size)))
+    phase = root/'sessions/one/phases/eval_initial'
+    phase.mkdir(parents=True)
+    (phase/'journal.sqlite').write_bytes(b'e'*20000)
+    report = root/'sessions/one/evaluations/initial.json'
+    report.parent.mkdir()
+    report.write_bytes(b'r'*1000)
+    config = configuration()
+    stage = config['stage10']
+    stage.update(version='genmo.closedloop.stage10.v2', evaluation=dict(every_iterations=100))
+    stage['limits']['accepted_iterations'] = 10000
+    stage['storage'].update(checkpoint_every_iterations=500, max_run_bytes=10**9,
+        archive_completed_iterations=True, archive_secondary=dict(root=str(tmp_path/'secondary'),
+        max_bytes=10**9, min_free_bytes=1))
+    result = plan_capacity(root, tmp_path/'new', config, free_bytes=10**12)
+    assert result['status'] == 'passed'
+    assert result['checkpoint_count'] == 24 and result['evaluation_count'] == 102
+    assert result['secondary']['projected_additional_bytes'] == (5000+2)*10000*1.25
+    assert result['checks']['shared_filesystem_keeps_combined_reserve']
+    assert result['combined_projected_bytes'] == (
+        result['projected_total_bytes']+result['secondary']['projected_additional_bytes'])
+    stage['storage']['archive_secondary']['max_bytes'] = 1
+    rejected = plan_capacity(root, tmp_path/'new', config, free_bytes=10**12)
+    assert not rejected['checks']['within_secondary_quota'] and rejected['status'] == 'failed'

@@ -103,6 +103,7 @@ def _worker(rank, directory):
             policy.actor.denoiser.weight.add_(.02)
         result['x0'] = x0_change_local(policy, local, reference, global_manifest=manifest, distributed=collective)
         torch.save(result, directory / f'rank_{rank}.pt')
+        dist.barrier()  # 所有证据落盘后共同销毁Gloo，保持原有超时和数值检查。
     finally:
         dist.destroy_process_group()
 

@@ -193,6 +193,7 @@ def _worker(rank, directory):
         result = dict(actor=run_actor(distributed=distributed), empty=run_actor(distributed=distributed, count=1),
                       critic=run_critic(distributed), normalized=target)
         torch.save(result, directory / f'rank_{rank}.pt')
+        dist.barrier()  # 两份结果均完成后再销毁Gloo，避免一方退出时另一方仍在保存。
     finally:
         dist.destroy_process_group()
 
@@ -411,6 +412,7 @@ def _failure_worker(rank, directory):
                 raise AssertionError('Injected rank-local failure was not propagated')
             distributed.barrier()
         torch.save(outcomes, directory / f'failure_{rank}.pt')
+        dist.barrier()  # 故障传播已结束；这里只同步成功的证据保存，不吞掉测试异常。
     finally:
         dist.destroy_process_group()
 
