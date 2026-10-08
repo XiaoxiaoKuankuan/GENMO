@@ -18,21 +18,29 @@ best_saved 指向的本运行已发布完整模型也始终保留，指针路径
 本轮恰好有 latest checkpoint。单工作线程最多四个在途轮；满队列产生背压，异常
 回传训练主线程，停止前 drain。包、清单和原件回收之间发生崩溃时，恢复重新校验
 已发布归档并幂等补齐，完整模型保存与 latest 发布始终留在同步主线程。
+
+归档计时独立于不可变证据清单：工作线程只向带锁的完成记录写入真实wall与阶段
+耗时，主线程通过drain_archive_timings取快照后再写TensorBoard/JSONL。入队预检、
+队列submit/backpressure和后台压缩/校验/fsync/发布/回收分别统计；未完成任务与
+失败重试明确标记，不修改原始归档返回值或把后台耗时计作同步checkpoint保存。
 """
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
 import hashlib
-from pathlib import Path
 import os
 import tarfile
 import tempfile
+import threading
+import time
+from contextlib import contextmanager
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 import torch
 
-from .run_management import _atomic_json, _read_json, _sync_dir, file_sha256
 from .archives import BoundedArchiveWorker
 from .checkpoint import VERSION_V2
+from .run_management import _atomic_json, _read_json, _sync_dir, file_sha256
 
 
 def validate_long_run_settings(stage):
@@ -77,7 +85,36 @@ class LongRunMaintenance:
         self.policy = policy
         self._archive_worker = None
         self._closed = False
+        self._timing_mutex = threading.RLock()
+        self._archive_timings, self._enqueue_timings = [], []
         manager._maintenance.append(self)
+
+    @staticmethod
+    @contextmanager
+    def _archive_stage(timings, key):
+        """阶段在本次归档的局部dict累计；异常仍记录真实wall，不共享线程局部状态。"""
+        started = time.perf_counter()
+        try:
+            yield
+        finally:
+            timings[key] = timings.get(key, 0.)+time.perf_counter()-started
+
+    def drain_archive_timings(self):
+        """主线程取走已完成归档/入队统计；后台不调用TensorBoard或训练对象。
+
+        返回独立快照，正在运行的任务不伪造完成耗时；尚无完成记录时total_seconds
+        为None。records含失败/恢复重试，successful_seconds只累加已完成成功任务。
+        入队计时拆分seal预检与submit wall，submit包含有界队列背压，不冒充压缩耗时。
+        """
+        with self._timing_mutex:
+            archives, enqueues = self._archive_timings, self._enqueue_timings
+            self._archive_timings, self._enqueue_timings = [], []
+        successful = [r for r in archives if r['status'] == 'passed']
+        return dict(schema='genmo.closedloop.stage10.archive_timing.v1', records=archives, enqueues=enqueues,
+            completed_count=len(archives), successful_count=len(successful),
+            total_seconds=sum(r['total_seconds'] for r in archives) if archives else None,
+            successful_seconds=sum(r['total_seconds'] for r in successful) if successful else None,
+            pending_count=0 if self._archive_worker is None else self._archive_worker.pending_count)
 
     def expired(self, now=None):
         return self.deadline is not None and (now or datetime.now(timezone.utc)) >= self.deadline
@@ -85,9 +122,27 @@ class LongRunMaintenance:
     def archive_iteration(self, directory):
         if not self.storage.get('archive_completed_iterations', False):
             return None
+        started, stages, result, failure = time.perf_counter(), {}, None, None
+        try:
+            result = self._archive_iteration(directory, stages)
+            return result
+        except BaseException as error:
+            failure = dict(type=type(error).__name__, message=str(error))
+            raise
+        finally:
+            name = Path(directory).name
+            record = dict(directory=str(directory), iteration=(result.get('iteration') if result is not None else None),
+                status='passed' if failure is None else 'failed', total_seconds=time.perf_counter()-started,
+                stage_seconds=stages, thread=threading.current_thread().name, error=failure)
+            if record['iteration'] is None and name.isdigit():
+                record['iteration'] = int(name)
+            with self._timing_mutex:
+                self._archive_timings.append(record)
+
+    def _archive_iteration(self, directory, timings):
         directory = self.guard._path(directory)
         if (directory / 'seal_manifest.json').exists():
-            return self._archive_sealed(directory)
+            return self._archive_sealed(directory, timings=timings)
         summary = _read_json(directory / 'summary.json')
         if summary.get('status') != 'accepted':
             raise ValueError('Only accepted, completely published iterations can be archived')
@@ -202,8 +257,10 @@ class LongRunMaintenance:
                     or file_sha256(path) != record['sha256']):
                 raise ValueError('Original execution evidence differs from immutable seal')
 
-    def _archive_sealed(self, directory):
-        seal = self._seal(directory)
+    def _archive_sealed(self, directory, *, timings=None):
+        timings = {} if timings is None else timings
+        with self._archive_stage(timings, 'seal_check_seconds'):
+            seal = self._seal(directory)
         members = seal['members']
         manifest_path = directory / 'archive_manifest.json'
         archive = directory / 'execution_evidence.tar.gz'
@@ -218,29 +275,36 @@ class LongRunMaintenance:
                     or not archive.is_file() or archive.stat().st_size != result.get('archive_size_bytes')
                     or file_sha256(archive) != result.get('archive_sha256')):
                 raise ValueError('Published execution archive differs from its immutable seal')
-            self._verify_archive(archive, members)
-            self._verify_originals(directory, members, allow_missing=True)
+            with self._archive_stage(timings, 'verification_seconds'):
+                self._verify_archive(archive, members)
+                self._verify_originals(directory, members, allow_missing=True)
         else:
-            self._verify_originals(directory, members)
+            with self._archive_stage(timings, 'verification_seconds'):
+                self._verify_originals(directory, members)
             if archive.exists():
                 # 包完成并原子公开、清单尚未公开就崩溃的窗口。
-                self._verify_archive(archive, members)
+                with self._archive_stage(timings, 'verification_seconds'):
+                    self._verify_archive(archive, members)
             else:
                 with self.guard.reservation(original_size + 1048576):
                     descriptor, temporary_name = tempfile.mkstemp(prefix='.execution.', suffix='.tmp', dir=directory)
                     os.close(descriptor)
                     temporary = Path(temporary_name)
                     try:
-                        with tarfile.open(temporary, 'w:gz', compresslevel=6) as stream:
-                            for record in members:
-                                stream.add(directory / record['path'], arcname=record['path'], recursive=False)
-                        with temporary.open('rb') as stream:
-                            os.fsync(stream.fileno())
-                        self._verify_archive(temporary, members)
-                        self._verify_originals(directory, members)
-                        os.link(temporary, archive)
-                        temporary.unlink()
-                        _sync_dir(directory)
+                        with self._archive_stage(timings, 'compression_seconds'):
+                            with tarfile.open(temporary, 'w:gz', compresslevel=6) as stream:
+                                for record in members:
+                                    stream.add(directory / record['path'], arcname=record['path'], recursive=False)
+                        with self._archive_stage(timings, 'archive_fsync_seconds'):
+                            with temporary.open('rb') as stream:
+                                os.fsync(stream.fileno())
+                        with self._archive_stage(timings, 'verification_seconds'):
+                            self._verify_archive(temporary, members)
+                            self._verify_originals(directory, members)
+                        with self._archive_stage(timings, 'publish_seconds'):
+                            os.link(temporary, archive)
+                            temporary.unlink()
+                            _sync_dir(directory)
                         # 在归还临时空间预留前计入完整包，前台不能看见一瞬间的虚假余量。
                         self.guard.account_file(archive)
                     finally:
@@ -251,23 +315,27 @@ class LongRunMaintenance:
                           archive=archive.name, archive_sha256=file_sha256(archive),
                           original_size_bytes=original_size, archive_size_bytes=archive.stat().st_size,
                           seal_sha256=seal_sha, iteration=seal['iteration'], members=members)
-            _atomic_json(manifest_path, result, disk_guard=self.guard)
+            with self._archive_stage(timings, 'publish_seconds'):
+                _atomic_json(manifest_path, result, disk_guard=self.guard)
         # 删除原件前再次核验；失败时保留剩余原件和已验证包作为可恢复证据。
         for record in members:
             path = self.guard._path(directory / record['path'])
             if path.exists():
-                self._verify_originals(directory, [record])
-                path.unlink()
-                self.guard.account_file(path)
-        for temporary in directory.glob('.execution.*.tmp'):
-            self.guard._path(temporary)
-            temporary.unlink()
-            self.guard.account_file(temporary)
-        for folder in sorted((path for path in directory.rglob('*') if path.is_dir()),
-                             key=lambda path: len(path.parts), reverse=True):
-            if not any(folder.iterdir()):
-                folder.rmdir()
-        _sync_dir(directory)
+                with self._archive_stage(timings, 'verification_seconds'):
+                    self._verify_originals(directory, [record])
+                with self._archive_stage(timings, 'reclaim_seconds'):
+                    path.unlink()
+                    self.guard.account_file(path)
+        with self._archive_stage(timings, 'reclaim_seconds'):
+            for temporary in directory.glob('.execution.*.tmp'):
+                self.guard._path(temporary)
+                temporary.unlink()
+                self.guard.account_file(temporary)
+            for folder in sorted((path for path in directory.rglob('*') if path.is_dir()),
+                                 key=lambda path: len(path.parts), reverse=True):
+                if not any(folder.iterdir()):
+                    folder.rmdir()
+            _sync_dir(directory)
         self.manager.append_metrics(dict(event='execution_archived', iteration=seal['iteration'],
             manifest=str(manifest_path.relative_to(self.manager.run_dir)),
             original_size_bytes=original_size, archive_size_bytes=result['archive_size_bytes']))
@@ -278,11 +346,24 @@ class LongRunMaintenance:
             raise RuntimeError('Long-run maintenance is closed')
         if not self.storage.get('archive_completed_iterations', False):
             return False
-        directory = self.guard._path(directory)
-        self._seal(directory)  # 未封存或 journal 未关闭的目录绝不进入后台队列。
-        if self._archive_worker is None:
-            self._archive_worker = BoundedArchiveWorker(self.archive_iteration, max_pending=4)
-        return self._archive_worker.submit(directory)
+        started, stages, queued, failure = time.perf_counter(), {}, False, None
+        try:
+            with self._archive_stage(stages, 'precheck_seconds'):
+                directory = self.guard._path(directory)
+                self._seal(directory)  # 未封存或 journal 未关闭的目录绝不进入后台队列。
+            if self._archive_worker is None:
+                self._archive_worker = BoundedArchiveWorker(self.archive_iteration, max_pending=4)
+            with self._archive_stage(stages, 'submit_wall_seconds'):
+                queued = self._archive_worker.submit(directory)
+            return queued
+        except BaseException as error:
+            failure = dict(type=type(error).__name__, message=str(error))
+            raise
+        finally:
+            record = dict(directory=str(directory), queued=queued, status='passed' if failure is None else 'failed',
+                          total_seconds=time.perf_counter()-started, stage_seconds=stages, error=failure)
+            with self._timing_mutex:
+                self._enqueue_timings.append(record)
 
     def recover_archives(self):
         """重启后重试未归档/未回收完的封存目录；不读取失败或仍开放的 journal。"""

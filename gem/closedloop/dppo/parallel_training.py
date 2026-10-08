@@ -81,6 +81,13 @@ def checkpoint_due(outer_iteration, interval=300, *, normal_end=False):
 def _write_checkpoint(c, *, reason):
     from tools.train_closedloop_stage10 import capture_execution_state
     from .evaluation import _model_fingerprint
+    from .periodic_monitor import log_metrics
+    previous = root_call(c.distributed, lambda: json.loads((c.output/'latest.json').read_text())
+                         if (c.output/'latest.json').exists() else None)
+    if previous is not None and previous['iteration'] == c.state['iteration']:
+        c.latest_checkpoint = previous
+        return previous
+    started = time.perf_counter()
     _synchronize_models(c, full=True, phase=f'checkpoint_{c.state["iteration"]}')
     c.state['budget'] = root_call(c.distributed, lambda: c.budget.state_dict())
     c.state['last_durable_checkpoint_iteration'] = c.state['iteration']
@@ -113,7 +120,24 @@ def _write_checkpoint(c, *, reason):
     saved = root_call(c.distributed, publish)
     c.state['last_durable_checkpoint_iteration'] = saved['iteration']
     c.latest_checkpoint = saved
+    elapsed = max(c.distributed.all_gather_object(time.perf_counter()-started))
+    root_call(c.distributed, lambda: log_metrics(c.writer, c.output/'curves.jsonl', c.state['iteration'],
+        dict(seconds=elapsed, iteration=c.state['iteration']), prefix='checkpoint'))
     return saved
+
+
+def _flush_archive_metrics(c):
+    """仅根训练线程写曲线；后台只返回已完成计时，不持有 TensorBoard writer。"""
+    if c.maintenance is None or not hasattr(c.maintenance, 'drain_archive_timings'):
+        return
+    from .periodic_monitor import log_metrics
+    telemetry = c.maintenance.drain_archive_timings()
+    for record in telemetry['records']:
+        c.manager.append_metrics(dict(event='execution_archive_completed', **record))
+        log_metrics(c.writer, c.output/'curves.jsonl', record['iteration'], record, prefix='archive')
+    if telemetry['enqueues']:
+        log_metrics(c.writer, c.output/'curves.jsonl', c.state['iteration'],
+            {f'entry{i}': row for i, row in enumerate(telemetry['enqueues'])}, prefix='archive_queue')
 
 
 def _new_phase(c, name, credits):
@@ -372,11 +396,14 @@ def _collect(c, index):
     report['rejections'] = sum(bool(row.metadata.get('rejection')) for row in buffer.transitions)
     report['timeouts'] = sum('timeout' in str(row.reason or '').lower() for row in buffer.transitions)
     report['generation_timing_totals'] = {}
+    report['actor_phase_totals'] = {}
     report['reward_component_sums'] = {}
     for row in buffer.transitions:
         for key, value in row.metadata.get('timing', {}).items():
             if isinstance(value, (int, float)):
                 report['generation_timing_totals'][key] = report['generation_timing_totals'].get(key, 0.) + value
+        for key, value in row.metadata.get('timing', {}).get('actor_phases', {}).items():
+            report['actor_phase_totals'][key] = report['actor_phase_totals'].get(key, 0.) + value
         for detail in row.metadata.get('reward_details', []):
             for key, value in detail.get('components', {}).items():
                 if isinstance(value, dict):
@@ -412,9 +439,18 @@ def _update(c, buffer, targets, manifest, index):
         bc=None if c.bc is None else c.bc.state_dict())) if c.distributed.rank == 0 else None)
     rng = capture_local_rng(c.generators)
     actor, critic, kl = {}, {}, {}
+    x0_reference = None
+    if c.settings.get('x0_diagnostic_every', 0) and index % c.settings['x0_diagnostic_every'] == 0:
+        from .optional_diagnostics import capture_x0_reference
+        x0_reference = capture_x0_reference(c.policy, rows, global_manifest=manifest, distributed=c.distributed,
+            denoising_microbatch=c.profile['microbatch'])
     try:
         started = time.perf_counter()
-        critic = critic_update_local(c.critic, c.critic_optimizer, rows, targets,
+        critic_updater = critic_update_local
+        if c.settings.get('critic_update_mode', 'distributed') == 'rank0_broadcast':
+            from .optional_diagnostics import critic_update_root_broadcast
+            critic_updater = critic_update_root_broadcast
+        critic = critic_updater(c.critic, c.critic_optimizer, rows, targets,
             global_manifest=manifest, distributed=c.distributed, steps=c.settings['critic_steps'],
             batch_size=c.settings['critic_batch'], generator=c.generators['critic'],
             grad_clip_norm=c.settings['critic_grad_clip_norm'])
@@ -435,6 +471,10 @@ def _update(c, buffer, targets, manifest, index):
                                denoising_microbatch=c.profile['microbatch'])
         kl_seconds = time.perf_counter()-started
         check_kl_limits(kl, c.settings)
+        if x0_reference is not None:
+            from .optional_diagnostics import x0_change_local
+            kl['x0_diagnostic'] = x0_change_local(c.policy, rows, x0_reference,
+                global_manifest=manifest, distributed=c.distributed, denoising_microbatch=c.profile['microbatch'])
     except Exception as failure:
         error_message = str(failure)
         restored = broadcast_state(backup, c.distributed)
@@ -450,7 +490,9 @@ def _update(c, buffer, targets, manifest, index):
                  actor_lr=c.settings['actor_lr'], optimizer_attempts_charged=True)))
         raise
     del backup
-    return dict(actor=actor, critic=critic, kl=kl, probability_check=check,
+    communication = (c.distributed.collect_gradient_timings(synchronize=True)
+                     if hasattr(c.distributed, 'collect_gradient_timings') else {'scope':'unavailable'})
+    return dict(communication=communication, actor=actor, critic=critic, kl=kl, probability_check=check,
                 timings=dict(critic_seconds=critic_seconds, actor_seconds=actor_seconds, kl_seconds=kl_seconds))
 
 
@@ -462,6 +504,8 @@ def run_parallel(args, config, collective, preflight):
         workers=None, backend=None, journal=None, writer=None, output=args.output_dir.resolve(),
         base_config=copy.deepcopy(config), config=copy.deepcopy(config), stage=config['stage10'],
         settings=config['stage9'], state=None)
+    if hasattr(collective, 'enable_gradient_timing'):
+        collective.enable_gradient_timing()
     stop = StopSignal(); stop.install()
     report = dict(schema='genmo.closedloop.stage10.session.v2', status='running', iterations=[], evaluations=[])
     error = None
@@ -550,6 +594,7 @@ def run_parallel(args, config, collective, preflight):
         _synchronize_models(c, full=True, phase='initialization')
         child_config = copy.deepcopy(c.config)
         child_config['runtime']['genmo_device'] = 'cuda:0'
+        child_config['runtime']['asset_conversion_dir'] = str(c.rank_dir/'usd_assets')
         config_path = c.rank_dir/'resolved_config.yaml'
         config_path.write_text(yaml.safe_dump(child_config, allow_unicode=True, sort_keys=False))
         c.workers = Workers(c.config, c.rank_dir)
@@ -618,6 +663,10 @@ def run_parallel(args, config, collective, preflight):
             start = time.perf_counter()
             buffer, targets, manifest, directory, path, collection = _collect(c, index)
             update = _update(c, buffer, targets, manifest, index)
+            update['gpu_memory_by_rank'] = {f'rank{i}': row for i, row in enumerate(collective.all_gather_object(dict(
+                allocated_bytes=torch.cuda.memory_allocated(collective.device),
+                reserved_bytes=torch.cuda.memory_reserved(collective.device),
+                peak_allocated_bytes=torch.cuda.max_memory_allocated(collective.device))))}
             gmt = local_call(collective, lambda: c.backend.call('verify_frozen'))
             local_call(collective, lambda: legacy._assert_frozen(gmt))
             sources_ok = root_call(collective, lambda: verify_source_provenance(provenance)['unchanged'])
@@ -664,6 +713,7 @@ def run_parallel(args, config, collective, preflight):
             if checkpoint_due(index, c.stage['storage']['checkpoint_every_iterations'], normal_end=index == args.stop_after_iteration):
                 _write_checkpoint(c, reason='periodic' if index % c.stage['storage']['checkpoint_every_iterations'] == 0 else 'normal_end')
             root_call(collective, lambda: c.maintenance.enqueue_archive(directory))
+            root_call(collective, lambda: _flush_archive_metrics(c))
             if index % c.stage['evaluation']['every_iterations'] == 0:
                 _evaluate(c, f'{index:06d}'); report['evaluations'].append(index)
             report['iterations'].append(index)
@@ -694,8 +744,6 @@ def run_parallel(args, config, collective, preflight):
         try:
             if c.journal is not None:
                 c.journal.close()
-            if c.writer is not None:
-                c.writer.close()
             if hasattr(c, 'identity'):
                 report['source_unchanged'] = root_call(collective, lambda: verify_source_provenance(provenance))
                 report['original_assets_unchanged'] = root_call(collective,
@@ -704,7 +752,18 @@ def run_parallel(args, config, collective, preflight):
                 if not report['source_unchanged']['unchanged'] or not report['original_assets_unchanged']:
                     error = error or RuntimeError('Source or original assets changed during this session')
             # root drains all immutable archives before releasing the run lock.
-            root_call(collective, lambda: c.manager.close() if c.manager is not None else None)
+            def close_manager():
+                if c.manager is not None:
+                    try:
+                        # 先drain和记录计时，再close释放写锁。
+                        if c.maintenance is not None:
+                            c.maintenance.drain()
+                    finally:
+                        _flush_archive_metrics(c)
+                        c.manager.close()
+            root_call(collective, close_manager)
+            if c.writer is not None:
+                c.writer.close()
             failures = collective.all_gather_object(None if error is None else f'{type(error).__name__}: {error}')
             if any(failures):
                 error = error or RuntimeError('; '.join(value for value in failures if value))

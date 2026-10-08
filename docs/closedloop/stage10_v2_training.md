@@ -6,7 +6,7 @@
 
 八个 rank 各自持有一个冻结 GMT/CPU PhysX 后端，使用同一模型版本分别采集 20 条上层转移（全局 160）。真实执行时长决定 GAE，环境/episode/连续区间之间不串接；old log-prob、old/next value、returns 和全局标准化 advantage 整轮固定。每条链 20 步，完整链组成 1600 内部转移的优化器 minibatch，2 个 epoch 最多 4 次 Actor 参数更新。计算 microbatch 启动依次校验 4、2、1 并记录共同通过的配置，独立于优化器 minibatch。
 
-Actor `AdamW(lr=5e-9, weight_decay=0)`，PPO clip 0.01；BC 每次参数更新由 rank0 计算全局 2 条样本、权重 0.1。PPO 按全局实际有效内部样本数归一化，再做梯度 SUM；BC 只加入一次，不乘或除以 8。Critic 默认 80 次、全局 batch32、学习率 1e-4；可显式配置20/40/80进行对照。
+Actor `AdamW(lr=5e-9, weight_decay=0)`，PPO clip 0.01；BC 每次参数更新由 rank0 计算全局 2 条样本、权重 0.1。PPO 按全局实际有效内部样本数归一化，再做梯度 SUM；BC 只加入一次，不乘或除以 8。Critic 默认 80 次、全局 batch32、学习率 1e-4；可显式配置20/40/80进行对照。`critic_update_mode: rank0_broadcast` 启用单卡更新后广播的性能对照，默认 `distributed` 不变。`x0_diagnostic_every: N` 显式开启每N轮更新前后真实x0输出诊断，默认0关闭，报告额外全链前向成本。
 
 随机核默认 eta=0.1、std_floor=0.001、CFG=2.5，不删除末端去噪 loss。精确 joint_sum 为默认概率目标；free_coordinate_mean 必须显式确认学习率/clip/BC配置，属于算法对照，真实 joint KL 仍保留。std_schedule 改变会改变核身份，不允许混用旧轨迹。
 
@@ -33,6 +33,8 @@ load_actor保留构造时的冻结规则，优化器排除固定编码表。旧S
 初始化、每100轮和正常结束使用独立评估状态，四来源各4条固定验证样本、42/1729两种子、每条10秒，共32任务，评估不额外保存模型。使用内存权重，恢复训练RNG和游标。最佳观测与最佳已保存模型分别记录；物理失败不增加、平均时长不下降后才比较四来源等权回报。
 
 固定初始链漂移用于诊断相对Stage1概率变化，不能替代闭环配对评估。训练曲线同时看reward/执行秒、分项奖励、真实执行时长、失败/拒绝、KL、clip、真实Actor步数、PPO/BC梯度、裁剪系数及Critic新批误差，不能仅凭loss平稳认定学到或退化。周期子集比较必须显式 `--mode periodic_subset`，不冒称全验证集验收。
+
+并行GMT的 `asset_conversion_dir` 由入口分配到各rank私有目录，避免固定环境种子导致IsaacLab默认秒级USD目录碰撞。路径不参与实际物理指纹；不更换URDF或转换选项。通信耗时明确为梯度SUM的CUDA stream event时间，不冒称全部Gloo/RPC通信；异步归档仅由训练主线程写入TensorBoard。
 
 ## 命令（服务器1本机）
 

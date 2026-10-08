@@ -17,11 +17,17 @@ BC 仅主进程采样并反传一次，trainer 负责将其梯度准确合并到
 独立采样轨迹或 BC；Critic minibatch 由主进程广播，因此无需引入另一套续训随机源。
 仅恢复已发布 checkpoint，丢弃中断时未接受的 rollout；不支持跨拓扑或跨任务身份。
 异常交由 torchrun 终止同一作业的其他进程，不继续不完整的分布式更新。
+
+梯度SUM归约另记录当前设备stream的CUDA事件，presence和每个梯度bucket均保留
+真实通信区间；记录时不逐桶强制同步，外层阶段完成后统一query或等待末event。
+CPU替身使用阻塞all_reduce的wall计时。张量本地bytes、host调用wall与stream耗时
+分别报告，未完成记录继续待取，不用零值冒充缺测，也不改变归约/优化算法。
 """
 from __future__ import annotations
 
 import copy
 import hashlib
+import time
 from pathlib import Path
 from uuid import uuid4
 
@@ -61,10 +67,89 @@ def _optimizer_fingerprint(optimizer):
 
 
 class DistributedCollectives:
-    def __init__(self, rank, world_size, *, control_group=None, tensor_group=None, device='cpu'):
+    def __init__(self, rank, world_size, *, control_group=None, tensor_group=None, device='cpu',
+                 measure_gradient_communication=False):
         self.rank, self.world_size = int(rank), int(world_size)
         self.control_group, self.tensor_group = control_group, tensor_group
         self.device = torch.device(device)
+        self._gradient_timing_pending = []
+        self._gradient_timing_sequence = 0
+        self._gradient_timing_enabled = bool(measure_gradient_communication)
+
+    def enable_gradient_timing(self, enabled=True):
+        """新监视入口显式开启；旧入口没有consumer时不积压CUDA事件或历史记录。"""
+        self._gradient_timing_enabled = bool(enabled)
+
+    def _timed_gradient_reduce(self, tensor, record, kind):
+        """仅包围真实SUM collective；CUDA事件延后收集，不增加逐桶同步。"""
+        if record is None:
+            dist.all_reduce(tensor, op=dist.ReduceOp.SUM, group=self.tensor_group)
+            return
+        events = None
+        if tensor.device.type == 'cuda':
+            stream = torch.cuda.current_stream(tensor.device)
+            begin, end = torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True)
+            begin.record(stream)
+            events = (begin, end, stream)
+        started = time.perf_counter()
+        dist.all_reduce(tensor, op=dist.ReduceOp.SUM, group=self.tensor_group)
+        wall = time.perf_counter()-started
+        if events is not None:
+            events[1].record(events[2])
+        record['collectives'].append(dict(kind=kind, device=str(tensor.device),
+            tensor_bytes=tensor.numel()*tensor.element_size(), host_api_seconds=wall,
+            cpu_wall_seconds=wall if events is None else None, events=events))
+
+    def collect_gradient_timings(self, *, synchronize=False):
+        """外层阶段结束后取走完成的归约计时；默认只query，不等待GPU。
+
+        CUDA值是SUM collective所在stream的真实event区间，包含通信等待；CPU值是
+        阻塞all_reduce的wall耗时。pack/copy/优化器计算不在区间内，tensor_bytes是
+        本地归约张量大小，不冒充网络传输量。synchronize=True仅等待每个stream的
+        最后一个结束event，随后统一读取，绝不在sum_gradients内逐桶同步。
+        尚未完成的调用继续保留；没有完成样本时seconds为None而非伪造为零。
+        """
+        pending = self._gradient_timing_pending
+        if synchronize:
+            ends = {}
+            for record in pending:
+                for collective in record['collectives']:
+                    if collective['events'] is not None:
+                        _, end, stream = collective['events']
+                        ends[(collective['device'], stream.cuda_stream)] = end
+            for end in ends.values():
+                end.synchronize()
+        complete, remaining = [], []
+        for record in pending:
+            if not all(c['events'] is None or c['events'][1].query() for c in record['collectives']):
+                remaining.append(record)
+                continue
+            collectives = []
+            for collective in record['collectives']:
+                event = collective['events']
+                seconds = collective['cpu_wall_seconds'] if event is None else event[0].elapsed_time(event[1])/1000.
+                if not 0. <= seconds < float('inf'):
+                    raise RuntimeError('Invalid completed gradient communication timing')
+                collectives.append(dict(kind=collective['kind'], device=collective['device'],
+                    tensor_bytes=collective['tensor_bytes'], host_api_seconds=collective['host_api_seconds'],
+                    seconds=float(seconds), clock='host_wall_cpu' if event is None else 'cuda_stream_event'))
+            complete.append(dict(sequence=record['sequence'], module=record['module'],
+                call_wall_seconds=record['call_wall_seconds'], collectives=collectives))
+        self._gradient_timing_pending = remaining
+        by_module = {}
+        for record in complete:
+            aggregate = by_module.setdefault(record['module'], dict(call_count=0, collective_count=0,
+                seconds=0., host_api_seconds=0., call_wall_seconds=0., tensor_bytes=0))
+            aggregate['call_count'] += 1
+            aggregate['call_wall_seconds'] += record['call_wall_seconds']
+            for collective in record['collectives']:
+                aggregate['collective_count'] += 1
+                for key in ('seconds', 'host_api_seconds', 'tensor_bytes'):
+                    aggregate[key] += collective[key]
+        return dict(schema='genmo.closedloop.stage10.gradient_communication_timing.v1', rank=self.rank,
+            completed_call_count=len(complete), pending_call_count=len(remaining),
+            seconds=sum(v['seconds'] for v in by_module.values()) if complete else None,
+            by_module=by_module, calls=complete, scope='sum_collective_stream_elapsed_excludes_pack_and_copy')
 
     def broadcast_object(self, value, src=0):
         objects = [value if self.rank == src else None]
@@ -91,9 +176,14 @@ class DistributedCollectives:
         dist.barrier(group=self.control_group)
 
     def sum_gradients(self, module):
+        started, timing = None, None
+        if self._gradient_timing_enabled:
+            started = time.perf_counter()
+            self._gradient_timing_sequence += 1
+            timing = dict(sequence=self._gradient_timing_sequence, module=type(module).__name__, collectives=[])
         parameters = list(module.parameters())
         present = torch.tensor([p.grad is not None for p in parameters], dtype=torch.int32, device=self.device)
-        dist.all_reduce(present, op=dist.ReduceOp.SUM, group=self.tensor_group)
+        self._timed_gradient_reduce(present, timing, 'gradient_presence')
         buckets = {}
         for parameter, count in zip(parameters, present.tolist()):
             if count == 0:
@@ -106,24 +196,27 @@ class DistributedCollectives:
         limit = 32 * 1024 * 1024
         for entries in buckets.values():
             pending, size = [], 0
-            def flush():
-                if not pending:
+            def flush(batch):
+                if not batch:
                     return
-                flat = torch.cat([gradient.reshape(-1) for _, gradient in pending])
-                dist.all_reduce(flat, op=dist.ReduceOp.SUM, group=self.tensor_group)
+                flat = torch.cat([gradient.reshape(-1) for _, gradient in batch])
+                self._timed_gradient_reduce(flat, timing, 'gradient_bucket')
                 offset = 0
-                for parameter, gradient in pending:
+                for parameter, gradient in batch:
                     gradient.copy_(flat[offset:offset + gradient.numel()].view_as(gradient))
                     parameter.grad = gradient
                     offset += gradient.numel()
             for parameter, gradient in entries:
                 required = gradient.numel() * gradient.element_size()
                 if pending and size + required > limit:
-                    flush()
+                    flush(pending)
                     pending, size = [], 0
                 pending.append((parameter, gradient))
                 size += required
-            flush()
+            flush(pending)
+        if timing is not None:
+            timing['call_wall_seconds'] = time.perf_counter()-started
+            self._gradient_timing_pending.append(timing)
 
     def gather_rows(self, local_rows, local_indices, total_count):
         entries = [None] * self.world_size
