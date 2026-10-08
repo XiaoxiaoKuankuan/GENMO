@@ -18,6 +18,7 @@ import torch
 from gem.closedloop.dppo import parallel_training as training
 from gem.closedloop.dppo.execution_profile import select_profile
 from gem.closedloop.dppo.run_management import TrainingBudget
+from gem.closedloop.dppo.parallel_support import begin_lease
 from tools.train_closedloop_stage10 import configuration
 
 
@@ -50,6 +51,17 @@ def test_profile_selects_common_pass_without_changing_tolerances():
     assert select_profile(ranks)['cfg_batch'] is False
     with pytest.raises(RuntimeError):
         select_profile(ranks, required=dict(microbatch=4, cfg_batch=False))
+
+
+def test_global_collection_credit_rejected_before_any_rank_reservation(tmp_path):
+    budget = TrainingBudget(tmp_path/'global.json', dict(accepted_iterations=2, optimizer_attempts=8,
+        generations=10, control_steps=100, physics_steps=400))
+    credits = [dict(generations=6, control_steps=10, physics_steps=40)]*2
+    before = budget.state_dict()
+    with pytest.raises(RuntimeError, match='complete parallel collection lease'):
+        begin_lease(Solo(), None, budget, tmp_path, 'collect', credits)
+    assert budget.state_dict() == before
+    assert not (tmp_path/'resource_lease.json').exists()
 
 
 @pytest.mark.parametrize('failure', ['critic', 'actor', 'kl'])

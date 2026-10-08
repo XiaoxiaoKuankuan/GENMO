@@ -241,6 +241,8 @@ def test_v2_resume_supersedes_unsaved_tail_without_refunding_resources(lifecycle
     assert read_json(life.root/'budget.json')['used']['accepted_iterations']==4
     historical = next(row for row in result['checks'] if row['name']==f'v2_historical_seal:{old.name}:3')
     assert historical['details']['disposition']=='superseded_unsaved'
+    next((life.root/'superseded_tails').glob('*.json')).unlink()
+    assert audit_run(life.root)['status']=='failed'
 
 
 def test_v2_final_checkpoint_can_include_later_evaluation_budget(lifecycle):

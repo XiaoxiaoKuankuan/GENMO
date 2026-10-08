@@ -369,6 +369,8 @@ def audit_training_v2(root, run, audit, result, minimum_iterations, require_resu
             superseded.add(key)
         events.append(dict(path=str(path.relative_to(root)), durable_iteration=event['durable_iteration'],
                            previous_accepted_iteration=previous['iteration']))
+    require(set(records)-selected_keys<=superseded,
+            'Noncanonical accepted V2 seal lacks explicit superseded-tail evidence')
     terminal = accepted['session_id']
     for name, session in sessions.items():
         recovered = name!=terminal and any(

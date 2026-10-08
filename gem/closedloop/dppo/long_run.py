@@ -11,6 +11,8 @@
 transition、去噪链和 SQLite 执行记录完整保留于归档，不抽样或丢弃历史执行数据。
 checkpoint 只回收已发布且不属于最近若干轮/定期里程碑的文件，先校验最新恢复点
 和旧文件，写入不可覆盖的退休证明后才删除旧文件；initial.pt 始终保留。
+best_saved 指向的本运行已发布完整模型也始终保留，指针路径、轮次或 SHA 不可信时
+先拒绝本次回收，不能删掉模型后才发现最佳指针已经失效。
 
 新 v2 路径以不可变 seal_manifest 证明本轮接受且全部 journal 已关闭，不再要求
 本轮恰好有 latest checkpoint。单工作线程最多四个在途轮；满队列产生背压，异常
@@ -314,6 +316,33 @@ class LongRunMaintenance:
         latest = _read_json(self.manager.run_dir / 'latest.json')
         publications = sorted((self.manager.run_dir / 'checkpoints/publications').glob('*.json'))
         records = [_read_json(path) for path in publications]
+        protected_best = None
+        best_pointer = self.manager.run_dir / 'best_saved.json'
+        if best_pointer.exists() or best_pointer.is_symlink():
+            best = _read_json(self.guard._path(best_pointer))
+            if best is not None:
+                descriptor = best.get('checkpoint') if isinstance(best, dict) else None
+                if (not isinstance(best, dict) or best.get('saved') is not True or not isinstance(descriptor, dict)
+                        or type(descriptor.get('iteration')) is not int
+                        or best.get('iteration') != descriptor['iteration']
+                        or not 0 <= descriptor['iteration'] <= latest['iteration']
+                        or not isinstance(descriptor.get('path'), str)
+                        or Path(descriptor['path']).is_absolute()):
+                    raise ValueError('Invalid best_saved checkpoint descriptor; refusing checkpoint retirement')
+                best_path = self.guard._path(self.manager.run_dir / descriptor['path'])
+                protected_best = str(best_path.relative_to(self.manager.run_dir))
+                if protected_best != descriptor['path'] or not best_path.is_file():
+                    raise ValueError('best_saved checkpoint must be an existing canonical path inside this run')
+                if descriptor['iteration'] == 0:
+                    if protected_best != 'checkpoints/initial.pt':
+                        raise ValueError('Initial best_saved must reference this run initial checkpoint')
+                else:
+                    matching = [record for record in records if all(record.get(key) == descriptor.get(key)
+                                for key in ('iteration', 'path', 'sha256'))]
+                    if len(matching) != 1 or best_path.stat().st_size != matching[0]['size_bytes']:
+                        raise ValueError('best_saved has no matching publication in this run')
+                if file_sha256(best_path) != descriptor.get('sha256'):
+                    raise ValueError('best_saved checkpoint SHA changed; refusing checkpoint retirement')
         # 稀疏保存时 keep_last 表示最近 N 个完整 checkpoint，不是最近 N 个外层轮。
         durable_records = [record for record in records if record['iteration'] <= latest['iteration']]
         recent = {record['iteration'] for record in sorted(durable_records, key=lambda item: item['iteration'])[-keep_last:]}
@@ -321,7 +350,8 @@ class LongRunMaintenance:
         for publication in publications:
             record = _read_json(publication)
             if (record['iteration'] > latest['iteration'] or record['iteration'] in recent
-                    or record['iteration'] % self.storage['checkpoint_keep_every'] == 0):
+                    or record['iteration'] % self.storage['checkpoint_keep_every'] == 0
+                    or record['path'] == protected_best):
                 continue
             path = self.guard._path(self.manager.run_dir / record['path'])
             if path.name == 'initial.pt' or record['iteration'] >= latest['iteration']:

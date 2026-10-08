@@ -221,3 +221,44 @@ def test_changed_old_or_latest_checkpoint_prevents_deletion(tmp_path, modified_i
             maintenance.prune_checkpoints()
         assert {number: path.read_bytes() for number, path in paths.items()} == before
         assert not (manager.run_dir / 'checkpoints/retired').exists()
+
+
+def test_retention_keeps_best_saved_extra_checkpoint_across_controlled_end_resumes(tmp_path):
+    settings = stage_settings()
+    settings['storage']['checkpoint_keep_every'] = 300
+    output = tmp_path / 'run'
+    with RunManager(output) as manager:
+        maintenance = LongRunMaintenance(manager, settings)
+        paths = {number: write_checkpoint(manager, number) for number in (300, 317, 325, 340)}
+        best = dict(saved=True, iteration=317, checkpoint=dict(iteration=317,
+            path=str(paths[317].relative_to(output)), sha256=file_sha256(paths[317])))
+        (output / 'best_saved.json').write_text(json.dumps(best))
+        assert maintenance.prune_checkpoints() == []
+    with RunManager(output, resume=True) as manager:
+        maintenance = LongRunMaintenance(manager, settings)
+        paths[360] = write_checkpoint(manager, 360)
+        assert maintenance.prune_checkpoints() == [str(paths[325].relative_to(output))]
+        assert all(paths[number].is_file() for number in (300, 317, 340, 360))
+        assert file_sha256(paths[317]) == best['checkpoint']['sha256']
+
+
+@pytest.mark.parametrize('fault', ['outside_run', 'wrong_sha', 'unpublished'])
+def test_invalid_best_saved_aborts_retention_before_any_deletion(tmp_path, fault):
+    with RunManager(tmp_path / 'run') as manager:
+        maintenance = LongRunMaintenance(manager, stage_settings())
+        paths = {number: write_checkpoint(manager, number) for number in (1, 2, 3, 4)}
+        descriptor = dict(iteration=1, path=str(paths[1].relative_to(manager.run_dir)), sha256=file_sha256(paths[1]))
+        if fault == 'outside_run':
+            outside = tmp_path / 'foreign.pt'
+            outside.write_bytes(paths[1].read_bytes())
+            descriptor['path'] = '../foreign.pt'
+        elif fault == 'wrong_sha':
+            descriptor['sha256'] = '0' * 64
+        else:
+            unknown = write_checkpoint(manager, 1, publish=False, filename='unpublished_copy.pt')
+            descriptor.update(path=str(unknown.relative_to(manager.run_dir)), sha256=file_sha256(unknown))
+        (manager.run_dir / 'best_saved.json').write_text(json.dumps(dict(saved=True, iteration=1, checkpoint=descriptor)))
+        with pytest.raises(ValueError):
+            maintenance.prune_checkpoints()
+        assert all(path.exists() for path in paths.values())
+        assert not (manager.run_dir / 'checkpoints/retired').exists()
