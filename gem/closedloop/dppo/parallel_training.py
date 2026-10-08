@@ -39,6 +39,7 @@ from .env_adapter import UpperEnvironment
 from .evaluation import evaluate_policy
 from .execution_profile import probe_profiles, select_profile
 from .performance import PhaseProfiler, activate, deactivate, measure
+from .tensor_cache import RolloutTensorCache
 from .full_dataset import FullMusicCatalog, FullMusicSampler
 from .long_run import LongRunMaintenance
 from .parallel_support import (begin_lease, broadcast_state, build_global_manifest, capture_local_rng,
@@ -176,23 +177,35 @@ def _calibrate_and_profile(c, restored=False):
     previous = capture_execution_state(c.env) if restored else None
     rng = capture_local_rng(c.generators)
     samples = c.base_config['timing']['calibration_warmup'] + c.base_config['timing']['calibration_samples']
+    performance = c.stage.get('performance', {})
+    fixed_shape = (c.state.get('execution_profile', {}).get('execution_batch_size') if restored else
+                   performance.get('execution_batch_size'))
     credits = c.distributed.all_gather_object(
-        collection_credit(samples + 2, c.settings['episode_seconds'], c.env.latency_budget_s))
+        collection_credit(samples + (5 if fixed_shape is not None else 2), c.settings['episode_seconds'], c.env.latency_budget_s))
     path, lease, budget = _new_phase(c, 'calibration', credits)
     c.env.budget, c.env.output = budget, path
     path.joinpath('raw_samples').mkdir()
-    def perform():
+    def perform(shape=fixed_shape, maximum=None):
         source = next(iter(c.catalog.samples['train']))
         sample = c.catalog.samples['train'][source][0]
         c.env.reset_task(sample, c.catalog.load_music(sample), seed=c.env.config['stage9']['seed'], phase='calibration')
         conditions, _ = c.env.preview_context()
         conditions = {key: value.to(c.distributed.device) for key, value in conditions.items()}
         return probe_profiles(c.policy, conditions,
-            maximum_microbatch=c.settings['denoising_microbatch'], seed=c.stage['seed']+c.distributed.rank,
-            reserve_generation=lambda: budget.reserve('profile', generations=1))
+            maximum_microbatch=maximum or c.settings['denoising_microbatch'], seed=c.stage['seed']+c.distributed.rank,
+            fixed_execution_shape=shape, optimizer_probe=bool(performance.get('optimizer_probe', False)),
+            actor_lr=c.settings.get('actor_lr', 5e-9), reserve_generation=lambda: budget.reserve('profile', generations=1))
     reports = c.distributed.all_gather_object(local_call(c.distributed, perform))
-    profile = select_profile(reports, required=c.state.get('execution_profile') if restored else None)
+    try:
+        profile = select_profile(reports, required=c.state.get('execution_profile') if restored else None)
+    except RuntimeError:
+        if restored or fixed_shape is None:
+            raise
+        fallback = c.distributed.all_gather_object(local_call(c.distributed, lambda: perform(None, 1)))
+        reports = [first+second for first, second in zip(reports, fallback)]
+        profile = select_profile(reports)
     c.profile = profile
+    c.policy.execution_batch_size = profile.get('execution_batch_size')
     c.policy.cfg_batch = profile['cfg_batch']
     # 校准必须使用最终通过概率门槛的执行方式；CFG回退后不可沿用更快路径的时延。
     calibration = local_call(c.distributed, lambda: calibrate(c.env, c.catalog, path,
@@ -543,12 +556,31 @@ def _probability_sentinels(manifest, *, world_size, chains_per_rank):
 
 
 def _update(c, buffer, targets, manifest, index):
+    """设备缓存只存在于本轮更新事务；故障传播与模型回滚仍由原更新器负责。"""
+    performance = getattr(c, 'stage', {}).get('performance', {})
+    cache = None
+    if performance.get('tensor_cache', False):
+        cache = local_call(c.distributed, lambda: RolloutTensorCache(buffer.transitions, targets,
+            c.distributed.device, max_device_bytes=performance.get('tensor_cache_max_bytes', 256*1024**2)))
+    c.tensor_cache = cache
+    try:
+        result = _update_cached(c, buffer, targets, manifest, index)
+        if cache is not None:
+            result['tensor_cache_by_rank'] = c.distributed.all_gather_object(cache.report())
+        return result
+    finally:
+        if cache is not None:
+            cache.close()
+        c.tensor_cache = None
+
+
+def _update_cached(c, buffer, targets, manifest, index):
     rows = buffer.transitions
     full = index == c.initial_iteration+1 or index % c.stage['checks']['full_probability_every'] == 0
     indices, coverage = (None, None) if full else _probability_sentinels(manifest,
         world_size=c.distributed.world_size, chains_per_rank=c.stage['checks']['sentinel_chains_per_rank'])
     check = probability_check_local(c.policy, rows, global_manifest=manifest, global_indices=indices, distributed=c.distributed,
-                                    denoising_microbatch=c.profile['microbatch'])
+                                    denoising_microbatch=c.profile['microbatch'], tensor_cache=c.tensor_cache)
     check.update(scope='full_rollout_before_first_step' if full else 'rank_sentinel_all_denoising_steps')
     if coverage is not None:
         check['sentinel_coverage'] = coverage
@@ -576,7 +608,8 @@ def _update(c, buffer, targets, manifest, index):
         critic = critic_updater(c.critic, c.critic_optimizer, rows, targets,
             global_manifest=manifest, distributed=c.distributed, steps=c.settings['critic_steps'],
             batch_size=c.settings['critic_batch'], generator=c.generators['critic'],
-            grad_clip_norm=c.settings['critic_grad_clip_norm'])
+            grad_clip_norm=c.settings['critic_grad_clip_norm'],
+            **({'tensor_cache':c.tensor_cache} if critic_updater is critic_update_local else {}))
         timings[active_phase] = time.perf_counter()-started
         active_phase = 'actor_seconds'
         started = time.perf_counter()
@@ -586,14 +619,14 @@ def _update(c, buffer, targets, manifest, index):
             ppo_epochs=c.settings['ppo_epochs'], actor_minibatch_internal_transitions=c.settings['actor_minibatch_internal_transitions'],
             denoising_microbatch=c.profile['microbatch'], max_optimizer_steps=c.settings['max_actor_optimizer_steps'],
             soft_kl_limit=c.settings['kl_soft_stop_joint'], objective_logprob_reduction=c.settings['objective_logprob_reduction'],
-            generator=c.generators['actor'], gradient_diagnostics=True,
+            generator=c.generators['actor'], gradient_diagnostics=True, tensor_cache=c.tensor_cache,
             reserve_attempt=lambda: root_call(c.distributed,
                 lambda: c.budget.reserve('update', optimizer_attempts=1)))
         timings[active_phase] = time.perf_counter()-started
         active_phase = 'kl_seconds'
         started = time.perf_counter()
         kl = analytic_kl_local(c.policy, rows, global_manifest=manifest, distributed=c.distributed,
-                               denoising_microbatch=c.profile['microbatch'])
+                               denoising_microbatch=c.profile['microbatch'], tensor_cache=c.tensor_cache)
         timings[active_phase] = time.perf_counter()-started
         active_phase = None
         check_kl_limits(kl, c.settings)

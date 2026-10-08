@@ -23,6 +23,7 @@ import torch
 
 from gem.closedloop.dppo.policy import masked_joint_log_prob
 from .performance import measure, profiled
+from .tensor_cache import ConditionGraphCache
 
 
 @contextmanager
@@ -96,22 +97,25 @@ def _context(rows, device):
 
 
 @profiled('learning.parameters', gpu=True)
-def _parameters(policy, rows, steps, device):
-    context = _context(rows, device)
-    state = torch.stack([row.chain[step] for row, step in zip(rows, steps)]).to(device)
+def _parameters(policy, rows, steps, device, cache=None, conditions=None):
+    context = _context(rows, device) if cache is None else cache.context(rows)
+    state = (torch.stack([row.chain[step] for row, step in zip(rows, steps)]).to(device)
+             if cache is None else cache.get('chain', rows, steps))
     indices = torch.tensor(steps, device=device, dtype=torch.long)
     if hasattr(policy, 'prepare_conditions'):
-        prepared = policy.prepare_conditions(context)
+        prepared = policy.prepare_conditions(context) if conditions is None else conditions.prepare(rows, context)
         result = policy.transition_parameters(context, state, indices, prepared=prepared)
     else:
         result = policy.transition_parameters(context, state, indices)
-    mask = torch.stack([row.free_mask for row in rows]).to(device)
+    mask = torch.stack([row.free_mask for row in rows]).to(device) if cache is None else cache.get('free_mask', rows)
     if 'free_mask' in result and not torch.equal(result['free_mask'], mask):
         raise ValueError('Current policy changed the fixed rollout free-coordinate mask')
     return result, mask
 
 
-def _old_kernel(rows, steps, device):
+def _old_kernel(rows, steps, device, cache=None):
+    if cache is not None:
+        return cache.get('old_means', rows, steps).double(), cache.get('old_stds', rows, steps).double()
     means = torch.cat([row.metadata['sampler_trace']['old_means'][:, step]
                        for row, step in zip(rows, steps)], 0).to(device).double()
     stds = torch.cat([row.metadata['sampler_trace']['old_stds'][:, step]
@@ -149,7 +153,7 @@ def _kl_report(values, free_counts):
 @torch.no_grad()
 @profiled('learning.analytic_kl', gpu=True)
 def analytic_kl_local(policy, transitions, *, global_manifest=None, distributed=None,
-                      denoising_microbatch=4, global_indices=None):
+                      denoising_microbatch=4, global_indices=None, tensor_cache=None):
     """按各卡本地链计算精确条件高斯 KL；跨卡仅收集小型逐步 KL 矩阵。"""
     from gem.closedloop.dppo.trainer import _validate_actor_transitions
     if type(denoising_microbatch) is not int or denoising_microbatch < 1:
@@ -170,12 +174,13 @@ def analytic_kl_local(policy, transitions, *, global_manifest=None, distributed=
         diagnostics = torch.zeros((len(owned), 4, policy.steps), dtype=torch.float64, device=device)
         counts = torch.tensor([int(row.free_mask.sum()) for row in local_rows], device=device, dtype=torch.float64)
         flat = [(index, step) for index in range(len(local_rows)) for step in range(policy.steps)]
+        conditions = ConditionGraphCache(policy, tensor_cache) if tensor_cache is not None and hasattr(policy, 'prepare_conditions') else None
         for start in range(0, len(flat), denoising_microbatch):
             chunk = flat[start:start + denoising_microbatch]
             rows = [local_rows[index] for index, _ in chunk]
             steps = [step for _, step in chunk]
-            parameters, mask = _parameters(policy, rows, steps, device)
-            old_mean, old_std = _old_kernel(rows, steps, device)
+            parameters, mask = _parameters(policy, rows, steps, device, tensor_cache, conditions)
+            old_mean, old_std = _old_kernel(rows, steps, device, tensor_cache)
             values = _joint_kl(parameters, mask, old_mean, old_std)
             count = mask.sum((-2, -1))
             shift = ((parameters['mean'].double() - old_mean).square().masked_fill(~mask, 0.).sum((-2, -1)) / count).sqrt()
@@ -203,7 +208,7 @@ def analytic_kl_local(policy, transitions, *, global_manifest=None, distributed=
 @torch.no_grad()
 @profiled('learning.probability_check', gpu=True)
 def probability_check_local(policy, transitions, *, global_manifest=None, distributed=None,
-                            denoising_microbatch=4, global_indices=None):
+                            denoising_microbatch=4, global_indices=None, tensor_cache=None):
     """完整零更新检查仅用于启动／周期诊断；原始概率、ratio 和独立公式门槛不放宽。"""
     from gem.closedloop.dppo.trainer import _validate_actor_transitions
     if type(denoising_microbatch) is not int or denoising_microbatch < 1:
@@ -222,14 +227,17 @@ def probability_check_local(policy, transitions, *, global_manifest=None, distri
         device = next(policy.actor.parameters()).device
         checks = torch.zeros((len(rows), 3), dtype=torch.float64, device=device)
         flat = [(index, step) for index in range(len(rows)) for step in range(policy.steps)]
+        conditions = ConditionGraphCache(policy, tensor_cache) if tensor_cache is not None and hasattr(policy, 'prepare_conditions') else None
         for start in range(0, len(flat), denoising_microbatch):
             chunk = flat[start:start + denoising_microbatch]
             samples, steps = [rows[i] for i, _ in chunk], [step for _, step in chunk]
-            parameters, mask = _parameters(policy, samples, steps, device)
-            observed = torch.stack([row.chain[step + 1] for row, step in zip(samples, steps)]).to(device)
-            stored = torch.stack([row.old_log_prob[step] for row, step in zip(samples, steps)]).to(device)
+            parameters, mask = _parameters(policy, samples, steps, device, tensor_cache, conditions)
+            observed = (torch.stack([row.chain[step + 1] for row, step in zip(samples, steps)]).to(device)
+                        if tensor_cache is None else tensor_cache.get('chain', samples, [step+1 for step in steps]))
+            stored = (torch.stack([row.old_log_prob[step] for row, step in zip(samples, steps)]).to(device)
+                      if tensor_cache is None else tensor_cache.get('old_log_prob', samples, steps))
             current = masked_joint_log_prob(observed, parameters['mean'], parameters['std'], mask)
-            old_mean, old_std = _old_kernel(samples, steps, device)
+            old_mean, old_std = _old_kernel(samples, steps, device, tensor_cache)
             independent = torch.distributions.Normal(old_mean, old_std).log_prob(observed.double())
             independent = independent.masked_fill(~mask, 0.).sum((-2, -1))
             batch = torch.stack(((current - stored).abs(), ((current - stored).exp() - 1).abs(),
@@ -284,7 +292,7 @@ def actor_update_v2(policy, optimizer, transitions, targets, *, global_manifest=
                     bc=None, bc_weight=.1, clip=.01, gamma_denoising=.99, grad_clip_norm=1.,
                     soft_kl_limit=.015, objective_logprob_reduction='joint_sum',
                     reserve_attempt=None, verify_initial_probability=False,
-                    gradient_diagnostics=True, step_callback=None):
+                    gradient_diagnostics=True, step_callback=None, tensor_cache=None):
     """执行真实多次 PPO 参数更新；完整硬 KL 与整轮回滚明确由外层事务负责。"""
     from gem.closedloop.dppo.trainer import _validate_actor_transitions
     for name, value in (('ppo_epochs', ppo_epochs), ('actor minibatch', actor_minibatch_internal_transitions),
@@ -317,7 +325,7 @@ def actor_update_v2(policy, optimizer, transitions, targets, *, global_manifest=
         if advantages.shape != (len(transitions),) or any(not torch.isfinite(advantages[index]) for _, index in _owned(selected, manifest, distributed)):
             raise ValueError('Actor requires fixed finite advantages aligned with local transitions')
     probability = (probability_check_local(policy, transitions, global_manifest=global_manifest, distributed=distributed,
-                    denoising_microbatch=denoising_microbatch) if verify_initial_probability else None)
+                    denoising_microbatch=denoising_microbatch, tensor_cache=tensor_cache) if verify_initial_probability else None)
     device = next(actor.parameters()).device
     upper_batch = actor_minibatch_internal_transitions // policy.steps
     reports, orders = [], []
@@ -345,32 +353,39 @@ def actor_update_v2(policy, optimizer, transitions, targets, *, global_manifest=
             optimizer.zero_grad(set_to_none=True)
             summary = torch.zeros(7, dtype=torch.float64, device=device)
             with _local_phase(distributed, 'actor_minibatch_forward_backward'):
+                conditions = ConditionGraphCache(policy, tensor_cache) if tensor_cache is not None and hasattr(policy, 'prepare_conditions') else None
                 for start in range(0, len(pairs), denoising_microbatch):
                     chunk = pairs[start:start + denoising_microbatch]
                     rows, steps = [transitions[index] for index, _ in chunk], [step for _, step in chunk]
-                    parameters, mask = _parameters(policy, rows, steps, device)
-                    observed = torch.stack([row.chain[step + 1] for row, step in zip(rows, steps)]).to(device)
+                    parameters, mask = _parameters(policy, rows, steps, device, tensor_cache, conditions)
+                    observed = (torch.stack([row.chain[step + 1] for row, step in zip(rows, steps)]).to(device)
+                        if tensor_cache is None else tensor_cache.get('chain', rows, [step+1 for step in steps]))
                     new = masked_joint_log_prob(observed, parameters['mean'], parameters['std'], mask)
-                    old = torch.stack([row.old_log_prob[step] for row, step in zip(rows, steps)]).to(device).detach()
+                    old = (torch.stack([row.old_log_prob[step] for row, step in zip(rows, steps)]).to(device).detach()
+                        if tensor_cache is None else tensor_cache.get('old_log_prob', rows, steps))
                     log_ratio = new - old
                     if objective_logprob_reduction == 'free_coordinate_mean':
                         log_ratio = log_ratio / mask.sum((-2, -1))
                     ratio = log_ratio.exp()
                     if not torch.isfinite(ratio).all():
                         raise FloatingPointError('Nonfinite PPO ratio before optimizer step')
-                    advantage = torch.stack([advantages[index] * gamma_denoising ** (policy.steps - 1 - step)
-                                             for index, step in chunk]).to(device)
+                    advantage = (torch.stack([advantages[index] * gamma_denoising ** (policy.steps - 1 - step)
+                                             for index, step in chunk]).to(device) if tensor_cache is None else
+                        tensor_cache.get('advantages', rows) * torch.tensor(
+                            [gamma_denoising ** (policy.steps-1-step) for step in steps], device=device, dtype=torch.float64))
                     objective = torch.minimum(ratio * advantage, ratio.clamp(1 - clip, 1 + clip) * advantage)
                     loss = -objective.sum() / denominator
                     with measure('actor.ppo_backward', gpu=True):
                         loss.backward()
-                    old_mean, old_std = _old_kernel(rows, steps, device)
+                    old_mean, old_std = _old_kernel(rows, steps, device, tensor_cache)
                     kl = _joint_kl(parameters, mask, old_mean, old_std).detach()
                     summary += torch.stack((loss.detach(), ((ratio < 1 - clip) | (ratio > 1 + clip)).double().sum(),
                                             ratio.detach().sum(), log_ratio.detach().abs().sum(), kl.sum(),
                                             ratio.new_tensor(ratio.numel(), dtype=torch.float64),
                                             (((advantage > 0) & (ratio > 1 + clip)) |
-                                             ((advantage < 0) & (ratio < 1 - clip))).double().sum()))
+                                            ((advantage < 0) & (ratio < 1 - clip))).double().sum()))
+                if conditions is not None:
+                    conditions.backward()
             if distributed is not None:
                 distributed.sum_gradients(actor)
                 summary = distributed.sum_tensor(summary)
@@ -405,7 +420,7 @@ def actor_update_v2(policy, optimizer, transitions, targets, *, global_manifest=
             with _local_phase(distributed, 'actor_optimizer_step'):
                 optimizer.step()
             post = analytic_kl_local(policy, transitions, global_manifest=global_manifest, distributed=distributed,
-                                      denoising_microbatch=denoising_microbatch, global_indices=indices)
+                                      denoising_microbatch=denoising_microbatch, global_indices=indices, tensor_cache=tensor_cache)
             record = dict(epoch=epoch, optimizer_step=len(reports) + 1, global_upper_indices=indices,
                 internal_transitions=denominator, ppo_loss=float(summary[0]),
                 clip_fraction=float(summary[1] / summary[5]), mean_ratio=float(summary[2] / summary[5]),
@@ -435,7 +450,7 @@ def actor_update_v2(policy, optimizer, transitions, targets, *, global_manifest=
 
 
 def critic_update_local(critic, optimizer, transitions, targets, *, global_manifest=None,
-                        distributed=None, steps=80, batch_size=32, generator=None, grad_clip_norm=1.):
+                        distributed=None, steps=80, batch_size=32, generator=None, grad_clip_norm=1., tensor_cache=None):
     """小 Critic 用全局索引、本地条件和固定目标学习；前后指标明确属于本批数据。"""
     if type(steps) is not int or steps < 1 or type(batch_size) is not int or batch_size < 1:
         raise ValueError('Critic steps and global batch size must be positive integers')
@@ -454,7 +469,8 @@ def critic_update_local(critic, optimizer, transitions, targets, *, global_manif
 
     def forward(indices):
         rows = [transitions[index] for index in indices]
-        return critic(_context(rows, device), torch.tensor([row.metadata['remaining_music_seconds'] for row in rows], device=device))
+        return critic(_context(rows, device), torch.tensor([row.metadata['remaining_music_seconds'] for row in rows], device=device)) if tensor_cache is None else critic(
+            tensor_cache.context(rows), tensor_cache.get('remaining_music_seconds', rows))
 
     @torch.no_grad()
     def metrics():

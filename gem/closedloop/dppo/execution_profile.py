@@ -46,29 +46,44 @@ def _step_differences(candidate, reference):
     return result
 
 
-def probe_profiles(policy, context, *, maximum_microbatch=4, seed=12345, reserve_generation=None):
+def probe_profiles(policy, context, *, maximum_microbatch=4, seed=12345, reserve_generation=None,
+                   fixed_execution_shape=None, optimizer_probe=False, actor_lr=5e-9):
     actor = policy.actor
     device = next(actor.parameters()).device
     initial_cfg = policy.cfg_batch
+    initial_shape = policy.execution_batch_size
     was_training = actor.training
     prior_gradients = {name: parameter.grad for name, parameter in actor.named_parameters()}
     actor.eval()
     reports, chains = [], {}
+    saved_weights = ({name: value.detach().cpu().clone() for name, value in actor.state_dict().items()}
+                     if optimizer_probe else None)
     try:
+        policy.execution_batch_size = None
+        policy.cfg_batch = False
+        if fixed_execution_shape is not None:
+            if reserve_generation is not None:
+                reserve_generation()
+            reference = policy.sample_rollout(context, generator=torch.Generator(device=device).manual_seed(seed))
+            with torch.no_grad():
+                _, reference_parameters = _log_probs(policy, context, reference, 1, details=True)
+        policy.execution_batch_size = fixed_execution_shape
         for cfg in (False, True):
             policy.cfg_batch = cfg
             if reserve_generation is not None:
                 reserve_generation()
             generator = torch.Generator(device=device).manual_seed(seed)
             chains[cfg] = policy.sample_rollout(context, generator=generator)
-        reference = chains[False]
-        policy.cfg_batch = False
-        with torch.no_grad():
-            reference_probability, reference_parameters = _log_probs(policy, context, reference, 1, details=True)
+        if fixed_execution_shape is None:
+            reference = chains[False]
+            policy.cfg_batch = False
+            with torch.no_grad():
+                _, reference_parameters = _log_probs(policy, context, reference, 1, details=True)
         for micro in (size for size in (4, 2, 1) if size <= maximum_microbatch):
             for cfg in (True, False):
                 policy.cfg_batch = cfg
-                report = dict(microbatch=micro, cfg_batch=cfg, passed=False)
+                report = dict(microbatch=micro, cfg_batch=cfg, passed=False,
+                    execution_batch_size=fixed_execution_shape, execution_identity=dict(policy.kernel_config))
                 started = time.perf_counter()
                 try:
                     if device.type == 'cuda':
@@ -83,8 +98,11 @@ def probe_profiles(policy, context, *, maximum_microbatch=4, seed=12345, reserve
                         oracle = density.log_prob(trace['chain'][:, 1:].double())
                         oracle = oracle.masked_fill(~trace['free_mask'][:, None], 0.).sum((-2, -1))
                         oracle_error = float((oracle-trace['old_log_probs']).abs().max())
-                        max_log = max(float(own_delta.abs().max()), float(base_delta.abs().max()))
-                        max_ratio = max(float(torch.expm1(own_delta).abs().max()), float(torch.expm1(base_delta).abs().max()))
+                        # 新执行身份允许与旧路径有已报告的舍入差异；自身采样/重算门槛保持不变。
+                        # 旧执行身份仍保留原来的跨路径门槛，不能用这个分支放行旧checkpoint。
+                        gate_delta = own_delta if fixed_execution_shape is not None else torch.cat((own_delta, base_delta))
+                        max_log = float(gate_delta.abs().max())
+                        max_ratio = float(torch.expm1(gate_delta).abs().max())
                         report.update(self_consistency=dict(max_logprob_error=float(own_delta.abs().max()),
                             max_ratio_error=float(torch.expm1(own_delta).abs().max()),
                             per_step_logprob_error=own_delta.abs().cpu().tolist()),
@@ -94,7 +112,7 @@ def probe_profiles(policy, context, *, maximum_microbatch=4, seed=12345, reserve
                                 layer_max_abs_error=_step_differences(parameters, reference_parameters)),
                             validation_scope='all_denoising_steps_separate_self_and_cross_execution')
                     actor.zero_grad(set_to_none=True)
-                    losses = []
+                    losses, training_probabilities = [], []
                     for start in range(0, policy.steps, micro):
                         count = min(micro, policy.steps-start)
                         batch = {key: value.expand(count, *value.shape[1:]).contiguous() for key, value in context.items()}
@@ -106,24 +124,49 @@ def probe_profiles(policy, context, *, maximum_microbatch=4, seed=12345, reserve
                             loss = -probability.sum()/policy.steps
                             loss.backward()
                             losses.append(loss.detach())
+                            training_probabilities.append(probability.detach())
+                    training_delta = torch.cat(training_probabilities)-trace['old_log_probs'][0]
+                    max_log = max(max_log, float(training_delta.abs().max()))
+                    max_ratio = max(max_ratio, float(torch.expm1(training_delta).abs().max()))
                     gradients = [parameter.grad for parameter in actor.parameters() if parameter.grad is not None]
                     finite = bool(gradients) and all(bool(torch.isfinite(gradient).all()) for gradient in gradients)
                     report.update(max_logprob_error=max_log, max_ratio_error=max_ratio,
                                   backward_denoising_steps=policy.steps,
                                   backward_loss=float(torch.stack(losses).sum()),
+                                  training_self_consistency=dict(max_logprob_error=float(training_delta.abs().max()),
+                                      per_step_logprob_error=training_delta.abs().cpu().tolist()),
                                   independent_gaussian_error=oracle_error, finite_gradients=finite,
                                   peak_memory_bytes=torch.cuda.max_memory_allocated(device) if device.type == 'cuda' else None,
                                   passed=finite and all(math.isfinite(v) for v in (max_log, max_ratio, oracle_error))
                                          and max_log <= 1e-4 and max_ratio <= 1e-3 and oracle_error <= 1e-8)
+                    if optimizer_probe and finite:
+                        optimizer = torch.optim.AdamW([p for p in actor.parameters() if p.requires_grad],
+                                                       lr=actor_lr, weight_decay=0.)
+                        norm = torch.nn.utils.clip_grad_norm_(actor.parameters(), 1., error_if_nonfinite=True)
+                        optimizer.step()
+                        with torch.no_grad():
+                            updated = _log_probs(policy, context, trace, micro)
+                        report['optimizer_probe'] = dict(learning_rate=actor_lr, gradient_norm_before_clip=float(norm),
+                            loss_before=float(torch.stack(losses).sum()), loss_after=float(-updated.mean()),
+                            max_logprob_change=float((updated-own).abs().max()),
+                            finite=bool(torch.isfinite(updated).all()), scope='temporary_adam_first_step_negative_logprob_restored')
+                        report['passed'] = report['passed'] and report['optimizer_probe']['finite']
+                        del optimizer
+                        actor.load_state_dict(saved_weights)
                 except torch.cuda.OutOfMemoryError as error:
                     report['error'] = f'CUDA memory: {error}'
                     actor.zero_grad(set_to_none=True)
                     torch.cuda.empty_cache()
+                if saved_weights is not None:
+                    actor.load_state_dict(saved_weights)
                 reports.append(report)
                 report['probe_wall_seconds'] = time.perf_counter()-started
                 actor.zero_grad(set_to_none=True)
         return reports
     finally:
+        if saved_weights is not None:
+            actor.load_state_dict(saved_weights)
+        policy.execution_batch_size = initial_shape
         policy.cfg_batch = initial_cfg
         actor.train(was_training)
         for name, parameter in actor.named_parameters():
@@ -137,6 +180,17 @@ def select_profile(reports_by_rank, required=None):
     for size, cfg in choices:
         if all(any(item['microbatch'] == size and item['cfg_batch'] == cfg and item['passed']
                    for item in reports) for reports in reports_by_rank):
-            return dict(microbatch=size, cfg_batch=cfg,
-                        probability_tolerances=dict(logprob=1e-4, ratio=1e-3, gaussian=1e-8))
+            selected = [next(item for item in reports if item['microbatch'] == size and item['cfg_batch'] == cfg and item['passed'])
+                        for reports in reports_by_rank]
+            shapes = {item.get('execution_batch_size') for item in selected}
+            if len(shapes) != 1:
+                continue
+            shape = next(iter(shapes))
+            if required is not None and required.get('execution_batch_size') != shape:
+                continue
+            result = dict(microbatch=size, cfg_batch=cfg,
+                          probability_tolerances=dict(logprob=1e-4, ratio=1e-3, gaussian=1e-8))
+            if shape is not None:
+                result.update(execution_batch_size=shape, execution_contract='fixed_shape_step_lane_single_condition_fp32.v1')
+            return result
     raise RuntimeError('No common microbatch/CFG profile passes unchanged probability gates')

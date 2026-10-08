@@ -67,6 +67,12 @@ diagnostics:
   verify_actor_condition_edges: true
   reward_substeps: true
 stage10:
+  # 性能执行身份改变时必须建立新run；不能作为旧checkpoint的无变化恢复。
+  performance:
+    execution_batch_size: 4
+    optimizer_probe: true
+    tensor_cache: true
+    tensor_cache_max_bytes: 268435456
   run_control:
     max_walltime_seconds: 604800
   distributed:
