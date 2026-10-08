@@ -145,7 +145,8 @@ def test_fixed_shape_and_condition_gradient_cache_match_every_trainable_module(a
         torch.set_num_threads(previous_threads)
 
 
-def test_fixed_shape_probe_keeps_strict_gate_and_restores_temporary_optimizer(actor_factory):
+@pytest.mark.parametrize('shape', [2, 4])
+def test_fixed_shape_probe_keeps_strict_gate_and_restores_temporary_optimizer(actor_factory, shape):
     previous_threads = torch.get_num_threads()
     torch.set_num_threads(1)
     try:
@@ -154,8 +155,8 @@ def test_fixed_shape_probe_keeps_strict_gate_and_restores_temporary_optimizer(ac
         before = copy.deepcopy(actor.state_dict())
         policy = DPPODiffusionPolicy(actor, steps=20)
         reports = probe_profiles(policy, _conditions(batch), maximum_microbatch=4,
-                                 fixed_execution_shape=4, optimizer_probe=True)
-        selected = next(row for row in reports if row['microbatch'] == 4 and row['cfg_batch'])
+                                 fixed_execution_shape=shape, optimizer_probe=True)
+        selected = next(row for row in reports if row['microbatch'] == shape and row['cfg_batch'])
         assert selected['passed'], selected
         assert selected['max_logprob_error'] <= 1e-4
         assert selected['max_ratio_error'] <= 1e-3
@@ -242,16 +243,17 @@ def test_batched_bc_samplewise_loss_and_independent_rng_restore(actor_factory):
         torch.set_num_threads(previous_threads)
 
 
-def test_full_learning_probe_restores_weights_and_reports_all_encoder_gradients(actor_factory):
+@pytest.mark.parametrize('shape', [2, 4])
+def test_full_learning_probe_restores_weights_and_reports_all_encoder_gradients(actor_factory, shape):
     from gem.closedloop.dppo.execution_profile import compare_learning_execution
     old_threads = torch.get_num_threads()
     torch.set_num_threads(1)
     try:
         actor, batch = actor_factory(starts=(45,))
         _activate_branches(actor)
-        policy = DPPODiffusionPolicy(actor, steps=20, cfg_batch=True, execution_batch_size=4)
+        policy = DPPODiffusionPolicy(actor, steps=20, cfg_batch=True, execution_batch_size=shape)
         saved = copy.deepcopy(actor.state_dict())
-        report = compare_learning_execution(policy, _conditions(batch))
+        report = compare_learning_execution(policy, _conditions(batch), microbatch=shape)
         assert report['max_logprob_difference'] <= 1e-4
         assert report['max_parameter_difference'] < 1e-7
         assert report['max_optimizer_state_difference'] < 1e-6

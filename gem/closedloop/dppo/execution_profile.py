@@ -79,7 +79,8 @@ def probe_profiles(policy, context, *, maximum_microbatch=4, seed=12345, reserve
             policy.cfg_batch = False
             with torch.no_grad():
                 _, reference_parameters = _log_probs(policy, context, reference, 1, details=True)
-        for micro in (size for size in (4, 2, 1) if size <= maximum_microbatch):
+        limit = min(maximum_microbatch, fixed_execution_shape or maximum_microbatch)
+        for micro in (size for size in (4, 2, 1) if size <= limit):
             for cfg in (True, False):
                 policy.cfg_batch = cfg
                 report = dict(microbatch=micro, cfg_batch=cfg, passed=False,

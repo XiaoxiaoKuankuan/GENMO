@@ -2,7 +2,8 @@
 
 本模块仅依赖 Python 标准库和 NumPy，不导入 Actor、训练 Dataset、Isaac 或 MuJoCo。
 两个解释器共享此协议；物理时间统一使用 600 Hz 整数 tick，而 wall time 只表示计算耗时。
-状态、请求和反馈携带 episode/request/plan 身份；实际数组以禁止 pickle 的 NPZ 字节传递，
+状态、请求和反馈携带 episode/request/plan 身份；实际数组以禁止 pickle 的有界原始字节传递，
+新传输格式显式标记v2并兼容读取旧NPZ帧，保持dtype/shape和独立可写结果，
 不会在每次规划时落盘。RPC 是单连接顺序请求；物理执行的幂等性由后端 advance_id 实现。
 socket 只在指定私有目录创建，退出删除本进程创建的 socket，不触碰其他进程或实验。
 """
@@ -24,6 +25,7 @@ import numpy as np
 _CALL_TIMING = ContextVar("rpc_call_timing", default=None)
 
 PROTOCOL_VERSION = "genmo.gmt_frozen_isaac.v1"
+WIRE_VERSION = "genmo.rpc.ndarray.raw.v2"
 CLOCK_HZ = 600
 MOTION_TICKS = 20
 CONTROL_TICKS = 12
@@ -81,7 +83,7 @@ class RemoteError(RuntimeError):
         super().__init__(f"{self.code}: {error.get('message', '')}")
 
 
-def _pack(value: Any) -> tuple[bytes, bytes]:
+def _pack_legacy(value: Any) -> tuple[bytes, bytes]:
     arrays: dict[str, np.ndarray] = {}
 
     def visit(item):
@@ -113,8 +115,74 @@ def _pack(value: Any) -> tuple[bytes, bytes]:
     return metadata, buffer.getvalue()
 
 
+def _pack(value: Any) -> tuple[bytes, bytes]:
+    """无ZIP成员循环：数组连续拼接，描述符显式给出dtype/shape/offset/size。"""
+    parts, offsets, total = [], {}, 0
+    def visit(item):
+        nonlocal total
+        if dataclasses.is_dataclass(item):
+            item = dataclasses.asdict(item)
+        if isinstance(item, np.ndarray):
+            if item.dtype.hasobject or item.dtype.kind not in "biufUS":
+                raise TypeError(f"Unsupported array dtype: {item.dtype}")
+            if id(item) not in offsets:
+                data = item.tobytes(order='C')
+                if total+len(data) > MAX_PACKET_BYTES:
+                    raise ValueError('RPC arrays exceed packet limit')
+                offsets[id(item)] = (item, dict(offset=total, size=len(data), dtype=item.dtype.str, shape=list(item.shape)))
+                parts.append(data); total += len(data)
+            return {'__ndarray_raw__': offsets[id(item)][1]}
+        if isinstance(item, np.generic):
+            return item.item()
+        if isinstance(item, dict):
+            if any(not isinstance(key, str) for key in item):
+                raise TypeError('RPC mapping keys must be strings')
+            return {key: visit(child) for key, child in item.items()}
+        if isinstance(item, (list, tuple)):
+            return [visit(child) for child in item]
+        if item is None or isinstance(item, (str, int, float, bool)):
+            return item
+        raise TypeError(f'Unsupported RPC value: {type(item).__name__}')
+    metadata = json.dumps(dict(__rpc_wire__=WIRE_VERSION, value=visit(value)), ensure_ascii=False,
+                          allow_nan=False, separators=(',', ':')).encode('utf-8')
+    return metadata, b''.join(parts)
+
+
+def _unpack_raw(values, payload):
+    def visit(item):
+        if isinstance(item, dict):
+            if set(item) == {'__ndarray_raw__'}:
+                spec = item['__ndarray_raw__']
+                if not isinstance(spec, dict) or set(spec) != {'offset', 'size', 'dtype', 'shape'}:
+                    raise ValueError('Invalid raw array descriptor')
+                offset, size, shape = spec['offset'], spec['size'], spec['shape']
+                if (type(offset) is not int or type(size) is not int or offset < 0 or size < 0
+                        or offset+size > len(payload) or not isinstance(shape, list)
+                        or any(type(x) is not int or x < 0 for x in shape) or len(shape) > 32):
+                    raise ValueError('Raw array bounds/shape invalid')
+                dtype = np.dtype(spec['dtype'])
+                if dtype.hasobject or dtype.kind not in 'biufUS':
+                    raise TypeError('Unsupported received RPC array dtype')
+                count = 1
+                for dimension in shape:
+                    count *= dimension
+                if count*dtype.itemsize != size or size > MAX_PACKET_BYTES:
+                    raise ValueError('Raw array byte count differs from shape/dtype')
+                # 独立可写数组：同一payload引用多次也保持旧NPZ路径无可写别名的语义。
+                return np.frombuffer(payload, dtype=dtype, count=count, offset=offset).reshape(shape).copy()
+            return {key: visit(child) for key, child in item.items()}
+        if isinstance(item, list):
+            return [visit(child) for child in item]
+        return item
+    return visit(values)
+
+
 def _unpack(metadata: bytes, payload: bytes):
     values = json.loads(metadata)
+    if isinstance(values, dict) and "__rpc_wire__" in values:
+        if values.get("__rpc_wire__") != WIRE_VERSION or set(values) != {"__rpc_wire__", "value"}:
+            raise ValueError("Unsupported RPC wire format")
+        return _unpack_raw(values["value"], payload)
     arrays = {}
     if payload:
         with np.load(io.BytesIO(payload), allow_pickle=False) as archive:

@@ -197,3 +197,23 @@ def test_block_rollout_keeps_one_raw_chain_and_detects_corruption(tmp_path):
     path.write_bytes(b'corrupt raw')
     with pytest.raises(ValueError, match='Raw trace size/SHA'):
         load_rollout_record(chunk_path.parent/record['path'], record, rank_directory=tmp_path)
+
+
+def test_raw_rpc_old_npz_compatible_and_rejects_descriptor_corruption():
+    import json
+    from gem.runtime.closedloop_protocol import _pack_legacy
+    source = dict(x=np.arange(12, dtype='>f4').reshape(3, 4), empty=np.zeros((0, 4)),
+                  scalar=np.array(2., dtype=np.float64), labels=np.array(['中文', 'test']))
+    for packed in (_pack(source), _pack_legacy(source)):
+        restored = _unpack(*packed)
+        for key in source:
+            assert restored[key].dtype == source[key].dtype
+            np.testing.assert_array_equal(restored[key], source[key])
+    metadata, payload = _pack(source)
+    bad = json.loads(metadata)
+    bad['value']['x']['__ndarray_raw__']['size'] += 1
+    with pytest.raises(ValueError, match='byte count'):
+        _unpack(json.dumps(bad).encode(), payload)
+    bad['value']['x']['__ndarray_raw__']['offset'] = len(payload)+1
+    with pytest.raises(ValueError, match='bounds'):
+        _unpack(json.dumps(bad).encode(), payload)

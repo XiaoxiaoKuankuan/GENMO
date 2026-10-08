@@ -69,7 +69,9 @@ diagnostics:
 stage10:
   # 性能执行身份改变时必须建立新run；不能作为旧checkpoint的无变化恢复。
   performance:
-    execution_batch_size: 4
+    # 单环境采样的填充代价需一并验收；4可自洽但跨过0.5秒决策边界。
+    execution_batch_size: 2
+    rpc_wire_format: genmo.rpc.ndarray.raw.v2
     optimizer_probe: true
     tensor_cache: true
     tensor_cache_max_bytes: 268435456

@@ -908,13 +908,14 @@ def run_parallel(args, config, collective, preflight):
             periodic_evaluation = index % c.stage['evaluation']['every_iterations'] == 0
             if periodic_evaluation:
                 _evaluate_and_record(c, report, f'{index:06d}', legacy_label=index)
-            walltime = _record_iteration_walltime(c, index, iteration_start, core_seconds=seconds,
-                                                 periodic_evaluation=periodic_evaluation)
             performance = local_call(collective, profiler.report)
             by_rank = collective.all_gather_object(performance)
+            walltime = _record_iteration_walltime(c, index, iteration_start, core_seconds=seconds,
+                                                 periodic_evaluation=periodic_evaluation)
             root_call(collective, lambda: atomic_json(c.session/f'performance_{index:06d}.json', dict(
                 schema='genmo.stage10.performance.v1', iteration=index, ranks=by_rank,
-                wall_includes_preflight=True, core_seconds=seconds, wall_seconds=walltime['seconds'])))
+                wall_includes_preflight=True, wall_includes_profiler_collection=True,
+                wall_excludes='final_performance_json_publication_and_print', core_seconds=seconds, wall_seconds=walltime['seconds'])))
             deactivate(c.performance_token)
             c.performance_token = None
             report['iterations'].append(index)
