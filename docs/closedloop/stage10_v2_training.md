@@ -2,6 +2,8 @@
 
 本版按最终授权配置实施。Actor 固定学习率 **5e-9**，正式训练不扫描候选、不自动降低学习率。正式入口 `scripts/train_stage10_8gpu_server1.sh` 默认使用 `configs/closedloop/stage10_8gpu_server1_v2.yaml`，默认仅运行一轮；长期训练必须显式给定停止轮次。
 
+2026-10-08将硬KL改为0.03后的真实八卡两轮、退出恢复与独立审计已经通过，完整实测时间、边界和正式启动命令见[KL 0.03验收报告](stage10_v2_kl003_acceptance_20261008.md)。原0.02失败报告保留历史含义，不代表当前状态。
+
 ## 更新流程和配置
 
 八个 rank 各自持有一个冻结 GMT/CPU PhysX 后端，使用同一模型版本分别采集 20 条上层转移（全局 160）。真实执行时长决定 GAE，环境/episode/连续区间之间不串接；old log-prob、old/next value、returns 和全局标准化 advantage 整轮固定。每条链 20 步，完整链组成 1600 内部转移的优化器 minibatch，2 个 epoch 最多 4 次 Actor 参数更新。计算 microbatch 启动依次校验 4、2、1 并记录共同通过的配置，独立于优化器 minibatch。
