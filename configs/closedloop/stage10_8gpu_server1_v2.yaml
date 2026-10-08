@@ -95,7 +95,7 @@ stage10:
     lambda_upper: 0.95
     gamma_denoising: 0.99
     ppo_clip: 0.01
-    kl_stop_joint: 0.02
+    kl_stop_joint: 0.03
     bc_weight: 0.1
     bc_batch: 2
     denoising_microbatch: 4

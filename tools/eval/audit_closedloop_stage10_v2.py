@@ -11,6 +11,12 @@
 当前策略链中排除。v2 归档绑定独立 seal，可以在没有同轮 checkpoint 时审计。
 所有模型只用 CPU mmap 读取元数据；不执行模型 forward、GPU、PhysX 或训练。
 运行时梯度和 replica 报告只能证明其声明的检查范围，不能证明动作质量或收敛。
+
+正常结束还必须有绑定 SHA 的初始化和终态周期评估：重新读取各 rank 的计划、
+逐任务证据及其 SHA，重算奖励、执行时长和物理失败统计，再与合并报告和固定
+初始基线比较。物理跌倒是有效的策略评估结果，不冒充基础设施故障；缺任务、
+证据不一致或评估改变模型/RNG 才使这项审计失败。旧 v2 缺少新增证据时仍能读取
+其他历史，但评估项明确缺失，不补写历史，也不宣称已经通过完整正式训练验收。
 """
 from __future__ import annotations
 
@@ -18,6 +24,7 @@ from pathlib import Path
 
 import numpy as np
 import torch
+import yaml
 
 from gem.closedloop.dppo.checkpoint import VERSION_V2, _validate_rank_states
 from gem.closedloop.dppo.run_management import TrainingBudget
@@ -94,6 +101,99 @@ def _completion(session, *, recovered=False):
         if 'original_assets_unchanged' in summary:
             require(summary['original_assets_unchanged'] is True, 'Recovered V2 original assets changed')
     return dict(status=summary.get('status'), recovered=recovered)
+
+
+def _periodic_evaluations(root, session, identity, *, require_final=False):
+    """只读重放评估汇总；终态必须绑定真实报告，不把物理失败当成执行证据失败。"""
+    from gem.closedloop.dppo.periodic_monitor import merge_periodic_reports
+
+    summary, directory = session['summary'], session['directory']
+    require(summary is not None, 'V2 evaluation requires a completed session summary')
+    artifacts = summary.get('evaluation_artifacts')
+    if artifacts is None:
+        raise FileNotFoundError(f'{directory}/evaluation_artifacts: legacy V2 has no SHA-bound evaluation evidence')
+    require(isinstance(artifacts, list), 'V2 evaluation artifacts must be a list')
+    declared = [f'{label:06d}' if type(label) is int else label for label in summary.get('evaluations', [])]
+    require(all(isinstance(label, str) and label for label in declared)
+            and len(declared)==len(set(declared)), 'V2 evaluation labels are invalid or repeated')
+    labels = [item.get('label') for item in artifacts]
+    require(len(labels)==len(set(labels)) and set(labels)==set(declared),
+            'V2 evaluation SHA records differ from completed evaluation labels')
+    config = yaml.safe_load((directory/'resolved_config.yaml').read_text())
+    expected = config['stage10']['evaluation']
+    baseline_path = root/'evaluation_baseline.json'
+    baseline = read_json(baseline_path)
+    require(baseline.get('iteration')==0 and baseline.get('status')=='passed',
+            'V2 periodic baseline is not the completed initial policy evaluation')
+    def rebuild(value, owner, label, reference):
+        paths = sorted((owner/'phases'/f'eval_{label}').glob('rank*/report/report.json'))
+        require(len(paths)==min(8, value['plan']['selected_sample_count']), 'V2 periodic rank reports are missing')
+        for rank_path in paths:
+            rank_report = read_json(rank_path)
+            selection = read_json(resolve(root, rank_report['selection_path'], rank_path.parent))
+            require(selection['periodic_partition']['world']==8, 'V2 periodic evaluation is not eight-rank partitioned')
+            actor = rank_report.get('actor_identity', {})
+            require(actor.get('iteration')==value['iteration']
+                    and actor.get('policy_version')==value['iteration'],
+                    'V2 periodic rank report evaluated another policy version')
+        recomputed = merge_periodic_reports(value['plan'], paths, baseline=reference,
+                                            evaluation_identity=value['evaluation_identity'])
+        require(all(value.get(key)==result for key, result in recomputed.items()),
+                'V2 periodic aggregate or episode metrics cannot be reproduced from original evidence')
+    # 初始 session 即使后来中断，也必须从其完整原始任务重算基线，不能只相信根目录副本。
+    initial_directory = resolve(root, str(root/'sessions'/baseline['session_id']))
+    require(read_json(initial_directory/'evaluations/initial.json')==baseline,
+            'V2 durable initial baseline differs from its original report')
+    rebuild(baseline, initial_directory, 'initial', None)
+    records = []
+    for item in artifacts:
+        label = item['label']
+        require(label=='initial' or label.isdecimal() or
+                (label.startswith('final_') and label[6:].isdecimal()), 'V2 evaluation label is not canonical')
+        iteration = integer(item['iteration'], 'V2 evaluated iteration')
+        require(iteration==(0 if label=='initial' else int(label.removeprefix('final_'))),
+                'V2 evaluation label differs from policy iteration')
+        path = resolve(root, item['path'])
+        require(path==directory/'evaluations'/f'{label}.json' and sha256(path)==item['sha256'],
+                'V2 evaluation report path/SHA differs from its session publication')
+        report = read_json(path)
+        require(report.get('iteration')==iteration and report.get('session_id')==directory.name,
+                'V2 evaluation report belongs to another session or policy iteration')
+        plan = report['plan']
+        require(plan['catalog_identity']==identity['dataset'] and plan['seeds']==expected['seeds']
+                and plan['periodic_subset']['samples_per_source']==expected['samples_per_source']
+                and plan['episode_seconds']==expected['episode_seconds']
+                and plan['task_count']==4*expected['samples_per_source']*len(expected['seeds']),
+                'V2 periodic plan differs from the configured dataset, samples, seeds or duration')
+        require(report['plan_sha256']==baseline['plan_sha256'] and plan==baseline['plan'],
+                'V2 periodic evaluation changed the fixed initial plan')
+        evaluation_identity = report['evaluation_identity']
+        require(evaluation_identity.get('training_identity')==identity
+                and evaluation_identity==baseline['evaluation_identity'],
+                'V2 periodic evaluation changed its training or execution identity')
+        rebuild(report, directory, label, None if iteration==0 else baseline)
+        for publication_path in (root/'checkpoints/publications').glob('*.json'):
+            publication = read_json(publication_path)
+            if publication.get('session_id')==directory.name and publication.get('iteration')==iteration:
+                fingerprint = publication['metadata'].get('actor_model_fingerprint')
+                if fingerprint is None:
+                    raise FileNotFoundError(f'{publication_path}: legacy V2 lacks evaluation/model fingerprint binding')
+                require(report['actor_identity']['model_fingerprint']==fingerprint,
+                        'V2 periodic evaluation differs from the published checkpoint model')
+        if iteration==0:
+            require(report==baseline, 'V2 durable initial baseline differs from its published report')
+        records.append(dict(label=label, iteration=iteration, path=str(path.relative_to(root)),
+            sha256=item['sha256'], task_count=report['task_count'],
+            physical_failure_count=report['physical_failure_count'],
+            mean_executed_seconds=report['mean_executed_seconds'],
+            source_balanced_reward=report['source_balanced_reward'],
+            infrastructure_complete=True, physical_failures_are_valid_policy_outcomes=True))
+    if require_final:
+        final = summary['final_state']['iteration']
+        require(any(row['iteration']==final and row['label']!='initial' for row in records),
+                'V2 successful terminal session has no final-policy evaluation')
+    return dict(reports=records, full_heldout_acceptance=False,
+                scope='SHA-bound fixed periodic subset and independently recomputed execution metrics')
 
 
 def _seal(root, path):
@@ -377,6 +477,15 @@ def audit_training_v2(root, run, audit, result, minimum_iterations, require_resu
             sessions[successor]['started_at'] is not None and session['started_at'] is not None
             and sessions[successor]['started_at']>session['started_at'] for successor in owners if successor!=name)
         audit.check(f'v2_session_completion:{name}', lambda s=session, r=recovered: _completion(s, recovered=r))
+    evaluation_records = {}
+    for name in sorted(owners):
+        session = sessions[name]
+        summary = session['summary']
+        if summary is None or summary.get('status')!='passed':
+            # 恢复链允许历史中断，不为未正常完成的旧进程虚构终态验证。
+            continue
+        evaluation_records[name] = audit.check(f'v2_periodic_evaluations:{name}',
+            lambda s=session: _periodic_evaluations(root, s, identity, require_final=True))
     data_lookup = None
     for name in owners:
         def data_check(name=name):
@@ -494,6 +603,7 @@ def audit_training_v2(root, run, audit, result, minimum_iterations, require_resu
         return dict(used=budget['used'], spent_superseded_budget_preserved=True)
     audit.check('persisted_budget_monotonic', persisted)
     result.update(version='genmo.closedloop.stage10.audit.v2',
+        periodic_evaluations=evaluation_records,
         execution_counter_contract='rank_local_verified' if len(counts)==len(selected) else 'required_not_verified',
         recovery_history=dict(sessions=[dict(session_id=name, selected=name in owners,
             disposition='terminal' if name==terminal else 'recovered_history') for name in sessions],

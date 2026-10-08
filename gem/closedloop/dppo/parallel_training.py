@@ -141,6 +141,27 @@ def _flush_archive_metrics(c):
             {f'entry{i}': row for i, row in enumerate(telemetry['enqueues'])}, prefix='archive_queue')
 
 
+def _close_run_manager(c, report):
+    """仅根进程调用：排空或计时失败仍释放运行锁，异常由外围 root_call 广播。"""
+    if c.manager is None:
+        return
+    try:
+        if c.maintenance is not None:
+            started = time.perf_counter()
+            c.maintenance.drain()
+            report['archive_drain_seconds'] = time.perf_counter()-started
+            c.manager.append_metrics(dict(event='archive_drain',
+                seconds=report['archive_drain_seconds'], scope='shutdown_only'))
+            from .periodic_monitor import log_metrics
+            log_metrics(c.writer, c.output/'curves.jsonl', (c.state or {}).get('iteration', 0),
+                dict(archive_drain_seconds=report['archive_drain_seconds']), prefix='shutdown')
+    finally:
+        try:
+            _flush_archive_metrics(c)
+        finally:
+            c.manager.close()
+
+
 def _new_phase(c, name, credits):
     path = c.session/'phases'/name/f'rank{c.distributed.rank:02d}'
     path.mkdir(parents=True, exist_ok=False)
@@ -175,15 +196,21 @@ def _calibrate_and_profile(c, restored=False):
     # 校准必须使用最终通过概率门槛的执行方式；CFG回退后不可沿用更快路径的时延。
     calibration = local_call(c.distributed, lambda: calibrate(c.env, c.catalog, path,
         c.base_config['timing']['calibration_warmup'], c.base_config['timing']['calibration_samples']))
-    atomic_json(path/'profile.json', dict(calibration=calibration, profiles=reports[c.distributed.rank], selected=profile))
-    if restored:
-        # 新环境只校验运行路径，恢复已有延迟合同；校准的请求编号仍消耗，不复用。
-        if max(calibration['durations']) > previous['latency_budget_s']:
-            raise RuntimeError('Restored latency contract is insufficient for the selected execution profile')
-        attempts = c.env.attempt
-        restore_execution_state(c.env, dict(previous, policy_version=c.state['policy_version'],
-                                           iteration=c.state['iteration']), spent_generations=attempts)
-    restore_local_rng(rng, c.generators)
+    def finalize_local():
+        # 本地落盘、恢复门槛与状态恢复均可能单卡失败；必须先统一传播，再进入租约结算。
+        try:
+            atomic_json(path/'profile.json', dict(calibration=calibration,
+                profiles=reports[c.distributed.rank], selected=profile))
+            if restored:
+                # 新环境只校验运行路径，恢复已有延迟合同；校准的请求编号仍消耗，不复用。
+                if max(calibration['durations']) > previous['latency_budget_s']:
+                    raise RuntimeError('Restored latency contract is insufficient for the selected execution profile')
+                attempts = c.env.attempt
+                restore_execution_state(c.env, dict(previous, policy_version=c.state['policy_version'],
+                                                   iteration=c.state['iteration']), spent_generations=attempts)
+        finally:
+            restore_local_rng(rng, c.generators)
+    local_call(c.distributed, finalize_local)
     c.profile = profile
     c.policy.cfg_batch = profile['cfg_batch']
     c.state['execution_profile'] = profile
@@ -191,7 +218,24 @@ def _calibrate_and_profile(c, restored=False):
     return reports
 
 
+def _restore_evaluation_state(c, journal, old_backend_journal, rng):
+    """所有 rank 在同一评估 finally 调用；恢复块无 collective，异常统一传播。
+
+    评估主体各个可能失败的计算阶段已通过 local_call/root_call 同步失败；这里继续
+    使用相同协议，保证单卡关闭 journal 或恢复 RNG 失败时其他卡不会进入计时汇总。
+    即使关闭 journal 失败，也必须尝试恢复训练 journal 和独立随机数。
+    """
+    def restore():
+        try:
+            journal.close()
+        finally:
+            c.backend.journal = old_backend_journal
+            restore_local_rng(rng, c.generators)
+    local_call(c.distributed, restore)
+
+
 def _evaluate(c, label):
+    evaluation_started = time.perf_counter()
     from .evaluation import _digest, _model_fingerprint, _stats
     from .periodic_monitor import (
         build_balanced_plan,
@@ -360,20 +404,57 @@ def _evaluate(c, label):
                 if choice[key] is not None:
                     atomic_json(c.output/f'{key}.json', choice[key])
             atomic_json(c.session/'evaluations'/f'{label}.json', result)
-            log_metrics(c.writer, c.output/'curves.jsonl', c.state['iteration'], dict(
-                reward=result['source_balanced_reward'], duration=result['mean_executed_seconds'],
-                physical_failure_count=result['physical_failure_count'], by_source=result['by_source'],
-                paired_baseline=result.get('paired_baseline'), fixed_actor_drift=result['fixed_actor_drift'],
-                fixed_critic_diagnostic=result['fixed_critic_diagnostic']), prefix='validation')
             return result
         result = root_call(c.distributed, publish)
         c.state.update(best_observed=result['selection']['best_observed'], best_saved=result['selection']['best_saved'])
         c.last_evaluation = result
-        return result
     finally:
-        journal.close()
-        c.backend.journal = old_backend_journal
-        restore_local_rng(rng, c.generators)
+        _restore_evaluation_state(c, journal, old_backend_journal, rng)
+    result['wall_seconds'] = max(c.distributed.all_gather_object(time.perf_counter()-evaluation_started))
+    result['wall_time_scope'] = 'evaluation_including_state_restore_excluding_final_timing_record_publish'
+    def publish_timing():
+        atomic_json(c.session/'evaluations'/f'{label}.json', result)
+        log_metrics(c.writer, c.output/'curves.jsonl', c.state['iteration'], dict(
+            reward=result['source_balanced_reward'], duration=result['mean_executed_seconds'],
+            physical_failure_count=result['physical_failure_count'], by_source=result['by_source'],
+            paired_baseline=result.get('paired_baseline'), fixed_actor_drift=result['fixed_actor_drift'],
+            fixed_critic_diagnostic=result['fixed_critic_diagnostic'], wall_seconds=result['wall_seconds']),
+            prefix='validation')
+    root_call(c.distributed, publish_timing)
+    return result
+
+
+def _evaluate_and_record(c, report, label, *, legacy_label=None):
+    """评估与最终计时落盘成功后登记 SHA，避免会话漏报终态验证或接受被改写报告。"""
+    result = _evaluate(c, label)
+    path = c.session/'evaluations'/f'{label}.json'
+    artifact = root_call(c.distributed, lambda: dict(label=label, iteration=c.state['iteration'],
+        path=str(path.relative_to(c.output)), sha256=sha256_file(path)))
+    report.setdefault('evaluation_artifacts', []).append(artifact)
+    report['evaluations'].append(label if legacy_label is None else legacy_label)
+    return result
+
+
+def _record_iteration_walltime(c, index, started, *, core_seconds, periodic_evaluation):
+    """记录实际循环墙钟；含持久化与入队背压，退出验证和归档排空另行计时。"""
+    from .periodic_monitor import log_metrics
+    seconds = max(c.distributed.all_gather_object(time.perf_counter()-started))
+    timing = dict(iteration=index, seconds=seconds, core_seconds=core_seconds,
+        post_update_seconds=max(0., seconds-core_seconds), periodic_evaluation=periodic_evaluation,
+        scope='outer_loop_through_seal_checkpoint_archive_enqueue_and_periodic_evaluation_excludes_final_evaluation_and_shutdown')
+    def publish():
+        c.manager.append_metrics(dict(event='iteration_walltime', **timing))
+        log_metrics(c.writer, c.output/'curves.jsonl', index, timing, prefix='iteration_walltime')
+    root_call(c.distributed, publish)
+    return timing
+
+
+def _finish_training(c, report):
+    """只在已有接受轮次时保存终态；成功终态评估必须登记，周期评估结果可复用。"""
+    if c.state['iteration'] > c.initial_iteration:
+        _write_checkpoint(c, reason='controlled_end')
+        if c.state['iteration'] not in report['evaluations']:
+            _evaluate_and_record(c, report, f'final_{c.state["iteration"]:06d}')
 
 
 def _collect(c, index):
@@ -433,14 +514,39 @@ def _collect(c, index):
     return buffer, targets, manifest, directory, path, report
 
 
+def _probability_sentinels(manifest, *, world_size, chains_per_rank):
+    """按 rank 选择可训练链，不把首条无自由坐标链误当成概率异常。
+
+    输入是所有 rank 一致的全局清单，因此选择过程无新增 collective。无可用链的
+    rank 仍参与后续概率汇总，同时明确记录覆盖缺口；其他 rank 的有效链继续检查。
+    全局没有可用链时拒绝更新，不能把空检查报告成通过。
+    """
+    eligible = [[] for _ in range(world_size)]
+    for index, row in enumerate(manifest):
+        if row['valid'] and row['has_free']:
+            eligible[row['owner_rank']].append(index)
+    chosen = [sorted(indices, key=lambda i: manifest[i]['local_index'])[:chains_per_rank]
+              for indices in eligible]
+    indices = [index for shard in chosen for index in shard]
+    if not indices:
+        raise ValueError('No free valid upper transition remains for probability sentinels')
+    return indices, dict(requested_chains_per_rank=chains_per_rank,
+        checked_upper_transitions=len(indices), rank_coverage=[dict(rank=rank,
+            eligible_upper_transitions=len(available), checked_upper_transitions=len(selected))
+            for rank, (available, selected) in enumerate(zip(eligible, chosen))],
+        ranks_without_eligible_chains=[rank for rank, available in enumerate(eligible) if not available])
+
+
 def _update(c, buffer, targets, manifest, index):
     rows = buffer.transitions
     full = index == c.initial_iteration+1 or index % c.stage['checks']['full_probability_every'] == 0
-    indices = None if full else [i for i, row in enumerate(manifest)
-        if row['local_index'] < c.stage['checks']['sentinel_chains_per_rank']]
+    indices, coverage = (None, None) if full else _probability_sentinels(manifest,
+        world_size=c.distributed.world_size, chains_per_rank=c.stage['checks']['sentinel_chains_per_rank'])
     check = probability_check_local(c.policy, rows, global_manifest=manifest, global_indices=indices, distributed=c.distributed,
                                     denoising_microbatch=c.profile['microbatch'])
     check.update(scope='full_rollout_before_first_step' if full else 'rank_sentinel_all_denoising_steps')
+    if coverage is not None:
+        check['sentinel_coverage'] = coverage
     # 一份共享模型/Adam 快照只在 rank0 创建；各 rank 只保存自己的轻量更新随机状态。
     backup = (cpu_snapshot(dict(actor=c.actor.state_dict(), critic=c.critic.state_dict(),
         actor_optimizer=c.actor_optimizer.state_dict(), critic_optimizer=c.critic_optimizer.state_dict(),
@@ -524,7 +630,8 @@ def run_parallel(args, config, collective, preflight):
     if hasattr(collective, 'enable_gradient_timing'):
         collective.enable_gradient_timing()
     stop = StopSignal(); stop.install()
-    report = dict(schema='genmo.closedloop.stage10.session.v2', status='running', iterations=[], evaluations=[])
+    report = dict(schema='genmo.closedloop.stage10.session.v2', status='running', iterations=[],
+                  evaluations=[], evaluation_artifacts=[])
     error = None
     try:
         def initialize():
@@ -644,9 +751,8 @@ def run_parallel(args, config, collective, preflight):
             c.writer = SummaryWriter(str(c.output/'tensorboard'))
         baseline_path = c.output/'evaluation_baseline.json'
         if not baseline_path.exists():
-            baseline = _evaluate(c, 'initial')
+            baseline = _evaluate_and_record(c, report, 'initial')
             root_call(collective, lambda: atomic_json(baseline_path, baseline))
-            report['evaluations'].append('initial')
         from .periodic_monitor import log_metrics
         while c.state['iteration'] < args.stop_after_iteration:
             latencies = collective.all_gather_object(c.env.latency_budget_s)
@@ -732,16 +838,17 @@ def run_parallel(args, config, collective, preflight):
                 _write_checkpoint(c, reason='periodic' if index % c.stage['storage']['checkpoint_every_iterations'] == 0 else 'normal_end')
             root_call(collective, lambda: c.maintenance.enqueue_archive(directory))
             root_call(collective, lambda: _flush_archive_metrics(c))
-            if index % c.stage['evaluation']['every_iterations'] == 0:
-                _evaluate(c, f'{index:06d}'); report['evaluations'].append(index)
+            periodic_evaluation = index % c.stage['evaluation']['every_iterations'] == 0
+            if periodic_evaluation:
+                _evaluate_and_record(c, report, f'{index:06d}', legacy_label=index)
+            walltime = _record_iteration_walltime(c, index, start, core_seconds=seconds,
+                                                 periodic_evaluation=periodic_evaluation)
             report['iterations'].append(index)
             if collective.rank == 0:
                 print(f'[ACCEPTED v2] iteration={index} actor_steps={update["actor"]["optimizer_steps"]} '
-                      f'lr={c.settings["actor_lr"]} KL={update["kl"]["mean_joint_kl"]:.8g} seconds={seconds:.2f}', flush=True)
-        if c.state['iteration'] > c.initial_iteration:
-            _write_checkpoint(c, reason='controlled_end')
-            if c.state['iteration'] not in report['evaluations']:
-                _evaluate(c, f'final_{c.state["iteration"]:06d}')
+                      f'lr={c.settings["actor_lr"]} KL={update["kl"]["mean_joint_kl"]:.8g} '
+                      f'core_seconds={seconds:.2f} wall_seconds={walltime["seconds"]:.2f}', flush=True)
+        _finish_training(c, report)
         report.update(status='passed', final_state=c.state)
     except BaseException as caught:
         error = caught
@@ -770,16 +877,7 @@ def run_parallel(args, config, collective, preflight):
                 if not report['source_unchanged']['unchanged'] or not report['original_assets_unchanged']:
                     error = error or RuntimeError('Source or original assets changed during this session')
             # root drains all immutable archives before releasing the run lock.
-            def close_manager():
-                if c.manager is not None:
-                    try:
-                        # 先drain和记录计时，再close释放写锁。
-                        if c.maintenance is not None:
-                            c.maintenance.drain()
-                    finally:
-                        _flush_archive_metrics(c)
-                        c.manager.close()
-            root_call(collective, close_manager)
+            root_call(collective, lambda: _close_run_manager(c, report))
             if c.writer is not None:
                 c.writer.close()
             failures = collective.all_gather_object(None if error is None else f'{type(error).__name__}: {error}')

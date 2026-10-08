@@ -4,11 +4,16 @@
 合成轨迹，小模型每轮四次 Actor 更新。保存间隔为300，短测试仅在停止点保存。
 不启动 GPU、物理后端或长训练，不证明真实八卡性能、动作质量或训练收敛。
 负例重写外层SHA后仍由索引、GAE、计数、BC和冻结语义拒绝；临时文件统一回收。
+周期评估夹具复用真实 CPU evaluate_policy，生成八 rank 分片中的四个有效分片、
+四来源各一样本和两个 seed；检查终态缺失、报告/episode SHA、计划、指标篡改和
+旧格式证据缺口。有效物理失败必须保留为效果指标，不能被审计器误报为基础设施失败。
 """
 from __future__ import annotations
 
 import copy
 import json
+from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 import torch
@@ -24,6 +29,9 @@ from gem.closedloop.dppo.returns import compute_gae
 from gem.closedloop.dppo.run_management import GuardedStepJournal, RolloutWriter, RunManager
 from tests import test_evaluation as fixtures
 from tests.closedloop.dppo.test_stage10_audit_recovery import write
+from tests.closedloop.dppo.test_periodic_monitor import Catalog
+from gem.closedloop.dppo.evaluation import evaluate_policy, _model_fingerprint
+from gem.closedloop.dppo.periodic_monitor import build_balanced_plan, merge_periodic_reports, shard_plan
 from tools.eval.audit_closedloop_stage10 import (
     audit_evaluation_restore,
     audit_run,
@@ -95,9 +103,39 @@ class ParallelLifecycle:
         self.initial = self.state['iteration']
         self.report = dict(schema='genmo.closedloop.stage10.session.v2', session_id=self.manager.session_id,
             world_size=8, initial_iteration=self.initial, resume=resume, identity=self.identity,
-            data_audit='data_audit.json', iterations=[], evaluations=[])
+            data_audit='data_audit.json', iterations=[], evaluations=[], evaluation_artifacts=[])
         write(self.directory/'session_start.json', dict(self.report, schema='genmo.closedloop.stage10.session_start.v2'))
+        write(self.directory/'resolved_config.yaml', dict(stage10=dict(evaluation=dict(
+            samples_per_source=1, seeds=[42, 1729], episode_seconds=10., every_iterations=100))))
+        if not (self.root/'evaluation_baseline.json').exists():
+            self.evaluate('initial')
         return self
+
+    def evaluate(self, label, *, failure=False):
+        catalog = Catalog(self.root)
+        catalog.identity = self.identity['dataset']
+        plan = build_balanced_plan(catalog, samples_per_source=1)
+        policy = SimpleNamespace(actor=self.actor)
+        paths = []
+        for rank in range(4):
+            path = self.directory/'phases'/f'eval_{label}'/f'rank{rank:02d}'/'report'
+            evaluate_policy(fixtures.Env(policy, failure=failure), policy, shard_plan(plan, rank, 8),
+                path, catalog=catalog, episode_seconds=10., actor_identity=dict(
+                    iteration=self.state['iteration'], policy_version=self.state['policy_version']))
+            paths.append(path/'report.json')
+        baseline_path = self.root/'evaluation_baseline.json'
+        baseline = read_json(baseline_path) if baseline_path.exists() else None
+        merged = merge_periodic_reports(plan, paths, baseline=baseline,
+            evaluation_identity=dict(training_identity=self.identity, timing_contract='deployment_critical.v2'))
+        merged.update(iteration=self.state['iteration'], session_id=self.directory.name)
+        path = self.directory/'evaluations'/f'{label}.json'
+        write(path, merged)
+        self.report['evaluations'].append(int(label) if label.isdecimal() else label)
+        self.report['evaluation_artifacts'].append(dict(label=label, iteration=self.state['iteration'],
+            path=str(path.relative_to(self.root)), sha256=sha256(path)))
+        if baseline is None:
+            write(baseline_path, merged)
+        return path
 
     def accept(self, *, save=False, archive=False):
         index = self.state['iteration']+1
@@ -183,10 +221,14 @@ class ParallelLifecycle:
             identity=self.identity, config=dict(stage10=dict(storage=dict(checkpoint_every_iterations=300))),
             version=VERSION_V2, rank_states=ranks)
         self.manager.publish_checkpoint(self.state['iteration'], path, metadata=dict(reason='controlled_end', world_size=8,
-            actor_updates=self.state['actor_updates'], critic_updates=self.state['critic_updates']))
+            actor_updates=self.state['actor_updates'], critic_updates=self.state['critic_updates'],
+            actor_model_fingerprint=_model_fingerprint(self.actor)))
         return path
 
     def finish(self, *, failed=False, hard=False):
+        if not hard and not failed and not any(row['iteration']==self.state['iteration']
+                and row['label']!='initial' for row in self.report['evaluation_artifacts']):
+            self.evaluate(f'final_{self.state["iteration"]:06d}')
         self.manager.close()
         self.manager = None
         if hard:
@@ -346,3 +388,89 @@ def test_v2_evaluation_audits_weights_without_interpreting_training_rng(tmp_path
     session['resume']['restored_full_state'] = True
     with pytest.raises(ValueError, match='falsely claims'):
         audit_evaluation_restore(session, identity)
+
+
+def _rewrite_session_evaluation_publication(life):
+    """负例重新绑定外层 SHA，让审计继续检查更深层的任务与指标语义。"""
+    summary = read_json(life.directory/'summary.json')
+    for artifact in summary.get('evaluation_artifacts', []):
+        path = life.root/artifact['path']
+        if path.exists():
+            artifact['sha256'] = sha256(path)
+    write(life.directory/'summary.json', summary)
+    completion = read_json(life.directory/'completion.json')
+    completion['summary_sha256'] = sha256(life.directory/'summary.json')
+    write(life.directory/'completion.json', completion)
+
+
+@pytest.mark.parametrize('fault', ['missing_final', 'missing_final_declaration', 'report_sha',
+    'aggregate', 'task_count', 'plan', 'episode_sha', 'rank_failure'])
+def test_v2_terminal_periodic_evaluation_requires_real_fixed_evidence(lifecycle, fault):
+    life = lifecycle.start()
+    life.accept()
+    life.accept(save=True)
+    life.finish()
+    path = life.directory/'evaluations/final_000002.json'
+    report = read_json(path)
+    if fault=='missing_final':
+        path.unlink()
+    elif fault=='missing_final_declaration':
+        session = read_json(life.directory/'summary.json')
+        session['evaluations'] = ['initial']
+        session['evaluation_artifacts'] = session['evaluation_artifacts'][:1]
+        write(life.directory/'summary.json', session)
+        _rewrite_session_evaluation_publication(life)
+    elif fault=='report_sha':
+        path.write_text(path.read_text()+'\n')
+    elif fault in ('aggregate', 'task_count', 'plan'):
+        if fault=='aggregate':
+            report['source_balanced_reward'] += 1.
+        elif fault=='task_count':
+            report['task_count'] -= 1
+        else:
+            report['plan']['tasks'][0]['music_start_frame'] += 1
+        write(path, report)
+        _rewrite_session_evaluation_publication(life)
+    elif fault=='episode_sha':
+        episode = Path(report['source_episode_manifests'][0]['path'])
+        value = read_json(episode)
+        value['reward_sum'] += 1.
+        write(episode, value)
+    else:
+        rank_path = life.directory/'phases/eval_final_000002/rank00/report/report.json'
+        value = read_json(rank_path)
+        value['status'] = 'failed'
+        write(rank_path, value)
+    result = audit_run(life.root, require_resume=False)
+    assert result['status']=='failed'
+    checked = next(row for row in result['checks'] if row['name'].startswith('v2_periodic_evaluations:'))
+    assert checked['status']=='failed', result['checks']
+
+
+def test_v2_periodic_physical_failures_are_valid_measured_outcomes(lifecycle):
+    life = lifecycle.start()
+    life.accept()
+    life.accept(save=True)
+    life.evaluate('final_000002', failure=True)
+    life.finish()
+    result = audit_run(life.root, require_resume=False)
+    assert result['status']=='passed', result['checks']
+    final = result['periodic_evaluations'][life.directory.name]['reports'][-1]
+    assert final['task_count']==8 and final['physical_failure_count']==8
+    assert final['infrastructure_complete'] and final['physical_failures_are_valid_policy_outcomes']
+
+
+def test_v2_legacy_missing_evaluation_sha_is_readable_but_not_full_acceptance(lifecycle):
+    life = lifecycle.start()
+    life.accept()
+    life.accept(save=True)
+    life.finish()
+    summary = read_json(life.directory/'summary.json')
+    del summary['evaluation_artifacts']
+    write(life.directory/'summary.json', summary)
+    _rewrite_session_evaluation_publication(life)
+    result = audit_run(life.root, require_resume=False, allow_incomplete=True)
+    assert result['status']=='incomplete', result['checks']
+    assert next(row for row in result['checks'] if row['name']=='v2_iteration:2')['status']=='passed'
+    legacy = next(row for row in result['checks'] if row['name'].startswith('v2_periodic_evaluations:'))
+    assert legacy['status']=='not_run' and 'legacy V2' in legacy['error']
