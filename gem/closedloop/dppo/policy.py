@@ -389,6 +389,17 @@ class DPPODiffusionPolicy:
         snapshot = self._conditions(conditions, clone=True)
         with torch.autocast(device_type=snapshot["known_qpos30"].device.type, enabled=False):
             device = snapshot['known_qpos30'].device
+            generators = generator if isinstance(generator, (list, tuple)) else None
+            batch_size = snapshot['known_qpos30'].shape[0]
+            if generators is not None and (len(generators) != batch_size or
+                    any(not isinstance(item, torch.Generator) for item in generators) or
+                    len({id(item) for item in generators}) != len(generators)):
+                raise ValueError('Batched environments require one distinct generator per sample')
+            def draw(shape):
+                if generators is None:
+                    return torch.randn(shape, device=device, dtype=torch.float32, generator=generator)
+                return torch.cat([torch.randn((1,*shape[1:]), device=device, dtype=torch.float32, generator=item)
+                                  for item in generators])
             def synchronize():
                 if device.type == 'cuda':
                     torch.cuda.synchronize(device)
@@ -399,14 +410,13 @@ class DPPODiffusionPolicy:
             synchronize()
             conditioned = time.perf_counter()
             template = adapted["known_x"]
-            noise = (torch.randn(template.shape, device=template.device, dtype=torch.float32,
-                                 generator=generator) if initial_noise is None
+            noise = (draw(template.shape) if initial_noise is None
                      else self._state(initial_noise, template, "initial_noise"))
             state = self.actor._constrain(noise, adapted)
             chain, means, stds, probabilities = [state.clone()], [], [], []
             for index in range(self.steps):
                 parameters = self.transition_parameters(snapshot, state, index, prepared=prepared)
-                noise = torch.randn(state.shape, device=state.device, dtype=torch.float32, generator=generator)
+                noise = draw(state.shape)
                 following = self.actor._constrain(parameters["mean"] + parameters["std"] * noise, adapted)
                 probabilities.append(masked_joint_log_prob(following, parameters["mean"],
                                      parameters["std"], parameters["free_mask"]))

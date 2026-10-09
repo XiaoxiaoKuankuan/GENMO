@@ -217,6 +217,8 @@ class UpperEnvironment:
         key = f"{self.config['stage9']['run_id']}:{self.iteration}:{self.episode_count}:{self.decision}:{self.attempt}"
         if self.rank is not None:
             key += f':rank:{self.rank}'
+        if getattr(self, 'collector_env_slot', None) is not None:
+            key += f':environment:{self.collector_env_slot}'
         seed = stable_noise_seed(self.config['stage9']['seed'], key)
         if self.comparison_noise_index is not None:
             seed = stable_noise_seed(1729, str(self.comparison_noise_index))
