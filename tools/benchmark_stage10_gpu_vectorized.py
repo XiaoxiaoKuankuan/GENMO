@@ -53,6 +53,10 @@ def main():
     p.add_argument('--rounds',type=int,default=2)
     p.add_argument('--continue-on-failure',action='store_true')
     a=p.parse_args()
+    # 子进程分别在GENMO/GMT工作树启动，相对路径必须在调用者目录一次解析。
+    for name in ('config','gmt_repo','output','data_audit'):
+        value=getattr(a,name)
+        if value is not None:setattr(a,name,value.expanduser().resolve())
     if any(n<1 or n>1024 for n in a.environments) or len(set(a.environments))!=len(a.environments):
         raise ValueError('Explicit distinct environment counts 1..1024 required')
     if a.mode=='collection' and max(a.environments)>32:

@@ -34,6 +34,8 @@ def main():
     parser.add_argument('--benchmark-repeats',type=int,default=0)
     parser.add_argument('--diagnostic-limit',type=int,default=32)
     args=parser.parse_args()
+    for name in ('config','gmt_repo','isaac_python','output'):
+        setattr(args,name,getattr(args,name).expanduser().resolve())
     devices=_available_gpus()
     if args.output.exists(): raise FileExistsError(args.output)
     args.output.mkdir(parents=True)
