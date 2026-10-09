@@ -125,7 +125,7 @@ def main():
     if not check['ready']:raise RuntimeError('Runtime assets failed preflight')
     torch.cuda.set_device(rank);torch.set_num_threads(config['runtime']['torch_threads'])
     torch.backends.cuda.matmul.allow_tf32=False;torch.backends.cudnn.allow_tf32=False
-    config['runtime']['genmo_device']=f'cuda:{rank}'
+    config['runtime'].update(rank=rank,genmo_device=f'cuda:{rank}')
     actor,_,_=local_call(collective,lambda:load_actor(config))
     policy=DPPODiffusionPolicy(actor,cfg_batch=True,numerical_layout='sample_matrix_bmm_fp32.v1',defer_checks=True)
     catalog=FullMusicCatalog(config['paths']['data_root'])

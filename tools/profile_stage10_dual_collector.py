@@ -81,7 +81,7 @@ def main():
     check=collective.broadcast_object(runtime_preflight(config,check_gpu=False) if rank==0 else None)
     if not check['ready']:raise RuntimeError('Runtime assets failed preflight')
     args.output_dir.mkdir(parents=True)
-    config['runtime']['genmo_device']=f'cuda:{local_rank}'
+    config['runtime'].update(rank=rank,genmo_device=f'cuda:{local_rank}')
     torch.cuda.set_device(local_rank)
     config['stage9']['run_id']='dual-prototype-'+str(uuid.uuid4())
     torch.set_num_threads(config['runtime']['torch_threads'])
