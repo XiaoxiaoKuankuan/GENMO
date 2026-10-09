@@ -59,6 +59,7 @@ class WorldEnvironmentCollector(VectorEnvironmentCollector):
         self.active=False;self.cancelled=threading.Event();self.rpc_pending={};self.rpc_sequence=0
         self.batch_reports=[];self.world_timing={};self.restore_records=None;self.shutdown_result=None
         self.rpc_thread=None;self.rpc_error=None
+        self.audit_seconds=0.
 
     def _request_id(self):
         self.rpc_sequence+=1
@@ -68,6 +69,7 @@ class WorldEnvironmentCollector(VectorEnvironmentCollector):
     def world_call(self, method, **payload):
         started=time.perf_counter()
         result=self.world.call(method,**payload)
+        self.audit_seconds += (getattr(self.world, 'last_call_timing', None) or {}).get('journal_seconds', 0.)
         self.world_timing['world_rpc_seconds']=self.world_timing.get('world_rpc_seconds',0.)+time.perf_counter()-started
         self.world_timing['world_rpc_calls']=self.world_timing.get('world_rpc_calls',0)+1
         for name,value in result.get('timing',{}).items():self.world_timing[name]=self.world_timing.get(name,0.)+value
@@ -93,9 +95,12 @@ class WorldEnvironmentCollector(VectorEnvironmentCollector):
             while len(results)<len(flows):
                 commands=[];generations=[]
                 for slot,(value,error) in ready.items():
+                    continuation_started=time.perf_counter()
                     try: operation=flows[slot].throw(error) if error is not None else flows[slot].send(value)
                     except StopIteration as finished:
                         results[slot]=finished.value;continue
+                    finally:
+                        self.world_timing['continuation_seconds']=self.world_timing.get('continuation_seconds',0.)+time.perf_counter()-continuation_started
                     if isinstance(operation,GenerationOperation):generations.append((slot,operation.packet))
                     elif isinstance(operation,BackendOperation):commands.append((slot,operation))
                     elif isinstance(operation,LocalOperation):
@@ -114,14 +119,17 @@ class WorldEnvironmentCollector(VectorEnvironmentCollector):
                     raw_path=owner.output.parent/'raw_samples'/f'world_batch_{len(self.batch_reports):06d}.pt'
                     raw_started=time.perf_counter()
                     identity=owner._save_evidence(block,raw_path)
-                    self.world_timing['raw_block_seconds']=self.world_timing.get('raw_block_seconds',0.)+time.perf_counter()-raw_started
+                    raw_seconds=time.perf_counter()-raw_started
+                    self.world_timing['raw_block_seconds']=self.world_timing.get('raw_block_seconds',0.)+raw_seconds
+                    self.audit_seconds += raw_seconds+timing['bulk_trace_transfer_seconds']
                     for item in generated:
                         _,index=item.pop('_shared_raw_block')
                         item['_raw_evidence']=dict(path=str(raw_path),identity=dict(identity,
                             storage='genmo.world_batch_raw.v3',index=index,count=len(group)))
                     self.batch_reports.append(dict(environment_slots=[slot for slot,_ in group],
                         effective_rows=len(group),padding_rows=0,pipeline_timing=timing,
-                        generation_seconds=time.perf_counter()-generation_started,
+                        generation_seconds=timing['condition_batch_seconds']+timing['generate_and_world_seconds'],
+                        wall_and_audit_seconds=time.perf_counter()-generation_started,
                         components=dict(self.policy.last_sample_timing)))
                     for (slot,_),value in zip(group,generated):ready[slot]=((value,timing),None)
                 requests=[]
@@ -158,7 +166,9 @@ class WorldEnvironmentCollector(VectorEnvironmentCollector):
                                         request_id=reply['request_id']))
                                 indexed=time.perf_counter()
                                 backend.journal.append_result(reference)
-                                self.world_timing['lane_index_seconds']=self.world_timing.get('lane_index_seconds',0.)+time.perf_counter()-indexed
+                                index_seconds=time.perf_counter()-indexed
+                                self.world_timing['lane_index_seconds']=self.world_timing.get('lane_index_seconds',0.)+index_seconds
+                                self.audit_seconds += index_seconds
                                 backend.last_envelope=envelope;backend.sequence=envelope['mutation_seq']
                                 if not envelope['ok']:error=RemoteError(envelope['error']);value=None
                                 else:value=envelope['result']
@@ -226,6 +236,7 @@ class WorldEnvironmentCollector(VectorEnvironmentCollector):
             total_transitions=sum(map(len,rows)),fragment_lengths=list(map(len,rows)),allocated_envs=self.num_envs,
             active_envs=self.num_envs,seconds=time.perf_counter()-started,batches=self.batch_reports,
             world_timing=self.world_timing,normal_boundary_resets=0,administrative_drain_controls=0,
+            training_reward_seconds=sum(row.metadata.get('training_reward_seconds',0.) for fragment in rows for row in fragment),
             real_environment_batch=True,gae_contract='independent_per_env_episode_contiguous_fragment')
 
     def calibrate(self,*,count_per_rank,warmup=1,samples=2):

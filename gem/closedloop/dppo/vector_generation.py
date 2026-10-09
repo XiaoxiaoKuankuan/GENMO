@@ -118,6 +118,8 @@ def generate_for_environment_flow(env):
     env.budget.reserve(env.phase, generations=1)
     started = time.perf_counter()
     request = env._request()
+    world_owner = getattr(env.policy, 'owner', None)
+    audit_at_start = getattr(world_owner, 'audit_seconds', None)
     reservation = yield from backend_operation('reserve_prefix', request=request)
     journal_seconds = env.backend.last_call_timing.get('journal_seconds', 0.)
     prefix_end = time.perf_counter()
@@ -149,14 +151,16 @@ def generate_for_environment_flow(env):
     else:
         path, identity = shared['path'], shared['identity']
     elapsed = time.perf_counter()-started
+    excluded = (journal_seconds+time.perf_counter()-prepared_at if audit_at_start is None else
+                world_owner.audit_seconds-audit_at_start)
     timing = dict(timing_contract=env.timing_contract, generation_contract=GENERATION_CONTRACT,
         critical_ready_scope='observed_training_batch_pipeline_not_modeled_deployment_delay',
         journal_seconds=journal_seconds, prefix_rpc_seconds=prefix_end-started,
         batched_pipeline_wait_seconds=sample_ready-prefix_end, prepare_rpc_seconds=prepared_at-sample_ready,
-        critical_ready_seconds=max(0., prepared_at-started-journal_seconds), total_wall_seconds=elapsed,
+        critical_ready_seconds=max(0., elapsed-excluded), total_wall_seconds=elapsed,
         raw_evidence_seconds=time.perf_counter()-prepared_at, trace_copy_seconds=0.,
         raw_evidence_identity=identity, shared_batch_timing=shared_timing,
-        excluded_audit_seconds=journal_seconds+time.perf_counter()-prepared_at)
+        excluded_audit_seconds=excluded)
     result.update(prepared=prepared, rejection=rejection, timing=timing, seed=seed,
         critical_ready_seconds=timing['critical_ready_seconds'], elapsed=elapsed, raw_path=str(path))
     return result

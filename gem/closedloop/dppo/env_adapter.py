@@ -376,6 +376,7 @@ class UpperEnvironment:
         boundary = self._execution_boundary(generated, arrival, ready_tick)
         execution_end = min(self.music_end_tick, boundary['tick']) if boundary else self.music_end_tick
         rows, rewards, details, events = [], [], [], []
+        training_reward_seconds = 0.
         commit, rejection = None, generated['rejection']
         pending = candidate is not None
         while not self.snapshot['done'] and self.snapshot['tick'] < execution_end:
@@ -398,6 +399,7 @@ class UpperEnvironment:
             stop = min(execution_end, arrival if pending and arrival>tick else ready_tick,
                        ((tick//300)+1)*300)
             advanced = yield from self.advance_flow(min(25,(stop-tick)//12))
+            reward_started = time.perf_counter()
             for row in advanced:
                 result = self.reward.evaluate_step(row)
                 if not result.get('transition_valid',False):
@@ -407,6 +409,7 @@ class UpperEnvironment:
                 rows.append(row)
                 details.append(result)
                 rewards.append(float(result['reward']))
+            training_reward_seconds += time.perf_counter()-reward_started
             if pending and self.snapshot['tick']%300==0:
                 events.append(dict(kind='decision_missed',tick=self.snapshot['tick']))
             if self.snapshot['tick'] > self.soft_end_tick+600*max(2.,2*self.latency_budget_s+.5):
@@ -454,6 +457,7 @@ class UpperEnvironment:
             raw_sample_path=generated['raw_path'],latency_seconds=generated['elapsed'],
             raw_evidence_identity=generated.get('timing', {}).get('raw_evidence_identity'),
             timing_contract=self.timing_contract, timing=generated.get('timing', {}),
+            training_reward_seconds=training_reward_seconds,
             critical_ready_seconds=generated.get('critical_ready_seconds', generated['elapsed']),
             commit_seconds=generated.get('commit_seconds',0.),terminal_snapshot=cpu_copy(self.snapshot))
         if boundary is not None:metadata['reference_execution_boundary']=dict(boundary,reached=boundary_reached)
