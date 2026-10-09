@@ -116,7 +116,7 @@ def main():
             '--socket',str(socket),'--headless'],args.gmt_repo,socket,strip_distributed=True,
             environment=device_environment))
         def check_device():
-            if workers.entries[0]['identity'].get('gpu_uuid')!=devices[rank][1]:
+            if workers.entries[0]['identity'].get('gpu_uuid')!=devices[rank][1].removeprefix('GPU-'):
                 raise AssertionError('Actual frozen GMT GPU UUID does not match allocated rank')
         local_call(collective,check_device)
         guard=DiskGuard(output,min_free_bytes=10*1024**3,max_run_bytes=10*1024**3)

@@ -70,7 +70,7 @@ def main():
         failed=[rank for rank,proc,_ in entries if proc.returncode!=0]
         if failed: raise RuntimeError(f'Isaac workers failed: {failed}')
         records=[json.loads((args.output/f'rank{rank:02d}/report.json').read_text()) for rank in range(8)]
-        if any(record['identity'].get('gpu_uuid')!=devices[rank][1] for rank,record in enumerate(records)):
+        if any(record['identity'].get('gpu_uuid')!=devices[rank][1].removeprefix('GPU-') for rank,record in enumerate(records)):
             raise AssertionError('GPU world UUID differs from allocated physical device')
         report=dict(status='passed',ranks=records)
     except BaseException as error:
