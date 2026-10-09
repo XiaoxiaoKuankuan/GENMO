@@ -131,6 +131,7 @@ def main():
     parser.add_argument('--compact', action='store_true', help='只比较各微批 joint GEMM/FP64累计，保留完整梯度门槛')
     parser.add_argument('--fp32-blocked-gemm', action='store_true')
     parser.add_argument('--pipelined-tensorcore', action='store_true')
+    parser.add_argument('--compensated-bf16',type=int,choices=(3,6))
     args = parser.parse_args()
     rank, world = int(os.environ['RANK']), int(os.environ['WORLD_SIZE'])
     if world != 8 or rank != int(os.environ['LOCAL_RANK']):
@@ -158,6 +159,9 @@ def main():
     if args.pipelined_tensorcore:
         from gem.closedloop.dppo.numerical_execution import configure_pipelined_tensorcore
         configure_pipelined_tensorcore(policy)
+    if args.compensated_bf16:
+        from gem.closedloop.dppo.numerical_execution import configure_compensated_bf16
+        configure_compensated_bf16(policy,args.compensated_bf16)
     rows, targets, archive_sha = local_call(collective, lambda: read_saved_rank(args.iteration, rank))
     if args.precision_mode is not None:
         rows = local_call(collective, lambda: sample_diagnostic_chains(policy, rows, f'cuda:{rank}', rank))

@@ -108,6 +108,7 @@ def main():
     parser.add_argument('--compile-denoiser', action='store_true')
     parser.add_argument('--fp32-blocked-gemm', action='store_true')
     parser.add_argument('--pipelined-tensorcore', action='store_true')
+    parser.add_argument('--compensated-bf16',type=int,choices=(3,6))
     args = parser.parse_args()
     rank, world = int(os.environ['RANK']), int(os.environ['WORLD_SIZE'])
     if world != 8 or rank != int(os.environ['LOCAL_RANK']): raise ValueError('Requires Server1 eight GPUs')
@@ -158,6 +159,9 @@ def main():
             if args.pipelined_tensorcore:
                 from gem.closedloop.dppo.numerical_execution import configure_pipelined_tensorcore
                 configure_pipelined_tensorcore(policy)
+            if args.compensated_bf16:
+                from gem.closedloop.dppo.numerical_execution import configure_compensated_bf16
+                configure_compensated_bf16(policy,args.compensated_bf16)
             item['contract'] = policy.kernel_config
             def generate():
                 generators = [torch.Generator(device=f'cuda:{rank}').manual_seed(713+rank*1000+i) for i in range(64)]

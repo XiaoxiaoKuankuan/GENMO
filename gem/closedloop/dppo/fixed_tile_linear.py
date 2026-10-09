@@ -48,7 +48,23 @@ def _kernel():
                            (rows[:, None]<M)&(kk[None, :]<K), 0)
             right = tl.load(B+kk[:, None]*BS0+cols[None, :]*BS1,
                             (kk[:, None]<K)&(cols[None, :]<N), 0)
-            if PIPELINED:
+            if PRECISION == 'bf16x3' or PRECISION == 'bf16x6':
+                # FP32主值拆成BF16高位和残差，乘积在FP32中合并；避免把整个
+                # 权重/激活直接舍入一次后丢失小更新。此为独立近似合同，非IEEE等价。
+                left_hi, right_hi = left.to(tl.bfloat16), right.to(tl.bfloat16)
+                left_rest = left-left_hi.to(tl.float32)
+                right_rest = right-right_hi.to(tl.float32)
+                left_lo, right_lo = left_rest.to(tl.bfloat16), right_rest.to(tl.bfloat16)
+                if PRECISION == 'bf16x6':
+                    left_tail = (left_rest-left_lo.to(tl.float32)).to(tl.bfloat16)
+                    right_tail = (right_rest-right_lo.to(tl.float32)).to(tl.bfloat16)
+                    total = tl.dot(left_tail,right_hi,total)
+                    total = tl.dot(left_lo,right_lo,total)
+                    total = tl.dot(left_hi,right_tail,total)
+                total = tl.dot(left_lo,right_hi,total)
+                total = tl.dot(left_hi,right_lo,total)
+                total = tl.dot(left_hi,right_hi,total)
+            elif PIPELINED:
                 # 让矩阵乘累加直接消费既有累加器，避免每个K块先物化独立乘积。
                 total = tl.dot(left, right, total, input_precision=PRECISION)
             else:
@@ -70,7 +86,7 @@ def fixed_matmul(left, right, *, precision='ieee'):
         raise ValueError('Fixed-tile candidate requires equal CUDA dtypes')
     pipelined = precision.endswith('_pipelined')
     precision = precision.removesuffix('_pipelined')
-    if left.dtype not in (torch.float32, torch.bfloat16) or precision not in ('ieee', 'tf32x3'):
+    if left.dtype not in (torch.float32, torch.bfloat16) or precision not in ('ieee', 'tf32x3','bf16x3','bf16x6'):
         raise ValueError('Unsupported explicit fixed-tile precision')
     if _MULTIPLY is None: _MULTIPLY = _kernel()
     m, k = left.shape; n = right.shape[1]
@@ -79,6 +95,9 @@ def fixed_matmul(left, right, *, precision='ieee'):
     if pipelined:
         # TF32x3三个乘积的寄存器需求比BF16高，独立使用较小tile候选。
         bm, bn, bk = (32, 64, 32)
+    if precision in ('bf16x3','bf16x6'):
+        if left.dtype != torch.float32:raise ValueError('Compensated BF16 requires FP32 source operands')
+        bm,bn,bk=(64,64,32)
     if m and n:
         grid = (((m+bm-1)//bm)*((n+bn-1)//bn),) if pipelined else ((m+bm-1)//bm, (n+bn-1)//bn)
         _MULTIPLY[grid](left, right, output, m, n, k,

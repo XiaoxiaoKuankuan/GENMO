@@ -106,6 +106,28 @@ def configure_pipelined_tensorcore(policy):
         grouped_output_tiles=8, direct_dot_accumulator=True)
 
 
+def configure_compensated_bf16(policy, products):
+    """显式诊断残差补偿的BF16矩阵乘；主参数、层间激活及attention保持FP32。
+
+    3项/6项乘积是不同近似合同，必须分别实际采样并验证梯度/Adam/有效输出。
+    不能把一次BF16舍入导致的策略突变用降低检查精度掩盖，也不宣称此路径与
+    原FP32逐位相同。默认生产配置不会启用该候选。
+    """
+    from .batch_execution import SampleMatrixLinear
+    from gem.network.base_arch.transformer.encoder_rope import RoPEAttention
+    if policy.numerical_execution is None or policy.numerical_execution['mode']!='bf16_backbone_candidate' or products not in (3,6):
+        raise ValueError('Compensated BF16 requires explicit candidate mode and 3 or 6 products')
+    for name,module in policy.actor.denoiser.named_modules():
+        if isinstance(module,SampleMatrixLinear):
+            module.compute_dtype=module.result_dtype=torch.float32
+            module.forward_backend=(f'fixed_tile_bf16x{products}_pipelined' if name.startswith('blocks.')
+                else 'fixed_tile_ieee' if name.startswith('embed_timestep.') else 'blocked64_fp32_gemm')
+        if isinstance(module,RoPEAttention):module.execution_backend='sdpa_math'
+    policy.numerical_execution.update(linear_backend=f'compensated_bf16x{products}_fp32_output.v1',
+        backbone_multiply=f'bf16x{products}',backbone_dtype='float32',attention_backend='sdpa_math',
+        master_weight_precast=False,layer_output_dtype='float32',compensation_products=products)
+
+
 @contextmanager
 def precision_scope(contract):
     if contract is None:
