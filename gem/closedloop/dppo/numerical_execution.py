@@ -124,13 +124,26 @@ def compile_fixed_denoiser(policy, capacity=64):
                 if count<capacity:
                     piece=torch.cat((piece,piece.new_full((capacity-count,*piece.shape[1:]),fill)),0)
                 parts.append(piece.contiguous())
-            action,contact=compiled(*parts)
+            # AOTAutograd的no_grad推理图和训练图可能采用不同融合归约，末端
+            # std=0.001会放大其舍入差。采样也使用同一有梯度前向，随后立即
+            # detach释放激活；条件输入保持同一requires_grad身份，不改其值。
+            # 这是显式额外激活成本，必须计入gen64计时，不能用旧推理图时间。
+            learning = torch.is_grad_enabled()
+            if torch.is_inference_mode_enabled():
+                raise ValueError('Shared compiled forward requires no_grad rather than inference_mode')
+            with torch.enable_grad():
+                if not parts[2].requires_grad:
+                    parts[2] = parts[2].detach().requires_grad_(True)
+                action,contact=compiled(*parts)
+            if not learning:
+                action,contact=action.detach(),contact.detach()
             heads.append(action[:count]);contacts.append(contact[:count])
         return dict(pred_x_start=torch.cat(heads),static_conf_logits=torch.cat(contacts))
     policy.actor.denoiser._stage10_eager_forward=original
     policy.actor.denoiser.forward=forward
-    policy.numerical_execution.update(denoiser_compiler='inductor_fixed_network_rows.v1',
+    policy.numerical_execution.update(denoiser_compiler='inductor_fixed_network_rows_shared_grad_forward.v2',
         compiled_network_capacity=capacity,compile_autotuning=True,compile_implicit_fallback=False,
+        inference_uses_grad_forward_then_detach=True,
         zero_padding_scope='internal_network_tail_only_not_effective_samples')
 
 
