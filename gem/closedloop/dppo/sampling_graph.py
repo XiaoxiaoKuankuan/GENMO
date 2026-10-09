@@ -70,6 +70,21 @@ class SamplingDenoiserGraph:
                     capture_seconds=self.capture_seconds, replays=self.replays,
                     eager_gradient_calls=self.eager_gradient_calls, graph_backward=False)
 
+    @torch.no_grad()
+    def prime_sample_batches(self, maximum):
+        """校准预热边界捕获1..N真实环境子批；不消耗随机数或创建训练转移。"""
+        if not self.graphs:raise ValueError('Prime after the first real CFG batch')
+        entry=max(self.graphs.values(),key=lambda item:item[1][0].shape[0])
+        source=entry[1];count=source[0].shape[0]//2
+        if count<maximum or source[0].shape[0]!=2*count:
+            raise ValueError('Prime requires the complete conditional/unconditional source batch')
+        # 克隆最大形状，避免LRU缓存变动及原静态输入被重放改写。
+        source=tuple(t.clone() for t in source)
+        for batch in range(1,maximum+1):
+            arguments=tuple(torch.cat((t[:batch],t[count:count+batch])) for t in source)
+            self(arguments[0],arguments[1],y=dict(f_cond=arguments[2],length=arguments[3]),inputs={})
+        torch.cuda.synchronize(source[0].device)
+
 
 def install_sampling_graph(actor, *, max_shapes=8):
     if isinstance(actor.denoiser.forward, SamplingDenoiserGraph):

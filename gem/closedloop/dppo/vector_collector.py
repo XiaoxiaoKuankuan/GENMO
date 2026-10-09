@@ -181,6 +181,9 @@ class VectorEnvironmentCollector(DualEnvironmentCollector):
                 env.decision+=1
                 return generated['critical_ready_seconds']
             values=self._run_boundary_jobs([self.executors[i].submit(generate,i) for i in range(enabled)],allow_generation=True)
+            prime=getattr(self.policy.actor.denoiser.forward,'prime_sample_batches',None)
+            if prime is not None and iteration==0:
+                prime(enabled)
             if iteration>=warmup:
                 for i,v in enumerate(values):durations[i].append(v)
         import math
