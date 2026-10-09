@@ -75,6 +75,7 @@ class DPPODiffusionPolicy:
         defer_checks: bool = False,
         precision_mode: str | None = None,
         attention_backend: str | None = None,
+        numerical_variant: str = 'default',
     ) -> None:
         if not isinstance(actor, Stage1Actor):
             raise TypeError("DPPO policy requires the existing Stage1Actor")
@@ -144,6 +145,10 @@ class DPPODiffusionPolicy:
                 effective_std_floors=list(self.std_schedule or (self.std_floor,) * steps))
         self.execution_batch_size = execution_batch_size
         self._prepare_actor()
+        # 在任何行为采样前固定算子合同，后续旧概率/恢复身份一起绑定此选择。
+        if numerical_variant != 'default':
+            from .numerical_execution import configure_variant
+            configure_variant(self, numerical_variant)
 
     @property
     def execution_batch_size(self):

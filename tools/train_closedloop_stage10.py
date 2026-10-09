@@ -174,14 +174,16 @@ def _sources(config, check):
                   'updater_v2', 'position_repair', 'archives', 'archive_process', 'optional_diagnostics',
                   'performance', 'tensor_cache', 'asset_cache', 'rollout_storage', 'budget_ledger',
                   'batch_execution', 'execution_checks', 'journal_codec', 'dual_collector',
-                  'numerical_execution', 'training_scale', 'fixed_tile_linear', 'prepaid_budget', 'update_observation')
+                  'numerical_execution', 'training_scale', 'fixed_tile_linear', 'prepaid_budget', 'update_observation',
+                  'effect_checkpoint')
     vector = config.get('runtime',{}).get('backend') == 'gpu_vectorized.v1'
     if vector:
         names += ('vector_collector','vector_boundary','vector_environment','vector_runtime','vector_evaluation',
                   'rollback_audit','sampling_graph','condition_sampling_graph','vector_metrics',
                   'vector_reward_math','vector_reward_adapter','vector_devices','deployment_clock','vector_generation',
                   'world_flow','world_collector')
-    gmt_additional = ['source/NoetixRobot/NoetixRobot/tasks/mimic/mimic_noetix_bumi4340_mha_sonic/closedloop/execution_journal.py']
+    gmt_additional = [f'source/NoetixRobot/NoetixRobot/tasks/mimic/mimic_noetix_bumi4340_mha_sonic/closedloop/{name}.py'
+                      for name in ('execution_journal', 'execution_copy')]
     if vector:
         gmt_additional += [f'source/NoetixRobot/NoetixRobot/tasks/mimic/mimic_noetix_bumi4340_mha_sonic/closedloop/{name}.py'
             for name in ('vector_backend','vector_env','vector_reference','vector_diagnostics','vector_service','vector_journal','vector_columns')]

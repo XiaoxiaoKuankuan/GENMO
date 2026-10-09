@@ -20,6 +20,17 @@ ATTENTION_BACKENDS = ('manual', 'sdpa_math', 'sdpa_efficient', 'sdpa_flash', 'sd
 _ACTIVE_PRECISION = ContextVar('stage10_active_precision', default=None)
 
 
+def configure_variant(policy, variant):
+    """训练入口与诊断共用显式候选选择；未经自洽验收的编译不接入生产配置。"""
+    if variant == 'blocked64_fp32_gemm':
+        configure_blocked_fp32(policy)
+    elif variant in ('compensated_bf16x3', 'compensated_bf16x6'):
+        configure_compensated_bf16(policy, int(variant[-1]))
+    else:
+        raise ValueError('Unknown explicit numerical variant')
+    policy.numerical_execution['variant'] = variant
+
+
 def configure_numerics(actor, mode, attention_backend=None):
     from .batch_execution import configure_gradients, set_sample_linear, SampleMatrixLinear
     from gem.network.base_arch.transformer.encoder_rope import RoPEAttention

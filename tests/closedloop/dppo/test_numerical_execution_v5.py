@@ -85,3 +85,21 @@ def test_precision_scope_restores_global_switch():
     with precision_scope(dict(matmul_tf32=not original)):
         assert torch.backends.cuda.matmul.allow_tf32 is not original
     assert torch.backends.cuda.matmul.allow_tf32 is original
+
+
+def test_explicit_variant_bound_before_sampling_and_wrong_mode_rejected(actor_factory, device):
+    from gem.closedloop.dppo.batch_execution import SampleMatrixLinear
+    actor, _ = actor_factory(starts=(45,47)); actor.to(device)
+    policy = DPPODiffusionPolicy(actor, cfg_batch=True, numerical_layout='sample_matrix_bmm_fp32.v1',
+        precision_mode='fp32_fast', numerical_variant='blocked64_fp32_gemm', defer_checks=True)
+    contract = policy.kernel_config['numerical_execution']
+    assert contract['variant'] == 'blocked64_fp32_gemm' and contract['network_row_capacity'] == 64
+    assert all(module.forward_backend == 'blocked64_fp32_gemm'
+        for name, module in actor.denoiser.named_modules()
+        if isinstance(module, SampleMatrixLinear) and not name.startswith('embed_timestep.'))
+    with pytest.raises(ValueError, match='fp32_fast'):
+        DPPODiffusionPolicy(actor, numerical_layout='sample_matrix_bmm_fp32.v1',
+            precision_mode='fp32_reference', numerical_variant='blocked64_fp32_gemm')
+    with pytest.raises(ValueError, match='Unknown explicit numerical variant'):
+        DPPODiffusionPolicy(actor, numerical_layout='sample_matrix_bmm_fp32.v1',
+            precision_mode='fp32_fast', numerical_variant='silent_fallback')

@@ -790,7 +790,8 @@ def run_parallel(args, config, collective, preflight):
             numerical_layout=c.stage.get('performance', {}).get('numerical_layout', 'legacy_step_lane'),
             defer_checks=c.stage.get('performance', {}).get('defer_tensor_checks', False),
             precision_mode=c.stage.get('performance', {}).get('precision_mode'),
-            attention_backend=c.stage.get('performance', {}).get('attention_backend'))
+            attention_backend=c.stage.get('performance', {}).get('attention_backend'),
+            numerical_variant=c.stage.get('performance', {}).get('numerical_variant', 'default'))
         if 'weight_reduction' in c.stage.get('performance', {}):
             from .batch_execution import configure_gradients
             performance = c.stage['performance']
