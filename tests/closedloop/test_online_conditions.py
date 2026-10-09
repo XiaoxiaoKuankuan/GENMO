@@ -173,7 +173,12 @@ def test_frozen_music_reuses_validated_source_without_changing_conditions(builde
     actual, actual_meta = builder.build(snapshot, reservation, frozen)
     for key in reference:
         torch.testing.assert_close(actual[key], reference[key], atol=0, rtol=0)
-    assert actual_meta == meta
+    assert actual_meta.keys() == meta.keys()
+    for key in meta:
+        if isinstance(meta[key], np.ndarray):
+            np.testing.assert_array_equal(actual_meta[key], meta[key])
+        else:
+            assert actual_meta[key] == meta[key]
     # 窗口消费者不能改变已经核验的整首音乐；内部意外写入则必须被发现。
     actual['music_features'].zero_()
     repeated, _ = builder.build(snapshot, reservation, frozen)
