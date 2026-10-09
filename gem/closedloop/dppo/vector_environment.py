@@ -75,7 +75,7 @@ class VectorUpperEnvironment(UpperEnvironment):
         if (self.config.get('runtime', {}).get('vector_generation_contract') == GENERATION_CONTRACT
                 and hasattr(self.policy, 'owner') and not kwargs.get('deterministic', False)):
             result = yield from generate_for_environment_flow(self)
+            result['timing']['reference_deadline'] = dict(self.deadline_diagnostic)
         else:
             result = yield from super().generate_flow(**kwargs)
-        result['timing']['reference_deadline'] = dict(self.deadline_diagnostic)
         return result

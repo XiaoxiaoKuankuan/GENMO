@@ -100,8 +100,12 @@ class VectorTrainingRuntime:
         if previous_budget is not None:previous_budget.close()
         resource.journal = self._journal(directory/'execution_journal.sqlite')
         resource.env.backend.journal = resource.journal
-        resource.env.budget = IncrementalBudget(directory/'budget.json', dict(accepted_iterations=1,
-            optimizer_attempts=1, **self.phase.slot_credits[slot]), disk_guard=self.c.guard)
+        budget_type, extra = IncrementalBudget, {}
+        if self.c.config['runtime'].get('vector_collection_contract') == 'genmo.world_batched_flow.v1':
+            from .prepaid_budget import PrepaidBudget
+            budget_type, extra = PrepaidBudget, dict(parent_lease=self.phase.parent.path)
+        resource.env.budget = budget_type(directory/'budget.json', dict(accepted_iterations=1,
+            optimizer_attempts=1, **self.phase.slot_credits[slot]), disk_guard=self.c.guard, **extra)
         resource.env.output = directory
         directory.joinpath('raw_samples').mkdir(exist_ok=True)
         resource.env.iteration = self.c.state['iteration']
