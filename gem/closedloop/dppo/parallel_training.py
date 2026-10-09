@@ -1000,9 +1000,18 @@ def run_parallel(args, config, collective, preflight):
             with measure('storage.archive_enqueue'):
                 root_call(collective, lambda: c.maintenance.enqueue_archive(directory))
             root_call(collective, lambda: _flush_archive_metrics(c))
-            periodic_evaluation = index % c.stage['evaluation']['every_iterations'] == 0
+            effect_due = index in c.stage['evaluation'].get('effect_check_iterations', [])
+            periodic_evaluation = index % c.stage['evaluation']['every_iterations'] == 0 or effect_due
             if periodic_evaluation:
-                _evaluate_and_record(c, report, f'{index:06d}', legacy_label=index)
+                evaluated = _evaluate_and_record(c, report, f'{index:06d}', legacy_label=index)
+                if effect_due:
+                    from .effect_checkpoint import summarize_effect
+                    def publish_effect():
+                        effect = summarize_effect(evaluated, update, iteration=index)
+                        atomic_json(c.session/'effect_checks'/f'{index:06d}.json', effect)
+                        return effect
+                    effect = root_call(collective, publish_effect)
+                    report.setdefault('effect_checks', []).append(effect)
             performance = local_call(collective, profiler.report)
             by_rank = collective.all_gather_object(performance)
             walltime = _record_iteration_walltime(c, index, iteration_start, core_seconds=seconds,
