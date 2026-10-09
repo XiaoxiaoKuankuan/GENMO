@@ -217,9 +217,11 @@ def analytic_kl_local(policy, transitions, *, global_manifest=None, distributed=
             current_std = parameters['std'].double().reshape(len(rows), -1).mean(1)
             base_std = parameters.get('base_std', parameters['std']).double().reshape(len(rows), -1).mean(1)
             noise = torch.stack((old_std.reshape(len(rows), -1).mean(1), current_std, base_std, shift), 1)
-            for offset, (index, step) in enumerate(chunk):
-                output[index, step] = values[offset]
-                diagnostics[index, :, step] = noise[offset]
+            # 批量散写小型KL/噪声矩阵，避免每个内部样本启动五个小拷贝kernel。
+            chain_index = torch.tensor([index for index, _ in chunk], device=device)
+            step_index = torch.tensor(steps, device=device) if tensor_cache is None else tensor_cache.step_indices(steps)
+            output[chain_index, step_index] = values
+            diagnostics[chain_index, :, step_index] = noise
         cache = (KLResultCache(policy, transitions, {selected[position]: (output[i], diagnostics[i], counts[i])
                  for i, (position, _) in enumerate(owned)}, manifest) if return_cache else None)
     if distributed is not None:
@@ -462,14 +464,28 @@ def actor_update_v2(policy, optimizer, transitions, targets, *, global_manifest=
                 bc_enabled = distributed.broadcast_object(bc_enabled if _rank(distributed) == 0 else None)
             bc_report = None
             if bc_enabled:
+                sharded_bc = bool(getattr(bc, 'distributed_global_mean', False))
+                if distributed is not None:
+                    sharded_bc = distributed.broadcast_object(sharded_bc if _rank(distributed) == 0 else None)
                 with _local_phase(distributed, 'bc_local_backward'):
-                    if _rank(distributed) == 0:
-                        bc_report = bc.backward(actor, weight=bc_weight)
-                    else:
+                    # PPO已经SUM，第二次通信前只保留rank0的一份；BC各rank按全局均值贡献。
+                    if _rank(distributed) != 0:
                         optimizer.zero_grad(set_to_none=True)
+                    if sharded_bc or _rank(distributed) == 0:
+                        if bc is None: raise ValueError('Distributed BC requires an independent anchor on every rank')
+                        from .numerical_execution import precision_scope
+                        with precision_scope(getattr(policy, 'numerical_execution', None)):
+                            bc_report = bc.backward(actor, weight=bc_weight/(distributed.world_size if sharded_bc and distributed else 1))
                 if distributed is not None:
                     distributed.sum_gradients(actor)
-                    bc_report = distributed.broadcast_object(bc_report if _rank(distributed) == 0 else None)
+                    if sharded_bc:
+                        shards = distributed.all_gather_object(bc_report)
+                        bc_report = dict(weight=bc_weight, batch_size=sum(item['batch_size'] for item in shards),
+                            loss=sum(item['loss']*item['batch_size'] for item in shards)/sum(item['batch_size'] for item in shards),
+                            distribution='all_ranks_global_mean_gradient_sum', ranks=shards,
+                            bc_update_steps=shards[0]['bc_update_steps'])
+                    else:
+                        bc_report = distributed.broadcast_object(bc_report if _rank(distributed) == 0 else None)
             actor.eval()
             with _local_phase(distributed, 'actor_gradient_diagnostics'):
                 diagnostics = (_gradient_pair_report(actor, ppo_gradients, module_details=gradient_module_details)
@@ -525,7 +541,8 @@ def actor_update_v2(policy, optimizer, transitions, targets, *, global_manifest=
 
 
 def critic_update_local(critic, optimizer, transitions, targets, *, global_manifest=None,
-                        distributed=None, steps=80, batch_size=32, generator=None, grad_clip_norm=1., tensor_cache=None):
+                        distributed=None, steps=80, batch_size=32, generator=None, grad_clip_norm=1., tensor_cache=None,
+                        epochs=None):
     """小 Critic 用全局索引、本地条件和固定目标学习；前后指标明确属于本批数据。"""
     if type(steps) is not int or steps < 1 or type(batch_size) is not int or batch_size < 1:
         raise ValueError('Critic steps and global batch size must be positive integers')
@@ -569,9 +586,19 @@ def critic_update_local(critic, optimizer, transitions, targets, *, global_manif
 
     initial = metrics()
     losses, norms = [], []
-    for _ in range(steps):
+    plan = None
+    if epochs is not None:
+        if type(epochs) is not int or epochs < 1: raise ValueError('Critic epochs must be positive')
         if distributed is None or _rank(distributed) == 0:
-            global_indices = [selected[i] for i in torch.randperm(len(selected), generator=generator)[:batch_size].tolist()]
+            plan = []
+            for _ in range(epochs):
+                order = balanced_epoch_order(selected, manifest, generator)
+                plan.extend(order[start:start+batch_size] for start in range(0,len(order),batch_size))
+        if distributed is not None: plan = distributed.broadcast_object(plan)
+        steps = len(plan)
+    for step in range(steps):
+        if distributed is None or _rank(distributed) == 0:
+            global_indices = plan[step] if plan is not None else [selected[i] for i in torch.randperm(len(selected), generator=generator)[:batch_size].tolist()]
         else:
             global_indices = None
         if distributed is not None:
@@ -595,6 +622,8 @@ def critic_update_local(critic, optimizer, transitions, targets, *, global_manif
         losses.append(float(loss.detach()))
     final = metrics()
     return dict(losses=losses, gradient_norms=norms, optimizer_steps=steps,
+        epochs=epochs, sampling='complete_epoch_without_replacement' if epochs else 'legacy_repeated_minibatch',
+        global_sample_visits=len(selected)*epochs if epochs else sum(min(batch_size,len(selected)) for _ in losses),
         initial_mse=initial['mse'], initial_explained_variance=initial['explained_variance'],
         mse=final['mse'], explained_variance=final['explained_variance'], before=initial, after=final,
         metric_scope='current_rollout_fixed_bootstrapped_targets_not_independent_value_ground_truth')

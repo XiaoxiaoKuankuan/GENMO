@@ -83,6 +83,8 @@ def configuration(path):
     if 'base_config' in config or config.get('stage10', {}).get('version') not in (VERSION, VERSION_V2):
         raise ValueError('Stage10 requires its own explicit full-dataset configuration')
     stage = config['stage10']
+    from gem.closedloop.dppo.training_scale import derive_training_scale
+    derive_training_scale(config)
     parallel_v2 = stage['version'] == VERSION_V2
     if type(stage['seed']) is not int or not 0 <= stage['seed'] < 2**32:
         raise ValueError('Stage10 base seed must be an integer in [0, 2**32)')
@@ -171,7 +173,8 @@ def _sources(config, check):
         names += ('parallel_support', 'parallel_training', 'execution_profile', 'periodic_monitor',
                   'updater_v2', 'position_repair', 'archives', 'archive_process', 'optional_diagnostics',
                   'performance', 'tensor_cache', 'asset_cache', 'rollout_storage', 'budget_ledger',
-                  'batch_execution', 'execution_checks', 'journal_codec', 'dual_collector')
+                  'batch_execution', 'execution_checks', 'journal_codec', 'dual_collector',
+                  'numerical_execution', 'training_scale')
     vector = config.get('runtime',{}).get('backend') == 'gpu_vectorized.v1'
     if vector:
         names += ('vector_collector','vector_boundary','vector_environment','vector_runtime','vector_evaluation',

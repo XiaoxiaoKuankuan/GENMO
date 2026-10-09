@@ -178,10 +178,11 @@ def _calibrate_and_profile(c, restored=False):
     if getattr(c, 'vector', None) is not None:
         result = c.vector.calibrate(c.state.pop('local_rank_state')['vector_collector'] if restored else None)
         micro = c.settings['denoising_microbatch']
-        if micro not in (8,16,32):
-            raise ValueError('GPU runtime requires a separately accepted learning microbatch (8/16/32)')
+        if type(micro) is not int or micro < 1:
+            raise ValueError('GPU learning microbatch must be positive')
         c.profile = dict(microbatch=micro,cfg_batch=True,numerical_layout=c.policy.numerical_layout,
-            validation_scope='saved_rollout_all_gradient_parity_then_first_live_probability_check')
+            numerical_execution=c.policy.numerical_execution,
+            validation_scope='explicit_configuration_requires_separate_gradient_acceptance_and_live_probability_check')
         c.state['execution_profile'] = dict(c.profile)
         return dict(calibration=result,profile=c.profile)
     from tools.train_closedloop_stage10 import calibrate, capture_execution_state, restore_execution_state
@@ -656,7 +657,7 @@ def _update_cached(c, buffer, targets, manifest, index):
             global_manifest=manifest, distributed=c.distributed, steps=c.settings['critic_steps'],
             batch_size=c.settings['critic_batch'], generator=c.generators['critic'],
             grad_clip_norm=c.settings['critic_grad_clip_norm'],
-            **({'tensor_cache':c.tensor_cache} if critic_updater is critic_update_local else {}))
+            **({'tensor_cache':c.tensor_cache, 'epochs':c.settings.get('critic_epochs')} if critic_updater is critic_update_local else {}))
         timings[active_phase] = time.perf_counter()-started
         active_phase = 'actor_seconds'
         started = time.perf_counter()
@@ -676,7 +677,7 @@ def _update_cached(c, buffer, targets, manifest, index):
         active_phase = 'kl_seconds'
         started = time.perf_counter()
         kl = analytic_kl_local(c.policy, rows, global_manifest=manifest, distributed=c.distributed,
-                               denoising_microbatch=c.profile['microbatch'], tensor_cache=c.tensor_cache,
+                               denoising_microbatch=c.settings.get('kl_microbatch', c.profile['microbatch']), tensor_cache=c.tensor_cache,
                                reuse_cache=None if kl_cache is None else kl_cache.get('cache'))
         timings[active_phase] = time.perf_counter()-started
         active_phase = None
@@ -779,11 +780,29 @@ def run_parallel(args, config, collective, preflight):
             std_floor=c.settings['std_floor'], guidance_scale=c.settings['guidance_scale'],
             cfg_batch=c.settings['cfg_batch'], std_schedule=c.settings.get('std_schedule'),
             numerical_layout=c.stage.get('performance', {}).get('numerical_layout', 'legacy_step_lane'),
-            defer_checks=c.stage.get('performance', {}).get('defer_tensor_checks', False))
+            defer_checks=c.stage.get('performance', {}).get('defer_tensor_checks', False),
+            precision_mode=c.stage.get('performance', {}).get('precision_mode'),
+            attention_backend=c.stage.get('performance', {}).get('attention_backend'))
+        if 'weight_reduction' in c.stage.get('performance', {}):
+            from .batch_execution import configure_gradients
+            performance = c.stage['performance']
+            configure_gradients(c.actor, weight_reduction=performance['weight_reduction'],
+                accumulation=performance.get('gradient_accumulation', 'fp64_reference'),
+                sensitive_names=performance.get('gradient_sensitive_names', []))
         c.sampler = FullMusicSampler(c.catalog, split='train', seed=c.stage['seed']+1000003*collective.rank,
             window_seconds=c.settings['episode_seconds'], random_start=c.stage['dataset']['random_start'],
             source_probabilities=c.stage['dataset']['source_probabilities'])
-        c.bc = local_call(collective, lambda: SupervisedAnchor(c.config, c.actor, train_config) if collective.rank == 0 else None)
+        def make_anchor():
+            sharded = c.settings.get('bc_distribution') == 'all_ranks'
+            if not sharded and collective.rank != 0: return None
+            anchor_config = copy.deepcopy(c.config)
+            if sharded:
+                anchor_config['stage9']['bc_batch'] = c.settings['bc_batch']//collective.world_size
+                anchor_config['stage9']['seed'] = (c.stage['seed']+1000003*collective.rank)%2**32
+            result = SupervisedAnchor(anchor_config, c.actor, train_config)
+            result.distributed_global_mean = sharded
+            return result
+        c.bc = local_call(collective, make_anchor)
         c.samplers = dict(music=c.sampler, **({'bc':c.bc} if c.bc is not None else {}))
         c.generators = dict(critic=torch.Generator().manual_seed(c.stage['seed']+2002),
                             actor=torch.Generator().manual_seed(c.stage['seed']+3003))

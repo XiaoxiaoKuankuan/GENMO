@@ -28,14 +28,12 @@ def validate_v2_configuration(config):
     performance = stage.get('performance', {})
     if config['runtime'].get('backend') == 'gpu_vectorized.v1':
         runtime = config['runtime']
-        if (type(runtime.get('num_envs')) is not int or not 1 <= runtime['num_envs'] <= 20
+        if (type(runtime.get('num_envs')) is not int or not 1 <= runtime['num_envs'] <= settings['rollout_upper_steps_per_rank']
                 or runtime.get('physics_device') != 'cuda:0'
                 or performance.get('numerical_layout') != 'sample_matrix_bmm_fp32.v1'
                 or settings.get('cfg_batch') is not True
-                or settings.get('rollout_upper_steps_per_rank') != 20
-                or settings.get('rollout_upper_steps') != 160
                 or settings.get('denoising_steps') != 20):
-            raise ValueError('GPU vector production requires genuine environments, 20 local chains and the accepted batch policy')
+            raise ValueError('GPU vector production requires genuine active environments, complete real chains and CFG')
         if (runtime.get('prefix_deadline_contract') != 'available_reference_deadline_cap.v1'
                 or runtime.get('vector_audit_contract') != 'nested_world_journal_excluded.v1'
                 or runtime.get('vector_device_contract') != 'isaac_global_gpu_index.v1'
@@ -81,6 +79,12 @@ def validate_v2_configuration(config):
         raise ValueError('Actor optimizer minibatch must contain complete denoising chains')
     if settings['rollout_upper_steps'] != 8 * settings['rollout_upper_steps_per_rank']:
         raise ValueError('Global rollout count must equal eight local collector counts')
+    if settings.get('bc_distribution', 'rank0') not in ('rank0', 'all_ranks'):
+        raise ValueError('Unknown BC distribution')
+    if settings.get('bc_distribution') == 'all_ranks' and settings['bc_batch'] % 8:
+        raise ValueError('Distributed BC global batch must split evenly across eight ranks')
+    if type(settings.get('kl_microbatch', settings['denoising_microbatch'])) is not int or settings.get('kl_microbatch', 1) < 1:
+        raise ValueError('KL microbatch must be independent and positive')
     if not 0 < settings['kl_soft_stop_joint'] <= settings['kl_stop_joint']:
         raise ValueError('Soft KL threshold must be positive and no greater than final hard threshold')
     if settings.get('kl_check_mode', 'post_step_full') not in ('post_step_full', 'pre_step_plus_final'):
