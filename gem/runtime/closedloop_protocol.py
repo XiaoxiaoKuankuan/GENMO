@@ -120,6 +120,15 @@ def _pack(value: Any) -> tuple[bytes, bytes]:
     parts, offsets, total = [], {}, 0
     def visit(item):
         nonlocal total
+        kind = type(item)
+        if kind in (type(None), str, int, float, bool):
+            return item
+        if kind is dict:
+            if any(not isinstance(key, str) for key in item):
+                raise TypeError('RPC mapping keys must be strings')
+            return {key:visit(child) for key,child in item.items()}
+        if kind in (list, tuple):
+            return [visit(child) for child in item]
         if dataclasses.is_dataclass(item):
             item = dataclasses.asdict(item)
         if isinstance(item, np.ndarray):
@@ -148,28 +157,31 @@ def _pack(value: Any) -> tuple[bytes, bytes]:
     return metadata, b''.join(parts)
 
 
+def _decode_raw_array(spec, payload):
+    """一次验证并恢复原始数组；同一描述符的多次引用仍各自独立可写。"""
+    if not isinstance(spec, dict) or set(spec) != {'offset', 'size', 'dtype', 'shape'}:
+        raise ValueError('Invalid raw array descriptor')
+    offset, size, shape = spec['offset'], spec['size'], spec['shape']
+    if (type(offset) is not int or type(size) is not int or offset < 0 or size < 0
+            or offset+size > len(payload) or not isinstance(shape, list)
+            or any(type(x) is not int or x < 0 for x in shape) or len(shape) > 32):
+        raise ValueError('Raw array bounds/shape invalid')
+    dtype = np.dtype(spec['dtype'])
+    if dtype.hasobject or dtype.kind not in 'biufUS':
+        raise TypeError('Unsupported received RPC array dtype')
+    count = 1
+    for dimension in shape:
+        count *= dimension
+    if count*dtype.itemsize != size or size > MAX_PACKET_BYTES:
+        raise ValueError('Raw array byte count differs from shape/dtype')
+    return np.frombuffer(payload, dtype=dtype, count=count, offset=offset).reshape(shape).copy()
+
+
 def _unpack_raw(values, payload):
     def visit(item):
         if isinstance(item, dict):
             if set(item) == {'__ndarray_raw__'}:
-                spec = item['__ndarray_raw__']
-                if not isinstance(spec, dict) or set(spec) != {'offset', 'size', 'dtype', 'shape'}:
-                    raise ValueError('Invalid raw array descriptor')
-                offset, size, shape = spec['offset'], spec['size'], spec['shape']
-                if (type(offset) is not int or type(size) is not int or offset < 0 or size < 0
-                        or offset+size > len(payload) or not isinstance(shape, list)
-                        or any(type(x) is not int or x < 0 for x in shape) or len(shape) > 32):
-                    raise ValueError('Raw array bounds/shape invalid')
-                dtype = np.dtype(spec['dtype'])
-                if dtype.hasobject or dtype.kind not in 'biufUS':
-                    raise TypeError('Unsupported received RPC array dtype')
-                count = 1
-                for dimension in shape:
-                    count *= dimension
-                if count*dtype.itemsize != size or size > MAX_PACKET_BYTES:
-                    raise ValueError('Raw array byte count differs from shape/dtype')
-                # 独立可写数组：同一payload引用多次也保持旧NPZ路径无可写别名的语义。
-                return np.frombuffer(payload, dtype=dtype, count=count, offset=offset).reshape(shape).copy()
+                return _decode_raw_array(item['__ndarray_raw__'], payload)
             return {key: visit(child) for key, child in item.items()}
         if isinstance(item, list):
             return [visit(child) for child in item]
@@ -178,6 +190,18 @@ def _unpack_raw(values, payload):
 
 
 def _unpack(metadata: bytes, payload: bytes):
+    # 本实现的标准 v2 帧拥有固定首字段。在 JSON 构建 dict 的同时恢复数组，
+    # 避免解析后再递归重建整棵树。非标准排序 v2 和旧 NPZ 仍走原兼容路径。
+    if metadata.startswith(b'{"__rpc_wire__":'):
+        def decode_object(item):
+            if len(item) == 1 and '__ndarray_raw__' in item:
+                return _decode_raw_array(item['__ndarray_raw__'], payload)
+            return item
+        values = json.loads(metadata, object_hook=decode_object)
+        if (not isinstance(values, dict) or values.get('__rpc_wire__') != WIRE_VERSION
+                or set(values) != {'__rpc_wire__', 'value'}):
+            raise ValueError('Unsupported RPC wire format')
+        return values['value']
     values = json.loads(metadata)
     if isinstance(values, dict) and "__rpc_wire__" in values:
         if values.get("__rpc_wire__") != WIRE_VERSION or set(values) != {"__rpc_wire__", "value"}:

@@ -27,6 +27,21 @@ def encode_binary(value):
 
     def visit(item):
         nonlocal offset
+        # 真实控制块的绝大多数叶子是内建标量。先处理这些叶子，避免每个
+        # tick/字段重复查询 Tensor、NumPy 和 Mapping 的动态类型协议。
+        kind = type(item)
+        if kind in (type(None), str, int, bool):
+            return item
+        if kind is float:
+            return item if math.isfinite(item) else {'__nonfinite__':repr(item)}
+        if kind is dict:
+            if any(not isinstance(key, str) for key in item):
+                raise TypeError('Journal mapping keys must be strings')
+            if len(item) == 1 and ('__journal_array_v2__' in item or '__nonfinite__' in item):
+                raise ValueError('Reserved journal metadata key')
+            return {key:visit(item[key]) for key in sorted(item)}
+        if kind in (list, tuple):
+            return [visit(child) for child in item]
         if hasattr(item, 'detach'):
             item = item.detach().cpu().numpy()
         if isinstance(item, np.ndarray):

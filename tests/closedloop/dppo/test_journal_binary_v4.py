@@ -132,3 +132,16 @@ def test_independent_audit_reads_binary_and_checks_physics(tmp_path):
     with StepJournal(path, format=FORMAT) as journal:
         journal.append_result(envelope('session',1,'reset_episode',dict(episode_id='e')))
     assert check_journal(path)['counts']['mutations'] == 1
+
+
+@pytest.mark.parametrize('value', [{1:'invalid'}, {'__journal_array_v2__':{}}, {'__nonfinite__':'nan'}])
+def test_scalar_fast_path_preserves_mapping_rejections(value):
+    with pytest.raises((TypeError, ValueError)):
+        encode_binary(value)
+
+
+def test_scalar_fast_path_preserves_types_and_fault_markers():
+    value = dict(items=[None, True, 1, -0.0, '汉字', float('nan'), float('inf'), -float('inf')])
+    decoded = decode_payload(encode_binary(value))
+    compare(value, decoded)
+    assert np.signbit(decoded['items'][3])

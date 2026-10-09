@@ -11,6 +11,7 @@ from __future__ import annotations
 from contextlib import contextmanager
 from dataclasses import dataclass
 import io
+import json
 import socket
 import struct
 import threading
@@ -251,3 +252,27 @@ def test_server_will_not_replace_existing_socket_path(tmp_path):
     with pytest.raises(FileExistsError):
         protocol.RpcServer(path, Handler()).serve()
     assert path.read_text() == "owned by another process"
+
+
+def test_object_hook_decode_matches_fallback_and_keeps_arrays_independent():
+    from tools.profile_closedloop_rpc import compare
+    array = np.arange(12, dtype='>f8').reshape(3, 4)[:, ::2]
+    metadata, payload = protocol._pack({'shared':[array, array], '汉字':'value', 'scalar':np.array(3)})
+    standard = protocol._unpack(metadata, payload)
+    header = json.loads(metadata)
+    fallback_metadata = json.dumps({'value':header['value'], '__rpc_wire__':header['__rpc_wire__']}).encode()
+    fallback = protocol._unpack(fallback_metadata, payload)
+    compare(standard, fallback)
+    standard['shared'][0][0, 0] = 99
+    assert standard['shared'][1][0, 0] == 0 and array[0, 0] == 0
+
+
+@pytest.mark.parametrize('change', [dict(offset=-1), dict(size=3), dict(shape=[True]),
+                                  dict(shape=[-1]), dict(dtype='O'), dict(offset=True)])
+def test_object_hook_rejects_the_same_invalid_descriptors(change):
+    descriptor = dict(offset=0, size=4, shape=[1], dtype='<f4') | change
+    value = {'__ndarray_raw__':descriptor}
+    for header in ({'__rpc_wire__':protocol.WIRE_VERSION, 'value':value},
+                   {'value':value, '__rpc_wire__':protocol.WIRE_VERSION}):
+        with pytest.raises((ValueError, TypeError)):
+            protocol._unpack(json.dumps(header, separators=(',', ':')).encode(), b'\0'*4)

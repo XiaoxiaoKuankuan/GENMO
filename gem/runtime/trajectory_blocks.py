@@ -62,7 +62,12 @@ def unpack_trace(block, *, readonly_views=False):
             raw = json.dumps(node['value'],ensure_ascii=False,allow_nan=False,separators=(',',':')).encode()
             if hashlib.sha256(raw).hexdigest() != node['sha256']:
                 raise ValueError('Static trace content SHA mismatch')
-            return [copy.deepcopy(node['value']) for _ in range(count)]
+            value = node['value']
+            # pack_trace 的常量仅含不可变内建标量。共享标量不会使行之间产生
+            # 可写别名；旧证据若包含可变常量，仍逐行复制，保留读取兼容性。
+            if type(value) in (type(None), str, int, float, bool):
+                return [value] * count
+            return [copy.deepcopy(value) for _ in range(count)]
         if kind in ('array','scalar','rows'):
             values = node['values']
             if len(values) != count:
