@@ -22,6 +22,25 @@ import time
 ROOT=Path(__file__).resolve().parents[1]
 
 
+def descendant_cpu_sample(root_pid):
+    """读取本测试进程树；按pid和启动时刻识别，避免把系统其他任务算入CPU占用。"""
+    processes={}
+    for entry in Path('/proc').iterdir():
+        if not entry.name.isdecimal():continue
+        try:
+            raw=(entry/'stat').read_text();fields=raw[raw.rfind(')')+2:].split()
+            processes[int(entry.name)]=(int(fields[1]),int(fields[11])+int(fields[12]),
+                fields[19],int(fields[21])*os.sysconf('SC_PAGE_SIZE'))
+        except (FileNotFoundError,ProcessLookupError,PermissionError):continue
+    selected={root_pid};pending=[root_pid]
+    while pending:
+        parent=pending.pop()
+        children=[pid for pid,record in processes.items() if record[0]==parent and pid not in selected]
+        selected.update(children);pending.extend(children)
+    return {f'{pid}:{processes[pid][2]}':dict(cpu_ticks=processes[pid][1],rss_bytes=processes[pid][3])
+        for pid in selected if pid in processes}
+
+
 def main():
     p=argparse.ArgumentParser(description=__doc__)
     p.add_argument('--mode',choices=('collection','capacity'),required=True)
@@ -59,12 +78,20 @@ def main():
         started=time.perf_counter()
         with (a.output/f'n{count:04d}.log').open('w') as log, (a.output/f'n{count:04d}_gpu.jsonl').open('w') as telemetry:
             process=subprocess.Popen(command,cwd=ROOT,env=env,stdout=log,stderr=subprocess.STDOUT)
+            previous={};previous_time=time.perf_counter()
             try:
                 while process.poll() is None:
                     values=subprocess.run(['nvidia-smi','--query-gpu=index,utilization.gpu,memory.used,memory.total',
                         '--format=csv,noheader,nounits'],capture_output=True,text=True,timeout=10)
-                    telemetry.write(json.dumps(dict(seconds=time.perf_counter()-started,csv=values.stdout,
-                        exit_code=values.returncode))+'\n');telemetry.flush()
+                    now=time.perf_counter();current=descendant_cpu_sample(process.pid)
+                    ticks=sum(max(0,value['cpu_ticks']-previous[key]['cpu_ticks'])
+                        for key,value in current.items() if key in previous)
+                    cores=ticks/os.sysconf('SC_CLK_TCK')/(now-previous_time) if previous else None
+                    telemetry.write(json.dumps(dict(seconds=now-started,csv=values.stdout,
+                        exit_code=values.returncode,cpu_cores=cores,
+                        cpu_scope='test_descendants_interval_delta_excludes_new_or_exited_process_tails',
+                        process_count=len(current),rss_sum_bytes=sum(v['rss_bytes'] for v in current.values())))+'\n');telemetry.flush()
+                    previous,previous_time=current,now
                     time.sleep(1.)
             finally:
                 if process.poll() is None:
