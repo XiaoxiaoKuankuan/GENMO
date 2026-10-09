@@ -15,7 +15,7 @@ from torch import nn
 from gem.network.base_arch.transformer.encoder_rope import EncoderRoPEBlock
 
 ROW_BMM = 'sample_matrix_bmm_fp32.v1'
-WEIGHT_REDUCTIONS = ('sample_bmm', 'joint_gemm', 'chunked_gemm', 'bounded_sample_bmm')
+WEIGHT_REDUCTIONS = ('sample_bmm', 'joint_gemm', 'chunked_gemm', 'bounded_sample_bmm', 'joint_gemm_fp64')
 GRADIENT_ACCUMULATIONS = ('fp64_reference', 'fp32', 'selective_fp64')
 
 
@@ -79,6 +79,9 @@ class _SampleLinear(torch.autograd.Function):
         grad_weight = None
         if ctx.needs_input_grad[1] and ctx.reduction == 'joint_gemm':
             grad_weight = flat.t() @ inputs
+        elif ctx.needs_input_grad[1] and ctx.reduction == 'joint_gemm_fp64':
+            # 仅已定位的敏感窄输出投影使用；不物化逐样本完整权重梯度。
+            grad_weight = (flat.double().t() @ inputs.double()).to(weight.dtype)
         elif ctx.needs_input_grad[1] and ctx.reduction == 'sample_bmm':
             # 每个样本沿时间维的归约也固定形状；随后高精度合并样本贡献。
             per_sample = torch.bmm(gradient.reshape(value.shape[0], -1, gradient.shape[-1]).transpose(1, 2),
@@ -112,6 +115,7 @@ class SampleMatrixLinear(nn.Linear):
         reduction = getattr(self, 'weight_reduction', None)
         if reduction is None:
             reduction = 'sample_bmm' if getattr(self, 'stable_weight_rows', True) else 'joint_gemm'
+        reduction = getattr(self, 'weight_reduction_override', None) or reduction
         dtype = getattr(self, 'compute_dtype', self.weight.dtype)
         result = _SampleLinear.apply(value.to(dtype), self.weight.to(dtype),
                                      None if self.bias is None else self.bias.to(dtype), reduction,

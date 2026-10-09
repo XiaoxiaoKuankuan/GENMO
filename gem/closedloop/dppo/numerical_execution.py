@@ -47,6 +47,7 @@ def configure_numerics(actor, mode, attention_backend=None):
     set_sample_linear(actor.denoiser, True)
     for name, module in actor.named_modules():
         if isinstance(module, SampleMatrixLinear):
+            module.weight_reduction_override = None
             # IEEE Triton在真实大矩阵上更慢，保留已测更快的cuBLAS BMM；只有
             # T=1时间嵌入/条件需要固定归约消除batch=1时的GEMV切换。
             module.forward_backend = ('sample_bmm' if mode == 'fp32_reference' or
@@ -187,10 +188,14 @@ def configure_compensated_bf16(policy, products):
             module.compute_dtype=module.result_dtype=torch.float32
             module.forward_backend=(f'fixed_tile_bf16x{products}_pipelined' if name.startswith('blocks.')
                 else 'fixed_tile_ieee' if name.startswith('embed_timestep.') else 'blocked64_fp32_gemm')
+            if name == 'final_layer.fc2':
+                # 真实B128回归仅此投影存在近相消梯度超差，其余骨干保持联合FP32。
+                module.weight_reduction_override = 'joint_gemm_fp64'
         if isinstance(module,RoPEAttention):module.execution_backend='sdpa_math'
-    policy.numerical_execution.update(linear_backend=f'compensated_bf16x{products}_fp32_output.v1',
+    policy.numerical_execution.update(linear_backend=f'compensated_bf16x{products}_fp32_output.v2',
         backbone_multiply=f'bf16x{products}',backbone_dtype='float32',attention_backend='sdpa_math',
-        master_weight_precast=False,layer_output_dtype='float32',compensation_products=products)
+        master_weight_precast=False,layer_output_dtype='float32',compensation_products=products,
+        sensitive_weight_gradient={'denoiser.final_layer.fc2':'joint_gemm_fp64'})
 
 
 @contextmanager

@@ -37,6 +37,15 @@ def test_sample_linear_derivative_and_parameter_identity():
     assert type(layer) is torch.nn.Linear
 
 
+def test_sensitive_projection_uses_one_final_fp64_matrix_not_sample_weights():
+    layer = SampleMatrixLinear(3, 2, bias=False)
+    layer.weight_reduction = 'joint_gemm'
+    layer.weight_reduction_override = 'joint_gemm_fp64'
+    inputs = torch.tensor([1e8, 1., -1e8]).reshape(3, 1, 1).expand(3, 1, 3)
+    layer(inputs).sum().backward()
+    torch.testing.assert_close(layer.weight.grad, torch.ones_like(layer.weight), rtol=0, atol=0)
+
+
 def test_microbatch_accumulator_preserves_cancelling_gradient_and_freeze():
     layer=torch.nn.Linear(1,1,bias=True)
     layer.bias.requires_grad_(False)
