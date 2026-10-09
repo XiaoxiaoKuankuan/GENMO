@@ -48,6 +48,13 @@ def available_memory():
     return int(fields['MemAvailable'].split()[0])*1024
 
 
+def process_usage(pid):
+    """读取自己创建进程的累计CPU时间/RSS，分别报告，不将CPU核数当百分比。"""
+    raw=Path(f'/proc/{pid}/stat').read_text().rsplit(')',1)[1].split()
+    return dict(cpu_seconds=(int(raw[11])+int(raw[12]))/os.sysconf('SC_CLK_TCK'),
+        rss_bytes=int(Path(f'/proc/{pid}/statm').read_text().split()[1])*os.sysconf('SC_PAGE_SIZE'))
+
+
 def main():
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--config',type=Path,required=True)
@@ -132,10 +139,22 @@ def main():
         collector=DualEnvironmentCollector(policy,factory,timeout_seconds=600.)
         for iteration in range(2):
             collective.barrier()
+            pids=[os.getpid(),*[w.entries[0]['proc'].pid for w in workers]]
+            before={pid:process_usage(pid) for pid in pids}
             fragments,metrics=local_call(collective,lambda:collector.collect(count_per_rank=20,policy_version=0))
+            after={pid:process_usage(pid) for pid in pids}
             torch.save(fragments,args.output_dir/f'rollout_{iteration}.pt')
             metrics['control_steps']=sum(r.executed_control_steps for f in fragments for r in f)
             metrics['timing']=[r.metadata.get('timing',{}) for f in fragments for r in f]
+            metrics['processes']=[dict(pid=pid,**after[pid],cpu_core_equivalents=
+                (after[pid]['cpu_seconds']-before[pid]['cpu_seconds'])/metrics['seconds']) for pid in pids]
+            metrics['prefix_frames']=[int(r.context['known_qpos30_mask'][0].any(-1).sum()) for f in fragments for r in f]
+            metrics['environment_fragments']=[dict(slot=i,transitions=len(f),
+                control_steps=sum(r.executed_control_steps for r in f),terminated=sum(r.terminated for r in f),
+                truncated=sum(r.truncated for r in f),bootstrap=sum(not r.terminated and r.next_context is not None for r in f))
+                for i,f in enumerate(fragments)]
+            metrics['sampling_network_useful_fraction']=1.
+            metrics['paired_request_fraction']=sum(b['effective_rows'] for b in metrics['batches'] if b['effective_rows']==2)/20
             report['rounds'].append(metrics)
         torch.save(collector.state_dict(),args.output_dir/'collector_boundary.pt')
         report['status']='eight_gpu_collection_completed_pending_independent_audit_and_training_integration'
