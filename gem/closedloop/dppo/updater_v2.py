@@ -6,8 +6,9 @@
 始终只读，后续 minibatch 必须用已经更新的 Actor 重新计算概率。局部 objective 求和
 除以当前全局内部转移数，随后 SUM 梯度，不能再除以微批大小或 GPU 数量。
 
-BC 每个真实 Actor 更新只由 rank 0 计算全局监督批，与同步后的 PPO 梯度组合再裁剪。
-更新后的当前 minibatch KL 只用于软停止；它不能证明全 rollout 满足硬限制。调用方
+BC 按显式配置由 rank 0 或全部 rank 分担，全局均值与同步后的 PPO 梯度组合再裁剪。
+当前 minibatch KL 只用于软停止；pre_step 模式检查当前前向，post_step 模式另行重算。
+两者都不能证明全 rollout 满足硬限制。调用方
 必须在发布策略前调用 analytic_kl_local 做完整检查，并负责整轮状态快照／回滚。
 本模块不保存 checkpoint、不启动环境、不改变学习率，也不修改 GMT 或采样链。
 
@@ -288,8 +289,10 @@ def probability_check_local(policy, transitions, *, global_manifest=None, distri
             independent = independent.masked_fill(~mask, 0.).sum((-2, -1))
             batch = torch.stack(((current - stored).abs(), ((current - stored).exp() - 1).abs(),
                                  (independent - stored).abs()), 1)
-            for offset, (index, _) in enumerate(chunk):
-                checks[index] = torch.maximum(checks[index], batch[offset])
+            # 同链20步按amax一次归约，避免每个内部转移启动索引/maximum/写回小算子。
+            # amax不改变浮点求和顺序，重复链索引和尾批均保留完整覆盖。
+            indices = torch.tensor([index for index, _ in chunk], device=device)[:, None].expand(-1, 3)
+            checks.scatter_reduce_(0, indices, batch, reduce='amax', include_self=True)
     if distributed is not None:
         checks = distributed.gather_rows(checks, [position for position, _ in owned], len(selected))
     maximum = checks.amax(0).cpu()

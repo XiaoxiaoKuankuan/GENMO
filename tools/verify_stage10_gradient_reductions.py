@@ -19,6 +19,7 @@ from pathlib import Path
 import sys
 import time
 from datetime import timedelta
+from dataclasses import replace
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import torch
@@ -34,6 +35,29 @@ from gem.closedloop.dppo.policy import DPPODiffusionPolicy
 from gem.closedloop.dppo.tensor_cache import RolloutTensorCache
 from gem.closedloop.dppo.updater_v2 import actor_update_v2, analytic_kl_local, probability_check_local
 from gem.closedloop.dppo.parallel_support import cpu_snapshot, root_call, local_call
+from gem.closedloop.dppo.numerical_execution import MODES
+
+
+@torch.no_grad()
+def sample_diagnostic_chains(policy, source, device, rank):
+    """新数值合同实际生成新链，绝不覆盖原文件或为旧链重新定义 old 概率。
+
+    只复用真实条件与固定优势作算子诊断。新动作没有进入物理环境，因此这些对象
+    仅供本工具的数学对照，不能写成真实闭环 rollout 或用于策略效果验收。
+    """
+    context = {key: torch.cat([row.context[key] for row in source]).to(device) for key in source[0].context}
+    trace = policy.sample_rollout(context, generator=[torch.Generator(device=device).manual_seed(
+        9200+rank*1000+i) for i in range(len(source))])
+    trace = cpu_snapshot(trace)
+    result = []
+    for index, old in enumerate(source):
+        part = {key: ({name:value[index:index+1] for name,value in value.items()} if key=='conditions' else
+            value[index:index+1] if torch.is_tensor(value) and key!='timestep_map' else copy.deepcopy(value))
+            for key,value in trace.items()}
+        result.append(replace(old, chain=part['chain'][0], old_log_prob=part['old_log_probs'][0],
+            free_mask=part['free_mask'][0], metadata=dict(old.metadata, sampler_trace=part,
+                numerical_diagnostic_only=True, diagnostic_behavior_contract=policy.kernel_config)))
+    return result
 
 
 def module_directions(current, reference):
@@ -102,6 +126,9 @@ def main():
     parser.add_argument('--accumulator-repeats', type=int, default=5)
     parser.add_argument('--warmstart-adam', action='store_true',
                         help='先用原真实rollout执行一次参考PPO更新，固定得到的非空Adam供所有候选比较')
+    parser.add_argument('--precision-mode', choices=MODES,
+                        help='显式新数值合同：实际生成新诊断链；原封存 rollout 和 old 概率保持不变')
+    parser.add_argument('--compact', action='store_true', help='只比较各微批 joint GEMM/FP64累计，保留完整梯度门槛')
     args = parser.parse_args()
     rank, world = int(os.environ['RANK']), int(os.environ['WORLD_SIZE'])
     if world != 8 or rank != int(os.environ['LOCAL_RANK']):
@@ -121,8 +148,11 @@ def main():
     actor = actor.to(f'cuda:{rank}')
     payload = torch.load(args.weights, map_location='cpu', mmap=True, weights_only=False)
     actor.load_state_dict(payload['actor'])
-    policy = DPPODiffusionPolicy(actor, cfg_batch=True, numerical_layout='sample_matrix_bmm_fp32.v1', defer_checks=True)
+    policy = DPPODiffusionPolicy(actor, cfg_batch=True, numerical_layout='sample_matrix_bmm_fp32.v1', defer_checks=True,
+                                 precision_mode=args.precision_mode)
     rows, targets, archive_sha = local_call(collective, lambda: read_saved_rank(args.iteration, rank))
+    if args.precision_mode is not None:
+        rows = local_call(collective, lambda: sample_diagnostic_chains(policy, rows, f'cuda:{rank}', rank))
     if any(row.metadata['sampler_trace']['kernel_config'] != policy.kernel_config for row in rows):
         raise ValueError('This equivalent-backward comparison cannot change the saved behavior policy')
     cache = RolloutTensorCache(rows, targets, f'cuda:{rank}', max_device_bytes=4*1024**3)
@@ -144,16 +174,21 @@ def main():
         del warm_optimizer
     sensitive = [name for name, _ in actor.named_parameters() if any(
         word in name for word in ('gate_', 'norm', 'history_encoder', 'prefix_encoder', 'cond_embed'))]
-    variants = [('sample_bmm', 'fp64_reference', 1)]
+    variants = [('joint_gemm' if args.precision_mode else 'sample_bmm', 'fp64_reference', 1)]
     variants += [(reduction, accumulation, micro)
-        for reduction, accumulation in [('joint_gemm', 'fp64_reference'), ('chunked_gemm', 'fp64_reference'),
+        for reduction, accumulation in ([('joint_gemm', 'fp64_reference')] if args.compact else
+            [('joint_gemm', 'fp64_reference'), ('chunked_gemm', 'fp64_reference'),
             ('bounded_sample_bmm', 'fp64_reference'), ('joint_gemm', 'fp32'), ('joint_gemm', 'selective_fp64')]
+        )
         for micro in args.microbatches]
     report = dict(schema='stage10.gradient_reduction_audit.v1', devices=devices,
         source_archive_sha256=archive_sha, real_global_chains=len(manifest),
-        preserved_old_probabilities=True, nonempty_adam=bool(payload['actor_optimizer']['state']),
+        preserved_source_archive=True, preserved_old_probabilities=True,
+        precision_mode=args.precision_mode, numerical_contract=policy.kernel_config,
+        chain_origin='actual_new_behavior_sampling_on_real_conditions_no_physics' if args.precision_mode else 'immutable_real_rollout',
+        nonempty_adam=bool(payload['actor_optimizer']['state']),
         adam_origin='one_fixed_real_PPO_warmup_step' if args.warmstart_adam else 'source_checkpoint',
-        sensitive_parameter_names=sensitive, numerical_reference='sample_bmm_fp64_accumulator_B1', results=[])
+        sensitive_parameter_names=sensitive, numerical_reference=variants[0], results=[])
     reference = None
     for reduction, accumulation, micro in variants:
         actor.load_state_dict(source_actor); actor.zero_grad(set_to_none=True)
