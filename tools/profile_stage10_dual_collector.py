@@ -12,7 +12,6 @@ import copy
 import csv
 import json
 import os
-import signal
 from pathlib import Path
 import subprocess
 import sys
@@ -60,7 +59,7 @@ def main():
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--config',type=Path,required=True)
     parser.add_argument('--output-dir',type=Path,required=True)
-    parser.add_argument('--inject-worker-exit',action='store_true',help='After two timed rounds, terminate only rank3/env1 owned test worker')
+    parser.add_argument('--inject-worker-exit',action='store_true',help='After two timed rounds, kill only rank3/env1 owned test worker')
     args=parser.parse_args()
     rank,world,local_rank=(int(os.environ.get(k,'-1')) for k in ('RANK','WORLD_SIZE','LOCAL_RANK'))
     if world!=8 or rank!=local_rank:raise ValueError('Use single-node torchrun with exactly eight GPUs')
@@ -161,6 +160,8 @@ def main():
             report['rounds'].append(metrics)
         torch.save(collector.state_dict(),args.output_dir/'collector_boundary.pt')
         report['status']='eight_gpu_collection_completed_pending_independent_audit_and_training_integration'
+        # 先落盘已完成的测速证据；后续故障注入失败也不能丢失成功采集结果。
+        (args.output_dir/'collection_report.json').write_text(json.dumps(report,ensure_ascii=False,indent=2))
         if args.inject_worker_exit:
             # 先在各自SQLite/连接线程验证全部16个冻结实例，再终止明确属于本测试的一个PID。
             frozen=[]
@@ -169,11 +170,15 @@ def main():
                 _assert_frozen(value);frozen.append(value)
             report['frozen_before_worker_exit']=frozen
             collective.barrier()
-            if rank==3:
-                owned=workers[1].entries[0]['proc']
-                if owned.poll() is not None:raise RuntimeError('Fault-injection worker already exited unexpectedly')
-                owned.send_signal(signal.SIGTERM)
-                owned.wait(timeout=30)
+            def inject_owned_exit():
+                if rank==3:
+                    owned=workers[1].entries[0]['proc']
+                    if owned.poll() is not None:raise RuntimeError('Fault-injection worker already exited unexpectedly')
+                    # Isaac 捕获 SIGTERM 后可能停留在扩展清理；本项测试的是突然退出，
+                    # 对本工具持有的明确 Popen 使用 SIGKILL，并协调传播注入本身的错误。
+                    owned.kill()
+                    owned.wait(timeout=30)
+            local_call(collective,inject_owned_exit)
             collective.barrier()
             caught=False
             try:
