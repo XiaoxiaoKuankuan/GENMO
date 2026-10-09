@@ -18,6 +18,7 @@ BC 按显式配置由 rank 0 或全部 rank 分担，全局均值与同步后的
 from __future__ import annotations
 
 import math
+import time
 from collections import deque
 from contextlib import contextmanager
 
@@ -406,6 +407,7 @@ def actor_update_v2(policy, optimizer, transitions, targets, *, global_manifest=
                 stopped = 'max_optimizer_steps'
                 break
             indices = order[offset:offset + upper_batch]
+            minibatch_started = time.perf_counter()
             owned = _owned(indices, manifest, distributed)
             pairs = [(index, step) for _, index in owned for step in range(policy.steps)]
             denominator = len(indices) * policy.steps
@@ -453,7 +455,6 @@ def actor_update_v2(policy, optimizer, transitions, targets, *, global_manifest=
                 if conditions is not None:
                     conditions.backward()
             if distributed is not None:
-                distributed.sum_gradients(actor)
                 summary = distributed.sum_tensor(summary)
             # 当前 minibatch 已经计算出真实 KL；两种模式都必须遵守软停止。
             # 上一 minibatch 的更新后 KL 不能代替当前不同样本上的更新前 KL。
@@ -461,10 +462,14 @@ def actor_update_v2(policy, optimizer, transitions, targets, *, global_manifest=
                     and float(summary[4] / summary[5]) >= soft_kl_limit):
                 discarded = dict(epoch=epoch, global_upper_indices=indices,
                     mean_joint_kl=float(summary[4] / summary[5]), optimizer_step_executed=False,
+                    local_forward_backward_wall_seconds=time.perf_counter()-minibatch_started,
+                    internal_sample_visits=denominator,gradient_allreduce_skipped=True,
                     scope='current_parameters_before_pending_step_against_fixed_rollout')
                 optimizer.zero_grad(set_to_none=True)
                 stopped = 'pre_minibatch_soft_kl'
                 break
+            if distributed is not None:
+                distributed.sum_gradients(actor)
             with _local_phase(distributed, 'actor_ppo_gradient_validation'):
                 ppo_norm = float(torch.nn.utils.clip_grad_norm_(actor.parameters(), float('inf'), error_if_nonfinite=True))
                 ppo_gradients = ({name: parameter.grad.detach().clone() for name, parameter in actor.named_parameters()
@@ -547,11 +552,15 @@ def actor_update_v2(policy, optimizer, transitions, targets, *, global_manifest=
                 break
         if stopped:
             break
+    applied = set(index for report in reports for index in report['global_upper_indices'])
     return dict(optimizer_steps=len(reports), optimizer_attempts=len(reports), steps=reports,
         epoch_orders=orders, epochs_started=len(orders), early_stop_reason=stopped,
         included_upper_transitions=len(selected), excluded_upper_transitions=len(manifest) - len(selected),
         probability_check=probability, objective_logprob_reduction=objective_logprob_reduction,
         kl_check_mode=kl_check_mode, discarded_pending_minibatch=discarded,
+        planned_internal_sample_visits=len(selected)*policy.steps*ppo_epochs,
+        applied_internal_sample_visits=sum(report['internal_transitions'] for report in reports),
+        applied_unique_upper_chains=len(applied),applied_unique_chain_fraction=len(applied)/len(selected),
         old_statistics_fixed=True, hard_kl_pending=True, rollback_scope='caller_owned_whole_rollout',
         minibatch_order_contract='owner_balanced_complete_chains.v1' if balanced_minibatches else 'global_shuffle.v1',
         bc_global_samples=sum((item['bc'] or {}).get('batch_size', 0) for item in reports))

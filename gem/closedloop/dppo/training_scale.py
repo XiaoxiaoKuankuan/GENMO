@@ -41,20 +41,27 @@ def budget_requirements(config, *, measured_evidence_bytes_per_transition=None):
     stage, train = config['stage10'], config['stage10']['training']
     rounds, count = stage['limits']['accepted_iterations'], train['rollout_upper_steps']
     evaluation = stage['evaluation']
-    evals = 2+rounds//evaluation['every_iterations']
+    evaluation_rounds = sorted({0,rounds,*range(evaluation['every_iterations'],rounds+1,evaluation['every_iterations']),
+        *(value for value in evaluation.get('effect_check_iterations',[]) if 0<value<=rounds)})
+    evals = len(evaluation_rounds)
     tasks = 4*evaluation['samples_per_source']*len(evaluation['seeds'])*evals
     delay = max(config['timing']['deployment_profile']['samples_seconds'])
     controls_per_decision = math.ceil(max(.5, math.ceil(delay/.5)*.5)*50)
-    requirements = dict(generations=rounds*count+tasks*math.ceil(evaluation['episode_seconds']/.5),
+    envs = config['runtime']['num_envs']*stage['distributed']['world_size']
+    calibration_generations=envs*(config['timing']['calibration_warmup']+config['timing']['calibration_samples'])
+    # 明确采用正常无提前终止场景，不能把取profile最大时长的估计称为数学下界。
+    requirements = dict(generations=rounds*count+tasks*math.ceil(evaluation['episode_seconds']/.5)+calibration_generations,
         optimizer_attempts=rounds*train['max_actor_optimizer_steps'],
-        control_steps=rounds*count*controls_per_decision+tasks*math.ceil(evaluation['episode_seconds']*50))
+        control_steps=rounds*count*controls_per_decision+tasks*math.ceil(evaluation['episode_seconds']*50)
+            +(2*envs+tasks)*50)
     requirements['physics_steps'] = requirements['control_steps']*4
-    worst = requirements['control_steps']+rounds*count*50+tasks*50
+    worst = requirements['control_steps']+(rounds*count-envs)*50
     deficits = {key:max(0, value-stage['limits'][key]) for key,value in requirements.items()}
-    return dict(planned_iterations=rounds, normal_no_failure_lower_requirements=requirements,
+    return dict(planned_iterations=rounds, normal_no_failure_scenario_requirements=requirements,
         control_upper_with_reset_every_decision=worst, physics_upper_with_reset_every_decision=4*worst,
-        authorization_limits=dict(stage['limits']), lower_bound_deficits=deficits,
-        evaluation_tasks=tasks, implicit_budget_increase=False,
+        authorization_limits=dict(stage['limits']), scenario_deficits=deficits,
+        evaluation_rounds=evaluation_rounds,evaluation_tasks=tasks,calibration_generations=calibration_generations,
+        implicit_budget_increase=False,
         evidence_bytes=None if measured_evidence_bytes_per_transition is None else
             rounds*count*measured_evidence_bytes_per_transition,
-        scope='normal_profile_no_failure_plus_explicit_reset_upper_bound_storage_requires_measurement')
+        scope='fresh_run_no_failure_scenario_max_profile_duration_with_warmup_not_a_guaranteed_lower_bound')
