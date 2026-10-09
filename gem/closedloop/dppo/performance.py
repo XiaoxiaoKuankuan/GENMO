@@ -23,7 +23,7 @@ class PhaseProfiler:
     def __init__(self, device='cpu', rank=0, *, detailed=True):
         self.device, self.rank = torch.device(device), rank
         self.detailed = detailed
-        self.rows = defaultdict(lambda: dict(calls=0, host_seconds=0., cuda_seconds=0.))
+        self.rows = defaultdict(lambda: dict(calls=0, host_seconds=0., cuda_seconds=0., thread_cpu_seconds=0.))
         self.events = []
         self.started = time.perf_counter()
 
@@ -40,12 +40,14 @@ class PhaseProfiler:
             begin.record(stream)
             events = (begin, end, stream)
         start = time.perf_counter()
+        cpu_start = time.thread_time()
         try:
             yield
         finally:
             row = self.rows[name]
             row['calls'] += 1
             row['host_seconds'] += time.perf_counter() - start
+            row['thread_cpu_seconds'] += time.thread_time() - cpu_start
             if events is not None:
                 events[1].record(events[2])
                 self.events.append((name, *events))
@@ -62,6 +64,7 @@ class PhaseProfiler:
                     elapsed_wall_seconds=time.perf_counter()-self.started,
                     intervals='inclusive_nested_do_not_sum', detailed=self.detailed,
                     hotloop_timing_enabled=self.detailed,
+                    thread_cpu_scope='current_thread_only_excludes_GPU_wait_and_other_threads',
                     stages={name: dict(row) for name, row in sorted(self.rows.items())})
 
 

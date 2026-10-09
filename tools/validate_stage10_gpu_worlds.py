@@ -9,6 +9,7 @@ torchrun环境变量以防Isaac误判分布式设备；所有子进程均在自�
 """
 from __future__ import annotations
 import argparse
+import ctypes
 import json
 import os
 from pathlib import Path
@@ -50,7 +51,12 @@ def main():
             command=[str(args.isaac_python),'-B',str(args.gmt_repo/'scripts/rsl_rl/check_frozen_vector_world.py'),
                 '--config',str(args.config),'--output',str(args.output/f'rank{rank:02d}'),
                 '--genmo-repo',str(ROOT),'--rank',str(rank),'--num-envs',str(args.num_envs),'--headless']
-            proc=subprocess.Popen(command,cwd=args.gmt_repo,env=env,stdout=log,stderr=subprocess.STDOUT,start_new_session=True)
+            owner=os.getpid()
+            def parent_guard():
+                if ctypes.CDLL(None).prctl(1,signal.SIGKILL)!=0:os._exit(125)
+                if os.getppid()!=owner:os._exit(125)
+            proc=subprocess.Popen(command,cwd=args.gmt_repo,env=env,stdout=log,stderr=subprocess.STDOUT,
+                start_new_session=True,preexec_fn=parent_guard)
             entries.append((rank,proc,log))
         while any(proc.poll() is None for _,proc,_ in entries):
             failed=[rank for rank,proc,_ in entries if proc.poll() not in (None,0)]

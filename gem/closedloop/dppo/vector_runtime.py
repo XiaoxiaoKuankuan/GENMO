@@ -35,6 +35,20 @@ from gem.robots.bumi.feature_codec import BumiMotionFeatureCodec
 from gem.robots.bumi.kinematics import BumiKinematics
 
 
+def freeze_buffer_targets(buffer, lengths, critic, device, *, critic_version, batch_size,
+                          gamma_upper, lambda_upper):
+    """在Buffer拥有的独立快照上固定价值；不能回到append之前的原可变对象计算GAE。"""
+    rows=buffer.transitions
+    if sum(lengths)!=len(rows) or any(type(n) is not int or n<1 for n in lengths):
+        raise ValueError('Vector fragment lengths must cover the complete buffer')
+    populate_values(rows,critic,device,critic_version=critic_version,batch_size=batch_size)
+    fragments=[];start=0
+    for n in lengths:
+        fragments.append(rows[start:start+n]);start+=n
+    return fixed_fragment_targets(fragments,critic,device,critic_version=critic_version,
+        gamma_upper=gamma_upper,lambda_upper=lambda_upper)[1]
+
+
 class VectorTrainingRuntime:
     def __init__(self, context):
         from tools.eval.run_closedloop_baseline import Workers
@@ -193,10 +207,9 @@ class VectorTrainingRuntime:
         for fragment in fragments:
             for row in fragment:buffer.append(row)
         def freeze_targets():
-            populate_values(buffer.transitions,c.critic,c.distributed.device,critic_version=c.state['critic_updates'],
-                batch_size=c.stage['performance']['value_snapshot_batch_size'])
-            return fixed_fragment_targets(fragments,c.critic,c.distributed.device,
-                critic_version=c.state['critic_updates'],gamma_upper=c.settings['gamma_upper'],lambda_upper=c.settings['lambda_upper'])[1]
+            return freeze_buffer_targets(buffer,list(map(len,fragments)),c.critic,c.distributed.device,
+                critic_version=c.state['critic_updates'],batch_size=c.stage['performance']['value_snapshot_batch_size'],
+                gamma_upper=c.settings['gamma_upper'],lambda_upper=c.settings['lambda_upper'])
         targets = normalize_advantages_global(local_call(c.distributed,freeze_targets),distributed=c.distributed)
         manifest = build_global_manifest(buffer.transitions,c.distributed)
         if len(manifest)!=c.settings['rollout_upper_steps']:raise RuntimeError('Global vector batch changed')

@@ -43,3 +43,26 @@ def test_eval_transport_carries_world_audit_time():
     client=SingleVectorLaneTransport(world)
     assert client.call('snapshot')=={'tick':600}
     assert client.last_call_timing['nested_journal_seconds']==.4
+
+
+def test_gae_values_belong_to_detached_buffer_not_mutable_collection_rows():
+    import torch
+    from tests.closedloop.dppo.test_data_learning import transition
+    from gem.closedloop.dppo.buffer import RolloutBuffer
+    from gem.closedloop.dppo.vector_runtime import freeze_buffer_targets
+    class Critic(torch.nn.Module):
+        def forward(self, context, remaining):
+            return context['music_features'].flatten(1).mean(1)+1.
+    original=[transition(),transition()]
+    buffer=RolloutBuffer(2)
+    for slot,row in enumerate(original):
+        row.identity.update(env_id=slot,episode_id=f'episode{slot}')
+        row.truncated=True
+        row.metadata.update(remaining_music_seconds=5.,next_remaining_music_seconds=4.96)
+        buffer.append(row)
+    for row in original:row.context['music_features'].fill_(100.)
+    targets=freeze_buffer_targets(buffer,[1,1],Critic(),'cpu',critic_version=7,batch_size=32,
+        gamma_upper=.99,lambda_upper=.95)
+    assert all(r.metadata['value_snapshot_version']==7 and r.old_value==1. for r in buffer.transitions)
+    assert all('value_snapshot_version' not in r.metadata for r in original)
+    assert torch.isfinite(targets['returns']).all()
