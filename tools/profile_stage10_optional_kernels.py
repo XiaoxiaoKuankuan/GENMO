@@ -147,11 +147,19 @@ def main():
     dist.broadcast_object_list(status, 0)
     if 'error' in status[0]:
         raise RuntimeError(status[0]['error'])
+    if args.variant == 'compile':
+        # 八个编译器不争用默认共享缓存，也不占用用户原有cache；任务结束按精确路径清理。
+        cache = args.output.parent / (args.output.stem+f'.compile_cache_rank{rank:02d}')
+        if cache.exists():raise FileExistsError(cache)
+        os.environ['TORCHINDUCTOR_CACHE_DIR'] = str(cache/'inductor')
+        os.environ['TRITON_CACHE_DIR'] = str(cache/'triton')
+        os.environ['TORCHINDUCTOR_COMPILE_THREADS'] = '1'
     torch.cuda.set_device(rank); torch.set_num_threads(1)
     torch.backends.cuda.matmul.allow_tf32 = False
     torch.backends.cudnn.allow_tf32 = False
     config = configuration(args.config); config['runtime']['genmo_device'] = f'cuda:{rank}'
-    report = dict(rank=rank, variant=args.variant, status='failed', scope='optional_kernel_experiment_no_policy_publication')
+    report = dict(rank=rank, variant=args.variant, status='failed', scope='optional_kernel_experiment_no_policy_publication',
+                  temporary_compiler_cache=str(cache) if args.variant=='compile' else None)
     try:
         actor, _, _ = load_actor(config)
         policy = DPPODiffusionPolicy(actor, cfg_batch=True, numerical_layout='sample_matrix_bmm_fp32.v1', defer_checks=True)
