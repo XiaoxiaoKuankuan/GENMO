@@ -17,7 +17,7 @@ import copy
 import queue
 import threading
 import time
-from concurrent.futures import Future, ThreadPoolExecutor
+from concurrent.futures import Future, ThreadPoolExecutor, TimeoutError as FutureTimeoutError
 from types import SimpleNamespace
 import torch
 
@@ -78,7 +78,7 @@ class _QueuedPolicy:
             try:
                 trace, timing = future.result(timeout=.02)
                 break
-            except TimeoutError:
+            except FutureTimeoutError:
                 if future.done():
                     raise
                 if self.owner.cancelled.is_set():

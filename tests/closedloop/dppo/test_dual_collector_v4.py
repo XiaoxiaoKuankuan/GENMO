@@ -101,6 +101,20 @@ def test_worker_failure_unblocks_peer_without_optimizer():
     finally:c.close()
 
 
+def test_future_poll_timeout_does_not_abort_slow_real_generation():
+    class SlowPolicy(Policy):
+        def sample_rollout(self,*args,**kwargs):
+            # 真实20步扩散必然超过20ms轮询；Python3.10的Future超时类型不同于内建TimeoutError。
+            time.sleep(.065)
+            return super().sample_rollout(*args,**kwargs)
+    collector=DualEnvironmentCollector(SlowPolicy(),factory([]),timeout_seconds=5)
+    try:
+        fragments,report=collector.collect(count_per_rank=4,policy_version=0)
+        assert sum(map(len,fragments))==4
+        assert all(item['batched_generation_seconds']>=.06 for item in report['batches'])
+    finally:collector.close()
+
+
 def test_close_failure_still_closes_both_environment_threads():
     closed=[]
     base=factory([])
