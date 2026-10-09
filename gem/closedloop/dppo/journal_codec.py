@@ -146,4 +146,3 @@ def resolve_world_reference(value, journal_path):
     if any(envelope.get(key) != value.get(key) for key in ('backend_session_id', 'mutation_seq', 'operation', 'ok')):
         raise ValueError('World reply reference changes lane identity')
     return envelope
-

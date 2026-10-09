@@ -31,24 +31,27 @@ def configure_numerics(actor, mode, attention_backend=None):
     set_sample_linear(actor.denoiser, True)
     for name, module in actor.named_modules():
         if isinstance(module, SampleMatrixLinear):
+            module.forward_backend = ('sample_bmm' if mode == 'fp32_reference' else
+                'fixed_tile_tf32x3' if mode == 'tf32_candidate' and name.startswith('denoiser.blocks.') else 'fixed_tile_ieee')
             module.compute_dtype = (torch.bfloat16 if mode == 'bf16_backbone_candidate'
                                     and name.startswith('denoiser.blocks.') else torch.float32)
             module.result_dtype = module.compute_dtype
-            if mode != 'fp32_reference' and not name.startswith('denoiser.'):
-                module.compute_dtype, module.result_dtype = torch.float64, torch.float32
         if isinstance(module, RoPEAttention):
             module.execution_backend = backend
     actor.history_encoder.execution_backend = 'native' if mode == 'fp32_reference' else 'sample_bmm_fused_gru'
-    actor.history_encoder.cell.gate_accumulation_dtype = torch.float64 if mode != 'fp32_reference' else torch.float32
+    actor.history_encoder.cell.gate_accumulation_dtype = torch.float32
+    actor.history_encoder.cell.forward_backend = 'sample_bmm' if mode == 'fp32_reference' else 'fixed_tile_ieee'
     configure_gradients(actor, weight_reduction='sample_bmm' if mode == 'fp32_reference' else 'joint_gemm')
-    return dict(version='stage10.numerical_execution.v3', mode=mode, attention_backend=backend,
+    return dict(version='stage10.numerical_execution.v4', mode=mode, attention_backend=backend,
         attention_fallback=False, condition_encoding='scalar_reference' if mode == 'fp32_reference' else 'batched_unique_chains',
         history_backend=actor.history_encoder.execution_backend, master_dtype='float32',
-        history_projection_accumulation='float64_then_float32' if mode != 'fp32_reference' else 'native_float32',
-        condition_linear_accumulation='float64_then_float32' if mode != 'fp32_reference' else 'native_float32',
+        history_projection_accumulation='fixed_tile_ieee' if mode != 'fp32_reference' else 'native_float32',
+        condition_linear_accumulation='fixed_tile_ieee' if mode != 'fp32_reference' else 'native_float32',
+        linear_backend='sample_bmm' if mode == 'fp32_reference' else 'fixed_tile_32x64x32',
+        backbone_multiply='tf32x3' if mode == 'tf32_candidate' else 'bf16' if mode == 'bf16_backbone_candidate' else 'ieee',
         backbone_dtype='bfloat16' if mode == 'bf16_backbone_candidate' else 'float32',
         output_cfg_ddim_dtype='float32', probability_dtype='float64',
-        matmul_tf32=mode == 'tf32_candidate', torch_version=torch.__version__)
+        matmul_tf32=False, torch_version=torch.__version__)
 
 
 @contextmanager

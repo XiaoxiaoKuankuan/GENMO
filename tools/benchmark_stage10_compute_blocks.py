@@ -78,10 +78,10 @@ def consistency(policy, trace):
     count = trace['chain'].shape[0]*policy.steps
     order = torch.randperm(count, device=device, generator=torch.Generator(device=device).manual_seed(932))
     reports = []
-    for batch in (1, 64, 128, 256, 512):
+    for batch in (1, 2, 7, 8, 32, 64, 128, 256, 512):
         # B1专门覆盖全部64条链最后两步；其他batch全链置换，包含不同末尾不足批。
         selected = (torch.stack((torch.arange(64, device=device)*20+18,
-                                torch.arange(64, device=device)*20+19), 1).flatten() if batch == 1 else order)
+                                torch.arange(64, device=device)*20+19), 1).flatten() if batch < 64 else order)
         errors = []
         with policy_phase(policy):
             for begin in range(0, len(selected), batch):
@@ -176,14 +176,14 @@ def main():
             item['t_kl256'] = measure(kl_forward, collective, args.repeats)
             if args.operator_profile:
                 collective.barrier()
-                if rank == 0:
+                def profile_root():
                     with torch.profiler.profile(activities=[torch.profiler.ProfilerActivity.CPU,
                             torch.profiler.ProfilerActivity.CUDA], record_shapes=True, profile_memory=True) as profile:
                         forward_backward();torch.cuda.synchronize()
                     (args.output/(mode+'_operators.txt')).write_text(profile.key_averages().table(
                         sort_by='self_cuda_time_total', row_limit=45))
                     profile.export_chrome_trace(str(args.output/(mode+'_trace.json')))
-                collective.barrier()
+                root_call(collective, profile_root)
             item['status'] = 'candidate_measured' if item['self_consistency_passed'] else 'rejected_self_consistency'
             del trace, policy
         except Exception as error:

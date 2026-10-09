@@ -21,12 +21,18 @@ GRADIENT_ACCUMULATIONS = ('fp64_reference', 'fp32', 'selective_fp64')
 
 class _SampleLinear(torch.autograd.Function):
     @staticmethod
-    def forward(ctx, value, weight, bias, reduction):
+    def forward(ctx, value, weight, bias, reduction, forward_backend='sample_bmm'):
         ctx.save_for_backward(value, weight)
         ctx.has_bias = bias is not None
         ctx.reduction = ('sample_bmm' if reduction else 'joint_gemm') if isinstance(reduction, bool) else reduction
+        ctx.forward_backend = forward_backend
         shaped = value.reshape(value.shape[0], -1, value.shape[-1])
-        result = torch.bmm(shaped, weight.t().unsqueeze(0).expand(len(value), -1, -1))
+        if forward_backend.startswith('fixed_tile_'):
+            from .fixed_tile_linear import fixed_matmul
+            result = fixed_matmul(shaped.reshape(-1, shaped.shape[-1]), weight.t(),
+                precision=forward_backend.removeprefix('fixed_tile_')).reshape(*shaped.shape[:-1], weight.shape[0])
+        else:
+            result = torch.bmm(shaped, weight.t().unsqueeze(0).expand(len(value), -1, -1))
         if bias is not None:
             result = result + bias
         return result.reshape(*value.shape[:-1], weight.shape[0])
@@ -40,7 +46,11 @@ class _SampleLinear(torch.autograd.Function):
         # 舍入路径；上游gate等接近相消的梯度会放大这个差异。
         grad_value = (torch.bmm(gradient.reshape(value.shape[0], -1, gradient.shape[-1]),
                                weight.unsqueeze(0).expand(value.shape[0], -1, -1)).reshape_as(value)
-                      if ctx.needs_input_grad[0] else None)
+                      if ctx.needs_input_grad[0] and not ctx.forward_backend.startswith('fixed_tile_') else None)
+        if ctx.needs_input_grad[0] and ctx.forward_backend.startswith('fixed_tile_'):
+            from .fixed_tile_linear import fixed_matmul
+            grad_value = fixed_matmul(flat, weight,
+                precision=ctx.forward_backend.removeprefix('fixed_tile_')).reshape_as(value)
         grad_weight = None
         if ctx.needs_input_grad[1] and ctx.reduction == 'joint_gemm':
             grad_weight = flat.t() @ inputs
@@ -66,7 +76,8 @@ class _SampleLinear(torch.autograd.Function):
             grad_weight = total.to(weight.dtype)
         grad_bias = (gradient.reshape(value.shape[0], -1, gradient.shape[-1]).sum(1).sum(0, dtype=torch.float64)
                      .to(gradient.dtype) if ctx.has_bias and ctx.needs_input_grad[2] else None)
-        return grad_value, grad_weight, grad_bias, None
+        result = (grad_value, grad_weight, grad_bias, None, None)
+        return result[:len(ctx.needs_input_grad)]
 
 
 class SampleMatrixLinear(nn.Linear):
@@ -78,7 +89,8 @@ class SampleMatrixLinear(nn.Linear):
             reduction = 'sample_bmm' if getattr(self, 'stable_weight_rows', True) else 'joint_gemm'
         dtype = getattr(self, 'compute_dtype', self.weight.dtype)
         result = _SampleLinear.apply(value.to(dtype), self.weight.to(dtype),
-                                     None if self.bias is None else self.bias.to(dtype), reduction)
+                                     None if self.bias is None else self.bias.to(dtype), reduction,
+                                     getattr(self, 'forward_backend', 'sample_bmm'))
         return result.to(getattr(self, 'result_dtype', result.dtype))
 
 
@@ -86,8 +98,9 @@ def sample_gru_cell(value, state, cell):
     """批量但逐行固定的GRU矩阵形状；CUDA融合门运算沿用PyTorch GRUCell定义。"""
     reduction = getattr(cell, 'weight_reduction', 'joint_gemm')
     dtype = getattr(cell, 'gate_accumulation_dtype', value.dtype)
-    inputs = _SampleLinear.apply(value[:, None].to(dtype), cell.weight_ih.to(dtype), None, reduction).squeeze(1).to(value.dtype)
-    hidden = _SampleLinear.apply(state[:, None].to(dtype), cell.weight_hh.to(dtype), None, reduction).squeeze(1).to(value.dtype)
+    backend = getattr(cell, 'forward_backend', 'sample_bmm')
+    inputs = _SampleLinear.apply(value[:, None].to(dtype), cell.weight_ih.to(dtype), None, reduction, backend).squeeze(1).to(value.dtype)
+    hidden = _SampleLinear.apply(state[:, None].to(dtype), cell.weight_hh.to(dtype), None, reduction, backend).squeeze(1).to(value.dtype)
     if value.is_cuda:
         return torch.ops.aten._thnn_fused_gru_cell(inputs, hidden, state, cell.bias_ih, cell.bias_hh)[0]
     # CPU仅为可读数学参考，生产验收必须在服务器1 CUDA进行。

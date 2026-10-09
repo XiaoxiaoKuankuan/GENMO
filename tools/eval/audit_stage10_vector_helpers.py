@@ -50,11 +50,15 @@ def audit_vector_rows(rows, collection, frozen, identity):
     runtime=identity['execution_contract']['runtime'];count=runtime['num_envs']
     total=identity['training_contract']['rollout_upper_steps_per_rank']
     quotas=[total//count+(slot<total%count) for slot in range(count)]
-    require(collection.get('schema')=='genmo.gpu_vector_collector.v1' and
+    world = runtime.get('vector_collection_contract') == 'genmo.world_batched_flow.v1'
+    require(collection.get('schema')==('genmo.world_batched_flow.v1' if world else 'genmo.gpu_vector_collector.v1') and
             collection.get('real_environment_batch') is True and collection.get('allocated_envs')==count and
             collection.get('active_envs')==count and collection.get('total_transitions')==len(rows)==total and
             collection.get('fragment_lengths')==quotas and
-            collection.get('fragment_contract')==runtime['vector_fragment_contract'], 'Vector rollout topology differs')
+            collection.get('fragment_contract')==(runtime['vector_collection_contract'] if world else runtime['vector_fragment_contract']), 'Vector rollout topology differs')
+    if world:
+        require(collection.get('normal_boundary_resets')==0 and collection.get('administrative_drain_controls')==0,
+                'World rollout must not reset or drain healthy robots at normal boundaries')
     sessions=lane_sessions(frozen,count)
     begin=0
     for slot,size in enumerate(quotas):
@@ -78,8 +82,9 @@ def audit_vector_rows(rows, collection, frozen, identity):
 def audit_vector_checkpoint(local, rows, identity, rank):
     runtime=identity['execution_contract']['runtime'];count=runtime['num_envs']
     saved=local.get('vector_collector',{})
-    require(saved.get('schema')=='genmo.gpu_vector_collector.boundary.v1' and saved.get('num_envs')==count and
-            saved.get('fragment_contract')==runtime['vector_fragment_contract'] and
+    world = runtime.get('vector_collection_contract') == 'genmo.world_batched_flow.v1'
+    require(saved.get('schema')==('genmo.world_batched_flow.boundary.v2' if world else 'genmo.gpu_vector_collector.boundary.v1') and saved.get('num_envs')==count and
+            saved.get('fragment_contract')==(runtime['vector_collection_contract'] if world else runtime['vector_fragment_contract']) and
             saved.get('numerical_layout')==identity['performance_contract']['numerical_layout'] and
             saved.get('restore_environment')=='fresh_PhysX_episodes_preserve_rng_cursors_and_spent_budget' and
             len(saved.get('states',[]))==count, 'Vector checkpoint topology or reference contract differs')
