@@ -68,7 +68,7 @@ def main():
         compat_profile=str(args.gmt_repo/'configs/sim2sim/model_135000_stage2.json'))
     config['runtime'].update(rank=rank,genmo_device=f'cuda:{rank}',backend='gpu_vectorized.v1',num_envs=args.num_envs,
         physics_device='cuda:0',gmt_precision='float32',asset_conversion_dir=str(output/'usd'),headless=True,video_path=None,
-        prefix_deadline_contract=DEADLINE_CONTRACT)
+        prefix_deadline_contract=DEADLINE_CONTRACT,vector_audit_contract='nested_world_journal_excluded.v1')
     if args.resume and not args.updates:raise ValueError('Resume requires the complete finite training mode')
     config['stage9']['run_id']=root_call(collective,lambda:'vector-finite-'+str(uuid.uuid4()))
     torch.cuda.set_device(rank);torch.set_num_threads(1)
@@ -172,6 +172,7 @@ def main():
         report.update(status='failed',error=f'{type(e).__name__}: {e}')
         if collector is not None:
             report['failed_collection_diagnostics']=dict(batches=collector.batch_reports,world_timing=collector.world_timing)
+        (output/'report.json').write_text(json.dumps(report,ensure_ascii=False,indent=2))
         raise
     finally:
         try:

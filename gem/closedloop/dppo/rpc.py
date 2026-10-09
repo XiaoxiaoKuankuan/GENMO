@@ -77,7 +77,9 @@ class AcknowledgedBackend:
             elapsed = time.perf_counter()-started
             self.last_call_timing = dict(method=method, total_seconds=elapsed,
                 transport_seconds=transport_seconds, journal_seconds=journal_seconds,
-                ack_seconds=ack_seconds, critical_seconds=max(0., elapsed-journal_seconds))
+                ack_seconds=ack_seconds, critical_seconds=max(0., elapsed-journal_seconds),
+                journal_interval=(previous.get('journal_interval') if previous is not None
+                                  and previous.get('_started')==started else None))
 
     def _mutation(self, method, payload, started):
         """只分离部署RPC与训练journal计时，持久化/ACK顺序和重发身份保持原样。"""
@@ -101,6 +103,7 @@ class AcknowledgedBackend:
                 self.journal.append_result(envelope)
         finally:
             timing['journal_seconds'] = time.perf_counter()-beginning
+            timing['journal_interval'] = (beginning,beginning+timing['journal_seconds'])
         beginning = time.perf_counter()
         try:
             with measure('rpc.ack'):

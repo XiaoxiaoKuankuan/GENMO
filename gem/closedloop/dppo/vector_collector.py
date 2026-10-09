@@ -15,6 +15,7 @@ import queue
 import copy
 import threading
 import time
+from collections import deque
 from concurrent.futures import Future,ThreadPoolExecutor,TimeoutError as FutureTimeout
 from types import SimpleNamespace
 from .dual_collector import DualEnvironmentCollector,split_trace
@@ -31,11 +32,23 @@ class VectorLaneBackend(AcknowledgedBackend):
     MUTATIONS=AcknowledgedBackend.MUTATIONS|{'retire','activate','join_fragment','drain_fragment'}
 
     def call(self,method,**payload):
-        result=super().call(method,**payload)
+        self.nested_journal_seconds=0.
+        try:result=super().call(method,**payload)
+        finally:
+            timing=self.last_call_timing
+            if timing is not None and timing.get('method')==method:
+                timing['nested_world_journal_seconds']=self.nested_journal_seconds
+                timing['journal_seconds']+=self.nested_journal_seconds
+                timing['critical_seconds']=max(0.,timing['total_seconds']-timing['journal_seconds'])
         if method=='drain_fragment':
             from gem.runtime.trajectory_blocks import expand_feedback
             result=expand_feedback(result)
         return result
+
+    def _client_call(self,method,**payload):
+        try:return super()._client_call(method,**payload)
+        finally:
+            self.nested_journal_seconds+=getattr(self.client,'last_call_timing',{}).get('nested_journal_seconds',0.)
 
 
 class QueuedLaneClient:
@@ -50,7 +63,10 @@ class QueuedLaneClient:
         self.owner.rpc_requests.put((self.env_id,method,payload,future,time.perf_counter()))
         deadline=time.perf_counter()+self.owner.timeout_seconds
         while True:
-            try:return future.result(timeout=.1)
+            try:
+                result,timing=future.result(timeout=.1)
+                self.last_call_timing=timing
+                return result
             except FutureTimeout:
                 if future.done():raise
                 if self.owner.cancelled.is_set():raise RuntimeError('Vector request cancelled')
@@ -84,6 +100,7 @@ class VectorEnvironmentCollector(DualEnvironmentCollector):
         self.rpc_error=None
         self.rpc_thread=None
         self.remaining_generations=None
+        self.audit_intervals=deque(maxlen=4096)
         if self.world_factory is not None:
             ready=Future()
             self.rpc_thread=threading.Thread(target=self._rpc_loop,args=(ready,),name='gpu-world-rpc',daemon=True)
@@ -263,12 +280,20 @@ class VectorEnvironmentCollector(DualEnvironmentCollector):
             requests.append(dict(env_id=env_id,method=method,payload=payload,request_id=key))
         if not requests:return False
         result=self.world.call('exchange',requests=requests)
+        interval=(getattr(self.world,'last_call_timing',None) or {}).get('journal_interval')
+        if interval is not None:self.audit_intervals.append(interval)
         for name,value in result.get('timing',{}).items():self.world_timing[name]=self.world_timing.get(name,0.)+value
         if result.get('fatal'):
             raise RuntimeError(f'GPU world failed; full evidence persisted before ACK: {result["fatal"].get("message")}')
         for reply in result['replies']:
             future,started=self.rpc_pending.pop(reply['request_id'])
-            if reply['ok']:future.set_result(reply['result'])
+            finished=time.perf_counter()
+            if len(self.audit_intervals)==self.audit_intervals.maxlen and started<self.audit_intervals[0][0]:
+                raise RuntimeError('Nested audit timing history exceeded its bounded capacity')
+            nested=sum(max(0.,min(end,finished)-max(begin,started)) for begin,end in self.audit_intervals)
+            timing=dict(total_seconds=finished-started,nested_journal_seconds=nested,
+                timing_contract='nested_world_journal_excluded.v1')
+            if reply['ok']:future.set_result((reply['result'],timing))
             else:future.set_exception(RemoteError(reply['error']))
         return True
 
