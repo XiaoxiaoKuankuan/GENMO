@@ -15,6 +15,22 @@ def is_vector(identity):
     return identity.get('execution_contract',{}).get('runtime',{}).get('backend')=='gpu_vectorized.v1'
 
 
+def audit_modeled_clock(metadata, task, begin, identity):
+    """从原配置/任务独立重建部署延迟，拒绝墙钟、拓扑或持久化污染模拟时间。"""
+    from gem.closedloop.dppo.deployment_clock import MODELED_CLOCK,DeploymentClock
+    contract=identity['execution_contract']
+    if contract['runtime'].get('timing_contract')!=MODELED_CLOCK:return
+    clock=DeploymentClock(contract['timing']['deployment_profile'])
+    expected=clock.sample(seed=identity['base_seed'],sample_id=task['sample_id'],
+        music_start_frame=task['music_start_frame'],decision_tick=begin)
+    require(metadata.get('timing_contract')==MODELED_CLOCK and
+            metadata.get('timing',{}).get('deployment_clock')==expected,
+            'Modeled deployment clock differs from immutable task/profile identity')
+    generated=metadata['generated']
+    require(generated['deadline_tick']<=begin+clock.budget_ticks,
+            'Training wallclock increased modeled prefix budget')
+
+
 def lane_sessions(frozen, count):
     lanes=frozen.get('lane_journals',[])
     require(len(lanes)==count and frozen.get('pending_env_ids')==[], 'Vector lanes missing or still executing')
@@ -89,6 +105,12 @@ def audit_vector_checkpoint(local, rows, identity, rank):
         require(record['seed']==(identity['base_seed']+1000003*rank+100003*slot)%2**32,
                 'Vector saved environment seed differs')
         require(number(execution['latency_budget_s'],'Vector latency')>0, 'Vector invalid latency budget')
+        if runtime.get('timing_contract')=='modeled_deployment.v3':
+            from gem.closedloop.dppo.deployment_clock import DeploymentClock
+            clock=DeploymentClock(identity['execution_contract']['timing']['deployment_profile'])
+            require(execution.get('deployment_profile_sha256')==clock.sha256 and
+                    execution['latency_budget_s']==clock.budget_seconds,
+                    'Vector checkpoint deployment clock/profile differs')
         counters.append(dict(env_id=slot,decision=decision,attempt=attempt,
             episode_count=integer(execution['episode_count'],'Vector episode count')))
     return dict(rank=rank,environments=counters,full_pool_permutations_verified=True)

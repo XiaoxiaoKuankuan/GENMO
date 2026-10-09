@@ -12,6 +12,8 @@
 deployment_critical.v2时仅部署必需条件、推理、输出转换/拷贝和参考RPC计入到达延迟，
 训练trace拷贝、原始证据落盘及RPC journal另行记录。证据依然在物理推进前可靠保存，
 副作用回复仍先落盘再ACK；新旧延迟合同必须在训练身份和基线中明确区分。
+modeled_deployment.v3进一步把虚拟部署时钟与训练墙钟分开：固定实测profile决定
+前缀预算和到达时刻，GPU批量/线程排队/保存仅记录性能；原等待期间物理和GAE不变。
 """
 from __future__ import annotations
 

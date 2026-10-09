@@ -589,7 +589,7 @@ def audit_training_v2(root, run, audit, result, minimum_iterations, require_resu
                     require(manifest==directory/f'rank{rank:02d}'/'rollout/manifest.json', 'V2 collector manifest belongs to another rank')
                     local = dict(rollout_manifest=str(manifest), targets_path=str(manifest.parent.parent/'fixed_targets.pt'),
                         policy_version_before=index-1, collected_upper_transitions=collection['transition_count'], collection=collection)
-                    rows, rollout = audit_rollout(root, local, data_lookup, contract, seen)
+                    rows, rollout = audit_rollout(root, local, data_lookup, contract, seen, identity=identity)
                     require(len(rows)==contract['rollout_upper_steps_per_rank'], 'V2 local rollout count differs')
                     if is_vector(identity):
                         audit_vector_rows(rows,collection,summary['gmt_frozen_by_rank'][rank],identity)

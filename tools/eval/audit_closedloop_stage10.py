@@ -229,7 +229,7 @@ def audit_data(data):
     return lookup
 
 
-def audit_rollout(root, summary, data_lookup, contract, seen_paths):
+def audit_rollout(root, summary, data_lookup, contract, seen_paths, *, identity=None):
     path = resolve(root, summary['rollout_manifest'])
     manifest = read_json(path)
     before = summary['policy_version_before']
@@ -269,6 +269,10 @@ def audit_rollout(root, summary, data_lookup, contract, seen_paths):
                 require(kernel[key]==contract[config_key], f'Stored denoising kernel differs: {key}')
             require(kernel['log_prob_reduction']=='joint_sum_fp64' and kernel['cfg_policy']=='music_only_shared_history_and_prefix', 'Wrong probability reduction or CFG policy')
             task = item.metadata['training_task']
+            if item.metadata.get('timing_contract')=='modeled_deployment.v3':
+                require(identity is not None, 'Modeled clock audit requires full execution identity')
+                from tools.eval.audit_stage10_vector_helpers import audit_modeled_clock
+                audit_modeled_clock(item.metadata,task,item.control_tick_begin,identity)
             require(task['split']=='train', 'val/test sample leaked into training Buffer')
             audited = data_lookup[(task['dataset'], 'train', str(task['sample_id']))]
             require(task['manifest_sha256']==audited['manifest_sha256'], 'Training task does not match complete train manifest')
@@ -798,7 +802,7 @@ def _audit_training(root, run, audit, result, minimum_iterations, require_resume
             require(summary['policy_version_before']==index-1, 'Logical iteration and policy version differ')
             require(data_lookup is not None, 'No validated complete dataset evidence')
             with archived_execution(root, summary) as archive:
-                rows, rollout = audit_rollout(root, summary, data_lookup, identity['training_contract'], seen_paths)
+                rows, rollout = audit_rollout(root, summary, data_lookup, identity['training_contract'], seen_paths, identity=identity)
                 targets = audit_targets(root, summary, rows, identity['training_contract'])
                 if archive is not None:
                     rollout['execution_archive'] = archive
@@ -1000,7 +1004,7 @@ def audit_run(run_dir, *, allow_incomplete=False, minimum_iterations=2, require_
                 require(summary['policy_version_before']==index-1, 'Logical iteration and policy version differ')
                 if data_lookup is None:
                     raise ValueError('No validated complete dataset evidence')
-                rows, rollout = audit_rollout(root, summary, data_lookup, identity['training_contract'], seen_paths)
+                rows, rollout = audit_rollout(root, summary, data_lookup, identity['training_contract'], seen_paths, identity=identity)
                 targets = audit_targets(root, summary, rows, identity['training_contract'])
                 update = audit_update(summary, identity['training_contract'])
                 budget_check(summary['budget'], last_budget)

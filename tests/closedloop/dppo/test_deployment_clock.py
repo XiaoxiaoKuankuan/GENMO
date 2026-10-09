@@ -45,6 +45,19 @@ def test_profile_resume_rejects_different_identity():
     with pytest.raises(ValueError,match='clock/profile'):restore_execution_state(env,state)
 
 
+def test_independent_auditor_rejects_wallclock_contamination():
+    from tools.eval.audit_stage10_vector_helpers import audit_modeled_clock
+    clock=DeploymentClock(profile())
+    identity=dict(base_seed=42,execution_contract=dict(runtime={'timing_contract':MODELED_CLOCK},
+        timing={'deployment_profile':profile()}))
+    task=dict(sample_id='a',music_start_frame=0)
+    record=clock.sample(seed=42,sample_id='a',music_start_frame=0,decision_tick=600)
+    metadata=dict(timing_contract=MODELED_CLOCK,timing={'deployment_clock':record},generated={'deadline_tick':828})
+    audit_modeled_clock(metadata,task,600,identity)
+    metadata['timing']['deployment_clock']['arrival_tick']+=12
+    with pytest.raises((ValueError,AssertionError)):audit_modeled_clock(metadata,task,600,identity)
+
+
 def test_old_real_clock_still_uses_measured_delay():
     env=SimpleNamespace(mode='latency',deployment_clock=None,timing_contract='deployment_critical.v2')
     assert UpperEnvironment._arrival_tick(env,dict(elapsed=9.,critical_ready_seconds=.24),600)==744
