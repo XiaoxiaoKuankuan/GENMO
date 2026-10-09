@@ -130,7 +130,17 @@ def main():
     payload = torch.load(args.weights, map_location='cpu', mmap=True, weights_only=False)
     report = dict(schema='stage10.compute_blocks.v1', devices=devices, source_archive_sha256=archive_sha,
         source='64_distinct_real_environment_conditions_replayed_for_compute_diagnosis', results=[])
-    reference_output = None
+    # 即使本次只计时一个候选，也用相同真实条件和独立噪声现场生成FP32参考。
+    # 此一次额外对照不进入候选P50/P95，不用旧报告的未知输出冒充逐值比较。
+    actor.load_state_dict(payload['actor'])
+    reference_policy = DPPODiffusionPolicy(actor, cfg_batch=True, numerical_layout='sample_matrix_bmm_fp32.v1',
+        defer_checks=True, precision_mode='fp32_reference')
+    def reference_generation():
+        return reference_policy.sample_rollout(conditions, generator=[torch.Generator(device=f'cuda:{rank}').manual_seed(
+            713+rank*1000+i) for i in range(64)])
+    reference_trace = local_call(collective, reference_generation)
+    reference_output = reference_trace['normalized'].cpu()
+    del reference_trace, reference_policy
     for mode in args.modes:
         item = dict(mode=mode)
         actor.load_state_dict(payload['actor']); actor.zero_grad(set_to_none=True)
@@ -155,8 +165,11 @@ def main():
             current = trace['normalized'].cpu()
             if reference_output is None and mode == 'fp32_reference': reference_output = current
             if reference_output is not None:
-                item['fp32_output_difference'] = dict(max_abs=float((current-reference_output).abs().max()),
-                    rms=float((current-reference_output).square().mean().sqrt()))
+                delta = current-reference_output
+                mask = trace['free_mask'].cpu()
+                item['fp32_output_difference'] = dict(max_abs=float(delta.abs().max()),
+                    rms=float(delta.square().mean().sqrt()), free_coordinate_rms=float(delta[mask].square().mean().sqrt()),
+                    scope='same_parameters_conditions_noise_and_full_20step_sampling_different_explicit_execution_contracts')
             item['t_gen64'] = measure(generate, collective, args.repeats)
             index128 = torch.arange(128, device=f'cuda:{rank}')%64
             step128 = (torch.arange(128, device=f'cuda:{rank}')//64)*19
