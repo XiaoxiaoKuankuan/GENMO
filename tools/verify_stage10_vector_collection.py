@@ -12,6 +12,7 @@ import argparse
 import copy
 from datetime import timedelta
 import json
+import hashlib
 import os
 from pathlib import Path
 import sys
@@ -48,6 +49,7 @@ def main():
     p.add_argument('--output',required=True,type=Path)
     p.add_argument('--num-envs',type=int,default=8)
     p.add_argument('--rounds',type=int,default=2)
+    p.add_argument('--data-audit',type=Path,help='显式复用完整数据审计报告；仍核对清单并逐次核验实际加载文件')
     args=p.parse_args()
     rank,world=int(os.environ['RANK']),int(os.environ['WORLD_SIZE'])
     if world!=8 or rank!=int(os.environ['LOCAL_RANK']):raise ValueError('Single-node eight GPUs required')
@@ -68,10 +70,13 @@ def main():
     policy=DPPODiffusionPolicy(actor,steps=20,eta=config['stage9']['eta'],std_floor=config['stage9']['std_floor'],
         guidance_scale=config['stage9']['guidance_scale'],cfg_batch=True,numerical_layout='sample_matrix_bmm_fp32.v1',defer_checks=True)
     catalog=FullMusicCatalog(config['paths']['data_root'])
-    catalog.apply_audit(root_call(collective,lambda:catalog.audit_files(require_audio=True)))
+    audit=root_call(collective,lambda:json.loads(args.data_audit.read_text()) if args.data_audit else catalog.audit_files(require_audio=True))
+    catalog.apply_audit(audit)
+    root_call(collective,lambda:(args.output/'data_audit.json').write_text(json.dumps(audit,ensure_ascii=False)))
     config_path=output/'resolved_config.yaml';config_path.write_text(yaml.safe_dump(config,allow_unicode=True))
     workers=Workers(config,output);collector=None;journal=None
-    report=dict(rank=rank,rounds=[],status='started',num_envs=args.num_envs)
+    report=dict(rank=rank,rounds=[],status='started',num_envs=args.num_envs,
+        audit_reused=args.data_audit is not None,data_content_sha256=audit['data_content_sha256'])
     try:
         socket=Path(workers.temp.name)/'vector.sock'
         client=local_call(collective,lambda:workers.start('gmt',[config['paths']['isaac_python'],'-B',
@@ -79,8 +84,10 @@ def main():
             '--socket',str(socket),'--headless'],args.gmt_repo,socket,strip_distributed=True,
             environment=dict(CUDA_VISIBLE_DEVICES=os.environ['CUDA_VISIBLE_DEVICES'].split(',')[rank])))
         guard=DiskGuard(output,min_free_bytes=10*1024**3,max_run_bytes=10*1024**3)
-        journal=GuardedStepJournal(output/'world_journal.sqlite',guard,format='genmo.execution_journal.ndarray.v2')
-        remote=VectorWorldClient(client,journal,socket_path=socket)
+        def world_factory():
+            world_journal=GuardedStepJournal(output/'world_journal.sqlite',guard,format='genmo.execution_journal.ndarray.v2')
+            return VectorWorldClient(client,world_journal,socket_path=socket)
+        workers.entries[0]['client']=None  # socket转交唯一RPC线程；关闭同样由该线程完成。
         def factory(slot,proxy):
             directory=output/f'env{slot:03d}';directory.mkdir()
             lane_journal=GuardedStepJournal(directory/'execution_journal.sqlite',guard,format='genmo.execution_journal.ndarray.v2')
@@ -94,7 +101,7 @@ def main():
             def close():
                 lane_journal.close();budget.close();backend.client.close()
             return SimpleNamespace(env=env,sampler=sampler,close=close)
-        collector=VectorEnvironmentCollector(policy,factory,remote,num_envs=args.num_envs)
+        collector=VectorEnvironmentCollector(policy,factory,world_factory,num_envs=args.num_envs)
         report['calibration']=local_call(collective,lambda:collector.calibrate())
         (output/'calibration.json').write_text(json.dumps(report['calibration'],indent=2))
         for iteration in range(args.rounds):
@@ -113,7 +120,7 @@ def main():
                 try:return probability_check_local(policy,rows,denoising_microbatch=32,tensor_cache=cache)
                 finally:cache.close()
             check=local_call(collective,audit)
-            frozen=local_call(collective,lambda:remote.call('verify_frozen'));_assert_frozen(frozen)
+            frozen=local_call(collective,lambda:collector.world_call('verify_frozen'));_assert_frozen(frozen)
             timing.update(probability=check,control_steps=sum(r.executed_control_steps for r in rows),
                 reward=sum(float(r.rewards.sum()) for r in rows),physical_failures=sum(bool(r.metadata.get('terminal_snapshot',{}).get('terminated')) for r in rows),
                 peak_memory_allocated=torch.cuda.max_memory_allocated(),frozen=frozen)

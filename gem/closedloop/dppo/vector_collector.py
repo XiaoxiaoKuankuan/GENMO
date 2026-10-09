@@ -57,7 +57,9 @@ class VectorEnvironmentCollector(DualEnvironmentCollector):
         if type(num_envs)is not int or num_envs<1:raise ValueError('Positive environment count required')
         if policy.numerical_layout!='sample_matrix_bmm_fp32.v1':
             raise ValueError('Vector sampling requires validated row-independent policy')
-        self.policy,self.factory,self.world=policy,factory,world_client
+        self.policy,self.factory=policy,factory
+        self.world_factory=world_client if callable(world_client) else None
+        self.world=None if self.world_factory else world_client
         self.num_envs=num_envs
         self.batch_wait_seconds,self.timeout_seconds=batch_wait_seconds,timeout_seconds
         self.requests,self.rpc_requests=queue.Queue(),queue.Queue()
@@ -69,6 +71,45 @@ class VectorEnvironmentCollector(DualEnvironmentCollector):
         self.rpc_pending={}
         self.rpc_sequence=0
         self.world_timing={}
+        self.world_commands=queue.Queue()
+        self.rpc_stop=threading.Event()
+        self.rpc_error=None
+        self.rpc_thread=None
+        if self.world_factory is not None:
+            ready=Future()
+            self.rpc_thread=threading.Thread(target=self._rpc_loop,args=(ready,),name='gpu-world-rpc',daemon=True)
+            self.rpc_thread.start();ready.result(timeout=timeout_seconds)
+
+    def _rpc_loop(self,ready):
+        """RPC/socket/SQLite均由本线程创建及使用，生成线程不会挡住参考准备。"""
+        try:
+            self.world=self.world_factory();ready.set_result(True)
+            while not self.rpc_stop.is_set():
+                try:method,payload,future=self.world_commands.get_nowait()
+                except queue.Empty:pass
+                else:
+                    try:future.set_result(self.world.call(method,**payload))
+                    except BaseException as error:future.set_exception(error);raise
+                    if method=='close':break
+                if not self._pump_rpc():time.sleep(.0005)
+        except BaseException as error:
+            self.rpc_error=error;self.cancelled.set()
+            if not ready.done():ready.set_exception(error)
+            for future,_ in self.rpc_pending.values():
+                if not future.done():future.set_exception(error)
+        finally:
+            if self.world is not None:
+                self.world.journal.close();self.world.client.close()
+
+    def world_call(self,method,**payload):
+        if self.rpc_thread is None:return self.world.call(method,**payload)
+        if self.rpc_error is not None:raise RuntimeError('Vector RPC dispatcher failed') from self.rpc_error
+        future=Future();self.world_commands.put((method,payload,future))
+        return future.result(timeout=self.timeout_seconds)
+
+    def _service(self):
+        if self.rpc_error is not None:raise RuntimeError('Vector RPC dispatcher failed') from self.rpc_error
+        return False if self.rpc_thread is not None else self._pump_rpc()
 
     def lane_client(self,env_id):return QueuedLaneClient(self,env_id)
 
@@ -81,7 +122,7 @@ class VectorEnvironmentCollector(DualEnvironmentCollector):
                 if f.done() and f.exception() is not None:raise f.exception()
             if time.perf_counter()>deadline:raise TimeoutError('Vector boundary operation deadline')
             if not allow_generation and not self.requests.empty():raise RuntimeError('Unexpected generation at checkpoint boundary')
-            worked=self._pump_rpc()
+            worked=self._service()
             if allow_generation:
                 pending,generated=self._generate_ready(pending,len(futures));worked=worked or generated
             if not worked:time.sleep(.0005)
@@ -212,7 +253,7 @@ class VectorEnvironmentCollector(DualEnvironmentCollector):
                 for f in futures:
                     if f.done() and f.exception() is not None:raise f.exception()
                 if time.perf_counter()-started>self.timeout_seconds:raise TimeoutError('Vector collection deadline')
-                worked=self._pump_rpc()
+                worked=self._service()
                 pending,generated=self._generate_ready(pending,enabled)
                 worked=worked or generated
                 if not worked:time.sleep(.0005)
@@ -248,4 +289,10 @@ class VectorEnvironmentCollector(DualEnvironmentCollector):
             try:f.result(timeout=self.timeout_seconds)
             except BaseException as e:errors.append(e)
         for e in self.executors:e.shutdown(wait=True,cancel_futures=True)
+        if self.rpc_thread is not None:
+            if self.rpc_error is None:
+                try:self.world_call('close')
+                except BaseException as error:errors.append(error)
+            self.rpc_stop.set();self.rpc_thread.join(timeout=self.timeout_seconds)
+            if self.rpc_thread.is_alive():errors.append(TimeoutError('Vector RPC shutdown deadline'))
         if errors:raise RuntimeError('Vector resource cleanup failed') from errors[0]
