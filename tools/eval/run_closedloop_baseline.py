@@ -342,7 +342,11 @@ class Workers:
             import ctypes
             libc, parent = ctypes.CDLL(None), os.getpid()
             def parent_guard():
-                libc.prctl(1, signal.SIGTERM)
+                # Isaac 能捕获 SIGTERM 并长时间停留在清理阶段；父 rank 已死时无法
+                # 再完成任何 ACK/恢复，必须可靠终止直属 worker，避免孤儿继续占卡。
+                # 正常退出仍通过 close RPC；这里只处理父进程突然死亡。
+                if libc.prctl(1, signal.SIGKILL) != 0:
+                    os._exit(126)
                 if os.getppid() != parent:
                     os._exit(125)
         try:
