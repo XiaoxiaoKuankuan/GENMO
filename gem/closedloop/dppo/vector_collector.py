@@ -24,11 +24,18 @@ import torch
 
 
 class VectorWorldClient(AcknowledgedBackend):
-    MUTATIONS={'exchange'}
+    MUTATIONS={'exchange','begin_rollout'}
 
 
 class VectorLaneBackend(AcknowledgedBackend):
-    MUTATIONS=AcknowledgedBackend.MUTATIONS|{'retire','activate'}
+    MUTATIONS=AcknowledgedBackend.MUTATIONS|{'retire','activate','join_fragment','drain_fragment'}
+
+    def call(self,method,**payload):
+        result=super().call(method,**payload)
+        if method=='drain_fragment':
+            from gem.runtime.trajectory_blocks import expand_feedback
+            result=expand_feedback(result)
+        return result
 
 
 class QueuedLaneClient:
@@ -53,7 +60,7 @@ class QueuedLaneClient:
 
 
 class VectorEnvironmentCollector(DualEnvironmentCollector):
-    def __init__(self,policy,factory,world_client,*,num_envs=8,batch_wait_seconds=.003,timeout_seconds=600.):
+    def __init__(self,policy,factory,world_client,*,num_envs=8,batch_wait_seconds=.03,timeout_seconds=600.):
         if type(num_envs)is not int or num_envs<1:raise ValueError('Positive environment count required')
         if policy.numerical_layout!='sample_matrix_bmm_fp32.v1':
             raise ValueError('Vector sampling requires validated row-independent policy')
@@ -215,11 +222,17 @@ class VectorEnvironmentCollector(DualEnvironmentCollector):
         self.restore_records=None
 
     def _fragment(self,slot,count,policy_version):
-        if self.states[slot] is not None and self.states[slot].task is not None:
-            self.states[slot].resource.env.backend.call('activate')
+        if self.states[slot] is None:
+            from .dual_collector import _QueuedPolicy
+            resource=self.factory(slot,_QueuedPolicy(self,slot))
+            self.states[slot]=SimpleNamespace(resource=resource,task=None,transitions=0)
+        self.states[slot].resource.env.backend.call('join_fragment')
         rows=super()._fragment(slot,count,policy_version)
-        env=self.states[slot].resource.env
-        env.backend.call('retire')
+        state=self.states[slot];env=state.resource.env
+        from .vector_boundary import finish_vector_fragment
+        extra,ended=finish_vector_fragment(env,rows[-1],continue_episode=state.task is not None)
+        if extra and state.task is not None:state.resource.sampler.record_execution(state.task,extra)
+        if ended:state.task=None
         return rows
 
     def _pump_rpc(self):
@@ -248,6 +261,7 @@ class VectorEnvironmentCollector(DualEnvironmentCollector):
         # 多于20个已分配环境时不伪造额外训练转移，只有预算内环境进入活动集。
         enabled=min(count_per_rank,self.num_envs)
         counts=[count_per_rank//enabled+(i<count_per_rank%enabled) for i in range(enabled)]
+        self.world_call('begin_rollout',env_ids=list(range(enabled)))
         signature=self.policy._parameter_signature()
         futures=[self.executors[i].submit(self._fragment,i,count,policy_version) for i,count in enumerate(counts)]
         started=time.perf_counter();self.batch_reports=[];self.world_timing={}
