@@ -118,6 +118,7 @@ def fixed_targets(transitions, critic, device, *, gamma_upper=.99, lambda_upper=
         a,b=transitions[i:i+2]
         continuation[i] = (a.transition_valid and b.transition_valid and not a.terminated and not a.truncated
             and all(a.identity[k]==b.identity[k] for k in ('backend_session_id','episode_id','policy_version'))
+            and a.identity.get('env_id',0)==b.identity.get('env_id',0)
             and a.control_tick_end==b.control_tick_begin)
     return compute_gae(rewards=[t.rewards for t in transitions],values=[t.old_value for t in transitions],
         next_values=[t.next_value for t in transitions],executed_steps=[t.executed_control_steps for t in transitions],

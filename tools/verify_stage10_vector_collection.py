@@ -95,6 +95,8 @@ def main():
                 lane_journal.close();budget.close();backend.client.close()
             return SimpleNamespace(env=env,sampler=sampler,close=close)
         collector=VectorEnvironmentCollector(policy,factory,remote,num_envs=args.num_envs)
+        report['calibration']=local_call(collective,lambda:collector.calibrate())
+        (output/'calibration.json').write_text(json.dumps(report['calibration'],indent=2))
         for iteration in range(args.rounds):
             collective.barrier()
             fragments,timing=local_call(collective,lambda:collector.collect(count_per_rank=20,policy_version=0))

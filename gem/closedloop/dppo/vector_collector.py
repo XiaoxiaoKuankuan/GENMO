@@ -12,9 +12,11 @@ journal仍先落盘后ACK。结束片段显式retire，下一轮继续时activat
 """
 from __future__ import annotations
 import queue
+import copy
 import threading
 import time
-from concurrent.futures import Future,ThreadPoolExecutor
+from concurrent.futures import Future,ThreadPoolExecutor,TimeoutError as FutureTimeout
+from types import SimpleNamespace
 from .dual_collector import DualEnvironmentCollector,split_trace
 from .rpc import AcknowledgedBackend
 from gem.runtime.closedloop_protocol import RemoteError
@@ -39,7 +41,13 @@ class QueuedLaneClient:
         if self.closed or self.owner.cancelled.is_set():raise RuntimeError('Vector lane stopped')
         future=Future()
         self.owner.rpc_requests.put((self.env_id,method,payload,future,time.perf_counter()))
-        return future.result(timeout=self.owner.timeout_seconds)
+        deadline=time.perf_counter()+self.owner.timeout_seconds
+        while True:
+            try:return future.result(timeout=.1)
+            except FutureTimeout:
+                if future.done():raise
+                if self.owner.cancelled.is_set():raise RuntimeError('Vector request cancelled')
+                if time.perf_counter()>deadline:raise TimeoutError('Vector lane request deadline')
 
     def close(self):self.closed=True
 
@@ -63,6 +71,102 @@ class VectorEnvironmentCollector(DualEnvironmentCollector):
         self.world_timing={}
 
     def lane_client(self,env_id):return QueuedLaneClient(self,env_id)
+
+    def _run_boundary_jobs(self,futures,*,allow_generation=False):
+        """只在静止世界边界服务初始化RPC，不容许意外GENMO请求。"""
+        deadline=time.perf_counter()+self.timeout_seconds
+        pending=[]
+        while not all(f.done() for f in futures):
+            for f in futures:
+                if f.done() and f.exception() is not None:raise f.exception()
+            if time.perf_counter()>deadline:raise TimeoutError('Vector boundary operation deadline')
+            if not allow_generation and not self.requests.empty():raise RuntimeError('Unexpected generation at checkpoint boundary')
+            worked=self._pump_rpc()
+            if allow_generation:
+                pending,generated=self._generate_ready(pending,len(futures));worked=worked or generated
+            if not worked:time.sleep(.0005)
+        return [f.result() for f in futures]
+
+    def _generate_ready(self,pending,enabled):
+        while len(pending)<enabled:
+            try:pending.append(self.requests.get_nowait())
+            except queue.Empty:break
+        if not pending or (len(pending)<enabled and time.perf_counter()-pending[0][4]<self.batch_wait_seconds):
+            return pending,False
+        slots=[p[0] for p in pending]
+        if len(set(slots))!=len(slots):raise RuntimeError('Duplicate causal environment generation request')
+        conditions={k:torch.cat([p[1][k] for p in pending]) for k in pending[0][1]}
+        begin=time.perf_counter()
+        trace=self.policy.sample_rollout(conditions,generator=[p[2] for p in pending])
+        end=time.perf_counter()
+        self.batch_reports.append(dict(environment_slots=slots,effective_rows=len(pending),padding_rows=0,
+            generation_seconds=end-begin,queue_wait_seconds=[begin-p[4] for p in pending]))
+        for i,p in enumerate(pending):
+            p[3].set_result((split_trace(trace,i,len(pending)),dict(self.policy.last_sample_timing)))
+        return [],True
+
+    def calibrate(self,*,count_per_rank=20,warmup=1,samples=2):
+        """用真实多环境请求校准新的批量部署延迟；校准不进入训练rollout。"""
+        from .dual_collector import _QueuedPolicy
+        enabled=min(self.num_envs,count_per_rank)
+        def initialize(slot):
+            if self.states[slot] is None:
+                resource=self.factory(slot,_QueuedPolicy(self,slot))
+                self.states[slot]=SimpleNamespace(resource=resource,task=None,transitions=0)
+            state=self.states[slot];env=state.resource.env;env.collector_env_slot=slot
+            sampler=state.resource.sampler;saved=copy.deepcopy(sampler.state_dict());task=sampler.next_task();sampler.load_state_dict(saved)
+            env.reset_task(task['sample'],task['music'],seed=env.config['stage9']['seed'],phase='calibration',music_start_frame=task['music_start_frame'])
+        self._run_boundary_jobs([self.executors[i].submit(initialize,i) for i in range(enabled)])
+        durations=[[] for _ in range(enabled)]
+        for iteration in range(warmup+samples):
+            def generate(slot):
+                env=self.states[slot].resource.env
+                generated=env.generate()
+                if generated['rejection'] or generated['prepared'] is None:raise RuntimeError('Calibration reference rejected')
+                env.backend.call('discard_plan',prepared_plan_id=generated['prepared']['prepared_plan_id'])
+                return generated['critical_ready_seconds']
+            values=self._run_boundary_jobs([self.executors[i].submit(generate,i) for i in range(enabled)],allow_generation=True)
+            if iteration>=warmup:
+                for i,v in enumerate(values):durations[i].append(v)
+        import math
+        latency=math.ceil((max(map(max,durations))*1.25+.04)*50)/50
+        def finish(slot):
+            env=self.states[slot].resource.env;env.latency_budget_s=latency
+            env.backend.call('retire')
+        self._run_boundary_jobs([self.executors[i].submit(finish,i) for i in range(enabled)])
+        return dict(durations=durations,latency_budget_s=latency,scope='real_vector_deployment_calibration_no_training_transitions')
+
+    def state_dict(self):
+        if self.active or self.cancelled.is_set() or self.rpc_pending:raise RuntimeError('Vector checkpoint requires consistent idle boundary')
+        def capture(state):
+            from tools.train_closedloop_stage10 import capture_execution_state
+            env=state.resource.env
+            return dict(execution=capture_execution_state(env),sampler=state.resource.sampler.state_dict(),
+                transitions=state.transitions,seed=env.config['stage9']['seed'],
+                ended_physical_episode=None if state.task is None else dict(episode_id=env.snapshot['episode_id'],tick=env.snapshot['tick']))
+        saved=[None]*self.num_envs
+        for i,(executor,state) in enumerate(zip(self.executors,self.states)):
+            if state is not None:saved[i]=executor.submit(capture,state).result(timeout=self.timeout_seconds)
+        return dict(schema='genmo.gpu_vector_collector.boundary.v1',num_envs=self.num_envs,
+            numerical_layout=self.policy.numerical_layout,states=saved,
+            restore_environment='fresh_PhysX_episodes_preserve_rng_cursors_and_spent_budget')
+
+    def load_state_dict(self,saved):
+        if self.active or any(s is not None for s in self.states):raise RuntimeError('Restore requires new vector collector')
+        if (saved.get('schema')!='genmo.gpu_vector_collector.boundary.v1' or saved.get('num_envs')!=self.num_envs
+                or saved.get('numerical_layout')!=self.policy.numerical_layout or len(saved['states'])!=self.num_envs):
+            raise ValueError('Vector execution topology/contract differs from checkpoint')
+        from .dual_collector import _QueuedPolicy
+        def restore(slot,record):
+            from tools.train_closedloop_stage10 import restore_execution_state
+            resource=self.factory(slot,_QueuedPolicy(self,slot))
+            if resource.env.config['stage9']['seed']!=record['seed']:raise ValueError('Per-environment seed differs')
+            resource.sampler.load_state_dict(record['sampler'])
+            restore_execution_state(resource.env,record['execution'])
+            resource.env.collector_env_slot=slot
+            # 旧物理episode明确结束，新world不会伪称中途PhysX恢复。
+            self.states[slot]=SimpleNamespace(resource=resource,task=None,transitions=record['transitions'])
+        self._run_boundary_jobs([self.executors[i].submit(restore,i,r) for i,r in enumerate(saved['states']) if r is not None])
 
     def _fragment(self,slot,count,policy_version):
         if self.states[slot] is not None and self.states[slot].task is not None:
@@ -108,21 +212,8 @@ class VectorEnvironmentCollector(DualEnvironmentCollector):
                     if f.done() and f.exception() is not None:raise f.exception()
                 if time.perf_counter()-started>self.timeout_seconds:raise TimeoutError('Vector collection deadline')
                 worked=self._pump_rpc()
-                while len(pending)<enabled:
-                    try:pending.append(self.requests.get_nowait())
-                    except queue.Empty:break
-                if pending and (len(pending)==enabled or time.perf_counter()-pending[0][4]>=self.batch_wait_seconds):
-                    slots=[p[0] for p in pending]
-                    if len(set(slots))!=len(slots):raise RuntimeError('Duplicate causal environment generation request')
-                    conditions={k:torch.cat([p[1][k] for p in pending]) for k in pending[0][1]}
-                    begin=time.perf_counter()
-                    trace=self.policy.sample_rollout(conditions,generator=[p[2] for p in pending])
-                    end=time.perf_counter()
-                    self.batch_reports.append(dict(environment_slots=slots,effective_rows=len(pending),padding_rows=0,
-                        generation_seconds=end-begin,queue_wait_seconds=[begin-p[4] for p in pending]))
-                    for i,p in enumerate(pending):
-                        p[3].set_result((split_trace(trace,i,len(pending)),dict(self.policy.last_sample_timing)))
-                    pending=[];worked=True
+                pending,generated=self._generate_ready(pending,enabled)
+                worked=worked or generated
                 if not worked:time.sleep(.0005)
             fragments=[f.result() for f in futures]
             if self.rpc_pending or not self.rpc_requests.empty():raise RuntimeError('Unfinished physical requests at rollout boundary')
