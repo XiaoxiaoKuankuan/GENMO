@@ -36,8 +36,14 @@ class _SampleLinear(torch.autograd.Function):
         grad_value = (torch.bmm(gradient.reshape(value.shape[0], -1, gradient.shape[-1]),
                                weight.unsqueeze(0).expand(value.shape[0], -1, -1)).reshape_as(value)
                       if ctx.needs_input_grad[0] else None)
-        grad_weight = flat.t() @ inputs if ctx.needs_input_grad[1] else None
-        grad_bias = flat.sum(0) if ctx.has_bias and ctx.needs_input_grad[2] else None
+        grad_weight = None
+        if ctx.needs_input_grad[1]:
+            # 每个样本沿时间维的归约也固定形状；随后高精度合并样本贡献。
+            per_sample = torch.bmm(gradient.reshape(value.shape[0], -1, gradient.shape[-1]).transpose(1, 2),
+                                  value.reshape(value.shape[0], -1, value.shape[-1]))
+            grad_weight = per_sample.sum(0, dtype=torch.float64).to(weight.dtype)
+        grad_bias = (gradient.reshape(value.shape[0], -1, gradient.shape[-1]).sum(1).sum(0, dtype=torch.float64)
+                     .to(gradient.dtype) if ctx.has_bias and ctx.needs_input_grad[2] else None)
         return grad_value, grad_weight, grad_bias
 
 
