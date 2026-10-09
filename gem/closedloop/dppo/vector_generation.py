@@ -81,8 +81,11 @@ def generate_batch(policy, packets, *, shared_storage=False):
     world = policy.actor.endecoder.codec.apply_world_anchor(trace['qpos'], anchors)
     finite = torch.stack([torch.isfinite(v).all() for v in (world,trace['qpos30'],trace['contact'])]).all()
     if not bool(finite): raise FloatingPointError('Nonfinite vector generated outputs')
+    # 部署必需输出与训练专用完整链分开计时；不能将前者误扣成审计传输。
+    output_transfer_begin = time.perf_counter()
+    critical = bulk_cpu_copy(dict(qpos_world=world, qpos30=trace['qpos30'], contact=trace['contact']))
     generated_end = time.perf_counter()
-    copied = bulk_cpu_copy(dict(trace=trace, qpos_world=world))
+    copied = dict(trace=bulk_cpu_copy(trace), qpos_world=critical['qpos_world'])
     finished = time.perf_counter()
     outputs = []
     for i,p in enumerate(packets):
@@ -95,14 +98,15 @@ def generate_batch(policy, packets, *, shared_storage=False):
             result=value.numpy()
             return result if shared_storage else result.copy()
         generated = dict(meta, qpos_world=array(copied['qpos_world'][i]),
-                         qpos30=array(local_trace['qpos30'][0]),
-                         contact=array(local_trace['contact'][0]))
+                         qpos30=array(critical['qpos30'][i]),
+                         contact=array(critical['contact'][i]))
         outputs.append(dict(context=contexts[i], meta=meta, generated=generated, trace=local_trace))
     if shared_storage:
         block=dict(schema='genmo.world_batch_raw.v3',trace=copied['trace'],generated=[item['generated'] for item in outputs])
         for index,item in enumerate(outputs):item['_shared_raw_block']=(block,index)
     return outputs, dict(condition_batch_seconds=condition_end-started,
         generate_and_world_seconds=generated_end-condition_end, bulk_trace_transfer_seconds=finished-generated_end,
+        critical_output_transfer_seconds=generated_end-output_transfer_begin,
         cpu_split_seconds=time.perf_counter()-finished, components=dict(policy.last_sample_timing),
         generation_contract=GENERATION_CONTRACT, effective_rows=len(packets))
 
