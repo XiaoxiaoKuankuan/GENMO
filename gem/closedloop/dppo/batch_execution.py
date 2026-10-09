@@ -17,9 +17,10 @@ ROW_BMM = 'sample_matrix_bmm_fp32.v1'
 
 class _SampleLinear(torch.autograd.Function):
     @staticmethod
-    def forward(ctx, value, weight, bias):
+    def forward(ctx, value, weight, bias, stable_weight_rows):
         ctx.save_for_backward(value, weight)
         ctx.has_bias = bias is not None
+        ctx.stable_weight_rows = stable_weight_rows
         shaped = value.reshape(value.shape[0], -1, value.shape[-1])
         result = torch.bmm(shaped, weight.t().unsqueeze(0).expand(len(value), -1, -1))
         if bias is not None:
@@ -37,21 +38,23 @@ class _SampleLinear(torch.autograd.Function):
                                weight.unsqueeze(0).expand(value.shape[0], -1, -1)).reshape_as(value)
                       if ctx.needs_input_grad[0] else None)
         grad_weight = None
-        if ctx.needs_input_grad[1]:
+        if ctx.needs_input_grad[1] and not ctx.stable_weight_rows:
+            grad_weight = flat.t() @ inputs
+        elif ctx.needs_input_grad[1]:
             # 每个样本沿时间维的归约也固定形状；随后高精度合并样本贡献。
             per_sample = torch.bmm(gradient.reshape(value.shape[0], -1, gradient.shape[-1]).transpose(1, 2),
                                   value.reshape(value.shape[0], -1, value.shape[-1]))
             grad_weight = per_sample.sum(0, dtype=torch.float64).to(weight.dtype)
         grad_bias = (gradient.reshape(value.shape[0], -1, gradient.shape[-1]).sum(1).sum(0, dtype=torch.float64)
                      .to(gradient.dtype) if ctx.has_bias and ctx.needs_input_grad[2] else None)
-        return grad_value, grad_weight, grad_bias
+        return grad_value, grad_weight, grad_bias, None
 
 
 class SampleMatrixLinear(nn.Linear):
     def forward(self, value):
         if value.ndim < 2:
             raise ValueError('SampleMatrixLinear requires explicit sample dimension')
-        return _SampleLinear.apply(value, self.weight, self.bias)
+        return _SampleLinear.apply(value, self.weight, self.bias, getattr(self,'stable_weight_rows',True))
 
 
 def set_sample_linear(module, enabled):

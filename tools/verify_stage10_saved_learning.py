@@ -110,6 +110,7 @@ def main():
     for key in ('iteration', 'weights', 'stage1-config', 'assets', 'output'):
         parser.add_argument('--'+key, type=Path, required=True)
     parser.add_argument('--timing-repeats', type=int, default=2)
+    parser.add_argument('--weight-reduction', choices=('sample_bmm','joint_gemm'), default='sample_bmm')
     args = parser.parse_args()
     rank, world, local = [int(os.environ[k]) for k in ('RANK','WORLD_SIZE','LOCAL_RANK')]
     if world != 8 or rank != local:
@@ -141,6 +142,10 @@ def main():
     initial = torch.load(args.weights, map_location='cpu', mmap=True, weights_only=False)['actor']
     actor.load_state_dict(initial, strict=True)
     policy = DPPODiffusionPolicy(actor, cfg_batch=True, numerical_layout='sample_matrix_bmm_fp32.v1', defer_checks=True)
+    from gem.closedloop.dppo.batch_execution import SampleMatrixLinear
+    for module in actor.denoiser.modules():
+        if isinstance(module,SampleMatrixLinear):
+            module.stable_weight_rows = args.weight_reduction=='sample_bmm'
     rows, targets, archive_sha = read_saved_rank(args.iteration, rank)
     if any(row.metadata['sampler_trace']['kernel_config'] != policy.kernel_config for row in rows):
         raise ValueError('Saved numerical identity differs; resampling forbidden')
@@ -150,6 +155,7 @@ def main():
         for i,row in enumerate(rows)]) for item in shard]
     orders = [balanced_epoch_order(list(range(160)), manifest, torch.Generator().manual_seed(61+e)) for e in range(2)]
     report = dict(schema='stage10.saved_learning.v1', source_archive_sha256=archive_sha,
+        weight_reduction=args.weight_reduction,
         preserved_old_data=True, resampled_chains=0, global_actual_transitions=160,
         scope='PPO_and_KL_fixed_actual_data_no_BC_no_physics_no_policy_publication', results=[])
     reference = None
