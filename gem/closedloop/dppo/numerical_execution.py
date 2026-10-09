@@ -82,6 +82,47 @@ def compile_denoiser(policy):
         compile_autotuning=True, compile_implicit_fallback=False)
 
 
+def compile_fixed_denoiser(policy, capacity=64):
+    """纯denoiser按固定网络行编译，隔离batch形状变化引起的融合归约变化。
+
+    外部microbatch不设上限；内部尾块只补零并立即裁掉，所有有效行仍来自真实
+    输入，填充不计入样本、概率或梯度归一化。仅返回Actor消费的动作/contact头，
+    不编译条件事务、概率、RPC或文件操作。必须重新通过实际采样及全部更新检查。
+    """
+    if policy.numerical_execution is None or type(capacity) is not int or capacity<1:
+        raise ValueError('Fixed compilation requires an explicit contract and positive capacity')
+    if hasattr(policy.actor.denoiser,'_stage10_eager_forward'):
+        raise ValueError('Denoiser already compiled')
+    original=policy.actor.denoiser.forward
+    def tensor_forward(xt,timesteps,condition,length):
+        result=original(xt,timesteps,y={'f_cond':condition,'length':length},inputs={})
+        return result['pred_x_start'],result['static_conf_logits']
+    compiled=torch.compile(tensor_forward,fullgraph=True,dynamic=False,
+        backend='inductor',mode='max-autotune-no-cudagraphs')
+    def forward(xt,timesteps,y=None,inputs=None,**kwargs):
+        if set(y or {})!={'f_cond','length'} or inputs or kwargs:
+            raise ValueError('Fixed compile only supports explicit Stage1 closedloop tensor inputs')
+        if len(xt)!=len(timesteps) or len(xt)!=len(y['length']) or len(xt)!=len(y['f_cond']):
+            raise ValueError('Unaligned compiled denoiser inputs')
+        heads,contacts=[],[]
+        for begin in range(0,len(xt),capacity):
+            count=min(capacity,len(xt)-begin)
+            parts=[]
+            for value,fill in ((xt,0),(timesteps,0),(y['f_cond'],0),(y['length'],1)):
+                piece=value[begin:begin+count]
+                if count<capacity:
+                    piece=torch.cat((piece,piece.new_full((capacity-count,*piece.shape[1:]),fill)),0)
+                parts.append(piece.contiguous())
+            action,contact=compiled(*parts)
+            heads.append(action[:count]);contacts.append(contact[:count])
+        return dict(pred_x_start=torch.cat(heads),static_conf_logits=torch.cat(contacts))
+    policy.actor.denoiser._stage10_eager_forward=original
+    policy.actor.denoiser.forward=forward
+    policy.numerical_execution.update(denoiser_compiler='inductor_fixed_network_rows.v1',
+        compiled_network_capacity=capacity,compile_autotuning=True,compile_implicit_fallback=False,
+        zero_padding_scope='internal_network_tail_only_not_effective_samples')
+
+
 def configure_blocked_fp32(policy):
     """诊断入口显式启用固定64网络行的FP32 GEMM，不改变默认参考算子。"""
     from .batch_execution import SampleMatrixLinear
