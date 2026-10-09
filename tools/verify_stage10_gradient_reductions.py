@@ -14,6 +14,7 @@ from __future__ import annotations
 import argparse
 import copy
 import json
+import math
 import os
 from pathlib import Path
 import sys
@@ -133,7 +134,11 @@ def main():
     parser.add_argument('--pipelined-tensorcore', action='store_true')
     parser.add_argument('--compensated-bf16',type=int,choices=(3,6))
     parser.add_argument('--compile-fixed-denoiser',action='store_true')
+    parser.add_argument('--actor-lr', type=float, default=5e-9,
+                        help='显式固定数据校准值，默认5e-9；不改正式配置，不自动搜索或降级')
     args = parser.parse_args()
+    if not math.isfinite(args.actor_lr) or args.actor_lr <= 0:
+        raise ValueError('Diagnostic learning rate must be finite and positive')
     rank, world = int(os.environ['RANK']), int(os.environ['WORLD_SIZE'])
     if world != 8 or rank != int(os.environ['LOCAL_RANK']):
         raise ValueError('Server1 eight GPU ranks are required')
@@ -180,8 +185,9 @@ def main():
     if args.warmstart_adam:
         probability_check_local(policy, rows, denoising_microbatch=32, tensor_cache=cache,
                                 distributed=collective, global_manifest=manifest)
-        warm_optimizer = torch.optim.AdamW(trainable_actor_parameters(actor), lr=5e-9, weight_decay=0.)
+        warm_optimizer = torch.optim.AdamW(trainable_actor_parameters(actor), lr=args.actor_lr, weight_decay=0.)
         warm_optimizer.load_state_dict(copy.deepcopy(payload['actor_optimizer']))
+        for group in warm_optimizer.param_groups: group['lr'] = args.actor_lr
         actor_update_v2(policy, warm_optimizer, rows, targets, global_manifest=manifest, distributed=collective,
             ppo_epochs=1, epoch_orders=[selected], actor_minibatch_internal_transitions=len(selected)*policy.steps,
             max_optimizer_steps=1, denoising_microbatch=32, soft_kl_limit=None, gradient_diagnostics=False,
@@ -203,16 +209,17 @@ def main():
         precision_mode=args.precision_mode, numerical_contract=policy.kernel_config,
         chain_origin='actual_new_behavior_sampling_on_real_conditions_no_physics' if args.precision_mode else 'immutable_real_rollout',
         nonempty_adam=bool(payload['actor_optimizer']['state']),
+        actor_lr=args.actor_lr, hard_kl_limit=config['stage10']['training']['kl_stop_joint'],
         adam_origin='one_fixed_real_PPO_warmup_step' if args.warmstart_adam else 'source_checkpoint',
         sensitive_parameter_names=sensitive, numerical_reference=variants[0], results=[])
     reference = None
     for reduction, accumulation, micro in variants:
         actor.load_state_dict(source_actor); actor.zero_grad(set_to_none=True)
         configure_gradients(actor, weight_reduction=reduction, accumulation=accumulation, sensitive_names=sensitive)
-        optimizer = torch.optim.AdamW(trainable_actor_parameters(actor), lr=5e-9, weight_decay=0.)
+        optimizer = torch.optim.AdamW(trainable_actor_parameters(actor), lr=args.actor_lr, weight_decay=0.)
         optimizer.load_state_dict(copy.deepcopy(payload['actor_optimizer']))
         for param_group in optimizer.param_groups:
-            param_group['lr'] = 5e-9
+            param_group['lr'] = args.actor_lr
         check = probability_check_local(policy, rows, denoising_microbatch=micro,
             tensor_cache=cache, distributed=collective, global_manifest=manifest)
         # warmstart后的参数相对采集旧策略已改变；零更新检查必须在原采集参数上执行。
@@ -238,13 +245,15 @@ def main():
         terminal = terminal_outputs(policy, rows, f'cuda:{rank}')
         item = dict(reduction=reduction, accumulation=accumulation, microbatch=micro,
             probability=check, update_count=update['optimizer_steps'], final_kl=kl,
+            hard_kl_accepted=bool(math.isfinite(kl['mean_joint_kl']) and kl['mean_joint_kl'] <= report['hard_kl_limit']),
+            closedloop_validation_passed=False,
             timing_ranks=timing, timing_scope='diagnostic_includes_unclipped_gradient_capture_not_performance_P50')
         if rank == 0:
             weights = cpu_snapshot(actor.state_dict())
             adam = {f'{i}/{key}':value.cpu().clone() for i, state in optimizer.state_dict()['state'].items()
                     for key, value in state.items() if torch.is_tensor(value)}
             if reference is None:
-                reference = gradients, weights, adam, terminal
+                reference = gradients, weights, adam, terminal, kl
                 item['reference'] = True
             else:
                 item['gradients'] = compare_named(gradients, reference[0], atol=3e-5, rtol=2e-4)
@@ -252,11 +261,15 @@ def main():
                 item['adam'] = compare_named(adam, reference[2], atol=1e-7, rtol=2e-4)
                 item['module_directions'] = module_directions(gradients, reference[0])
                 item['terminal_mean_max_abs_difference'] = float((terminal-reference[3]).abs().max())
-                item['passed'] = all(item[key]['passed'] for key in ('gradients', 'weights', 'adam'))
+                item['final_kl_abs_difference_from_reference'] = abs(kl['mean_joint_kl']-reference[4]['mean_joint_kl'])
+                item['gradient_weight_adam_parity_passed'] = all(item[key]['passed'] for key in ('gradients', 'weights', 'adam'))
+                # 算子回归和训练接受是两件事，禁止将梯度三项通过写成笼统 passed。
+                item['numerical_update_and_hard_kl_passed'] = bool(item['gradient_weight_adam_parity_passed'] and item['hard_kl_accepted'])
             report['results'].append(item)
             (args.output/'report.json').write_text(json.dumps(report, ensure_ascii=False, indent=2)+'\n')
             print(json.dumps(dict(reduction=reduction, accumulation=accumulation, microbatch=micro,
-                passed=item.get('passed', True), actor_seconds=max(t['actor_seconds'] for t in timing)), ensure_ascii=False), flush=True)
+                parity_passed=item.get('gradient_weight_adam_parity_passed'), hard_kl_accepted=item['hard_kl_accepted'],
+                actor_seconds=max(t['actor_seconds'] for t in timing)), ensure_ascii=False), flush=True)
         if reduction == 'sample_bmm':
             cost = benchmark_accumulator(actor, collective, args.accumulator_repeats)
             if rank == 0: report['accumulator_cost'] = cost
