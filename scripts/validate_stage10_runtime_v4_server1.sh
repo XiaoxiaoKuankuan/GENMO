@@ -16,6 +16,7 @@ case "$TASK_MODE" in
   learning) TASK_TOOL=profile_stage10_learning_v4.py; TASK_SECONDS=1800 ;;
   replay) TASK_TOOL=replay_stage10_runtime_v4.py; TASK_SECONDS=2400 ;;
   dual) TASK_TOOL=profile_stage10_dual_collector.py; TASK_SECONDS=1800 ;;
+  kernels) TASK_TOOL=profile_stage10_optional_kernels.py; TASK_SECONDS=900 ;;
   *) printf '未知测试模式：%s\n' "$TASK_MODE" >&2; exit 2 ;;
 esac
 export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0,1,2,3,4,5,6,7}"
