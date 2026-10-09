@@ -10,7 +10,8 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-from gem.closedloop.dppo.batch_execution import SampleMatrixLinear, set_sample_linear, batch_accounting
+from gem.closedloop.dppo.batch_execution import (SampleMatrixLinear, set_sample_linear, batch_accounting,
+                                                MicrobatchGradientAccumulator)
 from gem.closedloop.dppo.policy import DPPODiffusionPolicy, masked_joint_log_prob
 from gem.closedloop.dppo.tensor_cache import ConditionGraphCache, RolloutTensorCache
 from gem.closedloop.dppo.updater_v2 import _parameters
@@ -33,6 +34,26 @@ def test_sample_linear_derivative_and_parameter_identity():
         torch.testing.assert_close(a.grad, b.grad)
     set_sample_linear(layer, False)
     assert type(layer) is torch.nn.Linear
+
+
+def test_microbatch_accumulator_preserves_cancelling_gradient_and_freeze():
+    layer=torch.nn.Linear(1,1,bias=True)
+    layer.bias.requires_grad_(False)
+    accumulator=MicrobatchGradientAccumulator(layer)
+    for contribution in (1e8,1.,-1e8):
+        layer.weight.grad=torch.full_like(layer.weight,contribution)
+        accumulator.add()
+        assert layer.weight.grad is None
+    accumulator.finish()
+    torch.testing.assert_close(layer.weight.grad,torch.ones_like(layer.weight),rtol=0,atol=0)
+    assert layer.bias.grad is None and not layer.bias.requires_grad
+
+
+def test_microbatch_accumulator_does_not_create_absent_gradients():
+    layer=torch.nn.Linear(2,3)
+    accumulator=MicrobatchGradientAccumulator(layer)
+    accumulator.add();accumulator.finish()
+    assert all(p.grad is None for p in layer.parameters())
 
 
 @pytest.mark.parametrize('size', [2, 4, 8, 16, 32])
