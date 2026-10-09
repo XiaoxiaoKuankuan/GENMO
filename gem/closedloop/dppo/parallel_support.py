@@ -38,7 +38,8 @@ def validate_v2_configuration(config):
             raise ValueError('GPU vector production requires genuine environments, 20 local chains and the accepted batch policy')
         if (runtime.get('prefix_deadline_contract') != 'available_reference_deadline_cap.v1'
                 or runtime.get('vector_audit_contract') != 'nested_world_journal_excluded.v1'
-                or runtime.get('vector_device_contract') != 'isaac_global_gpu_index.v1'):
+                or runtime.get('vector_device_contract') != 'isaac_global_gpu_index.v1'
+                or runtime.get('vector_fragment_contract') != 'available_reference_fragment_boundary.v2'):
             raise ValueError('GPU vector timing/prefix contracts must be explicit')
         if runtime.get('vector_reward_contract') not in (None, 'stage10.gpu_vector_continuous_reward.v1'):
             raise ValueError('Unknown vector reward computation contract')

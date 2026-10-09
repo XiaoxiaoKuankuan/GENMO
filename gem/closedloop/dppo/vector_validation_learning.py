@@ -59,6 +59,7 @@ class FiniteVectorLearner:
             vector_audit_contract=config['runtime']['vector_audit_contract'],
             vector_reward_contract=config['runtime'].get('vector_reward_contract'),
             vector_device_contract=config['runtime'].get('vector_device_contract'),
+            vector_fragment_contract=config['runtime'].get('vector_fragment_contract'),
             gmt_policy_sha256=digest(paths['gmt_policy']),configuration=copy.deepcopy(config['stage10']['training']),
             run_id=config['stage9']['run_id'],scope='finite_validation_not_production_resume'))
         self.collector=None

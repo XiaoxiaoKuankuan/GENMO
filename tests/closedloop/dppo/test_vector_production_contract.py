@@ -33,7 +33,7 @@ def test_production_vector_config_preserves_learning_and_storage():
     assert (s['kl_stop_joint'],s['kl_soft_stop_joint'],s['ppo_epochs'],s['max_actor_optimizer_steps'])==(.03,.015,2,4)
     assert config['stage10']['storage']['checkpoint_every_iterations']==500
     for update in ({'num_envs':32},{'prefix_deadline_contract':'unknown'},{'vector_batch_wait_s':float('nan')},
-                   {'vector_device_contract':None}):
+                   {'vector_device_contract':None},{'vector_fragment_contract':None}):
         broken=copy.deepcopy(config);broken['runtime'].update(update)
         with pytest.raises(ValueError):validate_v2_configuration(broken)
 

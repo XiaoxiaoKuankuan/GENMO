@@ -224,6 +224,7 @@ class VectorEnvironmentCollector(DualEnvironmentCollector):
             scope='real_vector_deployment_calibration_no_training_transitions')
 
     def state_dict(self):
+        from .vector_boundary import FRAGMENT_CONTRACT
         if self.active or self.cancelled.is_set() or self.rpc_pending:raise RuntimeError('Vector checkpoint requires consistent idle boundary')
         def capture(state):
             from tools.train_closedloop_stage10 import capture_execution_state
@@ -236,12 +237,15 @@ class VectorEnvironmentCollector(DualEnvironmentCollector):
         for i,(executor,state) in enumerate(zip(self.executors,self.states)):
             if state is not None:saved[i]=executor.submit(capture,state).result(timeout=self.timeout_seconds)
         return dict(schema='genmo.gpu_vector_collector.boundary.v1',num_envs=self.num_envs,
+            fragment_contract=FRAGMENT_CONTRACT,
             numerical_layout=self.policy.numerical_layout,states=saved,
             restore_environment='fresh_PhysX_episodes_preserve_rng_cursors_and_spent_budget')
 
     def load_state_dict(self,saved):
+        from .vector_boundary import FRAGMENT_CONTRACT
         if self.active or any(s is not None for s in self.states):raise RuntimeError('Restore requires new vector collector')
         if (saved.get('schema')!='genmo.gpu_vector_collector.boundary.v1' or saved.get('num_envs')!=self.num_envs
+                or saved.get('fragment_contract')!=FRAGMENT_CONTRACT
                 or saved.get('numerical_layout')!=self.policy.numerical_layout or len(saved['states'])!=self.num_envs):
             raise ValueError('Vector execution topology/contract differs from checkpoint')
         from .dual_collector import _QueuedPolicy
@@ -309,6 +313,7 @@ class VectorEnvironmentCollector(DualEnvironmentCollector):
         return True
 
     def collect(self,*,count_per_rank=20,policy_version):
+        from .vector_boundary import FRAGMENT_CONTRACT
         if self.active or self.cancelled.is_set() or count_per_rank<1:raise ValueError('Invalid collector state/count')
         self.active=True
         # 多于20个已分配环境时不伪造额外训练转移，只有预算内环境进入活动集。
@@ -333,6 +338,7 @@ class VectorEnvironmentCollector(DualEnvironmentCollector):
             if self.rpc_pending or not self.rpc_requests.empty():raise RuntimeError('Unfinished physical requests at rollout boundary')
             if self.policy._parameter_signature()!=signature:raise RuntimeError('Actor changed during vector collection')
             return fragments,dict(schema='genmo.gpu_vector_collector.v1',total_transitions=sum(map(len,fragments)),
+                fragment_contract=FRAGMENT_CONTRACT,
                 allocated_envs=self.num_envs,active_envs=enabled,fragment_lengths=list(map(len,fragments)),
                 seconds=time.perf_counter()-started,batches=self.batch_reports,world_timing=self.world_timing,
                 environment_thread_profiles=[state.profile for state in self.states[:enabled]],
