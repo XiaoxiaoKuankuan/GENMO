@@ -332,7 +332,8 @@ def actor_update_v2(policy, optimizer, transitions, targets, *, global_manifest=
                     soft_kl_limit=.015, objective_logprob_reduction='joint_sum',
                     reserve_attempt=None, verify_initial_probability=False,
                     gradient_diagnostics=True, step_callback=None, tensor_cache=None,
-                    balanced_minibatches=False, gradient_module_details=True, kl_cache_sink=None):
+                    balanced_minibatches=False, gradient_module_details=True, kl_cache_sink=None,
+                    kl_check_mode='post_step_full'):
     """执行真实多次 PPO 参数更新；完整硬 KL 与整轮回滚明确由外层事务负责。"""
     from gem.closedloop.dppo.trainer import _validate_actor_transitions
     for name, value in (('ppo_epochs', ppo_epochs), ('actor minibatch', actor_minibatch_internal_transitions),
@@ -347,6 +348,11 @@ def actor_update_v2(policy, optimizer, transitions, targets, *, global_manifest=
         raise ValueError('Invalid BC weight or soft KL limit')
     if objective_logprob_reduction not in ('joint_sum', 'free_coordinate_mean'):
         raise ValueError('Unknown PPO objective probability reduction')
+    if kl_check_mode not in ('post_step_full', 'pre_step_plus_final'):
+        raise ValueError('Unknown KL check mode')
+    if kl_check_mode == 'pre_step_plus_final' and kl_cache_sink is not None:
+        kl_cache_sink.clear()
+    discarded = None
     actor = policy.actor
     actor.eval()
     if any(not parameter.requires_grad for group in optimizer.param_groups for parameter in group['params']):
@@ -430,6 +436,14 @@ def actor_update_v2(policy, optimizer, transitions, targets, *, global_manifest=
             if distributed is not None:
                 distributed.sum_gradients(actor)
                 summary = distributed.sum_tensor(summary)
+            if (kl_check_mode == 'pre_step_plus_final' and soft_kl_limit is not None
+                    and float(summary[4] / summary[5]) >= soft_kl_limit):
+                discarded = dict(epoch=epoch, global_upper_indices=indices,
+                    mean_joint_kl=float(summary[4] / summary[5]), optimizer_step_executed=False,
+                    scope='current_parameters_before_pending_step_against_fixed_rollout')
+                optimizer.zero_grad(set_to_none=True)
+                stopped = 'pre_minibatch_soft_kl'
+                break
             with _local_phase(distributed, 'actor_ppo_gradient_validation'):
                 ppo_norm = float(torch.nn.utils.clip_grad_norm_(actor.parameters(), float('inf'), error_if_nonfinite=True))
                 ppo_gradients = ({name: parameter.grad.detach().clone() for name, parameter in actor.named_parameters()
@@ -460,11 +474,13 @@ def actor_update_v2(policy, optimizer, transitions, targets, *, global_manifest=
                 reserve_attempt()
             with _local_phase(distributed, 'actor_optimizer_step'):
                 optimizer.step()
-            post = analytic_kl_local(policy, transitions, global_manifest=global_manifest, distributed=distributed,
-                                      denoising_microbatch=denoising_microbatch, global_indices=indices, tensor_cache=tensor_cache,
-                                      return_cache=kl_cache_sink is not None)
-            if kl_cache_sink is not None:
-                post, kl_cache_sink['cache'] = post
+            post = None
+            if kl_check_mode == 'post_step_full':
+                post = analytic_kl_local(policy, transitions, global_manifest=global_manifest, distributed=distributed,
+                                          denoising_microbatch=denoising_microbatch, global_indices=indices, tensor_cache=tensor_cache,
+                                          return_cache=kl_cache_sink is not None)
+                if kl_cache_sink is not None:
+                    post, kl_cache_sink['cache'] = post
             record = dict(epoch=epoch, optimizer_step=len(reports) + 1, global_upper_indices=indices,
                 internal_transitions=denominator, ppo_loss=float(summary[0]),
                 clip_fraction=float(summary[1] / summary[5]), mean_ratio=float(summary[2] / summary[5]),
@@ -474,13 +490,14 @@ def actor_update_v2(policy, optimizer, transitions, targets, *, global_manifest=
                 ppo_only_gradient_norm=ppo_norm, total_gradient_norm=total_norm,
                 grad_clip_factor=min(1., grad_clip_norm / (total_norm + 1e-6)), bc=bc_report,
                 gradient_contributions=diagnostics, post_minibatch_kl=post,
-                post_kl_extra_internal_forwards=denominator,
+                post_kl_extra_internal_forwards=denominator if post is not None else 0,
+                kl_check_mode=kl_check_mode,
                 learning_rates=[group['lr'] for group in optimizer.param_groups])
             reports.append(record)
             with _local_phase(distributed, 'actor_step_callback'):
                 if step_callback is not None:
                     step_callback(record)
-            if soft_kl_limit is not None and post['mean_joint_kl'] >= soft_kl_limit:
+            if post is not None and soft_kl_limit is not None and post['mean_joint_kl'] >= soft_kl_limit:
                 stopped = 'minibatch_soft_kl'
                 break
         if stopped:
@@ -489,6 +506,7 @@ def actor_update_v2(policy, optimizer, transitions, targets, *, global_manifest=
         epoch_orders=orders, epochs_started=len(orders), early_stop_reason=stopped,
         included_upper_transitions=len(selected), excluded_upper_transitions=len(manifest) - len(selected),
         probability_check=probability, objective_logprob_reduction=objective_logprob_reduction,
+        kl_check_mode=kl_check_mode, discarded_pending_minibatch=discarded,
         old_statistics_fixed=True, hard_kl_pending=True, rollback_scope='caller_owned_whole_rollout',
         minibatch_order_contract='owner_balanced_complete_chains.v1' if balanced_minibatches else 'global_shuffle.v1',
         bc_global_samples=sum((item['bc'] or {}).get('batch_size', 0) for item in reports))

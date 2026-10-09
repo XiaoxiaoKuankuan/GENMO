@@ -57,6 +57,8 @@ def validate_v2_configuration(config):
         raise ValueError('Global rollout count must equal eight local collector counts')
     if not 0 < settings['kl_soft_stop_joint'] <= settings['kl_stop_joint']:
         raise ValueError('Soft KL threshold must be positive and no greater than final hard threshold')
+    if settings.get('kl_check_mode', 'post_step_full') not in ('post_step_full', 'pre_step_plus_final'):
+        raise ValueError('Unknown KL check mode')
     if settings.get('critic_update_mode', 'distributed') not in ('distributed', 'rank0_broadcast'):
         raise ValueError('Critic mode must be distributed or explicit rank0_broadcast comparison')
     if type(settings.get('x0_diagnostic_every', 0)) is not int or settings.get('x0_diagnostic_every', 0) < 0:
