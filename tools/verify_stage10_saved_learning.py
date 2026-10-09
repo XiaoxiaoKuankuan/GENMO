@@ -110,8 +110,13 @@ def main():
     for key in ('iteration', 'weights', 'stage1-config', 'assets', 'output'):
         parser.add_argument('--'+key, type=Path, required=True)
     parser.add_argument('--timing-repeats', type=int, default=2)
+    parser.add_argument('--microbatches', type=int, nargs='+', default=[8,16,32],
+        help='显式学习微批候选；始终先做B=1全部梯度参考，不修改old rollout')
     parser.add_argument('--weight-reduction', choices=('sample_bmm','joint_gemm'), default='sample_bmm')
     args = parser.parse_args()
+    if (not args.microbatches or len(set(args.microbatches))!=len(args.microbatches)
+            or any(b<2 or b>200 for b in args.microbatches) or args.timing_repeats<0):
+        raise ValueError('Distinct learning microbatches must fit the local optimizer minibatch (2..200)')
     rank, world, local = [int(os.environ[k]) for k in ('RANK','WORLD_SIZE','LOCAL_RANK')]
     if world != 8 or rank != local:
         raise ValueError('Requires Server1 single node eight GPUs')
@@ -159,11 +164,12 @@ def main():
         preserved_old_data=True, resampled_chains=0, global_actual_transitions=160,
         scope='PPO_and_KL_fixed_actual_data_no_BC_no_physics_no_policy_publication', results=[])
     reference = None
-    candidates = [(b,1,'numerical') for b in (1,8,16,32)]
-    candidates += [(b,4,f'timing{repeat}') for repeat in range(args.timing_repeats) for b in (8,16,32)]
+    candidates = [(b,1,'numerical') for b in [1,*args.microbatches]]
+    candidates += [(b,4,f'timing{repeat}') for repeat in range(args.timing_repeats) for b in args.microbatches]
     for micro, steps, scope in candidates:
         actor.load_state_dict(initial); actor.zero_grad(set_to_none=True)
         optimizer = torch.optim.AdamW([p for p in actor.parameters() if p.requires_grad], lr=5e-9, weight_decay=0.)
+        torch.cuda.reset_peak_memory_stats(device)
         check = probability_check_local(policy, rows, denoising_microbatch=micro, tensor_cache=cache,
                                         distributed=collective, global_manifest=manifest)
         gradients = {}
