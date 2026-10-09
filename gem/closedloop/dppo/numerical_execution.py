@@ -34,17 +34,18 @@ def configure_numerics(actor, mode, attention_backend=None):
             module.compute_dtype = (torch.bfloat16 if mode == 'bf16_backbone_candidate'
                                     and name.startswith('denoiser.blocks.') else torch.float32)
             module.result_dtype = module.compute_dtype
-            if mode != 'fp32_reference' and name == 'history_encoder.out_proj':
+            if mode != 'fp32_reference' and not name.startswith('denoiser.'):
                 module.compute_dtype, module.result_dtype = torch.float64, torch.float32
         if isinstance(module, RoPEAttention):
             module.execution_backend = backend
     actor.history_encoder.execution_backend = 'native' if mode == 'fp32_reference' else 'sample_bmm_fused_gru'
     actor.history_encoder.cell.gate_accumulation_dtype = torch.float64 if mode != 'fp32_reference' else torch.float32
     configure_gradients(actor, weight_reduction='sample_bmm' if mode == 'fp32_reference' else 'joint_gemm')
-    return dict(version='stage10.numerical_execution.v2', mode=mode, attention_backend=backend,
+    return dict(version='stage10.numerical_execution.v3', mode=mode, attention_backend=backend,
         attention_fallback=False, condition_encoding='scalar_reference' if mode == 'fp32_reference' else 'batched_unique_chains',
         history_backend=actor.history_encoder.execution_backend, master_dtype='float32',
         history_projection_accumulation='float64_then_float32' if mode != 'fp32_reference' else 'native_float32',
+        condition_linear_accumulation='float64_then_float32' if mode != 'fp32_reference' else 'native_float32',
         backbone_dtype='bfloat16' if mode == 'bf16_backbone_candidate' else 'float32',
         output_cfg_ddim_dtype='float32', probability_dtype='float64',
         matmul_tf32=mode == 'tf32_candidate', torch_version=torch.__version__)

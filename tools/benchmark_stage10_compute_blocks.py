@@ -104,6 +104,7 @@ def main():
         parser.add_argument('--'+name, type=Path, required=True)
     parser.add_argument('--modes', nargs='+', choices=MODES, default=list(MODES))
     parser.add_argument('--repeats', type=int, default=5)
+    parser.add_argument('--operator-profile', action='store_true')
     args = parser.parse_args()
     rank, world = int(os.environ['RANK']), int(os.environ['WORLD_SIZE'])
     if world != 8 or rank != int(os.environ['LOCAL_RANK']): raise ValueError('Requires Server1 eight GPUs')
@@ -173,6 +174,16 @@ def main():
                     return _joint_kl(result, result['free_mask'], trace['old_means'][index256, step256].double(),
                                      trace['old_stds'][index256, step256].double())
             item['t_kl256'] = measure(kl_forward, collective, args.repeats)
+            if args.operator_profile:
+                collective.barrier()
+                if rank == 0:
+                    with torch.profiler.profile(activities=[torch.profiler.ProfilerActivity.CPU,
+                            torch.profiler.ProfilerActivity.CUDA], record_shapes=True, profile_memory=True) as profile:
+                        forward_backward();torch.cuda.synchronize()
+                    (args.output/(mode+'_operators.txt')).write_text(profile.key_averages().table(
+                        sort_by='self_cuda_time_total', row_limit=45))
+                    profile.export_chrome_trace(str(args.output/(mode+'_trace.json')))
+                collective.barrier()
             item['status'] = 'candidate_measured' if item['self_consistency_passed'] else 'rejected_self_consistency'
             del trace, policy
         except Exception as error:
