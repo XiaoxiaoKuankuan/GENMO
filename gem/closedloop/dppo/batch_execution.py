@@ -72,3 +72,34 @@ def batch_accounting(effective_rows, *, cfg, network_rows=None):
     return dict(effective_internal_rows=effective_rows, network_rows=actual,
                 cfg_rows=actual*branches, padding_rows=(actual-effective_rows)*branches,
                 useful_row_fraction=effective_rows/actual)
+
+
+class MicrobatchGradientAccumulator:
+    """以FP64合并微批梯度，消除小微批反复FP32写回造成的抵消误差。
+
+    网络前后向仍FP32；只对固定同一参数版本的梯度求和使用FP64缓冲。每次微批
+    backward后归并并清空叶子梯度，完成后仅转回一次FP32，随后执行原SUM通信、
+    BC、裁剪和Adam。默认无梯度的参数不分配缓存，条件图最后一次反传另行合并。
+    """
+    def __init__(self, module):
+        self.parameters = tuple(p for p in module.parameters() if p.requires_grad)
+        self.totals = {}
+
+    @torch.no_grad()
+    def add(self):
+        existing, values = [], []
+        for parameter in self.parameters:
+            gradient = parameter.grad
+            if gradient is None: continue
+            if parameter not in self.totals:
+                self.totals[parameter] = gradient.double()
+            else:
+                existing.append(self.totals[parameter]); values.append(gradient)
+            parameter.grad = None
+        if existing: torch._foreach_add_(existing, values)
+
+    @torch.no_grad()
+    def finish(self):
+        for parameter, total in self.totals.items():
+            parameter.grad = total.to(parameter.dtype)
+        self.totals.clear()

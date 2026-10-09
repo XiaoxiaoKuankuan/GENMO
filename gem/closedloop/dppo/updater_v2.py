@@ -400,6 +400,9 @@ def actor_update_v2(policy, optimizer, transitions, targets, *, global_manifest=
             optimizer.zero_grad(set_to_none=True)
             summary = torch.zeros(7, dtype=torch.float64, device=device)
             with _local_phase(distributed, 'actor_minibatch_forward_backward'), policy_phase(policy):
+                from .batch_execution import ROW_BMM, MicrobatchGradientAccumulator
+                gradient_sum = (MicrobatchGradientAccumulator(actor)
+                                if getattr(policy,'numerical_layout',None)==ROW_BMM else None)
                 conditions = ConditionGraphCache(policy, tensor_cache) if tensor_cache is not None and hasattr(policy, 'prepare_conditions') else None
                 if conditions is not None and getattr(policy, 'defer_checks', False):
                     conditions.prime([transitions[index] for _, index in owned])
@@ -424,6 +427,8 @@ def actor_update_v2(policy, optimizer, transitions, targets, *, global_manifest=
                     loss = -objective.sum() / denominator
                     with measure('actor.ppo_backward', gpu=True):
                         loss.backward()
+                        if gradient_sum is not None:
+                            gradient_sum.add()
                     old_mean, old_std = _old_kernel(rows, steps, device, tensor_cache)
                     kl = _joint_kl(parameters, mask, old_mean, old_std).detach()
                     summary += torch.stack((loss.detach(), ((ratio < 1 - clip) | (ratio > 1 + clip)).double().sum(),
@@ -431,6 +436,8 @@ def actor_update_v2(policy, optimizer, transitions, targets, *, global_manifest=
                                             ratio.new_tensor(ratio.numel(), dtype=torch.float64),
                                             (((advantage > 0) & (ratio > 1 + clip)) |
                                             ((advantage < 0) & (ratio < 1 - clip))).double().sum()))
+                if gradient_sum is not None:
+                    gradient_sum.finish()
                 if conditions is not None:
                     conditions.backward()
             if distributed is not None:
