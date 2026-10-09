@@ -333,7 +333,7 @@ def actor_update_v2(policy, optimizer, transitions, targets, *, global_manifest=
                     reserve_attempt=None, verify_initial_probability=False,
                     gradient_diagnostics=True, step_callback=None, tensor_cache=None,
                     balanced_minibatches=False, gradient_module_details=True, kl_cache_sink=None,
-                    kl_check_mode='post_step_full'):
+                    kl_check_mode='post_step_full', gradient_observer=None):
     """执行真实多次 PPO 参数更新；完整硬 KL 与整轮回滚明确由外层事务负责。"""
     from gem.closedloop.dppo.trainer import _validate_actor_transitions
     for name, value in (('ppo_epochs', ppo_epochs), ('actor minibatch', actor_minibatch_internal_transitions),
@@ -469,6 +469,9 @@ def actor_update_v2(policy, optimizer, transitions, targets, *, global_manifest=
             if distributed is not None and gradient_diagnostics:
                 diagnostics = distributed.broadcast_object(diagnostics)
             with _local_phase(distributed, 'actor_gradient_clipping'):
+                # 仅显式验收时读取完整、同步后且尚未裁剪的梯度；默认路径没有拷贝。
+                if gradient_observer is not None:
+                    gradient_observer(actor, len(reports))
                 total_norm = float(torch.nn.utils.clip_grad_norm_(actor.parameters(), grad_clip_norm, error_if_nonfinite=True))
             if reserve_attempt is not None:
                 reserve_attempt()
