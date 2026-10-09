@@ -44,6 +44,7 @@ def main():
         parser.add_argument('--'+name,required=True,type=Path)
     parser.add_argument('--repeats',type=int,default=3)
     parser.add_argument('--numerical-only',action='store_true',help='Only five single-Adam numerical comparisons')
+    parser.add_argument('--timing-only',action='store_true',help='Only micro32 detailed-profiler off/on at the same four offline steps')
     parser.add_argument('--profile-selection',action='store_true',help='Exercise the actual training profile chooser on eight GPUs')
     args=parser.parse_args()
     rank,world,local_rank=(int(os.environ.get(k,'-1')) for k in ('RANK','WORLD_SIZE','LOCAL_RANK'))
@@ -111,7 +112,7 @@ def main():
         weights_sha256=file_sha256(args.weights) if rank==0 else None,
         new_chain_sampling_seconds=sampling,results=[])
     report['production_profile_selection']=profile_selection
-    references={}
+    references={};reference_micros={}
     candidates=[(micro,'post_step_full',False,'one_step_numerical',0) for micro in (2,4,8,16,32)]
     for repeat in range(0 if args.numerical_only else args.repeats):
         candidates += [(m,mode,detail,scope,repeat) for m,mode,detail,scope in (
@@ -120,6 +121,10 @@ def main():
             (32,'post_step_full',False,'four_step_offline'),(16,'pre_step_plus_final',False,'four_step_offline'),
             (16,'post_step_full',True,'four_step_offline'),(16,'post_step_full',False,'soft_stop_enabled'),
             (16,'pre_step_plus_final',False,'soft_stop_enabled'))]
+    if args.timing_only:
+        if args.numerical_only:raise ValueError('Choose numerical-only or timing-only, not both')
+        candidates=[(32,'post_step_full',detail,'four_step_offline',repeat)
+                    for repeat in range(args.repeats) for detail in (False,True)]
     for micro,mode,detailed,scope,repeat in candidates:
         actor.load_state_dict(saved); actor.zero_grad(set_to_none=True)
         optimizer=torch.optim.AdamW([p for p in actor.parameters() if p.requires_grad],lr=5e-9,weight_decay=0.)
@@ -142,7 +147,8 @@ def main():
             state=cpu_snapshot(optimizer.state_dict()) if rank==0 else {}
             delta=None
             reference=references.get(scope)
-            if rank==0 and reference is None:references[scope]=(weights,state)
+            if rank==0 and reference is None:
+                references[scope]=(weights,state);reference_micros[scope]=micro
             elif rank==0:
                 delta=dict(parameter_max_abs=max(float((v.double()-reference[0][k].double()).abs().max()) for k,v in weights.items()),
                     optimizer_max_abs=max(float((v.double()-reference[1]['state'][i][k].double()).abs().max())
@@ -169,7 +175,7 @@ def main():
                 probability_check=check,actor_seconds=max(t['actor_seconds'] for t in timing_by_rank),
                 final_kl_seconds=max(t['final_kl_seconds'] for t in timing_by_rank),
                 learning_seconds=max(t['learning_seconds'] for t in timing_by_rank),final_kl=final,update=update,difference_from_scope_reference=delta,
-                reference_microbatch=16 if scope=='soft_stop_enabled' else 2,
+                reference_microbatch=reference_micros.get(scope,micro),
                 frozen_equal=all(collective.all_gather_object(frozen_equal)),ranks=timing_by_rank,
                 padding_rows=0,local_upper_per_minibatch=10,global_internal_per_minibatch=1600)
             report['results'].append(item)
