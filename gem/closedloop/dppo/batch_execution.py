@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import torch
 from torch import nn
+from gem.network.base_arch.transformer.encoder_rope import EncoderRoPEBlock
 
 ROW_BMM = 'sample_matrix_bmm_fp32.v1'
 
@@ -58,10 +59,37 @@ class SampleMatrixLinear(nn.Linear):
         return _SampleLinear.apply(value, self.weight, self.bias, getattr(self,'stable_weight_rows',True))
 
 
+class _SampleGate(torch.autograd.Function):
+    """保持广播乘法前向，门控梯度先按单样本时间维归约，再以FP64合并样本。"""
+    @staticmethod
+    def forward(ctx, gate, value):
+        ctx.save_for_backward(gate, value)
+        return gate * value
+
+    @staticmethod
+    def backward(ctx, gradient):
+        gate, value = ctx.saved_tensors
+        gate_gradient = None
+        if ctx.needs_input_grad[0]:
+            per_sample = (gradient * value).sum(1)
+            gate_gradient = per_sample.sum(0, dtype=torch.float64).to(gate.dtype).reshape_as(gate)
+        return gate_gradient, gradient * gate if ctx.needs_input_grad[1] else None
+
+
+class SampleEncoderRoPEBlock(EncoderRoPEBlock):
+    """只替换两处门控的反向归约；所有参数、归一化和attention公式保持原样。"""
+    def forward(self, x, attn_mask=None, tgt_key_padding_mask=None):
+        x = x + _SampleGate.apply(self.gate_msa, self._sa_block(
+            self.norm1(x), attn_mask=attn_mask, key_padding_mask=tgt_key_padding_mask))
+        return x + _SampleGate.apply(self.gate_mlp, self.mlp(self.norm2(x)))
+
+
 def set_sample_linear(module, enabled):
     """原位切换实现，不替换 Parameter，因此优化器引用和共享权重关系不变。"""
     count = 0
     for child in module.modules():
+        if type(child) in (EncoderRoPEBlock, SampleEncoderRoPEBlock):
+            child.__class__ = SampleEncoderRoPEBlock if enabled else EncoderRoPEBlock
         if type(child) in (nn.Linear, SampleMatrixLinear):
             child.__class__ = SampleMatrixLinear if enabled else nn.Linear
             count += 1

@@ -11,7 +11,8 @@ import pytest
 import torch
 
 from gem.closedloop.dppo.batch_execution import (SampleMatrixLinear, set_sample_linear, batch_accounting,
-                                                MicrobatchGradientAccumulator)
+                                                MicrobatchGradientAccumulator, _SampleGate,
+                                                SampleEncoderRoPEBlock)
 from gem.closedloop.dppo.policy import DPPODiffusionPolicy, masked_joint_log_prob
 from gem.closedloop.dppo.tensor_cache import ConditionGraphCache, RolloutTensorCache
 from gem.closedloop.dppo.updater_v2 import _parameters
@@ -54,6 +55,32 @@ def test_microbatch_accumulator_does_not_create_absent_gradients():
     accumulator=MicrobatchGradientAccumulator(layer)
     accumulator.add();accumulator.finish()
     assert all(p.grad is None for p in layer.parameters())
+
+
+def test_gate_gradient_matches_derivative_and_preserves_cancellation():
+    gate=torch.randn(1,1,3,dtype=torch.double,requires_grad=True)
+    value=torch.randn(3,4,3,dtype=torch.double,requires_grad=True)
+    assert torch.autograd.gradcheck(_SampleGate.apply,(gate,value))
+    gate=torch.ones(1,1,1,requires_grad=True)
+    value=torch.tensor([1e8,1.,-1e8]).reshape(3,1,1).requires_grad_()
+    _SampleGate.apply(gate,value).sum().backward()
+    assert gate.grad.item()==1.
+    torch.testing.assert_close(value.grad,torch.ones_like(value),rtol=0,atol=0)
+
+
+def test_gate_switch_preserves_parameter_aliases_and_forward():
+    from gem.network.base_arch.transformer.encoder_rope import EncoderRoPEBlock
+    block=EncoderRoPEBlock(8,2,dropout=0.).eval()
+    with torch.no_grad():
+        block.gate_msa.fill_(.2);block.gate_mlp.fill_(.3)
+    original=copy.deepcopy(block);parameters=dict(block.named_parameters())
+    set_sample_linear(block,True)
+    assert isinstance(block,SampleEncoderRoPEBlock)
+    assert all(p is parameters[n] for n,p in block.named_parameters())
+    x=torch.randn(3,5,8)
+    torch.testing.assert_close(block(x),original(x))
+    set_sample_linear(block,False)
+    assert type(block)is EncoderRoPEBlock
 
 
 @pytest.mark.parametrize('size', [2, 4, 8, 16, 32])
