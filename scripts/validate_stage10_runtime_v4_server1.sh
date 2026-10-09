@@ -9,7 +9,7 @@ set -euo pipefail
 TASK_REPO_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 TASK_PYTHON="${GENMO_PYTHON:-/home/user/liwei/GENMO/.venv/bin/python}"
 TASK_MODE="${1:-}"
-[[ $# -ge 1 ]] || { printf '需要模式：nccl | learning | replay | dual\n' >&2; exit 2; }
+[[ $# -ge 1 ]] || { printf '需要模式：nccl | learning | replay | dual | kernels | journal\n' >&2; exit 2; }
 shift
 case "$TASK_MODE" in
   nccl) TASK_TOOL=check_stage10_eight_gpu_collectives.py; TASK_SECONDS=150 ;;
@@ -17,6 +17,7 @@ case "$TASK_MODE" in
   replay) TASK_TOOL=replay_stage10_runtime_v4.py; TASK_SECONDS=2400 ;;
   dual) TASK_TOOL=profile_stage10_dual_collector.py; TASK_SECONDS=1800 ;;
   kernels) TASK_TOOL=profile_stage10_optional_kernels.py; TASK_SECONDS=900 ;;
+  journal) TASK_TOOL=profile_stage10_journal_v4.py; TASK_SECONDS=300 ;;
   *) printf '未知测试模式：%s\n' "$TASK_MODE" >&2; exit 2 ;;
 esac
 export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0,1,2,3,4,5,6,7}"

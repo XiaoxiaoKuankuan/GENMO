@@ -101,6 +101,24 @@ def test_worker_failure_unblocks_peer_without_optimizer():
     finally:c.close()
 
 
+def test_close_failure_still_closes_both_environment_threads():
+    closed=[]
+    base=factory([])
+    def create(slot,proxy):
+        resource=base(slot,proxy)
+        def close():
+            closed.append(slot)
+            if slot==0:raise RuntimeError('injected close failure')
+        resource.close=close
+        return resource
+    collector=DualEnvironmentCollector(Policy(),create,timeout_seconds=5)
+    collector.collect(count_per_rank=2,policy_version=0)
+    with pytest.raises(RuntimeError,match='all resources'):
+        collector.close()
+    assert sorted(closed)==[0,1]
+    assert all(executor._shutdown for executor in collector.executors)
+
+
 def test_two_generators_actual_actor_matches_independent_paths(actor_factory):
     torch.set_num_threads(1)
     actor,batch=actor_factory(starts=(45,47));_activate_branches(actor)

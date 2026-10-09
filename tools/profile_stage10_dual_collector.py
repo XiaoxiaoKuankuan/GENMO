@@ -106,6 +106,7 @@ def main():
                 '--config',str(path),'--socket',str(socket),'--headless'],config['paths']['gmt_repo'],socket,
                 strip_distributed=True,environment=dict(CUDA_VISIBLE_DEVICES=os.environ['CUDA_VISIBLE_DEVICES'].split(',')[local_rank])))
             client.close()
+            worker.entries[0]['client']=None  # 连接转交所属环境线程重建，避免退出再次使用关闭的socket。
             pid=worker.entries[0]['proc'].pid
             rss=int(Path(f'/proc/{pid}/statm').read_text().split()[1])*os.sysconf('SC_PAGE_SIZE')
             report.setdefault('workers',[]).append(dict(slot=slot,pid=pid,rss_bytes=rss,memory_available=available_memory()))

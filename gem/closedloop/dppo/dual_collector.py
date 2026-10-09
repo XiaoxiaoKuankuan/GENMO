@@ -179,12 +179,15 @@ class DualEnvironmentCollector:
                         raise ValueError('Two workers cannot share an execution session')
                     validated_resources = True
                 context = {key:torch.cat([item[1][key] for item in pending]) for key in pending[0][1]}
+                generating = time.perf_counter()
                 trace = self.policy.sample_rollout(context, generator=[item[2] for item in pending])
                 finished = time.perf_counter()
                 timing = dict(self.policy.last_sample_timing)
                 self.batch_reports.append(dict(environment_slots=slots, effective_rows=len(pending), padding_rows=0,
                     cfg_rows=len(pending)*(2 if self.policy.cfg_batch else 1),
-                    request_wait_seconds=[finished-item[4] for item in pending]))
+                    ready_queue_wait_seconds=[generating-item[4] for item in pending],
+                    batched_generation_seconds=finished-generating,
+                    request_until_ready_seconds=[finished-item[4] for item in pending]))
                 for index,item in enumerate(pending):
                     item[3].set_result((split_trace(trace,index,len(pending)),dict(timing)))
                 pending = []
@@ -213,10 +216,16 @@ class DualEnvironmentCollector:
     def close(self):
         self.cancelled.set()
         futures = [executor.submit(state.resource.close) for executor,state in zip(self.executors,self.states) if state is not None]
+        errors = []
         for future in futures:
-            future.result(timeout=self.timeout_seconds)
+            try:
+                future.result(timeout=self.timeout_seconds)
+            except Exception as error:
+                errors.append(error)
         for executor in self.executors:
             executor.shutdown(wait=True,cancel_futures=True)
+        if errors:
+            raise RuntimeError('Dual environment close failed after all resources were closed') from errors[0]
 
     def state_dict(self):
         """一致采集边界的双游标快照；不声称保存PhysX内部状态或退还资源预算。"""
