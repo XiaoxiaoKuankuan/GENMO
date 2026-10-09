@@ -62,7 +62,7 @@ class VectorUpperEnvironment(UpperEnvironment):
 
     def generate(self,**kwargs):
         from .vector_generation import GENERATION_CONTRACT, generate_for_environment
-        contract = self.config['runtime'].get('vector_generation_contract')
+        contract = self.config.get('runtime', {}).get('vector_generation_contract')
         if contract is not None and contract != GENERATION_CONTRACT:
             raise ValueError('Unknown vector generation pipeline')
         batched = contract is not None and hasattr(self.policy, 'owner') and not kwargs.get('deterministic', False)
@@ -72,7 +72,7 @@ class VectorUpperEnvironment(UpperEnvironment):
 
     def generate_flow(self, **kwargs):
         from .vector_generation import GENERATION_CONTRACT, generate_for_environment_flow
-        if (self.config['runtime'].get('vector_generation_contract') == GENERATION_CONTRACT
+        if (self.config.get('runtime', {}).get('vector_generation_contract') == GENERATION_CONTRACT
                 and hasattr(self.policy, 'owner') and not kwargs.get('deterministic', False)):
             result = yield from generate_for_environment_flow(self)
         else:

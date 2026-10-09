@@ -83,7 +83,7 @@ def audit_vector_checkpoint(local, rows, identity, rank):
     runtime=identity['execution_contract']['runtime'];count=runtime['num_envs']
     saved=local.get('vector_collector',{})
     world = runtime.get('vector_collection_contract') == 'genmo.world_batched_flow.v1'
-    require(saved.get('schema')==('genmo.world_batched_flow.boundary.v2' if world else 'genmo.gpu_vector_collector.boundary.v1') and saved.get('num_envs')==count and
+    require(saved.get('schema')==('genmo.gpu_vector_collector.boundary.v2' if world else 'genmo.gpu_vector_collector.boundary.v1') and saved.get('num_envs')==count and
             saved.get('fragment_contract')==(runtime['vector_collection_contract'] if world else runtime['vector_fragment_contract']) and
             saved.get('numerical_layout')==identity['performance_contract']['numerical_layout'] and
             saved.get('restore_environment')=='fresh_PhysX_episodes_preserve_rng_cursors_and_spent_budget' and
