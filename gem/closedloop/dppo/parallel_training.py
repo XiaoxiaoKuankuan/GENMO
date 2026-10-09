@@ -298,7 +298,8 @@ def _evaluate(c, label):
     if references is None and (label != 'initial' or baseline is not None):
         raise ValueError('Periodic evaluation requires the durable initial diagnostic reference')
     path, lease, budget = _new_phase(c, f'eval_{label}', per_rank)
-    journal = GuardedStepJournal(path/'execution_journal.sqlite', c.guard)
+    journal = GuardedStepJournal(path/'execution_journal.sqlite', c.guard,
+        format=c.stage.get('performance', {}).get('journal_format', 'json.v1'))
     c.backend.journal = journal
     config = copy.deepcopy(c.config)
     env = UpperEnvironment(config, c.backend, c.builder, c.policy, budget, path)
@@ -483,7 +484,8 @@ def _collect(c, index):
     lease = f'{c.session.name}/iteration{index}'
     budget = begin_lease(c.distributed, c.manager, c.budget, path, lease, credits)
     c.journal.close()
-    c.journal = GuardedStepJournal(path/'execution_journal.sqlite', c.guard)
+    c.journal = GuardedStepJournal(path/'execution_journal.sqlite', c.guard,
+        format=c.stage.get('performance', {}).get('journal_format', 'json.v1'))
     c.backend.journal = c.journal
     c.env.output, c.env.budget = path, budget
     path.joinpath('raw_samples').mkdir()
@@ -786,7 +788,8 @@ def run_parallel(args, config, collective, preflight):
             str(Path(config['paths']['gmt_repo'])/'scripts/rsl_rl/serve_frozen_gmt.py'), '--config', str(config_path),
             '--socket', str(socket), '--headless'], config['paths']['gmt_repo'], socket,
             environment={'CUDA_VISIBLE_DEVICES':visible}, strip_distributed=True))
-        c.journal = GuardedStepJournal(c.rank_dir/'bootstrap_journal.sqlite', c.guard)
+        c.journal = GuardedStepJournal(c.rank_dir/'bootstrap_journal.sqlite', c.guard,
+            format=c.stage.get('performance', {}).get('journal_format', 'json.v1'))
         c.backend = AcknowledgedBackend(client, c.journal, socket_path=socket, timeout_s=config['runtime']['rpc_timeout_s'])
         c.builder = OnlineConditionBuilder(BumiMotionFeatureCodec(BumiKinematics(config['paths']['kinematics'])))
         c.env = UpperEnvironment(c.config, c.backend, c.builder, c.policy, None, c.rank_dir/'bootstrap')

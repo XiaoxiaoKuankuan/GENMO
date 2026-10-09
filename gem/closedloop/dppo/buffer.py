@@ -186,21 +186,36 @@ class EncodedJournalReply:
     identity: str
     payload: bytes
     sha256: str
+    format: str = 'json.v1'
 
 
 class StepJournal:
     """同步落盘的幂等执行回复日志；成功返回后调用方才可发送后端 ACK。"""
-    def __init__(self, path: str | Path):
+    def __init__(self, path: str | Path, *, format='json.v1'):
+        from .journal_codec import FORMAT
+        if format not in ('json.v1', FORMAT):
+            raise ValueError('Unknown journal format')
+        self.format = format
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.connection = sqlite3.connect(self.path)
         self.connection.execute("PRAGMA journal_mode=WAL")
         self.connection.execute("PRAGMA synchronous=FULL")
         self.connection.execute("CREATE TABLE IF NOT EXISTS replies (identity TEXT PRIMARY KEY, sha256 TEXT NOT NULL, payload TEXT NOT NULL)")
+        self.connection.execute('CREATE TABLE IF NOT EXISTS journal_format (format TEXT NOT NULL)')
+        saved = self.connection.execute('SELECT format FROM journal_format').fetchall()
+        if saved and saved != [(format,)]:
+            self.connection.close()
+            raise ValueError('Journal format cannot change on reopening')
+        if not saved:
+            if format != 'json.v1' and self.connection.execute('SELECT COUNT(*) FROM replies').fetchone()[0]:
+                self.connection.close()
+                raise ValueError('Cannot append binary replies to legacy journal')
+            self.connection.execute('INSERT INTO journal_format VALUES (?)', (format,))
         self.connection.commit()
 
     @staticmethod
-    def encode_result(result: Mapping[str, Any]) -> EncodedJournalReply:
+    def encode_result(result: Mapping[str, Any], *, format='json.v1') -> EncodedJournalReply:
         body = result.get("result", result)
         if not isinstance(body, Mapping):
             body = result
@@ -210,16 +225,24 @@ class StepJournal:
             raise ValueError("durable execution reply requires session and mutation/request identity")
         # ack.v2 的序号在整个 worker session 单调增长，不能通过改变 episode 绕过冲突检测。
         identity = json.dumps([session, sequence], separators=(",", ":"))
-        payload = json.dumps(_journal_value(result), ensure_ascii=False, sort_keys=True,
-                             separators=(",", ":"), allow_nan=False).encode('utf-8')
-        return EncodedJournalReply(identity, payload, hashlib.sha256(payload).hexdigest())
+        from .journal_codec import FORMAT, encode_binary
+        if format == FORMAT:
+            payload = encode_binary(result)
+        elif format == 'json.v1':
+            payload = json.dumps(_journal_value(result), ensure_ascii=False, sort_keys=True,
+                                 separators=(',', ':'), allow_nan=False).encode('utf-8')
+        else:
+            raise ValueError('Unknown journal format')
+        return EncodedJournalReply(identity, payload, hashlib.sha256(payload).hexdigest(), format)
 
     def append_result(self, result: Mapping[str, Any]) -> bool:
-        return self.append_encoded(self.encode_result(result))
+        return self.append_encoded(self.encode_result(result, format=self.format))
 
     def append_encoded(self, encoded: EncodedJournalReply) -> bool:
         if not isinstance(encoded, EncodedJournalReply):
             raise TypeError('Journal requires a canonical immutable encoded reply')
+        if encoded.format != self.format:
+            raise ValueError('Encoded journal format differs from storage contract')
         identity, digest = encoded.identity, encoded.sha256
         with self.connection:
             existing = self.connection.execute("SELECT sha256 FROM replies WHERE identity=?", (identity,)).fetchone()
@@ -227,7 +250,7 @@ class StepJournal:
                 if existing[0] != digest:
                     raise ValueError("same execution identity returned different payload")
                 return False
-            self.connection.execute("INSERT INTO replies VALUES (?,?,?)", (identity, digest, encoded.payload.decode('utf-8')))
+            self.connection.execute("INSERT INTO replies VALUES (?,?,?)", (identity, digest, encoded.payload.decode('utf-8') if self.format == 'json.v1' else sqlite3.Binary(encoded.payload)))
         return True
 
     def __len__(self):

@@ -574,12 +574,12 @@ class RolloutWriter:
 
 class GuardedStepJournal:
     """保留StepJournal的先事务落盘语义，另对本轮SQLite/WAL占用做增量检查。"""
-    def __init__(self, path, disk_guard):
+    def __init__(self, path, disk_guard, *, format='json.v1'):
         self.path, self.disk_guard = disk_guard._path(path), disk_guard
         if self.path.exists():
             raise FileExistsError('each new attempt requires a new execution journal')
         disk_guard.check(65536)
-        self._journal = StepJournal(self.path)
+        self._journal = StepJournal(self.path, format=format)
         self._closed = False
         self._account()
 
@@ -588,7 +588,7 @@ class GuardedStepJournal:
             self.disk_guard.account_file(Path(str(self.path) + suffix))
 
     def append_result(self, result):
-        encoded = self._journal.encode_result(result)
+        encoded = self._journal.encode_result(result, format=self._journal.format)
         self.disk_guard.check(2 * len(encoded.payload) + 65536)
         try:
             return self._journal.append_encoded(encoded)

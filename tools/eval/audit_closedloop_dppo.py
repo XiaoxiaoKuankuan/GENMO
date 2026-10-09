@@ -319,8 +319,12 @@ def check_journal(path):
     with journal_snapshot(path) as connection:
         require(connection.execute("PRAGMA integrity_check").fetchone()[0] == "ok", "SQLite integrity failure")
         for row_number, (identity, digest, payload) in enumerate(connection.execute("SELECT identity,sha256,payload FROM replies ORDER BY rowid"), 1):
-            require(hashlib.sha256(payload.encode()).hexdigest() == digest, f"reply {row_number}: SHA256 mismatch")
-            reply = json.loads(payload)
+            from gem.closedloop.dppo.journal_codec import decode_payload
+            from gem.closedloop.dppo.buffer import _journal_value
+            raw = payload.encode() if isinstance(payload, str) else payload
+            require(hashlib.sha256(raw).hexdigest() == digest, f"reply {row_number}: SHA256 mismatch")
+            reply = _journal_value(decode_payload(payload, sha256=digest))
+            payload = json.dumps(reply, ensure_ascii=False, allow_nan=False)
             require(reply.get("execution_protocol") == "ack.v2", f"reply {row_number}: unsupported ACK protocol")
             session = reply["backend_session_id"]
             sequence = integer(reply["mutation_seq"], "mutation_seq")

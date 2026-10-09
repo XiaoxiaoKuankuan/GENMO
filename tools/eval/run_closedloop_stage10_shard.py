@@ -113,9 +113,11 @@ def verify_execution_journal(path, frozen):
     connection = sqlite3.connect(Path(path).resolve().as_uri() + '?mode=ro', uri=True)
     try:
         for identity, digest, payload in connection.execute('SELECT identity, sha256, payload FROM replies'):
-            if hashlib.sha256(payload.encode()).hexdigest() != digest:
+            raw = payload.encode() if isinstance(payload, str) else payload
+            if hashlib.sha256(raw).hexdigest() != digest:
                 raise ValueError('Durable execution payload SHA mismatch')
-            reply = json.loads(payload)
+            from gem.closedloop.dppo.journal_codec import decode_payload
+            reply = decode_payload(payload, sha256=digest)
             sequence = reply['mutation_seq']
             if (reply['backend_session_id'] != session_id or type(sequence) is not int
                     or json.loads(identity) != [session_id, sequence]):

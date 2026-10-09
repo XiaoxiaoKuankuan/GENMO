@@ -30,6 +30,8 @@ def validate_v2_configuration(config):
                 'disk_full_scan_every', 'asset_full_check_every'):
         if key in performance and (type(performance[key]) is not int or performance[key] < 1):
             raise ValueError(f'performance.{key} must be a positive integer')
+    if performance.get('journal_format', 'json.v1') not in ('json.v1', 'genmo.execution_journal.ndarray.v2'):
+        raise ValueError('Unknown journal format')
     layout = performance.get('numerical_layout', 'legacy_step_lane')
     if layout not in ('legacy_step_lane', 'sample_matrix_bmm_fp32.v1'):
         raise ValueError('Unknown numerical_layout')
