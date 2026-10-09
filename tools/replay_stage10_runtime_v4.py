@@ -83,7 +83,8 @@ class Recorder:
     def call(self,method,**payload):
         value=self.backend.call(method,**payload)
         if method in self.backend.MUTATIONS:
-            self.records.append(dict(method=method,payload=copy.deepcopy(payload),result=copy.deepcopy(value)))
+            self.records.append(dict(method=method,payload=copy.deepcopy(payload),result=copy.deepcopy(value),
+                timing=dict(self.backend.last_call_timing)))
         return value
 
 
@@ -154,7 +155,7 @@ def main():
                 generations=40,control_steps=5000,physics_steps=20000),disk_guard=guard)
             backend=AcknowledgedBackend(client,journal,socket_path=socket)
             recorder=Recorder(backend)
-            profile=PhaseProfiler(f'cuda:{rank}',rank,detailed=False);token=activate(profile)
+            profile=PhaseProfiler(f'cuda:{rank}',rank,detailed=True);token=activate(profile)
             collective.barrier();start=time.perf_counter()
             if reference is None:
                 builder=OnlineConditionBuilder(BumiMotionFeatureCodec(BumiKinematics(child['paths']['kinematics'])))
@@ -187,10 +188,12 @@ def main():
             for row in trace:
                 for key,value in row.get('cpu_timing',{}).items():
                     if isinstance(value,(int,float)):timing[key]=timing.get(key,0.)+value
+            rpc_timing={key:sum(r['timing'].get(key,0.) for r in records) for key in
+                ('total_seconds','transport_seconds','journal_seconds','ack_seconds')}
             frozen=backend.call('verify_frozen');_assert_frozen(frozen)
             record=dict(variant=label,seconds=elapsed,control_steps=len(trace),physics_steps=4*len(trace),
                 exact_feedback=not diff,feedback_differences=diff,exact_reward=not reward_diff,reward_differences=reward_diff,
-                reward_sum=sum(r['reward'] for r in rewards),backend_cpu_timing=timing,
+                reward_sum=sum(r['reward'] for r in rewards),backend_cpu_timing=timing,rpc_timing=rpc_timing,
                 profile=profile.report(),frozen=frozen,journal_bytes=journal.path.stat().st_size)
             results.append(record)
             torch.save(records,directory/'requests_and_full_replies.pt')
