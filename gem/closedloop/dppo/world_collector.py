@@ -231,6 +231,7 @@ class WorldEnvironmentCollector(VectorEnvironmentCollector):
         profile = None
         if self.states[0].resource.env.config['stage10'].get('performance',{}).get('python_world_profile',False):
             import cProfile
+            self.world_timing['python_diagnostic_profiler_enabled']=True
             profile=cProfile.Profile();profile.enable()
         before = [state.transitions for state in self.states]
         try:
@@ -248,7 +249,6 @@ class WorldEnvironmentCollector(VectorEnvironmentCollector):
             if profile is not None:
                 profile.disable()
                 profile.dump_stats(str(self.states[0].resource.env.output.parent/'world_python_profile.pstats'))
-                self.world_timing['python_diagnostic_profiler_enabled']=True
         self.world_call('end_rollout',env_ids=list(range(self.num_envs)))
         if signature!=self.policy._parameter_signature():raise RuntimeError('Policy changed during collection')
         rows=[fragments[i] for i in range(self.num_envs)]
