@@ -68,6 +68,8 @@ def validate_v2_configuration(config):
         raise ValueError('profiler_every must be zero or a positive integer')
     if type(performance.get('defer_tensor_checks', False)) is not bool:
         raise ValueError('defer_tensor_checks must be boolean')
+    if type(performance.get('python_world_profile',False)) is not bool:
+        raise ValueError('python_world_profile must be boolean')
     shape = performance.get('execution_batch_size')
     if shape is not None and (type(shape) is not int or shape not in (1, 2, 4)
                               or settings['denoising_steps'] % shape):

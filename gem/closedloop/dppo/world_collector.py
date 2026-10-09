@@ -228,6 +228,10 @@ class WorldEnvironmentCollector(VectorEnvironmentCollector):
         for slot in range(self.num_envs):self._resource(slot)
         self.world_call('begin_rollout',env_ids=list(range(self.num_envs)))
         signature=self.policy._parameter_signature();self.batch_reports=[];self.world_timing={};started=time.perf_counter()
+        profile = None
+        if self.states[0].resource.env.config['stage10'].get('performance',{}).get('python_world_profile',False):
+            import cProfile
+            profile=cProfile.Profile();profile.enable()
         before = [state.transitions for state in self.states]
         try:
             fragments=self._drive({slot:self._fragment_flow(slot,count_per_rank//self.num_envs,policy_version) for slot in range(self.num_envs)})
@@ -240,6 +244,11 @@ class WorldEnvironmentCollector(VectorEnvironmentCollector):
                 seconds=time.perf_counter()-started, batches=self.batch_reports, world_timing=self.world_timing,
                 audit_seconds=self.audit_seconds, partial_execution_is_not_accepted_rollout=True))
             raise
+        finally:
+            if profile is not None:
+                profile.disable()
+                profile.dump_stats(str(self.states[0].resource.env.output.parent/'world_python_profile.pstats'))
+                self.world_timing['python_diagnostic_profiler_enabled']=True
         self.world_call('end_rollout',env_ids=list(range(self.num_envs)))
         if signature!=self.policy._parameter_signature():raise RuntimeError('Policy changed during collection')
         rows=[fragments[i] for i in range(self.num_envs)]

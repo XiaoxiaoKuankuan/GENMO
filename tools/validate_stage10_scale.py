@@ -28,6 +28,7 @@ def main():
     parser.add_argument('--precision-mode', choices=('fp32_reference','fp32_fast','tf32_candidate','bf16_backbone_candidate'), required=True)
     parser.add_argument('--rounds', type=int, choices=(1,2), default=1)
     parser.add_argument('--resume', action='store_true')
+    parser.add_argument('--profile-world', action='store_true',help='只用于Python外围定位，该轮不作无profiler吞吐结果')
     parser.add_argument('--deadline-seconds', type=int, default=3600)
     args = parser.parse_args()
     if not 300 <= args.deadline_seconds <= 7200: raise ValueError('Finite deadline must be 300..7200 seconds')
@@ -46,6 +47,7 @@ def main():
             kinematics=str(ROOT/'configs/bumi/bumi_kinematics_robot_retargeter_fe934_v1.json'),
             compat_profile=str(args.gmt_repo.resolve()/'configs/sim2sim/model_135000_stage2.json'))
         config['stage10']['performance']['precision_mode'] = args.precision_mode
+        config['stage10']['performance']['python_world_profile']=args.profile_world
         # 临时归档与正式目录隔离，容量上限保持原授权。
         config['stage10']['storage']['archive_secondary']['root'] = str(output/'execution_archives')
         (output/'config.yaml').write_text(yaml.safe_dump(config, allow_unicode=True, sort_keys=False))
