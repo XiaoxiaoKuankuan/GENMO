@@ -1,7 +1,7 @@
 """服务器1八卡大规模DPPO有限端到端验收启动器，不启动长期训练。
 
-从4096/8192/16384生产候选配置构建独立路径配置，只覆盖仓库路径、显式数值模式
-和本次输出位置。每环境决策、真实全局链数、PPO epochs、Actor/Critic/BC工作量、
+从4096/8192/16384生产候选配置构建独立路径配置，只覆盖仓库路径、显式数值模式、
+显式算子候选和本次输出位置。每环境决策、真实全局链数、PPO epochs、Actor/Critic/BC工作量、
 概率与KL门槛保持配置值。最多运行两轮，完整使用正式训练器的初始化验证、末轮
 验证、断点、预算和有界归档机制；不使用旧160条小测试代替完整验收。
 
@@ -20,12 +20,32 @@ import yaml
 ROOT = Path(__file__).resolve().parents[1]
 
 
+def select_numerical_contract(config, precision_mode, numerical_variant, *, resume):
+    """一次确定实际候选，恢复时只核对原合同，不用CLI默认值覆盖断点身份。"""
+    performance = config['stage10']['performance']
+    variant = (performance.get('numerical_variant', 'default')
+               if numerical_variant is None else numerical_variant)
+    if resume:
+        if (performance['precision_mode'] != precision_mode or
+                performance.get('numerical_variant', 'default') != variant):
+            raise ValueError('Resume cannot change numerical execution contract')
+    else:
+        performance.update(precision_mode=precision_mode, numerical_variant=variant)
+    if variant in ('blocked64_fp32_gemm', 'compiled_blocked64_fp32') and precision_mode != 'fp32_fast':
+        raise ValueError('Blocked FP32 numerical variant requires fp32_fast')
+    if variant.startswith('compensated_bf16') and precision_mode != 'bf16_backbone_candidate':
+        raise ValueError('Compensated BF16 numerical variant requires bf16_backbone_candidate')
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--config', type=Path, required=True)
     parser.add_argument('--gmt-repo', type=Path, required=True)
     parser.add_argument('--output', type=Path, required=True)
     parser.add_argument('--precision-mode', choices=('fp32_reference','fp32_fast','tf32_candidate','bf16_backbone_candidate'), required=True)
+    parser.add_argument('--numerical-variant', choices=('default','blocked64_fp32_gemm',
+        'compiled_blocked64_fp32','compensated_bf16x3','compensated_bf16x6'),
+        help='显式新数值合同；省略时保留所选配置，恢复时不能修改')
     parser.add_argument('--rounds', type=int, choices=(1,2), default=1)
     parser.add_argument('--resume', action='store_true')
     parser.add_argument('--profile-world', action='store_true',help='只用于Python外围定位，该轮不作无profiler吞吐结果')
@@ -36,8 +56,7 @@ def main():
     if args.resume:
         if not (output/'run/latest.json').is_file(): raise ValueError('Resume requires a published complete checkpoint')
         config = yaml.safe_load((output/'config.yaml').read_text())
-        if config['stage10']['performance']['precision_mode'] != args.precision_mode:
-            raise ValueError('Resume cannot change numerical execution contract')
+        select_numerical_contract(config, args.precision_mode, args.numerical_variant, resume=True)
     else:
         output.mkdir(parents=True, exist_ok=False)
         config = yaml.safe_load(args.config.read_text())
@@ -46,7 +65,7 @@ def main():
         config['paths'].update(genmo_repo=str(ROOT), gmt_repo=str(args.gmt_repo.resolve()),
             kinematics=str(ROOT/'configs/bumi/bumi_kinematics_robot_retargeter_fe934_v1.json'),
             compat_profile=str(args.gmt_repo.resolve()/'configs/sim2sim/model_135000_stage2.json'))
-        config['stage10']['performance']['precision_mode'] = args.precision_mode
+        select_numerical_contract(config, args.precision_mode, args.numerical_variant, resume=False)
         config['stage10']['performance']['python_world_profile']=args.profile_world
         # 临时归档与正式目录隔离，容量上限保持原授权。
         config['stage10']['storage']['archive_secondary']['root'] = str(output/'execution_archives')

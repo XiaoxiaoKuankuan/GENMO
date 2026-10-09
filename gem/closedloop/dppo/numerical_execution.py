@@ -21,9 +21,12 @@ _ACTIVE_PRECISION = ContextVar('stage10_active_precision', default=None)
 
 
 def configure_variant(policy, variant):
-    """训练入口与诊断共用显式候选选择；未经自洽验收的编译不接入生产配置。"""
+    """训练入口与诊断共用显式候选；新合同禁止透明恢复旧运行。"""
     if variant == 'blocked64_fp32_gemm':
         configure_blocked_fp32(policy)
+    elif variant == 'compiled_blocked64_fp32':
+        configure_blocked_fp32(policy)
+        compile_fixed_denoiser(policy)
     elif variant in ('compensated_bf16x3', 'compensated_bf16x6'):
         configure_compensated_bf16(policy, int(variant[-1]))
     else:

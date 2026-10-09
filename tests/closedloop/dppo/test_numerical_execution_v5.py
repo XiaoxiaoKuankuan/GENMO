@@ -130,3 +130,27 @@ def test_compiled_candidate_keeps_bc_dropout_forward_gradients_and_rng(device, m
     for key in actual:torch.testing.assert_close(actual[key],expected[key],rtol=0,atol=0)
     actual['pred_x_start'].square().sum().backward();expected['pred_x_start'].square().sum().backward()
     for a,b in zip(model.parameters(),reference.parameters()):torch.testing.assert_close(a.grad,b.grad,rtol=0,atol=0)
+
+
+def test_compiled_variant_is_explicit_and_restore_cannot_switch_contract(actor_factory, device, monkeypatch):
+    from tools.validate_stage10_scale import select_numerical_contract
+    monkeypatch.setattr(torch, 'compile', lambda function, **kwargs: function)
+    actor, _ = actor_factory(starts=(45,47)); actor.to(device)
+    policy = DPPODiffusionPolicy(actor, numerical_layout='sample_matrix_bmm_fp32.v1',
+        precision_mode='fp32_fast', numerical_variant='compiled_blocked64_fp32', defer_checks=True)
+    contract = policy.kernel_config['numerical_execution']
+    assert contract['variant'] == 'compiled_blocked64_fp32'
+    assert contract['inference_uses_grad_forward_then_detach']
+    assert contract['supervised_training_forward'] == 'original_eager_preserve_dropout_and_rng'
+    config = {'stage10': {'performance': {'precision_mode': 'fp32_fast'}}}
+    select_numerical_contract(config, 'fp32_fast', 'compiled_blocked64_fp32', resume=False)
+    saved = copy.deepcopy(config)
+    select_numerical_contract(config, 'fp32_fast', None, resume=True)
+    assert config == saved
+    with pytest.raises(ValueError, match='Resume cannot change'):
+        select_numerical_contract(config, 'fp32_fast', 'default', resume=True)
+    with pytest.raises(ValueError, match='Resume cannot change'):
+        select_numerical_contract(config, 'tf32_candidate', None, resume=True)
+    with pytest.raises(ValueError, match='requires fp32_fast'):
+        select_numerical_contract(copy.deepcopy(config), 'bf16_backbone_candidate',
+            'compiled_blocked64_fp32', resume=False)
