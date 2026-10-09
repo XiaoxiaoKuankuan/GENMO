@@ -81,8 +81,11 @@ def install(actor, variant):
             key = tuple((tuple(a.shape), a.dtype, a.requires_grad) for a in args)
             if key not in graphs:
                 module = _GraphDenoiser(actor.denoiser, original).eval()
+                # 捕获使用独立叶子，避免反向捕获越过denoiser边界进入外部条件编码图。
+                # 真正调用仍传入原args，由graphed callable将输入梯度返回原条件图。
+                examples = tuple(a.detach().clone().requires_grad_(a.requires_grad) for a in args)
                 with torch.enable_grad(), torch.autocast('cuda', enabled=False, cache_enabled=False):
-                    graphs[key] = torch.cuda.make_graphed_callables(module, args,
+                    graphs[key] = torch.cuda.make_graphed_callables(module, examples,
                         num_warmup_iters=3, allow_unused_input=True)
                 info['captured_shapes'] = [str(k) for k in graphs]
             outputs = graphs[key](*args)
