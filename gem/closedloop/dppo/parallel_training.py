@@ -746,6 +746,11 @@ def run_parallel(args, config, collective, preflight):
             return dict(session_id=c.manager.session_id, run_id=c.manager.run_id)
         run = root_call(collective, initialize)
         c.session = c.output/'sessions'/run['session_id']
+        if c.stage.get('scale') is not None:
+            from .training_scale import budget_requirements
+            scale_budget = budget_requirements(c.config)
+            report['planned_scale_budget'] = scale_budget
+            root_call(collective, lambda: atomic_json(c.session/'planned_scale_budget.json', scale_budget))
         c.rank_dir = c.session/f'rank{collective.rank:02d}'
         c.rank_dir.mkdir(parents=True)
         c.config['runtime'].update(rank=collective.rank, genmo_device=str(collective.device))

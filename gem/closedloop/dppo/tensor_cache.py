@@ -151,6 +151,21 @@ class RolloutTensorCache:
         self.constant_cache.clear()
 
 
+class _ConditionGather(torch.autograd.Function):
+    """只存FP32条件；反向直接归并到链级FP64缓冲，不物化微批FP64条件及完整叶子梯度。"""
+    @staticmethod
+    def forward(ctx, token, features, index, total):
+        ctx.save_for_backward(index)
+        ctx.total = total
+        return features.index_select(0, index)
+
+    @staticmethod
+    def backward(ctx, gradient):
+        (index,) = ctx.saved_tensors
+        ctx.total.index_add_(0, index, gradient.to(ctx.total.dtype))
+        return None, None, None, None
+
+
 class ConditionGraphCache:
     def __init__(self, policy, tensor_cache=None):
         self.policy, self.tensor_cache = policy, tensor_cache
@@ -179,12 +194,19 @@ class ConditionGraphCache:
                 context = (self.tensor_cache.context([row]) if self.tensor_cache is not None else row.context)
                 originals.append(self.policy.prepare_conditions(context))
         self.bank = dict(lookup={id(row): i for i, row in enumerate(unique)}, originals=originals,
-            adapted={key: torch.cat([item['adapted'][key] for item in originals]) for key in originals[0]['adapted']},
-            leaves={}, indices={}, batched=batched)
+            adapted=(originals[0]['adapted'] if batched else
+                {key: torch.cat([item['adapted'][key] for item in originals]) for key in originals[0]['adapted']}),
+            leaves={}, indices={}, batched=batched, totals={}, tokens={})
         for name in ('conditional', 'unconditional'):
-            features = None if originals[0][name] is None else torch.cat([item[name] for item in originals])
-            self.bank['leaves'][name] = ((features.detach().double() if batched else features.detach()).requires_grad_(True)
-                if self.training and features is not None and features.requires_grad else features)
+            features = (originals[0][name] if batched or originals[0][name] is None else
+                        torch.cat([item[name] for item in originals]))
+            trainable = self.training and features is not None and features.requires_grad
+            if batched and trainable:
+                self.bank['leaves'][name] = features.detach()
+                self.bank['totals'][name] = torch.zeros_like(features, dtype=torch.float64)
+                self.bank['tokens'][name] = features.new_zeros((), requires_grad=True)
+            else:
+                self.bank['leaves'][name] = features.detach().requires_grad_(True) if trainable else features
 
     def prepare(self, rows, context):
         if self.finished or self.policy._parameter_signature() != self.signature:
@@ -196,7 +218,10 @@ class ConditionGraphCache:
             index = self.bank['indices'][positions]
             prepared = dict(self.bank['originals'][0])
             prepared['adapted'] = {key: value[index] for key, value in self.bank['adapted'].items()}
-            prepared.update({key: None if value is None else value[index].float() for key, value in self.bank['leaves'].items()})
+            for key, value in self.bank['leaves'].items():
+                prepared[key] = (None if value is None else
+                    _ConditionGather.apply(self.bank['tokens'][key], value, index, self.bank['totals'][key])
+                    if key in self.bank['totals'] else value[index])
             prepared['inputs'] = self.policy._input_signature(context)
             return prepared
         entries = []
@@ -232,9 +257,10 @@ class ConditionGraphCache:
                 for i, original in enumerate(self.bank['originals']):
                     outputs, gradients = [], []
                     for name, leaf in self.bank['leaves'].items():
-                        if leaf is not None and leaf.grad is not None and original[name].requires_grad:
+                        gradient = self.bank['totals'].get(name) if name in self.bank['totals'] else None if leaf is None else leaf.grad
+                        if leaf is not None and gradient is not None and original[name].requires_grad:
                             outputs.append(original[name])
-                            gradients.append((leaf.grad if self.bank['batched'] else leaf.grad[i:i+1]).to(original[name].dtype))
+                            gradients.append((gradient if self.bank['batched'] else gradient[i:i+1]).to(original[name].dtype))
                     if outputs:
                         torch.autograd.backward(outputs, gradients)
         if self.training and self.entries:

@@ -174,7 +174,7 @@ def _sources(config, check):
                   'updater_v2', 'position_repair', 'archives', 'archive_process', 'optional_diagnostics',
                   'performance', 'tensor_cache', 'asset_cache', 'rollout_storage', 'budget_ledger',
                   'batch_execution', 'execution_checks', 'journal_codec', 'dual_collector',
-                  'numerical_execution', 'training_scale')
+                  'numerical_execution', 'training_scale', 'fixed_tile_linear', 'prepaid_budget', 'update_observation')
     vector = config.get('runtime',{}).get('backend') == 'gpu_vectorized.v1'
     if vector:
         names += ('vector_collector','vector_boundary','vector_environment','vector_runtime','vector_evaluation',

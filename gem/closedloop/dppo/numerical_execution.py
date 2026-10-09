@@ -11,11 +11,13 @@ FP32；SDPA的q/k在FP32旋转后转回显式骨干dtype。强制单一SDPA后�
 全局TF32开关使用可嵌套上下文恢复，避免污染同进程的Stage1基线与其他策略。
 """
 from contextlib import contextmanager
+from contextvars import ContextVar
 
 import torch
 
 MODES = ('fp32_reference', 'fp32_fast', 'tf32_candidate', 'bf16_backbone_candidate')
 ATTENTION_BACKENDS = ('manual', 'sdpa_math', 'sdpa_efficient', 'sdpa_flash', 'sdpa_cudnn')
+_ACTIVE_PRECISION = ContextVar('stage10_active_precision', default=None)
 
 
 def configure_numerics(actor, mode, attention_backend=None):
@@ -59,10 +61,16 @@ def precision_scope(contract):
     if contract is None:
         yield
         return
+    desired = bool(contract['matmul_tf32'])
+    if _ACTIVE_PRECISION.get() == desired:
+        yield
+        return
     previous = torch.backends.cuda.matmul.allow_tf32, torch.backends.cudnn.allow_tf32
-    torch.backends.cuda.matmul.allow_tf32 = bool(contract['matmul_tf32'])
-    torch.backends.cudnn.allow_tf32 = bool(contract['matmul_tf32'])
+    token = _ACTIVE_PRECISION.set(desired)
+    torch.backends.cuda.matmul.allow_tf32 = desired
+    torch.backends.cudnn.allow_tf32 = desired
     try:
         yield
     finally:
         torch.backends.cuda.matmul.allow_tf32, torch.backends.cudnn.allow_tf32 = previous
+        _ACTIVE_PRECISION.reset(token)

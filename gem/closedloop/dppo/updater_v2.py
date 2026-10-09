@@ -231,6 +231,13 @@ def analytic_kl_local(policy, transitions, *, global_manifest=None, distributed=
         diagnostics = combined[:, policy.steps:-1].reshape(len(selected), 4, policy.steps)
     report = _kl_report(output.cpu(), counts.cpu())
     diagnostics = diagnostics.cpu()
+    report['effective_mean_change'] = dict(
+        scope='actual_execution_contract_on_fixed_old_rollout_states_free_coordinates',
+        changed_internal_transitions=int((diagnostics[:, 3, :] > 0).sum()),
+        checked_internal_transitions=len(selected)*policy.steps,
+        unchanged_fraction=float((diagnostics[:, 3, :] == 0).double().mean()),
+        mean_shift_rms=float(diagnostics[:, 3, :].mean()),
+        max_shift_rms=float(diagnostics[:, 3, :].max()))
     for step, entry in enumerate(report['per_denoising_step']):
         entry.update(mean_old_std=float(diagnostics[:, 0, step].mean()),
                      mean_std=float(diagnostics[:, 1, step].mean()), mean_base_std=float(diagnostics[:, 2, step].mean()),
@@ -501,7 +508,13 @@ def actor_update_v2(policy, optimizer, transitions, targets, *, global_manifest=
             if reserve_attempt is not None:
                 reserve_attempt()
             with _local_phase(distributed, 'actor_optimizer_step'):
+                observation = None
+                if getattr(policy, 'numerical_execution', None) is not None:
+                    from .update_observation import ParameterUpdateObservation
+                    observation = ParameterUpdateObservation(actor, bf16_backbone=
+                        policy.numerical_execution['mode']=='bf16_backbone_candidate')
                 optimizer.step()
+                update_observation = None if observation is None else observation.finish()
             post = None
             if kl_check_mode == 'post_step_full':
                 post = analytic_kl_local(policy, transitions, global_manifest=global_manifest, distributed=distributed,
@@ -520,6 +533,7 @@ def actor_update_v2(policy, optimizer, transitions, targets, *, global_manifest=
                 gradient_contributions=diagnostics, post_minibatch_kl=post,
                 post_kl_extra_internal_forwards=denominator if post is not None else 0,
                 kl_check_mode=kl_check_mode,
+                parameter_update_observation=update_observation,
                 learning_rates=[group['lr'] for group in optimizer.param_groups])
             reports.append(record)
             with _local_phase(distributed, 'actor_step_callback'):
