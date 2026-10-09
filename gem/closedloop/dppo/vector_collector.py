@@ -114,7 +114,12 @@ class VectorEnvironmentCollector(DualEnvironmentCollector):
                 try:method,payload,future=self.world_commands.get_nowait()
                 except queue.Empty:pass
                 else:
-                    try:future.set_result(self.world.call(method,**payload))
+                    try:
+                        if method=='__idle_local__':
+                            if self.rpc_pending or not self.rpc_requests.empty():
+                                raise RuntimeError('World journal rotation requires an idle RPC boundary')
+                            future.set_result(payload['function'](self.world))
+                        else:future.set_result(self.world.call(method,**payload))
                     except BaseException as error:future.set_exception(error);raise
                     if method=='close':break
                 if not self._pump_rpc():time.sleep(.0005)
@@ -132,6 +137,11 @@ class VectorEnvironmentCollector(DualEnvironmentCollector):
         if self.rpc_error is not None:raise RuntimeError('Vector RPC dispatcher failed') from self.rpc_error
         future=Future();self.world_commands.put((method,payload,future))
         return future.result(timeout=self.timeout_seconds)
+
+    def world_idle(self,function):
+        """只在采集边界让RPC所属线程执行本地日志封存/换代，不向服务发送Python对象。"""
+        if self.active:raise RuntimeError('Cannot rotate evidence while collection is active')
+        return self.world_call('__idle_local__',function=function)
 
     def _service(self):
         if self.rpc_error is not None:raise RuntimeError('Vector RPC dispatcher failed') from self.rpc_error

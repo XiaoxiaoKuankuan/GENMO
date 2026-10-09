@@ -114,9 +114,16 @@ def validate_config(config):
     for key, expected in thresholds.items():
         if config["termination"].get(key) != expected:
             raise ValueError(f"Stage8 {orientation_mode} requires termination.{key}={expected}")
-    if config["runtime"].get("num_envs") != 1 or config["model"].get("history_steps") != 50:
+    vector = config['runtime'].get('backend') == 'gpu_vectorized.v1'
+    if vector:
+        if config.get('stage10', {}).get('version') != 'genmo.closedloop.stage10.v2':
+            raise ValueError('GPU vector backend requires explicit Stage10 v2')
+        n = config['runtime'].get('num_envs')
+        if type(n) is not int or n < 1 or config['runtime'].get('physics_device') != 'cuda:0':
+            raise ValueError('GPU worker requires positive num_envs and its visible cuda:0 device')
+    if (not vector and config["runtime"].get("num_envs") != 1) or config["model"].get("history_steps") != 50:
         raise ValueError("Stage8 checkpoint/runtime requires B=1 and H=50")
-    if config["runtime"].get("physics_device") != "cpu":
+    if not vector and config["runtime"].get("physics_device") != "cpu":
         raise ValueError("This Stage8 configuration requires the verified CPU PhysX backend")
     for section, key in (("runtime", "torch_threads"), ("runtime", "rpc_timeout_s"),
                          ("runtime", "worker_start_timeout_s"), ("timing", "latency_guard_s"),

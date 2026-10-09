@@ -26,6 +26,22 @@ from .run_management import TrainingBudget
 def validate_v2_configuration(config):
     stage, settings = config['stage10'], config['stage10']['training']
     performance = stage.get('performance', {})
+    if config['runtime'].get('backend') == 'gpu_vectorized.v1':
+        runtime = config['runtime']
+        if (type(runtime.get('num_envs')) is not int or not 1 <= runtime['num_envs'] <= 20
+                or runtime.get('physics_device') != 'cuda:0'
+                or performance.get('numerical_layout') != 'sample_matrix_bmm_fp32.v1'
+                or settings.get('cfg_batch') is not True
+                or settings.get('rollout_upper_steps_per_rank') != 20
+                or settings.get('rollout_upper_steps') != 160
+                or settings.get('denoising_steps') != 20):
+            raise ValueError('GPU vector production requires genuine environments, 20 local chains and the accepted batch policy')
+        if (runtime.get('prefix_deadline_contract') != 'available_reference_deadline_cap.v1'
+                or runtime.get('vector_audit_contract') != 'nested_world_journal_excluded.v1'):
+            raise ValueError('GPU vector timing/prefix contracts must be explicit')
+        wait = runtime.get('vector_batch_wait_s')
+        if isinstance(wait, bool) or not isinstance(wait,(int,float)) or not math.isfinite(wait) or not 0 <= wait <= 1:
+            raise ValueError('GPU ready queue requires bounded explicit wait seconds')
     for key in ('tensor_cache_max_bytes', 'module_gradient_every', 'value_snapshot_batch_size',
                 'disk_full_scan_every', 'asset_full_check_every'):
         if key in performance and (type(performance[key]) is not int or performance[key] < 1):

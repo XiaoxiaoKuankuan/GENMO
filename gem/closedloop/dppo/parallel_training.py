@@ -94,7 +94,9 @@ def _write_checkpoint(c, *, reason):
     _synchronize_models(c, full=True, phase=f'checkpoint_{c.state["iteration"]}')
     c.state['budget'] = root_call(c.distributed, lambda: c.budget.state_dict())
     c.state['last_durable_checkpoint_iteration'] = c.state['iteration']
-    local_state = dict(c.state, **capture_execution_state(c.env), buffer_size=0, pending_plan=False)
+    execution = (dict(vector_collector=c.vector.checkpoint_state()) if getattr(c, 'vector', None) is not None
+                 else capture_execution_state(c.env))
+    local_state = dict(c.state, **execution, buffer_size=0, pending_plan=False)
     rank_state = capture_rank_state(c.distributed.rank, state=local_state,
         samplers=c.samplers, generators=c.generators)
     states = c.distributed.all_gather_object(rank_state)
@@ -173,6 +175,15 @@ def _new_phase(c, name, credits):
 
 
 def _calibrate_and_profile(c, restored=False):
+    if getattr(c, 'vector', None) is not None:
+        result = c.vector.calibrate(c.state.pop('local_rank_state')['vector_collector'] if restored else None)
+        micro = c.settings['denoising_microbatch']
+        if micro not in (8,16,32):
+            raise ValueError('GPU runtime requires a separately accepted learning microbatch (8/16/32)')
+        c.profile = dict(microbatch=micro,cfg_batch=True,numerical_layout=c.policy.numerical_layout,
+            validation_scope='saved_rollout_all_gradient_parity_then_first_live_probability_check')
+        c.state['execution_profile'] = dict(c.profile)
+        return dict(calibration=result,profile=c.profile)
     from tools.train_closedloop_stage10 import calibrate, capture_execution_state, restore_execution_state
     previous = capture_execution_state(c.env) if restored else None
     rng = capture_local_rng(c.generators)
@@ -251,6 +262,14 @@ def _restore_evaluation_state(c, journal, old_backend_journal, rng):
 
 
 def _evaluate(c, label):
+    if getattr(c, 'vector', None) is not None:
+        from .vector_evaluation import isolated_vector_evaluation
+        with isolated_vector_evaluation(c,label):
+            return _evaluate_impl(c,label)
+    return _evaluate_impl(c,label)
+
+
+def _evaluate_impl(c, label):
     evaluation_started = time.perf_counter()
     from .evaluation import _digest, _model_fingerprint, _stats
     from .periodic_monitor import (
@@ -289,6 +308,11 @@ def _evaluate(c, label):
         kernel=c.policy.kernel_config, execution_profile=c.state.get('execution_profile'),
         critical_latency_budgets=latencies,
         episode_seconds=c.stage['evaluation']['episode_seconds'], rng_scope='current_cuda_device')
+    if getattr(c, 'vector', None) is not None:
+        evaluation_identity['physics'] = dict(backend='gpu_vectorized.v1',evaluation_envs_per_rank=1,
+            training_envs_per_rank=c.vector.num_envs,train_world_preserved=True,
+            vector_audit_contract=c.config['runtime']['vector_audit_contract'],
+            prefix_deadline_contract=c.config['runtime']['prefix_deadline_contract'])
     baseline_path, reference_path = c.output/'evaluation_baseline.json', c.output/'fixed_diagnostic_reference.json'
     baseline = root_call(c.distributed, lambda: json.loads(baseline_path.read_text()) if baseline_path.exists() else None)
     references = root_call(c.distributed, lambda: json.loads(reference_path.read_text()) if reference_path.exists() else None)
@@ -302,7 +326,11 @@ def _evaluate(c, label):
         format=c.stage.get('performance', {}).get('journal_format', 'json.v1'))
     c.backend.journal = journal
     config = copy.deepcopy(c.config)
-    env = UpperEnvironment(config, c.backend, c.builder, c.policy, budget, path)
+    env_type = UpperEnvironment
+    if getattr(c, 'vector', None) is not None:
+        from .vector_environment import VectorUpperEnvironment
+        env_type = VectorUpperEnvironment
+    env = env_type(config, c.backend, c.builder, c.policy, budget, path)
     env.disk_guard = c.guard
     env.latency_budget_s, env.policy_version, env.iteration = c.env.latency_budget_s, c.env.policy_version, c.env.iteration
     initial_rows = []
@@ -475,6 +503,8 @@ def _finish_training(c, report):
 
 
 def _collect(c, index):
+    if getattr(c, 'vector', None) is not None:
+        return c.vector.collect(index)
     from tools.train_closedloop_stage10 import collect_rollout
     directory = c.session/'iterations'/f'{index:06d}'
     path = directory/f'rank{c.distributed.rank:02d}'
@@ -694,7 +724,7 @@ def run_parallel(args, config, collective, preflight):
     from tools import train_closedloop_stage10 as legacy
     from tools.eval.run_closedloop_baseline import Workers
     c = SimpleNamespace(distributed=collective, manager=None, maintenance=None, budget=None,
-        workers=None, backend=None, journal=None, writer=None, output=args.output_dir.resolve(),
+        workers=None, backend=None, journal=None, vector=None, writer=None, output=args.output_dir.resolve(),
         base_config=copy.deepcopy(config), config=copy.deepcopy(config), stage=config['stage10'],
         settings=config['stage9'], state=None)
     if hasattr(collective, 'enable_gradient_timing'):
@@ -789,33 +819,46 @@ def run_parallel(args, config, collective, preflight):
         if c.initial_iteration >= args.stop_after_iteration:
             raise ValueError('Stop iteration must exceed restored iteration')
         _synchronize_models(c, full=True, phase='initialization')
-        child_config = copy.deepcopy(c.config)
-        child_config['runtime']['genmo_device'] = 'cuda:0'
-        child_config['runtime']['asset_conversion_dir'] = str(c.rank_dir/'usd_assets')
-        config_path = c.rank_dir/'resolved_config.yaml'
-        config_path.write_text(yaml.safe_dump(child_config, allow_unicode=True, sort_keys=False))
-        c.workers = Workers(c.config, c.rank_dir)
-        socket = Path(c.workers.temp.name)/'gmt.sock'
-        visible = os.environ['CUDA_VISIBLE_DEVICES'].split(',')[collective.rank].strip()
-        client = local_call(collective, lambda: c.workers.start('gmt', [config['paths']['isaac_python'], '-B',
-            str(Path(config['paths']['gmt_repo'])/'scripts/rsl_rl/serve_frozen_gmt.py'), '--config', str(config_path),
-            '--socket', str(socket), '--headless'], config['paths']['gmt_repo'], socket,
-            environment={'CUDA_VISIBLE_DEVICES':visible}, strip_distributed=True))
-        c.journal = GuardedStepJournal(c.rank_dir/'bootstrap_journal.sqlite', c.guard,
-            format=c.stage.get('performance', {}).get('journal_format', 'json.v1'))
-        c.backend = AcknowledgedBackend(client, c.journal, socket_path=socket, timeout_s=config['runtime']['rpc_timeout_s'])
-        c.builder = OnlineConditionBuilder(BumiMotionFeatureCodec(BumiKinematics(config['paths']['kinematics'])))
-        c.env = UpperEnvironment(c.config, c.backend, c.builder, c.policy, None, c.rank_dir/'bootstrap')
-        c.env.disk_guard = c.guard
-        if args.resume:
-            c.env.policy_version, c.env.iteration = c.state['policy_version'], c.state['iteration']
-            spent_by_rank = root_call(collective, lambda: [sum(value.get('generations', 0)
-                for key, value in c.budget.state_dict()['phases'].items()
-                if key.endswith(f'/rank{rank}') and '/eval_' not in key) for rank in range(collective.world_size)])
-            saved_execution = c.state.pop('local_rank_state')
-            legacy.restore_execution_state(c.env, saved_execution, spent_generations=spent_by_rank[collective.rank])
-            atomic_json(c.rank_dir/'execution_restore.json', dict(saved_attempt=saved_execution['attempt'],
-                restored_attempt=c.env.attempt, reason='retain_per_rank_spent_generation_gap'))
+        if c.config['runtime'].get('backend') == 'gpu_vectorized.v1':
+            from .vector_runtime import VectorTrainingRuntime
+            if args.resume:
+                spent = root_call(collective, lambda:[sum(value.get('generations',0)
+                    for key,value in c.budget.state_dict()['phases'].items()
+                    if key.endswith(f'/rank{rank}') and '/eval_' not in key) for rank in range(collective.world_size)])
+                c.vector_spent_generations = spent[collective.rank]
+            c.vector = VectorTrainingRuntime(c)
+            c.env = c.vector
+            c.backend = SimpleNamespace(call=lambda method: c.vector.verify_frozen()
+                if method == 'verify_frozen' else (_ for _ in ()).throw(ValueError(method)))
+            c.builder = OnlineConditionBuilder(BumiMotionFeatureCodec(BumiKinematics(config['paths']['kinematics'])))
+        else:
+            child_config = copy.deepcopy(c.config)
+            child_config['runtime']['genmo_device'] = 'cuda:0'
+            child_config['runtime']['asset_conversion_dir'] = str(c.rank_dir/'usd_assets')
+            config_path = c.rank_dir/'resolved_config.yaml'
+            config_path.write_text(yaml.safe_dump(child_config, allow_unicode=True, sort_keys=False))
+            c.workers = Workers(c.config, c.rank_dir)
+            socket = Path(c.workers.temp.name)/'gmt.sock'
+            visible = os.environ['CUDA_VISIBLE_DEVICES'].split(',')[collective.rank].strip()
+            client = local_call(collective, lambda: c.workers.start('gmt', [config['paths']['isaac_python'], '-B',
+                str(Path(config['paths']['gmt_repo'])/'scripts/rsl_rl/serve_frozen_gmt.py'), '--config', str(config_path),
+                '--socket', str(socket), '--headless'], config['paths']['gmt_repo'], socket,
+                environment={'CUDA_VISIBLE_DEVICES':visible}, strip_distributed=True))
+            c.journal = GuardedStepJournal(c.rank_dir/'bootstrap_journal.sqlite', c.guard,
+                format=c.stage.get('performance', {}).get('journal_format', 'json.v1'))
+            c.backend = AcknowledgedBackend(client, c.journal, socket_path=socket, timeout_s=config['runtime']['rpc_timeout_s'])
+            c.builder = OnlineConditionBuilder(BumiMotionFeatureCodec(BumiKinematics(config['paths']['kinematics'])))
+            c.env = UpperEnvironment(c.config, c.backend, c.builder, c.policy, None, c.rank_dir/'bootstrap')
+            c.env.disk_guard = c.guard
+            if args.resume:
+                c.env.policy_version, c.env.iteration = c.state['policy_version'], c.state['iteration']
+                spent_by_rank = root_call(collective, lambda: [sum(value.get('generations', 0)
+                    for key, value in c.budget.state_dict()['phases'].items()
+                    if key.endswith(f'/rank{rank}') and '/eval_' not in key) for rank in range(collective.world_size)])
+                saved_execution = c.state.pop('local_rank_state')
+                legacy.restore_execution_state(c.env, saved_execution, spent_generations=spent_by_rank[collective.rank])
+                atomic_json(c.rank_dir/'execution_restore.json', dict(saved_attempt=saved_execution['attempt'],
+                    restored_attempt=c.env.attempt, reason='retain_per_rank_spent_generation_gap'))
         c.state['profile_checks'] = _calibrate_and_profile(c, restored=bool(args.resume))
         if not args.resume:
             _write_checkpoint(c, reason='initial')
@@ -891,8 +934,11 @@ def run_parallel(args, config, collective, preflight):
                 control_steps=sum(t.executed_control_steps for t in buffer.transitions),
                 physical_failures=sum(bool(t.metadata.get('terminal_snapshot', {}).get('terminated', False)) for t in buffer.transitions)))
             buffer.clear()
-            c.journal.close()
-            closed = collective.all_gather_object(str(c.journal.path))
+            if c.vector is not None:
+                closed = [path for paths in collective.all_gather_object(c.vector.closed_journals) for path in paths]
+            else:
+                c.journal.close()
+                closed = collective.all_gather_object(str(c.journal.path))
             budget = root_call(collective, lambda: (c.budget.accept_iteration(identity=f'{c.session.name}/iteration{index}'), c.budget.summary())[1])
             c.state.update(iteration=index, policy_version=c.state['policy_version']+1,
                 actor_updates=c.state['actor_updates']+update['actor']['optimizer_steps'],
@@ -956,10 +1002,12 @@ def run_parallel(args, config, collective, preflight):
             deactivate(c.performance_token)
             c.performance_token = None
         if c.workers is not None:
-            if c.backend is not None and c.workers.entries:
+            if c.backend is not None and c.workers.entries and c.vector is None:
                 c.workers.entries[-1]['client'] = c.backend.client
             try:
-                c.workers.close()
+                try:
+                    if c.vector is not None:c.vector.close()
+                finally:c.workers.close()
                 report['worker_shutdown'] = c.workers.shutdown
                 if not error and any(item.get('close_error') or item.get('forced_shutdown')
                     or item.get('process_exit_code') != 0 for item in c.workers.shutdown.values()):

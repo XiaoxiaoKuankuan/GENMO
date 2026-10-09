@@ -69,7 +69,7 @@ class BlockRolloutWriter(RolloutWriter):
             raise ValueError('Duplicate transition identity')
         raw = Path(transition.metadata['raw_sample_path']).resolve(strict=True)
         rank_root = self.directory.parent.resolve()
-        if not raw.is_relative_to(rank_root/'raw_samples') or raw.is_symlink():
+        if not raw.is_relative_to(rank_root) or not _valid_raw_relative(raw.relative_to(rank_root), transition.metadata) or raw.is_symlink():
             raise ValueError('Raw trace must remain in its rank raw_samples directory')
         evidence = transition.metadata.get('raw_evidence_identity')
         if not isinstance(evidence, dict) or evidence.get('size_bytes') != raw.stat().st_size:
@@ -120,6 +120,14 @@ class BlockRolloutWriter(RolloutWriter):
         return path
 
 
+def _valid_raw_relative(relative, metadata):
+    """GPU路径额外绑定环境槽位，保持旧单环境路径且拒绝越界/交叉环境引用。"""
+    if relative.is_absolute() or '..' in relative.parts:return False
+    if relative.parent == Path('raw_samples'):return True
+    slot = metadata.get('collector_env_slot')
+    return type(slot) is int and slot >= 0 and relative.parent == Path(f'env{slot:03d}/raw_samples')
+
+
 def load_rollout_record(path, record, *, rank_directory, physical=lambda path: path, cache=None):
     """校验块与原证据后重建；physical仅供已验证归档的路径解析器使用。"""
     path = Path(path)
@@ -142,7 +150,7 @@ def load_rollout_record(path, record, *, rank_directory, physical=lambda path: p
         raise ValueError('Invalid raw trace reference schema')
     reference = compact['raw']
     relative = Path(reference['path'])
-    if relative.is_absolute() or relative.parent != Path('raw_samples'):
+    if not _valid_raw_relative(relative, compact['fields']['metadata']):
         raise ValueError('Raw trace reference escapes rank directory')
     raw_path = physical(Path(rank_directory)/relative)
     if raw_path.stat().st_size != reference['size_bytes'] or file_sha256(raw_path) != reference['sha256']:

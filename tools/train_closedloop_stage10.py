@@ -172,6 +172,15 @@ def _sources(config, check):
                   'updater_v2', 'position_repair', 'archives', 'archive_process', 'optional_diagnostics',
                   'performance', 'tensor_cache', 'asset_cache', 'rollout_storage', 'budget_ledger',
                   'batch_execution', 'execution_checks', 'journal_codec', 'dual_collector')
+    vector = config['runtime'].get('backend') == 'gpu_vectorized.v1'
+    if vector:
+        names += ('vector_collector','vector_boundary','vector_environment','vector_runtime','vector_evaluation','rollback_audit')
+    gmt_additional = ['source/NoetixRobot/NoetixRobot/tasks/mimic/mimic_noetix_bumi4340_mha_sonic/closedloop/execution_journal.py']
+    if vector:
+        gmt_additional += [f'source/NoetixRobot/NoetixRobot/tasks/mimic/mimic_noetix_bumi4340_mha_sonic/closedloop/{name}.py'
+            for name in ('vector_backend','vector_env','vector_reference','vector_diagnostics','vector_service','vector_journal')]
+        gmt_additional += [f'scripts/rsl_rl/{name}.py' for name in
+            ('serve_frozen_gmt_vector','bumi4340_frozen_torch_policy','vector_app_resources')]
     return collect_source_provenance(config['paths'], repository_state=check['repositories'], additional_files={
         'genmo_repo': [*(f'gem/closedloop/dppo/{n}.py' for n in names),
             'tools/train_closedloop_stage10.py', 'gem/runtime/trajectory_blocks.py',
@@ -179,7 +188,7 @@ def _sources(config, check):
             'gem/closedloop/stage1_dataset.py', 'gem/closedloop/losses.py',
             *(['gem/closedloop/dppo/distributed_runtime.py', 'tools/train_closedloop_stage10_8gpu.py']
               if config['stage10'].get('distributed') else [])],
-        'gmt_repo': ['source/NoetixRobot/NoetixRobot/tasks/mimic/mimic_noetix_bumi4340_mha_sonic/closedloop/execution_journal.py']})
+        'gmt_repo': gmt_additional})
 
 
 def identity(config, check, provenance, catalog, data_audit, actor):
