@@ -315,10 +315,24 @@ class DPPODiffusionPolicy:
                 conditional = conditional[selection]
                 unconditional = None if unconditional is None else unconditional[selection]
             if self.cfg_batch and unconditional is not None:
-                combined = {key: torch.cat((value, value), dim=0) for key, value in adapted.items()}
+                # 同一条采样链20步共享条件，CFG固定输入只拼接一次。学习微批各自
+                # 持有prepared，不跨optimizer复用；cat仍保留条件编码器的梯度。
+                if output_lanes is None:
+                    signature = tuple((id(v), v._version) for v in
+                        (*adapted.values(), conditional, unconditional))
+                    cached = prepared.get('_cfg_inputs')
+                    if cached is None or cached[0] != signature:
+                        cached = (signature, {key: torch.cat((value, value), dim=0)
+                                  for key, value in adapted.items()},
+                                  torch.cat((conditional, unconditional), dim=0))
+                        prepared['_cfg_inputs'] = cached
+                    combined, cfg_condition = cached[1:]
+                else:
+                    combined = {key: torch.cat((value, value), dim=0) for key, value in adapted.items()}
+                    cfg_condition = torch.cat((conditional, unconditional), dim=0)
                 output = self.actor._denoise(torch.cat((state, state), dim=0),
                     torch.cat((original_t, original_t), dim=0), combined,
-                    torch.cat((conditional, unconditional), dim=0))
+                    cfg_condition)
                 conditional_output = {key: value[:state.shape[0]] for key, value in output.items()}
                 unconditional_output = {key: value[state.shape[0]:] for key, value in output.items()}
             else:

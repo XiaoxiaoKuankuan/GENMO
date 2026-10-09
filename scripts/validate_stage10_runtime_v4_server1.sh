@@ -15,6 +15,7 @@ case "$TASK_MODE" in
   nccl) TASK_TOOL=check_stage10_eight_gpu_collectives.py; TASK_SECONDS=150 ;;
   learning) TASK_TOOL=profile_stage10_learning_v4.py; TASK_SECONDS=1800 ;;
   saved-learning) TASK_TOOL=verify_stage10_saved_learning.py; TASK_SECONDS=1800 ;;
+  sampling-graph) TASK_TOOL=verify_stage10_sampling_graph.py; TASK_SECONDS=900 ;;
   vector-collection) TASK_TOOL=verify_stage10_vector_collection.py; TASK_SECONDS=1800 ;;
   vector-replay) TASK_TOOL=compare_stage10_cpu_gpu_replay.py; TASK_SECONDS=1200 ;;
   replay) TASK_TOOL=replay_stage10_runtime_v4.py; TASK_SECONDS=2400 ;;

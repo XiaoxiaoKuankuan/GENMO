@@ -83,6 +83,7 @@ class VectorEnvironmentCollector(DualEnvironmentCollector):
         self.rpc_stop=threading.Event()
         self.rpc_error=None
         self.rpc_thread=None
+        self.remaining_generations=None
         if self.world_factory is not None:
             ready=Future()
             self.rpc_thread=threading.Thread(target=self._rpc_loop,args=(ready,),name='gpu-world-rpc',daemon=True)
@@ -137,6 +138,8 @@ class VectorEnvironmentCollector(DualEnvironmentCollector):
         return [f.result() for f in futures]
 
     def _generate_ready(self,pending,enabled):
+        if self.remaining_generations is not None:
+            enabled=sum(count>0 for count in self.remaining_generations)
         while len(pending)<enabled:
             try:pending.append(self.requests.get_nowait())
             except queue.Empty:break
@@ -151,6 +154,8 @@ class VectorEnvironmentCollector(DualEnvironmentCollector):
         self.batch_reports.append(dict(environment_slots=slots,effective_rows=len(pending),padding_rows=0,
             generation_seconds=end-begin,queue_wait_seconds=[begin-p[4] for p in pending]))
         for i,p in enumerate(pending):
+            if self.remaining_generations is not None:
+                self.remaining_generations[p[0]]-=1
             p[3].set_result((split_trace(trace,i,len(pending)),dict(self.policy.last_sample_timing)))
         return [],True
 
@@ -270,6 +275,7 @@ class VectorEnvironmentCollector(DualEnvironmentCollector):
         # 多于20个已分配环境时不伪造额外训练转移，只有预算内环境进入活动集。
         enabled=min(count_per_rank,self.num_envs)
         counts=[count_per_rank//enabled+(i<count_per_rank%enabled) for i in range(enabled)]
+        self.remaining_generations=list(counts)
         self.world_call('begin_rollout',env_ids=list(range(enabled)))
         signature=self.policy._parameter_signature()
         futures=[self.executors[i].submit(self._fragment,i,count,policy_version) for i,count in enumerate(counts)]
@@ -307,7 +313,7 @@ class VectorEnvironmentCollector(DualEnvironmentCollector):
                 except queue.Empty:break
                 if not p[3].done():p[3].set_exception(error)
             raise
-        finally:self.active=False
+        finally:self.active=False;self.remaining_generations=None
 
     def close(self):
         self.cancelled.set()

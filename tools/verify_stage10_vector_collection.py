@@ -50,6 +50,7 @@ def main():
     p.add_argument('--num-envs',type=int,default=8)
     p.add_argument('--rounds',type=int,default=2)
     p.add_argument('--batch-wait-ms',type=float,default=100.)
+    p.add_argument('--sampling-graph',action='store_true',help='启用已独立验收的无梯度采样图；PPO反向保持原路径')
     p.add_argument('--data-audit',type=Path,help='显式复用完整数据审计报告；仍核对清单并逐次核验实际加载文件')
     p.add_argument('--updates',action='store_true',help='采集后运行原完整DPPO/BC/Critic更新与KL验收')
     p.add_argument('--resume',type=Path,help='仅恢复本工具完整GPU向量验收断点')
@@ -74,6 +75,10 @@ def main():
     actor,train_config,_=local_call(collective,lambda:load_actor(config))
     policy=DPPODiffusionPolicy(actor,steps=20,eta=config['stage9']['eta'],std_floor=config['stage9']['std_floor'],
         guidance_scale=config['stage9']['guidance_scale'],cfg_batch=True,numerical_layout='sample_matrix_bmm_fp32.v1',defer_checks=True)
+    graph=None
+    if args.sampling_graph:
+        from gem.closedloop.dppo.sampling_graph import install_sampling_graph
+        graph=install_sampling_graph(actor)
     catalog=FullMusicCatalog(config['paths']['data_root'])
     audit=root_call(collective,lambda:json.loads(args.data_audit.read_text()) if args.data_audit else catalog.audit_files(require_audio=True))
     catalog.apply_audit(audit)
@@ -151,6 +156,7 @@ def main():
             timing.update(probability=check,control_steps=sum(r.executed_control_steps for r in rows),
                 reward=sum(float(r.rewards.sum()) for r in rows),physical_failures=sum(bool(r.metadata.get('terminal_snapshot',{}).get('terminated')) for r in rows),
                 peak_memory_allocated=torch.cuda.max_memory_allocated(),frozen=frozen)
+            if graph is not None:timing['sampling_graph']=graph.report()
             if learner is not None:
                 timing['update']=learner.update(fragments)
                 if rank==0:print(f'[VECTOR] accepted round {iteration+1}: {timing["update"]["timings"]}',flush=True)
