@@ -134,7 +134,7 @@ class VectorEnvironmentCollector(DualEnvironmentCollector):
 
     def world_call(self,method,**payload):
         if self.rpc_thread is None:return self.world.call(method,**payload)
-        if self.rpc_error is not None:raise RuntimeError('Vector RPC dispatcher failed') from self.rpc_error
+        if self.rpc_error is not None:raise RuntimeError(f'Vector RPC dispatcher failed: {type(self.rpc_error).__name__}: {self.rpc_error}') from self.rpc_error
         future=Future();self.world_commands.put((method,payload,future))
         return future.result(timeout=self.timeout_seconds)
 
@@ -144,7 +144,7 @@ class VectorEnvironmentCollector(DualEnvironmentCollector):
         return self.world_call('__idle_local__',function=function)
 
     def _service(self):
-        if self.rpc_error is not None:raise RuntimeError('Vector RPC dispatcher failed') from self.rpc_error
+        if self.rpc_error is not None:raise RuntimeError(f'Vector RPC dispatcher failed: {type(self.rpc_error).__name__}: {self.rpc_error}') from self.rpc_error
         return False if self.rpc_thread is not None else self._pump_rpc()
 
     def lane_client(self,env_id):return QueuedLaneClient(self,env_id)

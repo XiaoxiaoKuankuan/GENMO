@@ -57,6 +57,7 @@ def main():
     p.add_argument('--resume',type=Path,help='仅恢复本工具完整GPU向量验收断点')
     p.add_argument('--stop-after-iteration',type=int,help='有限验收提前正常退出，例如第一轮保存后退出进程')
     p.add_argument('--reject-iteration',type=int,help='只在此有限工具的指定末轮实际更新后注入KL超限，要求完整回滚且不发布断点')
+    p.add_argument('--kill-worker-iteration',type=int,help='有限故障测试：已接受首轮后杀死本工具rank2物理worker，必须失败退出而不发布后续断点')
     args=p.parse_args()
     rank,world=int(os.environ['RANK']),int(os.environ['WORLD_SIZE'])
     if world!=8 or rank!=int(os.environ['LOCAL_RANK']):raise ValueError('Single-node eight GPUs required')
@@ -70,10 +71,13 @@ def main():
         compat_profile=str(args.gmt_repo/'configs/sim2sim/model_135000_stage2.json'))
     config['runtime'].update(rank=rank,genmo_device=f'cuda:{rank}',backend='gpu_vectorized.v1',num_envs=args.num_envs,
         physics_device='cuda:0',gmt_precision='float32',asset_conversion_dir=str(output/'usd'),headless=True,video_path=None,
-        prefix_deadline_contract=DEADLINE_CONTRACT,vector_audit_contract='nested_world_journal_excluded.v1')
+        prefix_deadline_contract=DEADLINE_CONTRACT,vector_audit_contract='nested_world_journal_excluded.v1',
+        vector_reward_contract='stage10.gpu_vector_continuous_reward.v1')
     if args.resume and not args.updates:raise ValueError('Resume requires the complete finite training mode')
     if args.reject_iteration is not None and (not args.updates or args.reject_iteration!=args.rounds or args.rounds<2):
         raise ValueError('KL injection requires the final round >=2 of a finite full update test')
+    if args.kill_worker_iteration is not None and (not args.updates or args.kill_worker_iteration!=2 or args.rounds!=2 or args.reject_iteration is not None):
+        raise ValueError('Worker injection requires exactly two finite rounds and no other injection')
     config['stage9']['run_id']=root_call(collective,lambda:'vector-finite-'+str(uuid.uuid4()))
     torch.cuda.set_device(rank);torch.set_num_threads(1)
     torch.backends.cuda.matmul.allow_tf32=torch.backends.cudnn.allow_tf32=False
@@ -142,6 +146,13 @@ def main():
         if not start<stop<=args.rounds:raise ValueError('Invalid finite iteration boundary')
         for iteration in range(start,stop):
             collective.barrier()
+            if args.kill_worker_iteration==iteration+1:
+                if rank==2:
+                    proc=workers.entries[0]['proc']
+                    report['injected_worker_exit']=dict(pid=proc.pid,iteration=iteration+1,prior_accepted=learner.iteration)
+                    (output/'report.json').write_text(json.dumps(report,ensure_ascii=False,indent=2))
+                    proc.kill();proc.wait(timeout=15)
+                collective.barrier()
             outer_begin=time.perf_counter()
             version=0 if learner is None else learner.policy_version
             for state in collector.states:

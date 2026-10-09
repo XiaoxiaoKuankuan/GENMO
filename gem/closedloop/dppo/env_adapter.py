@@ -173,7 +173,15 @@ class UpperEnvironment:
             raise ExecutionIntegrityError('Warmup terminated before any policy sample')
         self.music_end_tick = 600 + (len(self.music)*50//30)*12
         self.soft_end_tick = 600 + int(float(self.config['stage9']['episode_seconds'])*600)
-        self.reward = ExecutionReward(reward_config, self.music, music_start_tick=600,
+        reward_type = ExecutionReward
+        if self.config.get('runtime', {}).get('vector_reward_contract') is not None:
+            from .vector_reward_adapter import VectorExecutionReward
+            from .vector_reward_math import VECTOR_REWARD_VERSION
+            if (self.config['runtime'].get('backend') != 'gpu_vectorized.v1' or
+                    self.config['runtime']['vector_reward_contract'] != VECTOR_REWARD_VERSION):
+                raise ValueError('Explicit supported GPU reward contract required')
+            reward_type = VectorExecutionReward
+        self.reward = reward_type(reward_config, self.music, music_start_tick=600,
                                       target_activity=target)
         if last_warmup_row is not None:
             self.reward.seed_previous_target(last_warmup_row.get('joint_position_target'))

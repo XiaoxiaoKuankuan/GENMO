@@ -39,6 +39,8 @@ def validate_v2_configuration(config):
         if (runtime.get('prefix_deadline_contract') != 'available_reference_deadline_cap.v1'
                 or runtime.get('vector_audit_contract') != 'nested_world_journal_excluded.v1'):
             raise ValueError('GPU vector timing/prefix contracts must be explicit')
+        if runtime.get('vector_reward_contract') not in (None, 'stage10.gpu_vector_continuous_reward.v1'):
+            raise ValueError('Unknown vector reward computation contract')
         wait = runtime.get('vector_batch_wait_s')
         if isinstance(wait, bool) or not isinstance(wait,(int,float)) or not math.isfinite(wait) or not 0 <= wait <= 1:
             raise ValueError('GPU ready queue requires bounded explicit wait seconds')

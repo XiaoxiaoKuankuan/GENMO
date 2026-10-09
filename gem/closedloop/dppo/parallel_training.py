@@ -312,6 +312,7 @@ def _evaluate_impl(c, label):
         evaluation_identity['physics'] = dict(backend='gpu_vectorized.v1',evaluation_envs_per_rank=1,
             training_envs_per_rank=c.vector.num_envs,train_world_preserved=True,
             vector_audit_contract=c.config['runtime']['vector_audit_contract'],
+            vector_reward_contract=c.config['runtime'].get('vector_reward_contract'),
             prefix_deadline_contract=c.config['runtime']['prefix_deadline_contract'])
     baseline_path, reference_path = c.output/'evaluation_baseline.json', c.output/'fixed_diagnostic_reference.json'
     baseline = root_call(c.distributed, lambda: json.loads(baseline_path.read_text()) if baseline_path.exists() else None)
