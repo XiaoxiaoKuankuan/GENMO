@@ -107,6 +107,7 @@ def main():
     parser.add_argument('--operator-profile', action='store_true')
     parser.add_argument('--compile-denoiser', action='store_true')
     parser.add_argument('--fp32-blocked-gemm', action='store_true')
+    parser.add_argument('--pipelined-tensorcore', action='store_true')
     args = parser.parse_args()
     rank, world = int(os.environ['RANK']), int(os.environ['WORLD_SIZE'])
     if world != 8 or rank != int(os.environ['LOCAL_RANK']): raise ValueError('Requires Server1 eight GPUs')
@@ -154,6 +155,9 @@ def main():
             if args.compile_denoiser:
                 from gem.closedloop.dppo.numerical_execution import compile_denoiser
                 compile_denoiser(policy)
+            if args.pipelined_tensorcore:
+                from gem.closedloop.dppo.numerical_execution import configure_pipelined_tensorcore
+                configure_pipelined_tensorcore(policy)
             item['contract'] = policy.kernel_config
             def generate():
                 generators = [torch.Generator(device=f'cuda:{rank}').manual_seed(713+rank*1000+i) for i in range(64)]

@@ -94,6 +94,18 @@ def configure_blocked_fp32(policy):
         zero_padding_scope='internal_network_tail_only_not_effective_samples', network_row_capacity=64)
 
 
+def configure_pipelined_tensorcore(policy):
+    """仅诊断TF32x3固定小tile、直接累加器与L2分组候选；不静默改变v5。"""
+    from .batch_execution import SampleMatrixLinear
+    if policy.numerical_execution is None or policy.numerical_execution['mode'] != 'tf32_candidate':
+        raise ValueError('Pipelined Tensor Core requires explicit tf32_candidate contract')
+    for module in policy.actor.modules():
+        if isinstance(module, SampleMatrixLinear) and module.forward_backend == 'fixed_tile_tf32x3':
+            module.forward_backend = 'fixed_tile_tf32x3_pipelined'
+    policy.numerical_execution.update(linear_backend='fixed_tile_tf32x3_pipeline_32x64x32.v1',
+        grouped_output_tiles=8, direct_dot_accumulator=True)
+
+
 @contextmanager
 def precision_scope(contract):
     if contract is None:
