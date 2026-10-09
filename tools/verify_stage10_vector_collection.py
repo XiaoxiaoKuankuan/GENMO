@@ -32,7 +32,7 @@ from gem.closedloop.dppo.trainer import load_actor
 from gem.closedloop.dppo.policy import DPPODiffusionPolicy
 from gem.closedloop.dppo.vector_collector import VectorWorldClient,VectorLaneBackend,VectorEnvironmentCollector
 from gem.closedloop.dppo.full_dataset import FullMusicCatalog,FullMusicSampler
-from gem.closedloop.dppo.env_adapter import UpperEnvironment
+from gem.closedloop.dppo.vector_environment import VectorUpperEnvironment,DEADLINE_CONTRACT
 from gem.closedloop.dppo.run_management import DiskGuard,GuardedStepJournal
 from gem.closedloop.dppo.budget_ledger import IncrementalBudget
 from gem.closedloop.online_conditions import OnlineConditionBuilder
@@ -67,7 +67,8 @@ def main():
     config['paths'].update(genmo_repo=str(Path(__file__).resolve().parents[1]),gmt_repo=str(args.gmt_repo.resolve()),
         compat_profile=str(args.gmt_repo/'configs/sim2sim/model_135000_stage2.json'))
     config['runtime'].update(rank=rank,genmo_device=f'cuda:{rank}',backend='gpu_vectorized.v1',num_envs=args.num_envs,
-        physics_device='cuda:0',gmt_precision='float32',asset_conversion_dir=str(output/'usd'),headless=True,video_path=None)
+        physics_device='cuda:0',gmt_precision='float32',asset_conversion_dir=str(output/'usd'),headless=True,video_path=None,
+        prefix_deadline_contract=DEADLINE_CONTRACT)
     if args.resume and not args.updates:raise ValueError('Resume requires the complete finite training mode')
     config['stage9']['run_id']=root_call(collective,lambda:'vector-finite-'+str(uuid.uuid4()))
     torch.cuda.set_device(rank);torch.set_num_threads(1)
@@ -116,7 +117,7 @@ def main():
             backend=VectorLaneBackend(collector.lane_client(slot),lane_journal)
             child=copy.deepcopy(config);child['stage9']['seed']+=(rank*max(32,args.num_envs)+slot)*100003
             builder=OnlineConditionBuilder(BumiMotionFeatureCodec(BumiKinematics(config['paths']['kinematics'])))
-            env=UpperEnvironment(child,backend,builder,proxy,budget,directory/'collection');env.disk_guard=guard
+            env=VectorUpperEnvironment(child,backend,builder,proxy,budget,directory/'collection');env.disk_guard=guard
             sampler=FullMusicSampler(catalog,seed=child['stage9']['seed'],window_seconds=config['stage9']['episode_seconds'],random_start=True)
             def close():
                 lane_journal.close();budget.close();backend.client.close()
