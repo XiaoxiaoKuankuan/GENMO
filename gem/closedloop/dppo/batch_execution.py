@@ -19,6 +19,27 @@ WEIGHT_REDUCTIONS = ('sample_bmm', 'joint_gemm', 'chunked_gemm', 'bounded_sample
 GRADIENT_ACCUMULATIONS = ('fp64_reference', 'fp32', 'selective_fp64')
 
 
+def _blocked_fp32_gemm(value, matrix, *, capacity=64):
+    """固定真实样本块的FP32联合GEMM候选，M维不随外部microbatch改变。
+
+    每个完整块含64个网络行（CFG后的条件/无条件行）；尾块仅补零并立即裁掉，
+    不复制任何有效样本，也不把补零行计入概率、梯度或吞吐。外部B不受64限制。
+    固定每块时间长度与GEMM几何，允许cuBLAS使用大矩阵算子，同时单独验收
+    置换、不同batch和尾块的数值一致性；它不是已通过验收的默认路径。
+    """
+    shaped = value.reshape(value.shape[0], -1, value.shape[-1])
+    outputs = []
+    for begin in range(0, len(shaped), capacity):
+        part = shaped[begin:begin+capacity]
+        count = len(part)
+        if count < capacity:
+            part = torch.cat((part, part.new_zeros(capacity-count,*part.shape[1:])),0)
+        result = (part.reshape(-1, part.shape[-1]) @ matrix).reshape(capacity, shaped.shape[1], matrix.shape[1])
+        outputs.append(result[:count])
+    result = outputs[0] if len(outputs)==1 else torch.cat(outputs,0)
+    return result.reshape(*value.shape[:-1], matrix.shape[1])
+
+
 class _SampleLinear(torch.autograd.Function):
     @staticmethod
     def forward(ctx, value, weight, bias, reduction, forward_backend='sample_bmm'):
@@ -27,7 +48,9 @@ class _SampleLinear(torch.autograd.Function):
         ctx.reduction = ('sample_bmm' if reduction else 'joint_gemm') if isinstance(reduction, bool) else reduction
         ctx.forward_backend = forward_backend
         shaped = value.reshape(value.shape[0], -1, value.shape[-1])
-        if forward_backend.startswith('fixed_tile_'):
+        if forward_backend == 'blocked64_fp32_gemm':
+            result = _blocked_fp32_gemm(shaped, weight.t())
+        elif forward_backend.startswith('fixed_tile_'):
             from .fixed_tile_linear import fixed_matmul
             result = fixed_matmul(shaped.reshape(-1, shaped.shape[-1]), weight.t(),
                 precision=forward_backend.removeprefix('fixed_tile_')).reshape(*shaped.shape[:-1], weight.shape[0])
@@ -46,7 +69,9 @@ class _SampleLinear(torch.autograd.Function):
         # 舍入路径；上游gate等接近相消的梯度会放大这个差异。
         grad_value = (torch.bmm(gradient.reshape(value.shape[0], -1, gradient.shape[-1]),
                                weight.unsqueeze(0).expand(value.shape[0], -1, -1)).reshape_as(value)
-                      if ctx.needs_input_grad[0] and not ctx.forward_backend.startswith('fixed_tile_') else None)
+                      if ctx.needs_input_grad[0] and ctx.forward_backend=='sample_bmm' else None)
+        if ctx.needs_input_grad[0] and ctx.forward_backend=='blocked64_fp32_gemm':
+            grad_value = _blocked_fp32_gemm(gradient, weight)
         if ctx.needs_input_grad[0] and ctx.forward_backend.startswith('fixed_tile_'):
             from .fixed_tile_linear import fixed_matmul
             grad_value = fixed_matmul(flat, weight,

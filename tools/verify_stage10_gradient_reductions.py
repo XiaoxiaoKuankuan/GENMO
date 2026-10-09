@@ -129,6 +129,7 @@ def main():
     parser.add_argument('--precision-mode', choices=MODES,
                         help='显式新数值合同：实际生成新诊断链；原封存 rollout 和 old 概率保持不变')
     parser.add_argument('--compact', action='store_true', help='只比较各微批 joint GEMM/FP64累计，保留完整梯度门槛')
+    parser.add_argument('--fp32-blocked-gemm', action='store_true')
     args = parser.parse_args()
     rank, world = int(os.environ['RANK']), int(os.environ['WORLD_SIZE'])
     if world != 8 or rank != int(os.environ['LOCAL_RANK']):
@@ -150,6 +151,9 @@ def main():
     actor.load_state_dict(payload['actor'])
     policy = DPPODiffusionPolicy(actor, cfg_batch=True, numerical_layout='sample_matrix_bmm_fp32.v1', defer_checks=True,
                                  precision_mode=args.precision_mode)
+    if args.fp32_blocked_gemm:
+        from gem.closedloop.dppo.numerical_execution import configure_blocked_fp32
+        configure_blocked_fp32(policy)
     rows, targets, archive_sha = local_call(collective, lambda: read_saved_rank(args.iteration, rank))
     if args.precision_mode is not None:
         rows = local_call(collective, lambda: sample_diagnostic_chains(policy, rows, f'cuda:{rank}', rank))

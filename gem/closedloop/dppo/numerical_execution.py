@@ -82,6 +82,18 @@ def compile_denoiser(policy):
         compile_autotuning=True, compile_implicit_fallback=False)
 
 
+def configure_blocked_fp32(policy):
+    """诊断入口显式启用固定64网络行的FP32 GEMM，不改变默认参考算子。"""
+    from .batch_execution import SampleMatrixLinear
+    if policy.numerical_execution is None or policy.numerical_execution['mode'] != 'fp32_fast':
+        raise ValueError('Blocked FP32 requires an explicit fp32_fast diagnostic contract')
+    for name,module in policy.actor.denoiser.named_modules():
+        if isinstance(module,SampleMatrixLinear) and not name.startswith('embed_timestep.'):
+            module.forward_backend = 'blocked64_fp32_gemm'
+    policy.numerical_execution.update(linear_backend='blocked64_fp32_gemm.v1',
+        zero_padding_scope='internal_network_tail_only_not_effective_samples', network_row_capacity=64)
+
+
 @contextmanager
 def precision_scope(contract):
     if contract is None:

@@ -106,6 +106,7 @@ def main():
     parser.add_argument('--repeats', type=int, default=5)
     parser.add_argument('--operator-profile', action='store_true')
     parser.add_argument('--compile-denoiser', action='store_true')
+    parser.add_argument('--fp32-blocked-gemm', action='store_true')
     args = parser.parse_args()
     rank, world = int(os.environ['RANK']), int(os.environ['WORLD_SIZE'])
     if world != 8 or rank != int(os.environ['LOCAL_RANK']): raise ValueError('Requires Server1 eight GPUs')
@@ -137,6 +138,9 @@ def main():
         try:
             policy = DPPODiffusionPolicy(actor, cfg_batch=True, numerical_layout='sample_matrix_bmm_fp32.v1',
                 defer_checks=True, precision_mode=mode)
+            if args.fp32_blocked_gemm:
+                from gem.closedloop.dppo.numerical_execution import configure_blocked_fp32
+                configure_blocked_fp32(policy)
             if args.compile_denoiser:
                 from gem.closedloop.dppo.numerical_execution import compile_denoiser
                 compile_denoiser(policy)
