@@ -31,7 +31,11 @@ class _SampleLinear(torch.autograd.Function):
         value, weight = ctx.saved_tensors
         flat = gradient.reshape(-1, gradient.shape[-1])
         inputs = value.reshape(-1, value.shape[-1])
-        grad_value = (flat @ weight).reshape_as(value) if ctx.needs_input_grad[0] else None
+        # 输入梯度也逐样本保持相同矩阵形状。原flatten GEMM会随微批改变
+        # 舍入路径；上游gate等接近相消的梯度会放大这个差异。
+        grad_value = (torch.bmm(gradient.reshape(value.shape[0], -1, gradient.shape[-1]),
+                               weight.unsqueeze(0).expand(value.shape[0], -1, -1)).reshape_as(value)
+                      if ctx.needs_input_grad[0] else None)
         grad_weight = flat.t() @ inputs if ctx.needs_input_grad[1] else None
         grad_bias = flat.sum(0) if ctx.has_bias and ctx.needs_input_grad[2] else None
         return grad_value, grad_weight, grad_bias
