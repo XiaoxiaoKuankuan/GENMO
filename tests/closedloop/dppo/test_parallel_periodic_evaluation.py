@@ -106,7 +106,10 @@ def context(tmp_path, monkeypatch, *, samples=1, world=1):
     monkeypatch.setattr(training, 'local_call', lambda collective, fn: fn())
     monkeypatch.setattr(training, 'finish_lease', lambda *args: {'used': 0})
     monkeypatch.setattr(training, 'UpperEnvironment', IndependentEnv)
-    monkeypatch.setattr(training, 'GuardedStepJournal', lambda *args: SimpleNamespace(close=lambda: None))
+    def journal_factory(*args, format='json.v1'):
+        assert format == c.stage.get('performance', {}).get('journal_format', 'json.v1')
+        return SimpleNamespace(close=lambda: None)
+    monkeypatch.setattr(training, 'GuardedStepJournal', journal_factory)
     return c, credits
 
 
