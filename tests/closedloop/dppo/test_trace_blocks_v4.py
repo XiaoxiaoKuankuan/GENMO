@@ -37,3 +37,19 @@ def test_constant_sha_tamper_and_column_count():
     block['count'] = 3
     with pytest.raises(ValueError, match='count'):
         unpack_trace(block)
+
+
+def test_constant_cache_distinguishes_scalar_types_signed_zero_and_tampering():
+    import hashlib
+    import json
+    from gem.runtime.trajectory_blocks import _scalar_sha
+    _scalar_sha.cache_clear()
+    for value in (False, 0, 0.0, -0.0, True, 1, 1.0, None, '脚'):
+        block = pack_trace([dict(x=value) for _ in range(3)])
+        node = block['columns']['fields']['x']
+        assert node['sha256'] == hashlib.sha256(json.dumps(value, ensure_ascii=False,
+            allow_nan=False, separators=(',', ':')).encode()).hexdigest()
+        assert all(type(row['x']) is type(value) for row in unpack_trace(block))
+        corrupted = copy.deepcopy(block); corrupted['columns']['fields']['x']['sha256'] = '0'*64
+        with pytest.raises(ValueError, match='SHA'): unpack_trace(corrupted)
+    assert _scalar_sha.cache_info().maxsize == 8192

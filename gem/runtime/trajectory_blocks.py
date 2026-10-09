@@ -8,9 +8,24 @@
 import copy
 import hashlib
 import json
+from functools import lru_cache
 import numpy as np
 
 VERSION = 'genmo.control_trace.columns.v1'
+
+
+@lru_cache(maxsize=8192)
+def _scalar_sha(type_name, representation, value):
+    # 类型与repr显式入key，避免True/1和+0.0/-0.0在Python哈希中相等而误用SHA。
+    raw = json.dumps(value, ensure_ascii=False, allow_nan=False, separators=(',', ':')).encode()
+    return hashlib.sha256(raw).hexdigest()
+
+
+def _constant_sha(value):
+    if type(value) in (type(None), str, int, float, bool):
+        return _scalar_sha(type(value).__name__, repr(value), value)
+    raw = json.dumps(value, ensure_ascii=False, allow_nan=False, separators=(',', ':')).encode()
+    return hashlib.sha256(raw).hexdigest()
 
 
 def pack_trace(rows):
@@ -28,8 +43,7 @@ def pack_trace(rows):
                         fields=[column([v[i] for v in values]) for i in range(len(first))])
         if first is None or isinstance(first,(str,int,float,bool)):
             if all(type(v) is type(first) and v==first for v in values):
-                raw = json.dumps(first,ensure_ascii=False,allow_nan=False,separators=(',',':')).encode()
-                return dict(kind='constant',value=first,sha256=hashlib.sha256(raw).hexdigest())
+                return dict(kind='constant',value=first,sha256=_constant_sha(first))
             if type(first) in (int,float,bool) and all(type(v) is type(first) for v in values):
                 array = np.asarray(values)
                 if not array.dtype.hasobject:
@@ -59,8 +73,7 @@ def unpack_trace(block, *, readonly_views=False):
             columns = [decode(v) for v in node['fields']]
             return [(tuple(v[i] for v in columns) if kind=='tuple' else [v[i] for v in columns]) for i in range(count)]
         if kind == 'constant':
-            raw = json.dumps(node['value'],ensure_ascii=False,allow_nan=False,separators=(',',':')).encode()
-            if hashlib.sha256(raw).hexdigest() != node['sha256']:
+            if _constant_sha(node['value']) != node['sha256']:
                 raise ValueError('Static trace content SHA mismatch')
             value = node['value']
             # pack_trace 的常量仅含不可变内建标量。共享标量不会使行之间产生
