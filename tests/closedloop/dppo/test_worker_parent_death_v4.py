@@ -17,6 +17,16 @@ import time
 import pytest
 
 
+def test_worker_health_ignores_headless_warning_but_detects_fatal_gpu_creation(tmp_path):
+    from tools.eval.run_closedloop_baseline import fatal_worker_start_error
+    path=tmp_path/'worker.log'
+    path.write_text('[Warning] [carb.windowing-glfw.plugin] GLFW initialization failed.\n')
+    assert fatal_worker_start_error(path) is None
+    fatal='[Error] [omni.gpu_foundation_factory.plugin] Failed to create any GPU devices, including compatibility mode.'
+    path.write_text('earlier startup data\n'*2000+fatal+'\n')
+    assert fatal_worker_start_error(path)==fatal
+
+
 @pytest.mark.skipif(sys.platform != 'linux', reason='Linux PDEATHSIG contract')
 def test_rank_death_kills_worker_even_when_sigterm_is_ignored(tmp_path):
     worker = tmp_path/'worker.py'

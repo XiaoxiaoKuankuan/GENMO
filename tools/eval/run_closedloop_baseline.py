@@ -325,6 +325,16 @@ def acceptance_flags(summary, scope, shutdown, *, code, error):
     return flags
 
 
+def fatal_worker_start_error(path):
+    """仅识别Kit已宣告所有GPU创建失败；普通无窗口/GLFW警告不视为故障。"""
+    with Path(path).open('rb') as stream:
+        stream.seek(0,2)
+        stream.seek(max(0,stream.tell()-16384))
+        tail=stream.read().decode('utf-8',errors='replace')
+    marker='[omni.gpu_foundation_factory.plugin] Failed to create any GPU devices'
+    return next((line for line in tail.splitlines() if marker in line),None)
+
+
 class Workers:
     def __init__(self, config, output):
         self.config, self.output = config, Path(output)
@@ -366,9 +376,14 @@ class Workers:
         self.entries.append(entry)
         deadline = time.monotonic() + float(self.config["runtime"]["worker_start_timeout_s"])
         last_update = time.monotonic()
+        last_health_check = last_update-1.
         while time.monotonic() < deadline:
             if proc.poll() is not None:
                 raise RuntimeError(f"{name} worker exited {proc.returncode}; see {name}_worker.log")
+            if time.monotonic()-last_health_check>=1.:
+                last_health_check=time.monotonic()
+                fatal=fatal_worker_start_error(log.name)
+                if fatal:raise RuntimeError(f'{name} worker startup failed before RPC: {fatal}')
             if Path(socket_path).exists():
                 try:
                     client = RpcClient(socket_path, timeout_s=float(self.config["runtime"]["rpc_timeout_s"]))
