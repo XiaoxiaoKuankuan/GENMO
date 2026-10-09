@@ -12,6 +12,7 @@ import math
 import time
 
 import torch
+from .batch_execution import ROW_BMM
 from .policy import masked_joint_log_prob
 
 
@@ -92,6 +93,10 @@ def probe_profiles(policy, context, *, maximum_microbatch=4, seed=12345, reserve
                     if device.type == 'cuda':
                         torch.cuda.reset_peak_memory_stats(device)
                     trace = chains[cfg]
+                    sampled_identity = {key: value for key, value in trace['kernel_config'].items()
+                                        if key != 'timestep_map'}
+                    if sampled_identity != policy.kernel_config:
+                        raise ValueError('Profile must recompute the actual sampled execution identity')
                     with torch.no_grad():
                         own = _log_probs(policy, context, trace, micro)
                         base, parameters = _log_probs(policy, context, reference, micro, details=True)
@@ -103,7 +108,8 @@ def probe_profiles(policy, context, *, maximum_microbatch=4, seed=12345, reserve
                         oracle_error = float((oracle-trace['old_log_probs']).abs().max())
                         # 新执行身份允许与旧路径有已报告的舍入差异；自身采样/重算门槛保持不变。
                         # 旧执行身份仍保留原来的跨路径门槛，不能用这个分支放行旧checkpoint。
-                        gate_delta = own_delta if fixed_execution_shape is not None else torch.cat((own_delta, base_delta))
+                        separate_cross = fixed_execution_shape is not None or policy.numerical_layout == ROW_BMM
+                        gate_delta = own_delta if separate_cross else torch.cat((own_delta, base_delta))
                         max_log = float(gate_delta.abs().max())
                         max_ratio = float(torch.expm1(gate_delta).abs().max())
                         report.update(self_consistency=dict(max_logprob_error=float(own_delta.abs().max()),
@@ -113,7 +119,10 @@ def probe_profiles(policy, context, *, maximum_microbatch=4, seed=12345, reserve
                                 max_ratio_error=float(torch.expm1(base_delta).abs().max()),
                                 per_step_logprob_error=base_delta.abs().cpu().tolist(),
                                 layer_max_abs_error=_step_differences(parameters, reference_parameters)),
-                            validation_scope='all_denoising_steps_separate_self_and_cross_execution')
+                            validation_scope='all_denoising_steps_separate_self_and_cross_execution',
+                            probability_gate_scope='sampled_execution_identity' if separate_cross else 'self_and_legacy_cross_execution',
+                            sampled_execution_identity=sampled_identity,
+                            cross_reference_identity=reference['kernel_config'])
                     actor.zero_grad(set_to_none=True)
                     losses, training_probabilities = [], []
                     for start in range(0, policy.steps, micro):

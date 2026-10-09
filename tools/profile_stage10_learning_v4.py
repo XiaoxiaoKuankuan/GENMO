@@ -35,6 +35,7 @@ from tools.train_closedloop_stage10_8gpu import _available_gpus
 from gem.closedloop.dppo.parallel_support import cpu_snapshot
 from gem.closedloop.dppo.performance import PhaseProfiler,activate,deactivate
 from gem.closedloop.dppo.run_management import file_sha256
+from gem.closedloop.dppo.execution_profile import probe_profiles, select_profile
 
 
 def main():
@@ -43,6 +44,7 @@ def main():
         parser.add_argument('--'+name,required=True,type=Path)
     parser.add_argument('--repeats',type=int,default=3)
     parser.add_argument('--numerical-only',action='store_true',help='Only five single-Adam numerical comparisons')
+    parser.add_argument('--profile-selection',action='store_true',help='Exercise the actual training profile chooser on eight GPUs')
     args=parser.parse_args()
     rank,world,local_rank=(int(os.environ.get(k,'-1')) for k in ('RANK','WORLD_SIZE','LOCAL_RANK'))
     if world!=8 or rank!=local_rank:raise ValueError('Use single-node torchrun with exactly eight GPUs')
@@ -73,6 +75,18 @@ def main():
     policy=DPPODiffusionPolicy(actor,cfg_batch=True,numerical_layout='sample_matrix_bmm_fp32.v1',defer_checks=True)
     source=torch.load(args.rollout,map_location='cpu',weights_only=False)
     if len(source['traces'])!=160: raise ValueError('Benchmark requires exactly 160 real contexts')
+    profile_selection = None
+    if args.profile_selection:
+        context={k:v.to(args.device) for k,v in source['traces'][rank*20]['conditions'].items()}
+        profiles=probe_profiles(policy,context,maximum_microbatch=32,optimizer_probe=True)
+        reports=collective.all_gather_object(profiles)
+        selected=select_profile(reports)
+        profile_selection=dict(selected=selected,reports_by_rank=reports)
+        if rank==0:
+            args.output.with_suffix('.profiles.json').write_text(json.dumps(profile_selection,indent=2)+'\n')
+            print(json.dumps(dict(production_profile_selected=selected)),flush=True)
+        if selected['microbatch']!=32 or not selected['cfg_batch']:
+            raise RuntimeError('Eight-GPU production profile fell back: inspect profiles, do not hide this failure')
     rows=[]
     start=time.perf_counter()
     for i in range(rank*20,rank*20+20,2):
@@ -96,6 +110,7 @@ def main():
         device=torch.cuda.get_device_name(),input_sha256=file_sha256(args.rollout) if rank==0 else None,
         weights_sha256=file_sha256(args.weights) if rank==0 else None,
         new_chain_sampling_seconds=sampling,results=[])
+    report['production_profile_selection']=profile_selection
     references={}
     candidates=[(micro,'post_step_full',False,'one_step_numerical',0) for micro in (2,4,8,16,32)]
     for repeat in range(0 if args.numerical_only else args.repeats):

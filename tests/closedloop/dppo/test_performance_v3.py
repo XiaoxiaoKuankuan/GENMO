@@ -99,6 +99,33 @@ def test_profile_reports_self_and_cross_all_twenty_steps(actor_factory):
         torch.set_num_threads(previous_threads)
 
 
+@pytest.mark.parametrize('layout', ['legacy_step_lane', 'sample_matrix_bmm_fp32.v1'])
+def test_versioned_profile_keeps_self_gates_and_reports_cross_separately(actor_factory, monkeypatch, layout):
+    from gem.closedloop.dppo import execution_profile as module
+    torch.set_num_threads(1)
+    actor, batch = actor_factory(starts=(45,))
+    _activate_branches(actor)
+    policy = DPPODiffusionPolicy(actor, numerical_layout=layout)
+    original = module._log_probs
+    sampled_old = []
+
+    def cross_difference(policy, context, trace, microbatch, *, details=False):
+        sampled_old.append((trace, trace['old_log_probs'].clone()))
+        result = original(policy, context, trace, microbatch, details=details)
+        # 仅人为改变跨执行路径比较；自身概率、采样old值和独立高斯完全不动。
+        if details and policy.cfg_batch:
+            return result[0] + .125, result[1]
+        return result
+
+    monkeypatch.setattr(module, '_log_probs', cross_difference)
+    reports = module.probe_profiles(policy, _conditions(batch), maximum_microbatch=1)
+    merged = next(row for row in reports if row['cfg_batch'])
+    assert merged['self_consistency']['max_logprob_error'] <= 1e-4
+    assert merged['cross_execution']['max_logprob_error'] > .12
+    assert merged['passed'] == (layout != 'legacy_step_lane')
+    assert all(torch.equal(trace['old_log_probs'], old) for trace, old in sampled_old)
+
+
 def test_tensor_cache_full_and_explicit_blocks_match_original_and_reject_foreign_rows():
     from tests.closedloop.dppo.test_updater_v2 import BatchGaussianPolicy, rows
     policy = BatchGaussianPolicy()
