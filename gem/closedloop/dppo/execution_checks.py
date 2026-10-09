@@ -25,6 +25,14 @@ def require_tensor(condition, message, error=ValueError):
 
 @contextmanager
 def policy_phase(policy):
+    from .numerical_execution import precision_scope
+    with precision_scope(getattr(policy, 'numerical_execution', None)):
+        with _validation_phase(policy):
+            yield
+
+
+@contextmanager
+def _validation_phase(policy):
     if not getattr(policy, 'defer_checks', False) or getattr(policy, '_phase_signature', None) is not None:
         yield
         return

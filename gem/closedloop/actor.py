@@ -66,8 +66,13 @@ class TemporalHistoryEncoder(nn.Module):
         # 时间与数值同时隔离；即使残差投影已经训练，无效槽也不改变下一有效状态。
         features = torch.cat((history, relative_times[..., None]), dim=-1)
         features = torch.where(valid[..., None], features, 0.0)
+        backend = getattr(self, 'execution_backend', 'native')
         for index in range(history.shape[1]):
-            candidate = self.cell(features[:, index], state)
+            if backend == 'sample_bmm_fused_gru':
+                from gem.closedloop.dppo.batch_execution import sample_gru_cell
+                candidate = sample_gru_cell(features[:, index], state, self.cell)
+            else:
+                candidate = self.cell(features[:, index], state)
             state = torch.where(valid[:, index, None], candidate, state)
         residual = self.out_proj(state)
         return torch.where(valid.any(dim=1, keepdim=True), residual, 0.0)

@@ -73,6 +73,8 @@ class DPPODiffusionPolicy:
         execution_batch_size: int | None = None,
         numerical_layout: str = 'legacy_step_lane',
         defer_checks: bool = False,
+        precision_mode: str | None = None,
+        attention_backend: str | None = None,
     ) -> None:
         if not isinstance(actor, Stage1Actor):
             raise TypeError("DPPO policy requires the existing Stage1Actor")
@@ -93,6 +95,14 @@ class DPPODiffusionPolicy:
         )):
             raise ValueError("std_schedule must contain one finite floor >= std_floor per denoising step")
         self.actor = actor
+        self.numerical_execution = None
+        self.batched_conditions = False
+        if precision_mode is not None:
+            if numerical_layout == 'legacy_step_lane':
+                raise ValueError('Explicit precision contracts require independent sample rows')
+            from .numerical_execution import configure_numerics
+            self.numerical_execution = configure_numerics(actor, precision_mode, attention_backend)
+            self.batched_conditions = precision_mode != 'fp32_reference'
         self.defer_checks = defer_checks
         self._phase_signature = None
         self.numerical_layout = numerical_layout
@@ -149,6 +159,10 @@ class DPPODiffusionPolicy:
                 self.kernel_config.update(version='genmo.bumi_closedloop.stochastic_ddim_joint_sum.v4',
                     execution_contract=self.numerical_layout, execution_batch_size=None,
                     condition_batch_size=1, network_batch='effective_rows_cfg_expanded_no_padding')
+                if self.numerical_execution is not None:
+                    self.kernel_config.update(version='genmo.bumi_closedloop.stochastic_ddim_joint_sum.v5',
+                        numerical_execution=self.numerical_execution,
+                        condition_batch_size='unique_chains' if self.batched_conditions else 1)
                 return
             if size is None:
                 self.kernel_config.pop('execution_contract', None)
@@ -186,6 +200,7 @@ class DPPODiffusionPolicy:
         return tuple((id(p), p._version, p.requires_grad) for p in self.actor.parameters())
 
     @profiled('policy.condition_encoding', gpu=True)
+    @checked_policy_phase
     def prepare_conditions(self, conditions):
         """单链/单微批条件准备；保留encoder梯度，禁止跨参数更新或grad模式复用。
 
@@ -197,7 +212,7 @@ class DPPODiffusionPolicy:
         # 新执行身份固定条件编码的batch=1，避免同链条件在训练合批后切换GRU/GEMM数值路径。
         # 真实学习使用ConditionGraphCache，仅对每条唯一链运行一次这里的编码。
         count = selected['known_qpos30'].shape[0]
-        if (self.execution_batch_size is not None or self.numerical_layout != 'legacy_step_lane') and count > 1:
+        if not self.batched_conditions and (self.execution_batch_size is not None or self.numerical_layout != 'legacy_step_lane') and count > 1:
             entries = [self.prepare_conditions({key: value[i:i+1] for key, value in selected.items()})
                        for i in range(count)]
             result = dict(entries[0])
@@ -277,6 +292,7 @@ class DPPODiffusionPolicy:
         return value.detach()
 
     @profiled('policy.transition', gpu=True)
+    @checked_policy_phase
     def transition_parameters(
         self,
         conditions: Mapping[str, torch.Tensor],
