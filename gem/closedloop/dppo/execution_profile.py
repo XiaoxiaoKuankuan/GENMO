@@ -93,8 +93,7 @@ def probe_profiles(policy, context, *, maximum_microbatch=4, seed=12345, reserve
                     if device.type == 'cuda':
                         torch.cuda.reset_peak_memory_stats(device)
                     trace = chains[cfg]
-                    sampled_identity = {key: value for key, value in trace['kernel_config'].items()
-                                        if key != 'timestep_map'}
+                    sampled_identity = dict(trace['kernel_config'])
                     if sampled_identity != policy.kernel_config:
                         raise ValueError('Profile must recompute the actual sampled execution identity')
                     with torch.no_grad():
