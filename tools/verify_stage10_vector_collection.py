@@ -73,6 +73,8 @@ def main():
         physics_device='cuda:0',gmt_precision='float32',asset_conversion_dir=str(output/'usd'),headless=True,video_path=None,
         prefix_deadline_contract=DEADLINE_CONTRACT,vector_audit_contract='nested_world_journal_excluded.v1',
         vector_reward_contract='stage10.gpu_vector_continuous_reward.v1')
+    from gem.closedloop.dppo.vector_devices import bind_vector_device
+    device_environment=bind_vector_device(config,rank)
     if args.resume and not args.updates:raise ValueError('Resume requires the complete finite training mode')
     if args.reject_iteration is not None and (not args.updates or args.reject_iteration!=args.rounds or args.rounds<2):
         raise ValueError('KL injection requires the final round >=2 of a finite full update test')
@@ -112,7 +114,11 @@ def main():
         client=local_call(collective,lambda:workers.start('gmt',[config['paths']['isaac_python'],'-B',
             str(args.gmt_repo/'scripts/rsl_rl/serve_frozen_gmt_vector.py'),'--config',str(config_path),
             '--socket',str(socket),'--headless'],args.gmt_repo,socket,strip_distributed=True,
-            environment=dict(CUDA_VISIBLE_DEVICES=os.environ['CUDA_VISIBLE_DEVICES'].split(',')[rank])))
+            environment=device_environment))
+        def check_device():
+            if workers.entries[0]['identity'].get('gpu_uuid')!=devices[rank][1]:
+                raise AssertionError('Actual frozen GMT GPU UUID does not match allocated rank')
+        local_call(collective,check_device)
         guard=DiskGuard(output,min_free_bytes=10*1024**3,max_run_bytes=10*1024**3)
         def world_factory():
             world_journal=GuardedStepJournal(output/'world_journal.sqlite',guard,format='genmo.execution_journal.ndarray.v2')

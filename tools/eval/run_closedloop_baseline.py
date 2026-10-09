@@ -350,7 +350,9 @@ class Workers:
                 if key in {'RANK', 'LOCAL_RANK', 'WORLD_SIZE', 'LOCAL_WORLD_SIZE', 'GROUP_RANK',
                            'ROLE_RANK', 'ROLE_WORLD_SIZE', 'MASTER_ADDR', 'MASTER_PORT'} or key.startswith('TORCHELASTIC_'):
                     env.pop(key, None)
-        env.update(environment or {})
+        for key,value in (environment or {}).items():
+            if value is None:env.pop(key,None)
+            else:env[key]=value
         env.update(PYTHONDONTWRITEBYTECODE="1", OMP_NUM_THREADS=str(self.config["runtime"]["torch_threads"]))
         env["PYTHONPATH"] = str(ROOT) + os.pathsep + env.get("PYTHONPATH", "")
         parent_guard = None
@@ -389,6 +391,7 @@ class Workers:
                     client = RpcClient(socket_path, timeout_s=float(self.config["runtime"]["rpc_timeout_s"]))
                     entry["client"] = client
                     hello = client.call("hello")
+                    entry['identity']=hello
                     write_json(self.output / f"{name}_identity.json", hello)
                     print(f"[WORKER] {name} ready pid={proc.pid}", flush=True)
                     return client

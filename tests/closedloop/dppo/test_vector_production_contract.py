@@ -15,6 +15,17 @@ from gem.closedloop.dppo.rollout_storage import _valid_raw_relative
 from gem.closedloop.dppo.vector_evaluation import SingleVectorLaneTransport
 
 
+def test_native_isaac_device_binding_preserves_training_permutation(monkeypatch):
+    from gem.closedloop.dppo.vector_devices import bind_vector_device,VECTOR_DEVICE_CONTRACT
+    monkeypatch.setenv('CUDA_VISIBLE_DEVICES','2,0,1,3,4,5,6,7')
+    cfg={'runtime':{}}
+    env=bind_vector_device(cfg,0)
+    assert cfg['runtime']==dict(physics_device='cuda:2',vector_device_contract=VECTOR_DEVICE_CONTRACT)
+    assert env==dict(CUDA_VISIBLE_DEVICES=None,CUDA_DEVICE_ORDER='PCI_BUS_ID')
+    monkeypatch.setenv('CUDA_VISIBLE_DEVICES','0,0,1,3,4,5,6,7')
+    with pytest.raises(ValueError):bind_vector_device(cfg,0)
+
+
 def test_production_vector_config_preserves_learning_and_storage():
     config=configuration(Path(__file__).resolve().parents[3]/'configs/closedloop/stage10_8gpu_server1_gpu_vectorized.yaml')
     s=config['stage9']; assert config['runtime']['num_envs']==8

@@ -145,6 +145,8 @@ def main():
         compat_profile=str(args.gmt_repo/'configs/sim2sim/model_135000_stage2.json'))
     cfg['runtime'].update(backend='gpu_vectorized.v1',physics_device='cuda:0',num_envs=1,rank=rank,
         asset_conversion_dir=str(output/'usd'),headless=True,video_path=None)
+    from gem.closedloop.dppo.vector_devices import bind_vector_device
+    device_environment=bind_vector_device(cfg,rank)
     path=output/'resolved_config.yaml';path.write_text(yaml.safe_dump(cfg,allow_unicode=True))
     catalog=FullMusicCatalog(cfg['paths']['data_root']);catalog.apply_audit(json.loads(args.data_audit.read_text()))
     sample=catalog.samples['val'][SOURCES[rank%4]][0];music=catalog.load_music(sample)
@@ -157,7 +159,7 @@ def main():
         socket=Path(worker.temp.name)/'gmt.sock'
         client=local_call(group,lambda:worker.start('gmt',[cfg['paths']['isaac_python'],'-B',
             str(args.gmt_repo/'scripts/rsl_rl/serve_frozen_gmt_vector.py'),'--config',str(path),'--socket',str(socket),'--headless'],
-            args.gmt_repo,socket,strip_distributed=True,environment=dict(CUDA_VISIBLE_DEVICES=os.environ['CUDA_VISIBLE_DEVICES'].split(',')[rank])))
+            args.gmt_repo,socket,strip_distributed=True,environment=device_environment))
         guard=DiskGuard(output,min_free_bytes=10*2**30,max_run_bytes=4*2**30)
         for name in ('world','lane'):journals.append(GuardedStepJournal(output/(name+'.sqlite'),guard,format='genmo.execution_journal.ndarray.v2'))
         world=VectorWorldClient(client,journals[0],socket_path=socket);backend=VectorLaneBackend(SingleLaneTransport(world),journals[1])

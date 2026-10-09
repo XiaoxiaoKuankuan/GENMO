@@ -176,7 +176,7 @@ def _sources(config, check):
     if vector:
         names += ('vector_collector','vector_boundary','vector_environment','vector_runtime','vector_evaluation',
                   'rollback_audit','sampling_graph','condition_sampling_graph','vector_metrics',
-                  'vector_reward_math','vector_reward_adapter')
+                  'vector_reward_math','vector_reward_adapter','vector_devices')
     gmt_additional = ['source/NoetixRobot/NoetixRobot/tasks/mimic/mimic_noetix_bumi4340_mha_sonic/closedloop/execution_journal.py']
     if vector:
         gmt_additional += [f'source/NoetixRobot/NoetixRobot/tasks/mimic/mimic_noetix_bumi4340_mha_sonic/closedloop/{name}.py'

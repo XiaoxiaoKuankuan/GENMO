@@ -61,16 +61,21 @@ class VectorTrainingRuntime:
         self.closed_journals = []
         self.collector = None
         child = copy.deepcopy(c.config)
-        child['runtime'].update(physics_device='cuda:0', asset_conversion_dir=str(c.rank_dir/'usd_assets'))
+        from .vector_devices import bind_vector_device
+        device_environment=bind_vector_device(child,c.distributed.rank)
+        child['runtime'].update(asset_conversion_dir=str(c.rank_dir/'usd_assets'))
         config_path = c.rank_dir/'vector_config.yaml'
         config_path.write_text(yaml.safe_dump(child, allow_unicode=True))
         c.workers = Workers(c.config, c.rank_dir)
         socket = Path(c.workers.temp.name)/'vector.sock'
-        visible = os.environ['CUDA_VISIBLE_DEVICES'].split(',')[c.distributed.rank].strip()
         client = local_call(c.distributed, lambda: c.workers.start('gmt',
             [c.config['paths']['isaac_python'], '-B', str(Path(c.config['paths']['gmt_repo'])/
              'scripts/rsl_rl/serve_frozen_gmt_vector.py'), '--config', str(config_path), '--socket', str(socket), '--headless'],
-            c.config['paths']['gmt_repo'], socket, environment={'CUDA_VISIBLE_DEVICES':visible}, strip_distributed=True))
+            c.config['paths']['gmt_repo'], socket, environment=device_environment, strip_distributed=True))
+        def check_device():
+            if c.workers.entries[0]['identity'].get('gpu_uuid')!=str(torch.cuda.get_device_properties(c.distributed.device).uuid):
+                raise RuntimeError('Frozen GMT and GENMO rank are on different physical GPUs')
+        local_call(c.distributed,check_device)
         def world_factory():
             journal = self._journal(c.rank_dir/'bootstrap_world.sqlite')
             return VectorWorldClient(client, journal, socket_path=socket, timeout_s=c.config['runtime']['rpc_timeout_s'])

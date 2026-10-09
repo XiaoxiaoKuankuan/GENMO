@@ -45,7 +45,8 @@ def main():
                 if key in ('RANK','LOCAL_RANK','WORLD_SIZE','LOCAL_WORLD_SIZE','GROUP_RANK','ROLE_RANK',
                            'ROLE_WORLD_SIZE','MASTER_ADDR','MASTER_PORT') or key.startswith('TORCHELASTIC_'):
                     env.pop(key)
-            env.update(CUDA_VISIBLE_DEVICES=str(rank),PYTHONDONTWRITEBYTECODE='1',
+            env.pop('CUDA_VISIBLE_DEVICES',None)
+            env.update(CUDA_DEVICE_ORDER='PCI_BUS_ID',PYTHONDONTWRITEBYTECODE='1',
                 OMP_NUM_THREADS='1',MKL_NUM_THREADS='1',OPENBLAS_NUM_THREADS='1',
                 ISAACLAB_PATH='/data0/user/liwei/closedloop_stage8_runtime/IsaacLab')
             env['LD_LIBRARY_PATH']='/data0/user/liwei/closedloop_stage8_runtime/sysroot/usr/lib/x86_64-linux-gnu:'+env.get('LD_LIBRARY_PATH','')
@@ -69,6 +70,8 @@ def main():
         failed=[rank for rank,proc,_ in entries if proc.returncode!=0]
         if failed: raise RuntimeError(f'Isaac workers failed: {failed}')
         records=[json.loads((args.output/f'rank{rank:02d}/report.json').read_text()) for rank in range(8)]
+        if any(record['identity'].get('gpu_uuid')!=devices[rank][1] for rank,record in enumerate(records)):
+            raise AssertionError('GPU world UUID differs from allocated physical device')
         report=dict(status='passed',ranks=records)
     except BaseException as error:
         report=dict(status='failed',error=dict(type=type(error).__name__,message=str(error)))

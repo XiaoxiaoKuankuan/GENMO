@@ -13,6 +13,7 @@ import copy
 import os
 from pathlib import Path
 import yaml
+import torch
 from .parallel_support import local_call
 from .run_management import GuardedStepJournal
 from .vector_collector import VectorWorldClient, VectorLaneBackend
@@ -46,18 +47,23 @@ def isolated_vector_evaluation(c,label):
     path = c.session/'phases'/f'vector_eval_backend_{label}'/f'rank{c.distributed.rank:02d}'
     path.mkdir(parents=True,exist_ok=False)
     config = copy.deepcopy(c.config)
-    config['runtime'].update(num_envs=1,physics_device='cuda:0',asset_conversion_dir=str(path/'usd_assets'))
+    from .vector_devices import bind_vector_device
+    device_environment=bind_vector_device(config,c.distributed.rank)
+    config['runtime'].update(num_envs=1,asset_conversion_dir=str(path/'usd_assets'))
     config_path=path/'config.yaml';config_path.write_text(yaml.safe_dump(config,allow_unicode=True))
     workers=Workers(config,path)
     old_backend=c.backend
     world=journal=None
     try:
         socket=Path(workers.temp.name)/'eval.sock'
-        visible=os.environ['CUDA_VISIBLE_DEVICES'].split(',')[c.distributed.rank].strip()
         client=local_call(c.distributed,lambda:workers.start('gmt',[config['paths']['isaac_python'],'-B',
             str(Path(config['paths']['gmt_repo'])/'scripts/rsl_rl/serve_frozen_gmt_vector.py'),
             '--config',str(config_path),'--socket',str(socket),'--headless'],config['paths']['gmt_repo'],socket,
-            strip_distributed=True,environment={'CUDA_VISIBLE_DEVICES':visible}))
+            strip_distributed=True,environment=device_environment))
+        def check_device():
+            if workers.entries[0]['identity'].get('gpu_uuid')!=str(torch.cuda.get_device_properties(c.distributed.device).uuid):
+                raise RuntimeError('Evaluation world is on a different physical GPU')
+        local_call(c.distributed,check_device)
         journal=GuardedStepJournal(path/'world.sqlite',c.guard,format='genmo.execution_journal.ndarray.v2')
         world=VectorWorldClient(client,journal,socket_path=socket)
         c.backend=VectorLaneBackend(SingleVectorLaneTransport(world),None)
