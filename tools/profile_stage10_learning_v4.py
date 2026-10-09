@@ -42,6 +42,7 @@ def main():
     for name in ('stage1-config','weights','assets','rollout','output'):
         parser.add_argument('--'+name,required=True,type=Path)
     parser.add_argument('--repeats',type=int,default=3)
+    parser.add_argument('--numerical-only',action='store_true',help='Only five single-Adam numerical comparisons')
     args=parser.parse_args()
     rank,world,local_rank=(int(os.environ.get(k,'-1')) for k in ('RANK','WORLD_SIZE','LOCAL_RANK'))
     if world!=8 or rank!=local_rank:raise ValueError('Use single-node torchrun with exactly eight GPUs')
@@ -97,7 +98,7 @@ def main():
         new_chain_sampling_seconds=sampling,results=[])
     references={}
     candidates=[(micro,'post_step_full',False,'one_step_numerical',0) for micro in (2,4,8,16,32)]
-    for repeat in range(args.repeats):
+    for repeat in range(0 if args.numerical_only else args.repeats):
         candidates += [(m,mode,detail,scope,repeat) for m,mode,detail,scope in (
             (2,'post_step_full',False,'four_step_offline'),(4,'post_step_full',False,'four_step_offline'),
             (8,'post_step_full',False,'four_step_offline'),(16,'post_step_full',False,'four_step_offline'),
@@ -131,6 +132,19 @@ def main():
                 delta=dict(parameter_max_abs=max(float((v.double()-reference[0][k].double()).abs().max()) for k,v in weights.items()),
                     optimizer_max_abs=max(float((v.double()-reference[1]['state'][i][k].double()).abs().max())
                         for i,s in state['state'].items() for k,v in s.items() if torch.is_tensor(v)))
+                if scope=='one_step_numerical':
+                    # 初始Adam一阶矩=0.1*裁剪后的梯度，直接比较真实单步梯度，不比较loss量级猜测。
+                    parameter_names=[n for n,p in actor.named_parameters() if p.requires_grad]
+                    ids=[i for g in state['param_groups'] for i in g['params']]
+                    modules={}
+                    for name,i in zip(parameter_names,ids):
+                        if i not in state['state']:continue
+                        a=state['state'][i]['exp_avg'].double();b=reference[1]['state'][i]['exp_avg'].double()
+                        item=modules.setdefault(name.split('.')[0],dict(error2=0.,reference2=0.,max_abs=0.))
+                        item['error2']+=float((a-b).square().sum());item['reference2']+=float(b.square().sum())
+                        item['max_abs']=max(item['max_abs'],float((a-b).abs().max())/.1)
+                    delta['clipped_gradient_by_module']={n:dict(relative_l2=(v['error2']/max(v['reference2'],1e-300))**.5,
+                        max_abs=v['max_abs']) for n,v in modules.items()}
             frozen_equal=all(torch.equal(p.detach().cpu(),saved[n]) for n,p in actor.named_parameters() if not p.requires_grad)
             timing_by_rank=collective.all_gather_object(dict(rank=rank,actor_seconds=actor_end-start,final_kl_seconds=end-actor_end,
                 learning_seconds=end-start,performance=profile.report(),communication=collective.collect_gradient_timings(synchronize=True)))
@@ -139,13 +153,14 @@ def main():
                 internal_transitions_per_update=[s['internal_transitions'] for s in update['steps']],
                 probability_check=check,actor_seconds=max(t['actor_seconds'] for t in timing_by_rank),
                 final_kl_seconds=max(t['final_kl_seconds'] for t in timing_by_rank),
-                learning_seconds=max(t['learning_seconds'] for t in timing_by_rank),final_kl=final,update=update,difference_from_micro2=delta,
+                learning_seconds=max(t['learning_seconds'] for t in timing_by_rank),final_kl=final,update=update,difference_from_scope_reference=delta,
+                reference_microbatch=16 if scope=='soft_stop_enabled' else 2,
                 frozen_equal=all(collective.all_gather_object(frozen_equal)),ranks=timing_by_rank,
                 padding_rows=0,local_upper_per_minibatch=10,global_internal_per_minibatch=1600)
             report['results'].append(item)
             if rank==0:
                 args.output.write_text(json.dumps(report,ensure_ascii=False,indent=2)+'\n')
-                print(json.dumps({k:item[k] for k in ('scope','repeat','microbatch','kl_mode','optimizer_steps','actor_seconds','final_kl_seconds','difference_from_micro2')}),flush=True)
+                print(json.dumps({k:item[k] for k in ('scope','repeat','microbatch','kl_mode','optimizer_steps','actor_seconds','final_kl_seconds','difference_from_scope_reference')}),flush=True)
             del weights,state,optimizer
         finally:
             deactivate(token)

@@ -221,15 +221,16 @@ class ConditionGraphCache:
         if self.policy._parameter_signature() != self.signature:
             raise ValueError('Actor changed before condition encoder backward')
         if self.bank is not None and self.training:
-            for i, original in enumerate(self.bank['originals']):
-                outputs, gradients = [], []
-                for name, leaf in self.bank['leaves'].items():
-                    if leaf is not None and leaf.grad is not None and original[name].requires_grad:
-                        outputs.append(original[name])
-                        gradients.append(leaf.grad[i:i+1])
-                if outputs:
-                    torch.autograd.backward(outputs, gradients)
-        if self.training:
+            with measure('actor.condition_encoder_backward', gpu=True):
+                for i, original in enumerate(self.bank['originals']):
+                    outputs, gradients = [], []
+                    for name, leaf in self.bank['leaves'].items():
+                        if leaf is not None and leaf.grad is not None and original[name].requires_grad:
+                            outputs.append(original[name])
+                            gradients.append(leaf.grad[i:i+1])
+                    if outputs:
+                        torch.autograd.backward(outputs, gradients)
+        if self.training and self.entries:
             with measure('actor.condition_encoder_backward', gpu=True):
                 for entry in self.entries.values():
                     outputs, gradients = [], []
