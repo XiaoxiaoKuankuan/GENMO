@@ -3,8 +3,9 @@
 每rank只启动一个GPU PhysX世界，默认8个独立环境，完整一轮仍是20条真实上层
 转移、全局160条。真实GENMO条件按就绪队列批量扩散，执行冻结GMT和真实物理，
 保留原奖励、前缀保护、终止及逐环境journal。采集后使用同一Actor对保存链执行
-全部20步严格零更新概率检查，并核对身份、自由坐标和片段边界，不更新任何参数。
-本工具不是正式训练入口；通过只能证明采样闭环，DPPO、回滚和恢复另行验收。
+全部20步严格零更新概率检查，并核对身份、自由坐标和片段边界。显式--updates
+调用原完整DPPO/BC/Critic/KL更新，--resume用于独立进程间完整正常边界恢复验收。
+本工具不是正式训练入口；报告必须区分采样模式与完整有限更新模式。
 输出仅限显式新目录；八卡空闲检查在初始化CUDA之前，异常只清理本工具的进程。
 """
 from __future__ import annotations
@@ -48,6 +49,7 @@ def main():
     p.add_argument('--output',required=True,type=Path)
     p.add_argument('--num-envs',type=int,default=8)
     p.add_argument('--rounds',type=int,default=2)
+    p.add_argument('--batch-wait-ms',type=float,default=100.)
     p.add_argument('--data-audit',type=Path,help='显式复用完整数据审计报告；仍核对清单并逐次核验实际加载文件')
     p.add_argument('--updates',action='store_true',help='采集后运行原完整DPPO/BC/Critic更新与KL验收')
     p.add_argument('--resume',type=Path,help='仅恢复本工具完整GPU向量验收断点')
@@ -114,12 +116,13 @@ def main():
             def close():
                 lane_journal.close();budget.close();backend.client.close()
             return SimpleNamespace(env=env,sampler=sampler,close=close)
-        collector=VectorEnvironmentCollector(policy,factory,world_factory,num_envs=args.num_envs)
+        collector=VectorEnvironmentCollector(policy,factory,world_factory,num_envs=args.num_envs,batch_wait_seconds=args.batch_wait_ms/1000.)
         if args.resume:
             report['restored']=learner.restore(args.resume,collector)
         else:
             report['calibration']=local_call(collective,lambda:collector.calibrate())
             (output/'calibration.json').write_text(json.dumps(report['calibration'],indent=2))
+            if rank==0:print(f'[VECTOR] calibration budget={report["calibration"]["latency_budget_s"]:.3f}s',flush=True)
         start=0 if learner is None else learner.iteration
         stop=args.rounds if args.stop_after_iteration is None else args.stop_after_iteration
         if not start<stop<=args.rounds:raise ValueError('Invalid finite iteration boundary')
@@ -130,6 +133,7 @@ def main():
             for state in collector.states:
                 if state is not None:state.resource.env.iteration=iteration
             fragments,timing=local_call(collective,lambda:collector.collect(count_per_rank=20,policy_version=version))
+            if rank==0:print(f'[VECTOR] round {iteration+1} collection={timing["seconds"]:.3f}s batches={[b["effective_rows"] for b in timing["batches"]]}',flush=True)
             rows=[r for fragment in fragments for r in fragment]
             if len(rows)!=20:raise AssertionError('Real local batch changed')
             torch.save(fragments,output/f'rollout_{iteration:06d}.pt')
@@ -149,6 +153,7 @@ def main():
                 peak_memory_allocated=torch.cuda.max_memory_allocated(),frozen=frozen)
             if learner is not None:
                 timing['update']=learner.update(fragments)
+                if rank==0:print(f'[VECTOR] accepted round {iteration+1}: {timing["update"]["timings"]}',flush=True)
                 timing['outer_seconds_excluding_checkpoint']=time.perf_counter()-outer_begin
                 timing['checkpoint']=learner.save(collector,args.output/f'checkpoint_{learner.iteration:06d}.pt')
             report['rounds'].append(timing)
@@ -158,13 +163,19 @@ def main():
         if rank==0:(args.output/'report.json').write_text(json.dumps(dict(status='passed',ranks=results,devices=devices),ensure_ascii=False,indent=2))
     except BaseException as e:
         report.update(status='failed',error=f'{type(e).__name__}: {e}')
+        if collector is not None:
+            report['failed_collection_diagnostics']=dict(batches=collector.batch_reports,world_timing=collector.world_timing)
         raise
     finally:
-        if collector is not None:collector.close()
-        if journal is not None:journal.close()
-        workers.close()
-        (output/'report.json').write_text(json.dumps(report,ensure_ascii=False,indent=2))
-        if dist.is_initialized():dist.destroy_process_group()
+        try:
+            if collector is not None:collector.close()
+        finally:
+            try:
+                if journal is not None:journal.close()
+                workers.close()
+            finally:
+                (output/'report.json').write_text(json.dumps(report,ensure_ascii=False,indent=2))
+                if dist.is_initialized():dist.destroy_process_group()
 
 
 if __name__=='__main__':main()

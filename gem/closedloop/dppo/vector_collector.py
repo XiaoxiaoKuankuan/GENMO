@@ -60,7 +60,7 @@ class QueuedLaneClient:
 
 
 class VectorEnvironmentCollector(DualEnvironmentCollector):
-    def __init__(self,policy,factory,world_client,*,num_envs=8,batch_wait_seconds=.03,timeout_seconds=600.):
+    def __init__(self,policy,factory,world_client,*,num_envs=8,batch_wait_seconds=.1,timeout_seconds=600.):
         if type(num_envs)is not int or num_envs<1:raise ValueError('Positive environment count required')
         if policy.numerical_layout!='sample_matrix_bmm_fp32.v1':
             raise ValueError('Vector sampling requires validated row-independent policy')
@@ -184,7 +184,8 @@ class VectorEnvironmentCollector(DualEnvironmentCollector):
             env=self.states[slot].resource.env;env.latency_budget_s=latency
             env.backend.call('retire')
         self._run_boundary_jobs([self.executors[i].submit(finish,i) for i in range(enabled)])
-        return dict(durations=durations,latency_budget_s=latency,scope='real_vector_deployment_calibration_no_training_transitions')
+        return dict(durations=durations,latency_budget_s=latency,batches=list(self.batch_reports),
+            scope='real_vector_deployment_calibration_no_training_transitions')
 
     def state_dict(self):
         if self.active or self.cancelled.is_set() or self.rpc_pending:raise RuntimeError('Vector checkpoint requires consistent idle boundary')
