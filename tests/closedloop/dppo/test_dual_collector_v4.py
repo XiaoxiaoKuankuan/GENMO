@@ -10,7 +10,7 @@ import threading
 import time
 import pytest
 import torch
-from gem.closedloop.dppo.dual_collector import DualEnvironmentCollector,split_trace
+from gem.closedloop.dppo.dual_collector import DualEnvironmentCollector,split_trace,fixed_fragment_targets
 from gem.closedloop.dppo.policy import DPPODiffusionPolicy
 from tests.closedloop.test_stage1_actor import actor_factory,_conditions,_activate_branches
 
@@ -112,3 +112,42 @@ def test_two_generators_actual_actor_matches_independent_paths(actor_factory):
         actual=split_trace(combined,i,2)
         torch.testing.assert_close(actual['chain'],single['chain'],atol=0,rtol=0)
         torch.testing.assert_close(actual['old_log_probs'],single['old_log_probs'],atol=1e-8,rtol=0)
+
+
+def test_fragment_gae_never_crosses_environment_even_with_colliding_episode_ids():
+    def row(begin, reward, last=False):
+        return NS(metadata=dict(value_snapshot_version=4),old_value=0.,next_value=2.,
+            transition_valid=True,terminated=False,truncated=last,
+            identity=dict(backend_session_id='collision',episode_id='episode:1',policy_version=0),
+            control_tick_begin=begin,control_tick_end=begin+300,rewards=torch.tensor([reward]*25),
+            executed_control_steps=25,next_context={})
+    # 故意让两环境身份/tick可拼接；正确性来自显式片段边界，而非碰巧不同的字符串。
+    first=[row(600,.1),row(900,.2)]
+    second=[row(1200,100.),row(1500,200.,True)]
+    _, a=fixed_fragment_targets([first,second],None,'cpu',critic_version=4)
+    _, b=fixed_fragment_targets([first],None,'cpu',critic_version=4)
+    torch.testing.assert_close(a['returns'][:2],b['returns'],rtol=0,atol=0)
+    assert not a['advantages_normalized']
+    assert a['returns'][2]>a['returns'][0]*100
+
+
+def test_restore_does_not_reuse_noise_counter_after_unsaved_generation():
+    resources=[]
+    c=DualEnvironmentCollector(Policy(),factory(resources),timeout_seconds=5)
+    try:
+        c.collect(count_per_rank=2,policy_version=0)
+        saved=c.state_dict()
+    finally:c.close()
+    for record in saved['states']:
+        record['budget']=dict(limits=dict(generations=100),used=dict(generations=1))
+    resumed=[]
+    base=factory(resumed)
+    def make(slot,proxy):
+        resource=base(slot,proxy)
+        resource.env.budget=NS(state_dict=lambda:dict(limits=dict(generations=100),used=dict(generations=7)))
+        return resource
+    d=DualEnvironmentCollector(Policy(),make,timeout_seconds=5)
+    try:
+        d.load_state_dict(saved)
+        assert [r.env.attempt for r in resumed]==[7,7]
+    finally:d.close()

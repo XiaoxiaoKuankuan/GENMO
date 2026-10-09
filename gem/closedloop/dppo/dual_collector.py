@@ -247,14 +247,16 @@ class DualEnvironmentCollector:
             from tools.train_closedloop_stage10 import restore_execution_state
             resource=self.factory(slot,_QueuedPolicy(self,slot))
             resource.env.collector_env_slot=slot
+            spent_generations = None
             if record.get('budget') is not None:
                 live = resource.env.budget.state_dict()
                 if (live['limits'] != record['budget']['limits'] or any(
                         live['used'][key] < value for key,value in record['budget']['used'].items())):
                     resource.close()
                     raise ValueError('Dual collector recovery cannot refund or reset execution budget')
+                spent_generations = live['used']['generations']
             resource.sampler.load_state_dict(record['sampler'])
-            restore_execution_state(resource.env,record['execution'])
+            restore_execution_state(resource.env,record['execution'],spent_generations=spent_generations)
             self.states[slot]=SimpleNamespace(resource=resource,task=None,transitions=record['transitions'])
             return dict(slot=slot, rebuilt_backend_session=resource.env.backend.session_id,
                         closed_prior_episode=record['active_episode'], budget_refunded=False)
