@@ -158,12 +158,14 @@ def main():
                 reward=sum(float(r.rewards.sum()) for r in rows),physical_failures=sum(bool(r.metadata.get('terminal_snapshot',{}).get('terminated')) for r in rows),
                 peak_memory_allocated=torch.cuda.max_memory_allocated(),frozen=frozen)
             if graph is not None:timing['sampling_graph']=graph.report()
+            # 更新失败也保留已完成采集的耗时、物理工作量和概率验收，不能只剩错误字符串。
+            report['rounds'].append(timing)
+            (output/'report.json').write_text(json.dumps(report,ensure_ascii=False,indent=2))
             if learner is not None:
                 timing['update']=learner.update(fragments)
                 if rank==0:print(f'[VECTOR] accepted round {iteration+1}: {timing["update"]["timings"]}',flush=True)
                 timing['outer_seconds_excluding_checkpoint']=time.perf_counter()-outer_begin
                 timing['checkpoint']=learner.save(collector,args.output/f'checkpoint_{learner.iteration:06d}.pt')
-            report['rounds'].append(timing)
             (output/'report.json').write_text(json.dumps(report,ensure_ascii=False,indent=2))
         report.update(status='passed',scope='real_vector_full_DPPO_finite_validation' if learner else 'real_vector_collection_and_probability_no_DPPO')
         results=collective.all_gather_object(report)

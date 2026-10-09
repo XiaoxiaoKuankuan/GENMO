@@ -443,7 +443,9 @@ def actor_update_v2(policy, optimizer, transitions, targets, *, global_manifest=
             if distributed is not None:
                 distributed.sum_gradients(actor)
                 summary = distributed.sum_tensor(summary)
-            if (kl_check_mode == 'pre_step_plus_final' and soft_kl_limit is not None
+            # 当前 minibatch 已经计算出真实 KL；两种模式都必须遵守软停止。
+            # 上一 minibatch 的更新后 KL 不能代替当前不同样本上的更新前 KL。
+            if (soft_kl_limit is not None
                     and float(summary[4] / summary[5]) >= soft_kl_limit):
                 discarded = dict(epoch=epoch, global_upper_indices=indices,
                     mean_joint_kl=float(summary[4] / summary[5]), optimizer_step_executed=False,

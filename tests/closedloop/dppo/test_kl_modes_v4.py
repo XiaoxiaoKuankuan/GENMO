@@ -53,3 +53,30 @@ def test_pre_check_discards_step_before_bc_adam_and_budget():
     assert all(p.grad is None for p in policy.actor.parameters())
     assert all(float(state['step']) == 1 for state in optimizer.state.values())
     assert not cache
+
+
+def test_post_mode_respects_current_pre_kl_even_when_previous_batch_passed(monkeypatch):
+    """不同批分布使上一批通过、当前批已超限时，不能继续调用 BC/Adam。"""
+    from gem.closedloop.dppo import updater_v2
+    policy = BatchGaussianPolicy()
+    samples = rows(policy)
+    original = [r.old_log_prob.clone() for r in samples]
+    anchor, attempts = Anchor(), []
+    optimizer = torch.optim.Adam(trainable_actor_parameters(policy.actor), lr=.03)
+    actual_kl = updater_v2.analytic_kl_local
+    post_calls = []
+    def previous_batch_below_soft(*args, **kwargs):
+        report = actual_kl(*args, **kwargs)
+        post_calls.append(report)
+        return dict(report, mean_joint_kl=0.)
+    monkeypatch.setattr(updater_v2, 'analytic_kl_local', previous_batch_below_soft)
+    report = actor_update_v2(policy, optimizer, samples, {'advantages': torch.ones(4)},
+        actor_minibatch_internal_transitions=4, denoising_microbatch=3,
+        epoch_orders=[[0,1,2,3], [0,1,2,3]], soft_kl_limit=1e-15,
+        kl_check_mode='post_step_full', bc=anchor, reserve_attempt=lambda: attempts.append(1))
+    assert report['optimizer_steps'] == anchor.calls == len(attempts) == len(post_calls) == 1
+    assert report['early_stop_reason'] == 'pre_minibatch_soft_kl'
+    assert report['discarded_pending_minibatch']['mean_joint_kl'] > 1e-15
+    assert all(float(state['step']) == 1 for state in optimizer.state.values())
+    assert all(p.grad is None for p in policy.actor.parameters())
+    assert all(torch.equal(row.old_log_prob, old) for row, old in zip(samples, original))

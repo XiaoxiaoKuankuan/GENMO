@@ -664,10 +664,23 @@ def _update_cached(c, buffer, targets, manifest, index):
             c.bc.load_state_dict(restored['bc'])
         restore_local_rng(rng, c.generators)
         c.actor_optimizer.zero_grad(set_to_none=True); c.critic_optimizer.zero_grad(set_to_none=True)
+        from .rollback_audit import compare_recovered_state
+        def audit_recovery():
+            expected = {key: restored[key] for key in ('actor', 'critic', 'actor_optimizer', 'critic_optimizer')}
+            actual = dict(actor=c.actor.state_dict(), critic=c.critic.state_dict(),
+                actor_optimizer=c.actor_optimizer.state_dict(), critic_optimizer=c.critic_optimizer.state_dict())
+            if c.bc is not None:
+                expected['bc'], actual['bc'] = restored['bc'], c.bc.state_dict()
+            expected['rng'], actual['rng'] = rng, capture_local_rng(c.generators)
+            return compare_recovered_state(expected, actual)
+        recovery = c.distributed.all_gather_object(local_call(c.distributed, audit_recovery))
         root_call(c.distributed, lambda: atomic_json(c.session/f'rejected_{index:06d}.json',
-            dict(iteration=index, actor=actor, critic=critic, kl=kl, rolled_back=True, error=error_message,
+            dict(iteration=index, actor=actor, critic=critic, kl=kl,
+                 rolled_back=all(item['identical'] for item in recovery), rollback_audit_by_rank=recovery, error=error_message,
                  actor_lr=c.settings['actor_lr'], optimizer_attempts_charged=True,
                  probability_check=check, timings=timings)))
+        if not all(item['identical'] for item in recovery):
+            raise RuntimeError('Whole-rollout rollback failed exact state verification') from failure
         raise
     del backup
     communication = (c.distributed.collect_gradient_timings(synchronize=True)
