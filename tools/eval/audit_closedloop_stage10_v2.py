@@ -33,6 +33,7 @@ import yaml
 from gem.closedloop.dppo.budget_ledger import expand_budget_reference, read_budget_state
 from gem.closedloop.dppo.checkpoint import VERSION_V2, _validate_rank_states
 from gem.closedloop.dppo.run_management import TrainingBudget
+from tools.eval.audit_stage10_vector_helpers import is_vector,lane_sessions,audit_vector_rows,audit_vector_checkpoint
 from tools.eval.audit_closedloop_stage10 import (
     _physical,
     _retired_checkpoint,
@@ -235,6 +236,7 @@ def _targets(root, summary, rows, contract, *, normalization):
         if index+1<size:
             following = rows[index+1]
             continuous = (not row['terminated'] and not row['truncated'] and row['end']==following['begin']
+                and row['identity'].get('env_id')==following['identity'].get('env_id')
                 and all(row['identity'][key]==following['identity'][key]
                         for key in ('backend_session_id', 'episode_id', 'policy_version')))
             if continuous:
@@ -360,6 +362,10 @@ def _update(summary, contract):
         require(row.get('policy_unchanged') is True and row.get('runtime_parameters_unchanged') is True
                 and row['execution_journal']['executed_seq']==row['execution_journal']['acked_seq'],
                 'V2 frozen backend changed or has an unacknowledged mutation')
+        if 'lane_journals' in row:lane_sessions(row,len(row['lane_journals']))
+    all_sessions=[r['execution_journal']['backend_session_id'] for r in frozen]
+    all_sessions += [lane['backend_session_id'] for r in frozen for lane in r.get('lane_journals',[])]
+    require(len(set(all_sessions))==len(all_sessions), 'V2 world/lane identities overlap across ranks')
     require(summary['source_unchanged'].get('unchanged') is True, 'V2 accepted sources changed')
     replica = summary['replicas']
     if replica.get('scope')=='sampled_parameter_values_not_full_hash':
@@ -417,6 +423,10 @@ def _checkpoint(root, publication, identity, summary, actor_updates, critic_upda
         require(not rank or 'bc' not in item['samplers'], 'V2 BC state must belong to rank zero only')
         if rank==0 and identity['training_contract']['bc_weight']>0:
             require('bc' in item['samplers'], 'V2 active BC state is missing from rank zero')
+        if is_vector(identity):
+            require(item['rng'].get('cuda_scope')=='local_device', 'V2 RNG must have rank-local scope')
+            counters.append(audit_vector_checkpoint(local,rank_rows[rank],identity,rank))
+            continue
         decision, attempt = integer(local['decision'], 'V2 decision'), integer(local['attempt'], 'V2 attempt')
         require(decision<=attempt and decision==rank_rows[rank][-1]['identity']['decision_id']+1,
                 'V2 saved rank decision does not follow its real rollout')
@@ -581,10 +591,13 @@ def audit_training_v2(root, run, audit, result, minimum_iterations, require_resu
                         policy_version_before=index-1, collected_upper_transitions=collection['transition_count'], collection=collection)
                     rows, rollout = audit_rollout(root, local, data_lookup, contract, seen)
                     require(len(rows)==contract['rollout_upper_steps_per_rank'], 'V2 local rollout count differs')
-                    decisions = [row['identity']['decision_id'] for row in rows]
-                    require(all(right==left+1 for left, right in zip(decisions, decisions[1:])), 'V2 rank rollout decision IDs are not contiguous')
-                    require(all(row['identity']['backend_session_id']==summary['gmt_frozen_by_rank'][rank]['execution_journal']['backend_session_id']
-                                for row in rows), 'V2 rollout belongs to another frozen backend')
+                    if is_vector(identity):
+                        audit_vector_rows(rows,collection,summary['gmt_frozen_by_rank'][rank],identity)
+                    else:
+                        decisions = [row['identity']['decision_id'] for row in rows]
+                        require(all(right==left+1 for left, right in zip(decisions, decisions[1:])), 'V2 rank rollout decision IDs are not contiguous')
+                        require(all(row['identity']['backend_session_id']==summary['gmt_frozen_by_rank'][rank]['execution_journal']['backend_session_id']
+                                    for row in rows), 'V2 rollout belongs to another frozen backend')
                     rank_rows.append(rows)
                     rollouts.append(rollout)
                     rank_summaries.append(local)

@@ -15,8 +15,13 @@
 各环境有独立音乐采样器、噪声 Generator、状态历史、前缀、参考时间线、episode、
 决策时间和执行 journal。GENMO ready queue 合并不同真实环境的请求，实际批量通常为
 8、8、4；没有复制环境填充有效样本。每条链仍是 20 步，CFG 沿 batch 合并为两倍。
-提前完成的环境继续执行原参考并记录真实反馈，直至共同片段边界；尾段奖励和实际时长
-合并到该环境最后一条上层转移，不额外生成动作，不扩充训练 batch。
+提前完成的环境继续执行原参考并记录真实反馈，最多到共同片段边界或仍支持前缀和
+GMT前瞻的最后决策点；尾段奖励和实际时长合并到最后一条上层转移，不额外生成动作。
+到参考边界的环境保留有效下一条件，明确行政截断并在下轮reset。活动环境遇到连续
+迟到、结果不可能赶上已承诺deadline时，同样最多执行到合法bootstrap边界并丢弃
+未提交票据。不得在参考耗尽后补零、重复末帧或让整个共享场景继续非法推进；零控制步
+行政动作不能计入160条真实转移。此行为绑定`available_reference_fragment_boundary.v3`，
+相较旧流程的真实控制量可能改变，必须分别报告，不能冒充等物理工作量提速。
 
 GPU 场景使用原资产、关节顺序、执行器、观测、动作缩放和终止定义，控制 50Hz、物理
 200Hz。关闭原冻结配置禁止的随机化、噪声、课程学习和渲染。通用 `step()` 被显式
@@ -59,6 +64,13 @@ env_id、episode_id、连续执行区间和实际执行时间计算，各环境�
   只记一次；多线程 host 时间可能重叠，不能相加当成墙钟。额外记录 thread CPU 时间。
 - `vector_evaluation.py`：独立 GPU 评估世界，不重置训练中的 8 个环境。评估每 rank
   使用 1 个环境，并明确记录在评估身份中；真实训练仍是每 rank 8 个环境。
+- `vector_devices.py`：Isaac使用全局PCI编号，不对Kit子进程施加单卡CUDA掩码；
+  每个世界的真实设备UUID必须与所属GENMO rank对应。这样修复Omniverse与CUDA枚举
+  不一致导致的启动失败。Kit可能在其他可见卡建立少量上下文，但物理张量及策略
+  计算设备明确绑定并核验，不把这些上下文当作额外并行训练进程。
+- `vector_reward_math.py`、`vector_reward_adapter.py`：GPU FP64批量计算七项连续奖励，
+  原音乐/活动窗、权重和事件逻辑复用；首控制步及每100步独立标量重算完整证据。
+  GPU原始时钟在控制步入口clone，避免后续物理推进改变尚未落盘的奖励身份。
 
 ## 数值和物理边界
 
@@ -83,6 +95,9 @@ CPU/GPU 固定参考重放的根位置 RMS 约 0.4mm、关节 RMS 约 0.0025rad�
 `available_reference_deadline_cap.v1`，实际生成时延和迟到判定不隐藏。这些身份禁止
 把旧 CPU checkpoint 当作新 GPU run 的透明完整恢复；旧模型仍可读取和独立评估。
 
+参考行政边界、GPU连续奖励和原生设备绑定各有独立合同。旧GPU实验即使模型结构
+相同，也不能通过修改身份JSON冒充当前实现的完整恢复；可显式读取权重建立新run。
+
 ## 已有有限证据
 
 结果根目录：
@@ -103,6 +118,9 @@ CPU/GPU 固定参考重放的根位置 RMS 约 0.4mm、关节 RMS 约 0.0025rad�
 B64 为 19.54/19.52 秒，B128 为 19.82/19.82 秒；最终完整 KL 约 1.01/1.03/1.06 秒。
 峰值显存约 17.5/30.5/54.9 GB（十进制）。大显存说明可以装下更多激活，不保证计算
 更快；该严格 FP32 路径在 B32 之后已经没有明显批量收益。
+这里的四次更新只用于固定计算量计时，显式关闭软停止且不发布模型；该固定数据
+四次更新后的KL会超过0.03，不能称为已接受训练。真实训练始终保留软停止及最终
+完整KL检查。数值一致性单独对照相同的一次更新，包含全部未裁剪梯度和Adam状态。
 
 正式接口有限首轮因软 KL 停止只更新 Actor 1 次，核心轮约 52.1 秒；恢复轮更新 3 次，
 核心轮约 66.1 秒。之前另一有限恢复轮更新 4 次约 69.3 秒。不同更新次数和物理执行
@@ -137,3 +155,23 @@ bash scripts/train_stage10_gpu_vectorized_server1.sh \
 固定每 rank 20 条，可配 `--updates` 做真实学习；`--mode capacity` 才允许 512/1024。
 固定全局 160 条时，每 rank 同时最多有 20 条有效任务，因此 512/1024 环境的容量数据
 只能说明更大任务批次的潜力，不能计作当前 160 条训练的加速。
+
+完整矩阵命令如下，其中`--config`可指定本文件配套配置，`--output`必须为新目录。
+
+```bash
+/home/user/liwei/GENMO/.venv/bin/python -B tools/benchmark_stage10_gpu_vectorized.py \
+  --mode collection --environments 1 2 4 8 16 32 --updates --rounds 2 \
+  --config configs/closedloop/stage10_8gpu_server1_gpu_vectorized.yaml \
+  --gmt-repo /home/user/liwei/legged_lab_gmt-gpu-vectorized \
+  --output /data1/user/liwei/GENMO_outputs/closedloop_stage10/新的采样矩阵目录
+
+/home/user/liwei/GENMO/.venv/bin/python -B tools/benchmark_stage10_gpu_vectorized.py \
+  --mode capacity --environments 1 2 4 8 16 32 64 128 256 512 1024 \
+  --config configs/closedloop/stage10_8gpu_server1_gpu_vectorized.yaml \
+  --gmt-repo /home/user/liwei/legged_lab_gmt-gpu-vectorized \
+  --output /data1/user/liwei/GENMO_outputs/closedloop_stage10/新的物理容量目录
+```
+
+collection工具的N32仅分配32、激活20个真实任务，正式训练入口拒绝分配超过每卡20个
+环境。capacity则让全部N个机器人实际推进，包含完整执行证据，没有GENMO/DPPO。
+两张表不能互相替代。所有测试都检查八卡空闲，逐规模独占运行；不要同时启动两个矩阵。

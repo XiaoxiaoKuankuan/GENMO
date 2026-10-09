@@ -224,7 +224,9 @@ class VectorTrainingRuntime:
             writer = BlockRolloutWriter(path/'rollout',policy_version=c.state['policy_version'],
                 chunk_size=c.stage['storage']['rollout_chunk_size'],disk_guard=c.guard)
             for row in buffer.transitions:writer.append(row)
-            writer.finish()
+            published=writer.finish()
+            report.update(rollout_manifest=str(published),transition_count=len(buffer),full_train_pool=True,
+                control_steps=sum(row.executed_control_steps for row in buffer.transitions))
             torch.save(targets,path/'fixed_targets.pt');c.guard.account_file(path/'fixed_targets.pt')
             atomic_json(path/'collection.json',report)
         local_call(c.distributed,persist)
