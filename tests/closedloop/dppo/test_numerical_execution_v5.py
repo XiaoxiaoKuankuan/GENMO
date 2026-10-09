@@ -44,15 +44,16 @@ def test_batched_fused_gru_mask_and_all_gradients(device):
     torch.testing.assert_close(candidate(altered, valid, times), b, rtol=0, atol=0)
 
 
-def test_forced_sdpa_mask_and_eval_dropout(device):
-    reference = RoPEAttention(64, 4, dropout=.7).to(device).eval()
-    candidate = copy.deepcopy(reference); candidate.execution_backend = 'sdpa_efficient'
-    x = torch.randn(5, 11, 64, device=device)
+@pytest.mark.parametrize('dimension,heads', [(64,4),(1024,8)])
+def test_forced_sdpa_mask_and_eval_dropout(device, dimension, heads):
+    reference = RoPEAttention(dimension, heads, dropout=.7).to(device).eval()
+    candidate = copy.deepcopy(reference); candidate.execution_backend = 'sdpa_math'
+    x = torch.randn(5, 11, dimension, device=device)
     blocked = torch.ones(5,11,device=device,dtype=torch.bool); blocked[:, :6] = False
     a, b = reference(x, key_padding_mask=blocked), candidate(x, key_padding_mask=blocked)
     torch.testing.assert_close(a, b, atol=2e-6, rtol=2e-5)
     torch.testing.assert_close(candidate(x, key_padding_mask=blocked), b, atol=0, rtol=0)
-    assert candidate.last_execution_backend == 'sdpa_efficient'
+    assert candidate.last_execution_backend == 'sdpa_math'
 
 
 def test_batched_condition_graph_restores_encoder_gradients(actor_factory, device):

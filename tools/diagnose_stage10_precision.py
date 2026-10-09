@@ -31,7 +31,7 @@ def main():
     config=configuration(args.config);config['runtime']['genmo_device']=f'cuda:{rank}'
     actor,_,_=load_actor(config);payload=torch.load(args.weights,map_location='cpu',weights_only=False,mmap=True)
     reports=[]
-    for batch,attention in ((False,'manual'),(True,'manual'),(False,'sdpa_efficient'),(True,'sdpa_efficient')):
+    for batch,attention in ((False,'manual'),(True,'manual'),(False,'sdpa_math'),(True,'sdpa_math')):
         actor.load_state_dict(payload['actor'])
         policy=DPPODiffusionPolicy(actor,cfg_batch=True,numerical_layout='sample_matrix_bmm_fp32.v1',
             precision_mode='fp32_fast',attention_backend=attention,defer_checks=True)

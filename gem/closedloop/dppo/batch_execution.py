@@ -77,15 +77,17 @@ class SampleMatrixLinear(nn.Linear):
         if reduction is None:
             reduction = 'sample_bmm' if getattr(self, 'stable_weight_rows', True) else 'joint_gemm'
         dtype = getattr(self, 'compute_dtype', self.weight.dtype)
-        return _SampleLinear.apply(value.to(dtype), self.weight.to(dtype),
-                                   None if self.bias is None else self.bias.to(dtype), reduction)
+        result = _SampleLinear.apply(value.to(dtype), self.weight.to(dtype),
+                                     None if self.bias is None else self.bias.to(dtype), reduction)
+        return result.to(getattr(self, 'result_dtype', result.dtype))
 
 
 def sample_gru_cell(value, state, cell):
     """批量但逐行固定的GRU矩阵形状；CUDA融合门运算沿用PyTorch GRUCell定义。"""
     reduction = getattr(cell, 'weight_reduction', 'joint_gemm')
-    inputs = _SampleLinear.apply(value[:, None], cell.weight_ih, None, reduction).squeeze(1)
-    hidden = _SampleLinear.apply(state[:, None], cell.weight_hh, None, reduction).squeeze(1)
+    dtype = getattr(cell, 'gate_accumulation_dtype', value.dtype)
+    inputs = _SampleLinear.apply(value[:, None].to(dtype), cell.weight_ih.to(dtype), None, reduction).squeeze(1).to(value.dtype)
+    hidden = _SampleLinear.apply(state[:, None].to(dtype), cell.weight_hh.to(dtype), None, reduction).squeeze(1).to(value.dtype)
     if value.is_cuda:
         return torch.ops.aten._thnn_fused_gru_cell(inputs, hidden, state, cell.bias_ih, cell.bias_hh)[0]
     # CPU仅为可读数学参考，生产验收必须在服务器1 CUDA进行。
