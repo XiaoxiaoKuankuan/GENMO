@@ -95,6 +95,25 @@ def test_columnar_concatenation_preserves_mixed_leaves():
     with pytest.raises(ValueError):concatenate_trace_blocks(blocks+[pack_trace(rows[:1])])
 
 
+def test_generation_wait_propagates_shutdown_and_original_exception():
+    from concurrent.futures import Future
+    from threading import Event, Timer
+    from gem.closedloop.dppo.vector_generation import await_generation
+    owner=SimpleNamespace(timeout_seconds=600.,cancelled=Event())
+    owner.cancelled.set()
+    with pytest.raises(RuntimeError,match='cancelled'):await_generation(owner,Future())
+    owner.cancelled.clear();future=Future();future.set_exception(TimeoutError('model failed'))
+    with pytest.raises(TimeoutError,match='model failed'):await_generation(owner,future)
+    future=Future();future.set_result('ready')
+    assert await_generation(owner,future)=='ready'
+    timer=Timer(.02,owner.cancelled.set)
+    timer.start()
+    try:
+        with pytest.raises(RuntimeError,match='cancelled'):await_generation(owner,Future())
+    finally:
+        timer.cancel();timer.join()
+
+
 @pytest.mark.skipif(not torch.cuda.is_available(),reason='服务器1真实GPU批量传输验收')
 def test_bulk_copy_and_split_preserve_all_devices_and_no_storage_alias():
     import os

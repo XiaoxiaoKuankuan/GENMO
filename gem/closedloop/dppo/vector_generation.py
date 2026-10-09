@@ -12,7 +12,7 @@
 """
 from __future__ import annotations
 
-from concurrent.futures import Future
+from concurrent.futures import Future, TimeoutError as FutureTimeout
 import time
 import torch
 from .dual_collector import split_trace
@@ -21,6 +21,19 @@ from gem.closedloop.frozen_actor import stable_noise_seed
 from gem.runtime.closedloop_protocol import RemoteError
 
 GENERATION_CONTRACT = 'genmo.vector_generation_pipeline.v1'
+
+
+def await_generation(owner, future):
+    """工作进程或协调器失败时及时退出，不在关闭过程中等待整段600秒超时。"""
+    deadline=time.perf_counter()+owner.timeout_seconds
+    while True:
+        if owner.cancelled.is_set():raise RuntimeError('Vector generation cancelled by peer failure')
+        remaining=deadline-time.perf_counter()
+        if remaining<=0:raise TimeoutError('Vector generation pipeline deadline')
+        try:return future.result(timeout=min(.1,remaining))
+        except FutureTimeout:
+            # 等待超时与Future完成可能同时发生；重新读取结果以保留真实异常或成功值。
+            if future.done():return future.result()
 
 
 def bulk_cpu_copy(tree):
@@ -108,7 +121,7 @@ def generate_for_environment(env):
     owner = env.policy.owner
     future = Future()
     owner.requests.put((env.collector_env_slot, packet, None, future, time.perf_counter()))
-    result, shared_timing = future.result(timeout=owner.timeout_seconds)
+    result, shared_timing = await_generation(owner,future)
     sample_ready = time.perf_counter()
     rejection, prepared = None, None
     try:
@@ -123,6 +136,7 @@ def generate_for_environment(env):
         policy_version=env.policy_version), path)
     elapsed = time.perf_counter()-started
     timing = dict(timing_contract=env.timing_contract, generation_contract=GENERATION_CONTRACT,
+        critical_ready_scope='observed_training_batch_pipeline_not_modeled_deployment_delay',
         journal_seconds=journal_seconds, prefix_rpc_seconds=prefix_end-started,
         batched_pipeline_wait_seconds=sample_ready-prefix_end, prepare_rpc_seconds=prepared_at-sample_ready,
         critical_ready_seconds=max(0., prepared_at-started-journal_seconds), total_wall_seconds=elapsed,

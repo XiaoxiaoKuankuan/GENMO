@@ -57,6 +57,8 @@ def compare(reference,candidate,rounds):
                 chain_error=max(chain_error,float((a.chain-b.chain).abs().max()))
                 if a.rewards.shape==b.rewards.shape:
                     reward_error=max(reward_error,float((a.rewards-b.rewards).abs().max()) if a.rewards.numel() else 0.)
+                else:
+                    mismatches.append([iteration,rank,index,'reward_shape'])
     return dict(transitions_compared=total,causal_metadata_exact=not mismatches,mismatches=mismatches,
         max_chain_abs_difference=chain_error,max_step_reward_abs_difference=reward_error,
         scope='Exact_clock_task_counts_and_terminal_identity; numeric_differences_reported_without_changing_tolerances')
