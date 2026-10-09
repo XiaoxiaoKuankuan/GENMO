@@ -56,7 +56,8 @@ def fixed_matmul(left, right, *, precision='ieee'):
     if _MULTIPLY is None: _MULTIPLY = _kernel()
     m, k = left.shape; n = right.shape[1]
     output = torch.empty((m, n), device=left.device, dtype=left.dtype)
+    bm, bn, bk = (64, 128, 64) if left.dtype == torch.bfloat16 or precision == 'tf32x3' else (32, 64, 32)
     if m and n:
-        _MULTIPLY[((m+31)//32, (n+63)//64)](left, right, output, m, n, k,
-            *left.stride(), *right.stride(), precision, 32, 64, 32, num_warps=4, num_stages=3)
+        _MULTIPLY[((m+bm-1)//bm, (n+bn-1)//bn)](left, right, output, m, n, k,
+            *left.stride(), *right.stride(), precision, bm, bn, bk, num_warps=4, num_stages=3)
     return output

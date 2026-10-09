@@ -23,6 +23,9 @@ _ACTIVE_PRECISION = ContextVar('stage10_active_precision', default=None)
 def configure_numerics(actor, mode, attention_backend=None):
     from .batch_execution import configure_gradients, set_sample_linear, SampleMatrixLinear
     from gem.network.base_arch.transformer.encoder_rope import RoPEAttention
+    if hasattr(actor.denoiser, '_stage10_eager_forward'):
+        actor.denoiser.forward = actor.denoiser._stage10_eager_forward
+        del actor.denoiser._stage10_eager_forward
     if mode not in MODES:
         raise ValueError('Unknown explicit numerical execution mode')
     backend = attention_backend or ('manual' if mode == 'fp32_reference' else
@@ -33,8 +36,14 @@ def configure_numerics(actor, mode, attention_backend=None):
     set_sample_linear(actor.denoiser, True)
     for name, module in actor.named_modules():
         if isinstance(module, SampleMatrixLinear):
-            module.forward_backend = ('sample_bmm' if mode == 'fp32_reference' else
-                'fixed_tile_tf32x3' if mode == 'tf32_candidate' and name.startswith('denoiser.blocks.') else 'fixed_tile_ieee')
+            # IEEE Triton在真实大矩阵上更慢，保留已测更快的cuBLAS BMM；只有
+            # T=1时间嵌入/条件需要固定归约消除batch=1时的GEMV切换。
+            module.forward_backend = ('sample_bmm' if mode == 'fp32_reference' or
+                mode == 'fp32_fast' and name.startswith('denoiser.') and not name.startswith('denoiser.embed_timestep.')
+                else 'fixed_tile_tf32x3' if mode in ('tf32_candidate','bf16_backbone_candidate') and
+                name.startswith('denoiser.') and module.out_features >= 64
+                else 'sample_bmm' if name.startswith(('denoiser.final_layer.fc2','denoiser.static_conf_head.fc2'))
+                else 'fixed_tile_ieee')
             module.compute_dtype = (torch.bfloat16 if mode == 'bf16_backbone_candidate'
                                     and name.startswith('denoiser.blocks.') else torch.float32)
             module.result_dtype = module.compute_dtype
@@ -44,16 +53,33 @@ def configure_numerics(actor, mode, attention_backend=None):
     actor.history_encoder.cell.gate_accumulation_dtype = torch.float32
     actor.history_encoder.cell.forward_backend = 'sample_bmm' if mode == 'fp32_reference' else 'fixed_tile_ieee'
     configure_gradients(actor, weight_reduction='sample_bmm' if mode == 'fp32_reference' else 'joint_gemm')
-    return dict(version='stage10.numerical_execution.v4', mode=mode, attention_backend=backend,
+    return dict(version='stage10.numerical_execution.v5', mode=mode, attention_backend=backend,
         attention_fallback=False, condition_encoding='scalar_reference' if mode == 'fp32_reference' else 'batched_unique_chains',
         history_backend=actor.history_encoder.execution_backend, master_dtype='float32',
         history_projection_accumulation='fixed_tile_ieee' if mode != 'fp32_reference' else 'native_float32',
         condition_linear_accumulation='fixed_tile_ieee' if mode != 'fp32_reference' else 'native_float32',
-        linear_backend='sample_bmm' if mode == 'fp32_reference' else 'fixed_tile_32x64x32',
+        linear_backend='sample_bmm' if mode == 'fp32_reference' else
+            'sample_bmm_backbone_fixed_tile_conditions' if mode == 'fp32_fast' else 'fixed_tile_tensorcore_64x128x64',
         backbone_multiply='tf32x3' if mode == 'tf32_candidate' else 'bf16' if mode == 'bf16_backbone_candidate' else 'ieee',
         backbone_dtype='bfloat16' if mode == 'bf16_backbone_candidate' else 'float32',
         output_cfg_ddim_dtype='float32', probability_dtype='float64',
         matmul_tf32=False, torch_version=torch.__version__)
+
+
+def compile_denoiser(policy):
+    """只编译纯张量denoiser；不编译RPC、事务、校验和训练循环，无graph-break降级。"""
+    if policy.numerical_execution is None:
+        raise ValueError('Compilation requires an explicit numerical execution contract')
+    if hasattr(policy.actor.denoiser, '_stage10_eager_forward'):
+        raise ValueError('Denoiser already compiled')
+    import torch._dynamo
+    torch._dynamo.config.cache_size_limit = 32
+    forward = policy.actor.denoiser.forward
+    policy.actor.denoiser._stage10_eager_forward = forward
+    policy.actor.denoiser.forward = torch.compile(forward, fullgraph=True, dynamic=False,
+        backend='inductor', mode='max-autotune-no-cudagraphs')
+    policy.numerical_execution.update(denoiser_compiler='inductor_fullgraph_no_cudagraphs_v1',
+        compile_autotuning=True, compile_implicit_fallback=False)
 
 
 @contextmanager
