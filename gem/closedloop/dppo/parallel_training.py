@@ -180,6 +180,8 @@ def _calibrate_and_profile(c, restored=False):
     performance = c.stage.get('performance', {})
     fixed_shape = (c.state.get('execution_profile', {}).get('execution_batch_size') if restored else
                    performance.get('execution_batch_size'))
+    if getattr(c.policy, 'numerical_layout', 'legacy_step_lane') != 'legacy_step_lane':
+        fixed_shape = None
     credits = c.distributed.all_gather_object(
         collection_credit(samples + (5 if fixed_shape is not None else 2), c.settings['episode_seconds'], c.env.latency_budget_s))
     path, lease, budget = _new_phase(c, 'calibration', credits)
@@ -727,7 +729,9 @@ def run_parallel(args, config, collective, preflight):
         c.critic_optimizer = torch.optim.AdamW(c.critic.parameters(), lr=c.settings['critic_lr'], weight_decay=0.)
         c.policy = DPPODiffusionPolicy(c.actor, steps=c.settings['denoising_steps'], eta=c.settings['eta'],
             std_floor=c.settings['std_floor'], guidance_scale=c.settings['guidance_scale'],
-            cfg_batch=c.settings['cfg_batch'], std_schedule=c.settings.get('std_schedule'))
+            cfg_batch=c.settings['cfg_batch'], std_schedule=c.settings.get('std_schedule'),
+            numerical_layout=c.stage.get('performance', {}).get('numerical_layout', 'legacy_step_lane'),
+            defer_checks=c.stage.get('performance', {}).get('defer_tensor_checks', False))
         c.sampler = FullMusicSampler(c.catalog, split='train', seed=c.stage['seed']+1000003*collective.rank,
             window_seconds=c.settings['episode_seconds'], random_start=c.stage['dataset']['random_start'],
             source_probabilities=c.stage['dataset']['source_probabilities'])
@@ -809,7 +813,9 @@ def run_parallel(args, config, collective, preflight):
         from .periodic_monitor import log_metrics
         while c.state['iteration'] < args.stop_after_iteration:
             iteration_start = time.perf_counter()
-            profiler = PhaseProfiler(collective.device, collective.rank)
+            detail_every = c.stage.get('performance', {}).get('profiler_every', 1)
+            detailed = bool(detail_every and (c.state['iteration']+1) % detail_every == 0)
+            profiler = PhaseProfiler(collective.device, collective.rank, detailed=detailed)
             c.performance_token = activate(profiler)
             latencies = collective.all_gather_object(c.env.latency_budget_s)
             def capacity():

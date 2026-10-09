@@ -24,6 +24,7 @@ import torch
 
 from gem.closedloop.dppo.policy import masked_joint_log_prob
 from .performance import measure, profiled
+from .execution_checks import policy_phase, require_tensor, checked_policy_phase
 from .tensor_cache import ConditionGraphCache, KLResultCache
 
 
@@ -119,15 +120,15 @@ def _parameters(policy, rows, steps, device, cache=None, conditions=None):
     context = _context(rows, device) if cache is None else cache.context(rows)
     state = (torch.stack([row.chain[step] for row, step in zip(rows, steps)]).to(device)
              if cache is None else cache.get('chain', rows, steps))
-    indices = torch.tensor(steps, device=device, dtype=torch.long)
+    indices = torch.tensor(steps, device=device, dtype=torch.long) if cache is None else cache.step_indices(steps)
     if hasattr(policy, 'prepare_conditions'):
         prepared = policy.prepare_conditions(context) if conditions is None else conditions.prepare(rows, context)
         result = policy.transition_parameters(context, state, indices, prepared=prepared)
     else:
         result = policy.transition_parameters(context, state, indices)
     mask = torch.stack([row.free_mask for row in rows]).to(device) if cache is None else cache.get('free_mask', rows)
-    if 'free_mask' in result and not torch.equal(result['free_mask'], mask):
-        raise ValueError('Current policy changed the fixed rollout free-coordinate mask')
+    if 'free_mask' in result:
+        require_tensor((result['free_mask'] == mask).all(), 'Current policy changed the fixed rollout free-coordinate mask')
     return result, mask
 
 
@@ -145,8 +146,8 @@ def _joint_kl(parameters, mask, old_mean, old_std):
     mean, std = parameters['mean'].double(), parameters['std'].double()
     terms = (std / old_std).log() + (old_std.square() + (old_mean - mean).square()) / (2 * std.square()) - .5
     result = terms.masked_fill(~mask, 0.).sum((-2, -1))
-    if not torch.isfinite(result).all() or (result < -1e-10).any():
-        raise FloatingPointError('Nonfinite or negative conditional Gaussian KL')
+    require_tensor(torch.isfinite(result).all() & (result >= -1e-10).all(),
+                   'Nonfinite or negative conditional Gaussian KL', FloatingPointError)
     return result.clamp_min(0.)
 
 
@@ -177,7 +178,7 @@ def analytic_kl_local(policy, transitions, *, global_manifest=None, distributed=
     from gem.closedloop.dppo.trainer import _validate_actor_transitions
     if type(denoising_microbatch) is not int or denoising_microbatch < 1:
         raise ValueError('Denoising microbatch must be a positive integer')
-    with _local_phase(distributed, 'analytic_kl_local_forward'):
+    with _local_phase(distributed, 'analytic_kl_local_forward'), policy_phase(policy):
         manifest = _manifest(transitions, {}, distributed, global_manifest)
         selected = ([i for i, item in enumerate(manifest) if item['valid'] and item['has_free']]
                     if global_indices is None else list(global_indices))
@@ -202,6 +203,8 @@ def analytic_kl_local(policy, transitions, *, global_manifest=None, distributed=
                 reused.add(index)
         flat = [(index, step) for index in range(len(local_rows)) if index not in reused for step in range(policy.steps)]
         conditions = ConditionGraphCache(policy, tensor_cache) if tensor_cache is not None and hasattr(policy, 'prepare_conditions') else None
+        if conditions is not None and getattr(policy, 'defer_checks', False):
+            conditions.prime([local_rows[i] for i in range(len(local_rows)) if i not in reused])
         for start in range(0, len(flat), denoising_microbatch):
             chunk = flat[start:start + denoising_microbatch]
             rows = [local_rows[index] for index, _ in chunk]
@@ -390,8 +393,10 @@ def actor_update_v2(policy, optimizer, transitions, targets, *, global_manifest=
             denominator = len(indices) * policy.steps
             optimizer.zero_grad(set_to_none=True)
             summary = torch.zeros(7, dtype=torch.float64, device=device)
-            with _local_phase(distributed, 'actor_minibatch_forward_backward'):
+            with _local_phase(distributed, 'actor_minibatch_forward_backward'), policy_phase(policy):
                 conditions = ConditionGraphCache(policy, tensor_cache) if tensor_cache is not None and hasattr(policy, 'prepare_conditions') else None
+                if conditions is not None and getattr(policy, 'defer_checks', False):
+                    conditions.prime([transitions[index] for _, index in owned])
                 for start in range(0, len(pairs), denoising_microbatch):
                     chunk = pairs[start:start + denoising_microbatch]
                     rows, steps = [transitions[index] for index, _ in chunk], [step for _, step in chunk]
@@ -405,12 +410,10 @@ def actor_update_v2(policy, optimizer, transitions, targets, *, global_manifest=
                     if objective_logprob_reduction == 'free_coordinate_mean':
                         log_ratio = log_ratio / mask.sum((-2, -1))
                     ratio = log_ratio.exp()
-                    if not torch.isfinite(ratio).all():
-                        raise FloatingPointError('Nonfinite PPO ratio before optimizer step')
+                    require_tensor(torch.isfinite(ratio).all(), 'Nonfinite PPO ratio before optimizer step', FloatingPointError)
                     advantage = (torch.stack([advantages[index] * gamma_denoising ** (policy.steps - 1 - step)
                                              for index, step in chunk]).to(device) if tensor_cache is None else
-                        tensor_cache.get('advantages', rows) * torch.tensor(
-                            [gamma_denoising ** (policy.steps-1-step) for step in steps], device=device, dtype=torch.float64))
+                        tensor_cache.get('advantages', rows) * tensor_cache.denoising_discounts(steps, policy.steps, gamma_denoising))
                     objective = torch.minimum(ratio * advantage, ratio.clamp(1 - clip, 1 + clip) * advantage)
                     loss = -objective.sum() / denominator
                     with measure('actor.ppo_backward', gpu=True):

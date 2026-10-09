@@ -80,11 +80,13 @@ def probe_profiles(policy, context, *, maximum_microbatch=4, seed=12345, reserve
             with torch.no_grad():
                 _, reference_parameters = _log_probs(policy, context, reference, 1, details=True)
         limit = min(maximum_microbatch, fixed_execution_shape or maximum_microbatch)
-        for micro in (size for size in (4, 2, 1) if size <= limit):
+        candidates = (32, 16, 8, 4, 2, 1) if policy.numerical_layout != 'legacy_step_lane' else (4, 2, 1)
+        for micro in (size for size in candidates if size <= limit):
             for cfg in (True, False):
                 policy.cfg_batch = cfg
                 report = dict(microbatch=micro, cfg_batch=cfg, passed=False,
-                    execution_batch_size=fixed_execution_shape, execution_identity=dict(policy.kernel_config))
+                    execution_batch_size=fixed_execution_shape, numerical_layout=policy.numerical_layout,
+                    execution_identity=dict(policy.kernel_config))
                 started = time.perf_counter()
                 try:
                     if device.type == 'cuda':
@@ -174,7 +176,7 @@ def probe_profiles(policy, context, *, maximum_microbatch=4, seed=12345, reserve
 
 
 def select_profile(reports_by_rank, required=None):
-    choices = [(size, cfg) for size in (4, 2, 1) for cfg in (True, False)]
+    choices = [(size, cfg) for size in (32, 16, 8, 4, 2, 1) for cfg in (True, False)]
     if required is not None:
         choices = [(required['microbatch'], required['cfg_batch'])]
     for size, cfg in choices:
@@ -188,9 +190,19 @@ def select_profile(reports_by_rank, required=None):
             shape = next(iter(shapes))
             if required is not None and required.get('execution_batch_size') != shape:
                 continue
+            layouts = {item.get('numerical_layout', 'legacy_step_lane') for item in selected}
+            if len(layouts) != 1:
+                continue
+            layout = next(iter(layouts))
+            if required is not None and required.get('numerical_layout', 'legacy_step_lane') != layout:
+                continue
             result = dict(microbatch=size, cfg_batch=cfg,
                           probability_tolerances=dict(logprob=1e-4, ratio=1e-3, gaussian=1e-8))
-            if shape is not None:
+            if layout != 'legacy_step_lane':
+                result.update(numerical_layout=layout, execution_contract=layout,
+                    sampling_environment_batch=1, learner_effective_microbatch=size,
+                    network_rows=size*(2 if cfg else 1), padding_rows=0)
+            elif shape is not None:
                 result.update(execution_batch_size=shape, execution_contract='fixed_shape_step_lane_single_condition_fp32.v1')
             return result
     raise RuntimeError('No common microbatch/CFG profile passes unchanged probability gates')

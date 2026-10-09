@@ -20,14 +20,19 @@ _ACTIVE = ContextVar('stage10_performance', default=None)
 
 
 class PhaseProfiler:
-    def __init__(self, device='cpu', rank=0):
+    def __init__(self, device='cpu', rank=0, *, detailed=True):
         self.device, self.rank = torch.device(device), rank
+        self.detailed = detailed
         self.rows = defaultdict(lambda: dict(calls=0, host_seconds=0., cuda_seconds=0.))
         self.events = []
         self.started = time.perf_counter()
 
     @contextmanager
     def span(self, name, *, gpu=False):
+        if not self.detailed and not name.startswith(('round.', 'phase.', 'compute.', 'wait.')):
+            self.rows[name]['calls'] += 1
+            yield
+            return
         events = None
         if gpu and self.device.type == 'cuda':
             begin, end = torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True)
@@ -55,7 +60,8 @@ class PhaseProfiler:
         self.events.clear()
         return dict(schema='genmo.stage10.performance.v1', rank=self.rank,
                     elapsed_wall_seconds=time.perf_counter()-self.started,
-                    intervals='inclusive_nested_do_not_sum',
+                    intervals='inclusive_nested_do_not_sum', detailed=self.detailed,
+                    hotloop_timing_enabled=self.detailed,
                     stages={name: dict(row) for name, row in sorted(self.rows.items())})
 
 

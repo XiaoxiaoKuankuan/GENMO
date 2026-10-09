@@ -170,7 +170,8 @@ def _sources(config, check):
     if config['stage10']['version'] == VERSION_V2:
         names += ('parallel_support', 'parallel_training', 'execution_profile', 'periodic_monitor',
                   'updater_v2', 'position_repair', 'archives', 'archive_process', 'optional_diagnostics',
-                  'performance', 'tensor_cache', 'asset_cache', 'rollout_storage', 'budget_ledger')
+                  'performance', 'tensor_cache', 'asset_cache', 'rollout_storage', 'budget_ledger',
+                  'batch_execution', 'execution_checks')
     return collect_source_provenance(config['paths'], repository_state=check['repositories'], additional_files={
         'genmo_repo': [*(f'gem/closedloop/dppo/{n}.py' for n in names),
             'tools/train_closedloop_stage10.py',

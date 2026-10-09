@@ -28,6 +28,7 @@ import torch
 from gem.closedloop.actor import Stage1Actor
 from gem.closedloop.contracts import STAGE1_CONDITION_KEYS
 from .performance import profiled
+from .execution_checks import require_tensor, checked_policy_phase
 
 DPPO_KERNEL_VERSION = "genmo.bumi_closedloop.stochastic_ddim_joint_sum.v1"
 
@@ -45,8 +46,8 @@ def masked_joint_log_prob(
         raise TypeError("free_mask must be boolean")
     if std.shape not in ((mean.shape[0], 1, 1), mean.shape):
         raise ValueError("std must be [B,1,1] or match mean")
-    if not bool(torch.isfinite(std).all()) or bool((std <= 0).any()):
-        raise ValueError("Gaussian std must be finite and strictly positive")
+    require_tensor(torch.isfinite(std).all() & (std > 0).all(),
+                   "Gaussian std must be finite and strictly positive")
     # 先在相减前隔离确定性坐标，避免它们影响概率或产生无意义的大数。
     observed = torch.where(free_mask, value.detach(), 0.0).to(torch.float64)
     expected = torch.where(free_mask, mean, 0.0).to(torch.float64)
@@ -70,6 +71,8 @@ class DPPODiffusionPolicy:
         cfg_batch: bool = False,
         std_schedule: list[float] | tuple[float, ...] | None = None,
         execution_batch_size: int | None = None,
+        numerical_layout: str = 'legacy_step_lane',
+        defer_checks: bool = False,
     ) -> None:
         if not isinstance(actor, Stage1Actor):
             raise TypeError("DPPO policy requires the existing Stage1Actor")
@@ -90,6 +93,14 @@ class DPPODiffusionPolicy:
         )):
             raise ValueError("std_schedule must contain one finite floor >= std_floor per denoising step")
         self.actor = actor
+        self.defer_checks = defer_checks
+        self._phase_signature = None
+        self.numerical_layout = numerical_layout
+        if numerical_layout not in ('legacy_step_lane', 'sample_matrix_bmm_fp32.v1'):
+            raise ValueError('Unknown numerical execution layout')
+        if numerical_layout != 'legacy_step_lane':
+            from .batch_execution import set_sample_linear
+            set_sample_linear(actor.denoiser, True)
         self.steps = steps
         self.eta = float(eta)
         self.std_floor = float(std_floor)
@@ -134,6 +145,11 @@ class DPPODiffusionPolicy:
             raise ValueError('Execution batch shape must be positive or None')
         self._execution_batch_size = size
         if hasattr(self, 'kernel_config'):
+            if self.numerical_layout != 'legacy_step_lane':
+                self.kernel_config.update(version='genmo.bumi_closedloop.stochastic_ddim_joint_sum.v4',
+                    execution_contract=self.numerical_layout, execution_batch_size=None,
+                    condition_batch_size=1, network_batch='effective_rows_cfg_expanded_no_padding')
+                return
             if size is None:
                 self.kernel_config.pop('execution_contract', None)
                 self.kernel_config.pop('execution_batch_size', None)
@@ -155,7 +171,7 @@ class DPPODiffusionPolicy:
             self.kernel_config.update(version="genmo.bumi_closedloop.stochastic_ddim_joint_sum.v2",
                 cfg_forward="batched" if enabled else "separate",
                 effective_std_floors=list(self.std_schedule or (self.std_floor,) * self.steps))
-            if self.execution_batch_size is not None:
+            if self.execution_batch_size is not None or self.numerical_layout != 'legacy_step_lane':
                 self.execution_batch_size = self.execution_batch_size
 
     @staticmethod
@@ -164,6 +180,8 @@ class DPPODiffusionPolicy:
                      for key, value in sorted(conditions.items()))
 
     def _parameter_signature(self):
+        if self._phase_signature is not None:
+            return self._phase_signature
         # 原地optimizer.step/load_state_dict均改变Tensor版本，无需把权重复制到CPU求hash。
         return tuple((id(p), p._version, p.requires_grad) for p in self.actor.parameters())
 
@@ -179,7 +197,7 @@ class DPPODiffusionPolicy:
         # 新执行身份固定条件编码的batch=1，避免同链条件在训练合批后切换GRU/GEMM数值路径。
         # 真实学习使用ConditionGraphCache，仅对每条唯一链运行一次这里的编码。
         count = selected['known_qpos30'].shape[0]
-        if self.execution_batch_size is not None and count > 1:
+        if (self.execution_batch_size is not None or self.numerical_layout != 'legacy_step_lane') and count > 1:
             entries = [self.prepare_conditions({key: value[i:i+1] for key, value in selected.items()})
                        for i in range(count)]
             result = dict(entries[0])
@@ -218,6 +236,8 @@ class DPPODiffusionPolicy:
         return self._device_coefficients[device]
 
     def _prepare_actor(self) -> None:
+        if self._phase_signature is not None:
+            return
         if any(parameter.dtype != torch.float32 for parameter in self.actor.parameters()):
             raise TypeError("DPPO actor parameters must be float32")
         self.actor.eval()
@@ -240,8 +260,7 @@ class DPPODiffusionPolicy:
             result = step_index.to(value.device)
         else:
             raise TypeError("step_index must be an integer or int64 [B]")
-        if bool(((result < 0) | (result >= self.steps)).any()):
-            raise ValueError("step_index outside denoising chain")
+        require_tensor(((result >= 0) & (result < self.steps)).all(), "step_index outside denoising chain")
         return result
 
     @staticmethod
@@ -250,8 +269,7 @@ class DPPODiffusionPolicy:
             raise ValueError(f"{name} must have shape [B,120,30]")
         if value.dtype != torch.float32 or value.device != reference.device:
             raise TypeError(f"{name} must be float32 on the conditions device")
-        if not bool(torch.isfinite(value).all()):
-            raise ValueError(f"{name} must be finite")
+        require_tensor(torch.isfinite(value).all(), f"{name} must be finite")
         return value.detach()
 
     @profiled('policy.transition', gpu=True)
@@ -282,7 +300,7 @@ class DPPODiffusionPolicy:
             conditional, unconditional = prepared['conditional'], prepared['unconditional']
             actual_batch = state.shape[0]
             output_lanes = None
-            if self.execution_batch_size is not None:
+            if self.execution_batch_size is not None and self.numerical_layout == 'legacy_step_lane':
                 if actual_batch > self.execution_batch_size:
                     raise ValueError('Microbatch exceeds the fixed numerical execution shape')
                 # 固定形状还不够：部分GEMM在同批不同行存在ULP差异。每个去噪步固定
@@ -325,8 +343,8 @@ class DPPODiffusionPolicy:
             mean = previous_alpha.sqrt() * prediction + direction * epsilon
             mean = self.actor._constrain(mean, adapted)
             std = torch.maximum(base_std, coefficients['floors'][indices, None, None])
-            if not bool(torch.isfinite(mean).all()) or not bool(torch.isfinite(std).all()):
-                raise FloatingPointError("DPPO transition parameters are nonfinite")
+            require_tensor(torch.isfinite(mean).all() & torch.isfinite(std).all(),
+                           "DPPO transition parameters are nonfinite", FloatingPointError)
             result = {
                 "mean": mean,
                 "std": std,
@@ -358,6 +376,7 @@ class DPPODiffusionPolicy:
                                      parameters["free_mask"])
 
     @torch.no_grad()
+    @checked_policy_phase
     def sample_rollout(
         self,
         conditions: Mapping[str, torch.Tensor],

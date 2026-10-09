@@ -30,6 +30,15 @@ def validate_v2_configuration(config):
                 'disk_full_scan_every', 'asset_full_check_every'):
         if key in performance and (type(performance[key]) is not int or performance[key] < 1):
             raise ValueError(f'performance.{key} must be a positive integer')
+    layout = performance.get('numerical_layout', 'legacy_step_lane')
+    if layout not in ('legacy_step_lane', 'sample_matrix_bmm_fp32.v1'):
+        raise ValueError('Unknown numerical_layout')
+    if layout != 'legacy_step_lane' and performance.get('execution_batch_size') is not None:
+        raise ValueError('New sample-matrix layout must not specify a legacy fixed shape')
+    if type(performance.get('profiler_every', 1)) is not int or performance.get('profiler_every', 1) < 0:
+        raise ValueError('profiler_every must be zero or a positive integer')
+    if type(performance.get('defer_tensor_checks', False)) is not bool:
+        raise ValueError('defer_tensor_checks must be boolean')
     shape = performance.get('execution_batch_size')
     if shape is not None and (type(shape) is not int or shape not in (1, 2, 4)
                               or settings['denoising_steps'] % shape):

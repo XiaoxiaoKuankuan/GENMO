@@ -32,6 +32,7 @@ class RolloutTensorCache:
             raise ValueError('Tensor cache budget must be a positive byte count')
         self.closed = False
         self.blocks, self.index_cache = OrderedDict(), {}
+        self.constant_cache = {}
         self.transfer_count, self.transferred_bytes = 0, 0
         self.identities = [dict(getattr(row, 'identity', {})) for row in self.rows]
         self.kernel = None
@@ -120,6 +121,19 @@ class RolloutTensorCache:
         indices, time = self.index_cache[key]
         return values[indices] if time is None else values[indices, time]
 
+    def step_indices(self, steps):
+        key = ('steps', tuple(steps))
+        if key not in self.constant_cache:
+            self.constant_cache[key] = torch.tensor(steps, device=self.device, dtype=torch.long)
+        return self.constant_cache[key]
+
+    def denoising_discounts(self, steps, count, gamma):
+        key = ('discount', count, gamma)
+        if key not in self.constant_cache:
+            self.constant_cache[key] = torch.tensor([gamma**(count-1-i) for i in range(count)],
+                                                     device=self.device, dtype=torch.float64)
+        return self.constant_cache[key][self.step_indices(steps)]
+
     def context(self, rows):
         self._positions(rows)
         return {key.removeprefix('context/'): self.get(key, rows) for key in self.host if key.startswith('context/')}
@@ -134,6 +148,7 @@ class RolloutTensorCache:
         self.blocks.clear()
         self.host.clear()
         self.index_cache.clear()
+        self.constant_cache.clear()
 
 
 class ConditionGraphCache:
@@ -142,11 +157,41 @@ class ConditionGraphCache:
         self.training = torch.is_grad_enabled()
         self.signature = policy._parameter_signature()
         self.entries = {}
+        self.bank = None
         self.finished = False
+
+    def prime(self, rows):
+        """一次拼好本次参数版本的条件池；叶子梯度在所有切片后回传原编码图。"""
+        if self.entries or self.bank is not None:
+            raise RuntimeError('Condition bank must be primed before microbatches')
+        unique = list({id(row): row for row in rows}.values())
+        if not unique:
+            return
+        originals = []
+        for row in unique:
+            context = (self.tensor_cache.context([row]) if self.tensor_cache is not None else row.context)
+            originals.append(self.policy.prepare_conditions(context))
+        self.bank = dict(lookup={id(row): i for i, row in enumerate(unique)}, originals=originals,
+            adapted={key: torch.cat([item['adapted'][key] for item in originals]) for key in originals[0]['adapted']},
+            leaves={}, indices={})
+        for name in ('conditional', 'unconditional'):
+            features = None if originals[0][name] is None else torch.cat([item[name] for item in originals])
+            self.bank['leaves'][name] = (features.detach().requires_grad_(True)
+                if self.training and features is not None and features.requires_grad else features)
 
     def prepare(self, rows, context):
         if self.finished or self.policy._parameter_signature() != self.signature:
             raise ValueError('Condition graph cache cannot cross an optimizer step or completed backward')
+        if self.bank is not None:
+            positions = tuple(self.bank['lookup'][id(row)] for row in rows)
+            if positions not in self.bank['indices']:
+                self.bank['indices'][positions] = torch.tensor(positions, device=context['known_qpos30'].device)
+            index = self.bank['indices'][positions]
+            prepared = dict(self.bank['originals'][0])
+            prepared['adapted'] = {key: value[index] for key, value in self.bank['adapted'].items()}
+            prepared.update({key: None if value is None else value[index] for key, value in self.bank['leaves'].items()})
+            prepared['inputs'] = self.policy._input_signature(context)
+            return prepared
         entries = []
         for row in rows:
             key = id(row)
@@ -175,6 +220,15 @@ class ConditionGraphCache:
             raise RuntimeError('Condition encoder gradients already propagated')
         if self.policy._parameter_signature() != self.signature:
             raise ValueError('Actor changed before condition encoder backward')
+        if self.bank is not None and self.training:
+            for i, original in enumerate(self.bank['originals']):
+                outputs, gradients = [], []
+                for name, leaf in self.bank['leaves'].items():
+                    if leaf is not None and leaf.grad is not None and original[name].requires_grad:
+                        outputs.append(original[name])
+                        gradients.append(leaf.grad[i:i+1])
+                if outputs:
+                    torch.autograd.backward(outputs, gradients)
         if self.training:
             with measure('actor.condition_encoder_backward', gpu=True):
                 for entry in self.entries.values():
@@ -188,6 +242,7 @@ class ConditionGraphCache:
                         torch.autograd.backward(outputs, gradients)
         self.finished = True
         self.entries.clear()
+        self.bank = None
 
 
 class KLResultCache:
