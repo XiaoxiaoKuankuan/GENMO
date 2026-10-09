@@ -18,6 +18,8 @@ paths:
   data_root: /data0/user/liwei/datasets/bumi_music_umr70_mine_pass_90505_v1
 runtime:
   backend: gpu_vectorized.v1
+  vector_collection_contract: genmo.world_batched_flow.v1
+  generation_batch: 64
   vector_batch_wait_s: 0.0
   prefix_deadline_contract: available_reference_deadline_cap.v1
   vector_audit_contract: nested_world_journal_excluded.v1

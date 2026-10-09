@@ -118,6 +118,8 @@ def verify_execution_journal(path, frozen):
                 raise ValueError('Durable execution payload SHA mismatch')
             from gem.closedloop.dppo.journal_codec import decode_payload
             reply = decode_payload(payload, sha256=digest)
+            from gem.closedloop.dppo.journal_codec import resolve_world_reference
+            reply = resolve_world_reference(reply, path)
             sequence = reply['mutation_seq']
             if (reply['backend_session_id'] != session_id or type(sequence) is not int
                     or json.loads(identity) != [session_id, sequence]):

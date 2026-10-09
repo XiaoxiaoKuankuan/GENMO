@@ -25,7 +25,7 @@ import torch
 
 
 class VectorWorldClient(AcknowledgedBackend):
-    MUTATIONS={'exchange','begin_rollout'}
+    MUTATIONS={'exchange','begin_rollout','end_rollout'}
 
 
 def validate_vector_close(result):

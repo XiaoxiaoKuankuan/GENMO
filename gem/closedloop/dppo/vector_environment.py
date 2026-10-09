@@ -43,9 +43,9 @@ class VectorUpperEnvironment(UpperEnvironment):
                 pending_plan_scope='discarded_at_administrative_boundary_without_commit')
         return None
 
-    def step(self, **kwargs):
+    def step_flow(self, **kwargs):
         from .vector_boundary import fragment_reference_boundary,FRAGMENT_CONTRACT
-        row=super().step(**kwargs)
+        row=yield from super().step_flow(**kwargs)
         if not kwargs.get('deterministic',False) and not row.terminated:
             if fragment_reference_boundary(self.snapshot)==self.snapshot['tick']:
                 row.truncated=True;row.reason='reference_horizon_truncated'
@@ -68,4 +68,14 @@ class VectorUpperEnvironment(UpperEnvironment):
         batched = contract is not None and hasattr(self.policy, 'owner') and not kwargs.get('deterministic', False)
         result = generate_for_environment(self) if batched else super().generate(**kwargs)
         result['timing']['reference_deadline']=dict(self.deadline_diagnostic)
+        return result
+
+    def generate_flow(self, **kwargs):
+        from .vector_generation import GENERATION_CONTRACT, generate_for_environment_flow
+        if (self.config['runtime'].get('vector_generation_contract') == GENERATION_CONTRACT
+                and hasattr(self.policy, 'owner') and not kwargs.get('deterministic', False)):
+            result = yield from generate_for_environment_flow(self)
+        else:
+            result = yield from super().generate_flow(**kwargs)
+        result['timing']['reference_deadline'] = dict(self.deadline_diagnostic)
         return result

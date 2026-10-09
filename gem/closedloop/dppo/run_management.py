@@ -580,6 +580,7 @@ class GuardedStepJournal:
             raise FileExistsError('each new attempt requires a new execution journal')
         disk_guard.check(65536)
         self._journal = StepJournal(self.path, format=format)
+        self.last_record = None
         self._closed = False
         self._account()
 
@@ -591,7 +592,9 @@ class GuardedStepJournal:
         encoded = self._journal.encode_result(result, format=self._journal.format)
         self.disk_guard.check(2 * len(encoded.payload) + 65536)
         try:
-            return self._journal.append_encoded(encoded)
+            result = self._journal.append_encoded(encoded)
+            self.last_record = dict(identity=encoded.identity, sha256=encoded.sha256)
+            return result
         finally:
             self._account()
 

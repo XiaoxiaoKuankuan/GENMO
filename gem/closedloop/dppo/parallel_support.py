@@ -39,6 +39,11 @@ def validate_v2_configuration(config):
                 or runtime.get('vector_device_contract') != 'isaac_global_gpu_index.v1'
                 or runtime.get('vector_fragment_contract') != 'available_reference_fragment_boundary.v3'):
             raise ValueError('GPU vector timing/prefix contracts must be explicit')
+        if runtime.get('vector_collection_contract') not in (None, 'genmo.world_batched_flow.v1'):
+            raise ValueError('Unknown world state machine contract')
+        if runtime.get('vector_collection_contract') is not None and (type(runtime.get('generation_batch')) is not int
+                or not 1 <= runtime['generation_batch'] <= runtime['num_envs']):
+            raise ValueError('Independent world generation batch must fit active environments')
         if runtime.get('vector_reward_contract') not in (None, 'stage10.gpu_vector_continuous_reward.v1'):
             raise ValueError('Unknown vector reward computation contract')
         if runtime.get('vector_generation_contract') not in (None, 'genmo.vector_generation_pipeline.v1'):

@@ -123,3 +123,27 @@ def decode_payload(payload, *, sha256=None):
     if cursor != data_size:
         raise ValueError('Unreferenced journal bytes')
     return result
+def resolve_world_reference(value, journal_path):
+    """从同rank权威world journal解析只读索引，核对父SHA及lane身份，支持归档搬移。"""
+    reference = value.get('world_reply_reference') if isinstance(value, dict) else None
+    if reference is None:
+        return value
+    import sqlite3
+    from pathlib import Path
+    if reference.get('schema') != 'genmo.world_reply_reference.v1' or reference.get('journal') != '../world_journal.sqlite':
+        raise ValueError('Invalid bounded world reply reference')
+    source = Path(journal_path).parent.parent/'world_journal.sqlite'
+    identity = json.dumps([reference['backend_session_id'], reference['mutation_seq']], separators=(',', ':'))
+    with sqlite3.connect(f'file:{source}?mode=ro', uri=True) as connection:
+        record = connection.execute('SELECT sha256,payload FROM replies WHERE identity=?', (identity,)).fetchone()
+    if record is None or record[0] != reference['sha256']:
+        raise ValueError('Missing or changed authoritative world reply')
+    parent = decode_payload(record[1], sha256=record[0])
+    matches = [reply for reply in parent['result']['replies'] if reply['request_id'] == reference['request_id']]
+    if len(matches) != 1 or not matches[0]['ok']:
+        raise ValueError('World reply does not contain the referenced lane result')
+    envelope = matches[0]['result']
+    if any(envelope.get(key) != value.get(key) for key in ('backend_session_id', 'mutation_seq', 'operation', 'ok')):
+        raise ValueError('World reply reference changes lane identity')
+    return envelope
+

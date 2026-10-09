@@ -137,7 +137,9 @@ def load_rollout_record(path, record, *, rank_directory, physical=lambda path: p
         actual = physical(path)
         if actual.stat().st_size != record['size_bytes'] or file_sha256(actual) != record['sha256']:
             raise ValueError('Rollout block size/SHA mismatch')
-        cache.clear()  # 最多保留一个块，离线全量审计不无限增长
+        verified = cache.get('__raw_verified__', {})
+        cache.clear()  # 最多保留一个transition块；已校验原文件只保留小型stat/SHA身份。
+        cache['__raw_verified__'] = verified
         cache[key] = torch.load(actual, map_location='cpu', weights_only=False, mmap=True)
     payload = cache[key]
     if record.get('storage') != 'block_raw_reference.v2':
@@ -153,14 +155,27 @@ def load_rollout_record(path, record, *, rank_directory, physical=lambda path: p
     if not _valid_raw_relative(relative, compact['fields']['metadata']):
         raise ValueError('Raw trace reference escapes rank directory')
     raw_path = physical(Path(rank_directory)/relative)
-    if raw_path.stat().st_size != reference['size_bytes'] or file_sha256(raw_path) != reference['sha256']:
+    stat = raw_path.stat()
+    signature = (stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns, reference['sha256'])
+    verified = cache.setdefault('__raw_verified__', {})
+    if stat.st_size != reference['size_bytes'] or (verified.get(str(raw_path)) != signature and file_sha256(raw_path) != reference['sha256']):
         raise ValueError('Raw trace size/SHA mismatch')
+    verified[str(raw_path)] = signature
     raw = torch.load(raw_path, map_location='cpu', weights_only=False, mmap=True)
     trace = raw['trace']
     fields = compact['fields'].copy()
+    generated = raw['generated']
+    if reference.get('storage') == 'genmo.world_batch_raw.v3':
+        from .dual_collector import split_trace
+        index, count = reference['index'], reference['count']
+        if raw.get('schema') != 'genmo.world_batch_raw.v3' or type(index) is not int or not 0 <= index < count or len(generated) != count:
+            raise ValueError('Invalid shared raw block index/count')
+        trace, generated = split_trace(trace, index, count), generated[index]
+        if any(generated.get(key) != fields['identity'].get(key) for key in ('env_id','episode_id','request_id','plan_id')):
+            raise ValueError('Shared raw block row belongs to a different environment/request')
     if raw['policy_version'] != fields['identity']['policy_version']:
         raise ValueError('Raw trace policy identity mismatch')
-    fields['metadata'] = dict(fields['metadata'], sampler_trace=trace, generated=raw['generated'])
+    fields['metadata'] = dict(fields['metadata'], sampler_trace=trace, generated=generated)
     result = UpperTransition(**fields, chain=trace['chain'][0], old_log_prob=trace['old_log_probs'][0],
                              free_mask=trace['free_mask'][0])
     result.validate()

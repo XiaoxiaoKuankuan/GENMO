@@ -36,6 +36,7 @@ from gem.closedloop.dppo.rewards import ExecutionReward
 from gem.closedloop.dppo.target_activity import load_paired_activity
 from gem.closedloop.frozen_actor import stable_noise_seed
 from gem.runtime.closedloop_protocol import RemoteError
+from .world_flow import run_synchronous, backend_operation, LocalOperation
 
 
 def cpu_copy(value):
@@ -123,12 +124,15 @@ class UpperEnvironment:
 
     @profiled("collection.advance_including_rpc")
     def _advance(self, count):
+        return run_synchronous(self, self.advance_flow(count))
+
+    def advance_flow(self, count):
         count = int(count)
         if not 1 <= count <= 25:
             raise ValueError('advance requires 1..25 controls')
         previous = self.snapshot
         self.budget.reserve(self.phase, control_steps=count, physics_steps=4*count)
-        result = self.backend.call('advance', control_steps=count,
+        result = yield from backend_operation('advance', control_steps=count,
             advance_id=f"{previous['episode_id']}:advance:{self.backend.sequence+1}",
             expected_episode_id=previous['episode_id'])
         self.budget.settle_control(self.phase, count, result)
@@ -151,6 +155,9 @@ class UpperEnvironment:
         return rows
 
     def reset_task(self, sample, music, *, seed, phase='main', music_start_frame=0):
+        return run_synchronous(self, self.reset_task_flow(sample, music, seed=seed, phase=phase, music_start_frame=music_start_frame))
+
+    def reset_task_flow(self, sample, music, *, seed, phase='main', music_start_frame=0):
         # 配对动作只进入奖励；在reset/物理推进前验证，绝不加入builder的Actor条件。
         music = np.asarray(music)
         if music.ndim != 2 or music.shape[1] != 35 or len(music) < 2 or not np.isfinite(music).all():
@@ -168,11 +175,11 @@ class UpperEnvironment:
         self.full_music_num_frames, self.music_start_frame, self.data_split = len(music), int(music_start_frame), split
         self.phase, self.sample, self.music, self.seed = phase, sample, np.array(music[self.music_start_frame:], copy=True), int(seed)
         self.episode_count += 1
-        self.snapshot = self.backend.call('reset_episode', seed=self.seed,
+        self.snapshot = yield from backend_operation('reset_episode', seed=self.seed,
             episode_spec={'sample_id':sample['row']['sample_id'], 'dataset':sample['dataset'], 'mode':self.mode})
         last_warmup_row = None
         while self.snapshot['tick'] < 600 and not self.snapshot['done']:
-            warmup_rows = self._advance(min(25, (600-self.snapshot['tick'])//12))
+            warmup_rows = yield from self.advance_flow(min(25, (600-self.snapshot['tick'])//12))
             if warmup_rows:
                 last_warmup_row = warmup_rows[-1]
         if self.snapshot['done']:
@@ -191,7 +198,7 @@ class UpperEnvironment:
                                       target_activity=target)
         if last_warmup_row is not None:
             self.reward.seed_previous_target(last_warmup_row.get('joint_position_target'))
-        return self.preview_context()[0]
+        return (yield from self.preview_context_flow())[0]
 
     def _request(self):
         tick = int(self.snapshot['tick'])
@@ -203,8 +210,11 @@ class UpperEnvironment:
             deadline_tick=tick+ceil_control_tick(self.latency_budget_s*600), min_prefix=12)
 
     def preview_context(self):
+        return run_synchronous(self, self.preview_context_flow())
+
+    def preview_context_flow(self):
         request = self._request()
-        reservation = self.backend.call('preview_prefix', request=request)
+        reservation = yield from backend_operation('preview_prefix', request=request)
         return self.builder.build(self.snapshot, reservation, self.music, music_start_tick=600)
 
     def remaining_music(self, tick=None):
@@ -309,12 +319,18 @@ class UpperEnvironment:
                     rejection=rejection,elapsed=elapsed,critical_ready_seconds=critical,
                     timing=timings,seed=seed,raw_path=str(raw_path))
 
+    def generate_flow(self, *, deterministic=False):
+        return (yield LocalOperation(self.generate, dict(deterministic=deterministic)))
+
     def step(self, *, deterministic=False):
+        return run_synchronous(self, self.step_flow(deterministic=deterministic))
+
+    def step_flow(self, *, deterministic=False):
         """程序/RPC故障单独落盘为invalid，不用策略惩罚替代未知执行后果。"""
         self._inflight_sample = None
         start = int(self.snapshot['tick'])
         try:
-            return self._step_impl(deterministic=deterministic)
+            return (yield from self._step_flow(deterministic=deterministic))
         except Exception as exc:
             invalid = dict(transition_valid=False, reason='infrastructure_failure',
                 error_type=type(exc).__name__, error=str(exc), event_penalty_total=0.,
@@ -346,10 +362,13 @@ class UpperEnvironment:
         return ceil_control_tick(start+600*delay)
 
     def _step_impl(self, *, deterministic=False):
+        return run_synchronous(self, self._step_flow(deterministic=deterministic))
+
+    def _step_flow(self, *, deterministic=False):
         start = int(self.snapshot['tick'])
         if start%300:
             raise ExecutionIntegrityError('Upper action requested outside the decision grid')
-        generated = self.generate(deterministic=deterministic)
+        generated = yield from self.generate_flow(deterministic=deterministic)
         self._inflight_sample = generated
         candidate = generated['prepared']
         arrival = self._arrival_tick(generated, start)
@@ -364,7 +383,7 @@ class UpperEnvironment:
             if pending and tick >= arrival:
                 commit_begin = time.perf_counter()
                 try:
-                    commit = self.backend.call('commit_plan', prepared_plan_id=candidate['prepared_plan_id'],
+                    commit = yield from backend_operation('commit_plan', prepared_plan_id=candidate['prepared_plan_id'],
                                                expected_control_tick=tick)
                 except RemoteError as exc:
                     if exc.code != 'late_plan':
@@ -378,7 +397,8 @@ class UpperEnvironment:
                 break
             stop = min(execution_end, arrival if pending and arrival>tick else ready_tick,
                        ((tick//300)+1)*300)
-            for row in self._advance(min(25,(stop-tick)//12)):
+            advanced = yield from self.advance_flow(min(25,(stop-tick)//12))
+            for row in advanced:
                 result = self.reward.evaluate_step(row)
                 if not result.get('transition_valid',False):
                     self._save_evidence({'row':row,'reward':result,'raw_sample_path':generated['raw_path']},
@@ -392,7 +412,7 @@ class UpperEnvironment:
             if self.snapshot['tick'] > self.soft_end_tick+600*max(2.,2*self.latency_budget_s+.5):
                 raise ExecutionIntegrityError('Pending drain exceeded finite guard')
         if pending:
-            self.backend.call('discard_plan',prepared_plan_id=candidate['prepared_plan_id'])
+            yield from backend_operation('discard_plan',prepared_plan_id=candidate['prepared_plan_id'])
         end = int(self.snapshot['tick'])
         terminated = bool(self.snapshot.get('terminated',False) or end >= self.music_end_tick)
         boundary_reached = bool(boundary and end>=boundary['tick'] and not terminated)
@@ -412,7 +432,7 @@ class UpperEnvironment:
         self.decision += 1
         next_context = None
         if not terminated and not self.snapshot['done']:
-            next_context, _ = self.preview_context()
+            next_context, _ = yield from self.preview_context_flow()
         elif truncated:
             # 不在非法时间网格虚构可bootstrap条件。
             raise ExecutionIntegrityError('Backend truncation lacks a legal trusted next condition')

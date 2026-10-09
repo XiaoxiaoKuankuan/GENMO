@@ -80,8 +80,12 @@ class VectorTrainingRuntime:
             journal = self._journal(c.rank_dir/'bootstrap_world.sqlite')
             return VectorWorldClient(client, journal, socket_path=socket, timeout_s=c.config['runtime']['rpc_timeout_s'])
         c.workers.entries[0]['client'] = None
-        self.collector = VectorEnvironmentCollector(c.policy, self._factory, world_factory,
-            num_envs=self.num_envs, batch_wait_seconds=c.config['runtime']['vector_batch_wait_s'])
+        from .world_collector import WORLD_FLOW_CONTRACT, WorldEnvironmentCollector
+        world_flow=c.config['runtime'].get('vector_collection_contract')==WORLD_FLOW_CONTRACT
+        collector_type=WorldEnvironmentCollector if world_flow else VectorEnvironmentCollector
+        self.collector = collector_type(c.policy, self._factory, world_factory,
+            num_envs=self.num_envs, batch_wait_seconds=c.config['runtime']['vector_batch_wait_s'],
+            **({'generation_batch':c.config['runtime']['generation_batch']} if world_flow else {}))
 
     def _journal(self, path):
         return GuardedStepJournal(path, self.c.guard, format='genmo.execution_journal.ndarray.v2')

@@ -325,6 +325,8 @@ def check_journal(path):
             require(hashlib.sha256(raw).hexdigest() == digest, f"reply {row_number}: SHA256 mismatch")
             from gem.runtime.trajectory_blocks import expand_feedback
             decoded = decode_payload(payload, sha256=digest)
+            from gem.closedloop.dppo.journal_codec import resolve_world_reference
+            decoded = resolve_world_reference(decoded, path)
             if isinstance(decoded.get('result'), dict):
                 decoded['result'] = expand_feedback(decoded['result'])
             reply = _journal_value(decoded)

@@ -65,7 +65,7 @@ def bulk_cpu_copy(tree):
 
 
 @torch.no_grad()
-def generate_batch(policy, packets):
+def generate_batch(policy, packets, *, shared_storage=False):
     started = time.perf_counter()
     builder = packets[0]['builder']
     contexts, metadata = builder.build_many(
@@ -89,11 +89,18 @@ def generate_batch(policy, packets):
         meta = metadata[i]
         meta.update(seed=p['seed'], decision_id=p['decision'], plan_id=f"{p['reservation']['request_id']}:plan")
         # 此处clone只发生在CPU，避免单行torch.save意外保存整批底层storage。
-        local_trace = cpu_copy(split_trace(copied['trace'], i, len(packets)))
-        generated = dict(meta, qpos_world=copied['qpos_world'][i].numpy().copy(),
-                         qpos30=local_trace['qpos30'][0].numpy().copy(),
-                         contact=local_trace['contact'][0].numpy().copy())
+        local_trace = split_trace(copied['trace'], i, len(packets))
+        if not shared_storage: local_trace = cpu_copy(local_trace)
+        def array(value):
+            result=value.numpy()
+            return result if shared_storage else result.copy()
+        generated = dict(meta, qpos_world=array(copied['qpos_world'][i]),
+                         qpos30=array(local_trace['qpos30'][0]),
+                         contact=array(local_trace['contact'][0]))
         outputs.append(dict(context=contexts[i], meta=meta, generated=generated, trace=local_trace))
+    if shared_storage:
+        block=dict(schema='genmo.world_batch_raw.v3',trace=copied['trace'],generated=[item['generated'] for item in outputs])
+        for index,item in enumerate(outputs):item['_shared_raw_block']=(block,index)
     return outputs, dict(condition_batch_seconds=condition_end-started,
         generate_and_world_seconds=generated_end-condition_end, bulk_trace_transfer_seconds=finished-generated_end,
         cpu_split_seconds=time.perf_counter()-finished, components=dict(policy.last_sample_timing),
@@ -101,11 +108,17 @@ def generate_batch(policy, packets):
 
 
 def generate_for_environment(env):
+    from .world_flow import run_synchronous
+    return run_synchronous(env, generate_for_environment_flow(env))
+
+
+def generate_for_environment_flow(env):
     """只在环境所属线程进行参考请求、预算预占、journal和独立原链保存。"""
+    from .world_flow import backend_operation, GenerationOperation
     env.budget.reserve(env.phase, generations=1)
     started = time.perf_counter()
     request = env._request()
-    reservation = env.backend.call('reserve_prefix', request=request)
+    reservation = yield from backend_operation('reserve_prefix', request=request)
     journal_seconds = env.backend.last_call_timing.get('journal_seconds', 0.)
     prefix_end = time.perf_counter()
     env.attempt += 1
@@ -118,22 +131,23 @@ def generate_for_environment(env):
         env.comparison_noise_index += 1
     packet = dict(_vector_generation=True, builder=env.builder, snapshot=env.snapshot,
         reservation=reservation, music=env.music, seed=seed, decision=env.decision)
-    owner = env.policy.owner
-    future = Future()
-    owner.requests.put((env.collector_env_slot, packet, None, future, time.perf_counter()))
-    result, shared_timing = await_generation(owner,future)
+    result, shared_timing = yield GenerationOperation(packet)
     sample_ready = time.perf_counter()
     rejection, prepared = None, None
     try:
-        prepared = env.backend.call('prepare_plan', generated_plan=result['generated'])
+        prepared = yield from backend_operation('prepare_plan', generated_plan=result['generated'])
     except RemoteError as exc:
         if exc.code not in {'invalid_qpos','invalid_quaternion','invalid_plan_output','known_source_changed'}: raise
         rejection = dict(code=exc.code, message=str(exc), policy_penalty=True, category='finite_invalid_reference')
     journal_seconds += env.backend.last_call_timing.get('journal_seconds', 0.)
     prepared_at = time.perf_counter()
-    path = env.output/'raw_samples'/f'{env.phase}_{env.attempt:06d}.pt'
-    identity = env._save_evidence(dict(trace=result['trace'], generated=result['generated'],
-        policy_version=env.policy_version), path)
+    shared = result.pop('_raw_evidence', None)
+    if shared is None:
+        path = env.output/'raw_samples'/f'{env.phase}_{env.attempt:06d}.pt'
+        identity = env._save_evidence(dict(trace=result['trace'], generated=result['generated'],
+            policy_version=env.policy_version), path)
+    else:
+        path, identity = shared['path'], shared['identity']
     elapsed = time.perf_counter()-started
     timing = dict(timing_contract=env.timing_contract, generation_contract=GENERATION_CONTRACT,
         critical_ready_scope='observed_training_batch_pipeline_not_modeled_deployment_delay',
