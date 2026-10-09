@@ -158,8 +158,8 @@ stage10:
     accepted_iterations: 6
     optimizer_attempts: 24
     generations: 4096
-    control_steps: 200000
-    physics_steps: 800000
+    control_steps: 1000000
+    physics_steps: 4000000
   storage:
     min_free_bytes: 107374182400
     max_run_bytes: 107374182400
