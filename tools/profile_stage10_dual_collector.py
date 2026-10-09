@@ -60,6 +60,7 @@ def main():
     parser.add_argument('--config',type=Path,required=True)
     parser.add_argument('--output-dir',type=Path,required=True)
     parser.add_argument('--inject-worker-exit',action='store_true',help='After two timed rounds, kill only rank3/env1 owned test worker')
+    parser.add_argument('--audit-collected',action='store_true',help='Read both completed rounds and validate all real sampled chains; do not start workers')
     args=parser.parse_args()
     rank,world,local_rank=(int(os.environ.get(k,'-1')) for k in ('RANK','WORLD_SIZE','LOCAL_RANK'))
     if world!=8 or rank!=local_rank:raise ValueError('Use single-node torchrun with exactly eight GPUs')
@@ -68,7 +69,10 @@ def main():
     startup=[None]
     if rank==0:
         try:
-            if args.output_dir.exists():raise FileExistsError(args.output_dir)
+            if args.audit_collected:
+                if not (args.output_dir/'report.json').is_file():raise FileNotFoundError('Completed collection report required')
+                if (args.output_dir/'probability_audit.json').exists():raise FileExistsError('Audit already exists')
+            elif args.output_dir.exists():raise FileExistsError(args.output_dir)
             startup[0]=dict(devices=_available_gpus())
         except Exception as error:startup[0]=dict(error=str(error))
     dist.broadcast_object_list(startup,0)
@@ -78,10 +82,10 @@ def main():
     config=configuration(args.config)
     if len(os.sched_getaffinity(0))<2*world*config['runtime']['torch_threads']:
         raise RuntimeError('Insufficient CPU affinity for two independent workers')
-    if args.output_dir.exists():raise FileExistsError(args.output_dir)
+    if args.output_dir.exists() and not args.audit_collected:raise FileExistsError(args.output_dir)
     check=collective.broadcast_object(runtime_preflight(config,check_gpu=False) if rank==0 else None)
     if not check['ready']:raise RuntimeError('Runtime assets failed preflight')
-    args.output_dir.mkdir(parents=True)
+    args.output_dir.mkdir(parents=True,exist_ok=args.audit_collected)
     config['runtime'].update(rank=rank,genmo_device=f'cuda:{local_rank}')
     torch.cuda.set_device(local_rank)
     config['stage9']['run_id']='dual-prototype-'+str(uuid.uuid4())
@@ -89,6 +93,40 @@ def main():
     torch.backends.cuda.matmul.allow_tf32=False;torch.backends.cudnn.allow_tf32=False
     actor,_,_=local_call(collective,lambda:load_actor(config))
     policy=DPPODiffusionPolicy(actor,cfg_batch=True,numerical_layout='sample_matrix_bmm_fp32.v1',defer_checks=True)
+    if args.audit_collected:
+        # 所有输入只读。实际双环境链与对应采集概率直接比对，不能重新采样或改写old。
+        from gem.closedloop.dppo.tensor_cache import RolloutTensorCache
+        from gem.closedloop.dppo.updater_v2 import probability_check_local
+        def audit():
+            rounds=[]
+            for iteration in range(2):
+                fragments=torch.load(args.output_dir/f'rollout_{iteration}.pt',map_location='cpu',weights_only=False)
+                if len(fragments)!=2 or any(len(f)!=10 for f in fragments):raise ValueError('Two independent fragments required')
+                rows=[r for fragment in fragments for r in fragment]
+                for slot,fragment in enumerate(fragments):
+                    for row in fragment:
+                        row.validate()
+                        if row.metadata['collector_env_slot']!=slot:raise ValueError('Environment slot identity changed')
+                    if not (fragment[-1].terminated or fragment[-1].truncated):raise ValueError('GAE fragment boundary missing')
+                sessions=[{r.identity['backend_session_id'] for r in f} for f in fragments]
+                if sessions[0]&sessions[1]:raise ValueError('Independent environments share a backend session')
+                cache=RolloutTensorCache(rows,{},f'cuda:{rank}')
+                try:
+                    check=probability_check_local(policy,rows,denoising_microbatch=32,tensor_cache=cache)
+                finally:cache.close()
+                rounds.append(dict(iteration=iteration,probability=check,upper_transitions=len(rows),
+                    control_steps=sum(r.executed_control_steps for r in rows),
+                    physics_steps=sum(r.executed_physics_steps for r in rows),
+                    backend_sessions=[sorted(s) for s in sessions],
+                    fragment_lengths=list(map(len,fragments)),physical_failures=sum(r.terminated for r in rows)))
+            boundary=torch.load(args.output_dir/'collector_boundary.pt',map_location='cpu',weights_only=False)
+            return dict(rank=rank,rounds=rounds,boundary_budgets=[s['budget'] for s in boundary['states']],
+                scope='real_collected_chain_probability_identity_and_fragment_audit_no_optimizer_no_physics')
+        result=local_call(collective,audit)
+        results=collective.all_gather_object(result)
+        if rank==0:(root/'probability_audit.json').write_text(json.dumps(dict(passed=True,ranks=results),indent=2))
+        dist.destroy_process_group()
+        return
     catalog=FullMusicCatalog(config['paths']['data_root'])
     catalog.apply_audit(collective.broadcast_object(catalog.audit_files(require_audio=True) if rank==0 else None))
     workers=[];sockets=[];resources=[];collector=None

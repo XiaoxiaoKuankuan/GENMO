@@ -19,6 +19,7 @@ from pathlib import Path
 import sys
 import time
 import types
+import traceback
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import torch
@@ -228,6 +229,7 @@ def main():
             report['masks_equal'],report['parameter_aliases_and_freeze_preserved'])) else 'rejected_probability_or_identity'
     except Exception as error:
         report['error'] = f'{type(error).__name__}: {error}'
+        report['error_traceback'] = traceback.format_exc()
     finally:
         args.output.parent.mkdir(parents=True,exist_ok=True)
         args.output.with_name(args.output.stem+f'.rank{rank:02d}.json').write_text(json.dumps(report,ensure_ascii=False,indent=2)+'\n')
