@@ -103,3 +103,30 @@ def test_explicit_variant_bound_before_sampling_and_wrong_mode_rejected(actor_fa
     with pytest.raises(ValueError, match='Unknown explicit numerical variant'):
         DPPODiffusionPolicy(actor, numerical_layout='sample_matrix_bmm_fp32.v1',
             precision_mode='fp32_fast', numerical_variant='silent_fallback')
+
+
+def test_compiled_candidate_keeps_bc_dropout_forward_gradients_and_rng(device, monkeypatch):
+    from gem.closedloop.dppo.numerical_execution import compile_fixed_denoiser
+    class Denoiser(torch.nn.Module):
+        def __init__(self):
+            super().__init__(); self.linear=torch.nn.Linear(4,4); self.dropout=torch.nn.Dropout(.1)
+        def forward(self,x,timesteps,y=None,inputs=None):
+            value=self.dropout(self.linear(x)+y['f_cond'])
+            return dict(pred_x_start=value,static_conf_logits=value[..., :2])
+    model=Denoiser().to(device).train(); reference=copy.deepcopy(model); calls=[]
+    def compile_spy(function,**kwargs):
+        def wrapped(*args):calls.append(1);return function(*args)
+        return wrapped
+    monkeypatch.setattr(torch,'compile',compile_spy)
+    policy=SimpleNamespace(actor=SimpleNamespace(denoiser=model),numerical_execution={})
+    compile_fixed_denoiser(policy)
+    x=torch.randn(5,3,4,device=device);t=torch.zeros(5,dtype=torch.long,device=device)
+    y=dict(f_cond=torch.randn_like(x),length=torch.full((5,),3,device=device))
+    rng=torch.cuda.get_rng_state(device)
+    expected=reference(x,t,y=y,inputs={});after=torch.cuda.get_rng_state(device)
+    torch.cuda.set_rng_state(rng,device)
+    actual=model(x,t,y=y,inputs={})
+    assert torch.equal(torch.cuda.get_rng_state(device),after) and calls==[]
+    for key in actual:torch.testing.assert_close(actual[key],expected[key],rtol=0,atol=0)
+    actual['pred_x_start'].square().sum().backward();expected['pred_x_start'].square().sum().backward()
+    for a,b in zip(model.parameters(),reference.parameters()):torch.testing.assert_close(a.grad,b.grad,rtol=0,atol=0)

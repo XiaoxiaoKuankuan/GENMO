@@ -112,6 +112,10 @@ def compile_fixed_denoiser(policy, capacity=64):
     compiled=torch.compile(tensor_forward,fullgraph=True,dynamic=False,
         backend='inductor',mode='max-autotune-no-cudagraphs')
     def forward(xt,timesteps,y=None,inputs=None,**kwargs):
+        # BC使用train模式及真实dropout；不让固定网络尾行改变随机数消耗或
+        # 掩码。BC明确沿用原未编译前向，只有eval的采样/PPO/KL进入此候选。
+        if policy.actor.denoiser.training:
+            return original(xt,timesteps,y=y,inputs=inputs,**kwargs)
         if set(y or {})!={'f_cond','length'} or inputs or kwargs:
             raise ValueError('Fixed compile only supports explicit Stage1 closedloop tensor inputs')
         if len(xt)!=len(timesteps) or len(xt)!=len(y['length']) or len(xt)!=len(y['f_cond']):
@@ -145,6 +149,7 @@ def compile_fixed_denoiser(policy, capacity=64):
     policy.numerical_execution.update(denoiser_compiler='inductor_fixed_network_rows_shared_grad_forward.v2',
         compiled_network_capacity=capacity,compile_autotuning=True,compile_implicit_fallback=False,
         inference_uses_grad_forward_then_detach=True,
+        supervised_training_forward='original_eager_preserve_dropout_and_rng',
         zero_padding_scope='internal_network_tail_only_not_effective_samples')
 
 

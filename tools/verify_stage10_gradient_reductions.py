@@ -129,7 +129,10 @@ def main():
                         help='先用原真实rollout执行一次参考PPO更新，固定得到的非空Adam供所有候选比较')
     parser.add_argument('--precision-mode', choices=MODES,
                         help='显式新数值合同：实际生成新诊断链；原封存 rollout 和 old 概率保持不变')
-    parser.add_argument('--compact', action='store_true', help='只比较各微批 joint GEMM/FP64累计，保留完整梯度门槛')
+    parser.add_argument('--compact', action='store_true', help='只比较各微批 joint GEMM与指定累计精度，保留完整梯度门槛')
+    parser.add_argument('--accumulation-modes', nargs='+', default=['fp64_reference'],
+                        choices=('fp64_reference','fp32','selective_fp64'),
+                        help='compact模式独立选择累计精度，原B1 FP64仍保留基准')
     parser.add_argument('--fp32-blocked-gemm', action='store_true')
     parser.add_argument('--pipelined-tensorcore', action='store_true')
     parser.add_argument('--compensated-bf16',type=int,choices=(3,6))
@@ -185,9 +188,10 @@ def main():
     if args.warmstart_adam:
         probability_check_local(policy, rows, denoising_microbatch=32, tensor_cache=cache,
                                 distributed=collective, global_manifest=manifest)
-        warm_optimizer = torch.optim.AdamW(trainable_actor_parameters(actor), lr=args.actor_lr, weight_decay=0.)
+        warm_lr = config['stage10']['training']['actor_lr']
+        warm_optimizer = torch.optim.AdamW(trainable_actor_parameters(actor), lr=warm_lr, weight_decay=0.)
         warm_optimizer.load_state_dict(copy.deepcopy(payload['actor_optimizer']))
-        for parameter_group in warm_optimizer.param_groups: parameter_group['lr'] = args.actor_lr
+        for parameter_group in warm_optimizer.param_groups: parameter_group['lr'] = warm_lr
         actor_update_v2(policy, warm_optimizer, rows, targets, global_manifest=manifest, distributed=collective,
             ppo_epochs=1, epoch_orders=[selected], actor_minibatch_internal_transitions=len(selected)*policy.steps,
             max_optimizer_steps=1, denoising_microbatch=32, soft_kl_limit=None, gradient_diagnostics=False,
@@ -198,7 +202,7 @@ def main():
         word in name for word in ('gate_', 'norm', 'history_encoder', 'prefix_encoder', 'cond_embed'))]
     variants = [('joint_gemm' if args.precision_mode else 'sample_bmm', 'fp64_reference', 1)]
     variants += [(reduction, accumulation, micro)
-        for reduction, accumulation in ([('joint_gemm', 'fp64_reference')] if args.compact else
+        for reduction, accumulation in ([('joint_gemm', mode) for mode in args.accumulation_modes] if args.compact else
             [('joint_gemm', 'fp64_reference'), ('chunked_gemm', 'fp64_reference'),
             ('bounded_sample_bmm', 'fp64_reference'), ('joint_gemm', 'fp32'), ('joint_gemm', 'selective_fp64')]
         )
@@ -210,6 +214,7 @@ def main():
         chain_origin='actual_new_behavior_sampling_on_real_conditions_no_physics' if args.precision_mode else 'immutable_real_rollout',
         nonempty_adam=bool(payload['actor_optimizer']['state']),
         actor_lr=args.actor_lr, hard_kl_limit=config['stage10']['training']['kl_stop_joint'],
+        warmstart_lr=config['stage10']['training']['actor_lr'] if args.warmstart_adam else None,
         adam_origin='one_fixed_real_PPO_warmup_step' if args.warmstart_adam else 'source_checkpoint',
         sensitive_parameter_names=sensitive, numerical_reference=variants[0], results=[])
     reference = None
