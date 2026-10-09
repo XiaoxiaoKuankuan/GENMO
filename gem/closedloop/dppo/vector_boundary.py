@@ -14,7 +14,7 @@ import copy
 import torch
 from .env_adapter import ExecutionIntegrityError
 
-FRAGMENT_CONTRACT='available_reference_fragment_boundary.v2'
+FRAGMENT_CONTRACT='available_reference_fragment_boundary.v3'
 
 
 def fragment_reference_boundary(snapshot, *, minimum_prefix=12):

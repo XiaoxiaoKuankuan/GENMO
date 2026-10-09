@@ -79,3 +79,35 @@ def test_music_limit_with_sufficient_reference_is_unchanged():
     assert controls==25 and not ended
     assert calls[0]['max_control_steps']==50 and calls[0]['end_reason']=='collection_limit'
     assert not row.metadata['fragment_tail']['reference_horizon_truncated']
+
+
+@pytest.mark.parametrize('delay,controls,truncated',[(.764757,25,True),(.7,50,False)])
+def test_late_active_generation_keeps_real_controls_and_bootstrap(tmp_path,delay,controls,truncated):
+    from gem.closedloop.dppo.vector_environment import VectorUpperEnvironment
+    from tests.closedloop.dppo.test_env_adapter import adapter
+    from gem.closedloop.dppo.buffer import RolloutBuffer
+    env,backend=adapter(tmp_path,elapsed=delay)
+    env.__class__=VectorUpperEnvironment
+    old_snapshot=backend.snapshot
+    def snapshot():
+        # 将真实故障4800/5380整体平移到夹具600/1180；及时提交会延长参考。
+        end=2980 if any(k=='commit_plan' for k,_ in backend.calls) else 1180
+        return dict(old_snapshot(),source_end_tick=end,reference_valid_end_tick=end-16)
+    backend.snapshot=snapshot;env.snapshot=snapshot()
+    generate=env.generate
+    def generation(**kwargs):
+        value=generate(**kwargs);value['meta']['deadline_tick']=1044
+        return value
+    env.generate=generation
+    result=env.step()
+    assert result.executed_control_steps==controls and result.truncated==truncated
+    assert not result.terminated and result.next_context is not None
+    assert result.control_tick_end==600+12*controls
+    assert sum(env.budget.actual)==controls
+    assert result.metadata['event_penalty_total']==0
+    assert any(method=='commit_plan' for method,_ in backend.calls)==(not truncated)
+    if truncated:
+        assert result.reason=='reference_horizon_truncated'
+        assert result.metadata['reference_execution_boundary']['simulated_arrival_tick']==1068
+        assert any(method=='discard_plan' for method,_ in backend.calls)
+    RolloutBuffer().append(result)

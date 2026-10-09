@@ -322,6 +322,10 @@ class UpperEnvironment:
             self._save_evidence(invalid, path)
             raise
 
+    def _execution_boundary(self, generated, arrival, ready_tick):
+        """原单环境不增加行政边界；向量子类仅在显式参考合同下覆盖。"""
+        return None
+
     def _step_impl(self, *, deterministic=False):
         start = int(self.snapshot['tick'])
         if start%300:
@@ -333,10 +337,12 @@ class UpperEnvironment:
                  if self.timing_contract == 'deployment_critical.v2' else generated['elapsed'])
         arrival = start if self.mode=='paused' else ceil_control_tick(start+600*delay)
         ready_tick = max(start+300, int(math.ceil(arrival/300))*300)
+        boundary = self._execution_boundary(generated, arrival, ready_tick)
+        execution_end = min(self.music_end_tick, boundary['tick']) if boundary else self.music_end_tick
         rows, rewards, details, events = [], [], [], []
         commit, rejection = None, generated['rejection']
         pending = candidate is not None
-        while not self.snapshot['done'] and self.snapshot['tick'] < self.music_end_tick:
+        while not self.snapshot['done'] and self.snapshot['tick'] < execution_end:
             tick = int(self.snapshot['tick'])
             if pending and tick >= arrival:
                 commit_begin = time.perf_counter()
@@ -353,7 +359,7 @@ class UpperEnvironment:
                 pending = False
             if not pending and tick >= ready_tick:
                 break
-            stop = min(self.music_end_tick, arrival if pending and arrival>tick else ready_tick,
+            stop = min(execution_end, arrival if pending and arrival>tick else ready_tick,
                        ((tick//300)+1)*300)
             for row in self._advance(min(25,(stop-tick)//12)):
                 result = self.reward.evaluate_step(row)
@@ -372,8 +378,10 @@ class UpperEnvironment:
             self.backend.call('discard_plan',prepared_plan_id=candidate['prepared_plan_id'])
         end = int(self.snapshot['tick'])
         terminated = bool(self.snapshot.get('terminated',False) or end >= self.music_end_tick)
-        truncated = bool(self.snapshot.get('truncated',False) or (not terminated and end>=self.soft_end_tick))
-        reason = self.snapshot.get('reason') or ('music_end' if terminated else 'collection_limit' if truncated else None)
+        boundary_reached = bool(boundary and end>=boundary['tick'] and not terminated)
+        truncated = bool(self.snapshot.get('truncated',False) or (not terminated and end>=self.soft_end_tick) or boundary_reached)
+        reason = self.snapshot.get('reason') or ('music_end' if terminated else
+            boundary['reason'] if boundary_reached else 'collection_limit' if truncated else None)
         rejected_action = bool(rejection and rejection.get('policy_penalty',
             rejection.get('code') in {'invalid_qpos','invalid_quaternion','invalid_plan_output','known_source_changed'}))
         event_reward = self.reward.event_reward('reference_rejected') if rejected_action else 0.
@@ -411,6 +419,7 @@ class UpperEnvironment:
             timing_contract=self.timing_contract, timing=generated.get('timing', {}),
             critical_ready_seconds=generated.get('critical_ready_seconds', generated['elapsed']),
             commit_seconds=generated.get('commit_seconds',0.),terminal_snapshot=cpu_copy(self.snapshot))
+        if boundary is not None:metadata['reference_execution_boundary']=dict(boundary,reached=boundary_reached)
         if deterministic:
             return dict(metadata=metadata,rewards=rewards,terminated=terminated,truncated=truncated,
                         executed_control_steps=len(rows),reason=reason)

@@ -73,7 +73,7 @@ def main():
         physics_device='cuda:0',gmt_precision='float32',asset_conversion_dir=str(output/'usd'),headless=True,video_path=None,
         prefix_deadline_contract=DEADLINE_CONTRACT,vector_audit_contract='nested_world_journal_excluded.v1',
         vector_reward_contract='stage10.gpu_vector_continuous_reward.v1',
-        vector_fragment_contract='available_reference_fragment_boundary.v2')
+        vector_fragment_contract='available_reference_fragment_boundary.v3')
     from gem.closedloop.dppo.vector_devices import bind_vector_device
     device_environment=bind_vector_device(config,rank)
     if args.resume and not args.updates:raise ValueError('Resume requires the complete finite training mode')

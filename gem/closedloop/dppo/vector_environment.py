@@ -31,6 +31,29 @@ def bounded_reference_deadline(snapshot, requested, *, minimum_prefix=12):
 
 
 class VectorUpperEnvironment(UpperEnvironment):
+    def _execution_boundary(self, generated, arrival, ready_tick):
+        from .vector_boundary import fragment_reference_boundary,FRAGMENT_CONTRACT
+        supported=fragment_reference_boundary(self.snapshot)
+        # 迟于已承诺deadline的票据不可能安装。到达前仅执行现有真实参考，最多到
+        # 仍具有合法bootstrap条件的网格点；不得在参考耗尽后虚构GMT输入。
+        cannot_extend=generated['prepared'] is None or arrival>generated['meta']['deadline_tick']
+        if cannot_extend and ready_tick>supported:
+            return dict(tick=supported,reason='reference_horizon_truncated',contract=FRAGMENT_CONTRACT,
+                simulated_arrival_tick=arrival,deadline_tick=generated['meta']['deadline_tick'],
+                pending_plan_scope='discarded_at_administrative_boundary_without_commit')
+        return None
+
+    def step(self, **kwargs):
+        from .vector_boundary import fragment_reference_boundary,FRAGMENT_CONTRACT
+        row=super().step(**kwargs)
+        if not kwargs.get('deterministic',False) and not row.terminated:
+            if fragment_reference_boundary(self.snapshot)==self.snapshot['tick']:
+                row.truncated=True;row.reason='reference_horizon_truncated'
+                row.metadata['reference_boundary_reset']=dict(contract=FRAGMENT_CONTRACT,tick=self.snapshot['tick'])
+            if not row.executed_control_steps:
+                raise ExecutionIntegrityError('GPU collection cannot count a zero-control administrative action')
+        return row
+
     def _request(self):
         request=super()._request()
         request['deadline_tick'],self.deadline_diagnostic=bounded_reference_deadline(

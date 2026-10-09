@@ -24,7 +24,7 @@ runtime:
   vector_audit_contract: nested_world_journal_excluded.v1
   vector_reward_contract: stage10.gpu_vector_continuous_reward.v1
   vector_device_contract: isaac_global_gpu_index.v1
-  vector_fragment_contract: available_reference_fragment_boundary.v2
+  vector_fragment_contract: available_reference_fragment_boundary.v3
   genmo_device: cuda:0
   allow_shared_gpu: false
   physics_device: cuda:0
