@@ -7,7 +7,7 @@
 
 物理世界在普通轮之间连续存在。断点只保存逻辑游标、环境身份、随机计数及已耗预算，
 恢复明确开始新的物理episode。封存/换日志必须在所属线程及一致边界进行；不能在
-后台压缩的同时继续改写旧目录。此模块不修改DPPO、BC、GAE、KL或全局160条的定义。
+后台压缩的同时继续改写旧目录。全局链数从显式规模配置推导，本模块不改变DPPO、BC、GAE或KL。
 """
 from __future__ import annotations
 
@@ -152,11 +152,14 @@ class VectorTrainingRuntime:
         def close_local():
             used = {key:0 for key in phase.per_rank[c.distributed.rank]}
             paths = []
+            budget_timings = []
             def close_slot(state):
                 resource = state.resource
                 record = resource.env.budget.state_dict()
                 resource.journal.close()
                 resource.env.budget.close()
+                if hasattr(resource.env.budget, 'timing'):
+                    budget_timings.append(resource.env.budget.timing())
                 return record['used'], [str(resource.journal.path),str(resource.env.budget.database)]
             for executor, state in zip(self.collector.executors, self.collector.states):
                 if state is not None:
@@ -168,6 +171,7 @@ class VectorTrainingRuntime:
                 return str(world.journal.path)
             paths.append(self.collector.world_idle(close_world))
             phase.parent.reserve('completed_vector_execution', **used)
+            self.last_budget_timings = budget_timings
             return paths
         paths = local_call(c.distributed, close_local)
         self.closed_journals = paths
@@ -239,6 +243,10 @@ class VectorTrainingRuntime:
             atomic_json(path/'collection.json',report)
         local_call(c.distributed,persist)
         self._finish_phase()
+        report['budget_persistence'] = dict(environments=getattr(self, 'last_budget_timings', []),
+            scope='bounded_synchronous_flush_included_in_collection_walltime')
+        report['through_persistence_seconds'] = time.perf_counter()-started
+        local_call(c.distributed, lambda: atomic_json(path/'collection.json', report))
         return buffer,targets,manifest,directory,path,report
 
     def checkpoint_state(self):

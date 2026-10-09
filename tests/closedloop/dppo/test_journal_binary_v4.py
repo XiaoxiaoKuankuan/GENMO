@@ -23,7 +23,23 @@ def reply():
     a = np.arange(48, dtype='>f8').reshape(4,12)[:,::2]
     return dict(backend_session_id='session', mutation_seq=1, episode_id='e',
         value=a, same=a, bools=np.array([True,False]), names=np.array(['脚','foot']),
-        scalar=np.array(3.,dtype=np.float32), failure=[float('nan'),float('inf'),-float('inf')])
+                scalar=np.array(3.,dtype=np.float32), failure=[float('nan'),float('inf'),-float('inf')])
+
+
+def test_readonly_control_views_preserve_all_values_and_reject_mutation():
+    from gem.runtime.trajectory_blocks import pack_trace, unpack_trace
+    rows = [dict(tick=i*12, qpos=np.arange(28, dtype=np.float32)+i,
+                 substeps=[dict(force=np.arange(6, dtype=np.float64)+j) for j in range(4)],
+                 names=['left','right']) for i in range(25)]
+    block = pack_trace(rows)
+    original = encode_binary(block)
+    copied, views = unpack_trace(block), unpack_trace(block, readonly_views=True)
+    compare(copied, views)
+    for row in views:
+        assert np.shares_memory(row['qpos'], block['columns']['fields']['qpos']['values'])
+        with pytest.raises(ValueError): row['qpos'][0] = 999.
+    views[0]['names'][0] = 'changed'
+    assert encode_binary(block) == original
 
 
 def test_binary_canonical_raw_fields_and_old_read(tmp_path):

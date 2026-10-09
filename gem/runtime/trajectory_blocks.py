@@ -39,7 +39,7 @@ def pack_trace(rows):
     return dict(schema=VERSION, count=len(rows), columns=column(rows) if rows else None)
 
 
-def unpack_trace(block):
+def unpack_trace(block, *, readonly_views=False):
     if set(block) != {'schema','count','columns'} or block['schema'] != VERSION:
         raise ValueError('Unsupported trajectory block')
     count = block['count']
@@ -69,17 +69,21 @@ def unpack_trace(block):
                 raise ValueError('Trace column count mismatch')
             if kind in ('array','scalar') and (not isinstance(values,np.ndarray) or values.dtype.hasobject):
                 raise ValueError('Invalid trace array column')
+            if kind == 'array' and readonly_views:
+                result = [values[i].view() for i in range(count)]
+                for item in result: item.setflags(write=False)
+                return result
             return [(values[i].copy() if kind=='array' else values[i].item() if kind=='scalar' else copy.deepcopy(values[i])) for i in range(count)]
         raise ValueError('Invalid trace column kind')
     return decode(block['columns'])
 
 
-def expand_feedback(reply):
+def expand_feedback(reply, *, readonly_views=False):
     """在 journal 已保存并 ACK 后，为奖励/旧审计恢复完整逐行视图。"""
     if isinstance(reply,dict) and 'trace_block' in reply:
         if 'trace' in reply:
             raise ValueError('Reply cannot contain two authoritative traces')
-        return {k:v for k,v in reply.items() if k!='trace_block'} | {'trace':unpack_trace(reply['trace_block'])}
+        return {k:v for k,v in reply.items() if k!='trace_block'} | {'trace':unpack_trace(reply['trace_block'], readonly_views=readonly_views)}
     return reply
 
 

@@ -177,7 +177,7 @@ class WorldEnvironmentCollector(VectorEnvironmentCollector):
                                 if operation.method=='reset_episode' and error is None:backend.episode_id=value['episode_id']
                                 if operation.method=='advance' and error is None:
                                     from gem.runtime.trajectory_blocks import expand_feedback
-                                    value={**expand_feedback(value), 'backend_session_id':backend.session_id,'mutation_seq':backend.sequence}
+                                    value={**expand_feedback(value, readonly_views=True), 'backend_session_id':backend.session_id,'mutation_seq':backend.sequence}
                             backend.last_call_timing=dict(method=operation.method,total_seconds=time.perf_counter()-begin,
                                 journal_seconds=0.,critical_seconds=time.perf_counter()-begin,
                                 audit_scope='authoritative_world_journal_plus_reference_index')
@@ -228,7 +228,18 @@ class WorldEnvironmentCollector(VectorEnvironmentCollector):
         for slot in range(self.num_envs):self._resource(slot)
         self.world_call('begin_rollout',env_ids=list(range(self.num_envs)))
         signature=self.policy._parameter_signature();self.batch_reports=[];self.world_timing={};started=time.perf_counter()
-        fragments=self._drive({slot:self._fragment_flow(slot,count_per_rank//self.num_envs,policy_version) for slot in range(self.num_envs)})
+        before = [state.transitions for state in self.states]
+        try:
+            fragments=self._drive({slot:self._fragment_flow(slot,count_per_rank//self.num_envs,policy_version) for slot in range(self.num_envs)})
+        except BaseException as error:
+            from .budget import atomic_json
+            atomic_json(self.states[0].resource.env.output.parent/'failed_world_progress.json', dict(
+                status='failed', error_type=type(error).__name__, error=str(error), policy_version=policy_version,
+                requested_transitions=count_per_rank, completed_per_environment=[
+                    state.transitions-value for state,value in zip(self.states,before)],
+                seconds=time.perf_counter()-started, batches=self.batch_reports, world_timing=self.world_timing,
+                audit_seconds=self.audit_seconds, partial_execution_is_not_accepted_rollout=True))
+            raise
         self.world_call('end_rollout',env_ids=list(range(self.num_envs)))
         if signature!=self.policy._parameter_signature():raise RuntimeError('Policy changed during collection')
         rows=[fragments[i] for i in range(self.num_envs)]
