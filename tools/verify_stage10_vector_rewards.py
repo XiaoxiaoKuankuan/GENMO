@@ -88,6 +88,8 @@ def main():
                 torch.cuda.synchronize();transfer_seconds+=time.perf_counter()-began
                 began=time.perf_counter();value=engine.compute(**arguments);torch.cuda.synchronize()
                 gpu_seconds+=time.perf_counter()-began
+                # 模拟25控制步后才传回CPU：旧奖励的全部时间字段必须是独立快照。
+                arguments['ticks'].add_(288)
                 value=to_host(value)
                 for index,row in enumerate(rows):
                     result=select_env(value,index)['components']

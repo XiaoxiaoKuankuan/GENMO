@@ -38,6 +38,8 @@ class VectorRewardMath:
     def compute(self, *, tracking, errors, substeps, actual_joint_pos, reference_joint_pos,
                 terminated, active, ticks):
         if len(substeps)!=4:raise ValueError('GPU reward requires four true physical substeps')
+        # 多个控制步先保留GPU证据再批量转移；不能引用随后会原位递增的环境时钟。
+        ticks=ticks.clone()
         cfg=self.config;last=substeps[-1];checks=[]
         def number(value):
             value=value.double()
