@@ -50,12 +50,14 @@ def differences(left, right, path='', output=None):
     if len(output) >= 20:
         return output
     if isinstance(left, np.ndarray) and isinstance(right, np.ndarray):
-        if left.dtype != right.dtype or left.shape != right.shape or not np.array_equal(left, right, equal_nan=True):
+        equal_nan=left.dtype.kind in 'fc' and right.dtype.kind in 'fc'
+        if left.dtype != right.dtype or left.shape != right.shape or not np.array_equal(left, right, equal_nan=equal_nan):
             output.append(dict(path=path, kind='array', shapes=[list(left.shape), list(right.shape)],
-                max_abs=float(np.max(np.abs(left.astype(float)-right.astype(float)))) if left.shape==right.shape else None))
+                max_abs=float(np.max(np.abs(left.astype(float)-right.astype(float))))
+                if left.shape==right.shape and left.dtype.kind in 'iufc' and right.dtype.kind in 'iufc' and left.size else None))
     elif isinstance(left, dict) and isinstance(right, dict):
         ignored={'backend_session_id','cpu_timing','prepare_seconds','gmt_inference_seconds',
-                 'physics_seconds','video_capture_seconds','step_seconds','trace_block_encode_seconds'}
+                 'physics_seconds','video_capture_seconds','step_seconds','trace_encoding_seconds'}
         keys=(set(left)|set(right))-ignored
         for key in sorted(keys):
             if key=='schema' and {left.get(key),right.get(key)} <= {
