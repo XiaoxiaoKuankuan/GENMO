@@ -635,8 +635,11 @@ def _update_cached(c, buffer, targets, manifest, index):
     # 一份共享模型/Adam 快照只在 rank0 创建；各 rank 只保存自己的轻量更新随机状态。
     with measure('update.rollback_cpu_snapshot', gpu=True):
         backup = (cpu_snapshot(dict(actor=c.actor.state_dict(), critic=c.critic.state_dict(),
-            actor_optimizer=c.actor_optimizer.state_dict(), critic_optimizer=c.critic_optimizer.state_dict(),
-            bc=None if c.bc is None else c.bc.state_dict())) if c.distributed.rank == 0 else None)
+            actor_optimizer=c.actor_optimizer.state_dict(), critic_optimizer=c.critic_optimizer.state_dict()))
+            if c.distributed.rank == 0 else None)
+    # BC已由八个独立随机流采样，不能把rank0游标广播给其他rank冒充整轮恢复。
+    # 此状态很小；共享大模型仍只有一份权威CPU快照。
+    bc_before = None if c.bc is None else cpu_snapshot(c.bc.state_dict())
     rng = capture_local_rng(c.generators)
     actor, critic, kl = {}, {}, {}
     timings = dict(critic_seconds=0., actor_seconds=0., kl_seconds=0.)
@@ -695,7 +698,7 @@ def _update_cached(c, buffer, targets, manifest, index):
         c.actor_optimizer.load_state_dict(restored['actor_optimizer'])
         c.critic_optimizer.load_state_dict(restored['critic_optimizer'])
         if c.bc is not None:
-            c.bc.load_state_dict(restored['bc'])
+            c.bc.load_state_dict(bc_before)
         restore_local_rng(rng, c.generators)
         c.actor_optimizer.zero_grad(set_to_none=True); c.critic_optimizer.zero_grad(set_to_none=True)
         from .rollback_audit import compare_recovered_state
@@ -704,7 +707,7 @@ def _update_cached(c, buffer, targets, manifest, index):
             actual = dict(actor=c.actor.state_dict(), critic=c.critic.state_dict(),
                 actor_optimizer=c.actor_optimizer.state_dict(), critic_optimizer=c.critic_optimizer.state_dict())
             if c.bc is not None:
-                expected['bc'], actual['bc'] = restored['bc'], c.bc.state_dict()
+                expected['bc'], actual['bc'] = bc_before, c.bc.state_dict()
             expected['rng'], actual['rng'] = rng, capture_local_rng(c.generators)
             return compare_recovered_state(expected, actual)
         recovery = c.distributed.all_gather_object(local_call(c.distributed, audit_recovery))
