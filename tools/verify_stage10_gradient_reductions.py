@@ -100,6 +100,8 @@ def main():
         parser.add_argument('--'+key, type=Path, required=True)
     parser.add_argument('--microbatches', nargs='+', type=int, default=[64, 128, 256])
     parser.add_argument('--accumulator-repeats', type=int, default=5)
+    parser.add_argument('--warmstart-adam', action='store_true',
+                        help='先用原真实rollout执行一次参考PPO更新，固定得到的非空Adam供所有候选比较')
     args = parser.parse_args()
     rank, world = int(os.environ['RANK']), int(os.environ['WORLD_SIZE'])
     if world != 8 or rank != int(os.environ['LOCAL_RANK']):
@@ -126,6 +128,18 @@ def main():
         dict(owner_rank=rank, local_index=i, valid=row.transition_valid, has_free=bool(row.free_mask.any()))
         for i, row in enumerate(rows)]) for item in shard]
     selected = [i for i, item in enumerate(manifest) if item['valid'] and item['has_free']]
+    source_actor = payload['actor']
+    if args.warmstart_adam:
+        probability_check_local(policy, rows, denoising_microbatch=32, tensor_cache=cache,
+                                distributed=collective, global_manifest=manifest)
+        warm_optimizer = torch.optim.AdamW(trainable_actor_parameters(actor), lr=5e-9, weight_decay=0.)
+        warm_optimizer.load_state_dict(copy.deepcopy(payload['actor_optimizer']))
+        actor_update_v2(policy, warm_optimizer, rows, targets, global_manifest=manifest, distributed=collective,
+            ppo_epochs=1, epoch_orders=[selected], actor_minibatch_internal_transitions=len(selected)*policy.steps,
+            max_optimizer_steps=1, denoising_microbatch=32, soft_kl_limit=None, gradient_diagnostics=False,
+            tensor_cache=cache, kl_check_mode='pre_step_plus_final')
+        payload = dict(actor=cpu_snapshot(actor.state_dict()), actor_optimizer=cpu_snapshot(warm_optimizer.state_dict()))
+        del warm_optimizer
     sensitive = [name for name, _ in actor.named_parameters() if any(
         word in name for word in ('gate_', 'norm', 'history_encoder', 'prefix_encoder', 'cond_embed'))]
     variants = [('sample_bmm', 'fp64_reference', 1)]
@@ -135,11 +149,12 @@ def main():
         for micro in args.microbatches]
     report = dict(schema='stage10.gradient_reduction_audit.v1', devices=devices,
         source_archive_sha256=archive_sha, real_global_chains=len(manifest),
-        preserved_old_probabilities=True, restored_nonempty_adam=bool(payload['actor_optimizer']['state']),
+        preserved_old_probabilities=True, nonempty_adam=bool(payload['actor_optimizer']['state']),
+        adam_origin='one_fixed_real_PPO_warmup_step' if args.warmstart_adam else 'source_checkpoint',
         sensitive_parameter_names=sensitive, numerical_reference='sample_bmm_fp64_accumulator_B1', results=[])
     reference = None
     for reduction, accumulation, micro in variants:
-        actor.load_state_dict(payload['actor']); actor.zero_grad(set_to_none=True)
+        actor.load_state_dict(source_actor); actor.zero_grad(set_to_none=True)
         configure_gradients(actor, weight_reduction=reduction, accumulation=accumulation, sensitive_names=sensitive)
         optimizer = torch.optim.AdamW(trainable_actor_parameters(actor), lr=5e-9, weight_decay=0.)
         optimizer.load_state_dict(copy.deepcopy(payload['actor_optimizer']))
@@ -147,6 +162,8 @@ def main():
             param_group['lr'] = 5e-9
         check = probability_check_local(policy, rows, denoising_microbatch=micro,
             tensor_cache=cache, distributed=collective, global_manifest=manifest)
+        # warmstart后的参数相对采集旧策略已改变；零更新检查必须在原采集参数上执行。
+        actor.load_state_dict(payload['actor'])
         gradients = {}
         def observe(model, step):
             if rank == 0:
