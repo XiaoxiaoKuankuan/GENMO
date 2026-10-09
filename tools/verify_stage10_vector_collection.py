@@ -12,7 +12,6 @@ import argparse
 import copy
 from datetime import timedelta
 import json
-import hashlib
 import os
 from pathlib import Path
 import sys
@@ -50,6 +49,9 @@ def main():
     p.add_argument('--num-envs',type=int,default=8)
     p.add_argument('--rounds',type=int,default=2)
     p.add_argument('--data-audit',type=Path,help='显式复用完整数据审计报告；仍核对清单并逐次核验实际加载文件')
+    p.add_argument('--updates',action='store_true',help='采集后运行原完整DPPO/BC/Critic更新与KL验收')
+    p.add_argument('--resume',type=Path,help='仅恢复本工具完整GPU向量验收断点')
+    p.add_argument('--stop-after-iteration',type=int,help='有限验收提前正常退出，例如第一轮保存后退出进程')
     args=p.parse_args()
     rank,world=int(os.environ['RANK']),int(os.environ['WORLD_SIZE'])
     if world!=8 or rank!=int(os.environ['LOCAL_RANK']):raise ValueError('Single-node eight GPUs required')
@@ -63,16 +65,24 @@ def main():
         compat_profile=str(args.gmt_repo/'configs/sim2sim/model_135000_stage2.json'))
     config['runtime'].update(rank=rank,genmo_device=f'cuda:{rank}',backend='gpu_vectorized.v1',num_envs=args.num_envs,
         physics_device='cuda:0',gmt_precision='float32',asset_conversion_dir=str(output/'usd'),headless=True,video_path=None)
-    config['stage9']['run_id']='vector-finite-'+str(uuid.uuid4())
+    if args.resume and not args.updates:raise ValueError('Resume requires the complete finite training mode')
+    config['stage9']['run_id']=root_call(collective,lambda:'vector-finite-'+str(uuid.uuid4()))
     torch.cuda.set_device(rank);torch.set_num_threads(1)
     torch.backends.cuda.matmul.allow_tf32=torch.backends.cudnn.allow_tf32=False
-    actor,_,_=local_call(collective,lambda:load_actor(config))
+    actor,train_config,_=local_call(collective,lambda:load_actor(config))
     policy=DPPODiffusionPolicy(actor,steps=20,eta=config['stage9']['eta'],std_floor=config['stage9']['std_floor'],
         guidance_scale=config['stage9']['guidance_scale'],cfg_batch=True,numerical_layout='sample_matrix_bmm_fp32.v1',defer_checks=True)
     catalog=FullMusicCatalog(config['paths']['data_root'])
     audit=root_call(collective,lambda:json.loads(args.data_audit.read_text()) if args.data_audit else catalog.audit_files(require_audio=True))
     catalog.apply_audit(audit)
     root_call(collective,lambda:(args.output/'data_audit.json').write_text(json.dumps(audit,ensure_ascii=False)))
+    learner=None
+    if args.updates:
+        group=dist.new_group(backend='nccl',timeout=timedelta(minutes=10))
+        collective=DistributedCollectives(rank,world,tensor_group=group,device=f'cuda:{rank}')
+        from gem.closedloop.dppo.vector_validation_learning import FiniteVectorLearner
+        learner=FiniteVectorLearner(actor,policy,train_config,config,collective,args.output,
+            max_iterations=args.rounds,num_envs=args.num_envs)
     config_path=output/'resolved_config.yaml';config_path.write_text(yaml.safe_dump(config,allow_unicode=True))
     workers=Workers(config,output);collector=None;journal=None
     report=dict(rank=rank,rounds=[],status='started',num_envs=args.num_envs,
@@ -91,6 +101,9 @@ def main():
         def factory(slot,proxy):
             directory=output/f'env{slot:03d}';directory.mkdir()
             lane_journal=GuardedStepJournal(directory/'execution_journal.sqlite',guard,format='genmo.execution_journal.ndarray.v2')
+            if collector.restore_records is not None and collector.restore_records[slot] is not None:
+                from gem.closedloop.dppo.budget import atomic_json
+                atomic_json(directory/'budget.json',collector.restore_records[slot]['budget'])
             budget=IncrementalBudget(directory/'budget.json',dict(accepted_iterations=args.rounds,optimizer_attempts=1,
                 generations=200,control_steps=15000,physics_steps=60000),disk_guard=guard)
             backend=VectorLaneBackend(collector.lane_client(slot),lane_journal)
@@ -102,11 +115,21 @@ def main():
                 lane_journal.close();budget.close();backend.client.close()
             return SimpleNamespace(env=env,sampler=sampler,close=close)
         collector=VectorEnvironmentCollector(policy,factory,world_factory,num_envs=args.num_envs)
-        report['calibration']=local_call(collective,lambda:collector.calibrate())
-        (output/'calibration.json').write_text(json.dumps(report['calibration'],indent=2))
-        for iteration in range(args.rounds):
+        if args.resume:
+            report['restored']=learner.restore(args.resume,collector)
+        else:
+            report['calibration']=local_call(collective,lambda:collector.calibrate())
+            (output/'calibration.json').write_text(json.dumps(report['calibration'],indent=2))
+        start=0 if learner is None else learner.iteration
+        stop=args.rounds if args.stop_after_iteration is None else args.stop_after_iteration
+        if not start<stop<=args.rounds:raise ValueError('Invalid finite iteration boundary')
+        for iteration in range(start,stop):
             collective.barrier()
-            fragments,timing=local_call(collective,lambda:collector.collect(count_per_rank=20,policy_version=0))
+            outer_begin=time.perf_counter()
+            version=0 if learner is None else learner.policy_version
+            for state in collector.states:
+                if state is not None:state.resource.env.iteration=iteration
+            fragments,timing=local_call(collective,lambda:collector.collect(count_per_rank=20,policy_version=version))
             rows=[r for fragment in fragments for r in fragment]
             if len(rows)!=20:raise AssertionError('Real local batch changed')
             torch.save(fragments,output/f'rollout_{iteration:06d}.pt')
@@ -124,9 +147,13 @@ def main():
             timing.update(probability=check,control_steps=sum(r.executed_control_steps for r in rows),
                 reward=sum(float(r.rewards.sum()) for r in rows),physical_failures=sum(bool(r.metadata.get('terminal_snapshot',{}).get('terminated')) for r in rows),
                 peak_memory_allocated=torch.cuda.max_memory_allocated(),frozen=frozen)
+            if learner is not None:
+                timing['update']=learner.update(fragments)
+                timing['outer_seconds_excluding_checkpoint']=time.perf_counter()-outer_begin
+                timing['checkpoint']=learner.save(collector,args.output/f'checkpoint_{learner.iteration:06d}.pt')
             report['rounds'].append(timing)
             (output/'report.json').write_text(json.dumps(report,ensure_ascii=False,indent=2))
-        report.update(status='passed',scope='real_vector_collection_and_probability_no_DPPO')
+        report.update(status='passed',scope='real_vector_full_DPPO_finite_validation' if learner else 'real_vector_collection_and_probability_no_DPPO')
         results=collective.all_gather_object(report)
         if rank==0:(args.output/'report.json').write_text(json.dumps(dict(status='passed',ranks=results,devices=devices),ensure_ascii=False,indent=2))
     except BaseException as e:

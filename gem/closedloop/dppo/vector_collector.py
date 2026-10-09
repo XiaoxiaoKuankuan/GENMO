@@ -71,6 +71,7 @@ class VectorEnvironmentCollector(DualEnvironmentCollector):
         self.rpc_pending={}
         self.rpc_sequence=0
         self.world_timing={}
+        self.restore_records=None
         self.world_commands=queue.Queue()
         self.rpc_stop=threading.Event()
         self.rpc_error=None
@@ -185,6 +186,7 @@ class VectorEnvironmentCollector(DualEnvironmentCollector):
             env=state.resource.env
             return dict(execution=dict(capture_execution_state(env),policy_version=env.policy_version,iteration=env.iteration),sampler=state.resource.sampler.state_dict(),
                 transitions=state.transitions,seed=env.config['stage9']['seed'],
+                budget=env.budget.state_dict(),
                 ended_physical_episode=None if state.task is None else dict(episode_id=env.snapshot['episode_id'],tick=env.snapshot['tick']))
         saved=[None]*self.num_envs
         for i,(executor,state) in enumerate(zip(self.executors,self.states)):
@@ -199,6 +201,7 @@ class VectorEnvironmentCollector(DualEnvironmentCollector):
                 or saved.get('numerical_layout')!=self.policy.numerical_layout or len(saved['states'])!=self.num_envs):
             raise ValueError('Vector execution topology/contract differs from checkpoint')
         from .dual_collector import _QueuedPolicy
+        self.restore_records=saved['states']
         def restore(slot,record):
             from tools.train_closedloop_stage10 import restore_execution_state
             resource=self.factory(slot,_QueuedPolicy(self,slot))
@@ -209,6 +212,7 @@ class VectorEnvironmentCollector(DualEnvironmentCollector):
             # 旧物理episode明确结束，新world不会伪称中途PhysX恢复。
             self.states[slot]=SimpleNamespace(resource=resource,task=None,transitions=record['transitions'])
         self._run_boundary_jobs([self.executors[i].submit(restore,i,r) for i,r in enumerate(saved['states']) if r is not None])
+        self.restore_records=None
 
     def _fragment(self,slot,count,policy_version):
         if self.states[slot] is not None and self.states[slot].task is not None:
