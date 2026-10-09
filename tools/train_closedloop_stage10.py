@@ -172,7 +172,7 @@ def _sources(config, check):
                   'updater_v2', 'position_repair', 'archives', 'archive_process', 'optional_diagnostics',
                   'performance', 'tensor_cache', 'asset_cache', 'rollout_storage', 'budget_ledger',
                   'batch_execution', 'execution_checks', 'journal_codec', 'dual_collector')
-    vector = config['runtime'].get('backend') == 'gpu_vectorized.v1'
+    vector = config.get('runtime',{}).get('backend') == 'gpu_vectorized.v1'
     if vector:
         names += ('vector_collector','vector_boundary','vector_environment','vector_runtime','vector_evaluation','rollback_audit')
     gmt_additional = ['source/NoetixRobot/NoetixRobot/tasks/mimic/mimic_noetix_bumi4340_mha_sonic/closedloop/execution_journal.py']
