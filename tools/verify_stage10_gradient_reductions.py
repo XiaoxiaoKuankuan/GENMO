@@ -187,7 +187,7 @@ def main():
                                 distributed=collective, global_manifest=manifest)
         warm_optimizer = torch.optim.AdamW(trainable_actor_parameters(actor), lr=args.actor_lr, weight_decay=0.)
         warm_optimizer.load_state_dict(copy.deepcopy(payload['actor_optimizer']))
-        for group in warm_optimizer.param_groups: group['lr'] = args.actor_lr
+        for parameter_group in warm_optimizer.param_groups: parameter_group['lr'] = args.actor_lr
         actor_update_v2(policy, warm_optimizer, rows, targets, global_manifest=manifest, distributed=collective,
             ppo_epochs=1, epoch_orders=[selected], actor_minibatch_internal_transitions=len(selected)*policy.steps,
             max_optimizer_steps=1, denoising_microbatch=32, soft_kl_limit=None, gradient_diagnostics=False,
