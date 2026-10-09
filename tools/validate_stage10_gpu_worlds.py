@@ -31,6 +31,8 @@ def main():
     parser.add_argument('--output',type=Path,required=True)
     parser.add_argument('--num-envs',type=int,default=8)
     parser.add_argument('--deadline-seconds',type=int,default=600)
+    parser.add_argument('--benchmark-repeats',type=int,default=0)
+    parser.add_argument('--diagnostic-limit',type=int,default=32)
     args=parser.parse_args()
     devices=_available_gpus()
     if args.output.exists(): raise FileExistsError(args.output)
@@ -50,7 +52,8 @@ def main():
             log=(args.output/f'rank{rank:02d}.log').open('w')
             command=[str(args.isaac_python),'-B',str(args.gmt_repo/'scripts/rsl_rl/check_frozen_vector_world.py'),
                 '--config',str(args.config),'--output',str(args.output/f'rank{rank:02d}'),
-                '--genmo-repo',str(ROOT),'--rank',str(rank),'--num-envs',str(args.num_envs),'--headless']
+                '--genmo-repo',str(ROOT),'--rank',str(rank),'--num-envs',str(args.num_envs),
+                '--benchmark-repeats',str(args.benchmark_repeats),'--diagnostic-limit',str(args.diagnostic_limit),'--headless']
             owner=os.getpid()
             def parent_guard():
                 if ctypes.CDLL(None).prctl(1,signal.SIGKILL)!=0:os._exit(125)

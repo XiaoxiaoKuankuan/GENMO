@@ -208,19 +208,23 @@ class DPPODiffusionPolicy:
             return result
         with torch.autocast(device_type=selected['known_qpos30'].device.type, enabled=False):
             adapted = self.actor.adapt_conditions(selected)
-            residual = self.actor._residual(adapted)
-            conditional = self.actor._music_condition(adapted) + residual
-            unconditional = None
-            if self.guidance_scale != 1.:
-                # 全无音乐分支无需计算随后必定置零的music MLP。存在性嵌入仍参与梯度。
-                empty = torch.zeros_like(residual)
-                if self.actor.cond_exists_embedder is not None:
-                    flag = empty.new_zeros((*empty.shape[:-1], 1))
-                    empty = self.actor.cond_exists_embedder(torch.cat((empty, flag), -1))
-                unconditional = torch.where(adapted['future_valid'][..., None], empty, 0.) + residual
+            conditional, unconditional = self._encode_prepared(adapted)
         return dict(adapted=adapted, conditional=conditional, unconditional=unconditional,
             owner=id(self), inputs=self._input_signature(selected), parameters=self._parameter_signature(),
             grad_enabled=torch.is_grad_enabled())
+
+    def _encode_prepared(self, adapted):
+        """纯张量条件编码；采样图可捕获此段，校验和有梯度条件缓存留在调用边界。"""
+        residual = self.actor._residual(adapted)
+        conditional = self.actor._music_condition(adapted) + residual
+        unconditional = None
+        if self.guidance_scale != 1.:
+            empty = torch.zeros_like(residual)
+            if self.actor.cond_exists_embedder is not None:
+                flag = empty.new_zeros((*empty.shape[:-1], 1))
+                empty = self.actor.cond_exists_embedder(torch.cat((empty, flag), -1))
+            unconditional = torch.where(adapted['future_valid'][..., None], empty, 0.) + residual
+        return conditional, unconditional
 
     def _coefficients(self, device):
         device = torch.device(device)

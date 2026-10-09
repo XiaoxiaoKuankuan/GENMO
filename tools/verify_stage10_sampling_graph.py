@@ -36,6 +36,7 @@ from gem.closedloop.dppo.run_management import file_sha256
 def main():
     p=argparse.ArgumentParser(description=__doc__)
     for key in ('config','iteration','output'):p.add_argument('--'+key,type=Path,required=True)
+    p.add_argument('--target', choices=('denoiser','conditions','both'),default='denoiser')
     a=p.parse_args();rank=int(os.environ['RANK'])
     if int(os.environ['WORLD_SIZE'])!=8:raise ValueError('Eight Server1 GPUs required')
     dist.init_process_group('gloo',timeout=timedelta(minutes=15))
@@ -48,18 +49,28 @@ def main():
     actor,_,_=local_call(group,lambda:load_actor(cfg))
     policy=DPPODiffusionPolicy(actor,cfg_batch=True,numerical_layout='sample_matrix_bmm_fp32.v1',defer_checks=True)
     rows,_,source_sha=local_call(group,lambda:read_saved_rank(a.iteration,rank))
-    original=actor.denoiser.forward;wrapper=install_sampling_graph(actor)
-    report=dict(rank=rank,status='running',source_sha256=source_sha,results=[])
+    original=actor.denoiser.forward;original_condition=policy._encode_prepared
+    wrappers={}
+    if a.target in ('denoiser','both'):wrappers['denoiser']=install_sampling_graph(actor)
+    if a.target in ('conditions','both'):
+        from gem.closedloop.dppo.condition_sampling_graph import install_condition_sampling_graph
+        wrappers['conditions']=install_condition_sampling_graph(policy)
+    def select_graph(enabled):
+        actor.denoiser.forward=wrappers.get('denoiser',original) if enabled else original
+        policy._encode_prepared=wrappers.get('conditions',original_condition) if enabled else original_condition
+    def execution_report():return {name:wrapper.report() for name,wrapper in wrappers.items()}
+    report=dict(rank=rank,status='running',source_sha256=source_sha,target=a.target,results=[])
     def run():
         for batch in (1,4,8):
             selected=rows[:batch]
             context={k:torch.cat([row.context[k] for row in selected]).cuda(rank) for k in selected[0].context}
             def sample():
                 return policy.sample_rollout(context,generator=[torch.Generator(device=f'cuda:{rank}').manual_seed(9000+rank*100+i) for i in range(batch)])
-            actor.denoiser.forward=original
+            select_graph(False)
             eager=sample();torch.cuda.synchronize()
             begin=time.perf_counter();sample();torch.cuda.synchronize();eager_seconds=time.perf_counter()-begin
-            actor.denoiser.forward=wrapper
+            eager_components=dict(policy.last_sample_timing)
+            select_graph(True)
             graph=sample();torch.cuda.synchronize()
             difference={k:float((eager[k]-graph[k]).abs().max()) for k in
                 ('chain','old_means','old_stds','old_log_probs','qpos','contact','contact_logits')}
@@ -73,28 +84,29 @@ def main():
                 check_rows.append(item)
             cache=RolloutTensorCache(check_rows,{},f'cuda:{rank}')
             # 强制有梯度上下文，图模块应走原forward；校验函数内部no_grad也允许图执行。
-            actor.denoiser.forward=original
+            select_graph(False)
             check=probability_check_local(policy,check_rows,denoising_microbatch=32,tensor_cache=cache)
-            actor.denoiser.forward=wrapper
+            select_graph(True)
             with torch.enable_grad():
                 params=policy.transition_parameters(context,graph['chain'][:,0],0)
                 params['mean'].sum().backward()
-            if not wrapper.eager_gradient_calls:raise AssertionError('PPO did not use original gradient path')
+            if not all(w.eager_gradient_calls for w in wrappers.values()):raise AssertionError('PPO did not use original gradient path')
             actor.zero_grad(set_to_none=True);cache.close()
-            times=[]
+            times=[];components=[]
             for _ in range(3):
                 torch.cuda.synchronize();begin=time.perf_counter();sample();torch.cuda.synchronize()
                 times.append(time.perf_counter()-begin)
+                components.append(dict(policy.last_sample_timing))
             report['results'].append(dict(batch=batch,exact_output_difference=difference,probability=check,
-                eager_seconds=eager_seconds,graph_seconds=times))
+                eager_seconds=eager_seconds,graph_seconds=times,eager_components=eager_components,graph_components=components))
         if file_sha256(a.iteration/'execution_evidence.tar.gz')!=source_sha:raise AssertionError('Source changed')
     try:
-        local_call(group,run);report.update(status='passed',execution=wrapper.report())
+        local_call(group,run);report.update(status='passed',execution=execution_report())
     except BaseException as error:
-        report.update(status='failed',error=str(error),execution=wrapper.report())
+        report.update(status='failed',error=str(error),execution=execution_report())
         raise
     finally:
-        actor.denoiser.forward=original
+        select_graph(False)
         records=group.all_gather_object(report)
         if rank==0:a.output.write_text(json.dumps(dict(status='passed' if all(r['status']=='passed' for r in records) else 'failed',ranks=records),ensure_ascii=False,indent=2))
         dist.destroy_process_group()

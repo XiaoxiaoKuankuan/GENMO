@@ -179,7 +179,8 @@ class VectorEnvironmentCollector(DualEnvironmentCollector):
         trace=self.policy.sample_rollout(conditions,generator=[p[2] for p in pending])
         end=time.perf_counter()
         self.batch_reports.append(dict(environment_slots=slots,effective_rows=len(pending),padding_rows=0,
-            generation_seconds=end-begin,queue_wait_seconds=[begin-p[4] for p in pending]))
+            generation_seconds=end-begin,components=dict(self.policy.last_sample_timing),
+            queue_wait_seconds=[begin-p[4] for p in pending]))
         for i,p in enumerate(pending):
             if self.remaining_generations is not None:
                 self.remaining_generations[p[0]]-=1
