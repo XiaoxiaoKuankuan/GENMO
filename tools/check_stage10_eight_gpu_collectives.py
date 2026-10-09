@@ -14,6 +14,8 @@ sys.path.insert(0,str(Path(__file__).resolve().parents[1]))
 import torch
 import torch.distributed as dist
 from tools.train_closedloop_stage10_8gpu import _available_gpus
+from gem.closedloop.dppo.distributed_runtime import DistributedCollectives
+from gem.closedloop.dppo.updater_v2 import _local_phase
 
 
 def main():
@@ -38,6 +40,25 @@ def main():
         expected=8 if op==dist.ReduceOp.MAX else 36
         if not bool((value==expected).all()):raise ValueError('Collective produced incorrect data')
         if rank==0:print(json.dumps(dict(dtype=str(dtype),elements=size,operation=str(op),passed=True)),flush=True)
+    collective=DistributedCollectives(rank,world,tensor_group=group,device=f'cuda:{rank}')
+    for fault,owner in (('nan',0),('simulated_oom',7),('worker_error',3)):
+        caught=False
+        try:
+            with _local_phase(collective,'injected_'+fault):
+                if rank==owner:
+                    if fault=='nan':
+                        value=torch.tensor(float('nan'),device=f'cuda:{rank}')
+                        if not bool(torch.isfinite(value)):raise FloatingPointError('injected nonfinite tensor')
+                    elif fault=='simulated_oom':raise torch.cuda.OutOfMemoryError('injected allocation failure')
+                    else:raise RuntimeError('injected single-rank worker failure')
+        except RuntimeError as error:
+            caught='Cooperative local phase failed' in str(error)
+        if not all(collective.all_gather_object(caught)):raise AssertionError('A rank missed coordinated failure')
+        # 异常传播后仍可通信；此诊断没有optimizer，绝不让某些rank先做更新。
+        if float(collective.sum_tensor(torch.tensor(rank+1.,device=f'cuda:{rank}')))!=36:
+            raise AssertionError('Collective state corrupted after coordinated failure')
+        if rank==0:print(json.dumps(dict(fault=fault,injected_rank=owner,all_eight_failed_before_step=True,
+            memory_exhaustion_actually_allocated=False)),flush=True)
     dist.destroy_process_group(group);dist.destroy_process_group()
 
 
