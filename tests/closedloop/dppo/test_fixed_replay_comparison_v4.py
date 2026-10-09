@@ -5,7 +5,9 @@
 报告，不通过增加数值容差使重放通过。本测试只验证比较器，真实八卡重放另验收。
 """
 import numpy as np
-from tools.replay_stage10_runtime_v4 import differences
+from tools.replay_stage10_runtime_v4 import differences, Recorder
+from gem.runtime.closedloop_protocol import RemoteError
+import pytest
 
 
 def test_reference_string_arrays_and_dtype_preserved():
@@ -25,3 +27,15 @@ def test_wall_clock_exclusion_does_not_hide_critical_arrival_or_state():
     b=dict(a,schema='genmo.gmt_execution_feedback.columns.v3',trace_encoding_seconds=.1)
     assert differences(a,b)==[]
     assert differences(dict(schema='physical.v1'),dict(schema='physical.v2'))
+
+
+def test_recorder_preserves_acknowledged_business_rejection():
+    class Backend:
+        MUTATIONS={'commit_plan'}
+        last_envelope=dict(result=None,error=dict(code='late_plan',message='late_plan',type='ReferenceRejected'))
+        last_call_timing=dict(journal_seconds=.1)
+        def call(self,*a,**k):raise RemoteError(self.last_envelope['error'])
+    recorder=Recorder(Backend())
+    with pytest.raises(RemoteError):recorder.call('commit_plan',prepared_plan_id='p')
+    assert recorder.records==[dict(method='commit_plan',payload=dict(prepared_plan_id='p'),result=None,
+        remote_error=Backend.last_envelope['error'],timing=Backend.last_call_timing)]

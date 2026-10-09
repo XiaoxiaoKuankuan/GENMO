@@ -42,6 +42,7 @@ from gem.closedloop.dppo.target_activity import load_paired_activity
 from gem.closedloop.online_conditions import OnlineConditionBuilder
 from gem.robots.bumi.feature_codec import BumiMotionFeatureCodec
 from gem.robots.bumi.kinematics import BumiKinematics
+from gem.runtime.closedloop_protocol import RemoteError
 
 
 def differences(left, right, path='', output=None):
@@ -81,7 +82,16 @@ class Recorder:
         self.backend,self.records=backend,[]
     def __getattr__(self,name):return getattr(self.backend,name)
     def call(self,method,**payload):
-        value=self.backend.call(method,**payload)
+        try:
+            value=self.backend.call(method,**payload)
+        except RemoteError:
+            # 业务拒绝已经被生产客户端持久化和ACK，也消耗mutation序号，必须原样重放。
+            if method in self.backend.MUTATIONS:
+                envelope=self.backend.last_envelope
+                self.records.append(dict(method=method,payload=copy.deepcopy(payload),
+                    result=copy.deepcopy(envelope['result']),remote_error=copy.deepcopy(envelope['error']),
+                    timing=dict(self.backend.last_call_timing)))
+            raise
         if method in self.backend.MUTATIONS:
             self.records.append(dict(method=method,payload=copy.deepcopy(payload),result=copy.deepcopy(value),
                 timing=dict(self.backend.last_call_timing)))
@@ -174,14 +184,20 @@ def main():
                         method,payload=record['method'],record['payload']
                         if method=='advance':
                             count=payload['control_steps'];budget.reserve('fixed_replay',control_steps=count,physics_steps=count*4)
-                        value=recorder.call(method,**payload)
+                        try:
+                            value=recorder.call(method,**payload)
+                        except RemoteError:
+                            if not record.get('remote_error'):raise
+                            continue
+                        if record.get('remote_error'):raise ValueError('A rejected reference unexpectedly succeeded on replay')
                         if method=='advance':budget.settle_control('fixed_replay',count,value)
                     return recorder.records
                 records=local_call(collective,replay)
             elapsed=time.perf_counter()-start
             rewards=reward_rows(records,child,sample,music)
             if reference_reward is None:reference_reward=rewards
-            diff=differences([r['result'] for r in reference],[r['result'] for r in records])
+            diff=differences([dict(result=r['result'],remote_error=r.get('remote_error')) for r in reference],
+                             [dict(result=r['result'],remote_error=r.get('remote_error')) for r in records])
             reward_diff=differences(reference_reward,rewards)
             trace=[row for r in records if r['method']=='advance' for row in r['result']['trace']]
             timing={}
