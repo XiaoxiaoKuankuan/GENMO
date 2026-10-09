@@ -324,7 +324,13 @@ class VectorEnvironmentCollector(DualEnvironmentCollector):
             self.rpc_pending[key]=(future,started)
             requests.append(dict(env_id=env_id,method=method,payload=payload,request_id=key))
         if not requests:return False
+        call_start=time.perf_counter()
         result=self.world.call('exchange',requests=requests)
+        self.world_timing['world_exchange_wall_seconds']=self.world_timing.get('world_exchange_wall_seconds',0.)+time.perf_counter()-call_start
+        self.world_timing['world_exchange_calls']=self.world_timing.get('world_exchange_calls',0)+1
+        for name in ('journal_seconds','ack_seconds','transport_seconds'):
+            key='world_'+name
+            self.world_timing[key]=self.world_timing.get(key,0.)+(getattr(self.world,'last_call_timing',None) or {}).get(name,0.)
         interval=(getattr(self.world,'last_call_timing',None) or {}).get('journal_interval')
         if interval is not None:self.audit_intervals.append(interval)
         for name,value in result.get('timing',{}).items():self.world_timing[name]=self.world_timing.get(name,0.)+value

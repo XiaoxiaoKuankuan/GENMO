@@ -33,6 +33,12 @@ def attach_vector_metrics(rows, report):
         for name,value in batch.get('components',{}).items():
             report['actor_phase_totals'][name]=report['actor_phase_totals'].get(name,0.)+value
     report['generation_batch_wall_seconds']=sum(b['generation_seconds'] for b in report['batches'])
+    for source,target,scale in (('modeled_delay_ticks','modeled_delay_seconds',1/600.),('prefix_frames','prefix_frames',1.)):
+        values=report[source]
+        if values:
+            report[target+'_mean']=sum(values)/len(values)*scale
+            report[target+'_min']=min(values)*scale
+            report[target+'_max']=max(values)*scale
     report['generation_pipeline_totals']={}
     for batch in report['batches']:
         for name,value in (batch.get('pipeline_timing') or {}).items():

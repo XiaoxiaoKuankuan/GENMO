@@ -53,6 +53,8 @@ def main():
     p.add_argument('--sampling-graph',action='store_true',help='启用已独立验收的无梯度采样图；PPO反向保持原路径')
     p.add_argument('--condition-graph',action='store_true',help='仅无梯度条件编码使用严格FP32采样图')
     p.add_argument('--data-audit',type=Path,help='显式复用完整数据审计报告；仍核对清单并逐次核验实际加载文件')
+    p.add_argument('--comparison-seed',type=int,help='有限A/B验收固定任务、噪声run身份和模型初始化；不用于正式run')
+    p.add_argument('--inject-generation-wall-ms',type=float,default=0.,help='仅验收：每个真实生成批次注入墙钟延迟，核验模拟时钟不变')
     p.add_argument('--updates',action='store_true',help='采集后运行原完整DPPO/BC/Critic更新与KL验收')
     p.add_argument('--resume',type=Path,help='仅恢复本工具完整GPU向量验收断点')
     p.add_argument('--stop-after-iteration',type=int,help='有限验收提前正常退出，例如第一轮保存后退出进程')
@@ -81,7 +83,14 @@ def main():
         raise ValueError('KL injection requires the final round >=2 of a finite full update test')
     if args.kill_worker_iteration is not None and (not args.updates or args.kill_worker_iteration!=2 or args.rounds!=2 or args.reject_iteration is not None):
         raise ValueError('Worker injection requires exactly two finite rounds and no other injection')
-    config['stage9']['run_id']=root_call(collective,lambda:'vector-finite-'+str(uuid.uuid4()))
+    config['stage9']['run_id']=root_call(collective,lambda:('vector-comparison-'+str(args.comparison_seed)
+        if args.comparison_seed is not None else 'vector-finite-'+str(uuid.uuid4())))
+    if args.comparison_seed is not None:
+        import random
+        import numpy as np
+        random.seed(args.comparison_seed);np.random.seed(args.comparison_seed);torch.manual_seed(args.comparison_seed)
+    if not 0 <= args.inject_generation_wall_ms <= 2000:
+        raise ValueError('Finite wallclock injection must be bounded at two seconds')
     torch.cuda.set_device(rank);torch.set_num_threads(1)
     torch.backends.cuda.matmul.allow_tf32=torch.backends.cudnn.allow_tf32=False
     actor,train_config,_=local_call(collective,lambda:load_actor(config))
@@ -142,6 +151,13 @@ def main():
                 lane_journal.close();budget.close();backend.client.close()
             return SimpleNamespace(env=env,sampler=sampler,close=close)
         collector=VectorEnvironmentCollector(policy,factory,world_factory,num_envs=args.num_envs,batch_wait_seconds=args.batch_wait_ms/1000.)
+        if args.inject_generation_wall_ms:
+            original_sample=policy.sample_rollout
+            def delayed_sample(*a,**kw):
+                time.sleep(args.inject_generation_wall_ms/1000.)
+                return original_sample(*a,**kw)
+            policy.sample_rollout=delayed_sample
+            report['wallclock_injection_seconds_per_batch']=args.inject_generation_wall_ms/1000.
         if args.resume:
             report['restored']=learner.restore(args.resume,collector)
         else:
