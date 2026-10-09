@@ -27,6 +27,7 @@ import io
 import json
 import math
 import re
+from collections import OrderedDict
 from numbers import Integral
 from pathlib import Path
 
@@ -42,6 +43,27 @@ _TIMEBASE_HZ = 600
 _MOTION_TICKS = 20
 _CONTROL_TICKS = 12
 ACTIVITY_VERSION = "genmo.closedloop.paired_activity.linear_interval_rms.v1"
+
+# 每个已核验清单按内容身份建立索引，避免每个环境 reset 再解码/扫描全部行。
+# 缓存最多 12 个清单；重复 sample_id 保留全部行，不能用字典覆盖掩盖歧义。
+_MANIFEST_INDEX = OrderedDict()
+
+
+def _manifest_matches(path, payload, sha, sample_id):
+    key = (str(path), sha)
+    index = _MANIFEST_INDEX.pop(key, None)
+    if index is None:
+        index = {}
+        for line in payload.decode().splitlines():
+            if line.strip():
+                row = json.loads(line)
+                index.setdefault(row.get('sample_id'), []).append(row)
+        # 同一路径的新内容淘汰旧版本，不保留无用历史。
+        for previous in list(_MANIFEST_INDEX):
+            if previous[0] == key[0]: del _MANIFEST_INDEX[previous]
+        while len(_MANIFEST_INDEX) >= 12: _MANIFEST_INDEX.popitem(last=False)
+    _MANIFEST_INDEX[key] = index
+    return index.get(sample_id, ())
 
 
 def _sha(value, field):
@@ -90,6 +112,8 @@ class PairedActivityTarget:
         self.num_frames = len(positions)
         self._positions = positions[:, [names.index(name) for name in expected]].copy()
         self._positions.setflags(write=False)
+        self._velocity_begin = self._velocity_end = 0
+        self._velocity = None
         self.source = copy.deepcopy(source)
         self.source.update({"activity_version": ACTIVITY_VERSION, "source_joint_order": list(names),
                             "joint_order": list(expected), "position_unit": "rad", "velocity_unit": "rad/s",
@@ -107,6 +131,21 @@ class PairedActivityTarget:
         weight = np.clip(sample - left, 0, 1)[:, None]
         return self._positions[left] * (1 - weight) + self._positions[right] * weight
 
+    def _window_velocity(self, end, count):
+        """按最多 512 个新区间复用相邻端点，窗口 RMS 仍沿用原逐元素归约。
+
+        end 是已完成的控制区间数；缓存包含原样插值、后向差分的结果，既不使用
+        改变求和顺序的前缀和，也不外推任务尾部。乱序读取可重建有界缓存。
+        """
+        begin = end-count
+        if self._velocity is None or begin < self._velocity_begin or end > self._velocity_end:
+            self._velocity_begin = begin
+            self._velocity_end = min(max(end, begin+512), self.num_frames*_MOTION_TICKS//_CONTROL_TICKS)
+            endpoints = np.arange(begin, self._velocity_end+1, dtype=np.int64)*_CONTROL_TICKS
+            self._velocity = np.diff(self._interpolate(endpoints), axis=0)/self.dt
+            self._velocity.setflags(write=False)
+        return self._velocity[begin-self._velocity_begin:end-self._velocity_begin]
+
     def __call__(self, tick):
         if isinstance(tick, bool) or not isinstance(tick, Integral):
             raise ValueError("paired activity tick must be an integer")
@@ -117,7 +156,7 @@ class PairedActivityTarget:
             raise ValueError("paired activity tick exceeds paired music duration")
         count = min(elapsed // _CONTROL_TICKS, self.window_steps)
         endpoints = np.arange(elapsed - count * _CONTROL_TICKS, elapsed + 1, _CONTROL_TICKS, dtype=np.int64)
-        velocity = np.diff(self._interpolate(endpoints), axis=0) / self.dt
+        velocity = self._window_velocity(elapsed//_CONTROL_TICKS, count)
         joint_rms = np.sqrt(np.mean(velocity ** 2, axis=0))
         return {"valid": True, "activity_rad_s": float(np.sqrt(np.mean(velocity ** 2))),
                 "per_joint_rms_rad_s": joint_rms.tolist(), "window_count": int(count),
@@ -147,8 +186,7 @@ def load_paired_activity(data_root, sample, *, music_start_tick=600, window_s=0.
     manifest_bytes, manifest_sha = ASSET_BYTES.read(manifest_path)
     if manifest_sha != _sha(sample.get("manifest_sha256"), "manifest_sha256"):
         raise ValueError("paired activity selected train manifest SHA mismatch")
-    rows = [json.loads(line) for line in manifest_bytes.decode().splitlines() if line.strip()]
-    matches = [item for item in rows if item.get("sample_id") == row.get("sample_id")]
+    matches = _manifest_matches(manifest_path, manifest_bytes, manifest_sha, row.get("sample_id"))
     if len(matches) != 1 or matches[0] != row or row.get("split") != split or row.get("fps") != 30:
         raise ValueError(f"paired activity row must exactly match its unique {split} manifest row")
     return _load_verified_pair(root, sample, manifest_path, manifest_sha, split=split,

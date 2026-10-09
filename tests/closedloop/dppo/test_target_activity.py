@@ -124,6 +124,33 @@ def test_target_owns_immutable_motion_and_copied_provenance():
     assert obj(612)["source"]["declared"] == "paired"
 
 
+def test_cached_windows_equal_scalar_reference_at_boundaries_and_random_order():
+    rng = np.random.default_rng(738)
+    obj = target(rng.normal(size=(1901, 21)))
+    controls = len(obj._positions)*20//12
+    for index in list(range(1, controls+1))+rng.integers(1, controls+1, size=128).tolist():
+        count = min(index, obj.window_steps)
+        endpoints = np.arange(index-count, index+1)*12
+        reference = np.diff(obj._interpolate(endpoints), axis=0)/obj.dt
+        actual = obj(600+index*12)
+        assert actual['activity_rad_s'] == float(np.sqrt(np.mean(reference**2)))
+        assert actual['per_joint_rms_rad_s'] == np.sqrt(np.mean(reference**2, axis=0)).tolist()
+        assert len(obj._velocity) <= 512
+
+
+def test_manifest_index_keeps_duplicate_rows_and_invalidates_changed_content(tmp_path):
+    from gem.closedloop.dppo.target_activity import _MANIFEST_INDEX
+    _MANIFEST_INDEX.clear()
+    root, sample, _, _ = write_pair(tmp_path)
+    load_paired_activity(root, sample)
+    manifest = root/'AIST++/manifests/train.jsonl'
+    manifest.write_text(manifest.read_text()*2)
+    sample['manifest_sha256'] = hashlib.sha256(manifest.read_bytes()).hexdigest()
+    with pytest.raises(ValueError, match='unique train manifest row'):
+        load_paired_activity(root, sample)
+    assert len(_MANIFEST_INDEX) == 1
+
+
 def test_strict_pair_load_hash_provenance_and_joint_order(tmp_path):
     root, sample, path, _ = write_pair(tmp_path)
     before = copy.deepcopy(sample)
