@@ -72,18 +72,20 @@ def parameters(policy, trace, indices, steps, *, prepared=None):
     return policy.transition_parameters(context, trace['chain'][indices, steps], steps, prepared=prepared)
 
 
-@torch.no_grad()
-def consistency(policy, trace):
+def consistency(policy, trace, *, grad_enabled=False):
     device = trace['chain'].device
     count = trace['chain'].shape[0]*policy.steps
     order = torch.randperm(count, device=device, generator=torch.Generator(device=device).manual_seed(932))
     reports = []
-    for batch in (1, 2, 7, 8, 32, 64, 128, 256, 512):
+    batches = (1, 8, 64, 128) if grad_enabled else (1, 2, 7, 8, 32, 64, 128, 256, 512)
+    for batch in batches:
         # B1专门覆盖全部64条链最后两步；其他batch全链置换，包含不同末尾不足批。
         selected = (torch.stack((torch.arange(64, device=device)*20+18,
-                                torch.arange(64, device=device)*20+19), 1).flatten() if batch < 64 else order)
+                                torch.arange(64, device=device)*20+19), 1).flatten() if batch < 64 or grad_enabled else order)
         errors = []
-        with policy_phase(policy):
+        # AOTAutograd等可能为有梯度前向另选融合核；采样/no_grad自洽不足以
+        # 证明PPO前向也一致。单独覆盖末端，门槛与无梯度完全相同。
+        with torch.set_grad_enabled(grad_enabled), policy_phase(policy):
             for begin in range(0, len(selected), batch):
                 flat = selected[begin:begin+batch]; index, step = flat//20, flat%20
                 result = parameters(policy, trace, index, step)
@@ -91,9 +93,10 @@ def consistency(policy, trace):
                 delta = logp-trace['old_log_probs'][index, step]
                 reference = torch.distributions.Normal(result['mean'].double(), result['std'].double()).log_prob(
                     trace['chain'][index, step+1].double()).masked_fill(~result['free_mask'], 0.).sum((-2, -1))
-                errors.append(torch.stack((delta.abs().max(), delta.expm1().abs().max(), (logp-reference).abs().max())))
+                errors.append(torch.stack((delta.abs().max(), delta.expm1().abs().max(), (logp-reference).abs().max())).detach())
+                del result, logp, delta, reference
         maximum = torch.stack(errors).amax(0).cpu().tolist()
-        reports.append(dict(batch=batch, checked=len(selected), log_prob_error=maximum[0], ratio_error=maximum[1],
+        reports.append(dict(batch=batch, grad_enabled=grad_enabled, checked=len(selected), log_prob_error=maximum[0], ratio_error=maximum[1],
             independent_gaussian_error=maximum[2], passed=maximum[0]<=1e-4 and maximum[1]<=1e-3 and maximum[2]<=1e-8))
     return reports
 
@@ -173,7 +176,10 @@ def main():
             trace = local_call(collective, generate)
             checks = local_call(collective, lambda: consistency(policy, trace))
             item['consistency_ranks'] = collective.all_gather_object(checks)
-            item['self_consistency_passed'] = all(row['passed'] for shard in item['consistency_ranks'] for row in shard)
+            gradient_checks = local_call(collective, lambda: consistency(policy, trace, grad_enabled=True))
+            item['grad_forward_consistency_ranks'] = collective.all_gather_object(gradient_checks)
+            item['self_consistency_passed'] = all(row['passed'] for group in
+                (item['consistency_ranks'], item['grad_forward_consistency_ranks']) for shard in group for row in shard)
             current = trace['normalized'].cpu()
             if reference_output is None and mode == 'fp32_reference': reference_output = current
             if reference_output is not None:
