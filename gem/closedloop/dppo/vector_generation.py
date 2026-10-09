@@ -91,6 +91,7 @@ def generate_batch(policy, packets, *, shared_storage=False):
     for i,p in enumerate(packets):
         meta = metadata[i]
         meta.update(seed=p['seed'], decision_id=p['decision'], plan_id=f"{p['reservation']['request_id']}:plan")
+        if 'task_identity' in p: meta['task_identity'] = p['task_identity']
         # 此处clone只发生在CPU，避免单行torch.save意外保存整批底层storage。
         local_trace = split_trace(copied['trace'], i, len(packets))
         if not shared_storage: local_trace = cpu_copy(local_trace)
@@ -136,7 +137,11 @@ def generate_for_environment_flow(env):
         seed = stable_noise_seed(1729, str(env.comparison_noise_index))
         env.comparison_noise_index += 1
     packet = dict(_vector_generation=True, builder=env.builder, snapshot=env.snapshot,
-        reservation=reservation, music=env.music, seed=seed, decision=env.decision)
+        reservation=reservation, music=getattr(env,'condition_music',env.music), seed=seed, decision=env.decision,
+        task_identity=dict(dataset=env.sample['dataset'], sample_id=env.sample['row']['sample_id'],
+            split=env.data_split, manifest_sha256=env.sample['manifest_sha256'],
+            source_music_feature_sha256=env.sample['row']['source_music_feature_sha256'],
+            music_start_frame=env.music_start_frame))
     result, shared_timing = yield GenerationOperation(packet)
     sample_ready = time.perf_counter()
     rejection, prepared = None, None

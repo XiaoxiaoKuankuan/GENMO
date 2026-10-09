@@ -16,6 +16,7 @@ import torch
 
 from gem.closedloop.contracts import STAGE1_CONDITION_KEYS, validate_stage1_condition_batch
 from gem.closedloop.online_conditions import OnlineConditionBuilder
+from gem.closedloop.online_conditions import FrozenMusicFeatures
 from gem.robots.bumi.feature_codec import BumiMotionFeatureCodec
 from gem.robots.bumi.kinematics import BumiKinematics
 from gem.utils.rotation_conversions import axis_angle_to_quaternion
@@ -161,3 +162,28 @@ def test_long_episode_times_keep_30hz_and_50hz_resolution(builder):
     conditions, _ = builder.build(snapshot, reservation, music, music_start_tick=snapshot["tick"])
     assert conditions["future_times"].dtype == torch.float64
     validate_stage1_condition_batch(conditions)
+
+
+@pytest.mark.parametrize('prefix', [0, 1, 12, 119])
+def test_frozen_music_reuses_validated_source_without_changing_conditions(builder, prefix):
+    snapshot, reservation, music = make_inputs(builder, prefix)
+    reference, meta = builder.build(snapshot, reservation, music)
+    frozen = FrozenMusicFeatures(music)
+    music[:] = np.nan
+    actual, actual_meta = builder.build(snapshot, reservation, frozen)
+    for key in reference:
+        torch.testing.assert_close(actual[key], reference[key], atol=0, rtol=0)
+    assert actual_meta == meta
+    # 窗口消费者不能改变已经核验的整首音乐；内部意外写入则必须被发现。
+    actual['music_features'].zero_()
+    repeated, _ = builder.build(snapshot, reservation, frozen)
+    torch.testing.assert_close(repeated['music_features'], reference['music_features'], atol=0, rtol=0)
+    frozen.checked().add_(1)
+    with pytest.raises(ValueError, match='modified'):
+        builder.build(snapshot, reservation, frozen)
+
+
+@pytest.mark.parametrize('values', [np.zeros((3, 34)), np.full((3, 35), np.nan)])
+def test_frozen_music_retains_full_input_validation(values):
+    with pytest.raises(ValueError, match='finite float'):
+        FrozenMusicFeatures(values)

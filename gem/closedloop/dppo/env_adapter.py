@@ -174,6 +174,8 @@ class UpperEnvironment:
             dt=reward_config.get('dt', .02), split=split, music_start_frame=music_start_frame)
         self.full_music_num_frames, self.music_start_frame, self.data_split = len(music), int(music_start_frame), split
         self.phase, self.sample, self.music, self.seed = phase, sample, np.array(music[self.music_start_frame:], copy=True), int(seed)
+        from gem.closedloop.online_conditions import FrozenMusicFeatures
+        self.condition_music = FrozenMusicFeatures(self.music)
         self.episode_count += 1
         self.snapshot = yield from backend_operation('reset_episode', seed=self.seed,
             episode_spec={'sample_id':sample['row']['sample_id'], 'dataset':sample['dataset'], 'mode':self.mode})
@@ -215,7 +217,8 @@ class UpperEnvironment:
     def preview_context_flow(self):
         request = self._request()
         reservation = yield from backend_operation('preview_prefix', request=request)
-        return self.builder.build(self.snapshot, reservation, self.music, music_start_tick=600)
+        return self.builder.build(self.snapshot, reservation,
+                                  getattr(self, 'condition_music', self.music), music_start_tick=600)
 
     def remaining_music(self, tick=None):
         tick = self.snapshot['tick'] if tick is None else tick
@@ -234,7 +237,8 @@ class UpperEnvironment:
         prefix_end = time.perf_counter()
         timings['prefix_rpc_seconds'] = prefix_end-started
         timings['journal_seconds'] += journal_seconds('reserve_prefix')
-        context, meta = self.builder.build(self.snapshot, reservation, self.music, music_start_tick=600)
+        context, meta = self.builder.build(self.snapshot, reservation,
+                                          getattr(self, 'condition_music', self.music), music_start_tick=600)
         condition_end = time.perf_counter()
         timings['condition_build_seconds'] = condition_end-prefix_end
         self.attempt += 1

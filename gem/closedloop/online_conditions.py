@@ -46,6 +46,25 @@ def _tensor(value: Any, dtype: torch.dtype | None = None) -> torch.Tensor:
     return torch.as_tensor(np.array(value, copy=True), dtype=dtype)
 
 
+class FrozenMusicFeatures:
+    """episode边界核验并独立持有音乐，只读窗口消费避免每次复制整首音乐。
+
+    构造时完成原来的shape/finite/FP32转换，源数组后续修改不能污染内部副本。
+    运行期检查张量版本；窗口高级索引产生独立结果。只适用于已经绑定任务的
+    不可变音乐，公共build接口对普通输入仍每次完整核验。
+    """
+    def __init__(self, values):
+        self._value = _tensor(values, torch.float32)
+        if self._value.ndim != 2 or self._value.shape[1] != MUSIC_FEATURE_DIM or not torch.isfinite(self._value).all():
+            raise ValueError('music_features must be finite float [N,35] at 30 Hz')
+        self._version = self._value._version
+
+    def checked(self):
+        if self._value._version != self._version:
+            raise ValueError('Frozen episode music was modified after validation')
+        return self._value
+
+
 class OnlineConditionBuilder:
     """只读取快照，不修改后端缓存；构造 batch=1 的原始 physical 条件。"""
 
@@ -129,9 +148,12 @@ class OnlineConditionBuilder:
         music_start_tick = _integer(music_start_tick, "music_start_tick")
         if (decision_tick - music_start_tick) % SOURCE_TICKS:
             raise ValueError("decision and music start must share the 30 Hz source grid")
-        music = _tensor(music_features, torch.float32)
-        if music.ndim != 2 or music.shape[1] != MUSIC_FEATURE_DIM or not torch.isfinite(music).all():
-            raise ValueError("music_features must be finite float [N,35] at 30 Hz")
+        if isinstance(music_features, FrozenMusicFeatures):
+            music = music_features.checked()
+        else:
+            music = _tensor(music_features, torch.float32)
+            if music.ndim != 2 or music.shape[1] != MUSIC_FEATURE_DIM or not torch.isfinite(music).all():
+                raise ValueError("music_features must be finite float [N,35] at 30 Hz")
         indices = (future_ticks - music_start_tick) // SOURCE_TICKS
         music_valid = (indices >= 0) & (indices < len(music))
         window = torch.zeros((MOTION_WINDOW_FRAMES, MUSIC_FEATURE_DIM), dtype=torch.float32)
