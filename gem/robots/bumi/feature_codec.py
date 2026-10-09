@@ -366,6 +366,23 @@ class BumiMotionFeatureCodec:
             body_quat_w=fk["body_quat_w"],
         )
 
+    def encode_condition_features(self,qpos:torch.Tensor):
+        """只编码在线前缀需要的qpos30/anchor，不构建从未被条件使用的22体FK。
+
+        保留encode→canonicalize的两次规范化及build_canonical_anchor内部操作顺序，
+        使FP32条件逐元素相同；不修改带几何监督的完整encode入口。该路径仍保留
+        输入有限性、四元数和表示维度检查，返回条件特征及其原世界anchor。
+        """
+        qpos=self.normalize_qpos_sequence(self.normalize_qpos_sequence(qpos))
+        anchor=self.build_canonical_anchor(qpos)
+        inverse=anchor.heading_inverse_quat_wxyz.expand(*qpos.shape[:-1],4)
+        position=quaternion_apply(inverse,qpos[...,:3]-anchor.position_w)
+        rotation=make_quaternion_continuous(quaternion_multiply(inverse,qpos[...,3:7]))
+        components=BumiMotionComponents(
+            root_delta_xy_heading=self.root_horizontal_delta_to_heading(position,rotation),
+            root_height_offset=position[...,2:3],root_rot_local_quat=rotation,joint_dof=qpos[...,7:])
+        return self.assemble_features(components),anchor
+
     def assemble_features(self, components: BumiMotionComponents) -> torch.Tensor:
         expected = {
             "root_delta_xy_heading": (components.root_delta_xy_heading, 2),

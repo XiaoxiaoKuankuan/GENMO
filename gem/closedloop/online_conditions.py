@@ -110,9 +110,8 @@ class OnlineConditionBuilder:
         known = torch.zeros((1, MOTION_WINDOW_FRAMES, 30), dtype=torch.float32)
         known_mask = torch.zeros_like(known, dtype=torch.bool)
         if prefix:
-            encoded = self.codec.encode(source)
-            anchor = encoded.anchor
-            known[0, :prefix] = encoded.physical_features
+            features,anchor = self.codec.encode_condition_features(source)
+            known[0, :prefix] = features
             known_mask[0, :prefix] = True
             known_mask[0, prefix - 1, :2] = False
         else:
