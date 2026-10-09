@@ -1,6 +1,6 @@
 # 大规模DPPO独立候选配置：八卡每卡64活动环境，完整20步CFG；不自动启动。
 # 所有rollout、完整链minibatch和更新次数由stage10.scale统一推导。
-# FP32 fast、microbatch128/KL256需通过独立八卡数值及真实闭环验收。
+# 显式编译FP32已通过概率/梯度/Adam诊断，microbatch128/KL256完整闭环仍待验收。
 # 主模型仍为明确的Stage1 s350000，随机核/clip/KL/奖励保持原配置。
 # 500轮是用户新预算；生成/物理/存储授权上限原值保留，缺口必须报告，不自动扩张。
 version: genmo.gmt_frozen_isaac.v1
@@ -132,6 +132,7 @@ stage10:
     gmt_state_reuse: true
     gmt_trace_blocks: true
     precision_mode: fp32_fast
+    numerical_variant: compiled_blocked64_fp32
     weight_reduction: joint_gemm
     gradient_accumulation: fp32
   distributed:
