@@ -1,6 +1,7 @@
 # 第二阶段独立性能分支的有限八卡验收配置，不能加载旧运行原样续训。
 # 真实有效学习微批候选最高32，新FP32数值身份，原logp/ratio/Gaussian门槛不变；
-# 合并CFG，无复制填充。仅运行2个外轮/最多8次Actor更新，最多3600秒。
+# 合并CFG，无复制填充。有限6个外轮/最多24次Actor更新，最多3600秒。
+# 先运行1轮保存并退出，再恢复至6轮；第3/4/5轮提供不含首次全检和保存的普通轮对照。
 # 完整保存仍每500轮，初始化/受控结束按原规则额外保存；最终全量KL硬门槛0.03。
 # 默认保留post_step_full。新journal/轨迹列块/状态复用分别可关闭用于消融。
 # 此文件没有启用双环境原型；双环境必须另行完成资源、物理重放和恢复验收。
@@ -14,7 +15,7 @@ paths:
   stats: /data0/user/liwei/datasets/bumi_music_umr70_mine_pass_v1/stats/qpos30_train_stats.json
   kinematics: /home/user/liwei/GENMO-bumi-stage10-runtime-v4/configs/bumi/bumi_kinematics_robot_retargeter_fe934_v1.json
   gmt_policy: /data0/user/liwei/closedloop_stage8_assets/gmt_model135000/model_135000_stage2.onnx
-  compat_profile: /home/user/liwei/legged_lab_gmt/configs/sim2sim/model_135000_stage2.json
+  compat_profile: /home/user/liwei/legged_lab_gmt-runtime-v4/configs/sim2sim/model_135000_stage2.json
   isaac_contract: /data0/user/liwei/closedloop_stage8_assets/gmt_model135000/isaac_contract.json
   data_root: /data0/user/liwei/datasets/bumi_music_umr70_mine_pass_90505_v1
 runtime:
@@ -154,14 +155,14 @@ stage10:
     every_iterations: 100
     samples_per_source: 4
   limits:
-    accepted_iterations: 2
-    optimizer_attempts: 8
-    generations: 2000000
-    control_steps: 60000000
-    physics_steps: 240000000
+    accepted_iterations: 6
+    optimizer_attempts: 24
+    generations: 4096
+    control_steps: 200000
+    physics_steps: 800000
   storage:
     min_free_bytes: 107374182400
-    max_run_bytes: 2473901162496
+    max_run_bytes: 107374182400
     checkpoint_reserve_bytes: 4294967296
     rollout_chunk_size: 16
     checkpoint_keep_last: 2
@@ -170,8 +171,8 @@ stage10:
     checkpoint_every_iterations: 500
     archive_queue_size: 4
     archive_secondary:
-      root: /data0/user/liwei/GENMO_outputs/closedloop_stage10_execution_archives
-      max_bytes: 1869169767219
+      root: /data0/user/liwei/GENMO_outputs/closedloop_stage10_execution_archives/runtime_v4_validation_20261009
+      max_bytes: 68719476736
       min_free_bytes: 107374182400
   reward:
     version: stage9.execution_reward.v2
