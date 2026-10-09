@@ -67,8 +67,12 @@ class UpperEnvironment:
         self.disk_guard = None
         runtime = config.get('runtime', {})
         self.timing_contract = runtime.get('timing_contract', 'legacy_audit_inclusive.v1')
-        if self.timing_contract not in {'legacy_audit_inclusive.v1', 'deployment_critical.v2'}:
+        from .deployment_clock import MODELED_CLOCK, clock_for_config
+        if self.timing_contract not in {'legacy_audit_inclusive.v1', 'deployment_critical.v2', MODELED_CLOCK}:
             raise ValueError('Unsupported upper environment timing_contract')
+        self.deployment_clock = clock_for_config(config)
+        if self.deployment_clock is not None:
+            self.latency_budget_s = self.deployment_clock.budget_seconds
         self.rank = runtime.get('rank')
         if self.rank is not None and (type(self.rank) is not int or self.rank < 0):
             raise ValueError('runtime.rank must be a nonnegative integer')
@@ -289,7 +293,7 @@ class UpperEnvironment:
         prepared_at = time.perf_counter()
         timings['prepare_rpc_seconds'] = prepared_at-preparing
         timings['journal_seconds'] += journal_seconds('prepare_plan')
-        if self.timing_contract == 'deployment_critical.v2':
+        if self.timing_contract != 'legacy_audit_inclusive.v1':
             # 实际wall时间仍包含journal；仿真到达只映射部署必需路径，ACK没有被扣除。
             critical = max(0., prepared_at-started-timings['journal_seconds'])
             save_trace()
@@ -298,7 +302,7 @@ class UpperEnvironment:
         elapsed = time.perf_counter()-started
         timings.update(critical_ready_seconds=critical, total_wall_seconds=elapsed,
             excluded_audit_seconds=(timings['trace_copy_seconds']+timings['raw_evidence_seconds']
-                +timings['journal_seconds']) if self.timing_contract == 'deployment_critical.v2' else 0.)
+                +timings['journal_seconds']) if self.timing_contract != 'legacy_audit_inclusive.v1' else 0.)
         return dict(context=context,meta=meta,generated=generated,trace=trace,prepared=prepared,
                     rejection=rejection,elapsed=elapsed,critical_ready_seconds=critical,
                     timing=timings,seed=seed,raw_path=str(raw_path))
@@ -326,6 +330,19 @@ class UpperEnvironment:
         """原单环境不增加行政边界；向量子类仅在显式参考合同下覆盖。"""
         return None
 
+    def _arrival_tick(self, generated, start):
+        if self.mode == 'paused':
+            return start
+        if self.deployment_clock is not None:
+            record = self.deployment_clock.sample(seed=self.config['stage10']['seed'],
+                sample_id=self.sample['row']['sample_id'], music_start_frame=self.music_start_frame,
+                decision_tick=start)
+            generated.setdefault('timing', {})['deployment_clock'] = record
+            return record['arrival_tick']
+        delay = (generated.get('critical_ready_seconds', generated['elapsed'])
+                 if self.timing_contract == 'deployment_critical.v2' else generated['elapsed'])
+        return ceil_control_tick(start+600*delay)
+
     def _step_impl(self, *, deterministic=False):
         start = int(self.snapshot['tick'])
         if start%300:
@@ -333,9 +350,7 @@ class UpperEnvironment:
         generated = self.generate(deterministic=deterministic)
         self._inflight_sample = generated
         candidate = generated['prepared']
-        delay = (generated.get('critical_ready_seconds', generated['elapsed'])
-                 if self.timing_contract == 'deployment_critical.v2' else generated['elapsed'])
-        arrival = start if self.mode=='paused' else ceil_control_tick(start+600*delay)
+        arrival = self._arrival_tick(generated, start)
         ready_tick = max(start+300, int(math.ceil(arrival/300))*300)
         boundary = self._execution_boundary(generated, arrival, ready_tick)
         execution_end = min(self.music_end_tick, boundary['tick']) if boundary else self.music_end_tick

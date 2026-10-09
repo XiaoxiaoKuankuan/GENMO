@@ -33,7 +33,9 @@ runtime:
   torch_threads: 4
   rpc_timeout_s: 120
   worker_start_timeout_s: 600
-  timing_contract: deployment_critical.v2
+  timing_contract: modeled_deployment.v3
+  vector_generation_contract: genmo.vector_generation_pipeline.v1
+  vector_evidence_contract: gmt.vector_columns.v1
 model:
   history_steps: 50
   ddim_steps: 20
@@ -49,6 +51,22 @@ timing:
   latency_guard_s: 0.04
   calibration_warmup: 1
   calibration_samples: 2
+  # 来自服务器1八卡各自N=1、20步GENMO的16次关键路径实测；仅是单机器人部署代理。
+  # 训练N/微批/排队不再修改这份profile。新测量或真实部署平台必须显式更换身份。
+  deployment_profile:
+    schema: genmo.deployment_delay_profile.v1
+    target: single_robot_single_request
+    prefix_budget_seconds: 0.38
+    samples_seconds: [0.26070217799860984, 0.2588543399469927, 0.2560029230080545, 0.24379220989067107, 0.2556550590088591, 0.2538018390769139, 0.24764974182471633, 0.2576558298896998, 0.25552060024347156, 0.24952622689306736, 0.2531918198801577, 0.24276695807930082, 0.2570537432329729, 0.2614388820948079, 0.2603578440612182, 0.25853567582089454]
+    provenance:
+    - {path: '/data1/user/liwei/GENMO_outputs/closedloop_stage10/gpu_vectorized_validation_20261009/environment_matrix_final_v1/n0001/rank00/calibration.json', sha256: d24f12472912d7f0ff04513598e6a21fe21d9efdbaedc4ca7cff4e66cc50a2ca}
+    - {path: '/data1/user/liwei/GENMO_outputs/closedloop_stage10/gpu_vectorized_validation_20261009/environment_matrix_final_v1/n0001/rank01/calibration.json', sha256: 6beb21883a9ecf9030f935bbad669ce8283b021af5d31c7abb72c58eb43858a3}
+    - {path: '/data1/user/liwei/GENMO_outputs/closedloop_stage10/gpu_vectorized_validation_20261009/environment_matrix_final_v1/n0001/rank02/calibration.json', sha256: bc88ff40fff37b54385f7fb43570186078d449ef02d749d18c06e5a75d06484c}
+    - {path: '/data1/user/liwei/GENMO_outputs/closedloop_stage10/gpu_vectorized_validation_20261009/environment_matrix_final_v1/n0001/rank03/calibration.json', sha256: f1b088d3abf033a9bd7fba64d56de356affb9a7ea80c4ccc37d6de29f7edf27a}
+    - {path: '/data1/user/liwei/GENMO_outputs/closedloop_stage10/gpu_vectorized_validation_20261009/environment_matrix_final_v1/n0001/rank04/calibration.json', sha256: 34d29d4ab0817fe010f0e2fd0fc46145e108bbbfa0da256ca1f2b401992abc75}
+    - {path: '/data1/user/liwei/GENMO_outputs/closedloop_stage10/gpu_vectorized_validation_20261009/environment_matrix_final_v1/n0001/rank05/calibration.json', sha256: a1687b16fe8359434fcdbc37e739ac0a1afdbf838b0240c60572684bcca1f84f}
+    - {path: '/data1/user/liwei/GENMO_outputs/closedloop_stage10/gpu_vectorized_validation_20261009/environment_matrix_final_v1/n0001/rank06/calibration.json', sha256: 89ad2136a3fb93d6c496dd0274c50c7c04cc4da51621f37a7987339cb37f9210}
+    - {path: '/data1/user/liwei/GENMO_outputs/closedloop_stage10/gpu_vectorized_validation_20261009/environment_matrix_final_v1/n0001/rank07/calibration.json', sha256: f07bc15c09efed70c87772f54c5c536bfc431fa4a271dc1660b997bef2a26a84}
 environment:
   terrain: plane
   ground_height_m: 0.0

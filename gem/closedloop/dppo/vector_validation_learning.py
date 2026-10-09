@@ -60,6 +60,10 @@ class FiniteVectorLearner:
             vector_reward_contract=config['runtime'].get('vector_reward_contract'),
             vector_device_contract=config['runtime'].get('vector_device_contract'),
             vector_fragment_contract=config['runtime'].get('vector_fragment_contract'),
+            timing_contract=config['runtime']['timing_contract'],
+            deployment_profile=copy.deepcopy(config['timing'].get('deployment_profile')),
+            vector_generation_contract=config['runtime'].get('vector_generation_contract'),
+            vector_evidence_contract=config['runtime'].get('vector_evidence_contract'),
             gmt_policy_sha256=digest(paths['gmt_policy']),configuration=copy.deepcopy(config['stage10']['training']),
             run_id=config['stage9']['run_id'],scope='finite_validation_not_production_resume'))
         self.collector=None

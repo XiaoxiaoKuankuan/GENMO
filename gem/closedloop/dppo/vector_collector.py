@@ -191,17 +191,26 @@ class VectorEnvironmentCollector(DualEnvironmentCollector):
             return pending,False
         slots=[p[0] for p in pending]
         if len(set(slots))!=len(slots):raise RuntimeError('Duplicate causal environment generation request')
-        conditions={k:torch.cat([p[1][k] for p in pending]) for k in pending[0][1]}
         begin=time.perf_counter()
-        trace=self.policy.sample_rollout(conditions,generator=[p[2] for p in pending])
+        pipeline = bool(pending[0][1].get('_vector_generation', False))
+        if any(bool(p[1].get('_vector_generation',False)) != pipeline for p in pending):
+            raise RuntimeError('Cannot mix generation pipeline protocols in a batch')
+        if pipeline:
+            from .vector_generation import generate_batch
+            outputs, pipeline_timing = generate_batch(self.policy, [p[1] for p in pending])
+        else:
+            conditions={k:torch.cat([p[1][k] for p in pending]) for k in pending[0][1]}
+            trace=self.policy.sample_rollout(conditions,generator=[p[2] for p in pending])
         end=time.perf_counter()
         self.batch_reports.append(dict(environment_slots=slots,effective_rows=len(pending),padding_rows=0,
             generation_seconds=end-begin,components=dict(self.policy.last_sample_timing),
+            pipeline_timing=pipeline_timing if pipeline else None,
             queue_wait_seconds=[begin-p[4] for p in pending]))
         for i,p in enumerate(pending):
             if self.remaining_generations is not None:
                 self.remaining_generations[p[0]]-=1
-            p[3].set_result((split_trace(trace,i,len(pending)),dict(self.policy.last_sample_timing)))
+            p[3].set_result((outputs[i] if pipeline else split_trace(trace,i,len(pending)),
+                            pipeline_timing if pipeline else dict(self.policy.last_sample_timing)))
         return [],True
 
     def calibrate(self,*,count_per_rank=20,warmup=1,samples=2):
@@ -232,13 +241,17 @@ class VectorEnvironmentCollector(DualEnvironmentCollector):
             if iteration>=warmup:
                 for i,v in enumerate(values):durations[i].append(v)
         import math
-        latency=math.ceil((max(map(max,durations))*1.25+.04)*50)/50
+        clock = self.states[0].resource.env.deployment_clock
+        latency=(clock.budget_seconds if clock is not None else
+                 math.ceil((max(map(max,durations))*1.25+.04)*50)/50)
         def finish(slot):
             env=self.states[slot].resource.env;env.latency_budget_s=latency
             env.backend.call('retire')
         self._run_boundary_jobs([self.executors[i].submit(finish,i) for i in range(enabled)])
         return dict(durations=durations,latency_budget_s=latency,batches=list(self.batch_reports),
-            scope='real_vector_deployment_calibration_no_training_transitions')
+            deployment_profile_sha256=None if clock is None else clock.sha256,
+            scope=('training_wallclock_profile_only_does_not_calibrate_simulated_delay' if clock is not None
+                   else 'real_vector_deployment_calibration_no_training_transitions'))
 
     def state_dict(self):
         from .vector_boundary import FRAGMENT_CONTRACT

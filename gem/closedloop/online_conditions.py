@@ -63,6 +63,7 @@ class OnlineConditionBuilder:
         reservation: Mapping[str, Any],
         music_features: Any,
         music_start_tick: int = 600,
+        _prefix_encoding=None,
     ) -> tuple[dict[str, torch.Tensor], dict[str, Any]]:
         """将一次请求时刻的快照与前缀预留转换为条件及执行元数据。
 
@@ -110,7 +111,7 @@ class OnlineConditionBuilder:
         known = torch.zeros((1, MOTION_WINDOW_FRAMES, 30), dtype=torch.float32)
         known_mask = torch.zeros_like(known, dtype=torch.bool)
         if prefix:
-            features,anchor = self.codec.encode_condition_features(source)
+            features,anchor = (self.codec.encode_condition_features(source) if _prefix_encoding is None else _prefix_encoding)
             known[0, :prefix] = features
             known_mask[0, :prefix] = True
             known_mask[0, prefix - 1, :2] = False
@@ -162,6 +163,32 @@ class OnlineConditionBuilder:
             "music_start_tick": music_start_tick,
         })
         return conditions, meta
+
+    def build_many(self, snapshots, reservations, music_features, music_start_tick=600):
+        """按同P分组批量编码前缀，保持原标量校验和精确运算顺序。
+
+        元数据、不同长度音乐及历史的合法性仍逐条验证；昂贵的四元数/锚点/动作
+        编码按真实前缀长度合批，无伪造前缀或padding参与编码。整批在CPU构造后
+        由协调器一次传GPU，避免多个线程竞争Torch小算子和逐环境设备同步。
+        """
+        from dataclasses import fields
+        if not snapshots or not len(snapshots)==len(reservations)==len(music_features):
+            raise ValueError('Aligned nonempty vector condition inputs required')
+        groups, encodings = {}, {}
+        for i,reservation in enumerate(reservations):
+            count = _integer(reservation['prefix_frames'], 'prefix_frames')
+            if count:
+                groups.setdefault(count, []).append(i)
+        for indices in groups.values():
+            qpos = torch.stack([_tensor(reservations[i]['source_qpos'], torch.float32) for i in indices])
+            features, anchors = self.codec.encode_condition_features(qpos)
+            for row,i in enumerate(indices):
+                anchor = type(anchors)(**{field.name:(getattr(anchors, field.name)[row]
+                    if getattr(anchors, field.name).ndim else getattr(anchors, field.name)) for field in fields(anchors)})
+                encodings[i] = (features[row], anchor)
+        values = [self.build(s, r, m, music_start_tick, _prefix_encoding=encodings.get(i))
+                  for i,(s,r,m) in enumerate(zip(snapshots,reservations,music_features))]
+        return [v[0] for v in values], [v[1] for v in values]
 
     def _history(self, snapshot: Mapping[str, Any], tick: int):
         """将已有历史放入固定因果网格；无效槽归零，不插值或伪造有效历史。"""

@@ -176,11 +176,11 @@ def _sources(config, check):
     if vector:
         names += ('vector_collector','vector_boundary','vector_environment','vector_runtime','vector_evaluation',
                   'rollback_audit','sampling_graph','condition_sampling_graph','vector_metrics',
-                  'vector_reward_math','vector_reward_adapter','vector_devices')
+                  'vector_reward_math','vector_reward_adapter','vector_devices','deployment_clock','vector_generation')
     gmt_additional = ['source/NoetixRobot/NoetixRobot/tasks/mimic/mimic_noetix_bumi4340_mha_sonic/closedloop/execution_journal.py']
     if vector:
         gmt_additional += [f'source/NoetixRobot/NoetixRobot/tasks/mimic/mimic_noetix_bumi4340_mha_sonic/closedloop/{name}.py'
-            for name in ('vector_backend','vector_env','vector_reference','vector_diagnostics','vector_service','vector_journal')]
+            for name in ('vector_backend','vector_env','vector_reference','vector_diagnostics','vector_service','vector_journal','vector_columns')]
         gmt_additional += [f'scripts/rsl_rl/{name}.py' for name in
             ('serve_frozen_gmt_vector','bumi4340_frozen_torch_policy','vector_app_resources')]
     return collect_source_provenance(config['paths'], repository_state=check['repositories'], additional_files={
@@ -222,6 +222,8 @@ def validate_execution_state(state):
 def capture_execution_state(env):
     """初始校准后及每轮发布前共用的执行计数快照，不保存PhysX内部状态。"""
     result = {name:getattr(env,name) for name in ('decision', 'attempt', 'episode_count', 'latency_budget_s')}
+    clock = getattr(env, 'deployment_clock', None)
+    if clock is not None: result['deployment_profile_sha256'] = clock.sha256
     validate_execution_state(result)
     return result
 
@@ -234,6 +236,11 @@ def restore_execution_state(env, state, *, spent_generations=None):
     env.policy_version, env.iteration = state['policy_version'], state['iteration']
     env.decision, env.episode_count = state['decision'], state['episode_count']
     env.attempt = max(state['attempt'], state['attempt'] if spent_generations is None else spent_generations)
+    clock = getattr(env, 'deployment_clock', None)
+    if state.get('deployment_profile_sha256') != (None if clock is None else clock.sha256):
+        raise ValueError('Checkpoint deployment clock/profile differs from this run')
+    if clock is not None and state['latency_budget_s'] != clock.budget_seconds:
+        raise ValueError('Checkpoint changed modeled prefix budget')
     env.latency_budget_s = state['latency_budget_s']
 
 

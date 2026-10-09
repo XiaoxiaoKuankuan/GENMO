@@ -81,3 +81,31 @@ def expand_feedback(reply):
             raise ValueError('Reply cannot contain two authoritative traces')
         return {k:v for k,v in reply.items() if k!='trace_block'} | {'trace':unpack_trace(reply['trace_block'])}
     return reply
+
+
+def concatenate_trace_blocks(blocks):
+    """拼接同一环境的真实连续区间，不先展开全部控制步对象。
+
+    数值列一次连接；常量与结构保持原协议，少量异构叶子独立恢复后重组。这里只
+    合并已经持久化/确认区间的表示，不改变环境身份、执行顺序或最多25步的边界。
+    """
+    counts = [b['count'] for b in blocks]
+    if not blocks or any(b['schema'] != VERSION for b in blocks) or sum(counts) > 25:
+        raise ValueError('Cannot concatenate incompatible or oversized control blocks')
+    useful = [(b['columns'], b['count']) for b in blocks if b['count']]
+    if not useful: return pack_trace([])
+    def combine(parts):
+        first = parts[0][0]
+        kinds = {node['kind'] for node,_ in parts}
+        if kinds == {'mapping'} and all(node['fields'].keys() == first['fields'].keys() for node,_ in parts):
+            return dict(kind='mapping', fields={k:combine([(n['fields'][k],c) for n,c in parts]) for k in first['fields']})
+        if len(kinds)==1 and first['kind'] in ('list','tuple') and all(len(n['fields'])==len(first['fields']) for n,_ in parts):
+            return dict(kind=first['kind'],fields=[combine([(n['fields'][i],c) for n,c in parts]) for i in range(len(first['fields']))])
+        if kinds == {'constant'} and all(n['sha256']==first['sha256'] for n,_ in parts): return first
+        if len(kinds)==1 and first['kind'] in ('array','scalar'):
+            return dict(kind=first['kind'],values=np.concatenate([n['values'] for n,_ in parts]))
+        values=[]
+        for node,count in parts:
+            values.extend(unpack_trace(dict(schema=VERSION,count=count,columns=node)))
+        return pack_trace(values)['columns']
+    return dict(schema=VERSION,count=sum(counts),columns=combine(useful))

@@ -61,6 +61,11 @@ class VectorUpperEnvironment(UpperEnvironment):
         return request
 
     def generate(self,**kwargs):
-        result=super().generate(**kwargs)
+        from .vector_generation import GENERATION_CONTRACT, generate_for_environment
+        contract = self.config['runtime'].get('vector_generation_contract')
+        if contract is not None and contract != GENERATION_CONTRACT:
+            raise ValueError('Unknown vector generation pipeline')
+        batched = contract is not None and hasattr(self.policy, 'owner') and not kwargs.get('deterministic', False)
+        result = generate_for_environment(self) if batched else super().generate(**kwargs)
         result['timing']['reference_deadline']=dict(self.deadline_diagnostic)
         return result

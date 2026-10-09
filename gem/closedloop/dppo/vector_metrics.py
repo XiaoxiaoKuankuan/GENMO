@@ -14,7 +14,13 @@ def attach_vector_metrics(rows, report):
     report['reward_component_sums']={}
     report['generation_timing_totals']={}
     report['actor_phase_totals']={}
+    report['modeled_delay_ticks']=[]
+    report['prefix_frames']=[]
     for row in rows:
+        clock=row.metadata.get('timing',{}).get('deployment_clock')
+        if clock is not None: report['modeled_delay_ticks'].append(clock['delay_ticks'])
+        prefix=row.metadata.get('generated',{}).get('prefix_frames')
+        if prefix is not None: report['prefix_frames'].append(prefix)
         for detail in row.metadata.get('reward_details',[]):
             for name,value in detail.get('components',{}).items():
                 value=value.get('integrated_reward') if isinstance(value,dict) else value
@@ -27,6 +33,11 @@ def attach_vector_metrics(rows, report):
         for name,value in batch.get('components',{}).items():
             report['actor_phase_totals'][name]=report['actor_phase_totals'].get(name,0.)+value
     report['generation_batch_wall_seconds']=sum(b['generation_seconds'] for b in report['batches'])
+    report['generation_pipeline_totals']={}
+    for batch in report['batches']:
+        for name,value in (batch.get('pipeline_timing') or {}).items():
+            if name.endswith('_seconds') and isinstance(value,(int,float)):
+                report['generation_pipeline_totals'][name]=report['generation_pipeline_totals'].get(name,0.)+value
     report['generation_timing_scope']='per_environment_latency_sum_can_overlap'
     report['actor_phase_scope']='each_real_batch_once_no_per_environment_duplication'
     return report

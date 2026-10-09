@@ -43,6 +43,10 @@ def validate_v2_configuration(config):
             raise ValueError('GPU vector timing/prefix contracts must be explicit')
         if runtime.get('vector_reward_contract') not in (None, 'stage10.gpu_vector_continuous_reward.v1'):
             raise ValueError('Unknown vector reward computation contract')
+        if runtime.get('vector_generation_contract') not in (None, 'genmo.vector_generation_pipeline.v1'):
+            raise ValueError('Unknown vector generation computation contract')
+        if runtime.get('vector_evidence_contract') not in (None, 'gmt.vector_columns.v1'):
+            raise ValueError('Unknown vector evidence computation contract')
         wait = runtime.get('vector_batch_wait_s')
         if isinstance(wait, bool) or not isinstance(wait,(int,float)) or not math.isfinite(wait) or not 0 <= wait <= 1:
             raise ValueError('GPU ready queue requires bounded explicit wait seconds')
@@ -94,8 +98,10 @@ def validate_v2_configuration(config):
         value = settings.get(key)
         if value is not None and (isinstance(value, bool) or not math.isfinite(value) or value <= 0):
             raise ValueError(f'{key} must be positive or null (diagnostic only)')
-    if config['runtime'].get('timing_contract') != 'deployment_critical.v2':
+    from .deployment_clock import MODELED_CLOCK, clock_for_config
+    if config['runtime'].get('timing_contract') not in ('deployment_critical.v2', MODELED_CLOCK):
         raise ValueError('Stage10 v2 requires the explicit deployment critical-path timing contract')
+    clock_for_config(config)
     for key in ('checkpoint_every_iterations', 'archive_queue_size'):
         if type(stage['storage'].get(key)) is not int or stage['storage'][key] < 1:
             raise ValueError(f'{key} must be a positive integer')
