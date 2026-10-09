@@ -323,7 +323,11 @@ def check_journal(path):
             from gem.closedloop.dppo.buffer import _journal_value
             raw = payload.encode() if isinstance(payload, str) else payload
             require(hashlib.sha256(raw).hexdigest() == digest, f"reply {row_number}: SHA256 mismatch")
-            reply = _journal_value(decode_payload(payload, sha256=digest))
+            from gem.runtime.trajectory_blocks import expand_feedback
+            decoded = decode_payload(payload, sha256=digest)
+            if isinstance(decoded.get('result'), dict):
+                decoded['result'] = expand_feedback(decoded['result'])
+            reply = _journal_value(decoded)
             payload = json.dumps(reply, ensure_ascii=False, allow_nan=False)
             require(reply.get("execution_protocol") == "ack.v2", f"reply {row_number}: unsupported ACK protocol")
             session = reply["backend_session_id"]

@@ -114,5 +114,8 @@ class AcknowledgedBackend:
         if method == 'reset_episode':
             self.episode_id = result['episode_id']
         if method == 'advance':
+            from gem.runtime.trajectory_blocks import expand_feedback
+            with measure('rpc.trace_block_decode'):
+                result = expand_feedback(result)
             result = {**result, 'backend_session_id': self.session_id, 'mutation_seq': seq}
         return result

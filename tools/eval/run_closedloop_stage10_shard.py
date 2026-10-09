@@ -127,7 +127,8 @@ def verify_execution_journal(path, frozen):
                 continue
             if not reply['ok']:
                 raise ValueError('An advance failed without complete execution evidence')
-            result = reply['result']
+            from gem.runtime.trajectory_blocks import expand_feedback
+            result = expand_feedback(reply['result'])
             count, rows = result['executed_control_steps'], result['trace']
             if (type(count) is not int or count < 0 or len(rows) != count
                     or result['executed_physics_steps'] != count * 4

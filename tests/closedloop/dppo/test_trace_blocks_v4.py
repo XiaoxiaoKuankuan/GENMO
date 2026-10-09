@@ -1,0 +1,39 @@
+"""列式完整控制轨迹的还原、静态内容身份和奖励等价性测试。
+
+复用实际奖励输入夹具，比较转换前后每个控制步及四个子步的字段、dtype、shape；
+测试故障异构行和静态SHA篡改。编码不触发物理推进，不能据此宣称PhysX已验收。
+"""
+import copy
+import numpy as np
+import pytest
+from gem.runtime.trajectory_blocks import pack_trace, unpack_trace, expand_feedback
+from gem.closedloop.dppo.journal_codec import encode_binary, decode_payload
+from tools.profile_closedloop_rpc import compare
+from tests.closedloop.dppo.test_data_learning import actual_step
+
+
+def test_full_control_and_substep_fields_survive_both_codecs():
+    rows = [actual_step(i, speed=1.) for i in range(25)]
+    block = pack_trace(rows)
+    decoded = decode_payload(encode_binary(dict(trace_block=block)))
+    result = expand_feedback(decoded)
+    compare(rows, result['trace'])
+    assert len(result['trace']) == 25
+    assert all(len(row['physics_substeps']) == 4 for row in result['trace'])
+
+
+def test_heterogeneous_fault_rows_and_empty():
+    rows = [dict(tick=12, action=np.zeros(21), valid=True), dict(tick=24, valid=False, error='fault')]
+    compare(rows, unpack_trace(pack_trace(rows)))
+    assert unpack_trace(pack_trace([])) == []
+
+
+def test_constant_sha_tamper_and_column_count():
+    block = pack_trace([dict(source='asset-hash', state=np.arange(4)) for _ in range(2)])
+    broken = copy.deepcopy(block)
+    broken['columns']['fields']['source']['value'] = 'different-asset'
+    with pytest.raises(ValueError, match='SHA'):
+        unpack_trace(broken)
+    block['count'] = 3
+    with pytest.raises(ValueError, match='count'):
+        unpack_trace(block)

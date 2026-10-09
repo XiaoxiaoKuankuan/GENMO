@@ -174,7 +174,7 @@ def _sources(config, check):
                   'batch_execution', 'execution_checks', 'journal_codec')
     return collect_source_provenance(config['paths'], repository_state=check['repositories'], additional_files={
         'genmo_repo': [*(f'gem/closedloop/dppo/{n}.py' for n in names),
-            'tools/train_closedloop_stage10.py',
+            'tools/train_closedloop_stage10.py', 'gem/runtime/trajectory_blocks.py',
             'configs/closedloop/stage1_dataset_server1_fourset_90505_v1.yaml',
             'gem/closedloop/stage1_dataset.py', 'gem/closedloop/losses.py',
             *(['gem/closedloop/dppo/distributed_runtime.py', 'tools/train_closedloop_stage10_8gpu.py']
