@@ -34,11 +34,19 @@ def main():
     parser.add_argument('--benchmark-repeats',type=int,default=0)
     parser.add_argument('--diagnostic-limit',type=int,default=32)
     args=parser.parse_args()
-    for name in ('config','gmt_repo','isaac_python','output'):
+    for name in ('config','gmt_repo','output'):
         setattr(args,name,getattr(args,name).expanduser().resolve())
+    # venv/bin/python通常是软链接；不能resolve到系统解释器而丢失虚拟环境身份。
+    args.isaac_python=Path(os.path.abspath(args.isaac_python.expanduser()))
     devices=_available_gpus()
     if args.output.exists(): raise FileExistsError(args.output)
     args.output.mkdir(parents=True)
+    # 与正式入口使用同一配置适配器，补齐stage9同值接口及解析后的奖励权重。
+    # 不在Isaac解释器中导入GENMO训练依赖，也不另行复制奖励配置规则。
+    import yaml
+    from tools.train_closedloop_stage10 import configuration
+    resolved_config=args.output/'resolved_config.yaml'
+    resolved_config.write_text(yaml.safe_dump(configuration(args.config),allow_unicode=True,sort_keys=False))
     entries=[]; started=time.monotonic(); report={}
     try:
         for rank in range(8):
@@ -54,7 +62,7 @@ def main():
             env['LD_LIBRARY_PATH']='/data0/user/liwei/closedloop_stage8_runtime/sysroot/usr/lib/x86_64-linux-gnu:'+env.get('LD_LIBRARY_PATH','')
             log=(args.output/f'rank{rank:02d}.log').open('w')
             command=[str(args.isaac_python),'-B',str(args.gmt_repo/'scripts/rsl_rl/check_frozen_vector_world.py'),
-                '--config',str(args.config),'--output',str(args.output/f'rank{rank:02d}'),
+                '--config',str(resolved_config),'--output',str(args.output/f'rank{rank:02d}'),
                 '--genmo-repo',str(ROOT),'--rank',str(rank),'--num-envs',str(args.num_envs),
                 '--benchmark-repeats',str(args.benchmark_repeats),'--diagnostic-limit',str(args.diagnostic_limit),'--headless']
             owner=os.getpid()
