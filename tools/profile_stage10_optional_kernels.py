@@ -179,7 +179,24 @@ def main():
             actor.zero_grad(set_to_none=True)
             return timings
         report['eager_timings'] = benchmark()
+        original_history = actor.history_encoder.forward
         info = install(actor, args.variant); report['execution'] = info
+        if args.variant == 'gru':
+            adapted = actor.adapt_conditions(context)
+            report['history_mask_cases'] = []
+            for label in ('actual', 'holes', 'empty'):
+                valid = adapted['history_valid'].clone()
+                if label == 'holes':valid[:,::3] = False
+                if label == 'empty':valid[:] = False
+                history = adapted['history'].detach().clone().requires_grad_(True)
+                expected = original_history(history,valid,adapted['history_relative_times'])
+                actual = actor.history_encoder(history,valid,adapted['history_relative_times'])
+                torch.testing.assert_close(actual,expected,atol=1e-6,rtol=1e-4)
+                gradient, = torch.autograd.grad(actual.sum(),history)
+                if not bool((gradient[~valid]==0).all()):raise ValueError('Fused GRU leaked invalid history gradient')
+                if label == 'empty' and not bool((actual==0).all()):raise ValueError('Empty history must be exactly zero')
+                report['history_mask_cases'].append(dict(case=label,max_abs=float((actual-expected).abs().max()),
+                    invalid_input_gradient_exact_zero=True))
         torch.cuda.reset_peak_memory_stats()
         prepared = time.perf_counter()
         own = sample()
