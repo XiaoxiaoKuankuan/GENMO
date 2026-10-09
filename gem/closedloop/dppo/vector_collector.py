@@ -223,6 +223,14 @@ class VectorEnvironmentCollector(DualEnvironmentCollector):
         self.restore_records=None
 
     def _fragment(self,slot,count,policy_version):
+        from .performance import PhaseProfiler,activate,deactivate
+        profiler=PhaseProfiler('cpu',slot,detailed=True);token=activate(profiler)
+        try:return self._fragment_profiled(slot,count,policy_version)
+        finally:
+            deactivate(token)
+            if self.states[slot] is not None:self.states[slot].profile=profiler.report()
+
+    def _fragment_profiled(self,slot,count,policy_version):
         if self.states[slot] is None:
             from .dual_collector import _QueuedPolicy
             resource=self.factory(slot,_QueuedPolicy(self,slot))
@@ -282,6 +290,8 @@ class VectorEnvironmentCollector(DualEnvironmentCollector):
             return fragments,dict(schema='genmo.gpu_vector_collector.v1',total_transitions=sum(map(len,fragments)),
                 allocated_envs=self.num_envs,active_envs=enabled,fragment_lengths=list(map(len,fragments)),
                 seconds=time.perf_counter()-started,batches=self.batch_reports,world_timing=self.world_timing,
+                environment_thread_profiles=[state.profile for state in self.states[:enabled]],
+                resource_scope='sum_thread_work_can_overlap_not_walltime',
                 gae_contract='independent_per_env_episode_contiguous_fragment',real_environment_batch=True)
         except BaseException as error:
             self.cancelled.set()

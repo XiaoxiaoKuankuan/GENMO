@@ -110,6 +110,26 @@ def compare(cpu,gpu,cpu_rewards,gpu_rewards):
         cpu_reward=sum(r['reward'] for r in cpu_rewards),gpu_reward=sum(r['reward'] for r in gpu_rewards))
 
 
+def replay_requests(backend,records,control_limit):
+    before=[];after=[];mapping={};controls=0;start=time.perf_counter()
+    for old in records:
+        method=old['method'];payload=remap(old['payload'],mapping)
+        if method=='reset_episode' and before:break
+        if method=='advance' and controls+payload['control_steps']>control_limit:break
+        try:value=backend.call(method,**payload)
+        except RemoteError as error:
+            if not old.get('remote_error') or error.code!=old['remote_error']['code']:raise
+            continue
+        if old.get('remote_error'):raise AssertionError('Previously rejected reference was accepted')
+        if method=='reset_episode':mapping[old['result']['episode_id']]=value['episode_id']
+        if method=='prepare_plan':mapping[old['result']['prepared_plan_id']]=value['prepared_plan_id']
+        before.append(old);after.append(dict(method=method,payload=payload,result=value))
+        if method=='advance':
+            controls+=value['executed_control_steps']
+            if value['done']:break
+    return before,after,time.perf_counter()-start
+
+
 def main():
     p=argparse.ArgumentParser(description=__doc__)
     for name in ('config','gmt-repo','cpu-replay','data-audit','output'):p.add_argument('--'+name,type=Path,required=True)
@@ -141,25 +161,9 @@ def main():
         guard=DiskGuard(output,min_free_bytes=10*2**30,max_run_bytes=4*2**30)
         for name in ('world','lane'):journals.append(GuardedStepJournal(output/(name+'.sqlite'),guard,format='genmo.execution_journal.ndarray.v2'))
         world=VectorWorldClient(client,journals[0],socket_path=socket);backend=VectorLaneBackend(SingleLaneTransport(world),journals[1])
-        before=[];after=[];mapping={};controls=0;start=time.perf_counter()
-        for old in records:
-            method=old['method'];payload=remap(old['payload'],mapping)
-            if method=='reset_episode' and before:break
-            if method=='advance' and controls+payload['control_steps']>args.controls:break
-            try:value=backend.call(method,**payload)
-            except RemoteError as error:
-                if not old.get('remote_error') or error.code!=old['remote_error']['code']:raise
-                continue
-            if old.get('remote_error'):raise AssertionError('Previously rejected reference was accepted')
-            if method=='reset_episode':mapping[old['result']['episode_id']]=value['episode_id']
-            if method=='prepare_plan':mapping[old['result']['prepared_plan_id']]=value['prepared_plan_id']
-            before.append(old);after.append(dict(method=method,payload=payload,result=value))
-            if method=='advance':
-                controls+=value['executed_control_steps']
-                if value['done']:break
-        elapsed=time.perf_counter()-start
-        result=compare(before,after,reward_rows(before,cfg,sample,music),reward_rows(after,cfg,sample,music))
-        frozen=world.call('verify_frozen');_assert_frozen(frozen)
+        before,after,elapsed=local_call(group,lambda:replay_requests(backend,records,args.controls))
+        result=local_call(group,lambda:compare(before,after,reward_rows(before,cfg,sample,music),reward_rows(after,cfg,sample,music)))
+        frozen=local_call(group,lambda:world.call('verify_frozen'));_assert_frozen(frozen)
         torch.save(after,output/'gpu_requests_and_full_replies.pt')
         report.update(status='passed' if result['passed'] else 'failed',comparison=result,seconds=elapsed,frozen=frozen,
             scope='fixed_reference_and_arrival_short_GPU_PhysX_replay_not_training_quality')
