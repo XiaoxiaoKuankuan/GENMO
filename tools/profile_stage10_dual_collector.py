@@ -12,6 +12,7 @@ import copy
 import csv
 import json
 import os
+import signal
 from pathlib import Path
 import subprocess
 import sys
@@ -59,6 +60,7 @@ def main():
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--config',type=Path,required=True)
     parser.add_argument('--output-dir',type=Path,required=True)
+    parser.add_argument('--inject-worker-exit',action='store_true',help='After two timed rounds, terminate only rank3/env1 owned test worker')
     args=parser.parse_args()
     rank,world,local_rank=(int(os.environ.get(k,'-1')) for k in ('RANK','WORLD_SIZE','LOCAL_RANK'))
     if world!=8 or rank!=local_rank:raise ValueError('Use single-node torchrun with exactly eight GPUs')
@@ -159,12 +161,40 @@ def main():
             report['rounds'].append(metrics)
         torch.save(collector.state_dict(),args.output_dir/'collector_boundary.pt')
         report['status']='eight_gpu_collection_completed_pending_independent_audit_and_training_integration'
+        if args.inject_worker_exit:
+            # 先在各自SQLite/连接线程验证全部16个冻结实例，再终止明确属于本测试的一个PID。
+            frozen=[]
+            for executor,state in zip(collector.executors,collector.states):
+                value=executor.submit(lambda r=state.resource:r.env.backend.call('verify_frozen')).result(timeout=120)
+                _assert_frozen(value);frozen.append(value)
+            report['frozen_before_worker_exit']=frozen
+            collective.barrier()
+            if rank==3:
+                owned=workers[1].entries[0]['proc']
+                if owned.poll() is not None:raise RuntimeError('Fault-injection worker already exited unexpectedly')
+                owned.send_signal(signal.SIGTERM)
+                owned.wait(timeout=30)
+            collective.barrier()
+            caught=False
+            try:
+                local_call(collective,lambda:collector.collect(count_per_rank=2,policy_version=0))
+            except RuntimeError as error:
+                caught=True
+                report['worker_exit_diagnostic']=str(error)
+            if not all(collective.all_gather_object(caught)):raise AssertionError('A rank missed actual worker exit')
+            report['worker_exit_test']=dict(actual_owned_worker_terminated=True,failed_rank=3,failed_environment=1,
+                all_ranks_notified=True,actor_optimizer_steps=0,spent_budget_refunded=False,
+                scope='after_two_timed_rounds_not_included_in_sampling_throughput')
     except BaseException as error:
         report.update(status='failed',error=f'{type(error).__name__}: {error}')
         raise
     finally:
         try:
-            if collector is not None:collector.close()
+            if collector is not None:
+                try:collector.close()
+                except Exception as error:
+                    if not report.get('worker_exit_test'):raise
+                    report['expected_close_error_after_injected_exit']=str(error)
         finally:
             for worker in reversed(workers):worker.close()
             (args.output_dir/'report.json').write_text(json.dumps(report,ensure_ascii=False,indent=2))
