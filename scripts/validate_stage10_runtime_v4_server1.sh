@@ -1,15 +1,15 @@
 #!/usr/bin/env bash
 # 第二阶段性能分支的服务器1有限八卡验收入口，不调用正式一万轮启动器。
 # 沿用既有训练启动脚本验证过的四项NCCL设置和PhysX动态库路径，避免直接torchrun
-# 漏掉单机通信环境而误触服务器不可用的IB/GDR路径。只允许通信、离线学习、固定
-# 物理重放、双环境原型、可选算子和journal六个测试入口；各有独立墙钟上限。
+# 漏掉单机通信环境而误触服务器不可用的IB/GDR路径。仅允许下列显式有限验收入口，
+# 包括固定旧rollout学习、GPU多环境采集/奖励/重放；各有独立墙钟上限。
 # 输出路径由后续Python参数显式指定，Python入口在创建CUDA上下文前检查八卡空闲。
 # 不删除正式数据、不修改已发布checkpoint；测试失败保持非零退出并保留诊断。
 set -euo pipefail
 TASK_REPO_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 TASK_PYTHON="${GENMO_PYTHON:-/home/user/liwei/GENMO/.venv/bin/python}"
 TASK_MODE="${1:-}"
-[[ $# -ge 1 ]] || { printf '需要模式：nccl | learning | replay | dual | kernels | journal\n' >&2; exit 2; }
+[[ $# -ge 1 ]] || { printf '需要模式：nccl | learning | saved-learning | sampling-graph | vector-collection | vector-replay | vector-rewards | replay | dual | kernels | journal\n' >&2; exit 2; }
 shift
 case "$TASK_MODE" in
   nccl) TASK_TOOL=check_stage10_eight_gpu_collectives.py; TASK_SECONDS=150 ;;
