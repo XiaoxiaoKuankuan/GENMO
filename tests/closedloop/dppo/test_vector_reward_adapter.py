@@ -58,3 +58,23 @@ def test_cmd_warmup_seed_is_retained_in_first_audit():
     for calculator in (oracle,reference,vector):calculator.seed_previous_target(target)
     row['reward_primitives']=packet(row,oracle)
     compare_reward_evidence(vector.evaluate_step(row),reference.evaluate_step(row))
+
+
+def test_runtime_reward_import_does_not_load_training_dataset():
+    import subprocess
+    import sys
+    code = '''
+import importlib.abc, sys
+class NoTrainingLogging(importlib.abc.MetaPathFinder):
+    def find_spec(self, fullname, path=None, target=None):
+        if fullname == 'colorlog':
+            raise ImportError('Frozen runtime must not require training logging')
+guard=NoTrainingLogging();sys.meta_path.insert(0,guard)
+from gem.closedloop.dppo.vector_reward_math import VectorRewardMath
+assert 'gem.closedloop.stage1_dataset' not in sys.modules
+sys.meta_path.remove(guard)
+from gem.closedloop import BumiClosedLoopStage1Dataset
+from gem.closedloop.stage1_dataset import BumiClosedLoopStage1Dataset as direct
+assert direct is BumiClosedLoopStage1Dataset
+'''
+    subprocess.run([sys.executable,'-B','-c',code],check=True)
