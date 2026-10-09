@@ -115,6 +115,8 @@ def main():
     group = dist.new_group(backend='nccl', timeout=timedelta(minutes=20))
     collective = DistributedCollectives(rank, world, device=f'cuda:{rank}', tensor_group=group)
     config = configuration(args.config)
+    # 必须在load_actor内第一次.to()之前指定本rank设备，避免七个额外GPU0上下文。
+    config['runtime']['genmo_device'] = f'cuda:{rank}'
     actor, _, _ = local_call(collective, lambda: load_actor(config))
     actor = actor.to(f'cuda:{rank}')
     payload = torch.load(args.weights, map_location='cpu', mmap=True, weights_only=False)
