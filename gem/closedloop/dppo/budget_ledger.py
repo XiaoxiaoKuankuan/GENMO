@@ -119,6 +119,25 @@ class IncrementalBudget(TrainingBudget):
         self.settle_many([(phase, reserved, used, lease_id)])
         return copy.deepcopy(self.state['lease_settlements'][lease_id])
 
+    def settle_control(self,phase,requested,result):
+        """仅退回已确认未执行的子步；终止短advance以独立事务幂等结算。"""
+        if not result.get('physics_count_exact',True):return
+        requested=_integer(requested,'requested controls')
+        actual=_integer(result['executed_control_steps'],'executed controls')
+        physics=_integer(result['executed_physics_steps'],'executed physics')
+        if not 0<=actual<=requested or not 4*actual<=physics<=4*requested:raise ValueError('Inconsistent physical settlement')
+        if actual==requested and physics==4*requested:return
+        session=result.get('backend_session_id');sequence=result.get('mutation_seq')
+        if not isinstance(session,str) or not session or type(sequence)is not int or sequence<1:
+            raise ValueError('Partial control settlement requires acknowledged execution identity')
+        identity=f'{session}:{sequence}'
+        record=dict(phase=phase,requested=requested,actual=actual,physics=physics)
+        previous=self.state.get('control_settlements',{}).get(identity)
+        if previous is not None:
+            if previous!=record:raise ValueError('Control settlement identity payload changed')
+            return
+        self._change([dict(kind='control_settle',identity=identity,**record)],identity='control:'+identity)
+
     def accept_iteration(self, phase='update', *, identity=None):
         if not isinstance(identity, str) or not identity:
             raise ValueError('Incremental acceptance requires a unique session/iteration identity')
@@ -139,7 +158,7 @@ class IncrementalBudget(TrainingBudget):
 
 def _validate_operations(state, operations, settled_phases, accepted_ids):
     used = state['used'].copy()
-    phases, settlements, accepted = {}, {}, []
+    phases, settlements, accepted, controls = {}, {}, [], {}
     if not isinstance(operations, list) or not operations:
         raise ValueError('Budget transaction must contain operations')
     for operation in operations:
@@ -162,6 +181,18 @@ def _validate_operations(state, operations, settled_phases, accepted_ids):
                     raise BudgetExceeded(f'{key} budget exhausted in {phase}')
                 used[key] += count
                 values[key] = values.get(key, 0)+count
+        elif kind == 'control_settle':
+            identity=operation.get('identity')
+            if not isinstance(identity,str) or not identity or identity in controls or identity in state.get('control_settlements',{}):
+                raise ValueError('Duplicate control settlement identity')
+            requested=_integer(operation['requested'],'requested controls')
+            actual=_integer(operation['actual'],'executed controls');physics=_integer(operation['physics'],'executed physics')
+            if not 0<=actual<=requested or not 4*actual<=physics<=4*requested:
+                raise ValueError('Inconsistent physical settlement')
+            for key,reserved,spent in (('control_steps',requested,actual),('physics_steps',4*requested,physics)):
+                if reserved>values.get(key,0) or reserved>used[key]:raise ValueError('Control settlement exceeds reservation')
+                used[key]-=reserved-spent;values[key]-=reserved-spent
+            controls[identity]=dict(phase=phase,requested=requested,actual=actual,physics=physics)
         elif kind == 'settle':
             identity = operation.get('identity')
             reserved, spent = operation.get('reserved'), operation.get('used')
@@ -185,12 +216,14 @@ def _validate_operations(state, operations, settled_phases, accepted_ids):
             settlements[identity] = dict(phase=phase, reserved=reserved.copy(), used=spent.copy())
         else:
             raise ValueError('Unknown budget operation')
-    return dict(used=used, phases=phases), settlements, accepted
+    return dict(used=used, phases=phases, control_settlements=controls), settlements, accepted
 
 
 def _apply(state, changes, settlements, accepted):
     state['used'] = changes['used']
     state['phases'].update(changes['phases'])
+    if changes.get('control_settlements'):
+        state.setdefault('control_settlements',{}).update(changes['control_settlements'])
     if settlements:
         state.setdefault('lease_settlements', {}).update(settlements)
     if accepted:

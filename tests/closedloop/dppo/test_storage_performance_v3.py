@@ -217,3 +217,27 @@ def test_raw_rpc_old_npz_compatible_and_rejects_descriptor_corruption():
     bad['value']['x']['__ndarray_raw__']['offset'] = len(payload)+1
     with pytest.raises(ValueError, match='bounds'):
         _unpack(json.dumps(bad).encode(), payload)
+
+def test_incremental_partial_control_settlement_is_atomic_idempotent_and_replayable(tmp_path):
+    from gem.closedloop.dppo.budget_ledger import IncrementalBudget,replay_budget
+    limits=dict(accepted_iterations=2,optimizer_attempts=8,generations=40,control_steps=1000,physics_steps=4000)
+    budget=IncrementalBudget(tmp_path/'budget.json',limits)
+    budget.reserve('train',control_steps=25,physics_steps=100)
+    unknown=dict(physics_count_exact=False)
+    budget.settle_control('train',25,unknown)
+    assert budget.state['used']['physics_steps']==100
+    result=dict(backend_session_id='env3',mutation_seq=5,physics_count_exact=True,
+        executed_control_steps=7,executed_physics_steps=28)
+    budget.settle_control('train',25,result)
+    sequence=budget.sequence
+    budget.settle_control('train',25,result)
+    assert budget.sequence==sequence
+    assert budget.state['used']['control_steps']==7 and budget.state['used']['physics_steps']==28
+    with pytest.raises(ValueError,match='payload changed'):
+        budget.settle_control('train',25,dict(result,executed_control_steps=8,executed_physics_steps=32))
+    expected=budget.state_dict();budget.close()
+    reopened=IncrementalBudget(tmp_path/'budget.json',limits)
+    assert reopened.state_dict()==expected
+    reopened.settle_control('train',25,result)
+    assert reopened.sequence==sequence
+    reopened.close()
