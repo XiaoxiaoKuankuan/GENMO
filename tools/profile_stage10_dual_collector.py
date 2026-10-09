@@ -118,7 +118,8 @@ def main():
                     control_steps=sum(r.executed_control_steps for r in rows),
                     physics_steps=sum(r.executed_physics_steps for r in rows),
                     backend_sessions=[sorted(s) for s in sessions],
-                    fragment_lengths=list(map(len,fragments)),physical_failures=sum(r.terminated for r in rows)))
+                    fragment_lengths=list(map(len,fragments)),terminations=sum(r.terminated for r in rows),
+                    physical_failures=sum(bool(r.metadata.get('terminal_snapshot',{}).get('terminated',False)) for r in rows)))
             boundary=torch.load(args.output_dir/'collector_boundary.pt',map_location='cpu',weights_only=False)
             return dict(rank=rank,rounds=rounds,boundary_budgets=[s['budget'] for s in boundary['states']],
                 scope='real_collected_chain_probability_identity_and_fragment_audit_no_optimizer_no_physics')
