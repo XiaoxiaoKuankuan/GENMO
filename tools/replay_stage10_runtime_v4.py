@@ -54,9 +54,13 @@ def differences(left, right, path='', output=None):
             output.append(dict(path=path, kind='array', shapes=[list(left.shape), list(right.shape)],
                 max_abs=float(np.max(np.abs(left.astype(float)-right.astype(float)))) if left.shape==right.shape else None))
     elif isinstance(left, dict) and isinstance(right, dict):
-        ignored={'backend_session_id','cpu_timing','prepare_seconds','feedback_schema','schema'}
+        ignored={'backend_session_id','cpu_timing','prepare_seconds','gmt_inference_seconds',
+                 'physics_seconds','video_capture_seconds','step_seconds','trace_block_encode_seconds'}
         keys=(set(left)|set(right))-ignored
         for key in sorted(keys):
+            if key=='schema' and {left.get(key),right.get(key)} <= {
+                    'genmo.gmt_execution_feedback.v2','genmo.gmt_execution_feedback.columns.v3'}:
+                continue
             if key not in left or key not in right:
                 output.append(dict(path=path+'/'+key,kind='missing_field'))
             else:
