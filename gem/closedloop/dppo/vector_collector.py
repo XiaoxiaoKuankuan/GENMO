@@ -28,6 +28,22 @@ class VectorWorldClient(AcknowledgedBackend):
     MUTATIONS={'exchange','begin_rollout'}
 
 
+def validate_vector_close(result):
+    """正常退出必须保留冻结参数和世界/全部lane已持久化确认的真实回执。"""
+    from tools.train_closedloop_stage10 import _assert_frozen
+    _assert_frozen(result)
+    if (result.get('closed') is not True or result.get('gmt_parameters_frozen') is not True
+            or result.get('actual_module_sha256')!=result.get('initial_module_sha256')
+            or not result.get('actual_module_sha256') or result.get('pending_env_ids')!=[]
+            or result.get('deferred_reset_env_ids')!=[] or result.get('restart_required') is not False
+            or not result.get('lane_journals')):
+        raise RuntimeError('Vector worker closed with incomplete execution or changed parameters')
+    for journal in [result.get('execution_journal',{}),*result.get('lane_journals',[])]:
+        if (not journal.get('backend_session_id') or journal.get('executed_seq')!=journal.get('acked_seq')
+                or journal.get('outstanding_seq') is not None):
+            raise RuntimeError('Vector worker closed before all execution was acknowledged')
+
+
 class VectorLaneBackend(AcknowledgedBackend):
     MUTATIONS=AcknowledgedBackend.MUTATIONS|{'retire','activate','join_fragment','drain_fragment'}
 
@@ -100,6 +116,7 @@ class VectorEnvironmentCollector(DualEnvironmentCollector):
         self.rpc_error=None
         self.rpc_thread=None
         self.remaining_generations=None
+        self.shutdown_result=None
         self.audit_intervals=deque(maxlen=4096)
         if self.world_factory is not None:
             ready=Future()
@@ -371,8 +388,12 @@ class VectorEnvironmentCollector(DualEnvironmentCollector):
         for e in self.executors:e.shutdown(wait=True,cancel_futures=True)
         if self.rpc_thread is not None:
             if self.rpc_error is None:
-                try:self.world_call('close')
+                try:self.shutdown_result=self.world_call('close')
                 except BaseException as error:errors.append(error)
             self.rpc_stop.set();self.rpc_thread.join(timeout=self.timeout_seconds)
             if self.rpc_thread.is_alive():errors.append(TimeoutError('Vector RPC shutdown deadline'))
+        elif self.world is not None:
+            try:self.shutdown_result=self.world.call('close')
+            except BaseException as error:errors.append(error)
         if errors:raise RuntimeError('Vector resource cleanup failed') from errors[0]
+        return self.shutdown_result

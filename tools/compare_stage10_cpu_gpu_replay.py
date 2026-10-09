@@ -174,9 +174,14 @@ def main():
         local_call(group,lambda:None if result['passed'] else (_ for _ in ()).throw(AssertionError('CPU/GPU comparison failed; unchanged tolerances')))
     finally:
         if world is not None:
-            try:world.call('close')
-            except Exception:pass
-        worker.close()
+            try:
+                from gem.closedloop.dppo.vector_collector import validate_vector_close
+                result=world.call('close')
+                world.client.close()
+                worker.record_external_close('gmt',result)
+                validate_vector_close(result)
+            finally:worker.close()
+        else:worker.close()
         for journal in journals:journal.close()
         (output/'report.json').write_text(json.dumps(report,ensure_ascii=False,indent=2))
         if dist.is_initialized():dist.destroy_process_group()

@@ -416,6 +416,18 @@ class Workers:
         backend = self.start("gmt", command, paths["gmt_repo"], gmt_socket)
         return actor, backend
 
+    def record_external_close(self, name, result):
+        """接收唯一RPC所有者的真实close回执，只关闭socket，不再次发送close。"""
+        entries=[entry for entry in self.entries if entry['name']==name]
+        if len(entries)!=1 or name in self.shutdown:
+            raise ValueError('External worker close requires one unrecorded owned process')
+        if not isinstance(result,dict) or result.get('closed') is not True:
+            raise ValueError('External worker close requires its successful RPC acknowledgement')
+        self.shutdown[name]=dict(result)
+        client=entries[0]['client']
+        if client is not None:client.close()
+        entries[0]['client']=None
+
     def close(self):
         for entry in reversed(self.entries):
             name, proc, client = entry["name"], entry["proc"], entry["client"]

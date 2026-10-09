@@ -212,7 +212,12 @@ def main():
         raise
     finally:
         try:
-            if collector is not None:collector.close()
+            if collector is not None:
+                result=collector.close()
+                if result is not None:
+                    from gem.closedloop.dppo.vector_collector import validate_vector_close
+                    workers.record_external_close('gmt',result)
+                    validate_vector_close(result)
         finally:
             try:
                 if journal is not None:journal.close()

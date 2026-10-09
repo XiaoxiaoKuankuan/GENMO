@@ -240,4 +240,8 @@ class VectorTrainingRuntime:
         return self.collector.world_call('verify_frozen')
 
     def close(self):
-        if self.collector is not None:self.collector.close()
+        if self.collector is not None:
+            from .vector_collector import validate_vector_close
+            result=self.collector.close()
+            self.c.workers.record_external_close('gmt',result)
+            validate_vector_close(result)

@@ -72,9 +72,18 @@ def isolated_vector_evaluation(c,label):
         c.backend=old_backend
         def close():
             try:
-                if world is not None:world.call('close')
+                if world is not None:
+                    from .vector_collector import validate_vector_close
+                    result=world.call('close')
+                    world.client.close()
+                    workers.record_external_close('gmt',result)
+                    validate_vector_close(result)
             finally:
-                try:workers.close()
+                try:
+                    workers.close()
+                    if any(v.get('close_error') or v.get('forced_shutdown') or v.get('process_exit_code')!=0
+                           for v in workers.shutdown.values()):
+                        raise RuntimeError('Isolated GPU evaluation worker did not close cleanly')
                 finally:
                     if journal is not None:journal.close()
         local_call(c.distributed,close)
