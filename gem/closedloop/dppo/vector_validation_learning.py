@@ -92,6 +92,40 @@ class FiniteVectorLearner:
         result['replicas']=_synchronize_models(c,full=True,phase='finite_vector_acceptance')
         return result
 
+    def reject_for_validation(self, fragments):
+        """仅有限测试：先实际完成更新和全量KL，再注入超限，核验整轮精确恢复。"""
+        from . import parallel_training
+        c=self.c
+        if self.iteration<1 or not c.actor_optimizer.state or not c.critic_optimizer.state:
+            raise ValueError('Fault acceptance requires a prior accepted round and nonempty Adam states')
+        before=copy.deepcopy(c.state)
+        spent=root_call(c.distributed,lambda:c.budget.state_dict()['used']['optimizer_attempts'])
+        original=parallel_training.check_kl_limits
+        observed={}
+        def reject(kl, settings):
+            observed['actual_full_kl']=copy.deepcopy(kl)
+            changed=dict(kl,mean_joint_kl=settings['kl_stop_joint']+.001)
+            observed['injected_mean_joint_kl']=changed['mean_joint_kl']
+            original(changed,settings)
+            raise AssertionError('Injected hard KL rejection failed')
+        parallel_training.check_kl_limits=reject
+        try:
+            try:self.update(fragments)
+            except RuntimeError as error:
+                if not observed or 'Final whole-rollout KL rejected' not in str(error):raise
+            else:raise AssertionError('Rejected iteration was incorrectly accepted')
+        finally:parallel_training.check_kl_limits=original
+        if c.state!=before:raise AssertionError('Rejected round changed accepted counters')
+        rejected=root_call(c.distributed,lambda:json.loads((c.session/f'rejected_{self.iteration+1:06d}.json').read_text()))
+        after=root_call(c.distributed,lambda:c.budget.state_dict()['used']['optimizer_attempts'])
+        if not rejected['rolled_back'] or after<=spent:
+            raise AssertionError('Rollback must restore all bytes without refunding optimization attempts')
+        replicas=_synchronize_models(c,full=True,phase='finite_injected_KL_rollback')
+        return dict(status='passed_expected_fault',injection=observed,
+            accepted_counters_unchanged=True,charged_attempts=after-spent,
+            exact_recovery_by_rank=rejected['rollback_audit_by_rank'],replicas=replicas,
+            checkpoint_published=False)
+
     def save(self,collector,path):
         c=self.c
         local_state=local_call(c.distributed,lambda:dict(c.state,vector_collector=collector.state_dict()))

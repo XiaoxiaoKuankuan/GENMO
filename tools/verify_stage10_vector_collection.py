@@ -56,6 +56,7 @@ def main():
     p.add_argument('--updates',action='store_true',help='采集后运行原完整DPPO/BC/Critic更新与KL验收')
     p.add_argument('--resume',type=Path,help='仅恢复本工具完整GPU向量验收断点')
     p.add_argument('--stop-after-iteration',type=int,help='有限验收提前正常退出，例如第一轮保存后退出进程')
+    p.add_argument('--reject-iteration',type=int,help='只在此有限工具的指定末轮实际更新后注入KL超限，要求完整回滚且不发布断点')
     args=p.parse_args()
     rank,world=int(os.environ['RANK']),int(os.environ['WORLD_SIZE'])
     if world!=8 or rank!=int(os.environ['LOCAL_RANK']):raise ValueError('Single-node eight GPUs required')
@@ -71,6 +72,8 @@ def main():
         physics_device='cuda:0',gmt_precision='float32',asset_conversion_dir=str(output/'usd'),headless=True,video_path=None,
         prefix_deadline_contract=DEADLINE_CONTRACT,vector_audit_contract='nested_world_journal_excluded.v1')
     if args.resume and not args.updates:raise ValueError('Resume requires the complete finite training mode')
+    if args.reject_iteration is not None and (not args.updates or args.reject_iteration!=args.rounds or args.rounds<2):
+        raise ValueError('KL injection requires the final round >=2 of a finite full update test')
     config['stage9']['run_id']=root_call(collective,lambda:'vector-finite-'+str(uuid.uuid4()))
     torch.cuda.set_device(rank);torch.set_num_threads(1)
     torch.backends.cuda.matmul.allow_tf32=torch.backends.cudnn.allow_tf32=False
@@ -147,6 +150,8 @@ def main():
             if rank==0:print(f'[VECTOR] round {iteration+1} collection={timing["seconds"]:.3f}s batches={[b["effective_rows"] for b in timing["batches"]]}',flush=True)
             rows=[r for fragment in fragments for r in fragment]
             if len(rows)!=20:raise AssertionError('Real local batch changed')
+            from gem.closedloop.dppo.vector_metrics import attach_vector_metrics
+            attach_vector_metrics(rows,timing)
             torch.save(fragments,output/f'rollout_{iteration:06d}.pt')
             def audit():
                 for slot,fragment in enumerate(fragments):
@@ -168,12 +173,17 @@ def main():
             report['rounds'].append(timing)
             (output/'report.json').write_text(json.dumps(report,ensure_ascii=False,indent=2))
             if learner is not None:
+                if args.reject_iteration==iteration+1:
+                    timing['expected_failure']=learner.reject_for_validation(fragments)
+                    timing['outer_seconds_excluding_checkpoint']=time.perf_counter()-outer_begin
+                    continue
                 timing['update']=learner.update(fragments)
                 if rank==0:print(f'[VECTOR] accepted round {iteration+1}: {timing["update"]["timings"]}',flush=True)
                 timing['outer_seconds_excluding_checkpoint']=time.perf_counter()-outer_begin
                 timing['checkpoint']=learner.save(collector,args.output/f'checkpoint_{learner.iteration:06d}.pt')
             (output/'report.json').write_text(json.dumps(report,ensure_ascii=False,indent=2))
         report.update(status='passed',scope='real_vector_full_DPPO_finite_validation' if learner else 'real_vector_collection_and_probability_no_DPPO')
+        if args.reject_iteration is not None:report['scope']='real_vector_expected_KL_rejection_no_final_publication'
         results=collective.all_gather_object(report)
         if rank==0:(args.output/'report.json').write_text(json.dumps(dict(status='passed',ranks=results,devices=devices),ensure_ascii=False,indent=2))
     except BaseException as e:

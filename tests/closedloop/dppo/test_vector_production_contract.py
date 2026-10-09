@@ -66,3 +66,16 @@ def test_gae_values_belong_to_detached_buffer_not_mutable_collection_rows():
     assert all(r.metadata['value_snapshot_version']==7 and r.old_value==1. for r in buffer.transitions)
     assert all('value_snapshot_version' not in r.metadata for r in original)
     assert torch.isfinite(targets['returns']).all()
+
+
+def test_vector_metrics_count_shared_generation_once_and_all_rewards():
+    from gem.closedloop.dppo.vector_metrics import attach_vector_metrics
+    rows=[SimpleNamespace(reason=None,metadata=dict(timing={'critical_ready_seconds':.7},
+        reward_details=[{'components':{'track':{'integrated_reward':.04},'music':.01}}])) for _ in range(8)]
+    rows[-1].reason='rpc_timeout';rows[-1].metadata['rejection']='late_plan'
+    report=attach_vector_metrics(rows,{'batches':[{'generation_seconds':.6,'components':{'denoising_seconds':.5}}]})
+    assert report['rejections']==report['timeouts']==1
+    assert report['reward_component_sums']['track']==pytest.approx(.32)
+    assert report['generation_timing_totals']['critical_ready_seconds']==pytest.approx(5.6)
+    assert report['generation_batch_wall_seconds']==.6
+    assert report['actor_phase_totals']['denoising_seconds']==.5

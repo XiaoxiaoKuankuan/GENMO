@@ -206,6 +206,8 @@ class VectorTrainingRuntime:
         buffer = RolloutBuffer(count)
         for fragment in fragments:
             for row in fragment:buffer.append(row)
+        from .vector_metrics import attach_vector_metrics
+        attach_vector_metrics(buffer.transitions, report)
         def freeze_targets():
             return freeze_buffer_targets(buffer,list(map(len,fragments)),c.critic,c.distributed.device,
                 critic_version=c.state['critic_updates'],batch_size=c.stage['performance']['value_snapshot_batch_size'],
