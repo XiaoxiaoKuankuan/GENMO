@@ -124,6 +124,7 @@ class VectorEnvironmentCollector(DualEnvironmentCollector):
                 generated=env.generate()
                 if generated['rejection'] or generated['prepared'] is None:raise RuntimeError('Calibration reference rejected')
                 env.backend.call('discard_plan',prepared_plan_id=generated['prepared']['prepared_plan_id'])
+                env.decision+=1
                 return generated['critical_ready_seconds']
             values=self._run_boundary_jobs([self.executors[i].submit(generate,i) for i in range(enabled)],allow_generation=True)
             if iteration>=warmup:
@@ -141,7 +142,7 @@ class VectorEnvironmentCollector(DualEnvironmentCollector):
         def capture(state):
             from tools.train_closedloop_stage10 import capture_execution_state
             env=state.resource.env
-            return dict(execution=capture_execution_state(env),sampler=state.resource.sampler.state_dict(),
+            return dict(execution=dict(capture_execution_state(env),policy_version=env.policy_version,iteration=env.iteration),sampler=state.resource.sampler.state_dict(),
                 transitions=state.transitions,seed=env.config['stage9']['seed'],
                 ended_physical_episode=None if state.task is None else dict(episode_id=env.snapshot['episode_id'],tick=env.snapshot['tick']))
         saved=[None]*self.num_envs
