@@ -51,7 +51,21 @@ def main():
                 logp=masked_joint_log_prob(trace['chain'][order,20],result['mean'],result['std'],result['free_mask'])
                 errors.append(dict(mean=float((result['mean']-trace['old_means'][order,19]).abs().max()),
                     logp=float((logp-trace['old_log_probs'][order,19]).abs().max())))
-        reports.append(dict(batch=batch,attention=attention,conditions=components,recompute=errors))
+            captures=[]
+            for repeat in range(2):
+                captured={}
+                hooks=[module.register_forward_hook(lambda m,a,o,n=name: captured.update({n:(a[0].clone(),o.clone())}))
+                    for name,module in actor.named_modules() if name.endswith('.attn')]
+                try:
+                    result=policy.transition_parameters(contexts,trace['chain'][:,19],19)
+                finally:
+                    for hook in hooks:hook.remove()
+                captures.append(captured)
+            repeat_layers={name:dict(input=float((a[0]-captures[1][name][0]).abs().max()),
+                output=float((a[1]-captures[1][name][1]).abs().max())) for name,a in captures[0].items()}
+        reports.append(dict(batch=batch,attention=attention,conditions=components,recompute=errors,
+            attention_states=[dict(name=name,training=module.training,head_dim=module.head_dim,heads=module.num_heads)
+                for name,module in actor.named_modules() if name.endswith('.attn')], repeat_layers=repeat_layers))
     (args.output/f'rank{rank:02d}.json').write_text(json.dumps(reports,indent=2)+'\n')
     if rank==0:print(json.dumps(reports),flush=True)
     dist.destroy_process_group()
