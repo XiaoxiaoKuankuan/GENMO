@@ -49,6 +49,8 @@ def summarize(run):
             actual_output_change=kl.get('effective_mean_change'),per_step_kl=kl['per_denoising_step'],
             physical_failures=r['physical_failures'],executed_seconds=r['executed_seconds'],
             reward_per_second=r['reward_per_second'],transitions_per_second=r['transitions_per_second'],
+            trained_unique_chains_per_second=len(r['global_manifest'])*actor['applied_unique_chain_fraction']/r['seconds'],
+            applied_internal_visits_per_second=actor['applied_internal_sample_visits']/r['seconds'],
             boundary_wait_controls=sum(c.get('administrative_drain_controls',0) for c in collectors),
             boundary_wait_reward=sum(c.get('administrative_drain_reward',0.) for c in collectors),
             generation_batch_histogram={},
@@ -61,7 +63,8 @@ def summarize(run):
         iterations.append(row)
     hot=[r for r in iterations if not r['initial_round_of_session'] and not r['diagnostic']]
     ordinary={key:distribution(r[key] for r in hot if r[key] is not None) for key in
-        ('sample_seconds','actor_seconds','kl_seconds','core_seconds','outer_seconds','transitions_per_second')}
+        ('sample_seconds','actor_seconds','kl_seconds','core_seconds','outer_seconds','transitions_per_second',
+         'trained_unique_chains_per_second','applied_internal_visits_per_second')}
     archived=[r for r in records if r.get('event')=='execution_archived']
     completions=[r for r in records if r.get('event')=='execution_archive_completed']
     curves=[json.loads(line) for line in (run/'curves.jsonl').read_text().splitlines()]
