@@ -38,17 +38,14 @@ from gem.robots.bumi.feature_codec import (  # noqa: E402
     BUMI_REPRESENTATION_CONTRACT_VERSION,
 )
 from gem.robots.bumi.kinematics import BumiKinematics  # noqa: E402
-from gem.robots.bumi.postprocess import (  # noqa: E402
-    BUMI_STREAMING_FOOT_LOCK_CONTRACT_VERSION,
-)
 from gem.runtime.bumi_audio import AudioController  # noqa: E402
 from gem.runtime.bumi_gmt_plan import (  # noqa: E402
     BumiGmtPlanSnapshot,
     BumiIncrementalGmtPlanBuilder,
     interpolate_qpos,
 )
-from gem.runtime.bumi_music_deploy import (  # noqa: E402
-    BUMI_SLIDING_QPOS_CONTRACT_VERSION,
+from gem.runtime.bumi_music_contract import (  # noqa: E402
+    BUMI_STAGE1_SAMPLING_CONTRACT_VERSION,
 )
 from gem.runtime.bumi_online_stream import (  # noqa: E402
     BUMI_ONLINE_QPOS_STREAM_CONTRACT,
@@ -315,13 +312,10 @@ class BumiOnlineBridge:
         identity = BumiOnlineIdentity.from_mapping(payload["identity"])
         if identity.representation_contract_version != BUMI_REPRESENTATION_CONTRACT_VERSION:
             raise ValueError("begin uses an unsupported BUMI representation contract")
-        if identity.sliding_contract_version != BUMI_SLIDING_QPOS_CONTRACT_VERSION:
-            raise ValueError("begin uses an unsupported BUMI overlap-add contract")
-        if identity.foot_lock_contract_version not in {
-            BUMI_STREAMING_FOOT_LOCK_CONTRACT_VERSION,
-            "disabled",
-        }:
-            raise ValueError("begin uses an unsupported BUMI foot-lock contract")
+        if identity.sliding_contract_version != BUMI_STAGE1_SAMPLING_CONTRACT_VERSION:
+            raise ValueError("begin必须使用当前Stage1前缀续接采样身份")
+        if identity.foot_lock_contract_version != "disabled":
+            raise ValueError("当前Stage1输出不使用旧foot-lock后处理")
         if identity.kinematics_sha256 != self.kinematics_sha256:
             raise ValueError("begin kinematics SHA does not match bridge --kinematics")
         if identity.joint_order_sha256 != self.joint_order_sha256:

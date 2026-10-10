@@ -1,25 +1,13 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: LicenseRef-NVIDIA-OneWay-Noncommercial
-"""BUMI GENMO 常驻滚动推理控制台。
+"""Stage1常驻生成控制台，保留在线和完整缓存两种原操作流程。
 
-本入口只服务“BUMI 模型直接输出机器人 qpos”的在线链路：TensorRT 正式后端或 ONNX
-诊断后端在进程内常驻；收到 ``play`` 后提取 30 Hz EDGE35，按 120 帧窗口、30 帧重叠、
-90 帧步长逐窗独立 DDIM，在线 overlap-add、根位移单次积分和因果足锁，然后立即把已经
-最终确定的 qpos28 后缀发送给独立 GMT 安全桥。第一窗提交 90 帧并暂存 30 帧，下一窗
-融合后继续提交，末窗刷新全部尾帧。
-
-控制台支持 ``play/stand/status/quit/shutdown``，默认先生成两个有效块；桥收到预生成块并
-获得 GMT ACK 后才启动音乐和 50 Hz 播放。后续生成由 12 秒高水位、4 秒低水位节流，且
-持续窗口生成、拼接和后处理 P95 必须低于一个 90 帧步长对应的 3 秒。本文件不导入 GMR、
-SMPL、SMPL-X、SMP1 或旧 ``robot_stream.py``，不会改变既有部署入口。
-
-独立部署可通过 ``--deployment-manifest`` 使用原仓库发布的 ONNX、engine 和配套资产，
-无需训练 checkpoint；来源指纹与所有实际文件交叉核验。原 ``--checkpoint`` 路径保持
-兼容，两种资产指定方式互斥，避免不同训练版本混用。
-
---runtime-mode=preview 使用内存本地播放器，不创建控制器网络连接；--preview 启动
-独立 MuJoCo 纯运动学窗口。GMT 模式从 Bridge 已发布的快照取样，本地模式读取本地
-时钟的当前姿态，查看器的生命周期、阻塞和异常不介入动作生成或控制器安全逻辑。
+收到音乐后提取EDGE35，由新Stage1生成器按120帧窗口、12帧前缀和因果proprio48续接。
+在线模式仍预生成后逐块提交、使用原高低水位与心跳；buffered模式完整收齐后只提交
+一个最终qpos28块，GMT按仿真策略步播放，自动音乐播放由配套桥入口关闭。
+资产仅从Stage1部署清单加载，运行时不读取训练checkpoint，不支持旧五输入网络。
+play/路径输入/status/stand/quit/shutdown语法及qpos28二进制协议保持原样。
+本体历史来自自身生成轨迹，不新增真实机器人状态反馈。preview继续复用本地播放器。
 """
 
 from __future__ import annotations
@@ -46,16 +34,17 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from gem.robots.bumi.endecoder import BumiEndecoder  # noqa: E402
 from gem.robots.bumi.feature_codec import BUMI_REPRESENTATION_CONTRACT_VERSION  # noqa: E402
-from gem.robots.bumi.postprocess import (  # noqa: E402
-    BUMI_STREAMING_FOOT_LOCK_CONTRACT_VERSION,
-)
 from gem.runtime.bumi_deployment_bundle import resolve_console_assets  # noqa: E402
-from gem.runtime.bumi_music_contract import BUMI_ONNX_CONTRACT_VERSION  # noqa: E402
+from gem.runtime.bumi_music_contract import (  # noqa: E402
+    BUMI_STAGE1_SAMPLING_CONTRACT_VERSION,
+)
 from gem.runtime.bumi_music_deploy import (  # noqa: E402
-    BUMI_SLIDING_QPOS_CONTRACT_VERSION,
     BumiOrtStepRunner,
-    BumiStreamingQposGenerator,
+    BumiStage1QposGenerator,
     BumiTensorRTStepRunner,
+    plan_stage1_windows,
+    stage1_warmup_inputs,
+    validate_stage1_metadata,
 )
 from gem.runtime.bumi_online_stream import (  # noqa: E402
     BUMI_ONLINE_QPOS_STREAM_CONTRACT,
@@ -68,7 +57,6 @@ from gem.runtime.bumi_online_stream import (  # noqa: E402
 )
 from gem.runtime.music_only_trt import (  # noqa: E402
     exact_motion_frame_count,
-    plan_sliding_windows,
     sha256_file,
 )
 from gem.utils.music_features import (  # noqa: E402
@@ -81,16 +69,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--backend", choices=("tensorrt", "onnx"), default="tensorrt")
     parser.add_argument("--playback-mode", choices=("realtime", "buffered"), default="realtime")
-    parser.add_argument("--deployment-manifest", type=Path, help="无需 checkpoint 的完整部署清单")
-    parser.add_argument("--checkpoint", type=Path)
-    parser.add_argument("--onnx", type=Path)
-    parser.add_argument("--onnx-metadata", type=Path)
-    parser.add_argument("--engine", type=Path)
-    parser.add_argument("--kinematics", type=Path)
-    parser.add_argument("--stats", type=Path)
+    parser.add_argument("--deployment-manifest", type=Path, required=True, help="当前Stage1完整部署清单")
     parser.add_argument("--bridge", default="tcp://127.0.0.1:7022")
     parser.add_argument("--device", default="cuda:0")
-    parser.add_argument("--onnx-provider", choices=("cpu", "cuda"), default="cpu")
+    parser.add_argument("--onnx-provider", choices=("cpu", "cuda"), default="cuda")
     parser.add_argument("--ddim-steps", type=int, default=20)
     parser.add_argument("--guidance-scale", type=float, default=2.5)
     parser.add_argument("--feature-cache-size", type=int, default=32)
@@ -98,7 +80,6 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--high-water-seconds", type=float, default=12.0)
     parser.add_argument("--low-water-seconds", type=float, default=4.0)
     parser.add_argument("--heartbeat-seconds", type=float, default=0.5)
-    parser.add_argument("--no-foot-lock", action="store_true")
     parser.add_argument("--no-cuda-graph", action="store_true")
     parser.add_argument("--runtime-mode", choices=("gmt", "preview"), default="gmt")
     parser.add_argument("--preview", action="store_true", help="自动启动纯运动学 MuJoCo 窗口")
@@ -164,16 +145,7 @@ class ResidentBumiConsole:
         self.device = torch.device(args.device)
         if self.device.type == "cuda" and not torch.cuda.is_available():
             raise RuntimeError("CUDA requested but unavailable")
-        self.checkpoint = (
-            args.checkpoint.expanduser().resolve(strict=True)
-            if args.checkpoint is not None
-            else None
-        )
-        self.source_checkpoint_sha256 = (
-            self.deployment_bundle.source_checkpoint_sha256
-            if self.deployment_bundle is not None
-            else sha256_file(self.checkpoint)
-        )
+        self.source_checkpoint_sha256 = self.deployment_bundle.source_checkpoint_sha256
         self.onnx_path = args.onnx.expanduser().resolve(strict=True)
         self.kinematics_path = args.kinematics.expanduser().resolve(strict=True)
         self.stats_path = args.stats.expanduser().resolve(strict=True)
@@ -188,6 +160,7 @@ class ResidentBumiConsole:
                 kinematics_path=self.kinematics_path,
                 stats_path=self.stats_path,
                 enable_contact_targets=False,
+                clip_std_min=float(self.metadata["asset_identity"]["clip_std_min"]),
             )
             .to(self.device)
             .eval()
@@ -202,7 +175,7 @@ class ResidentBumiConsole:
             manifest_path = self.metadata_path
         else:
             if args.engine is None:
-                raise ValueError("--backend=tensorrt requires --engine")
+                raise ValueError("Stage1部署清单必须包含engine")
             inference_path = args.engine.expanduser().resolve(strict=True)
             self.runner = BumiTensorRTStepRunner(
                 inference_path,
@@ -212,9 +185,9 @@ class ResidentBumiConsole:
             if self.runner.manifest is None:
                 raise RuntimeError("TensorRT backend requires engine.json")
             if self.runner.manifest.get("checkpoint_sha256") != checkpoint_sha:
-                raise ValueError("TensorRT manifest checkpoint SHA does not match --checkpoint")
+                raise ValueError("TensorRT来源checkpoint SHA不匹配Stage1清单")
             if self.runner.manifest.get("onnx_sha256") != onnx_sha:
-                raise ValueError("TensorRT manifest ONNX SHA does not match --onnx")
+                raise ValueError("TensorRT与Stage1清单的ONNX SHA不匹配")
             manifest_path = inference_path.parent / "engine.json"
             manifest_path.resolve(strict=True)
         self.identity = BumiOnlineIdentity(
@@ -227,10 +200,8 @@ class ResidentBumiConsole:
             kinematics_sha256=sha256_file(self.kinematics_path),
             joint_order_sha256=bumi_joint_order_sha256(self.endecoder.kinematics.joint_order),
             representation_contract_version=BUMI_REPRESENTATION_CONTRACT_VERSION,
-            sliding_contract_version=BUMI_SLIDING_QPOS_CONTRACT_VERSION,
-            foot_lock_contract_version=(
-                BUMI_STREAMING_FOOT_LOCK_CONTRACT_VERSION if not args.no_foot_lock else "disabled"
-            ),
+            sliding_contract_version=BUMI_STAGE1_SAMPLING_CONTRACT_VERSION,
+            foot_lock_contract_version="disabled",
         )
         if self.runtime_mode == "preview":
             from gem.runtime.bumi_local_player import LocalBumiPlayer
@@ -287,28 +258,9 @@ class ResidentBumiConsole:
             self.current_request_id = None
 
     def _validate_onnx_identity(self) -> dict[str, Any]:
+        """清单已核验完整文件来源；在控制台显式核验Stage1图语义。"""
         metadata = json.loads(self.metadata_path.read_text(encoding="utf-8"))
-        if metadata.get("contract_version") != BUMI_ONNX_CONTRACT_VERSION:
-            raise ValueError("ONNX metadata is not the BUMI guided denoiser contract")
-        if metadata.get("representation_contract_version") != BUMI_REPRESENTATION_CONTRACT_VERSION:
-            raise ValueError("ONNX metadata is not the current BUMI qpos30 representation")
-        if int(metadata.get("sequence_length", -1)) != 120:
-            raise ValueError("BUMI online runtime requires fixed [1,120,30]")
-        expected = {
-            "checkpoint": (metadata.get("checkpoint") or {}).get("sha256"),
-            "kinematics": (metadata.get("kinematics") or {}).get("sha256"),
-            "stats": (metadata.get("stats") or {}).get("sha256"),
-        }
-        actual = {
-            "checkpoint": self.source_checkpoint_sha256,
-            "kinematics": sha256_file(self.kinematics_path),
-            "stats": sha256_file(self.stats_path),
-        }
-        for name in expected:
-            if expected[name] != actual[name]:
-                raise ValueError(
-                    f"BUMI ONNX {name} identity mismatch: metadata={expected[name]}, actual={actual[name]}"
-                )
+        validate_stage1_metadata(metadata)
         return metadata
 
     def initialize(self) -> None:
@@ -320,13 +272,7 @@ class ResidentBumiConsole:
         ):
             raise RuntimeError("Console/Bridge playback_mode 不一致，请使用配套入口")
         self._replace_request_state(None, int(status["revision"]))
-        self.runner(
-            torch.zeros(1, 120, 30, device=self.device),
-            torch.tensor([999], device=self.device),
-            torch.zeros(1, 120, 35, device=self.device),
-            torch.tensor([120], device=self.device),
-            torch.tensor([self.args.guidance_scale], device=self.device),
-        )
+        self.runner(stage1_warmup_inputs(self.device, self.args.guidance_scale))
         if self.device.type == "cuda":
             torch.cuda.synchronize(self.device)
         if getattr(self.args, "preview", False):
@@ -471,7 +417,7 @@ class ResidentBumiConsole:
             )
             features = align_features_to_length(features, frame_count, policy="trim_or_pad_last")
             duration = frame_count / 30.0
-            windows = plan_sliding_windows(frame_count)
+            windows = plan_stage1_windows(frame_count)
             prime_chunks = min(2, len(windows))
             buffered = getattr(self.args, "playback_mode", "realtime") == "buffered"
             pending_qpos = []
@@ -501,13 +447,12 @@ class ResidentBumiConsole:
             if cancel.is_set():
                 self.bridge.request({"command": "stand"})
                 return
-            generator = BumiStreamingQposGenerator(
+            generator = BumiStage1QposGenerator(
                 self.runner,
                 self.endecoder,
                 device=self.device,
                 steps=self.args.ddim_steps,
                 guidance_scale=self.args.guidance_scale,
-                apply_foot_lock=not self.args.no_foot_lock,
             )
             iterator = iter(generator.generate(features, seed=command.seed))
             window_times: list[float] = []
@@ -593,7 +538,7 @@ class ResidentBumiConsole:
                             "submitted_frames": generator.emitted_frames
                             if not buffered or generated.is_last
                             else 0,
-                            "pending_overlap_frames": generator.pending_frames,
+                            "pending_prefix_frames": generator.pending_frames,
                             "future_buffer_seconds": response.get("future_buffer_seconds"),
                             "window_seconds": list(window_times),
                             "continuation_window_seconds": list(continuation),

@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
-# BUMI music-only Ubuntu x86_64 / RTX 4090 一键安装入口。
+# BUMI Stage1 Ubuntu x86_64 / RTX 4090 一键安装入口。
 # 自动准备 uv、Python 3.10 虚拟环境和锁定的 Python/TensorRT 依赖；缺失时仅通过 APT
 # 安装 curl、FFmpeg、Redis 等系统工具。无需预先安装 python3-pip、python3.10-venv 或 Git。
 # 已有正确的 TensorRT 环境直接复用；新环境安装虚拟环境内的官方库，不更换系统驱动。
 # 固定安装 MuJoCo 3.2.3；检查器校验机器人资源和关节契约，不会打开窗口或启动 GMT。
-# 最后执行模型哈希、GPU/engine 兼容性和真实单步推理检查，不连接 GMT、不发送动作。
+# 仅安装依赖，不自动执行模型检查或推理；之后手工构建Stage1引擎并使用所需启动脚本。
+# 同时安装ONNX图改写构建依赖；插件编译使用已有CUDA nvcc及匹配TensorRT SDK，安装器不改CUDA。
 # 只允许在精简部署目录运行，防止误修改完整训练仓库的 .venv；临时下载脚本自动清理。
 set -euo pipefail
 BUMI_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
@@ -69,7 +70,7 @@ else
     "$BUMI_UV" --no-config venv --python 3.10 .venv
 fi
 "$BUMI_UV" --no-config pip install --python .venv/bin/python --index-strategy unsafe-best-match \
-    -r requirements/deployment/runtime.lock
+    -r requirements/deployment/runtime.lock -r requirements/deployment/export.lock
 
 if .venv/bin/python -B gem/runtime/tensorrt_environment.py; then
     echo '已有匹配的 TensorRT，复用当前安装。'
@@ -83,5 +84,4 @@ else
         .venv/bin/python -B gem/runtime/tensorrt_environment.py
     fi
 fi
-bash "$BUMI_ROOT/run.sh" check
-echo '安装与模型检查通过。deployment.ini 中 gmt 模式沿用 GMT/Bridge/GENMO；preview 模式只执行 bash run.sh genmo。'
+echo '依赖安装完成；未执行模型推理验收。接着运行 bash scripts/export/build_bumi_stage1_engine.sh。'

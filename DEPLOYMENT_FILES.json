@@ -1,5 +1,5 @@
 {
-  "description": "BUMI music-only 部署分支依赖闭包；模型文件不纳入Git",
+  "description": "当前Stage1 s595000部署依赖闭包；七资产包包含CUDA掩码插件，由构建入口生成，模型文件不纳入Git",
   "source_commit": "9046e36fee037cf65ff4d25f83cbefde63ad7506",
   "python_files": [
     "gem/__init__.py",
@@ -26,6 +26,8 @@
     "gem/runtime/bumi_online_stream.py",
     "gem/runtime/bumi_preview.py",
     "gem/runtime/bumi_robot_stream.py",
+    "gem/runtime/bumi_stage1_history.py",
+    "gem/runtime/bumi_stage1_plugin.py",
     "gem/runtime/gmt_buffered_trajectory.py",
     "gem/runtime/gmt_policy_source.py",
     "gem/runtime/gmt_trajectory.py",
@@ -39,6 +41,7 @@
     "scripts/demo/demo_bumi_gmt_bridge.py",
     "scripts/demo/demo_music_bumi_console.py",
     "scripts/demo/run_bumi_deployment.py",
+    "scripts/demo/validate_bumi_stage1_engine.py",
     "tests/__init__.py",
     "tests/bumi/__init__.py",
     "tests/bumi/conftest.py",
@@ -48,7 +51,9 @@
     "tests/bumi/test_bumi_preview.py",
     "tests/bumi/test_bumi_root_height.py",
     "tests/bumi/test_gmt_policy_source.py",
-    "tests/bumi/validate_bumi_preview_runtime.py"
+    "tests/bumi/validate_bumi_preview_runtime.py",
+    "tools/export/build_bumi_music_tensorrt.py",
+    "tools/export/bumi_stage1_trt_graph.py"
   ],
   "retained_files": [
     ".gitignore",
@@ -85,6 +90,7 @@
     "docs/BUMI_MUJOCO_PREVIEW.md",
     "docs/BUMI_MUSIC_DEPLOYMENT.md",
     "docs/BUMI_ROOT_HEIGHT.md",
+    "docs/BUMI_STAGE1_TRT_VALIDATION_20261010.md",
     "docs/GENMO_CONTROLLER_ADAPTATION.md",
     "gem/__init__.py",
     "gem/diffusion_utils/gaussian_diffusion.py",
@@ -110,6 +116,8 @@
     "gem/runtime/bumi_online_stream.py",
     "gem/runtime/bumi_preview.py",
     "gem/runtime/bumi_robot_stream.py",
+    "gem/runtime/bumi_stage1_history.py",
+    "gem/runtime/bumi_stage1_plugin.py",
     "gem/runtime/gmt_buffered_trajectory.py",
     "gem/runtime/gmt_policy_source.py",
     "gem/runtime/gmt_trajectory.py",
@@ -126,6 +134,7 @@
     "integrations/gmt/test/test_gmt_trajectory_protocol.cpp",
     "pyproject.toml",
     "requirements/deployment/runtime.lock",
+    "requirements/deployment/export.lock",
     "requirements/deployment/system-packages.txt",
     "requirements/deployment/tensorrt-bindings.lock",
     "requirements/deployment/tensorrt-runtime.lock",
@@ -134,7 +143,13 @@
     "scripts/demo/check_bumi_deployment.py",
     "scripts/demo/demo_bumi_gmt_bridge.py",
     "scripts/demo/demo_music_bumi_console.py",
+    "scripts/demo/run_bumi_buffered_bridge.sh",
+    "scripts/demo/run_bumi_buffered_console.sh",
     "scripts/demo/run_bumi_deployment.py",
+    "scripts/demo/run_bumi_online_bridge.sh",
+    "scripts/demo/run_bumi_online_console.sh",
+    "scripts/demo/validate_bumi_stage1_engine.py",
+    "scripts/export/build_bumi_stage1_engine.sh",
     "tests/__init__.py",
     "tests/bumi/__init__.py",
     "tests/bumi/conftest.py",
@@ -145,10 +160,16 @@
     "tests/bumi/test_bumi_root_height.py",
     "tests/bumi/test_gmt_policy_source.py",
     "tests/bumi/validate_bumi_preview_runtime.py",
+    "tools/export/build_bumi_music_tensorrt.py",
+    "tools/export/bumi_stage1_trt_graph.py",
+    "tools/export/bumi_stage1_mask_plugin.cu",
     "记录文本.md"
   ],
   "removed_tracked_count": 502,
   "replaced_initializers": [
     "gem/runtime/__init__.py"
-  ]
+  ],
+  "source_commit_role": "初始部署闭包来源；本次Stage1迁移为未提交工作树修改",
+  "migration_model": "Stage1 s595000",
+  "runtime_validation": "not_run"
 }

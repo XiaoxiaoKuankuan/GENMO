@@ -5,7 +5,7 @@
 离线 ``bumi_qpos_stream_v1`` 完全隔离。每个负载是连续的 MuJoCo 原生
 ``float32[T,28]``、30 Hz、根四元数 ``wxyz``。JSON 头固定 request/revision、绝对帧号、
 CRC32，并绑定 checkpoint、ONNX、实际推理 artifact/manifest、stats、kinematics、21
-关节顺序、表示、120/30/90 overlap-add 和因果足锁版本；接收端在一个 revision 中要求
+关节顺序、表示、Stage1 120/12/108 前缀续接身份和禁用足锁标记；接收端在一个 revision 中要求
 身份逐字段不变且帧号无重复、无缺口。
 
 本文件还承载新控制台和新安全桥都需要的少量无状态逻辑：交互命令解析、心跳判定和
@@ -63,7 +63,7 @@ class BumiOnlineIdentity:
     kinematics_sha256: str
     joint_order_sha256: str
     representation_contract_version: str
-    sliding_contract_version: str
+    sliding_contract_version: str  # 保留JSON键名，值为当前Stage1采样身份，不表示旧overlap-add。
     foot_lock_contract_version: str
 
     def __post_init__(self) -> None:

@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# BUMI 部署统一启动入口：bash run.sh bridge / genmo / check / check-gmt / show-config。
+# BUMI 部署统一启动入口：bash run.sh online-bridge / online-console / buffered-bridge / buffered-console。
+# 原genmo/bridge/check/check-gmt/show-config入口保留，明确的在线/缓存角色不受preview设置影响。
 # 所有模型、GPU、端口和容器设置从同目录 deployment.ini 读取，不在终端拼接路径参数。
 # 使用部署目录自身的虚拟环境，保持进程信号和交互终端，不启动或修改 GMT 控制器。
 set -euo pipefail

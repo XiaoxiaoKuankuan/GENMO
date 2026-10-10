@@ -3,8 +3,8 @@
 
 默认只核验部署清单、完整文件哈希、BUMI 运动学/统计，并输出实际
 Python 环境及版本；不连接 Bridge/Redis，不启动 ROS，也不发送机器人动作。传入
---inference 时才使用指定 ONNX/TensorRT 后端执行一次固定形状的零输入去噪，验证输出
-形状和有限性。这只是安装检查，真实模型的完整 DDIM 数值验收在原 GENMO 仓库进行。
+--inference 时才使用指定 ONNX/TensorRT 后端执行一次当前Stage1十一输入去噪，验证输出
+形状和有限性。这只是安装检查，不自动执行完整DDIM或仿真验收。
 所有模型路径从清单位置解析，允许在不同电脑、不同工作目录直接复用整个部署目录。
 --check-gmt 额外只读GMT当前ROS参数及policy元数据；未传时不要求GMT或ROS在线。
 """
@@ -41,7 +41,8 @@ def main(argv: list[str] | None = None) -> int:
     import torch
 
     from gem.robots.bumi.endecoder import BumiEndecoder
-    from gem.runtime.bumi_music_deploy import BumiOrtStepRunner, BumiTensorRTStepRunner
+    from gem.runtime.bumi_music_deploy import (BumiOrtStepRunner, BumiTensorRTStepRunner,
+                                               stage1_warmup_inputs)
     from gem.runtime.gmt_trajectory import GmtPolicyContract
 
     bundle = load_bumi_deployment_manifest(args.deployment_manifest)
@@ -103,13 +104,7 @@ def main(argv: list[str] | None = None) -> int:
                 bundle.paths["onnx"], device=device, provider=args.onnx_provider
             )
         with torch.inference_mode():
-            outputs = runner(
-                torch.zeros(1, 120, 30, device=device),
-                torch.tensor([999], device=device),
-                torch.zeros(1, 120, 35, device=device),
-                torch.tensor([120], device=device),
-                torch.tensor([2.5], device=device),
-            )
+            outputs = runner(stage1_warmup_inputs(device))
         if not all(bool(torch.isfinite(value).all()) for value in outputs):
             raise RuntimeError("single-step outputs contain NaN/Inf")
         result["output_shapes"] = [list(value.shape) for value in outputs]

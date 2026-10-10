@@ -8,7 +8,7 @@ ROS 参数服务和容器名。Console 和 Bridge 共用同一 ZeroMQ 配置，B
 本模块保留原 demo 的命令行接口，仅供 run.sh 的统一入口使用。相对路径以配置文件
 所在目录为基准，允许部署包整体移动；解析时拒绝拼错的字段、越界端口和非法采样参数。
 读取配置不启动推理或网络；只有构造 Bridge 命令时才校验模型清单。
-可选 runtime/preview 配置控制独立播放和动画窗口；旧四段配置保持 GMT 且关闭预览。
+runtime/preview控制本地查看器；online/buffered角色显式选择GMT链路，不改写配置文件。
 """
 
 from __future__ import annotations
@@ -39,6 +39,9 @@ class DeploymentConfig:
     runtime_mode: str = "gmt"
     preview_enabled: bool = False
     robot_manifest: Path | None = None
+    backend: str = "tensorrt"
+    buffered_bridge_endpoint: str = "tcp://127.0.0.1:7023"
+    buffered_redis_key: str = "gmt_buffered_frame_bumi"
 
 
 def load_deployment_config(path: str | Path) -> DeploymentConfig:
@@ -47,19 +50,20 @@ def load_deployment_config(path: str | Path) -> DeploymentConfig:
     with path.open(encoding="utf-8") as stream:
         parser.read_file(stream)
     expected = {
-        "model": {"manifest", "device", "ddim_steps", "guidance_scale"},
+        "model": {"manifest", "device", "ddim_steps", "guidance_scale", "backend"},
         "bridge": {"host", "port", "audio_playback"},
         "redis": {"host", "port", "db", "key"},
         "gmt": {"ros_master_uri", "container"},
     }
-    optional = {"runtime": {"mode"}, "preview": {"enabled", "robot_manifest"}}
+    optional = {"runtime": {"mode"}, "preview": {"enabled", "robot_manifest"},
+                "buffered": {"bridge_port", "redis_key"}}
     if (
         parser.defaults()
         or not set(expected) <= set(parser.sections())
         or set(parser.sections()) - set(expected) - set(optional)
     ):
         raise ValueError(
-            "deployment.ini 配置段无效；必需 model/bridge/redis/gmt，可选 runtime/preview"
+            "deployment.ini 配置段无效；必需 model/bridge/redis/gmt，可选 runtime/preview/buffered"
         )
     expected.update({key: value for key, value in optional.items() if parser.has_section(key)})
     for section, keys in expected.items():
@@ -107,6 +111,15 @@ def load_deployment_config(path: str | Path) -> DeploymentConfig:
     audio = parser["bridge"]["audio_playback"]
     if audio not in {"off", "ffplay"}:
         raise ValueError("bridge.audio_playback 必须为 ffplay 或 off")
+    backend = parser["model"]["backend"]
+    if backend not in {"tensorrt", "onnx"}:
+        raise ValueError("model.backend必须为tensorrt或onnx")
+    buffered_port = parser.getint("buffered", "bridge_port", fallback=7023)
+    buffered_key = parser.get("buffered", "redis_key", fallback="gmt_buffered_frame_bumi")
+    if not 1 <= buffered_port <= 65535 or buffered_port == port("bridge"):
+        raise ValueError("buffered.bridge_port必须有效且不同于在线端口")
+    if buffered_key == parser["redis"]["key"] or not buffered_key.strip():
+        raise ValueError("buffered.redis_key必须非空且与在线键隔离")
     manifest = Path(parser["model"]["manifest"]).expanduser()
     if not manifest.is_absolute():
         manifest = path.parent / manifest
@@ -138,67 +151,50 @@ def load_deployment_config(path: str | Path) -> DeploymentConfig:
         mode,
         preview,
         robot_manifest.resolve(),
+        backend,
+        f"tcp://{host('bridge')}:{buffered_port}",
+        buffered_key,
     )
 
 
 def deployment_command(config: DeploymentConfig, role: str) -> tuple[str, list[str]]:
-    """返回既有脚本和参数；不启动进程，不修改任何控制器配置。"""
+    """从同一模型配置生成在线或buffered命令，仅覆盖本次进程的播放选择。"""
+    explicit = role in {"online-bridge", "online-console", "buffered-bridge", "buffered-console"}
+    buffered = role.startswith("buffered-")
+    mode = "gmt" if explicit else config.runtime_mode
+    endpoint = config.buffered_bridge_endpoint if buffered else config.bridge_endpoint
+    redis_key = config.buffered_redis_key if buffered else config.redis_key
+    audio = "off" if buffered else config.audio_playback
+    playback = "buffered" if buffered else "realtime"
     model = ["--deployment-manifest", str(config.manifest)]
     gmt = ["--ros-master-uri", config.ros_master_uri, "--gmt-container", config.container]
-    if config.runtime_mode == "preview" and role in {"bridge", "check-gmt"}:
-        raise ValueError("当前为独立 preview 模式，无需启动或检查 GMT Bridge")
+    if mode == "preview" and role in {"bridge", "check-gmt"}:
+        raise ValueError("preview模式无需GMT Bridge；联动请使用明确的online/buffered入口")
     if role in {"check", "check-gmt"}:
         options = ["--check-gmt", *gmt] if role == "check-gmt" else ["--inference"]
         return "check_bumi_deployment.py", [
-            *model,
-            "--device",
-            config.device,
-            *options,
+            *model, "--device", config.device, "--backend", config.backend,
+            "--onnx-provider", "cuda", *options,
             *(["--robot-manifest", str(config.robot_manifest)] if config.preview_enabled else []),
         ]
-    if role == "genmo":
+    if role in {"genmo", "online-console", "buffered-console"}:
         return "demo_music_bumi_console.py", [
-            *model,
-            "--backend",
-            "tensorrt",
-            "--device",
-            config.device,
-            "--bridge",
-            config.bridge_endpoint,
-            "--ddim-steps",
-            str(config.ddim_steps),
-            "--guidance-scale",
-            str(config.guidance_scale),
-            "--runtime-mode",
-            config.runtime_mode,
-            "--audio-playback",
-            config.audio_playback,
-            *(
-                ["--preview", "--robot-manifest", str(config.robot_manifest)]
-                if config.preview_enabled
-                else []
-            ),
+            *model, "--backend", config.backend, "--device", config.device,
+            "--onnx-provider", "cuda", "--bridge", endpoint,
+            "--ddim-steps", str(config.ddim_steps), "--guidance-scale", str(config.guidance_scale),
+            "--runtime-mode", mode, "--playback-mode", playback, "--audio-playback", audio,
+            *(["--preview", "--robot-manifest", str(config.robot_manifest)]
+              if config.preview_enabled and not explicit else []),
         ]
-    if role == "bridge":
+    if role in {"bridge", "online-bridge", "buffered-bridge"}:
         from gem.runtime.bumi_deployment_bundle import load_bumi_deployment_manifest
 
         bundle = load_bumi_deployment_manifest(config.manifest)
         return "demo_bumi_gmt_bridge.py", [
-            "--kinematics",
-            str(bundle.paths["kinematics"]),
-            "--bind",
-            config.bridge_endpoint,
-            *gmt,
-            "--redis-host",
-            config.redis_host,
-            "--redis-port",
-            str(config.redis_port),
-            "--redis-db",
-            str(config.redis_db),
-            "--redis-key",
-            config.redis_key,
-            "--audio-playback",
-            config.audio_playback,
-            "--verbose",
+            "--kinematics", str(bundle.paths["kinematics"]), "--bind", endpoint, *gmt,
+            "--redis-host", config.redis_host, "--redis-port", str(config.redis_port),
+            "--redis-db", str(config.redis_db), "--redis-key", redis_key,
+            "--playback-mode", playback, "--audio-playback", audio,
+            *(["--ack-timeout-seconds", "300"] if buffered else []), "--verbose",
         ]
     raise ValueError(f"未知运行角色：{role}")

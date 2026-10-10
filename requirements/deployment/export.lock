@@ -1,0 +1,3 @@
+# 当前Stage1 TensorRT部署专用图的构建依赖，仅进行ONNX读取、静态形状推导和图重写。
+# 不安装onnxsim/onnxoptimizer，不执行模型推理；原始ONNX和元数据保持只读。
+onnx==1.18.0
