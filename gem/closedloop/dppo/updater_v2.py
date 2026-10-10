@@ -333,7 +333,9 @@ def _gradient_pair_report(actor, ppo_gradients, *, module_details=True):
                                ppo.new_tensor(1., dtype=torch.float64)))
         labels = ['all', name.split('.')[0]] if module_details else ['all']
         if old is not None:
-            groups['shared'] += numbers*(numbers[1] > 0)
+            # 编译后的未使用contact输出可能产生已分配的零梯度；它不代表PPO
+            # 对该参数有实际贡献。公共统计要求两项均非零，仍在GPU上判断。
+            groups['shared'] += numbers*((numbers[0] > 0)&(numbers[1] > 0))
         if 'contact' in name or 'static_conf' in name:
             labels.append('contact_head')
         for label in set(labels):

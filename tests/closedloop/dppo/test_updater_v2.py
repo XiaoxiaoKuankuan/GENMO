@@ -139,6 +139,22 @@ def test_real_multistep_reuses_fixed_old_statistics_and_bc_each_step():
     assert contribution['bc_only']['ppo_norm'] == 0
 
 
+def test_allocated_zero_ppo_gradient_is_not_a_shared_active_branch():
+    from gem.closedloop.dppo.updater_v2 import _gradient_pair_report
+    actor=torch.nn.Module()
+    actor.register_parameter('backbone',torch.nn.Parameter(torch.tensor([1.])))
+    actor.register_parameter('contact_head',torch.nn.Parameter(torch.tensor([1.])))
+    actor.backbone.grad=torch.tensor([5.])
+    actor.contact_head.grad=torch.tensor([7.])
+    report=_gradient_pair_report(actor,{'backbone':torch.tensor([2.]),'contact_head':torch.tensor([0.])})
+    assert report['shared']['contributing_parameter_tensors']==1
+    assert report['shared']['ppo_norm']==2.
+    assert report['shared']['weighted_bc_norm']==3.
+    assert report['contact_head']['ppo_norm']==0.
+    assert report['contact_head']['weighted_bc_norm']==7.
+    assert report['contact_head']['cosine'] is None
+
+
 @pytest.mark.parametrize('micro', [1, 2, 3, 7])
 def test_microbatch_changes_memory_not_optimizer_normalization(micro):
     expected = run_actor(micro=4)

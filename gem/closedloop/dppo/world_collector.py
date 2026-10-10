@@ -311,6 +311,7 @@ class WorldEnvironmentCollector(VectorEnvironmentCollector):
             total_transitions=sum(map(len,rows)),fragment_lengths=list(map(len,rows)),allocated_envs=self.num_envs,
             active_envs=self.num_envs,seconds=time.perf_counter()-started,batches=self.batch_reports,
             world_timing=self.world_timing,columnar_reward_cpu_timings=reward_timings,
+            columnar_reward_timing_scope='all_consumed_controls_including_warmup_and_boundary_wait',
             server_rpc_transport_timing=protocol_delta,normal_boundary_resets=0,
             administrative_drain_controls=sum(t['executed_control_steps'] for t in tails),
             administrative_drain_physics_steps=sum(t['executed_physics_steps'] for t in tails),
@@ -318,6 +319,7 @@ class WorldEnvironmentCollector(VectorEnvironmentCollector):
             administrative_wait_max_wall_seconds=max((t['wait_wall_seconds'] for t in tails),default=0.),
             administrative_wait_limit_reached=sum(t['wait_limit_reached'] for t in tails),
             training_reward_seconds=sum(row.metadata.get('training_reward_seconds',0.) for fragment in rows for row in fragment),
+            training_reward_timing_scope='accepted_transition_metadata_excludes_separate_warmup',
             real_environment_batch=True,gae_contract='independent_per_env_episode_contiguous_fragment')
 
     def calibrate(self,*,count_per_rank,warmup=1,samples=2):
