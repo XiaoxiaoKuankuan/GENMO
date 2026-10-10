@@ -280,7 +280,7 @@ def test_object_hook_rejects_the_same_invalid_descriptors(change):
 
 def test_protocol_counters_measure_codec_without_idle_wait_or_reply_changes(tmp_path):
     handler=Handler()
-    with serving(tmp_path,handler) as path:
+    with serving(tmp_path,handler) as (path,_,thread):
         client=protocol.RpcClient(path)
         payload={'matrix':np.arange(84,dtype='>f8').reshape(4,21)}
         result=client.call('echo',**payload)
