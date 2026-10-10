@@ -25,6 +25,7 @@ import torch.distributed as dist
 from gem.closedloop.dppo.budget import atomic_json
 from tools.run_stage10_pipeline_matrix import idle_eight
 from tools.eval.audit_closedloop_stage10 import audit_run
+from tools.report_stage10_pipeline import summarize
 
 
 def main():
@@ -67,9 +68,18 @@ def main():
                               traceback=traceback.format_exc())
             destination = args.output/f'run_{index:02d}.json'
             atomic_json(destination, report)
+            measurements_path = args.output/f'run_{index:02d}_measurements.json'
+            measurements_error = None
+            try:
+                atomic_json(measurements_path, summarize(run))
+            except Exception as error:
+                measurements_error = f'{type(error).__name__}: {error}'
             record = dict(run=str(run), rank=rank, report=str(destination), status=report['status'],
                 require_resume=run in require_resume, seconds=time.perf_counter()-started,
-                failed_checks=report.get('failed_checks'))
+                failed_checks=report.get('failed_checks'),measurements=str(measurements_path),
+                measurements_error=measurements_error)
+            if measurements_error is not None:
+                record['status'] = 'failed'
             local.append(record)
             print(json.dumps(record), flush=True)
         gathered = [None]*8
