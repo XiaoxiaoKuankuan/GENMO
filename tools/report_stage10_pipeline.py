@@ -31,7 +31,8 @@ def distribution(values):
 def summarize(run):
     records=[json.loads(line) for path in sorted((run/'metrics').glob('*.jsonl'))
              for line in path.read_text().splitlines()]
-    accepted=[r for r in records if r.get('event')=='iteration_accepted']
+    accepted=sorted((r for r in records if r.get('event')=='iteration_accepted'),
+                    key=lambda r:(r.get('time_utc',''),r['session_id'],r['iteration']))
     outer={(r['session_id'],r['iteration']):r for r in records if r.get('event')=='iteration_walltime'}
     seen=set();iterations=[]
     for r in accepted:
@@ -54,6 +55,25 @@ def summarize(run):
             boundary_wait_controls=sum(c.get('administrative_drain_controls',0) for c in collectors),
             boundary_wait_reward=sum(c.get('administrative_drain_reward',0.) for c in collectors),
             generation_batch_histogram={},
+            actor_step_diagnostics=[{key:step.get(key) for key in (
+                'optimizer_step','epoch','internal_transitions','full_internal_transitions',
+                'denoising_sampling','learning_rates','pre_minibatch_mean_joint_kl',
+                'mean_ratio','clip_fraction','objective_clipped_fraction','per_denoising_step',
+                'ppo_only_gradient_norm','total_gradient_norm','gradient_contributions',
+                'grad_clip_factor','parameter_update_observation','bc')} for step in actor['steps']],
+            actor_early_stop_reason=actor.get('early_stop_reason'),
+            gae_global_by_rank=[dict(rank=c['rank'],**c.get('gae_global',{})) for c in collectors],
+            gae_fragment_lengths=[length for c in collectors for length in c.get('gae_contiguous_fragment_lengths',[])],
+            boundary_wait_by_rank=[dict(rank=c['rank'],environments=c.get('boundary_wait_by_environment',[]))
+                for c in collectors],
+            first_gmt_consumption_by_rank=[dict(rank=c['rank'],references=c.get('new_reference_first_gmt_input',[]))
+                for c in collectors],
+            collection_phases_by_rank=[{key:c.get(key) for key in (
+                'rank','control_steps','world_timing','server_rpc_transport_timing',
+                'snapshot_seconds','learning_data_persistence_seconds','synchronization_wait_seconds',
+                'generation_timing_totals','generation_pipeline_totals','generation_batch_wall_seconds',
+                'episode_reset_count','terminated_transition_count','truncated_transition_count',
+                'termination_reason_counts')} for c in collectors],
             columnar_reward_timing_by_rank=[dict(rank=c['rank'],
                 contract=c.get('columnar_reward_timing_contract','legacy_object_counter_delta_may_reset'),
                 usable_for_breakdown=c.get('columnar_reward_timing_contract')=='per_consume_call_across_episode_replacements.v2'
@@ -96,11 +116,15 @@ def summarize(run):
             mean_executed_seconds=value.get('mean_executed_seconds'),
             physical_failure_count=value.get('physical_failure_count'),
             fixed_actor_drift=value.get('fixed_actor_drift'),fixed_critic_diagnostic=value.get('fixed_critic_diagnostic'),
+            paired_baseline=value.get('paired_baseline'),episode_metrics=value.get('episode_metrics'),
+            evaluation_identity=value.get('evaluation_identity'),iteration=value.get('iteration'),
+            session_id=value.get('session_id'),
             wall_seconds=value.get('wall_seconds'),
             task_count=value.get('task_count'),plan_sha256=value.get('plan_sha256')))
     return dict(schema='stage10.pipeline_measurements.v1',run=str(run),iterations=iterations,
         warm_ordinary=ordinary,archive=archive,evaluations=evaluations,
         acceptance_not_inferred_from_timing=True,raw_records_unchanged=True,
+        nested_phase_seconds_must_not_be_added=True,
         percentile_scope='observed_finite_rounds_linear_interpolation_not_confidence_interval')
 
 
