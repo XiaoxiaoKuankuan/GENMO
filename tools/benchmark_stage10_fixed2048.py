@@ -72,6 +72,9 @@ def main():
         defer_checks=True,precision_mode=performance['precision_mode'],numerical_variant=performance['numerical_variant'])
     configure_gradients(actor,weight_reduction=performance['weight_reduction'],
         accumulation=performance['gradient_accumulation'],weight_reduction_overrides=performance['weight_reduction_overrides'])
+    from gem.closedloop.dppo.evaluation import _model_fingerprint
+    (directory/'actor_identity.json').write_text(json.dumps(dict(model_fingerprint=_model_fingerprint(actor),
+        torch_threads=torch.get_num_threads(),source_root=str(ROOT),buffers=[name for name,_ in actor.named_buffers()]),indent=2))
     if any(r.metadata['sampler_trace']['kernel_config']!=policy.kernel_config for r in rows):
         raise ValueError('Cannot change saved behavior numerical contract')
     manifest=[v for shard in c.all_gather_object([dict(owner_rank=rank,local_index=i,
