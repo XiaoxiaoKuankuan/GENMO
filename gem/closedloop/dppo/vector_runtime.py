@@ -238,6 +238,20 @@ class VectorTrainingRuntime:
         targets_started=time.perf_counter()
         targets = normalize_advantages_global(local_call(c.distributed,freeze_targets),distributed=c.distributed)
         report['fixed_targets_with_rank_wait_seconds']=time.perf_counter()-targets_started
+        report['gae_global']=dict(valid_upper_count=targets['advantage_global_count'],
+            mean=targets['advantage_global_mean'],std=targets['advantage_global_std'],
+            variance=targets['advantage_global_std']**2,scope='raw_advantage_before_global_normalization')
+        lengths=[]
+        for fragment in fragments:
+            previous=None;length=0
+            for row in fragment:
+                if previous is not None and (previous.terminated or previous.truncated or
+                        previous.identity['episode_id']!=row.identity['episode_id'] or
+                        previous.control_tick_end!=row.control_tick_begin):
+                    lengths.append(length);length=0
+                length+=1;previous=row
+            if length:lengths.append(length)
+        report['gae_contiguous_fragment_lengths']=lengths
         manifest = build_global_manifest(buffer.transitions,c.distributed)
         if len(manifest)!=c.settings['rollout_upper_steps']:raise RuntimeError('Global vector batch changed')
         def persist():
