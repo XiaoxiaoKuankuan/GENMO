@@ -416,6 +416,37 @@ def _update(summary, contract):
                 parameter_change_scope='Runtime optimizer/gradient evidence; no per-iteration weight comparison')
 
 
+def _audit_bc_rank_states(rank_states, contract, actor_updates):
+    """按不可变训练合同核对BC归属、局部样本量和更新计数，保留旧rank0格式。"""
+    distribution = contract.get('bc_distribution', 'rank0')
+    require(distribution in ('rank0', 'all_ranks'), 'V2 BC distribution is unknown')
+    world = len(rank_states)
+    global_batch = integer(contract.get('bc_batch', 2), 'V2 BC global batch', 1)
+    sharded = distribution == 'all_ranks'
+    require(not sharded or global_batch % world == 0, 'V2 BC global batch cannot be evenly sharded')
+    local_batch = global_batch // world if sharded else global_batch
+    active = contract['bc_weight'] > 0
+    streams = []
+    for rank, item in enumerate(rank_states):
+        bc = item['samplers'].get('bc')
+        owner = sharded or rank == 0
+        require(owner or bc is None, 'V2 BC state is present on an unassigned rank')
+        require(not (owner and active) or isinstance(bc, dict), 'V2 active BC rank state is missing')
+        if bc is None:
+            continue
+        require(bc.get('batch_size') == local_batch, 'V2 BC local batch differs from the global normalization')
+        require(bc.get('bc_update_steps') == (actor_updates if active else 0),
+                'V2 BC accumulated updates differ from accepted Actor steps')
+        if sharded and active:
+            generator = bc.get('generator')
+            require(isinstance(generator, torch.Tensor) and generator.dtype == torch.uint8
+                    and generator.ndim == 1, 'V2 sharded BC generator state is missing')
+            # 各rank独立种子流，断点不能被rank0的BC快照覆盖。
+            streams.append(generator.cpu().numpy().tobytes())
+    require(not (sharded and active) or len(set(streams)) == world,
+            'V2 sharded BC RNG streams were duplicated across ranks')
+
+
 def _checkpoint(root, publication, identity, summary, actor_updates, critic_updates, rank_rows):
     path = resolve(root, publication['path'])
     metadata = publication['metadata']
@@ -444,6 +475,7 @@ def _checkpoint(root, publication, identity, summary, actor_updates, critic_upda
             and state['actor_updates']==actor_updates and state['critic_updates']==critic_updates,
             'V2 checkpoint outer iteration or accumulated optimizer counts differ')
     require(len(saved['rank_states'])==8, 'V2 checkpoint is missing a rank')
+    _audit_bc_rank_states(saved['rank_states'], identity['training_contract'], actor_updates)
     counters = []
     for rank, item in enumerate(saved['rank_states']):
         local = item['state']
@@ -454,9 +486,6 @@ def _checkpoint(root, publication, identity, summary, actor_updates, critic_upda
         music = item['samplers']['music']
         require(music.get('split')=='train' and music.get('catalog_identity')==identity['dataset'],
                 'V2 rank sampler differs from the full training catalog')
-        require(not rank or 'bc' not in item['samplers'], 'V2 BC state must belong to rank zero only')
-        if rank==0 and identity['training_contract']['bc_weight']>0:
-            require('bc' in item['samplers'], 'V2 active BC state is missing from rank zero')
         if is_vector(identity):
             require(item['rng'].get('cuda_scope')=='local_device', 'V2 RNG must have rank-local scope')
             counters.append(audit_vector_checkpoint(local,rank_rows[rank],identity,rank))
