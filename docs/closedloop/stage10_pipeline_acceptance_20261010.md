@@ -109,7 +109,7 @@ PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=. python -B tools/run_stage10_pipeline_matr
 
 | 项目 | 完整工作量P50 | P95 | 结论 |
 |---|---:|---:|---|
-| Actor128 | 70.320059 s | 见原始报告 | 完整两次更新、81920次全局内部访问，BC256 |
+| Actor128 | 70.320059 s | 70.787679 s | 完整两次更新、81920次全局内部访问，BC256 |
 | Actor256 | 无 | 无 | 真实八卡CUDA OOM，不可用，不能声称梯度/Adam完整对照通过 |
 | Actor512 | 无 | 无 | 真实八卡CUDA OOM，不可用，不能声称梯度/Adam完整对照通过 |
 | KL256 | 12.357528 s | 12.357670 s | 最终40960内部转移全部计算 |
@@ -123,3 +123,9 @@ Actor128五次执行包括数值轮、预热和三次正式计时；报告保存
 两个OOM均成功退出失败图并恢复后继续诊断；结束对八rank逐字节验证Actor、Adam、BC和RNG，全部identical。诊断真实执行10次optimizer尝试并计入预算，未退款；包含恢复和额外检查的诊断墙钟665.821秒，不属于普通轮。此前`fixed2048_live_microbatch_v1`的二次OOM失败完整保留，不能改写为成功。
 
 本次在更新后的同一权重上重新测量20步独立梯度。末两步平均joint KL为0.0475602/0.0531291，ratio越过clip区间比例为0.98877/0.99072，末端集中仍存在。逐步梯度范数不可以相加为“贡献百分比”，更不能解释为Adam参数变化的占比；完整逐模块结果在原报告中保留。
+
+诊断完整报告SHA256为`5e89213d9d12029c19ad346f7c3bb456e1eb82aaf2f0ea142caec52bbe047fd9`，路径为`fixed2048_live_microbatch_v2/run/sessions/57bbd563-14c2-46d1-ab24-602c98dfd212/fixed_work_probe/report.json`。恢复后的正常第二轮完成2次真实Actor更新、最终KL0.005027684，与先前无诊断运行相同；终态验证结束，整个进程退出码0。
+
+### 分项计时的后续勘误
+
+十轮总采样/Actor/KL/主体墙钟及真实奖励仍有效。但旧`columnar_reward_cpu_timings`使用奖励对象累计值按slot作差，episode更换对象时可能少计甚至出现负数，因此**这些旧奖励CPU分项全部不用于性能分解**。新的`per_consume_call_across_episode_replacements.v2`按实际消费调用累计，兼容标量路径与回退单列，并保留跨episode的实际回退次数。此计时修正不改变奖励、GAE或模拟时钟；真实验证将在冻结矩阵之后用新源码进行，不能反填旧数据为新结果。
