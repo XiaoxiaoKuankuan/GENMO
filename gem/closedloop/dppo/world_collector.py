@@ -266,6 +266,7 @@ class WorldEnvironmentCollector(VectorEnvironmentCollector):
         before = [state.transitions for state in self.states]
         try:
             fragments=self._drive({slot:self._fragment_flow(slot,count_per_rank//self.num_envs,policy_version) for slot in range(self.num_envs)})
+            self.world_call('end_rollout',env_ids=list(range(self.num_envs)))
         except BaseException as error:
             from .budget import atomic_json
             atomic_json(self.states[0].resource.env.output.parent/'failed_world_progress.json', dict(
@@ -280,7 +281,6 @@ class WorldEnvironmentCollector(VectorEnvironmentCollector):
             if profile is not None:
                 profile.disable()
                 profile.dump_stats(str(self.states[0].resource.env.output.parent/'world_python_profile.pstats'))
-        self.world_call('end_rollout',env_ids=list(range(self.num_envs)))
         if signature!=self.policy._parameter_signature():raise RuntimeError('Policy changed during collection')
         rows=[fragments[i] for i in range(self.num_envs)]
         tails=[row.metadata['fragment_tail'] for fragment in rows for row in fragment if 'fragment_tail' in row.metadata]
