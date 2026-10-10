@@ -278,12 +278,14 @@ def audit_rollout(root, summary, data_lookup, contract, seen_paths, *, identity=
             require(task['manifest_sha256']==audited['manifest_sha256'], 'Training task does not match complete train manifest')
             integer(task['music_start_frame'], 'training music start')
             require(task['music_start_frame']<audited['num_frames'], 'Training music start outside real song')
+            from tools.eval.audit_stage10_vector_helpers import audit_boundary_wait_metadata
+            tail = audit_boundary_wait_metadata(item, identity or {})
             rows.append(dict(identity=dict(item.identity), rewards=item.rewards.double().tolist(),
                 count=count, begin=item.control_tick_begin, end=item.control_tick_end,
                 terminated=bool(item.terminated), truncated=bool(item.truncated),
                 has_next=item.next_context is not None, event_reward=float(item.metadata.get('event_reward', 0.)),
                 old_value=float(item.old_value), next_value=float(item.next_value),
-                free_coordinate_count=int(item.free_mask.sum())))
+                free_coordinate_count=int(item.free_mask.sum()), audited_fragment_tail=tail))
             controls += count
             physics += item.executed_physics_steps
             sources[task['dataset']] += 1

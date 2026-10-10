@@ -8,7 +8,48 @@ lane journal、真实生成批次和checkpoint中的采样器。此模块只读�
 这些检查补充原全局概率、GAE、KL、Adam、预算和归档审计，不降低原数值门槛。
 """
 from collections import Counter
-from tools.eval.audit_closedloop_stage10 import require,integer,number
+from tools.eval.audit_closedloop_stage10 import require,integer,number,close
+
+
+def audit_boundary_wait_metadata(item, identity):
+    """独立验证授权尾段的精确控制/物理和逐步奖励，不以汇总标签替代原始转移。"""
+    import torch
+    runtime = identity.get('execution_contract', {}).get('runtime', {})
+    tail = item.metadata.get('fragment_tail')
+    if runtime.get('vector_boundary_wait_contract') is None or tail is None:
+        return None
+    maximum = runtime['vector_boundary_wait_max_control_steps']
+    require(runtime['vector_boundary_wait_contract']=='bounded_reference_wait.v1'
+            and tail.get('boundary_wait_contract')==runtime['vector_boundary_wait_contract']
+            and tail.get('wait_limit_controls')==maximum, 'Boundary wait contract or cap differs')
+    count = integer(tail['executed_control_steps'], 'Boundary wait controls')
+    reserved = integer(tail['budget_reserved_controls'], 'Boundary wait reservation')
+    require(count<=reserved<=maximum and reserved<=tail['requested_control_steps']
+            and tail['executed_physics_steps']==4*count and count<=item.executed_control_steps,
+            'Boundary wait control/physics/budget count differs')
+    require(tail['begin_tick']>=item.control_tick_begin and tail['end_tick']==item.control_tick_end
+            and tail['end_tick']-tail['begin_tick']==12*count,
+            'Boundary wait physical interval differs')
+    supported = tail.get('maximum_supported_decision_tick')
+    require(supported is None or tail['end_tick']<=supported, 'Boundary wait exceeded valid reference')
+    integer(tail['execution_sequence'], 'Boundary wait acknowledged sequence', 1)
+    require(number(tail['wait_wall_seconds'], 'Boundary wait walltime')>=0,
+            'Boundary wait walltime invalid')
+    require(type(tail['wait_limit_reached']) is bool and
+            (not tail['wait_limit_reached'] or count==reserved==maximum), 'Boundary wait cap flag differs')
+    values = []
+    if count:
+        details = item.metadata['reward_details'][-count:]
+        require(len(details)==count and all(d.get('transition_valid') is True for d in details),
+                'Boundary wait step reward evidence missing')
+        values = [number(d['reward'], 'Boundary wait step reward') for d in details]
+        # 正控制步尾段从未终止状态开始；若末状态物理终止，原奖励在最后控制步加一次失败惩罚。
+        if item.metadata['terminal_snapshot'].get('terminated'):
+            values[-1] -= identity['reward']['failure_penalty']
+        require(torch.equal(torch.tensor(values, dtype=item.rewards.dtype), item.rewards[-count:]),
+                'Boundary wait rewards differ from stored actual control rewards')
+    close(tail['reward_sum'], sum(values), 'Boundary wait exact step reward sum')
+    return dict(tail)
 
 
 def is_vector(identity):
@@ -56,11 +97,19 @@ def audit_vector_rows(rows, collection, frozen, identity):
             collection.get('active_envs')==count and collection.get('total_transitions')==len(rows)==total and
             collection.get('fragment_lengths')==quotas and
             collection.get('fragment_contract')==(runtime['vector_collection_contract'] if world else runtime['vector_fragment_contract']), 'Vector rollout topology differs')
+    bounded = world and runtime.get('vector_boundary_wait_contract') is not None
     if world:
-        require(collection.get('normal_boundary_resets')==0 and collection.get('administrative_drain_controls')==0,
-                'World rollout must not reset or drain healthy robots at normal boundaries')
+        require(collection.get('normal_boundary_resets')==0, 'World rollout reset healthy robots at boundary')
+        if bounded:
+            require(collection.get('boundary_wait_contract')==runtime['vector_boundary_wait_contract']
+                    and collection.get('boundary_wait_max_controls')==runtime['vector_boundary_wait_max_control_steps'],
+                    'World bounded wait identity differs')
+        else:
+            require(collection.get('administrative_drain_controls')==0,
+                    'World legacy boundary contract does not authorize drain')
     sessions=lane_sessions(frozen,count)
     begin=0
+    tails=[]
     for slot,size in enumerate(quotas):
         fragment=rows[begin:begin+size];begin+=size
         require(all(r['identity'].get('env_id')==slot and
@@ -70,6 +119,19 @@ def audit_vector_rows(rows, collection, frozen, identity):
         require(all(b==a+1 for a,b in zip(decisions,decisions[1:])), 'Vector per-environment decisions are not continuous')
         require(fragment[-1]['terminated'] or fragment[-1]['truncated'], 'Vector GAE fragment is not closed')
         require(all(r['count']>0 for r in fragment), 'Vector rollout counts a zero-control action')
+        if bounded:
+            require(fragment[-1].get('audited_fragment_tail') is not None and
+                    all(r.get('audited_fragment_tail') is None for r in fragment[:-1]),
+                    'World bounded wait must be verified exactly once at each environment tail')
+            tails.append(fragment[-1]['audited_fragment_tail'])
+    if bounded:
+        require(collection['administrative_drain_controls']==sum(t['executed_control_steps'] for t in tails)
+                and collection['administrative_drain_physics_steps']==sum(t['executed_physics_steps'] for t in tails)
+                and collection['administrative_wait_limit_reached']==sum(t['wait_limit_reached'] for t in tails),
+                'World bounded wait aggregate hides control/physics/cap work')
+        close(collection['administrative_drain_reward'],sum(t['reward_sum'] for t in tails), 'World bounded wait reward aggregate')
+        close(collection['administrative_wait_max_wall_seconds'],max(t['wait_wall_seconds'] for t in tails),
+              'World bounded wait walltime aggregate')
     generated=Counter()
     for batch in collection['batches']:
         slots=batch['environment_slots']
@@ -88,6 +150,10 @@ def audit_vector_checkpoint(local, rows, identity, rank):
             saved.get('numerical_layout')==identity['performance_contract']['numerical_layout'] and
             saved.get('restore_environment')=='fresh_PhysX_episodes_preserve_rng_cursors_and_spent_budget' and
             len(saved.get('states',[]))==count, 'Vector checkpoint topology or reference contract differs')
+    if world and runtime.get('vector_boundary_wait_contract') is not None:
+        require(saved.get('boundary_wait_contract')==runtime['vector_boundary_wait_contract']
+                and saved.get('boundary_wait_max_controls')==runtime['vector_boundary_wait_max_control_steps'],
+                'Vector checkpoint bounded wait contract differs')
     counters=[]
     for slot,record in enumerate(saved['states']):
         require(isinstance(record,dict), 'Vector checkpoint missing an environment')
