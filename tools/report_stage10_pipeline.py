@@ -72,7 +72,9 @@ def summarize(run):
             first_gmt_consumption_by_rank=[dict(rank=c['rank'],references=c.get('new_reference_first_gmt_input',[]))
                 for c in collectors],
             collection_phases_by_rank=[{key:c.get(key) for key in (
-                'rank','control_steps','world_timing','server_rpc_transport_timing',
+                'rank','control_steps','seconds','local_compute_seconds','through_persistence_seconds',
+                'world_timing','server_rpc_transport_timing','metric_processing_seconds',
+                'journal_and_budget_close_with_rank_wait_seconds',
                 'snapshot_seconds','learning_data_persistence_seconds','synchronization_wait_seconds',
                 'generation_timing_totals','generation_pipeline_totals','generation_batch_wall_seconds',
                 'terminated_transitions','truncated_transitions','termination_reasons')} for c in collectors],
