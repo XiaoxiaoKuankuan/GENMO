@@ -1,6 +1,7 @@
 """第二阶段训练的分层性能计时与调用计数。
 
-CPU 区间使用 perf_counter；GPU 区间同时记录当前 stream 的 CUDA Event，事件在
+CPU 墙钟区间使用 perf_counter，线程CPU时间使用thread_time（包含驱动忙等，不能
+视为纯数值计算时间）；GPU 区间同时记录当前 stream 的 CUDA Event，事件在
 轮次边界统一读取，不在每个算子后执行设备全局同步。嵌套区间明确标记为包含关系，
 不能直接相加冒充关键路径。未启用时接口为空操作，不改变随机数、梯度或执行时序。
 每个 rank 独立持有记录器，采集计算、collective 等待和整轮墙钟必须分别命名。
@@ -64,7 +65,7 @@ class PhaseProfiler:
                     elapsed_wall_seconds=time.perf_counter()-self.started,
                     intervals='inclusive_nested_do_not_sum', detailed=self.detailed,
                     hotloop_timing_enabled=self.detailed,
-                    thread_cpu_scope='current_thread_only_excludes_GPU_wait_and_other_threads',
+                    thread_cpu_scope='current_thread_cpu_includes_driver_busy_wait_excludes_sleep_and_other_threads',
                     stages={name: dict(row) for name, row in sorted(self.rows.items())})
 
 

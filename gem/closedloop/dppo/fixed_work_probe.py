@@ -113,7 +113,7 @@ def run_fixed_work_probe(c, rows, targets, manifest, backup, bc_before, rng):
                     # 仅八卡明确的 CUDA OOM 允许继续有限候选比较，其他异常终止并整轮恢复。
                     if not all(item['cuda_oom'] for item in failures):raise
                     unavailable=dict(reason='cuda_out_of_memory',repeat=repeat,failures_by_rank=failures,
-                        partial_work_charged=True,full_work_completed=False)
+                        partial_work_wall_time_included=True,full_work_completed=False)
                 finally:
                     if token is not None:deactivate(token)
                 if unavailable is not None:
