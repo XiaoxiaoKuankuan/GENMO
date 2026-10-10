@@ -22,7 +22,7 @@ FORMAT = 'genmo.execution_journal.ndarray.v2'
 MAX_BYTES = 256*1024**2
 
 
-def encode_binary(value):
+def encode_binary_reference(value):
     parts, offset = [], 0
 
     def visit(item):
@@ -77,6 +77,42 @@ def encode_binary(value):
     if len(metadata)+offset > MAX_BYTES:
         raise ValueError('Journal reply exceeds byte limit')
     return MAGIC+struct.pack('!QQ', len(metadata), offset)+metadata+b''.join(parts)
+
+
+def encode_binary(value):
+    """普通列式树直接交给C层JSON遍历；字节、排序和SHA与原参考编码完全一致。
+
+    先只验证源键和原生容器，不递归重建一份包含全部标量的中间字典。数组由JSON
+    default回调按同一排序顺序分配偏移，最后只拼接一次完整帧。含Python非有限值、
+    Tensor或自定义Mapping的故障/兼容结构保留原编码器，不丢失任何原始字段。
+    """
+    def native(item):
+        kind=type(item)
+        if kind in (type(None),str,int,bool):return True
+        if kind is float:return math.isfinite(item)
+        if kind is dict:
+            if any(not isinstance(k,str) for k in item):raise TypeError('Journal mapping keys must be strings')
+            if len(item)==1 and ('__journal_array_v2__' in item or '__nonfinite__' in item):
+                raise ValueError('Reserved journal metadata key')
+            return all(native(v) for v in item.values())
+        if kind in (list,tuple):return all(native(v) for v in item)
+        return kind is np.ndarray or isinstance(item,Path)
+    if not native(value):return encode_binary_reference(value)
+    parts=[];offset=0
+    def default(item):
+        nonlocal offset
+        if isinstance(item,Path):return str(item)
+        if type(item) is not np.ndarray or item.dtype.hasobject or item.dtype.kind not in 'biufUS':
+            raise TypeError('Unsupported journal array dtype/value')
+        raw=item.tobytes(order='C')
+        spec=dict(dtype=item.dtype.str,shape=list(item.shape),offset=offset,size=len(raw))
+        parts.append(raw);offset+=len(raw)
+        if offset>MAX_BYTES:raise ValueError('Journal reply exceeds byte limit')
+        return {'__journal_array_v2__':spec}
+    metadata=json.dumps(dict(format=FORMAT,value=value),ensure_ascii=False,sort_keys=True,
+        separators=(',',':'),allow_nan=False,default=default).encode()
+    if len(metadata)+offset>MAX_BYTES:raise ValueError('Journal reply exceeds byte limit')
+    return b''.join((MAGIC,struct.pack('!QQ',len(metadata),offset),metadata,*parts))
 
 
 def decode_payload(payload, *, sha256=None):

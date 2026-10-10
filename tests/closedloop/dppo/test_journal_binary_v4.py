@@ -177,3 +177,19 @@ def test_columnar_join_preserves_non_native_array_bytes_and_signed_zero():
     for row,original in zip(joined,values,strict=True):
         assert row['state'].dtype==original.dtype
         assert row['state'].tobytes()==original.tobytes()
+
+
+@pytest.mark.parametrize('fault',[False,True])
+def test_fast_c_json_encoder_matches_reference_complete_bytes(fault):
+    from pathlib import Path
+    from gem.closedloop.dppo.journal_codec import encode_binary_reference
+    from gem.runtime.trajectory_blocks import pack_trace
+    value=reply()
+    if not fault:value.pop('failure')
+    value['path']=Path('有空 格/证据')
+    value['zeros']=[0.,-0.]
+    value['trace']=pack_trace([dict(tick=i*12,position=np.arange(21,dtype='>f4')+i,
+        physics=[{'force':np.linspace(-1,1,6,dtype=np.float64)} for _ in range(4)]) for i in range(25)])
+    assert encode_binary(value)==encode_binary_reference(value)
+    for broken in ({1:'bad'},{'__journal_array_v2__':{}},{'__nonfinite__':'nan'}):
+        with pytest.raises((TypeError,ValueError)):encode_binary(broken)
