@@ -70,10 +70,13 @@ def main():
                 '--deadline-seconds','3600',*extra]
             with (output/f'{name}.launch.log').open('x') as log:
                 completed=subprocess.run(command,cwd=ROOT,stdout=log,stderr=subprocess.STDOUT)
-            row.update(exit_code=completed.returncode,status='passed' if not completed.returncode else 'failed',
+            accepted=output/name/'run/accepted.json'
+            count=json.loads(accepted.read_text())['iteration'] if accepted.exists() else 0
+            row.update(exit_code=completed.returncode,accepted_rounds=count,
+                status='passed' if not completed.returncode and count==rounds else 'failed',
                 seconds=time.perf_counter()-started,ended_utc=datetime.now(timezone.utc).isoformat())
             save();print(json.dumps(row,ensure_ascii=False),flush=True)
-        report['status']='passed' if all(r['exit_code']==0 for r in report['cases']) else 'failed'
+        report['status']='passed' if all(r['status']=='passed' for r in report['cases']) else 'failed'
     except BaseException as error:
         report.update(status='stopped',error=f'{type(error).__name__}: {error}')
         raise
