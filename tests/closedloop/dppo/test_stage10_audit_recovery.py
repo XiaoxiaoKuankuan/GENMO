@@ -14,6 +14,8 @@ from __future__ import annotations
 
 import copy
 import json
+import gc
+import weakref
 from types import SimpleNamespace
 
 import pytest
@@ -23,6 +25,35 @@ from gem.closedloop.dppo import run_management as management
 from gem.closedloop.dppo.checkpoint import load_checkpoint, save_checkpoint
 from tests import test_evaluation as evaluation_fixtures
 from tools.eval.audit_closedloop_stage10 import audit_run, main, read_json, sha256
+
+
+@pytest.mark.parametrize('kind', ['oom', 'numeric'])
+def test_failed_graph_frames_released_before_state_restore(kind):
+    from gem.closedloop.dppo.rollback_audit import release_failed_computation
+    references = []
+    def failed_forward():
+        retained = torch.ones(512, requires_grad=True) * 3
+        references.append(weakref.ref(retained))
+        if kind == 'oom':
+            raise torch.cuda.OutOfMemoryError('injected CUDA allocation failure')
+        raise FloatingPointError('injected numeric failure')
+    def cooperative_wrapper():
+        try:
+            failed_forward()
+        except Exception as cause:
+            raise RuntimeError('cooperative failure') from cause
+    with pytest.raises(RuntimeError, match='cooperative failure'):
+        try:
+            cooperative_wrapper()
+        except Exception as failure:
+            assert references[0]() is not None
+            report = release_failed_computation(failure)
+            gc.collect()
+            assert references[0]() is None
+            assert report['cuda_oom'] == (kind == 'oom')
+            assert 'failed_forward' in report['traceback']
+            # 仍能按原类型重新抛出，异常现场文字保留；非OOM不能被自动降级。
+            raise
 
 
 def write(path, value):

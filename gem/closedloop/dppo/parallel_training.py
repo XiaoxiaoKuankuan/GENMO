@@ -19,6 +19,7 @@ Actor/Critic 训练任务。Actor 固定学习率由配置指定，默认 5e-9�
 from __future__ import annotations
 
 import copy
+import gc
 import json
 import math
 import os
@@ -702,6 +703,12 @@ def _update_cached(c, buffer, targets, manifest, index):
         if active_phase is not None:
             timings[active_phase] = time.perf_counter()-started
         error_message = str(failure)
+        from .rollback_audit import release_failed_computation
+        failure_details = release_failed_computation(failure)
+        c.actor_optimizer.zero_grad(set_to_none=True); c.critic_optimizer.zero_grad(set_to_none=True)
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
         restored = broadcast_state(backup, c.distributed)
         c.actor.load_state_dict(restored['actor']); c.critic.load_state_dict(restored['critic'])
         c.actor_optimizer.load_state_dict(restored['actor_optimizer'])
@@ -723,6 +730,7 @@ def _update_cached(c, buffer, targets, manifest, index):
         root_call(c.distributed, lambda: atomic_json(c.session/f'rejected_{index:06d}.json',
             dict(iteration=index, actor=actor, critic=critic, kl=kl,
                  rolled_back=all(item['identical'] for item in recovery), rollback_audit_by_rank=recovery, error=error_message,
+                 failure_details=failure_details,
                  actor_lr=c.settings['actor_lr'], optimizer_attempts_charged=True,
                  probability_check=check, timings=timings)))
         if not all(item['identical'] for item in recovery):

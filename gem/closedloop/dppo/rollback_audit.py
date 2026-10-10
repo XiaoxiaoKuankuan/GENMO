@@ -10,8 +10,32 @@ from __future__ import annotations
 
 import hashlib
 import struct
+import traceback
 import numpy as np
 import torch
+
+
+def release_failed_computation(error):
+    """保留异常文本后清空已退出帧，避免 OOM 恢复被原计算图再次挤占显存。
+
+    原异常类型和 traceback 结构仍可重新抛出；清除的仅是已经退出函数的局部引用。
+    当前仍在执行的事务帧由 Python 自动跳过。遍历 cause/context，覆盖分布式协作
+    异常包装；此操作不改变参数、预算或 RNG，也不把任意 RuntimeError 当作 OOM。
+    """
+    report = dict(type=type(error).__name__, message=str(error),
+                  traceback=''.join(traceback.format_exception(type(error), error, error.__traceback__)),
+                  cuda_oom=False)
+    pending, seen = [error], set()
+    while pending:
+        current = pending.pop()
+        if id(current) in seen:
+            continue
+        seen.add(id(current))
+        report['cuda_oom'] |= isinstance(current, torch.cuda.OutOfMemoryError)
+        if current.__traceback__ is not None:
+            traceback.clear_frames(current.__traceback__)
+        pending.extend(child for child in (current.__cause__, current.__context__) if child is not None)
+    return report
 
 
 def exact_state_digest(value):

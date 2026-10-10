@@ -40,6 +40,7 @@ def main():
     with (directory/'pytest.log').open('w') as log, redirect_stdout(log),redirect_stderr(log):
         code=pytest.main(['-q','-p','no:cacheprovider','--basetemp',str(temporary),
             *[str(root/'tests/closedloop/dppo'/name) for name in paths],
+            str(root/'tests/closedloop/dppo/test_parallel_orchestration.py')+'::test_whole_iteration_rollback_preserves_spent_budget',
             str(root/'tests/closedloop/test_closedloop_protocol.py'),
             str(root/'tests/closedloop/test_closedloop_protocol_disconnect.py'),
             str(a.gmt_repo/'tests/test_vector_scheduler.py'),

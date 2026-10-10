@@ -14,6 +14,7 @@ epoch，不把进程间重新编译形成的另一套算子当作原行为策略
 from __future__ import annotations
 
 import copy
+import gc
 import time
 import numpy as np
 import torch
@@ -21,7 +22,7 @@ import torch
 from .parallel_support import (broadcast_state, capture_local_rng, restore_local_rng,
                               local_call, root_call, cpu_snapshot)
 from .budget import atomic_json
-from .rollback_audit import compare_recovered_state
+from .rollback_audit import compare_recovered_state, release_failed_computation
 from .updater_v2 import actor_update_v2, analytic_kl_local, probability_check_local
 from .performance import PhaseProfiler, activate, deactivate
 from .run_management import file_sha256
@@ -75,6 +76,7 @@ def run_fixed_work_probe(c, rows, targets, manifest, backup, bc_before, rng):
         root_call(d,lambda:c.budget.reserve('fixed_work_probe',optimizer_attempts=1))
         attempts+=1
     def restore():
+        actor.zero_grad(set_to_none=True)
         actor.load_state_dict(state['actor']);optimizer.load_state_dict(copy.deepcopy(state['actor_optimizer']))
         if c.bc is not None:c.bc.load_state_dict(copy.deepcopy(bc_before))
         restore_local_rng(rng,c.generators);actor.zero_grad(set_to_none=True)
@@ -93,7 +95,7 @@ def run_fixed_work_probe(c, rows, targets, manifest, backup, bc_before, rng):
             save()
         base_outputs=_terminal_outputs(c.policy,rows,cache)
         for micro in (128,256,512):
-            times=[];diagnostic=None
+            times=[];diagnostic=None;unavailable=None
             for repeat in range(5):
                 local_call(d,restore);captured=[]
                 def observe(model,step):
@@ -104,8 +106,21 @@ def run_fixed_work_probe(c, rows, targets, manifest, backup, bc_before, rng):
                 try:
                     update=actor_update_v2(c.policy,optimizer,rows,targets,denoising_microbatch=micro,
                         gradient_observer=observe if repeat==0 else None,**kwargs)
+                except Exception as failure:
+                    details=release_failed_computation(failure)
+                    actor.zero_grad(set_to_none=True);gc.collect();torch.cuda.empty_cache()
+                    failures=d.all_gather_object(details)
+                    # 仅八卡明确的 CUDA OOM 允许继续有限候选比较，其他异常终止并整轮恢复。
+                    if not all(item['cuda_oom'] for item in failures):raise
+                    unavailable=dict(reason='cuda_out_of_memory',repeat=repeat,failures_by_rank=failures,
+                        partial_work_charged=True,full_work_completed=False)
                 finally:
                     if token is not None:deactivate(token)
+                if unavailable is not None:
+                    local_call(d,restore)
+                    memory=d.all_gather_object(dict(allocated_peak_bytes=torch.cuda.max_memory_allocated(),
+                        reserved_bytes=torch.cuda.memory_reserved()))
+                    break
                 torch.cuda.synchronize();seconds=time.perf_counter()-begin
                 memory=d.all_gather_object(dict(seconds=seconds,allocated_peak_bytes=torch.cuda.max_memory_allocated(),
                     reserved_bytes=torch.cuda.memory_reserved()))
@@ -138,7 +153,13 @@ def run_fixed_work_probe(c, rows, targets, manifest, backup, bc_before, rng):
                     diagnostic=root_call(d,compare)
                     diagnostic['phase_profiles_by_rank']=profiles
                 del captured
-            report['actor'].append(dict(microbatch=micro,p50=float(np.percentile(times,50)),p95=float(np.percentile(times,95)),
+            if unavailable is not None:
+                report['actor'].append(dict(microbatch=micro,status='unavailable',p50=None,p95=None,
+                    samples=times,diagnostic=diagnostic,memory_ranks=memory,**unavailable))
+                save()
+                if d.rank==0:print(f'[FIXED_WORK] Actor B={micro} unavailable: CUDA OOM; state restored',flush=True)
+                continue
+            report['actor'].append(dict(microbatch=micro,status='completed',p50=float(np.percentile(times,50)),p95=float(np.percentile(times,95)),
                 samples=times,diagnostic=diagnostic,memory_ranks=memory,optimizer_steps=2,
                 internal_sample_visits=81920,global_bc_samples=256))
             if d.rank==0:print(f'[FIXED_WORK] Actor B={micro} P50={np.percentile(times,50):.3f}s accepted={diagnostic["numerical_passed"]}',flush=True)
@@ -170,6 +191,10 @@ def run_fixed_work_probe(c, rows, targets, manifest, backup, bc_before, rng):
                 samples=times,report=kl,phase_profiles_by_rank=profiles,
                 mean_difference=abs(kl['mean_joint_kl']-reference_kl['mean_joint_kl'])))
             save()
+    except Exception as failure:
+        report['failure']=release_failed_computation(failure)
+        actor.zero_grad(set_to_none=True);gc.collect();torch.cuda.empty_cache()
+        raise
     finally:
         local_call(d,restore)
         for name,p in actor.named_parameters():p.grad=None if old_grad[name] is None else old_grad[name].to(p.device)
