@@ -61,3 +61,17 @@ def test_inactive_bc_has_zero_updates_or_no_state():
     _audit_bc_rank_states(ranks, contract, 8)
     ranks[7]['samplers'].pop('bc')
     _audit_bc_rank_states(ranks, contract, 8)
+
+
+def test_retired_metadata_does_not_claim_rng_byte_validation():
+    ranks, contract = states()
+    for item in ranks: item['samplers']['bc'].pop('generator')
+    report = _audit_bc_rank_states(ranks, contract, 8, complete=False)
+    assert report['rng_scope'] == 'unavailable_in_retired_metadata'
+    with pytest.raises(ValueError): _audit_bc_rank_states(ranks, contract, 8)
+
+
+def test_retired_metadata_still_requires_shard_counts():
+    ranks, contract = states()
+    ranks[2]['samplers']['bc']['bc_update_steps'] = 7
+    with pytest.raises(ValueError): _audit_bc_rank_states(ranks, contract, 8, complete=False)
