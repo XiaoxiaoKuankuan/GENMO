@@ -274,6 +274,34 @@ def test_v2_eight_rank_multistep_sparse_checkpoint_and_sealed_archives(lifecycle
     assert before=={str(path.relative_to(life.root)):sha256(path) for path in life.root.rglob('*') if path.is_file()}
 
 
+@pytest.mark.parametrize('count',[4,8])
+def test_v2_sampled_ppo_cannot_substitute_sampled_or_incomplete_final_kl(lifecycle,count):
+    from gem.closedloop.dppo.denoising_sampling import plan_record
+    from tools.eval.audit_closedloop_stage10_v2 import _update
+    life=lifecycle.start();life.accept()
+    summary=read_json(life.directory/'iterations/000001/summary.json')
+    contract=dict(life.contract,denoising_steps=20,denoising_steps_per_chain=count,
+                  actor_minibatch_internal_transitions=80)
+    actor=summary['actor']
+    for step in actor['steps']:
+        indices=step['global_upper_indices']
+        step.update(internal_transitions=4*count,full_internal_transitions=80,
+                    denoising_sampling=plan_record(731,indices,20,count))
+    actor.update(denoising_steps_per_chain=count,full_denoising_steps=20,
+                 applied_internal_sample_visits=16*count,planned_internal_sample_visits=16*count,
+                 full_objective_internal_transitions=320,applied_unique_upper_chains=8,
+                 applied_unique_chain_fraction=1.)
+    summary['kl'].update(per_denoising_step=[dict(step_index=i,mean_joint_kl=.001) for i in range(20)],
+                         included_upper_transitions=8,fresh_internal_forwards=160,reused_upper_transitions=0,
+                         effective_mean_change=dict(checked_internal_transitions=160))
+    assert _update(summary,contract)['actor_optimizer_steps']==4
+    for key,value in [('per_denoising_step',summary['kl']['per_denoising_step'][:count]),
+                      ('included_upper_transitions',7),('fresh_internal_forwards',8*count),
+                      ('effective_mean_change',dict(checked_internal_transitions=8*count))]:
+        bad=copy.deepcopy(summary);bad['kl'][key]=value
+        with pytest.raises(ValueError,match='KL'):_update(bad,contract)
+
+
 def test_v2_failure_before_first_accept_keeps_its_audit_version(lifecycle):
     life = lifecycle.start()
     life.finish(failed=True)
