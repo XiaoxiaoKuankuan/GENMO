@@ -352,6 +352,12 @@ class RpcServer:
             raise FileExistsError(f"Refusing to replace socket: {self.path}")
         self.path.parent.mkdir(parents=True, exist_ok=True)
         server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        # 仅累计协议CPU/传输数据，不把等待下一次训练请求算作CPU计算。
+        statistics=self.handler._rpc_transport_statistics={}
+        def accumulate(prefix, timing):
+            for key,value in timing.items():
+                if key=='receive_including_remote_seconds':continue
+                name=prefix+key;statistics[name]=statistics.get(name,0.)+value
         bound = False
         try:
             server.bind(str(self.path))
@@ -365,7 +371,10 @@ class RpcServer:
                     last_sequence = 0
                     while not finished:
                         try:
-                            request = receive_message(connection)
+                            receive_timing={}
+                            request = receive_message(connection,timing=receive_timing)
+                            accumulate('request_',receive_timing)
+                            statistics['received_requests']=statistics.get('received_requests',0)+1
                             if not isinstance(request, dict):
                                 raise ValueError("RPC request envelope must be a mapping")
                         except (EOFError, ConnectionError, ValueError, TypeError, KeyError, zipfile.BadZipFile):
@@ -390,7 +399,9 @@ class RpcServer:
                             response.update(ok=False, error={"type": type(exc).__name__,
                                             "message": str(exc), "code": getattr(exc, "code", None)})
                         try:
-                            send_message(connection, response)
+                            send_timing={}
+                            send_message(connection, response,timing=send_timing)
+                            accumulate('reply_',send_timing)
                         except ConnectionError:
                             # 后端可能已推进并缓存 advance_id；保留服务供新连接取回原结果，
                             # 这里不能重试 handler。close 已完成时 finished 保持 True。

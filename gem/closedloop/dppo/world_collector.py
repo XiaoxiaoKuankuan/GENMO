@@ -271,6 +271,7 @@ class WorldEnvironmentCollector(VectorEnvironmentCollector):
         for slot in range(self.num_envs):self._resource(slot)
         self.world_call('begin_rollout',env_ids=list(range(self.num_envs)))
         signature=self.policy._parameter_signature();self.batch_reports=[];self.world_timing={};started=time.perf_counter()
+        protocol_before=self.world_call('transport_statistics') if getattr(self.world,'batched_lane_ack',None) else None
         profile = None
         if self.states[0].resource.env.config['stage10'].get('performance',{}).get('python_world_profile',False):
             import cProfile
@@ -297,6 +298,8 @@ class WorldEnvironmentCollector(VectorEnvironmentCollector):
                 profile.dump_stats(str(self.states[0].resource.env.output.parent/'world_python_profile.pstats'))
         if signature!=self.policy._parameter_signature():raise RuntimeError('Policy changed during collection')
         rows=[fragments[i] for i in range(self.num_envs)]
+        protocol_after=self.world_call('transport_statistics') if protocol_before is not None else {}
+        protocol_delta={key:value-protocol_before.get(key,0.) for key,value in protocol_after.items()}
         tails=[row.metadata['fragment_tail'] for fragment in rows for row in fragment if 'fragment_tail' in row.metadata]
         reward_timings={}
         for state,previous in zip(self.states,reward_before):
@@ -306,7 +309,8 @@ class WorldEnvironmentCollector(VectorEnvironmentCollector):
             boundary_wait_contract=self.boundary_wait_contract,boundary_wait_max_controls=self.boundary_wait_max_controls,
             total_transitions=sum(map(len,rows)),fragment_lengths=list(map(len,rows)),allocated_envs=self.num_envs,
             active_envs=self.num_envs,seconds=time.perf_counter()-started,batches=self.batch_reports,
-            world_timing=self.world_timing,columnar_reward_cpu_timings=reward_timings,normal_boundary_resets=0,
+            world_timing=self.world_timing,columnar_reward_cpu_timings=reward_timings,
+            server_rpc_transport_timing=protocol_delta,normal_boundary_resets=0,
             administrative_drain_controls=sum(t['executed_control_steps'] for t in tails),
             administrative_drain_physics_steps=sum(t['executed_physics_steps'] for t in tails),
             administrative_drain_reward=sum(t['reward_sum'] for t in tails),
