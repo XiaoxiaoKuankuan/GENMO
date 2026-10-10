@@ -113,6 +113,40 @@ def test_sampled_ppo_is_unbiased_keeps_old_and_full_kl(monkeypatch):
             torch.testing.assert_close(torch.stack([g[name] for g in gradients]).mean(0),value,atol=3e-5,rtol=2e-4)
 
 
+def test_stratified_actual_clipped_ppo_gradient_mean_includes_unchanged_bc(monkeypatch):
+    policy=TwentySteps();data=samples(policy)
+    original_prob=torch.stack([row.old_log_prob.clone() for row in data])
+    # 使用已偏离行为策略的参数，覆盖实际clip分支而非只在ratio=1求导。
+    with torch.no_grad():policy.actor.denoiser.weight.add_(.002)
+    base=copy.deepcopy(policy.actor.state_dict())
+    def update(strategy,count):
+        policy.actor.load_state_dict(base)
+        optimizer=torch.optim.SGD(policy.actor.parameters(),lr=1e-5)
+        observed={};anchor=Anchor()
+        def observe(actor,step):
+            observed.update({name:p.grad.clone() for name,p in actor.named_parameters() if p.grad is not None})
+        result=actor_update_v2(policy,optimizer,data,dict(advantages=torch.tensor([1.,-.6])),
+            ppo_epochs=1,epoch_orders=[[0,1]],actor_minibatch_internal_transitions=40,
+            denoising_microbatch=7,max_optimizer_steps=1,soft_kl_limit=None,
+            denoising_steps_per_chain=count,denoising_sampling_strategy=strategy,
+            generator=torch.Generator().manual_seed(7),gradient_observer=observe,
+            gradient_diagnostics=False,bc=anchor,bc_weight=.1,kl_check_mode='pre_step_plus_final')
+        assert anchor.calls==1 and result['bc_global_samples']==2
+        assert torch.equal(torch.stack([row.old_log_prob for row in data]),original_prob)
+        return observed,result
+    expected,full=update('uniform',20)
+    assert full['steps'][0]['objective_clipped_fraction']>0
+    gradients=[]
+    for offset in range(18):
+        monkeypatch.setattr('gem.closedloop.dppo.denoising_sampling.chain_steps',
+            lambda seed,index,total,sampled,strategy,offset=offset:
+                sorted((offset+j)%18 for j in range(6))+[18,19])
+        gradient,report=update('stratified8',8);gradients.append(gradient)
+        assert report['applied_internal_sample_visits']==16
+    for name,value in expected.items():
+        torch.testing.assert_close(torch.stack([g[name] for g in gradients]).mean(0),value,atol=3e-5,rtol=2e-4)
+
+
 def test_explicit_finite_launcher_preserves_full_behavior_and_resume_objective():
     from tools.validate_stage10_scale import select_learning_experiment
     from gem.closedloop.dppo.training_scale import derive_training_scale
