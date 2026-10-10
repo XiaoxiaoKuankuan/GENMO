@@ -128,6 +128,9 @@ def main():
             p95=float(np.percentile(samples,95)),samples=samples,diagnostic=diagnostic,
             optimizer_steps=2,internal_visits=81920,global_bc_samples=256,memory_ranks=shards))
         save()
+    from tools.stage10_step_gradient_report import step_contributions
+    report['current_compiled_per_step_gradient']=step_contributions(policy,rows,targets,cache,c)
+    save()
     actor.load_state_dict(base)
     kl_reference=None
     for micro in (256,512,1024):
