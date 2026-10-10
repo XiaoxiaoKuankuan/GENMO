@@ -34,6 +34,7 @@ class RolloutTensorCache:
         self.blocks, self.index_cache = OrderedDict(), {}
         self.constant_cache = {}
         self.transfer_count, self.transferred_bytes = 0, 0
+        self.block_hits = self.gather_calls = self.cross_block_gathers = 0
         self.identities = [dict(getattr(row, 'identity', {})) for row in self.rows]
         self.kernel = None
         self.host = {}
@@ -84,6 +85,7 @@ class RolloutTensorCache:
         if self.closed:
             raise RuntimeError('Rollout tensor cache already released')
         if index in self.blocks:
+            self.block_hits += 1
             self.blocks.move_to_end(index)
             return self.blocks[index]
         while len(self.blocks) >= self.max_blocks:
@@ -107,11 +109,37 @@ class RolloutTensorCache:
 
     def get(self, name, rows, steps=None):
         positions = self._positions(rows)
+        self.gather_calls += 1
+        if steps is not None and len(steps) != len(positions):
+            raise ValueError('Step indices must align with rollout rows')
+        if not positions:
+            value = self.host[name][:0]
+            return (value if steps is None else value[:,0]).to(self.device)
         # 按原顺序保留跨块尾批；常规整轮驻留走一次index_select/高级索引。
         block_ids = {index//self.block_size for index in positions}
         if len(block_ids) != 1:
-            return torch.cat([self.get(name, [row], None if steps is None else [step])
-                for row, step in zip(rows, steps if steps is not None else [None]*len(rows))])
+            self.cross_block_gathers += 1
+            groups = {}
+            for output, position in enumerate(positions):
+                groups.setdefault(position//self.block_size, []).append(output)
+            pieces, order = [], []
+            for block_id, outputs in groups.items():
+                values = self._block(block_id)[name]
+                key = ('group', tuple(positions[i] for i in outputs),
+                       None if steps is None else tuple(steps[i] for i in outputs))
+                if key not in self.index_cache:
+                    self.index_cache[key] = (
+                        torch.tensor([positions[i]%self.block_size for i in outputs],device=self.device),
+                        None if steps is None else torch.tensor([steps[i] for i in outputs],device=self.device))
+                indices, time = self.index_cache[key]
+                pieces.append(values[indices] if time is None else values[indices,time])
+                order.extend(outputs)
+            key = ('restore', tuple(order))
+            if key not in self.index_cache:
+                inverse = [0]*len(order)
+                for source, output in enumerate(order): inverse[output] = source
+                self.index_cache[key] = torch.tensor(inverse,device=self.device)
+            return torch.cat(pieces).index_select(0,self.index_cache[key])
         block_id = next(iter(block_ids))
         values = self._block(block_id)[name]
         key = (positions, None if steps is None else tuple(steps))
@@ -141,6 +169,8 @@ class RolloutTensorCache:
     def report(self):
         return dict(mode=self.mode, bytes=self.bytes, block_upper_chains=self.block_size,
                     block_transfers=self.transfer_count, transferred_bytes=self.transferred_bytes,
+                    block_hits=self.block_hits, gather_calls=self.gather_calls,
+                    cross_block_gathers=self.cross_block_gathers, recursive_row_gathers=0,
                     upper_transitions=len(self.rows))
 
     def close(self):

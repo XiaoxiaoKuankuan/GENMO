@@ -320,3 +320,17 @@ def test_full_learning_probe_restores_weights_and_reports_all_encoder_gradients(
             torch.testing.assert_close(value, saved[name], rtol=0, atol=0)
     finally:
         torch.set_num_threads(old_threads)
+
+
+def test_cross_block_gather_groups_duplicates_and_timestep_order():
+    from tests.closedloop.dppo.test_updater_v2 import BatchGaussianPolicy,rows
+    samples=rows(BatchGaussianPolicy(),16)
+    full=RolloutTensorCache(samples,dict(advantages=torch.arange(16,dtype=torch.float64)),'cpu')
+    blocked=RolloutTensorCache(samples,dict(advantages=torch.arange(16,dtype=torch.float64)),
+                               'cpu',max_device_bytes=full.bytes//4)
+    selected=[samples[i] for i in [15,0,7,15,3,9,0]];steps=[0,1,0,1,0,1,1]
+    torch.testing.assert_close(blocked.get('chain',selected,steps),full.get('chain',selected,steps),rtol=0,atol=0)
+    assert blocked.report()['cross_block_gathers']==1 and blocked.report()['recursive_row_gathers']==0
+    assert blocked.get('chain',[],[]).shape==full.get('chain',[],[]).shape
+    with pytest.raises(ValueError,match='align'):blocked.get('chain',selected,[0])
+    full.close();blocked.close()
