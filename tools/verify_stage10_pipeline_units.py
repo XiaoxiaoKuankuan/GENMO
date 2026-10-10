@@ -12,6 +12,8 @@ import json
 import os
 from pathlib import Path
 import sys
+import tempfile
+import shutil
 
 import torch
 import torch.distributed as dist
@@ -26,6 +28,8 @@ def main():
     torch.cuda.set_device(rank);torch.set_num_threads(1)
     dist.init_process_group('gloo',timeout=timedelta(minutes=20))
     directory=a.output/f'rank{rank:02d}';directory.mkdir(parents=True,exist_ok=False)
+    temporary=Path(tempfile.mkdtemp(prefix='s10p-',dir='/tmp'))
+    (directory/'temporary_directory.txt').write_text(str(temporary))
     root=Path(__file__).resolve().parents[1]
     sys.path.insert(0,str(root/'tests/closedloop/dppo'))
     import pytest
@@ -34,13 +38,15 @@ def main():
         'test_updater_v2.py','test_stage10_audit_recovery.py','test_stage10_archive_audit.py',
         'test_stage10_async_archives.py','test_stage10_timing_metrics.py','test_vector_production_contract.py']
     with (directory/'pytest.log').open('w') as log, redirect_stdout(log),redirect_stderr(log):
-        code=pytest.main(['-q','-p','no:cacheprovider','--basetemp',str(directory/'tmp'),
+        code=pytest.main(['-q','-p','no:cacheprovider','--basetemp',str(temporary),
             *[str(root/'tests/closedloop/dppo'/name) for name in paths],
             str(root/'tests/closedloop/test_closedloop_protocol.py'),
             str(root/'tests/closedloop/test_closedloop_protocol_disconnect.py'),
             str(a.gmt_repo/'tests/test_vector_scheduler.py'),
             str(a.gmt_repo/'tests/test_vector_execution_journal.py')])
-    results=[None]*8;dist.all_gather_object(results,dict(rank=rank,exit_code=int(code)))
+    if not code:shutil.rmtree(temporary)
+    results=[None]*8;dist.all_gather_object(results,dict(rank=rank,exit_code=int(code),
+        temporary_directory=str(temporary),temporary_removed=not bool(code)))
     if rank==0:(a.output/'report.json').write_text(json.dumps(results,indent=2))
     dist.destroy_process_group()
     return int(any(r['exit_code'] for r in results))

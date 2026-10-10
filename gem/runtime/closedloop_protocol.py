@@ -372,7 +372,9 @@ class RpcServer:
                     while not finished:
                         try:
                             receive_timing={}
-                            request = receive_message(connection,timing=receive_timing)
+                            token=_CALL_TIMING.set(receive_timing)
+                            try:request=receive_message(connection)
+                            finally:_CALL_TIMING.reset(token)
                             accumulate('request_',receive_timing)
                             statistics['received_requests']=statistics.get('received_requests',0)+1
                             if not isinstance(request, dict):
@@ -400,7 +402,9 @@ class RpcServer:
                                             "message": str(exc), "code": getattr(exc, "code", None)})
                         try:
                             send_timing={}
-                            send_message(connection, response,timing=send_timing)
+                            token=_CALL_TIMING.set(send_timing)
+                            try:send_message(connection,response)
+                            finally:_CALL_TIMING.reset(token)
                             accumulate('reply_',send_timing)
                         except ConnectionError:
                             # 后端可能已推进并缓存 advance_id；保留服务供新连接取回原结果，
