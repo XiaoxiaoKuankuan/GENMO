@@ -430,7 +430,10 @@ class LongRunMaintenance:
             raise
         finally:
             record = dict(directory=str(directory), queued=queued, status='passed' if failure is None else 'failed',
-                          total_seconds=time.perf_counter()-started, stage_seconds=stages, error=failure)
+                          total_seconds=time.perf_counter()-started, stage_seconds=stages, error=failure,
+                          pending_count=0 if self._archive_worker is None else self._archive_worker.pending_count,
+                          peak_pending_count=0 if self._archive_worker is None else self._archive_worker.peak_pending_count,
+                          queue_capacity=4)
             with self._timing_mutex:
                 self._enqueue_timings.append(record)
 

@@ -160,6 +160,7 @@ class BoundedArchiveWorker:
         self._credits = threading.BoundedSemaphore(max_pending)
         self._mutex = threading.RLock()
         self._pending = set()
+        self._peak_pending_count = 0
         self._failure = None
         self._closed = False
         self._thread = threading.Thread(target=self._run, name='genmo-execution-archive', daemon=False)
@@ -175,6 +176,10 @@ class BoundedArchiveWorker:
     def pending_count(self):
         with self._mutex:
             return len(self._pending)
+
+    @property
+    def peak_pending_count(self):
+        with self._mutex:return self._peak_pending_count
 
     def submit(self, directory):
         directory = Path(directory).resolve()
@@ -198,6 +203,7 @@ class BoundedArchiveWorker:
                 if directory in self._pending:
                     return False
                 self._pending.add(directory)
+                self._peak_pending_count=max(self._peak_pending_count,len(self._pending))
                 self._queue.put_nowait(directory)
                 submitted = True
                 return True
