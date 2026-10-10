@@ -21,6 +21,8 @@ def derive_training_scale(config):
     for name, value in dict(world=world, envs=envs, decisions=decisions, chains=chains, critic_epochs=critic_epochs).items():
         if type(value) is not int or value < 1: raise ValueError(f'Invalid scale {name}')
     local, total = envs*decisions, world*envs*decisions
+    from .denoising_sampling import validate_step_count
+    sampled_steps=validate_step_count(train['denoising_steps'],train.get('denoising_steps_per_chain'))
     derived = dict(rollout_upper_steps_per_rank=local, rollout_upper_steps=total,
         actor_minibatch_internal_transitions=chains*train['denoising_steps'],
         max_actor_optimizer_steps=train['ppo_epochs']*math.ceil(total/chains),
@@ -32,7 +34,9 @@ def derive_training_scale(config):
     stage['derived_scale'] = dict(version='stage10.scale.v1', world_size=world, environments_per_rank=envs,
         decisions_per_environment=decisions, local_upper_transitions=local, global_upper_transitions=total,
         global_internal_transitions=total*train['denoising_steps'],
-        ppo_local_internal_samples=local*train['denoising_steps']*train['ppo_epochs'],
+        ppo_local_internal_samples=local*sampled_steps*train['ppo_epochs'],
+        ppo_full_local_internal_samples=local*train['denoising_steps']*train['ppo_epochs'],
+        ppo_sampled_steps_per_chain=sampled_steps,
         actor_minibatch_chains=chains, planned_actor_steps=derived['max_actor_optimizer_steps'],
         planned_critic_steps=derived['critic_steps'], global_bc_samples_per_iteration=derived['max_actor_optimizer_steps']*train['bc_batch'])
 

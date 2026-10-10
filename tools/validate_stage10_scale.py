@@ -1,6 +1,6 @@
 """服务器1八卡大规模DPPO有限端到端验收启动器，不启动长期训练。
 
-从4096/8192/16384生产候选配置构建独立路径配置，只覆盖仓库路径、显式数值模式、
+从1024/2048/4096/8192有限候选配置构建独立路径配置，只覆盖仓库路径、显式数值模式、
 显式算子候选和本次输出位置。每环境决策、真实全局链数、PPO epochs、Actor/Critic/BC工作量、
 概率与KL门槛保持配置值。最多运行两轮，完整使用正式训练器的初始化验证、末轮
 验证、断点、预算和有界归档机制；不使用旧160条小测试代替完整验收。
@@ -11,6 +11,7 @@
 """
 from __future__ import annotations
 import argparse
+import math
 import os
 from pathlib import Path
 import subprocess
@@ -37,6 +38,26 @@ def select_numerical_contract(config, precision_mode, numerical_variant, *, resu
         raise ValueError('Compensated BF16 numerical variant requires bf16_backbone_candidate')
 
 
+def select_learning_experiment(config,*,steps=None,actor_lr=None,sensitive_output_fp64=False,resume=False):
+    """显式算法对照入口；缺省完整20步，恢复只核对，不自动调参或更改行为链。"""
+    training=config['stage10']['training'];performance=config['stage10']['performance']
+    from gem.closedloop.dppo.denoising_sampling import validate_step_count
+    if steps is not None:
+        validate_step_count(training['denoising_steps'],steps)
+        if resume and training.get('denoising_steps_per_chain',20)!=steps:
+            raise ValueError('Resume cannot change timestep sampling objective')
+        if not resume:training['denoising_steps_per_chain']=steps
+    if actor_lr is not None:
+        if not math.isfinite(actor_lr) or actor_lr<=0:raise ValueError('Explicit experiment lr must be finite and positive')
+        if resume and training['actor_lr']!=actor_lr:raise ValueError('Resume cannot change experiment learning rate')
+        if not resume:training['actor_lr']=actor_lr
+    if sensitive_output_fp64:
+        requested={'denoiser.final_layer.fc2':'joint_gemm_fp64'}
+        if resume and performance.get('weight_reduction_overrides')!=requested:
+            raise ValueError('Resume cannot change sensitive gradient precision')
+        if not resume:performance['weight_reduction_overrides']=requested
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--config', type=Path, required=True)
@@ -48,6 +69,10 @@ def main():
         help='显式新数值合同；省略时保留所选配置，恢复时不能修改')
     parser.add_argument('--rounds', type=int, choices=(1,2), default=1)
     parser.add_argument('--resume', action='store_true')
+    parser.add_argument('--denoising-samples',type=int,choices=(4,8,20),
+        help='显式独立PPO目标对照；行为采样及最终完整KL仍20步，缺省不改配置')
+    parser.add_argument('--actor-lr',type=float,help='有限校准的显式固定值；不进行扫描或自动回退')
+    parser.add_argument('--sensitive-output-fp64',action='store_true')
     parser.add_argument('--profile-world', action='store_true',help='只用于Python外围定位，该轮不作无profiler吞吐结果')
     parser.add_argument('--deadline-seconds', type=int, default=3600)
     args = parser.parse_args()
@@ -57,6 +82,8 @@ def main():
         if not (output/'run/latest.json').is_file(): raise ValueError('Resume requires a published complete checkpoint')
         config = yaml.safe_load((output/'config.yaml').read_text())
         select_numerical_contract(config, args.precision_mode, args.numerical_variant, resume=True)
+        select_learning_experiment(config,steps=args.denoising_samples,actor_lr=args.actor_lr,
+            sensitive_output_fp64=args.sensitive_output_fp64,resume=True)
     else:
         output.mkdir(parents=True, exist_ok=False)
         config = yaml.safe_load(args.config.read_text())
@@ -66,6 +93,8 @@ def main():
             kinematics=str(ROOT/'configs/bumi/bumi_kinematics_robot_retargeter_fe934_v1.json'),
             compat_profile=str(args.gmt_repo.resolve()/'configs/sim2sim/model_135000_stage2.json'))
         select_numerical_contract(config, args.precision_mode, args.numerical_variant, resume=False)
+        select_learning_experiment(config,steps=args.denoising_samples,actor_lr=args.actor_lr,
+            sensitive_output_fp64=args.sensitive_output_fp64,resume=False)
         config['stage10']['performance']['python_world_profile']=args.profile_world
         # 临时归档与正式目录隔离，容量上限保持原授权。
         config['stage10']['storage']['archive_secondary']['root'] = str(output/'execution_archives')
