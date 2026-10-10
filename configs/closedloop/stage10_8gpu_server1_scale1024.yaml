@@ -136,6 +136,8 @@ stage10:
     precision_mode: fp32_fast
     numerical_variant: compiled_blocked64_fp32
     weight_reduction: joint_gemm
+    weight_reduction_overrides:
+      denoiser.final_layer.fc2: joint_gemm_fp64
     gradient_accumulation: fp32
   distributed:
     world_size: 8
