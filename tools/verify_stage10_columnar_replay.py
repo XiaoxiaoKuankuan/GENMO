@@ -24,7 +24,7 @@ import torch.distributed as dist
 ROOT=Path(__file__).resolve().parents[1];sys.path.insert(0,str(ROOT))
 from tools.stage10_fixed_inputs import load_rank
 from tools.train_closedloop_stage10 import configuration
-from gem.runtime.trajectory_blocks import ColumnarTrace
+from gem.runtime.trajectory_blocks import ColumnarTrace,unpack_trace
 from gem.closedloop.dppo.journal_codec import decode_payload,encode_binary,encode_binary_reference
 from gem.closedloop.dppo.vector_reward_adapter import VectorExecutionReward,compare_reward_evidence
 from gem.closedloop.dppo.full_dataset import FullMusicCatalog
@@ -66,6 +66,8 @@ def main():
                 for block in blocks:
                     if not block['count']:continue
                     start=time.perf_counter();trace=ColumnarTrace([block]);times['column_view_seconds']+=time.perf_counter()-start
+                    if a.compare_codecs and encode_binary_reference(list(trace))!=encode_binary_reference(unpack_trace(block)):
+                        raise ValueError('Complete physical fields/dtype/signed bytes changed in column views')
                     episode=trace[0]['episode_id']
                     if episode not in task_by_episode:continue
                     if trace[-1]['tick']<=600:
@@ -104,6 +106,7 @@ def main():
     report=dict(rank=rank,source=source,passed=True,controls=len(observed),episodes=len(calculators),timing=times,
         max_reward_difference=max_reward_difference,gae_max_abs_difference=float((new['advantages_raw']-old['advantages_raw']).abs().max()),
         columnar_fallbacks=0,all_reward_fields_compared=True,physical_controls_unchanged=True,
+        full_physical_fields_byte_compared=a.compare_codecs,
         codecs=None if not a.compare_codecs else codec_times)
     (directory/'report.json').write_text(json.dumps(report,indent=2))
     reports=[None]*8;dist.all_gather_object(reports,report)
