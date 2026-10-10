@@ -45,6 +45,7 @@ class VectorExecutionReward(ExecutionReward):
         self.columnar_seconds = 0.
         self.columnar_fallbacks = 0
         self.last_columnar_fallback = None
+        self.columnar_timings = {}
 
     def evaluate_batch(self, trace):
         """完整列式数值消费，逐行仅组装兼容证据；周期标量审计不省略。"""
@@ -54,13 +55,15 @@ class VectorExecutionReward(ExecutionReward):
             return [self.evaluate_step(row) for row in trace]
         if not len(trace): return []
         started = time.perf_counter()
+        timings={}
         try:
-            results, new = evaluate_columns(self, trace)
+            results, new = evaluate_columns(self, trace,timings=timings)
         except (ValueError, KeyError, IndexError, TypeError) as error:
             # 原错误证据及逐步状态推进语义保持不变，不吞掉不合法奖励。
             self.columnar_fallbacks += 1
             self.last_columnar_fallback = str(error)
             return [self.evaluate_step(row) for row in trace]
+        assembled=time.perf_counter()
         for i, (row, result) in enumerate(zip(trace, results)):
             if self.control_count % 100 == 0:
                 reference = object.__new__(ExecutionReward)
@@ -72,6 +75,8 @@ class VectorExecutionReward(ExecutionReward):
             self._previous_target = np.array(row['joint_position_target'], copy=True)
             self.control_count += 1
         self.columnar_seconds += time.perf_counter()-started
+        timings['independent_audit_and_state_commit_seconds']=time.perf_counter()-assembled
+        for key,value in timings.items():self.columnar_timings[key]=self.columnar_timings.get(key,0.)+value
         return results
 
     def evaluate_step(self, trace):

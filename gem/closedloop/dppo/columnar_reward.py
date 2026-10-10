@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import copy
 import math
+import time
 import numpy as np
 import torch
 from gem.robots.bumi.metrics import _derive_motion_beats, _beat_alignment
@@ -29,10 +30,16 @@ def _finite(value, name, shape=None):
     return value
 
 
-def evaluate_columns(reward, trace):
+def evaluate_columns(reward, trace, *, timings=None):
     """纯计算本批结果及后继窗口；核对结束前不修改调用者的因果状态。"""
     n = len(trace)
     if not n: return [], []
+    marked=time.perf_counter()
+    def mark(name):
+        nonlocal marked
+        now=time.perf_counter()
+        if timings is not None:timings[name]=now-marked
+        marked=now
     cfg = reward.config
     col = trace.column
     if any(block['count'] and len(block['columns']['fields']['physics_substeps']['fields']) != 4
@@ -62,6 +69,7 @@ def evaluate_columns(reward, trace):
     all_rows = history + new
     all_speed = np.stack([row[2] for row in all_rows])
     all_ticks = np.asarray([row[0] for row in all_rows])
+    mark('validation_and_column_views_seconds')
     ends = len(history) + np.arange(1,n+1)
     counts = np.minimum(ends, reward.activity_steps)
     actual = np.empty(n, dtype=np.float64)
@@ -92,6 +100,7 @@ def evaluate_columns(reward, trace):
             window_count=count,window_complete=count==reward.activity_steps,window_begin_tick=begin,
             window_end_tick=tick,target_source=copy.deepcopy(target['source']),target_evidence=target,
             valid=True,gate=gate,gate_unclamped_ratio=ratio,intensity_log_ratio=log_ratio,intensity_score=score))
+    mark('activity_window_and_metadata_seconds')
     if reward.music is None: raise ValueError('music features not_available')
     beat_counts = np.minimum(ends, reward.beat_steps)
     beats, music_count, motion_count = np.zeros(n), np.zeros(n,dtype=int), np.zeros(n,dtype=int)
@@ -107,6 +116,7 @@ def evaluate_columns(reward, trace):
         for j,i in enumerate(ids):
             music_count[i] = int(music[j].sum()); motion_count[i] = int(motion[j].sum())
             if music_count[i]: beats[i] = float(_beat_alignment(music[j:j+1],motion[j:j+1],valid[j:j+1],round(1/cfg['dt']))[1])
+    mark('music_numeric_seconds')
     power = [[] for _ in range(n)]
     for s in range(4):
         path = ('physics_substeps',s)
@@ -132,6 +142,7 @@ def evaluate_columns(reward, trace):
                 torque_sample_tick=col(*meta,'torque_sample_tick')[i].item(),
                 velocity_sample_tick=col(*meta,'velocity_sample_tick')[i].item(),
                 time_s=col(*meta,'time_s')[i].item(),sampling_synchronized=bool(sync[i])))
+    mark('physical_power_and_metadata_seconds')
     consistency_raw, consistency_norm = {}, {}
     consistency_valid=col('reference_consistency','valid')
     if consistency_valid.dtype.kind!='b' or not consistency_valid.all(): raise ValueError('Invalid reference consistency')
@@ -148,6 +159,7 @@ def evaluate_columns(reward, trace):
     rates = {name: scores[name]*cfg[key]*(-1 if 'penalty' in key else 1)*
              (np.asarray(gates) if name in ('track','music') else 1.) for name,key in WEIGHTS.items()}
     total = sum(rates.values())
+    mark('consistency_and_reward_integration_seconds')
     results = []
     for i,row in enumerate(trace):
         music_raw = dict(beat_definition='bumi.metrics._derive_motion_beats+_beat_alignment',
@@ -180,4 +192,5 @@ def evaluate_columns(reward, trace):
                 raw={k:float(v[i]) for k,v in consistency_raw.items()},
                 normalized={k:float(v[i]) for k,v in consistency_norm.items()},
                 tolerances=copy.deepcopy(cfg['consistency']),reward_weight=0.)),scales=copy.deepcopy(cfg['scales'])))
+    mark('reward_field_assembly_seconds')
     return results, new

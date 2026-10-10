@@ -277,6 +277,7 @@ class WorldEnvironmentCollector(VectorEnvironmentCollector):
             self.world_timing['python_diagnostic_profiler_enabled']=True
             profile=cProfile.Profile();profile.enable()
         before = [state.transitions for state in self.states]
+        reward_before=[dict(getattr(state.resource.env.reward,'columnar_timings',{})) for state in self.states]
         try:
             fragments=self._drive({slot:self._fragment_flow(slot,count_per_rank//self.num_envs,policy_version) for slot in range(self.num_envs)})
             self.world_call('end_rollout',env_ids=list(range(self.num_envs)))
@@ -297,11 +298,15 @@ class WorldEnvironmentCollector(VectorEnvironmentCollector):
         if signature!=self.policy._parameter_signature():raise RuntimeError('Policy changed during collection')
         rows=[fragments[i] for i in range(self.num_envs)]
         tails=[row.metadata['fragment_tail'] for fragment in rows for row in fragment if 'fragment_tail' in row.metadata]
+        reward_timings={}
+        for state,previous in zip(self.states,reward_before):
+            for key,value in getattr(state.resource.env.reward,'columnar_timings',{}).items():
+                reward_timings[key]=reward_timings.get(key,0.)+value-previous.get(key,0.)
         return rows,dict(schema=WORLD_FLOW_CONTRACT,fragment_contract=WORLD_FLOW_CONTRACT,
             boundary_wait_contract=self.boundary_wait_contract,boundary_wait_max_controls=self.boundary_wait_max_controls,
             total_transitions=sum(map(len,rows)),fragment_lengths=list(map(len,rows)),allocated_envs=self.num_envs,
             active_envs=self.num_envs,seconds=time.perf_counter()-started,batches=self.batch_reports,
-            world_timing=self.world_timing,normal_boundary_resets=0,
+            world_timing=self.world_timing,columnar_reward_cpu_timings=reward_timings,normal_boundary_resets=0,
             administrative_drain_controls=sum(t['executed_control_steps'] for t in tails),
             administrative_drain_physics_steps=sum(t['executed_physics_steps'] for t in tails),
             administrative_drain_reward=sum(t['reward_sum'] for t in tails),
