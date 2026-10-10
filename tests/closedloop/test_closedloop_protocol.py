@@ -287,6 +287,8 @@ def test_protocol_counters_measure_codec_without_idle_wait_or_reply_changes(tmp_
         assert set(result)==set(payload)
         np.testing.assert_array_equal(result['matrix'],payload['matrix'])
         client.call('close');client.close()
+        thread.join(timeout=2)
+        assert not thread.is_alive()
     stats=handler._rpc_transport_statistics
     assert stats['received_requests']==2
     assert stats['reply_sent_bytes']>payload['matrix'].nbytes
