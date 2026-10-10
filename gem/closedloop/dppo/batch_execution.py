@@ -15,7 +15,8 @@ from torch import nn
 from gem.network.base_arch.transformer.encoder_rope import EncoderRoPEBlock
 
 ROW_BMM = 'sample_matrix_bmm_fp32.v1'
-WEIGHT_REDUCTIONS = ('sample_bmm', 'joint_gemm', 'chunked_gemm', 'bounded_sample_bmm', 'joint_gemm_fp64')
+WEIGHT_REDUCTIONS = ('sample_bmm', 'joint_gemm', 'chunked_gemm', 'bounded_sample_bmm',
+                     'joint_gemm_fp64', 'cublas_bf16x3', 'cublas_bf16x6')
 GRADIENT_ACCUMULATIONS = ('fp64_reference', 'fp32', 'selective_fp64')
 
 
@@ -79,6 +80,9 @@ class _SampleLinear(torch.autograd.Function):
         grad_weight = None
         if ctx.needs_input_grad[1] and ctx.reduction == 'joint_gemm':
             grad_weight = flat.t() @ inputs
+        elif ctx.needs_input_grad[1] and ctx.reduction in ('cublas_bf16x3','cublas_bf16x6'):
+            from .compensated_gemm import compensated_gemm
+            grad_weight = compensated_gemm(flat.t(), inputs, int(ctx.reduction[-1]))
         elif ctx.needs_input_grad[1] and ctx.reduction == 'joint_gemm_fp64':
             # 仅已定位的敏感窄输出投影使用；不物化逐样本完整权重梯度。
             grad_weight = (flat.double().t() @ inputs.double()).to(weight.dtype)

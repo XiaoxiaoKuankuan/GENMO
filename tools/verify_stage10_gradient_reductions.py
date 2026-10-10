@@ -30,7 +30,7 @@ from tools.verify_stage10_saved_learning import read_saved_rank, compare_named
 from tools.train_closedloop_stage10 import configuration
 from tools.train_closedloop_stage10_8gpu import _available_gpus
 from gem.closedloop.dppo.trainer import load_actor, trainable_actor_parameters
-from gem.closedloop.dppo.batch_execution import configure_gradients, MicrobatchGradientAccumulator
+from gem.closedloop.dppo.batch_execution import configure_gradients, MicrobatchGradientAccumulator, WEIGHT_REDUCTIONS
 from gem.closedloop.dppo.distributed_runtime import DistributedCollectives
 from gem.closedloop.dppo.policy import DPPODiffusionPolicy
 from gem.closedloop.dppo.tensor_cache import RolloutTensorCache
@@ -130,6 +130,8 @@ def main():
     parser.add_argument('--precision-mode', choices=MODES,
                         help='显式新数值合同：实际生成新诊断链；原封存 rollout 和 old 概率保持不变')
     parser.add_argument('--compact', action='store_true', help='只比较各微批 joint GEMM与指定累计精度，保留完整梯度门槛')
+    parser.add_argument('--weight-reductions',nargs='+',choices=WEIGHT_REDUCTIONS,default=['joint_gemm'],
+                        help='compact模式的显式反向算子；原B1参考不变，采样和old概率不变')
     parser.add_argument('--accumulation-modes', nargs='+', default=['fp64_reference'],
                         choices=('fp64_reference','fp32','selective_fp64'),
                         help='compact模式独立选择累计精度，原B1 FP64仍保留基准')
@@ -202,7 +204,7 @@ def main():
         word in name for word in ('gate_', 'norm', 'history_encoder', 'prefix_encoder', 'cond_embed'))]
     variants = [('joint_gemm' if args.precision_mode else 'sample_bmm', 'fp64_reference', 1)]
     variants += [(reduction, accumulation, micro)
-        for reduction, accumulation in ([('joint_gemm', mode) for mode in args.accumulation_modes] if args.compact else
+        for reduction, accumulation in ([(red, mode) for red in args.weight_reductions for mode in args.accumulation_modes] if args.compact else
             [('joint_gemm', 'fp64_reference'), ('chunked_gemm', 'fp64_reference'),
             ('bounded_sample_bmm', 'fp64_reference'), ('joint_gemm', 'fp32'), ('joint_gemm', 'selective_fp64')]
         )
