@@ -177,7 +177,7 @@ class WorldEnvironmentCollector(VectorEnvironmentCollector):
                                 if operation.method=='reset_episode' and error is None:backend.episode_id=value['episode_id']
                                 if operation.method=='advance' and error is None:
                                     from gem.runtime.trajectory_blocks import expand_feedback
-                                    value={**expand_feedback(value, readonly_views=True), 'backend_session_id':backend.session_id,'mutation_seq':backend.sequence}
+                                    value={**expand_feedback(value, readonly_views=True, lazy=True), 'backend_session_id':backend.session_id,'mutation_seq':backend.sequence}
                             backend.last_call_timing=dict(method=operation.method,total_seconds=time.perf_counter()-begin,
                                 journal_seconds=0.,critical_seconds=time.perf_counter()-begin,
                                 audit_scope='authoritative_world_journal_plus_reference_index')

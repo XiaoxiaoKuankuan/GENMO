@@ -79,9 +79,13 @@ def main():
         'rpc_encode':(lambda:old_rpc._pack(value), lambda:closedloop_protocol._pack(value), True),
         'rpc_decode':(lambda:old_rpc._unpack(metadata, payload), lambda:closedloop_protocol._unpack(metadata, payload), False),
         'trace_expand':(lambda:[old_trace.expand_feedback(v, readonly_views=True) for v in feedback],
-                        lambda:[trajectory_blocks.expand_feedback(v, readonly_views=True) for v in feedback], False),
+                        lambda:[trajectory_blocks.expand_feedback(v, readonly_views=True,lazy=True) for v in feedback], False),
         'reply_copy':(lambda:copy.deepcopy(value), lambda:clone_module.execution_copy(value), False),
     }
+    # 同时测完整消费，避免只延后展开却把未计时成本藏到奖励阶段。
+    cases['trace_expand_and_full_consume']=(
+        lambda:copy.deepcopy([old_trace.expand_feedback(v,readonly_views=True) for v in feedback]),
+        lambda:copy.deepcopy([trajectory_blocks.expand_feedback(v,readonly_views=True,lazy=True) for v in feedback]),False)
     result = {}
     for name, (reference, candidate, byte_exact) in cases.items():
         first, second = reference(), candidate()

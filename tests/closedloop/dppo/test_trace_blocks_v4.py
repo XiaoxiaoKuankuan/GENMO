@@ -53,3 +53,22 @@ def test_constant_cache_distinguishes_scalar_types_signed_zero_and_tampering():
         corrupted = copy.deepcopy(block); corrupted['columns']['fields']['x']['sha256'] = '0'*64
         with pytest.raises(ValueError, match='SHA'): unpack_trace(corrupted)
     assert _scalar_sha.cache_info().maxsize == 8192
+
+
+def test_lazy_rows_validate_before_access_and_preserve_all_consumed_evidence():
+    import pickle
+    import json
+    rows=[actual_step(i,speed=1.) for i in range(25)]
+    block=pack_trace(rows)
+    lazy=unpack_trace(block,readonly_views=True,lazy=True)
+    assert isinstance(lazy[0],dict) and dict.__len__(lazy[0])==0
+    compare(rows,lazy)
+    compare(rows,copy.deepcopy(lazy))
+    fresh=unpack_trace(block,readonly_views=True,lazy=True)
+    compare(rows,pickle.loads(pickle.dumps(fresh)))
+    with pytest.raises(TypeError,match='read-only'):lazy[0]['tick']=99
+    constant=pack_trace([dict(x=1,nested=dict(y='value'))]*2)
+    assert json.loads(json.dumps(unpack_trace(constant,readonly_views=True,lazy=True)))==[dict(x=1,nested=dict(y='value'))]*2
+    constant['columns']['fields']['nested']['fields']['y']['sha256']='wrong'
+    with pytest.raises(ValueError,match='SHA'):
+        unpack_trace(constant,readonly_views=True,lazy=True)
