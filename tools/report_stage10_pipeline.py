@@ -83,8 +83,13 @@ def summarize(run):
     for path in sorted(run.glob('sessions/*/evaluations/*.json')):
         value=json.loads(path.read_text())
         evaluations.append(dict(path=str(path),status=value.get('status'),
-            summary=value.get('summary'),aggregate=value.get('aggregate'),selection=value.get('selection'),
-            task_count=value.get('plan',{}).get('task_count'),plan_sha256=value.get('plan',{}).get('plan_sha256')))
+            aggregate=value.get('aggregate'),by_source=value.get('by_source'),
+            source_balanced_reward=value.get('source_balanced_reward'),
+            mean_executed_seconds=value.get('mean_executed_seconds'),
+            physical_failure_count=value.get('physical_failure_count'),
+            fixed_actor_drift=value.get('fixed_actor_drift'),fixed_critic_diagnostic=value.get('fixed_critic_diagnostic'),
+            wall_seconds=value.get('wall_seconds'),
+            task_count=value.get('task_count'),plan_sha256=value.get('plan_sha256')))
     return dict(schema='stage10.pipeline_measurements.v1',run=str(run),iterations=iterations,
         warm_ordinary=ordinary,archive=archive,evaluations=evaluations,
         acceptance_not_inferred_from_timing=True,raw_records_unchanged=True,
