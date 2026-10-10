@@ -119,11 +119,15 @@ def _context(rows, device):
 
 @profiled('learning.parameters', gpu=True)
 def _parameters(policy, rows, steps, device, cache=None, conditions=None):
-    context = _context(rows, device) if cache is None else cache.context(rows)
+    prepared_only = (conditions is not None and conditions.bank is not None
+                     and hasattr(policy, '_transition_prepared'))
+    context = None if prepared_only else (_context(rows, device) if cache is None else cache.context(rows))
     state = (torch.stack([row.chain[step] for row, step in zip(rows, steps)]).to(device)
              if cache is None else cache.get('chain', rows, steps))
     indices = torch.tensor(steps, device=device, dtype=torch.long) if cache is None else cache.step_indices(steps)
-    if hasattr(policy, 'prepare_conditions'):
+    if prepared_only:
+        result = conditions.transition(rows, state, indices)
+    elif hasattr(policy, 'prepare_conditions'):
         prepared = policy.prepare_conditions(context) if conditions is None else conditions.prepare(rows, context)
         result = policy.transition_parameters(context, state, indices, prepared=prepared)
     else:
@@ -224,6 +228,8 @@ def analytic_kl_local(policy, transitions, *, global_manifest=None, distributed=
             step_index = torch.tensor(steps, device=device) if tensor_cache is None else tensor_cache.step_indices(steps)
             output[chain_index, step_index] = values
             diagnostics[chain_index, :, step_index] = noise
+        if conditions is not None:
+            conditions.validate_inputs()
         cache = (KLResultCache(policy, transitions, {selected[position]: (output[i], diagnostics[i], counts[i])
                  for i, (position, _) in enumerate(owned)}, manifest) if return_cache else None)
     if distributed is not None:
@@ -261,7 +267,7 @@ def probability_check_local(policy, transitions, *, global_manifest=None, distri
     from gem.closedloop.dppo.trainer import _validate_actor_transitions
     if type(denoising_microbatch) is not int or denoising_microbatch < 1:
         raise ValueError('Denoising microbatch must be a positive integer')
-    with _local_phase(distributed, 'initial_probability_local_forward'):
+    with _local_phase(distributed, 'initial_probability_local_forward'), policy_phase(policy):
         manifest = _manifest(transitions, {}, distributed, global_manifest)
         selected = ([i for i, item in enumerate(manifest) if item['valid'] and item['has_free']]
                     if global_indices is None else list(global_indices))
@@ -276,6 +282,8 @@ def probability_check_local(policy, transitions, *, global_manifest=None, distri
         checks = torch.zeros((len(rows), 3), dtype=torch.float64, device=device)
         flat = [(index, step) for index in range(len(rows)) for step in range(policy.steps)]
         conditions = ConditionGraphCache(policy, tensor_cache) if tensor_cache is not None and hasattr(policy, 'prepare_conditions') else None
+        if conditions is not None and getattr(policy, 'defer_checks', False):
+            conditions.prime(rows)
         for start in range(0, len(flat), denoising_microbatch):
             chunk = flat[start:start + denoising_microbatch]
             samples, steps = [rows[i] for i, _ in chunk], [step for _, step in chunk]
@@ -294,6 +302,8 @@ def probability_check_local(policy, transitions, *, global_manifest=None, distri
             # amax不改变浮点求和顺序，重复链索引和尾批均保留完整覆盖。
             indices = torch.tensor([index for index, _ in chunk], device=device)[:, None].expand(-1, 3)
             checks.scatter_reduce_(0, indices, batch, reduce='amax', include_self=True)
+        if conditions is not None:
+            conditions.validate_inputs()
     if distributed is not None:
         checks = distributed.gather_rows(checks, [position for position, _ in owned], len(selected))
     maximum = checks.amax(0).cpu()

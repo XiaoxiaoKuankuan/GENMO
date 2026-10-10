@@ -308,15 +308,24 @@ class DPPODiffusionPolicy:
         """返回带参数梯度的 Gaussian 参数；输入 x_k 固定，允许每样本不同去噪步。"""
         self._prepare_actor()
         selected = self._conditions(conditions)
-        with torch.autocast(device_type=selected["known_qpos30"].device.type, enabled=False):
-            if prepared is None:
-                prepared = self.prepare_conditions(conditions)
-            elif (prepared.get('owner') != id(self)
-                    or prepared.get('inputs') != self._input_signature(selected)
-                    or prepared.get('parameters') != self._parameter_signature()
-                    or prepared.get('grad_enabled') != torch.is_grad_enabled()):
-                raise ValueError('Prepared conditions differ from inputs, Actor version or grad mode')
-            adapted = prepared['adapted']
+        if prepared is None:
+            prepared = self.prepare_conditions(conditions)
+        elif prepared.get('inputs') != self._input_signature(selected):
+            raise ValueError('Prepared conditions differ from inputs, Actor version or grad mode')
+        return self._transition_prepared(prepared, x_k, step_index, diagnostics=diagnostics)
+
+    def _transition_prepared(self, prepared, x_k, step_index, *, diagnostics=False):
+        """条件缓存专用张量入口；原输入在prime校验，更新前仍核验原张量版本。
+
+        只消费已编码条件及三项约束，不再逐微批选取原始音乐/历史/时间字段。
+        公共transition_parameters仍严格绑定输入身份；此入口只由已验证缓存使用。
+        """
+        if (prepared.get('owner') != id(self)
+                or prepared.get('parameters') != self._parameter_signature()
+                or prepared.get('grad_enabled') != torch.is_grad_enabled()):
+            raise ValueError('Prepared conditions differ from inputs, Actor version or grad mode')
+        with torch.autocast(device_type=x_k.device.type, enabled=False):
+            adapted = {key: prepared['adapted'][key] for key in ('known_x', 'known_mask', 'future_valid')}
             state = self._state(x_k, adapted["known_x"], "x_k")
             state = self.actor._constrain(state, adapted)
             indices = self._step_indices(step_index, state)
@@ -439,15 +448,18 @@ class DPPODiffusionPolicy:
                     return torch.randn(shape, device=device, dtype=torch.float32, generator=generator)
                 return torch.cat([torch.randn((1,*shape[1:]), device=device, dtype=torch.float32, generator=item)
                                   for item in generators])
-            def synchronize():
-                if device.type == 'cuda':
-                    torch.cuda.synchronize(device)
-            synchronize()
+            # 大阶段用同一stream的事件计时，仅在最终输出边界等待；不在条件编码、
+            # 去噪与物理解码之间连续排空GPU。部署仍等待完整输出，审计口径另计。
+            marks = []
+            def mark():
+                value = torch.cuda.Event(enable_timing=True) if device.type == 'cuda' else time.perf_counter()
+                if device.type == 'cuda': value.record(torch.cuda.current_stream(device))
+                marks.append(value)
             beginning = time.perf_counter()
+            mark()
             prepared = self.prepare_conditions(snapshot)
             adapted = prepared['adapted']
-            synchronize()
-            conditioned = time.perf_counter()
+            mark()
             template = adapted["known_x"]
             noise = (draw(template.shape) if initial_noise is None
                      else self._state(initial_noise, template, "initial_noise"))
@@ -463,17 +475,21 @@ class DPPODiffusionPolicy:
                 stds.append(parameters["std"].clone())
                 chain.append(following.clone())
                 state = following
-            synchronize()
-            denoised = time.perf_counter()
+            mark()
             physical = self.actor.endecoder.denormalize(state)
             physical = torch.where(adapted["known_mask"], adapted["known_physical"], physical)
             physical = torch.where(adapted["future_valid"][..., None], physical, 0.0)
             qpos = self.actor.endecoder.codec.decode_to_canonical_qpos(physical)
             qpos = torch.where(adapted["future_valid"][..., None], qpos, 0.0)
             logits = parameters["contact_logits"]
-            synchronize()
-            self.last_sample_timing = dict(condition_prepare_seconds=conditioned-beginning,
-                denoising_seconds=denoised-conditioned, decode_seconds=time.perf_counter()-denoised)
+            mark()
+            if device.type == 'cuda': marks[-1].synchronize()
+            durations = [(a.elapsed_time(b)/1000. if device.type == 'cuda' else b-a)
+                         for a,b in zip(marks, marks[1:])]
+            self.last_sample_timing = dict(condition_prepare_seconds=durations[0],
+                denoising_seconds=durations[1], decode_seconds=durations[2],
+                total_wall_seconds=time.perf_counter()-beginning,
+                interval_scope='current_stream_cuda_events' if device.type == 'cuda' else 'cpu_wall_clock')
             return {
                 "chain": torch.stack(chain, dim=1),
                 "old_log_probs": torch.stack(probabilities, dim=1),

@@ -174,6 +174,7 @@ class ConditionGraphCache:
         self.entries = {}
         self.bank = None
         self.finished = False
+        self.source_versions = []
 
     def prime(self, rows):
         """一次拼好本次参数版本的条件池；叶子梯度在所有切片后回传原编码图。"""
@@ -182,6 +183,7 @@ class ConditionGraphCache:
         unique = list({id(row): row for row in rows}.values())
         if not unique:
             return
+        self.source_versions = [(value, value._version) for row in unique for value in row.context.values()]
         batched = getattr(self.policy, 'batched_conditions', False)
         originals = []
         if batched:
@@ -208,22 +210,36 @@ class ConditionGraphCache:
             else:
                 self.bank['leaves'][name] = features.detach().requires_grad_(True) if trainable else features
 
+    def validate_inputs(self):
+        """阶段末核对固定环境输入，避免热路径逐微批扫描或重新传输。"""
+        if any(value._version != version for value, version in self.source_versions):
+            raise ValueError('Condition source changed within the fixed rollout phase')
+
+    def transition(self, rows, state, steps):
+        """缓存自持链身份，允许重复链/混合步，省去原始context gather。"""
+        if self.bank is None:
+            raise ValueError('Prepared-only transition requires a primed condition bank')
+        return self.policy._transition_prepared(self.prepare(rows, None), state, steps)
+
     def prepare(self, rows, context):
         if self.finished or self.policy._parameter_signature() != self.signature:
             raise ValueError('Condition graph cache cannot cross an optimizer step or completed backward')
         if self.bank is not None:
             positions = tuple(self.bank['lookup'][id(row)] for row in rows)
             if positions not in self.bank['indices']:
-                self.bank['indices'][positions] = torch.tensor(positions, device=context['known_qpos30'].device)
+                self.bank['indices'][positions] = torch.tensor(positions, device=self.bank['adapted']['known_x'].device)
             index = self.bank['indices'][positions]
             prepared = dict(self.bank['originals'][0])
-            prepared['adapted'] = {key: value[index] for key, value in self.bank['adapted'].items()}
+            keys = self.bank['adapted'] if context is not None else ('known_x', 'known_mask', 'future_valid')
+            prepared['adapted'] = {key: self.bank['adapted'][key].index_select(0, index) for key in keys}
             for key, value in self.bank['leaves'].items():
                 prepared[key] = (None if value is None else
                     _ConditionGather.apply(self.bank['tokens'][key], value, index, self.bank['totals'][key])
                     if key in self.bank['totals'] else value[index])
-            prepared['inputs'] = self.policy._input_signature(context)
+            prepared['inputs'] = None if context is None else self.policy._input_signature(context)
             return prepared
+        if context is None:
+            raise ValueError('Unprimed condition cache requires raw context')
         entries = []
         for row in rows:
             key = id(row)
@@ -248,6 +264,7 @@ class ConditionGraphCache:
         return prepared
 
     def backward(self):
+        self.validate_inputs()
         if self.finished:
             raise RuntimeError('Condition encoder gradients already propagated')
         if self.policy._parameter_signature() != self.signature:
