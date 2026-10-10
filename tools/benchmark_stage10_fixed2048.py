@@ -45,6 +45,7 @@ def main():
     p.add_argument('--repeats',type=int,default=3)
     p.add_argument('--probability-only',action='store_true')
     p.add_argument('--reuse-inputs-from',type=Path)
+    p.add_argument('--diagnose-sampling-shape',action='store_true',help='只重算保存链，不重采样或改写概率')
     a=p.parse_args();rank=int(os.environ['LOCAL_RANK'])
     if int(os.environ['WORLD_SIZE'])!=8 or not 3<=a.repeats<=10:raise ValueError('Eight GPUs and 3..10 repeats required')
     torch.cuda.set_device(rank);torch.set_num_threads(1)
@@ -74,6 +75,21 @@ def main():
         valid=r.transition_valid,has_free=bool(r.free_mask.any())) for i,r in enumerate(rows)]) for v in shard]
     selected=[i for i,m in enumerate(manifest) if m['valid'] and m['has_free']]
     cache=RolloutTensorCache(rows,targets,c.device,max_device_bytes=4*1024**3)
+    if a.diagnose_sampling_shape:
+        from gem.closedloop.dppo.execution_checks import policy_phase
+        # 对比原证据自身条件，独立检查持久化重建没有发生环境/链串接。
+        condition_diff={key:max(float((r.context[key].double()-r.metadata['sampler_trace']['conditions'][key].double()).abs().max())
+                                for r in rows) for key in rows[0].context}
+        chosen=list({r.identity['env_id']:r for r in reversed(rows)}.values())[:64]
+        context=cache.context(chosen);evidence=[]
+        with torch.no_grad(),policy_phase(policy):
+            prepared=policy.prepare_conditions(context)
+            for step in range(20):
+                params=policy.transition_parameters(context,cache.get('chain',chosen,[step]*len(chosen)),step,prepared=prepared)
+                old=cache.get('old_means',chosen,[step]*len(chosen))
+                delta=(params['mean']-old).double()
+                evidence.append(dict(step=step,max_mean_difference=float(delta.abs().max()),rms=float(delta.square().mean().sqrt())))
+        (directory/'saved_shape_diagnostic.json').write_text(json.dumps(dict(condition_difference=condition_diff,per_step=evidence),indent=2))
     probabilities={}
     for b in (128,256,512,1024):
         if rank==0:print(json.dumps(dict(phase='probability',microbatch=b,source_difference=source_difference)),flush=True)
