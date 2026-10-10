@@ -26,6 +26,8 @@ import torch
 import torch.distributed as dist
 
 ROOT=Path(__file__).resolve().parents[1];sys.path.insert(0,str(ROOT))
+if os.environ.get('STAGE10_DIAGNOSTIC_CODE_ROOT'):
+    sys.path.insert(0,os.environ['STAGE10_DIAGNOSTIC_CODE_ROOT'])
 from tools.stage10_fixed_inputs import load_rank
 from tools.train_closedloop_stage10 import configuration
 from tools.verify_stage10_saved_learning import compare_named
