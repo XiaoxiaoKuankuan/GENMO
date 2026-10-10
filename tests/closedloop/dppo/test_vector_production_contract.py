@@ -45,6 +45,27 @@ def test_vector_raw_references_bind_environment_slot():
         assert not _valid_raw_relative(Path(path),{'collector_env_slot':3})
 
 
+@pytest.mark.parametrize('key,value',[
+    ('rollout_upper_steps',1024),('denoising_steps_per_chain',8),('ppo_epochs',1),
+    ('actor_minibatch_internal_transitions',20480),('bc_batch',64),('bc_distribution','rank0'),
+])
+def test_fixed_work_probe_rejects_changed_work_and_supervision(key,value):
+    config=configuration(Path(__file__).resolve().parents[3]/'configs/closedloop/stage10_8gpu_server1_scale2048.yaml')
+    config['stage10']['performance']['fixed_work_probe_iteration']=2
+    validate_v2_configuration(config)
+    config['stage10']['training'][key]=value
+    with pytest.raises(ValueError,match='Fixed-work probe'):
+        validate_v2_configuration(config)
+
+
+@pytest.mark.parametrize('iteration',[True,1,3,2.0,'2'])
+def test_fixed_work_probe_requires_second_actual_rollout(iteration):
+    config=configuration(Path(__file__).resolve().parents[3]/'configs/closedloop/stage10_8gpu_server1_scale2048.yaml')
+    config['stage10']['performance']['fixed_work_probe_iteration']=iteration
+    with pytest.raises(ValueError,match='Fixed-work probe'):
+        validate_v2_configuration(config)
+
+
 def test_eval_transport_carries_world_audit_time():
     def call(method,**payload):
         assert method=='exchange'

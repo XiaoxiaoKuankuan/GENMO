@@ -16,7 +16,7 @@ from gem.closedloop.dppo.tensor_cache import ConditionGraphCache
 from gem.closedloop.dppo.updater_v2 import _parameters,_old_kernel,_joint_kl
 
 
-def step_contributions(policy,rows,targets,cache,collective,*,microbatch=128):
+def step_contributions(policy,rows,targets,cache,collective,*,microbatch=128,clip=.01,gamma_denoising=.99):
     selected=[r for i,r in enumerate(rows) if bool(targets['valid'][i]) and bool(r.free_mask.any())]
     global_chains=sum(collective.all_gather_object(len(selected)))
     if not global_chains:raise ValueError('Gradient diagnostic requires actual valid chains')
@@ -34,13 +34,13 @@ def step_contributions(policy,rows,targets,cache,collective,*,microbatch=128):
                     observed=cache.get('chain',current,[step+1]*len(current))
                     logprob=masked_joint_log_prob(observed,parameters['mean'],parameters['std'],mask)
                     ratio=(logprob-cache.get('old_log_prob',current,steps)).exp()
-                    advantage=cache.get('advantages',current)*cache.denoising_discounts(steps,20,.99)
-                    loss=-torch.minimum(ratio*advantage,ratio.clamp(.99,1.01)*advantage).sum()/(global_chains*20)
+                    advantage=cache.get('advantages',current)*cache.denoising_discounts(steps,policy.steps,gamma_denoising)
+                    loss=-torch.minimum(ratio*advantage,ratio.clamp(1.-clip,1.+clip)*advantage).sum()/(global_chains*policy.steps)
                     require_tensor(torch.isfinite(loss),'Invalid diagnostic loss',FloatingPointError)
                     loss.backward();accumulator.add()
                     old_mean,old_std=_old_kernel(current,steps,collective.device,cache)
                     kl=_joint_kl(parameters,mask,old_mean,old_std).detach()
-                    stats+=torch.stack((kl.sum(),ratio.detach().sum(),((ratio<.99)|(ratio>1.01)).sum(),
+                    stats+=torch.stack((kl.sum(),ratio.detach().sum(),((ratio<1.-clip)|(ratio>1.+clip)).sum(),
                         loss.detach(),kl.new_tensor(len(current))))
                 accumulator.finish();conditions.backward()
             collective.sum_gradients(actor);stats=collective.sum_tensor(stats).cpu().tolist()
@@ -57,6 +57,7 @@ def step_contributions(policy,rows,targets,cache,collective,*,microbatch=128):
                     objective_contribution=stats[3],global_chains=int(stats[4])))
     finally:
         for name,p in actor.named_parameters():p.grad=original[name]
-    return dict(per_step=reports,normalization='full_global_valid_chains_times_20',
+    return dict(per_step=reports,normalization='full_global_valid_chains_times_full_denoising_steps',
+        full_denoising_steps=policy.steps,ppo_clip=clip,gamma_denoising=gamma_denoising,
         gradient_reduction='global_SUM',individual_norms_are_not_additive=True,
         optimizer_steps=0,old_probabilities_unchanged=True)

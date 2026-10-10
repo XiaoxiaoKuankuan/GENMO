@@ -133,7 +133,8 @@ def run_fixed_work_probe(c, rows, targets, manifest, backup, bc_before, rng):
         updated=broadcast_state(reference[1] if d.rank==0 else None,d)
         actor.load_state_dict(updated)
         del updated
-        report['per_step_gradient']=step_contributions(c.policy,rows,targets,cache,d);save()
+        report['per_step_gradient']=step_contributions(c.policy,rows,targets,cache,d,
+            clip=c.settings['ppo_clip'],gamma_denoising=c.settings['gamma_denoising']);save()
         reference_kl=None
         for micro in (256,512,1024):
             times=[]
