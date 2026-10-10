@@ -92,7 +92,10 @@ def main():
     try:
         for index,record in enumerate(inputs):
             target=started+index*args.producer_seconds
-            while time.perf_counter()<target:time.sleep(min(1.,target-time.perf_counter()))
+            while True:
+                remaining=target-time.perf_counter()
+                if remaining<=0:break
+                time.sleep(min(1.,remaining))
             begin=time.perf_counter();worker.submit(record['directory'])
             report['enqueues'].append(dict(index=index,scheduled_seconds=index*args.producer_seconds,
                 ready_seconds=begin-started,submit_wall_seconds=time.perf_counter()-begin,pending=worker.pending_count))
@@ -111,6 +114,9 @@ def main():
         raise
     finally:
         try:worker.close()
+        except BaseException as error:
+            report.update(status='failed',close_error=f'{type(error).__name__}: {error}')
+            raise
         finally:atomic_json(output/'report.json',report)
     print(json.dumps({k:report[k] for k in ('status','peak_pending','archive_seconds','drain_seconds')}))
 
