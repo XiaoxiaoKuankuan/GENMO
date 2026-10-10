@@ -356,9 +356,11 @@ def actor_update_v2(policy, optimizer, transitions, targets, *, global_manifest=
                     reserve_attempt=None, verify_initial_probability=False,
                     gradient_diagnostics=True, step_callback=None, tensor_cache=None,
                     balanced_minibatches=False, gradient_module_details=True, kl_cache_sink=None,
-                    kl_check_mode='post_step_full', gradient_observer=None):
+                    kl_check_mode='post_step_full', gradient_observer=None, denoising_steps_per_chain=None):
     """执行真实多次 PPO 参数更新；完整硬 KL 与整轮回滚明确由外层事务负责。"""
     from gem.closedloop.dppo.trainer import _validate_actor_transitions
+    from .denoising_sampling import validate_step_count, chain_steps, plan_record
+    sampled_steps = validate_step_count(policy.steps, denoising_steps_per_chain)
     for name, value in (('ppo_epochs', ppo_epochs), ('actor minibatch', actor_minibatch_internal_transitions),
                         ('microbatch', denoising_microbatch), ('max optimizer steps', max_optimizer_steps)):
         if type(value) is not int or value < 1:
@@ -419,8 +421,16 @@ def actor_update_v2(policy, optimizer, transitions, targets, *, global_manifest=
             indices = order[offset:offset + upper_batch]
             minibatch_started = time.perf_counter()
             owned = _owned(indices, manifest, distributed)
-            pairs = [(index, step) for _, index in owned for step in range(policy.steps)]
-            denominator = len(indices) * policy.steps
+            seed = None
+            if sampled_steps < policy.steps:
+                if distributed is None or _rank(distributed) == 0:
+                    seed = int(torch.randint(0,2**63-1,(1,),generator=generator))
+                if distributed is not None: seed = distributed.broadcast_object(seed)
+            sampling = plan_record(seed, indices, policy.steps, sampled_steps)
+            pairs = [(index, step) for position, index in owned
+                     for step in chain_steps(seed, indices[position], policy.steps, sampled_steps)]
+            denominator = len(indices) * sampled_steps
+            full_denominator = len(indices) * policy.steps
             optimizer.zero_grad(set_to_none=True)
             summary = torch.zeros(7, dtype=torch.float64, device=device)
             with _local_phase(distributed, 'actor_minibatch_forward_backward'), policy_phase(policy):
@@ -473,7 +483,7 @@ def actor_update_v2(policy, optimizer, transitions, targets, *, global_manifest=
                 discarded = dict(epoch=epoch, global_upper_indices=indices,
                     mean_joint_kl=float(summary[4] / summary[5]), optimizer_step_executed=False,
                     local_forward_backward_wall_seconds=time.perf_counter()-minibatch_started,
-                    internal_sample_visits=denominator,gradient_allreduce_skipped=True,
+                    internal_sample_visits=denominator,gradient_allreduce_skipped=True,denoising_sampling=sampling,
                     scope='current_parameters_before_pending_step_against_fixed_rollout')
                 optimizer.zero_grad(set_to_none=True)
                 stopped = 'pre_minibatch_soft_kl'
@@ -541,7 +551,8 @@ def actor_update_v2(policy, optimizer, transitions, targets, *, global_manifest=
                 if kl_cache_sink is not None:
                     post, kl_cache_sink['cache'] = post
             record = dict(epoch=epoch, optimizer_step=len(reports) + 1, global_upper_indices=indices,
-                internal_transitions=denominator, ppo_loss=float(summary[0]),
+                internal_transitions=denominator, full_internal_transitions=full_denominator,
+                denoising_sampling=sampling, ppo_loss=float(summary[0]),
                 clip_fraction=float(summary[1] / summary[5]), mean_ratio=float(summary[2] / summary[5]),
                 objective_clipped_fraction=float(summary[6] / summary[5]),
                 mean_abs_log_ratio=float(summary[3] / summary[5]), pre_minibatch_mean_joint_kl=float(summary[4] / summary[5]),
@@ -549,7 +560,7 @@ def actor_update_v2(policy, optimizer, transitions, targets, *, global_manifest=
                 ppo_only_gradient_norm=ppo_norm, total_gradient_norm=total_norm,
                 grad_clip_factor=min(1., grad_clip_norm / (total_norm + 1e-6)), bc=bc_report,
                 gradient_contributions=diagnostics, post_minibatch_kl=post,
-                post_kl_extra_internal_forwards=denominator if post is not None else 0,
+                post_kl_extra_internal_forwards=full_denominator if post is not None else 0,
                 kl_check_mode=kl_check_mode,
                 parameter_update_observation=update_observation,
                 learning_rates=[group['lr'] for group in optimizer.param_groups])
@@ -568,7 +579,9 @@ def actor_update_v2(policy, optimizer, transitions, targets, *, global_manifest=
         included_upper_transitions=len(selected), excluded_upper_transitions=len(manifest) - len(selected),
         probability_check=probability, objective_logprob_reduction=objective_logprob_reduction,
         kl_check_mode=kl_check_mode, discarded_pending_minibatch=discarded,
-        planned_internal_sample_visits=len(selected)*policy.steps*ppo_epochs,
+        planned_internal_sample_visits=len(selected)*sampled_steps*ppo_epochs,
+        full_objective_internal_transitions=len(selected)*policy.steps*ppo_epochs,
+        denoising_steps_per_chain=sampled_steps, full_denoising_steps=policy.steps,
         applied_internal_sample_visits=sum(report['internal_transitions'] for report in reports),
         applied_unique_upper_chains=len(applied),applied_unique_chain_fraction=len(applied)/len(selected),
         old_statistics_fixed=True, hard_kl_pending=True, rollback_scope='caller_owned_whole_rollout',

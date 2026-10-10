@@ -1,0 +1,50 @@
+"""独立的DPPO去噪时间步抽样实验合同。
+
+每条真实行为链仍完整采集20步，old概率保持采集值。实验仅对PPO loss无放回均匀
+抽取K个内部转移，入选概率K/T，Horvitz-Thompson权重T/K；按全量链×T归一化
+等价于抽样loss之和除以链×K。gamma_denoising仍按原始步号计算，BC频率不变。
+
+全步模式不消费新随机数。抽样模式每个optimizer minibatch由rank0的可恢复Actor
+生成器产生一个种子并广播，再按全局链身份派生独立CPU生成器，分片方式不影响
+选择。保存种子、选择SHA和步号直方图可重建每个样本。抽样KL只是软停止估计；
+最终硬KL必须仍在所有真实链、全部T步上计算，不由本模块改变或缓存拼接。
+"""
+from __future__ import annotations
+import hashlib
+import json
+import torch
+
+CONTRACT = 'dppo.uniform_denoising_without_replacement.v1'
+
+
+def validate_step_count(total_steps, sampled_steps):
+    count = total_steps if sampled_steps is None else sampled_steps
+    if type(count) is not int or not 1 <= count <= total_steps:
+        raise ValueError('denoising_steps_per_chain must be an integer in [1, full diffusion steps]')
+    return count
+
+
+def chain_steps(seed, global_index, total_steps, sampled_steps):
+    count = validate_step_count(total_steps, sampled_steps)
+    if count == total_steps:
+        return list(range(total_steps))
+    if type(seed) is not int or seed < 0 or type(global_index) is not int or global_index < 0:
+        raise ValueError('Sampled denoising steps require a nonnegative seed and global chain identity')
+    digest = hashlib.blake2b(f'{CONTRACT}:{seed}:{global_index}'.encode(), digest_size=8).digest()
+    generator = torch.Generator().manual_seed(int.from_bytes(digest, 'little') % (2**63-1))
+    # 排序仅方便连续状态读取，不改变无放回抽样分布。
+    return sorted(torch.randperm(total_steps, generator=generator)[:count].tolist())
+
+
+def plan_record(seed, global_indices, total_steps, sampled_steps):
+    count = validate_step_count(total_steps, sampled_steps)
+    selection = [(index, chain_steps(seed,index,total_steps,count)) for index in global_indices]
+    histogram = [0]*total_steps
+    for _, steps in selection:
+        for step in steps: histogram[step] += 1
+    return dict(contract=CONTRACT, full_steps=total_steps, selected_steps_per_chain=count,
+        seed=seed, inclusion_probability=count/total_steps, inverse_probability_weight=total_steps/count,
+        selection_sha256=hashlib.sha256(json.dumps(selection,separators=(',',':')).encode()).hexdigest(),
+        step_histogram=histogram, full_20_step_hard_kl_required=True,
+        pre_step_kl_scope='all_minibatch_steps' if count==total_steps else 'uniform_sample_estimate_not_full_KL',
+        loss_normalization='sum_selected_objectives_divided_by_global_chains_times_selected_steps')

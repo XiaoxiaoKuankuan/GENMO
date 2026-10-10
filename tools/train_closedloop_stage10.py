@@ -175,7 +175,7 @@ def _sources(config, check):
                   'performance', 'tensor_cache', 'asset_cache', 'rollout_storage', 'budget_ledger',
                   'batch_execution', 'execution_checks', 'journal_codec', 'dual_collector',
                   'numerical_execution', 'training_scale', 'fixed_tile_linear', 'prepaid_budget', 'update_observation',
-                  'effect_checkpoint')
+                  'effect_checkpoint', 'compensated_gemm', 'denoising_sampling')
     vector = config.get('runtime',{}).get('backend') == 'gpu_vectorized.v1'
     if vector:
         names += ('vector_collector','vector_boundary','vector_environment','vector_runtime','vector_evaluation',

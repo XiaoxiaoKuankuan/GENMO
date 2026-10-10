@@ -674,6 +674,7 @@ def _update_cached(c, buffer, targets, manifest, index):
             balanced_minibatches=performance.get('balanced_minibatches', False),
             gradient_module_details=index % performance.get('module_gradient_every', 1) == 0,
             kl_cache_sink=kl_cache, kl_check_mode=c.settings.get('kl_check_mode', 'post_step_full'),
+            denoising_steps_per_chain=c.settings.get('denoising_steps_per_chain'),
             reserve_attempt=lambda: root_call(c.distributed,
                 lambda: c.budget.reserve('update', optimizer_attempts=1)))
         timings[active_phase] = time.perf_counter()-started
