@@ -36,6 +36,8 @@ def main():
     p=argparse.ArgumentParser(description=__doc__)
     for key in ('iteration','config','output'):p.add_argument('--'+key,type=Path,required=True)
     p.add_argument('--compare-codecs',action='store_true',help='核对全部原始帧字节并分别计时旧新编码，非端到端吞吐')
+    p.add_argument('--compare-reward-bytes',action='store_true',
+        help='额外核对全部奖励叶子的规范字节，包括浮点符号零；不放宽原数值门槛')
     a=p.parse_args();rank=int(os.environ['LOCAL_RANK'])
     if int(os.environ['WORLD_SIZE'])!=8:raise ValueError('Requires Server1 eight ranks')
     torch.cuda.set_device(rank);torch.set_num_threads(1)
@@ -47,6 +49,7 @@ def main():
     expected={(r.identity['episode_id'],d['tick']):d for r in rows for d in r.metadata['reward_details']}
     calculators={};warm={};observed={};times=dict(column_view_seconds=0.,scalar_seconds=0.,columnar_seconds=0.)
     codec_times=dict(reference_seconds=0.,fast_seconds=0.,frames=0,bytes=0)
+    reward_byte_controls=0
     journal=Path(source['rank_directory'])/'world_journal.sqlite'
     with sqlite3.connect(journal.resolve().as_uri()+'?mode=ro',uri=True) as db:
         for sha,payload in db.execute('SELECT sha256,payload FROM replies ORDER BY rowid'):
@@ -90,6 +93,10 @@ def main():
                     if new.columnar_fallbacks:raise ValueError(f'Columnar path fell back: {new.last_columnar_fallback}')
                     for x,y in zip(actual,reference):
                         compare_reward_evidence(x,y)
+                        if a.compare_reward_bytes:
+                            if encode_binary_reference(x)!=encode_binary_reference(y):
+                                raise ValueError(f'Complete reward canonical bytes changed: episode={episode}, tick={x["tick"]}')
+                            reward_byte_controls+=1
                         key=(episode,x['tick'])
                         if key in expected:compare_reward_evidence(x,expected[key]);observed[key]=x
     if observed.keys()!=expected.keys():raise ValueError('Not all actual reward/control steps covered')
@@ -106,6 +113,7 @@ def main():
     report=dict(rank=rank,source=source,passed=True,controls=len(observed),episodes=len(calculators),timing=times,
         max_reward_difference=max_reward_difference,gae_max_abs_difference=float((new['advantages_raw']-old['advantages_raw']).abs().max()),
         columnar_fallbacks=0,all_reward_fields_compared=True,physical_controls_unchanged=True,
+        full_reward_fields_byte_compared=a.compare_reward_bytes,reward_byte_controls=reward_byte_controls,
         full_physical_fields_byte_compared=a.compare_codecs,
         codecs=None if not a.compare_codecs else codec_times)
     (directory/'report.json').write_text(json.dumps(report,indent=2))
