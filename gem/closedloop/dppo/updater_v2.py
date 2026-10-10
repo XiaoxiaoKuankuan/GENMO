@@ -356,11 +356,13 @@ def actor_update_v2(policy, optimizer, transitions, targets, *, global_manifest=
                     reserve_attempt=None, verify_initial_probability=False,
                     gradient_diagnostics=True, step_callback=None, tensor_cache=None,
                     balanced_minibatches=False, gradient_module_details=True, kl_cache_sink=None,
-                    kl_check_mode='post_step_full', gradient_observer=None, denoising_steps_per_chain=None):
+                    kl_check_mode='post_step_full', gradient_observer=None, denoising_steps_per_chain=None,
+                    denoising_sampling_strategy='uniform'):
     """执行真实多次 PPO 参数更新；完整硬 KL 与整轮回滚明确由外层事务负责。"""
     from gem.closedloop.dppo.trainer import _validate_actor_transitions
-    from .denoising_sampling import validate_step_count, chain_steps, plan_record
-    sampled_steps = validate_step_count(policy.steps, denoising_steps_per_chain)
+    from .denoising_sampling import validate_sampling, chain_steps, plan_record
+    sampled_steps = validate_sampling(policy.steps, denoising_steps_per_chain, denoising_sampling_strategy)
+    stratified = denoising_sampling_strategy == 'stratified8'
     for name, value in (('ppo_epochs', ppo_epochs), ('actor minibatch', actor_minibatch_internal_transitions),
                         ('microbatch', denoising_microbatch), ('max optimizer steps', max_optimizer_steps)):
         if type(value) is not int or value < 1:
@@ -426,13 +428,16 @@ def actor_update_v2(policy, optimizer, transitions, targets, *, global_manifest=
                 if distributed is None or _rank(distributed) == 0:
                     seed = int(torch.randint(0,2**63-1,(1,),generator=generator))
                 if distributed is not None: seed = distributed.broadcast_object(seed)
-            sampling = plan_record(seed, indices, policy.steps, sampled_steps)
+            sampling = plan_record(seed, indices, policy.steps, sampled_steps, denoising_sampling_strategy)
             pairs = [(index, step) for position, index in owned
-                     for step in chain_steps(seed, indices[position], policy.steps, sampled_steps)]
+                     for step in (chain_steps(seed, indices[position], policy.steps, sampled_steps,
+                                  denoising_sampling_strategy) if stratified else
+                                  chain_steps(seed, indices[position], policy.steps, sampled_steps))]
             denominator = len(indices) * sampled_steps
             full_denominator = len(indices) * policy.steps
             optimizer.zero_grad(set_to_none=True)
             summary = torch.zeros(7, dtype=torch.float64, device=device)
+            per_step = torch.zeros(policy.steps, 5, dtype=torch.float64, device=device)
             with _local_phase(distributed, 'actor_minibatch_forward_backward'), policy_phase(policy):
                 from .batch_execution import ROW_BMM, MicrobatchGradientAccumulator
                 gradient_sum = (MicrobatchGradientAccumulator(actor)
@@ -458,16 +463,25 @@ def actor_update_v2(policy, optimizer, transitions, targets, *, global_manifest=
                                              for index, step in chunk]).to(device) if tensor_cache is None else
                         tensor_cache.get('advantages', rows) * tensor_cache.denoising_discounts(steps, policy.steps, gamma_denoising))
                     objective = torch.minimum(ratio * advantage, ratio.clamp(1 - clip, 1 + clip) * advantage)
-                    loss = -objective.sum() / denominator
+                    importance = (torch.tensor([3. if step < 18 else 1. for step in steps],
+                                  device=device,dtype=torch.float64) if stratified else 1.)
+                    loss = -(objective*importance).sum() / (full_denominator if stratified else denominator)
                     with measure('actor.ppo_backward', gpu=True):
                         loss.backward()
                         if gradient_sum is not None:
                             gradient_sum.add()
                     old_mean, old_std = _old_kernel(rows, steps, device, tensor_cache)
                     kl = _joint_kl(parameters, mask, old_mean, old_std).detach()
-                    summary += torch.stack((loss.detach(), ((ratio < 1 - clip) | (ratio > 1 + clip)).double().sum(),
-                                            ratio.detach().sum(), log_ratio.detach().abs().sum(), kl.sum(),
-                                            ratio.new_tensor(ratio.numel(), dtype=torch.float64),
+                    ratio_clipped = ((ratio < 1-clip)|(ratio > 1+clip)).double()
+                    objective_clipped = (((advantage > 0)&(ratio > 1+clip))|((advantage < 0)&(ratio < 1-clip))).double()
+                    step_indices = (tensor_cache.step_indices(steps) if tensor_cache is not None else
+                                    torch.tensor(steps,device=device))
+                    per_step.index_add_(0,step_indices,torch.stack((kl,ratio.detach(),ratio_clipped,
+                        objective_clipped,torch.ones_like(kl)),1))
+                    # 分层样本的KL采用逆概率权重估计完整20步均值；最终硬KL仍另算全部步骤。
+                    summary += torch.stack((loss.detach(), ratio_clipped.sum(),
+                                            ratio.detach().sum(), log_ratio.detach().abs().sum(), (kl*importance).sum(),
+                                            ratio.new_tensor(len(chunk)*policy.steps/sampled_steps if stratified else ratio.numel(), dtype=torch.float64),
                                             (((advantage > 0) & (ratio > 1 + clip)) |
                                             ((advantage < 0) & (ratio < 1 - clip))).double().sum()))
                 if gradient_sum is not None:
@@ -476,6 +490,7 @@ def actor_update_v2(policy, optimizer, transitions, targets, *, global_manifest=
                     conditions.backward()
             if distributed is not None:
                 summary = distributed.sum_tensor(summary)
+                per_step = distributed.sum_tensor(per_step)
             # 当前 minibatch 已经计算出真实 KL；两种模式都必须遵守软停止。
             # 上一 minibatch 的更新后 KL 不能代替当前不同样本上的更新前 KL。
             if (soft_kl_limit is not None
@@ -553,9 +568,13 @@ def actor_update_v2(policy, optimizer, transitions, targets, *, global_manifest=
             record = dict(epoch=epoch, optimizer_step=len(reports) + 1, global_upper_indices=indices,
                 internal_transitions=denominator, full_internal_transitions=full_denominator,
                 denoising_sampling=sampling, ppo_loss=float(summary[0]),
-                clip_fraction=float(summary[1] / summary[5]), mean_ratio=float(summary[2] / summary[5]),
-                objective_clipped_fraction=float(summary[6] / summary[5]),
-                mean_abs_log_ratio=float(summary[3] / summary[5]), pre_minibatch_mean_joint_kl=float(summary[4] / summary[5]),
+                clip_fraction=float(summary[1] / denominator), mean_ratio=float(summary[2] / denominator),
+                objective_clipped_fraction=float(summary[6] / denominator),
+                mean_abs_log_ratio=float(summary[3] / denominator), pre_minibatch_mean_joint_kl=float(summary[4] / summary[5]),
+                per_denoising_step=[dict(step=s,visits=int(count),mean_joint_kl=kl/count if count else None,
+                    mean_ratio=ratio/count if count else None,clip_fraction=clipped/count if count else None,
+                    objective_clipped_fraction=obj/count if count else None)
+                    for s,(kl,ratio,clipped,obj,count) in enumerate(per_step.cpu().tolist())],
                 ratio_scope='before_this_minibatch_step_against_fixed_rollout_old_policy',
                 ppo_only_gradient_norm=ppo_norm, total_gradient_norm=total_norm,
                 grad_clip_factor=min(1., grad_clip_norm / (total_norm + 1e-6)), bc=bc_report,

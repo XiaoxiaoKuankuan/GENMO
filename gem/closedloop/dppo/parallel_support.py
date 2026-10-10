@@ -88,8 +88,9 @@ def validate_v2_configuration(config):
                  'max_actor_optimizer_steps', 'rollout_upper_steps_per_rank'):
         if type(settings.get(name)) is not int or settings[name] < 1:
             raise ValueError(f'{name} must be a positive integer')
-    from .denoising_sampling import validate_step_count
-    validate_step_count(settings['denoising_steps'], settings.get('denoising_steps_per_chain'))
+    from .denoising_sampling import validate_sampling
+    validate_sampling(settings['denoising_steps'], settings.get('denoising_steps_per_chain'),
+                      settings.get('denoising_sampling_strategy','uniform'))
     if settings['actor_minibatch_internal_transitions'] % settings['denoising_steps']:
         raise ValueError('Actor optimizer minibatch must contain complete denoising chains')
     if settings['rollout_upper_steps'] != 8 * settings['rollout_upper_steps_per_rank']:

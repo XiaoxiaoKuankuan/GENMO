@@ -47,6 +47,40 @@ def test_plan_is_independent_of_owner_and_full_steps_do_not_need_seed():
     assert chain_steps(None,0,20,20)==list(range(20))
 
 
+def test_stratified_terminal_steps_and_exact_unbiased_weights():
+    from gem.closedloop.dppo.denoising_sampling import validate_sampling
+    import json
+    for seed in range(20):
+        selected=chain_steps(seed,13,20,8,'stratified8')
+        assert len(set(selected))==8 and selected[-2:]==[18,19]
+        plan=plan_record(seed,[13],20,8,'stratified8')
+        assert plan==json.loads(json.dumps(plan))
+        assert plan['inverse_probability_weight']==[3.]*18+[1.,1.]
+        assert plan['selected_chain_steps']==[[13,selected]]
+    # 枚举均匀六步的循环覆盖，三倍权重准确恢复每个原始步骤及其去噪折扣。
+    values=torch.arange(1,21,dtype=torch.float64)*.99**torch.arange(19,-1,-1,dtype=torch.float64)
+    estimates=[]
+    for offset in range(18):
+        steps=[(offset+j)%18 for j in range(6)]
+        estimates.append((3*values[steps].sum()+values[18:].sum())/20)
+    torch.testing.assert_close(torch.stack(estimates).mean(),values.mean(),atol=1e-14,rtol=1e-14)
+    with pytest.raises(ValueError):validate_sampling(20,4,'stratified8')
+
+
+def test_stratified_ppo_preserves_old_chain_and_full_kl():
+    policy=TwentySteps();data=samples(policy);old=torch.stack([r.old_log_prob.clone() for r in data])
+    optimizer=torch.optim.Adam(policy.actor.parameters(),lr=1e-8)
+    report=actor_update_v2(policy,optimizer,data,dict(advantages=torch.tensor([1.,-.6])),ppo_epochs=1,
+        epoch_orders=[[0,1]],actor_minibatch_internal_transitions=40,denoising_microbatch=7,
+        max_optimizer_steps=1,soft_kl_limit=None,denoising_steps_per_chain=8,
+        denoising_sampling_strategy='stratified8',generator=torch.Generator().manual_seed(7),
+        gradient_diagnostics=False,kl_check_mode='pre_step_plus_final')
+    assert report['applied_internal_sample_visits']==16
+    assert report['steps'][0]['per_denoising_step'][18]['visits']==2
+    assert torch.equal(torch.stack([r.old_log_prob for r in data]),old)
+    assert analytic_kl_local(policy,data,denoising_microbatch=13)['fresh_internal_forwards']==40
+
+
 def test_sampled_ppo_is_unbiased_keeps_old_and_full_kl(monkeypatch):
     torch.set_num_threads(1)
     policy=TwentySteps();data=samples(policy);base=copy.deepcopy(policy.actor.state_dict())

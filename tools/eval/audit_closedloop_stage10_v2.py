@@ -308,7 +308,8 @@ def _step_sampling(step, indices, contract):
     if selected != full or sampling is not None:
         require(isinstance(sampling, dict) and step.get('full_internal_transitions')==len(indices)*full,
                 'V2 sampled update lacks full behavior chain accounting')
-        expected = plan_record(sampling.get('seed'), indices, full, selected)
+        expected = plan_record(sampling.get('seed'), indices, full, selected,
+                               contract.get('denoising_sampling_strategy','uniform'))
         require(sampling==expected, 'V2 denoising sampling identity, weights or coverage differ')
     return selected
 

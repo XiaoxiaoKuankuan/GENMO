@@ -15,6 +15,16 @@ import json
 import torch
 
 CONTRACT = 'dppo.uniform_denoising_without_replacement.v1'
+STRATIFIED_CONTRACT = 'dppo.stratified_terminal_two_plus_uniform_six.v1'
+
+
+def validate_sampling(total_steps, sampled_steps, strategy='uniform'):
+    count = validate_step_count(total_steps, sampled_steps)
+    if strategy not in ('uniform', 'stratified8'):
+        raise ValueError('Unknown denoising sampling strategy')
+    if strategy == 'stratified8' and (total_steps != 20 or count != 8):
+        raise ValueError('stratified8 requires exactly 20 full steps and 8 selected steps')
+    return count
 
 
 def validate_step_count(total_steps, sampled_steps):
@@ -24,27 +34,38 @@ def validate_step_count(total_steps, sampled_steps):
     return count
 
 
-def chain_steps(seed, global_index, total_steps, sampled_steps):
-    count = validate_step_count(total_steps, sampled_steps)
+def chain_steps(seed, global_index, total_steps, sampled_steps, strategy='uniform'):
+    count = validate_sampling(total_steps, sampled_steps, strategy)
     if count == total_steps:
         return list(range(total_steps))
     if type(seed) is not int or seed < 0 or type(global_index) is not int or global_index < 0:
         raise ValueError('Sampled denoising steps require a nonnegative seed and global chain identity')
-    digest = hashlib.blake2b(f'{CONTRACT}:{seed}:{global_index}'.encode(), digest_size=8).digest()
+    contract = STRATIFIED_CONTRACT if strategy == 'stratified8' else CONTRACT
+    digest = hashlib.blake2b(f'{contract}:{seed}:{global_index}'.encode(), digest_size=8).digest()
     generator = torch.Generator().manual_seed(int.from_bytes(digest, 'little') % (2**63-1))
     # 排序仅方便连续状态读取，不改变无放回抽样分布。
+    if strategy == 'stratified8':
+        return sorted(torch.randperm(18, generator=generator)[:6].tolist()) + [18,19]
     return sorted(torch.randperm(total_steps, generator=generator)[:count].tolist())
 
 
-def plan_record(seed, global_indices, total_steps, sampled_steps):
-    count = validate_step_count(total_steps, sampled_steps)
-    selection = [(index, chain_steps(seed,index,total_steps,count)) for index in global_indices]
+def plan_record(seed, global_indices, total_steps, sampled_steps, strategy='uniform'):
+    count = validate_sampling(total_steps, sampled_steps, strategy)
+    selection = [(index, chain_steps(seed,index,total_steps,count) if strategy=='uniform' else
+                  chain_steps(seed,index,total_steps,count,strategy)) for index in global_indices]
     histogram = [0]*total_steps
     for _, steps in selection:
         for step in steps: histogram[step] += 1
-    return dict(contract=CONTRACT, full_steps=total_steps, selected_steps_per_chain=count,
+    result = dict(contract=CONTRACT, full_steps=total_steps, selected_steps_per_chain=count,
         seed=seed, inclusion_probability=count/total_steps, inverse_probability_weight=total_steps/count,
         selection_sha256=hashlib.sha256(json.dumps(selection,separators=(',',':')).encode()).hexdigest(),
         step_histogram=histogram, full_20_step_hard_kl_required=True,
         pre_step_kl_scope='all_minibatch_steps' if count==total_steps else 'uniform_sample_estimate_not_full_KL',
         loss_normalization='sum_selected_objectives_divided_by_global_chains_times_selected_steps')
+    if strategy == 'stratified8':
+        result.update(contract=STRATIFIED_CONTRACT,strategy=strategy,
+            inclusion_probability=[1/3]*18+[1.,1.],inverse_probability_weight=[3.]*18+[1.,1.],
+            selected_chain_steps=[[index,steps] for index,steps in selection],
+            pre_step_kl_scope='inverse_probability_weighted_estimate_not_full_KL',
+            loss_normalization='sum_inverse_probability_weighted_objectives_divided_by_global_chains_times_20')
+    return result
