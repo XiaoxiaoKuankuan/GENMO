@@ -92,6 +92,7 @@
     "docs/BUMI_ROOT_HEIGHT.md",
     "docs/BUMI_STAGE1_TRT_VALIDATION_20261010.md",
     "docs/LIWEI_DEPLOYMENT_MIGRATION.md",
+    "docs/LIWEI_DEPLOYMENT_VALIDATION_20261010.md",
     "docs/GENMO_CONTROLLER_ADAPTATION.md",
     "gem/__init__.py",
     "gem/diffusion_utils/gaussian_diffusion.py",
@@ -172,7 +173,7 @@
   "replaced_initializers": [
     "gem/runtime/__init__.py"
   ],
-  "source_commit_role": "初始部署闭包来源；本次Stage1迁移为未提交工作树修改",
+  "source_commit_role": "初始部署闭包来源；当前部署提交以Git分支和迁移快照中的完整HEAD为准",
   "migration_model": "Stage1 s595000",
-  "runtime_validation": "not_run"
+  "runtime_validation": "Stage1数值、GMT原生探针及buffered/在线短片段仿真通过，见docs/LIWEI_DEPLOYMENT_VALIDATION_20261010.md"
 }

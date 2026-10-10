@@ -12,6 +12,11 @@
 验收覆盖模型生成，未连接GMT仿真或实机；完整证据与阈值见
 [Stage1引擎验收记录](docs/BUMI_STAGE1_TRT_VALIDATION_20261010.md)。
 
+2026-10-10已在目标机`/home/user/liwei`完成CUDA12迁移、共享环境保护检查、GMT原生
+CUDA探针、Release编译、离线buffered及在线仿真，并确认Gazebo/MuJoCo窗口可用。
+目标机结果、初始化条件、备份位置和验收范围见
+[liwei迁移验收记录](docs/LIWEI_DEPLOYMENT_VALIDATION_20261010.md)。
+
 ## 准备模型
 
 在本部署目录操作，已有.venv可直接使用；缺少环境时先运行：
