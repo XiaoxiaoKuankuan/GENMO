@@ -115,14 +115,15 @@ def test_late_active_generation_keeps_real_controls_and_bootstrap(tmp_path,delay
 
 def test_authorized_wait_limit_retains_actual_reward_budget_and_bootstrap():
     env,row,calls,budget=fixture_env(source=9280,actual=25)
-    before=float(row.rewards.sum())
+    before=row.rewards.clone()
     controls,ended=finish_vector_fragment(env,row,continue_episode=True,maximum_wait_controls=25)
     assert controls==25 and ended and row.truncated and not row.terminated
     assert row.reason=='bounded_boundary_wait_limit' and row.next_context is not None
     assert row.metadata['fragment_tail']['wait_limit_reached']
     assert not row.metadata['fragment_tail']['reference_horizon_truncated']
     assert row.metadata['fragment_tail']['reward_sum']==6.25
-    assert float(row.rewards.sum())==before+6.25
+    assert torch.equal(row.rewards[:len(before)],before)
+    assert torch.equal(row.rewards[len(before):],torch.full((25,),.25,dtype=before.dtype))
     assert budget==[dict(control_steps=25,physics_steps=100)]
     assert calls[0]['end_reason']=='bounded_boundary_wait_limit'
 

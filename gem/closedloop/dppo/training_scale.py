@@ -55,13 +55,17 @@ def budget_requirements(config, *, measured_evidence_bytes_per_transition=None):
         control_steps=rounds*count*controls_per_decision+tasks*math.ceil(evaluation['episode_seconds']*50)
             +(2*envs+tasks)*50)
     requirements['physics_steps'] = requirements['control_steps']*4
-    worst = requirements['control_steps']+(rounds*count-envs)*50
+    wait_upper=(rounds*envs*config['runtime']['vector_boundary_wait_max_control_steps']
+                if config['runtime'].get('vector_boundary_wait_contract') else 0)
+    worst = requirements['control_steps']+(rounds*count-envs)*50+wait_upper
     deficits = {key:max(0, value-stage['limits'][key]) for key,value in requirements.items()}
     return dict(planned_iterations=rounds, normal_no_failure_scenario_requirements=requirements,
         control_upper_with_reset_every_decision=worst, physics_upper_with_reset_every_decision=4*worst,
         authorization_limits=dict(stage['limits']), scenario_deficits=deficits,
         evaluation_rounds=evaluation_rounds,evaluation_tasks=tasks,calibration_generations=calibration_generations,
         implicit_budget_increase=False,
+        boundary_wait_control_upper=wait_upper,boundary_wait_physics_upper=4*wait_upper,
+        wait_upper_scope='additional_authorized_maximum_not_assumed_executed',
         evidence_bytes=None if measured_evidence_bytes_per_transition is None else
             rounds*count*measured_evidence_bytes_per_transition,
         scope='fresh_run_no_failure_scenario_max_profile_duration_with_warmup_not_a_guaranteed_lower_bound')
