@@ -99,3 +99,22 @@ def test_explicit_finite_launcher_preserves_full_behavior_and_resume_objective()
     for arguments in (dict(steps=8),dict(actor_lr=5e-9)):
         with pytest.raises(ValueError,match='Resume cannot change'):
             select_learning_experiment(config,resume=True,**arguments)
+
+
+@pytest.mark.parametrize('count',[4,8,20])
+def test_independent_auditor_reconstructs_sampling_not_just_total_count(count):
+    from tools.eval.audit_closedloop_stage10_v2 import _step_sampling
+    indices=[0,19,31];seed=731 if count<20 else None
+    contract=dict(denoising_steps=20,denoising_steps_per_chain=count)
+    step=dict(internal_transitions=len(indices)*count,full_internal_transitions=len(indices)*20,
+              denoising_sampling=plan_record(seed,indices,20,count))
+    assert _step_sampling(step,indices,contract)==count
+    for key,value in [('inverse_probability_weight',1.01),('selection_sha256','changed'),
+                      ('full_20_step_hard_kl_required',False)]:
+        bad=copy.deepcopy(step);bad['denoising_sampling'][key]=value
+        with pytest.raises((ValueError,AssertionError)):
+            _step_sampling(bad,indices,contract)
+    bad=copy.deepcopy(step);bad['internal_transitions']+=1
+    with pytest.raises((ValueError,AssertionError)):_step_sampling(bad,indices,contract)
+    if count==20:
+        assert _step_sampling(dict(internal_transitions=60),indices,dict(denoising_steps=20))==20

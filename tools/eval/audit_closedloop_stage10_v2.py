@@ -297,6 +297,22 @@ def _verify_members(root, record):
                 'V2 sealed execution member size/SHA differs')
 
 
+def _step_sampling(step, indices, contract):
+    """核对抽样分母和可重建步号，旧全步记录继续可读；硬KL覆盖另外核验。"""
+    from gem.closedloop.dppo.denoising_sampling import plan_record, validate_step_count
+    full = contract['denoising_steps']
+    selected = validate_step_count(full, contract.get('denoising_steps_per_chain'))
+    require(step['internal_transitions']==len(indices)*selected,
+            'V2 optimizer minibatch sampled denominator differs')
+    sampling = step.get('denoising_sampling')
+    if selected != full or sampling is not None:
+        require(isinstance(sampling, dict) and step.get('full_internal_transitions')==len(indices)*full,
+                'V2 sampled update lacks full behavior chain accounting')
+        expected = plan_record(sampling.get('seed'), indices, full, selected)
+        require(sampling==expected, 'V2 denoising sampling identity, weights or coverage differ')
+    return selected
+
+
 def _update(summary, contract):
     probability = summary['probability_check']
     require(probability.get('passed') is True and probability.get('scope') in (
@@ -324,9 +340,9 @@ def _update(summary, contract):
     require(steps<=len(expected), 'V2 Actor steps exceed the declared epoch/minibatch schedule')
     bc_samples = 0
     for position, (step, (epoch, indices)) in enumerate(zip(actor['steps'], expected), 1):
-        require(step['optimizer_step']==position and step['epoch']==epoch and step['global_upper_indices']==indices
-                and step['internal_transitions']==len(indices)*contract['denoising_steps'],
+        require(step['optimizer_step']==position and step['epoch']==epoch and step['global_upper_indices']==indices,
                 'V2 optimizer minibatch indices/denominator differ')
+        selected_steps = _step_sampling(step, indices, contract)
         require(number(step['ppo_only_gradient_norm'], 'V2 PPO-only gradient')>0
                 and number(step['total_gradient_norm'], 'V2 total gradient')>0, 'V2 Actor gradient is not positive')
         require(0<=number(step['clip_fraction'], 'V2 clip fraction')<=1
@@ -342,6 +358,17 @@ def _update(summary, contract):
                 close(bc['weight'], contract['bc_weight'], 'V2 BC weight', 0.)
             bc_samples += bc['batch_size']
     require(actor['bc_global_samples']==bc_samples, 'V2 BC global sample count differs')
+    if 'denoising_steps_per_chain' in actor or selected_steps != contract['denoising_steps']:
+        require(actor.get('denoising_steps_per_chain')==selected_steps
+                and actor.get('full_denoising_steps')==contract['denoising_steps']
+                and actor.get('applied_internal_sample_visits')==sum(s['internal_transitions'] for s in actor['steps'])
+                and actor.get('planned_internal_sample_visits')==len(eligible)*selected_steps*contract['ppo_epochs']
+                and actor.get('full_objective_internal_transitions')==len(eligible)*contract['denoising_steps']*contract['ppo_epochs'],
+                'V2 sampled/full objective visit counts differ')
+        used_chains = {index for step in actor['steps'] for index in step['global_upper_indices']}
+        require(actor.get('applied_unique_upper_chains')==len(used_chains),
+                'V2 applied unique chain coverage differs')
+        close(actor['applied_unique_chain_fraction'], len(used_chains)/len(eligible), 'V2 applied chain fraction')
     require(critic['optimizer_steps']==contract['critic_steps']
             and len(critic['losses'])==critic['optimizer_steps'], 'V2 Critic optimizer count differs')
     require(summary['actor_lr']==contract['actor_lr'] and summary['kl_limit']==contract['kl_stop_joint'],
@@ -349,6 +376,13 @@ def _update(summary, contract):
     kl = summary['kl']
     require(0<=number(kl['mean_joint_kl'], 'V2 joint KL')<=contract['kl_stop_joint'], 'V2 accepted KL exceeds hard limit')
     require(len(kl['per_denoising_step'])==contract['denoising_steps'], 'V2 KL step coverage differs')
+    if selected_steps != contract['denoising_steps']:
+        full_count = len(eligible)*contract['denoising_steps']
+        require(kl.get('included_upper_transitions')==len(eligible)
+                and [row.get('step_index') for row in kl['per_denoising_step']]==list(range(contract['denoising_steps']))
+                and kl.get('effective_mean_change',{}).get('checked_internal_transitions')==full_count
+                and kl.get('fresh_internal_forwards',0)+kl.get('reused_upper_transitions',0)*contract['denoising_steps']==full_count,
+                'V2 sampled PPO requires final KL on every eligible chain and every behavior step')
     close(sum(number(row['mean_joint_kl'], 'V2 step KL') for row in kl['per_denoising_step'])/
           contract['denoising_steps'], kl['mean_joint_kl'], 'V2 mean KL across denoising steps')
     for field, key in (('max_joint_kl', 'kl_max_internal'), ('max_chain_joint_kl', 'kl_max_chain'),
