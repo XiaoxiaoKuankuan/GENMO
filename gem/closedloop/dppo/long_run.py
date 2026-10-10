@@ -53,6 +53,9 @@ def validate_long_run_settings(stage):
     if seconds is not None and (type(seconds) is not int or seconds <= 0):
         raise ValueError('max_walltime_seconds must be a positive integer')
     storage = stage['storage']
+    level=storage.get('archive_compression_level',6)
+    if type(level) is not int or not 1<=level<=9:
+        raise ValueError('archive_compression_level must be an integer from 1 to 9')
     validate_secondary_store(storage)
     if storage.get('archive_secondary') and stage.get('version') not in (None, 'genmo.closedloop.stage10.v2'):
         raise ValueError('Secondary archive storage requires the sealed v2 training format')
@@ -71,6 +74,7 @@ class LongRunMaintenance:
         validate_long_run_settings(stage)
         self.manager, self.guard = manager, manager.disk_guard
         self.storage = stage['storage']
+        self.compression_level=self.storage.get('archive_compression_level',6)
         manifest = _read_json(manager.run_dir / 'run_manifest.json')
         self.created_at = datetime.fromisoformat(manifest['created_at'])
         seconds = stage.get('run_control', {}).get('max_walltime_seconds')
@@ -82,6 +86,8 @@ class LongRunMaintenance:
                       checkpoint_keep_every=self.storage.get('checkpoint_keep_every'),
                       archive_completed_iterations=self.storage.get('archive_completed_iterations', False))
         path = manager.run_dir / 'long_run_policy.json'
+        if 'archive_compression_level' in self.storage:
+            policy['archive_compression_level']=self.compression_level
         if self.storage.get('archive_secondary') is not None:
             policy['archive_secondary'] = self.storage['archive_secondary']
             prepare_secondary_store(manager.run_dir, policy['archive_secondary'], resume=path.exists())
@@ -301,7 +307,7 @@ class LongRunMaintenance:
                     temporary = Path(temporary_name)
                     try:
                         with self._archive_stage(timings, 'compression_seconds'):
-                            with tarfile.open(temporary, 'w:gz', compresslevel=6) as stream:
+                            with tarfile.open(temporary, 'w:gz', compresslevel=getattr(self,'compression_level',6)) as stream:
                                 for record in members:
                                     stream.add(directory / record['path'], arcname=record['path'], recursive=False)
                         with self._archive_stage(timings, 'archive_fsync_seconds'):
@@ -379,7 +385,8 @@ class LongRunMaintenance:
                         self._archive_process = ArchiveProcessClient()
                     pid = self._archive_process.pid
                     response = self._archive_process.archive(directory, run_dir=self.manager.run_dir,
-                                                             min_free_bytes=self.guard.min_free_bytes)
+                        min_free_bytes=self.guard.min_free_bytes,
+                        **({'compression_level':self.compression_level} if 'archive_compression_level' in self.storage else {}))
                     result = response['result']
                     stages.update(response['stage_seconds'])
                 finally:

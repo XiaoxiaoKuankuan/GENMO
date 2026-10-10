@@ -81,6 +81,9 @@ def main():
             directory = guard._path(request['directory'])
             maintenance = LongRunMaintenance.__new__(LongRunMaintenance)
             maintenance.guard = guard
+            level=request.get('compression_level',6)
+            if type(level) is not int or not 1<=level<=9:raise ValueError('Invalid lossless compression level')
+            maintenance.compression_level=level
             maintenance.manager = SimpleNamespace(run_dir=guard.run_dir, append_metrics=metrics.append)
             result = maintenance._archive_sealed(directory, timings=timings)
             response.update(status='passed', result=result)

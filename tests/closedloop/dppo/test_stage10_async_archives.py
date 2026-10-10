@@ -370,3 +370,21 @@ def test_reconcile_marks_unsaved_tail_and_preserves_spent_budget(tmp_path):
         directory, journal = iteration(manager, 2)
         manager.seal_iteration(directory, 2, closed_journals=[journal])
         assert _read_json(manager.run_dir / 'accepted.json')['iteration'] == 2
+
+
+@pytest.mark.parametrize('level',[1,6])
+def test_lossless_compression_candidate_keeps_member_sha_and_recovery(tmp_path,level):
+    import tarfile
+    import hashlib
+    configured=stage();configured['storage']['archive_compression_level']=level
+    with RunManager(tmp_path/'run') as manager:
+        maintenance=LongRunMaintenance(manager,configured)
+        directory,journal=iteration(manager)
+        manager.seal_iteration(directory,1,closed_journals=[journal])
+        assert maintenance.enqueue_archive(directory)
+        maintenance.close()
+        manifest=_read_json(directory/'archive_manifest.json')
+        assert maintenance.archive_iteration(directory)==manifest
+    with tarfile.open(directory/manifest['archive'],'r:gz') as stream:
+        for member,record in zip(stream,manifest['members'],strict=True):
+            assert hashlib.sha256(stream.extractfile(member).read()).hexdigest()==record['sha256']
