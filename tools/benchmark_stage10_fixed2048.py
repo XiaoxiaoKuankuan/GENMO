@@ -17,6 +17,7 @@ import copy
 from datetime import timedelta
 import json
 import os
+import random
 from pathlib import Path
 import shutil
 import sys
@@ -61,12 +62,16 @@ def main():
     if len(rows)!=256:raise ValueError('Fixed-work acceptance requires 2048 real global chains')
     config=configuration(a.config);config['runtime']['genmo_device']=f'cuda:{rank}'
     torch.set_num_threads(config['runtime']['torch_threads'])
+    random.seed(config['stage10']['seed']);np.random.seed(config['stage10']['seed']);torch.manual_seed(config['stage10']['seed'])
     settings=config['stage10']['training'];performance=config['stage10']['performance']
     actor,train_config,_=load_actor(config)
     payload=torch.load(a.weights,map_location='cpu',mmap=True,weights_only=False)
     source_difference={n:float((v.cpu()-payload['actor'][n]).abs().max()) for n,v in actor.state_dict().items()
                        if not torch.equal(v.cpu(),payload['actor'][n])}
     actor.load_state_dict(payload['actor'])
+    c.broadcast_module(actor)
+    optimizer=torch.optim.AdamW(trainable_actor_parameters(actor),lr=5e-9,weight_decay=0.)
+    optimizer.load_state_dict(copy.deepcopy(payload['actor_optimizer']))
     policy=DPPODiffusionPolicy(actor,steps=20,eta=settings['eta'],std_floor=settings['std_floor'],
         guidance_scale=settings['guidance_scale'],cfg_batch=True,numerical_layout=performance['numerical_layout'],
         defer_checks=True,precision_mode=performance['precision_mode'],numerical_variant=performance['numerical_variant'])
@@ -75,6 +80,8 @@ def main():
     from gem.closedloop.dppo.evaluation import _model_fingerprint
     (directory/'actor_identity.json').write_text(json.dumps(dict(model_fingerprint=_model_fingerprint(actor),
         torch_threads=torch.get_num_threads(),source_root=str(ROOT),buffers=[name for name,_ in actor.named_buffers()]),indent=2))
+    config['stage9']['bc_batch']=128//8;config['stage9']['seed']=42+1000003*rank
+    bc=SupervisedAnchor(config,actor,train_config);bc.distributed_global_mean=True
     if any(r.metadata['sampler_trace']['kernel_config']!=policy.kernel_config for r in rows):
         raise ValueError('Cannot change saved behavior numerical contract')
     manifest=[v for shard in c.all_gather_object([dict(owner_rank=rank,local_index=i,
@@ -110,10 +117,6 @@ def main():
         if rank==0:(a.output/'probability.json').write_text(json.dumps(probabilities,indent=2))
     if a.probability_only:
         cache.close();dist.destroy_process_group(group);dist.destroy_process_group();return
-    optimizer=torch.optim.AdamW(trainable_actor_parameters(actor),lr=5e-9,weight_decay=0.)
-    optimizer.load_state_dict(copy.deepcopy(payload['actor_optimizer']))
-    config['stage9']['bc_batch']=128//8;config['stage9']['seed']=42+1000003*rank
-    bc=SupervisedAnchor(config,actor,train_config);bc.distributed_global_mean=True
     kwargs=dict(global_manifest=manifest,distributed=c,actor_minibatch_internal_transitions=2048*20,
         soft_kl_limit=None,gradient_diagnostics=True,tensor_cache=cache,kl_check_mode='pre_step_plus_final',
         bc=bc,bc_weight=.1,clip=.01,gamma_denoising=.99)
