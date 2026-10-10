@@ -25,7 +25,7 @@ ROOT=Path(__file__).resolve().parents[1];sys.path.insert(0,str(ROOT))
 from tools.stage10_fixed_inputs import load_rank
 from tools.train_closedloop_stage10 import configuration
 from gem.runtime.trajectory_blocks import ColumnarTrace
-from gem.closedloop.dppo.journal_codec import decode_payload
+from gem.closedloop.dppo.journal_codec import decode_payload,encode_binary,encode_binary_reference
 from gem.closedloop.dppo.vector_reward_adapter import VectorExecutionReward,compare_reward_evidence
 from gem.closedloop.dppo.full_dataset import FullMusicCatalog
 from gem.closedloop.dppo.target_activity import load_paired_activity
@@ -35,6 +35,7 @@ from gem.closedloop.dppo.trainer import fixed_targets
 def main():
     p=argparse.ArgumentParser(description=__doc__)
     for key in ('iteration','config','output'):p.add_argument('--'+key,type=Path,required=True)
+    p.add_argument('--compare-codecs',action='store_true',help='核对全部原始帧字节并分别计时旧新编码，非端到端吞吐')
     a=p.parse_args();rank=int(os.environ['LOCAL_RANK'])
     if int(os.environ['WORLD_SIZE'])!=8:raise ValueError('Requires Server1 eight ranks')
     torch.cuda.set_device(rank);torch.set_num_threads(1)
@@ -45,10 +46,17 @@ def main():
     task_by_episode={r.identity['episode_id']:r.metadata['training_task'] for r in rows}
     expected={(r.identity['episode_id'],d['tick']):d for r in rows for d in r.metadata['reward_details']}
     calculators={};warm={};observed={};times=dict(column_view_seconds=0.,scalar_seconds=0.,columnar_seconds=0.)
+    codec_times=dict(reference_seconds=0.,fast_seconds=0.,frames=0,bytes=0)
     journal=Path(source['rank_directory'])/'world_journal.sqlite'
     with sqlite3.connect(journal.resolve().as_uri()+'?mode=ro',uri=True) as db:
         for sha,payload in db.execute('SELECT sha256,payload FROM replies ORDER BY rowid'):
             value=decode_payload(payload,sha256=sha)
+            if a.compare_codecs:
+                start=time.perf_counter();old_bytes=encode_binary_reference(value);codec_times['reference_seconds']+=time.perf_counter()-start
+                start=time.perf_counter();new_bytes=encode_binary(value);codec_times['fast_seconds']+=time.perf_counter()-start
+                if old_bytes!=new_bytes or new_bytes!=payload:raise ValueError('Canonical journal bytes changed')
+                codec_times['frames']+=1;codec_times['bytes']+=len(new_bytes)
+                del old_bytes,new_bytes
             if not value.get('ok'):continue
             for reply in value['result'].get('replies',[]):
                 env=reply.get('result',{})
@@ -95,7 +103,8 @@ def main():
     for key in ('advantages_raw','returns','discounted_rewards'):torch.testing.assert_close(new[key],old[key],atol=1e-11,rtol=1e-11)
     report=dict(rank=rank,source=source,passed=True,controls=len(observed),episodes=len(calculators),timing=times,
         max_reward_difference=max_reward_difference,gae_max_abs_difference=float((new['advantages_raw']-old['advantages_raw']).abs().max()),
-        columnar_fallbacks=0,all_reward_fields_compared=True,physical_controls_unchanged=True)
+        columnar_fallbacks=0,all_reward_fields_compared=True,physical_controls_unchanged=True,
+        codecs=None if not a.compare_codecs else codec_times)
     (directory/'report.json').write_text(json.dumps(report,indent=2))
     reports=[None]*8;dist.all_gather_object(reports,report)
     if rank==0:(a.output/'report.json').write_text(json.dumps(dict(ranks=reports),indent=2))

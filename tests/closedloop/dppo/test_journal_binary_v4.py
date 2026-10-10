@@ -193,3 +193,16 @@ def test_fast_c_json_encoder_matches_reference_complete_bytes(fault):
     assert encode_binary(value)==encode_binary_reference(value)
     for broken in ({1:'bad'},{'__journal_array_v2__':{}},{'__nonfinite__':'nan'}):
         with pytest.raises((TypeError,ValueError)):encode_binary(broken)
+
+
+def test_fast_rpc_metadata_and_alias_payload_are_byte_identical():
+    from gem.runtime.closedloop_protocol import _raw_packet,_raw_packet_reference,_unpack
+    value=reply();value.pop('failure')
+    value['zeros']=[0.,-0.]
+    expected=_raw_packet_reference(value)
+    assert _raw_packet(value)==expected
+    assert _raw_packet(value,size_only=True)==(expected[0],len(expected[1]))
+    decoded=_unpack(*expected)
+    assert decoded['value'].dtype==value['value'].dtype
+    assert decoded['value'].tobytes()==value['value'].tobytes()
+    assert not np.shares_memory(decoded['value'],decoded['same'])

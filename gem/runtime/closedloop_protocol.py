@@ -115,7 +115,7 @@ def _pack_legacy(value: Any) -> tuple[bytes, bytes]:
     return metadata, buffer.getvalue()
 
 
-def _raw_packet(value: Any, *, size_only=False):
+def _raw_packet_reference(value: Any, *, size_only=False):
     """无ZIP成员循环：数组连续拼接，描述符显式给出dtype/shape/offset/size。"""
     parts, offsets, total = [], {}, 0
     def visit(item):
@@ -156,6 +156,34 @@ def _raw_packet(value: Any, *, size_only=False):
     metadata = json.dumps(dict(__rpc_wire__=WIRE_VERSION, value=visit(value)), ensure_ascii=False,
                           allow_nan=False, separators=(',', ':')).encode('utf-8')
     return metadata, total if size_only else b''.join(parts)
+
+
+def _raw_packet(value: Any, *, size_only=False):
+    """原v2字节合同的C层JSON快路；不再重建完整标量树，数组别名/上限不变。"""
+    def native(item):
+        kind=type(item)
+        if kind in (type(None),str,int,float,bool,np.ndarray):return True
+        if kind is dict:
+            if any(not isinstance(k,str) for k in item):raise TypeError('RPC mapping keys must be strings')
+            return all(native(v) for v in item.values())
+        if kind in (list,tuple):return all(native(v) for v in item)
+        return False
+    if not native(value):return _raw_packet_reference(value,size_only=size_only)
+    parts=[];offsets={};total=0
+    def default(item):
+        nonlocal total
+        if type(item) is not np.ndarray or item.dtype.hasobject or item.dtype.kind not in 'biufUS':
+            raise TypeError('Unsupported RPC array dtype/value')
+        if id(item) not in offsets:
+            size=item.nbytes
+            if total+size>MAX_PACKET_BYTES:raise ValueError('RPC arrays exceed packet limit')
+            offsets[id(item)]=(item,dict(offset=total,size=size,dtype=item.dtype.str,shape=list(item.shape)))
+            if not size_only:parts.append(item.tobytes(order='C'))
+            total+=size
+        return {'__ndarray_raw__':offsets[id(item)][1]}
+    metadata=json.dumps(dict(__rpc_wire__=WIRE_VERSION,value=value),ensure_ascii=False,
+        allow_nan=False,separators=(',',':'),default=default).encode('utf-8')
+    return metadata,total if size_only else b''.join(parts)
 
 
 def _pack(value: Any) -> tuple[bytes, bytes]:
