@@ -115,6 +115,41 @@ def test_columnar_rejects_swapped_identity_without_state_change():
     assert vector._last_tick is None and vector.control_count==0
 
 
+def test_world_timing_counts_replaced_reward_instances_without_negative_deltas():
+    from gem.closedloop.dppo.vector_reward_adapter import capture_columnar_timings
+    from gem.runtime.trajectory_blocks import pack_trace, ColumnarTrace
+    histories = []
+    # 模拟同一slot换episode：第二个对象从零计数，旧对象仍有大量累计历史。
+    with capture_columnar_timings() as total:
+        for instance in range(2):
+            oracle, reference, vector = calculators()
+            vector.columnar_timings['reward_field_assembly_seconds'] = 1000.
+            before = dict(vector.columnar_timings)
+            row = actual_step(0, speed=1.); row['env_id'] = 3
+            row['reward_primitives'] = packet(row, oracle)
+            result = vector.evaluate_batch(ColumnarTrace([pack_trace([row])]))[0]
+            compare_reward_evidence(result, reference.evaluate_step(row))
+            histories.append({k: v-before.get(k, 0.) for k, v in vector.columnar_timings.items()})
+    assert all(value >= 0 for value in total.values())
+    for key in total:
+        assert total[key] == pytest.approx(sum(row.get(key, 0.) for row in histories), abs=1e-12)
+    assert total['reward_field_assembly_seconds'] < 1000.
+
+
+def test_columnar_timing_scope_is_restored_after_failure():
+    from gem.closedloop.dppo.vector_reward_adapter import capture_columnar_timings
+    with capture_columnar_timings() as outer:
+        with pytest.raises(RuntimeError):
+            with capture_columnar_timings() as inner:
+                _, _, vector = calculators()
+                vector._record_columnar_timings({'test_seconds': 2.})
+                raise RuntimeError('injected world failure')
+        vector._record_columnar_timings({'test_seconds': 3.})
+    vector._record_columnar_timings({'test_seconds': 5.})
+    assert inner == {'test_seconds': 2.}
+    assert outer == {'test_seconds': 3.}
+
+
 @pytest.mark.parametrize('damage',['nan_duration','integer_consistency','extra_component'])
 def test_columnar_faults_keep_scalar_invalid_evidence_between_audits(damage):
     from gem.runtime.trajectory_blocks import pack_trace,ColumnarTrace

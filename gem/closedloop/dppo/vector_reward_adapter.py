@@ -10,11 +10,30 @@ GPU前一步PD目标通过预热自然建立，CPU副本同步维护以支持审
 """
 from __future__ import annotations
 from collections.abc import Mapping
+from contextlib import contextmanager
+from contextvars import ContextVar
 import copy
 import time
 import numpy as np
 from .rewards import ExecutionReward
 from .vector_reward_math import VECTOR_REWARD_VERSION, reward_config_sha
+
+_COLUMNAR_TIMING_SINK = ContextVar('stage10_columnar_reward_timing_sink', default=None)
+
+
+@contextmanager
+def capture_columnar_timings():
+    """按真实消费调用累计本轮计时，环境换episode/奖励对象不导致计数归零。
+
+    世界续体在同一调度线程运行；上下文只收集其调用，不读取全局对象或其他线程。
+    异常仍恢复外层上下文，已有累计值可用于故障证据；不改奖励计算或执行顺序。
+    """
+    totals = {}
+    token = _COLUMNAR_TIMING_SINK.set(totals)
+    try:
+        yield totals
+    finally:
+        _COLUMNAR_TIMING_SINK.reset(token)
 
 
 def compare_reward_evidence(actual, expected, path='reward'):
@@ -47,6 +66,13 @@ class VectorExecutionReward(ExecutionReward):
         self.last_columnar_fallback = None
         self.columnar_timings = {}
 
+    def _record_columnar_timings(self, timings):
+        sink = _COLUMNAR_TIMING_SINK.get()
+        for key, value in timings.items():
+            self.columnar_timings[key] = self.columnar_timings.get(key, 0.) + value
+            if sink is not None:
+                sink[key] = sink.get(key, 0.) + value
+
     def evaluate_batch(self, trace):
         """完整列式数值消费，逐行仅组装兼容证据；周期标量审计不省略。"""
         from gem.runtime.trajectory_blocks import ColumnarTrace
@@ -62,7 +88,12 @@ class VectorExecutionReward(ExecutionReward):
             # 原错误证据及逐步状态推进语义保持不变，不吞掉不合法奖励。
             self.columnar_fallbacks += 1
             self.last_columnar_fallback = str(error)
-            return [self.evaluate_step(row) for row in trace]
+            fallback_started = time.perf_counter()
+            try:
+                return [self.evaluate_step(row) for row in trace]
+            finally:
+                self._record_columnar_timings(dict(failed_columnar_attempt_seconds=fallback_started-started,
+                    scalar_fallback_seconds=time.perf_counter()-fallback_started))
         assembled=time.perf_counter()
         for i, (row, result) in enumerate(zip(trace, results)):
             if self.control_count % 100 == 0:
@@ -76,7 +107,7 @@ class VectorExecutionReward(ExecutionReward):
             self.control_count += 1
         self.columnar_seconds += time.perf_counter()-started
         timings['independent_audit_and_state_commit_seconds']=time.perf_counter()-assembled
-        for key,value in timings.items():self.columnar_timings[key]=self.columnar_timings.get(key,0.)+value
+        self._record_columnar_timings(timings)
         return results
 
     def evaluate_step(self, trace):

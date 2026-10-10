@@ -279,10 +279,12 @@ class WorldEnvironmentCollector(VectorEnvironmentCollector):
             self.world_timing['python_diagnostic_profiler_enabled']=True
             profile=cProfile.Profile();profile.enable()
         before = [state.transitions for state in self.states]
-        reward_before=[dict(getattr(state.resource.env.reward,'columnar_timings',{})) for state in self.states]
+        from .vector_reward_adapter import capture_columnar_timings
+        reward_timings={}
         try:
-            fragments=self._drive({slot:self._fragment_flow(slot,count_per_rank//self.num_envs,policy_version) for slot in range(self.num_envs)})
-            self.world_call('end_rollout',env_ids=list(range(self.num_envs)))
+            with capture_columnar_timings() as reward_timings:
+                fragments=self._drive({slot:self._fragment_flow(slot,count_per_rank//self.num_envs,policy_version) for slot in range(self.num_envs)})
+                self.world_call('end_rollout',env_ids=list(range(self.num_envs)))
         except BaseException as error:
             from .budget import atomic_json
             atomic_json(self.states[0].resource.env.output.parent/'failed_world_progress.json', dict(
@@ -291,7 +293,8 @@ class WorldEnvironmentCollector(VectorEnvironmentCollector):
                 requested_transitions=count_per_rank, completed_per_environment=[
                     state.transitions-value for state,value in zip(self.states,before)],
                 seconds=time.perf_counter()-started, batches=self.batch_reports, world_timing=self.world_timing,
-                audit_seconds=self.audit_seconds, partial_execution_is_not_accepted_rollout=True))
+                audit_seconds=self.audit_seconds, columnar_reward_cpu_timings=reward_timings,
+                partial_execution_is_not_accepted_rollout=True))
             raise
         finally:
             if profile is not None:
@@ -302,16 +305,13 @@ class WorldEnvironmentCollector(VectorEnvironmentCollector):
         protocol_after=self.world_call('transport_statistics') if protocol_before is not None else {}
         protocol_delta={key:value-protocol_before.get(key,0.) for key,value in protocol_after.items()}
         tails=[row.metadata['fragment_tail'] for fragment in rows for row in fragment if 'fragment_tail' in row.metadata]
-        reward_timings={}
-        for state,previous in zip(self.states,reward_before):
-            for key,value in getattr(state.resource.env.reward,'columnar_timings',{}).items():
-                reward_timings[key]=reward_timings.get(key,0.)+value-previous.get(key,0.)
         return rows,dict(schema=WORLD_FLOW_CONTRACT,fragment_contract=WORLD_FLOW_CONTRACT,
             boundary_wait_contract=self.boundary_wait_contract,boundary_wait_max_controls=self.boundary_wait_max_controls,
             total_transitions=sum(map(len,rows)),fragment_lengths=list(map(len,rows)),allocated_envs=self.num_envs,
             active_envs=self.num_envs,seconds=time.perf_counter()-started,batches=self.batch_reports,
             world_timing=self.world_timing,columnar_reward_cpu_timings=reward_timings,
             columnar_reward_timing_scope='all_consumed_controls_including_warmup_and_boundary_wait',
+            columnar_reward_timing_contract='per_consume_call_across_episode_replacements.v2',
             server_rpc_transport_timing=protocol_delta,normal_boundary_resets=0,
             administrative_drain_controls=sum(t['executed_control_steps'] for t in tails),
             administrative_drain_physics_steps=sum(t['executed_physics_steps'] for t in tails),
