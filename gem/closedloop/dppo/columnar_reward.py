@@ -38,6 +38,9 @@ def evaluate_columns(reward, trace):
     if any(block['count'] and len(block['columns']['fields']['physics_substeps']['fields']) != 4
            for block in trace.blocks):
         raise ValueError('normal control interval requires four actual physical substeps')
+    if any(block['count'] and set(block['columns']['fields']['reward_primitives']['fields']['components']['fields'])
+           != set(WEIGHTS)-{'music'} for block in trace.blocks):
+        raise ValueError('GPU reward identity/configuration/fields mismatch')
     ticks = col('tick')
     episodes = col('episode_id')
     if (ticks.dtype.kind not in 'iu' or np.any(ticks % 12) or
@@ -108,7 +111,8 @@ def evaluate_columns(reward, trace):
     for s in range(4):
         path = ('physics_substeps',s)
         physics_ticks = col(*path,'physics_tick')
-        if np.any(physics_ticks != ticks-12+(s+1)*3) or np.any(np.abs(col(*path,'dt_s')-cfg['dt']/4)>1e-12):
+        durations=_finite(col(*path,'dt_s'),'physical sample duration',(n,))
+        if np.any(physics_ticks != ticks-12+(s+1)*3) or np.any(np.abs(durations-cfg['dt']/4)>1e-12):
             raise ValueError('Invalid physical sample timestamp/duration')
         p = (*path,'physical_diagnostics')
         torque = _finite(col(*p,'pd_torque_estimate_nm'),'torque',(n,21))
@@ -129,7 +133,8 @@ def evaluate_columns(reward, trace):
                 velocity_sample_tick=col(*meta,'velocity_sample_tick')[i].item(),
                 time_s=col(*meta,'time_s')[i].item(),sampling_synchronized=bool(sync[i])))
     consistency_raw, consistency_norm = {}, {}
-    if not col('reference_consistency','valid').all(): raise ValueError('Invalid reference consistency')
+    consistency_valid=col('reference_consistency','valid')
+    if consistency_valid.dtype.kind!='b' or not consistency_valid.all(): raise ValueError('Invalid reference consistency')
     for key,tolerance in cfg['consistency'].items():
         value = _finite(col('reference_consistency',key),key,(n,))
         if np.any(np.abs(value)>tolerance): raise ValueError('Reference consistency construction error')

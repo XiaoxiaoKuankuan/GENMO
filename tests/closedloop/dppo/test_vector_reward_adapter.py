@@ -113,3 +113,25 @@ def test_columnar_rejects_swapped_identity_without_state_change():
     with pytest.raises(ValueError,match='identity'):
         vector.evaluate_batch(ColumnarTrace([pack_trace([row])]))
     assert vector._last_tick is None and vector.control_count==0
+
+
+@pytest.mark.parametrize('damage',['nan_duration','integer_consistency','extra_component'])
+def test_columnar_faults_keep_scalar_invalid_evidence_between_audits(damage):
+    from gem.runtime.trajectory_blocks import pack_trace,ColumnarTrace
+    oracle,_,vector=calculators()
+    first=actual_step(0);first['env_id']=3;first['reward_primitives']=packet(first,oracle)
+    vector.evaluate_step(first)
+    reference=copy.deepcopy(vector)
+    row=actual_step(1);row['env_id']=3;row['reward_primitives']=packet(row,oracle)
+    if damage=='nan_duration':row['physics_substeps'][0]['dt_s']=float('nan')
+    elif damage=='integer_consistency':row['reference_consistency']['valid']=1
+    else:row['reward_primitives']['components']['extra']={}
+    if damage=='extra_component':
+        with pytest.raises(ValueError,match='identity'):reference.evaluate_step(row)
+        with pytest.raises(ValueError,match='identity'):vector.evaluate_batch(ColumnarTrace([pack_trace([row])]))
+    else:
+        expected=reference.evaluate_step(row)
+        actual=vector.evaluate_batch(ColumnarTrace([pack_trace([row])]))[0]
+        compare_reward_evidence(actual,expected)
+        assert not actual['transition_valid']
+    assert vector.columnar_fallbacks==1
