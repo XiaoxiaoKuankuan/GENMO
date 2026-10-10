@@ -29,7 +29,7 @@ from tools.train_closedloop_stage10_8gpu import _available_gpus
 from gem.closedloop.dppo.trainer import load_actor
 from gem.closedloop.dppo.policy import DPPODiffusionPolicy, masked_joint_log_prob
 from gem.closedloop.dppo.execution_checks import policy_phase
-from gem.closedloop.dppo.numerical_execution import MODES
+from gem.closedloop.dppo.numerical_execution import MODES, ATTENTION_BACKENDS
 from gem.closedloop.dppo.parallel_support import root_call, local_call
 from gem.closedloop.dppo.distributed_runtime import DistributedCollectives
 from gem.closedloop.dppo.updater_v2 import _joint_kl
@@ -106,6 +106,7 @@ def main():
     for name in ('config', 'iteration', 'weights', 'output'):
         parser.add_argument('--'+name, type=Path, required=True)
     parser.add_argument('--modes', nargs='+', choices=MODES, default=list(MODES))
+    parser.add_argument('--attention-backend', choices=ATTENTION_BACKENDS)
     parser.add_argument('--repeats', type=int, default=5)
     parser.add_argument('--operator-profile', action='store_true')
     parser.add_argument('--compile-denoiser', action='store_true')
@@ -153,7 +154,7 @@ def main():
         gc.collect(); torch.cuda.empty_cache()
         try:
             policy = DPPODiffusionPolicy(actor, cfg_batch=True, numerical_layout='sample_matrix_bmm_fp32.v1',
-                defer_checks=True, precision_mode=mode)
+                defer_checks=True, precision_mode=mode, attention_backend=args.attention_backend)
             if args.fp32_blocked_gemm:
                 from gem.closedloop.dppo.numerical_execution import configure_blocked_fp32
                 configure_blocked_fp32(policy)

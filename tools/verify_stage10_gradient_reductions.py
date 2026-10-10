@@ -36,7 +36,7 @@ from gem.closedloop.dppo.policy import DPPODiffusionPolicy
 from gem.closedloop.dppo.tensor_cache import RolloutTensorCache
 from gem.closedloop.dppo.updater_v2 import actor_update_v2, analytic_kl_local, probability_check_local
 from gem.closedloop.dppo.parallel_support import cpu_snapshot, root_call, local_call
-from gem.closedloop.dppo.numerical_execution import MODES
+from gem.closedloop.dppo.numerical_execution import MODES, ATTENTION_BACKENDS
 
 
 @torch.no_grad()
@@ -124,6 +124,9 @@ def main():
     for key in ('iteration', 'weights', 'config', 'output'):
         parser.add_argument('--'+key, type=Path, required=True)
     parser.add_argument('--microbatches', nargs='+', type=int, default=[64, 128, 256])
+    parser.add_argument('--denoising-samples', nargs='+', type=int, choices=(4,8,20), default=[20],
+                        help='独立算法实验：每个K都有相同抽样计划的B1梯度参考，另报告相对完整20步差异')
+    parser.add_argument('--attention-backend', choices=ATTENTION_BACKENDS)
     parser.add_argument('--accumulator-repeats', type=int, default=5)
     parser.add_argument('--warmstart-adam', action='store_true',
                         help='先用原真实rollout执行一次参考PPO更新，固定得到的非空Adam供所有候选比较')
@@ -163,7 +166,7 @@ def main():
     payload = torch.load(args.weights, map_location='cpu', mmap=True, weights_only=False)
     actor.load_state_dict(payload['actor'])
     policy = DPPODiffusionPolicy(actor, cfg_batch=True, numerical_layout='sample_matrix_bmm_fp32.v1', defer_checks=True,
-                                 precision_mode=args.precision_mode)
+                                 precision_mode=args.precision_mode, attention_backend=args.attention_backend)
     if args.fp32_blocked_gemm:
         from gem.closedloop.dppo.numerical_execution import configure_blocked_fp32
         configure_blocked_fp32(policy)
@@ -202,13 +205,15 @@ def main():
         del warm_optimizer
     sensitive = [name for name, _ in actor.named_parameters() if any(
         word in name for word in ('gate_', 'norm', 'history_encoder', 'prefix_encoder', 'cond_embed'))]
-    variants = [('joint_gemm' if args.precision_mode else 'sample_bmm', 'fp64_reference', 1)]
-    variants += [(reduction, accumulation, micro)
+    base_variants = [('joint_gemm' if args.precision_mode else 'sample_bmm', 'fp64_reference', 1)]
+    base_variants += [(reduction, accumulation, micro)
         for reduction, accumulation in ([(red, mode) for red in args.weight_reductions for mode in args.accumulation_modes] if args.compact else
             [('joint_gemm', 'fp64_reference'), ('chunked_gemm', 'fp64_reference'),
             ('bounded_sample_bmm', 'fp64_reference'), ('joint_gemm', 'fp32'), ('joint_gemm', 'selective_fp64')]
         )
         for micro in args.microbatches]
+    variants = [(red,acc,micro,count) for count in dict.fromkeys([20,*args.denoising_samples])
+                for red,acc,micro in base_variants]
     report = dict(schema='stage10.gradient_reduction_audit.v1', devices=devices,
         source_archive_sha256=archive_sha, real_global_chains=len(manifest),
         preserved_source_archive=True, preserved_old_probabilities=True,
@@ -219,8 +224,9 @@ def main():
         warmstart_lr=config['stage10']['training']['actor_lr'] if args.warmstart_adam else None,
         adam_origin='one_fixed_real_PPO_warmup_step' if args.warmstart_adam else 'source_checkpoint',
         sensitive_parameter_names=sensitive, numerical_reference=variants[0], results=[])
-    reference = None
-    for reduction, accumulation, micro in variants:
+    references = {}
+    full_gradient_reference = None
+    for reduction, accumulation, micro, sampled_steps in variants:
         actor.load_state_dict(source_actor); actor.zero_grad(set_to_none=True)
         configure_gradients(actor, weight_reduction=reduction, accumulation=accumulation, sensitive_names=sensitive)
         optimizer = torch.optim.AdamW(trainable_actor_parameters(actor), lr=args.actor_lr, weight_decay=0.)
@@ -241,7 +247,8 @@ def main():
         update = actor_update_v2(policy, optimizer, rows, targets, global_manifest=manifest, distributed=collective,
             ppo_epochs=1, epoch_orders=[selected], actor_minibatch_internal_transitions=len(selected)*policy.steps,
             max_optimizer_steps=1, denoising_microbatch=micro, soft_kl_limit=None, gradient_diagnostics=False,
-            tensor_cache=cache, kl_check_mode='pre_step_plus_final', gradient_observer=observe)
+            tensor_cache=cache, kl_check_mode='pre_step_plus_final', gradient_observer=observe,
+            denoising_steps_per_chain=sampled_steps, generator=torch.Generator().manual_seed(625014))
         torch.cuda.synchronize(); updated = time.perf_counter()
         kl = analytic_kl_local(policy, rows, distributed=collective, global_manifest=manifest,
             denoising_microbatch=256, tensor_cache=cache)
@@ -251,6 +258,9 @@ def main():
             peak_allocated_bytes=torch.cuda.max_memory_allocated(), reserved_bytes=torch.cuda.memory_reserved()))
         terminal = terminal_outputs(policy, rows, f'cuda:{rank}')
         item = dict(reduction=reduction, accumulation=accumulation, microbatch=micro,
+            denoising_samples=sampled_steps, sampling_plan=update['steps'][0]['denoising_sampling'],
+            applied_internal_samples=update['applied_internal_sample_visits'],
+            final_kl_internal_samples=kl['fresh_internal_forwards'],
             probability=check, update_count=update['optimizer_steps'], final_kl=kl,
             hard_kl_accepted=bool(math.isfinite(kl['mean_joint_kl']) and kl['mean_joint_kl'] <= report['hard_kl_limit']),
             closedloop_validation_passed=False,
@@ -259,10 +269,19 @@ def main():
             weights = cpu_snapshot(actor.state_dict())
             adam = {f'{i}/{key}':value.cpu().clone() for i, state in optimizer.state_dict()['state'].items()
                     for key, value in state.items() if torch.is_tensor(value)}
+            reference = references.get(sampled_steps)
             if reference is None:
                 reference = gradients, weights, adam, terminal, kl
+                references[sampled_steps] = reference
                 item['reference'] = True
-            else:
+                if sampled_steps == 20: full_gradient_reference = reference
+            if sampled_steps != 20:
+                item['algorithm_comparison'] = dict(
+                    target='unbiased_uniform_timestep_estimator_not_equivalent_single_update',
+                    module_directions=module_directions(gradients,full_gradient_reference[0]),
+                    terminal_mean_max_abs_difference=float((terminal-full_gradient_reference[3]).abs().max()),
+                    final_kl_difference=kl['mean_joint_kl']-full_gradient_reference[4]['mean_joint_kl'])
+            if not item.get('reference'):
                 item['gradients'] = compare_named(gradients, reference[0], atol=3e-5, rtol=2e-4)
                 item['weights'] = compare_named(weights, reference[1], atol=1e-7, rtol=0.)
                 item['adam'] = compare_named(adam, reference[2], atol=1e-7, rtol=2e-4)
@@ -275,9 +294,9 @@ def main():
             report['results'].append(item)
             (args.output/'report.json').write_text(json.dumps(report, ensure_ascii=False, indent=2)+'\n')
             print(json.dumps(dict(reduction=reduction, accumulation=accumulation, microbatch=micro,
-                parity_passed=item.get('gradient_weight_adam_parity_passed'), hard_kl_accepted=item['hard_kl_accepted'],
+                denoising_samples=sampled_steps, parity_passed=item.get('gradient_weight_adam_parity_passed'), hard_kl_accepted=item['hard_kl_accepted'],
                 actor_seconds=max(t['actor_seconds'] for t in timing)), ensure_ascii=False), flush=True)
-        if reduction == 'sample_bmm':
+        if reduction == 'sample_bmm' and sampled_steps == 20:
             cost = benchmark_accumulator(actor, collective, args.accumulator_repeats)
             if rank == 0: report['accumulator_cost'] = cost
         del optimizer, gradients
