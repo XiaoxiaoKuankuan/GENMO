@@ -271,7 +271,8 @@ class WorldEnvironmentCollector(VectorEnvironmentCollector):
         for slot in range(self.num_envs):self._resource(slot)
         self.world_call('begin_rollout',env_ids=list(range(self.num_envs)))
         signature=self.policy._parameter_signature();self.batch_reports=[];self.world_timing={};started=time.perf_counter()
-        protocol_before=self.world_call('transport_statistics') if getattr(self.world,'batched_lane_ack',None) else None
+        protocol_before=(self.world_call('transport_statistics') if
+            getattr(self.world,'transport_statistics_contract',None)=='rpc.transport_cumulative.v1' else None)
         profile = None
         if self.states[0].resource.env.config['stage10'].get('performance',{}).get('python_world_profile',False):
             import cProfile

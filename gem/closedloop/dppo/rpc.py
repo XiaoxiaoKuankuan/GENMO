@@ -28,6 +28,7 @@ class AcknowledgedBackend:
         if hello['executed_seq'] != hello['acked_seq']:
             raise RuntimeError('Cannot adopt a worker with an unknown outstanding mutation')
         self.sequence = int(hello['executed_seq'])
+        self.transport_statistics_contract=hello.get('transport_statistics_contract')
         self.episode_id = None
         self.last_envelope = None
         self.last_call_timing = None
