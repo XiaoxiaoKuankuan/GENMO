@@ -24,6 +24,7 @@ from .budget import atomic_json
 from .rollback_audit import compare_recovered_state
 from .updater_v2 import actor_update_v2, analytic_kl_local, probability_check_local
 from .performance import PhaseProfiler, activate, deactivate
+from .run_management import file_sha256
 
 
 @torch.no_grad()
@@ -68,6 +69,11 @@ def run_fixed_work_probe(c, rows, targets, manifest, backup, bc_before, rng):
     orders=[[selected[i] for i in torch.randperm(len(selected),generator=torch.Generator().manual_seed(445+epoch)).tolist()]
             for epoch in range(2)]
     def save():root_call(d,lambda:atomic_json(directory/'report.json',report))
+    attempts=0
+    def reserve():
+        nonlocal attempts
+        root_call(d,lambda:c.budget.reserve('fixed_work_probe',optimizer_attempts=1))
+        attempts+=1
     def restore():
         actor.load_state_dict(state['actor']);optimizer.load_state_dict(copy.deepcopy(state['actor_optimizer']))
         if c.bc is not None:c.bc.load_state_dict(copy.deepcopy(bc_before))
@@ -78,7 +84,7 @@ def run_fixed_work_probe(c, rows, targets, manifest, backup, bc_before, rng):
         kl_check_mode='pre_step_plus_final',bc=c.bc,bc_weight=c.settings['bc_weight'],
         clip=c.settings['ppo_clip'],gamma_denoising=c.settings['gamma_denoising'],
         grad_clip_norm=c.settings['grad_clip_norm'],
-        reserve_attempt=lambda:root_call(d,lambda:c.budget.reserve('fixed_work_probe',optimizer_attempts=1)))
+        reserve_attempt=reserve)
     reference=None;output_reference=None;recovery=None
     try:
         for micro in (128,256,512,1024):
@@ -171,8 +177,11 @@ def run_fixed_work_probe(c, rows, targets, manifest, backup, bc_before, rng):
         actual=dict(actor=actor.state_dict(),actor_optimizer=optimizer.state_dict(),
             bc=None if c.bc is None else c.bc.state_dict(),rng=capture_local_rng(c.generators))
         recovery=d.all_gather_object(local_call(d,lambda:compare_recovered_state(expected,actual)))
-        report.update(recovery_by_rank=recovery,seconds_including_restores=max(d.all_gather_object(time.perf_counter()-started)))
+        report.update(recovery_by_rank=recovery,optimizer_attempt_count=attempts,
+            seconds_including_restores=max(d.all_gather_object(time.perf_counter()-started)))
         save()
         if not all(item['identical'] for item in recovery):raise RuntimeError('Fixed-work diagnostic failed exact restoration')
-    return dict(report=str(directory/'report.json'),seconds=report['seconds_including_restores'],
+    digest=root_call(d,lambda:file_sha256(directory/'report.json'))
+    return dict(report=str(directory/'report.json'),report_sha256=digest,
+        optimizer_attempts=attempts,seconds=report['seconds_including_restores'],
         scope='finite_diagnostic_included_in_outer_wall_not_an_ordinary_round',restored_exactly=True)
