@@ -166,6 +166,7 @@ def runtime_preflight(config, *, check_gpu):
 
 
 def _sources(config, check):
+    stage = config['stage10']
     names = ('policy', 'buffer', 'rewards', 'critic', 'returns', 'music_tasks', 'target_activity',
              'env_adapter', 'rpc', 'budget', 'trainer', 'checkpoint', 'lr_calibration',
              'full_dataset', 'run_management', 'evaluation', 'long_run', 'archive_store')
@@ -176,6 +177,8 @@ def _sources(config, check):
                   'batch_execution', 'execution_checks', 'journal_codec', 'dual_collector',
                   'numerical_execution', 'training_scale', 'fixed_tile_linear', 'prepaid_budget', 'update_observation',
                   'effect_checkpoint', 'compensated_gemm', 'denoising_sampling')
+        if stage.get('performance', {}).get('fixed_work_probe_iteration') is not None:
+            names += ('fixed_work_probe',)
     vector = config.get('runtime',{}).get('backend') == 'gpu_vectorized.v1'
     if vector:
         names += ('vector_collector','vector_boundary','vector_environment','vector_runtime','vector_evaluation',
@@ -192,6 +195,8 @@ def _sources(config, check):
     return collect_source_provenance(config['paths'], repository_state=check['repositories'], additional_files={
         'genmo_repo': [*(f'gem/closedloop/dppo/{n}.py' for n in names),
             'tools/train_closedloop_stage10.py', 'gem/runtime/trajectory_blocks.py', 'gem/closedloop/__init__.py',
+            *(['tools/verify_stage10_saved_learning.py','tools/verify_stage10_gradient_reductions.py',
+               'tools/stage10_step_gradient_report.py'] if stage.get('performance', {}).get('fixed_work_probe_iteration') is not None else []),
             'configs/closedloop/stage1_dataset_server1_fourset_90505_v1.yaml',
             'gem/closedloop/stage1_dataset.py', 'gem/closedloop/losses.py',
             *(['gem/closedloop/dppo/distributed_runtime.py', 'tools/train_closedloop_stage10_8gpu.py']

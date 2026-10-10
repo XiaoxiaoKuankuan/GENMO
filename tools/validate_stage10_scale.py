@@ -80,6 +80,7 @@ def main():
     parser.add_argument('--archive-compression-level',type=int,choices=range(1,10),
                         help='独立无损归档吞吐对照；不删除字段，不跳过回读SHA')
     parser.add_argument('--resume', action='store_true')
+    parser.add_argument('--fixed-work-probe',action='store_true',help='第二轮实际行为策略上的有界微批矩阵，不是普通轮计时')
     parser.add_argument('--denoising-samples',type=int,choices=(4,8,20),
         help='显式独立PPO目标对照；行为采样及最终完整KL仍20步，缺省不改配置')
     parser.add_argument('--actor-lr',type=float,help='有限校准的显式固定值；不进行扫描或自动回退')
@@ -87,6 +88,8 @@ def main():
     parser.add_argument('--profile-world', action='store_true',help='只用于Python外围定位，该轮不作无profiler吞吐结果')
     parser.add_argument('--deadline-seconds', type=int, default=3600)
     args = parser.parse_args()
+    if args.fixed_work_probe and (args.resume or args.rounds!=2):
+        raise ValueError('Fixed-work probe only permits a fresh finite two-round run')
     if not 300 <= args.deadline_seconds <= 7200: raise ValueError('Finite deadline must be 300..7200 seconds')
     output = args.output.resolve()
     if args.resume:
@@ -107,6 +110,7 @@ def main():
         select_learning_experiment(config,steps=args.denoising_samples,actor_lr=args.actor_lr,
             sensitive_output_fp64=args.sensitive_output_fp64,resume=False,sampling_strategy=args.sampling_strategy)
         config['stage10']['performance']['python_world_profile']=args.profile_world
+        if args.fixed_work_probe:config['stage10']['performance']['fixed_work_probe_iteration']=2
         # 临时归档与正式目录隔离，容量上限保持原授权。
         config['stage10']['storage']['archive_secondary']['root'] = str(output/'execution_archives')
         if args.archive_compression_level is not None:

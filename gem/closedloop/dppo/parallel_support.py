@@ -26,6 +26,12 @@ from .run_management import TrainingBudget
 def validate_v2_configuration(config):
     stage, settings = config['stage10'], config['stage10']['training']
     performance = stage.get('performance', {})
+    if performance.get('fixed_work_probe_iteration') is not None:
+        if (type(performance['fixed_work_probe_iteration']) is not int or performance['fixed_work_probe_iteration'] != 2
+                or settings['rollout_upper_steps'] != 2048 or settings.get('denoising_steps_per_chain',20) != 20
+                or settings['ppo_epochs'] != 2 or settings['actor_minibatch_internal_transitions'] != 40960
+                or settings['bc_batch'] != 128 or settings.get('bc_distribution') != 'all_ranks'):
+            raise ValueError('Fixed-work probe requires second-round actual 2048 Full20 data')
     if config['runtime'].get('backend') == 'gpu_vectorized.v1':
         runtime = config['runtime']
         if (type(runtime.get('num_envs')) is not int or not 1 <= runtime['num_envs'] <= settings['rollout_upper_steps_per_rank']

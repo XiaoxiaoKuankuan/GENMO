@@ -651,6 +651,12 @@ def _update_cached(c, buffer, targets, manifest, index):
         x0_reference = capture_x0_reference(c.policy, rows, global_manifest=manifest, distributed=c.distributed,
             denoising_microbatch=c.profile['microbatch'])
     try:
+        probe = None
+        if performance.get('fixed_work_probe_iteration') == index:
+            if not c.fixed_work_probe_allowed:
+                raise ValueError('Fixed-work probe is restricted to a new finite two-round run')
+            from .fixed_work_probe import run_fixed_work_probe
+            probe = run_fixed_work_probe(c, rows, targets, manifest, backup, bc_before, rng)
         active_phase = 'critic_seconds'
         started = time.perf_counter()
         critic_updater = critic_update_local
@@ -726,7 +732,7 @@ def _update_cached(c, buffer, targets, manifest, index):
     communication = (c.distributed.collect_gradient_timings(synchronize=True)
                      if hasattr(c.distributed, 'collect_gradient_timings') else {'scope':'unavailable'})
     return dict(communication=communication, actor=actor, critic=critic, kl=kl, probability_check=check,
-                timings=timings)
+                timings=timings, fixed_work_probe=probe)
 
 
 def run_parallel(args, config, collective, preflight):
@@ -737,6 +743,9 @@ def run_parallel(args, config, collective, preflight):
         workers=None, backend=None, journal=None, vector=None, writer=None, output=args.output_dir.resolve(),
         base_config=copy.deepcopy(config), config=copy.deepcopy(config), stage=config['stage10'],
         settings=config['stage9'], state=None)
+    c.fixed_work_probe_allowed = not args.resume and args.stop_after_iteration == 2
+    if c.stage.get('performance', {}).get('fixed_work_probe_iteration') is not None and not c.fixed_work_probe_allowed:
+        raise ValueError('Fixed-work probe cannot enter long training or resume')
     if hasattr(collective, 'enable_gradient_timing'):
         collective.enable_gradient_timing()
     stop = StopSignal(); stop.install()
