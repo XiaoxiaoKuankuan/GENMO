@@ -74,3 +74,31 @@ Stratified8固定选18/19，从0～17无放回均匀选6；前18步入选概率1
 ## 待补充的实测结果
 
 固定非空Adam的Actor/KL微批矩阵、当前逐步梯度、三环境布局、Full20/K8固定任务效果、压缩级别对照和独立恢复审计正在进行。此版本不自动推荐K8或启动正式训练，待后续实际结果追加后再给生产建议。
+
+## 代码位置与兼容性
+
+| 范围 | 主要文件/函数 | 本轮新增内容 |
+|---|---|---|
+| 列式训练数据 | `trajectory_blocks.py::ColumnarTrace`、`columnar_reward.py::evaluate_columns`、`VectorExecutionReward.evaluate_batch`、`buffer.cpu_snapshot` | 按列读取连续分项、批量活动/功率/音乐计算，共享不可变物理列；原标量审计仍执行 |
+| 可靠事务 | `world_collector.py`、`rpc.py`、GMT `vector_service.py::ack_lanes` | 全部结果及lane索引持久化后批量ACK；不增加物理步，不减SHA/幂等检查 |
+| 编解码 | `journal_codec.py`、`closedloop_protocol.py` | C层JSON直接遍历，原二进制payload和wire逐字节对照；独立协商统计能力 |
+| 张量缓存 | `tensor_cache.py::RolloutTensorCache.get` | 跨块分组批量索引，保留重复行和顺序；新增传输、命中和gather计数 |
+| 算法实验 | `denoising_sampling.py`、`updater_v2.py`、六份2048配置 | 显式Stratified8、逐步ratio/KL/clip；三拓扑和三optimizer minibatch分别配置 |
+| 恢复与诊断 | `rollback_audit.py::release_failed_computation`、`parallel_training.py`、`fixed_work_probe.py` | 异常文字先保留，再释放退出帧持有的图；OOM候选不冒充通过；同会话非空Adam对照后完整状态核验 |
+| 归档 | `archive_process.py`、`archives.py`、`long_run.py` | 可选gzip级别，原始成员SHA回读不变；在途任务计入队列峰值 |
+| 汇总与有限入口 | `report_stage10_pipeline.py`、`run_stage10_pipeline_matrix.py`、`benchmark_stage10_archive_level.py` | 分开真实采样/实际训练覆盖吞吐；八卡空闲检查、独立目录、有限轮数、退出码和实际接受轮数共同验收 |
+
+没有改动Stage1评估代码、GMT控制权重/动作定义或现有模型文件。新增代码均带中文模块说明，历史修改与实际失败均追加到根目录`记录文本.md`，不重写先前结果。
+
+有限对照入口（在服务器1、已同步的GENMO功能分支执行；必须使用新的输出目录）：
+
+```bash
+source /home/user/liwei/GENMO/.venv/bin/activate
+cd /home/user/liwei/GENMO-bumi-closedloop
+PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=. python -B tools/run_stage10_pipeline_matrix.py \
+  --gmt-repo /home/user/liwei/legged_lab_gmt \
+  --output /data1/user/liwei/GENMO_outputs/closedloop_stage10/manual_pipeline_matrix \
+  --cases env32 env16 optimizer1024 optimizer512
+```
+
+该命令是四个明确的两轮有限测试，不启动正式训练；各案例都会检查八卡空闲，发现其他计算进程即停止。K方案另外显式选择`full1024 uniform1024 stratified1024 full2048 uniform2048 stratified2048`，前一档各四轮、后一档各两轮，均累计4096真实转移。跨1024/2048时Actor/BC更新总数可能不同，报告必须注明；同档三个K方案保持相同预算与评估协议。
