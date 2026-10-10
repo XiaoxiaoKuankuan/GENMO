@@ -85,9 +85,12 @@ def test_vector_metrics_count_shared_generation_once_and_all_rewards():
     rows=[SimpleNamespace(reason=None,metadata=dict(timing={'critical_ready_seconds':.7},
         reward_details=[{'components':{'track':{'integrated_reward':.04},'music':.01}}])) for _ in range(8)]
     rows[-1].reason='rpc_timeout';rows[-1].metadata['rejection']='late_plan'
-    report=attach_vector_metrics(rows,{'batches':[{'generation_seconds':.6,'components':{'denoising_seconds':.5}}]})
+    report=attach_vector_metrics(rows,{'batches':[{'generation_seconds':.6,'components':{
+        'denoising_seconds':.5,'interval_scope':'current_stream_cuda_events'}}]})
     assert report['rejections']==report['timeouts']==1
     assert report['reward_component_sums']['track']==pytest.approx(.32)
     assert report['generation_timing_totals']['critical_ready_seconds']==pytest.approx(5.6)
     assert report['generation_batch_wall_seconds']==.6
     assert report['actor_phase_totals']['denoising_seconds']==.5
+    assert report['actor_timing_interval_scopes']==['current_stream_cuda_events']
+    assert 'interval_scope' not in report['actor_phase_totals']

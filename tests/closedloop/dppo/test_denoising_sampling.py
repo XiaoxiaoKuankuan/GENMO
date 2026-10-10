@@ -6,6 +6,7 @@
 这不是把抽样梯度等同单次全梯度：单次抽样方差需由真实rollout诊断单独报告。
 """
 import copy
+import pytest
 import torch
 from gem.closedloop.dppo.denoising_sampling import chain_steps,plan_record
 from gem.closedloop.dppo.updater_v2 import actor_update_v2,analytic_kl_local

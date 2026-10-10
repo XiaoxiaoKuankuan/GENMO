@@ -556,7 +556,8 @@ def _collect(c, index):
             if isinstance(value, (int, float)):
                 report['generation_timing_totals'][key] = report['generation_timing_totals'].get(key, 0.) + value
         for key, value in row.metadata.get('timing', {}).get('actor_phases', {}).items():
-            report['actor_phase_totals'][key] = report['actor_phase_totals'].get(key, 0.) + value
+            if isinstance(value,(int,float)) and not isinstance(value,bool):
+                report['actor_phase_totals'][key] = report['actor_phase_totals'].get(key, 0.) + value
         for detail in row.metadata.get('reward_details', []):
             for key, value in detail.get('components', {}).items():
                 if isinstance(value, dict):
