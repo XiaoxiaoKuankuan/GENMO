@@ -43,6 +43,8 @@ def main():
     p=argparse.ArgumentParser(description=__doc__)
     for name in ('iteration','weights','config','output'):p.add_argument('--'+name,type=Path,required=True)
     p.add_argument('--repeats',type=int,default=3)
+    p.add_argument('--probability-only',action='store_true')
+    p.add_argument('--reuse-inputs-from',type=Path)
     a=p.parse_args();rank=int(os.environ['LOCAL_RANK'])
     if int(os.environ['WORLD_SIZE'])!=8 or not 3<=a.repeats<=10:raise ValueError('Eight GPUs and 3..10 repeats required')
     torch.cuda.set_device(rank);torch.set_num_threads(1)
@@ -51,12 +53,15 @@ def main():
     group=dist.new_group(backend='nccl',timeout=timedelta(minutes=20))
     c=DistributedCollectives(rank,8,device=f'cuda:{rank}',tensor_group=group)
     directory=a.output/f'rank{rank:02d}';directory.mkdir(parents=True,exist_ok=False)
-    rows,targets,source=load_rank(a.iteration,rank,directory/'unpacked')
+    inputs=(a.reuse_inputs_from/f'rank{rank:02d}'/'unpacked' if a.reuse_inputs_from else directory/'unpacked')
+    rows,targets,source=load_rank(a.iteration,rank,inputs,reuse_verified=bool(a.reuse_inputs_from))
     if len(rows)!=256:raise ValueError('Fixed-work acceptance requires 2048 real global chains')
     config=configuration(a.config);config['runtime']['genmo_device']=f'cuda:{rank}'
     settings=config['stage10']['training'];performance=config['stage10']['performance']
     actor,train_config,_=load_actor(config)
     payload=torch.load(a.weights,map_location='cpu',mmap=True,weights_only=False)
+    source_difference={n:float((v.cpu()-payload['actor'][n]).abs().max()) for n,v in actor.state_dict().items()
+                       if not torch.equal(v.cpu(),payload['actor'][n])}
     actor.load_state_dict(payload['actor'])
     policy=DPPODiffusionPolicy(actor,steps=20,eta=settings['eta'],std_floor=settings['std_floor'],
         guidance_scale=settings['guidance_scale'],cfg_batch=True,numerical_layout=performance['numerical_layout'],
@@ -69,8 +74,20 @@ def main():
         valid=r.transition_valid,has_free=bool(r.free_mask.any())) for i,r in enumerate(rows)]) for v in shard]
     selected=[i for i,m in enumerate(manifest) if m['valid'] and m['has_free']]
     cache=RolloutTensorCache(rows,targets,c.device,max_device_bytes=4*1024**3)
-    probabilities={str(b):probability_check_local(policy,rows,global_manifest=manifest,distributed=c,
-        denoising_microbatch=b,tensor_cache=cache) for b in (128,256,512,1024)}
+    probabilities={}
+    for b in (128,256,512,1024):
+        if rank==0:print(json.dumps(dict(phase='probability',microbatch=b,source_difference=source_difference)),flush=True)
+        try:
+            probabilities[str(b)]=probability_check_local(policy,rows,global_manifest=manifest,distributed=c,
+                denoising_microbatch=b,tensor_cache=cache)
+        except Exception as error:
+            if rank==0:
+                (a.output/'probability_failure.json').write_text(json.dumps(dict(microbatch=b,error=repr(error),
+                    completed=probabilities,source_difference=source_difference,kernel=policy.kernel_config),indent=2))
+            raise
+        if rank==0:(a.output/'probability.json').write_text(json.dumps(probabilities,indent=2))
+    if a.probability_only:
+        cache.close();dist.destroy_process_group(group);dist.destroy_process_group();return
     optimizer=torch.optim.AdamW(trainable_actor_parameters(actor),lr=5e-9,weight_decay=0.)
     optimizer.load_state_dict(copy.deepcopy(payload['actor_optimizer']))
     config['stage9']['bc_batch']=128//8;config['stage9']['seed']=42+1000003*rank
@@ -146,7 +163,7 @@ def main():
             samples=samples,full_kl=kl,mean_difference=abs(kl['mean_joint_kl']-kl_reference['mean_joint_kl'])))
         save()
     report['cache']=c.all_gather_object(cache.report());save();cache.close()
-    shutil.rmtree(directory/'unpacked')
+    if not a.reuse_inputs_from:shutil.rmtree(directory/'unpacked')
     dist.destroy_process_group(group);dist.destroy_process_group()
 
 

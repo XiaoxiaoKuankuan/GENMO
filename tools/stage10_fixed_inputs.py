@@ -14,7 +14,7 @@ from gem.closedloop.dppo.rollout_storage import load_rollout_record
 from gem.closedloop.dppo.run_management import file_sha256
 
 
-def load_rank(iteration, rank, destination, *, journals=False):
+def load_rank(iteration, rank, destination, *, journals=False, reuse_verified=False):
     iteration, destination = Path(iteration), Path(destination)
     manifest=json.loads((iteration/'archive_manifest.json').read_text())
     archive=iteration/manifest['archive']
@@ -24,6 +24,15 @@ def load_rank(iteration, rank, destination, *, journals=False):
     needed={name for name in members if name.startswith(prefix) and (
         '/raw_samples/' in name or '/rollout/' in name or name.endswith('/fixed_targets.pt') or
         journals and name.endswith('/world_journal.sqlite'))}
+    if reuse_verified:
+        for name in needed:
+            relative=Path(name)
+            path=destination/relative
+            if (relative.is_absolute() or '..' in relative.parts or not path.is_file()
+                    or path.is_symlink() or path.stat().st_size!=members[name]['size_bytes']
+                    or file_sha256(path)!=members[name]['sha256']):
+                raise ValueError('Reusable diagnostic input no longer matches immutable archive')
+        return _read_rank(destination,rank,manifest,len(needed))
     destination.mkdir(parents=True,exist_ok=False)
     found=set()
     with tarfile.open(archive,'r|gz') as stream:
@@ -40,6 +49,10 @@ def load_rank(iteration, rank, destination, *, journals=False):
             if digest.hexdigest()!=members[item.name]['sha256']:raise ValueError('Member SHA mismatch')
             found.add(item.name)
     if found!=needed:raise ValueError('Incomplete archive')
+    return _read_rank(destination,rank,manifest,len(found))
+
+
+def _read_rank(destination,rank,manifest,member_count):
     rank_dir=destination/f'rank{rank:02d}'
     roll=json.loads((rank_dir/'rollout/manifest.json').read_text());rows=[];cache={}
     for chunk in roll['chunks']:
@@ -51,4 +64,4 @@ def load_rank(iteration, rank, destination, *, journals=False):
     if len(rows)!=roll['transition_count']:raise ValueError('Real rollout count differs')
     targets=torch.load(rank_dir/'fixed_targets.pt',weights_only=False,map_location='cpu')
     return rows,targets,dict(archive_sha256=manifest['archive_sha256'],rank_directory=str(rank_dir),
-                            real_local_chains=len(rows),members=len(found))
+                            real_local_chains=len(rows),members=member_count)
