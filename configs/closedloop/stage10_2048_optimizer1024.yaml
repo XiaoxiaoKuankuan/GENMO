@@ -1,0 +1,311 @@
+# 独立优化配置对照：全局每minibatch 1024条链；无早停时BC总量固定256条/轮。
+# 有限规模对照配置（不自动启动）：八卡每卡64活动环境，完整20步CFG；不自动启动。
+# 所有rollout、完整链minibatch和更新次数由stage10.scale统一推导。
+# 显式编译FP32及microbatch128/KL256已完成八卡真实两轮有限验收；不等于长期效果通过。
+# 主模型仍为明确的Stage1 s350000，随机核/clip/KL/奖励保持原配置。
+# 500轮是用户新预算；生成/物理/存储授权上限原值保留，缺口必须报告，不自动扩张。
+version: genmo.gmt_frozen_isaac.v1
+paths:
+  genmo_repo: /home/user/liwei/GENMO-bumi-closedloop
+  gmt_repo: /home/user/liwei/legged_lab_gmt
+  genmo_python: /home/user/liwei/GENMO/.venv/bin/python
+  isaac_python: /data0/user/liwei/closedloop_stage8_runtime/env_isaaclab/bin/python
+  checkpoint: /data0/user/liwei/GENMO_outputs/bumi_closedloop_stage1_90505_p6to18_z15_b256_s350k_8gpu_v1/checkpoints/s350000.pt
+  stats: /data0/user/liwei/datasets/bumi_music_umr70_mine_pass_v1/stats/qpos30_train_stats.json
+  kinematics: /home/user/liwei/GENMO-bumi-closedloop/configs/bumi/bumi_kinematics_robot_retargeter_fe934_v1.json
+  gmt_policy: /data0/user/liwei/closedloop_stage8_assets/gmt_model135000/model_135000_stage2.onnx
+  compat_profile: /home/user/liwei/legged_lab_gmt/configs/sim2sim/model_135000_stage2.json
+  isaac_contract: /data0/user/liwei/closedloop_stage8_assets/gmt_model135000/isaac_contract.json
+  data_root: /data0/user/liwei/datasets/bumi_music_umr70_mine_pass_90505_v1
+runtime:
+  backend: gpu_vectorized.v1
+  vector_collection_contract: genmo.world_batched_flow.v1
+  vector_boundary_wait_contract: bounded_reference_wait.v1
+  vector_boundary_wait_max_control_steps: 100
+  generation_batch: 64
+  vector_batch_wait_s: 0.0
+  prefix_deadline_contract: available_reference_deadline_cap.v1
+  vector_audit_contract: nested_world_journal_excluded.v1
+  vector_reward_contract: stage10.gpu_vector_continuous_reward.v1
+  vector_device_contract: isaac_global_gpu_index.v1
+  vector_fragment_contract: available_reference_fragment_boundary.v3
+  genmo_device: cuda:0
+  allow_shared_gpu: false
+  physics_device: cuda:0
+  headless: true
+  num_envs: 64
+  torch_threads: 4
+  rpc_timeout_s: 600
+  worker_start_timeout_s: 600
+  timing_contract: modeled_deployment.v3
+  vector_generation_contract: genmo.vector_generation_pipeline.v1
+  vector_evidence_contract: gmt.vector_columns.v1
+model:
+  history_steps: 50
+  ddim_steps: 20
+  guidance_scale: 2.5
+timing:
+  clock_hz: 600
+  decision_ticks: 300
+  control_ticks: 12
+  physics_ticks: 3
+  warmup_ticks: 600
+  min_prefix_frames: 12
+  lookahead_control_steps: 10
+  latency_guard_s: 0.04
+  calibration_warmup: 1
+  calibration_samples: 2
+  deployment_profile:
+    schema: genmo.deployment_delay_profile.v1
+    target: single_robot_single_request
+    prefix_budget_seconds: 0.38
+    samples_seconds:
+    - 0.26070217799860984
+    - 0.2588543399469927
+    - 0.2560029230080545
+    - 0.24379220989067107
+    - 0.2556550590088591
+    - 0.2538018390769139
+    - 0.24764974182471633
+    - 0.2576558298896998
+    - 0.25552060024347156
+    - 0.24952622689306736
+    - 0.2531918198801577
+    - 0.24276695807930082
+    - 0.2570537432329729
+    - 0.2614388820948079
+    - 0.2603578440612182
+    - 0.25853567582089454
+    provenance:
+    - path: /data1/user/liwei/GENMO_outputs/closedloop_stage10/gpu_vectorized_validation_20261009/environment_matrix_final_v1/n0001/rank00/calibration.json
+      sha256: d24f12472912d7f0ff04513598e6a21fe21d9efdbaedc4ca7cff4e66cc50a2ca
+    - path: /data1/user/liwei/GENMO_outputs/closedloop_stage10/gpu_vectorized_validation_20261009/environment_matrix_final_v1/n0001/rank01/calibration.json
+      sha256: 6beb21883a9ecf9030f935bbad669ce8283b021af5d31c7abb72c58eb43858a3
+    - path: /data1/user/liwei/GENMO_outputs/closedloop_stage10/gpu_vectorized_validation_20261009/environment_matrix_final_v1/n0001/rank02/calibration.json
+      sha256: bc88ff40fff37b54385f7fb43570186078d449ef02d749d18c06e5a75d06484c
+    - path: /data1/user/liwei/GENMO_outputs/closedloop_stage10/gpu_vectorized_validation_20261009/environment_matrix_final_v1/n0001/rank03/calibration.json
+      sha256: f1b088d3abf033a9bd7fba64d56de356affb9a7ea80c4ccc37d6de29f7edf27a
+    - path: /data1/user/liwei/GENMO_outputs/closedloop_stage10/gpu_vectorized_validation_20261009/environment_matrix_final_v1/n0001/rank04/calibration.json
+      sha256: 34d29d4ab0817fe010f0e2fd0fc46145e108bbbfa0da256ca1f2b401992abc75
+    - path: /data1/user/liwei/GENMO_outputs/closedloop_stage10/gpu_vectorized_validation_20261009/environment_matrix_final_v1/n0001/rank05/calibration.json
+      sha256: a1687b16fe8359434fcdbc37e739ac0a1afdbf838b0240c60572684bcca1f84f
+    - path: /data1/user/liwei/GENMO_outputs/closedloop_stage10/gpu_vectorized_validation_20261009/environment_matrix_final_v1/n0001/rank06/calibration.json
+      sha256: 89ad2136a3fb93d6c496dd0274c50c7c04cc4da51621f37a7987339cb37f9210
+    - path: /data1/user/liwei/GENMO_outputs/closedloop_stage10/gpu_vectorized_validation_20261009/environment_matrix_final_v1/n0001/rank07/calibration.json
+      sha256: f07bc15c09efed70c87772f54c5c536bfc431fa4a271dc1660b997bef2a26a84
+environment:
+  terrain: plane
+  ground_height_m: 0.0
+  initial_foot_clearance_m: 0.001
+  domain_randomization: false
+  observation_noise: false
+  external_perturbations: false
+  reset_randomization: false
+  actuator_delay_steps: 0
+  curriculum: false
+termination:
+  orientation_mode: separated_yaw
+  root_height_error_m: 0.2
+  non_yaw_orientation_error_rad: 0.6
+  yaw_error_rad: 1.5
+  end_effector_relative_height_error_m: 0.15
+diagnostics:
+  record_original_threshold_crossings: true
+  verify_actor_condition_edges: true
+  reward_substeps: true
+stage10:
+  performance:
+    rpc_wire_format: genmo.rpc.ndarray.raw.v2
+    optimizer_probe: true
+    tensor_cache: true
+    tensor_cache_max_bytes: 4294967296
+    balanced_minibatches: true
+    reuse_final_kl: true
+    module_gradient_every: 100
+    bc_batch_forward: true
+    value_snapshot_batch_size: 128
+    incremental_budget: true
+    block_rollout: true
+    disk_full_scan_every: 100
+    asset_full_check_every: 100
+    numerical_layout: sample_matrix_bmm_fp32.v1
+    defer_tensor_checks: true
+    profiler_every: 100
+    journal_format: genmo.execution_journal.ndarray.v2
+    gmt_state_reuse: true
+    gmt_trace_blocks: true
+    precision_mode: fp32_fast
+    numerical_variant: compiled_blocked64_fp32
+    weight_reduction: joint_gemm
+    weight_reduction_overrides:
+      denoiser.final_layer.fc2: joint_gemm_fp64
+    gradient_accumulation: fp32
+  distributed:
+    world_size: 8
+    backend: nccl
+    collection: all_ranks
+  version: genmo.closedloop.stage10.v2
+  seed: 42
+  training:
+    execution_mode: latency
+    denoising_steps: 20
+    guidance_scale: 2.5
+    eta: 0.1
+    std_floor: 0.001
+    log_probability_reduction: joint_sum
+    ppo_epochs: 2
+    actor_lr: 5.0e-09
+    critic_lr: 0.0001
+    critic_update_mode: distributed
+    x0_diagnostic_every: 0
+    critic_batch: 1024
+    grad_clip_norm: 1.0
+    gamma_upper: 0.99
+    lambda_upper: 0.95
+    gamma_denoising: 0.99
+    ppo_clip: 0.01
+    kl_stop_joint: 0.03
+    bc_weight: 0.1
+    bc_batch: 64
+    denoising_microbatch: 128
+    episode_seconds: 10.0
+    latency_budget_s: 0.5
+    critic_grad_clip_norm: 1.0
+    bc_prefix:
+      min_frames: 6
+      max_frames: 30
+      zero_probability: 0.15
+    cfg_batch: true
+    objective_logprob_reduction: joint_sum
+    kl_soft_stop_joint: 0.015
+    kl_max_internal: null
+    kl_max_step_mean: null
+    kl_max_chain: null
+    std_schedule: null
+    kl_check_mode: pre_step_plus_final
+    bc_distribution: all_ranks
+    kl_microbatch: 256
+  dataset:
+    split: train
+    random_start: true
+    source_probabilities:
+    - 0.2
+    - 0.35
+    - 0.25
+    - 0.2
+    require_audio: true
+  evaluation:
+    split: val
+    eval_count: 16
+    seeds:
+    - 42
+    - 1729
+    selection_seed: 42
+    start_mode: beginning
+    episode_seconds: 10.0
+    every_iterations: 50
+    samples_per_source: 4
+    effect_check_iterations:
+    - 100
+    - 200
+    - 500
+  limits:
+    accepted_iterations: 500
+    optimizer_attempts: 45000
+    generations: 2000000
+    control_steps: 60000000
+    physics_steps: 240000000
+  storage:
+    min_free_bytes: 107374182400
+    max_run_bytes: 2473901162496
+    checkpoint_reserve_bytes: 4294967296
+    rollout_chunk_size: 64
+    checkpoint_keep_last: 2
+    checkpoint_keep_every: 500
+    archive_completed_iterations: true
+    checkpoint_every_iterations: 500
+    archive_queue_size: 4
+    archive_secondary:
+      root: /data0/user/liwei/GENMO_outputs/closedloop_stage10_execution_archives/gpu_vectorized
+      max_bytes: 1869169767219
+      min_free_bytes: 107374182400
+  reward:
+    version: stage9.execution_reward.v2
+    dt: 0.02
+    track_weight: 2.5
+    music_weight: 2.0
+    stable_weight: 1.0
+    alive_weight: 0.5
+    cmd_penalty_weight: 0.15
+    torque_penalty_weight: 0.1
+    contact_penalty_weight: 0.2
+    joint_limit_penalty_weight: 0.5
+    failure_penalty: 5.0
+    rejected_plan_penalty: 0.5
+    scales:
+      root_height_m: 0.05
+      non_yaw_rad: 0.12
+      slide_m_s: 0.15
+    tracking:
+      objective: gmt.motion_tracking.v1
+      std:
+        anchor_pos: 0.3
+        anchor_ori: 0.4
+        body_pos: 0.3
+        body_ori: 0.4
+        joint_pos: 0.25
+        joint_vel: 1.4
+      weights:
+        anchor_pos: 0.14285714285714285
+        anchor_ori: 0.14285714285714285
+        body_pos: 0.2857142857142857
+        body_ori: 0.2857142857142857
+        joint_pos: 0.14285714285714285
+        joint_vel: 0.0
+    stable_mix:
+      root_height: 0.5
+      non_yaw: 0.5
+    music_mix:
+      beat: 0.7
+      intensity: 0.3
+    torque:
+      free_ratio: 0.8
+      mean_weight: 0.5
+      max_weight: 0.5
+    activity:
+      window_s: 0.5
+      inactive_target_rad_s: 0.1
+      full_gate_ratio: 0.5
+      epsilon: 1.0e-08
+      intensity_epsilon: 0.05
+      intensity_log_ratio: 2.0
+    music:
+      beat_window_s: 1.0
+      feature_fps: 30
+      beat_column: 34
+      beat_threshold: 0.5
+    contact:
+      slide_weight: 0.7
+      bad_contact_weight: 0.3
+      support_clearance_m: 0.025
+    joint_limit:
+      hard_range_margin_fraction: 0.05
+      numeric_tolerance_rad: 1.0e-06
+      actual_weight: 0.5
+      reference_weight: 0.5
+    consistency:
+      joint_vel_rms_rad_s: 0.0001
+      root_lin_vel_rms_m_s: 0.0001
+      root_ang_vel_rms_rad_s: 0.0001
+    diagnostics:
+      mechanical_power_weight: 0.0
+      impact_weight: 0.0
+    require_substeps: true
+  checks:
+    full_probability_every: 100
+    full_fingerprint_every: 100
+    sentinel_chains_per_rank: 1
+  scale:
+    decisions_per_environment: 4
+    actor_minibatch_chains: 1024
+    critic_epochs: 4
