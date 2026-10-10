@@ -34,6 +34,7 @@ import shutil
 import signal
 import tempfile
 import threading
+import time
 import uuid
 
 import torch
@@ -589,10 +590,14 @@ class GuardedStepJournal:
             self.disk_guard.account_file(Path(str(self.path) + suffix))
 
     def append_result(self, result):
+        started=time.perf_counter()
         encoded = self._journal.encode_result(result, format=self._journal.format)
+        encoded_at=time.perf_counter()
         self.disk_guard.check(2 * len(encoded.payload) + 65536)
         try:
             result = self._journal.append_encoded(encoded)
+            self.last_timing=dict(encode_and_sha_seconds=encoded_at-started,
+                                  **getattr(self._journal,'last_timing',{}))
             self.last_record = dict(identity=encoded.identity, sha256=encoded.sha256)
             return result
         finally:

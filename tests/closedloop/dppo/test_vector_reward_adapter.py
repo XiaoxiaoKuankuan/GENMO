@@ -82,3 +82,34 @@ from gem.closedloop.stage1_dataset import BumiClosedLoopStage1Dataset as direct
 assert direct is BumiClosedLoopStage1Dataset
 '''
     subprocess.run([sys.executable,'-B','-c',code],check=True)
+
+
+@pytest.mark.parametrize('block_size',[1,7,25])
+def test_columnar_complete_reward_and_causal_state(block_size):
+    from gem.runtime.trajectory_blocks import pack_trace, ColumnarTrace
+    oracle,reference,vector=calculators()
+    data=[]
+    for index in range(103):
+        row=actual_step(index,speed=1.+.1*(index%9));row['env_id']=3
+        row['reward_primitives']=packet(row,oracle);data.append(row)
+    for begin in range(0,len(data),block_size):
+        batch=data[begin:begin+block_size]
+        results=vector.evaluate_batch(ColumnarTrace([pack_trace(batch)]))
+        for row,result in zip(batch,results):
+            compare_reward_evidence(result,reference.evaluate_step(row))
+    assert vector.columnar_seconds>0 and vector.scalar_audits==2
+    assert vector.control_count==103 and vector._last_tick==reference._last_tick
+    for actual,expected in zip(vector.window,reference.window):
+        assert actual[0]==expected[0]
+        compare_reward_evidence(actual[1],expected[1])
+        compare_reward_evidence(actual[2],expected[2])
+    compare_reward_evidence(vector._previous_target,reference._previous_target)
+
+
+def test_columnar_rejects_swapped_identity_without_state_change():
+    from gem.runtime.trajectory_blocks import pack_trace, ColumnarTrace
+    oracle,_,vector=calculators();row=actual_step();row['env_id']=3
+    row['reward_primitives']=packet(row,oracle);row['reward_primitives']['episode_id']='wrong'
+    with pytest.raises(ValueError,match='identity'):
+        vector.evaluate_batch(ColumnarTrace([pack_trace([row])]))
+    assert vector._last_tick is None and vector.control_count==0

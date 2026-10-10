@@ -222,19 +222,26 @@ class VectorTrainingRuntime:
         report['seconds'] = time.perf_counter()-started
         report['synchronization_wait_seconds'] = max(0.,report['seconds']-report['local_compute_seconds'])
         report.update(rank=c.distributed.rank, gpu_peak_allocated_bytes=torch.cuda.max_memory_allocated(c.distributed.device))
+        snapshot_started=time.perf_counter()
         buffer = RolloutBuffer(count)
         for fragment in fragments:
             for row in fragment:buffer.append(row)
+        report['snapshot_seconds']=time.perf_counter()-snapshot_started
+        metric_started=time.perf_counter()
         from .vector_metrics import attach_vector_metrics
         attach_vector_metrics(buffer.transitions, report)
+        report['metric_processing_seconds']=time.perf_counter()-metric_started
         def freeze_targets():
             return freeze_buffer_targets(buffer,list(map(len,fragments)),c.critic,c.distributed.device,
                 critic_version=c.state['critic_updates'],batch_size=c.stage['performance']['value_snapshot_batch_size'],
                 gamma_upper=c.settings['gamma_upper'],lambda_upper=c.settings['lambda_upper'])
+        targets_started=time.perf_counter()
         targets = normalize_advantages_global(local_call(c.distributed,freeze_targets),distributed=c.distributed)
+        report['fixed_targets_with_rank_wait_seconds']=time.perf_counter()-targets_started
         manifest = build_global_manifest(buffer.transitions,c.distributed)
         if len(manifest)!=c.settings['rollout_upper_steps']:raise RuntimeError('Global vector batch changed')
         def persist():
+            persistence_started=time.perf_counter()
             writer = BlockRolloutWriter(path/'rollout',policy_version=c.state['policy_version'],
                 chunk_size=c.stage['storage']['rollout_chunk_size'],disk_guard=c.guard)
             for row in buffer.transitions:writer.append(row)
@@ -242,9 +249,12 @@ class VectorTrainingRuntime:
             report.update(rollout_manifest=str(published),transition_count=len(buffer),full_train_pool=True,
                 control_steps=sum(row.executed_control_steps for row in buffer.transitions))
             torch.save(targets,path/'fixed_targets.pt');c.guard.account_file(path/'fixed_targets.pt')
+            report['learning_data_persistence_seconds']=time.perf_counter()-persistence_started
             atomic_json(path/'collection.json',report)
         local_call(c.distributed,persist)
+        closing_started=time.perf_counter()
         self._finish_phase()
+        report['journal_and_budget_close_with_rank_wait_seconds']=time.perf_counter()-closing_started
         report['budget_persistence'] = dict(environments=getattr(self, 'last_budget_timings', []),
             scope='bounded_synchronous_flush_included_in_collection_walltime')
         report['through_persistence_seconds'] = time.perf_counter()-started

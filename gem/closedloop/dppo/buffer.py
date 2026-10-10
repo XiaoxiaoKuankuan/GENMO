@@ -19,6 +19,7 @@ import json
 import math
 from pathlib import Path
 import sqlite3
+import time
 from typing import Any, Mapping
 
 import numpy as np
@@ -27,19 +28,22 @@ import torch
 from gem.closedloop.contracts import validate_stage1_condition_batch
 
 
-def cpu_snapshot(value: Any) -> Any:
+def cpu_snapshot(value: Any, memo=None) -> Any:
     """递归复制 Tensor/NumPy/容器，所有 Tensor 与计算图和源缓冲断开。"""
-    if isinstance(value, torch.Tensor):
-        return value.detach().cpu().clone()
-    if isinstance(value, np.ndarray):
-        return value.copy()
-    if isinstance(value, Mapping):
-        return {key: cpu_snapshot(item) for key, item in value.items()}
-    if isinstance(value, tuple):
-        return tuple(cpu_snapshot(item) for item in value)
-    if isinstance(value, list):
-        return [cpu_snapshot(item) for item in value]
-    return copy.deepcopy(value)
+    if memo is None: memo={}
+    if type(value) in (type(None),str,int,float,bool): return value
+    if id(value) in memo: return memo[id(value)]
+    if isinstance(value, torch.Tensor):result=value.detach().cpu().clone()
+    elif isinstance(value, np.ndarray):result=value.copy()
+    elif isinstance(value, Mapping):
+        from gem.runtime.trajectory_blocks import _TraceRow
+        result=(value.snapshot_columns(cpu_snapshot,memo) if isinstance(value,_TraceRow) else
+                {key:cpu_snapshot(item,memo) for key,item in value.items()})
+    elif isinstance(value, tuple):result=tuple(cpu_snapshot(item,memo) for item in value)
+    elif isinstance(value, list):result=[cpu_snapshot(item,memo) for item in value]
+    else:result=copy.deepcopy(value)
+    memo[id(value)]=result
+    return result
 
 
 @dataclass
@@ -244,6 +248,8 @@ class StepJournal:
         if encoded.format != self.format:
             raise ValueError('Encoded journal format differs from storage contract')
         identity, digest = encoded.identity, encoded.sha256
+        started=time.perf_counter()
+        self.last_timing={}
         with self.connection:
             existing = self.connection.execute("SELECT sha256 FROM replies WHERE identity=?", (identity,)).fetchone()
             if existing:
@@ -251,6 +257,9 @@ class StepJournal:
                     raise ValueError("same execution identity returned different payload")
                 return False
             self.connection.execute("INSERT INTO replies VALUES (?,?,?)", (identity, digest, encoded.payload.decode('utf-8') if self.format == 'json.v1' else sqlite3.Binary(encoded.payload)))
+            written=time.perf_counter()
+        self.last_timing=dict(sqlite_update_seconds=written-started,
+                              sqlite_commit_and_sync_seconds=time.perf_counter()-written)
         return True
 
     def __len__(self):

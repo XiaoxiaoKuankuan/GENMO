@@ -405,8 +405,7 @@ class UpperEnvironment:
                        ((tick//300)+1)*300)
             advanced = yield from self.advance_flow(min(25,(stop-tick)//12))
             reward_started = time.perf_counter()
-            for row in advanced:
-                result = self.reward.evaluate_step(row)
+            for row, result in zip(advanced, self.reward.evaluate_batch(advanced)):
                 if not result.get('transition_valid',False):
                     self._save_evidence({'row':row,'reward':result,'raw_sample_path':generated['raw_path']},
                                self.output/'invalid_reward.pt')
@@ -452,6 +451,11 @@ class UpperEnvironment:
                     if key in row}}.items():
                 backend_cpu_totals[name] = backend_cpu_totals.get(name, 0.) + float(seconds)
         consumed = sorted({str(p) for row in rows for p in row.get('consumed_plan_ids', [row.get('active_plan_id')]) if p is not None})
+        first_consumption = {}
+        for row in rows:
+            for plan in row.get('consumed_plan_ids', []):
+                if plan is not None:
+                    first_consumption.setdefault(str(plan),int(row['control_tick_begin']))
         metadata = dict(remaining_music_seconds=self.remaining_music(start),
             next_remaining_music_seconds=self.remaining_music(end), sampler_trace=trace,
             music_start_frame=getattr(self, 'music_start_frame', 0),
@@ -459,10 +463,14 @@ class UpperEnvironment:
             data_split=getattr(self, 'data_split', 'train'), backend_cpu_totals=backend_cpu_totals,
             generated=generated['generated'],published=commit,rejection=rejection,reward_details=details,
             events=events,consumed_plan_ids=consumed,event_reward=zero_step_event,event_penalty_total=event_reward,
+            consumed_plan_first_gmt_input_tick=first_consumption,
+            first_consumption_scope='actual_GMT_command_window_input_at_control_begin_not_reference_future_tick',
             raw_sample_path=generated['raw_path'],latency_seconds=generated['elapsed'],
             raw_evidence_identity=generated.get('timing', {}).get('raw_evidence_identity'),
             timing_contract=self.timing_contract, timing=generated.get('timing', {}),
             training_reward_seconds=training_reward_seconds,
+            reward_columnar_fallbacks=getattr(self.reward,'columnar_fallbacks',0),
+            reward_last_columnar_fallback=getattr(self.reward,'last_columnar_fallback',None),
             critical_ready_seconds=generated.get('critical_ready_seconds', generated['elapsed']),
             commit_seconds=generated.get('commit_seconds',0.),terminal_snapshot=cpu_copy(self.snapshot))
         if boundary is not None:metadata['reference_execution_boundary']=dict(boundary,reached=boundary_reached)

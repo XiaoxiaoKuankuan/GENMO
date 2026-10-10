@@ -82,6 +82,14 @@ class WorldEnvironmentCollector(VectorEnvironmentCollector):
         self.audit_seconds += (getattr(self.world, 'last_call_timing', None) or {}).get('journal_seconds', 0.)
         self.world_timing['world_rpc_seconds']=self.world_timing.get('world_rpc_seconds',0.)+time.perf_counter()-started
         self.world_timing['world_rpc_calls']=self.world_timing.get('world_rpc_calls',0)+1
+        key='world_'+method+'_calls'
+        self.world_timing[key]=self.world_timing.get(key,0)+1
+        for name in ('journal_seconds','transport_seconds','ack_seconds'):
+            key='world_'+name
+            self.world_timing[key]=self.world_timing.get(key,0.)+(getattr(self.world,'last_call_timing',{}) or {}).get(name,0.)
+        for name,seconds in (getattr(self.world,'last_call_timing',{}) or {}).get('journal_detail',{}).items():
+            key='world_journal_'+name
+            self.world_timing[key]=self.world_timing.get(key,0.)+seconds
         for name,value in result.get('timing',{}).items():self.world_timing[name]=self.world_timing.get(name,0.)+value
         if result.get('fatal'): raise RuntimeError(f'World execution failed after durable evidence: {result["fatal"]}')
         return result
@@ -194,14 +202,19 @@ class WorldEnvironmentCollector(VectorEnvironmentCollector):
                                 if operation.method=='reset_episode' and error is None:backend.episode_id=value['episode_id']
                                 if operation.method in ('advance','drain_fragment') and error is None:
                                     from gem.runtime.trajectory_blocks import expand_feedback
-                                    value={**expand_feedback(value, readonly_views=True, lazy=True), 'backend_session_id':backend.session_id,'mutation_seq':backend.sequence}
+                                    value={**expand_feedback(value, readonly_views=True, lazy=True, columnar=True), 'backend_session_id':backend.session_id,'mutation_seq':backend.sequence}
                             backend.last_call_timing=dict(method=operation.method,total_seconds=time.perf_counter()-begin,
                                 journal_seconds=0.,critical_seconds=time.perf_counter()-begin,
                                 audit_scope='authoritative_world_journal_plus_reference_index')
                             ready[slot]=(value,error)
                         if acknowledgements or pages_left or ack_pending:
                             ack_pending.update(entry['request_id'] for entry in acknowledgements)
-                            response=self.world_call('exchange',requests=acknowledgements)
+                            if (acknowledgements and not pages_left and
+                                    getattr(self.world,'batched_lane_ack',None)=='durable_world_and_lane_indices.v1'):
+                                response=self.world_call('ack_lanes',backend_session_id=self.world.session_id,
+                                                         requests=acknowledgements)
+                            else:
+                                response=self.world_call('exchange',requests=acknowledgements)
                             replies=response['replies']
                             pages_left=response.get('reply_page',{}).get('remaining_reply_count',0)
                             if not replies and not pages_left and ack_pending:

@@ -567,6 +567,10 @@ class ExecutionReward:
             "samples": details, "mean_w": float(np.mean([item["mean_w"] for item in details])),
             "mean_sum_w": float(np.mean([item["sum_w"] for item in details])), "max_w": max(item["max_w"] for item in details), "reward_weight": 0.}
 
+    def evaluate_batch(self, trace):
+        """旧单环境路径保持标量定义，列式GPU适配器独立覆盖。"""
+        return [self.evaluate_step(row) for row in trace]
+
     @profiled('collection.reward')
     def evaluate_step(self, trace):
         tick = trace.get("tick")

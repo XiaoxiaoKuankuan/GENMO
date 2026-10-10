@@ -16,7 +16,26 @@ def attach_vector_metrics(rows, report):
     report['actor_phase_totals']={}
     report['modeled_delay_ticks']=[]
     report['prefix_frames']=[]
+    report['boundary_wait_by_environment']=[]
+    report['new_reference_first_gmt_input']=[]
+    report['columnar_reward_fallbacks']=0
+    first={}
     for row in rows:
+        for plan,tick in row.metadata.get('consumed_plan_first_gmt_input_tick',{}).items():
+            key=(row.identity.get('env_id'),row.identity['episode_id'],plan)
+            first[key]=min(tick,first.get(key,tick))
+    for row in rows:
+        key=(row.identity.get('env_id'),row.identity['episode_id'],row.identity['plan_id'])
+        report['new_reference_first_gmt_input'].append(dict(env_id=key[0],episode_id=key[1],plan_id=key[2],
+            tick=first.get(key),observed=key in first))
+        tail=row.metadata.get('fragment_tail')
+        if tail is not None:
+            total=float(row.rewards.sum())+row.metadata.get('event_reward',0.)
+            report['boundary_wait_by_environment'].append(dict(env_id=key[0],episode_id=key[1],
+                control_steps=tail['executed_control_steps'],reward_sum=tail['reward_sum'],
+                fraction_of_last_transition_reward=None if total==0 else tail['reward_sum']/total))
+        report['columnar_reward_fallbacks']=max(report['columnar_reward_fallbacks'],
+            row.metadata.get('reward_columnar_fallbacks',0))
         clock=row.metadata.get('timing',{}).get('deployment_clock')
         if clock is not None: report['modeled_delay_ticks'].append(clock['delay_ticks'])
         prefix=row.metadata.get('generated',{}).get('prefix_frames')
@@ -43,7 +62,10 @@ def attach_vector_metrics(rows, report):
             report[target+'_min']=min(values)*scale
             report[target+'_max']=max(values)*scale
     report['generation_pipeline_totals']={}
+    report['effective_generation_batch_histogram']={}
     for batch in report['batches']:
+        size=str(batch['effective_rows'])
+        report['effective_generation_batch_histogram'][size]=report['effective_generation_batch_histogram'].get(size,0)+1
         for name,value in (batch.get('pipeline_timing') or {}).items():
             if name.endswith('_seconds') and isinstance(value,(int,float)):
                 report['generation_pipeline_totals'][name]=report['generation_pipeline_totals'].get(name,0.)+value

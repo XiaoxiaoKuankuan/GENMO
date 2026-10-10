@@ -24,6 +24,7 @@ class AcknowledgedBackend:
         if 'ack.v2' not in hello.get('execution_protocols', []):
             raise RuntimeError('Stage9 requires acknowledged execution protocol ack.v2')
         self.session_id = hello['backend_session_id']
+        self.batched_lane_ack = hello.get('batched_lane_ack')
         if hello['executed_seq'] != hello['acked_seq']:
             raise RuntimeError('Cannot adopt a worker with an unknown outstanding mutation')
         self.sequence = int(hello['executed_seq'])
@@ -79,7 +80,8 @@ class AcknowledgedBackend:
                 transport_seconds=transport_seconds, journal_seconds=journal_seconds,
                 ack_seconds=ack_seconds, critical_seconds=max(0., elapsed-journal_seconds),
                 journal_interval=(previous.get('journal_interval') if previous is not None
-                                  and previous.get('_started')==started else None))
+                                  and previous.get('_started')==started else None),
+                journal_detail=dict(getattr(self.journal,'last_timing',{})))
 
     def _mutation(self, method, payload, started):
         """只分离部署RPC与训练journal计时，持久化/ACK顺序和重发身份保持原样。"""

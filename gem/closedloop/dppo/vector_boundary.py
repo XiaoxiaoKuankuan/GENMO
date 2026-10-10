@@ -67,10 +67,11 @@ def finish_vector_fragment_flow(env,row,*,continue_episode,maximum_wait_controls
             snapshot['episode_id']!=previous['episode_id'] or snapshot['tick']!=previous['tick']+12*actual):
         raise ExecutionIntegrityError('Invalid vector fragment drain feedback')
     values=[];details=[]
-    for n,step in enumerate(trace):
+    reward_batch = (env.reward.evaluate_batch(trace) if hasattr(env.reward,'evaluate_batch') else
+                    [env.reward.evaluate_step(step) for step in trace])
+    for n,(step,reward) in enumerate(zip(trace,reward_batch)):
         if step['episode_id']!=row.identity['episode_id'] or step['env_id']!=row.identity['env_id'] or step['tick']!=previous['tick']+12*(n+1):
             raise ExecutionIntegrityError('Cross-environment or discontinuous fragment tail')
-        reward=env.reward.evaluate_step(step)
         if not reward.get('transition_valid'):raise ExecutionIntegrityError(f'Invalid tail reward: {reward.get("errors")}')
         values.append(float(reward['reward']));details.append(reward)
     newly_failed=bool(snapshot.get('terminated') and not previous.get('terminated'))
@@ -100,6 +101,10 @@ def finish_vector_fragment_flow(env,row,*,continue_episode,maximum_wait_controls
     row.metadata['event_penalty_total']+=penalty
     consumed={str(p) for step in trace for p in step.get('consumed_plan_ids',[]) if p is not None}
     row.metadata['consumed_plan_ids']=sorted(set(row.metadata['consumed_plan_ids'])|consumed)
+    first=row.metadata.setdefault('consumed_plan_first_gmt_input_tick',{})
+    for step in trace:
+        for plan in step.get('consumed_plan_ids',[]):
+            if plan is not None:first.setdefault(str(plan),int(step['control_tick_begin']))
     row.metadata['fragment_tail']=dict(executed_control_steps=actual,executed_physics_steps=4*actual,
         begin_tick=previous['tick'],end_tick=snapshot['tick'],contract=FRAGMENT_CONTRACT,
         execution_sequence=result['mutation_seq'],budget_reserved_controls=limit,

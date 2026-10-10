@@ -11,6 +11,7 @@ GPU前一步PD目标通过预热自然建立，CPU副本同步维护以支持审
 from __future__ import annotations
 from collections.abc import Mapping
 import copy
+import time
 import numpy as np
 from .rewards import ExecutionReward
 from .vector_reward_math import VECTOR_REWARD_VERSION, reward_config_sha
@@ -40,6 +41,38 @@ class VectorExecutionReward(ExecutionReward):
         super().__init__(*args, **kwargs)
         self.config_sha256 = reward_config_sha(self.config)
         self.control_count = self.scalar_audits = 0
+        self.vector_version = VECTOR_REWARD_VERSION
+        self.columnar_seconds = 0.
+        self.columnar_fallbacks = 0
+        self.last_columnar_fallback = None
+
+    def evaluate_batch(self, trace):
+        """完整列式数值消费，逐行仅组装兼容证据；周期标量审计不省略。"""
+        from gem.runtime.trajectory_blocks import ColumnarTrace
+        from .columnar_reward import evaluate_columns
+        if not isinstance(trace, ColumnarTrace):
+            return [self.evaluate_step(row) for row in trace]
+        if not len(trace): return []
+        started = time.perf_counter()
+        try:
+            results, new = evaluate_columns(self, trace)
+        except (ValueError, KeyError, IndexError, TypeError) as error:
+            # 原错误证据及逐步状态推进语义保持不变，不吞掉不合法奖励。
+            self.columnar_fallbacks += 1
+            self.last_columnar_fallback = str(error)
+            return [self.evaluate_step(row) for row in trace]
+        for i, (row, result) in enumerate(zip(trace, results)):
+            if self.control_count % 100 == 0:
+                reference = object.__new__(ExecutionReward)
+                reference.__dict__ = copy.deepcopy(self.__dict__)
+                compare_reward_evidence(result, reference.evaluate_step(row))
+                self.scalar_audits += 1
+            self.window.append(new[i])
+            self._last_tick, self._episode = row['tick'], row['episode_id']
+            self._previous_target = np.array(row['joint_position_target'], copy=True)
+            self.control_count += 1
+        self.columnar_seconds += time.perf_counter()-started
+        return results
 
     def evaluate_step(self, trace):
         packet = trace.get('reward_primitives', {})

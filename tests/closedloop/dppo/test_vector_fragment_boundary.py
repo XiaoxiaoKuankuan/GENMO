@@ -36,7 +36,8 @@ def fixture_env(*,source=5380,actual=0):
         assert method=='drain_fragment'
         assert actual<=payload['max_control_steps']
         calls.append(payload)
-        trace=[dict(episode_id='e',env_id=5,tick=5100+12*(i+1),consumed_plan_ids=['p']) for i in range(actual)]
+        trace=[dict(episode_id='e',env_id=5,tick=5100+12*(i+1),control_tick_begin=5100+12*i,
+                    consumed_plan_ids=['p']) for i in range(actual)]
         return dict(executed_control_steps=actual,executed_physics_steps=actual*4,physics_count_exact=True,
                     transition_valid=True,trace=trace,snapshot=dict(snapshot,tick=5100+actual*12),mutation_seq=12)
     def no_failure_event(*args):raise AssertionError('Administrative boundary is not physical failure')

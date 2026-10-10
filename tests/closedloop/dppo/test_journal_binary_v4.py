@@ -145,3 +145,35 @@ def test_scalar_fast_path_preserves_types_and_fault_markers():
     decoded = decode_payload(encode_binary(value))
     compare(value, decoded)
     assert np.signbit(decoded['items'][3])
+
+
+def test_columnar_pickle_snapshot_keeps_bytes_and_source_isolation():
+    import io
+    import torch
+    from gem.runtime.trajectory_blocks import pack_trace,ColumnarTrace
+    from gem.closedloop.dppo.buffer import cpu_snapshot
+    rows=[dict(v=np.array([i,-0.],dtype='>f8'),zero=(-0. if i%2 else 0.)) for i in range(25)]
+    block=pack_trace(rows);trace=ColumnarTrace([block])
+    cloned=cpu_snapshot(list(trace))
+    output=io.BytesIO();torch.save(cloned,output);output.seek(0)
+    restored=torch.load(output,weights_only=False)
+    for i,row in enumerate(restored):
+        assert row['v'].dtype==rows[i]['v'].dtype and row['v'].tobytes()==rows[i]['v'].tobytes()
+        assert np.signbit(row['zero'])==np.signbit(rows[i]['zero'])
+    block['columns']['fields']['v']['values'][:]=99
+    assert cloned[0]['v'][0]==0 and restored[0]['v'][0]==0
+    # 所有行引用同一个独立列快照，没有变成25份大数组。
+    assert all(row._fields is cloned[0]._fields for row in cloned)
+
+
+def test_columnar_join_preserves_non_native_array_bytes_and_signed_zero():
+    from gem.runtime.trajectory_blocks import pack_trace, ColumnarTrace, concatenate_trace_blocks, unpack_trace
+    values=[np.asarray([0.,-0.,i],dtype='>f8') for i in range(4)]
+    blocks=[pack_trace([{'state':v} for v in values[:2]]),pack_trace([{'state':v} for v in values[2:]])]
+    column=ColumnarTrace(blocks).column('state')
+    assert column.dtype==values[0].dtype
+    assert column.tobytes()==b''.join(v.tobytes() for v in values)
+    joined=unpack_trace(concatenate_trace_blocks(blocks),readonly_views=True)
+    for row,original in zip(joined,values,strict=True):
+        assert row['state'].dtype==original.dtype
+        assert row['state'].tobytes()==original.tobytes()

@@ -9,7 +9,7 @@ import copy
 import hashlib
 import json
 from functools import lru_cache
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 import numpy as np
 
 VERSION = 'genmo.control_trace.columns.v1'
@@ -36,14 +36,15 @@ def pack_trace(rows):
     def column(values):
         first = values[0]
         if all(isinstance(v,np.ndarray) and v.dtype==first.dtype and v.shape==first.shape for v in values) if isinstance(first,np.ndarray) else False:
-            return dict(kind='array', values=np.stack(values))
+            return dict(kind='array', values=np.stack(values).astype(first.dtype,copy=False))
         if isinstance(first,dict) and all(isinstance(v,dict) and v.keys()==first.keys() for v in values):
             return dict(kind='mapping', fields={k:column([v[k] for v in values]) for k in sorted(first)})
         if isinstance(first,(list,tuple)) and all(isinstance(v,type(first)) and len(v)==len(first) for v in values):
             return dict(kind='tuple' if isinstance(first,tuple) else 'list',
                         fields=[column([v[i] for v in values]) for i in range(len(first))])
         if first is None or isinstance(first,(str,int,float,bool)):
-            if all(type(v) is type(first) and v==first for v in values):
+            if all(type(v) is type(first) and v==first and
+                   (type(first) is not float or repr(v)==repr(first)) for v in values):
                 return dict(kind='constant',value=first,sha256=_constant_sha(first))
             if type(first) in (int,float,bool) and all(type(v) is type(first) for v in values):
                 array = np.asarray(values)
@@ -52,6 +53,18 @@ def pack_trace(rows):
         return dict(kind='rows', values=copy.deepcopy(values))
 
     return dict(schema=VERSION, count=len(rows), columns=column(rows) if rows else None)
+
+
+def _restore_column_fields(payload):
+    from gem.closedloop.dppo.journal_codec import decode_payload
+    return _ColumnFields(decode_payload(payload))
+
+
+class _ColumnFields(dict):
+    """独立列快照的单份无损存储，避免NumPy pickle规范化非本机字节序。"""
+    def __reduce_ex__(self, protocol):
+        from gem.closedloop.dppo.journal_codec import encode_binary
+        return _restore_column_fields, (encode_binary(dict(self)),)
 
 
 class _TraceRow(Mapping):
@@ -78,7 +91,14 @@ class _TraceRow(Mapping):
     def get(self,key,default=None):return self[key] if key in self._fields else default
     def copy(self):return {key:self[key] for key in self._fields}
     def __deepcopy__(self,memo):return {key:copy.deepcopy(self[key],memo) for key in self._fields}
-    def __reduce_ex__(self,protocol):return dict,(self.copy(),)
+    def __reduce_ex__(self,protocol):return _TraceRow,(self._fields,self._index)
+    def snapshot_columns(self, snapshot, memo):
+        """独立CPU快照保留列共享关系；不把同一25步数组展开复制25次。"""
+        fields=memo.get(id(self._fields))
+        if not isinstance(fields,_ColumnFields):
+            fields=_ColumnFields(snapshot(self._fields,memo))
+            memo[id(self._fields)]=fields
+        return _TraceRow(fields,self._index)
     def __setitem__(self,*args):raise TypeError('Trace row is read-only')
     def __delitem__(self,*args):raise TypeError('Trace row is read-only')
     def update(self,*args,**kwargs):raise TypeError('Trace row is read-only')
@@ -167,7 +187,46 @@ def unpack_trace(block, *, readonly_views=False, lazy=False):
     return decode(block['columns'])
 
 
-def expand_feedback(reply, *, readonly_views=False, lazy=False):
+class ColumnarTrace(Sequence):
+    """已核验块的只读训练视图；数值消费者直接取整列，审计按需访问完整行。
+
+    不复制完整回复，不省略字段或SHA核验。原始块一直由本对象持有，数值列不会
+    引用随后可被物理仿真修改的设备缓冲。多块仅连接被读取的列，缓存限于本回复。
+    """
+    def __init__(self, blocks):
+        self.blocks = tuple(blocks)
+        self._rows, self._columns = [], {}
+        for block in self.blocks:
+            self._rows.extend(unpack_trace(block, readonly_views=True, lazy=True))
+
+    def __len__(self): return len(self._rows)
+    def __getitem__(self, index): return self._rows[index]
+
+    def column(self, *path):
+        if path not in self._columns:
+            chunks = []
+            for block in self.blocks:
+                if not block['count']: continue
+                node = block['columns']
+                for key in path:
+                    node = node['fields'][key]
+                if node['kind'] in ('array', 'scalar'):
+                    value = node['values'].view()
+                elif node['kind'] == 'constant':
+                    value = np.broadcast_to(np.asarray(node['value']), (block['count'],))
+                else:
+                    value = np.asarray([_lazy_value(node, i) for i in range(block['count'])])
+                chunks.append(value)
+            value = (chunks[0].view() if len(chunks) == 1 else
+                     np.concatenate(chunks).astype(chunks[0].dtype,copy=False)
+                     if chunks and all(c.dtype==chunks[0].dtype for c in chunks) else
+                     np.concatenate(chunks) if chunks else np.empty(0))
+            value.setflags(write=False)
+            self._columns[path] = value
+        return self._columns[path]
+
+
+def expand_feedback(reply, *, readonly_views=False, lazy=False, columnar=False):
     """在 journal 已保存并 ACK 后，为奖励/旧审计恢复完整逐行视图。"""
     if isinstance(reply,dict) and 'trace_blocks' in reply:
         if 'trace' in reply or 'trace_block' in reply:
@@ -180,14 +239,17 @@ def expand_feedback(reply, *, readonly_views=False, lazy=False):
         total=sum(b['count'] for b in blocks)
         if type(reply.get('executed_control_steps')) is not int or total>2000 or total!=reply['executed_control_steps']:
             raise ValueError('Trace block sequence differs from actual control count')
-        rows=[row for block in blocks for row in unpack_trace(block,readonly_views=readonly_views,lazy=lazy)]
+        rows=(ColumnarTrace(blocks) if columnar else
+              [row for block in blocks for row in unpack_trace(block,readonly_views=readonly_views,lazy=lazy)])
         if len(rows)>2000 or len(rows)!=reply['executed_control_steps']:
             raise ValueError('Trace block sequence differs from actual control count')
         return {k:v for k,v in reply.items() if k!='trace_blocks'} | {'trace':rows}
     if isinstance(reply,dict) and 'trace_block' in reply:
         if 'trace' in reply:
             raise ValueError('Reply cannot contain two authoritative traces')
-        return {k:v for k,v in reply.items() if k!='trace_block'} | {'trace':unpack_trace(reply['trace_block'], readonly_views=readonly_views,lazy=lazy)}
+        return {k:v for k,v in reply.items() if k!='trace_block'} | {'trace':(
+            ColumnarTrace([reply['trace_block']]) if columnar else
+            unpack_trace(reply['trace_block'], readonly_views=readonly_views,lazy=lazy))}
     return reply
 
 
@@ -211,7 +273,9 @@ def concatenate_trace_blocks(blocks):
             return dict(kind=first['kind'],fields=[combine([(n['fields'][i],c) for n,c in parts]) for i in range(len(first['fields']))])
         if kinds == {'constant'} and all(n['sha256']==first['sha256'] for n,_ in parts): return first
         if len(kinds)==1 and first['kind'] in ('array','scalar'):
-            return dict(kind=first['kind'],values=np.concatenate([n['values'] for n,_ in parts]))
+            arrays=[n['values'] for n,_ in parts]
+            if all(v.dtype==arrays[0].dtype for v in arrays):
+                return dict(kind=first['kind'],values=np.concatenate(arrays).astype(arrays[0].dtype,copy=False))
         values=[]
         for node,count in parts:
             values.extend(unpack_trace(dict(schema=VERSION,count=count,columns=node)))
