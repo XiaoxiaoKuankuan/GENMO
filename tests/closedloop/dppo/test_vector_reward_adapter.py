@@ -27,11 +27,15 @@ def packet(row,oracle):
         **{key:row[key] for key in ('env_id','episode_id','tick')},components=result)
 
 
-def test_causal_stream_and_periodic_full_audit():
+@pytest.mark.parametrize("lazy",[False,True])
+def test_causal_stream_and_periodic_full_audit(lazy):
     oracle,reference,vector=calculators()
     for index in range(102):
         row=actual_step(index,speed=1.);row['env_id']=3
         row['reward_primitives']=packet(row,oracle)
+        if lazy:
+            from gem.runtime.trajectory_blocks import pack_trace,unpack_trace
+            row=unpack_trace(pack_trace([row]),readonly_views=True,lazy=True)[0]
         compare_reward_evidence(vector.evaluate_step(row),reference.evaluate_step(row))
     assert vector.scalar_audits==2 and vector.control_count==102
 
