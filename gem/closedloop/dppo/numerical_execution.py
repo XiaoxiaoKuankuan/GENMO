@@ -142,7 +142,11 @@ def compile_fixed_denoiser(policy, capacity=64):
             with torch.enable_grad():
                 if not parts[2].requires_grad:
                     parts[2] = parts[2].detach().requires_grad_(True)
-                action,contact=compiled(*parts)
+                # 普通轮只计调用次数；显式诊断轮用CUDA事件测量，轮末统一读取，
+                # 不在固定64行块之间同步GPU，不改变编译函数及其张量输入。
+                from .performance import measure
+                with measure('actor.compiled_fixed64_forward',gpu=True):
+                    action,contact=compiled(*parts)
             if not learning:
                 action,contact=action.detach(),contact.detach()
             heads.append(action[:count]);contacts.append(contact[:count])

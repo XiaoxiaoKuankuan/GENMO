@@ -23,6 +23,7 @@ from .parallel_support import (broadcast_state, capture_local_rng, restore_local
 from .budget import atomic_json
 from .rollback_audit import compare_recovered_state
 from .updater_v2 import actor_update_v2, analytic_kl_local, probability_check_local
+from .performance import PhaseProfiler, activate, deactivate
 
 
 @torch.no_grad()
@@ -92,8 +93,13 @@ def run_fixed_work_probe(c, rows, targets, manifest, backup, bc_before, rng):
                 def observe(model,step):
                     if d.rank==0:captured.append(cpu_snapshot({name:p.grad for name,p in model.named_parameters()}))
                 d.barrier();torch.cuda.synchronize();torch.cuda.reset_peak_memory_stats();begin=time.perf_counter()
-                update=actor_update_v2(c.policy,optimizer,rows,targets,denoising_microbatch=micro,
-                    gradient_observer=observe if repeat==0 else None,**kwargs)
+                profiler=PhaseProfiler(d.device,d.rank,detailed=True) if repeat==0 else None
+                token=activate(profiler) if profiler is not None else None
+                try:
+                    update=actor_update_v2(c.policy,optimizer,rows,targets,denoising_microbatch=micro,
+                        gradient_observer=observe if repeat==0 else None,**kwargs)
+                finally:
+                    if token is not None:deactivate(token)
                 torch.cuda.synchronize();seconds=time.perf_counter()-begin
                 memory=d.all_gather_object(dict(seconds=seconds,allocated_peak_bytes=torch.cuda.max_memory_allocated(),
                     reserved_bytes=torch.cuda.memory_reserved()))
@@ -101,6 +107,7 @@ def run_fixed_work_probe(c, rows, targets, manifest, backup, bc_before, rng):
                     raise ValueError('Fixed-work candidate changed update count or complete coverage')
                 if repeat>=2:times.append(max(item['seconds'] for item in memory))
                 if repeat==0:
+                    profiles=d.all_gather_object(profiler.report())
                     kl=analytic_kl_local(c.policy,rows,global_manifest=manifest,distributed=d,
                         denoising_microbatch=256,tensor_cache=cache)
                     outputs=_terminal_outputs(c.policy,rows,cache)
@@ -123,6 +130,7 @@ def run_fixed_work_probe(c, rows, targets, manifest, backup, bc_before, rng):
                             numerical_passed=all(g['passed'] for g in grad) and params['passed'] and moment['passed'] and
                                 all(item['comparison']['passed'] for item in output_reports))
                     diagnostic=root_call(d,compare)
+                    diagnostic['phase_profiles_by_rank']=profiles
                 del captured
             report['actor'].append(dict(microbatch=micro,p50=float(np.percentile(times,50)),p95=float(np.percentile(times,95)),
                 samples=times,diagnostic=diagnostic,memory_ranks=memory,optimizer_steps=2,
@@ -140,14 +148,21 @@ def run_fixed_work_probe(c, rows, targets, manifest, backup, bc_before, rng):
             times=[]
             for repeat in range(5):
                 d.barrier();torch.cuda.synchronize();begin=time.perf_counter()
-                kl=analytic_kl_local(c.policy,rows,global_manifest=manifest,distributed=d,
-                    denoising_microbatch=micro,tensor_cache=cache)
+                profiler=PhaseProfiler(d.device,d.rank,detailed=True) if repeat==0 else None
+                token=activate(profiler) if profiler is not None else None
+                try:
+                    kl=analytic_kl_local(c.policy,rows,global_manifest=manifest,distributed=d,
+                        denoising_microbatch=micro,tensor_cache=cache)
+                finally:
+                    if token is not None:deactivate(token)
                 torch.cuda.synchronize();seconds=max(d.all_gather_object(time.perf_counter()-begin))
+                if repeat==0:profiles=d.all_gather_object(profiler.report())
                 if repeat>=2:times.append(seconds)
                 if kl['fresh_internal_forwards']!=40960:raise ValueError('KL candidate omitted complete steps')
             if reference_kl is None:reference_kl=kl
             report['kl'].append(dict(microbatch=micro,p50=float(np.percentile(times,50)),p95=float(np.percentile(times,95)),
-                samples=times,report=kl,mean_difference=abs(kl['mean_joint_kl']-reference_kl['mean_joint_kl'])))
+                samples=times,report=kl,phase_profiles_by_rank=profiles,
+                mean_difference=abs(kl['mean_joint_kl']-reference_kl['mean_joint_kl'])))
             save()
     finally:
         local_call(d,restore)
