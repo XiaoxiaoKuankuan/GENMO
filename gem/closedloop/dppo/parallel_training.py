@@ -921,7 +921,7 @@ def run_parallel(args, config, collective, preflight):
         if not baseline_path.exists():
             baseline = _evaluate_and_record(c, report, 'initial')
             root_call(collective, lambda: atomic_json(baseline_path, baseline))
-        from .periodic_monitor import log_metrics
+        from .periodic_monitor import actor_minibatch_curves, log_metrics
         while c.state['iteration'] < args.stop_after_iteration:
             iteration_start = time.perf_counter()
             detail_every = c.stage.get('performance', {}).get('profiler_every', 1)
@@ -1013,7 +1013,7 @@ def run_parallel(args, config, collective, preflight):
                 c.manager.seal_iteration(directory, index, closed_journals=closed)
                 c.manager.append_metrics(dict(event='iteration_accepted', **summary))
                 curves = {key: value for key, value in summary.items() if key not in ('global_manifest', 'budget', 'replicas')}
-                curves['actor_minibatches'] = {f'step{i+1}': row for i, row in enumerate(update['actor']['steps'])}
+                curves['actor_minibatches'] = actor_minibatch_curves(update['actor']['steps'])
                 curves['denoising_steps'] = {f'step{i}': row for i, row in enumerate(update['kl']['per_denoising_step'])}
                 curves['collectors'] = {f'rank{i}': dict(row, wait_after_collection_seconds=
                     row['synchronization_wait_seconds']) for i, row in enumerate(summaries)}

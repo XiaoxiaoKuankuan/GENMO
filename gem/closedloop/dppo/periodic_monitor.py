@@ -427,6 +427,18 @@ def summarize_critic_predictions(predictions, targets):
                 target_variance=variance, mean_prediction=float(p.mean()), mean_target=float(t.mean()))
 
 
+def actor_minibatch_curves(records):
+    """将逐去噪步骤映射到稳定曲线标签，保留原始审计列表与缺测语义。
+
+    通用曲线展开器有意跳过任意列表，避免把全量链身份或大数组写成海量scalar。
+    这里只显式展开每次Actor更新的有限20步统计；未抽中的步骤没有ratio/KL均值，
+    仍为None而非零。Stratified8的访问分布与Full20不同，不在此重新加权或改数值。
+    """
+    return {f'step{index+1}': dict(record, denoising_steps={
+        f'step{step["step"]}': dict(step) for step in record.get('per_denoising_step', [])})
+        for index, record in enumerate(records)}
+
+
 def numeric_metrics(value, prefix=''):
     """展开有限嵌套数值；列表、文本和缺测不伪造为零。"""
     result = {}

@@ -22,6 +22,27 @@ from gem.closedloop.dppo.run_management import RunManager
 from tests.closedloop.dppo.test_stage10_async_archives import iteration, stage
 
 
+def test_actor_step_curves_keep_denoising_ratio_clip_and_missing_values(tmp_path):
+    import copy
+    from gem.closedloop.dppo.periodic_monitor import actor_minibatch_curves, log_metrics
+    records=[dict(optimizer_step=1,per_denoising_step=[
+        dict(step=0,visits=0,mean_joint_kl=None,mean_ratio=None,clip_fraction=None),
+        dict(step=19,visits=3,mean_joint_kl=.02,mean_ratio=1.002,clip_fraction=1/3)])]
+    original=copy.deepcopy(records)
+    logged=[]
+    writer=SimpleNamespace(add_scalar=lambda tag,value,step:logged.append((tag,value,step)))
+    values=log_metrics(writer,tmp_path/'curves.jsonl',7,
+        dict(actor_minibatches=actor_minibatch_curves(records)),durable=False)
+    prefix='actor_minibatches/step1/denoising_steps/'
+    assert values[prefix+'step19/mean_ratio']==1.002
+    assert values[prefix+'step19/clip_fraction']==1/3
+    assert values[prefix+'step19/mean_joint_kl']==.02
+    assert values[prefix+'step0/visits']==0
+    assert prefix+'step0/mean_ratio' not in values
+    assert (prefix+'step19/clip_fraction',1/3,7) in logged
+    assert records==original and isinstance(records[0]['per_denoising_step'],list)
+
+
 def test_cpu_sum_statistics_cover_presence_and_bucket_without_changing_gradients(monkeypatch):
     model = torch.nn.Module()
     model.first = torch.nn.Parameter(torch.ones(2))
