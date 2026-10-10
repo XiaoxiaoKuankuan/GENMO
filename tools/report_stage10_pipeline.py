@@ -72,8 +72,7 @@ def summarize(run):
                 'rank','control_steps','world_timing','server_rpc_transport_timing',
                 'snapshot_seconds','learning_data_persistence_seconds','synchronization_wait_seconds',
                 'generation_timing_totals','generation_pipeline_totals','generation_batch_wall_seconds',
-                'episode_reset_count','terminated_transition_count','truncated_transition_count',
-                'termination_reason_counts')} for c in collectors],
+                'terminated_transitions','truncated_transitions','termination_reasons')} for c in collectors],
             columnar_reward_timing_by_rank=[dict(rank=c['rank'],
                 contract=c.get('columnar_reward_timing_contract','legacy_object_counter_delta_may_reset'),
                 usable_for_breakdown=c.get('columnar_reward_timing_contract')=='per_consume_call_across_episode_replacements.v2'
