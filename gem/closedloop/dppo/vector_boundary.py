@@ -13,6 +13,7 @@ from __future__ import annotations
 import copy
 import torch
 from .env_adapter import ExecutionIntegrityError
+from .world_flow import backend_operation, run_synchronous, LocalOperation
 
 FRAGMENT_CONTRACT='available_reference_fragment_boundary.v3'
 
@@ -29,7 +30,14 @@ def fragment_reference_boundary(snapshot, *, minimum_prefix=12):
     return boundary
 
 
-def finish_vector_fragment(env,row,*,continue_episode):
+def finish_vector_fragment(env,row,*,continue_episode,maximum_wait_controls=None):
+    """同步兼容入口；世界级调度使用下面同一份续体，不复制奖励/预算公式。"""
+    return run_synchronous(env,finish_vector_fragment_flow(env,row,
+        continue_episode=continue_episode,maximum_wait_controls=maximum_wait_controls))
+
+
+def finish_vector_fragment_flow(env,row,*,continue_episode,maximum_wait_controls=None):
+    """有限轮末等待：所有实际控制步进入末条转移，超限明确截断并保留bootstrap。"""
     previous=env.snapshot
     remaining=min(env.music_end_tick,env.soft_end_tick)-previous['tick']
     limit=max(0,remaining//12) if continue_episode and not previous['done'] else 0
@@ -38,12 +46,19 @@ def finish_vector_fragment(env,row,*,continue_episode):
     if continue_episode and not previous['done']:
         supported_tick=fragment_reference_boundary(previous)
         limit=min(limit,(supported_tick-previous['tick'])//12)
+    reference_limited=limit<requested_limit
+    wait_limited=False
+    if maximum_wait_controls is not None:
+        if type(maximum_wait_controls) is not int or not 25<=maximum_wait_controls<=2000 or maximum_wait_controls%25:
+            raise ValueError('Boundary wait limit must be 25..2000 controls on the decision grid')
+        wait_limited=maximum_wait_controls<limit
+        limit=min(limit,maximum_wait_controls)
     if limit>2000:raise ExecutionIntegrityError('Vector fragment drain exceeds finite resource bound')
     end_reason='music_end' if env.music_end_tick<=env.soft_end_tick else 'collection_limit'
-    reference_limited=limit<requested_limit
     if reference_limited:end_reason='reference_horizon_truncated'
+    if wait_limited:end_reason='bounded_boundary_wait_limit'
     if limit:env.budget.reserve(env.phase,control_steps=limit,physics_steps=4*limit)
-    result=env.backend.call('drain_fragment',max_control_steps=limit,end_reason=end_reason,
+    result=yield from backend_operation('drain_fragment',max_control_steps=limit,end_reason=end_reason,
         advance_id=f"{previous['episode_id']}:fragment:{env.backend.sequence+1}")
     if limit:env.budget.settle_control(env.phase,limit,result)
     actual=result['executed_control_steps'];trace=result['trace'];snapshot=result['snapshot']
@@ -67,12 +82,18 @@ def finish_vector_fragment(env,row,*,continue_episode):
     if values:row.rewards=torch.cat((row.rewards,torch.tensor(values,dtype=row.rewards.dtype)))
     row.control_tick_end=snapshot['tick'];row.executed_control_steps+=actual;row.executed_physics_steps+=4*actual
     env.snapshot=snapshot
-    reference_exhausted=reference_limited and actual==limit
+    reference_exhausted=reference_limited and not wait_limited and actual==limit
+    wait_exhausted=wait_limited and actual==limit
     row.terminated=bool(row.terminated or snapshot.get('terminated') or snapshot['tick']>=env.music_end_tick)
     row.truncated=not row.terminated
     row.reason=snapshot.get('reason') or ('music_end' if row.terminated else
-        'reference_horizon_truncated' if reference_exhausted else 'collector_fragment_boundary')
-    row.next_context=None if row.terminated else env.preview_context()[0]
+        'reference_horizon_truncated' if reference_exhausted else
+        'bounded_boundary_wait_limit' if wait_exhausted else 'collector_fragment_boundary')
+    if row.terminated:row.next_context=None
+    else:
+        preview=(yield from env.preview_context_flow()) if hasattr(env,'preview_context_flow') else (
+            yield LocalOperation(env.preview_context,{}))
+        row.next_context=preview[0]
     row.metadata['next_remaining_music_seconds']=env.remaining_music()
     row.metadata['terminal_snapshot']=copy.deepcopy(snapshot)
     row.metadata['reward_details'].extend(details)
@@ -83,7 +104,8 @@ def finish_vector_fragment(env,row,*,continue_episode):
         begin_tick=previous['tick'],end_tick=snapshot['tick'],contract=FRAGMENT_CONTRACT,
         execution_sequence=result['mutation_seq'],budget_reserved_controls=limit,
         requested_control_steps=requested_limit,maximum_supported_decision_tick=supported_tick,
-        reference_horizon_truncated=reference_exhausted)
+        reference_horizon_truncated=reference_exhausted,wait_limit_controls=maximum_wait_controls,
+        wait_limit_reached=wait_exhausted,reward_sum=sum(values)+ (penalty if not values else 0.))
     row.validate()
     return actual, bool(row.terminated or snapshot['tick']>=env.soft_end_tick or
-                       not continue_episode or reference_exhausted)
+                       not continue_episode or reference_exhausted or wait_exhausted)

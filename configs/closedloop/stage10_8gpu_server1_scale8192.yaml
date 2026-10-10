@@ -19,6 +19,8 @@ paths:
 runtime:
   backend: gpu_vectorized.v1
   vector_collection_contract: genmo.world_batched_flow.v1
+  vector_boundary_wait_contract: bounded_reference_wait.v1
+  vector_boundary_wait_max_control_steps: 100
   generation_batch: 64
   vector_batch_wait_s: 0.0
   prefix_deadline_contract: available_reference_deadline_cap.v1

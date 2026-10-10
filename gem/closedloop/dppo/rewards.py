@@ -21,6 +21,7 @@ PD 目标变化按真实生效目标计算；力矩使用未裁剪的隐式 PD t
 的因果子窗，并严格要求目标监督使用完全相同的窗口，显式记录 window_complete。
 """
 from __future__ import annotations
+from collections.abc import Mapping
 
 from collections import deque
 import copy
@@ -110,8 +111,8 @@ def _merge(destination, overrides, prefix="reward"):
     for key, value in overrides.items():
         if key not in destination:
             raise ValueError(f"unknown {prefix} setting {key}")
-        if isinstance(destination[key], dict):
-            if not isinstance(value, dict):
+        if isinstance(destination[key], Mapping):
+            if not isinstance(value, Mapping):
                 raise ValueError(f"{prefix}.{key} must be a mapping")
             _merge(destination[key], value, f"{prefix}.{key}")
         else:
@@ -253,7 +254,7 @@ class ExecutionReward:
         speed = np.stack([row[2] for row in rows])
         actual = _scalar(np.sqrt(np.mean(speed ** 2)), "actual activity RMS")
         target = self.target_activity(int(tick))
-        if not isinstance(target, dict) or target.get("valid") is not True:
+        if not isinstance(target, Mapping) or target.get("valid") is not True:
             raise ValueError("A_target not_available or invalid")
         target_value = _scalar(target.get("activity_rad_s"), "A_target.activity_rad_s")
         if target_value < 0:
@@ -308,7 +309,7 @@ class ExecutionReward:
     def _track(self, row):
         """消费 GMT 原误差和选择证据；这里不重新对齐参考、不从评分反推误差。"""
         diagnostic = row.get("motion_tracking")
-        if not isinstance(diagnostic, dict) or diagnostic.get("schema") != TRACKING_OBJECTIVE:
+        if not isinstance(diagnostic, Mapping) or diagnostic.get("schema") != TRACKING_OBJECTIVE:
             raise ValueError("missing or incompatible frozen GMT motion_tracking diagnostics")
         if diagnostic.get("coordinate_frame") != "world" or diagnostic.get("quaternion_order") != "wxyz":
             raise ValueError("motion_tracking must retain GMT world coordinates and wxyz quaternions")
@@ -323,7 +324,7 @@ class ExecutionReward:
             raise ValueError("motion_tracking joint order must match frozen GMT native order")
         for side in ("reference", "actual"):
             values = diagnostic.get(side)
-            if not isinstance(values, dict):
+            if not isinstance(values, Mapping):
                 raise ValueError(f"motion_tracking requires {side} state evidence")
             for field, shape in (("anchor_pos_w", (3,)), ("anchor_quat_w", (4,)),
                                  ("body_pos_w", (len(body_names), 3)), ("body_quat_w", (len(body_names), 4)),
@@ -332,12 +333,12 @@ class ExecutionReward:
         for field, shape in (("body_pos_relative_w", (len(body_names), 3)), ("body_quat_relative_w", (len(body_names), 4))):
             _array(diagnostic["reference"].get(field), f"motion_tracking.reference.{field}", shape)
         terms = diagnostic.get("terms")
-        if not isinstance(terms, dict) or set(terms) != set(TRACKING_FUNCTIONS):
+        if not isinstance(terms, Mapping) or set(terms) != set(TRACKING_FUNCTIONS):
             raise ValueError("motion_tracking requires all six original GMT terms")
         raw, normalized, scores = {}, {}, {}
         for name, function in TRACKING_FUNCTIONS.items():
             term = terms[name]
-            if not isinstance(term, dict) or term.get("function") != function:
+            if not isinstance(term, Mapping) or term.get("function") != function:
                 raise ValueError(f"motion_tracking.{name} is not the original GMT function")
             if name.startswith(("body_", "joint_")):
                 kind = "body" if name.startswith("body_") else "joint"
@@ -524,7 +525,7 @@ class ExecutionReward:
 
     def _consistency(self, row):
         data = row.get("reference_consistency")
-        if not isinstance(data, dict) or data.get("valid") is not True:
+        if not isinstance(data, Mapping) or data.get("valid") is not True:
             raise ValueError("reference derivative support or consistency evidence unavailable")
         raw, normalized = {}, {}
         for key, tolerance in self.config["consistency"].items():
@@ -543,7 +544,7 @@ class ExecutionReward:
             velocity = _array(sample.get("joint_vel_gmt"), "joint velocity at physical sample", (21,))
             power = _array(np.abs(torque * velocity), "PD estimated mechanical power", (21,))
             metadata = d.get("mechanical_power_pd_estimate")
-            if not isinstance(metadata, dict):
+            if not isinstance(metadata, Mapping):
                 raise ValueError("PD mechanical power sampling-time evidence unavailable")
             for key in ("torque_sample_tick", "velocity_sample_tick", "time_s"):
                 _scalar(metadata.get(key), f"mechanical power {key}")

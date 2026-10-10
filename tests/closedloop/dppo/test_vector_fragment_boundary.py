@@ -111,3 +111,33 @@ def test_late_active_generation_keeps_real_controls_and_bootstrap(tmp_path,delay
         assert result.metadata['reference_execution_boundary']['simulated_arrival_tick']==1068
         assert any(method=='discard_plan' for method,_ in backend.calls)
     RolloutBuffer().append(result)
+
+
+def test_authorized_wait_limit_retains_actual_reward_budget_and_bootstrap():
+    env,row,calls,budget=fixture_env(source=9280,actual=25)
+    before=float(row.rewards.sum())
+    controls,ended=finish_vector_fragment(env,row,continue_episode=True,maximum_wait_controls=25)
+    assert controls==25 and ended and row.truncated and not row.terminated
+    assert row.reason=='bounded_boundary_wait_limit' and row.next_context is not None
+    assert row.metadata['fragment_tail']['wait_limit_reached']
+    assert not row.metadata['fragment_tail']['reference_horizon_truncated']
+    assert row.metadata['fragment_tail']['reward_sum']==6.25
+    assert float(row.rewards.sum())==before+6.25
+    assert budget==[dict(control_steps=25,physics_steps=100)]
+    assert calls[0]['end_reason']=='bounded_boundary_wait_limit'
+
+
+def test_world_wait_flow_yields_same_bounded_rpc_before_consuming_feedback():
+    from gem.closedloop.dppo.vector_boundary import finish_vector_fragment_flow
+    from gem.closedloop.dppo.world_flow import BackendOperation,LocalOperation
+    env,row,calls,budget=fixture_env(source=6280,actual=25)
+    flow=finish_vector_fragment_flow(env,row,continue_episode=True,maximum_wait_controls=50)
+    operation=next(flow)
+    assert isinstance(operation,BackendOperation) and operation.method=='drain_fragment'
+    assert not calls and budget==[dict(control_steps=50,physics_steps=200)]
+    feedback=env.backend.call(operation.method,**operation.payload)
+    preview=flow.send(feedback)
+    assert isinstance(preview,LocalOperation)
+    with pytest.raises(StopIteration) as result:flow.send(preview.function(**preview.arguments))
+    assert result.value.value==(25,False)
+    assert row.executed_control_steps==27 and row.metadata['fragment_tail']['reward_sum']==6.25

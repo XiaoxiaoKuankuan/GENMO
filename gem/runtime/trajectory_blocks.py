@@ -9,6 +9,7 @@ import copy
 import hashlib
 import json
 from functools import lru_cache
+from collections.abc import Mapping
 import numpy as np
 
 VERSION = 'genmo.control_trace.columns.v1'
@@ -53,19 +54,21 @@ def pack_trace(rows):
     return dict(schema=VERSION, count=len(rows), columns=column(rows) if rows else None)
 
 
-class _TraceRow(dict):
+class _TraceRow(Mapping):
     """权威列块的只读逐行适配器：只展开消费者实际访问的字段。
 
     块结构和每个常量SHA先完整验证；访问延迟不等于省略验证或物理证据。仅用于
-    journal已持久化后的奖励/状态消费。显式复制或序列化时完整展开，防止dict子类
-    的内部字段缓存被误当成全部证据；数组视图只读，普通协议缺省仍返回独立字典。
+    journal已持久化后的奖励/状态消费。不能继承dict：CPython的JSON快路径会把
+    尚未读取的内部缓存当空对象。Mapping使不支持的JSON直接报错，必须先显式
+    deepcopy完整展开；pickle和二进制Mapping编码仍完整保留所有字段。
     """
     def __init__(self, fields, index):
         self._fields,self._index=fields,index
+        self._cache={}
     def __getitem__(self,key):
-        if not dict.__contains__(self,key):
-            dict.__setitem__(self,key,_lazy_value(self._fields[key],self._index))
-        return dict.__getitem__(self,key)
+        if key not in self._cache:
+            self._cache[key]=_lazy_value(self._fields[key],self._index)
+        return self._cache[key]
     def __iter__(self):return iter(self._fields)
     def __len__(self):return len(self._fields)
     def __contains__(self,key):return key in self._fields

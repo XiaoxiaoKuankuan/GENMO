@@ -1,4 +1,4 @@
-# 大规模DPPO独立候选配置：八卡每卡64活动环境，完整20步CFG；不自动启动。
+# 有限规模对照配置（不自动启动）：八卡每卡64活动环境，完整20步CFG；不自动启动。
 # 所有rollout、完整链minibatch和更新次数由stage10.scale统一推导。
 # 显式编译FP32已通过概率/梯度/Adam诊断，microbatch128/KL256完整闭环仍待验收。
 # 主模型仍为明确的Stage1 s350000，随机核/clip/KL/奖励保持原配置。
@@ -303,6 +303,6 @@ stage10:
     full_fingerprint_every: 100
     sentinel_chains_per_rank: 1
   scale:
-    decisions_per_environment: 8
+    decisions_per_environment: 4
     actor_minibatch_chains: 2048
     critic_epochs: 4

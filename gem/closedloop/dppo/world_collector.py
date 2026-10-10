@@ -5,7 +5,9 @@
 advance，收到完整世界回复并可靠保存后批量ACK，才恢复对应续体。GENMO请求按
 独立配置合批，批内全部来自不同真实环境，20步链及每环境RNG身份不变。
 
-正常rollout结束只封存本轮证据，不reset/retire健康机器人，不推进额外drain。
+正常rollout结束只封存本轮证据。显式启用bounded_reference_wait.v1时，已采满环境
+可在参考有效且有限控制步内继续执行，完整反馈并入末条转移，不增加生成样本数。
+等待成本单列；到上限的环境行政截断，保留bootstrap，下一轮明确重置。
 本模块不伪造物理恢复：断点恢复仍创建新PhysX世界和新episode，保留预算消耗与
 采样游标。若严格每环境配额造成未完成的异步物理请求，明确报错并保留证据，绝不
 静默冻结部分机器人、扔掉实际执行或把额外长尾算作吞吐提升。
@@ -24,6 +26,7 @@ from .vector_generation import generate_batch
 from gem.runtime.closedloop_protocol import RemoteError
 
 WORLD_FLOW_CONTRACT = 'genmo.world_batched_flow.v1'
+BOUNDARY_WAIT_CONTRACT = 'bounded_reference_wait.v1'
 
 
 class _ImmediateExecutor:
@@ -50,11 +53,17 @@ class _DirectLane:
 
 
 class WorldEnvironmentCollector(VectorEnvironmentCollector):
-    def __init__(self, policy, factory, world_client, *, num_envs=64, generation_batch=64, timeout_seconds=600., **kwargs):
+    def __init__(self, policy, factory, world_client, *, num_envs=64, generation_batch=64, timeout_seconds=600.,
+                 boundary_wait_contract=None,boundary_wait_max_controls=100, **kwargs):
         if generation_batch < 1 or generation_batch > num_envs: raise ValueError('Invalid independent sampling batch')
         self.policy,self.factory=policy,factory
         self.world=world_client() if callable(world_client) else world_client
         self.num_envs,self.generation_batch,self.timeout_seconds=num_envs,generation_batch,timeout_seconds
+        if boundary_wait_contract not in (None,BOUNDARY_WAIT_CONTRACT):raise ValueError('Unknown boundary wait contract')
+        if (type(boundary_wait_max_controls) is not int or not 25<=boundary_wait_max_controls<=2000
+                or boundary_wait_max_controls%25):raise ValueError('Boundary wait must be bounded on decision grid')
+        self.boundary_wait_contract=boundary_wait_contract
+        self.boundary_wait_max_controls=boundary_wait_max_controls
         self.states=[None]*num_envs;self.executors=[_ImmediateExecutor() for _ in range(num_envs)]
         self.active=False;self.cancelled=threading.Event();self.rpc_pending={};self.rpc_sequence=0
         self.batch_reports=[];self.world_timing={};self.restore_records=None;self.shutdown_result=None
@@ -175,7 +184,7 @@ class WorldEnvironmentCollector(VectorEnvironmentCollector):
                                 acknowledgements.append(dict(env_id=slot,method='ack',payload=dict(
                                     backend_session_id=backend.session_id,through_seq=backend.sequence),request_id=self._request_id()))
                                 if operation.method=='reset_episode' and error is None:backend.episode_id=value['episode_id']
-                                if operation.method=='advance' and error is None:
+                                if operation.method in ('advance','drain_fragment') and error is None:
                                     from gem.runtime.trajectory_blocks import expand_feedback
                                     value={**expand_feedback(value, readonly_views=True, lazy=True), 'backend_session_id':backend.session_id,'mutation_seq':backend.sequence}
                             backend.last_call_timing=dict(method=operation.method,total_seconds=time.perf_counter()-begin,
@@ -219,7 +228,19 @@ class WorldEnvironmentCollector(VectorEnvironmentCollector):
                 manifest_sha256=task['sample']['manifest_sha256']))
             sampler.record_execution(task,row.executed_control_steps);rows.append(row);state.transitions+=1
             if row.terminated or row.truncated:state.task=None
-        if not rows[-1].terminated:
+        if self.boundary_wait_contract is not None:
+            from .vector_boundary import finish_vector_fragment_flow
+            tail_started=time.perf_counter()
+            task=state.task
+            extra,ended=yield from finish_vector_fragment_flow(env,rows[-1],continue_episode=task is not None,
+                maximum_wait_controls=self.boundary_wait_max_controls)
+            rows[-1].metadata['fragment_tail'].update(boundary_wait_contract=self.boundary_wait_contract,
+                wait_wall_seconds=time.perf_counter()-tail_started)
+            if extra:
+                if task is None:raise RuntimeError('Boundary executed without an active task')
+                sampler.record_execution(task,extra)
+            if ended:state.task=None
+        elif not rows[-1].terminated:
             rows[-1].truncated=True;rows[-1].reason=rows[-1].reason or 'collector_fragment_boundary'
         return rows
 
@@ -252,10 +273,17 @@ class WorldEnvironmentCollector(VectorEnvironmentCollector):
         self.world_call('end_rollout',env_ids=list(range(self.num_envs)))
         if signature!=self.policy._parameter_signature():raise RuntimeError('Policy changed during collection')
         rows=[fragments[i] for i in range(self.num_envs)]
+        tails=[row.metadata['fragment_tail'] for fragment in rows for row in fragment if 'fragment_tail' in row.metadata]
         return rows,dict(schema=WORLD_FLOW_CONTRACT,fragment_contract=WORLD_FLOW_CONTRACT,
+            boundary_wait_contract=self.boundary_wait_contract,boundary_wait_max_controls=self.boundary_wait_max_controls,
             total_transitions=sum(map(len,rows)),fragment_lengths=list(map(len,rows)),allocated_envs=self.num_envs,
             active_envs=self.num_envs,seconds=time.perf_counter()-started,batches=self.batch_reports,
-            world_timing=self.world_timing,normal_boundary_resets=0,administrative_drain_controls=0,
+            world_timing=self.world_timing,normal_boundary_resets=0,
+            administrative_drain_controls=sum(t['executed_control_steps'] for t in tails),
+            administrative_drain_physics_steps=sum(t['executed_physics_steps'] for t in tails),
+            administrative_drain_reward=sum(t['reward_sum'] for t in tails),
+            administrative_wait_max_wall_seconds=max((t['wait_wall_seconds'] for t in tails),default=0.),
+            administrative_wait_limit_reached=sum(t['wait_limit_reached'] for t in tails),
             training_reward_seconds=sum(row.metadata.get('training_reward_seconds',0.) for fragment in rows for row in fragment),
             real_environment_batch=True,gae_contract='independent_per_env_episode_contiguous_fragment')
 
@@ -296,11 +324,16 @@ class WorldEnvironmentCollector(VectorEnvironmentCollector):
     def state_dict(self):
         result=super().state_dict()
         result.update(schema='genmo.gpu_vector_collector.boundary.v2',fragment_contract=WORLD_FLOW_CONTRACT)
+        result.update(boundary_wait_contract=self.boundary_wait_contract,
+            boundary_wait_max_controls=self.boundary_wait_max_controls)
         return result
 
     def load_state_dict(self,saved):
         if saved.get('schema')!='genmo.gpu_vector_collector.boundary.v2' or saved.get('fragment_contract')!=WORLD_FLOW_CONTRACT:
             raise ValueError('World collector cannot transparently resume the old threaded collector')
+        if (saved.get('boundary_wait_contract')!=self.boundary_wait_contract or
+                saved.get('boundary_wait_max_controls',100)!=self.boundary_wait_max_controls):
+            raise ValueError('World collector boundary wait contract differs from checkpoint')
         # 共用已验收的逻辑RNG/预算恢复，输入版本先严格核验；物理仍明确重建。
         adapted=copy.deepcopy(saved)
         from .vector_boundary import FRAGMENT_CONTRACT

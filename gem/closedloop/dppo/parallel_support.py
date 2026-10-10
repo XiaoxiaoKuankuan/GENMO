@@ -41,6 +41,12 @@ def validate_v2_configuration(config):
             raise ValueError('GPU vector timing/prefix contracts must be explicit')
         if runtime.get('vector_collection_contract') not in (None, 'genmo.world_batched_flow.v1'):
             raise ValueError('Unknown world state machine contract')
+        if runtime.get('vector_boundary_wait_contract') is not None:
+            wait_controls=runtime.get('vector_boundary_wait_max_control_steps')
+            if (runtime['vector_boundary_wait_contract']!='bounded_reference_wait.v1' or
+                    runtime.get('vector_collection_contract')!='genmo.world_batched_flow.v1' or
+                    type(wait_controls) is not int or not 25<=wait_controls<=2000 or wait_controls%25):
+                raise ValueError('Explicit bounded world boundary wait contract required')
         if runtime.get('vector_collection_contract') is not None and (type(runtime.get('generation_batch')) is not int
                 or not 1 <= runtime['generation_batch'] <= runtime['num_envs']):
             raise ValueError('Independent world generation batch must fit active environments')

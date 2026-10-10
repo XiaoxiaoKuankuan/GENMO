@@ -9,6 +9,7 @@ GPU前一步PD目标通过预热自然建立，CPU副本同步维护以支持审
 旧CPU路径不导入本适配；使用者必须显式绑定新的奖励计算合同。
 """
 from __future__ import annotations
+from collections.abc import Mapping
 import copy
 import numpy as np
 from .rewards import ExecutionReward
@@ -16,12 +17,12 @@ from .vector_reward_math import VECTOR_REWARD_VERSION, reward_config_sha
 
 
 def compare_reward_evidence(actual, expected, path='reward'):
-    if isinstance(expected, dict):
-        if not isinstance(actual, dict) or set(actual) != set(expected):
+    if isinstance(expected, Mapping):
+        if not isinstance(actual, Mapping) or set(actual) != set(expected):
             raise AssertionError(f'{path}: reward evidence fields differ')
         for key in expected:
             compare_reward_evidence(actual[key], expected[key], f'{path}.{key}')
-    elif isinstance(expected, (list, tuple)) and expected and isinstance(expected[0], dict):
+    elif isinstance(expected, (list, tuple)) and expected and isinstance(expected[0], Mapping):
         if len(actual) != len(expected):
             raise AssertionError(f'{path}: reward evidence length differs')
         for index, (left, right) in enumerate(zip(actual, expected)):

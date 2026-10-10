@@ -16,6 +16,7 @@ modeled_deployment.v3进一步把虚拟部署时钟与训练墙钟分开：固�
 前缀预算和到达时刻，GPU批量/线程排队/保存仅记录性能；原等待期间物理和GAE不变。
 """
 from __future__ import annotations
+from collections.abc import Mapping
 
 import io
 import hashlib
@@ -44,7 +45,7 @@ def cpu_copy(value):
         return value.detach().cpu().clone()
     if isinstance(value, np.ndarray):
         return value.copy()
-    if isinstance(value, dict):
+    if isinstance(value, Mapping):
         return {k: cpu_copy(v) for k, v in value.items()}
     if isinstance(value, (list, tuple)):
         return type(value)(cpu_copy(v) for v in value)
@@ -230,7 +231,7 @@ class UpperEnvironment:
         timings = dict(timing_contract=self.timing_contract, journal_seconds=0.)
         def journal_seconds(method):
             record = getattr(self.backend, 'last_call_timing', None)
-            return (float(record['journal_seconds']) if isinstance(record, dict)
+            return (float(record['journal_seconds']) if isinstance(record, Mapping)
                     and record.get('method') == method else 0.)
         request = self._request()
         reservation = self.backend.call('reserve_prefix', request=request)

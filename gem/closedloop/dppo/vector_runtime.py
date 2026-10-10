@@ -85,7 +85,9 @@ class VectorTrainingRuntime:
         collector_type=WorldEnvironmentCollector if world_flow else VectorEnvironmentCollector
         self.collector = collector_type(c.policy, self._factory, world_factory,
             num_envs=self.num_envs, batch_wait_seconds=c.config['runtime']['vector_batch_wait_s'],
-            **({'generation_batch':c.config['runtime']['generation_batch']} if world_flow else {}))
+            **({'generation_batch':c.config['runtime']['generation_batch'],
+                'boundary_wait_contract':c.config['runtime'].get('vector_boundary_wait_contract'),
+                'boundary_wait_max_controls':c.config['runtime'].get('vector_boundary_wait_max_control_steps',100)} if world_flow else {}))
 
     def _journal(self, path):
         return GuardedStepJournal(path, self.c.guard, format='genmo.execution_journal.ndarray.v2')

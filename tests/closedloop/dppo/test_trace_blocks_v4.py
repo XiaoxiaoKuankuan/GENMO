@@ -4,6 +4,7 @@
 测试故障异构行和静态SHA篡改。编码不触发物理推进，不能据此宣称PhysX已验收。
 """
 import copy
+from collections.abc import Mapping
 import numpy as np
 import pytest
 from gem.runtime.trajectory_blocks import pack_trace, unpack_trace, expand_feedback
@@ -61,14 +62,18 @@ def test_lazy_rows_validate_before_access_and_preserve_all_consumed_evidence():
     rows=[actual_step(i,speed=1.) for i in range(25)]
     block=pack_trace(rows)
     lazy=unpack_trace(block,readonly_views=True,lazy=True)
-    assert isinstance(lazy[0],dict) and dict.__len__(lazy[0])==0
+    assert isinstance(lazy[0],Mapping) and not lazy[0]._cache
     compare(rows,lazy)
     compare(rows,copy.deepcopy(lazy))
     fresh=unpack_trace(block,readonly_views=True,lazy=True)
     compare(rows,pickle.loads(pickle.dumps(fresh)))
     with pytest.raises(TypeError,match='read-only'):lazy[0]['tick']=99
     constant=pack_trace([dict(x=1,nested=dict(y='value'))]*2)
-    assert json.loads(json.dumps(unpack_trace(constant,readonly_views=True,lazy=True)))==[dict(x=1,nested=dict(y='value'))]*2
+    view=unpack_trace(constant,readonly_views=True,lazy=True)
+    with pytest.raises(TypeError,match='JSON serializable'):
+        json.dumps(view)
+    assert json.loads(json.dumps(copy.deepcopy(view)))==[dict(x=1,nested=dict(y='value'))]*2
+    compare(view, decode_payload(encode_binary(view)))
     constant['columns']['fields']['nested']['fields']['y']['sha256']='wrong'
     with pytest.raises(ValueError,match='SHA'):
         unpack_trace(constant,readonly_views=True,lazy=True)

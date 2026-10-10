@@ -73,7 +73,7 @@ def test_unflushed_crash_does_not_refund_parent_reservation(tmp_path):
     assert TrainingBudget(root.path, limits()).state_dict()['used']['generations'] == 30
 
 
-@pytest.mark.parametrize('decisions,steps', [(8,4),(16,8),(32,16)])
+@pytest.mark.parametrize('decisions,steps', [(2,2),(4,2),(8,4),(16,8),(32,16)])
 def test_production_scale_derived_without_old_160_and_four_step_limits(decisions, steps):
     config = dict(runtime=dict(num_envs=64), stage10=dict(distributed=dict(world_size=8),
         scale=dict(decisions_per_environment=decisions, actor_minibatch_chains=2048, critic_epochs=4),
