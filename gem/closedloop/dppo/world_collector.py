@@ -241,6 +241,7 @@ class WorldEnvironmentCollector(VectorEnvironmentCollector):
                 if task['sample']['row']['split']!='train':raise ValueError('Validation sample in training world')
                 yield from env.reset_task_flow(task['sample'],task['music'],seed=env.config['stage9']['seed']+env.episode_count,
                     phase='train',music_start_frame=task['music_start_frame'])
+                self.world_timing['completed_environment_resets']=self.world_timing.get('completed_environment_resets',0)+1
                 state.task=task
             row=yield from env.step_flow()
             if not row.transition_valid or row.identity['policy_version']!=policy_version:raise ValueError('Invalid/mixed behavior policy')
@@ -312,6 +313,8 @@ class WorldEnvironmentCollector(VectorEnvironmentCollector):
             world_timing=self.world_timing,columnar_reward_cpu_timings=reward_timings,
             columnar_reward_timing_scope='all_consumed_controls_including_warmup_and_boundary_wait',
             columnar_reward_timing_contract='per_consume_call_across_episode_replacements.v2',
+            columnar_reward_fallbacks=reward_timings.fallback_calls,
+            columnar_reward_fallback_scope='actual_consume_batch_fallbacks_this_rollout',
             server_rpc_transport_timing=protocol_delta,normal_boundary_resets=0,
             administrative_drain_controls=sum(t['executed_control_steps'] for t in tails),
             administrative_drain_physics_steps=sum(t['executed_physics_steps'] for t in tails),

@@ -283,6 +283,7 @@ def audit_rollout(root, summary, data_lookup, contract, seen_paths, *, identity=
             rows.append(dict(identity=dict(item.identity), rewards=item.rewards.double().tolist(),
                 count=count, begin=item.control_tick_begin, end=item.control_tick_end,
                 terminated=bool(item.terminated), truncated=bool(item.truncated),
+                reason=item.reason,
                 has_next=item.next_context is not None, event_reward=float(item.metadata.get('event_reward', 0.)),
                 old_value=float(item.old_value), next_value=float(item.next_value),
                 free_coordinate_count=int(item.free_mask.sum()), audited_fragment_tail=tail))
@@ -293,7 +294,11 @@ def audit_rollout(root, summary, data_lookup, contract, seen_paths, *, identity=
     require(len(rows)==manifest['transition_count']==summary['collected_upper_transitions'], 'Published rollout transition count differs')
     require(controls==manifest['executed_control_steps']==summary['collection']['control_steps'] and physics==manifest['executed_physics_steps'], 'Rollout totals differ')
     require(summary['collection'].get('full_train_pool') is True, 'Training collection used a preselected subset')
-    return rows, dict(transition_count=len(rows), control_steps=controls, physics_steps=physics, source_transition_counts=dict(sources))
+    return rows, dict(transition_count=len(rows), control_steps=controls, physics_steps=physics, source_transition_counts=dict(sources),
+        terminated_transitions=sum(row['terminated'] for row in rows),
+        truncated_transitions=sum(row['truncated'] for row in rows),
+        episode_identities=[list(key) for key in sorted({(row['identity']['backend_session_id'],row['identity']['episode_id']) for row in rows})],
+        termination_reasons=dict(Counter(str(row['reason']) for row in rows if row['terminated'] or row['truncated'])))
 
 
 def audit_targets(root, summary, rows, contract, *, normalization=None):

@@ -107,7 +107,10 @@ def test_vector_metrics_count_shared_generation_once_and_all_rewards():
         metadata=dict(timing={'critical_ready_seconds':.7},
         reward_details=[{'components':{'track':{'integrated_reward':.04},'music':.01}}])) for i in range(8)]
     rows[-1].reason='rpc_timeout';rows[-1].metadata['rejection']='late_plan'
-    report=attach_vector_metrics(rows,{'batches':[{'effective_rows':8,'generation_seconds':.6,'components':{
+    rows[-1].terminated=True;rows[0].truncated=True;rows[0].reason='fragment_limit'
+    rows[0].metadata['reward_columnar_fallbacks']=99  # 旧episode累计值不能覆盖本轮真实次数。
+    report=attach_vector_metrics(rows,{'columnar_reward_fallbacks':2,
+        'batches':[{'effective_rows':8,'generation_seconds':.6,'components':{
         'denoising_seconds':.5,'interval_scope':'current_stream_cuda_events'}}]})
     assert report['rejections']==report['timeouts']==1
     assert report['reward_component_sums']['track']==pytest.approx(.32)
@@ -118,3 +121,6 @@ def test_vector_metrics_count_shared_generation_once_and_all_rewards():
     assert 'interval_scope' not in report['actor_phase_totals']
     assert report['effective_generation_batch_histogram']=={'8':1}
     assert not any(r['observed'] for r in report['new_reference_first_gmt_input'])
+    assert report['columnar_reward_fallbacks']==2
+    assert report['terminated_transitions']==report['truncated_transitions']==1
+    assert report['termination_reasons']=={'rpc_timeout':1,'fragment_limit':1}

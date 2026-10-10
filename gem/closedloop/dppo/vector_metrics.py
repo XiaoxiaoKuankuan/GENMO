@@ -18,7 +18,15 @@ def attach_vector_metrics(rows, report):
     report['prefix_frames']=[]
     report['boundary_wait_by_environment']=[]
     report['new_reference_first_gmt_input']=[]
-    report['columnar_reward_fallbacks']=0
+    fallback_count=report.get('columnar_reward_fallbacks')
+    report['columnar_reward_fallbacks']=0 if fallback_count is None else fallback_count
+    report['terminated_transitions']=sum(bool(getattr(row,'terminated',False)) for row in rows)
+    report['truncated_transitions']=sum(bool(getattr(row,'truncated',False)) for row in rows)
+    report['termination_reasons']={}
+    for row in rows:
+        if getattr(row,'terminated',False) or getattr(row,'truncated',False):
+            reason=str(row.reason)
+            report['termination_reasons'][reason]=report['termination_reasons'].get(reason,0)+1
     first={}
     for row in rows:
         for plan,tick in row.metadata.get('consumed_plan_first_gmt_input_tick',{}).items():
@@ -34,8 +42,9 @@ def attach_vector_metrics(rows, report):
             report['boundary_wait_by_environment'].append(dict(env_id=key[0],episode_id=key[1],
                 control_steps=tail['executed_control_steps'],reward_sum=tail['reward_sum'],
                 fraction_of_last_transition_reward=None if total==0 else tail['reward_sum']/total))
-        report['columnar_reward_fallbacks']=max(report['columnar_reward_fallbacks'],
-            row.metadata.get('reward_columnar_fallbacks',0))
+        if fallback_count is None:
+            report['columnar_reward_fallbacks']=max(report['columnar_reward_fallbacks'],
+                row.metadata.get('reward_columnar_fallbacks',0))
         clock=row.metadata.get('timing',{}).get('deployment_clock')
         if clock is not None: report['modeled_delay_ticks'].append(clock['delay_ticks'])
         prefix=row.metadata.get('generated',{}).get('prefix_frames')

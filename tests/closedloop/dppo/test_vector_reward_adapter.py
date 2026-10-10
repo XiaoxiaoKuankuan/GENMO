@@ -108,10 +108,14 @@ def test_columnar_complete_reward_and_causal_state(block_size):
 
 def test_columnar_rejects_swapped_identity_without_state_change():
     from gem.runtime.trajectory_blocks import pack_trace, ColumnarTrace
+    from gem.closedloop.dppo.vector_reward_adapter import capture_columnar_timings
     oracle,_,vector=calculators();row=actual_step();row['env_id']=3
     row['reward_primitives']=packet(row,oracle);row['reward_primitives']['episode_id']='wrong'
-    with pytest.raises(ValueError,match='identity'):
-        vector.evaluate_batch(ColumnarTrace([pack_trace([row])]))
+    with capture_columnar_timings() as timings:
+        with pytest.raises(ValueError,match='identity'):
+            vector.evaluate_batch(ColumnarTrace([pack_trace([row])]))
+    assert timings.fallback_calls == 1
+    assert timings['scalar_fallback_seconds'] >= 0
     assert vector._last_tick is None and vector.control_count==0
 
 

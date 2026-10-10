@@ -21,6 +21,13 @@ from .vector_reward_math import VECTOR_REWARD_VERSION, reward_config_sha
 _COLUMNAR_TIMING_SINK = ContextVar('stage10_columnar_reward_timing_sink', default=None)
 
 
+class _RewardTimingTotals(dict):
+    """秒数作为映射序列化，回退次数单独输出，避免混淆单位。"""
+    def __init__(self):
+        super().__init__()
+        self.fallback_calls = 0
+
+
 @contextmanager
 def capture_columnar_timings():
     """按真实消费调用累计本轮计时，环境换episode/奖励对象不导致计数归零。
@@ -28,7 +35,7 @@ def capture_columnar_timings():
     世界续体在同一调度线程运行；上下文只收集其调用，不读取全局对象或其他线程。
     异常仍恢复外层上下文，已有累计值可用于故障证据；不改奖励计算或执行顺序。
     """
-    totals = {}
+    totals = _RewardTimingTotals()
     token = _COLUMNAR_TIMING_SINK.set(totals)
     try:
         yield totals
@@ -92,6 +99,9 @@ class VectorExecutionReward(ExecutionReward):
             # 原错误证据及逐步状态推进语义保持不变，不吞掉不合法奖励。
             self.columnar_fallbacks += 1
             self.last_columnar_fallback = str(error)
+            sink = _COLUMNAR_TIMING_SINK.get()
+            if sink is not None:
+                sink.fallback_calls += 1
             fallback_started = time.perf_counter()
             try:
                 return [self.evaluate_step(row) for row in trace]
