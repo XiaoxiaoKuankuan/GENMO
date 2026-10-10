@@ -8,10 +8,14 @@ CUDA 12 的 PyTorch 仍使用自己的不同 SONAME 运行库，不覆盖系统 
 版本查询优先读取 Linux 进程已经实际映射的 libnvinfer 路径，不能用系统 ldconfig 中
 另一套库冒充当前 Python binding 所链接的版本。发现同时加载不同路径时明确拒绝。
 本模块只依赖标准库，也可直接作为安装器探针执行；不会创建 CUDA 上下文或运行模型。
+CUDA12部署按已安装的TensorRT绑定族预加载nvidia/cuda_runtime的libcudart.so.12，
+CUDA13保持原路径；两种TensorRT绑定同时存在时拒绝运行。安装探针可显式指定CUDA族，
+同时报告实际加载的libnvinfer和cudart路径，避免把系统另一套库当成当前wheel环境。
 """
 
 from __future__ import annotations
 
+import argparse
 import ctypes
 import ctypes.util
 import json
@@ -20,12 +24,35 @@ from importlib import metadata
 from pathlib import Path
 
 
-def prepare_tensorrt_libraries() -> None:
+def installed_tensorrt_cuda_major() -> int | None:
+    """按绑定发行包识别CUDA族，不把PyTorch的CUDA12运行库误认为TensorRT族。"""
+    families = []
+    for major in (12, 13):
+        try:
+            metadata.distribution(f"tensorrt-cu{major}-bindings")
+        except metadata.PackageNotFoundError:
+            continue
+        families.append(major)
+    if len(families) > 1:
+        raise RuntimeError("同时安装了CUDA12和CUDA13 TensorRT绑定，拒绝混用")
+    return families[0] if families else None
+
+
+def prepare_tensorrt_libraries(cuda_major: int | None = None) -> None:
+    installed = installed_tensorrt_cuda_major()
+    if installed is not None and cuda_major is not None and installed != cuda_major:
+        raise RuntimeError(f"TensorRT CUDA族不匹配：已有{installed}，要求{cuda_major}")
+    major = cuda_major or installed
+    if major == 12:
+        name, relative = "nvidia-cuda-runtime-cu12", "nvidia/cuda_runtime/lib/libcudart.so.12"
+    else:
+        # 无wheel绑定时保留原系统CUDA13安装的预加载行为。
+        name, relative = "nvidia-cuda-runtime", "nvidia/cu13/lib/libcudart.so.13"
     try:
-        runtime = metadata.distribution("nvidia-cuda-runtime")
+        runtime = metadata.distribution(name)
     except metadata.PackageNotFoundError:
         return
-    path = Path(runtime.locate_file("nvidia/cu13/lib/libcudart.so.13"))
+    path = Path(runtime.locate_file(relative))
     if path.is_file():
         ctypes.CDLL(str(path), mode=ctypes.RTLD_GLOBAL)
 
@@ -57,7 +84,10 @@ def linked_tensorrt_version() -> str:
 
 
 def main() -> int:
-    prepare_tensorrt_libraries()
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--cuda-major", type=int, choices=(12, 13))
+    args = parser.parse_args()
+    prepare_tensorrt_libraries(args.cuda_major)
     import tensorrt as trt
 
     actual = linked_tensorrt_version()
@@ -65,7 +95,16 @@ def main() -> int:
         raise RuntimeError(
             f"部署锁要求 TensorRT 10.13.3.9，实际 binding={trt.__version__}, lib={actual}"
         )
-    print(json.dumps({"tensorrt": trt.__version__, "libnvinfer": actual}, ensure_ascii=False))
+    maps = Path("/proc/self/maps").read_text()
+    cuda_paths = sorted({line.split(maxsplit=5)[5]
+                         for line in maps.splitlines()
+                         if len(line.split(maxsplit=5)) == 6
+                         and re.fullmatch(r"libcudart\.so(?:\.[0-9]+)*",
+                                          Path(line.split(maxsplit=5)[5]).name)})
+    print(json.dumps({"tensorrt": trt.__version__, "libnvinfer": actual,
+                      "tensorrt_cuda_major": installed_tensorrt_cuda_major(),
+                      "libnvinfer_paths": [str(p) for p in loaded_nvinfer_paths(maps)],
+                      "libcudart_paths": cuda_paths}, ensure_ascii=False))
     return 0
 
 

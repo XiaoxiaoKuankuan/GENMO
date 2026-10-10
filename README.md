@@ -4,6 +4,9 @@
 部署运行时不加载训练checkpoint；音乐编码、历史编码、动作前缀和CFG已包含在ONNX图中。
 图外保留当前Stage1的确定性DDIM、因果proprio48、120/12/108帧续接和qpos28解码。
 
+迁移到`/home/user/liwei`、复用已有虚拟环境及CUDA12构建见
+[liwei部署说明](docs/LIWEI_DEPLOYMENT_MIGRATION.md)。
+
 2026-10-10已在本机RTX 4090实际编译CUDA插件、构建FP32 engine，并通过正式包加载、
 原始ONNX单步对齐、完整20步DDIM及三首音乐片段的两窗口生成对齐。
 验收覆盖模型生成，未连接GMT仿真或实机；完整证据与阈值见

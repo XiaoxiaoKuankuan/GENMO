@@ -1,0 +1,5 @@
+# Stage1 CUDA 12部署的TensorRT前端与Python 3.10绑定，均固定为10.13.3.9。
+# 官方PyPI文件采用完整SHA256校验；由install.sh以--no-deps安装，保留共享环境既有依赖。
+# 禁止与CUDA13绑定同时安装；底层库使用独立tensorrt-cu12-runtime.lock补充。
+tensorrt-cu12 @ https://files.pythonhosted.org/packages/1a/aa/5a630ac02d05f7bbc774bd11b2bc9a3d31aa0bd7d38b4cfeef06733544b3/tensorrt_cu12-10.13.3.9.tar.gz#sha256=b507abc536ceeaac3b2e6527bd65100bef19000d204e7072db6fe85f9f859a84
+tensorrt-cu12-bindings @ https://files.pythonhosted.org/packages/03/b4/768d8e1d4cd949422ede434397d5f68b2281a2a269602257ab2922674f36/tensorrt_cu12_bindings-10.13.3.9-cp310-none-manylinux_2_28_x86_64.whl#sha256=3ca2635394789dd62346ff5ee3f02def53cee2cd21247cc342461dc721893a1e

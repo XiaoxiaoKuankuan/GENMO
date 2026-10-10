@@ -1,0 +1,4 @@
+# Stage1 CUDA12部署的TensorRT官方完整运行库，固定10.13.3.9和下载SHA256。
+# CUDA运行时复用runtime.lock的nvidia-cuda-runtime-cu12==12.4.127，不引入CUDA13包。
+# install.sh使用--no-deps安装，避免自动更新现有PyTorch环境中的CUDA运行依赖。
+tensorrt-cu12-libs @ https://pypi.nvidia.com/tensorrt-cu12-libs/tensorrt_cu12_libs-10.13.3.9-py2.py3-none-manylinux_2_28_x86_64.whl#sha256=bf2008eca911411aa93b852825ea992de33396451ea11713a6eb97c411d3b2e9

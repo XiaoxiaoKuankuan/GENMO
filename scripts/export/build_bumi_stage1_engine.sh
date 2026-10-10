@@ -10,6 +10,8 @@
 # 本脚本只构建和打包，不执行推理对齐、预热、pytest、demo、GMT仿真或实机。
 # 源路径可用BUMI_STAGE1_*环境变量覆盖；额外参数透传构建器，例如--overwrite或--workspace-gib。
 # 构建脚本不会清理旧模型资产，也不会更改deployment.ini或GMT代码。
+# 已有便携模型包时默认从models/bumi_stage1_s595000读取四项源资产，不依赖原主机路径。
+# BUMI_STAGE1_SOURCE_ROOT显式提供时仍读取该完整仓库导出；便携SDK优先于系统SDK。
 set -euo pipefail
 BUMI_DEPLOY_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)"
 if [[ ! -x "$BUMI_DEPLOY_ROOT/.venv/bin/python" ]]; then
@@ -32,14 +34,25 @@ if ! "$BUMI_DEPLOY_ROOT/.venv/bin/python" -B -c 'import importlib.util, importli
         exit 1
     fi
 fi
-BUMI_STAGE1_SOURCE_ROOT="${BUMI_STAGE1_SOURCE_ROOT:-/home/weili/bumi-closedloop-worktrees/GENMO}"
-BUMI_STAGE1_SOURCE_ASSETS="$BUMI_STAGE1_SOURCE_ROOT/inputs/checkpoints/stage1_server2_s595000_20261008"
-BUMI_STAGE1_SOURCE_ONNX="${BUMI_STAGE1_ONNX:-$BUMI_STAGE1_SOURCE_ROOT/outputs/onnx/stage1_server2_s595000_20261008/bumi_stage1_denoiser_s595000.onnx}"
+BUMI_STAGE1_PACKAGED_ROOT="$BUMI_DEPLOY_ROOT/models/bumi_stage1_s595000"
+if [[ -n "${BUMI_STAGE1_SOURCE_ROOT:-}" ]]; then
+    BUMI_STAGE1_SOURCE_ASSETS="$BUMI_STAGE1_SOURCE_ROOT/inputs/checkpoints/stage1_server2_s595000_20261008"
+    BUMI_STAGE1_DEFAULT_ONNX="$BUMI_STAGE1_SOURCE_ROOT/outputs/onnx/stage1_server2_s595000_20261008/bumi_stage1_denoiser_s595000.onnx"
+    BUMI_STAGE1_DEFAULT_KIN="$BUMI_STAGE1_SOURCE_ASSETS/bumi_kinematics_robot_retargeter_fe934_v1.json"
+else
+    BUMI_STAGE1_SOURCE_ASSETS="$BUMI_STAGE1_PACKAGED_ROOT/assets"
+    BUMI_STAGE1_DEFAULT_ONNX="$BUMI_STAGE1_PACKAGED_ROOT/bumi_stage1_denoiser.onnx"
+    BUMI_STAGE1_DEFAULT_KIN="$BUMI_STAGE1_SOURCE_ASSETS/bumi_kinematics.json"
+fi
+BUMI_STAGE1_SOURCE_ONNX="${BUMI_STAGE1_ONNX:-$BUMI_STAGE1_DEFAULT_ONNX}"
+if [[ -z "${BUMI_STAGE1_TRT_INCLUDE:-}" && -f "$BUMI_DEPLOY_ROOT/sdk/tensorrt-10.13.3.9/include/NvInfer.h" ]]; then
+    export BUMI_STAGE1_TRT_INCLUDE="$BUMI_DEPLOY_ROOT/sdk/tensorrt-10.13.3.9/include"
+fi
 exec "$BUMI_DEPLOY_ROOT/.venv/bin/python" -B -u \
     "$BUMI_DEPLOY_ROOT/tools/export/build_bumi_music_tensorrt.py" \
     --onnx "$BUMI_STAGE1_SOURCE_ONNX" \
     --onnx-metadata "${BUMI_STAGE1_ONNX_METADATA:-$BUMI_STAGE1_SOURCE_ONNX.json}" \
     --stats "${BUMI_STAGE1_STATS:-$BUMI_STAGE1_SOURCE_ASSETS/qpos30_train_stats.json}" \
-    --kinematics "${BUMI_STAGE1_KINEMATICS:-$BUMI_STAGE1_SOURCE_ASSETS/bumi_kinematics_robot_retargeter_fe934_v1.json}" \
+    --kinematics "${BUMI_STAGE1_KINEMATICS:-$BUMI_STAGE1_DEFAULT_KIN}" \
     --output-dir "${BUMI_STAGE1_OUTPUT_DIR:-$BUMI_DEPLOY_ROOT/models/bumi_stage1_s595000}" \
     --device "${BUMI_STAGE1_DEVICE:-cuda:0}" --precision fp32 "$@"
