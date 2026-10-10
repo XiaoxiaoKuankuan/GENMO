@@ -46,6 +46,38 @@ def test_no_progress_fails_instead_of_freezing_or_draining_world():
     assert collector.cancelled.is_set() and not collector.active
 
 
+def test_world_drains_deferred_pages_and_cross_page_ack_receipts_after_indexing():
+    records=[[],[]]
+    class World:
+        def __init__(self):
+            self.sequence=0;self.session_id='world';self.journal=NS(last_record={'sha256':'start'})
+            self.ids=[];self.acks=[]
+        def call(self,method,**payload):
+            assert method=='exchange'
+            self.sequence+=1;self.journal.last_record={'sha256':str(self.sequence)}
+            for request in payload['requests']:
+                if request['method']=='execute':self.ids.append(request['request_id'])
+                else:
+                    assert len(records[request['env_id']])==1  # 完整世界回复的lane索引先落盘。
+                    self.acks.append(request['request_id'])
+            if self.sequence<=2:
+                i=self.sequence-1
+                reply=dict(request_id=self.ids[i],ok=True,result=dict(backend_session_id=f'lane{i}',
+                    mutation_seq=1,operation='advance',ok=True,result=dict(env_id=i,trace_block=dict(
+                        schema='genmo.control_trace.columns.v1',count=0,columns=None))))
+                return dict(replies=[reply],reply_page={'remaining_reply_count':2})
+            if self.sequence==3:return dict(replies=[],reply_page={'remaining_reply_count':2})
+            assert self.sequence==4
+            return dict(replies=[dict(request_id=key,ok=True,result={}) for key in self.acks],
+                        reply_page={'remaining_reply_count':0})
+    world=World();collector=WorldEnvironmentCollector(None,None,world,num_envs=2,generation_batch=2)
+    collector.states=[NS(resource=NS(env=NS(backend=NS(MUTATIONS={'advance'},session_id=f'lane{i}',
+        sequence=0,episode_id=f'e{i}',journal=NS(append_result=records[i].append))))) for i in range(2)]
+    result=collector._drive({i:backend_operation('advance',control_steps=1) for i in range(2)})
+    assert world.sequence==4 and [result[i]['env_id'] for i in range(2)]==[0,1]
+    assert all(len(r)==1 for r in records) and not collector.active
+
+
 def limits():
     return dict(accepted_iterations=1, optimizer_attempts=8, generations=100,
                 control_steps=1000, physics_steps=4000)

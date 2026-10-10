@@ -16,6 +16,7 @@ from __future__ import annotations
 import copy
 import threading
 import time
+import traceback
 from concurrent.futures import Future
 from types import SimpleNamespace
 
@@ -153,10 +154,17 @@ class WorldEnvironmentCollector(VectorEnvironmentCollector):
                                          payload=payload,request_id=identity))
                 if requests or waiting:
                     # 空exchange只在确有未完成物理请求时驱动，不做空轮询写盘。
-                    replies=self.world_call('exchange',requests=requests)['replies']
-                    while replies:
+                    response=self.world_call('exchange',requests=requests)
+                    replies=response['replies'];ack_pending=set()
+                    pages_left=response.get('reply_page',{}).get('remaining_reply_count',0)
+                    while replies or pages_left or ack_pending:
+                        if time.perf_counter()-started>self.timeout_seconds:
+                            raise TimeoutError('Bounded world reply page deadline')
                         acknowledgements=[]
                         for reply in replies:
+                            if reply['request_id'] in ack_pending:
+                                if not reply['ok']:raise RemoteError(reply['error'])
+                                ack_pending.remove(reply['request_id']);continue
                             slot,operation,mutation,begin=waiting.pop(reply['request_id'])
                             backend=self.states[slot].resource.env.backend
                             if not reply['ok']:
@@ -191,12 +199,13 @@ class WorldEnvironmentCollector(VectorEnvironmentCollector):
                                 journal_seconds=0.,critical_seconds=time.perf_counter()-begin,
                                 audit_scope='authoritative_world_journal_plus_reference_index')
                             ready[slot]=(value,error)
-                        if acknowledgements:
-                            received=self.world_call('exchange',requests=acknowledgements)['replies']
-                            ack_ids={entry['request_id'] for entry in acknowledgements}
-                            for reply in received:
-                                if reply['request_id'] in ack_ids and not reply['ok']:raise RemoteError(reply['error'])
-                            replies=[entry for entry in received if entry['request_id'] not in ack_ids]
+                        if acknowledgements or pages_left or ack_pending:
+                            ack_pending.update(entry['request_id'] for entry in acknowledgements)
+                            response=self.world_call('exchange',requests=acknowledgements)
+                            replies=response['replies']
+                            pages_left=response.get('reply_page',{}).get('remaining_reply_count',0)
+                            if not replies and not pages_left and ack_pending:
+                                raise RuntimeError('World reply pages lost lane ACK receipts')
                         else:replies=[]
                 if not ready and waiting:
                     raise RuntimeError('Exact environment quotas reached an asynchronous physical boundary; no hidden drain or partial-world freeze is allowed')
@@ -261,6 +270,7 @@ class WorldEnvironmentCollector(VectorEnvironmentCollector):
             from .budget import atomic_json
             atomic_json(self.states[0].resource.env.output.parent/'failed_world_progress.json', dict(
                 status='failed', error_type=type(error).__name__, error=str(error), policy_version=policy_version,
+                traceback=traceback.format_exc(),
                 requested_transitions=count_per_rank, completed_per_environment=[
                     state.transitions-value for state,value in zip(self.states,before)],
                 seconds=time.perf_counter()-started, batches=self.batch_reports, world_timing=self.world_timing,

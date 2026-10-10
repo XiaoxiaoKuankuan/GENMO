@@ -169,6 +169,21 @@ def unpack_trace(block, *, readonly_views=False, lazy=False):
 
 def expand_feedback(reply, *, readonly_views=False, lazy=False):
     """在 journal 已保存并 ACK 后，为奖励/旧审计恢复完整逐行视图。"""
+    if isinstance(reply,dict) and 'trace_blocks' in reply:
+        if 'trace' in reply or 'trace_block' in reply:
+            raise ValueError('Reply cannot contain two authoritative traces')
+        blocks=reply['trace_blocks']
+        if not isinstance(blocks,list) or len(blocks)>2000:
+            raise ValueError('Invalid bounded trace block sequence')
+        if any(not isinstance(b,dict) or type(b.get('count')) is not int or not 0<=b['count']<=25 for b in blocks):
+            raise ValueError('Invalid bounded trace block count')
+        total=sum(b['count'] for b in blocks)
+        if type(reply.get('executed_control_steps')) is not int or total>2000 or total!=reply['executed_control_steps']:
+            raise ValueError('Trace block sequence differs from actual control count')
+        rows=[row for block in blocks for row in unpack_trace(block,readonly_views=readonly_views,lazy=lazy)]
+        if len(rows)>2000 or len(rows)!=reply['executed_control_steps']:
+            raise ValueError('Trace block sequence differs from actual control count')
+        return {k:v for k,v in reply.items() if k!='trace_blocks'} | {'trace':rows}
     if isinstance(reply,dict) and 'trace_block' in reply:
         if 'trace' in reply:
             raise ValueError('Reply cannot contain two authoritative traces')

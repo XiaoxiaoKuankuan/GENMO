@@ -77,3 +77,27 @@ def test_lazy_rows_validate_before_access_and_preserve_all_consumed_evidence():
     constant['columns']['fields']['nested']['fields']['y']['sha256']='wrong'
     with pytest.raises(ValueError,match='SHA'):
         unpack_trace(constant,readonly_views=True,lazy=True)
+
+
+def test_long_boundary_keeps_every_substep_in_bounded_column_blocks():
+    from gem.runtime.closedloop_protocol import _pack,_unpack,raw_message_size
+    rows=[actual_step(i,speed=1.) for i in range(75)]
+    value=dict(schema='genmo.gmt_execution_feedback.block_sequence.v1',executed_control_steps=75,
+        trace_blocks=[pack_trace(rows[start:start+25]) for start in range(0,75,25)])
+    metadata,payload=_pack(value)
+    assert raw_message_size(value)==len(metadata)+len(payload)
+    restored=decode_payload(encode_binary(_unpack(metadata,payload)))
+    compare(rows,expand_feedback(restored,readonly_views=True,lazy=True)['trace'])
+    broken=copy.deepcopy(value);broken['executed_control_steps']=74
+    with pytest.raises(ValueError,match='control count'):expand_feedback(broken)
+    broken=copy.deepcopy(value);broken['trace']=rows
+    with pytest.raises(ValueError,match='two authoritative'):expand_feedback(broken)
+
+
+def test_raw_size_preserves_alias_and_noncontiguous_array_encoding():
+    from gem.runtime.closedloop_protocol import _pack,raw_message_size
+    array=np.arange(50,dtype='>f8').reshape(5,10)[:,::2]
+    value={'a':array,'same':array,'nested':[np.float32(.3),'中文',None]}
+    metadata,payload=_pack(value)
+    assert len(payload)==array.nbytes
+    assert raw_message_size(value)==len(metadata)+len(payload)

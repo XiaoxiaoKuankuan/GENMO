@@ -115,7 +115,7 @@ def _pack_legacy(value: Any) -> tuple[bytes, bytes]:
     return metadata, buffer.getvalue()
 
 
-def _pack(value: Any) -> tuple[bytes, bytes]:
+def _raw_packet(value: Any, *, size_only=False):
     """无ZIP成员循环：数组连续拼接，描述符显式给出dtype/shape/offset/size。"""
     parts, offsets, total = [], {}, 0
     def visit(item):
@@ -135,11 +135,12 @@ def _pack(value: Any) -> tuple[bytes, bytes]:
             if item.dtype.hasobject or item.dtype.kind not in "biufUS":
                 raise TypeError(f"Unsupported array dtype: {item.dtype}")
             if id(item) not in offsets:
-                data = item.tobytes(order='C')
-                if total+len(data) > MAX_PACKET_BYTES:
+                size = item.nbytes
+                if total+size > MAX_PACKET_BYTES:
                     raise ValueError('RPC arrays exceed packet limit')
-                offsets[id(item)] = (item, dict(offset=total, size=len(data), dtype=item.dtype.str, shape=list(item.shape)))
-                parts.append(data); total += len(data)
+                offsets[id(item)] = (item, dict(offset=total, size=size, dtype=item.dtype.str, shape=list(item.shape)))
+                if not size_only:parts.append(item.tobytes(order='C'))
+                total += size
             return {'__ndarray_raw__': offsets[id(item)][1]}
         if isinstance(item, np.generic):
             return item.item()
@@ -154,7 +155,21 @@ def _pack(value: Any) -> tuple[bytes, bytes]:
         raise TypeError(f'Unsupported RPC value: {type(item).__name__}')
     metadata = json.dumps(dict(__rpc_wire__=WIRE_VERSION, value=visit(value)), ensure_ascii=False,
                           allow_nan=False, separators=(',', ':')).encode('utf-8')
-    return metadata, b''.join(parts)
+    return metadata, total if size_only else b''.join(parts)
+
+
+def _pack(value: Any) -> tuple[bytes, bytes]:
+    return _raw_packet(value)
+
+
+def raw_message_size(value: Any) -> int:
+    """精确计算v2元数据及数组字节，不复制数组；供完整回复按现有包上限分页。
+
+    元数据沿用真正编码器及同一数组别名规则，避免低估长尾证据。只计算每条已完成
+    回复一次；跨回复求和是保守上界，不提高MAX_PACKET_BYTES或减少任何证据。
+    """
+    metadata,size=_raw_packet(value,size_only=True)
+    return len(metadata)+size
 
 
 def _decode_raw_array(spec, payload):
