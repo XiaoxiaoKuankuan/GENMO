@@ -14,6 +14,7 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 
 import torch
+from .performance import measure
 
 MODES = ('fp32_reference', 'fp32_fast', 'tf32_candidate', 'bf16_backbone_candidate')
 ATTENTION_BACKENDS = ('manual', 'sdpa_math', 'sdpa_efficient', 'sdpa_flash', 'sdpa_cudnn')
@@ -144,7 +145,6 @@ def compile_fixed_denoiser(policy, capacity=64):
                     parts[2] = parts[2].detach().requires_grad_(True)
                 # 普通轮只计调用次数；显式诊断轮用CUDA事件测量，轮末统一读取，
                 # 不在固定64行块之间同步GPU，不改变编译函数及其张量输入。
-                from .performance import measure
                 with measure('actor.compiled_fixed64_forward',gpu=True):
                     action,contact=compiled(*parts)
             if not learning:
