@@ -166,6 +166,7 @@ def test_worker_bounds_inflight_and_backpressures_then_drains(tmp_path):
         for number in range(4):
             assert worker.submit(tmp_path / str(number))
         assert started.wait(1) and worker.pending_count == 4
+        assert worker.peak_pending_count == 4
         assert not worker.submit(tmp_path / '0')
         producer = threading.Thread(target=lambda: (worker.submit(tmp_path / '4'), submitted.set()))
         producer.start()
@@ -175,6 +176,7 @@ def test_worker_bounds_inflight_and_backpressures_then_drains(tmp_path):
         assert submitted.is_set()
         worker.drain()
         assert len(completed) == 5 and worker.pending_count == 0
+        assert worker.peak_pending_count == 4
     finally:
         release.set()
         if producer is not None:

@@ -276,3 +276,20 @@ def test_object_hook_rejects_the_same_invalid_descriptors(change):
                    {'value':value, '__rpc_wire__':protocol.WIRE_VERSION}):
         with pytest.raises((ValueError, TypeError)):
             protocol._unpack(json.dumps(header, separators=(',', ':')).encode(), b'\0'*4)
+
+
+def test_protocol_counters_measure_codec_without_idle_wait_or_reply_changes(tmp_path):
+    handler=Handler()
+    with serving(tmp_path,handler) as path:
+        client=protocol.RpcClient(path)
+        payload={'matrix':np.arange(84,dtype='>f8').reshape(4,21)}
+        result=client.call('echo',**payload)
+        assert set(result)==set(payload)
+        np.testing.assert_array_equal(result['matrix'],payload['matrix'])
+        client.call('close');client.close()
+    stats=handler._rpc_transport_statistics
+    assert stats['received_requests']==2
+    assert stats['reply_sent_bytes']>payload['matrix'].nbytes
+    assert stats['request_received_bytes']>payload['matrix'].nbytes
+    assert stats['request_decode_seconds']>=0 and stats['reply_encode_seconds']>=0
+    assert not any('receive_including_remote' in key for key in stats)
