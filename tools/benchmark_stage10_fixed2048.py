@@ -60,6 +60,7 @@ def main():
     rows,targets,source=load_rank(a.iteration,rank,inputs,reuse_verified=bool(a.reuse_inputs_from))
     if len(rows)!=256:raise ValueError('Fixed-work acceptance requires 2048 real global chains')
     config=configuration(a.config);config['runtime']['genmo_device']=f'cuda:{rank}'
+    torch.set_num_threads(config['runtime']['torch_threads'])
     settings=config['stage10']['training'];performance=config['stage10']['performance']
     actor,train_config,_=load_actor(config)
     payload=torch.load(a.weights,map_location='cpu',mmap=True,weights_only=False)
