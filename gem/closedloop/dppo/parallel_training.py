@@ -798,7 +798,8 @@ def run_parallel(args, config, collective, preflight):
             performance = c.stage['performance']
             configure_gradients(c.actor, weight_reduction=performance['weight_reduction'],
                 accumulation=performance.get('gradient_accumulation', 'fp64_reference'),
-                sensitive_names=performance.get('gradient_sensitive_names', []))
+                sensitive_names=performance.get('gradient_sensitive_names', []),
+                weight_reduction_overrides=performance.get('weight_reduction_overrides'))
         c.sampler = FullMusicSampler(c.catalog, split='train', seed=c.stage['seed']+1000003*collective.rank,
             window_seconds=c.settings['episode_seconds'], random_start=c.stage['dataset']['random_start'],
             source_probabilities=c.stage['dataset']['source_probabilities'])

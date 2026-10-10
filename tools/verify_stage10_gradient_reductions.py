@@ -127,6 +127,7 @@ def main():
     parser.add_argument('--denoising-samples', nargs='+', type=int, choices=(4,8,20), default=[20],
                         help='独立算法实验：每个K都有相同抽样计划的B1梯度参考，另报告相对完整20步差异')
     parser.add_argument('--attention-backend', choices=ATTENTION_BACKENDS)
+    parser.add_argument('--sensitive-output-fp64',action='store_true',help='仅候选最终动作投影用FP64权重梯度；原逐样本参考保持不变')
     parser.add_argument('--accumulator-repeats', type=int, default=5)
     parser.add_argument('--warmstart-adam', action='store_true',
                         help='先用原真实rollout执行一次参考PPO更新，固定得到的非空Adam供所有候选比较')
@@ -220,7 +221,7 @@ def main():
         precision_mode=args.precision_mode, numerical_contract=policy.kernel_config,
         chain_origin='actual_new_behavior_sampling_on_real_conditions_no_physics' if args.precision_mode else 'immutable_real_rollout',
         nonempty_adam=bool(payload['actor_optimizer']['state']),
-        actor_lr=args.actor_lr, hard_kl_limit=config['stage10']['training']['kl_stop_joint'],
+        sensitive_output_fp64=args.sensitive_output_fp64, actor_lr=args.actor_lr, hard_kl_limit=config['stage10']['training']['kl_stop_joint'],
         warmstart_lr=config['stage10']['training']['actor_lr'] if args.warmstart_adam else None,
         adam_origin='one_fixed_real_PPO_warmup_step' if args.warmstart_adam else 'source_checkpoint',
         sensitive_parameter_names=sensitive, numerical_reference=variants[0], results=[])
@@ -229,6 +230,8 @@ def main():
     for reduction, accumulation, micro, sampled_steps in variants:
         actor.load_state_dict(source_actor); actor.zero_grad(set_to_none=True)
         configure_gradients(actor, weight_reduction=reduction, accumulation=accumulation, sensitive_names=sensitive)
+        if args.sensitive_output_fp64:
+            actor.denoiser.final_layer.fc2.weight_reduction_override = ('joint_gemm_fp64' if reduction != 'sample_bmm' else None)
         optimizer = torch.optim.AdamW(trainable_actor_parameters(actor), lr=args.actor_lr, weight_decay=0.)
         optimizer.load_state_dict(copy.deepcopy(payload['actor_optimizer']))
         for param_group in optimizer.param_groups:

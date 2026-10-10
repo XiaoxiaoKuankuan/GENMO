@@ -145,13 +145,20 @@ def sample_gru_cell(value, state, cell):
 
 
 def configure_gradients(actor, *, weight_reduction='sample_bmm', accumulation='fp64_reference',
-                        sensitive_names=()):
+                        sensitive_names=(), weight_reduction_overrides=None):
     """只选择反向与累计实现；不修改参数、前向、旧概率或优化器状态。"""
     if weight_reduction not in WEIGHT_REDUCTIONS or accumulation not in GRADIENT_ACCUMULATIONS:
         raise ValueError('Unknown explicit gradient execution candidate')
     for module in actor.modules():
         if isinstance(module, SampleMatrixLinear):
             module.weight_reduction = weight_reduction
+    if weight_reduction_overrides is not None:
+        modules=dict(actor.named_modules())
+        for name, reduction in weight_reduction_overrides.items():
+            if not isinstance(modules.get(name),SampleMatrixLinear) or reduction not in WEIGHT_REDUCTIONS:
+                raise ValueError('Weight gradient override requires an exact existing SampleMatrixLinear and reduction')
+        for name,reduction in weight_reduction_overrides.items():
+            modules[name].weight_reduction_override=reduction
     known = dict(actor.named_parameters())
     if any(name not in known for name in sensitive_names):
         raise ValueError('Selective FP64 requires exact existing parameter names')
