@@ -78,7 +78,11 @@ class VectorExecutionReward(ExecutionReward):
         from gem.runtime.trajectory_blocks import ColumnarTrace
         from .columnar_reward import evaluate_columns
         if not isinstance(trace, ColumnarTrace):
-            return [self.evaluate_step(row) for row in trace]
+            started = time.perf_counter()
+            try:
+                return [self.evaluate_step(row) for row in trace]
+            finally:
+                self._record_columnar_timings(dict(scalar_input_path_seconds=time.perf_counter()-started))
         if not len(trace): return []
         started = time.perf_counter()
         timings={}

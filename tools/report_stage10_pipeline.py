@@ -54,6 +54,11 @@ def summarize(run):
             boundary_wait_controls=sum(c.get('administrative_drain_controls',0) for c in collectors),
             boundary_wait_reward=sum(c.get('administrative_drain_reward',0.) for c in collectors),
             generation_batch_histogram={},
+            columnar_reward_timing_by_rank=[dict(rank=c['rank'],
+                contract=c.get('columnar_reward_timing_contract','legacy_object_counter_delta_may_reset'),
+                usable_for_breakdown=c.get('columnar_reward_timing_contract')=='per_consume_call_across_episode_replacements.v2'
+                    and all(v>=0 for v in c.get('columnar_reward_cpu_timings',{}).values()),
+                seconds=c.get('columnar_reward_cpu_timings',{})) for c in collectors],
             critic={k:critic.get(k) for k in ('initial_mse','mse','initial_explained_variance','explained_variance')},
             tensor_cache_by_rank=r['tensor_cache_by_rank'],budget_used=r['budget']['used'],
             probability_check=r['probability_check'])
