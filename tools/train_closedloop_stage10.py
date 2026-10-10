@@ -172,7 +172,7 @@ def _sources(config, check):
              'full_dataset', 'run_management', 'evaluation', 'long_run', 'archive_store')
     if config['stage10']['version'] == VERSION_V2:
         names += ('parallel_support', 'parallel_training', 'execution_profile', 'periodic_monitor',
-                  'updater_v2', 'position_repair', 'archives', 'archive_process', 'optional_diagnostics',
+                  'updater_v2', 'position_repair', 'archives', 'archive_process', 'gzip_archive', 'optional_diagnostics',
                   'performance', 'tensor_cache', 'asset_cache', 'rollout_storage', 'budget_ledger',
                   'batch_execution', 'execution_checks', 'journal_codec', 'dual_collector',
                   'numerical_execution', 'training_scale', 'fixed_tile_linear', 'prepaid_budget', 'update_observation',

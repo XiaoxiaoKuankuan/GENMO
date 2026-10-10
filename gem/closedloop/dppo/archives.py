@@ -79,12 +79,14 @@ class ArchiveProcessClient:
                 self._process.kill()
                 self._process.wait()
 
-    def archive(self, directory, *, run_dir, min_free_bytes, compression_level=6):
+    def archive(self, directory, *, run_dir, min_free_bytes, compression_level=6,
+                compression_backend='python', compression_threads=1):
         if self._closed:
             raise RuntimeError('Archive process is closed')
         self._request_id += 1
         request = dict(operation='archive', request_id=self._request_id, directory=str(directory),
-                       run_dir=str(run_dir), min_free_bytes=min_free_bytes,compression_level=compression_level)
+                       run_dir=str(run_dir), min_free_bytes=min_free_bytes,compression_level=compression_level,
+                       compression_backend=compression_backend,compression_threads=compression_threads)
         try:
             pending = memoryview((json.dumps(request, allow_nan=False)+'\n').encode())
             while pending:

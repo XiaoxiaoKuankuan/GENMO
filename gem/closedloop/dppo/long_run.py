@@ -56,6 +56,9 @@ def validate_long_run_settings(stage):
     level=storage.get('archive_compression_level',6)
     if type(level) is not int or not 1<=level<=9:
         raise ValueError('archive_compression_level must be an integer from 1 to 9')
+    from .gzip_archive import validate_compression
+    validate_compression(storage.get('archive_compression_backend','python'),
+                         storage.get('archive_compression_threads',1))
     validate_secondary_store(storage)
     if storage.get('archive_secondary') and stage.get('version') not in (None, 'genmo.closedloop.stage10.v2'):
         raise ValueError('Secondary archive storage requires the sealed v2 training format')
@@ -75,6 +78,10 @@ class LongRunMaintenance:
         self.manager, self.guard = manager, manager.disk_guard
         self.storage = stage['storage']
         self.compression_level=self.storage.get('archive_compression_level',6)
+        self.compression_backend=self.storage.get('archive_compression_backend','python')
+        self.compression_threads=self.storage.get('archive_compression_threads',1)
+        if self.compression_backend=='pigz' and shutil.which('pigz') is None:
+            raise FileNotFoundError('Explicit pigz archive backend is unavailable')
         manifest = _read_json(manager.run_dir / 'run_manifest.json')
         self.created_at = datetime.fromisoformat(manifest['created_at'])
         seconds = stage.get('run_control', {}).get('max_walltime_seconds')
@@ -88,6 +95,8 @@ class LongRunMaintenance:
         path = manager.run_dir / 'long_run_policy.json'
         if 'archive_compression_level' in self.storage:
             policy['archive_compression_level']=self.compression_level
+        for name in ('archive_compression_backend','archive_compression_threads'):
+            if name in self.storage:policy[name]=self.storage[name]
         if self.storage.get('archive_secondary') is not None:
             policy['archive_secondary'] = self.storage['archive_secondary']
             prepare_secondary_store(manager.run_dir, policy['archive_secondary'], resume=path.exists())
@@ -307,7 +316,10 @@ class LongRunMaintenance:
                     temporary = Path(temporary_name)
                     try:
                         with self._archive_stage(timings, 'compression_seconds'):
-                            with tarfile.open(temporary, 'w:gz', compresslevel=getattr(self,'compression_level',6)) as stream:
+                            from .gzip_archive import compressed_tar
+                            with compressed_tar(temporary,level=getattr(self,'compression_level',6),
+                                    backend=getattr(self,'compression_backend','python'),
+                                    threads=getattr(self,'compression_threads',1)) as stream:
                                 for record in members:
                                     stream.add(directory / record['path'], arcname=record['path'], recursive=False)
                         with self._archive_stage(timings, 'archive_fsync_seconds'):
@@ -386,7 +398,9 @@ class LongRunMaintenance:
                     pid = self._archive_process.pid
                     response = self._archive_process.archive(directory, run_dir=self.manager.run_dir,
                         min_free_bytes=self.guard.min_free_bytes,
-                        **({'compression_level':self.compression_level} if 'archive_compression_level' in self.storage else {}))
+                        **({'compression_level':self.compression_level} if 'archive_compression_level' in self.storage else {}),
+                        **({'compression_backend':self.compression_backend,'compression_threads':self.compression_threads}
+                           if 'archive_compression_backend' in self.storage or 'archive_compression_threads' in self.storage else {}))
                     result = response['result']
                     stages.update(response['stage_seconds'])
                 finally:

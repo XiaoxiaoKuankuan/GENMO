@@ -70,21 +70,27 @@ def main():
     parser.add_argument('--source-run',type=Path,required=True)
     parser.add_argument('--output',type=Path,required=True)
     parser.add_argument('--level',type=int,choices=range(1,10),required=True)
+    parser.add_argument('--backend',choices=('python','pigz'),default='python')
+    parser.add_argument('--threads',type=int,choices=range(1,5),default=1)
     parser.add_argument('--producer-seconds',type=float,default=100.)
     args=parser.parse_args()
+    from gem.closedloop.dppo.gzip_archive import validate_compression
+    validate_compression(args.backend,args.threads)
     if not 90<=args.producer_seconds<=160:raise ValueError('Finite throughput test period must be 90..160 seconds')
     idle_eight();output=args.output.resolve();output.mkdir(parents=True,exist_ok=False)
     run=output/'run';run.mkdir()
     inputs,preparation=prepare(args.source_run.resolve(strict=True),run)
     report=dict(schema='stage10.real_evidence_archive_replay.v1',status='running',inputs=inputs,
         source_read_only=True,physical_execution_steps=0,optimizer_steps=0,preparation_seconds=preparation,
-        producer_seconds=args.producer_seconds,compression_level=args.level,queue_capacity=4,enqueues=[],archives=[])
+        producer_seconds=args.producer_seconds,compression_level=args.level,compression_backend=args.backend,
+        compression_threads=args.threads,queue_capacity=4,enqueues=[],archives=[])
     atomic_json(output/'report.json',report)
     client=None;mutex=threading.Lock()
     def archive(directory):
         nonlocal client
         if client is None:client=ArchiveProcessClient()
-        result=client.archive(directory,run_dir=run,min_free_bytes=100*1024**3,compression_level=args.level)
+        result=client.archive(directory,run_dir=run,min_free_bytes=100*1024**3,compression_level=args.level,
+            compression_backend=args.backend,compression_threads=args.threads)
         with mutex:report['archives'].append(result)
     def close():
         if client is not None:client.close()

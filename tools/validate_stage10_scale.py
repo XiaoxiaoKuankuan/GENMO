@@ -79,6 +79,8 @@ def main():
     parser.add_argument('--sampling-strategy',choices=('uniform','stratified8'))
     parser.add_argument('--archive-compression-level',type=int,choices=range(1,10),
                         help='独立无损归档吞吐对照；不删除字段，不跳过回读SHA')
+    parser.add_argument('--archive-compression-backend',choices=('python','pigz'))
+    parser.add_argument('--archive-compression-threads',type=int,choices=range(1,5))
     parser.add_argument('--resume', action='store_true')
     parser.add_argument('--fixed-work-probe',action='store_true',help='第二轮实际行为策略上的有界微批矩阵，不是普通轮计时')
     parser.add_argument('--denoising-samples',type=int,choices=(4,8,20),
@@ -115,10 +117,15 @@ def main():
         config['stage10']['storage']['archive_secondary']['root'] = str(output/'execution_archives')
         if args.archive_compression_level is not None:
             config['stage10']['storage']['archive_compression_level']=args.archive_compression_level
+        for name in ('archive_compression_backend','archive_compression_threads'):
+            if getattr(args,name) is not None:config['stage10']['storage'][name]=getattr(args,name)
         (output/'config.yaml').write_text(yaml.safe_dump(config, allow_unicode=True, sort_keys=False))
     if args.resume and args.archive_compression_level is not None and config['stage10']['storage'].get(
             'archive_compression_level',6)!=args.archive_compression_level:
         raise ValueError('Resume cannot change bound compression policy')
+    for name,default in (('archive_compression_backend','python'),('archive_compression_threads',1)):
+        if args.resume and getattr(args,name) is not None and config['stage10']['storage'].get(name,default)!=getattr(args,name):
+            raise ValueError('Resume cannot change bound compression policy')
     environment = dict(os.environ, CUDA_VISIBLE_DEVICES='0,1,2,3,4,5,6,7', PYTHONDONTWRITEBYTECODE='1',
         OMP_NUM_THREADS='1', MKL_NUM_THREADS='1', OPENBLAS_NUM_THREADS='1',
         NCCL_CUMEM_HOST_ENABLE='0', NCCL_IB_DISABLE='1', NCCL_SOCKET_IFNAME='lo', TORCH_NCCL_BLOCKING_WAIT='1')

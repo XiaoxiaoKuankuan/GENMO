@@ -77,9 +77,12 @@ def test_changed_original_stays_after_seal_failure(tmp_path):
         assert not (directory / 'archive_manifest.json').exists()
 
 
-def test_archive_published_before_manifest_recovers_without_recompression(tmp_path, monkeypatch):
+@pytest.mark.parametrize('backend',['python','pigz'])
+def test_archive_published_before_manifest_recovers_without_recompression(tmp_path, monkeypatch, backend):
     with RunManager(tmp_path / 'run') as manager:
-        maintenance = LongRunMaintenance(manager, stage())
+        configured=stage();configured['storage'].update(archive_compression_backend=backend,
+            archive_compression_threads=4 if backend=='pigz' else 1)
+        maintenance = LongRunMaintenance(manager, configured)
         directory, journal = iteration(manager)
         manager.seal_iteration(directory, 1, closed_journals=[journal])
         atomic = long_run._atomic_json
@@ -375,10 +378,13 @@ def test_reconcile_marks_unsaved_tail_and_preserves_spent_budget(tmp_path):
 
 
 @pytest.mark.parametrize('level',[1,6])
-def test_lossless_compression_candidate_keeps_member_sha_and_recovery(tmp_path,level):
+@pytest.mark.parametrize('backend',['python','pigz'])
+def test_lossless_compression_candidate_keeps_member_sha_and_recovery(tmp_path,level,backend):
     import tarfile
     import hashlib
     configured=stage();configured['storage']['archive_compression_level']=level
+    configured['storage'].update(archive_compression_backend=backend,
+        archive_compression_threads=4 if backend=='pigz' else 1)
     with RunManager(tmp_path/'run') as manager:
         maintenance=LongRunMaintenance(manager,configured)
         directory,journal=iteration(manager)
@@ -390,3 +396,62 @@ def test_lossless_compression_candidate_keeps_member_sha_and_recovery(tmp_path,l
     with tarfile.open(directory/manifest['archive'],'r:gz') as stream:
         for member,record in zip(stream,manifest['members'],strict=True):
             assert hashlib.sha256(stream.extractfile(member).read()).hexdigest()==record['sha256']
+
+
+@pytest.mark.parametrize('backend,threads',[('unknown',1),('python',2),('pigz',0),('pigz',5),('pigz',True)])
+def test_archive_compression_rejects_unbounded_or_ambiguous_configuration(backend,threads):
+    from gem.closedloop.dppo.gzip_archive import validate_compression
+    with pytest.raises(ValueError):validate_compression(backend,threads)
+
+
+def test_failed_pigz_cannot_publish_or_remove_originals(tmp_path,monkeypatch):
+    fake=tmp_path/'bin';fake.mkdir()
+    executable=fake/'pigz'
+    executable.write_text('#!/bin/sh\n# 测试压缩器明确失败，不能当作合法gzip发布。\necho injected-compressor-failure >&2\nexit 7\n')
+    executable.chmod(0o755);monkeypatch.setenv('PATH',str(fake))
+    with RunManager(tmp_path/'run') as manager:
+        configured=stage();configured['storage'].update(archive_compression_backend='pigz',archive_compression_threads=4)
+        maintenance=LongRunMaintenance(manager,configured)
+        directory,journal=iteration(manager);manager.seal_iteration(directory,1,closed_journals=[journal])
+        with pytest.raises((RuntimeError,BrokenPipeError)):
+            maintenance.archive_iteration(directory)
+        assert (directory/'execution_journal.sqlite').exists()
+        assert (directory/'fixed_targets.pt').exists()
+        assert not (directory/'archive_manifest.json').exists()
+        assert not (directory/'execution_evidence.tar.gz').exists()
+        assert not list(directory.glob('.execution.*.tmp'))
+
+
+def test_pigz_follows_archive_parent_death(tmp_path):
+    """归档worker突然退出时，压缩器也必须退出，不能留下持有临时包的孤儿。"""
+    import json
+    libc=ctypes.CDLL(None,use_errno=True);previous=ctypes.c_int()
+    assert libc.prctl(37,ctypes.byref(previous),0,0,0)==0
+    assert libc.prctl(36,1,0,0,0)==0
+    code=('from gem.closedloop.dppo.gzip_archive import compressed_tar; import time\n'
+          f'with compressed_tar({json.dumps(str(tmp_path/"unpublished.gz"))},backend="pigz",threads=4):\n'
+          ' print("ready",flush=True)\n time.sleep(120)\n')
+    parent=subprocess.Popen([sys.executable,'-B','-c',code],stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True)
+    pid,reaped=None,False
+    try:
+        assert parent.stdout.readline().strip()=='ready'
+        children=Path('/proc')/str(parent.pid)/'task'/str(parent.pid)/'children'
+        eventually(lambda:bool(children.read_text().strip()))
+        ids=children.read_text().split();assert len(ids)==1;pid=int(ids[0])
+        eventually(lambda:(Path('/proc')/str(pid)/'comm').read_text().strip()=='pigz')
+        parent.kill();parent.wait(timeout=5)
+        def exited():
+            nonlocal reaped
+            found,_=os.waitpid(pid,os.WNOHANG);reaped=found==pid
+            return reaped
+        eventually(exited)
+        assert not (Path('/proc')/str(pid)).exists()
+    finally:
+        if parent.poll() is None:parent.kill();parent.wait(timeout=5)
+        if pid is not None and not reaped:
+            try:
+                found,_=os.waitpid(pid,os.WNOHANG)
+                if found==0:os.kill(pid,signal.SIGKILL);os.waitpid(pid,0)
+            except ChildProcessError:pass
+        parent.stdout.close();parent.stderr.close()
+        assert libc.prctl(36,previous.value,0,0,0)==0

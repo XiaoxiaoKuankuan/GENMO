@@ -84,6 +84,10 @@ def main():
             level=request.get('compression_level',6)
             if type(level) is not int or not 1<=level<=9:raise ValueError('Invalid lossless compression level')
             maintenance.compression_level=level
+            maintenance.compression_backend=request.get('compression_backend','python')
+            maintenance.compression_threads=request.get('compression_threads',1)
+            from gem.closedloop.dppo.gzip_archive import validate_compression
+            validate_compression(maintenance.compression_backend,maintenance.compression_threads)
             maintenance.manager = SimpleNamespace(run_dir=guard.run_dir, append_metrics=metrics.append)
             result = maintenance._archive_sealed(directory, timings=timings)
             response.update(status='passed', result=result)
