@@ -47,6 +47,57 @@ def test_deployment_delay_rejects_unmeasured_forward_contract(changed):
         training_v3._validate_calibrated_execution(profile, execution, assets)
 
 
+def test_k8_and_full20_keep_matched_epoch_orders_and_old_chain(tmp_path, monkeypatch):
+    from gem.closedloop.dppo import updater_v3
+    from gem.closedloop.dppo.distributed_runtime import DistributedCollectives
+    from gem.closedloop.dppo.gradient_merge_v3 import BCGradientController
+    from gem.closedloop.dppo.tensor_cache import RolloutTensorCache
+    from tests.closedloop.dppo.test_denoising_sampling import TwentySteps, samples
+    from tests.closedloop.dppo.test_updater_v2 import Anchor
+    import torch.distributed as dist
+
+    # 小高斯策略没有预训练条件编码器；只替换该缓存，不替换实际概率、PPO、
+    # 梯度归约、BC或Adam，以检验两轮真实更新中的随机顺序及工作量。
+    class NoConditionEncoder:
+        bank = None
+        def __init__(self, *args): pass
+        def prime(self, rows): pass
+        def backward(self): pass
+
+    monkeypatch.setattr(updater_v3, 'ConditionGraphCache', NoConditionEncoder)
+    policy = TwentySteps()
+    policy.precision = 'native_fp32'
+    data = [copy.deepcopy(row) for _ in range(4) for row in samples(policy)]
+    old_chain = torch.stack([row.chain.clone() for row in data])
+    base = copy.deepcopy(policy.actor.state_dict())
+    targets = dict(advantages=torch.tensor([1., -.6] * 4))
+    manifest = [dict(owner_rank=0, local_index=i, valid=True, has_free=True) for i in range(8)]
+    reports, states = [], []
+    dist.init_process_group('gloo', init_method=(tmp_path / 'one_rank').as_uri(), rank=0, world_size=1)
+    cache = RolloutTensorCache(data, targets, 'cpu')
+    try:
+        for count in (8, 20):
+            policy.actor.load_state_dict(base)
+            generator = torch.Generator().manual_seed(731)
+            anchor = Anchor()
+            report = updater_v3.actor_update_v3(policy, torch.optim.AdamW(policy.actor.parameters(), lr=1e-5),
+                data, targets, cache, manifest, BCGradientController(initial=.01),
+                distributed=DistributedCollectives(0, 1), anchor=anchor, generator=generator,
+                sampled_steps=count, minibatch_chains=2, microbatch=7, soft_kl=None)
+            assert report['optimizer_steps'] == anchor.calls == 8
+            assert report['internal_sample_visits'] == 8 * count * 2
+            reports.append(report)
+            states.append(generator.get_state().clone())
+    finally:
+        cache.close()
+        dist.destroy_process_group()
+    assert reports[0]['epoch_orders'] == reports[1]['epoch_orders']
+    assert torch.equal(states[0], states[1])
+    assert [s['denoising_sampling']['seed'] for s in reports[0]['steps']] == [
+        s['denoising_sampling']['seed'] for s in reports[1]['steps']]
+    assert torch.equal(torch.stack([row.chain for row in data]), old_chain)
+
+
 @pytest.mark.parametrize('fault', [None, 'assets', 'kernel', 'schema', 'hard_kl', 'soft_kl', 'partial', 'nonfinite'])
 def test_evaluation_actor_load_requires_complete_bound_update(tmp_path, fault):
     from gem.closedloop.dppo.checkpoint_v3 import load_evaluation_actor
