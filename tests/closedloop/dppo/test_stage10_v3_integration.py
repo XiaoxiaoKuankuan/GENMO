@@ -39,7 +39,7 @@ def test_evaluation_binds_only_best_pointers_and_validates_actor(tmp_path, monke
                                             sha256=file_sha256(artifact))])
     publication = dict(path=str(checkpoint.relative_to(tmp_path)), sha256=file_sha256(checkpoint),
                        iteration=0, metadata=dict(actor_model_fingerprint='actor'))
-    context = SimpleNamespace(distributed=None, actor=object(), output=tmp_path, session=session, state={})
+    context = SimpleNamespace(distributed=None, actor=object(), bc=object(), output=tmp_path, session=session, state={})
     monkeypatch.setattr(parallel_training, '_evaluate_and_record', lambda *args: copy.deepcopy(result))
     monkeypatch.setattr(training_v3, '_snapshot', lambda *args, **kwargs: dict(publication=publication))
     monkeypatch.setattr(training_v3, 'root_call', lambda distributed, call: call())

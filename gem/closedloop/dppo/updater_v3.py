@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import math
 import time
+from collections import Counter
 
 import torch
 
@@ -102,7 +103,10 @@ def actor_update_v3(policy,optimizer,rows,targets,cache,manifest,controller,*,di
             with _local_phase(distributed,'v3_actor_optimizer_step'):
                 optimizer.step()
             # 后续minibatch不会复用旧条件图，old statistics则保持同一份rollout。
-            bc_shards=distributed.all_gather_object(dict(batch=bc_report['batch_size'],loss=bc_report['loss']))
+            local_sources=Counter(meta['dataset_id'] for sample in bc_report.get('samples',[]) for meta in sample)
+            bc_shards=distributed.all_gather_object(dict(batch=bc_report['batch_size'],loss=bc_report['loss'],sources=dict(local_sources)))
+            source_counts=Counter()
+            for shard in bc_shards:source_counts.update(shard['sources'])
             per_step=[]
             for s,(joint,coordinate,ratio,clipped,active,n) in enumerate(step_metrics.cpu().tolist()):
                 per_step.append(dict(step=s,visits=int(n),mean_joint_kl=joint/n if n else None,
@@ -117,6 +121,7 @@ def actor_update_v3(policy,optimizer,rows,targets,cache,manifest,controller,*,di
                 gradient_contributions=contributions,total_gradient_norm=total_norm,
                 gradient_clip_factor=min(1.,grad_clip_norm/(total_norm+1e-6)),
                 bc_global_samples=sum(x['batch'] for x in bc_shards),
+                bc_samples_by_source=dict(source_counts),
                 bc_loss=sum(x['batch']*x['loss'] for x in bc_shards)/sum(x['batch'] for x in bc_shards),
                 learning_rate=optimizer.param_groups[0]['lr'],wall_seconds=time.perf_counter()-start))
             if step_observer is not None:step_observer(reports[-1])
@@ -128,6 +133,8 @@ def actor_update_v3(policy,optimizer,rows,targets,cache,manifest,controller,*,di
         planned_optimizer_steps=ppo_epochs*math.ceil(len(selected)/minibatch_chains),
         internal_sample_visits=sum(r['internal_sample_visits'] for r in reports),
         actual_global_bc_samples=sum(r['bc_global_samples'] for r in reports),
+        bc_samples_by_source={source:sum(r['bc_samples_by_source'].get(source,0) for r in reports)
+            for source in sorted({source for r in reports for source in r['bc_samples_by_source']})},
         planned_internal_visits=len(selected)*sampled_steps*ppo_epochs,
         objective_reduction=objective_reduction,proxy_is_joint_probability=objective_reduction=='joint_sum',
         old_statistics_fixed=True,final_full20_kl_pending=True)

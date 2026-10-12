@@ -37,6 +37,7 @@ import numpy as np
 import torch
 import torch.distributed as dist
 from gem.closedloop.dppo.checkpoint_v3 import file_sha256,immutable_cpu_snapshot
+from gem.closedloop.dppo.budget import atomic_json
 from gem.closedloop.dppo.diagnostic_rollout_v3 import load_rollout
 from gem.closedloop.dppo.distributed_runtime import DistributedCollectives
 from gem.closedloop.dppo.gradient_merge_v3 import BCGradientController
@@ -59,12 +60,14 @@ def calibrate_actor(a,d,source,rank_state,policy,optimizer,anchor,generators,cac
         source_case_sha256=file_sha256(a.case/'case.json'),real_global_chains=len(manifest),
         shared_initial_adam_nonempty=bool(source['actor_optimizer']['state']),candidates=[],
         scope='fixed_real_behavior_full_combined_update_not_accepted_physical_training',
-        old_statistics_not_rewritten=True,soft_stop_disabled_for_equal_work=True)
+        old_statistics_not_rewritten=True,soft_stop_disabled_for_equal_work=True,
+        objective=kwargs['objective_reduction'],clip=kwargs['clip'],kl_limits=stage['kl'])
     for lr in a.calibrate_actor_rates:
         policy.actor.load_state_dict(source['actor']);optimizer.load_state_dict(copy.deepcopy(source['actor_optimizer']))
         for group in optimizer.param_groups:group['lr']=lr
         anchor.load_state_dict(rank_state['bc']);restore_local_rng(rank_state['rng'],generators)
         settings=dict(stage['bc_gradient'],initial=a.calibrate_bc_initial)
+        if a.calibrate_bc_maximum is not None:settings['maximum']=a.calibrate_bc_maximum
         controller=BCGradientController(**settings)
         def observe(step):
             if d.rank==0:
@@ -80,7 +83,7 @@ def calibrate_actor(a,d,source,rank_state,policy,optimizer,anchor,generators,cac
         report['candidates'].append(dict(actor_lr=lr,bc_initial=a.calibrate_bc_initial,
             update=result,full20_kl=kl,hard_kl=check_kl_v3(kl,stage['kl']),actor_seconds=seconds,
             peak_memory_by_rank=d.all_gather_object(torch.cuda.max_memory_allocated())))
-        root_call(d,lambda:(a.output/'report.json').write_text(json.dumps(report,ensure_ascii=False,indent=2)+'\n'))
+        root_call(d,lambda:atomic_json(a.output/'report.json',report))
     return report
 
 
@@ -165,9 +168,30 @@ def compare_critics(a,d,actor,train,cache,rows,targets,manifest,stage):
         report['actor_unchanged']=exact_state_digest(actor.state_dict())==base_actor
         if not report['actor_unchanged'] or any(p.grad is not None for p in actor.parameters()):
             raise RuntimeError('Critic comparison changed the Actor or its gradients')
-        root_call(d,lambda:(a.output/'report.json').write_text(json.dumps(report,ensure_ascii=False,indent=2)+'\n'))
+        root_call(d,lambda:atomic_json(a.output/'report.json',report))
         del critic,optimizer
     return report
+
+
+def recommend_compute_profile(report,device_bytes):
+    """按已验证数值、实际P50与显存余量选择计算微批；不替代LR或物理效果标定。"""
+    eligible=[]
+    for item in report['actor']:
+        check=item['diagnostic']
+        numerical=all(x['passed'] for x in check['gradients']) and all(
+            check[key]['passed'] for key in ('parameters','adam','terminal_outputs'))
+        peak=max(x['allocated'] for x in item['memory'])
+        if numerical and peak<=.8*device_bytes:
+            eligible.append(dict(variant=item['variant'],actor_microbatch=item['microbatch'],
+                p50_seconds=item['p50'],peak_allocated_bytes=peak))
+    selected=min(eligible,key=lambda item:item['p50_seconds']) if eligible else None
+    kl=min(report['kl'],key=lambda item:item['p50']) if report['kl'] else None
+    return dict(schema='genmo.stage10.measured_compute_recommendation.v3',selected=selected,
+        kl_microbatch=None if kl is None else kl['microbatch'],eligible=eligible,
+        device_total_bytes=device_bytes,maximum_allocated_fraction=.8,
+        selection='fastest_measured_warmed_full_work_with_original_numerical_checks',
+        evidence='fixed_real_case_nonempty_Adam_not_production_PhysX_memory_or_learning_quality',
+        actor_lr_and_BC_require_separate_calibration=True)
 
 
 def summarize_gpu_trace(path):
@@ -211,6 +235,9 @@ def main():
     p.add_argument('--profile',action='store_true',help='另测一个预热后的真实CPU/CUDA优化步，不纳入吞吐计时')
     p.add_argument('--calibrate-actor-rates',type=float,nargs='+',help='从同一起点有限标定完整PPO+BC学习率，不保存候选权重')
     p.add_argument('--calibrate-bc-initial',type=float,default=.01)
+    p.add_argument('--calibrate-bc-maximum',type=float)
+    p.add_argument('--objective',choices=['free_coordinate_mean','joint_sum'],help='明确的离线目标对照，不改行为核')
+    p.add_argument('--ppo-clip',type=float,help='仅固定数据对照的显式clip候选')
     p.add_argument('--critic-reference',type=Path,help='独立真实物理评估的fixed_diagnostic_reference.json')
     p.add_argument('--critic-epochs',type=int,nargs='+',default=[4,16,32])
     a=p.parse_args();rank=int(os.environ['LOCAL_RANK'])
@@ -232,6 +259,8 @@ def main():
     source=torch.load(a.case/'learning_state.pt',map_location='cpu',weights_only=False,mmap=True)
     rank_state=torch.load(r/'rank_state.pt',map_location='cpu',weights_only=False)
     config=copy.deepcopy(source['config']);settings=config['stage9'];stage=config['stage10']
+    if a.objective is not None:settings['objective_logprob_reduction']=a.objective
+    if a.ppo_clip is not None:settings['ppo_clip']=a.ppo_clip
     config['runtime']['genmo_device']=str(d.device)
     actor,train,loading=local_call(d,lambda:load_actor(config));actor.load_state_dict(source['actor'])
     if a.critic_reference is not None:
@@ -277,7 +306,7 @@ def main():
         offline_warmup=offline_warm,all_candidates_same_nonempty_adam=True,old_statistics_not_rewritten=True,
         soft_stop_disabled_only_for_fixed_work=True,sampled_steps=a.sampled_steps,actor=[],kl=[])
     def publish():
-        root_call(d,lambda:(a.output/'report.json').write_text(json.dumps(report,ensure_ascii=False,indent=2)+'\n'))
+        root_call(d,lambda:atomic_json(a.output/'report.json',report))
     publish()
     def restore():
         actor.load_state_dict(base);optimizer.load_state_dict(copy.deepcopy(adam));anchor.load_state_dict(bc_base)
@@ -362,6 +391,8 @@ def main():
                 step_observer=(lambda result:active.step()) if rank==0 else None,**kwargs)
         d.barrier()
         report['profiler']=root_call(d,lambda:summarize_gpu_trace(trace));publish()
+    report['compute_recommendation']=recommend_compute_profile(report,torch.cuda.get_device_properties(d.device).total_memory)
+    root_call(d,lambda:atomic_json(a.output/'compute_recommendation.json',report['compute_recommendation']))
     report['cache']=d.all_gather_object(cache.report());publish();cache.close()
     dist.destroy_process_group(group);dist.destroy_process_group()
 

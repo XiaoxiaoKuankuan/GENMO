@@ -114,6 +114,20 @@ def _preserve_rollout_anomaly(c,buffer,targets,manifest,label):
 def _evaluate(c,report,label):
     from .parallel_training import _evaluate_and_record
     result=_evaluate_and_record(c,report,label)
+    if hasattr(c.bc,'validation_report'):
+        from .policy_v3 import dense_precision_scope
+        def retention():
+            with dense_precision_scope(c.policy.precision):
+                return c.bc.validation_report(c.actor,c.config,rank=c.distributed.rank,world=c.distributed.world_size)
+        shards=c.distributed.all_gather_object(local_call(c.distributed,retention))
+        samples=[row for shard in shards for row in shard['samples']]
+        sources=sorted({row['meta']['dataset_id'] for row in samples})
+        by_source={source:dict(count=sum(r['meta']['dataset_id']==source for r in samples),
+            mean_loss=sum(r['loss'] for r in samples if r['meta']['dataset_id']==source)/
+                sum(r['meta']['dataset_id']==source for r in samples)) for source in sources}
+        result['stage1_retention']=dict(by_source=by_source,samples=samples,
+            source_balanced_loss=sum(x['mean_loss'] for x in by_source.values())/len(by_source),
+            source_loss_maturity=c.bc.source_global_step,scope=shards[0]['scope'])
     publication=_snapshot(c,'evaluated_'+label,wait=True)['publication']
     from .periodic_monitor import mark_saved_evaluation
     baseline=root_call(c.distributed,lambda:json.loads((c.output/'evaluation_baseline.json').read_text())
