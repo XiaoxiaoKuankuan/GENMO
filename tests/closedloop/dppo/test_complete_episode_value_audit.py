@@ -9,7 +9,21 @@ from __future__ import annotations
 import copy
 import pytest
 
-from tools.audit_stage10_v3_complete_returns import complete_returns, identity_key
+from tools.audit_stage10_v3_complete_returns import complete_returns, identity_key, validate_value_task
+
+
+@pytest.mark.parametrize('changed', [None, 'environment', 'termination', 'timing'])
+def test_value_audit_compares_physical_task_but_allows_training_horizon(changed):
+    model = dict(environment=dict(gravity=-9.81), termination=dict(yaw=1.5),
+                 timing=dict(prefix=.3), stage10=dict(episode_seconds=10.))
+    evaluation = copy.deepcopy(model)
+    evaluation['stage10']['episode_seconds'] = 180.
+    if changed:
+        evaluation[changed][next(iter(evaluation[changed]))] *= 2
+        with pytest.raises(ValueError, match='Value task'):
+            validate_value_task(model, evaluation)
+    else:
+        validate_value_task(model, evaluation)
 
 
 def example():

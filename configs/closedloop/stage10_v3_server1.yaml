@@ -3,14 +3,15 @@
 # 八卡各64环境×8连续决策，4096真实链；两epoch、1024完整链/minibatch，最多8次更新。
 # 行为始终20步CFG；PPO每epoch重新无放回K8，按20/K恢复完整目标归一化。
 # 主代理使用自由坐标平均log-ratio，FP64真实joint概率/KL始终记录，前缀/padding排除。
-# 真实4096链标定选Actor2e-7/BC初值0.01；完整8步中间及最终KL通过，物理学习收益仍须验收。
+# 在32epoch Critic真实预热后的4096链上选Actor5e-8/BC初值0.01；完整8步软/硬KL通过。
+# 原2e-7在完整主循环多次提前软停；降低学习率不改变clip/KL门槛，收益仍以独立物理评估为准。
 # 实测Actor计算微批64、KL微批256最快且满足原数值检查；64是可配置计算微批，不是算子固定分块。
-# 预训练条件Critic独立冻结副本+256维两层四头时序头，真实轨迹预热8轮后才更新Actor。
+# 预训练条件Critic独立冻结副本+256维两层四头时序头，每批32epoch，真实预热8轮后才更新Actor。
 # 每轮BC总512，按推导后的optimizer次数分配；有界EMA梯度比例标定，不解释为Adam贡献比例。
 # 日常随机链驻GPU至更新完成，不逐轮永久保存执行证据；诊断/异常明确持久化。
 # 完整恢复点按1800秒的一致边界冻结CPU快照，最多单在途异步写盘；best保存实际权重。
 # 500轮只是未来预算，本入口默认有限测试，不自动启动正式/长期训练。
-# 部署profile需要针对新模型/执行路径重新实测确认；训练墙钟和磁盘延迟不改变模拟时钟。
+# 部署0.30秒profile已按新模型单请求实测；改变数值执行核须重标，训练墙钟不改变模拟时钟。
 version: genmo.gmt_frozen_isaac.v1
 paths:
   genmo_repo: /home/user/liwei/GENMO-stage10-v3-verified-20261012
@@ -208,7 +209,7 @@ stage10:
     std_floor: 0.001
     log_probability_reduction: joint_sum
     ppo_epochs: 2
-    actor_lr: 2.0e-07
+    actor_lr: 5.0e-08
     critic_lr: 0.0001
     x0_diagnostic_every: 0
     grad_clip_norm: 1.0
@@ -394,7 +395,7 @@ stage10:
     heads: 4
     freeze_encoders: true
     learning_rate: 0.0001
-    epochs: 4
+    epochs: 32
     global_batch: 1024
     warmup_rollouts: 8
   bc_gradient:

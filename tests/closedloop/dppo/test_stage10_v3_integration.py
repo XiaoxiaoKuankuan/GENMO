@@ -26,6 +26,50 @@ def test_periodic_interaction_schedule_does_not_restart_after_resume(used, expec
     assert training_v3._next_interaction_boundary(used, 1500000) == expected
 
 
+def test_actor_free_warmup_periods_create_distinct_actual_phase_directories(tmp_path, monkeypatch):
+    monkeypatch.setattr(parallel_training, 'begin_lease', lambda *args: object())
+    c = SimpleNamespace(session=tmp_path / 'session', distributed=SimpleNamespace(rank=0), manager=None, budget=None)
+    paths = []
+    for rollout, controls in [(12, 1500000), (24, 3000000)]:
+        state = dict(iteration=0, rollouts_completed=rollout, training_control_steps=controls)
+        label = training_v3._periodic_evaluation_label(state)
+        path, _, _ = parallel_training._new_phase(c, 'eval_' + label, [{}])
+        paths.append(path)
+    assert paths[0] != paths[1] and all(p.is_dir() for p in paths)
+
+
+@pytest.mark.parametrize('changed', ['environment', 'termination', 'gmt_agent_config', 'isaac_contract'])
+def test_physical_identity_binds_task_and_sidecar_assets(tmp_path, changed):
+    paths = {}
+    for name in ['gmt_agent_config', 'isaac_contract']:
+        path = tmp_path / name
+        path.write_text('original')
+        paths[name] = str(path)
+    c = dict(paths=paths, environment=dict(domain_randomization=False), termination=dict(yaw_error_rad=1.5))
+    original = training_v3._physical_configuration_identity(c)
+    if changed in paths:
+        from pathlib import Path
+        Path(paths[changed]).write_text('changed')
+    else:
+        c[changed][next(iter(c[changed]))] = .25
+    assert training_v3._physical_configuration_identity(c) != original
+
+
+def test_source_identity_detects_changed_physical_task_outside_adapter(tmp_path):
+    genmo, gmt = tmp_path / 'genmo', tmp_path / 'gmt'
+    for name in ('train_stage10_v3_8gpu.py', 'run_stage10_v3_8gpu.sh', 'train_closedloop_stage10.py'):
+        path = genmo / 'tools' / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text('fixture')
+    task = gmt / 'source/NoetixRobot/NoetixRobot/tasks/mimic/mimic_noetix_bumi4340_mha_sonic/tracking_env_cfg.py'
+    task.parent.mkdir(parents=True)
+    task.write_text('decimation = 4')
+    config = dict(paths=dict(genmo_repo=str(genmo), gmt_repo=str(gmt)))
+    original = training_v3._sources(config)
+    task.write_text('decimation = 2')
+    assert training_v3._sources(config) != original
+
+
 @pytest.mark.parametrize('changed', [None, 'linear', 'precision', 'attention', 'compiler', 'torch_version', 'assets'])
 def test_deployment_delay_rejects_unmeasured_forward_contract(changed):
     from pathlib import Path

@@ -79,11 +79,29 @@ def _sources(config):
             files += [root/'tools'/name for name in ('train_stage10_v3_8gpu.py',
                 'run_stage10_v3_8gpu.sh','train_closedloop_stage10.py')]
         else:
-            files=list((root/'source/NoetixRobot/NoetixRobot/tasks/mimic/mimic_noetix_bumi4340_mha_sonic/closedloop').glob('*.py'))
+            robot_root=root/'source/NoetixRobot/NoetixRobot'
+            # 实际任务的env/mdp/PD/观测会改变物理转移，不能只绑定closedloop适配层。
+            files=list((robot_root/'tasks/mimic/mimic_noetix_bumi4340_mha_sonic').rglob('*.py'))
+            for directory in ('actuators','managers','terrains','assets/robots/bumi3_4340_lowpd'):
+                files+=list((robot_root/directory).rglob('*.py'))
             files+=list((root/'scripts/rsl_rl').glob('bumi4340*.py'))
             files+=list((root/'rsl_rl/rsl_rl').rglob('*.py'))
         records[label]={str(p.relative_to(root)):file_sha256(p) for p in sorted(set(files))}
     return records
+
+
+def _periodic_evaluation_label(state):
+    """预热时Actor轮次恒为零；按已完成rollout及交互计数区分每次周期评估。"""
+    return (f'periodic_r{state["rollouts_completed"]:06d}_'
+            f'c{state["training_control_steps"]:012d}_a{state["iteration"]:06d}')
+
+
+def _physical_configuration_identity(config):
+    """恢复同时绑定显式物理/终止配置和实际侧车资产，拒绝权重相同而任务改变。"""
+    return dict(environment=copy.deepcopy(config['environment']),
+        termination=copy.deepcopy(config['termination']),
+        gmt_agent_config_sha256=file_sha256(config['paths']['gmt_agent_config']),
+        isaac_contract_sha256=file_sha256(config['paths']['isaac_contract']))
 
 
 def _snapshot(c,reason,*,wait=False):
@@ -247,6 +265,7 @@ def run(cargs,config,distributed):
             training=c.stage['training'],critic=c.stage['critic'],bc_gradient=c.stage['bc_gradient'],kl=c.stage['kl'],
             scale=c.stage['scale'],reward=c.settings['reward'],runtime=c.base_config['runtime'],timing=c.base_config['timing'],
             dataset=c.stage['dataset'],evaluation=c.stage['evaluation'],
+            physical_configuration=root_call(distributed,lambda:_physical_configuration_identity(c.base_config)),
             source_files=root_call(distributed,lambda:_sources(config)),
             data_catalog=c.catalog.identity,source_stage1_step=loading['source_global_step'],
             actor_initialization=actor_initialization,
@@ -435,7 +454,7 @@ def run(cargs,config,distributed):
             if c.state['training_control_steps']>=c.state['next_evaluation_control_steps']:
                 c.state['next_evaluation_control_steps']=_next_interaction_boundary(
                     c.state['training_control_steps'],c.stage['evaluation']['every_control_steps'])
-                _evaluate(c,report,f'{c.state["iteration"]:06d}')
+                _evaluate(c,report,_periodic_evaluation_label(c.state))
             if time.perf_counter()-last_save>=c.stage['storage']['checkpoint_interval_seconds']:
                 _snapshot(c,'periodic');last_save=time.perf_counter()
             root_call(distributed,lambda:c.async_writer.poll())

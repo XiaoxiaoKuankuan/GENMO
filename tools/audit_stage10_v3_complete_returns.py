@@ -115,7 +115,14 @@ def load_conditions(reference, expected, report):
     return result
 
 
-def evaluate_checkpoint(path, sha, report, conditions, targets, batch_size):
+def validate_value_task(model_config, evaluation_config):
+    """任务动力学、终止与部署时钟须相同；采样截断长度不改变完整音乐的V定义。"""
+    for key in ('environment', 'termination', 'timing'):
+        if model_config[key] != evaluation_config[key]:
+            raise ValueError('Value task configuration differs: ' + key)
+
+
+def evaluate_checkpoint(path, sha, report, conditions, targets, batch_size, evaluation_config):
     import torch
     from gem.closedloop.dppo.checkpoint_v3 import SCHEMA, file_sha256
     from gem.closedloop.dppo.checkpoint import _validate_model_state
@@ -129,6 +136,7 @@ def evaluate_checkpoint(path, sha, report, conditions, targets, batch_size):
     identity = report['evaluation_identity']['training_identity']
     if payload.get('schema') != SCHEMA:
         raise ValueError('Only explicit complete v3 checkpoints can be evaluated')
+    validate_value_task(payload['config'], evaluation_config)
     for key in ('assets', 'kernel', 'reward'):
         if payload['identity'][key] != identity[key]:
             raise ValueError('Evaluation and Critic model contract differs: ' + key)
@@ -180,20 +188,24 @@ def main():
     if args.output.exists() or args.batch_size < 1 or len({r[0] for r in args.model}) != len(args.model):
         parser.error('New output, positive batch size and unique model labels required')
     import torch
+    import yaml
     from gem.closedloop.dppo.checkpoint_v3 import file_sha256
     torch.set_num_threads(4)
     report = json.loads(args.report.read_text())
+    evaluation_config_path = args.report.parent.parent / 'resolved_config.yaml'
+    evaluation_config = yaml.safe_load(evaluation_config_path.read_text())
     gamma = report['evaluation_identity']['training_identity']['training']['gamma_upper']
     targets, episodes = complete_returns(report, gamma)
     conditions = load_conditions(args.reference, targets, report)
-    models = {label: evaluate_checkpoint(Path(path), sha, report, conditions, targets, args.batch_size)
+    models = {label: evaluate_checkpoint(Path(path), sha, report, conditions, targets, args.batch_size, evaluation_config)
               for label, path, sha in args.model}
     result = dict(schema='genmo.stage10.complete_episode_value_audit.v3', gamma_upper=gamma,
         target_scope='actual_discounted_complete_episode_returns_without_critic_bootstrap',
         statistical_scope='finite_sample_MC_returns_not_exact_expected_value_error',
         episodes=episodes, models=models, inputs=dict(report=str(args.report.resolve()),
             report_sha256=file_sha256(args.report), reference=str(args.reference.resolve()),
-            reference_sha256=file_sha256(args.reference)))
+            reference_sha256=file_sha256(args.reference), evaluation_config=str(evaluation_config_path.resolve()),
+            evaluation_config_sha256=file_sha256(evaluation_config_path)))
     args.output.parent.mkdir(parents=True, exist_ok=True)
     with args.output.open('x') as stream:
         json.dump(result, stream, ensure_ascii=False, indent=2)
