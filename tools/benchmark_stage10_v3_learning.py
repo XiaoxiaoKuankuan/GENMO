@@ -10,6 +10,11 @@ KL。计时轮不复制完整梯度，预热后比较同一完整工作量而不
 本离线对照明确关闭软停止以保持更新覆盖一致，最终仍报告原硬KL是否通过；不把
 超限的离线副本发布为正式策略。不同精度的迁移KL与自身概率检查分开，BF16和
 编译候选即使更快也必须另有真实闭环效果，不能由此脚本自动进入正式训练。
+
+显式profile选项在常规计时完成后额外运行一次固定工作量，只在rank0采集一个
+预热后的optimizer step的真实CPU/CUDA trace。输出kernel区间并集、NCCL区间与
+主机同步API等待，不把包含CPU发射空隙的CUDA事件时间当成GPU实际计算占用。
+这次有测量扰动的运行不进入P50/P95，也不发布训练权重。
 """
 from __future__ import annotations
 import argparse
@@ -20,6 +25,7 @@ import os
 from pathlib import Path
 import sys
 import time
+from contextlib import nullcontext
 ROOT=Path(__file__).resolve().parents[1];sys.path.insert(0,str(ROOT))
 import numpy as np
 import torch
@@ -39,6 +45,36 @@ from tools.verify_stage10_gradient_reductions import module_directions,terminal_
 from tools.verify_stage10_saved_learning import compare_named
 
 
+def summarize_gpu_trace(path):
+    """汇总真实profiler区间；不同类别可能重叠，不能直接相加得到墙钟。"""
+    events=json.loads(path.read_text())['traceEvents']
+    spans={name:[] for name in ('kernels','compute_kernels','nccl_kernels','host_sync_api')}
+    names={}
+    for e in events:
+        if e.get('ph')!='X' or not e.get('dur'):continue
+        interval=(float(e['ts']),float(e['ts'])+float(e['dur']))
+        name=e.get('name','');category=e.get('cat','')
+        if category=='kernel':
+            spans['kernels'].append(interval)
+            spans['nccl_kernels' if 'nccl' in name.lower() else 'compute_kernels'].append(interval)
+            names[name]=names.get(name,0.)+e['dur']/1e6
+        if category in ('cuda_runtime','cuda_driver') and 'Synchronize' in name:
+            spans['host_sync_api'].append(interval)
+    def union(intervals):
+        total=0.;end=None
+        for begin,stop in sorted(intervals):
+            total+=stop-begin if end is None or begin>=end else max(0.,stop-end)
+            end=max(stop,end) if end is not None else stop
+        return total/1e6
+    steps=[e['dur']/1e6 for e in events if e.get('ph')=='X' and e.get('name','').startswith('ProfilerStep#')]
+    if not spans['kernels'] or not steps:raise RuntimeError('Profiler trace lacks actual CUDA kernels or active step')
+    return dict(trace_sha256=file_sha256(path),active_step_wall_seconds=sum(steps),
+        interval_union_seconds={k:union(v) for k,v in spans.items()},
+        kernel_event_count=len(spans['kernels']),top_kernel_sum_seconds=sorted(names.items(),key=lambda item:-item[1])[:20],
+        scope='rank0_one_warmed_optimizer_step_extra_run_excluded_from_throughput',
+        intervals_may_overlap=True,host_sync_is_blocking_API_time_not_all_CPU_idle_time=True)
+
+
 def main():
     p=argparse.ArgumentParser(description=__doc__)
     p.add_argument('--case',type=Path,required=True);p.add_argument('--output',type=Path,required=True)
@@ -47,6 +83,7 @@ def main():
     p.add_argument('--repeats',type=int,default=3)
     p.add_argument('--sampled-steps',type=int,choices=[8,20],default=8)
     p.add_argument('--variants',nargs='+',choices=['reference','bf16_cudnn','compiled_fp32','stable_bmm'],default=['reference'])
+    p.add_argument('--profile',action='store_true',help='另测一个预热后的真实CPU/CUDA优化步，不纳入吞吐计时')
     a=p.parse_args();rank=int(os.environ['LOCAL_RANK'])
     if int(os.environ['WORLD_SIZE'])!=8 or not 1<=a.repeats<=5:raise ValueError('Eight GPUs and 1..5 finite repeats required')
     for k,v in dict(NCCL_CUMEM_HOST_ENABLE='0',NCCL_IB_DISABLE='1',NCCL_SOCKET_IFNAME='lo',TORCH_NCCL_BLOCKING_WAIT='1').items():os.environ.setdefault(k,v)
@@ -170,6 +207,18 @@ def main():
         report['kl'].append(dict(microbatch=micro,samples=samples,p50=float(np.percentile(samples,50)),
             p95=float(np.percentile(samples,95)),report=kl,numerical_execution=policy.numerical_execution))
         publish()
+    if a.profile:
+        restore();d.barrier()
+        trace=a.output/'rank00_optimizer_trace.json'
+        profiler=(torch.profiler.profile(activities=[torch.profiler.ProfilerActivity.CPU,
+            torch.profiler.ProfilerActivity.CUDA],record_shapes=True,profile_memory=True,
+            schedule=torch.profiler.schedule(wait=0,warmup=1,active=1,repeat=1),
+            on_trace_ready=lambda p:p.export_chrome_trace(str(trace))) if rank==0 else nullcontext())
+        with profiler as active:
+            actor_update_v3(policy,optimizer,rows,targets,cache,manifest,controller,microbatch=a.microbatches[-1],
+                step_observer=(lambda result:active.step()) if rank==0 else None,**kwargs)
+        d.barrier()
+        report['profiler']=root_call(d,lambda:summarize_gpu_trace(trace));publish()
     report['cache']=d.all_gather_object(cache.report());publish();cache.close()
     dist.destroy_process_group(group);dist.destroy_process_group()
 

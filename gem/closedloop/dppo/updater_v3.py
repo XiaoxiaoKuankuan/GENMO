@@ -204,7 +204,7 @@ def critic_update_v3(critic,optimizer,rows,targets,cache,manifest,*,distributed,
     critic.train()
     selected=_eligible(manifest,False);owned=_owned(selected,manifest,distributed);local_indices=[i for _,i in owned]
     local_rows=[rows[i] for i in local_indices]
-    cached_features=hasattr(critic,'encode_frozen')
+    cached_features=hasattr(critic,'encode_frozen') and getattr(critic,'freeze_encoders',False)
     with _local_phase(distributed,'v3_critic_frozen_encoding'):
         encoded=critic.encode_frozen(cache.context(local_rows)) if cached_features else cache.context(local_rows)
     lookup={i:j for j,i in enumerate(local_indices)}
@@ -245,5 +245,5 @@ def critic_update_v3(critic,optimizer,rows,targets,cache,manifest,*,distributed,
     final=metrics()
     return dict(before=initial,after=final,optimizer_steps=len(losses),epochs=epochs,losses=losses,gradient_norms=norms,
         frozen_encoder_passes=1 if cached_features else 0,feature_bytes=sum(v.numel()*v.element_size() for v in encoded.values()),
-        critic_feature_contract='independent_pretrained_frozen_cache' if cached_features else 'legacy_MLP_recompute_trainable_encoders',
+        critic_feature_contract='independent_pretrained_frozen_cache' if cached_features else 'recompute_trainable_encoders_each_step',
         global_sample_visits=epochs*len(selected),metric_scope='fixed_rollout_bootstrap_targets_next_batch_before_update_is_separate')

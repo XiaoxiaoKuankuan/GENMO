@@ -23,6 +23,11 @@ class Stage1RetentionAnchor(SupervisedAnchor):
         self.source_global_step=int(source_global_step)
         # 配对SUM以后已经统计真实全局BC梯度，省去每个监督反向的重复全模型FP64 hook。
         self.micro_gradient_diagnostics=False
+    def backward(self,actor,weight):
+        report=super().backward(actor,weight)
+        report.update(loss_maturity_step=self.source_global_step+self.bc_update_steps-1,
+            warmup_origin='source_stage1_step_plus_independent_bc_updates')
+        return report
     def state_dict(self):return dict(super().state_dict(),source_global_step=self.source_global_step)
     def validate_state_dict(self,state):
         if state.get('source_global_step')!=self.source_global_step:

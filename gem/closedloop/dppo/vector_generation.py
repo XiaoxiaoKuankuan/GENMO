@@ -101,7 +101,10 @@ def generate_batch(policy, packets, *, shared_storage=False, device_trace=False)
         generated = dict(meta, qpos_world=array(copied['qpos_world'][i]),
                          qpos30=array(critical['qpos30'][i]),
                          contact=array(critical['contact'][i]))
-        outputs.append(dict(context=contexts[i], meta=meta, generated=generated, trace=local_trace))
+        # 内存训练直接交付采样时的条件副本，确保条件、free_mask与完整随机链同卡。
+        # 原磁盘路径继续使用CPU条件，实际部署需要的qpos输出仍单独传回CPU。
+        context=local_trace['conditions'] if device_trace else contexts[i]
+        outputs.append(dict(context=context, meta=meta, generated=generated, trace=local_trace))
     if shared_storage:
         block=dict(schema='genmo.world_batch_raw.v3',trace=copied['trace'],generated=[item['generated'] for item in outputs])
         for index,item in enumerate(outputs):item['_shared_raw_block']=(block,index)

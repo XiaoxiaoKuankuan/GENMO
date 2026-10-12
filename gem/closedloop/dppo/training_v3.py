@@ -52,10 +52,13 @@ def _sources(config):
     records={}
     for label,root in [('genmo',Path(config['paths']['genmo_repo'])),('gmt',Path(config['paths']['gmt_repo']))]:
         if label=='genmo':
-            files=list((root/'gem/closedloop').rglob('*.py'))+list((root/'gem/network').rglob('*.py'))+list((root/'gem/robots/bumi').rglob('*.py'))
+            files=list((root/'gem').rglob('*.py'))
+            files += [root/'tools'/name for name in ('train_stage10_v3_8gpu.py',
+                'run_stage10_v3_8gpu.sh','train_closedloop_stage10.py')]
         else:
             files=list((root/'source/NoetixRobot/NoetixRobot/tasks/mimic/mimic_noetix_bumi4340_mha_sonic/closedloop').glob('*.py'))
             files+=list((root/'scripts/rsl_rl').glob('bumi4340*.py'))
+            files+=list((root/'rsl_rl/rsl_rl').rglob('*.py'))
         records[label]={str(p.relative_to(root)):file_sha256(p) for p in sorted(set(files))}
     return records
 
@@ -95,6 +98,14 @@ def _restore_rollback(c,saved):
     c.actor_optimizer.zero_grad(set_to_none=True);c.critic_optimizer.zero_grad(set_to_none=True)
 
 
+def _preserve_rollout_anomaly(c,buffer,targets,manifest,label):
+    """在释放已完成采集前保存完整证据；异常保存失败不能掩盖原始训练错误。"""
+    from .diagnostic_rollout_v3 import persist_rollout
+    path=c.session/'anomalies'/label/f'rank{c.distributed.rank:02d}'/'rollout'
+    return persist_rollout(path,buffer.transitions,targets,manifest,kernel=c.policy.kernel_config,
+        identity=c.identity,full_execution=True,guard=c.guard)
+
+
 def _evaluate(c,report,label):
     from .parallel_training import _evaluate_and_record
     result=_evaluate_and_record(c,report,label)
@@ -127,6 +138,7 @@ def run(cargs,config,distributed):
         async_writer=None,vector=None,workers=None,maintenance=None,budget=None,output=cargs.output_dir.resolve())
     report=dict(schema='genmo.stage10.session.v3',status='running',iterations=[],warmup=[],evaluations=[],evaluation_artifacts=[])
     signal=StopSignal();signal.install();cache=None;buffer=None;error=None;saved=None;profile_token=None
+    targets=None;manifest=None;label=None;anomaly_saved=None
     try:
         def initialize():
             c.manager=RunManager(c.output,resume=bool(cargs.resume),min_free_bytes=c.stage['storage']['min_free_bytes'],max_run_bytes=c.stage['storage']['max_run_bytes'])
@@ -183,6 +195,7 @@ def run(cargs,config,distributed):
         c.identity=dict(schema='genmo.stage10.training_identity.v3',assets=assets,kernel=c.policy.kernel_config,
             training=c.stage['training'],critic=c.stage['critic'],bc_gradient=c.stage['bc_gradient'],kl=c.stage['kl'],
             scale=c.stage['scale'],reward=c.settings['reward'],runtime=c.base_config['runtime'],timing=c.base_config['timing'],
+            dataset=c.stage['dataset'],evaluation=c.stage['evaluation'],
             source_files=root_call(distributed,lambda:_sources(config)),
             data_catalog=c.catalog.identity,source_stage1_step=loading['source_global_step'],
             recovery='fresh_PhysX_episodes_no_partial_rollout_reuse',torch_version=torch.__version__)
@@ -226,8 +239,11 @@ def run(cargs,config,distributed):
             raise _FiniteDiagnosticComplete
         if payload is None:
             _snapshot(c,'initial',wait=True)
-            baseline=_evaluate(c,report,'initial')
-            root_call(distributed,lambda:atomic_json(c.output/'evaluation_baseline.json',baseline))
+            if cargs.collect_only:
+                report['initial_evaluation_skipped_for_collect_only']=True
+            else:
+                baseline=_evaluate(c,report,'initial')
+                root_call(distributed,lambda:atomic_json(c.output/'evaluation_baseline.json',baseline))
         started=time.perf_counter();last_save=started
         next_eval=c.state['training_control_steps']+c.stage['evaluation']['every_control_steps']
         next_diagnostic=c.state['training_control_steps']+c.stage['storage']['diagnostic_every_control_steps']
@@ -239,6 +255,7 @@ def run(cargs,config,distributed):
             strict=cargs.strict_evidence or c.state['training_control_steps']>=next_diagnostic
             if strict:next_diagnostic=c.state['training_control_steps']+c.stage['storage']['diagnostic_every_control_steps']
             round_start=time.perf_counter()
+            anomaly_saved=None
             from .performance import PhaseProfiler,activate,deactivate
             frequency=c.stage['performance']['profiler_every']
             detailed=strict or c.state['rollouts_completed']==0 or (not is_warmup and c.state['iteration']==0) or (
@@ -307,12 +324,7 @@ def run(cargs,config,distributed):
                     clip=c.settings['ppo_clip'],objective_reduction=c.settings['objective_logprob_reduction'])
                 accepted=check_kl_v3(kl,c.stage['kl'])
                 if not accepted['passed']:
-                    def preserve_rejection():
-                        from .diagnostic_rollout_v3 import persist_rollout
-                        path=c.session/'anomalies'/label/f'rank{distributed.rank:02d}'/'rollout'
-                        persist_rollout(path,rows,targets,manifest,kernel=c.policy.kernel_config,
-                            identity=c.identity,full_execution=True,guard=c.guard)
-                    local_call(distributed,preserve_rejection)
+                    anomaly_saved=local_call(distributed,lambda:_preserve_rollout_anomaly(c,buffer,targets,manifest,label))
                     local_call(distributed,lambda:_restore_rollback(c,saved))
                     root_call(distributed,lambda:atomic_json(c.session/(label+'_rejected.json'),dict(kl=kl,acceptance=accepted,actor=actor,
                         physical_and_resource_consumption_retained=True,training_state_restored=True)))
@@ -354,10 +366,17 @@ def run(cargs,config,distributed):
         import traceback
         error=caught;report.update(status='failed',error=dict(type=type(caught).__name__,message=str(caught),traceback=traceback.format_exc()))
         traceback.print_exc()
+        from .rollback_audit import release_failed_computation
+        release_failed_computation(caught)
+        if buffer is not None and targets is not None and manifest is not None:
+            try:
+                if anomaly_saved is None:
+                    anomaly_saved=local_call(distributed,lambda:_preserve_rollout_anomaly(c,buffer,targets,manifest,label))
+                report['anomaly_rollouts']=distributed.all_gather_object(anomaly_saved)
+            except BaseException as evidence_error:
+                report['anomaly_save_error']=repr(evidence_error)
         if saved is not None:
             try:
-                from .rollback_audit import release_failed_computation
-                release_failed_computation(caught)
                 c.actor_optimizer.zero_grad(set_to_none=True);c.critic_optimizer.zero_grad(set_to_none=True)
                 _restore_rollback(c,saved)
                 report['whole_training_state_restored']=True
@@ -369,6 +388,11 @@ def run(cargs,config,distributed):
             deactivate(profile_token)
         if cache is not None:cache.close()
         if buffer is not None:buffer.clear()
+        if hasattr(c,'identity'):
+            try:
+                report['source_unchanged']=root_call(distributed,lambda:_sources(config)==c.identity['source_files'])
+                if not report['source_unchanged']:raise RuntimeError('Bound runtime source changed during session')
+            except BaseException as caught:error=error or caught
         if c.vector is not None:
             try:report['world_shutdown']=local_call(distributed,c.vector.close)
             except BaseException as caught:error=error or caught
