@@ -111,7 +111,10 @@ def main():
     ax.set_ylabel('Explained Variance')
     ax.axhline(0, color='#777777', linewidth=.8)
     ax.legend(loc='best', frameon=False)
-    ax.set_title('分来源完整回报预测\n每来源仅一首歌；FineDance发生真实航向终止')
+    episodes = mc['episodes']
+    failure_count = sum(bool(episode['physical_failure']) for episode in episodes)
+    ax.set_title(f'分来源完整回报预测：{len(episodes)}个完整episode\n'
+                 f'实际物理终止{failure_count}次；样本范围以输入报告为准')
     for ax in axes.flat:
         ax.spines[['top', 'right']].set_visible(False)
         ax.grid(axis='y', alpha=.15)
