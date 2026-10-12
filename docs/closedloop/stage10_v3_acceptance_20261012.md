@@ -29,6 +29,26 @@
 
 主要实现文件为 `gem/closedloop/dppo/{probability_v3,policy_v3,pretrained_critic,gradient_merge_v3,updater_v3,runtime_v3,training_v3,checkpoint_v3}.py`。GMT 配套代码为 `bumi4340_policy_loader.py`、`bumi4340_native_frozen_policy.py` 及 `closedloop/inprocess_service.py`。
 
+## 与保留的旧正式配置对照
+
+旧配置以仓库 `stage10_formal_2048_full20_48h_server1.yaml` 为准，仍保留原样。它使用s350000和GMT135000，因此历史奖励及墙钟不能直接当作同资产、同工作量的质量对照。算法和性能的可比结论采用本报告固定真实数据的配对实验。
+
+|项目|旧正式配置/路径|v3主方案|
+|---|---|---|
+|初始化|s350000 / GMT135000|s595000 / GMT140500及配套SHA|
+|每轮真实链|8卡×64环境×4决策=2048|8卡×64环境×8决策=4096|
+|Actor全局minibatch|2048链|1024链；单卡计算微批独立配置|
+|内部优化|Full20，两epoch约2次Adam|K8，两epoch最多8次Adam；行为仍20步|
+|概率目标|joint_sum，clip0.01|自由有效坐标平均代理，clip0.003；保留真实joint诊断|
+|Actor LR|5e-9|固定真实数据标定起点5e-8|
+|BC|固定0.1|初值0.01＋有界平滑梯度比例；继承Stage1损失成熟度|
+|Critic|从零音乐/历史/前缀编码及池化MLP|独立复制冻结预训练编码、完整时序Transformer|
+|采样通信|独立GENMO/Isaac运行环境及批量服务、持久化确认|统一Python3.11同进程直接批量调用、日常内存确认|
+|长期归档|每轮完整执行归档|日常仅统计；周期诊断/异常保留完整证据|
+|恢复|旧v2训练身份|独立v3完整权重与优化器，重建PhysX并重新采样|
+
+两种clip与KL的概率单位不同，不能直接按数值大小解释更新宽松程度。旧约161.21秒/2048链/2次Adam与新完整8次Adam整轮墙钟也不具有同工作量可比性；只报告各自范围，不给出混合资产和更新量的整体提速倍数。v3 K8相对Full20约2.37倍Actor计算效率来自同新资产、同真实链、同8次Adam的直接实测。
+
 ## 已核验的证据
 
 服务器测试根目录为 `/data1/user/liwei/GENMO_outputs/closedloop_stage10/v3_validation_20261012`。用户要求交付全部测试结果，因此这些具名报告、失败日志和必要固定数据保留；pytest 临时夹具按精确路径清理。
