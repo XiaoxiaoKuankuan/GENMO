@@ -269,7 +269,8 @@ class WorldEnvironmentCollector(VectorEnvironmentCollector):
                 wait_wall_seconds=time.perf_counter()-tail_started)
             if extra:
                 if task is None:raise RuntimeError('Boundary executed without an active task')
-                sampler.record_execution(task,extra)
+                # 等待反馈已合入末条转移；只增加真实控制覆盖，不产生新上层决策。
+                sampler.record_execution(task,extra,upper_transitions=0)
             if ended:state.task=None
         elif not rows[-1].terminated:
             rows[-1].truncated=True;rows[-1].reason=rows[-1].reason or 'collector_fragment_boundary'
