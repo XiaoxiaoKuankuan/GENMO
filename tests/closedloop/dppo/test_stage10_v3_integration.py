@@ -21,6 +21,32 @@ from gem.closedloop.dppo.checkpoint_v3 import file_sha256
 from gem.closedloop.dppo.periodic_monitor import choose_best
 
 
+@pytest.mark.parametrize('used,expected', [(0, 1500000), (1499999, 1500000), (1500000, 3000000), (3199999, 4500000)])
+def test_periodic_interaction_schedule_does_not_restart_after_resume(used, expected):
+    assert training_v3._next_interaction_boundary(used, 1500000) == expected
+
+
+@pytest.mark.parametrize('changed', [None, 'linear', 'precision', 'attention', 'compiler', 'torch_version', 'assets'])
+def test_deployment_delay_rejects_unmeasured_forward_contract(changed):
+    from pathlib import Path
+    import yaml
+    root = Path(training_v3.__file__).resolve().parents[3]
+    profile = yaml.safe_load((root / 'configs/closedloop/stage10_v3_server1.yaml').read_text())['timing']['deployment_profile']
+    execution = copy.deepcopy(profile['numerical_execution'])
+    # 旧标定文件的展示文字不影响真实算子；纯反向实现不属于单请求前向计时。
+    execution.update(mode='compensated_tensorcore_fp32_storage_candidate', weight_gradient='new_backward')
+    assets = copy.deepcopy(profile['measured_assets'])
+    if changed == 'assets':
+        assets['checkpoint'] = 'different'
+    elif changed:
+        execution[changed] = 'unmeasured'
+    if changed:
+        with pytest.raises(ValueError, match='calibration'):
+            training_v3._validate_calibrated_execution(profile, execution, assets)
+    else:
+        training_v3._validate_calibrated_execution(profile, execution, assets)
+
+
 @pytest.mark.parametrize('fault', [None, 'assets', 'kernel', 'schema', 'hard_kl', 'soft_kl', 'partial', 'nonfinite'])
 def test_evaluation_actor_load_requires_complete_bound_update(tmp_path, fault):
     from gem.closedloop.dppo.checkpoint_v3 import load_evaluation_actor

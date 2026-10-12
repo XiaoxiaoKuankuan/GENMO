@@ -48,6 +48,29 @@ class _FiniteDiagnosticComplete(Exception):
     """仅退出有限诊断主体；统一finally仍核验物理关闭并决定最终退出码。"""
 
 
+def _next_interaction_boundary(used, interval):
+    """按累计真实控制步对齐周期；重启不把下一次评估延后一个完整周期。"""
+    if type(used) is not int or used < 0 or type(interval) is not int or interval < 1:
+        raise ValueError('Nonnegative actual interactions and positive integer interval required')
+    return (used // interval + 1) * interval
+
+
+def _validate_calibrated_execution(profile, numerical_execution, assets):
+    """部署延迟必须对应已测资产和实际前向；说明性mode文字不参与算子身份。"""
+    if profile.get('measured_assets') != assets:
+        raise ValueError('Deployment calibration assets differ from this Actor/GMT experiment')
+    measured = profile.get('numerical_execution', {})
+    keys = ('schema', 'precision', 'linear', 'attention', 'attention_fallback',
+            'matmul_tf32', 'master_dtype', 'layer_residual_dtype', 'probability_dtype',
+            'final_projection', 'inference_requires_grad', 'condition_encoding',
+            'network_rows', 'torch_version', 'compiler')
+    changed = [key for key in keys if key not in measured or key not in numerical_execution
+               or measured[key] != numerical_execution[key]]
+    if changed:
+        raise ValueError('Deployment execution changed; rerun explicit single-request calibration: '
+                         + ', '.join(changed))
+
+
 def _sources(config):
     records={}
     for label,root in [('genmo',Path(config['paths']['genmo_repo'])),('gmt',Path(config['paths']['gmt_repo']))]:
@@ -197,6 +220,9 @@ def run(cargs,config,distributed):
             attention=precision['attention'],linear_execution=precision['linear_execution'],
             compile_denoiser=precision['compile'],precise_output=precision['precise_output'],
             weight_gradient=precision.get('weight_gradient','direct_joint_gemm'))
+        if not cargs.calibrate_only:
+            _validate_calibrated_execution(c.config['timing']['deployment_profile'],
+                c.policy.numerical_execution,c.stage['assets'])
         actor_initialization=dict(kind='source_stage1',source_global_step=loading['source_global_step'])
         if cargs.evaluation_actor:
             from .checkpoint_v3 import load_evaluation_actor
@@ -274,16 +300,20 @@ def run(cargs,config,distributed):
             report.update(status='passed',scope='fixed_real_physics_evaluation_without_training',final_state=c.state)
             raise _FiniteDiagnosticComplete
         started=time.perf_counter();last_save=started
-        next_eval=c.state['training_control_steps']+c.stage['evaluation']['every_control_steps']
-        next_diagnostic=c.state['training_control_steps']+c.stage['storage']['diagnostic_every_control_steps']
+        c.state.setdefault('next_evaluation_control_steps',_next_interaction_boundary(
+            c.state['training_control_steps'],c.stage['evaluation']['every_control_steps']))
+        c.state.setdefault('next_diagnostic_control_steps',_next_interaction_boundary(
+            c.state['training_control_steps'],c.stage['storage']['diagnostic_every_control_steps']))
         warmups=critic_config['warmup_rollouts'] if cargs.warmup_rollouts is None else cargs.warmup_rollouts
         while c.state['iteration']<cargs.stop_after_iteration:
             if any(distributed.all_gather_object(signal.stop_requested)) or time.perf_counter()-started>=c.stage['run_control']['max_walltime_seconds']:break
             is_warmup=c.state['warmup_completed']<warmups
             label=('warmup' if is_warmup else 'train')+f'_{c.state["rollouts_completed"]+1:06d}'
-            strict=cargs.strict_evidence or c.state['training_control_steps']>=next_diagnostic
-            if strict:next_diagnostic=c.state['training_control_steps']+c.stage['storage']['diagnostic_every_control_steps']
+            strict=cargs.strict_evidence or c.state['training_control_steps']>=c.state['next_diagnostic_control_steps']
+            if strict:c.state['next_diagnostic_control_steps']=_next_interaction_boundary(
+                c.state['training_control_steps'],c.stage['storage']['diagnostic_every_control_steps'])
             round_start=time.perf_counter()
+            torch.cuda.reset_peak_memory_stats(distributed.device)
             anomaly_saved=None
             from .performance import PhaseProfiler,activate,deactivate
             frequency=c.stage['performance']['profiler_every']
@@ -362,16 +392,31 @@ def run(cargs,config,distributed):
                     root_call(distributed,lambda:atomic_json(c.session/(label+'_rejected.json'),dict(kl=kl,acceptance=accepted,actor=actor,
                         physical_and_resource_consumption_retained=True,training_state_restored=True,rollback_audits=rollbacks)))
                     raise RuntimeError('Final Full20 KL rejected; whole training update rolled back')
-                c.state['actor_updates']+=actor['optimizer_steps']
-                c.state['policy_version']+=1;c.state['iteration']+=1
-                root_call(distributed,lambda:c.budget.accept_iteration('update',identity=f'{identity["session_id"]}/{label}'))
             else:
-                actor_seconds=0.;c.state['warmup_completed']+=1
+                actor_seconds=0.
             def assert_paused_physics():
                 if tuple(service.world.control_ticks)!=physical_ticks or service.world.env.sim.current_time!=physics_time:
                     raise RuntimeError('Training optimization advanced the PhysX world')
             local_call(distributed,assert_paused_physics)
+            fingerprint_frequency=c.stage['checks']['full_fingerprint_every']
+            fingerprints=None
+            if strict or (fingerprint_frequency>0 and (c.state['rollouts_completed']+1)%fingerprint_frequency==0):
+                fingerprints=distributed.all_gather_object(local_call(distributed,lambda:dict(
+                    actor=_model_fingerprint(c.actor),critic=_model_fingerprint(c.critic))))
+                if any(value!=fingerprints[0] for value in fingerprints):
+                    raise RuntimeError('Periodic complete Actor/Critic fingerprints differ across ranks')
+            memory=distributed.all_gather_object(dict(pytorch_peak_allocated=torch.cuda.max_memory_allocated(distributed.device),
+                pytorch_peak_reserved=torch.cuda.max_memory_reserved(distributed.device),
+                scope='current_round_PyTorch_allocator_excludes_PhysX_external_allocations'))
+            # 全部验收完成后再推进接受轮次，失败可回滚学习状态；已用物理/优化尝试不退款。
+            if not is_warmup:
+                root_call(distributed,lambda:c.budget.accept_iteration('update',identity=f'{identity["session_id"]}/{label}'))
+                c.state['actor_updates']+=actor['optimizer_steps']
+                c.state['policy_version']+=1;c.state['iteration']+=1
+            else:
+                c.state['warmup_completed']+=1
             c.state['rollouts_completed']+=1
+            c.state['budget']=root_call(distributed,lambda:c.budget.summary())
             cache_report=cache.report();cache.close();cache=None;buffer.clear();buffer=None;saved=None;del rows
             wall=max(distributed.all_gather_object(time.perf_counter()-round_start))
             profile_report=profiler.report();deactivate(profile_token);profile_token=None
@@ -379,14 +424,18 @@ def run(cargs,config,distributed):
                 probability=initial_probability,critic=critic,actor=actor,full20_kl=kl,tensor_cache=cache_report,
                 actor_seconds=actor_seconds,critic_seconds=critic_seconds,wall_seconds=wall,
                 performance_by_rank=distributed.all_gather_object(profile_report),physics_paused_during_optimization=True,
+                memory_by_rank=memory,periodic_model_fingerprints=fingerprints,
                 effective_upper_transitions_per_second=used[2]/wall,mode='critic_warmup' if is_warmup else 'dppo_bc')
             root_call(distributed,lambda:(c.manager.append_metrics(record),log_metrics(c.writer,c.output/'curves.jsonl',c.state['rollouts_completed'],
                 record,prefix='v3',durable=False)))
             report['warmup' if is_warmup else 'iterations'].append(dict(label=label,wall_seconds=wall,actor_steps=0 if actor is None else actor['optimizer_steps']))
             if distributed.rank==0:print(f'[V3 ACCEPTED] {label} chains={used[2]} actor_steps={0 if actor is None else actor["optimizer_steps"]} wall={wall:.3f}s',flush=True)
-            if c.state['training_control_steps']>=next_eval:
+            if is_warmup and c.state['warmup_completed']==warmups:
+                _snapshot(c,'critic_warmup_complete');last_save=time.perf_counter()
+            if c.state['training_control_steps']>=c.state['next_evaluation_control_steps']:
+                c.state['next_evaluation_control_steps']=_next_interaction_boundary(
+                    c.state['training_control_steps'],c.stage['evaluation']['every_control_steps'])
                 _evaluate(c,report,f'{c.state["iteration"]:06d}')
-                next_eval=c.state['training_control_steps']+c.stage['evaluation']['every_control_steps']
             if time.perf_counter()-last_save>=c.stage['storage']['checkpoint_interval_seconds']:
                 _snapshot(c,'periodic');last_save=time.perf_counter()
             root_call(distributed,lambda:c.async_writer.poll())

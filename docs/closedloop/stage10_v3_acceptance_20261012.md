@@ -138,3 +138,42 @@ BC来源实际覆盖AIOZ 180、AIST 94、FineDance 135、Mine 103，共512个样
 完整v3 checkpoint包含Actor、Critic、两个Adam、BC控制器、rank RNG与采样器状态、累计真实交互及源码/资产/数值核身份。当前为固定LR，scheduler明确为空。恢复重建PhysX并重新采样；未完成rollout不恢复，已用物理预算不退回。异步线程只写不可变CPU快照，最多单在途；重要评估和best均有实际权重及SHA。相同完成边界再次保存使用独立publication ID，旧文件不覆盖。
 
 算法单轮对照可保存明确的 `actor_evaluation.v3` 实际权重，只允许 `--evaluate-only --evaluation-actor` 使用；它没有优化器/物理恢复语义。加载检查资产、随机核、完整更新步数及中间软线/最终硬KL通过标记。8种加载边界加原集成共19项CPU测试通过，0.48秒，错误输入拒绝后Actor保持原字节。
+
+## 完整主循环与非空Adam实际恢复
+
+`main_warm8_k8_v2` 冻结GENMO34245ae/GMT078251a，先完成8轮Critic预热，共32768条真实转移。首轮包含完整概率检查与首次启动缓存，墙钟185.043秒；其余7轮分别105.587、103.920、99.883、104.401、100.787、103.965、104.397秒。与最初checkpoint逐张量核对，322个Actor参数和buffer字节完全不变，Actor Adam仍为空。
+
+第9次rollout执行首轮Actor学习，4096条真实链、5次optimizer更新、320个BC样本，覆盖所有链至少一次。第6个待更新minibatch的平均坐标KL为0.001340，触发原0.001软线并丢弃尚未应用的梯度；完成参数的全20步KL仍通过硬验收：平均坐标0.001307、joint均值4.03993、坐标P95 0.004866、最大去噪步坐标0.006920、有效clipping7.308%。末端两步joint KL占50.809%。没有放宽门槛凑足8次更新，也没有把5次记为8次。
+
+首轮整体墙钟244.660秒，约16.742条真实上层转移/秒；Actor部分85.973秒包含为软停止额外计算但未应用的minibatch。该轮还有明确capture固定数据的开销，不是纯日常8次更新吞吐。设备监测覆盖更新阶段，每卡峰值约30GiB，含Isaac、CUDA上下文和缓存，不等于PyTorch已分配显存。所有已记录轮次的优化期间物理暂停检查通过。
+
+8轮预热后，新批更新前Critic EV为0.06538，本批4epoch后0.45280；MSE从84.79494降到54.12539。预热第8批更新前/后EV为0.01457/0.02381，说明早期在线拟合弱于固定数据充分拟合；需结合下一批与终态独立参考判断，不由本批0.45直接认定泛化可靠。预热第4/6轮分别记录3/1次物理失败，其他已报告预热轮及首个Actor采集轮失败0；失败是实际训练数据，不能从成功采集统计中抹去。
+
+实际执行配对工具读取了初始32任务共2.097GiB的权威journal，自对照收益差和音乐簇区间均为0，未配对控制步0。初始参考关节相邻50Hz步RMS为0.020402rad、P95绝对值0.044108rad；实际关节加速度RMS为8.52816rad/s²。它们是该固定任务集的统计，不是机器人安全界限。后续通过 `tools/compare_stage10_v3_physical.py` 与实际更新/噪声评估比较。
+
+首轮完整作业退出0，总监督1701.987秒；固定32任务终态回报42.737124，较初始42.807730下降0.070606，失败0。按16个音乐簇、四来源分层的配对bootstrap 95%区间为[-0.208505, 0.077991]，跨过零。真实机器人关节位置差RMS 0.031664rad、P95绝对值0.041841rad，GMT动作差RMS 0.272783（GMT动作单位），没有未配对控制步；这些真实动作变化不等于策略收益。Stage1固定监督loss由4.194112变为4.200210。首批训练前/后EV提高并未伴随可证实的物理收益。
+
+同一冻结源码以 `--resume latest` 从完整checkpoint恢复，独立新建PhysX世界后重采第2轮，`main_warm8_k8_resume2_v1` 退出0，总629.583秒。预热计数保持8，Actor从5步继续到13步；第2轮完整8次更新、512个BC样本、整体墙钟297.495秒，Actor部分107.696秒，最终平均坐标KL0.0009163。该轮显式capture真实非空Adam固定数据，包含保存开销。训练中物理暂停、GMT冻结、源码身份及关闭检查通过。
+
+恢复轮的新批Critic更新前EV0.090256/MSE82.41117，4epoch后EV0.117689/MSE52.64054，Critic更新耗时0.4457秒。终态回报42.775391，较初始下降0.032340、失败0；Stage1监督loss4.200338。固定初始Critic参考EV0.05249/MSE67.67941只衡量旧初始自举标签，不能认作当前V的无偏质量。新开发补充每次独立物理评估上以当前Critic自举的fresh诊断，并保留旧固定targets用于历史可比性。两种诊断都明确自举偏差。
+
+主循环后续修正还包括：评估/重型诊断边界按累计真实交互对齐并进入checkpoint；周期全模型跨rank指纹真正执行；每轮记录PyTorch allocated/reserved峰值；验收全部完成后才推进接受计数；预热完成单独保存完整恢复点。现有33项相关CPU回归通过，6.30秒。另对部署时延加入实际前向执行身份检查，换算子/精度/编译器必须重新单请求标定，不能静默套用旧0.30秒合同。
+
+`stable_tf32x3_wide` 八卡自身概率测试退出0，31.964秒，不同batch/置换/梯度模式最大误差3.64e-12。完整非空Adam计算候选对照正在使用真实第2轮固定数据，尚不由自身概率检查决定采用。
+
+## 已验证的运行环境
+
+独立Python路径为 `/data0/user/liwei/closedloop_stage10_v3_runtime/env_isaac_genmo/bin/python`。本次只读包元数据确认：Python3.11.15、PyTorch2.7.1+cu128、Triton3.3.1、Isaac Sim5.1.0.0、Isaac Lab0.54.2、NumPy1.26.4、SciPy1.15.3、ONNX Runtime1.27.0、Hydra1.3.2、OmegaConf2.3.1、TensorBoard2.21.0、PyYAML6.0.2。原训练环境未被替换；该环境已实际运行八卡PhysX、GENMO和GMT，同一Python进程交互。
+
+使用服务器干净工作树的统一入口，输出必须是独立新目录，有限结束轮次显式给出：
+
+```bash
+cd /home/user/liwei/GENMO-stage10-v3-verified-20261012
+bash tools/run_stage10_v3_8gpu.sh \
+  --config configs/closedloop/stage10_v3_server1.yaml \
+  --gmt-repo /home/user/liwei/legged_lab_gmt-stage10-v3-verified-20261012 \
+  --output-dir /data1/user/liwei/GENMO_outputs/closedloop_stage10/v3_validation_20261012/NEW_FINITE_RUN \
+  --warmup-rollouts 8 --stop-after-iteration 1
+```
+
+恢复使用同一源码/资产/算法配置、同一输出目录并加 `--resume latest`；若配置已改，应明确指向该运行保存的 `resolved_config.yaml`，不能把新算法配置伪装成旧运行的恢复。旧v2 checkpoint必须拒绝。模型 `s595000`、GMT140500及对应SHA在YAML中完整列出，入口先校验空闲GPU与资产再启动。

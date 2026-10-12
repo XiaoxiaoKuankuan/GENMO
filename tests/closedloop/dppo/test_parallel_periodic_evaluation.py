@@ -148,6 +148,33 @@ def test_evaluate_connects_identity_fixed_references_curves_and_real_saved_bound
     assert 'validation/fixed_critic_diagnostic/mse' in rows[0]['metrics']
 
 
+def test_v3_periodic_critic_reports_fresh_independent_values_without_replacing_reference(tmp_path, monkeypatch):
+    c, _ = context(tmp_path, monkeypatch)
+    c.stage['version'] = 'genmo.closedloop.stage10.v3'
+    first = training._evaluate(c, 'initial')
+    atomic_json(c.output/'evaluation_baseline.json', first)
+    reference = (c.output/'fixed_diagnostic_reference.json').read_bytes()
+    assert first['fresh_critic_diagnostic']['transition_count'] == 8
+    c.state.update(iteration=1, critic_updates=16)
+    with torch.no_grad():
+        c.critic.weight.add_(2.)
+    class NewPhysicalConditions(IndependentEnv):
+        def step(self, deterministic=False):
+            row = super().step(deterministic)
+            row.context = {'x': torch.full((1, 1), 11.)}
+            return row
+    monkeypatch.setattr(training, 'UpperEnvironment', NewPhysicalConditions)
+    second = training._evaluate(c, '000001')
+    fresh = second['fresh_critic_diagnostic']
+    assert fresh['mean_prediction'] == pytest.approx(13.)
+    assert second['fixed_critic_diagnostic']['mean_prediction'] == pytest.approx(3.)
+    assert fresh['transition_count'] == 8 and fresh['critic_updates'] == 16
+    assert fresh['reference_sha256'] != first['fresh_critic_diagnostic']['reference_sha256']
+    assert (c.output/'fixed_diagnostic_reference.json').read_bytes() == reference
+    assert c.critic.weight.grad is None
+    assert second['fixed_critic_diagnostic']['reference_sha256'] == first['fixed_critic_diagnostic']['reference_sha256']
+
+
 def test_credit_counts_actual_sample_shards_for_nondivisible_world(tmp_path, monkeypatch):
     c, credits = context(tmp_path, monkeypatch, samples=4, world=3)
     class Finished(Exception):
