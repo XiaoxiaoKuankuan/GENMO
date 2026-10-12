@@ -15,6 +15,12 @@ KL。计时轮不复制完整梯度，预热后比较同一完整工作量而不
 预热后的optimizer step的真实CPU/CUDA trace。输出kernel区间并集、NCCL区间与
 主机同步API等待，不把包含CPU发射空隙的CUDA事件时间当成GPU实际计算占用。
 这次有测量扰动的运行不进入P50/P95，也不发布训练权重。
+
+显式calibrate-actor-rates模式从同一原始Actor/Adam/BC/RNG出发有限扫描学习率，
+只用真实旧链标定完整PPO+BC更新，保存全部梯度比例、clipping和Full20 KL；失败
+候选不会成为训练策略。critic-reference模式用同一真实固定目标比较预训练时序
+Critic与旧MLP，按完整episode留出，并另测独立物理评估轨迹。冻结特征可以缓存，
+可训练层每步重算；固定GAE误差不冒充无偏真实价值误差或下一批在线泛化能力。
 """
 from __future__ import annotations
 import argparse
@@ -43,6 +49,125 @@ from gem.closedloop.dppo.updater_v2 import probability_check_local
 from gem.closedloop.dppo.updater_v3 import actor_update_v3,final_kl_v3,check_kl_v3
 from tools.verify_stage10_gradient_reductions import module_directions,terminal_outputs
 from tools.verify_stage10_saved_learning import compare_named
+
+
+def calibrate_actor(a,d,source,rank_state,policy,optimizer,anchor,generators,cache,rows,targets,manifest,kwargs,stage):
+    """共享全部实际采样输入与随机起点；扫描结果只供选择新的独立训练配置。"""
+    if not 1<=len(a.calibrate_actor_rates)<=6 or any(not 0<x<1e-3 for x in a.calibrate_actor_rates):
+        raise ValueError('Finite Actor learning-rate calibration requires 1..6 positive bounded candidates')
+    report=dict(schema='genmo.stage10.real_data_actor_calibration.v3',source_case=str(a.case),
+        source_case_sha256=file_sha256(a.case/'case.json'),real_global_chains=len(manifest),
+        shared_initial_adam_nonempty=bool(source['actor_optimizer']['state']),candidates=[],
+        scope='fixed_real_behavior_full_combined_update_not_accepted_physical_training',
+        old_statistics_not_rewritten=True,soft_stop_disabled_for_equal_work=True)
+    for lr in a.calibrate_actor_rates:
+        policy.actor.load_state_dict(source['actor']);optimizer.load_state_dict(copy.deepcopy(source['actor_optimizer']))
+        for group in optimizer.param_groups:group['lr']=lr
+        anchor.load_state_dict(rank_state['bc']);restore_local_rng(rank_state['rng'],generators)
+        settings=dict(stage['bc_gradient'],initial=a.calibrate_bc_initial)
+        controller=BCGradientController(**settings)
+        def observe(step):
+            if d.rank==0:
+                print(json.dumps(dict(phase='calibrate_actor',lr=lr,step=step['optimizer_step'],
+                    ppo_loss=step['ppo_loss'],coordinate_kl=step['pre_step_mean_coordinate_kl'],
+                    bc_weight=step['gradient_contributions']['bc_weight']),ensure_ascii=False),flush=True)
+        d.barrier();torch.cuda.reset_peak_memory_stats();started=time.perf_counter()
+        result=actor_update_v3(policy,optimizer,rows,targets,cache,manifest,controller,
+            microbatch=a.microbatches[0],step_observer=observe,**kwargs)
+        torch.cuda.synchronize();seconds=max(d.all_gather_object(time.perf_counter()-started))
+        kl=final_kl_v3(policy,rows,cache,manifest,distributed=d,microbatch=a.kl_microbatches[0],
+            clip=kwargs['clip'],objective_reduction=kwargs['objective_reduction'])
+        report['candidates'].append(dict(actor_lr=lr,bc_initial=a.calibrate_bc_initial,
+            update=result,full20_kl=kl,hard_kl=check_kl_v3(kl,stage['kl']),actor_seconds=seconds,
+            peak_memory_by_rank=d.all_gather_object(torch.cuda.max_memory_allocated())))
+        root_call(d,lambda:(a.output/'report.json').write_text(json.dumps(report,ensure_ascii=False,indent=2)+'\n'))
+    return report
+
+
+def compare_critics(a,d,actor,train,cache,rows,targets,manifest,stage):
+    """两种Critic使用同一固定监督与episode切分，独立评估不参与拟合和参数选择。"""
+    from gem.closedloop.dppo.pretrained_critic import PretrainedConditionCritic
+    from gem.closedloop.dppo.critic import UpperCritic
+    from gem.closedloop.dppo.periodic_monitor import fixed_critic_diagnostic,summarize_critic_predictions
+    from gem.closedloop.dppo.updater_v3 import critic_update_v3
+    from gem.closedloop.dppo.rollback_audit import exact_state_digest
+    reference_manifest=json.loads(a.critic_reference.read_text())
+    descriptor=next(r['critic'] for r in reference_manifest['ranks'] if r['rank']==d.rank)
+    if file_sha256(descriptor['path'])!=descriptor['sha256']:raise ValueError('Independent Critic reference SHA changed')
+    reference=torch.load(descriptor['path'],map_location='cpu',weights_only=False)
+    if reference['reference_sha256']!=descriptor['reference_sha256']:raise ValueError('Critic reference identity mismatch')
+    keys=[(r.identity['backend_session_id'],r.identity['env_id'],r.identity['episode_id']) for r in rows]
+    episodes=list(dict.fromkeys(keys));held=set(episodes[::4])
+    train_ids=[i for i,key in enumerate(keys) if key not in held];held_ids=[i for i,key in enumerate(keys) if key in held]
+    if not train_ids or not held_ids:raise ValueError('At least two independent episodes per rank required')
+    owners=d.all_gather_object(train_ids)
+    fit_manifest=[dict(m,valid=m['valid'] and m['local_index'] in owners[m['owner_rank']]) for m in manifest]
+    base_actor=exact_state_digest(actor.state_dict())
+    def independent(critic):
+        local=fixed_critic_diagnostic(critic,reference)
+        parts=d.all_gather_object(local)
+        return dict(summarize_critic_predictions([x for p in parts for x in p['predictions']],
+            [x for p in parts for x in p['targets']]),scope=reference['diagnostic_scope'])
+    @torch.no_grad()
+    def metrics(critic,indices):
+        chosen=[rows[i] for i in indices]
+        pred=critic(cache.context(chosen),cache.get('remaining_music_seconds',chosen)).double()
+        y=torch.as_tensor(targets['returns'],device=d.device)[indices].double();err=y-pred
+        vector=torch.stack((y.new_tensor(len(y)),y.sum(),y.square().sum(),err.sum(),err.square().sum()))
+        n,s,s2,e,e2=d.sum_tensor(vector).cpu().tolist();var=max(0.,s2/n-(s/n)**2)
+        return dict(count=int(n),mse=e2/n,explained_variance=None if var<=1e-12 else 1-(e2/n-(e/n)**2)/var)
+    @torch.no_grad()
+    def order_sensitivity(critic):
+        chosen=[rows[i] for i in held_ids[:32]];context=cache.context(chosen)
+        remaining=cache.get('remaining_music_seconds',chosen);base=critic(context,remaining)
+        results={}
+        for name,field,mask_key in [('music','music_features','music_valid'),('prefix','known_qpos30','known_qpos30_mask')]:
+            changed={k:v.clone() for k,v in context.items()}
+            mask=context[mask_key].any(-1) if context[mask_key].ndim==3 else context[mask_key]
+            eligible=[]
+            for i in range(len(chosen)):
+                idx=mask[i].nonzero().flatten();eligible.append(len(idx)>1)
+                changed[field][i,idx]=context[field][i,idx.flip(0)]
+            delta=(critic(changed,remaining)-base).abs()[torch.tensor(eligible,device=d.device)]
+            parts=d.all_gather_object(delta.cpu().tolist());values=[x for part in parts for x in part]
+            results[name]=dict(count=len(values),mean_abs=float(np.mean(values)),max_abs=max(values),
+                changed_fraction=sum(x>1e-7 for x in values)/len(values),scope='reverse_values_keep_original_times_and_masks')
+        return results
+    report=dict(schema='genmo.stage10.real_data_critic_comparison.v3',source_case=str(a.case),
+        source_case_sha256=file_sha256(a.case/'case.json'),independent_reference=str(a.critic_reference),
+        reference_sha256=file_sha256(a.critic_reference),fit_chains=sum(len(x) for x in owners),
+        held_out_chains=len(manifest)-sum(len(x) for x in owners),split='entire_episodes_every_fourth_per_rank',
+        targets='unchanged_initial_critic_bootstrapped_GAE_not_unbiased_ground_truth',cases=[])
+    for kind in ('pretrained_temporal','legacy_mlp_control'):
+        torch.manual_seed(42)
+        critic=(PretrainedConditionCritic(actor,dimension=stage['critic']['dimension'],layers=stage['critic']['layers'],
+            heads=stage['critic']['heads'],freeze_encoders=True) if kind=='pretrained_temporal' else
+            UpperCritic(qpos_mean=actor.endecoder.mean,qpos_std=actor.endecoder.std,
+                proprio_scales=tuple(train.model.proprio_scales))).to(d.device)
+        d.broadcast_module(critic)
+        optimizer=torch.optim.AdamW([p for p in critic.parameters() if p.requires_grad],lr=stage['critic']['learning_rate'],weight_decay=0.)
+        generator=torch.Generator().manual_seed(20261012)
+        item=dict(architecture=kind,initial=dict(fit=metrics(critic,train_ids),held_out=metrics(critic,held_ids),
+            independent=independent(critic)),checkpoints=[])
+        completed=0
+        for epochs in a.critic_epochs:
+            if not completed<epochs<=64:raise ValueError('Critic epoch endpoints must increase within 64')
+            started=time.perf_counter()
+            fit=critic_update_v3(critic,optimizer,rows,targets,cache,fit_manifest,distributed=d,generator=generator,
+                epochs=epochs-completed,batch=stage['critic']['global_batch'])
+            item['checkpoints'].append(dict(epochs=epochs,fit=fit,held_out=metrics(critic,held_ids),
+                independent=independent(critic),order_sensitivity=order_sensitivity(critic),
+                wall_seconds=max(d.all_gather_object(time.perf_counter()-started))))
+            completed=epochs
+            if d.rank==0:print(json.dumps(dict(phase='critic_comparison',architecture=kind,epochs=epochs,
+                held_out=item['checkpoints'][-1]['held_out'],independent=item['checkpoints'][-1]['independent'])),flush=True)
+        report['cases'].append(item)
+        report['actor_unchanged']=exact_state_digest(actor.state_dict())==base_actor
+        if not report['actor_unchanged'] or any(p.grad is not None for p in actor.parameters()):
+            raise RuntimeError('Critic comparison changed the Actor or its gradients')
+        root_call(d,lambda:(a.output/'report.json').write_text(json.dumps(report,ensure_ascii=False,indent=2)+'\n'))
+        del critic,optimizer
+    return report
 
 
 def summarize_gpu_trace(path):
@@ -82,8 +207,12 @@ def main():
     p.add_argument('--kl-microbatches',type=int,nargs='+',default=[256,512,1024])
     p.add_argument('--repeats',type=int,default=3)
     p.add_argument('--sampled-steps',type=int,choices=[8,20],default=8)
-    p.add_argument('--variants',nargs='+',choices=['reference','bf16_cudnn','compiled_fp32','stable_bmm'],default=['reference'])
+    p.add_argument('--variants',nargs='+',choices=['reference','bf16_cudnn','compiled_fp32','stable_bmm','weight_bf16x3','weight_bf16x6'],default=['reference'])
     p.add_argument('--profile',action='store_true',help='另测一个预热后的真实CPU/CUDA优化步，不纳入吞吐计时')
+    p.add_argument('--calibrate-actor-rates',type=float,nargs='+',help='从同一起点有限标定完整PPO+BC学习率，不保存候选权重')
+    p.add_argument('--calibrate-bc-initial',type=float,default=.01)
+    p.add_argument('--critic-reference',type=Path,help='独立真实物理评估的fixed_diagnostic_reference.json')
+    p.add_argument('--critic-epochs',type=int,nargs='+',default=[4,16,32])
     a=p.parse_args();rank=int(os.environ['LOCAL_RANK'])
     if int(os.environ['WORLD_SIZE'])!=8 or not 1<=a.repeats<=5:raise ValueError('Eight GPUs and 1..5 finite repeats required')
     for k,v in dict(NCCL_CUMEM_HOST_ENABLE='0',NCCL_IB_DISABLE='1',NCCL_SOCKET_IFNAME='lo',TORCH_NCCL_BLOCKING_WAIT='1').items():os.environ.setdefault(k,v)
@@ -105,9 +234,16 @@ def main():
     config=copy.deepcopy(source['config']);settings=config['stage9'];stage=config['stage10']
     config['runtime']['genmo_device']=str(d.device)
     actor,train,loading=local_call(d,lambda:load_actor(config));actor.load_state_dict(source['actor'])
+    if a.critic_reference is not None:
+        if a.calibrate_actor_rates:p.error('Choose Actor calibration or Critic comparison')
+        # 与训练入口一致，在修改Actor算子类别前复制Stage1原生条件编码器。
+        cache=RolloutTensorCache(rows,targets,d.device,max_device_bytes=8*1024**3)
+        compare_critics(a,d,actor,train,cache,rows,targets,manifest,stage)
+        cache.close();dist.destroy_process_group(group);dist.destroy_process_group();return
     policy=DenseDiffusionPolicy(actor,std_schedule=settings['std_schedule'],**dict(precision=stage['precision']['mode'],
         attention=stage['precision']['attention'],linear_execution=stage['precision']['linear_execution'],
-        precise_output=stage['precision']['precise_output'],compile_denoiser=stage['precision']['compile']))
+        precise_output=stage['precision']['precise_output'],compile_denoiser=stage['precision']['compile'],
+        weight_gradient=stage['precision'].get('weight_gradient','direct_joint_gemm')))
     if policy.kernel_config!=source['kernel'] or inputs['kernel']!=source['kernel']:raise ValueError('Baseline behavior numerical contract changed')
     optimizer=torch.optim.AdamW(trainable_actor_parameters(actor),lr=settings['actor_lr'],weight_decay=0.)
     optimizer.load_state_dict(copy.deepcopy(source['actor_optimizer']))
@@ -125,6 +261,9 @@ def main():
         clip=settings['ppo_clip'],gamma_denoising=settings['gamma_denoising'],soft_kl=None,
         kl_reduction=stage['kl']['reduction'],objective_reduction=settings['objective_logprob_reduction'],
         grad_clip_norm=settings['grad_clip_norm'])
+    if a.calibrate_actor_rates:
+        calibrate_actor(a,d,source,rank_state,policy,optimizer,anchor,generators,cache,rows,targets,manifest,kwargs,stage)
+        cache.close();dist.destroy_process_group(group);dist.destroy_process_group();return
     offline_warm=None
     if not optimizer.state:
         offline_warm=actor_update_v3(policy,optimizer,rows,targets,cache,manifest,controller,
@@ -139,6 +278,7 @@ def main():
         soft_stop_disabled_only_for_fixed_work=True,sampled_steps=a.sampled_steps,actor=[],kl=[])
     def publish():
         root_call(d,lambda:(a.output/'report.json').write_text(json.dumps(report,ensure_ascii=False,indent=2)+'\n'))
+    publish()
     def restore():
         actor.load_state_dict(base);optimizer.load_state_dict(copy.deepcopy(adam));anchor.load_state_dict(bc_base)
         controller.load_state_dict(controller_base);restore_local_rng(rng_base,generators)
@@ -149,13 +289,14 @@ def main():
             from gem.closedloop.dppo.policy_v3 import configure_dense_actor
             options=dict(precision='bf16_backbone' if variant=='bf16_cudnn' else stage['precision']['mode'],
                 attention='sdpa_cudnn' if variant=='bf16_cudnn' else stage['precision']['attention'],
-                linear_execution='stable_bmm' if variant=='stable_bmm' else stage['precision']['linear_execution'])
+                linear_execution='stable_bmm' if variant=='stable_bmm' else stage['precision']['linear_execution'],
+                weight_gradient='cublas_'+variant.removeprefix('weight_') if variant.startswith('weight_') else
+                    stage['precision'].get('weight_gradient','direct_joint_gemm'))
+            if hasattr(actor.denoiser,'_stage10_eager_forward'):raise ValueError('Compiled variant must be tested last or in a separate process')
+            policy.numerical_execution.update(configure_dense_actor(actor,**options));policy.precision=options['precision']
             if variant=='compiled_fp32':
                 from gem.closedloop.dppo.compiled_forward_v3 import install_shared_forward
                 install_shared_forward(policy)
-            else:
-                if hasattr(actor.denoiser,'_stage10_eager_forward'):raise ValueError('Compiled variant must be tested last or in a separate process')
-                policy.numerical_execution.update(configure_dense_actor(actor,**options));policy.precision=options['precision']
         for micro in a.microbatches:
             samples=[];diagnostic=None
             for repeat in range(a.repeats+2):
@@ -171,6 +312,8 @@ def main():
                 if result['optimizer_steps']!=planned or result['internal_sample_visits']!=result['planned_internal_visits']:
                     raise ValueError('Candidate changed actual complete optimizer/data work')
                 if repeat>=2:samples.append(elapsed)
+                if rank==0:print(json.dumps(dict(phase='actor_compute',variant=variant,microbatch=micro,
+                    repeat=repeat,seconds=elapsed)),flush=True)
                 if repeat==0:
                     kl=final_kl_v3(policy,rows,cache,manifest,distributed=d,microbatch=512,
                         clip=settings['ppo_clip'],objective_reduction=settings['objective_logprob_reduction'])

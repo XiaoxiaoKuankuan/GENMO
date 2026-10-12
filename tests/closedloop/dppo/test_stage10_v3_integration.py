@@ -172,3 +172,58 @@ def test_boundary_tail_is_part_of_complete_memory_execution_evidence():
     assert len(saved) == row.executed_control_steps == 27
     assert saved[:2] == prefix
     assert [step['tick'] for step in saved] == list(range(5088, 5401, 12))
+
+
+def test_repeated_checkpoint_boundary_publishes_distinct_immutable_files(tmp_path):
+    from gem.closedloop.dppo.checkpoint_v3 import AsyncCheckpointWriter, SCHEMA
+    payload = dict(schema=SCHEMA, actor={'weight': torch.ones(3)}, actor_fingerprint='finite',
+        state=dict(iteration=1, rollouts_completed=2, actor_updates=3, critic_updates=4))
+    writer = AsyncCheckpointWriter(tmp_path)
+    published = []
+    try:
+        for _ in range(2):
+            writer.submit(copy.deepcopy(payload), reason='controlled_end')
+            published.append(writer.poll(wait=True))
+    finally:
+        writer.close()
+    assert published[0]['path'] != published[1]['path']
+    for item in published:
+        assert file_sha256(tmp_path / item['path']) == item['sha256']
+    assert json.loads((tmp_path / 'latest.json').read_text())['path'] == published[-1]['path']
+
+
+def test_rollback_restores_nonempty_adam_and_rng_exactly():
+    from gem.closedloop.dppo.gradient_merge_v3 import BCGradientController
+    from gem.closedloop.dppo.rollback_audit import exact_state_digest
+
+    class Anchor:
+        def __init__(self): self.value = {'cursor': 4}
+        def state_dict(self): return copy.deepcopy(self.value)
+        def load_state_dict(self, value): self.value = copy.deepcopy(value)
+
+    actor, critic = torch.nn.Linear(3, 2), torch.nn.Linear(3, 1)
+    actor_opt, critic_opt = (torch.optim.AdamW(module.parameters(), lr=.01) for module in (actor, critic))
+    c = SimpleNamespace(actor=actor, critic=critic, actor_optimizer=actor_opt, critic_optimizer=critic_opt,
+        bc=Anchor(), controller=BCGradientController(), generators={'actor': torch.Generator().manual_seed(314)},
+        state=dict(actor_updates=2, critic_updates=3, training_control_steps=101))
+    for model, opt in ((actor, actor_opt), (critic, critic_opt)):
+        model(torch.ones(2, 3)).square().sum().backward(); opt.step(); opt.zero_grad(set_to_none=True)
+    saved = training_v3._rollback_snapshot(c)
+    for model, opt in ((actor, actor_opt), (critic, critic_opt)):
+        model(torch.full((2, 3), 2.)).sum().backward(); opt.step()
+    torch.rand(3); torch.rand(3, generator=c.generators['actor'])
+    c.bc.value['cursor'] += 1; c.controller.update(3., 4.)
+    c.state.update(actor_updates=8, critic_updates=12, training_control_steps=109)
+    audit = training_v3._restore_rollback(c, saved)
+    assert audit['identical']
+    assert exact_state_digest(saved) == exact_state_digest(training_v3._rollback_snapshot(c))
+    assert c.state['training_control_steps'] == 109
+    assert all(p.grad is None for model in (actor, critic) for p in model.parameters())
+
+
+def test_nan_p95_is_rejected_without_relaxing_kl_limits():
+    from gem.closedloop.dppo.updater_v3 import check_kl_v3
+    report = dict(mean_coordinate_kl=0., mean_joint_kl=0., maximum_step_mean_coordinate_kl=0.,
+                  coordinate_kl=dict(p95=float('nan')))
+    outcome = check_kl_v3(report, dict(p95_coordinate=.01))
+    assert not outcome['passed'] and 'p95_coordinate' in outcome['failures']

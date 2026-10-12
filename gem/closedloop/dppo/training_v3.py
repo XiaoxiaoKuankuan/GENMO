@@ -96,6 +96,11 @@ def _restore_rollback(c,saved):
     c.bc.load_state_dict(saved['bc']);c.controller.load_state_dict(saved['controller']);restore_local_rng(saved['rng'],c.generators)
     c.state['actor_updates'],c.state['critic_updates']=saved['actor_updates'],saved['critic_updates']
     c.actor_optimizer.zero_grad(set_to_none=True);c.critic_optimizer.zero_grad(set_to_none=True)
+    from .rollback_audit import compare_recovered_state
+    audit=compare_recovered_state(saved,_rollback_snapshot(c))
+    if not audit['identical']:
+        raise RuntimeError('Whole training rollback byte audit failed: '+json.dumps(audit,ensure_ascii=False))
+    return audit
 
 
 def _preserve_rollout_anomaly(c,buffer,targets,manifest,label):
@@ -176,7 +181,8 @@ def run(cargs,config,distributed):
         precision=c.stage['precision']
         c.policy=DenseDiffusionPolicy(c.actor,std_schedule=c.settings['std_schedule'],precision=precision['mode'],
             attention=precision['attention'],linear_execution=precision['linear_execution'],
-            compile_denoiser=precision['compile'],precise_output=precision['precise_output'])
+            compile_denoiser=precision['compile'],precise_output=precision['precise_output'],
+            weight_gradient=precision.get('weight_gradient','direct_joint_gemm'))
         c.actor_optimizer=torch.optim.AdamW(trainable_actor_parameters(c.actor),lr=c.settings['actor_lr'],weight_decay=0.)
         c.critic_optimizer=torch.optim.AdamW([p for p in c.critic.parameters() if p.requires_grad],lr=critic_config['learning_rate'],weight_decay=0.)
         c.controller=BCGradientController(**c.stage['bc_gradient'])
@@ -244,6 +250,9 @@ def run(cargs,config,distributed):
             else:
                 baseline=_evaluate(c,report,'initial')
                 root_call(distributed,lambda:atomic_json(c.output/'evaluation_baseline.json',baseline))
+        if cargs.evaluate_only:
+            report.update(status='passed',scope='fixed_real_physics_evaluation_without_training',final_state=c.state)
+            raise _FiniteDiagnosticComplete
         started=time.perf_counter();last_save=started
         next_eval=c.state['training_control_steps']+c.stage['evaluation']['every_control_steps']
         next_diagnostic=c.state['training_control_steps']+c.stage['storage']['diagnostic_every_control_steps']
@@ -271,9 +280,12 @@ def run(cargs,config,distributed):
             c.state['training_physics_steps']+=used[1]
             c.state['training_upper_transitions']+=used[2]
             cache=RolloutTensorCache(rows,targets,distributed.device,max_device_bytes=c.stage['storage']['tensor_cache_max_bytes'],preserve_device=True)
+            probability_frequency=c.stage['checks']['full_probability_every']
+            full_probability=(c.state['rollouts_completed']==0 or strict or
+                (probability_frequency>0 and c.state['rollouts_completed']%probability_frequency==0))
             initial_probability=probability_check_local(c.policy,rows,global_manifest=manifest,distributed=distributed,
                 denoising_microbatch=c.settings['kl_microbatch'],tensor_cache=cache,
-                global_indices=None if c.state['rollouts_completed']==0 or strict else
+                global_indices=None if full_probability else
                     [next(i for i,m in enumerate(manifest) if m['owner_rank']==rank and m['has_free'])
                      for rank in range(8) if any(m['owner_rank']==rank and m['has_free'] for m in manifest)])
             saved=local_call(distributed,lambda:_rollback_snapshot(c))
@@ -325,9 +337,10 @@ def run(cargs,config,distributed):
                 accepted=check_kl_v3(kl,c.stage['kl'])
                 if not accepted['passed']:
                     anomaly_saved=local_call(distributed,lambda:_preserve_rollout_anomaly(c,buffer,targets,manifest,label))
-                    local_call(distributed,lambda:_restore_rollback(c,saved))
+                    rollback=local_call(distributed,lambda:_restore_rollback(c,saved))
+                    rollbacks=distributed.all_gather_object(rollback)
                     root_call(distributed,lambda:atomic_json(c.session/(label+'_rejected.json'),dict(kl=kl,acceptance=accepted,actor=actor,
-                        physical_and_resource_consumption_retained=True,training_state_restored=True)))
+                        physical_and_resource_consumption_retained=True,training_state_restored=True,rollback_audits=rollbacks)))
                     raise RuntimeError('Final Full20 KL rejected; whole training update rolled back')
                 c.state['actor_updates']+=actor['optimizer_steps']
                 c.state['policy_version']+=1;c.state['iteration']+=1
@@ -378,7 +391,8 @@ def run(cargs,config,distributed):
         if saved is not None:
             try:
                 c.actor_optimizer.zero_grad(set_to_none=True);c.critic_optimizer.zero_grad(set_to_none=True)
-                _restore_rollback(c,saved)
+                rollback=local_call(distributed,lambda:_restore_rollback(c,saved))
+                report['rollback_audits']=distributed.all_gather_object(rollback)
                 report['whole_training_state_restored']=True
             except BaseException as restore_error:
                 report['whole_training_state_restored']=False;report['rollback_error']=repr(restore_error)
@@ -395,7 +409,8 @@ def run(cargs,config,distributed):
             except BaseException as caught:error=error or caught
         if c.vector is not None:
             try:report['world_shutdown']=local_call(distributed,c.vector.close)
-            except BaseException as caught:error=error or caught
+            except BaseException as caught:
+                report['world_shutdown_error']=repr(caught);error=error or caught
         if distributed.rank==0:
             try:
                 if c.async_writer is not None:report['checkpoint_shutdown']=c.async_writer.close()

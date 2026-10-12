@@ -4,6 +4,9 @@
 旧固定64行编译器的有梯度推理补救。网络行随真实 batch 扩大，条件批量编码，
 音乐/历史/前缀在一条链的20步中复用；训练条件图由 ConditionGraphCache 回传。
 FP32主参数和Adam始终保留，原生GEMM直接归约权重梯度，不物化逐样本权重矩阵。
+显式补偿BF16权重梯度候选复用已有三项/六项Tensor Core算子，只替换Transformer
+反向权重归约；条件和敏感输出保持原精度。它不改变采样前向，仍须完整梯度及
+非空Adam对照，默认继续使用原生联合GEMM，不能由可调用直接视为验收通过。
 
 native_fp32是新数值基线，tf32和bf16_backbone属于显式候选合同。BF16只计算
 Transformer大矩阵和指定SDPA，层间残差、条件、输出投影、CFG和DDIM仍FP32。
@@ -31,7 +34,7 @@ from gem.network.base_arch.transformer.encoder_rope import EncoderRoPEBlock, RoP
 
 class _DenseLinear(torch.autograd.Function):
     @staticmethod
-    def forward(ctx, inputs, weight, bias, dtype, precise_output, backend):
+    def forward(ctx, inputs, weight, bias, dtype, precise_output, backend, weight_gradient):
         arithmetic=torch.float64 if precise_output else dtype
         x,w=inputs.to(arithmetic),weight.to(arithmetic)
         ctx.save_for_backward(x,w)
@@ -39,6 +42,7 @@ class _DenseLinear(torch.autograd.Function):
         ctx.has_bias=bias is not None
         ctx.precise_output=precise_output
         ctx.backend=backend
+        ctx.weight_gradient=weight_gradient
         if backend=='sample_bmm' and not precise_output:
             shaped=x.reshape(len(x),-1,x.shape[-1])
             result=torch.bmm(shaped,w.t().unsqueeze(0).expand(len(x),-1,-1)).reshape(*x.shape[:-1],w.shape[0])
@@ -67,19 +71,25 @@ class _DenseLinear(torch.autograd.Function):
             else:grad_x=F.linear(g.to(w.dtype),w.t())
             grad_x=grad_x.reshape_as(x).to(ctx.input_dtype)
         # 直接得到最终[out,in]矩阵；不创建[B,out,in]临时梯度。
-        grad_w=(g.to(accumulation).t()@inputs.to(accumulation)).to(ctx.weight_dtype) if ctx.needs_input_grad[1] else None
+        grad_w=None
+        if ctx.needs_input_grad[1]:
+            if ctx.weight_gradient!='direct_joint_gemm' and not ctx.precise_output:
+                from .compensated_gemm import compensated_gemm
+                grad_w=compensated_gemm(g.float().t(),inputs.float(),int(ctx.weight_gradient[-1])).to(ctx.weight_dtype)
+            else:grad_w=(g.to(accumulation).t()@inputs.to(accumulation)).to(ctx.weight_dtype)
         grad_b=g.sum(0,dtype=accumulation).to(ctx.weight_dtype) if ctx.has_bias and ctx.needs_input_grad[2] else None
-        return grad_x,grad_w,grad_b,None,None,None
+        return grad_x,grad_w,grad_b,None,None,None,None
 
 
 class RegionalDenseLinear(nn.Linear):
     def forward(self, inputs):
         return _DenseLinear.apply(inputs,self.weight,self.bias,
             getattr(self,'v3_compute_dtype',torch.float32),getattr(self,'v3_precise_output',False),
-            getattr(self,'v3_linear_backend','native_gemm'))
+            getattr(self,'v3_linear_backend','native_gemm'),getattr(self,'v3_weight_gradient','direct_joint_gemm'))
 
 
-def configure_dense_actor(actor, *, precision='native_fp32', attention='sdpa_math', precise_output=True,linear_execution='native_gemm'):
+def configure_dense_actor(actor, *, precision='native_fp32', attention='sdpa_math', precise_output=True,linear_execution='native_gemm',
+                          weight_gradient='direct_joint_gemm'):
     if precision not in ('native_fp32','tf32','bf16_backbone'):
         raise ValueError('Unknown explicit v3 arithmetic contract')
     if attention not in ('manual','sdpa_math','sdpa_efficient','sdpa_flash','sdpa_cudnn'):
@@ -88,11 +98,14 @@ def configure_dense_actor(actor, *, precision='native_fp32', attention='sdpa_mat
         raise TypeError('Actor master parameters must remain FP32')
     if linear_execution not in ('native_gemm','stable_bmm','stable_ieee','stable_tf32x3','stable_bf16x3','stable_bf16x6'):
         raise ValueError('Unknown v3 dense reduction contract')
+    if weight_gradient not in ('direct_joint_gemm','cublas_bf16x3','cublas_bf16x6'):
+        raise ValueError('Unknown explicit v3 weight-gradient arithmetic contract')
     for name,module in actor.named_modules():
         if type(module) in (nn.Linear,SampleMatrixLinear,RegionalDenseLinear):
             module.__class__=RegionalDenseLinear
             module.v3_compute_dtype=(torch.bfloat16 if precision=='bf16_backbone' and name.startswith('denoiser.blocks.') else torch.float32)
             module.v3_precise_output=bool(precise_output and name=='denoiser.final_layer.fc2')
+            module.v3_weight_gradient=weight_gradient if name.startswith('denoiser.blocks.') else 'direct_joint_gemm'
             module.v3_linear_backend=('native_gemm' if linear_execution=='native_gemm' else
                 'sample_bmm' if linear_execution=='stable_bmm' and name.startswith('denoiser.blocks.') else
                 'ieee' if linear_execution=='stable_bmm' else
@@ -107,7 +120,7 @@ def configure_dense_actor(actor, *, precision='native_fp32', attention='sdpa_mat
         actor.history_encoder.cell.forward_backend='fixed_tile_ieee'
         actor.history_encoder.cell.weight_reduction='joint_gemm'
     return dict(schema='genmo.stage10.native_dense_execution.v1',precision=precision,
-        linear=linear_execution,weight_gradient='direct_joint_gemm',attention=attention,attention_fallback=False,
+        linear=linear_execution,weight_gradient=weight_gradient,attention=attention,attention_fallback=False,
         mode='bf16_backbone_candidate' if precision=='bf16_backbone' else
              'tf32_candidate' if precision=='tf32' else
              'compensated_tensorcore_fp32_storage_candidate' if linear_execution in ('stable_tf32x3','stable_bf16x3','stable_bf16x6') else 'fp32_fast',
@@ -131,7 +144,7 @@ def dense_precision_scope(precision):
 
 class DenseDiffusionPolicy(DPPODiffusionPolicy):
     def __init__(self,actor,*,std_schedule,precision='native_fp32',attention='sdpa_math',compile_denoiser=False,
-                 precise_output=True,linear_execution='native_gemm',steps=20,eta=.1,guidance_scale=2.5):
+                 precise_output=True,linear_execution='native_gemm',weight_gradient='direct_joint_gemm',steps=20,eta=.1,guidance_scale=2.5):
         if steps!=20 or len(std_schedule)!=20:
             raise ValueError('v3 production behavior must retain the full 20-step chain')
         super().__init__(actor,steps=steps,eta=eta,std_floor=min(std_schedule),std_schedule=std_schedule,
@@ -140,7 +153,7 @@ class DenseDiffusionPolicy(DPPODiffusionPolicy):
         self.batched_conditions=True
         self.precision=precision
         self.numerical_execution=configure_dense_actor(actor,precision=precision,attention=attention,
-            precise_output=precise_output,linear_execution=linear_execution)
+            precise_output=precise_output,linear_execution=linear_execution,weight_gradient=weight_gradient)
         if compile_denoiser:
             from .compiled_forward_v3 import install_shared_forward
             install_shared_forward(self)

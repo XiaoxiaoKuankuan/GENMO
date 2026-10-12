@@ -17,6 +17,7 @@ import hashlib
 import os
 from pathlib import Path
 import time
+import uuid
 import torch
 
 from .budget import atomic_json
@@ -65,7 +66,9 @@ class AsyncCheckpointWriter:
 
     def _write(self,payload,reason):
         start=time.perf_counter();state=payload['state']
-        name=f'stage10_v3_r{state["rollouts_completed"]:06d}_a{state["actor_updates"]:06d}_{reason}.pt'
+        # 恢复后可以在同一完成边界再次受控退出；每次发布独立身份，绝不覆盖旧权重。
+        publication_id=f'{time.time_ns():020d}_{uuid.uuid4().hex[:12]}'
+        name=f'stage10_v3_r{state["rollouts_completed"]:06d}_a{state["actor_updates"]:06d}_{publication_id}_{reason}.pt'
         path=self.root/'checkpoints'/name;tmp=path.with_suffix('.pt.partial')
         if path.exists() or tmp.exists():raise FileExistsError(path)
         try:
@@ -77,7 +80,7 @@ class AsyncCheckpointWriter:
             finally:os.close(fd)
             descriptor=dict(schema='genmo.stage10.checkpoint_publication.v3',iteration=state['iteration'],
                 rollouts_completed=state['rollouts_completed'],path=str(path.relative_to(self.root)),
-                sha256=sha,size_bytes=size,metadata=dict(reason=reason,actor_updates=state['actor_updates'],
+                sha256=sha,size_bytes=size,publication_id=publication_id,metadata=dict(reason=reason,actor_updates=state['actor_updates'],
                     critic_updates=state['critic_updates'],actor_model_fingerprint=payload['actor_fingerprint']))
             atomic_json(self.root/'latest.json',descriptor)
             if reason=='best':atomic_json(self.root/'best_checkpoint.json',descriptor)

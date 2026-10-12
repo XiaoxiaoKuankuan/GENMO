@@ -137,7 +137,7 @@ def actor_update_v3(policy,optimizer,rows,targets,cache,manifest,controller,*,di
 def final_kl_v3(policy,rows,cache,manifest,*,distributed,microbatch=256,clip=.05,objective_reduction='free_coordinate_mean'):
     selected=_eligible(manifest);owned=_owned(selected,manifest,distributed)
     local=[rows[i] for _,i in owned];device=next(policy.actor.parameters()).device
-    columns=8
+    columns=9
     records=torch.zeros(len(local),20,columns,device=device,dtype=torch.float64)
     start=time.perf_counter()
     with _local_phase(distributed,'v3_final_full20_kl'),policy_phase(policy):
@@ -149,7 +149,7 @@ def final_kl_v3(policy,rows,cache,manifest,*,distributed,microbatch=256,clip=.05
             old_mean,old_std=_old_kernel(samples,steps,device,cache)
             stats=gaussian_statistics(cache.get('chain',samples,[s+1 for s in steps]),old_mean,old_std,
                 params['mean'],params['std'],mask)
-            proxy=ppo_surrogate(stats,torch.ones(len(part),device=device),clip=clip,reduction=objective_reduction)
+            proxy=ppo_surrogate(stats,cache.get('advantages',samples),clip=clip,reduction=objective_reduction)
             shift=((params['mean'].double()-old_mean).square().masked_fill(~mask,0.).sum((-2,-1))/stats['free_count']).sqrt()
             physical_delta=(params['mean'].double()-old_mean)*policy.actor.endecoder.std.double()
             physical=[]
@@ -159,7 +159,7 @@ def final_kl_v3(policy,rows,cache,manifest,*,distributed,microbatch=256,clip=.05
                     part_mask.sum((-2,-1)).clamp_min(1)).sqrt())
             i=torch.tensor([i for i,_ in part],device=device);s=cache.step_indices(steps)
             records[i,s]=torch.stack((stats['joint_kl'],stats['mean_coordinate_kl'],proxy['ratio'],
-                stats['joint_log_ratio'],shift,*physical),1)
+                stats['joint_log_ratio'],shift,*physical,proxy['objective_clipped'].double()),1)
         conditions.validate_inputs()
     full=distributed.gather_rows(records.reshape(len(local),20*columns),[p for p,_ in owned],len(selected)).reshape(-1,20,columns)
     joint,coordinate,ratio,logratio,shift=[full[:,:,i] for i in range(5)]
@@ -168,6 +168,7 @@ def final_kl_v3(policy,rows,cache,manifest,*,distributed,microbatch=256,clip=.05
     for s in range(20):
         step_reports.append(dict(step=s,joint_kl=quantile(joint[:,s]),mean_coordinate_kl=quantile(coordinate[:,s]),
             proxy_ratio=quantile(ratio[:,s]),clip_fraction=float(((ratio[:,s]<1-clip)|(ratio[:,s]>1+clip)).double().mean()),
+            objective_clip_fraction=float(full[:,s,8].mean()),
             mean_normalized_mean_change_rms=float(shift[:,s].mean())))
     return dict(mean_joint_kl=float(joint.mean()),mean_coordinate_kl=float(coordinate.mean()),
         joint_kl=quantile(joint),coordinate_kl=quantile(coordinate),chain_joint_kl=quantile(joint.sum(1)),
@@ -178,9 +179,11 @@ def final_kl_v3(policy,rows,cache,manifest,*,distributed,microbatch=256,clip=.05
         effective_mean_change=dict(mean_rms=float(shift.mean()),max_rms=float(shift.max()),
             unchanged_internal_fraction=float((shift==0).double().mean()),
             scope='final_policy_means_on_old_sampling_path_not_resampled_physical_trajectory'),
-        final_reference_mean_change=dict(root_xyz_rms_m=quantile(full[:,-1,5]),
+        objective_clip_fraction=float(full[:,:,8].mean()),
+        final_reference_mean_change=dict(root_feature_rms_m=quantile(full[:,-1,5]),
             rotation6d_rms_unitless=quantile(full[:,-1,6]),joint_rms_rad=quantile(full[:,-1,7]),
-            scope='decoded_final_gaussian_mean_not_actual_robot_execution'),
+            root_semantics='heading_local_xy_increments_and_root_height_not_world_xyz',
+            scope='denormalized_final_gaussian_mean_not_decoded_world_or_actual_robot_execution'),
         kl_scope='old_path_conditional_gaussian_not_final_action_marginal',
         p95_scope='distribution_of_per_internal_free_coordinate_average_over_real_chains',
         wall_seconds=max(distributed.all_gather_object(time.perf_counter()-start)))
@@ -195,7 +198,7 @@ def check_kl_v3(report,limits):
         if bound is not None and (not math.isfinite(report[field]) or report[field]>bound):
             failures[key]=dict(value=report[field],limit=bound)
     p95=limits.get('p95_coordinate')
-    if p95 is not None and report['coordinate_kl']['p95']>p95:
+    if p95 is not None and (not math.isfinite(report['coordinate_kl']['p95']) or report['coordinate_kl']['p95']>p95):
         failures['p95_coordinate']=dict(value=report['coordinate_kl']['p95'],limit=p95)
     return dict(passed=not failures,failures=failures,units='explicit_joint_or_coordinate_never_reuse_one_threshold')
 
