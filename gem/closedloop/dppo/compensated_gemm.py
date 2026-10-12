@@ -14,7 +14,6 @@ from __future__ import annotations
 
 import atexit
 import ctypes
-from pathlib import Path
 import threading
 
 import torch
@@ -27,8 +26,9 @@ _LIBRARY = None
 def _library():
     global _LIBRARY
     if _LIBRARY is None:
-        path = Path(torch.__file__).resolve().parents[1]/'nvidia/cublas/lib/libcublas.so.12'
-        lib = ctypes.CDLL(str(path))
+        # torch已加载的CUDA 12依赖由动态链接器按SONAME复用。统一Isaac环境的
+        # cuBLAS可位于继承的site-packages，不能假定它与torch处于同一物理目录。
+        lib = ctypes.CDLL('libcublas.so.12')
         ptr, integer = ctypes.c_void_p, ctypes.c_int
         lib.cublasCreate_v2.argtypes = [ctypes.POINTER(ptr)]
         lib.cublasDestroy_v2.argtypes = [ptr]

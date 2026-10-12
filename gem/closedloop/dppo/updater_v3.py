@@ -4,6 +4,8 @@ rollout旧均值/方差/联合概率、价值、returns和全局标准化advanta
 每个epoch重新对完整链打乱并无放回抽样去噪步骤；N/K逆概率权重乘回完整20步
 目标，去噪折扣保留。后续minibatch使用已经更新的参数，PPO clipping有实际意义。
 主代理目标采用自由有效坐标平均log-ratio，真实joint统计同时记录且不被改写。
+协调器在K8和Full20都消费一个minibatch种子，使下一epoch的链顺序可配对比较；
+Full20仍选择全部步骤，种子不改变其内部选择，也不改旧v2抽样器的RNG合同。
 
 条件在当前optimizer minibatch的唯一链上只编码一次，临时条件梯度最后回传。
 BC继续使用原Stage1损失；局部PPO和BC统一配对SUM、统一裁剪、Adam真实更新。
@@ -52,7 +54,7 @@ def actor_update_v3(policy,optimizer,rows,targets,cache,manifest,controller,*,di
         for begin in range(0,len(order),minibatch_chains):
             indices=order[begin:begin+minibatch_chains]
             owned=_owned(indices,manifest,distributed)
-            seed=(int(torch.randint(0,2**63-1,(1,),generator=generator)) if distributed.rank==0 and sampled_steps<20 else None)
+            seed=(int(torch.randint(0,2**63-1,(1,),generator=generator)) if distributed.rank==0 else None)
             seed=distributed.broadcast_object(seed)
             pairs=[(i,s) for position,i in owned for s in chain_steps(seed,indices[position],20,sampled_steps)]
             optimizer.zero_grad(set_to_none=True);actor.eval()
@@ -128,6 +130,7 @@ def actor_update_v3(policy,optimizer,rows,targets,cache,manifest,controller,*,di
         if stop_reason:break
     covered={i for report in reports for i in report['global_chain_indices']}
     return dict(optimizer_steps=len(reports),steps=reports,epoch_orders=orders,early_stop_reason=stop_reason,
+        epoch_order_rng_contract='one_minibatch_seed_for_K8_and_Full20.v3',
         discarded_pending_minibatch=discarded if stop_reason else None,
         eligible_chains=len(selected),applied_unique_chains=len(covered),applied_chain_fraction=len(covered)/len(selected),
         planned_optimizer_steps=ppo_epochs*math.ceil(len(selected)/minibatch_chains),
