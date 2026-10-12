@@ -7,8 +7,8 @@
 # 本配置的Actor学习率尚未针对该噪声重新标定；物理评估通过不等于可正式训练。
 version: genmo.gmt_frozen_isaac.v1
 paths:
-  genmo_repo: /home/user/liwei/GENMO-bumi-closedloop
-  gmt_repo: /home/user/liwei/legged_lab_gmt
+  genmo_repo: /home/user/liwei/GENMO-stage10-v3-verified-20261012
+  gmt_repo: /home/user/liwei/legged_lab_gmt-stage10-v3-verified-20261012
   genmo_python: /data0/user/liwei/closedloop_stage10_v3_runtime/env_isaac_genmo/bin/python
   isaac_python: /data0/user/liwei/closedloop_stage10_v3_runtime/env_isaac_genmo/bin/python
   checkpoint: /data0/user/liwei/closedloop_stage10_v3_assets/20261012/stage1_s595000/s595000.pt

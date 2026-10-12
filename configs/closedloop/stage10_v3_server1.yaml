@@ -13,8 +13,8 @@
 # 部署profile需要针对新模型/执行路径重新实测确认；训练墙钟和磁盘延迟不改变模拟时钟。
 version: genmo.gmt_frozen_isaac.v1
 paths:
-  genmo_repo: /home/user/liwei/GENMO-bumi-closedloop
-  gmt_repo: /home/user/liwei/legged_lab_gmt
+  genmo_repo: /home/user/liwei/GENMO-stage10-v3-verified-20261012
+  gmt_repo: /home/user/liwei/legged_lab_gmt-stage10-v3-verified-20261012
   genmo_python: /data0/user/liwei/closedloop_stage10_v3_runtime/env_isaac_genmo/bin/python
   isaac_python: /data0/user/liwei/closedloop_stage10_v3_runtime/env_isaac_genmo/bin/python
   checkpoint: /data0/user/liwei/closedloop_stage10_v3_assets/20261012/stage1_s595000/s595000.pt
