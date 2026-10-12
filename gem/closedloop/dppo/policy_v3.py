@@ -96,7 +96,7 @@ def configure_dense_actor(actor, *, precision='native_fp32', attention='sdpa_mat
         raise ValueError('Unknown forced attention backend')
     if any(p.dtype!=torch.float32 for p in actor.parameters()):
         raise TypeError('Actor master parameters must remain FP32')
-    if linear_execution not in ('native_gemm','stable_bmm','stable_ieee','stable_tf32x3','stable_bf16x3','stable_bf16x6'):
+    if linear_execution not in ('native_gemm','stable_bmm','stable_ieee','stable_tf32x3','stable_tf32x3_wide','stable_bf16x3','stable_bf16x6'):
         raise ValueError('Unknown v3 dense reduction contract')
     if weight_gradient not in ('direct_joint_gemm','cublas_bf16x3','cublas_bf16x6'):
         raise ValueError('Unknown explicit v3 weight-gradient arithmetic contract')
@@ -123,7 +123,7 @@ def configure_dense_actor(actor, *, precision='native_fp32', attention='sdpa_mat
         linear=linear_execution,weight_gradient=weight_gradient,attention=attention,attention_fallback=False,
         mode='bf16_backbone_candidate' if precision=='bf16_backbone' else
              'tf32_candidate' if precision=='tf32' else
-             'compensated_tensorcore_fp32_storage_candidate' if linear_execution in ('stable_tf32x3','stable_bf16x3','stable_bf16x6') else 'fp32_fast',
+             'compensated_tensorcore_fp32_storage_candidate' if linear_execution in ('stable_tf32x3','stable_tf32x3_wide','stable_bf16x3','stable_bf16x6') else 'fp32_fast',
         matmul_tf32=precision=='tf32',
         master_dtype='float32',layer_residual_dtype='float32',probability_dtype='float64',
         final_projection='float64_local' if precise_output else 'float32',

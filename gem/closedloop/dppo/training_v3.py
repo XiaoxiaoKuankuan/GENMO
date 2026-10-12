@@ -197,6 +197,11 @@ def run(cargs,config,distributed):
             attention=precision['attention'],linear_execution=precision['linear_execution'],
             compile_denoiser=precision['compile'],precise_output=precision['precise_output'],
             weight_gradient=precision.get('weight_gradient','direct_joint_gemm'))
+        actor_initialization=dict(kind='source_stage1',source_global_step=loading['source_global_step'])
+        if cargs.evaluation_actor:
+            from .checkpoint_v3 import load_evaluation_actor
+            actor_initialization=local_call(distributed,lambda:load_evaluation_actor(cargs.evaluation_actor,
+                actor=c.actor,kernel=c.policy.kernel_config,assets=c.stage['assets']))
         c.actor_optimizer=torch.optim.AdamW(trainable_actor_parameters(c.actor),lr=c.settings['actor_lr'],weight_decay=0.)
         c.critic_optimizer=torch.optim.AdamW([p for p in c.critic.parameters() if p.requires_grad],lr=critic_config['learning_rate'],weight_decay=0.)
         c.controller=BCGradientController(**c.stage['bc_gradient'])
@@ -218,6 +223,7 @@ def run(cargs,config,distributed):
             dataset=c.stage['dataset'],evaluation=c.stage['evaluation'],
             source_files=root_call(distributed,lambda:_sources(config)),
             data_catalog=c.catalog.identity,source_stage1_step=loading['source_global_step'],
+            actor_initialization=actor_initialization,
             recovery='fresh_PhysX_episodes_no_partial_rollout_reuse',torch_version=torch.__version__)
         payload=None
         if cargs.resume:

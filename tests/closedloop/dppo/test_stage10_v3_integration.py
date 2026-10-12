@@ -21,6 +21,36 @@ from gem.closedloop.dppo.checkpoint_v3 import file_sha256
 from gem.closedloop.dppo.periodic_monitor import choose_best
 
 
+@pytest.mark.parametrize('fault', [None, 'assets', 'kernel', 'schema', 'hard_kl', 'soft_kl', 'partial', 'nonfinite'])
+def test_evaluation_actor_load_requires_complete_bound_update(tmp_path, fault):
+    from gem.closedloop.dppo.checkpoint_v3 import load_evaluation_actor
+    actor = torch.nn.Linear(3, 2)
+    original = copy.deepcopy(actor.state_dict())
+    candidate = {name: value + .25 for name, value in original.items()}
+    kernel, assets = {'steps': 20}, {'checkpoint': 'source-sha'}
+    payload = dict(schema='genmo.closedloop.stage10.actor_evaluation.v3', evaluation_only=True,
+        complete_update_and_soft_kl_passed=True, actor=candidate, kernel=kernel,
+        source_identity={'assets': assets}, hard_kl={'passed': True}, source_case_sha256='a' * 64,
+        update={'optimizer_steps': 8, 'planned_optimizer_steps': 8})
+    if fault == 'assets': payload['source_identity'] = {'assets': {'checkpoint': 'other'}}
+    if fault == 'kernel': payload['kernel'] = {'steps': 8}
+    if fault == 'schema': payload['schema'] = 'old-training-checkpoint'
+    if fault == 'hard_kl': payload['hard_kl']['passed'] = False
+    if fault == 'soft_kl': payload['complete_update_and_soft_kl_passed'] = False
+    if fault == 'partial': payload['update']['optimizer_steps'] = 1
+    if fault == 'nonfinite': candidate['weight'][0, 0] = float('nan')
+    path = tmp_path / 'evaluation_actor.pt'
+    torch.save(payload, path)
+    if fault:
+        with pytest.raises(ValueError):
+            load_evaluation_actor(path, actor=actor, kernel=kernel, assets=assets)
+        assert all(torch.equal(value, actor.state_dict()[name]) for name, value in original.items())
+    else:
+        result = load_evaluation_actor(path, actor=actor, kernel=kernel, assets=assets)
+        assert result['sha256'] == file_sha256(path)
+        assert all(torch.equal(value, actor.state_dict()[name]) for name, value in candidate.items())
+
+
 @pytest.mark.parametrize('matching_actor', [True, False])
 def test_evaluation_binds_only_best_pointers_and_validates_actor(tmp_path, monkeypatch, matching_actor):
     session = tmp_path / 'sessions' / 'finite'

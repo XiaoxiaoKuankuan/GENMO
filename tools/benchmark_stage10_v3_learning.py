@@ -80,9 +80,37 @@ def calibrate_actor(a,d,source,rank_state,policy,optimizer,anchor,generators,cac
         torch.cuda.synchronize();seconds=max(d.all_gather_object(time.perf_counter()-started))
         kl=final_kl_v3(policy,rows,cache,manifest,distributed=d,microbatch=a.kl_microbatches[0],
             clip=kwargs['clip'],objective_reduction=kwargs['objective_reduction'])
-        report['candidates'].append(dict(actor_lr=lr,bc_initial=a.calibrate_bc_initial,
+        candidate=dict(actor_lr=lr,bc_initial=a.calibrate_bc_initial,
             update=result,full20_kl=kl,hard_kl=check_kl_v3(kl,stage['kl']),actor_seconds=seconds,
-            peak_memory_by_rank=d.all_gather_object(torch.cuda.max_memory_allocated())))
+            peak_memory_by_rank=d.all_gather_object(torch.cuda.max_memory_allocated()))
+        # 同一预热后真实rollout可比较三个更新目标，再各自做独立物理评估；训练交互完全相同。
+        if a.save_evaluation_actor:
+            soft=source['config']['stage9']['kl_soft_stop_coordinate']
+            admissible=(candidate['hard_kl']['passed'] and result['optimizer_steps']==result['planned_optimizer_steps']
+                and all(step['pre_step_mean_coordinate_kl']<soft for step in result['steps']))
+            candidate['evaluation_publication_admissible']=admissible
+            if admissible:
+                def save_actor():
+                    path=a.output/f'actor_{lr:g}_{kwargs["objective_reduction"]}_K{a.sampled_steps}.pt'
+                    payload=dict(schema='genmo.closedloop.stage10.actor_evaluation.v3',evaluation_only=True,
+                        complete_update_and_soft_kl_passed=True,
+                        actor=immutable_cpu_snapshot(policy.actor.state_dict()),kernel=copy.deepcopy(policy.kernel_config),
+                        source_identity=source['identity'],source_case=str(a.case),source_case_sha256=report['source_case_sha256'],
+                        update=dict(actor_lr=lr,bc_initial=a.calibrate_bc_initial,clip=kwargs['clip'],
+                            objective=kwargs['objective_reduction'],sampled_steps=a.sampled_steps,
+                            optimizer_steps=result['optimizer_steps'],planned_optimizer_steps=result['planned_optimizer_steps'],
+                            real_global_chains=len(manifest)),
+                        full20_kl=kl,hard_kl=candidate['hard_kl'])
+                    temporary=path.with_suffix('.partial')
+                    with temporary.open('xb') as f:torch.save(payload,f);f.flush();os.fsync(f.fileno())
+                    os.link(temporary,path);temporary.unlink()
+                    fd=os.open(path.parent,os.O_RDONLY|os.O_DIRECTORY)
+                    try:os.fsync(fd)
+                    finally:os.close(fd)
+                    return dict(path=str(path),sha256=file_sha256(path),size_bytes=path.stat().st_size,
+                        schema=payload['schema'],evaluation_only=True)
+                candidate['evaluation_actor']=root_call(d,save_actor)
+        report['candidates'].append(candidate)
         root_call(d,lambda:atomic_json(a.output/'report.json',report))
     return report
 
@@ -177,6 +205,7 @@ def recommend_compute_profile(report,device_bytes):
     """按已验证数值、实际P50与显存余量选择计算微批；不替代LR或物理效果标定。"""
     eligible=[]
     for item in report['actor']:
+        if item['p50'] is None:continue
         check=item['diagnostic']
         numerical=all(x['passed'] for x in check['gradients']) and all(
             check[key]['passed'] for key in ('parameters','adam','terminal_outputs'))
@@ -231,16 +260,20 @@ def main():
     p.add_argument('--kl-microbatches',type=int,nargs='+',default=[256,512,1024])
     p.add_argument('--repeats',type=int,default=3)
     p.add_argument('--sampled-steps',type=int,choices=[8,20],default=8)
-    p.add_argument('--variants',nargs='+',choices=['reference','bf16_cudnn','compiled_fp32','stable_bmm','weight_bf16x3','weight_bf16x6'],default=['reference'])
+    p.add_argument('--variants',nargs='+',choices=['reference','bf16_cudnn','compiled_fp32','stable_bmm','wide_tile','weight_bf16x3','weight_bf16x6'],default=['reference'])
     p.add_argument('--profile',action='store_true',help='另测一个预热后的真实CPU/CUDA优化步，不纳入吞吐计时')
+    p.add_argument('--diagnostic-only',action='store_true',help='每候选只做一次完整梯度/Adam/全20步KL比较，带梯度拷贝，不作为吞吐计时')
     p.add_argument('--calibrate-actor-rates',type=float,nargs='+',help='从同一起点有限标定完整PPO+BC学习率，不保存候选权重')
     p.add_argument('--calibrate-bc-initial',type=float,default=.01)
     p.add_argument('--calibrate-bc-maximum',type=float)
+    p.add_argument('--save-evaluation-actor',action='store_true',help='仅将通过中间软线及最终硬KL的完整标定权重发布为物理评估输入，不是训练恢复点')
     p.add_argument('--objective',choices=['free_coordinate_mean','joint_sum'],help='明确的离线目标对照，不改行为核')
     p.add_argument('--ppo-clip',type=float,help='仅固定数据对照的显式clip候选')
     p.add_argument('--critic-reference',type=Path,help='独立真实物理评估的fixed_diagnostic_reference.json')
     p.add_argument('--critic-epochs',type=int,nargs='+',default=[4,16,32])
     a=p.parse_args();rank=int(os.environ['LOCAL_RANK'])
+    if a.diagnostic_only and a.profile:p.error('Numerical diagnostics and independent performance profiling are separate modes')
+    if a.save_evaluation_actor and not a.calibrate_actor_rates:p.error('Evaluation Actor publication requires explicit finite calibration')
     if int(os.environ['WORLD_SIZE'])!=8 or not 1<=a.repeats<=5:raise ValueError('Eight GPUs and 1..5 finite repeats required')
     for k,v in dict(NCCL_CUMEM_HOST_ENABLE='0',NCCL_IB_DISABLE='1',NCCL_SOCKET_IFNAME='lo',TORCH_NCCL_BLOCKING_WAIT='1').items():os.environ.setdefault(k,v)
     torch.cuda.set_device(rank);torch.set_num_threads(4)
@@ -318,7 +351,8 @@ def main():
             from gem.closedloop.dppo.policy_v3 import configure_dense_actor
             options=dict(precision='bf16_backbone' if variant=='bf16_cudnn' else stage['precision']['mode'],
                 attention='sdpa_cudnn' if variant=='bf16_cudnn' else stage['precision']['attention'],
-                linear_execution='stable_bmm' if variant=='stable_bmm' else stage['precision']['linear_execution'],
+                linear_execution='stable_bmm' if variant=='stable_bmm' else
+                    'stable_tf32x3_wide' if variant=='wide_tile' else stage['precision']['linear_execution'],
                 weight_gradient='cublas_'+variant.removeprefix('weight_') if variant.startswith('weight_') else
                     stage['precision'].get('weight_gradient','direct_joint_gemm'))
             if hasattr(actor.denoiser,'_stage10_eager_forward'):raise ValueError('Compiled variant must be tested last or in a separate process')
@@ -328,7 +362,7 @@ def main():
                 install_shared_forward(policy)
         for micro in a.microbatches:
             samples=[];diagnostic=None
-            for repeat in range(a.repeats+2):
+            for repeat in range(1 if a.diagnostic_only else a.repeats+2):
                 restore();captured=[]
                 def observer(model,step):
                     if rank==0:captured.append({n:None if p.grad is None else p.grad.detach().cpu().clone()
@@ -364,11 +398,12 @@ def main():
                             precision_contract_change=variant!='reference')
                     diagnostic=root_call(d,compare)
                 memory=d.all_gather_object(dict(allocated=torch.cuda.max_memory_allocated(),reserved=torch.cuda.memory_reserved()))
-            report['actor'].append(dict(variant=variant,microbatch=micro,samples=samples,p50=float(np.percentile(samples,50)),
-                p95=float(np.percentile(samples,95)),diagnostic=diagnostic,actual_optimizer_steps=result['optimizer_steps'],
+            report['actor'].append(dict(variant=variant,microbatch=micro,samples=samples,p50=float(np.percentile(samples,50)) if samples else None,
+                p95=float(np.percentile(samples,95)) if samples else None,diagnostic=diagnostic,
+                numerical_diagnostic_only=a.diagnostic_only,actual_optimizer_steps=result['optimizer_steps'],
                 actual_internal_visits=result['internal_sample_visits'],actual_BC_samples=result['actual_global_bc_samples'],memory=memory))
             publish()
-    for micro in a.kl_microbatches:
+    for micro in ([] if a.diagnostic_only else a.kl_microbatches):
         samples=[];restore()
         for repeat in range(a.repeats+2):
             d.barrier();torch.cuda.synchronize();start=time.perf_counter()

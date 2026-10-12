@@ -3,7 +3,8 @@
 # 八卡各64环境×8连续决策，4096真实链；两epoch、1024完整链/minibatch，最多8次更新。
 # 行为始终20步CFG；PPO每epoch重新无放回K8，按20/K恢复完整目标归一化。
 # 主代理使用自由坐标平均log-ratio，FP64真实joint概率/KL始终记录，前缀/padding排除。
-# 初始Actor3e-6/clip0.003/末端std0.03/coordinate KL为待有限标定值，不能由解析成功宣称生产验收。
+# 真实4096链标定选Actor2e-7/BC初值0.01；完整8步中间及最终KL通过，物理学习收益仍须验收。
+# 实测Actor计算微批64、KL微批256最快且满足原数值检查；64是可配置计算微批，不是算子固定分块。
 # 预训练条件Critic独立冻结副本+256维两层四头时序头，真实轨迹预热8轮后才更新Actor。
 # 每轮BC总512，按推导后的optimizer次数分配；有界EMA梯度比例标定，不解释为Adam贡献比例。
 # 日常随机链驻GPU至更新完成，不逐轮永久保存执行证据；诊断/异常明确持久化。
@@ -207,7 +208,7 @@ stage10:
     std_floor: 0.001
     log_probability_reduction: joint_sum
     ppo_epochs: 2
-    actor_lr: 3.0e-06
+    actor_lr: 2.0e-07
     critic_lr: 0.0001
     x0_diagnostic_every: 0
     grad_clip_norm: 1.0
@@ -215,8 +216,8 @@ stage10:
     lambda_upper: 0.95
     gamma_denoising: 0.99
     ppo_clip: 0.003
-    bc_weight: 0.1
-    denoising_microbatch: 128
+    bc_weight: 0.01
+    denoising_microbatch: 64
     episode_seconds: 10.0
     latency_budget_s: 0.5
     critic_grad_clip_norm: 1.0
@@ -247,7 +248,7 @@ stage10:
     - 0.025
     - 0.03
     - 0.03
-    kl_microbatch: 512
+    kl_microbatch: 256
     ppo_steps_per_chain: 8
     kl_soft_stop_coordinate: 0.001
     bc_samples_per_rollout: 512
@@ -397,7 +398,7 @@ stage10:
     global_batch: 1024
     warmup_rollouts: 8
   bc_gradient:
-    initial: 0.1
+    initial: 0.01
     target_ratio: 0.1
     minimum: 0.0001
     maximum: 10.0

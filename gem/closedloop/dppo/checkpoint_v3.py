@@ -114,3 +114,25 @@ def load_v3(path,*,identity,actor,critic,actor_optimizer,critic_optimizer,contro
     controller.load_state_dict(payload['bc_controller'])
     if any(p.dtype!=torch.float32 for p in actor.parameters()):raise ValueError('Restored Actor master dtype changed')
     return payload
+
+
+def load_evaluation_actor(path,*,actor,kernel,assets):
+    """只读入明确的固定数据对照权重；不恢复优化器，不改变Stage1 Critic副本。"""
+    payload=torch.load(path,map_location='cpu',weights_only=False,mmap=True)
+    if (payload.get('schema')!='genmo.closedloop.stage10.actor_evaluation.v3' or
+            payload.get('evaluation_only') is not True or payload.get('kernel')!=kernel or
+            payload.get('source_identity',{}).get('assets')!=assets or
+            payload.get('hard_kl',{}).get('passed') is not True or
+            payload.get('complete_update_and_soft_kl_passed') is not True):
+        raise ValueError('Evaluation Actor asset/kernel/complete-update identity differs')
+    update=payload.get('update',{})
+    if (type(update.get('optimizer_steps')) is not int or update['optimizer_steps']<1 or
+            update['optimizer_steps']!=update.get('planned_optimizer_steps') or
+            not isinstance(payload.get('source_case_sha256'),str) or len(payload['source_case_sha256'])!=64):
+        raise ValueError('Evaluation Actor is not a complete identified fixed-data update')
+    descriptor=dict(kind='fixed_real_data_update_evaluation_only',path=str(Path(path).resolve()),
+        sha256=file_sha256(path),source_case_sha256=payload['source_case_sha256'],update=update)
+    from .checkpoint import _validate_model_state
+    _validate_model_state(actor,payload['actor'],'v3 evaluation Actor')
+    actor.load_state_dict(payload['actor'],strict=True)
+    return descriptor
