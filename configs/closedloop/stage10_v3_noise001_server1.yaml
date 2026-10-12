@@ -1,0 +1,407 @@
+# Stage10 v3：末端噪声noise001的独立真实物理对照完整配置。
+# 初始化s595000并冻结GMT140500，保留完整20步随机采样、50Hz控制和200Hz四子步物理。
+# 与critic32主方案只改变effective_std_floors；固定音乐/种子、0.30秒已测计算时延、
+# 奖励和机器人合同保持相同，先使用--evaluate-only检查真实跟踪、连续性及失败。
+# 噪声日程为归一化qpos30的标准差下限，实际std仍包含原DDIM eta噪声。
+# 必须建立独立run身份；禁止改写其他噪声行为的old statistics或透明恢复其checkpoint。
+# 本配置的Actor学习率尚未针对该噪声重新标定；物理评估通过不等于可正式训练。
+version: genmo.gmt_frozen_isaac.v1
+paths:
+  genmo_repo: /home/user/liwei/GENMO-bumi-closedloop
+  gmt_repo: /home/user/liwei/legged_lab_gmt
+  genmo_python: /data0/user/liwei/closedloop_stage10_v3_runtime/env_isaac_genmo/bin/python
+  isaac_python: /data0/user/liwei/closedloop_stage10_v3_runtime/env_isaac_genmo/bin/python
+  checkpoint: /data0/user/liwei/closedloop_stage10_v3_assets/20261012/stage1_s595000/s595000.pt
+  stats: /data0/user/liwei/closedloop_stage10_v3_assets/20261012/stage1_s595000/qpos30_train_stats.json
+  kinematics: /data0/user/liwei/closedloop_stage10_v3_assets/20261012/stage1_s595000/bumi_kinematics_robot_retargeter_fe934_v1.json
+  gmt_policy: /data0/user/liwei/closedloop_stage10_v3_assets/20261012/gmt140500/policy.onnx
+  compat_profile: null
+  isaac_contract: /data0/user/liwei/closedloop_stage8_assets/gmt_model135000/isaac_contract.json
+  data_root: /data0/user/liwei/datasets/bumi_music_umr70_mine_pass_90505_v1
+  gmt_checkpoint: /data0/user/liwei/closedloop_stage10_v3_assets/20261012/gmt140500/model_140500.pt
+  gmt_agent_config: /data0/user/liwei/closedloop_stage10_v3_assets/20261012/gmt140500/agent.yaml
+runtime:
+  backend: gpu_vectorized.v1
+  vector_collection_contract: genmo.world_batched_flow.v1
+  vector_boundary_wait_contract: bounded_reference_wait.v1
+  vector_boundary_wait_max_control_steps: 100
+  generation_batch: 64
+  vector_batch_wait_s: 0.0
+  prefix_deadline_contract: available_reference_deadline_cap.v1
+  vector_audit_contract: nested_world_journal_excluded.v1
+  vector_reward_contract: stage10.gpu_vector_continuous_reward.v1
+  vector_device_contract: isaac_global_gpu_index.v1
+  vector_fragment_contract: available_reference_fragment_boundary.v3
+  genmo_device: cuda:0
+  allow_shared_gpu: false
+  physics_device: cuda:0
+  headless: true
+  num_envs: 64
+  torch_threads: 4
+  rpc_timeout_s: 600
+  worker_start_timeout_s: 600
+  timing_contract: modeled_deployment.v3
+  vector_generation_contract: genmo.vector_generation_pipeline.v1
+  vector_evidence_contract: gmt.vector_columns.v1
+  training_transport: inprocess_shared_columns.v1
+  gmt_inference_contract: gmt.native_checkpoint_frozen_batch.v1
+  noise_namespace: stage10_v3_s595000_gmt140500
+  training_evidence_lifecycle: ephemeral_until_update.v3
+  isaaclab_root: /data0/user/liwei/closedloop_stage8_runtime/IsaacLab
+  sysroot_library: /data0/user/liwei/closedloop_stage8_runtime/sysroot/usr/lib/x86_64-linux-gnu
+model:
+  history_steps: 50
+  ddim_steps: 20
+  guidance_scale: 2.5
+timing:
+  clock_hz: 600
+  decision_ticks: 300
+  control_ticks: 12
+  physics_ticks: 3
+  warmup_ticks: 600
+  min_prefix_frames: 12
+  lookahead_control_steps: 10
+  latency_guard_s: 0.04
+  calibration_warmup: 1
+  calibration_samples: 2
+  deployment_profile:
+    schema: genmo.deployment_delay_profile.v1
+    target: single_robot_single_request
+    prefix_budget_seconds: 0.3
+    samples_seconds:
+    - 0.2345237594563514
+    - 0.23389932583086193
+    - 0.23853539070114493
+    - 0.23333783098496497
+    - 0.2338250579778105
+    - 0.2333586709573865
+    - 0.23675013822503388
+    - 0.23286609607748687
+    - 0.213341562775895
+    - 0.2097237268462777
+    - 0.21169853839091957
+    - 0.21474683564156294
+    - 0.2137050679884851
+    - 0.21657986799255013
+    - 0.21689937496557832
+    - 0.21140951989218593
+    - 0.22153387940488756
+    - 0.21958800894208252
+    - 0.2195445301476866
+    - 0.2224551688414067
+    - 0.2205174898263067
+    - 0.22203838475979865
+    - 0.2196579270530492
+    - 0.21850883914157748
+    - 0.23799799592234194
+    - 0.22545456094667315
+    - 0.23311165301129222
+    - 0.2355008888989687
+    - 0.23634790256619453
+    - 0.2368926068302244
+    - 0.23669538903050125
+    - 0.23785035638138652
+    - 0.22229064186103642
+    - 0.22478292672894895
+    - 0.22411102429032326
+    - 0.2234693302307278
+    - 0.22269812901504338
+    - 0.22350192931480706
+    - 0.22454466903582215
+    - 0.22098953393287957
+    - 0.22972223861142993
+    - 0.2281277352012694
+    - 0.22899770620279014
+    - 0.2295888694934547
+    - 0.2283029709942639
+    - 0.2277498790062964
+    - 0.2295836191624403
+    - 0.23073046701028943
+    - 0.21909356373362243
+    - 0.21686335816048086
+    - 0.2185950675047934
+    - 0.2190101440064609
+    - 0.21905387425795197
+    - 0.21948510059155524
+    - 0.2175804388243705
+    - 0.21630619117058814
+    - 0.21644136076793075
+    - 0.21437543095089495
+    - 0.21547879022546113
+    - 0.2151039745658636
+    - 0.21617896342650056
+    - 0.21680862619541585
+    - 0.21627858094871044
+    - 0.2149222451262176
+    provenance:
+    - path: /data1/user/liwei/GENMO_outputs/closedloop_stage10/v3_validation_20261012/calibration_inprocess_v4/deployment_calibration.json
+      sha256: 3d9b51ec9bd8f9b49198d55fc9c5073d48cd44b191bbe4d4e2f717a666afa4a7
+    - path: /data1/user/liwei/GENMO_outputs/closedloop_stage10/v3_validation_20261012/calibration_inprocess_v4/sessions/980c25c6-4d92-4935-a640-d1c66ee9be3b/summary.json
+      sha256: 81c4374c1fce4e6f0e50f03807993d0c25142eed8094f20954c25eb0981fbc39
+    measured_assets:
+      checkpoint: 51b522fbdeb0ec289e5ffc24e2fccca9888df90495f57f96714c1bb43c05f8e2
+      stats: c7c0acb0e7a38797adb38ce0be41ee72820e34daed4e780275c64fb55c3e5326
+      kinematics: c08731704dccece11351b6fa877e30bac5ca2a8d363de30af7ca2ea1398f4029
+      gmt_policy: 31a8f999b652d272246b803d4ffa708f3125de92c0d573411ef13fc3ee6ced20
+      gmt_checkpoint: 79d1a99e54db42342927ec178329dab88772bafbc05df1b0dbe310bc6dd0b319
+    numerical_execution:
+      schema: genmo.stage10.native_dense_execution.v1
+      precision: native_fp32
+      linear: stable_tf32x3
+      weight_gradient: direct_joint_gemm
+      attention: sdpa_math
+      attention_fallback: false
+      mode: fp32_fast
+      matmul_tf32: false
+      master_dtype: float32
+      layer_residual_dtype: float32
+      probability_dtype: float64
+      final_projection: float64_local
+      inference_requires_grad: false
+      condition_encoding: batched_unique_chains
+      network_rows: actual_batch_cfg_expanded
+      torch_version: 2.7.1+cu128
+      compiler: null
+    measurement_scope: eight_independent_single_request_GPU_worlds_excluding_two_warmups
+environment:
+  terrain: plane
+  ground_height_m: 0.0
+  initial_foot_clearance_m: 0.001
+  domain_randomization: false
+  observation_noise: false
+  external_perturbations: false
+  reset_randomization: false
+  actuator_delay_steps: 0
+  curriculum: false
+termination:
+  orientation_mode: separated_yaw
+  root_height_error_m: 0.2
+  non_yaw_orientation_error_rad: 0.6
+  yaw_error_rad: 1.5
+  end_effector_relative_height_error_m: 0.15
+diagnostics:
+  record_original_threshold_crossings: true
+  verify_actor_condition_edges: true
+  reward_substeps: true
+stage10:
+  performance:
+    tensor_cache_max_bytes: 4294967296
+    bc_batch_forward: true
+    profiler_every: 25
+  distributed:
+    world_size: 8
+    backend: nccl
+    collection: all_ranks
+  version: genmo.closedloop.stage10.v3
+  seed: 42
+  training:
+    execution_mode: latency
+    denoising_steps: 20
+    guidance_scale: 2.5
+    eta: 0.1
+    std_floor: 0.001
+    log_probability_reduction: joint_sum
+    ppo_epochs: 2
+    actor_lr: 2.0e-07
+    critic_lr: 0.0001
+    x0_diagnostic_every: 0
+    grad_clip_norm: 1.0
+    gamma_upper: 0.99
+    lambda_upper: 0.95
+    gamma_denoising: 0.99
+    ppo_clip: 0.003
+    bc_weight: 0.01
+    denoising_microbatch: 64
+    episode_seconds: 10.0
+    latency_budget_s: 0.5
+    critic_grad_clip_norm: 1.0
+    bc_prefix:
+      min_frames: 6
+      max_frames: 30
+      zero_probability: 0.15
+    cfg_batch: true
+    objective_logprob_reduction: free_coordinate_mean
+    std_schedule:
+    - 0.001
+    - 0.001
+    - 0.001
+    - 0.001
+    - 0.001
+    - 0.001
+    - 0.001
+    - 0.001
+    - 0.001
+    - 0.001
+    - 0.001
+    - 0.001
+    - 0.001
+    - 0.001
+    - 0.001
+    - 0.001
+    - 0.001
+    - 0.001
+    - 0.001
+    - 0.001
+    kl_microbatch: 256
+    ppo_steps_per_chain: 8
+    kl_soft_stop_coordinate: 0.001
+    bc_samples_per_rollout: 512
+  dataset:
+    split: train
+    random_start: true
+    source_probabilities:
+    - 0.2
+    - 0.35
+    - 0.25
+    - 0.2
+    require_audio: true
+  evaluation:
+    split: val
+    eval_count: 16
+    seeds:
+    - 42
+    - 1729
+    selection_seed: 42
+    start_mode: beginning
+    episode_seconds: 10.0
+    samples_per_source: 4
+    effect_check_iterations:
+    - 100
+    - 200
+    - 500
+    - 1000
+    every_control_steps: 1500000
+  run_control:
+    max_walltime_seconds: 172800
+    max_training_iterations: 500
+  limits:
+    accepted_iterations: 500
+    optimizer_attempts: 4000
+    generations: 3000000
+    control_steps: 150000000
+    physics_steps: 600000000
+  storage:
+    min_free_bytes: 107374182400
+    max_run_bytes: 536870912000
+    checkpoint_reserve_bytes: 4294967296
+    tensor_cache_max_bytes: 4294967296
+    checkpoint_interval_seconds: 1800
+    diagnostic_every_control_steps: 5000000
+    mode: daily
+    checkpoint_keep_last: 2
+    retain_best_and_evaluated: true
+  reward:
+    version: stage9.execution_reward.v2
+    dt: 0.02
+    track_weight: 2.5
+    music_weight: 2.0
+    stable_weight: 1.0
+    alive_weight: 0.5
+    cmd_penalty_weight: 0.15
+    torque_penalty_weight: 0.1
+    contact_penalty_weight: 0.2
+    joint_limit_penalty_weight: 0.5
+    failure_penalty: 5.0
+    rejected_plan_penalty: 0.5
+    scales:
+      root_height_m: 0.05
+      non_yaw_rad: 0.12
+      slide_m_s: 0.15
+    tracking:
+      objective: gmt.motion_tracking.v1
+      std:
+        anchor_pos: 0.3
+        anchor_ori: 0.4
+        body_pos: 0.3
+        body_ori: 0.4
+        joint_pos: 0.25
+        joint_vel: 1.4
+      weights:
+        anchor_pos: 0.14285714285714285
+        anchor_ori: 0.14285714285714285
+        body_pos: 0.2857142857142857
+        body_ori: 0.2857142857142857
+        joint_pos: 0.14285714285714285
+        joint_vel: 0.0
+    stable_mix:
+      root_height: 0.5
+      non_yaw: 0.5
+    music_mix:
+      beat: 0.7
+      intensity: 0.3
+    torque:
+      free_ratio: 0.8
+      mean_weight: 0.5
+      max_weight: 0.5
+    activity:
+      window_s: 0.5
+      inactive_target_rad_s: 0.1
+      full_gate_ratio: 0.5
+      epsilon: 1.0e-08
+      intensity_epsilon: 0.05
+      intensity_log_ratio: 2.0
+    music:
+      beat_window_s: 1.0
+      feature_fps: 30
+      beat_column: 34
+      beat_threshold: 0.5
+    contact:
+      slide_weight: 0.7
+      bad_contact_weight: 0.3
+      support_clearance_m: 0.025
+    joint_limit:
+      hard_range_margin_fraction: 0.05
+      numeric_tolerance_rad: 1.0e-06
+      actual_weight: 0.5
+      reference_weight: 0.5
+    consistency:
+      joint_vel_rms_rad_s: 0.0001
+      root_lin_vel_rms_m_s: 0.0001
+      root_ang_vel_rms_rad_s: 0.0001
+    diagnostics:
+      mechanical_power_weight: 0.0
+      impact_weight: 0.0
+    require_substeps: true
+  checks:
+    full_probability_every: 100
+    full_fingerprint_every: 1
+    sentinel_chains_per_rank: 1
+  scale:
+    decisions_per_environment: 8
+    actor_minibatch_chains: 1024
+  precision:
+    mode: native_fp32
+    linear_execution: stable_tf32x3
+    attention: sdpa_math
+    compile: false
+    precise_output: true
+  kl:
+    reduction: free_coordinate_mean
+    mean_coordinate: 0.002
+    mean_joint: null
+    maximum_step_mean_coordinate: 0.01
+    p95_coordinate: 0.01
+  critic:
+    type: pretrained_temporal
+    dimension: 256
+    layers: 2
+    heads: 4
+    freeze_encoders: true
+    learning_rate: 0.0001
+    epochs: 32
+    global_batch: 1024
+    warmup_rollouts: 8
+  bc_gradient:
+    initial: 0.01
+    target_ratio: 0.1
+    minimum: 0.0001
+    maximum: 10.0
+    smoothing: 0.9
+    max_change: 2.0
+    mode: bounded_ratio
+  assets:
+    checkpoint: 51b522fbdeb0ec289e5ffc24e2fccca9888df90495f57f96714c1bb43c05f8e2
+    stats: c7c0acb0e7a38797adb38ce0be41ee72820e34daed4e780275c64fb55c3e5326
+    kinematics: c08731704dccece11351b6fa877e30bac5ca2a8d363de30af7ca2ea1398f4029
+    gmt_policy: 31a8f999b652d272246b803d4ffa708f3125de92c0d573411ef13fc3ee6ced20
+    gmt_checkpoint: 79d1a99e54db42342927ec178329dab88772bafbc05df1b0dbe310bc6dd0b319
