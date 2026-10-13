@@ -5,6 +5,8 @@
 检查每个视频及报告HTTP可达，并实际验证首段、尾段和越界Range响应。对HTML脚本使用
 系统JavaScript引擎做语法验证，不替代浏览器视觉质量判断。结果保存到用户要求保留的验收JSON，
 脚本语法临时文件由TemporaryDirectory自动回收，不修改模型、视频和训练数据。
+独立报告只核验主页面；若存在旧版Mine高度恢复补充目录，再一并核验，避免最新模型
+必须创建无关补充页。所有实际存在的主/补充媒体仍逐一核对，不跳过缺失文件。
 """
 
 from __future__ import annotations
@@ -28,7 +30,10 @@ def main():
     root = args.root.resolve()
     opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
     files, videos, results = [], [], []
-    for suffix in ("", "current_mine_reference/"):
+    suffixes = [""]
+    if (root / "current_mine_reference").exists():
+        suffixes.append("current_mine_reference/")
+    for suffix in suffixes:
         local = root / suffix
         records = json.loads((local / "results.json").read_text())
         for name in (

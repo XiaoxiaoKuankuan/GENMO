@@ -5,6 +5,8 @@
 模型或动作结果。网页提供原始BUMI重定向舞蹈和ONNX自主滚动生成的同步播放器、筛选、
 播放速度、逐样本指标、训练曲线与原始报告下载。所有依赖均使用本地相对路径，无外部
 分析服务；明确区分本次留出与预训练未见、4秒带示范条件评测与完整自主运动学滚动。
+模型步数、日志步数及服务器说明由本次checkpoint/训练证据和命令行提供，避免旧350k
+报告文案误标最新模型；默认展示训练集，仍保留原固定选样中的留出视频供单独查看。
 """
 
 from __future__ import annotations
@@ -16,10 +18,18 @@ import statistics
 from pathlib import Path
 
 
-def build(root: Path, analysis: Path, selection: Path) -> None:
+def build(
+    root: Path,
+    analysis: Path,
+    selection: Path,
+    server_label: str = "训练模型",
+    report_date: str = "",
+) -> None:
     records = json.loads((root / "results.json").read_text())
     train = json.loads((analysis / "training_analysis.json").read_text())
     parity = json.loads((root / "onnx_parity.json").read_text())
+    checkpoint = json.loads((root / "checkpoint_capture.json").read_text())
+    protocol = json.loads((root / "protocol.json").read_text())
     summary = {
         "samples": len(records),
         "videos": sum(
@@ -82,6 +92,9 @@ def build(root: Path, analysis: Path, selection: Path) -> None:
         "summary": summary,
         "parity": parity,
         "data_identity": identity,
+        "checkpoint": checkpoint,
+        "protocol": protocol,
+        "presentation": {"server_label": server_label, "report_date": report_date},
     }
     template = Path(__file__).with_name("templates") / "stage1_comparison.html"
     encoded = json.dumps(payload, ensure_ascii=False).replace("</", "<\\/")
@@ -94,5 +107,7 @@ if __name__ == "__main__":
     parser.add_argument("--root", type=Path, required=True)
     parser.add_argument("--analysis", type=Path, required=True)
     parser.add_argument("--selection", type=Path, required=True)
+    parser.add_argument("--server-label", default="训练模型")
+    parser.add_argument("--report-date", default="")
     args = parser.parse_args()
-    build(args.root, args.analysis, args.selection)
+    build(args.root, args.analysis, args.selection, args.server_label, args.report_date)
