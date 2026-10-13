@@ -36,3 +36,27 @@ def test_current_config_accepts_nondivisible_bc_total_without_environment_quota(
     config['stage10']['scale']['decisions_per_environment']=8
     path.write_text(yaml.safe_dump(config))
     with pytest.raises(ValueError,match='quotas'):configuration(path)
+
+
+
+def test_reset_warmup_seeds_only_final_actual_pd_target_across_world_windows():
+    from types import SimpleNamespace
+    import numpy as np
+    from gem.closedloop.dppo.env_adapter import UpperEnvironment
+    from gem.closedloop.dppo.rewards import ExecutionReward
+    env=object.__new__(UpperEnvironment)
+    env.snapshot=dict(tick=0,done=False);env.rollout_window_reached=False;env._warmup_last_target=None
+    env.reward=ExecutionReward(dict(music_reward_enabled=False,music_weight=0.),None)
+    def advance(count):
+        env.snapshot['tick']+=12*count
+        env.rollout_window_reached=env.snapshot['tick']==300
+        if False:yield
+        return [dict(joint_position_target=np.full(21,env.snapshot['tick']))]
+    env.advance_flow=advance
+    flow=env.continue_warmup_flow()
+    with pytest.raises(StopIteration):next(flow)
+    assert env.snapshot['tick']==300 and env.reward._previous_target is None
+    env.rollout_window_reached=False
+    with pytest.raises(StopIteration):next(env.continue_warmup_flow())
+    np.testing.assert_array_equal(env.reward._previous_target,np.full(21,600))
+    assert env.reward._last_tick is None

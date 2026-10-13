@@ -201,17 +201,19 @@ class UpperEnvironment:
             reward_type = VectorExecutionReward
         self.reward = reward_type(reward_config, self.music, music_start_tick=600,
                                       target_activity=target)
-        if last_warmup_row is not None:
-            self.reward.seed_previous_target(last_warmup_row.get('joint_position_target'))
+        self._warmup_last_target=None if last_warmup_row is None else last_warmup_row.get('joint_position_target')
         if self.snapshot['tick']<600:return None
+        if self._warmup_last_target is not None:self.reward.seed_previous_target(self._warmup_last_target)
         return (yield from self.preview_context_flow())[0]
 
     def continue_warmup_flow(self):
         """重置预热跨世界rollout继续，音乐尚未启动，不构造虚假上层状态。"""
         while self.snapshot['tick']<600 and not self.snapshot['done'] and not self.rollout_window_reached:
             rows=yield from self.advance_flow(min(25,(600-self.snapshot['tick'])//12))
-            if rows:self.reward.seed_previous_target(rows[-1].get('joint_position_target'))
+            if rows:self._warmup_last_target=rows[-1].get('joint_position_target')
         if self.snapshot['done']:raise ExecutionIntegrityError('Warmup terminated before any policy sample')
+        if self.snapshot['tick']>=600 and self._warmup_last_target is not None:
+            self.reward.seed_previous_target(self._warmup_last_target)
 
     def _request(self):
         tick = int(self.snapshot['tick'])
@@ -271,7 +273,7 @@ class UpperEnvironment:
         timings['input_transfer_seconds'] = transferred-condition_end
         if deterministic:
             with torch.no_grad():
-                noise = torch.randn((1,120,30),device=device,generator=generator)
+                noise = torch.randn((1,batch['future_valid'].shape[1],30),device=device,generator=generator)
                 sample = self.policy.actor.sample(batch, steps=self.policy.steps,
                     guidance_scale=self.policy.guidance_scale,noise=noise)
             trace = {'conditions':cpu_copy(context), 'deterministic_baseline':True}
