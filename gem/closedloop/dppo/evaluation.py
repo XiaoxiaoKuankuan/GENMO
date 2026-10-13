@@ -77,9 +77,9 @@ def _publish_json(path, value):
 
 
 def build_evaluation_tasks(catalog, *, split='val', eval_count='all', seeds=(1729, 2718),
-                           selection_seed=42, start_mode='beginning', episode_seconds=None):
+                           selection_seed=42, start_mode='beginning', episode_seconds=None, critic_mc=False, balanced_samples_per_source=None):
     """构建可保存的评估计划；eval_count 是不同配对样本数，实际 episode 数还要乘 seed 数。"""
-    if split not in {'val', 'test'}:
+    if split not in ({'train'} if critic_mc else {'val', 'test'}):
         raise ValueError('Independent evaluation requires explicit val or test split')
     if start_mode not in {'beginning', 'center'}:
         raise ValueError('Evaluation start_mode must be beginning or center')
@@ -106,7 +106,14 @@ def build_evaluation_tasks(catalog, *, split='val', eval_count='all', seeds=(172
     identities = [(sample['dataset'], str(sample['row']['sample_id'])) for sample in pool]
     if len(set(identities)) != len(identities):
         raise ValueError('Evaluation pool contains duplicate sample identities')
-    if eval_count == 'all':
+    if balanced_samples_per_source is not None:
+        rng=np.random.default_rng(int(selection_seed))
+        indices=[]
+        for positions in source_positions.values():
+            if type(balanced_samples_per_source) is not int or not 0<balanced_samples_per_source<=len(positions):raise ValueError('Invalid balanced MC task count')
+            indices.extend(int(i) for i in rng.choice(positions,balanced_samples_per_source,replace=False))
+        indices.sort()
+    elif eval_count == 'all':
         indices = list(range(len(pool)))
     else:
         if isinstance(eval_count, bool) or not isinstance(eval_count, int) or not 1 <= eval_count <= len(pool):
@@ -142,7 +149,8 @@ def build_evaluation_tasks(catalog, *, split='val', eval_count='all', seeds=(172
             'selected_sample_count': len(indices), 'task_count': len(tasks), 'seeds': [int(seed) for seed in seeds],
             'selection_seed': int(selection_seed), 'selection_rule': 'all_or_seeded_without_replacement_with_source_coverage_when_possible',
             'start_mode': start_mode, 'episode_seconds': episode_seconds, 'tasks': tasks,
-            'pretraining_unseen_claim': False, 'training_buffer_allowed': False}
+            'pretraining_unseen_claim': False, 'training_buffer_allowed': bool(critic_mc)}
+    if critic_mc:plan['critic_mc_supervision']=True
     plan['plan_sha256'] = _digest(plan)
     return plan
 
@@ -335,12 +343,14 @@ def aggregate_evaluation(episodes):
 
 def evaluate_policy(env, policy, task_plan, output_dir, *, catalog=None, episode_seconds=None,
                     deterministic=False, actor_identity=None, frozen_modules=None, progress=None,
-                    local_cuda_only=False):
+                    local_cuda_only=False, transition_sink=None):
     """只评估显式 policy，返回可重算报告；故障时先写报告再抛错，绝不开始优化。"""
     if env.policy is not policy:
         raise ValueError('Evaluation environment must use the explicitly supplied loaded Actor policy')
     plan = copy.deepcopy(task_plan)
-    if plan.get('version') != VERSION or plan.get('split') not in ('val', 'test') or plan.get('training_buffer_allowed') is not False:
+    mc=bool(plan.get('critic_mc_supervision'))
+    if mc and (plan.get('split')!='train' or transition_sink is None or plan.get('episode_seconds') is not None):raise ValueError('MC supervision requires full train episodes and explicit causal sink')
+    if plan.get('version') != VERSION or plan.get('split') not in (('train',) if mc else ('val', 'test')) or plan.get('training_buffer_allowed') is not mc:
         raise ValueError('Invalid independent evaluation task plan')
     declared = plan.pop('plan_sha256', None)
     if declared != _digest(plan):
@@ -384,13 +394,17 @@ def evaluate_policy(env, policy, task_plan, output_dir, *, catalog=None, episode
             try:
                 actual_motion_rows = []
                 music = catalog.load_music(task['sample']) if catalog is not None else load_music_features(plan['data_root'], task['sample'])
-                env.config['stage9']['episode_seconds'] = float(task['remaining_music_seconds']) if limit is None else float(limit)
+                if 'physical_episode' in env.config.get('stage10',{}):
+                    env.config['stage10']['physical_episode']['safety_limit_seconds']=None if limit is None else float(limit)
+                else:
+                    env.config['stage9']['episode_seconds'] = float(task['remaining_music_seconds']) if limit is None else float(limit)
                 env.comparison_noise_index = int(task['noise_index_start'])
                 with torch.no_grad():
                     env.reset_task(task['sample'], music, seed=task['seed'], phase='evaluation', music_start_frame=task['music_start_frame'])
                     maximum_decisions = math.ceil(min(task['remaining_music_seconds'], float(limit) if limit is not None else task['remaining_music_seconds'])/.02)+2
                     for decision_index in range(maximum_decisions):
                         result = env.step(deterministic=deterministic)
+                        if transition_sink is not None:transition_sink(task,result)
                         evidence = _decision_evidence(result, decision_index)
                         actual_motion_rows.extend({k:np.array(r[k],copy=True) for k in ('tick','actual_joint_pos_gmt','actual_joint_vel_gmt')} for r in _field(result,'metadata',{}).get('execution_trace',[]))
                         episode['decisions'].append(evidence)

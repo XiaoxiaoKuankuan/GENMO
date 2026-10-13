@@ -34,6 +34,7 @@ def main():
     parser.add_argument('--calibrate-only',action='store_true',help='只测新模型单机器人关键路径，不更新参数')
     parser.add_argument('--evaluate-only',action='store_true',help='新实验只做固定物理评估，用于实际噪声核标定，不采训练rollout')
     parser.add_argument('--evaluation-actor',type=Path,help='已通过固定真实数据标定的独立Actor权重，只允许evaluate-only使用')
+    parser.add_argument('--critic-preheat-only',action='store_true',help='固定Actor，完成完整MC/TD价值对照后结束，不进入Actor更新')
     parser.add_argument('--collect-only',action='store_true',help='只采一轮完整真实rollout供计算对照，不更新Actor/Critic')
     parser.add_argument('--capture-validation-iteration',type=int,help='明确保存指定轮更新前的真实学习张量及Adam用于固定数据对照')
     parser.add_argument('--genmo-repo',type=Path,default=ROOT)
@@ -49,7 +50,7 @@ def main():
     config=configuration(args.config,genmo_repo=args.genmo_repo,gmt_repo=args.gmt_repo)
     if args.calibrate_only:
         config['runtime'].update(num_envs=1,generation_batch=1,phase_contract='single_request_calibration.v1')
-    if sum((args.calibrate_only,args.collect_only,args.evaluate_only))>1:parser.error('Choose only one finite diagnostic phase')
+    if sum((args.calibrate_only,args.collect_only,args.evaluate_only,args.critic_preheat_only))>1:parser.error('Choose only one finite diagnostic phase')
     if args.evaluate_only and args.resume:parser.error('Noise calibration requires a fresh explicit experiment identity')
     if args.evaluation_actor and not args.evaluate_only:parser.error('Fixed-data Actor candidates are evaluation-only, not training recovery points')
     if args.collect_only:args.capture_validation_iteration=1;args.warmup_rollouts=0

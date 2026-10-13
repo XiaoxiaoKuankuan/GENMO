@@ -319,20 +319,30 @@ def run(cargs,config,distributed):
             raise _FiniteDiagnosticComplete
         if payload is None:
             _snapshot(c,'initial',wait=True)
-            if cargs.collect_only:
-                report['initial_evaluation_skipped_for_collect_only']=True
+            if cargs.collect_only or getattr(cargs,'critic_preheat_only',False):
+                report['initial_evaluation_skipped_for_finite_data_diagnostic']=True
             else:
                 baseline=_evaluate(c,report,'initial')
                 root_call(distributed,lambda:atomic_json(c.output/'evaluation_baseline.json',baseline))
         if cargs.evaluate_only:
             report.update(status='passed',scope='fixed_real_physics_evaluation_without_training',final_state=c.state)
             raise _FiniteDiagnosticComplete
+        complete_mc=c.stage['critic'].get('complete_mc',{})
+        if complete_mc.get('enabled') and not cargs.collect_only and not c.state.get('mc_preheat_complete'):
+            from .mc_calibration import calibrate_critic
+            report['mc_preheat']=calibrate_critic(c,'preheat',fit=True)
+            c.state['mc_preheat_complete']=True
+            c.state['next_mc_calibration_control_steps']=_next_interaction_boundary(c.state['training_control_steps'],complete_mc['every_control_steps'])
+            _snapshot(c,'complete_mc_preheat',wait=True)
+        if getattr(cargs,'critic_preheat_only',False):
+            report.update(status='passed',scope='complete_MC_critic_preheat_without_Actor_updates',final_state=c.state)
+            raise _FiniteDiagnosticComplete
         started=time.perf_counter();last_save=started
         c.state.setdefault('next_evaluation_control_steps',_next_interaction_boundary(
             c.state['training_control_steps'],c.stage['evaluation']['every_control_steps']))
         c.state.setdefault('next_diagnostic_control_steps',_next_interaction_boundary(
             c.state['training_control_steps'],c.stage['storage']['diagnostic_every_control_steps']))
-        warmups=critic_config['warmup_rollouts'] if cargs.warmup_rollouts is None else cargs.warmup_rollouts
+        warmups=(0 if complete_mc.get('enabled') else critic_config['warmup_rollouts']) if cargs.warmup_rollouts is None else cargs.warmup_rollouts
         while c.state['iteration']<cargs.stop_after_iteration:
             if any(distributed.all_gather_object(signal.stop_requested)) or any(distributed.all_gather_object(c.clock.expired)):break
             is_warmup=c.state['warmup_completed']<warmups
@@ -466,6 +476,11 @@ def run(cargs,config,distributed):
                 _evaluate(c,report,_periodic_evaluation_label(c.state))
             if time.perf_counter()-last_save>=c.stage['storage']['checkpoint_interval_seconds']:
                 _snapshot(c,'periodic');last_save=time.perf_counter()
+            if complete_mc.get('enabled') and c.state['training_control_steps']>=c.state['next_mc_calibration_control_steps']:
+                from .mc_calibration import calibrate_critic
+                calibrate_critic(c,'policy_'+str(c.state['policy_version']),fit=False)
+                c.state['next_mc_calibration_control_steps']=_next_interaction_boundary(c.state['training_control_steps'],complete_mc['every_control_steps'])
+                _snapshot(c,'mc_calibrated',wait=True)
             root_call(distributed,lambda:c.async_writer.poll())
         _snapshot(c,'controlled_end',wait=True)
         _evaluate(c,report,'final_'+f'{c.state["iteration"]:06d}')

@@ -188,7 +188,9 @@ class UpperEnvironment:
         if self.snapshot['done']:
             raise ExecutionIntegrityError('Warmup terminated before any policy sample')
         self.music_end_tick = 600 + (len(self.music)*50//30)*12
-        self.soft_end_tick = 600 + int(float(self.config['stage9']['episode_seconds'])*600)
+        physical=self.config.get('stage10',{}).get('physical_episode')
+        safety=(physical['safety_limit_seconds'] if physical is not None else self.config['stage9']['episode_seconds'])
+        self.soft_end_tick = float('inf') if safety is None else 600+int(float(safety)*600)
         reward_type = ExecutionReward
         if self.config.get('runtime', {}).get('vector_reward_contract') is not None:
             from .vector_reward_adapter import VectorExecutionReward
@@ -425,7 +427,7 @@ class UpperEnvironment:
         boundary_reached = bool(boundary and end>=boundary['tick'] and not terminated)
         truncated = bool(self.snapshot.get('truncated',False) or (not terminated and end>=self.soft_end_tick) or boundary_reached)
         reason = self.snapshot.get('reason') or ('music_end' if terminated else
-            boundary['reason'] if boundary_reached else 'collection_limit' if truncated else None)
+            boundary['reason'] if boundary_reached else 'physical_safety_limit' if truncated else None)
         rejected_action = bool(rejection and rejection.get('policy_penalty',
             rejection.get('code') in {'invalid_qpos','invalid_quaternion','invalid_plan_output','known_source_changed'}))
         event_reward = self.reward.event_reward('reference_rejected') if rejected_action else 0.
@@ -458,6 +460,7 @@ class UpperEnvironment:
                     first_consumption.setdefault(str(plan),int(row['control_tick_begin']))
         metadata = dict(remaining_music_seconds=self.remaining_music(start),
             next_remaining_music_seconds=self.remaining_music(end), sampler_trace=trace,
+            physical_episode_administrative_truncation=bool(truncated and not boundary_reached),
             music_start_frame=getattr(self, 'music_start_frame', 0),
             full_music_num_frames=getattr(self, 'full_music_num_frames', len(self.music)),
             data_split=getattr(self, 'data_split', 'train'), backend_cpu_totals=backend_cpu_totals,

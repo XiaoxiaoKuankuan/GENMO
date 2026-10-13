@@ -219,7 +219,7 @@ def critic_update(critic,optimizer,rows,targets,cache,manifest,*,distributed,gen
     local_rows=[rows[i] for i in local_indices]
     cached_features=hasattr(critic,'encode_frozen') and getattr(critic,'freeze_encoders',False)
     with _local_phase(distributed,'stage10_critic_frozen_encoding'):
-        encoded=critic.encode_frozen(cache.context(local_rows)) if cached_features else cache.context(local_rows)
+        encoded=(critic.encode_frozen(cache.context(local_rows)) if cached_features else cache.context(local_rows)) if local_rows else {}
     lookup={i:j for j,i in enumerate(local_indices)}
     target=torch.as_tensor(targets['returns'],device=cache.device,dtype=torch.float32)
     def forward(indices):

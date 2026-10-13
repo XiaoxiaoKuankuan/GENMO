@@ -35,6 +35,10 @@ def configuration(path,*,genmo_repo=None,gmt_repo=None):
             raise ValueError(f'Invalid explicit policy setting {key}')
     if c['model']['guidance_scale'] != t['guidance_scale']:
         raise ValueError('model and training guidance_scale differ')
+    if 'episode_seconds' in t:raise ValueError('physical_episode and ppo_rollout must be separate')
+    seconds=s['physical_episode']['safety_limit_seconds']
+    if seconds is not None and (not math.isfinite(seconds) or seconds<=0 or seconds%0.5):raise ValueError('Physical safety limit must lie on the decision grid')
+    if s['ppo_rollout']['world_seconds']<=0 or s['ppo_rollout']['world_seconds']%0.5:raise ValueError('Rollout world window must lie on the decision grid')
     n=c['runtime']['num_envs'];decisions=scale['decisions_per_environment'];chains=n*decisions*world
     for k,v in [('world',world),('environments',n),('decisions',decisions),('optimizer chains',scale['actor_minibatch_chains']),
                 ('Actor microbatch',t['denoising_microbatch']),('KL microbatch',t['kl_microbatch'])]:

@@ -10,7 +10,7 @@ audit_files 才扫描全部音乐、音频与动作，逐条记录当前 motion.
 
 FullMusicSampler 先按 20/35/25/20 抽来源，再在来源完整清单中按独立 RNG 打乱、
 无放回抽样。随机起点以 30 Hz 源帧计数，返回完整音乐和 start_frame；环境必须对音乐
-与配对活动目标同步应用偏移，音乐末尾仍是真任务结束，window_seconds 仅为行政采集
+与配对活动目标同步应用偏移，音乐末尾仍是真任务结束，minimum_remaining_seconds 仅为行政采集
 窗口。采样概率是任务概率，不伪称实际控制时间比例。record_execution 单独统计真实
 控制步、转移和已覆盖源时间区间，并保存 RNG、游标、当前任务进度与覆盖以供恢复。
 
@@ -37,7 +37,7 @@ from gem.closedloop.evaluation_music import load_music_features, sha256_file
 
 SPLITS = ("train", "val", "test")
 CATALOG_VERSION = "genmo.closedloop.full_music_catalog.v1"
-SAMPLER_VERSION = "genmo.closedloop.full_music_sampler.v1"
+SAMPLER_VERSION = "genmo.closedloop.full_music_sampler.v2"
 
 
 def _integer(value, name, minimum=0):
@@ -300,18 +300,18 @@ def _merge_intervals(existing, begin, end):
 class FullMusicSampler:
     """完整清单内来源概率采样；真实执行覆盖必须由调用方 record_execution 回填。"""
 
-    def __init__(self, catalog, *, split="train", seed=42, window_seconds=30., random_start=True,
+    def __init__(self, catalog, *, split="train", seed=42, minimum_remaining_seconds=30., random_start=True,
                  source_probabilities=SOURCE_PROBABILITIES):
         if not isinstance(catalog, FullMusicCatalog) or split not in SPLITS:
             raise ValueError("full sampler requires a complete catalog and explicit valid split")
         _integer(seed, "seed")
-        if not math.isfinite(float(window_seconds)) or window_seconds <= 0 or not isinstance(random_start, bool):
-            raise ValueError("window_seconds must be positive and random_start must be boolean")
+        if not math.isfinite(float(minimum_remaining_seconds)) or minimum_remaining_seconds <= 0 or not isinstance(random_start, bool):
+            raise ValueError("minimum_remaining_seconds must be positive and random_start must be boolean")
         probabilities = np.asarray(source_probabilities, dtype=float)
         if probabilities.shape != (4,) or not np.isfinite(probabilities).all() or (probabilities <= 0).any() or not np.isclose(probabilities.sum(), 1., atol=1e-12, rtol=0):
             raise ValueError("four positive source probabilities must sum to one")
         self.catalog, self.split = catalog, split
-        self.window_seconds, self.random_start = float(window_seconds), random_start
+        self.minimum_remaining_seconds, self.random_start = float(minimum_remaining_seconds), random_start
         self.probabilities = probabilities.copy()
         self.rng = np.random.default_rng(int(seed))
         self.draw_count = 0
@@ -329,7 +329,7 @@ class FullMusicSampler:
         index = self.orders[source][self.cursors[source]]
         sample = copy.deepcopy(self.catalog.samples[self.split][source][index])
         music = self.catalog.load_music(sample)
-        maximum = max(0, len(music) - max(2, math.ceil(self.window_seconds * 30)))
+        maximum = max(0, len(music) - max(2, math.ceil(self.minimum_remaining_seconds * 30)))
         start = int(self.rng.integers(maximum + 1)) if self.random_start else 0
         self.cursors[source] += 1
         self.draw_count += 1
@@ -340,7 +340,7 @@ class FullMusicSampler:
         return dict(sample=sample, music=music, start_frame=start, music_start_frame=start,
                     task_index=self.draw_count - 1, full_music_duration_seconds=len(music) / 30.,
                     music_duration_seconds=len(music) / 30., remaining_music_seconds=(len(music)-start) / 30.,
-                    window_duration_seconds=min(self.window_seconds, (len(music)-start) / 30.),
+                    minimum_remaining_requirement_seconds=min(self.minimum_remaining_seconds, (len(music)-start) / 30.),
                     sampling_probabilities=dict(zip(SOURCES, self.probabilities.tolist())))
 
     def record_execution(self, task, control_steps, *, upper_transitions=1):
@@ -377,7 +377,7 @@ class FullMusicSampler:
 
     def state_dict(self):
         return copy.deepcopy(dict(version=SAMPLER_VERSION, catalog_identity=self.catalog.identity, split=self.split,
-            window_seconds=self.window_seconds, random_start=self.random_start, source_probabilities=self.probabilities.tolist(),
+            minimum_remaining_seconds=self.minimum_remaining_seconds, random_start=self.random_start, source_probabilities=self.probabilities.tolist(),
             rng=self.rng.bit_generator.state, draw_count=self.draw_count, orders=self.orders, cursors=self.cursors,
             counts=self._counts, drawn={k: sorted(v) for k, v in self._drawn.items()}, intervals=self._intervals, active=self._active))
 
@@ -385,8 +385,8 @@ class FullMusicSampler:
         """仅复制轻量采样状态进行验证，不复制只读 catalog 或读取音乐数据。"""
         state = copy.deepcopy(state)
         expected = dict(version=SAMPLER_VERSION, catalog_identity=self.catalog.identity, split=self.split,
-            window_seconds=self.window_seconds, random_start=self.random_start, source_probabilities=self.probabilities.tolist())
-        for key in ("version", "catalog_identity", "split", "window_seconds", "random_start", "source_probabilities"):
+            minimum_remaining_seconds=self.minimum_remaining_seconds, random_start=self.random_start, source_probabilities=self.probabilities.tolist())
+        for key in ("version", "catalog_identity", "split", "minimum_remaining_seconds", "random_start", "source_probabilities"):
             if state.get(key) != expected[key]:
                 raise ValueError(f"full sampler checkpoint identity differs: {key}")
         count = _integer(state["draw_count"], "draw_count")

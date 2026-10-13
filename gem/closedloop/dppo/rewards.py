@@ -251,7 +251,7 @@ class ExecutionReward:
             return -float(self.config["rejected_plan_penalty"])
         if reason in {"physical_failure", "task_failure", "reference_exhausted"}:
             return -float(self.config["failure_penalty"])
-        if reason in {None, "music_end", "task_complete", "collection_limit", "rollout_truncated", "infrastructure_failure"}:
+        if reason in {None, "music_end", "task_complete", "collection_limit", "rollout_truncated", "physical_safety_limit", "infrastructure_failure"}:
             return 0.
         raise ValueError(f"event must use an explicit Stage9 reason category, got {reason}")
 

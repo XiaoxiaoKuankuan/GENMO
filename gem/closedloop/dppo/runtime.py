@@ -71,7 +71,7 @@ class InProcessTrainingRuntime:
         env=VectorUpperEnvironment(config,backend,builder,proxy,None,c.rank_dir/'ephemeral'/f'env{slot:03d}')
         env.disk_guard=c.guard
         resource=SimpleNamespace(env=env,journal=None,sampler=FullMusicSampler(c.catalog,split='train',
-            seed=config['stage9']['seed'],window_seconds=c.settings['episode_seconds'],
+            seed=config['stage9']['seed'],minimum_remaining_seconds=c.stage['ppo_rollout']['world_seconds'],
             random_start=c.stage['dataset']['random_start'],source_probabilities=c.stage['dataset']['source_probabilities']))
         self._bind(slot,resource)
         def close():resource.journal.close();resource.env.budget.close();backend.client.close()
@@ -97,7 +97,7 @@ class InProcessTrainingRuntime:
         self.strict=bool(strict)
         path=c.session/'collections'/label/f'rank{c.distributed.rank:02d}'
         local_call(c.distributed,lambda:path.mkdir(parents=True,exist_ok=False))
-        credits=[collection_credit(n+3,c.settings['episode_seconds'],self.latency_budget_s) for n in counts]
+        credits=[collection_credit(n+3,c.stage['ppo_rollout']['world_seconds'],self.latency_budget_s) for n in counts]
         total={key:sum(v[key] for v in credits) for key in credits[0]}
         per_rank=c.distributed.all_gather_object(total);lease=f'{c.session.name}/{label}'
         parent=local_call(c.distributed,lambda:begin_lease(c.distributed,c.manager,c.budget,path,lease,per_rank,c.guard))

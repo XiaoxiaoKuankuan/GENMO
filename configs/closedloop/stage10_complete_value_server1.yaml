@@ -194,6 +194,15 @@ stage10:
     collection: all_ranks
   version: genmo.closedloop.stage10.continuous.v1
   seed: 42
+  physical_episode:
+    safety_limit_seconds: null
+    termination: music_end_or_physical_failure
+  ppo_rollout:
+    world_seconds: 4.0
+    collection_contract: equal_decisions_intermediate_control
+  generation_horizon:
+    frames: 120
+    fps: 30
   training:
     execution_mode: latency
     denoising_steps: 20
@@ -212,7 +221,6 @@ stage10:
     ppo_clip: 0.003
     bc_weight: 0.01
     denoising_microbatch: 64
-    episode_seconds: 10.0
     latency_budget_s: 0.5
     critic_grad_clip_norm: 1.0
     bc_prefix:
@@ -248,7 +256,7 @@ stage10:
     bc_samples_per_rollout: 512
   dataset:
     split: train
-    random_start: true
+    random_start: false
     source_probabilities:
     - 0.2
     - 0.35
@@ -377,6 +385,14 @@ stage10:
     maximum_step_mean_coordinate: 0.01
     p95_coordinate: 0.01
   critic:
+    complete_mc:
+      enabled: true
+      samples_per_source: 4
+      training_seeds: [42, 1729]
+      validation_seeds: [2718, 31415]
+      mix_candidates: [0.0, 0.5, 1.0]
+      epochs: 32
+      every_control_steps: 5000000
     type: pretrained_temporal
     dimension: 256
     layers: 2

@@ -122,7 +122,7 @@ class VectorTrainingRuntime:
         env = VectorUpperEnvironment(config, backend, builder, proxy, None, self.phase.path/f'env{slot:03d}')
         env.disk_guard = c.guard
         resource = SimpleNamespace(env=env, journal=None, sampler=FullMusicSampler(c.catalog, split='train',
-            seed=config['stage9']['seed'], window_seconds=c.settings['episode_seconds'],
+            seed=config['stage9']['seed'], minimum_remaining_seconds=c.stage['ppo_rollout']['world_seconds'],
             random_start=c.stage['dataset']['random_start'], source_probabilities=c.stage['dataset']['source_probabilities']))
         self._bind(slot, resource)
         def close():

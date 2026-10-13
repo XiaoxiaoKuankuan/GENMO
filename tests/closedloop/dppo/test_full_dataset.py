@@ -303,14 +303,14 @@ def test_mutating_public_sample_does_not_mutate_catalog_validation_snapshot(tmp_
 
 def test_random_windows_keep_complete_music_and_resume_exactly(tmp_path):
     catalog = FullMusicCatalog(make_catalog_data(tmp_path))
-    first = FullMusicSampler(catalog, seed=17, window_seconds=2.)
+    first = FullMusicSampler(catalog, seed=17, minimum_remaining_seconds=2.)
     a = first.next_task()
     assert len(a["music"]) == 180 and 0 <= a["start_frame"] <= 120
     assert a["full_music_duration_seconds"] == 6.
     assert a["remaining_music_seconds"] == (180-a["start_frame"])/30.
     first.record_execution(a, 25)
     state = first.state_dict()
-    restored = FullMusicSampler(catalog, seed=999, window_seconds=2.)
+    restored = FullMusicSampler(catalog, seed=999, minimum_remaining_seconds=2.)
     restored.load_state_dict(state)
     for _ in range(6):
         x, y = first.next_task(), restored.next_task()
@@ -324,7 +324,7 @@ def test_random_windows_keep_complete_music_and_resume_exactly(tmp_path):
 def test_task_source_probabilities_are_not_claimed_as_control_time_mix(tmp_path, monkeypatch):
     catalog = FullMusicCatalog(make_catalog_data(tmp_path, frames=60))
     monkeypatch.setattr(catalog, "load_music", lambda sample: np.zeros((60,35)))
-    sampler = FullMusicSampler(catalog, seed=42, window_seconds=1.)
+    sampler = FullMusicSampler(catalog, seed=42, minimum_remaining_seconds=1.)
     for _ in range(10000):
         task = sampler.next_task()
         sampler.record_execution(task, 1 if task["sample"]["dataset"] == "Mine" else 10)
@@ -353,7 +353,7 @@ def test_actual_coverage_has_no_double_counted_source_time_and_rejects_stale_tas
         sampler.record_execution(b, 301)
 
 
-@pytest.mark.parametrize("field", ["split", "window_seconds", "draw_count", "orders", "cursor", "rng", "intervals", "active"])
+@pytest.mark.parametrize("field", ["split", "minimum_remaining_seconds", "draw_count", "orders", "cursor", "rng", "intervals", "active"])
 def test_restore_rejects_corrupt_state_without_changing_existing_sampler(tmp_path, field):
     catalog = FullMusicCatalog(make_catalog_data(tmp_path))
     sampler = FullMusicSampler(catalog)
@@ -362,7 +362,7 @@ def test_restore_rejects_corrupt_state_without_changing_existing_sampler(tmp_pat
     state = sampler.state_dict()
     corrupt = copy.deepcopy(state)
     if field == "split": corrupt["split"] = "val"
-    elif field == "window_seconds": corrupt[field] = 2.
+    elif field == "minimum_remaining_seconds": corrupt[field] = 2.
     elif field == "draw_count": corrupt[field] = 99
     elif field == "orders": corrupt[field][SOURCES[0]] = [0,0]
     elif field == "cursor": corrupt["cursors"][SOURCES[0]] = -1
