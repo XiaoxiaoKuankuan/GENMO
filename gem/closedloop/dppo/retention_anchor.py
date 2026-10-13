@@ -31,18 +31,29 @@ class Stage1RetentionAnchor(SupervisedAnchor):
         super().__init__(config,actor,train_config)
         self.losses=_MatureStage1Loss(self.losses,source_global_step)
         self.source_global_step=int(source_global_step)
+        self.maximum_batch_size=config['stage9']['bc_samples_per_rollout']
         # 配对SUM以后已经统计真实全局BC梯度，省去每个监督反向的重复全模型FP64 hook。
         self.micro_gradient_diagnostics=False
     def backward(self,actor,weight):
+        if self.batch_size==0:
+            return dict(loss=0.,batch_size=0,samples=[],bc_update_steps=self.bc_update_steps,
+                weight=weight,empty_local_BC_shard=True)
         report=super().backward(actor,weight)
         report.update(loss_maturity_step=self.source_global_step+self.bc_update_steps-1,
             warmup_origin='source_stage1_step_plus_independent_bc_updates')
         return report
-    def state_dict(self):return dict(super().state_dict(),source_global_step=self.source_global_step)
+    def state_dict(self):return dict(super().state_dict(),source_global_step=self.source_global_step,
+        batch_contract='actual_optimizer_step_allocation.v1')
     def validate_state_dict(self,state):
         if state.get('source_global_step')!=self.source_global_step:
             raise ValueError('Stage1 BC mature-loss origin differs from checkpoint')
-        return super().validate_state_dict(state)
+        if (state.get('batch_contract')!='actual_optimizer_step_allocation.v1' or type(state['batch_size'])is not int
+                or not 0<=state['batch_size']<=self.maximum_batch_size):raise ValueError('Invalid dynamic BC batch identity')
+        # 父类的固定batch检查只适用于Stage9；这里验证RNG和计数，保存实际尾批分配。
+        return super().validate_state_dict(dict(state,batch_size=self.batch_size))
+    def load_state_dict(self,state):
+        super().load_state_dict(state)
+        self.batch_size=state['batch_size']
 
     @torch.no_grad()
     def validation_report(self,actor,config,*,rank,world):

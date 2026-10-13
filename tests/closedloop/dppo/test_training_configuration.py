@@ -31,7 +31,8 @@ def test_main_scale_is_4096_full_chains_with_eight_combined_updates():
     assert s['version'] == VERSION
     assert s['derived'] == dict(world_size=8, real_chains=4096, local_chains=512,
         planned_actor_steps=8, local_ppo_internal_visits=8192, local_full_kl_visits=10240,
-        bc_per_step=64, bc_per_rollout=512)
+        bc_per_step=64, bc_per_rollout=512,maximum_actor_steps=10,
+        count_semantics='nominal_capacity_only_actual_manifest_controls_optimization')
     assert (t['denoising_steps'], t['ppo_steps_per_chain'], t['ppo_epochs']) == (20, 8, 2)
     assert t['actor_lr'] == 5e-8 and t['ppo_clip'] == .003
     assert c['runtime']['timing_contract'] == 'modeled_deployment.v3'

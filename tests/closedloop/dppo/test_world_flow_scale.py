@@ -67,18 +67,19 @@ def test_boundary_wait_extends_control_coverage_without_inventing_decision(tmp_p
 def test_restored_world_can_collect_before_first_reward_object_exists():
     """完整断点恢复会重建物理episode，计时不能假设首次reset前已有reward。"""
     calls = []
-    world = NS(call=lambda method, **kwargs: calls.append(method) or {})
+    world = NS(call=lambda method, **kwargs: calls.append(method) or (dict(world_window=dict(reached=True,requested_world_controls=50)) if method=='end_rollout' else {}))
     policy = NS(_parameter_signature=lambda: ('fixed',))
     collector = WorldEnvironmentCollector(policy, None, world, num_envs=2, generation_batch=2)
     collector.states = [NS(transitions=0, resource=NS(env=NS(config={'stage10': {}}))) for _ in range(2)]
     assert all(not hasattr(state.resource.env, 'reward') for state in collector.states)
-    def fragment(slot, count, version):
+    def fragment(slot, version):
+        count=2
         if False:
             yield
         collector.states[slot].transitions += count
         return [NS(metadata={'env_id': slot, 'policy_version': version}) for _ in range(count)]
-    collector._fragment_flow = fragment
-    rows, report = collector.collect(count_per_rank=4, policy_version=7)
+    collector._window_flow = fragment
+    rows, report = collector.collect(world_seconds=1., policy_version=7)
     assert calls == ['begin_rollout', 'end_rollout']
     assert list(map(len, rows)) == [2, 2]
     assert report['columnar_reward_cpu_timings'] == {}

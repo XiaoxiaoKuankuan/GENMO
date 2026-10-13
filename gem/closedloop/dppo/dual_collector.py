@@ -27,7 +27,10 @@ def fixed_fragment_targets(fragments, critic, device, *, critic_version, gamma_u
     from .trainer import fixed_targets
     targets = [fixed_targets(rows,critic,device, gamma_upper=gamma_upper,lambda_upper=lambda_upper,
                              reuse_values=True,critic_version=critic_version,normalize=False)
-               for rows in fragments]
+               for rows in fragments if rows]
+    if not targets:
+        return [],fixed_targets([],critic,device,gamma_upper=gamma_upper,lambda_upper=lambda_upper,
+            reuse_values=True,critic_version=critic_version,normalize=False)
     result = {}
     for key in targets[0]:
         values = [item[key] for item in targets]

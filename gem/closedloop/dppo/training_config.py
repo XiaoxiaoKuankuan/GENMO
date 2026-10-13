@@ -18,7 +18,7 @@ import yaml
 
 from .rewards import resolve_reward_config
 
-VERSION='genmo.closedloop.stage10.continuous.v1'
+VERSION='genmo.closedloop.stage10.world_window.v1'
 
 
 def configuration(path,*,genmo_repo=None,gmt_repo=None):
@@ -39,7 +39,9 @@ def configuration(path,*,genmo_repo=None,gmt_repo=None):
     seconds=s['physical_episode']['safety_limit_seconds']
     if seconds is not None and (not math.isfinite(seconds) or seconds<=0 or seconds%0.5):raise ValueError('Physical safety limit must lie on the decision grid')
     if s['ppo_rollout']['world_seconds']<=0 or s['ppo_rollout']['world_seconds']%0.5:raise ValueError('Rollout world window must lie on the decision grid')
-    n=c['runtime']['num_envs'];decisions=scale['decisions_per_environment'];chains=n*decisions*world
+    if s['ppo_rollout']['collection_contract']!='shared_world_sim_time.v1':raise ValueError('Current collection uses shared world simulation time')
+    if 'decisions_per_environment' in scale:raise ValueError('Per-environment decision quotas are no longer supported')
+    n=c['runtime']['num_envs'];decisions=math.ceil(s['ppo_rollout']['world_seconds']/.5);chains=n*decisions*world
     for k,v in [('world',world),('environments',n),('decisions',decisions),('optimizer chains',scale['actor_minibatch_chains']),
                 ('Actor microbatch',t['denoising_microbatch']),('KL microbatch',t['kl_microbatch'])]:
         if type(v)is not int or v<1:raise ValueError(f'{k} must be positive integer')
@@ -57,8 +59,8 @@ def configuration(path,*,genmo_repo=None,gmt_repo=None):
         raise ValueError('Invalid independently calibrated Actor learning rate/clip')
     steps=t['ppo_epochs']*math.ceil(chains/scale['actor_minibatch_chains'])
     bc_total=t['bc_samples_per_rollout']
-    if type(bc_total)is not int or bc_total<steps*world or bc_total%steps or (bc_total//steps)%world:
-        raise ValueError('BC total must divide planned optimizer steps and all GPU ranks exactly')
+    if type(bc_total)is not int or bc_total<1:
+        raise ValueError('BC total must be positive; actual ragged optimizer steps determine its allocation')
     t.update(rollout_upper_steps=chains,rollout_upper_steps_per_rank=n*decisions,
         actor_minibatch_internal_transitions=scale['actor_minibatch_chains']*20,
         max_actor_optimizer_steps=steps,bc_batch=bc_total//steps,
@@ -68,10 +70,14 @@ def configuration(path,*,genmo_repo=None,gmt_repo=None):
         bc_data_root=c['paths']['data_root'],bc_distribution='all_ranks')
     if s['limits']['physics_steps']!=4*s['limits']['control_steps']:
         raise ValueError('Physical resource budget must preserve four substeps')
-    if s['limits']['optimizer_attempts']<s['limits']['accepted_iterations']*steps:
+    maximum_steps=t['ppo_epochs']*math.ceil(n*(decisions+1)*world/scale['actor_minibatch_chains'])
+    if bc_total<maximum_steps:raise ValueError('BC must cover every possible actual optimizer step')
+    if s['limits']['optimizer_attempts']<s['limits']['accepted_iterations']*maximum_steps:
         raise ValueError('Optimizer attempt budget must cover the complete declared workload')
     if c['runtime']['generation_batch']>n:raise ValueError('No duplicated environments to pad effective GENMO batches')
     s['derived']=dict(world_size=world,real_chains=chains,local_chains=n*decisions,planned_actor_steps=steps,
         local_ppo_internal_visits=n*decisions*t['ppo_steps_per_chain']*t['ppo_epochs'],
         local_full_kl_visits=n*decisions*20,bc_per_step=t['bc_batch'],bc_per_rollout=bc_total)
+    s['derived'].update(count_semantics='nominal_capacity_only_actual_manifest_controls_optimization',
+        maximum_actor_steps=maximum_steps)
     return c

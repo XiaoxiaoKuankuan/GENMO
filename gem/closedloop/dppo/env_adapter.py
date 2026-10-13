@@ -150,7 +150,7 @@ class UpperEnvironment:
         for i, row in enumerate(rows):
             if row['episode_id'] != previous['episode_id'] or row['tick'] != previous['tick']+12*(i+1):
                 raise ExecutionIntegrityError('Trace is not a complete contiguous actual trajectory')
-        if actual < count and not snapshot['done']:
+        if actual < count and not snapshot['done'] and not snapshot.get('rollout_window_reached',False):
             raise ExecutionIntegrityError('Short advance without terminal state')
         self.snapshot = snapshot
         return rows
@@ -181,7 +181,7 @@ class UpperEnvironment:
         self.snapshot = yield from backend_operation('reset_episode', seed=self.seed,
             episode_spec={'sample_id':sample['row']['sample_id'], 'dataset':sample['dataset'], 'mode':self.mode})
         last_warmup_row = None
-        while self.snapshot['tick'] < 600 and not self.snapshot['done']:
+        while self.snapshot['tick'] < 600 and not self.snapshot['done'] and not getattr(self,'rollout_window_reached',False):
             warmup_rows = yield from self.advance_flow(min(25, (600-self.snapshot['tick'])//12))
             if warmup_rows:
                 last_warmup_row = warmup_rows[-1]
@@ -203,7 +203,15 @@ class UpperEnvironment:
                                       target_activity=target)
         if last_warmup_row is not None:
             self.reward.seed_previous_target(last_warmup_row.get('joint_position_target'))
+        if self.snapshot['tick']<600:return None
         return (yield from self.preview_context_flow())[0]
+
+    def continue_warmup_flow(self):
+        """重置预热跨世界rollout继续，音乐尚未启动，不构造虚假上层状态。"""
+        while self.snapshot['tick']<600 and not self.snapshot['done'] and not self.rollout_window_reached:
+            rows=yield from self.advance_flow(min(25,(600-self.snapshot['tick'])//12))
+            if rows:self.reward.seed_previous_target(rows[-1].get('joint_position_target'))
+        if self.snapshot['done']:raise ExecutionIntegrityError('Warmup terminated before any policy sample')
 
     def _request(self):
         tick = int(self.snapshot['tick'])
@@ -416,6 +424,7 @@ class UpperEnvironment:
                 details.append(result)
                 rewards.append(float(result['reward']))
             training_reward_seconds += time.perf_counter()-reward_started
+            if getattr(self,'rollout_window_reached',False):break
             if pending and self.snapshot['tick']%300==0:
                 events.append(dict(kind='decision_missed',tick=self.snapshot['tick']))
             if self.snapshot['tick'] > self.soft_end_tick+600*max(2.,2*self.latency_budget_s+.5):

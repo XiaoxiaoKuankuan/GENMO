@@ -125,7 +125,8 @@ def _evaluate_impl(c, label):
     env.disk_guard = c.guard
     env.latency_budget_s, env.policy_version, env.iteration = c.env.latency_budget_s, c.env.policy_version, c.env.iteration
     initial_rows = []
-    fresh_critic_enabled = c.stage.get('version') == 'genmo.closedloop.stage10.continuous.v1'
+    from .training_config import VERSION as CURRENT_TRAINING_VERSION
+    fresh_critic_enabled = c.stage.get('version')==CURRENT_TRAINING_VERSION
     if references is None or fresh_critic_enabled:
         actual_step = env.step
         def capture_initial(*args, **kwargs):

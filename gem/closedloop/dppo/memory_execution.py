@@ -93,7 +93,7 @@ class DeviceRolloutBuffer:
                 expected=row.context['future_valid'][0,:,None]&~row.context['known_qpos30_mask'][0]
                 flags.extend([torch.isfinite(row.chain).all(),torch.isfinite(row.old_log_prob).all(),(row.free_mask==expected).all()])
                 signatures.add(row.identity['policy_version']);self._transitions.append(row)
-        if len(signatures)!=1 or not bool(torch.stack(flags).all()):
+        if self._transitions and (len(signatures)!=1 or not bool(torch.stack(flags).all())):
             raise ValueError('Mixed policy version, nonfinite rollout or changed free mask')
         self.fragments=list(map(len,fragments))
     @property

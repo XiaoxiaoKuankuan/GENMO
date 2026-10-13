@@ -95,6 +95,12 @@ class WorldEnvironmentCollector(VectorEnvironmentCollector):
             self.world_timing[key]=self.world_timing.get(key,0.)+seconds
         for name,value in result.get('timing',{}).items():self.world_timing[name]=self.world_timing.get(name,0.)+value
         if result.get('fatal'): raise RuntimeError(f'World execution failed after durable evidence: {result["fatal"]}')
+        window=result.get('world_window')
+        if window is not None:
+            self.window_record=window
+            if window['reached']:
+                for state in self.states:
+                    if state is not None:state.resource.env.rollout_window_reached=True
         return result
     def world_idle(self,function):
         if self.active or self.rpc_pending: raise RuntimeError('World boundary is not idle')
@@ -276,9 +282,43 @@ class WorldEnvironmentCollector(VectorEnvironmentCollector):
             rows[-1].truncated=True;rows[-1].reason=rows[-1].reason or 'collector_fragment_boundary'
         return rows
 
-    def collect(self, *,count_per_rank,policy_version):
-        if count_per_rank%self.num_envs:raise ValueError('World quota must assign equal complete decision counts')
+    def _window_flow(self,slot,policy_version):
+        """每个环境连续产生有效决策，统一世界边界到达时一起停止。"""
+        state=self.states[slot];env,sampler=state.resource.env,state.resource.sampler
+        env.policy_version=policy_version
+        yield from backend_operation('join_fragment')
+        rows=[]
+        while not env.rollout_window_reached:
+            if state.task is None:
+                task=sampler.next_task()
+                if task['sample']['row']['split']!='train':raise ValueError('Validation sample in training world')
+                yield from env.reset_task_flow(task['sample'],task['music'],seed=env.config['stage9']['seed']+env.episode_count,
+                    phase='train',music_start_frame=task['music_start_frame'])
+                state.task=task
+                self.world_timing['completed_environment_resets']=self.world_timing.get('completed_environment_resets',0)+1
+            if env.rollout_window_reached:break
+            if env.snapshot['tick']<600:
+                yield from env.continue_warmup_flow()
+            if env.rollout_window_reached:break
+            row=yield from env.step_flow()
+            if not row.transition_valid or row.identity['policy_version']!=policy_version:raise ValueError('Invalid/mixed behavior policy')
+            task=state.task
+            row.metadata.update(collector_env_slot=slot,training_task=dict(dataset=task['sample']['dataset'],
+                sample_id=task['sample']['row']['sample_id'],split='train',music_start_frame=task['music_start_frame'],
+                manifest_sha256=task['sample']['manifest_sha256']))
+            sampler.record_execution(task,row.executed_control_steps);rows.append(row);state.transitions+=1
+            if row.terminated or row.truncated:state.task=None
+        if rows and not rows[-1].terminated:
+            # 这里只切当前Actor版本的GAE；正常物理episode、参考和音乐继续存在。
+            rows[-1].truncated=True
+            rows[-1].reason=rows[-1].reason or 'ppo_world_window_boundary'
+        return rows
+
+    def collect(self, *,world_seconds,policy_version):
+        if world_seconds<=0 or world_seconds%0.5:raise ValueError('World duration must lie on the decision grid')
         for slot in range(self.num_envs):self._resource(slot)
+        for state in self.states:state.resource.env.rollout_window_reached=False
+        self.window_record=None
         self.world_call('begin_rollout',env_ids=list(range(self.num_envs)))
         signature=self.policy._parameter_signature();self.batch_reports=[];self.world_timing={};started=time.perf_counter()
         protocol_before=(self.world_call('transport_statistics') if
@@ -293,14 +333,14 @@ class WorldEnvironmentCollector(VectorEnvironmentCollector):
         reward_timings={}
         try:
             with capture_columnar_timings() as reward_timings:
-                fragments=self._drive({slot:self._fragment_flow(slot,count_per_rank//self.num_envs,policy_version) for slot in range(self.num_envs)})
+                fragments=self._drive({slot:self._window_flow(slot,policy_version) for slot in range(self.num_envs)})
                 self.world_call('end_rollout',env_ids=list(range(self.num_envs)))
         except BaseException as error:
             from .budget import atomic_json
             atomic_json(self.states[0].resource.env.output.parent/'failed_world_progress.json', dict(
                 status='failed', error_type=type(error).__name__, error=str(error), policy_version=policy_version,
                 traceback=traceback.format_exc(),
-                requested_transitions=count_per_rank, completed_per_environment=[
+                requested_world_seconds=world_seconds, completed_per_environment=[
                     state.transitions-value for state,value in zip(self.states,before)],
                 seconds=time.perf_counter()-started, batches=self.batch_reports, world_timing=self.world_timing,
                 audit_seconds=self.audit_seconds, columnar_reward_cpu_timings=reward_timings,
@@ -315,7 +355,13 @@ class WorldEnvironmentCollector(VectorEnvironmentCollector):
         protocol_after=self.world_call('transport_statistics') if protocol_before is not None else {}
         protocol_delta={key:value-protocol_before.get(key,0.) for key,value in protocol_after.items()}
         tails=[row.metadata['fragment_tail'] for fragment in rows for row in fragment if 'fragment_tail' in row.metadata]
+        if self.window_record is None or not self.window_record['reached']:
+            raise RuntimeError('Shared world did not attest its real simulation window')
+        if self.window_record['requested_world_controls']!=round(world_seconds*50):
+            raise RuntimeError('Collector and PhysX world configured different rollout durations')
         return rows,dict(schema=WORLD_FLOW_CONTRACT,fragment_contract=WORLD_FLOW_CONTRACT,
+            collection_contract='shared_world_sim_time.v1',world_window=self.window_record,
+            quota_alignment_removed=True,physical_episodes_preserved=True,
             boundary_wait_contract=self.boundary_wait_contract,boundary_wait_max_controls=self.boundary_wait_max_controls,
             total_transitions=sum(map(len,rows)),fragment_lengths=list(map(len,rows)),allocated_envs=self.num_envs,
             active_envs=self.num_envs,seconds=time.perf_counter()-started,batches=self.batch_reports,

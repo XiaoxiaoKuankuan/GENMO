@@ -91,13 +91,18 @@ class InProcessTrainingRuntime:
         resource.env.iteration=self.c.state['rollouts_completed']
         resource.env.policy_version=self.c.state['policy_version']
 
-    def _open(self,label,counts,strict):
+    def _open(self,label,counts,strict,*,world_seconds=None):
         c=self.c
         if self.phase is not None:raise RuntimeError('Cannot overlap physical rollout phases')
         self.strict=bool(strict)
         path=c.session/'collections'/label/f'rank{c.distributed.rank:02d}'
         local_call(c.distributed,lambda:path.mkdir(parents=True,exist_ok=False))
         credits=[collection_credit(n+3,c.stage['ppo_rollout']['world_seconds'],self.latency_budget_s) for n in counts]
+        if world_seconds is not None:
+            # 全世界时间含reset预热，额外最多一格用于合法边界；失败不凭配额增加执行。
+            controls=round(world_seconds*50)+25
+            credits=[dict(control_steps=controls,physics_steps=4*controls,
+                generations=(controls+24)//25+2) for _ in counts]
         total={key:sum(v[key] for v in credits) for key in credits[0]}
         per_rank=c.distributed.all_gather_object(total);lease=f'{c.session.name}/{label}'
         parent=local_call(c.distributed,lambda:begin_lease(c.distributed,c.manager,c.budget,path,lease,per_rank,c.guard))
@@ -121,12 +126,11 @@ class InProcessTrainingRuntime:
         return used,state
 
     def collect(self,label,*,strict=False):
-        c=self.c;count=c.settings['rollout_upper_steps_per_rank']
-        if count%self.num_envs:raise ValueError('Exact equal environment decision quotas required')
-        self._open(label,[count//self.num_envs]*self.num_envs,strict)
+        c=self.c;seconds=c.stage['ppo_rollout']['world_seconds']
+        self._open(label,[0]*self.num_envs,strict,world_seconds=seconds)
         self.apply_restore()
         start=time.perf_counter()
-        fragments,report=local_call(c.distributed,lambda:self.collector.collect(count_per_rank=count,policy_version=c.state['policy_version']))
+        fragments,report=local_call(c.distributed,lambda:self.collector.collect(world_seconds=seconds,policy_version=c.state['policy_version']))
         def prepare_learning():
             buffer=DeviceRolloutBuffer(fragments,c.policy,c.distributed.device)
             rows=buffer.transitions
@@ -137,11 +141,11 @@ class InProcessTrainingRuntime:
             return buffer,targets
         buffer,targets=local_call(c.distributed,prepare_learning)
         rows=buffer.transitions
-        targets=normalize_advantages_global(targets,distributed=c.distributed)
-        counts=torch.stack([row.free_mask.sum() for row in rows]).cpu().tolist()
+        counts=torch.stack([row.free_mask.sum() for row in rows]).cpu().tolist() if rows else []
         local=[dict(owner_rank=c.distributed.rank,local_index=i,valid=True,has_free=n>0) for i,n in enumerate(counts)]
         manifest=[item for shard in c.distributed.all_gather_object(local) for item in shard]
-        if len(manifest)!=c.settings['rollout_upper_steps']:raise RuntimeError('Global real rollout count changed')
+        if manifest:targets=normalize_advantages_global(targets,distributed=c.distributed)
+        else:targets.update(advantage_global_count=0,advantage_global_mean=0.,advantage_global_std=0.)
         used,budget=self._finish()
         contiguous=[]
         for fragment in fragments:

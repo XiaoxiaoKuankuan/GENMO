@@ -83,9 +83,14 @@ def collect_complete_bank(c, label, split, *, samples_per_source, seeds):
         if _model_fingerprint(c.actor)!=actor_before:raise RuntimeError('MC evaluation changed Actor weights')
         finish_lease(c.distributed,c.budget,prepaid,lease,credits)
         bank.training_data(policy_version=c.state['policy_version'],kernel=c.policy.kernel_config)
-        bank_record=dict(report=bank.report(),actor_fingerprint=actor_before,plan=plan,
+        bank_record=dict(schema='genmo.complete_episode.value_dataset.v1',report=bank.report(),
+            actor_fingerprint=actor_before,policy_version=c.state['policy_version'],kernel=c.policy.kernel_config,
+            reward_configuration=c.stage['reward'],plan=plan,
+            episodes=[dict(task=e['task'],end_reason=e['end_reason'],control_steps=e['control_steps'],
+                states=len(e['rows'])) for e in bank.episodes],
             rows=[dict(context=r.context,metadata=r.metadata,identity=r.identity,rewards=r.rewards,
-                executed_control_steps=r.executed_control_steps,begin=r.control_tick_begin,end=r.control_tick_end)
+                executed_control_steps=r.executed_control_steps,begin=r.control_tick_begin,end=r.control_tick_end,
+                terminated=r.terminated,truncated=r.truncated)
                 for e in bank.episodes for r in e['rows']],
             returns=torch.cat([e['returns'] for e in bank.episodes]) if bank.episodes else torch.empty(0))
         torch.save(bank_record,path/'complete_mc.pt')

@@ -196,14 +196,14 @@ stage10:
     world_size: 8
     backend: nccl
     collection: all_ranks
-  version: genmo.closedloop.stage10.continuous.v1
+  version: genmo.closedloop.stage10.world_window.v1
   seed: 42
   physical_episode:
     safety_limit_seconds: null
     termination: music_end_or_physical_failure
   ppo_rollout:
     world_seconds: 4.0
-    collection_contract: equal_decisions_intermediate_control
+    collection_contract: shared_world_sim_time.v1
   generation_horizon:
     frames: 120
     fps: 30
@@ -283,7 +283,7 @@ stage10:
     max_training_iterations: 500
   limits:
     accepted_iterations: 500
-    optimizer_attempts: 4000
+    optimizer_attempts: 6000
     generations: 3000000
     control_steps: 150000000
     physics_steps: 600000000
@@ -375,7 +375,6 @@ stage10:
     full_fingerprint_every: 1
     sentinel_chains_per_rank: 1
   scale:
-    decisions_per_environment: 8
     actor_minibatch_chains: 1024
   precision:
     mode: native_fp32

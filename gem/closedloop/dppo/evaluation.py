@@ -372,7 +372,10 @@ def evaluate_policy(env, policy, task_plan, output_dir, *, catalog=None, episode
     gradient_before = _model_fingerprint(policy.actor, gradients=True)
     modes = {name: {child_name: child.training for child_name, child in module.named_modules()} for name, module in modules.items()}
     rng = _capture_rng(local_cuda_only=local_cuda_only)
-    original_limit = env.config['stage9']['episode_seconds']
+    physical=env.config.get('stage10',{}).get('physical_episode')
+    limit_owner=physical if physical is not None else env.config['stage9']
+    limit_key='safety_limit_seconds' if physical is not None else 'episode_seconds'
+    original_limit = limit_owner[limit_key]
     original_noise_index = env.comparison_noise_index
     episodes, manifests = [], []
     error = None
@@ -438,7 +441,7 @@ def evaluate_policy(env, policy, task_plan, output_dir, *, catalog=None, episode
     finally:
         after = {name: _model_fingerprint(module) for name, module in modules.items()}
         gradient_after = _model_fingerprint(policy.actor, gradients=True)
-        env.config['stage9']['episode_seconds'] = original_limit
+        limit_owner[limit_key] = original_limit
         env.comparison_noise_index = original_noise_index
         for name, module in modules.items():
             for child_name, child in module.named_modules():

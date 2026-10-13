@@ -367,6 +367,15 @@ def run(cargs,config,distributed):
             c.state['training_control_steps']+=used[0]
             c.state['training_physics_steps']+=used[1]
             c.state['training_upper_transitions']+=used[2]
+            if not manifest:
+                buffer.clear();buffer=None
+                c.state['rollouts_completed']+=1
+                deactivate(profile_token);profile_token=None
+                empty_collections=distributed.all_gather_object(collection)
+                root_call(distributed,lambda:c.manager.append_metrics(dict(label=label,mode='empty_world_window',
+                    collection_by_rank=empty_collections,state=copy.deepcopy(c.state),
+                    actor_steps=0,critic_steps=0,policy_version_unchanged=True)))
+                continue
             cache=RolloutTensorCache(rows,targets,distributed.device,max_device_bytes=c.stage['storage']['tensor_cache_max_bytes'],preserve_device=True)
             probability_frequency=c.stage['checks']['full_probability_every']
             full_probability=(c.state['rollouts_completed']==0 or strict or
@@ -418,7 +427,7 @@ def run(cargs,config,distributed):
                     sampled_steps=c.settings['ppo_steps_per_chain'],clip=c.settings['ppo_clip'],
                     gamma_denoising=c.settings['gamma_denoising'],soft_kl=c.settings['kl_soft_stop_coordinate'],
                     kl_reduction=c.stage['kl']['reduction'],objective_reduction=c.settings['objective_logprob_reduction'],
-                    grad_clip_norm=c.settings['grad_clip_norm'],reserve_attempt=reserve)
+                    grad_clip_norm=c.settings['grad_clip_norm'],reserve_attempt=reserve,bc_samples_per_rollout=c.settings['bc_samples_per_rollout'])
                 actor_seconds=max(distributed.all_gather_object(time.perf_counter()-actor_start))
                 kl=final_kl(c.policy,rows,cache,manifest,distributed=distributed,microbatch=c.settings['kl_microbatch'],
                     clip=c.settings['ppo_clip'],objective_reduction=c.settings['objective_logprob_reduction'])

@@ -41,12 +41,15 @@ def actor_update(policy,optimizer,rows,targets,cache,manifest,controller,*,distr
                     generator,ppo_epochs=2,minibatch_chains=1024,microbatch=128,sampled_steps=8,
                     clip=.05,gamma_denoising=.99,soft_kl=.002,kl_reduction='free_coordinate_mean',
                     objective_reduction='free_coordinate_mean',grad_clip_norm=1.,reserve_attempt=None,
-                    gradient_observer=None,step_observer=None):
+                    gradient_observer=None,step_observer=None,bc_samples_per_rollout=None):
     if sampled_steps not in (8,20) or policy.steps!=20 or ppo_epochs<1 or minibatch_chains<1 or microbatch<1:
         raise ValueError('当前 requires Full20 behavior and explicit Uniform8/Full20 optimization')
     if kl_reduction not in ('joint_sum','free_coordinate_mean'):raise ValueError('Unknown KL control units')
     selected=_eligible(manifest);reports=[];orders=[];stop_reason=None
     if not selected:raise ValueError('No free valid behavior chain remains for PPO')
+    planned_steps=ppo_epochs*math.ceil(len(selected)/minibatch_chains)
+    bc_batches=(None if bc_samples_per_rollout is None else [
+        bc_samples_per_rollout//planned_steps+(i<bc_samples_per_rollout%planned_steps) for i in range(planned_steps)])
     actor=policy.actor;device=next(actor.parameters()).device
     for epoch in range(ppo_epochs):
         order=balanced_epoch_order(selected,manifest,generator) if distributed.rank==0 else None
@@ -94,7 +97,11 @@ def actor_update(policy,optimizer,rows,targets,cache,manifest,controller,*,distr
             ppo=take_gradients(actor)
             with _local_phase(distributed,'stage10_bc_local_forward_backward'):
                 from .dense_policy import dense_precision_scope
-                with dense_precision_scope(policy.precision):bc_report=anchor.backward(actor,weight=1/distributed.world_size)
+                global_bc=None if bc_batches is None else bc_batches[len(reports)]
+                if global_bc is not None:
+                    anchor.batch_size=global_bc//distributed.world_size+(distributed.rank<global_bc%distributed.world_size)
+                bc_weight=1/distributed.world_size if global_bc is None else (anchor.batch_size/global_bc if global_bc else 0.)
+                with dense_precision_scope(policy.precision):bc_report=anchor.backward(actor,weight=bc_weight)
                 bc=take_gradients(actor)
             contributions=merge_global_gradients(actor,ppo,bc,controller,distributed=distributed)
             if gradient_observer is not None:gradient_observer(actor,len(reports))
