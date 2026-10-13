@@ -18,50 +18,6 @@ from gem.closedloop.dppo.run_management import TrainingBudget
 from gem.closedloop.dppo.training_scale import derive_training_scale, budget_requirements
 
 
-@pytest.mark.parametrize('collector_kind', ['world', 'threaded'])
-def test_boundary_wait_extends_control_coverage_without_inventing_decision(tmp_path, monkeypatch, collector_kind):
-    """真实采样器统计应是1条决策、30个控制步；边界等待5步不能记成第2条决策。"""
-    import threading
-    from gem.closedloop.dppo.full_dataset import FullMusicCatalog, FullMusicSampler
-    from gem.closedloop.dppo.vector_collector import VectorEnvironmentCollector
-    from gem.closedloop.dppo import vector_boundary
-    from tests.closedloop.dppo.test_full_dataset import make_catalog_data
-
-    sampler = FullMusicSampler(FullMusicCatalog(make_catalog_data(tmp_path)), random_start=False)
-    task = sampler.next_task()
-    row = NS(transition_valid=True, identity=dict(policy_version=7), executed_control_steps=25,
-             metadata={}, terminated=False, truncated=False, reason=None)
-    env = NS(backend=NS(call=lambda *a, **kw: None), step=lambda: row)
-    def step_flow():
-        if False: yield
-        return row
-    env.step_flow = step_flow
-    def finish(env, last, **kwargs):
-        last.executed_control_steps += 5
-        last.metadata['fragment_tail'] = {}
-        return 5, False
-    def finish_flow(*args, **kwargs):
-        if False: yield
-        return finish(*args, **kwargs)
-    monkeypatch.setattr(vector_boundary, 'finish_vector_fragment', finish)
-    monkeypatch.setattr(vector_boundary, 'finish_vector_fragment_flow', finish_flow)
-    cls = WorldEnvironmentCollector if collector_kind == 'world' else VectorEnvironmentCollector
-    collector = object.__new__(cls)
-    collector.states = [NS(resource=NS(env=env, sampler=sampler), task=task, transitions=0)]
-    collector.cancelled = threading.Event()
-    collector.boundary_wait_contract = 'bounded_reference_wait.v1'
-    collector.boundary_wait_max_controls = 100
-    if collector_kind == 'world':
-        flow = collector._fragment_flow(0, 1, 7)
-        next(flow)  # 真实join_fragment协议边界；此测试不执行物理。
-        with pytest.raises(StopIteration) as end: flow.send({})
-        rows = end.value.value
-    else:
-        rows = collector._fragment_profiled(0, 1, 7)
-    coverage = sampler.coverage()['per_source'][task['sample']['dataset']]
-    assert coverage['upper_transitions'] == len(rows) == collector.states[0].transitions == 1
-    assert coverage['control_steps'] == rows[0].executed_control_steps == 30
-    assert sampler.state_dict()['active']['control_steps'] == 30
 
 
 def test_restored_world_can_collect_before_first_reward_object_exists():
@@ -110,7 +66,7 @@ def test_no_progress_fails_instead_of_freezing_or_draining_world():
     world = NS(call=lambda method, **kwargs:dict(replies=[]))
     collector = WorldEnvironmentCollector(None, None, world, num_envs=2, generation_batch=2)
     collector.states = [NS(resource=NS(env=NS(backend=NS(MUTATIONS=set())))) for _ in range(2)]
-    with pytest.raises(RuntimeError, match='no hidden drain'):
+    with pytest.raises(RuntimeError, match='partial-world advance'):
         collector._drive({i:backend_operation('advance', count=1) for i in range(2)})
     assert collector.cancelled.is_set() and not collector.active
 

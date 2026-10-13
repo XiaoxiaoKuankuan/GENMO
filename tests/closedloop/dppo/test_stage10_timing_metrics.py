@@ -15,8 +15,8 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-from gem.closedloop.dppo import distributed_runtime as runtime
-from gem.closedloop.dppo.distributed_runtime import DistributedCollectives
+from gem.closedloop.dppo import collectives as runtime
+from gem.closedloop.dppo.collectives import DistributedCollectives
 from gem.closedloop.dppo.long_run import LongRunMaintenance
 from gem.closedloop.dppo.run_management import RunManager
 from tests.closedloop.dppo.test_stage10_async_archives import iteration, stage

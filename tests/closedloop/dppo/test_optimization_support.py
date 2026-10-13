@@ -20,7 +20,7 @@ import torch
 import torch.distributed as dist
 import torch.multiprocessing as mp
 
-from gem.closedloop.dppo.distributed_runtime import DistributedCollectives
+from gem.closedloop.dppo.collectives import DistributedCollectives
 from gem.closedloop.dppo.policy import masked_joint_log_prob
 from gem.closedloop.dppo.position_repair import audit_position_tables, canonical_position_tables
 from gem.closedloop.dppo.returns import normalize_advantages_global

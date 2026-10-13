@@ -121,7 +121,7 @@ def test_retirement_or_archive_tampering_fails(lifecycle, fault):
 def test_production_archive_and_retirement_feed_read_only_auditor(lifecycle):
     """真实 LongRunMaintenance 生产者与审计器端到端对接，禁止只测自制格式。"""
     life = lifecycle.with_counter_contract().start()
-    stage = dict(run_control={'max_walltime_seconds': 604800}, storage={
+    stage = dict(run_control={}, storage={
         'checkpoint_keep_last': 2, 'checkpoint_keep_every': 100, 'archive_completed_iterations': True})
     maintenance = LongRunMaintenance(life.manager, stage)
     first = life.publish()

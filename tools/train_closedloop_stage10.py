@@ -57,8 +57,9 @@ def main():
     rank,world,local=(int(os.environ.get(k,'-1')) for k in ['RANK','WORLD_SIZE','LOCAL_RANK'])
     if world!=8 or rank!=local or not 0<=rank<8 or os.environ.get('CUDA_VISIBLE_DEVICES')!='0,1,2,3,4,5,6,7':
         parser.error('Use one-node torchrun with eight GPUs explicitly visible in global order')
-    if not 1<=args.stop_after_iteration<=config['stage10']['limits']['accepted_iterations']:
-        parser.error('Finite stopping iteration must fit the explicit budget')
+    from gem.closedloop.dppo.run_control import validate_stopping_iteration
+    try:validate_stopping_iteration(args.stop_after_iteration,config['stage10'])
+    except ValueError as error:parser.error(str(error))
     dist.init_process_group('gloo',timeout=timedelta(minutes=30))
     preflight=[None]
     if rank==0:
@@ -100,7 +101,7 @@ def main():
         torch.cuda.set_device(local);torch.set_num_threads(config['runtime']['torch_threads'])
         torch.backends.cuda.matmul.allow_tf32=False;torch.backends.cudnn.allow_tf32=False
         tensor_group=dist.new_group(backend='nccl',timeout=timedelta(minutes=15))
-        from gem.closedloop.dppo.distributed_runtime import DistributedCollectives
+        from gem.closedloop.dppo.collectives import DistributedCollectives
         distributed=DistributedCollectives(rank,world,tensor_group=tensor_group,device=f'cuda:{local}')
         if float(distributed.sum_tensor(torch.tensor(rank+1.,device=distributed.device)))!=36.:
             raise RuntimeError('Eight-GPU SUM proof failed')

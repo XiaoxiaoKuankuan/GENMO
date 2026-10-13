@@ -51,7 +51,7 @@ def test_preheated_value_and_nonempty_adam_restore_without_actor_change(tmp_path
     result=load(tmp_path,actor,critic,optimizer,identity,data)
     torch.testing.assert_close(critic[1].weight,data['critic']['1.weight'],rtol=0,atol=0)
     assert optimizer.state and result['prior_mc_control_steps']==500
-    assert _model_fingerprint(actor)==fingerprint and result['fresh_run_wall_budget']
+    assert _model_fingerprint(actor)==fingerprint and result['fresh_PhysX']
 
 
 @pytest.mark.parametrize('changed',['kernel','physics','encoder','quality','code'])

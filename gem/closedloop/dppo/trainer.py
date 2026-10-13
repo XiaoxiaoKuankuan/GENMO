@@ -102,7 +102,7 @@ def populate_values(transitions, critic, device, *, critic_version=None, batch_s
 
 
 def fixed_targets(transitions, critic, device, *, gamma_upper=.99, lambda_upper=.95,
-                  reuse_values=False, critic_version=None, normalize=True):
+                  reuse_values=False, critic_version=None, normalize=False):
     if reuse_values:
         if critic_version is None:
             raise ValueError('Reusing populated values requires an explicit Critic version')

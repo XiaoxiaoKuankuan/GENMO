@@ -1,8 +1,7 @@
-"""七天训练截止、执行证据归档和检查点保留策略的真实CPU文件生命周期测试。
+"""历史执行证据归档和检查点保留策略的真实CPU文件生命周期测试。
 
 测试使用真实RunManager排他锁、JSON原子发布、tar.gz归档和最小torch checkpoint，
-不连接GPU或物理服务，不复制生产算法构造预期值。固定验证首次run创建时间决定
-七天绝对截止，恢复不会延长或悄悄改变保留策略；完整二进制执行数据可以从归档
+不连接GPU或物理服务，不复制生产算法构造预期值。验证恢复不悄悄改变保留策略；完整二进制执行数据可以从归档
 逐字节取回、文件与归档SHA一致，summary和学习率诊断仍可直接读取。
 
 检查点测试通过真实发布接口形成latest及不可变发布凭证，核验initial、最近两份
@@ -13,7 +12,6 @@
 from __future__ import annotations
 
 import copy
-from datetime import datetime, timedelta
 import hashlib
 import json
 import tarfile
@@ -28,7 +26,7 @@ from gem.closedloop.dppo.run_management import RunManager, file_sha256
 
 
 def stage_settings():
-    return dict(run_control=dict(max_walltime_seconds=604800), storage=dict(
+    return dict(run_control={}, storage=dict(
         checkpoint_keep_last=2, checkpoint_keep_every=100,
         archive_completed_iterations=True))
 
@@ -67,31 +65,24 @@ def write_execution(manager, iteration=1, *, status='accepted'):
     return directory, evidence
 
 
-def test_seven_day_deadline_is_created_at_and_resume_does_not_extend(tmp_path):
+def test_archive_policy_restores_without_a_training_clock(tmp_path):
     output = tmp_path / 'run'
     with RunManager(output) as manager:
         maintenance = LongRunMaintenance(manager, stage_settings())
-        created = datetime.fromisoformat(json.loads((output / 'run_manifest.json').read_text())['created_at'])
-        deadline = created + timedelta(days=7)
-        assert maintenance.deadline == deadline
-        assert not maintenance.expired(deadline - timedelta(microseconds=1))
-        assert maintenance.expired(deadline)
-        assert maintenance.expired(deadline + timedelta(days=1))
+        assert not hasattr(maintenance, 'deadline') and not hasattr(maintenance, 'expired')
         original_policy = (output / 'long_run_policy.json').read_bytes()
     with RunManager(output, resume=True) as manager:
-        resumed = LongRunMaintenance(manager, stage_settings())
-        assert resumed.deadline == deadline
-        assert resumed.expired(deadline)
+        LongRunMaintenance(manager, stage_settings())
         assert (output / 'long_run_policy.json').read_bytes() == original_policy
 
 
 @pytest.mark.parametrize('section,key,value', [
-    ('run_control', 'max_walltime_seconds', 604801),
+    ('run_control', 'unsupported_stop_setting', 1),
     ('storage', 'checkpoint_keep_last', 3),
     ('storage', 'checkpoint_keep_every', 200),
     ('storage', 'archive_completed_iterations', False),
 ])
-def test_resume_rejects_changed_deadline_or_retention_without_overwriting_policy(
+def test_resume_rejects_changed_retention_or_unsupported_stop_setting(
         tmp_path, section, key, value):
     output = tmp_path / 'run'
     with RunManager(output) as manager:
@@ -100,7 +91,7 @@ def test_resume_rejects_changed_deadline_or_retention_without_overwriting_policy
     changed = copy.deepcopy(stage_settings())
     changed[section][key] = value
     with RunManager(output, resume=True) as manager:
-        with pytest.raises(ValueError, match='cannot change'):
+        with pytest.raises(ValueError, match='cannot change|does not own'):
             LongRunMaintenance(manager, changed)
     assert (output / 'long_run_policy.json').read_bytes() == original_policy
 

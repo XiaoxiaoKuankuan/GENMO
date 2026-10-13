@@ -27,7 +27,7 @@ import torch
 from torch import nn
 import torch.distributed as dist
 from gem.closedloop.dppo.training_checkpoint import SCHEMA,AsyncCheckpointWriter,immutable_cpu_snapshot,file_sha256,load_training_checkpoint
-from gem.closedloop.dppo.distributed_runtime import DistributedCollectives
+from gem.closedloop.dppo.collectives import DistributedCollectives
 from gem.closedloop.dppo.gradient_merge import BCGradientController,merge_global_gradients,take_gradients
 from gem.closedloop.dppo.memory_execution import MemoryReceiveJournal,PrepaidMemoryBudget
 

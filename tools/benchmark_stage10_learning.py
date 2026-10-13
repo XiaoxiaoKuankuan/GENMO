@@ -40,7 +40,7 @@ import torch.distributed as dist
 from gem.closedloop.dppo.training_checkpoint import file_sha256,immutable_cpu_snapshot
 from gem.closedloop.dppo.budget import atomic_json
 from gem.closedloop.dppo.diagnostic_rollout import load_rollout
-from gem.closedloop.dppo.distributed_runtime import DistributedCollectives
+from gem.closedloop.dppo.collectives import DistributedCollectives
 from gem.closedloop.dppo.gradient_merge import BCGradientController
 from gem.closedloop.dppo.parallel_support import capture_local_rng,restore_local_rng,local_call,root_call
 from gem.closedloop.dppo.dense_policy import DenseDiffusionPolicy

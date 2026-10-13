@@ -5,12 +5,9 @@
 advance，收到完整世界回复并可靠保存后批量ACK，才恢复对应续体。GENMO请求按
 独立配置合批，批内全部来自不同真实环境，20步链及每环境RNG身份不变。
 
-正常rollout结束只封存本轮证据。显式启用bounded_reference_wait.v1时，已采满环境
-可在参考有效且有限控制步内继续执行，完整反馈并入末条转移，不增加生成样本数。
-等待成本单列；到上限的环境行政截断，保留bootstrap，下一轮明确重置。
-本模块不伪造物理恢复：断点恢复仍创建新PhysX世界和新episode，保留预算消耗与
-采样游标。若严格每环境配额造成未完成的异步物理请求，明确报错并保留证据，绝不
-静默冻结部分机器人、扔掉实际执行或把额外长尾算作吞吐提升。
+rollout 以共享世界的模拟时间结束，各环境有效转移数可以不同；不设每环境决策
+配额，不再执行配额尾部等待。所有实际控制步由后端计数和预算账本核验，普通
+窗口边界保留健康机器人、音乐和参考。恢复仍重建 PhysX，不恢复中途物理状态。
 """
 from __future__ import annotations
 import copy
@@ -24,10 +21,10 @@ from .world_flow import BackendOperation, GenerationOperation, LocalOperation, b
 from .vector_collector import VectorEnvironmentCollector, validate_vector_close
 from .dual_collector import _QueuedPolicy
 from .vector_generation import generate_batch
+from .env_adapter import WarmupEpisodeEnded
 from gem.runtime.closedloop_protocol import RemoteError
 
 WORLD_FLOW_CONTRACT = 'genmo.world_batched_flow.v1'
-BOUNDARY_WAIT_CONTRACT = 'bounded_reference_wait.v1'
 
 
 class _ImmediateExecutor:
@@ -55,7 +52,7 @@ class _DirectLane:
 
 class WorldEnvironmentCollector(VectorEnvironmentCollector):
     def __init__(self, policy, factory, world_client, *, num_envs=64, generation_batch=64, timeout_seconds=600.,
-                 boundary_wait_contract=None,boundary_wait_max_controls=100, training_storage='durable_cpu.v1', **kwargs):
+                 training_storage='durable_cpu.v1'):
         if generation_batch < 1 or generation_batch > num_envs: raise ValueError('Invalid independent sampling batch')
         self.policy,self.factory=policy,factory
         if training_storage not in ('durable_cpu.v1','ephemeral_device'):
@@ -63,11 +60,6 @@ class WorldEnvironmentCollector(VectorEnvironmentCollector):
         self.training_storage=training_storage
         self.world=world_client() if callable(world_client) else world_client
         self.num_envs,self.generation_batch,self.timeout_seconds=num_envs,generation_batch,timeout_seconds
-        if boundary_wait_contract not in (None,BOUNDARY_WAIT_CONTRACT):raise ValueError('Unknown boundary wait contract')
-        if (type(boundary_wait_max_controls) is not int or not 25<=boundary_wait_max_controls<=2000
-                or boundary_wait_max_controls%25):raise ValueError('Boundary wait must be bounded on decision grid')
-        self.boundary_wait_contract=boundary_wait_contract
-        self.boundary_wait_max_controls=boundary_wait_max_controls
         self.states=[None]*num_envs;self.executors=[_ImmediateExecutor() for _ in range(num_envs)]
         self.active=False;self.cancelled=threading.Event();self.rpc_pending={};self.rpc_sequence=0
         self.batch_reports=[];self.world_timing={};self.restore_records=None;self.shutdown_result=None
@@ -235,7 +227,7 @@ class WorldEnvironmentCollector(VectorEnvironmentCollector):
                                 raise RuntimeError('World reply pages lost lane ACK receipts')
                         else:replies=[]
                 if not ready and waiting:
-                    raise RuntimeError('Exact environment quotas reached an asynchronous physical boundary; no hidden drain or partial-world freeze is allowed')
+                    raise RuntimeError('World window lost a pending physical reply; partial-world advance is forbidden')
                 if not ready and not waiting and len(results)<len(flows):raise RuntimeError('World state machine made no progress')
             if waiting:raise RuntimeError('World finished with pending physical replies')
             return results
@@ -244,43 +236,6 @@ class WorldEnvironmentCollector(VectorEnvironmentCollector):
             raise
         finally:self.active=False
 
-    def _fragment_flow(self,slot,count,policy_version):
-        state=self.states[slot];env,sampler=state.resource.env,state.resource.sampler
-        env.policy_version=policy_version
-        yield from backend_operation('join_fragment')
-        rows=[]
-        for _ in range(count):
-            if state.task is None:
-                task=sampler.next_task()
-                if task['sample']['row']['split']!='train':raise ValueError('Validation sample in training world')
-                yield from env.reset_task_flow(task['sample'],task['music'],seed=env.config['stage9']['seed']+env.episode_count,
-                    phase='train',music_start_frame=task['music_start_frame'])
-                self.world_timing['completed_environment_resets']=self.world_timing.get('completed_environment_resets',0)+1
-                state.task=task
-            row=yield from env.step_flow()
-            if not row.transition_valid or row.identity['policy_version']!=policy_version:raise ValueError('Invalid/mixed behavior policy')
-            task=state.task
-            row.metadata.update(collector_env_slot=slot,training_task=dict(dataset=task['sample']['dataset'],
-                sample_id=task['sample']['row']['sample_id'],split='train',music_start_frame=task['music_start_frame'],
-                manifest_sha256=task['sample']['manifest_sha256']))
-            sampler.record_execution(task,row.executed_control_steps);rows.append(row);state.transitions+=1
-            if row.terminated or row.truncated:state.task=None
-        if self.boundary_wait_contract is not None:
-            from .vector_boundary import finish_vector_fragment_flow
-            tail_started=time.perf_counter()
-            task=state.task
-            extra,ended=yield from finish_vector_fragment_flow(env,rows[-1],continue_episode=task is not None,
-                maximum_wait_controls=self.boundary_wait_max_controls)
-            rows[-1].metadata['fragment_tail'].update(boundary_wait_contract=self.boundary_wait_contract,
-                wait_wall_seconds=time.perf_counter()-tail_started)
-            if extra:
-                if task is None:raise RuntimeError('Boundary executed without an active task')
-                # 等待反馈已合入末条转移；只增加真实控制覆盖，不产生新上层决策。
-                sampler.record_execution(task,extra,upper_transitions=0)
-            if ended:state.task=None
-        elif not rows[-1].terminated:
-            rows[-1].truncated=True;rows[-1].reason=rows[-1].reason or 'collector_fragment_boundary'
-        return rows
 
     def _window_flow(self,slot,policy_version):
         """每个环境连续产生有效决策，统一世界边界到达时一起停止。"""
@@ -289,16 +244,22 @@ class WorldEnvironmentCollector(VectorEnvironmentCollector):
         yield from backend_operation('join_fragment')
         rows=[]
         while not env.rollout_window_reached:
-            if state.task is None:
-                task=sampler.next_task()
-                if task['sample']['row']['split']!='train':raise ValueError('Validation sample in training world')
-                yield from env.reset_task_flow(task['sample'],task['music'],seed=env.config['stage9']['seed']+env.episode_count,
-                    phase='train',music_start_frame=task['music_start_frame'])
-                state.task=task
-                self.world_timing['completed_environment_resets']=self.world_timing.get('completed_environment_resets',0)+1
-            if env.rollout_window_reached:break
-            if env.snapshot['tick']<600:
-                yield from env.continue_warmup_flow()
+            try:
+                if state.task is None:
+                    task=sampler.next_task()
+                    if task['sample']['row']['split']!='train':raise ValueError('Validation sample in training world')
+                    yield from env.reset_task_flow(task['sample'],task['music'],seed=env.config['stage9']['seed']+env.episode_count,
+                        phase='train',music_start_frame=task['music_start_frame'])
+                    state.task=task
+                    self.world_timing['completed_environment_resets']=self.world_timing.get('completed_environment_resets',0)+1
+                if env.rollout_window_reached:break
+                if env.snapshot['tick']<600:
+                    yield from env.continue_warmup_flow()
+            except WarmupEpisodeEnded:
+                # 只接收已结算的正常物理终止，完整性错误仍交给上层停止运行。
+                self.world_timing['warmup_physical_failures']=self.world_timing.get('warmup_physical_failures',0)+1
+                state.task=None
+                continue
             if env.rollout_window_reached:break
             row=yield from env.step_flow()
             if not row.transition_valid or row.identity['policy_version']!=policy_version:raise ValueError('Invalid/mixed behavior policy')
@@ -354,7 +315,6 @@ class WorldEnvironmentCollector(VectorEnvironmentCollector):
         rows=[fragments[i] for i in range(self.num_envs)]
         protocol_after=self.world_call('transport_statistics') if protocol_before is not None else {}
         protocol_delta={key:value-protocol_before.get(key,0.) for key,value in protocol_after.items()}
-        tails=[row.metadata['fragment_tail'] for fragment in rows for row in fragment if 'fragment_tail' in row.metadata]
         if self.window_record is None or not self.window_record['reached']:
             raise RuntimeError('Shared world did not attest its real simulation window')
         if self.window_record['requested_world_controls']!=round(world_seconds*50):
@@ -362,20 +322,14 @@ class WorldEnvironmentCollector(VectorEnvironmentCollector):
         return rows,dict(schema=WORLD_FLOW_CONTRACT,fragment_contract=WORLD_FLOW_CONTRACT,
             collection_contract='shared_world_sim_time.v1',world_window=self.window_record,
             quota_alignment_removed=True,physical_episodes_preserved=True,
-            boundary_wait_contract=self.boundary_wait_contract,boundary_wait_max_controls=self.boundary_wait_max_controls,
             total_transitions=sum(map(len,rows)),fragment_lengths=list(map(len,rows)),allocated_envs=self.num_envs,
             active_envs=self.num_envs,seconds=time.perf_counter()-started,batches=self.batch_reports,
             world_timing=self.world_timing,columnar_reward_cpu_timings=reward_timings,
-            columnar_reward_timing_scope='all_consumed_controls_including_warmup_and_boundary_wait',
+            columnar_reward_timing_scope='all_consumed_controls_in_this_world_window',
             columnar_reward_timing_contract='per_consume_call_across_episode_replacements.v2',
             columnar_reward_fallbacks=reward_timings.fallback_calls,
             columnar_reward_fallback_scope='actual_consume_batch_fallbacks_this_rollout',
             server_rpc_transport_timing=protocol_delta,normal_boundary_resets=0,
-            administrative_drain_controls=sum(t['executed_control_steps'] for t in tails),
-            administrative_drain_physics_steps=sum(t['executed_physics_steps'] for t in tails),
-            administrative_drain_reward=sum(t['reward_sum'] for t in tails),
-            administrative_wait_max_wall_seconds=max((t['wait_wall_seconds'] for t in tails),default=0.),
-            administrative_wait_limit_reached=sum(t['wait_limit_reached'] for t in tails),
             training_reward_seconds=sum(row.metadata.get('training_reward_seconds',0.) for fragment in rows for row in fragment),
             training_reward_timing_scope='accepted_transition_metadata_excludes_separate_warmup',
             real_environment_batch=True,gae_contract='independent_per_env_episode_contiguous_fragment')
@@ -417,16 +371,11 @@ class WorldEnvironmentCollector(VectorEnvironmentCollector):
     def state_dict(self):
         result=super().state_dict()
         result.update(schema='genmo.gpu_vector_collector.boundary.v2',fragment_contract=WORLD_FLOW_CONTRACT)
-        result.update(boundary_wait_contract=self.boundary_wait_contract,
-            boundary_wait_max_controls=self.boundary_wait_max_controls)
         return result
 
     def load_state_dict(self,saved):
         if saved.get('schema')!='genmo.gpu_vector_collector.boundary.v2' or saved.get('fragment_contract')!=WORLD_FLOW_CONTRACT:
             raise ValueError('World collector cannot transparently resume the old threaded collector')
-        if (saved.get('boundary_wait_contract')!=self.boundary_wait_contract or
-                saved.get('boundary_wait_max_controls',100)!=self.boundary_wait_max_controls):
-            raise ValueError('World collector boundary wait contract differs from checkpoint')
         # 共用已验收的逻辑RNG/预算恢复，输入版本先严格核验；物理仍明确重建。
         adapted=copy.deepcopy(saved)
         from .vector_boundary import FRAGMENT_CONTRACT

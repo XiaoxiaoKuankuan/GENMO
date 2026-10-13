@@ -34,7 +34,7 @@ def test_main_scale_is_4096_full_chains_with_eight_combined_updates():
         bc_per_step=64, bc_per_rollout=512,maximum_actor_steps=10,
         count_semantics='nominal_capacity_only_actual_manifest_controls_optimization')
     assert (t['denoising_steps'], t['ppo_steps_per_chain'], t['ppo_epochs']) == (20, 8, 2)
-    assert t['actor_lr'] == 5e-8 and t['ppo_clip'] == .003
+    assert t['actor_lr'] == 1e-7 and t['ppo_clip'] == .003
     assert c['runtime']['timing_contract'] == 'modeled_deployment.v3'
     assert (c['timing']['control_ticks'], c['timing']['physics_ticks']) == (12, 3)
 
@@ -53,7 +53,7 @@ def test_diagnostics_share_current_code_and_existing_asset_paths(path):
     assert c['stage10']['assets']['checkpoint'] == configuration(CONFIG)['stage10']['assets']['checkpoint']
 
 
-@pytest.mark.parametrize('version', ['genmo.closedloop.stage10.v2', 'genmo.closedloop.stage10.v3'])
+@pytest.mark.parametrize('version', ['genmo.closedloop.stage10.v2', 'genmo.closedloop.stage10.v3', 'genmo.closedloop.stage10.continuous_horizon.v1'])
 def test_superseded_training_configuration_is_rejected(tmp_path, version):
     c = yaml.safe_load(CONFIG.read_text())
     c['stage10']['version'] = version

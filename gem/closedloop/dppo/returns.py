@@ -15,7 +15,7 @@ import torch
 
 
 def compute_gae(rewards, values, next_values, executed_steps, bootstrap_mask, continuation_mask,
-                valid=None, *, gamma_upper=.99, lambda_upper=.95, event_rewards=None, normalize=True):
+                valid=None, *, gamma_upper=.99, lambda_upper=.95, event_rewards=None, normalize=False):
     if not 0 < float(gamma_upper) <= 1 or not 0 < float(lambda_upper) <= 1:
         raise ValueError("gamma_upper and lambda_upper must be in (0,1]")
     n = len(rewards)

@@ -1,42 +1,19 @@
-"""跨 checkpoint 保留的运行墙钟期限与显式策略构造。
+"""显式策略构造与按累计 PPO 迭代停止的运行合同。
 
-48 小时期限从新运行启动时确定，保存原始开始时间和预算；恢复沿用同一期限，
-包括中断期间的时间，防止反复恢复重新获得预算。模型更新回滚不退还墙钟时间。
+训练不设总墙钟期限；新运行与恢复都使用已接受的累计 PPO 外层迭代数。
+调用方仍独立维护信号停止、checkpoint、资源预算及真实物理执行的时间约束。
 策略构造从实际训练配置显式传入扩散步数、eta、CFG 与精度参数，消除默认值漂移。
 本模块不启动仿真、不分配数据预算，也不改变实际控制时钟。
 """
 from __future__ import annotations
-import math
-import time
 
-
-class RunWallBudget:
-    def __init__(self, seconds, *, started=None, clock=time.time):
-        self.clock = clock
-        self.limit = float(seconds)
-        self.started = float(clock() if started is None else started)
-        if not math.isfinite(self.limit) or self.limit <= 0 or not math.isfinite(self.started):
-            raise ValueError('Finite positive run deadline required')
-
-    def state_dict(self):
-        elapsed = float(self.clock()) - self.started
-        if elapsed < 0:
-            raise RuntimeError('Wall clock moved before the persisted run start')
-        return dict(schema='genmo.run_wall_budget.v1', started_unix_seconds=self.started,
-                    limit_seconds=self.limit, elapsed_seconds=elapsed,
-                    deadline_unix_seconds=self.started+self.limit, downtime_counts=True)
-
-    @property
-    def expired(self):
-        return self.state_dict()['elapsed_seconds'] >= self.limit
-
-    def restore(self, state):
-        if state.get('schema') != 'genmo.run_wall_budget.v1' or state['limit_seconds'] != self.limit:
-            raise ValueError('Run wall budget identity differs')
-        if state['deadline_unix_seconds'] != state['started_unix_seconds'] + self.limit:
-            raise ValueError('Corrupted persisted run deadline')
-        self.started = float(state['started_unix_seconds'])
-        self.state_dict()
+def validate_stopping_iteration(requested, stage):
+    """显式停止轮数是恢复后的累计上限，不能重新获得一份 500 轮预算。"""
+    maximum = stage['run_control']['max_training_iterations']
+    if (type(requested) is not int or not 1 <= requested <= maximum
+            or requested > stage['limits']['accepted_iterations']):
+        raise ValueError('Stopping iteration must fit the cumulative PPO iteration budget')
+    return requested
 
 
 def build_policy(actor, settings, precision):

@@ -19,7 +19,7 @@ import pytest
 import torch
 import torch.distributed as dist
 
-from gem.closedloop.dppo.distributed_runtime import DistributedCollectives
+from gem.closedloop.dppo.collectives import DistributedCollectives
 from gem.closedloop.dppo.trainer import actor_update, analytic_kl, critic_update
 
 

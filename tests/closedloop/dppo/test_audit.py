@@ -126,7 +126,7 @@ def phase_artifacts(directory, count, version, config):
                    worker_shutdown=dict(gmt=dict(closed=True, policy_unchanged=True, runtime_parameters_unchanged=True, process_exit_code=0)))
     if version == 0:
         targets = compute_gae([r.rewards for r in rows], [r.old_value for r in rows], [r.next_value for r in rows],
-                              [1]*count, [not r.terminated for r in rows], [i%2 == 0 for i in range(count)])
+                              [1]*count, [not r.terminated for r in rows], [i%2 == 0 for i in range(count)], normalize=True)
         targets.update(old_values=torch.tensor([r.old_value for r in rows], dtype=torch.float64),
                        next_values=torch.tensor([r.next_value for r in rows], dtype=torch.float64))
         torch.save(targets, directory/"fixed_targets.pt")

@@ -125,7 +125,6 @@ def _physical_configuration_identity(config):
 
 
 def _snapshot(c,reason,*,wait=False):
-    if hasattr(c,'clock'):c.state['wall_budget']=c.clock.state_dict()
     rank_state=dict(rank=c.distributed.rank,rng=capture_local_rng(c.generators),bc=c.bc.state_dict(),
         collector=c.vector.checkpoint_state())
     rank_states=c.distributed.all_gather_object(rank_state)
@@ -218,8 +217,8 @@ def run(cargs,config,distributed):
         stage=config['stage10'],settings=copy.deepcopy(config['stage9']),manager=None,writer=None,
         async_writer=None,vector=None,workers=None,maintenance=None,budget=None,output=cargs.output_dir.resolve())
     report=dict(schema='genmo.stage10.session',status='running',iterations=[],warmup=[],evaluations=[],evaluation_artifacts=[])
-    from .run_control import RunWallBudget,build_policy
-    c.clock=RunWallBudget(c.stage['run_control']['max_walltime_seconds'])
+    from .run_control import build_policy,validate_stopping_iteration
+    stop_after_iteration=validate_stopping_iteration(cargs.stop_after_iteration,c.stage)
     signal=StopSignal();signal.install();cache=None;buffer=None;error=None;saved=None;profile_token=None
     targets=None;manifest=None;label=None;anomaly_saved=None
     try:
@@ -284,6 +283,7 @@ def run(cargs,config,distributed):
             training=c.stage['training'],critic=c.stage['critic'],bc_gradient=c.stage['bc_gradient'],kl=c.stage['kl'],
             scale=c.stage['scale'],reward=c.settings['reward'],runtime=c.base_config['runtime'],timing=c.base_config['timing'],
             dataset=c.stage['dataset'],evaluation=c.stage['evaluation'],
+            run_control=c.stage['run_control'],resource_limits=c.stage['limits'],
             physical_episode=c.stage['physical_episode'],ppo_rollout=c.stage['ppo_rollout'],generation_horizon=c.stage['generation_horizon'],
             physical_configuration=root_call(distributed,lambda:_physical_configuration_identity(c.base_config)),
             source_files=root_call(distributed,lambda:_sources(config)),
@@ -313,7 +313,6 @@ def run(cargs,config,distributed):
             from .run_management import validate_budget_progress
             root_call(distributed,lambda:validate_budget_progress(payload['budget'],c.budget.state_dict()))
             c.state=copy.deepcopy(payload['state'])
-            c.clock.restore(c.state['wall_budget'])
             c.bc.load_state_dict(payload['rank_states'][distributed.rank]['bc'])
             restore_local_rng(payload['rank_states'][distributed.rank]['rng'],c.generators)
         from NoetixRobot.tasks.mimic.mimic_noetix_bumi4340_mha_sonic.closedloop.vector_backend import VectorFrozenGmtBackend
@@ -370,8 +369,8 @@ def run(cargs,config,distributed):
         c.state.setdefault('next_diagnostic_control_steps',_next_interaction_boundary(
             c.state['training_control_steps'],c.stage['storage']['diagnostic_every_control_steps']))
         warmups=(0 if complete_mc.get('enabled') else critic_config['warmup_rollouts']) if cargs.warmup_rollouts is None else cargs.warmup_rollouts
-        while c.state['iteration']<cargs.stop_after_iteration:
-            if any(distributed.all_gather_object(signal.stop_requested)) or any(distributed.all_gather_object(c.clock.expired)):break
+        while c.state['iteration']<stop_after_iteration:
+            if any(distributed.all_gather_object(signal.stop_requested)):break
             is_warmup=c.state['warmup_completed']<warmups
             label=('warmup' if is_warmup else 'train')+f'_{c.state["rollouts_completed"]+1:06d}'
             strict=cargs.strict_evidence or c.state['training_control_steps']>=c.state['next_diagnostic_control_steps']

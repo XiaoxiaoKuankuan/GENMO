@@ -22,7 +22,7 @@ import torch
 import torch.distributed as dist
 from gem.closedloop.dppo.budget import atomic_json
 from gem.closedloop.dppo.critic import UpperCritic
-from gem.closedloop.dppo.distributed_runtime import DistributedCollectives
+from gem.closedloop.dppo.collectives import DistributedCollectives
 from gem.closedloop.dppo.evaluation import _model_fingerprint
 from gem.closedloop.dppo.mc_calibration import ValueConditionCache, independent_mc_metrics
 from gem.closedloop.dppo.parallel_support import root_call

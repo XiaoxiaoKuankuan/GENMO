@@ -150,7 +150,7 @@ def test_evaluate_connects_identity_fixed_references_curves_and_real_saved_bound
 
 def test_v3_periodic_critic_reports_fresh_independent_values_without_replacing_reference(tmp_path, monkeypatch):
     c, _ = context(tmp_path, monkeypatch)
-    c.stage['version'] = 'genmo.closedloop.stage10.continuous_horizon.v1'
+    c.stage['version'] = 'genmo.closedloop.stage10.iteration_horizon.v1'
     first = training._evaluate(c, 'initial')
     atomic_json(c.output/'evaluation_baseline.json', first)
     reference = (c.output/'fixed_diagnostic_reference.json').read_bytes()

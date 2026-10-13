@@ -11,7 +11,7 @@
 # 每轮BC总512按实际PPO步数整数分配，局部梯度按实际全局分母累计，一次SUM、一次裁剪更新。
 # 微批64/KL256和Actor学习率5e-8目前为有限H60标定起点，不能把H120结果当作H60学习收益。
 # 日常完整链驻GPU至优化与最终KL完成，周期/异常才存完整证据；checkpoint一致CPU快照单在途异步。
-# 新schema拒旧实验等价恢复；恢复重建新PhysX episode，48小时沿原始期限累计（停机也计入）。
+# 新schema拒旧实验等价恢复；恢复重建新PhysX episode，按累计PPO外层迭代停止，无总墙钟时限。
 # 未绑定实际Horizon部署测量hash时正式入口明确拒绝；500轮预算不自动启动长期训练。
 version: genmo.gmt_frozen_isaac.v1
 paths:
@@ -31,8 +31,6 @@ paths:
 runtime:
   backend: gpu_vectorized.v1
   vector_collection_contract: genmo.world_batched_flow.v1
-  vector_boundary_wait_contract: bounded_reference_wait.v1
-  vector_boundary_wait_max_control_steps: 100
   generation_batch: 64
   vector_batch_wait_s: 0.0
   prefix_deadline_contract: available_reference_deadline_cap.v1
@@ -201,7 +199,7 @@ stage10:
     world_size: 8
     backend: nccl
     collection: all_ranks
-  version: genmo.closedloop.stage10.continuous_horizon.v1
+  version: genmo.closedloop.stage10.iteration_horizon.v1
   seed: 42
   physical_episode:
     safety_limit_seconds: null
@@ -284,7 +282,6 @@ stage10:
     samples_per_source: 4
     every_control_steps: 1500000
   run_control:
-    max_walltime_seconds: 172800
     max_training_iterations: 500
   limits:
     accepted_iterations: 500

@@ -53,7 +53,7 @@ def test_gae_values_belong_to_detached_buffer_not_mutable_collection_rows():
     import torch
     from tests.closedloop.dppo.test_data_learning import transition
     from gem.closedloop.dppo.buffer import RolloutBuffer
-    from gem.closedloop.dppo.vector_runtime import freeze_buffer_targets
+    from gem.closedloop.dppo.runtime import freeze_buffer_targets
     class Critic(torch.nn.Module):
         def forward(self, context, remaining):
             return context['music_features'].flatten(1).mean(1)+1.

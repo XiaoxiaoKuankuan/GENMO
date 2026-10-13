@@ -3,7 +3,7 @@
 调用方先启动Isaac App并初始化唯一世界，再将原生冻结GMT服务交给本运行时。
 世界级续体和参考因果逻辑继续复用已验收实现，不创建每环境线程、不走Unix RPC。
 普通训练采用有界内存接收和GPU随机链；严格/周期诊断切换完整持久化，物理控制、
-四子步、奖励、终止和边界等待不变。modeled_deployment.v3继续决定模拟到达时刻。
+四子步、奖励和真实终止不变。modeled_deployment.v3继续决定模拟到达时刻。
 
 每轮根预算先持久化预占，各环境内存子账本逐操作检查；成功才结算实际消耗。
 GAE按各环境/episode/连续执行片段独立计算，全局标准化一次。Critic只在采集
@@ -36,6 +36,20 @@ from gem.robots.bumi.feature_codec import BumiMotionFeatureCodec
 from gem.robots.bumi.kinematics import BumiKinematics
 
 
+def freeze_buffer_targets(buffer, lengths, critic, device, *, critic_version, batch_size,
+                          gamma_upper, lambda_upper):
+    """在Buffer拥有的独立快照上固定价值；不能回到append之前的原可变对象计算GAE。"""
+    rows=buffer.transitions
+    if sum(lengths)!=len(rows) or any(type(n) is not int or n<0 for n in lengths):
+        raise ValueError('Vector fragment lengths must cover the complete buffer')
+    populate_values(rows,critic,device,critic_version=critic_version,batch_size=batch_size)
+    fragments=[];start=0
+    for n in lengths:
+        fragments.append(rows[start:start+n]);start+=n
+    return fixed_fragment_targets(fragments,critic,device,critic_version=critic_version,
+        gamma_upper=gamma_upper,lambda_upper=lambda_upper)[1]
+
+
 class _DirectTransport:
     def __init__(self,service):self.service=service;self.last_call_timing={}
     def call(self,method,**payload):return self.service.call(method,**payload)
@@ -50,8 +64,6 @@ class InProcessTrainingRuntime:
         world=VectorWorldClient(_DirectTransport(service),MemoryReceiveJournal(world_path))
         self.collector=WorldEnvironmentCollector(c.policy,self._factory,world,num_envs=self.num_envs,
             generation_batch=c.config['runtime']['generation_batch'],
-            boundary_wait_contract=c.config['runtime']['vector_boundary_wait_contract'],
-            boundary_wait_max_controls=c.config['runtime']['vector_boundary_wait_max_control_steps'],
             training_storage='ephemeral_device')
         self.iteration,self.policy_version=c.state['iteration'],c.state['policy_version']
 
@@ -143,10 +155,9 @@ class InProcessTrainingRuntime:
         def prepare_learning():
             buffer=DeviceRolloutBuffer(fragments,c.policy,c.distributed.device)
             rows=buffer.transitions
-            populate_values(rows,c.critic,c.distributed.device,critic_version=c.state['critic_updates'],batch_size=256)
-            targets=fixed_fragment_targets([rows[sum(buffer.fragments[:i]):sum(buffer.fragments[:i+1])] for i in range(len(buffer.fragments))],
-                c.critic,c.distributed.device,critic_version=c.state['critic_updates'],gamma_upper=c.settings['gamma_upper'],
-                lambda_upper=c.settings['lambda_upper'])[1]
+            targets=freeze_buffer_targets(buffer,buffer.fragments,c.critic,c.distributed.device,
+                critic_version=c.state['critic_updates'],batch_size=256,gamma_upper=c.settings['gamma_upper'],
+                lambda_upper=c.settings['lambda_upper'])
             return buffer,targets
         buffer,targets=local_call(c.distributed,prepare_learning)
         rows=buffer.transitions

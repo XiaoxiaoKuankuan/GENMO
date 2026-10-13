@@ -217,6 +217,42 @@ def test_music_end_and_admin_cutoff_have_different_bootstrap(tmp_path):
     RolloutBuffer().append(result)
 
 
+def test_backend_administrative_done_uses_trusted_terminal_state_for_bootstrap(tmp_path):
+    env, backend = adapter(tmp_path)
+    backend.fail_at = 900  # 0.5 秒合法决策边界，模拟后端行政截断而非摔倒。
+    original_snapshot, original_call = backend.snapshot, backend.call
+    def snapshot():
+        result = original_snapshot()
+        if result['done']:
+            result.update(terminated=False, truncated=True, reason='administrative_limit')
+        return result
+    backend.snapshot = snapshot
+    def call(method, **payload):
+        result = original_call(method, **payload)
+        if method == 'advance':
+            for row in result['trace']:
+                row.update(terminated=False, reason=None)
+        return result
+    backend.call = call
+    transition = env.step()
+    assert transition.truncated and not transition.terminated
+    assert transition.next_context is not None and transition.control_tick_end == 900
+    assert transition.metadata['event_penalty_total'] == 0.
+    RolloutBuffer().append(transition)
+
+
+def test_inconsistent_backend_done_flags_are_not_silently_dropped(tmp_path):
+    env, backend = adapter(tmp_path)
+    original_snapshot = backend.snapshot
+    def snapshot():
+        result = original_snapshot()
+        result.update(done=True, terminated=False, truncated=False)
+        return result
+    backend.snapshot = snapshot
+    with pytest.raises(ExecutionIntegrityError, match='done must equal'):
+        env.step()
+
+
 def test_missing_execution_trace_cannot_enter_rewards_or_buffer(tmp_path):
     env, backend = adapter(tmp_path)
     backend.corrupt_trace = True

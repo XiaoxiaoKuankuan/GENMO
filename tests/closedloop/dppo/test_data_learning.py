@@ -116,7 +116,7 @@ def test_semimarkov_returns_manual_variable_steps_and_fixed_targets():
     a0 = d0 + (gamma * lam) ** 2 * d1
     torch.testing.assert_close(out["advantages_raw"], torch.tensor([a0, d1], dtype=torch.float64))
     torch.testing.assert_close(out["returns"], torch.tensor([a0 + 4, 3], dtype=torch.float64))
-    assert out["advantages"].mean().abs() < 1e-12
+    torch.testing.assert_close(out["advantages"], out["advantages_raw"])
     assert not out["returns"].requires_grad
 
 

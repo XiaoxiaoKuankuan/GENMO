@@ -18,7 +18,7 @@ import yaml
 
 from .rewards import resolve_reward_config
 
-VERSION='genmo.closedloop.stage10.continuous_horizon.v1'
+VERSION='genmo.closedloop.stage10.iteration_horizon.v1'
 
 
 def configuration(path,*,genmo_repo=None,gmt_repo=None):
@@ -28,6 +28,14 @@ def configuration(path,*,genmo_repo=None,gmt_repo=None):
     if genmo_repo:c['paths']['genmo_repo']=str(Path(genmo_repo).resolve())
     if gmt_repo:c['paths']['gmt_repo']=str(Path(gmt_repo).resolve())
     s=c['stage10'];t=s['training'];scale=s['scale'];world=s['distributed']['world_size']
+    control=s['run_control']
+    if set(control)!={'max_training_iterations'}:
+        raise ValueError('Only max_training_iterations is supported; total walltime limits are removed')
+    maximum=control['max_training_iterations']
+    if type(maximum)is not int or not 1<=maximum<=500 or maximum>s['limits']['accepted_iterations']:
+        raise ValueError('Cumulative PPO iteration limit must be 1..500 within the resource budget')
+    if any(key.startswith('vector_boundary_wait') for key in c['runtime']):
+        raise ValueError('Retired vector_boundary_wait settings are not used by world-time collection')
     if 'effect_check_iterations' in s['evaluation']:
         raise ValueError('effect_check_iterations is unsupported; use actual interaction evaluation intervals')
     for key in ('eta', 'guidance_scale'):

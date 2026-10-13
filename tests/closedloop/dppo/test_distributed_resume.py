@@ -1,11 +1,8 @@
-"""验证八卡运行层的恢复同步不会把非主进程优化器重置成首次更新。
+"""验证当前 checkpoint 在各 rank 严格恢复非空 Adam 和下一次全局更新。
 
-测试使用两个真实Gloo进程和小型带buffer网络，先保存已有AdamW动量与步数的
-主进程checkpoint，再让另一个rank从不同权重、不同学习率和空优化器启动。
-生产DistributedLearner初始化必须同步完整模型、buffer、AdamW参数组及状态，
-随后一次全局梯度更新应与不中断的单进程基准一致。另覆盖全新空状态初始化，
-以及初始化不得消耗主进程已恢复的随机状态。checkpoint和交换文件仅位于pytest
-临时目录，不读取正式音乐数据或模型，不使用GPU，也不启动任何长期训练。
+两个真实 Gloo 进程从不同参数和优化器初态加载同一个当前 schema 文件，验证
+Actor、Critic、buffer、学习率及 Adam 动量步数与不中断基准一致。恢复调用不得
+消耗 RNG；不再测试已删除的 rank0 采样 DistributedLearner。仅用临时小模型。
 """
 from __future__ import annotations
 
@@ -18,14 +15,16 @@ import torch
 import torch.distributed as dist
 import torch.multiprocessing as mp
 
-from gem.closedloop.dppo.distributed_runtime import DistributedCollectives, DistributedLearner
+from gem.closedloop.dppo.collectives import DistributedCollectives
+from gem.closedloop.dppo.training_checkpoint import SCHEMA, load_training_checkpoint
+from gem.closedloop.dppo.gradient_merge import BCGradientController
 
 
 class BufferedModel(torch.nn.Module):
     def __init__(self):
         super().__init__()
         self.layer = torch.nn.Linear(2, 1)
-        self.register_buffer('normalizer', torch.tensor([.3, .7]), persistent=False)
+        self.register_buffer('normalizer', torch.tensor([.3, .7]), persistent=True)
 
     def forward(self, inputs):
         return self.layer(inputs / self.normalizer).squeeze(-1)
@@ -66,29 +65,19 @@ def _worker(rank, directory):
         results = {}
         for name in ('new', 'resumed'):
             actor, critic, actor_optimizer, critic_optimizer = _components(100 + rank, wrong_worker_configuration=True)
-            if rank == 0:
-                saved = torch.load(directory/f'{name}.pt', map_location='cpu', weights_only=False)
-                actor.load_state_dict(saved['actor'])
-                critic.load_state_dict(saved['critic'])
-                actor.normalizer.copy_(saved['actor_buffer'])
-                critic.normalizer.copy_(saved['critic_buffer'])
-                actor_optimizer.load_state_dict(saved['actor_optimizer'])
-                critic_optimizer.load_state_dict(saved['critic_optimizer'])
-            else:
-                actor.normalizer.fill_(5.)
-                critic.normalizer.fill_(8.)
-            learner = DistributedLearner(collective, directory/name)
-            learner.actor, learner.critic = actor, critic
-            learner.actor_optimizer, learner.critic_optimizer = actor_optimizer, critic_optimizer
             random_state = torch.get_rng_state().clone()
-            learner._synchronize_initial()
+            controller = BCGradientController()
+            load_training_checkpoint(directory/f'{name}.pt', identity={'test':'current_resume'},
+                actor=actor, critic=critic, actor_optimizer=actor_optimizer,
+                critic_optimizer=critic_optimizer, controller=controller)
             assert torch.equal(random_state, torch.get_rng_state())
+            initialization=collective.fingerprints(actor,critic,'initialization')
             initial = _snapshot(actor, critic, actor_optimizer, critic_optimizer)
             _update(actor, actor_optimizer, .2, collective)
             _update(critic, critic_optimizer, -.1, collective)
-            evidence = learner._finish('resume_next_update', {})
+            evidence = collective.fingerprints(actor,critic,'resume_next_update')
             results[name] = dict(initial=initial, after=_snapshot(actor, critic, actor_optimizer, critic_optimizer),
-                                 initialization=learner.evidence[0], update=evidence)
+                                 initialization=initialization, update=evidence)
         torch.save(results, directory/f'rank_{rank}.pt')
         dist.barrier()  # 两卡完整恢复结果均发布后再退出通信组。
     finally:
@@ -122,7 +111,8 @@ def resumed_replicas(tmp_path_factory):
             _update(actor, actor_optimizer, step*.1)
             _update(critic, critic_optimizer, -step*.2)
         initial = _snapshot(actor, critic, actor_optimizer, critic_optimizer)
-        torch.save(initial, directory/f'{name}.pt')
+        torch.save(dict(initial, schema=SCHEMA, identity={'test':'current_resume'},
+            bc_controller=BCGradientController().state_dict()), directory/f'{name}.pt')
         _update(actor, actor_optimizer, .2)
         _update(critic, critic_optimizer, -.1)
         expected[name] = dict(initial=initial, after=_snapshot(actor, critic, actor_optimizer, critic_optimizer))
@@ -139,8 +129,7 @@ def test_optimizer_sync_and_next_global_update_match_uninterrupted(resumed_repli
         _assert_equal(result[name]['initial'], expected[name]['initial'])
         _assert_equal(result[name]['after'], expected[name]['after'])
         assert result[name]['initialization']['replicas_identical']
-        assert result[name]['initialization']['optimizers']['replicas_identical']
-        assert result[name]['update']['distributed']['replicas_identical']
+        assert result[name]['update']['replicas_identical']
         if name == 'resumed':
             for optimizer in ('actor_optimizer', 'critic_optimizer'):
                 assert {float(state['step']) for state in result[name]['after'][optimizer]['state'].values()} == {5.}

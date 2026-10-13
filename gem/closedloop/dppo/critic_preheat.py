@@ -2,7 +2,7 @@
 
 完整歌曲采集昂贵，已经通过独立MC验证的价值网络可以作为同一Stage1行为的
 初始化。此模块只导出Critic及其Adam状态、验证结果与采集来源，不迁移Actor、
-Actor优化器、RNG、BC游标、PhysX世界或48小时期限，因此不是训练checkpoint恢复。
+Actor优化器、RNG、BC游标或累计PPO轮数，因此不是训练checkpoint恢复。
 导入前核验Actor实际权重、随机核、奖励、物理源码/配置、数据、Horizon和价值结构。
 冻结编码器必须逐元素一致；所有验证完成前不修改Critic。旧Actor版本数据不能
 用于新Actor的MC监督，导入只允许尚未进行Actor更新的s595000初始化阶段。
@@ -110,7 +110,7 @@ def initialize_critic(artifact, *, identity, actor, critic, optimizer, genmo_rep
     return dict(artifact=copy.deepcopy(artifact), source=data['source'],
         selected_updates=data['selected_updates'], prior_mc_control_steps=data['prior_mc_control_steps'],
         prior_mc_physics_steps=data['prior_mc_physics_steps'], validation=report,
-        actor_unchanged=True, fresh_PhysX=True, fresh_run_wall_budget=True,
+        actor_unchanged=True, fresh_PhysX=True,
         scope='Critic_initialization_only_not_checkpoint_resume_or_new_policy_MC_labels')
 
 

@@ -56,6 +56,10 @@ class ExecutionIntegrityError(RuntimeError):
     pass
 
 
+class WarmupEpisodeEnded(RuntimeError):
+    """启动站姿发生正常物理终止；计数已结算，该环境重置，不构造虚假 PPO 动作。"""
+
+
 class UpperEnvironment:
     def __init__(self, config, backend, builder, policy, budget, output):
         self.config, self.backend, self.builder, self.policy = config, backend, builder, policy
@@ -145,6 +149,8 @@ class UpperEnvironment:
             raise ExecutionIntegrityError(f"Unusable execution: {result.get('reason', result.get('fault_stage'))}")
         if result['executed_physics_steps'] != actual*4 or snapshot is None:
             raise ExecutionIntegrityError('Incomplete physical control interval or missing snapshot')
+        if bool(snapshot['done']) != bool(snapshot.get('terminated') or snapshot.get('truncated')):
+            raise ExecutionIntegrityError('Backend done must equal terminated or truncated')
         if snapshot['episode_id'] != previous['episode_id'] or snapshot['tick'] != previous['tick']+12*actual:
             raise ExecutionIntegrityError('Execution changed episode or tick unexpectedly')
         for i, row in enumerate(rows):
@@ -186,6 +192,8 @@ class UpperEnvironment:
             if warmup_rows:
                 last_warmup_row = warmup_rows[-1]
         if self.snapshot['done']:
+            if self.snapshot.get('terminated'):
+                raise WarmupEpisodeEnded('Physical failure during startup warmup')
             raise ExecutionIntegrityError('Warmup terminated before any policy sample')
         self.music_end_tick = 600 + (len(self.music)*50//30)*12
         physical=self.config.get('stage10',{}).get('physical_episode')
@@ -211,7 +219,10 @@ class UpperEnvironment:
         while self.snapshot['tick']<600 and not self.snapshot['done'] and not self.rollout_window_reached:
             rows=yield from self.advance_flow(min(25,(600-self.snapshot['tick'])//12))
             if rows:self._warmup_last_target=rows[-1].get('joint_position_target')
-        if self.snapshot['done']:raise ExecutionIntegrityError('Warmup terminated before any policy sample')
+        if self.snapshot['done']:
+            if self.snapshot.get('terminated'):
+                raise WarmupEpisodeEnded('Physical failure during continued startup warmup')
+            raise ExecutionIntegrityError('Warmup ended without a physical termination contract')
         if self.snapshot['tick']>=600 and self._warmup_last_target is not None:
             self.reward.seed_previous_target(self._warmup_last_target)
 
@@ -436,7 +447,7 @@ class UpperEnvironment:
         end = int(self.snapshot['tick'])
         terminated = bool(self.snapshot.get('terminated',False) or end >= self.music_end_tick)
         boundary_reached = bool(boundary and end>=boundary['tick'] and not terminated)
-        truncated = bool(self.snapshot.get('truncated',False) or (not terminated and end>=self.soft_end_tick) or boundary_reached)
+        truncated = bool(not terminated and (self.snapshot.get('truncated',False) or end>=self.soft_end_tick or boundary_reached))
         reason = self.snapshot.get('reason') or ('music_end' if terminated else
             boundary['reason'] if boundary_reached else 'physical_safety_limit' if truncated else None)
         rejected_action = bool(rejection and rejection.get('policy_penalty',
@@ -451,11 +462,10 @@ class UpperEnvironment:
             zero_step_event = event_reward
         self.decision += 1
         next_context = None
-        if not terminated and not self.snapshot['done']:
+        if not terminated:
+            # advance 已核验未自动 reset 的终态、episode、精确 tick 与完整反馈；
+            # GMT preview 允许同一终态上的只读条件，行政截断仍需合法参考才可自举。
             next_context, _ = yield from self.preview_context_flow()
-        elif truncated:
-            # 不在非法时间网格虚构可bootstrap条件。
-            raise ExecutionIntegrityError('Backend truncation lacks a legal trusted next condition')
         trace = generated['trace']
         backend_cpu_totals = {}
         for row in rows:

@@ -1,8 +1,8 @@
-"""关闭音乐奖励后的真实控制分项、门控、积分与恢复期限验收。
+"""关闭音乐奖励后的真实控制分项、门控、积分与策略参数验收。
 
 使用含四个物理子步的既有夹具，对标量和列式路径逐控制步独立核对；把节拍函数
 替换成必定报错的探针，确认禁用后完全不调用。tracking 仍要求配对活动监督。
-额外检查 eta/CFG 显式传参、音乐条件不受奖励开关影响和跨恢复的固定运行期限。
+额外检查 eta/CFG 显式传参、音乐条件不受奖励开关影响和与奖励独立的音乐条件。
 测试只产生 pytest 临时数据，不加载正式权重、不启动仿真或修改已有运行。
 """
 from types import SimpleNamespace
@@ -11,7 +11,7 @@ import numpy as np
 import pytest
 from gem.closedloop.dppo.rewards import ExecutionReward
 from gem.closedloop.dppo.vector_reward_adapter import VectorExecutionReward, compare_reward_evidence
-from gem.closedloop.dppo.run_control import RunWallBudget, build_policy
+from gem.closedloop.dppo.run_control import build_policy
 from gem.closedloop.dppo.evaluation import _decision_evidence
 from gem.runtime.trajectory_blocks import ColumnarTrace, pack_trace
 from tests.closedloop.dppo.test_data_learning import actual_step, target_activity_fixture
@@ -69,15 +69,6 @@ def test_failure_event_is_integrated_once_and_not_multiplied_by_dt():
     assert evidence['reward_sum']==pytest.approx(detail['reward']-5.)
 
 
-def test_run_deadline_is_restored_without_another_48_hours():
-    now=[1000.];clock=lambda:now[0]
-    budget=RunWallBudget(48*3600,clock=clock)
-    now[0]+=24*3600;saved=budget.state_dict()
-    resumed=RunWallBudget(48*3600,clock=clock);resumed.restore(saved)
-    now[0]+=24*3600
-    assert resumed.expired and resumed.state_dict()['deadline_unix_seconds']==1000.+48*3600
-    with pytest.raises(ValueError,match='identity'):
-        RunWallBudget(60,clock=clock).restore(saved)
 
 
 def test_policy_receives_actual_eta_cfg_and_precision(monkeypatch):

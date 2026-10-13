@@ -283,7 +283,7 @@ def _stage10_archive(root):
         write(manifest_path, {'schema': 'genmo.closedloop.stage10.rollout.v1', 'complete': True, 'policy_version': index-1,
             'transition_count': 1, 'executed_control_steps': 2, 'executed_physics_steps': 8,
             'chunks': [{'path': 'chunk_000000/manifest.json', 'sha256': sha256(chunk_path), 'record_count': 1}]})
-        targets = compute_gae([item.rewards], [.5], [.7], [2], [True], [False])
+        targets = compute_gae([item.rewards], [.5], [.7], [2], [True], [False], normalize=True)
         targets.update(old_values=torch.tensor([.5], dtype=torch.float64), next_values=torch.tensor([.7], dtype=torch.float64))
         torch.save(targets, directory/'fixed_targets.pt')
         calibration = {'accepted_updates': 1, 'base_state_restored_per_candidate': True, 'gradients_reused': True,

@@ -1,9 +1,7 @@
-"""第十步多日训练的截止时间、检查点保留和执行证据无损归档。
+"""历史执行证据的检查点保留和无损归档。
 
 本模块只管理同一 RunManager 排他锁覆盖的运行目录，不参与采样、奖励或梯度计算。
-七天时限从 run_manifest 的首次创建时间计算，断点恢复不重置时钟；入口在完整
-接受更新、执行证据封存的边界停机，最终完整 checkpoint 仍同步保存。保留策略
-必须在新运行中显式配置并持久化，
+本模块不设置训练总时限，归档和保留策略在运行中显式配置并持久化，
 恢复时不得悄悄改变。默认未配置时保持既有行为，不回收旧 checkpoint。
 
 执行记录按轮以 gzip 压缩的 tar 文件保存，逐文件 SHA 校验归档内容后，原子发布
@@ -35,7 +33,6 @@ import tempfile
 import threading
 import time
 from contextlib import contextmanager
-from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import torch
@@ -47,12 +44,8 @@ from .run_management import _atomic_json, _read_json, _sync_dir, file_sha256
 
 
 def validate_long_run_settings(stage):
-    control = stage.get('run_control', {})
-    if set(control) - {'max_walltime_seconds'}:
-        raise ValueError('Unknown long-run control setting')
-    seconds = control.get('max_walltime_seconds')
-    if seconds is not None and (type(seconds) is not int or seconds <= 0):
-        raise ValueError('max_walltime_seconds must be a positive integer')
+    if stage.get('run_control', {}):
+        raise ValueError('Archive maintenance does not own training stop settings')
     storage = stage['storage']
     level=storage.get('archive_compression_level',6)
     if type(level) is not int or not 1<=level<=9:
@@ -84,12 +77,8 @@ class LongRunMaintenance:
         if self.compression_backend=='pigz' and shutil.which('pigz') is None:
             raise FileNotFoundError('Explicit pigz archive backend is unavailable')
         manifest = _read_json(manager.run_dir / 'run_manifest.json')
-        self.created_at = datetime.fromisoformat(manifest['created_at'])
-        seconds = stage.get('run_control', {}).get('max_walltime_seconds')
-        self.deadline = None if seconds is None else self.created_at + timedelta(seconds=seconds)
-        policy = dict(schema='genmo.closedloop.stage10.long_run_policy.v1',
-                      created_at=manifest['created_at'], max_walltime_seconds=seconds,
-                      deadline_utc=None if self.deadline is None else self.deadline.isoformat(),
+        policy = dict(schema='genmo.closedloop.stage10.archive_policy.v1',
+                      created_at=manifest['created_at'],
                       checkpoint_keep_last=self.storage.get('checkpoint_keep_last'),
                       checkpoint_keep_every=self.storage.get('checkpoint_keep_every'),
                       archive_completed_iterations=self.storage.get('archive_completed_iterations', False))
@@ -103,7 +92,7 @@ class LongRunMaintenance:
             prepare_secondary_store(manager.run_dir, policy['archive_secondary'], resume=path.exists())
         if path.exists():
             if _read_json(path) != policy:
-                raise ValueError('Resume cannot change the original long-run deadline or retention policy')
+                raise ValueError('Resume cannot change the original archive retention policy')
         else:
             _atomic_json(path, policy, disk_guard=self.guard)
         self.policy = policy
@@ -140,9 +129,6 @@ class LongRunMaintenance:
             total_seconds=sum(r['total_seconds'] for r in archives) if archives else None,
             successful_seconds=sum(r['total_seconds'] for r in successful) if successful else None,
             pending_count=0 if self._archive_worker is None else self._archive_worker.pending_count)
-
-    def expired(self, now=None):
-        return self.deadline is not None and (now or datetime.now(timezone.utc)) >= self.deadline
 
     def archive_iteration(self, directory):
         if not self.storage.get('archive_completed_iterations', False):

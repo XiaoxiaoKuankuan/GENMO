@@ -93,7 +93,7 @@ def test_deployment_delay_rejects_unmeasured_forward_contract(changed):
 
 def test_k8_and_full20_keep_matched_epoch_orders_and_old_chain(tmp_path, monkeypatch):
     from gem.closedloop.dppo import updater
-    from gem.closedloop.dppo.distributed_runtime import DistributedCollectives
+    from gem.closedloop.dppo.collectives import DistributedCollectives
     from gem.closedloop.dppo.gradient_merge import BCGradientController
     from gem.closedloop.dppo.tensor_cache import RolloutTensorCache
     from tests.closedloop.dppo.test_denoising_sampling import TwentySteps, samples
