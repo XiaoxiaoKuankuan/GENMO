@@ -27,6 +27,7 @@ import argparse
 import copy
 from datetime import timedelta
 import json
+import math
 import os
 from pathlib import Path
 import sys
@@ -85,9 +86,12 @@ def calibrate_actor(a,d,source,rank_state,policy,optimizer,anchor,generators,cac
             peak_memory_by_rank=d.all_gather_object(torch.cuda.max_memory_allocated()))
         # 同一预热后真实rollout可比较三个更新目标，再各自做独立物理评估；训练交互完全相同。
         if a.save_evaluation_actor:
-            soft=source['config']['stage9']['kl_soft_stop_coordinate']
+            joint_units=stage['kl']['reduction']=='joint_sum'
+            soft=a.soft_kl_joint if joint_units else source['config']['stage9']['kl_soft_stop_coordinate']
+            soft_field='pre_step_mean_joint_kl' if joint_units else 'pre_step_mean_coordinate_kl'
             admissible=(candidate['hard_kl']['passed'] and result['optimizer_steps']==result['planned_optimizer_steps']
-                and all(step['pre_step_mean_coordinate_kl']<soft for step in result['steps']))
+                and all(step[soft_field]<soft for step in result['steps']))
+            candidate['publication_soft_kl']=dict(field=soft_field,limit=soft)
             candidate['evaluation_publication_admissible']=admissible
             if admissible:
                 def save_actor():
@@ -99,7 +103,8 @@ def calibrate_actor(a,d,source,rank_state,policy,optimizer,anchor,generators,cac
                         update=dict(actor_lr=lr,bc_initial=a.calibrate_bc_initial,clip=kwargs['clip'],
                             objective=kwargs['objective_reduction'],sampled_steps=a.sampled_steps,
                             optimizer_steps=result['optimizer_steps'],planned_optimizer_steps=result['planned_optimizer_steps'],
-                            real_global_chains=len(manifest)),
+                            real_global_chains=len(manifest),kl_limits=copy.deepcopy(stage['kl']),
+                            publication_soft_kl=candidate['publication_soft_kl']),
                         full20_kl=kl,hard_kl=candidate['hard_kl'])
                     temporary=path.with_suffix('.partial')
                     with temporary.open('xb') as f:torch.save(payload,f);f.flush();os.fsync(f.fileno())
@@ -262,6 +267,7 @@ def main():
     p.add_argument('--sampled-steps',type=int,choices=[8,20],default=8)
     p.add_argument('--variants',nargs='+',choices=['reference','bf16_cudnn','compiled_fp32','stable_bmm','wide_tile','weight_bf16x3','weight_bf16x6'],default=['reference'])
     p.add_argument('--profile',action='store_true',help='另测一个预热后的真实CPU/CUDA优化步，不纳入吞吐计时')
+    p.add_argument('--profile-only',action='store_true',help='只在明确指定微批做独立CUDA trace，不重跑完整吞吐扫描')
     p.add_argument('--diagnostic-only',action='store_true',help='每候选只做一次完整梯度/Adam/全20步KL比较，带梯度拷贝，不作为吞吐计时')
     p.add_argument('--calibrate-actor-rates',type=float,nargs='+',help='从同一起点有限标定完整PPO+BC学习率，不保存候选权重')
     p.add_argument('--calibrate-bc-initial',type=float,default=.01)
@@ -269,11 +275,21 @@ def main():
     p.add_argument('--save-evaluation-actor',action='store_true',help='仅将通过中间软线及最终硬KL的完整标定权重发布为物理评估输入，不是训练恢复点')
     p.add_argument('--objective',choices=['free_coordinate_mean','joint_sum'],help='明确的离线目标对照，不改行为核')
     p.add_argument('--ppo-clip',type=float,help='仅固定数据对照的显式clip候选')
+    p.add_argument('--mean-joint-kl-limit',type=float,help='严格joint对照的真实joint KL上限，不能借用平均坐标门槛')
+    p.add_argument('--soft-kl-joint',type=float,help='严格joint对照的逐minibatch发布门槛，单位为真实joint KL')
     p.add_argument('--critic-reference',type=Path,help='独立真实物理评估的fixed_diagnostic_reference.json')
     p.add_argument('--critic-epochs',type=int,nargs='+',default=[4,16,32])
     a=p.parse_args();rank=int(os.environ['LOCAL_RANK'])
     if a.diagnostic_only and a.profile:p.error('Numerical diagnostics and independent performance profiling are separate modes')
+    if a.profile_only:
+        if a.diagnostic_only or a.calibrate_actor_rates:p.error('Profile-only is separate from numerical or rate calibration')
+        a.profile=True
     if a.save_evaluation_actor and not a.calibrate_actor_rates:p.error('Evaluation Actor publication requires explicit finite calibration')
+    if a.mean_joint_kl_limit is not None or a.soft_kl_joint is not None:
+        if (a.objective!='joint_sum' or a.mean_joint_kl_limit is None or a.soft_kl_joint is None
+                or not all(math.isfinite(x) for x in (a.soft_kl_joint,a.mean_joint_kl_limit))
+                or not 0<a.soft_kl_joint<a.mean_joint_kl_limit):
+            p.error('Strict joint comparison requires explicit joint objective and 0 < joint soft KL < joint hard KL')
     if int(os.environ['WORLD_SIZE'])!=8 or not 1<=a.repeats<=5:raise ValueError('Eight GPUs and 1..5 finite repeats required')
     for k,v in dict(NCCL_CUMEM_HOST_ENABLE='0',NCCL_IB_DISABLE='1',NCCL_SOCKET_IFNAME='lo',TORCH_NCCL_BLOCKING_WAIT='1').items():os.environ.setdefault(k,v)
     torch.cuda.set_device(rank);torch.set_num_threads(4)
@@ -292,16 +308,19 @@ def main():
     source=torch.load(a.case/'learning_state.pt',map_location='cpu',weights_only=False,mmap=True)
     rank_state=torch.load(r/'rank_state.pt',map_location='cpu',weights_only=False)
     config=copy.deepcopy(source['config']);settings=config['stage9'];stage=config['stage10']
+    if a.mean_joint_kl_limit is not None:
+        stage['kl'].update(reduction='joint_sum',mean_joint=a.mean_joint_kl_limit)
     if a.objective is not None:settings['objective_logprob_reduction']=a.objective
     if a.ppo_clip is not None:settings['ppo_clip']=a.ppo_clip
     config['runtime']['genmo_device']=str(d.device)
-    actor,train,loading=local_call(d,lambda:load_actor(config));actor.load_state_dict(source['actor'])
+    actor,train,loading=local_call(d,lambda:load_actor(config))
     if a.critic_reference is not None:
         if a.calibrate_actor_rates:p.error('Choose Actor calibration or Critic comparison')
         # 与训练入口一致，在修改Actor算子类别前复制Stage1原生条件编码器。
         cache=RolloutTensorCache(rows,targets,d.device,max_device_bytes=8*1024**3)
         compare_critics(a,d,actor,train,cache,rows,targets,manifest,stage)
         cache.close();dist.destroy_process_group(group);dist.destroy_process_group();return
+    actor.load_state_dict(source['actor'])
     from gem.closedloop.dppo.run_control import build_policy
     if any(v!='reference' for v in a.variants):
         p.error('Numerical candidates require freshly sampled data from their own actual kernel; benchmark reference within that declared case')
@@ -346,7 +365,7 @@ def main():
         controller.load_state_dict(controller_base);restore_local_rng(rng_base,generators)
         actor.zero_grad(set_to_none=True)
     baseline_outputs=terminal_outputs(policy,rows,d.device);reference=None
-    for variant in a.variants:
+    for variant in ([] if a.profile_only else a.variants):
         if variant!='reference':
             from gem.closedloop.dppo.dense_policy import configure_dense_actor
             options=dict(precision='bf16_backbone' if variant=='bf16_cudnn' else stage['precision']['mode'],
@@ -403,7 +422,7 @@ def main():
                 numerical_diagnostic_only=a.diagnostic_only,actual_optimizer_steps=result['optimizer_steps'],
                 actual_internal_visits=result['internal_sample_visits'],actual_BC_samples=result['actual_global_bc_samples'],memory=memory))
             publish()
-    for micro in ([] if a.diagnostic_only else a.kl_microbatches):
+    for micro in ([] if a.diagnostic_only or a.profile_only else a.kl_microbatches):
         samples=[];restore()
         for repeat in range(a.repeats+2):
             d.barrier();torch.cuda.synchronize();start=time.perf_counter()
@@ -416,16 +435,24 @@ def main():
         publish()
     if a.profile:
         restore();d.barrier()
+        recommendation=recommend_compute_profile(report,torch.cuda.get_device_properties(d.device).total_memory)
+        chosen=recommendation['selected']
+        profile_micro=chosen['actor_microbatch'] if chosen else a.microbatches[0]
         trace=a.output/'rank00_optimizer_trace.json'
         profiler=(torch.profiler.profile(activities=[torch.profiler.ProfilerActivity.CPU,
             torch.profiler.ProfilerActivity.CUDA],record_shapes=True,profile_memory=True,
             schedule=torch.profiler.schedule(wait=0,warmup=1,active=1,repeat=1),
             on_trace_ready=lambda p:p.export_chrome_trace(str(trace))) if rank==0 else nullcontext())
         with profiler as active:
-            actor_update(policy,optimizer,rows,targets,cache,manifest,controller,microbatch=a.microbatches[-1],
+            actor_update(policy,optimizer,rows,targets,cache,manifest,controller,microbatch=profile_micro,
                 step_observer=(lambda result:active.step()) if rank==0 else None,**kwargs)
         d.barrier()
-        report['profiler']=root_call(d,lambda:summarize_gpu_trace(trace));publish()
+        report['profiler']=root_call(d,lambda:summarize_gpu_trace(trace))
+        report['profiler']['microbatch']=profile_micro
+        if a.profile_only:
+            report['profile_final_full20_kl']=final_kl(policy,rows,cache,manifest,distributed=d,
+                microbatch=a.kl_microbatches[0],clip=settings['ppo_clip'],objective_reduction=settings['objective_logprob_reduction'])
+        publish()
     report['compute_recommendation']=recommend_compute_profile(report,torch.cuda.get_device_properties(d.device).total_memory)
     root_call(d,lambda:atomic_json(a.output/'compute_recommendation.json',report['compute_recommendation']))
     report['cache']=d.all_gather_object(cache.report());publish();cache.close()
