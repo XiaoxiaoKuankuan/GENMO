@@ -216,7 +216,7 @@ def _decision_evidence(result, index):
     for reward, detail in zip(rewards, details):
         if detail.get('transition_valid') is not True:
             raise ValueError('Invalid reward detail cannot enter evaluation statistics')
-        if detail.get('version') != 'stage9.execution_reward.v2' or detail.get('activity', {}).get('valid') is not True:
+        if detail.get('version') not in {'stage9.execution_reward.v2','stage10.physical_reward.v1'} or detail.get('activity', {}).get('valid') is not True:
             raise ValueError('Evaluation requires current reward version and valid paired activity')
         if not math.isclose(_number(detail['dt_s'], 'dt'), .02, abs_tol=1e-12):
             raise ValueError('Evaluation control intervals must be 50Hz')
@@ -382,6 +382,7 @@ def evaluate_policy(env, policy, task_plan, output_dir, *, catalog=None, episode
                        'noise_index_start': task['noise_index_start'], 'decisions': [], 'transition_valid': False,
                        'physical_failure': False, 'truncated': False, 'end_reason': None, 'reward_sum': 0.}
             try:
+                actual_motion_rows = []
                 music = catalog.load_music(task['sample']) if catalog is not None else load_music_features(plan['data_root'], task['sample'])
                 env.config['stage9']['episode_seconds'] = float(task['remaining_music_seconds']) if limit is None else float(limit)
                 env.comparison_noise_index = int(task['noise_index_start'])
@@ -391,6 +392,7 @@ def evaluate_policy(env, policy, task_plan, output_dir, *, catalog=None, episode
                     for decision_index in range(maximum_decisions):
                         result = env.step(deterministic=deterministic)
                         evidence = _decision_evidence(result, decision_index)
+                        actual_motion_rows.extend({k:np.array(r[k],copy=True) for k in ('tick','actual_joint_pos_gmt','actual_joint_vel_gmt')} for r in _field(result,'metadata',{}).get('execution_trace',[]))
                         episode['decisions'].append(evidence)
                         episode['reward_sum'] += evidence['reward_sum']
                         if evidence['terminated'] or evidence['truncated']:
@@ -405,6 +407,8 @@ def evaluate_policy(env, policy, task_plan, output_dir, *, catalog=None, episode
                 episode.update(transition_valid=False, error={'type': type(caught).__name__, 'message': str(caught)},
                                end_reason='infrastructure_failure')
                 error = caught
+            from .motion_diagnostics import episode_motion_diagnostic
+            episode['motion_diagnostic'] = episode_motion_diagnostic(actual_motion_rows,music) if episode.get('transition_valid') else dict(available=False,reason='invalid_episode')
             episode_path = output/'episodes'/f'{index:06d}.json'
             _publish_json(episode_path, episode)
             episodes.append(episode)

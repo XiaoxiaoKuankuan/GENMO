@@ -18,7 +18,7 @@ import yaml
 
 from .rewards import resolve_reward_config
 
-VERSION='genmo.closedloop.stage10'
+VERSION='genmo.closedloop.stage10.continuous.v1'
 
 
 def configuration(path,*,genmo_repo=None,gmt_repo=None):
@@ -28,6 +28,13 @@ def configuration(path,*,genmo_repo=None,gmt_repo=None):
     if genmo_repo:c['paths']['genmo_repo']=str(Path(genmo_repo).resolve())
     if gmt_repo:c['paths']['gmt_repo']=str(Path(gmt_repo).resolve())
     s=c['stage10'];t=s['training'];scale=s['scale'];world=s['distributed']['world_size']
+    if s['evaluation'].get('effect_check_iterations'):
+        raise ValueError('effect_check_iterations is unsupported; use actual interaction evaluation intervals')
+    for key in ('eta', 'guidance_scale'):
+        if not math.isfinite(t[key]) or t[key] < 0:
+            raise ValueError(f'Invalid explicit policy setting {key}')
+    if c['model']['guidance_scale'] != t['guidance_scale']:
+        raise ValueError('model and training guidance_scale differ')
     n=c['runtime']['num_envs'];decisions=scale['decisions_per_environment'];chains=n*decisions*world
     for k,v in [('world',world),('environments',n),('decisions',decisions),('optimizer chains',scale['actor_minibatch_chains']),
                 ('Actor microbatch',t['denoising_microbatch']),('KL microbatch',t['kl_microbatch'])]:

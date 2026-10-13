@@ -56,6 +56,7 @@ TRACKING_ERROR_FIELDS = {
 
 DEFAULT_CONFIG = {
     "version": "stage9.execution_reward.v2",
+    "music_reward_enabled": True,
     "dt": .02,
     "track_weight": 2.5, "music_weight": 2., "stable_weight": 1., "alive_weight": .5,
     "cmd_penalty_weight": .15, "torque_penalty_weight": .10,
@@ -132,7 +133,8 @@ class ExecutionReward:
         self.config = copy.deepcopy(DEFAULT_CONFIG)
         _merge(self.config, config or {})
         self._validate_config()
-        self.music = self._music_array(music_features)
+        self.music_enabled = self.config['music_reward_enabled']
+        self.music = self._music_array(music_features) if self.music_enabled else None
         self.music_start_tick = int(music_start_tick)
         self.target_activity = target_activity
         self._cache_music_beats()
@@ -143,6 +145,9 @@ class ExecutionReward:
 
     def _cache_music_beats(self):
         """每次绑定音乐或起点后计算一次，保持原30Hz到50Hz的round映射。"""
+        if not self.music_enabled:
+            self._beat_ticks = np.empty(0, dtype=np.int64)
+            return
         cfg = self.config['music']
         source = (np.empty(0, dtype=np.int64) if self.music is None else
                   np.flatnonzero(self.music[:, cfg['beat_column']] > cfg['beat_threshold']))
@@ -157,8 +162,14 @@ class ExecutionReward:
 
     def _validate_config(self):
         config = self.config
-        if config["version"] != "stage9.execution_reward.v2":
-            raise ValueError("reward version must be stage9.execution_reward.v2")
+        if config["version"] not in {"stage9.execution_reward.v2", "stage10.physical_reward.v1"}:
+            raise ValueError("Unknown explicit execution reward identity")
+        if type(config['music_reward_enabled']) is not bool:
+            raise ValueError('music_reward_enabled must be an explicit boolean')
+        if not config['music_reward_enabled'] and config['music_weight'] != 0:
+            raise ValueError('Disabled music reward requires music_weight=0')
+        if config['version'] == 'stage10.physical_reward.v1' and config['music_reward_enabled']:
+            raise ValueError('Physical reward identity requires disabled music reward')
         if config["dt"] != .02:
             raise ValueError("Stage9 rewards require dt=0.02 for actual 50Hz controls")
         def finite_nonnegative(value, name, *, positive=False):
@@ -225,7 +236,7 @@ class ExecutionReward:
         return music
 
     def reset(self, *, music_features=None, music_start_tick=None, target_activity=None):
-        if music_features is not None:
+        if music_features is not None and self.music_enabled:
             self.music = self._music_array(music_features)
         if music_start_tick is not None:
             self.music_start_tick = int(music_start_tick)
@@ -268,8 +279,10 @@ class ExecutionReward:
         cfg = self.config["activity"]
         ratio = actual / (cfg["full_gate_ratio"] * target_value + cfg["epsilon"])
         gate = 1. if target_value <= cfg["inactive_target_rad_s"] else min(1., ratio)
-        log_ratio = math.log((actual + cfg["intensity_epsilon"]) / (target_value + cfg["intensity_epsilon"])) / math.log(cfg["intensity_log_ratio"])
-        intensity = math.exp(-min(abs(log_ratio), 1e150) ** 2)
+        # tracking 仍消费配对活动门控；禁用音乐项时不计算强度匹配分数。
+        log_ratio = (math.log((actual + cfg["intensity_epsilon"]) / (target_value + cfg["intensity_epsilon"]))
+                     / math.log(cfg["intensity_log_ratio"])) if self.music_enabled else None
+        intensity = math.exp(-min(abs(log_ratio), 1e150) ** 2) if self.music_enabled else None
         return gate, intensity, {"actual_activity_rad_s": actual, "target_activity_rad_s": target_value,
             "window_count": len(rows), "window_complete": len(rows) == self.activity_steps,
             "window_begin_tick": expected_begin, "window_end_tick": int(tick),
@@ -595,6 +608,11 @@ class ExecutionReward:
         mapping = {"track": "track_weight", "music": "music_weight", "stable": "stable_weight", "alive": "alive_weight",
                    "cmd": "cmd_penalty_weight", "torque": "torque_penalty_weight", "contact": "contact_penalty_weight", "joint_limit": "joint_limit_penalty_weight"}
         for name, weight_key in mapping.items():
+            if name == 'music' and not self.music_enabled:
+                components[name] = dict(enabled=False, valid=True, raw={'reason': 'music_reward_disabled'},
+                    normalized={}, score=0., weight=0., gate=1., activity_gate=1.,
+                    weighted_rate=0., integrated_reward=0.)
+                continue
             try:
                 if name == "music" and not activity["valid"]:
                     raise ValueError("music intensity not_available without paired target activity")
@@ -625,7 +643,7 @@ class ExecutionReward:
         if trace.get("completed_physics_steps", 4) != 4:
             errors.append("incomplete control interval")
         total_rate = sum(item["weighted_rate"] for item in components.values())
-        return {"version": "stage9.execution_reward.v2", "tick": int(tick), "episode_id": episode,
+        return {"version": self.config['version'], "tick": int(tick), "episode_id": episode,
                 "reward": self.config["dt"] * total_rate, "reward_rate": total_rate,
                 "reward_is_integrated": True, "dt_s": self.config["dt"], "transition_valid": not errors,
                 "errors": errors, "components": components, "activity": activity, "diagnostics": diagnostics,

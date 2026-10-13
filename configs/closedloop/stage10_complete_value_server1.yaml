@@ -65,6 +65,7 @@ timing:
   calibration_samples: 2
   deployment_profile:
     schema: genmo.deployment_delay_profile.v1
+    behavior_kernel_sha256: ebfce1a5806b539c3775073cf5a427e955b782d453d6cfc2ede67220dcd4c9eb
     target: single_robot_single_request
     prefix_budget_seconds: 0.3
     samples_seconds:
@@ -191,7 +192,7 @@ stage10:
     world_size: 8
     backend: nccl
     collection: all_ranks
-  version: genmo.closedloop.stage10
+  version: genmo.closedloop.stage10.continuous.v1
   seed: 42
   training:
     execution_mode: latency
@@ -263,11 +264,6 @@ stage10:
     start_mode: beginning
     episode_seconds: 180.0
     samples_per_source: 1
-    effect_check_iterations:
-    - 100
-    - 200
-    - 500
-    - 1000
     every_control_steps: 1500000
   run_control:
     max_walltime_seconds: 172800
@@ -289,10 +285,11 @@ stage10:
     checkpoint_keep_last: 2
     retain_best_and_evaluated: true
   reward:
-    version: stage9.execution_reward.v2
+    version: stage10.physical_reward.v1
     dt: 0.02
     track_weight: 2.5
-    music_weight: 2.0
+    music_weight: 0.0
+    music_reward_enabled: false
     stable_weight: 1.0
     alive_weight: 0.5
     cmd_penalty_weight: 0.15

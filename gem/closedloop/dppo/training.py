@@ -55,10 +55,14 @@ def _next_interaction_boundary(used, interval):
     return (used // interval + 1) * interval
 
 
-def _validate_calibrated_execution(profile, numerical_execution, assets):
+def _validate_calibrated_execution(profile, numerical_execution, assets, kernel=None):
     """部署延迟必须对应已测资产和实际前向；说明性mode文字不参与算子身份。"""
     if profile.get('measured_assets') != assets:
         raise ValueError('Deployment calibration assets differ from this Actor/GMT experiment')
+    if kernel is not None:
+        digest=hashlib.sha256(json.dumps(kernel,sort_keys=True,separators=(',',':')).encode()).hexdigest()
+        if profile.get('behavior_kernel_sha256') != digest:
+            raise ValueError('Behavior kernel changed; explicit deployment calibration required')
     measured = profile.get('numerical_execution', {})
     keys = ('schema', 'precision', 'linear', 'attention', 'attention_fallback',
             'matmul_tf32', 'master_dtype', 'layer_residual_dtype', 'probability_dtype',
@@ -85,6 +89,10 @@ def _sources(config):
             for directory in ('actuators','managers','terrains','assets/robots/bumi3_4340_lowpd'):
                 files+=list((robot_root/directory).rglob('*.py'))
             files+=list((root/'scripts/rsl_rl').glob('bumi4340*.py'))
+            files+=list((root/'scripts/motion').rglob('*.py'))
+            # 参考转换、关节映射与任务配置同样会改变真实转移和恢复身份。
+            files+=list((robot_root/'tasks/mimic/mimic_noetix_bumi4340_mha_sonic').rglob('*.yaml'))
+            files+=[p for p in (robot_root/'assets/robots/bumi3_4340_lowpd').rglob('*') if p.is_file()]
             files+=list((root/'rsl_rl/rsl_rl').rglob('*.py'))
         records[label]={str(p.relative_to(root)):file_sha256(p) for p in sorted(set(files))}
     return records
@@ -105,6 +113,7 @@ def _physical_configuration_identity(config):
 
 
 def _snapshot(c,reason,*,wait=False):
+    if hasattr(c,'clock'):c.state['wall_budget']=c.clock.state_dict()
     rank_state=dict(rank=c.distributed.rank,rng=capture_local_rng(c.generators),bc=c.bc.state_dict(),
         collector=c.vector.checkpoint_state())
     rank_states=c.distributed.all_gather_object(rank_state)
@@ -197,6 +206,8 @@ def run(cargs,config,distributed):
         stage=config['stage10'],settings=copy.deepcopy(config['stage9']),manager=None,writer=None,
         async_writer=None,vector=None,workers=None,maintenance=None,budget=None,output=cargs.output_dir.resolve())
     report=dict(schema='genmo.stage10.session',status='running',iterations=[],warmup=[],evaluations=[],evaluation_artifacts=[])
+    from .run_control import RunWallBudget,build_policy
+    c.clock=RunWallBudget(c.stage['run_control']['max_walltime_seconds'])
     signal=StopSignal();signal.install();cache=None;buffer=None;error=None;saved=None;profile_token=None
     targets=None;manifest=None;label=None;anomaly_saved=None
     try:
@@ -234,13 +245,10 @@ def run(cargs,config,distributed):
         c.critic=local_call(distributed,create_critic)
         distributed.broadcast_module(c.actor);distributed.broadcast_module(c.critic)
         precision=c.stage['precision']
-        c.policy=DenseDiffusionPolicy(c.actor,std_schedule=c.settings['std_schedule'],precision=precision['mode'],
-            attention=precision['attention'],linear_execution=precision['linear_execution'],
-            compile_denoiser=precision['compile'],precise_output=precision['precise_output'],
-            weight_gradient=precision.get('weight_gradient','direct_joint_gemm'))
+        c.policy=build_policy(c.actor,c.settings,precision)
         if not cargs.calibrate_only:
             _validate_calibrated_execution(c.config['timing']['deployment_profile'],
-                c.policy.numerical_execution,c.stage['assets'])
+                c.policy.numerical_execution,c.stage['assets'],c.policy.kernel_config)
         actor_initialization=dict(kind='source_stage1',source_global_step=loading['source_global_step'])
         if cargs.evaluation_actor:
             from .training_checkpoint import load_evaluation_actor
@@ -280,6 +288,7 @@ def run(cargs,config,distributed):
             from .run_management import validate_budget_progress
             root_call(distributed,lambda:validate_budget_progress(payload['budget'],c.budget.state_dict()))
             c.state=copy.deepcopy(payload['state'])
+            c.clock.restore(c.state['wall_budget'])
             c.bc.load_state_dict(payload['rank_states'][distributed.rank]['bc'])
             restore_local_rng(payload['rank_states'][distributed.rank]['rng'],c.generators)
         from NoetixRobot.tasks.mimic.mimic_noetix_bumi4340_mha_sonic.closedloop.vector_backend import VectorFrozenGmtBackend
@@ -325,7 +334,7 @@ def run(cargs,config,distributed):
             c.state['training_control_steps'],c.stage['storage']['diagnostic_every_control_steps']))
         warmups=critic_config['warmup_rollouts'] if cargs.warmup_rollouts is None else cargs.warmup_rollouts
         while c.state['iteration']<cargs.stop_after_iteration:
-            if any(distributed.all_gather_object(signal.stop_requested)) or time.perf_counter()-started>=c.stage['run_control']['max_walltime_seconds']:break
+            if any(distributed.all_gather_object(signal.stop_requested)) or any(distributed.all_gather_object(c.clock.expired)):break
             is_warmup=c.state['warmup_completed']<warmups
             label=('warmup' if is_warmup else 'train')+f'_{c.state["rollouts_completed"]+1:06d}'
             strict=cargs.strict_evidence or c.state['training_control_steps']>=c.state['next_diagnostic_control_steps']

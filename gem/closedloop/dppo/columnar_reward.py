@@ -93,29 +93,30 @@ def evaluate_columns(reward, trace, *, timings=None):
         if target_value < 0: raise ValueError('A_target activity must be nonnegative')
         ratio = a/(activity_cfg['full_gate_ratio']*target_value+activity_cfg['epsilon'])
         gate = 1. if target_value <= activity_cfg['inactive_target_rad_s'] else min(1.,ratio)
-        log_ratio = math.log((a+activity_cfg['intensity_epsilon'])/(target_value+activity_cfg['intensity_epsilon']))/math.log(activity_cfg['intensity_log_ratio'])
-        score = math.exp(-min(abs(log_ratio),1e150)**2)
+        log_ratio = (math.log((a+activity_cfg['intensity_epsilon'])/(target_value+activity_cfg['intensity_epsilon']))/math.log(activity_cfg['intensity_log_ratio'])) if reward.music_enabled else None
+        score = math.exp(-min(abs(log_ratio),1e150)**2) if reward.music_enabled else None
         gates.append(gate); intensity.append(score)
         activities.append(dict(actual_activity_rad_s=a,target_activity_rad_s=target_value,
             window_count=count,window_complete=count==reward.activity_steps,window_begin_tick=begin,
             window_end_tick=tick,target_source=copy.deepcopy(target['source']),target_evidence=target,
             valid=True,gate=gate,gate_unclamped_ratio=ratio,intensity_log_ratio=log_ratio,intensity_score=score))
     mark('activity_window_and_metadata_seconds')
-    if reward.music is None: raise ValueError('music features not_available')
-    beat_counts = np.minimum(ends, reward.beat_steps)
-    beats, music_count, motion_count = np.zeros(n), np.zeros(n,dtype=int), np.zeros(n,dtype=int)
-    ids = np.flatnonzero(beat_counts == reward.beat_steps)
-    if len(ids):
-        indices = ends[ids,None]-reward.beat_steps+np.arange(reward.beat_steps)
-        window_ticks = all_ticks[indices]
-        if np.any(window_ticks < reward.music_start_tick) or np.any(window_ticks > reward.music_start_tick+len(reward.music)*20):
-            raise ValueError('music outside paired task')
-        music = torch.from_numpy(np.isin(window_ticks,reward._beat_ticks))
-        valid = torch.ones(music.shape,dtype=torch.bool)
-        motion = _derive_motion_beats(torch.from_numpy(np.abs(all_speed[indices])),valid)
-        for j,i in enumerate(ids):
-            music_count[i] = int(music[j].sum()); motion_count[i] = int(motion[j].sum())
-            if music_count[i]: beats[i] = float(_beat_alignment(music[j:j+1],motion[j:j+1],valid[j:j+1],round(1/cfg['dt']))[1])
+    if reward.music_enabled:
+        if reward.music is None: raise ValueError('music features not_available')
+        beat_counts = np.minimum(ends, reward.beat_steps)
+        beats, music_count, motion_count = np.zeros(n), np.zeros(n,dtype=int), np.zeros(n,dtype=int)
+        ids = np.flatnonzero(beat_counts == reward.beat_steps)
+        if len(ids):
+            indices = ends[ids,None]-reward.beat_steps+np.arange(reward.beat_steps)
+            window_ticks = all_ticks[indices]
+            if np.any(window_ticks < reward.music_start_tick) or np.any(window_ticks > reward.music_start_tick+len(reward.music)*20):
+                raise ValueError('music outside paired task')
+            music = torch.from_numpy(np.isin(window_ticks,reward._beat_ticks))
+            valid = torch.ones(music.shape,dtype=torch.bool)
+            motion = _derive_motion_beats(torch.from_numpy(np.abs(all_speed[indices])),valid)
+            for j,i in enumerate(ids):
+                music_count[i] = int(music[j].sum()); motion_count[i] = int(motion[j].sum())
+                if music_count[i]: beats[i] = float(_beat_alignment(music[j:j+1],motion[j:j+1],valid[j:j+1],round(1/cfg['dt']))[1])
     mark('music_numeric_seconds')
     power = [[] for _ in range(n)]
     for s in range(4):
@@ -152,7 +153,7 @@ def evaluate_columns(reward, trace, *, timings=None):
         consistency_raw[key],consistency_norm[key] = value, np.abs(value)/tolerance
     scores = {}
     for name in WEIGHTS:
-        if name == 'music': scores[name] = cfg['music_mix']['beat']*beats+cfg['music_mix']['intensity']*np.asarray(intensity)
+        if name == 'music': scores[name] = (cfg['music_mix']['beat']*beats+cfg['music_mix']['intensity']*np.asarray(intensity)) if reward.music_enabled else np.zeros(n)
         else: scores[name] = _finite(col('reward_primitives','components',name,'score'),name,(n,))
         if np.any((scores[name]<0)|(scores[name]>1+1e-12)): raise ValueError('Reward score outside [0,1]')
         scores[name] = np.minimum(scores[name],1.)
@@ -162,21 +163,23 @@ def evaluate_columns(reward, trace, *, timings=None):
     mark('consistency_and_reward_integration_seconds')
     results = []
     for i,row in enumerate(trace):
-        music_raw = dict(beat_definition='bumi.metrics._derive_motion_beats+_beat_alignment',
-            beat_window_count=int(beat_counts[i]),beat_window_complete=bool(beat_counts[i]==reward.beat_steps),
-            beat_valid=bool(music_count[i]),intensity_valid=True,activity=copy.deepcopy(activities[i]),
-            beat_alignment=float(beats[i]),intensity_alignment=intensity[i])
-        if beat_counts[i]<reward.beat_steps: music_raw['beat_reason']='insufficient_causal_history'
-        else:
-            music_raw.update(music_beat_count=int(music_count[i]),motion_beat_count=int(motion_count[i]))
-            if not music_count[i]: music_raw['beat_reason']='no_music_beats'
+        music_raw = {'reason': 'music_reward_disabled'}
+        if reward.music_enabled:
+            music_raw = dict(beat_definition='bumi.metrics._derive_motion_beats+_beat_alignment',
+                beat_window_count=int(beat_counts[i]),beat_window_complete=bool(beat_counts[i]==reward.beat_steps),
+                beat_valid=bool(music_count[i]),intensity_valid=True,activity=copy.deepcopy(activities[i]),
+                beat_alignment=float(beats[i]),intensity_alignment=intensity[i])
+            if beat_counts[i]<reward.beat_steps: music_raw['beat_reason']='insufficient_causal_history'
+            else:
+                music_raw.update(music_beat_count=int(music_count[i]),motion_beat_count=int(motion_count[i]))
+                if not music_count[i]: music_raw['beat_reason']='no_music_beats'
         components = {}
         for name,key in WEIGHTS.items():
             primitive = row['reward_primitives']['components'][name] if name!='music' else None
-            gate = gates[i] if name in ('track','music') else 1.
-            components[name] = dict(enabled=True,valid=True if primitive is None else bool(primitive['valid']),
+            gate = gates[i] if name=='track' or name=='music' and reward.music_enabled else 1.
+            components[name] = dict(enabled=name!='music' or reward.music_enabled,valid=True if primitive is None else bool(primitive['valid']),
                 raw=music_raw if primitive is None else primitive['raw'],
-                normalized=dict(beat=float(beats[i]),intensity=intensity[i]) if primitive is None else primitive['normalized'],
+                normalized=(dict(beat=float(beats[i]),intensity=intensity[i]) if reward.music_enabled else {}) if primitive is None else primitive['normalized'],
                 score=float(scores[name][i]),weight=cfg[key]*(-1 if 'penalty' in key else 1),gate=gate,
                 activity_gate=gate,weighted_rate=float(rates[name][i]),integrated_reward=float(cfg['dt']*rates[name][i]))
         power_info = dict(valid=True,sampling='four_physics_substeps',
@@ -185,7 +188,7 @@ def evaluate_columns(reward, trace, *, timings=None):
             sampling_note='PD torque estimate and velocity may come from opposite boundaries of a physics substep; inspect each timestamp',
             samples=power[i],mean_w=float(np.mean([p['mean_w'] for p in power[i]])),
             mean_sum_w=float(np.mean([p['sum_w'] for p in power[i]])),max_w=max(p['max_w'] for p in power[i]),reward_weight=0.)
-        results.append(dict(version='stage9.execution_reward.v2',tick=int(ticks[i]),episode_id=str(episodes[i]),
+        results.append(dict(version=cfg['version'],tick=int(ticks[i]),episode_id=str(episodes[i]),
             reward=float(cfg['dt']*total[i]),reward_rate=float(total[i]),reward_is_integrated=True,dt_s=cfg['dt'],
             transition_valid=True,errors=[],components=components,activity=activities[i],
             diagnostics=dict(power=power_info,consistency=dict(valid=True,
