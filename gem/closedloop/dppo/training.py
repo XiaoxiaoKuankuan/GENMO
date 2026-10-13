@@ -48,6 +48,14 @@ class _FiniteDiagnosticComplete(Exception):
     """仅退出有限诊断主体；统一finally仍核验物理关闭并决定最终退出码。"""
 
 
+def _requires_initial_evaluation(args, state, baseline_exists):
+    if args.collect_only or getattr(args,'critic_preheat_only',False) or baseline_exists:
+        return False
+    if state['actor_updates'] or state['policy_version']:
+        raise ValueError('Updated Actor has no durable initial evaluation; cannot invent Stage1 baseline')
+    return True
+
+
 def _next_interaction_boundary(used, interval):
     """按累计真实控制步对齐周期；重启不把下一次评估延后一个完整周期。"""
     if type(used) is not int or used < 0 or type(interval) is not int or interval < 1:
@@ -283,6 +291,19 @@ def run(cargs,config,distributed):
             actor_initialization=actor_initialization,
             recovery='fresh_PhysX_episodes_no_partial_rollout_reuse',torch_version=torch.__version__)
         payload=None
+        if not cargs.resume and critic_config.get('preheat_artifact'):
+            from .critic_preheat import initialize_critic
+            imported=local_call(distributed,lambda:initialize_critic(critic_config['preheat_artifact'],
+                identity=c.identity,actor=c.actor,critic=c.critic,optimizer=c.critic_optimizer,
+                genmo_repo=c.config['paths']['genmo_repo'],quality_gate=critic_config['complete_mc']['quality_gate']))
+            c.state.update(critic_initialization=imported,mc_preheat_complete=True,
+                critic_updates=imported['selected_updates'],
+                training_control_steps=imported['prior_mc_control_steps'],
+                training_physics_steps=imported['prior_mc_physics_steps'],
+                prior_mc_control_steps=imported['prior_mc_control_steps'],
+                prior_mc_physics_steps=imported['prior_mc_physics_steps'])
+            c.state['next_mc_calibration_control_steps']=_next_interaction_boundary(
+                c.state['training_control_steps'],critic_config['complete_mc']['every_control_steps'])
         if cargs.resume:
             pointer=root_call(distributed,lambda:json.loads((c.output/'latest.json').read_text()))
             checkpoint=c.output/pointer['path']
@@ -323,11 +344,11 @@ def run(cargs,config,distributed):
             raise _FiniteDiagnosticComplete
         if payload is None:
             _snapshot(c,'initial',wait=True)
-            if cargs.collect_only or getattr(cargs,'critic_preheat_only',False):
-                report['initial_evaluation_skipped_for_finite_data_diagnostic']=True
-            else:
-                baseline=_evaluate(c,report,'initial')
-                root_call(distributed,lambda:atomic_json(c.output/'evaluation_baseline.json',baseline))
+        if cargs.collect_only or getattr(cargs,'critic_preheat_only',False):
+            report['initial_evaluation_skipped_for_finite_data_diagnostic']=True
+        elif _requires_initial_evaluation(cargs,c.state,root_call(distributed,lambda:(c.output/'evaluation_baseline.json').exists())):
+            baseline=_evaluate(c,report,'initial')
+            root_call(distributed,lambda:atomic_json(c.output/'evaluation_baseline.json',baseline))
         if cargs.evaluate_only:
             report.update(status='passed',scope='fixed_real_physics_evaluation_without_training',final_state=c.state)
             raise _FiniteDiagnosticComplete

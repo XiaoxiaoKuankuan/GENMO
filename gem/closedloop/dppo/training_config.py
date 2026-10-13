@@ -45,6 +45,11 @@ def configuration(path,*,genmo_repo=None,gmt_repo=None):
     if type(horizon['frames'])is not int or horizon['frames'] not in (60,120) or horizon['fps']!=30:raise ValueError('Actual GENMO horizon must be 60/120 frames at 30Hz')
     t['generation_frames']=horizon['frames']
     mc=s['critic'].get('complete_mc',{})
+    artifact=s['critic'].get('preheat_artifact')
+    if artifact and (not mc.get('enabled') or set(artifact)!={'path','sha256'}
+            or not isinstance(artifact['path'],str) or not Path(artifact['path']).is_absolute()
+            or not isinstance(artifact['sha256'],str) or len(artifact['sha256'])!=64):
+        raise ValueError('Explicit matching complete-MC Critic initialization artifact required')
     if mc.get('enabled'):
         if type(mc['samples_per_source'])is not int or mc['samples_per_source']<1 or type(mc['epochs'])is not int or mc['epochs']<1:
             raise ValueError('Complete MC supervision requires positive real episode count and epochs')
