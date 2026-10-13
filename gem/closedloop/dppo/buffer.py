@@ -105,15 +105,15 @@ class UpperTransition:
         if self.next_context is not None:
             validate_stage1_condition_batch(self.next_context, history_steps=50)
         if self.chain is None or self.chain.dtype != torch.float32 or self.chain.ndim != 3:
-            raise ValueError("valid transition requires a FP32 [K+1,120,30] chain")
-        if self.chain.shape[1:] != (120, 30) or self.chain.shape[0] < 2:
+            raise ValueError("valid transition requires a FP32 [K+1,T,30] chain")
+        if self.chain.shape[1:] != (self.context["future_valid"].shape[1], 30) or self.chain.shape[0] < 2:
             raise ValueError("invalid denoising chain shape")
         if self.old_log_prob is None or self.old_log_prob.shape != (self.chain.shape[0] - 1,):
             raise ValueError("old_log_prob must be [K]")
         if self.old_log_prob.dtype != torch.float64:
             raise ValueError("old joint log probabilities must preserve FP64 precision")
-        if self.free_mask is None or self.free_mask.dtype != torch.bool or self.free_mask.shape != (120, 30):
-            raise ValueError("free_mask must be bool [120,30]")
+        if self.free_mask is None or self.free_mask.dtype != torch.bool or self.free_mask.shape != (self.context["future_valid"].shape[1], 30):
+            raise ValueError("free_mask must be bool [T,30]")
         expected_free = self.context["future_valid"][0, :, None] & ~self.context["known_qpos30_mask"][0]
         if not torch.equal(self.free_mask, expected_free):
             raise ValueError("stored free_mask differs from the sampled condition mask")

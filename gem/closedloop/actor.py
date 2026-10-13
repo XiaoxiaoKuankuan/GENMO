@@ -298,7 +298,7 @@ class Stage1Actor(nn.Module):
             raise ValueError("timesteps outside diffusion schedule")
         noise = torch.randn_like(target_x) if noise is None else noise.to(target_x)
         if noise.shape != target_x.shape or not bool(torch.isfinite(noise).all()):
-            raise ValueError("noise must be finite [B,120,30]")
+            raise ValueError("noise must be finite [B,T,30] (T=60/120)")
         xt = self.train_diffusion.q_sample(target_x, timesteps, noise=noise)
         # 无 halo 的未知末端位移没有 x0 标签；其输入独立于占位标签，仍可被模型生成。
         xt = torch.where(valid, xt, noise)
@@ -326,7 +326,7 @@ class Stage1Actor(nn.Module):
         adapted = self.adapt_conditions(conditions)
         xt = torch.randn_like(adapted["known_x"]) if noise is None else noise.to(adapted["known_x"])
         if xt.shape != adapted["known_x"].shape or not bool(torch.isfinite(xt).all()):
-            raise ValueError("noise must be finite [B,120,30]")
+            raise ValueError("noise must be finite [B,T,30] (T=60/120)")
         xt = self._constrain(xt, adapted)
         residual = self._residual(adapted)
         conditional = self._music_condition(adapted) + residual

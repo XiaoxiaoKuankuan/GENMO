@@ -144,7 +144,7 @@ def dense_precision_scope(precision):
 
 class DenseDiffusionPolicy(DPPODiffusionPolicy):
     def __init__(self,actor,*,std_schedule,precision='native_fp32',attention='sdpa_math',compile_denoiser=False,
-                 precise_output=True,linear_execution='native_gemm',weight_gradient='direct_joint_gemm',steps=20,eta=.1,guidance_scale=2.5):
+                 precise_output=True,linear_execution='native_gemm',weight_gradient='direct_joint_gemm',steps=20,eta=.1,guidance_scale=2.5,generation_frames=120):
         if steps!=20 or len(std_schedule)!=20:
             raise ValueError('当前 production behavior must retain the full 20-step chain')
         super().__init__(actor,steps=steps,eta=eta,std_floor=min(std_schedule),std_schedule=std_schedule,
@@ -152,6 +152,8 @@ class DenseDiffusionPolicy(DPPODiffusionPolicy):
         self.numerical_layout='native_dense'
         self.batched_conditions=True
         self.precision=precision
+        if generation_frames not in (60,120) or generation_frames>actor.denoiser.max_len:raise ValueError('Invalid actual generation horizon')
+        self.generation_frames=generation_frames
         self.numerical_execution=configure_dense_actor(actor,precision=precision,attention=attention,
             precise_output=precise_output,linear_execution=linear_execution,weight_gradient=weight_gradient)
         if compile_denoiser:
@@ -162,8 +164,10 @@ class DenseDiffusionPolicy(DPPODiffusionPolicy):
             execution_contract=self.numerical_layout,numerical_execution=self.numerical_execution,
             condition_batch_size='unique_chains',execution_batch_size=None,
             network_batch='actual_rows_no_fixed64_tiles',effective_std_floors=list(std_schedule))
+        self.kernel_config.update(generation_horizon_frames=generation_frames,generation_fps=30)
 
     def prepare_conditions(self,conditions):
+        if conditions['future_valid'].shape[1]!=self.generation_frames:raise ValueError('Condition horizon differs from actual behavior kernel')
         with dense_precision_scope(self.precision):return super().prepare_conditions(conditions)
 
     def _transition_prepared(self,prepared,x_k,step_index,*,diagnostics=False):

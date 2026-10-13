@@ -264,6 +264,6 @@ def critic_update(critic,optimizer,rows,targets,cache,manifest,*,distributed,gen
             losses.append(float(distributed.sum_tensor(loss.detach())))
     final=metrics()
     return dict(before=initial,after=final,optimizer_steps=len(losses),epochs=epochs,losses=losses,gradient_norms=norms,
-        frozen_encoder_passes=1 if cached_features else 0,feature_bytes=sum(v.numel()*v.element_size() for v in encoded.values()),
+        frozen_encoder_passes=int(cached_features and bool(local_rows)),feature_bytes=sum(v.numel()*v.element_size() for v in encoded.values()),
         critic_feature_contract='independent_pretrained_frozen_cache' if cached_features else 'recompute_trainable_encoders_each_step',
         global_sample_visits=epochs*len(selected),metric_scope='fixed_rollout_bootstrap_targets_next_batch_before_update_is_separate')

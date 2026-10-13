@@ -290,7 +290,7 @@ class DPPODiffusionPolicy:
     @staticmethod
     def _state(value: torch.Tensor, reference: torch.Tensor, name: str) -> torch.Tensor:
         if not isinstance(value, torch.Tensor) or value.shape != reference.shape:
-            raise ValueError(f"{name} must have shape [B,120,30]")
+            raise ValueError(f"{name} must have shape [B,T,30] (T=60/120)")
         if value.dtype != torch.float32 or value.device != reference.device:
             raise TypeError(f"{name} must be float32 on the conditions device")
         require_tensor(torch.isfinite(value).all(), f"{name} must be finite")

@@ -1,10 +1,18 @@
-# Stage10：末端噪声noise001的独立真实物理对照完整配置。
-# 初始化s595000并冻结GMT140500，保留完整20步随机采样、50Hz控制和200Hz四子步物理。
-# 与critic32主方案只改变effective_std_floors；固定音乐/种子、0.30秒已测计算时延、
-# 奖励和机器人合同保持相同，先使用--evaluate-only检查真实跟踪、连续性及失败。
-# 噪声日程为归一化qpos30的标准差下限，实际std仍包含原DDIM eta噪声。
-# 必须建立独立run身份；禁止改写其他噪声行为的old statistics或透明恢复其checkpoint。
-# 本配置的Actor学习率尚未针对该噪声重新标定；物理评估通过不等于可正式训练。
+# 当前连续音乐第二阶段正式候选：s595000 Actor、冻结GMT140500、真实Isaac反馈。
+# 实际生成60帧/2秒，保持预训练max_len120权重；120帧仅通过同实现对照配置选用。
+# 每GPU一个64环境世界，PPO按4秒真实世界时间到合法决策边界一起停，正常episode跨轮继续。
+# 实际有效链数、尾批和optimizer次数由本轮manifest决定；首轮包含真实重置预热，不强凑4096。
+# 行为始终20步随机扩散，PPO每epoch无放回K8；平均自由坐标log-ratio仅为代理，保留原joint统计。
+# 主数值核stable_tf32x3，采样/最终全20步KL真正无梯度；Actor主参数与Adam FP32。
+# 音乐奖励开关关闭且权重0；音乐条件/CFG/Stage1监督保留，tracking保留配对动作activity gate。
+# Critic独立冻结Stage1编码器，256维/2层/4头；固定Actor完整episode MC/TD比例经独立验证选择。
+# 完整MC预热256epoch按真实状态量推导步骤，验证MSE降30%且EV>=0.2才允许Actor学习。
+# 正式Actor阶段主要用当前新采样TD/GAE，真实终止不bootstrap、普通窗口尾bootstrap、不跨Actor拼GAE。
+# 每轮BC总512按实际PPO步数整数分配，局部梯度按实际全局分母累计，一次SUM、一次裁剪更新。
+# 微批64/KL256和Actor学习率5e-8目前为有限H60标定起点，不能把H120结果当作H60学习收益。
+# 日常完整链驻GPU至优化与最终KL完成，周期/异常才存完整证据；checkpoint一致CPU快照单在途异步。
+# 新schema拒旧实验等价恢复；恢复重建新PhysX episode，48小时沿原始期限累计（停机也计入）。
+# 未绑定实际Horizon部署测量hash时正式入口明确拒绝；500轮预算不自动启动长期训练。
 version: genmo.gmt_frozen_isaac.v1
 paths:
   genmo_repo: /home/user/liwei/GENMO-bumi-closedloop
@@ -66,7 +74,7 @@ timing:
   calibration_samples: 2
   deployment_profile:
     schema: genmo.deployment_delay_profile.v1
-    behavior_kernel_sha256: ebfce1a5806b539c3775073cf5a427e955b782d453d6cfc2ede67220dcd4c9eb
+    behavior_kernel_sha256: pending_h60_actual_calibration
     target: single_robot_single_request
     prefix_budget_seconds: 0.3
     samples_seconds:
@@ -193,7 +201,7 @@ stage10:
     world_size: 8
     backend: nccl
     collection: all_ranks
-  version: genmo.closedloop.stage10.world_window.v1
+  version: genmo.closedloop.stage10.continuous_horizon.v1
   seed: 42
   physical_episode:
     safety_limit_seconds: null
@@ -202,7 +210,7 @@ stage10:
     world_seconds: 4.0
     collection_contract: shared_world_sim_time.v1
   generation_horizon:
-    frames: 120
+    frames: 60
     fps: 30
   training:
     execution_mode: latency
@@ -392,7 +400,10 @@ stage10:
       training_seeds: [42, 1729]
       validation_seeds: [2718, 31415]
       mix_candidates: [0.0, 0.5, 1.0]
-      epochs: 32
+      epochs: 256
+      quality_gate:
+        minimum_relative_mse_reduction: 0.3
+        minimum_explained_variance: 0.2
       every_control_steps: 5000000
     type: pretrained_temporal
     dimension: 256

@@ -86,6 +86,7 @@ def _sources(config):
             robot_root=root/'source/NoetixRobot/NoetixRobot'
             # 实际任务的env/mdp/PD/观测会改变物理转移，不能只绑定closedloop适配层。
             files=list((robot_root/'tasks/mimic/mimic_noetix_bumi4340_mha_sonic').rglob('*.py'))
+            files+=list(robot_root.rglob('*.py'))
             for directory in ('actuators','managers','terrains','assets/robots/bumi3_4340_lowpd'):
                 files+=list((robot_root/directory).rglob('*.py'))
             files+=list((root/'scripts/rsl_rl').glob('bumi4340*.py'))
@@ -94,7 +95,10 @@ def _sources(config):
             files+=list((robot_root/'tasks/mimic/mimic_noetix_bumi4340_mha_sonic').rglob('*.yaml'))
             files+=[p for p in (robot_root/'assets/robots/bumi3_4340_lowpd').rglob('*') if p.is_file()]
             files+=list((root/'rsl_rl/rsl_rl').rglob('*.py'))
-        records[label]={str(p.relative_to(root)):file_sha256(p) for p in sorted(set(files))}
+            # Isaac Lab基类和管理器直接决定控制/物理生命周期；同样绑定实际源码。
+            lab=Path(config.get('runtime',{}).get('isaaclab_root','/nonexistent_isaaclab'))
+            files+=list((lab/'source/isaaclab/isaaclab').rglob('*.py'))
+        records[label]={str(p.relative_to(root)) if p.is_relative_to(root) else 'external/'+str(p):file_sha256(p) for p in sorted(set(files))}
     return records
 
 
@@ -261,7 +265,6 @@ def run(cargs,config,distributed):
         anchor_config['stage9'].update(bc_batch=c.settings['bc_batch']//distributed.world_size,
             seed=(c.stage['seed']+1000003*distributed.rank)%2**32)
         c.bc=Stage1RetentionAnchor(anchor_config,c.actor,train,source_global_step=loading['source_global_step'])
-        c.bc.distributed_global_mean=True
         c.generators=dict(actor=torch.Generator().manual_seed(c.stage['seed']+3003),critic=torch.Generator().manual_seed(c.stage['seed']+2002))
         c.state=dict(iteration=0,rollouts_completed=0,warmup_completed=0,actor_updates=0,critic_updates=0,
             policy_version=0,optimizer_attempts=0,training_control_steps=0,training_physics_steps=0,
@@ -273,6 +276,7 @@ def run(cargs,config,distributed):
             training=c.stage['training'],critic=c.stage['critic'],bc_gradient=c.stage['bc_gradient'],kl=c.stage['kl'],
             scale=c.stage['scale'],reward=c.settings['reward'],runtime=c.base_config['runtime'],timing=c.base_config['timing'],
             dataset=c.stage['dataset'],evaluation=c.stage['evaluation'],
+            physical_episode=c.stage['physical_episode'],ppo_rollout=c.stage['ppo_rollout'],generation_horizon=c.stage['generation_horizon'],
             physical_configuration=root_call(distributed,lambda:_physical_configuration_identity(c.base_config)),
             source_files=root_call(distributed,lambda:_sources(config)),
             data_catalog=c.catalog.identity,source_stage1_step=loading['source_global_step'],
@@ -304,7 +308,7 @@ def run(cargs,config,distributed):
         from gem.closedloop.online_conditions import OnlineConditionBuilder
         from gem.robots.bumi.feature_codec import BumiMotionFeatureCodec
         from gem.robots.bumi.kinematics import BumiKinematics
-        c.builder=OnlineConditionBuilder(BumiMotionFeatureCodec(BumiKinematics(config['paths']['kinematics'])))
+        c.builder=OnlineConditionBuilder(BumiMotionFeatureCodec(BumiKinematics(config['paths']['kinematics'])),motion_frames=config['stage10']['generation_horizon']['frames'])
         if distributed.rank==0:
             from torch.utils.tensorboard import SummaryWriter
             c.writer=SummaryWriter(str(c.output/'tensorboard'),max_queue=128,flush_secs=30)
@@ -331,9 +335,11 @@ def run(cargs,config,distributed):
         if complete_mc.get('enabled') and not cargs.collect_only and not c.state.get('mc_preheat_complete'):
             from .mc_calibration import calibrate_critic
             report['mc_preheat']=calibrate_critic(c,'preheat',fit=True)
-            c.state['mc_preheat_complete']=True
+            c.state['mc_preheat_complete']=report['mc_preheat']['quality_gate_passed']
             c.state['next_mc_calibration_control_steps']=_next_interaction_boundary(c.state['training_control_steps'],complete_mc['every_control_steps'])
             _snapshot(c,'complete_mc_preheat',wait=True)
+            if not c.state['mc_preheat_complete'] and not getattr(cargs,'critic_preheat_only',False):
+                raise RuntimeError('Independent complete MC validation is insufficient; Actor learning remains disabled')
         if getattr(cargs,'critic_preheat_only',False):
             report.update(status='passed',scope='complete_MC_critic_preheat_without_Actor_updates',final_state=c.state)
             raise _FiniteDiagnosticComplete
@@ -361,7 +367,7 @@ def run(cargs,config,distributed):
             profile_token=activate(profiler)
             buffer,targets,manifest,collection=c.vector.collect(label,strict=strict)
             rows=buffer.transitions
-            used=distributed.sum_tensor(torch.tensor([collection['actual_confirmed_control_steps'],collection['actual_confirmed_physics_steps'],len(rows)],
+            used=distributed.sum_tensor(torch.tensor([collection['actual_confirmed_control_steps'],collection['actual_world_allocated_physics_steps'],len(rows)],
                 device=distributed.device,dtype=torch.int64)).cpu().tolist()
             # 实际交互已发生，KL拒绝只恢复学习状态，不能让交互计数回退。
             c.state['training_control_steps']+=used[0]

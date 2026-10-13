@@ -33,7 +33,7 @@ import torch
 from torch import nn
 
 from gem.closedloop.contracts import STAGE1_CONTRACT_VERSION
-from gem.robots.bumi.feature_codec import BUMI_REPRESENTATION_CONTRACT_VERSION
+from gem.robots.bumi.feature_codec import BUMI_REPRESENTATION_CONTRACT_VERSION, validate_native_checkpoint
 
 STAGE1_CHECKPOINT_VERSION = "genmo.bumi_closedloop.checkpoint.v1"
 STAGE1_TRAINING_CHECKPOINT_VERSION = "genmo.bumi_closedloop.training_checkpoint.v1"
@@ -110,10 +110,8 @@ def warm_start_weights(
 ) -> dict[str, Any]:
     """只迁移匹配旧 qpos30/contact2 权重，并返回每个参数的明确分类。"""
 
-    from gem.bumi_gem import BumiMusicGEM
-
     checkpoint = _read_checkpoint(source)
-    BumiMusicGEM._validate_representation_checkpoint(checkpoint)
+    validate_native_checkpoint(checkpoint)
     current = actor.state_dict()
     report: dict[str, Any] = {
         "mode": "weights_only_warm_start",

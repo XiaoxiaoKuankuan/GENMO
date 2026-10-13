@@ -169,8 +169,9 @@ class FrozenStage1Actor:
             raise ValueError("Stage8 frozen worker currently requires B=1")
         if not math.isclose(float(batch["decision_time"][0]), int(meta["decision_tick"]) / 600.0, abs_tol=1e-8):
             raise ValueError("condition time differs from request decision_tick")
+        frames=batch["future_valid"].shape[1]
         prefix = int(meta["prefix_frames"])
-        if not 0 <= prefix < 120 or int(batch["known_qpos30_mask"].any(-1).sum()) != prefix:
+        if not 0 <= prefix < frames or int(batch["known_qpos30_mask"].any(-1).sum()) != prefix:
             raise ValueError("prefix metadata differs from coordinate mask")
         anchor = torch.as_tensor(meta["world_anchor"], dtype=torch.float32, device=self.device)
         if anchor.shape != (4,) or not bool(torch.isfinite(anchor).all()):
@@ -179,7 +180,7 @@ class FrozenStage1Actor:
             raise ValueError("world_anchor Z must equal the existing codec default root reference")
         seed = stable_noise_seed(meta["seed"], meta["decision_id"])
         generator = torch.Generator(device="cpu").manual_seed(seed)
-        noise = torch.randn((1, 120, 30), generator=generator, dtype=torch.float32).to(self.device)
+        noise = torch.randn((1, frames, 30), generator=generator, dtype=torch.float32).to(self.device)
         devices = [self.device.index if self.device.index is not None else torch.cuda.current_device()] if self.device.type == "cuda" else []
         # DDIM eta=0 仍调用 randn_like；隔离其 RNG 副作用，不污染其他 episode 的随机状态。
         with torch.random.fork_rng(devices=devices):
@@ -191,7 +192,7 @@ class FrozenStage1Actor:
         world = self.actor.endecoder.codec.apply_world_anchor(sample["qpos"], anchor)
         result = {**dict(meta)}
         for name, value, width in (("qpos_world", world, 28), ("qpos30", sample["qpos30"], 30), ("contact", sample["contact"], 2)):
-            if value.shape != (1, 120, width) or not bool(torch.isfinite(value).all()):
+            if value.shape != (1, frames, width) or not bool(torch.isfinite(value).all()):
                 raise FloatingPointError(f"Actor produced invalid {name}")
             result[name] = value[0].detach().cpu().to(torch.float32).numpy().copy()
         if self.device.type == "cuda":

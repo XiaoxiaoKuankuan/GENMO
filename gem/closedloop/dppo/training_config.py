@@ -18,7 +18,7 @@ import yaml
 
 from .rewards import resolve_reward_config
 
-VERSION='genmo.closedloop.stage10.world_window.v1'
+VERSION='genmo.closedloop.stage10.continuous_horizon.v1'
 
 
 def configuration(path,*,genmo_repo=None,gmt_repo=None):
@@ -28,7 +28,7 @@ def configuration(path,*,genmo_repo=None,gmt_repo=None):
     if genmo_repo:c['paths']['genmo_repo']=str(Path(genmo_repo).resolve())
     if gmt_repo:c['paths']['gmt_repo']=str(Path(gmt_repo).resolve())
     s=c['stage10'];t=s['training'];scale=s['scale'];world=s['distributed']['world_size']
-    if s['evaluation'].get('effect_check_iterations'):
+    if 'effect_check_iterations' in s['evaluation']:
         raise ValueError('effect_check_iterations is unsupported; use actual interaction evaluation intervals')
     for key in ('eta', 'guidance_scale'):
         if not math.isfinite(t[key]) or t[key] < 0:
@@ -41,6 +41,17 @@ def configuration(path,*,genmo_repo=None,gmt_repo=None):
     if s['ppo_rollout']['world_seconds']<=0 or s['ppo_rollout']['world_seconds']%0.5:raise ValueError('Rollout world window must lie on the decision grid')
     if s['ppo_rollout']['collection_contract']!='shared_world_sim_time.v1':raise ValueError('Current collection uses shared world simulation time')
     if 'decisions_per_environment' in scale:raise ValueError('Per-environment decision quotas are no longer supported')
+    horizon=s['generation_horizon']
+    if type(horizon['frames'])is not int or horizon['frames'] not in (60,120) or horizon['fps']!=30:raise ValueError('Actual GENMO horizon must be 60/120 frames at 30Hz')
+    t['generation_frames']=horizon['frames']
+    mc=s['critic'].get('complete_mc',{})
+    if mc.get('enabled'):
+        if type(mc['samples_per_source'])is not int or mc['samples_per_source']<1 or type(mc['epochs'])is not int or mc['epochs']<1:
+            raise ValueError('Complete MC supervision requires positive real episode count and epochs')
+        if not mc['mix_candidates'] or any(not math.isfinite(v) or not 0<=v<=1 for v in mc['mix_candidates']):raise ValueError('Invalid MC/TD mixing candidates')
+        if set(mc['training_seeds']) & set(mc['validation_seeds']):raise ValueError('MC validation seeds must be independent')
+        for value in mc.get('quality_gate',{}).values():
+            if not math.isfinite(value) or not 0<=value<1:raise ValueError('Invalid independent MC quality threshold')
     n=c['runtime']['num_envs'];decisions=math.ceil(s['ppo_rollout']['world_seconds']/.5);chains=n*decisions*world
     for k,v in [('world',world),('environments',n),('decisions',decisions),('optimizer chains',scale['actor_minibatch_chains']),
                 ('Actor microbatch',t['denoising_microbatch']),('KL microbatch',t['kl_microbatch'])]:

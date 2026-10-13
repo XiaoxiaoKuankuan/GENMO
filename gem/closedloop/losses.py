@@ -159,9 +159,9 @@ class Stage1BumiLosses(BumiRobotLosses):
         """返回可反传总损失和包含 raw/normalized/weighted 的独立诊断字典。"""
         validate_stage1_training_batch(batch, history_steps=int(batch["proprio_history"].shape[1]))
         if pred_x_start.shape != batch["target_qpos30"].shape:
-            raise ValueError("pred_x_start must match target_qpos30 [B,120,30]")
+            raise ValueError("pred_x_start must match target_qpos30 [B,T,30] (T=60/120)")
         if contact_logits.shape != batch["target_contact"].shape:
-            raise ValueError("contact_logits must match target_contact [B,120,2]")
+            raise ValueError("contact_logits must match target_contact [B,T,2] (T=60/120)")
         # 原物理公式也在 FP32 中运行，避免低精度 SO(3)/差分/FK 放大误差。
         with torch.autocast(device_type=pred_x_start.device.type, enabled=False):
             return self._forward_float(

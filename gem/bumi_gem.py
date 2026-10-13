@@ -11,6 +11,7 @@ from gem.gem import GEM
 from gem.robots.bumi.feature_codec import (
     BUMI_FEATURE_DIM,
     BUMI_REPRESENTATION_CONTRACT_VERSION,
+    validate_native_checkpoint,
 )
 from gem.robots.bumi.metrics import compute_bumi_kinematic_metrics
 from gem.robots.bumi.postprocess import (
@@ -68,36 +69,7 @@ class BumiMusicGEM(GEM):
 
     @staticmethod
     def _validate_representation_checkpoint(checkpoint: Mapping[str, Any]) -> None:
-        actual = checkpoint.get("bumi_representation_contract_version")
-        if actual != BUMI_REPRESENTATION_CONTRACT_VERSION:
-            raise RuntimeError(
-                "BUMI checkpoint representation mismatch: expected "
-                f"{BUMI_REPRESENTATION_CONTRACT_VERSION!r}, got {actual!r}. "
-                "Only native qpos30 checkpoints with the current representation contract "
-                "are accepted."
-            )
-        state = checkpoint.get("state_dict")
-        if not isinstance(state, Mapping):
-            raise RuntimeError("native BUMI qpos30 checkpoint is missing state_dict")
-        final_shapes = [
-            tuple(value.shape)
-            for key, value in state.items()
-            if str(key).endswith("denoiser.final_layer.fc2.weight")
-            and isinstance(value, torch.Tensor)
-        ]
-        contact_shapes = [
-            tuple(value.shape)
-            for key, value in state.items()
-            if str(key).endswith("static_conf_head.fc2.weight") and isinstance(value, torch.Tensor)
-        ]
-        if len(final_shapes) != 1 or final_shapes[0][0] != BUMI_FEATURE_DIM:
-            raise RuntimeError(
-                f"native BUMI checkpoint must contain one qpos30 output head, got {final_shapes}"
-            )
-        if len(contact_shapes) != 1 or contact_shapes[0][0] != 2:
-            raise RuntimeError(
-                f"native BUMI checkpoint must contain one 2D contact head, got {contact_shapes}"
-            )
+        validate_native_checkpoint(checkpoint)
 
     def on_save_checkpoint(self, checkpoint: dict[str, Any]) -> None:
         super().on_save_checkpoint(checkpoint)

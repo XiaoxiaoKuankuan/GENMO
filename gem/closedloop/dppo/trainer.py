@@ -189,7 +189,7 @@ def _validate_actor_transitions(policy, transitions):
     for item in transitions:
         if not item.transition_valid:
             raise ValueError('Invalid transitions cannot enter Actor optimization')
-        if item.chain.shape != (policy.steps + 1, 120, 30):
+        if item.chain.shape != (policy.steps + 1, item.context["future_valid"].shape[1], 30):
             raise ValueError('Rollout chain differs from the configured denoising steps')
         if item.chain.dtype != torch.float32 or item.old_log_prob.dtype != torch.float64:
             raise TypeError('Rollout chain/log probability precision changed')
@@ -417,9 +417,10 @@ class SupervisedAnchor:
         data.server1_example.root=config['stage9']['bc_data_root']
         data.qpos30_stats.path=config['paths']['stats']
         data.dataset_defaults.kinematics_path=config['paths']['kinematics']
+        frames=config.get('stage10',{}).get('generation_horizon',{}).get('frames',120)
         prefix=config['stage9'].get('bc_prefix',dict(min_frames=6,max_frames=18,zero_probability=.15))
         if (type(prefix['min_frames']) is not int or type(prefix['max_frames']) is not int
-                or not 1 <= prefix['min_frames'] <= prefix['max_frames'] < 120
+                or not 1 <= prefix['min_frames'] <= prefix['max_frames'] < frames
                 or not 0 <= prefix['zero_probability'] < 1):
             raise ValueError('BC prefix range must preserve at least one free future frame')
         data.sample_contract.update(prefix_min_frames=prefix['min_frames'],prefix_max_frames=prefix['max_frames'],
@@ -430,6 +431,7 @@ class SupervisedAnchor:
             opts=OmegaConf.to_container(entry,resolve=True)
             opts.pop('_target_',None)
             opts['kinematics_path']=config['paths']['kinematics']
+            opts['motion_frames']=frames
             self.datasets.append(BumiClosedLoopStage1Dataset(**opts))
         self.losses=build_stage1_losses(actor,train_config).to(next(actor.parameters()).device)
         self.generator=torch.Generator().manual_seed(int(config['stage9']['seed'])+1001)

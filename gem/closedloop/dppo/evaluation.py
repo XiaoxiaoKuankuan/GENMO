@@ -267,7 +267,9 @@ def _decision_evidence(result, index):
         mask = context.get('known_qpos30_mask') if isinstance(context, dict) else None
         if mask is not None:
             prefix = int(torch.as_tensor(mask).any(-1).sum())
-    if type(prefix) is not int or not 0 <= prefix < 120:
+    frames=generated.get('generation_horizon_frames',120)
+    if type(frames)is not int or frames not in (60,120):raise ValueError('Invalid evaluated generation horizon')
+    if type(prefix) is not int or not 0 <= prefix < frames:
         raise ValueError('Evaluation requires actual known prefix frame count')
     terminal_snapshot = metadata.get('terminal_snapshot') or {}
     physical_failure = bool(terminal_snapshot.get('terminated', False))
@@ -282,6 +284,7 @@ def _decision_evidence(result, index):
             'terminated': terminated, 'truncated': truncated, 'reason': reason, 'physical_failure': physical_failure,
             'rejection': _plain(metadata.get('rejection')), 'latency_seconds': _number(metadata['latency_seconds'], 'latency'),
             'commit_seconds': _number(metadata.get('commit_seconds', 0.), 'commit latency'), 'prefix_frames': prefix,
+            'generation_horizon_frames':frames,'new_reference_frames':frames-prefix,
             'events': _plain(metadata.get('events', [])), 'raw_sample_path': str(metadata.get('raw_sample_path', '')),
             'controls': controls}
 
@@ -396,6 +399,7 @@ def evaluate_policy(env, policy, task_plan, output_dir, *, catalog=None, episode
                        'physical_failure': False, 'truncated': False, 'end_reason': None, 'reward_sum': 0.}
             try:
                 actual_motion_rows = []
+                generated_plans=[]
                 music = catalog.load_music(task['sample']) if catalog is not None else load_music_features(plan['data_root'], task['sample'])
                 if 'physical_episode' in env.config.get('stage10',{}):
                     env.config['stage10']['physical_episode']['safety_limit_seconds']=None if limit is None else float(limit)
@@ -410,6 +414,7 @@ def evaluate_policy(env, policy, task_plan, output_dir, *, catalog=None, episode
                         if transition_sink is not None:transition_sink(task,result)
                         evidence = _decision_evidence(result, decision_index)
                         actual_motion_rows.extend({k:np.array(r[k],copy=True) for k in ('tick','actual_joint_pos_gmt','actual_joint_vel_gmt')} for r in _field(result,'metadata',{}).get('execution_trace',[]))
+                        generated_plans.append(_field(result,'metadata',{}).get('generated',{}))
                         episode['decisions'].append(evidence)
                         episode['reward_sum'] += evidence['reward_sum']
                         if evidence['terminated'] or evidence['truncated']:
@@ -424,8 +429,9 @@ def evaluate_policy(env, policy, task_plan, output_dir, *, catalog=None, episode
                 episode.update(transition_valid=False, error={'type': type(caught).__name__, 'message': str(caught)},
                                end_reason='infrastructure_failure')
                 error = caught
-            from .motion_diagnostics import episode_motion_diagnostic
+            from .motion_diagnostics import episode_motion_diagnostic,generated_reference_diagnostic
             episode['motion_diagnostic'] = episode_motion_diagnostic(actual_motion_rows,music) if episode.get('transition_valid') else dict(available=False,reason='invalid_episode')
+            episode['generated_reference_diagnostic']=generated_reference_diagnostic(generated_plans)
             episode_path = output/'episodes'/f'{index:06d}.json'
             _publish_json(episode_path, episode)
             episodes.append(episode)

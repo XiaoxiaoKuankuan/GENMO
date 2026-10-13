@@ -45,4 +45,4 @@ def build_policy(actor, settings, precision):
         eta=settings['eta'], guidance_scale=settings['guidance_scale'], precision=precision['mode'],
         attention=precision['attention'], linear_execution=precision['linear_execution'],
         compile_denoiser=precision['compile'], precise_output=precision['precise_output'],
-        weight_gradient=precision.get('weight_gradient', 'direct_joint_gemm'))
+        weight_gradient=precision.get('weight_gradient', 'direct_joint_gemm'),generation_frames=settings.get('generation_frames',120))

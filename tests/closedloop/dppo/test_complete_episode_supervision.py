@@ -76,4 +76,4 @@ def test_current_configuration_separates_three_time_concepts():
     assert 'episode_seconds' not in c['stage10']['training']
     assert c['stage10']['physical_episode']['safety_limit_seconds'] is None
     assert c['stage10']['ppo_rollout']['world_seconds']==4.
-    assert c['stage10']['generation_horizon']==dict(frames=120,fps=30)
+    assert c['stage10']['generation_horizon']==dict(frames=60,fps=30)

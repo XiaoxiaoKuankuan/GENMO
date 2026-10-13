@@ -81,7 +81,16 @@ def collect_complete_bank(c, label, split, *, samples_per_source, seeds):
                 local_call(c.distributed,run)
             finally:journal.close()
         if _model_fingerprint(c.actor)!=actor_before:raise RuntimeError('MC evaluation changed Actor weights')
-        finish_lease(c.distributed,c.budget,prepaid,lease,credits)
+        local_used=prepaid.state_dict()['used']
+        c.state['budget']=finish_lease(c.distributed,c.budget,prepaid,lease,credits)
+        consumed=c.distributed.sum_tensor(torch.tensor([local_used['control_steps'],local_used['physics_steps']],
+            device=c.distributed.device,dtype=torch.int64)).cpu().tolist()
+        field='mc_training' if split=='train' else 'mc_validation'
+        c.state[field+'_control_steps']=c.state.get(field+'_control_steps',0)+consumed[0]
+        c.state[field+'_physics_steps']=c.state.get(field+'_physics_steps',0)+consumed[1]
+        if split=='train':
+            c.state['training_control_steps']+=consumed[0]
+            c.state['training_physics_steps']+=consumed[1]
         bank.training_data(policy_version=c.state['policy_version'],kernel=c.policy.kernel_config)
         bank_record=dict(schema='genmo.complete_episode.value_dataset.v1',report=bank.report(),
             actor_fingerprint=actor_before,policy_version=c.state['policy_version'],kernel=c.policy.kernel_config,
@@ -138,12 +147,14 @@ def calibrate_critic(c, label, *, fit):
         initial=immutable_cpu_snapshot(c.critic.state_dict());optimizer=immutable_cpu_snapshot(c.critic_optimizer.state_dict())
         rng=capture_local_rng(c.generators);best=None;best_state=None;best_optimizer=None
         for ratio in cfg['mix_candidates']:
+            candidate_start=time.perf_counter()
             c.critic.load_state_dict(initial);c.critic_optimizer.load_state_dict(optimizer);restore_local_rng(rng,c.generators)
             result=critic_update(c.critic,c.critic_optimizer,rows,dict(returns=(1-ratio)*td+ratio*mc),
                 ValueConditionCache(rows,c.distributed.device),manifest,distributed=c.distributed,
                 generator=c.generators['critic'],epochs=cfg['epochs'],batch=c.stage['critic']['global_batch'])
             metrics=independent_mc_metrics(c,validation)
-            candidate=dict(mc_ratio=ratio,validation=metrics,training=result)
+            candidate=dict(mc_ratio=ratio,validation=metrics,training=result,
+                wall_seconds=max(c.distributed.all_gather_object(time.perf_counter()-candidate_start)))
             report['candidates'].append(candidate)
             if best is None or metrics['mse']<best['validation']['mse']:
                 best=candidate;best_state=immutable_cpu_snapshot(c.critic.state_dict());best_optimizer=immutable_cpu_snapshot(c.critic_optimizer.state_dict())
@@ -151,6 +162,11 @@ def calibrate_critic(c, label, *, fit):
         c.state['critic_updates']+=best['training']['optimizer_steps']
         report.update(selected_mc_ratio=best['mc_ratio'],after=best['validation'],
             attempted_critic_steps=sum(r['training']['optimizer_steps'] for r in report['candidates']))
+        report['relative_validation_mse_reduction']=1-best['validation']['mse']/max(before['mse'],1e-12)
+        gate=cfg.get('quality_gate',{})
+        report['quality_gate_passed']=(report['relative_validation_mse_reduction']>=gate.get('minimum_relative_mse_reduction',0.)
+            and best['validation']['explained_variance'] is not None
+            and best['validation']['explained_variance']>=gate.get('minimum_explained_variance',0.))
         training.episodes.clear();validation.episodes.clear()
     report['wall_seconds']=max(c.distributed.all_gather_object(time.perf_counter()-started))
     root_call(c.distributed,lambda:atomic_json(c.session/'mc_calibration'/f'{label}.json',report))

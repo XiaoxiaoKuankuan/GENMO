@@ -68,12 +68,12 @@ def actor_factory(tmp_path):
     )
     root = _write_dataset(tmp_path / "dataset", length=180)
 
-    def make(*, history_steps=50, prefix=6, starts=(45, 47), proprio_scales=(1, 1, 1, 1)):
+    def make(*, history_steps=50, prefix=6, starts=(45, 47), proprio_scales=(1, 1, 1, 1),motion_frames=120):
         dataset = _dataset(
             root,
             history_steps=history_steps,
             prefix_min_frames=prefix,
-            prefix_max_frames=prefix,
+            prefix_max_frames=prefix,motion_frames=motion_frames,
         )
         batch = collate_stage1_training_samples(
             [dataset.get_window(0, start_frame=start) for start in starts]

@@ -75,6 +75,7 @@ class Stage1RetentionAnchor(SupervisedAnchor):
                     torch.manual_seed(20261012);np.random.seed(20261012);random.seed(20261012)
                     for entry in data.datasets.val.values():
                         options=OmegaConf.to_container(entry,resolve=True);options.pop('_target_',None)
+                        options['motion_frames']=config['stage10']['generation_horizon']['frames']
                         dataset=BumiClosedLoopStage1Dataset(**options)
                         indices=torch.randperm(len(dataset),generator=selection_rng)[:min(len(dataset),2*world)].tolist()
                         for ordinal,index in enumerate(indices):
@@ -82,7 +83,7 @@ class Stage1RetentionAnchor(SupervisedAnchor):
                             sample=dataset[index]
                             items.append((collate_stage1_training_samples([sample]),
                                 torch.randint(actor.diffusion_steps,(1,),generator=noise_rng),
-                                torch.randn(1,120,30,generator=noise_rng)))
+                                torch.randn(1,config['stage10']['generation_horizon']['frames'],30,generator=noise_rng)))
             finally:np.random.set_state(numpy_state);random.setstate(python_state)
             self._validation_samples=items
         modes={name:child.training for name,child in actor.named_modules()};actor.eval();results=[]

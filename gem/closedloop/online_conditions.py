@@ -68,10 +68,12 @@ class FrozenMusicFeatures:
 class OnlineConditionBuilder:
     """只读取快照，不修改后端缓存；构造 batch=1 的原始 physical 条件。"""
 
-    def __init__(self, codec: BumiMotionFeatureCodec, history_steps: int = 50) -> None:
+    def __init__(self, codec: BumiMotionFeatureCodec, history_steps: int = 50, motion_frames: int = 120) -> None:
         if not isinstance(codec, BumiMotionFeatureCodec):
             raise TypeError("codec must be the existing BumiMotionFeatureCodec")
         self.codec = codec
+        if type(motion_frames)is not int or motion_frames not in (60,120):raise ValueError('Explicit 60/120 frame horizon required')
+        self.motion_frames=motion_frames
         self.history_steps = _integer(history_steps, "history_steps")
         if self.history_steps <= 0:
             raise ValueError("history_steps must be positive")
@@ -112,9 +114,10 @@ class OnlineConditionBuilder:
             if key in snapshot:
                 meta.setdefault(key, snapshot[key])
 
+        if meta.get('generation_horizon_frames',self.motion_frames)!=self.motion_frames:raise ValueError('GMT and GENMO horizon differ')
         prefix = _integer(meta["prefix_frames"], "prefix_frames")
-        if not 0 <= prefix < MOTION_WINDOW_FRAMES:
-            raise ValueError("prefix_frames must be in [0,119] and leave a generation horizon")
+        if not 0 <= prefix < self.motion_frames:
+            raise ValueError("prefix_frames must leave new space in the configured horizon")
         source = _tensor(reservation["source_qpos"], torch.float32)
         source_ticks = _tensor(reservation["source_ticks"])
         if source.shape != (prefix, 28) or source_ticks.shape != (prefix,):
@@ -127,7 +130,7 @@ class OnlineConditionBuilder:
         if not torch.isfinite(source).all():
             raise ValueError("reserved source contains NaN/Inf")
 
-        known = torch.zeros((1, MOTION_WINDOW_FRAMES, 30), dtype=torch.float32)
+        known = torch.zeros((1, self.motion_frames, 30), dtype=torch.float32)
         known_mask = torch.zeros_like(known, dtype=torch.bool)
         if prefix:
             features,anchor = (self.codec.encode_condition_features(source) if _prefix_encoding is None else _prefix_encoding)
@@ -144,7 +147,7 @@ class OnlineConditionBuilder:
         known = torch.where(known_mask, known, 0.0)
 
         history, history_valid, history_ticks = self._history(snapshot, decision_tick)
-        future_ticks = decision_tick + torch.arange(MOTION_WINDOW_FRAMES, dtype=torch.int64) * SOURCE_TICKS
+        future_ticks = decision_tick + torch.arange(self.motion_frames, dtype=torch.int64) * SOURCE_TICKS
         music_start_tick = _integer(music_start_tick, "music_start_tick")
         if (decision_tick - music_start_tick) % SOURCE_TICKS:
             raise ValueError("decision and music start must share the 30 Hz source grid")
@@ -156,7 +159,7 @@ class OnlineConditionBuilder:
                 raise ValueError("music_features must be finite float [N,35] at 30 Hz")
         indices = (future_ticks - music_start_tick) // SOURCE_TICKS
         music_valid = (indices >= 0) & (indices < len(music))
-        window = torch.zeros((MOTION_WINDOW_FRAMES, MUSIC_FEATURE_DIM), dtype=torch.float32)
+        window = torch.zeros((self.motion_frames, MUSIC_FEATURE_DIM), dtype=torch.float32)
         window[music_valid] = music[indices[music_valid]]
         conditions = {
             "music_features": window[None],
@@ -167,7 +170,7 @@ class OnlineConditionBuilder:
             "known_qpos30": known,
             "known_qpos30_mask": known_mask,
             # 推理计划在音乐结尾之外仍有状态点，只有音乐条件被显式标为不可见。
-            "future_valid": torch.ones((1, MOTION_WINDOW_FRAMES), dtype=torch.bool),
+            "future_valid": torch.ones((1, self.motion_frames), dtype=torch.bool),
             "future_times": future_ticks[None].to(torch.float64) / CLOCK_HZ,
             "decision_time": torch.tensor([decision_tick / CLOCK_HZ], dtype=torch.float64),
         }
@@ -177,6 +180,7 @@ class OnlineConditionBuilder:
         yaw = float(anchor.yaw.reshape(()).detach().cpu())
         meta.update({
             "decision_tick": decision_tick,
+            "generation_horizon_frames": self.motion_frames,
             "prefix_frames": prefix,
             "world_anchor": [*position.tolist(), yaw],
             "anchor_pos": position.numpy().copy(),

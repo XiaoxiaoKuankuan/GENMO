@@ -35,9 +35,9 @@ from gem.closedloop.dppo.trainer import load_actor
 from gem.closedloop.stage1_dataset import BumiClosedLoopStage1Dataset, collate_stage1_training_samples
 
 
-def math_checks(device):
+def math_checks(device,frames=120):
     torch.manual_seed(12010)
-    x=torch.randn(16,120,30,device=device);old=torch.randn_like(x)
+    x=torch.randn(16,frames,30,device=device);old=torch.randn_like(x)
     new=(old+.01*torch.randn_like(old)).requires_grad_(True)
     sigma=torch.full((16,1,1),.03,device=device);current=sigma*1.003
     mask=torch.rand_like(x)>.15;mask[0]=False
@@ -66,14 +66,14 @@ def math_checks(device):
         clip_branch_checked=True,without_replacement_loss_expectation_checked=True)
 
 
-def load_real_conditions(actor,config,device,count):
+def load_real_conditions(actor,config,device,count,frames=120):
     data=OmegaConf.load(ROOT/'configs/closedloop/stage1_dataset_server1_fourset_90505_v1.yaml')
     data.server1_example.root=config['paths']['data_root']
     data.dataset_defaults.kinematics_path=config['paths']['kinematics']
     data.sample_contract.update(prefix_min_frames=6,prefix_max_frames=30,prefix_zero_probability=.15)
     samples=[]
     for entry in data.datasets.train.values():
-        opts=OmegaConf.to_container(entry,resolve=True);opts.pop('_target_')
+        opts=OmegaConf.to_container(entry,resolve=True);opts.pop('_target_');opts['motion_frames']=frames
         ds=BumiClosedLoopStage1Dataset(**opts)
         for i in range((count+3)//4):samples.append(ds[(7*i+3)%len(ds)])
     batch=collate_stage1_training_samples(samples[:count])
@@ -152,27 +152,34 @@ def main():
     parser.add_argument('--compile',action='store_true')
     parser.add_argument('--linear-execution',default='native_gemm')
     parser.add_argument('--chains',type=int,default=8)
+    parser.add_argument('--frames',type=int,choices=[60,120],default=60)
     args=parser.parse_args();rank=int(os.environ['RANK']);device=torch.device('cuda:'+os.environ['LOCAL_RANK'])
     torch.cuda.set_device(device);torch.set_num_threads(4);torch.manual_seed(42)
     args.output.mkdir(parents=True,exist_ok=True)
     record=dict(phase=args.phase,rank=rank,precision=args.precision,attention=args.attention,compile=args.compile,
-        linear_execution=args.linear_execution,
+        linear_execution=args.linear_execution,generation_horizon_frames=args.frames,
         conditions_scope='four_source_real_Stage1_demonstration_not_physical_rollout')
     try:
-        if args.phase=='math':result=math_checks(device)
+        if args.phase=='math':result=math_checks(device,args.frames)
         else:
             assets=args.asset_root/'stage1_s595000'
             config=dict(paths=dict(checkpoint=str(assets/'s595000.pt'),stats=str(assets/'qpos30_train_stats.json'),
                 kinematics=str(assets/'bumi_kinematics_robot_retargeter_fe934_v1.json'),
                 data_root='/data0/user/liwei/datasets/bumi_music_umr70_mine_pass_90505_v1'),runtime=dict(genmo_device=str(device)))
             actor,_,loading=load_actor(config)
-            context=load_real_conditions(actor,config,device,args.chains)
+            context=load_real_conditions(actor,config,device,args.chains,args.frames)
             if args.phase=='critic':result=critic_checks(actor,context)
             else:
                 policy=DenseDiffusionPolicy(actor,std_schedule=[.001]*16+[.02,.025,.03,.03],
                     precision=args.precision,attention=args.attention,compile_denoiser=args.compile,
-                    linear_execution=args.linear_execution)
+                    linear_execution=args.linear_execution,generation_frames=args.frames)
+                actual_lengths=set()
+                hooks=[b.register_forward_pre_hook(lambda _,a:actual_lengths.add(a[0].shape[1])) for b in actor.denoiser.blocks]
                 result=probability_checks(policy,context)
+                for h in hooks:h.remove()
+                if actual_lengths!={args.frames}:raise AssertionError('Transformer computed a different horizon')
+                result['actual_Transformer_lengths']=sorted(actual_lengths)
+                result['pretrained_maximum_frames']=actor.denoiser.max_len
             record['source_global_step']=loading['source_global_step']
         record.update(result)
     except BaseException as error:

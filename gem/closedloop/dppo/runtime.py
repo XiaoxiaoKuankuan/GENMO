@@ -67,7 +67,7 @@ class InProcessTrainingRuntime:
         config=copy.deepcopy(c.config)
         config['stage9']['seed']=(c.config['stage10']['seed']+1000003*c.distributed.rank+100003*slot)%2**32
         backend=VectorLaneBackend(self.collector.lane_client(slot),None)
-        builder=OnlineConditionBuilder(BumiMotionFeatureCodec(BumiKinematics(config['paths']['kinematics'])))
+        builder=OnlineConditionBuilder(BumiMotionFeatureCodec(BumiKinematics(config['paths']['kinematics'])),motion_frames=config['stage10']['generation_horizon']['frames'])
         env=VectorUpperEnvironment(config,backend,builder,proxy,None,c.rank_dir/'ephemeral'/f'env{slot:03d}')
         env.disk_guard=c.guard
         resource=SimpleNamespace(env=env,journal=None,sampler=FullMusicSampler(c.catalog,split='train',
@@ -106,7 +106,7 @@ class InProcessTrainingRuntime:
         total={key:sum(v[key] for v in credits) for key in credits[0]}
         per_rank=c.distributed.all_gather_object(total);lease=f'{c.session.name}/{label}'
         parent=local_call(c.distributed,lambda:begin_lease(c.distributed,c.manager,c.budget,path,lease,per_rank,c.guard))
-        self.phase=SimpleNamespace(path=path,credits=credits,per_rank=per_rank,parent=parent,lease=lease)
+        self.phase=SimpleNamespace(path=path,credits=credits,per_rank=per_rank,parent=parent,lease=lease,world_seconds=world_seconds)
         self.collector.world.journal.close();self.collector.world.journal=self._journal(path/'world_journal.sqlite')
         self.collector.training_storage='durable_cpu.v1' if self.strict else 'ephemeral_device'
         for slot,state in enumerate(self.collector.states):
@@ -120,7 +120,16 @@ class InProcessTrainingRuntime:
                 for key in used:used[key]+=state.resource.env.budget.used[key]
                 state.resource.env.budget.close();state.resource.journal.close()
         self.collector.world.journal.close()
-        phase.parent.reserve('confirmed_physical_execution',**used)
+        billed=dict(used)
+        if phase.world_seconds is not None:
+            allocated_controls=self.num_envs*self.collector.window_record['actual_world_controls']
+            if used['control_steps']>allocated_controls:raise RuntimeError('Lane controls exceed the real allocated world interval')
+            billed.update(control_steps=allocated_controls,physics_steps=4*allocated_controls)
+        self.last_physics_accounting=dict(contract='all_allocated_PhysX_slots.v1',
+            budgeted_control_slots=billed['control_steps'],allocated_physics_steps=billed['physics_steps'],
+            inactive_physics_steps=billed['physics_steps']-used['physics_steps'],
+            actual_GMT_controls=used['control_steps'],actual_GMT_physics_steps=used['physics_steps'])
+        phase.parent.reserve('confirmed_allocated_physical_execution',**billed)
         state=finish_lease(c.distributed,c.budget,phase.parent,phase.lease,phase.per_rank)
         self.phase=None
         return used,state
@@ -158,6 +167,8 @@ class InProcessTrainingRuntime:
                 length+=1;previous=row
             if length:contiguous.append(length)
         report.update(through_targets_and_budget_seconds=time.perf_counter()-start,
+            physics_accounting=self.last_physics_accounting,
+            actual_world_allocated_physics_steps=self.last_physics_accounting['allocated_physics_steps'],
             control_steps=sum(r.executed_control_steps for r in rows),physics_steps=sum(r.executed_physics_steps for r in rows),
             actual_confirmed_control_steps=used['control_steps'],actual_confirmed_physics_steps=used['physics_steps'],
             non_rollout_control_steps=used['control_steps']-sum(r.executed_control_steps for r in rows),
@@ -200,6 +211,8 @@ class InProcessTrainingRuntime:
                 sampler=state.resource.sampler.state_dict(),transitions=state.transitions,
                 ended_on_restore_episode=None if state.task is None else state.task['sample']['row']['sample_id']))
         return dict(schema='genmo.stage10.inprocess_collector.boundary',states=records,
+            generation_horizon_frames=self.c.stage['generation_horizon']['frames'],
+            ppo_rollout=copy.deepcopy(self.c.stage['ppo_rollout']),
             environment_count=self.num_envs,restore='fresh_PhysX_episodes_no_partial_rollout_reuse')
 
     def restore_logical(self,saved):

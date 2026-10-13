@@ -48,6 +48,39 @@ BUMI_QUATERNION_CONVENTION = "wxyz"
 BUMI_QPOS_ORDER = "mujoco_native"
 
 
+def validate_native_checkpoint(checkpoint: Mapping) -> None:
+    """检查原生 qpos30/contact2 权重表示，不导入训练器或外部日志服务。"""
+    actual = checkpoint.get("bumi_representation_contract_version")
+    if actual != BUMI_REPRESENTATION_CONTRACT_VERSION:
+        raise RuntimeError(
+            "BUMI checkpoint representation mismatch: expected "
+            f"{BUMI_REPRESENTATION_CONTRACT_VERSION!r}, got {actual!r}. "
+            "Only native qpos30 checkpoints with the current representation contract "
+            "are accepted."
+        )
+    state = checkpoint.get("state_dict")
+    if not isinstance(state, Mapping):
+        raise RuntimeError("native BUMI qpos30 checkpoint is missing state_dict")
+    final_shapes = [
+        tuple(value.shape) for key, value in state.items()
+        if str(key).endswith("denoiser.final_layer.fc2.weight")
+        and isinstance(value, torch.Tensor)
+    ]
+    contact_shapes = [
+        tuple(value.shape) for key, value in state.items()
+        if str(key).endswith("static_conf_head.fc2.weight")
+        and isinstance(value, torch.Tensor)
+    ]
+    if len(final_shapes) != 1 or final_shapes[0][0] != BUMI_FEATURE_DIM:
+        raise RuntimeError(
+            f"native BUMI checkpoint must contain one qpos30 output head, got {final_shapes}"
+        )
+    if len(contact_shapes) != 1 or contact_shapes[0][0] != 2:
+        raise RuntimeError(
+            f"native BUMI checkpoint must contain one 2D contact head, got {contact_shapes}"
+        )
+
+
 @dataclass(frozen=True)
 class BumiMotionComponents:
     root_delta_xy_heading: torch.Tensor

@@ -2,7 +2,7 @@
 
 音乐 MLP、存在标记、带相对时间的掩码历史 GRU、前缀编码器和物理归一化均从
 已核验的 Stage1 Actor 复制。模块和存储与 Actor 完全隔离；首版冻结这些副本，
-训练只更新低维投影、两层 Temporal Transformer 和 Value Head。120帧音乐和
+训练只更新低维投影、两层 Temporal Transformer 和 Value Head。完整实际60/120帧音乐和
 前缀保持顺序，不做平均池化；相对时间、音乐/未来/前缀 mask 和音乐剩余时长
 明确参与融合。Value token通过注意力读取完整条件，输出当前条件的 V(s)。
 

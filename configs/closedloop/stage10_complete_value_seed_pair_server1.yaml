@@ -1,10 +1,18 @@
-# Stage10：四来源完整音乐 episode 的独立 Critic 校准配置。
-# 只允许配合 --evaluate-only，在新输出目录运行s595000原Actor与冻结GMT140500。
-# 四来源各一首、固定种子42/1729共8个episode，最大180秒；必须逐episode确认真实终止，
-# 不能把达到180秒的行政截断解释为完整回报。报告保留完整实际控制奖励和因果条件。
-# 单次MC回报包含随机策略与物理失败的方差；增加种子用于独立复核，不把标签用于训练。
-# 原训练gamma/lambda不改；离线诊断从实际奖励另算无自举MC标签，不使用GAE标签。
-# 该配置不评估训练吞吐、不作为正式训练参数，不修改已有模型、运行或checkpoint。
+# 当前连续音乐第二阶段正式候选：s595000 Actor、冻结GMT140500、真实Isaac反馈。
+# 实际生成60帧/2秒，保持预训练max_len120权重；120帧仅通过同实现对照配置选用。
+# 每GPU一个64环境世界，PPO按4秒真实世界时间到合法决策边界一起停，正常episode跨轮继续。
+# 实际有效链数、尾批和optimizer次数由本轮manifest决定；首轮包含真实重置预热，不强凑4096。
+# 行为始终20步随机扩散，PPO每epoch无放回K8；平均自由坐标log-ratio仅为代理，保留原joint统计。
+# 主数值核stable_tf32x3，采样/最终全20步KL真正无梯度；Actor主参数与Adam FP32。
+# 音乐奖励开关关闭且权重0；音乐条件/CFG/Stage1监督保留，tracking保留配对动作activity gate。
+# Critic独立冻结Stage1编码器，256维/2层/4头；固定Actor完整episode MC/TD比例经独立验证选择。
+# 完整MC预热256epoch按真实状态量推导步骤，验证MSE降30%且EV>=0.2才允许Actor学习。
+# 正式Actor阶段主要用当前新采样TD/GAE，真实终止不bootstrap、普通窗口尾bootstrap、不跨Actor拼GAE。
+# 每轮BC总512按实际PPO步数整数分配，局部梯度按实际全局分母累计，一次SUM、一次裁剪更新。
+# 微批64/KL256和Actor学习率5e-8目前为有限H60标定起点，不能把H120结果当作H60学习收益。
+# 日常完整链驻GPU至优化与最终KL完成，周期/异常才存完整证据；checkpoint一致CPU快照单在途异步。
+# 新schema拒旧实验等价恢复；恢复重建新PhysX episode，48小时沿原始期限累计（停机也计入）。
+# 未绑定实际Horizon部署测量hash时正式入口明确拒绝；500轮预算不自动启动长期训练。
 version: genmo.gmt_frozen_isaac.v1
 paths:
   genmo_repo: /home/user/liwei/GENMO-bumi-closedloop
@@ -66,85 +74,83 @@ timing:
   calibration_samples: 2
   deployment_profile:
     schema: genmo.deployment_delay_profile.v1
-    behavior_kernel_sha256: ebfce1a5806b539c3775073cf5a427e955b782d453d6cfc2ede67220dcd4c9eb
+    behavior_kernel_sha256: a894b90b74cbd80d042d61db09f5b63649c7199a45da40c250bbd61cdf117feb
     target: single_robot_single_request
     prefix_budget_seconds: 0.3
     samples_seconds:
-    - 0.2345237594563514
-    - 0.23389932583086193
-    - 0.23853539070114493
-    - 0.23333783098496497
-    - 0.2338250579778105
-    - 0.2333586709573865
-    - 0.23675013822503388
-    - 0.23286609607748687
-    - 0.213341562775895
-    - 0.2097237268462777
-    - 0.21169853839091957
-    - 0.21474683564156294
-    - 0.2137050679884851
-    - 0.21657986799255013
-    - 0.21689937496557832
-    - 0.21140951989218593
-    - 0.22153387940488756
-    - 0.21958800894208252
-    - 0.2195445301476866
-    - 0.2224551688414067
-    - 0.2205174898263067
-    - 0.22203838475979865
-    - 0.2196579270530492
-    - 0.21850883914157748
-    - 0.23799799592234194
-    - 0.22545456094667315
-    - 0.23311165301129222
-    - 0.2355008888989687
-    - 0.23634790256619453
-    - 0.2368926068302244
-    - 0.23669538903050125
-    - 0.23785035638138652
-    - 0.22229064186103642
-    - 0.22478292672894895
-    - 0.22411102429032326
-    - 0.2234693302307278
-    - 0.22269812901504338
-    - 0.22350192931480706
-    - 0.22454466903582215
-    - 0.22098953393287957
-    - 0.22972223861142993
-    - 0.2281277352012694
-    - 0.22899770620279014
-    - 0.2295888694934547
-    - 0.2283029709942639
-    - 0.2277498790062964
-    - 0.2295836191624403
-    - 0.23073046701028943
-    - 0.21909356373362243
-    - 0.21686335816048086
-    - 0.2185950675047934
-    - 0.2190101440064609
-    - 0.21905387425795197
-    - 0.21948510059155524
-    - 0.2175804388243705
-    - 0.21630619117058814
-    - 0.21644136076793075
-    - 0.21437543095089495
-    - 0.21547879022546113
-    - 0.2151039745658636
-    - 0.21617896342650056
-    - 0.21680862619541585
-    - 0.21627858094871044
-    - 0.2149222451262176
+    - 0.2275407612323761
+    - 0.22513806796632707
+    - 0.22590077319182456
+    - 0.22621836373582482
+    - 0.23923182184807956
+    - 0.22667369665578008
+    - 0.22619699616916478
+    - 0.22580804210156202
+    - 0.22211668197996914
+    - 0.21986763644963503
+    - 0.21972079877741635
+    - 0.2207561219111085
+    - 0.2205359151121229
+    - 0.2197432117536664
+    - 0.2198661589063704
+    - 0.22299064509570599
+    - 0.22048272308893502
+    - 0.21995588089339435
+    - 0.21940257004462183
+    - 0.21996971126645803
+    - 0.2208974880632013
+    - 0.220521833980456
+    - 0.2205598521977663
+    - 0.22347980691120028
+    - 0.21438161097466946
+    - 0.21300154295749962
+    - 0.20970704592764378
+    - 0.20940314512699842
+    - 0.20881576603278518
+    - 0.2089295657351613
+    - 0.2141016675159335
+    - 0.21477368311025202
+    - 0.2137604346498847
+    - 0.21243976475670934
+    - 0.21276985201984644
+    - 0.21271955384872854
+    - 0.2128059610258788
+    - 0.2110696597956121
+    - 0.21301889838650823
+    - 0.21306113619357347
+    - 0.2117073603440076
+    - 0.20957582094706595
+    - 0.21102348482236266
+    - 0.21016314765438437
+    - 0.21081081381998956
+    - 0.21119453269056976
+    - 0.21690792706795037
+    - 0.21009816275909543
+    - 0.2168056049849838
+    - 0.2142190730664879
+    - 0.21387075213715434
+    - 0.21341933868825436
+    - 0.21356609393842518
+    - 0.2133455949369818
+    - 0.21451226226054132
+    - 0.2134626219049096
+    - 0.21695178002119064
+    - 0.21655608504079282
+    - 0.21936806314624846
+    - 0.218520823167637
+    - 0.2178772788029164
+    - 0.22009597020223737
+    - 0.22111839544959366
+    - 0.21653638081625104
     provenance:
-    - path: /data1/user/liwei/GENMO_outputs/closedloop_stage10/v3_validation_20261012/calibration_inprocess_v4/deployment_calibration.json
-      sha256: 3d9b51ec9bd8f9b49198d55fc9c5073d48cd44b191bbe4d4e2f717a666afa4a7
-    - path: /data1/user/liwei/GENMO_outputs/closedloop_stage10/v3_validation_20261012/calibration_inprocess_v4/sessions/980c25c6-4d92-4935-a640-d1c66ee9be3b/summary.json
-      sha256: 81c4374c1fce4e6f0e50f03807993d0c25142eed8094f20954c25eb0981fbc39
+    - path: /data1/user/liwei/GENMO_outputs/closedloop_stage10/continuous_validation_20261013/stageD_h60_deployment_calibration/deployment_calibration.json
+      sha256: 24b0ce2555c11eec1a82e26523023831577eb2c5c559971809c1fbaa58e3da65
     measured_assets:
       checkpoint: 51b522fbdeb0ec289e5ffc24e2fccca9888df90495f57f96714c1bb43c05f8e2
-      stats: c7c0acb0e7a38797adb38ce0be41ee72820e34daed4e780275c64fb55c3e5326
-      kinematics: c08731704dccece11351b6fa877e30bac5ca2a8d363de30af7ca2ea1398f4029
-      gmt_policy: 31a8f999b652d272246b803d4ffa708f3125de92c0d573411ef13fc3ee6ced20
       gmt_checkpoint: 79d1a99e54db42342927ec178329dab88772bafbc05df1b0dbe310bc6dd0b319
+      gmt_policy: 31a8f999b652d272246b803d4ffa708f3125de92c0d573411ef13fc3ee6ced20
+      kinematics: c08731704dccece11351b6fa877e30bac5ca2a8d363de30af7ca2ea1398f4029
+      stats: c7c0acb0e7a38797adb38ce0be41ee72820e34daed4e780275c64fb55c3e5326
     numerical_execution:
       schema: genmo.stage10.native_dense_execution.v1
       precision: native_fp32
@@ -152,7 +158,7 @@ timing:
       weight_gradient: direct_joint_gemm
       attention: sdpa_math
       attention_fallback: false
-      mode: fp32_fast
+      mode: compensated_tensorcore_fp32_storage_candidate
       matmul_tf32: false
       master_dtype: float32
       layer_residual_dtype: float32
@@ -163,7 +169,6 @@ timing:
       network_rows: actual_batch_cfg_expanded
       torch_version: 2.7.1+cu128
       compiler: null
-    measurement_scope: eight_independent_single_request_GPU_worlds_excluding_two_warmups
 environment:
   terrain: plane
   ground_height_m: 0.0
@@ -193,7 +198,7 @@ stage10:
     world_size: 8
     backend: nccl
     collection: all_ranks
-  version: genmo.closedloop.stage10.world_window.v1
+  version: genmo.closedloop.stage10.continuous_horizon.v1
   seed: 42
   physical_episode:
     safety_limit_seconds: null
@@ -202,7 +207,7 @@ stage10:
     world_seconds: 4.0
     collection_contract: shared_world_sim_time.v1
   generation_horizon:
-    frames: 120
+    frames: 60
     fps: 30
   training:
     execution_mode: latency
@@ -389,10 +394,20 @@ stage10:
     complete_mc:
       enabled: true
       samples_per_source: 4
-      training_seeds: [42, 1729]
-      validation_seeds: [2718, 31415]
-      mix_candidates: [0.0, 0.5, 1.0]
-      epochs: 32
+      training_seeds:
+      - 42
+      - 1729
+      validation_seeds:
+      - 2718
+      - 31415
+      mix_candidates:
+      - 0.0
+      - 0.5
+      - 1.0
+      epochs: 256
+      quality_gate:
+        minimum_relative_mse_reduction: 0.3
+        minimum_explained_variance: 0.2
       every_control_steps: 5000000
     type: pretrained_temporal
     dimension: 256

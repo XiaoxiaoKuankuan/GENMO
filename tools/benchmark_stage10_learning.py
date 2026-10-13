@@ -302,10 +302,10 @@ def main():
         cache=RolloutTensorCache(rows,targets,d.device,max_device_bytes=8*1024**3)
         compare_critics(a,d,actor,train,cache,rows,targets,manifest,stage)
         cache.close();dist.destroy_process_group(group);dist.destroy_process_group();return
-    policy=DenseDiffusionPolicy(actor,std_schedule=settings['std_schedule'],**dict(precision=stage['precision']['mode'],
-        attention=stage['precision']['attention'],linear_execution=stage['precision']['linear_execution'],
-        precise_output=stage['precision']['precise_output'],compile_denoiser=stage['precision']['compile'],
-        weight_gradient=stage['precision'].get('weight_gradient','direct_joint_gemm')))
+    from gem.closedloop.dppo.run_control import build_policy
+    if any(v!='reference' for v in a.variants):
+        p.error('Numerical candidates require freshly sampled data from their own actual kernel; benchmark reference within that declared case')
+    policy=build_policy(actor,settings,stage['precision'])
     if policy.kernel_config!=source['kernel'] or inputs['kernel']!=source['kernel']:raise ValueError('Baseline behavior numerical contract changed')
     optimizer=torch.optim.AdamW(trainable_actor_parameters(actor),lr=settings['actor_lr'],weight_decay=0.)
     optimizer.load_state_dict(copy.deepcopy(source['actor_optimizer']))
@@ -322,7 +322,7 @@ def main():
         minibatch_chains=stage['scale']['actor_minibatch_chains'],sampled_steps=a.sampled_steps,
         clip=settings['ppo_clip'],gamma_denoising=settings['gamma_denoising'],soft_kl=None,
         kl_reduction=stage['kl']['reduction'],objective_reduction=settings['objective_logprob_reduction'],
-        grad_clip_norm=settings['grad_clip_norm'])
+        grad_clip_norm=settings['grad_clip_norm'],bc_samples_per_rollout=settings['bc_samples_per_rollout'])
     if a.calibrate_actor_rates:
         calibrate_actor(a,d,source,rank_state,policy,optimizer,anchor,generators,cache,rows,targets,manifest,kwargs,stage)
         cache.close();dist.destroy_process_group(group);dist.destroy_process_group();return

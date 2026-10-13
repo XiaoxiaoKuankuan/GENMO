@@ -1,7 +1,8 @@
 """Stage 1 条件音乐生成模型的固定形状 ONNX 去噪接口与 DDIM 运行器。
 
 导出图包含音乐编码、50 帧因果 proprio48 历史 GRU、逐坐标动作前缀、原 Transformer
-以及 CFG 双分支；两个分支只在音乐条件上不同。公开 batch=1、动作长120帧、运动30Hz。
+以及CFG双分支；两个分支只在音乐条件上不同。公开batch=1、实际60/120帧、30Hz，
+图的长度取导出样例条件，不补至120；运行器检查实际图长度与请求一致。
 时间输入为历史相对决策时刻的秒数，调用前仍通过既有条件契约检查绝对时间和有效 mask。
 图输出 normalized qpos30 的 x0 及独立 contact2 logits，不包含优化器、GT、DDIM循环、
 qpos解码、FK、GMT或物理仿真。Python运行器复用训练Actor的扩散调度与最终前缀精确回写。
@@ -139,11 +140,14 @@ class Stage1OnnxSampler:
             raise RuntimeError("请求 CUDA ONNX，但 CUDA provider 未成功加载")
         if [i.name for i in self.session.get_inputs()] != INPUT_NAMES:
             raise RuntimeError("Stage1 ONNX 输入顺序或名称与版本契约不符")
+        self.motion_frames=self.session.get_inputs()[0].shape[1]
+        if self.motion_frames not in (60,120):raise RuntimeError('ONNX必须声明实际60或120帧固定窗口')
         self.actor = actor
 
     @torch.no_grad()
     def sample(self, conditions, *, steps=20, guidance_scale=2.5, noise=None, return_trace=False):
         actor = self.actor
+        if conditions['future_valid'].shape[1]!=self.motion_frames:raise ValueError('请求Horizon与ONNX实际图长度不一致')
         adapted = actor.adapt_conditions(conditions)
         xt = torch.randn_like(adapted["known_x"]) if noise is None else noise.to(adapted["known_x"])
         inputs = make_inputs(

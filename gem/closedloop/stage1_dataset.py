@@ -2,7 +2,7 @@
 
 本模块从一条完整、已配对且已经现有 BUMI reader 验收的 ``qpos28 + EDGE35`` 序列中，
 在 decision frame 处分出三类互不混淆的数据：截至决策时刻可因果获得的 50 Hz
-``proprio48`` 历史、未来 120 点 30 Hz 音乐/动作监督，以及位于该未来窗口开头的
+``proprio48`` 历史、未来实际60/120点 30 Hz 音乐/动作监督，以及位于该未来窗口开头的
 teacher-forced committed qpos30 prefix。它复用现有 ``BumiMusicDatasetReader``、
 ``BumiMotionFeatureCodec`` 和版本化左右足接触标签，不修改旧 music-only Dataset 的返回值。
 
@@ -263,9 +263,11 @@ class BumiClosedLoopStage1Dataset(Dataset):
         joint_limit_tolerance: float = 1.0e-3,
         limit_size: int | None = None,
         prefix_zero_probability: float = 0.0,
+        motion_frames: int = MOTION_WINDOW_FRAMES,
     ) -> None:
         super().__init__()
-        self.motion_frames = MOTION_WINDOW_FRAMES
+        if type(motion_frames)is not int or motion_frames not in (60,120):raise ValueError('Stage1 supervision requires actual 60/120 frames')
+        self.motion_frames = motion_frames
         self.history_steps = int(history_steps)
         self.prefix_min_frames = int(prefix_min_frames)
         self.prefix_max_frames = int(prefix_max_frames)
@@ -285,9 +287,9 @@ class BumiClosedLoopStage1Dataset(Dataset):
             raise ValueError("limit_size must be positive when provided")
         if not 0 <= self.prefix_min_frames <= self.prefix_max_frames:
             raise ValueError("prefix frames require 0 <= min <= max")
-        if self.prefix_max_frames >= MOTION_WINDOW_FRAMES:
+        if self.prefix_max_frames >= self.motion_frames:
             raise ValueError(
-                f"prefix_max_frames must be < {MOTION_WINDOW_FRAMES} so unknown future remains"
+                f"prefix_max_frames must be < {self.motion_frames} so unknown future remains"
             )
         if not 0.0 <= self.prefix_zero_probability <= 1.0:
             raise ValueError("prefix_zero_probability must be finite and in [0, 1]")
@@ -319,7 +321,7 @@ class BumiClosedLoopStage1Dataset(Dataset):
         self.idx2meta: list[int] = []
         for row_index, row in enumerate(self.rows):
             repeats = (
-                duration_repeat_count(int(row["num_frames"]), MOTION_WINDOW_FRAMES)
+                duration_repeat_count(int(row["num_frames"]), self.motion_frames)
                 if self.duration_aware_sampling
                 else 1
             )
@@ -480,21 +482,21 @@ class BumiClosedLoopStage1Dataset(Dataset):
                 f"[0,{sequence_length - 1}]"
             )
 
-        future_count = min(MOTION_WINDOW_FRAMES, sequence_length - decision_frame)
-        future_valid = torch.zeros(MOTION_WINDOW_FRAMES, dtype=torch.bool)
+        future_count = min(self.motion_frames, sequence_length - decision_frame)
+        future_valid = torch.zeros(self.motion_frames, dtype=torch.bool)
         future_valid[:future_count] = True
         music_features = self._zero_pad(
-            music[decision_frame : decision_frame + future_count], MOTION_WINDOW_FRAMES
+            music[decision_frame : decision_frame + future_count], self.motion_frames
         )
         music_valid = future_valid.clone()
 
-        # 额外读取第 121 个 qpos，只为给窗口内第 120 帧的 root delta 提供真实 t+1 halo。
+        # 额外读取第T+1个真实qpos，只为窗口末端root delta提供t+1 halo。
         qpos_halo = qpos[
-            decision_frame : min(sequence_length, decision_frame + MOTION_WINDOW_FRAMES + 1)
+            decision_frame : min(sequence_length, decision_frame + self.motion_frames + 1)
         ]
         encoded_halo = self.codec.encode(qpos_halo).physical_features
-        target_qpos30 = torch.zeros(MOTION_WINDOW_FRAMES, QPOS30_DIM, dtype=torch.float32)
-        target_qpos30_valid = torch.zeros(MOTION_WINDOW_FRAMES, QPOS30_DIM, dtype=torch.bool)
+        target_qpos30 = torch.zeros(self.motion_frames, QPOS30_DIM, dtype=torch.float32)
+        target_qpos30_valid = torch.zeros(self.motion_frames, QPOS30_DIM, dtype=torch.bool)
         target_qpos30[:future_count] = encoded_halo[:future_count]
         target_qpos30_valid[:future_count, 2:] = True
         real_delta_count = min(future_count, max(sequence_length - decision_frame - 1, 0))
@@ -502,8 +504,8 @@ class BumiClosedLoopStage1Dataset(Dataset):
         target_qpos30[~target_qpos30_valid] = 0.0
 
         contact_timeline, contact_timeline_valid, contact_source = self._contact_timeline(sequence)
-        target_contact = torch.zeros(MOTION_WINDOW_FRAMES, 2, dtype=torch.float32)
-        target_contact_valid = torch.zeros(MOTION_WINDOW_FRAMES, 2, dtype=torch.bool)
+        target_contact = torch.zeros(self.motion_frames, 2, dtype=torch.float32)
+        target_contact_valid = torch.zeros(self.motion_frames, 2, dtype=torch.bool)
         target_contact[:future_count] = contact_timeline[
             decision_frame : decision_frame + future_count
         ]
@@ -519,7 +521,7 @@ class BumiClosedLoopStage1Dataset(Dataset):
         )
         decision_time = torch.tensor(decision_frame / float(MOTION_FPS), dtype=torch.float64)
         future_times = (
-            decision_frame + torch.arange(MOTION_WINDOW_FRAMES, dtype=torch.float64)
+            decision_frame + torch.arange(self.motion_frames, dtype=torch.float64)
         ) / float(MOTION_FPS)
 
         requested_prefix = self._requested_prefix_frames(str(row["sample_id"]), decision_frame)

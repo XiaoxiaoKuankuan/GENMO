@@ -69,6 +69,16 @@ def test_cli_help_is_available_before_loading_gpu_or_isaac():
     subprocess.run(['bash', '-n', str(ROOT / 'scripts/train_stage10_8gpu_server1.sh')], check=True)
 
 
+@pytest.mark.parametrize('value', [0, None, [], [1, 2]])
+def test_unused_effect_iteration_field_is_explicitly_rejected(tmp_path, value):
+    c = yaml.safe_load(CONFIG.read_text())
+    c['stage10']['evaluation']['effect_check_iterations'] = value
+    path = tmp_path / 'unused.yaml'
+    path.write_text(yaml.safe_dump(c))
+    with pytest.raises(ValueError, match='effect_check_iterations is unsupported'):
+        configuration(path)
+
+
 def test_source_identity_covers_shell_entry_and_shared_execution_module(tmp_path):
     genmo, gmt = tmp_path / 'genmo', tmp_path / 'gmt'
     names = ['tools/train_closedloop_stage10.py', 'scripts/train_stage10_8gpu_server1.sh',
