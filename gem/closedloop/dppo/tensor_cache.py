@@ -22,8 +22,10 @@ from .performance import measure
 
 
 class RolloutTensorCache:
-    def __init__(self, transitions, targets, device, *, max_device_bytes=256*1024**2):
+    def __init__(self, transitions, targets, device, *, max_device_bytes=256*1024**2, preserve_device=False):
         self.device = torch.device(device)
+        source_device=self.device if preserve_device else torch.device('cpu')
+        self.preserve_device=preserve_device
         self.rows = tuple(transitions)
         self.lookup = {id(row): i for i, row in enumerate(self.rows)}
         if len(self.lookup) != len(self.rows):
@@ -45,7 +47,7 @@ class RolloutTensorCache:
                 self.bytes = 0
                 return
             for key in self.rows[0].context:
-                self.host['context/'+key] = torch.cat([row.context[key].detach().cpu() for row in self.rows], 0)
+                self.host['context/'+key] = torch.cat([row.context[key].detach().to(source_device) for row in self.rows], 0)
             prototype = next((row for row in self.rows if row.chain is not None), None)
             if prototype is not None:
                 trace = prototype.metadata['sampler_trace']
@@ -55,8 +57,8 @@ class RolloutTensorCache:
                     old_means=lambda r: r.metadata['sampler_trace']['old_means'][0],
                     old_stds=lambda r: r.metadata['sampler_trace']['old_stds'][0])
                 for name, extract in extractors.items():
-                    template = extract(prototype).detach().cpu()
-                    values = [extract(row).detach().cpu() if row.chain is not None else torch.zeros_like(template)
+                    template = extract(prototype).detach().to(source_device)
+                    values = [extract(row).detach().to(source_device) if row.chain is not None else torch.zeros_like(template)
                               for row in self.rows]
                     self.host[name] = torch.stack(values)
             for key in ('advantages', 'returns', 'valid', 'old_values', 'next_values'):
@@ -74,6 +76,8 @@ class RolloutTensorCache:
         if per_row > max_device_bytes:
             raise MemoryError(f'One complete rollout chain requires {per_row} cache bytes, budget={max_device_bytes}')
         self.mode = 'device' if self.bytes <= max_device_bytes else 'pinned_blocks'
+        if preserve_device and self.mode!='device':
+            raise MemoryError('Device-resident rollout exceeds cache budget; select an explicit host-block contract before sampling')
         self.block_size = len(self.rows) if self.mode == 'device' else max(1, min(8, max_device_bytes//per_row))
         self.max_blocks = max(1, max_device_bytes//(per_row*self.block_size))
         if self.mode == 'pinned_blocks' and self.device.type == 'cuda':
@@ -95,7 +99,8 @@ class RolloutTensorCache:
             block = {key: value[start:start+self.block_size].to(self.device, non_blocking=True)
                      for key, value in self.host.items()}
         self.transfer_count += 1
-        self.transferred_bytes += sum(value.numel()*value.element_size() for value in block.values())
+        self.transferred_bytes += sum(value.numel()*value.element_size() for key,value in block.items()
+                                      if self.host[key].device!=value.device)
         self.blocks[index] = block
         return block
 
@@ -168,6 +173,7 @@ class RolloutTensorCache:
 
     def report(self):
         return dict(mode=self.mode, bytes=self.bytes, block_upper_chains=self.block_size,
+                    input_storage='device_rollout' if self.preserve_device else 'cpu_snapshot',
                     block_transfers=self.transfer_count, transferred_bytes=self.transferred_bytes,
                     block_hits=self.block_hits, gather_calls=self.gather_calls,
                     cross_block_gathers=self.cross_block_gathers, recursive_row_gathers=0,

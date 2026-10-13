@@ -5,6 +5,8 @@
 组织；IEEE 使用固定32×64×32块，Tensor Core候选使用64×128×64块。
 batch、置换、尾批只改变输出网格，
 不改变任何有效输出元素的归约顺序，不复制有效样本，也不修改概率或随机核。
+显式wide候选只将流水TF32x3的M块从32扩至64，保持N=64、K=32；用于真实Profiler
+已定位的矩阵乘瓶颈。默认tile不变，候选仍须通过跨batch概率、完整梯度和速度验收。
 
 FP32 fast显式使用IEEE乘法，TF32候选显式使用三项TF32分解，BF16候选使用
 BF16乘法和FP32累加。主参数仍为FP32，转换由可微的显式cast完成。输入梯度使用
@@ -86,6 +88,10 @@ def fixed_matmul(left, right, *, precision='ieee'):
         raise ValueError('Fixed-tile candidate requires equal CUDA dtypes')
     pipelined = precision.endswith('_pipelined')
     precision = precision.removesuffix('_pipelined')
+    wide = precision.endswith('_wide')
+    precision = precision.removesuffix('_wide')
+    if wide and (not pipelined or precision!='tf32x3'):
+        raise ValueError('Wide tile is an explicit pipelined TF32x3 candidate')
     if left.dtype not in (torch.float32, torch.bfloat16) or precision not in ('ieee', 'tf32x3','bf16x3','bf16x6'):
         raise ValueError('Unsupported explicit fixed-tile precision')
     if _MULTIPLY is None: _MULTIPLY = _kernel()
@@ -95,6 +101,7 @@ def fixed_matmul(left, right, *, precision='ieee'):
     if pipelined:
         # TF32x3三个乘积的寄存器需求比BF16高，独立使用较小tile候选。
         bm, bn, bk = (32, 64, 32)
+        if wide:bm=64
     if precision in ('bf16x3','bf16x6'):
         if left.dtype != torch.float32:raise ValueError('Compensated BF16 requires FP32 source operands')
         bm,bn,bk=(64,64,32)

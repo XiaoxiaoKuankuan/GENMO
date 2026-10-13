@@ -65,7 +65,7 @@ def bulk_cpu_copy(tree):
 
 
 @torch.no_grad()
-def generate_batch(policy, packets, *, shared_storage=False):
+def generate_batch(policy, packets, *, shared_storage=False, device_trace=False):
     started = time.perf_counter()
     builder = packets[0]['builder']
     contexts, metadata = builder.build_many(
@@ -85,7 +85,7 @@ def generate_batch(policy, packets, *, shared_storage=False):
     output_transfer_begin = time.perf_counter()
     critical = bulk_cpu_copy(dict(qpos_world=world, qpos30=trace['qpos30'], contact=trace['contact']))
     generated_end = time.perf_counter()
-    copied = dict(trace=bulk_cpu_copy(trace), qpos_world=critical['qpos_world'])
+    copied = dict(trace=trace if device_trace else bulk_cpu_copy(trace), qpos_world=critical['qpos_world'])
     finished = time.perf_counter()
     outputs = []
     for i,p in enumerate(packets):
@@ -101,7 +101,10 @@ def generate_batch(policy, packets, *, shared_storage=False):
         generated = dict(meta, qpos_world=array(copied['qpos_world'][i]),
                          qpos30=array(critical['qpos30'][i]),
                          contact=array(critical['contact'][i]))
-        outputs.append(dict(context=contexts[i], meta=meta, generated=generated, trace=local_trace))
+        # 内存训练直接交付采样时的条件副本，确保条件、free_mask与完整随机链同卡。
+        # 原磁盘路径继续使用CPU条件，实际部署需要的qpos输出仍单独传回CPU。
+        context=local_trace['conditions'] if device_trace else contexts[i]
+        outputs.append(dict(context=context, meta=meta, generated=generated, trace=local_trace))
     if shared_storage:
         block=dict(schema='genmo.world_batch_raw.v3',trace=copied['trace'],generated=[item['generated'] for item in outputs])
         for index,item in enumerate(outputs):item['_shared_raw_block']=(block,index)
@@ -129,7 +132,8 @@ def generate_for_environment_flow(env):
     journal_seconds = env.backend.last_call_timing.get('journal_seconds', 0.)
     prefix_end = time.perf_counter()
     env.attempt += 1
-    key = f"{env.config['stage9']['run_id']}:{env.iteration}:{env.episode_count}:{env.decision}:{env.attempt}"
+    namespace=env.config.get('runtime',{}).get('noise_namespace',env.config['stage9']['run_id'])
+    key = f"{namespace}:{env.iteration}:{env.episode_count}:{env.decision}:{env.attempt}"
     if env.rank is not None: key += f':rank:{env.rank}'
     key += f':environment:{env.collector_env_slot}'
     seed = stable_noise_seed(env.config['stage9']['seed'], key)
@@ -171,5 +175,5 @@ def generate_for_environment_flow(env):
         raw_evidence_identity=identity, shared_batch_timing=shared_timing,
         excluded_audit_seconds=excluded)
     result.update(prepared=prepared, rejection=rejection, timing=timing, seed=seed,
-        critical_ready_seconds=timing['critical_ready_seconds'], elapsed=elapsed, raw_path=str(path))
+        critical_ready_seconds=timing['critical_ready_seconds'], elapsed=elapsed, raw_path=None if path is None else str(path))
     return result

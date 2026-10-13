@@ -55,9 +55,12 @@ class _DirectLane:
 
 class WorldEnvironmentCollector(VectorEnvironmentCollector):
     def __init__(self, policy, factory, world_client, *, num_envs=64, generation_batch=64, timeout_seconds=600.,
-                 boundary_wait_contract=None,boundary_wait_max_controls=100, **kwargs):
+                 boundary_wait_contract=None,boundary_wait_max_controls=100, training_storage='durable_cpu.v1', **kwargs):
         if generation_batch < 1 or generation_batch > num_envs: raise ValueError('Invalid independent sampling batch')
         self.policy,self.factory=policy,factory
+        if training_storage not in ('durable_cpu.v1','ephemeral_device.v3'):
+            raise ValueError('Unknown world training-data lifecycle')
+        self.training_storage=training_storage
         self.world=world_client() if callable(world_client) else world_client
         self.num_envs,self.generation_batch,self.timeout_seconds=num_envs,generation_batch,timeout_seconds
         if boundary_wait_contract not in (None,BOUNDARY_WAIT_CONTRACT):raise ValueError('Unknown boundary wait contract')
@@ -130,20 +133,25 @@ class WorldEnvironmentCollector(VectorEnvironmentCollector):
                 for begin in range(0,len(generations),self.generation_batch):
                     group=generations[begin:begin+self.generation_batch]
                     generation_started=time.perf_counter()
-                    generated,timing=generate_batch(self.policy,[packet for _,packet in group],shared_storage=True)
+                    generated,timing=generate_batch(self.policy,[packet for _,packet in group],shared_storage=True,
+                        device_trace=self.training_storage=='ephemeral_device.v3')
                     owner=self.states[group[0][0]].resource.env
                     block=generated[0]['_shared_raw_block'][0]
                     block['policy_version']=owner.policy_version
                     raw_path=owner.output.parent/'raw_samples'/f'world_batch_{len(self.batch_reports):06d}.pt'
                     raw_started=time.perf_counter()
-                    identity=owner._save_evidence(block,raw_path)
+                    if self.training_storage=='ephemeral_device.v3':
+                        identity=dict(storage='ephemeral_device.v3',sha256=None,size_bytes=None,
+                            memory_identity=f'{owner.config["stage9"]["run_id"]}:{owner.iteration}:{owner.attempt}:{len(self.batch_reports)}',
+                            recovery='discard_incomplete_rollout_and_resample_from_complete_checkpoint')
+                    else:identity=owner._save_evidence(block,raw_path)
                     raw_seconds=time.perf_counter()-raw_started
                     self.world_timing['raw_block_seconds']=self.world_timing.get('raw_block_seconds',0.)+raw_seconds
                     self.audit_seconds += raw_seconds+timing['bulk_trace_transfer_seconds']
                     for item in generated:
                         _,index=item.pop('_shared_raw_block')
-                        item['_raw_evidence']=dict(path=str(raw_path),identity=dict(identity,
-                            storage='genmo.world_batch_raw.v3',index=index,count=len(group)))
+                        item['_raw_evidence']=dict(path=str(raw_path) if self.training_storage=='durable_cpu.v1' else None,
+                            identity=dict(identity,storage=identity.get('storage','genmo.world_batch_raw.v3'),index=index,count=len(group)))
                     self.batch_reports.append(dict(environment_slots=[slot for slot,_ in group],
                         effective_rows=len(group),padding_rows=0,pipeline_timing=timing,
                         generation_seconds=timing['condition_batch_seconds']+timing['generate_and_world_seconds'],
@@ -261,7 +269,8 @@ class WorldEnvironmentCollector(VectorEnvironmentCollector):
                 wait_wall_seconds=time.perf_counter()-tail_started)
             if extra:
                 if task is None:raise RuntimeError('Boundary executed without an active task')
-                sampler.record_execution(task,extra)
+                # 等待反馈已合入末条转移；只增加真实控制覆盖，不产生新上层决策。
+                sampler.record_execution(task,extra,upper_transitions=0)
             if ended:state.task=None
         elif not rows[-1].terminated:
             rows[-1].truncated=True;rows[-1].reason=rows[-1].reason or 'collector_fragment_boundary'

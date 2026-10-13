@@ -98,6 +98,9 @@ def finish_vector_fragment_flow(env,row,*,continue_episode,maximum_wait_controls
     row.metadata['next_remaining_music_seconds']=env.remaining_music()
     row.metadata['terminal_snapshot']=copy.deepcopy(snapshot)
     row.metadata['reward_details'].extend(details)
+    if 'execution_trace' in row.metadata:
+        # 日常内存证据也须包含轮末真实推进的尾段，供异常时完整回放。
+        row.metadata['execution_trace']=[*row.metadata['execution_trace'],*trace]
     row.metadata['event_penalty_total']+=penalty
     consumed={str(p) for step in trace for p in step.get('consumed_plan_ids',[]) if p is not None}
     row.metadata['consumed_plan_ids']=sorted(set(row.metadata['consumed_plan_ids'])|consumed)

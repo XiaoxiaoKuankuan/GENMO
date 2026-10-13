@@ -310,7 +310,8 @@ class VectorEnvironmentCollector(DualEnvironmentCollector):
         state=self.states[slot];env=state.resource.env
         from .vector_boundary import finish_vector_fragment
         extra,ended=finish_vector_fragment(env,rows[-1],continue_episode=state.task is not None)
-        if extra and state.task is not None:state.resource.sampler.record_execution(state.task,extra)
+        if extra and state.task is not None:
+            state.resource.sampler.record_execution(state.task,extra,upper_transitions=0)
         if ended:state.task=None
         return rows
 

@@ -339,7 +339,8 @@ def _evaluate_impl(c, label):
     env.disk_guard = c.guard
     env.latency_budget_s, env.policy_version, env.iteration = c.env.latency_budget_s, c.env.policy_version, c.env.iteration
     initial_rows = []
-    if references is None:
+    fresh_critic_enabled = c.stage.get('version') == 'genmo.closedloop.stage10.v3'
+    if references is None or fresh_critic_enabled:
         actual_step = env.step
         def capture_initial(*args, **kwargs):
             row = actual_step(*args, **kwargs)
@@ -407,8 +408,19 @@ def _evaluate_impl(c, label):
                             raise ValueError('Fixed Critic reference identity differs')
                 c._periodic_fixed_reference = (actor_reference, critic_reference, description)
             actor_reference, critic_reference, description = c._periodic_fixed_reference
+            fresh_critic = None
+            if fresh_critic_enabled:
+                # 初始固定targets用于可比的历史诊断；新独立轨迹另用当前V自举，
+                # 两者必须分开。这里只缓存因果价值输入及真实奖励，不保留随机链。
+                fresh_reference = (critic_reference if references is None else
+                    build_fixed_critic_reference(initial_rows, c.critic, c.distributed.device,
+                        gamma_upper=c.settings['gamma_upper'], lambda_upper=c.settings['lambda_upper']))
+                fresh_critic = dict(predictions=[r['initial_prediction'] for r in fresh_reference['records']],
+                    targets=[r['target'] for r in fresh_reference['records']],
+                    reference_sha256=fresh_reference['reference_sha256'])
             return dict(reference=description, actor=fixed_chain_drift(c.policy, actor_reference, include_values=True),
-                        critic=None if critic_reference is None else fixed_critic_diagnostic(c.critic, critic_reference))
+                        critic=None if critic_reference is None else fixed_critic_diagnostic(c.critic, critic_reference),
+                        fresh_critic=fresh_critic)
         diagnostics = c.distributed.all_gather_object(local_call(c.distributed, diagnose))
         diagnostics = [diagnostic for diagnostic in diagnostics if diagnostic is not None]
         c.state['budget'] = finish_lease(c.distributed, c.budget, budget, lease, per_rank)
@@ -433,6 +445,14 @@ def _evaluate_impl(c, label):
                                                   [t for d in critics for t in d['targets']]),
                     reference_sha256=_digest([d['reference_sha256'] for d in critics]),
                     diagnostic_scope='fixed_initial_eval_gae_targets_with_initial_critic_bootstrap'))
+            if fresh_critic_enabled:
+                fresh = [d['fresh_critic'] for d in diagnostics]
+                result['fresh_critic_diagnostic'] = dict(available=True,
+                    **summarize_critic_predictions([p for d in fresh for p in d['predictions']],
+                                                  [t for d in fresh for t in d['targets']]),
+                    reference_sha256=_digest([d['reference_sha256'] for d in fresh]),
+                    critic_updates=c.state.get('critic_updates'),
+                    diagnostic_scope='fresh_independent_physics_current_critic_bootstrapped_GAE_not_unbiased_V_truth')
             initial = result if baseline is None else baseline
             previous_best = load_best_pointers(c.output, result, state=c.state)
             choice = choose_best(result, initial, **previous_best, iteration=c.state['iteration'])
@@ -468,7 +488,8 @@ def _evaluate_impl(c, label):
             reward=result['source_balanced_reward'], duration=result['mean_executed_seconds'],
             physical_failure_count=result['physical_failure_count'], by_source=result['by_source'],
             paired_baseline=result.get('paired_baseline'), fixed_actor_drift=result['fixed_actor_drift'],
-            fixed_critic_diagnostic=result['fixed_critic_diagnostic'], wall_seconds=result['wall_seconds']),
+            fixed_critic_diagnostic=result['fixed_critic_diagnostic'],
+            fresh_critic_diagnostic=result.get('fresh_critic_diagnostic'), wall_seconds=result['wall_seconds']),
             prefix='validation')
     root_call(c.distributed, publish_timing)
     return result

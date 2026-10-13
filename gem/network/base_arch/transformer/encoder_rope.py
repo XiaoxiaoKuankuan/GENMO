@@ -87,12 +87,13 @@ class RoPEAttention(nn.Module):
                 blocked = padding if blocked is None else blocked | padding
             # 原mask的True表示禁止，SDPA布尔mask的True表示允许；禁止无声反转语义。
             allowed = None if blocked is None else ~blocked
+            arithmetic = getattr(self, 'attention_compute_dtype', xv.dtype)
             with sdpa_kernel(backends=[selected]):
                 output = torch.nn.functional.scaled_dot_product_attention(
-                    xq.to(xv.dtype), xk.to(xv.dtype), xv, attn_mask=allowed,
+                    xq.to(arithmetic), xk.to(arithmetic), xv.to(arithmetic), attn_mask=allowed,
                     dropout_p=self.dropout.p if self.training else 0., is_causal=False)
             self.last_execution_backend = backend  # 强制单后端；不支持即由PyTorch抛错，无隐式fallback。
-            return self.proj(output.transpose(1, 2).reshape(B, L, -1))
+            return self.proj(output.transpose(1, 2).reshape(B, L, -1).to(x.dtype))
 
         attn_score = einsum(xq, xk, "b n i c, b n j c -> b n i j") / math.sqrt(self.head_dim)
         if attn_mask is not None:

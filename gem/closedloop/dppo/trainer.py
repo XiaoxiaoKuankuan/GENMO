@@ -484,14 +484,15 @@ class SupervisedAnchor:
                     if not torch.isfinite(loss):
                         raise FloatingPointError('Nonfinite Stage1 supervised retention loss')
                     squares=[]
-                    hooks=[parameter.register_hook(lambda gradient: squares.append(gradient.detach().double().square().sum()))
-                           for parameter in actor.parameters() if parameter.requires_grad]
+                    diagnostics=getattr(self,'micro_gradient_diagnostics',True)
+                    hooks=([parameter.register_hook(lambda gradient: squares.append(gradient.detach().double().square().sum()))
+                           for parameter in actor.parameters() if parameter.requires_grad] if diagnostics else [])
                     try:
                         (weight*loss/self.batch_size).backward()
                     finally:
                         for hook in hooks:
                             hook.remove()
-                    micro_gradient_norms.append(float(torch.stack(squares).sum().sqrt()) if squares else 0.)
+                    micro_gradient_norms.append((float(torch.stack(squares).sum().sqrt()) if squares else 0.) if diagnostics else None)
                     warmup_factors.append({key:float(value.detach()) for key,value in details.items() if key.endswith('warmup_factor')})
                     values.append(float(loss.detach()));samples.append(batch['meta'])
             self.bc_update_steps+=1
@@ -535,15 +536,16 @@ class SupervisedAnchor:
                     if not torch.isfinite(mean_loss):
                         raise FloatingPointError('Nonfinite batched Stage1 supervised retention loss')
                 squares = []
-                hooks = [p.register_hook(lambda gradient: squares.append(gradient.detach().double().square().sum()))
-                         for p in actor.parameters() if p.requires_grad]
+                diagnostics=getattr(self,'micro_gradient_diagnostics',True)
+                hooks = ([p.register_hook(lambda gradient: squares.append(gradient.detach().double().square().sum()))
+                         for p in actor.parameters() if p.requires_grad] if diagnostics else [])
                 try:
                     with measure('bc.backward', gpu=True):
                         (weight*mean_loss).backward()
                 finally:
                     for hook in hooks:
                         hook.remove()
-                norm = float(torch.stack(squares).sum().sqrt()) if squares else 0.
+                norm = (float(torch.stack(squares).sum().sqrt()) if squares else 0.) if diagnostics else None
                 self.bc_update_steps += 1
         finally:
             actor.eval()
