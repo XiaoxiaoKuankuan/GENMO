@@ -232,7 +232,7 @@ class DualEnvironmentCollector:
         if self.active or self.cancelled.is_set() or any(state is None for state in self.states):
             raise RuntimeError('Checkpoint requires an initialized healthy collection boundary')
         def capture(state):
-            from tools.train_closedloop_stage10 import capture_execution_state
+            from gem.closedloop.dppo.execution_state import capture_execution_state
             env = state.resource.env
             task = state.task
             return dict(execution=dict(capture_execution_state(env), policy_version=env.policy_version,iteration=env.iteration),
@@ -253,7 +253,7 @@ class DualEnvironmentCollector:
                 or saved.get('numerical_layout')!=self.policy.numerical_layout or len(saved.get('states',[]))!=2):
             raise ValueError('Incompatible dual collector checkpoint')
         def restore(slot, record):
-            from tools.train_closedloop_stage10 import restore_execution_state
+            from gem.closedloop.dppo.execution_state import restore_execution_state
             resource=self.factory(slot,_QueuedPolicy(self,slot))
             resource.env.collector_env_slot=slot
             spent_generations = None

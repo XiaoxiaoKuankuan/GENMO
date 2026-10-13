@@ -158,9 +158,8 @@ def test_block_rollout_keeps_one_raw_chain_and_detects_corruption(tmp_path):
     import hashlib
     from gem.closedloop.dppo.buffer import UpperTransition
     from gem.closedloop.dppo.rollout_storage import BlockRolloutWriter, load_rollout_record
-    from gem.closedloop.dppo.offline_diagnostics import load_immutable_rollouts
-    from tests.closedloop.dppo.test_stage10_entrypoint import transition
-    # 沿用入口测试的标准有效条件与120x30链，不建立另一套概率/执行字段。
+    from tests.closedloop.dppo.test_data_learning import transition
+    # 使用原有效条件与120x30链夹具，保持概率/执行字段覆盖。
     row = transition().snapshot()
     row.metadata["sampler_trace"] = {}
     row.metadata['sampler_trace']['chain'] = row.chain[None]
@@ -192,8 +191,6 @@ def test_block_rollout_keeps_one_raw_chain_and_detects_corruption(tmp_path):
     assert restored.metadata['generated'] == row.metadata['generated']
     targets = tmp_path/'fixed_targets.pt'
     torch.save(dict(advantages=torch.ones(2), returns=torch.ones(2), valid=torch.ones(2, dtype=torch.bool)), targets)
-    loaded, _, _ = load_immutable_rollouts([manifest], [targets], max_chains=2)
-    assert len(loaded) == 2
     path.write_bytes(b'corrupt raw')
     with pytest.raises(ValueError, match='Raw trace size/SHA'):
         load_rollout_record(chunk_path.parent/record['path'], record, rank_directory=tmp_path)

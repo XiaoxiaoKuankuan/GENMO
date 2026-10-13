@@ -9,9 +9,8 @@ import copy
 import pytest
 import torch
 from gem.closedloop.dppo.denoising_sampling import chain_steps,plan_record
-from gem.closedloop.dppo.updater_v2 import actor_update_v2,analytic_kl_local
 from gem.closedloop.dppo.policy import masked_joint_log_prob
-from tests.closedloop.dppo.test_updater_v2 import BatchGaussianPolicy, rows, Anchor
+from tests.closedloop.dppo.test_optimization_support import BatchGaussianPolicy, rows, Anchor
 
 
 class TwentySteps(BatchGaussianPolicy):
@@ -67,106 +66,12 @@ def test_stratified_terminal_steps_and_exact_unbiased_weights():
     with pytest.raises(ValueError):validate_sampling(20,4,'stratified8')
 
 
-def test_stratified_ppo_preserves_old_chain_and_full_kl():
-    policy=TwentySteps();data=samples(policy);old=torch.stack([r.old_log_prob.clone() for r in data])
-    optimizer=torch.optim.Adam(policy.actor.parameters(),lr=1e-8)
-    report=actor_update_v2(policy,optimizer,data,dict(advantages=torch.tensor([1.,-.6])),ppo_epochs=1,
-        epoch_orders=[[0,1]],actor_minibatch_internal_transitions=40,denoising_microbatch=7,
-        max_optimizer_steps=1,soft_kl_limit=None,denoising_steps_per_chain=8,
-        denoising_sampling_strategy='stratified8',generator=torch.Generator().manual_seed(7),
-        gradient_diagnostics=False,kl_check_mode='pre_step_plus_final')
-    assert report['applied_internal_sample_visits']==16
-    assert report['steps'][0]['per_denoising_step'][18]['visits']==2
-    assert torch.equal(torch.stack([r.old_log_prob for r in data]),old)
-    assert analytic_kl_local(policy,data,denoising_microbatch=13)['fresh_internal_forwards']==40
 
 
-def test_sampled_ppo_is_unbiased_keeps_old_and_full_kl(monkeypatch):
-    torch.set_num_threads(1)
-    policy=TwentySteps();data=samples(policy);base=copy.deepcopy(policy.actor.state_dict())
-    old=torch.stack([row.old_log_prob.clone() for row in data]);gradients=[]
-    def update(count):
-        policy.actor.load_state_dict(base);optimizer=torch.optim.SGD(policy.actor.parameters(),lr=1e-5)
-        generator=torch.Generator().manual_seed(731);before=generator.get_state().clone();anchor=Anchor();observed={}
-        def observe(actor,step):
-            observed.update({n:p.grad.clone() for n,p in actor.named_parameters() if p.grad is not None})
-        report=actor_update_v2(policy,optimizer,data,dict(advantages=torch.tensor([1.,-.6])),ppo_epochs=1,
-            epoch_orders=[[0,1]],actor_minibatch_internal_transitions=40,denoising_microbatch=7,
-            max_optimizer_steps=1,soft_kl_limit=None,denoising_steps_per_chain=count,
-            generator=generator,gradient_observer=observe,gradient_diagnostics=False,
-            bc=anchor,bc_weight=.1,kl_check_mode='pre_step_plus_final')
-        assert report['optimizer_steps']==1 and anchor.calls==1
-        assert report['applied_internal_sample_visits']==2*count
-        assert torch.equal(torch.stack([row.old_log_prob for row in data]),old)
-        if count==20:assert torch.equal(generator.get_state(),before)
-        kl=analytic_kl_local(policy,data,denoising_microbatch=13)
-        assert kl['fresh_internal_forwards']==40 and len(kl['per_denoising_step'])==20
-        return observed
-    expected=update(20)
-    for count in (4,8):
-        gradients=[]
-        for offset in range(20):
-            monkeypatch.setattr('gem.closedloop.dppo.denoising_sampling.chain_steps',
-                lambda seed,index,total,sampled,offset=offset:sorted((offset+j)%total for j in range(sampled)))
-            gradients.append(update(count))
-        for name,value in expected.items():
-            torch.testing.assert_close(torch.stack([g[name] for g in gradients]).mean(0),value,atol=3e-5,rtol=2e-4)
 
 
-def test_stratified_actual_clipped_ppo_gradient_mean_includes_unchanged_bc(monkeypatch):
-    policy=TwentySteps();data=samples(policy)
-    original_prob=torch.stack([row.old_log_prob.clone() for row in data])
-    # 使用已偏离行为策略的参数，覆盖实际clip分支而非只在ratio=1求导。
-    with torch.no_grad():policy.actor.denoiser.weight.add_(.002)
-    base=copy.deepcopy(policy.actor.state_dict())
-    def update(strategy,count):
-        policy.actor.load_state_dict(base)
-        optimizer=torch.optim.SGD(policy.actor.parameters(),lr=1e-5)
-        observed={};anchor=Anchor()
-        def observe(actor,step):
-            observed.update({name:p.grad.clone() for name,p in actor.named_parameters() if p.grad is not None})
-        result=actor_update_v2(policy,optimizer,data,dict(advantages=torch.tensor([1.,-.6])),
-            ppo_epochs=1,epoch_orders=[[0,1]],actor_minibatch_internal_transitions=40,
-            denoising_microbatch=7,max_optimizer_steps=1,soft_kl_limit=None,
-            denoising_steps_per_chain=count,denoising_sampling_strategy=strategy,
-            generator=torch.Generator().manual_seed(7),gradient_observer=observe,
-            gradient_diagnostics=False,bc=anchor,bc_weight=.1,kl_check_mode='pre_step_plus_final')
-        assert anchor.calls==1 and result['bc_global_samples']==2
-        assert torch.equal(torch.stack([row.old_log_prob for row in data]),original_prob)
-        return observed,result
-    expected,full=update('uniform',20)
-    assert full['steps'][0]['objective_clipped_fraction']>0
-    gradients=[]
-    for offset in range(18):
-        monkeypatch.setattr('gem.closedloop.dppo.denoising_sampling.chain_steps',
-            lambda seed,index,total,sampled,strategy,offset=offset:
-                sorted((offset+j)%18 for j in range(6))+[18,19])
-        gradient,report=update('stratified8',8);gradients.append(gradient)
-        assert report['applied_internal_sample_visits']==16
-    for name,value in expected.items():
-        torch.testing.assert_close(torch.stack([g[name] for g in gradients]).mean(0),value,atol=3e-5,rtol=2e-4)
 
 
-def test_explicit_finite_launcher_preserves_full_behavior_and_resume_objective():
-    from tools.validate_stage10_scale import select_learning_experiment
-    from gem.closedloop.dppo.training_scale import derive_training_scale
-    import copy
-    config=dict(runtime=dict(num_envs=64),stage10=dict(performance={},distributed=dict(world_size=8),
-        scale=dict(decisions_per_environment=16,actor_minibatch_chains=2048,critic_epochs=4),
-        training=dict(denoising_steps=20,ppo_epochs=2,critic_batch=1024,bc_batch=128,actor_lr=5e-9)))
-    select_learning_experiment(config,steps=4,actor_lr=2.5e-9,sensitive_output_fp64=True)
-    derive_training_scale(config);stage=config['stage10']
-    assert stage['training']['denoising_steps']==20
-    assert stage['training']['max_actor_optimizer_steps']==8
-    assert stage['derived_scale']['global_internal_transitions']==8192*20
-    assert stage['derived_scale']['ppo_local_internal_samples']==1024*4*2
-    assert stage['derived_scale']['ppo_full_local_internal_samples']==1024*20*2
-    saved=copy.deepcopy(config)
-    select_learning_experiment(config,resume=True)
-    assert config==saved
-    for arguments in (dict(steps=8),dict(actor_lr=5e-9)):
-        with pytest.raises(ValueError,match='Resume cannot change'):
-            select_learning_experiment(config,resume=True,**arguments)
 
 
 @pytest.mark.parametrize('count',[4,8,20])

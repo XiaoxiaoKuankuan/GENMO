@@ -9,7 +9,7 @@ from __future__ import annotations
 import copy
 import pytest
 
-from tools.audit_stage10_v3_complete_returns import complete_returns, identity_key, validate_value_task
+from tools.audit_stage10_complete_returns import complete_returns, identity_key, validate_value_task
 
 
 @pytest.mark.parametrize('changed', [None, 'environment', 'termination', 'timing'])

@@ -58,7 +58,7 @@ class WorldEnvironmentCollector(VectorEnvironmentCollector):
                  boundary_wait_contract=None,boundary_wait_max_controls=100, training_storage='durable_cpu.v1', **kwargs):
         if generation_batch < 1 or generation_batch > num_envs: raise ValueError('Invalid independent sampling batch')
         self.policy,self.factory=policy,factory
-        if training_storage not in ('durable_cpu.v1','ephemeral_device.v3'):
+        if training_storage not in ('durable_cpu.v1','ephemeral_device'):
             raise ValueError('Unknown world training-data lifecycle')
         self.training_storage=training_storage
         self.world=world_client() if callable(world_client) else world_client
@@ -134,14 +134,14 @@ class WorldEnvironmentCollector(VectorEnvironmentCollector):
                     group=generations[begin:begin+self.generation_batch]
                     generation_started=time.perf_counter()
                     generated,timing=generate_batch(self.policy,[packet for _,packet in group],shared_storage=True,
-                        device_trace=self.training_storage=='ephemeral_device.v3')
+                        device_trace=self.training_storage=='ephemeral_device')
                     owner=self.states[group[0][0]].resource.env
                     block=generated[0]['_shared_raw_block'][0]
                     block['policy_version']=owner.policy_version
                     raw_path=owner.output.parent/'raw_samples'/f'world_batch_{len(self.batch_reports):06d}.pt'
                     raw_started=time.perf_counter()
-                    if self.training_storage=='ephemeral_device.v3':
-                        identity=dict(storage='ephemeral_device.v3',sha256=None,size_bytes=None,
+                    if self.training_storage=='ephemeral_device':
+                        identity=dict(storage='ephemeral_device',sha256=None,size_bytes=None,
                             memory_identity=f'{owner.config["stage9"]["run_id"]}:{owner.iteration}:{owner.attempt}:{len(self.batch_reports)}',
                             recovery='discard_incomplete_rollout_and_resample_from_complete_checkpoint')
                     else:identity=owner._save_evidence(block,raw_path)

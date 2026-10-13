@@ -47,7 +47,7 @@ def test_default_tracking_parameters_preserve_outer_weight_and_gmt_proportions()
 
 
 @pytest.mark.parametrize("filename", ["stage9_dppo_smoke.yaml", "stage9_dppo_server1.yaml",
-                                       "stage10_prepare_server1.yaml", "stage10_formal_server1.yaml"])
+                                       "stage10_server1.yaml", "stage10_long_episode_server1.yaml"])
 def test_training_configurations_share_the_same_explicit_tracking_objective(filename):
     path = Path(__file__).resolve().parents[3] / "configs" / "closedloop" / filename
     stage = "stage10" if filename.startswith("stage10_") else "stage9"

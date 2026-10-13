@@ -12,7 +12,8 @@ import pytest
 import torch
 from gem.closedloop.dppo.deployment_clock import DeploymentClock, MODELED_CLOCK
 from gem.closedloop.dppo.env_adapter import UpperEnvironment
-from tools.train_closedloop_stage10 import configuration, capture_execution_state, restore_execution_state
+from gem.closedloop.dppo.training_config import configuration
+from gem.closedloop.dppo.execution_state import capture_execution_state, restore_execution_state
 
 
 def profile():
@@ -81,9 +82,9 @@ def test_batch_condition_exact_against_scalar_reference():
 
 
 def test_gpu_config_declares_fixed_profile_and_batched_pipeline():
-    config=configuration(Path(__file__).resolve().parents[3]/'configs/closedloop/stage10_8gpu_server1_gpu_vectorized.yaml')
+    config=configuration(Path(__file__).resolve().parents[3]/'configs/closedloop/stage10_server1.yaml')
     assert config['runtime']['timing_contract']==MODELED_CLOCK
-    assert DeploymentClock(config['timing']['deployment_profile']).budget_seconds==.38
+    assert DeploymentClock(config['timing']['deployment_profile']).budget_seconds==.30
 
 
 def test_columnar_concatenation_preserves_mixed_leaves():

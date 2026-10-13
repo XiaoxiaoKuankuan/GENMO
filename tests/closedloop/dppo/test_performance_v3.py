@@ -15,40 +15,12 @@ from gem.closedloop.dppo.execution_profile import probe_profiles
 from gem.closedloop.dppo.performance import PhaseProfiler, activate, deactivate, measure
 from gem.closedloop.dppo.policy import DPPODiffusionPolicy
 from gem.closedloop.dppo.tensor_cache import ConditionGraphCache, RolloutTensorCache
-from gem.closedloop.dppo.updater_v2 import _parameters, probability_check_local, analytic_kl_local
-from gem.closedloop.dppo.updater_v2 import balanced_epoch_order
+from gem.closedloop.dppo.optimization_support import _parameters, probability_check_local
+from gem.closedloop.dppo.optimization_support import balanced_epoch_order
 from tests.closedloop.test_stage1_actor import _activate_branches, _conditions
 from tests.closedloop.test_stage1_actor import actor_factory as actor_factory
 
 
-@pytest.mark.parametrize('name', ['performance', 'tensor_cache', 'asset_cache', 'rollout_storage', 'budget_ledger', 'archive_store'])
-def test_new_runtime_source_mutation_is_detected_by_training_inventory(tmp_path, monkeypatch, name):
-    """实际训练入口的源码清单必须保护新增执行模块，不能只有Git HEAD而漏掉文件SHA。"""
-    from gem.closedloop.baseline_provenance import _file_record, verify_source_provenance
-    from tools import train_closedloop_stage10 as entry
-    from pathlib import Path
-
-    def capture(paths, *, repository_state, additional_files):
-        records = []
-        for relative in additional_files['genmo_repo']:
-            path = tmp_path/relative
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_bytes(b'# immutable runtime source\n')
-            record = _file_record(tmp_path, relative, 'stage9_training')
-            record['repository'] = 'genmo_repo'
-            records.append(record)
-        return dict(schema='genmo.closedloop_stage8_source_provenance.v1', files=records,
-                    repositories={'genmo_repo': {'path': str(tmp_path)}}, source_manifest_sha256='f'*64)
-
-    monkeypatch.setattr(entry, 'collect_source_provenance', capture)
-    snapshot = entry._sources({'paths': {}, 'stage10': {'version': entry.VERSION_V2}}, {'repositories': {}})
-    assert verify_source_provenance(snapshot)['unchanged']
-    target = tmp_path/f'gem/closedloop/dppo/{name}.py'
-    assert target.is_file(), f'{name} was omitted from the production source inventory'
-    target.write_bytes(b'# MODIFIED runtime source!\n')
-    observed = verify_source_provenance(snapshot)
-    assert not observed['unchanged']
-    assert [Path(row['path']).name for row in observed['changed_files']] == [f'{name}.py']
 
 
 def test_performance_counts_and_preserves_rng_and_gradients():
@@ -127,7 +99,7 @@ def test_versioned_profile_keeps_self_gates_and_reports_cross_separately(actor_f
 
 
 def test_tensor_cache_full_and_explicit_blocks_match_original_and_reject_foreign_rows():
-    from tests.closedloop.dppo.test_updater_v2 import BatchGaussianPolicy, rows
+    from tests.closedloop.dppo.test_optimization_support import BatchGaussianPolicy, rows
     policy = BatchGaussianPolicy()
     samples = rows(policy, 4)
     targets = dict(advantages=torch.arange(4, dtype=torch.float64), returns=torch.arange(4).float())
@@ -140,9 +112,18 @@ def test_tensor_cache_full_and_explicit_blocks_match_original_and_reject_foreign
             torch.testing.assert_close(cache.get('chain', selected, steps),
                 torch.stack([row.chain[step] for row, step in zip(selected, steps)]), rtol=0, atol=0)
             assert probability_check_local(policy, samples, tensor_cache=cache)['passed']
-            expected = analytic_kl_local(policy, samples)
-            actual = analytic_kl_local(policy, samples, tensor_cache=cache)
-            assert actual == expected
+            from gem.closedloop.dppo.optimization_support import _old_kernel
+            from gem.closedloop.dppo.gaussian_probability import gaussian_statistics
+            direct, mask = _parameters(policy, selected, steps, 'cpu')
+            cached, cached_mask = _parameters(policy, selected, steps, 'cpu', cache)
+            old_mean, old_std = _old_kernel(selected, steps, 'cpu')
+            cached_mean, cached_std = _old_kernel(selected, steps, 'cpu', cache)
+            observed = torch.stack([row.chain[step + 1] for row, step in zip(selected, steps)])
+            expected = gaussian_statistics(observed, old_mean, old_std, direct['mean'], direct['std'], mask)
+            actual = gaussian_statistics(cache.get('chain', selected, [step + 1 for step in steps]),
+                cached_mean, cached_std, cached['mean'], cached['std'], cached_mask)
+            for key in expected:
+                torch.testing.assert_close(actual[key], expected[key], rtol=0, atol=0)
             with pytest.raises(ValueError, match='different rollout'):
                 cache.get('chain', [copy.copy(samples[0])], [0])
     finally:
@@ -240,33 +221,6 @@ def test_balanced_epoch_keeps_all_data_and_rng_restore(counts):
             assert [sum(manifest[i]['owner_rank'] == rank for i in order[start:start+80]) for rank in range(8)] == [10]*8
 
 
-def test_final_kl_reuses_only_unchanged_version_and_matches_authoritative():
-    from tests.closedloop.dppo.test_updater_v2 import BatchGaussianPolicy, rows
-    policy = BatchGaussianPolicy()
-    samples = rows(policy, 4)
-    with torch.no_grad():
-        policy.actor.denoiser.weight.add_(.01)
-    _, cache = analytic_kl_local(policy, samples, global_indices=[1, 3], return_cache=True)
-    calls = []
-    original = policy.transition_parameters
-    def counted(context, state, steps):
-        calls.append(len(state))
-        return original(context, state, steps)
-    policy.transition_parameters = counted
-    actual = analytic_kl_local(policy, samples, reuse_cache=cache)
-    assert sum(calls) == 4 and actual['reused_upper_transitions'] == 2
-    expected = analytic_kl_local(policy, samples)
-    for name in expected:
-        if name not in ('reused_upper_transitions', 'fresh_internal_forwards'):
-            assert actual[name] == expected[name]
-    with torch.no_grad():
-        policy.actor.denoiser.weight.add_(.001)
-    with pytest.raises(ValueError, match='KL cache'):
-        analytic_kl_local(policy, samples, reuse_cache=cache)
-    _, fresh = analytic_kl_local(policy, samples, return_cache=True)
-    samples[0].chain.add_(.1)
-    with pytest.raises(ValueError, match='KL cache'):
-        analytic_kl_local(policy, samples, reuse_cache=fresh)
 
 
 def test_batched_bc_samplewise_loss_and_independent_rng_restore(actor_factory):
@@ -323,7 +277,7 @@ def test_full_learning_probe_restores_weights_and_reports_all_encoder_gradients(
 
 
 def test_cross_block_gather_groups_duplicates_and_timestep_order():
-    from tests.closedloop.dppo.test_updater_v2 import BatchGaussianPolicy,rows
+    from tests.closedloop.dppo.test_optimization_support import BatchGaussianPolicy,rows
     samples=rows(BatchGaussianPolicy(),16)
     full=RolloutTensorCache(samples,dict(advantages=torch.arange(16,dtype=torch.float64)),'cpu')
     blocked=RolloutTensorCache(samples,dict(advantages=torch.arange(16,dtype=torch.float64)),

@@ -184,20 +184,3 @@ def test_production_scale_derived_without_old_160_and_four_step_limits(decisions
     assert train['critic_steps'] == 4*512*decisions//1024
     broken = copy.deepcopy(config); broken['stage10']['training']['rollout_upper_steps'] = 160
     with pytest.raises(ValueError, match='Conflicting'):derive_training_scale(broken)
-
-
-def test_budget_counts_unique_evaluations_initial_warmup_and_does_not_expand_authorization():
-    from pathlib import Path
-    from tools.train_closedloop_stage10 import configuration
-    config=configuration(Path(__file__).resolve().parents[3]/'configs/closedloop/stage10_8gpu_server1_scale8192.yaml')
-    original=copy.deepcopy(config['stage10']['limits'])
-    report=budget_requirements(config)
-    assert report['evaluation_rounds']==list(range(0,501,50))
-    assert report['evaluation_tasks']==352
-    assert report['calibration_generations']==1536
-    assert report['normal_no_failure_scenario_requirements']['generations']==4104576
-    assert report['normal_no_failure_scenario_requirements']['control_steps']==102644800
-    assert report['scenario_deficits']['generations']==2104576
-    assert config['stage10']['limits']==original
-    config['stage10']['evaluation']['effect_check_iterations']=[100,175,200,500]
-    assert budget_requirements(config)['evaluation_tasks']==384

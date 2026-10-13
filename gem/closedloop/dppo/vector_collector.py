@@ -30,7 +30,7 @@ class VectorWorldClient(AcknowledgedBackend):
 
 def validate_vector_close(result):
     """正常退出必须保留冻结参数和世界/全部lane已持久化确认的真实回执。"""
-    from tools.train_closedloop_stage10 import _assert_frozen
+    from gem.closedloop.dppo.execution_state import _assert_frozen
     _assert_frozen(result)
     if (result.get('closed') is not True or result.get('gmt_parameters_frozen') is not True
             or result.get('actual_module_sha256')!=result.get('initial_module_sha256')
@@ -257,7 +257,7 @@ class VectorEnvironmentCollector(DualEnvironmentCollector):
         from .vector_boundary import FRAGMENT_CONTRACT
         if self.active or self.cancelled.is_set() or self.rpc_pending:raise RuntimeError('Vector checkpoint requires consistent idle boundary')
         def capture(state):
-            from tools.train_closedloop_stage10 import capture_execution_state
+            from gem.closedloop.dppo.execution_state import capture_execution_state
             env=state.resource.env
             return dict(execution=dict(capture_execution_state(env),policy_version=env.policy_version,iteration=env.iteration),sampler=state.resource.sampler.state_dict(),
                 transitions=state.transitions,seed=env.config['stage9']['seed'],
@@ -281,7 +281,7 @@ class VectorEnvironmentCollector(DualEnvironmentCollector):
         from .dual_collector import _QueuedPolicy
         self.restore_records=saved['states']
         def restore(slot,record):
-            from tools.train_closedloop_stage10 import restore_execution_state
+            from gem.closedloop.dppo.execution_state import restore_execution_state
             resource=self.factory(slot,_QueuedPolicy(self,slot))
             if resource.env.config['stage9']['seed']!=record['seed']:raise ValueError('Per-environment seed differs')
             resource.sampler.load_state_dict(record['sampler'])

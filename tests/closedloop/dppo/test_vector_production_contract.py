@@ -9,8 +9,6 @@ from pathlib import Path
 from types import SimpleNamespace
 import copy
 import pytest
-from tools.train_closedloop_stage10 import configuration
-from gem.closedloop.dppo.parallel_support import validate_v2_configuration
 from gem.closedloop.dppo.rollout_storage import _valid_raw_relative
 from gem.closedloop.dppo.vector_evaluation import SingleVectorLaneTransport
 
@@ -26,16 +24,6 @@ def test_native_isaac_device_binding_preserves_training_permutation(monkeypatch)
     with pytest.raises(ValueError):bind_vector_device(cfg,0)
 
 
-def test_production_vector_config_preserves_learning_and_storage():
-    config=configuration(Path(__file__).resolve().parents[3]/'configs/closedloop/stage10_8gpu_server1_gpu_vectorized.yaml')
-    s=config['stage9']; assert config['runtime']['num_envs']==8
-    assert (s['actor_lr'],s['rollout_upper_steps'],s['rollout_upper_steps_per_rank'],s['denoising_steps'])==(5e-9,160,20,20)
-    assert (s['kl_stop_joint'],s['kl_soft_stop_joint'],s['ppo_epochs'],s['max_actor_optimizer_steps'])==(.03,.015,2,4)
-    assert config['stage10']['storage']['checkpoint_every_iterations']==500
-    for update in ({'num_envs':32},{'prefix_deadline_contract':'unknown'},{'vector_batch_wait_s':float('nan')},
-                   {'vector_device_contract':None},{'vector_fragment_contract':None}):
-        broken=copy.deepcopy(config);broken['runtime'].update(update)
-        with pytest.raises(ValueError):validate_v2_configuration(broken)
 
 
 def test_vector_raw_references_bind_environment_slot():
@@ -45,25 +33,8 @@ def test_vector_raw_references_bind_environment_slot():
         assert not _valid_raw_relative(Path(path),{'collector_env_slot':3})
 
 
-@pytest.mark.parametrize('key,value',[
-    ('rollout_upper_steps',1024),('denoising_steps_per_chain',8),('ppo_epochs',1),
-    ('actor_minibatch_internal_transitions',20480),('bc_batch',64),('bc_distribution','rank0'),
-])
-def test_fixed_work_probe_rejects_changed_work_and_supervision(key,value):
-    config=configuration(Path(__file__).resolve().parents[3]/'configs/closedloop/stage10_8gpu_server1_scale2048.yaml')
-    config['stage10']['performance']['fixed_work_probe_iteration']=2
-    validate_v2_configuration(config)
-    config['stage10']['training'][key]=value
-    with pytest.raises(ValueError,match='Fixed-work probe'):
-        validate_v2_configuration(config)
 
 
-@pytest.mark.parametrize('iteration',[True,1,3,2.0,'2'])
-def test_fixed_work_probe_requires_second_actual_rollout(iteration):
-    config=configuration(Path(__file__).resolve().parents[3]/'configs/closedloop/stage10_8gpu_server1_scale2048.yaml')
-    config['stage10']['performance']['fixed_work_probe_iteration']=iteration
-    with pytest.raises(ValueError,match='Fixed-work probe'):
-        validate_v2_configuration(config)
 
 
 def test_eval_transport_carries_world_audit_time():

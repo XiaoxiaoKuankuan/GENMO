@@ -222,7 +222,7 @@ def compare_learning_execution(policy, context, *, microbatch=4, actor_lr=5e-9):
     from types import SimpleNamespace
     from .parallel_support import cpu_snapshot
     from .tensor_cache import RolloutTensorCache, ConditionGraphCache
-    from .updater_v2 import _parameters
+    from .optimization_support import _parameters
     actor = policy.actor
     saved = cpu_snapshot(actor.state_dict())
     gradients_before = {name: p.grad for name, p in actor.named_parameters()}

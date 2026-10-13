@@ -174,7 +174,7 @@ def distributed_results(tmp_path_factory):
     torch.set_num_threads(1)
     try:
         directory = tmp_path_factory.mktemp("distributed_training")
-        from tests.closedloop.dppo.test_updater_v2 import _spawn_bounded
+        from tests.closedloop.dppo.test_optimization_support import _spawn_bounded
         _spawn_bounded(_worker, directory)
         ranks = [torch.load(directory / f"rank_{rank}.pt", weights_only=False) for rank in range(2)]
         single = {name: _run_actor(None, **options) for name, options in ACTOR_CASES.items()}

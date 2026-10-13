@@ -586,12 +586,3 @@ class SupervisedAnchor:
         self.generator.set_state(state['generator']);self.bc_update_steps=int(state['bc_update_steps'])
         self.torch_rng=state['torch_rng'].clone();self.numpy_rng=state['numpy_rng'];self.python_rng=state['python_rng']
         self.cuda_rng=state['cuda_rng'].clone() if state['cuda_rng'] is not None else None
-
-
-# 新训练入口显式选择 v2；Stage9 和旧测试继续使用原单步更新接口。
-from gem.closedloop.dppo.updater_v2 import (  # noqa: E402
-    actor_update_v2 as actor_update_v2,
-    analytic_kl_local as analytic_kl_local,
-    critic_update_local as critic_update_local,
-    probability_check_local as probability_check_local,
-)

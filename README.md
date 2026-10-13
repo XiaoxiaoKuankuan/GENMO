@@ -6,6 +6,14 @@
 模型输出保持 **qpos30 + 独立 contact2**，不预测 joint velocity，不使用 51D 动作表示。
 Stage 2 的 Frozen GMT、动力学、Critic / DPPO 不由本页的离线入口启动。
 
+第二阶段当前基线也在本分支直接维护，统一从
+[`scripts/train_stage10_8gpu_server1.sh`](scripts/train_stage10_8gpu_server1.sh)
+启动，默认配置是 [`stage10_server1.yaml`](configs/closedloop/stage10_server1.yaml)。
+它使用 s595000、冻结 GMT 140500、同进程八卡 Isaac、K8 DPPO＋BC 和预训练条件 Critic。
+当前入口、运行边界、历史验收结论和后续开发约定见
+[第二阶段当前基线](docs/closedloop/stage10_current_baseline.md)。后续直接替换本分支实现，
+不另建版本分支；已撤下方法通过 Git 历史追溯。
+
 ## 当前代码与契约
 
 - [Stage 1 契约](docs/closedloop/stage1_contract_v1.md)：120 帧 @ 30 Hz 的未来窗口、

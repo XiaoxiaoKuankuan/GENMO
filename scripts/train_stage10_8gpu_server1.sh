@@ -1,83 +1,25 @@
 #!/usr/bin/env bash
-# 第十步服务器1八卡共同训练启动脚本：八个进程使用同一套Actor/Critic参数和同步梯度。
-# 默认 v2 每卡一个独立冻结 GMT/CPU PhysX 采集器，各采20条转移后同步多次更新；
-# rank0写唯一预算账本，每500个外层轮次保存完整模型与各卡恢复状态。
-# 为便于先验证正常启动，默认只运行到第1个接受更新；持续首段需显式传入
-# --stop-after-iteration N。续训使用同一目录加--resume latest，恢复已发布checkpoint，
-# 同步模型、优化器动量和步数；采样器、BC、随机状态和累计预算由rank0恢复。
-# GENMO_PYTHON、CUDA_VISIBLE_DEVICES和STAGE10_8GPU_CONFIG可以覆盖解释器、八张卡
-# 和显式配置路径；配置内模型、数据及GMT资产仍使用服务器1已经核验的正式路径。
-# NCCL设置沿用本机单节点八卡通信条件；PhysX动态库路径仅在此进程树中补充，不改系统。
-# 本脚本不删除运行产物，启动验收应由调用方使用明确临时目录并在核验后精确清理。
+# Stage10 的八卡统一运行环境入口。
+# 本脚本在Python/Kit启动前设置Isaac动态库和单机NCCL环境，防止只在进程内部
+# 修改LD_LIBRARY_PATH而无法影响动态链接器。默认训练边界仍由Python入口限定
+# 为两个Actor外层轮次；500轮预算不会自动启动。调用者必须指定独立output-dir。
+# 当前第二阶段统一从本脚本启动；不覆盖已有模型、日志，不抢占已有GPU作业。
+# 需要统一Python3.11环境继承Isaac依赖并安装支持RTX 6000D的Torch/Triton。
 set -euo pipefail
-
-TASK_REPO_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
-TASK_PYTHON="${GENMO_PYTHON:-/home/user/liwei/GENMO/.venv/bin/python}"
-TASK_CONFIG="${STAGE10_8GPU_CONFIG:-$TASK_REPO_ROOT/configs/closedloop/stage10_8gpu_server1_v2.yaml}"
-TASK_OUTPUT=""
-TASK_STOP=1
-TASK_RESUME=""
-
-usage() {
-  cat <<'EOF'
-用法：bash scripts/train_stage10_8gpu_server1.sh --output-dir 目录 [--stop-after-iteration 1] [--resume latest]
-  --output-dir PATH           同一8卡作业唯一输出目录；新run用新目录，恢复用原目录。
-  --stop-after-iteration N     在第N个接受更新后停止，默认1；上限由所选配置决定。
-  --resume latest|PATH        从同一run最新发布checkpoint恢复，继续累计预算。
-  -h, --help                 显示帮助，不启动训练。
-默认1轮用于启动验收，续训时显式指定更高停止轮次；配置中的运行截止时间优先生效。
-EOF
-}
-
-while [[ $# -gt 0 ]]; do
-  case "$1" in
-    --output-dir)
-      [[ $# -ge 2 && -n "$2" ]] || { usage >&2; exit 2; }
-      TASK_OUTPUT="$2"
-      shift 2
-      ;;
-    --stop-after-iteration)
-      [[ $# -ge 2 ]] || { usage >&2; exit 2; }
-      TASK_STOP="$2"
-      shift 2
-      ;;
-    --resume)
-      [[ $# -ge 2 && -n "$2" ]] || { usage >&2; exit 2; }
-      TASK_RESUME="$2"
-      shift 2
-      ;;
-    -h|--help) usage; exit 0 ;;
-    *) printf '不支持的参数：%s\n' "$1" >&2; usage >&2; exit 2 ;;
-  esac
-done
-
-[[ -n "$TASK_OUTPUT" ]] || { usage >&2; exit 2; }
-[[ "$TASK_STOP" =~ ^[1-9][0-9]*$ ]] || { printf '停止轮次必须是正整数。\n' >&2; exit 2; }
-[[ -x "$TASK_PYTHON" ]] || { printf 'Python不可执行：%s\n' "$TASK_PYTHON" >&2; exit 2; }
-[[ -f "$TASK_CONFIG" ]] || { printf '配置不存在：%s\n' "$TASK_CONFIG" >&2; exit 2; }
-
-# 在切换到仓库前解析相对输出路径，避免用户指定目录随工作目录变化。
-TASK_OUTPUT="$(realpath -m -- "$TASK_OUTPUT")"
-if [[ -n "$TASK_RESUME" && "$TASK_RESUME" != latest ]]; then
-  TASK_RESUME="$(realpath -m -- "$TASK_RESUME")"
-fi
-TASK_RESUME_ARGS=()
-if [[ -n "$TASK_RESUME" ]]; then
-  TASK_RESUME_ARGS=(--resume "$TASK_RESUME")
-fi
-export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0,1,2,3,4,5,6,7}"
-IFS=',' read -r -a TASK_GPU_IDS <<< "$CUDA_VISIBLE_DEVICES"
-[[ ${#TASK_GPU_IDS[@]} -eq 8 ]] || { printf 'CUDA_VISIBLE_DEVICES必须列出8张GPU。\n' >&2; exit 2; }
+task_repo_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
+task_python="${STAGE10_PYTHON:-/data0/user/liwei/closedloop_stage10_v3_runtime/env_isaac_genmo/bin/python}"
+export ISAACLAB_PATH="${ISAACLAB_PATH:-/data0/user/liwei/closedloop_stage8_runtime/IsaacLab}"
+export LD_LIBRARY_PATH="/data0/user/liwei/closedloop_stage8_runtime/sysroot/usr/lib/x86_64-linux-gnu:${LD_LIBRARY_PATH:-}"
+export CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
+export CUDA_DEVICE_ORDER=PCI_BUS_ID
 export PYTHONDONTWRITEBYTECODE=1
-export PYTHONPATH="$TASK_REPO_ROOT${PYTHONPATH:+:$PYTHONPATH}"
-export OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1
-export NCCL_CUMEM_HOST_ENABLE=0 NCCL_IB_DISABLE=1 NCCL_SOCKET_IFNAME=lo
+export OMP_NUM_THREADS="${OMP_NUM_THREADS:-4}"
+export OPENBLAS_NUM_THREADS=1
+export MKL_NUM_THREADS=1
+export NCCL_CUMEM_HOST_ENABLE="${NCCL_CUMEM_HOST_ENABLE:-0}"
+export NCCL_IB_DISABLE="${NCCL_IB_DISABLE:-1}"
+export NCCL_SOCKET_IFNAME="${NCCL_SOCKET_IFNAME:-lo}"
 export TORCH_NCCL_BLOCKING_WAIT=1
-export LD_LIBRARY_PATH="/data0/user/liwei/closedloop_stage8_runtime/sysroot/usr/lib/x86_64-linux-gnu${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
-
-cd "$TASK_REPO_ROOT"
-printf '八卡独立GMT采集并同步更新同一模型（显式旧v1配置仍为单采集）\n配置=%s\n输出=%s\n停止轮次=%s\nGPU=%s\n' \
-  "$TASK_CONFIG" "$TASK_OUTPUT" "$TASK_STOP" "$CUDA_VISIBLE_DEVICES"
-exec "$TASK_PYTHON" -B -m torch.distributed.run --standalone --nproc_per_node=8 \
-  tools/train_closedloop_stage10_8gpu.py --config "$TASK_CONFIG" \
-  --output-dir "$TASK_OUTPUT" --stop-after-iteration "$TASK_STOP" "${TASK_RESUME_ARGS[@]}"
+cd -- "$task_repo_root"
+exec "$task_python" -B -m torch.distributed.run --standalone --nproc_per_node=8 \
+  tools/train_closedloop_stage10.py "$@"

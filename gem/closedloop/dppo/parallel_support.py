@@ -7,7 +7,7 @@
 
 原始条件、旧概率和旧价值在同一 rollout 内不可变；可学习条件编码不能跨参数更新
 复用。这里还提供一次整轮权威快照和无磁盘的张量状态广播，供 KL 拒绝时恢复模型和
-Adam 状态。新版本配置显式绑定多步更新、延迟和检查频率，旧 v1 入口保持兼容。
+Adam 状态。当前训练的规模、延迟与检查频率由 training_config 统一解析。
 """
 from __future__ import annotations
 
@@ -23,120 +23,6 @@ import torch.distributed as dist
 from .run_management import TrainingBudget
 
 
-def validate_v2_configuration(config):
-    stage, settings = config['stage10'], config['stage10']['training']
-    performance = stage.get('performance', {})
-    if performance.get('fixed_work_probe_iteration') is not None:
-        if (type(performance['fixed_work_probe_iteration']) is not int or performance['fixed_work_probe_iteration'] != 2
-                or settings['rollout_upper_steps'] != 2048 or settings.get('denoising_steps_per_chain',20) != 20
-                or settings['ppo_epochs'] != 2 or settings['actor_minibatch_internal_transitions'] != 40960
-                or settings['bc_batch'] != 128 or settings.get('bc_distribution') != 'all_ranks'):
-            raise ValueError('Fixed-work probe requires second-round actual 2048 Full20 data')
-    if config['runtime'].get('backend') == 'gpu_vectorized.v1':
-        runtime = config['runtime']
-        if (type(runtime.get('num_envs')) is not int or not 1 <= runtime['num_envs'] <= settings['rollout_upper_steps_per_rank']
-                or runtime.get('physics_device') != 'cuda:0'
-                or performance.get('numerical_layout') != 'sample_matrix_bmm_fp32.v1'
-                or settings.get('cfg_batch') is not True
-                or settings.get('denoising_steps') != 20):
-            raise ValueError('GPU vector production requires genuine active environments, complete real chains and CFG')
-        if (runtime.get('prefix_deadline_contract') != 'available_reference_deadline_cap.v1'
-                or runtime.get('vector_audit_contract') != 'nested_world_journal_excluded.v1'
-                or runtime.get('vector_device_contract') != 'isaac_global_gpu_index.v1'
-                or runtime.get('vector_fragment_contract') != 'available_reference_fragment_boundary.v3'):
-            raise ValueError('GPU vector timing/prefix contracts must be explicit')
-        if runtime.get('vector_collection_contract') not in (None, 'genmo.world_batched_flow.v1'):
-            raise ValueError('Unknown world state machine contract')
-        if runtime.get('vector_boundary_wait_contract') is not None:
-            wait_controls=runtime.get('vector_boundary_wait_max_control_steps')
-            if (runtime['vector_boundary_wait_contract']!='bounded_reference_wait.v1' or
-                    runtime.get('vector_collection_contract')!='genmo.world_batched_flow.v1' or
-                    type(wait_controls) is not int or not 25<=wait_controls<=2000 or wait_controls%25):
-                raise ValueError('Explicit bounded world boundary wait contract required')
-        if runtime.get('vector_collection_contract') is not None and (type(runtime.get('generation_batch')) is not int
-                or not 1 <= runtime['generation_batch'] <= runtime['num_envs']):
-            raise ValueError('Independent world generation batch must fit active environments')
-        if runtime.get('vector_reward_contract') not in (None, 'stage10.gpu_vector_continuous_reward.v1'):
-            raise ValueError('Unknown vector reward computation contract')
-        if runtime.get('vector_generation_contract') not in (None, 'genmo.vector_generation_pipeline.v1'):
-            raise ValueError('Unknown vector generation computation contract')
-        if runtime.get('vector_evidence_contract') not in (None, 'gmt.vector_columns.v1'):
-            raise ValueError('Unknown vector evidence computation contract')
-        wait = runtime.get('vector_batch_wait_s')
-        if isinstance(wait, bool) or not isinstance(wait,(int,float)) or not math.isfinite(wait) or not 0 <= wait <= 1:
-            raise ValueError('GPU ready queue requires bounded explicit wait seconds')
-    for key in ('tensor_cache_max_bytes', 'module_gradient_every', 'value_snapshot_batch_size',
-                'disk_full_scan_every', 'asset_full_check_every'):
-        if key in performance and (type(performance[key]) is not int or performance[key] < 1):
-            raise ValueError(f'performance.{key} must be a positive integer')
-    if performance.get('journal_format', 'json.v1') not in ('json.v1', 'genmo.execution_journal.ndarray.v2'):
-        raise ValueError('Unknown journal format')
-    layout = performance.get('numerical_layout', 'legacy_step_lane')
-    if layout not in ('legacy_step_lane', 'sample_matrix_bmm_fp32.v1'):
-        raise ValueError('Unknown numerical_layout')
-    if layout != 'legacy_step_lane' and performance.get('execution_batch_size') is not None:
-        raise ValueError('New sample-matrix layout must not specify a legacy fixed shape')
-    if type(performance.get('profiler_every', 1)) is not int or performance.get('profiler_every', 1) < 0:
-        raise ValueError('profiler_every must be zero or a positive integer')
-    if type(performance.get('defer_tensor_checks', False)) is not bool:
-        raise ValueError('defer_tensor_checks must be boolean')
-    if type(performance.get('python_world_profile',False)) is not bool:
-        raise ValueError('python_world_profile must be boolean')
-    shape = performance.get('execution_batch_size')
-    if shape is not None and (type(shape) is not int or shape not in (1, 2, 4)
-                              or settings['denoising_steps'] % shape):
-        raise ValueError('execution_batch_size must divide all denoising steps and be 1/2/4')
-    if stage.get('distributed') != dict(world_size=8, backend='nccl', collection='all_ranks'):
-        raise ValueError('Stage10 v2 requires eight synchronous independent collectors')
-    if 'actor_lr_candidates' in settings:
-        raise ValueError('Fixed-lr v2 must not contain learning-rate candidates')
-    for name in ('ppo_epochs', 'actor_minibatch_internal_transitions', 'denoising_microbatch',
-                 'max_actor_optimizer_steps', 'rollout_upper_steps_per_rank'):
-        if type(settings.get(name)) is not int or settings[name] < 1:
-            raise ValueError(f'{name} must be a positive integer')
-    from .denoising_sampling import validate_sampling
-    validate_sampling(settings['denoising_steps'], settings.get('denoising_steps_per_chain'),
-                      settings.get('denoising_sampling_strategy','uniform'))
-    if settings['actor_minibatch_internal_transitions'] % settings['denoising_steps']:
-        raise ValueError('Actor optimizer minibatch must contain complete denoising chains')
-    if settings['rollout_upper_steps'] != 8 * settings['rollout_upper_steps_per_rank']:
-        raise ValueError('Global rollout count must equal eight local collector counts')
-    if settings.get('bc_distribution', 'rank0') not in ('rank0', 'all_ranks'):
-        raise ValueError('Unknown BC distribution')
-    if settings.get('bc_distribution') == 'all_ranks' and settings['bc_batch'] % 8:
-        raise ValueError('Distributed BC global batch must split evenly across eight ranks')
-    if type(settings.get('kl_microbatch', settings['denoising_microbatch'])) is not int or settings.get('kl_microbatch', 1) < 1:
-        raise ValueError('KL microbatch must be independent and positive')
-    if not 0 < settings['kl_soft_stop_joint'] <= settings['kl_stop_joint']:
-        raise ValueError('Soft KL threshold must be positive and no greater than final hard threshold')
-    if settings.get('kl_check_mode', 'post_step_full') not in ('post_step_full', 'pre_step_plus_final'):
-        raise ValueError('Unknown KL check mode')
-    if settings.get('critic_update_mode', 'distributed') not in ('distributed', 'rank0_broadcast'):
-        raise ValueError('Critic mode must be distributed or explicit rank0_broadcast comparison')
-    if type(settings.get('x0_diagnostic_every', 0)) is not int or settings.get('x0_diagnostic_every', 0) < 0:
-        raise ValueError('x0 diagnostic interval must be zero (disabled) or a positive integer')
-    objective = settings.get('objective_logprob_reduction', 'joint_sum')
-    if objective not in ('joint_sum', 'free_coordinate_mean'):
-        raise ValueError('Unknown PPO probability objective')
-    if objective != 'joint_sum' and not settings.get('alternative_objective_acknowledged', False):
-        raise ValueError('Alternative objective requires explicit learning-rate/clip/BC acknowledgement')
-    for key in ('kl_max_internal', 'kl_max_step_mean', 'kl_max_chain'):
-        value = settings.get(key)
-        if value is not None and (isinstance(value, bool) or not math.isfinite(value) or value <= 0):
-            raise ValueError(f'{key} must be positive or null (diagnostic only)')
-    from .deployment_clock import MODELED_CLOCK, clock_for_config
-    if config['runtime'].get('timing_contract') not in ('deployment_critical.v2', MODELED_CLOCK):
-        raise ValueError('Stage10 v2 requires the explicit deployment critical-path timing contract')
-    clock_for_config(config)
-    for key in ('checkpoint_every_iterations', 'archive_queue_size'):
-        if type(stage['storage'].get(key)) is not int or stage['storage'][key] < 1:
-            raise ValueError(f'{key} must be a positive integer')
-    for value in stage['checks'].values():
-        if type(value) is not int or value < 1:
-            raise ValueError('Periodic checks require positive integer intervals')
-    for key in ('every_iterations', 'samples_per_source'):
-        if type(stage['evaluation'].get(key)) is not int or stage['evaluation'][key] < 1:
-            raise ValueError(f'Evaluation {key} must be positive')
 
 
 def root_call(collective, function):

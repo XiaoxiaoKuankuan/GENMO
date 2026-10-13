@@ -18,7 +18,7 @@ import pytest
 import torch
 
 from gem.closedloop.dppo import evaluation
-from gem.closedloop.dppo import parallel_training as training
+from gem.closedloop.dppo import evaluation_runtime as training
 from gem.closedloop.dppo.budget import atomic_json
 from gem.closedloop.dppo.periodic_monitor import (
     build_balanced_plan,
@@ -150,7 +150,7 @@ def test_evaluate_connects_identity_fixed_references_curves_and_real_saved_bound
 
 def test_v3_periodic_critic_reports_fresh_independent_values_without_replacing_reference(tmp_path, monkeypatch):
     c, _ = context(tmp_path, monkeypatch)
-    c.stage['version'] = 'genmo.closedloop.stage10.v3'
+    c.stage['version'] = 'genmo.closedloop.stage10'
     first = training._evaluate(c, 'initial')
     atomic_json(c.output/'evaluation_baseline.json', first)
     reference = (c.output/'fixed_diagnostic_reference.json').read_bytes()

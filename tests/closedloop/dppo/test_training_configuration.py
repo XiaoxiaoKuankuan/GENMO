@@ -1,0 +1,107 @@
+"""当前 Stage10 入口、真实规模和配套 GMT 身份的 CPU 集成检查。
+
+读取实际主配置与诊断配置，确认同一实现绑定正确资产、原功能工作树和统一 Python，
+并验证 4096 链的 minibatch/BC 推导。旧训练配置必须明确拒绝，不能隐式转换为当前
+方法。独立检查 CLI 帮助和源码身份清单，覆盖入口迁移时容易遗漏的脚本路径。
+配套 GMT 检查只执行纯目录配置函数，不导入 Isaac，不创建 GPU 上下文或运行仿真。
+"""
+from __future__ import annotations
+
+import ast
+import copy
+import os
+from pathlib import Path
+import subprocess
+import sys
+from types import SimpleNamespace
+
+import pytest
+import yaml
+
+from gem.closedloop.dppo.training import _sources
+from gem.closedloop.dppo.training_config import VERSION, configuration
+
+ROOT = Path(__file__).resolve().parents[3]
+CONFIG = ROOT / 'configs/closedloop/stage10_server1.yaml'
+
+
+def test_main_scale_is_4096_full_chains_with_eight_combined_updates():
+    c = configuration(CONFIG)
+    s, t = c['stage10'], c['stage10']['training']
+    assert s['version'] == VERSION
+    assert s['derived'] == dict(world_size=8, real_chains=4096, local_chains=512,
+        planned_actor_steps=8, local_ppo_internal_visits=8192, local_full_kl_visits=10240,
+        bc_per_step=64, bc_per_rollout=512)
+    assert (t['denoising_steps'], t['ppo_steps_per_chain'], t['ppo_epochs']) == (20, 8, 2)
+    assert t['actor_lr'] == 5e-8 and t['ppo_clip'] == .003
+    assert c['runtime']['timing_contract'] == 'modeled_deployment.v3'
+    assert (c['timing']['control_ticks'], c['timing']['physics_ticks']) == (12, 3)
+
+
+@pytest.mark.parametrize('path', sorted((ROOT / 'configs/closedloop').glob('stage10*.yaml')),
+                         ids=lambda path: path.stem)
+def test_diagnostics_share_current_code_and_existing_asset_paths(path):
+    c = configuration(path)
+    p = c['paths']
+    assert p['genmo_repo'] == '/home/user/liwei/GENMO-bumi-closedloop'
+    assert p['gmt_repo'] == '/home/user/liwei/legged_lab_gmt'
+    assert p['genmo_python'] == p['isaac_python'] == (
+        '/data0/user/liwei/closedloop_stage10_v3_runtime/env_isaac_genmo/bin/python')
+    assert Path(p['checkpoint']).name == 's595000.pt'
+    assert Path(p['gmt_checkpoint']).name == 'model_140500.pt'
+    assert c['stage10']['assets']['checkpoint'] == configuration(CONFIG)['stage10']['assets']['checkpoint']
+
+
+@pytest.mark.parametrize('version', ['genmo.closedloop.stage10.v2', 'genmo.closedloop.stage10.v3'])
+def test_superseded_training_configuration_is_rejected(tmp_path, version):
+    c = yaml.safe_load(CONFIG.read_text())
+    c['stage10']['version'] = version
+    path = tmp_path / 'old.yaml'; path.write_text(yaml.safe_dump(c))
+    with pytest.raises(ValueError, match='configuration required'):
+        configuration(path)
+
+
+def test_cli_help_is_available_before_loading_gpu_or_isaac():
+    result = subprocess.run([sys.executable, '-B', str(ROOT / 'tools/train_closedloop_stage10.py'), '--help'],
+        capture_output=True, text=True, timeout=30, check=True)
+    assert '--warmup-rollouts' in result.stdout and '--stop-after-iteration' in result.stdout
+    subprocess.run(['bash', '-n', str(ROOT / 'scripts/train_stage10_8gpu_server1.sh')], check=True)
+
+
+def test_source_identity_covers_shell_entry_and_shared_execution_module(tmp_path):
+    genmo, gmt = tmp_path / 'genmo', tmp_path / 'gmt'
+    names = ['tools/train_closedloop_stage10.py', 'scripts/train_stage10_8gpu_server1.sh',
+             'gem/closedloop/dppo/execution_state.py']
+    for name in names:
+        path = genmo / name; path.parent.mkdir(parents=True, exist_ok=True); path.write_text('original')
+    c = dict(paths=dict(genmo_repo=str(genmo), gmt_repo=str(gmt)))
+    original = _sources(c)
+    for name in names:
+        path = genmo / name; path.write_text('modified')
+        assert _sources(c) != original
+        path.write_text('original')
+
+
+def test_current_gmt_identity_keeps_rank_asset_conversion_separate(tmp_path):
+    gmt = Path(os.environ.get('STAGE10_TEST_GMT_REPO', ROOT.parent / 'legged_lab_gmt'))
+    path = gmt / ('source/NoetixRobot/NoetixRobot/tasks/mimic/'
+                  'mimic_noetix_bumi4340_mha_sonic/closedloop/config.py')
+    if not path.is_file():
+        pytest.skip('配套 GMT 源码未提供；服务器集成检查必须提供 STAGE10_TEST_GMT_REPO')
+    source = path.read_text(); tree = ast.parse(source)
+    node = next(n for n in tree.body if isinstance(n, ast.FunctionDef)
+                and n.name == 'configure_worker_asset_conversion')
+    module = ast.Module(body=[copy.deepcopy(node)], type_ignores=[])
+    scope = {'Path': Path}
+    exec(compile(module, str(path), 'exec'), scope)
+    observed = []
+    for rank in (0, 7):
+        directory = tmp_path / f'rank{rank:02d}'
+        spawn = SimpleNamespace(usd_dir='default')
+        cfg = SimpleNamespace(scene=SimpleNamespace(robot=SimpleNamespace(spawn=spawn)))
+        settings = dict(stage10=dict(version=VERSION),
+                        runtime=dict(rank=rank, asset_conversion_dir=str(directory)))
+        scope['configure_worker_asset_conversion'](cfg, settings)
+        observed.append(spawn.usd_dir)
+        assert spawn.usd_dir == str(directory.resolve())
+    assert observed[0] != observed[1]

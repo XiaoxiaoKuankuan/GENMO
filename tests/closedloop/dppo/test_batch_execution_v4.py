@@ -15,7 +15,7 @@ from gem.closedloop.dppo.batch_execution import (SampleMatrixLinear, set_sample_
                                                 SampleEncoderRoPEBlock)
 from gem.closedloop.dppo.policy import DPPODiffusionPolicy, masked_joint_log_prob
 from gem.closedloop.dppo.tensor_cache import ConditionGraphCache, RolloutTensorCache
-from gem.closedloop.dppo.updater_v2 import _parameters
+from gem.closedloop.dppo.optimization_support import _parameters
 from gem.closedloop.dppo.execution_checks import policy_phase
 from gem.closedloop.dppo.performance import PhaseProfiler, activate, deactivate, measure
 from tests.closedloop.test_stage1_actor import actor_factory, _conditions, _activate_branches
