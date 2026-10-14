@@ -206,7 +206,7 @@ class AudioPlayer:
     """回调采用独立样本游标；物理暂停时输出静音且游标不增长。"""
     def __init__(self, music, enabled=True):
         self.music=music;self.enabled=enabled;self.lock=threading.Lock()
-        self.cursor=0;self.running=False;self.target_seconds=0.;self.underruns=0;self.stream=None
+        self.cursor=0;self.running=False;self.target_seconds=0.;self.underruns=0;self.stream=None;self.resyncs=0
         if enabled:
             import sounddevice as sd
             if music.pcm is None:raise ValueError('播放前必须预解码PCM')
@@ -234,7 +234,15 @@ class AudioPlayer:
         with self.lock:
             return dict(enabled=self.enabled,played_seconds=self.cursor/self.music.sample_rate,
                 target_seconds=self.target_seconds,underflow_callbacks=self.underruns,
+                resyncs=self.resyncs,
                 drift_seconds=(self.cursor/self.music.sample_rate-self.target_seconds) if self.enabled else None)
+
+    def resync(self, seconds):
+        """仅连续演示在已记录漂移后显式对齐音频；不跳过任何物理控制步。"""
+        with self.lock:
+            self.target_seconds=max(0.,seconds)
+            self.cursor=min(len(self.music.pcm),int(self.target_seconds*self.music.sample_rate))
+            self.resyncs+=1
 
     def close(self):
         self.update(self.target_seconds,False)

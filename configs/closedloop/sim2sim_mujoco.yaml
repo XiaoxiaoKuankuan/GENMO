@@ -43,6 +43,7 @@ precision:
   precise_output: true
   weight_gradient: direct_joint_gemm
 runtime:
+  continue_on_failure: true  # 连续仿真：误差/迟到只告警，参考耗尽显式保持；严格验收可设false
   device: cuda:0
   torch_threads: 1
   warmup_control_steps: 50

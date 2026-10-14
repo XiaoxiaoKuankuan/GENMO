@@ -29,11 +29,21 @@ class EpisodeDiagnostics:
     def __init__(self, music, music_start_tick=600):
         self.music=music;self.music_start_tick=music_start_tick
         self.velocity=deque(maxlen=25);self.records=[];self.requests=[];self.events=[]
+        self.warnings={};self.warning_ticks={};self.plans=[]
         self.paired_target=None
         if music.paired_qpos is not None:
             from gem.closedloop.dppo.target_activity import PairedActivityTarget
             self.paired_target=PairedActivityTarget(music.paired_qpos[:,7:],
                 joint_names=music.paired_joint_names,source=music.identity,music_start_tick=music_start_tick)
+
+    def warn(self, code, tick, **details):
+        """累计每次异常，事件日志同类每仿真秒最多一条，避免持续摔倒刷屏。"""
+        self.warnings[code]=self.warnings.get(code,0)+1
+        if code not in self.warning_ticks or tick-self.warning_ticks[code]>=600:
+            self.events.append(dict(event='continued_warning',code=code,tick=tick,**details))
+            self.warning_ticks[code]=tick
+            return True
+        return False
 
     def append(self, record, *, lateness, wall_elapsed, audio):
         if record['tick']==self.music_start_tick+12:self.velocity.clear()
@@ -62,6 +72,12 @@ class EpisodeDiagnostics:
                 arrays[k]=np.array([0. if r[k] is None else r[k] for r in rows])
                 arrays[k+'_valid']=np.array([r[k] is not None for r in rows])
             np.savez_compressed(directory/'control_trace.npz',**arrays)
+        if self.plans:
+            np.savez_compressed(directory/'generated_plans.npz',
+                qpos_world=np.stack([p['qpos_world'] for p in self.plans]),
+                decision_tick=np.array([p['decision_tick'] for p in self.plans]),
+                prefix_frames=np.array([p['prefix_frames'] for p in self.plans]),
+                committed=np.array([p['committed'] for p in self.plans]))
         musical=[r for r in rows if r['tick']>self.music_start_tick]
         beat_metric=None
         if len(musical)>2:
@@ -79,7 +95,12 @@ class EpisodeDiagnostics:
             simulated_seconds=sim,music_executed_seconds=len(musical)*.02,
             active_wall_seconds=active_wall_seconds,real_time_factor=sim/active_wall_seconds if active_wall_seconds else None,
             real_time_pass=bool(rows and .95<=sim/max(active_wall_seconds,1e-9)<=1.05 and
-                not reason.startswith(('realtime_','reference_','generation_'))),
+                not reason.startswith(('realtime_','reference_','generation_')) and
+                not any(k.startswith(('realtime_','reference_','generation_')) for k in self.warnings)),
+            warnings=self.warnings,physical_failure_steps=sum(r.get('physical_warning_count',0)>0 for r in rows),
+            physical_success=bool(rows and not any(r.get('physical_warning_count',0) for r in rows)),
+            reference_fallback_steps=sum(r.get('reference_fallback',False) for r in rows),
+            raw_plans='generated_plans.npz' if self.plans else None,
             actual_activity_mean_rad_s=float(np.mean([r['activity_rad_s'] for r in musical])) if musical else None,
             joint_tracking_rmse_mean_rad=float(np.mean([r['joint_tracking_rmse_rad'] for r in musical])) if musical else None,
             min_joint_limit_margin_rad=min((r['joint_limit_margin_rad'] for r in rows),default=None),

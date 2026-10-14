@@ -5,8 +5,10 @@
 Stage2只导入Actor和绑定随机核，不构造Critic/optimizer，不冒充训练恢复。
 
 600Hz整数tick组织30Hz源动作、50HzGMT和200Hz物理。生成期间物理继续执行；
-只在用户暂停或episode结束时暂停。迟到/旧episode结果不提交，超100ms不跳步
-追赶；所有失败写明原因。启动先在本机同一线程预热/计时，禁止沿用服务器预算。
+默认连续仿真：物理误差、迟到和音频漂移记录告警后继续；迟到/旧episode结果
+不提交，参考不足时显式追加标记的保持参考，不改真实qpos。不可恢复的数值
+异常记录后重新开始episode。严格验收可关闭continue_on_failure，所有降级
+仍在报告中判为未通过。启动先在本机同一线程预热/计时，不沿用服务器预算。
 """
 from __future__ import annotations
 from concurrent.futures import ThreadPoolExecutor
@@ -138,13 +140,17 @@ class InferenceActor:
 class LogicalClock:
     """显式暂停冻结逻辑墙钟；暂停不是模型运行慢时的自动补偿。"""
     def __init__(self,now=time.monotonic):
-        self.now=now;self.origin=now();self.paused_at=None;self.paused_total=0.
+        self.now=now;self.origin=now();self.paused_at=None;self.paused_total=0.;self.delayed_total=0.
     def elapsed(self):
         return (self.paused_at if self.paused_at is not None else self.now())-self.origin-self.paused_total
     def pause(self):
         if self.paused_at is None:self.paused_at=self.now()
     def resume(self):
         if self.paused_at is not None:self.paused_total+=self.now()-self.paused_at;self.paused_at=None
+    def rebase(self, delay):
+        """连续仿真允许节拍降速，但保留全部延迟供真实RTF统计。"""
+        self.origin+=delay;self.delayed_total+=delay
+    def measured_elapsed(self):return self.elapsed()+self.delayed_total
 
 
 class Sim2SimRuntime:
@@ -164,6 +170,7 @@ class Sim2SimRuntime:
         self.episodes=[];self.pending=None;self.episode_number=0;self.audio=None
         self.scripted_events=deque(sorted(scripted_events,key=lambda e:e['at_seconds']))
         self.total_controls=0;self.frozen_models=[];self.calibrations={}
+        self.continuous=bool(config['runtime'].get('continue_on_failure',True))
         genmo=Path(config['paths']['genmo_repo']);gmt=Path(config['paths']['gmt_repo'])
         sources=[*sorted(Path(__file__).parent.glob('*.py')),
             genmo/'scripts/demo/run_genmo_gmt_sim2sim.py',genmo/'gem/closedloop/actor.py',
@@ -198,6 +205,19 @@ class Sim2SimRuntime:
         self.actor=self.worker.submit(InferenceActor,self.config,self.models[self.model_index]).result()
         write_json(self.output/f'model_{self.model_index+1}_identity.json',self.actor.identity)
 
+    def _warn(self, diagnostics, code, **details):
+        if diagnostics.warn(code,self.backend.tick,**details):
+            print(f'[CONTINUE] tick={self.backend.tick} {code}',flush=True)
+        self._publish(last_warning=code)
+
+    def _ensure_reference(self, through_tick, diagnostics=None):
+        if not self.continuous:return
+        if self.backend.timeline.reference_valid_end_tick>=through_tick:return
+        event=self.backend.timeline.extend_hold(through_tick+600)
+        if event is not None and diagnostics is not None:
+            diagnostics.events.append(dict(event,tick=self.backend.tick))
+            self._warn(diagnostics,'reference_hold_extended')
+
     def _calibrate(self,music):
         self._publish(status='calibrating_local_latency')
         samples=[];warmup=self.config['runtime']['calibration_warmup']
@@ -211,6 +231,9 @@ class Sim2SimRuntime:
             tick=self.backend.tick
             reservation=self.backend.reserve_prefix(dict(episode_id=self.backend.episode_id,request_id='calibration:'+str(i),
                 decision_tick=tick,deadline_tick=tick+300,min_prefix=12))
+            # 准备耗时在请求时冻结的参考副本上测量；并发物理的保护水位继续推进，
+            # 不把已过时的标定轨迹提交到真实时间轴，也不会先被protection_advanced打断。
+            preparation_timeline=copy.deepcopy(self.backend.timeline)
             start=time.perf_counter()
             future=self.worker.submit(self.actor.generate,self.backend.snapshot(),reservation,music,
                 self.seed,i,self.config['runtime']['warmup_control_steps']*12)
@@ -219,11 +242,12 @@ class Sim2SimRuntime:
             if i<warmup:future.result()
             while not future.done():
                 if time.perf_counter()-start>=count*.02:
+                    self._ensure_reference(self.backend.tick+180)
                     self.backend.step_control(check_termination=False);count+=1;calibration_controls+=1
                 else:time.sleep(.001)
             result=future.result()
-            ticket=self.backend.prepare_plan(result)
-            self.backend.timeline.discard_plan(ticket['ticket_id'],'calibration_only')
+            ticket=preparation_timeline.prepare_plan(result)
+            preparation_timeline.discard_plan(ticket['ticket_id'],'calibration_only')
             duration=time.perf_counter()-start
             if i>=warmup:samples.append(duration)
         guard=float(self.config['runtime']['latency_guard_seconds'])
@@ -237,8 +261,13 @@ class Sim2SimRuntime:
         result['calibration_control_steps']=calibration_controls
         result['concurrent_load']='GMT CPU ONNX + four MuJoCo substeps; active viewer when enabled'
         result['accepted']=budget<=(300-12)/600
+        result['measured_budget_seconds']=budget
+        result['preparation_reference']='frozen_request_timeline; never committed to live calibration'
+        if self.continuous and not result['accepted']:
+            result['deadline_budget_seconds']=.48;result['deadline_ticks']=288
+            result['continuation']='best_effort; late results discarded; explicit hold if needed'
         write_json(self.output/f'calibration_model{self.model_index+1}_{len(self.calibrations):03d}.json',result)
-        if not result['accepted']:
+        if not result['accepted'] and not self.continuous:
             raise RuntimeError(f'本机生成＋准备预算{budget:.3f}s超过0.5s重规划可用时间，不能实时执行')
         self.calibrations[self.actor.identity['behavior_id']]=result
         return result
@@ -261,7 +290,7 @@ class Sim2SimRuntime:
         diagnostics.events.append(dict(event='reset',episode_id=episode,tick=0,initial_qpos=initial))
         self._publish(status='running',episode_id=episode,reason=None,model=self.actor.name,
             music=track.name,music_duration=music.duration,qpos=initial,reference_qpos=initial,
-            music_seconds=0.,paused=False)
+            music_seconds=0.,paused=False,last_warning=None)
         while not self.stop.is_set():
             while self.scripted_events and self.total_controls*.02>=self.scripted_events[0]['at_seconds']:
                 event=self.scripted_events.popleft();self.command(event['action'])
@@ -291,14 +320,22 @@ class Sim2SimRuntime:
                 time.sleep(min(remaining,.003));continue
             lateness=clock.elapsed()-due
             if lateness>self.config['runtime']['lateness_limit_seconds']:
-                reason='realtime_control_late';break
+                if not self.continuous:reason='realtime_control_late';break
+                self._warn(diagnostics,'realtime_control_late',lateness_seconds=lateness)
+                # 重新对齐节拍，保留每个真实物理步；降速/跳音频均显式记录，不能算实时通过。
+                clock.rebase(lateness)
             if (not self.headless and self.viewer_heartbeat is not None and
                     time.monotonic()-self.viewer_heartbeat>self.config['runtime']['lateness_limit_seconds']):
-                reason='realtime_viewer_unresponsive';break
+                if not self.continuous:reason='realtime_viewer_unresponsive';break
+                self._warn(diagnostics,'realtime_viewer_unresponsive')
             try:
                 if self.pending is not None:
                     if self.pending.done():
-                        plan=self.pending.result();self.pending=None
+                        completed=self.pending;self.pending=None
+                        plan=completed.result()
+                        captured=dict(qpos_world=plan['qpos_world'].copy(),decision_tick=plan['decision_tick'],
+                            prefix_frames=plan['prefix_frames'],committed=False)
+                        diagnostics.plans.append(captured)
                         if plan['episode_id']!=episode or plan['behavior_id']!=self.actor.identity['behavior_id']:
                             raise ValueError('stale_generation_identity')
                         if clock.elapsed()*600>plan['deadline_tick']:
@@ -306,60 +343,84 @@ class Sim2SimRuntime:
                                 request_id=plan['request_id'],decision_tick=plan['decision_tick'],
                                 deadline_tick=plan['deadline_tick'],arrival_logical_seconds=clock.elapsed(),
                                 generation_seconds=plan['latency_seconds'],gpu_stage_timing=plan['timing']))
-                            reason='generation_deadline_missed';break
-                        prepared_start=time.perf_counter();ticket=self.backend.prepare_plan(plan)
-                        if clock.elapsed()*600>plan['deadline_tick']:
-                            self.backend.timeline.discard_plan(ticket['ticket_id'],'late_wall_clock')
-                            diagnostics.events.append(dict(event='reject_late_reference_prepare',
-                                request_id=plan['request_id'],generation_seconds=plan['latency_seconds'],
-                                prepare_seconds=time.perf_counter()-prepared_start,logical_seconds=clock.elapsed()))
-                            reason='generation_deadline_missed';break
-                        ack=self.backend.commit_plan(ticket)
-                        diagnostics.requests.append(dict(request_id=plan['request_id'],decision_tick=plan['decision_tick'],
-                            commit_tick=self.backend.tick,deadline_tick=plan['deadline_tick'],prefix_frames=plan['prefix_frames'],
-                            generation_seconds=plan['latency_seconds'],prepare_seconds=time.perf_counter()-prepared_start,
-                            history_sha256=plan['history_sha256'],history_valid_count=plan['history_valid_count'],
-                            generated_qpos_sha256=hashlib.sha256(plan['qpos_world'].tobytes()).hexdigest(),
-                            noise_seed=plan['noise_seed'],ack=ack))
-                        diagnostics.requests[-1]['gpu_stage_timing']=plan['timing']
+                            if not self.continuous:reason='generation_deadline_missed';break
+                            self._warn(diagnostics,'generation_deadline_missed',request_id=plan['request_id'])
+                        else:
+                            prepared_start=time.perf_counter();ticket=self.backend.prepare_plan(plan)
+                            if clock.elapsed()*600>plan['deadline_tick']:
+                                self.backend.timeline.discard_plan(ticket['ticket_id'],'late_wall_clock')
+                                if not self.continuous:reason='generation_deadline_missed';break
+                                self._warn(diagnostics,'generation_prepare_late',request_id=plan['request_id'])
+                            else:
+                                ack=self.backend.commit_plan(ticket);captured['committed']=True
+                                diagnostics.requests.append(dict(request_id=plan['request_id'],decision_tick=plan['decision_tick'],
+                                    commit_tick=self.backend.tick,deadline_tick=plan['deadline_tick'],prefix_frames=plan['prefix_frames'],
+                                    generation_seconds=plan['latency_seconds'],prepare_seconds=time.perf_counter()-prepared_start,
+                                    history_sha256=plan['history_sha256'],history_valid_count=plan['history_valid_count'],
+                                    generated_qpos_sha256=hashlib.sha256(plan['qpos_world'].tobytes()).hexdigest(),
+                                    noise_seed=plan['noise_seed'],ack=ack))
+                                diagnostics.requests[-1]['gpu_stage_timing']=plan['timing']
                     elif clock.elapsed()*600>pending_meta['deadline_tick']:
-                        reason='generation_deadline_missed';break
+                        if not self.continuous:reason='generation_deadline_missed';break
+                        if not pending_meta.get('late_reported'):
+                            self._warn(diagnostics,'generation_deadline_missed',request_id=pending_meta['request_id'])
+                            pending_meta['late_reported']=True
                 tick=self.backend.tick
                 if tick>=music_start and (tick-music_start)%300==0:
                     if self.pending is not None:
-                        reason='generation_overlap';break
-                    request=dict(episode_id=episode,request_id=f'{episode}:{decision_id}',decision_tick=tick,
-                        deadline_tick=tick+calibration['deadline_ticks'],min_prefix=12)
-                    reservation=self.backend.reserve_prefix(request)
-                    self.pending=self.worker.submit(self.actor.generate,self.backend.snapshot(),reservation,
-                        frozen_music,self.seed,decision_id,music_start)
-                    pending_meta=request;decision_id+=1
+                        if not self.continuous:reason='generation_overlap';break
+                        self._warn(diagnostics,'generation_overlap')
+                    else:
+                        self._ensure_reference(tick+calibration['deadline_ticks']+180,diagnostics)
+                        request=dict(episode_id=episode,request_id=f'{episode}:{decision_id}',decision_tick=tick,
+                            deadline_tick=tick+calibration['deadline_ticks'],min_prefix=12)
+                        reservation=self.backend.reserve_prefix(request)
+                        self.pending=self.worker.submit(self.actor.generate,self.backend.snapshot(),reservation,
+                            frozen_music,self.seed,decision_id,music_start)
+                        pending_meta=request;decision_id+=1
                 self.audio.update((tick-music_start)/600,True)
-                record=self.backend.step_control()
+                self._ensure_reference(tick+180,diagnostics)
+                record=self.backend.step_control(check_termination=not self.continuous)
                 self.total_controls+=1
+                physical=[k for k,v in self.config['termination'].items() if record[k]>float(v)]
+                record['physical_warning_count']=len(physical)
+                record['reference_fallback']=any(str(p).startswith('fallback_hold:') for p in
+                    self.backend.timeline.window(self.backend.tick)['origin_plan_ids'])
+                for code in physical:self._warn(diagnostics,'physical_failure:'+code,value=record[code])
                 record['gmt_policy_observation']=self.backend.last_feed['policy'][0]
                 record['gmt_history']=self.backend.last_feed['history_obs'][0]
                 record['gmt_command_window']=self.backend.last_feed['command_window'][0]
                 audio_state=self.audio.snapshot()
-                row=diagnostics.append(record,lateness=lateness,wall_elapsed=clock.elapsed(),audio=audio_state)
+                row=diagnostics.append(record,lateness=lateness,wall_elapsed=clock.measured_elapsed(),audio=audio_state)
                 self._publish(status='running',qpos=record['qpos'],reference_qpos=record['reference_qpos'],
+                    reference_source='fallback_hold' if record['reference_fallback'] else 'GENMO',
                     music_seconds=row['music_seconds'],activity=row['activity_rad_s'],yaw_error=record['yaw_error_rad'],
                     reference_remaining=record['reference_remaining_seconds'],
                     inference_seconds=diagnostics.requests[-1]['generation_seconds'] if diagnostics.requests else 0.,
-                    real_time_factor=self.backend.tick/600/max(clock.elapsed(),.001),tick=self.backend.tick)
+                    real_time_factor=self.backend.tick/600/max(clock.measured_elapsed(),.001),tick=self.backend.tick)
                 if audio_state['enabled'] and tick>=music_start+60 and abs(audio_state['drift_seconds'])>.1:
-                    reason='realtime_audio_drift';break
+                    if not self.continuous:reason='realtime_audio_drift';break
+                    self._warn(diagnostics,'realtime_audio_drift',drift_seconds=audio_state['drift_seconds'])
+                    self.audio.resync((self.backend.tick-music_start)/600)
                 if record['done']:
                     reason=record['reason'];break
                 # 无在途请求时裁剪历史参考，既有时钟、世界状态和承诺均不重置。
                 if self.pending is None:self.backend.timeline.trim(self.backend.tick)
             except Exception as exc:
-                reason='reference_or_execution_error:'+str(exc)
                 diagnostics.events.append(dict(event='exception',type=type(exc).__name__,detail=str(exc),tick=self.backend.tick))
-                break
+                if not self.continuous:
+                    reason='reference_or_execution_error:'+str(exc);break
+                self._warn(diagnostics,'reference_or_execution_error',detail=str(exc))
+                if isinstance(exc,FloatingPointError) or self.backend.done:
+                    reason='recovery_reset:'+str(exc);next_action='restart';break
+                # 参考拒绝/生成异常不终止物理；下一轮仍检查命令与截止，且可重新请求。
+                # 控制本身持续异常时显式重置，不在同一tick无限重试。
+                if diagnostics.warnings.get('reference_or_execution_error',0)>3 and self.backend.tick==getattr(self,'_last_error_tick',None):
+                    reason='recovery_reset:'+str(exc);next_action='restart';break
+                self._last_error_tick=self.backend.tick
         # 最后一控制周期也计入墙钟；不因提前计算下一状态制造大于1的RTF。
         while not paused and clock.elapsed()<self.backend.tick/600:time.sleep(.001)
-        active_wall=clock.elapsed();self.audio.close();audio_final=self.audio.snapshot();self.audio=None
+        active_wall=clock.measured_elapsed();self.audio.close();audio_final=self.audio.snapshot();self.audio=None
         self._publish(status='finished',reason=reason,paused=True)
         if self.pending is not None:
             try:
