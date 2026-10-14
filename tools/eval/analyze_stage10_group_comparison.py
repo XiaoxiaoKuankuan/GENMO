@@ -103,6 +103,8 @@ def paired_prefix(a, b):
     close(sum(delta.values())+tail+event, total, 'Paired total reward accounting differs')
     am, bm = slice_metrics(a, n), slice_metrics(b, n)
     return dict(common_seconds=n/50, total_reward_delta=total, common_components_delta=delta,
+        initial_actual_joint_max_difference_rad=float(np.max(np.abs(a['actual_joint_gmt'][0]-b['actual_joint_gmt'][0]))),
+        initial_reference_joint_max_difference_rad=float(np.max(np.abs(a['reference_joint_gmt'][0]-b['reference_joint_gmt'][0]))),
         common_components_delta_per_second={k:v/(n/50) for k,v in delta.items()},
         tracking_score_contribution=float(score.sum()), tracking_gate_contribution=float(gate.sum()),
         tracking_score_contribution_per_second=float(score.sum()/(n/50)),
@@ -149,27 +151,37 @@ def aggregate(rows):
         zero_control_events=sum(r['zero_control_event_reward_sum'] for r in rows))
 
 
-def analyze(root):
-    spec = read(root/'comparison_spec.json')
+def analyze(root, *, fresh_control=False):
+    model_roots={model:root/model if fresh_control else root for model in MODELS}
+    plan_root=model_roots['stage1']
+    spec = read(plan_root/'comparison_spec.json')
     completion = read(root/'completion.json')
     if completion['status']!='passed' or completion['updates_performed']:
         raise ValueError('Comparison must finish successfully without updates')
     if spec['smoke']:
         raise ValueError('Administrative smoke cannot be analyzed as a complete-song result')
+    if fresh_control:
+        specifications=[read(model_roots[model]/'comparison_spec.json') for model in MODELS]
+        if any(s['identity']!=spec['identity'] or s['plans']!=spec['plans'] for s in specifications):
+            raise ValueError('Fresh-world model identities or plans differ')
+        spec=dict(spec,models=[s['models'][0] for s in specifications],comparison_id=sha(root/'selection.json'))
     plans = {}
     for split, item in spec['plans'].items():
-        path = root/item['file']
+        path = plan_root/item['file']
         if sha(path)!=item['sha256']:
             raise ValueError('Prepared group plan changed')
         plans[split] = {t['task_id']:t for t in read(path)['tasks']}
-    for name in completion['ranks']:
-        item = read(root/name)
-        if item['status']!='passed' or any(not m['actor_unchanged'] for m in item['models']):
-            raise ValueError('Incomplete rank or Actor changed during evaluation')
+    for model_root in sorted(set(model_roots.values())):
+        finished=read(model_root/'completion.json')
+        if finished['status']!='passed' or finished['updates_performed']:raise ValueError('Invalid child completion')
+        for name in finished['ranks']:
+            item = read(model_root/name)
+            if item['status']!='passed' or any(not m['actor_unchanged'] for m in item['models']):
+                raise ValueError('Incomplete rank or Actor changed during evaluation')
     arrays, episodes, curve, joint_rows, mc = {}, [], [], [], defaultdict(list)
     for model in MODELS:
         seen = set()
-        for directory in sorted(root.glob('rank*/'+model+'/*')):
+        for directory in sorted(model_roots[model].glob('rank*/'+model+'/*')):
             if not directory.is_dir() or (directory/'empty.json').exists():
                 continue
             split = directory.name
@@ -290,6 +302,9 @@ def analyze(root):
         comparison_id=spec['comparison_id'],tasks_per_model=sum(len(v) for v in plans.values()),episodes=episodes,
         summaries=summaries,paired=paired,critic=critic,joint_rows=joint_rows,time_curves=curve,
         verification=dict(identical_task_and_noise=True,report_and_trajectory_sha=True,all_control_rewards_reconciled=True,
+            fresh_PhysX_process_per_model_per_task=fresh_control,
+            post_warmup_initial_joint_max_difference_rad=max(r['initial_actual_joint_max_difference_rad']
+                for pairs in paired.values() for pair in pairs.values() for r in pair['tasks']),
             music_reward_zero=True,all_complete_no_administrative_truncation=True,frozen_models_unchanged=True),
         scope=dict(main_weighting='equal_sources_equal_music_groups_equal_seeds',
             uncertainty='source_stratified_paired_music_group_bootstrap_not_independent_seeds',
@@ -305,9 +320,10 @@ def main():
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--root',type=Path,required=True)
     parser.add_argument('--output',type=Path,required=True)
+    parser.add_argument('--fresh-control',action='store_true')
     args=parser.parse_args()
     if args.output.exists():raise FileExistsError(args.output)
-    result=analyze(args.root.resolve())
+    result=analyze(args.root.resolve(),fresh_control=args.fresh_control)
     with args.output.open('x') as stream:json.dump(result,stream,ensure_ascii=False,allow_nan=False,indent=2)
     print(json.dumps(dict(status=result['status'],tasks_per_model=result['tasks_per_model'],output=str(args.output)),ensure_ascii=False))
 
