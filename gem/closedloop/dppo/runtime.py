@@ -14,6 +14,7 @@ GAE按各环境/episode/连续执行片段独立计算，全局标准化一次�
 from __future__ import annotations
 
 import copy
+import hashlib
 from pathlib import Path
 from types import SimpleNamespace
 import time
@@ -25,7 +26,7 @@ from .dual_collector import fixed_fragment_targets
 from .full_dataset import FullMusicSampler
 from .memory_execution import MemoryReceiveJournal,PrepaidMemoryBudget,DeviceRolloutBuffer
 from .parallel_support import begin_lease,finish_lease,collection_credit,local_call,root_call
-from .returns import normalize_advantages_global
+from .returns import normalize_advantages_global, shuffle_advantages_global
 from .run_management import GuardedStepJournal
 from .trainer import populate_values
 from .vector_collector import VectorWorldClient,VectorLaneBackend
@@ -48,6 +49,18 @@ def freeze_buffer_targets(buffer, lengths, critic, device, *, critic_version, ba
         fragments.append(rows[start:start+n]);start+=n
     return fixed_fragment_targets(fragments,critic,device,critic_version=critic_version,
         gamma_upper=gamma_upper,lambda_upper=lambda_upper)[1]
+
+
+def _source_summary(rows):
+    """按训练任务数据来源汇总本rank真实转移的奖励、执行时长与物理失败，供分来源学习曲线。"""
+    summary={}
+    for row in rows:
+        source=row.metadata.get('training_task',{}).get('dataset','unknown')
+        item=summary.setdefault(source,dict(transitions=0,reward_sum=0.,executed_seconds=0.,physical_failures=0))
+        item['transitions']+=1;item['reward_sum']+=float(row.rewards.sum())
+        item['executed_seconds']+=row.executed_control_steps*.02
+        item['physical_failures']+=int(bool(row.metadata.get('terminal_snapshot',{}).get('terminated',False)))
+    return summary
 
 
 class _DirectTransport:
@@ -166,6 +179,10 @@ class InProcessTrainingRuntime:
         manifest=[item for shard in c.distributed.all_gather_object(local) for item in shard]
         if manifest:targets=normalize_advantages_global(targets,distributed=c.distributed)
         else:targets.update(advantage_global_count=0,advantage_global_mean=0.,advantage_global_std=0.)
+        if manifest and c.settings.get('advantage_control','none')=='shuffle_global':
+            # 负对照的置换种子只由run种子和rollout序号决定，不消耗训练/Actor/Critic生成器。
+            seed=int(hashlib.sha256(f"{c.stage['seed']}:advantage_shuffle:{c.state['rollouts_completed']}".encode()).hexdigest()[:15],16)
+            targets=shuffle_advantages_global(targets,manifest,distributed=c.distributed,seed=seed)
         used,budget=self._finish()
         contiguous=[]
         for fragment in fragments:
@@ -188,7 +205,8 @@ class InProcessTrainingRuntime:
             physical_failures=sum(bool(r.metadata.get('terminal_snapshot',{}).get('terminated',False)) for r in rows),
             behavior_version=c.state['policy_version'],strict_evidence=bool(strict),resource_used=used,
             tensor_storage='GPU_until_optimizer_and_final_KL_complete',
-            gae_variance=targets['advantage_global_std']**2,gae_contiguous_lengths=contiguous)
+            gae_variance=targets['advantage_global_std']**2,gae_contiguous_lengths=contiguous,
+            advantage_control=targets.get('advantage_control','none'),by_source=_source_summary(rows))
         if strict:
             from .rollout_storage import BlockRolloutWriter
             writer=BlockRolloutWriter(self.c.session/'collections'/label/f'rank{c.distributed.rank:02d}'/'rollout',

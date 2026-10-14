@@ -81,6 +81,11 @@ def configuration(path,*,genmo_repo=None,gmt_repo=None):
         raise ValueError('Unknown explicit PPO proxy objective')
     if not 0<t['ppo_clip']<1 or not math.isfinite(t['actor_lr']) or t['actor_lr']<=0:
         raise ValueError('Invalid independently calibrated Actor learning rate/clip')
+    # 诊断实验开关进入训练身份：shuffle_global为优势置换负对照，SNR只增加梯度统计不改更新。
+    if t.get('advantage_control','none') not in ('none','shuffle_global'):
+        raise ValueError('advantage_control must be none or shuffle_global')
+    if type(t.get('gradient_snr_diagnostic',False)) is not bool:
+        raise ValueError('gradient_snr_diagnostic must be boolean')
     steps=t['ppo_epochs']*math.ceil(chains/scale['actor_minibatch_chains'])
     bc_total=t['bc_samples_per_rollout']
     if type(bc_total)is not int or bc_total<1:

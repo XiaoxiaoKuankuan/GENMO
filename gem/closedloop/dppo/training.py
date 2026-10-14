@@ -17,6 +17,7 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
+import math
 from pathlib import Path
 import random
 import time
@@ -130,6 +131,14 @@ def _overhead(c,name,started):
     if overhead is not None:overhead[name]=overhead.get(name,0.)+time.perf_counter()-started
 
 
+def _sketch_cosine(previous,current):
+    if not previous or not current:return None
+    names=sorted(set(previous)&set(current))
+    dot=sum(float((previous[n]*current[n]).sum()) for n in names)
+    left=sum(float(previous[n].square().sum()) for n in names);right=sum(float(current[n].square().sum()) for n in names)
+    return None if left<=0 or right<=0 else max(-1.,min(1.,dot/math.sqrt(left*right)))
+
+
 def _snapshot(c,reason,*,wait=False):
     rank_state=dict(rank=c.distributed.rank,rng=capture_local_rng(c.generators),bc=c.bc.state_dict(),
         collector=c.vector.checkpoint_state())
@@ -183,6 +192,9 @@ def _evaluate(c,report,label):
     started=time.perf_counter()
     result=_evaluate_and_record(c,report,label)
     _overhead(c,'evaluation_run_seconds',started)
+    alert=(result.get('paired_baseline') or {}).get('regression_alert') or {}
+    if alert.get('triggered') and c.distributed.rank==0:
+        print(f'[STAGE10 ALERT] {label} paired reward delta upper90={alert["upper90"]:.4f}<0; training continues',flush=True)
     if hasattr(c.bc,'validation_report'):
         stage=time.perf_counter()
         from .dense_policy import dense_precision_scope
@@ -231,7 +243,7 @@ def run(cargs,config,distributed):
     c=SimpleNamespace(distributed=distributed,config=copy.deepcopy(config),base_config=copy.deepcopy(config),
         stage=config['stage10'],settings=copy.deepcopy(config['stage9']),manager=None,writer=None,
         async_writer=None,vector=None,workers=None,maintenance=None,budget=None,output=cargs.output_dir.resolve(),
-        overhead={})
+        overhead={},snr_previous_sketch=None)
     report=dict(schema='genmo.stage10.session',status='running',iterations=[],warmup=[],evaluations=[],evaluation_artifacts=[])
     from .run_control import build_policy,validate_stopping_iteration
     stop_after_iteration=validate_stopping_iteration(cargs.stop_after_iteration,c.stage)
@@ -469,7 +481,13 @@ def run(cargs,config,distributed):
                     sampled_steps=c.settings['ppo_steps_per_chain'],clip=c.settings['ppo_clip'],
                     gamma_denoising=c.settings['gamma_denoising'],soft_kl=c.settings['kl_soft_stop_coordinate'],
                     kl_reduction=c.stage['kl']['reduction'],objective_reduction=c.settings['objective_logprob_reduction'],
-                    grad_clip_norm=c.settings['grad_clip_norm'],reserve_attempt=reserve,bc_samples_per_rollout=c.settings['bc_samples_per_rollout'])
+                    grad_clip_norm=c.settings['grad_clip_norm'],reserve_attempt=reserve,bc_samples_per_rollout=c.settings['bc_samples_per_rollout'],
+                    snr=c.settings.get('gradient_snr_diagnostic',False))
+                sketch=actor.pop('_ppo_gradient_sketch',None)
+                if actor.get('gradient_snr') is not None:
+                    # 相邻两轮全局PPO梯度抽样的方向余弦；抽样只驻留内存，不进入checkpoint或记录。
+                    actor['gradient_snr']['consecutive_iteration_cosine']=_sketch_cosine(c.snr_previous_sketch,sketch)
+                    c.snr_previous_sketch=sketch
                 actor_seconds=max(distributed.all_gather_object(time.perf_counter()-actor_start))
                 kl=final_kl(c.policy,rows,cache,manifest,distributed=distributed,microbatch=c.settings['kl_microbatch'],
                     clip=c.settings['ppo_clip'],objective_reduction=c.settings['objective_logprob_reduction'])

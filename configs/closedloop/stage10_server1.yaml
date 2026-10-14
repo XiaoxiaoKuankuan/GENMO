@@ -258,6 +258,9 @@ stage10:
     ppo_steps_per_chain: 8
     kl_soft_stop_coordinate: 0.001
     bc_samples_per_rollout: 512
+    # 学习信号诊断：none为正常PPO，shuffle_global为全局优势置换负对照；SNR只统计两半rank与相邻轮梯度方向。
+    advantage_control: none
+    gradient_snr_diagnostic: true
   dataset:
     split: train
     random_start: false

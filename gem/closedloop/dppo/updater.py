@@ -41,7 +41,7 @@ def actor_update(policy,optimizer,rows,targets,cache,manifest,controller,*,distr
                     generator,ppo_epochs=2,minibatch_chains=1024,microbatch=128,sampled_steps=8,
                     clip=.05,gamma_denoising=.99,soft_kl=.002,kl_reduction='free_coordinate_mean',
                     objective_reduction='free_coordinate_mean',grad_clip_norm=1.,reserve_attempt=None,
-                    gradient_observer=None,step_observer=None,bc_samples_per_rollout=None):
+                    gradient_observer=None,step_observer=None,bc_samples_per_rollout=None,snr=False):
     if sampled_steps not in (8,20) or policy.steps!=20 or ppo_epochs<1 or minibatch_chains<1 or microbatch<1:
         raise ValueError('当前 requires Full20 behavior and explicit Uniform8/Full20 optimization')
     if kl_reduction not in ('joint_sum','free_coordinate_mean'):raise ValueError('Unknown KL control units')
@@ -51,6 +51,7 @@ def actor_update(policy,optimizer,rows,targets,cache,manifest,controller,*,distr
     bc_batches=(None if bc_samples_per_rollout is None else [
         bc_samples_per_rollout//planned_steps+(i<bc_samples_per_rollout%planned_steps) for i in range(planned_steps)])
     actor=policy.actor;device=next(actor.parameters()).device
+    sketch={} if snr else None
     for epoch in range(ppo_epochs):
         order=balanced_epoch_order(selected,manifest,generator) if distributed.rank==0 else None
         order=distributed.broadcast_object(order);orders.append(order)
@@ -103,7 +104,7 @@ def actor_update(policy,optimizer,rows,targets,cache,manifest,controller,*,distr
                 bc_weight=1/distributed.world_size if global_bc is None else (anchor.batch_size/global_bc if global_bc else 0.)
                 with dense_precision_scope(policy.precision):bc_report=anchor.backward(actor,weight=bc_weight)
                 bc=take_gradients(actor)
-            contributions=merge_global_gradients(actor,ppo,bc,controller,distributed=distributed)
+            contributions=merge_global_gradients(actor,ppo,bc,controller,distributed=distributed,half_split=snr,sketch=sketch)
             if gradient_observer is not None:gradient_observer(actor,len(reports))
             with _local_phase(distributed,'stage10_actor_combined_clip'):
                 total_norm=float(torch.nn.utils.clip_grad_norm_([p for p in actor.parameters() if p.requires_grad],
@@ -136,7 +137,19 @@ def actor_update(policy,optimizer,rows,targets,cache,manifest,controller,*,distr
             if step_observer is not None:step_observer(reports[-1])
         if stop_reason:break
     covered={i for report in reports for i in report['global_chain_indices']}
+    snr_report=None
+    if snr:
+        halves=[r['gradient_contributions'].get('half_split') for r in reports]
+        halves=[h for h in halves if h is not None]
+        first2=sum(h['first_half_square'] for h in halves);second2=sum(h['second_half_square'] for h in halves)
+        dot=sum(h['dot'] for h in halves);cosines=[h['cosine'] for h in halves if h['cosine'] is not None]
+        snr_report=dict(half_split_cosine_per_step=[h['cosine'] for h in halves],
+            half_split_cosine_mean=sum(cosines)/len(cosines) if cosines else None,
+            half_split_cosine_pooled=None if first2<=0 or second2<=0 else dot/math.sqrt(first2*second2),
+            sketch_elements=sum(v.numel() for v in sketch.values()),
+            scope='independent_half_rank_PPO_gradients_per_optimizer_step;sketch_is_iteration_sum_for_consecutive_cosine')
     return dict(optimizer_steps=len(reports),steps=reports,epoch_orders=orders,early_stop_reason=stop_reason,
+        gradient_snr=snr_report,_ppo_gradient_sketch=sketch,
         epoch_order_rng_contract='one_minibatch_seed_for_K8_and_Full20',
         discarded_pending_minibatch=discarded if stop_reason else None,
         eligible_chains=len(selected),applied_unique_chains=len(covered),applied_chain_fraction=len(covered)/len(selected),

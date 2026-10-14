@@ -184,9 +184,22 @@ def paired_summary(baseline, current):
             reward_delta=other['reward']-row['reward'], duration_delta=other['executed_seconds']-row['executed_seconds'],
             new_failure=bool(other['physical_failure'] and not row['physical_failure']),
             failure_recovered=bool(row['physical_failure'] and not other['physical_failure'])))
-    return dict(task_count=len(pairs), reward_delta=_stats([r['reward_delta'] for r in pairs]),
+    deltas = [r['reward_delta'] for r in pairs]
+    return dict(task_count=len(pairs), reward_delta=_stats(deltas),
         duration_delta=_stats([r['duration_delta'] for r in pairs]), new_failures=sum(r['new_failure'] for r in pairs),
-        failure_recovered=sum(r['failure_recovered'] for r in pairs), pairs=pairs)
+        failure_recovered=sum(r['failure_recovered'] for r in pairs), pairs=pairs, regression_alert=_regression_alert(deltas))
+
+
+def _regression_alert(deltas, z=1.6448536269514722):
+    """配对回报差均值的单侧90%上界低于0时只告警，不停止训练、不改变模型选择。"""
+    n = len(deltas)
+    if n < 2:
+        return dict(available=False, upper90=None, triggered=False, scope='paired_mean_reward_delta_one_sided_90')
+    mean = sum(deltas) / n
+    sd = math.sqrt(sum((d-mean)**2 for d in deltas) / (n-1))
+    upper = mean + z*sd/math.sqrt(n)
+    return dict(available=True, mean=mean, standard_error=sd/math.sqrt(n), upper90=upper, triggered=upper < 0.,
+        scope='paired_mean_reward_delta_one_sided_90')
 
 
 def merge_periodic_reports(plan, rankreports, *, baseline=None, evaluation_identity=None):

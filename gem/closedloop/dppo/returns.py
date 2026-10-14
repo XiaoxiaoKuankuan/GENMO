@@ -104,3 +104,28 @@ def normalize_advantages_global(targets, *, distributed=None):
             'advantage_normalization_scope': 'global_valid_upper_transitions',
             'advantage_global_count': int(count), 'advantage_global_mean': float(mean),
             'advantage_global_std': float(variance.sqrt())}
+
+
+def shuffle_advantages_global(targets, manifest, *, distributed=None, seed):
+    """负对照：只在全局有效且含自由坐标的转移之间置换已标准化优势。
+
+    置换使用独立CPU生成器，各rank由同一种子得到同一排列，不触碰训练RNG；returns、
+    raw advantage、old/next value与有效标记保持原值，因此Critic目标不受影响。
+    输出与原优势数值多重集相同，只打断优势与行为链之间的对应关系。
+    """
+    rank = 0 if distributed is None else distributed.rank
+    eligible = lambda r: [m['local_index'] for m in manifest
+        if m['owner_rank'] == r and m['valid'] and m['has_free']]
+    advantages = targets['advantages']
+    local = eligible(rank)
+    values = advantages.detach().double().cpu()[local].tolist() if local else []
+    gathered = [values] if distributed is None else distributed.all_gather_object(values)
+    pool = torch.tensor([v for part in gathered for v in part], dtype=torch.float64)
+    permuted = pool[torch.randperm(len(pool), generator=torch.Generator().manual_seed(int(seed)))]
+    offset = sum(len(part) for part in gathered[:rank])
+    shuffled = advantages.clone()
+    if local:
+        shuffled[torch.as_tensor(local, device=shuffled.device)] = permuted[offset:offset+len(local)].to(
+            device=shuffled.device, dtype=shuffled.dtype)
+    return {**targets, 'advantages': shuffled, 'advantage_control': 'shuffle_global',
+            'advantage_shuffle_seed': int(seed), 'advantage_shuffle_count': len(pool)}
