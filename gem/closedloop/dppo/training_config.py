@@ -42,6 +42,13 @@ def configuration(path,*,genmo_repo=None,gmt_repo=None):
         raise ValueError('Retired vector_boundary_wait settings are not used by world-time collection')
     if 'effect_check_iterations' in s['evaluation']:
         raise ValueError('effect_check_iterations is unsupported; use actual interaction evaluation intervals')
+    eval_envs=s['evaluation'].get('envs_per_rank',1)
+    if type(eval_envs)is not int or not 1<=eval_envs<=64 or type(s['evaluation'].get('persistent_world',False))is not bool:
+        raise ValueError('Evaluation requires 1..64 slots in one world and explicit persistent_world boolean')
+    if s['evaluation'].get('start_mode','beginning') not in ('beginning','center','mixed') or type(s['evaluation'].get('unique_music',False))is not bool:
+        raise ValueError('Invalid evaluation music selection configuration')
+    if s['evaluation'].get('episode_seconds') is None and s['evaluation'].get('start_mode','beginning')!='beginning':
+        raise ValueError('Complete song evaluation cannot start in the middle')
     for key in ('eta', 'guidance_scale'):
         if not math.isfinite(t[key]) or t[key] < 0:
             raise ValueError(f'Invalid explicit policy setting {key}')

@@ -42,10 +42,12 @@ def collect_complete_bank(c, label, split, *, samples_per_source, seeds):
         balanced_samples_per_source=samples_per_source,seeds=seeds,selection_seed=c.stage['seed']+419,
         episode_seconds=None,critic_mc=split=='train'))
     nseed=len(seeds)
+    from .evaluation_world import balanced_rank_tasks
+    task_shards=balanced_rank_tasks(plan,c.distributed.world_size)
     shards=[]
     for rank in range(c.distributed.world_size):
         child=copy.deepcopy(plan)
-        child['tasks']=[t for i,t in enumerate(plan['tasks']) if (i//nseed)%c.distributed.world_size==rank]
+        child['tasks']=task_shards[rank]
         child['task_count']=len(child['tasks']);child['selected_sample_count']=len(child['tasks'])//nseed
         child['plan_sha256']=_digest({k:v for k,v in child.items() if k!='plan_sha256'})
         shards.append(child)
@@ -55,6 +57,7 @@ def collect_complete_bank(c, label, split, *, samples_per_source, seeds):
         controls=sum(math.ceil(t['remaining_music_seconds']*50)+75 for t in child['tasks'])
         generations=sum(math.ceil(t['remaining_music_seconds']/.5)+5 for t in child['tasks'])
         credits.append(dict(control_steps=max(1,controls),physics_steps=4*max(1,controls),generations=max(1,generations)))
+        for key in ('control_steps','physics_steps'):credits[-1][key]*=c.stage['evaluation'].get('envs_per_rank',1)
     path=c.session/'mc_calibration'/label/f'rank{c.distributed.rank:02d}'
     path.mkdir(parents=True,exist_ok=False);lease=f'{c.session.name}/mc/{label}'
     prepaid=begin_lease(c.distributed,c.manager,c.budget,path,lease,credits,c.guard)
@@ -64,9 +67,14 @@ def collect_complete_bank(c, label, split, *, samples_per_source, seeds):
             journal=GuardedStepJournal(path/'execution.sqlite',c.guard,format='genmo.execution_journal.ndarray.v2')
             c.backend.journal=journal
             cfg=copy.deepcopy(c.config);cfg['stage10']['physical_episode']['safety_limit_seconds']=None
+            cfg['runtime']['evidence_level']='full'
             from .vector_environment import VectorUpperEnvironment
             from gem.closedloop.online_conditions import OnlineConditionBuilder
-            env=VectorUpperEnvironment(cfg,c.backend,c.builder,c.policy,prepaid,path)
+            driver=None
+            if getattr(getattr(c,'active_evaluation_world',None),'num_envs',1)>1:
+                from .evaluation_world import EvaluationWorldDriver
+                driver=EvaluationWorldDriver(c,cfg,prepaid,path);env=driver.env
+            else:env=VectorUpperEnvironment(cfg,c.backend,c.builder,c.policy,prepaid,path)
             env.disk_guard=c.guard;env.latency_budget_s=c.vector.latency_budget_s
             env.policy_version=c.state['policy_version'];env.iteration=c.state['iteration']
             def capture(task,row):
@@ -77,9 +85,12 @@ def collect_complete_bank(c, label, split, *, samples_per_source, seeds):
                     if not shards[c.distributed.rank]['tasks']:return None
                     return evaluate_policy(env,c.policy,shards[c.distributed.rank],path/'report',catalog=c.catalog,
                         actor_identity=dict(model_fingerprint=actor_before,policy_version=c.state['policy_version']),
-                        frozen_modules={'critic':c.critic},local_cuda_only=True,transition_sink=capture)
+                        frozen_modules={'critic':c.critic},local_cuda_only=True,transition_sink=capture,world_driver=driver)
                 local_call(c.distributed,run)
-            finally:journal.close()
+            finally:
+                try:
+                    if driver is not None:driver.close()
+                finally:journal.close()
         if _model_fingerprint(c.actor)!=actor_before:raise RuntimeError('MC evaluation changed Actor weights')
         local_used=prepaid.state_dict()['used']
         c.state['budget']=finish_lease(c.distributed,c.budget,prepaid,lease,credits)

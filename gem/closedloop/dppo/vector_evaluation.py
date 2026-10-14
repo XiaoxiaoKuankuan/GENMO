@@ -1,11 +1,10 @@
 """GPU多环境训练的隔离评估世界，复用原固定任务、奖励、报告和模型选择逻辑。
 
-训练世界保持原PhysX状态不动，每rank另外启动一个GPU评估世界，按固定验证任务
-逐条执行；八张卡仍并行评估各自分片。评估明确使用N=1和训练相同的部署时钟，
-不把较小评估batch的耗时当成训练吞吐，不与旧CPU基线混合。Stage1和后续模型共用
-这一评估协议、固定起点、种子及明确的延迟预算。新v3固定profile，不使用训练N
-重标定延迟；旧v2仍显式使用实测关键路径。世界和环境两层日志都先落盘再
-ACK，世界日志等待从critical时间排除。退出时恢复训练backend对象，评估不重置
+训练世界保持原PhysX状态不动，每rank另外启动一个GPU评估世界，环境数由配置
+绑定；任务在该世界内并行，按任务独立噪声和部署时钟推进。可在整个会话常驻，
+每次只轮换接收日志，世界启动/关闭耗时单独记录。Stage1和后续模型共用同一
+评估协议、固定起点、种子及明确的延迟预算。世界权威日志持久化后才ACK，
+环境索引不重复存储完整物理记录。退出时恢复训练backend对象，评估不重置
 训练物理状态、音乐游标或预算；原评估器负责恢复模型模式、梯度和所有训练RNG。
 评估/MC世界的启动与关闭耗时另记入上下文的非迭代开销，不计入评估自身wall_seconds。
 世界进程启动失败（例如Isaac远程地面USD下载瞬断）时换新目录最多重试三次；启动失败发生在
@@ -16,6 +15,7 @@ from contextlib import contextmanager
 import copy
 import os
 from pathlib import Path
+from types import SimpleNamespace
 import time
 import yaml
 import torch
@@ -47,14 +47,16 @@ class SingleVectorLaneTransport:
 
 
 class IsolatedWorld:
-    """一个独立N=1评估/MC世界的进程、日志与后端；不含collective，可在评估线程内使用。"""
+    """一个独立评估/MC世界的进程、日志与后端；不含collective。"""
     def __init__(self):
         self.workers=self.world=self.journal=self.backend=None
         self.start_seconds=self.close_seconds=0.
+        self.num_envs=1
+        self.closed=False
 
 
 def open_isolated_world(c,label,*,attempts=3):
-    """启动并核验N=1 Isaac世界；进程启动失败（如地面USD远程下载瞬断）时换新目录重试。
+    """启动并核验Isaac世界；进程启动失败（如地面USD远程下载瞬断）时换新目录重试。
 
     每次尝试使用独立目录并保留失败日志；世界进入物理执行前的启动失败不产生任何交互，
     因此重试不改变评估结果。三次都失败才抛出。不做跨rank同步。
@@ -79,7 +81,9 @@ def _open_isolated_world_once(c,label):
     from .vector_devices import bind_vector_device
     device_environment=bind_vector_device(config,c.distributed.rank)
     # 独立评估/MC世界不重复首个列式-逐行全量对照；训练世界每会话已执行一次，数值路径相同。
-    config['runtime'].update(num_envs=1,asset_conversion_dir=str(path/'usd_assets'),columnar_first_audit=False)
+    handle.num_envs=c.stage['evaluation'].get('envs_per_rank',1)
+    config['runtime'].update(num_envs=handle.num_envs,asset_conversion_dir=str(path/'usd_assets'),
+        columnar_first_audit=False,evidence_level='full')
     config_path=path/'config.yaml';config_path.write_text(yaml.safe_dump(config,allow_unicode=True))
     handle.workers=Workers(config,path)
     try:
@@ -92,7 +96,8 @@ def _open_isolated_world_once(c,label):
             raise RuntimeError('Evaluation world is on a different physical GPU')
         handle.journal=GuardedStepJournal(path/'world.sqlite',c.guard,format='genmo.execution_journal.ndarray.v2')
         handle.world=VectorWorldClient(client,handle.journal,socket_path=socket)
-        handle.backend=VectorLaneBackend(SingleVectorLaneTransport(handle.world),None)
+        handle.backend=(VectorLaneBackend(SingleVectorLaneTransport(handle.world),None)
+            if handle.num_envs==1 else SimpleNamespace(journal=None))
     except BaseException:
         close_isolated_world(handle)
         raise
@@ -102,6 +107,8 @@ def _open_isolated_world_once(c,label):
 
 def close_isolated_world(handle):
     """关闭世界与进程；任何非干净退出都抛错，journal无论如何关闭。"""
+    if handle.closed:return
+    handle.closed=True
     started=time.perf_counter()
     try:
         if handle.world is not None:
@@ -127,9 +134,11 @@ def isolated_vector_evaluation(c,label):
     kind = 'mc' if label.startswith('mc_') else 'evaluation'
     overhead = getattr(c, 'overhead', None)
     old_backend=c.backend
-    handle,failure=None,None
+    persistent=c.stage['evaluation'].get('persistent_world',False)
+    handle=getattr(c,'evaluation_world',None) if persistent else None
+    failure=None;created=handle is None
     try:
-        handle=open_isolated_world(c,label)
+        if created:handle=open_isolated_world(c,label)
     except Exception as error:
         failure=f'rank {c.distributed.rank}: {type(error).__name__}: {error}'
     failures=c.distributed.all_gather_object(failure)
@@ -138,14 +147,25 @@ def isolated_vector_evaluation(c,label):
         if handle is not None:
             try:close_isolated_world(handle)
             except Exception:pass
+        if persistent:c.evaluation_world=None
         raise RuntimeError('; '.join(item for item in failures if item))
-    if overhead is not None:
+    if persistent:c.evaluation_world=handle
+    c.active_evaluation_world=handle
+    def rotate_journal():
+        path=c.session/'phases'/f'vector_eval_journal_{label}'/f'rank{c.distributed.rank:02d}'
+        path.mkdir(parents=True,exist_ok=False)
+        handle.journal.close()
+        handle.journal=GuardedStepJournal(path/'world.sqlite',c.guard,format='genmo.execution_journal.ndarray.v2')
+        handle.world.journal=handle.journal
+    if not created:local_call(c.distributed,rotate_journal)
+    if overhead is not None and created:
         overhead[kind+'_world_start_seconds']=overhead.get(kind+'_world_start_seconds',0.)+handle.start_seconds
     c.backend=handle.backend
     try:
         yield
     finally:
         c.backend=old_backend
-        local_call(c.distributed,lambda:close_isolated_world(handle))
-        if overhead is not None:
+        c.active_evaluation_world=None
+        if not persistent:local_call(c.distributed,lambda:close_isolated_world(handle))
+        if overhead is not None and not persistent:
             overhead[kind+'_world_close_seconds']=overhead.get(kind+'_world_close_seconds',0.)+handle.close_seconds

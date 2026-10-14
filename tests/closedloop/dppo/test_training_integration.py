@@ -186,24 +186,27 @@ def test_evaluation_binds_only_best_pointers_and_validates_actor(tmp_path, monke
                              executed_seconds=10., physical_failure=0)])
     result['selection'] = choose_best(result, result, iteration=0)
     artifact.write_text(json.dumps(result))
-    report = dict(evaluation_artifacts=[dict(path=str(artifact.relative_to(tmp_path)),
-                                            sha256=file_sha256(artifact))])
+    report = dict(evaluation_artifacts=[],evaluations=[])
     publication = dict(path=str(checkpoint.relative_to(tmp_path)), sha256=file_sha256(checkpoint),
-                       iteration=0, metadata=dict(actor_model_fingerprint='actor'))
-    context = SimpleNamespace(distributed=None, actor=object(), bc=object(), output=tmp_path, session=session, state={})
-    monkeypatch.setattr(evaluation_runtime, '_evaluate_and_record', lambda *args: copy.deepcopy(result))
-    monkeypatch.setattr(training, '_snapshot', lambda *args, **kwargs: dict(publication=publication))
+                       iteration=0, metadata=dict(actor_model_fingerprint='actor' if matching_actor else 'wrong',reason='evaluated_initial'))
+    ready=[]
+    context = SimpleNamespace(distributed=SimpleNamespace(rank=0), actor=object(), bc=object(), output=tmp_path,
+        session=session,state={'iteration':0},async_writer=SimpleNamespace(poll=lambda **kwargs:ready.pop(0) if ready else None))
+    monkeypatch.setattr(evaluation_runtime, '_evaluate', lambda *args,**kwargs: copy.deepcopy(result))
+    monkeypatch.setattr(training, '_snapshot', lambda *args, **kwargs: ready.append(publication))
     monkeypatch.setattr(training, 'root_call', lambda distributed, call: call())
-    monkeypatch.setattr(training, '_model_fingerprint', lambda actor: 'actor' if matching_actor else 'wrong')
+    saved = training._evaluate(context, report, 'initial')
+    assert saved['selection']['best_saved'] is None
+    assert not report['evaluation_artifacts']
     if not matching_actor:
-        with pytest.raises(ValueError, match='Actor differs'):
-            training._evaluate(context, report, 'initial')
+        with pytest.raises(ValueError, match='Actor fingerprint differs'):
+            training._poll_checkpoint(context,wait=True)
         assert not (tmp_path / 'best_checkpoint.json').exists()
         return
-    saved = training._evaluate(context, report, 'initial')
+    training._poll_checkpoint(context,wait=True)
     assert saved['selection']['eligible'] is True
     assert saved['selection']['best_saved']['checkpoint']['sha256'] == file_sha256(checkpoint)
-    assert set(context.state) == {'best_observed', 'best_saved'}
+    assert {'best_observed', 'best_saved'}<=set(context.state)
     assert not (tmp_path / 'eligible.json').exists()
     assert json.loads((tmp_path / 'best_checkpoint.json').read_text()) == publication
     assert json.loads(artifact.read_text()) == saved

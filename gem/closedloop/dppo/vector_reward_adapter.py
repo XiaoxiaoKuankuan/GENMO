@@ -69,6 +69,7 @@ class VectorExecutionReward(ExecutionReward):
         self.control_count = self.scalar_audits = 0
         # 每audit_interval个控制步做一次完整标量重算对照；环境按runtime配置设置，默认100。
         self.audit_interval = 100
+        self.evidence_level = 'full'
         self.vector_version = VECTOR_REWARD_VERSION
         self.columnar_seconds = 0.
         self.columnar_fallbacks = 0

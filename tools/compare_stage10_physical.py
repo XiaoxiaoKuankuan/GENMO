@@ -55,6 +55,11 @@ def validate_pair(before, after, *, mode):
         raise ValueError('Fixed music, seeds or evaluation plan differ')
     a, b = (report['evaluation_identity'] for report in (before, after))
     for key in ('timing_contract', 'critical_latency_budgets', 'episode_seconds', 'physics'):
+        if key=='physics' and mode=='environment_layout':
+            first,second=dict(a[key]),dict(b[key])
+            first.pop('evaluation_envs_per_rank',None);second.pop('evaluation_envs_per_rank',None)
+            if first!=second:raise ValueError('Physical contract differs outside evaluation layout')
+            continue
         if a[key] != b[key]:
             raise ValueError('Physical evaluation contract differs: ' + key)
     for key in ('assets', 'reward', 'timing', 'source_files'):
@@ -80,7 +85,8 @@ def load_physical(report):
         keys = []
         for decision in episode['decisions']:
             identity = decision['identity']
-            journal = Path(decision['raw_sample_path']).parent.parent / 'execution_journal.sqlite'
+            journal = (Path(decision['authoritative_journal_path']) if decision.get('authoritative_journal_path') else
+                Path(decision['raw_sample_path']).parent.parent / 'execution_journal.sqlite')
             for control in decision['controls']:
                 key = (identity['backend_session_id'], identity['env_id'], identity['episode_id'], control['tick'])
                 if key in wanted[journal]:
@@ -99,7 +105,7 @@ def load_physical(report):
                 replies += 1
                 if not isinstance(body, dict):
                     continue
-                for row in expand_feedback(body, columnar=True).get('trace', ()):
+                for row in physical_rows(body):
                     key = (row['backend_session_id'], row['env_id'], row['episode_id'], row['tick'])
                     if key not in selected:
                         continue
@@ -123,6 +129,18 @@ def load_physical(report):
         result[task] = dict(ticks=ticks, **{name: np.array([wanted[path][key][name] for path, key in keys])
                                           for name in ('qpos', 'velocity', 'action', 'reference')})
     return result, evidence
+
+
+def physical_rows(body):
+    """遍历原单lane回复或世界批量回复；ACK/索引记录不含物理数据。"""
+    if not isinstance(body,dict):return
+    if 'replies' in body:
+        for reply in body['replies']:
+            if reply.get('ok'):
+                value=reply['result']
+                yield from physical_rows(value.get('result',value))
+    else:
+        yield from expand_feedback(body,columnar=True).get('trace',())
 
 
 def compare(before, after, *, mode='algorithm'):
@@ -186,7 +204,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--before', type=Path, required=True)
     parser.add_argument('--after', type=Path, required=True)
-    parser.add_argument('--mode', choices=('algorithm', 'noise'), default='algorithm')
+    parser.add_argument('--mode', choices=('algorithm', 'noise','environment_layout'), default='algorithm')
     parser.add_argument('--output', type=Path, required=True)
     args = parser.parse_args()
     if args.output.exists():

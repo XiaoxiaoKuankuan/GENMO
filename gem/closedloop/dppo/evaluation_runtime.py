@@ -54,16 +54,16 @@ def _record_overhead(c, name, started):
         overhead[name] = overhead.get(name, 0.) + time.perf_counter() - started
 
 
-def _evaluate(c, label):
+def _evaluate(c, label, *, write_report=True):
     if getattr(c, 'vector', None) is not None:
         from .vector_evaluation import isolated_vector_evaluation
         with isolated_vector_evaluation(c,label):
-            return _evaluate_impl(c,label)
-    return _evaluate_impl(c,label)
+            return _evaluate_impl(c,label,write_report=write_report)
+    return _evaluate_impl(c,label,write_report=write_report)
 
 
 
-def _evaluate_impl(c, label):
+def _evaluate_impl(c, label, *, write_report=True):
     evaluation_started = time.perf_counter()
     from .evaluation import _digest, _model_fingerprint, _stats
     from .periodic_monitor import (
@@ -88,22 +88,32 @@ def _evaluate_impl(c, label):
     plan = root_call(c.distributed, lambda: build_balanced_plan(c.catalog,
         samples_per_source=c.stage['evaluation']['samples_per_source'],
         seeds=c.stage['evaluation']['seeds'], selection_seed=c.stage['evaluation']['selection_seed'],
-        seconds=c.stage['evaluation']['episode_seconds']))
+        seconds=c.stage['evaluation']['episode_seconds'],
+        start_mode=c.stage['evaluation'].get('start_mode','beginning'),
+        unique_music=c.stage['evaluation'].get('unique_music',False)))
     # 分片单位是样本，同一样本全部seed留在同rank；预算必须按实际child任务数计算。
     shards = [shard_plan(plan, rank, c.distributed.world_size) for rank in range(c.distributed.world_size)]
     latencies = c.distributed.all_gather_object(c.env.latency_budget_s)
     per_rank = []
     for rank, child in enumerate(shards):
-        count = len(child['tasks'])
-        decisions = count * (math.ceil(c.stage['evaluation']['episode_seconds']/.5)+2)
-        per_rank.append(collection_credit(decisions, c.stage['evaluation']['episode_seconds'], latencies[rank]))
-    evaluation_identity = dict(schema='genmo.closedloop.stage10.periodic_execution.v2',
+        seconds=c.stage['evaluation']['episode_seconds']
+        if seconds is None:
+            controls=sum(math.ceil(t['remaining_music_seconds']*50)+75 for t in child['tasks'])
+            generations=sum(math.ceil(t['remaining_music_seconds']/.5)+5 for t in child['tasks'])
+            per_rank.append(dict(control_steps=max(1,controls),physics_steps=4*max(1,controls),generations=max(1,generations)))
+        else:
+            decisions=len(child['tasks'])*(math.ceil(seconds/.5)+2)
+            per_rank.append(collection_credit(decisions,seconds,latencies[rank]))
+        slots=c.stage['evaluation'].get('envs_per_rank',1)
+        # 预付覆盖最坏的多slot不等长尾部；结算仅使用实际执行/分配的物理步。
+        for key in ('control_steps','physics_steps'):per_rank[-1][key]*=slots
+    evaluation_identity = dict(schema='genmo.closedloop.stage10.periodic_execution.v3',
         training_identity=c.identity, timing_contract=c.config['runtime']['timing_contract'],
         kernel=c.policy.kernel_config, execution_profile=c.state.get('execution_profile'),
         critical_latency_budgets=latencies,
         episode_seconds=c.stage['evaluation']['episode_seconds'], rng_scope='current_cuda_device')
     if getattr(c, 'vector', None) is not None:
-        evaluation_identity['physics'] = dict(backend='gpu_vectorized.v1',evaluation_envs_per_rank=1,
+        evaluation_identity['physics'] = dict(backend='gpu_vectorized.v1',evaluation_envs_per_rank=c.stage['evaluation'].get('envs_per_rank',1),
             training_envs_per_rank=c.vector.num_envs,train_world_preserved=True,
             vector_audit_contract=c.config['runtime']['vector_audit_contract'],
             vector_reward_contract=c.config['runtime'].get('vector_reward_contract'),
@@ -123,24 +133,24 @@ def _evaluate_impl(c, label):
         format=c.stage.get('performance', {}).get('journal_format', 'json.v1'))
     c.backend.journal = journal
     config = copy.deepcopy(c.config)
+    config.setdefault('runtime',{})['evidence_level']='full'
     env_type = UpperEnvironment
     if getattr(c, 'vector', None) is not None:
         from .vector_environment import VectorUpperEnvironment
         env_type = VectorUpperEnvironment
-    env = env_type(config, c.backend, c.builder, c.policy, budget, path)
+    driver=None
+    if getattr(getattr(c,'active_evaluation_world',None),'num_envs',1)>1:
+        from .evaluation_world import EvaluationWorldDriver
+        driver=EvaluationWorldDriver(c,config,budget,path);env=driver.env
+    else:env = env_type(config, c.backend, c.builder, c.policy, budget, path)
     env.disk_guard = c.guard
     env.latency_budget_s, env.policy_version, env.iteration = c.env.latency_budget_s, c.env.policy_version, c.env.iteration
     initial_rows = []
     from .training_config import VERSION as CURRENT_TRAINING_VERSION
     fresh_critic_enabled = c.stage.get('version')==CURRENT_TRAINING_VERSION
-    if references is None or fresh_critic_enabled:
-        actual_step = env.step
-        def capture_initial(*args, **kwargs):
-            row = actual_step(*args, **kwargs)
-            if hasattr(row, 'context') and hasattr(row, 'identity'):
-                initial_rows.append(snapshot_critic_transition(row))
-            return row
-        env.step = capture_initial
+    def capture_initial(task,row):
+        if (references is None or fresh_critic_enabled) and hasattr(row,'context') and hasattr(row,'identity'):
+            initial_rows.append(snapshot_critic_transition(row))
     try:
         def perform():
             if not shards[c.distributed.rank]['tasks']:
@@ -150,7 +160,7 @@ def _evaluate_impl(c, label):
                 actor_identity=dict(model_fingerprint=_model_fingerprint(c.actor), iteration=c.state['iteration'],
                     policy_version=c.state['policy_version'], timing_contract=c.config['runtime']['timing_contract'],
                     kernel=c.policy.kernel_config, scope='periodic_in_memory'), frozen_modules={'critic':c.critic},
-                local_cuda_only=True,
+                local_cuda_only=True,transition_sink=capture_initial,world_driver=driver,
                 progress=lambda event: print(f'[EVAL rank={c.distributed.rank}] {event}', flush=True))
         local_call(c.distributed, perform)
         reports = c.distributed.all_gather_object(str(path/'report/report.json') if shards[c.distributed.rank]['tasks'] else None)
@@ -266,20 +276,19 @@ def _evaluate_impl(c, label):
             for key in ('best_observed', 'best_saved'):
                 if choice[key] is not None:
                     atomic_json(c.output/f'{key}.json', choice[key])
-            written = time.perf_counter()
-            atomic_json(c.session/'evaluations'/f'{label}.json', result)
-            _record_overhead(c, 'evaluation_json_write_seconds', written)
             return result
         result = root_call(c.distributed, publish)
         c.state.update(best_observed=result['selection']['best_observed'], best_saved=result['selection']['best_saved'])
         c.last_evaluation = result
     finally:
-        _restore_evaluation_state(c, journal, old_backend_journal, rng)
+        try:
+            if driver is not None:local_call(c.distributed,driver.close)
+        finally:_restore_evaluation_state(c, journal, old_backend_journal, rng)
     result['wall_seconds'] = max(c.distributed.all_gather_object(time.perf_counter()-evaluation_started))
     result['wall_time_scope'] = 'evaluation_including_state_restore_excluding_final_timing_record_publish'
     def publish_timing():
         written = time.perf_counter()
-        atomic_json(c.session/'evaluations'/f'{label}.json', result)
+        if write_report:atomic_json(c.session/'evaluations'/f'{label}.json', result)
         _record_overhead(c, 'evaluation_json_write_seconds', written)
         log_metrics(c.writer, c.output/'curves.jsonl', c.state['iteration'], dict(
             reward=result['source_balanced_reward'], duration=result['mean_executed_seconds'],

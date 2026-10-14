@@ -79,29 +79,52 @@ def _plan_valid(plan):
              'Periodic parent does not contain the balanced four-source subset')
 
 
-def build_balanced_plan(catalog, *, samples_per_source=4, seeds=(42, 1729), seconds=10., selection_seed=42):
+def build_balanced_plan(catalog, *, samples_per_source=4, seeds=(42, 1729), seconds=10., selection_seed=42,
+                        start_mode='beginning',unique_music=False):
     """在独立局部RNG中固定选样，复用全池任务的原task/noise身份。"""
     _require(type(samples_per_source) is int and samples_per_source > 0, 'samples_per_source must be positive')
     _require(set(catalog.samples['val']) == set(SOURCES), 'Periodic plan requires the four original sources')
+    _require(start_mode in ('beginning','center','mixed'), 'Invalid periodic start_mode')
+    _require(start_mode=='beginning' or seconds is not None, 'Complete song evaluation must begin at music start')
     full = build_evaluation_tasks(catalog, split='val', eval_count='all', seeds=seeds,
-        selection_seed=selection_seed, start_mode='beginning', episode_seconds=seconds)
+        selection_seed=selection_seed, start_mode='center' if start_mode=='center' else 'beginning', episode_seconds=seconds)
     rng = np.random.default_rng(selection_seed)
     chosen = set()
     for source in sorted(SOURCES):
         samples = sorted(catalog.samples['val'][source], key=lambda s: str(s['row']['sample_id']))
+        if unique_music:
+            groups={}
+            for sample in samples:groups.setdefault(sample['group_id'],[]).append(sample)
+            samples=[group[int(rng.integers(len(group)))] for _,group in sorted(groups.items())]
+            # 同一音频的不同动作片段不能充当新增的独立音乐。
+            unique={}
+            for sample in samples:unique.setdefault(sample['row']['source_audio_sha256'],sample)
+            samples=list(unique.values())
         _require(len(samples) >= samples_per_source, f'Insufficient periodic val samples: {source}')
         for index in sorted(rng.choice(len(samples), size=samples_per_source, replace=False).tolist()):
             chosen.add((source, str(samples[index]['row']['sample_id'])))
     plan = copy.deepcopy(full)
     tasks = [t for t in plan['tasks'] if (t['dataset'], t['sample_id']) in chosen]
+    if start_mode=='mixed':
+        center=build_evaluation_tasks(catalog,split='val',eval_count='all',seeds=seeds,
+            selection_seed=selection_seed,start_mode='center',episode_seconds=seconds)
+        centered={(t['dataset'],t['sample_id'],t['seed']):t for t in center['tasks']}
+        counts={source:0 for source in SOURCES};mixed=[]
+        for index in range(0,len(tasks),len(seeds)):
+            group=tasks[index:index+len(seeds)];source=group[0]['dataset']
+            mixed.extend(centered[(t['dataset'],t['sample_id'],t['seed'])] if counts[source]%2 else t for t in group)
+            counts[source]+=1
+        tasks=mixed
     samples = [t['sample'] for t in tasks[::len(full['seeds'])]]
     plan.update(tasks=tasks, selected_sample_count=len(chosen), task_count=len(tasks), requested_eval_count=len(chosen),
         selected_unique_group_count=len({s['group_id'] for s in samples}),
         selected_unique_audio_count=len({s['row']['source_audio_sha256'] for s in samples}),
-        selection_rule='fixed_source_balanced_without_replacement',
+        selection_rule='fixed_source_balanced_unique_music' if unique_music else 'fixed_source_balanced_without_replacement',
+        start_mode=start_mode,
         periodic_subset=dict(schema=VERSION, samples_per_source=samples_per_source,
             source_sample_counts=dict.fromkeys(sorted(SOURCES), samples_per_source),
             full_pool_parent_plan_sha256=full['plan_sha256'], full_heldout_acceptance=False))
+    if unique_music:plan['selection_unit']='unique_music_group_and_audio_per_source'
     plan['plan_sha256'] = _digest({k: v for k, v in plan.items() if k != 'plan_sha256'})
     _plan_valid(plan)
     return plan

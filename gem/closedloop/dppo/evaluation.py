@@ -344,11 +344,74 @@ def aggregate_evaluation(episodes):
                                         for seed in seeds} for source in sources}}
 
 
+def evaluation_episode_flow(env, task, index, plan, *, catalog, limit, deterministic, transition_sink, progress):
+    """一个评估任务的因果续体；串行与共享世界使用同一控制、奖励及报告逻辑。"""
+    from .world_flow import LocalOperation
+    error=None
+    if task['sample']['row'].get('split') != plan['split']:
+        raise ValueError('Evaluation task contains a training or different split sample')
+    if progress:
+        progress({'event': 'evaluation_episode_start', 'episode_index': index, 'task_id': task['task_id'],
+                  'dataset': task['dataset'], 'seed': task['seed']})
+    episode = {'version': VERSION, 'task_id': task['task_id'], 'episode_index': index,
+               'dataset': task['dataset'], 'sample_id': task['sample_id'], 'split': plan['split'], 'seed': task['seed'],
+               'music_start_frame': task['music_start_frame'], 'full_music_seconds': task['full_music_seconds'],
+               'remaining_music_seconds': task['remaining_music_seconds'], 'episode_seconds_limit': limit,
+               'noise_index_start': task['noise_index_start'], 'decisions': [], 'transition_valid': False,
+               'physical_failure': False, 'truncated': False, 'end_reason': None, 'reward_sum': 0.}
+    try:
+        actual_motion_rows = []
+        generated_plans=[]
+        music = catalog.load_music(task['sample']) if catalog is not None else load_music_features(plan['data_root'], task['sample'])
+        if 'physical_episode' in env.config.get('stage10',{}):
+            env.config['stage10']['physical_episode']['safety_limit_seconds']=None if limit is None else float(limit)
+        else:
+            env.config['stage9']['episode_seconds'] = float(task['remaining_music_seconds']) if limit is None else float(limit)
+        env.comparison_noise_index = int(task['noise_index_start'])
+        with torch.no_grad():
+            reset=dict(seed=task['seed'],phase='evaluation',music_start_frame=task['music_start_frame'])
+            if hasattr(env,'reset_task_flow'):
+                yield from env.reset_task_flow(task['sample'],music,**reset)
+            else:
+                yield LocalOperation(env.reset_task,dict(sample=task['sample'],music=music,**reset))
+            maximum_decisions = math.ceil(min(task['remaining_music_seconds'], float(limit) if limit is not None else task['remaining_music_seconds'])/.02)+2
+            for decision_index in range(maximum_decisions):
+                if hasattr(env,'step_flow'):result=yield from env.step_flow(deterministic=deterministic)
+                else:result=yield LocalOperation(env.step,dict(deterministic=deterministic))
+                if transition_sink is not None:transition_sink(task,result)
+                evidence = _decision_evidence(result, decision_index)
+                if hasattr(env,'authoritative_journal_path'):
+                    evidence['authoritative_journal_path']=env.authoritative_journal_path
+                actual_motion_rows.extend({k:np.array(r[k],copy=True) for k in ('tick','actual_joint_pos_gmt','actual_joint_vel_gmt')} for r in _field(result,'metadata',{}).get('execution_trace',[]))
+                generated_plans.append(_field(result,'metadata',{}).get('generated',{}))
+                episode['decisions'].append(evidence)
+                episode['reward_sum'] += evidence['reward_sum']
+                if evidence['terminated'] or evidence['truncated']:
+                    episode.update(transition_valid=True, physical_failure=evidence['physical_failure'],
+                                   truncated=evidence['truncated'], end_reason=evidence['reason'])
+                    break
+                if evidence['executed_control_steps'] <= 0:
+                    raise RuntimeError('Evaluation made no progress without a terminal boundary')
+            else:
+                raise RuntimeError('Evaluation exceeded finite decision guard without termination')
+    except Exception as caught:
+        episode.update(transition_valid=False, error={'type': type(caught).__name__, 'message': str(caught)},
+                       end_reason='infrastructure_failure')
+        error = caught
+    from .motion_diagnostics import episode_motion_diagnostic,generated_reference_diagnostic
+    episode['motion_diagnostic'] = episode_motion_diagnostic(actual_motion_rows,music) if episode.get('transition_valid') else dict(available=False,reason='invalid_episode')
+    episode['generated_reference_diagnostic']=generated_reference_diagnostic(generated_plans)
+    if progress:
+        progress(dict(event='evaluation_episode_end',episode_index=index,task_id=task['task_id'],
+            transition_valid=episode['transition_valid'],reward_sum=episode['reward_sum']))
+    return episode,error
+
+
 def evaluate_policy(env, policy, task_plan, output_dir, *, catalog=None, episode_seconds=None,
                     deterministic=False, actor_identity=None, frozen_modules=None, progress=None,
-                    local_cuda_only=False, transition_sink=None):
+                    local_cuda_only=False, transition_sink=None, world_driver=None):
     """只评估显式 policy，返回可重算报告；故障时先写报告再抛错，绝不开始优化。"""
-    if env.policy is not policy:
+    if env.policy is not policy and getattr(getattr(env.policy,'owner',None),'policy',None) is not policy:
         raise ValueError('Evaluation environment must use the explicitly supplied loaded Actor policy')
     plan = copy.deepcopy(task_plan)
     mc=bool(plan.get('critic_mc_supervision'))
@@ -385,63 +448,27 @@ def evaluate_policy(env, policy, task_plan, output_dir, *, catalog=None, episode
     try:
         for module in modules.values():
             module.eval()
-        for index, task in enumerate(plan['tasks']):
-            if task['sample']['row'].get('split') != plan['split']:
-                raise ValueError('Evaluation task contains a training or different split sample')
-            if progress:
-                progress({'event': 'evaluation_episode_start', 'episode_index': index, 'task_id': task['task_id'],
-                          'dataset': task['dataset'], 'seed': task['seed']})
-            episode = {'version': VERSION, 'task_id': task['task_id'], 'episode_index': index,
-                       'dataset': task['dataset'], 'sample_id': task['sample_id'], 'split': plan['split'], 'seed': task['seed'],
-                       'music_start_frame': task['music_start_frame'], 'full_music_seconds': task['full_music_seconds'],
-                       'remaining_music_seconds': task['remaining_music_seconds'], 'episode_seconds_limit': limit,
-                       'noise_index_start': task['noise_index_start'], 'decisions': [], 'transition_valid': False,
-                       'physical_failure': False, 'truncated': False, 'end_reason': None, 'reward_sum': 0.}
-            try:
-                actual_motion_rows = []
-                generated_plans=[]
-                music = catalog.load_music(task['sample']) if catalog is not None else load_music_features(plan['data_root'], task['sample'])
-                if 'physical_episode' in env.config.get('stage10',{}):
-                    env.config['stage10']['physical_episode']['safety_limit_seconds']=None if limit is None else float(limit)
-                else:
-                    env.config['stage9']['episode_seconds'] = float(task['remaining_music_seconds']) if limit is None else float(limit)
-                env.comparison_noise_index = int(task['noise_index_start'])
-                with torch.no_grad():
-                    env.reset_task(task['sample'], music, seed=task['seed'], phase='evaluation', music_start_frame=task['music_start_frame'])
-                    maximum_decisions = math.ceil(min(task['remaining_music_seconds'], float(limit) if limit is not None else task['remaining_music_seconds'])/.02)+2
-                    for decision_index in range(maximum_decisions):
-                        result = env.step(deterministic=deterministic)
-                        if transition_sink is not None:transition_sink(task,result)
-                        evidence = _decision_evidence(result, decision_index)
-                        actual_motion_rows.extend({k:np.array(r[k],copy=True) for k in ('tick','actual_joint_pos_gmt','actual_joint_vel_gmt')} for r in _field(result,'metadata',{}).get('execution_trace',[]))
-                        generated_plans.append(_field(result,'metadata',{}).get('generated',{}))
-                        episode['decisions'].append(evidence)
-                        episode['reward_sum'] += evidence['reward_sum']
-                        if evidence['terminated'] or evidence['truncated']:
-                            episode.update(transition_valid=True, physical_failure=evidence['physical_failure'],
-                                           truncated=evidence['truncated'], end_reason=evidence['reason'])
-                            break
-                        if evidence['executed_control_steps'] <= 0:
-                            raise RuntimeError('Evaluation made no progress without a terminal boundary')
-                    else:
-                        raise RuntimeError('Evaluation exceeded finite decision guard without termination')
-            except Exception as caught:
-                episode.update(transition_valid=False, error={'type': type(caught).__name__, 'message': str(caught)},
-                               end_reason='infrastructure_failure')
-                error = caught
-            from .motion_diagnostics import episode_motion_diagnostic,generated_reference_diagnostic
-            episode['motion_diagnostic'] = episode_motion_diagnostic(actual_motion_rows,music) if episode.get('transition_valid') else dict(available=False,reason='invalid_episode')
-            episode['generated_reference_diagnostic']=generated_reference_diagnostic(generated_plans)
-            episode_path = output/'episodes'/f'{index:06d}.json'
-            _publish_json(episode_path, episode)
+        def flow(environment, index, task):
+            return evaluation_episode_flow(environment,task,index,plan,catalog=catalog,limit=limit,
+                deterministic=deterministic,transition_sink=transition_sink,progress=progress)
+        if world_driver is None:
+            from .world_flow import run_synchronous
+            results=[]
+            for index,task in enumerate(plan['tasks']):
+                episode,caught=run_synchronous(env,flow(env,index,task))
+                results.append((index,episode,caught))
+                if caught is not None:break
+        else:
+            if deterministic:raise ValueError('Shared-world evaluation requires the declared stochastic behavior')
+            results=world_driver.run(plan['tasks'],flow)
+        for index,episode,caught in sorted(results,key=lambda item:item[0]):
+            episode_path=output/'episodes'/f'{index:06d}.json'
+            _publish_json(episode_path,episode)
             episodes.append(episode)
-            manifests.append({'path': str(episode_path.relative_to(output)), 'sha256': hashlib.sha256(episode_path.read_bytes()).hexdigest(),
-                              'task_id': task['task_id'], 'transition_valid': episode['transition_valid']})
-            if progress:
-                progress({'event': 'evaluation_episode_end', 'episode_index': index, 'task_id': task['task_id'],
-                          'transition_valid': episode['transition_valid'], 'reward_sum': episode['reward_sum']})
-            if error is not None:
-                break
+            manifests.append(dict(path=str(episode_path.relative_to(output)),
+                sha256=hashlib.sha256(episode_path.read_bytes()).hexdigest(),
+                task_id=episode['task_id'],transition_valid=episode['transition_valid']))
+            if caught is not None and error is None:error=caught
     except Exception as caught:
         error = caught
     finally:
@@ -467,6 +494,7 @@ def evaluate_policy(env, policy, task_plan, output_dir, *, catalog=None, episode
               'episode_seconds_limit': limit, 'pretraining_unseen_claim': False,
               'execution_evidence': 'separate acknowledged execution journal and raw sample paths',
               'error': None if error is None else {'type': type(error).__name__, 'message': str(error)}}
+    if world_driver is not None:report['world_execution']=getattr(world_driver,'execution_summary',None)
     _publish_json(output/'report.json', report)
     if error is not None:
         error.evaluation_report = report

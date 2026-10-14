@@ -34,6 +34,8 @@ def evaluate_columns(reward, trace, *, timings=None):
     """纯计算本批结果及后继窗口；核对结束前不修改调用者的因果状态。"""
     n = len(trace)
     if not n: return [], []
+    full_indices=(set(range(n)) if getattr(reward,'evidence_level','full')=='full' else
+        {i for i in range(n) if (reward.control_count+i)%reward.audit_interval==0})
     marked=time.perf_counter()
     def mark(name):
         nonlocal marked
@@ -96,10 +98,12 @@ def evaluate_columns(reward, trace, *, timings=None):
         log_ratio = (math.log((a+activity_cfg['intensity_epsilon'])/(target_value+activity_cfg['intensity_epsilon']))/math.log(activity_cfg['intensity_log_ratio'])) if reward.music_enabled else None
         score = math.exp(-min(abs(log_ratio),1e150)**2) if reward.music_enabled else None
         gates.append(gate); intensity.append(score)
-        activities.append(dict(actual_activity_rad_s=a,target_activity_rad_s=target_value,
+        activity=dict(actual_activity_rad_s=a,target_activity_rad_s=target_value,valid=True,gate=gate)
+        if i in full_indices:activity.update(dict(
             window_count=count,window_complete=count==reward.activity_steps,window_begin_tick=begin,
             window_end_tick=tick,target_source=copy.deepcopy(target['source']),target_evidence=target,
-            valid=True,gate=gate,gate_unclamped_ratio=ratio,intensity_log_ratio=log_ratio,intensity_score=score))
+            gate_unclamped_ratio=ratio,intensity_log_ratio=log_ratio,intensity_score=score))
+        activities.append(activity)
     mark('activity_window_and_metadata_seconds')
     if reward.music_enabled:
         if reward.music is None: raise ValueError('music features not_available')
@@ -125,6 +129,7 @@ def evaluate_columns(reward, trace, *, timings=None):
         durations=_finite(col(*path,'dt_s'),'physical sample duration',(n,))
         if np.any(physics_ticks != ticks-12+(s+1)*3) or np.any(np.abs(durations-cfg['dt']/4)>1e-12):
             raise ValueError('Invalid physical sample timestamp/duration')
+        if not full_indices:continue
         p = (*path,'physical_diagnostics')
         torque = _finite(col(*p,'pd_torque_estimate_nm'),'torque',(n,21))
         velocity = _finite(col(*path,'joint_vel_gmt'),'substep velocity',(n,21))
@@ -137,7 +142,7 @@ def evaluate_columns(reward, trace, *, timings=None):
         if (sync.dtype.kind != 'b' or np.any(sync != (tt==vt)) or np.any(vt!=physics_ticks) or
                 not all(math.isclose(float(t),int(p_tick)/600,abs_tol=1e-12) for t,p_tick in zip(seconds,physics_ticks))):
             raise ValueError('PD power sampling-time evidence differs')
-        for i in range(n):
+        for i in full_indices:
             power[i].append(dict(per_joint_w=values[i].tolist(),mean_w=float(values[i].mean()),
                 sum_w=float(values[i].sum()),max_w=float(values[i].max()),
                 torque_sample_tick=col(*meta,'torque_sample_tick')[i].item(),
@@ -154,7 +159,8 @@ def evaluate_columns(reward, trace, *, timings=None):
     scores = {}
     for name in WEIGHTS:
         if name == 'music': scores[name] = (cfg['music_mix']['beat']*beats+cfg['music_mix']['intensity']*np.asarray(intensity)) if reward.music_enabled else np.zeros(n)
-        else: scores[name] = _finite(col('reward_primitives','components',name,'score'),name,(n,))
+        else:
+            scores[name] = _finite(col('reward_primitives','components',name,'score'),name,(n,))
         if np.any((scores[name]<0)|(scores[name]>1+1e-12)): raise ValueError('Reward score outside [0,1]')
         scores[name] = np.minimum(scores[name],1.)
     rates = {name: scores[name]*cfg[key]*(-1 if 'penalty' in key else 1)*
@@ -163,6 +169,11 @@ def evaluate_columns(reward, trace, *, timings=None):
     mark('consistency_and_reward_integration_seconds')
     results = []
     for i,row in enumerate(trace):
+        if i not in full_indices:
+            results.append(dict(version=cfg['version'],tick=int(ticks[i]),episode_id=str(episodes[i]),
+                reward=float(cfg['dt']*total[i]),reward_rate=float(total[i]),reward_is_integrated=True,dt_s=cfg['dt'],
+                transition_valid=True,errors=[],activity=activities[i],evidence_level='training'))
+            continue
         music_raw = {'reason': 'music_reward_disabled'}
         if reward.music_enabled:
             music_raw = dict(beat_definition='bumi.metrics._derive_motion_beats+_beat_alignment',

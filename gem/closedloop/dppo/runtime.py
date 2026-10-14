@@ -115,11 +115,15 @@ class InProcessTrainingRuntime:
         resource.env.output=directory
         resource.env.iteration=self.c.state['rollouts_completed']
         resource.env.policy_version=self.c.state['policy_version']
+        level='full' if self.strict else self.c.config['runtime'].get('evidence_level','full')
+        resource.env.config['runtime']['evidence_level']=level
+        if getattr(resource.env,'reward',None) is not None:resource.env.reward.evidence_level=level
 
     def _open(self,label,counts,strict,*,world_seconds=None):
         c=self.c
         if self.phase is not None:raise RuntimeError('Cannot overlap physical rollout phases')
         self.strict=bool(strict)
+        self.service.set_evidence_level('full' if strict else c.config['runtime'].get('evidence_level','full'))
         path=c.session/'collections'/label/f'rank{c.distributed.rank:02d}'
         local_call(c.distributed,lambda:path.mkdir(parents=True,exist_ok=False))
         credits=[collection_credit(n+3,c.stage['ppo_rollout']['world_seconds'],self.latency_budget_s) for n in counts]

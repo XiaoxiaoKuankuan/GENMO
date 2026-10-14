@@ -158,12 +158,42 @@ def _sketch_cosine(previous,current):
     return None if left<=0 or right<=0 else max(-1.,min(1.,dot/math.sqrt(left*right)))
 
 
+def _poll_checkpoint(c,*,wait=False):
+    """仅root调用：权重完整发布之后，才绑定对应评估并一次性写最终JSON。"""
+    publication=c.async_writer.poll(wait=wait)
+    pending=getattr(c,'pending_evaluation',None)
+    if publication is not None and pending is not None:
+        result,label,report,baseline=pending
+        if publication['metadata']['reason']!='evaluated_'+label:
+            raise RuntimeError('Pending evaluation does not match published checkpoint')
+        from .periodic_monitor import mark_saved_evaluation
+        selection=mark_saved_evaluation(result,baseline,publication,
+            actor_fingerprint=result['actor_identity']['model_fingerprint'],output_dir=c.output,
+            best_observed=result['selection']['best_observed'],best_saved=result['selection']['best_saved'])
+        result['selection']=selection
+        c.state.update({key:selection[key] for key in ('best_observed','best_saved')})
+        started=time.perf_counter()
+        for key in ('best_observed','best_saved'):
+            if selection[key] is not None:atomic_json(c.output/(key+'.json'),selection[key])
+        path=c.session/'evaluations'/f'{label}.json'
+        atomic_json(path,result)
+        report['evaluation_artifacts'].append(dict(label=label,iteration=result['iteration'],
+            path=str(path.relative_to(c.output)),sha256=file_sha256(path)))
+        report['evaluations'].append(label)
+        choice=selection.get('best_saved')
+        if choice and choice.get('checkpoint',{}).get('path')==publication['path']:
+            atomic_json(c.output/'best_checkpoint.json',publication)
+        c.pending_evaluation=None
+        _overhead(c,'evaluation_selection_publish_seconds',started)
+    return publication
+
+
 def _snapshot(c,reason,*,wait=False):
     rank_state=dict(rank=c.distributed.rank,rng=capture_local_rng(c.generators),bc=c.bc.state_dict(),
         collector=c.vector.checkpoint_state())
     rank_states=c.distributed.all_gather_object(rank_state)
     def save():
-        c.async_writer.poll()
+        _poll_checkpoint(c,wait=True)
         c.manager.check_disk(c.stage['storage']['checkpoint_reserve_bytes'])
         before=time.perf_counter()
         payload=immutable_cpu_snapshot(dict(schema=SCHEMA,identity=c.identity,config=c.base_config,
@@ -173,7 +203,7 @@ def _snapshot(c,reason,*,wait=False):
             actor_fingerprint=_model_fingerprint(c.actor)))
         queued=c.async_writer.submit(payload,reason=reason)
         queued['cpu_snapshot_seconds']=time.perf_counter()-before
-        if wait:queued['publication']=c.async_writer.poll(wait=True)
+        if wait:queued['publication']=_poll_checkpoint(c,wait=True)
         return queued
     return root_call(c.distributed,save)
 
@@ -207,9 +237,10 @@ def _preserve_rollout_anomaly(c,buffer,targets,manifest,label):
 
 
 def _evaluate(c,report,label):
-    from .evaluation_runtime import _evaluate_and_record
+    from .evaluation_runtime import _evaluate as evaluate
+    root_call(c.distributed,lambda:_poll_checkpoint(c,wait=True))
     started=time.perf_counter()
-    result=_evaluate_and_record(c,report,label)
+    result=evaluate(c,label,write_report=False)
     _overhead(c,'evaluation_run_seconds',started)
     alert=(result.get('paired_baseline') or {}).get('regression_alert') or {}
     from .periodic_monitor import advance_regression_alert
@@ -233,29 +264,12 @@ def _evaluate(c,report,label):
             source_loss_maturity=c.bc.source_global_step,scope=shards[0]['scope'])
         _overhead(c,'evaluation_stage1_retention_seconds',stage)
     stage=time.perf_counter()
-    publication=_snapshot(c,'evaluated_'+label,wait=True)['publication']
+    _snapshot(c,'evaluated_'+label)
     _overhead(c,'evaluation_snapshot_seconds',stage)
     stage=time.perf_counter()
-    from .periodic_monitor import mark_saved_evaluation
     baseline=root_call(c.distributed,lambda:json.loads((c.output/'evaluation_baseline.json').read_text())
         if (c.output/'evaluation_baseline.json').exists() else result)
-    selection=mark_saved_evaluation(result,baseline,publication,actor_fingerprint=_model_fingerprint(c.actor),
-        output_dir=c.output,best_observed=result['selection']['best_observed'],
-        best_saved=result['selection']['best_saved'])
-    result['selection']=selection
-    c.state.update({key:selection[key] for key in ('best_observed','best_saved')})
-    def publish_selection():
-        for key in ('best_observed','best_saved'):
-            value=selection[key]
-            if value is not None:atomic_json(c.output/(key+'.json'),value)
-        atomic_json(c.session/'evaluations'/f'{label}.json',result)
-        artifact=report['evaluation_artifacts'][-1]
-        artifact['sha256']=file_sha256(c.output/artifact['path'])
-        choice=selection.get('best_saved')
-        if choice and choice.get('checkpoint',{}).get('path')==publication['path']:
-            atomic_json(c.output/'best_checkpoint.json',publication)
-    root_call(c.distributed,publish_selection)
-    _overhead(c,'evaluation_selection_publish_seconds',stage)
+    if c.distributed.rank==0:c.pending_evaluation=(result,label,report,baseline)
     _overhead(c,'evaluation_total_seconds',started)
     return result
 
@@ -596,9 +610,9 @@ def run(cargs,config,distributed):
                 _overhead(c,'mc_calibration_seconds',stage)
                 c.state['next_mc_calibration_control_steps']=_next_interaction_boundary(c.state['training_control_steps'],complete_mc['every_control_steps'])
                 stage=time.perf_counter()
-                _snapshot(c,'mc_calibrated',wait=True)
+                _snapshot(c,'mc_calibrated')
                 _overhead(c,'mc_snapshot_seconds',stage)
-            root_call(distributed,lambda:c.async_writer.poll())
+            root_call(distributed,lambda:_poll_checkpoint(c))
         _snapshot(c,'controlled_end',wait=True)
         _evaluate(c,report,'final_'+f'{c.state["iteration"]:06d}')
         report.update(status='passed',final_state=c.state)
@@ -636,13 +650,22 @@ def run(cargs,config,distributed):
                 report['source_unchanged']=root_call(distributed,lambda:_sources(config)==c.identity['source_files'])
                 if not report['source_unchanged']:raise RuntimeError('Bound runtime source changed during session')
             except BaseException as caught:error=error or caught
+        if getattr(c,'evaluation_world',None) is not None:
+            try:
+                from .vector_evaluation import close_isolated_world
+                local_call(distributed,lambda:close_isolated_world(c.evaluation_world))
+                report['evaluation_world_shutdown']=dict(clean=True,wall_seconds=c.evaluation_world.close_seconds)
+            except BaseException as caught:
+                report['evaluation_world_shutdown']=dict(clean=False,error=repr(caught));error=error or caught
         if c.vector is not None:
             try:report['world_shutdown']=local_call(distributed,c.vector.close)
             except BaseException as caught:
                 report['world_shutdown_error']=repr(caught);error=error or caught
         if distributed.rank==0:
             try:
-                if c.async_writer is not None:report['checkpoint_shutdown']=c.async_writer.close()
+                if c.async_writer is not None:
+                    report['checkpoint_shutdown']=_poll_checkpoint(c,wait=True)
+                    c.async_writer.close()
             except BaseException as caught:error=error or caught
             finally:
                 if c.writer is not None:c.writer.close()

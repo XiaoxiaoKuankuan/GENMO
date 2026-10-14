@@ -18,6 +18,31 @@ def calculators():
             for cls in (ExecutionReward,ExecutionReward,VectorExecutionReward)]
 
 
+def test_training_evidence_preserves_bitwise_reward_and_full_audit_at_boundary():
+    from gem.runtime.trajectory_blocks import pack_trace,ColumnarTrace
+    oracle,_,full=calculators();lean=copy.deepcopy(full)
+    lean.evidence_level='training';lean.audit_interval=full.audit_interval=50
+    for begin in range(0,125,25):
+        data=[]
+        for index in range(begin,begin+25):
+            row=actual_step(index,speed=1.+.1*(index%9));row['env_id']=3
+            row['reward_primitives']=packet(row,oracle);data.append(row)
+        a=full.evaluate_batch(ColumnarTrace([pack_trace(data)]))
+        b=lean.evaluate_batch(ColumnarTrace([pack_trace(data)]))
+        assert [r['reward'] for r in a]==[r['reward'] for r in b]
+        assert [r['transition_valid'] for r in a]==[r['transition_valid'] for r in b]
+        for i,(left,right) in enumerate(zip(a,b)):
+            if (begin+i)%50==0:compare_reward_evidence(right,left)
+            else:
+                assert 'diagnostics' not in right and 'components' not in right
+                assert right['activity']['gate']==left['activity']['gate']
+    assert lean.scalar_audits==full.scalar_audits==3
+    lean.evidence_level='full'
+    row=actual_step(125,speed=1.);row['env_id']=3;row['reward_primitives']=packet(row,oracle)
+    compare_reward_evidence(lean.evaluate_batch(ColumnarTrace([pack_trace([row])]))[0],
+        full.evaluate_batch(ColumnarTrace([pack_trace([row])]))[0])
+
+
 def packet(row,oracle):
     result={}
     for name in ('track','stable','alive','cmd','torque','contact','joint_limit'):
