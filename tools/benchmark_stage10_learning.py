@@ -21,6 +21,15 @@ KL。计时轮不复制完整梯度，预热后比较同一完整工作量而不
 候选不会成为训练策略。critic-reference模式用同一真实固定目标比较预训练时序
 Critic与旧MLP，按完整episode留出，并另测独立物理评估轨迹。冻结特征可以缓存，
 可训练层每步重算；固定GAE误差不冒充无偏真实价值误差或下一批在线泛化能力。
+
+cross-kernel模式允许数值候选在同一stable采样数据和同一起点上执行同样的8步更新：
+除原逐张量对照外，报告更新前跨核数值KL底噪、更新后相对reference的超额KL、参数增量
+与reference的余弦和clip比例。它只回答候选学习更新是否与主核等价及其吞吐，不替代候选
+在自身采样数据上的零更新检查，也不自动改变训练数值核。
+
+heldout-surrogate模式是A0学习信号离线检验：按(rank,环境槽)整条环境流把链分成拟合半和
+留出半，BC权重固定为0，只用拟合半执行标准PPO更新，再在留出半计算优势加权的代理比值
+增益 mean(A*(r-1))。同一流程对拟合半优势做全局置换得到零分布，报告z值。不保存权重。
 """
 from __future__ import annotations
 import argparse
@@ -51,6 +60,86 @@ from gem.closedloop.dppo.optimization_support import probability_check_local
 from gem.closedloop.dppo.updater import actor_update,final_kl,check_kl
 from gem.closedloop.dppo.learning_diagnostics import module_directions,terminal_outputs
 from gem.closedloop.dppo.learning_diagnostics import compare_named
+
+
+def _set_advantages(cache,values):
+    cache.host['advantages']=values.to(cache.host['advantages'].dtype).clone()
+    cache.blocks.clear()
+
+
+@torch.no_grad()
+def heldout_gain(policy,rows,cache,manifest,d,*,microbatch,gamma_denoising):
+    """留出链全部20步的优势加权代理比值增益；r=1时恒为0，只读当前Actor和旧统计。"""
+    from gem.closedloop.dppo.execution_checks import policy_phase
+    from gem.closedloop.dppo.gaussian_probability import gaussian_statistics
+    from gem.closedloop.dppo.optimization_support import _owned,_parameters,_old_kernel
+    from gem.closedloop.dppo.tensor_cache import ConditionGraphCache
+    from gem.closedloop.dppo.updater import _eligible
+    owned=_owned(_eligible(manifest),manifest,d);local=[rows[i] for _,i in owned]
+    totals=torch.zeros(3,dtype=torch.float64,device=d.device)
+    with policy_phase(policy):
+        conditions=ConditionGraphCache(policy,cache);conditions.prime(local)
+        pairs=[(i,s) for i in range(len(local)) for s in range(20)]
+        for offset in range(0,len(pairs),microbatch):
+            part=pairs[offset:offset+microbatch];samples=[local[i] for i,_ in part];steps=[s for _,s in part]
+            params,mask=_parameters(policy,samples,steps,d.device,cache,conditions)
+            old_mean,old_std=_old_kernel(samples,steps,d.device,cache)
+            stats=gaussian_statistics(cache.get('chain',samples,[s+1 for s in steps]),old_mean,old_std,
+                params['mean'],params['std'],mask)
+            ratio=stats['mean_coordinate_log_ratio'].exp()
+            advantage=cache.get('advantages',samples).to(ratio)*cache.denoising_discounts(steps,20,gamma_denoising).to(ratio)
+            valid=stats['free_count']>0
+            totals+=torch.stack(((advantage*(ratio-1)).masked_fill(~valid,0.).sum(),valid.sum().double(),
+                (ratio-1).abs().masked_fill(~valid,0.).sum()))
+    totals=d.sum_tensor(totals);gain,count,change=totals.cpu().tolist()
+    return dict(gain_per_internal_transition=gain/max(count,1.),internal_transitions=int(count),
+        mean_abs_ratio_change=change/max(count,1.))
+
+
+def heldout_surrogate_test(a,d,policy,optimizer,anchor,generators,cache,rows,manifest,kwargs,settings):
+    import hashlib
+    half=lambda slot:int(hashlib.sha256(f'{a.heldout_seed}:{d.rank}:{slot}'.encode()).hexdigest(),16)%2
+    halves=d.all_gather_object([half(row.metadata.get('collector_env_slot',i)) for i,row in enumerate(rows)])
+    fit=[dict(m,has_free=m['has_free'] and halves[m['owner_rank']][m['local_index']]==0) for m in manifest]
+    held=[dict(m,has_free=m['has_free'] and halves[m['owner_rank']][m['local_index']]==1) for m in manifest]
+    controller=BCGradientController(initial=0.,minimum=0.,mode='fixed')
+    base=immutable_cpu_snapshot(policy.actor.state_dict());adam=immutable_cpu_snapshot(optimizer.state_dict())
+    bc_base=immutable_cpu_snapshot(anchor.state_dict());rng_base=capture_local_rng(generators)
+    true_advantages=cache.host['advantages'].clone()
+    local_fit=[m['local_index'] for m in fit if m['owner_rank']==d.rank and m['valid'] and m['has_free']]
+    def restore():
+        policy.actor.load_state_dict(base);optimizer.load_state_dict(copy.deepcopy(adam))
+        anchor.load_state_dict(bc_base);restore_local_rng(rng_base,generators);policy.actor.zero_grad(set_to_none=True)
+    def evaluate(permutation):
+        restore()
+        if permutation is not None:
+            values=true_advantages[local_fit].double().tolist()
+            pool=[v for part in d.all_gather_object(values) for v in part]
+            order=torch.randperm(len(pool),generator=torch.Generator().manual_seed(10007*a.heldout_seed+permutation))
+            offset=sum(len(x) for x in d.all_gather_object(values)[:d.rank])
+            permuted=true_advantages.clone()
+            if local_fit:permuted[local_fit]=torch.tensor(pool,dtype=permuted.dtype)[order][offset:offset+len(local_fit)]
+            _set_advantages(cache,permuted)
+        update=actor_update(policy,optimizer,rows,None,cache,fit,controller,microbatch=settings['denoising_microbatch'],**kwargs)
+        _set_advantages(cache,true_advantages)
+        result=heldout_gain(policy,rows,cache,held,d,microbatch=128,gamma_denoising=settings['gamma_denoising'])
+        result.update(optimizer_steps=update['optimizer_steps'],permutation=permutation)
+        if d.rank==0:print(json.dumps(dict(phase='heldout_surrogate',**result)),flush=True)
+        return result
+    restore()
+    zero=heldout_gain(policy,rows,cache,held,d,microbatch=128,gamma_denoising=settings['gamma_denoising'])
+    real=evaluate(None);nulls=[evaluate(k) for k in range(a.heldout_surrogate)]
+    values=np.array([x['gain_per_internal_transition'] for x in nulls])
+    z=None if len(values)<2 or values.std(ddof=1)<=0 else float((real['gain_per_internal_transition']-values.mean())/values.std(ddof=1))
+    report=dict(schema='genmo.stage10.heldout_surrogate_test',source_case=str(a.case),seed=a.heldout_seed,
+        fit_chains=sum(m['valid'] and m['has_free'] for m in fit),heldout_chains=sum(m['valid'] and m['has_free'] for m in held),
+        split='sha256(seed,rank,collector_env_slot)_whole_environment_streams',bc_weight=0.,
+        before_update=zero,real=real,null=nulls,null_mean=float(values.mean()) if len(values) else None,
+        null_std=float(values.std(ddof=1)) if len(values)>1 else None,z=z,
+        interpretation='z>=2 suggests PPO update generalizes advantage signal to held-out environment streams')
+    root_call(d,lambda:atomic_json(a.output/'heldout_surrogate.json',report))
+    restore()
+    return report
 
 
 def calibrate_actor(a,d,source,rank_state,policy,optimizer,anchor,generators,cache,rows,targets,manifest,kwargs,stage):
@@ -279,6 +368,9 @@ def main():
     p.add_argument('--soft-kl-joint',type=float,help='严格joint对照的逐minibatch发布门槛，单位为真实joint KL')
     p.add_argument('--critic-reference',type=Path,help='独立真实物理评估的fixed_diagnostic_reference.json')
     p.add_argument('--critic-epochs',type=int,nargs='+',default=[4,16,32])
+    p.add_argument('--cross-kernel',action='store_true',help='允许数值候选在同一stable采样数据上做更新等价对照')
+    p.add_argument('--heldout-surrogate',type=int,default=0,help='A0留出代理增益检验的零分布置换次数')
+    p.add_argument('--heldout-seed',type=int,default=0)
     a=p.parse_args();rank=int(os.environ['LOCAL_RANK'])
     if a.diagnostic_only and a.profile:p.error('Numerical diagnostics and independent performance profiling are separate modes')
     if a.profile_only:
@@ -322,8 +414,9 @@ def main():
         cache.close();dist.destroy_process_group(group);dist.destroy_process_group();return
     actor.load_state_dict(source['actor'])
     from gem.closedloop.dppo.run_control import build_policy
-    if any(v!='reference' for v in a.variants):
-        p.error('Numerical candidates require freshly sampled data from their own actual kernel; benchmark reference within that declared case')
+    if any(v!='reference' for v in a.variants) and not a.cross_kernel:
+        p.error('Numerical candidates require freshly sampled data from their own actual kernel; use --cross-kernel for stable-sampled update equivalence')
+    if a.cross_kernel and a.variants[0]!='reference':p.error('--cross-kernel compares every candidate against a first reference run')
     policy=build_policy(actor,settings,stage['precision'])
     if policy.kernel_config!=source['kernel'] or inputs['kernel']!=source['kernel']:raise ValueError('Baseline behavior numerical contract changed')
     optimizer=torch.optim.AdamW(trainable_actor_parameters(actor),lr=settings['actor_lr'],weight_decay=0.)
@@ -344,6 +437,10 @@ def main():
         grad_clip_norm=settings['grad_clip_norm'],bc_samples_per_rollout=settings['bc_samples_per_rollout'])
     if a.calibrate_actor_rates:
         calibrate_actor(a,d,source,rank_state,policy,optimizer,anchor,generators,cache,rows,targets,manifest,kwargs,stage)
+        cache.close();dist.destroy_process_group(group);dist.destroy_process_group();return
+    if a.heldout_surrogate:
+        root_call(d,lambda:a.output.mkdir(parents=True,exist_ok=True))
+        heldout_surrogate_test(a,d,policy,optimizer,anchor,generators,cache,rows,manifest,kwargs,settings)
         cache.close();dist.destroy_process_group(group);dist.destroy_process_group();return
     offline_warm=None
     if not optimizer.state:
@@ -386,6 +483,10 @@ def main():
                 def observer(model,step):
                     if rank==0:captured.append({n:None if p.grad is None else p.grad.detach().cpu().clone()
                         for n,p in model.named_parameters()})
+                pre_kl=None
+                if a.cross_kernel and repeat==0:
+                    pre_kl=final_kl(policy,rows,cache,manifest,distributed=d,microbatch=512,
+                        clip=settings['ppo_clip'],objective_reduction=settings['objective_logprob_reduction'])
                 d.barrier();torch.cuda.synchronize();torch.cuda.reset_peak_memory_stats();start=time.perf_counter()
                 result=actor_update(policy,optimizer,rows,targets,cache,manifest,controller,microbatch=micro,
                     gradient_observer=observer if repeat==0 else None,**kwargs)
@@ -405,9 +506,22 @@ def main():
                         weights=immutable_cpu_snapshot(actor.state_dict())
                         state={f'{i}/{k}':v.cpu().clone() for i,x in optimizer.state_dict()['state'].items()
                             for k,v in x.items() if torch.is_tensor(v)}
-                        current=dict(gradients=captured,weights=weights,adam=state,outputs=outputs,kl=kl)
+                        delta={k:(weights[k].double()-base[k].double()).reshape(-1) for k in weights if weights[k].is_floating_point()}
+                        clip=float(np.mean([x['clip_fraction'] for x in result['steps']]))
+                        current=dict(gradients=captured,weights=weights,adam=state,outputs=outputs,kl=kl,delta=delta,clip=clip)
                         if reference is None:reference=current
-                        return dict(gradients=[compare_named(x,y,atol=3e-5,rtol=2e-4) for x,y in zip(captured,reference['gradients'])],
+                        cross=None
+                        if a.cross_kernel:
+                            dot=sum(float(delta[k]@reference['delta'][k]) for k in delta)
+                            norm=math.sqrt(sum(float(v@v) for v in delta.values())*sum(float(v@v) for v in reference['delta'].values()))
+                            cross=dict(pre_update_mean_coordinate_kl=pre_kl['mean_coordinate_kl'],
+                                pre_update_maximum_step_mean_coordinate_kl=pre_kl['maximum_step_mean_coordinate_kl'],
+                                post_update_mean_coordinate_kl=kl['mean_coordinate_kl'],
+                                excess_mean_coordinate_kl_vs_reference=kl['mean_coordinate_kl']-reference['kl']['mean_coordinate_kl'],
+                                parameter_delta_cosine_vs_reference=dot/norm if norm>0 else None,
+                                clip_fraction_mean=clip,reference_clip_fraction_mean=reference['clip'],
+                                scope='stable_sampled_old_statistics;candidate_learning_kernel')
+                        return dict(cross_kernel=cross,gradients=[compare_named(x,y,atol=3e-5,rtol=2e-4) for x,y in zip(captured,reference['gradients'])],
                             module_directions=[module_directions(x,y) for x,y in zip(captured,reference['gradients'])],
                             parameters=compare_named(weights,reference['weights'],atol=1e-7,rtol=0.),
                             adam=compare_named(state,reference['adam'],atol=1e-7,rtol=2e-4),
