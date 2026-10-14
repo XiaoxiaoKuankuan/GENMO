@@ -5,7 +5,8 @@
 """
 import copy
 import pytest
-from tools.eval.audit_stage10_pilots import add_launcher_timing, episode_metrics, paired_statistics,joint_boundary_sample
+from tools.eval.audit_stage10_pilots import (add_launcher_timing, episode_metrics,
+    paired_statistics,joint_boundary_sample,evaluation_control_steps,summarize_run)
 
 
 @pytest.mark.parametrize('damage',[None,'sha','missing','physics'])
@@ -59,7 +60,45 @@ def test_repeated_seeds_do_not_create_independent_music():
     many = paired_statistics(*paired_rows(20), 'reward', draws=1000)
     assert one['mean'] == many['mean'] == 1.
     assert one['ci95'] == many['ci95']
+    assert one['ci90'] == many['ci90']
+    assert one['ci95'][0] <= one['ci90'][0] <= one['ci90'][1] <= one['ci95'][1]
     assert many['music_groups_by_source'] == {'source': 2}
+
+
+def test_evaluation_axis_uses_measured_controls_including_post_rollout_mc():
+    data=dict(initial_state=dict(training_control_steps=200000),
+        final_state=dict(training_control_steps=1500123),
+        training=[dict(mode='dppo_bc',state=dict(iteration=10,training_control_steps=1223687))])
+    assert evaluation_control_steps(data,dict(label='initial',iteration=0))==200000
+    assert evaluation_control_steps(data,dict(label='periodic_r000010_c000001223687_a000010',iteration=10))==1223687
+    assert evaluation_control_steps(data,dict(label='final_000010',iteration=10))==1500123
+    assert evaluation_control_steps(data,dict(label='extra',iteration=10))==1223687
+    with pytest.raises(ValueError,match='交互计数'):
+        evaluation_control_steps(data,dict(label='extra',iteration=9))
+
+
+def test_disabled_gradient_diagnostic_is_missing_not_zero_in_completed_report():
+    before,after=paired_rows(1)
+    for row in before+after:
+        row.update(reward_per_second=row['reward']/10,actual_activity_rad_s=1.,activity_ratio=.8,
+            activity_gate=.9,physical_failure=False,end_reason='music_end')
+    kl=dict(covered_internal_transitions=40,covered_chains=2,wall_seconds=1.,
+        mean_coordinate_kl=.0001,maximum_step_mean_coordinate_kl=.001,objective_clip_fraction=.05,
+        per_denoising_step=[dict(mean_coordinate_kl=dict(mean=.0001),joint_kl=dict(mean=.1)) for _ in range(20)])
+    state=dict(selected_actor_lr=1e-7,training_control_steps=200)
+    record=dict(mode='dppo_bc',full20_kl=kl,wall_seconds=5.,actor_seconds=2.,critic_seconds=1.,
+        actor=dict(optimizer_steps=1,steps=[dict(learning_rate=1e-7)],gradient_snr=None),
+        collection_by_rank=[dict(through_targets_and_budget_seconds=1.)])
+    data=dict(run_id='example',summary_status='passed',exit_code=0,source_unchanged=True,
+        checkpoint_sha_verified=True,training=[record],evaluations=[dict(rows=before),dict(rows=after)],
+        initial_state=state,final_state=state)
+    result=summarize_run(data)
+    assert result['training_metrics']['half_gradient_cosine'] is None
+    assert result['gradient_snr_observed_iterations']==0
+    record['actor']['gradient_snr']=dict(half_split_cosine_pooled=.02)
+    result=summarize_run(data)
+    assert result['training_metrics']['half_gradient_cosine']['mean']==.02
+    assert result['gradient_snr_observed_iterations']==1
 
 
 def test_pairing_rejects_same_task_id_with_changed_noise():

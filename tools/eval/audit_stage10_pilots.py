@@ -217,6 +217,7 @@ def paired_statistics(before, after, metric, *, draws=20000, seed=20261014):
         estimates.append(sums[indices].sum(1) / counts[indices].sum(1))
     bootstrap = np.mean(estimates, axis=0)
     return dict(mean=statistics.mean(source_means.values()),
+        ci90=[float(v) for v in np.quantile(bootstrap, [.05, .95])],
         ci95=[float(v) for v in np.quantile(bootstrap, [.025, .975])],
         by_source=source_means, music_groups_by_source=source_counts, tasks=len(left),
         scope='source_balanced_paired_delta_music_cluster_bootstrap_not_independent_training_seeds',
@@ -265,9 +266,13 @@ def summarize_run(data):
         collection=lambda r:max(x['through_targets_and_budget_seconds'] for x in r['collection_by_rank']),
         mean_coordinate_kl=lambda r:r['full20_kl']['mean_coordinate_kl'],
         maximum_step_kl=lambda r:r['full20_kl']['maximum_step_mean_coordinate_kl'],
-        objective_clip_fraction=lambda r:r['full20_kl']['objective_clip_fraction'],
-        half_gradient_cosine=lambda r:r['actor']['gradient_snr']['half_split_cosine_pooled'])
+        objective_clip_fraction=lambda r:r['full20_kl']['objective_clip_fraction'])
     result['training_metrics'] = {key: describe(fn(row) for row in accepted) for key,fn in getters.items()}
+    # 正式训练关闭重型梯度信噪比诊断；缺测不能填0，也不能阻止已有物理证据导出。
+    cosines=[(row['actor'].get('gradient_snr') or {}).get('half_split_cosine_pooled') for row in accepted]
+    cosines=[value for value in cosines if value is not None]
+    result['training_metrics']['half_gradient_cosine']=describe(cosines) if cosines else None
+    result['gradient_snr_observed_iterations']=len(cosines)
     result['paired_to_initial'] = {metric:paired_statistics(baseline['rows'], final['rows'], metric)
         for metric in ('reward', 'reward_per_second', 'actual_activity_rad_s', 'activity_ratio')}
     result['kl_first16_mean'] = describe(statistics.mean(step['mean_coordinate_kl']['mean']
@@ -280,6 +285,23 @@ def summarize_run(data):
     result['first16_joint_kl_share'] = (sum(weighted_joint[:16]) / sum(weighted_joint)
         if sum(weighted_joint) > 0 else None)
     return result
+
+
+def evaluation_control_steps(data, evaluation):
+    """用实际交互量标注评估曲线，不能用轮数乘名义102400控制步替代。
+
+    周期标签在实际评估前固定了交互计数；final使用终态（包括末次MC），initial
+    使用已导入预热的初态。其他标签只允许唯一的已记录接受轮对应，避免静默估算。
+    """
+    label=evaluation['label']
+    match=re.fullmatch(r'periodic_r\d+_c(\d+)_a\d+',label)
+    if match:return int(match[1])
+    if label=='initial':return int(data['initial_state']['training_control_steps'])
+    if label.startswith('final_'):return int(data['final_state']['training_control_steps'])
+    values={row['state']['training_control_steps'] for row in data['training']
+        if row['mode']=='dppo_bc' and row['state']['iteration']==evaluation['iteration']}
+    if len(values)!=1:raise ValueError(f'评估缺少唯一的实际交互计数: {label}')
+    return int(next(iter(values)))
 
 
 def add_launcher_timing(comparison, evidence):
@@ -336,7 +358,7 @@ def plot_comparison(first, second, comparison, output):
     for index,data in enumerate((first,second)):
         label=data['run_id'];color=colors[index]
         evaluations=data['evaluations'];baseline=evaluations[0]['source_balanced_reward']
-        axes[0,0].plot([e['iteration'] for e in evaluations],
+        axes[0,0].plot([evaluation_control_steps(data,e)/1e6 for e in evaluations],
             [e['source_balanced_reward']-baseline for e in evaluations],'-o',label=label,color=color)
         rows=[r for r in data['training'] if r['mode']=='dppo_bc']
         iterations=[r['state']['iteration'] for r in rows]
@@ -346,7 +368,7 @@ def plot_comparison(first, second, comparison, output):
         axes[1,1].bar(np.arange(len(sources))+(index-.5)*.36,
             [changes[s]['actual_activity_rad_s']['relative_percent'] for s in sources],
             width=.36,label=label,color=color)
-    axes[0,0].axhline(0,color='black',lw=.8);axes[0,0].set(title='固定评估：相对各自初始Actor的回报变化',xlabel='接受的PPO轮数',ylabel='积分回报差（越高越好）')
+    axes[0,0].axhline(0,color='black',lw=.8);axes[0,0].set(title='固定评估：相对各自初始Actor的回报变化',xlabel='实际训练控制步 / 百万（含MC预热与校准）',ylabel='积分回报差（越高越好）')
     axes[0,1].set(title='实际用于更新的Actor学习率',xlabel='接受的PPO轮数',ylabel='学习率 / 1e-7')
     target=second['identity']['training']['kl_target_coordinate']
     limit=second['identity']['kl']['maximum_step_mean_coordinate']
