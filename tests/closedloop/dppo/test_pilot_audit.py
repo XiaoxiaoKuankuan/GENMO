@@ -6,7 +6,8 @@
 import copy
 import pytest
 from tools.eval.audit_stage10_pilots import (add_launcher_timing, episode_metrics,
-    paired_statistics,joint_boundary_sample,evaluation_control_steps,summarize_run)
+    paired_statistics,joint_boundary_sample,evaluation_control_steps,summarize_run,
+    summarize_complete_evaluation,compare_models)
 
 
 @pytest.mark.parametrize('damage',[None,'sha','missing','physics'])
@@ -101,6 +102,55 @@ def test_disabled_gradient_diagnostic_is_missing_not_zero_in_completed_report():
     assert result['gradient_snr_observed_iterations']==1
 
 
+def complete_rows():
+    rows=paired_rows(1)[0]
+    for i,row in enumerate(rows):
+        controls=100 if i==0 else 200
+        row.update(reward=10.,reward_per_second=10./(controls/50),seconds=controls/50,
+            actual_activity_rad_s=1.,activity_ratio=.8,physical_failure=i==0,truncated=False,
+            end_reason='yaw_anchor_ori' if i==0 else 'music_end',control_steps=controls,
+            joint_boundaries=dict(available=True,control_samples=controls,
+                actual_soft_control_fraction=.1,actual_hard_control_fraction=.03 if i==0 else 0.,
+                actual_max_hard_excess_rad=.001,reference_soft_control_fraction=.2,
+                reference_hard_control_fraction=.3,reference_max_hard_excess_rad=.2))
+    return rows
+
+
+def test_full_song_report_keeps_early_failure_and_separates_reference_boundaries():
+    result=summarize_complete_evaluation(dict(rows=complete_rows()))
+    assert result['overall']['completed']==result['overall']['physical_failures']==1
+    assert result['overall']['completion_rate']==.5
+    assert result['overall']['reward_per_second']==3.75
+    assert result['overall']['actual_hard_control_fraction']==pytest.approx(.01)
+    assert result['overall']['reference_hard_control_fraction']==pytest.approx(.3)
+    assert result['overall']['actual_max_hard_excess_rad']==.001
+    assert result['overall']['reference_max_hard_excess_rad']==.2
+
+
+@pytest.mark.parametrize('damage',['truncated','evidence','failure_flag'])
+def test_full_song_report_rejects_noncomplete_or_unverified_inputs(damage):
+    rows=complete_rows()
+    if damage=='truncated':rows[0]['truncated']=True
+    elif damage=='evidence':rows[0]['joint_boundaries']['available']=False
+    else:rows[1]['physical_failure']=True
+    with pytest.raises(ValueError):summarize_complete_evaluation(dict(rows=rows))
+
+
+def test_complete_model_comparison_requires_same_execution_and_includes_failures():
+    evaluation=dict(rows=complete_rows(),plan_sha256='plan',actor_identity='stage1',
+        evaluation_identity={k:'same' for k in ('kernel','timing_contract','execution_profile',
+            'critical_latency_budgets','episode_seconds','physics')})
+    baseline=dict(evaluations=[evaluation],summary_status='passed',exit_code=0,
+        source_unchanged=True,checkpoint_sha_verified=True,
+        identity={k:'same' for k in ('assets','source_files','physical_configuration','reward','generation_horizon')})
+    result=compare_models(baseline,copy.deepcopy(baseline),copy.deepcopy(baseline))
+    assert result['models']['P1']['overall']['physical_failures']==1
+    assert result['paired_to_stage1']['P1']['reward_per_second']['ci90']==[0.,0.]
+    changed=copy.deepcopy(baseline);changed['identity']['reward']='different'
+    with pytest.raises(ValueError,match='执行身份'):
+        compare_models(baseline,changed,baseline)
+
+
 def test_pairing_rejects_same_task_id_with_changed_noise():
     before, after = paired_rows(1)
     after[0]['noise_index_start'] += 1
@@ -115,6 +165,17 @@ def test_launcher_timing_includes_overheads_and_rejects_different_run():
     assert result['runs']['P1']['amortized_total_seconds_per_accepted_iteration'] == 144.525
     with pytest.raises(ValueError, match='不匹配'):
         add_launcher_timing(result, [dict(pilot_progress=evidence['pilot_progress'].replace('P1', 'P2'))])
+
+
+@pytest.mark.parametrize('exit_code,wall_seconds',[(0,12000.5),(1,12000.5),(0,float('nan'))])
+def test_native_launcher_exit_json_is_not_reconstructed_from_iteration_wall(exit_code,wall_seconds):
+    result=dict(runs={'P1':dict(accepted_iterations=100)})
+    evidence=dict(run_id='P1',exit_code=exit_code,wall_seconds=wall_seconds)
+    if exit_code or wall_seconds!=wall_seconds:
+        with pytest.raises(ValueError):add_launcher_timing(result,[evidence])
+    else:
+        add_launcher_timing(result,[evidence])
+        assert result['runs']['P1']['amortized_total_seconds_per_accepted_iteration']==120.005
 
 
 def test_integrated_rewards_and_terminal_event_are_not_multiplied_by_dt():

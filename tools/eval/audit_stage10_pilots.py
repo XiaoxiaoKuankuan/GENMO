@@ -9,6 +9,8 @@ checkpoint的SHA，逐控制步复算积分和四子步计数，提取活动度�
 --run-evidence可传入两台服务器的只读证据JSON，使用其中已结束的启动日志核对总耗时；
 没有启动日志时不以普通轮耗时之和冒充全程耗时。输入文件SHA随比较报告记录。
 输出只用于实施进度与学习效果审计，不自动宣称G5通过或启动正式训练。
+--compare-models按Stage1/P1/P2顺序比较完整歌曲导出：真实失败保留，行政截断
+拒绝；按来源等权统计每秒回报、活动度，并单列实际机器人与GENMO参考关节边界。
 """
 from __future__ import annotations
 
@@ -184,7 +186,12 @@ def export_run(root, *, physical_boundaries=False):
                 for step in actor.get('steps', [])]
             selected['collection_by_rank'] = row.get('collection_by_rank')
             selected['performance_by_rank'] = row.get('performance_by_rank')
+            selected['memory_by_rank'] = row.get('memory_by_rank')
+            critic=row.get('critic') or {}
+            selected['critic']={key:critic.get(key) for key in ('before','after','optimizer_steps','metric_scope')}
             result['training'].append(selected)
+    result['mc_calibrations']=[dict(file=str(path),sha256=sha256(path),report=load_json(path))
+        for path in sorted((session/'mc_calibration').glob('*.json'))]
     return result
 
 
@@ -309,10 +316,16 @@ def add_launcher_timing(comparison, evidence):
     if len(evidence) != len(comparison['runs']):
         raise ValueError('启动日志数量与pilot数量不一致')
     for name, source in zip(comparison['runs'], evidence):
-        matches = re.findall(r'\] end (\S+) exit=(\d+) wall=(\d+)s', source['pilot_progress'])
-        if len(matches) != 1 or matches[0][0] != name or matches[0][1] != '0':
-            raise ValueError(f'pilot启动日志身份、会话数或退出状态不匹配: {name}')
-        total = int(matches[0][2])
+        if 'wall_seconds' in source:
+            if source.get('run_id')!=name or source.get('exit_code')!=0:
+                raise ValueError(f'pilot启动日志身份或退出状态不匹配: {name}')
+            total=float(source['wall_seconds'])
+            if not math.isfinite(total) or total<=0:raise ValueError('启动墙钟必须为正的有限数')
+        else:
+            matches = re.findall(r'\] end (\S+) exit=(\d+) wall=(\d+)s', source['pilot_progress'])
+            if len(matches) != 1 or matches[0][0] != name or matches[0][1] != '0':
+                raise ValueError(f'pilot启动日志身份、会话数或退出状态不匹配: {name}')
+            total = int(matches[0][2])
         result = comparison['runs'][name]
         result['end_to_end_seconds'] = total
         result['amortized_total_seconds_per_accepted_iteration'] = total / result['accepted_iterations']
@@ -341,6 +354,108 @@ def compare_runs(first, second):
             second['evaluations'][-1]['rows'], metric)
             for metric in ('reward', 'reward_per_second', 'actual_activity_rad_s', 'activity_ratio')},
         decision='No automatic promotion; inspect independent reward gains, source regressions and missing plan work.')
+
+
+def summarize_complete_evaluation(evaluation):
+    """完整episode统计保留早失败，不以执行更短的高每秒分数代替完成率。"""
+    rows=evaluation['rows']
+    if not rows or any(row['truncated'] or (row['end_reason']!='music_end' and not row['physical_failure']) for row in rows):
+        raise ValueError('完整歌曲对照不接受行政截断或基础设施异常')
+    if any(row['end_reason']=='music_end' and row['physical_failure'] for row in rows):
+        raise ValueError('真实失败标志和终止原因不一致')
+    if any(not row.get('joint_boundaries',{}).get('available') for row in rows):
+        raise ValueError('完整歌曲对照缺少权威实际/参考关节边界')
+    def metrics(part):
+        result={key:statistics.mean(row[key] for row in part) for key in
+            ('reward','reward_per_second','seconds','actual_activity_rad_s','activity_ratio')}
+        result.update(tasks=len(part),completed=sum(row['end_reason']=='music_end' for row in part),
+            physical_failures=sum(row['physical_failure'] for row in part),
+            control_steps=sum(row['control_steps'] for row in part))
+        result['completion_rate']=result['completed']/result['tasks']
+        for label in ('actual','reference'):
+            for level in ('soft','hard'):
+                key=f'{label}_{level}_control_fraction'
+                result[key]=sum(row['joint_boundaries'][key]*row['control_steps'] for row in part)/result['control_steps']
+            key=label+'_max_hard_excess_rad'
+            result[key]=max(row['joint_boundaries'][key] for row in part)
+        return result
+    sources={source:metrics([row for row in rows if row['dataset']==source])
+        for source in sorted({row['dataset'] for row in rows})}
+    overall=metrics(rows)
+    balanced={key:statistics.mean(values[key] for values in sources.values()) for key in
+        ('reward','reward_per_second','seconds','actual_activity_rad_s','activity_ratio','completion_rate',
+         'actual_hard_control_fraction','reference_hard_control_fraction')}
+    return dict(overall=overall,by_source=sources,source_balanced=balanced,
+        end_reasons=dict(collections.Counter(row['end_reason'] for row in rows)),
+        independent_music_groups=len({(row['dataset'],row['music_group']) for row in rows}),
+        boundary_scope='fraction_of_actual_controls_with_any_joint_beyond_limit_not_fraction_of_joints')
+
+
+def compare_models(stage1,first,second):
+    """三个实际权重在同一完整歌曲计划上的独立复核，不进行参数搜索或自动晋升。"""
+    values={'Stage1':stage1,'P1':first,'P2':second}
+    evaluations={name:data['evaluations'][-1] for name,data in values.items()}
+    baseline=evaluations['Stage1'];reference_identity=baseline['evaluation_identity']
+    for name,data in values.items():
+        if data['summary_status']!='passed' or data['exit_code']!=0 or not data['source_unchanged'] or not data['checkpoint_sha_verified']:
+            raise ValueError(f'完整歌曲会话没有正确结束或权重未核验: {name}')
+        evaluation=evaluations[name]
+        if evaluation['plan_sha256']!=baseline['plan_sha256']:
+            raise ValueError('完整歌曲任务计划不一致')
+        for key in ('kernel','timing_contract','execution_profile','critical_latency_budgets','episode_seconds','physics'):
+            if evaluation['evaluation_identity'][key]!=reference_identity[key]:
+                raise ValueError(f'完整歌曲物理或行为合同不一致: {key}')
+        for key in ('assets','source_files','physical_configuration','reward','generation_horizon'):
+            if data['identity'][key]!=stage1['identity'][key]:
+                raise ValueError(f'完整歌曲执行身份不一致: {key}')
+    summaries={name:summarize_complete_evaluation(e) for name,e in evaluations.items()}
+    metrics=('reward','reward_per_second','seconds','actual_activity_rad_s','activity_ratio','physical_failure')
+    pairs={name:{metric:paired_statistics(baseline['rows'],evaluation['rows'],metric)
+        for metric in metrics} for name,evaluation in evaluations.items() if name!='Stage1'}
+    return dict(schema='genmo.stage10.complete_model_comparison.v1',models=summaries,
+        paired_to_stage1=pairs,second_minus_first={metric:paired_statistics(
+            evaluations['P1']['rows'],evaluations['P2']['rows'],metric) for metric in metrics},
+        evaluation_plan_sha256=baseline['plan_sha256'],
+        actors={name:evaluation['actor_identity'] for name,evaluation in evaluations.items()},
+        scope='complete_available_paired_music_samples_test_only_not_unseen_Stage1_pretraining_certificate')
+
+
+def plot_model_comparison(comparison,output):
+    """实际失败、奖励、动作和边界同时展示，不能只挑总回报画图。"""
+    import numpy as np
+    import matplotlib
+    matplotlib.use('Agg')
+    from matplotlib import pyplot as plt,font_manager
+    font=Path('/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc')
+    if font.exists():
+        font_manager.fontManager.addfont(str(font));plt.rcParams['font.family']=font_manager.FontProperties(fname=str(font)).get_name()
+    plt.rcParams['axes.unicode_minus']=False
+    names=list(comparison['models']);colors=['#607d8b','#2875b9','#db7a22']
+    fig,axes=plt.subplots(2,3,figsize=(16,9),layout='constrained')
+    models=comparison['models'];sources=list(models['Stage1']['by_source']);x=np.arange(len(sources))
+    for ax,key,title,unit in [
+        (axes[0,0],'completion_rate','完整可用歌曲完成率','%'),
+        (axes[0,1],'reward_per_second','来源等权：每秒物理回报','回报 / 秒'),
+        (axes[0,2],'actual_max_hard_excess_rad','实际机器人：最大硬边界超量','弧度')]:
+        vals=[models[name]['overall' if key!='reward_per_second' else 'source_balanced'][key] for name in names]
+        if key=='completion_rate':vals=[100*v for v in vals]
+        bars=ax.bar(names,vals,color=colors)
+        labels=[f"{models[name]['overall']['completed']}/{models[name]['overall']['tasks']}" for name in names] if key=='completion_rate' else [f'{v:.5f}' for v in vals]
+        ax.bar_label(bars,labels=labels,padding=3,fontsize=9);ax.set(title=title,ylabel=unit);ax.margins(y=.2)
+    axes[0,0].set_ylim(0,110)
+    for i,name in enumerate(names):
+        by=models[name]['by_source'];initial=models['Stage1']['by_source']
+        axes[1,0].bar(x+(i-1)*.25,[100*(by[s]['reward_per_second']/initial[s]['reward_per_second']-1) for s in sources],.25,label=name,color=colors[i])
+        axes[1,1].bar(x+(i-1)*.25,[100*(by[s]['actual_activity_rad_s']/initial[s]['actual_activity_rad_s']-1) for s in sources],.25,label=name,color=colors[i])
+        axes[1,2].bar(x+(i-1)*.25,[100*by[s]['actual_hard_control_fraction'] for s in sources],.25,label=name,color=colors[i])
+    for ax,title,unit in [(axes[1,0],'各来源每秒回报相对Stage1变化','%'),
+                         (axes[1,1],'各来源实际活动度相对Stage1变化','%'),
+                         (axes[1,2],'实际机器人：触硬边界控制步比例','%')]:
+        ax.set(title=title,ylabel=unit);ax.set_xticks(x,sources,rotation=15);ax.axhline(0,color='black',lw=.7);ax.legend(fontsize=8)
+    for ax in axes.flat:ax.grid(axis='y',alpha=.2)
+    count=models['Stage1']['overall']['tasks'];groups=models['Stage1']['independent_music_groups']
+    fig.suptitle(f'Stage1 / 固定学习率P1 / 自适应学习率P2：同条件完整物理测试\n{groups}个音乐组、{count}个任务；真实失败全部保留；参考边界另见JSON',fontsize=14)
+    fig.savefig(output/'complete_song_comparison.png',dpi=160);fig.savefig(output/'complete_song_comparison.pdf');plt.close(fig)
 
 
 def plot_comparison(first, second, comparison, output):
@@ -392,6 +507,7 @@ def main():
     mode = parser.add_mutually_exclusive_group(required=True)
     mode.add_argument('--export-run', type=Path)
     mode.add_argument('--compare', nargs=2, type=Path, metavar=('P1_JSON','P2_JSON'))
+    mode.add_argument('--compare-models',nargs=3,type=Path,metavar=('STAGE1_JSON','P1_JSON','P2_JSON'))
     parser.add_argument('--run-evidence', nargs=2, type=Path, metavar=('P1_EVIDENCE','P2_EVIDENCE'))
     parser.add_argument('--output', type=Path)
     parser.add_argument('--physical-boundaries',action='store_true',help='只读核验完整权威journal，提取实际与参考软/硬关节边界')
@@ -404,6 +520,15 @@ def main():
         if args.physical_boundaries:parser.error('--physical-boundaries只适用于--export-run')
         if args.output is None:parser.error('--compare需要--output')
         args.output.mkdir(parents=True,exist_ok=True)
+        if args.compare_models:
+            if args.run_evidence:parser.error('--run-evidence只适用于训练pilot的--compare')
+            target=args.output/'complete_song_comparison.json'
+            if target.exists():raise FileExistsError(target)
+            result=compare_models(*map(load_json,args.compare_models))
+            result['input_exports']=[dict(path=str(p.resolve()),sha256=sha256(p)) for p in args.compare_models]
+            plot_model_comparison(result,args.output)
+            target.write_text(json.dumps(result,ensure_ascii=False,indent=2,allow_nan=False)+'\n');print(target)
+            return
         target=args.output/'comparison.json'
         if target.exists():raise FileExistsError(target)
         first,second=map(load_json,args.compare)
