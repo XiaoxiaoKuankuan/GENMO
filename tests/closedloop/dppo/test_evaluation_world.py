@@ -40,6 +40,20 @@ def test_distinct_music_mixed_start_preserves_seed_pairing(tmp_path):
     assert plan==build_balanced_plan(catalog,samples_per_source=4,start_mode='mixed',unique_music=True)
 
 
+def test_all_available_test_music_uses_longest_sample_without_repeating_groups(tmp_path):
+    catalog=Catalog(tmp_path)
+    catalog.samples['test']=copy.deepcopy(catalog.samples['val'])
+    for source,samples in catalog.samples['test'].items():
+        for sample in samples:sample['split']=sample['row']['split']='test'
+        samples[1]['group_id']=samples[0]['group_id']
+        samples[1]['row']['source_audio_sha256']=samples[0]['row']['source_audio_sha256']
+        samples[1]['row']['num_frames']=300
+    plan=build_balanced_plan(catalog,samples_per_source='all_unique',unique_music=True,split='test',seconds=None)
+    assert plan['selected_unique_group_count']==16 and len(plan['tasks'])==32
+    assert all(t['sample_id']!='0' for t in plan['tasks'])
+    assert plan['training_buffer_allowed'] is False
+
+
 def test_persistent_world_restores_backend_and_rotates_journal(tmp_path,monkeypatch):
     from gem.closedloop.dppo import vector_evaluation as m
     events=[]

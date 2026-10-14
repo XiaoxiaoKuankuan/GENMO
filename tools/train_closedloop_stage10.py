@@ -51,6 +51,8 @@ def main():
     import torch.distributed as dist
     from gem.closedloop.dppo.training_config import configuration
     config=configuration(args.config,genmo_repo=args.genmo_repo,gmt_repo=args.gmt_repo)
+    if config['stage10']['evaluation'].get('split','val')=='test' and not args.evaluate_only:
+        parser.error('Held-out test music is only allowed in independent --evaluate-only runs')
     if args.calibrate_only:
         config['runtime'].update(num_envs=1,generation_batch=1,phase_contract='single_request_calibration.v1')
     if sum((args.calibrate_only,args.collect_only,args.evaluate_only,args.critic_preheat_only))>1:parser.error('Choose only one finite diagnostic phase')

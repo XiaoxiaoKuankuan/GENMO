@@ -90,7 +90,7 @@ def _evaluate_impl(c, label, *, write_report=True):
         seeds=c.stage['evaluation']['seeds'], selection_seed=c.stage['evaluation']['selection_seed'],
         seconds=c.stage['evaluation']['episode_seconds'],
         start_mode=c.stage['evaluation'].get('start_mode','beginning'),
-        unique_music=c.stage['evaluation'].get('unique_music',False)))
+        unique_music=c.stage['evaluation'].get('unique_music',False),split=c.stage['evaluation'].get('split','val')))
     # 分片单位是样本，同一样本全部seed留在同rank；预算必须按实际child任务数计算。
     shards = [shard_plan(plan, rank, c.distributed.world_size) for rank in range(c.distributed.world_size)]
     latencies = c.distributed.all_gather_object(c.env.latency_budget_s)

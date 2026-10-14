@@ -79,6 +79,15 @@ def test_unused_effect_iteration_field_is_explicitly_rejected(tmp_path, value):
         configuration(path)
 
 
+@pytest.mark.parametrize('split,count,unique', [('train',4,False),('val','all_unique',False),('test',0,True)])
+def test_invalid_heldout_selection_rejected_before_gpu_start(tmp_path,split,count,unique):
+    c=yaml.safe_load(CONFIG.read_text())
+    c['stage10']['evaluation'].update(split=split,samples_per_source=count,unique_music=unique)
+    path=tmp_path/'invalid_selection.yaml';path.write_text(yaml.safe_dump(c))
+    with pytest.raises(ValueError,match='Held-out evaluation'):
+        configuration(path)
+
+
 def test_source_identity_covers_shell_entry_and_shared_execution_module(tmp_path):
     genmo, gmt = tmp_path / 'genmo', tmp_path / 'gmt'
     names = ['tools/train_closedloop_stage10.py', 'scripts/train_stage10_8gpu_server1.sh',

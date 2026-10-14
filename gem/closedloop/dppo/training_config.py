@@ -47,6 +47,10 @@ def configuration(path,*,genmo_repo=None,gmt_repo=None):
         raise ValueError('Evaluation requires 1..64 slots in one world and explicit persistent_world boolean')
     if s['evaluation'].get('start_mode','beginning') not in ('beginning','center','mixed') or type(s['evaluation'].get('unique_music',False))is not bool:
         raise ValueError('Invalid evaluation music selection configuration')
+    selection=s['evaluation'].get('samples_per_source',4)
+    if (s['evaluation'].get('split','val') not in ('val','test') or not
+            (type(selection)is int and selection>0 or selection=='all_unique' and s['evaluation'].get('unique_music',False))):
+        raise ValueError('Held-out evaluation requires val/test and positive count or all_unique music selection')
     if s['evaluation'].get('episode_seconds') is None and s['evaluation'].get('start_mode','beginning')!='beginning':
         raise ValueError('Complete song evaluation cannot start in the middle')
     for key in ('eta', 'guidance_scale'):
