@@ -479,6 +479,11 @@ def plot_comparison(first, second, comparison, output):
         iterations=[r['state']['iteration'] for r in rows]
         axes[0,1].plot(iterations,[r['actor']['steps'][0]['learning_rate']/1e-7 for r in rows],label=label,color=color)
         axes[1,0].plot(iterations,[r['full20_kl']['maximum_step_mean_coordinate_kl'] for r in rows],label=label,color=color)
+        rejected=[r for r in data['training'] if r['mode']=='kl_rejected_rollback']
+        if rejected:
+            axes[1,0].scatter([r['state']['iteration'] for r in rejected],
+                [r['full20_kl']['maximum_step_mean_coordinate_kl'] for r in rejected],
+                marker='x',s=65,color=color,zorder=5,label=f'{label}拒绝尝试（不增加轮数）')
         changes=comparison['runs'][label]['source_changes'];sources=sorted(changes)
         axes[1,1].bar(np.arange(len(sources))+(index-.5)*.36,
             [changes[s]['actual_activity_rad_s']['relative_percent'] for s in sources],
