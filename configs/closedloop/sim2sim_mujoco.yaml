@@ -1,0 +1,63 @@
+# 本机实时GENMO＋GMT真实MuJoCo闭环；不修改任何Stage2训练配置。
+# 路径固定到已核验模型，修改模型/随机核后每次启动重新标定部署截止预算。
+schema: genmo.gmt.mujoco_sim2sim.v1
+paths:
+  genmo_repo: /home/weili/bumi-closedloop-worktrees/GENMO
+  gmt_repo: /home/weili/bumi-closedloop-worktrees/legged_lab_gmt
+  stage1_checkpoint: /home/weili/bumi-closedloop-worktrees/GENMO/inputs/checkpoints/stage1_server2_s595000_20261008/s595000.pt
+  stats: /home/weili/bumi-closedloop-worktrees/GENMO/inputs/checkpoints/stage1_server2_s595000_20261008/qpos30_train_stats.json
+  kinematics: /home/weili/bumi-closedloop-worktrees/GENMO/configs/bumi/bumi_kinematics_robot_retargeter_fe934_v1.json
+  gmt_policy: /home/weili/bumi-closedloop-worktrees/legged_lab_gmt/logs/rsl_rl/tracking_bumi4340_mha_sonic_mimic/2026-09-28_20-12-58_umr_soma50_six50_filtered_scratch/exported/model_140500/policy.onnx
+  gmt_checkpoint: /home/weili/bumi-closedloop-worktrees/legged_lab_gmt/logs/rsl_rl/tracking_bumi4340_mha_sonic_mimic/2026-09-28_20-12-58_umr_soma50_six50_filtered_scratch/model_140500.pt
+  gmt_agent: /home/weili/bumi-closedloop-worktrees/legged_lab_gmt/logs/rsl_rl/tracking_bumi4340_mha_sonic_mimic/2026-09-28_20-12-58_umr_soma50_six50_filtered_scratch/params/agent.yaml
+  gmt_sha256: 31a8f999b652d272246b803d4ffa708f3125de92c0d573411ef13fc3ee6ced20
+  gmt_validation_python: /home/weili/miniconda3/envs/env_isaaclab/bin/python
+  mjcf: /home/weili/bumi-closedloop-worktrees/legged_lab_gmt/source/NoetixRobot/NoetixRobot/assets/robots/bumi3_4340_lowpd/mjcf/bumi3_4340.xml
+  urdf: /home/weili/bumi-closedloop-worktrees/legged_lab_gmt/source/NoetixRobot/NoetixRobot/assets/robots/bumi3_4340_lowpd/urdf/bumi3_4340_point.urdf
+  isaac_contract: /home/weili/bumi-closedloop-worktrees/legged_lab_gmt/outputs/datasets/volc_gmt_mine99_20260928/records/root_z_restoration_20260928/isaac_contract.json
+  dataset_root: /home/weili/bumi-closedloop-worktrees/GENMO/inputs/evals/stage1_fourset_20260928/selected_data
+  output_root: /home/weili/bumi-closedloop-worktrees/GENMO/outputs/sim2sim
+models:
+  - name: Stage1-s595000
+    checkpoint: /home/weili/bumi-closedloop-worktrees/GENMO/inputs/checkpoints/stage1_server2_s595000_20261008/s595000.pt
+  - name: Stage2-iteration147
+    checkpoint: /home/weili/bumi-closedloop-worktrees/GENMO/outputs/sim2sim/models/actor_iteration147.pt
+    sha256: 99d93bde73165fb57bb430577678afff1abc0704e8caabfe132c4cddce8945da
+  - name: Stage2-iteration246
+    checkpoint: /home/weili/bumi-closedloop-worktrees/GENMO/outputs/sim2sim/models/actor_iteration246.pt
+    sha256: 9e0d718fb87565a3f5980d82fc7612825c3dc73afd1432f0f7a0b61599294a84
+# 2/3绑定已经结束的旧基线147/246轮，不追随正在训练的新模型。
+playlist: /home/weili/bumi-closedloop-worktrees/GENMO/inputs/evals/stage1_fourset_20260928/selection.json
+generation_frames: 60
+sampling:
+  generation_frames: 60
+  denoising_steps: 20
+  eta: 0.1
+  guidance_scale: 2.5
+  std_schedule: [0.001, 0.001, 0.001, 0.001, 0.001, 0.001, 0.001, 0.001, 0.001, 0.001, 0.001, 0.001, 0.001, 0.001, 0.001, 0.001, 0.02, 0.025, 0.03, 0.03]
+precision:
+  mode: native_fp32
+  linear_execution: stable_tf32x3
+  attention: sdpa_math
+  compile: false
+  precise_output: true
+  weight_gradient: direct_joint_gemm
+runtime:
+  device: cuda:0
+  torch_threads: 1
+  warmup_control_steps: 50
+  calibration_warmup: 3
+  calibration_samples: 12
+  latency_guard_seconds: 0.06
+  lateness_limit_seconds: 0.1
+  auto_next: true
+  audio: true
+  viewer_fps: 25
+  video_fps: 25
+  video_width: 1280
+  video_height: 720
+termination:
+  root_height_error_m: 0.2
+  non_yaw_orientation_error_rad: 0.6
+  yaw_error_rad: 1.5
+  end_effector_relative_height_error_m: 0.15
