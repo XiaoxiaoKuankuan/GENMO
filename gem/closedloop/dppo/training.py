@@ -326,8 +326,11 @@ def run(cargs,config,distributed):
         actor_initialization=dict(kind='source_stage1',source_global_step=loading['source_global_step'])
         if cargs.evaluation_actor:
             from .training_checkpoint import load_evaluation_actor
+            binding=root_call(distributed,lambda:dict(reward=c.settings['reward'],timing=c.base_config['timing'],
+                physical_configuration=_physical_configuration_identity(c.base_config),source_files=_sources(config),
+                generation_horizon=c.stage['generation_horizon'],data_catalog=c.catalog.identity))
             actor_initialization=local_call(distributed,lambda:load_evaluation_actor(cargs.evaluation_actor,
-                actor=c.actor,kernel=c.policy.kernel_config,assets=c.stage['assets']))
+                actor=c.actor,kernel=c.policy.kernel_config,assets=c.stage['assets'],execution_binding=binding))
         c.actor_optimizer=torch.optim.AdamW(trainable_actor_parameters(c.actor),lr=c.settings['actor_lr'],weight_decay=0.)
         c.critic_optimizer=torch.optim.AdamW([p for p in c.critic.parameters() if p.requires_grad],lr=critic_config['learning_rate'],weight_decay=0.)
         c.controller=BCGradientController(**c.stage['bc_gradient'])
@@ -354,7 +357,7 @@ def run(cargs,config,distributed):
             actor_initialization=actor_initialization,
             recovery='fresh_PhysX_episodes_no_partial_rollout_reuse',torch_version=torch.__version__)
         payload=None
-        if not cargs.resume and critic_config.get('preheat_artifact'):
+        if not cargs.resume and not cargs.evaluate_only and critic_config.get('preheat_artifact'):
             from .critic_preheat import initialize_critic
             imported=local_call(distributed,lambda:initialize_critic(critic_config['preheat_artifact'],
                 identity=c.identity,actor=c.actor,critic=c.critic,optimizer=c.critic_optimizer,
@@ -476,10 +479,11 @@ def run(cargs,config,distributed):
                     [next(i for i,m in enumerate(manifest) if m['owner_rank']==rank and m['has_free'])
                      for rank in range(8) if any(m['owner_rank']==rank and m['has_free'] for m in manifest)])
             saved=local_call(distributed,lambda:_rollback_snapshot(c))
-            if (not is_warmup and cargs.capture_validation_iteration is not None
+            if (cargs.collect_only or not is_warmup and cargs.capture_validation_iteration is not None
                     and c.state['iteration']+1==cargs.capture_validation_iteration):
                 from .diagnostic_rollout import persist_rollout
-                case=c.session/'fixed_data_validation'/f'iteration{cargs.capture_validation_iteration:06d}'
+                case_index=c.state['rollouts_completed']+1 if cargs.collect_only else cargs.capture_validation_iteration
+                case=c.session/'fixed_data_validation'/f'iteration{case_index:06d}'
                 local_call(distributed,lambda:persist_rollout(case/f'rank{distributed.rank:02d}',rows,targets,manifest,
                     kernel=c.policy.kernel_config,identity=c.identity,full_execution=False,guard=c.manager.disk_guard if distributed.rank==0 else c.guard))
                 local_call(distributed,lambda:torch.save(dict(bc=saved['bc'],rng=saved['rng']),
@@ -494,10 +498,17 @@ def run(cargs,config,distributed):
                     nonempty_adam=bool(saved['actor_optimizer']['state']),ranks=rank_files,
                     evidence_scope='real_PhysX_training_inputs_not_full_physical_archive')))
                 if cargs.collect_only:
-                    report.update(status='passed',scope='full_real_rollout_collection_not_training_acceptance',
-                        fixed_data_case=str(case),collection_by_rank=distributed.all_gather_object(collection),
-                        full_zero_update_probability=initial_probability)
-                    raise _FiniteDiagnosticComplete
+                    c.state['rollouts_completed']+=1
+                    item=dict(fixed_data_case=str(case),collection_by_rank=distributed.all_gather_object(collection),
+                        full_zero_update_probability=initial_probability,world_window_index=case_index)
+                    report.setdefault('fixed_data_cases',[]).append(item)
+                    cache.close();cache=None;buffer.clear();buffer=None;saved=None;del rows
+                    deactivate(profile_token);profile_token=None
+                    if c.state['rollouts_completed']>=getattr(cargs,'collect_rollouts',1):
+                        report.update(status='passed',scope='full_real_rollout_collection_not_training_acceptance',
+                            **item,final_state=c.state)
+                        raise _FiniteDiagnosticComplete
+                    continue
             update_start=time.perf_counter()
             physical_ticks=tuple(service.world.control_ticks)
             physics_time=service.world.env.sim.current_time

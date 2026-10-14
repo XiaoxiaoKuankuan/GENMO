@@ -116,9 +116,30 @@ def load_training_checkpoint(path,*,identity,actor,critic,actor_optimizer,critic
     return payload
 
 
-def load_evaluation_actor(path,*,actor,kernel,assets):
-    """只读入明确的固定数据对照权重；不恢复优化器，不改变Stage1 Critic副本。"""
+def load_evaluation_actor(path,*,actor,kernel,assets,execution_binding=None):
+    """只读指定已完成checkpoint或固定数据候选的Actor，不恢复优化器/训练进度。
+
+    正式checkpoint额外核对源码、奖励、时钟、数据和物理身份，允许改变纯评估任务
+    数/长度和训练学习率以进行同条件P1/P2对照；绝不作为继续训练的恢复入口。
+    """
     payload=torch.load(path,map_location='cpu',weights_only=False,mmap=True)
+    if payload.get('schema')==SCHEMA:
+        identity=payload.get('identity',{})
+        if (not execution_binding or identity.get('assets')!=assets or identity.get('kernel')!=kernel or
+                any(identity.get(k)!=v for k,v in execution_binding.items())):
+            raise ValueError('Complete evaluation checkpoint execution identity differs')
+        from .checkpoint import _validate_model_state
+        _validate_model_state(actor,payload['actor'],'complete evaluation Actor')
+        # 使用原Actor指纹算法的只读临时副本，先核验再修改调用者。
+        import copy
+        from .evaluation import _model_fingerprint
+        candidate=copy.deepcopy(actor).cpu();candidate.load_state_dict(payload['actor'],strict=True)
+        if _model_fingerprint(candidate)!=payload.get('actor_fingerprint'):
+            raise ValueError('Complete evaluation Actor fingerprint differs')
+        actor.load_state_dict(payload['actor'],strict=True)
+        return dict(kind='complete_checkpoint_evaluation_only',path=str(Path(path).resolve()),sha256=file_sha256(path),
+            source_iteration=payload['state']['iteration'],source_policy_version=payload['state']['policy_version'],
+            training_resume=False)
     if (payload.get('schema')!='genmo.closedloop.stage10.actor_evaluation' or
             payload.get('evaluation_only') is not True or payload.get('kernel')!=kernel or
             payload.get('source_identity',{}).get('assets')!=assets or

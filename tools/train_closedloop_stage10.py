@@ -33,13 +33,16 @@ def main():
     parser.add_argument('--strict-evidence',action='store_true')
     parser.add_argument('--calibrate-only',action='store_true',help='只测新模型单机器人关键路径，不更新参数')
     parser.add_argument('--evaluate-only',action='store_true',help='新实验只做固定物理评估，用于实际噪声核标定，不采训练rollout')
-    parser.add_argument('--evaluation-actor',type=Path,help='已通过固定真实数据标定的独立Actor权重，只允许evaluate-only使用')
+    parser.add_argument('--evaluation-actor',type=Path,help='明确指定完整训练checkpoint或已验收固定数据Actor，只允许evaluate-only使用')
     parser.add_argument('--critic-preheat-only',action='store_true',help='固定Actor，完成完整MC/TD价值对照后结束，不进入Actor更新')
     parser.add_argument('--collect-only',action='store_true',help='只采一轮完整真实rollout供计算对照，不更新Actor/Critic')
+    parser.add_argument('--collect-rollouts',type=int,default=1,help='collect-only连续世界窗口数；保留正常episode，不更新行为策略')
     parser.add_argument('--capture-validation-iteration',type=int,help='明确保存指定轮更新前的真实学习张量及Adam用于固定数据对照')
     parser.add_argument('--genmo-repo',type=Path,default=ROOT)
     parser.add_argument('--gmt-repo',type=Path)
     args=parser.parse_args()
+    if args.collect_rollouts<1 or (args.collect_rollouts!=1 and not args.collect_only):
+        parser.error('--collect-rollouts requires a positive count and --collect-only')
     # 单机八卡使用已有验收的通信环境，不依赖当前shell的隐式NCCL默认值。
     for key,value in dict(NCCL_CUMEM_HOST_ENABLE='0',NCCL_IB_DISABLE='1',
                          NCCL_SOCKET_IFNAME='lo',TORCH_NCCL_BLOCKING_WAIT='1').items():

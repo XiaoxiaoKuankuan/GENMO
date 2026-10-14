@@ -213,6 +213,30 @@ def test_evaluation_binds_only_best_pointers_and_validates_actor(tmp_path, monke
     assert report['evaluation_artifacts'][0]['sha256'] == file_sha256(artifact)
 
 
+@pytest.mark.parametrize('fault',[None,'binding','fingerprint'])
+def test_complete_checkpoint_evaluation_checks_execution_before_loading(tmp_path,fault):
+    from gem.closedloop.dppo.training_checkpoint import load_evaluation_actor,SCHEMA
+    from gem.closedloop.dppo.evaluation import _model_fingerprint
+    actor=torch.nn.Linear(3,2);original=copy.deepcopy(actor.state_dict())
+    candidate=copy.deepcopy(actor)
+    with torch.no_grad():candidate.weight.add_(.25)
+    binding={'reward':{'music_weight':0.},'source_files':{'code':'sha'}}
+    identity=dict(binding,assets={'checkpoint':'sha'},kernel={'frozen_prefix':16})
+    payload=dict(schema=SCHEMA,identity=identity,actor=candidate.state_dict(),
+        actor_fingerprint=_model_fingerprint(candidate),state={'iteration':100,'policy_version':100})
+    if fault=='binding':identity['source_files']={'code':'changed'}
+    if fault=='fingerprint':payload['actor_fingerprint']='wrong'
+    path=tmp_path/'checkpoint.pt';torch.save(payload,path)
+    def load():return load_evaluation_actor(path,actor=actor,kernel={'frozen_prefix':16},
+        assets={'checkpoint':'sha'},execution_binding=binding)
+    if fault:
+        with pytest.raises(ValueError):load()
+        assert all(torch.equal(v,actor.state_dict()[k]) for k,v in original.items())
+    else:
+        assert load()['source_iteration']==100
+        assert torch.equal(actor.weight,candidate.weight)
+
+
 def test_complete_rollout_anomaly_preserves_execution_and_old_statistics(tmp_path):
     from gem.closedloop.dppo.diagnostic_rollout import load_rollout
     from tests.closedloop.dppo.test_data_learning import transition
