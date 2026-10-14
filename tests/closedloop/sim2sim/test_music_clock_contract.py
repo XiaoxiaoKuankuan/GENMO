@@ -48,6 +48,23 @@ def test_manifest_retains_independent_music_identity(tmp_path):
     assert tracks[0].audio==source/'audio/song.wav'
 
 
+def test_audio_directory_recurses_sorts_and_excludes_metadata(tmp_path):
+    folder=tmp_path/'歌曲';folder.mkdir();(folder/'album').mkdir()
+    for name in ['B.MP3','a.wav','album/C.mp3','._a.wav','notes.txt']:
+        (folder/name).write_bytes(b'input listing fixture')
+    (folder/'__MACOSX').mkdir();(folder/'__MACOSX/no.mp3').write_bytes(b'resource fork')
+    (folder/'.cache').mkdir();(folder/'.cache/no.wav').write_bytes(b'cache')
+    (folder/'z-alias.wav').symlink_to(folder/'a.wav')
+    tracks=load_playlist(folder,tmp_path)
+    assert [t.audio.relative_to(folder).as_posix() for t in tracks]==['a.wav','album/C.mp3','B.MP3']
+    assert all(t.source=='external' and t.split=='not_applicable' and t.motion is None for t in tracks)
+
+
+def test_empty_audio_directory_and_missing_audio_are_explicit_errors(tmp_path):
+    with pytest.raises(ValueError,match='没有可用的WAV/MP3'):load_playlist(tmp_path,tmp_path)
+    with pytest.raises(FileNotFoundError):load_playlist(tmp_path/'missing.wav',tmp_path)
+
+
 def test_external_cache_identity_and_corruption_fail_closed(tmp_path,monkeypatch):
     from gem.utils import music_features
     calls=[]

@@ -1,6 +1,7 @@
 """实时sim2sim的音乐清单、完整音频特征缓存与播放时钟。
 
-清单可读取现有四来源selection.json、逐行manifest或明确的音频路径列表；
+清单可读取现有四来源selection.json、逐行manifest、音频文件夹或明确的音频路径列表；
+文件夹递归扫描WAV/MP3，按相对路径排序，排除隐藏文件和macOS资源附属文件；
 保留source/split/music_group_id和SHA，不能把同音乐动作片段当独立音乐。
 任意WAV/MP3在物理episode开始前整首提取既有EDGE35，缓存键绑定音频内容、
 提取源码和参数。无配对示范时目标活动度/活动门控/训练奖励均不适用。
@@ -11,6 +12,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import hashlib
 import json
+import os
 import threading
 from pathlib import Path
 import numpy as np
@@ -41,8 +43,26 @@ class Track:
 
 
 def load_playlist(path, dataset_root):
-    """读取现有selection/manifest或WAV/MP3列表；相对路径有明确根目录。"""
-    path, root = Path(path).resolve(), Path(dataset_root).resolve()
+    """读取清单、单首或目录；目录不猜测训练划分，也不按文件名认定独立音乐。"""
+    path, root = Path(path).expanduser().resolve(), Path(dataset_root).expanduser().resolve()
+    if not path.exists():raise FileNotFoundError(path)
+    if path.is_dir():
+        candidates=[]
+        for directory, subdirs, files in os.walk(path,followlinks=False):
+            subdirs[:]=sorted(d for d in subdirs if not d.startswith('.') and d!='__MACOSX')
+            for name in files:
+                if name.startswith('.') or Path(name).suffix.lower() not in ('.wav','.mp3'):continue
+                candidate=Path(directory)/name
+                if candidate.is_file():candidates.append(candidate)
+        candidates.sort(key=lambda p:(p.relative_to(path).as_posix().casefold(),p.relative_to(path).as_posix()))
+        tracks=[];seen=set()
+        for candidate in candidates:
+            resolved=candidate.resolve()
+            if resolved in seen:continue
+            seen.add(resolved);tracks.append(Track(resolved,candidate.stem))
+        if not tracks:raise ValueError('音频文件夹没有可用的WAV/MP3: '+str(path))
+        print(f'[MUSIC] 文件夹读取{len(tracks)}个音频文件，按相对路径排序: {path}',flush=True)
+        return tracks
     if path.suffix.lower() in ('.wav','.mp3'):
         return [Track(path, path.stem)]
     if path.suffix.lower() == '.jsonl':
@@ -124,11 +144,13 @@ def prepare_music(track, cache, *, decode_audio=True):
                 if json.loads(str(data['key'].item())) != key_data:raise ValueError('音乐缓存身份错误')
                 if hashlib.sha256(features.tobytes()).hexdigest()!=str(data['sha256'].item()):
                     raise ValueError('音乐缓存内容SHA错误')
+            print(f'[MUSIC] 复用整曲EDGE35缓存: {track.audio.name}',flush=True)
         else:
+            print(f'[MUSIC] 首次提取整曲EDGE35，完成后缓存: {track.audio.name}',flush=True)
             values, extraction=extractor.extract_edge_baseline35(track.audio,target_fps=30,aist_sequence_name=track.sequence)
             features=np.asarray(values,dtype=np.float32)
             # 独占发布，失败不留下可被误读的完整缓存。
-            import os, tempfile
+            import tempfile
             with tempfile.NamedTemporaryFile(dir=cache,suffix='.partial',delete=False) as stream:
                 tmp=Path(stream.name)
                 np.savez_compressed(stream,features=features,metadata=json.dumps(extraction),
@@ -159,7 +181,8 @@ def prepare_music(track, cache, *, decode_audio=True):
     if len(features)/30 < duration-.1:
         if track.features is not None:
             from dataclasses import replace
-            print(f'[MUSIC] 清单特征覆盖{len(features)/30:.2f}s，整曲{duration:.2f}s；重新提取整首EDGE35',flush=True)
+            print(f'[MUSIC] 清单特征仅覆盖{len(features)/30:.2f}s，整曲{duration:.2f}s；'
+                  '改用整曲EDGE35（已有缓存直接复用）',flush=True)
             full=prepare_music(replace(track,features=None,feature_sha=None),cache,decode_audio=decode_audio)
             full.track=track
             full.identity['manifest_partial_feature_sha256']=feature_sha

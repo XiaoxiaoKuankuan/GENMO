@@ -1,7 +1,9 @@
 """MuJoCo原生GLFW交互窗口与结束后的真实状态视频编码。
 
 窗口持有独立MjData，只从物理线程复制qpos用于绘制；绝不写入正在运行的
-物理MjData。参考ghost来自已提交参考，渲染掉帧不改变真实控制步。键盘事件
+物理MjData。参考来自已提交参考，默认左右分屏、不透明显示，避免与实际机器人
+重叠的半透明面产生闪烁；V可切回叠加对照。两幅画面使用同一快照和相机，
+参考姿态不做平滑、平移或时间偏移，渲染掉帧不改变真实控制步。键盘事件
 仅入控制队列，暂停/重置/切歌/切模型均由物理线程在合法控制边界处理。
 视频在所有控制停止后由逐50Hz真实状态生成并混入原音频，保留明确的
 physics_backend=mujoco来源；这段离线编码不计作实时动力学吞吐。
@@ -28,10 +30,15 @@ class Sim2SimViewer:
         # 与Actor共用4090时关闭窗口阴影，离线视频仍可有阴影；不更改模型/物理。
         self.scene.flags[mujoco.mjtRndFlag.mjRND_SHADOW]=False
         self.scene.flags[mujoco.mjtRndFlag.mjRND_REFLECTION]=False
+        self.ghost_scene.flags[mujoco.mjtRndFlag.mjRND_SHADOW]=False
+        self.ghost_scene.flags[mujoco.mjtRndFlag.mjRND_REFLECTION]=False
         self.context=mujoco.MjrContext(self.model,mujoco.mjtFontScale.mjFONTSCALE_150)
         self.camera=mujoco.MjvCamera();self.options=mujoco.MjvOption();self.perturb=mujoco.MjvPerturb()
         self.camera.distance=2.5;self.camera.azimuth=125;self.camera.elevation=-14
         self.show_reference=True;self.mouse_last=None;self.mouse_button=None
+        self.reference_display=runtime.config['runtime'].get('reference_display','split')
+        if self.reference_display not in ('split','overlay'):
+            raise ValueError('reference_display必须为split或overlay')
         self.captured_episodes=set()
         glfw.set_key_callback(self.window,self._key)
         glfw.set_scroll_callback(self.window,self._scroll)
@@ -45,6 +52,8 @@ class Sim2SimViewer:
                  g.KEY_ESCAPE:'stop'}
         if key in mapping:self.runtime.command(mapping[key])
         elif key==g.KEY_G:self.show_reference=not self.show_reference
+        elif key==g.KEY_V:
+            self.reference_display='overlay' if self.reference_display=='split' else 'split'
         elif key in (g.KEY_1,g.KEY_2,g.KEY_3):
             index=key-g.KEY_1
             if index<len(self.runtime.models):self.runtime.command(f'model:{index}')
@@ -59,20 +68,34 @@ class Sim2SimViewer:
             self.camera.azimuth-=dx*.3;self.camera.elevation=float(np.clip(self.camera.elevation-dy*.2,-85,0))
         self.mouse_last=(x,y)
 
-    def _ghost(self,state):
-        if not self.show_reference or 'reference_qpos' not in state:return
+    def _reference_scene(self,state,*,overlay):
+        """只准备渲染场景，保留qpos原值；叠加模式随后只复制可见geom。"""
         self.ref_data.qpos[:]=state['reference_qpos'];mujoco.mj_forward(self.model,self.ref_data)
         mujoco.mjv_updateScene(self.model,self.ref_data,self.options,self.perturb,self.camera,
-                             mujoco.mjtCatBit.mjCAT_DYNAMIC,self.ghost_scene)
+                             mujoco.mjtCatBit.mjCAT_DYNAMIC if overlay else mujoco.mjtCatBit.mjCAT_ALL,
+                             self.ghost_scene)
+
+    def _ghost(self,state):
+        if not self.show_reference or 'reference_qpos' not in state:return
+        self._reference_scene(state,overlay=True)
         for source in self.ghost_scene.geoms[:self.ghost_scene.ngeom]:
+            if source.objtype!=mujoco.mjtObj.mjOBJ_GEOM or source.rgba[3]<=0:continue
             if self.scene.ngeom>=self.scene.maxgeom:break
             dest=self.scene.geoms[self.scene.ngeom]
             mujoco.mjv_initGeom(dest,source.type,source.size.astype(np.float64),source.pos.astype(np.float64),
                                source.mat.astype(np.float64).reshape(9),
                                np.array([.15,.85,1.,.22],dtype=np.float32))
-            for field in ('dataid','objtype','objid','category','matid','texcoord','modelrbound'):
+            for field in ('dataid','objtype','objid','texcoord','modelrbound'):
                 setattr(dest,field,getattr(source,field))
+            dest.matid=-1;dest.category=mujoco.mjtCatBit.mjCAT_DECOR
             dest.transparent=1;self.scene.ngeom+=1
+
+    def _opaque_reference(self,state):
+        self._reference_scene(state,overlay=False)
+        for geom in self.ghost_scene.geoms[:self.ghost_scene.ngeom]:
+            if geom.objtype!=mujoco.mjtObj.mjOBJ_GEOM or geom.objid<0:continue
+            if self.model.geom_bodyid[geom.objid]==0 or geom.rgba[3]<=0:continue
+            geom.matid=-1;geom.rgba[:]=[.15,.65,.95,1.];geom.transparent=0
 
     def run(self):
         g=self.glfw
@@ -87,10 +110,20 @@ class Sim2SimViewer:
                 self.camera.lookat[2]=max(.4,self.camera.lookat[2])
                 mujoco.mjv_updateScene(self.model,self.data,self.options,self.perturb,self.camera,
                                       mujoco.mjtCatBit.mjCAT_ALL,self.scene)
-                self._ghost(state)
                 width,height=g.get_framebuffer_size(self.window)
                 rect=mujoco.MjrRect(0,0,width,height)
-                mujoco.mjr_render(rect,self.scene,self.context)
+                split=self.show_reference and self.reference_display=='split' and 'reference_qpos' in state
+                if split:
+                    self._opaque_reference(state)
+                    left=mujoco.MjrRect(0,0,width//2,height);right=mujoco.MjrRect(width//2,0,width-width//2,height)
+                    mujoco.mjr_render(left,self.scene,self.context)
+                    mujoco.mjr_render(right,self.ghost_scene,self.context)
+                    for viewport,label in ((left,'ACTUAL: GMT + MuJoCo'),(right,'REFERENCE: GENMO (same time)')):
+                        mujoco.mjr_overlay(mujoco.mjtFont.mjFONT_NORMAL,mujoco.mjtGridPos.mjGRID_TOPRIGHT,
+                                           viewport,label,'',self.context)
+                else:
+                    if self.show_reference:self._ghost(state)
+                    mujoco.mjr_render(rect,self.scene,self.context)
                 title=f'{state.get("model","Loading")} | {state.get("music","")} | {state.get("status","")}'
                 g.set_window_title(self.window,title)
                 text=(f'Status: {state.get("status", "loading")}\n'
@@ -102,8 +135,9 @@ class Sim2SimViewer:
                 mujoco.mjr_overlay(mujoco.mjtFont.mjFONT_NORMAL,mujoco.mjtGridPos.mjGRID_TOPLEFT,
                     rect,text,'',self.context)
                 mujoco.mjr_overlay(mujoco.mjtFont.mjFONT_NORMAL,mujoco.mjtGridPos.mjGRID_BOTTOMLEFT,
-                    rect,'SPACE pause | R replay | N/P track | 1/2/3 model | G reference | ESC exit',
-                    'Actual physics: MuJoCo 200 Hz / GMT 50 Hz',self.context)
+                    rect,'SPACE pause | R replay | N/P song | 1/2/3 model\n'
+                    'G reference | V split/overlay | ESC exit | physics 200 Hz / GMT 50 Hz',
+                    '',self.context)
                 if (self.runtime.record and state.get('status')=='finished' and
                         state.get('episode_id') not in self.captured_episodes):
                     # 只保存本应用的渲染缓冲，不截取用户桌面；物理已停，不干扰控制计时。

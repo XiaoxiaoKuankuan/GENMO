@@ -20,6 +20,10 @@ PYTHONDONTWRITEBYTECODE=1 /home/weili/GENMO/.venv/bin/python -B \
 PYTHONDONTWRITEBYTECODE=1 /home/weili/GENMO/.venv/bin/python -B \
   scripts/demo/run_genmo_gmt_sim2sim.py --audio /绝对路径/歌曲.mp3 --record
 
+# 整个音频文件夹；递归读取WAV/MP3，按相对路径排序
+PYTHONDONTWRITEBYTECODE=1 /home/weili/GENMO/.venv/bin/python -B \
+  scripts/demo/run_genmo_gmt_sim2sim.py --audio-dir "/home/weili/下载/music/music" --record
+
 # 替换成一个明确的Stage2 checkpoint，不能传latest指针或目录
 PYTHONDONTWRITEBYTECODE=1 /home/weili/GENMO/.venv/bin/python -B \
   scripts/demo/run_genmo_gmt_sim2sim.py \
@@ -34,8 +38,14 @@ PYTHONDONTWRITEBYTECODE=1 /home/weili/GENMO/.venv/bin/python -B \
 
 `--playlist`接受现有`selection.json`、逐行manifest、JSON音频条目列表或每行一个音频路径的文本清单。
 selection的`source/row`从配置`dataset_root`解析；manifest从所属数据集目录解析；普通音频清单相对清单位置解析。
-同曲动作片段的音乐分组身份保留，不称作独立音乐。原特征若只覆盖短片段，终端明确打印提示，整首重新提取EDGE35，
-报告同时保留旧特征身份和新缓存身份；配对活动度只在有真实配对覆盖的区间有效。
+`--audio-dir`接受音频目录，`--audio`也兼容目录；二者不能与`--playlist`同时使用。目录递归扫描、不跟随子目录
+符号链接，排除隐藏文件/目录和`__MACOSX`等附属文件。同一个真实文件的符号链接别名只读取一次；
+目录输入标为外部音频，不根据文件名猜测训练/测试划分或配对动作，也不把内容重复的文件自动认定为独立音乐。
+
+“清单特征仅覆盖9.60s，整曲48.00s”表示旧清单只存了9.6秒配对片段的音乐特征，而音频有48秒。
+整曲执行需要覆盖48秒的EDGE35（30Hz、每帧35维）；首次在episode开始前提取，之后按音频内容和提取配置复用缓存。
+终端分别显示“首次提取”或“复用缓存”，不会因这条提示每次重复提取，也不是重新训练GENMO。
+报告保留旧特征和新缓存的身份；同曲动作片段仍属于原音乐组，配对活动度只在有真实配对覆盖的区间有效。
 
 ## 操作
 
@@ -45,11 +55,19 @@ selection的`source/row`从配置`dataset_root`解析；manifest从所属数据�
 | R | 同一曲、同一随机种子，从站立初态重播 |
 | N / P | 下一首/上一首，新episode |
 | 1 / 2 / 3 | Stage1 s595000 / 固定旧基线147轮 / 固定旧基线246轮，重新开始当前歌曲 |
-| G | 显示/隐藏已提交参考的半透明机器人 |
+| G | 显示/隐藏已提交的GENMO参考 |
+| V | 分屏/半透明叠加显示切换，默认分屏 |
 | 鼠标拖动 / 滚轮 | 转动视角 / 缩放 |
 | Esc或关闭窗口 | 安全结束，保存报告，随后编码已请求的视频 |
 
-物理失败后停在结果界面，不自动循环重试；R/N/P/模型键仍可使用。自然音乐结束按配置切到下一首。
+默认`runtime.reference_display: split`：左边是GMT控制的实际MuJoCo机器人，右边是不透明蓝色GENMO参考。
+两侧使用同一时刻、同一相机，保持参考原始姿态，不加平滑、不平移动作数据。这样避免参考与实体重叠导致的
+遮挡和半透明闪变。V可切回叠加；叠加层只绘制可见机器人几何体，不把辅助site或隐藏形状染成蓝色。
+蓝色参考是运动学显示；左侧实体才经过GMT控制和真实MuJoCo动力学。分屏改善显示，不能用来证明生成轨迹完全无抖动。
+
+物理失败后停在结果界面，不自动循环重试；R/N/P/模型键仍可使用。默认`runtime.auto_next: true`：
+自然音乐结束后播放下一首，最后一首结束后退出，不自动循环列表；单首输入正常完成后退出。
+自动切歌时先从新episode准备下一首特征和站立参考，不承诺无缝连续音频。
 无窗口模式在失败时结束，避免无人值守挂起。`--max-seconds`是**当前sim2sim验收的实际仿真总秒数**，含站立预热，
 达到后记行政结束；它与训练的停止策略无关。SIGINT/SIGTERM与Esc都走安全收尾。
 
@@ -69,6 +87,10 @@ selection的`source/row`从配置`dataset_root`解析；manifest从所属数据�
 本机已补齐用户级PortAudio动态库，位置为既有虚拟环境`lib/`；入口需要时只为本进程设置动态库搜索路径。
 其他机器需要可用的PortAudio/声音设备、MuJoCo、GLFW、PyTorch、ONNX Runtime、librosa、soundfile、sounddevice和ffmpeg。
 `--mute`不会移除音乐条件；缺少声音依赖时不会静默伪装为有声运行。
+
+`ALSA ... underrun occurred`是声音设备的播放缓冲暂时缺数据，可能造成短暂断音；不是音频文件损坏或机器人失败的
+判定。当前音频回调采用低延迟，推理/窗口/物理并发时需要关注调度。报告记录`underflow_callbacks`与游标差，
+超过现有100ms音频偏差门槛仍会结束episode。短测无欠载不代表长时间播放已彻底解决，`--mute`仅用于明确关闭声音。
 
 ## 输出和结果边界
 
@@ -109,6 +131,11 @@ music_cache/                    按音频内容＋提取配置命名的EDGE35缓
 带窗口和无窗口各有一次63.46秒实时通过记录，均因朝向误差物理终止，不能当作长歌完成。
 另一轮窗口复核在55.94秒发生生成截止超期，正确停止；长期实时稳定性仍未证明。
 7.941秒WAV已完整自然结束。长段还有28个控制步发生关节边界越界，报告保留这些实际质量问题。
+
+同日显示/目录改进：10项sim2sim回归通过，另1项真实GPU反馈测试默认跳过（首版已单独通过，本次未改反馈链）。
+本机真实窗口＋声音＋分屏运行12秒：448＋152控制步、1792＋608物理子步；第一首自然结束并切到第二首，
+第二首因显式12秒验收上限结束。两段实时速度比均约1.000，无音频欠载，模型/源码冻结检查通过。
+这次只验证目录、显示与自然切歌，不能替代长期实时验收。临时轨迹和视频已清理，诊断摘要与截图保留用于闪烁问题复核。
 
 详细证据：[验收报告](../../../outputs/sim2sim/acceptance_20261014/验收报告.md)；
 [主视频](../../../outputs/sim2sim/acceptance_20261014/window_65s/episode0001-d86c0480/physics_with_audio.mp4)。
