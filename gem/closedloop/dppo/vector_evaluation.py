@@ -8,6 +8,8 @@
 ACK，世界日志等待从critical时间排除。退出时恢复训练backend对象，评估不重置
 训练物理状态、音乐游标或预算；原评估器负责恢复模型模式、梯度和所有训练RNG。
 评估/MC世界的启动与关闭耗时另记入上下文的非迭代开销，不计入评估自身wall_seconds。
+世界进程启动失败（例如Isaac远程地面USD下载瞬断）时换新目录最多重试三次；启动失败发生在
+任何物理交互之前，因此重试不改变评估结果，失败目录与日志保留。
 """
 from __future__ import annotations
 from contextlib import contextmanager
@@ -44,12 +46,33 @@ class SingleVectorLaneTransport:
     def close(self):pass
 
 
-@contextmanager
-def isolated_vector_evaluation(c,label):
+class IsolatedWorld:
+    """一个独立N=1评估/MC世界的进程、日志与后端；不含collective，可在评估线程内使用。"""
+    def __init__(self):
+        self.workers=self.world=self.journal=self.backend=None
+        self.start_seconds=self.close_seconds=0.
+
+
+def open_isolated_world(c,label,*,attempts=3):
+    """启动并核验N=1 Isaac世界；进程启动失败（如地面USD远程下载瞬断）时换新目录重试。
+
+    每次尝试使用独立目录并保留失败日志；世界进入物理执行前的启动失败不产生任何交互，
+    因此重试不改变评估结果。三次都失败才抛出。不做跨rank同步。
+    """
+    errors=[]
+    for attempt in range(attempts):
+        suffix='' if attempt==0 else f'_retry{attempt}'
+        try:
+            return _open_isolated_world_once(c,label+suffix)
+        except Exception as error:
+            errors.append(f'{type(error).__name__}: {error}')
+            time.sleep(5*(attempt+1))
+    raise RuntimeError('Isolated evaluation world failed to start: '+' | '.join(errors))
+
+
+def _open_isolated_world_once(c,label):
     from tools.eval.run_closedloop_baseline import Workers
-    kind = 'mc' if label.startswith('mc_') else 'evaluation'
-    overhead = getattr(c, 'overhead', None)
-    started = time.perf_counter()
+    started=time.perf_counter();handle=IsolatedWorld()
     path = c.session/'phases'/f'vector_eval_backend_{label}'/f'rank{c.distributed.rank:02d}'
     path.mkdir(parents=True,exist_ok=False)
     config = copy.deepcopy(c.config)
@@ -58,44 +81,71 @@ def isolated_vector_evaluation(c,label):
     # 独立评估/MC世界不重复首个列式-逐行全量对照；训练世界每会话已执行一次，数值路径相同。
     config['runtime'].update(num_envs=1,asset_conversion_dir=str(path/'usd_assets'),columnar_first_audit=False)
     config_path=path/'config.yaml';config_path.write_text(yaml.safe_dump(config,allow_unicode=True))
-    workers=Workers(config,path)
-    old_backend=c.backend
-    world=journal=None
+    handle.workers=Workers(config,path)
     try:
-        socket=Path(workers.temp.name)/'eval.sock'
-        client=local_call(c.distributed,lambda:workers.start('gmt',[config['paths']['isaac_python'],'-B',
+        socket=Path(handle.workers.temp.name)/'eval.sock'
+        client=handle.workers.start('gmt',[config['paths']['isaac_python'],'-B',
             str(Path(config['paths']['gmt_repo'])/'scripts/rsl_rl/serve_frozen_gmt_vector.py'),
             '--config',str(config_path),'--socket',str(socket),'--headless'],config['paths']['gmt_repo'],socket,
-            strip_distributed=True,environment=device_environment))
-        def check_device():
-            if workers.entries[0]['identity'].get('gpu_uuid')!=str(torch.cuda.get_device_properties(c.distributed.device).uuid):
-                raise RuntimeError('Evaluation world is on a different physical GPU')
-        local_call(c.distributed,check_device)
-        journal=GuardedStepJournal(path/'world.sqlite',c.guard,format='genmo.execution_journal.ndarray.v2')
-        world=VectorWorldClient(client,journal,socket_path=socket)
-        c.backend=VectorLaneBackend(SingleVectorLaneTransport(world),None)
-        if overhead is not None:
-            overhead[kind+'_world_start_seconds']=overhead.get(kind+'_world_start_seconds',0.)+time.perf_counter()-started
+            strip_distributed=True,environment=device_environment)
+        if handle.workers.entries[0]['identity'].get('gpu_uuid')!=str(torch.cuda.get_device_properties(c.distributed.device).uuid):
+            raise RuntimeError('Evaluation world is on a different physical GPU')
+        handle.journal=GuardedStepJournal(path/'world.sqlite',c.guard,format='genmo.execution_journal.ndarray.v2')
+        handle.world=VectorWorldClient(client,handle.journal,socket_path=socket)
+        handle.backend=VectorLaneBackend(SingleVectorLaneTransport(handle.world),None)
+    except BaseException:
+        close_isolated_world(handle)
+        raise
+    handle.start_seconds=time.perf_counter()-started
+    return handle
+
+
+def close_isolated_world(handle):
+    """关闭世界与进程；任何非干净退出都抛错，journal无论如何关闭。"""
+    started=time.perf_counter()
+    try:
+        if handle.world is not None:
+            from .vector_collector import validate_vector_close
+            result=handle.world.call('close')
+            handle.world.client.close()
+            handle.workers.record_external_close('gmt',result)
+            validate_vector_close(result)
+    finally:
+        try:
+            if handle.workers is not None:
+                handle.workers.close()
+                if any(v.get('close_error') or v.get('forced_shutdown') or v.get('process_exit_code')!=0
+                       for v in handle.workers.shutdown.values()):
+                    raise RuntimeError('Isolated GPU evaluation worker did not close cleanly')
+        finally:
+            if handle.journal is not None:handle.journal.close()
+            handle.close_seconds=time.perf_counter()-started
+
+
+@contextmanager
+def isolated_vector_evaluation(c,label):
+    kind = 'mc' if label.startswith('mc_') else 'evaluation'
+    overhead = getattr(c, 'overhead', None)
+    old_backend=c.backend
+    handle,failure=None,None
+    try:
+        handle=open_isolated_world(c,label)
+    except Exception as error:
+        failure=f'rank {c.distributed.rank}: {type(error).__name__}: {error}'
+    failures=c.distributed.all_gather_object(failure)
+    if any(failures):
+        # 其他rank启动失败时，本rank已启动的世界也必须关闭后再共同抛错。
+        if handle is not None:
+            try:close_isolated_world(handle)
+            except Exception:pass
+        raise RuntimeError('; '.join(item for item in failures if item))
+    if overhead is not None:
+        overhead[kind+'_world_start_seconds']=overhead.get(kind+'_world_start_seconds',0.)+handle.start_seconds
+    c.backend=handle.backend
+    try:
         yield
     finally:
-        closing=time.perf_counter()
         c.backend=old_backend
-        def close():
-            try:
-                if world is not None:
-                    from .vector_collector import validate_vector_close
-                    result=world.call('close')
-                    world.client.close()
-                    workers.record_external_close('gmt',result)
-                    validate_vector_close(result)
-            finally:
-                try:
-                    workers.close()
-                    if any(v.get('close_error') or v.get('forced_shutdown') or v.get('process_exit_code')!=0
-                           for v in workers.shutdown.values()):
-                        raise RuntimeError('Isolated GPU evaluation worker did not close cleanly')
-                finally:
-                    if journal is not None:journal.close()
-        local_call(c.distributed,close)
+        local_call(c.distributed,lambda:close_isolated_world(handle))
         if overhead is not None:
-            overhead[kind+'_world_close_seconds']=overhead.get(kind+'_world_close_seconds',0.)+time.perf_counter()-closing
+            overhead[kind+'_world_close_seconds']=overhead.get(kind+'_world_close_seconds',0.)+handle.close_seconds
