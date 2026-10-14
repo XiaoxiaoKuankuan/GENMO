@@ -211,6 +211,7 @@ class ConditionGraphCache:
         self.bank = None
         self.finished = False
         self.source_versions = []
+        self.feature_names=getattr(policy,'condition_feature_names',('conditional','unconditional'))
 
     def prime(self, rows):
         """一次拼好本次参数版本的条件池；叶子梯度在所有切片后回传原编码图。"""
@@ -235,7 +236,7 @@ class ConditionGraphCache:
             adapted=(originals[0]['adapted'] if batched else
                 {key: torch.cat([item['adapted'][key] for item in originals]) for key in originals[0]['adapted']}),
             leaves={}, indices={}, batched=batched, totals={}, tokens={})
-        for name in ('conditional', 'unconditional'):
+        for name in self.feature_names:
             features = (originals[0][name] if batched or originals[0][name] is None else
                         torch.cat([item[name] for item in originals]))
             trainable = self.training and features is not None and features.requires_grad
@@ -284,7 +285,7 @@ class ConditionGraphCache:
                           {key: value.to(context[key].device) for key, value in row.context.items()})
                 original = self.policy.prepare_conditions(single)
                 entry = dict(original=original, leaf={})
-                for name in ('conditional', 'unconditional'):
+                for name in self.feature_names:
                     feature = original[name]
                     entry['leaf'][name] = (feature.detach().requires_grad_(True)
                         if self.training and feature is not None and feature.requires_grad else feature)
@@ -293,7 +294,7 @@ class ConditionGraphCache:
         prepared = dict(entries[0]['original'])
         prepared['adapted'] = {key: torch.cat([entry['original']['adapted'][key] for entry in entries])
                                for key in prepared['adapted']}
-        for name in ('conditional', 'unconditional'):
+        for name in self.feature_names:
             prepared[name] = (None if entries[0]['leaf'][name] is None else
                               torch.cat([entry['leaf'][name] for entry in entries]))
         prepared['inputs'] = self.policy._input_signature(context)
@@ -320,7 +321,7 @@ class ConditionGraphCache:
             with measure('actor.condition_encoder_backward', gpu=True):
                 for entry in self.entries.values():
                     outputs, gradients = [], []
-                    for name in ('conditional', 'unconditional'):
+                    for name in self.feature_names:
                         original, leaf = entry['original'][name], entry['leaf'][name]
                         if original is not None and original.requires_grad and leaf.grad is not None:
                             outputs.append(original)

@@ -83,6 +83,9 @@ def configuration(path,*,genmo_repo=None,gmt_repo=None):
         strategy=='last' and type(t['ppo_steps_per_chain']) is int and 1<=t['ppo_steps_per_chain']<=20)
     if t['denoising_steps']!=20 or not steps_ok or t['ppo_epochs']!=2:
         raise ValueError('Full20 behavior and explicit Uniform8/Full20 or terminal-K two-epoch PPO required')
+    frozen=t.get('frozen_prefix_steps',0)
+    if type(frozen)is not int or frozen not in (0,16) or (frozen and (strategy!='last' or t['ppo_steps_per_chain']!=4)):
+        raise ValueError('Frozen first16 requires terminal4 PPO; old shared-network runs have a different kernel identity')
     if len(t['std_schedule'])!=20 or any(not math.isfinite(x) or x<=0 for x in t['std_schedule']):
         raise ValueError('Actual noise schedule must define twenty positive finite floors')
     if c['runtime']['timing_contract']!='modeled_deployment.v3' or c['timing']['control_ticks']!=12 or c['timing']['physics_ticks']!=3:

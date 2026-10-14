@@ -70,6 +70,10 @@ def test_low_ev_refit_without_improvement_restores_critic(monkeypatch, tmp_path)
     for key, value in c.critic.state_dict().items(): torch.testing.assert_close(value, before[key], rtol=0, atol=0)
     torch.testing.assert_close(next(iter(c.critic_optimizer.state.values()))['step'], step, rtol=0, atol=0)
     assert c.state['critic_updates'] == 10
+    assert report['after'] == report['before']
+    assert report['candidate_after']['mse'] == 11.
+    assert report['selected_mc_ratio'] is None
+    assert report['relative_validation_mse_reduction'] == 0.
 
 
 def test_low_ev_refit_with_improvement_is_accepted(monkeypatch, tmp_path):

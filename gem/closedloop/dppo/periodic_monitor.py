@@ -143,8 +143,12 @@ def _load_episode(root, reference):
 
 def _episode_row(episode):
     overall = aggregate_evaluation([episode])['overall']
+    controls=[r for d in episode['decisions'] for r in d['controls']]
+    actual=sum(float(r.get('activity',{}).get('actual_activity_rad_s') or 0)*r['dt_s'] for r in controls)
+    target=sum(float(r.get('activity',{}).get('target_activity_rad_s') or 0)*r['dt_s'] for r in controls)
     return dict(task_id=episode['task_id'], dataset=episode['dataset'], seed=episode['seed'],
         reward=overall['reward_sum'], executed_seconds=overall['executed_seconds'],
+        activity_ratio=actual/target if target>0 else None,
         physical_failure=int(episode['physical_failure']), rejection_count=overall['rejection_count'])
 
 
@@ -185,21 +189,45 @@ def paired_summary(baseline, current):
             new_failure=bool(other['physical_failure'] and not row['physical_failure']),
             failure_recovered=bool(row['physical_failure'] and not other['physical_failure'])))
     deltas = [r['reward_delta'] for r in pairs]
+    tasks={t['task_id']:t for t in baseline.get('plan',{}).get('tasks',[])}
+    groups=[(r['dataset'],tasks.get(r['task_id'],{}).get('sample',{}).get('group_id',r['task_id'])) for r in pairs]
     return dict(task_count=len(pairs), reward_delta=_stats(deltas),
         duration_delta=_stats([r['duration_delta'] for r in pairs]), new_failures=sum(r['new_failure'] for r in pairs),
-        failure_recovered=sum(r['failure_recovered'] for r in pairs), pairs=pairs, regression_alert=_regression_alert(deltas))
+        failure_recovered=sum(r['failure_recovered'] for r in pairs), pairs=pairs, regression_alert=_regression_alert(deltas,groups=groups))
 
 
-def _regression_alert(deltas, z=1.6448536269514722):
-    """配对回报差均值的单侧90%上界低于0时只告警，不停止训练、不改变模型选择。"""
+def _regression_alert(deltas, z=1.2815515655446004, *, groups=None):
+    """来源等权、音乐成簇的单侧90%上界；这里只给单次证据，连续次数由checkpoint状态维护。"""
     n = len(deltas)
     if n < 2:
         return dict(available=False, upper90=None, triggered=False, scope='paired_mean_reward_delta_one_sided_90')
     mean = sum(deltas) / n
     sd = math.sqrt(sum((d-mean)**2 for d in deltas) / (n-1))
     upper = mean + z*sd/math.sqrt(n)
+    scope='paired_mean_reward_delta_one_sided_90'
+    if groups is not None:
+        by_source={}
+        for (source,group),delta in zip(groups,deltas):by_source.setdefault(source,{}).setdefault(group,[]).append(delta)
+        rng=np.random.default_rng(20261014);estimates=[];means=[]
+        for source,music in sorted(by_source.items()):
+            sums=np.array([sum(v) for v in music.values()]);counts=np.array([len(v) for v in music.values()])
+            indices=rng.integers(0,len(sums),size=(4096,len(sums)))
+            estimates.append(sums[indices].sum(1)/counts[indices].sum(1));means.append(sums.sum()/counts.sum())
+        mean=float(np.mean(means));distribution=np.mean(estimates,axis=0)
+        upper=float(np.quantile(distribution,.90));sd=float(np.std(distribution,ddof=1))*math.sqrt(n)
+        scope='source_balanced_music_cluster_bootstrap_one_sided_90'
     return dict(available=True, mean=mean, standard_error=sd/math.sqrt(n), upper90=upper, triggered=upper < 0.,
-        scope='paired_mean_reward_delta_one_sided_90')
+        scope=scope)
+
+
+def advance_regression_alert(state, alert, iteration):
+    """同一接受轮重复评估不重复累计；连续两次负上界才告警，状态随checkpoint恢复。"""
+    previous=state.get('regression_monitor',{})
+    if previous.get('iteration')==iteration:return previous
+    count=previous.get('consecutive',0)+1 if alert.get('available') and alert.get('triggered') else 0
+    result=dict(iteration=iteration,consecutive=count,triggered=count>=2,upper90=alert.get('upper90'))
+    state['regression_monitor']=result
+    return result
 
 
 def merge_periodic_reports(plan, rankreports, *, baseline=None, evaluation_identity=None):
@@ -277,6 +305,12 @@ def choose_best(current, baseline, *, best_observed=None, best_saved=None, saved
     paired = paired_summary(baseline, current)
     eligible = (current['physical_failure_count'] <= baseline['physical_failure_count']
                 and current['mean_executed_seconds'] + 1e-9 >= baseline['mean_executed_seconds'])
+    # 不做单个来源专项优化；保留整体活动度不得明显萎缩的选模保护。
+    initial_activity=[r['activity_ratio'] for r in baseline['episode_metrics'] if r.get('activity_ratio') is not None]
+    actual_activity=[r['activity_ratio'] for r in current['episode_metrics'] if r.get('activity_ratio') is not None]
+    activity_ok=(not initial_activity or (len(actual_activity)==len(initial_activity)
+        and sum(actual_activity)>=.8*sum(initial_activity)))
+    eligible=eligible and activity_ok
     candidate = dict(iteration=iteration, plan_sha256=current['plan_sha256'], actor_identity=current['actor_identity'],
         score=current['source_balanced_reward'], physical_failure_count=current['physical_failure_count'],
         mean_executed_seconds=current['mean_executed_seconds'], saved=bool(saved),
@@ -286,7 +320,7 @@ def choose_best(current, baseline, *, best_observed=None, best_saved=None, saved
     if eligible and saved and (best_saved is None or candidate['score'] > best_saved['score']):
         best_saved = candidate
     return dict(eligible=eligible, best_observed=best_observed, best_saved=best_saved,
-                paired_new_failures=paired['new_failures'])
+                activity_retention_passed=activity_ok,paired_new_failures=paired['new_failures'])
 
 
 def load_best_pointers(output_dir, current, *, state=None):

@@ -117,6 +117,20 @@ def test_best_observed_is_not_mislabelled_saved_and_baseline_safety_gate(tmp_pat
     failed['physical_failure_count'] = 1
     failed['episode_metrics'][0]['physical_failure'] = 1
     assert not choose_best(failed, baseline)['eligible']
+    inactive=copy.deepcopy(improved)
+    for row in baseline['episode_metrics']:row['activity_ratio']=1.
+    for row in inactive['episode_metrics']:row['activity_ratio']=.79
+    assert not choose_best(inactive,baseline)['eligible']
+
+
+def test_regression_alert_needs_two_different_iterations_and_restores_state():
+    from gem.closedloop.dppo.periodic_monitor import advance_regression_alert
+    state={};negative=dict(available=True,triggered=True,upper90=-.1)
+    assert not advance_regression_alert(state,negative,10)['triggered']
+    assert not advance_regression_alert(state,negative,10)['triggered']
+    recovered=copy.deepcopy(state)
+    assert advance_regression_alert(recovered,negative,20)['triggered']
+    assert advance_regression_alert(recovered,dict(available=True,triggered=False),30)['consecutive']==0
 
 
 def test_subset_comparison_is_explicit_and_rechecks_origin_sha(tmp_path):

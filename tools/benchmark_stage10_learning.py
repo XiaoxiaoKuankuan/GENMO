@@ -412,12 +412,13 @@ def main():
         cache=RolloutTensorCache(rows,targets,d.device,max_device_bytes=8*1024**3)
         compare_critics(a,d,actor,train,cache,rows,targets,manifest,stage)
         cache.close();dist.destroy_process_group(group);dist.destroy_process_group();return
-    actor.load_state_dict(source['actor'])
     from gem.closedloop.dppo.run_control import build_policy
     if any(v!='reference' for v in a.variants) and not a.cross_kernel:
         p.error('Numerical candidates require freshly sampled data from their own actual kernel; use --cross-kernel for stable-sampled update equivalence')
     if a.cross_kernel and a.variants[0]!='reference':p.error('--cross-kernel compares every candidate against a first reference run')
     policy=build_policy(actor,settings,stage['precision'])
+    # 冻结前段必须先从Stage1初始化；恢复只覆盖可训练Actor。
+    actor.load_state_dict(source['actor'])
     if policy.kernel_config!=source['kernel'] or inputs['kernel']!=source['kernel']:raise ValueError('Baseline behavior numerical contract changed')
     optimizer=torch.optim.AdamW(trainable_actor_parameters(actor),lr=settings['actor_lr'],weight_decay=0.)
     optimizer.load_state_dict(copy.deepcopy(source['actor_optimizer']))

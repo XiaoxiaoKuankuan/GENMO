@@ -212,7 +212,9 @@ def _evaluate(c,report,label):
     result=_evaluate_and_record(c,report,label)
     _overhead(c,'evaluation_run_seconds',started)
     alert=(result.get('paired_baseline') or {}).get('regression_alert') or {}
-    if alert.get('triggered') and c.distributed.rank==0:
+    from .periodic_monitor import advance_regression_alert
+    result['consecutive_regression_alert']=advance_regression_alert(c.state,alert,c.state['iteration'])
+    if result['consecutive_regression_alert']['triggered'] and c.distributed.rank==0:
         print(f'[STAGE10 ALERT] {label} paired reward delta upper90={alert["upper90"]:.4f}<0; training continues',flush=True)
     if hasattr(c.bc,'validation_report'):
         stage=time.perf_counter()
@@ -390,16 +392,8 @@ def run(cargs,config,distributed):
             raise _FiniteDiagnosticComplete
         if payload is None:
             _snapshot(c,'initial',wait=True)
-        if cargs.collect_only or getattr(cargs,'critic_preheat_only',False):
-            report['initial_evaluation_skipped_for_finite_data_diagnostic']=True
-        elif _requires_initial_evaluation(cargs,c.state,root_call(distributed,lambda:(c.output/'evaluation_baseline.json').exists())):
-            baseline=_evaluate(c,report,'initial')
-            root_call(distributed,lambda:atomic_json(c.output/'evaluation_baseline.json',baseline))
-        if cargs.evaluate_only:
-            report.update(status='passed',scope='fixed_real_physics_evaluation_without_training',final_state=c.state)
-            raise _FiniteDiagnosticComplete
         complete_mc=c.stage['critic'].get('complete_mc',{})
-        if complete_mc.get('enabled') and not cargs.collect_only and not c.state.get('mc_preheat_complete'):
+        if complete_mc.get('enabled') and not cargs.collect_only and not cargs.evaluate_only and not c.state.get('mc_preheat_complete'):
             from .mc_calibration import calibrate_critic
             report['mc_preheat']=calibrate_critic(c,'preheat',fit=True)
             c.state['mc_preheat_complete']=report['mc_preheat']['quality_gate_passed']
@@ -409,6 +403,15 @@ def run(cargs,config,distributed):
                 raise RuntimeError('Independent complete MC validation is insufficient; Actor learning remains disabled')
         if getattr(cargs,'critic_preheat_only',False):
             report.update(status='passed',scope='complete_MC_critic_preheat_without_Actor_updates',final_state=c.state)
+            raise _FiniteDiagnosticComplete
+        # 正式训练的固定价值诊断必须绑定已预热Critic；纯Actor评估不隐式训练Critic。
+        if cargs.collect_only:
+            report['initial_evaluation_skipped_for_finite_data_diagnostic']=True
+        elif _requires_initial_evaluation(cargs,c.state,root_call(distributed,lambda:(c.output/'evaluation_baseline.json').exists())):
+            baseline=_evaluate(c,report,'initial')
+            root_call(distributed,lambda:atomic_json(c.output/'evaluation_baseline.json',baseline))
+        if cargs.evaluate_only:
+            report.update(status='passed',scope='fixed_real_physics_evaluation_without_training',final_state=c.state)
             raise _FiniteDiagnosticComplete
         started=time.perf_counter();last_save=started
         c.state.setdefault('next_evaluation_control_steps',_next_interaction_boundary(

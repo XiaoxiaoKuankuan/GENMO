@@ -96,12 +96,16 @@ def probability_checks(policy,context):
             conditions={k:v[rows] for k,v in context.items()}
             # 有梯度与无梯度版本分别检查，不能用采样时的detached网络输出替代重算。
             for grad in [False,True]:
+                selected=(steps>=getattr(policy,'frozen_prefix_steps',0)) if grad else torch.ones_like(steps,dtype=torch.bool)
+                if not selected.any():continue
+                active_rows,active_steps=rows[selected],steps[selected]
+                conditions={k:v[active_rows] for k,v in context.items()}
                 with torch.set_grad_enabled(grad):
-                    params=policy.transition_parameters(conditions,trace['chain'][rows,steps],steps)
-                    joint=masked_joint_log_prob(trace['chain'][rows,steps+1],params['mean'],params['std'],params['free_mask'])
-                    old=trace['old_log_probs'][rows,steps]
-                    independent=torch.distributions.Normal(trace['old_means'][rows,steps].double(),
-                        trace['old_stds'][rows,steps].double()).log_prob(trace['chain'][rows,steps+1].double())
+                    params=policy.transition_parameters(conditions,trace['chain'][active_rows,active_steps],active_steps)
+                    joint=masked_joint_log_prob(trace['chain'][active_rows,active_steps+1],params['mean'],params['std'],params['free_mask'])
+                    old=trace['old_log_probs'][active_rows,active_steps]
+                    independent=torch.distributions.Normal(trace['old_means'][active_rows,active_steps].double(),
+                        trace['old_stds'][active_rows,active_steps].double()).log_prob(trace['chain'][active_rows,active_steps+1].double())
                     independent=independent.masked_fill(~params['free_mask'],0.).sum((-2,-1))
                     error=torch.stack(((joint-old).abs().max(),((joint-old).exp()-1).abs().max(),(independent-old).abs().max()))
                     maxima=torch.maximum(maxima,error.detach())
@@ -113,6 +117,20 @@ def probability_checks(policy,context):
         if not record['passed']:
             result['passed']=False;return result
     result['passed']=True
+    if getattr(policy,'frozen_prefix_steps',0):
+        before={k:v.clone() for k,v in policy.frozen_policy.actor.state_dict().items()}
+        with torch.no_grad():
+            early=policy.transition_parameters(context,trace['chain'][:,0],0)['mean'].clone()
+        optimizer=torch.optim.Adam(policy.actor.parameters(),lr=1e-7)
+        for _ in range(2):
+            optimizer.zero_grad(set_to_none=True)
+            prediction=policy.transition_parameters(context,trace['chain'][:,19],19)['mean']
+            prediction.square().mean().backward();optimizer.step()
+        with torch.no_grad():
+            torch.testing.assert_close(policy.transition_parameters(context,trace['chain'][:,0],0)['mean'],early,atol=0,rtol=0)
+        for key,value in policy.frozen_policy.actor.state_dict().items():torch.testing.assert_close(value,before[key],atol=0,rtol=0)
+        assert all(p.grad is None for p in policy.frozen_policy.actor.parameters())
+        result['frozen_prefix_nonempty_adam_checked']=True
     return result
 
 
@@ -153,6 +171,7 @@ def main():
     parser.add_argument('--linear-execution',default='native_gemm')
     parser.add_argument('--chains',type=int,default=8)
     parser.add_argument('--frames',type=int,choices=[60,120],default=60)
+    parser.add_argument('--frozen-prefix-steps',type=int,choices=[0,16],default=0)
     args=parser.parse_args();rank=int(os.environ['RANK']);device=torch.device('cuda:'+os.environ['LOCAL_RANK'])
     torch.cuda.set_device(device);torch.set_num_threads(4);torch.manual_seed(42)
     args.output.mkdir(parents=True,exist_ok=True)
@@ -170,7 +189,9 @@ def main():
             context=load_real_conditions(actor,config,device,args.chains,args.frames)
             if args.phase=='critic':result=critic_checks(actor,context)
             else:
-                policy=DenseDiffusionPolicy(actor,std_schedule=[.001]*16+[.02,.025,.03,.03],
+                from gem.closedloop.dppo.frozen_prefix import FrozenPrefixPolicy
+                cls=FrozenPrefixPolicy if args.frozen_prefix_steps else DenseDiffusionPolicy
+                policy=cls(actor,std_schedule=[.001]*16+[.08,.1,.12,.12],
                     precision=args.precision,attention=args.attention,compile_denoiser=args.compile,
                     linear_execution=args.linear_execution,generation_frames=args.frames)
                 actual_lengths=set()
@@ -180,6 +201,7 @@ def main():
                 if actual_lengths!={args.frames}:raise AssertionError('Transformer computed a different horizon')
                 result['actual_Transformer_lengths']=sorted(actual_lengths)
                 result['pretrained_maximum_frames']=actor.denoiser.max_len
+                result['kernel']=policy.kernel_config
             record['source_global_step']=loading['source_global_step']
         record.update(result)
     except BaseException as error:

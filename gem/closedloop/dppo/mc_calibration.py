@@ -135,7 +135,7 @@ def calibrate_critic(c, label, *, fit, fit_if_ev_below=None):
     periodic_refit=False
     if not fit and fit_if_ev_below is not None:
         periodic_refit=fit=before['explained_variance'] is None or before['explained_variance']<fit_if_ev_below
-    report=dict(before=before,candidates=[],behavior_version=c.state['policy_version'],fit=fit,
+    report=dict(before=before,after=before,candidates=[],behavior_version=c.state['policy_version'],fit=fit,
         refit_threshold=fit_if_ev_below,periodic_refit=periodic_refit)
     if fit:
         training=collect_complete_bank(c,label+'_train','train',samples_per_source=cfg['samples_per_source'],seeds=cfg['training_seeds'])
@@ -174,13 +174,14 @@ def calibrate_critic(c, label, *, fit, fit_if_ev_below=None):
         else:
             c.critic.load_state_dict(initial);c.critic_optimizer.load_state_dict(optimizer)
         report['refit_accepted']=accepted
-        report.update(selected_mc_ratio=best['mc_ratio'],after=best['validation'],
+        report.update(selected_mc_ratio=best['mc_ratio'] if accepted else None,
+            candidate_after=best['validation'],after=best['validation'] if accepted else before,
             attempted_critic_steps=sum(r['training']['optimizer_steps'] for r in report['candidates']))
-        report['relative_validation_mse_reduction']=1-best['validation']['mse']/max(before['mse'],1e-12)
+        report['relative_validation_mse_reduction']=1-report['after']['mse']/max(before['mse'],1e-12)
         gate=cfg.get('quality_gate',{})
         report['quality_gate_passed']=(report['relative_validation_mse_reduction']>=gate.get('minimum_relative_mse_reduction',0.)
-            and best['validation']['explained_variance'] is not None
-            and best['validation']['explained_variance']>=gate.get('minimum_explained_variance',0.))
+            and report['after']['explained_variance'] is not None
+            and report['after']['explained_variance']>=gate.get('minimum_explained_variance',0.))
         training.episodes.clear();validation.episodes.clear()
     report['wall_seconds']=max(c.distributed.all_gather_object(time.perf_counter()-started))
     root_call(c.distributed,lambda:atomic_json(c.session/'mc_calibration'/f'{label}.json',report))

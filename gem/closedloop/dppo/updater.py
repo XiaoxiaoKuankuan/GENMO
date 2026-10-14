@@ -194,6 +194,10 @@ def final_kl(policy,rows,cache,manifest,*,distributed,microbatch=256,clip=.05,ob
         conditions.validate_inputs()
     full=distributed.gather_rows(records.reshape(len(local),20*columns),[p for p,_ in owned],len(selected)).reshape(-1,20,columns)
     joint,coordinate,ratio,logratio,shift=[full[:,:,i] for i in range(5)]
+    frozen_steps=getattr(policy,'frozen_prefix_steps',0)
+    frozen_max=float(coordinate[:,:frozen_steps].max()) if frozen_steps else None
+    if frozen_steps and (not math.isfinite(frozen_max) or frozen_max>1e-12):
+        raise RuntimeError('Frozen prefix changed during Actor optimization or numerical replay')
     def quantile(x):return dict(mean=float(x.mean()),p95=float(torch.quantile(x.flatten(),.95)),max=float(x.max()))
     step_reports=[]
     for s in range(20):
@@ -205,6 +209,7 @@ def final_kl(policy,rows,cache,manifest,*,distributed,microbatch=256,clip=.05,ob
         joint_kl=quantile(joint),coordinate_kl=quantile(coordinate),chain_joint_kl=quantile(joint.sum(1)),
         maximum_step_mean_coordinate_kl=float(coordinate.mean(0).max()),
         per_denoising_step=step_reports,covered_chains=len(selected),covered_internal_transitions=len(selected)*20,
+        frozen_prefix=dict(steps=frozen_steps,maximum_coordinate_kl=frozen_max,checked=bool(frozen_steps)),
         terminal_two_step_joint_kl_fraction=float(joint[:,-2:].sum()/joint.sum()) if joint.sum()>0 else None,
         joint_log_ratio_range=[float(logratio.min()),float(logratio.max())],
         effective_mean_change=dict(mean_rms=float(shift.mean()),max_rms=float(shift.max()),

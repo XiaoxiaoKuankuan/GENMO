@@ -36,6 +36,7 @@ def settings_from_kernel(kernel):
     execution=kernel['numerical_execution']
     settings=dict(generation_frames=kernel['generation_horizon_frames'],denoising_steps=kernel['steps'],
         eta=kernel['eta'],guidance_scale=kernel['guidance_scale'],std_schedule=kernel['effective_std_floors'])
+    if kernel.get('frozen_prefix'):settings['frozen_prefix_steps']=kernel['frozen_prefix']['steps']
     precision=dict(mode=execution['precision'],linear_execution=execution['linear'],
         attention=execution['attention'],compile=execution.get('compiler') is not None,
         precise_output=execution['final_projection']=='float64_local',
@@ -63,6 +64,7 @@ class InferenceActor:
         self.source_checkpoint=payload.get('source_checkpoint',dict(path=str(self.path),sha256=self.sha,
             schema=payload.get('schema',payload.get('checkpoint_version')),
             iteration=payload.get('state',{}).get('iteration'),stage1_step=payload.get('global_step')))
+        frozen_actor=None
         if not is_stage1:
             identity=payload.get('identity')
             if not isinstance(identity,dict) or 'kernel' not in identity or 'actor' not in payload:
@@ -74,6 +76,7 @@ class InferenceActor:
                 expected=identity['assets'].get(key)
                 if expected is None or file_sha(paths[local])!=expected:
                     raise ValueError('Stage2绑定资产不一致: '+key)
+            if identity['kernel'].get('frozen_prefix'):frozen_actor=copy.deepcopy(self.actor)
             self.actor.load_state_dict(payload['actor'],strict=True)
             self.source_identity=identity;self.source_kernel=identity['kernel']
             sampling,precision=settings_from_kernel(self.source_kernel)
@@ -83,7 +86,7 @@ class InferenceActor:
         if sampling['generation_frames']!=config['generation_frames']:
             raise ValueError('Actor行为Horizon与MuJoCo参考Horizon不同，不能静默覆盖')
         self.actor.eval().requires_grad_(False)
-        self.policy=build_policy(self.actor,sampling,precision)
+        self.policy=build_policy(self.actor,sampling,precision,frozen_actor=frozen_actor)
         if self.source_kernel:
             old=copy.deepcopy(self.source_kernel);new=copy.deepcopy(self.policy.kernel_config)
             # 跨机器Torch版本可能不同：记录新行为身份并重新标定，不声称旧核逐位等价。
