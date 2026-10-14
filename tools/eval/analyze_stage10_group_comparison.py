@@ -227,8 +227,13 @@ def analyze(root):
                 row['motion_diagnostic'] = episode['motion_diagnostic']
                 row['generated_reference_diagnostic'] = episode['generated_reference_diagnostic']
                 row['critic'] = critic_statistics(a['value_prediction'],a['mc_return'])
+                row['initial_value_prediction']=float(a['value_prediction'][0])
+                row['initial_mc_return']=float(a['mc_return'][0])
                 row['raw_error_means'] = {key:float(np.mean([c['raw_errors'][key] for c in controls]))
                     for key in controls[0]['raw_errors'] if key!='control_tick'}
+                row['last_5s_raw_error_means'] = {key:float(np.mean([c['raw_errors'][key] for c in controls[-250:]]))
+                    for key in controls[0]['raw_errors'] if key!='control_tick'}
+                row['last_control_raw_errors']=controls[-1]['raw_errors']
                 row['prefix_range'] = [int(a['prefix_frames'].min()),int(a['prefix_frames'].max())]
                 episodes.append(row)
                 for j,name in enumerate(meta['gmt_joint_names']):

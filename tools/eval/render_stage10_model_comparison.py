@@ -40,6 +40,7 @@ def main():
     parser.add_argument('--kinematics',type=Path,required=True)
     parser.add_argument('--audio',type=Path,required=True)
     parser.add_argument('--output',type=Path,required=True)
+    parser.add_argument('--analysis',type=Path,help='正式视频用严格分析结果绑定模型指纹和轨迹SHA；短渲染联调可省略')
     parser.add_argument('--panel-width',type=int,default=640)
     parser.add_argument('--panel-height',type=int,default=480)
     parser.add_argument('--font',type=Path,default=Path('/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc'))
@@ -49,6 +50,15 @@ def main():
     metadata=[json.loads(p.read_text()) for p in args.trajectories]
     if len({m['task_id'] for m in metadata})!=1 or any(m['task']!=metadata[0]['task'] for m in metadata):
         raise ValueError('Three trajectories must use the identical task, music and seed')
+    model_identities=None
+    if args.analysis:
+        audit=json.loads(args.analysis.read_text())
+        if audit['status']!='passed':raise ValueError('Strict comparison analysis has not passed')
+        for name,m in zip(('stage1','iteration147','current'),metadata):
+            rows=[e for e in audit['episodes'] if e['model']==name and e['task_id']==m['task_id']]
+            if len(rows)!=1 or rows[0]['trajectory_sha256']!=m['sha256']:
+                raise ValueError('Video model order or trajectory differs from strict analysis')
+        model_identities=audit['models']
     kin=json.loads(args.kinematics.read_text())
     if sha(args.mjcf)!=kin['source_mjcf_sha256']:raise ValueError('Rendering MJCF differs from verified kinematics')
     arrays=[]
@@ -125,6 +135,7 @@ def main():
         raise
     finally:renderer.close()
     manifest=dict(schema='genmo.stage10.three_model_mujoco_replay.v1',task=task,labels=args.labels,
+        model_identities=model_identities,analysis_sha256=sha(args.analysis) if args.analysis else None,
         trajectory_metadata=[dict(path=str(p),sha256=sha(p),npz_sha256=m['sha256']) for p,m in zip(args.trajectories,metadata)],
         video_sha256=sha(output),fps=50,frames=frames,duration_seconds=frames/50,
         panel_duration_seconds=[len(a['tick'])/50 for a in arrays],audio_sha256=audio_sha,audio_start_seconds=.02,
