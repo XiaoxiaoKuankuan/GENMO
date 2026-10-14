@@ -66,6 +66,7 @@ def export_preheat(checkpoint, report, output):
     payload = torch.load(checkpoint, map_location='cpu', weights_only=False, mmap=True)
     validation = json.loads(report.read_text())
     state, identity = payload['state'], payload['identity']
+    behavior_sources=_bound_behavior_sources(payload['config']['paths']['genmo_repo'],identity['source_files'].get('genmo',{}))
     if (payload.get('schema') != SCHEMA or not state.get('mc_preheat_complete')
             or state['actor_updates'] or state['policy_version'] or not validation.get('quality_gate_passed')
             or identity['actor_initialization']['kind'] != 'source_stage1'):
@@ -75,7 +76,7 @@ def export_preheat(checkpoint, report, output):
         architecture={k:identity['critic'][k] for k in ARCHITECTURE},
         value_targets=_value_targets(identity),
         physical_sources=identity['source_files']['gmt'],
-        behavior_sources=_critical_sources(payload['config']['paths']['genmo_repo']),
+        behavior_sources=behavior_sources,
         critic=payload['critic'], critic_optimizer=payload['critic_optimizer'],
         selected_updates=state['critic_updates'], validation=validation,
         prior_mc_control_steps=state['mc_training_control_steps'],
@@ -96,6 +97,15 @@ def export_preheat(checkpoint, report, output):
     result = dict(path=str(output.resolve()), sha256=file_sha256(output), source=record['source'])
     atomic_json(output.with_suffix(output.suffix+'.json'), result)
     return result
+
+
+def _bound_behavior_sources(root, checkpoint_sources):
+    """导出只能签名产生该checkpoint的实际源码，禁止更新仓库后给旧预热补盖新指纹。"""
+    signatures=_critical_sources(root)
+    for name in signatures:
+        if checkpoint_sources.get(name)!=file_sha256(Path(root)/name):
+            raise ValueError('Preheat source changed since checkpoint: '+name)
+    return signatures
 
 
 def initialize_critic(artifact, *, identity, actor, critic, optimizer, genmo_repo, quality_gate):

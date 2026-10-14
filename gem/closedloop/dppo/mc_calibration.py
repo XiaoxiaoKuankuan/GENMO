@@ -33,6 +33,15 @@ class ValueConditionCache:
         return torch.tensor([r.metadata[key] for r in rows],device=self.device,dtype=torch.float32)
 
 
+def mc_execution_counts(used,world_execution=None):
+    """学习时钟只累计真实GMT控制；退役slot占用的PhysX工作量仍完整进入资源账本。"""
+    active=used['control_steps'] if world_execution is None else world_execution['actual_GMT_controls']
+    if (used['physics_steps']!=4*used['control_steps'] or not 0<=active<=used['control_steps']
+            or world_execution is not None and world_execution['allocated_physics_steps']!=used['physics_steps']):
+        raise ValueError('Complete MC active/allocated physical counts disagree')
+    return [active,4*active,used['physics_steps']]
+
+
 def collect_complete_bank(c, label, split, *, samples_per_source, seeds):
     from .vector_evaluation import isolated_vector_evaluation
     actor_before=_model_fingerprint(c.actor);signature=c.policy._parameter_signature()
@@ -94,16 +103,22 @@ def collect_complete_bank(c, label, split, *, samples_per_source, seeds):
         if _model_fingerprint(c.actor)!=actor_before:raise RuntimeError('MC evaluation changed Actor weights')
         local_used=prepaid.state_dict()['used']
         c.state['budget']=finish_lease(c.distributed,c.budget,prepaid,lease,credits)
-        consumed=c.distributed.sum_tensor(torch.tensor([local_used['control_steps'],local_used['physics_steps']],
+        execution_counts=mc_execution_counts(local_used,
+            None if driver is None or not shards[c.distributed.rank]['tasks'] else driver.execution_summary)
+        consumed=c.distributed.sum_tensor(torch.tensor(execution_counts,
             device=c.distributed.device,dtype=torch.int64)).cpu().tolist()
         field='mc_training' if split=='train' else 'mc_validation'
         c.state[field+'_control_steps']=c.state.get(field+'_control_steps',0)+consumed[0]
         c.state[field+'_physics_steps']=c.state.get(field+'_physics_steps',0)+consumed[1]
+        c.state[field+'_allocated_physics_steps']=c.state.get(field+'_allocated_physics_steps',0)+consumed[2]
+        c.state[field+'_inactive_physics_steps']=c.state.get(field+'_inactive_physics_steps',0)+consumed[2]-consumed[1]
         if split=='train':
             c.state['training_control_steps']+=consumed[0]
             c.state['training_physics_steps']+=consumed[1]
         bank.training_data(policy_version=c.state['policy_version'],kernel=c.policy.kernel_config)
         bank_record=dict(schema='genmo.complete_episode.value_dataset.v1',report=bank.report(),
+            execution_work=dict(actual_GMT_controls=execution_counts[0],active_physics_steps=execution_counts[1],
+                allocated_physics_steps=execution_counts[2],inactive_physics_steps=execution_counts[2]-execution_counts[1]),
             actor_fingerprint=actor_before,policy_version=c.state['policy_version'],kernel=c.policy.kernel_config,
             reward_configuration=c.stage['reward'],plan=plan,
             episodes=[dict(task=e['task'],end_reason=e['end_reason'],control_steps=e['control_steps'],

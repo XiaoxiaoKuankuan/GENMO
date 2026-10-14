@@ -82,3 +82,25 @@ def test_preheat_resume_builds_initial_reference_and_never_invents_it_after_acto
     args.critic_preheat_only=True;assert not _requires_initial_evaluation(args,state,False)
     args.critic_preheat_only=False;state['actor_updates']=1
     with pytest.raises(ValueError,match='cannot invent'):_requires_initial_evaluation(args,state,False)
+
+
+def test_export_cannot_stamp_current_source_on_an_older_checkpoint(tmp_path):
+    from gem.closedloop.dppo.critic_preheat import _bound_behavior_sources
+    fixture(tmp_path)
+    signatures=_critical_sources(tmp_path)
+    recorded={name:file_sha256(tmp_path/name) for name in signatures}
+    assert _bound_behavior_sources(tmp_path,recorded)==signatures
+    (tmp_path/'gem/closedloop/actor.py').write_text('value = 2\n')
+    with pytest.raises(ValueError,match='source changed since checkpoint'):
+        _bound_behavior_sources(tmp_path,recorded)
+
+
+def test_mc_real_interaction_clock_excludes_retired_slot_physics_but_budget_keeps_it():
+    from gem.closedloop.dppo.mc_calibration import mc_execution_counts
+    assert mc_execution_counts({'control_steps':100,'physics_steps':400},
+        {'actual_GMT_controls':70,'allocated_physics_steps':400})==[70,280,400]
+    assert mc_execution_counts({'control_steps':0,'physics_steps':0})==[0,0,0]
+    assert mc_execution_counts({'control_steps':70,'physics_steps':280})==[70,280,280]
+    with pytest.raises(ValueError,match='counts disagree'):
+        mc_execution_counts({'control_steps':100,'physics_steps':400},
+            {'actual_GMT_controls':101,'allocated_physics_steps':400})
