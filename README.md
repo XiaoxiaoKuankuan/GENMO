@@ -10,9 +10,14 @@ Stage 2 的 Frozen GMT、动力学、Critic / DPPO 不由本页的离线入口�
 [`scripts/train_stage10_8gpu_server1.sh`](scripts/train_stage10_8gpu_server1.sh)
 启动，默认配置是 [`stage10_server1.yaml`](configs/closedloop/stage10_server1.yaml)。
 它使用 s595000、冻结 GMT 140500、同进程八卡 Isaac、K8 DPPO＋BC 和预训练条件 Critic。
-当前入口、运行边界、历史验收结论和后续开发约定见
-[第二阶段当前基线](docs/closedloop/stage10_current_baseline.md)。后续直接替换本分支实现，
+当前参数、运行边界、启动与恢复验收见
+[第二阶段正式训练说明](docs/closedloop/stage10_iteration_training.rst)。后续直接替换本分支实现，
 不另建版本分支；已撤下方法通过 Git 历史追溯。
+
+第二阶段只保留 `stage10_server1.yaml` 作为正式配置。旧 Stage9 训练入口、噪声扫描、
+长预热和 120 帧实验配置，以及对应历史工作树、模型、日志与测试产物已清理。
+当前 60 帧基线的训练目录和恢复依赖保持完整；旧实现需要查阅时使用 Git 历史，
+不继续在工作目录保存并行副本。
 
 ## 当前代码与契约
 

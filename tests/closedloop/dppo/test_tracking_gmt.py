@@ -1,4 +1,4 @@
-"""Stage9 Tracking 与冻结 GMT motion-tracking 诊断契约的 CPU 回归。
+"""当前第二阶段 Tracking 与冻结 GMT motion-tracking 诊断契约的 CPU 回归。
 
 本文件检查六项平方误差到 exp(-error/std²) 的解析映射、归一化混合权重、默认关闭
 但可显式启用的关节速度项，以及 body/joint 名称、索引、有限数组和同 tick 证据。
@@ -46,12 +46,9 @@ def test_default_tracking_parameters_preserve_outer_weight_and_gmt_proportions()
     assert set(config["scales"]) == {"root_height_m", "non_yaw_rad", "slide_m_s"}
 
 
-@pytest.mark.parametrize("filename", ["stage9_dppo_smoke.yaml", "stage9_dppo_server1.yaml",
-                                       "stage10_server1.yaml", "stage10_long_episode_server1.yaml"])
-def test_training_configurations_share_the_same_explicit_tracking_objective(filename):
-    path = Path(__file__).resolve().parents[3] / "configs" / "closedloop" / filename
-    stage = "stage10" if filename.startswith("stage10_") else "stage9"
-    config = yaml.safe_load(path.read_text())[stage]["reward"]
+def test_current_training_configuration_uses_explicit_tracking_objective():
+    path = Path(__file__).resolve().parents[3] / "configs" / "closedloop" / "stage10_server1.yaml"
+    config = yaml.safe_load(path.read_text())["stage10"]["reward"]
     assert config["tracking"] == DEFAULT_CONFIG["tracking"]
     assert resolve_reward_config(config)["track_weight"] == 2.5
 
