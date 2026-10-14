@@ -91,3 +91,47 @@ def test_independent_auditor_reconstructs_sampling_not_just_total_count(count):
     with pytest.raises((ValueError,AssertionError)):_step_sampling(bad,indices,contract)
     if count==20:
         assert _step_sampling(dict(internal_transitions=60),indices,dict(denoising_steps=20))==20
+
+
+def test_terminal_steps_strategy_is_deterministic_and_marks_objective_scope():
+    assert chain_steps(None,5,20,4,'last')==[16,17,18,19]
+    assert chain_steps(7,9,20,4,'last')==chain_steps(11,2,20,4,'last')
+    record=plan_record(None,[0,1,2],20,4,'last')
+    assert record['contract']=='dppo.terminal_steps_objective_only.v1'
+    assert record['inclusion_probability']==[0.]*16+[1.]*4 and record['step_histogram'][16:]==[3]*4
+    assert record['objective_scope']=='terminal_K_steps_mean_not_full20_estimate'
+    with pytest.raises(ValueError,match='Unknown'):chain_steps(None,0,20,4,'tail')
+
+
+def test_terminal_strategy_actor_update_uses_only_last_steps(monkeypatch, tmp_path):
+    import torch.distributed as dist
+    from gem.closedloop.dppo import updater
+    from gem.closedloop.dppo.collectives import DistributedCollectives
+    from gem.closedloop.dppo.gradient_merge import BCGradientController
+    from gem.closedloop.dppo.tensor_cache import RolloutTensorCache
+
+    class NoConditionEncoder:
+        bank = None
+        def __init__(self, *args): pass
+        def prime(self, rows): pass
+        def backward(self): pass
+
+    monkeypatch.setattr(updater, 'ConditionGraphCache', NoConditionEncoder)
+    policy = TwentySteps(); policy.precision = 'native_fp32'
+    data = samples(policy)
+    targets = dict(advantages=torch.tensor([1., -.6]))
+    manifest = [dict(owner_rank=0, local_index=i, valid=True, has_free=True) for i in range(2)]
+    dist.init_process_group('gloo', init_method=(tmp_path / 'one_rank').as_uri(), rank=0, world_size=1)
+    cache = RolloutTensorCache(data, targets, 'cpu')
+    try:
+        report = updater.actor_update(policy, torch.optim.AdamW(policy.actor.parameters(), lr=1e-5),
+            data, targets, cache, manifest, BCGradientController(initial=0., minimum=0., mode='fixed'),
+            distributed=DistributedCollectives(0, 1), anchor=Anchor(), generator=torch.Generator().manual_seed(3),
+            sampled_steps=4, minibatch_chains=2, microbatch=5, soft_kl=None, step_strategy='last')
+    finally:
+        cache.close()
+        dist.destroy_process_group()
+    for step in report['steps']:
+        assert [s['step'] for s in step['per_denoising_step'] if s['visits']] == [16, 17, 18, 19]
+        assert step['denoising_sampling']['strategy'] == 'last'
+    assert report['internal_sample_visits'] == 2 * 4 * 2

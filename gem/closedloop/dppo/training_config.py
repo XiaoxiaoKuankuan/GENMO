@@ -71,8 +71,11 @@ def configuration(path,*,genmo_repo=None,gmt_repo=None):
         if type(v)is not int or v<1:raise ValueError(f'{k} must be positive integer')
     if world!=8 or s['distributed']['backend']!='nccl' or s['distributed']['collection']!='all_ranks':
         raise ValueError('当前 production requires eight synchronous GPU ranks')
-    if t['denoising_steps']!=20 or t['ppo_steps_per_chain'] not in (8,20) or t['ppo_epochs']!=2:
-        raise ValueError('Full20 behavior and explicit Uniform8/Full20 two-epoch PPO required')
+    strategy=t.get('ppo_step_strategy','uniform')
+    steps_ok=(strategy=='uniform' and t['ppo_steps_per_chain'] in (8,20)) or (
+        strategy=='last' and type(t['ppo_steps_per_chain']) is int and 1<=t['ppo_steps_per_chain']<=20)
+    if t['denoising_steps']!=20 or not steps_ok or t['ppo_epochs']!=2:
+        raise ValueError('Full20 behavior and explicit Uniform8/Full20 or terminal-K two-epoch PPO required')
     if len(t['std_schedule'])!=20 or any(not math.isfinite(x) or x<=0 for x in t['std_schedule']):
         raise ValueError('Actual noise schedule must define twenty positive finite floors')
     if c['runtime']['timing_contract']!='modeled_deployment.v3' or c['timing']['control_ticks']!=12 or c['timing']['physics_ticks']!=3:

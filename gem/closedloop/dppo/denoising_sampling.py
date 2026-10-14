@@ -9,6 +9,10 @@ loss之和除以链×K。分层K8固定保留18/19，从0至17均匀选6，对�
 生成器产生一个种子并广播，再按全局链身份派生独立CPU生成器，分片方式不影响
 选择。保存种子、选择SHA和步号直方图可重建每个样本。抽样KL只是软停止估计；
 最终硬KL必须仍在所有真实链、全部T步上计算，不由本模块改变或缓存拼接。
+
+末端K步模式（last）只对最后K个低噪声去噪步计算PPO目标，不消费随机数；它是不同的
+优化目标（末端K步平均），不是全20步目标的无偏估计。早期步仍共享同一网络，其间接
+均值变化由全20步硬KL约束。
 """
 from __future__ import annotations
 import hashlib
@@ -17,11 +21,12 @@ import torch
 
 CONTRACT = 'dppo.uniform_denoising_without_replacement.v1'
 STRATIFIED_CONTRACT = 'dppo.stratified_terminal_two_plus_uniform_six.v1'
+LAST_CONTRACT = 'dppo.terminal_steps_objective_only.v1'
 
 
 def validate_sampling(total_steps, sampled_steps, strategy='uniform'):
     count = validate_step_count(total_steps, sampled_steps)
-    if strategy not in ('uniform', 'stratified8'):
+    if strategy not in ('uniform', 'stratified8', 'last'):
         raise ValueError('Unknown denoising sampling strategy')
     if strategy == 'stratified8' and (total_steps != 20 or count != 8):
         raise ValueError('stratified8 requires exactly 20 full steps and 8 selected steps')
@@ -39,6 +44,8 @@ def chain_steps(seed, global_index, total_steps, sampled_steps, strategy='unifor
     count = validate_sampling(total_steps, sampled_steps, strategy)
     if count == total_steps:
         return list(range(total_steps))
+    if strategy == 'last':
+        return list(range(total_steps-count, total_steps))
     if type(seed) is not int or seed < 0 or type(global_index) is not int or global_index < 0:
         raise ValueError('Sampled denoising steps require a nonnegative seed and global chain identity')
     contract = STRATIFIED_CONTRACT if strategy == 'stratified8' else CONTRACT
@@ -63,6 +70,12 @@ def plan_record(seed, global_indices, total_steps, sampled_steps, strategy='unif
         step_histogram=histogram, full_20_step_hard_kl_required=True,
         pre_step_kl_scope='all_minibatch_steps' if count==total_steps else 'uniform_sample_estimate_not_full_KL',
         loss_normalization='sum_selected_objectives_divided_by_global_chains_times_selected_steps')
+    if strategy == 'last':
+        result.update(contract=LAST_CONTRACT,strategy=strategy,seed=None,
+            inclusion_probability=[0.]*(total_steps-count)+[1.]*count,inverse_probability_weight=None,
+            pre_step_kl_scope='terminal_selected_steps_only_not_full_KL',
+            objective_scope='terminal_K_steps_mean_not_full20_estimate',
+            loss_normalization='sum_terminal_step_objectives_divided_by_global_chains_times_selected_steps')
     if strategy == 'stratified8':
         result.update(contract=STRATIFIED_CONTRACT,strategy=strategy,
             inclusion_probability=[1/3]*18+[1.,1.],inverse_probability_weight=[3.]*18+[1.,1.],

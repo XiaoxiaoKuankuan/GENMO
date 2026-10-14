@@ -482,7 +482,7 @@ def run(cargs,config,distributed):
                     gamma_denoising=c.settings['gamma_denoising'],soft_kl=c.settings['kl_soft_stop_coordinate'],
                     kl_reduction=c.stage['kl']['reduction'],objective_reduction=c.settings['objective_logprob_reduction'],
                     grad_clip_norm=c.settings['grad_clip_norm'],reserve_attempt=reserve,bc_samples_per_rollout=c.settings['bc_samples_per_rollout'],
-                    snr=c.settings.get('gradient_snr_diagnostic',False))
+                    snr=c.settings.get('gradient_snr_diagnostic',False),step_strategy=c.settings.get('ppo_step_strategy','uniform'))
                 sketch=actor.pop('_ppo_gradient_sketch',None)
                 if actor.get('gradient_snr') is not None:
                     # 相邻两轮全局PPO梯度抽样的方向余弦；抽样只驻留内存，不进入checkpoint或记录。

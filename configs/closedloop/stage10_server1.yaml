@@ -256,6 +256,8 @@ stage10:
     - 0.03
     kl_microbatch: 128
     ppo_steps_per_chain: 8
+    # uniform: 每链每epoch从20步无放回均匀抽ppo_steps_per_chain步；last: 只对末端K个去噪步计算PPO目标。
+    ppo_step_strategy: uniform
     kl_soft_stop_coordinate: 0.001
     bc_samples_per_rollout: 512
     # 学习信号诊断：none为正常PPO，shuffle_global为全局优势置换负对照；SNR只统计两半rank与相邻轮梯度方向。

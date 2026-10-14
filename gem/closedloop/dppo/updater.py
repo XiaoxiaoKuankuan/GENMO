@@ -41,9 +41,10 @@ def actor_update(policy,optimizer,rows,targets,cache,manifest,controller,*,distr
                     generator,ppo_epochs=2,minibatch_chains=1024,microbatch=128,sampled_steps=8,
                     clip=.05,gamma_denoising=.99,soft_kl=.002,kl_reduction='free_coordinate_mean',
                     objective_reduction='free_coordinate_mean',grad_clip_norm=1.,reserve_attempt=None,
-                    gradient_observer=None,step_observer=None,bc_samples_per_rollout=None,snr=False):
-    if sampled_steps not in (8,20) or policy.steps!=20 or ppo_epochs<1 or minibatch_chains<1 or microbatch<1:
-        raise ValueError('当前 requires Full20 behavior and explicit Uniform8/Full20 optimization')
+                    gradient_observer=None,step_observer=None,bc_samples_per_rollout=None,snr=False,step_strategy='uniform'):
+    allowed=(step_strategy=='uniform' and sampled_steps in (8,20)) or (step_strategy=='last' and type(sampled_steps) is int and 1<=sampled_steps<=20)
+    if not allowed or policy.steps!=20 or ppo_epochs<1 or minibatch_chains<1 or microbatch<1:
+        raise ValueError('当前 requires Full20 behavior and explicit Uniform8/Full20 or terminal-K optimization')
     if kl_reduction not in ('joint_sum','free_coordinate_mean'):raise ValueError('Unknown KL control units')
     selected=_eligible(manifest);reports=[];orders=[];stop_reason=None
     if not selected:raise ValueError('No free valid behavior chain remains for PPO')
@@ -60,7 +61,7 @@ def actor_update(policy,optimizer,rows,targets,cache,manifest,controller,*,distr
             owned=_owned(indices,manifest,distributed)
             seed=(int(torch.randint(0,2**63-1,(1,),generator=generator)) if distributed.rank==0 else None)
             seed=distributed.broadcast_object(seed)
-            pairs=[(i,s) for position,i in owned for s in chain_steps(seed,indices[position],20,sampled_steps)]
+            pairs=[(i,s) for position,i in owned for s in chain_steps(seed,indices[position],20,sampled_steps,step_strategy)]
             optimizer.zero_grad(set_to_none=True);actor.eval()
             summary=torch.zeros(7,device=device,dtype=torch.float64)
             step_metrics=torch.zeros(20,6,device=device,dtype=torch.float64)
@@ -123,7 +124,7 @@ def actor_update(policy,optimizer,rows,targets,cache,manifest,controller,*,distr
                     mean_coordinate_kl=coordinate/n if n else None,mean_proxy_ratio=ratio/n if n else None,
                     clip_fraction=clipped/n if n else None,objective_clip_fraction=active/n if n else None))
             reports.append(dict(epoch=epoch,optimizer_step=len(reports)+1,global_chain_indices=indices,
-                sampled_steps=sampled_steps,denoising_sampling=plan_record(seed,indices,20,sampled_steps),
+                sampled_steps=sampled_steps,denoising_sampling=plan_record(seed,indices,20,sampled_steps,step_strategy),
                 internal_sample_visits=int(visits),full_objective_transitions=len(indices)*20,
                 ppo_loss=values[0],mean_proxy_ratio=values[1]/visits,clip_fraction=values[2]/visits,
                 objective_clip_fraction=values[3]/visits,pre_step_mean_joint_kl=values[4]/visits,
