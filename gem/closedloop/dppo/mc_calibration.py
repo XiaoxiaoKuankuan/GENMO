@@ -42,14 +42,37 @@ def mc_execution_counts(used,world_execution=None):
     return [active,4*active,used['physics_steps']]
 
 
+def complete_mc_plan(catalog, split, *, samples_per_source, seeds, selection_seed):
+    """训练bank按独立音乐选最长配对片段，验证bank保留固定计划以便纵向比较。"""
+    selected=catalog
+    if split=='train':
+        from gem.closedloop.evaluation_music import select_train_music
+        selected=copy.copy(catalog)
+        selected.samples={'train':{source:[] for source in catalog.samples['train']}}
+        for sample in select_train_music(catalog.data_root,sorted(catalog.samples['train']),
+                samples_per_source,seed=selection_seed):
+            source=sample['dataset'];identifier=sample['row']['sample_id']
+            audited=next((s for s in catalog.samples['train'][source] if s['row']['sample_id']==identifier),None)
+            if audited is None or audited['row']!=sample['row'] or audited['group_id']!=sample['group_id']:
+                raise ValueError('MC unique music selection differs from audited training catalog')
+            selected.samples['train'][source].append(audited)
+    plan=build_evaluation_tasks(selected,split=split,eval_count=samples_per_source*len(selected.samples[split]),
+        balanced_samples_per_source=samples_per_source,seeds=seeds,selection_seed=selection_seed,
+        episode_seconds=None,critic_mc=split=='train')
+    if split=='train':
+        plan['selection_unit']='unique_global_music_group_and_audio_longest_paired_sample'
+        plan['selection_rule']='seeded_group_longest_unique_global_group_and_audio_sha256'
+        plan['plan_sha256']=_digest({k:v for k,v in plan.items() if k!='plan_sha256'})
+    return plan
+
+
 def collect_complete_bank(c, label, split, *, samples_per_source, seeds):
     from .vector_evaluation import isolated_vector_evaluation
     actor_before=_model_fingerprint(c.actor);signature=c.policy._parameter_signature()
     bank=CompleteEpisodeBank(policy_version=c.state['policy_version'],kernel_identity=c.policy.kernel_config,
         gamma_upper=c.settings['gamma_upper'])
-    plan=root_call(c.distributed,lambda:build_evaluation_tasks(c.catalog,split=split,eval_count=samples_per_source*4,
-        balanced_samples_per_source=samples_per_source,seeds=seeds,selection_seed=c.stage['seed']+419,
-        episode_seconds=None,critic_mc=split=='train'))
+    plan=root_call(c.distributed,lambda:complete_mc_plan(c.catalog,split,
+        samples_per_source=samples_per_source,seeds=seeds,selection_seed=c.stage['seed']+419))
     nseed=len(seeds)
     from .evaluation_world import balanced_rank_tasks
     task_shards=balanced_rank_tasks(plan,c.distributed.world_size)
@@ -164,7 +187,8 @@ def calibrate_critic(c, label, *, fit, fit_if_ev_below=None):
     report=dict(before=before,after=before,candidates=[],behavior_version=c.state['policy_version'],fit=fit,
         refit_threshold=fit_if_ev_below,periodic_refit=periodic_refit)
     if fit:
-        training=collect_complete_bank(c,label+'_train','train',samples_per_source=cfg['samples_per_source'],seeds=cfg['training_seeds'])
+        training=collect_complete_bank(c,label+'_train','train',
+            samples_per_source=cfg.get('training_samples_per_source',cfg['samples_per_source']),seeds=cfg['training_seeds'])
         rows,mc=training.training_data(policy_version=c.state['policy_version'],kernel=c.policy.kernel_config)
         # TD/GAE以同一初始Critic为基准；真实终止没有自举，候选共享固定标签与样本。
         td=[]

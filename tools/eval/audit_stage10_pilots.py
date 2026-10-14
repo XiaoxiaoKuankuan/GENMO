@@ -119,7 +119,7 @@ def episode_metrics(episode, task):
         generated_reference_diagnostic=episode.get('generated_reference_diagnostic'))
 
 
-def export_run(root):
+def export_run(root, *, physical_boundaries=False):
     root = Path(root).resolve(strict=True)
     sessions = sorted((root / 'sessions').glob('*/summary.json'))
     if len(sessions) != 1:
@@ -146,6 +146,18 @@ def export_run(root):
         data = load_json(path)
         tasks = {row['task_id']: row for row in data['plan']['tasks']}
         episodes = [episode_metrics(row, tasks[row['task_id']]) for row in data['episodes']]
+        if physical_boundaries:
+            from tools.compare_stage10_physical import load_physical
+            values,evidence=load_physical(data,extractor=lambda row:joint_boundary_sample(
+                row['reward_primitives']['components']['joint_limit']))
+            for episode in episodes:
+                rows=values[episode['task_id']];count=len(rows['ticks'])
+                if count!=episode['control_steps']:raise ValueError('权威关节边界控制步缺失')
+                episode['joint_boundaries']=dict(available=True,control_samples=count,
+                    **{key if key.endswith('_rad') else key.replace('_any','_control_fraction'):
+                        float(array.max() if key.endswith('_rad') else array.mean())
+                        for key,array in rows.items() if key!='ticks'})
+            result.setdefault('physical_journal_evidence',[]).append(dict(label=artifact['label'],journals=evidence))
         if len(episodes) != len(tasks) or len({r['task_id'] for r in episodes}) != len(tasks):
             raise ValueError('评估任务缺失或重复')
         result['evaluations'].append(dict(label=artifact['label'], iteration=artifact['iteration'],
@@ -360,12 +372,14 @@ def main():
     mode.add_argument('--compare', nargs=2, type=Path, metavar=('P1_JSON','P2_JSON'))
     parser.add_argument('--run-evidence', nargs=2, type=Path, metavar=('P1_EVIDENCE','P2_EVIDENCE'))
     parser.add_argument('--output', type=Path)
+    parser.add_argument('--physical-boundaries',action='store_true',help='只读核验完整权威journal，提取实际与参考软/硬关节边界')
     args = parser.parse_args()
     if args.export_run:
         if args.run_evidence:parser.error('--run-evidence只适用于--compare')
-        json.dump(export_run(args.export_run), sys.stdout, ensure_ascii=False, allow_nan=False)
+        json.dump(export_run(args.export_run,physical_boundaries=args.physical_boundaries), sys.stdout, ensure_ascii=False, allow_nan=False)
         sys.stdout.write('\n')
     else:
+        if args.physical_boundaries:parser.error('--physical-boundaries只适用于--export-run')
         if args.output is None:parser.error('--compare需要--output')
         args.output.mkdir(parents=True,exist_ok=True)
         target=args.output/'comparison.json'

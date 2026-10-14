@@ -27,7 +27,7 @@ def fixture(tmp_path):
     identity = {k:{'identity':k} for k in MATCHED}
     identity.update(critic={**{k:k for k in ARCHITECTURE},'complete_mc':{'mix_candidates':[0.,.5,1.]}},
         training={'gamma_upper':.99,'lambda_upper':.95},source_files={'gmt':{'physics.py':'fixed'}})
-    for name in ['actor.py','contracts.py','online_conditions.py','training.py']:
+    for name in ['actor.py','contracts.py','online_conditions.py','training.py','evaluation_music.py']:
         p=tmp_path/'gem/closedloop'/name;p.parent.mkdir(parents=True,exist_ok=True);p.write_text('value = 1\n')
     data=dict(schema=SCHEMA_PREHEAT,actor_fingerprint=_model_fingerprint(actor),
         matched_identity={k:identity[k] for k in MATCHED},architecture={k:identity['critic'][k] for k in ARCHITECTURE},

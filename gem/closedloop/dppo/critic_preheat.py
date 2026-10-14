@@ -40,7 +40,7 @@ def _critical_sources(root):
     root = Path(root)
     files = list((root/'gem/network').rglob('*.py')) + list((root/'gem/robots').rglob('*.py'))
     files += [root/('gem/closedloop/'+n) for n in
-        ('actor.py', 'contracts.py', 'online_conditions.py', 'training.py')]
+        ('actor.py', 'contracts.py', 'online_conditions.py', 'training.py','evaluation_music.py')]
     files += [p for p in (root/'gem/closedloop/dppo').glob('*.py') if p.name in
         ('policy.py', 'dense_policy.py', 'batch_execution.py', 'fixed_tile_linear.py',
          'compensated_gemm.py', 'compiled_forward.py', 'dense_attention.py',

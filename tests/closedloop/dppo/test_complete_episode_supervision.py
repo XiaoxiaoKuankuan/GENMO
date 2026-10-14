@@ -14,6 +14,28 @@ from gem.closedloop.dppo.training_config import configuration
 from gem.closedloop.dppo.returns import compute_gae
 
 
+def test_mc_training_selection_uses_distinct_music_and_audited_longest_sample(tmp_path):
+    import json,hashlib
+    from gem.closedloop.dppo.mc_calibration import complete_mc_plan
+    rows=[]
+    for name,group,frames in [('short','song1',30),('long','song1',90),('second','song2',60)]:
+        rows.append(dict(sample_id=name,num_frames=frames,split='train',fps=30,
+            resplit_provenance=dict(group_id=group),source_audio_sha256=hashlib.sha256(group.encode()).hexdigest()))
+    manifest=tmp_path/'Mine/manifests/train.jsonl';manifest.parent.mkdir(parents=True)
+    manifest.write_text(''.join(json.dumps(r)+'\n' for r in rows))
+    samples=[dict(dataset='Mine',split='train',group_id=r['resplit_provenance']['group_id'],row=r) for r in rows]
+    catalog=SimpleNamespace(data_root=tmp_path,identity={'test':'catalog'},samples={'train':{'Mine':samples}})
+    plan=complete_mc_plan(catalog,'train',samples_per_source=2,seeds=[42,1729],selection_seed=461)
+    assert plan['selected_unique_group_count']==plan['selected_sample_count']==2
+    assert plan['selected_unique_audio_count']==2 and plan['task_count']==4
+    assert {t['sample_id'] for t in plan['tasks']}=={'long','second'}
+    assert plan['critic_mc_supervision'] and plan['episode_seconds'] is None
+    assert len(catalog.samples['train']['Mine'])==3
+    samples[1]['row']=dict(samples[1]['row'],num_frames=91)
+    with pytest.raises(ValueError,match='audited training catalog'):
+        complete_mc_plan(catalog,'train',samples_per_source=2,seeds=[42],selection_seed=461)
+
+
 def row(begin, rewards, *, terminal=False, truncated=False, version=0, event=0.):
     return SimpleNamespace(identity=dict(backend_session_id='b',episode_id='e',policy_version=version),
         context={'causal':torch.tensor([[begin]])},next_context=None,transition_valid=True,

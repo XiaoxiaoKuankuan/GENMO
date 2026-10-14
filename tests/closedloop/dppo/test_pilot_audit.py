@@ -8,6 +8,31 @@ import pytest
 from tools.eval.audit_stage10_pilots import add_launcher_timing, episode_metrics, paired_statistics,joint_boundary_sample
 
 
+@pytest.mark.parametrize('damage',[None,'sha','missing','physics'])
+def test_compact_physical_extractor_keeps_authoritative_journal_guards(tmp_path,damage):
+    import hashlib,sqlite3
+    from gem.closedloop.dppo.journal_codec import encode_binary
+    from tools.compare_stage10_physical import load_physical
+    path=tmp_path/'execution.sqlite'
+    identity=dict(backend_session_id='backend',env_id=0,episode_id='episode')
+    rows=[dict(identity,tick=t,state_valid=True,completed_physics_steps=4,actual=.9) for t in (612,624)]
+    if damage=='missing':rows.pop()
+    if damage=='physics':rows[0]['completed_physics_steps']=3
+    payload=encode_binary(dict(trace=rows));digest=hashlib.sha256(payload).hexdigest()
+    if damage=='sha':digest='0'*64
+    with sqlite3.connect(path) as db:
+        db.execute('CREATE TABLE replies(sha256 TEXT,payload BLOB)')
+        db.execute('INSERT INTO replies VALUES(?,?)',(digest,payload))
+    report=dict(episodes=[dict(task_id='task',decisions=[dict(identity=identity,
+        authoritative_journal_path=str(path),controls=[dict(tick=t) for t in (612,624)])])])
+    if damage:
+        with pytest.raises(ValueError):load_physical(report,extractor=lambda row:dict(boundary=row['actual']))
+    else:
+        result,evidence=load_physical(report,extractor=lambda row:dict(boundary=row['actual']))
+        assert result['task']['boundary'].tolist()==[.9,.9]
+        assert evidence[0]['matched_controls']==2 and evidence[0]['verified_reply_count']==1
+
+
 def test_actual_and_reference_joint_boundaries_are_independent():
     raw=dict(hard_limits_rad=[[-1.,1.]]*21,safe_limits_rad=[[-.9,.9]]*21,numeric_tolerance_rad=1e-6,
         actual_joint_position_rad=[.95]+[0.]*20,consumed_reference_joint_position_rad=[1.01]+[0.]*20)

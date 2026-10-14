@@ -74,6 +74,8 @@ def configuration(path,*,genmo_repo=None,gmt_repo=None):
             or not isinstance(artifact['sha256'],str) or len(artifact['sha256'])!=64):
         raise ValueError('Explicit matching complete-MC Critic initialization artifact required')
     if mc.get('enabled'):
+        count=mc.get('training_samples_per_source',mc['samples_per_source'])
+        if type(count)is not int or count<1:raise ValueError('MC training_samples_per_source must be positive')
         if type(mc['samples_per_source'])is not int or mc['samples_per_source']<1 or type(mc['epochs'])is not int or mc['epochs']<1:
             raise ValueError('Complete MC supervision requires positive real episode count and epochs')
         if not mc['mix_candidates'] or any(not math.isfinite(v) or not 0<=v<=1 for v in mc['mix_candidates']):raise ValueError('Invalid MC/TD mixing candidates')

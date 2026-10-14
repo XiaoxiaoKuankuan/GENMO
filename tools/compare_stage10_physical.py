@@ -78,9 +78,11 @@ def validate_pair(before, after, *, mode):
     return left, right
 
 
-def load_physical(report):
+def load_physical(report, *, extractor=None):
+    """按权威回执定位全部控制步；可提取紧凑指标，仍保留原SHA/完整性/四子步核验。"""
     wanted = defaultdict(dict)
     ordered = {}
+    fields=('qpos','velocity','action','reference') if extractor is None else None
     for episode in report['episodes']:
         keys = []
         for decision in episode['decisions']:
@@ -113,10 +115,12 @@ def load_physical(report):
                         raise ValueError('Repeated authoritative physical control')
                     if not row['state_valid'] or row['completed_physics_steps'] != 4:
                         raise ValueError('Matched control lacks four complete trusted physical substeps')
-                    selected[key] = dict(qpos=np.asarray(row['actual_qpos'], dtype=np.float64).copy(),
+                    selected[key] = extractor(row) if extractor is not None else dict(qpos=np.asarray(row['actual_qpos'], dtype=np.float64).copy(),
                         velocity=np.asarray(row['actual_joint_vel'], dtype=np.float64).copy(),
                         action=np.asarray(row['applied_action'], dtype=np.float64).copy(),
                         reference=np.asarray(row['reference']['joint_pos'], dtype=np.float64).copy())
+                    if fields is None:fields=tuple(selected[key])
+                    if tuple(selected[key])!=tuple(fields):raise ValueError('Physical extractor changed its field schema')
         if before != (path.stat().st_size, path.stat().st_mtime_ns) or any(v is None for v in selected.values()):
             raise ValueError('Missing physical control or evaluation journal changed during reading')
         evidence.append(dict(path=str(path), verified_reply_count=replies, matched_controls=len(selected),
@@ -127,7 +131,7 @@ def load_physical(report):
         if len(ticks) > 1 and not np.all(np.diff(ticks) == 12):
             raise ValueError('Evaluation control timeline has gaps or repeated ticks')
         result[task] = dict(ticks=ticks, **{name: np.array([wanted[path][key][name] for path, key in keys])
-                                          for name in ('qpos', 'velocity', 'action', 'reference')})
+                                          for name in (fields or ())})
     return result, evidence
 
 
@@ -155,7 +159,8 @@ def compare(before, after, *, mode='algorithm'):
         delta = other['reward_sum'] - episode['reward_sum']
         pairs.append(dict(task_id=task, dataset=episode['dataset'], sample_id=episode['sample_id'],
             seed=episode['seed'], reward_delta=delta, new_failure=other['physical_failure'] and not episode['physical_failure']))
-        clusters[episode['dataset']][episode['sample_id']].append(delta)
+        task_record=next(t for t in before['plan']['tasks'] if t['task_id']==task)
+        clusters[episode['dataset']][task_record['sample']['group_id']].append(delta)
         a, b = physical_a[task], physical_b[task]
         n = min(len(a['ticks']), len(b['ticks']))
         unmatched[0] += len(a['ticks']) - n
