@@ -46,6 +46,20 @@ def checked_path(root, relative, expected_sha):
     return path
 
 
+def joint_boundary_sample(component):
+    """从真实控制步的原始关节与限位统计，区分实体与已消费参考，不使用混合罚分代替。"""
+    raw=component['raw'];hard=raw['hard_limits_rad'];safe=raw['safe_limits_rad']
+    tolerance=raw['numeric_tolerance_rad'];result={}
+    for label,key in [('actual','actual_joint_position_rad'),('reference','consumed_reference_joint_position_rad')]:
+        positions=raw[key]
+        if not len(positions)==len(hard)==len(safe)==21:raise ValueError('关节边界证据维度不一致')
+        excess=[max(lo-q,q-hi,0.) for q,(lo,hi) in zip(positions,hard)]
+        result[label+'_hard_any']=any(v>tolerance for v in excess)
+        result[label+'_soft_any']=any(q<lo-tolerance or q>hi+tolerance for q,(lo,hi) in zip(positions,safe))
+        result[label+'_max_hard_excess_rad']=max(excess)
+    return result
+
+
 def episode_metrics(episode, task):
     """真实50Hz奖励已经积分，只求和；活动度用实际dt加权。"""
     for key in ('task_id', 'dataset', 'seed', 'music_start_frame', 'noise_index_start'):
@@ -54,6 +68,7 @@ def episode_metrics(episode, task):
     elapsed = reward = actual = target = gate = 0.
     controls_count = physics = 0
     components = collections.defaultdict(float)
+    boundaries=collections.defaultdict(float);boundary_count=0
     for decision in episode['decisions']:
         controls = decision['controls']
         if len(controls) != decision['executed_control_steps'] or decision['executed_physics_steps'] != 4 * len(controls):
@@ -80,6 +95,10 @@ def episode_metrics(episode, task):
             gate += float(activity['gate']) * dt
             for name, value in control['components'].items():
                 components[name] += float(value['integrated_reward'])
+            if 'raw' in control['components'].get('joint_limit',{}):
+                values=joint_boundary_sample(control['components']['joint_limit']);boundary_count+=1
+                for key,value in values.items():
+                    boundaries[key]=(max(boundaries[key],value) if key.endswith('_rad') else boundaries[key]+float(value))
     if elapsed <= 0 or not math.isclose(reward, episode['reward_sum'], abs_tol=1e-8, rel_tol=1e-9):
         raise ValueError('episode真实奖励/时长不一致')
     sample = task['sample']
@@ -92,6 +111,10 @@ def episode_metrics(episode, task):
         components=dict(components), physical_failure=bool(episode['physical_failure']),
         truncated=bool(episode['truncated']), end_reason=episode['end_reason'],
         control_steps=controls_count, physics_steps=physics,
+        joint_boundaries=(dict(available=True,control_samples=boundary_count,
+            **{key if key.endswith('_rad') else key.replace('_any','_control_fraction'):
+                float(value) if key.endswith('_rad') else value/boundary_count for key,value in boundaries.items()})
+            if boundary_count==controls_count else dict(available=False,control_samples=boundary_count)),
         motion_diagnostic=episode.get('motion_diagnostic'),
         generated_reference_diagnostic=episode.get('generated_reference_diagnostic'))
 

@@ -5,7 +5,16 @@
 """
 import copy
 import pytest
-from tools.eval.audit_stage10_pilots import add_launcher_timing, episode_metrics, paired_statistics
+from tools.eval.audit_stage10_pilots import add_launcher_timing, episode_metrics, paired_statistics,joint_boundary_sample
+
+
+def test_actual_and_reference_joint_boundaries_are_independent():
+    raw=dict(hard_limits_rad=[[-1.,1.]]*21,safe_limits_rad=[[-.9,.9]]*21,numeric_tolerance_rad=1e-6,
+        actual_joint_position_rad=[.95]+[0.]*20,consumed_reference_joint_position_rad=[1.01]+[0.]*20)
+    values=joint_boundary_sample({'raw':raw})
+    assert values['actual_soft_any'] and not values['actual_hard_any']
+    assert values['actual_max_hard_excess_rad']==0.
+    assert values['reference_hard_any'] and values['reference_max_hard_excess_rad']==pytest.approx(.01)
 
 
 def paired_rows(repeats):
