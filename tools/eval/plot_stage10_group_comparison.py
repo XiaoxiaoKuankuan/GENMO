@@ -55,7 +55,7 @@ def plot(data,output):
             ax=axes[row,col];v=[s[m]['source_balanced_means'][key]*scale for m in MODELS]
             ax.bar(LABELS,v,color=COLORS,width=.66)
             for j,value in enumerate(v):
-                label=f'{value:.2f}'
+                label=f'{value:.4f}' if key=='soft_joint_fraction' else f'{value:.3f}' if key!='completed' else f'{value:.2f}'
                 if key=='completed':label+=f"\n{s[MODELS[j]]['overall']['completed_count']}/{s[MODELS[j]]['overall']['episodes']}次"
                 ax.text(j,value,label,ha='center',va='bottom',fontsize=10)
             ax.set_title(f'{split.upper()} · {title}',fontsize=11)
@@ -137,15 +137,16 @@ def plot(data,output):
                 rows=[r for r in data['joint_rows'] if r['split']==split and r['model']==model and r['joint']==name]
                 values.extend([source_mean(rows,k)*100 for k in ('actual_soft_fraction','reference_soft_fraction')])
             matrix.append(values)
-        a=np.array(matrix);im=ax.imshow(a,aspect='auto',vmin=0,vmax=100,cmap='YlOrRd')
+        a=np.array(matrix);im=ax.imshow(a,aspect='auto',vmin=0,vmax=20,cmap='YlOrRd')
         for i in range(len(names)):
-            for j in range(6):ax.text(j,i,f'{a[i,j]:.1f}',ha='center',va='center',fontsize=8,color='white' if a[i,j]>60 else '#222')
+            for j in range(6):ax.text(j,i,f'{a[i,j]:.1f}',ha='center',va='center',fontsize=8,color='white' if a[i,j]>12 else '#222')
         ax.set_xticks(range(6),['Stage1\n实际','Stage1\n参考','147\n实际','147\n参考','246\n实际','246\n参考'])
         ax.set_yticks(range(len(names)),[n.replace('_joint','') for n in names],fontsize=9)
         ax.set_title(split.upper()+' · 各关节近/触界时间占比 %');ax.grid(False)
-    fig.colorbar(im,ax=axes,shrink=.55,pad=.02,label='来源等权占比 %')
     fig.suptitle('实际机器人与实际消费参考的关节边界对照',fontsize=18)
     fig.subplots_adjust(wspace=.5,top=.92,bottom=.08,left=.16,right=.88)
+    color_axis=fig.add_axes([.91,.23,.017,.55])
+    fig.colorbar(im,cax=color_axis,label='来源等权占比 %（色标0—20）')
     save(fig,output,'joint_boundary_heatmap')
 
     fig,axes=plt.subplots(2,3,figsize=(15,8))
