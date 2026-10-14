@@ -7,12 +7,14 @@
 重标定延迟；旧v2仍显式使用实测关键路径。世界和环境两层日志都先落盘再
 ACK，世界日志等待从critical时间排除。退出时恢复训练backend对象，评估不重置
 训练物理状态、音乐游标或预算；原评估器负责恢复模型模式、梯度和所有训练RNG。
+评估/MC世界的启动与关闭耗时另记入上下文的非迭代开销，不计入评估自身wall_seconds。
 """
 from __future__ import annotations
 from contextlib import contextmanager
 import copy
 import os
 from pathlib import Path
+import time
 import yaml
 import torch
 from .parallel_support import local_call
@@ -45,6 +47,9 @@ class SingleVectorLaneTransport:
 @contextmanager
 def isolated_vector_evaluation(c,label):
     from tools.eval.run_closedloop_baseline import Workers
+    kind = 'mc' if label.startswith('mc_') else 'evaluation'
+    overhead = getattr(c, 'overhead', None)
+    started = time.perf_counter()
     path = c.session/'phases'/f'vector_eval_backend_{label}'/f'rank{c.distributed.rank:02d}'
     path.mkdir(parents=True,exist_ok=False)
     config = copy.deepcopy(c.config)
@@ -68,8 +73,11 @@ def isolated_vector_evaluation(c,label):
         journal=GuardedStepJournal(path/'world.sqlite',c.guard,format='genmo.execution_journal.ndarray.v2')
         world=VectorWorldClient(client,journal,socket_path=socket)
         c.backend=VectorLaneBackend(SingleVectorLaneTransport(world),None)
+        if overhead is not None:
+            overhead[kind+'_world_start_seconds']=overhead.get(kind+'_world_start_seconds',0.)+time.perf_counter()-started
         yield
     finally:
+        closing=time.perf_counter()
         c.backend=old_backend
         def close():
             try:
@@ -88,3 +96,5 @@ def isolated_vector_evaluation(c,label):
                 finally:
                     if journal is not None:journal.close()
         local_call(c.distributed,close)
+        if overhead is not None:
+            overhead[kind+'_world_close_seconds']=overhead.get(kind+'_world_close_seconds',0.)+time.perf_counter()-closing

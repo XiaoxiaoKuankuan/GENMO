@@ -124,6 +124,12 @@ def _physical_configuration_identity(config):
         isaac_contract_sha256=file_sha256(config['paths']['isaac_contract']))
 
 
+def _overhead(c,name,started):
+    """评估、MC、快照等非迭代前台耗时，累计到下一条轮次记录后清零；不进入checkpoint或身份。"""
+    overhead=getattr(c,'overhead',None)
+    if overhead is not None:overhead[name]=overhead.get(name,0.)+time.perf_counter()-started
+
+
 def _snapshot(c,reason,*,wait=False):
     rank_state=dict(rank=c.distributed.rank,rng=capture_local_rng(c.generators),bc=c.bc.state_dict(),
         collector=c.vector.checkpoint_state())
@@ -174,8 +180,11 @@ def _preserve_rollout_anomaly(c,buffer,targets,manifest,label):
 
 def _evaluate(c,report,label):
     from .evaluation_runtime import _evaluate_and_record
+    started=time.perf_counter()
     result=_evaluate_and_record(c,report,label)
+    _overhead(c,'evaluation_run_seconds',started)
     if hasattr(c.bc,'validation_report'):
+        stage=time.perf_counter()
         from .dense_policy import dense_precision_scope
         def retention():
             with dense_precision_scope(c.policy.precision):
@@ -189,7 +198,11 @@ def _evaluate(c,report,label):
         result['stage1_retention']=dict(by_source=by_source,samples=samples,
             source_balanced_loss=sum(x['mean_loss'] for x in by_source.values())/len(by_source),
             source_loss_maturity=c.bc.source_global_step,scope=shards[0]['scope'])
+        _overhead(c,'evaluation_stage1_retention_seconds',stage)
+    stage=time.perf_counter()
     publication=_snapshot(c,'evaluated_'+label,wait=True)['publication']
+    _overhead(c,'evaluation_snapshot_seconds',stage)
+    stage=time.perf_counter()
     from .periodic_monitor import mark_saved_evaluation
     baseline=root_call(c.distributed,lambda:json.loads((c.output/'evaluation_baseline.json').read_text())
         if (c.output/'evaluation_baseline.json').exists() else result)
@@ -209,13 +222,16 @@ def _evaluate(c,report,label):
         if choice and choice.get('checkpoint',{}).get('path')==publication['path']:
             atomic_json(c.output/'best_checkpoint.json',publication)
     root_call(c.distributed,publish_selection)
+    _overhead(c,'evaluation_selection_publish_seconds',stage)
+    _overhead(c,'evaluation_total_seconds',started)
     return result
 
 
 def run(cargs,config,distributed):
     c=SimpleNamespace(distributed=distributed,config=copy.deepcopy(config),base_config=copy.deepcopy(config),
         stage=config['stage10'],settings=copy.deepcopy(config['stage9']),manager=None,writer=None,
-        async_writer=None,vector=None,workers=None,maintenance=None,budget=None,output=cargs.output_dir.resolve())
+        async_writer=None,vector=None,workers=None,maintenance=None,budget=None,output=cargs.output_dir.resolve(),
+        overhead={})
     report=dict(schema='genmo.stage10.session',status='running',iterations=[],warmup=[],evaluations=[],evaluation_artifacts=[])
     from .run_control import build_policy,validate_stopping_iteration
     stop_after_iteration=validate_stopping_iteration(cargs.stop_after_iteration,c.stage)
@@ -498,9 +514,11 @@ def run(cargs,config,distributed):
                 actor_seconds=actor_seconds,critic_seconds=critic_seconds,wall_seconds=wall,
                 performance_by_rank=distributed.all_gather_object(profile_report),physics_paused_during_optimization=True,
                 memory_by_rank=memory,periodic_model_fingerprints=fingerprints,
-                effective_upper_transitions_per_second=used[2]/wall,mode='critic_warmup' if is_warmup else 'dppo_bc')
+                effective_upper_transitions_per_second=used[2]/wall,mode='critic_warmup' if is_warmup else 'dppo_bc',
+                overhead_since_previous_record=dict(c.overhead))
             root_call(distributed,lambda:(c.manager.append_metrics(record),log_metrics(c.writer,c.output/'curves.jsonl',c.state['rollouts_completed'],
                 record,prefix='training',durable=False)))
+            c.overhead.clear()
             report['warmup' if is_warmup else 'iterations'].append(dict(label=label,wall_seconds=wall,actor_steps=0 if actor is None else actor['optimizer_steps']))
             if distributed.rank==0:print(f'[STAGE10 ACCEPTED] {label} chains={used[2]} actor_steps={0 if actor is None else actor["optimizer_steps"]} wall={wall:.3f}s',flush=True)
             if is_warmup and c.state['warmup_completed']==warmups:
@@ -510,12 +528,18 @@ def run(cargs,config,distributed):
                     c.state['training_control_steps'],c.stage['evaluation']['every_control_steps'])
                 _evaluate(c,report,_periodic_evaluation_label(c.state))
             if time.perf_counter()-last_save>=c.stage['storage']['checkpoint_interval_seconds']:
+                stage=time.perf_counter()
                 _snapshot(c,'periodic');last_save=time.perf_counter()
+                _overhead(c,'periodic_snapshot_seconds',stage)
             if complete_mc.get('enabled') and c.state['training_control_steps']>=c.state['next_mc_calibration_control_steps']:
                 from .mc_calibration import calibrate_critic
+                stage=time.perf_counter()
                 calibrate_critic(c,'policy_'+str(c.state['policy_version']),fit=False)
+                _overhead(c,'mc_calibration_seconds',stage)
                 c.state['next_mc_calibration_control_steps']=_next_interaction_boundary(c.state['training_control_steps'],complete_mc['every_control_steps'])
+                stage=time.perf_counter()
                 _snapshot(c,'mc_calibrated',wait=True)
+                _overhead(c,'mc_snapshot_seconds',stage)
             root_call(distributed,lambda:c.async_writer.poll())
         _snapshot(c,'controlled_end',wait=True)
         _evaluate(c,report,'final_'+f'{c.state["iteration"]:06d}')

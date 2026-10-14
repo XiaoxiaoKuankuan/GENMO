@@ -48,6 +48,12 @@ def _restore_evaluation_state(c, journal, old_backend_journal, rng):
 
 
 
+def _record_overhead(c, name, started):
+    overhead = getattr(c, 'overhead', None)
+    if overhead is not None:
+        overhead[name] = overhead.get(name, 0.) + time.perf_counter() - started
+
+
 def _evaluate(c, label):
     if getattr(c, 'vector', None) is not None:
         from .vector_evaluation import isolated_vector_evaluation
@@ -260,7 +266,9 @@ def _evaluate_impl(c, label):
             for key in ('best_observed', 'best_saved'):
                 if choice[key] is not None:
                     atomic_json(c.output/f'{key}.json', choice[key])
+            written = time.perf_counter()
             atomic_json(c.session/'evaluations'/f'{label}.json', result)
+            _record_overhead(c, 'evaluation_json_write_seconds', written)
             return result
         result = root_call(c.distributed, publish)
         c.state.update(best_observed=result['selection']['best_observed'], best_saved=result['selection']['best_saved'])
@@ -270,7 +278,9 @@ def _evaluate_impl(c, label):
     result['wall_seconds'] = max(c.distributed.all_gather_object(time.perf_counter()-evaluation_started))
     result['wall_time_scope'] = 'evaluation_including_state_restore_excluding_final_timing_record_publish'
     def publish_timing():
+        written = time.perf_counter()
         atomic_json(c.session/'evaluations'/f'{label}.json', result)
+        _record_overhead(c, 'evaluation_json_write_seconds', written)
         log_metrics(c.writer, c.output/'curves.jsonl', c.state['iteration'], dict(
             reward=result['source_balanced_reward'], duration=result['mean_executed_seconds'],
             physical_failure_count=result['physical_failure_count'], by_source=result['by_source'],
