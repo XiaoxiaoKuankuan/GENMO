@@ -276,7 +276,9 @@ def compare_runs(first, second):
                     raise ValueError(f'物理评估合同不一致: {key}')
     initial_pair = paired_statistics(one['rows'], two['rows'], 'reward')
     return dict(schema='genmo.stage10.pilot_comparison.v1',
-        scope='one_training_seed_per_setting_fixed_32_short_validation_tasks_12_music_groups',
+        scope='one_training_seed_per_setting_source_balanced_music_cluster_paired_evaluation',
+        evaluation_tasks=len(one['rows']),
+        independent_music_groups=len({(r['dataset'],r['music_group']) for r in one['rows']}),
         initial_pair=initial_pair, runs={d['run_id']:summarize_run(d) for d in (first,second)},
         second_minus_first={metric:paired_statistics(first['evaluations'][-1]['rows'],
             second['evaluations'][-1]['rows'], metric)
@@ -320,7 +322,9 @@ def plot_comparison(first, second, comparison, output):
     axes[1,1].set_xticks(np.arange(len(sources)),sources,rotation=12)
     axes[1,1].set(title='最终评估的实际活动度变化',ylabel='相对初始值变化（%）')
     for ax in axes.flat:ax.legend(fontsize=9);ax.grid(axis='y',alpha=.2)
-    fig.suptitle('P1固定学习率 vs P2自适应学习率｜各40轮、同一初始Actor和MC Critic\n32个9.6–10秒任务，12个音乐组；短评估不能代表完整歌曲',fontsize=13)
+    counts=[comparison['runs'][d['run_id']]['accepted_iterations'] for d in (first,second)]
+    fig.suptitle(f'固定学习率 vs 自适应学习率｜接受轮数 {counts[0]} / {counts[1]}\n'
+        f'{comparison["evaluation_tasks"]}个固定任务，{comparison["independent_music_groups"]}个音乐组；短评估不能代表完整歌曲',fontsize=13)
     fig.savefig(output/'pilot_comparison.png',dpi=160)
     fig.savefig(output/'pilot_comparison.pdf')
     plt.close(fig)
