@@ -530,7 +530,8 @@ def run(cargs,config,distributed):
                         actor=actor,mode='rollback_continue',next_actor_lr=next_lr,physical_and_resource_consumption_retained=True,
                         training_state_restored=True,rollback_audits=rollbacks)))
                 elif c.settings.get('actor_lr_control','fixed')=='kl_adaptive':
-                    _set_actor_lr(c,_kl_adapted_lr(c.state['selected_actor_lr'],kl['mean_coordinate_kl'],c.settings['kl_target_coordinate']))
+                    metric=c.settings.get('kl_control_metric','mean_coordinate_kl')
+                    _set_actor_lr(c,_kl_adapted_lr(c.state['selected_actor_lr'],kl[metric],c.settings['kl_target_coordinate']))
             else:
                 actor_seconds=0.
             def assert_paused_physics():

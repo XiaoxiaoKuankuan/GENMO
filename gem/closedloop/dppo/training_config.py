@@ -101,9 +101,13 @@ def configuration(path,*,genmo_repo=None,gmt_repo=None):
     if t.get('kl_rejection','abort') not in ('abort','rollback_continue'):raise ValueError('kl_rejection must be abort or rollback_continue')
     if t.get('actor_lr_control','fixed')=='kl_adaptive':
         bounds=t.get('actor_lr_bounds');target=t.get('kl_target_coordinate')
-        if (not isinstance(bounds,list) or len(bounds)!=2 or not 0<bounds[0]<=t['actor_lr']<=bounds[1]
-                or not isinstance(target,(int,float)) or not 0<target<s['kl']['mean_coordinate']):
-            raise ValueError('kl_adaptive requires actor_lr_bounds [low, high] containing actor_lr and 0<kl_target_coordinate<kl.mean_coordinate')
+        # 控制量可选全20步平均坐标KL或单步最大平均坐标KL（末端K步目标时后者先触及硬门槛）。
+        metric=t.get('kl_control_metric','mean_coordinate_kl')
+        limit={'mean_coordinate_kl':s['kl']['mean_coordinate'],
+               'maximum_step_mean_coordinate_kl':s['kl']['maximum_step_mean_coordinate']}.get(metric)
+        if (limit is None or not isinstance(bounds,list) or len(bounds)!=2 or not 0<bounds[0]<=t['actor_lr']<=bounds[1]
+                or not isinstance(target,(int,float)) or not 0<target<limit):
+            raise ValueError('kl_adaptive requires a known kl_control_metric, actor_lr_bounds [low, high] containing actor_lr and 0<kl_target_coordinate<its hard limit')
     steps=t['ppo_epochs']*math.ceil(chains/scale['actor_minibatch_chains'])
     bc_total=t['bc_samples_per_rollout']
     if type(bc_total)is not int or bc_total<1:
