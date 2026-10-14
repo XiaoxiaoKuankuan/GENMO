@@ -45,6 +45,7 @@ def _critical_sources(root):
         ('policy.py', 'dense_policy.py', 'batch_execution.py', 'fixed_tile_linear.py',
          'compensated_gemm.py', 'compiled_forward.py', 'dense_attention.py',
          'frozen_prefix.py','run_control.py','env_adapter.py','vector_environment.py',
+         'evaluation.py','evaluation_world.py','vector_evaluation.py',
          'world_collector.py','mc_calibration.py','complete_episode.py','trainer.py',
          'pretrained_critic.py','rewards.py','columnar_reward.py','vector_reward_adapter.py')
         or p.name.startswith('stable_')]

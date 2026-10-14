@@ -7,6 +7,7 @@
 from types import SimpleNamespace
 from pathlib import Path
 import copy
+import pytest
 from gem.closedloop.dppo.evaluation_world import assign_tasks,balanced_rank_tasks
 from gem.closedloop.dppo.periodic_monitor import build_balanced_plan
 from tests.closedloop.dppo.test_periodic_monitor import Catalog
@@ -74,6 +75,38 @@ def test_persistent_world_restores_backend_and_rotates_journal(tmp_path,monkeypa
     assert events==['open','journal_close']
     assert handle.world.journal is handle.journal
     assert context.overhead['evaluation_world_start_seconds']==2.
+
+
+def test_persistent_lane_preserves_episode_only_at_same_confirmed_watermark(tmp_path,monkeypatch):
+    from gem.closedloop.dppo import evaluation_world as m
+    class Lane:
+        session='session';sequence=0;acked=0;episode=None
+        def call(self,method,**p):
+            if method=='hello':return dict(execution_protocols=['ack.v2'],backend_session_id=self.session,
+                executed_seq=self.sequence,acked_seq=self.acked)
+            if method=='ack':self.acked=p['through_seq'];return {}
+            assert method=='execute' and p['expected_episode_id']==self.episode, 'stale_episode'
+            assert p['backend_session_id']==self.session and p['mutation_seq']==self.sequence+1
+            self.sequence+=1;self.episode=f'episode_{self.sequence}'
+            return dict(backend_session_id=self.session,mutation_seq=self.sequence,operation=p['operation'],
+                ok=True,result={'episode_id':self.episode})
+    lane=Lane();handle=SimpleNamespace(journal=SimpleNamespace(path=tmp_path/'world.sqlite'))
+    c=SimpleNamespace(active_evaluation_world=handle,builder=None,guard=None,env=SimpleNamespace(latency_budget_s=.3),
+        state={'policy_version':0,'iteration':0})
+    monkeypatch.setattr(m,'VectorUpperEnvironment',lambda config,backend,*args:SimpleNamespace(backend=backend))
+    def create(label):
+        d=m.EvaluationWorldDriver.__new__(m.EvaluationWorldDriver)
+        d.c=c;d.config={'runtime':{}};d.budget=None;d.path=tmp_path/label
+        d.collector=SimpleNamespace(lane_client=lambda slot:lane)
+        resource=d._factory(0,None);d.collector.states=[SimpleNamespace(resource=resource)]
+        return d,resource.env.backend
+    first,backend=create('validation');backend.call('reset_episode');first.close()
+    second,backend=create('training');assert backend.episode_id=='episode_1'
+    backend.call('reset_episode');assert backend.episode_id=='episode_2';second.close()
+    lane.sequence+=1;lane.acked=lane.sequence
+    with pytest.raises(RuntimeError,match='changed session or acknowledged sequence'):create('unknown_mutation')
+    del handle.lane_boundaries
+    with pytest.raises(RuntimeError,match='without its confirmed episode identity'):create('missing_boundary')
 
 
 def test_evaluation_publication_waits_for_matching_actual_checkpoint(tmp_path,monkeypatch):

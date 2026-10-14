@@ -59,6 +59,14 @@ class EvaluationWorldDriver:
         config['runtime']['evidence_level']='full'
         journal=MemoryReceiveJournal(self.path/f'env{slot:03d}'/'lane_index.sqlite')
         backend=VectorLaneBackend(self.collector.lane_client(slot),journal)
+        # 常驻世界在上一批retire后仍保留episode身份；新客户端只能接管已确认的同一水位。
+        previous=getattr(self.c.active_evaluation_world,'lane_boundaries',{}).get(slot)
+        if previous is not None:
+            if (backend.session_id,backend.sequence)!=(previous['session_id'],previous['sequence']):
+                raise RuntimeError('Persistent evaluation lane changed session or acknowledged sequence')
+            backend.episode_id=previous['episode_id']
+        elif backend.sequence:
+            raise RuntimeError('Cannot adopt a used evaluation lane without its confirmed episode identity')
         env=VectorUpperEnvironment(config,backend,self.c.builder,proxy,self.budget,self.path/f'env{slot:03d}')
         env.disk_guard=self.c.guard;env.latency_budget_s=self.c.env.latency_budget_s
         env.authoritative_journal_path=str(self.c.active_evaluation_world.journal.path)
@@ -88,4 +96,8 @@ class EvaluationWorldDriver:
 
     def close(self):
         # 常驻世界归会话所有；这里只释放本次评估的lane索引。
+        self.c.active_evaluation_world.lane_boundaries={
+            slot:dict(session_id=state.resource.env.backend.session_id,
+                sequence=state.resource.env.backend.sequence,episode_id=state.resource.env.backend.episode_id)
+            for slot,state in enumerate(self.collector.states)}
         for state in self.collector.states:state.resource.close()
