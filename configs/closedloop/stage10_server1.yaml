@@ -53,6 +53,10 @@ runtime:
   gmt_inference_contract: gmt.native_checkpoint_frozen_batch.v1
   noise_namespace: stage10_s595000_gmt140500
   training_evidence_lifecycle: ephemeral_until_update
+  # training档：进程内世界回复不再递归只读封存（同进程恢复不重放未完成rollout）。
+  evidence_level: training
+  # CPU标量奖励与GPU列式奖励的完整重算对照间隔（控制步）；原为100。
+  reward_audit_interval_controls: 1000
   isaaclab_root: /data0/user/liwei/closedloop_stage8_runtime/IsaacLab
   sysroot_library: /data0/user/liwei/closedloop_stage8_runtime/sysroot/usr/lib/x86_64-linux-gnu
 model:
@@ -263,6 +267,10 @@ stage10:
     # 学习信号诊断：none为正常PPO，shuffle_global为全局优势置换负对照；SNR只统计两半rank与相邻轮梯度方向。
     advantage_control: none
     gradient_snr_diagnostic: true
+    # fixed保持actor_lr；kl_adaptive时按全20步平均坐标KL趋近kl_target_coordinate（需actor_lr_bounds）。
+    actor_lr_control: fixed
+    # abort为原硬KL失败即结束；rollback_continue回滚本轮学习状态、学习率减半后继续。
+    kl_rejection: abort
   dataset:
     split: train
     random_start: false
@@ -413,6 +421,8 @@ stage10:
         minimum_explained_variance: 0.2
       # 周期完整MC只做诊断，间隔由5M放宽到10M（约98轮），节省约5%墙钟。
       every_control_steps: 10000000
+      # 非null时周期校准独立验证EV低于该值才在独立训练bank上重拟合；验证MSE不改善则恢复原Critic。
+      refit_if_ev_below: null
     type: pretrained_temporal
     dimension: 256
     layers: 2

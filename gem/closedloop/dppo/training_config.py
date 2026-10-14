@@ -34,6 +34,10 @@ def configuration(path,*,genmo_repo=None,gmt_repo=None):
     maximum=control['max_training_iterations']
     if type(maximum)is not int or not 1<=maximum<=500 or maximum>s['limits']['accepted_iterations']:
         raise ValueError('Cumulative PPO iteration limit must be 1..500 within the resource budget')
+    if c['runtime'].get('evidence_level','full') not in ('full','training'):
+        raise ValueError('runtime.evidence_level must be full or training')
+    interval=c['runtime'].get('reward_audit_interval_controls',100)
+    if type(interval) is not int or interval<1:raise ValueError('reward_audit_interval_controls must be a positive integer')
     if any(key.startswith('vector_boundary_wait') for key in c['runtime']):
         raise ValueError('Retired vector_boundary_wait settings are not used by world-time collection')
     if 'effect_check_iterations' in s['evaluation']:
@@ -65,6 +69,9 @@ def configuration(path,*,genmo_repo=None,gmt_repo=None):
         if set(mc['training_seeds']) & set(mc['validation_seeds']):raise ValueError('MC validation seeds must be independent')
         for value in mc.get('quality_gate',{}).values():
             if not math.isfinite(value) or not 0<=value<1:raise ValueError('Invalid independent MC quality threshold')
+        refit=mc.get('refit_if_ev_below')
+        if refit is not None and (not isinstance(refit,(int,float)) or not 0<refit<=1):
+            raise ValueError('refit_if_ev_below must be null or in (0, 1]')
     n=c['runtime']['num_envs'];decisions=math.ceil(s['ppo_rollout']['world_seconds']/.5);chains=n*decisions*world
     for k,v in [('world',world),('environments',n),('decisions',decisions),('optimizer chains',scale['actor_minibatch_chains']),
                 ('Actor microbatch',t['denoising_microbatch']),('KL microbatch',t['kl_microbatch'])]:
@@ -89,6 +96,14 @@ def configuration(path,*,genmo_repo=None,gmt_repo=None):
         raise ValueError('advantage_control must be none or shuffle_global')
     if type(t.get('gradient_snr_diagnostic',False)) is not bool:
         raise ValueError('gradient_snr_diagnostic must be boolean')
+    # 学习率控制：fixed保持actor_lr；kl_adaptive按最终全20步平均坐标KL趋近目标，并受显式上下界约束。
+    if t.get('actor_lr_control','fixed') not in ('fixed','kl_adaptive'):raise ValueError('actor_lr_control must be fixed or kl_adaptive')
+    if t.get('kl_rejection','abort') not in ('abort','rollback_continue'):raise ValueError('kl_rejection must be abort or rollback_continue')
+    if t.get('actor_lr_control','fixed')=='kl_adaptive':
+        bounds=t.get('actor_lr_bounds');target=t.get('kl_target_coordinate')
+        if (not isinstance(bounds,list) or len(bounds)!=2 or not 0<bounds[0]<=t['actor_lr']<=bounds[1]
+                or not isinstance(target,(int,float)) or not 0<target<s['kl']['mean_coordinate']):
+            raise ValueError('kl_adaptive requires actor_lr_bounds [low, high] containing actor_lr and 0<kl_target_coordinate<kl.mean_coordinate')
     steps=t['ppo_epochs']*math.ceil(chains/scale['actor_minibatch_chains'])
     bc_total=t['bc_samples_per_rollout']
     if type(bc_total)is not int or bc_total<1:

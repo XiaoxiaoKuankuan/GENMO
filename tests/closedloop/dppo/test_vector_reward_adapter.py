@@ -174,3 +174,18 @@ def test_columnar_faults_keep_scalar_invalid_evidence_between_audits(damage):
         compare_reward_evidence(actual,expected)
         assert not actual['transition_valid']
     assert vector.columnar_fallbacks==1
+
+
+@pytest.mark.parametrize('interval,expected',[(1000,1),(50,3)])
+def test_scalar_audit_interval_changes_only_audit_frequency(interval,expected):
+    from gem.runtime.trajectory_blocks import pack_trace, ColumnarTrace
+    oracle,reference,vector=calculators();vector.audit_interval=interval
+    data=[]
+    for index in range(103):
+        row=actual_step(index,speed=1.+.1*(index%9));row['env_id']=3
+        row['reward_primitives']=packet(row,oracle);data.append(row)
+    for begin in range(0,len(data),25):
+        batch=data[begin:begin+25]
+        for row,result in zip(batch,vector.evaluate_batch(ColumnarTrace([pack_trace(batch)]))):
+            compare_reward_evidence(result,reference.evaluate_step(row))
+    assert vector.scalar_audits==expected and vector.control_count==103

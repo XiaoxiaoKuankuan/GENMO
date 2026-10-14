@@ -131,6 +131,25 @@ def _overhead(c,name,started):
     if overhead is not None:overhead[name]=overhead.get(name,0.)+time.perf_counter()-started
 
 
+def _bounded_actor_lr(c,value):
+    low,high=c.settings.get('actor_lr_bounds',[c.settings['actor_lr'],c.settings['actor_lr']])
+    return min(high,max(low,float(value)))
+
+
+def _set_actor_lr(c,value):
+    """按显式上下界设置下一轮Actor学习率；学习率随Adam状态进入checkpoint。"""
+    lr=_bounded_actor_lr(c,value)
+    for group in c.actor_optimizer.param_groups:group['lr']=lr
+    c.state['selected_actor_lr']=lr
+    return lr
+
+
+def _kl_adapted_lr(current,measured,target):
+    """KL约随学习率平方变化：按sqrt(target/measured)一步趋近，单轮倍率限制在[0.5,1.5]。"""
+    if measured is None or measured<=0:return current*1.5
+    return current*min(1.5,max(.5,math.sqrt(target/measured)))
+
+
 def _sketch_cosine(previous,current):
     if not previous or not current:return None
     names=sorted(set(previous)&set(current))
@@ -406,7 +425,7 @@ def run(cargs,config,distributed):
                 c.state['training_control_steps'],c.stage['storage']['diagnostic_every_control_steps'])
             round_start=time.perf_counter()
             torch.cuda.reset_peak_memory_stats(distributed.device)
-            anomaly_saved=None
+            anomaly_saved=None;rejected=False
             from .performance import PhaseProfiler,activate,deactivate
             frequency=c.stage['performance']['profiler_every']
             detailed=strict or c.state['rollouts_completed']==0 or (not is_warmup and c.state['iteration']==0) or (
@@ -492,13 +511,26 @@ def run(cargs,config,distributed):
                 kl=final_kl(c.policy,rows,cache,manifest,distributed=distributed,microbatch=c.settings['kl_microbatch'],
                     clip=c.settings['ppo_clip'],objective_reduction=c.settings['objective_logprob_reduction'])
                 accepted=check_kl(kl,c.stage['kl'])
-                if not accepted['passed']:
+                if not accepted['passed'] and c.settings.get('kl_rejection','abort')!='rollback_continue':
                     anomaly_saved=local_call(distributed,lambda:_preserve_rollout_anomaly(c,buffer,targets,manifest,label))
                     rollback=local_call(distributed,lambda:_restore_rollback(c,saved))
                     rollbacks=distributed.all_gather_object(rollback)
                     root_call(distributed,lambda:atomic_json(c.session/(label+'_rejected.json'),dict(kl=kl,acceptance=accepted,actor=actor,
                         physical_and_resource_consumption_retained=True,training_state_restored=True,rollback_audits=rollbacks)))
                     raise RuntimeError('Final Full20 KL rejected; whole training update rolled back')
+                if not accepted['passed']:
+                    # 回滚后继续：恢复全部学习状态后再减半学习率；本轮不计入接受轮次，只写JSON证据。
+                    rollback=local_call(distributed,lambda:_restore_rollback(c,saved))
+                    rollbacks=distributed.all_gather_object(rollback)
+                    next_lr=_set_actor_lr(c,c.state['selected_actor_lr']*.5)
+                    c.state['kl_rejections']=c.state.get('kl_rejections',0)+1
+                    c.snr_previous_sketch=None
+                    rejected=True
+                    root_call(distributed,lambda:atomic_json(c.session/(label+'_rejected.json'),dict(kl=kl,acceptance=accepted,
+                        actor=actor,mode='rollback_continue',next_actor_lr=next_lr,physical_and_resource_consumption_retained=True,
+                        training_state_restored=True,rollback_audits=rollbacks)))
+                elif c.settings.get('actor_lr_control','fixed')=='kl_adaptive':
+                    _set_actor_lr(c,_kl_adapted_lr(c.state['selected_actor_lr'],kl['mean_coordinate_kl'],c.settings['kl_target_coordinate']))
             else:
                 actor_seconds=0.
             def assert_paused_physics():
@@ -516,7 +548,9 @@ def run(cargs,config,distributed):
                 pytorch_peak_reserved=torch.cuda.max_memory_reserved(distributed.device),
                 scope='current_round_PyTorch_allocator_excludes_PhysX_external_allocations'))
             # 全部验收完成后再推进接受轮次，失败可回滚学习状态；已用物理/优化尝试不退款。
-            if not is_warmup:
+            if rejected:
+                pass
+            elif not is_warmup:
                 root_call(distributed,lambda:c.budget.accept_iteration('update',identity=f'{identity["session_id"]}/{label}'))
                 c.state['actor_updates']+=actor['optimizer_steps']
                 c.state['policy_version']+=1;c.state['iteration']+=1
@@ -532,7 +566,8 @@ def run(cargs,config,distributed):
                 actor_seconds=actor_seconds,critic_seconds=critic_seconds,wall_seconds=wall,
                 performance_by_rank=distributed.all_gather_object(profile_report),physics_paused_during_optimization=True,
                 memory_by_rank=memory,periodic_model_fingerprints=fingerprints,
-                effective_upper_transitions_per_second=used[2]/wall,mode='critic_warmup' if is_warmup else 'dppo_bc',
+                effective_upper_transitions_per_second=used[2]/wall,
+                mode='critic_warmup' if is_warmup else 'kl_rejected_rollback' if rejected else 'dppo_bc',
                 overhead_since_previous_record=dict(c.overhead))
             root_call(distributed,lambda:(c.manager.append_metrics(record),log_metrics(c.writer,c.output/'curves.jsonl',c.state['rollouts_completed'],
                 record,prefix='training',durable=False)))
@@ -552,7 +587,8 @@ def run(cargs,config,distributed):
             if complete_mc.get('enabled') and c.state['training_control_steps']>=c.state['next_mc_calibration_control_steps']:
                 from .mc_calibration import calibrate_critic
                 stage=time.perf_counter()
-                calibrate_critic(c,'policy_'+str(c.state['policy_version']),fit=False)
+                calibrate_critic(c,'policy_'+str(c.state['policy_version']),fit=False,
+                    fit_if_ev_below=complete_mc.get('refit_if_ev_below'))
                 _overhead(c,'mc_calibration_seconds',stage)
                 c.state['next_mc_calibration_control_steps']=_next_interaction_boundary(c.state['training_control_steps'],complete_mc['every_control_steps'])
                 stage=time.perf_counter()

@@ -67,6 +67,8 @@ class VectorExecutionReward(ExecutionReward):
         super().__init__(*args, **kwargs)
         self.config_sha256 = reward_config_sha(self.config)
         self.control_count = self.scalar_audits = 0
+        # 每audit_interval个控制步做一次完整标量重算对照；环境按runtime配置设置，默认100。
+        self.audit_interval = 100
         self.vector_version = VECTOR_REWARD_VERSION
         self.columnar_seconds = 0.
         self.columnar_fallbacks = 0
@@ -110,7 +112,7 @@ class VectorExecutionReward(ExecutionReward):
                     scalar_fallback_seconds=time.perf_counter()-fallback_started))
         assembled=time.perf_counter()
         for i, (row, result) in enumerate(zip(trace, results)):
-            if self.control_count % 100 == 0:
+            if self.control_count % self.audit_interval == 0:
                 reference = object.__new__(ExecutionReward)
                 reference.__dict__ = copy.deepcopy(self.__dict__)
                 compare_reward_evidence(result, reference.evaluate_step(row))
@@ -133,7 +135,7 @@ class VectorExecutionReward(ExecutionReward):
                 set(packet.get('components', {})) != {'track', 'stable', 'alive', 'cmd', 'torque', 'contact', 'joint_limit'}):
             raise ValueError('GPU reward identity/configuration/fields mismatch')
         reference = None
-        if self.control_count % 100 == 0:
+        if self.control_count % self.audit_interval == 0:
             reference = object.__new__(ExecutionReward)
             reference.__dict__ = copy.deepcopy(self.__dict__)
         result = super().evaluate_step(trace)

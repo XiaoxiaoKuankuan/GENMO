@@ -55,7 +55,8 @@ def isolated_vector_evaluation(c,label):
     config = copy.deepcopy(c.config)
     from .vector_devices import bind_vector_device
     device_environment=bind_vector_device(config,c.distributed.rank)
-    config['runtime'].update(num_envs=1,asset_conversion_dir=str(path/'usd_assets'))
+    # 独立评估/MC世界不重复首个列式-逐行全量对照；训练世界每会话已执行一次，数值路径相同。
+    config['runtime'].update(num_envs=1,asset_conversion_dir=str(path/'usd_assets'),columnar_first_audit=False)
     config_path=path/'config.yaml';config_path.write_text(yaml.safe_dump(config,allow_unicode=True))
     workers=Workers(config,path)
     old_backend=c.backend

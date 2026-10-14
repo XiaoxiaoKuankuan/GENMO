@@ -123,11 +123,20 @@ def independent_mc_metrics(c, bank):
         scope='independent_complete_MC_current_fixed_behavior_no_bootstrap')
 
 
-def calibrate_critic(c, label, *, fit):
+def calibrate_critic(c, label, *, fit, fit_if_ev_below=None):
+    """完整MC价值校准；fit_if_ev_below只用于周期调用：独立验证EV低于阈值才拟合。
+
+    周期重拟合在独立训练种子bank上训练候选，用验证bank选最优；最优候选验证MSE不优于
+    拟合前时恢复原Critic/Adam，不计入critic_updates。预热(fit=True)语义不变。
+    """
     started=time.perf_counter();cfg=c.stage['critic']['complete_mc']
     validation=collect_complete_bank(c,label+'_val','val',samples_per_source=cfg['samples_per_source'],seeds=cfg['validation_seeds'])
     before=independent_mc_metrics(c,validation)
-    report=dict(before=before,candidates=[],behavior_version=c.state['policy_version'],fit=fit)
+    periodic_refit=False
+    if not fit and fit_if_ev_below is not None:
+        periodic_refit=fit=before['explained_variance'] is None or before['explained_variance']<fit_if_ev_below
+    report=dict(before=before,candidates=[],behavior_version=c.state['policy_version'],fit=fit,
+        refit_threshold=fit_if_ev_below,periodic_refit=periodic_refit)
     if fit:
         training=collect_complete_bank(c,label+'_train','train',samples_per_source=cfg['samples_per_source'],seeds=cfg['training_seeds'])
         rows,mc=training.training_data(policy_version=c.state['policy_version'],kernel=c.policy.kernel_config)
@@ -158,8 +167,13 @@ def calibrate_critic(c, label, *, fit):
             report['candidates'].append(candidate)
             if best is None or metrics['mse']<best['validation']['mse']:
                 best=candidate;best_state=immutable_cpu_snapshot(c.critic.state_dict());best_optimizer=immutable_cpu_snapshot(c.critic_optimizer.state_dict())
-        c.critic.load_state_dict(best_state);c.critic_optimizer.load_state_dict(best_optimizer)
-        c.state['critic_updates']+=best['training']['optimizer_steps']
+        accepted=not periodic_refit or best['validation']['mse']<before['mse']
+        if accepted:
+            c.critic.load_state_dict(best_state);c.critic_optimizer.load_state_dict(best_optimizer)
+            c.state['critic_updates']+=best['training']['optimizer_steps']
+        else:
+            c.critic.load_state_dict(initial);c.critic_optimizer.load_state_dict(optimizer)
+        report['refit_accepted']=accepted
         report.update(selected_mc_ratio=best['mc_ratio'],after=best['validation'],
             attempted_critic_steps=sum(r['training']['optimizer_steps'] for r in report['candidates']))
         report['relative_validation_mse_reduction']=1-best['validation']['mse']/max(before['mse'],1e-12)

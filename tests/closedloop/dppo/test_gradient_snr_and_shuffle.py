@@ -131,3 +131,27 @@ def test_sketch_samples_global_ppo_gradient_with_fixed_stride(snr_results):
     for name, value in sketch.items():
         expected = (first[name]+second[name]).reshape(-1)[::stride].double()
         torch.testing.assert_close(value, expected, rtol=1e-6, atol=1e-6)
+
+
+def test_kl_adaptive_learning_rate_is_bounded_and_monotone():
+    from types import SimpleNamespace
+    from gem.closedloop.dppo.training import _kl_adapted_lr, _set_actor_lr
+    assert math.isclose(_kl_adapted_lr(1e-7, 2e-4, 8e-4), 1.5e-7)
+    assert math.isclose(_kl_adapted_lr(1e-7, 3.2e-3, 8e-4), .5e-7)
+    assert math.isclose(_kl_adapted_lr(1e-7, 8e-4, 8e-4), 1e-7)
+    optimizer = torch.optim.AdamW(torch.nn.Linear(2, 2).parameters(), lr=1e-7)
+    c = SimpleNamespace(actor_optimizer=optimizer, state={}, settings=dict(actor_lr=1e-7, actor_lr_bounds=[5e-8, 4e-7]))
+    assert _set_actor_lr(c, 1e-6) == 4e-7 and optimizer.param_groups[0]['lr'] == 4e-7 and c.state['selected_actor_lr'] == 4e-7
+    assert _set_actor_lr(c, 1e-9) == 5e-8
+
+
+@pytest.mark.parametrize('update', [dict(actor_lr_control='kl_adaptive'),
+    dict(actor_lr_control='kl_adaptive', actor_lr_bounds=[1e-7, 1e-6], kl_target_coordinate=.01),
+    dict(kl_rejection='retry')])
+def test_invalid_learning_rate_control_is_rejected(tmp_path, update):
+    c = yaml.safe_load(CONFIG.read_text())
+    c['stage10']['training'].update(update)
+    path = tmp_path / 'invalid_lr.yaml'
+    path.write_text(yaml.safe_dump(c))
+    with pytest.raises(ValueError):
+        configuration(path)
