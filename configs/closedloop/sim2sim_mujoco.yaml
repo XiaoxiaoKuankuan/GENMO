@@ -53,7 +53,6 @@ runtime:
   auto_next: true
   audio: true
   viewer_fps: 25
-  reference_display: split  # 左实际、右原样参考；V切换叠加，避免半透明重叠闪烁
   video_fps: 25
   video_width: 1280
   video_height: 720

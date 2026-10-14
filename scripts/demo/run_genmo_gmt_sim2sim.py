@@ -4,7 +4,8 @@
 --audio接受WAV/MP3或音频目录，--audio-dir明确指定递归音乐文件夹；
 --playlist接受既有selection/manifest或音频清单；
 --actor-checkpoint选择明确的Stage2权重，不追随latest。窗口通过空格/R/N/P/
-1/2/3/G/V/Esc交互，V切换分屏/叠加参考；--headless用于有界自动验收；--record在执行结束后编码视频。
+1/2/3/G/Esc交互，单画面叠加半透明蓝色GENMO运动学参考与实体动力学机器人；
+G显示/隐藏参考；--headless用于有界自动验收；--record在执行结束后编码视频。
 所有运行产物写入outputs/sim2sim下独立目录；不使用Isaac、不启动训练、不改模型。
 """
 from __future__ import annotations
