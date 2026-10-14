@@ -292,7 +292,8 @@ stage10:
     checkpoint_reserve_bytes: 4294967296
     tensor_cache_max_bytes: 4294967296
     checkpoint_interval_seconds: 1800
-    diagnostic_every_control_steps: 5000000
+    # 严格证据轮（完整journal/概率/指纹/profiler）每约98轮一次；普通轮仍保留哨兵概率检查。
+    diagnostic_every_control_steps: 10000000
     mode: daily
     checkpoint_keep_last: 2
     retain_best_and_evaluated: true
@@ -405,7 +406,8 @@ stage10:
       quality_gate:
         minimum_relative_mse_reduction: 0.3
         minimum_explained_variance: 0.2
-      every_control_steps: 5000000
+      # 周期完整MC只做诊断，间隔由5M放宽到10M（约98轮），节省约5%墙钟。
+      every_control_steps: 10000000
     type: pretrained_temporal
     dimension: 256
     layers: 2

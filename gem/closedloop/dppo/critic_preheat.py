@@ -4,6 +4,8 @@
 初始化。此模块只导出Critic及其Adam状态、验证结果与采集来源，不迁移Actor、
 Actor优化器、RNG、BC游标或累计PPO轮数，因此不是训练checkpoint恢复。
 导入前核验Actor实际权重、随机核、奖励、物理源码/配置、数据、Horizon和价值结构。
+价值目标定义（上层gamma/lambda与MC/TD候选比例）同样绑定：MC回报按gamma折扣、
+TD候选按lambda构造，二者不同时预热价值尺度不可复用。
 冻结编码器必须逐元素一致；所有验证完成前不修改Critic。旧Actor版本数据不能
 用于新Actor的MC监督，导入只允许尚未进行Actor更新的s595000初始化阶段。
 来源MC交互单列记录并纳入累计训练交互，当前运行预算只结算本运行新增物理执行。
@@ -20,10 +22,17 @@ from .checkpoint import _validate_model_state, _validate_optimizer_state
 from .evaluation import _model_fingerprint
 from .training_checkpoint import SCHEMA, file_sha256, immutable_cpu_snapshot
 
-SCHEMA_PREHEAT = 'genmo.stage10.fixed_actor_critic_preheat.v1'
+SCHEMA_PREHEAT = 'genmo.stage10.fixed_actor_critic_preheat.v2'
 MATCHED = ('assets', 'kernel', 'reward', 'timing', 'physical_configuration',
     'dataset', 'data_catalog', 'source_stage1_step', 'generation_horizon')
 ARCHITECTURE = ('type', 'dimension', 'layers', 'heads', 'freeze_encoders', 'learning_rate')
+
+
+def _value_targets(identity):
+    """预热MC标签与TD候选实际使用的价值目标定义。"""
+    return dict(gamma_upper=identity['training']['gamma_upper'],
+        lambda_upper=identity['training']['lambda_upper'],
+        mix_candidates=list(identity['critic']['complete_mc']['mix_candidates']))
 
 
 def _critical_sources(root):
@@ -60,6 +69,7 @@ def export_preheat(checkpoint, report, output):
     record = dict(schema=SCHEMA_PREHEAT, actor_fingerprint=payload['actor_fingerprint'],
         matched_identity={k:identity[k] for k in MATCHED},
         architecture={k:identity['critic'][k] for k in ARCHITECTURE},
+        value_targets=_value_targets(identity),
         physical_sources=identity['source_files']['gmt'],
         behavior_sources=_critical_sources(payload['config']['paths']['genmo_repo']),
         critic=payload['critic'], critic_optimizer=payload['critic_optimizer'],
@@ -92,9 +102,10 @@ def initialize_critic(artifact, *, identity, actor, critic, optimizer, genmo_rep
             or data['actor_fingerprint'] != _model_fingerprint(actor)
             or data['matched_identity'] != {k:identity[k] for k in MATCHED}
             or data['architecture'] != {k:identity['critic'][k] for k in ARCHITECTURE}
+            or data.get('value_targets') != _value_targets(identity)
             or data['physical_sources'] != identity['source_files']['gmt']
             or data['behavior_sources'] != _critical_sources(genmo_repo)):
-        raise ValueError('Fixed Actor, kernel, physics, dataset or Critic initialization identity differs')
+        raise ValueError('Fixed Actor, kernel, physics, dataset, value target or Critic initialization identity differs')
     report = data['validation']
     if (not report['quality_gate_passed']
             or report['relative_validation_mse_reduction'] < quality_gate['minimum_relative_mse_reduction']

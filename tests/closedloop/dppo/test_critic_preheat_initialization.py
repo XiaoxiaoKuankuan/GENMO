@@ -2,7 +2,8 @@
 
 只在临时目录构造小型冻结编码器与非空Adam，不读取正式模型或推进PhysX。
 验证同一固定Actor的独立价值成果可加载，同时不修改Actor、不迁移Actor优化器或
-运行时钟；随机核、物理源码、冻结编码器或验证质量改变必须在修改Critic前拒绝。
+运行时钟；随机核、物理源码、冻结编码器、验证质量或价值目标gamma/lambda改变必须在修改
+Critic前拒绝。
 另外检查预热恢复需要真正初始评估，Actor已更新时不能补造Stage1基线。
 """
 import copy
@@ -11,7 +12,7 @@ import pytest
 import torch
 
 from gem.closedloop.dppo.critic_preheat import (
-    MATCHED, ARCHITECTURE, SCHEMA_PREHEAT, _critical_sources, initialize_critic)
+    MATCHED, ARCHITECTURE, SCHEMA_PREHEAT, _critical_sources, _value_targets, initialize_critic)
 from gem.closedloop.dppo.evaluation import _model_fingerprint
 from gem.closedloop.dppo.training import _requires_initial_evaluation
 from gem.closedloop.dppo.training_checkpoint import file_sha256
@@ -24,11 +25,13 @@ def fixture(tmp_path):
     optimizer = torch.optim.AdamW(critic[1].parameters(), lr=1e-4)
     critic(torch.ones(3,2)).sum().backward();optimizer.step();critic.zero_grad(set_to_none=True)
     identity = {k:{'identity':k} for k in MATCHED}
-    identity.update(critic={k:k for k in ARCHITECTURE},source_files={'gmt':{'physics.py':'fixed'}})
+    identity.update(critic={**{k:k for k in ARCHITECTURE},'complete_mc':{'mix_candidates':[0.,.5,1.]}},
+        training={'gamma_upper':.99,'lambda_upper':.95},source_files={'gmt':{'physics.py':'fixed'}})
     for name in ['actor.py','contracts.py','online_conditions.py','training.py']:
         p=tmp_path/'gem/closedloop'/name;p.parent.mkdir(parents=True,exist_ok=True);p.write_text('value = 1\n')
     data=dict(schema=SCHEMA_PREHEAT,actor_fingerprint=_model_fingerprint(actor),
-        matched_identity={k:identity[k] for k in MATCHED},architecture=identity['critic'],
+        matched_identity={k:identity[k] for k in MATCHED},architecture={k:identity['critic'][k] for k in ARCHITECTURE},
+        value_targets=_value_targets(identity),
         physical_sources=identity['source_files']['gmt'],behavior_sources=_critical_sources(tmp_path),
         critic=copy.deepcopy(critic.state_dict()),critic_optimizer=copy.deepcopy(optimizer.state_dict()),
         selected_updates=1,prior_mc_control_steps=500,prior_mc_physics_steps=2000,source={'initialization_only':True},
@@ -54,7 +57,7 @@ def test_preheated_value_and_nonempty_adam_restore_without_actor_change(tmp_path
     assert _model_fingerprint(actor)==fingerprint and result['fresh_PhysX']
 
 
-@pytest.mark.parametrize('changed',['kernel','physics','encoder','quality','code'])
+@pytest.mark.parametrize('changed',['kernel','physics','encoder','quality','code','gamma','lambda','legacy'])
 def test_mismatch_rejected_before_value_or_adam_mutation(tmp_path,changed):
     actor,critic,optimizer,identity,data=fixture(tmp_path)
     if changed=='kernel':data['matched_identity']['kernel']={'different':True}
@@ -62,6 +65,9 @@ def test_mismatch_rejected_before_value_or_adam_mutation(tmp_path,changed):
     if changed=='encoder':data['critic']['0.weight'].add_(1.)
     if changed=='quality':data['validation']['after']['explained_variance']=.1
     if changed=='code':(tmp_path/'gem/closedloop/actor.py').write_text('value = 2\n')
+    if changed=='gamma':identity['training']['gamma_upper']=.97
+    if changed=='lambda':identity['training']['lambda_upper']=.8
+    if changed=='legacy':data.pop('value_targets')
     before=copy.deepcopy(critic.state_dict());step=next(iter(optimizer.state.values()))['step'].clone()
     with pytest.raises(ValueError):load(tmp_path,actor,critic,optimizer,identity,data)
     for key,value in critic.state_dict().items():torch.testing.assert_close(value,before[key],rtol=0,atol=0)
