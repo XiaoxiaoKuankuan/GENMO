@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 from collections import defaultdict
+import hashlib
 import json
 from pathlib import Path
 
@@ -160,14 +161,50 @@ def plot(data,output):
     fig.tight_layout();save(fig,output,'complete_mc_critic_quality')
 
 
+def plot_failure_case(data, root, output):
+    """固定展示最长test歌曲201的第一个seed，绑定真实轨迹SHA，不挑最佳片段。"""
+    candidates=[r for r in data['episodes'] if r['split']=='test' and r['dataset']=='FineDance'
+        and r['sample_id']=='201' and r['model']=='stage1']
+    if not candidates:return
+    selected=min(candidates,key=lambda r:r['seed'])
+    fig,axes=plt.subplots(2,3,figsize=(16,8),sharey='row')
+    for col,model in enumerate(MODELS):
+        row=next(r for r in data['episodes'] if r['model']==model and r['task_id']==selected['task_id'])
+        path=root/row['trajectory']
+        if hashlib.sha256(path.read_bytes()).hexdigest()!=row['trajectory_sha256']:
+            raise ValueError('Failure-case trajectory differs from strict analysis')
+        with np.load(path) as a:
+            upper_time=(a['upper_tick']-a['tick'][0]+12)/600
+            end=len(a['tick'])/50
+            ax=axes[0,col]
+            ax.plot(upper_time,a['value_prediction'],color='#b74b42',label='Critic预测V')
+            ax.plot(upper_time,a['mc_return'],color='#256f9c',label='真实完整MC回报')
+            ax.axvline(end,color='#444',ls='--',lw=1)
+            ax.set_title(f'{LABELS[col]}：实际执行{end:.2f}秒')
+            ax.set_ylabel('从该状态起的折扣回报');ax.set_xlabel('歌曲已执行时间 / 秒')
+            ax.legend(fontsize=9)
+            ax=axes[1,col];tail=upper_time>=max(0,end-20)
+            ax.plot(upper_time[tail]-end,a['value_prediction'][tail],color='#b74b42',label='Critic预测V')
+            ax.plot(upper_time[tail]-end,a['mc_return'][tail],color='#256f9c',label='真实完整MC回报')
+            ax.axvline(0,color='#444',ls='--',lw=1);ax.axhline(0,color='#888',lw=.7)
+            ax.set_title('结束前20秒：'+('朝向误差超限' if row['end_reason']=='yaw_anchor_ori' else row['end_reason']))
+            ax.set_xlabel('相对真实结束时刻 / 秒');ax.set_ylabel('预测值与真实回报')
+    fig.suptitle(f'长歌失败的价值盲区：FineDance 201，seed={selected["seed"]}',fontsize=18)
+    fig.text(.02,-.02,'每个模型使用自己的完整真实轨迹和自身Critic。MC末端真实终止不自举；曲线不跨模型拼接、不裁去失败。\n'
+        '该案例帮助解释机制，不代替49个独立音乐组的总体统计，也不能单独证明输入缺项是唯一原因。',fontsize=10)
+    fig.tight_layout();save(fig,output,'failure_value_case_finedance201')
+
+
 def main():
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--analysis',type=Path,required=True)
     parser.add_argument('--output',type=Path,required=True)
+    parser.add_argument('--trajectory-root',type=Path,help='可选：核验本地真实轨迹，增加固定长歌失败案例图')
     args=parser.parse_args();data=json.loads(args.analysis.read_text())
     if data['status']!='passed':raise ValueError('Strict analysis must pass')
     args.output.mkdir(parents=True,exist_ok=False)
     plot(data,args.output)
+    if args.trajectory_root:plot_failure_case(data,args.trajectory_root,args.output)
     print(args.output)
 
 
