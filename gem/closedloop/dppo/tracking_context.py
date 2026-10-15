@@ -33,8 +33,14 @@ def validate_tracking_context(context):
         torch.isclose(times[:,-1],context['decision_time'],atol=1e-10,rtol=0).all(),
         torch.where(valid[...,None],values[...,:48]==context['proprio_history'],True).all(),
         torch.where(~valid[...,None],values==0.,True).all())
-    if not bool(torch.stack(checks).all()):
-        raise ValueError('Noncausal, fabricated, mismatched or invalid tracking history')
+    passed=torch.stack(checks)
+    if not bool(passed.all()):
+        names=('finite_history','finite_times','finite_reference','actor_mask','actor_timestamps',
+            'reference_timestamps','no_future','50Hz_grid','decision_endpoint','actor_proprio48','invalid_padding_zero')
+        failed=[name for name,ok in zip(names,passed.cpu().tolist()) if not ok]
+        raise ValueError('Noncausal or mismatched tracking history: '+','.join(failed)+
+            f'; timestamp_delta={float((times-context["proprio_history_times"]).abs().max())}; '+
+            f'proprio_delta={float(torch.where(valid[...,None],values[...,:48]-context["proprio_history"],0.).abs().max())}')
     return context
 
 
@@ -46,6 +52,6 @@ def build_critic_context(actor_context,snapshot):
         return torch.as_tensor(snapshot[key],dtype=dtype,device=device).unsqueeze(0).clone()
     result=dict(actor_context,tracking_history=tensor('tracking_history_values',torch.float32),
         tracking_history_valid=tensor('tracking_history_valid',torch.bool),
-        tracking_history_times=tensor('tracking_history_ticks',torch.float64)/600.,
-        tracking_reference_times=tensor('tracking_reference_ticks',torch.float64)/600.)
+        tracking_history_times=(torch.as_tensor(snapshot['tracking_history_ticks'],dtype=torch.float64)/600.).unsqueeze(0).to(device),
+        tracking_reference_times=(torch.as_tensor(snapshot['tracking_reference_ticks'],dtype=torch.float64)/600.).unsqueeze(0).to(device))
     return validate_tracking_context(result)
