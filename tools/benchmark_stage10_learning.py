@@ -456,14 +456,22 @@ def main():
             publish()
     for micro in ([] if a.diagnostic_only or a.profile_only else a.kl_microbatches):
         samples=[];restore()
-        for repeat in range(a.repeats+2):
+        # 稀有尾批每轮只出现一次，图在第三次才捕获；不能把首次捕获计入稳态计时。
+        warmups=3 if hasattr(policy,'cuda_graph_counters') else 2
+        measured_captures=[]
+        for repeat in range(a.repeats+warmups):
+            captures=getattr(policy,'cuda_graph_counters',{}).get('captures',0)
             d.barrier();torch.cuda.synchronize();start=time.perf_counter()
             kl=final_kl(policy,rows,cache,manifest,distributed=d,microbatch=micro,
                 clip=settings['ppo_clip'],objective_reduction=settings['objective_logprob_reduction'])
             seconds=max(d.all_gather_object(time.perf_counter()-start))
-            if repeat>=2:samples.append(seconds)
+            if repeat>=warmups:
+                samples.append(seconds)
+                measured_captures.append(max(d.all_gather_object(
+                    getattr(policy,'cuda_graph_counters',{}).get('captures',0)-captures)))
         report['kl'].append(dict(microbatch=micro,samples=samples,p50=float(np.percentile(samples,50)),
             p95=float(np.percentile(samples,95)),report=kl,numerical_execution=policy.numerical_execution,
+            warmup_runs=warmups,graph_captures_during_measured_runs=measured_captures,
             cuda_graph_counters=copy.deepcopy(getattr(policy,'cuda_graph_counters',None))))
         publish()
     if a.profile:
