@@ -48,7 +48,7 @@ def split_trace(trace, index, batch_size):
     for key,value in trace.items():
         if key == 'conditions':
             result[key] = {name:tensor[index:index+1] for name,tensor in value.items()}
-        elif torch.is_tensor(value) and key != 'timestep_map':
+        elif torch.is_tensor(value) and key not in ('timestep_map','probability_steps'):
             if value.shape[0] != batch_size:
                 raise ValueError(f'Unexpected batched trace field {key}')
             result[key] = value[index:index+1]

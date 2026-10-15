@@ -100,6 +100,14 @@ class UpperTransition:
         if self.executed_physics_steps != 4 * self.executed_control_steps:
             raise ValueError("partial physics advancement cannot be a valid training transition")
         validate_stage1_condition_batch(self.context, history_steps=50)
+        from .tracking_context import validate_tracking_context
+        validate_tracking_context(self.metadata['critic_context'])
+        if self.next_context is not None:
+            validate_tracking_context(self.metadata['next_critic_context'])
+        for actor,critic in ((self.context,self.metadata['critic_context']),
+                             (self.next_context,self.metadata.get('next_critic_context'))):
+            if actor is not None and any(not torch.equal(v,critic[k].to(v.device)) for k,v in actor.items()):
+                raise ValueError('Actor and Critic base conditions belong to different states')
         if self.context["decision_time"].shape != (1,):
             raise ValueError("Stage9 buffer requires single-environment conditions")
         if self.next_context is not None:
@@ -108,8 +116,8 @@ class UpperTransition:
             raise ValueError("valid transition requires a FP32 [K+1,T,30] chain")
         if self.chain.shape[1:] != (self.context["future_valid"].shape[1], 30) or self.chain.shape[0] < 2:
             raise ValueError("invalid denoising chain shape")
-        if self.old_log_prob is None or self.old_log_prob.shape != (self.chain.shape[0] - 1,):
-            raise ValueError("old_log_prob must be [K]")
+        if self.old_log_prob is None or self.old_log_prob.shape != (19,):
+            raise ValueError("old_log_prob must contain only the 19 stochastic transitions; final map has no density")
         if self.old_log_prob.dtype != torch.float64:
             raise ValueError("old joint log probabilities must preserve FP64 precision")
         if self.free_mask is None or self.free_mask.dtype != torch.bool or self.free_mask.shape != (self.context["future_valid"].shape[1], 30):

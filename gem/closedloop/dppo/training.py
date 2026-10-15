@@ -308,14 +308,8 @@ def run(cargs,config,distributed):
             critic_config['warmup_rollouts']=cargs.warmup_rollouts
             c.base_config['stage10']['critic']['warmup_rollouts']=cargs.warmup_rollouts
         def create_critic():
-            if critic_config['type']=='pretrained_temporal':
-                return PretrainedConditionCritic(c.actor,dimension=critic_config['dimension'],layers=critic_config['layers'],
-                    heads=critic_config['heads'],freeze_encoders=critic_config['freeze_encoders']).to(distributed.device)
-            if critic_config['type']=='legacy_mlp_control':
-                from .critic import UpperCritic
-                return UpperCritic(qpos_mean=c.actor.endecoder.mean,qpos_std=c.actor.endecoder.std,
-                    proprio_scales=tuple(train.model.proprio_scales)).to(distributed.device)
-            raise ValueError('Unknown explicit Critic architecture')
+            return PretrainedConditionCritic(c.actor,dimension=critic_config['dimension'],layers=critic_config['layers'],
+                heads=critic_config['heads'],history_scales=critic_config['history_scales']).to(distributed.device)
         c.critic=local_call(distributed,create_critic)
         distributed.broadcast_module(c.actor);distributed.broadcast_module(c.critic)
         precision=c.stage['precision']
@@ -332,7 +326,11 @@ def run(cargs,config,distributed):
             actor_initialization=local_call(distributed,lambda:load_evaluation_actor(cargs.evaluation_actor,
                 actor=c.actor,kernel=c.policy.kernel_config,assets=c.stage['assets'],execution_binding=binding))
         c.actor_optimizer=torch.optim.AdamW(trainable_actor_parameters(c.actor),lr=c.settings['actor_lr'],weight_decay=0.)
-        c.critic_optimizer=torch.optim.AdamW([p for p in c.critic.parameters() if p.requires_grad],lr=critic_config['learning_rate'],weight_decay=0.)
+        history_ids={id(p) for p in c.critic.history_encoder.parameters()}
+        c.critic_optimizer=torch.optim.AdamW([
+            dict(params=list(c.critic.history_encoder.parameters()),lr=critic_config['history_learning_rate'],name='tracking_history'),
+            dict(params=[p for p in c.critic.parameters() if p.requires_grad and id(p) not in history_ids],
+                 lr=critic_config['learning_rate'],name='temporal_value')],weight_decay=0.)
         c.controller=BCGradientController(**c.stage['bc_gradient'])
         anchor_config=copy.deepcopy(c.config)
         anchor_config['stage9'].update(bc_batch=c.settings['bc_batch']//distributed.world_size,
@@ -409,6 +407,9 @@ def run(cargs,config,distributed):
             raise _FiniteDiagnosticComplete
         if payload is None:
             _snapshot(c,'initial',wait=True)
+        if not (cargs.calibrate_only or cargs.collect_only or cargs.evaluate_only or getattr(cargs,'critic_preheat_only',False)):
+            from .kl_calibration import validate_calibration
+            validate_calibration(c.stage['kl'],c.policy.kernel_config,c.stage['reward'])
         complete_mc=c.stage['critic'].get('complete_mc',{})
         if complete_mc.get('enabled') and not cargs.collect_only and not cargs.evaluate_only and not c.state.get('mc_preheat_complete'):
             from .mc_calibration import calibrate_critic
@@ -529,7 +530,7 @@ def run(cargs,config,distributed):
                     gamma_denoising=c.settings['gamma_denoising'],soft_kl=c.settings['kl_soft_stop_coordinate'],
                     kl_reduction=c.stage['kl']['reduction'],objective_reduction=c.settings['objective_logprob_reduction'],
                     grad_clip_norm=c.settings['grad_clip_norm'],reserve_attempt=reserve,bc_samples_per_rollout=c.settings['bc_samples_per_rollout'],
-                    snr=c.settings.get('gradient_snr_diagnostic',False),step_strategy=c.settings.get('ppo_step_strategy','uniform'))
+                    snr=c.settings.get('gradient_snr_diagnostic',False),step_strategy=c.settings['ppo_step_strategy'])
                 sketch=actor.pop('_ppo_gradient_sketch',None)
                 if actor.get('gradient_snr') is not None:
                     # 相邻两轮全局PPO梯度抽样的方向余弦；抽样只驻留内存，不进入checkpoint或记录。
@@ -545,7 +546,7 @@ def run(cargs,config,distributed):
                     rollbacks=distributed.all_gather_object(rollback)
                     root_call(distributed,lambda:atomic_json(c.session/(label+'_rejected.json'),dict(kl=kl,acceptance=accepted,actor=actor,
                         physical_and_resource_consumption_retained=True,training_state_restored=True,rollback_audits=rollbacks)))
-                    raise RuntimeError('Final Full20 KL rejected; whole training update rolled back')
+                    raise RuntimeError('Final trainable-four KL rejected; whole training update rolled back')
                 if not accepted['passed']:
                     # 回滚后继续：恢复全部学习状态后再减半学习率；本轮不计入接受轮次，只写JSON证据。
                     rollback=local_call(distributed,lambda:_restore_rollback(c,saved))
@@ -591,7 +592,7 @@ def run(cargs,config,distributed):
             wall=max(distributed.all_gather_object(time.perf_counter()-round_start))
             profile_report=profiler.report();deactivate(profile_token);profile_token=None
             record=dict(label=label,state=copy.deepcopy(c.state),collection_by_rank=distributed.all_gather_object(collection),
-                probability=initial_probability,critic=critic,actor=actor,full20_kl=kl,tensor_cache=cache_report,
+                probability=initial_probability,critic=critic,actor=actor,trainable4_kl=kl,tensor_cache=cache_report,
                 actor_seconds=actor_seconds,critic_seconds=critic_seconds,wall_seconds=wall,
                 performance_by_rank=distributed.all_gather_object(profile_report),physics_paused_during_optimization=True,
                 memory_by_rank=memory,periodic_model_fingerprints=fingerprints,

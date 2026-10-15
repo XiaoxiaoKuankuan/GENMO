@@ -118,6 +118,8 @@ class VectorExecutionReward(ExecutionReward):
                 reference.__dict__ = copy.deepcopy(self.__dict__)
                 compare_reward_evidence(result, reference.evaluate_step(row))
                 self.scalar_audits += 1
+            from .joint_limits import executed_boundaries
+            _,self._limit_runs=executed_boundaries(row,self._limit_runs)
             self.window.append(new[i])
             self._last_tick, self._episode = row['tick'], row['episode_id']
             self._previous_target = np.array(row['joint_position_target'], copy=True)

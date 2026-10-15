@@ -451,7 +451,7 @@ def build_fixed_critic_reference(transitions, critic, device, *, gamma_upper=.99
     finally:
         for name, child in critic.named_modules():
             child.training = modes[name]
-    records = [dict(context=row.context, remaining_music_seconds=row.metadata['remaining_music_seconds'],
+    records = [dict(context=row.context, critic_context=row.metadata['critic_context'], remaining_music_seconds=row.metadata['remaining_music_seconds'],
                     target=float(targets['returns'][index]), initial_prediction=row.old_value,
                     identity=row.identity, control_tick_begin=row.control_tick_begin,
                     control_tick_end=row.control_tick_end)
@@ -462,7 +462,7 @@ def build_fixed_critic_reference(transitions, critic, device, *, gamma_upper=.99
                                identity=r['identity'], control_tick_begin=r['control_tick_begin'],
                                control_tick_end=r['control_tick_end']) for r in records]).encode())
     for record in records:
-        for key, value in sorted(record['context'].items()):
+        for key, value in sorted(record['critic_context'].items()):
             tensor = value.contiguous()
             digest.update(str((key, str(tensor.dtype), tuple(tensor.shape))).encode())
             digest.update(tensor.reshape(-1).view(torch.uint8).numpy().tobytes())
@@ -480,7 +480,7 @@ def fixed_critic_diagnostic(critic, reference):
         critic.eval()
         with torch.no_grad():
             for record in reference['records']:
-                context = {key: value.to(device) for key, value in record['context'].items()}
+                context = {key: value.to(device) for key, value in record['critic_context'].items()}
                 predictions.append(float(critic(context, torch.tensor([record['remaining_music_seconds']], device=device))[0]))
                 targets.append(float(record['target']))
     finally:
@@ -579,7 +579,7 @@ def fixed_chain_drift(policy, reference, *, include_values=False):
                 _require(trace['chain'].shape[1] == policy.steps+1, 'Fixed reference denoising steps differ')
                 context = {k: v.to(device) for k, v in trace['conditions'].items()}
                 prepared = policy.prepare_conditions(context) if hasattr(policy, 'prepare_conditions') else None
-                for step in range(policy.steps):
+                for step in policy.stochastic_steps:
                     kwargs = {} if prepared is None else dict(prepared=prepared)
                     current = policy.transition_parameters(context, trace['chain'][:, step].to(device), step, **kwargs)
                     old_mean, old_std = trace['old_means'][:, step].to(device).double(), trace['old_stds'][:, step].to(device).double()

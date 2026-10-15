@@ -22,10 +22,10 @@ from .checkpoint import _validate_model_state, _validate_optimizer_state
 from .evaluation import _model_fingerprint
 from .training_checkpoint import SCHEMA, file_sha256, immutable_cpu_snapshot
 
-SCHEMA_PREHEAT = 'genmo.stage10.fixed_actor_critic_preheat.v2'
+SCHEMA_PREHEAT = 'genmo.stage2.asymmetric_fixed_actor_critic_preheat.v1'
 MATCHED = ('assets', 'kernel', 'reward', 'timing', 'physical_configuration',
     'dataset', 'data_catalog', 'source_stage1_step', 'generation_horizon')
-ARCHITECTURE = ('type', 'dimension', 'layers', 'heads', 'freeze_encoders', 'learning_rate')
+ARCHITECTURE = ('type', 'dimension', 'layers', 'heads', 'history_scales', 'history_learning_rate', 'learning_rate')
 
 
 def _value_targets(identity):
@@ -47,7 +47,8 @@ def _critical_sources(root):
          'frozen_prefix.py','run_control.py','env_adapter.py','vector_environment.py',
          'evaluation.py','evaluation_world.py','vector_evaluation.py',
          'world_collector.py','mc_calibration.py','complete_episode.py','trainer.py',
-         'pretrained_critic.py','rewards.py','columnar_reward.py','vector_reward_adapter.py')
+         'pretrained_critic.py','tracking_context.py','joint_limits.py','vector_generation.py',
+         'rewards.py','columnar_reward.py','vector_reward_adapter.py','vector_reward_math.py')
         or p.name.startswith('stable_')]
     signatures = {}
     import hashlib

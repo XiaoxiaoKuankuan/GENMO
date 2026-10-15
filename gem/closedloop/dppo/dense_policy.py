@@ -144,10 +144,11 @@ def dense_precision_scope(precision):
 
 class DenseDiffusionPolicy(DPPODiffusionPolicy):
     def __init__(self,actor,*,std_schedule,precision='native_fp32',attention='sdpa_math',compile_denoiser=False,
-                 precise_output=True,linear_execution='native_gemm',weight_gradient='direct_joint_gemm',steps=20,eta=.1,guidance_scale=2.5,generation_frames=120):
+                 precise_output=True,linear_execution='native_gemm',weight_gradient='direct_joint_gemm',steps=20,eta=.1,guidance_scale=2.5,generation_frames=120,deterministic_steps=()):
         if steps!=20 or len(std_schedule)!=20:
             raise ValueError('当前 production behavior must retain the full 20-step chain')
-        super().__init__(actor,steps=steps,eta=eta,std_floor=min(std_schedule),std_schedule=std_schedule,
+        super().__init__(actor,steps=steps,eta=eta,std_floor=min(v for v in std_schedule if v>0),std_schedule=std_schedule,
+            deterministic_steps=deterministic_steps,
             guidance_scale=guidance_scale,cfg_batch=True,numerical_layout='legacy_step_lane',defer_checks=True)
         self.numerical_layout='native_dense'
         self.batched_conditions=True

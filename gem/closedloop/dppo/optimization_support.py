@@ -161,7 +161,7 @@ def probability_check_local(policy, transitions, *, global_manifest=None, distri
             _validate_actor_transitions(policy, rows)
         device = next(policy.actor.parameters()).device
         checks = torch.zeros((len(rows), 3), dtype=torch.float64, device=device)
-        flat = [(index, step) for index in range(len(rows)) for step in range(policy.steps)]
+        flat = [(index, step) for index in range(len(rows)) for step in policy.stochastic_steps]
         conditions = ConditionGraphCache(policy, tensor_cache) if tensor_cache is not None and hasattr(policy, 'prepare_conditions') else None
         if conditions is not None and getattr(policy, 'defer_checks', False):
             conditions.prime(rows)

@@ -1,4 +1,4 @@
-"""服务器1真实八卡的 Stage10 算法和数值执行有限验收入口。
+"""服务器2真实八卡的 Stage10 算法和数值执行有限验收入口。
 
 本脚本只运行命令行明确指定的有限检查，使用独立输出目录，输出完整JSON与
 各rank计时，不启动长期训练。math阶段用CUDA核对直接高斯比值、联合KL、mask、
@@ -86,13 +86,13 @@ def probability_checks(policy,context):
     start=time.perf_counter();trace=policy.sample_rollout(context,generator=generators)
     result=dict(generation_seconds=time.perf_counter()-start,variants=[],behavior_requires_grad=False)
     assert not any(trace[k].requires_grad for k in ['chain','old_means','old_stds','old_log_probs'])
-    batch=len(trace['chain']);flat=batch*20
+    batch=len(trace['chain']);flat=batch*19
     for micro in [1,4,8,16,32,64,128]:
         maxima=torch.zeros(3,device=device,dtype=torch.float64)
         order=torch.randperm(flat,device=device,generator=torch.Generator(device=device).manual_seed(42))
         start=time.perf_counter()
         for begin in range(0,flat,micro):
-            ids=order[begin:begin+micro];rows=ids//20;steps=ids%20
+            ids=order[begin:begin+micro];rows=ids//19;steps=ids%19
             conditions={k:v[rows] for k,v in context.items()}
             # 有梯度与无梯度版本分别检查，不能用采样时的detached网络输出替代重算。
             for grad in [False,True]:
@@ -124,7 +124,7 @@ def probability_checks(policy,context):
         optimizer=torch.optim.Adam(policy.actor.parameters(),lr=1e-7)
         for _ in range(2):
             optimizer.zero_grad(set_to_none=True)
-            prediction=policy.transition_parameters(context,trace['chain'][:,19],19)['mean']
+            prediction=policy.transition_parameters(context,trace['chain'][:,18],18)['mean']
             prediction.square().mean().backward();optimizer.step()
         with torch.no_grad():
             torch.testing.assert_close(policy.transition_parameters(context,trace['chain'][:,0],0)['mean'],early,atol=0,rtol=0)
@@ -137,8 +137,14 @@ def probability_checks(policy,context):
 def critic_checks(actor,context):
     device=context['known_qpos30'].device
     critic=PretrainedConditionCritic(actor).to(device)
+    context=dict(context)
+    context['proprio_history_times']=context['decision_time'][:,None]+torch.arange(-49,1,device=device,dtype=torch.float64)[None]*.02
+    valid=context['proprio_history_valid']
+    context.update(tracking_history=torch.where(valid[...,None],torch.cat((context['proprio_history'],
+        torch.randn(len(valid),50,42,device=device)),dim=-1),0.),tracking_history_valid=valid.clone(),
+        tracking_history_times=context['proprio_history_times'].clone(),tracking_reference_times=context['proprio_history_times'].clone())
     assert not any(p.requires_grad for m in critic.encoder_modules() for p in m.parameters())
-    for name in ['music_embedder','cond_exists_embedder','history_encoder','prefix_encoder']:
+    for name in ['music_embedder','cond_exists_embedder','prefix_encoder']:
         a,c=getattr(actor,name),getattr(critic,name)
         if a is not None:
             for p,q in zip(a.parameters(),c.parameters()):assert p.data_ptr()!=q.data_ptr() and torch.equal(p,q)
@@ -171,7 +177,7 @@ def main():
     parser.add_argument('--linear-execution',default='native_gemm')
     parser.add_argument('--chains',type=int,default=8)
     parser.add_argument('--frames',type=int,choices=[60,120],default=60)
-    parser.add_argument('--frozen-prefix-steps',type=int,choices=[0,16],default=0)
+    parser.add_argument('--frozen-prefix-steps',type=int,choices=[15],default=15)
     args=parser.parse_args();rank=int(os.environ['RANK']);device=torch.device('cuda:'+os.environ['LOCAL_RANK'])
     torch.cuda.set_device(device);torch.set_num_threads(4);torch.manual_seed(42)
     args.output.mkdir(parents=True,exist_ok=True)
@@ -190,8 +196,8 @@ def main():
             if args.phase=='critic':result=critic_checks(actor,context)
             else:
                 from gem.closedloop.dppo.frozen_prefix import FrozenPrefixPolicy
-                cls=FrozenPrefixPolicy if args.frozen_prefix_steps else DenseDiffusionPolicy
-                policy=cls(actor,std_schedule=[.001]*16+[.08,.1,.12,.12],
+                cls=FrozenPrefixPolicy
+                policy=cls(actor,std_schedule=[.001]*15+[.04,.06,.08,.10,0.],
                     precision=args.precision,attention=args.attention,compile_denoiser=args.compile,
                     linear_execution=args.linear_execution,generation_frames=args.frames)
                 actual_lengths=set()

@@ -17,11 +17,9 @@ def validate_stopping_iteration(requested, stage):
 
 
 def build_policy(actor, settings, precision, *, frozen_actor=None):
-    from .dense_policy import DenseDiffusionPolicy
-    cls=DenseDiffusionPolicy;extra={}
-    if settings.get('frozen_prefix_steps',0):
-        from .frozen_prefix import FrozenPrefixPolicy
-        cls=FrozenPrefixPolicy;extra.update(frozen_prefix_steps=settings['frozen_prefix_steps'],frozen_actor=frozen_actor)
+    from .frozen_prefix import FrozenPrefixPolicy
+    cls=FrozenPrefixPolicy
+    extra=dict(frozen_prefix_steps=15,frozen_actor=frozen_actor)
     return cls(actor, **extra, std_schedule=settings['std_schedule'], steps=settings['denoising_steps'],
         eta=settings['eta'], guidance_scale=settings['guidance_scale'], precision=precision['mode'],
         attention=precision['attention'], linear_execution=precision['linear_execution'],

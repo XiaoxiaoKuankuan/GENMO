@@ -48,11 +48,14 @@ class RolloutTensorCache:
                 return
             for key in self.rows[0].context:
                 self.host['context/'+key] = torch.cat([row.context[key].detach().to(source_device) for row in self.rows], 0)
+            for key in self.rows[0].metadata['critic_context']:
+                self.host['critic/'+key]=torch.cat([row.metadata['critic_context'][key].detach().to(source_device)
+                                                   for row in self.rows],0)
             prototype = next((row for row in self.rows if row.chain is not None), None)
             if prototype is not None:
                 trace = prototype.metadata['sampler_trace']
                 self.kernel = json.dumps(trace['kernel_config'], sort_keys=True)
-                extractors = dict(chain=lambda r: r.chain, old_log_prob=lambda r: r.old_log_prob,
+                extractors = dict(sampling_noise=lambda r:r.metadata['sampler_trace']['sampling_noise'][0],chain=lambda r: r.chain, old_log_prob=lambda r: r.old_log_prob,
                     free_mask=lambda r: r.free_mask,
                     old_means=lambda r: r.metadata['sampler_trace']['old_means'][0],
                     old_stds=lambda r: r.metadata['sampler_trace']['old_stds'][0])
@@ -84,6 +87,9 @@ class RolloutTensorCache:
             self.host = {key: value.pin_memory() for key, value in self.host.items()}
         if self.mode == 'device':
             self._block(0)
+
+    def critic_context(self,rows):
+        return {key.removeprefix('critic/'):self.get(key,rows) for key in self.host if key.startswith('critic/')}
 
     def _block(self, index):
         if self.closed:

@@ -161,18 +161,22 @@ def evaluate_columns(reward, trace, *, timings=None):
         if name == 'music': scores[name] = (cfg['music_mix']['beat']*beats+cfg['music_mix']['intensity']*np.asarray(intensity)) if reward.music_enabled else np.zeros(n)
         else:
             scores[name] = _finite(col('reward_primitives','components',name,'score'),name,(n,))
-        if np.any((scores[name]<0)|(scores[name]>1+1e-12)): raise ValueError('Reward score outside [0,1]')
-        scores[name] = np.minimum(scores[name],1.)
+        if np.any(scores[name]<0) or (name != "joint_limit" and np.any(scores[name]>1+1e-12)): raise ValueError('Reward score outside [0,1]')
+        if name != "joint_limit": scores[name] = np.minimum(scores[name],1.)
     rates = {name: scores[name]*cfg[key]*(-1 if 'penalty' in key else 1)*
              (np.asarray(gates) if name in ('track','music') else 1.) for name,key in WEIGHTS.items()}
     total = sum(rates.values())
     mark('consistency_and_reward_integration_seconds')
     results = []
+    limit_runs=reward._limit_runs.copy()
+    from .joint_limits import executed_boundaries
     for i,row in enumerate(trace):
+        boundary,limit_runs=executed_boundaries(row,limit_runs)
+        physical_state=reward._physical_state(row)
         if i not in full_indices:
             results.append(dict(version=cfg['version'],tick=int(ticks[i]),episode_id=str(episodes[i]),
                 reward=float(cfg['dt']*total[i]),reward_rate=float(total[i]),reward_is_integrated=True,dt_s=cfg['dt'],
-                transition_valid=True,errors=[],activity=activities[i],evidence_level='training'))
+                transition_valid=True,errors=[],activity=activities[i],joint_limit_diagnostics=boundary,evidence_level='training'))
             continue
         music_raw = {'reason': 'music_reward_disabled'}
         if reward.music_enabled:
@@ -188,7 +192,7 @@ def evaluate_columns(reward, trace, *, timings=None):
         for name,key in WEIGHTS.items():
             primitive = row['reward_primitives']['components'][name] if name!='music' else None
             gate = gates[i] if name=='track' or name=='music' and reward.music_enabled else 1.
-            components[name] = dict(enabled=name!='music' or reward.music_enabled,valid=True if primitive is None else bool(primitive['valid']),
+            components[name] = dict(enabled=(name!='music' or reward.music_enabled) and (name!='stable' or cfg['stable_weight']!=0),valid=True if primitive is None else bool(primitive['valid']),
                 raw=music_raw if primitive is None else primitive['raw'],
                 normalized=(dict(beat=float(beats[i]),intensity=intensity[i]) if reward.music_enabled else {}) if primitive is None else primitive['normalized'],
                 score=float(scores[name][i]),weight=cfg[key]*(-1 if 'penalty' in key else 1),gate=gate,
@@ -201,8 +205,8 @@ def evaluate_columns(reward, trace, *, timings=None):
             mean_sum_w=float(np.mean([p['sum_w'] for p in power[i]])),max_w=max(p['max_w'] for p in power[i]),reward_weight=0.)
         results.append(dict(version=cfg['version'],tick=int(ticks[i]),episode_id=str(episodes[i]),
             reward=float(cfg['dt']*total[i]),reward_rate=float(total[i]),reward_is_integrated=True,dt_s=cfg['dt'],
-            transition_valid=True,errors=[],components=components,activity=activities[i],
-            diagnostics=dict(power=power_info,consistency=dict(valid=True,
+            transition_valid=True,errors=[],components=components,activity=activities[i],joint_limit_diagnostics=boundary,
+            diagnostics=dict(power=power_info,physical_state=physical_state,consistency=dict(valid=True,
                 raw={k:float(v[i]) for k,v in consistency_raw.items()},
                 normalized={k:float(v[i]) for k,v in consistency_norm.items()},
                 tolerances=copy.deepcopy(cfg['consistency']),reward_weight=0.)),scales=copy.deepcopy(cfg['scales'])))

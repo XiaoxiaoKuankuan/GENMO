@@ -104,7 +104,12 @@ def generate_batch(policy, packets, *, shared_storage=False, device_trace=False)
         # 内存训练直接交付采样时的条件副本，确保条件、free_mask与完整随机链同卡。
         # 原磁盘路径继续使用CPU条件，实际部署需要的qpos输出仍单独传回CPU。
         context=local_trace['conditions'] if device_trace else contexts[i]
-        outputs.append(dict(context=context, meta=meta, generated=generated, trace=local_trace))
+        from .tracking_context import build_critic_context
+        critic_context=build_critic_context(context,p['snapshot'])
+        from .joint_limits import generated_boundaries
+        generated['joint_limit_diagnostics']=generated_boundaries(generated['qpos_world'],
+            local_trace['free_mask'][0,:,9:].cpu().numpy(),p['snapshot'],policy.actor.endecoder.kinematics.joint_order)
+        outputs.append(dict(context=context, critic_context=critic_context, meta=meta, generated=generated, trace=local_trace))
     if shared_storage:
         block=dict(schema='genmo.world_batch_raw.v3',trace=copied['trace'],generated=[item['generated'] for item in outputs])
         for index,item in enumerate(outputs):item['_shared_raw_block']=(block,index)

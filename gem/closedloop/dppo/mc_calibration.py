@@ -28,6 +28,10 @@ class ValueConditionCache:
     def __init__(self, rows, device):self.rows=rows;self.device=torch.device(device)
     def context(self, rows):
         return {k:torch.cat([r.context[k] for r in rows]).to(self.device) for k in rows[0].context}
+    def critic_context(self,rows):
+        return {key:torch.cat([r.metadata['critic_context'][key] for r in rows]).to(self.device)
+                for key in rows[0].metadata['critic_context']}
+
     def get(self, key, rows):
         if key!='remaining_music_seconds':raise KeyError(key)
         return torch.tensor([r.metadata[key] for r in rows],device=self.device,dtype=torch.float32)
@@ -163,7 +167,7 @@ def independent_mc_metrics(c, bank):
     predictions=[];c.critic.eval()
     for start in range(0,len(rows),128):
         part=rows[start:start+128];cache=ValueConditionCache(part,c.distributed.device)
-        predictions.extend(c.critic(cache.context(part),cache.get('remaining_music_seconds',part)).cpu().tolist())
+        predictions.extend(c.critic(cache.critic_context(part),cache.get('remaining_music_seconds',part)).cpu().tolist())
     shards=c.distributed.all_gather_object(dict(predictions=predictions,targets=targets.tolist(),bank=bank.report()))
     p=[v for r in shards for v in r['predictions']];t=[v for r in shards for v in r['targets']]
     if not t:raise ValueError('No complete nonadministrative MC validation episode')

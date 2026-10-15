@@ -80,11 +80,19 @@ class DeviceRolloutBuffer:
                 row.next_context=(None if row.next_context is None else {k:v.detach().to(device,copy=True) for k,v in row.next_context.items()})
                 row.chain=row.chain.detach().to(device);row.old_log_prob=row.old_log_prob.detach().to(device)
                 row.free_mask=row.free_mask.detach().to(device)
+                from .tracking_context import validate_tracking_context
+                for key in ('critic_context','next_critic_context'):
+                    if row.metadata[key] is not None:
+                        row.metadata[key]={k:v.detach().to(device,copy=True) for k,v in row.metadata[key].items()}
+                        validate_tracking_context(row.metadata[key])
+                        actor_context=row.context if key=='critic_context' else row.next_context
+                        if actor_context is None or any(not torch.equal(v,row.metadata[key][k]) for k,v in actor_context.items()):
+                            raise ValueError('Critic and Actor snapshots have different causal conditions')
                 trace=row.metadata['sampler_trace']
-                for key in ['chain','old_means','old_stds','old_log_probs','free_mask']:
+                for key in ['chain','old_means','old_stds','old_log_probs','free_mask','sampling_noise']:
                     trace[key]=trace[key].detach().to(device)
                 if trace['kernel_config']!=policy.kernel_config:raise ValueError('Behavior and learner kernel identities differ')
-                if row.chain.shape!=(21,policy.generation_frames,30) or row.chain.dtype!=torch.float32 or row.old_log_prob.shape!=(20,) or row.old_log_prob.dtype!=torch.float64:
+                if row.chain.shape!=(21,policy.generation_frames,30) or row.chain.dtype!=torch.float32 or row.old_log_prob.shape!=(19,) or row.old_log_prob.dtype!=torch.float64:
                     raise ValueError('GPU buffer requires the full FP32 20-step chain and FP64 joint old probability')
                 if row.executed_physics_steps!=4*row.executed_control_steps or row.control_tick_end-row.control_tick_begin!=12*row.executed_control_steps:
                     raise ValueError('Physical work or timestamp count changed')
