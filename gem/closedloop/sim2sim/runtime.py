@@ -208,6 +208,7 @@ class Sim2SimRuntime:
         self.stop=threading.Event();self.finished=threading.Event();self.failure=None
         self.viewer_heartbeat=None
         self.models=config['models'];self.model_index=0;self.track_index=0;self.actor=None
+        self._announced_music=None
         self.episodes=[];self.pending=None;self.episode_number=0;self.audio=None
         self.scripted_events=deque(sorted(scripted_events,key=lambda e:e['at_seconds']))
         self.total_controls=0;self.frozen_models=[];self.calibrations={}
@@ -315,6 +316,9 @@ class Sim2SimRuntime:
 
     def _episode(self):
         track=self.tracks[self.track_index]
+        if self._announced_music!=track.audio:
+            print(f'[MUSIC] 当前音乐 [{self.track_index+1}/{len(self.tracks)}]: {track.name}',flush=True)
+            self._announced_music=track.audio
         self._publish(status='preparing_music',music=track.name)
         music=prepare_music(track,Path(self.config['paths']['output_root'])/'music_cache',
                             decode_audio=self.config['runtime']['audio'])

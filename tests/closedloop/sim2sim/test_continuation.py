@@ -47,6 +47,7 @@ def make_runtime(tmp_path,monkeypatch,continuous=True,pending=None):
     runtime.config=dict(paths={'output_root':str(tmp_path)},runtime={'audio':False,'warmup_control_steps':50,
         'auto_next':False,'lateness_limit_seconds':.1},termination={'non_yaw_orientation_error_rad':.6})
     runtime.tracks=[track];runtime.track_index=0;runtime.actor=SimpleNamespace(name='test',identity={'behavior_id':'test'})
+    runtime._announced_music=None
     runtime.calibrations={'test':{'deadline_ticks':240}};runtime.episode_number=0;runtime.backend=Backend()
     runtime.commands=queue.Queue();runtime.stop=threading.Event();runtime.scripted_events=[]
     runtime.total_controls=0;runtime.max_seconds=.08;runtime.headless=True;runtime.record=False
