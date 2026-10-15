@@ -39,6 +39,7 @@ def device_packet(row,engine):
         if torch.is_tensor(v):
             v=v[0].numpy();return v.item() if v.ndim==0 else v
         if isinstance(v,dict):return {k:host(x) for k,x in v.items()}
+        if isinstance(v,(list,tuple)):return type(v)(host(x) for x in v)
         return v
     packet=host(packet);packet['episode_id']=row['episode_id'];return packet
 
