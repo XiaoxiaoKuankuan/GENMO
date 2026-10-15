@@ -76,8 +76,11 @@ class UpperEnvironment:
         runtime = config.get('runtime', {})
         self.timing_contract = runtime.get('timing_contract', 'legacy_audit_inclusive.v1')
         from .deployment_clock import MODELED_CLOCK, clock_for_config
-        if self.timing_contract not in {'legacy_audit_inclusive.v1', 'deployment_critical.v2', MODELED_CLOCK}:
+        if self.timing_contract not in {'legacy_audit_inclusive.v1', 'deployment_critical.v2', MODELED_CLOCK,'deployment_calibration.no_execution.v1'}:
             raise ValueError('Unsupported upper environment timing_contract')
+        if self.timing_contract=='deployment_calibration.no_execution.v1':
+            if runtime.get('phase_contract')!='single_request_calibration.v1':raise ValueError('Unmeasured clock is calibration-only')
+            self.latency_budget_s=float(config['timing']['calibration_reservation_seconds'])
         self.deployment_clock = clock_for_config(config)
         if self.deployment_clock is not None:
             self.latency_budget_s = self.deployment_clock.budget_seconds

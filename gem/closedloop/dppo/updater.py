@@ -172,7 +172,7 @@ def final_kl(policy,rows,cache,manifest,*,distributed,microbatch=256,clip=.05,ob
     records=torch.zeros(len(local),4,columns,device=device,dtype=torch.float64)
     start=time.perf_counter()
     with _local_phase(distributed,'stage2_final_trainable4_kl'),policy_phase(policy):
-        conditions=ConditionGraphCache(policy,cache);conditions.prime(local)
+        conditions=ConditionGraphCache(policy,cache,include_frozen=False);conditions.prime(local)
         pairs=[(i,s) for i in range(len(local)) for s in policy.trainable_steps]
         for offset in range(0,len(pairs),microbatch):
             part=pairs[offset:offset+microbatch];samples=[local[i] for i,_ in part];steps=[s for _,s in part]

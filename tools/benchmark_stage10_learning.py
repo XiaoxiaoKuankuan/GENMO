@@ -79,7 +79,7 @@ def heldout_gain(policy,rows,cache,manifest,d,*,microbatch,gamma_denoising):
     totals=torch.zeros(3,dtype=torch.float64,device=d.device)
     with policy_phase(policy):
         conditions=ConditionGraphCache(policy,cache);conditions.prime(local)
-        pairs=[(i,s) for i in range(len(local)) for s in range(20)]
+        pairs=[(i,s) for i in range(len(local)) for s in policy.trainable_steps]
         for offset in range(0,len(pairs),microbatch):
             part=pairs[offset:offset+microbatch];samples=[local[i] for i,_ in part];steps=[s for _,s in part]
             params,mask=_parameters(policy,samples,steps,d.device,cache,conditions)
@@ -171,7 +171,7 @@ def calibrate_actor(a,d,source,rank_state,policy,optimizer,anchor,generators,cac
         kl=final_kl(policy,rows,cache,manifest,distributed=d,microbatch=a.kl_microbatches[0],
             clip=kwargs['clip'],objective_reduction=kwargs['objective_reduction'])
         candidate=dict(actor_lr=lr,bc_initial=a.calibrate_bc_initial,
-            update=result,full20_kl=kl,hard_kl=check_kl(kl,stage['kl']),actor_seconds=seconds,
+            update=result,trainable4_kl=kl,hard_kl=check_kl(kl,stage['kl']),actor_seconds=seconds,
             peak_memory_by_rank=d.all_gather_object(torch.cuda.max_memory_allocated()))
         # 同一预热后真实rollout可比较三个更新目标，再各自做独立物理评估；训练交互完全相同。
         if a.save_evaluation_actor:
@@ -185,7 +185,7 @@ def calibrate_actor(a,d,source,rank_state,policy,optimizer,anchor,generators,cac
             if admissible:
                 def save_actor():
                     path=a.output/f'actor_{lr:g}_{kwargs["objective_reduction"]}_K{a.sampled_steps}.pt'
-                    payload=dict(schema='genmo.closedloop.stage10.actor_evaluation',evaluation_only=True,
+                    payload=dict(schema='genmo.stage2.asymmetric_actor_evaluation.v1',evaluation_only=True,
                         complete_update_and_soft_kl_passed=True,
                         actor=immutable_cpu_snapshot(policy.actor.state_dict()),kernel=copy.deepcopy(policy.kernel_config),
                         source_identity=source['identity'],source_case=str(a.case),source_case_sha256=report['source_case_sha256'],
@@ -194,7 +194,7 @@ def calibrate_actor(a,d,source,rank_state,policy,optimizer,anchor,generators,cac
                             optimizer_steps=result['optimizer_steps'],planned_optimizer_steps=result['planned_optimizer_steps'],
                             real_global_chains=len(manifest),kl_limits=copy.deepcopy(stage['kl']),
                             publication_soft_kl=candidate['publication_soft_kl']),
-                        full20_kl=kl,hard_kl=candidate['hard_kl'])
+                        trainable4_kl=kl,hard_kl=candidate['hard_kl'])
                     temporary=path.with_suffix('.partial')
                     with temporary.open('xb') as f:torch.save(payload,f);f.flush();os.fsync(f.fileno())
                     os.link(temporary,path);temporary.unlink()
@@ -266,7 +266,7 @@ def compare_critics(a,d,actor,train,cache,rows,targets,manifest,stage):
     for kind in ('pretrained_temporal','legacy_mlp_control'):
         torch.manual_seed(42)
         critic=(PretrainedConditionCritic(actor,dimension=stage['critic']['dimension'],layers=stage['critic']['layers'],
-            heads=stage['critic']['heads'],freeze_encoders=True) if kind=='pretrained_temporal' else
+            heads=stage['critic']['heads'],history_scales=stage['critic']['history_scales']) if kind=='pretrained_temporal' else
             UpperCritic(qpos_mean=actor.endecoder.mean,qpos_std=actor.endecoder.std,
                 proprio_scales=tuple(train.model.proprio_scales))).to(d.device)
         d.broadcast_module(critic)
@@ -353,7 +353,7 @@ def main():
     p.add_argument('--microbatches',type=int,nargs='+',default=[64,128,256])
     p.add_argument('--kl-microbatches',type=int,nargs='+',default=[256,512,1024])
     p.add_argument('--repeats',type=int,default=3)
-    p.add_argument('--sampled-steps',type=int,choices=[8,20],default=8)
+    p.add_argument('--sampled-steps',type=int,choices=[4],default=4)
     p.add_argument('--variants',nargs='+',choices=['reference','bf16_cudnn','compiled_fp32','stable_bmm','wide_tile','weight_bf16x3','weight_bf16x6'],default=['reference'])
     p.add_argument('--profile',action='store_true',help='另测一个预热后的真实CPU/CUDA优化步，不纳入吞吐计时')
     p.add_argument('--profile-only',action='store_true',help='只在明确指定微批做独立CUDA trace，不重跑完整吞吐扫描')
@@ -390,7 +390,7 @@ def main():
     d=DistributedCollectives(rank,8,tensor_group=group,device=f'cuda:{rank}')
     root_call(d,lambda:a.output.mkdir(parents=True,exist_ok=False))
     case=json.loads((a.case/'case.json').read_text())
-    if case['schema']!='genmo.stage10.fixed_learning_case' or len(case['ranks'])!=8:raise ValueError('Complete eight-rank 当前 case required')
+    if case['schema']!='genmo.stage2.asymmetric_fixed_learning_case.v1' or len(case['ranks'])!=8:raise ValueError('Complete eight-rank 当前 case required')
     if file_sha256(a.case/'learning_state.pt')!=case['learning_state_sha256']:raise ValueError('Learning state SHA changed')
     r=a.case/f'rank{rank:02d}';record=next(x for x in case['ranks'] if x['rank']==rank)
     if file_sha256(r/'rank_state.pt')!=record['rank_state_sha256'] or file_sha256(r/'manifest.json')!=record['rollout_manifest_sha256']:
@@ -528,7 +528,7 @@ def main():
                             adam=compare_named(state,reference['adam'],atol=1e-7,rtol=2e-4),
                             terminal_outputs=compare_named({'mean':outputs},{'mean':reference['outputs']},atol=1e-7,rtol=0.),
                             terminal_max_change_from_base=float((outputs-baseline_outputs).abs().max()),
-                            full20_kl=kl,hard_kl=check_kl(kl,stage['kl']),
+                            trainable4_kl=kl,hard_kl=check_kl(kl,stage['kl']),
                             precision_contract_change=variant!='reference')
                     diagnostic=root_call(d,compare)
                 memory=d.all_gather_object(dict(allocated=torch.cuda.max_memory_allocated(),reserved=torch.cuda.memory_reserved()))
@@ -565,7 +565,7 @@ def main():
         report['profiler']=root_call(d,lambda:summarize_gpu_trace(trace))
         report['profiler']['microbatch']=profile_micro
         if a.profile_only:
-            report['profile_final_full20_kl']=final_kl(policy,rows,cache,manifest,distributed=d,
+            report['profile_final_trainable4_kl']=final_kl(policy,rows,cache,manifest,distributed=d,
                 microbatch=a.kl_microbatches[0],clip=settings['ppo_clip'],objective_reduction=settings['objective_logprob_reduction'])
         publish()
     report['compute_recommendation']=recommend_compute_profile(report,torch.cuda.get_device_properties(d.device).total_memory)

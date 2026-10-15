@@ -400,7 +400,8 @@ def run(cargs,config,distributed):
         root_call(distributed,lambda:atomic_json(c.output/'training_identity.json',c.identity))
         root_call(distributed,lambda:(c.session/'resolved_config.yaml').write_text(yaml.safe_dump(c.base_config,allow_unicode=True,sort_keys=False)))
         if cargs.calibrate_only:
-            calibration=c.vector.calibrate()
+            calibration=c.vector.calibrate(warmup=c.config['timing']['calibration_warmup'],
+                samples=c.config['timing']['calibration_samples'])
             report.update(status='passed',scope='single_request_deployment_calibration_not_training',
                 calibrations=distributed.all_gather_object(calibration))
             root_call(distributed,lambda:atomic_json(c.output/'deployment_calibration.json',report))
@@ -475,7 +476,7 @@ def run(cargs,config,distributed):
             full_probability=(c.state['rollouts_completed']==0 or strict or
                 (probability_frequency>0 and c.state['rollouts_completed']%probability_frequency==0))
             initial_probability=probability_check_local(c.policy,rows,global_manifest=manifest,distributed=distributed,
-                denoising_microbatch=c.settings['kl_microbatch'],tensor_cache=cache,
+                denoising_microbatch=c.settings['kl_microbatch'],tensor_cache=cache,include_frozen=full_probability,
                 global_indices=None if full_probability else
                     [next(i for i,m in enumerate(manifest) if m['owner_rank']==rank and m['has_free'])
                      for rank in range(8) if any(m['owner_rank']==rank and m['has_free'] for m in manifest)])
@@ -494,7 +495,7 @@ def run(cargs,config,distributed):
                 rank_files=distributed.all_gather_object(dict(rank=distributed.rank,
                     rollout_manifest_sha256=file_sha256(case/f'rank{distributed.rank:02d}'/'manifest.json'),
                     rank_state_sha256=file_sha256(case/f'rank{distributed.rank:02d}'/'rank_state.pt')))
-                root_call(distributed,lambda:atomic_json(case/'case.json',dict(schema='genmo.stage10.fixed_learning_case',
+                root_call(distributed,lambda:atomic_json(case/'case.json',dict(schema='genmo.stage2.asymmetric_fixed_learning_case.v1',
                     real_global_chains=len(manifest),learning_state_sha256=file_sha256(case/'learning_state.pt'),
                     nonempty_adam=bool(saved['actor_optimizer']['state']),ranks=rank_files,
                     evidence_scope='real_PhysX_training_inputs_not_full_physical_archive')))

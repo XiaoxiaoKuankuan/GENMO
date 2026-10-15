@@ -21,7 +21,7 @@ from .budget import atomic_json
 from .buffer import UpperTransition,cpu_snapshot
 from .training_checkpoint import file_sha256
 
-SCHEMA='genmo.stage10.validation_rollout'
+SCHEMA='genmo.stage2.asymmetric_validation_rollout.v1'
 
 
 def persist_rollout(path,rows,targets,manifest,*,kernel,identity,full_execution=True,guard=None):

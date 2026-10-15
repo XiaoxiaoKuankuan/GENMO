@@ -111,7 +111,7 @@ def generate_batch(policy, packets, *, shared_storage=False, device_trace=False)
             local_trace['free_mask'][0,:,9:].cpu().numpy(),p['snapshot'],policy.actor.endecoder.kinematics.joint_order)
         outputs.append(dict(context=context, critic_context=critic_context, meta=meta, generated=generated, trace=local_trace))
     if shared_storage:
-        block=dict(schema='genmo.world_batch_raw.v3',trace=copied['trace'],generated=[item['generated'] for item in outputs])
+        block=dict(schema='genmo.stage2.asymmetric_world_batch.v1',trace=copied['trace'],generated=[item['generated'] for item in outputs])
         for index,item in enumerate(outputs):item['_shared_raw_block']=(block,index)
     return outputs, dict(condition_batch_seconds=condition_end-started,
         generate_and_world_seconds=generated_end-condition_end, bulk_trace_transfer_seconds=finished-generated_end,

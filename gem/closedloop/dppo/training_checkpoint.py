@@ -140,7 +140,7 @@ def load_evaluation_actor(path,*,actor,kernel,assets,execution_binding=None):
         return dict(kind='complete_checkpoint_evaluation_only',path=str(Path(path).resolve()),sha256=file_sha256(path),
             source_iteration=payload['state']['iteration'],source_policy_version=payload['state']['policy_version'],
             training_resume=False)
-    if (payload.get('schema')!='genmo.closedloop.stage10.actor_evaluation' or
+    if (payload.get('schema')!='genmo.stage2.asymmetric_actor_evaluation.v1' or
             payload.get('evaluation_only') is not True or payload.get('kernel')!=kernel or
             payload.get('source_identity',{}).get('assets')!=assets or
             payload.get('hard_kl',{}).get('passed') is not True or

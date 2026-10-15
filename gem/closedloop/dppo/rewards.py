@@ -364,6 +364,8 @@ class ExecutionReward:
                         or len(set(indices)) != len(indices)
                         or list(selected or []) != [names[i] for i in indices]):
                     raise ValueError(f"motion_tracking.{name} selected {kind} names/order differ from indices")
+                if name.startswith("body_") and list(selected)!=list(body_names):
+                    raise ValueError("Body tracking must cover the full original MotionCommand body set")
             if name == 'foot_height' and set(term['body_names']) != {'l_ankle_roll_link','r_ankle_roll_link'}:
                 raise ValueError('Foot height requires both ankle roll links')
             if name == 'leg_joint_pos' and term['joint_names'] != LEG_JOINT_NAMES:

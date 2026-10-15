@@ -356,8 +356,9 @@ class WorldEnvironmentCollector(VectorEnvironmentCollector):
                 for slot,value in records.items():durations[slot].append(value)
         self._drive({i:backend_operation('retire') for i in range(self.num_envs)})
         clock=self.states[0].resource.env.deployment_clock
-        return dict(durations=durations,latency_budget_s=clock.budget_seconds,batches=self.batch_reports,
-            deployment_profile_sha256=clock.sha256,scope='wallclock_only_fixed_modeled_deployment_v3')
+        return dict(durations=durations,calibration_reservation_seconds=self.states[0].resource.env.latency_budget_s,
+            batches=self.batch_reports,deployment_profile_sha256=None if clock is None else clock.sha256,
+            scope='measured_generation_prepare_wallclock_without_execution_no_prior_latency_profile')
 
     def close(self):
         self.cancelled.set()

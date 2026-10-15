@@ -143,7 +143,7 @@ def _old_kernel(rows, steps, device, cache=None):
 @torch.no_grad()
 @profiled('learning.probability_check', gpu=True)
 def probability_check_local(policy, transitions, *, global_manifest=None, distributed=None,
-                            denoising_microbatch=4, global_indices=None, tensor_cache=None):
+                            denoising_microbatch=4, global_indices=None, tensor_cache=None, include_frozen=True):
     """完整零更新检查仅用于启动／周期诊断；原始概率、ratio 和独立公式门槛不放宽。"""
     from gem.closedloop.dppo.trainer import _validate_actor_transitions
     if type(denoising_microbatch) is not int or denoising_microbatch < 1:
@@ -161,8 +161,8 @@ def probability_check_local(policy, transitions, *, global_manifest=None, distri
             _validate_actor_transitions(policy, rows)
         device = next(policy.actor.parameters()).device
         checks = torch.zeros((len(rows), 3), dtype=torch.float64, device=device)
-        flat = [(index, step) for index in range(len(rows)) for step in policy.stochastic_steps]
-        conditions = ConditionGraphCache(policy, tensor_cache) if tensor_cache is not None and hasattr(policy, 'prepare_conditions') else None
+        flat = [(index, step) for index in range(len(rows)) for step in (policy.stochastic_steps if include_frozen else policy.trainable_steps)]
+        conditions = ConditionGraphCache(policy, tensor_cache,include_frozen=include_frozen) if tensor_cache is not None and hasattr(policy, 'prepare_conditions') else None
         if conditions is not None and getattr(policy, 'defer_checks', False):
             conditions.prime(rows)
         for start in range(0, len(flat), denoising_microbatch):
@@ -190,5 +190,6 @@ def probability_check_local(policy, transitions, *, global_manifest=None, distri
     maximum = checks.amax(0).cpu()
     if not torch.isfinite(maximum).all() or (maximum > torch.tensor([1e-4, 1e-3, 1e-8])).any():
         raise FloatingPointError(f'Zero-update probability mismatch: {maximum.tolist()}')
-    return dict(passed=True, max_abs_log_probability_difference=float(maximum[0]),
+    return dict(passed=True,checked_steps=list(policy.stochastic_steps if include_frozen else policy.trainable_steps),
+                frozen_identity=policy.assert_frozen_identity(),max_abs_log_probability_difference=float(maximum[0]),
                 max_abs_ratio_minus_one=float(maximum[1]), max_abs_independent_gaussian_difference=float(maximum[2]))

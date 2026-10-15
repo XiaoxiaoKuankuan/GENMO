@@ -103,6 +103,8 @@ def configuration(path,*,genmo_repo=None,gmt_repo=None):
         raise ValueError('Invalid separate history GRU learning rate')
     if s['kl']['calibration']['scope']!='four_trainable_steps_only':
         raise ValueError('Old full20 KL thresholds cannot identify the new four-step KL')
+    if not 0<c['timing']['calibration_reservation_seconds']<=.5:
+        raise ValueError('Calibration needs an explicit bounded reservation, not a measured delay')
     if c['runtime']['timing_contract']!='modeled_deployment.v3' or c['timing']['control_ticks']!=12 or c['timing']['physics_ticks']!=3:
         raise ValueError('Keep calibrated deployment clock and 50Hz/200Hz four physical substeps')
     if t['objective_logprob_reduction'] not in ('joint_sum','free_coordinate_mean'):

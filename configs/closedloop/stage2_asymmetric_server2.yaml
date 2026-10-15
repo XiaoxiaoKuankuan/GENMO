@@ -343,8 +343,9 @@ termination:
   root_height_error_m: 0.2
   yaw_error_rad: 1.5
 timing:
-  calibration_samples: 2
-  calibration_warmup: 1
+  calibration_reservation_seconds: 0.5
+  calibration_samples: 8
+  calibration_warmup: 2
   clock_hz: 600
   control_ticks: 12
   decision_ticks: 300

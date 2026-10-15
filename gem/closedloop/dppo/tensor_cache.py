@@ -209,8 +209,9 @@ class _ConditionGather(torch.autograd.Function):
 
 
 class ConditionGraphCache:
-    def __init__(self, policy, tensor_cache=None):
+    def __init__(self, policy, tensor_cache=None, *, include_frozen=True):
         self.policy, self.tensor_cache = policy, tensor_cache
+        self.include_frozen=include_frozen
         self.training = torch.is_grad_enabled()
         self.signature = policy._parameter_signature()
         self.entries = {}
@@ -218,6 +219,11 @@ class ConditionGraphCache:
         self.finished = False
         self.source_versions = []
         self.feature_names=getattr(policy,'condition_feature_names',('conditional','unconditional'))
+
+    def _encode_context(self,context):
+        if hasattr(self.policy,'frozen_policy'):
+            return self.policy.prepare_conditions(context,include_frozen=self.include_frozen)
+        return self.policy.prepare_conditions(context)
 
     def prime(self, rows):
         """一次拼好本次参数版本的条件池；叶子梯度在所有切片后回传原编码图。"""
@@ -233,11 +239,11 @@ class ConditionGraphCache:
             device = next(self.policy.actor.parameters()).device
             context = (self.tensor_cache.context(unique) if self.tensor_cache is not None else
                 {key: torch.cat([row.context[key] for row in unique]).to(device) for key in unique[0].context})
-            originals.append(self.policy.prepare_conditions(context))
+            originals.append(self._encode_context(context))
         else:
             for row in unique:
                 context = (self.tensor_cache.context([row]) if self.tensor_cache is not None else row.context)
-                originals.append(self.policy.prepare_conditions(context))
+                originals.append(self._encode_context(context))
         self.bank = dict(lookup={id(row): i for i, row in enumerate(unique)}, originals=originals,
             adapted=(originals[0]['adapted'] if batched else
                 {key: torch.cat([item['adapted'][key] for item in originals]) for key in originals[0]['adapted']}),
@@ -289,7 +295,7 @@ class ConditionGraphCache:
             if key not in self.entries:
                 single = (self.tensor_cache.context([row]) if self.tensor_cache is not None else
                           {key: value.to(context[key].device) for key, value in row.context.items()})
-                original = self.policy.prepare_conditions(single)
+                original = self._encode_context(single)
                 entry = dict(original=original, leaf={})
                 for name in self.feature_names:
                     feature = original[name]

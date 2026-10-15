@@ -82,6 +82,8 @@ class InProcessTrainingRuntime:
 
     @property
     def latency_budget_s(self):
+        if self.c.config['runtime'].get('phase_contract')=='single_request_calibration.v1':
+            return self.c.config['timing']['calibration_reservation_seconds']
         return self.c.config['timing']['deployment_profile']['prefix_budget_seconds']
 
     def _journal(self,path):
