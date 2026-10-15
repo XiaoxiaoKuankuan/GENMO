@@ -91,6 +91,9 @@ def generate_batch(policy, packets, *, shared_storage=False, device_trace=False)
     copied = dict(trace=trace if device_trace else bulk_cpu_copy(trace), qpos_world=critical['qpos_world'])
     finished = time.perf_counter()
     boundaries=generated_boundary_reports(critical['boundary'])
+    from .tracking_context import build_critic_context_batch
+    critic_conditions=build_critic_context_batch(trace['conditions'] if device_trace else conditions,
+        [p['snapshot'] for p in packets])
     outputs = []
     for i,p in enumerate(packets):
         meta = metadata[i]
@@ -108,8 +111,7 @@ def generate_batch(policy, packets, *, shared_storage=False, device_trace=False)
         # 内存训练直接交付采样时的条件副本，确保条件、free_mask与完整随机链同卡。
         # 原磁盘路径继续使用CPU条件，实际部署需要的qpos输出仍单独传回CPU。
         context=local_trace['conditions'] if device_trace else contexts[i]
-        from .tracking_context import build_critic_context
-        critic_context=build_critic_context(context,p['snapshot'])
+        critic_context={key:value[i:i+1] for key,value in critic_conditions.items()}
         generated['joint_limit_diagnostics']=boundaries[i]
         outputs.append(dict(context=context, critic_context=critic_context, meta=meta, generated=generated, trace=local_trace))
     if shared_storage:

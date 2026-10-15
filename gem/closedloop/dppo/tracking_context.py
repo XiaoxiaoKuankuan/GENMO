@@ -45,13 +45,21 @@ def validate_tracking_context(context):
 
 
 def build_critic_context(actor_context,snapshot):
-    if snapshot.get('tracking_history_schema')!='gmt.causal_tracking_history90.v1':
+    return build_critic_context_batch(actor_context,[snapshot])
+
+
+def build_critic_context_batch(actor_context,snapshots):
+    """同一决策批次合并H2D和因果核验；按原整数tick在CPU做FP64秒转换。"""
+    if len(snapshots)!=len(actor_context['decision_time']) or any(
+            s.get('tracking_history_schema')!='gmt.causal_tracking_history90.v1' for s in snapshots):
         raise ValueError('Backend has no audited causal tracking history')
     device=actor_context['decision_time'].device
-    def tensor(key,dtype):
-        return torch.as_tensor(snapshot[key],dtype=dtype,device=device).unsqueeze(0).clone()
+    def tensor(key,dtype,scale=1.):
+        value=torch.stack([torch.as_tensor(s[key],dtype=dtype) for s in snapshots])
+        if scale!=1.:value=value/scale
+        return value.to(device).clone()
     result=dict(actor_context,tracking_history=tensor('tracking_history_values',torch.float32),
         tracking_history_valid=tensor('tracking_history_valid',torch.bool),
-        tracking_history_times=(torch.as_tensor(snapshot['tracking_history_ticks'],dtype=torch.float64)/600.).unsqueeze(0).to(device),
-        tracking_reference_times=(torch.as_tensor(snapshot['tracking_reference_ticks'],dtype=torch.float64)/600.).unsqueeze(0).to(device))
+        tracking_history_times=tensor('tracking_history_ticks',torch.float64,600.),
+        tracking_reference_times=tensor('tracking_reference_ticks',torch.float64,600.))
     return validate_tracking_context(result)

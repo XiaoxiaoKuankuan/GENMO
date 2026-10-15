@@ -39,7 +39,7 @@ def test_cuda_graph_reads_current_weights_and_returns_owned_outputs():
         def __init__(self):super().__init__();self.linear=torch.nn.Linear(4,4,device='cuda')
         def forward(self,x,t,y=None,inputs=None):
             value=self.linear(x)+y['f_cond']+t[:,None,None]
-            return dict(pred_x_start=value,static_conf_logits=value[...,:2])
+            return dict(pred_x_start=value,pred_x=value,static_conf_logits=value[...,:2],pred_cam=None)
     module=Denoiser().eval();original=module.forward
     policy=SimpleNamespace(actor=SimpleNamespace(denoiser=module),numerical_execution={})
     install_inference_graph(policy)
@@ -47,6 +47,7 @@ def test_cuda_graph_reads_current_weights_and_returns_owned_outputs():
     with torch.no_grad():
         for _ in range(4):first=module(x,t,y,inputs={})
         saved=first['pred_x_start'].clone()
+        assert first['pred_cam'] is None and first['pred_x'] is first['pred_x_start']
         module.linear.weight.add_(.01)
         second=module(x+1,t,y,inputs={})
         torch.testing.assert_close(second['pred_x_start'],original(x+1,t,y,inputs={})['pred_x_start'],atol=0,rtol=0)
@@ -54,3 +55,20 @@ def test_cuda_graph_reads_current_weights_and_returns_owned_outputs():
     module(x,t,y,inputs={})['pred_x_start'].square().mean().backward()
     assert module.linear.weight.grad is not None
     assert policy.cuda_graph_counters['replays']>=3 and policy.cuda_graph_counters['gradient_calls']==1
+
+
+@pytest.mark.parametrize('device',['cpu','cuda'])
+def test_batched_privileged_history_matches_individual_and_rejects_future(device):
+    if device=='cuda' and not torch.cuda.is_available():pytest.skip('CUDA required')
+    from gem.closedloop.dppo.tracking_context import build_critic_context,build_critic_context_batch
+    from tests.closedloop.dppo.test_data_learning import context
+    c={k:v.to(device) for k,v in context(batch=3).items()}
+    snapshots=[dict(tracking_history_schema='gmt.causal_tracking_history90.v1',
+        tracking_history_values=torch.zeros(50,90),tracking_history_valid=torch.ones(50,dtype=torch.bool),
+        tracking_history_ticks=torch.arange(12,601,12),tracking_reference_ticks=torch.arange(12,601,12)) for _ in range(3)]
+    result=build_critic_context_batch(c,snapshots)
+    for i,snapshot in enumerate(snapshots):
+        expected=build_critic_context({k:v[i:i+1] for k,v in c.items()},snapshot)
+        assert all(torch.equal(value[i:i+1],expected[k]) for k,value in result.items())
+    snapshots[1]['tracking_reference_ticks'][-1]+=12
+    with pytest.raises(ValueError,match='reference_timestamps'):build_critic_context_batch(c,snapshots)

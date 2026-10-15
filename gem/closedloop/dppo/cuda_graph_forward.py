@@ -55,7 +55,9 @@ def install_inference_graph(policy,*,maximum_graphs=2):
         static,graph,outputs=graphs[key];graphs.move_to_end(key)
         for target,value in zip(static,values):target.copy_(value)
         graph.replay();counters['replays']+=1
-        return {name:value.clone() for name,value in outputs.items()}
+        # Stage1还返回禁用头的None以及pred_x/pred_x_start同一张量；保持原结构和别名。
+        copies={id(value):value.clone() for value in outputs.values() if torch.is_tensor(value)}
+        return {name:copies[id(value)] if torch.is_tensor(value) else value for name,value in outputs.items()}
     module._stage10_eager_forward=original;module.forward=forward
     policy.cuda_graph_counters=counters
     policy.numerical_execution.update(cuda_graph=dict(contract='eager_math_eval_nograd_static_buffers.v1',
