@@ -1,7 +1,7 @@
 """Stage10 独立配置解析、训练规模推导与新旧身份隔离。
 
 本模块只接受显式当前配置，自动从GPU数、环境数、连续决策数及完整链minibatch
-推导rollout、optimizer次数、K8访问数和BC每步样本量，不继承160条或四次更新
+推导rollout、optimizer次数、四个随机训练步访问数和BC每步样本量，不继承160条或四次更新
 限制。代理目标与joint诊断、coordinate/joint KL门槛分别定义，不能复用一个
 无量纲数字。初始参数是待有限标定的候选，任何算法或数值合同变化新建run。
 
@@ -114,12 +114,12 @@ def configuration(path,*,genmo_repo=None,gmt_repo=None):
         raise ValueError('advantage_control must be none or shuffle_global')
     if type(t.get('gradient_snr_diagnostic',False)) is not bool:
         raise ValueError('gradient_snr_diagnostic must be boolean')
-    # 学习率控制：fixed保持actor_lr；kl_adaptive按最终全20步平均坐标KL趋近目标，并受显式上下界约束。
+    # 学习率控制：fixed保持actor_lr；kl_adaptive按最终四个训练步骤平均坐标KL趋近目标，并受显式上下界约束。
     if t.get('actor_lr_control','fixed') not in ('fixed','kl_adaptive'):raise ValueError('actor_lr_control must be fixed or kl_adaptive')
     if t.get('kl_rejection','abort') not in ('abort','rollback_continue'):raise ValueError('kl_rejection must be abort or rollback_continue')
     if t.get('actor_lr_control','fixed')=='kl_adaptive':
         bounds=t.get('actor_lr_bounds');target=t.get('kl_target_coordinate')
-        # 控制量可选全20步平均坐标KL或单步最大平均坐标KL（末端K步目标时后者先触及硬门槛）。
+        # 控制量可选四个训练步骤平均坐标KL或单步最大平均坐标KL（末端K步目标时后者先触及硬门槛）。
         metric=t.get('kl_control_metric','mean_coordinate_kl')
         limit={'mean_coordinate_kl':s['kl']['mean_coordinate'],
                'maximum_step_mean_coordinate_kl':s['kl']['maximum_step_mean_coordinate']}.get(metric)
@@ -131,7 +131,7 @@ def configuration(path,*,genmo_repo=None,gmt_repo=None):
     if type(bc_total)is not int or bc_total<1:
         raise ValueError('BC total must be positive; actual ragged optimizer steps determine its allocation')
     t.update(rollout_upper_steps=chains,rollout_upper_steps_per_rank=n*decisions,
-        actor_minibatch_internal_transitions=scale['actor_minibatch_chains']*20,
+        actor_minibatch_internal_transitions=scale['actor_minibatch_chains']*4,
         max_actor_optimizer_steps=steps,bc_batch=bc_total//steps,
         critic_steps=s['critic']['epochs']*math.ceil(chains/s['critic']['global_batch']),
         critic_batch=s['critic']['global_batch'],critic_lr=s['critic']['learning_rate'])

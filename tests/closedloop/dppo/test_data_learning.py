@@ -265,7 +265,7 @@ def actual_step(index=0, *, speed=0., position=0.):
             "actual_qpos": np.r_[0., 0., 1., 1., 0., 0., 0., np.full(21, position)],
             "actual_root_ang_vel_b": np.zeros(3), "joint_position_target": np.zeros(21),
             "reference": {"joint_pos": np.full(21, position), "joint_vel": np.full(21, speed),
-        "body_lin_vel_w": np.zeros((len(body_names),3)), "body_ang_vel_w": np.zeros((len(body_names),3)),
+        "body_lin_vel_w": np.zeros((3,3)), "body_ang_vel_w": np.zeros((3,3)),
                           "body_pos_w": np.array([[0., 0., 1.]] * 3), "body_quat_w": np.array([[1., 0., 0., 0.]] * 3)},
             "errors": {"joint_position_rmse_rad": 0., "joint_velocity_rmse_rad_s": 0., "root_position_error_m": 0.,
                        "root_height_error_m": 0., "non_yaw_orientation_error_rad": 0.,
