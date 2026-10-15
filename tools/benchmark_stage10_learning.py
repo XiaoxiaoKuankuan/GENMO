@@ -1,12 +1,13 @@
-"""服务器1八卡：同一真实Stage10 rollout的完整梯度、Adam、KL及吞吐对照。
+"""服务器2八卡：同一真实非对称Stage2 rollout的完整梯度、Adam、KL及吞吐对照。
 
 输入必须来自collect-only或明确capture的真实Isaac闭环，并核验学习状态、rank
 状态、rollout的SHA和实际行为核。不会改写old statistics，不重新采样物理任务。
 若原Adam为空，先在此离线副本执行一次真实梯度更新以建立非空动量，再把模型、
 Adam、BC/RNG和权重控制器冻结为全部候选的共同起点；此步不是训练接受轮次。
 
-数值轮保存全部未裁剪合成梯度，核对每个模块方向、参数、Adam、末端输出及全20步
-KL。计时轮不复制完整梯度，预热后比较同一完整工作量而不是单microbatch延迟。
+数值轮保存全部未裁剪合成梯度，核对每个模块方向、参数、Adam、末端输出及可训练
+四步KL；冻结15步和确定性末步检查身份。计时轮不复制完整梯度，预热后比较同一
+完整工作量而不是单microbatch延迟。
 本离线对照明确关闭软停止以保持更新覆盖一致，最终仍报告原硬KL是否通过；不把
 超限的离线副本发布为正式策略。不同精度的迁移KL与自身概率检查分开，BF16和
 编译候选即使更快也必须另有真实闭环效果，不能由此脚本自动进入正式训练。
@@ -17,10 +18,10 @@ KL。计时轮不复制完整梯度，预热后比较同一完整工作量而不
 这次有测量扰动的运行不进入P50/P95，也不发布训练权重。
 
 显式calibrate-actor-rates模式从同一原始Actor/Adam/BC/RNG出发有限扫描学习率，
-只用真实旧链标定完整PPO+BC更新，保存全部梯度比例、clipping和Full20 KL；失败
-候选不会成为训练策略。critic-reference模式用同一真实固定目标比较预训练时序
-Critic与旧MLP，按完整episode留出，并另测独立物理评估轨迹。冻结特征可以缓存，
-可训练层每步重算；固定GAE误差不冒充无偏真实价值误差或下一批在线泛化能力。
+只用新核真实行为链标定完整PPO+BC更新，保存全部梯度比例、clipping和四步KL；失败
+候选不会成为训练策略。通过软硬审查的候选可显式发布评估Actor，供独立真实物理
+对照；它不包含训练恢复状态，也不自动启动在线学习。Critic的MC/TD对照由主入口
+在独立完整episode上完成，本工具不再构造旧MLP或旧Critic兼容路径。
 
 cross-kernel模式允许数值候选在同一stable采样数据和同一起点上执行同样的8步更新：
 除原逐张量对照外，报告更新前跨核数值KL底噪、更新后相对reference的超额KL、参数增量
@@ -68,7 +69,7 @@ def _set_advantages(cache,values):
 
 @torch.no_grad()
 def heldout_gain(policy,rows,cache,manifest,d,*,microbatch,gamma_denoising):
-    """留出链全部20步的优势加权代理比值增益；r=1时恒为0，只读当前Actor和旧统计。"""
+    """留出链全部四个可训练步的优势加权代理增益；只读当前Actor和真实行为统计。"""
     from gem.closedloop.dppo.execution_checks import policy_phase
     from gem.closedloop.dppo.gaussian_probability import gaussian_statistics
     from gem.closedloop.dppo.optimization_support import _owned,_parameters,_old_kernel
@@ -272,8 +273,8 @@ def main():
     p.add_argument('--variants',nargs='+',choices=['reference','bf16_cudnn','compiled_fp32','stable_bmm','wide_tile','weight_bf16x3','weight_bf16x6'],default=['reference'])
     p.add_argument('--profile',action='store_true',help='另测一个预热后的真实CPU/CUDA优化步，不纳入吞吐计时')
     p.add_argument('--profile-only',action='store_true',help='只在明确指定微批做独立CUDA trace，不重跑完整吞吐扫描')
-    p.add_argument('--diagnostic-only',action='store_true',help='每候选只做一次完整梯度/Adam/全20步KL比较，带梯度拷贝，不作为吞吐计时')
-    p.add_argument('--calibrate-actor-rates',type=float,nargs='+',help='从同一起点有限标定完整PPO+BC学习率，不保存候选权重')
+    p.add_argument('--diagnostic-only',action='store_true',help='每候选只做一次完整梯度/Adam/全链四步KL比较，带梯度拷贝，不作为吞吐计时')
+    p.add_argument('--calibrate-actor-rates',type=float,nargs='+',help='从同一起点有限标定完整PPO+BC学习率；仅显式save-evaluation-actor时发布合格评估权重')
     p.add_argument('--calibrate-bc-initial',type=float,default=.01)
     p.add_argument('--calibrate-bc-maximum',type=float)
     p.add_argument('--save-evaluation-actor',action='store_true',help='仅将通过中间软线及最终硬KL的完整标定权重发布为物理评估输入，不是训练恢复点')
