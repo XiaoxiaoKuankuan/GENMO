@@ -5,6 +5,7 @@
 运行时钟；随机核、物理源码、冻结编码器、验证质量或价值目标gamma/lambda改变必须在修改
 Critic前拒绝。
 另外检查预热恢复需要真正初始评估，Actor已更新时不能补造Stage1基线。
+4/8秒窗口只允许共享完整纯MC初始化；任何含TD的成果必须匹配真实TD切片时长。
 """
 import copy
 from types import SimpleNamespace
@@ -12,7 +13,7 @@ import pytest
 import torch
 
 from gem.closedloop.dppo.critic_preheat import (
-    MATCHED, ARCHITECTURE, SCHEMA_PREHEAT, _critical_sources, _value_targets, initialize_critic)
+    MATCHED, ARCHITECTURE, SCHEMA_PREHEAT, _critical_sources, _value_targets, _supervision, initialize_critic)
 from gem.closedloop.dppo.evaluation import _model_fingerprint
 from gem.closedloop.dppo.training import _requires_initial_evaluation
 from gem.closedloop.dppo.training_checkpoint import file_sha256
@@ -26,7 +27,8 @@ def fixture(tmp_path):
     critic(torch.ones(3,2)).sum().backward();optimizer.step();critic.zero_grad(set_to_none=True)
     identity = {k:{'identity':k} for k in MATCHED}
     identity.update(critic={**{k:k for k in ARCHITECTURE},'complete_mc':{'mix_candidates':[0.,.5,1.]}},
-        training={'gamma_upper':.99,'lambda_upper':.95},source_files={'gmt':{'physics.py':'fixed'}})
+        training={'gamma_upper':.99,'lambda_upper':.95},ppo_rollout={'world_seconds':4.},
+        source_files={'gmt':{'physics.py':'fixed'}})
     for name in ['actor.py','contracts.py','online_conditions.py','training.py','evaluation_music.py']:
         p=tmp_path/'gem/closedloop'/name;p.parent.mkdir(parents=True,exist_ok=True);p.write_text('value = 1\n')
     data=dict(schema=SCHEMA_PREHEAT,actor_fingerprint=_model_fingerprint(actor),
@@ -35,7 +37,9 @@ def fixture(tmp_path):
         physical_sources=identity['source_files']['gmt'],behavior_sources=_critical_sources(tmp_path),
         critic=copy.deepcopy(critic.state_dict()),critic_optimizer=copy.deepcopy(optimizer.state_dict()),
         selected_updates=1,prior_mc_control_steps=500,prior_mc_physics_steps=2000,source={'initialization_only':True},
-        validation=dict(quality_gate_passed=True,relative_validation_mse_reduction=.7,after={'explained_variance':.6}))
+        validation=dict(selected_mc_ratio=1.,quality_gate_passed=True,
+            relative_validation_mse_reduction=.7,after={'explained_variance':.6}))
+    data['supervision']=_supervision(identity,data['validation'])
     return actor,critic,optimizer,identity,data
 
 
@@ -82,6 +86,25 @@ def test_preheat_resume_builds_initial_reference_and_never_invents_it_after_acto
     args.critic_preheat_only=True;assert not _requires_initial_evaluation(args,state,False)
     args.critic_preheat_only=False;state['actor_updates']=1
     with pytest.raises(ValueError,match='cannot invent'):_requires_initial_evaluation(args,state,False)
+
+
+@pytest.mark.parametrize('ratio',[0.,.5,1.])
+@pytest.mark.parametrize('seconds',[4.,8.])
+def test_only_complete_mc_supervision_is_independent_of_rollout_window(tmp_path,ratio,seconds):
+    actor,critic,optimizer,identity,data=fixture(tmp_path)
+    data['validation']['selected_mc_ratio']=ratio
+    data['supervision']=_supervision(identity,data['validation'])
+    identity['ppo_rollout']['world_seconds']=seconds
+    before=copy.deepcopy(critic.state_dict())
+    step=next(iter(optimizer.state.values()))['step'].clone()
+    if ratio==1. or seconds==4.:
+        result=load(tmp_path,actor,critic,optimizer,identity,data)
+        assert result['supervision']==data['supervision']
+    else:
+        with pytest.raises(ValueError,match='TD labels'):
+            load(tmp_path,actor,critic,optimizer,identity,data)
+        for key,value in critic.state_dict().items():torch.testing.assert_close(value,before[key],rtol=0,atol=0)
+        torch.testing.assert_close(next(iter(optimizer.state.values()))['step'],step,rtol=0,atol=0)
 
 
 def test_export_cannot_stamp_current_source_on_an_older_checkpoint(tmp_path):
