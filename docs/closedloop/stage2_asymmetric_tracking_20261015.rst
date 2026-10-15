@@ -11,7 +11,7 @@
 * GENMO：``feature/stage2-asymmetric-denoising``；GMT：``feature/stage2-tracking-history``。
   使用原本地工作树，未新建额外工作树。原训练代码保留在原分支。
 * 新配置：``configs/closedloop/stage2_asymmetric_server2.yaml``。
-  新Actor学习最多8个接受轮次，仅供有限验收；KL标定状态仍为 ``pending``。
+  新Actor学习最多8个接受轮次，仅供有限验收；KL标定已绑定真实证据，非长期训练许可。
 * 所有CPU、GPU和真实物理试验均在服务器2；服务器1只读核验。
   核验时服务器1为GENMO ``fe30a71``、原功能分支，P1恢复作业PID3746056仍存在。
   本任务没有向服务器1同步、切分支、发信号、修改模型或抢占GPU。
@@ -306,6 +306,10 @@ soft统计最大0.000175289。四步joint链和均值1.076332、P95 1.840328、�
 ``paired_stage1_actor_selected.json`` 和 ``paired_stage1_actor_conservative.json``。
 5e-8实际评估权重SHA为
 ``3a7045cd6020b1ebdfa40a87ff2241eb2a23b11b10fb2873cee31526958effdc``。
+独立门禁以收紧后的门槛重新核验所有实测字段，并发布
+``four_step_kl_calibration.json``，SHA为
+``fdacb39b6f79bc4588c06ba6f28916ea5d2551d58837149e621fe25b0986bc71``。
+配置/证据门禁/非空Adam与累计轮数恢复等36项CPU集成检查在服务器2全部通过。
 
 真实GPU计算对照
 ---------------
@@ -350,8 +354,8 @@ soft统计最大0.000175289。四步joint链和均值1.076332、P95 1.840328、�
 待完成的有限验收
 ----------------
 
-1. 发布上述真实固定数据和物理证据的SHA绑定，复核收紧后的软硬门槛。
-2. 完整有限在线更新/恢复、真实轮次吞吐和峰显存。未通过前不发布正式参数或启动长期训练。
+完整有限在线更新/恢复、真实轮次吞吐和峰显存尚待检查。先运行两轮，再恢复到累计
+第三轮；未通过前不发布正式参数，不自动启动长期训练。
 
 旧P1的rollout、Critic和优化器不进入这条新恢复路径。checkpoint恢复仍重建PhysX世界，
 从新物理episode采样，不恢复虚构PhysX中间状态。日常rollout在更新完成后释放，完整

@@ -2,7 +2,7 @@
 # 完整20步行为：冻结0..14、可训练随机15..18、冻结确定性19；Gaussian统计只含随机步。
 # Stage1 s595000、GMT140500、60帧/30Hz、50/200Hz物理和连续世界采集保持。
 # 本配置仅允许服务器2有限验收；旧P1奖励、rollout、Critic及优化器均不能恢复。
-# 已完成新核部署标定和32任务配对筛选；KL证据绑定前仍禁止启动Actor学习。
+# 已绑定新核部署标定和32任务配对证据；仅允许有限在线验证，不自动启动长期训练。
 # 1e-7新增朝向失败，5e-8无新增失败且完成数29→30；仅作为有限在线验收起点。
 # 音乐/前缀编码冻结，历史GRU独立学习率1e-5，其余Critic1e-4；完整MC必须重新采集。
 diagnostics:
@@ -175,9 +175,11 @@ stage10:
     p95_coordinate: 0.0007
     reduction: free_coordinate_mean
     calibration:
-      status: pending
+      status: validated
       scope: four_trainable_steps_only
-      evidence: null
+      evidence:
+        path: /data1/user/liwei/GENMO_outputs/closedloop_stage10/stage2_asymmetric_20261015/four_step_kl_calibration.json
+        sha256: fdacb39b6f79bc4588c06ba6f28916ea5d2551d58837149e621fe25b0986bc71
   limits:
     accepted_iterations: 8
     control_steps: 150000000
