@@ -35,7 +35,7 @@ def test_main_scale_is_4096_full_chains_with_eight_combined_updates():
         count_semantics='nominal_capacity_only_actual_manifest_controls_optimization')
     assert (t['denoising_steps'], t['ppo_steps_per_chain'], t['ppo_epochs']) == (20, 4, 2)
     assert t['frozen_prefix_steps']==15 and t['ppo_step_strategy']=='intermediate4'
-    assert t['actor_lr'] == 1e-7 and t['ppo_clip'] == .003
+    assert t['actor_lr'] == 5e-8 and t['ppo_clip'] == .003
     assert c['runtime']['timing_contract'] == 'modeled_deployment.v3'
     assert (c['timing']['control_ticks'], c['timing']['physics_ticks']) == (12, 3)
 

@@ -2,7 +2,8 @@
 # 完整20步行为：冻结0..14、可训练随机15..18、冻结确定性19；Gaussian统计只含随机步。
 # Stage1 s595000、GMT140500、60帧/30Hz、50/200Hz物理和连续世界采集保持。
 # 本配置仅允许服务器2有限验收；旧P1奖励、rollout、Critic及优化器均不能恢复。
-# 当前噪声和四步KL为待标定候选，部署合同与KL证据未填之前不能启动Actor学习。
+# 已完成新核部署标定和32任务配对筛选；KL证据绑定前仍禁止启动Actor学习。
+# 1e-7新增朝向失败，5e-8无新增失败且完成数29→30；仅作为有限在线验收起点。
 # 音乐/前缀编码冻结，历史GRU独立学习率1e-5，其余Critic1e-4；完整MC必须重新采集。
 diagnostics:
   record_original_threshold_crossings: true
@@ -167,10 +168,11 @@ stage10:
     fps: 30
     frames: 60
   kl:
-    maximum_step_mean_coordinate: 0.004
-    mean_coordinate: 0.001
+    # 位于实测5e-8通过分布与1e-7物理退化分布之间；未将冻结零KL计入分母。
+    maximum_step_mean_coordinate: 0.0006
+    mean_coordinate: 0.0003
     mean_joint: null
-    p95_coordinate: 0.003
+    p95_coordinate: 0.0007
     reduction: free_coordinate_mean
     calibration:
       status: pending
@@ -292,7 +294,7 @@ stage10:
     retain_best_and_evaluated: true
     tensor_cache_max_bytes: 4294967296
   training:
-    actor_lr: 1.0e-07
+    actor_lr: 5.0e-08
     actor_lr_control: fixed
     advantage_control: none
     bc_prefix:
@@ -316,7 +318,7 @@ stage10:
     guidance_scale: 2.5
     kl_microbatch: 128
     kl_rejection: rollback_continue
-    kl_soft_stop_coordinate: 0.0005
+    kl_soft_stop_coordinate: 0.00025
     lambda_upper: 0.95
     latency_budget_s: 0.5
     log_probability_reduction: joint_sum
