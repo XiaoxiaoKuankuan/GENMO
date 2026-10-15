@@ -47,6 +47,8 @@ def test_scalar_gpu_math_and_columnar_rewards():
     scalar=ExecutionReward(target_activity=target_activity_fixture)
     vector=VectorExecutionReward(target_activity=target_activity_fixture)
     engine=VectorRewardMath(scalar.config,1,'cpu')
+    # 实际训练在启动站立预热后才开始音乐奖励，前一步目标已由真实控制建立。
+    scalar.seed_previous_target(np.zeros(21));vector.seed_previous_target(np.zeros(21));engine.previous_valid.fill_(True)
     for i in range(3):
         row=actual_step(i,speed=1.);row['env_id']=0
         for j,(name,item) in enumerate(row['motion_tracking']['terms'].items()):
