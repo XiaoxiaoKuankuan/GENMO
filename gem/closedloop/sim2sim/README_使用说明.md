@@ -7,7 +7,16 @@
 ## 启动
 
 本机环境为 `/home/weili/GENMO/.venv/bin/python`，配置固定在
-`configs/closedloop/sim2sim_mujoco.yaml`。已有模型和素材不进入Git，移动机器后需要配置对应资产的绝对路径。
+`configs/closedloop/sim2sim_mujoco.yaml`。该文件只保留需要替换的模型、资产路径、音乐入口、输出位置和GPU，
+每组旁边都注明更换方法。固定采样、精度、显示、标定和告警默认值在`gem/closedloop/sim2sim/config.py`，
+启动时自动补齐；运行报告仍保存完整解析配置。已有模型和素材不进入Git。
+
+GENMO相关相对路径以本仓库为基准，GMT资产相对`paths.gmt_repo`，与启动目录无关；绝对路径也可使用。
+GMT仓库搬家只改`gmt_repo`，其余GMT相对路径自动跟随。更换Stage1改`stage1_checkpoint`并检查配套
+`stats/kinematics`，模式1通过YAML锚点自动复用该权重；更换Stage2改对应`models`条目的`checkpoint/sha256`，
+`name`仅用于显示。Stage2绑定的基础资产仍须匹配，当前GMT后端仍限定140500。
+更换默认音乐可直接改`playlist`为音频目录或清单，命令行音乐参数优先。专项验收仍可在自定义YAML中
+覆盖运行项，例如`runtime.audio: false`；普通启动无需填写整套固定参数。
 
 ```bash
 cd /home/weili/bumi-closedloop-worktrees/GENMO

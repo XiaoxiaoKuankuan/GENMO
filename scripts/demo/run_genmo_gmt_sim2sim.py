@@ -47,9 +47,8 @@ def main():
     if args.max_seconds is not None and args.max_seconds<=0:parser.error('--max-seconds必须大于0')
     if args.headless:os.environ.setdefault('MUJOCO_GL','egl')
     os.environ.setdefault('PYTHONDONTWRITEBYTECODE','1')
-    import yaml
-    config=yaml.safe_load(args.config.read_text())
-    if config.get('schema')!='genmo.gmt.mujoco_sim2sim.v1':raise ValueError('不支持的sim2sim配置')
+    from gem.closedloop.sim2sim.config import load_config
+    config=load_config(args.config)
     if args.mute:config['runtime']['audio']=False
     if args.actor_checkpoint:
         config['models']=[dict(name=args.actor_checkpoint.stem,checkpoint=str(args.actor_checkpoint.resolve()))]

@@ -14,7 +14,7 @@ import sys
 import numpy as np
 import pytest
 import torch
-import yaml
+from gem.closedloop.sim2sim.config import load_config
 
 pytestmark=pytest.mark.skipif(os.environ.get('SIM2SIM_REAL_TESTS')!='1',reason='需显式SIM2SIM_REAL_TESTS=1和本机GPU/模型资产')
 
@@ -26,7 +26,7 @@ def test_real_perturbation_reaches_genmo_and_changes_generation(tmp_path,model_i
     from gem.closedloop.online_conditions import FrozenMusicFeatures
     from gem.closedloop.sim2sim.diagnostics import write_json
     root=Path(__file__).resolve().parents[3]
-    config=yaml.safe_load((root/'configs/closedloop/sim2sim_mujoco.yaml').read_text())
+    config=load_config(root/'configs/closedloop/sim2sim_mujoco.yaml')
     sys.path.insert(0,str(Path(config['paths']['gmt_repo'])/'scripts'))
     from bumi4340_mujoco_backend import BumiMujocoBackend
     backend=BumiMujocoBackend(config);actor=InferenceActor(config,config['models'][model_index])
@@ -77,7 +77,7 @@ def test_deployment_matches_native_ddim_without_extra_action_noise(tmp_path,mode
     from gem.closedloop.online_conditions import FrozenMusicFeatures
     from gem.closedloop.sim2sim.diagnostics import write_json
     root=Path(__file__).resolve().parents[3]
-    config=yaml.safe_load((root/'configs/closedloop/sim2sim_mujoco.yaml').read_text())
+    config=load_config(root/'configs/closedloop/sim2sim_mujoco.yaml')
     sys.path.insert(0,str(Path(config['paths']['gmt_repo'])/'scripts'))
     from bumi4340_mujoco_backend import BumiMujocoBackend
     backend=BumiMujocoBackend(config);owner=InferenceActor(config,config['models'][model_index])
