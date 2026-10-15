@@ -29,7 +29,7 @@ def context(batch=1):
     return {
         "music_features": torch.zeros(batch, 120, 35), "music_valid": torch.ones(batch, 120, dtype=torch.bool),
         "proprio_history": torch.zeros(batch, 50, 48), "proprio_history_valid": torch.ones(batch, 50, dtype=torch.bool),
-        "proprio_history_times": (torch.arange(50, dtype=torch.float64) / 50 + .02).expand(batch, -1).clone(),
+        "proprio_history_times": (torch.arange(12, 601, 12, dtype=torch.float64) / 600).expand(batch, -1).clone(),
         "known_qpos30": torch.zeros(batch, 120, 30), "known_qpos30_mask": torch.zeros(batch, 120, 30, dtype=torch.bool),
         "future_valid": torch.ones(batch, 120, dtype=torch.bool),
         "future_times": (torch.arange(120, dtype=torch.float64) / 30 + 1.).expand(batch, -1).clone(),
@@ -38,13 +38,21 @@ def context(batch=1):
 
 
 def transition():
+    current, following = context(), context()
+    for key in ('decision_time','proprio_history_times','future_times'):
+        following[key] += .04
+    def privileged(c):
+        return dict(c,tracking_history=torch.cat((c['proprio_history'],torch.zeros(1,50,42)),dim=-1),
+            tracking_history_valid=c['proprio_history_valid'].clone(),
+            tracking_history_times=c['proprio_history_times'].clone(),
+            tracking_reference_times=c['proprio_history_times'].clone())
     return UpperTransition(
         identity={"run_id": "r", "backend_session_id": "s", "episode_id": "e", "decision_id": 1, "policy_version": 0},
-        context=context(), next_context=context(), chain=torch.zeros(3, 120, 30, requires_grad=True),
-        old_log_prob=torch.zeros(2, dtype=torch.float64), free_mask=torch.ones(120, 30, dtype=torch.bool),
+        context=current, next_context=following, chain=torch.zeros(21, 120, 30, requires_grad=True),
+        old_log_prob=torch.zeros(19, dtype=torch.float64), free_mask=torch.ones(120, 30, dtype=torch.bool),
         rewards=torch.tensor([.1, .2]), old_value=0., next_value=1., control_tick_begin=600,
         control_tick_end=624, executed_control_steps=2, executed_physics_steps=8,
-        metadata={"mutable": np.zeros(3)},
+        metadata={"mutable": np.zeros(3),'critic_context':privileged(current),'next_critic_context':privileged(following)},
     )
 
 
@@ -82,7 +90,7 @@ def test_single_environment_policy_shapes_are_normalized():
     item.chain, item.old_log_prob, item.free_mask = item.chain[None], item.old_log_prob[None], item.free_mask[None]
     buffer = RolloutBuffer(1)
     buffer.append(item)
-    assert buffer.transitions[0].chain.shape == (3, 120, 30)
+    assert buffer.transitions[0].chain.shape == (21, 120, 30)
     with pytest.raises(OverflowError):
         buffer.append(item)
 

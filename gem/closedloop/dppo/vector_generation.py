@@ -81,12 +81,16 @@ def generate_batch(policy, packets, *, shared_storage=False, device_trace=False)
     world = policy.actor.endecoder.codec.apply_world_anchor(trace['qpos'], anchors)
     finite = torch.stack([torch.isfinite(v).all() for v in (world,trace['qpos30'],trace['contact'])]).all()
     if not bool(finite): raise FloatingPointError('Nonfinite vector generated outputs')
+    from .joint_limits import generated_boundaries_tensors,generated_boundary_reports
+    boundary=generated_boundaries_tensors(world,trace['free_mask'][:,:,9:],
+        [p['snapshot'] for p in packets],policy.actor.endecoder.kinematics.joint_order,check_finite=False)
     # 部署必需输出与训练专用完整链分开计时；不能将前者误扣成审计传输。
     output_transfer_begin = time.perf_counter()
-    critical = bulk_cpu_copy(dict(qpos_world=world, qpos30=trace['qpos30'], contact=trace['contact']))
+    critical = bulk_cpu_copy(dict(qpos_world=world, qpos30=trace['qpos30'], contact=trace['contact'],boundary=boundary))
     generated_end = time.perf_counter()
     copied = dict(trace=trace if device_trace else bulk_cpu_copy(trace), qpos_world=critical['qpos_world'])
     finished = time.perf_counter()
+    boundaries=generated_boundary_reports(critical['boundary'])
     outputs = []
     for i,p in enumerate(packets):
         meta = metadata[i]
@@ -106,9 +110,7 @@ def generate_batch(policy, packets, *, shared_storage=False, device_trace=False)
         context=local_trace['conditions'] if device_trace else contexts[i]
         from .tracking_context import build_critic_context
         critic_context=build_critic_context(context,p['snapshot'])
-        from .joint_limits import generated_boundaries
-        generated['joint_limit_diagnostics']=generated_boundaries(generated['qpos_world'],
-            local_trace['free_mask'][0,:,9:].cpu().numpy(),p['snapshot'],policy.actor.endecoder.kinematics.joint_order)
+        generated['joint_limit_diagnostics']=boundaries[i]
         outputs.append(dict(context=context, critic_context=critic_context, meta=meta, generated=generated, trace=local_trace))
     if shared_storage:
         block=dict(schema='genmo.stage2.asymmetric_world_batch.v1',trace=copied['trace'],generated=[item['generated'] for item in outputs])
@@ -117,6 +119,7 @@ def generate_batch(policy, packets, *, shared_storage=False, device_trace=False)
         generate_and_world_seconds=generated_end-condition_end, bulk_trace_transfer_seconds=finished-generated_end,
         critical_output_transfer_seconds=generated_end-output_transfer_begin,
         cpu_split_seconds=time.perf_counter()-finished, components=dict(policy.last_sample_timing),
+        boundary_execution='batched_device_fp64_merged_output_transfer',
         generation_contract=GENERATION_CONTRACT, effective_rows=len(packets))
 
 

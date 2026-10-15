@@ -272,7 +272,7 @@ def main():
     p.add_argument('--kl-microbatches',type=int,nargs='+',default=[256,512,1024])
     p.add_argument('--repeats',type=int,default=3)
     p.add_argument('--sampled-steps',type=int,choices=[4],default=4)
-    p.add_argument('--variants',nargs='+',choices=['reference','bf16_cudnn','compiled_fp32','stable_bmm','wide_tile','weight_bf16x3','weight_bf16x6'],default=['reference'])
+    p.add_argument('--variants',nargs='+',choices=['reference','bf16_cudnn','compiled_fp32','cuda_graph','stable_bmm','wide_tile','weight_bf16x3','weight_bf16x6'],default=['reference'])
     p.add_argument('--profile',action='store_true',help='另测一个预热后的真实CPU/CUDA优化步，不纳入吞吐计时')
     p.add_argument('--profile-only',action='store_true',help='只在明确指定微批做独立CUDA trace，不重跑完整吞吐扫描')
     p.add_argument('--diagnostic-only',action='store_true',help='每候选只做一次完整梯度/Adam/全链四步KL比较，带梯度拷贝，不作为吞吐计时')
@@ -387,6 +387,9 @@ def main():
             if variant=='compiled_fp32':
                 from gem.closedloop.dppo.compiled_forward import install_shared_forward
                 install_shared_forward(policy)
+            if variant=='cuda_graph':
+                from gem.closedloop.dppo.cuda_graph_forward import install_inference_graph
+                install_inference_graph(policy)
         for micro in a.microbatches:
             samples=[];diagnostic=None
             for repeat in range(1 if a.diagnostic_only else a.repeats+2):
@@ -456,7 +459,8 @@ def main():
             seconds=max(d.all_gather_object(time.perf_counter()-start))
             if repeat>=2:samples.append(seconds)
         report['kl'].append(dict(microbatch=micro,samples=samples,p50=float(np.percentile(samples,50)),
-            p95=float(np.percentile(samples,95)),report=kl,numerical_execution=policy.numerical_execution))
+            p95=float(np.percentile(samples,95)),report=kl,numerical_execution=policy.numerical_execution,
+            cuda_graph_counters=copy.deepcopy(getattr(policy,'cuda_graph_counters',None))))
         publish()
     if a.profile:
         restore();d.barrier()

@@ -87,6 +87,23 @@ def test_full_generated_boundary_uses_only_free_coordinates():
     assert report['reward_weight']==0 and np.array_equal(q,before)
 
 
+@pytest.mark.parametrize('frames',[60,120])
+def test_batched_generated_boundaries_match_independent_scalar_with_permuted_joints(frames):
+    from gem.closedloop.dppo.joint_limits import generated_boundaries_tensors,generated_boundary_reports
+    from gem.closedloop.contracts import GMT_EXPECTED_JOINT_ORDER
+    names=list(GMT_EXPECTED_JOINT_ORDER);source=names[::-1]
+    rng=np.random.default_rng(33);q=rng.normal(size=(3,frames,28)).astype(np.float32)
+    mask=rng.random((3,frames,21))>.2;mask[0]=False;mask[1,:12]=False
+    snapshots=[dict(joint_names=names,joint_hard_limits_rad=np.tile([-2-i*.1,2+i*.1],(21,1)),
+        joint_soft_limits_rad=np.tile([-1.8,1.8],(21,1))) for i in range(3)]
+    expected=[generated_boundaries(x,m,s,source) for x,m,s in zip(q,mask,snapshots)]
+    data=generated_boundaries_tensors(torch.from_numpy(q),torch.from_numpy(mask),snapshots,source)
+    assert generated_boundary_reports(data)==expected
+    q[0,0,7]=np.nan
+    with pytest.raises(ValueError,match='Nonfinite'):
+        generated_boundaries_tensors(torch.from_numpy(q),torch.from_numpy(mask),snapshots,source)
+
+
 def test_evaluation_accepts_new_reward_and_keeps_separate_boundary_costs():
     from types import SimpleNamespace
     from gem.closedloop.dppo.evaluation import _decision_evidence

@@ -174,6 +174,7 @@ def main():
     parser.add_argument('--precision',choices=['native_fp32','tf32','bf16_backbone'],default='native_fp32')
     parser.add_argument('--attention',default='sdpa_math')
     parser.add_argument('--compile',action='store_true')
+    parser.add_argument('--cuda-graph',action='store_true',help='单独验收真实无梯度CUDA Graph及eager有梯度一致性')
     parser.add_argument('--linear-execution',default='native_gemm')
     parser.add_argument('--chains',type=int,default=8)
     parser.add_argument('--frames',type=int,choices=[60,120],default=60)
@@ -182,7 +183,7 @@ def main():
     torch.cuda.set_device(device);torch.set_num_threads(4);torch.manual_seed(42)
     args.output.mkdir(parents=True,exist_ok=True)
     record=dict(phase=args.phase,rank=rank,precision=args.precision,attention=args.attention,compile=args.compile,
-        linear_execution=args.linear_execution,generation_horizon_frames=args.frames,
+        linear_execution=args.linear_execution,cuda_graph=args.cuda_graph,generation_horizon_frames=args.frames,
         conditions_scope='four_source_real_Stage1_demonstration_not_physical_rollout')
     try:
         if args.phase=='math':result=math_checks(device,args.frames)
@@ -199,7 +200,7 @@ def main():
                 cls=FrozenPrefixPolicy
                 policy=cls(actor,std_schedule=[.001]*15+[.04,.06,.08,.10,0.],
                     precision=args.precision,attention=args.attention,compile_denoiser=args.compile,
-                    linear_execution=args.linear_execution,generation_frames=args.frames)
+                    linear_execution=args.linear_execution,generation_frames=args.frames,cuda_graph=args.cuda_graph)
                 actual_lengths=set()
                 hooks=[b.register_forward_pre_hook(lambda _,a:actual_lengths.add(a[0].shape[1])) for b in actor.denoiser.blocks]
                 result=probability_checks(policy,context)
@@ -208,6 +209,7 @@ def main():
                 result['actual_Transformer_lengths']=sorted(actual_lengths)
                 result['pretrained_maximum_frames']=actor.denoiser.max_len
                 result['kernel']=policy.kernel_config
+                if args.cuda_graph:result['cuda_graph_counters']=dict(actor=policy.cuda_graph_counters,frozen=policy.frozen_policy.cuda_graph_counters)
             record['source_global_step']=loading['source_global_step']
         record.update(result)
     except BaseException as error:

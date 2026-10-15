@@ -144,7 +144,7 @@ def dense_precision_scope(precision):
 
 class DenseDiffusionPolicy(DPPODiffusionPolicy):
     def __init__(self,actor,*,std_schedule,precision='native_fp32',attention='sdpa_math',compile_denoiser=False,
-                 precise_output=True,linear_execution='native_gemm',weight_gradient='direct_joint_gemm',steps=20,eta=.1,guidance_scale=2.5,generation_frames=120,deterministic_steps=()):
+                 precise_output=True,linear_execution='native_gemm',weight_gradient='direct_joint_gemm',steps=20,eta=.1,guidance_scale=2.5,generation_frames=120,deterministic_steps=(),cuda_graph=False):
         if steps!=20 or len(std_schedule)!=20:
             raise ValueError('当前 production behavior must retain the full 20-step chain')
         super().__init__(actor,steps=steps,eta=eta,std_floor=min(v for v in std_schedule if v>0),std_schedule=std_schedule,
@@ -158,9 +158,13 @@ class DenseDiffusionPolicy(DPPODiffusionPolicy):
         self.numerical_execution=configure_dense_actor(actor,precision=precision,attention=attention,
             precise_output=precise_output,linear_execution=linear_execution,weight_gradient=weight_gradient)
         if compile_denoiser:
+            if cuda_graph:raise ValueError('Compile and CUDA graph candidates must be evaluated separately')
             from .compiled_forward import install_shared_forward
             install_shared_forward(self)
         else:self.numerical_execution['compiler']=None
+        if cuda_graph:
+            from .cuda_graph_forward import install_inference_graph
+            install_inference_graph(self)
         self.kernel_config.update(version='genmo.stochastic_ddim.actual_kernel',
             execution_contract=self.numerical_layout,numerical_execution=self.numerical_execution,
             condition_batch_size='unique_chains',execution_batch_size=None,

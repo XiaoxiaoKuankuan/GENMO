@@ -11,6 +11,9 @@ Adam更新。结束后无梯度检查全部有效链的四步KL，冻结部分�
 Critic只缓存冻结音乐/前缀特征及历史输入，历史GRU、时序层和Value Head每次优化
 重新建图；当前/下一批误差与独立MC验证分开。归约使用全局实际有效分母，尾批和
 空rank参与同一通信序列。本模块不推进物理，也不保存checkpoint。
+纯日志的BC来源与逐去噪统计在完整更新结束后合并读取；soft KL、非有限值检查、
+梯度比例控制仍在每次参数更新前执行。step_observer仅收到当步已就绪的优化字段，
+完整来源和逐步诊断在函数返回时补齐，避免日志逐微批阻塞设备。
 """
 from __future__ import annotations
 
@@ -43,6 +46,7 @@ def actor_update(policy,optimizer,rows,targets,cache,manifest,controller,*,distr
         raise ValueError('Invalid PPO iteration scale')
     if kl_reduction not in ('joint_sum','free_coordinate_mean'):raise ValueError('Unknown KL control units')
     selected=_eligible(manifest);reports=[];orders=[];stop_reason=None
+    pending_metrics=[];pending_bc=[]
     if not selected:raise ValueError('No free valid behavior chain remains for PPO')
     planned_steps=ppo_epochs*math.ceil(len(selected)/minibatch_chains)
     bc_batches=(None if bc_samples_per_rollout is None else [
@@ -83,7 +87,8 @@ def actor_update(policy,optimizer,rows,targets,cache,manifest,controller,*,distr
                             proxy['objective_clipped'].double(),torch.ones_like(stats['joint_kl'])),1))
                     del loss,params,stats,proxy
                 conditions.backward()
-            summary=distributed.sum_tensor(summary);step_metrics=distributed.sum_tensor(step_metrics)
+            combined=distributed.sum_tensor(torch.cat((summary,step_metrics.flatten())))
+            summary,step_metrics=combined[:7],combined[7:].reshape(20,6)
             values=summary.cpu().tolist();visits=values[-1]
             measured=values[4 if kl_reduction=='joint_sum' else 5]/visits
             if soft_kl is not None and measured>=soft_kl:
@@ -110,28 +115,32 @@ def actor_update(policy,optimizer,rows,targets,cache,manifest,controller,*,distr
                 optimizer.step()
             # 后续minibatch不会复用旧条件图，old statistics则保持同一份rollout。
             local_sources=Counter(meta['dataset_id'] for sample in bc_report.get('samples',[]) for meta in sample)
-            bc_shards=distributed.all_gather_object(dict(batch=bc_report['batch_size'],loss=bc_report['loss'],sources=dict(local_sources)))
-            source_counts=Counter()
-            for shard in bc_shards:source_counts.update(shard['sources'])
-            per_step=[]
-            for s,(joint,coordinate,ratio,clipped,active,n) in enumerate(step_metrics.cpu().tolist()):
-                per_step.append(dict(step=s,visits=int(n),mean_joint_kl=joint/n if n else None,
-                    mean_coordinate_kl=coordinate/n if n else None,mean_proxy_ratio=ratio/n if n else None,
-                    clip_fraction=clipped/n if n else None,objective_clip_fraction=active/n if n else None))
+            pending_bc.append(dict(batch=bc_report['batch_size'],loss=bc_report['loss'],sources=dict(local_sources)))
+            pending_metrics.append(step_metrics)
             reports.append(dict(epoch=epoch,optimizer_step=len(reports)+1,global_chain_indices=indices,
                 sampled_steps=sampled_steps,denoising_sampling=plan_record(seed,indices,20,sampled_steps,step_strategy),
                 internal_sample_visits=int(visits),full_objective_transitions=len(indices)*4,
                 ppo_loss=values[0],mean_proxy_ratio=values[1]/visits,clip_fraction=values[2]/visits,
                 objective_clip_fraction=values[3]/visits,pre_step_mean_joint_kl=values[4]/visits,
-                pre_step_mean_coordinate_kl=values[5]/visits,per_denoising_step=per_step,
+                pre_step_mean_coordinate_kl=values[5]/visits,
                 gradient_contributions=contributions,total_gradient_norm=total_norm,
                 gradient_clip_factor=min(1.,grad_clip_norm/(total_norm+1e-6)),
-                bc_global_samples=sum(x['batch'] for x in bc_shards),
-                bc_samples_by_source=dict(source_counts),
-                bc_loss=sum(x['batch']*x['loss'] for x in bc_shards)/sum(x['batch'] for x in bc_shards),
                 learning_rate=optimizer.param_groups[0]['lr'],wall_seconds=time.perf_counter()-start))
             if step_observer is not None:step_observer(reports[-1])
         if stop_reason:break
+    if reports:
+        shards=distributed.all_gather_object(pending_bc)
+        if any(len(shard)!=len(reports) for shard in shards):raise RuntimeError('Rank optimizer/log counts differ')
+        for index,(report,metrics) in enumerate(zip(reports,torch.stack(pending_metrics).cpu().tolist())):
+            source_counts=Counter();bc_shards=[s[index] for s in shards]
+            for shard in bc_shards:source_counts.update(shard['sources'])
+            total=sum(s['batch'] for s in bc_shards)
+            report.update(bc_global_samples=total,bc_samples_by_source=dict(source_counts),
+                bc_loss=sum(s['batch']*s['loss'] for s in bc_shards)/max(total,1),
+                per_denoising_step=[dict(step=s,visits=int(n),mean_joint_kl=joint/n if n else None,
+                    mean_coordinate_kl=coordinate/n if n else None,mean_proxy_ratio=ratio/n if n else None,
+                    clip_fraction=clipped/n if n else None,objective_clip_fraction=active/n if n else None)
+                    for s,(joint,coordinate,ratio,clipped,active,n) in enumerate(metrics)])
     covered={i for report in reports for i in report['global_chain_indices']}
     snr_report=None
     if snr:
@@ -312,9 +321,11 @@ def critic_update(critic,optimizer,rows,targets,cache,manifest,*,distributed,gen
                     loss.backward()
             distributed.sum_gradients(critic)
             with _local_phase(distributed,'stage10_critic_clip_and_step'):
-                norms.append(float(torch.nn.utils.clip_grad_norm_([p for p in critic.parameters() if p.requires_grad],grad_clip,error_if_nonfinite=True)))
+                norms.append(torch.nn.utils.clip_grad_norm_([p for p in critic.parameters() if p.requires_grad],grad_clip,error_if_nonfinite=True).detach())
                 optimizer.step()
-            losses.append(float(distributed.sum_tensor(loss.detach())))
+            losses.append(loss.detach())
+    losses=distributed.sum_tensor(torch.stack(losses)).cpu().tolist() if losses else []
+    norms=torch.stack(norms).cpu().tolist() if norms else []
     final=metrics()
     return dict(before=initial,after=final,optimizer_steps=len(losses),epochs=epochs,losses=losses,gradient_norms=norms,
         frozen_encoder_passes=int(cached_features and bool(local_rows)),feature_bytes=sum(v.numel()*v.element_size() for v in encoded.values()),

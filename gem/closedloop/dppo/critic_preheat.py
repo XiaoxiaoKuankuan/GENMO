@@ -43,7 +43,7 @@ def _critical_sources(root):
         ('actor.py', 'contracts.py', 'online_conditions.py', 'training.py','evaluation_music.py')]
     files += [p for p in (root/'gem/closedloop/dppo').glob('*.py') if p.name in
         ('policy.py', 'dense_policy.py', 'batch_execution.py', 'fixed_tile_linear.py',
-         'compensated_gemm.py', 'compiled_forward.py', 'dense_attention.py',
+         'compensated_gemm.py', 'compiled_forward.py', 'cuda_graph_forward.py', 'dense_attention.py',
          'frozen_prefix.py','run_control.py','env_adapter.py','vector_environment.py',
          'evaluation.py','evaluation_world.py','vector_evaluation.py',
          'world_collector.py','mc_calibration.py','complete_episode.py','trainer.py',

@@ -4,6 +4,8 @@
 名称与连续50Hz越界时长；连续计数严格按同一episode的已执行控制步更新。
 完整60帧诊断仅检查可修改且有效的关节坐标，使用实际生成的21关节角按名称重排。
 该完整窗口结果只做诊断，绝不再次累加到50Hz奖励，也不裁剪动作或已承诺参考。
+在线生成使用设备批量归约后随必需参考输出合并传输；保留NumPy逐任务函数作为
+独立诊断参照，二者阈值、FP64计算和完整逐坐标证据相同，不逐环境同步CUDA。
 """
 from __future__ import annotations
 import numpy as np
@@ -55,6 +57,58 @@ def generated_boundaries(qpos,free_joint_mask,snapshot,source_joint_names):
     return dict(scope='all_modifiable_valid_generated_coordinates_not_execution_reward',reward_weight=0.,
         hard=boundary_metrics(position,snapshot['joint_hard_limits_rad'],names,mask),
         soft=boundary_metrics(position,snapshot['joint_soft_limits_rad'],names,mask))
+
+
+def generated_boundaries_tensors(qpos,free_joint_mask,snapshots,source_joint_names,*,check_finite=True):
+    """批量计算[B,60/120,21]合法性；只返回设备张量，不逐环境读GPU标量。
+
+    名称和权威限位在CPU元数据上核验，全部越界计算在qpos所在设备按FP64执行。
+    调用方已经检查完整生成输出有限时可关闭重复有限性同步；独立调用默认检查。
+    """
+    import torch
+    if qpos.ndim!=3 or qpos.shape[-1]!=28 or not len(qpos) or len(snapshots)!=len(qpos):
+        raise ValueError('Batched generated qpos requires nonempty [B,T,28] and one snapshot per row')
+    if free_joint_mask.shape!=(*qpos.shape[:2],21) or free_joint_mask.device!=qpos.device:
+        raise ValueError('Generation joint mask differs from actual qpos')
+    names=GMT_EXPECTED_JOINT_ORDER
+    if len(source_joint_names)!=21 or set(source_joint_names)!=set(names):
+        raise ValueError('Generated source joint names must be a permutation of GMT joints')
+    if any(tuple(s['joint_names'])!=names for s in snapshots):
+        raise ValueError('Generated reference boundary joint order mismatch')
+    bounds=np.asarray([[s['joint_hard_limits_rad'],s['joint_soft_limits_rad']] for s in snapshots],dtype=np.float64)
+    if bounds.shape!=(len(qpos),2,21,2) or not np.isfinite(bounds).all() or (bounds[...,1]<=bounds[...,0]).any():
+        raise ValueError('Joint boundaries require ordered finite [21,2] limits')
+    indices=torch.tensor([list(source_joint_names).index(n) for n in names],device=qpos.device)
+    position=qpos[...,7:].index_select(-1,indices).double()
+    if check_finite and not bool(torch.isfinite(position).all()):
+        raise ValueError('Nonfinite joint boundary input')
+    valid=free_joint_mask.index_select(-1,indices).bool()
+    limits=torch.as_tensor(bounds,device=qpos.device)
+    excess=torch.maximum(limits[:,:,None,:,0]-position[:,None],position[:,None]-limits[:,:,None,:,1]).clamp_min_(0.)
+    excess=excess.masked_fill(~valid[:,None],0.)
+    violation=(excess>1e-6)&valid[:,None]
+    count=valid.sum((-2,-1))
+    return dict(max_excess_rad=excess.amax((-2,-1)),
+        violation_fraction=violation.sum((-2,-1)).double()/count.clamp_min(1)[:,None],
+        valid_coordinates=count,per_joint_max_excess_rad=excess.amax(-2),violation_mask=violation)
+
+
+def generated_boundary_reports(host_metrics):
+    """合并D2H结束后恢复既有证据结构；这里禁止隐式CUDA标量读取。"""
+    if any(v.device.type!='cpu' for v in host_metrics.values()):
+        raise ValueError('Batch boundary reports require one completed host transfer')
+    arrays={k:v.numpy() for k,v in host_metrics.items()};records=[]
+    for i,count in enumerate(arrays['valid_coordinates']):
+        report=dict(scope='all_modifiable_valid_generated_coordinates_not_execution_reward',reward_weight=0.)
+        for j,kind in enumerate(('hard','soft')):
+            violation=arrays['violation_mask'][i,j]
+            report[kind]=dict(max_excess_rad=float(arrays['max_excess_rad'][i,j]),
+                violation_fraction=float(arrays['violation_fraction'][i,j]),valid_coordinates=int(count),
+                per_joint_max_excess_rad=arrays['per_joint_max_excess_rad'][i,j].tolist(),
+                violating_joint_names=[n for n,bad in zip(GMT_EXPECTED_JOINT_ORDER,violation.any(0)) if bad],
+                violation_mask=violation.tolist())
+        records.append(report)
+    return records
 
 
 def summarize_boundaries(records,*,generated=()):

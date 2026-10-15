@@ -9,6 +9,8 @@ BC比例标定只读取共同作用参数；contact等单独头单列。目标�
 用指数平滑、显式上下限及每步最大变化倍率控制，不按每个microbatch跳变。
 该系数是梯度合成系数，不等于Adam参数更新贡献。控制器状态属于新checkpoint
 与整轮回滚状态。实际通信字节、桶数和时间被报告，不隐瞒双向量诊断的额外流量。
+归约后梯度直接持有本次bucket的独立视图，bucket不跨步复用；消除逐参数clone而
+不改变SUM、FP64统计、合成顺序或参数更新，p.grad持有存储直到下一次zero_grad。
 """
 from __future__ import annotations
 
@@ -115,8 +117,8 @@ def merge_global_gradients(actor,ppo,bc,controller,*,distributed=None,bucket_byt
             groups['all']+=numbers;groups[_group(name)]+=numbers
             groups['shared']+=numbers*((numbers[0]>0)&(numbers[1]>0))
             # 明确保存全局未加权向量，BC控制只在全部桶统计完成后更新一次。
-            ppo[name]=a.reshape_as(p).clone() if flags[0] else None
-            bc[name]=b.reshape_as(p).clone() if flags[1] else None
+            ppo[name]=a.reshape_as(p) if flags[0] else None
+            bc[name]=b.reshape_as(p) if flags[1] else None
             offset+=p.numel()
     reports={}
     for name,(a2,b2,dot) in zip(groups,torch.stack(list(groups.values())).cpu().tolist()):
