@@ -3,8 +3,9 @@
 # Stage1 s595000、GMT140500、60帧/30Hz、50/200Hz物理和连续世界采集保持。
 # 本配置仅允许服务器2有限验收；旧P1奖励、rollout、Critic及优化器均不能恢复。
 # 已绑定新核部署标定和32任务配对证据；仅允许有限在线验证，不自动启动长期训练。
-# 固定数据单次候选：1e-7新增朝向失败，5e-8无新增失败、完成数29→30。
-# 后续在线两轮及恢复第三轮均为28/32完成，连续收益尚未成立；本配置不是正式训练推荐。
+# 容量验收起点：128环境/卡、4秒窗口、Actor/KL微批128，全局PPO/Critic批量2048。
+# 新完整MC覆盖96首独立训练音乐，价值验证改善；四轮Actor物理收益尚未稳健。
+# 保持有限四轮和硬KL失败退出；本配置不是长期正式训练推荐。
 # 音乐/前缀编码冻结，历史GRU独立学习率1e-5，其余Critic1e-4；完整MC必须重新采集。
 diagnostics:
   record_original_threshold_crossings: true
@@ -42,13 +43,13 @@ runtime:
   allow_shared_gpu: false
   backend: gpu_vectorized.v1
   evidence_level: training
-  generation_batch: 64
+  generation_batch: 128
   genmo_device: cuda:0
   gmt_inference_contract: gmt.native_checkpoint_frozen_batch.v1
   headless: true
   isaaclab_root: /data0/user/liwei/closedloop_stage8_runtime/IsaacLab
   noise_namespace: stage2_asymmetric_tracking90_deterministic_final
-  num_envs: 64
+  num_envs: 128
   physics_device: cuda:0
   prefix_deadline_contract: available_reference_deadline_cap.v1
   reward_audit_interval_controls: 1000
@@ -104,7 +105,7 @@ stage10:
         AIOZ-GDANCE: 4
         FineDance: 5
         Mine: 5
-      training_samples_per_source: 12
+      training_samples_per_source: 24
       training_seeds:
       - 42
       - 1729
@@ -113,14 +114,14 @@ stage10:
       - 31415
     dimension: 256
     epochs: 32
-    global_batch: 1024
+    global_batch: 2048
     heads: 4
     layers: 2
     learning_rate: 0.0001
     # 新奖励、新90维历史、新15+4+1行为下的独立完整MC；只导入Critic，不恢复旧Actor/轮数。
     preheat_artifact:
-      path: /data1/user/liwei/GENMO_outputs/closedloop_stage10/stage2_asymmetric_20261015/critic_init_complete_mc.pt
-      sha256: 6994547a001f3b4e2a8cc46dd084101832144397308f9e556c7384cdf2d65ba9
+      path: /data1/user/liwei/GENMO_outputs/closedloop_stage10/stage2_capacity_20261015/critic_init_complete_mc.pt
+      sha256: e507e974719802afea3c563ee2a07da8912bd753cda98c6198e628b8d30e43a1
     type: asymmetric_tracking_temporal
     warmup_rollouts: 0
     history_learning_rate: 1.0e-05
@@ -182,10 +183,10 @@ stage10:
         path: /data1/user/liwei/GENMO_outputs/closedloop_stage10/stage2_asymmetric_20261015/four_step_kl_calibration.json
         sha256: fdacb39b6f79bc4588c06ba6f28916ea5d2551d58837149e621fe25b0986bc71
   limits:
-    accepted_iterations: 8
+    accepted_iterations: 4
     control_steps: 150000000
     generations: 3000000
-    optimizer_attempts: 6000
+    optimizer_attempts: 40
     physics_steps: 600000000
   performance:
     bc_batch_forward: true
@@ -282,9 +283,9 @@ stage10:
         leg_joint_pos: 0.07936507936507936
     version: stage2.gmt8_reference_limits.v1
   run_control:
-    max_training_iterations: 8
+    max_training_iterations: 4
   scale:
-    actor_minibatch_chains: 1024
+    actor_minibatch_chains: 2048
   seed: 42
   storage:
     checkpoint_interval_seconds: 1800
@@ -304,12 +305,12 @@ stage10:
       max_frames: 30
       min_frames: 6
       zero_probability: 0.15
-    bc_samples_per_rollout: 512
+    bc_samples_per_rollout: 1024
     bc_weight: 0.01
     cfg_batch: true
     critic_grad_clip_norm: 1.0
     critic_lr: 0.0001
-    denoising_microbatch: 64
+    denoising_microbatch: 128
     denoising_steps: 20
     eta: 0.1
     execution_mode: latency
@@ -320,7 +321,7 @@ stage10:
     gradient_snr_diagnostic: false
     guidance_scale: 2.5
     kl_microbatch: 128
-    kl_rejection: rollback_continue
+    kl_rejection: abort
     kl_soft_stop_coordinate: 0.00025
     lambda_upper: 0.95
     latency_budget_s: 0.5

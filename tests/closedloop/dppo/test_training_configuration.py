@@ -1,7 +1,7 @@
 """当前 Stage10 入口、真实规模和配套 GMT 身份的 CPU 集成检查。
 
 读取实际主配置与诊断配置，确认同一实现绑定正确资产、原功能工作树和统一 Python，
-并验证 4096 链的 minibatch/BC 推导。旧训练配置必须明确拒绝，不能隐式转换为当前
+并验证 8192 链名义容量的 minibatch/BC 推导。旧训练配置必须明确拒绝，不能隐式转换为当前
 方法。独立检查 CLI 帮助和源码身份清单，覆盖入口迁移时容易遗漏的脚本路径。
 配套 GMT 检查只执行纯目录配置函数，不导入 Isaac，不创建 GPU 上下文或运行仿真。
 """
@@ -25,14 +25,18 @@ ROOT = Path(__file__).resolve().parents[3]
 CONFIG = ROOT / 'configs/closedloop/stage2_asymmetric_server2.yaml'
 
 
-def test_main_scale_is_4096_full_chains_with_eight_combined_updates():
+def test_main_scale_is_8192_nominal_chains_with_eight_combined_updates():
     c = configuration(CONFIG)
     s, t = c['stage10'], c['stage10']['training']
     assert s['version'] == VERSION
-    assert s['derived'] == dict(world_size=8, real_chains=4096, local_chains=512,
-        planned_actor_steps=8, local_ppo_internal_visits=4096, local_trainable_kl_visits=2048,
-        bc_per_step=64, bc_per_rollout=512,maximum_actor_steps=10,
+    assert s['derived'] == dict(world_size=8, real_chains=8192, local_chains=1024,
+        planned_actor_steps=8, local_ppo_internal_visits=8192, local_trainable_kl_visits=4096,
+        bc_per_step=128, bc_per_rollout=1024,maximum_actor_steps=10,
         count_semantics='nominal_capacity_only_actual_manifest_controls_optimization')
+    assert c['runtime']['num_envs']==c['runtime']['generation_batch']==128
+    assert s['critic']['global_batch']==s['scale']['actor_minibatch_chains']==2048
+    assert t['denoising_microbatch']==t['kl_microbatch']==128
+    assert s['critic']['complete_mc']['training_samples_per_source']==24
     assert (t['denoising_steps'], t['ppo_steps_per_chain'], t['ppo_epochs']) == (20, 4, 2)
     assert t['frozen_prefix_steps']==15 and t['ppo_step_strategy']=='intermediate4'
     assert t['actor_lr'] == 5e-8 and t['ppo_clip'] == .003
