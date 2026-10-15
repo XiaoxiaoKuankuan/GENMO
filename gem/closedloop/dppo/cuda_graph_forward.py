@@ -1,7 +1,7 @@
 """纯推理denoiser的有界CUDA Graph候选，不改变扩散、随机采样或反向数学。
 
 只捕获eval且no_grad的张量前向；PPO有梯度前向和Stage1 BC继续执行原函数。输入
-使用真实批量形状，不填充或复制样本；同形状出现三次才捕获，最多保留两个图，
+使用真实批量形状，不填充或复制样本；同形状出现三次才捕获，默认最多保留八个图，
 变长尾批可执行原前向。随机噪声仍由外层独立generator产生并写入静态输入。
 图读取当前参数存储，optimizer原位更新后仍使用新权重；替换参数/缓冲区存储则
 重建，禁止复用旧地址。返回独立输出，避免下一次replay覆盖此前动作或contact。
@@ -14,9 +14,9 @@ from collections import OrderedDict
 import torch
 
 
-def install_inference_graph(policy,*,maximum_graphs=2):
+def install_inference_graph(policy,*,maximum_graphs=8):
     module=policy.actor.denoiser
-    if maximum_graphs<1 or hasattr(module,'_stage10_eager_forward'):
+    if type(maximum_graphs)is not int or not 1<=maximum_graphs<=8 or hasattr(module,'_stage10_eager_forward'):
         raise ValueError('Invalid CUDA graph capacity or an existing execution wrapper')
     original=module.forward;graphs=OrderedDict();seen={}
     counters=dict(captures=0,replays=0,cold_calls=0,gradient_calls=0,evictions=0)

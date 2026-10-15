@@ -9,6 +9,8 @@
 minibatch统一2048条链，BC按真实名义采集容量从512升到1024/2048，Critic全局
 批量2048且仍32epoch。每组总计16秒世界时间：4秒四轮、8秒两轮，实际有效样本、
 失败/重置与物理控制数必须由报告核对，不能把名义容量当作实际完成工作。
+有限实验遇到硬KL拒绝时整轮回滚并退出，不通过追加rollout获得更多交互预算；
+各组停止轮数和optimizer尝试上限单独绑定，保留原资源、信号及物理保护。
 
 本工具只写完整配置及manifest，包含实际源码提交、基础配置SHA、实验边界和
 可复制启动参数。默认稳定数值核、CUDA Graph关闭，所有run都重新初始化PhysX，
@@ -73,6 +75,12 @@ def prepare(base,output,*,critic_artifact=None,kl_microbatch=128,mc_music=24):
         c=copy.deepcopy(config);s=c['stage10']
         s['ppo_rollout']['world_seconds']=float(seconds)
         s['training'].update(denoising_microbatch=micro,bc_samples_per_rollout=256*seconds)
+        if iterations:
+            s['training']['kl_rejection']='abort'
+            s['limits']['accepted_iterations']=iterations
+            s['run_control']['max_training_iterations']=iterations
+            # 额外一个合法边界只预留可能出现的变长尾批，不增加已接受轮数。
+            s['limits']['optimizer_attempts']=iterations*2*(seconds+1)
         path=directory/(name+'.yaml')
         with path.open('x') as stream:yaml.safe_dump(c,stream,allow_unicode=True,sort_keys=False)
         parsed=configuration(path)

@@ -276,6 +276,7 @@ def main():
     p.add_argument('--profile',action='store_true',help='另测一个预热后的真实CPU/CUDA优化步，不纳入吞吐计时')
     p.add_argument('--profile-only',action='store_true',help='只在明确指定微批做独立CUDA trace，不重跑完整吞吐扫描')
     p.add_argument('--diagnostic-only',action='store_true',help='每候选只做一次完整梯度/Adam/全链四步KL比较，带梯度拷贝，不作为吞吐计时')
+    p.add_argument('--kl-only',action='store_true',help='仅在共同非空Adam起点预热并计时最终KL，用于已验收前向的静态缓冲容量对照')
     p.add_argument('--calibrate-actor-rates',type=float,nargs='+',help='从同一起点有限标定完整PPO+BC学习率；仅显式save-evaluation-actor时发布合格评估权重')
     p.add_argument('--calibrate-bc-initial',type=float,default=.01)
     p.add_argument('--calibrate-bc-maximum',type=float)
@@ -289,6 +290,8 @@ def main():
     p.add_argument('--heldout-seed',type=int,default=0)
     a=p.parse_args();rank=int(os.environ['LOCAL_RANK'])
     if a.diagnostic_only and a.profile:p.error('Numerical diagnostics and independent performance profiling are separate modes')
+    if a.kl_only and (a.profile or a.profile_only or a.diagnostic_only or a.calibrate_actor_rates or a.heldout_surrogate):
+        p.error('KL-only is an independent finite inference measurement')
     if a.profile_only:
         if a.diagnostic_only or a.calibrate_actor_rates:p.error('Profile-only is separate from numerical or rate calibration')
         a.profile=True
@@ -365,6 +368,7 @@ def main():
         source_case_sha256=file_sha256(a.case/'case.json'),real_global_chains=len(manifest),probability=probability,
         offline_warmup=offline_warm,all_candidates_same_nonempty_adam=True,old_statistics_not_rewritten=True,
         soft_stop_disabled_only_for_fixed_work=True,sampled_steps=a.sampled_steps,actor=[],kl=[])
+    report['measurement_scope']='final_KL_only_with_nonempty_Adam' if a.kl_only else 'full_actor_update_and_final_KL'
     def publish():
         root_call(d,lambda:atomic_json(a.output/'report.json',report))
     publish()
@@ -390,7 +394,7 @@ def main():
             if variant=='cuda_graph':
                 from gem.closedloop.dppo.cuda_graph_forward import install_inference_graph
                 install_inference_graph(policy)
-        for micro in a.microbatches:
+        for micro in ([] if a.kl_only else a.microbatches):
             samples=[];diagnostic=None
             for repeat in range(1 if a.diagnostic_only else a.repeats+2):
                 restore();captured=[]

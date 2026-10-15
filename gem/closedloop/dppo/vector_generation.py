@@ -91,9 +91,11 @@ def generate_batch(policy, packets, *, shared_storage=False, device_trace=False)
     copied = dict(trace=trace if device_trace else bulk_cpu_copy(trace), qpos_world=critical['qpos_world'])
     finished = time.perf_counter()
     boundaries=generated_boundary_reports(critical['boundary'])
+    boundary_report_end=time.perf_counter()
     from .tracking_context import build_critic_context_batch
     critic_conditions=build_critic_context_batch(trace['conditions'] if device_trace else conditions,
         [p['snapshot'] for p in packets])
+    critic_condition_end=time.perf_counter()
     outputs = []
     for i,p in enumerate(packets):
         meta = metadata[i]
@@ -120,7 +122,9 @@ def generate_batch(policy, packets, *, shared_storage=False, device_trace=False)
     return outputs, dict(condition_batch_seconds=condition_end-started,
         generate_and_world_seconds=generated_end-condition_end, bulk_trace_transfer_seconds=finished-generated_end,
         critical_output_transfer_seconds=generated_end-output_transfer_begin,
-        cpu_split_seconds=time.perf_counter()-finished, components=dict(policy.last_sample_timing),
+        boundary_report_cpu_seconds=boundary_report_end-finished,
+        critic_history_upload_validation_seconds=critic_condition_end-boundary_report_end,
+        cpu_split_seconds=time.perf_counter()-critic_condition_end, components=dict(policy.last_sample_timing),
         boundary_execution='batched_device_fp64_merged_output_transfer',
         generation_contract=GENERATION_CONTRACT, effective_rows=len(packets))
 
