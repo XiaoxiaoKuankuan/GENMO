@@ -27,9 +27,9 @@ GENMO，GMT140500冻结，Isaac Lab提供真实反馈，DPPO＋BC联合更新Act
 * Stage2音乐奖励关闭，音乐条件、CFG、Stage1音乐动作监督保留。tracking继续
   使用配对动作活动度门控，不能把不动换来的稳定误认为生成能力提升。
 
-主配置的Actor学习率选型与完整歌曲复核见本次验收报告。两个有限pilot唯一主动
-差别是固定学习率1e-7与有边界的KL自适应学习率；正式阶段沿选中run连续恢复，
-不能清空已完成轮数、优化器或交互预算。
+正式Actor学习率固定1e-7。两组100轮pilot及独立完整歌曲复核后选P1，自适应
+学习率不采用。具体收益和动作活动度下降、参考极端越界等限制见本次验收报告。
+正式阶段从P1第100轮连续恢复，不能清空已完成轮数、优化器或交互预算。
 
 评估、Critic和归档
 -----------------
@@ -69,7 +69,7 @@ SIGINT/SIGTERM安全停止、完整checkpoint、显存和磁盘保护、单次�
 
     bash scripts/train_stage10_8gpu_server1.sh \
       --config configs/closedloop/stage10_server1.yaml \
-      --output-dir /绝对路径/已选中的运行目录 \
+      --output-dir /data1/user/liwei/GENMO_outputs/closedloop_stage10/formalization_20261014/pilot_P1/P1 \
       --resume latest --stop-after-iteration 500
 
 不要把其他实验checkpoint放入该目录冒充恢复。新建运行必须用不存在的独立目录
