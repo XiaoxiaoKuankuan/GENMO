@@ -98,6 +98,21 @@ def test_periodic_merge_reproduces_32_episodes_and_rejects_missing_or_duplicate(
         merge_periodic_reports(plan, paths)
 
 
+def test_unique_music_plan_has_explicit_unequal_source_counts(tmp_path):
+    catalog=Catalog(tmp_path)
+    counts=dict(zip(SOURCES,(2,4,5,5)))
+    plan=build_balanced_plan(catalog,samples_per_source=counts,unique_music=True,seconds=None)
+    assert plan['task_count']==32 and plan['periodic_subset']['source_sample_counts']==counts
+    assert plan['selected_unique_audio_count']==plan['selected_unique_group_count']==16
+    assert plan['episode_seconds'] is None
+    from gem.closedloop.dppo.mc_calibration import complete_mc_plan
+    mc=complete_mc_plan(catalog,'val',samples_per_source=counts,seeds=[2718,31415],selection_seed=461)
+    assert mc['task_count']==32 and mc['selected_unique_audio_count']==16
+    bad=dict(counts);bad[SOURCES[0]]=6
+    with pytest.raises(ValueError,match='Insufficient'):
+        build_balanced_plan(catalog,samples_per_source=bad,unique_music=True)
+
+
 def test_best_observed_is_not_mislabelled_saved_and_baseline_safety_gate(tmp_path):
     plan, paths = evaluate_ranks(tmp_path)
     baseline = merge_periodic_reports(plan, paths)

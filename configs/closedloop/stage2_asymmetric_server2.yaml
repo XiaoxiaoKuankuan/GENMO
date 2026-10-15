@@ -97,7 +97,11 @@ stage10:
         minimum_explained_variance: 0.6
         minimum_relative_mse_reduction: 0.3
       refit_if_ev_below: 0.9
-      samples_per_source: 4
+      samples_per_source:
+        AIST++: 2
+        AIOZ-GDANCE: 4
+        FineDance: 5
+        Mine: 5
       training_samples_per_source: 12
       training_seeds:
       - 42
@@ -142,7 +146,13 @@ stage10:
     episode_seconds: null
     every_control_steps: 1500000
     persistent_world: true
-    samples_per_source: 4
+    # 当前val只有两首独立AIST音乐，不重复片段凑数；16首×2种子共32任务。
+    # 总分仍按四来源等权汇总，保留原test清单作为后续独立检验。
+    samples_per_source:
+      AIST++: 2
+      AIOZ-GDANCE: 4
+      FineDance: 5
+      Mine: 5
     seeds:
     - 42
     - 1729

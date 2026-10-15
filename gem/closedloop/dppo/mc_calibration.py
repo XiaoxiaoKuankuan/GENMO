@@ -47,7 +47,11 @@ def mc_execution_counts(used,world_execution=None):
 
 
 def complete_mc_plan(catalog, split, *, samples_per_source, seeds, selection_seed):
-    """训练bank按独立音乐选最长配对片段，验证bank保留固定计划以便纵向比较。"""
+    """两个bank均按独立音乐选最长可用配对样本；验证规模允许显式分来源配额。"""
+    if split!='train':
+        from .periodic_monitor import build_balanced_plan
+        return build_balanced_plan(catalog,samples_per_source=samples_per_source,seeds=seeds,
+            selection_seed=selection_seed,seconds=None,unique_music=True,split=split)
     selected=catalog
     if split=='train':
         from gem.closedloop.evaluation_music import select_train_music

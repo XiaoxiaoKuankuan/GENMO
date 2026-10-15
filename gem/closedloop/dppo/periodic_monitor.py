@@ -18,6 +18,7 @@ import hashlib
 import json
 import math
 import os
+from collections.abc import Mapping
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -83,15 +84,18 @@ def build_balanced_plan(catalog, *, samples_per_source=4, seeds=(42, 1729), seco
                         start_mode='beginning',unique_music=False,split='val'):
     """在独立局部RNG中固定选样，复用全池任务的原task/noise身份。"""
     all_music=samples_per_source=='all_unique'
-    _require(all_music and unique_music or type(samples_per_source) is int and samples_per_source > 0,
-        'samples_per_source must be positive or all_unique with unique_music')
+    per_source=isinstance(samples_per_source,Mapping)
+    _require(all_music and unique_music or type(samples_per_source) is int and samples_per_source > 0
+        or per_source and set(samples_per_source)==set(SOURCES)
+        and all(type(n) is int and n>0 for n in samples_per_source.values()),
+        'samples_per_source must be positive, an explicit four-source count map, or all_unique with unique_music')
     _require(split in ('val','test') and set(catalog.samples[split]) == set(SOURCES), 'Periodic plan requires four held-out sources')
     _require(start_mode in ('beginning','center','mixed'), 'Invalid periodic start_mode')
     _require(start_mode=='beginning' or seconds is not None, 'Complete song evaluation must begin at music start')
     full = build_evaluation_tasks(catalog, split=split, eval_count='all', seeds=seeds,
         selection_seed=selection_seed, start_mode='center' if start_mode=='center' else 'beginning', episode_seconds=seconds)
     rng = np.random.default_rng(selection_seed)
-    chosen = set();source_counts={}
+    chosen = set();source_counts={};seen_groups=set();seen_audio=set()
     for source in sorted(SOURCES):
         samples = sorted(catalog.samples[split][source], key=lambda s: str(s['row']['sample_id']))
         if unique_music:
@@ -101,12 +105,15 @@ def build_balanced_plan(catalog, *, samples_per_source=4, seeds=(42, 1729), seco
             # 同一音频的不同动作片段不能充当新增的独立音乐。
             unique={}
             for sample in samples:unique.setdefault(sample['row']['source_audio_sha256'],sample)
-            samples=list(unique.values())
-        count=len(samples) if all_music else samples_per_source
+            samples=[sample for sample in unique.values() if sample['group_id'] not in seen_groups
+                     and sample['row']['source_audio_sha256'] not in seen_audio]
+        count=len(samples) if all_music else samples_per_source[source] if per_source else samples_per_source
         _require(len(samples) >= count>0, f'Insufficient periodic held-out samples: {source}')
         source_counts[source]=count
         for index in sorted(rng.choice(len(samples), size=count, replace=False).tolist()):
-            chosen.add((source, str(samples[index]['row']['sample_id'])))
+            sample=samples[index]
+            chosen.add((source, str(sample['row']['sample_id'])))
+            seen_groups.add(sample['group_id']);seen_audio.add(sample['row']['source_audio_sha256'])
     plan = copy.deepcopy(full)
     tasks = [t for t in plan['tasks'] if (t['dataset'], t['sample_id']) in chosen]
     if start_mode=='mixed':
