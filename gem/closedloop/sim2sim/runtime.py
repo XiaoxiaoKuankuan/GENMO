@@ -56,7 +56,6 @@ class InferenceActor:
         paths=config['paths'];self.path=Path(entry['checkpoint']).resolve()
         self.name=entry['name'];self.sha=file_sha(self.path)
         self.final_report=None
-        if entry.get('sha256') and entry['sha256']!=self.sha:raise ValueError('Actor checkpoint与配置SHA不符')
         payload=torch.load(self.path,map_location='cpu',weights_only=False,mmap=True)
         is_stage1='checkpoint_version' in payload and 'actor_interface_config' in payload
         self.is_stage1=is_stage1

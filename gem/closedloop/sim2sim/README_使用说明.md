@@ -13,8 +13,9 @@
 
 GENMO相关相对路径以本仓库为基准，GMT资产相对`paths.gmt_repo`，与启动目录无关；绝对路径也可使用。
 GMT仓库搬家只改`gmt_repo`，其余GMT相对路径自动跟随。更换Stage1改`stage1_checkpoint`并检查配套
-`stats/kinematics`，模式1通过YAML锚点自动复用该权重；更换Stage2改对应`models`条目的`checkpoint/sha256`，
-`name`仅用于显示。Stage2绑定的基础资产仍须匹配，当前GMT后端仍限定140500。
+`stats/kinematics`，模式1通过YAML锚点自动复用该权重；更换Stage2只改对应`models`条目的`checkpoint`路径，
+`name`仅用于显示。无需手动计算或填写文件指纹，程序自动记录实际文件身份；
+Stage2绑定的基础资产仍须匹配，当前GMT后端仍限定140500。
 更换默认音乐可直接改`playlist`为音频目录或清单，命令行音乐参数优先。专项验收仍可在自定义YAML中
 覆盖运行项，例如`runtime.audio: false`；普通启动无需填写整套固定参数。
 

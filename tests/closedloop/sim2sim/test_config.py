@@ -2,8 +2,8 @@
 
 使用仓库中的日常YAML和临时配置验证：省略固定参数后仍保留确定性DDIM和完整
 运行设置；更换GMT根目录只迁移GMT资产，不影响GENMO权重；配置复制到别处或
-更换启动目录不会误解相对路径。另核验Python符号链接入口和SHA原样保留，
-防止路径规范化破坏虚拟环境或自动更改模型身份。测试只解析配置，不加载任何
+更换启动目录不会误解相对路径。另核验Python符号链接入口和模型名称原样保留，
+防止路径规范化破坏虚拟环境或混淆模型选择。测试只解析配置，不加载任何
 真实权重、声音设备、GPU或动力学；所有写入均使用pytest临时目录。
 """
 from pathlib import Path
@@ -41,7 +41,6 @@ def test_gmt_move_and_different_launch_directory_keep_correct_asset_bases(tmp_pa
     for key in ('gmt_policy','gmt_checkpoint','gmt_agent','mjcf','urdf','isaac_contract'):
         assert Path(config['paths'][key])==gmt/raw['paths'][key]
     assert config['models']==before['models'] and config['playlist']==before['playlist']
-    assert config['paths']['gmt_sha256']==before['paths']['gmt_sha256']
     assert not config['runtime']['audio'] and config['runtime']['calibration_samples']==12
 
 
@@ -55,7 +54,7 @@ def test_absolute_paths_and_python_symlink_entry_are_preserved(tmp_path):
     config=load_config(path)
     assert config['paths']['gmt_validation_python']==str(link)
     assert config['models'][1]['checkpoint']==str(tmp_path/'新模型.pt')
-    assert config['models'][1]['sha256']==raw['models'][1]['sha256']
+    assert config['models'][1]['name']==raw['models'][1]['name']
 
 
 @pytest.mark.parametrize('content',['[]','runtime: []','schema: unsupported'])

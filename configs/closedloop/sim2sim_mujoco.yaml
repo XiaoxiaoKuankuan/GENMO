@@ -10,15 +10,13 @@ paths:
   stage1_checkpoint: &stage1_checkpoint inputs/checkpoints/stage1_server2_s595000_20261008/s595000.pt
   stats: inputs/checkpoints/stage1_server2_s595000_20261008/qpos30_train_stats.json
   kinematics: configs/bumi/bumi_kinematics_robot_retargeter_fe934_v1.json
-  # Stage2绑定基础模型/stats/kinematics/GMT内容SHA，必须使用与它匹配的一套资产。
+  # Stage2需使用与训练时匹配的基础模型/stats/kinematics/GMT配套文件。
 
-  # GMT文件换位置：改对应路径；更换策略内容需同时核对以下4项。
+  # GMT文件换位置：改对应路径；更换策略内容需配套核对以下3个文件。
   # 当前后端限定140500，换其他训练轮数需另行适配后端，不是只改文件名。
   gmt_policy: logs/rsl_rl/tracking_bumi4340_mha_sonic_mimic/2026-09-28_20-12-58_umr_soma50_six50_filtered_scratch/exported/model_140500/policy.onnx
   gmt_checkpoint: logs/rsl_rl/tracking_bumi4340_mha_sonic_mimic/2026-09-28_20-12-58_umr_soma50_six50_filtered_scratch/model_140500.pt
   gmt_agent: logs/rsl_rl/tracking_bumi4340_mha_sonic_mimic/2026-09-28_20-12-58_umr_soma50_six50_filtered_scratch/params/agent.yaml
-  gmt_sha256: 31a8f999b652d272246b803d4ffa708f3125de92c0d573411ef13fc3ee6ced20
-  # 上面是policy.onnx的内容SHA：sha256sum /实际路径/policy.onnx；只搬文件不用改SHA。
   # 换机器/虚拟环境：改为能加载GMT原始.pt并做ONNX对照的Python解释器。
   gmt_validation_python: /home/weili/miniconda3/envs/env_isaaclab/bin/python
 
@@ -32,17 +30,14 @@ paths:
   # 更换运行报告、轨迹、视频及音乐特征缓存的保存位置，改output_root。
   output_root: outputs/sim2sim
 
-# 按键1/2/3依列表顺序选择模型；更换Stage2只改对应checkpoint和sha256，name是显示名称。
-# sha256sum /实际路径/新模型.pt 获取SHA；仅移动同一模型文件时保留SHA。
+# 按键1/2/3依列表顺序选择模型；更换Stage2只改对应checkpoint路径，name是显示名称。
 models:
   - name: Stage1-s595000
     checkpoint: *stage1_checkpoint
   - name: Stage2-iteration147
     checkpoint: outputs/sim2sim/models/actor_iteration147.pt
-    sha256: 99d93bde73165fb57bb430577678afff1abc0704e8caabfe132c4cddce8945da
   - name: Stage2-iteration246
     checkpoint: outputs/sim2sim/models/actor_iteration246.pt
-    sha256: 9e0d718fb87565a3f5980d82fc7612825c3dc73afd1432f0f7a0b61599294a84
 
 # 默认音乐入口：可填selection/manifest、音频清单、单首WAV/MP3或音频文件夹。
 # 命令行--audio/--audio-dir/--playlist会覆盖此项；换日常播放目录也可只改这里。
