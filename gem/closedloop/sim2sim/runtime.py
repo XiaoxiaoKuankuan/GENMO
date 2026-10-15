@@ -2,10 +2,10 @@
 
 物理线程独占MjData和reference提交；唯一推理线程只消费复制的音乐/历史/前缀。
 行为固定完整20步，60帧输入直接进入Transformer，模型从明确checkpoint加载。
-Stage1演示采用原Stage1语义的eta=0 DDIM，仅初始噪声随机；不借用DPPO探索噪声。
+Stage1和Stage2统一采用20步eta=0 DDIM，仅初始噪声随机；不采样DPPO探索噪声。
 缓存条件/合批CFG只改执行组织，须与Stage1Actor.sample同条件/初始噪声核验。
-Stage2始终保留checkpoint声明的完整随机核，不把确定性演示冒充训练行为。
-Stage2只导入Actor和绑定随机核，不构造Critic/optimizer，不冒充训练恢复。
+Stage2先校验checkpoint声明的训练随机核，再显式构造独立确定性推理身份。
+保留原训练身份、CFG、Horizon、数值算子和冻结前段；不构造Critic/optimizer。
 
 600Hz整数tick组织30Hz源动作、50HzGMT和200Hz物理。生成期间物理继续执行；
 默认连续仿真：物理误差、迟到和音频漂移记录告警后继续；迟到/旧episode结果
@@ -92,41 +92,43 @@ class InferenceActor:
         if sampling['generation_frames']!=config['generation_frames']:
             raise ValueError('Actor行为Horizon与MuJoCo参考Horizon不同，不能静默覆盖')
         self.actor.eval().requires_grad_(False)
-        if self.is_stage1:sampling['eta']=0.
-        self.policy=build_policy(self.actor,sampling,precision,frozen_actor=frozen_actor)
         if self.source_kernel:
-            old=copy.deepcopy(self.source_kernel);new=copy.deepcopy(self.policy.kernel_config)
+            source_policy=build_policy(self.actor,sampling,precision,frozen_actor=frozen_actor)
+            old=copy.deepcopy(self.source_kernel);new=copy.deepcopy(source_policy.kernel_config)
             # 跨机器Torch版本可能不同：记录新行为身份并重新标定，不声称旧核逐位等价。
             old['numerical_execution'].pop('torch_version',None);new['numerical_execution'].pop('torch_version',None)
             if old!=new:raise ValueError('本机重建随机核与checkpoint声明不同')
+            del source_policy
+        # 概率参数构造器要求正floor；推理仅取mean，绝不使用其std采样。
+        # eta必须在构造前归零，确保DDIM均值中的方向系数也属于确定性路径。
+        sampling.update(denoising_steps=20,eta=0.,std_schedule=[.001]*20)
+        self.policy=build_policy(self.actor,sampling,precision,frozen_actor=frozen_actor)
         self.initial_fingerprint=_fingerprint(self.actor)
         self.builder=OnlineConditionBuilder(self.actor.endecoder.codec,history_steps=50,
                                             motion_frames=sampling['generation_frames'])
-        kernel=(dict(version='genmo.sim2sim.stage1_ddim.v1',steps=20,eta=0.,
+        kernel=dict(version='genmo.sim2sim.deterministic_ddim.v1',steps=20,eta=0.,
             guidance_scale=sampling['guidance_scale'],generation_horizon_frames=sampling['generation_frames'],
-            noise='initial_only',effective_std_floors=[0.]*20,
+            noise='initial_only',std_floor=0.,effective_std_floors=[0.]*20,final_step_noise=False,
+            timestep_map=list(self.policy.timestep_map),
             numerical_execution=copy.deepcopy(self.policy.kernel_config['numerical_execution']))
-            if self.is_stage1 else self.policy.kernel_config)
+        if self.policy.kernel_config.get('frozen_prefix'):
+            kernel['frozen_prefix']=copy.deepcopy(self.policy.kernel_config['frozen_prefix'])
         self.identity=dict(name=self.name,checkpoint=str(self.path),checkpoint_sha256=self.sha,
             actor_fingerprint=self.initial_fingerprint,source_training_identity=self.source_identity,
-            source_checkpoint=self.source_checkpoint,
+            source_checkpoint=self.source_checkpoint,source_training_kernel=copy.deepcopy(self.source_kernel),
             kernel=kernel,device=str(self.device),torch_version=torch.__version__,
             physics_backend='mujoco',purpose='inference_only_no_training_resume')
-        self.identity['sampler']='stage1_ddim20_eta0_initial_noise_only' if self.is_stage1 else 'original_dense_sample_rollout_20_steps'
+        self.identity['sampler']='ddim20_eta0_initial_noise_only'
         self.identity['behavior_id']=hashlib.sha256(json.dumps(self.identity,sort_keys=True).encode()).hexdigest()
 
 
     @torch.no_grad()
     def _sample(self,batch,generator,*,initial_noise=None):
-        """Stage1只沿eta=0 DDIM均值去噪，Stage2完整保留原checkpoint随机核。
+        """Stage1和Stage2共用eta=0 DDIM，仅抽取初始噪声，后续每步只取均值。
 
-        Stage1仍是20个真实去噪步，合批CFG和条件缓存复用既有执行算子；每一步
+        两阶段均执行20个真实去噪步，合批CFG和条件缓存复用既有执行算子；每一步
         都恢复已知前缀，物理解码后再次精确回写。这里不做动作平滑/限速。
         """
-        if not self.is_stage1:
-            sample=self.policy.sample_rollout(batch,generator=generator,initial_noise=initial_noise)
-            self.sampling_timing=dict(self.policy.last_sample_timing)
-            return sample
         started=time.perf_counter()
         prepared=self.policy.prepare_conditions(batch);adapted=prepared['adapted']
         noise=(torch.randn(adapted['known_x'].shape,device=self.device,dtype=torch.float32,generator=generator)
@@ -143,7 +145,7 @@ class InferenceActor:
         contact=torch.where(adapted['future_valid'][...,None],parameters['contact_logits'].sigmoid(),0.)
         if torch.device(self.device).type=='cuda':torch.cuda.current_stream(self.device).synchronize()
         self.sampling_timing=dict(total_wall_seconds=time.perf_counter()-started,
-            interval_scope='stage1 deterministic DDIM20; cached conditions and batched CFG',steps=self.policy.steps)
+            interval_scope='deterministic DDIM20; initial noise only; cached conditions and batched CFG',steps=self.policy.steps)
         return dict(qpos=qpos,qpos30=physical,contact=contact,normalized=state)
 
     @torch.no_grad()

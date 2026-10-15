@@ -93,9 +93,12 @@ selection的`source/row`从配置`dataset_root`解析；manifest从所属数据�
 ## 控制和数值合同
 
 - GENMO实际输入60帧（2秒，30Hz），每0.5秒重规划，完整20步扩散采样。120帧需显式配置并匹配checkpoint身份。
-- Stage1演示使用与`Stage1Actor.sample`相同的20步eta=0 DDIM，只用初始噪声决定生成结果；每一步不再
-  额外加入DPPO探索噪声。条件缓存和合批CFG只优化执行，已用同条件/初始噪声对照原接口。Stage2保持其checkpoint
-  声明的完整随机核，不因显示偏好修改训练/评估身份。新Stage1行为身份重新计算并在本机重新标定。
+- Stage1和Stage2（按键1/2/3及`--actor-checkpoint`）统一使用20步eta=0 DDIM，仅初始噪声随机；
+  每步只沿DDIM均值更新，实际附加噪声标准差全0，末步同样不添加探索噪声。保留音乐条件、真实状态反馈、
+  已知前缀及checkpoint绑定的冻结前段。条件缓存和合批CFG复用既有执行算子，不做动作平滑或限速。
+  同一初始噪声和条件下去噪过程确定；不同初始噪声仍允许动作多样性，`--seed`控制请求噪声序列。
+  概率参数构造器内部的正floor不被采样，不是部署实际噪声。当前推理身份明确记为
+  `ddim20_eta0_initial_noise_only`、`effective_std_floors=[0,...,0]`，所有模型重新本机标定。
 - GMT CPU ONNX，50Hz；MuJoCo200Hz，每控制步真实执行四个子步。模型来源必须为140500，PD/默认角/动作缩放/力矩上限均取自ONNX元数据。
 - GMT历史为69×10，按观测项展开；GENMO历史为50×48，未知历史是无效mask。48维关节顺序与Isaac训练后端一致。
 - 保留参考reserve/prepare/commit、未来10个控制步、插值和差分右点保护。训练/严格模式缺参考直接结束；
@@ -105,8 +108,10 @@ selection的`source/row`从配置`dataset_root`解析；manifest从所属数据�
   严格模式不能超过0.5秒减一个控制周期；连续模式完整保存实测预算，超限时采用0.48秒截止并明确标为
   best_effort，迟到仍丢弃。标定prepare使用请求时冻结的参考副本计时，不向已推进的物理时间轴提交过时样本，
   避免标定先被protection_advanced打断。这个部署合同不复用服务器预算。
-- Stage2只导入Actor权重和绑定的噪声、eta、CFG、Horizon、数值算子。跨机器Torch版本写入新的推理身份，并重新标定；
-  不声称与原训练机器逐位等价，不复用旧rollout，也不接受无身份权重作为训练恢复。
+- Stage2只导入Actor权重，先严格重建并校验checkpoint的原训练核，再把推理eta和实际附加噪声设为0；
+  CFG、Horizon、数值算子及冻结前段保留。原身份保存于`source_training_identity/source_training_kernel`，
+  实际确定性行为保存于`kernel/sampler`。这是独立部署行为，不冒充原随机策略的训练评估或训练恢复；
+  不改训练配置、原checkpoint或服务器运行。跨机器Torch版本亦写入新身份。
 - 窗口/控制落后超过100ms或音频游标偏差超过100ms时记录告警；严格模式结束，连续模式继续且不跳过物理步。
 
 本机已补齐用户级PortAudio动态库，位置为既有虚拟环境`lib/`；入口需要时只为本进程设置动态库搜索路径。

@@ -4,7 +4,8 @@ SIM2SIM_REAL_TESTS=1才运行：同一初态/音乐/前缀/随机种子，仅在
 短时真实外力，比较实际50帧历史及后续GENMO输出。外力通过xfrc_applied作用
 于动力学，非reset绝不写qpos。另检查20次denoiser的实际长度60、真正no_grad
 与参数冻结。它是受控因果检验，不是完整歌曲质量或实时性统计。
-另用同条件/初始噪声对照Stage1原生DDIM，防止演示额外加入DPPO探索噪声。
+三个固定模型均验证外力反馈；另用同条件/初始噪声对照各自权重的原生DDIM，
+核对只消耗一次初始随机数、20步全程不消耗探索噪声，且原Stage2训练身份保留。
 可用SIM2SIM_EVIDENCE_DIR保存本次用户要求的证据；默认pytest临时目录自动清理。
 """
 import os
@@ -18,7 +19,8 @@ import yaml
 pytestmark=pytest.mark.skipif(os.environ.get('SIM2SIM_REAL_TESTS')!='1',reason='需显式SIM2SIM_REAL_TESTS=1和本机GPU/模型资产')
 
 
-def test_real_perturbation_reaches_genmo_and_changes_generation(tmp_path):
+@pytest.mark.parametrize('model_index',[0,1,2])
+def test_real_perturbation_reaches_genmo_and_changes_generation(tmp_path,model_index):
     from gem.closedloop.sim2sim.runtime import InferenceActor
     from gem.closedloop.sim2sim.music import load_playlist,prepare_music
     from gem.closedloop.online_conditions import FrozenMusicFeatures
@@ -27,7 +29,7 @@ def test_real_perturbation_reaches_genmo_and_changes_generation(tmp_path):
     config=yaml.safe_load((root/'configs/closedloop/sim2sim_mujoco.yaml').read_text())
     sys.path.insert(0,str(Path(config['paths']['gmt_repo'])/'scripts'))
     from bumi4340_mujoco_backend import BumiMujocoBackend
-    backend=BumiMujocoBackend(config);actor=InferenceActor(config,config['models'][0])
+    backend=BumiMujocoBackend(config);actor=InferenceActor(config,config['models'][model_index])
     track=next(t for t in load_playlist(config['playlist'],config['paths']['dataset_root']) if t.source=='AIOZ-GDANCE')
     music=prepare_music(track,tmp_path/'music_cache',decode_audio=False)
     frozen=FrozenMusicFeatures(music.features);observations=[];plans=[];shapes=[];grad_modes=[]
@@ -57,9 +59,9 @@ def test_real_perturbation_reaches_genmo_and_changes_generation(tmp_path):
         assert actor.close()['frozen'] and backend.close()['frozen']
         evidence=Path(os.environ.get('SIM2SIM_EVIDENCE_DIR',str(tmp_path)))
         evidence.mkdir(parents=True,exist_ok=True)
-        np.savez_compressed(evidence/'physical_feedback.npz',normal_history=observations[0]['history_values'],
+        np.savez_compressed(evidence/f'model{model_index+1}_physical_feedback.npz',normal_history=observations[0]['history_values'],
             disturbed_history=observations[1]['history_values'],normal_output=plans[0]['qpos_world'],disturbed_output=plans[1]['qpos_world'])
-        write_json(evidence/'physical_feedback.json',dict(passed=True,force_n=[50.,0.,0.],force_control_steps=5,
+        write_json(evidence/f'model{model_index+1}_physical_feedback.json',dict(passed=True,force_n=[50.,0.,0.],force_control_steps=5,
             control_hz=50,physics_hz=200,history_max_abs_difference=history_difference,
             actual_qpos_max_abs_difference=actual_difference,generation_max_abs_difference=generation_difference,
             prefix_frames=p,denoiser_input_shapes=shapes,grad_enabled_any=any(grad_modes),
@@ -68,7 +70,8 @@ def test_real_perturbation_reaches_genmo_and_changes_generation(tmp_path):
         handle.remove()
 
 
-def test_stage1_demo_matches_native_ddim_without_extra_action_noise(tmp_path):
+@pytest.mark.parametrize('model_index',[0,1,2])
+def test_deployment_matches_native_ddim_without_extra_action_noise(tmp_path,model_index):
     from gem.closedloop.sim2sim.runtime import InferenceActor
     from gem.closedloop.sim2sim.music import load_playlist,prepare_music
     from gem.closedloop.online_conditions import FrozenMusicFeatures
@@ -77,7 +80,7 @@ def test_stage1_demo_matches_native_ddim_without_extra_action_noise(tmp_path):
     config=yaml.safe_load((root/'configs/closedloop/sim2sim_mujoco.yaml').read_text())
     sys.path.insert(0,str(Path(config['paths']['gmt_repo'])/'scripts'))
     from bumi4340_mujoco_backend import BumiMujocoBackend
-    backend=BumiMujocoBackend(config);owner=InferenceActor(config,config['models'][0])
+    backend=BumiMujocoBackend(config);owner=InferenceActor(config,config['models'][model_index])
     track=load_playlist(config['playlist'],config['paths']['dataset_root'])[0]
     music=prepare_music(track,tmp_path/'music_cache',decode_audio=False)
     for _ in range(50):backend.step_control(check_termination=False)
@@ -88,13 +91,27 @@ def test_stage1_demo_matches_native_ddim_without_extra_action_noise(tmp_path):
         for seed in (42,43,44):
             generator=torch.Generator(device=owner.device).manual_seed(seed)
             noise=torch.randn((1,60,30),device=owner.device,generator=generator)
+            rng_after_initial=generator.get_state().clone()
             demo=owner._sample(batch,generator,initial_noise=noise)
+            assert torch.equal(generator.get_state(),rng_after_initial)
             native=owner.actor.sample(batch,steps=20,guidance_scale=2.5,noise=noise)
             error=float((demo['qpos']-native['qpos']).abs().max());errors.append(error)
             torch.testing.assert_close(demo['qpos'],native['qpos'],atol=1e-5,rtol=1e-5)
+            implicit_generator=torch.Generator(device=owner.device).manual_seed(seed)
+            implicit=owner._sample(batch,implicit_generator)
+            assert torch.equal(implicit_generator.get_state(),rng_after_initial)
+            torch.testing.assert_close(implicit['qpos'],demo['qpos'],atol=0,rtol=0)
+    assert owner.policy.steps==20 and owner.policy.eta==0.
+    assert owner.identity['sampler']=='ddim20_eta0_initial_noise_only'
     assert owner.identity['kernel']['noise']=='initial_only'
     assert owner.identity['kernel']['effective_std_floors']==[0.]*20
+    assert owner.identity['kernel']['std_floor']==0. and not owner.identity['kernel']['final_step_noise']
+    if model_index:
+        assert owner.identity['source_training_kernel']==owner.source_identity['kernel']
+        assert owner.identity['source_training_kernel']['eta']==.1
+        assert owner.identity['source_training_kernel']['effective_std_floors'][-1]==.03
     assert owner.close()['frozen'] and backend.close()['frozen']
     evidence=Path(os.environ.get('SIM2SIM_EVIDENCE_DIR',str(tmp_path)));evidence.mkdir(parents=True,exist_ok=True)
-    write_json(evidence/'stage1_native_ddim_parity.json',dict(seeds=[42,43,44],qpos_max_errors=errors,
-        sampler=owner.identity['sampler'],scope='same weights/conditions/initial noise; original Stage1 DDIM semantics'))
+    write_json(evidence/f'model{model_index+1}_native_ddim_parity.json',dict(seeds=[42,43,44],qpos_max_errors=errors,
+        sampler=owner.identity['sampler'],model=owner.identity,only_initial_noise_consumed=True,
+        scope='same weights/conditions/initial noise; native eta=0 DDIM semantics'))

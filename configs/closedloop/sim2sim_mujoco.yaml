@@ -32,10 +32,10 @@ generation_frames: 60
 sampling:
   generation_frames: 60
   denoising_steps: 20
-  eta: 0.0  # Stage1演示只保留初始噪声；Stage2读取checkpoint自身的eta/噪声身份
+  eta: 0.0  # Stage1/Stage2部署统一eta=0，仅初始噪声；原训练核独立校验和记录
   guidance_scale: 2.5
-  # 此日程仅保留给概率参数构造器；Stage1不采样这些探索噪声，有效floor在身份中为0。
-  std_schedule: [0.001, 0.001, 0.001, 0.001, 0.001, 0.001, 0.001, 0.001, 0.001, 0.001, 0.001, 0.001, 0.001, 0.001, 0.001, 0.001, 0.02, 0.025, 0.03, 0.03]
+  # 此日程仅供复用的概率参数构造器；部署只取mean，从不采样其std，有效floor全0。
+  std_schedule: [0.001, 0.001, 0.001, 0.001, 0.001, 0.001, 0.001, 0.001, 0.001, 0.001, 0.001, 0.001, 0.001, 0.001, 0.001, 0.001, 0.001, 0.001, 0.001, 0.001]
 precision:
   mode: native_fp32
   linear_execution: stable_tf32x3
