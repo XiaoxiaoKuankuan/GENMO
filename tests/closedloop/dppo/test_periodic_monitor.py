@@ -28,7 +28,7 @@ from gem.closedloop.dppo.periodic_monitor import (
     merge_periodic_reports,
     shard_plan,
 )
-from gem.closedloop.dppo.policy import DPPODiffusionPolicy
+from gem.closedloop.dppo.frozen_prefix import FrozenPrefixPolicy
 from tests.closedloop.test_stage1_actor import _activate_branches, _conditions
 from tests.closedloop.test_stage1_actor import actor_factory as actor_factory
 from tests.test_evaluation import Env, policy
@@ -182,15 +182,15 @@ def test_fixed_initial_chain_drift_needs_no_upper_transition(actor_factory, tmp_
     previous = torch.get_num_threads()
     torch.set_num_threads(1)
     try:
-        actor, batch = actor_factory(starts=(45,))
+        actor, batch = actor_factory(starts=(45,),motion_frames=60)
         _activate_branches(actor)
-        loaded = DPPODiffusionPolicy(actor, steps=3)
+        loaded = FrozenPrefixPolicy(actor,std_schedule=[.001]*15+[.04,.06,.08,.1,0.],generation_frames=60)
         trace = loaded.sample_rollout(_conditions(batch), generator=torch.Generator().manual_seed(72))
         raw = tmp_path/'initial_eval_raw.pt'
         torch.save({'trace': trace}, raw)
         reference = load_reference_traces([raw])
         first = fixed_chain_drift(loaded, reference)
-        assert first['internal_transition_count'] == 3 and first['mean_joint_kl'] == pytest.approx(0., abs=1e-12)
+        assert first['internal_transition_count'] == 4 and first['mean_joint_kl'] == pytest.approx(0., abs=1e-12)
         with torch.no_grad():
             next(actor.music_embedder.parameters()).add_(.01)
         second = fixed_chain_drift(loaded, reference)

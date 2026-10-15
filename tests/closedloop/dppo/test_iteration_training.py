@@ -21,20 +21,20 @@ from gem.closedloop.dppo.returns import compute_gae, normalize_advantages_global
 from gem.closedloop.dppo.env_adapter import WarmupEpisodeEnded, ExecutionIntegrityError
 from gem.closedloop.dppo.world_collector import WorldEnvironmentCollector
 
-CONFIG=Path(__file__).resolve().parents[3]/'configs/closedloop/stage10_server1.yaml'
+CONFIG=Path(__file__).resolve().parents[3]/'configs/closedloop/stage2_asymmetric_server2.yaml'
 
 
 def test_production_parameters_and_cumulative_iteration_ceiling():
     config=configuration(CONFIG); stage=config['stage10']; train=stage['training']
     assert train['actor_lr']==1e-7 and train['critic_lr']==1e-4
     assert (train['eta'],train['ppo_steps_per_chain'],train['ppo_clip'])==(.1,4,.003)
-    assert train['std_schedule']==[.001]*16+[.08,.10,.12,.12]
-    assert stage['bc_gradient']['target_ratio']==.1 and stage['kl']['mean_coordinate']==.002
-    assert stage['run_control']=={'max_training_iterations':500}
-    assert validate_stopping_iteration(500,stage)==500
-    for wrong in (0,501,True,500.0):
+    assert train['std_schedule']==[.001]*15+[.04,.06,.08,.10,0.]
+    assert stage['bc_gradient']['target_ratio']==.1 and stage['kl']['mean_coordinate']==.001
+    assert stage['run_control']=={'max_training_iterations':8}
+    assert validate_stopping_iteration(8,stage)==8
+    for wrong in (0,9,True,8.0):
         with pytest.raises(ValueError):validate_stopping_iteration(wrong,stage)
-    assert stage['limits']==dict(accepted_iterations=500,optimizer_attempts=6000,
+    assert stage['limits']==dict(accepted_iterations=8,optimizer_attempts=6000,
         generations=3000000,control_steps=150000000,physics_steps=600000000)
 
 
