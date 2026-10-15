@@ -3,9 +3,9 @@
 窗口持有独立MjData，只从物理线程复制qpos用于绘制；绝不写入正在运行的
 物理MjData。单一画面中的实体机器人显示GMT控制下的MuJoCo完整动力学状态；
 半透明蓝色机器人显示同一时刻的GENMO已提交参考，只在独立MjData中做运动学
-正向计算和几何体渲染，不执行GMT、PD或mj_step。参考先独立绘制不透明轮廓
-遮罩，再以固定22%蓝色合成到实体画面，避免透明网格内部叠面/深度排序产生
-表面明暗闪变；不会平滑或修改参考姿态。两者使用同一快照和相机，
+正向计算和几何体渲染，不执行GMT、PD或mj_step。参考保留原始三维网格、
+光照和22%蓝色半透明外观，按真实深度遮挡叠加；不会把轮廓涂成平面色块，
+也不平滑或修改参考姿态。两者使用同一快照和相机，
 参考姿态不做平滑、平移或时间偏移，渲染掉帧不改变真实控制步。键盘事件
 仅入控制队列，暂停/重置/切歌/切模型均由物理线程在合法控制边界处理。
 视频在所有控制停止后由逐50Hz真实状态生成并混入原音频，保留明确的
@@ -17,12 +17,6 @@ import subprocess
 import time
 import numpy as np
 import mujoco
-
-
-def blend_reference(rgb,mask,alpha=.22):
-    """屏幕空间固定透明度，只修改轮廓内像素；轮廓外的动力学画面逐字节保留。"""
-    rgb[mask]=np.rint(rgb[mask]*(1-alpha)+np.array([.15,.65,.95])*255*alpha).astype(np.uint8)
-    return rgb
 
 
 class Sim2SimViewer:
@@ -81,48 +75,22 @@ class Sim2SimViewer:
     def _ghost(self,state):
         if not self.show_reference or 'reference_qpos' not in state:return
         self._reference_scene(state)
-        visible=[]
         for source in self.ghost_scene.geoms[:self.ghost_scene.ngeom]:
             if source.objtype!=mujoco.mjtObj.mjOBJ_GEOM or source.rgba[3]<=0:continue
-            visible.append((source.type,source.size.astype(np.float64),source.pos.astype(np.float64),
-                source.mat.astype(np.float64).reshape(9),
-                {field:getattr(source,field) for field in ('dataid','objtype','objid','texcoord','modelrbound')}))
-        self.ghost_scene.ngeom=len(visible)
-        for index,(kind,size,pos,mat,fields) in enumerate(visible):
-            dest=self.ghost_scene.geoms[index]
-            mujoco.mjv_initGeom(dest,kind,size,pos,mat,np.ones(4,dtype=np.float32))
-            for field,value in fields.items():setattr(dest,field,value)
+            if self.scene.ngeom>=self.scene.maxgeom:break
+            dest=self.scene.geoms[self.scene.ngeom]
+            mujoco.mjv_initGeom(dest,source.type,source.size.astype(np.float64),source.pos.astype(np.float64),
+                               source.mat.astype(np.float64).reshape(9),
+                               np.array([.15,.65,.95,.22],dtype=np.float32))
+            for field in ('dataid','objtype','objid','texcoord','modelrbound'):
+                setattr(dest,field,getattr(source,field))
             dest.matid=-1;dest.category=mujoco.mjtCatBit.mjCAT_DECOR
-            dest.transparent=0;dest.segid=index
+            dest.transparent=1;self.scene.ngeom+=1
 
     def _render(self,rect,state):
-        """实体正常绘制；参考只提供无光照的深度遮罩，最后做稳定的半透明合成。"""
-        mujoco.mjr_render(rect,self.scene,self.context)
-        if not self.show_reference or 'reference_qpos' not in state:return
-        shape=(rect.height,rect.width,3)
-        if not hasattr(self,'pixel_buffers') or self.pixel_buffers[0].shape!=shape:
-            self.pixel_buffers=(np.empty(shape,dtype=np.uint8),np.empty(shape,dtype=np.uint8))
-        actual,reference=self.pixel_buffers
-        mujoco.mjr_readPixels(actual,None,rect,self.context)
+        """恢复原三维半透明网格外观；实体与蓝色参考在同一个场景中绘制。"""
         self._ghost(state)
-        segment=mujoco.mjtRndFlag.mjRND_SEGMENT;identifier=mujoco.mjtRndFlag.mjRND_IDCOLOR
-        self.ghost_scene.flags[segment]=True;self.ghost_scene.flags[identifier]=True
-        try:
-            mujoco.mjr_render(rect,self.ghost_scene,self.context)
-            mujoco.mjr_readPixels(reference,None,rect,self.context)
-        finally:
-            self.ghost_scene.flags[segment]=False;self.ghost_scene.flags[identifier]=False
-        # ID颜色以0作为背景，三通道任一个非0就属于机器人；同一表面重复三角形
-        # 无论先后绘制都得到同一轮廓，不参与蓝色层的光照和alpha累积。
-        blend_reference(actual,np.any(reference!=0,axis=-1))
-        # mjr_drawPixels不替调用方关闭深度测试；否则ID遮罩的深度会挡住合成图，
-        # 窗口里仍残留黑色分割轮廓。只为屏幕像素绘制临时关闭并恢复GL状态。
-        from OpenGL import GL
-        GL.glPushAttrib(GL.GL_ENABLE_BIT)
-        try:
-            GL.glDisable(GL.GL_DEPTH_TEST);GL.glDisable(GL.GL_BLEND);GL.glDisable(GL.GL_FOG)
-            mujoco.mjr_drawPixels(actual.reshape(-1,1),None,rect,self.context)
-        finally:GL.glPopAttrib()
+        mujoco.mjr_render(rect,self.scene,self.context)
 
     def run(self):
         g=self.glfw

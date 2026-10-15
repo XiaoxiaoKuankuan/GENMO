@@ -4,6 +4,7 @@ SIM2SIM_REAL_TESTS=1才运行：同一初态/音乐/前缀/随机种子，仅在
 短时真实外力，比较实际50帧历史及后续GENMO输出。外力通过xfrc_applied作用
 于动力学，非reset绝不写qpos。另检查20次denoiser的实际长度60、真正no_grad
 与参数冻结。它是受控因果检验，不是完整歌曲质量或实时性统计。
+另用同条件/初始噪声对照Stage1原生DDIM，防止演示额外加入DPPO探索噪声。
 可用SIM2SIM_EVIDENCE_DIR保存本次用户要求的证据；默认pytest临时目录自动清理。
 """
 import os
@@ -65,3 +66,35 @@ def test_real_perturbation_reaches_genmo_and_changes_generation(tmp_path):
             model=actor.identity,scope='controlled physical perturbation; not a real-time benchmark'))
     finally:
         handle.remove()
+
+
+def test_stage1_demo_matches_native_ddim_without_extra_action_noise(tmp_path):
+    from gem.closedloop.sim2sim.runtime import InferenceActor
+    from gem.closedloop.sim2sim.music import load_playlist,prepare_music
+    from gem.closedloop.online_conditions import FrozenMusicFeatures
+    from gem.closedloop.sim2sim.diagnostics import write_json
+    root=Path(__file__).resolve().parents[3]
+    config=yaml.safe_load((root/'configs/closedloop/sim2sim_mujoco.yaml').read_text())
+    sys.path.insert(0,str(Path(config['paths']['gmt_repo'])/'scripts'))
+    from bumi4340_mujoco_backend import BumiMujocoBackend
+    backend=BumiMujocoBackend(config);owner=InferenceActor(config,config['models'][0])
+    track=load_playlist(config['playlist'],config['paths']['dataset_root'])[0]
+    music=prepare_music(track,tmp_path/'music_cache',decode_audio=False)
+    for _ in range(50):backend.step_control(check_termination=False)
+    reservation=backend.reserve_prefix(dict(episode_id=backend.episode_id,request_id='parity',decision_tick=600,deadline_tick=888))
+    conditions,_=owner.builder.build(backend.snapshot(),reservation,FrozenMusicFeatures(music.features),music_start_tick=600)
+    batch={k:v.to(owner.device) for k,v in conditions.items()};errors=[]
+    with torch.no_grad():
+        for seed in (42,43,44):
+            generator=torch.Generator(device=owner.device).manual_seed(seed)
+            noise=torch.randn((1,60,30),device=owner.device,generator=generator)
+            demo=owner._sample(batch,generator,initial_noise=noise)
+            native=owner.actor.sample(batch,steps=20,guidance_scale=2.5,noise=noise)
+            error=float((demo['qpos']-native['qpos']).abs().max());errors.append(error)
+            torch.testing.assert_close(demo['qpos'],native['qpos'],atol=1e-5,rtol=1e-5)
+    assert owner.identity['kernel']['noise']=='initial_only'
+    assert owner.identity['kernel']['effective_std_floors']==[0.]*20
+    assert owner.close()['frozen'] and backend.close()['frozen']
+    evidence=Path(os.environ.get('SIM2SIM_EVIDENCE_DIR',str(tmp_path)));evidence.mkdir(parents=True,exist_ok=True)
+    write_json(evidence/'stage1_native_ddim_parity.json',dict(seeds=[42,43,44],qpos_max_errors=errors,
+        sampler=owner.identity['sampler'],scope='same weights/conditions/initial noise; original Stage1 DDIM semantics'))

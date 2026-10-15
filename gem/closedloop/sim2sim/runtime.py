@@ -2,6 +2,9 @@
 
 物理线程独占MjData和reference提交；唯一推理线程只消费复制的音乐/历史/前缀。
 行为固定完整20步，60帧输入直接进入Transformer，模型从明确checkpoint加载。
+Stage1演示采用原Stage1语义的eta=0 DDIM，仅初始噪声随机；不借用DPPO探索噪声。
+缓存条件/合批CFG只改执行组织，须与Stage1Actor.sample同条件/初始噪声核验。
+Stage2始终保留checkpoint声明的完整随机核，不把确定性演示冒充训练行为。
 Stage2只导入Actor和绑定随机核，不构造Critic/optimizer，不冒充训练恢复。
 
 600Hz整数tick组织30Hz源动作、50HzGMT和200Hz物理。生成期间物理继续执行；
@@ -56,6 +59,7 @@ class InferenceActor:
         if entry.get('sha256') and entry['sha256']!=self.sha:raise ValueError('Actor checkpoint与配置SHA不符')
         payload=torch.load(self.path,map_location='cpu',weights_only=False,mmap=True)
         is_stage1='checkpoint_version' in payload and 'actor_interface_config' in payload
+        self.is_stage1=is_stage1
         base=dict(paths=dict(checkpoint=str(self.path) if is_stage1 else paths['stage1_checkpoint'],
                             stats=paths['stats'],kinematics=paths['kinematics']),
             runtime=dict(torch_threads=config['runtime']['torch_threads'],genmo_device=config['runtime']['device']),
@@ -88,6 +92,7 @@ class InferenceActor:
         if sampling['generation_frames']!=config['generation_frames']:
             raise ValueError('Actor行为Horizon与MuJoCo参考Horizon不同，不能静默覆盖')
         self.actor.eval().requires_grad_(False)
+        if self.is_stage1:sampling['eta']=0.
         self.policy=build_policy(self.actor,sampling,precision,frozen_actor=frozen_actor)
         if self.source_kernel:
             old=copy.deepcopy(self.source_kernel);new=copy.deepcopy(self.policy.kernel_config)
@@ -97,14 +102,49 @@ class InferenceActor:
         self.initial_fingerprint=_fingerprint(self.actor)
         self.builder=OnlineConditionBuilder(self.actor.endecoder.codec,history_steps=50,
                                             motion_frames=sampling['generation_frames'])
+        kernel=(dict(version='genmo.sim2sim.stage1_ddim.v1',steps=20,eta=0.,
+            guidance_scale=sampling['guidance_scale'],generation_horizon_frames=sampling['generation_frames'],
+            noise='initial_only',effective_std_floors=[0.]*20,
+            numerical_execution=copy.deepcopy(self.policy.kernel_config['numerical_execution']))
+            if self.is_stage1 else self.policy.kernel_config)
         self.identity=dict(name=self.name,checkpoint=str(self.path),checkpoint_sha256=self.sha,
             actor_fingerprint=self.initial_fingerprint,source_training_identity=self.source_identity,
             source_checkpoint=self.source_checkpoint,
-            kernel=self.policy.kernel_config,device=str(self.device),torch_version=torch.__version__,
+            kernel=kernel,device=str(self.device),torch_version=torch.__version__,
             physics_backend='mujoco',purpose='inference_only_no_training_resume')
-        self.identity['sampler']='original_dense_sample_rollout_20_steps'
+        self.identity['sampler']='stage1_ddim20_eta0_initial_noise_only' if self.is_stage1 else 'original_dense_sample_rollout_20_steps'
         self.identity['behavior_id']=hashlib.sha256(json.dumps(self.identity,sort_keys=True).encode()).hexdigest()
 
+
+    @torch.no_grad()
+    def _sample(self,batch,generator,*,initial_noise=None):
+        """Stage1只沿eta=0 DDIM均值去噪，Stage2完整保留原checkpoint随机核。
+
+        Stage1仍是20个真实去噪步，合批CFG和条件缓存复用既有执行算子；每一步
+        都恢复已知前缀，物理解码后再次精确回写。这里不做动作平滑/限速。
+        """
+        if not self.is_stage1:
+            sample=self.policy.sample_rollout(batch,generator=generator,initial_noise=initial_noise)
+            self.sampling_timing=dict(self.policy.last_sample_timing)
+            return sample
+        started=time.perf_counter()
+        prepared=self.policy.prepare_conditions(batch);adapted=prepared['adapted']
+        noise=(torch.randn(adapted['known_x'].shape,device=self.device,dtype=torch.float32,generator=generator)
+               if initial_noise is None else initial_noise.to(adapted['known_x']))
+        state=self.actor._constrain(noise,adapted)
+        for step in range(self.policy.steps):
+            parameters=self.policy.transition_parameters(batch,state,step,prepared=prepared)
+            state=parameters['mean']
+        physical=self.actor.endecoder.denormalize(state)
+        physical=torch.where(adapted['known_mask'],adapted['known_physical'],physical)
+        physical=torch.where(adapted['future_valid'][...,None],physical,0.)
+        qpos=self.actor.endecoder.codec.decode_to_canonical_qpos(physical)
+        qpos=torch.where(adapted['future_valid'][...,None],qpos,0.)
+        contact=torch.where(adapted['future_valid'][...,None],parameters['contact_logits'].sigmoid(),0.)
+        if torch.device(self.device).type=='cuda':torch.cuda.current_stream(self.device).synchronize()
+        self.sampling_timing=dict(total_wall_seconds=time.perf_counter()-started,
+            interval_scope='stage1 deterministic DDIM20; cached conditions and batched CFG',steps=self.policy.steps)
+        return dict(qpos=qpos,qpos30=physical,contact=contact,normalized=state)
 
     @torch.no_grad()
     def generate(self,snapshot,reservation,music,seed,decision_id,music_start_tick):
@@ -113,7 +153,7 @@ class InferenceActor:
         conditions,meta=self.builder.build(snapshot,reservation,music,music_start_tick=music_start_tick)
         generator=torch.Generator(device=self.device).manual_seed(stable_noise_seed(seed,decision_id))
         batch={k:v.to(self.device) for k,v in conditions.items()}
-        sample=self.policy.sample_rollout(batch,generator=generator)
+        sample=self._sample(batch,generator)
         anchor=torch.as_tensor(meta['world_anchor'],dtype=torch.float32,device=self.device)
         world=self.actor.endecoder.codec.apply_world_anchor(sample['qpos'],anchor)
         plan=dict(meta,plan_id=f"{reservation['request_id']}:plan",behavior_id=self.identity['behavior_id'])
@@ -123,7 +163,7 @@ class InferenceActor:
         plan.update(latency_seconds=time.perf_counter()-started,
             history_sha256=hashlib.sha256(conditions['proprio_history'].numpy().tobytes()).hexdigest(),
             history_valid_count=int(conditions['proprio_history_valid'].sum()),
-            timing=dict(self.policy.last_sample_timing),noise_seed=stable_noise_seed(seed,decision_id))
+            timing=dict(self.sampling_timing),noise_seed=stable_noise_seed(seed,decision_id))
         return plan
 
     def close(self):
