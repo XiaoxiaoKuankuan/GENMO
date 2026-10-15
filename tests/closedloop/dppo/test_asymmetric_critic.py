@@ -66,3 +66,27 @@ def test_causal_contract_rejects_privilege_leaks(actor_factory,fault):
         c['tracking_history'][:,0]=1
     else:c['future_reward']=torch.ones(2)
     with pytest.raises(ValueError):validate_tracking_context(c)
+
+
+def test_mc_and_evaluation_keep_independent_privileged_history(actor_factory):
+    from types import SimpleNamespace
+    from gem.closedloop.dppo.complete_episode import CompleteEpisodeBank
+    from gem.closedloop.dppo.periodic_monitor import snapshot_critic_transition
+    actor,batch=actor_factory(motion_frames=60,starts=(45,))
+    c=tracking_context(_conditions(batch));actor_context={k:c[k] for k in _conditions(batch)}
+    row=SimpleNamespace(context=actor_context,next_context=None,identity=dict(backend_session_id='s',episode_id='e',policy_version=0),
+        rewards=torch.tensor([.02]),executed_control_steps=1,control_tick_begin=900,control_tick_end=912,
+        terminated=True,truncated=False,transition_valid=True,reason='music_end',
+        metadata=dict(critic_context=c,next_critic_context=None,remaining_music_seconds=.02,next_remaining_music_seconds=0.,
+            event_reward=0.,sampler_trace=dict(kernel_config={'test':'synthetic'})))
+    bank=CompleteEpisodeBank(policy_version=0,kernel_identity={'test':'synthetic'})
+    bank.append({'task_id':'test'},row)
+    snapshot=snapshot_critic_transition(row)
+    saved=bank.episodes[0]['rows'][0].metadata['critic_context']
+    for key,value in saved.items():
+        assert value.device.type=='cpu'
+        torch.testing.assert_close(value,c[key],atol=0,rtol=0)
+        assert value.data_ptr()!=c[key].data_ptr()
+    c['tracking_history'].fill_(99.)
+    assert not torch.equal(saved['tracking_history'],c['tracking_history'])
+    torch.testing.assert_close(saved['tracking_history'],snapshot.metadata['critic_context']['tracking_history'])

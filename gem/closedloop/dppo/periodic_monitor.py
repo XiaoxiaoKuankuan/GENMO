@@ -431,8 +431,10 @@ def snapshot_critic_transition(row):
         executed_control_steps=row.executed_control_steps, control_tick_begin=row.control_tick_begin,
         control_tick_end=row.control_tick_end, terminated=row.terminated, truncated=row.truncated,
         transition_valid=row.transition_valid, old_value=0., next_value=0.,
-        metadata={key: copy.deepcopy(row.metadata[key]) for key in
-                  ('remaining_music_seconds', 'next_remaining_music_seconds', 'event_reward') if key in row.metadata})
+        metadata={**{key:copy.deepcopy(row.metadata[key]) for key in
+                  ('remaining_music_seconds','next_remaining_music_seconds','event_reward') if key in row.metadata},
+            'critic_context':context(row.metadata['critic_context']),
+            'next_critic_context':context(row.metadata['next_critic_context'])})
 
 
 def build_fixed_critic_reference(transitions, critic, device, *, gamma_upper=.99, lambda_upper=.95):

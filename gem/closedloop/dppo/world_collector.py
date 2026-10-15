@@ -149,7 +149,7 @@ class WorldEnvironmentCollector(VectorEnvironmentCollector):
                     for item in generated:
                         _,index=item.pop('_shared_raw_block')
                         item['_raw_evidence']=dict(path=str(raw_path) if self.training_storage=='durable_cpu.v1' else None,
-                            identity=dict(identity,storage=identity.get('storage','genmo.world_batch_raw.v3'),index=index,count=len(group)))
+                            identity=dict(identity,storage=identity.get('storage','genmo.stage2.asymmetric_world_batch.v1'),index=index,count=len(group)))
                     self.batch_reports.append(dict(environment_slots=[slot for slot,_ in group],
                         effective_rows=len(group),padding_rows=0,pipeline_timing=timing,
                         generation_seconds=timing['condition_batch_seconds']+timing['generate_and_world_seconds'],

@@ -55,6 +55,12 @@ class FrozenPrefixPolicy(DenseDiffusionPolicy):
                      [(f'diffusion_cache/{name}',value) for name,value in self._frozen_coefficients.items()])
 
     def _frozen_settings(self):
+        # 精度scope在每次真实前向都会设置并恢复；身份绑定scope内实际设置，不绑定外部环境默认值。
+        from .numerical_execution import precision_scope
+        with precision_scope(self.frozen_policy.numerical_execution):
+            return self._frozen_settings_in_scope()
+
+    def _frozen_settings_in_scope(self):
         import json
         model=self.frozen_policy.actor
         attributes=('execution_backend','forward_backend','weight_reduction','dense_compute_dtype',

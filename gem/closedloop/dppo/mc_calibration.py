@@ -143,7 +143,7 @@ def collect_complete_bank(c, label, split, *, samples_per_source, seeds):
             c.state['training_control_steps']+=consumed[0]
             c.state['training_physics_steps']+=consumed[1]
         bank.training_data(policy_version=c.state['policy_version'],kernel=c.policy.kernel_config)
-        bank_record=dict(schema='genmo.complete_episode.value_dataset.v1',report=bank.report(),
+        bank_record=dict(schema='genmo.stage2.causal_tracking.complete_episode.value_dataset.v1',report=bank.report(),
             execution_work=dict(actual_GMT_controls=execution_counts[0],active_physics_steps=execution_counts[1],
                 allocated_physics_steps=execution_counts[2],inactive_physics_steps=execution_counts[2]-execution_counts[1]),
             actor_fingerprint=actor_before,policy_version=c.state['policy_version'],kernel=c.policy.kernel_config,

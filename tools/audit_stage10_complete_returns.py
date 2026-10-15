@@ -150,10 +150,10 @@ def evaluate_checkpoint(path, sha, report, conditions, targets, batch_size, eval
     if _model_fingerprint(actor) != report['actor_identity']['model_fingerprint']:
         raise ValueError('Complete return policy differs from the Critic checkpoint Actor')
     settings = config['stage10']['critic']
-    if settings['type'] != 'pretrained_temporal' or not settings['freeze_encoders']:
+    if settings['type'] != 'asymmetric_tracking_temporal':
         raise ValueError('This audit targets independent frozen pretrained temporal Critics')
     critic = PretrainedConditionCritic(actor, dimension=settings['dimension'], layers=settings['layers'],
-        heads=settings['heads'], freeze_encoders=True)
+        heads=settings['heads'], history_scales=settings['history_scales'])
     _validate_model_state(critic, payload['critic'], 'complete-return Critic')
     critic.load_state_dict(payload['critic']); critic.eval()
     fingerprint = _model_fingerprint(critic)
@@ -162,7 +162,7 @@ def evaluate_checkpoint(path, sha, report, conditions, targets, batch_size, eval
     with torch.no_grad():
         for begin in range(0, len(keys), batch_size):
             batch = [conditions[k] for k in keys[begin:begin + batch_size]]
-            context = {key: torch.cat([r['context'][key] for r in batch]) for key in batch[0]['context']}
+            context = {key: torch.cat([r['critic_context'][key] for r in batch]) for key in batch[0]['critic_context']}
             remaining = torch.tensor([r['remaining_music_seconds'] for r in batch])
             predictions.extend(critic(context, remaining).tolist())
     if _model_fingerprint(critic) != fingerprint or any(p.grad is not None for p in critic.parameters()):

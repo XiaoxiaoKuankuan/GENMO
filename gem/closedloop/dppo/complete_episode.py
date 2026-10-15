@@ -62,6 +62,9 @@ class CompleteEpisodeBank:
             next_context=None if row.next_context is None else {k:v.detach().cpu().clone() for k,v in row.next_context.items()},
             transition_valid=True,metadata={k:copy.deepcopy(row.metadata[k]) for k in
                 ('remaining_music_seconds','next_remaining_music_seconds','event_reward','physical_episode_administrative_truncation') if k in row.metadata})
+        for name in ('critic_context','next_critic_context'):
+            value=row.metadata[name]
+            item.metadata[name]=None if value is None else {k:v.detach().cpu().clone() for k,v in value.items()}
         if not row.transition_valid:raise ValueError('Invalid physics cannot enter MC bank')
         rows=self.pending.setdefault(key,[]);rows.append(item)
         physical_admin=row.metadata.get('physical_episode_administrative_truncation') or row.reason in {
