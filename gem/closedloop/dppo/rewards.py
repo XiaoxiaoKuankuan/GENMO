@@ -655,6 +655,8 @@ class ExecutionReward:
         from .joint_limits import executed_boundaries
         try:
             boundary,self._limit_runs=executed_boundaries(trace,self._limit_runs)
+            normalized=components['joint_limit']['normalized']
+            boundary.update(actual_cost=normalized.get('actual_cost'),reference_cost=normalized.get('reference_cost'))
         except (ValueError,KeyError,IndexError,TypeError) as error:
             boundary=dict(valid=False,reason=str(error));errors.append('joint_boundaries: '+str(error))
         total_rate = sum(item["weighted_rate"] for item in components.values())

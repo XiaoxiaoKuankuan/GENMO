@@ -180,6 +180,10 @@ class InProcessTrainingRuntime:
             return buffer,targets
         buffer,targets=local_call(c.distributed,prepare_learning)
         rows=buffer.transitions
+        from .joint_limits import summarize_boundaries
+        report['joint_limits']=summarize_boundaries(
+            [d['joint_limit_diagnostics'] for r in rows for d in r.metadata['reward_details']],
+            generated=[r.metadata['generated']['joint_limit_diagnostics'] for r in rows])
         counts=torch.stack([row.free_mask.sum() for row in rows]).cpu().tolist() if rows else []
         local=[dict(owner_rank=c.distributed.rank,local_index=i,valid=True,has_free=n>0) for i,n in enumerate(counts)]
         manifest=[item for shard in c.distributed.all_gather_object(local) for item in shard]

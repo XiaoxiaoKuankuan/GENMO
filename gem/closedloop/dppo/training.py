@@ -32,7 +32,6 @@ from .training_checkpoint import SCHEMA,AsyncCheckpointWriter,immutable_cpu_snap
 from .gradient_merge import BCGradientController
 from .full_dataset import FullMusicCatalog
 from .parallel_support import local_call,root_call,capture_local_rng,restore_local_rng
-from .dense_policy import DenseDiffusionPolicy
 from .pretrained_critic import PretrainedConditionCritic
 from .retention_anchor import Stage1RetentionAnchor
 from .runtime import InProcessTrainingRuntime

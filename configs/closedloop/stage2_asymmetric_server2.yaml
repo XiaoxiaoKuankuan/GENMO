@@ -139,7 +139,7 @@ stage10:
     world_size: 8
   evaluation:
     envs_per_rank: 4
-    episode_seconds: 10.0
+    episode_seconds: null
     every_control_steps: 1500000
     persistent_world: true
     samples_per_source: 4
@@ -349,7 +349,103 @@ timing:
   clock_hz: 600
   control_ticks: 12
   decision_ticks: 300
-  deployment_profile: null
+  deployment_profile:
+    schema: genmo.deployment_delay_profile.v1
+    target: single_robot_single_request
+    samples_seconds:
+    - 0.26094565354287624
+    - 0.26231176778674126
+    - 0.2600226001814008
+    - 0.26059039682149887
+    - 0.26057666074484587
+    - 0.2627587616443634
+    - 0.26163737941533327
+    - 0.2597906142473221
+    - 0.2520998353138566
+    - 0.2520544854924083
+    - 0.25204230565577745
+    - 0.2517268331721425
+    - 0.2520964555442333
+    - 0.25143239088356495
+    - 0.25154851470142603
+    - 0.25218326319009066
+    - 0.24845256097614765
+    - 0.2500178003683686
+    - 0.24826053343713284
+    - 0.24780398327857256
+    - 0.248760805465281
+    - 0.24897975008934736
+    - 0.2489914484322071
+    - 0.25190886948257685
+    - 0.27311278134584427
+    - 0.273892636410892
+    - 0.27206969913095236
+    - 0.27480508107692003
+    - 0.2728550862520933
+    - 0.2709999792277813
+    - 0.27178404573351145
+    - 0.27299065329134464
+    - 0.25192431919276714
+    - 0.2516257343813777
+    - 0.2537991423159838
+    - 0.2512370105832815
+    - 0.25472880713641644
+    - 0.2508502583950758
+    - 0.2511930810287595
+    - 0.2511252835392952
+    - 0.26179016660898924
+    - 0.2621700195595622
+    - 0.2623240975663066
+    - 0.26110984198749065
+    - 0.26103815250098705
+    - 0.2593208830803633
+    - 0.25929596181958914
+    - 0.2595410095527768
+    - 0.2567042289301753
+    - 0.2549970904365182
+    - 0.24964015185832977
+    - 0.2499112132936716
+    - 0.2494520414620638
+    - 0.25803317688405514
+    - 0.2528076199814677
+    - 0.24938847590237856
+    - 0.2645701877772808
+    - 0.26202437467873096
+    - 0.2610095404088497
+    - 0.26176923885941505
+    - 0.2627083035185933
+    - 0.2625328730791807
+    - 0.2608034163713455
+    - 0.26525696739554405
+    prefix_budget_seconds: 0.32
+    provenance:
+    - path: /data1/user/liwei/GENMO_outputs/closedloop_stage10/stage2_asymmetric_20261015/deployment_pass2/deployment_calibration.json
+      sha256: 6b64e6b882610b1a0e585190952d4256e25f91058e1885174393ce3422c7cac7
+    measured_assets:
+      checkpoint: 51b522fbdeb0ec289e5ffc24e2fccca9888df90495f57f96714c1bb43c05f8e2
+      gmt_checkpoint: 79d1a99e54db42342927ec178329dab88772bafbc05df1b0dbe310bc6dd0b319
+      gmt_policy: 31a8f999b652d272246b803d4ffa708f3125de92c0d573411ef13fc3ee6ced20
+      kinematics: c08731704dccece11351b6fa877e30bac5ca2a8d363de30af7ca2ea1398f4029
+      stats: c7c0acb0e7a38797adb38ce0be41ee72820e34daed4e780275c64fb55c3e5326
+    numerical_execution:
+      schema: genmo.stage10.native_dense_execution.v1
+      precision: native_fp32
+      linear: stable_tf32x3
+      weight_gradient: direct_joint_gemm
+      attention: sdpa_math
+      attention_fallback: false
+      mode: compensated_tensorcore_fp32_storage_candidate
+      matmul_tf32: false
+      master_dtype: float32
+      layer_residual_dtype: float32
+      probability_dtype: float64
+      final_projection: float64_local
+      inference_requires_grad: false
+      condition_encoding: batched_unique_chains
+      network_rows: actual_batch_cfg_expanded
+      torch_version: 2.7.1+cu128
+      compiler: null
+    behavior_kernel_sha256: 9e2a93cf3626748eb6d8cc38d00a02600861148c4cc150bdaeae641a70bd7926
   latency_guard_s: 0.04
   lookahead_control_steps: 10
   min_prefix_frames: 12

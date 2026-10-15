@@ -580,8 +580,8 @@ def fixed_chain_drift(policy, reference, *, include_values=False):
                 trace = record['trace']
                 _require(trace['chain'].shape[1] == policy.steps+1, 'Fixed reference denoising steps differ')
                 context = {k: v.to(device) for k, v in trace['conditions'].items()}
-                prepared = policy.prepare_conditions(context) if hasattr(policy, 'prepare_conditions') else None
-                for step in policy.stochastic_steps:
+                prepared = policy.prepare_conditions(context,include_frozen=False)
+                for step in policy.trainable_steps:
                     kwargs = {} if prepared is None else dict(prepared=prepared)
                     current = policy.transition_parameters(context, trace['chain'][:, step].to(device), step, **kwargs)
                     old_mean, old_std = trace['old_means'][:, step].to(device).double(), trace['old_stds'][:, step].to(device).double()
@@ -593,7 +593,7 @@ def fixed_chain_drift(policy, reference, *, include_values=False):
         for name, child in policy.actor.named_modules():
             child.training = modes[name]
     stats = _stats(values)
-    result = dict(reference_sha256=reference['reference_sha256'], internal_transition_count=len(values),
+    result = dict(gaussian_steps=list(policy.trainable_steps),frozen_identity=policy.assert_frozen_identity(),reference_sha256=reference['reference_sha256'], internal_transition_count=len(values),
         mean_joint_kl=stats['mean'], p95_joint_kl=stats['p95'], max_joint_kl=stats['max'],
         diagnostic_scope='fixed_initial_chain_gaussian_drift_not_physics_quality')
     if include_values:

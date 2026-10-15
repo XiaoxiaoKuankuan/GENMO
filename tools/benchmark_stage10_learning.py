@@ -52,7 +52,6 @@ from gem.closedloop.dppo.diagnostic_rollout import load_rollout
 from gem.closedloop.dppo.collectives import DistributedCollectives
 from gem.closedloop.dppo.gradient_merge import BCGradientController
 from gem.closedloop.dppo.parallel_support import capture_local_rng,restore_local_rng,local_call,root_call
-from gem.closedloop.dppo.dense_policy import DenseDiffusionPolicy
 from gem.closedloop.dppo.retention_anchor import Stage1RetentionAnchor
 from gem.closedloop.dppo.tensor_cache import RolloutTensorCache
 from gem.closedloop.dppo.trainer import load_actor,trainable_actor_parameters
@@ -209,92 +208,6 @@ def calibrate_actor(a,d,source,rank_state,policy,optimizer,anchor,generators,cac
     return report
 
 
-def compare_critics(a,d,actor,train,cache,rows,targets,manifest,stage):
-    """两种Critic使用同一固定监督与episode切分，独立评估不参与拟合和参数选择。"""
-    from gem.closedloop.dppo.pretrained_critic import PretrainedConditionCritic
-    from gem.closedloop.dppo.critic import UpperCritic
-    from gem.closedloop.dppo.periodic_monitor import fixed_critic_diagnostic,summarize_critic_predictions
-    from gem.closedloop.dppo.updater import critic_update
-    from gem.closedloop.dppo.rollback_audit import exact_state_digest
-    reference_manifest=json.loads(a.critic_reference.read_text())
-    descriptor=next(r['critic'] for r in reference_manifest['ranks'] if r['rank']==d.rank)
-    if file_sha256(descriptor['path'])!=descriptor['sha256']:raise ValueError('Independent Critic reference SHA changed')
-    reference=torch.load(descriptor['path'],map_location='cpu',weights_only=False)
-    if reference['reference_sha256']!=descriptor['reference_sha256']:raise ValueError('Critic reference identity mismatch')
-    keys=[(r.identity['backend_session_id'],r.identity['env_id'],r.identity['episode_id']) for r in rows]
-    episodes=list(dict.fromkeys(keys));held=set(episodes[::4])
-    train_ids=[i for i,key in enumerate(keys) if key not in held];held_ids=[i for i,key in enumerate(keys) if key in held]
-    if not train_ids or not held_ids:raise ValueError('At least two independent episodes per rank required')
-    owners=d.all_gather_object(train_ids)
-    fit_manifest=[dict(m,valid=m['valid'] and m['local_index'] in owners[m['owner_rank']]) for m in manifest]
-    base_actor=exact_state_digest(actor.state_dict())
-    def independent(critic):
-        local=fixed_critic_diagnostic(critic,reference)
-        parts=d.all_gather_object(local)
-        return dict(summarize_critic_predictions([x for p in parts for x in p['predictions']],
-            [x for p in parts for x in p['targets']]),scope=reference['diagnostic_scope'])
-    @torch.no_grad()
-    def metrics(critic,indices):
-        chosen=[rows[i] for i in indices]
-        pred=critic(cache.context(chosen),cache.get('remaining_music_seconds',chosen)).double()
-        y=torch.as_tensor(targets['returns'],device=d.device)[indices].double();err=y-pred
-        vector=torch.stack((y.new_tensor(len(y)),y.sum(),y.square().sum(),err.sum(),err.square().sum()))
-        n,s,s2,e,e2=d.sum_tensor(vector).cpu().tolist();var=max(0.,s2/n-(s/n)**2)
-        return dict(count=int(n),mse=e2/n,explained_variance=None if var<=1e-12 else 1-(e2/n-(e/n)**2)/var)
-    @torch.no_grad()
-    def order_sensitivity(critic):
-        chosen=[rows[i] for i in held_ids[:32]];context=cache.context(chosen)
-        remaining=cache.get('remaining_music_seconds',chosen);base=critic(context,remaining)
-        results={}
-        for name,field,mask_key in [('music','music_features','music_valid'),('prefix','known_qpos30','known_qpos30_mask')]:
-            changed={k:v.clone() for k,v in context.items()}
-            mask=context[mask_key].any(-1) if context[mask_key].ndim==3 else context[mask_key]
-            eligible=[]
-            for i in range(len(chosen)):
-                idx=mask[i].nonzero().flatten();eligible.append(len(idx)>1)
-                changed[field][i,idx]=context[field][i,idx.flip(0)]
-            delta=(critic(changed,remaining)-base).abs()[torch.tensor(eligible,device=d.device)]
-            parts=d.all_gather_object(delta.cpu().tolist());values=[x for part in parts for x in part]
-            results[name]=dict(count=len(values),mean_abs=float(np.mean(values)),max_abs=max(values),
-                changed_fraction=sum(x>1e-7 for x in values)/len(values),scope='reverse_values_keep_original_times_and_masks')
-        return results
-    report=dict(schema='genmo.stage10.real_data_critic_comparison',source_case=str(a.case),
-        source_case_sha256=file_sha256(a.case/'case.json'),independent_reference=str(a.critic_reference),
-        reference_sha256=file_sha256(a.critic_reference),fit_chains=sum(len(x) for x in owners),
-        held_out_chains=len(manifest)-sum(len(x) for x in owners),split='entire_episodes_every_fourth_per_rank',
-        targets='unchanged_initial_critic_bootstrapped_GAE_not_unbiased_ground_truth',cases=[])
-    for kind in ('pretrained_temporal','legacy_mlp_control'):
-        torch.manual_seed(42)
-        critic=(PretrainedConditionCritic(actor,dimension=stage['critic']['dimension'],layers=stage['critic']['layers'],
-            heads=stage['critic']['heads'],history_scales=stage['critic']['history_scales']) if kind=='pretrained_temporal' else
-            UpperCritic(qpos_mean=actor.endecoder.mean,qpos_std=actor.endecoder.std,
-                proprio_scales=tuple(train.model.proprio_scales))).to(d.device)
-        d.broadcast_module(critic)
-        optimizer=torch.optim.AdamW([p for p in critic.parameters() if p.requires_grad],lr=stage['critic']['learning_rate'],weight_decay=0.)
-        generator=torch.Generator().manual_seed(20261012)
-        item=dict(architecture=kind,initial=dict(fit=metrics(critic,train_ids),held_out=metrics(critic,held_ids),
-            independent=independent(critic)),checkpoints=[])
-        completed=0
-        for epochs in a.critic_epochs:
-            if not completed<epochs<=64:raise ValueError('Critic epoch endpoints must increase within 64')
-            started=time.perf_counter()
-            fit=critic_update(critic,optimizer,rows,targets,cache,fit_manifest,distributed=d,generator=generator,
-                epochs=epochs-completed,batch=stage['critic']['global_batch'])
-            item['checkpoints'].append(dict(epochs=epochs,fit=fit,held_out=metrics(critic,held_ids),
-                independent=independent(critic),order_sensitivity=order_sensitivity(critic),
-                wall_seconds=max(d.all_gather_object(time.perf_counter()-started))))
-            completed=epochs
-            if d.rank==0:print(json.dumps(dict(phase='critic_comparison',architecture=kind,epochs=epochs,
-                held_out=item['checkpoints'][-1]['held_out'],independent=item['checkpoints'][-1]['independent'])),flush=True)
-        report['cases'].append(item)
-        report['actor_unchanged']=exact_state_digest(actor.state_dict())==base_actor
-        if not report['actor_unchanged'] or any(p.grad is not None for p in actor.parameters()):
-            raise RuntimeError('Critic comparison changed the Actor or its gradients')
-        root_call(d,lambda:atomic_json(a.output/'report.json',report))
-        del critic,optimizer
-    return report
-
-
 def recommend_compute_profile(report,device_bytes):
     """按已验证数值、实际P50与显存余量选择计算微批；不替代LR或物理效果标定。"""
     eligible=[]
@@ -366,8 +279,6 @@ def main():
     p.add_argument('--ppo-clip',type=float,help='仅固定数据对照的显式clip候选')
     p.add_argument('--mean-joint-kl-limit',type=float,help='严格joint对照的真实joint KL上限，不能借用平均坐标门槛')
     p.add_argument('--soft-kl-joint',type=float,help='严格joint对照的逐minibatch发布门槛，单位为真实joint KL')
-    p.add_argument('--critic-reference',type=Path,help='独立真实物理评估的fixed_diagnostic_reference.json')
-    p.add_argument('--critic-epochs',type=int,nargs='+',default=[4,16,32])
     p.add_argument('--cross-kernel',action='store_true',help='允许数值候选在同一stable采样数据上做更新等价对照')
     p.add_argument('--heldout-surrogate',type=int,default=0,help='A0留出代理增益检验的零分布置换次数')
     p.add_argument('--heldout-seed',type=int,default=0)
@@ -406,12 +317,6 @@ def main():
     if a.ppo_clip is not None:settings['ppo_clip']=a.ppo_clip
     config['runtime']['genmo_device']=str(d.device)
     actor,train,loading=local_call(d,lambda:load_actor(config))
-    if a.critic_reference is not None:
-        if a.calibrate_actor_rates:p.error('Choose Actor calibration or Critic comparison')
-        # 与训练入口一致，在修改Actor算子类别前复制Stage1原生条件编码器。
-        cache=RolloutTensorCache(rows,targets,d.device,max_device_bytes=8*1024**3)
-        compare_critics(a,d,actor,train,cache,rows,targets,manifest,stage)
-        cache.close();dist.destroy_process_group(group);dist.destroy_process_group();return
     from gem.closedloop.dppo.run_control import build_policy
     if any(v!='reference' for v in a.variants) and not a.cross_kernel:
         p.error('Numerical candidates require freshly sampled data from their own actual kernel; use --cross-kernel for stable-sampled update equivalence')

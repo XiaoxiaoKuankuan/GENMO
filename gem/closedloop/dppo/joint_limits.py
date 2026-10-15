@@ -55,3 +55,29 @@ def generated_boundaries(qpos,free_joint_mask,snapshot,source_joint_names):
     return dict(scope='all_modifiable_valid_generated_coordinates_not_execution_reward',reward_weight=0.,
         hard=boundary_metrics(position,snapshot['joint_hard_limits_rad'],names,mask),
         soft=boundary_metrics(position,snapshot['joint_soft_limits_rad'],names,mask))
+
+
+def summarize_boundaries(records,*,generated=()):
+    """普通训练仅持久化聚合数值/关节名称；原始逐控制步证据仍留到本轮更新结束。"""
+    result=dict(executed_control_samples=len(records),generated_proposals=len(generated),
+        generated_scope='all_modifiable_valid_coordinates_not_added_to_reward')
+    for side in ('actual','consumed_reference'):
+        result[side]={}
+        cost='actual_cost' if side=='actual' else 'reference_cost'
+        values=[r[cost] for r in records]
+        result[side]['cost_mean']=float(np.mean(values)) if values else None
+        result[side]['cost_max']=max(values) if values else None
+        for kind in ('hard','soft'):
+            metrics=[r[side][kind] for r in records]
+            result[side][kind]=dict(max_excess_rad=max((m['max_excess_rad'] for m in metrics),default=None),
+                violation_fraction=float(np.mean([m['violation_fraction'] for m in metrics])) if metrics else None,
+                maximum_consecutive_seconds=max((m['maximum_consecutive_seconds'] for m in metrics),default=None),
+                violating_joint_names=sorted({n for m in metrics for n in m['violating_joint_names']}))
+    result['generated']={}
+    for kind in ('hard','soft'):
+        metrics=[r[kind] for r in generated];count=sum(m['valid_coordinates'] for m in metrics)
+        result['generated'][kind]=dict(valid_coordinates=count,
+            max_excess_rad=max((m['max_excess_rad'] for m in metrics),default=None),
+            violation_fraction=sum(m['violation_fraction']*m['valid_coordinates'] for m in metrics)/count if count else None,
+            violating_joint_names=sorted({n for m in metrics for n in m['violating_joint_names']}))
+    return result

@@ -85,3 +85,18 @@ def test_full_generated_boundary_uses_only_free_coordinates():
     assert report['hard']['violating_joint_names']==[names[0]]
     assert report['hard']['valid_coordinates']==50*21
     assert report['reward_weight']==0 and np.array_equal(q,before)
+
+
+def test_evaluation_accepts_new_reward_and_keeps_separate_boundary_costs():
+    from types import SimpleNamespace
+    from gem.closedloop.dppo.evaluation import _decision_evidence
+    reward=ExecutionReward(target_activity=target_activity_fixture)
+    details=[reward.evaluate_step(actual_step(i,speed=1.)) for i in range(2)]
+    result=SimpleNamespace(transition_valid=True,rewards=[d['reward'] for d in details],
+        executed_control_steps=2,executed_physics_steps=8,terminated=True,truncated=False,reason='music_end',identity={},
+        metadata=dict(reward_details=details,event_reward=0.,latency_seconds=.25,generated=dict(prefix_frames=12,generation_horizon_frames=60)))
+    record=_decision_evidence(result,0)
+    assert record['reward_sum']==pytest.approx(sum(d['reward'] for d in details))
+    assert record['controls'][0]['joint_limit_diagnostics']['actual_cost']==0.
+    assert record['controls'][0]['joint_limit_diagnostics']['reference_cost']==0.
+    assert record['controls'][0]['raw_errors']['root_height_error_m']==0.

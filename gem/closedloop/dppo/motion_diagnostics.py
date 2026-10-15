@@ -53,7 +53,9 @@ def generated_reference_diagnostic(plans):
         prefixes.append(int(plan['prefix_frames']))
     if not speeds:return dict(available=False,reason='no_valid_generated_proposals',invalid_proposals=invalid,reward_weight=0.)
     def rms(values):return float(np.sqrt(np.mean(np.concatenate(values)**2)))
-    return dict(available=True,reward_weight=0.,valid_proposals=len(speeds),invalid_proposals=invalid,
+    from .joint_limits import summarize_boundaries
+    boundaries=summarize_boundaries([],generated=[p['joint_limit_diagnostics'] for p in plans])
+    return dict(joint_limits=boundaries,available=True,reward_weight=0.,valid_proposals=len(speeds),invalid_proposals=invalid,
         generated_joint_speed_rms_rad_s=rms(speeds),generated_joint_acceleration_rms_rad_s2=rms(accelerations),
         generated_joint_jerk_rms_rad_s3=rms(jerks),quaternion_norm_max_error=max(quaternion_error),
         prefix_min_frames=min(prefixes),prefix_max_frames=max(prefixes),

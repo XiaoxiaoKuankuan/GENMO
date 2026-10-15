@@ -173,6 +173,8 @@ def evaluate_columns(reward, trace, *, timings=None):
     for i,row in enumerate(trace):
         boundary,limit_runs=executed_boundaries(row,limit_runs)
         physical_state=reward._physical_state(row)
+        costs=row['reward_primitives']['components']['joint_limit']['normalized']
+        boundary.update(actual_cost=float(costs['actual_cost']),reference_cost=float(costs['reference_cost']))
         if i not in full_indices:
             results.append(dict(version=cfg['version'],tick=int(ticks[i]),episode_id=str(episodes[i]),
                 reward=float(cfg['dt']*total[i]),reward_rate=float(total[i]),reward_is_integrated=True,dt_s=cfg['dt'],
