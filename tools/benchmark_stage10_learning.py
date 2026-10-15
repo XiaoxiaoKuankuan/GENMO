@@ -153,6 +153,7 @@ def calibrate_actor(a,d,source,rank_state,policy,optimizer,anchor,generators,cac
         shared_initial_adam_nonempty=bool(source['actor_optimizer']['state']),candidates=[],
         scope='fixed_real_behavior_full_combined_update_not_accepted_physical_training',
         old_statistics_not_rewritten=True,soft_stop_disabled_for_equal_work=True,
+        actual_compute_config=dict(actor_microbatch=a.microbatches[0],kl_microbatch=a.kl_microbatches[0]),
         objective=kwargs['objective_reduction'],clip=kwargs['clip'],kl_limits=stage['kl'])
     for lr in a.calibrate_actor_rates:
         policy.actor.load_state_dict(source['actor']);optimizer.load_state_dict(copy.deepcopy(source['actor_optimizer']))
@@ -192,6 +193,7 @@ def calibrate_actor(a,d,source,rank_state,policy,optimizer,anchor,generators,cac
                         actor=immutable_cpu_snapshot(policy.actor.state_dict()),kernel=copy.deepcopy(policy.kernel_config),
                         source_identity=source['identity'],source_case=str(a.case),source_case_sha256=report['source_case_sha256'],
                         update=dict(actor_lr=lr,bc_initial=a.calibrate_bc_initial,clip=kwargs['clip'],
+                            actual_compute_config=report['actual_compute_config'],
                             objective=kwargs['objective_reduction'],sampled_steps=a.sampled_steps,
                             optimizer_steps=result['optimizer_steps'],planned_optimizer_steps=result['planned_optimizer_steps'],
                             real_global_chains=len(manifest),kl_limits=copy.deepcopy(stage['kl']),
