@@ -145,7 +145,9 @@ def calibrate_actor(a,d,source,rank_state,policy,optimizer,anchor,generators,cac
     """共享全部实际采样输入与随机起点；扫描结果只供选择新的独立训练配置。"""
     if not 1<=len(a.calibrate_actor_rates)<=6 or any(not 0<x<1e-3 for x in a.calibrate_actor_rates):
         raise ValueError('Finite Actor learning-rate calibration requires 1..6 positive bounded candidates')
-    report=dict(schema='genmo.stage10.real_data_actor_calibration',source_case=str(a.case),
+    from gem.closedloop.dppo.kl_calibration import digest
+    report=dict(schema='genmo.stage2.real_data_four_step_actor_calibration.v1',source_case=str(a.case),
+        kernel_sha256=digest(policy.kernel_config),reward_sha256=digest(source['identity']['reward']),
         source_case_sha256=file_sha256(a.case/'case.json'),real_global_chains=len(manifest),
         shared_initial_adam_nonempty=bool(source['actor_optimizer']['state']),candidates=[],
         scope='fixed_real_behavior_full_combined_update_not_accepted_physical_training',

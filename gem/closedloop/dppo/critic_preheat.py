@@ -47,7 +47,7 @@ def _critical_sources(root):
          'frozen_prefix.py','run_control.py','env_adapter.py','vector_environment.py',
          'evaluation.py','evaluation_world.py','vector_evaluation.py',
          'world_collector.py','mc_calibration.py','complete_episode.py','trainer.py',
-         'pretrained_critic.py','tracking_context.py','joint_limits.py','vector_generation.py',
+         'pretrained_critic.py','tracking_context.py','joint_limits.py','vector_generation.py','updater.py',
          'rewards.py','columnar_reward.py','vector_reward_adapter.py','vector_reward_math.py')
         or p.name.startswith('stable_')]
     signatures = {}

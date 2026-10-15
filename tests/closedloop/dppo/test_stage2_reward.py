@@ -92,11 +92,22 @@ def test_evaluation_accepts_new_reward_and_keeps_separate_boundary_costs():
     from gem.closedloop.dppo.evaluation import _decision_evidence
     reward=ExecutionReward(target_activity=target_activity_fixture)
     details=[reward.evaluate_step(actual_step(i,speed=1.)) for i in range(2)]
+    row=actual_step();names=row['physical_diagnostics']['joint_names']
+    snapshot=dict(joint_names=names,joint_hard_limits_rad=np.tile([-2,2],(21,1)),joint_soft_limits_rad=np.tile([-1.8,1.8],(21,1)))
+    q=np.zeros((60,28));q[-1,7]=2.4
+    boundary=generated_boundaries(q,np.ones((60,21),bool),snapshot,names)
     result=SimpleNamespace(transition_valid=True,rewards=[d['reward'] for d in details],
         executed_control_steps=2,executed_physics_steps=8,terminated=True,truncated=False,reason='music_end',identity={},
-        metadata=dict(reward_details=details,event_reward=0.,latency_seconds=.25,generated=dict(prefix_frames=12,generation_horizon_frames=60)))
+        metadata=dict(reward_details=details,event_reward=0.,latency_seconds=.25,
+            generated=dict(prefix_frames=12,generation_horizon_frames=60,joint_limit_diagnostics=boundary)))
     record=_decision_evidence(result,0)
     assert record['reward_sum']==pytest.approx(sum(d['reward'] for d in details))
     assert record['controls'][0]['joint_limit_diagnostics']['actual_cost']==0.
     assert record['controls'][0]['joint_limit_diagnostics']['reference_cost']==0.
     assert record['controls'][0]['raw_errors']['root_height_error_m']==0.
+    from gem.closedloop.dppo.evaluation import aggregate_evaluation
+    aggregate=aggregate_evaluation([dict(transition_valid=True,physical_failure=False,truncated=False,
+        end_reason='music_end',reward_sum=record['reward_sum'],dataset='test',seed=42,decisions=[record])])['overall']
+    assert aggregate['joint_limits']['generated_proposals']==1
+    assert aggregate['joint_limits']['generated']['hard']['max_excess_rad']==pytest.approx(.4)
+    assert aggregate['reward_sum']==record['reward_sum']  # 未执行末帧越界只统计，不重复罚分。

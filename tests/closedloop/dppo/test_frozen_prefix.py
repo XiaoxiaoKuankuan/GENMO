@@ -31,6 +31,8 @@ def test_intermediate4_gradients_and_deterministic_final(actor_factory):
         early=policy.transition_parameters(context,rollout['chain'][:,0],0)['mean'].clone()
         final=policy.transition_parameters(context,rollout['chain'][:,19],19)
         assert final['std'] is None
+        with pytest.raises(ValueError,match='no Gaussian'):
+            policy.evaluate_log_probs(context,rollout['chain'][:,19],rollout['chain'][:,20],19)
         torch.testing.assert_close(rollout['chain'][:,20],final['mean'],atol=0,rtol=0)
         old_last=final['mean'].clone()
         late=policy.transition_parameters(context,rollout['chain'][:,18],18)['mean'].clone()

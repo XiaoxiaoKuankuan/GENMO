@@ -142,16 +142,17 @@ def test_k8_and_full20_keep_matched_epoch_orders_and_old_chain(tmp_path, monkeyp
     assert torch.equal(torch.stack([row.chain for row in data]), old_chain)
 
 
-@pytest.mark.parametrize('fault', [None, 'assets', 'kernel', 'schema', 'hard_kl', 'soft_kl', 'partial', 'nonfinite'])
+@pytest.mark.parametrize('fault', [None, 'assets', 'kernel', 'schema', 'hard_kl', 'soft_kl', 'partial', 'nonfinite', 'binding'])
 def test_evaluation_actor_load_requires_complete_bound_update(tmp_path, fault):
     from gem.closedloop.dppo.training_checkpoint import load_evaluation_actor
     actor = torch.nn.Linear(3, 2)
     original = copy.deepcopy(actor.state_dict())
     candidate = {name: value + .25 for name, value in original.items()}
     kernel, assets = {'steps': 20}, {'checkpoint': 'source-sha'}
-    payload = dict(schema='genmo.closedloop.stage10.actor_evaluation', evaluation_only=True,
+    binding=dict(reward={'version':'new_reward'},source_files={'code':'sha'},timing={'budget':.32})
+    payload = dict(schema='genmo.stage2.asymmetric_actor_evaluation.v1', evaluation_only=True,
         complete_update_and_soft_kl_passed=True, actor=candidate, kernel=kernel,
-        source_identity={'assets': assets}, hard_kl={'passed': True}, source_case_sha256='a' * 64,
+        source_identity=dict(assets=assets,**binding), hard_kl={'passed': True}, source_case_sha256='a' * 64,
         update={'optimizer_steps': 8, 'planned_optimizer_steps': 8})
     if fault == 'assets': payload['source_identity'] = {'assets': {'checkpoint': 'other'}}
     if fault == 'kernel': payload['kernel'] = {'steps': 8}
@@ -160,14 +161,15 @@ def test_evaluation_actor_load_requires_complete_bound_update(tmp_path, fault):
     if fault == 'soft_kl': payload['complete_update_and_soft_kl_passed'] = False
     if fault == 'partial': payload['update']['optimizer_steps'] = 1
     if fault == 'nonfinite': candidate['weight'][0, 0] = float('nan')
+    if fault == 'binding': payload['source_identity']['reward']={'version':'other_reward'}
     path = tmp_path / 'evaluation_actor.pt'
     torch.save(payload, path)
     if fault:
         with pytest.raises(ValueError):
-            load_evaluation_actor(path, actor=actor, kernel=kernel, assets=assets)
+            load_evaluation_actor(path, actor=actor, kernel=kernel, assets=assets,execution_binding=binding)
         assert all(torch.equal(value, actor.state_dict()[name]) for name, value in original.items())
     else:
-        result = load_evaluation_actor(path, actor=actor, kernel=kernel, assets=assets)
+        result = load_evaluation_actor(path, actor=actor, kernel=kernel, assets=assets,execution_binding=binding)
         assert result['sha256'] == file_sha256(path)
         assert all(torch.equal(value, actor.state_dict()[name]) for name, value in candidate.items())
 

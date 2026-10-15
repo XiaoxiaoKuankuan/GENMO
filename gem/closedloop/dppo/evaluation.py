@@ -288,6 +288,7 @@ def _decision_evidence(result, index):
             'rejection': _plain(metadata.get('rejection')), 'latency_seconds': _number(metadata['latency_seconds'], 'latency'),
             'commit_seconds': _number(metadata.get('commit_seconds', 0.), 'commit latency'), 'prefix_frames': prefix,
             'generation_horizon_frames':frames,'new_reference_frames':frames-prefix,
+            'generated_joint_limit_diagnostics':_plain(generated['joint_limit_diagnostics']),
             'events': _plain(metadata.get('events', [])), 'raw_sample_path': str(metadata.get('raw_sample_path', '')),
             'controls': controls}
 
@@ -313,7 +314,8 @@ def _aggregate_group(episodes):
     rejections = [item for item in decisions if item['rejection']]
     failures = sum(bool(episode['physical_failure']) for episode in valid)
     from .joint_limits import summarize_boundaries
-    limits=summarize_boundaries([r['joint_limit_diagnostics'] for r in controls])
+    limits=summarize_boundaries([r['joint_limit_diagnostics'] for r in controls],
+        generated=[d['generated_joint_limit_diagnostics'] for d in decisions])
     return {'joint_limits':limits,'episode_count': len(episodes), 'valid_episode_count': len(valid),
             'infrastructure_failure_count': len(episodes)-len(valid), 'physical_failure_count': failures,
             'physical_failure_rate': failures/len(valid) if valid else None,

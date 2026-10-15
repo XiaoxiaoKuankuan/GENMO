@@ -428,6 +428,8 @@ class DPPODiffusionPolicy:
     ) -> torch.Tensor:
         """重算一个或混合内部决策的 log probability，返回 FP64 [B]。"""
         parameters = self.transition_parameters(conditions, x_k, step_index, prepared=prepared)
+        if parameters['std'] is None:
+            raise ValueError('Deterministic mapping has no Gaussian log probability')
         observed = self._state(x_next, parameters["mean"], "x_next")
         return masked_joint_log_prob(observed, parameters["mean"], parameters["std"],
                                      parameters["free_mask"])

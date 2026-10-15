@@ -409,7 +409,7 @@ def run(cargs,config,distributed):
             _snapshot(c,'initial',wait=True)
         if not (cargs.calibrate_only or cargs.collect_only or cargs.evaluate_only or getattr(cargs,'critic_preheat_only',False)):
             from .kl_calibration import validate_calibration
-            validate_calibration(c.stage['kl'],c.policy.kernel_config,c.stage['reward'])
+            validate_calibration(c.stage['kl'],c.policy.kernel_config,c.settings['reward'],c.settings['kl_soft_stop_coordinate'])
         complete_mc=c.stage['critic'].get('complete_mc',{})
         if complete_mc.get('enabled') and not cargs.collect_only and not cargs.evaluate_only and not c.state.get('mc_preheat_complete'):
             from .mc_calibration import calibrate_critic

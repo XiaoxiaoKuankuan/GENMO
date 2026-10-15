@@ -180,6 +180,22 @@ def _comparison_group(pairs, initial_episodes, final_episodes):
             'failure_pair_counts': {name: sum(row['failure_pair']==name for row in pairs) for name in FAILURE_GROUPS}}
 
 
+def paired_execution_identity(identity):
+    """配对Actor效果时只允许学习状态不同，物理/奖励/核/源码和执行时钟逐项相同。
+
+    新run的Critic预热文件、优化器设置和Actor初始化来源不决定冻结Actor评估的
+    状态转移。它们保留在原报告中，但不能要求Stage1和更新Actor的初始化身份相同。
+    其余外层执行字段完整保留；源码不放宽，也不自动兼容不同奖励或随机核。
+    """
+    if not isinstance(identity,dict) or 'training_identity' not in identity:return identity
+    required=('schema','assets','kernel','reward','runtime','timing','physical_episode','ppo_rollout',
+        'generation_horizon','physical_configuration','source_files','data_catalog','source_stage1_step',
+        'torch_version','recovery')
+    training=identity['training_identity']
+    require(all(k in training for k in required),'Paired evaluation lacks explicit execution identity')
+    return dict(identity,training_identity={k:training[k] for k in required})
+
+
 def compare_evaluations(initial_report, final_report, *, mode='full_val'):
     """完整读取和核验后生成比较；调用方负责选择新的输出文件，函数不写输入。"""
     require(mode in ('full_val', 'periodic_subset'), 'Unknown comparison mode')
@@ -189,7 +205,8 @@ def compare_evaluations(initial_report, final_report, *, mode='full_val'):
     require(parent==other_parent, 'Initial/final full parent plan, task noise or episode duration differs')
     if mode == 'full_val':
         require(initial['actor_identity']['sha256']!=final['actor_identity']['sha256'], 'Comparison requires two different checkpoint files')
-    require(initial['training_identity']==final['training_identity'], 'Initial/final training, reward or execution identity differs')
+    require(paired_execution_identity(initial['training_identity'])==paired_execution_identity(final['training_identity']),
+            'Initial/final reward, physics, source, stochastic kernel or execution identity differs')
     require(initial['extension_provenance']['source_manifest_sha256']==final['extension_provenance']['source_manifest_sha256'], 'Initial/final evaluation implementation SHA differs')
     require(initial['episode_seconds_limit']==final['episode_seconds_limit'] and initial['deterministic']==final['deterministic'], 'Initial/final evaluation semantics differ')
     pairs = []
@@ -224,6 +241,12 @@ def compare_evaluations(initial_report, final_report, *, mode='full_val'):
               'by_failure_pair': {name: group([index for index in indices if pairs[index]['failure_pair']==name]) for name in FAILURE_GROUPS},
               'pairs': pairs}
     result.update(mode=mode, full_heldout_acceptance=(mode == 'full_val'))
+    execution=initial['training_identity'].get('training_identity')
+    if execution is not None:
+        from gem.closedloop.dppo.kl_calibration import digest
+        result.update(execution_kernel_sha256=digest(execution['kernel']),
+                      execution_reward_sha256=digest(execution['reward']),
+                      evaluated_actor_initialization=final['training_identity']['training_identity']['actor_initialization'])
     return result
 
 

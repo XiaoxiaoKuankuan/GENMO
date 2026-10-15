@@ -60,14 +60,23 @@ class Env:
             self.policy.actor.weight.add_(1.)
         count = min(25, self.limit-self.steps)
         components = {}
-        for name, weight, score in [('track', 2.5, 1.), ('music', 2., .3), ('stable', 1., 1.), ('alive', .5, 1.),
+        for name, weight, score in [('track', 2.5, 1.), ('music', 0., 0.), ('stable', 0., 0.), ('alive', .5, 1.),
                                     ('cmd', -.15, 0.), ('torque', -.1, 0.), ('contact', -.2, 0.), ('joint_limit', -.5, 0.)]:
             components[name] = {'score': score, 'gate': 1., 'activity_gate': 1., 'weight': weight,
                                 'weighted_rate': score*weight, 'integrated_reward': .02*score*weight,
                                 'valid': True, 'raw': {'joint_position_rmse_rad': .05} if name=='track' else {'root_height_error_m': .01} if name=='stable' else {}}
         base = sum(item['integrated_reward'] for item in components.values())
-        details = [{'version': 'stage9.execution_reward.v2', 'tick': 600+12*(self.steps+i+1), 'dt_s': .02,
+        from tests.closedloop.dppo.test_data_learning import actual_step
+        from gem.closedloop.dppo.joint_limits import executed_boundaries,generated_boundaries
+        boundary_row=actual_step();names=boundary_row['physical_diagnostics']['joint_names']
+        limits=executed_boundaries(boundary_row,np.zeros((2,2,21),dtype=np.int64))[0]
+        limits.update(actual_cost=0.,reference_cost=0.)
+        generated_limits=generated_boundaries(np.zeros((60,28)),np.ones((60,21),bool),
+            dict(joint_names=names,joint_hard_limits_rad=np.tile([-2,2],(21,1)),
+                 joint_soft_limits_rad=np.tile([-1.8,1.8],(21,1))),names)
+        details = [{'version': 'stage2.gmt8_reference_limits.v1', 'tick': 600+12*(self.steps+i+1), 'dt_s': .02,
                     'transition_valid': True, 'reward': base, 'components': copy.deepcopy(components),
+                    'joint_limit_diagnostics':copy.deepcopy(limits),'diagnostics':{'physical_state':{'root_height_error_m':.01}},
                     'activity': {'valid': True, 'actual_activity_rad_s': 1., 'target_activity_rad_s': 1.,
                                  'gate': 1., 'intensity_score': 1., 'window_count': min(25, self.steps+i+1),
                                  'window_complete': self.steps+i+1>=25}} for i in range(count)]
@@ -86,7 +95,8 @@ class Env:
                 'truncated': terminal and self.limit<self.full_steps and not failed,
                 'reason': 'root_height' if failed else 'music_end' if terminal and self.limit==self.full_steps else 'collection_limit' if terminal else None,
                 'metadata': {'reward_details': details, 'event_reward': penalty if count==0 else 0., 'event_penalty_total': penalty,
-                    'generated': {'prefix_frames': 21}, 'terminal_snapshot': {'terminated': failed},
+                    'generated': {'prefix_frames': 21,'generation_horizon_frames':60,'joint_limit_diagnostics':generated_limits},
+                    'terminal_snapshot': {'terminated': failed},
                     'rejection': {'policy_penalty': True, 'code': 'invalid_qpos'} if self.rejection and self.decisions==1 else None,
                     'latency_seconds': .31, 'events': [], 'raw_sample_path': 'raw/sample.pt'}}
 

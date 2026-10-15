@@ -1,21 +1,16 @@
-"""Stage10：固定行为数据、K8代理PPO、预训练Critic缓存与最终Full20验收。
+"""固定行为四步DPPO＋BC、可训练历史Critic和完整四步KL审查。
 
-rollout旧均值/方差/联合概率、价值、returns和全局标准化advantage整轮固定。
-每个epoch重新对完整链打乱并无放回抽样去噪步骤；N/K逆概率权重乘回完整20步
-目标，去噪折扣保留。后续minibatch使用已经更新的参数，PPO clipping有实际意义。
-主代理目标采用自由有效坐标平均log-ratio，真实joint统计同时记录且不被改写。
-协调器在K8和Full20都消费一个minibatch种子，使下一epoch的链顺序可配对比较；
-Full20仍选择全部步骤，种子不改变其内部选择，也不改旧v2抽样器的RNG合同。
+20步行为仅索引15..18参与Actor优化；每个epoch打乱完整链，四步全部参与，不使用
+旧K8抽样权重或把冻结零KL加入分母。旧均值/标准差/联合概率、价值目标与优势整轮
+固定。自由有效坐标平均log-ratio是代理目标，原joint概率比及KL分别保存。
+当前optimizer minibatch的条件只编码一次，PPO与原Stage1 BC梯度统一SUM、裁剪及
+Adam更新。结束后无梯度检查全部有效链的四步KL，冻结部分检查不可变身份。
+少量同噪声重生成只诊断最终参考变化，单独计时，不冒充实际物理执行或完整KL覆盖。
+失败可回滚模型/优化器/BC/RNG，已发生的物理和资源消耗不能回滚。
 
-条件在当前optimizer minibatch的唯一链上只编码一次，临时条件梯度最后回传。
-BC继续使用原Stage1损失；局部PPO和BC统一配对SUM、统一裁剪、Adam真实更新。
-当前前向的真实KL只决定待更新步骤是否停止；循环结束必须用最终参数重新计算
-所有有效链全部20步的KL，失败由调用方恢复整轮模型/优化器/BC/RNG/控制状态。
-物理世界与资源消耗不能回滚。本模块不保存checkpoint、不推进物理或改变奖励。
-
-Critic冻结特征仅编码一次并跨epoch缓存，时序投影/Transformer/Value Head每步
-重算。当前批拟合前后指标分开，新批更新前指标不能由同批低MSE代替。所有归约
-使用实际全局有效分母，尾批和某rank没有局部样本仍参与同一通信序列。
+Critic只缓存冻结音乐/前缀特征及历史输入，历史GRU、时序层和Value Head每次优化
+重新建图；当前/下一批误差与独立MC验证分开。归约使用全局实际有效分母，尾批和
+空rank参与同一通信序列。本模块不推进物理，也不保存checkpoint。
 """
 from __future__ import annotations
 
@@ -204,6 +199,8 @@ def final_kl(policy,rows,cache,manifest,*,distributed,microbatch=256,clip=.05,ob
             proxy_ratio=quantile(ratio[:,s]),clip_fraction=float(((ratio[:,s]<1-clip)|(ratio[:,s]>1+clip)).double().mean()),
             objective_clip_fraction=float(full[:,s,8].mean()),
             mean_normalized_mean_change_rms=float(shift[:,s].mean())))
+    kl_seconds=max(distributed.all_gather_object(time.perf_counter()-start))
+    reference_change=reference_change_diagnostics(policy,local,cache,distributed)
     return dict(mean_joint_kl=float(joint.mean()),mean_coordinate_kl=float(coordinate.mean()),
         clip_fraction=float(((ratio<1-clip)|(ratio>1+clip)).double().mean()),
         joint_kl=quantile(joint),coordinate_kl=quantile(coordinate),chain_joint_kl=quantile(joint.sum(1)),
@@ -223,12 +220,13 @@ def final_kl(policy,rows,cache,manifest,*,distributed,microbatch=256,clip=.05,ob
             scope='denormalized_index18_gaussian_mean_not_final_deterministic_reference'),
         kl_scope='four_trainable_old_path_gaussians_not_deterministic_final_action_density',
         p95_scope='four_trainable_steps_per_chain_coordinate_means_only',
-        reference_change=reference_change_diagnostics(policy,local,cache,distributed),
+        reference_change=reference_change,kl_only_wall_seconds=kl_seconds,
         wall_seconds=max(distributed.all_gather_object(time.perf_counter()-start)))
 
 
 @torch.no_grad()
 def reference_change_diagnostics(policy,rows,cache,distributed,max_local_chains=16):
+    started=time.perf_counter()
     selected=rows[:max_local_chains]
     changes=[]
     with _local_phase(distributed,'stage2_updated_reference_diagnostic'),policy_phase(policy):
@@ -257,7 +255,8 @@ def reference_change_diagnostics(policy,rows,cache,distributed,max_local_chains=
                     protected_coordinates_unchanged=bool(torch.equal(state[i][~free[i]],before[i][~free[i]]))))
     all_rows=[r for shard in distributed.all_gather_object(changes) for r in shard]
     return dict(scope='regenerated_final_deterministic_reference_same_initial_state_and_saved_innovations_not_physics',
-        covered_chains=len(all_rows),selection='first_up_to_16_eligible_chains_per_rank',samples=all_rows)
+        covered_chains=len(all_rows),selection='first_up_to_16_eligible_chains_per_rank',samples=all_rows,
+        wall_seconds=max(distributed.all_gather_object(time.perf_counter()-started)))
 
 
 def check_kl(report,limits):
