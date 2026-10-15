@@ -21,6 +21,13 @@ from .rewards import resolve_reward_config
 VERSION='genmo.closedloop.stage2.asymmetric_tracking.v1'
 
 
+def _source_counts(value):
+    """显式四来源配额，不把bool或缺来源的字典当有效任务数。"""
+    from .full_dataset import SOURCES
+    return (type(value)is int and value>0 or isinstance(value,dict) and set(value)==set(SOURCES)
+            and all(type(n)is int and n>0 for n in value.values()))
+
+
 def configuration(path,*,genmo_repo=None,gmt_repo=None):
     c=yaml.safe_load(Path(path).read_text())
     if c.get('stage10',{}).get('version')!=VERSION or 'base_config' in c:
@@ -49,8 +56,8 @@ def configuration(path,*,genmo_repo=None,gmt_repo=None):
         raise ValueError('Invalid evaluation music selection configuration')
     selection=s['evaluation'].get('samples_per_source',4)
     if (s['evaluation'].get('split','val') not in ('val','test') or not
-            (type(selection)is int and selection>0 or selection=='all_unique' and s['evaluation'].get('unique_music',False))):
-        raise ValueError('Held-out evaluation requires val/test and positive count or all_unique music selection')
+            (_source_counts(selection) or selection=='all_unique' and s['evaluation'].get('unique_music',False))):
+        raise ValueError('Held-out evaluation requires val/test and explicit positive source counts or all_unique music selection')
     if s['evaluation'].get('episode_seconds') is None and s['evaluation'].get('start_mode','beginning')!='beginning':
         raise ValueError('Complete song evaluation cannot start in the middle')
     for key in ('eta', 'guidance_scale'):
@@ -76,7 +83,7 @@ def configuration(path,*,genmo_repo=None,gmt_repo=None):
     if mc.get('enabled'):
         count=mc.get('training_samples_per_source',mc['samples_per_source'])
         if type(count)is not int or count<1:raise ValueError('MC training_samples_per_source must be positive')
-        if type(mc['samples_per_source'])is not int or mc['samples_per_source']<1 or type(mc['epochs'])is not int or mc['epochs']<1:
+        if not _source_counts(mc['samples_per_source']) or type(mc['epochs'])is not int or mc['epochs']<1:
             raise ValueError('Complete MC supervision requires positive real episode count and epochs')
         if not mc['mix_candidates'] or any(not math.isfinite(v) or not 0<=v<=1 for v in mc['mix_candidates']):raise ValueError('Invalid MC/TD mixing candidates')
         if set(mc['training_seeds']) & set(mc['validation_seeds']):raise ValueError('MC validation seeds must be independent')

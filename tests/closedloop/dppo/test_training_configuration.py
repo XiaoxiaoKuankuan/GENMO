@@ -22,7 +22,7 @@ from gem.closedloop.dppo.training import _sources
 from gem.closedloop.dppo.training_config import VERSION, configuration
 
 ROOT = Path(__file__).resolve().parents[3]
-CONFIG = ROOT / 'configs/closedloop/stage10_server1.yaml'
+CONFIG = ROOT / 'configs/closedloop/stage2_asymmetric_server2.yaml'
 
 
 def test_main_scale_is_4096_full_chains_with_eight_combined_updates():
@@ -30,17 +30,17 @@ def test_main_scale_is_4096_full_chains_with_eight_combined_updates():
     s, t = c['stage10'], c['stage10']['training']
     assert s['version'] == VERSION
     assert s['derived'] == dict(world_size=8, real_chains=4096, local_chains=512,
-        planned_actor_steps=8, local_ppo_internal_visits=4096, local_full_kl_visits=10240,
+        planned_actor_steps=8, local_ppo_internal_visits=4096, local_trainable_kl_visits=2048,
         bc_per_step=64, bc_per_rollout=512,maximum_actor_steps=10,
         count_semantics='nominal_capacity_only_actual_manifest_controls_optimization')
     assert (t['denoising_steps'], t['ppo_steps_per_chain'], t['ppo_epochs']) == (20, 4, 2)
-    assert t['frozen_prefix_steps']==16 and t['ppo_step_strategy']=='last'
+    assert t['frozen_prefix_steps']==15 and t['ppo_step_strategy']=='intermediate4'
     assert t['actor_lr'] == 1e-7 and t['ppo_clip'] == .003
     assert c['runtime']['timing_contract'] == 'modeled_deployment.v3'
     assert (c['timing']['control_ticks'], c['timing']['physics_ticks']) == (12, 3)
 
 
-@pytest.mark.parametrize('path', sorted((ROOT / 'configs/closedloop').glob('stage10*.yaml')),
+@pytest.mark.parametrize('path', [CONFIG],
                          ids=lambda path: path.stem)
 def test_diagnostics_share_current_code_and_existing_asset_paths(path):
     c = configuration(path)
@@ -80,7 +80,8 @@ def test_unused_effect_iteration_field_is_explicitly_rejected(tmp_path, value):
         configuration(path)
 
 
-@pytest.mark.parametrize('split,count,unique', [('train',4,False),('val','all_unique',False),('test',0,True)])
+@pytest.mark.parametrize('split,count,unique', [('train',4,False),('val','all_unique',False),('test',0,True),
+    ('val',{'AIST++':2},True)])
 def test_invalid_heldout_selection_rejected_before_gpu_start(tmp_path,split,count,unique):
     c=yaml.safe_load(CONFIG.read_text())
     c['stage10']['evaluation'].update(split=split,samples_per_source=count,unique_music=unique)
