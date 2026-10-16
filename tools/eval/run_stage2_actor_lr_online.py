@@ -5,8 +5,10 @@
 规则选择配置；规则只排除明显退化，不能解释成理论安全保证或统计显著提升。
 
 优先保留5e-8坐标DPPO对照、两种目标各自的1e-6原KL候选；若后者物理退化，则
-从同一目标的原门槛候选中选择完成率、总回报较好的替代。最多再选一个确有配对
-收益的放宽KL候选，仍标记探索实验。所有候选评估结果及不选择理由全部写入计划。
+从同一目标的原门槛候选中选择完成率、总回报较好的替代。先选一个确有配对收益
+的放宽KL代表；若此时缺少另一种目标，再保留该目标合格的探索代表，保证A/B的
+有限在线可比较性。最多四组，所有放宽KL项仍是探索。筛选门槛不因覆盖要求降低，
+没有合格项的目标必须缺席。所有候选评估结果及不选择理由全部写入计划。
 每个在线实验均从同一个Stage1、已验收MC Critic及空Actor Adam独立开始，禁止把
 扫描后的Actor或其他候选优化器当作续训。实际提交最多八步，每四轮评估并保存真实
 权重及当前行为策略的完整MC价值诊断，失败不补跑凑数。
@@ -36,7 +38,7 @@ from tools.eval.run_stage2_actor_lr_physics import sha, gpu_monitor, verify_summ
 
 
 SELECTION_RULES=dict(
-    schema='genmo.stage2.uniform_lr_finite_selection.v1',
+    schema='genmo.stage2.uniform_lr_finite_selection.v2',
     scope='empirical_finite_simulation_screen_not_formal_safety_or_significance',
     maximum_experiments=4, accepted_iterations_each=8,
     minimum_completion_delta=0, minimum_total_reward_ratio=.98,
@@ -44,6 +46,9 @@ SELECTION_RULES=dict(
     maximum_hard_excess_increase_rad=dict(actual=.03,consumed_reference=.05,generated=.05),
     maximum_hard_fraction_increase=.002,
     exploratory_minimum_reward_ratio=1.01,
+    objective_coverage='retain_each_objective_if_an_original_or_improving_exploratory_candidate_is_eligible',
+    maximum_exploratory_experiments=2,
+    exploration_requires_larger_accepted_lr_than_5e8_baseline=True,
     ranking=['complete_tasks','total_reward','fewer_backtracking_attempts'],
     preferred_primary=['coordinate_dppo_lr5e-08_kl1','coordinate_dppo_lr1e-06_kl1',
                        'joint_score_pg_lr1e-06_kl1'])
@@ -107,9 +112,15 @@ def select_candidates(scan,analyses):
                       r['kl_multiplier']==1 and r['name']!=control['name']]
             if eligible:add(max(eligible,key=ranking),'original_KL_alternative_after_primary_regression')
     exploratory=[r for r in assessments if r['eligible'] and r['kl_multiplier']>1 and
-        r['reward_ratio']>=SELECTION_RULES['exploratory_minimum_reward_ratio']]
+        r['reward_ratio']>=SELECTION_RULES['exploratory_minimum_reward_ratio'] and
+        r['accepted_lr']>by_name[r['objective']+'_lr5e-08_kl1']['accepted_lr']]
     if exploratory:add(max(exploratory,key=ranking),'best_finite_relaxed_KL_exploration_not_formal_promotion')
+    for objective in ('coordinate_dppo','joint_score_pg'):
+        if any(r['objective']==objective for r in selected):continue
+        eligible=[r for r in exploratory if r['objective']==objective]
+        if eligible:add(max(eligible,key=ranking),'eligible_exploration_to_preserve_A_B_online_comparison')
     assert len(selected)<=SELECTION_RULES['maximum_experiments']
+    assert sum(r['kl_multiplier']>1 for r in selected)<=SELECTION_RULES['maximum_exploratory_experiments']
     return dict(rules=SELECTION_RULES,assessments=assessments,selected=selected,
         warning='Selection on these 16 music groups is exploratory; confidence is not independent confirmation')
 

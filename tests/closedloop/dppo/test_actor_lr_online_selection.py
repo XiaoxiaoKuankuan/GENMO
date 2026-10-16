@@ -1,7 +1,8 @@
 """验证高学习率有限在线实验的选择边界，不启动训练或伪造物理收益。
 
 以合成的32任务总量检查：每秒分数提高不能掩盖早失败；活动度、参考/实际硬限位
-都参与经验筛选；原KL候选优先，放宽KL只额外选一个探索代表；已有扫描参数与
+都参与经验筛选；原KL候选优先，探索代表必要时补足另一目标且实际步长大于低LR
+基线，总数仍最多四组；已有扫描参数与
 物理任务身份必须保持一致。测试结果只证明编排规则，不能替代真实物理验收。
 """
 import copy
@@ -86,3 +87,24 @@ def test_online_completion_requires_real_checkpoint_and_current_mc(tmp_path):
     assert result['accepted_actor_steps']==8 and result['optimizer_attempts']==15
     weights.write_bytes(b'changed')
     with pytest.raises(ValueError,match='checkpoint'):verify_online(tmp_path)
+
+
+def test_objective_coverage_never_relaxes_physical_gates():
+    scan,values=fixtures()
+    for name,value in values.items():
+        if name.startswith('coordinate_dppo'):
+            value['aggregate']['music_completion_count']=28
+    values['coordinate_dppo_lr3e-06_kl10']=analysis()
+    values['coordinate_dppo_lr3e-06_kl10']['aggregate']['reward_sum']=102.
+    values['joint_score_pg_lr3e-07_kl3']['aggregate']['reward_sum']=104.
+    plan=select_candidates(scan,values)
+    names={r['name'] for r in plan['selected']}
+    assert names=={'joint_score_pg_lr1e-06_kl1','joint_score_pg_lr3e-07_kl3',
+                   'coordinate_dppo_lr3e-06_kl10'}
+    assert len(plan['selected'])<=4
+    values['coordinate_dppo_lr3e-06_kl10']['aggregate']['joint_limits']['actual']['hard']['max_excess_rad']=.2
+    plan=select_candidates(scan,values)
+    assert all(r['objective']=='joint_score_pg' for r in plan['selected'])
+    values['joint_score_pg_lr5e-08_kl3']['aggregate']['reward_sum']=150.
+    plan=select_candidates(scan,values)
+    assert 'joint_score_pg_lr5e-08_kl3' not in {r['name'] for r in plan['selected']}
