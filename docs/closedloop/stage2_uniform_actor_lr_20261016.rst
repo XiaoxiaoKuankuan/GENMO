@@ -239,6 +239,9 @@ CPU重算，与各候选自身整曲MC回报比较。新Stage1基线3516个决�
 旧v1仅保留一个探索组可能使A/B只剩一种目标。物理筛选数值门槛未变，旧等待器
 仅在尚未创建在线run且无子进程时结束，原规则/命令/SHA保留在
 ``online_selection_coverage_amendment.json``；全30项物理结果仍完整保留。
+启动前再明确v3低LR对照回退：若A的5e-8因物理退化被排除，用同门槛合格的B
+5e-8作小步长对照；若两者都不合格，则不能强行加入。此项只补足同目标的LR
+比较，不增加4组总上限，记录于 ``online_selection_control_amendment.json``。
 
 .. image:: stage2_uniform_actor_lr_finedance_low_20261016.png
    :alt: Stage1与5e-8单步对照在FineDance075和138的真实实际与消费参考轨迹

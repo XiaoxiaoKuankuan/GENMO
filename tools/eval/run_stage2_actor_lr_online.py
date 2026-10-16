@@ -4,7 +4,8 @@
 不同扫描权重的32任务物理评估及逐控制证据分析，再按本文件中预先写明的经验筛选
 规则选择配置；规则只排除明显退化，不能解释成理论安全保证或统计显著提升。
 
-优先保留5e-8坐标DPPO对照、两种目标各自的1e-6原KL候选；若后者物理退化，则
+优先保留5e-8坐标DPPO对照（不合格时用通过同门槛的5e-8 joint-score对照）、
+两种目标各自的1e-6原KL候选；若后者物理退化，则
 从同一目标的原门槛候选中选择完成率、总回报较好的替代。先选一个确有配对收益
 的放宽KL代表；若此时缺少另一种目标，再保留该目标合格的探索代表，保证A/B的
 有限在线可比较性。最多四组，所有放宽KL项仍是探索。筛选门槛不因覆盖要求降低，
@@ -38,7 +39,7 @@ from tools.eval.run_stage2_actor_lr_physics import sha, gpu_monitor, verify_summ
 
 
 SELECTION_RULES=dict(
-    schema='genmo.stage2.uniform_lr_finite_selection.v2',
+    schema='genmo.stage2.uniform_lr_finite_selection.v3',
     scope='empirical_finite_simulation_screen_not_formal_safety_or_significance',
     maximum_experiments=4, accepted_iterations_each=8,
     minimum_completion_delta=0, minimum_total_reward_ratio=.98,
@@ -49,6 +50,7 @@ SELECTION_RULES=dict(
     objective_coverage='retain_each_objective_if_an_original_or_improving_exploratory_candidate_is_eligible',
     maximum_exploratory_experiments=2,
     exploration_requires_larger_accepted_lr_than_5e8_baseline=True,
+    low_lr_control_fallback='joint_score_pg_lr5e-08_kl1_only_if_coordinate_control_ineligible',
     ranking=['complete_tasks','total_reward','fewer_backtracking_attempts'],
     preferred_primary=['coordinate_dppo_lr5e-08_kl1','coordinate_dppo_lr1e-06_kl1',
                        'joint_score_pg_lr1e-06_kl1'])
@@ -103,6 +105,8 @@ def select_candidates(scan,analyses):
             selected.append(dict(item,selection_reason=reason))
     control=by_name['coordinate_dppo_lr5e-08_kl1']
     add(control,'predeclared_low_LR_control_if_not_physically_degraded')
+    if not control['eligible']:
+        add(by_name['joint_score_pg_lr5e-08_kl1'],'eligible_low_LR_control_after_coordinate_control_regression')
     def ranking(row):return (row['completion'],row['reward_ratio'],-row['attempts'])
     for objective in ('coordinate_dppo','joint_score_pg'):
         preferred=by_name[objective+'_lr1e-06_kl1']

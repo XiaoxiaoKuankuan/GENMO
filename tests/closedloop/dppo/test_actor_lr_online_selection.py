@@ -99,7 +99,7 @@ def test_objective_coverage_never_relaxes_physical_gates():
     values['joint_score_pg_lr3e-07_kl3']['aggregate']['reward_sum']=104.
     plan=select_candidates(scan,values)
     names={r['name'] for r in plan['selected']}
-    assert names=={'joint_score_pg_lr1e-06_kl1','joint_score_pg_lr3e-07_kl3',
+    assert names=={'joint_score_pg_lr5e-08_kl1','joint_score_pg_lr1e-06_kl1','joint_score_pg_lr3e-07_kl3',
                    'coordinate_dppo_lr3e-06_kl10'}
     assert len(plan['selected'])<=4
     values['coordinate_dppo_lr3e-06_kl10']['aggregate']['joint_limits']['actual']['hard']['max_excess_rad']=.2
@@ -108,3 +108,6 @@ def test_objective_coverage_never_relaxes_physical_gates():
     values['joint_score_pg_lr5e-08_kl3']['aggregate']['reward_sum']=150.
     plan=select_candidates(scan,values)
     assert 'joint_score_pg_lr5e-08_kl3' not in {r['name'] for r in plan['selected']}
+    values['joint_score_pg_lr5e-08_kl1']['aggregate']['music_completion_count']=28
+    plan=select_candidates(scan,values)
+    assert all(r['proposed_lr']!=5e-8 for r in plan['selected'])
