@@ -22,25 +22,31 @@ import torch.distributed as dist
 
 
 class BCGradientController:
-    def __init__(self, *, initial=.1,target_ratio=.1,minimum=1e-4,maximum=10.,smoothing=.9,max_change=2.,mode='bounded_ratio'):
+    def __init__(self, *, initial=.1,target_ratio=.1,minimum=1e-4,maximum=10.,smoothing=.9,max_change=2.,mode='bounded_ratio',initialize_from_gradient=False):
         if not 0<=minimum<=initial<=maximum or target_ratio<=0 or not 0<=smoothing<1 or max_change<1:
             raise ValueError('Invalid bounded BC gradient calibration')
         if mode not in ('fixed','bounded_ratio'):raise ValueError('Unknown BC calibration mode')
         self.value,self.target_ratio,self.minimum,self.maximum=initial,target_ratio,minimum,maximum
         self.smoothing,self.max_change,self.mode=smoothing,max_change,mode
         self.updates=0
+        self.initialize_from_gradient=bool(initialize_from_gradient)
 
     def update(self,ppo_norm,bc_norm):
         old=self.value
         if self.mode=='bounded_ratio' and ppo_norm>0 and bc_norm>1e-20:
             target=min(self.maximum,max(self.minimum,self.target_ratio*ppo_norm/bc_norm))
-            proposed=self.smoothing*old+(1-self.smoothing)*target
-            self.value=min(self.maximum,old*self.max_change,max(self.minimum,old/self.max_change,proposed))
+            if self.initialize_from_gradient and self.updates==0:
+                self.value=target
+            else:
+                proposed=self.smoothing*old+(1-self.smoothing)*target
+                self.value=min(self.maximum,old*self.max_change,max(self.minimum,old/self.max_change,proposed))
         self.updates+=1
         return self.value
 
     def state_dict(self):return dict(self.__dict__)
     def load_state_dict(self,state):
+        if state.get('initialize_from_gradient',False)!=self.initialize_from_gradient:
+            raise ValueError('BC initial gradient calibration contract differs from checkpoint')
         for key in ['target_ratio','minimum','maximum','smoothing','max_change','mode']:
             if state[key]!=getattr(self,key):raise ValueError('BC controller contract differs from checkpoint')
         if not self.minimum<=state['value']<=self.maximum or state['updates']<0:
@@ -64,7 +70,7 @@ def _group(name):
 
 
 def merge_global_gradients(actor,ppo,bc,controller,*,distributed=None,bucket_bytes=32*1024**2,
-                           half_split=False,sketch=None,sketch_budget=1<<20):
+                           half_split=False,sketch=None,sketch_budget=1<<20,component_observer=None):
     """PPO与BC梯度一次SUM合并；可选梯度信噪比诊断不改变p.grad。
 
     half_split在同一bucket增加第三行，只放前一半rank的PPO梯度，归约后得到两半rank
@@ -127,6 +133,7 @@ def merge_global_gradients(actor,ppo,bc,controller,*,distributed=None,bucket_byt
     shared=reports['shared'];weight=controller.update(shared['ppo_norm'],shared['unweighted_bc_norm'])
     for name,p in parameters:
         a,b=ppo.get(name),bc.get(name)
+        if component_observer is not None:component_observer(name,a,b)
         if a is None and b is None:p.grad=None
         elif a is None:p.grad=b.mul_(weight)
         elif b is None:p.grad=a

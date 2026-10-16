@@ -22,7 +22,7 @@ def _read(reference):
     return json.loads(content)
 
 
-def validate_calibration(limits,kernel,reward,soft_limit):
+def validate_calibration(limits,kernel,reward,soft_limit,*,optimization=None):
     binding=limits['calibration']
     if binding.get('status')!='validated' or not binding.get('evidence'):
         raise ValueError('Four-step KL requires real fixed-rollout and physical calibration before Actor learning')
@@ -30,7 +30,10 @@ def validate_calibration(limits,kernel,reward,soft_limit):
     content=path.read_bytes()
     if hashlib.sha256(content).hexdigest()!=evidence['sha256']:raise ValueError('KL calibration evidence SHA differs')
     report=json.loads(content)
-    if (report.get('schema')!='genmo.stage2.four_step_kl_calibration.v1' or report.get('status')!='passed' or
+    schema='genmo.stage2.four_step_kl_calibration.v2' if optimization is not None else 'genmo.stage2.four_step_kl_calibration.v1'
+    if optimization is not None and report.get('optimization')!=optimization:
+        raise ValueError('KL calibration does not bind actual Actor LR/epochs/minibatch/objective/backtracking/limits')
+    if (report.get('schema')!=schema or report.get('status')!='passed' or
             report.get('kernel_sha256')!=digest(kernel) or report.get('reward_sha256')!=digest(reward)):
         raise ValueError('KL calibration belongs to another policy or reward')
     keys=('mean_coordinate','maximum_step_mean_coordinate','p95_coordinate')

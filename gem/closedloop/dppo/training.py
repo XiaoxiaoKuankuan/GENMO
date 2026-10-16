@@ -408,8 +408,15 @@ def run(cargs,config,distributed):
         if payload is None:
             _snapshot(c,'initial',wait=True)
         if not (cargs.calibrate_only or cargs.collect_only or cargs.evaluate_only or getattr(cargs,'critic_preheat_only',False)):
-            from .kl_calibration import validate_calibration
-            validate_calibration(c.stage['kl'],c.policy.kernel_config,c.settings['reward'],c.settings['kl_soft_stop_coordinate'])
+            from .actor_experiment import optimization_binding,validate_experiment_configuration
+            if 'actor_objective' in c.settings:
+                validate_experiment_configuration(c.config,c.stage['derived']['maximum_actor_steps'])
+                report['actor_experiment']=dict(optimization=optimization_binding(c.stage),
+                    physics_quality_validated=False,scope='explicit_finite_simulation_experiment')
+            else:
+                from .kl_calibration import validate_calibration
+                validate_calibration(c.stage['kl'],c.policy.kernel_config,c.settings['reward'],c.settings['kl_soft_stop_coordinate'],
+                    optimization=optimization_binding(c.stage))
         complete_mc=c.stage['critic'].get('complete_mc',{})
         if complete_mc.get('enabled') and not cargs.collect_only and not cargs.evaluate_only and not c.state.get('mc_preheat_complete'):
             from .mc_calibration import calibrate_critic
@@ -497,7 +504,10 @@ def run(cargs,config,distributed):
                 root_call(distributed,lambda:atomic_json(case/'case.json',dict(schema='genmo.stage2.asymmetric_fixed_learning_case.v1',
                     real_global_chains=len(manifest),learning_state_sha256=file_sha256(case/'learning_state.pt'),
                     nonempty_adam=bool(saved['actor_optimizer']['state']),ranks=rank_files,
-                    evidence_scope='real_PhysX_training_inputs_not_full_physical_archive')))
+                    evidence_scope='real_PhysX_training_inputs_not_full_physical_archive',
+                    joint_limits={key:(list(value) if key=='joint_names' else value.tolist())
+                        for key,value in service.world.snapshots([0])[0].items() if key in
+                        ('joint_names','joint_hard_limits_rad','joint_soft_limits_rad')})))
                 if cargs.collect_only:
                     c.state['rollouts_completed']+=1
                     item=dict(fixed_data_case=str(case),collection_by_rank=distributed.all_gather_object(collection),
@@ -523,7 +533,17 @@ def run(cargs,config,distributed):
                 def reserve():
                     root_call(distributed,lambda:c.budget.reserve('actor_attempts',optimizer_attempts=1))
                     c.state['optimizer_attempts']+=1
-                actor=actor_update(c.policy,c.actor_optimizer,rows,targets,cache,manifest,c.controller,distributed=distributed,
+                update_actor=actor_update
+                if 'actor_objective' in c.settings:
+                    from functools import partial
+                    from .full_batch_actor import full_batch_actor_update
+                    snapshot=service.world.snapshots([0])[0]
+                    c.policy.experimental_joint_limits={k:snapshot[k] for k in
+                        ('joint_names','joint_hard_limits_rad','joint_soft_limits_rad')}
+                    update_actor=partial(full_batch_actor_update,objective=c.settings['actor_objective'],
+                        backtracking=c.settings['optimizer_backtracking'],kl_limits=c.stage['kl'],
+                        kl_microbatch=c.settings['kl_microbatch'],proposed_lr=c.settings['actor_lr'])
+                actor=update_actor(c.policy,c.actor_optimizer,rows,targets,cache,manifest,c.controller,distributed=distributed,
                     anchor=c.bc,generator=c.generators['actor'],ppo_epochs=c.settings['ppo_epochs'],
                     minibatch_chains=c.stage['scale']['actor_minibatch_chains'],microbatch=c.settings['denoising_microbatch'],
                     sampled_steps=c.settings['ppo_steps_per_chain'],clip=c.settings['ppo_clip'],
@@ -539,7 +559,11 @@ def run(cargs,config,distributed):
                 actor_seconds=max(distributed.all_gather_object(time.perf_counter()-actor_start))
                 kl=final_kl(c.policy,rows,cache,manifest,distributed=distributed,microbatch=c.settings['kl_microbatch'],
                     clip=c.settings['ppo_clip'],objective_reduction=c.settings['objective_logprob_reduction'])
-                accepted=check_kl(kl,c.stage['kl'])
+                from .actor_backtracking import check_candidate_kl
+                accepted=check_candidate_kl(kl,c.stage['kl'])
+                if actor.get('step_rejected'):
+                    accepted['passed']=False
+                    accepted['failures']['optimizer_step_backtracking']='all_attempts_rejected'
                 if not accepted['passed'] and c.settings.get('kl_rejection','abort')!='rollback_continue':
                     anomaly_saved=local_call(distributed,lambda:_preserve_rollout_anomaly(c,buffer,targets,manifest,label))
                     rollback=local_call(distributed,lambda:_restore_rollback(c,saved))
@@ -584,6 +608,8 @@ def run(cargs,config,distributed):
                 root_call(distributed,lambda:c.budget.accept_iteration('update',identity=f'{identity["session_id"]}/{label}'))
                 c.state['actor_updates']+=actor['optimizer_steps']
                 c.state['policy_version']+=1;c.state['iteration']+=1
+                if 'actor_objective' in c.settings:
+                    c.state['last_accepted_actor_lr']=actor['steps'][-1]['learning_rate']
             else:
                 c.state['warmup_completed']+=1
             c.state['rollouts_completed']+=1
@@ -606,7 +632,9 @@ def run(cargs,config,distributed):
             if distributed.rank==0:print(f'[STAGE10 ACCEPTED] {label} chains={used[2]} actor_steps={0 if actor is None else actor["optimizer_steps"]} wall={wall:.3f}s',flush=True)
             if is_warmup and c.state['warmup_completed']==warmups:
                 _snapshot(c,'critic_warmup_complete');last_save=time.perf_counter()
-            if c.state['training_control_steps']>=c.state['next_evaluation_control_steps']:
+            iteration_eval=c.stage['evaluation'].get('every_actor_iterations')
+            if (c.state['training_control_steps']>=c.state['next_evaluation_control_steps'] or
+                    iteration_eval and not is_warmup and not rejected and c.state['iteration']%iteration_eval==0):
                 c.state['next_evaluation_control_steps']=_next_interaction_boundary(
                     c.state['training_control_steps'],c.stage['evaluation']['every_control_steps'])
                 _evaluate(c,report,_periodic_evaluation_label(c.state))
@@ -614,7 +642,9 @@ def run(cargs,config,distributed):
                 stage=time.perf_counter()
                 _snapshot(c,'periodic');last_save=time.perf_counter()
                 _overhead(c,'periodic_snapshot_seconds',stage)
-            if complete_mc.get('enabled') and c.state['training_control_steps']>=c.state['next_mc_calibration_control_steps']:
+            iteration_mc=complete_mc.get('every_actor_iterations')
+            if complete_mc.get('enabled') and (c.state['training_control_steps']>=c.state['next_mc_calibration_control_steps'] or
+                    iteration_mc and not is_warmup and not rejected and c.state['iteration']%iteration_mc==0):
                 from .mc_calibration import calibrate_critic
                 stage=time.perf_counter()
                 calibrate_critic(c,'policy_'+str(c.state['policy_version']),fit=False,

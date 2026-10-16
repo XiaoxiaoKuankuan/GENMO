@@ -99,7 +99,7 @@ def configuration(path,*,genmo_repo=None,gmt_repo=None):
     if world!=8 or s['distributed']['backend']!='nccl' or s['distributed']['collection']!='all_ranks':
         raise ValueError('当前 production requires eight synchronous GPU ranks')
     if (t['denoising_steps']!=20 or t['ppo_step_strategy']!='intermediate4' or
-            t['ppo_steps_per_chain']!=4 or t['frozen_prefix_steps']!=15 or t['ppo_epochs']!=2):
+            t['ppo_steps_per_chain']!=4 or t['frozen_prefix_steps']!=15 or t['ppo_epochs'] not in (1,2)):
         raise ValueError('Only frozen15 + stochastic trainable4 + deterministic final is supported')
     if len(t['std_schedule'])!=20 or t['std_schedule'][-1]!=0. or any(
             not math.isfinite(x) or x<=0 for x in t['std_schedule'][:-1]):
@@ -152,6 +152,9 @@ def configuration(path,*,genmo_repo=None,gmt_repo=None):
     if bc_total<maximum_steps:raise ValueError('BC must cover every possible actual optimizer step')
     if s['limits']['optimizer_attempts']<s['limits']['accepted_iterations']*maximum_steps:
         raise ValueError('Optimizer attempt budget must cover the complete declared workload')
+    if 'actor_objective' in t:
+        from .actor_experiment import validate_experiment_configuration
+        validate_experiment_configuration(c, maximum_steps)
     if c['runtime']['generation_batch']>n:raise ValueError('No duplicated environments to pad effective GENMO batches')
     s['derived']=dict(world_size=world,real_chains=chains,local_chains=n*decisions,planned_actor_steps=steps,
         local_ppo_internal_visits=n*decisions*t['ppo_steps_per_chain']*t['ppo_epochs'],
