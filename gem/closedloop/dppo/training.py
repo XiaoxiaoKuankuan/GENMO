@@ -42,6 +42,7 @@ from .trainer import load_actor,trainable_actor_parameters
 from .optimization_support import probability_check_local
 from .updater import actor_update,critic_update,final_kl,check_kl
 from .periodic_monitor import log_metrics
+from .tensorboard_metrics import DashboardWriter, training_scalars
 from .evaluation import _model_fingerprint
 
 
@@ -262,6 +263,8 @@ def _evaluate(c,report,label):
         result['stage1_retention']=dict(by_source=by_source,samples=samples,
             source_balanced_loss=sum(x['mean_loss'] for x in by_source.values())/len(by_source),
             source_loss_maturity=c.bc.source_global_step,scope=shards[0]['scope'])
+        root_call(c.distributed,lambda:c.writer.write('validation',c.state['iteration'],
+            {'Loss/stage1_validation':result['stage1_retention']['source_balanced_loss']}) if c.writer else None)
         _overhead(c,'evaluation_stage1_retention_seconds',stage)
     stage=time.perf_counter()
     _snapshot(c,'evaluated_'+label)
@@ -396,8 +399,7 @@ def run(cargs,config,distributed):
         from gem.robots.bumi.kinematics import BumiKinematics
         c.builder=OnlineConditionBuilder(BumiMotionFeatureCodec(BumiKinematics(config['paths']['kinematics'])),motion_frames=config['stage10']['generation_horizon']['frames'])
         if distributed.rank==0:
-            from torch.utils.tensorboard import SummaryWriter
-            c.writer=SummaryWriter(str(c.output/'tensorboard'),max_queue=128,flush_secs=30)
+            c.writer=DashboardWriter(c.output/'tensorboard_compact')
         report.update(run_id=identity['run_id'],session_id=identity['session_id'],initial_state=copy.deepcopy(c.state))
         root_call(distributed,lambda:atomic_json(c.output/'training_identity.json',c.identity))
         root_call(distributed,lambda:(c.session/'resolved_config.yaml').write_text(yaml.safe_dump(c.base_config,allow_unicode=True,sort_keys=False)))
@@ -598,8 +600,8 @@ def run(cargs,config,distributed):
                 effective_upper_transitions_per_second=used[2]/wall,
                 mode='critic_warmup' if is_warmup else 'kl_rejected_rollback' if rejected else 'dppo_bc',
                 overhead_since_previous_record=dict(c.overhead))
-            root_call(distributed,lambda:(c.manager.append_metrics(record),log_metrics(c.writer,c.output/'curves.jsonl',c.state['rollouts_completed'],
-                record,prefix='training',durable=False)))
+            root_call(distributed,lambda:(c.manager.append_metrics(record),log_metrics(c.writer,c.output/'curves.jsonl',c.state['iteration'],
+                record,prefix='training',durable=False,dashboard_metrics=training_scalars(record))))
             c.overhead.clear()
             report['warmup' if is_warmup else 'iterations'].append(dict(label=label,wall_seconds=wall,actor_steps=0 if actor is None else actor['optimizer_steps']))
             if distributed.rank==0:print(f'[STAGE10 ACCEPTED] {label} chains={used[2]} actor_steps={0 if actor is None else actor["optimizer_steps"]} wall={wall:.3f}s',flush=True)

@@ -7,7 +7,7 @@
 周期子集只作训练监视，不冒充完整val/test验收，也不声称第一阶段从未见过这些数据。
 
 提供四来源等权回报及基线失败/时长保护的best observed/best saved选择，嵌套数值
-指标的TensorBoard/JSONL记录，以及固定初始随机链上的高斯KL漂移诊断。所有权重
+指标的完整JSONL记录、显式白名单TensorBoard曲线，以及固定初始随机链上的高斯KL漂移诊断。所有权重
 身份可来自内存模型指纹，不强求周期评估先写checkpoint。调用者负责独立环境、
 独立物理预算、RNG隔离、原子发布报告和真实源码/奖励/执行合同的一致性。
 """
@@ -527,13 +527,14 @@ def numeric_metrics(value, prefix=''):
 
 
 @profiled('storage.monitor')
-def log_metrics(writer, jsonl_path, step, metrics, *, prefix='', durable=True):
-    """同一外层轮次写TensorBoard和JSONL；调用者持有唯一writer，不创建新训练进程。"""
+def log_metrics(writer, jsonl_path, step, metrics, *, prefix='', durable=True, dashboard_metrics=None):
+    """JSONL保留审计数值；TensorBoard只写调用者明确聚合的白名单，横轴为接受迭代。"""
     _require(type(step) is int and step >= 0, 'Monitor step must be nonnegative')
     values = numeric_metrics(metrics, prefix)
     if writer is not None:
-        for tag, value in values.items():
-            writer.add_scalar(tag, value, step)
+        if dashboard_metrics is None:
+            raise ValueError('TensorBoard requires explicit compact dashboard_metrics')
+        writer.write(prefix, step, dashboard_metrics)
         if durable:
             writer.flush()
     if jsonl_path is not None:

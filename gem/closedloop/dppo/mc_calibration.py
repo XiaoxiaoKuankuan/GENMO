@@ -234,5 +234,11 @@ def calibrate_critic(c, label, *, fit, fit_if_ev_below=None):
             and report['after']['explained_variance']>=gate.get('minimum_explained_variance',0.))
         training.episodes.clear();validation.episodes.clear()
     report['wall_seconds']=max(c.distributed.all_gather_object(time.perf_counter()-started))
-    root_call(c.distributed,lambda:atomic_json(c.session/'mc_calibration'/f'{label}.json',report))
+    def publish():
+        atomic_json(c.session/'mc_calibration'/f'{label}.json',report)
+        if getattr(c,'writer',None) is not None:
+            from .tensorboard_metrics import mc_scalars
+            c.writer.write('critic_mc',c.state['iteration'],mc_scalars(report))
+            c.writer.flush()
+    root_call(c.distributed,publish)
     return report
