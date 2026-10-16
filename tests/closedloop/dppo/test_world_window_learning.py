@@ -27,7 +27,7 @@ def test_empty_local_world_buffer_has_no_virtual_transition_or_critic_call():
 
 def test_current_config_accepts_nondivisible_bc_total_without_environment_quota(tmp_path):
     root=Path(__file__).resolve().parents[3]
-    config=yaml.safe_load((root/'configs/closedloop/stage10_server1.yaml').read_text())
+    config=yaml.safe_load((root/'configs/closedloop/stage2_asymmetric_server2.yaml').read_text())
     config['stage10']['training']['bc_samples_per_rollout']=517
     path=tmp_path/'candidate.yaml';path.write_text(yaml.safe_dump(config))
     resolved=configuration(path)

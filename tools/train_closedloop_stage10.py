@@ -3,7 +3,7 @@
 先用Gloo在任何CUDA/Isaac上下文创建前核验八张卡空闲、模型SHA和独立输出目录，
 再为每rank启动一个Isaac App和对应GPU世界，NCCL同步DPPO/BC/Critic梯度。
 Actor初始化s595000，冻结原生GMT140500；本入口直接维护当前训练实现和恢复格式。
-新配置最多500轮预算不自动开启，必须显式指定stop-after-iteration。正常结束
+训练配置的累计轮次预算不会自动开启，必须显式指定stop-after-iteration。正常结束
 保存一致checkpoint、运行固定评估、关闭物理世界和通信组；异常返回真实非零码。
 
 GENMO和Isaac必须使用同一Python3.11测试运行环境，不能混用3.10二进制包。

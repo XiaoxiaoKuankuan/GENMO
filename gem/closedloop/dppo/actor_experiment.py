@@ -2,8 +2,8 @@
 
 实验绑定实际统一LR、全局链批量、epoch、目标、BC、Adam超参数、回溯及软硬KL。
 允许原门槛的1/3/10倍独立探索，但明确不代表物理质量通过，累计最多20轮；每轮
-只有一次on-policy提交。该入口只授权服务器2有限实验，恢复仍严格比较完整运行
-身份。正式发布需要包含新优化合同的v2物理证据，旧v1证据不可为本实验背书。
+只有一次on-policy提交。旧有限合同仍最多20轮；新的delayed_credit_training合同仅接受用户明确授权的
+服务器2八秒正式运行，最多2000轮，物理收益仍标记未验证，恢复严格比较完整身份。正式发布需要包含新优化合同的v2物理证据，旧v1证据不可为本实验背书。
 """
 from __future__ import annotations
 import math
@@ -13,7 +13,7 @@ from .kl_calibration import digest
 
 def optimization_binding(stage):
     t = stage['training']
-    return dict(schema='genmo.stage2.actor_optimization_binding.v1',
+    result = dict(schema='genmo.stage2.actor_optimization_binding.v1',
         actor_lr=t['actor_lr'], actor_lr_control=t.get('actor_lr_control','fixed'),
         actor_optimizer=dict(type='AdamW', parameter_groups=1, betas=[.9,.999], eps=1e-8, weight_decay=0.),
         ppo_epochs=t['ppo_epochs'], global_minibatch_chains=stage['scale']['actor_minibatch_chains'],
@@ -24,12 +24,20 @@ def optimization_binding(stage):
         backtracking=t.get('optimizer_backtracking'),
         hard_kl={k:v for k,v in stage['kl'].items() if k!='calibration'},
         soft_kl=t['kl_soft_stop_coordinate'])
+    if stage['ppo_rollout'].get('credit_contract'):
+        result.update(schema='genmo.stage2.actor_optimization_binding.v2',
+            rollout=stage['ppo_rollout'], gamma_upper=t['gamma_upper'],lambda_upper=t['lambda_upper'],
+            dataset=stage['dataset'],mc_start_distribution=stage['critic']['complete_mc'].get('start_distribution'),
+            run_contract=stage['actor_experiment'])
+    return result
 
 
 def validate_experiment_configuration(config, maximum_steps):
     s = config['stage10']; t = s['training']; trial = s.get('actor_experiment', {})
-    if (trial.get('schema') != 'genmo.stage2.uniform_lr_experiment.v2'
-            or trial.get('scope') != 'server2_finite_not_formal'
+    formal=(trial.get('schema')=='genmo.stage2.delayed_credit_training.v1'
+            and trial.get('scope')=='server2_formal_user_authorized')
+    if (not formal and (trial.get('schema') != 'genmo.stage2.uniform_lr_experiment.v2'
+            or trial.get('scope') != 'server2_finite_not_formal')
             or t['actor_objective'] not in ('coordinate_dppo','joint_score_pg')
             or t['ppo_epochs'] != 1 or maximum_steps != 1
             or s['scale']['actor_minibatch_chains'] != 16384
@@ -37,7 +45,7 @@ def validate_experiment_configuration(config, maximum_steps):
             or t['actor_lr_control'] != 'fixed'
             or not 0 < t['actor_lr'] <= 1e-5):
         raise ValueError('Explicit uniform-LR single on-policy full-batch finite experiment required')
-    if s['run_control']['max_training_iterations'] > 20 or s['limits']['accepted_iterations'] > 20:
+    if not formal and (s['run_control']['max_training_iterations'] > 20 or s['limits']['accepted_iterations'] > 20):
         raise ValueError('Exploratory high-LR experiments cannot automatically start long training')
     bt = t.get('optimizer_backtracking', {})
     if (set(bt) != {'max_attempts','factor'} or type(bt['max_attempts']) is not int
@@ -60,6 +68,14 @@ def validate_experiment_configuration(config, maximum_steps):
         raise ValueError('Experimental optimization binding differs; old calibration cannot authorize new LR/objective')
     for container in (s['evaluation'], s['critic']['complete_mc']):
         every=container.get('every_actor_iterations')
-        if every is not None and every not in (2,4):
+        if every is not None and every not in ((100,) if formal else (2,4)):
             raise ValueError('Finite experiments must evaluate at an explicit 2 or 4 accepted-iteration interval')
+    if formal:
+        from .reference_credit import CREDIT_CONTRACT
+        if (s['run_control']['max_training_iterations']>2000 or s['limits']['accepted_iterations']>2000
+                or s['ppo_rollout']['world_seconds']!=8 or t['lambda_upper']!=.98 or t['gamma_upper']!=.99
+                or s['storage'].get('checkpoint_interval_iterations')!=100
+                or s['ppo_rollout'].get('credit_contract')!=CREDIT_CONTRACT
+                or s['critic']['complete_mc'].get('start_distribution')!='match_training_reset.v1'):
+            raise ValueError('Explicit 8s/.98/2000-iteration delayed-credit training contract required')
     return optimization_binding(s)

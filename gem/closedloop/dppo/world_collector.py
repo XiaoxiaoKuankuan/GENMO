@@ -314,6 +314,9 @@ class WorldEnvironmentCollector(VectorEnvironmentCollector):
                 profile.dump_stats(str(self.states[0].resource.env.output.parent/'world_python_profile.pstats'))
         if signature!=self.policy._parameter_signature():raise RuntimeError('Policy changed during collection')
         rows=[fragments[i] for i in range(self.num_envs)]
+        capacity=round(world_seconds/.5)
+        if any(len(fragment)>capacity for fragment in rows):
+            raise RuntimeError('Shared decision-grid capacity exceeded; cannot perform multiple on-policy PG steps')
         protocol_after=self.world_call('transport_statistics') if protocol_before is not None else {}
         protocol_delta={key:value-protocol_before.get(key,0.) for key,value in protocol_after.items()}
         if self.window_record is None or not self.window_record['reached']:

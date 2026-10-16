@@ -44,6 +44,8 @@ def freeze_buffer_targets(buffer, lengths, critic, device, *, critic_version, ba
     rows=buffer.transitions
     if sum(lengths)!=len(rows) or any(type(n) is not int or n<0 for n in lengths):
         raise ValueError('Vector fragment lengths must cover the complete buffer')
+    from .reference_credit import validate_reward_intervals
+    validate_reward_intervals(rows)
     populate_values(rows,critic,device,critic_version=critic_version,batch_size=batch_size)
     fragments=[];start=0
     for n in lengths:
@@ -233,6 +235,15 @@ class InProcessTrainingRuntime:
                 policy_version=c.state['policy_version'],chunk_size=64,disk_guard=c.guard)
             for row in rows:writer.append(row)
             writer.finish()
+        if c.stage['ppo_rollout'].get('credit_contract'):
+            path=c.session/'collections'/label/f'rank{c.distributed.rank:02d}'/'reference_credit.json'
+            updates=[dict(env_slot=i,**item) for i,state in enumerate(self.collector.states)
+                for item in state.resource.env.reference_credit.drain_updates()]
+            atomic_json(path,dict(contract=c.stage['ppo_rollout']['credit_contract'],
+                behavior_version=c.state['policy_version'],tick_hz=600,reward_reassignment=False,plans=updates))
+            c.guard.account_file(path)
+            report['reference_credit']=dict(path=str(path),plan_updates=len(updates),
+                gamma_upper=c.settings['gamma_upper'],lambda_upper=c.settings['lambda_upper'])
         atomic_json(c.session/'collections'/label/f'rank{c.distributed.rank:02d}'/'collection.json',report)
         self.iteration,self.policy_version=c.state['iteration'],c.state['policy_version']
         return buffer,targets,manifest,report

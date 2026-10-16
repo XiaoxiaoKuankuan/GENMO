@@ -65,6 +65,8 @@ class UpperEnvironment:
         self.config, self.backend, self.builder, self.policy = config, backend, builder, policy
         self.budget, self.output = budget, Path(output)
         self.snapshot = None
+        from .reference_credit import ReferenceCreditLedger
+        self.reference_credit = ReferenceCreditLedger() if config.get('stage10',{}).get('ppo_rollout',{}).get('credit_contract') else None
         self.attempt = self.decision = self.episode_count = 0
         self.latency_budget_s = float(config['stage9'].get('latency_budget_s', .5))
         self.mode = config['stage9'].get('execution_mode', 'latency')
@@ -161,6 +163,7 @@ class UpperEnvironment:
                 raise ExecutionIntegrityError('Trace is not a complete contiguous actual trajectory')
         if actual < count and not snapshot['done'] and not snapshot.get('rollout_window_reached',False):
             raise ExecutionIntegrityError('Short advance without terminal state')
+        if self.reference_credit is not None:self.reference_credit.observe(rows)
         self.snapshot = snapshot
         return rows
 
@@ -183,7 +186,9 @@ class UpperEnvironment:
         motion_reset = initialization == MOTION_RESET_CONTRACT
         if initialization not in ('standing', MOTION_RESET_CONTRACT):
             raise ValueError('Unknown episode initialization contract')
-        if motion_reset and (phase != 'train' or split != 'train' or
+        mc_reset=(phase=='critic_mc' and split in ('train','val') and
+            self.config.get('stage10',{}).get('critic',{}).get('complete_mc',{}).get('start_distribution')=='match_training_reset.v1')
+        if motion_reset and (not (phase=='train' and split=='train' or mc_reset) or
                 self.config.get('stage10', {}).get('dataset', {}).get('initialization') != MOTION_RESET_CONTRACT or
                 self.config.get('runtime', {}).get('backend') != 'gpu_vectorized.v1'):
             raise ValueError('Paired motion reset requires explicit GPU Actor-training initialization')
@@ -197,7 +202,7 @@ class UpperEnvironment:
             from .motion_initialization import make_motion_initialization
             target, paired_qpos = target
             episode_spec['initialization'] = make_motion_initialization(paired_qpos, target.source,
-                start_frame=int(music_start_frame), plan_frames=self.config['stage10']['generation_horizon']['frames'])
+                start_frame=int(music_start_frame), plan_frames=self.config['stage10']['generation_horizon']['frames'],phase=phase)
         self.full_music_num_frames, self.music_start_frame, self.data_split = len(music), int(music_start_frame), split
         self.phase, self.sample, self.music, self.seed = phase, sample, np.array(music[self.music_start_frame:], copy=True), int(seed)
         from gem.closedloop.online_conditions import FrozenMusicFeatures
@@ -206,6 +211,7 @@ class UpperEnvironment:
         self.snapshot = yield from backend_operation('reset_episode', seed=self.seed,
             episode_spec=episode_spec)
         self.initialization = initialization
+        if self.reference_credit is not None:self.reference_credit.reset(self.snapshot['episode_id'])
         if motion_reset:
             applied = self.snapshot.get('reset_initialization') or {}
             if (applied.get('contract') != MOTION_RESET_CONTRACT or
@@ -442,6 +448,10 @@ class UpperEnvironment:
         execution_end = min(self.music_end_tick, boundary['tick']) if boundary else self.music_end_tick
         rows, rewards, details, events = [], [], [], []
         training_reward_seconds = 0.
+        if self.reference_credit is not None:
+            self.reference_credit.register(generated['meta']['plan_id'],decision_tick=start,
+                policy_version=self.policy_version,parent_plan_id=generated['meta']['parent_plan_id'],
+                horizon_ticks=self.config['stage10']['generation_horizon']['frames']*20)
         commit, rejection = None, generated['rejection']
         pending = candidate is not None
         while not self.snapshot['done'] and self.snapshot['tick'] < execution_end:
@@ -451,6 +461,7 @@ class UpperEnvironment:
                 try:
                     commit = yield from backend_operation('commit_plan', prepared_plan_id=candidate['prepared_plan_id'],
                                                expected_control_tick=tick)
+                    if self.reference_credit is not None:self.reference_credit.committed(generated['meta']['plan_id'],tick)
                 except RemoteError as exc:
                     if exc.code != 'late_plan':
                         raise

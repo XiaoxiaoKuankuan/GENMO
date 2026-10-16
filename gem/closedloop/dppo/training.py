@@ -414,7 +414,7 @@ def run(cargs,config,distributed):
             if 'actor_objective' in c.settings:
                 validate_experiment_configuration(c.config,c.stage['derived']['maximum_actor_steps'])
                 report['actor_experiment']=dict(optimization=optimization_binding(c.stage),
-                    physics_quality_validated=False,scope='explicit_finite_simulation_experiment')
+                    physics_quality_validated=False,scope=c.stage['actor_experiment']['scope'])
             else:
                 from .kl_calibration import validate_calibration
                 validate_calibration(c.stage['kl'],c.policy.kernel_config,c.settings['reward'],c.settings['kl_soft_stop_coordinate'],
@@ -640,9 +640,12 @@ def run(cargs,config,distributed):
                 c.state['next_evaluation_control_steps']=_next_interaction_boundary(
                     c.state['training_control_steps'],c.stage['evaluation']['every_control_steps'])
                 _evaluate(c,report,_periodic_evaluation_label(c.state))
-            if time.perf_counter()-last_save>=c.stage['storage']['checkpoint_interval_seconds']:
+            from .run_control import iteration_checkpoint_reason
+            checkpoint_reason=iteration_checkpoint_reason(c.state['iteration'],c.stage['storage'],
+                is_warmup=is_warmup,rejected=rejected)
+            if checkpoint_reason or time.perf_counter()-last_save>=c.stage['storage']['checkpoint_interval_seconds']:
                 stage=time.perf_counter()
-                _snapshot(c,'periodic');last_save=time.perf_counter()
+                _snapshot(c,checkpoint_reason or 'periodic');last_save=time.perf_counter()
                 _overhead(c,'periodic_snapshot_seconds',stage)
             iteration_mc=complete_mc.get('every_actor_iterations')
             if complete_mc.get('enabled') and (c.state['training_control_steps']>=c.state['next_mc_calibration_control_steps'] or

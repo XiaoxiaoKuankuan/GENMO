@@ -21,7 +21,12 @@ def complete_mc_returns(rows, *, gamma_upper=.99):
     gamma=float(gamma_upper)**(1/25)
     returns=torch.empty(len(rows),dtype=torch.float64);future=torch.zeros((),dtype=torch.float64)
     previous=None
+    from .reference_credit import validate_reward_intervals
+    validate_reward_intervals(rows)
+    physical_key=tuple(rows[0].identity.get(k,0) for k in ('backend_session_id','env_id','episode_id'))
     for row in rows:
+        if tuple(row.identity.get(k,0) for k in ('backend_session_id','env_id','episode_id'))!=physical_key:
+            raise ValueError('MC cannot cross physical sessions or environments')
         if row.identity['policy_version']!=policy or row.identity['episode_id']!=episode:
             raise ValueError('MC cannot cross episode or Actor behavior versions')
         if previous is not None and previous!=row.control_tick_begin:

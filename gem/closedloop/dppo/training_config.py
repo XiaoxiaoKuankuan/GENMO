@@ -49,8 +49,11 @@ def configuration(path,*,genmo_repo=None,gmt_repo=None):
     if set(control)!={'max_training_iterations'}:
         raise ValueError('Only max_training_iterations is supported; total walltime limits are removed')
     maximum=control['max_training_iterations']
-    if type(maximum)is not int or not 1<=maximum<=500 or maximum>s['limits']['accepted_iterations']:
-        raise ValueError('Cumulative PPO iteration limit must be 1..500 within the resource budget')
+    if type(maximum)is not int or maximum<1 or maximum>s['limits']['accepted_iterations']:
+        raise ValueError('Cumulative PPO iteration limit must be positive and within the resource budget')
+    checkpoint_interval=s['storage'].get('checkpoint_interval_iterations')
+    if checkpoint_interval is not None and (type(checkpoint_interval)is not int or checkpoint_interval<1):
+        raise ValueError('Checkpoint iteration interval must be a positive integer')
     if c['runtime'].get('evidence_level','full') not in ('full','training'):
         raise ValueError('runtime.evidence_level must be full or training')
     interval=c['runtime'].get('reward_audit_interval_controls',100)
@@ -85,6 +88,8 @@ def configuration(path,*,genmo_repo=None,gmt_repo=None):
     if type(horizon['frames'])is not int or horizon['frames'] not in (60,120) or horizon['fps']!=30:raise ValueError('Actual GENMO horizon must be 60/120 frames at 30Hz')
     t['generation_frames']=horizon['frames']
     mc=s['critic'].get('complete_mc',{})
+    if s['critic']['complete_mc'].get('start_distribution','beginning') not in ('beginning','match_training_reset.v1'):
+        raise ValueError('Unknown complete-MC reset distribution')
     artifact=s['critic'].get('preheat_artifact')
     if artifact and (not mc.get('enabled') or set(artifact)!={'path','sha256'}
             or not isinstance(artifact['path'],str) or not Path(artifact['path']).is_absolute()
@@ -158,7 +163,9 @@ def configuration(path,*,genmo_repo=None,gmt_repo=None):
         bc_data_root=c['paths']['data_root'],bc_distribution='all_ranks')
     if s['limits']['physics_steps']!=4*s['limits']['control_steps']:
         raise ValueError('Physical resource budget must preserve four substeps')
-    maximum_steps=t['ppo_epochs']*math.ceil(n*(decisions+1)*world/scale['actor_minibatch_chains'])
+    # 共享世界所有reset/决策都对齐25控制步网格；每格每环境至多一条Actor转移。
+    # collector再次按真实片段校验此上限，失败/预热只减少有效链，不能偷偷多做PG更新。
+    maximum_steps=t['ppo_epochs']*math.ceil(chains/scale['actor_minibatch_chains'])
     if bc_total<maximum_steps:raise ValueError('BC must cover every possible actual optimizer step')
     if s['limits']['optimizer_attempts']<s['limits']['accepted_iterations']*maximum_steps:
         raise ValueError('Optimizer attempt budget must cover the complete declared workload')
