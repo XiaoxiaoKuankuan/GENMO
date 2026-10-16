@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import hashlib
 import json
 from pathlib import Path
 import sys
@@ -65,10 +66,18 @@ def summarize(root, output, partial=False):
     queue_path = root / 'physics/queue.json'
     analysis_path = root / 'physical_analysis/index.json'
     critic_path = root / 'critic_analysis/index.json'
-    queue = json.loads(queue_path.read_text())
+    # 阶段快照的队列可能同时推进；SHA必须绑定本次解析的字节，不能在数分钟汇总后
+    # 再给旧内容盖上新队列的SHA。完整结束后的最终报告仍按同一方式读取。
+    snapshots = {}
+    def snapshot(path):
+        data = path.read_bytes()
+        snapshots[path] = hashlib.sha256(data).hexdigest()
+        return json.loads(data)
+    queue = snapshot(queue_path)
     scan = read_verified(scan_path, queue['scan_sha256'])
-    index = json.loads(analysis_path.read_text())
-    critic_index = json.loads(critic_path.read_text())
+    snapshots[scan_path] = queue['scan_sha256']
+    index = snapshot(analysis_path)
+    critic_index = snapshot(critic_path)
     complete = (queue['status'] == 'completed_all_distinct_survivors'
                 and index['status'] == 'completed' and critic_index['status'] == 'completed')
     if not complete and not partial:
@@ -123,7 +132,7 @@ def summarize(root, output, partial=False):
             passed_fixed_prescreen=candidate['screening']['passed']))
     result = dict(schema='genmo.stage2.uniform_lr_compact_physical_review.v1',
         status='complete_physics_not_formal_promotion' if complete else 'partial_not_final_selection',
-        sources=[dict(path=str(p), sha256=file_sha256(p)) for p in (scan_path, queue_path, analysis_path, critic_path)],
+        sources=[dict(path=str(p), sha256=snapshots[p]) for p in (scan_path, queue_path, analysis_path, critic_path)],
         implementation_sha256=file_sha256(__file__), cases=cases, candidates=candidates,
         completed_distinct_physical=len(cases), expected_distinct_physical=len(queue['jobs']),
         caveats=['same_16_music_groups_used_for_selection_not_independent_confirmation',
