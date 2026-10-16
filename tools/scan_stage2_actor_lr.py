@@ -103,6 +103,9 @@ def main():
         if source['actor_optimizer']['state']:raise ValueError('This scan starts all candidates from the same empty Stage1 Adam')
         configs=json.loads(args.candidates.read_text())['candidates']
         config=copy.deepcopy(source['config']);settings=config['stage9'];stage=config['stage10']
+        scan_stage=configuration(configs[0]['path'])['stage10']
+        if any(configuration(v['path'])['stage10']['bc_gradient']!=scan_stage['bc_gradient'] for v in configs):
+            raise ValueError('Every candidate must use the same BC gradient target/controller settings')
         config['runtime']['genmo_device']=str(d.device)
         actor,train,loading=local_call(d,lambda:load_actor(config))
         if any(not torch.equal(v.cpu(),source['actor'][k]) for k,v in actor.state_dict().items()):
@@ -136,7 +139,7 @@ def main():
         for objective in ('coordinate_dppo','joint_score_pg'):
             actor.load_state_dict(source['actor']);optimizer.load_state_dict(copy.deepcopy(base_adam))
             anchor.load_state_dict(rank_state['bc']);restore_local_rng(rank_state['rng'],generators)
-            controller=BCGradientController(**stage['bc_gradient'])
+            controller=BCGradientController(**scan_stage['bc_gradient'])
             torch.cuda.reset_peak_memory_stats();d.barrier();started=time.perf_counter()
             gradient,observation,before,local=prepare_full_batch_gradient(policy,optimizer,rows,targets,cache,manifest,controller,
                 distributed=d,anchor=anchor,objective=objective,minibatch_chains=16384,microbatch=128,

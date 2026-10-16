@@ -2,6 +2,7 @@
 # 一次全局16384链容量、128计算微批、单epoch；所有Actor参数共用一个AdamW学习率组。
 # 首次BC按真实全局梯度比例0.1初始化，后续保持有界平滑；最多8轮，严禁自动长训。
 # 采样、奖励、Critic初始化和Stage1/GMT资产不变，实验及优化合同独立绑定。
+# BC系数上限仅适配joint-score的损失量纲；首次按真实梯度比0.1定标，不能用旧系数上限压低BC贡献。
 diagnostics:
   record_original_threshold_crossings: true
   reward_substeps: true
@@ -73,7 +74,7 @@ stage10:
   bc_gradient:
     initial: 0.01
     max_change: 2.0
-    maximum: 10.0
+    maximum: 10000.0
     minimum: 0.0001
     mode: bounded_ratio
     smoothing: 0.9
@@ -173,7 +174,7 @@ stage10:
     calibration:
       status: exploratory_not_physically_validated
       scope: four_trainable_steps_only
-      optimization_sha256: cac9e1075495f5d8cf394370cb2af1d600fc8f490c0b4eec71975af17cb1a8d1
+      optimization_sha256: d473b2f3b46193eacb972b39929cff9288d40b87ad42f457e5a9f058aee53c4e
     chain_joint_mean: null
     chain_joint_p95: null
     chain_joint_max: null
