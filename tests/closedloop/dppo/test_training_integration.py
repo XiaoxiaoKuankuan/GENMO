@@ -392,6 +392,31 @@ def test_repeated_checkpoint_boundary_publishes_distinct_immutable_files(tmp_pat
     assert json.loads((tmp_path / 'latest.json').read_text())['path'] == published[-1]['path']
 
 
+def test_iteration_milestones_survive_periodic_retention_without_rejected_duplicates(tmp_path):
+    from gem.closedloop.dppo.run_control import iteration_checkpoint_reason
+    from gem.closedloop.dppo.training_checkpoint import AsyncCheckpointWriter,SCHEMA
+    storage={'checkpoint_interval_iterations':100}
+    assert iteration_checkpoint_reason(99,storage) is None
+    assert iteration_checkpoint_reason(0,storage) is None
+    assert iteration_checkpoint_reason(100,storage,rejected=True) is None
+    assert iteration_checkpoint_reason(100,storage,is_warmup=True) is None
+    writer=AsyncCheckpointWriter(tmp_path,keep_last=2)
+    saved=[]
+    try:
+        for iteration,reason in [(100,iteration_checkpoint_reason(100,storage)),
+                (101,'periodic'),(102,'periodic'),(200,iteration_checkpoint_reason(200,storage)),(201,'periodic')]:
+            payload=dict(schema=SCHEMA,actor={'weight':torch.tensor([float(iteration)])},actor_fingerprint='test',
+                state=dict(iteration=iteration,rollouts_completed=iteration,actor_updates=iteration,critic_updates=iteration))
+            writer.submit(payload,reason=reason)
+            saved.append(writer.poll(wait=True))
+    finally:writer.close()
+    assert (tmp_path/saved[0]['path']).is_file() and (tmp_path/saved[3]['path']).is_file()
+    assert not (tmp_path/saved[1]['path']).exists()
+    assert len(list((tmp_path/'checkpoints').glob('*.pt')))==4
+    assert torch.load(tmp_path/saved[0]['path'],weights_only=False)['state']['iteration']==100
+    assert iteration_checkpoint_reason(2000,storage)=='iteration_002000'
+
+
 def test_rollback_restores_nonempty_adam_and_rng_exactly():
     from gem.closedloop.dppo.gradient_merge import BCGradientController
     from gem.closedloop.dppo.rollback_audit import exact_state_digest

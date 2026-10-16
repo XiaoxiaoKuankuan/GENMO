@@ -49,8 +49,11 @@ def configuration(path,*,genmo_repo=None,gmt_repo=None):
     if set(control)!={'max_training_iterations'}:
         raise ValueError('Only max_training_iterations is supported; total walltime limits are removed')
     maximum=control['max_training_iterations']
-    if type(maximum)is not int or not 1<=maximum<=500 or maximum>s['limits']['accepted_iterations']:
-        raise ValueError('Cumulative PPO iteration limit must be 1..500 within the resource budget')
+    if type(maximum)is not int or maximum<1 or maximum>s['limits']['accepted_iterations']:
+        raise ValueError('Cumulative PPO iteration limit must be positive and within the resource budget')
+    checkpoint_interval=s['storage'].get('checkpoint_interval_iterations')
+    if checkpoint_interval is not None and (type(checkpoint_interval)is not int or checkpoint_interval<1):
+        raise ValueError('Checkpoint iteration interval must be a positive integer')
     if c['runtime'].get('evidence_level','full') not in ('full','training'):
         raise ValueError('runtime.evidence_level must be full or training')
     interval=c['runtime'].get('reward_audit_interval_controls',100)

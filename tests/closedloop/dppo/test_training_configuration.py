@@ -44,6 +44,23 @@ def test_main_scale_is_8192_nominal_chains_with_eight_combined_updates():
     assert (c['timing']['control_ticks'], c['timing']['physics_ticks']) == (12, 3)
 
 
+def test_server1_accepts_2000_cumulative_updates_but_not_a_new_budget_on_resume():
+    from gem.closedloop.dppo.run_control import validate_stopping_iteration
+    stage=configuration(CONFIG)['stage10']
+    assert stage['run_control']['max_training_iterations']==stage['limits']['accepted_iterations']==2000
+    assert stage['storage']['checkpoint_interval_iterations']==100
+    assert validate_stopping_iteration(2000,stage)==2000
+    with pytest.raises(ValueError):validate_stopping_iteration(2001,stage)
+
+
+@pytest.mark.parametrize('value',[0,-1,True,100.0])
+def test_invalid_iteration_checkpoint_interval_rejected(tmp_path,value):
+    config=yaml.safe_load(CONFIG.read_text())
+    config['stage10']['storage']['checkpoint_interval_iterations']=value
+    path=tmp_path/'invalid_save_interval.yaml';path.write_text(yaml.safe_dump(config))
+    with pytest.raises(ValueError,match='Checkpoint iteration interval'):configuration(path)
+
+
 @pytest.mark.parametrize('path', [CONFIG],
                          ids=lambda path: path.stem)
 def test_diagnostics_share_current_code_and_existing_asset_paths(path):

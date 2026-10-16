@@ -179,11 +179,11 @@ stage10:
       scope: four_trainable_steps_only
       evidence: null
   limits:
-    accepted_iterations: 500
-    control_steps: 150000000
-    generations: 3000000
-    optimizer_attempts: 6000
-    physics_steps: 600000000
+    accepted_iterations: 2000
+    control_steps: 1200000000
+    generations: 30000000
+    optimizer_attempts: 24000
+    physics_steps: 4800000000
   performance:
     bc_batch_forward: true
     journal_format: genmo.execution_journal.ndarray.v2
@@ -279,11 +279,13 @@ stage10:
         leg_joint_pos: 0.07936507936507936
     version: stage2.gmt8_reference_limits.v1
   run_control:
-    max_training_iterations: 500
+    max_training_iterations: 2000
   scale:
     actor_minibatch_chains: 2048
   seed: 42
   storage:
+    # 按已接受的Actor外层更新轮数保留100、200、...、2000，不受最近两份定时备份清理影响。
+    checkpoint_interval_iterations: 100
     checkpoint_interval_seconds: 1800
     checkpoint_keep_last: 2
     checkpoint_reserve_bytes: 4294967296
