@@ -1,8 +1,9 @@
-"""统一高学习率实验的CPU事务、score梯度和FP32舍入回归。
+"""统一高学习率实验的CPU/CUDA事务、score梯度和FP32舍入回归。
 
 小型可解析网络验证非空Adam每次回溯从同一起点执行、完全拒绝和异常恢复、随机
 状态与BC控制器一致、冻结参数排除、joint-score无指数以及有效链分母。合成KL
-只检查控制逻辑，绝不作为真实策略或物理安全验收证据。
+只检查控制逻辑，绝不作为真实策略或物理安全验收证据。CUDA用例必须在明确空闲
+GPU上显式执行，验证非空Adam字节等价及实际CUDA随机状态恢复；无设备时明确跳过。
 """
 import copy
 from types import SimpleNamespace
@@ -25,8 +26,10 @@ def kl(value):
         coordinate_kl={'p95':value}, chain_joint_kl={'mean':100*value,'p95':120*value,'max':150*value})
 
 
-def setup():
-    actor=torch.nn.Linear(2,1)
+def setup(device='cpu'):
+    if device=='cuda' and not torch.cuda.is_available():
+        pytest.skip('CUDA transaction regression requires an explicitly free GPU')
+    actor=torch.nn.Linear(2,1,device=device)
     optimizer=torch.optim.AdamW(actor.parameters(),lr=1e-6,weight_decay=0.)
     for p in actor.parameters():p.grad=torch.ones_like(p)
     optimizer.step()
@@ -41,16 +44,18 @@ def equal_state(a,b):
     return a==b
 
 
-def test_backtrack_nonempty_adam_matches_one_direct_step_and_counts_attempts():
-    actor,opt,controller=setup()
+@pytest.mark.parametrize('device',['cpu','cuda'])
+def test_backtrack_nonempty_adam_matches_one_direct_step_and_counts_attempts(device):
+    actor,opt,controller=setup(device)
     reference=copy.deepcopy(actor)
     expected=torch.optim.AdamW(reference.parameters(),lr=1e-6,weight_decay=0.)
     expected.load_state_dict(copy.deepcopy(opt.state_dict()))
     for p in reference.parameters():p.grad=torch.full_like(p,.3)
     expected.param_groups[0]['lr']=2.5e-7;expected.step()
-    attempts=[];rng=torch.get_rng_state().clone()
+    read_rng=torch.cuda.get_rng_state if device=='cuda' else torch.get_rng_state
+    attempts=[];rng=read_rng().clone()
     def evaluate():
-        torch.rand(4)
+        torch.rand(4,device=device)
         return kl(opt.param_groups[0]['lr'])
     result=backtracked_step(actor,opt,controller,evaluate=evaluate,
         limits={'mean_coordinate':3e-7},distributed=Collective(),max_attempts=4,
@@ -58,22 +63,24 @@ def test_backtrack_nonempty_adam_matches_one_direct_step_and_counts_attempts():
     assert result['accepted_lr']==2.5e-7 and len(attempts)==3
     assert equal_state(actor.state_dict(),reference.state_dict())
     assert equal_state(opt.state_dict(),expected.state_dict())
-    assert torch.equal(torch.get_rng_state(),rng)
+    assert torch.equal(read_rng(),rng)
     assert all(float(s['step'])==2 for s in opt.state.values())
 
 
-def test_all_rejected_restores_model_adam_bc_and_rng_without_refunding():
-    actor,opt,controller=setup()
+@pytest.mark.parametrize('device',['cpu','cuda'])
+def test_all_rejected_restores_model_adam_bc_and_rng_without_refunding(device):
+    actor,opt,controller=setup(device)
     before=copy.deepcopy((actor.state_dict(),opt.state_dict(),controller.state_dict()))
-    rng=torch.get_rng_state().clone();count=[]
+    read_rng=torch.cuda.get_rng_state if device=='cuda' else torch.get_rng_state
+    rng=read_rng().clone();count=[]
     def evaluate():
-        torch.rand(5)
+        torch.rand(5,device=device)
         return kl(.1)
     result=backtracked_step(actor,opt,controller,evaluate=evaluate,limits={'mean_coordinate':.001},
         distributed=Collective(),max_attempts=3,reserve_attempt=lambda:count.append(1))
     assert not result['accepted'] and len(count)==3
     assert equal_state(before,(actor.state_dict(),opt.state_dict(),controller.state_dict()))
-    assert torch.equal(rng,torch.get_rng_state())
+    assert torch.equal(rng,read_rng())
 
 
 def test_exception_restores_and_multiple_groups_or_frozen_parameter_rejected():
