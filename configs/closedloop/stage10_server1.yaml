@@ -366,10 +366,101 @@ timing:
   decision_ticks: 300
   deployment_profile:
     schema: genmo.deployment_delay_profile.v1
+    behavior_kernel_sha256: 9e2a93cf3626748eb6d8cc38d00a02600861148c4cc150bdaeae641a70bd7926
     target: single_robot_single_request
-    samples_seconds: []
     prefix_budget_seconds: 0.32
-    provenance: []
+    samples_seconds:
+    - 0.2527589660603553
+    - 0.2522150974255055
+    - 0.251840319018811
+    - 0.25247016409412026
+    - 0.2518382859416306
+    - 0.25280021224170923
+    - 0.25361284613609314
+    - 0.2517010229639709
+    - 0.24819279043003917
+    - 0.24730442743748426
+    - 0.24751211307011545
+    - 0.24916055239737034
+    - 0.24900236865505576
+    - 0.24866950791329145
+    - 0.2501728357747197
+    - 0.24769779341295362
+    - 0.25583038781769574
+    - 0.25531362323090434
+    - 0.2543915160931647
+    - 0.25923970411531627
+    - 0.2585282220970839
+    - 0.25847174786031246
+    - 0.2597156367264688
+    - 0.2561985601205379
+    - 0.2544458869379014
+    - 0.25434857537038624
+    - 0.2536886599846184
+    - 0.2562307908665389
+    - 0.256140393903479
+    - 0.25496159587055445
+    - 0.2569577640388161
+    - 0.2543957040179521
+    - 0.24914177739992738
+    - 0.2478199473116547
+    - 0.24817142798565328
+    - 0.24810491129755974
+    - 0.2480852697044611
+    - 0.247102142078802
+    - 0.24829011084511876
+    - 0.24843211518600583
+    - 0.25018528662621975
+    - 0.2502682819031179
+    - 0.2491545130033046
+    - 0.24959225696511567
+    - 0.2546697275247425
+    - 0.24933108175173402
+    - 0.25031046918593347
+    - 0.24983501620590687
+    - 0.2521658167243004
+    - 0.2518184743821621
+    - 0.25134250544942915
+    - 0.2521809972822666
+    - 0.25116324005648494
+    - 0.25115387700498104
+    - 0.25307198194786906
+    - 0.2545742893125862
+    - 0.2639116852078587
+    - 0.2646353323943913
+    - 0.2624937789514661
+    - 0.26276267878711224
+    - 0.26329259271733463
+    - 0.2623027618974447
+    - 0.2641008219216019
+    - 0.2622200446203351
+    provenance:
+    - path: /data1/user/liwei/GENMO_outputs/closedloop_stage10/stage2_server1_integration_20261016/deployment/deployment_calibration.json
+      sha256: 2674503f86d2eb2f13e0186edb081a9ba8906ccc11153c2eba092f9e43d1af26
+    measured_assets:
+      checkpoint: 51b522fbdeb0ec289e5ffc24e2fccca9888df90495f57f96714c1bb43c05f8e2
+      gmt_checkpoint: 79d1a99e54db42342927ec178329dab88772bafbc05df1b0dbe310bc6dd0b319
+      gmt_policy: 31a8f999b652d272246b803d4ffa708f3125de92c0d573411ef13fc3ee6ced20
+      kinematics: c08731704dccece11351b6fa877e30bac5ca2a8d363de30af7ca2ea1398f4029
+      stats: c7c0acb0e7a38797adb38ce0be41ee72820e34daed4e780275c64fb55c3e5326
+    numerical_execution:
+      schema: genmo.stage10.native_dense_execution.v1
+      precision: native_fp32
+      linear: stable_tf32x3
+      weight_gradient: direct_joint_gemm
+      attention: sdpa_math
+      attention_fallback: false
+      mode: compensated_tensorcore_fp32_storage_candidate
+      matmul_tf32: false
+      master_dtype: float32
+      layer_residual_dtype: float32
+      probability_dtype: float64
+      final_projection: float64_local
+      inference_requires_grad: false
+      condition_encoding: batched_unique_chains
+      network_rows: actual_batch_cfg_expanded
+      torch_version: 2.7.1+cu128
+      compiler: null
   latency_guard_s: 0.04
   lookahead_control_steps: 10
   min_prefix_frames: 12
