@@ -40,7 +40,21 @@ def short_name(path):
 
 
 def fixed_scan(scan,output):
-    rows=scan['rows'];colors={1:'#2864A0',3:'#D08A2E',10:'#A34B78'}
+    rows=scan.get('rows')
+    if rows is None:
+        # 可直接复核扫描器的原始report.json，不依赖手工制作的轻量中间表。
+        rows=[]
+        for candidate in scan['candidates']:
+            transaction=candidate['backtracking']
+            accepted=transaction['attempts'][-1]['diagnostics'] if transaction['accepted'] else None
+            parameters={} if accepted is None else accepted['parameters']['modules']['all']
+            rows.append(dict(name=candidate['name'],objective=candidate['objective'],
+                proposed_lr=candidate['actor_lr'],kl_multiplier=candidate['kl_multiplier'],
+                accepted_lr=transaction['accepted_lr'],attempts=transaction['attempt_count'],
+                final_joint_rms=np.nan if accepted is None else accepted['outputs']['final_joint_rms_mean'],
+                changed_fraction=parameters.get('changed_fraction',np.nan),
+                fp32_zero=parameters.get('fp32_rounded_to_zero_fraction',np.nan)))
+    colors={1:'#2864A0',3:'#D08A2E',10:'#A34B78'}
     fig,axes=plt.subplots(1,3,figsize=(16,4.9))
     labels={1:'原门槛',3:'3倍探索门槛',10:'10倍探索门槛'}
     proposals=sorted({r['proposed_lr'] for r in rows})
