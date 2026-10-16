@@ -1,12 +1,13 @@
-# 第二阶段正式配置（2026-10-15定稿）：100轮P1/P2及独立整曲复核后，选固定Actor学习率1e-7。
+# 第二阶段配置（2026-10-16随机状态修订）：沿用已选Actor学习率1e-7，采样修复须新运行。
 # Stage1 s595000初始化GENMO；GMT140500冻结，Isaac Lab提供真实50Hz控制/200Hz物理反馈。
 # 实际生成60帧；行为20步，独立Stage1副本冻结前16步，只更新末4步；最终仍检查全20步KL。
 # 音乐奖励关闭，音乐条件/CFG/Stage1 BC和配对动作activity gate保留；不添加新奖励。
-# 独立冻结预训练Critic先用48首训练音乐完整MC预热，绑定下方严格核验的初始化文件。
+# 独立冻结预训练Critic先用48首训练音乐完整MC预热；采样/初始化身份已变化，重新预热。
 # 每卡64环境、4秒世界采集，正常episode跨轮保留；评估与MC使用单个常驻N4世界。
-# 所有资产与部署测量均按固定SHA绑定。正式运行沿选中pilot恢复至累计500接受轮，
+# 所有资产与部署测量均按固定SHA绑定。随机运动起点必须使用新的运行目录，不能恢复旧P1，
 # 没有总墙钟时限；信号安全停止、checkpoint、资源/磁盘、参考截止与物理终止保护保留。
-# 具体证据及限定条件见docs/closedloop/stage10_formalization_20261014.rst。
+# 采样/初态验收见docs/closedloop/stage10_random_state_fix_20261016.rst；历史优化参数证据
+# 见docs/closedloop/stage10_formalization_20261014.rst，不将历史模型效果当作本修订的训练结果。
 diagnostics:
   record_original_threshold_crossings: true
   reward_substeps: true
@@ -115,14 +116,18 @@ stage10:
     heads: 4
     layers: 2
     learning_rate: 0.0001
-    preheat_artifact:
-      path: /data1/user/liwei/GENMO_outputs/closedloop_stage10/formalization_20261014/critic_initialization/critic_preheat.pt
-      sha256: f0763ea30f01aa2267a5ea9571aa97c63141be28a97c157e5e67c34573e7136e
+    preheat_artifact: null
     type: pretrained_temporal
-    # 完整MC已预热；不再额外执行旧8轮TD预热。
+    # 由完整MC门禁负责新运行预热；不额外执行旧8轮TD预热。
     warmup_rollouts: 0
   dataset:
-    random_start: false
+    # 普通Actor训练：跨环境共享、跨rank分片的时间bin；覆盖到曲段中后部。
+    random_start: true
+    sampling_contract: rank_shared_time_bins.v1
+    time_bin_seconds: 1.0
+    # 初始候选比例：20%站立开头启动，80%配对运动状态预热；不是已验证最优值。
+    standing_start_probability: 0.2
+    initialization: paired_motion_warmup.v1
     require_audio: true
     source_probabilities:
     - 0.2

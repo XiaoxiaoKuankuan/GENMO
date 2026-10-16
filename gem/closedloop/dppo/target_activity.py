@@ -1,4 +1,4 @@
-"""第九步奖励专用的配对示范活动度，不参与 Actor 或 Critic 的输入。
+"""配对示范活动度监督，以及显式训练reset所需的已核验完整运动。
 
 本模块从 ``stage9.bc_data_root`` 的清单读取当前音乐严格对应的 BUMI 动作，默认仅
 接受 train；第十步可以显式选择 val/test 作只读评价，并以 music_start_frame 同时
@@ -16,6 +16,10 @@
 核对；它不是 motion.pt 文件哈希。本模块另记录实际读取的 motion_file_sha256，明确
 区分来源声明核验和当前内容身份，不冒称重新打开了不在数据包中的原始动作文件。所有
 张量只在 CPU 读取；本模块不加载网络、不运行 FK/GPU，也不修改音乐采样器条件字段。
+
+默认接口只返回活动度目标，不把示范轨迹加入Actor/Critic条件。普通Actor训练可显式
+指定return_motion=True，额外获得完整qpos的独立副本，以初始化配对运动状态和真实
+控制预热；此通道拒绝val/test。调用方必须另行执行训练reset契约和后端实际状态核验。
 """
 from __future__ import annotations
 
@@ -168,7 +172,7 @@ class PairedActivityTarget:
 
 
 def load_paired_activity(data_root, sample, *, music_start_tick=600, window_s=0.5, dt=0.02,
-                         split="train", music_start_frame=0):
+                         split="train", music_start_frame=0, return_motion=False):
     """严格加载指定划分对应动作；旧调用默认 train，偏移仅作用于核验后的源数组。"""
     root = Path(data_root).expanduser().resolve()
     if not isinstance(sample, dict) or not isinstance(sample.get("row"), dict):
@@ -190,11 +194,12 @@ def load_paired_activity(data_root, sample, *, music_start_tick=600, window_s=0.
     if len(matches) != 1 or matches[0] != row or row.get("split") != split or row.get("fps") != 30:
         raise ValueError(f"paired activity row must exactly match its unique {split} manifest row")
     return _load_verified_pair(root, sample, manifest_path, manifest_sha, split=split,
-        music_start_tick=music_start_tick, window_s=window_s, dt=dt, music_start_frame=music_start_frame)
+        music_start_tick=music_start_tick, window_s=window_s, dt=dt, music_start_frame=music_start_frame,
+        return_motion=return_motion)
 
 
 def _load_verified_pair(root, sample, manifest_path, manifest_sha, *, split,
-                        music_start_tick=600, window_s=0.5, dt=0.02, music_start_frame=0):
+                        music_start_tick=600, window_s=0.5, dt=0.02, music_start_frame=0, return_motion=False):
     """共享文件核验核心；调用方必须已完整核验所属清单及唯一行，避免全量审计重复解析。"""
     folder, row = sample["dataset"], sample["row"]
     source_root = (root / folder).resolve()
@@ -265,5 +270,10 @@ def _load_verified_pair(root, sample, manifest_path, manifest_sha, *, split,
                   "dataset_info_sha256": hashlib.sha256(info_bytes).hexdigest(),
                   "music_start_frame": int(music_start_frame), "full_source_num_frames": len(qpos),
                   "music_offset_seconds": int(music_start_frame) / 30.}
-    return PairedActivityTarget(qpos[int(music_start_frame):, 7:], joint_names=payload["joint_names"], source=provenance,
-                                music_start_tick=music_start_tick, window_s=window_s, dt=dt)
+    target = PairedActivityTarget(qpos[int(music_start_frame):, 7:], joint_names=payload["joint_names"], source=provenance,
+                                 music_start_tick=music_start_tick, window_s=window_s, dt=dt)
+    if return_motion:
+        if split != 'train':
+            raise ValueError('Paired motion initialization is restricted to training data')
+        return target, np.array(qpos, dtype=np.float64, copy=True)
+    return target

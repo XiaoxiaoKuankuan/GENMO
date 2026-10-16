@@ -28,6 +28,16 @@ def configuration(path,*,genmo_repo=None,gmt_repo=None):
     if genmo_repo:c['paths']['genmo_repo']=str(Path(genmo_repo).resolve())
     if gmt_repo:c['paths']['gmt_repo']=str(Path(gmt_repo).resolve())
     s=c['stage10'];t=s['training'];scale=s['scale'];world=s['distributed']['world_size']
+    from .time_sampling import TIME_SAMPLING_CONTRACT, MOTION_RESET_CONTRACT
+    dataset = s['dataset']
+    if (dataset.get('random_start') is not True or dataset.get('sampling_contract') != TIME_SAMPLING_CONTRACT
+            or dataset.get('initialization') != MOTION_RESET_CONTRACT or dataset.get('split') != 'train'):
+        raise ValueError('Actor training requires explicit random time sampling and paired motion initialization')
+    bin_seconds, standing = dataset.get('time_bin_seconds'), dataset.get('standing_start_probability')
+    if (type(bin_seconds) not in (int, float) or not math.isfinite(bin_seconds) or bin_seconds <= 0
+            or not math.isclose(bin_seconds * 30, round(bin_seconds * 30), abs_tol=1e-9)
+            or type(standing) not in (int, float) or not math.isfinite(standing) or not 0 <= standing < 1):
+        raise ValueError('Explicit positive 30Hz time bins and standing probability in [0,1) required')
     control=s['run_control']
     if set(control)!={'max_training_iterations'}:
         raise ValueError('Only max_training_iterations is supported; total walltime limits are removed')
