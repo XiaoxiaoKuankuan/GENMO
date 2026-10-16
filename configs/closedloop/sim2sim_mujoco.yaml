@@ -30,14 +30,16 @@ paths:
   # 更换运行报告、轨迹、视频及音乐特征缓存的保存位置，改output_root。
   output_root: outputs/sim2sim
 
-# 按键1/2/3依列表顺序选择模型；更换Stage2只改对应checkpoint路径，name是显示名称。
+# 按键1为Stage1基础模型，按键2为当前测试模型；更换测试模型只替换第二项路径和名称。
+# 当前测试：服务器1 P1正式训练的第500轮，2026-10-16正常完成后固定导出。
 models:
   - name: Stage1-s595000
     checkpoint: *stage1_checkpoint
-  - name: Stage2-iteration147
-    checkpoint: outputs/sim2sim/models/actor_iteration147.pt
-  - name: Stage2-iteration246
-    checkpoint: outputs/sim2sim/models/actor_iteration246.pt
+  - name: Stage2-P1-iteration500
+    checkpoint: outputs/sim2sim/models/actor_iteration500.pt
+    # 需要复查旧模型时，替换上面这一行即可；旧模型不同时启用。
+    # checkpoint: outputs/sim2sim/models/actor_iteration147.pt
+    # checkpoint: outputs/sim2sim/models/actor_iteration246.pt
 
 # 默认音乐入口：可填selection/manifest、音频清单、单首WAV/MP3或音频文件夹。
 # 命令行--audio/--audio-dir/--playlist会覆盖此项；换日常播放目录也可只改这里。

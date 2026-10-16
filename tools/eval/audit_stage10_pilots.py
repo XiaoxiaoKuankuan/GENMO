@@ -4,6 +4,8 @@
 --export-run可经SSH标准输入在服务器执行，只读取run目录：核验评估JSON与最终
 checkpoint的SHA，逐控制步复算积分和四子步计数，提取活动度、奖励分项、末端K步
 策略和完整20步KL。它不导入Isaac/Actor、不占GPU、不修改训练源码或原始产物。
+同一run连续恢复时，按真实迭代顺序核验各会话及累计计数，再合并证据；每个
+final评估保留所属会话的实际控制步，不能把早期final错标为整个run的终点。
 --compare在本地按task身份配对，使用来源内音乐组成簇的bootstrap区间，
 不把同曲不同种子视为独立音乐；分别报告普通训练轮耗时和含评估/启动的总耗时。
 --run-evidence可传入两台服务器的只读证据JSON，使用其中已结束的启动日志核对总耗时；
@@ -121,29 +123,58 @@ def episode_metrics(episode, task):
         generated_reference_diagnostic=episode.get('generated_reference_diagnostic'))
 
 
+def completed_sessions(root):
+    """只合并同一run已正常结束且累计计数严格衔接的会话，缺失摘要不能被忽略。"""
+    directories = [p for p in (root / 'sessions').iterdir() if p.is_dir()]
+    if not directories or any(not (p / 'summary.json').is_file() for p in directories):
+        raise ValueError('存在未完整结束或缺少摘要的会话')
+    sessions = [(p / 'summary.json', load_json(p / 'summary.json')) for p in directories]
+    sessions.sort(key=lambda item: (item[1]['initial_state']['iteration'], item[1]['final_state']['iteration']))
+    counters = ('iteration', 'rollouts_completed', 'actor_updates', 'critic_updates', 'policy_version',
+        'optimizer_attempts', 'training_control_steps', 'training_physics_steps', 'training_upper_transitions')
+    for index, (path, summary) in enumerate(sessions):
+        if (summary['status'] != 'passed' or summary['exit_code'] != 0 or not summary['source_unchanged'] or
+                summary['session_id'] != path.parent.name or summary['run_id'] != sessions[0][1]['run_id']):
+            raise ValueError('会话身份、退出状态或源码冻结核验失败')
+        if index:
+            previous = sessions[index - 1][1]['final_state']
+            if any(previous[k] != summary['initial_state'][k] for k in counters):
+                raise ValueError('连续恢复的累计计数不衔接')
+            if summary['final_state']['iteration'] <= summary['initial_state']['iteration']:
+                raise ValueError('恢复会话没有新的接受轮次，不能重复拼接')
+    return sessions
+
+
 def export_run(root, *, physical_boundaries=False):
     root = Path(root).resolve(strict=True)
-    sessions = sorted((root / 'sessions').glob('*/summary.json'))
-    if len(sessions) != 1:
-        raise ValueError('本工具要求一个完整pilot会话，不能静默拼接多次恢复')
-    summary = load_json(sessions[0])
-    session = sessions[0].parent
+    sessions = completed_sessions(root)
+    summary_path, summary = sessions[-1]
+    initial = sessions[0][1]
+    session = summary_path.parent
     identity = load_json(root / 'training_identity.json')
     latest = load_json(root / 'latest.json')
     checkpoint = checked_path(root, latest['path'], latest['sha256'])
     if checkpoint.stat().st_size != latest['size_bytes']:
         raise ValueError('最终checkpoint字节数不一致')
+    if any(latest[key] != summary['checkpoint_shutdown'][key] for key in ('path', 'sha256', 'iteration')):
+        raise ValueError('最新checkpoint与最后会话的结束发布不一致')
     result = dict(schema='genmo.stage10.pilot_audit_export.v1', run_root=str(root),
-        run_id=summary['run_id'], summary_sha256=sha256(sessions[0]),
+        run_id=summary['run_id'], summary_sha256=sha256(summary_path),
         summary_status=summary['status'], exit_code=summary['exit_code'],
         source_unchanged=summary['source_unchanged'],
         world_shutdown={k: v for k, v in summary['world_shutdown'].items() if k != 'lane_journals'},
-        initial_state=scalars(summary['initial_state']), final_state=scalars(summary['final_state']),
-        imported_critic=summary['initial_state'].get('critic_initialization', {}).get('artifact'),
+        initial_state=scalars(initial['initial_state']), final_state=scalars(summary['final_state']),
+        imported_critic=initial['initial_state'].get('critic_initialization', {}).get('artifact'),
         latest=latest, checkpoint_sha_verified=True, identity=identity,
         resolved_config=(session / 'resolved_config.yaml').read_text(),
-        evaluations=[], training=[], source_files={})
-    for artifact in summary['evaluation_artifacts']:
+        evaluations=[], training=[], source_files={},
+        sessions=[dict(session_id=s['session_id'], summary_sha256=sha256(p), status=s['status'],
+            exit_code=s['exit_code'], source_unchanged=s['source_unchanged'],
+            initial_state=scalars(s['initial_state']), final_state=scalars(s['final_state']),
+            world_shutdown=s['world_shutdown'], evaluation_world_shutdown=s.get('evaluation_world_shutdown'))
+            for p, s in sessions])
+    artifacts = [(s, artifact) for _, s in sessions for artifact in s['evaluation_artifacts']]
+    for owner, artifact in artifacts:
         path = checked_path(root, artifact['path'], artifact['sha256'])
         data = load_json(path)
         tasks = {row['task_id']: row for row in data['plan']['tasks']}
@@ -162,7 +193,10 @@ def export_run(root, *, physical_boundaries=False):
             result.setdefault('physical_journal_evidence',[]).append(dict(label=artifact['label'],journals=evidence))
         if len(episodes) != len(tasks) or len({r['task_id'] for r in episodes}) != len(tasks):
             raise ValueError('评估任务缺失或重复')
+        measured_controls = (owner['final_state']['training_control_steps'] if artifact['label'].startswith('final_')
+            else owner['initial_state']['training_control_steps'] if artifact['label'] == 'initial' else None)
         result['evaluations'].append(dict(label=artifact['label'], iteration=artifact['iteration'],
+            session_id=owner['session_id'], training_control_steps=measured_controls,
             file=str(path), sha256=artifact['sha256'], plan_sha256=data['plan_sha256'],
             evaluation_identity=data['evaluation_identity'], actor_identity=data['actor_identity'],
             assertions=data['assertions'], aggregate=data['aggregate'],
@@ -170,7 +204,8 @@ def export_run(root, *, physical_boundaries=False):
             fixed_critic_diagnostic=data.get('fixed_critic_diagnostic'),
             fresh_critic_diagnostic=data.get('fresh_critic_diagnostic'),
             stage1_retention=data.get('stage1_retention'), wall_seconds=data['wall_seconds']))
-    for path in sorted((root / 'metrics').glob('*.jsonl')):
+    for _, owner in sessions:
+        path = root / 'metrics' / (owner['session_id'] + '.jsonl')
         result['source_files'][str(path)] = sha256(path)
         for line in path.open():
             row = json.loads(line)
@@ -179,6 +214,7 @@ def export_run(root, *, physical_boundaries=False):
             selected = {key: row.get(key) for key in ('label', 'mode', 'wall_seconds', 'actor_seconds',
                 'critic_seconds', 'full20_kl', 'overhead_since_previous_record', 'physics_paused_during_optimization')}
             selected['state'] = scalars(row['state'])
+            selected['session_id'] = owner['session_id']
             actor = row.get('actor') or {}
             selected['actor'] = {key: value for key, value in actor.items() if key not in ('steps', 'epoch_orders')}
             selected['actor']['steps'] = [{key: value for key, value in step.items()
@@ -190,8 +226,11 @@ def export_run(root, *, physical_boundaries=False):
             critic=row.get('critic') or {}
             selected['critic']={key:critic.get(key) for key in ('before','after','optimizer_steps','metric_scope')}
             result['training'].append(selected)
+    accepted = [r['state']['iteration'] for r in result['training'] if r['mode'] == 'dppo_bc']
+    if accepted != list(range(initial['initial_state']['iteration'] + 1, summary['final_state']['iteration'] + 1)):
+        raise ValueError('接受轮次存在缺失、重复或顺序错误')
     result['mc_calibrations']=[dict(file=str(path),sha256=sha256(path),report=load_json(path))
-        for path in sorted((session/'mc_calibration').glob('*.json'))]
+        for p, _ in sessions for path in sorted((p.parent/'mc_calibration').glob('*.json'))]
     return result
 
 
@@ -254,7 +293,8 @@ def summarize_run(data):
                 relative_percent=100*(b/a-1) if a else None)
     for row in accepted:
         kl = row['full20_kl']
-        if kl['covered_internal_transitions'] != 20 * kl['covered_chains']:
+        if (kl['covered_chains'] <= 0 or kl['covered_internal_transitions'] != 20 * kl['covered_chains'] or
+                [s['step'] for s in kl['per_denoising_step']] != list(range(20))):
             raise ValueError('最终KL没有覆盖完整20步')
     result = dict(run_id=data['run_id'], status=data['summary_status'], exit_code=data['exit_code'],
         source_unchanged=data['source_unchanged'], checkpoint_sha_verified=data['checkpoint_sha_verified'],
@@ -301,6 +341,8 @@ def evaluation_control_steps(data, evaluation):
     使用已导入预热的初态。其他标签只允许唯一的已记录接受轮对应，避免静默估算。
     """
     label=evaluation['label']
+    if evaluation.get('training_control_steps') is not None:
+        return int(evaluation['training_control_steps'])
     match=re.fullmatch(r'periodic_r\d+_c(\d+)_a\d+',label)
     if match:return int(match[1])
     if label=='initial':return int(data['initial_state']['training_control_steps'])
@@ -454,7 +496,8 @@ def plot_model_comparison(comparison,output):
         ax.set(title=title,ylabel=unit);ax.set_xticks(x,sources,rotation=15);ax.axhline(0,color='black',lw=.7);ax.legend(fontsize=8)
     for ax in axes.flat:ax.grid(axis='y',alpha=.2)
     count=models['Stage1']['overall']['tasks'];groups=models['Stage1']['independent_music_groups']
-    fig.suptitle(f'Stage1 / 固定学习率P1 / 自适应学习率P2：同条件完整物理测试\n{groups}个音乐组、{count}个任务；真实失败全部保留；参考边界另见JSON',fontsize=14)
+    title=comparison.get('plot_title','Stage1 / 固定学习率P1 / 自适应学习率P2：同条件完整物理测试')
+    fig.suptitle(f'{title}\n{groups}个音乐组、{count}个任务；真实失败全部保留；参考边界另见JSON',fontsize=14)
     fig.savefig(output/'complete_song_comparison.png',dpi=160);fig.savefig(output/'complete_song_comparison.pdf');plt.close(fig)
 
 
