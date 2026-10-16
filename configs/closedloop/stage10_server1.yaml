@@ -91,7 +91,9 @@ stage10:
     complete_mc:
       enabled: true
       epochs: 96
-      every_control_steps: 10000000
+      # 正式长训练按接受轮数复核；交互阈值高于总资源预算，避免同时按约50轮重复触发。
+      every_control_steps: 2000000000
+      every_actor_iterations: 200
       mix_candidates:
       - 0.0
       - 0.5
@@ -153,7 +155,9 @@ stage10:
   evaluation:
     envs_per_rank: 4
     episode_seconds: null
-    every_control_steps: 1500000
+    # 完整歌曲评估与每100轮模型对齐；每轮训练曲线仍正常记录。
+    every_control_steps: 2000000000
+    every_actor_iterations: 100
     persistent_world: true
     samples_per_source:
       AIST++: 2
