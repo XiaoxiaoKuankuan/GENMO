@@ -8,13 +8,15 @@ audit_files 才扫描全部音乐、音频与动作，逐条记录当前 motion.
 并行 rank 可通过 apply_audit 验证并原子绑定 root 广播的完整报告，不重复全量读文件；
 绑定同时更新逐样本payload身份、采样清单和目录身份，避免只同步汇总SHA。
 
-FullMusicSampler 先按 20/35/25/20 抽来源，再在来源完整清单中按独立 RNG 打乱、
-无放回抽样。随机起点以 30 Hz 源帧计数，返回完整音乐和 start_frame；环境必须对音乐
+FullMusicSampler 先按 20/35/25/20 抽来源；普通Actor训练把同rank环境绑定到共享
+时间bin池，由该池跨rank分片、无放回抽取音乐位置。独立使用时仍提供单环境清单
+打乱采样。随机起点以 30 Hz 源帧计数，返回完整音乐和 start_frame；环境必须对音乐
 与配对活动目标同步应用偏移，音乐末尾仍是真任务结束，minimum_remaining_seconds 仅为行政采集
 窗口。采样概率是任务概率，不伪称实际控制时间比例。record_execution 单独统计真实
 控制步、转移和已覆盖源时间区间，并保存 RNG、游标、当前任务进度与覆盖以供恢复。
 
-此采样器面向单环境顺序执行；开始下一任务后不能再回填旧任务的执行计数。val/test
+每个实例保存单环境的顺序执行计数，共享池单独保存一次；开始下一任务后不能再回填
+旧任务的执行计数。val/test
 可用同一只读加载接口创建评价任务，但训练入口必须显式选择 train；任何奖励标签、
 覆盖统计或数据来源字段都不会被加入 Actor 的十个条件字段。
 """
@@ -37,7 +39,7 @@ from gem.closedloop.evaluation_music import load_music_features, sha256_file
 
 SPLITS = ("train", "val", "test")
 CATALOG_VERSION = "genmo.closedloop.full_music_catalog.v1"
-SAMPLER_VERSION = "genmo.closedloop.full_music_sampler.v2"
+SAMPLER_VERSION = "genmo.closedloop.full_music_sampler.v3"
 
 
 def _integer(value, name, minimum=0):
@@ -301,7 +303,7 @@ class FullMusicSampler:
     """完整清单内来源概率采样；真实执行覆盖必须由调用方 record_execution 回填。"""
 
     def __init__(self, catalog, *, split="train", seed=42, minimum_remaining_seconds=30., random_start=True,
-                 source_probabilities=SOURCE_PROBABILITIES):
+                 source_probabilities=SOURCE_PROBABILITIES, time_pool=None):
         if not isinstance(catalog, FullMusicCatalog) or split not in SPLITS:
             raise ValueError("full sampler requires a complete catalog and explicit valid split")
         _integer(seed, "seed")
@@ -311,6 +313,10 @@ class FullMusicSampler:
         if probabilities.shape != (4,) or not np.isfinite(probabilities).all() or (probabilities <= 0).any() or not np.isclose(probabilities.sum(), 1., atol=1e-12, rtol=0):
             raise ValueError("four positive source probabilities must sum to one")
         self.catalog, self.split = catalog, split
+        if time_pool is not None and (split != 'train' or not random_start or time_pool.catalog is not catalog
+                or time_pool.identity['minimum_remaining_seconds'] != float(minimum_remaining_seconds)):
+            raise ValueError('Shared time sampling requires the same audited train catalog and random starts')
+        self.time_pool = time_pool
         self.minimum_remaining_seconds, self.random_start = float(minimum_remaining_seconds), random_start
         self.probabilities = probabilities.copy()
         self.rng = np.random.default_rng(int(seed))
@@ -323,21 +329,26 @@ class FullMusicSampler:
 
     def next_task(self):
         source = str(self.rng.choice(SOURCES, p=self.probabilities))
-        if self.cursors[source] == len(self.orders[source]):
-            self.orders[source] = self.rng.permutation(len(self.orders[source])).tolist()
-            self.cursors[source] = 0
-        index = self.orders[source][self.cursors[source]]
+        sampling = dict(initialization='standing', time_bin=None)
+        if self.time_pool is None:
+            if self.cursors[source] == len(self.orders[source]):
+                self.orders[source] = self.rng.permutation(len(self.orders[source])).tolist()
+                self.cursors[source] = 0
+            index = self.orders[source][self.cursors[source]]
+            self.cursors[source] += 1
+        else:
+            index, start, sampling = self.time_pool.draw(source)
         sample = copy.deepcopy(self.catalog.samples[self.split][source][index])
         music = self.catalog.load_music(sample)
         maximum = max(0, len(music) - max(2, math.ceil(self.minimum_remaining_seconds * 30)))
-        start = int(self.rng.integers(maximum + 1)) if self.random_start else 0
-        self.cursors[source] += 1
+        if self.time_pool is None:
+            start = int(self.rng.integers(maximum + 1)) if self.random_start else 0
         self.draw_count += 1
         self._counts[source]["tasks_drawn"] += 1
         self._drawn[source].add(sample["row"]["sample_id"])
         self._active = dict(task_index=self.draw_count - 1, dataset=source, sample_id=sample["row"]["sample_id"],
                             start_frame=start, control_steps=0, num_frames=len(music))
-        return dict(sample=sample, music=music, start_frame=start, music_start_frame=start,
+        return dict(sample=sample, music=music, start_frame=start, music_start_frame=start, sampling=sampling,
                     task_index=self.draw_count - 1, full_music_duration_seconds=len(music) / 30.,
                     music_duration_seconds=len(music) / 30., remaining_music_seconds=(len(music)-start) / 30.,
                     minimum_remaining_requirement_seconds=min(self.minimum_remaining_seconds, (len(music)-start) / 30.),
@@ -377,6 +388,7 @@ class FullMusicSampler:
 
     def state_dict(self):
         return copy.deepcopy(dict(version=SAMPLER_VERSION, catalog_identity=self.catalog.identity, split=self.split,
+            time_pool_identity=None if self.time_pool is None else self.time_pool.identity,
             minimum_remaining_seconds=self.minimum_remaining_seconds, random_start=self.random_start, source_probabilities=self.probabilities.tolist(),
             rng=self.rng.bit_generator.state, draw_count=self.draw_count, orders=self.orders, cursors=self.cursors,
             counts=self._counts, drawn={k: sorted(v) for k, v in self._drawn.items()}, intervals=self._intervals, active=self._active))
@@ -385,8 +397,9 @@ class FullMusicSampler:
         """仅复制轻量采样状态进行验证，不复制只读 catalog 或读取音乐数据。"""
         state = copy.deepcopy(state)
         expected = dict(version=SAMPLER_VERSION, catalog_identity=self.catalog.identity, split=self.split,
+            time_pool_identity=None if self.time_pool is None else self.time_pool.identity,
             minimum_remaining_seconds=self.minimum_remaining_seconds, random_start=self.random_start, source_probabilities=self.probabilities.tolist())
-        for key in ("version", "catalog_identity", "split", "minimum_remaining_seconds", "random_start", "source_probabilities"):
+        for key in expected:
             if state.get(key) != expected[key]:
                 raise ValueError(f"full sampler checkpoint identity differs: {key}")
         count = _integer(state["draw_count"], "draw_count")

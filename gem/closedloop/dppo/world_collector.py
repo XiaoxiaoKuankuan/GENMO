@@ -249,7 +249,8 @@ class WorldEnvironmentCollector(VectorEnvironmentCollector):
                     task=sampler.next_task()
                     if task['sample']['row']['split']!='train':raise ValueError('Validation sample in training world')
                     yield from env.reset_task_flow(task['sample'],task['music'],seed=env.config['stage9']['seed']+env.episode_count,
-                        phase='train',music_start_frame=task['music_start_frame'])
+                        phase='train',music_start_frame=task['music_start_frame'],
+                        **({'initialization': task['sampling']['initialization']} if 'sampling' in task else {}))
                     state.task=task
                     self.world_timing['completed_environment_resets']=self.world_timing.get('completed_environment_resets',0)+1
                 if env.rollout_window_reached:break
@@ -266,7 +267,7 @@ class WorldEnvironmentCollector(VectorEnvironmentCollector):
             task=state.task
             row.metadata.update(collector_env_slot=slot,training_task=dict(dataset=task['sample']['dataset'],
                 sample_id=task['sample']['row']['sample_id'],split='train',music_start_frame=task['music_start_frame'],
-                manifest_sha256=task['sample']['manifest_sha256']))
+                manifest_sha256=task['sample']['manifest_sha256'],sampling=copy.deepcopy(task.get('sampling'))))
             sampler.record_execution(task,row.executed_control_steps);rows.append(row);state.transitions+=1
             if row.terminated or row.truncated:state.task=None
         if rows and not rows[-1].terminated:

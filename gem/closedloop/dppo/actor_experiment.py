@@ -1,7 +1,7 @@
 """高学习率有限实验的配置身份和门禁，不借用旧低学习率的标定结论。
 
 实验绑定实际统一LR、全局链批量、epoch、目标、BC、Adam超参数、回溯及软硬KL。
-允许原门槛的1/3/10倍独立探索，但明确不代表物理质量通过，累计最多16轮；每轮
+允许原门槛的1/3/10倍独立探索，但明确不代表物理质量通过，累计最多20轮；每轮
 只有一次on-policy提交。该入口只授权服务器2有限实验，恢复仍严格比较完整运行
 身份。正式发布需要包含新优化合同的v2物理证据，旧v1证据不可为本实验背书。
 """
@@ -28,7 +28,7 @@ def optimization_binding(stage):
 
 def validate_experiment_configuration(config, maximum_steps):
     s = config['stage10']; t = s['training']; trial = s.get('actor_experiment', {})
-    if (trial.get('schema') != 'genmo.stage2.uniform_lr_experiment.v1'
+    if (trial.get('schema') != 'genmo.stage2.uniform_lr_experiment.v2'
             or trial.get('scope') != 'server2_finite_not_formal'
             or t['actor_objective'] not in ('coordinate_dppo','joint_score_pg')
             or t['ppo_epochs'] != 1 or maximum_steps != 1
@@ -37,7 +37,7 @@ def validate_experiment_configuration(config, maximum_steps):
             or t['actor_lr_control'] != 'fixed'
             or not 0 < t['actor_lr'] <= 1e-5):
         raise ValueError('Explicit uniform-LR single on-policy full-batch finite experiment required')
-    if s['run_control']['max_training_iterations'] > 16 or s['limits']['accepted_iterations'] > 16:
+    if s['run_control']['max_training_iterations'] > 20 or s['limits']['accepted_iterations'] > 20:
         raise ValueError('Exploratory high-LR experiments cannot automatically start long training')
     bt = t.get('optimizer_backtracking', {})
     if (set(bt) != {'max_attempts','factor'} or type(bt['max_attempts']) is not int

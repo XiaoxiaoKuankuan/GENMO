@@ -119,9 +119,7 @@ stage10:
     layers: 2
     learning_rate: 0.0001
     # 新奖励、新90维历史、新15+4+1行为下的独立完整MC；只导入Critic，不恢复旧Actor/轮数。
-    preheat_artifact:
-      path: /data1/user/liwei/GENMO_outputs/closedloop_stage10/stage2_capacity_20261015/critic_init_complete_mc.pt
-      sha256: e507e974719802afea3c563ee2a07da8912bd753cda98c6198e628b8d30e43a1
+    preheat_artifact: null
     type: asymmetric_tracking_temporal
     warmup_rollouts: 0
     history_learning_rate: 1.0e-05
@@ -135,7 +133,11 @@ stage10:
     - 1.5
     - 3.14
   dataset:
-    random_start: false
+    random_start: true
+    sampling_contract: rank_shared_time_bins.v1
+    time_bin_seconds: 1.0
+    standing_start_probability: 0.2
+    initialization: paired_motion_warmup.v1
     require_audio: true
     source_probabilities:
     - 0.2

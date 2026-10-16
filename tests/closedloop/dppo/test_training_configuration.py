@@ -67,6 +67,16 @@ def test_superseded_training_configuration_is_rejected(tmp_path, version):
         configuration(path)
 
 
+@pytest.mark.parametrize('key,value', [('random_start',False),('sampling_contract',None),
+    ('initialization','standing'),('standing_start_probability',1.),('time_bin_seconds',.015)])
+def test_training_rejects_incomplete_random_state_configuration(tmp_path,key,value):
+    c=yaml.safe_load(CONFIG.read_text())
+    c['stage10']['dataset'][key]=value
+    path=tmp_path/'incomplete_random_state.yaml';path.write_text(yaml.safe_dump(c))
+    with pytest.raises(ValueError,match='sampling|initialization|time bins'):
+        configuration(path)
+
+
 def test_cli_help_is_available_before_loading_gpu_or_isaac():
     result = subprocess.run([sys.executable, '-B', str(ROOT / 'tools/train_closedloop_stage10.py'), '--help'],
         capture_output=True, text=True, timeout=30, check=True)

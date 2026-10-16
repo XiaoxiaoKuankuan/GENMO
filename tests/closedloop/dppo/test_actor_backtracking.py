@@ -197,3 +197,22 @@ def test_real_policy_full_batch_one_step_and_no_old_chain_mutation(tmp_path,acto
         assert policy.assert_frozen_identity()['checked']
     finally:
         cache.close();dist.destroy_process_group()
+
+
+def test_random_start_twenty_round_contract_rejects_twenty_one(tmp_path):
+    from pathlib import Path
+    import yaml
+    from gem.closedloop.dppo.training_config import configuration
+    source = Path(__file__).resolve().parents[3] / 'configs/closedloop/stage2_random20_server2.yaml'
+    actual = configuration(source)['stage10']
+    assert actual['training']['actor_lr'] == 3e-7
+    assert actual['training']['actor_objective'] == 'joint_score_pg'
+    assert actual['derived']['maximum_actor_steps'] == 1
+    assert actual['critic']['preheat_artifact'] is None
+    assert actual['run_control']['max_training_iterations'] == 20
+    config = yaml.safe_load(source.read_text())
+    config['stage10']['run_control']['max_training_iterations'] = 21
+    config['stage10']['limits'].update(accepted_iterations=21, optimizer_attempts=189)
+    target = tmp_path / 'too_long.yaml'; target.write_text(yaml.safe_dump(config))
+    with pytest.raises(ValueError, match='long training'):
+        configuration(target)

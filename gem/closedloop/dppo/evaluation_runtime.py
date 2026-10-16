@@ -21,6 +21,7 @@ from .parallel_support import (begin_lease, collection_credit, finish_lease, cap
     restore_local_rng, local_call, root_call)
 from .run_management import GuardedStepJournal
 from gem.robots.bumi.kinematics import sha256_file
+from .tensorboard_metrics import evaluation_scalars
 
 def _new_phase(c, name, credits):
     path = c.session/'phases'/name/f'rank{c.distributed.rank:02d}'
@@ -296,7 +297,7 @@ def _evaluate_impl(c, label, *, write_report=True):
             paired_baseline=result.get('paired_baseline'), fixed_actor_drift=result['fixed_actor_drift'],
             fixed_critic_diagnostic=result['fixed_critic_diagnostic'],
             fresh_critic_diagnostic=result.get('fresh_critic_diagnostic'), wall_seconds=result['wall_seconds']),
-            prefix='validation')
+            prefix='validation',dashboard_metrics=evaluation_scalars(result,baseline) if c.writer is not None else None)
     root_call(c.distributed, publish_timing)
     return result
 

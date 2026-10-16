@@ -166,16 +166,20 @@ def test_subset_comparison_is_explicit_and_rechecks_origin_sha(tmp_path):
         compare_evaluations(initial, final, mode='periodic_subset')
 
 
-def test_nested_metrics_keep_tags_and_skip_missing_values(tmp_path):
+def test_audit_keeps_nested_metrics_but_tensorboard_requires_explicit_small_view(tmp_path):
     logged = []
-    writer = SimpleNamespace(add_scalar=lambda tag, value, step: logged.append((tag, value, step)), flush=lambda: None)
+    writer = SimpleNamespace(write=lambda scope, step, values: logged.append((scope, step, values)), flush=lambda: None)
     path = tmp_path/'metrics.jsonl'
-    values = log_metrics(writer, path, 100, {'reward': 2., 'source': {'Mine': {'loss': .3}}, 'missing': None}, prefix='val')
+    dashboard = {'Reward/total_per_second': 2.}
+    values = log_metrics(writer, path, 100, {'reward': 2., 'source': {'Mine': {'loss': .3}}, 'missing': None},
+                         prefix='val', dashboard_metrics=dashboard)
     assert values == {'val/reward': 2., 'val/source/Mine/loss': .3}
-    assert len(logged) == 2 and all(row[2] == 100 for row in logged)
+    assert logged == [('val', 100, dashboard)]
     assert json.loads(path.read_text())['metrics'] == values
     with pytest.raises(ValueError, match='Nonfinite'):
         log_metrics(writer, path, 101, {'bad': float('nan')})
+    with pytest.raises(ValueError, match='explicit compact'):
+        log_metrics(writer, path, 101, {'reward': 3.})
 
 
 def test_fixed_initial_chain_drift_needs_no_upper_transition(actor_factory, tmp_path):

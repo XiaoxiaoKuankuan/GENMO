@@ -24,6 +24,7 @@ import torch
 from .budget import atomic_json
 from .dual_collector import fixed_fragment_targets
 from .full_dataset import FullMusicSampler
+from .time_sampling import StratifiedTimePool, execution_coverage
 from .memory_execution import MemoryReceiveJournal,PrepaidMemoryBudget,DeviceRolloutBuffer
 from .parallel_support import begin_lease,finish_lease,collection_credit,local_call,root_call
 from .returns import normalize_advantages_global, shuffle_advantages_global
@@ -73,6 +74,11 @@ class InProcessTrainingRuntime:
     def __init__(self,c,service):
         self.c,self.service=c,service
         self.num_envs=c.config['runtime']['num_envs'];self.phase=None;self.strict=False
+        dataset = c.stage['dataset']
+        self.time_pool = StratifiedTimePool(c.catalog, seed=c.stage['seed'], rank=c.distributed.rank,
+            world_size=c.stage['distributed']['world_size'],
+            minimum_remaining_seconds=c.stage['ppo_rollout']['world_seconds'],
+            bin_seconds=dataset['time_bin_seconds'], standing_start_probability=dataset['standing_start_probability'])
         world_path=c.rank_dir/'bootstrap_world.sqlite'
         world=VectorWorldClient(_DirectTransport(service),MemoryReceiveJournal(world_path))
         self.collector=WorldEnvironmentCollector(c.policy,self._factory,world,num_envs=self.num_envs,
@@ -99,7 +105,8 @@ class InProcessTrainingRuntime:
         env.disk_guard=c.guard
         resource=SimpleNamespace(env=env,journal=None,sampler=FullMusicSampler(c.catalog,split='train',
             seed=config['stage9']['seed'],minimum_remaining_seconds=c.stage['ppo_rollout']['world_seconds'],
-            random_start=c.stage['dataset']['random_start'],source_probabilities=c.stage['dataset']['source_probabilities']))
+            random_start=c.stage['dataset']['random_start'],source_probabilities=c.stage['dataset']['source_probabilities'],
+            time_pool=self.time_pool))
         self._bind(slot,resource)
         def close():resource.journal.close();resource.env.budget.close();backend.client.close()
         resource.close=close
@@ -204,7 +211,10 @@ class InProcessTrainingRuntime:
                 if length and not continues:contiguous.append(length);length=0
                 length+=1;previous=row
             if length:contiguous.append(length)
-        report.update(through_targets_and_budget_seconds=time.perf_counter()-start,
+        samplers = [state.resource.sampler for state in self.collector.states if state is not None]
+        report.update(time_sampling=self.time_pool.summary(),
+            sampling_coverage=execution_coverage(c.catalog, samplers),
+            through_targets_and_budget_seconds=time.perf_counter()-start,
             physics_accounting=self.last_physics_accounting,
             actual_world_allocated_physics_steps=self.last_physics_accounting['allocated_physics_steps'],
             control_steps=sum(r.executed_control_steps for r in rows),physics_steps=sum(r.executed_physics_steps for r in rows),
@@ -230,8 +240,12 @@ class InProcessTrainingRuntime:
     def calibrate(self,*,warmup=2,samples=8):
         if self.num_envs!=1:raise ValueError('Deployment calibration requires one real robot request per rank')
         self._open('deployment_calibration',[warmup+samples],False)
-        result=local_call(self.c.distributed,lambda:self.collector.calibrate(
-            count_per_rank=warmup+samples,warmup=warmup,samples=samples))
+        saved_pool = self.time_pool.state_dict()
+        try:
+            result=local_call(self.c.distributed,lambda:self.collector.calibrate(
+                count_per_rank=warmup+samples,warmup=warmup,samples=samples))
+        finally:
+            self.time_pool.load_state_dict(saved_pool)
         used,_=self._finish()
         result.update(actual_resource_used=used,target='single_robot_single_request',
             actual_environment_count=1,numerical_execution=self.c.policy.numerical_execution,
@@ -249,19 +263,23 @@ class InProcessTrainingRuntime:
             records.append(dict(execution=dict(capture_execution_state(env),policy_version=env.policy_version,iteration=env.iteration),
                 sampler=state.resource.sampler.state_dict(),transitions=state.transitions,
                 ended_on_restore_episode=None if state.task is None else state.task['sample']['row']['sample_id']))
-        return dict(schema='genmo.stage10.inprocess_collector.boundary',states=records,
+        return dict(schema='genmo.stage10.inprocess_collector.time_sampling.v1',states=records,
+            time_pool=self.time_pool.state_dict(),
             generation_horizon_frames=self.c.stage['generation_horizon']['frames'],
             ppo_rollout=copy.deepcopy(self.c.stage['ppo_rollout']),
             environment_count=self.num_envs,restore='fresh_PhysX_episodes_no_partial_rollout_reuse')
 
     def restore_logical(self,saved):
-        if saved.get('schema')!='genmo.stage10.inprocess_collector.boundary' or saved['environment_count']!=self.num_envs:
+        if saved.get('schema')!='genmo.stage10.inprocess_collector.time_sampling.v1' or saved['environment_count']!=self.num_envs:
             raise ValueError('Old vector collector is not a 当前 complete restore')
+        if saved.get('time_pool', {}).get('identity') != self.time_pool.identity:
+            raise ValueError('Shared time sampling changed; create a new training identity')
         self.saved_logical=saved
 
     def apply_restore(self):
         if not hasattr(self,'saved_logical'):return
         from gem.closedloop.dppo.execution_state import restore_execution_state
+        self.time_pool.load_state_dict(self.saved_logical['time_pool'])
         for slot,record in enumerate(self.saved_logical['states']):
             if record is None:continue
             resource=self.collector._resource(slot).resource

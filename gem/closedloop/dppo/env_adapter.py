@@ -164,11 +164,12 @@ class UpperEnvironment:
         self.snapshot = snapshot
         return rows
 
-    def reset_task(self, sample, music, *, seed, phase='main', music_start_frame=0):
-        return run_synchronous(self, self.reset_task_flow(sample, music, seed=seed, phase=phase, music_start_frame=music_start_frame))
+    def reset_task(self, sample, music, *, seed, phase='main', music_start_frame=0, initialization='standing'):
+        return run_synchronous(self, self.reset_task_flow(sample, music, seed=seed, phase=phase,
+            music_start_frame=music_start_frame, initialization=initialization))
 
-    def reset_task_flow(self, sample, music, *, seed, phase='main', music_start_frame=0):
-        # 配对动作只进入奖励；在reset/物理推进前验证，绝不加入builder的Actor条件。
+    def reset_task_flow(self, sample, music, *, seed, phase='main', music_start_frame=0, initialization='standing'):
+        # 配对动作可用于显式训练reset；Actor只通过既有已承诺前缀接收参考。
         music = np.asarray(music)
         if music.ndim != 2 or music.shape[1] != 35 or len(music) < 2 or not np.isfinite(music).all():
             raise ValueError('Task music must contain finite full [T>=2,35] features')
@@ -178,17 +179,41 @@ class UpperEnvironment:
         if sample['row'].get('num_frames', len(music)) != len(music):
             raise ValueError('reset_task requires full music before applying music_start_frame')
         split = sample['row'].get('split', 'train')
+        from .time_sampling import MOTION_RESET_CONTRACT
+        motion_reset = initialization == MOTION_RESET_CONTRACT
+        if initialization not in ('standing', MOTION_RESET_CONTRACT):
+            raise ValueError('Unknown episode initialization contract')
+        if motion_reset and (phase != 'train' or split != 'train' or
+                self.config.get('stage10', {}).get('dataset', {}).get('initialization') != MOTION_RESET_CONTRACT or
+                self.config.get('runtime', {}).get('backend') != 'gpu_vectorized.v1'):
+            raise ValueError('Paired motion reset requires explicit GPU Actor-training initialization')
         reward_config = self.config['stage9'].get('reward', {})
+        extra = dict(return_motion=True) if motion_reset else {}
         target = load_paired_activity(self.config['stage9']['bc_data_root'], sample,
             music_start_tick=600, window_s=reward_config.get('activity', {}).get('window_s', .5),
-            dt=reward_config.get('dt', .02), split=split, music_start_frame=music_start_frame)
+            dt=reward_config.get('dt', .02), split=split, music_start_frame=music_start_frame, **extra)
+        episode_spec = dict(sample_id=sample['row']['sample_id'], dataset=sample['dataset'], mode=self.mode)
+        if motion_reset:
+            from .motion_initialization import make_motion_initialization
+            target, paired_qpos = target
+            episode_spec['initialization'] = make_motion_initialization(paired_qpos, target.source,
+                start_frame=int(music_start_frame), plan_frames=self.config['stage10']['generation_horizon']['frames'])
         self.full_music_num_frames, self.music_start_frame, self.data_split = len(music), int(music_start_frame), split
         self.phase, self.sample, self.music, self.seed = phase, sample, np.array(music[self.music_start_frame:], copy=True), int(seed)
         from gem.closedloop.online_conditions import FrozenMusicFeatures
         self.condition_music = FrozenMusicFeatures(self.music)
         self.episode_count += 1
         self.snapshot = yield from backend_operation('reset_episode', seed=self.seed,
-            episode_spec={'sample_id':sample['row']['sample_id'], 'dataset':sample['dataset'], 'mode':self.mode})
+            episode_spec=episode_spec)
+        self.initialization = initialization
+        if motion_reset:
+            applied = self.snapshot.get('reset_initialization') or {}
+            if (applied.get('contract') != MOTION_RESET_CONTRACT or
+                    applied.get('actual_state_verified') is not True or
+                    applied.get('music_start_frame') != self.music_start_frame or
+                    any(applied.get('source', {}).get(key) != target.source[key] for key in
+                        ('dataset', 'sample_id', 'motion_file_sha256'))):
+                raise ExecutionIntegrityError('Backend did not apply the requested paired motion initialization')
         last_warmup_row = None
         while self.snapshot['tick'] < 600 and not self.snapshot['done'] and not getattr(self,'rollout_window_reached',False):
             warmup_rows = yield from self.advance_flow(min(25, (600-self.snapshot['tick'])//12))
