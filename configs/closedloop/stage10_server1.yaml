@@ -5,7 +5,7 @@
 # 每卡128环境、4秒连续世界；Actor/Critic全局批量2048，Actor/KL微批128，BC每轮1024。
 # 完整MC为96首独立训练音乐×2种子，另用独立验证音乐与种子检验价值预测。
 # 必须重新进行服务器1部署标定、完整MC和四步KL物理标定；旧P1/服务器2证据不授权学习。
-# 500是显式预算上限，入口默认只跑2轮；本次不自动启动500轮长期训练。
+# 正式训练显式指定2000轮；入口默认仍只跑2轮，预热/标定通过后才允许正式Actor学习。
 # 沿用当前服务器1入口文件名，不代表仍采用旧Stage10算法；使用全新运行目录。
 diagnostics:
   record_original_threshold_crossings: true
@@ -118,7 +118,9 @@ stage10:
     heads: 4
     layers: 2
     learning_rate: 0.0001
-    preheat_artifact: null
+    preheat_artifact:
+      path: /data1/user/liwei/GENMO_outputs/closedloop_stage10/stage2_formal_2000_20261016/critic_init_mc96.pt
+      sha256: ba53a51cf1f35dbb4f02b3ceac704c35794d6744eb90e021dc79c03138efb9e7
     type: asymmetric_tracking_temporal
     warmup_rollouts: 0
     history_learning_rate: 1.0e-05
@@ -290,7 +292,8 @@ stage10:
     checkpoint_keep_last: 2
     checkpoint_reserve_bytes: 4294967296
     diagnostic_every_control_steps: 10000000
-    max_run_bytes: 536870912000
+    # 2000轮还会保留固定评估与MC检查点，为完整模型和物理证据预留1.5TiB。
+    max_run_bytes: 1649267441664
     min_free_bytes: 107374182400
     mode: daily
     retain_best_and_evaluated: true
