@@ -2,7 +2,7 @@
 ========================
 
 本说明对应 ``feature/bumi-music-closedloop``，参考 GENMO 提交
-``bb9121b216d6596ed93af9615e25b85880f661ed`` 和 GMT 提交
+``04a29ea74d5044e8bd1b2bc46f1d6fcf95a72fe5`` 和 GMT 提交
 ``3c05061c6ab09664c7f95fa50fa66c5a797a0a2c``。共享目录没有切换分支。
 配套 GMT 仍使用 ``feature/bumi-frozen-gmt-backend``。
 
@@ -63,3 +63,45 @@ TensorBoard继续一个任务一个run，八类分组。新增 ``Policy/p95_trai
 冻结Stage1前段及确定性末步经非空Adam更新后输出逐值不变；Critic新增列梯度非零。
 64次单请求部署生成最大0.26464秒，小于0.32秒前缀预算，主配置已绑定本机测量。
 证据根为 ``/data1/user/liwei/GENMO_outputs/closedloop_stage10/stage2_server1_integration_20261016``。
+
+与参考分支的具体差异
+------------------
+
+GMT生产源码与参考3c05061相同，额外修订仅在本分支的旧CPU测试夹具与记录。
+GENMO的DPPO生产目录有五个文件不同：KL发布器、严格概率审计、Critic历史模块命名、
+训练器中对应优化器参数名、精简TensorBoard。其余奖励、采集、随机初始化、去噪、
+四步更新与KL、完整MC实现均采用同一参考代码。
+独立MC复核工具另补齐真实初始化RNG及分来源误差，部署与数值验证工具保留服务器1入口。
+
+.. list-table:: 配置入口的用途
+   :header-rows: 1
+
+   * - 入口
+     - 更新目标/批量
+     - 运行边界
+   * - stage10_server1.yaml
+     - 四步coordinate DPPO，2 epoch，批量2048；候选LR5e-8
+     - 默认有限2轮，500仅预算上限；使用本机新MC/新KL证据
+   * - stage2_asymmetric_server2.yaml
+     - 相同四步coordinate DPPO，2 epoch，批量2048，LR5e-8
+     - 参考分支有限4轮实验配置，硬KL拒绝即退出
+   * - stage2_actor_lr_server2.yaml
+     - 高LR coordinate DPPO，1 epoch，批量16384；显式回溯
+     - 独立有限8轮实验；未成为本分支默认训练
+   * - stage2_random20_server2.yaml
+     - joint score策略梯度，1 epoch，批量16384，LR3e-7；显式回溯
+     - 独立有限20轮实验；并非本次指定的普通DPPO目标
+
+sim2sim继续只列Stage1与一个当前测试模型，动态按模型数量显示按键；保留本分支此项
+用户约定，没有采用参考分支固定显示三个模型的界面。历史报告/图表未作为新验收结果搬入。
+
+本轮最终范围
+------------
+
+按用户最新要求，本轮以代码同步和分支差异核对结束，不继续训练。
+额外启动的 ``critic_mc96`` 完整MC作业及其8卡GMT子进程已全部停止；只处理本轮作业。
+已产生的MC数据保留在上述证据根内，验证银行共3692个状态的来源标签和SHA检查已通过。
+MC预热、完整价值预测对照和四步KL物理标定没有完成，不能宣称训练效果提升。
+本轮没有进行Actor训练；配置中的KL状态仍为pending，后续正式学习必须先补齐新标定。
+结束前重新读取远端，已补入参考分支最新04a29ea的同轮重复评估Actor指纹一致性检查。
+本说明按远端最新提交比较；本地同名参考分支指针较旧，没有切换或重置它。

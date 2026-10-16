@@ -122,10 +122,15 @@ def review(run, destination):
     config['runtime']['genmo_device'] = 'cpu'
     actor, _, _ = load_actor(config)
     evaluations = []
+    fingerprints = {}
     for artifact in summary['evaluation_artifacts']:
         report_path = run/artifact['path']
         report = read_verified(report_path, artifact['sha256'])
         weights = verify_evaluation_weights(run, artifact, report, actor)
+        step, fingerprint = artifact['iteration'], weights['actor_fingerprint']
+        if step in fingerprints and fingerprints[step] != fingerprint:
+            raise ValueError('Repeated evaluation at one iteration changed actual Actor weights')
+        fingerprints[step] = fingerprint
         analysis = analyze(report_path, destination/artifact['label'],
             run/'evaluation_baseline.json' if artifact['iteration'] else None)
         if (analysis['aggregate']['valid_episode_count'] != 32
