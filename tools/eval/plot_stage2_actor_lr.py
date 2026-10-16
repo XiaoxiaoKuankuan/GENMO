@@ -190,12 +190,48 @@ def focused(paths,case,output):
         joint_limits_case=str(case),joint_limits_case_sha256=hashlib.sha256(case.read_bytes()).hexdigest()),indent=2))
 
 
+def critic_failure(paths,output):
+    """固定Critic的CPU预测与同一策略真实整曲MC对照，横轴不假设固定执行时长。"""
+    values=json.loads(paths[0].read_text());physical=json.loads(paths[1].read_text())
+    if (values['actor']!=physical['actor'] or values['source_report_sha256']!=physical['source']['sha256']
+            or values['execution']['device']!='cpu'):
+        raise ValueError('Critic/physics plot must identify the same Actor and physical trajectories')
+    keys=[('075',42),('075',1729),('138',42),('138',1729)]
+    fig,axes=plt.subplots(2,2,figsize=(12,8));summaries=[]
+    for ax,(sample,seed) in zip(axes.flat,keys):
+        task=next(t for t in physical['tasks'] if t['source']=='FineDance' and t['sample']==sample and t['seed']==seed)
+        rows=sorted((r for r in values['rows'] if r['task_id']==task['task_id']),key=lambda r:r['decision'])
+        x=np.asarray([r['decision'] for r in rows]);pred=np.asarray([r['prediction'] for r in rows]);target=np.asarray([r['target'] for r in rows])
+        if not len(rows) or not np.array_equal(x,np.arange(len(rows))):raise ValueError('Missing complete MC decisions')
+        error=pred-target
+        ax.plot(x,pred,color='#2469A0',label='固定预热Critic预测（CPU）',linewidth=1.3)
+        ax.plot(x,target,color='#C66E2B',label='该真实整曲的折扣MC回报',linewidth=1.3)
+        if task['physical_failure']:
+            ax.plot(x[-1],target[-1],'x',color='#B22F35',markersize=9,mew=2,label='真实物理失败')
+            ax.annotate(f'终止前预测 {pred[-1]:.1f}\n实际MC {target[-1]:.1f}',
+                (x[-1],pred[-1]),xytext=(-115,8),textcoords='offset points',fontsize=9,
+                arrowprops=dict(arrowstyle='->',color='#777777'))
+        ax.set_title(f'FineDance {sample} · seed {seed} · '+('yaw失败' if task['physical_failure'] else '音乐完成'))
+        ax.set_xlabel('上层决策编号（从0开始）');ax.set_ylabel('折扣累计回报');ax.grid(alpha=.2);ax.legend(fontsize=8)
+        summaries.append(dict(task_id=task['task_id'],sample=sample,seed=seed,end_reason=task['reason'],
+            states=len(rows),mse=float(np.mean(error**2)),bias=float(np.mean(error)),
+            final_prediction=float(pred[-1]),final_MC=float(target[-1]),
+            last20_decisions_bias=float(error[-20:].mean())))
+    fig.suptitle('初始Stage1闭环：预热Critic能否预见完整歌曲中的失败？',fontsize=15)
+    fig.text(.06,.015,'MC使用实际50Hz积分奖励、原时间折扣及真实终止；不自举，不再次乘dt。'
+        '\nCPU重算仅为补充诊断；跨设备1e-4精度检查未通过，不能冒充线上GPU原预测。单条MC不是无噪声价值真值。',fontsize=10)
+    fig.tight_layout(rect=(0,.07,1,.95));save(fig,output/'critic_failure_MC')
+    (output/'critic_MC_sources.json').write_text(json.dumps(dict(tasks=summaries,
+        sources=[dict(path=str(p),sha256=hashlib.sha256(p.read_bytes()).hexdigest()) for p in paths]),ensure_ascii=False,indent=2))
+
+
 def main():
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--scan',type=Path,required=True)
     parser.add_argument('--analysis',type=Path,nargs='*',default=[])
     parser.add_argument('--summary',type=Path,help='严格汇总后的轻量物理JSON，绘制全部候选矩阵')
     parser.add_argument('--focus',type=Path,nargs=2,help='Stage1和一个候选的analysis.json；读取已核验实际轨迹')
+    parser.add_argument('--critic',type=Path,nargs=2,help='CPU Critic诊断和同一物理analysis.json；绘制完整MC轨迹')
     parser.add_argument('--joint-limits-case',type=Path,help='真实采集的case.json，读取具名权威硬限位')
     parser.add_argument('--font',type=Path,help='无系统中文字体时明确指定Noto CJK字体文件')
     parser.add_argument('--output',type=Path,required=True)
@@ -209,6 +245,7 @@ def main():
     fixed_scan(json.loads(args.scan.read_text()),args.output)
     if args.analysis:physics(args.analysis,args.output)
     if args.summary:candidate_grid(json.loads(args.summary.read_text()),args.output)
+    if args.critic:critic_failure(args.critic,args.output)
     if args.focus:
         if not args.joint_limits_case:raise ValueError('Focused plot requires authoritative runtime joint limits')
         focused(args.focus,args.joint_limits_case,args.output)
