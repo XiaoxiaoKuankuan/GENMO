@@ -4,6 +4,8 @@
 12/16/20轮，而不是套用旧八轮队列或旧奖励的结果。全部输入保持只读；输出必须
 是新目录。核对完整训练状态、实际Adam次数、MC策略版本、每次评估的真实权重及
 32任务完整终止，再给出各轮奖励、时长、活动、八项Tracking和三域关节限位。
+补充同一任务共同执行时长内的配对回报，保留其中真实终止事件罚分，帮助识别
+早失败后少执行低分区间造成的每秒回报偏差；该辅助比较不替代完整歌曲成绩。
 
 最后checkpoint中的各rank采样器保留了真实执行时间区间。本工具跨rank求区间
 并集，按歌曲全长统计前/中/后三分之一覆盖，避免把抽到的起点或重复执行次数
@@ -21,13 +23,14 @@ import sys
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 import torch
+import numpy as np
 
 from gem.closedloop.dppo.budget import atomic_json
 from gem.closedloop.dppo.full_dataset import FullMusicCatalog, _merge_intervals, SOURCES
 from gem.closedloop.dppo.training_checkpoint import file_sha256
 from gem.closedloop.dppo.training_config import configuration
 from tools.eval.analyze_stage2_actor_lr_online import optimizer_rows, verify_evaluation_weights
-from tools.eval.analyze_stage2_actor_lr_physics import analyze
+from tools.eval.analyze_stage2_actor_lr_physics import analyze, music_cluster_interval
 from tools.eval.run_stage2_actor_lr_physics import verify_summary
 from tools.eval.summarize_stage2_actor_lr import read_verified
 from gem.closedloop.dppo.trainer import load_actor
@@ -83,6 +86,61 @@ def gpu_memory(path):
     return dict(per_gpu_GiB=peaks, sample_interval_seconds=5, includes_external_PhysX=True)
 
 
+def reward_timelines(episodes):
+    """已审计episode压缩为50Hz累计奖励；输入reward已经积分，不能再乘dt。"""
+    result = {}
+    for episode in episodes:
+        key = episode['task_id']
+        if key in result:
+            raise ValueError('Duplicate common-duration task identity')
+        rewards, events = [], []
+        for decision in episode['decisions']:
+            for control in decision['controls']:
+                if not np.isclose(control['dt_s'], .02, rtol=0, atol=1e-12):
+                    raise ValueError('Common-duration comparison requires real 50Hz controls')
+                rewards.append(control['reward'])
+            events.append((len(rewards), decision['zero_step_event_reward']))
+        increments = np.asarray([0., *rewards], dtype=np.float64)
+        for index, event in events:
+            increments[index] += event
+        cumulative = increments.cumsum()
+        if (not np.isfinite(cumulative).all()
+                or not np.isclose(cumulative[-1], episode['reward_sum'], rtol=1e-10, atol=1e-6)):
+            raise ValueError('Common-duration reward integral differs from audited episode')
+        result[key] = dict(identity=tuple(episode[k] for k in
+            ('dataset', 'sample_id', 'seed', 'music_start_frame', 'full_music_seconds')),
+            cumulative=cumulative)
+    return result
+
+
+def common_duration_pairing(initial, final):
+    """双方各取min(真实时长)，按音乐组求区间；零步任务显式排除而非填0。"""
+    if initial.keys() != final.keys():
+        raise ValueError('Common-duration task sets differ')
+    rows, excluded = [], []
+    for key, before in initial.items():
+        after = final[key]
+        if before['identity'] != after['identity']:
+            raise ValueError('Common-duration task identity differs')
+        count = min(len(before['cumulative']), len(after['cumulative'])) - 1
+        if not count:
+            excluded.append(key)
+            continue
+        seconds = count / 50
+        base, candidate = float(before['cumulative'][count]), float(after['cumulative'][count])
+        rows.append(dict(task_id=key, dataset=before['identity'][0], sample_id=before['identity'][1],
+            seed=before['identity'][2], common_controls=count, common_seconds=seconds,
+            initial_reward=base, final_reward=candidate,
+            delta=dict(common_prefix_reward_per_second=(candidate-base)/seconds)))
+    seconds = sum(r['common_seconds'] for r in rows)
+    return dict(scope='paired_common_elapsed_time_including_real_event_penalties_not_full_song_score',
+        pairs=rows, excluded_zero_common_controls=excluded,
+        music_group_interval=(music_cluster_interval(dict(pairs=rows), 'common_prefix_reward_per_second')
+                              if rows else None),
+        initial_all_time_weighted_rate=sum(r['initial_reward'] for r in rows)/seconds if seconds else None,
+        final_all_time_weighted_rate=sum(r['final_reward'] for r in rows)/seconds if seconds else None)
+
+
 def review(run, destination):
     evidence = verify_summary(run)
     summary = read_verified(evidence['summary'], evidence['summary_sha256'])
@@ -123,6 +181,7 @@ def review(run, destination):
     actor, _, _ = load_actor(config)
     evaluations = []
     fingerprints = {}
+    baseline_timeline = None
     for artifact in summary['evaluation_artifacts']:
         report_path = run/artifact['path']
         report = read_verified(report_path, artifact['sha256'])
@@ -136,12 +195,18 @@ def review(run, destination):
         if (analysis['aggregate']['valid_episode_count'] != 32
                 or analysis['aggregate']['administrative_truncation_count']):
             raise ValueError('Incomplete or administratively truncated physical comparison')
+        timeline = reward_timelines(report['episodes'])
+        if artifact['iteration'] == 0:
+            baseline_timeline = timeline
+        if baseline_timeline is None:
+            raise ValueError('Baseline must be audited before candidate comparisons')
         evaluations.append(dict(iteration=artifact['iteration'], label=artifact['label'], weights=weights,
             report=dict(path=str(report_path), sha256=artifact['sha256']),
             aggregate=analysis['aggregate'], paired=analysis.get('paired'), by_source=analysis['by_source'],
             tracking_eight=analysis['tracking_eight_control_mean'], yaw=analysis['yaw']['overall'],
             tasks=[{k:v for k,v in t.items() if k!='generated'} for t in analysis['tasks']],
             retention={k:v for k,v in analysis['retention'].items() if k!='samples'},
+            common_duration_paired=common_duration_pairing(baseline_timeline, timeline),
             wall_seconds=analysis['evaluation_seconds']))
     del actor
     pointer = json.loads((run/'latest.json').read_text())
