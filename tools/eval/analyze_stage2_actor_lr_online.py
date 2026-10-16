@@ -28,7 +28,7 @@ from gem.closedloop.dppo.evaluation import _model_fingerprint
 from gem.closedloop.dppo.trainer import load_actor
 from gem.closedloop.dppo.training_checkpoint import file_sha256, SCHEMA
 from gem.closedloop.dppo.training_config import configuration
-from tools.eval.analyze_stage2_actor_lr_physics import analyze
+from tools.eval.analyze_stage2_actor_lr_physics import analyze, mc_predictions
 from tools.eval.run_stage2_actor_lr_online import verify_online
 from tools.eval.summarize_stage2_actor_lr import gpu_peak, read_verified
 
@@ -103,6 +103,10 @@ def analyze_job(job, output):
     evaluations = []
     first_by_iteration = {}
     baseline = run / 'evaluation_baseline.json'
+    initial_report = read_verified(baseline, evidence['report_sha256'])
+    initial_mc = mc_predictions(baseline, initial_report['episodes'], initial_report)
+    if not initial_mc['available']:
+        raise ValueError('Initialized online Critic needs its actual initial GPU predictions')
     for artifact in summary['evaluation_artifacts']:
         report_path = run / artifact['path']
         report = read_verified(report_path, artifact['sha256'])
@@ -142,6 +146,7 @@ def analyze_job(job, output):
         rejected_optimizer_attempts=attempts-len(accepted),
         process_wall_seconds=job['elapsed_seconds'], gpu=gpu_peak(run.parent / 'gpu.csv'),
         initial_state=summary['initial_state'], final_state=summary['final_state'],
+        initial_gpu_mc={k: v for k, v in initial_mc.items() if k != 'rows'},
         current_policy_mc=evidence['mc'], metrics_source=dict(path=str(metrics), sha256=file_sha256(metrics)))
     atomic_json(output / 'online_analysis.json', value)
     return value
@@ -158,6 +163,7 @@ def main():
     result = dict(schema='genmo.stage2.uniform_lr_online_review.v1', status='waiting', cases=[],
         queue=str(args.queue), implementation_sha256=file_sha256(__file__),
         scope='eight_step_finite_online_evidence_not_formal_training_promotion')
+    atomic_json(args.output / 'review.json', result)
     completed = set()
     try:
         while True:
