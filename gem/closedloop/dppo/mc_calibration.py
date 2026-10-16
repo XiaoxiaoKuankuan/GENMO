@@ -86,6 +86,7 @@ def matched_reset_mc_plan(plan, stage):
     import numpy as np
     plan=copy.deepcopy(plan);dataset=stage['dataset']
     plan['mc_start_distribution']='match_training_reset.v1'
+    plan['start_mode']='training_reset_mixture'
     for task in plan['tasks']:
         rng=np.random.default_rng(stable_noise_seed(stage['seed']+937,task['task_id']))
         frames=int(task['full_music_frames'])

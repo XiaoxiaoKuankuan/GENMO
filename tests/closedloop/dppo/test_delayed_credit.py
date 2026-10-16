@@ -117,6 +117,7 @@ def test_mc_reset_plan_is_independent_reproducible_and_complete():
     plan=dict(tasks=tasks,episode_seconds=None);before=copy.deepcopy(plan)
     a=matched_reset_mc_plan(plan,c['stage10']);b=matched_reset_mc_plan(plan,c['stage10'])
     assert a==b and plan==before and a['episode_seconds'] is None
+    assert a['start_mode']=='training_reset_mixture'
     counts=sum(t['initialization']=='standing' for t in a['tasks'])
     assert 20<counts<60
     assert any(t['music_start_frame']>2000 for t in a['tasks'])
