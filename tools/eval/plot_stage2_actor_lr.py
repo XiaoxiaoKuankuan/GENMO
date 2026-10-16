@@ -96,6 +96,50 @@ def physics(paths,output):
     fig.tight_layout();save(fig,output/'physical_comparison')
 
 
+def candidate_grid(summary, output):
+    """全部30配置的同条件物理结果；相同权重别名如实共用一次执行。"""
+    cases={r['name']:r for r in summary['cases']}
+    baseline=cases['stage1']['aggregate']
+    proposals=sorted({r['proposed_lr'] for r in summary['candidates']})
+    scales=[1,3,10]
+    metrics=[('完成数相对Stage1的变化',lambda a:a['music_completion_count']-baseline['music_completion_count'],False),
+             ('总回报相对Stage1的变化(%)',lambda a:100*(a['reward_sum']/baseline['reward_sum']-1),False),
+             ('消费参考硬越界峰值增量(rad)',lambda a:a['joint_limits']['consumed_reference']['hard']['max_excess_rad']-
+              baseline['joint_limits']['consumed_reference']['hard']['max_excess_rad'],True),
+             ('实际机器人硬越界峰值增量(rad)',lambda a:a['joint_limits']['actual']['hard']['max_excess_rad']-
+              baseline['joint_limits']['actual']['hard']['max_excess_rad'],True)]
+    fig,axes=plt.subplots(2,4,figsize=(20,8))
+    for column,(title,metric,reversed_color) in enumerate(metrics):
+        matrices=[]
+        for objective in ('coordinate_dppo','joint_score_pg'):
+            values=np.full((3,5),np.nan)
+            for c in summary['candidates']:
+                if c['objective']==objective and c['physics_name'] in cases:
+                    values[scales.index(c['kl_multiplier']),proposals.index(c['proposed_lr'])]=metric(cases[c['physics_name']]['aggregate'])
+            matrices.append(values)
+        bound=max(float(np.nanmax(np.abs(v))) if np.isfinite(v).any() else 0. for v in matrices)
+        bound=max(bound,1e-8)
+        for row,values in enumerate(matrices):
+            ax=axes[row,column]
+            im=ax.imshow(values,cmap='RdBu_r' if reversed_color else 'RdBu',vmin=-bound,vmax=bound,aspect='auto')
+            for y in range(3):
+                for x in range(5):
+                    v=values[y,x]
+                    label='待完成' if not np.isfinite(v) else f'{v:+.0f}' if column==0 else f'{v:+.2f}' if column==1 else f'{v:+.4f}'
+                    ax.text(x,y,label,ha='center',va='center',fontsize=10,
+                            color='white' if np.isfinite(v) and abs(v)>.55*bound else '#222222')
+            ax.set_xticks(range(5),['5e-8','3e-7','1e-6','3e-6','1e-5'])
+            ax.set_yticks(range(3),['原KL','3倍KL','10倍KL'])
+            ax.set_xlabel('提议统一Actor学习率（实际接受值见回溯图）',fontsize=9)
+            ax.set_title(('A 坐标DPPO' if row==0 else 'B joint-score')+' · '+title,fontsize=11)
+            fig.colorbar(im,ax=ax,fraction=.04,pad=.025)
+    fig.suptitle(f"全部候选的真实配对物理结果：Stage1完成{baseline['music_completion_count']}/32，"
+                 f"总回报{baseline['reward_sum']:.2f}；每组16首音乐×2seed",fontsize=15)
+    fig.text(.04,.01,'蓝色表示该项相对改善，红色表示退化；各项必须同时判断。3倍/10倍KL只属探索，'
+             '同权重别名共用实测结果。\n状态：'+summary['status']+'；选优使用同一音乐组，不构成独立确认或正式训练许可。',fontsize=10)
+    fig.tight_layout(rect=(0,.07,1,.95));save(fig,output/'physical_candidate_grid')
+
+
 def focused(paths,case,output):
     if len(paths)!=2:raise ValueError('Focused trajectory plot compares Stage1 and exactly one candidate')
     limits=json.loads(case.read_text())['joint_limits']
@@ -150,6 +194,7 @@ def main():
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--scan',type=Path,required=True)
     parser.add_argument('--analysis',type=Path,nargs='*',default=[])
+    parser.add_argument('--summary',type=Path,help='严格汇总后的轻量物理JSON，绘制全部候选矩阵')
     parser.add_argument('--focus',type=Path,nargs=2,help='Stage1和一个候选的analysis.json；读取已核验实际轨迹')
     parser.add_argument('--joint-limits-case',type=Path,help='真实采集的case.json，读取具名权威硬限位')
     parser.add_argument('--font',type=Path,help='无系统中文字体时明确指定Noto CJK字体文件')
@@ -163,6 +208,7 @@ def main():
                          'svg.fonttype':'path','figure.facecolor':'white'})
     fixed_scan(json.loads(args.scan.read_text()),args.output)
     if args.analysis:physics(args.analysis,args.output)
+    if args.summary:candidate_grid(json.loads(args.summary.read_text()),args.output)
     if args.focus:
         if not args.joint_limits_case:raise ValueError('Focused plot requires authoritative runtime joint limits')
         focused(args.focus,args.joint_limits_case,args.output)
