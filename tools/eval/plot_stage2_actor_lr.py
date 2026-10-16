@@ -139,7 +139,7 @@ def candidate_grid(summary, output):
             for y in range(3):
                 for x in range(5):
                     v=values[y,x]
-                    label='待完成' if not np.isfinite(v) else f'{v:+.0f}' if column==0 else f'{v:+.2f}' if column==1 else f'{v:+.4f}'
+                    label='未完成' if not np.isfinite(v) else f'{v:+.0f}' if column==0 else f'{v:+.2f}' if column==1 else f'{v:+.4f}'
                     ax.text(x,y,label,ha='center',va='center',fontsize=10,
                             color='white' if np.isfinite(v) and abs(v)>.55*bound else '#222222')
             ax.set_xticks(range(5),['5e-8','3e-7','1e-6','3e-6','1e-5'])
