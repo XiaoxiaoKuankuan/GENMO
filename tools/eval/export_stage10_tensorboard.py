@@ -4,7 +4,8 @@
 输入为原运行目录；按完整 session 的初始/最终迭代串联普通 Actor 更新，读取原始
 metrics JSONL，而不是从几百个旧 TensorBoard 标签猜测分母。固定验证只接受 session
 summary 登记且 SHA 一致的报告，使用同一 Stage1 基线重算每秒回报、原始跟踪误差、
-活动度和音乐组配对区间；独立完整 MC 另作 critic_mc run。不会加载 checkpoint、
+活动度和音乐组配对区间；完整 MC、训练和验证统一写入同一个任务 run，训练与
+验证总回报使用不同标签以保留统计语义。不会加载 checkpoint、
 启动 GPU/Isaac、修改原日志或更改模型，输出必须是不存在的独立目录。
 发布前校验迭代连续性、任务身份和有限白名单，再输出指标定义、精简事件、来源
 摘要和趋势小结。失败目录保留为 partial 名称，不能冒充已完成可交付视图。
@@ -22,7 +23,7 @@ import sys
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 from gem.closedloop.dppo.tensorboard_metrics import (
-    DashboardWriter, DEFINITIONS, VERSION, evaluation_scalars, evaluation_view, mc_scalars, training_scalars,
+    DashboardWriter, EVENT_TAG_OVERRIDES, VERSION, evaluation_scalars, evaluation_view, mc_scalars, training_scalars,
 )
 
 
@@ -120,8 +121,9 @@ def export_run(run, output):
             raise ValueError('Duplicate evaluation iteration would hide a model identity')
         evaluations.sort(key=lambda row: row['iteration'])
         best = max(evaluations, key=lambda row: row['scalars']['Reward/total_per_second'])
-        used_tags = {tag for _, tag in scalar_series}
+        used_tags = {EVENT_TAG_OVERRIDES.get((scope, tag), tag) for scope, tag in scalar_series}
         summary = dict(schema=VERSION+'.export', status='passed', source_run=str(run),
+            tensorboard_layout='single_run', tensorboard_runs=1,
             accepted_iterations=len(seen), fixed_evaluations=len(evaluations),
             old_scalar_tags=len(old_tags), compact_scalar_tags=len(used_tags),
             scalar_series=len(scalar_series), groups=sorted({tag.split('/')[0] for tag in used_tags}),

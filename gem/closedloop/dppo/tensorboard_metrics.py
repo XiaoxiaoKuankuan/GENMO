@@ -1,9 +1,10 @@
-"""第二阶段训练效果的精简 TensorBoard 指标与独立训练/验证曲线。
+"""第二阶段训练效果的精简 TensorBoard：一个训练任务对应一个 run。
 
 本模块把真实采集、固定物理验证、优化器和完整 MC 报告转换成固定白名单指标。
 只保留奖励、原始跟踪误差、动作保留、终止、策略、损失、采样份额和吞吐八组；
 禁止递归展开预算、会话 UUID、网络结构、逐 minibatch 或逐去噪步内部字段。
-训练与固定验证使用独立 run、共同的累计接受迭代横轴。验证回报按来源等权，
+训练、固定验证和完整 MC 共用一个事件目录及累计接受迭代横轴；训练与验证的
+同名总回报在写入时分别命名，避免混成一条曲线。验证回报按来源等权，
 配对区间按来源内音乐组重采样，两个种子不充当两首独立音乐。RMS 从平方误差
 重算，身体项沿用 GMT 的水平位置/yaw 对齐定义，根部项保留世界坐标漂移。
 所有聚合只读已有报告，不改变奖励、随机生成器、模型、优化器或仿真；缺测省略，
@@ -21,7 +22,7 @@ import numpy as np
 
 
 SOURCES = ('AIOZ-GDANCE', 'AIST++', 'FineDance', 'Mine')
-VERSION = 'genmo.stage10.compact_tensorboard.v1'
+VERSION = 'genmo.stage10.compact_tensorboard.v2'
 DEFINITIONS = {
     'Reward/total_per_second': '分/秒，越高越好。训练为各来源积分回报/实际采集秒数再四来源等权；验证为各任务每秒回报先来源内平均、再来源等权。',
     'Reward/episode_return': '分，固定验证任务积分回报的四来源等权平均；执行更久也会增加，必须一起看每秒回报和终止。',
@@ -72,6 +73,18 @@ DEFINITIONS = {
 for _source in SOURCES:
     DEFINITIONS[f'Sampling/time_share_{_source}'] = '本轮普通 Actor 实际采集秒数中该来源的占比；不是选曲概率，也不是唯一时间覆盖率。'
 
+SCOPES = ('training', 'validation', 'critic_mc')
+EVENT_TAG_OVERRIDES = {
+    ('training', 'Reward/total_per_second'): 'Reward/train_total_per_second',
+    ('validation', 'Reward/total_per_second'): 'Reward/validation_total_per_second',
+}
+EVENT_DEFINITIONS = {tag: description for tag, description in DEFINITIONS.items()
+                     if tag != 'Reward/total_per_second'}
+EVENT_DEFINITIONS.update({
+    'Reward/train_total_per_second': '分/秒，普通训练采集各来源积分回报/实际采集秒数再来源等权；任务不断变化，只作训练监视。',
+    'Reward/validation_total_per_second': '分/秒，固定验证各任务每秒回报先来源内平均再来源等权；优先用此曲线判断训练效果。',
+})
+
 ERROR_TAGS = {
     'anchor_position_error_sq_m2': 'root_position_rms_m',
     'anchor_orientation_error_sq_rad2': 'root_orientation_rms_rad',
@@ -95,6 +108,17 @@ def checked_scalars(values):
         if isinstance(value, (bool, str)) or not math.isfinite(float(value)):
             raise ValueError(f'Nonfinite or nonnumeric compact metric: {tag}')
         result[tag] = float(value)
+    return result
+
+
+def dashboard_scalars(scope, values):
+    """只区分训练和验证的同名总回报；其余标签沿用八个功能分组，不创建子 run。"""
+    if scope not in SCOPES:
+        raise ValueError('Invalid compact curve scope')
+    result = {EVENT_TAG_OVERRIDES.get((scope, tag), tag): value
+              for tag, value in checked_scalars(values).items()}
+    if not result.keys() <= EVENT_DEFINITIONS.keys():
+        raise ValueError('Metric has no single-run event definition')
     return result
 
 
@@ -286,35 +310,39 @@ def mc_scalars(report):
 
 
 class DashboardWriter:
-    """三个明确的 run 共用有限标签：training、validation、critic_mc；不递归扫描历史。"""
+    """全部指标写入一个事件目录；scope 只保留在审计记录中，不再创建三个 run。"""
     def __init__(self, directory):
         self.directory = Path(directory)
         self.directory.mkdir(parents=True, exist_ok=True)
-        self.writers = {}
+        self.writer = None
         (self.directory/'metric_definitions.json').write_text(json.dumps(
-            dict(schema=VERSION, x_axis='accepted_iteration', metrics=DEFINITIONS),
+            dict(schema=VERSION, layout='single_run', x_axis='accepted_iteration',
+                 metrics=EVENT_DEFINITIONS,
+                 source_tag_overrides=[dict(scope=scope, source_tag=tag, event_tag=event_tag)
+                                       for (scope, tag), event_tag in EVENT_TAG_OVERRIDES.items()]),
             ensure_ascii=False, indent=2)+'\n')
 
     def write(self, scope, step, values, *, walltime=None):
-        if scope not in ('training', 'validation', 'critic_mc') or type(step) is not int or step < 0:
+        if scope not in SCOPES or type(step) is not int or step < 0:
             raise ValueError('Invalid compact curve scope or accepted iteration')
         values = checked_scalars(values)
         if not values:
             return
-        if scope not in self.writers:
+        event_values = dashboard_scalars(scope, values)
+        if self.writer is None:
             from torch.utils.tensorboard import SummaryWriter
-            self.writers[scope] = SummaryWriter(str(self.directory/scope), max_queue=128, flush_secs=30)
+            self.writer = SummaryWriter(str(self.directory), max_queue=128, flush_secs=30)
         timestamp = time.time() if walltime is None else walltime
-        for tag, value in values.items():
-            self.writers[scope].add_scalar(tag, value, step, walltime=timestamp)
+        for tag, value in event_values.items():
+            self.writer.add_scalar(tag, value, step, walltime=timestamp)
         with (self.directory/'scalars.jsonl').open('a', encoding='utf-8') as stream:
             stream.write(json.dumps(dict(scope=scope, step=step, wall_time=timestamp, scalars=values),
                                     ensure_ascii=False, allow_nan=False)+'\n')
 
     def flush(self):
-        for writer in self.writers.values():
-            writer.flush()
+        if self.writer is not None:
+            self.writer.flush()
 
     def close(self):
-        for writer in self.writers.values():
-            writer.close()
+        if self.writer is not None:
+            self.writer.close()

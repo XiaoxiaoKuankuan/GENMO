@@ -2,7 +2,8 @@
 
 使用不均衡 rank 时长、冻结去噪步骤、同曲多种子、零执行失败和不同来源误差，
 检查分母与来源权重、原始平方误差到 RMS 的变换、行政结束不算失败、配对区间
-不污染 RNG、缺测不补零。真实 TensorBoard 事件在 pytest 临时目录中读回。
+不污染 RNG、缺测不补零。真实 TensorBoard 事件在 pytest 临时目录中读回，检查
+一个任务只发现一个 run、训练/验证同轮奖励不混合，稀疏 MC 保持真实记录频率。
 历史重建用带 SHA 的完整小报告验证 0..N 横轴、旧日志保留以及缺轮/篡改拒绝；
 不启动仿真、GPU或正式训练，不在生产运行目录生成测试产物。
 """
@@ -16,9 +17,10 @@ from pathlib import Path
 import numpy as np
 import pytest
 from tensorboard.backend.event_processing.event_accumulator import EventAccumulator
+from tensorboard.backend.event_processing.event_multiplexer import EventMultiplexer
 
 from gem.closedloop.dppo.tensorboard_metrics import (
-    COMPONENT_TAGS, DEFINITIONS, ERROR_TAGS, SOURCES, DashboardWriter, checked_scalars,
+    COMPONENT_TAGS, EVENT_DEFINITIONS, ERROR_TAGS, SOURCES, DashboardWriter, checked_scalars,
     evaluation_scalars, evaluation_view, mc_scalars, training_scalars,
 )
 from tools.eval.export_stage10_tensorboard import export_run
@@ -151,20 +153,30 @@ def test_zero_execution_failure_is_counted_without_invented_reward_rate():
     assert 'Reward/paired_gain_per_second' not in values
 
 
-def test_real_event_files_have_eight_groups_and_distinct_runs(tmp_path):
+def test_real_events_keep_one_run_and_separate_training_validation_reward(tmp_path):
     writer = DashboardWriter(tmp_path/'dashboard')
     writer.write('training', 1, training_scalars(training_record()))
     writer.write('validation', 0, evaluation_scalars(evaluation_report()))
+    writer.write('validation', 1, evaluation_scalars(evaluation_report(1, gain=.25)))
     writer.write('critic_mc', 1, mc_scalars({'after': dict(explained_variance=.8, mean_prediction=5., mean_target=7.)}))
     writer.close()
-    groups = set()
-    for scope in ('training', 'validation', 'critic_mc'):
-        events = EventAccumulator(str(tmp_path/'dashboard'/scope)).Reload()
-        tags = events.Tags()['scalars']
-        assert tags and set(tags) <= DEFINITIONS.keys()
-        groups.update(tag.split('/')[0] for tag in tags)
+    dashboard = tmp_path/'dashboard'
+    multiplexer = EventMultiplexer().AddRunsFromDirectory(str(dashboard)).Reload()
+    assert list(multiplexer.Runs()) == ['.']
+    events = EventAccumulator(str(dashboard)).Reload()
+    tags = events.Tags()['scalars']
+    assert tags and set(tags) <= EVENT_DEFINITIONS.keys()
+    groups = {tag.split('/')[0] for tag in tags}
     assert groups == {'Reward', 'Tracking', 'Motion', 'Termination', 'Policy', 'Loss', 'Sampling', 'Perf'}
-    assert len(DEFINITIONS) <= 50
+    assert len(EVENT_DEFINITIONS) <= 50
+    assert all(events.Scalars(tag) for tag in tags)
+    train = events.Scalars('Reward/train_total_per_second')
+    validation = events.Scalars('Reward/validation_total_per_second')
+    assert [(row.step, row.value) for row in train] == [(1, pytest.approx(9.1))]
+    assert [(row.step, row.value) for row in validation] == [(0, 2.), (1, 2.25)]
+    assert 'Reward/total_per_second' not in tags
+    assert len(events.Scalars('Loss/critic_mc_ev')) == 1
+    assert not any((dashboard/scope).exists() for scope in ('training', 'validation', 'critic_mc'))
     records = [json.loads(line) for line in (tmp_path/'dashboard/scalars.jsonl').read_text().splitlines()]
     assert records[1]['step'] == 0
     assert all('/state/' not in tag for row in records for tag in row['scalars'])
@@ -195,6 +207,10 @@ def test_export_rebuilds_original_iterations_and_leaves_source_untouched(tmp_pat
     summary = export_run(root, tmp_path/'clean')
     assert summary['accepted_iterations'] == 1
     assert summary['fixed_evaluations'] == 2
+    assert summary['tensorboard_runs'] == 1
+    events = EventAccumulator(str(tmp_path/'clean')).Reload()
+    assert len(events.Scalars('Reward/train_total_per_second')) == 1
+    assert [row.step for row in events.Scalars('Reward/validation_total_per_second')] == [0, 1]
     assert summary['final']['iteration'] == 1
     assert summary['final']['scalars']['Reward/paired_gain_per_second'] == pytest.approx(.2)
     assert {p: p.read_bytes() for p in root.rglob('*') if p.is_file()} == before

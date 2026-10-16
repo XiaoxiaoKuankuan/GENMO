@@ -3,7 +3,8 @@
 
 本次改动只调整监控、历史重建和说明，不修改奖励、优化器、选模规则或模型。
 旧P1运行包含882个scalar标签，递归展开了预算、会话和内部诊断；原TensorBoard又
-扫描整个历史实验根目录。新入口使用固定白名单，最多49个标签、8个分组。
+扫描整个历史实验根目录。新入口使用固定白名单，最多50个标签、8个分组，
+一个任务只有一个run。当前49条实际曲线，训练和验证总回报各占一条。
 当前音乐奖励关闭，Reward/music不画恒零曲线。详细原始证据仍保留在JSON/JSONL。
 
 如何打开
@@ -15,16 +16,19 @@
 
     python -B tools/eval/export_stage10_tensorboard.py \
       --run-dir /data1/user/liwei/GENMO_outputs/closedloop_stage10/formalization_20261014/pilot_P1/P1 \
-      --output /home/user/liwei/stage10_tensorboard_compact/P1_500_20261016
+      --output /home/user/liwei/stage10_tensorboard_compact/P1_500_20261016_single/P1_500
 
 本地下载后的查看命令::
 
     /home/weili/GENMO/.venv/bin/tensorboard \
-      --logdir /home/weili/bumi-closedloop-worktrees/GENMO/outputs/tensorboard_compact/P1_500_20261016 \
+      --logdir /home/weili/bumi-closedloop-worktrees/GENMO/outputs/tensorboard_compact/P1_500_20261016_single \
       --host 127.0.0.1 --port 16008
 
-三个run分别是 ``training`` 随机物理采集/更新、``validation`` 固定任务验证和
-``critic_mc`` 独立完整轨迹价值诊断。横轴统一为累计接受的Actor迭代，Stage1基线为0；
+页面只显示 ``P1_500`` 一个run，训练、固定验证和完整MC都在同一任务页面。
+``Reward/train_total_per_second`` 是普通训练采集回报，
+``Reward/validation_total_per_second`` 是固定验证回报，不能拼成同一条曲线。
+其余指标仍按八个功能组排列，来源和采样频率见下面的逐项定义。
+横轴统一为累计接受的Actor迭代，Stage1基线为0；
 预热、被拒绝的更新仍留在审计记录，不冒充新增已接受训练轮次。
 每条曲线都保留原始点，程序不做平滑、不删不利点；TensorBoard界面可选择轻度
 平滑辅助阅读，但判断改善应查看原始固定验证点和配对区间。
@@ -32,7 +36,7 @@
 先看哪些曲线
 ------------
 
-1. 选择validation：看Reward/paired_gain_per_second及两个CI95边界。收益应为正，
+1. 选择唯一的任务P1_500：看Reward/paired_gain_per_second及两个CI95边界。收益应为正，
    区间下界大于零才支持该固定验证集的明确收益。该区间不含独立重训随机性，
    反复选最好的checkpoint也会引入选模偏差。
 2. 看Tracking的根位置、根朝向、关节角和根位置P95。整体漂移变差时，不能用
@@ -73,9 +77,9 @@
 ------------
 
 奖励分项当前来自保存完整逐控制步证据的固定验证。旧普通采集没有将全量分项
-保存到metrics，重建时不根据稀疏审计补造训练分项。Reward/total_per_second在
-training中为每来源总回报/实际秒数再平均，在validation中为每任务每秒回报先
-来源内平均再来源等权；训练与验证任务分布不同，不比较两者绝对值来判断过拟合。
+保存到metrics，重建时不根据稀疏审计补造训练分项。Reward/train_total_per_second
+为每来源总回报/实际秒数再平均，Reward/validation_total_per_second为每任务
+每秒回报先来源内平均再来源等权；训练与验证任务分布不同，不比较两者绝对值判断过拟合。
 固定验证的奖励分项使用相同来源/任务权重，分项和与总回报之差可含事件惩罚。
 
 Reward
@@ -87,8 +91,10 @@ Reward
 
    * - 标签
      - 含义与读法
-   * - ``Reward/total_per_second``
-     - 分/秒，越高越好。训练为各来源积分回报/实际采集秒数再四来源等权；验证为各任务每秒回报先来源内平均、再来源等权。
+   * - ``Reward/train_total_per_second``
+     - 分/秒，普通训练采集各来源积分回报/实际采集秒数再来源等权；任务不断变化，只作训练监视。
+   * - ``Reward/validation_total_per_second``
+     - 分/秒，固定验证各任务每秒回报先来源内平均再来源等权；优先用此曲线判断训练效果。
    * - ``Reward/episode_return``
      - 分，固定验证任务积分回报的四来源等权平均；执行更久也会增加，必须一起看每秒回报和终止。
    * - ``Reward/tracking``
@@ -259,13 +265,13 @@ Perf
 本次旧500轮的交付结果
 ---------------------
 
-原始882个标签重建为48个实际标签、8组。training有500个迭代点，validation有
-37次固定验证（0至500），critic_mc有97/193/289/384/480轮五次完整MC。
-本地精简目录包含6个已与服务器逐文件SHA核验的来源文件，共1,223,507字节；
-另有delivery_verification.json记录HTTP服务、标签和横轴核验。
+原始882个标签最终展示为49条曲线、8组、一个任务run。训练指标各有500个迭代点，
+验证指标各有37个点（0至500），MC指标各有97/193/289/384/480轮五个点。
+单run版本从上一版已下载并逐文件SHA核验的精简JSONL重排，逐点核对数据和横轴，
+不重新评估模型、不平滑、不补零。来源摘要和delivery_verification.json保留核验结果。
 
 本机查看地址为 http://127.0.0.1:16008 ，服务名为
-``genmo-stage10-compact-tensorboard-20261016.service``。该服务只读取上述本地
+``genmo-stage10-single-run-tensorboard-20261016.service``。该服务只读取上述本地
 精简目录。服务器原6007历史监控保持原状态，原训练、模型和事件文件不改。
 
 重建后的固定短验证：每秒回报3.426497到3.424977（-0.0444%）；活动保留0.959159；
@@ -279,6 +285,18 @@ Perf
 第480轮完整MC解释方差0.799344，平均低估10.815563分。以上均由原报告重算，
 未用显示平滑制造趋势，也不把本次监控改造说成模型质量已经改善。
 
-验证共85项CPU测试通过；真实历史500轮/37次评估完整性与SHA核验通过，真实
-TensorBoard HTTP端点返回48个标签、8组及验证0至500的37个点。临时测试目录
-已清理，精简曲线和来源核验文件作为本次用户要求的交付产物保留。
+本轮85项CPU测试通过，包括真实事件目录只发现一个run、同一轮训练/验证回报
+隔离和稀疏MC保留检查。HTTP逐项确认P1_500唯一run的49条曲线均有有限数据，
+训练/验证/MC分别19/28/2条，每条分别500/37/5点；新旧事件的数值、step和wall_time
+逐点相同。浏览器已实际刷新验证唯一run和原空白的Loss/MC图，并关闭忽略离群值
+缩放以显示完整纵轴范围。精简曲线和来源核验文件作为交付保留。
+
+为什么上一版有空图
+------------------
+
+上一版把一个任务拆成training、validation、critic_mc三个run。实际浏览器只勾选
+validation时，页面仍保留全部48张图卡，其中20项只属于另外两个run，所以没有
+曲线。HTTP逐项检查确认数据并未丢失：19项训练曲线各500点、28项验证各37点、
+2项MC各5点，均有有限数值。单run版本把它们汇入唯一任务，恢复训练和MC图卡。
+MC只有5个点、固定验证只有37个点是原始记录频率，不是缺失500轮数据。
+刷新后如地址栏仍带旧的runSelectionState，应打开无旧筛选的16008/#scalars链接。
