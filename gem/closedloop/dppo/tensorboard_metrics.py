@@ -22,12 +22,11 @@ import numpy as np
 
 
 SOURCES = ('AIOZ-GDANCE', 'AIST++', 'FineDance', 'Mine')
-VERSION = 'genmo.stage10.compact_tensorboard.v2'
+VERSION = 'genmo.stage2.asymmetric_compact_tensorboard.v1'
 DEFINITIONS = {
     'Reward/total_per_second': '分/秒，越高越好。训练为各来源积分回报/实际采集秒数再四来源等权；验证为各任务每秒回报先来源内平均、再来源等权。',
     'Reward/episode_return': '分，固定验证任务积分回报的四来源等权平均；执行更久也会增加，必须一起看每秒回报和终止。',
     'Reward/tracking': '分/秒，已乘权重和活动度门控的跟踪奖励；越高越好，但不能替代原始误差。',
-    'Reward/stable': '分/秒，根高和非 yaw 姿态稳定奖励，越高越好。',
     'Reward/alive': '分/秒，有效存活控制区间奖励，越高越好。',
     'Reward/command_penalty': '分/秒，控制指令变化惩罚，非正，越接近零越好。',
     'Reward/torque_penalty': '分/秒，力矩惩罚，非正，越接近零越好。',
@@ -41,8 +40,10 @@ DEFINITIONS = {
     'Tracking/root_orientation_rms_rad': '弧度，根部完整姿态角差 RMS，越低越好；包含 yaw。',
     'Tracking/body_position_rms_m': '米，GMT 水平位置/yaw 对齐后的身体位置 RMS；不等于蓝色影子的全局位移。',
     'Tracking/body_orientation_rms_rad': '弧度，GMT yaw 对齐后的身体姿态 RMS，越低越好。',
-    'Tracking/joint_position_rms_rad': '弧度，关节角误差 RMS，越低越好。',
-    'Tracking/joint_velocity_rms_rad_s': '弧度/秒，关节速度误差 RMS，越低越好；当前奖励权重为零，属于诊断。',
+    'Tracking/body_lin_vel_rms_m_s': '米/秒，GMT身体集合的全局线速度误差 RMS。',
+    'Tracking/body_ang_vel_rms_rad_s': '弧度/秒，GMT身体集合的全局角速度误差 RMS。',
+    'Tracking/foot_height_rms_m': '米，GMT左右踝相对高度误差 RMS。',
+    'Tracking/leg_joint_position_rms_rad': '弧度，GMT指定十二腿关节位置误差 RMS，不是全身21关节。',
     'Tracking/root_position_p95_m': '米，来源等权的逐控制步根位置误差第95百分位，越低越好，用于观察尾部漂移。',
     'Motion/activity_rad_s': '弧度/秒，实际机器人0.5秒因果窗关节速度 RMS 的来源等权均值；不是越小越好。',
     'Motion/activity_retention': '相对同一固定任务 Stage1 实际活动度的比例；1为持平，持续下降提示动作收缩。',
@@ -55,10 +56,14 @@ DEFINITIONS = {
     'Termination/reference_rejections_per_1000s': '次/1000机器人秒，固定验证参考拒绝次数/实际执行秒数，越低越好。',
     'Policy/learning_rate': '实际 Actor 优化器学习率，不是配置上限。',
     'Policy/trainable_kl': '本轮更新前后可训练去噪步骤的平均每自由坐标 KL；排除冻结步骤，大小本身不等于收益。',
-    'Policy/max_step_kl': '完整去噪链中最大的单步平均每自由坐标 KL，用于检查更新是否过大。',
+    'Policy/max_step_kl': '四个可训练随机步骤中最大的单步平均每自由坐标 KL，用于检查某一步是否变化过大。',
+    'Policy/p95_trainable_kl': '全部真实链×四个训练步骤的每自由坐标 KL 的95百分位，检查更新尾部；不包含冻结步骤。',
+    'Policy/chain_joint_kl': '每条真实链内四个随机转移联合 KL 求和后再对链取平均，单位不同于每坐标 KL；不是最终动作密度的直接 KL。',
     'Policy/clipped_objective_fraction': '可训练去噪步骤最终检查中真正被 PPO 裁剪的目标比例；接近零不单独证明无效。',
     'Policy/gradient_norm': 'Actor 每次更新裁剪前 PPO+BC 总梯度范数的均值；持续异常增大需检查。',
     'Policy/bc_to_ppo_gradient_ratio': '每次更新加权 BC 梯度范数/PPO 梯度范数的均值；不是 Adam 参数更新贡献比例。',
+    'Loss/joint_score': '四个随机步骤完整联合 Gaussian score 单次策略梯度损失；不是 clipped PPO，不能按单调下降验收。',
+    'Policy/backtracks': '本次接受前的学习率减半次数；实际学习率同时见 learning_rate。',
     'Loss/ppo': 'Actor 本轮 PPO 代理损失按内部样本访问数加权；优势归一化后常在零附近，不能按单调下降验收效果。',
     'Loss/bc': 'Actor 本轮 BC 损失按实际 BC 样本数加权；衡量监督约束拟合，不等于物理跟踪。',
     'Loss/critic_mse_before': '本轮 Critic 更新前，对本轮自举目标的 MSE；不同轮目标会变化。',
@@ -86,14 +91,17 @@ EVENT_DEFINITIONS.update({
 })
 
 ERROR_TAGS = {
-    'anchor_position_error_sq_m2': 'root_position_rms_m',
-    'anchor_orientation_error_sq_rad2': 'root_orientation_rms_rad',
-    'body_position_mean_error_sq_m2': 'body_position_rms_m',
-    'body_orientation_mean_error_sq_rad2': 'body_orientation_rms_rad',
-    'joint_position_mean_error_sq_rad2': 'joint_position_rms_rad',
-    'joint_velocity_mean_error_sq_rad2_s2': 'joint_velocity_rms_rad_s',
+    'anchor_pos_squared_error': 'root_position_rms_m',
+    'anchor_ori_squared_error': 'root_orientation_rms_rad',
+    'body_pos_squared_error': 'body_position_rms_m',
+    'body_ori_squared_error': 'body_orientation_rms_rad',
+    'body_lin_vel_squared_error': 'body_lin_vel_rms_m_s',
+    'body_ang_vel_squared_error': 'body_ang_vel_rms_rad_s',
+    'foot_height_squared_error': 'foot_height_rms_m',
+    'leg_joint_pos_squared_error': 'leg_joint_position_rms_rad',
 }
-COMPONENT_TAGS = dict(track='tracking', stable='stable', alive='alive', cmd='command_penalty',
+
+COMPONENT_TAGS = dict(track='tracking', alive='alive', cmd='command_penalty',
                       torque='torque_penalty', contact='contact_penalty', joint_limit='joint_limit_penalty')
 
 
@@ -148,7 +156,9 @@ def training_scalars(record):
         values['Termination/physical_failures_per_1000s'] = 1000*sum(c['physical_failures'] for c in collections)/seconds
     actor = record.get('actor') or {}
     steps = actor.get('steps', [])
-    for tag, key, weight in [('Loss/ppo', 'ppo_loss', 'internal_sample_visits'),
+    objective = actor.get('objective', 'coordinate_dppo')
+    loss_tag = 'Loss/joint_score' if objective == 'joint_score_pg' else 'Loss/ppo'
+    for tag, key, weight in [(loss_tag, 'ppo_loss', 'internal_sample_visits'),
                              ('Loss/bc', 'bc_loss', 'bc_global_samples')]:
         values[tag] = _weighted(steps, key, weight)
     if steps:
@@ -161,13 +171,20 @@ def training_scalars(record):
                 ratios.append(gradients['weighted_bc_norm']/gradients['ppo_norm'])
         if ratios:
             values['Policy/bc_to_ppo_gradient_ratio'] = float(np.mean(ratios))
-    kl = record.get('full20_kl') or {}
-    frozen = kl.get('frozen_prefix', {}).get('steps', 0)
-    active = [s for s in kl.get('per_denoising_step', []) if s['step'] >= frozen]
+    transaction = steps[-1].get('backtracking', {}) if steps else {}
+    if transaction:
+        values['Policy/backtracks'] = transaction.get('backtracks')
+    kl = record.get('trainable4_kl') or {}
+    active = kl.get('per_denoising_step', [])
+    if active and [step['step'] for step in active] != [15, 16, 17, 18]:
+        raise ValueError('Compact curves require exactly the four trainable Gaussian steps')
     if active:
         values['Policy/trainable_kl'] = float(np.mean([s['mean_coordinate_kl']['mean'] for s in active]))
-        values['Policy/clipped_objective_fraction'] = float(np.mean([s['objective_clip_fraction'] for s in active]))
+        if objective != 'joint_score_pg':
+            values['Policy/clipped_objective_fraction'] = float(np.mean([s['objective_clip_fraction'] for s in active]))
     values['Policy/max_step_kl'] = kl.get('maximum_step_mean_coordinate_kl')
+    values['Policy/p95_trainable_kl'] = kl.get('coordinate_kl', {}).get('p95')
+    values['Policy/chain_joint_kl'] = kl.get('chain_joint_kl', {}).get('mean')
     critic = record.get('critic') or {}
     values['Loss/critic_mse_before'] = critic.get('before', {}).get('mse')
     values['Loss/critic_mse_after'] = critic.get('after', {}).get('mse')
@@ -256,7 +273,7 @@ def evaluation_scalars(report, baseline=None, *, bootstrap_repeats=2000):
         if all(parts):
             values['Tracking/'+tag] = math.sqrt(float(np.mean([
                 sum(v*w for v, w in part)/sum(w for _, w in part) for part in parts])))
-    parts = [view['errors'][s].get('anchor_position_error_sq_m2', []) for s in SOURCES]
+    parts = [view['errors'][s].get('anchor_pos_squared_error', []) for s in SOURCES]
     if all(parts):
         weighted = []
         for part in parts:

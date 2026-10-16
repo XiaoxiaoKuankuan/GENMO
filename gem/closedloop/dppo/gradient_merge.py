@@ -9,6 +9,8 @@ BC比例标定只读取共同作用参数；contact等单独头单列。目标�
 用指数平滑、显式上下限及每步最大变化倍率控制，不按每个microbatch跳变。
 该系数是梯度合成系数，不等于Adam参数更新贡献。控制器状态属于新checkpoint
 与整轮回滚状态。实际通信字节、桶数和时间被报告，不隐瞒双向量诊断的额外流量。
+归约后梯度直接持有本次bucket的独立视图，bucket不跨步复用；消除逐参数clone而
+不改变SUM、FP64统计、合成顺序或参数更新，p.grad持有存储直到下一次zero_grad。
 """
 from __future__ import annotations
 
@@ -20,25 +22,31 @@ import torch.distributed as dist
 
 
 class BCGradientController:
-    def __init__(self, *, initial=.1,target_ratio=.1,minimum=1e-4,maximum=10.,smoothing=.9,max_change=2.,mode='bounded_ratio'):
+    def __init__(self, *, initial=.1,target_ratio=.1,minimum=1e-4,maximum=10.,smoothing=.9,max_change=2.,mode='bounded_ratio',initialize_from_gradient=False):
         if not 0<=minimum<=initial<=maximum or target_ratio<=0 or not 0<=smoothing<1 or max_change<1:
             raise ValueError('Invalid bounded BC gradient calibration')
         if mode not in ('fixed','bounded_ratio'):raise ValueError('Unknown BC calibration mode')
         self.value,self.target_ratio,self.minimum,self.maximum=initial,target_ratio,minimum,maximum
         self.smoothing,self.max_change,self.mode=smoothing,max_change,mode
         self.updates=0
+        self.initialize_from_gradient=bool(initialize_from_gradient)
 
     def update(self,ppo_norm,bc_norm):
         old=self.value
         if self.mode=='bounded_ratio' and ppo_norm>0 and bc_norm>1e-20:
             target=min(self.maximum,max(self.minimum,self.target_ratio*ppo_norm/bc_norm))
-            proposed=self.smoothing*old+(1-self.smoothing)*target
-            self.value=min(self.maximum,old*self.max_change,max(self.minimum,old/self.max_change,proposed))
+            if self.initialize_from_gradient and self.updates==0:
+                self.value=target
+            else:
+                proposed=self.smoothing*old+(1-self.smoothing)*target
+                self.value=min(self.maximum,old*self.max_change,max(self.minimum,old/self.max_change,proposed))
         self.updates+=1
         return self.value
 
     def state_dict(self):return dict(self.__dict__)
     def load_state_dict(self,state):
+        if state.get('initialize_from_gradient',False)!=self.initialize_from_gradient:
+            raise ValueError('BC initial gradient calibration contract differs from checkpoint')
         for key in ['target_ratio','minimum','maximum','smoothing','max_change','mode']:
             if state[key]!=getattr(self,key):raise ValueError('BC controller contract differs from checkpoint')
         if not self.minimum<=state['value']<=self.maximum or state['updates']<0:
@@ -62,7 +70,7 @@ def _group(name):
 
 
 def merge_global_gradients(actor,ppo,bc,controller,*,distributed=None,bucket_bytes=32*1024**2,
-                           half_split=False,sketch=None,sketch_budget=1<<20):
+                           half_split=False,sketch=None,sketch_budget=1<<20,component_observer=None):
     """PPO与BC梯度一次SUM合并；可选梯度信噪比诊断不改变p.grad。
 
     half_split在同一bucket增加第三行，只放前一半rank的PPO梯度，归约后得到两半rank
@@ -115,8 +123,8 @@ def merge_global_gradients(actor,ppo,bc,controller,*,distributed=None,bucket_byt
             groups['all']+=numbers;groups[_group(name)]+=numbers
             groups['shared']+=numbers*((numbers[0]>0)&(numbers[1]>0))
             # 明确保存全局未加权向量，BC控制只在全部桶统计完成后更新一次。
-            ppo[name]=a.reshape_as(p).clone() if flags[0] else None
-            bc[name]=b.reshape_as(p).clone() if flags[1] else None
+            ppo[name]=a.reshape_as(p) if flags[0] else None
+            bc[name]=b.reshape_as(p) if flags[1] else None
             offset+=p.numel()
     reports={}
     for name,(a2,b2,dot) in zip(groups,torch.stack(list(groups.values())).cpu().tolist()):
@@ -125,6 +133,7 @@ def merge_global_gradients(actor,ppo,bc,controller,*,distributed=None,bucket_byt
     shared=reports['shared'];weight=controller.update(shared['ppo_norm'],shared['unweighted_bc_norm'])
     for name,p in parameters:
         a,b=ppo.get(name),bc.get(name)
+        if component_observer is not None:component_observer(name,a,b)
         if a is None and b is None:p.grad=None
         elif a is None:p.grad=b.mul_(weight)
         elif b is None:p.grad=a

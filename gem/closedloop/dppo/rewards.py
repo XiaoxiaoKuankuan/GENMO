@@ -1,11 +1,11 @@
 """第九步第二版实际执行奖励、活动监督与物理诊断。
 
-本模块只评价已经执行的 50Hz 控制区间。跟踪消费冻结 GMT 原 motion-tracking 六项
+本模块只评价已经执行的 50Hz 控制区间。跟踪消费冻结 GMT 原 motion-tracking 八项
 平方误差：世界 anchor 位置/完整姿态、原 MotionCommand 对齐后的 body 位置/姿态、
-原任务选择的关节位置及可选关节速度。使用 exp(-error/std²)，不再次平方 error，
+body全局线/角速度、双脚相对高度及十二腿关节位置。使用 exp(-error/std²)，不再次平方 error，
 不重新构造坐标系或用旧 RMSE/末端高度/yaw 混合项回退；名称、选择、时刻和原值
 证据随 backend 诊断保存。内部 objective 版本独立标识这次 tracking 语义变化。
-稳定性仍直接消费原 backend 的根高与 non-yaw 误差，其余 v2 奖励公式保持不变。
+独立稳定性奖励关闭，根高与姿态仍作为物理终止及诊断；活动门控继续保留。
 活动门控同时作用于跟踪和音乐；目标活动度来自配对训练动作的同一因果时间窗，
 绝不使用 GENMO 生成参考代替监督。音乐节拍复用 BUMI 原有动作节拍和对齐函数。
 连续奖励率统一乘 0.02 秒，失败及有限非法参考的事件罚分由调用方单独加入一次。
@@ -15,7 +15,7 @@ PD 目标变化按真实生效目标计算；力矩使用未裁剪的隐式 PD t
 采样时刻会明确标记，不把代理称为硬件力矩、电功率或能耗。接触允许脚与肘，
 优先使用支撑球附近速度；只能获得 link 速度时明确保留 slide_proxy 名称。
 
-所有分数和连续代价有界于 [0,1]，输出同时保存原始量、归一化量、分项积分及最终
+除不饱和关节限位代价外，其他分数和连续代价有界于 [0,1]，输出同时保存原始量、归一化量、分项积分及最终
 奖励。参考位置—速度一致性属于数据完整性门禁，不属于策略奖励；超出容差或
 缺少必需证据时标记 transition_valid=false。活动窗口尚不足 0.5 秒时使用实际已有
 的因果子窗，并严格要求目标监督使用完全相同的窗口，显式记录 window_complete。
@@ -35,30 +35,30 @@ from gem.closedloop.contracts import GMT_EXPECTED_JOINT_ORDER
 from .performance import profiled
 
 
-TRACKING_OBJECTIVE = "gmt.motion_tracking.v1"
+TRACKING_OBJECTIVE = "gmt.motion_tracking.eight_terms.v1"
 TRACKING_FUNCTIONS = {
     "anchor_pos": "motion_global_anchor_position_error_exp",
     "anchor_ori": "motion_global_anchor_orientation_error_exp",
     "body_pos": "motion_relative_body_position_error_exp",
     "body_ori": "motion_relative_body_orientation_error_exp",
-    "joint_pos": "motion_joint_position_error_exp",
-    "joint_vel": "motion_joint_velocity_error_exp",
+    "body_lin_vel": "motion_global_body_linear_velocity_error_exp",
+    "body_ang_vel": "motion_global_body_angular_velocity_error_exp",
+    "foot_height": "motion_relative_body_height_error_exp",
+    "leg_joint_pos": "motion_joint_position_error_exp",
 }
-TRACKING_ERROR_FIELDS = {
-    "anchor_pos": "anchor_position_error_sq_m2",
-    "anchor_ori": "anchor_orientation_error_sq_rad2",
-    "body_pos": "body_position_mean_error_sq_m2",
-    "body_ori": "body_orientation_mean_error_sq_rad2",
-    "joint_pos": "joint_position_mean_error_sq_rad2",
-    "joint_vel": "joint_velocity_mean_error_sq_rad2_s2",
-}
+TRACKING_ERROR_FIELDS = {name: name + "_squared_error" for name in TRACKING_FUNCTIONS}
+TRACKING_STD = dict(anchor_pos=.3, anchor_ori=.4, body_pos=.3, body_ori=.4,
+                    body_lin_vel=1., body_ang_vel=3.14, foot_height=.07, leg_joint_pos=.25)
+TRACKING_WEIGHTS = {name: weight/6.3 for name,weight in zip(TRACKING_FUNCTIONS,(.5,.5,1.,1.,1.,1.,.8,.5))}
+LEG_JOINT_NAMES = [side+'_'+joint+'_joint' for side in ('l','r') for joint in
+    ('leg_pitch','leg_roll','leg_yaw','knee_pitch','ankle_pitch','ankle_roll')]
 
 
 DEFAULT_CONFIG = {
-    "version": "stage9.execution_reward.v2",
-    "music_reward_enabled": True,
+    "version": "stage2.gmt8_reference_limits.v1",
+    "music_reward_enabled": False,
     "dt": .02,
-    "track_weight": 2.5, "music_weight": 2., "stable_weight": 1., "alive_weight": .5,
+    "track_weight": 2.5, "music_weight": 0., "stable_weight": 0., "alive_weight": .5,
     "cmd_penalty_weight": .15, "torque_penalty_weight": .10,
     "contact_penalty_weight": .20, "joint_limit_penalty_weight": .50,
     "failure_penalty": 5., "rejected_plan_penalty": .5,
@@ -66,11 +66,8 @@ DEFAULT_CONFIG = {
                "non_yaw_rad": .12, "slide_m_s": .15},
     "tracking": {
         "objective": TRACKING_OBJECTIVE,
-        "std": {"anchor_pos": .3, "anchor_ori": .4, "body_pos": .3,
-                "body_ori": .4, "joint_pos": .25, "joint_vel": 1.4},
-        # 对应当前 GMT 启用的 .5/.5/1/1/.5 比例；joint_vel 原任务未启用。
-        "weights": {"anchor_pos": 1/7, "anchor_ori": 1/7, "body_pos": 2/7,
-                    "body_ori": 2/7, "joint_pos": 1/7, "joint_vel": 0.},
+        "std": TRACKING_STD,
+        "weights": TRACKING_WEIGHTS,
     },
     "stable_mix": {"root_height": .5, "non_yaw": .5},
     "music_mix": {"beat": .7, "intensity": .3},
@@ -80,7 +77,7 @@ DEFAULT_CONFIG = {
     "music": {"beat_window_s": 1., "feature_fps": 30, "beat_column": 34, "beat_threshold": .5},
     "contact": {"slide_weight": .7, "bad_contact_weight": .3, "support_clearance_m": .025},
     "joint_limit": {"hard_range_margin_fraction": .05, "numeric_tolerance_rad": 1e-6,
-                    "actual_weight": .5, "reference_weight": .5},
+                    "actual_weight": .3, "reference_weight": .7},
     "consistency": {"joint_vel_rms_rad_s": 1e-4, "root_lin_vel_rms_m_s": 1e-4,
                     "root_ang_vel_rms_rad_s": 1e-4},
     "diagnostics": {"mechanical_power_weight": 0., "impact_weight": 0.},
@@ -142,6 +139,7 @@ class ExecutionReward:
         self.beat_steps = int(round(self.config["music"]["beat_window_s"] / self.config["dt"]))
         self.window = deque(maxlen=max(self.activity_steps, self.beat_steps))
         self._last_tick = self._episode = self._previous_target = None
+        self._limit_runs=np.zeros((2,2,21),dtype=np.int64)
 
     def _cache_music_beats(self):
         """每次绑定音乐或起点后计算一次，保持原30Hz到50Hz的round映射。"""
@@ -162,14 +160,14 @@ class ExecutionReward:
 
     def _validate_config(self):
         config = self.config
-        if config["version"] not in {"stage9.execution_reward.v2", "stage10.physical_reward.v1"}:
+        if config["version"] != "stage2.gmt8_reference_limits.v1":
             raise ValueError("Unknown explicit execution reward identity")
         if type(config['music_reward_enabled']) is not bool:
             raise ValueError('music_reward_enabled must be an explicit boolean')
         if not config['music_reward_enabled'] and config['music_weight'] != 0:
             raise ValueError('Disabled music reward requires music_weight=0')
-        if config['version'] == 'stage10.physical_reward.v1' and config['music_reward_enabled']:
-            raise ValueError('Physical reward identity requires disabled music reward')
+        if config['music_reward_enabled'] or config['stable_weight'] != 0:
+            raise ValueError('New physical reward requires disabled music and independent stability rewards')
         if config["dt"] != .02:
             raise ValueError("Stage9 rewards require dt=0.02 for actual 50Hz controls")
         def finite_nonnegative(value, name, *, positive=False):
@@ -184,6 +182,8 @@ class ExecutionReward:
         tracking = config["tracking"]
         if tracking["objective"] != TRACKING_OBJECTIVE:
             raise ValueError(f"tracking.objective must be {TRACKING_OBJECTIVE}")
+        if tracking['std'] != TRACKING_STD or tracking['weights'] != TRACKING_WEIGHTS:
+            raise ValueError('Tracking std/weights must match the eight authoritative GMT terms')
         for name, value in tracking["std"].items():
             finite_nonnegative(value, f"tracking.std.{name}", positive=True)
             squared = float(value) * float(value)
@@ -245,6 +245,7 @@ class ExecutionReward:
         self._cache_music_beats()
         self.window.clear()
         self._last_tick = self._episode = self._previous_target = None
+        self._limit_runs=np.zeros((2,2,21),dtype=np.int64)
 
     def event_reward(self, reason):
         if reason in {"reference_rejected", "plan_rejected", "rejected"}:
@@ -341,20 +342,21 @@ class ExecutionReward:
                 raise ValueError(f"motion_tracking requires {side} state evidence")
             for field, shape in (("anchor_pos_w", (3,)), ("anchor_quat_w", (4,)),
                                  ("body_pos_w", (len(body_names), 3)), ("body_quat_w", (len(body_names), 4)),
+                                 ("body_lin_vel_w", (len(body_names), 3)), ("body_ang_vel_w", (len(body_names), 3)),
                                  ("joint_pos", (len(joint_names),)), ("joint_vel", (len(joint_names),))):
                 _array(values.get(field), f"motion_tracking.{side}.{field}", shape)
         for field, shape in (("body_pos_relative_w", (len(body_names), 3)), ("body_quat_relative_w", (len(body_names), 4))):
             _array(diagnostic["reference"].get(field), f"motion_tracking.reference.{field}", shape)
         terms = diagnostic.get("terms")
         if not isinstance(terms, Mapping) or set(terms) != set(TRACKING_FUNCTIONS):
-            raise ValueError("motion_tracking requires all six original GMT terms")
+            raise ValueError("motion_tracking requires all eight original GMT terms")
         raw, normalized, scores = {}, {}, {}
         for name, function in TRACKING_FUNCTIONS.items():
             term = terms[name]
             if not isinstance(term, Mapping) or term.get("function") != function:
                 raise ValueError(f"motion_tracking.{name} is not the original GMT function")
-            if name.startswith(("body_", "joint_")):
-                kind = "body" if name.startswith("body_") else "joint"
+            if name.startswith("body_") or name in ("foot_height", "leg_joint_pos"):
+                kind = "joint" if name == "leg_joint_pos" else "body"
                 names = body_names if kind == "body" else joint_names
                 indices, selected = term.get(f"{kind}_indices"), term.get(f"{kind}_names")
                 if (not isinstance(indices, (list, tuple)) or not indices
@@ -362,6 +364,14 @@ class ExecutionReward:
                         or len(set(indices)) != len(indices)
                         or list(selected or []) != [names[i] for i in indices]):
                     raise ValueError(f"motion_tracking.{name} selected {kind} names/order differ from indices")
+                if name.startswith("body_") and list(selected)!=list(body_names):
+                    raise ValueError("Body tracking must cover the full original MotionCommand body set")
+            if name == 'foot_height' and set(term['body_names']) != {'l_ankle_roll_link','r_ankle_roll_link'}:
+                raise ValueError('Foot height requires both ankle roll links')
+            if name == 'leg_joint_pos' and term['joint_names'] != LEG_JOINT_NAMES:
+                raise ValueError('Tracking requires the exact twelve leg joints')
+            if term['source_std'] != TRACKING_STD[name] or not math.isclose(term['source_weight']/6.3,TRACKING_WEIGHTS[name],abs_tol=1e-14):
+                raise ValueError('GMT authoritative tracking configuration differs')
             error = _scalar(term.get("error"), f"motion_tracking.{name}.error")
             if error < 0:
                 raise ValueError(f"motion_tracking.{name} squared error must be nonnegative")
@@ -380,12 +390,11 @@ class ExecutionReward:
                                  "std": copy.deepcopy(cfg["std"]), "weights": copy.deepcopy(cfg["weights"])}
 
     def _stable(self, row):
-        raw, normalized, scores = {}, {}, {}
-        for name, key, scale in (("root_height", "root_height_error_m", "root_height_m"),
-                                 ("non_yaw", "non_yaw_orientation_error_rad", "non_yaw_rad")):
-            raw[key] = _scalar(row["errors"].get(key), key)
-            scores[name], normalized[name] = _score(raw[key], self.config["scales"][scale])
-        return sum(self.config["stable_mix"][name] * score for name, score in scores.items()), True, raw, {"errors_over_scale": normalized, "scores": scores}
+        return 0., True, {'reason': 'stable_reward_disabled'}, {}
+
+    def _physical_state(self,row):
+        return dict(valid=True,reward_weight=0.,root_height_error_m=_scalar(row['errors'].get('root_height_error_m'),'root_height_error_m'),
+            non_yaw_orientation_error_rad=_scalar(row['errors'].get('non_yaw_orientation_error_rad'),'non_yaw_orientation_error_rad'))
 
     def _alive(self, row):
         complete = row.get("completed_physics_steps", 4) == 4
@@ -522,19 +531,20 @@ class ExecutionReward:
         actual = _array(row.get("actual_joint_pos_gmt"), "actual joint position", (21,))
         reference = _array(row["reference"].get("joint_pos"), "currently consumed reference joint position", (21,))
         def joint_cost(position):
-            lower_width, upper_width = safe[:, 0] - hard[:, 0], hard[:, 1] - safe[:, 1]
-            lower = np.divide(safe[:, 0] - position, lower_width, out=np.zeros(21), where=lower_width > 0)
-            upper = np.divide(position - safe[:, 1], upper_width, out=np.zeros(21), where=upper_width > 0)
-            lower[(lower_width == 0) & (position <= hard[:, 0])] = 1.
-            upper[(upper_width == 0) & (position >= hard[:, 1])] = 1.
-            return np.clip(np.maximum(lower, upper), 0., 1.)
+            # 无硬裁剪、无代价饱和；软硬区间为1，超过硬边界仍线性增长。
+            fallback=(hard[:,1]-hard[:,0])*self.config['joint_limit']['hard_range_margin_fraction']
+            lw,uw=safe[:,0]-hard[:,0],hard[:,1]-safe[:,1]
+            lower=(safe[:,0]-position)/np.where(lw>0,lw,fallback)
+            upper=(position-safe[:,1])/np.where(uw>0,uw,fallback)
+            return np.maximum(np.maximum(lower,upper),0.)
         a_cost, r_cost = joint_cost(actual), joint_cost(reference)
         value = self.config["joint_limit"]["actual_weight"] * float(a_cost.max()) + self.config["joint_limit"]["reference_weight"] * float(r_cost.max())
         return value, True, {"actual_joint_position_rad": actual.tolist(), "consumed_reference_joint_position_rad": reference.tolist(),
             "reference_tick": row.get("reference_tick", row["tick"]), "hard_limits_rad": hard.tolist(),
             "original_safe_limits_rad": original_safe.tolist(), "safe_limits_rad": safe.tolist(), "safe_limits_source": source,
             "numeric_tolerance_rad": tolerance, "numeric_boundary_clamped": bool(np.any(safe != original_safe)),
-            "numeric_boundary_note": "only floating-point soft-limit excess within configured tolerance is clipped to hard limits"}, {"actual_per_joint_cost": a_cost.tolist(), "reference_per_joint_cost": r_cost.tolist()}
+            "numeric_boundary_note": "only floating-point soft-limit excess within configured tolerance is clipped to hard limits"}, {"actual_per_joint_cost": a_cost.tolist(), "reference_per_joint_cost": r_cost.tolist(),
+                "actual_cost":float(a_cost.max()),"reference_cost":float(r_cost.max()),"saturates":False}
 
     def _consistency(self, row):
         data = row.get("reference_consistency")
@@ -608,8 +618,8 @@ class ExecutionReward:
         mapping = {"track": "track_weight", "music": "music_weight", "stable": "stable_weight", "alive": "alive_weight",
                    "cmd": "cmd_penalty_weight", "torque": "torque_penalty_weight", "contact": "contact_penalty_weight", "joint_limit": "joint_limit_penalty_weight"}
         for name, weight_key in mapping.items():
-            if name == 'music' and not self.music_enabled:
-                components[name] = dict(enabled=False, valid=True, raw={'reason': 'music_reward_disabled'},
+            if name == 'music' and not self.music_enabled or name == 'stable' and self.config['stable_weight'] == 0:
+                components[name] = dict(enabled=False, valid=True, raw={'reason': name+'_reward_disabled'},
                     normalized={}, score=0., weight=0., gate=1., activity_gate=1.,
                     weighted_rate=0., integrated_reward=0.)
                 continue
@@ -617,9 +627,9 @@ class ExecutionReward:
                 if name == "music" and not activity["valid"]:
                     raise ValueError("music intensity not_available without paired target activity")
                 score, valid, raw, normalized = self._music(intensity, activity) if name == "music" else getattr(self, "_" + name)(trace)
-                if not math.isfinite(score) or not 0 <= score <= 1 + 1e-12:
+                if not math.isfinite(score) or score < 0 or (name != "joint_limit" and score > 1 + 1e-12):
                     raise ValueError(f"{name} score must be finite and within [0,1]")
-                score = min(score, 1.)
+                score = score if name == "joint_limit" else min(score, 1.)
             except (ValueError, KeyError, IndexError, TypeError) as error:
                 score, valid, raw, normalized = 0., False, {"reason": str(error)}, {}
                 errors.append(f"{name}: {error}")
@@ -629,7 +639,7 @@ class ExecutionReward:
             components[name] = {"enabled": True, "valid": bool(valid), "raw": raw, "normalized": normalized,
                 "score": score, "weight": weight, "gate": multiplier, "activity_gate": multiplier,
                 "weighted_rate": rate, "integrated_reward": self.config["dt"] * rate}
-        for name in ("consistency", "power"):
+        for name in ("consistency", "power", "physical_state"):
             try:
                 diagnostics[name] = getattr(self, "_" + name)(trace)
             except (ValueError, KeyError, IndexError, TypeError) as error:
@@ -642,11 +652,19 @@ class ExecutionReward:
             errors.append("backend marked execution/state invalid")
         if trace.get("completed_physics_steps", 4) != 4:
             errors.append("incomplete control interval")
+        from .joint_limits import executed_boundaries
+        try:
+            boundary,self._limit_runs=executed_boundaries(trace,self._limit_runs)
+            normalized=components['joint_limit']['normalized']
+            boundary.update(actual_cost=normalized.get('actual_cost'),reference_cost=normalized.get('reference_cost'))
+        except (ValueError,KeyError,IndexError,TypeError) as error:
+            boundary=dict(valid=False,reason=str(error));errors.append('joint_boundaries: '+str(error))
         total_rate = sum(item["weighted_rate"] for item in components.values())
         return {"version": self.config['version'], "tick": int(tick), "episode_id": episode,
                 "reward": self.config["dt"] * total_rate, "reward_rate": total_rate,
                 "reward_is_integrated": True, "dt_s": self.config["dt"], "transition_valid": not errors,
                 "errors": errors, "components": components, "activity": activity, "diagnostics": diagnostics,
+                "joint_limit_diagnostics":boundary,
                 "scales": copy.deepcopy(self.config["scales"])}
 
 

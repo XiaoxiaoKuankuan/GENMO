@@ -18,6 +18,7 @@ import hashlib
 import json
 import math
 import os
+from collections.abc import Mapping
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -83,15 +84,18 @@ def build_balanced_plan(catalog, *, samples_per_source=4, seeds=(42, 1729), seco
                         start_mode='beginning',unique_music=False,split='val'):
     """在独立局部RNG中固定选样，复用全池任务的原task/noise身份。"""
     all_music=samples_per_source=='all_unique'
-    _require(all_music and unique_music or type(samples_per_source) is int and samples_per_source > 0,
-        'samples_per_source must be positive or all_unique with unique_music')
+    per_source=isinstance(samples_per_source,Mapping)
+    _require(all_music and unique_music or type(samples_per_source) is int and samples_per_source > 0
+        or per_source and set(samples_per_source)==set(SOURCES)
+        and all(type(n) is int and n>0 for n in samples_per_source.values()),
+        'samples_per_source must be positive, an explicit four-source count map, or all_unique with unique_music')
     _require(split in ('val','test') and set(catalog.samples[split]) == set(SOURCES), 'Periodic plan requires four held-out sources')
     _require(start_mode in ('beginning','center','mixed'), 'Invalid periodic start_mode')
     _require(start_mode=='beginning' or seconds is not None, 'Complete song evaluation must begin at music start')
     full = build_evaluation_tasks(catalog, split=split, eval_count='all', seeds=seeds,
         selection_seed=selection_seed, start_mode='center' if start_mode=='center' else 'beginning', episode_seconds=seconds)
     rng = np.random.default_rng(selection_seed)
-    chosen = set();source_counts={}
+    chosen = set();source_counts={};seen_groups=set();seen_audio=set()
     for source in sorted(SOURCES):
         samples = sorted(catalog.samples[split][source], key=lambda s: str(s['row']['sample_id']))
         if unique_music:
@@ -101,12 +105,15 @@ def build_balanced_plan(catalog, *, samples_per_source=4, seeds=(42, 1729), seco
             # 同一音频的不同动作片段不能充当新增的独立音乐。
             unique={}
             for sample in samples:unique.setdefault(sample['row']['source_audio_sha256'],sample)
-            samples=list(unique.values())
-        count=len(samples) if all_music else samples_per_source
+            samples=[sample for sample in unique.values() if sample['group_id'] not in seen_groups
+                     and sample['row']['source_audio_sha256'] not in seen_audio]
+        count=len(samples) if all_music else samples_per_source[source] if per_source else samples_per_source
         _require(len(samples) >= count>0, f'Insufficient periodic held-out samples: {source}')
         source_counts[source]=count
         for index in sorted(rng.choice(len(samples), size=count, replace=False).tolist()):
-            chosen.add((source, str(samples[index]['row']['sample_id'])))
+            sample=samples[index]
+            chosen.add((source, str(sample['row']['sample_id'])))
+            seen_groups.add(sample['group_id']);seen_audio.add(sample['row']['source_audio_sha256'])
     plan = copy.deepcopy(full)
     tasks = [t for t in plan['tasks'] if (t['dataset'], t['sample_id']) in chosen]
     if start_mode=='mixed':
@@ -431,8 +438,10 @@ def snapshot_critic_transition(row):
         executed_control_steps=row.executed_control_steps, control_tick_begin=row.control_tick_begin,
         control_tick_end=row.control_tick_end, terminated=row.terminated, truncated=row.truncated,
         transition_valid=row.transition_valid, old_value=0., next_value=0.,
-        metadata={key: copy.deepcopy(row.metadata[key]) for key in
-                  ('remaining_music_seconds', 'next_remaining_music_seconds', 'event_reward') if key in row.metadata})
+        metadata={**{key:copy.deepcopy(row.metadata[key]) for key in
+                  ('remaining_music_seconds','next_remaining_music_seconds','event_reward') if key in row.metadata},
+            'critic_context':context(row.metadata['critic_context']),
+            'next_critic_context':context(row.metadata['next_critic_context'])})
 
 
 def build_fixed_critic_reference(transitions, critic, device, *, gamma_upper=.99, lambda_upper=.95):
@@ -451,7 +460,7 @@ def build_fixed_critic_reference(transitions, critic, device, *, gamma_upper=.99
     finally:
         for name, child in critic.named_modules():
             child.training = modes[name]
-    records = [dict(context=row.context, remaining_music_seconds=row.metadata['remaining_music_seconds'],
+    records = [dict(context=row.context, critic_context=row.metadata['critic_context'], remaining_music_seconds=row.metadata['remaining_music_seconds'],
                     target=float(targets['returns'][index]), initial_prediction=row.old_value,
                     identity=row.identity, control_tick_begin=row.control_tick_begin,
                     control_tick_end=row.control_tick_end)
@@ -462,7 +471,7 @@ def build_fixed_critic_reference(transitions, critic, device, *, gamma_upper=.99
                                identity=r['identity'], control_tick_begin=r['control_tick_begin'],
                                control_tick_end=r['control_tick_end']) for r in records]).encode())
     for record in records:
-        for key, value in sorted(record['context'].items()):
+        for key, value in sorted(record['critic_context'].items()):
             tensor = value.contiguous()
             digest.update(str((key, str(tensor.dtype), tuple(tensor.shape))).encode())
             digest.update(tensor.reshape(-1).view(torch.uint8).numpy().tobytes())
@@ -480,7 +489,7 @@ def fixed_critic_diagnostic(critic, reference):
         critic.eval()
         with torch.no_grad():
             for record in reference['records']:
-                context = {key: value.to(device) for key, value in record['context'].items()}
+                context = {key: value.to(device) for key, value in record['critic_context'].items()}
                 predictions.append(float(critic(context, torch.tensor([record['remaining_music_seconds']], device=device))[0]))
                 targets.append(float(record['target']))
     finally:
@@ -579,8 +588,8 @@ def fixed_chain_drift(policy, reference, *, include_values=False):
                 trace = record['trace']
                 _require(trace['chain'].shape[1] == policy.steps+1, 'Fixed reference denoising steps differ')
                 context = {k: v.to(device) for k, v in trace['conditions'].items()}
-                prepared = policy.prepare_conditions(context) if hasattr(policy, 'prepare_conditions') else None
-                for step in range(policy.steps):
+                prepared = policy.prepare_conditions(context,include_frozen=False)
+                for step in policy.trainable_steps:
                     kwargs = {} if prepared is None else dict(prepared=prepared)
                     current = policy.transition_parameters(context, trace['chain'][:, step].to(device), step, **kwargs)
                     old_mean, old_std = trace['old_means'][:, step].to(device).double(), trace['old_stds'][:, step].to(device).double()
@@ -592,7 +601,7 @@ def fixed_chain_drift(policy, reference, *, include_values=False):
         for name, child in policy.actor.named_modules():
             child.training = modes[name]
     stats = _stats(values)
-    result = dict(reference_sha256=reference['reference_sha256'], internal_transition_count=len(values),
+    result = dict(gaussian_steps=list(policy.trainable_steps),frozen_identity=policy.assert_frozen_identity(),reference_sha256=reference['reference_sha256'], internal_transition_count=len(values),
         mean_joint_kl=stats['mean'], p95_joint_kl=stats['p95'], max_joint_kl=stats['max'],
         diagnostic_scope='fixed_initial_chain_gaussian_drift_not_physics_quality')
     if include_values:

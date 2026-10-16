@@ -1,11 +1,9 @@
-"""用已采完整歌曲的相同MC数据对照预训练时序Critic与原独立MLP Critic。
+"""在同一套新奖励完整MC轨迹上复核非对称Critic初始化和预热权重。
 
-只读取固定Stage1 Actor下32条训练和32条独立验证物理episode，不推进Isaac，不
-重采轨迹，不把TD bootstrap标签当真实MC。预训练方案读取已经通过验证的实际
-价值权重；原Critic从零训练相同256 epoch/全局1024批，使用同一真实交互预算。
-只输入生成动作之前的十个条件及剩余音乐时长，校验Actor和冻结副本不被更新。
-输出各自独立MC的MSE/EV、音乐和前缀顺序敏感性、GPU时间及实际权重；此工具
-仅做对照，不会切换主训练网络或解冻其预训练编码器。
+仅使用新的90维真实历史MC银行及新schema预热成果，对照同一三编码器网络在初始化
+和完成预热后的独立验证MSE/EV、音乐/前缀顺序敏感性。MC/TD混合候选的拟合与选择
+由主预热流程完成，这里不再保留旧MLP或旧48维Critic训练入口，也不推进Isaac。
+固定Actor、行为核、数据源SHA必须一致，输出实际价值权重以支持复核。
 """
 from __future__ import annotations
 import argparse
@@ -21,7 +19,6 @@ ROOT=Path(__file__).resolve().parents[1];sys.path.insert(0,str(ROOT))
 import torch
 import torch.distributed as dist
 from gem.closedloop.dppo.budget import atomic_json
-from gem.closedloop.dppo.critic import UpperCritic
 from gem.closedloop.dppo.collectives import DistributedCollectives
 from gem.closedloop.dppo.evaluation import _model_fingerprint
 from gem.closedloop.dppo.mc_calibration import ValueConditionCache, independent_mc_metrics
@@ -35,7 +32,7 @@ from gem.closedloop.dppo.updater import critic_update
 class Bank:
     def __init__(self,path,actor_fingerprint,kernel):
         data=torch.load(path,map_location='cpu',weights_only=False,mmap=True)
-        if (data['schema']!='genmo.complete_episode.value_dataset.v1' or data['policy_version']!=0
+        if (data['schema']!='genmo.stage2.causal_tracking.complete_episode.value_dataset.v1' or data['policy_version']!=0
                 or data['actor_fingerprint']!=actor_fingerprint or data['kernel']!=kernel
                 or data['report']['pending_episodes'] or data['report']['excluded']):
             raise ValueError('Complete fixed Stage1 MC identity or terminal boundary differs')
@@ -48,7 +45,7 @@ class Bank:
 @torch.no_grad()
 def order_sensitivity(c,bank):
     rows=bank.rows[:32];cache=ValueConditionCache(rows,c.distributed.device)
-    context=cache.context(rows);remaining=cache.get('remaining_music_seconds',rows)
+    context=cache.critic_context(rows);remaining=cache.get('remaining_music_seconds',rows)
     base=c.critic(context,remaining);report={}
     for name,field,mask_key in [('music','music_features','music_valid'),('prefix','known_qpos30','known_qpos30_mask')]:
         changed={k:v.clone() for k,v in context.items()};mask=context[mask_key]
@@ -70,7 +67,7 @@ def validation_points(c, bank):
     predictions=[]
     for start in range(0,len(bank.rows),128):
         rows=bank.rows[start:start+128];cache=ValueConditionCache(rows,c.distributed.device)
-        predictions.extend(c.critic(cache.context(rows),cache.get('remaining_music_seconds',rows)).cpu().tolist())
+        predictions.extend(c.critic(cache.critic_context(rows),cache.get('remaining_music_seconds',rows)).cpu().tolist())
     parts=c.distributed.all_gather_object(dict(predictions=predictions,targets=bank.targets.tolist()))
     return dict(predictions=[x for p in parts for x in p['predictions']],targets=[x for p in parts for x in p['targets']])
 
@@ -78,7 +75,7 @@ def validation_points(c, bank):
 def main():
     p=argparse.ArgumentParser(description=__doc__)
     p.add_argument('--mc-run',type=Path,required=True);p.add_argument('--artifact',type=Path,required=True)
-    p.add_argument('--output',type=Path,required=True);p.add_argument('--epochs',type=int,default=256)
+    p.add_argument('--output',type=Path,required=True)
     a=p.parse_args();rank=int(os.environ['LOCAL_RANK'])
     torch.cuda.set_device(rank);torch.set_num_threads(4);torch.manual_seed(42)
     torch.backends.cuda.matmul.allow_tf32=False
@@ -98,21 +95,17 @@ def main():
     c=SimpleNamespace(distributed=d,policy=SimpleNamespace(kernel_config=kernel),state=dict(policy_version=0))
     report=dict(schema='genmo.complete_MC.critic_architecture_comparison',source=str(a.mc_run),
         artifact_sha256=file_sha256(a.artifact),fixed_actor=fingerprint,real_training_states=len(manifest),cases=[])
-    for kind in ('pretrained_temporal','legacy_mlp_control'):
+    for kind in ('stage1_initialized_asymmetric','mc_preheated_asymmetric'):
         torch.manual_seed(42)
-        c.critic=(PretrainedConditionCritic(actor,dimension=256,layers=2,heads=4,freeze_encoders=True)
-            if kind=='pretrained_temporal' else UpperCritic(qpos_mean=actor.endecoder.mean,qpos_std=actor.endecoder.std,
-            proprio_scales=tuple(train.model.proprio_scales))).to(d.device)
+        settings=config['stage10']['critic']
+        c.critic=PretrainedConditionCritic(actor,dimension=settings['dimension'],layers=settings['layers'],
+            heads=settings['heads'],history_scales=settings['history_scales']).to(d.device)
         d.broadcast_module(c.critic);start=time.perf_counter();training=None
-        if kind=='pretrained_temporal':c.critic.load_state_dict(artifact['critic'])
-        else:
-            optimizer=torch.optim.AdamW(c.critic.parameters(),lr=config['stage10']['critic']['learning_rate'],weight_decay=0.)
-            training=critic_update(c.critic,optimizer,rows,dict(returns=targets),ValueConditionCache(rows,d.device),manifest,
-                distributed=d,generator=torch.Generator().manual_seed(config['stage10']['seed']+2002),epochs=a.epochs,batch=1024)
+        if kind=='mc_preheated_asymmetric':c.critic.load_state_dict(artifact['critic'])
         c.critic.eval();metrics=independent_mc_metrics(c,banks['val'])
         item=dict(architecture=kind,validation_MC=metrics,order_sensitivity=order_sensitivity(c,banks['val']),
             validation_points=validation_points(c,banks['val']),
-            training=training,training_updates=(artifact['selected_updates']if training is None else training['optimizer_steps']),
+            training=training,training_updates=artifact['selected_updates'] if kind=='mc_preheated_asymmetric' else 0,
             wall_seconds=max(d.all_gather_object(time.perf_counter()-start)))
         report['cases'].append(item)
         root_call(d,lambda:torch.save(immutable_cpu_snapshot(c.critic.state_dict()),a.output/(kind+'.pt')))

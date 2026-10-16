@@ -28,6 +28,10 @@ class ValueConditionCache:
     def __init__(self, rows, device):self.rows=rows;self.device=torch.device(device)
     def context(self, rows):
         return {k:torch.cat([r.context[k] for r in rows]).to(self.device) for k in rows[0].context}
+    def critic_context(self,rows):
+        return {key:torch.cat([r.metadata['critic_context'][key] for r in rows]).to(self.device)
+                for key in rows[0].metadata['critic_context']}
+
     def get(self, key, rows):
         if key!='remaining_music_seconds':raise KeyError(key)
         return torch.tensor([r.metadata[key] for r in rows],device=self.device,dtype=torch.float32)
@@ -43,7 +47,11 @@ def mc_execution_counts(used,world_execution=None):
 
 
 def complete_mc_plan(catalog, split, *, samples_per_source, seeds, selection_seed):
-    """训练bank按独立音乐选最长配对片段，验证bank保留固定计划以便纵向比较。"""
+    """两个bank均按独立音乐选最长可用配对样本；验证规模允许显式分来源配额。"""
+    if split!='train':
+        from .periodic_monitor import build_balanced_plan
+        return build_balanced_plan(catalog,samples_per_source=samples_per_source,seeds=seeds,
+            selection_seed=selection_seed,seconds=None,unique_music=True,split=split)
     selected=catalog
     if split=='train':
         from gem.closedloop.evaluation_music import select_train_music
@@ -139,7 +147,7 @@ def collect_complete_bank(c, label, split, *, samples_per_source, seeds):
             c.state['training_control_steps']+=consumed[0]
             c.state['training_physics_steps']+=consumed[1]
         bank.training_data(policy_version=c.state['policy_version'],kernel=c.policy.kernel_config)
-        bank_record=dict(schema='genmo.complete_episode.value_dataset.v1',report=bank.report(),
+        bank_record=dict(schema='genmo.stage2.causal_tracking.complete_episode.value_dataset.v1',report=bank.report(),
             execution_work=dict(actual_GMT_controls=execution_counts[0],active_physics_steps=execution_counts[1],
                 allocated_physics_steps=execution_counts[2],inactive_physics_steps=execution_counts[2]-execution_counts[1]),
             actor_fingerprint=actor_before,policy_version=c.state['policy_version'],kernel=c.policy.kernel_config,
@@ -163,7 +171,7 @@ def independent_mc_metrics(c, bank):
     predictions=[];c.critic.eval()
     for start in range(0,len(rows),128):
         part=rows[start:start+128];cache=ValueConditionCache(part,c.distributed.device)
-        predictions.extend(c.critic(cache.context(part),cache.get('remaining_music_seconds',part)).cpu().tolist())
+        predictions.extend(c.critic(cache.critic_context(part),cache.get('remaining_music_seconds',part)).cpu().tolist())
     shards=c.distributed.all_gather_object(dict(predictions=predictions,targets=targets.tolist(),bank=bank.report()))
     p=[v for r in shards for v in r['predictions']];t=[v for r in shards for v in r['targets']]
     if not t:raise ValueError('No complete nonadministrative MC validation episode')

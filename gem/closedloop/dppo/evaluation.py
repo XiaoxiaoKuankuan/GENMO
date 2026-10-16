@@ -224,7 +224,7 @@ def _decision_evidence(result, index):
     for reward, detail in zip(rewards, details):
         if detail.get('transition_valid') is not True:
             raise ValueError('Invalid reward detail cannot enter evaluation statistics')
-        if detail.get('version') not in {'stage9.execution_reward.v2','stage10.physical_reward.v1'} or detail.get('activity', {}).get('valid') is not True:
+        if detail.get('version') != 'stage2.gmt8_reference_limits.v1' or detail.get('activity', {}).get('valid') is not True:
             raise ValueError('Evaluation requires current reward version and valid paired activity')
         if not math.isclose(_number(detail['dt_s'], 'dt'), .02, abs_tol=1e-12):
             raise ValueError('Evaluation control intervals must be 50Hz')
@@ -249,12 +249,15 @@ def _decision_evidence(result, index):
             for key, value in detail['components'].get(group, {}).get('raw', {}).items():
                 if isinstance(value, (int, float, np.integer, np.floating)) and not isinstance(value, bool):
                     raw_errors[key] = _number(value, key)
+        for key,value in detail['diagnostics']['physical_state'].items():
+            if key.endswith(('_m','_rad')):raw_errors[key]=_number(value,key)
         activity = {key: _plain(detail.get('activity', {}).get(key)) for key in
                     ('valid', 'actual_activity_rad_s', 'target_activity_rad_s', 'gate', 'intensity_score',
                      'window_count', 'window_complete', 'window_begin_tick', 'window_end_tick')}
         controls.append({'tick': int(detail['tick']), 'dt_s': _number(detail['dt_s'], 'dt'),
                          'reward': actual, 'continuous_reward': continuous, 'event_reward': actual-continuous,
-                         'components': components, 'raw_errors': raw_errors, 'activity': activity})
+                         'components': components, 'raw_errors': raw_errors, 'activity': activity,
+                         'joint_limit_diagnostics':_plain(detail['joint_limit_diagnostics'])})
     zero_step_event = _number(metadata.get('event_reward', 0.), 'zero step event')
     event_penalty = _number(metadata.get('event_penalty_total', zero_step_event), 'event penalty')
     total = sum(_number(value, 'reward') for value in rewards) + zero_step_event
@@ -285,6 +288,7 @@ def _decision_evidence(result, index):
             'rejection': _plain(metadata.get('rejection')), 'latency_seconds': _number(metadata['latency_seconds'], 'latency'),
             'commit_seconds': _number(metadata.get('commit_seconds', 0.), 'commit latency'), 'prefix_frames': prefix,
             'generation_horizon_frames':frames,'new_reference_frames':frames-prefix,
+            'generated_joint_limit_diagnostics':_plain(generated['joint_limit_diagnostics']),
             'events': _plain(metadata.get('events', [])), 'raw_sample_path': str(metadata.get('raw_sample_path', '')),
             'controls': controls}
 
@@ -309,7 +313,10 @@ def _aggregate_group(episodes):
     total_reward = sum(episode['reward_sum'] for episode in valid)
     rejections = [item for item in decisions if item['rejection']]
     failures = sum(bool(episode['physical_failure']) for episode in valid)
-    return {'episode_count': len(episodes), 'valid_episode_count': len(valid),
+    from .joint_limits import summarize_boundaries
+    limits=summarize_boundaries([r['joint_limit_diagnostics'] for r in controls],
+        generated=[d['generated_joint_limit_diagnostics'] for d in decisions])
+    return {'joint_limits':limits,'episode_count': len(episodes), 'valid_episode_count': len(valid),
             'infrastructure_failure_count': len(episodes)-len(valid), 'physical_failure_count': failures,
             'physical_failure_rate': failures/len(valid) if valid else None,
             'music_completion_count': sum(episode['end_reason'] in ('music_end', 'task_complete') for episode in valid),

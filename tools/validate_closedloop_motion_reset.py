@@ -26,7 +26,7 @@ sys.path.insert(0, str(ROOT))
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--config', type=Path, default=ROOT / 'configs/closedloop/stage10_server1.yaml')
+    parser.add_argument('--config', type=Path, default=ROOT / 'configs/closedloop/stage2_random20_server2.yaml')
     parser.add_argument('--gmt-repo', type=Path, required=True)
     parser.add_argument('--output', type=Path, required=True)
     parser.add_argument('--case', action='append', help='训练来源/样本名/音乐起点秒数，可重复指定')
@@ -99,11 +99,15 @@ def main():
                 evidence = actual['reset_initialization']
                 assert evidence['actual_state_verified'] and int(actual['history_append_count']) == 1
                 assert int(np.asarray(actual['history_valid']).sum()) == 1
+                assert actual['tracking_history_schema'] == 'gmt.causal_tracking_history90.v1'
+                assert np.asarray(actual['tracking_history_values']).shape == (50, 90)
+                assert int(np.asarray(actual['tracking_history_valid']).sum()) == 1
+                np.testing.assert_array_equal(actual['tracking_history_ticks'], actual['tracking_reference_ticks'])
                 assert evidence['music_start_frame'] == packet['music_start_frame']
                 for key, before in neighbor.items():
                     torch.testing.assert_close(getattr(robot.data, key)[1], before, atol=1e-6, rtol=0)
                 after = world.snapshots([1])[0]
-                for key in ('tick', 'history_values', 'history_valid', 'history_ticks', 'history_append_count'):
+                for key in ('tick', 'history_values', 'history_valid', 'history_ticks', 'history_append_count', 'tracking_history_values', 'tracking_history_valid', 'tracking_history_ticks'):
                     np.testing.assert_array_equal(after[key], history[key])
                 for buffer, before, pushes in buffers:
                     torch.testing.assert_close(buffer._buffer[:, 1], before, atol=0, rtol=0)
@@ -114,7 +118,9 @@ def main():
                 final = world.snapshots([0])[0]
                 assert int(final['history_append_count']) == final['tick'] // 12 + 1
                 assert np.isfinite(final['history_values']).all()
-                item = dict(case=case, reset_state_verified=True, neighbor_state_and_history_unchanged=True,
+                assert np.isfinite(final['tracking_history_values']).all()
+                np.testing.assert_array_equal(final['tracking_history_ticks'], final['tracking_reference_ticks'])
+                item = dict(tracking_history90_verified=True, case=case, reset_state_verified=True, neighbor_state_and_history_unchanged=True,
                     music_start_seconds=packet['music_start_frame'] / 30, reset_initialization=evidence,
                     warmup_completed=final['tick'] == 600 and not final['done'],
                     actual_warmup_control_steps=final['tick'] // 12, terminated=bool(final['done']),

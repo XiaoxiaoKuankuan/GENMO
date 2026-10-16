@@ -24,7 +24,7 @@ from gem.closedloop.dppo.training import _sketch_cosine
 from gem.closedloop.dppo.training_config import configuration
 
 ROOT = Path(__file__).resolve().parents[3]
-CONFIG = ROOT / 'configs/closedloop/stage10_server1.yaml'
+CONFIG = ROOT / 'configs/closedloop/stage2_asymmetric_server2.yaml'
 
 
 def _targets():
@@ -160,7 +160,7 @@ def test_invalid_learning_rate_control_is_rejected(tmp_path, update):
 def test_kl_adaptive_accepts_maximum_step_metric_below_its_limit(tmp_path):
     c = yaml.safe_load(CONFIG.read_text())
     c['stage10']['training'].update(actor_lr_control='kl_adaptive', actor_lr_bounds=[5e-8, 2e-6],
-        kl_target_coordinate=.004, kl_control_metric='maximum_step_mean_coordinate_kl')
+        kl_target_coordinate=.0004, kl_control_metric='maximum_step_mean_coordinate_kl')
     path = tmp_path / 'max_step.yaml'
     path.write_text(yaml.safe_dump(c))
     assert configuration(path)['stage10']['training']['kl_control_metric'] == 'maximum_step_mean_coordinate_kl'

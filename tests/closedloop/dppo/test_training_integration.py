@@ -15,6 +15,7 @@ from types import SimpleNamespace
 
 import pytest
 import torch
+from tests.closedloop.test_stage1_actor import actor_factory, _activate_branches, _conditions
 
 from gem.closedloop.dppo import evaluation_runtime, training
 from gem.closedloop.dppo.training_checkpoint import file_sha256
@@ -75,7 +76,7 @@ def test_deployment_delay_rejects_unmeasured_forward_contract(changed):
     from pathlib import Path
     import yaml
     root = Path(training.__file__).resolve().parents[3]
-    profile = yaml.safe_load((root / 'configs/closedloop/stage10_server1.yaml').read_text())['timing']['deployment_profile']
+    profile = yaml.safe_load((root / 'configs/closedloop/stage2_asymmetric_server2.yaml').read_text())['timing']['deployment_profile']
     execution = copy.deepcopy(profile['numerical_execution'])
     # 旧标定文件的展示文字不影响真实算子；纯反向实现不属于单请求前向计时。
     execution.update(mode='compensated_tensorcore_fp32_storage_candidate', weight_gradient='new_backward')
@@ -91,27 +92,34 @@ def test_deployment_delay_rejects_unmeasured_forward_contract(changed):
         training._validate_calibrated_execution(profile, execution, assets)
 
 
-def test_k8_and_full20_keep_matched_epoch_orders_and_old_chain(tmp_path, monkeypatch):
+def test_four_step_microbatches_keep_epoch_orders_old_chain_and_complete_logs(tmp_path, actor_factory):
     from gem.closedloop.dppo import updater
     from gem.closedloop.dppo.collectives import DistributedCollectives
     from gem.closedloop.dppo.gradient_merge import BCGradientController
     from gem.closedloop.dppo.tensor_cache import RolloutTensorCache
-    from tests.closedloop.dppo.test_denoising_sampling import TwentySteps, samples
-    from tests.closedloop.dppo.test_optimization_support import Anchor
+    from gem.closedloop.dppo.frozen_prefix import FrozenPrefixPolicy
+    from gem.closedloop.dppo.dual_collector import split_trace
+    from tests.closedloop.dppo.test_asymmetric_critic import tracking_context
+    from gem.closedloop.contracts import STAGE1_CONDITION_KEYS
     import torch.distributed as dist
 
-    # 小高斯策略没有预训练条件编码器；只替换该缓存，不替换实际概率、PPO、
-    # 梯度归约、BC或Adam，以检验两轮真实更新中的随机顺序及工作量。
-    class NoConditionEncoder:
-        bank = None
-        def __init__(self, *args): pass
-        def prime(self, rows): pass
-        def backward(self): pass
+    class Anchor:
+        def __init__(self): self.calls = 0
+        def backward(self, actor, weight):
+            self.calls += 1
+            loss = sum(p.square().mean() for p in actor.parameters() if p.requires_grad)
+            (loss * weight).backward()
+            return dict(batch_size=2, loss=float(loss.detach()), samples=[[{'dataset_id':'fixture'}]*2])
 
-    monkeypatch.setattr(updater, 'ConditionGraphCache', NoConditionEncoder)
-    policy = TwentySteps()
-    policy.precision = 'native_fp32'
-    data = [copy.deepcopy(row) for _ in range(4) for row in samples(policy)]
+    actor, batch = actor_factory(motion_frames=60); _activate_branches(actor)
+    policy = FrozenPrefixPolicy(actor,std_schedule=[.001]*15+[.04,.06,.08,.1,0.],generation_frames=60)
+    privileged = tracking_context(_conditions(batch))
+    context = {k:privileged[k] for k in STAGE1_CONDITION_KEYS}
+    trace = policy.sample_rollout(context,generator=torch.Generator().manual_seed(17))
+    data = [SimpleNamespace(context={k:v[i:i+1].clone() for k,v in context.items()},identity={},
+        chain=trace['chain'][i].clone(),old_log_prob=trace['old_log_probs'][i].clone(),free_mask=trace['free_mask'][i].clone(),
+        metadata=dict(critic_context={k:v[i:i+1].clone() for k,v in privileged.items()},
+            sampler_trace=split_trace(trace,i,2),remaining_music_seconds=5.)) for _ in range(4) for i in range(2)]
     old_chain = torch.stack([row.chain.clone() for row in data])
     base = copy.deepcopy(policy.actor.state_dict())
     targets = dict(advantages=torch.tensor([1., -.6] * 4))
@@ -120,16 +128,20 @@ def test_k8_and_full20_keep_matched_epoch_orders_and_old_chain(tmp_path, monkeyp
     dist.init_process_group('gloo', init_method=(tmp_path / 'one_rank').as_uri(), rank=0, world_size=1)
     cache = RolloutTensorCache(data, targets, 'cpu')
     try:
-        for count in (8, 20):
+        for microbatch in (3, 8):
             policy.actor.load_state_dict(base)
             generator = torch.Generator().manual_seed(731)
             anchor = Anchor()
             report = updater.actor_update(policy, torch.optim.AdamW(policy.actor.parameters(), lr=1e-5),
                 data, targets, cache, manifest, BCGradientController(initial=.01),
                 distributed=DistributedCollectives(0, 1), anchor=anchor, generator=generator,
-                sampled_steps=count, minibatch_chains=2, microbatch=7, soft_kl=None)
+                sampled_steps=4, minibatch_chains=2, microbatch=microbatch, soft_kl=None)
             assert report['optimizer_steps'] == anchor.calls == 8
-            assert report['internal_sample_visits'] == 8 * count * 2
+            assert report['internal_sample_visits'] == 8 * 4 * 2
+            assert report['actual_global_bc_samples'] == 16
+            assert report['bc_samples_by_source'] == {'fixture':16}
+            for step in report['steps']:
+                assert [r['step'] for r in step['per_denoising_step'] if r['visits']] == [15,16,17,18]
             reports.append(report)
             states.append(generator.get_state().clone())
     finally:
@@ -142,16 +154,17 @@ def test_k8_and_full20_keep_matched_epoch_orders_and_old_chain(tmp_path, monkeyp
     assert torch.equal(torch.stack([row.chain for row in data]), old_chain)
 
 
-@pytest.mark.parametrize('fault', [None, 'assets', 'kernel', 'schema', 'hard_kl', 'soft_kl', 'partial', 'nonfinite'])
+@pytest.mark.parametrize('fault', [None, 'assets', 'kernel', 'schema', 'hard_kl', 'soft_kl', 'partial', 'nonfinite', 'binding'])
 def test_evaluation_actor_load_requires_complete_bound_update(tmp_path, fault):
     from gem.closedloop.dppo.training_checkpoint import load_evaluation_actor
     actor = torch.nn.Linear(3, 2)
     original = copy.deepcopy(actor.state_dict())
     candidate = {name: value + .25 for name, value in original.items()}
     kernel, assets = {'steps': 20}, {'checkpoint': 'source-sha'}
-    payload = dict(schema='genmo.closedloop.stage10.actor_evaluation', evaluation_only=True,
+    binding=dict(reward={'version':'new_reward'},source_files={'code':'sha'},timing={'budget':.32})
+    payload = dict(schema='genmo.stage2.asymmetric_actor_evaluation.v1', evaluation_only=True,
         complete_update_and_soft_kl_passed=True, actor=candidate, kernel=kernel,
-        source_identity={'assets': assets}, hard_kl={'passed': True}, source_case_sha256='a' * 64,
+        source_identity=dict(assets=assets,**binding), hard_kl={'passed': True}, source_case_sha256='a' * 64,
         update={'optimizer_steps': 8, 'planned_optimizer_steps': 8})
     if fault == 'assets': payload['source_identity'] = {'assets': {'checkpoint': 'other'}}
     if fault == 'kernel': payload['kernel'] = {'steps': 8}
@@ -160,14 +173,15 @@ def test_evaluation_actor_load_requires_complete_bound_update(tmp_path, fault):
     if fault == 'soft_kl': payload['complete_update_and_soft_kl_passed'] = False
     if fault == 'partial': payload['update']['optimizer_steps'] = 1
     if fault == 'nonfinite': candidate['weight'][0, 0] = float('nan')
+    if fault == 'binding': payload['source_identity']['reward']={'version':'other_reward'}
     path = tmp_path / 'evaluation_actor.pt'
     torch.save(payload, path)
     if fault:
         with pytest.raises(ValueError):
-            load_evaluation_actor(path, actor=actor, kernel=kernel, assets=assets)
+            load_evaluation_actor(path, actor=actor, kernel=kernel, assets=assets,execution_binding=binding)
         assert all(torch.equal(value, actor.state_dict()[name]) for name, value in original.items())
     else:
-        result = load_evaluation_actor(path, actor=actor, kernel=kernel, assets=assets)
+        result = load_evaluation_actor(path, actor=actor, kernel=kernel, assets=assets,execution_binding=binding)
         assert result['sha256'] == file_sha256(path)
         assert all(torch.equal(value, actor.state_dict()[name]) for name, value in candidate.items())
 
@@ -273,6 +287,7 @@ def test_critic_recomputes_trainable_encoder_after_each_update(frozen):
         def __init__(self):
             super().__init__()
             self.freeze_encoders = frozen
+            self.cache_frozen_conditions = frozen
             self.encoder = torch.nn.Linear(2, 3)
             self.head = torch.nn.Linear(3, 1)
             self.encoder.requires_grad_(not frozen)
@@ -296,7 +311,7 @@ def test_critic_recomputes_trainable_encoder_after_each_update(frozen):
     rows = [SimpleNamespace(index=i) for i in range(4)]
     features = torch.arange(8, dtype=torch.float32).reshape(4, 2) / 8
     cache = SimpleNamespace(device=torch.device('cpu'),
-        context=lambda selected: dict(feature=features[[row.index for row in selected]]),
+        critic_context=lambda selected: dict(feature=features[[row.index for row in selected]]),
         get=lambda key, selected: torch.ones(len(selected)))
     manifest = [dict(owner_rank=0, local_index=i, valid=True, has_free=True) for i in range(4)]
     distributed = SimpleNamespace(rank=0, world_size=1, all_gather_object=lambda value: [value],
@@ -314,9 +329,12 @@ def test_critic_recomputes_trainable_encoder_after_each_update(frozen):
 def test_generation_delivers_conditions_on_the_sampling_device(device_trace):
     from gem.closedloop.dppo.vector_generation import generate_batch
     from tests.closedloop.dppo.test_data_learning import context
+    from gem.closedloop.contracts import GMT_EXPECTED_JOINT_ORDER
+    import numpy as np
     device = torch.device('cuda', torch.cuda.current_device()) if torch.cuda.is_available() else torch.device('cpu')
     actor = torch.nn.Linear(1, 1).to(device)
-    actor.endecoder = SimpleNamespace(codec=SimpleNamespace(apply_world_anchor=lambda value, anchor: value))
+    actor.endecoder = SimpleNamespace(codec=SimpleNamespace(apply_world_anchor=lambda value, anchor: value),
+        kinematics=SimpleNamespace(joint_order=GMT_EXPECTED_JOINT_ORDER))
 
     def sample(conditions, **kwargs):
         count = len(conditions['decision_time'])
@@ -328,7 +346,11 @@ def test_generation_delivers_conditions_on_the_sampling_device(device_trace):
     builder = SimpleNamespace(build_many=lambda *args: ([context(), context()],
         [dict(world_anchor=[0., 0., 0.]), dict(world_anchor=[0., 0., 0.])]))
     policy = SimpleNamespace(actor=actor, sample_rollout=sample, last_sample_timing={})
-    packets = [dict(builder=builder, snapshot={}, reservation=dict(request_id=str(i)), music=None,
+    snapshot=dict(joint_names=GMT_EXPECTED_JOINT_ORDER,joint_hard_limits_rad=np.tile([-2.,2.],(21,1)),
+        joint_soft_limits_rad=np.tile([-1.8,1.8],(21,1)),tracking_history_schema='gmt.causal_tracking_history90.v1',
+        tracking_history_values=np.zeros((50,90)),tracking_history_valid=np.ones(50,dtype=bool),
+        tracking_history_ticks=np.arange(12,601,12),tracking_reference_ticks=np.arange(12,601,12))
+    packets = [dict(builder=builder, snapshot=snapshot, reservation=dict(request_id=str(i)), music=None,
                     seed=i+17, decision=0) for i in range(2)]
     outputs, _ = generate_batch(policy, packets, shared_storage=True, device_trace=device_trace)
     expected = device if device_trace else torch.device('cpu')

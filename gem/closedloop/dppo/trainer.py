@@ -82,10 +82,10 @@ def populate_values(transitions, critic, device, *, critic_version=None, batch_s
     critic.eval()
     work = []
     for row in transitions:
-        work.append((row, 'old_value', row.context, row.metadata['remaining_music_seconds']))
+        work.append((row, 'old_value', row.metadata['critic_context'], row.metadata['remaining_music_seconds']))
         row.next_value = 0.
         if row.next_context is not None and not row.terminated:
-            work.append((row, 'next_value', row.next_context, row.metadata['next_remaining_music_seconds']))
+            work.append((row, 'next_value', row.metadata['next_critic_context'], row.metadata['next_remaining_music_seconds']))
     with torch.no_grad(), measure('critic.fixed_value_snapshot', gpu=True):
         for start in range(0, len(work), batch_size):
             chunk = work[start:start+batch_size]
@@ -193,14 +193,16 @@ def _validate_actor_transitions(policy, transitions):
             raise ValueError('Rollout chain differs from the configured denoising steps')
         if item.chain.dtype != torch.float32 or item.old_log_prob.dtype != torch.float64:
             raise TypeError('Rollout chain/log probability precision changed')
-        if item.old_log_prob.shape != (policy.steps,):
-            raise ValueError('Old log probabilities must match all denoising steps')
+        if item.old_log_prob.shape != (len(policy.stochastic_steps),):
+            raise ValueError('Old log probabilities must match the nineteen stochastic transitions')
         expected = item.context['future_valid'][..., None] & ~item.context['known_qpos30_mask']
         if not torch.equal(item.free_mask.cpu(), expected[0].cpu()):
             raise ValueError('Stored free mask differs from the original conditions')
         trace = item.metadata['sampler_trace']
         if trace['kernel_config'] != policy.kernel_config:
             raise ValueError('Rollout and learner stochastic kernel configuration differs')
+        if trace['probability_steps'].tolist() != list(policy.stochastic_steps):
+            raise ValueError('Deterministic final step cannot have a probability density')
         if trace['timestep_map'].tolist() != list(policy.timestep_map):
             raise ValueError('Rollout timestep map differs from the learner')
 
@@ -231,7 +233,7 @@ def probability_check(policy, transitions, *, clip=.01):
         for item in transitions:
             context = {k:v.to(device) for k,v in item.context.items()}
             row = []
-            for step in range(policy.steps):
+            for step in policy.stochastic_steps:
                 current = policy.evaluate_log_probs(context,item.chain[step:step+1].to(device),
                     item.chain[step+1:step+2].to(device),step)
                 delta = current-item.old_log_prob[step].to(device)
@@ -277,7 +279,7 @@ def analytic_kl(policy, transitions, *, distributed=None):
             context={k:v.to(device) for k,v in item.context.items()}
             trace=item.metadata['sampler_trace']
             row, dimension_row = [], []
-            for step in range(policy.steps):
+            for step in policy.stochastic_steps:
                 params=policy.transition_parameters(context,item.chain[step:step+1].to(device),step)
                 old_mu=trace['old_means'][:,step].to(device).double()
                 old_std=trace['old_stds'][:,step].to(device).double()
@@ -333,7 +335,7 @@ def actor_update(policy, optimizer, transitions, targets, *, bc=None, bc_weight=
         index, item = selected[position]
         context={k:v.to(device) for k,v in item.context.items()}
         row=[]
-        for step in range(policy.steps):
+        for step in policy.stochastic_steps:
             new=policy.evaluate_log_probs(context,item.chain[step:step+1].to(device),
                 item.chain[step+1:step+2].to(device),step)
             log_ratio=new-item.old_log_prob[step].detach().to(device)

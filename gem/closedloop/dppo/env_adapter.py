@@ -76,8 +76,11 @@ class UpperEnvironment:
         runtime = config.get('runtime', {})
         self.timing_contract = runtime.get('timing_contract', 'legacy_audit_inclusive.v1')
         from .deployment_clock import MODELED_CLOCK, clock_for_config
-        if self.timing_contract not in {'legacy_audit_inclusive.v1', 'deployment_critical.v2', MODELED_CLOCK}:
+        if self.timing_contract not in {'legacy_audit_inclusive.v1', 'deployment_critical.v2', MODELED_CLOCK,'deployment_calibration.no_execution.v1'}:
             raise ValueError('Unsupported upper environment timing_contract')
+        if self.timing_contract=='deployment_calibration.no_execution.v1':
+            if runtime.get('phase_contract')!='single_request_calibration.v1':raise ValueError('Unmeasured clock is calibration-only')
+            self.latency_budget_s=float(config['timing']['calibration_reservation_seconds'])
         self.deployment_clock = clock_for_config(config)
         if self.deployment_clock is not None:
             self.latency_budget_s = self.deployment_clock.budget_seconds
@@ -334,6 +337,10 @@ class UpperEnvironment:
             if not torch.isfinite(value).all():
                 raise FloatingPointError(f'Nonfinite generated {name}')
             generated[name] = value[0].detach().cpu().numpy().copy()
+        from .joint_limits import generated_boundaries
+        generated['joint_limit_diagnostics']=generated_boundaries(generated['qpos_world'],
+            (batch['future_valid'][0,:,None]&~batch['known_qpos30_mask'][0])[:,9:].cpu().numpy(),
+            self.snapshot,self.policy.actor.endecoder.kinematics.joint_order)
         outputs_ready = time.perf_counter()
         timings['output_conversion_transfer_seconds'] = outputs_ready-sampled
         raw_path = self.output/'raw_samples'/f'{self.phase}_{self.attempt:06d}.pt'
@@ -371,7 +378,9 @@ class UpperEnvironment:
         timings.update(critical_ready_seconds=critical, total_wall_seconds=elapsed,
             excluded_audit_seconds=(timings['trace_copy_seconds']+timings['raw_evidence_seconds']
                 +timings['journal_seconds']) if self.timing_contract != 'legacy_audit_inclusive.v1' else 0.)
-        return dict(context=context,meta=meta,generated=generated,trace=trace,prepared=prepared,
+        from .tracking_context import build_critic_context
+        critic_context=build_critic_context(context,self.snapshot)
+        return dict(context=context,critic_context=critic_context,meta=meta,generated=generated,trace=trace,prepared=prepared,
                     rejection=rejection,elapsed=elapsed,critical_ready_seconds=critical,
                     timing=timings,seed=seed,raw_path=str(raw_path))
 
@@ -490,10 +499,13 @@ class UpperEnvironment:
             zero_step_event = event_reward
         self.decision += 1
         next_context = None
+        next_critic_context = None
         if not terminated:
             # advance 已核验未自动 reset 的终态、episode、精确 tick 与完整反馈；
             # GMT preview 允许同一终态上的只读条件，行政截断仍需合法参考才可自举。
             next_context, _ = yield from self.preview_context_flow()
+            from .tracking_context import build_critic_context
+            next_critic_context=build_critic_context(next_context,self.snapshot)
         trace = generated['trace']
         backend_cpu_totals = {}
         for row in rows:
@@ -507,7 +519,8 @@ class UpperEnvironment:
             for plan in row.get('consumed_plan_ids', []):
                 if plan is not None:
                     first_consumption.setdefault(str(plan),int(row['control_tick_begin']))
-        metadata = dict(remaining_music_seconds=self.remaining_music(start),
+        metadata = dict(critic_context=generated["critic_context"],next_critic_context=next_critic_context,
+            remaining_music_seconds=self.remaining_music(start),
             next_remaining_music_seconds=self.remaining_music(end), sampler_trace=trace,
             physical_episode_administrative_truncation=bool(truncated and not boundary_reached),
             music_start_frame=getattr(self, 'music_start_frame', 0),

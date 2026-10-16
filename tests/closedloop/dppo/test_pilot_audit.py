@@ -7,60 +7,7 @@ import copy
 import pytest
 from tools.eval.audit_stage10_pilots import (add_launcher_timing, episode_metrics,
     paired_statistics,joint_boundary_sample,evaluation_control_steps,summarize_run,
-    summarize_complete_evaluation,compare_models,export_run)
-
-
-def resumed_run(tmp_path):
-    """构造目录名逆序的两次真实发布关系，验证计数衔接而非UUID字典序。"""
-    import hashlib,json
-    root=tmp_path/'run';(root/'sessions').mkdir(parents=True);(root/'metrics').mkdir()
-    (root/'training_identity.json').write_text('{}')
-    checkpoint=root/'final.pt';checkpoint.write_bytes(b'immutable checkpoint fixture')
-    publication=dict(path='final.pt',sha256=hashlib.sha256(checkpoint.read_bytes()).hexdigest(),
-        size_bytes=checkpoint.stat().st_size,iteration=2)
-    (root/'latest.json').write_text(json.dumps(publication))
-    def state(i):
-        return dict(iteration=i,rollouts_completed=i,actor_updates=8*i,critic_updates=32*i,
-            policy_version=i,optimizer_attempts=8*i,training_control_steps=100*i,
-            training_physics_steps=400*i,training_upper_transitions=4*i)
-    for sid,start in [('z_first',0),('a_resume',1)]:
-        directory=root/'sessions'/sid;directory.mkdir();(directory/'resolved_config.yaml').write_text('{}')
-        summary=dict(session_id=sid,run_id='run',status='passed',exit_code=0,source_unchanged=True,
-            initial_state=state(start),final_state=state(start+1),evaluation_artifacts=[],
-            world_shutdown=dict(policy_unchanged=True),checkpoint_shutdown=publication)
-        (directory/'summary.json').write_text(json.dumps(summary))
-        (root/'metrics'/(sid+'.jsonl')).write_text(json.dumps(dict(mode='dppo_bc',state=state(start+1)))+'\n')
-    return root
-
-
-def test_resumed_export_uses_counter_order_and_all_sessions(tmp_path):
-    result=export_run(resumed_run(tmp_path))
-    assert [s['session_id'] for s in result['sessions']]==['z_first','a_resume']
-    assert [r['state']['iteration'] for r in result['training']]==[1,2]
-    assert result['initial_state']['iteration']==0 and result['final_state']['iteration']==2
-
-
-@pytest.mark.parametrize('damage',['missing_summary','counter_gap','failed','source_changed','duplicate_iteration','publication'])
-def test_resumed_export_rejects_incomplete_or_inconsistent_history(tmp_path,damage):
-    import json
-    root=resumed_run(tmp_path);path=root/'sessions/a_resume/summary.json'
-    summary=json.loads(path.read_text())
-    if damage=='missing_summary':path.unlink()
-    else:
-        if damage=='counter_gap':summary['initial_state']['actor_updates']+=1
-        elif damage=='failed':summary['exit_code']=1
-        elif damage=='source_changed':summary['source_unchanged']=False
-        elif damage=='publication':summary['checkpoint_shutdown']['iteration']=1
-        elif damage=='duplicate_iteration':
-            metrics=root/'metrics/a_resume.jsonl';metrics.write_text(metrics.read_text()*2)
-        path.write_text(json.dumps(summary))
-    with pytest.raises(ValueError):export_run(root)
-
-
-def test_earlier_final_evaluation_keeps_its_own_session_interaction_count():
-    data=dict(final_state=dict(training_control_steps=500000))
-    evaluation=dict(label='final_000100',iteration=100,training_control_steps=100000)
-    assert evaluation_control_steps(data,evaluation)==100000
+    summarize_complete_evaluation,compare_models)
 
 
 @pytest.mark.parametrize('damage',[None,'sha','missing','physics'])
@@ -138,7 +85,7 @@ def test_disabled_gradient_diagnostic_is_missing_not_zero_in_completed_report():
             activity_gate=.9,physical_failure=False,end_reason='music_end')
     kl=dict(covered_internal_transitions=40,covered_chains=2,wall_seconds=1.,
         mean_coordinate_kl=.0001,maximum_step_mean_coordinate_kl=.001,objective_clip_fraction=.05,
-        per_denoising_step=[dict(step=i,mean_coordinate_kl=dict(mean=.0001),joint_kl=dict(mean=.1)) for i in range(20)])
+        per_denoising_step=[dict(mean_coordinate_kl=dict(mean=.0001),joint_kl=dict(mean=.1)) for _ in range(20)])
     state=dict(selected_actor_lr=1e-7,training_control_steps=200)
     record=dict(mode='dppo_bc',full20_kl=kl,wall_seconds=5.,actor_seconds=2.,critic_seconds=1.,
         actor=dict(optimizer_steps=1,steps=[dict(learning_rate=1e-7)],gradient_snr=None),
@@ -147,19 +94,12 @@ def test_disabled_gradient_diagnostic_is_missing_not_zero_in_completed_report():
         checkpoint_sha_verified=True,training=[record],evaluations=[dict(rows=before),dict(rows=after)],
         initial_state=state,final_state=state)
     result=summarize_run(data)
-    assert result['full20_coverage_passed']
     assert result['training_metrics']['half_gradient_cosine'] is None
     assert result['gradient_snr_observed_iterations']==0
     record['actor']['gradient_snr']=dict(half_split_cosine_pooled=.02)
     result=summarize_run(data)
     assert result['training_metrics']['half_gradient_cosine']['mean']==.02
     assert result['gradient_snr_observed_iterations']==1
-    kl['covered_internal_transitions']=39
-    with pytest.raises(ValueError,match='20步'):summarize_run(data)
-    kl['covered_internal_transitions']=40;kl['per_denoising_step'].pop()
-    with pytest.raises(ValueError,match='20步'):summarize_run(data)
-    kl['per_denoising_step'].append(dict(kl['per_denoising_step'][0]))
-    with pytest.raises(ValueError,match='20步'):summarize_run(data)
 
 
 def complete_rows():

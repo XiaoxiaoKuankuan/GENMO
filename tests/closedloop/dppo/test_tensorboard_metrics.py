@@ -38,9 +38,10 @@ def training_record(step=1):
                    for count, bc, loss in [(1, 3, 1.), (3, 1, 3.)]]
     return dict(mode='dppo_bc', state={'iteration': step}, collection_by_rank=collections,
         actor={'steps': actor_steps}, critic={'before': {'mse': 9., 'explained_variance': .2}, 'after': {'mse': 1.}},
-        full20_kl={'frozen_prefix': {'steps': 16}, 'maximum_step_mean_coordinate_kl': .2,
-            'per_denoising_step': [dict(step=i, mean_coordinate_kl={'mean': 0. if i < 16 else .2},
-                                       objective_clip_fraction=0. if i < 16 else .1) for i in range(20)]},
+        trainable4_kl={ 'maximum_step_mean_coordinate_kl': .2,
+            'coordinate_kl': {'p95': .35}, 'chain_joint_kl': {'mean': 400.},
+            'per_denoising_step': [dict(step=i, mean_coordinate_kl={'mean': .2},
+                                       objective_clip_fraction=.1) for i in range(15,19)]},
         wall_seconds=20., time_utc='2026-10-16T00:00:00+00:00')
 
 
@@ -69,6 +70,9 @@ def test_training_uses_actual_rank_denominators_and_excludes_frozen_steps():
     assert values['Reward/total_per_second'] == pytest.approx(9.1)
     assert values['Termination/physical_failures_per_1000s'] == pytest.approx(50.)
     assert values['Policy/trainable_kl'] == pytest.approx(.2)
+    assert values['Policy/p95_trainable_kl'] == pytest.approx(.35)
+    assert values['Policy/chain_joint_kl'] == pytest.approx(400.)
+    assert 'Reward/stable' not in EVENT_DEFINITIONS
     assert values['Policy/clipped_objective_fraction'] == pytest.approx(.1)
     assert values['Loss/ppo'] == pytest.approx(2.5)
     assert values['Loss/bc'] == pytest.approx(1.5)
@@ -117,7 +121,7 @@ def test_validation_balances_sources_and_rms_is_not_average_root_error():
     for episode in report['episodes']:
         value = .01 if episode['dataset'] == SOURCES[0] else .09
         for control in episode['decisions'][0]['controls']:
-            control['raw_errors']['anchor_position_error_sq_m2'] = value
+            control['raw_errors']['anchor_pos_squared_error'] = value
         if episode['dataset'] == SOURCES[0]:
             episode['decisions'][0]['controls'] *= 10
             episode['reward_sum'] *= 10
@@ -168,7 +172,7 @@ def test_real_events_keep_one_run_and_separate_training_validation_reward(tmp_pa
     assert tags and set(tags) <= EVENT_DEFINITIONS.keys()
     groups = {tag.split('/')[0] for tag in tags}
     assert groups == {'Reward', 'Tracking', 'Motion', 'Termination', 'Policy', 'Loss', 'Sampling', 'Perf'}
-    assert len(EVENT_DEFINITIONS) <= 50
+    assert len(EVENT_DEFINITIONS) <= 56
     assert all(events.Scalars(tag) for tag in tags)
     train = events.Scalars('Reward/train_total_per_second')
     validation = events.Scalars('Reward/validation_total_per_second')
@@ -228,3 +232,17 @@ def test_export_rejects_missing_iteration_and_tampered_evaluation(tmp_path):
     (root/'sessions/session1/eval1.json').write_text('{}')
     with pytest.raises(ValueError, match='SHA'):
         export_run(root, tmp_path/'tampered')
+
+
+def test_joint_score_curves_are_not_mislabeled_as_clipped_ppo():
+    record = training_record()
+    record['actor']['objective'] = 'joint_score_pg'
+    record['actor']['steps'][-1]['backtracking'] = {'backtracks': 2}
+    values = training_scalars(record)
+    assert values['Loss/joint_score'] == pytest.approx(2.5)
+    assert values['Policy/backtracks'] == 2
+    assert 'Loss/ppo' not in values
+    assert 'Policy/clipped_objective_fraction' not in values
+    record['trainable4_kl']['per_denoising_step'].append(dict(step=19))
+    with pytest.raises(ValueError, match='four trainable'):
+        training_scalars(record)

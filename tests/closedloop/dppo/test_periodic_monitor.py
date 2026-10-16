@@ -28,7 +28,7 @@ from gem.closedloop.dppo.periodic_monitor import (
     merge_periodic_reports,
     shard_plan,
 )
-from gem.closedloop.dppo.policy import DPPODiffusionPolicy
+from gem.closedloop.dppo.frozen_prefix import FrozenPrefixPolicy
 from tests.closedloop.test_stage1_actor import _activate_branches, _conditions
 from tests.closedloop.test_stage1_actor import actor_factory as actor_factory
 from tests.test_evaluation import Env, policy
@@ -96,6 +96,21 @@ def test_periodic_merge_reproduces_32_episodes_and_rejects_missing_or_duplicate(
     episode_path.write_text(json.dumps(value))
     with pytest.raises(ValueError, match='SHA'):
         merge_periodic_reports(plan, paths)
+
+
+def test_unique_music_plan_has_explicit_unequal_source_counts(tmp_path):
+    catalog=Catalog(tmp_path)
+    counts=dict(zip(SOURCES,(2,4,5,5)))
+    plan=build_balanced_plan(catalog,samples_per_source=counts,unique_music=True,seconds=None)
+    assert plan['task_count']==32 and plan['periodic_subset']['source_sample_counts']==counts
+    assert plan['selected_unique_audio_count']==plan['selected_unique_group_count']==16
+    assert plan['episode_seconds'] is None
+    from gem.closedloop.dppo.mc_calibration import complete_mc_plan
+    mc=complete_mc_plan(catalog,'val',samples_per_source=counts,seeds=[2718,31415],selection_seed=461)
+    assert mc['task_count']==32 and mc['selected_unique_audio_count']==16
+    bad=dict(counts);bad[SOURCES[0]]=6
+    with pytest.raises(ValueError,match='Insufficient'):
+        build_balanced_plan(catalog,samples_per_source=bad,unique_music=True)
 
 
 def test_best_observed_is_not_mislabelled_saved_and_baseline_safety_gate(tmp_path):
@@ -171,15 +186,15 @@ def test_fixed_initial_chain_drift_needs_no_upper_transition(actor_factory, tmp_
     previous = torch.get_num_threads()
     torch.set_num_threads(1)
     try:
-        actor, batch = actor_factory(starts=(45,))
+        actor, batch = actor_factory(starts=(45,),motion_frames=60)
         _activate_branches(actor)
-        loaded = DPPODiffusionPolicy(actor, steps=3)
+        loaded = FrozenPrefixPolicy(actor,std_schedule=[.001]*15+[.04,.06,.08,.1,0.],generation_frames=60)
         trace = loaded.sample_rollout(_conditions(batch), generator=torch.Generator().manual_seed(72))
         raw = tmp_path/'initial_eval_raw.pt'
         torch.save({'trace': trace}, raw)
         reference = load_reference_traces([raw])
         first = fixed_chain_drift(loaded, reference)
-        assert first['internal_transition_count'] == 3 and first['mean_joint_kl'] == pytest.approx(0., abs=1e-12)
+        assert first['internal_transition_count'] == 4 and first['mean_joint_kl'] == pytest.approx(0., abs=1e-12)
         with torch.no_grad():
             next(actor.music_embedder.parameters()).add_(.01)
         second = fixed_chain_drift(loaded, reference)

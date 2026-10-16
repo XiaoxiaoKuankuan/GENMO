@@ -76,6 +76,7 @@ class DPPODiffusionPolicy:
         precision_mode: str | None = None,
         attention_backend: str | None = None,
         numerical_variant: str = 'default',
+        deterministic_steps: tuple[int, ...] = (),
     ) -> None:
         if not isinstance(actor, Stage1Actor):
             raise TypeError("DPPO policy requires the existing Stage1Actor")
@@ -91,8 +92,14 @@ class DPPODiffusionPolicy:
             raise TypeError("cfg_batch must be boolean")
         if execution_batch_size is not None and (type(execution_batch_size) is not int or execution_batch_size < 1):
             raise ValueError('execution_batch_size must be a positive integer or None')
+        self.deterministic_steps=tuple(deterministic_steps)
+        self.stochastic_steps=tuple(i for i in range(steps) if i not in self.deterministic_steps)
+        if self.deterministic_steps not in ((),(steps-1,)):
+            raise ValueError('Only the final denoising map may be deterministic')
         if std_schedule is not None and (len(std_schedule) != steps or any(
-            isinstance(value, bool) or not math.isfinite(value) or value < std_floor for value in std_schedule
+            isinstance(value, bool) or not math.isfinite(value) or
+            (value != 0. if index in self.deterministic_steps else value < std_floor)
+            for index,value in enumerate(std_schedule)
         )):
             raise ValueError("std_schedule must contain one finite floor >= std_floor per denoising step")
         self.actor = actor
@@ -133,7 +140,9 @@ class DPPODiffusionPolicy:
             "noise_schedule": actor.noise_schedule,
             "base_diffusion_steps": actor.diffusion_steps,
             "mean_uses_base_std": True,
-            "final_step_noise": True,
+            "final_step_noise": not bool(self.deterministic_steps),
+            "stochastic_steps":list(self.stochastic_steps),
+            "deterministic_steps":list(self.deterministic_steps),
             "log_prob_reduction": "joint_sum_fp64",
             "network_dtype": "float32",
             "cfg_policy": "music_only_shared_history_and_prefix",
@@ -419,6 +428,8 @@ class DPPODiffusionPolicy:
     ) -> torch.Tensor:
         """重算一个或混合内部决策的 log probability，返回 FP64 [B]。"""
         parameters = self.transition_parameters(conditions, x_k, step_index, prepared=prepared)
+        if parameters['std'] is None:
+            raise ValueError('Deterministic mapping has no Gaussian log probability')
         observed = self._state(x_next, parameters["mean"], "x_next")
         return masked_joint_log_prob(observed, parameters["mean"], parameters["std"],
                                      parameters["free_mask"])
@@ -464,15 +475,19 @@ class DPPODiffusionPolicy:
             noise = (draw(template.shape) if initial_noise is None
                      else self._state(initial_noise, template, "initial_noise"))
             state = self.actor._constrain(noise, adapted)
-            chain, means, stds, probabilities = [state.clone()], [], [], []
+            chain, means, stds, probabilities, innovations = [state.clone()], [], [], [], []
             for index in range(self.steps):
                 parameters = self.transition_parameters(snapshot, state, index, prepared=prepared)
-                noise = draw(state.shape)
-                following = self.actor._constrain(parameters["mean"] + parameters["std"] * noise, adapted)
-                probabilities.append(masked_joint_log_prob(following, parameters["mean"],
-                                     parameters["std"], parameters["free_mask"]))
-                means.append(parameters["mean"].clone())
-                stds.append(parameters["std"].clone())
+                if index in self.deterministic_steps:
+                    following=parameters['mean'].clone()
+                else:
+                    noise = draw(state.shape)
+                    innovations.append(noise.clone())
+                    following = self.actor._constrain(parameters["mean"] + parameters["std"] * noise, adapted)
+                    probabilities.append(masked_joint_log_prob(following, parameters["mean"],
+                                         parameters["std"], parameters["free_mask"]))
+                    means.append(parameters["mean"].clone())
+                    stds.append(parameters["std"].clone())
                 chain.append(following.clone())
                 state = following
             mark()
@@ -492,7 +507,10 @@ class DPPODiffusionPolicy:
                 interval_scope='current_stream_cuda_events' if device.type == 'cuda' else 'cpu_wall_clock')
             return {
                 "chain": torch.stack(chain, dim=1),
+                "probability_steps":torch.tensor(self.stochastic_steps,device=state.device,dtype=torch.long),
+                "deterministic_final_mean":state.clone() if self.deterministic_steps else None,
                 "old_log_probs": torch.stack(probabilities, dim=1),
+                "sampling_noise":torch.stack(innovations,dim=1),
                 "old_means": torch.stack(means, dim=1),
                 "old_stds": torch.stack(stds, dim=1),
                 "free_mask": parameters["free_mask"].clone(),

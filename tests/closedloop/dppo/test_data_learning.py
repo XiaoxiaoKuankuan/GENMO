@@ -29,7 +29,7 @@ def context(batch=1):
     return {
         "music_features": torch.zeros(batch, 120, 35), "music_valid": torch.ones(batch, 120, dtype=torch.bool),
         "proprio_history": torch.zeros(batch, 50, 48), "proprio_history_valid": torch.ones(batch, 50, dtype=torch.bool),
-        "proprio_history_times": (torch.arange(50, dtype=torch.float64) / 50 + .02).expand(batch, -1).clone(),
+        "proprio_history_times": (torch.arange(12, 601, 12, dtype=torch.float64) / 600).expand(batch, -1).clone(),
         "known_qpos30": torch.zeros(batch, 120, 30), "known_qpos30_mask": torch.zeros(batch, 120, 30, dtype=torch.bool),
         "future_valid": torch.ones(batch, 120, dtype=torch.bool),
         "future_times": (torch.arange(120, dtype=torch.float64) / 30 + 1.).expand(batch, -1).clone(),
@@ -38,13 +38,21 @@ def context(batch=1):
 
 
 def transition():
+    current, following = context(), context()
+    for key in ('decision_time','proprio_history_times','future_times'):
+        following[key] += .04
+    def privileged(c):
+        return dict(c,tracking_history=torch.cat((c['proprio_history'],torch.zeros(1,50,42)),dim=-1),
+            tracking_history_valid=c['proprio_history_valid'].clone(),
+            tracking_history_times=c['proprio_history_times'].clone(),
+            tracking_reference_times=c['proprio_history_times'].clone())
     return UpperTransition(
         identity={"run_id": "r", "backend_session_id": "s", "episode_id": "e", "decision_id": 1, "policy_version": 0},
-        context=context(), next_context=context(), chain=torch.zeros(3, 120, 30, requires_grad=True),
-        old_log_prob=torch.zeros(2, dtype=torch.float64), free_mask=torch.ones(120, 30, dtype=torch.bool),
+        context=current, next_context=following, chain=torch.zeros(21, 120, 30, requires_grad=True),
+        old_log_prob=torch.zeros(19, dtype=torch.float64), free_mask=torch.ones(120, 30, dtype=torch.bool),
         rewards=torch.tensor([.1, .2]), old_value=0., next_value=1., control_tick_begin=600,
         control_tick_end=624, executed_control_steps=2, executed_physics_steps=8,
-        metadata={"mutable": np.zeros(3)},
+        metadata={"mutable": np.zeros(3),'critic_context':privileged(current),'next_critic_context':privileged(following)},
     )
 
 
@@ -82,7 +90,7 @@ def test_single_environment_policy_shapes_are_normalized():
     item.chain, item.old_log_prob, item.free_mask = item.chain[None], item.old_log_prob[None], item.free_mask[None]
     buffer = RolloutBuffer(1)
     buffer.append(item)
-    assert buffer.transitions[0].chain.shape == (3, 120, 30)
+    assert buffer.transitions[0].chain.shape == (21, 120, 30)
     with pytest.raises(OverflowError):
         buffer.append(item)
 
@@ -198,6 +206,7 @@ def motion_tracking_fixture(tick, *, speed=0., position=0.):
         "body_pos_w": np.tile([0., 0., 1.], (len(body_names), 1)),
         "body_quat_w": np.tile([1., 0., 0., 0.], (len(body_names), 1)),
         "joint_pos": np.full(21, position), "joint_vel": np.full(21, speed),
+        "body_lin_vel_w": np.zeros((len(body_names),3)), "body_ang_vel_w": np.zeros((len(body_names),3)),
     }
     reference = copy.deepcopy(actual)
     reference["body_pos_relative_w"] = reference["body_pos_w"].copy()
@@ -208,8 +217,10 @@ def motion_tracking_fixture(tick, *, speed=0., position=0.):
         ("anchor_ori", "motion_global_anchor_orientation_error_exp", "motion_global_anchor_ori", .4, .5),
         ("body_pos", "motion_relative_body_position_error_exp", "motion_body_pos", .3, 1.),
         ("body_ori", "motion_relative_body_orientation_error_exp", "motion_body_ori", .4, 1.),
-        ("joint_pos", "motion_joint_position_error_exp", "motion_leg_joint_pos", .25, .5),
-        ("joint_vel", "motion_joint_velocity_error_exp", None, None, 0.),
+        ("body_lin_vel", "motion_global_body_linear_velocity_error_exp", "motion_body_lin_vel", 1., 1.),
+        ("body_ang_vel", "motion_global_body_angular_velocity_error_exp", "motion_body_ang_vel", 3.14, 1.),
+        ("foot_height", "motion_relative_body_height_error_exp", "motion_foot_height", .07, .8),
+        ("leg_joint_pos", "motion_joint_position_error_exp", "motion_leg_joint_pos", .25, .5),
     )
     for key, function, source_term, source_std, source_weight in descriptions:
         item = {"error": 0., "function": function, "source_term": source_term,
@@ -217,14 +228,17 @@ def motion_tracking_fixture(tick, *, speed=0., position=0.):
                 "source_enabled": source_weight != 0}
         if key.startswith("body_"):
             item.update(body_indices=list(range(22)), body_names=body_names.copy())
-        elif key.startswith("joint_"):
+        elif key == "foot_height":
+            indices=[body_names.index(n) for n in ("l_ankle_roll_link","r_ankle_roll_link")]
+            item.update(body_indices=indices, body_names=[body_names[i] for i in indices])
+        elif key=="leg_joint_pos":
             indices = ([0, 3, 7, 11, 15, 19, 1, 4, 8, 12, 16, 20]
-                       if key == "joint_pos" else list(range(21)))
+                       if key == "leg_joint_pos" else list(range(21)))
             item.update(joint_indices=indices, joint_names=[joint_names[i] for i in indices])
         if source_weight:
             item["source_score"] = 1.
         terms[key] = item
-    return {"schema": "gmt.motion_tracking.v1", "control_tick": tick, "reference_tick": tick,
+    return {"schema": "gmt.motion_tracking.eight_terms.v1", "control_tick": tick, "reference_tick": tick,
             "coordinate_frame": "world", "quaternion_order": "wxyz",
             "anchor_body_name": "base_link", "body_names": body_names, "joint_names": joint_names,
             "reference": reference, "actual": actual, "terms": terms}
@@ -236,7 +250,7 @@ def actual_step(index=0, *, speed=0., position=0.):
     physical = {"body_names": names, "foot_body_names": names[1:3],
                 "body_link_lin_vel_w": np.zeros((5, 3)), "pd_torque_estimate_nm": np.zeros(21),
                 "joint_effort_limits_nm": np.ones(21) * 40, "joint_velocity_limits_rad_s": np.ones(21) * 10,
-                "joint_pos_limits_rad": np.tile([-2., 2.], (21, 1)), "soft_joint_pos_limits_rad": None,
+                "joint_pos_limits_rad": np.tile([-2., 2.], (21, 1)), "soft_joint_pos_limits_rad": np.tile([-1.8,1.8], (21,1)), "joint_names": list(GMT_EXPECTED_JOINT_ORDER),
                 "foot_net_contact_forces_w_n": np.array([[0., 0., 20.], [0., 0., 20.]]),
                 "foot_min_support_clearance_m": np.zeros(2), "contact_body_names": names,
                 "allowed_contact_body_names": names[1:], "undesired_contact_force_threshold_n": 1.,
@@ -259,6 +273,7 @@ def actual_step(index=0, *, speed=0., position=0.):
             "actual_qpos": np.r_[0., 0., 1., 1., 0., 0., 0., np.full(21, position)],
             "actual_root_ang_vel_b": np.zeros(3), "joint_position_target": np.zeros(21),
             "reference": {"joint_pos": np.full(21, position), "joint_vel": np.full(21, speed),
+        "body_lin_vel_w": np.zeros((3,3)), "body_ang_vel_w": np.zeros((3,3)),
                           "body_pos_w": np.array([[0., 0., 1.]] * 3), "body_quat_w": np.array([[1., 0., 0., 0.]] * 3)},
             "errors": {"joint_position_rmse_rad": 0., "joint_velocity_rmse_rad_s": 0., "root_position_error_m": 0.,
                        "root_height_error_m": 0., "non_yaw_orientation_error_rad": 0.,

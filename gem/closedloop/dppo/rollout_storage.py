@@ -165,10 +165,10 @@ def load_rollout_record(path, record, *, rank_directory, physical=lambda path: p
     trace = raw['trace']
     fields = compact['fields'].copy()
     generated = raw['generated']
-    if reference.get('storage') == 'genmo.world_batch_raw.v3':
+    if reference.get('storage') == 'genmo.stage2.asymmetric_world_batch.v1':
         from .dual_collector import split_trace
         index, count = reference['index'], reference['count']
-        if raw.get('schema') != 'genmo.world_batch_raw.v3' or type(index) is not int or not 0 <= index < count or len(generated) != count:
+        if raw.get('schema') != 'genmo.stage2.asymmetric_world_batch.v1' or type(index) is not int or not 0 <= index < count or len(generated) != count:
             raise ValueError('Invalid shared raw block index/count')
         trace, generated = split_trace(trace, index, count), generated[index]
         if any(generated.get(key) != fields['identity'].get(key) for key in ('env_id','episode_id','request_id','plan_id')):

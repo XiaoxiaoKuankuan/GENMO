@@ -22,7 +22,7 @@ import torch
 
 from .budget import atomic_json
 
-SCHEMA='genmo.closedloop.stage10.iteration_horizon.checkpoint.v1'
+SCHEMA='genmo.closedloop.stage2.asymmetric_tracking.checkpoint.v1'
 
 
 def immutable_cpu_snapshot(value):
@@ -140,12 +140,14 @@ def load_evaluation_actor(path,*,actor,kernel,assets,execution_binding=None):
         return dict(kind='complete_checkpoint_evaluation_only',path=str(Path(path).resolve()),sha256=file_sha256(path),
             source_iteration=payload['state']['iteration'],source_policy_version=payload['state']['policy_version'],
             training_resume=False)
-    if (payload.get('schema')!='genmo.closedloop.stage10.actor_evaluation' or
+    if (payload.get('schema')!='genmo.stage2.asymmetric_actor_evaluation.v1' or
             payload.get('evaluation_only') is not True or payload.get('kernel')!=kernel or
             payload.get('source_identity',{}).get('assets')!=assets or
+            not execution_binding or any(payload.get('source_identity',{}).get(k)!=v
+                                         for k,v in execution_binding.items()) or
             payload.get('hard_kl',{}).get('passed') is not True or
             payload.get('complete_update_and_soft_kl_passed') is not True):
-        raise ValueError('Evaluation Actor asset/kernel/complete-update identity differs')
+        raise ValueError('Evaluation Actor asset/kernel/reward/physics/source/complete-update identity differs')
     update=payload.get('update',{})
     if (type(update.get('optimizer_steps')) is not int or update['optimizer_steps']<1 or
             update['optimizer_steps']!=update.get('planned_optimizer_steps') or

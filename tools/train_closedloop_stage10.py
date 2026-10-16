@@ -54,7 +54,8 @@ def main():
     if config['stage10']['evaluation'].get('split','val')=='test' and not args.evaluate_only:
         parser.error('Held-out test music is only allowed in independent --evaluate-only runs')
     if args.calibrate_only:
-        config['runtime'].update(num_envs=1,generation_batch=1,phase_contract='single_request_calibration.v1')
+        config['runtime'].update(num_envs=1,generation_batch=1,phase_contract='single_request_calibration.v1',
+            timing_contract='deployment_calibration.no_execution.v1')
     if sum((args.calibrate_only,args.collect_only,args.evaluate_only,args.critic_preheat_only))>1:parser.error('Choose only one finite diagnostic phase')
     if args.evaluate_only and args.resume:parser.error('Noise calibration requires a fresh explicit experiment identity')
     if args.evaluation_actor and not args.evaluate_only:parser.error('Fixed-data Actor candidates are evaluation-only, not training recovery points')

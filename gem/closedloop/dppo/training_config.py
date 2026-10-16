@@ -1,7 +1,7 @@
 """Stage10 独立配置解析、训练规模推导与新旧身份隔离。
 
 本模块只接受显式当前配置，自动从GPU数、环境数、连续决策数及完整链minibatch
-推导rollout、optimizer次数、K8访问数和BC每步样本量，不继承160条或四次更新
+推导rollout、optimizer次数、四个随机训练步访问数和BC每步样本量，不继承160条或四次更新
 限制。代理目标与joint诊断、coordinate/joint KL门槛分别定义，不能复用一个
 无量纲数字。初始参数是待有限标定的候选，任何算法或数值合同变化新建run。
 
@@ -18,7 +18,14 @@ import yaml
 
 from .rewards import resolve_reward_config
 
-VERSION='genmo.closedloop.stage10.iteration_horizon.v1'
+VERSION='genmo.closedloop.stage2.asymmetric_tracking.v1'
+
+
+def _source_counts(value):
+    """显式四来源配额，不把bool或缺来源的字典当有效任务数。"""
+    from .full_dataset import SOURCES
+    return (type(value)is int and value>0 or isinstance(value,dict) and set(value)==set(SOURCES)
+            and all(type(n)is int and n>0 for n in value.values()))
 
 
 def configuration(path,*,genmo_repo=None,gmt_repo=None):
@@ -59,8 +66,8 @@ def configuration(path,*,genmo_repo=None,gmt_repo=None):
         raise ValueError('Invalid evaluation music selection configuration')
     selection=s['evaluation'].get('samples_per_source',4)
     if (s['evaluation'].get('split','val') not in ('val','test') or not
-            (type(selection)is int and selection>0 or selection=='all_unique' and s['evaluation'].get('unique_music',False))):
-        raise ValueError('Held-out evaluation requires val/test and positive count or all_unique music selection')
+            (_source_counts(selection) or selection=='all_unique' and s['evaluation'].get('unique_music',False))):
+        raise ValueError('Held-out evaluation requires val/test and explicit positive source counts or all_unique music selection')
     if s['evaluation'].get('episode_seconds') is None and s['evaluation'].get('start_mode','beginning')!='beginning':
         raise ValueError('Complete song evaluation cannot start in the middle')
     for key in ('eta', 'guidance_scale'):
@@ -86,7 +93,7 @@ def configuration(path,*,genmo_repo=None,gmt_repo=None):
     if mc.get('enabled'):
         count=mc.get('training_samples_per_source',mc['samples_per_source'])
         if type(count)is not int or count<1:raise ValueError('MC training_samples_per_source must be positive')
-        if type(mc['samples_per_source'])is not int or mc['samples_per_source']<1 or type(mc['epochs'])is not int or mc['epochs']<1:
+        if not _source_counts(mc['samples_per_source']) or type(mc['epochs'])is not int or mc['epochs']<1:
             raise ValueError('Complete MC supervision requires positive real episode count and epochs')
         if not mc['mix_candidates'] or any(not math.isfinite(v) or not 0<=v<=1 for v in mc['mix_candidates']):raise ValueError('Invalid MC/TD mixing candidates')
         if set(mc['training_seeds']) & set(mc['validation_seeds']):raise ValueError('MC validation seeds must be independent')
@@ -101,16 +108,20 @@ def configuration(path,*,genmo_repo=None,gmt_repo=None):
         if type(v)is not int or v<1:raise ValueError(f'{k} must be positive integer')
     if world!=8 or s['distributed']['backend']!='nccl' or s['distributed']['collection']!='all_ranks':
         raise ValueError('当前 production requires eight synchronous GPU ranks')
-    strategy=t.get('ppo_step_strategy','uniform')
-    steps_ok=(strategy=='uniform' and t['ppo_steps_per_chain'] in (8,20)) or (
-        strategy=='last' and type(t['ppo_steps_per_chain']) is int and 1<=t['ppo_steps_per_chain']<=20)
-    if t['denoising_steps']!=20 or not steps_ok or t['ppo_epochs']!=2:
-        raise ValueError('Full20 behavior and explicit Uniform8/Full20 or terminal-K two-epoch PPO required')
-    frozen=t.get('frozen_prefix_steps',0)
-    if type(frozen)is not int or frozen not in (0,16) or (frozen and (strategy!='last' or t['ppo_steps_per_chain']!=4)):
-        raise ValueError('Frozen first16 requires terminal4 PPO; old shared-network runs have a different kernel identity')
-    if len(t['std_schedule'])!=20 or any(not math.isfinite(x) or x<=0 for x in t['std_schedule']):
-        raise ValueError('Actual noise schedule must define twenty positive finite floors')
+    if (t['denoising_steps']!=20 or t['ppo_step_strategy']!='intermediate4' or
+            t['ppo_steps_per_chain']!=4 or t['frozen_prefix_steps']!=15 or t['ppo_epochs'] not in (1,2)):
+        raise ValueError('Only frozen15 + stochastic trainable4 + deterministic final is supported')
+    if len(t['std_schedule'])!=20 or t['std_schedule'][-1]!=0. or any(
+            not math.isfinite(x) or x<=0 for x in t['std_schedule'][:-1]):
+        raise ValueError('Nineteen positive stochastic floors and an explicit zero deterministic final are required')
+    if s['critic']['type']!='asymmetric_tracking_temporal' or 'freeze_encoders' in s['critic']:
+        raise ValueError('Independent trainable tracking history Critic required')
+    if not 0<s['critic']['history_learning_rate']<=s['critic']['learning_rate']:
+        raise ValueError('Invalid separate history GRU learning rate')
+    if s['kl']['calibration']['scope']!='four_trainable_steps_only':
+        raise ValueError('Old full20 KL thresholds cannot identify the new four-step KL')
+    if not 0<c['timing']['calibration_reservation_seconds']<=.5:
+        raise ValueError('Calibration needs an explicit bounded reservation, not a measured delay')
     if c['runtime']['timing_contract']!='modeled_deployment.v3' or c['timing']['control_ticks']!=12 or c['timing']['physics_ticks']!=3:
         raise ValueError('Keep calibrated deployment clock and 50Hz/200Hz four physical substeps')
     if t['objective_logprob_reduction'] not in ('joint_sum','free_coordinate_mean'):
@@ -122,12 +133,12 @@ def configuration(path,*,genmo_repo=None,gmt_repo=None):
         raise ValueError('advantage_control must be none or shuffle_global')
     if type(t.get('gradient_snr_diagnostic',False)) is not bool:
         raise ValueError('gradient_snr_diagnostic must be boolean')
-    # 学习率控制：fixed保持actor_lr；kl_adaptive按最终全20步平均坐标KL趋近目标，并受显式上下界约束。
+    # 学习率控制：fixed保持actor_lr；kl_adaptive按最终四个训练步骤平均坐标KL趋近目标，并受显式上下界约束。
     if t.get('actor_lr_control','fixed') not in ('fixed','kl_adaptive'):raise ValueError('actor_lr_control must be fixed or kl_adaptive')
     if t.get('kl_rejection','abort') not in ('abort','rollback_continue'):raise ValueError('kl_rejection must be abort or rollback_continue')
     if t.get('actor_lr_control','fixed')=='kl_adaptive':
         bounds=t.get('actor_lr_bounds');target=t.get('kl_target_coordinate')
-        # 控制量可选全20步平均坐标KL或单步最大平均坐标KL（末端K步目标时后者先触及硬门槛）。
+        # 控制量可选四个训练步骤平均坐标KL或单步最大平均坐标KL（末端K步目标时后者先触及硬门槛）。
         metric=t.get('kl_control_metric','mean_coordinate_kl')
         limit={'mean_coordinate_kl':s['kl']['mean_coordinate'],
                'maximum_step_mean_coordinate_kl':s['kl']['maximum_step_mean_coordinate']}.get(metric)
@@ -139,7 +150,7 @@ def configuration(path,*,genmo_repo=None,gmt_repo=None):
     if type(bc_total)is not int or bc_total<1:
         raise ValueError('BC total must be positive; actual ragged optimizer steps determine its allocation')
     t.update(rollout_upper_steps=chains,rollout_upper_steps_per_rank=n*decisions,
-        actor_minibatch_internal_transitions=scale['actor_minibatch_chains']*20,
+        actor_minibatch_internal_transitions=scale['actor_minibatch_chains']*4,
         max_actor_optimizer_steps=steps,bc_batch=bc_total//steps,
         critic_steps=s['critic']['epochs']*math.ceil(chains/s['critic']['global_batch']),
         critic_batch=s['critic']['global_batch'],critic_lr=s['critic']['learning_rate'])
@@ -151,10 +162,13 @@ def configuration(path,*,genmo_repo=None,gmt_repo=None):
     if bc_total<maximum_steps:raise ValueError('BC must cover every possible actual optimizer step')
     if s['limits']['optimizer_attempts']<s['limits']['accepted_iterations']*maximum_steps:
         raise ValueError('Optimizer attempt budget must cover the complete declared workload')
+    if 'actor_objective' in t:
+        from .actor_experiment import validate_experiment_configuration
+        validate_experiment_configuration(c, maximum_steps)
     if c['runtime']['generation_batch']>n:raise ValueError('No duplicated environments to pad effective GENMO batches')
     s['derived']=dict(world_size=world,real_chains=chains,local_chains=n*decisions,planned_actor_steps=steps,
         local_ppo_internal_visits=n*decisions*t['ppo_steps_per_chain']*t['ppo_epochs'],
-        local_full_kl_visits=n*decisions*20,bc_per_step=t['bc_batch'],bc_per_rollout=bc_total)
+        local_trainable_kl_visits=n*decisions*4,bc_per_step=t['bc_batch'],bc_per_rollout=bc_total)
     s['derived'].update(count_semantics='nominal_capacity_only_actual_manifest_controls_optimization',
         maximum_actor_steps=maximum_steps)
     return c

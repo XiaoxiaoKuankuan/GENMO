@@ -14,9 +14,9 @@ from __future__ import annotations
 import hashlib
 import json
 import torch
-from .rewards import resolve_reward_config, TRACKING_ERROR_FIELDS
+from .rewards import resolve_reward_config, TRACKING_ERROR_FIELDS, TRACKING_OBJECTIVE
 
-VECTOR_REWARD_VERSION='stage10.gpu_vector_continuous_reward.v1'
+VECTOR_REWARD_VERSION='stage2.gmt8_gpu_reward.v1'
 
 
 def reward_config_sha(config):
@@ -46,8 +46,8 @@ class VectorRewardMath:
             checks.append(torch.isfinite(value).all())
             return value
         def checked(flag):checks.append(flag.all())
-        def term(score,raw,normalized=None,valid=None):
-            checked(torch.isfinite(score)&(score>=0)&(score<=1.+1e-12))
+        def term(score,raw,normalized=None,valid=None,unbounded=False):
+            checked(torch.isfinite(score)&(score>=0)&((score<=1.+1e-12) if not unbounded else torch.ones_like(score,dtype=torch.bool)))
             return dict(score=score,valid=torch.ones_like(active) if valid is None else valid,
                 raw=raw,normalized={} if normalized is None else normalized)
         scores={};normalized={};raw={}
@@ -55,19 +55,13 @@ class VectorRewardMath:
             error=number(item['error']);checked(error>=0)
             normalized[name]=error/cfg['tracking']['std'][name]**2
             scores[name]=torch.exp(-normalized[name]);raw[TRACKING_ERROR_FIELDS[name]]=error
-        raw.update(source='frozen_gmt_current_motion_command',objective='gmt.motion_tracking.v1',
+        raw.update(source='frozen_gmt_current_motion_command',objective=TRACKING_OBJECTIVE,
             anchor_body_name=tracking['anchor_body_name'],body_names=tracking['body_names'],
             joint_names=tracking['joint_names'],terms=tracking['terms'],control_tick=ticks)
         track=sum(cfg['tracking']['weights'][name]*score for name,score in scores.items())
         output={'track':term(track,raw,dict(error_over_std_squared=normalized,scores=scores,
             std=cfg['tracking']['std'],weights=cfg['tracking']['weights']))}
-        raw={};normalized={};scores={}
-        for name,key,scale in (('root_height','root_height_error_m','root_height_m'),
-                               ('non_yaw','non_yaw_orientation_error_rad','non_yaw_rad')):
-            raw[key]=number(errors[key]);normalized[name]=raw[key]/cfg['scales'][scale]
-            scores[name]=torch.exp(-normalized[name].abs().clamp_max(1e150).square())
-        output['stable']=term(sum(cfg['stable_mix'][name]*score for name,score in scores.items()),raw,
-            dict(errors_over_scale=normalized,scores=scores))
+        output['stable']=term(torch.zeros_like(ticks,dtype=torch.float64),dict(reason='stable_reward_disabled'))
         output['alive']=term((~terminated).double(),dict(complete_control_interval=True,
             execution_valid=True,execution_failed=terminated))
         target=number(last['joint_position_target']);limit=number(last['joint_velocity_limits_rad_s'])
@@ -138,19 +132,18 @@ class VectorRewardMath:
         safe=torch.minimum(torch.maximum(safe,hard[...,:1]),hard[...,1:])
         actual,reference=number(actual_joint_pos),number(reference_joint_pos)
         def joint_cost(position):
+            fallback=(hard[...,1]-hard[...,0])*cfg['joint_limit']['hard_range_margin_fraction']
             lw,uw=safe[...,0]-hard[...,0],hard[...,1]-safe[...,1]
-            lower=torch.where(lw>0,(safe[...,0]-position)/torch.where(lw>0,lw,1.),0.)
-            upper=torch.where(uw>0,(position-safe[...,1])/torch.where(uw>0,uw,1.),0.)
-            lower=torch.where((lw==0)&(position<=hard[...,0]),1.,lower)
-            upper=torch.where((uw==0)&(position>=hard[...,1]),1.,upper)
-            return torch.maximum(lower,upper).clamp(0.,1.)
+            lower=(safe[...,0]-position)/torch.where(lw>0,lw,fallback)
+            upper=(position-safe[...,1])/torch.where(uw>0,uw,fallback)
+            return torch.maximum(lower,upper).clamp_min(0.)
         ac,rc=joint_cost(actual),joint_cost(reference)
         output['joint_limit']=term(cfg['joint_limit']['actual_weight']*ac.amax(-1)+cfg['joint_limit']['reference_weight']*rc.amax(-1),
             dict(actual_joint_position_rad=actual,consumed_reference_joint_position_rad=reference,
                 reference_tick=ticks,hard_limits_rad=hard,original_safe_limits_rad=original,safe_limits_rad=safe,
                 safe_limits_source=source,numeric_tolerance_rad=tolerance,numeric_boundary_clamped=(safe!=original).flatten(1).any(-1),
                 numeric_boundary_note='only floating-point soft-limit excess within configured tolerance is clipped to hard limits'),
-            dict(actual_per_joint_cost=ac,reference_per_joint_cost=rc))
+            dict(actual_per_joint_cost=ac,reference_per_joint_cost=rc,actual_cost=ac.amax(-1),reference_cost=rc.amax(-1),saturates=False),unbounded=True)
         torch._assert_async(torch.stack(checks).all(),'Invalid GPU batched reward input or score')
         return dict(schema=VECTOR_REWARD_VERSION,config_sha256=self.config_sha,
             env_id=last['env_index'],tick=ticks.clone(),components=output)

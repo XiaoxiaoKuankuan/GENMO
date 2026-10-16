@@ -81,12 +81,21 @@ def generate_batch(policy, packets, *, shared_storage=False, device_trace=False)
     world = policy.actor.endecoder.codec.apply_world_anchor(trace['qpos'], anchors)
     finite = torch.stack([torch.isfinite(v).all() for v in (world,trace['qpos30'],trace['contact'])]).all()
     if not bool(finite): raise FloatingPointError('Nonfinite vector generated outputs')
+    from .joint_limits import generated_boundaries_tensors,generated_boundary_reports
+    boundary=generated_boundaries_tensors(world,trace['free_mask'][:,:,9:],
+        [p['snapshot'] for p in packets],policy.actor.endecoder.kinematics.joint_order,check_finite=False)
     # 部署必需输出与训练专用完整链分开计时；不能将前者误扣成审计传输。
     output_transfer_begin = time.perf_counter()
-    critical = bulk_cpu_copy(dict(qpos_world=world, qpos30=trace['qpos30'], contact=trace['contact']))
+    critical = bulk_cpu_copy(dict(qpos_world=world, qpos30=trace['qpos30'], contact=trace['contact'],boundary=boundary))
     generated_end = time.perf_counter()
     copied = dict(trace=trace if device_trace else bulk_cpu_copy(trace), qpos_world=critical['qpos_world'])
     finished = time.perf_counter()
+    boundaries=generated_boundary_reports(critical['boundary'])
+    boundary_report_end=time.perf_counter()
+    from .tracking_context import build_critic_context_batch
+    critic_conditions=build_critic_context_batch(trace['conditions'] if device_trace else conditions,
+        [p['snapshot'] for p in packets])
+    critic_condition_end=time.perf_counter()
     outputs = []
     for i,p in enumerate(packets):
         meta = metadata[i]
@@ -104,14 +113,19 @@ def generate_batch(policy, packets, *, shared_storage=False, device_trace=False)
         # 内存训练直接交付采样时的条件副本，确保条件、free_mask与完整随机链同卡。
         # 原磁盘路径继续使用CPU条件，实际部署需要的qpos输出仍单独传回CPU。
         context=local_trace['conditions'] if device_trace else contexts[i]
-        outputs.append(dict(context=context, meta=meta, generated=generated, trace=local_trace))
+        critic_context={key:value[i:i+1] for key,value in critic_conditions.items()}
+        generated['joint_limit_diagnostics']=boundaries[i]
+        outputs.append(dict(context=context, critic_context=critic_context, meta=meta, generated=generated, trace=local_trace))
     if shared_storage:
-        block=dict(schema='genmo.world_batch_raw.v3',trace=copied['trace'],generated=[item['generated'] for item in outputs])
+        block=dict(schema='genmo.stage2.asymmetric_world_batch.v1',trace=copied['trace'],generated=[item['generated'] for item in outputs])
         for index,item in enumerate(outputs):item['_shared_raw_block']=(block,index)
     return outputs, dict(condition_batch_seconds=condition_end-started,
         generate_and_world_seconds=generated_end-condition_end, bulk_trace_transfer_seconds=finished-generated_end,
         critical_output_transfer_seconds=generated_end-output_transfer_begin,
-        cpu_split_seconds=time.perf_counter()-finished, components=dict(policy.last_sample_timing),
+        boundary_report_cpu_seconds=boundary_report_end-finished,
+        critic_history_upload_validation_seconds=critic_condition_end-boundary_report_end,
+        cpu_split_seconds=time.perf_counter()-critic_condition_end, components=dict(policy.last_sample_timing),
+        boundary_execution='batched_device_fp64_merged_output_transfer',
         generation_contract=GENERATION_CONTRACT, effective_rows=len(packets))
 
 

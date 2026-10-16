@@ -2,7 +2,7 @@
 
 测试直接调用正式配置解析、checkpoint 加载、GAE 和世界环境续体；只使用临时
 小模型与可计数协议替身，不启动 Isaac，不读取或修改正式权重。验证删除总时限
-后 500 轮上限、资源限制及固定随机核仍生效，旧身份在模型改变前拒绝，非空 Adam
+后本分支4轮有限上限、资源限制及固定随机核仍生效，旧身份在模型改变前拒绝，非空 Adam
 和 BC 控制器可以恢复。64 个环境中一个在站姿启动时物理终止，只重置该环境；
 它不生成虚假 PPO 转移，其他环境保持有效，真实执行完整性错误不被吞掉。
 """
@@ -21,20 +21,21 @@ from gem.closedloop.dppo.returns import compute_gae, normalize_advantages_global
 from gem.closedloop.dppo.env_adapter import WarmupEpisodeEnded, ExecutionIntegrityError
 from gem.closedloop.dppo.world_collector import WorldEnvironmentCollector
 
-CONFIG=Path(__file__).resolve().parents[3]/'configs/closedloop/stage10_server1.yaml'
+CONFIG=Path(__file__).resolve().parents[3]/'configs/closedloop/stage2_asymmetric_server2.yaml'
 
 
 def test_production_parameters_and_cumulative_iteration_ceiling():
     config=configuration(CONFIG); stage=config['stage10']; train=stage['training']
-    assert train['actor_lr']==1e-7 and train['critic_lr']==1e-4
+    assert train['actor_lr']==5e-8 and train['critic_lr']==1e-4
     assert (train['eta'],train['ppo_steps_per_chain'],train['ppo_clip'])==(.1,4,.003)
-    assert train['std_schedule']==[.001]*16+[.08,.10,.12,.12]
-    assert stage['bc_gradient']['target_ratio']==.1 and stage['kl']['mean_coordinate']==.002
-    assert stage['run_control']=={'max_training_iterations':500}
-    assert validate_stopping_iteration(500,stage)==500
-    for wrong in (0,501,True,500.0):
+    assert train['std_schedule']==[.001]*15+[.04,.06,.08,.10,0.]
+    assert stage['bc_gradient']['target_ratio']==.1 and stage['kl']['mean_coordinate']==.0003
+    assert stage['run_control']=={'max_training_iterations':4}
+    assert validate_stopping_iteration(4,stage)==4
+    for wrong in (0,5,True,4.0):
         with pytest.raises(ValueError):validate_stopping_iteration(wrong,stage)
-    assert stage['limits']==dict(accepted_iterations=500,optimizer_attempts=6000,
+    assert train['kl_rejection']=='abort'
+    assert stage['limits']==dict(accepted_iterations=4,optimizer_attempts=40,
         generations=3000000,control_steps=150000000,physics_steps=600000000)
 
 

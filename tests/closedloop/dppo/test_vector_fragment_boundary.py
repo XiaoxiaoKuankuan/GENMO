@@ -30,7 +30,7 @@ def fixture_env(*,source=5380,actual=0):
                   source_end_tick=source,reference_valid_end_tick=source-16)
     row=transition();row.identity['env_id']=5
     row.control_tick_begin=5076;row.control_tick_end=5100
-    row.metadata=dict(reward_details=[],event_penalty_total=0.,consumed_plan_ids=[])
+    row.metadata.update(reward_details=[],event_penalty_total=0.,consumed_plan_ids=[])
     calls=[]
     def call(method,**payload):
         assert method=='drain_fragment'
@@ -46,7 +46,7 @@ def fixture_env(*,source=5380,actual=0):
            backend=NS(call=call,sequence=11),
            budget=NS(reserve=lambda *a,**k:budget.append(k),settle_control=lambda *a:None),
            reward=NS(evaluate_step=lambda step:dict(transition_valid=True,reward=.25),event_reward=no_failure_event),
-           remaining_music=lambda:20.,preview_context=lambda:(context(),None))
+           remaining_music=lambda:20.,preview_context=lambda:(row.next_context,None))
     return env,row,calls,budget
 
 

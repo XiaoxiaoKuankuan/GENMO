@@ -149,7 +149,7 @@ class WorldEnvironmentCollector(VectorEnvironmentCollector):
                     for item in generated:
                         _,index=item.pop('_shared_raw_block')
                         item['_raw_evidence']=dict(path=str(raw_path) if self.training_storage=='durable_cpu.v1' else None,
-                            identity=dict(identity,storage=identity.get('storage','genmo.world_batch_raw.v3'),index=index,count=len(group)))
+                            identity=dict(identity,storage=identity.get('storage','genmo.stage2.asymmetric_world_batch.v1'),index=index,count=len(group)))
                     self.batch_reports.append(dict(environment_slots=[slot for slot,_ in group],
                         effective_rows=len(group),padding_rows=0,pipeline_timing=timing,
                         generation_seconds=timing['condition_batch_seconds']+timing['generate_and_world_seconds'],
@@ -357,8 +357,9 @@ class WorldEnvironmentCollector(VectorEnvironmentCollector):
                 for slot,value in records.items():durations[slot].append(value)
         self._drive({i:backend_operation('retire') for i in range(self.num_envs)})
         clock=self.states[0].resource.env.deployment_clock
-        return dict(durations=durations,latency_budget_s=clock.budget_seconds,batches=self.batch_reports,
-            deployment_profile_sha256=clock.sha256,scope='wallclock_only_fixed_modeled_deployment_v3')
+        return dict(durations=durations,calibration_reservation_seconds=self.states[0].resource.env.latency_budget_s,
+            batches=self.batch_reports,deployment_profile_sha256=None if clock is None else clock.sha256,
+            scope='measured_generation_prepare_wallclock_without_execution_no_prior_latency_profile')
 
     def close(self):
         self.cancelled.set()

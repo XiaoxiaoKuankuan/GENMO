@@ -6,6 +6,8 @@ Actor优化器、RNG、BC游标或累计PPO轮数，因此不是训练checkpoint
 导入前核验Actor实际权重、随机核、奖励、物理源码/配置、数据、Horizon和价值结构。
 价值目标定义（上层gamma/lambda与MC/TD候选比例）同样绑定：MC回报按gamma折扣、
 TD候选按lambda构造，二者不同时预热价值尺度不可复用。
+同时记录实际预热TD片段时长：含TD的选中成果只能用于相同片段时长；选中纯MC时，
+完整episode标签不依赖PPO窗口，允许4/8秒窗口共享同一固定Actor的初始化成果。
 冻结编码器必须逐元素一致；所有验证完成前不修改Critic。旧Actor版本数据不能
 用于新Actor的MC监督，导入只允许尚未进行Actor更新的s595000初始化阶段。
 来源MC交互单列记录并纳入累计训练交互，当前运行预算只结算本运行新增物理执行。
@@ -22,10 +24,10 @@ from .checkpoint import _validate_model_state, _validate_optimizer_state
 from .evaluation import _model_fingerprint
 from .training_checkpoint import SCHEMA, file_sha256, immutable_cpu_snapshot
 
-SCHEMA_PREHEAT = 'genmo.stage10.fixed_actor_critic_preheat.v2'
+SCHEMA_PREHEAT = 'genmo.stage2.asymmetric_fixed_actor_critic_preheat.v2'
 MATCHED = ('assets', 'kernel', 'reward', 'timing', 'physical_configuration',
     'dataset', 'data_catalog', 'source_stage1_step', 'generation_horizon')
-ARCHITECTURE = ('type', 'dimension', 'layers', 'heads', 'freeze_encoders', 'learning_rate')
+ARCHITECTURE = ('type', 'dimension', 'layers', 'heads', 'history_scales', 'history_learning_rate', 'learning_rate')
 
 
 def _value_targets(identity):
@@ -33,6 +35,19 @@ def _value_targets(identity):
     return dict(gamma_upper=identity['training']['gamma_upper'],
         lambda_upper=identity['training']['lambda_upper'],
         mix_candidates=list(identity['critic']['complete_mc']['mix_candidates']))
+
+
+def _supervision(identity, validation):
+    """绑定实际选中监督和TD切片，不能把含TD的4秒标签冒充8秒标签。"""
+    import math
+    ratio = float(validation['selected_mc_ratio'])
+    seconds = float(identity['ppo_rollout']['world_seconds'])
+    if (not math.isfinite(ratio) or not 0 <= ratio <= 1
+            or ratio not in identity['critic']['complete_mc']['mix_candidates']
+            or not math.isfinite(seconds) or seconds <= 0):
+        raise ValueError('Invalid selected preheat supervision or TD fragment duration')
+    return dict(selected_mc_ratio=ratio, td_fragment_world_seconds=seconds,
+        window_independent=ratio == 1.)
 
 
 def _critical_sources(root):
@@ -43,11 +58,13 @@ def _critical_sources(root):
         ('actor.py', 'contracts.py', 'online_conditions.py', 'training.py','evaluation_music.py')]
     files += [p for p in (root/'gem/closedloop/dppo').glob('*.py') if p.name in
         ('policy.py', 'dense_policy.py', 'batch_execution.py', 'fixed_tile_linear.py',
-         'compensated_gemm.py', 'compiled_forward.py', 'dense_attention.py',
+         'compensated_gemm.py', 'compiled_forward.py', 'cuda_graph_forward.py', 'dense_attention.py',
          'frozen_prefix.py','run_control.py','env_adapter.py','vector_environment.py',
          'evaluation.py','evaluation_world.py','vector_evaluation.py',
-         'world_collector.py','mc_calibration.py','complete_episode.py','trainer.py',
-         'pretrained_critic.py','rewards.py','columnar_reward.py','vector_reward_adapter.py')
+         'world_collector.py','time_sampling.py','motion_initialization.py','target_activity.py',
+         'full_dataset.py','runtime.py','mc_calibration.py','complete_episode.py','trainer.py',
+         'pretrained_critic.py','tracking_context.py','joint_limits.py','vector_generation.py','updater.py',
+         'rewards.py','columnar_reward.py','vector_reward_adapter.py','vector_reward_math.py')
         or p.name.startswith('stable_')]
     signatures = {}
     import hashlib
@@ -75,6 +92,7 @@ def export_preheat(checkpoint, report, output):
         matched_identity={k:identity[k] for k in MATCHED},
         architecture={k:identity['critic'][k] for k in ARCHITECTURE},
         value_targets=_value_targets(identity),
+        supervision=_supervision(identity, validation),
         physical_sources=identity['source_files']['gmt'],
         behavior_sources=behavior_sources,
         critic=payload['critic'], critic_optimizer=payload['critic_optimizer'],
@@ -121,6 +139,14 @@ def initialize_critic(artifact, *, identity, actor, critic, optimizer, genmo_rep
             or data['behavior_sources'] != _critical_sources(genmo_repo)):
         raise ValueError('Fixed Actor, kernel, physics, dataset, value target or Critic initialization identity differs')
     report = data['validation']
+    target = _supervision(identity, report)
+    source = data.get('supervision', {})
+    if (source.get('selected_mc_ratio') != target['selected_mc_ratio']
+            or source.get('window_independent') != target['window_independent']
+            or not isinstance(source.get('td_fragment_world_seconds'), (int, float))
+            or not 0 < source['td_fragment_world_seconds'] < float('inf')
+            or not target['window_independent'] and source != target):
+        raise ValueError('Preheat supervision differs: TD labels require the same PPO fragment duration')
     if (not report['quality_gate_passed']
             or report['relative_validation_mse_reduction'] < quality_gate['minimum_relative_mse_reduction']
             or report['after']['explained_variance'] < quality_gate['minimum_explained_variance']):
@@ -133,6 +159,7 @@ def initialize_critic(artifact, *, identity, actor, critic, optimizer, genmo_rep
     critic.load_state_dict(data['critic'], strict=True)
     optimizer.load_state_dict(data['critic_optimizer'])
     return dict(artifact=copy.deepcopy(artifact), source=data['source'],
+        supervision=copy.deepcopy(source),
         selected_updates=data['selected_updates'], prior_mc_control_steps=data['prior_mc_control_steps'],
         prior_mc_physics_steps=data['prior_mc_physics_steps'], validation=report,
         actor_unchanged=True, fresh_PhysX=True,

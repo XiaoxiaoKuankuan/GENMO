@@ -1,13 +1,12 @@
-# 第二阶段配置（2026-10-16随机状态修订）：沿用已选Actor学习率1e-7，采样修复须新运行。
-# Stage1 s595000初始化GENMO；GMT140500冻结，Isaac Lab提供真实50Hz控制/200Hz物理反馈。
-# 实际生成60帧；行为20步，独立Stage1副本冻结前16步，只更新末4步；最终仍检查全20步KL。
-# 音乐奖励关闭，音乐条件/CFG/Stage1 BC和配对动作activity gate保留；不添加新奖励。
-# 独立冻结预训练Critic先用48首训练音乐完整MC预热；采样/初始化身份已变化，重新预热。
-# 每卡64环境、4秒世界采集，正常episode跨轮保留；评估与MC使用单个常驻N4世界。
-# 所有资产与部署测量均按固定SHA绑定。随机运动起点必须使用新的运行目录，不能恢复旧P1，
-# 没有总墙钟时限；信号安全停止、checkpoint、资源/磁盘、参考截止与物理终止保护保留。
-# 采样/初态验收见docs/closedloop/stage10_random_state_fix_20261016.rst；历史优化参数证据
-# 见docs/closedloop/stage10_formalization_20261014.rst，不将历史模型效果当作本修订的训练结果。
+# 服务器1第二阶段：GMT八项跟踪、参考/实际0.7/0.3限位、非对称历史跟踪Critic。
+# Actor条件不变；Critic历史50×90加相对时间为50×91，Stage1初始化GRU可训练。
+# 20步生成：冻结前15步，中间4步随机DPPO，最后1步冻结Stage1确定性去噪。
+# 保留随机音乐/配对运动预热、跨rank时间覆盖、音乐条件/活动度/BC；稳定和音乐奖励关闭。
+# 每卡128环境、4秒连续世界；Actor/Critic全局批量2048，Actor/KL微批128，BC每轮1024。
+# 完整MC为96首独立训练音乐×2种子，另用独立验证音乐与种子检验价值预测。
+# 必须重新进行服务器1部署标定、完整MC和四步KL物理标定；旧P1/服务器2证据不授权学习。
+# 500是显式预算上限，入口默认只跑2轮；本次不自动启动500轮长期训练。
+# 沿用当前服务器1入口文件名，不代表仍采用旧Stage10算法；使用全新运行目录。
 diagnostics:
   record_original_threshold_crossings: true
   reward_substeps: true
@@ -44,13 +43,13 @@ runtime:
   allow_shared_gpu: false
   backend: gpu_vectorized.v1
   evidence_level: training
-  generation_batch: 64
+  generation_batch: 128
   genmo_device: cuda:0
   gmt_inference_contract: gmt.native_checkpoint_frozen_batch.v1
   headless: true
   isaaclab_root: /data0/user/liwei/closedloop_stage8_runtime/IsaacLab
-  noise_namespace: stage10_s595000_gmt140500
-  num_envs: 64
+  noise_namespace: stage2_server1_tracking90_random_motion_deterministic_final
+  num_envs: 128
   physics_device: cuda:0
   prefix_deadline_contract: available_reference_deadline_cap.v1
   reward_audit_interval_controls: 1000
@@ -67,7 +66,7 @@ runtime:
   vector_evidence_contract: gmt.vector_columns.v1
   vector_fragment_contract: available_reference_fragment_boundary.v3
   vector_generation_contract: genmo.vector_generation_pipeline.v1
-  vector_reward_contract: stage10.gpu_vector_continuous_reward.v1
+  vector_reward_contract: stage2.gmt8_gpu_reward.v1
   worker_start_timeout_s: 600
 stage10:
   assets:
@@ -101,8 +100,12 @@ stage10:
         minimum_explained_variance: 0.6
         minimum_relative_mse_reduction: 0.3
       refit_if_ev_below: 0.9
-      samples_per_source: 4
-      training_samples_per_source: 12
+      samples_per_source:
+        AIST++: 2
+        AIOZ-GDANCE: 4
+        FineDance: 5
+        Mine: 5
+      training_samples_per_source: 24
       training_seeds:
       - 42
       - 1729
@@ -111,21 +114,27 @@ stage10:
       - 31415
     dimension: 256
     epochs: 32
-    freeze_encoders: true
-    global_batch: 1024
+    global_batch: 2048
     heads: 4
     layers: 2
     learning_rate: 0.0001
     preheat_artifact: null
-    type: pretrained_temporal
-    # 由完整MC门禁负责新运行预热；不额外执行旧8轮TD预热。
+    type: asymmetric_tracking_temporal
     warmup_rollouts: 0
+    history_learning_rate: 1.0e-05
+    history_scales:
+    - 1.5
+    - 1.0
+    - 1.0
+    - 1.0
+    - 0.3
+    - 1.0
+    - 1.5
+    - 3.14
   dataset:
-    # 普通Actor训练：跨环境共享、跨rank分片的时间bin；覆盖到曲段中后部。
     random_start: true
     sampling_contract: rank_shared_time_bins.v1
     time_bin_seconds: 1.0
-    # 初始候选比例：20%站立开头启动，80%配对运动状态预热；不是已验证最优值。
     standing_start_probability: 0.2
     initialization: paired_motion_warmup.v1
     require_audio: true
@@ -141,29 +150,34 @@ stage10:
     world_size: 8
   evaluation:
     envs_per_rank: 4
-    episode_seconds: 10.0
-    # 旧元数据键不控制周期任务；实际用下方all_unique（27音乐组/54任务）。
-    # 仅保留该值以使本次pilot到正式阶段的严格恢复身份完全一致。
-    eval_count: 16
+    episode_seconds: null
     every_control_steps: 1500000
     persistent_world: true
-    samples_per_source: all_unique
+    samples_per_source:
+      AIST++: 2
+      AIOZ-GDANCE: 4
+      FineDance: 5
+      Mine: 5
     seeds:
     - 42
     - 1729
     selection_seed: 42
     split: val
-    start_mode: mixed
+    start_mode: beginning
     unique_music: true
   generation_horizon:
     fps: 30
     frames: 60
   kl:
-    maximum_step_mean_coordinate: 0.01
-    mean_coordinate: 0.002
+    maximum_step_mean_coordinate: 0.0006
+    mean_coordinate: 0.0003
     mean_joint: null
-    p95_coordinate: 0.01
+    p95_coordinate: 0.0007
     reduction: free_coordinate_mean
+    calibration:
+      status: pending
+      scope: four_trainable_steps_only
+      evidence: null
   limits:
     accepted_iterations: 500
     control_steps: 150000000
@@ -212,10 +226,10 @@ stage10:
     dt: 0.02
     failure_penalty: 5.0
     joint_limit:
-      actual_weight: 0.5
+      actual_weight: 0.3
       hard_range_margin_fraction: 0.05
       numeric_tolerance_rad: 1.0e-06
-      reference_weight: 0.5
+      reference_weight: 0.7
     joint_limit_penalty_weight: 0.5
     music:
       beat_column: 34
@@ -236,7 +250,7 @@ stage10:
     stable_mix:
       non_yaw: 0.5
       root_height: 0.5
-    stable_weight: 1.0
+    stable_weight: 0.0
     torque:
       free_ratio: 0.8
       max_weight: 0.5
@@ -244,26 +258,30 @@ stage10:
     torque_penalty_weight: 0.1
     track_weight: 2.5
     tracking:
-      objective: gmt.motion_tracking.v1
+      objective: gmt.motion_tracking.eight_terms.v1
       std:
-        anchor_ori: 0.4
         anchor_pos: 0.3
-        body_ori: 0.4
+        anchor_ori: 0.4
         body_pos: 0.3
-        joint_pos: 0.25
-        joint_vel: 1.4
+        body_ori: 0.4
+        body_lin_vel: 1.0
+        body_ang_vel: 3.14
+        foot_height: 0.07
+        leg_joint_pos: 0.25
       weights:
-        anchor_ori: 0.14285714285714285
-        anchor_pos: 0.14285714285714285
-        body_ori: 0.2857142857142857
-        body_pos: 0.2857142857142857
-        joint_pos: 0.14285714285714285
-        joint_vel: 0.0
-    version: stage10.physical_reward.v1
+        anchor_pos: 0.07936507936507936
+        anchor_ori: 0.07936507936507936
+        body_pos: 0.15873015873015872
+        body_ori: 0.15873015873015872
+        body_lin_vel: 0.15873015873015872
+        body_ang_vel: 0.15873015873015872
+        foot_height: 0.126984126984127
+        leg_joint_pos: 0.07936507936507936
+    version: stage2.gmt8_reference_limits.v1
   run_control:
     max_training_iterations: 500
   scale:
-    actor_minibatch_chains: 1024
+    actor_minibatch_chains: 2048
   seed: 42
   storage:
     checkpoint_interval_seconds: 1800
@@ -276,23 +294,23 @@ stage10:
     retain_best_and_evaluated: true
     tensor_cache_max_bytes: 4294967296
   training:
-    actor_lr: 1.0e-07
+    actor_lr: 5.0e-08
     actor_lr_control: fixed
     advantage_control: none
     bc_prefix:
       max_frames: 30
       min_frames: 6
       zero_probability: 0.15
-    bc_samples_per_rollout: 512
+    bc_samples_per_rollout: 1024
     bc_weight: 0.01
     cfg_batch: true
     critic_grad_clip_norm: 1.0
     critic_lr: 0.0001
-    denoising_microbatch: 64
+    denoising_microbatch: 128
     denoising_steps: 20
     eta: 0.1
     execution_mode: latency
-    frozen_prefix_steps: 16
+    frozen_prefix_steps: 15
     gamma_denoising: 0.99
     gamma_upper: 0.99
     grad_clip_norm: 1.0
@@ -300,18 +318,16 @@ stage10:
     guidance_scale: 2.5
     kl_microbatch: 128
     kl_rejection: rollback_continue
-    kl_soft_stop_coordinate: 0.005
+    kl_soft_stop_coordinate: 0.00025
     lambda_upper: 0.95
     latency_budget_s: 0.5
     log_probability_reduction: joint_sum
-    # 代理按自由有效坐标平均；joint_sum仍是原始真实联合概率诊断。
     objective_logprob_reduction: free_coordinate_mean
     ppo_clip: 0.003
     ppo_epochs: 2
-    ppo_step_strategy: last
+    ppo_step_strategy: intermediate4
     ppo_steps_per_chain: 4
     std_floor: 0.001
-    # 末端0.12指下限调度；真实std由同一已绑定随机核生成和重算。
     std_schedule:
     - 0.001
     - 0.001
@@ -328,13 +344,13 @@ stage10:
     - 0.001
     - 0.001
     - 0.001
-    - 0.001
+    - 0.04
+    - 0.06
     - 0.08
     - 0.1
-    - 0.12
-    - 0.12
+    - 0.0
     x0_diagnostic_every: 0
-  version: genmo.closedloop.stage10.iteration_horizon.v1
+  version: genmo.closedloop.stage2.asymmetric_tracking.v1
 termination:
   end_effector_relative_height_error_m: 0.15
   non_yaw_orientation_error_rad: 0.6
@@ -342,108 +358,18 @@ termination:
   root_height_error_m: 0.2
   yaw_error_rad: 1.5
 timing:
-  calibration_samples: 2
-  calibration_warmup: 1
+  calibration_reservation_seconds: 0.5
+  calibration_samples: 8
+  calibration_warmup: 2
   clock_hz: 600
   control_ticks: 12
   decision_ticks: 300
   deployment_profile:
-    behavior_kernel_sha256: a585cec8868af91039dfc37d78bb91ace58e61e797650674d9402d51246c7a84
-    measured_assets:
-      checkpoint: 51b522fbdeb0ec289e5ffc24e2fccca9888df90495f57f96714c1bb43c05f8e2
-      gmt_checkpoint: 79d1a99e54db42342927ec178329dab88772bafbc05df1b0dbe310bc6dd0b319
-      gmt_policy: 31a8f999b652d272246b803d4ffa708f3125de92c0d573411ef13fc3ee6ced20
-      kinematics: c08731704dccece11351b6fa877e30bac5ca2a8d363de30af7ca2ea1398f4029
-      stats: c7c0acb0e7a38797adb38ce0be41ee72820e34daed4e780275c64fb55c3e5326
-    numerical_execution:
-      attention: sdpa_math
-      attention_fallback: false
-      compiler: null
-      condition_encoding: batched_unique_chains
-      final_projection: float64_local
-      inference_requires_grad: false
-      layer_residual_dtype: float32
-      linear: stable_tf32x3
-      master_dtype: float32
-      matmul_tf32: false
-      mode: compensated_tensorcore_fp32_storage_candidate
-      network_rows: actual_batch_cfg_expanded
-      precision: native_fp32
-      probability_dtype: float64
-      schema: genmo.stage10.native_dense_execution.v1
-      torch_version: 2.7.1+cu128
-      weight_gradient: direct_joint_gemm
-    prefix_budget_seconds: 0.3
-    provenance:
-    - path: /data1/user/liwei/GENMO_outputs/closedloop_stage10/formalization_20261014/acceptance/frozen_calibration_retry/run/deployment_calibration.json
-      sha256: 3d24647e0eb13b2d04080523de50e858be082394d7ce835feff0c2ea1583859e
-    samples_seconds:
-    - 0.2531055426225066
-    - 0.25334354396909475
-    - 0.2539080185815692
-    - 0.2549656927585602
-    - 0.25400371197611094
-    - 0.253005463629961
-    - 0.2542393859475851
-    - 0.2544047376140952
-    - 0.2426069751381874
-    - 0.24616616871207952
-    - 0.24700434133410454
-    - 0.2474628919735551
-    - 0.24384212493896484
-    - 0.2465947698801756
-    - 0.24857437424361706
-    - 0.25851260870695114
-    - 0.24980850517749786
-    - 0.2467338563874364
-    - 0.24907279387116432
-    - 0.2458268478512764
-    - 0.24572305660694838
-    - 0.24592844489961863
-    - 0.24533006083220243
-    - 0.24517259653657675
-    - 0.24752013012766838
-    - 0.24964312463998795
-    - 0.251580398529768
-    - 0.24913820065557957
-    - 0.24675329308956861
-    - 0.24768812023103237
-    - 0.24726455379277468
-    - 0.25183797627687454
-    - 0.2530524441972375
-    - 0.2529087830334902
-    - 0.25097651220858097
-    - 0.2530599357560277
-    - 0.2507274793460965
-    - 0.25095426570624113
-    - 0.25066067557781935
-    - 0.2501070210710168
-    - 0.235778265632689
-    - 0.23908142931759357
-    - 0.23651107493788004
-    - 0.23547805286943913
-    - 0.23466721549630165
-    - 0.2373407669365406
-    - 0.23578411061316729
-    - 0.23585700057446957
-    - 0.24377579241991043
-    - 0.24417887348681688
-    - 0.2451734161004424
-    - 0.24322211276739836
-    - 0.241408109664917
-    - 0.24223961774259806
-    - 0.24252423085272312
-    - 0.2423850130289793
-    - 0.24167361203581095
-    - 0.24395897891372442
-    - 0.2409444209188223
-    - 0.23985243402421474
-    - 0.23992779199033976
-    - 0.24016625806689262
-    - 0.24036451801657677
-    - 0.23921153973788023
     schema: genmo.deployment_delay_profile.v1
     target: single_robot_single_request
+    samples_seconds: []
+    prefix_budget_seconds: 0.32
+    provenance: []
   latency_guard_s: 0.04
   lookahead_control_steps: 10
   min_prefix_frames: 12
