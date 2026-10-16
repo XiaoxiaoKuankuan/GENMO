@@ -6,7 +6,6 @@
 """
 import json
 import sqlite3
-import numpy as np
 import pytest
 import torch
 from gem.closedloop.dppo.journal_codec import encode_binary
@@ -18,17 +17,24 @@ def test_mc_uses_integrated_rewards_and_event_not_saved_gae(tmp_path):
     identity=dict(backend_session_id='world',episode_id='episode',decision_id=0)
     snapshot=tmp_path/'critic.pt'
     torch.save(dict(records=[dict(identity=identity,initial_prediction=3.,target=99999.)]),snapshot)
-    (tmp_path/'fixed_diagnostic_reference.json').write_text(json.dumps(dict(ranks=[dict(
+    report=dict(evaluation_identity={'version':'current'},iteration=0)
+    (tmp_path/'fixed_diagnostic_reference.json').write_text(json.dumps(dict(
+        evaluation_identity=report['evaluation_identity'],initial_iteration=0,ranks=[dict(
         critic=dict(path=str(snapshot),sha256=file_sha256(snapshot)))])))
     episode=dict(task_id='one',dataset='source',truncated=False,decisions=[dict(
         identity=identity,decision_index=0,terminated=True,controls=[{'reward':1.},{'reward':2.}],
         zero_step_event_reward=-5.)])
-    result=mc_predictions(tmp_path/'report.json',[episode])
+    result=mc_predictions(tmp_path/'report.json',[episode],report)
     expected=1.+.99**(1/25)*(2.-5.)
     assert result['rows'][0]['mc_return']==pytest.approx(expected)
     assert result['overall']['mse']==pytest.approx((3.-expected)**2)
     episode['truncated']=True
-    assert mc_predictions(tmp_path/'report.json',[episode])['excluded_administrative_or_incomplete_tasks']==['one']
+    assert mc_predictions(tmp_path/'report.json',[episode],report)['excluded_administrative_or_incomplete_tasks']==['one']
+    report['iteration']=1
+    assert not mc_predictions(tmp_path/'report.json',[episode],report)['available']
+    report['evaluation_identity']={'version':'different'}
+    with pytest.raises(ValueError,match='different execution identity'):
+        mc_predictions(tmp_path/'report.json',[episode],report)
 
 
 def test_physics_requires_every_counted_control_and_four_substeps(tmp_path):

@@ -20,6 +20,7 @@ import json
 from pathlib import Path
 import sqlite3
 import sys
+import time
 
 ROOT=Path(__file__).resolve().parents[2]
 sys.path.insert(0,str(ROOT))
@@ -38,11 +39,15 @@ def identity_key(value):
     return tuple(value[k] for k in ('backend_session_id','episode_id','decision_id'))
 
 
-def mc_predictions(report_path, episodes):
+def mc_predictions(report_path, episodes, expected_report):
     reference_path=Path(report_path).parent/'fixed_diagnostic_reference.json'
     if not reference_path.is_file():
         return dict(available=False,reason='no_matching_initial_prediction_snapshot')
     reference=json.loads(reference_path.read_text())
+    if reference['evaluation_identity']!=expected_report['evaluation_identity']:
+        raise ValueError('MC prediction snapshot belongs to a different execution identity')
+    if reference['initial_iteration']!=expected_report['iteration']:
+        return dict(available=False,reason='old_prediction_snapshot_cannot_label_new_actor_behavior')
     predictions={}
     for rank in reference['ranks']:
         info=rank.get('critic')
@@ -164,6 +169,14 @@ def analyze(report_path,output,baseline=None):
     scores={name:float(np.mean([np.exp(-r['raw_errors'][TRACKING_ERROR_FIELDS[name]]/std**2)
                                for r in controls])) for name,std in TRACKING_STD.items()}
     overall=report['aggregate']['overall']
+    summaries=list(Path(report_path).parent.glob('sessions/*/summary.json'))
+    initial_state=(json.loads(summaries[0].read_text()).get('initial_state',{}) if len(summaries)==1 else {})
+    initialized=bool(initial_state.get('critic_initialization') or initial_state.get('mc_preheat_complete'))
+    # evaluate-only只加载Actor，原入口不会导入MC Critic。不能把随机Value Head的
+    # 误差用于批评已预热Critic；有限在线实验另有当前策略的完整MC校准。
+    mc=(mc_predictions(report_path,episodes,report) if initialized else dict(available=False,
+        reason='pure_actor_evaluation_did_not_initialize_preheated_critic',
+        required_evidence='finite_online_current_policy_complete_MC_calibration'))
     tasks=[]
     for e in episodes:
         actual=e.get('motion_diagnostic',{});generated=e.get('generated_reference_diagnostic',{})
@@ -176,7 +189,8 @@ def analyze(report_path,output,baseline=None):
         actor=report['actor_identity'],plan_sha256=plan['plan_sha256'],aggregate=overall,
         tracking_eight_control_mean=scores,by_source=report['by_source'],tasks=tasks,
         retention=report.get('stage1_retention'),evaluation_seconds=report.get('wall_seconds'),
-        mc=mc_predictions(report_path,episodes),yaw=physical_controls(episodes,output),
+        mc=mc,yaw=physical_controls(episodes,output),
+        analysis_implementation_sha256=file_sha256(__file__),
         claim_scope='fixed_16_music_32_full_available_paired_episodes_not_full_dataset_acceptance')
     if baseline:
         comparison=compare_evaluations(baseline,report_path,mode='periodic_subset')
@@ -193,11 +207,55 @@ def analyze(report_path,output,baseline=None):
 
 def main():
     parser=argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--report',type=Path,required=True)
+    inputs=parser.add_mutually_exclusive_group(required=True)
+    inputs.add_argument('--report',type=Path)
+    inputs.add_argument('--queue',type=Path,help='只读跟随有限物理队列，CPU分析与后续GPU任务并行')
     parser.add_argument('--baseline',type=Path)
     parser.add_argument('--output',type=Path,required=True)
+    parser.add_argument('--resume',action='store_true')
     args=parser.parse_args();torch.set_num_threads(2)
-    analyze(args.report,args.output,args.baseline)
+    if args.report:
+        if args.resume:raise ValueError('Single analysis output is immutable; choose a fresh directory')
+        analyze(args.report,args.output,args.baseline)
+        return
+    if args.baseline:raise ValueError('Queue baseline is its identified Stage1 task')
+    if args.resume:
+        index=json.loads((args.output/'index.json').read_text())
+        if index['queue']!=str(args.queue.resolve()):raise ValueError('Different physics queue')
+    else:
+        args.output.mkdir(parents=True,exist_ok=False)
+        index=dict(schema='genmo.stage2.uniform_lr_physical_analysis_queue.v1',
+                   queue=str(args.queue.resolve()),attempts=[],status='running')
+    while True:
+        queue=json.loads(args.queue.read_text())
+        passed=[r for r in queue['attempts'] if r.get('status')=='passed']
+        baseline=next((r['evidence']['report'] for r in passed if r['name']=='stage1'),None)
+        for job in passed:
+            previous=[r for r in index['attempts'] if r['name']==job['name']]
+            if previous and previous[-1]['status']=='passed':
+                if file_sha256(previous[-1]['analysis'])!=previous[-1]['sha256']:
+                    raise ValueError('Published analysis bytes changed')
+                continue
+            destination=args.output/job['name']/f'attempt{len(previous)+1:02d}'
+            item=dict(name=job['name'],aliases=job['aliases'],status='running',started=time.time())
+            index['attempts'].append(item);atomic_json(args.output/'index.json',index)
+            try:
+                result=analyze(Path(job['evidence']['report']),destination,
+                               None if job['name']=='stage1' else Path(baseline))
+                path=destination/'analysis.json'
+                item.update(status='passed',analysis=str(path),sha256=file_sha256(path),
+                            aggregate=result['aggregate'],paired=result.get('paired'))
+            except BaseException as exc:
+                item.update(status='failed',error=repr(exc));index['status']='analysis_failed'
+                raise
+            finally:
+                item['elapsed_seconds']=time.time()-item['started']
+                atomic_json(args.output/'index.json',index)
+        if queue['status'] in ('completed_all_distinct_survivors','interrupted','stopped_with_failure'):
+            index['status']='completed' if queue['status']=='completed_all_distinct_survivors' else 'physics_queue_incomplete'
+            atomic_json(args.output/'index.json',index)
+            return
+        time.sleep(30)
 
 
 if __name__=='__main__':main()
