@@ -193,7 +193,7 @@ class UpperEnvironment:
                 self.config.get('runtime', {}).get('backend') != 'gpu_vectorized.v1'):
             raise ValueError('Paired motion reset requires explicit GPU Actor-training initialization')
         reward_config = self.config['stage9'].get('reward', {})
-        extra = dict(return_motion=True) if motion_reset else {}
+        extra = dict(return_motion=True,motion_phase=phase) if motion_reset else {}
         target = load_paired_activity(self.config['stage9']['bc_data_root'], sample,
             music_start_tick=600, window_s=reward_config.get('activity', {}).get('window_s', .5),
             dt=reward_config.get('dt', .02), split=split, music_start_frame=music_start_frame, **extra)

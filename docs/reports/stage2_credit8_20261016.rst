@@ -75,7 +75,8 @@ rollout和GAE传播。上一轮四秒rollout的结论不能替这次八秒运行
 运行和证据
 ----------
 
-代码实现提交：GENMO 79f96fd；GMT 1ae6227。后续仅记录性提交不改变上述运行源码。
+八秒真实采集验收源码：GENMO 79f96fd；GMT 1ae6227。正式任务另补MC计划标记及
+数据读取层显式critic_mc权限；运行精确提交以launch_identity.json为准。
 服务器2集中根目录：
 /data1/user/liwei/GENMO_outputs/closedloop_stage10/stage2_credit8_20261016
 
@@ -90,3 +91,15 @@ TensorBoard使用train/tensorboard_compact。恢复使用同配置、同源码�
 这次改动解决信用传播窗口与因果记账问题，不保证消除90秒以后的yaw漂移。后续
 必须按每100轮完整歌曲完成率、共同时间奖励、活动度、关节边界和失败时间判断，
 不能只看训练loss或每秒回报。
+
+启动阶段故障与修复
+------------------
+
+首次正式启动在验证MC采集阶段遇到底层target_activity仍限制训练集初始化的问题。
+环境和GMT已允许显式MC，读取层没有传递阶段，属于集成遗漏，不是物理失败。
+Actor更新数为0；只停止这次新启动，完整保留failed_mc_loader证据。
+
+修复后motion_phase由环境明确传到底层读取器，普通验证和test仍拒绝；扩展测试
+从真实临时清单加载train/val动作，走环境reset及50步预热流程，而不只测试参数
+校验。该批100项CPU回归通过。以新源码身份从头重新MC预热，不绕过校验或复用
+失败运行的优化器。服务器1及原random20/P1没有中断或变动。

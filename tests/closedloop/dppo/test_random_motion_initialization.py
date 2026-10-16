@@ -181,13 +181,15 @@ def test_bootstrap_boundary_holds_are_explicit_and_do_not_move_music_start(tmp_p
     np.testing.assert_allclose(reset['bootstrap_qpos'][36,7:],qpos[start,7:])
 
 
-def test_environment_passes_motion_reset_and_uses_real_warmup_flow(tmp_path,monkeypatch):
+@pytest.mark.parametrize('phase,split',[('train','train'),('critic_mc','train'),('critic_mc','val')])
+def test_environment_passes_motion_reset_and_uses_real_warmup_flow(tmp_path,monkeypatch,phase,split):
     from tests.closedloop.dppo.test_env_adapter import adapter
     env,backend=adapter(tmp_path,mode='paused')
-    catalog=FullMusicCatalog(make_catalog_data(tmp_path,frames=300));sample=catalog.samples['train']['Mine'][0]
+    catalog=FullMusicCatalog(make_catalog_data(tmp_path,frames=300));sample=catalog.samples[split]['Mine'][0]
     env.config['stage9']['bc_data_root']=str(catalog.data_root)
     env.config['runtime']={'backend':'gpu_vectorized.v1'}
-    env.config['stage10']={'dataset':{'initialization':MOTION_RESET_CONTRACT},'generation_horizon':{'frames':120}}
+    env.config['stage10']={'dataset':{'initialization':MOTION_RESET_CONTRACT},'generation_horizon':{'frames':120},
+        'critic':{'complete_mc':{'start_distribution':'match_training_reset.v1'}}}
     original=backend.call;resets=[]
     def call(method,**payload):
         if method=='reset_episode':
@@ -197,7 +199,7 @@ def test_environment_passes_motion_reset_and_uses_real_warmup_flow(tmp_path,monk
                 actual_state_verified=True,music_start_frame=packet['music_start_frame'],source=packet['source']))
         return original(method,**payload)
     backend.call=call
-    env.reset_task(sample,catalog.load_music(sample),seed=42,phase='train',music_start_frame=150,
+    env.reset_task(sample,catalog.load_music(sample),seed=42,phase=phase,music_start_frame=150,
                    initialization=MOTION_RESET_CONTRACT)
     initialization=resets[0]['episode_spec']['initialization']
     assert initialization['music_start_frame']==150 and backend.tick==600
@@ -230,3 +232,15 @@ def test_backend_ack_must_confirm_motion_initialization(tmp_path,monkeypatch,fau
     backend.call=bad_ack
     with pytest.raises(RuntimeError,match='did not apply'):
         env.reset_task(sample,catalog.load_music(sample),seed=42,phase='train',initialization=MOTION_RESET_CONTRACT)
+
+
+def test_motion_loader_keeps_validation_and_test_isolation(tmp_path):
+    catalog=FullMusicCatalog(make_catalog_data(tmp_path,frames=300))
+    val=catalog.samples['val']['Mine'][0]
+    with pytest.raises(ValueError,match='explicit'):
+        load_paired_activity(catalog.data_root,val,split='val',return_motion=True)
+    target,motion=load_paired_activity(catalog.data_root,val,split='val',return_motion=True,motion_phase='critic_mc')
+    assert target.source['split']=='val' and motion.shape==(300,28)
+    test=catalog.samples['test']['Mine'][0]
+    with pytest.raises(ValueError,match='explicit'):
+        load_paired_activity(catalog.data_root,test,split='test',return_motion=True,motion_phase='critic_mc')
