@@ -144,6 +144,9 @@ def test_completed_run_compaction_keeps_controls_models_and_budget(tmp_path):
     reference=dict(path=str(episode_path),sha256=file_sha256(episode_path),task_id='task')
     summary=root/'sessions/s/evaluations/initial.json';summary.parent.mkdir(parents=True)
     _publish_json(summary,dict(episodes=[episode],source_episode_manifests=[reference],aggregate={'reward_sum':1.}))
+    session_summary=root/'sessions/s/summary.json'
+    _publish_json(session_summary,dict(evaluation_artifacts=[dict(
+        path=str(summary.relative_to(root)),sha256=file_sha256(summary))]))
     database=phase/'world.sqlite';connection=sqlite3.connect(database)
     connection.execute('create table evidence(value blob)');connection.execute('insert into evidence values (?)',(b'actual'*1024,))
     connection.commit();connection.close();original=database.read_bytes()
@@ -155,6 +158,7 @@ def test_completed_run_compaction_keeps_controls_models_and_budget(tmp_path):
     assert read_episode(episode_path)['decisions']==episode['decisions']
     document=json.loads(summary.read_text())
     assert 'episodes' not in document and document['source_episode_manifests'][0]['sha256']==file_sha256(episode_path)
+    assert json.loads(session_summary.read_text())['evaluation_artifacts'][0]['sha256']==file_sha256(summary)
     assert gzip.open(result['cold_sqlite'][0]['archive'],'rb').read()==original
     assert not database.exists() and budget.read_bytes()==b'never delete budget'
     assert a.stat().st_ino==b.stat().st_ino and c.read_bytes()==b'different complete state'

@@ -86,6 +86,7 @@ def compact(root,*,apply=False):
         documents=set(root.glob('sessions/**/report/report.json'))
         documents.update(root.glob('sessions/*/evaluations/*.json'))
         documents.update(root.glob('sessions/*/session.json'))
+        documents.update(root.glob('sessions/*/summary.json'))
         if (root/'evaluation_baseline.json').exists():documents.add(root/'evaluation_baseline.json')
         for path in sorted(documents,key=lambda p:len(p.parts),reverse=True):
             old=json.loads(path.read_text());document=summary_only(old)
