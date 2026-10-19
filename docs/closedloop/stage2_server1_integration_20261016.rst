@@ -177,3 +177,21 @@ MC预热、完整价值预测对照和四步KL物理标定没有完成，不能�
 正式训练目录为上述新根下的 ``train_2000``，命令明确指定2000轮；
 Actor从Stage1 s595000初始化，Critic加载96首MC权重，Actor优化器从空状态开始。
 TensorBoard只加载该任务的 ``train_2000/tensorboard_compact``，保持一个任务一个run。
+
+2026-10-19北京时间10:30正式启动，运行代码提交 ``8857d6b``，tmux会话
+``stage2-formal2000-server1-20261019``，训练会话 ``73c0ec24-0565-4226-b0b1-45449e5686a7``。
+32任务初始评估完成后，10:48:39已接受 ``train_000001``：6144条真实链，6/6个
+Actor优化步骤，265.17秒；四步平均KL0.000131995314、最大单步均值0.000240967449、
+P95为0.000299658713，均低于原阈值。全20步前向审计通过，概率重算和ratio误差为0，
+冻结前15步及末步身份通过。八个主训练进程仍在，单个TensorBoard事件文件已写入。
+这里只证明正式训练已开始且首次更新检查通过，尚未建立长期质量改善结论。
+
+实际启动命令（已执行，不要在现有目录重复启动）::
+
+    bash scripts/train_stage10_8gpu_server1.sh \
+      --config configs/closedloop/stage10_server1.yaml \
+      --output-dir /data1/user/liwei/GENMO_outputs/closedloop_stage10/stage2_formal_2000_20261019/train_2000 \
+      --stop-after-iteration 2000
+
+实时日志为新证据根下 ``train_2000.log``；启动命令、时间和源码提交保存在
+``train_2000_launch.json``。永久里程碑checkpoint仍按100、200、…、2000轮保存。
