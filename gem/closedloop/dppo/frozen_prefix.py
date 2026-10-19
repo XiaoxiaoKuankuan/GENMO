@@ -56,7 +56,7 @@ class FrozenPrefixPolicy(DenseDiffusionPolicy):
 
     def _frozen_settings(self):
         # 精度scope在每次真实前向都会设置并恢复；身份绑定scope内实际设置，不绑定外部环境默认值。
-        from .numerical_execution import precision_scope
+        from .execution_checks import precision_scope
         with precision_scope(self.frozen_policy.numerical_execution):
             return self._frozen_settings_in_scope()
 

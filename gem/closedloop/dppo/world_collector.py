@@ -18,8 +18,7 @@ from concurrent.futures import Future
 from types import SimpleNamespace
 
 from .world_flow import BackendOperation, GenerationOperation, LocalOperation, backend_operation
-from .vector_collector import VectorEnvironmentCollector, validate_vector_close
-from .dual_collector import _QueuedPolicy
+from .vector_collector import validate_vector_close
 from .vector_generation import generate_batch
 from .env_adapter import WarmupEpisodeEnded
 from gem.runtime.closedloop_protocol import RemoteError
@@ -27,14 +26,17 @@ from gem.runtime.closedloop_protocol import RemoteError
 WORLD_FLOW_CONTRACT = 'genmo.world_batched_flow.v1'
 
 
-class _ImmediateExecutor:
-    """兼容既有边界状态捕获接口；所有资源实际都由当前唯一调度线程持有。"""
-    def submit(self, function, *args, **kwargs):
-        future = Future()
-        try: future.set_result(function(*args, **kwargs))
-        except BaseException as error: future.set_exception(error)
-        return future
-    def shutdown(self, **kwargs): pass
+
+
+class _WorldPolicyView:
+    """环境只读取当前策略身份，采样请求必须交给同线程世界批处理。"""
+    def __init__(self,owner):
+        self.owner=owner;self.actor=owner.policy.actor;self.steps=owner.policy.steps
+        self.guidance_scale=owner.policy.guidance_scale;self.last_sample_timing={}
+    @property
+    def kernel_config(self):return self.owner.policy.kernel_config
+    def sample_rollout(self,*args,**kwargs):
+        raise RuntimeError('World generation must use the batched continuation scheduler')
 
 
 class _DirectLane:
@@ -50,7 +52,7 @@ class _DirectLane:
     def close(self): pass
 
 
-class WorldEnvironmentCollector(VectorEnvironmentCollector):
+class WorldEnvironmentCollector:
     def __init__(self, policy, factory, world_client, *, num_envs=64, generation_batch=64, timeout_seconds=600.,
                  training_storage='durable_cpu.v1'):
         if generation_batch < 1 or generation_batch > num_envs: raise ValueError('Invalid independent sampling batch')
@@ -60,10 +62,9 @@ class WorldEnvironmentCollector(VectorEnvironmentCollector):
         self.training_storage=training_storage
         self.world=world_client() if callable(world_client) else world_client
         self.num_envs,self.generation_batch,self.timeout_seconds=num_envs,generation_batch,timeout_seconds
-        self.states=[None]*num_envs;self.executors=[_ImmediateExecutor() for _ in range(num_envs)]
+        self.states=[None]*num_envs
         self.active=False;self.cancelled=threading.Event();self.rpc_pending={};self.rpc_sequence=0
         self.batch_reports=[];self.world_timing={};self.restore_records=None;self.shutdown_result=None
-        self.rpc_thread=None;self.rpc_error=None
         self.audit_seconds=0.
 
     def _request_id(self):
@@ -100,7 +101,7 @@ class WorldEnvironmentCollector(VectorEnvironmentCollector):
 
     def _resource(self, slot):
         if self.states[slot] is None:
-            resource=self.factory(slot,_QueuedPolicy(self,slot))
+            resource=self.factory(slot,_WorldPolicyView(self))
             resource.env.collector_env_slot=slot
             self.states[slot]=SimpleNamespace(resource=resource,task=None,transitions=0)
         return self.states[slot]
@@ -206,7 +207,7 @@ class WorldEnvironmentCollector(VectorEnvironmentCollector):
                                 acknowledgements.append(dict(env_id=slot,method='ack',payload=dict(
                                     backend_session_id=backend.session_id,through_seq=backend.sequence),request_id=self._request_id()))
                                 if operation.method=='reset_episode' and error is None:backend.episode_id=value['episode_id']
-                                if operation.method in ('advance','drain_fragment') and error is None:
+                                if operation.method=='advance' and error is None:
                                     from gem.runtime.trajectory_blocks import expand_feedback
                                     value={**expand_feedback(value, readonly_views=True, lazy=True, columnar=True), 'backend_session_id':backend.session_id,'mutation_seq':backend.sequence}
                             backend.last_call_timing=dict(method=operation.method,total_seconds=time.perf_counter()-begin,
@@ -374,15 +375,40 @@ class WorldEnvironmentCollector(VectorEnvironmentCollector):
         return self.shutdown_result
 
     def state_dict(self):
-        result=super().state_dict()
-        result.update(schema='genmo.gpu_vector_collector.boundary.v2',fragment_contract=WORLD_FLOW_CONTRACT)
-        return result
+        if self.active or self.cancelled.is_set() or self.rpc_pending:
+            raise RuntimeError('World checkpoint requires an idle decision boundary')
+        from .execution_state import capture_execution_state
+        saved=[]
+        for state in self.states:
+            if state is None:
+                saved.append(None);continue
+            env=state.resource.env
+            saved.append(dict(execution=dict(capture_execution_state(env),policy_version=env.policy_version,
+                iteration=env.iteration),sampler=state.resource.sampler.state_dict(),transitions=state.transitions,
+                seed=env.config['stage9']['seed'],budget=env.budget.state_dict(),
+                ended_physical_episode=None if state.task is None else
+                    dict(episode_id=env.snapshot['episode_id'],tick=env.snapshot['tick'])))
+        return dict(schema='genmo.gpu_vector_collector.boundary.v2',num_envs=self.num_envs,
+            fragment_contract=WORLD_FLOW_CONTRACT,numerical_layout=self.policy.numerical_layout,states=saved,
+            restore_environment='fresh_PhysX_episodes_preserve_rng_cursors_and_spent_budget')
 
     def load_state_dict(self,saved):
-        if saved.get('schema')!='genmo.gpu_vector_collector.boundary.v2' or saved.get('fragment_contract')!=WORLD_FLOW_CONTRACT:
-            raise ValueError('World collector cannot transparently resume the old threaded collector')
-        # 共用已验收的逻辑RNG/预算恢复，输入版本先严格核验；物理仍明确重建。
-        adapted=copy.deepcopy(saved)
-        from .vector_boundary import FRAGMENT_CONTRACT
-        adapted.update(schema='genmo.gpu_vector_collector.boundary.v1',fragment_contract=FRAGMENT_CONTRACT)
-        return super().load_state_dict(adapted)
+        if self.active or any(state is not None for state in self.states):
+            raise RuntimeError('Restore requires a new world collector')
+        if (saved.get('schema')!='genmo.gpu_vector_collector.boundary.v2'
+                or saved.get('fragment_contract')!=WORLD_FLOW_CONTRACT
+                or saved.get('num_envs')!=self.num_envs
+                or saved.get('numerical_layout')!=self.policy.numerical_layout
+                or len(saved['states'])!=self.num_envs):
+            raise ValueError('World topology or current logical checkpoint contract differs')
+        from .execution_state import restore_execution_state
+        for slot,record in enumerate(saved['states']):
+            if record is None:continue
+            resource=self.factory(slot,_WorldPolicyView(self))
+            if resource.env.config['stage9']['seed']!=record['seed']:
+                raise ValueError('Per-environment seed differs')
+            resource.sampler.load_state_dict(record['sampler'])
+            restore_execution_state(resource.env,record['execution'])
+            resource.env.collector_env_slot=slot
+            self.states[slot]=SimpleNamespace(resource=resource,task=None,transitions=record['transitions'])
+        self.restore_records=None

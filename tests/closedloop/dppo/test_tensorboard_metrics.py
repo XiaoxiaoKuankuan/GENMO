@@ -89,8 +89,8 @@ def test_training_uses_actual_rank_denominators_and_excludes_frozen_steps():
     assert values['Reward/total_per_second'] == pytest.approx(9.1)
     assert values['Termination/physical_failures_per_1000s'] == pytest.approx(50.)
     assert values['Policy/trainable_kl'] == pytest.approx(.2)
-    assert values['Policy/clipped_objective_fraction'] == pytest.approx(.1)
-    assert values['Loss/ppo'] == pytest.approx(2.5)
+    assert 'Policy/clipped_objective_fraction' not in values  # joint-score没有真实PPO目标裁剪
+    assert values['Loss/joint_score'] == pytest.approx(2.5)
     assert values['Loss/bc'] == pytest.approx(1.5)
     assert values['Policy/bc_to_ppo_gradient_ratio'] == pytest.approx(.1)
     assert values['Perf/controls_per_second'] == 100.

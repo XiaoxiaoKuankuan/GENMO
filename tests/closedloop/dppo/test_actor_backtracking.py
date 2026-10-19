@@ -136,26 +136,24 @@ def test_configuration_binds_every_actual_optimizer_choice(tmp_path):
     from pathlib import Path
     import yaml
     from gem.closedloop.dppo.training_config import configuration
-    source=Path(__file__).resolve().parents[3]/'configs/closedloop/stage2_actor_lr_server2.yaml'
+    source=Path(__file__).resolve().parents[3]/'configs/closedloop/stage2_credit_server2.yaml'
     assert configuration(source)['stage10']['derived']['maximum_actor_steps']==1
     c=yaml.safe_load(source.read_text())
     c['stage10']['training']['actor_lr']=3e-6
     p=tmp_path/'changed.yaml';p.write_text(yaml.safe_dump(c))
     with pytest.raises(ValueError,match='binding'):configuration(p)
-    c['stage10']['run_control']['max_training_iterations']=500
-    c['stage10']['limits']['accepted_iterations']=500
-    c['stage10']['limits']['optimizer_attempts']=4500
+    c=yaml.safe_load(source.read_text())
+    c['stage10']['training']['actor_objective']='coordinate_dppo'
     p.write_text(yaml.safe_dump(c))
-    with pytest.raises(ValueError,match='long training'):configuration(p)
+    with pytest.raises(ValueError,match='joint-score'):configuration(p)
 
 
-@pytest.mark.parametrize('objective',['coordinate_dppo','joint_score_pg'])
-def test_real_policy_full_batch_one_step_and_no_old_chain_mutation(tmp_path,actor_factory,objective):
+def test_real_policy_full_batch_one_step_and_no_old_chain_mutation(tmp_path,actor_factory):
     from tests.closedloop.test_stage1_actor import _activate_branches,_conditions
     from tests.closedloop.dppo.test_asymmetric_critic import tracking_context
     from gem.closedloop.contracts import STAGE1_CONDITION_KEYS
     from gem.closedloop.dppo.frozen_prefix import FrozenPrefixPolicy
-    from gem.closedloop.dppo.dual_collector import split_trace
+    from gem.closedloop.dppo.rollout_helpers import split_trace
     from gem.closedloop.dppo.tensor_cache import RolloutTensorCache
     from gem.closedloop.dppo.collectives import DistributedCollectives
     from gem.closedloop.dppo.full_batch_actor import full_batch_actor_update
@@ -187,32 +185,13 @@ def test_real_policy_full_batch_one_step_and_no_old_chain_mutation(tmp_path,acto
     try:
         report=full_batch_actor_update(policy,optimizer,rows,targets,cache,manifest,
             BCGradientController(initialize_from_gradient=True),distributed=DistributedCollectives(0,1),
-            anchor=Anchor(),generator=torch.Generator().manual_seed(4),objective=objective,
+            anchor=Anchor(),generator=torch.Generator().manual_seed(4),
             backtracking={'max_attempts':2,'factor':.5},kl_limits={'mean_coordinate':1.},
             microbatch=3,kl_microbatch=3,bc_samples_per_rollout=4)
         assert report['optimizer_steps']==1 and report['attempted_optimizer_steps']==1
         assert report['actual_global_bc_samples']==4 and report['internal_sample_visits']==8
-        assert report['steps'][0]['denominator']==(8 if objective=='coordinate_dppo' else 2)
+        assert report['steps'][0]['denominator']==2
         assert torch.equal(original,torch.stack([r.chain for r in rows]))
         assert policy.assert_frozen_identity()['checked']
     finally:
         cache.close();dist.destroy_process_group()
-
-
-def test_random_start_twenty_round_contract_rejects_twenty_one(tmp_path):
-    from pathlib import Path
-    import yaml
-    from gem.closedloop.dppo.training_config import configuration
-    source = Path(__file__).resolve().parents[3] / 'configs/closedloop/stage2_random20_server2.yaml'
-    actual = configuration(source)['stage10']
-    assert actual['training']['actor_lr'] == 3e-7
-    assert actual['training']['actor_objective'] == 'joint_score_pg'
-    assert actual['derived']['maximum_actor_steps'] == 1
-    assert actual['critic']['preheat_artifact'] is None
-    assert actual['run_control']['max_training_iterations'] == 20
-    config = yaml.safe_load(source.read_text())
-    config['stage10']['run_control']['max_training_iterations'] = 21
-    config['stage10']['limits'].update(accepted_iterations=21, optimizer_attempts=189)
-    target = tmp_path / 'too_long.yaml'; target.write_text(yaml.safe_dump(config))
-    with pytest.raises(ValueError, match='long training'):
-        configuration(target)

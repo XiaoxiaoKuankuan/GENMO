@@ -14,7 +14,6 @@ GAE按各环境/episode/连续执行片段独立计算，全局标准化一次�
 from __future__ import annotations
 
 import copy
-import hashlib
 from pathlib import Path
 from types import SimpleNamespace
 import time
@@ -22,12 +21,12 @@ import time
 import torch
 
 from .budget import atomic_json
-from .dual_collector import fixed_fragment_targets
+from .rollout_helpers import fixed_fragment_targets
 from .full_dataset import FullMusicSampler
 from .time_sampling import StratifiedTimePool, execution_coverage
 from .memory_execution import MemoryReceiveJournal,PrepaidMemoryBudget,DeviceRolloutBuffer
 from .parallel_support import begin_lease,finish_lease,collection_credit,local_call,root_call
-from .returns import normalize_advantages_global, shuffle_advantages_global
+from .returns import normalize_advantages_global
 from .run_management import GuardedStepJournal
 from .trainer import populate_values
 from .vector_collector import VectorWorldClient,VectorLaneBackend
@@ -198,10 +197,6 @@ class InProcessTrainingRuntime:
         manifest=[item for shard in c.distributed.all_gather_object(local) for item in shard]
         if manifest:targets=normalize_advantages_global(targets,distributed=c.distributed)
         else:targets.update(advantage_global_count=0,advantage_global_mean=0.,advantage_global_std=0.)
-        if manifest and c.settings.get('advantage_control','none')=='shuffle_global':
-            # 负对照的置换种子只由run种子和rollout序号决定，不消耗训练/Actor/Critic生成器。
-            seed=int(hashlib.sha256(f"{c.stage['seed']}:advantage_shuffle:{c.state['rollouts_completed']}".encode()).hexdigest()[:15],16)
-            targets=shuffle_advantages_global(targets,manifest,distributed=c.distributed,seed=seed)
         used,budget=self._finish()
         contiguous=[]
         for fragment in fragments:

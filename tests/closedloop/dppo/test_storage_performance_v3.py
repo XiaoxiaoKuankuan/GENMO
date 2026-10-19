@@ -94,20 +94,19 @@ def test_incremental_budget_batch_resume_reference_and_no_duplicate_refund(tmp_p
     limits = dict(accepted_iterations=10, optimizer_attempts=40, generations=100,
                   control_steps=1000, physics_steps=4000)
     path = tmp_path/'budget.json'
-    old = TrainingBudget(path, limits)
-    old.reserve('legacy', generations=1)
-    baseline = old.state_dict()
     budget = IncrementalBudget(path, limits)
+    budget.reserve('initial',generations=1)
+    baseline = budget.state_dict()
     entries = [(f'round/rank{i}', dict(generations=5, control_steps=50, physics_steps=200)) for i in range(8)]
     budget.reserve_many(entries)
-    assert budget.sequence == 1 and budget.state['used']['generations'] == 41
+    assert budget.sequence == 2 and budget.state['used']['generations'] == 41
     credit = dict(generations=3, control_steps=30, physics_steps=120)
     budget.settle_many([(phase, amount, credit, phase) for phase, amount in entries])
-    assert budget.sequence == 2 and budget.state['used']['generations'] == 25
+    assert budget.sequence == 3 and budget.state['used']['generations'] == 25
     ref = budget.summary()
     for phase, amount in entries:
         budget.settle_lease(phase, amount, credit, lease_id=phase)
-    assert budget.sequence == 2
+    assert budget.sequence == 3
     with pytest.raises(ValueError, match='settled'):
         budget.reserve(entries[0][0], generations=1)
     budget.accept_iteration(identity='session/1')

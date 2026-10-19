@@ -41,7 +41,6 @@ import torch
 
 from .budget import BudgetExceeded
 from .buffer import StepJournal, UpperTransition
-from .checkpoint import VERSION as CHECKPOINT_VERSION, VERSION_V2, _validate_rank_states
 from .performance import profiled
 
 
@@ -694,43 +693,17 @@ class RunManager:
         if self._closed:
             raise RuntimeError('run manager is closed; no writer lock is held')
 
-    def budget(self, limits, *, for_extension=False, incremental=False):
+    def budget(self, limits):
         self._ensure_open()
-        if for_extension:
-            # 扩展前先按旧账本构造；入口完成checkpoint和配置身份校验后才提交扩展事件。
-            limits = _read_json(self.run_dir / 'budget.json')['limits']
         if self._budget is None:
-            path = self.run_dir / 'budget.json'
-            if incremental or (path.exists() and _read_json(path).get('schema') == 'genmo.closedloop.stage10.budget_ledger.v2'):
-                from .budget_ledger import IncrementalBudget
-                self._budget = IncrementalBudget(path, limits, disk_guard=self.disk_guard)
-            else:
-                self._budget = TrainingBudget(path, limits, disk_guard=self.disk_guard)
+            from .budget_ledger import IncrementalBudget
+            self._budget = IncrementalBudget(self.run_dir / "budget.json", limits, disk_guard=self.disk_guard)
         elif self._budget.limits != limits:
-            raise ValueError('cannot change active run budget limits')
+            raise ValueError("Cannot change active run budget limits")
         return self._budget
 
-    def iteration_dir(self, index, attempt=None):
-        self._ensure_open()
-        index = _integer(index, 'iteration index')
-        attempt = self.session_id if attempt is None else attempt
-        if not isinstance(attempt, str) or not re.fullmatch(r'[A-Za-z0-9_-]{1,128}', attempt):
-            raise ValueError('attempt must be a bounded plain identifier')
-        key = (index, attempt)
-        if key not in self._directories:
-            path = self.run_dir / 'iterations' / f'{index:06d}' / attempt
-            path.mkdir(parents=True, exist_ok=False)
-            self._directories[key] = path
-        return self._directories[key]
 
-    def rollout_writer(self, index, *, policy_version, chunk_size=16, attempt=None):
-        return RolloutWriter(self.iteration_dir(index, attempt) / 'rollout', policy_version=policy_version,
-                             chunk_size=chunk_size, disk_guard=self.disk_guard)
 
-    def journal(self, index, attempt=None):
-        journal = GuardedStepJournal(self.iteration_dir(index, attempt) / 'execution_journal.sqlite', self.disk_guard)
-        self._journals.append(journal)
-        return journal
 
     @profiled('storage.disk_check')
     def check_disk(self, required_bytes=0, *, refresh=False):
@@ -762,135 +735,9 @@ class RunManager:
         self.disk_guard.account_file(path)
         return path
 
-    @profiled('storage.seal')
-    def seal_iteration(self, directory, iteration, *, metadata=None, closed_journals=()):
-        """发布独立接受水位及不可变文件清单；普通轮不要求写完整模型 checkpoint。"""
-        self._ensure_open()
-        iteration = _integer(iteration, 'accepted iteration', 1)
-        directory = self.disk_guard._path(directory)
-        summary_path = directory / 'summary.json'
-        summary = _read_json(summary_path)
-        if summary.get('status') != 'accepted' or summary.get('iteration') != iteration:
-            raise ValueError('Only the matching accepted iteration can be sealed')
-        known_closed = set()
-        for journal in [*self._journals, *closed_journals]:
-            if isinstance(journal, (str, Path)):
-                # 路径表示调用方已在全 rank barrier 后确认关闭的远端 journal。
-                path = self.disk_guard._path(journal)
-            else:
-                path = self.disk_guard._path(journal.path)
-                if not getattr(journal, 'closed', getattr(journal, '_closed', False)):
-                    if path.is_relative_to(directory):
-                        raise ValueError('Cannot seal an open execution journal')
-                    continue
-            known_closed.add(path)
-        preserved = {'summary.json', 'lr_progress.json', 'seal_manifest.json',
-                     'archive_manifest.json', 'execution_evidence.tar.gz', 'superseded.json'}
-        members = []
-        for path in sorted(directory.rglob('*')):
-            self.disk_guard._path(path)
-            if not path.is_file() or path.parent == directory and path.name in preserved:
-                continue
-            if path.name.endswith(('-wal', '-shm')):
-                raise ValueError('SQLite WAL/SHM must be closed and removed before sealing')
-            if path.suffix == '.sqlite' and path not in known_closed:
-                raise ValueError('Every execution journal requires an explicit closed declaration')
-            if path.name.endswith('.tmp'):
-                raise ValueError('Incomplete temporary evidence cannot be sealed')
-            self.disk_guard.account_file(path)
-            members.append(dict(path=str(path.relative_to(directory)), size_bytes=path.stat().st_size,
-                                sha256=file_sha256(path)))
-        if not members:
-            raise ValueError('Cannot seal an empty execution record')
-        seal_path = directory / 'seal_manifest.json'
-        seal = dict(schema='genmo.closedloop.stage10.iteration_seal.v2', iteration=iteration,
-                    session_id=self.session_id, summary_sha256=file_sha256(summary_path),
-                    journals_closed=True, members=members, metadata=copy.deepcopy(metadata or {}))
-        if seal_path.exists():
-            if _read_json(seal_path) != seal:
-                raise ValueError('Iteration seal differs from its immutable evidence')
-        else:
-            _atomic_json(seal_path, seal, disk_guard=self.disk_guard)
-        accepted_path = self.run_dir / 'accepted.json'
-        descriptor = dict(schema='genmo.closedloop.stage10.accepted_iteration.v2', iteration=iteration,
-                          seal=str(seal_path.relative_to(self.run_dir)), seal_sha256=file_sha256(seal_path),
-                          session_id=self.session_id)
-        if accepted_path.exists():
-            previous = _read_json(accepted_path)
-            if previous['iteration'] > iteration or previous['iteration'] == iteration and previous != descriptor:
-                raise ValueError('Accepted watermark must advance; reconcile stale tail before resume')
-        _atomic_json(accepted_path, descriptor, replace=True, disk_guard=self.disk_guard)
-        return seal_path
 
-    def reconcile_accepted(self, durable_iteration):
-        """恢复较早完整 checkpoint 时标记未持久训练尾部作废；已花资源不回退。"""
-        self._ensure_open()
-        durable_iteration = _integer(durable_iteration, 'durable iteration')
-        accepted_path = self.run_dir / 'accepted.json'
-        if not accepted_path.exists():
-            return None
-        previous = _read_json(accepted_path)
-        if previous['iteration'] <= durable_iteration:
-            return None
-        event = dict(schema='genmo.closedloop.stage10.superseded_tail.v2',
-                     session_id=self.session_id, durable_iteration=durable_iteration,
-                     previous_accepted=previous, spent_budget_preserved=True)
-        path = self.run_dir / 'superseded_tails' / f'{self.session_id}.json'
-        _atomic_json(path, event, disk_guard=self.disk_guard)
-        _atomic_json(accepted_path, dict(schema='genmo.closedloop.stage10.accepted_iteration.v2',
-                     iteration=durable_iteration, session_id=self.session_id,
-                     reconciliation=str(path.relative_to(self.run_dir))), replace=True,
-                     disk_guard=self.disk_guard)
-        self.append_metrics(dict(event='unsaved_training_tail_superseded',
-                            durable_iteration=durable_iteration, accepted_iteration=previous['iteration']))
-        return path
 
-    def publish_checkpoint(self, iteration, checkpoint_path, metadata=None):
-        self._ensure_open()
-        iteration = _integer(iteration, 'checkpoint iteration', 1)
-        path = self.disk_guard._path(checkpoint_path)
-        if not path.is_file() or path.is_symlink():
-            raise ValueError('complete checkpoint must be a regular file inside this run')
-        latest_path = self.run_dir / 'latest.json'
-        if latest_path.exists() and _read_json(latest_path)['iteration'] >= iteration:
-            raise ValueError('checkpoint publication must advance the accepted iteration watermark')
-        payload = torch.load(path, map_location='cpu', weights_only=False, mmap=True)
-        required = {'actor', 'critic', 'actor_optimizer', 'critic_optimizer', 'identity',
-                    'config', 'state', 'optimizer_layout', 'restore_environment'}
-        version = payload.get('version')
-        required.update({'rank_states', 'world_size'} if version == VERSION_V2 else {'rng', 'samplers'})
-        if version not in (CHECKPOINT_VERSION, VERSION_V2) or not required.issubset(payload):
-            raise ValueError('latest requires a complete Actor/Critic training checkpoint')
-        if version == VERSION_V2 and payload['world_size'] != _validate_rank_states(payload['rank_states']):
-            raise ValueError('Checkpoint rank count differs from its world size')
-        state = payload['state']
-        if state.get('buffer_size') != 0 or state.get('pending_plan') is not False or state.get('iteration') != iteration:
-            raise ValueError('checkpoint must match the iteration at an empty-buffer/no-pending boundary')
-        del payload
-        self.disk_guard.account_file(path)
-        self.disk_guard.check()
-        descriptor = dict(schema='genmo.closedloop.stage10.checkpoint_publication.v1', iteration=iteration,
-            path=str(path.relative_to(self.run_dir)), sha256=file_sha256(path), size_bytes=path.stat().st_size,
-            session_id=self.session_id, metadata=copy.deepcopy(metadata or {}),
-            budget=None if self._budget is None else self._budget.state_dict())
-        publication = self.run_dir / 'checkpoints' / 'publications' / f'{iteration:09d}-{self.session_id}.json'
-        _atomic_json(publication, descriptor, disk_guard=self.disk_guard)
-        _atomic_json(latest_path, dict(descriptor, publication=str(publication.relative_to(self.run_dir))),
-                     replace=True, disk_guard=self.disk_guard)
-        return latest_path
 
-    def latest_checkpoint(self):
-        self._ensure_open()
-        latest = _read_json(self.run_dir / 'latest.json')
-        if latest.get('schema') != 'genmo.closedloop.stage10.checkpoint_publication.v1':
-            raise ValueError('unsupported checkpoint publication')
-        publication = self.disk_guard._path(self.run_dir / latest['publication'])
-        if _read_json(publication) != {key: value for key, value in latest.items() if key != 'publication'}:
-            raise ValueError('latest pointer differs from its immutable checkpoint publication')
-        path = self.disk_guard._path(self.run_dir / latest['path'])
-        if not path.is_file() or path.stat().st_size != latest['size_bytes'] or file_sha256(path) != latest['sha256']:
-            raise ValueError('latest checkpoint is missing, incomplete or has a different SHA')
-        return path
 
     def close(self):
         if not self._closed:

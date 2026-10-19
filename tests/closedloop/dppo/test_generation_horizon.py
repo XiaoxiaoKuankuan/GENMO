@@ -11,6 +11,7 @@ from tests.closedloop.test_stage1_actor import actor_factory,_conditions
 from gem.closedloop.contracts import validate_stage1_training_batch
 from gem.closedloop.dppo.dense_policy import DenseDiffusionPolicy
 from gem.closedloop.dppo.pretrained_critic import PretrainedConditionCritic
+from tests.closedloop.dppo.test_asymmetric_critic import tracking_context
 
 
 @pytest.mark.parametrize('frames',[60,120])
@@ -31,7 +32,7 @@ def test_actual_horizon_keeps_pretrained_capacity_and_full_twenty_step_chain(act
     for handle in handles:handle.remove()
     assert shapes and set(shapes)=={frames}
     with torch.no_grad():
-        features=critic.encode_frozen(context);value=critic.forward_encoded(features,torch.tensor([20.]))
+        features=critic.encode_frozen(tracking_context(context));value=critic.forward_encoded(features,torch.tensor([20.]))
     assert value.shape==(1,) and features['music'].shape[1]==frames
     assert policy.kernel_config['generation_horizon_frames']==frames
     wrong=dict(context,future_valid=torch.ones(1,180,dtype=torch.bool))

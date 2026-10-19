@@ -1,4 +1,4 @@
-"""服务器1当前 Stage10 八卡 Isaac 同进程训练入口，默认只做有限训练。
+"""当前唯一第二阶段八卡Isaac同进程训练入口，默认只做有限训练。
 
 先用Gloo在任何CUDA/Isaac上下文创建前核验八张卡空闲、模型SHA和独立输出目录，
 再为每rank启动一个Isaac App和对应GPU世界，NCCL同步DPPO/BC/Critic梯度。
@@ -25,7 +25,7 @@ sys.path.insert(0,str(ROOT))
 
 def main():
     parser=argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--config',type=Path,default=ROOT/'configs/closedloop/stage2_asymmetric_server2.yaml')
+    parser.add_argument('--config',type=Path,default=ROOT/'configs/closedloop/stage2_credit_server2.yaml')
     parser.add_argument('--output-dir',type=Path,required=True)
     parser.add_argument('--stop-after-iteration',type=int,default=2)
     parser.add_argument('--warmup-rollouts',type=int)

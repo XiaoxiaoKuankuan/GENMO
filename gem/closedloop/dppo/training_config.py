@@ -18,7 +18,7 @@ import yaml
 
 from .rewards import resolve_reward_config
 
-VERSION='genmo.closedloop.stage2.asymmetric_tracking.v1'
+VERSION='genmo.closedloop.stage2.continuous_joint_score.v1'
 
 
 def _source_counts(value):
@@ -35,6 +35,12 @@ def configuration(path,*,genmo_repo=None,gmt_repo=None):
     if genmo_repo:c['paths']['genmo_repo']=str(Path(genmo_repo).resolve())
     if gmt_repo:c['paths']['gmt_repo']=str(Path(gmt_repo).resolve())
     s=c['stage10'];t=s['training'];scale=s['scale'];world=s['distributed']['world_size']
+    precision=s['precision']
+    if (precision['mode']!='native_fp32' or precision['attention']!='sdpa_math'
+            or precision['linear_execution']!='stable_tf32x3' or precision['compile']
+            or not precision['precise_output'] or precision.get('cuda_graph',False)
+            or precision.get('weight_gradient','direct_joint_gemm')!='direct_joint_gemm'):
+        raise ValueError('Only the validated stable_tf32x3 FP32 execution is supported')
     from .time_sampling import TIME_SAMPLING_CONTRACT, MOTION_RESET_CONTRACT
     dataset = s['dataset']
     if (dataset.get('random_start') is not True or dataset.get('sampling_contract') != TIME_SAMPLING_CONTRACT
@@ -129,30 +135,21 @@ def configuration(path,*,genmo_repo=None,gmt_repo=None):
         raise ValueError('Calibration needs an explicit bounded reservation, not a measured delay')
     if c['runtime']['timing_contract']!='modeled_deployment.v3' or c['timing']['control_ticks']!=12 or c['timing']['physics_ticks']!=3:
         raise ValueError('Keep calibrated deployment clock and 50Hz/200Hz four physical substeps')
-    if t['objective_logprob_reduction'] not in ('joint_sum','free_coordinate_mean'):
-        raise ValueError('Unknown explicit PPO proxy objective')
+    if t['objective_logprob_reduction']!='free_coordinate_mean':
+        raise ValueError('Only current free-coordinate diagnostic reduction is supported')
     if not 0<t['ppo_clip']<1 or not math.isfinite(t['actor_lr']) or t['actor_lr']<=0:
         raise ValueError('Invalid independently calibrated Actor learning rate/clip')
-    # 诊断实验开关进入训练身份：shuffle_global为优势置换负对照，SNR只增加梯度统计不改更新。
-    if t.get('advantage_control','none') not in ('none','shuffle_global'):
-        raise ValueError('advantage_control must be none or shuffle_global')
+    if t.get('advantage_control','none')!='none':
+        raise ValueError('Retired advantage-control experiments are not supported')
     if type(t.get('gradient_snr_diagnostic',False)) is not bool:
         raise ValueError('gradient_snr_diagnostic must be boolean')
     diagnostic_interval=s['checks'].get('actor_diagnostics_every',100)
     if type(diagnostic_interval) is not int or diagnostic_interval<1:
         raise ValueError('actor_diagnostics_every must be a positive iteration interval')
-    # 学习率控制：fixed保持actor_lr；kl_adaptive按最终四个训练步骤平均坐标KL趋近目标，并受显式上下界约束。
-    if t.get('actor_lr_control','fixed') not in ('fixed','kl_adaptive'):raise ValueError('actor_lr_control must be fixed or kl_adaptive')
-    if t.get('kl_rejection','abort') not in ('abort','rollback_continue'):raise ValueError('kl_rejection must be abort or rollback_continue')
-    if t.get('actor_lr_control','fixed')=='kl_adaptive':
-        bounds=t.get('actor_lr_bounds');target=t.get('kl_target_coordinate')
-        # 控制量可选四个训练步骤平均坐标KL或单步最大平均坐标KL（末端K步目标时后者先触及硬门槛）。
-        metric=t.get('kl_control_metric','mean_coordinate_kl')
-        limit={'mean_coordinate_kl':s['kl']['mean_coordinate'],
-               'maximum_step_mean_coordinate_kl':s['kl']['maximum_step_mean_coordinate']}.get(metric)
-        if (limit is None or not isinstance(bounds,list) or len(bounds)!=2 or not 0<bounds[0]<=t['actor_lr']<=bounds[1]
-                or not isinstance(target,(int,float)) or not 0<target<limit):
-            raise ValueError('kl_adaptive requires a known kl_control_metric, actor_lr_bounds [low, high] containing actor_lr and 0<kl_target_coordinate<its hard limit')
+    if t['actor_lr_control']!='fixed' or t['kl_rejection']!='abort':
+        raise ValueError('Only fixed proposed LR with bounded per-step backtracking and hard rejection is supported')
+    if any(key in t for key in ('actor_lr_bounds','kl_target_coordinate','kl_control_metric')):
+        raise ValueError('Retired adaptive-LR settings are not supported')
     steps=t['ppo_epochs']*math.ceil(chains/scale['actor_minibatch_chains'])
     bc_total=t['bc_samples_per_rollout']
     if type(bc_total)is not int or bc_total<1:
@@ -172,9 +169,8 @@ def configuration(path,*,genmo_repo=None,gmt_repo=None):
     if bc_total<maximum_steps:raise ValueError('BC must cover every possible actual optimizer step')
     if s['limits']['optimizer_attempts']<s['limits']['accepted_iterations']*maximum_steps:
         raise ValueError('Optimizer attempt budget must cover the complete declared workload')
-    if 'actor_objective' in t:
-        from .actor_experiment import validate_experiment_configuration
-        validate_experiment_configuration(c, maximum_steps)
+    from .actor_optimization import validate_optimization_configuration
+    validate_optimization_configuration(c, maximum_steps)
     if c['runtime']['generation_batch']>n:raise ValueError('No duplicated environments to pad effective GENMO batches')
     s['derived']=dict(world_size=world,real_chains=chains,local_chains=n*decisions,planned_actor_steps=steps,
         local_ppo_internal_visits=n*decisions*t['ppo_steps_per_chain']*t['ppo_epochs'],

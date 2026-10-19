@@ -308,15 +308,3 @@ def _evaluate_impl(c, label, *, write_report=True):
             prefix='validation',dashboard_metrics=evaluation_scalars(result,baseline) if c.writer is not None else None)
     root_call(c.distributed, publish_timing)
     return result
-
-
-
-def _evaluate_and_record(c, report, label, *, legacy_label=None):
-    """评估与最终计时落盘成功后登记 SHA，避免会话漏报终态验证或接受被改写报告。"""
-    result = _evaluate(c, label)
-    path = c.session/'evaluations'/f'{label}.json'
-    artifact = root_call(c.distributed, lambda: dict(label=label, iteration=c.state['iteration'],
-        path=str(path.relative_to(c.output)), sha256=sha256_file(path)))
-    report.setdefault('evaluation_artifacts', []).append(artifact)
-    report['evaluations'].append(label if legacy_label is None else legacy_label)
-    return result

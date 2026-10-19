@@ -154,16 +154,14 @@ def test_subset_comparison_is_explicit_and_rechecks_origin_sha(tmp_path):
     initial, final = tmp_path/'initial.json', tmp_path/'final.json'
     for path in (initial, final):
         path.write_text(json.dumps(merged))
-    result = compare_evaluations(initial, final, mode='periodic_subset')
+    result = compare_evaluations(initial, final)
     assert result['paired_task_count'] == 32 and result['full_heldout_acceptance'] is False
     assert result['mode'] == 'periodic_subset'
-    with pytest.raises((ValueError, FileNotFoundError)):
-        compare_evaluations(initial, final)  # 不能把subset静默当fullval。
     damaged = copy.deepcopy(merged)
     damaged['episode_metrics'][0]['reward'] += 1
     final.write_text(json.dumps(damaged))
     with pytest.raises(ValueError, match='aggregate'):
-        compare_evaluations(initial, final, mode='periodic_subset')
+        compare_evaluations(initial, final)
 
 
 def test_audit_keeps_nested_metrics_but_tensorboard_requires_explicit_small_view(tmp_path):

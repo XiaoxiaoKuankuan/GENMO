@@ -54,7 +54,7 @@ def test_intermediate4_gradients_and_deterministic_final(actor_factory):
 
 
 def test_final_kl_covers_four_steps_and_regenerates_reference(actor_factory):
-    from gem.closedloop.dppo.dual_collector import split_trace
+    from gem.closedloop.dppo.rollout_helpers import split_trace
     from gem.closedloop.dppo.tensor_cache import RolloutTensorCache
     from gem.closedloop.dppo.updater import final_kl
     from tests.closedloop.dppo.test_asymmetric_critic import tracking_context

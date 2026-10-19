@@ -1,23 +1,9 @@
-"""Stage10 的真实无梯度采样、原生批量 GEMM 与区域精度策略合同。
+"""当前FP32主参数、stable_tf32x3大矩阵与SDPA数学注意力执行。
 
-复用 Stage1 Actor 的条件、CFG、20步DDIM均值、前缀约束和物理解码，不继承
-旧固定64行编译器的有梯度推理补救。网络行随真实 batch 扩大，条件批量编码，
-音乐/历史/前缀在一条链的20步中复用；训练条件图由 ConditionGraphCache 回传。
-FP32主参数和Adam始终保留，原生GEMM直接归约权重梯度，不物化逐样本权重矩阵。
-显式补偿BF16权重梯度候选复用已有三项/六项Tensor Core算子，只替换Transformer
-反向权重归约；条件和敏感输出保持原精度。它不改变采样前向，仍须完整梯度及
-非空Adam对照，默认继续使用原生联合GEMM，不能由可调用直接视为验收通过。
-
-native_fp32是新数值基线，tf32和bf16_backbone属于显式候选合同。BF16只计算
-Transformer大矩阵和指定SDPA，层间残差、条件、输出投影、CFG和DDIM仍FP32。
-敏感最终窄投影可使用局部FP64计算；概率和KL在独立模块维持FP64。采样的old
-statistics来自实际使用的路径，任何候选必须通过自身零更新和完整梯度/Adam
-验收后才能用于生产；没有自动降低概率门槛或静默恢复旧run。
-
-末端floor是新随机核身份，基础DDIM方向系数仍明确使用原eta日程；实际高斯
-采样和概率均使用max(base_sigma,显式floor)。完整四秒自由坐标保持优化资格。
-torch.compile只作用于纯denoiser候选，并分别验证no_grad与有梯度执行，不强制
-启用梯度来伪造推理数值一致性。调用边界采用既有延后GPU检查机制。
+Actor真实60帧输入随有效batch计算，条件按当前参数版本复用；采样和KL无梯度，
+训练保留完整条件编码梯度。敏感输出使用局部FP64，概率独立FP64，权重梯度使用
+联合GEMM。GPU正式配置只接受已验收路径；CPU原生GEMM保留为数学回归工具。
+旧BF16、TF32近似、编译、CUDA Graph及矩阵核扫描实现不再保留或自动回退。
 """
 from __future__ import annotations
 
@@ -28,7 +14,6 @@ from torch import nn
 from torch.nn import functional as F
 
 from .policy import DPPODiffusionPolicy
-from .batch_execution import SampleMatrixLinear, SampleEncoderRoPEBlock
 from gem.network.base_arch.transformer.encoder_rope import EncoderRoPEBlock, RoPEAttention
 
 
@@ -43,11 +28,7 @@ class _DenseLinear(torch.autograd.Function):
         ctx.precise_output=precise_output
         ctx.backend=backend
         ctx.weight_gradient=weight_gradient
-        if backend=='sample_bmm' and not precise_output:
-            shaped=x.reshape(len(x),-1,x.shape[-1])
-            result=torch.bmm(shaped,w.t().unsqueeze(0).expand(len(x),-1,-1)).reshape(*x.shape[:-1],w.shape[0])
-            if bias is not None:result=result+bias.to(arithmetic)
-        elif backend!='native_gemm' and not precise_output:
+        if backend!='native_gemm' and not precise_output:
             from .fixed_tile_linear import fixed_matmul
             result=fixed_matmul(x.reshape(-1,x.shape[-1]),w.t(),precision=backend).reshape(*x.shape[:-1],w.shape[0])
             if bias is not None:result=result+bias.to(arithmetic)
@@ -62,10 +43,7 @@ class _DenseLinear(torch.autograd.Function):
         accumulation=torch.float64 if ctx.precise_output else torch.float32
         grad_x=None
         if ctx.needs_input_grad[0]:
-            if ctx.backend=='sample_bmm' and not ctx.precise_output:
-                grad_x=torch.bmm(gradient.reshape(len(x),-1,gradient.shape[-1]).to(w.dtype),
-                    w.unsqueeze(0).expand(len(x),-1,-1))
-            elif ctx.backend!='native_gemm' and not ctx.precise_output:
+            if ctx.backend!='native_gemm' and not ctx.precise_output:
                 from .fixed_tile_linear import fixed_matmul
                 grad_x=fixed_matmul(g.to(w.dtype),w,precision=ctx.backend)
             else:grad_x=F.linear(g.to(w.dtype),w.t())
@@ -73,10 +51,7 @@ class _DenseLinear(torch.autograd.Function):
         # 直接得到最终[out,in]矩阵；不创建[B,out,in]临时梯度。
         grad_w=None
         if ctx.needs_input_grad[1]:
-            if ctx.weight_gradient!='direct_joint_gemm' and not ctx.precise_output:
-                from .compensated_gemm import compensated_gemm
-                grad_w=compensated_gemm(g.float().t(),inputs.float(),int(ctx.weight_gradient[-1])).to(ctx.weight_dtype)
-            else:grad_w=(g.to(accumulation).t()@inputs.to(accumulation)).to(ctx.weight_dtype)
+            grad_w=(g.to(accumulation).t()@inputs.to(accumulation)).to(ctx.weight_dtype)
         grad_b=g.sum(0,dtype=accumulation).to(ctx.weight_dtype) if ctx.has_bias and ctx.needs_input_grad[2] else None
         return grad_x,grad_w,grad_b,None,None,None,None
 
@@ -90,30 +65,27 @@ class RegionalDenseLinear(nn.Linear):
 
 def configure_dense_actor(actor, *, precision='native_fp32', attention='sdpa_math', precise_output=True,linear_execution='native_gemm',
                           weight_gradient='direct_joint_gemm'):
-    if precision not in ('native_fp32','tf32','bf16_backbone'):
+    if precision!='native_fp32':
         raise ValueError('Unknown explicit 当前 arithmetic contract')
-    if attention not in ('manual','sdpa_math','sdpa_efficient','sdpa_flash','sdpa_cudnn'):
+    if attention!='sdpa_math':
         raise ValueError('Unknown forced attention backend')
     if any(p.dtype!=torch.float32 for p in actor.parameters()):
         raise TypeError('Actor master parameters must remain FP32')
-    if linear_execution not in ('native_gemm','stable_bmm','stable_ieee','stable_tf32x3','stable_tf32x3_wide','stable_bf16x3','stable_bf16x6'):
+    if linear_execution not in ('native_gemm','stable_tf32x3'):
         raise ValueError('Unknown 当前 dense reduction contract')
-    if weight_gradient not in ('direct_joint_gemm','cublas_bf16x3','cublas_bf16x6'):
+    if weight_gradient!='direct_joint_gemm':
         raise ValueError('Unknown explicit 当前 weight-gradient arithmetic contract')
     for name,module in actor.named_modules():
-        if type(module) in (nn.Linear,SampleMatrixLinear,RegionalDenseLinear):
+        if type(module) in (nn.Linear,RegionalDenseLinear):
             module.__class__=RegionalDenseLinear
-            module.dense_compute_dtype=(torch.bfloat16 if precision=='bf16_backbone' and name.startswith('denoiser.blocks.') else torch.float32)
+            module.dense_compute_dtype=torch.float32
             module.dense_precise_output=bool(precise_output and name=='denoiser.final_layer.fc2')
             module.dense_weight_gradient=weight_gradient if name.startswith('denoiser.blocks.') else 'direct_joint_gemm'
             module.dense_linear_backend=('native_gemm' if linear_execution=='native_gemm' else
-                'sample_bmm' if linear_execution=='stable_bmm' and name.startswith('denoiser.blocks.') else
-                'ieee' if linear_execution=='stable_bmm' else
                 linear_execution.removeprefix('stable_')+'_pipelined' if name.startswith('denoiser.blocks.') else 'ieee')
-        if type(module) is SampleEncoderRoPEBlock:module.__class__=EncoderRoPEBlock
         if isinstance(module,RoPEAttention):
             module.execution_backend=attention
-            module.attention_compute_dtype=torch.bfloat16 if precision=='bf16_backbone' else torch.float32
+            module.attention_compute_dtype=torch.float32
     # 批量GRUCell原有跳过无效历史语义保留，避免按链递归batch=1。
     actor.history_encoder.execution_backend='native' if linear_execution=='native_gemm' else 'sample_bmm_fused_gru'
     if linear_execution!='native_gemm':
@@ -121,10 +93,8 @@ def configure_dense_actor(actor, *, precision='native_fp32', attention='sdpa_mat
         actor.history_encoder.cell.weight_reduction='joint_gemm'
     return dict(schema='genmo.stage10.native_dense_execution.v1',precision=precision,
         linear=linear_execution,weight_gradient=weight_gradient,attention=attention,attention_fallback=False,
-        mode='bf16_backbone_candidate' if precision=='bf16_backbone' else
-             'tf32_candidate' if precision=='tf32' else
-             'compensated_tensorcore_fp32_storage_candidate' if linear_execution in ('stable_tf32x3','stable_tf32x3_wide','stable_bf16x3','stable_bf16x6') else 'fp32_fast',
-        matmul_tf32=precision=='tf32',
+        mode='compensated_tensorcore_fp32_storage_candidate' if linear_execution=='stable_tf32x3' else 'fp32_fast',
+        matmul_tf32=False,
         master_dtype='float32',layer_residual_dtype='float32',probability_dtype='float64',
         final_projection='float64_local' if precise_output else 'float32',
         inference_requires_grad=False,condition_encoding='batched_unique_chains',
@@ -149,7 +119,7 @@ class DenseDiffusionPolicy(DPPODiffusionPolicy):
             raise ValueError('当前 production behavior must retain the full 20-step chain')
         super().__init__(actor,steps=steps,eta=eta,std_floor=min(v for v in std_schedule if v>0),std_schedule=std_schedule,
             deterministic_steps=deterministic_steps,
-            guidance_scale=guidance_scale,cfg_batch=True,numerical_layout='legacy_step_lane',defer_checks=True)
+            guidance_scale=guidance_scale,cfg_batch=True,defer_checks=True)
         self.numerical_layout='native_dense'
         self.batched_conditions=True
         self.precision=precision
@@ -157,14 +127,9 @@ class DenseDiffusionPolicy(DPPODiffusionPolicy):
         self.generation_frames=generation_frames
         self.numerical_execution=configure_dense_actor(actor,precision=precision,attention=attention,
             precise_output=precise_output,linear_execution=linear_execution,weight_gradient=weight_gradient)
-        if compile_denoiser:
-            if cuda_graph:raise ValueError('Compile and CUDA graph candidates must be evaluated separately')
-            from .compiled_forward import install_shared_forward
-            install_shared_forward(self)
-        else:self.numerical_execution['compiler']=None
-        if cuda_graph:
-            from .cuda_graph_forward import install_inference_graph
-            install_inference_graph(self)
+        if compile_denoiser or cuda_graph:
+            raise ValueError('Retired compile/CUDA Graph candidates are not supported')
+        self.numerical_execution['compiler']=None
         self.kernel_config.update(version='genmo.stochastic_ddim.actual_kernel',
             execution_contract=self.numerical_layout,numerical_execution=self.numerical_execution,
             condition_batch_size='unique_chains',execution_batch_size=None,

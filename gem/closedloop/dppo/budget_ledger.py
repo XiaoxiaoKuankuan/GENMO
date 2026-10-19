@@ -1,12 +1,12 @@
-"""第二阶段根进程增量预算账本及旧格式兼容读取。
+"""当前第二阶段根进程的唯一SQLite增量预算账本。
 
 SQLite以FULL事务追加带前序SHA的事件，八卡预占/结算分别只提交一个事务；内存
 仅在事务持久化后更新计数，失败时禁止继续使用旧余额。唯一lease和接受轮次身份
 阻止重复退款或计费，未知执行仍保留原预占。初始完整v1快照作为不可变起点，新
 budget.json仅发布数据库身份，不随历史增长重写；完整checkpoint仍保存可独立
 检查的v1状态，普通轮保存带链头SHA的常量大小引用。恢复/审计重放原始事务，核对
-每一事件的余额、唯一身份和SHA链。旧JSON可显式迁移，原文件保留为数据库内基线；
-新数值执行身份仍要求新run，账本迁移本身不授权旧模型跨执行契约续训或扩限。
+每一事件的余额、唯一身份和SHA链。不接受旧JSON根账本或自动迁移；算法身份和
+资源额度由当前完整checkpoint及运行目录共同核验。
 """
 from __future__ import annotations
 
@@ -35,10 +35,11 @@ class IncrementalBudget(TrainingBudget):
         self.limits = _budget_limits(limits)
         self.database = self.path.with_suffix('.sqlite')
         descriptor = json.loads(self.path.read_text()) if self.path.exists() else None
-        if descriptor is None or descriptor.get('schema') != SCHEMA:
-            initial = (TrainingBudget(self.path, limits, disk_guard=disk_guard).state_dict()
-                       if descriptor is not None else dict(schema='genmo.closedloop.stage10.budget.v1',
-                           limits=self.limits.copy(), used={key: 0 for key in BUDGET_KEYS}, phases={}))
+        if descriptor is not None and descriptor.get('schema') != SCHEMA:
+            raise ValueError('Only the current SQLite root budget ledger is supported')
+        if descriptor is None:
+            initial = dict(schema='genmo.closedloop.stage10.budget.v1',
+                limits=self.limits.copy(), used={key: 0 for key in BUDGET_KEYS}, phases={})
             if self.database.exists():
                 # 未发布数据库不含执行权限；禁止覆盖可能属于另一次中断的事务。
                 raise FileExistsError('Unpublished budget database requires explicit recovery inspection')

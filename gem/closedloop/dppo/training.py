@@ -39,7 +39,8 @@ from .run_management import RunManager,DiskGuard,StopSignal
 from .tensor_cache import RolloutTensorCache
 from .trainer import load_actor,trainable_actor_parameters
 from .optimization_support import probability_check_local
-from .updater import actor_update,critic_update,final_kl,check_kl
+from .updater import critic_update,final_kl,check_kl
+from .full_batch_actor import full_batch_actor_update
 from .compact_evidence import summary_only
 from .periodic_monitor import log_metrics
 from .tensorboard_metrics import DashboardWriter, training_scalars
@@ -130,33 +131,6 @@ def _overhead(c,name,started):
     """评估、MC、快照等非迭代前台耗时，累计到下一条轮次记录后清零；不进入checkpoint或身份。"""
     overhead=getattr(c,'overhead',None)
     if overhead is not None:overhead[name]=overhead.get(name,0.)+time.perf_counter()-started
-
-
-def _bounded_actor_lr(c,value):
-    low,high=c.settings.get('actor_lr_bounds',[c.settings['actor_lr'],c.settings['actor_lr']])
-    return min(high,max(low,float(value)))
-
-
-def _set_actor_lr(c,value):
-    """按显式上下界设置下一轮Actor学习率；学习率随Adam状态进入checkpoint。"""
-    lr=_bounded_actor_lr(c,value)
-    for group in c.actor_optimizer.param_groups:group['lr']=lr
-    c.state['selected_actor_lr']=lr
-    return lr
-
-
-def _kl_adapted_lr(current,measured,target):
-    """KL约随学习率平方变化：按sqrt(target/measured)一步趋近，单轮倍率限制在[0.5,1.5]。"""
-    if measured is None or measured<=0:return current*1.5
-    return current*min(1.5,max(.5,math.sqrt(target/measured)))
-
-
-def _sketch_cosine(previous,current):
-    if not previous or not current:return None
-    names=sorted(set(previous)&set(current))
-    dot=sum(float((previous[n]*current[n]).sum()) for n in names)
-    left=sum(float(previous[n].square().sum()) for n in names);right=sum(float(current[n].square().sum()) for n in names)
-    return None if left<=0 or right<=0 else max(-1.,min(1.,dot/math.sqrt(left*right)))
 
 
 def _poll_checkpoint(c,*,wait=False):
@@ -356,7 +330,7 @@ def run(cargs,config,distributed):
     c=SimpleNamespace(distributed=distributed,config=copy.deepcopy(config),base_config=copy.deepcopy(config),
         stage=config['stage10'],settings=copy.deepcopy(config['stage9']),manager=None,writer=None,
         async_writer=None,vector=None,workers=None,maintenance=None,budget=None,output=cargs.output_dir.resolve(),
-        overhead={},snr_previous_sketch=None)
+        overhead={})
     report=dict(schema='genmo.stage10.session',status='running',iterations=[],warmup=[],evaluations=[],evaluation_artifacts=[])
     from .run_control import build_policy,validate_stopping_iteration
     stop_after_iteration=validate_stopping_iteration(cargs.stop_after_iteration,c.stage)
@@ -365,7 +339,7 @@ def run(cargs,config,distributed):
     try:
         def initialize():
             c.manager=RunManager(c.output,resume=bool(cargs.resume),min_free_bytes=c.stage['storage']['min_free_bytes'],max_run_bytes=c.stage['storage']['max_run_bytes'])
-            c.budget=c.manager.budget(c.stage['limits'],incremental=True)
+            c.budget=c.manager.budget(c.stage['limits'])
             c.async_writer=AsyncCheckpointWriter(c.output,keep_last=c.stage['storage']['checkpoint_keep_last'])
             return dict(run_id=c.manager.run_id,session_id=c.manager.session_id)
         identity=root_call(distributed,initialize)
@@ -490,15 +464,10 @@ def run(cargs,config,distributed):
         if payload is None:
             _snapshot(c,'initial',wait=True)
         if not (cargs.calibrate_only or cargs.collect_only or cargs.evaluate_only or getattr(cargs,'critic_preheat_only',False)):
-            from .actor_experiment import optimization_binding,validate_experiment_configuration
-            if 'actor_objective' in c.settings:
-                validate_experiment_configuration(c.config,c.stage['derived']['maximum_actor_steps'])
-                report['actor_experiment']=dict(optimization=optimization_binding(c.stage),
-                    physics_quality_validated=False,scope=c.stage['actor_experiment']['scope'])
-            else:
-                from .kl_calibration import validate_calibration
-                validate_calibration(c.stage['kl'],c.policy.kernel_config,c.settings['reward'],c.settings['kl_soft_stop_coordinate'],
-                    optimization=optimization_binding(c.stage))
+            from .actor_optimization import optimization_binding,validate_optimization_configuration
+            validate_optimization_configuration(c.config,c.stage['derived']['maximum_actor_steps'])
+            report['actor_optimization']=dict(optimization=optimization_binding(c.stage),
+                physics_quality_validated=False)
         complete_mc=c.stage['critic'].get('complete_mc',{})
         if getattr(cargs,'mc_validation_only',False):
             from .mc_calibration import calibrate_critic
@@ -624,31 +593,20 @@ def run(cargs,config,distributed):
                 def reserve():
                     root_call(distributed,lambda:c.budget.reserve('actor_attempts',optimizer_attempts=1))
                     c.state['optimizer_attempts']+=1
-                update_actor=actor_update
-                if 'actor_objective' in c.settings:
-                    from functools import partial
-                    from .full_batch_actor import full_batch_actor_update
-                    snapshot=service.world.snapshots([0])[0]
-                    c.policy.experimental_joint_limits={k:snapshot[k] for k in
-                        ('joint_names','joint_hard_limits_rad','joint_soft_limits_rad')}
-                    update_actor=partial(full_batch_actor_update,objective=c.settings['actor_objective'],
-                        backtracking=c.settings['optimizer_backtracking'],kl_limits=c.stage['kl'],
+                snapshot=service.world.snapshots([0])[0]
+                c.policy.experimental_joint_limits={k:snapshot[k] for k in
+                    ('joint_names','joint_hard_limits_rad','joint_soft_limits_rad')}
+                actor=full_batch_actor_update(c.policy,c.actor_optimizer,rows,targets,cache,manifest,c.controller,
+                    distributed=distributed,anchor=c.bc,generator=c.generators['actor'],
+                    backtracking=c.settings['optimizer_backtracking'],kl_limits=c.stage['kl'],
                     kl_microbatch=c.settings['kl_microbatch'],proposed_lr=c.settings['actor_lr'],
                     detailed_diagnostics=(c.state['iteration']==0 or
-                        (c.state['iteration']+1)%c.stage['checks'].get('actor_diagnostics_every',100)==0))
-                actor=update_actor(c.policy,c.actor_optimizer,rows,targets,cache,manifest,c.controller,distributed=distributed,
-                    anchor=c.bc,generator=c.generators['actor'],ppo_epochs=c.settings['ppo_epochs'],
+                        (c.state['iteration']+1)%c.stage['checks'].get('actor_diagnostics_every',100)==0),
+                    ppo_epochs=c.settings['ppo_epochs'],
                     minibatch_chains=c.stage['scale']['actor_minibatch_chains'],microbatch=c.settings['denoising_microbatch'],
-                    sampled_steps=c.settings['ppo_steps_per_chain'],clip=c.settings['ppo_clip'],
-                    gamma_denoising=c.settings['gamma_denoising'],soft_kl=c.settings['kl_soft_stop_coordinate'],
-                    kl_reduction=c.stage['kl']['reduction'],objective_reduction=c.settings['objective_logprob_reduction'],
+                    clip=c.settings['ppo_clip'],
                     grad_clip_norm=c.settings['grad_clip_norm'],reserve_attempt=reserve,bc_samples_per_rollout=c.settings['bc_samples_per_rollout'],
-                    snr=c.settings.get('gradient_snr_diagnostic',False),step_strategy=c.settings['ppo_step_strategy'])
-                sketch=actor.pop('_ppo_gradient_sketch',None)
-                if actor.get('gradient_snr') is not None:
-                    # 相邻两轮全局PPO梯度抽样的方向余弦；抽样只驻留内存，不进入checkpoint或记录。
-                    actor['gradient_snr']['consecutive_iteration_cosine']=_sketch_cosine(c.snr_previous_sketch,sketch)
-                    c.snr_previous_sketch=sketch
+                    snr=c.settings.get('gradient_snr_diagnostic',False))
                 actor_seconds=max(distributed.all_gather_object(time.perf_counter()-actor_start))
                 from .kl_reuse import reusable_accepted_kl
                 kl=reusable_accepted_kl(actor,c.policy,cache,manifest,distributed,
@@ -672,27 +630,13 @@ def run(cargs,config,distributed):
                 if actor.get('step_rejected'):
                     accepted['passed']=False
                     accepted['failures']['optimizer_step_backtracking']='all_attempts_rejected'
-                if not accepted['passed'] and c.settings.get('kl_rejection','abort')!='rollback_continue':
+                if not accepted['passed']:
                     anomaly_saved=local_call(distributed,lambda:_preserve_rollout_anomaly(c,buffer,targets,manifest,label))
                     rollback=local_call(distributed,lambda:_restore_rollback(c,saved))
                     rollbacks=distributed.all_gather_object(rollback)
                     root_call(distributed,lambda:atomic_json(c.session/(label+'_rejected.json'),dict(kl=kl,acceptance=accepted,actor=actor,
                         physical_and_resource_consumption_retained=True,training_state_restored=True,rollback_audits=rollbacks)))
                     raise RuntimeError('Final trainable-four KL rejected; whole training update rolled back')
-                if not accepted['passed']:
-                    # 回滚后继续：恢复全部学习状态后再减半学习率；本轮不计入接受轮次，只写JSON证据。
-                    rollback=local_call(distributed,lambda:_restore_rollback(c,saved))
-                    rollbacks=distributed.all_gather_object(rollback)
-                    next_lr=_set_actor_lr(c,c.state['selected_actor_lr']*.5)
-                    c.state['kl_rejections']=c.state.get('kl_rejections',0)+1
-                    c.snr_previous_sketch=None
-                    rejected=True
-                    root_call(distributed,lambda:atomic_json(c.session/(label+'_rejected.json'),dict(kl=kl,acceptance=accepted,
-                        actor=actor,mode='rollback_continue',next_actor_lr=next_lr,physical_and_resource_consumption_retained=True,
-                        training_state_restored=True,rollback_audits=rollbacks)))
-                elif c.settings.get('actor_lr_control','fixed')=='kl_adaptive':
-                    metric=c.settings.get('kl_control_metric','mean_coordinate_kl')
-                    _set_actor_lr(c,_kl_adapted_lr(c.state['selected_actor_lr'],kl[metric],c.settings['kl_target_coordinate']))
             else:
                 actor_seconds=0.
             def assert_paused_physics():
@@ -716,8 +660,7 @@ def run(cargs,config,distributed):
                 root_call(distributed,lambda:c.budget.accept_iteration('update',identity=f'{identity["session_id"]}/{label}'))
                 c.state['actor_updates']+=actor['optimizer_steps']
                 c.state['policy_version']+=1;c.state['iteration']+=1
-                if 'actor_objective' in c.settings:
-                    c.state['last_accepted_actor_lr']=actor['steps'][-1]['learning_rate']
+                c.state['last_accepted_actor_lr']=actor['steps'][-1]['learning_rate']
             else:
                 c.state['warmup_completed']+=1
             c.state['rollouts_completed']+=1

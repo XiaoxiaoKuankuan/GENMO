@@ -1,20 +1,9 @@
-"""Stage10固定归约顺序的联合矩阵乘法候选。
+"""当前stable_tf32x3主矩阵乘与IEEE条件/GRU矩阵乘。
 
-原逐样本BMM避免了批量变化时cuBLAS换算法造成的概率漂移，但重复读取权重、
-小矩阵调度和标量FP32算力成为大批量瓶颈。本实现将全部真实样本/时间行连续
-组织；IEEE 使用固定32×64×32块，Tensor Core候选使用64×128×64块。
-batch、置换、尾批只改变输出网格，
-不改变任何有效输出元素的归约顺序，不复制有效样本，也不修改概率或随机核。
-显式wide候选只将流水TF32x3的M块从32扩至64，保持N=64、K=32；用于真实Profiler
-已定位的矩阵乘瓶颈。默认tile不变，候选仍须通过跨batch概率、完整梯度和速度验收。
-
-FP32 fast显式使用IEEE乘法，TF32候选显式使用三项TF32分解，BF16候选使用
-BF16乘法和FP32累加。主参数仍为FP32，转换由可微的显式cast完成。输入梯度使用
-同一固定算子，权重梯度保留已独立验证的联合GEMM/分块选择。此模块不启用自动
-调参，以免batch或运行时选核改变数值合同；不支持的设备明确失败、不静默回退。
-
-仅CUDA生产候选会导入Triton。参考路径和历史checkpoint继续使用原实现。
-该候选须通过真实模型零更新、全部梯度、Adam和闭环验证后才能进入正式训练。
+保持已验收的固定K归约、输出tile、流水调度和TF32x3补偿乘法；batch、尾批和
+置换只改变独立输出网格，既不复制样本也不切换随机核。参数、输入与累加均为
+FP32；敏感最终投影在上层使用FP64。本模块不提供BF16、宽tile或自动调参候选，
+不支持的设备明确失败，不以另一种算子静默替换正式路径。
 """
 from __future__ import annotations
 
@@ -50,23 +39,7 @@ def _kernel():
                            (rows[:, None]<M)&(kk[None, :]<K), 0)
             right = tl.load(B+kk[:, None]*BS0+cols[None, :]*BS1,
                             (kk[:, None]<K)&(cols[None, :]<N), 0)
-            if PRECISION == 'bf16x3' or PRECISION == 'bf16x6':
-                # FP32主值拆成BF16高位和残差，乘积在FP32中合并；避免把整个
-                # 权重/激活直接舍入一次后丢失小更新。此为独立近似合同，非IEEE等价。
-                left_hi, right_hi = left.to(tl.bfloat16), right.to(tl.bfloat16)
-                left_rest = left-left_hi.to(tl.float32)
-                right_rest = right-right_hi.to(tl.float32)
-                left_lo, right_lo = left_rest.to(tl.bfloat16), right_rest.to(tl.bfloat16)
-                if PRECISION == 'bf16x6':
-                    left_tail = (left_rest-left_lo.to(tl.float32)).to(tl.bfloat16)
-                    right_tail = (right_rest-right_lo.to(tl.float32)).to(tl.bfloat16)
-                    total = tl.dot(left_tail,right_hi,total)
-                    total = tl.dot(left_lo,right_lo,total)
-                    total = tl.dot(left_hi,right_tail,total)
-                total = tl.dot(left_lo,right_hi,total)
-                total = tl.dot(left_hi,right_lo,total)
-                total = tl.dot(left_hi,right_hi,total)
-            elif PIPELINED:
+            if PIPELINED:
                 # 让矩阵乘累加直接消费既有累加器，避免每个K块先物化独立乘积。
                 total = tl.dot(left, right, total, input_precision=PRECISION)
             else:
@@ -88,23 +61,12 @@ def fixed_matmul(left, right, *, precision='ieee'):
         raise ValueError('Fixed-tile candidate requires equal CUDA dtypes')
     pipelined = precision.endswith('_pipelined')
     precision = precision.removesuffix('_pipelined')
-    wide = precision.endswith('_wide')
-    precision = precision.removesuffix('_wide')
-    if wide and (not pipelined or precision!='tf32x3'):
-        raise ValueError('Wide tile is an explicit pipelined TF32x3 candidate')
-    if left.dtype not in (torch.float32, torch.bfloat16) or precision not in ('ieee', 'tf32x3','bf16x3','bf16x6'):
-        raise ValueError('Unsupported explicit fixed-tile precision')
+    if left.dtype!=torch.float32 or precision not in ('ieee','tf32x3'):
+        raise ValueError('Only current FP32 IEEE/TF32x3 arithmetic is supported')
     if _MULTIPLY is None: _MULTIPLY = _kernel()
     m, k = left.shape; n = right.shape[1]
     output = torch.empty((m, n), device=left.device, dtype=left.dtype)
-    bm, bn, bk = (64, 128, 64) if left.dtype == torch.bfloat16 or precision == 'tf32x3' else (32, 64, 32)
-    if pipelined:
-        # TF32x3三个乘积的寄存器需求比BF16高，独立使用较小tile候选。
-        bm, bn, bk = (32, 64, 32)
-        if wide:bm=64
-    if precision in ('bf16x3','bf16x6'):
-        if left.dtype != torch.float32:raise ValueError('Compensated BF16 requires FP32 source operands')
-        bm,bn,bk=(64,64,32)
+    bm,bn,bk=(32,64,32) if pipelined or precision=='ieee' else (64,128,64)
     if m and n:
         grid = (((m+bm-1)//bm)*((n+bn-1)//bn),) if pipelined else ((m+bm-1)//bm, (n+bn-1)//bn)
         _MULTIPLY[grid](left, right, output, m, n, k,

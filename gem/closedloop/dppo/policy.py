@@ -68,14 +68,9 @@ class DPPODiffusionPolicy:
         eta: float = 0.1,
         std_floor: float = 0.001,
         guidance_scale: float = 2.5,
-        cfg_batch: bool = False,
+        cfg_batch: bool = True,
         std_schedule: list[float] | tuple[float, ...] | None = None,
-        execution_batch_size: int | None = None,
-        numerical_layout: str = 'legacy_step_lane',
         defer_checks: bool = False,
-        precision_mode: str | None = None,
-        attention_backend: str | None = None,
-        numerical_variant: str = 'default',
         deterministic_steps: tuple[int, ...] = (),
     ) -> None:
         if not isinstance(actor, Stage1Actor):
@@ -90,8 +85,6 @@ class DPPODiffusionPolicy:
             raise ValueError("guidance_scale must be finite")
         if type(cfg_batch) is not bool:
             raise TypeError("cfg_batch must be boolean")
-        if execution_batch_size is not None and (type(execution_batch_size) is not int or execution_batch_size < 1):
-            raise ValueError('execution_batch_size must be a positive integer or None')
         self.deterministic_steps=tuple(deterministic_steps)
         self.stochastic_steps=tuple(i for i in range(steps) if i not in self.deterministic_steps)
         if self.deterministic_steps not in ((),(steps-1,)):
@@ -104,27 +97,16 @@ class DPPODiffusionPolicy:
             raise ValueError("std_schedule must contain one finite floor >= std_floor per denoising step")
         self.actor = actor
         self.numerical_execution = None
-        self.batched_conditions = False
-        if precision_mode is not None:
-            if numerical_layout == 'legacy_step_lane':
-                raise ValueError('Explicit precision contracts require independent sample rows')
-            from .numerical_execution import configure_numerics
-            self.numerical_execution = configure_numerics(actor, precision_mode, attention_backend)
-            self.batched_conditions = precision_mode != 'fp32_reference'
+        self.batched_conditions = True
         self.defer_checks = defer_checks
         self._phase_signature = None
-        self.numerical_layout = numerical_layout
-        if numerical_layout not in ('legacy_step_lane', 'sample_matrix_bmm_fp32.v1'):
-            raise ValueError('Unknown numerical execution layout')
-        if numerical_layout != 'legacy_step_lane':
-            from .batch_execution import set_sample_linear
-            set_sample_linear(actor.denoiser, True)
+        self.numerical_layout = 'native_dense'
         self.steps = steps
         self.eta = float(eta)
         self.std_floor = float(std_floor)
         self.guidance_scale = float(guidance_scale)
         self._cfg_batch = cfg_batch
-        self._execution_batch_size = None
+        self.execution_batch_size = None
         self.std_schedule = None if std_schedule is None else tuple(float(v) for v in std_schedule)
         self._device_coefficients = {}
         self.last_sample_timing = {}
@@ -152,55 +134,10 @@ class DPPODiffusionPolicy:
             self.kernel_config.update(version="genmo.bumi_closedloop.stochastic_ddim_joint_sum.v2",
                 cfg_forward="batched" if cfg_batch else "separate",
                 effective_std_floors=list(self.std_schedule or (self.std_floor,) * steps))
-        self.execution_batch_size = execution_batch_size
         self._prepare_actor()
-        # 在任何行为采样前固定算子合同，后续旧概率/恢复身份一起绑定此选择。
-        if numerical_variant != 'default':
-            from .numerical_execution import configure_variant
-            configure_variant(self, numerical_variant)
 
     @property
-    def execution_batch_size(self):
-        return self._execution_batch_size
-
-    @execution_batch_size.setter
-    def execution_batch_size(self, size):
-        if size is not None and (type(size) is not int or size < 1):
-            raise ValueError('Execution batch shape must be positive or None')
-        self._execution_batch_size = size
-        if hasattr(self, 'kernel_config'):
-            if self.numerical_layout != 'legacy_step_lane':
-                self.kernel_config.update(version='genmo.bumi_closedloop.stochastic_ddim_joint_sum.v4',
-                    execution_contract=self.numerical_layout, execution_batch_size=None,
-                    condition_batch_size=1, network_batch='effective_rows_cfg_expanded_no_padding')
-                if self.numerical_execution is not None:
-                    self.kernel_config.update(version='genmo.bumi_closedloop.stochastic_ddim_joint_sum.v5',
-                        numerical_execution=self.numerical_execution,
-                        condition_batch_size='unique_chains' if self.batched_conditions else 1)
-                return
-            if size is None:
-                self.kernel_config.pop('execution_contract', None)
-                self.kernel_config.pop('execution_batch_size', None)
-            else:
-                self.kernel_config.update(version='genmo.bumi_closedloop.stochastic_ddim_joint_sum.v3',
-                    execution_contract='fixed_shape_step_lane_single_condition_fp32.v1', execution_batch_size=size)
-
-    @property
-    def cfg_batch(self):
-        return self._cfg_batch
-
-    @cfg_batch.setter
-    def cfg_batch(self, enabled):
-        """数值验收可回退CFG双前向；执行方式随随机核身份一同更新。"""
-        if type(enabled) is not bool:
-            raise TypeError("cfg_batch must be boolean")
-        self._cfg_batch = enabled
-        if hasattr(self, 'kernel_config'):
-            self.kernel_config.update(version="genmo.bumi_closedloop.stochastic_ddim_joint_sum.v2",
-                cfg_forward="batched" if enabled else "separate",
-                effective_std_floors=list(self.std_schedule or (self.std_floor,) * self.steps))
-            if self.execution_batch_size is not None or self.numerical_layout != 'legacy_step_lane':
-                self.execution_batch_size = self.execution_batch_size
+    def cfg_batch(self):return self._cfg_batch
 
     @staticmethod
     def _input_signature(conditions):
@@ -223,18 +160,6 @@ class DPPODiffusionPolicy:
         """
         self._prepare_actor()
         selected = self._conditions(conditions)
-        # 新执行身份固定条件编码的batch=1，避免同链条件在训练合批后切换GRU/GEMM数值路径。
-        # 真实学习使用ConditionGraphCache，仅对每条唯一链运行一次这里的编码。
-        count = selected['known_qpos30'].shape[0]
-        if not self.batched_conditions and (self.execution_batch_size is not None or self.numerical_layout != 'legacy_step_lane') and count > 1:
-            entries = [self.prepare_conditions({key: value[i:i+1] for key, value in selected.items()})
-                       for i in range(count)]
-            result = dict(entries[0])
-            result['adapted'] = {key: torch.cat([entry['adapted'][key] for entry in entries]) for key in entries[0]['adapted']}
-            for name in ('conditional', 'unconditional'):
-                result[name] = None if entries[0][name] is None else torch.cat([entry[name] for entry in entries])
-            result['inputs'] = self._input_signature(selected)
-            return result
         with torch.autocast(device_type=selected['known_qpos30'].device.type, enabled=False):
             adapted = self.actor.adapt_conditions(selected)
             conditional, unconditional = self._encode_prepared(adapted)
@@ -342,37 +267,18 @@ class DPPODiffusionPolicy:
             original_t = coefficients['timesteps'][indices]
             conditional, unconditional = prepared['conditional'], prepared['unconditional']
             actual_batch = state.shape[0]
-            output_lanes = None
-            if self.execution_batch_size is not None and self.numerical_layout == 'legacy_step_lane':
-                if actual_batch > self.execution_batch_size:
-                    raise ValueError('Microbatch exceeds the fixed numerical execution shape')
-                # 固定形状还不够：部分GEMM在同批不同行存在ULP差异。每个去噪步固定
-                # 到step % B的位置，使单链采样与20步微批重算使用相同的计算行。
-                output_lanes = indices.remainder(self.execution_batch_size)
-                if torch.unique(output_lanes).numel() != actual_batch:
-                    raise ValueError('Fixed-shape microbatch needs distinct denoising step lanes')
-                selection = torch.zeros(self.execution_batch_size, device=state.device, dtype=torch.long)
-                selection[output_lanes] = torch.arange(actual_batch, device=state.device)
-                state, indices, original_t = state[selection], indices[selection], original_t[selection]
-                adapted = {key: value[selection] for key, value in adapted.items()}
-                conditional = conditional[selection]
-                unconditional = None if unconditional is None else unconditional[selection]
             if self.cfg_batch and unconditional is not None:
                 # 同一条采样链20步共享条件，CFG固定输入只拼接一次。学习微批各自
                 # 持有prepared，不跨optimizer复用；cat仍保留条件编码器的梯度。
-                if output_lanes is None:
-                    signature = tuple((id(v), v._version) for v in
-                        (*adapted.values(), conditional, unconditional))
-                    cached = prepared.get('_cfg_inputs')
-                    if cached is None or cached[0] != signature:
-                        cached = (signature, {key: torch.cat((value, value), dim=0)
-                                  for key, value in adapted.items()},
-                                  torch.cat((conditional, unconditional), dim=0))
-                        prepared['_cfg_inputs'] = cached
-                    combined, cfg_condition = cached[1:]
-                else:
-                    combined = {key: torch.cat((value, value), dim=0) for key, value in adapted.items()}
-                    cfg_condition = torch.cat((conditional, unconditional), dim=0)
+                signature = tuple((id(v), v._version) for v in
+                    (*adapted.values(), conditional, unconditional))
+                cached = prepared.get('_cfg_inputs')
+                if cached is None or cached[0] != signature:
+                    cached = (signature, {key: torch.cat((value, value), dim=0)
+                              for key, value in adapted.items()},
+                              torch.cat((conditional, unconditional), dim=0))
+                    prepared['_cfg_inputs'] = cached
+                combined, cfg_condition = cached[1:]
                 output = self.actor._denoise(torch.cat((state, state), dim=0),
                     torch.cat((original_t, original_t), dim=0), combined,
                     cfg_condition)
@@ -415,7 +321,7 @@ class DPPODiffusionPolicy:
                     unconditional_encoding=unconditional,
                     conditional_prediction=conditional_output['pred_x_start'],
                     unconditional_prediction=(output['pred_x_start'] if self.guidance_scale != 1. else None))
-            return {key: None if value is None else (value[:actual_batch] if output_lanes is None else value[output_lanes])
+            return {key: None if value is None else value[:actual_batch]
                     for key, value in result.items()}
 
     def evaluate_log_probs(

@@ -163,25 +163,6 @@ def test_signal_exit_reuses_only_same_saved_budget_and_learning_boundary(monkeyp
     assert events==['save']
 
 
-def test_engineering_migration_keeps_learning_content_and_rejects_algorithm_changes(monkeypatch):
-    from tools.migrate_stage2_efficiency import digest,target_identity
-    from gem.closedloop.dppo.training_config import configuration
-    from pathlib import Path
-    from tools import migrate_stage2_efficiency as migration
-    config=configuration(Path(__file__).resolve().parents[3]/'configs/closedloop/stage2_credit_server2.yaml')
-    stage=config['stage10']
-    keys=('training','critic','bc_gradient','kl','scale','dataset','evaluation','run_control','physical_episode','ppo_rollout','generation_horizon')
-    parent={key:copy.deepcopy(stage[key]) for key in keys}
-    parent.update(reward=config['stage9']['reward'],runtime=config['runtime'],timing=config['timing'],
-        resource_limits=stage['limits'],assets=stage['assets'],physical_configuration={'physics':'same'},
-        source_files={'genmo':{'gem/closedloop/dppo/training.py':'old'},'gmt':{}})
-    monkeypatch.setattr(migration,'_physical_configuration_identity',lambda c:{'physics':'same'})
-    monkeypatch.setattr(migration,'_sources',lambda c:{'genmo':{'gem/closedloop/dppo/training.py':'new'},'gmt':{}})
-    identity,changes=target_identity(parent,config)
-    assert identity['training']==parent['training'] and changes['genmo']
-    assert digest({'x':torch.ones(4),'rng':(1,2)})==digest({'rng':(1,2),'x':torch.ones(4)})
-    modified=copy.deepcopy(config);modified['stage10']['training']['actor_lr']=1e-6
-    with pytest.raises(ValueError,match='algorithm'):target_identity(parent,modified)
 
 
 def test_completed_run_compaction_keeps_controls_models_and_budget(tmp_path):

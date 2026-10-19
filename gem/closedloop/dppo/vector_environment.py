@@ -7,7 +7,7 @@
 放宽commit的late_plan检查。实际生成超过更紧deadline仍按原规则拒绝。
 
 preview和真实reserve使用相同快照/公式，Critic与下一次Actor得到一致的前缀。
-旧单环境路径不变。该协商策略有独立版本，必须写入GPU运行及断点身份，并重新
+该协商策略有独立版本，必须写入当前GPU运行及断点身份，并重新
 建立GPU闭环基线；不能将改变前缀长度后的结果冒充旧CPU运行的等价恢复。
 """
 from __future__ import annotations

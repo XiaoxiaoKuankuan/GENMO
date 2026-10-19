@@ -9,7 +9,7 @@ import pytest
 import torch
 import yaml
 from gem.closedloop.dppo.memory_execution import DeviceRolloutBuffer
-from gem.closedloop.dppo.dual_collector import fixed_fragment_targets
+from gem.closedloop.dppo.rollout_helpers import fixed_fragment_targets
 from gem.closedloop.dppo.tensor_cache import RolloutTensorCache
 from gem.closedloop.dppo.training_config import configuration
 
@@ -27,8 +27,10 @@ def test_empty_local_world_buffer_has_no_virtual_transition_or_critic_call():
 
 def test_current_config_accepts_nondivisible_bc_total_without_environment_quota(tmp_path):
     root=Path(__file__).resolve().parents[3]
-    config=yaml.safe_load((root/'configs/closedloop/stage2_asymmetric_server2.yaml').read_text())
+    config=yaml.safe_load((root/'configs/closedloop/stage2_credit_server2.yaml').read_text())
     config['stage10']['training']['bc_samples_per_rollout']=517
+    from gem.closedloop.dppo.actor_optimization import optimization_binding,digest
+    config['stage10']['kl']['calibration']['optimization_sha256']=digest(optimization_binding(config['stage10']))
     path=tmp_path/'candidate.yaml';path.write_text(yaml.safe_dump(config))
     resolved=configuration(path)
     assert 'decisions_per_environment' not in resolved['stage10']['scale']
@@ -60,3 +62,48 @@ def test_reset_warmup_seeds_only_final_actual_pd_target_across_world_windows():
     with pytest.raises(StopIteration):next(env.continue_warmup_flow())
     np.testing.assert_array_equal(env.reward._previous_target,np.full(21,600))
     assert env.reward._last_tick is None
+
+
+def test_current_world_restore_preserves_counters_and_sampler_but_starts_new_physics():
+    from types import SimpleNamespace as NS
+    from gem.closedloop.dppo.world_collector import WorldEnvironmentCollector
+    class Sampler:
+        def __init__(self):self.cursor=0
+        def state_dict(self):return {'cursor':self.cursor}
+        def load_state_dict(self,value):self.cursor=value['cursor']
+    def factory(slot,policy):
+        env=NS(policy_version=0,iteration=0,decision=0,attempt=0,episode_count=0,
+            latency_budget_s=.32,snapshot={'episode_id':'new','tick':600},config={'stage9':{'seed':42+slot}})
+        return NS(env=env,sampler=Sampler(),budget=None)
+    policy=NS(actor=torch.nn.Linear(2,1),steps=20,guidance_scale=2.5,numerical_layout='native_dense')
+    collector=WorldEnvironmentCollector(policy,factory,object(),num_envs=2,generation_batch=2)
+    resource=factory(0,None);resource.env.budget=NS(state_dict=lambda:{'used':{'control_steps':25}})
+    resource.env.decision=8;resource.env.attempt=9;resource.env.episode_count=2
+    resource.env.policy_version=7;resource.env.iteration=7;resource.env.snapshot={'episode_id':'old','tick':3000}
+    resource.sampler.cursor=91
+    collector.states[0]=NS(resource=resource,task={'old_physical_episode':True},transitions=17)
+    saved=collector.state_dict()
+    assert saved['schema']=='genmo.gpu_vector_collector.boundary.v2'
+    assert saved['states'][1] is None
+    restored=WorldEnvironmentCollector(policy,factory,object(),num_envs=2,generation_batch=2)
+    restored.load_state_dict(saved)
+    state=restored.states[0]
+    assert state.task is None and state.transitions==17 and state.resource.sampler.cursor==91
+    assert (state.resource.env.decision,state.resource.env.attempt,state.resource.env.policy_version)==(8,9,7)
+    assert state.resource.env.snapshot=={'episode_id':'new','tick':600}
+    assert restored.states[1] is None
+    saved['schema']='genmo.gpu_vector_collector.boundary.v1'
+    empty=WorldEnvironmentCollector(policy,lambda *args:pytest.fail('old identity must fail before constructing resources'),
+        object(),num_envs=2,generation_batch=2)
+    with pytest.raises(ValueError,match='contract'):empty.load_state_dict(saved)
+
+
+def test_root_budget_rejects_legacy_json_instead_of_implicitly_migrating(tmp_path):
+    import json
+    from gem.closedloop.dppo.budget_ledger import IncrementalBudget
+    path=tmp_path/'budget.json'
+    previous={'schema':'genmo.closedloop.stage10.budget.v1','used':{'control_steps':17}}
+    path.write_text(json.dumps(previous))
+    limits=dict(accepted_iterations=1,optimizer_attempts=1,generations=20,control_steps=100,physics_steps=400)
+    with pytest.raises(ValueError,match='current SQLite'):IncrementalBudget(path,limits)
+    assert json.loads(path.read_text())==previous and not path.with_suffix('.sqlite').exists()

@@ -15,7 +15,7 @@ from __future__ import annotations
 from concurrent.futures import Future, TimeoutError as FutureTimeout
 import time
 import torch
-from .dual_collector import split_trace
+from .rollout_helpers import split_trace
 from .env_adapter import cpu_copy
 from gem.closedloop.frozen_actor import stable_noise_seed
 from gem.runtime.closedloop_protocol import RemoteError

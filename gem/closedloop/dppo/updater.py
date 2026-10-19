@@ -1,31 +1,16 @@
-"""固定行为四步DPPO＋BC、可训练历史Critic和完整四步KL审查。
+"""当前四个可训练高斯步骤的完整KL审查和独立非对称Critic训练。
 
-20步行为仅索引15..18参与Actor优化；每个epoch打乱完整链，四步全部参与，不使用
-旧K8抽样权重或把冻结零KL加入分母。旧均值/标准差/联合概率、价值目标与优势整轮
-固定。自由有效坐标平均log-ratio是代理目标，原joint概率比及KL分别保存。
-当前optimizer minibatch的条件只编码一次，PPO与原Stage1 BC梯度统一SUM、裁剪及
-Adam更新。结束后无梯度检查全部有效链的四步KL，冻结部分检查不可变身份。
-少量同噪声重生成只诊断最终参考变化，单独计时，不冒充实际物理执行或完整KL覆盖。
-失败可回滚模型/优化器/BC/RNG，已发生的物理和资源消耗不能回滚。
-
-Critic只缓存冻结音乐/前缀特征及历史输入，历史GRU、时序层和Value Head每次优化
-重新建图；当前/下一批误差与独立MC验证分开。归约使用全局实际有效分母，尾批和
-空rank参与同一通信序列。本模块不推进物理，也不保存checkpoint。
-纯日志的BC来源与逐去噪统计在完整更新结束后合并读取；soft KL、非有限值检查、
-梯度比例控制仍在每次参数更新前执行。step_observer仅收到当步已就绪的优化字段，
-完整来源和逐步诊断在函数返回时补齐，避免日志逐微批阻塞设备。
+Actor只由full_batch_actor执行一次真实全局joint-score＋BC更新；本模块覆盖所有
+有效链的15～18步，保留坐标及joint-chain KL、裁剪诊断、最终参考变化与冻结
+身份。Critic使用实际全局分母和可训练历史GRU，不跨optimizer复用可训练特征。
+旧随机K8/Full20或坐标PPO优化入口已删除，不能通过参数切换回退役算法。
 """
 from __future__ import annotations
 
 import math
 import time
-from collections import Counter
-
 import torch
-
-from .denoising_sampling import chain_steps, plan_record
 from .execution_checks import policy_phase
-from .gradient_merge import merge_global_gradients, take_gradients
 from .gaussian_probability import gaussian_statistics, ppo_surrogate
 from .tensor_cache import ConditionGraphCache
 from .optimization_support import _owned, _parameters, _old_kernel, balanced_epoch_order, _local_phase
@@ -33,139 +18,6 @@ from .optimization_support import _owned, _parameters, _old_kernel, balanced_epo
 
 def _eligible(manifest,actor=True):
     return [i for i,m in enumerate(manifest) if m['valid'] and (m['has_free'] or not actor)]
-
-
-def actor_update(policy,optimizer,rows,targets,cache,manifest,controller,*,distributed,anchor,
-                    generator,ppo_epochs=2,minibatch_chains=1024,microbatch=128,sampled_steps=4,
-                    clip=.05,gamma_denoising=.99,soft_kl=.002,kl_reduction='free_coordinate_mean',
-                    objective_reduction='free_coordinate_mean',grad_clip_norm=1.,reserve_attempt=None,
-                    gradient_observer=None,step_observer=None,bc_samples_per_rollout=None,snr=False,step_strategy='intermediate4'):
-    if step_strategy!='intermediate4' or sampled_steps!=4 or tuple(policy.trainable_steps)!=(15,16,17,18):
-        raise ValueError('PPO must optimize exactly indices 15 to 18')
-    if policy.steps!=20 or ppo_epochs<1 or minibatch_chains<1 or microbatch<1:
-        raise ValueError('Invalid PPO iteration scale')
-    if kl_reduction not in ('joint_sum','free_coordinate_mean'):raise ValueError('Unknown KL control units')
-    selected=_eligible(manifest);reports=[];orders=[];stop_reason=None
-    pending_metrics=[];pending_bc=[]
-    if not selected:raise ValueError('No free valid behavior chain remains for PPO')
-    planned_steps=ppo_epochs*math.ceil(len(selected)/minibatch_chains)
-    bc_batches=(None if bc_samples_per_rollout is None else [
-        bc_samples_per_rollout//planned_steps+(i<bc_samples_per_rollout%planned_steps) for i in range(planned_steps)])
-    actor=policy.actor;device=next(actor.parameters()).device
-    sketch={} if snr else None
-    for epoch in range(ppo_epochs):
-        order=balanced_epoch_order(selected,manifest,generator) if distributed.rank==0 else None
-        order=distributed.broadcast_object(order);orders.append(order)
-        for begin in range(0,len(order),minibatch_chains):
-            indices=order[begin:begin+minibatch_chains]
-            owned=_owned(indices,manifest,distributed)
-            seed=(int(torch.randint(0,2**63-1,(1,),generator=generator)) if distributed.rank==0 else None)
-            seed=distributed.broadcast_object(seed)
-            pairs=[(i,s) for position,i in owned for s in chain_steps(seed,indices[position],20,sampled_steps,step_strategy)]
-            optimizer.zero_grad(set_to_none=True);actor.eval()
-            summary=torch.zeros(7,device=device,dtype=torch.float64)
-            step_metrics=torch.zeros(20,6,device=device,dtype=torch.float64)
-            start=time.perf_counter()
-            with _local_phase(distributed,'stage10_actor_local_forward_backward'),policy_phase(policy):
-                conditions=ConditionGraphCache(policy,cache);conditions.prime([rows[i] for _,i in owned])
-                for offset in range(0,len(pairs),microbatch):
-                    chunk=pairs[offset:offset+microbatch];samples=[rows[i] for i,_ in chunk];steps=[s for _,s in chunk]
-                    params,mask=_parameters(policy,samples,steps,device,cache,conditions)
-                    old_mean,old_std=_old_kernel(samples,steps,device,cache)
-                    observed=cache.get('chain',samples,[s+1 for s in steps])
-                    stats=gaussian_statistics(observed,old_mean,old_std,params['mean'],params['std'],mask)
-                    advantage=cache.get('advantages',samples)*cache.denoising_discounts(steps,20,gamma_denoising)
-                    proxy=ppo_surrogate(stats,advantage,clip=clip,reduction=objective_reduction)
-                    loss=-proxy['objective'].sum()/(len(indices)*4)
-                    loss.backward()
-                    with torch.no_grad():
-                        summary+=torch.stack((loss.detach(),proxy['ratio'].sum(),proxy['clipped'].double().sum(),
-                            proxy['objective_clipped'].double().sum(),stats['joint_kl'].sum(),stats['mean_coordinate_kl'].sum(),
-                            proxy['ratio'].new_tensor(len(chunk))))
-                        step_metrics.index_add_(0,cache.step_indices(steps),torch.stack((stats['joint_kl'],
-                            stats['mean_coordinate_kl'],proxy['ratio'].detach(),proxy['clipped'].double(),
-                            proxy['objective_clipped'].double(),torch.ones_like(stats['joint_kl'])),1))
-                    del loss,params,stats,proxy
-                conditions.backward()
-            combined=distributed.sum_tensor(torch.cat((summary,step_metrics.flatten())))
-            summary,step_metrics=combined[:7],combined[7:].reshape(20,6)
-            values=summary.cpu().tolist();visits=values[-1]
-            measured=values[4 if kl_reduction=='joint_sum' else 5]/visits
-            if soft_kl is not None and measured>=soft_kl:
-                optimizer.zero_grad(set_to_none=True);stop_reason='pre_step_soft_kl'
-                discarded=dict(epoch=epoch,indices=indices,mean_kl=measured,kl_units=kl_reduction,
-                    sample_visits=int(visits),wall_seconds=time.perf_counter()-start,optimizer_step_executed=False)
-                break
-            ppo=take_gradients(actor)
-            with _local_phase(distributed,'stage10_bc_local_forward_backward'):
-                from .dense_policy import dense_precision_scope
-                global_bc=None if bc_batches is None else bc_batches[len(reports)]
-                if global_bc is not None:
-                    anchor.batch_size=global_bc//distributed.world_size+(distributed.rank<global_bc%distributed.world_size)
-                bc_weight=1/distributed.world_size if global_bc is None else (anchor.batch_size/global_bc if global_bc else 0.)
-                with dense_precision_scope(policy.precision):bc_report=anchor.backward(actor,weight=bc_weight)
-                bc=take_gradients(actor)
-            contributions=merge_global_gradients(actor,ppo,bc,controller,distributed=distributed,half_split=snr,sketch=sketch)
-            if gradient_observer is not None:gradient_observer(actor,len(reports))
-            with _local_phase(distributed,'stage10_actor_combined_clip'):
-                total_norm=float(torch.nn.utils.clip_grad_norm_([p for p in actor.parameters() if p.requires_grad],
-                    grad_clip_norm,error_if_nonfinite=True))
-            if reserve_attempt is not None:reserve_attempt()
-            with _local_phase(distributed,'stage10_actor_optimizer_step'):
-                optimizer.step()
-            # 后续minibatch不会复用旧条件图，old statistics则保持同一份rollout。
-            local_sources=Counter(meta['dataset_id'] for sample in bc_report.get('samples',[]) for meta in sample)
-            pending_bc.append(dict(batch=bc_report['batch_size'],loss=bc_report['loss'],sources=dict(local_sources)))
-            pending_metrics.append(step_metrics)
-            reports.append(dict(epoch=epoch,optimizer_step=len(reports)+1,global_chain_indices=indices,
-                sampled_steps=sampled_steps,denoising_sampling=plan_record(seed,indices,20,sampled_steps,step_strategy),
-                internal_sample_visits=int(visits),full_objective_transitions=len(indices)*4,
-                ppo_loss=values[0],mean_proxy_ratio=values[1]/visits,clip_fraction=values[2]/visits,
-                objective_clip_fraction=values[3]/visits,pre_step_mean_joint_kl=values[4]/visits,
-                pre_step_mean_coordinate_kl=values[5]/visits,
-                gradient_contributions=contributions,total_gradient_norm=total_norm,
-                gradient_clip_factor=min(1.,grad_clip_norm/(total_norm+1e-6)),
-                learning_rate=optimizer.param_groups[0]['lr'],wall_seconds=time.perf_counter()-start))
-            if step_observer is not None:step_observer(reports[-1])
-        if stop_reason:break
-    if reports:
-        shards=distributed.all_gather_object(pending_bc)
-        if any(len(shard)!=len(reports) for shard in shards):raise RuntimeError('Rank optimizer/log counts differ')
-        for index,(report,metrics) in enumerate(zip(reports,torch.stack(pending_metrics).cpu().tolist())):
-            source_counts=Counter();bc_shards=[s[index] for s in shards]
-            for shard in bc_shards:source_counts.update(shard['sources'])
-            total=sum(s['batch'] for s in bc_shards)
-            report.update(bc_global_samples=total,bc_samples_by_source=dict(source_counts),
-                bc_loss=sum(s['batch']*s['loss'] for s in bc_shards)/max(total,1),
-                per_denoising_step=[dict(step=s,visits=int(n),mean_joint_kl=joint/n if n else None,
-                    mean_coordinate_kl=coordinate/n if n else None,mean_proxy_ratio=ratio/n if n else None,
-                    clip_fraction=clipped/n if n else None,objective_clip_fraction=active/n if n else None)
-                    for s,(joint,coordinate,ratio,clipped,active,n) in enumerate(metrics)])
-    covered={i for report in reports for i in report['global_chain_indices']}
-    snr_report=None
-    if snr:
-        halves=[r['gradient_contributions'].get('half_split') for r in reports]
-        halves=[h for h in halves if h is not None]
-        first2=sum(h['first_half_square'] for h in halves);second2=sum(h['second_half_square'] for h in halves)
-        dot=sum(h['dot'] for h in halves);cosines=[h['cosine'] for h in halves if h['cosine'] is not None]
-        snr_report=dict(half_split_cosine_per_step=[h['cosine'] for h in halves],
-            half_split_cosine_mean=sum(cosines)/len(cosines) if cosines else None,
-            half_split_cosine_pooled=None if first2<=0 or second2<=0 else dot/math.sqrt(first2*second2),
-            sketch_elements=sum(v.numel() for v in sketch.values()),
-            scope='independent_half_rank_PPO_gradients_per_optimizer_step;sketch_is_iteration_sum_for_consecutive_cosine')
-    return dict(optimizer_steps=len(reports),steps=reports,epoch_orders=orders,early_stop_reason=stop_reason,
-        gradient_snr=snr_report,_ppo_gradient_sketch=sketch,
-        epoch_order_rng_contract='fixed_four_steps_shuffled_chains',
-        discarded_pending_minibatch=discarded if stop_reason else None,
-        eligible_chains=len(selected),applied_unique_chains=len(covered),applied_chain_fraction=len(covered)/len(selected),
-        planned_optimizer_steps=ppo_epochs*math.ceil(len(selected)/minibatch_chains),
-        internal_sample_visits=sum(r['internal_sample_visits'] for r in reports),
-        actual_global_bc_samples=sum(r['bc_global_samples'] for r in reports),
-        bc_samples_by_source={source:sum(r['bc_samples_by_source'].get(source,0) for r in reports)
-            for source in sorted({source for r in reports for source in r['bc_samples_by_source']})},
-        planned_internal_visits=len(selected)*sampled_steps*ppo_epochs,
-        objective_reduction=objective_reduction,proxy_is_joint_probability=objective_reduction=='joint_sum',
-        old_statistics_fixed=True,final_trainable4_kl_pending=True)
 
 
 @torch.no_grad()

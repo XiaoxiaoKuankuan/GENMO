@@ -18,7 +18,6 @@ import pytest
 import torch
 
 from gem.closedloop.dppo.buffer import RolloutBuffer, StepJournal, UpperTransition
-from gem.closedloop.dppo.critic import UpperCritic
 from gem.closedloop.dppo.music_tasks import SOURCES, TrainMusicSampler
 from gem.closedloop.dppo.returns import compute_gae
 from gem.closedloop.dppo.rewards import ExecutionReward
@@ -155,39 +154,8 @@ def test_zero_step_rejection_event_and_event_discount():
         compute_gae([[1]], [0.], [0.], [1], [False], [True])
 
 
-def test_critic_masks_unknown_padding_and_empty_history():
-    torch.manual_seed(13)
-    critic = UpperCritic()
-    original = context()
-    original["music_valid"][:, 60:] = False
-    original["proprio_history_valid"].zero_()
-    changed = copy.deepcopy(original)
-    changed["proprio_history"].fill_(10000)
-    changed["known_qpos30"].fill_(-10000)
-    changed["music_features"][:, 60:] = 10000
-    torch.testing.assert_close(critic(original, [10.]), critic(changed, [10.]), atol=0, rtol=0)
-    assert critic(original, [0.]).shape == (1,)
-    assert not torch.equal(critic(original, [0.]), critic(original, [10.]))
-    with pytest.raises(ValueError, match="ten Actor"):
-        critic({**original, "target_qpos30": torch.zeros(1, 120, 30)}, [10.])
 
 
-def test_value_loss_updates_only_critic_and_copies_statistics():
-    actor = torch.nn.Linear(30, 30)
-    before = copy.deepcopy(actor.state_dict())
-    mean = torch.arange(30.)
-    critic = UpperCritic(qpos_mean=mean)
-    mean.add_(100)
-    assert critic.qpos_mean[0] == 0
-    opt = torch.optim.Adam(critic.parameters(), lr=1e-4)
-    old = critic.value_head[-1].weight.detach().clone()
-    loss = (critic(context(), [8.]) - torch.tensor([2.])).square().mean()
-    loss.backward()
-    assert any(p.grad is not None and torch.isfinite(p.grad).all() and p.grad.norm() > 0 for p in critic.parameters())
-    assert all(p.grad is None for p in actor.parameters())
-    opt.step()
-    assert not torch.equal(old, critic.value_head[-1].weight)
-    assert all(torch.equal(value, before[key]) for key, value in actor.state_dict().items())
 
 
 def motion_tracking_fixture(tick, *, speed=0., position=0.):
@@ -297,15 +265,16 @@ def music_fixture():
     return features
 
 
-def test_actual_tracking_and_stability_reward_prefers_controlled_pose():
+def test_current_tracking_reward_prefers_controlled_pose_without_stability():
     good = ExecutionReward(music_features=music_fixture(), target_activity=target_activity_fixture).evaluate_step(actual_step(speed=1.))
     bad_row = actual_step(speed=1.)
     bad_row["errors"]["root_height_error_m"] = .5
     bad_row["errors"]["non_yaw_orientation_error_rad"] = 1.
-    bad_row["motion_tracking"]["terms"]["joint_pos"]["error"] = 1.
+    bad_row["motion_tracking"]["terms"]["leg_joint_pos"].update(error=1.,source_score=math.exp(-1./.25**2))
     bad = ExecutionReward(music_features=music_fixture(), target_activity=target_activity_fixture).evaluate_step(bad_row)
     assert good["transition_valid"] and bad["transition_valid"]
-    assert good["reward"] == pytest.approx(.092)
+    assert good["components"]["track"]["score"]==pytest.approx(1.)
+    assert not good["components"]["stable"]["enabled"]
     assert bad["reward"] < good["reward"]
 
 
@@ -313,7 +282,7 @@ def test_missing_or_nonfinite_actual_diagnostics_marks_invalid():
     missing = actual_step()
     del missing["errors"]["root_height_error_m"]
     result = ExecutionReward(music_features=music_fixture(), target_activity=target_activity_fixture).evaluate_step(missing)
-    assert not result["transition_valid"] and not result["components"]["stable"]["valid"]
+    assert not result["transition_valid"] and not result["components"]["stable"]["enabled"]
     invalid = actual_step()
     invalid["physics_substeps"][0]["physical_diagnostics"]["pd_torque_estimate_nm"][0] = float("nan")
     result = ExecutionReward(music_features=music_fixture(), target_activity=target_activity_fixture).evaluate_step(invalid)

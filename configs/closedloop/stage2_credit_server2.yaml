@@ -1,6 +1,6 @@
 # 服务器2正式延迟信用分配：用户明确授权最多2000个已接受迭代，每100轮保留完整checkpoint。
 # 8秒共享世界、lambda=.98、gamma=.99/0.5秒、单次全局joint-score更新，统一LR=3e-7。
-# 三倍KL是探索门限，不宣称完整歌曲收益已经通过；独立新MC、新运行身份，不复用旧优化器。
+# 四步KL是实际更新保护，不宣称完整歌曲收益已经通过；源码清理后新运行重新进行MC。
 # MC覆盖训练reset分布；固定32任务完整歌曲仍从开头评估。奖励只按真实执行归属。
 diagnostics:
   record_original_threshold_crossings: true
@@ -175,9 +175,9 @@ stage10:
     p95_coordinate: 0.0021
     reduction: free_coordinate_mean
     calibration:
-      status: exploratory_not_physically_validated
+      status: not_physically_validated
       scope: four_trainable_steps_only
-      optimization_sha256: d7f4c9a6fee130a7404ed0603192cb41e34012f24cc8b929c7b740ecd1b26d88
+      optimization_sha256: 5c84d93830523bfc8cb526c97b8d8225cd20a6f6260f650ce9add6e8352c087a
     chain_joint_mean: null
     chain_joint_p95: null
     chain_joint_max: null
@@ -301,7 +301,6 @@ stage10:
   training:
     actor_lr: 3.0e-07
     actor_lr_control: fixed
-    advantage_control: none
     bc_prefix:
       max_frames: 30
       min_frames: 6
@@ -359,11 +358,9 @@ stage10:
     optimizer_backtracking:
       max_attempts: 9
       factor: 0.5
-  version: genmo.closedloop.stage2.asymmetric_tracking.v1
-  actor_experiment:
-    schema: genmo.stage2.delayed_credit_training.v1
-    scope: server2_formal_user_authorized
-    kl_multiplier: 3
+  version: genmo.closedloop.stage2.continuous_joint_score.v1
+  actor_optimization:
+    schema: genmo.stage2.continuous_joint_score.v1
 termination:
   end_effector_relative_height_error_m: 0.15
   non_yaw_orientation_error_rad: 0.6

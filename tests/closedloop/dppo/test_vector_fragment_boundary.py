@@ -8,7 +8,7 @@
 from types import SimpleNamespace as NS
 import pytest
 import torch
-from gem.closedloop.dppo.vector_boundary import finish_vector_fragment,fragment_reference_boundary,FRAGMENT_CONTRACT
+from gem.closedloop.dppo.vector_boundary import fragment_reference_boundary,FRAGMENT_CONTRACT
 from gem.closedloop.dppo.vector_environment import bounded_reference_deadline
 from gem.closedloop.dppo.env_adapter import ExecutionIntegrityError
 from tests.closedloop.dppo.test_data_learning import transition,context
@@ -25,61 +25,12 @@ def test_boundary_still_supports_real_prefix_and_lookahead(tick,source,valid,bou
     with pytest.raises(ExecutionIntegrityError):bounded_reference_deadline(snapshot,boundary+1140)
 
 
-def fixture_env(*,source=5380,actual=0):
-    snapshot=dict(episode_id='e',env_id=5,tick=5100,done=False,terminated=False,reason=None,
-                  source_end_tick=source,reference_valid_end_tick=source-16)
-    row=transition();row.identity['env_id']=5
-    row.control_tick_begin=5076;row.control_tick_end=5100
-    row.metadata.update(reward_details=[],event_penalty_total=0.,consumed_plan_ids=[])
-    calls=[]
-    def call(method,**payload):
-        assert method=='drain_fragment'
-        assert actual<=payload['max_control_steps']
-        calls.append(payload)
-        trace=[dict(episode_id='e',env_id=5,tick=5100+12*(i+1),control_tick_begin=5100+12*i,
-                    consumed_plan_ids=['p']) for i in range(actual)]
-        return dict(executed_control_steps=actual,executed_physics_steps=actual*4,physics_count_exact=True,
-                    transition_valid=True,trace=trace,snapshot=dict(snapshot,tick=5100+actual*12),mutation_seq=12)
-    def no_failure_event(*args):raise AssertionError('Administrative boundary is not physical failure')
-    budget=[]
-    env=NS(snapshot=snapshot,music_end_tick=18000,soft_end_tick=18000,phase='train',
-           backend=NS(call=call,sequence=11),
-           budget=NS(reserve=lambda *a,**k:budget.append(k),settle_control=lambda *a:None),
-           reward=NS(evaluate_step=lambda step:dict(transition_valid=True,reward=.25),event_reward=no_failure_event),
-           remaining_music=lambda:20.,preview_context=lambda:(row.next_context,None))
-    return env,row,calls,budget
 
 
-def test_exhausted_extra_wait_is_truncated_with_bootstrap_and_no_phantom_budget():
-    env,row,calls,budget=fixture_env()
-    old=row.rewards.clone()
-    controls,reset=finish_vector_fragment(env,row,continue_episode=True)
-    assert controls==0 and reset and row.truncated and not row.terminated
-    assert row.next_context is not None and row.reason=='reference_horizon_truncated'
-    assert calls[0]['max_control_steps']==0 and not budget
-    torch.testing.assert_close(row.rewards,old)
-    assert row.metadata['fragment_tail']['contract']==FRAGMENT_CONTRACT
 
 
-@pytest.mark.parametrize('actual,reset',[(25,False),(75,True)])
-def test_partial_wait_only_resets_when_supported_boundary_reached(actual,reset):
-    env,row,calls,budget=fixture_env(source=6280,actual=actual)
-    controls,ended=finish_vector_fragment(env,row,continue_episode=True)
-    assert controls==actual and ended==reset
-    assert row.control_tick_end==5100+12*actual and row.executed_control_steps==2+actual
-    assert budget==[dict(control_steps=75,physics_steps=300)]
-    assert calls[0]['max_control_steps']==75
-    assert row.next_context is not None and not row.terminated and row.truncated
-    assert row.metadata['fragment_tail']['reference_horizon_truncated']==reset
 
 
-def test_music_limit_with_sufficient_reference_is_unchanged():
-    env,row,calls,budget=fixture_env(source=9280,actual=25)
-    env.soft_end_tick=5700
-    controls,ended=finish_vector_fragment(env,row,continue_episode=True)
-    assert controls==25 and not ended
-    assert calls[0]['max_control_steps']==50 and calls[0]['end_reason']=='collection_limit'
-    assert not row.metadata['fragment_tail']['reference_horizon_truncated']
 
 
 @pytest.mark.parametrize('delay,controls,truncated',[(.764757,25,True),(.7,50,False)])
@@ -112,34 +63,3 @@ def test_late_active_generation_keeps_real_controls_and_bootstrap(tmp_path,delay
         assert result.metadata['reference_execution_boundary']['simulated_arrival_tick']==1068
         assert any(method=='discard_plan' for method,_ in backend.calls)
     RolloutBuffer().append(result)
-
-
-def test_authorized_wait_limit_retains_actual_reward_budget_and_bootstrap():
-    env,row,calls,budget=fixture_env(source=9280,actual=25)
-    before=row.rewards.clone()
-    controls,ended=finish_vector_fragment(env,row,continue_episode=True,maximum_wait_controls=25)
-    assert controls==25 and ended and row.truncated and not row.terminated
-    assert row.reason=='bounded_boundary_wait_limit' and row.next_context is not None
-    assert row.metadata['fragment_tail']['wait_limit_reached']
-    assert not row.metadata['fragment_tail']['reference_horizon_truncated']
-    assert row.metadata['fragment_tail']['reward_sum']==6.25
-    assert torch.equal(row.rewards[:len(before)],before)
-    assert torch.equal(row.rewards[len(before):],torch.full((25,),.25,dtype=before.dtype))
-    assert budget==[dict(control_steps=25,physics_steps=100)]
-    assert calls[0]['end_reason']=='bounded_boundary_wait_limit'
-
-
-def test_world_wait_flow_yields_same_bounded_rpc_before_consuming_feedback():
-    from gem.closedloop.dppo.vector_boundary import finish_vector_fragment_flow
-    from gem.closedloop.dppo.world_flow import BackendOperation,LocalOperation
-    env,row,calls,budget=fixture_env(source=6280,actual=25)
-    flow=finish_vector_fragment_flow(env,row,continue_episode=True,maximum_wait_controls=50)
-    operation=next(flow)
-    assert isinstance(operation,BackendOperation) and operation.method=='drain_fragment'
-    assert not calls and budget==[dict(control_steps=50,physics_steps=200)]
-    feedback=env.backend.call(operation.method,**operation.payload)
-    preview=flow.send(feedback)
-    assert isinstance(preview,LocalOperation)
-    with pytest.raises(StopIteration) as result:flow.send(preview.function(**preview.arguments))
-    assert result.value.value==(25,False)
-    assert row.executed_control_steps==27 and row.metadata['fragment_tail']['reward_sum']==6.25

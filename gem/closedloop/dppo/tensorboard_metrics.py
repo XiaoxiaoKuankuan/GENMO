@@ -155,7 +155,7 @@ def training_scalars(record):
         values['Termination/physical_failures_per_1000s'] = 1000*sum(c['physical_failures'] for c in collections)/seconds
     actor = record.get('actor') or {}
     steps = actor.get('steps', [])
-    objective = actor.get('objective', 'coordinate_dppo')
+    objective = actor.get('objective', 'joint_score_pg')
     loss_tag = 'Loss/joint_score' if objective == 'joint_score_pg' else 'Loss/ppo'
     for tag, key, weight in [(loss_tag, 'ppo_loss', 'internal_sample_visits'),
                              ('Loss/bc', 'bc_loss', 'bc_global_samples')]:

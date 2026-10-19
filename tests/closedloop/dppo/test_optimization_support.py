@@ -26,17 +26,60 @@ from gem.closedloop.dppo.position_repair import audit_position_tables, canonical
 from gem.closedloop.dppo.returns import normalize_advantages_global
 from gem.closedloop.dppo.trainer import fixed_targets, populate_values, trainable_actor_parameters
 from gem.closedloop.dppo.optimization_support import probability_check_local
-from tests.closedloop.dppo.test_distributed_training import GaussianActor, SmallCritic, _assert_nested_close
 from tests.closedloop.test_stage1_actor import actor_factory as actor_factory
 
 
+class GaussianActor(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.denoiser = torch.nn.Linear(1, 1, bias=False)
+        self.bc_only = torch.nn.Parameter(torch.tensor(.35))
+        self.always_unused = torch.nn.Parameter(torch.tensor(.7))
+        self.register_buffer("frozen_stats", torch.tensor([.4, .8]))
+        with torch.no_grad():
+            self.denoiser.weight.fill_(.2)
+
+class SmallCritic(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.value_head = torch.nn.Linear(2, 1)
+        self.always_unused = torch.nn.Parameter(torch.tensor(.9))
+        with torch.no_grad():
+            self.value_head.weight.copy_(torch.tensor([[.2, -.1]]))
+            self.value_head.bias.fill_(.05)
+
+    def forward(self, context, remaining_music_seconds):
+        inputs = torch.cat((context["feature"], remaining_music_seconds[:, None]), dim=1)
+        return self.value_head(inputs).squeeze(-1)
+
+def _assert_nested_close(actual, expected):
+    if isinstance(expected, torch.Tensor):
+        torch.testing.assert_close(actual, expected, atol=2e-7, rtol=2e-6)
+    elif isinstance(expected, dict):
+        assert set(actual) == set(expected)
+        for key in expected:
+            _assert_nested_close(actual[key], expected[key])
+    elif isinstance(expected, (list, tuple)):
+        assert len(actual) == len(expected)
+        for value, other in zip(actual, expected):
+            _assert_nested_close(value, other)
+    elif isinstance(expected, float):
+        assert actual == pytest.approx(expected, abs=2e-7, rel=2e-6)
+    else:
+        assert actual == expected
+
+
 class BatchGaussianPolicy:
+    stochastic_steps=(0,1)
+    trainable_steps=(0,1)
     steps = 2
     timestep_map = (999, 0)
     kernel_config = {'test': 'v2_batch_gaussian'}
 
     def __init__(self):
         self.actor = GaussianActor()
+
+    def assert_frozen_identity(self):return {"checked":True}
 
     def transition_parameters(self, context, state, step):
         batch = state.shape[0]
@@ -76,7 +119,8 @@ def rows(policy, count=4):
                 logp.append(masked_joint_log_prob(chain[step + 1:step + 2], parameters['mean'], parameters['std'], ~known)[0])
         result.append(SimpleNamespace(context=context, chain=chain, free_mask=~known[0],
             old_log_prob=torch.stack(logp), transition_valid=True,
-            metadata=dict(remaining_music_seconds=float(index + 1), sampler_trace=dict(kernel_config=policy.kernel_config,
+            metadata=dict(remaining_music_seconds=float(index + 1), critic_context=context,sampler_trace=dict(kernel_config=policy.kernel_config,
+                probability_steps=torch.tensor(policy.stochastic_steps),
                 timestep_map=torch.tensor(policy.timestep_map), old_means=torch.stack(means, 1), old_stds=torch.stack(stds, 1)))))
     return result
 
@@ -185,43 +229,6 @@ def test_probability_sentinel_uses_global_indices_without_truncating_manifest():
 
 
 
-def test_repair_exports_weights_only_and_preserves_source(actor_factory, tmp_path, monkeypatch):
-    from omegaconf import OmegaConf
-    from gem.closedloop.checkpoint import save_stage1_checkpoint
-    from gem.closedloop.dppo.checkpoint import VERSION
-    from gem.closedloop.dppo.position_repair import repair_stage2_weights, file_sha256
-    actor, _ = actor_factory(starts=(45,))
-    architecture = tmp_path / 'architecture.pt'
-    save_stage1_checkpoint(actor, architecture, config={'test_only': True}, global_step=123)
-    stats = Path(actor.endecoder.stats_path)
-    kinematics = Path(actor.endecoder.kinematics.kinematics_path)
-    mutated = copy.deepcopy(actor)
-    with torch.no_grad():
-        mutated.denoiser.sequence_pos_encoder.pe[2, 0, 3] += .01
-        mutated.history_encoder.out_proj.bias.add_(.02)
-    source = tmp_path / 'stage2_full.pt'
-    torch.save(dict(version=VERSION, actor=mutated.state_dict(), actor_optimizer={'must_be_discarded': True},
-        state={'iteration': 2897}, identity=dict(actor_interface=dict(actor.interface_config),
-            assets=dict(checkpoint=file_sha256(architecture), stats=file_sha256(stats), kinematics=file_sha256(kinematics)))), source)
-    # 保持测试统计量明确标记为 placeholder；只替换模型工厂，不伪造生产数据身份。
-    monkeypatch.setattr('gem.closedloop.dppo.trainer.load_actor',
-                        lambda _config: (copy.deepcopy(actor), OmegaConf.create({'test_only': True}), {}))
-    initial_sha = file_sha256(source)
-    audit = repair_stage2_weights(source, architecture, stats=stats, kinematics=kinematics)
-    assert audit['position_tables']['modified_before_repair']
-    assert not audit['position_tables']['repaired']
-    output = tmp_path / 'repaired_actor.pt'
-    report = repair_stage2_weights(source, architecture, stats=stats, kinematics=kinematics, output=output)
-    assert report['position_tables']['repaired']
-    assert file_sha256(source) == initial_sha
-    result = torch.load(output, weights_only=False)
-    assert 'actor_optimizer' not in result and 'critic_optimizer' not in result
-    assert result['global_step'] == 0 and result['warm_start_report']['source_iteration'] == 2897
-    for key, value in mutated.state_dict().items():
-        expected = actor.state_dict()[key] if key.endswith('sequence_pos_encoder.pe') else value
-        torch.testing.assert_close(result['state_dict'][key], expected, rtol=0, atol=0)
-    with pytest.raises(FileExistsError):
-        repair_stage2_weights(source, architecture, stats=stats, kinematics=kinematics, output=output)
 
 
 
