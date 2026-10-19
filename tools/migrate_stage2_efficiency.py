@@ -37,7 +37,7 @@ GENMO_FILES={
         'training_checkpoint','compact_evidence','evaluation','evaluation_runtime','evaluation_world',
         'evaluation_shards','periodic_monitor','vector_evaluation','mc_calibration','runtime',
         'diagnostic_rollout','vector_generation','memory_execution','tensor_cache','execution_checks',
-        'frozen_prefix','env_adapter','columnar_reward')}
+        'frozen_prefix','env_adapter','columnar_reward','tensorboard_metrics')}
 GENMO_FILES.add('tools/train_closedloop_stage10.py')
 GMT_BASE='source/NoetixRobot/NoetixRobot/tasks/mimic/mimic_noetix_bumi4340_mha_sonic/closedloop/'
 GMT_FILES={GMT_BASE+name+'.py' for name in ('execution_journal','inprocess_service','vector_backend','vector_columns')}

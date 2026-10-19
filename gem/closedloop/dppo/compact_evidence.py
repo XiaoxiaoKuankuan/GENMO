@@ -76,3 +76,30 @@ def read_episode(path):
 def summary_only(report):
     """合并结果保留全部任务指标与证据引用，避免重复嵌入同一控制轨迹。"""
     return {key: value for key, value in report.items() if key != 'episodes'}
+
+
+def report_episodes(report):
+    """按任务顺序读取周期报告的单份轨迹，核验JSON与控制侧车两层SHA。
+
+    旧内嵌证据仅用于历史读取；新周期报告必须提供绝对来源路径、任务身份和SHA。
+    逐任务产生记录，避免为了曲线再次长期保留整批完整控制对象。
+    """
+    if 'episodes' in report:
+        yield from report['episodes']
+        return
+    references=report.get('source_episode_manifests')
+    if references is None:
+        raise ValueError('Evaluation summary lacks verified episode sources')
+    for reference in references:
+        path=Path(reference['path'])
+        if not path.is_absolute():
+            raise ValueError('Periodic episode source must be absolute')
+        sha=hashlib.sha256()
+        with path.open('rb') as stream:
+            for block in iter(lambda:stream.read(1024**2),b''):sha.update(block)
+        if sha.hexdigest()!=reference['sha256']:
+            raise ValueError('Evaluation source episode JSON SHA differs')
+        episode=read_episode(path)
+        if episode['task_id']!=reference['task_id']:
+            raise ValueError('Evaluation source episode task differs')
+        yield episode

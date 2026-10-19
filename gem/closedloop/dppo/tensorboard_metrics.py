@@ -200,7 +200,8 @@ def evaluation_view(report):
     tasks = {t['task_id']: t for t in report['plan']['tasks']}
     rows = {}
     errors = {source: defaultdict(list) for source in SOURCES}
-    for episode in report['episodes']:
+    from .compact_evidence import report_episodes
+    for episode in report_episodes(report):
         if not episode.get('transition_valid') or episode['task_id'] in rows:
             raise ValueError('Invalid or duplicate evaluation episode')
         task = tasks[episode['task_id']]

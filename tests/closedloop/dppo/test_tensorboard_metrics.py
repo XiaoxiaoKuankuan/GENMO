@@ -64,6 +64,26 @@ def evaluation_report(iteration=0, gain=0., error=.01, activity=1.):
         stage1_retention={'source_balanced_loss': 4.-gain})
 
 
+def test_compact_evaluation_preserves_dashboard_values_and_checks_sources(tmp_path):
+    from gem.closedloop.dppo.compact_evidence import write_episode, summary_only
+    from gem.closedloop.dppo.evaluation import _publish_json
+    original=evaluation_report()
+    compact=summary_only(original)
+    compact['source_episode_manifests']=[]
+    for i,episode in enumerate(original['episodes']):
+        path=tmp_path/f'{i:06d}.json'
+        write_episode(path,episode,publish_json=_publish_json)
+        compact['source_episode_manifests'].append(dict(path=str(path),task_id=episode['task_id'],
+            sha256=hashlib.sha256(path.read_bytes()).hexdigest()))
+    expected=evaluation_scalars(original)
+    assert evaluation_scalars(compact)==expected
+    assert evaluation_scalars(compact,compact)==expected
+    reference=compact['source_episode_manifests'][0]
+    Path(reference['path']).write_text(Path(reference['path']).read_text()+'\n')
+    with pytest.raises(ValueError,match='JSON SHA'):
+        evaluation_scalars(compact)
+
+
 def test_training_uses_actual_rank_denominators_and_excludes_frozen_steps():
     values = training_scalars(training_record())
     assert values['Reward/total_per_second'] == pytest.approx(9.1)
