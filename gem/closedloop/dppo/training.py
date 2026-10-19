@@ -276,17 +276,48 @@ def _evaluate(c,report,label,*,save=True):
     return result
 
 
-def _maintain_after_iteration(c,report,*,is_warmup,rejected,last_save):
+def _learning_version(c):
+    """退出维护凭据只在本会话有效，绑定完成计数和两个网络的真实Tensor版本。"""
+    counters=tuple(c.state.get(key) for key in
+        ('iteration','rollouts_completed','actor_updates','critic_updates','policy_version'))
+    tensors=tuple((id(value),value._version) for module in (c.actor,c.critic)
+        for value in list(module.parameters())+list(module.buffers()))
+    return counters,tensors
+
+
+def _completed_training_resume(args,state,limit):
+    """累计训练已达请求水位时直接结束；显式评估、MC等只读诊断仍允许执行。"""
+    modes=('calibrate_only','evaluate_only','collect_only','critic_preheat_only','mc_validation_only')
+    return bool(args.resume and state['iteration']>=limit
+        and not any(getattr(args,name,False) for name in modes))
+
+
+def _finish_controlled_run(c,report,*,stopped):
+    """已在最终轮维护中保存的同一完整状态不重复评估/序列化；任意rank失配则重做。"""
+    stamp=getattr(c,'final_maintenance_version',None)
+    reusable=stamp is not None and stamp==_learning_version(c)
+    if all(c.distributed.all_gather_object(reusable)):
+        root_call(c.distributed,lambda:_poll_checkpoint(c,wait=True))
+        report['final_maintenance_reused']=True
+        return
+    if not stopped:
+        _evaluate(c,report,'final_'+f'{c.state["iteration"]:06d}',save=False)
+    _snapshot(c,'controlled_end',wait=True)
+
+
+def _maintain_after_iteration(c,report,*,is_warmup,rejected,last_save,finishing=False):
     """先评估与MC维护，再合并保存原因；同轮只发布一份最终恢复状态。"""
     distributed=c.distributed
     complete_mc=c.stage['critic'].get('complete_mc',{})
     save_reasons=[]
     iteration_eval=c.stage['evaluation'].get('every_actor_iterations')
-    if (c.state['training_control_steps']>=c.state['next_evaluation_control_steps'] or
-            iteration_eval and not is_warmup and not rejected and c.state['iteration']%iteration_eval==0):
+    periodic_evaluation=(c.state['training_control_steps']>=c.state['next_evaluation_control_steps'] or
+            iteration_eval and not is_warmup and not rejected and c.state['iteration']%iteration_eval==0)
+    if periodic_evaluation or finishing:
         c.state['next_evaluation_control_steps']=_next_interaction_boundary(
             c.state['training_control_steps'],c.stage['evaluation']['every_control_steps'])
-        evaluation_label=_periodic_evaluation_label(c.state)
+        evaluation_label=(_periodic_evaluation_label(c.state) if periodic_evaluation else
+            'final_'+f'{c.state["iteration"]:06d}')
         _evaluate(c,report,evaluation_label,save=False)
         save_reasons.append('evaluated_'+evaluation_label)
     from .run_control import iteration_checkpoint_reason
@@ -305,9 +336,14 @@ def _maintain_after_iteration(c,report,*,is_warmup,rejected,last_save):
         _overhead(c,'mc_calibration_seconds',stage)
         c.state['next_mc_calibration_control_steps']=_next_interaction_boundary(c.state['training_control_steps'],complete_mc['every_control_steps'])
         save_reasons.append('mc_calibrated')
+    if finishing:save_reasons.append('controlled_end')
     if save_reasons:
         stage=time.perf_counter()
-        _snapshot(c,'+'.join(save_reasons));last_save=time.perf_counter()
+        if finishing:
+            _snapshot(c,'+'.join(save_reasons),wait=True)
+            c.final_maintenance_version=_learning_version(c)
+        else:_snapshot(c,'+'.join(save_reasons))
+        last_save=time.perf_counter()
         _overhead(c,'maintenance_snapshot_seconds',stage)
     return last_save
 
@@ -436,6 +472,10 @@ def run(cargs,config,distributed):
         report.update(run_id=identity['run_id'],session_id=identity['session_id'],initial_state=copy.deepcopy(c.state))
         root_call(distributed,lambda:atomic_json(c.output/'training_identity.json',c.identity))
         root_call(distributed,lambda:(c.session/'resolved_config.yaml').write_text(yaml.safe_dump(c.base_config,allow_unicode=True,sort_keys=False)))
+        if _completed_training_resume(cargs,c.state,stop_after_iteration):
+            report.update(status='passed',scope='already_at_requested_cumulative_iteration_no_updates_or_extra_checkpoint',
+                final_state=c.state)
+            raise _FiniteDiagnosticComplete
         if cargs.calibrate_only:
             calibration=c.vector.calibrate(warmup=c.config['timing']['calibration_warmup'],
                 samples=c.config['timing']['calibration_samples'])
@@ -696,12 +736,11 @@ def run(cargs,config,distributed):
             if distributed.rank==0:print(f'[STAGE10 ACCEPTED] {label} chains={used[2]} actor_steps={0 if actor is None else actor["optimizer_steps"]} wall={wall:.3f}s',flush=True)
             if is_warmup and c.state['warmup_completed']==warmups:
                 _snapshot(c,'critic_warmup_complete');last_save=time.perf_counter()
-            last_save=_maintain_after_iteration(c,report,is_warmup=is_warmup,rejected=rejected,last_save=last_save)
+            last_save=_maintain_after_iteration(c,report,is_warmup=is_warmup,rejected=rejected,last_save=last_save,
+                finishing=not is_warmup and not rejected and c.state['iteration']>=stop_after_iteration)
             root_call(distributed,lambda:_poll_checkpoint(c))
         stopped=any(distributed.all_gather_object(signal.stop_requested))
-        if not stopped:
-            _evaluate(c,report,'final_'+f'{c.state["iteration"]:06d}',save=False)
-        _snapshot(c,'controlled_end',wait=True)
+        _finish_controlled_run(c,report,stopped=stopped)
         report.update(status='passed',final_state=c.state)
     except _FiniteDiagnosticComplete:
         pass

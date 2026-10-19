@@ -109,6 +109,43 @@ def test_one_complete_publication_has_all_maintenance_roles(tmp_path):
     finally:writer.close()
 
 
+@pytest.mark.parametrize('iteration',[100,101])
+def test_final_iteration_reuses_maintenance_and_rejects_changed_learning_state(iteration,monkeypatch):
+    from gem.closedloop.dppo import training,mc_calibration
+    events=[]
+    c=NS(distributed=Collective(),actor=torch.nn.Linear(2,1),critic=torch.nn.Linear(2,1),overhead={},
+        state=dict(iteration=iteration,rollouts_completed=iteration,actor_updates=iteration,policy_version=iteration,
+            training_control_steps=1000,next_evaluation_control_steps=(500 if iteration==100 else 2000),next_mc_calibration_control_steps=500,
+            critic_updates=7),stage=dict(evaluation=dict(every_actor_iterations=100,every_control_steps=1000),
+                storage=dict(checkpoint_interval_iterations=100,checkpoint_interval_seconds=1800),
+                critic=dict(complete_mc=dict(enabled=True,every_actor_iterations=100,every_control_steps=1000))))
+    monkeypatch.setattr(training,'_evaluate',lambda *args,**kwargs:events.append(('evaluate',kwargs['save'])))
+    def mc(*args,**kwargs):c.state['critic_updates']=9;events.append(('mc',9))
+    monkeypatch.setattr(mc_calibration,'calibrate_critic',mc)
+    monkeypatch.setattr(training,'_snapshot',lambda c,reason,**kwargs:events.append(('save',reason,c.state['critic_updates'])))
+    monkeypatch.setattr(training,'root_call',lambda distributed,fn:fn())
+    monkeypatch.setattr(training,'_poll_checkpoint',lambda *args,**kwargs:events.append(('poll',kwargs.get('wait'))))
+    report={}
+    training._maintain_after_iteration(c,report,is_warmup=False,rejected=False,last_save=0,finishing=True)
+    training._finish_controlled_run(c,report,stopped=False)
+    saves=[e for e in events if e[0]=='save']
+    assert len(saves)==1 and saves[0][2]==9 and 'controlled_end' in saves[0][1]
+    assert sum(e[0]=='evaluate' for e in events)==sum(e[0]=='mc' for e in events)==1
+    assert report['final_maintenance_reused']
+    with torch.no_grad():c.critic.weight.add_(1.)
+    training._finish_controlled_run(c,{},stopped=False)
+    assert sum(e[0]=='save' for e in events)==sum(e[0]=='evaluate' for e in events)==2
+
+
+def test_completed_resume_does_not_block_explicit_diagnostics():
+    from gem.closedloop.dppo.training import _completed_training_resume
+    args=NS(resume='latest')
+    assert _completed_training_resume(args,dict(iteration=2000),2000)
+    assert not _completed_training_resume(args,dict(iteration=1999),2000)
+    for mode in ('calibrate_only','evaluate_only','collect_only','critic_preheat_only','mc_validation_only'):
+        assert not _completed_training_resume(NS(resume='latest',**{mode:True}),dict(iteration=2000),2000)
+
+
 def test_engineering_migration_keeps_learning_content_and_rejects_algorithm_changes(monkeypatch):
     from tools.migrate_stage2_efficiency import digest,target_identity
     from gem.closedloop.dppo.training_config import configuration
