@@ -32,7 +32,7 @@ def actor_update(policy,optimizer,rows,targets,cache,manifest,controller,*,distr
                     objective_reduction='joint_sum',grad_clip_norm=1.,reserve_attempt=None,
                     gradient_observer=None,step_observer=None,bc_samples_per_rollout=2048,
                     bc_min_global_batch=1,snr=False,step_strategy='intermediate4',detailed_diagnostics=False,
-                    max_active_clip=.95,trust_region=None,kl_limits=None):
+                    max_active_clip=.95,trust_region=None,kl_limits=None,max_optimizer_steps=None,candidate_observer=None):
     """每条完整链一个联合比值；两遍微批反传与全局SUM严格保持同一目标。"""
     from .chain_ppo import evaluate_chain_records,from_records,backward_chain_surrogate
     from .gaussian_probability import chain_diagnostics,distribution
@@ -49,6 +49,8 @@ def actor_update(policy,optimizer,rows,targets,cache,manifest,controller,*,distr
     selected=_eligible(manifest);reports=[];orders=[];stop_reason=None;covered=set();discarded=None
     if not selected:raise ValueError('No free valid behavior chain remains for PPO')
     planned_steps=ppo_epochs*math.ceil(len(selected)/minibatch_chains)
+    if max_optimizer_steps is not None and (type(max_optimizer_steps)is not int or max_optimizer_steps<1):
+        raise ValueError('Explicit diagnostic optimizer limit must be positive')
     bc_total=max(bc_samples_per_rollout,planned_steps*bc_min_global_batch)
     bc_batches=[bc_total//planned_steps+(i<bc_total%planned_steps) for i in range(planned_steps)]
     actor=policy.actor;device=next(actor.parameters()).device;sketch={} if snr else None
@@ -125,7 +127,8 @@ def actor_update(policy,optimizer,rows,targets,cache,manifest,controller,*,distr
                     return post
                 transaction=backtracked_step(actor,optimizer,controller,evaluate=evaluate_candidate,
                     limits=limits,distributed=distributed,generators={'actor':generator},
-                    max_attempts=trust_region['max_attempts'],reserve_attempt=reserve_attempt)
+                    max_attempts=trust_region['max_attempts'],reserve_attempt=reserve_attempt,
+                    observe=candidate_observer)
                 if not transaction['accepted']:
                     import json
                     raise FloatingPointError('Full-chain trust-region exhausted; whole iteration rollback: '+json.dumps(transaction))
@@ -177,6 +180,8 @@ def actor_update(policy,optimizer,rows,targets,cache,manifest,controller,*,distr
             if soft_kl is not None and post['chain_joint_kl']['mean']>=soft_kl:stop_reason='post_step_chain_joint_kl'
             elif post['active_clip_fraction']>=max_active_clip:stop_reason='post_step_active_clip_saturation'
             if stop_reason:break
+            if max_optimizer_steps is not None and len(reports)>=max_optimizer_steps:
+                stop_reason='explicit_diagnostic_optimizer_limit';break
         if stop_reason:break
     return dict(objective='full_chain_clipped_ppo',ppo_clip_applied=True,optimizer_steps=len(reports),
         attempted_optimizer_steps=sum((r['trust_region'] or {}).get('attempt_count',1) for r in reports),

@@ -24,7 +24,7 @@ def digest(value):
 def optimization_binding(stage):
     t=stage['training']
     return dict(schema='genmo.stage2.full_chain_optimization_binding.v1',
-        actor_lr=t['actor_lr'],actor_lr_control=t['actor_lr_control'],
+        actor_lr=t['actor_lr'],actor_lr_control=t['actor_lr_control'],actor_trainable_scope=t.get('actor_trainable_scope','all'),
         actor_optimizer=dict(type='AdamW',parameter_groups=1,betas=[.9,.999],eps=1e-8,weight_decay=0.),
         ppo_epochs=t['ppo_epochs'],global_minibatch_chains=stage['scale']['actor_minibatch_chains'],
         objective=t['actor_objective'],joint_reduction=t['objective_logprob_reduction'],ppo_clip=t['ppo_clip'],
@@ -41,6 +41,8 @@ def optimization_binding(stage):
 
 def validate_optimization_configuration(config,maximum_steps):
     s=config['stage10'];t=s['training']
+    from .actor_scope import SCOPES
+    if t.get('actor_trainable_scope','all') not in SCOPES:raise ValueError('Unknown Actor trainable scope')
     if (s.get('actor_optimization')!={'schema':OPTIMIZATION_SCHEMA}
             or 'actor_experiment' in s or t['actor_objective'] not in ACTOR_OBJECTIVES
             or t['ppo_epochs']<1 or maximum_steps<1

@@ -551,6 +551,10 @@ class UpperEnvironment:
             critical_ready_seconds=generated.get('critical_ready_seconds', generated['elapsed']),
             commit_seconds=generated.get('commit_seconds',0.),terminal_snapshot=cpu_copy(self.snapshot))
         if boundary is not None:metadata['reference_execution_boundary']=dict(boundary,reached=boundary_reached)
+        if self.config.get('runtime',{}).get('record_compact_execution_provenance',False):
+            from .execution_provenance import compact_execution
+            metadata['compact_execution_provenance']=compact_execution(rows,ledger=self.reference_credit,
+                plan_id=generated['meta']['plan_id'],decision_tick=start,commit=commit)
         if self.config.get('runtime', {}).get('training_evidence_lifecycle') == 'ephemeral_until_update':
             # 完整物理列保持只读视图到本轮更新结束；普通训练不落盘，异常可据此完整保存。
             metadata['execution_trace'] = rows

@@ -19,7 +19,7 @@ import torch
 from .execution_checks import require_tensor
 
 
-def gaussian_statistics(value, old_mean, old_std, new_mean, new_std, free_mask):
+def gaussian_statistics(value, old_mean, old_std, new_mean, new_std, free_mask, *, coordinate_details=False):
     """返回 FP64 [B] 的直接联合 log-ratio、联合 KL 与自由坐标数。"""
     if value.shape != old_mean.shape or value.shape != new_mean.shape or value.shape != free_mask.shape:
         raise ValueError('Gaussian values, means and mask must have equal [B,T,D] shapes')
@@ -44,9 +44,17 @@ def gaussian_statistics(value, old_mean, old_std, new_mean, new_std, free_mask):
     counts = free_mask.sum((-2,-1))
     require_tensor(torch.isfinite(joint_ratio).all() & torch.isfinite(joint_kl).all()
         & (joint_kl >= -1e-10).all(), 'Nonfinite Gaussian ratio or negative KL', FloatingPointError)
-    return dict(joint_log_ratio=joint_ratio, joint_kl=joint_kl.clamp_min(0.), free_count=counts,
+    result=dict(joint_log_ratio=joint_ratio, joint_kl=joint_kl.clamp_min(0.), free_count=counts,
         mean_coordinate_log_ratio=joint_ratio/counts.clamp_min(1),
         mean_coordinate_kl=joint_kl.clamp_min(0.)/counts.clamp_min(1))
+    if coordinate_details:
+        # 诊断复用同一完整异方差公式；普通训练不分配这些额外输出。
+        result['coordinates']={key:torch.where(free_mask,tensor,0.) for key,tensor in dict(
+            kl=kl_terms,log_ratio=ratio_terms,mean_delta=new-old,
+            standardized_mean_delta=(new-old)/sigma0,residual=z,
+            actual_std=sigma0.expand_as(x),std_log_change=r.expand_as(x)).items()}
+        result['coordinates']['mask']=free_mask
+    return result
 
 
 def ppo_surrogate(statistics, advantages, *, clip, reduction='joint_sum'):

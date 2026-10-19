@@ -97,7 +97,7 @@ def output_probe(policy, rows, cache, max_chains=16):
         context = cache.context(selected)
         prepared = policy.prepare_conditions(context)
         state = cache.get('chain', selected, [15]*len(selected)).clone()
-        means, logratios, stds = [], [], []
+        means, logratios, stds, moving_states = [], [], [], []
         for step in policy.trainable_steps:
             old_state = cache.get('chain', selected, [step]*len(selected))
             params = policy.transition_parameters(context, old_state, step, prepared=prepared)
@@ -111,6 +111,7 @@ def output_probe(policy, rows, cache, max_chains=16):
             moving = policy.transition_parameters(context, state, step, prepared=prepared)
             state = policy.actor._constrain(moving['mean'] + moving['std']*
                 cache.get('sampling_noise', selected, [step]*len(selected)), prepared['adapted'])
+            moving_states.append(state.clone())
         final = policy.transition_parameters(context, state, 19, prepared=prepared)
         qpos = policy.actor.endecoder.codec.decode_to_canonical_qpos(policy.actor.endecoder.denormalize(final['mean']))
         boundaries=None
@@ -119,6 +120,7 @@ def output_probe(policy, rows, cache, max_chains=16):
             boundaries=generated_boundaries_tensors(qpos,cache.get('free_mask',selected)[:,:,9:],
                 [policy.experimental_joint_limits]*len(selected),policy.actor.endecoder.kinematics.joint_order)
         return dict(mean=torch.stack(means, 1), joint_log_ratio=torch.stack(logratios, 1), boundaries=boundaries,
+            moving_states=torch.stack(moving_states,1),pre_final=state.clone(),
             actual_std=torch.stack(stds, 1), final=final['mean'].clone(), qpos=qpos,
             contact=final['contact_logits'].sigmoid(), mask=cache.get('free_mask', selected),
             advantages=cache.get('advantages', selected),
