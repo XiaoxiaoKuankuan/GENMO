@@ -38,7 +38,7 @@ from gem.closedloop.dppo.collectives import DistributedCollectives
 from gem.closedloop.dppo.diagnostic_rollout import load_rollout
 from gem.closedloop.dppo.execution_checks import policy_phase
 from gem.closedloop.dppo.gradient_merge import BCGradientController,_group
-from gem.closedloop.dppo.optimization_support import probability_check_local
+from gem.closedloop.dppo.optimization_support import probability_check_local,_local_phase
 from gem.closedloop.dppo.parallel_support import capture_local_rng,restore_local_rng,local_call,root_call
 from gem.closedloop.dppo.probability_attribution import coordinate_report,importance_report,quantiles
 from gem.closedloop.dppo.retention_anchor import Stage1RetentionAnchor
@@ -53,7 +53,8 @@ from gem.closedloop.dppo.updater import actor_update,final_kl
 
 @torch.no_grad()
 def whole_chain_statistics(policy,rows,cache,distributed,metadata):
-    with policy_phase(policy):local=evaluate_chain_records(policy,rows,cache,microbatch=128).cpu()
+    with _local_phase(distributed,'attribution_all_real_chains'),policy_phase(policy):
+        local=evaluate_chain_records(policy,rows,cache,microbatch=128).cpu()
     shards=distributed.all_gather_object(local)
     records=torch.cat(shards);stats=from_records(records)
     report=importance_report(stats['joint_log_ratio'],stats['joint_kl'],
@@ -153,7 +154,11 @@ def main():
     if world!=8 or local!=rank:raise ValueError('Explicit single-node eight-GPU allocation required')
     dist.init_process_group('gloo',timeout=timedelta(minutes=45));group=None;cache=None
     try:
-        root_call(DistributedCollectives(rank,world),lambda:args.output_dir.mkdir(parents=True,exist_ok=False))
+        def reserve_node():
+            busy=subprocess.check_output(['nvidia-smi','--query-compute-apps=pid,process_name','--format=csv,noheader'],text=True).strip()
+            if busy:raise RuntimeError('Probability experiment requires free allocated GPUs: '+busy)
+            args.output_dir.mkdir(parents=True,exist_ok=False)
+        root_call(DistributedCollectives(rank,world),reserve_node)
         torch.cuda.set_device(local);torch.set_num_threads(4)
         group=dist.new_group(backend='nccl',timeout=timedelta(minutes=30))
         distributed=DistributedCollectives(rank,world,tensor_group=group,device=f'cuda:{local}')
@@ -196,24 +201,40 @@ def main():
         rng=capture_local_rng({'actor':generator});anchor_initial=copy.deepcopy(anchor.state_dict())
         optimizer_initial=copy.deepcopy(optimizer.state_dict());controller_initial=copy.deepcopy(controller.state_dict())
         before=output_probe(policy,eligible[:16],cache,max_chains=16)
-        history=[];attempt_history=[]
-        def observe_attempt():
+        history=[];attempt_history=[];last_evaluation={};evaluation_reuses=0
+        def whole():
+            nonlocal evaluation_reuses
+            signature=policy._parameter_signature()
+            if last_evaluation.get('signature')==signature:
+                evaluation_reuses+=1
+                return last_evaluation['report'],last_evaluation['records']
             measured,records=whole_chain_statistics(policy,eligible,cache,distributed,metadata)
+            last_evaluation.update(signature=signature,report=measured,records=records)
+            return measured,records
+        def persist_statistics(name,records):
+            root_call(distributed,lambda:torch.save(dict(records=records,metadata=metadata,
+                source_case_sha256=file_sha256(args.case/'case.json'),
+                columns=['joint_kl','mean_coordinate_kl','joint_log_ratio','free_count','mean_change_rms',
+                    'root_feature_change','rotation6d_change','joint_change']),args.output_dir/(name+'.chains.pt')))
+        def observe_attempt():
+            measured,records=whole()
             change=probe_difference(before,output_probe(policy,eligible[:16],cache,max_chains=16))
             samples=[s for shard in distributed.all_gather_object(change) for s in shard]
             entry=dict(attempt=len(attempt_history)+1,learning_rate=optimizer.param_groups[0]['lr'],
                 full_rollout=measured,output=probe_summary(samples))
             attempt_history.append(entry)
             root_call(distributed,lambda:atomic_json(args.output_dir/f'attempt_{len(attempt_history):03d}.json',entry))
+            persist_statistics(f'attempt_{len(attempt_history):03d}',records)
             return dict(whole_chain_ESS=measured['ess_fraction'],whole_chain_KL=measured['joint_kl_mean'])
         def observe_step(step):
-            measured,_=whole_chain_statistics(policy,eligible,cache,distributed,metadata)
+            measured,records=whole()
             entry=dict(minibatch_accepted_adam_step=step['optimizer_step'],final_acceptance_pending=True,
                 learning_rate=step['learning_rate'],full_rollout=measured,
                 parameter_update=step['parameter_update'],gradient_contributions=step['gradient_contributions'],
                 trust_region=step['trust_region'])
             history.append(entry)
             root_call(distributed,lambda:atomic_json(args.output_dir/f'accepted_step_{len(history):03d}.json',entry))
+            persist_statistics(f'accepted_step_{len(history):03d}',records)
             if rank==0:print(json.dumps(dict(scope=args.scope,step=step['optimizer_step'],lr=step['learning_rate'],
                 KL=measured['joint_kl_mean'],ESS=measured['ess_fraction'],active_clip=measured['active_clip_fraction'])),flush=True)
         trust=None if args.no_backtracking else dict(config['stage9']['trust_region'],maximum_lr=args.learning_rate)
@@ -227,7 +248,10 @@ def main():
         acceptance=check_candidate_kl(kl,config['stage10']['kl'])
         if not report['optimizer_steps']:acceptance=dict(passed=False,failures={'optimizer':'no accepted step'})
         report['accepted_optimizer_steps']=report['optimizer_steps'] if acceptance['passed'] else 0
-        final_importance,records=whole_chain_statistics(policy,eligible,cache,distributed,metadata)
+        final_importance,records=whole()
+        if not math.isclose(final_importance['joint_kl_mean'],kl['chain_joint_kl']['mean'],rel_tol=1e-9,abs_tol=1e-12):
+            raise AssertionError('Reused probability diagnostics differ from independent final whole-rollout KL')
+        persist_statistics('final',records)
         # 普通样本加每个rank自身高KL/高ratio尾部，前后始终使用完全相同条件和噪声。
         local_records=records[sum(distributed.all_gather_object(len(eligible))[:rank]):][:len(eligible)]
         stats=from_records(local_records)
@@ -262,7 +286,8 @@ def main():
             output=probe_summary(probes),history=history,attempts=len(attempt_history),actor_restored=restored,export=export,
             wall_seconds=max(distributed.all_gather_object(time.perf_counter()-started)),
             peak_allocated_bytes=max(distributed.all_gather_object(torch.cuda.max_memory_allocated(distributed.device))),
-            physical_quality='unverified_counterfactual_generation_only',ESS_is_diagnostic_not_training_gate=True)
+            physical_quality='unverified_counterfactual_generation_only',ESS_is_diagnostic_not_training_gate=True,
+            fixed_parameter_diagnostic_reuses=evaluation_reuses)
         result['controller_initialization']=controller_origin
         root_call(distributed,lambda:atomic_json(args.output_dir/'summary.json',result))
     except BaseException as error:

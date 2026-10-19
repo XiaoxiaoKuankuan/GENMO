@@ -66,10 +66,11 @@ def test_coordinate_full_unequal_variance_formula_and_partition_sums():
 def test_importance_logsumexp_exact_identity_and_extreme_tail_identity():
     metadata=[dict(identity={'chain':i},advantage=0.) for i in range(4)]
     log=torch.tensor([0.,0.,0.,math.log(1000.)],dtype=torch.float64)
-    report=importance_report(log,torch.tensor([0.,0.,0.,.01]),torch.tensor([1.,-1.,1.,1.]),metadata)
+    report=importance_report(log,torch.tensor([2.,0.,0.,.01]),torch.tensor([1.,-1.,1.,1.]),metadata)
     weights=np.array([1.,1.,1.,1000.])
     assert report['effective_chains']==pytest.approx(weights.sum()**2/np.square(weights).sum())
     assert report['highest_weight_chains'][0]['identity']=={'chain':3}
+    assert report['highest_kl_chains'][0]['identity']=={'chain':0}
     assert report['top_weight_shares']['0.001']==pytest.approx(1000/1003)
     assert report['active_clip_fraction']==.25
     same=importance_report(torch.zeros(4),torch.zeros(4),torch.ones(4),metadata)
@@ -79,7 +80,8 @@ def test_importance_logsumexp_exact_identity_and_extreme_tail_identity():
     assert extreme['ratio'] is None and extreme['ratio_unrepresentable_count']==4
 
 
-@pytest.mark.parametrize('scope,prefix',[('qpos_output','denoiser.final_layer.'),('qpos_projection','denoiser.final_layer.fc2.')])
+@pytest.mark.parametrize('scope,prefix',[('qpos_output','denoiser.final_layer.'),('qpos_projection','denoiser.final_layer.fc2.'),
+    ('denoiser_inputs','denoiser.')])
 def test_restricted_actor_keeps_kernel_and_real_streamed_score(scope,prefix,actor_factory):
     policy,rows,targets=case(actor_factory)
     original={n:p.detach().clone() for n,p in policy.actor.named_parameters()}
@@ -100,6 +102,7 @@ def test_restricted_actor_keeps_kernel_and_real_streamed_score(scope,prefix,acto
         if name.startswith(prefix) and p.grad is not None}
     policy.actor.zero_grad(set_to_none=True)
     report=configure_actor_scope(policy.actor,scope)
+    expected={name:value for name,value in expected.items() if name in report['parameter_names']}
     assert all(name.startswith(prefix) for name in report['parameter_names'])
     try:
         with policy_phase(policy):
@@ -114,8 +117,8 @@ def test_restricted_actor_keeps_kernel_and_real_streamed_score(scope,prefix,acto
         assert float((delta/scale).sqrt())<2e-5
         opt=torch.optim.AdamW([p for p in policy.actor.parameters() if p.requires_grad],lr=1e-6)
         opt.step()
-        assert any(not torch.equal(original[n],p) for n,p in policy.actor.named_parameters() if n.startswith(prefix))
-        assert all(torch.equal(original[n],p) for n,p in policy.actor.named_parameters() if not n.startswith(prefix))
+        assert any(not torch.equal(original[n],p) for n,p in policy.actor.named_parameters() if n in report['parameter_names'])
+        assert all(torch.equal(original[n],p) for n,p in policy.actor.named_parameters() if n not in report['parameter_names'])
         assert policy.kernel_config==kernel and policy.assert_frozen_identity()['checked']
         configure_actor_scope(policy.actor,'all')
         assert any(p.requires_grad for n,p in policy.actor.named_parameters() if not n.startswith(prefix))
@@ -145,14 +148,14 @@ def test_candidate_configurations_bind_scope_and_200_iteration_cap():
     from gem.closedloop.dppo.actor_optimization import optimization_binding
     root=Path(__file__).resolve().parents[3]
     candidates=[]
-    for scope in ('qpos_output','qpos_projection'):
+    for scope in ('qpos_output','qpos_projection','denoiser_inputs'):
         c=configuration(root/f'configs/closedloop/stage2_{scope}.yaml')
         assert c['stage10']['run_control']['max_training_iterations']==200
         assert c['stage10']['limits']['accepted_iterations']==200
         assert c['stage9']['actor_trainable_scope']==scope
         assert c['runtime']['record_compact_execution_provenance']
         candidates.append(optimization_binding(c['stage10']))
-    assert candidates[0]!=candidates[1]
+    assert len({str(value) for value in candidates})==3
     subprocess.run([sys.executable,'-B',str(root/'tools/analyze_stage2_probability.py'),'--help'],check=True,capture_output=True,text=True,timeout=30)
 
 

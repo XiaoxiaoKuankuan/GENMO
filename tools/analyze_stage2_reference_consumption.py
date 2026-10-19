@@ -46,11 +46,12 @@ def associate(case,chain_payload):
         key=token(meta['identity']);row=rows_by_id.get(key)
         if row is None:raise ValueError('Attribution chain identity is absent from the supplied real rollout')
         episode=consumed.get(key[:3]);plan=(episode or {}).get('plans',{}).get(key[3])
-        current=(plan or {}).get('current_frame_weight',[0.]*60);window=(plan or {}).get('window_frame_weight',[0.]*60)
+        lineage=bool((episode or {}).get('source_lineage_complete'))
+        current=(plan or {}).get('current_generated_frame_weight',[0.]*60);window=(plan or {}).get('window_generated_frame_weight',[0.]*60)
         counts={name:0 for name in names}
         for frame,(kl,log) in enumerate(zip(meta['kl_by_frame'],meta['log_ratio_by_frame'])):
-            if plan is None:category='unverified_missing_provenance'
-            elif plan['commit_tick'] is None:category='generated_not_committed'
+            if plan is not None and plan['commit_tick'] is None:category='generated_not_committed'
+            elif plan is None or not lineage:category='unverified_missing_provenance'
             elif current[frame]>0:category='current_consumed_source_support'
             elif window[frame]>0:category='window_observed_not_current'
             else:category='not_observed_in_retained_controls'
@@ -70,6 +71,7 @@ def associate(case,chain_payload):
         missing_compact_transitions=missing,by_consumption=totals,chains=details,
         reason=None if episodes else 'Historical learning-only rollout omitted real per-control GMT windows',
         association_scope='adjacent_source_pose_support_not_full_velocity_or_physical_causality',
+        root_feature_association_is_temporal_index_not_world_pose_causality=True,
         unobserved_frames_are_not_proof_of_never_executed=True)
 
 

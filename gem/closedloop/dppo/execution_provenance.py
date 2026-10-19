@@ -12,7 +12,7 @@
 """
 from __future__ import annotations
 
-SCHEMA='genmo.stage2.compact_execution_provenance.v1'
+SCHEMA='genmo.stage2.compact_execution_provenance.v2'
 
 
 def source_frame_support(reference_tick,decision_tick,frames=60):
@@ -38,9 +38,12 @@ def compact_execution(rows,*,ledger,plan_id,decision_tick,commit):
         steps.append(dict(control_tick_begin=begin,control_tick_end=int(row['tick']),
             consumed_reference_ticks=ticks,consumed_plan_indices=[lookup[plan] for plan in plans],
             reference_tick=int(row['reference_tick']),reference_plan_id=str(row['reference_plan_id'])))
-    origins={str(key):dict(decision_tick=int(item['decision_tick']),commit_tick=item['commit_tick'])
+    origins={str(key):dict(decision_tick=int(item['decision_tick']),commit_tick=item['commit_tick'],
+        parent_plan_id=item.get('parent_plan_id'),prefix_frames=item.get('prefix_frames'),
+        generation_frames=item.get('generation_frames',60))
         for key,item in ledger.records.items() if not str(key).startswith('bootstrap:')}
-    origins[str(plan_id)]=dict(decision_tick=int(decision_tick),commit_tick=(None if commit is None else int(commit['effective_tick'])))
+    origins.setdefault(str(plan_id),{}).update(decision_tick=int(decision_tick),
+        commit_tick=(None if commit is None else int(commit['effective_tick'])))
     return dict(schema=SCHEMA,plans=origins,steps=steps,plan_dictionary=dictionary,
         scope='actual_control_window_current_center_and_reward_reference_in_this_transition')
 
@@ -63,7 +66,26 @@ def consumption_report(records,*,frames=60):
             if key in controls and controls[key]!=row:raise ValueError('Conflicting real control provenance')
             controls[key]=row
     result={key:dict(**item,window_frame_weight=[0.]*frames,current_frame_weight=[0.]*frames,
-        reward_frame_weight=[0.]*frames,first_window_tick=None,first_current_tick=None) for key,item in plans.items()}
+        reward_frame_weight=[0.]*frames,window_generated_frame_weight=[0.]*frames,
+        current_generated_frame_weight=[0.]*frames,reward_generated_frame_weight=[0.]*frames,
+        first_window_tick=None,first_current_tick=None) for key,item in plans.items()}
+    unresolved={kind:0. for kind in ('window','current','reward')}
+    def origin(plan,frame,seen=()):
+        if plan.startswith('bootstrap:'):return ('bootstrap',frame)
+        if plan in seen:raise ValueError('Cyclic committed-prefix source lineage')
+        item=plans.get(plan)
+        if item is None or item.get('prefix_frames') is None:return None
+        if frame>=item['prefix_frames']:return (plan,frame)
+        parent=item.get('parent_plan_id')
+        if not parent:return None
+        if parent.startswith('bootstrap:'):return ('bootstrap',frame)
+        previous=plans.get(parent)
+        if previous is None:return None
+        absolute=item['decision_tick']+frame*20
+        index,remainder=divmod(absolute-previous['decision_tick'],20)
+        if remainder or not 0<=index<previous.get('generation_frames',frames):
+            raise ValueError('Committed source prefix does not align with recorded parent generation')
+        return origin(parent,index,(*seen,plan))
     for begin,row in sorted(controls.items()):
         occurrences=[('window',tick,plan) for tick,plan in zip(row['consumed_reference_ticks'],row['consumed_plan_ids'])]
         occurrences.extend((('current',row['consumed_reference_ticks'][10],row['consumed_plan_ids'][10]),
@@ -76,6 +98,9 @@ def consumption_report(records,*,frames=60):
                 raise ValueError('Observed reference before successful commit')
             for frame,weight in source_frame_support(tick,item['decision_tick'],frames):
                 item[kind+'_frame_weight'][frame]+=weight
+                source=origin(plan,frame)
+                if source is None:unresolved[kind]+=weight
+                elif source[0]!='bootstrap':result[source[0]][kind+'_generated_frame_weight'][source[1]]+=weight
             if kind in ('window','current') and item['first_'+kind+'_tick'] is None:item['first_'+kind+'_tick']=begin
     for item in result.values():
         current=item['current_frame_weight'];window=item['window_frame_weight']
@@ -83,6 +108,8 @@ def consumption_report(records,*,frames=60):
         item['observed_lookahead_only_frames']=[i for i,v in enumerate(window) if v>0 and current[i]==0]
         item['unobserved_frames']=[i for i,v in enumerate(window) if v==0]
         item['unobserved_is_not_proof_of_never_consumed']=True
+        item['observed_current_generated_frames']=[i for i,v in enumerate(item['current_generated_frame_weight']) if v>0]
     return dict(status='verified_in_retained_control_range',plans=result,control_count=len(controls),
+        unresolved_source_support_weight=unresolved,source_lineage_complete=not any(unresolved.values()),
         pose_interpolation='linear_joint_position_and_position_SLERP_orientation_adjacent_source_support',
         scope='finite_retained_controls_not_complete_episode_unless_explicitly_collected')

@@ -18,7 +18,8 @@ def test_source_interpolation_and_lookahead_is_not_current_consumption():
     plans=['bootstrap:x' if tick<24 else 'p' for tick in ticks]
     row=dict(control_tick_begin=12,control_tick_end=24,consumed_reference_ticks=ticks,consumed_plan_ids=plans,
         reference_tick=24,reference_plan_id='p')
-    record=dict(schema=SCHEMA,plans={'p':dict(decision_tick=0,commit_tick=12)},steps=[row])
+    record=dict(schema=SCHEMA,plans={'p':dict(decision_tick=0,commit_tick=12,prefix_frames=0,
+        parent_plan_id='bootstrap:x',generation_frames=60)},steps=[row])
     result=consumption_report([record]);p=result['plans']['p']
     assert p['first_window_tick']==12 and p['first_current_tick'] is None
     assert sum(p['current_frame_weight'])==0 and sum(p['reward_frame_weight'])==pytest.approx(1)
@@ -45,7 +46,8 @@ def test_consumed_frame_KL_association_does_not_invent_missing_history(tmp_path,
     assert result['status']=='unverified'
     assert result['by_consumption']['unverified_missing_provenance']['joint_kl']==60
     ticks=list(range(-108,133,12));plans=['bootstrap:x' if tick<24 else 'p' for tick in ticks]
-    row.metadata['compact_execution_provenance']=dict(schema=SCHEMA,plans={'p':dict(decision_tick=0,commit_tick=12)},
+    row.metadata['compact_execution_provenance']=dict(schema=SCHEMA,plans={'p':dict(decision_tick=0,commit_tick=12,
+        prefix_frames=0,parent_plan_id='bootstrap:x',generation_frames=60)},
         steps=[dict(control_tick_begin=12,control_tick_end=24,consumed_reference_ticks=ticks,consumed_plan_ids=plans,
             reference_tick=24,reference_plan_id='p')])
     result=tool.associate(tmp_path,dict(metadata=[metadata]))
@@ -53,3 +55,17 @@ def test_consumed_frame_KL_association_does_not_invent_missing_history(tmp_path,
     assert result['by_consumption']['current_consumed_source_support']['joint_kl']==0
     assert result['by_consumption']['window_observed_not_current']['joint_kl']==7
     assert sum(v['joint_kl'] for v in result['by_consumption'].values())==60
+
+
+def test_interpolation_reaches_previous_plan_through_exact_committed_prefix():
+    plans={'p0':dict(decision_tick=0,commit_tick=12,prefix_frames=0,parent_plan_id='bootstrap:x',generation_frames=60),
+        'p1':dict(decision_tick=300,commit_tick=468,prefix_frames=17,parent_plan_id='p0',generation_frames=60)}
+    ticks=list(range(504,745,12))
+    row=dict(control_tick_begin=624,control_tick_end=636,consumed_reference_ticks=ticks,
+        consumed_plan_ids=['p0' if tick<=612 else 'p1' for tick in ticks],reference_tick=636,reference_plan_id='p1')
+    result=consumption_report([dict(schema=SCHEMA,plans=plans,steps=[row])])
+    assert result['source_lineage_complete']
+    assert sum(result['plans']['p0']['current_frame_weight'])==0
+    assert result['plans']['p0']['current_generated_frame_weight'][31]==pytest.approx(.8)
+    assert result['plans']['p1']['current_generated_frame_weight'][17]==pytest.approx(.2)
+    assert sum(sum(v['current_generated_frame_weight']) for v in result['plans'].values())==pytest.approx(1.)

@@ -452,7 +452,8 @@ class UpperEnvironment:
         if self.reference_credit is not None:
             self.reference_credit.register(generated['meta']['plan_id'],decision_tick=start,
                 policy_version=self.policy_version,parent_plan_id=generated['meta']['parent_plan_id'],
-                horizon_ticks=self.config['stage10']['generation_horizon']['frames']*20)
+                horizon_ticks=self.config['stage10']['generation_horizon']['frames']*20,
+                prefix_frames=generated['meta'].get('prefix_frames'))
         commit, rejection = None, generated['rejection']
         pending = candidate is not None
         while not self.snapshot['done'] and self.snapshot['tick'] < execution_end:

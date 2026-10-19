@@ -128,17 +128,18 @@ def importance_report(log_ratio,joint_kl,advantages,metadata,*,clip=.1,top=12):
     active=((advantages>0)&(log_ratio>high))|((advantages<0)&(log_ratio<low))
     limits=(math.log(float.fromhex('0x0.0000000000001p-1022')),math.log(torch.finfo(torch.float64).max))
     representable=(log_ratio>=limits[0])&(log_ratio<=limits[1])
-    tails=[]
-    for i in order[:top].tolist():
-        tails.append({**metadata[i],'joint_log_ratio':float(log_ratio[i]),'joint_kl':float(joint_kl[i]),
+    def entry(i):
+        return {**metadata[i],'joint_log_ratio':float(log_ratio[i]),'joint_kl':float(joint_kl[i]),
             'normalized_weight':float(weights[i]),'advantage':float(advantages[i]),
-            'ordinary_clip':bool(ordinary[i]),'active_clip':bool(active[i])})
+            'ordinary_clip':bool(ordinary[i]),'active_clip':bool(active[i])}
+    tails=[entry(i) for i in order[:top].tolist()]
     return dict(joint_log_ratio=quantiles(log_ratio),ratio=quantiles(log_ratio.exp()) if representable.all() else None,
         ratio_unrepresentable_count=int((~representable).sum()),ordinary_clip_fraction=float(ordinary.double().mean()),
         active_clip_fraction=float(active.double().mean()),joint_kl=quantiles(joint_kl),joint_kl_mean=float(joint_kl.mean()),
         effective_chains=float(ess),ess_fraction=float(ess/len(log_ratio)),
         top_weight_shares={str(fraction):float(weights[order[:max(1,math.ceil(len(order)*fraction))]].sum())
             for fraction in (.001,.01,.05)},highest_weight_chains=tails,
+        highest_kl_chains=[entry(i) for i in torch.argsort(joint_kl,descending=True)[:top].tolist()],
         scope='offline_diagnostic_only_no_ESS_training_gate_no_weight_clamp')
 
 
