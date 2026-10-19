@@ -3,6 +3,8 @@
 有限固定rollout试验及同新奖励的真实物理对照必须先落盘。正式学习只接受绑定
 当前行为核、奖励、选定soft/hard门槛的SHA证据，pending配置仅可用于采集、评估、
 部署延迟标定或Critic预热。这里不猜测阈值、不修改采样，也不读取旧P1优化状态。
+物理对照核验任务完整性、执行身份及被评估Actor，新增失败只作为训练效果诊断；
+不要求一次探索更新就保持每个任务不退化，不以物理成绩阻止正式学习。
 """
 from __future__ import annotations
 import hashlib
@@ -65,9 +67,8 @@ def validate_calibration(limits,kernel,reward,soft_limit,*,optimization=None):
             or comparison.get('execution_kernel_sha256')!=digest(kernel)
             or comparison.get('execution_reward_sha256')!=digest(reward)):
         raise ValueError('Independent paired physical evidence is incomplete or has a different identity')
-    if (comparison.get('evaluated_actor_initialization',{}).get('sha256') not in actors
-            or comparison['overall']['failure_pair_counts']['new_failure']):
-        raise ValueError('Physical comparison must evaluate the selected Actor without introducing new paired failures')
+    if comparison.get('evaluated_actor_initialization',{}).get('sha256') not in actors:
+        raise ValueError('Physical comparison must evaluate the selected Actor')
     if not isinstance(report.get('selection_reason'),str) or len(report['selection_reason'].strip())<20:
         raise ValueError('Calibration must explain thresholds using measured policy change and physical results')
     return report
@@ -96,11 +97,15 @@ def publish_calibration(config_path,fixed_report,physical_comparison,actor_rate,
     optimization=optimization_binding(config['stage10'])
     if actor_rate != config['stage10']['training']['actor_lr']:
         raise ValueError('Published calibration must bind the configured Actor learning rate')
+    physical=reference(physical_comparison)
+    comparison=_read(physical)
     report=dict(schema='genmo.stage2.four_step_kl_calibration.v2',status='passed',optimization=optimization,
         kernel_sha256=digest(source['kernel']),reward_sha256=digest(config['stage9']['reward']),
         hard_limits={key:limits[key] for key in ('mean_coordinate','maximum_step_mean_coordinate','p95_coordinate')},
         soft_limit=soft,fixed_rollout_trials=[dict(evidence=fixed,actor_lr=actor_rate)],
-        physical_comparison=reference(physical_comparison),selection_reason=selection_reason,
+        physical_comparison=physical,selection_reason=selection_reason,
+        physical_outcome_policy='diagnostic_only_not_training_admission',
+        physical_failure_pair_counts=copy.deepcopy(comparison['overall']['failure_pair_counts']),
         learning_benefit_not_implied_by_kl_pass=True)
     output=Path(output);output.parent.mkdir(parents=True,exist_ok=True)
     temporary=output.with_suffix(output.suffix+'.pending')

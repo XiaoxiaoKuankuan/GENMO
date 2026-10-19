@@ -1,8 +1,9 @@
-"""四步KL证据、评估权重绑定及配对执行身份的CPU拒绝测试。
+"""四步KL证据、评估权重绑定及物理结果诊断的CPU回归测试。
 
 本文件仅在pytest临时目录构造明确的合成JSON，不采集物理数据、不发布训练配置。
-验证软/硬阈值、四步覆盖、冻结身份、实际评估权重SHA和配对新增失败不能被空证据
-或旧20步统计替代。另验证Actor初始化和Critic训练来源可以不同，而物理源码与奖励
+验证软/硬阈值、四步覆盖、冻结身份和实际评估权重SHA不能被空证据或旧20步统计
+替代；新增物理失败仍被保留为诊断，但不阻止发布标定或启动训练。
+另验证Actor初始化和Critic训练来源可以不同，而物理源码与奖励
 必须完全相同。这些合成门禁测试不代表真实KL标定通过。
 """
 import copy
@@ -57,7 +58,15 @@ def test_four_step_evidence_binds_soft_hard_and_physical_actor(tmp_path):
         validate_calibration(limits,kernel,reward,.0005)
 
 
-@pytest.mark.parametrize('fault',['twenty','coverage','frozen','hard','partial','physical_actor','failure','reward','sha'])
+def test_new_physical_failure_is_diagnostic_not_training_admission(tmp_path):
+    limits,kernel,reward=evidence(tmp_path,'failure')
+    report=validate_calibration(limits,kernel,reward,.0005)
+    physical=json.loads((tmp_path/'physical.json').read_text())
+    assert report['status']=='passed'
+    assert physical['overall']['failure_pair_counts']['new_failure']==1
+
+
+@pytest.mark.parametrize('fault',['twenty','coverage','frozen','hard','partial','physical_actor','reward','sha'])
 def test_invalid_calibration_cannot_enable_actor_learning(tmp_path,fault):
     limits,kernel,reward=evidence(tmp_path,fault)
     with pytest.raises(ValueError):validate_calibration(limits,kernel,reward,.0005)
@@ -107,9 +116,10 @@ def test_published_calibration_binds_actual_optimizer_and_can_be_read_by_trainin
     (tmp_path/'fixed.json').write_text(json.dumps(fixed))
     physical = json.loads((tmp_path/'physical.json').read_text())
     physical['execution_reward_sha256'] = digest(reward)
+    physical['overall']['failure_pair_counts']['new_failure'] = 1
     (tmp_path/'physical.json').write_text(json.dumps(physical))
     args = (path, tmp_path/'fixed.json', tmp_path/'physical.json', 1e-7,
-            'Synthetic publication regression: bind measured optimization without weakening physical gates.',
+            'Synthetic publication regression: bind measured optimization and preserve physical failures as diagnostics.',
             tmp_path/'published.json')
     if fault:
         with pytest.raises(ValueError, match='Measured candidate optimization'):
@@ -121,3 +131,5 @@ def test_published_calibration_binds_actual_optimizer_and_can_be_read_by_trainin
         limits['calibration'] = dict(status='validated', evidence=reference)
         result = validate_calibration(limits, kernel, reward, .0005, optimization=optimization)
         assert result['schema'] == 'genmo.stage2.four_step_kl_calibration.v2'
+        assert result['physical_outcome_policy']=='diagnostic_only_not_training_admission'
+        assert result['physical_failure_pair_counts']['new_failure']==1

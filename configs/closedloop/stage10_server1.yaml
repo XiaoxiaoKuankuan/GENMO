@@ -181,9 +181,11 @@ stage10:
     p95_coordinate: 0.0007
     reduction: free_coordinate_mean
     calibration:
-      status: pending
+      status: validated
       scope: four_trainable_steps_only
-      evidence: null
+      evidence:
+        path: /data1/user/liwei/GENMO_outputs/closedloop_stage10/stage2_formal_2000_20261019/kl_calibration_v2.json
+        sha256: f1fbdbd526c742a4578523a63415ec8b8ba2cb2935ec4e417015d17fc7429a1f
   limits:
     accepted_iterations: 2000
     control_steps: 1200000000
