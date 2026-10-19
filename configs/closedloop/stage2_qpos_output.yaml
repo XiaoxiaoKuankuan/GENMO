@@ -4,7 +4,7 @@
 # LR=1e-6，真实chain clip=.10，epoch=1，全局2048链/更新；每步BC至少256样本。
 # 联合KL门槛是待真实rollout标定的实验候选，不继承旧坐标平均KL阈值。
 # 奖励、Critic结构/目标、15+4+1采样核与噪声调度、GMT权重及时钟保持原定义。
-# CLI默认仅运行有限迭代；2000只是累计资源上限，不自动启动长期训练。
+# CLI默认仅运行有限迭代；本候选累计上限200轮，不自动启动长期训练。
 diagnostics:
   record_original_threshold_crossings: true
   reward_substeps: true
