@@ -103,17 +103,13 @@ def distribution(values):
 
 
 def chain_diagnostics(statistics, advantages, *, clip):
-    """真实联合ratio、符号相关裁剪及log-space ESS；每条完整链权重仅计算一次。"""
+    """真实联合ratio、符号相关裁剪及联合KL；每条完整链只统计一次。"""
     surrogate=ppo_surrogate(statistics,advantages,clip=clip,reduction='joint_sum')
     valid=statistics['free_count']>0
     logratio=surrogate['log_ratio'][valid].detach()
-    # 减最大log权重只用于ESS的公共比例约消，不改变PPO ratio或梯度。
-    weights=(logratio-logratio.max()).exp()
-    ess=weights.sum().square()/weights.square().sum()
     return dict(chain_joint_log_ratio=distribution(logratio),
         chain_joint_ratio=distribution(surrogate['ratio'][valid]),chain_joint_kl=distribution(statistics['joint_kl'][valid]),
         clip_fraction=float(surrogate['clipped'][valid].double().mean()),
         active_clip_fraction=float(surrogate['objective_clipped'][valid].double().mean()),
-        importance_weight_ess=float(ess),importance_weight_ess_fraction=float(ess/len(logratio)),
         nonfinite_fraction=0.,ratio_underflow_fraction=0.,
         ratio_is_joint_probability=True,denominator='one_complete_chain_one_upper_GAE_advantage')

@@ -75,7 +75,7 @@ def run(rank,world,actor,rows,targets,directory,soft_kl=None,adaptive=False):
             BCGradientController(initialize_from_gradient=True),distributed=DistributedCollectives(rank,world),
             anchor=Anchor(),generator=torch.Generator().manual_seed(4),minibatch_chains=2,microbatch=3,
             bc_samples_per_rollout=7,soft_kl=soft_kl,reserve_attempt=lambda:attempts.append(1),
-            detailed_diagnostics=True,min_ess_fraction=.5 if adaptive else .05,
+            detailed_diagnostics=True,
             trust_region=dict(maximum_lr=1e-7,growth=1.25,margin=.8,max_attempts=8) if adaptive else None,
             kl_limits=dict(chain_joint_mean=.2,chain_joint_p95=.6,chain_joint_p99=.9,chain_joint_max=2.) if adaptive else None)
         assert len(attempts)==report['attempted_optimizer_steps']
@@ -122,7 +122,7 @@ def test_later_minibatches_recheck_earlier_chain_weights(tmp_path,actor_factory)
     report=torch.load(tmp_path/'rank0.pt',weights_only=False)['report']
     assert report['optimizer_steps']==3
     assert [s['candidate_checked_chains'] for s in report['steps']]==[2,4,5]
-    assert report['steps'][-1]['post_step_chain']['importance_weight_ess_fraction']>=.5
+    assert report['steps'][-1]['post_step_chain']['chain_joint_kl']['mean']<=.08
     assert all(s['trust_region']['accepted'] for s in report['steps'])
 
 

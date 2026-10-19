@@ -1,7 +1,7 @@
 """当前连续世界Actor优化配置及实际参数身份。
 
 只接受完整四步联合Clipped PPO，一个完整链比值对应一个上层GAE优势。显式绑定
-统一学习率、全局链批量、Epoch、BC批量下限、联合KL及ESS/裁剪早停阈值。旧坐标
+统一学习率、全局链批量、Epoch、BC批量下限、联合KL及裁剪早停阈值。旧坐标
 代理训练和单次joint-score训练入口退役；joint-score函数仅留作数学梯度参考。
 联合KL初始阈值是待真实rollout标定的候选，不能沿用坐标平均阈值或声称物理安全。
 本模块只校验配置，不启动训练；物理收益仍由真实完整歌曲执行结果判断。
@@ -30,7 +30,7 @@ def optimization_binding(stage):
         objective=t['actor_objective'],joint_reduction=t['objective_logprob_reduction'],ppo_clip=t['ppo_clip'],
         gamma_denoising=t['gamma_denoising'],gradient_clip=t['grad_clip_norm'],
         bc_samples=t['bc_samples_per_rollout'],bc_min_global_batch=t['bc_min_global_batch'],bc_controller=stage['bc_gradient'],
-        chain_clip_saturation=t['max_active_clip_fraction'],minimum_ess=t['min_ess_fraction'],
+        chain_clip_saturation=t['max_active_clip_fraction'],
         hard_kl={key:value for key,value in stage['kl'].items() if key!='calibration'},
         soft_chain_joint_kl=t['kl_soft_stop_chain_joint'],rollout=stage['ppo_rollout'],
         trust_region=t['trust_region'],
@@ -65,11 +65,10 @@ def validate_optimization_configuration(config,maximum_steps):
     bounds=[s['kl'][key] for key in ('chain_joint_mean','chain_joint_p95','chain_joint_p99','chain_joint_max')]
     if bounds!=sorted(bounds) or not 0<t['kl_soft_stop_chain_joint']<=bounds[0]:
         raise ValueError('Soft chain KL and hard mean/tail thresholds must be ordered')
-    if not 0<t['max_active_clip_fraction']<=1 or not 0<t['min_ess_fraction']<=1:
-        raise ValueError('Explicit active-clip and ESS finite-experiment limits required')
-    if (s['kl'].get('minimum_ess')!=t['min_ess_fraction']
-            or s['kl'].get('maximum_active_clip')!=t['max_active_clip_fraction']):
-        raise ValueError('Full-rollout ESS and active-clip acceptance must match mini-batch guard')
+    if not 0<t['max_active_clip_fraction']<=1:
+        raise ValueError('Explicit active-clip finite-experiment limit required')
+    if s['kl'].get('maximum_active_clip')!=t['max_active_clip_fraction']:
+        raise ValueError('Full-rollout active-clip acceptance must match mini-batch guard')
     expected=dict(status='candidate_requires_joint_calibration',scope='four_trainable_steps_only',
         optimization_sha256=digest(optimization_binding(s)))
     if s['kl']['calibration'].get('optimization_sha256')=='auto':

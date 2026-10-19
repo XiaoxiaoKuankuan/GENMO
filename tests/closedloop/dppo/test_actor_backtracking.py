@@ -12,7 +12,7 @@ import torch
 from gem.closedloop.dppo.actor_backtracking import backtracked_step, uniform_actor_optimizer, check_candidate_kl
 from gem.closedloop.dppo.actor_step_diagnostics import StepDiagnostics
 from gem.closedloop.dppo.full_batch_actor import joint_score_objective
-from gem.closedloop.dppo.gaussian_probability import gaussian_statistics
+from gem.closedloop.dppo.gaussian_probability import gaussian_statistics, chain_statistics, chain_diagnostics
 from gem.closedloop.dppo.gradient_merge import BCGradientController
 from tests.closedloop.test_stage1_actor import actor_factory
 
@@ -162,10 +162,29 @@ def test_numerical_candidate_rejected_then_retried_without_extra_adam_time():
     assert all(float(s['step'])==2 for s in opt.state.values())
 
 
-def test_ess_collapse_cannot_pass_small_kl():
-    report=kl(0.)
-    report['importance_weight_ess_fraction']=.001
-    assert not check_candidate_kl(report,{'minimum_ess':.05})['passed']
+def test_concentrated_finite_ratios_do_not_reject_valid_joint_kl():
+    # 构造一条罕见但有限的旧高斯样本；其大ratio已被正优势PPO裁剪。
+    # 权重集中本身不拒绝更新；真正超出联合KL或active clip上限时仍拒绝。
+    old=torch.zeros(32,4,1,dtype=torch.float64)
+    value=old.clone();value[-1]=25.
+    sigma=torch.ones_like(old);mask=torch.ones_like(old,dtype=torch.bool)
+    flat=lambda tensor:tensor.reshape(128,1,1)
+    steps=gaussian_statistics(flat(value),flat(old),flat(sigma),flat(old+.1),flat(sigma),flat(mask))
+    chain=chain_statistics(*(steps[key].reshape(32,4) for key in ('joint_log_ratio','joint_kl','free_count')))
+    report=chain_diagnostics(chain,torch.ones(32),clip=.1)
+    assert report['chain_joint_ratio']['max']>1e4
+    assert report['chain_joint_kl']['mean']==pytest.approx(.02)
+    assert report['active_clip_fraction']==pytest.approx(1/32)
+    limits=dict(chain_joint_mean=.1,chain_joint_p95=.6,chain_joint_p99=.9,chain_joint_max=2.,maximum_active_clip=.95)
+    assert check_candidate_kl(report,limits)['passed']
+    actor,opt,c=setup()
+    accepted=backtracked_step(actor,opt,c,evaluate=lambda:report,limits=limits,distributed=Collective())
+    assert accepted['accepted'] and accepted['attempt_count']==1
+    assert accepted['accepted_lr']==1e-6
+    joint_failure=check_candidate_kl(report,{**limits,'chain_joint_mean':.01})
+    assert set(joint_failure['failures'])=={'chain_joint_mean'}
+    clip_failure=check_candidate_kl(report,{**limits,'maximum_active_clip':.01})
+    assert set(clip_failure['failures'])=={'active_clip_fraction'}
 
 
 def test_real_policy_full_batch_one_step_and_no_old_chain_mutation(tmp_path,actor_factory):

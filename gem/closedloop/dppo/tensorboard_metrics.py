@@ -78,7 +78,6 @@ DEFINITIONS.update({
     'Policy/chain_joint_kl': '全部有效旧rollout链四步联合KL之和的均值；主要更新约束，非未来物理安全保证。',
     'Policy/chain_joint_kl_p95': '上述每链联合KL的P95，检查尾部更新。完整P99/Max见每轮JSON。',
     'Policy/chain_clip_fraction': '完整链ratio落在[1-clip,1+clip]之外的比例；区别于真正失去梯度的active clip。',
-    'Policy/importance_ess_fraction': '联合重要性权重的有效样本数/链数；越接近1权重越均匀，过低提示旧数据失效。',
     'Policy/parameter_update_rms': '每次Adam后真实FP32 Actor参数变化RMS的均值，非理论更新量。',
     'Policy/ppo_bc_cosine': '全局SUM后的PPO与BC梯度余弦；负值表示方向存在冲突。',
     'Policy/accepted_updates': '通过完整rollout联合KL的实际Adam次数，区别于计划次数。',
@@ -206,7 +205,6 @@ def training_scalars(record):
         values['Policy/chain_joint_kl']=kl['chain_joint_kl']['mean']
         values['Policy/chain_joint_kl_p95']=kl['chain_joint_kl']['p95']
         values['Policy/chain_clip_fraction']=kl.get('clip_fraction')
-        values['Policy/importance_ess_fraction']=kl.get('importance_weight_ess_fraction')
     values['Policy/accepted_updates']=actor.get('accepted_optimizer_steps')
     values['Policy/planned_updates']=actor.get('planned_optimizer_steps')
     parameter=[v['parameter_update']['modules']['all']['update_rms'] for v in steps if 'parameter_update' in v]

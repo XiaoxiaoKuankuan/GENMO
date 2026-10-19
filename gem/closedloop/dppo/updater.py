@@ -4,7 +4,7 @@
 对应同一个上层GAE。两遍流式计算保持完整链梯度，条件图在每个Adam版本重建。
 全局实际链数是唯一分母；PPO/BC梯度SUM后统一裁剪，不额外平均四步或world size。
 
-每个minibatch记录真实参数、同噪声最终输出及联合概率变化，链KL/ESS/裁剪饱和可
+每个minibatch记录真实参数、同噪声最终输出及联合概率变化，链KL或裁剪饱和可
 提前停止。最终所有旧rollout链的四步KL仍须通过；Actor/Critic/Adam/BC/RNG回滚由
 training统一管理。BC设置每步全局样本下限，监控实际样本量及成本。保持Critic
 结构、价值目标、物理时钟、原奖励和真实采样核，不把数值通过称为物理收益。
@@ -32,7 +32,7 @@ def actor_update(policy,optimizer,rows,targets,cache,manifest,controller,*,distr
                     objective_reduction='joint_sum',grad_clip_norm=1.,reserve_attempt=None,
                     gradient_observer=None,step_observer=None,bc_samples_per_rollout=2048,
                     bc_min_global_batch=1,snr=False,step_strategy='intermediate4',detailed_diagnostics=False,
-                    max_active_clip=.95,min_ess_fraction=.05,trust_region=None,kl_limits=None):
+                    max_active_clip=.95,trust_region=None,kl_limits=None):
     """每条完整链一个联合比值；两遍微批反传与全局SUM严格保持同一目标。"""
     from .chain_ppo import evaluate_chain_records,from_records,backward_chain_surrogate
     from .gaussian_probability import chain_diagnostics,distribution
@@ -73,7 +73,6 @@ def actor_update(policy,optimizer,rows,targets,cache,manifest,controller,*,distr
             pre=chain_diagnostics(statistics,adv,clip=clip)
             if soft_kl is not None and pre['chain_joint_kl']['mean']>=soft_kl:stop_reason='pre_step_chain_joint_kl'
             elif pre['active_clip_fraction']>=max_active_clip:stop_reason='active_clip_saturation'
-            elif pre['importance_weight_ess_fraction']<min_ess_fraction:stop_reason='importance_weight_ess_collapse'
             if stop_reason:
                 discarded=dict(epoch=epoch,global_chain_count=len(indices),diagnostics=pre,
                     wall_seconds=time.perf_counter()-started,optimizer_step_executed=False)
@@ -106,7 +105,7 @@ def actor_update(policy,optimizer,rows,targets,cache,manifest,controller,*,distr
             post_records=None;post=None;transaction=None
             if trust_region is not None:
                 # 更新还会影响先前批次；累计已用链全部参与候选检查，避免只在新批次
-                # ESS正常却破坏前面链的权重。最终仍检查包含未用链在内的完整rollout。
+                # KL通过却遗漏前面链的变化。最终仍检查包含未用链在内的完整rollout。
                 guarded=covered.union(indices)
                 guard_indices=[i for i in selected if i in guarded]
                 guard_owned=_owned(guard_indices,manifest,distributed)
@@ -114,7 +113,7 @@ def actor_update(policy,optimizer,rows,targets,cache,manifest,controller,*,distr
                 limits={k:v*trust_region['margin'] for k,v in kl_limits.items()
                     if k.startswith('chain_joint_')}
                 limits['chain_joint_mean']=min(limits['chain_joint_mean'],soft_kl*trust_region['margin'])
-                limits.update(minimum_ess=min_ess_fraction,maximum_active_clip=max_active_clip)
+                limits['maximum_active_clip']=max_active_clip
                 optimizer.param_groups[0]['lr']=min(trust_region['maximum_lr'],
                     optimizer.param_groups[0]['lr']*trust_region['growth'])
                 def evaluate_candidate():
@@ -174,10 +173,9 @@ def actor_update(policy,optimizer,rows,targets,cache,manifest,controller,*,distr
                 wall_seconds=max(distributed.all_gather_object(time.perf_counter()-started)))
             reports.append(report)
             if step_observer is not None:step_observer(report)
-            # 轻量minibatch检查只覆盖当前完整链；接受与否还要整轮所有链KL审查。
+            # 回溯检查覆盖累计已用链；接受与否还要整轮所有链KL审查。
             if soft_kl is not None and post['chain_joint_kl']['mean']>=soft_kl:stop_reason='post_step_chain_joint_kl'
             elif post['active_clip_fraction']>=max_active_clip:stop_reason='post_step_active_clip_saturation'
-            elif post['importance_weight_ess_fraction']<min_ess_fraction:stop_reason='post_step_importance_weight_ess_collapse'
             if stop_reason:break
         if stop_reason:break
     return dict(objective='full_chain_clipped_ppo',ppo_clip_applied=True,optimizer_steps=len(reports),
@@ -201,7 +199,7 @@ def actor_update(policy,optimizer,rows,targets,cache,manifest,controller,*,distr
 
 @torch.no_grad()
 def final_kl(policy,rows,cache,manifest,*,distributed,microbatch=256,clip=.10,objective_reduction='joint_sum'):
-    """所有有效链的真实联合KL；四步各自诊断，clip/ESS一律按完整链统计。"""
+    """所有有效链的真实联合KL；四步各自诊断，ratio与clip均按完整链统计。"""
     from .chain_ppo import evaluate_chain_records,from_records
     from .gaussian_probability import chain_diagnostics,distribution
     if objective_reduction!='joint_sum':raise ValueError('Final PPO diagnostics require complete-chain joint ratio')

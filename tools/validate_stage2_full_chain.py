@@ -4,7 +4,7 @@
 重建冻结Stage1先验并加载采样时Actor，使用原状态/创新噪声/均值/实际标准差/mask，
 验证零更新概率、FP64独立Normal公式、完整Autograd与流式微批梯度、多卡SUM。
 随后各学习率从相同Actor/Adam/BC/控制器/RNG起点执行有限完整链更新，保存所有
-接受、拒绝、裁剪、ESS、参数变化、输出变化和耗时；候选之间完整恢复并核验字节。
+接受、拒绝、裁剪、参数变化、输出变化和耗时；候选之间完整恢复并核验字节。
 
 本入口不创建Isaac世界、不产生新物理交互、不改变旧行为数据，也不把数值通过
 当作物理收益。旧rollout的Critic/GAE目标仅用于同数据数值对照，不作为新策略MC。
@@ -154,7 +154,6 @@ def main():
                     anchor=anchor,generator=generators['actor'],ppo_epochs=args.epochs,minibatch_chains=2048,
                     microbatch=128,clip=.1,soft_kl=config['stage9']['kl_soft_stop_chain_joint'],
                     bc_samples_per_rollout=2048*args.epochs,bc_min_global_batch=256,
-                    min_ess_fraction=config['stage9']['min_ess_fraction'],
                     max_active_clip=config['stage9']['max_active_clip_fraction'],
                     trust_region=trust,kl_limits=config['stage10']['kl'])
                 kl=final_kl(policy,rows,cache,manifest,distributed=distributed,microbatch=128,clip=.1)
@@ -174,7 +173,6 @@ def main():
             if rank==0:print(json.dumps(dict(lr=lr,accepted=trial['acceptance']['passed'],
                 steps=trial.get('actor',{}).get('optimizer_steps'),
                 joint_kl=trial.get('kl',{}).get('chain_joint_kl'),
-                ess=trial.get('kl',{}).get('importance_weight_ess_fraction'),
                 failures=trial['acceptance']['failures']),ensure_ascii=False),flush=True)
         actor.load_state_dict(initial['actor']);optimizer.load_state_dict(copy.deepcopy(initial['optimizer']))
         controller.load_state_dict(initial['controller']);anchor.load_state_dict(initial['bc']);restore_local_rng(initial['rng'],generators)

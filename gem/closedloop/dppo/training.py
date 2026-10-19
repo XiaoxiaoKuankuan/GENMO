@@ -122,13 +122,12 @@ def _record_actor_step(c,label,step):
     """即时保留小批候选及回退证据；整轮检查通过前不能计作最终接受更新。"""
     def publish():
         c.manager.append_metrics(dict(event='actor_minibatch',label=label,
-            pending_iteration=c.state['iteration']+1,acceptance_scope='pending_full_rollout_joint_KL_ESS',
+            pending_iteration=c.state['iteration']+1,acceptance_scope='pending_full_rollout_joint_KL',
             actor_step=step))
         post=step['post_step_chain'];transaction=step.get('trust_region') or {}
         print(f'[STAGE2 ACTOR] {label} update={step["optimizer_step"]} '
             f'chains={step["global_chain_count"]} lr={step["learning_rate"]:.6g} '
             f'chain_KL={post["chain_joint_kl"]["mean"]:.6g} '
-            f'ESS={post["importance_weight_ess_fraction"]:.4f} '
             f'backtracks={transaction.get("backtracks",0)} wall={step["wall_seconds"]:.3f}s '
             'acceptance=pending_full_rollout',flush=True)
     root_call(c.distributed,publish)
@@ -619,7 +618,7 @@ def run(cargs,config,distributed):
                     objective_reduction=c.settings['objective_logprob_reduction'],
                     grad_clip_norm=c.settings['grad_clip_norm'],reserve_attempt=reserve,
                     bc_samples_per_rollout=c.settings['bc_samples_per_rollout'],bc_min_global_batch=c.settings['bc_min_global_batch'],
-                    max_active_clip=c.settings['max_active_clip_fraction'],min_ess_fraction=c.settings['min_ess_fraction'],
+                    max_active_clip=c.settings['max_active_clip_fraction'],
                     trust_region=c.settings['trust_region'],kl_limits=c.stage['kl'],
                     step_observer=lambda step:_record_actor_step(c,label,step),
                     snr=c.settings.get('gradient_snr_diagnostic',False))

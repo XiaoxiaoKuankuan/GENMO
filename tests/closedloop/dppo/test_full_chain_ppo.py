@@ -74,7 +74,7 @@ def test_joint_ratio_is_sum_not_coordinate_or_per_step_clip():
     assert out['ratio'].item()==pytest.approx(1.04**4)
     out['objective'].sum().backward();assert torch.equal(step.grad,torch.zeros_like(step))
     report=chain_diagnostics(stats,torch.ones(1),clip=.1)
-    assert report['importance_weight_ess']==1 and report['active_clip_fraction']==1
+    assert report['active_clip_fraction']==1
 
 
 @pytest.mark.parametrize('bad',[float('nan'),float('inf'),1000.,-1000.])

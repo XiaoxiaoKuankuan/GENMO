@@ -2,7 +2,7 @@
 
 调用前完成一次全批量PPO/BC合成与裁剪。本模块保留模型、AdamW、BC控制器、指定
 生成器及Python/NumPy/Torch随机状态，每次从相同起点用固定梯度执行一次AdamW，
-按1、1/2、1/4等有限次数尝试。生产检查当前完整链mini-batch的全部四步；
+按1、1/2、1/4等有限次数尝试。生产检查累计已用完整链的全部四步；
 所有rank共同接受或拒绝，冻结参数不允许进入优化器或参数快照。失败尝试的预算不退款。
 此处不提高噪声、不截断概率，也不改写行为统计；全部失败恢复起点并返回拒绝证据，
 由训练器拒绝整轮。单步通过后训练器仍执行完整rollout最终KL审查。
@@ -38,12 +38,11 @@ def check_candidate_kl(report, limits):
             value = report['chain_joint_kl'][name]
             if not math.isfinite(value) or value > bound:
                 result['failures']['chain_joint_'+name] = dict(value=value, limit=bound)
-    for field,bound,upper in (('importance_weight_ess_fraction',limits.get('minimum_ess'),False),
-                             ('active_clip_fraction',limits.get('maximum_active_clip'),True)):
-        if bound is not None:
-            value=report[field]
-            if not math.isfinite(value) or (value>bound if upper else value<bound):
-                result['failures'][field]=dict(value=value,limit=bound)
+    bound=limits.get('maximum_active_clip')
+    if bound is not None:
+        value=report['active_clip_fraction']
+        if not math.isfinite(value) or value>bound:
+            result['failures']['active_clip_fraction']=dict(value=value,limit=bound)
     result['passed'] = not result['failures']
     result['joint_gate_is_empirical_not_theoretical_safety'] = True
     return result
