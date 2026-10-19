@@ -20,7 +20,10 @@ from gem.closedloop.dppo.actor_scope import configure_actor_scope
 from gem.closedloop.dppo.chain_ppo import evaluate_chain_records,backward_chain_surrogate
 from gem.closedloop.dppo.execution_checks import policy_phase
 from gem.closedloop.dppo.tensor_cache import RolloutTensorCache
-from gem.closedloop.dppo.optimization_support import _local_phase
+from gem.closedloop.dppo.optimization_support import _local_phase,_parameters,_old_kernel
+from gem.closedloop.dppo.gaussian_probability import gaussian_statistics
+from gem.closedloop.dppo.attribution_runtime import collect_coordinates,probe_difference,probe_summary
+from gem.closedloop.dppo.actor_step_diagnostics import output_probe
 from gem.closedloop.dppo.actor_backtracking import backtracked_step
 from gem.closedloop.dppo.gradient_merge import BCGradientController
 from tests.closedloop.dppo.test_clipped_dppo import case
@@ -61,7 +64,7 @@ def test_coordinate_full_unequal_variance_formula_and_partition_sums():
 
 
 def test_importance_logsumexp_exact_identity_and_extreme_tail_identity():
-    metadata=[dict(identity={'chain':i}) for i in range(4)]
+    metadata=[dict(identity={'chain':i},advantage=0.) for i in range(4)]
     log=torch.tensor([0.,0.,0.,math.log(1000.)],dtype=torch.float64)
     report=importance_report(log,torch.tensor([0.,0.,0.,.01]),torch.tensor([1.,-1.,1.,1.]),metadata)
     weights=np.array([1.,1.,1.,1000.])
@@ -83,6 +86,19 @@ def test_restricted_actor_keeps_kernel_and_real_streamed_score(scope,prefix,acto
     kernel=dict(policy.kernel_config)
     cache=RolloutTensorCache(rows,targets,'cpu')
     with policy_phase(policy):baseline=evaluate_chain_records(policy,rows,cache,microbatch=3)
+    with policy_phase(policy):
+        terms=[]
+        for step in policy.trainable_steps:
+            params,mask=_parameters(policy,rows,[step]*len(rows),'cpu',cache)
+            old_mean,old_std=_old_kernel(rows,[step]*len(rows),'cpu',cache)
+            terms.append(gaussian_statistics(cache.get('chain',rows,[step+1]*len(rows)),
+                old_mean,old_std,params['mean'],params['std'],mask)['joint_log_ratio'])
+        ratio=torch.stack(terms,1).sum(1).exp();adv=targets['advantages'].double()
+        reference=-torch.minimum(ratio*adv,ratio.clamp(.9,1.1)*adv).mean()
+        reference.backward()
+    expected={name:p.grad.detach().clone() for name,p in policy.actor.named_parameters()
+        if name.startswith(prefix) and p.grad is not None}
+    policy.actor.zero_grad(set_to_none=True)
     report=configure_actor_scope(policy.actor,scope)
     assert all(name.startswith(prefix) for name in report['parameter_names'])
     try:
@@ -91,6 +107,11 @@ def test_restricted_actor_keeps_kernel_and_real_streamed_score(scope,prefix,acto
             # CPU微批重放和原采样批量可有FP32差异；范围切换本身必须逐位不变。
             torch.testing.assert_close(records,baseline,rtol=0,atol=0)
             backward_chain_surrogate(policy,rows,cache,records,clip=.1,global_chain_count=len(rows),microbatch=3)
+        # FP32完整图与不同微批的舍入按整体梯度相对L2比较，避免近零坐标放大相对误差。
+        delta=sum((p.grad.double()-expected[name].double()).square().sum()
+            for name,p in policy.actor.named_parameters() if name in expected)
+        scale=sum(value.double().square().sum() for value in expected.values())
+        assert float((delta/scale).sqrt())<2e-5
         opt=torch.optim.AdamW([p for p in policy.actor.parameters() if p.requires_grad],lr=1e-6)
         opt.step()
         assert any(not torch.equal(original[n],p) for n,p in policy.actor.named_parameters() if n.startswith(prefix))
@@ -133,3 +154,21 @@ def test_candidate_configurations_bind_scope_and_200_iteration_cap():
         candidates.append(optimization_binding(c['stage10']))
     assert candidates[0]!=candidates[1]
     subprocess.run([sys.executable,'-B',str(root/'tools/analyze_stage2_probability.py'),'--help'],check=True,capture_output=True,text=True,timeout=30)
+
+
+def test_real_rollout_metadata_coordinates_and_probe_pipeline(actor_factory):
+    policy,rows,targets=case(actor_factory)
+    cache=RolloutTensorCache(rows,targets,'cpu')
+    try:
+        detail,metadata=collect_coordinates(policy,rows,cache,microbatch=3)
+        with policy_phase(policy):records=evaluate_chain_records(policy,rows,cache,microbatch=3)
+        torch.testing.assert_close(detail['kl'].sum((2,3)),records[:,:,0],rtol=1e-10,atol=1e-10)
+        torch.testing.assert_close(detail['log_ratio'].sum((2,3)),records[:,:,2],rtol=1e-10,atol=1e-10)
+        report=coordinate_report(detail,metadata,policy.actor.endecoder.kinematics.joint_order)
+        assert report['total']['free_coordinates']==int(detail['mask'].sum())
+        importance_report(detail['log_ratio'].sum((1,2,3)),detail['kl'].sum((1,2,3)),targets['advantages'],metadata)
+        before=output_probe(policy,rows,cache,max_chains=len(rows))
+        output=probe_summary(probe_difference(before,before))
+        assert output['distributions']['final_joint_rms_rad']['max']==0
+        assert all(s['protected_unchanged'] for s in output['samples'])
+    finally:cache.close()

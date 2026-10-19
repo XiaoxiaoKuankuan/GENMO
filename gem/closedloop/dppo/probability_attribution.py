@@ -96,6 +96,20 @@ def coordinate_report(detail,metadata,joint_order):
         largest_step_kl_share=max(v['kl_fraction'] or 0 for v in report['by_step'].values()),
         largest_feature_kl_share=max(v['kl_fraction'] or 0 for v in report['by_feature'].values()),
         rule='measured_shares_no_automatic_bug_or_physical_quality_claim')
+    concentration=report['concentration'];denominator=report['total']['free_coordinates']
+    enrichments={name:(item['kl_fraction'] or 0)/(item['free_coordinates']/denominator)
+        for name,item in report['by_feature'].items() if item['free_coordinates']}
+    report['attribution_flags']=dict(
+        diffuse_small_coordinate_accumulation=bool(total>0 and
+            (concentration['top_1pct_coordinate_kl_share'] or 0)<.15 and
+            (concentration['top_1pct_chain_kl_share'] or 0)<.15 and
+            report['total']['standardized_mean_delta_rms']<.1),
+        concentrated_coordinates=bool((concentration['top_5pct_coordinate_kl_share'] or 0)>.5),
+        concentrated_step=bool(concentration['largest_step_kl_share']>.6),
+        concentrated_feature=bool(max(enrichments.values(),default=0)>3),
+        concentrated_tail_chains=bool((concentration['top_1pct_chain_kl_share'] or 0)>.25),
+        feature_kl_density_enrichment=enrichments,
+        definitions='descriptive_explicit_thresholds_not_mutually_exclusive_not_training_gates')
     return report
 
 
@@ -116,9 +130,9 @@ def importance_report(log_ratio,joint_kl,advantages,metadata,*,clip=.1,top=12):
     representable=(log_ratio>=limits[0])&(log_ratio<=limits[1])
     tails=[]
     for i in order[:top].tolist():
-        tails.append(dict(**metadata[i],joint_log_ratio=float(log_ratio[i]),joint_kl=float(joint_kl[i]),
-            normalized_weight=float(weights[i]),advantage=float(advantages[i]),
-            ordinary_clip=bool(ordinary[i]),active_clip=bool(active[i])))
+        tails.append({**metadata[i],'joint_log_ratio':float(log_ratio[i]),'joint_kl':float(joint_kl[i]),
+            'normalized_weight':float(weights[i]),'advantage':float(advantages[i]),
+            'ordinary_clip':bool(ordinary[i]),'active_clip':bool(active[i])})
     return dict(joint_log_ratio=quantiles(log_ratio),ratio=quantiles(log_ratio.exp()) if representable.all() else None,
         ratio_unrepresentable_count=int((~representable).sum()),ordinary_clip_fraction=float(ordinary.double().mean()),
         active_clip_fraction=float(active.double().mean()),joint_kl=quantiles(joint_kl),joint_kl_mean=float(joint_kl.mean()),
