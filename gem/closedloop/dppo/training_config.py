@@ -2,7 +2,7 @@
 
 本模块只接受显式当前配置，自动从GPU数、环境数、连续决策数及完整链minibatch
 推导rollout、optimizer次数、四个随机训练步访问数和BC每步样本量，不继承160条或四次更新
-限制。代理目标与joint诊断、coordinate/joint KL门槛分别定义，不能复用一个
+限制。联合链PPO和联合链KL为训练目标，coordinate KL仅作辅助诊断，不能复用一个
 无量纲数字。初始参数是待有限标定的候选，任何算法或数值合同变化新建run。
 
 Stage1与GMT均绑定真实SHA和统计量，全部环境时序与奖励保留旧明确配置。检查
@@ -18,7 +18,7 @@ import yaml
 
 from .rewards import resolve_reward_config
 
-VERSION='genmo.closedloop.stage2.continuous_tracking.v2'
+VERSION='genmo.closedloop.stage2.full_chain_joint.v1'
 
 
 def _source_counts(value):
@@ -120,7 +120,7 @@ def configuration(path,*,genmo_repo=None,gmt_repo=None):
     if world!=8 or s['distributed']['backend']!='nccl' or s['distributed']['collection']!='all_ranks':
         raise ValueError('当前 production requires eight synchronous GPU ranks')
     if (t['denoising_steps']!=20 or t['ppo_step_strategy']!='intermediate4' or
-            t['ppo_steps_per_chain']!=4 or t['frozen_prefix_steps']!=15 or t['ppo_epochs'] not in (1,2)):
+            t['ppo_steps_per_chain']!=4 or t['frozen_prefix_steps']!=15 or t['ppo_epochs'] not in (1,2,3,5)):
         raise ValueError('Only frozen15 + stochastic trainable4 + deterministic final is supported')
     if len(t['std_schedule'])!=20 or t['std_schedule'][-1]!=0. or any(
             not math.isfinite(x) or x<=0 for x in t['std_schedule'][:-1]):
@@ -135,8 +135,8 @@ def configuration(path,*,genmo_repo=None,gmt_repo=None):
         raise ValueError('Calibration needs an explicit bounded reservation, not a measured delay')
     if c['runtime']['timing_contract']!='modeled_deployment.v3' or c['timing']['control_ticks']!=12 or c['timing']['physics_ticks']!=3:
         raise ValueError('Keep calibrated deployment clock and 50Hz/200Hz four physical substeps')
-    if t['objective_logprob_reduction']!='free_coordinate_mean':
-        raise ValueError('Only current free-coordinate diagnostic reduction is supported')
+    if t['objective_logprob_reduction']!='joint_sum' or t['gamma_denoising']!=1.:
+        raise ValueError('Full-chain joint PPO requires sum and one undiscounted upper advantage')
     if not 0<t['ppo_clip']<1 or not math.isfinite(t['actor_lr']) or t['actor_lr']<=0:
         raise ValueError('Invalid independently calibrated Actor learning rate/clip')
     if t.get('advantage_control','none')!='none':
@@ -146,12 +146,17 @@ def configuration(path,*,genmo_repo=None,gmt_repo=None):
     diagnostic_interval=s['checks'].get('actor_diagnostics_every',100)
     if type(diagnostic_interval) is not int or diagnostic_interval<1:
         raise ValueError('actor_diagnostics_every must be a positive iteration interval')
-    if t['actor_lr_control']!='fixed' or t['kl_rejection']!='abort':
+    if t['actor_lr_control']!='fixed' or t['kl_rejection']!='rollback_abort':
         raise ValueError('Only fixed uniform LR and final whole-rollout hard rejection are supported')
     if any(key in t for key in ('actor_lr_bounds','kl_target_coordinate','kl_control_metric')):
         raise ValueError('Retired adaptive-LR settings are not supported')
     steps=t['ppo_epochs']*math.ceil(chains/scale['actor_minibatch_chains'])
     bc_total=t['bc_samples_per_rollout']
+    minimum_bc=t['bc_min_global_batch']
+    if type(minimum_bc)is not int or minimum_bc<256:
+        raise ValueError('Production BC requires at least 256 global samples per Adam step')
+    bc_total=max(bc_total,steps*minimum_bc)
+    t['bc_samples_per_rollout']=bc_total
     if type(bc_total)is not int or bc_total<1:
         raise ValueError('BC total must be positive; actual ragged optimizer steps determine its allocation')
     t.update(rollout_upper_steps=chains,rollout_upper_steps_per_rank=n*decisions,

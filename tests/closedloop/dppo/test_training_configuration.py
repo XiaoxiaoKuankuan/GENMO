@@ -22,24 +22,24 @@ from gem.closedloop.dppo.training import _sources
 from gem.closedloop.dppo.training_config import VERSION, configuration
 
 ROOT = Path(__file__).resolve().parents[3]
-CONFIG = ROOT / 'configs/closedloop/stage2_credit_server2.yaml'
+CONFIG = ROOT / 'configs/closedloop/stage2_full_chain.yaml'
 
 
-def test_main_scale_is_16384_nominal_chains_with_four_clipped_dppo_updates():
+def test_main_scale_is_16384_nominal_chains_with_eight_full_chain_updates():
     c = configuration(CONFIG)
     s, t = c['stage10'], c['stage10']['training']
     assert s['version'] == VERSION
     assert s['derived'] == dict(world_size=8, real_chains=16384, local_chains=2048,
-        planned_actor_steps=4, local_ppo_internal_visits=8192, local_trainable_kl_visits=8192,
-        bc_per_step=256, bc_per_rollout=1024,maximum_actor_steps=4,
+        planned_actor_steps=8, local_ppo_internal_visits=8192, local_trainable_kl_visits=8192,
+        bc_per_step=256, bc_per_rollout=2048,maximum_actor_steps=8,
         count_semantics='nominal_capacity_only_actual_manifest_controls_optimization')
     assert c['runtime']['num_envs']==c['runtime']['generation_batch']==128
-    assert s['critic']['global_batch']==2048 and s['scale']['actor_minibatch_chains']==4096
+    assert s['critic']['global_batch']==2048 and s['scale']['actor_minibatch_chains']==2048
     assert t['denoising_microbatch']==t['kl_microbatch']==128
     assert s['critic']['complete_mc']['training_samples_per_source']==24
     assert (t['denoising_steps'], t['ppo_steps_per_chain'], t['ppo_epochs']) == (20, 4, 1)
     assert t['frozen_prefix_steps']==15 and t['ppo_step_strategy']=='intermediate4'
-    assert t['actor_lr'] == 3e-7 and t['ppo_clip'] == .01
+    assert t['actor_lr'] == 1e-6 and t['ppo_clip'] == .10
     assert c['runtime']['timing_contract'] == 'modeled_deployment.v3'
     assert (c['timing']['control_ticks'], c['timing']['physics_ticks']) == (12, 3)
 
@@ -141,3 +141,15 @@ def test_current_gmt_identity_keeps_rank_asset_conversion_separate(tmp_path):
         observed.append(spawn.usd_dir)
         assert spawn.usd_dir == str(directory.resolve())
     assert observed[0] != observed[1]
+
+
+def test_epoch_two_keeps_bc_floor_and_doubles_complete_chain_updates(tmp_path):
+    c=yaml.safe_load(CONFIG.read_text())
+    c['stage10']['training']['ppo_epochs']=2
+    path=tmp_path/'epoch2.yaml';path.write_text(yaml.safe_dump(c))
+    resolved=configuration(path)['stage10']
+    assert resolved['derived']['planned_actor_steps']==16
+    assert resolved['derived']['bc_per_step']==256
+    assert resolved['derived']['bc_per_rollout']==4096
+    assert resolved['training']['gamma_denoising']==1.
+    assert resolved['training']['objective_logprob_reduction']=='joint_sum'

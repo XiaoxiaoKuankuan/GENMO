@@ -40,7 +40,6 @@ from .tensor_cache import RolloutTensorCache
 from .trainer import load_actor,trainable_actor_parameters
 from .optimization_support import probability_check_local
 from .updater import actor_update,critic_update,final_kl,check_kl
-from .full_batch_actor import full_batch_actor_update
 from .compact_evidence import summary_only
 from .periodic_monitor import log_metrics
 from .tensorboard_metrics import DashboardWriter, training_scalars
@@ -517,7 +516,9 @@ def run(cargs,config,distributed):
                 frequency>0 and c.state['rollouts_completed']%frequency==0)
             profiler=PhaseProfiler(distributed.device,distributed.rank,detailed=detailed)
             profile_token=activate(profiler)
+            collection_start=time.perf_counter()
             buffer,targets,manifest,collection=c.vector.collect(label,strict=strict)
+            collection_seconds=max(distributed.all_gather_object(time.perf_counter()-collection_start))
             rows=buffer.transitions
             if periodic_diagnostic and not strict:
                 from .diagnostic_rollout import sampled_diagnostic
@@ -593,32 +594,17 @@ def run(cargs,config,distributed):
                 def reserve():
                     root_call(distributed,lambda:c.budget.reserve('actor_attempts',optimizer_attempts=1))
                     c.state['optimizer_attempts']+=1
-                if c.settings['actor_objective']=='joint_score_pg':
-                    snapshot=service.world.snapshots([0])[0]
-                    c.policy.experimental_joint_limits={k:snapshot[k] for k in
-                        ('joint_names','joint_hard_limits_rad','joint_soft_limits_rad')}
-                    actor=full_batch_actor_update(c.policy,c.actor_optimizer,rows,targets,cache,manifest,c.controller,
-                        distributed=distributed,anchor=c.bc,generator=c.generators['actor'],
-                        backtracking=c.settings['optimizer_backtracking'],kl_limits=c.stage['kl'],
-                        kl_microbatch=c.settings['kl_microbatch'],proposed_lr=c.settings['actor_lr'],
-                        detailed_diagnostics=(c.state['iteration']==0 or
-                            (c.state['iteration']+1)%c.stage['checks'].get('actor_diagnostics_every',100)==0),
-                        ppo_epochs=c.settings['ppo_epochs'],
-                        minibatch_chains=c.stage['scale']['actor_minibatch_chains'],microbatch=c.settings['denoising_microbatch'],
-                        clip=c.settings['ppo_clip'],
-                        grad_clip_norm=c.settings['grad_clip_norm'],reserve_attempt=reserve,bc_samples_per_rollout=c.settings['bc_samples_per_rollout'],
-                        snr=c.settings.get('gradient_snr_diagnostic',False))
-                else:
-                    actor=actor_update(c.policy,c.actor_optimizer,rows,targets,cache,manifest,c.controller,
-                        distributed=distributed,anchor=c.bc,generator=c.generators['actor'],
-                        ppo_epochs=c.settings['ppo_epochs'],minibatch_chains=c.stage['scale']['actor_minibatch_chains'],
-                        microbatch=c.settings['denoising_microbatch'],sampled_steps=c.settings['ppo_steps_per_chain'],
-                        clip=c.settings['ppo_clip'],gamma_denoising=c.settings['gamma_denoising'],
-                        soft_kl=c.settings['kl_soft_stop_coordinate'],kl_reduction=c.stage['kl']['reduction'],
-                        objective_reduction=c.settings['objective_logprob_reduction'],
-                        grad_clip_norm=c.settings['grad_clip_norm'],reserve_attempt=reserve,
-                        bc_samples_per_rollout=c.settings['bc_samples_per_rollout'],
-                        snr=c.settings.get('gradient_snr_diagnostic',False))
+                actor=actor_update(c.policy,c.actor_optimizer,rows,targets,cache,manifest,c.controller,
+                    distributed=distributed,anchor=c.bc,generator=c.generators['actor'],
+                    ppo_epochs=c.settings['ppo_epochs'],minibatch_chains=c.stage['scale']['actor_minibatch_chains'],
+                    microbatch=c.settings['denoising_microbatch'],sampled_steps=c.settings['ppo_steps_per_chain'],
+                    clip=c.settings['ppo_clip'],gamma_denoising=c.settings['gamma_denoising'],
+                    soft_kl=c.settings['kl_soft_stop_chain_joint'],kl_reduction=c.stage['kl']['reduction'],
+                    objective_reduction=c.settings['objective_logprob_reduction'],
+                    grad_clip_norm=c.settings['grad_clip_norm'],reserve_attempt=reserve,
+                    bc_samples_per_rollout=c.settings['bc_samples_per_rollout'],bc_min_global_batch=c.settings['bc_min_global_batch'],
+                    max_active_clip=c.settings['max_active_clip_fraction'],min_ess_fraction=c.settings['min_ess_fraction'],
+                    snr=c.settings.get('gradient_snr_diagnostic',False))
                 actor_seconds=max(distributed.all_gather_object(time.perf_counter()-actor_start))
                 from .kl_reuse import reusable_accepted_kl
                 kl=reusable_accepted_kl(actor,c.policy,cache,manifest,distributed,
@@ -642,6 +628,8 @@ def run(cargs,config,distributed):
                 if actor.get('step_rejected') or actor['optimizer_steps']==0:
                     accepted['passed']=False
                     accepted['failures']['actor_optimizer']='no_accepted_optimizer_step'
+                actor['accepted_optimizer_steps']=actor['optimizer_steps'] if accepted['passed'] else 0
+                actor['acceptance_scope']='full_rollout_chain_joint_KL'
                 if not accepted['passed']:
                     anomaly_saved=local_call(distributed,lambda:_preserve_rollout_anomaly(c,buffer,targets,manifest,label))
                     rollback=local_call(distributed,lambda:_restore_rollback(c,saved))
@@ -683,6 +671,15 @@ def run(cargs,config,distributed):
             record=dict(label=label,state=copy.deepcopy(c.state),collection_by_rank=distributed.all_gather_object(collection),
                 probability=initial_probability,critic=critic,actor=actor,trainable4_kl=kl,tensor_cache=cache_report,
                 actor_seconds=actor_seconds,critic_seconds=critic_seconds,wall_seconds=wall,
+                efficiency=dict(environment_seconds=collection_seconds,actor_total_seconds=actor_seconds,
+                    actor_ppo_seconds=sum(v['ppo_seconds'] for v in (actor or {}).get('steps',[])),
+                    bc_seconds=sum(v['bc_seconds'] for v in (actor or {}).get('steps',[])),
+                    kl_seconds=sum(v['post_step_kl_seconds'] for v in (actor or {}).get('steps',[]))+(kl or {}).get('wall_seconds',0.),
+                    critic_seconds=critic_seconds,total_seconds=wall,effective_chains=(actor or {}).get('eligible_chains',0),
+                    accepted_actor_steps=(actor or {}).get('accepted_optimizer_steps',0),
+                    actor_seconds_per_accepted_step=actor_seconds/max((actor or {}).get('optimizer_steps',0),1),
+                    peak_allocated_bytes=max(m['pytorch_peak_allocated'] for m in memory),
+                    timing_scope='foreground_wall_phases; actor_total_contains_PPO_BC_KL_and_diagnostics'),
                 performance_by_rank=distributed.all_gather_object(profile_report),physics_paused_during_optimization=True,
                 memory_by_rank=memory,periodic_model_fingerprints=fingerprints,
                 effective_upper_transitions_per_second=used[2]/wall,

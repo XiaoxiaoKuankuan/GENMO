@@ -31,7 +31,7 @@ def uniform_actor_optimizer(actor, optimizer):
 
 def check_candidate_kl(report, limits):
     result = check_kl(report, limits)
-    for name in ('mean', 'p95', 'max'):
+    for name in ('mean', 'p95', 'p99', 'max'):
         bound = limits.get('chain_joint_'+name)
         if bound is not None:
             value = report['chain_joint_kl'][name]

@@ -136,16 +136,17 @@ def test_configuration_binds_every_actual_optimizer_choice(tmp_path):
     from pathlib import Path
     import yaml
     from gem.closedloop.dppo.training_config import configuration
-    source=Path(__file__).resolve().parents[3]/'configs/closedloop/stage2_credit_server2.yaml'
-    assert configuration(source)['stage10']['derived']['maximum_actor_steps']==4
+    source=Path(__file__).resolve().parents[3]/'configs/closedloop/stage2_full_chain.yaml'
+    assert configuration(source)['stage10']['derived']['maximum_actor_steps']==8
     c=yaml.safe_load(source.read_text())
+    c['stage10']['kl']['calibration']=configuration(source)['stage10']['kl']['calibration']
     c['stage10']['training']['actor_lr']=3e-6
     p=tmp_path/'changed.yaml';p.write_text(yaml.safe_dump(c))
     with pytest.raises(ValueError,match='binding'):configuration(p)
     c=yaml.safe_load(source.read_text())
     c['stage10']['training']['actor_objective']='coordinate_dppo'
     p.write_text(yaml.safe_dump(c))
-    with pytest.raises(ValueError,match='joint-score'):configuration(p)
+    with pytest.raises(ValueError,match='full-chain'):configuration(p)
 
 
 def test_real_policy_full_batch_one_step_and_no_old_chain_mutation(tmp_path,actor_factory):

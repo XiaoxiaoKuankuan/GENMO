@@ -1,4 +1,4 @@
-"""Clipped DPPO真实小网络、变长尾批和分布式归约回归。
+"""完整链Clipped PPO真实小网络、变长尾批和分布式归约回归。
 
 复用Stage1 Actor、15+4+1行为采样、真实高斯概率及生产更新器，验证5条链按2/2/1
 更新三次、每次四步、旧行为统计不变及BC总数。两进程场景故意让rank1没有任何
@@ -54,13 +54,17 @@ def case(actor_factory):
 
 def run(rank,world,actor,rows,targets,directory,soft_kl=None):
     torch.set_num_threads(1)
+    # spawn会通过共享内存传递CPU Tensor；每个rank必须独占参数，避免重复原位Adam。
+    actor=copy.deepcopy(actor)
+    if actor.train_diffusion is None:
+        actor.train_diffusion=actor._diffusion(actor.diffusion_steps)
     policy=FrozenPrefixPolicy(actor,std_schedule=[.001]*15+[.04,.06,.08,.1,0.],generation_frames=60)
     dist.init_process_group('gloo',init_method=(Path(directory)/'gloo').as_uri(),rank=rank,world_size=world)
     manifest=[dict(owner_rank=0,local_index=i,valid=True,has_free=True) for i in range(len(rows))]
     local=rows if rank==0 else []
     local_targets=targets if rank==0 else {k:v[:0] for k,v in targets.items()}
     cache=RolloutTensorCache(local,local_targets,'cpu')
-    opt=torch.optim.AdamW(trainable_actor_parameters(policy.actor),lr=1e-6,weight_decay=0.)
+    opt=torch.optim.AdamW(trainable_actor_parameters(policy.actor),lr=1e-7,weight_decay=0.)
     # 真实非空Adam初态：零梯度step只建立动量，不改变Actor及old statistics。
     for p in trainable_actor_parameters(policy.actor):p.grad=torch.zeros_like(p)
     opt.step();opt.zero_grad(set_to_none=True)
@@ -86,7 +90,10 @@ def test_multistep_tail_empty_rank_bc_and_nonempty_adam(tmp_path,actor_factory):
     initial=copy.deepcopy(policy.actor.state_dict())
     one=tmp_path/'one';two=tmp_path/'two';one.mkdir();two.mkdir()
     run(0,1,copy.deepcopy(policy.actor),rows,targets,str(one))
-    mp.start_processes(run,args=(2,copy.deepcopy(policy.actor),rows,targets,str(two)),nprocs=2,start_method='fork')
+    child_actor=copy.deepcopy(policy.actor)
+    # 扩散调度器含不可pickle的lambda；子进程按原1000步配置重建，模型/行为张量不变。
+    child_actor.train_diffusion=None
+    mp.start_processes(run,args=(2,child_actor,rows,targets,str(two)),nprocs=2,start_method='spawn')
     expected=torch.load(one/'rank0.pt',weights_only=False)
     results=[torch.load(two/f'rank{i}.pt',weights_only=False) for i in range(2)]
     for result in [expected,*results]:
@@ -112,5 +119,6 @@ def test_soft_kl_stops_before_pending_optimizer_and_bc(tmp_path,actor_factory):
     run(0,1,policy.actor,rows,targets,str(tmp_path),soft_kl=1e-12)
     report=torch.load(tmp_path/'rank0.pt',weights_only=False)['report']
     assert report['optimizer_steps']==1 and report['actual_global_bc_samples']==3
-    assert report['early_stop_reason']=='pre_step_soft_kl'
-    assert report['discarded_pending_minibatch']['optimizer_step_executed'] is False
+    assert report['early_stop_reason']=='post_step_chain_joint_kl'
+    assert report['skipped_optimizer_steps']==2
+    assert report['steps'][0]['post_step_chain']['chain_joint_kl']['mean']>1e-12

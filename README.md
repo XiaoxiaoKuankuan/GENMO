@@ -9,7 +9,7 @@ Stage 2 的 Frozen GMT、动力学、Critic / DPPO 不由本页的离线入口�
 第二阶段只维护当前一套方案，统一从
 [`scripts/train_stage10_8gpu_server1.sh`](scripts/train_stage10_8gpu_server1.sh)
 启动，默认配置是唯一的
-[`stage2_credit_server2.yaml`](configs/closedloop/stage2_credit_server2.yaml)。
+[`stage2_full_chain.yaml`](configs/closedloop/stage2_full_chain.yaml)。
 它使用s595000、冻结GMT140500、60帧生成、每卡128环境和8秒连续世界采集；
 前15步冻结、4步随机训练、末步冻结确定性去噪。Actor采用统一LR `3e-7`、
 单次全局joint-score策略梯度加原Stage1 BC，Critic独立使用历史跟踪特权信息和完整MC。

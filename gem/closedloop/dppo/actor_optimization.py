@@ -1,9 +1,9 @@
 """当前连续世界Actor优化配置及实际参数身份。
 
-默认Clipped DPPO支持完整四步、多全局minibatch和一次统一学习率；joint_score_pg
-保留为显式单次全批量可选目标，只有它启用逐Adam回溯。两者共用Stage1 BC、真实
-行为统计、GAE和整轮四步KL保护。绑定实际目标、LR、批量、BC、折扣和KL定义，
-不把未启用的joint-score回溯参数计入DPPO实际优化合同，也不兼容旧Critic输入。
+只接受完整四步联合Clipped PPO，一个完整链比值对应一个上层GAE优势。显式绑定
+统一学习率、全局链批量、Epoch、BC批量下限、联合KL及ESS/裁剪早停阈值。旧坐标
+代理训练和单次joint-score训练入口退役；joint-score函数仅留作数学梯度参考。
+联合KL初始阈值是待真实rollout标定的候选，不能沿用坐标平均阈值或声称物理安全。
 本模块只校验配置，不启动训练；物理收益仍由真实完整歌曲执行结果判断。
 """
 from __future__ import annotations
@@ -12,9 +12,9 @@ import hashlib
 import json
 import math
 
-ACTOR_OBJECTIVE='clipped_dppo'
-ACTOR_OBJECTIVES=('clipped_dppo','joint_score_pg')
-OPTIMIZATION_SCHEMA='genmo.stage2.continuous_actor.v2'
+ACTOR_OBJECTIVE='full_chain_clipped_ppo'
+ACTOR_OBJECTIVES=('full_chain_clipped_ppo',)
+OPTIMIZATION_SCHEMA='genmo.stage2.full_chain_actor.v1'
 
 
 def digest(value):
@@ -23,16 +23,16 @@ def digest(value):
 
 def optimization_binding(stage):
     t=stage['training']
-    return dict(schema='genmo.stage2.actor_optimization_binding.v3',
+    return dict(schema='genmo.stage2.full_chain_optimization_binding.v1',
         actor_lr=t['actor_lr'],actor_lr_control=t['actor_lr_control'],
         actor_optimizer=dict(type='AdamW',parameter_groups=1,betas=[.9,.999],eps=1e-8,weight_decay=0.),
         ppo_epochs=t['ppo_epochs'],global_minibatch_chains=stage['scale']['actor_minibatch_chains'],
-        objective=t['actor_objective'],proxy_reduction=t['objective_logprob_reduction'],ppo_clip=t['ppo_clip'],
+        objective=t['actor_objective'],joint_reduction=t['objective_logprob_reduction'],ppo_clip=t['ppo_clip'],
         gamma_denoising=t['gamma_denoising'],gradient_clip=t['grad_clip_norm'],
-        bc_samples=t['bc_samples_per_rollout'],bc_controller=stage['bc_gradient'],
-        backtracking=t['optimizer_backtracking'] if t['actor_objective']=='joint_score_pg' else None,
+        bc_samples=t['bc_samples_per_rollout'],bc_min_global_batch=t['bc_min_global_batch'],bc_controller=stage['bc_gradient'],
+        chain_clip_saturation=t['max_active_clip_fraction'],minimum_ess=t['min_ess_fraction'],
         hard_kl={key:value for key,value in stage['kl'].items() if key!='calibration'},
-        soft_kl=t['kl_soft_stop_coordinate'],rollout=stage['ppo_rollout'],
+        soft_chain_joint_kl=t['kl_soft_stop_chain_joint'],rollout=stage['ppo_rollout'],
         gamma_upper=t['gamma_upper'],lambda_upper=t['lambda_upper'],dataset=stage['dataset'],
         mc_start_distribution=stage['critic']['complete_mc']['start_distribution'],
         run_contract=stage['actor_optimization'])
@@ -44,27 +44,26 @@ def validate_optimization_configuration(config,maximum_steps):
             or 'actor_experiment' in s or t['actor_objective'] not in ACTOR_OBJECTIVES
             or t['ppo_epochs']<1 or maximum_steps<1
             or s['scale']['actor_minibatch_chains']<1
-            or t['objective_logprob_reduction']!='free_coordinate_mean'
+            or t['objective_logprob_reduction']!='joint_sum' or t['gamma_denoising']!=1.
             or t['actor_lr_control']!='fixed' or not math.isfinite(t['actor_lr']) or t['actor_lr']<=0):
-        raise ValueError('Explicit clipped_dppo or single-step joint-score with one uniform Actor LR required')
-    if t['actor_objective']=='joint_score_pg' and (t['ppo_epochs']!=1 or maximum_steps!=1):
-        raise ValueError('joint-score requires exactly one full-rollout optimizer step')
-    bt=t['optimizer_backtracking']
-    if (set(bt)!={'max_attempts','factor'} or type(bt['max_attempts']) is not int
-            or not 1<=bt['max_attempts']<=10 or bt['factor']!=.5):
-        raise ValueError('Bounded optimizer-step backtracking required')
-    attempts=bt['max_attempts'] if t['actor_objective']=='joint_score_pg' else maximum_steps
-    if s['limits']['optimizer_attempts']<s['limits']['accepted_iterations']*attempts:
-        raise ValueError('Budget must include every planned Actor step and any joint-score retries')
-    for key in ('mean_coordinate','maximum_step_mean_coordinate','p95_coordinate'):
-        if not math.isfinite(s['kl'][key]) or s['kl'][key]<=0:
-            raise ValueError('Four-step KL limits must be positive and finite')
-    for key in ('chain_joint_mean','chain_joint_p95','chain_joint_max'):
+        raise ValueError('Explicit full-chain joint PPO with one undiscounted GAE and uniform Actor LR required')
+    if s['limits']['optimizer_attempts']<s['limits']['accepted_iterations']*maximum_steps:
+        raise ValueError('Budget must cover every planned optimizer update')
+    if s['kl']['reduction']!='chain_joint':raise ValueError('Trust-region must use complete-chain joint KL')
+    for key in ('mean_coordinate','maximum_step_mean_coordinate','p95_coordinate','mean_joint'):
+        if s['kl'].get(key) is not None:raise ValueError('Coordinate/per-step KL is diagnostic only for full-chain PPO')
+    for key in ('chain_joint_mean','chain_joint_p95','chain_joint_p99','chain_joint_max'):
         value=s['kl'][key]
-        if value is not None and (not math.isfinite(value) or value<=0):
-            raise ValueError('Empirical joint-chain KL gates must be null or positive finite')
-    expected=dict(status='not_physically_validated',scope='four_trainable_steps_only',
+        if not math.isfinite(value) or value<=0:raise ValueError('Explicit positive finite chain KL limits required')
+    bounds=[s['kl'][key] for key in ('chain_joint_mean','chain_joint_p95','chain_joint_p99','chain_joint_max')]
+    if bounds!=sorted(bounds) or not 0<t['kl_soft_stop_chain_joint']<=bounds[0]:
+        raise ValueError('Soft chain KL and hard mean/tail thresholds must be ordered')
+    if not 0<t['max_active_clip_fraction']<=1 or not 0<t['min_ess_fraction']<=1:
+        raise ValueError('Explicit active-clip and ESS finite-experiment limits required')
+    expected=dict(status='candidate_requires_joint_calibration',scope='four_trainable_steps_only',
         optimization_sha256=digest(optimization_binding(s)))
+    if s['kl']['calibration'].get('optimization_sha256')=='auto':
+        s['kl']['calibration']['optimization_sha256']=expected['optimization_sha256']
     if s['kl']['calibration']!=expected:
         raise ValueError('Optimization binding differs; regenerate the identity for the actual configuration')
     from .reference_credit import CREDIT_CONTRACT

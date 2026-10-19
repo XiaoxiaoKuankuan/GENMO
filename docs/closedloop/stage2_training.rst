@@ -1,105 +1,94 @@
-当前第二阶段训练
-================
+当前第二阶段：完整链联合PPO
+==========================
 
-只保留一套配置和实现
---------------------
+开发基线
+--------
 
-GENMO分支feature/stage2-asymmetric-denoising，配套GMT分支
-feature/stage2-tracking-history。唯一第二阶段训练配置为
-configs/closedloop/stage2_credit_server2.yaml，默认入口为
-scripts/train_stage10_8gpu_server1.sh。脚本沿用原文件名，实际路径和资源配置来自
-服务器2的当前配置；不会启动服务器1，也不会自动抢占已有GPU进程。
+GENMO固定分支feature/bumi-music-closedloop，GMT固定分支
+feature/bumi-frozen-gmt-backend。唯一配置为configs/closedloop/stage2_full_chain.yaml。
+本次参考SCRIPT第4.3节、附录B.3和E：https://arxiv.org/html/2605.22894v3 。
+论文的链概率比与PPO裁剪形式用于数学参考；其Flow Matching、学习噪声、Teacher
+Velocity Anchor和文本奖励不引入当前系统。本文最后保留此前方案的历史结果，不能
+把历史结果当作本次算法的验收结论。
 
-旧非对称候选、学习率扫描和随机20轮配置、多线程配额采集器、
-旧完整checkpoint恢复及一次性工程迁移脚本已删除。历史实现从Git获取，不在当前
-工作目录保留另一套入口。Stage1和MuJoCo sim2sim是独立功能，其配置继续保留。
+概率与梯度
+----------
 
-当前参数与执行
+固定20步生成：0～14用冻结Stage1，15～18为可训练高斯转移，19为冻结Stage1确定性
+末步。已承诺前缀和padding从概率中排除。实际标准差仍来自原DDIM核的base std及
+既有std floor，0.04/0.06/0.08/0.10是四个可训练步的下限，不能冒充全部实际std。
+
+每条链的log ratio在FP64中对四步全部自由坐标求和，ratio=exp(sum log ratio)。
+每条链对应一个上层GAE优势，只做一次PPO clip。没有除以自由坐标数，也没有平均
+四个独立PPO目标；gamma_denoising=1。GAE gamma=.99、lambda=.98保持原定义。
+
+第一遍无梯度得到完整链的裁剪分支和导数系数，第二遍逐微批重算四步联合log ratio
+并反向。条件编码器梯度累计后统一反传，模型参数在两遍间禁止变化。loss只除以
+全局实际有效链数，跨卡梯度SUM，不再除world size或四步。独立完整Autograd和
+joint-score梯度用于检查首次未裁剪更新；后者不再作为生产训练配置入口。
+
+高斯比值沿用旧标准化残差、log1p/expm1稳定公式，不直接减两个巨大log probability。
+裁剪分支先在log space决定；不可表示的ratio、非有限值或下溢必须显式拒绝并回滚，
+不截断真实ratio、不删除异常样本、不修改旧行为数据。每轮记录chain log ratio、
+ratio分布、普通clip与active clip、联合KL、ESS和非有限比例。
+
+首个候选与联合KL
+----------------
+
+* Actor AdamW统一LR=1e-6，clip=.10，epoch=1，全局minibatch2048条完整链。
+* 八卡×128环境×16决策名义容量16384链，每epoch最多8次更新；实际有效链数决定
+  次数。epoch=2时最多16次，需先通过有限实测。允许后续独立研究3或5个epoch。
+* 每次BC全局至少256样本。epoch=1名义2048样本/轮，epoch=2为4096，尾批按实际
+  计划更新次数分配；原Stage1RetentionAnchor、qpos/contact/已知前缀监督保留。
+* BC/PPO共同参数梯度范数目标比例初值.1；记录全局范数、余弦、模块贡献、合成
+  梯度裁剪和真实Adam参数RMS变化，不能把BC权重解释成Adam更新贡献。
+* 初始候选soft chain KL=.10；整轮hard chain KL mean/P95/P99/Max=.20/.60/.90/2.0。
+  这些是待真实rollout校准的实验阈值，不继承旧coordinate门限，也非物理安全证明。
+* active clip达到.95或ESS比例低于.05停止继续使用本轮旧数据。每个minibatch只
+  看四个随机步；整轮最终KL必须覆盖所有有效链。冻结步骤用参数/核/条件身份检查，
+  启动及每100轮保留完整概率审计，不在每个minibatch重复20步网络前向。
+* 整轮拒绝完整恢复Actor、Critic、两套Adam、BC采样器、BC控制器和RNG；实际物理
+  交互和优化尝试预算不退回。拒绝原因、学习状态恢复证据及耗时必须保存。
+
+configuration会自动生成优化身份摘要；用户不需要手算SHA。新训练身份为
+full_chain_joint.v1，完整checkpoint为full_chain_joint.checkpoint.v1，旧优化器
+运行不允许透明续训。Actor/Critic/奖励/噪声/物理时钟的既有行为仍单独绑定身份。
+
+保持不变的任务
 --------------
 
-* Stage1 s595000初始化可训练Actor；独立冻结Stage1网络用于前15步和确定性末步。
-* 第15～18步为真实高斯转移，标准差下限0.04/0.06/0.08/0.10。完整执行20步。
-* 实际生成60帧、30Hz、qpos30＋contact2；每0.5秒重规划，已承诺前缀不能修改。
-* 八卡，每卡128环境，一个共享PhysX世界连续采集8秒；健康episode跨轮保留。
-* 默认Clipped DPPO：Actor统一学习率3e-7、一个epoch、全局minibatch4096条有效链、
-  计算微批128、clip0.01。每epoch打乱完整链，四步15～18全部参与；使用自由坐标
-  平均log-ratio代理，保留真实joint概率诊断。约16000条有效链产生4次Adam更新。
-* 原Stage1 BC每轮1024样本，按实际计划更新数分配（4步时每步256），动态目标梯度
-  比例0.1；PPO和BC一次全局SUM、统一裁剪1.0，不重复除以卡数。
-  soft KL提前停止时如实记录已经执行的步数和BC数量，不补做没有PPO依据的更新。
-* Critic音乐/前缀编码器冻结，历史跟踪GRU独立训练1e-5，时序/Value层1e-4；
-  完整MC训练和独立验证继续保留，gamma0.99每0.5秒，GAE lambda0.98。
-* 八项GMT Tracking、配对动作活动门控、参考/实际限位0.7/0.3；音乐和独立稳定性
-  奖励关闭，音乐条件、BC音乐动作损失、物理失败和事件罚分保留。
-* minibatch复用PPO前向的坐标平均KL，达到0.00075时丢弃当前未执行更新并停止。
-  整轮末一次完整四步KL，门限0.0009/0.0018/0.0021；失败恢复整轮Actor、Critic、
-  Adam、BC和RNG，保留实际资源消耗。普通DPPO不逐minibatch复制模型或全链回溯。
-* joint_score_pg仅保留为显式可选目标；配置需改为一次全批量minibatch及1个epoch。
-  只有该目标使用最多9次0.5倍率Adam回溯，接受的完整KL仍可按实际身份复用。
-* GMT50Hz、物理200Hz，每控制四个真实子步；训练优化期间世界暂停。
+Stage1网络、s595000权重、GMT冻结权重、Tracking90 v2非对称Critic结构与观测、
+八项Tracking及其他奖励定义和权重均保留。音乐奖励仍关闭；50Hz控制、200Hz物理、
+0.5秒重规划和60帧/2秒参考保持。随机音乐位置、配对运动初态及跨轮连续物理episode
+保留；完整MC预热和独立价值验证保留。新实验的整曲评估使用每次新建评估世界，
+避免把驻留世界历史状态差异误认成Actor收益。
 
-Critic90历史最后六维为已执行参考的根质心线/角速度，已从世界坐标旋转到当前真实
-机器人机体系。Actor48不变，90+时间仍为91维，音乐/前缀冻结、历史GRU可训练。
-GMT和GENMO同时采用Tracking90 v2；base_link参考与实际root使用同一刚体质心速度。
-
-配置使用当前continuous_tracking.v2身份，不再识别旧训练配置。优化参数与数据、
-GAE、BC和KL一起绑定；修改参数时同步更新optimization_sha256，不借用旧验收结论。
-如需重新计算该字段，可在配置更改后显式执行以下命令；它只更新配置参数摘要，
-不会赋予物理验收状态、修改checkpoint或启动训练::
-
-    python - <<'PY'
-    from pathlib import Path
-    import yaml
-    from gem.closedloop.dppo.actor_optimization import optimization_binding, digest
-    path=Path('configs/closedloop/stage2_credit_server2.yaml')
-    text=path.read_text();config=yaml.safe_load(text)
-    before=config['stage10']['kl']['calibration']['optimization_sha256']
-    after=digest(optimization_binding(config['stage10']))
-    path.write_text(text.replace(before,after))
-    PY
-
-运行与恢复
+验证与运行
 ----------
 
-2026-10-19八卡有限验证首轮被最终KL拒绝，接受轮数为0。用户明确要求保持全部
-参数、不再调参试跑。以下为运行接口说明，当前配置尚不能作为已通过的正式训练
-基线；不得将本次新Critic预热通过视为Actor训练通过。
+服务器1上先执行数值/梯度测试，再用已有不可变真实rollout运行唯一标定工具
+ tools/validate_stage2_full_chain.py。该工具不启动物理仿真，所有候选从相同
+Actor/Adam/BC/RNG起点比较；旧rollout的GAE仅用于同数据对照，不冒充当前CriticMC。
 
-先确认目标八张卡空闲及模型/数据路径正确。新运行必须使用独立空目录，下面命令
-仅为示例，不表示已自动启动新训练::
-
-    bash scripts/train_stage10_8gpu_server1.sh \
-      --output-dir /data1/user/liwei/GENMO_outputs/closedloop_stage10/新运行目录 \
-      --stop-after-iteration 2000
-
-同一份源码和配置的中断恢复::
+有限闭环统一入口::
 
     bash scripts/train_stage10_8gpu_server1.sh \
-      --output-dir /data1/user/liwei/GENMO_outputs/closedloop_stage10/新运行目录 \
-      --resume latest --stop-after-iteration 2000
+      --config configs/closedloop/stage2_full_chain.yaml \
+      --output-dir /data1/user/liwei/GENMO_outputs/closedloop_stage10/独立有限实验目录 \
+      --stop-after-iteration 3
 
-累计最多2000轮，每100轮保留里程碑，30分钟滚动容灾保留最近2份。评估和MC每
-100个已接受轮次执行，同一边界合并一份完整checkpoint，best保存实际权重。
-恢复Actor、Critic、两个Adam、BC、各rank RNG和累计资源，PhysX按合同重建并
-开始新episode，不恢复中途rollout。SIGINT/SIGTERM仍在合法边界保存后退出。
+必须先完成真实联合KL及有限物理验收；不能因optimizer.step执行或KL较小就宣称
+运动质量提高。固定完整音乐对照同时看总回报、各奖励项、完成率、失败、世界根部
+误差、局部身体/关节误差和活动度，保留全部失败任务。长期2000轮只是配置容量，
+本次有限命令不自动启动长期训练。
 
-本次Critic输入改变了物理含义，checkpoint使用asymmetric_tracking.checkpoint.v2。
-旧运行不能直接用新代码--resume，不能改SHA或绕过检查。首次运行从s595000创建
-Actor和独立Critic，重新采集完整MC预热；后续只能恢复同源码、同配置的新身份。
+一个任务一个TensorBoard目录。曲线按Reward/Tracking/Motion/Termination/Policy/
+Loss/Sampling/Perf分组；新增联合KL、clip/active clip、ESS、参数RMS、接受/计划更新数
+及PPO/BC/Critic/KL/采集耗时。逐minibatch分位数、模块贡献、异常和输出探针留在JSON，
+不递归展开成大量TensorBoard页面。root输出变化包含位置与姿态；同噪声参考变化
+是生成侧诊断，不能替代GMT实际执行。
 
-诊断与证据
-----------
-
-唯一入口仍支持--evaluate-only、--evaluation-actor、--mc-validation-only、
---critic-preheat-only、--collect-only、--calibrate-only、--strict-evidence及
---verify-kl-reuse；这些是当前方案的检查模式，不是其他算法入口。
-
-普通rollout在本轮优化及KL完成后释放；评估逐控制记录以单份无损压缩侧车保存，
-异常/严格模式可保存完整证据。保留资源账本、显存/磁盘保护、参考截止和物理终止，
-不设置48小时总训练期限。工程效率验收见docs/reports/stage2_efficiency_20261019.rst，
-该报告记录对应历史实测提交；源码精简不自动继承新的物理学习收益证明。
-
-本次有限验证结论（2026-10-19）
+此前坐标代理PPO基线的历史验证
 ------------------------------
 
 实测源码为GENMO 18acec6、GMT 58ce29d，之后仅追加结果文档，不改变算法和参数。

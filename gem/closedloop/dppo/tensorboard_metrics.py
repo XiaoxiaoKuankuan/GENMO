@@ -58,7 +58,7 @@ DEFINITIONS = {
     'Policy/learning_rate': '实际 Actor 优化器学习率，不是配置上限。',
     'Policy/trainable_kl': '本轮更新前后可训练去噪步骤的平均每自由坐标 KL；排除冻结步骤，大小本身不等于收益。',
     'Policy/max_step_kl': '完整去噪链中最大的单步平均每自由坐标 KL，用于检查更新是否过大。',
-    'Policy/clipped_objective_fraction': '可训练去噪步骤最终检查中真正被 PPO 裁剪的目标比例；接近零不单独证明无效。',
+    'Policy/clipped_objective_fraction': '完整链联合PPO中因符号相关裁剪失去梯度的链比例；0不证明无效，接近1说明饱和。',
     'Policy/gradient_norm': 'Actor 每次更新裁剪前 PPO+BC 总梯度范数的均值；持续异常增大需检查。',
     'Policy/bc_to_ppo_gradient_ratio': '每次更新加权 BC 梯度范数/PPO 梯度范数的均值；不是 Adam 参数更新贡献比例。',
     'Loss/joint_score': '四个随机步骤完整联合 Gaussian score 单次策略梯度损失；不是 clipped PPO，不能按单调下降验收。',
@@ -74,6 +74,23 @@ DEFINITIONS = {
     'Perf/iteration_seconds': '秒，本次接受迭代墙钟，不包含迭代之间另做的周期评估/MC/保存开销。',
     'Perf/controls_per_second': '实际 Actor 采集控制步总数/本轮墙钟；用于判断吞吐，不是策略质量。',
 }
+DEFINITIONS.update({
+    'Policy/chain_joint_kl': '全部有效旧rollout链四步联合KL之和的均值；主要更新约束，非未来物理安全保证。',
+    'Policy/chain_joint_kl_p95': '上述每链联合KL的P95，检查尾部更新。完整P99/Max见每轮JSON。',
+    'Policy/chain_clip_fraction': '完整链ratio落在[1-clip,1+clip]之外的比例；区别于真正失去梯度的active clip。',
+    'Policy/importance_ess_fraction': '联合重要性权重的有效样本数/链数；越接近1权重越均匀，过低提示旧数据失效。',
+    'Policy/parameter_update_rms': '每次Adam后真实FP32 Actor参数变化RMS的均值，非理论更新量。',
+    'Policy/ppo_bc_cosine': '全局SUM后的PPO与BC梯度余弦；负值表示方向存在冲突。',
+    'Policy/accepted_updates': '通过完整rollout联合KL的实际Adam次数，区别于计划次数。',
+    'Policy/planned_updates': '本轮按真实有效链数、完整链minibatch及epoch推导的计划Adam次数。',
+    'Perf/environment_seconds': '实际GMT闭环采集墙钟。',
+    'Perf/actor_ppo_seconds': '完整链ratio前向及流式PPO反向时间，不含BC和更新后KL。',
+    'Perf/bc_seconds': '原Stage1 BC样本加载与前向反向时间。',
+    'Perf/critic_seconds': '原价值目标的Critic更新墙钟。',
+    'Perf/kl_seconds': '更新后minibatch及整轮联合KL/最终参考诊断墙钟。',
+    'Perf/actor_step_seconds': 'Actor阶段总墙钟/最终接受Adam次数，含BC、KL及参数/输出诊断。',
+    'Perf/peak_memory_gib': '本轮PyTorch峰值显存GiB，不含PhysX外部分配。',
+})
 for _source in SOURCES:
     DEFINITIONS[f'Sampling/time_share_{_source}'] = '本轮普通 Actor 实际采集秒数中该来源的占比；不是选曲概率，也不是唯一时间覆盖率。'
 
@@ -180,8 +197,24 @@ def training_scalars(record):
     if active:
         values['Policy/trainable_kl'] = float(np.mean([s['mean_coordinate_kl']['mean'] for s in active]))
         if objective != 'joint_score_pg':
-            values['Policy/clipped_objective_fraction'] = float(np.mean([s['objective_clip_fraction'] for s in active]))
+            values['Policy/clipped_objective_fraction'] = kl.get('active_clip_fraction',kl.get('objective_clip_fraction'))
     values['Policy/max_step_kl'] = kl.get('maximum_step_mean_coordinate_kl')
+    if kl.get('chain_joint_kl'):
+        values['Policy/chain_joint_kl']=kl['chain_joint_kl']['mean']
+        values['Policy/chain_joint_kl_p95']=kl['chain_joint_kl']['p95']
+        values['Policy/chain_clip_fraction']=kl.get('clip_fraction')
+        values['Policy/importance_ess_fraction']=kl.get('importance_weight_ess_fraction')
+    values['Policy/accepted_updates']=actor.get('accepted_optimizer_steps')
+    values['Policy/planned_updates']=actor.get('planned_optimizer_steps')
+    parameter=[v['parameter_update']['modules']['all']['update_rms'] for v in steps if 'parameter_update' in v]
+    cosine=[v['gradient_contributions']['all']['cosine'] for v in steps if v.get('gradient_contributions',{}).get('all',{}).get('cosine') is not None]
+    if parameter:values['Policy/parameter_update_rms']=float(np.mean(parameter))
+    if cosine:values['Policy/ppo_bc_cosine']=float(np.mean(cosine))
+    efficiency=record.get('efficiency',{})
+    for name in ('environment_seconds','actor_ppo_seconds','bc_seconds','critic_seconds','kl_seconds'):
+        values['Perf/'+name]=efficiency.get(name)
+    values['Perf/actor_step_seconds']=efficiency.get('actor_seconds_per_accepted_step')
+    if 'peak_allocated_bytes' in efficiency:values['Perf/peak_memory_gib']=efficiency['peak_allocated_bytes']/2**30
     critic = record.get('critic') or {}
     values['Loss/critic_mse_before'] = critic.get('before', {}).get('mse')
     values['Loss/critic_mse_after'] = critic.get('after', {}).get('mse')

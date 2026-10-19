@@ -128,7 +128,7 @@ def full_batch_actor_update(policy, optimizer, rows, targets, cache, manifest, c
         detailed_diagnostics=detailed_diagnostics, gradient_snr=snr)
     def evaluate():
         result = final_kl(policy, rows, cache, manifest, distributed=distributed, microbatch=kl_microbatch,
-            clip=clip, objective_reduction='free_coordinate_mean')
+            clip=clip, objective_reduction='joint_sum')
         result['clip_is_counterfactual_dppo_diagnostic'] = True
         return result
     def observe():
@@ -163,6 +163,6 @@ def full_batch_actor_update(policy, optimizer, rows, targets, cache, manifest, c
     if accepted:
         from .kl_reuse import seal_accepted_kl
         policy._accepted_kl_receipt = seal_accepted_kl(policy, cache, manifest,
-            transaction['attempts'][-1]['kl'], clip=clip, reduction='free_coordinate_mean')
+            transaction['attempts'][-1]['kl'], clip=clip, reduction='joint_sum')
         result['complete_accepted_kl_available']=True
     return result

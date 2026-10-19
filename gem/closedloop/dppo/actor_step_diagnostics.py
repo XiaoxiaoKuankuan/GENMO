@@ -79,9 +79,11 @@ class StepDiagnostics:
                 nonzero_gradient_elements=int(nonzero), nonzero_gradient_unchanged_fraction=unchanged/max(nonzero, 1),
                 nonzero_adam_delta_elements=int(ideal_n), fp32_rounded_to_zero_fraction=rounded/max(ideal_n, 1),
                 adam_subtraction_fp64_delta_rms=math.sqrt(ideal2/n),
-                update_dot_negative_ppo_gradient=pdot, update_dot_negative_weighted_bc_gradient=bdot)
+                update_dot_negative_ppo_gradient=pdot if self.components else None,
+                update_dot_negative_weighted_bc_gradient=bdot if self.components else None)
         return dict(modules=output, master_dtype='float32',
             rounding_scope='FP64_reconstruction_from_actual_FP32_Adam_moments_before_parameter_subtraction',
+            gradient_projection_measured=bool(self.components),
             gradient_projection_is_not_separable_Adam_contribution=True)
 
 
@@ -141,7 +143,11 @@ def compare_probes(before, after, distributed):
             joint_mask = mask[:, 9:]
             qdelta = after['qpos'][i, :, 7:].double()-before['qpos'][i, :, 7:].double()
             mean_delta = after['mean'][i].double()-before['mean'][i].double()
+            from .updater import _quaternion_angle
+            valid=mask.any(-1)
             record=dict(identity=before['identities'][i], source=before['sources'][i],
+                final_root_position_rms_m=float((after['qpos'][i,:,:3]-before['qpos'][i,:,:3]).double().square()[valid].mean().sqrt()),
+                final_root_orientation_rms_rad=float(_quaternion_angle(before['qpos'][i,:,3:7],after['qpos'][i,:,3:7])[valid].square().mean().sqrt()),
                 advantage=float(before['advantages'][i]),
                 joint_log_ratio_gain=float((after['joint_log_ratio'][i]-before['joint_log_ratio'][i]).sum()),
                 mean_change_rms=float(mean_delta[:, mask].square().mean().sqrt()),

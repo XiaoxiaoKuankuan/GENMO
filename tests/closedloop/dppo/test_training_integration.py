@@ -76,7 +76,7 @@ def test_deployment_delay_rejects_unmeasured_forward_contract(changed):
     from pathlib import Path
     import yaml
     root = Path(training.__file__).resolve().parents[3]
-    profile = yaml.safe_load((root / 'configs/closedloop/stage2_credit_server2.yaml').read_text())['timing']['deployment_profile']
+    profile = yaml.safe_load((root / 'configs/closedloop/stage2_full_chain.yaml').read_text())['timing']['deployment_profile']
     execution = copy.deepcopy(profile['numerical_execution'])
     # 旧标定文件的展示文字不影响真实算子；纯反向实现不属于单请求前向计时。
     execution.update(mode='compensated_tensorcore_fp32_storage_candidate', weight_gradient='new_backward')

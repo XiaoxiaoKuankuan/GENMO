@@ -1,7 +1,8 @@
-# 服务器2正式延迟信用分配：用户明确授权最多2000个已接受迭代，每100轮保留完整checkpoint。
-# 8秒共享世界、lambda=.98、gamma=.99/0.5秒、按4096条链分批Clipped DPPO更新，统一LR=3e-7。
-# 四步KL是实际更新保护，不宣称完整歌曲收益已经通过；源码清理后新运行重新进行MC。
-# MC覆盖训练reset分布；固定32任务完整歌曲仍从开头评估。奖励只按真实执行归属。
+# 完整链联合PPO首个候选：8卡×128环境，8秒采集，0.5秒上层决策，60帧参考。
+# LR=1e-6，真实chain clip=.10，epoch=1，全局2048链/更新；每步BC至少256样本。
+# 联合KL/ESS门槛是待真实rollout标定的实验候选，不继承旧坐标平均KL阈值。
+# 奖励、Critic结构/目标、15+4+1采样核与噪声调度、GMT权重及时钟保持原定义。
+# CLI默认仅运行有限迭代；2000只是累计资源上限，不自动启动长期训练。
 diagnostics:
   record_original_threshold_crossings: true
   reward_substeps: true
@@ -43,7 +44,7 @@ runtime:
   gmt_inference_contract: gmt.native_checkpoint_frozen_batch.v1
   headless: true
   isaaclab_root: /data0/user/liwei/closedloop_stage8_runtime/IsaacLab
-  noise_namespace: stage2_credit8_clipped_dppo_tracking90v2_20261019
+  noise_namespace: stage2_full_chain_joint_tracking90v2_20261019
   num_envs: 128
   physics_device: cuda:0
   prefix_deadline_contract: available_reference_deadline_cap.v1
@@ -151,7 +152,7 @@ stage10:
     envs_per_rank: 4
     episode_seconds: null
     every_control_steps: 100000000
-    persistent_world: true
+    persistent_world: false
     samples_per_source:
       AIST++: 2
       AIOZ-GDANCE: 4
@@ -169,23 +170,24 @@ stage10:
     fps: 30
     frames: 60
   kl:
-    maximum_step_mean_coordinate: 0.0018
-    mean_coordinate: 0.0009
+    maximum_step_mean_coordinate: null
+    mean_coordinate: null
     mean_joint: null
-    p95_coordinate: 0.0021
-    reduction: free_coordinate_mean
+    p95_coordinate: null
+    reduction: chain_joint
     calibration:
-      status: not_physically_validated
+      status: candidate_requires_joint_calibration
       scope: four_trainable_steps_only
-      optimization_sha256: 95f39303c35c94abcd4261b8a155cb51a788cf85091a8357e72a743b522ad5f1
-    chain_joint_mean: null
-    chain_joint_p95: null
-    chain_joint_max: null
+      optimization_sha256: auto
+    chain_joint_mean: 0.20
+    chain_joint_p95: 0.60
+    chain_joint_p99: 0.90
+    chain_joint_max: 2.0
   limits:
     accepted_iterations: 2000
     control_steps: 1100000000
     generations: 40000000
-    optimizer_attempts: 18000
+    optimizer_attempts: 80000
     physics_steps: 4400000000
   performance:
     bc_batch_forward: true
@@ -285,7 +287,7 @@ stage10:
   run_control:
     max_training_iterations: 2000
   scale:
-    actor_minibatch_chains: 4096
+    actor_minibatch_chains: 2048
   seed: 42
   storage:
     checkpoint_interval_seconds: 1800
@@ -299,13 +301,14 @@ stage10:
     tensor_cache_max_bytes: 4294967296
     checkpoint_interval_iterations: 100
   training:
-    actor_lr: 3.0e-07
+    actor_lr: 1.0e-06
     actor_lr_control: fixed
     bc_prefix:
       max_frames: 30
       min_frames: 6
       zero_probability: 0.15
-    bc_samples_per_rollout: 1024
+    bc_samples_per_rollout: 2048
+    bc_min_global_batch: 256
     bc_weight: 0.01
     cfg_batch: true
     critic_grad_clip_norm: 1.0
@@ -315,19 +318,21 @@ stage10:
     eta: 0.1
     execution_mode: latency
     frozen_prefix_steps: 15
-    gamma_denoising: 0.99
+    gamma_denoising: 1.0
     gamma_upper: 0.99
     grad_clip_norm: 1.0
     gradient_snr_diagnostic: false
     guidance_scale: 2.5
     kl_microbatch: 128
-    kl_rejection: abort
-    kl_soft_stop_coordinate: 0.00075
+    kl_rejection: rollback_abort
+    kl_soft_stop_chain_joint: 0.10
+    max_active_clip_fraction: 0.95
+    min_ess_fraction: 0.05
     lambda_upper: 0.98
     latency_budget_s: 0.5
     log_probability_reduction: joint_sum
-    objective_logprob_reduction: free_coordinate_mean
-    ppo_clip: 0.01
+    objective_logprob_reduction: joint_sum
+    ppo_clip: 0.10
     ppo_epochs: 1
     ppo_step_strategy: intermediate4
     ppo_steps_per_chain: 4
@@ -354,14 +359,10 @@ stage10:
     - 0.1
     - 0.0
     x0_diagnostic_every: 0
-    actor_objective: clipped_dppo
-    # 仅显式joint_score_pg使用；Clipped DPPO仅保留整轮回滚。
-    optimizer_backtracking:
-      max_attempts: 9
-      factor: 0.5
-  version: genmo.closedloop.stage2.continuous_tracking.v2
+    actor_objective: full_chain_clipped_ppo
+  version: genmo.closedloop.stage2.full_chain_joint.v1
   actor_optimization:
-    schema: genmo.stage2.continuous_actor.v2
+    schema: genmo.stage2.full_chain_actor.v1
 termination:
   end_effector_relative_height_error_m: 0.15
   non_yaw_orientation_error_rad: 0.6
