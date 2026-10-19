@@ -112,19 +112,21 @@ def module_ablation(policy,rows,cache,initial,distributed,output):
     finally:policy.actor.load_state_dict(after)
 
 
-def export_actor(policy,config,learning,report,acceptance,case,output):
+def export_actor(policy,config,learning,report,acceptance,case,output,*,allow_measured_profile_transfer=False):
     from gem.closedloop.dppo.training import _sources,_physical_configuration_identity
-    identity=copy.deepcopy(learning['identity'])
+    from gem.closedloop.dppo.training_checkpoint import probability_candidate_binding
+    source=copy.deepcopy(learning['identity']);identity=copy.deepcopy(source)
     current=dict(reward=config['stage9']['reward'],timing=config['timing'],
         physical_configuration=_physical_configuration_identity(config),generation_horizon=config['stage10']['generation_horizon'])
-    for key,value in current.items():
-        if identity.get(key)!=value:raise ValueError('Fixed data and current physical evaluation binding differ: '+key)
+    identity.update(current)
     identity['source_files']=_sources(config)
     complete=report['optimizer_steps']==report['planned_optimizer_steps']
     if not complete or not acceptance['passed']:return dict(exported=False,reason='incomplete_update_or_joint_KL_rejection')
+    transfer=probability_candidate_binding(source,identity,allow_measured_profile_transfer=allow_measured_profile_transfer)
     path=output/'actor_evaluation.pt'
-    torch.save(dict(schema='genmo.stage2.asymmetric_actor_evaluation.v1',evaluation_only=True,
-        actor=immutable_cpu_snapshot(policy.actor.state_dict()),kernel=policy.kernel_config,source_identity=identity,
+    torch.save(dict(schema='genmo.stage2.probability_candidate_evaluation.v1',evaluation_only=True,
+        actor=immutable_cpu_snapshot(policy.actor.state_dict()),kernel=policy.kernel_config,source_identity=source,
+        evaluation_identity=identity,evaluation_transfer=transfer,
         hard_kl=acceptance,complete_update_and_soft_kl_passed=True,update=dict(
             optimizer_steps=report['optimizer_steps'],planned_optimizer_steps=report['planned_optimizer_steps'],
             actor_scope=policy.actor_scope),source_case_sha256=file_sha256(case/'case.json')),path)
@@ -144,6 +146,8 @@ def main():
     parser.add_argument('--coordinates',action='store_true')
     parser.add_argument('--module-ablation',action='store_true')
     parser.add_argument('--export-actor',action='store_true')
+    parser.add_argument('--allow-measured-profile-transfer',action='store_true',
+        help='显式将旧采集延迟样本池迁移到当前物理评估池；保留来源，必须新鲜配对PhysX评估，不允许训练恢复')
     args=parser.parse_args()
     rank=int(os.environ['RANK']);world=int(os.environ['WORLD_SIZE']);local=int(os.environ['LOCAL_RANK'])
     if world!=8 or local!=rank:raise ValueError('Explicit single-node eight-GPU allocation required')
@@ -232,12 +236,21 @@ def main():
             torch.topk(stats['joint_log_ratio'],min(4,len(eligible))).indices.tolist()))
         selected=[eligible[i] for i in selected_indices]
         after_state=immutable_cpu_snapshot(actor.state_dict());after_probe=output_probe(policy,selected,cache,max_chains=len(selected))
+        if args.export_actor:
+            root_call(distributed,lambda:torch.save(dict(schema='genmo.stage2.probability_diagnostic_actor.v1',
+                actor=after_state,source_case_sha256=file_sha256(args.case/'case.json'),source_identity=learning['identity'],
+                kernel=policy.kernel_config,actor_scope=policy.actor_scope,update=report,hard_kl=acceptance,
+                evaluation_only=False,training_resume=False),args.output_dir/'actor_diagnostic.pt'))
+        local_call(distributed,lambda:torch.save(dict(before={k:v.detach().cpu() if torch.is_tensor(v) else v for k,v in before.items()},
+            after={k:v.detach().cpu() if torch.is_tensor(v) else v for k,v in output_probe(policy,eligible[:16],cache,max_chains=16).items()}),
+            args.output_dir/f'ordinary_probe_vectors_rank{rank:02d}.pt'))
         actor.load_state_dict(initial);before_probe=output_probe(policy,selected,cache,max_chains=len(selected));actor.load_state_dict(after_state)
         probes=[s for shard in distributed.all_gather_object(probe_difference(before_probe,after_probe)) for s in shard]
         root_call(distributed,lambda:atomic_json(args.output_dir/'output_attribution.json',probe_summary(probes)))
         coordinates=coordinate_analysis(policy,eligible,cache,distributed,args.output_dir) if args.coordinates else None
         if args.module_ablation:module_ablation(policy,eligible,cache,initial,distributed,args.output_dir)
-        export=root_call(distributed,lambda:export_actor(policy,config,learning,report,acceptance,args.case,args.output_dir)) if args.export_actor else None
+        export=root_call(distributed,lambda:export_actor(policy,config,learning,report,acceptance,args.case,args.output_dir,
+            allow_measured_profile_transfer=args.allow_measured_profile_transfer)) if args.export_actor else None
         actor.load_state_dict(initial);optimizer.load_state_dict(optimizer_initial);controller.load_state_dict(controller_initial)
         anchor.load_state_dict(anchor_initial);restore_local_rng(rng,{'actor':generator})
         restored=exact_state_digest(actor.state_dict())==initial_digest

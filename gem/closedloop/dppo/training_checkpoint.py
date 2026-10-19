@@ -126,6 +126,30 @@ def load_training_checkpoint(path,*,identity,actor,critic,actor_optimizer,critic
     return payload
 
 
+def probability_candidate_binding(source,target,*,allow_measured_profile_transfer=False):
+    """只允许显式更换实测延迟样本池/来源，不改变时钟、前缀预算、奖励或物理合同。
+
+    旧rollout身份和目标评估身份分别保留；这种Actor只可做新鲜物理评估，绝不可作为
+    相同训练身份恢复。实际50/200Hz、重规划周期与部署核设置仍逐项相等。
+    """
+    for key in ('assets','kernel','reward','physical_configuration','data_catalog','generation_horizon'):
+        if source.get(key)!=target.get(key):raise ValueError('Candidate evaluation behavior contract differs: '+key)
+    old=dict(source['timing']);new=dict(target['timing'])
+    old_profile=old.pop('deployment_profile');new_profile=new.pop('deployment_profile')
+    if old!=new:raise ValueError('Candidate evaluation physical/replanning clock differs')
+    transferred=old_profile!=new_profile
+    if transferred:
+        if not allow_measured_profile_transfer:raise ValueError('Explicit measured delay profile transfer required')
+        for key in set(old_profile)|set(new_profile):
+            if key not in ('samples_seconds','provenance') and old_profile.get(key)!=new_profile.get(key):
+                raise ValueError('Measured delay transfer changes kernel or prefix budget: '+key)
+    import hashlib,json
+    sha=lambda value:hashlib.sha256(json.dumps(value,sort_keys=True,separators=(',',':')).encode()).hexdigest()
+    return dict(measured_delay_profile_transfer=transferred,source_profile_sha256=sha(old_profile),
+        evaluation_profile_sha256=sha(new_profile),allowed_differences=['samples_seconds','provenance'],
+        new_PhysX_paired_evaluation_required=True,training_resume=False)
+
+
 def load_evaluation_actor(path,*,actor,kernel,assets,execution_binding=None):
     """只读指定已完成checkpoint或固定数据候选的Actor，不恢复优化器/训练进度。
 
@@ -133,6 +157,25 @@ def load_evaluation_actor(path,*,actor,kernel,assets,execution_binding=None):
     数/长度和训练学习率以进行同条件P1/P2对照；绝不作为继续训练的恢复入口。
     """
     payload=torch.load(path,map_location='cpu',weights_only=False,mmap=True)
+    if payload.get('schema')=='genmo.stage2.probability_candidate_evaluation.v1':
+        target=payload.get('evaluation_identity',{})
+        update=payload.get('update',{})
+        if (payload.get('evaluation_only') is not True or not execution_binding or
+                target.get('assets')!=assets or target.get('kernel')!=kernel or
+                any(target.get(k)!=v for k,v in execution_binding.items()) or
+                payload.get('hard_kl',{}).get('passed') is not True or
+                type(update.get('optimizer_steps'))is not int or update['optimizer_steps']<1 or
+                update['optimizer_steps']!=update.get('planned_optimizer_steps') or
+                len(payload.get('source_case_sha256',''))!=64):
+            raise ValueError('Probability candidate evaluation identity or complete joint-KL update differs')
+        transfer=probability_candidate_binding(payload['source_identity'],target,allow_measured_profile_transfer=True)
+        if transfer!=payload.get('evaluation_transfer'):raise ValueError('Probability candidate profile transfer evidence differs')
+        from .checkpoint import _validate_model_state
+        _validate_model_state(actor,payload['actor'],'probability candidate evaluation Actor')
+        actor.load_state_dict(payload['actor'],strict=True)
+        return dict(kind='probability_candidate_fresh_evaluation_only',path=str(Path(path).resolve()),
+            sha256=file_sha256(path),source_case_sha256=payload['source_case_sha256'],update=update,
+            evaluation_transfer=transfer,training_resume=False)
     if payload.get('schema')==SCHEMA:
         identity=payload.get('identity',{})
         if (not execution_binding or identity.get('assets')!=assets or identity.get('kernel')!=kernel or

@@ -5,6 +5,7 @@
 不创建物理环境，不读取正式模型或改动实际参考时间轴。
 """
 import pytest
+import torch
 from types import SimpleNamespace
 from gem.closedloop.dppo.execution_provenance import SCHEMA,source_frame_support,consumption_report,compact_execution
 
@@ -30,3 +31,25 @@ def test_source_interpolation_and_lookahead_is_not_current_consumption():
     assert consumption_report([None])['status']=='unverified'
     record['plans']['p']['commit_tick']=24
     with pytest.raises(ValueError,match='before successful commit'):consumption_report([record])
+
+
+def test_consumed_frame_KL_association_does_not_invent_missing_history(tmp_path,monkeypatch):
+    import tools.analyze_stage2_reference_consumption as tool
+    (tmp_path/'rank00').mkdir()
+    identity=dict(backend_session_id='backend',env_id=0,episode_id='episode',plan_id='p')
+    metadata=dict(identity=identity,source='A',music_frame=0,prefix_frames=0,
+        kl_by_frame=[1.]*60,log_ratio_by_frame=[-.1]*60)
+    row=SimpleNamespace(identity=identity,metadata={},free_mask=torch.ones(60,30,dtype=torch.bool))
+    monkeypatch.setattr(tool,'load_rollout',lambda path:{'transitions':[row]})
+    result=tool.associate(tmp_path,dict(metadata=[metadata]))
+    assert result['status']=='unverified'
+    assert result['by_consumption']['unverified_missing_provenance']['joint_kl']==60
+    ticks=list(range(-108,133,12));plans=['bootstrap:x' if tick<24 else 'p' for tick in ticks]
+    row.metadata['compact_execution_provenance']=dict(schema=SCHEMA,plans={'p':dict(decision_tick=0,commit_tick=12)},
+        steps=[dict(control_tick_begin=12,control_tick_end=24,consumed_reference_ticks=ticks,consumed_plan_ids=plans,
+            reference_tick=24,reference_plan_id='p')])
+    result=tool.associate(tmp_path,dict(metadata=[metadata]))
+    assert result['status']=='verified_in_retained_ranges'
+    assert result['by_consumption']['current_consumed_source_support']['joint_kl']==0
+    assert result['by_consumption']['window_observed_not_current']['joint_kl']==7
+    assert sum(v['joint_kl'] for v in result['by_consumption'].values())==60
