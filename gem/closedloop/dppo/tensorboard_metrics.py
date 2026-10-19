@@ -57,12 +57,12 @@ DEFINITIONS = {
     'Termination/reference_rejections_per_1000s': '次/1000机器人秒，固定验证参考拒绝次数/实际执行秒数，越低越好。',
     'Policy/learning_rate': '实际 Actor 优化器学习率，不是配置上限。',
     'Policy/trainable_kl': '本轮更新前后可训练去噪步骤的平均每自由坐标 KL；排除冻结步骤，大小本身不等于收益。',
-    'Policy/max_step_kl': '完整去噪链中最大的单步平均每自由坐标 KL，用于检查更新是否过大。',
+    'Policy/max_step_kl': '四个可训练随机步骤中最大的单步平均每自由坐标 KL，仅作辅助诊断。',
     'Policy/clipped_objective_fraction': '完整链联合PPO中因符号相关裁剪失去梯度的链比例；0不证明无效，接近1说明饱和。',
     'Policy/gradient_norm': 'Actor 每次更新裁剪前 PPO+BC 总梯度范数的均值；持续异常增大需检查。',
     'Policy/bc_to_ppo_gradient_ratio': '每次更新加权 BC 梯度范数/PPO 梯度范数的均值；不是 Adam 参数更新贡献比例。',
     'Loss/joint_score': '四个随机步骤完整联合 Gaussian score 单次策略梯度损失；不是 clipped PPO，不能按单调下降验收。',
-    'Policy/backtracks': '本次接受前的学习率减半次数；实际学习率同时见 learning_rate。',
+    'Policy/backtracks': '本轮所有 minibatch 被拒绝并回退的 Adam 候选总次数；不是有效更新次数，实际学习率见 learning_rate。',
     'Loss/ppo': 'Actor 本轮 PPO 代理损失按内部样本访问数加权；优势归一化后常在零附近，不能按单调下降验收效果。',
     'Loss/bc': 'Actor 本轮 BC 损失按实际 BC 样本数加权；衡量监督约束拟合，不等于物理跟踪。',
     'Loss/critic_mse_before': '本轮 Critic 更新前，对本轮自举目标的 MSE；不同轮目标会变化。',
@@ -88,7 +88,7 @@ DEFINITIONS.update({
     'Perf/bc_seconds': '原Stage1 BC样本加载与前向反向时间。',
     'Perf/critic_seconds': '原价值目标的Critic更新墙钟。',
     'Perf/kl_seconds': '更新后minibatch及整轮联合KL/最终参考诊断墙钟。',
-    'Perf/actor_step_seconds': 'Actor阶段总墙钟/最终接受Adam次数，含BC、KL及参数/输出诊断。',
+    'Perf/actor_step_seconds': 'Actor小批更新阶段墙钟/最终接受Adam次数，含BC、候选回退及小批KL；整轮最终KL另计。',
     'Perf/peak_memory_gib': '本轮PyTorch峰值显存GiB，不含PhysX外部分配。',
 })
 for _source in SOURCES:
@@ -187,9 +187,12 @@ def training_scalars(record):
                 ratios.append(gradients['weighted_bc_norm']/gradients['ppo_norm'])
         if ratios:
             values['Policy/bc_to_ppo_gradient_ratio'] = float(np.mean(ratios))
-    transaction = steps[-1].get('backtracking', {}) if steps else {}
-    if transaction:
-        values['Policy/backtracks'] = transaction.get('backtracks')
+    if actor.get('rejected_step_candidates') is not None:
+        values['Policy/backtracks'] = actor['rejected_step_candidates']
+    elif steps:
+        transaction = steps[-1].get('backtracking', {})
+        if transaction:
+            values['Policy/backtracks'] = transaction.get('backtracks')
     kl = record.get('trainable4_kl') or {}
     active = kl.get('per_denoising_step', [])
     if active and [step['step'] for step in active] != [15, 16, 17, 18]:

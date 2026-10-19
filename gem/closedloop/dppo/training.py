@@ -118,6 +118,22 @@ def _periodic_evaluation_label(state):
             f'c{state["training_control_steps"]:012d}_a{state["iteration"]:06d}')
 
 
+def _record_actor_step(c,label,step):
+    """即时保留小批候选及回退证据；整轮检查通过前不能计作最终接受更新。"""
+    def publish():
+        c.manager.append_metrics(dict(event='actor_minibatch',label=label,
+            pending_iteration=c.state['iteration']+1,acceptance_scope='pending_full_rollout_joint_KL_ESS',
+            actor_step=step))
+        post=step['post_step_chain'];transaction=step.get('trust_region') or {}
+        print(f'[STAGE2 ACTOR] {label} update={step["optimizer_step"]} '
+            f'chains={step["global_chain_count"]} lr={step["learning_rate"]:.6g} '
+            f'chain_KL={post["chain_joint_kl"]["mean"]:.6g} '
+            f'ESS={post["importance_weight_ess_fraction"]:.4f} '
+            f'backtracks={transaction.get("backtracks",0)} wall={step["wall_seconds"]:.3f}s '
+            'acceptance=pending_full_rollout',flush=True)
+    root_call(c.distributed,publish)
+
+
 def _physical_configuration_identity(config):
     """恢复同时绑定显式物理/终止配置和实际侧车资产，拒绝权重相同而任务改变。"""
     return dict(environment=copy.deepcopy(config['environment']),
@@ -605,6 +621,7 @@ def run(cargs,config,distributed):
                     bc_samples_per_rollout=c.settings['bc_samples_per_rollout'],bc_min_global_batch=c.settings['bc_min_global_batch'],
                     max_active_clip=c.settings['max_active_clip_fraction'],min_ess_fraction=c.settings['min_ess_fraction'],
                     trust_region=c.settings['trust_region'],kl_limits=c.stage['kl'],
+                    step_observer=lambda step:_record_actor_step(c,label,step),
                     snr=c.settings.get('gradient_snr_diagnostic',False))
                 actor_seconds=max(distributed.all_gather_object(time.perf_counter()-actor_start))
                 from .kl_reuse import reusable_accepted_kl
@@ -680,7 +697,8 @@ def run(cargs,config,distributed):
                     accepted_actor_steps=(actor or {}).get('accepted_optimizer_steps',0),
                     actor_seconds_per_accepted_step=actor_seconds/max((actor or {}).get('optimizer_steps',0),1),
                     peak_allocated_bytes=max(m['pytorch_peak_allocated'] for m in memory),
-                    timing_scope='foreground_wall_phases; actor_total_contains_PPO_BC_KL_and_diagnostics'),
+                    timing_scope='foreground_wall_phases; actor_total_is_update_loop_excludes_final_rollout_KL; '
+                        'kl_seconds_includes_candidate_and_final_checks; overlapping_fields_must_not_be_summed'),
                 performance_by_rank=distributed.all_gather_object(profile_report),physics_paused_during_optimization=True,
                 memory_by_rank=memory,periodic_model_fingerprints=fingerprints,
                 effective_upper_transitions_per_second=used[2]/wall,

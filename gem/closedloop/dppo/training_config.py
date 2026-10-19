@@ -150,7 +150,7 @@ def configuration(path,*,genmo_repo=None,gmt_repo=None):
     if type(diagnostic_interval) is not int or diagnostic_interval<1:
         raise ValueError('actor_diagnostics_every must be a positive iteration interval')
     if t['actor_lr_control']!='joint_kl_backtracking' or t['kl_rejection']!='rollback_abort':
-        raise ValueError('Only fixed uniform LR and final whole-rollout hard rejection are supported')
+        raise ValueError('Uniform AdamW with joint-KL backtracking and final whole-rollout rejection required')
     if any(key in t for key in ('actor_lr_bounds','kl_target_coordinate','kl_control_metric')):
         raise ValueError('Retired adaptive-LR settings are not supported')
     steps=t['ppo_epochs']*math.ceil(chains/scale['actor_minibatch_chains'])

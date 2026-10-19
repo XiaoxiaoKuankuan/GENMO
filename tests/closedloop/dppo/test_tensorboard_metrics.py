@@ -259,6 +259,16 @@ def test_joint_score_curves_are_not_mislabeled_as_clipped_ppo():
     assert values['Policy/backtracks'] == 2
     assert 'Loss/ppo' not in values
     assert 'Policy/clipped_objective_fraction' not in values
+    # 完整链实现把回退总数放在 Actor 汇总，不能只显示最后一个小批或漏掉曲线。
+    record['actor'].update(objective='full_chain_clipped_ppo', rejected_step_candidates=7,
+                           planned_optimizer_steps=8, accepted_optimizer_steps=7)
+    record['trainable4_kl'].update(active_clip_fraction=.3)
+    values = training_scalars(record)
+    assert values['Policy/backtracks'] == 7
+    assert values['Policy/planned_updates'] == 8
+    assert values['Policy/accepted_updates'] == 7
+    assert values['Policy/clipped_objective_fraction'] == pytest.approx(.3)
+    assert 'Loss/joint_score' not in values
     record['trainable4_kl']['per_denoising_step'].append(dict(step=19))
     with pytest.raises(ValueError, match='four trainable'):
         training_scalars(record)
