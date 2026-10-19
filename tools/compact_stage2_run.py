@@ -1,7 +1,8 @@
 """整理已停止Stage2运行的重复证据，保留模型、指标及可还原的原始物理数据库。
 
 默认只清点。--apply取得运行排他锁后，把逐控制JSON转换为单份无损列式证据，
-更新父报告的文件SHA并明确记载格式迁移；完整SQLite按原字节gzip冷存并校验还原SHA。
+更新父报告的文件SHA并明确记载格式迁移；关键评估SQLite按原字节gzip冷存并核验。
+其余阶段的重复底层journal在完整控制摘要或MC标签已保留后退役，清单标明证据范围。
 严格训练rollout先提取每卡8条自包含真实链，再释放已完成更新的全量张量归档。
 checkpoint只对字节SHA完全相同的文件合并硬链接，所有原路径及SHA保持有效，不把
 不同RNG、优化器或计数的checkpoint冒充同一个恢复点。不访问模型GPU、不启动训练。
@@ -57,7 +58,7 @@ def compact(root,*,apply=False):
     report_path=root/'retention_manifest.json'
     report=(json.loads(report_path.read_text()) if report_path.exists() else dict(
         schema='genmo.stage2.retention_compaction.v1',run=str(root),before_bytes=allocated_bytes(root),
-        converted=[],cold_sqlite=[],sampled_rollouts=[],deduplicated=[]))
+        converted=[],cold_sqlite=[],retired_sqlite=[],sampled_rollouts=[],deduplicated=[]))
     if not apply:
         return dict(run=str(root),allocated_bytes=allocated_bytes(root),
             sqlite_count=len(list(root.glob('sessions/**/*.sqlite'))),
@@ -143,9 +144,23 @@ def compact(root,*,apply=False):
                 if path.resolve() not in protected:path.unlink()
         databases=[p for parent in ('phases','collections','mc_calibration')
             for p in root.glob(f'sessions/*/{parent}/**/*.sqlite')]
+        pinned=None
+        if (root/'latest.json').exists():
+            latest=json.loads((root/'latest.json').read_text())['iteration']
+            pinned={0,latest,latest//100*100}
+            if (root/'best_checkpoint.json').exists():
+                pinned.add(json.loads((root/'best_checkpoint.json').read_text())['iteration'])
+        report['complete_physics_evaluation_iterations']=None if pinned is None else sorted(pinned)
         for path in sorted(databases):
             wal=path.with_name(path.name+'-wal')
             if wal.exists() and wal.stat().st_size:continue
+            keep=(pinned is None or 'phases' in path.parts and any(
+                ('initial' in part if iteration==0 else f'r{iteration:06d}_' in part or f'final_{iteration:06d}' in part)
+                for part in path.parts for iteration in pinned))
+            if not keep:
+                report.setdefault('retired_sqlite',[]).append(dict(path=str(path),bytes=path.stat().st_size,
+                    sha256=file_sha256(path),retained='lossless_control_summary_or_complete_MC_labels_and_sampled_training_chains'))
+                record();path.unlink();continue
             target=root/'cold_evidence'/path.relative_to(root).with_suffix('.sqlite.gz')
             target.parent.mkdir(parents=True,exist_ok=True)
             temporary=target.with_suffix('.partial');h=hashlib.sha256();size=path.stat().st_size
@@ -171,7 +186,7 @@ def compact(root,*,apply=False):
                     report['deduplicated'].append(dict(path=str(path),canonical=str(known[sha]),sha256=sha))
                 else:known[sha]=path
         report.update(status='completed',after_bytes=allocated_bytes(root),
-            fidelity='lossless_control_records_and_gzip_original_SQLite;sampled_completed_training_chains;all_model_paths_retained')
+            fidelity='lossless_control_records;gzip_key_physics_SQLite;complete_MC_labels;sampled_training_chains;all_model_paths_retained')
         record();return report
     finally:lock.close()
 
