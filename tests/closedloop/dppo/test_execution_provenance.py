@@ -69,3 +69,22 @@ def test_interpolation_reaches_previous_plan_through_exact_committed_prefix():
     assert result['plans']['p0']['current_generated_frame_weight'][31]==pytest.approx(.8)
     assert result['plans']['p1']['current_generated_frame_weight'][17]==pytest.approx(.2)
     assert sum(sum(v['current_generated_frame_weight']) for v in result['plans'].values())==pytest.approx(1.)
+
+
+def test_actual_window_time_sides_resolve_inherited_prefix_and_conserve_support():
+    from tools.analyze_stage2_reference_consumption import temporal_window_support
+    plans={'p0':dict(decision_tick=0,commit_tick=12,prefix_frames=0,parent_plan_id='bootstrap:x',generation_frames=60),
+        'p1':dict(decision_tick=300,commit_tick=468,prefix_frames=17,parent_plan_id='p0',generation_frames=60)}
+    ticks=list(range(504,745,12))
+    row=dict(control_tick_begin=624,control_tick_end=636,consumed_reference_ticks=ticks,
+        consumed_plan_ids=['p0' if tick<=612 else 'p1' for tick in ticks],reference_tick=636,reference_plan_id='p1')
+    record=dict(schema=SCHEMA,plans=plans,steps=[row]);verified=consumption_report([record])
+    view=temporal_window_support([record,record],verified['plans'])
+    assert sum(sum(item['past']) for item in view.values())==pytest.approx(10.)
+    assert sum(sum(item['current']) for item in view.values())==pytest.approx(1.)
+    assert sum(sum(item['future']) for item in view.values())==pytest.approx(10.)
+    assert view['p0']['current'][31]==pytest.approx(.8)
+    assert view['p1']['current'][17]==pytest.approx(.2)
+    # tick636位于新plan源16.8帧，仍有0.2插值权重来自旧plan的继承前缀。
+    assert view['p0']['future'][31]==pytest.approx(.2)
+    assert view['p0']['past'][26]>0

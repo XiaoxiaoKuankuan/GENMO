@@ -95,6 +95,15 @@ epoch2不自动更好。qpos输出MLP的6次更新全部接受，但最终参考
 腿部投影候选只有12300个有效参数，另18450个非腿输出行参数和Adam矩保持零变化。
 最终冻结去噪映射仍可能把腿部输入扰动传播到其他输出，所以最终非腿变化不要求为零。
 
+epoch2固定数据实验的BC总量为4096、epoch1为2048，即保持每次Adam的BC样本量
+可比；不把epoch2当成只改变PPO重复次数且BC总量完全相同的消融。
+腿部行额外LR上限1e-5实验的首步KL0.44525，回退至5e-6仍为0.11130，
+再回退2.5e-6通过；后两步接受3.125e-6/3.90625e-6。最终KL0.0142855、
+ESS97.1608%，同64链最终关节变化仅6.1425e-5rad，未显示动作变化优势。
+独立数值实验自然结束后，服务器1从Stage1初始化启动qpos_output、epoch1的新鲜
+MC及两轮PhysX测试，GENMO启动提交bca552d、GMT为f689ab5。它不是固定数据候选
+权重的训练恢复；新训练Actor的行为数据及优化器均重新建立。
+
 实现、行为边界和验证
 --------------------
 
@@ -116,6 +125,9 @@ epoch2不自动更好。qpos输出MLP的6次更新全部接受，但最终参考
 * ``tools/analyze_stage2_probability.py`` 以八卡不可变case对比尝试、回溯、接受、
   epoch1/2及模块隔离；``tools/attribute_stage2_actor_change.py`` 只读比较真实checkpoint。
   ``tools/analyze_stage2_reference_consumption.py`` 通过case SHA和逐链身份关联来源。
+  其时间视图额外按真实control_begin区分窗口回看、中心和前瞻，并核验三类之和
+  等于完整窗口支持。保留区间中仅出现在回看的帧不能称为前瞻，父plan继承前缀
+  也可能继续贡献新plan未来插值，不能只根据plan所有权判断来源。
 
 服务器1最终相关测试为161项通过、无跳过，包括独立Gaussian、坐标加和、零更新、
 prefix/padding、全Autograd与流式梯度、微批/尾批、多卡归约、回滚、不同scope的
