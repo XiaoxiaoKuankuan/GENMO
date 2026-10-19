@@ -28,6 +28,8 @@ def uniform_actor_optimizer(actor, optimizer):
         raise ValueError('AdamW must contain every trainable Actor parameter exactly once and no frozen parameters')
     if any(p.dtype != torch.float32 for p in optimizer.param_groups[0]['params']):
         raise ValueError('FP32 master parameters required')
+    if getattr(actor,'_stage2_row_gradient_hooks',[]) and optimizer.param_groups[0]['weight_decay']!=0:
+        raise ValueError('Row-frozen Actor parameters require AdamW weight_decay=0')
 
 
 def check_candidate_kl(report, limits):

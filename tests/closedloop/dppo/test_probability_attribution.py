@@ -24,7 +24,7 @@ from gem.closedloop.dppo.optimization_support import _local_phase,_parameters,_o
 from gem.closedloop.dppo.gaussian_probability import gaussian_statistics
 from gem.closedloop.dppo.attribution_runtime import collect_coordinates,probe_difference,probe_summary
 from gem.closedloop.dppo.actor_step_diagnostics import output_probe
-from gem.closedloop.dppo.actor_backtracking import backtracked_step
+from gem.closedloop.dppo.actor_backtracking import backtracked_step,uniform_actor_optimizer
 from gem.closedloop.dppo.gradient_merge import BCGradientController
 from tests.closedloop.dppo.test_clipped_dppo import case
 from tests.closedloop.test_stage1_actor import actor_factory
@@ -81,7 +81,7 @@ def test_importance_logsumexp_exact_identity_and_extreme_tail_identity():
 
 
 @pytest.mark.parametrize('scope,prefix',[('qpos_output','denoiser.final_layer.'),('qpos_projection','denoiser.final_layer.fc2.'),
-    ('denoiser_inputs','denoiser.')])
+    ('denoiser_inputs','denoiser.'),('leg_projection','denoiser.final_layer.fc2.')])
 def test_restricted_actor_keeps_kernel_and_real_streamed_score(scope,prefix,actor_factory):
     policy,rows,targets=case(actor_factory)
     original={n:p.detach().clone() for n,p in policy.actor.named_parameters()}
@@ -103,6 +103,9 @@ def test_restricted_actor_keeps_kernel_and_real_streamed_score(scope,prefix,acto
     policy.actor.zero_grad(set_to_none=True)
     report=configure_actor_scope(policy.actor,scope)
     expected={name:value for name,value in expected.items() if name in report['parameter_names']}
+    if scope=='leg_projection':
+        selected=torch.zeros(30,dtype=torch.bool);selected[report['row_masked_output_features']]=True
+        for value in expected.values():value[~selected]=0
     assert all(name.startswith(prefix) for name in report['parameter_names'])
     try:
         with policy_phase(policy):
@@ -115,10 +118,23 @@ def test_restricted_actor_keeps_kernel_and_real_streamed_score(scope,prefix,acto
             for name,p in policy.actor.named_parameters() if name in expected)
         scale=sum(value.double().square().sum() for value in expected.values())
         assert float((delta/scale).sqrt())<2e-5
-        opt=torch.optim.AdamW([p for p in policy.actor.parameters() if p.requires_grad],lr=1e-6)
+        opt=torch.optim.AdamW([p for p in policy.actor.parameters() if p.requires_grad],lr=1e-6,weight_decay=0.)
+        if scope=='leg_projection':
+            opt.param_groups[0]['weight_decay']=.01
+            with pytest.raises(ValueError,match='weight_decay=0'):uniform_actor_optimizer(policy.actor,opt)
+            opt.param_groups[0]['weight_decay']=0.
+            uniform_actor_optimizer(policy.actor,opt)
         opt.step()
         assert any(not torch.equal(original[n],p) for n,p in policy.actor.named_parameters() if n in report['parameter_names'])
         assert all(torch.equal(original[n],p) for n,p in policy.actor.named_parameters() if n not in report['parameter_names'])
+        if scope=='leg_projection':
+            for name,p in policy.actor.named_parameters():
+                if name in report['parameter_names']:
+                    assert torch.equal(original[name][~selected],p[~selected])
+                    assert torch.count_nonzero(opt.state[p]['exp_avg'][~selected])==0
+            with policy_phase(policy):updated=evaluate_chain_records(policy,rows,cache,microbatch=3)
+            # 所有坐标仍参与生产概率；非腿输出参数冻结，不允许借此删除自由mask。
+            assert updated[:,:,3].sum()==records[:,:,3].sum()
         assert policy.kernel_config==kernel and policy.assert_frozen_identity()['checked']
         configure_actor_scope(policy.actor,'all')
         assert any(p.requires_grad for n,p in policy.actor.named_parameters() if not n.startswith(prefix))
@@ -148,15 +164,16 @@ def test_candidate_configurations_bind_scope_and_200_iteration_cap():
     from gem.closedloop.dppo.actor_optimization import optimization_binding
     root=Path(__file__).resolve().parents[3]
     candidates=[]
-    for scope in ('qpos_output','qpos_projection','denoiser_inputs'):
+    for scope in ('qpos_output','qpos_projection','denoiser_inputs','leg_projection'):
         c=configuration(root/f'configs/closedloop/stage2_{scope}.yaml')
         assert c['stage10']['run_control']['max_training_iterations']==200
         assert c['stage10']['limits']['accepted_iterations']==200
         assert c['stage9']['actor_trainable_scope']==scope
         assert c['runtime']['record_compact_execution_provenance']
         candidates.append(optimization_binding(c['stage10']))
-    assert len({str(value) for value in candidates})==3
+    assert len({str(value) for value in candidates})==4
     subprocess.run([sys.executable,'-B',str(root/'tools/analyze_stage2_probability.py'),'--help'],check=True,capture_output=True,text=True,timeout=30)
+    subprocess.run([sys.executable,'-B',str(root/'tools/attribute_stage2_actor_change.py'),'--help'],check=True,capture_output=True,text=True,timeout=30)
 
 
 def test_real_rollout_metadata_coordinates_and_probe_pipeline(actor_factory):
