@@ -69,6 +69,9 @@ def configuration(path,*,genmo_repo=None,gmt_repo=None):
     if 'effect_check_iterations' in s['evaluation']:
         raise ValueError('effect_check_iterations is unsupported; use actual interaction evaluation intervals')
     eval_envs=s['evaluation'].get('envs_per_rank',1)
+    mc_envs=s['critic']['complete_mc'].get('envs_per_rank',eval_envs)
+    if type(mc_envs)is not int or not 1<=mc_envs<=64:
+        raise ValueError('Complete MC requires 1..64 independent slots per GPU')
     if type(eval_envs)is not int or not 1<=eval_envs<=64 or type(s['evaluation'].get('persistent_world',False))is not bool:
         raise ValueError('Evaluation requires 1..64 slots in one world and explicit persistent_world boolean')
     if s['evaluation'].get('start_mode','beginning') not in ('beginning','center','mixed') or type(s['evaluation'].get('unique_music',False))is not bool:
@@ -146,7 +149,7 @@ def configuration(path,*,genmo_repo=None,gmt_repo=None):
     diagnostic_interval=s['checks'].get('actor_diagnostics_every',100)
     if type(diagnostic_interval) is not int or diagnostic_interval<1:
         raise ValueError('actor_diagnostics_every must be a positive iteration interval')
-    if t['actor_lr_control']!='fixed' or t['kl_rejection']!='rollback_abort':
+    if t['actor_lr_control']!='joint_kl_backtracking' or t['kl_rejection']!='rollback_abort':
         raise ValueError('Only fixed uniform LR and final whole-rollout hard rejection are supported')
     if any(key in t for key in ('actor_lr_bounds','kl_target_coordinate','kl_control_metric')):
         raise ValueError('Retired adaptive-LR settings are not supported')

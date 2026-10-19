@@ -56,6 +56,14 @@ class IsolatedWorld:
         self.closed=False
 
 
+def isolated_env_count(c,label):
+    """MC可并行更多完整音乐；固定Actor评估仍使用原4槽协议。"""
+    value=c.stage['evaluation'].get('envs_per_rank',1)
+    if label.startswith('mc_'):
+        value=c.stage.get('critic',{}).get('complete_mc',{}).get('envs_per_rank',value)
+    return value
+
+
 def open_isolated_world(c,label,*,attempts=3):
     """启动并核验Isaac世界；进程启动失败（如地面USD远程下载瞬断）时换新目录重试。
 
@@ -82,7 +90,7 @@ def _open_isolated_world_once(c,label):
     from .vector_devices import bind_vector_device
     device_environment=bind_vector_device(config,c.distributed.rank)
     # 独立评估/MC世界不重复首个列式-逐行全量对照；训练世界每会话已执行一次，数值路径相同。
-    handle.num_envs=c.stage['evaluation'].get('envs_per_rank',1)
+    handle.num_envs=isolated_env_count(c,label)
     config['runtime'].update(num_envs=handle.num_envs,asset_conversion_dir=str(path/'usd_assets'),
         columnar_first_audit=False,evidence_level='training')
     config_path=path/'config.yaml';config_path.write_text(yaml.safe_dump(config,allow_unicode=True))
@@ -136,6 +144,8 @@ def isolated_vector_evaluation(c,label):
     overhead = getattr(c, 'overhead', None)
     old_backend=c.backend
     persistent=c.stage['evaluation'].get('persistent_world',False)
+    if kind=='mc' and isolated_env_count(c,label)!=c.stage['evaluation'].get('envs_per_rank',1):
+        persistent=False
     handle=getattr(c,'evaluation_world',None) if persistent else None
     failure=None;created=handle is None
     try:

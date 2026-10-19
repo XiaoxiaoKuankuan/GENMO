@@ -604,6 +604,7 @@ def run(cargs,config,distributed):
                     grad_clip_norm=c.settings['grad_clip_norm'],reserve_attempt=reserve,
                     bc_samples_per_rollout=c.settings['bc_samples_per_rollout'],bc_min_global_batch=c.settings['bc_min_global_batch'],
                     max_active_clip=c.settings['max_active_clip_fraction'],min_ess_fraction=c.settings['min_ess_fraction'],
+                    trust_region=c.settings['trust_region'],kl_limits=c.stage['kl'],
                     snr=c.settings.get('gradient_snr_diagnostic',False))
                 actor_seconds=max(distributed.all_gather_object(time.perf_counter()-actor_start))
                 from .kl_reuse import reusable_accepted_kl

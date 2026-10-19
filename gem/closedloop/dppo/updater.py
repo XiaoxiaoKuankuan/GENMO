@@ -32,11 +32,11 @@ def actor_update(policy,optimizer,rows,targets,cache,manifest,controller,*,distr
                     objective_reduction='joint_sum',grad_clip_norm=1.,reserve_attempt=None,
                     gradient_observer=None,step_observer=None,bc_samples_per_rollout=2048,
                     bc_min_global_batch=1,snr=False,step_strategy='intermediate4',detailed_diagnostics=False,
-                    max_active_clip=.95,min_ess_fraction=.05):
+                    max_active_clip=.95,min_ess_fraction=.05,trust_region=None,kl_limits=None):
     """每条完整链一个联合比值；两遍微批反传与全局SUM严格保持同一目标。"""
     from .chain_ppo import evaluate_chain_records,from_records,backward_chain_surrogate
     from .gaussian_probability import chain_diagnostics,distribution
-    from .actor_backtracking import uniform_actor_optimizer
+    from .actor_backtracking import uniform_actor_optimizer,backtracked_step
     from .actor_step_diagnostics import StepDiagnostics,output_probe,compare_probes
     from .parallel_support import local_call
     if step_strategy!='intermediate4' or sampled_steps!=4 or tuple(policy.trainable_steps)!=(15,16,17,18):
@@ -102,18 +102,44 @@ def actor_update(policy,optimizer,rows,targets,cache,manifest,controller,*,distr
             clip_factor=min(1.,grad_clip_norm/(total_norm+1e-6))
             # 只在rank0保留可训练参数前值来测实际FP32更新，不复制Adam或冻结网络。
             observation=local_call(distributed,lambda:StepDiagnostics(actor) if distributed.rank==0 else None)
-            if reserve_attempt is not None:reserve_attempt()
-            with _local_phase(distributed,'stage2_actor_optimizer_step'):optimizer.step()
+            transaction_started=time.perf_counter();kl_elapsed=0.
+            post_records=None;post=None;transaction=None
+            if trust_region is not None:
+                limits={k:v*trust_region['margin'] for k,v in kl_limits.items()
+                    if k.startswith('chain_joint_')}
+                limits['chain_joint_mean']=min(limits['chain_joint_mean'],soft_kl*trust_region['margin'])
+                limits.update(minimum_ess=min_ess_fraction,maximum_active_clip=max_active_clip)
+                optimizer.param_groups[0]['lr']=min(trust_region['maximum_lr'],
+                    optimizer.param_groups[0]['lr']*trust_region['growth'])
+                def evaluate_candidate():
+                    nonlocal post_records,post,kl_elapsed
+                    measured=time.perf_counter()
+                    _,post_records,post_adv=collect_records(local,owned,len(indices))
+                    post=chain_diagnostics(from_records(post_records),post_adv,clip=clip)
+                    kl_elapsed+=time.perf_counter()-measured
+                    return post
+                transaction=backtracked_step(actor,optimizer,controller,evaluate=evaluate_candidate,
+                    limits=limits,distributed=distributed,generators={'actor':generator},
+                    max_attempts=trust_region['max_attempts'],reserve_attempt=reserve_attempt)
+                if not transaction['accepted']:
+                    import json
+                    raise FloatingPointError('Full-chain trust-region exhausted; whole iteration rollback: '+json.dumps(transaction))
+            else:
+                if reserve_attempt is not None:reserve_attempt()
+                with _local_phase(distributed,'stage2_actor_optimizer_step'):optimizer.step()
+            transaction_seconds=max(distributed.all_gather_object(time.perf_counter()-transaction_started))
             parameter_report=local_call(distributed,lambda:observation.finish(optimizer,contributions['bc_weight'],clip_factor)
                 if observation is not None else None)
             parameter_report=distributed.broadcast_object(parameter_report)
             del observation
             probe_after=local_call(distributed,lambda:output_probe(policy,local,cache,max_chains=2))
             output_change=compare_probes(probe_before,probe_after,distributed)
-            kl_started=time.perf_counter()
-            _,post_records,post_adv=collect_records(local,owned,len(indices))
-            post=chain_diagnostics(from_records(post_records),post_adv,clip=clip)
-            kl_seconds=max(distributed.all_gather_object(time.perf_counter()-kl_started))
+            if post is None:
+                measured=time.perf_counter()
+                _,post_records,post_adv=collect_records(local,owned,len(indices))
+                post=chain_diagnostics(from_records(post_records),post_adv,clip=clip)
+                kl_elapsed+=time.perf_counter()-measured
+            kl_seconds=max(distributed.all_gather_object(kl_elapsed))
             local_sources=Counter(meta['dataset_id'] for sample in bc_report.get('samples',[]) for meta in sample)
             shards=distributed.all_gather_object(dict(batch=bc_report['batch_size'],loss=bc_report['loss'],sources=dict(local_sources)))
             sources=Counter()
@@ -131,12 +157,12 @@ def actor_update(policy,optimizer,rows,targets,cache,manifest,controller,*,distr
                 per_denoising_step=[dict(step=s+15,joint_kl=distribution(post_records[:,s,0]),
                     mean_coordinate_kl=distribution(post_records[:,s,1])) for s in range(4)],
                 gradient_contributions=contributions,total_gradient_norm=total_norm,gradient_clip_factor=clip_factor,
-                parameter_update=parameter_report,output_change=output_change,
+                parameter_update=parameter_report,output_change=output_change,trust_region=transaction,
                 bc_global_samples=sum(s['batch'] for s in shards),bc_samples_by_source=dict(sources),
                 bc_loss=sum(s['batch']*s['loss'] for s in shards)/global_bc,
                 learning_rate=optimizer.param_groups[0]['lr'],ppo_ratio_seconds=ratio_seconds,
                 ppo_backward_seconds=ppo_seconds,ppo_seconds=ratio_seconds+ppo_seconds,
-                bc_seconds=bc_seconds,post_step_kl_seconds=kl_seconds,
+                bc_seconds=bc_seconds,post_step_kl_seconds=kl_seconds,optimizer_transaction_seconds=transaction_seconds,
                 wall_seconds=max(distributed.all_gather_object(time.perf_counter()-started)))
             reports.append(report)
             if step_observer is not None:step_observer(report)
@@ -147,7 +173,9 @@ def actor_update(policy,optimizer,rows,targets,cache,manifest,controller,*,distr
             if stop_reason:break
         if stop_reason:break
     return dict(objective='full_chain_clipped_ppo',ppo_clip_applied=True,optimizer_steps=len(reports),
-        attempted_optimizer_steps=len(reports),executed_optimizer_steps=len(reports),
+        attempted_optimizer_steps=sum((r['trust_region'] or {}).get('attempt_count',1) for r in reports),
+        rejected_step_candidates=sum((r['trust_region'] or {}).get('backtracks',0) for r in reports),
+        executed_optimizer_steps=len(reports),
         accepted_optimizer_steps=None,acceptance_scope='pending_full_rollout_joint_KL',
         planned_optimizer_steps=planned_steps,skipped_optimizer_steps=planned_steps-len(reports),
         steps=reports,epoch_orders=orders,early_stop_reason=stop_reason,discarded_pending_minibatch=discarded,

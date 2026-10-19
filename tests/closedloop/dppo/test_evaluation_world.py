@@ -13,6 +13,16 @@ from gem.closedloop.dppo.periodic_monitor import build_balanced_plan
 from tests.closedloop.dppo.test_periodic_monitor import Catalog
 
 
+def test_mc_parallel_capacity_does_not_change_actor_evaluation_protocol():
+    from gem.closedloop.dppo.vector_evaluation import isolated_env_count
+    c=SimpleNamespace(stage={'evaluation':{'envs_per_rank':4},
+        'critic':{'complete_mc':{'envs_per_rank':32}}})
+    assert isolated_env_count(c,'mc_preheat_train')==32
+    assert isolated_env_count(c,'mc_preheat_val_retry1')==32
+    assert isolated_env_count(c,'initial')==4
+    assert isolated_env_count(c,'final')==4
+
+
 def test_long_song_distribution_preserves_noise_and_groups(tmp_path):
     plan=build_balanced_plan(Catalog(tmp_path),samples_per_source=4)
     for i,t in enumerate(plan['tasks']):t['remaining_music_seconds']=1.+i//2

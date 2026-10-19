@@ -1,11 +1,12 @@
-"""统一Actor学习率的单步KL回溯事务，只用于显式有限实验。
+"""统一Actor学习率的单步KL回溯事务，供完整链PPO和数学参考调用。
 
 调用前完成一次全批量PPO/BC合成与裁剪。本模块保留模型、AdamW、BC控制器、指定
 生成器及Python/NumPy/Torch随机状态，每次从相同起点用固定梯度执行一次AdamW，
-按1、1/2、1/4等有限次数尝试。KL必须在同一真实旧链上覆盖全部可训练四步；
-所有rank共同接受或拒绝，冻结参数不允许进入优化器。失败尝试的预算不退款。
+按1、1/2、1/4等有限次数尝试。生产检查当前完整链mini-batch的全部四步；
+所有rank共同接受或拒绝，冻结参数不允许进入优化器或参数快照。失败尝试的预算不退款。
 此处不提高噪声、不截断概率，也不改写行为统计；全部失败恢复起点并返回拒绝证据，
-由训练器拒绝整轮。单步通过后训练器仍执行独立最终KL审查。
+由训练器拒绝整轮。单步通过后训练器仍执行完整rollout最终KL审查。
+梯度与BC只计算一次，候选从相同Adam时刻重试；不靠重复Adam累计动量缩小步长。
 """
 from __future__ import annotations
 
@@ -37,6 +38,12 @@ def check_candidate_kl(report, limits):
             value = report['chain_joint_kl'][name]
             if not math.isfinite(value) or value > bound:
                 result['failures']['chain_joint_'+name] = dict(value=value, limit=bound)
+    for field,bound,upper in (('importance_weight_ess_fraction',limits.get('minimum_ess'),False),
+                             ('active_clip_fraction',limits.get('maximum_active_clip'),True)):
+        if bound is not None:
+            value=report[field]
+            if not math.isfinite(value) or (value>bound if upper else value<bound):
+                result['failures'][field]=dict(value=value,limit=bound)
     result['passed'] = not result['failures']
     result['joint_gate_is_empirical_not_theoretical_safety'] = True
     return result
@@ -51,18 +58,25 @@ def backtracked_step(actor, optimizer, controller, *, evaluate, limits, distribu
     initial_lr = float(group['lr'])
     if not math.isfinite(initial_lr) or not 0 < initial_lr <= 1e-5:
         raise ValueError('Explicit experimental Actor LR must be in (0,1e-5]')
-    model = copy.deepcopy(actor.state_dict())
+    model = {n:p.detach().clone() for n,p in actor.named_parameters() if p.requires_grad}
     adam = copy.deepcopy(optimizer.state_dict())
     control = copy.deepcopy(controller.state_dict())
     rng = capture_local_rng(generators)
-    grads = {n: None if p.grad is None else p.grad.detach().clone() for n, p in actor.named_parameters()}
+    # Adam与no-grad KL前向都不修改梯度；保留所有权及版本，避免复制第三份大向量。
+    grads = {n:p.grad for n,p in actor.named_parameters() if p.requires_grad}
+    versions = {n:g._version for n,g in grads.items() if g is not None}
     def restore():
-        actor.load_state_dict(model)
+        with torch.no_grad():
+            for n,p in actor.named_parameters():
+                if n in model:p.copy_(model[n])
         optimizer.load_state_dict(copy.deepcopy(adam))
         controller.load_state_dict(control)
         restore_local_rng(rng, generators)
-        for n, p in actor.named_parameters():
-            p.grad = None if grads[n] is None else grads[n].clone()
+        for n,p in actor.named_parameters():
+            if n in grads:
+                if grads[n] is not None and grads[n]._version!=versions[n]:
+                    raise RuntimeError('KL candidate evaluation modified the fixed gradient')
+                p.grad=grads[n]
     trials = []
     try:
         for index in range(max_attempts):
@@ -74,13 +88,17 @@ def backtracked_step(actor, optimizer, controller, *, evaluate, limits, distribu
                 reserve_attempt()
             started = time.perf_counter()
             local_call(distributed,optimizer.step)
-            with torch.no_grad():
-                kl = evaluate()
-                acceptance = check_candidate_kl(kl, limits)
+            try:
+                with torch.no_grad():
+                    kl = evaluate()
+                    acceptance = check_candidate_kl(kl, limits)
+            except FloatingPointError as error:
+                kl=None
+                acceptance=dict(passed=False,failures={'numerical':str(error)})
             flags = distributed.all_gather_object(acceptance['passed'])
             if any(flag != flags[0] for flag in flags):
                 raise RuntimeError('Ranks disagree on backtracking acceptance')
-            diagnostics = observe() if observe is not None else None
+            diagnostics = observe() if observe is not None and kl is not None else None
             trials.append(dict(attempt=index+1, learning_rate=lr, factor=factor**index,
                 kl=kl, acceptance=acceptance, diagnostics=diagnostics,
                 wall_seconds=max(distributed.all_gather_object(time.perf_counter()-started))))

@@ -95,6 +95,7 @@ def main():
     parser.add_argument('--output-dir',type=Path,required=True)
     parser.add_argument('--learning-rates',type=float,nargs='+',default=[1e-6,3e-6,1e-5])
     parser.add_argument('--epochs',type=int,default=1)
+    parser.add_argument('--adaptive-kl',action='store_true',help='实际联合KL回溯；各LR为候选上限而非承诺接受步长')
     args=parser.parse_args()
     rank=int(os.environ['RANK']);world=int(os.environ['WORLD_SIZE']);local=int(os.environ['LOCAL_RANK'])
     if world!=8 or rank!=local:raise ValueError('Requires one explicitly allocated eight-GPU node')
@@ -147,10 +148,13 @@ def main():
             optimizer.param_groups[0]['lr']=lr
             started=time.perf_counter();torch.cuda.reset_peak_memory_stats(distributed.device)
             try:
+                trust=copy.deepcopy(config['stage9']['trust_region']) if args.adaptive_kl else None
+                if trust is not None:trust['maximum_lr']=lr
                 report=actor_update(policy,optimizer,rows,targets,cache,manifest,controller,distributed=distributed,
                     anchor=anchor,generator=generators['actor'],ppo_epochs=args.epochs,minibatch_chains=2048,
                     microbatch=128,clip=.1,soft_kl=config['stage9']['kl_soft_stop_chain_joint'],
-                    bc_samples_per_rollout=2048*args.epochs,bc_min_global_batch=256)
+                    bc_samples_per_rollout=2048*args.epochs,bc_min_global_batch=256,
+                    trust_region=trust,kl_limits=config['stage10']['kl'])
                 kl=final_kl(policy,rows,cache,manifest,distributed=distributed,microbatch=128,clip=.1)
                 acceptance=check_candidate_kl(kl,config['stage10']['kl'])
                 report['accepted_optimizer_steps']=report['optimizer_steps'] if acceptance['passed'] else 0

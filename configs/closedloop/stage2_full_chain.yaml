@@ -87,6 +87,7 @@ stage10:
     sentinel_chains_per_rank: 1
   critic:
     complete_mc:
+      envs_per_rank: 32
       enabled: true
       epochs: 96
       every_control_steps: 100000000
@@ -187,7 +188,7 @@ stage10:
     accepted_iterations: 2000
     control_steps: 1100000000
     generations: 40000000
-    optimizer_attempts: 80000
+    optimizer_attempts: 640000
     physics_steps: 4400000000
   performance:
     bc_batch_forward: true
@@ -302,7 +303,12 @@ stage10:
     checkpoint_interval_iterations: 100
   training:
     actor_lr: 1.0e-06
-    actor_lr_control: fixed
+    actor_lr_control: joint_kl_backtracking
+    trust_region:
+      maximum_lr: 1.0e-06
+      growth: 1.25
+      margin: 0.8
+      max_attempts: 8
     bc_prefix:
       max_frames: 30
       min_frames: 6

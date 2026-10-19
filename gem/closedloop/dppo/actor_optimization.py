@@ -33,6 +33,7 @@ def optimization_binding(stage):
         chain_clip_saturation=t['max_active_clip_fraction'],minimum_ess=t['min_ess_fraction'],
         hard_kl={key:value for key,value in stage['kl'].items() if key!='calibration'},
         soft_chain_joint_kl=t['kl_soft_stop_chain_joint'],rollout=stage['ppo_rollout'],
+        trust_region=t['trust_region'],
         gamma_upper=t['gamma_upper'],lambda_upper=t['lambda_upper'],dataset=stage['dataset'],
         mc_start_distribution=stage['critic']['complete_mc']['start_distribution'],
         run_contract=stage['actor_optimization'])
@@ -45,9 +46,15 @@ def validate_optimization_configuration(config,maximum_steps):
             or t['ppo_epochs']<1 or maximum_steps<1
             or s['scale']['actor_minibatch_chains']<1
             or t['objective_logprob_reduction']!='joint_sum' or t['gamma_denoising']!=1.
-            or t['actor_lr_control']!='fixed' or not math.isfinite(t['actor_lr']) or t['actor_lr']<=0):
+            or t['actor_lr_control']!='joint_kl_backtracking' or not math.isfinite(t['actor_lr']) or t['actor_lr']<=0):
         raise ValueError('Explicit full-chain joint PPO with one undiscounted GAE and uniform Actor LR required')
-    if s['limits']['optimizer_attempts']<s['limits']['accepted_iterations']*maximum_steps:
+    trust=t['trust_region']
+    if (set(trust)!={'maximum_lr','growth','margin','max_attempts'}
+            or trust['maximum_lr']!=t['actor_lr'] or not 1<=trust['growth']<=2
+            or not 0<trust['margin']<1 or type(trust['max_attempts'])is not int
+            or not 1<=trust['max_attempts']<=10):
+        raise ValueError('Explicit bounded joint-KL backtracking required')
+    if s['limits']['optimizer_attempts']<s['limits']['accepted_iterations']*maximum_steps*trust['max_attempts']:
         raise ValueError('Budget must cover every planned optimizer update')
     if s['kl']['reduction']!='chain_joint':raise ValueError('Trust-region must use complete-chain joint KL')
     for key in ('mean_coordinate','maximum_step_mean_coordinate','p95_coordinate','mean_joint'):

@@ -141,12 +141,31 @@ def test_configuration_binds_every_actual_optimizer_choice(tmp_path):
     c=yaml.safe_load(source.read_text())
     c['stage10']['kl']['calibration']=configuration(source)['stage10']['kl']['calibration']
     c['stage10']['training']['actor_lr']=3e-6
+    c['stage10']['training']['trust_region']['maximum_lr']=3e-6
     p=tmp_path/'changed.yaml';p.write_text(yaml.safe_dump(c))
     with pytest.raises(ValueError,match='binding'):configuration(p)
     c=yaml.safe_load(source.read_text())
     c['stage10']['training']['actor_objective']='coordinate_dppo'
     p.write_text(yaml.safe_dump(c))
     with pytest.raises(ValueError,match='full-chain'):configuration(p)
+
+
+def test_numerical_candidate_rejected_then_retried_without_extra_adam_time():
+    actor,opt,c=setup();count=[]
+    def evaluate():
+        count.append(opt.param_groups[0]['lr'])
+        if len(count)==1:raise FloatingPointError('explicit ratio underflow')
+        return kl(0.)
+    result=backtracked_step(actor,opt,c,evaluate=evaluate,limits={},distributed=Collective())
+    assert result['accepted_lr']==5e-7 and result['attempt_count']==2
+    assert result['attempts'][0]['acceptance']['failures']['numerical']=='explicit ratio underflow'
+    assert all(float(s['step'])==2 for s in opt.state.values())
+
+
+def test_ess_collapse_cannot_pass_small_kl():
+    report=kl(0.)
+    report['importance_weight_ess_fraction']=.001
+    assert not check_candidate_kl(report,{'minimum_ess':.05})['passed']
 
 
 def test_real_policy_full_batch_one_step_and_no_old_chain_mutation(tmp_path,actor_factory):
