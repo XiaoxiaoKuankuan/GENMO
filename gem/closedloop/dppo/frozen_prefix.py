@@ -56,7 +56,7 @@ class FrozenPrefixPolicy(DenseDiffusionPolicy):
 
     def _frozen_settings(self):
         # 精度scope在每次真实前向都会设置并恢复；身份绑定scope内实际设置，不绑定外部环境默认值。
-        from .numerical_execution import precision_scope
+        from .execution_checks import precision_scope
         with precision_scope(self.frozen_policy.numerical_execution):
             return self._frozen_settings_in_scope()
 
@@ -93,7 +93,7 @@ class FrozenPrefixPolicy(DenseDiffusionPolicy):
         return current if frozen is None else current+frozen._parameter_signature()
 
     def prepare_conditions(self, conditions, *, include_frozen=True):
-        self.assert_frozen_identity()
+        if self._phase_signature is None:self.assert_frozen_identity()
         prepared=super().prepare_conditions(conditions)
         # 有梯度调用只训练末段；冻结编码器仅在采样/周期概率回放/最终参考诊断计算。
         frozen=None

@@ -7,7 +7,8 @@ Actor优化器、RNG、BC游标或累计PPO轮数，因此不是训练checkpoint
 价值目标定义（上层gamma/lambda与MC/TD候选比例）同样绑定：MC回报按gamma折扣、
 TD候选按lambda构造，二者不同时预热价值尺度不可复用。
 同时记录实际预热TD片段时长：含TD的选中成果只能用于相同片段时长；选中纯MC时，
-完整episode标签不依赖PPO窗口，允许4/8秒窗口共享同一固定Actor的初始化成果。
+从歌曲开头的完整episode标签不依赖PPO窗口；随机reset的合法起点受最短剩余窗口影响，
+因此随机起点MC即便选纯MC也绑定窗口与初始化分布，不能跨4/8秒伪复用。
 冻结编码器必须逐元素一致；所有验证完成前不修改Critic。旧Actor版本数据不能
 用于新Actor的MC监督，导入只允许尚未进行Actor更新的s595000初始化阶段。
 来源MC交互单列记录并纳入累计训练交互，当前运行预算只结算本运行新增物理执行。
@@ -34,7 +35,8 @@ def _value_targets(identity):
     """预热MC标签与TD候选实际使用的价值目标定义。"""
     return dict(gamma_upper=identity['training']['gamma_upper'],
         lambda_upper=identity['training']['lambda_upper'],
-        mix_candidates=list(identity['critic']['complete_mc']['mix_candidates']))
+        mix_candidates=list(identity['critic']['complete_mc']['mix_candidates']),
+        mc_start_distribution=identity['critic']['complete_mc'].get('start_distribution','beginning'))
 
 
 def _supervision(identity, validation):
@@ -47,7 +49,7 @@ def _supervision(identity, validation):
             or not math.isfinite(seconds) or seconds <= 0):
         raise ValueError('Invalid selected preheat supervision or TD fragment duration')
     return dict(selected_mc_ratio=ratio, td_fragment_world_seconds=seconds,
-        window_independent=ratio == 1.)
+        window_independent=ratio == 1. and identity['critic']['complete_mc'].get('start_distribution','beginning')=='beginning')
 
 
 def _critical_sources(root):
@@ -58,11 +60,10 @@ def _critical_sources(root):
         ('actor.py', 'contracts.py', 'online_conditions.py', 'training.py','evaluation_music.py')]
     files += [p for p in (root/'gem/closedloop/dppo').glob('*.py') if p.name in
         ('policy.py', 'dense_policy.py', 'batch_execution.py', 'fixed_tile_linear.py',
-         'compensated_gemm.py', 'compiled_forward.py', 'cuda_graph_forward.py', 'dense_attention.py',
          'frozen_prefix.py','run_control.py','env_adapter.py','vector_environment.py',
          'evaluation.py','evaluation_world.py','vector_evaluation.py',
          'world_collector.py','time_sampling.py','motion_initialization.py','target_activity.py',
-         'full_dataset.py','runtime.py','mc_calibration.py','complete_episode.py','trainer.py',
+         'full_dataset.py','runtime.py','mc_calibration.py','complete_episode.py','reference_credit.py','trainer.py',
          'pretrained_critic.py','tracking_context.py','joint_limits.py','vector_generation.py','updater.py',
          'rewards.py','columnar_reward.py','vector_reward_adapter.py','vector_reward_math.py')
         or p.name.startswith('stable_')]

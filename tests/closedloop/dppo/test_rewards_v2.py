@@ -1,10 +1,8 @@
-"""第二版 Stage9 实际执行奖励的独立解析验收。
+"""当前奖励中的实际活动度、执行器代价、接触和完整性门禁回归。
 
-测试按用户公式手算积分、活动门控、指数分数、PD 目标变化、饱和力矩代价、接触与
-关节安全边距。合成执行记录包含四个明确时间戳的 200Hz 子步及配对目标活动度，
-用于验证接口和数值语义，不声称代表真实机器人质量。额外故障用例验证缺少配对
-监督、程序性参考不一致和采样时间证据时不能静默生成有效训练数据；RPC 分段
-因果性与恢复由已有集成测试覆盖。所有测试只运行 CPU，不生成正式训练产物。
+八项Tracking、0.7/0.3参考/实际限位和禁用音乐/stable由当前stage2_reward与
+physical_reward专门验证；本文件只保留仍在当前实现使用的独立物理分项检查。
+旧六项Tracking、独立稳定性、音乐评分及饱和限位公式的专用测试已经删除。
 """
 from __future__ import annotations
 
@@ -33,49 +31,10 @@ def component(row, name, value=1.):
     return result["components"][name]
 
 
-def test_formula_integrates_once_and_event_penalties_do_not_use_dt():
-    calculator = reward()
-    result = calculator.evaluate_step(actual_step(speed=1.))
-    assert result["version"] == "stage9.execution_reward.v2"
-    assert result["reward"] == pytest.approx(.02 * (2.5 + 2. * .3 + 1. + .5))
-    assert result["reward"] == pytest.approx(sum(item["integrated_reward"] for item in result["components"].values()))
-    assert result["reward"] == pytest.approx(.02 * sum(item["weighted_rate"] for item in result["components"].values()))
-    assert calculator.event_reward("physical_failure") == -5.
-    assert calculator.event_reward("plan_rejected") == -.5
-    for reason in ("music_end", "collection_limit", "rollout_truncated", "infrastructure_failure"):
-        assert calculator.event_reward(reason) == 0.
 
 
-@pytest.mark.parametrize("key,error_key,std,weight", [
-    ("anchor_pos", "anchor_position_error_sq_m2", .3, 1 / 7),
-    ("anchor_ori", "anchor_orientation_error_sq_rad2", .4, 1 / 7),
-    ("body_pos", "body_position_mean_error_sq_m2", .3, 2 / 7),
-    ("body_ori", "body_orientation_mean_error_sq_rad2", .4, 2 / 7),
-    ("joint_pos", "joint_position_mean_error_sq_rad2", .25, 1 / 7),
-    ("joint_vel", "joint_velocity_mean_error_sq_rad2_s2", 1.4, 0.),
-])
-def test_tracking_uses_gmt_squared_errors_without_realigning(key, error_key, std, weight):
-    row = actual_step(speed=1.)
-    row["motion_tracking"]["terms"][key]["error"] = std ** 2
-    # GENMO 不另造坐标对齐，也不使用旧 RMSE/yaw 标量替代当前 MotionCommand 诊断。
-    row["actual_qpos"][:3] = 999.
-    row["reference"]["body_pos_w"][:] = 999.
-    for legacy_key in ("joint_position_rmse_rad", "joint_velocity_rmse_rad_s",
-                       "end_effector_relative_height_error_m", "yaw_error_rad", "root_position_error_m"):
-        row["errors"][legacy_key] = 999.
-    result = component(row, "track")
-    assert result["score"] == pytest.approx(1 - weight + weight * math.exp(-1))
-    assert result["raw"][error_key] == std ** 2
-    assert result["normalized"]["error_over_std_squared"][key] == pytest.approx(1.)
-    assert result["normalized"]["scores"][key] == pytest.approx(math.exp(-1))
 
 
-def test_stability_only_height_and_non_yaw_not_dynamic_motion_penalty():
-    row = actual_step(speed=100.)
-    row["actual_root_ang_vel_b"][:] = 999.
-    row["errors"]["root_height_error_m"] = .05
-    row["errors"]["non_yaw_orientation_error_rad"] = .12
-    assert component(row, "stable")["score"] == pytest.approx(math.exp(-1))
 
 
 def test_alive_failure_is_zero_without_hiding_terminal_event():
@@ -93,24 +52,8 @@ def test_alive_failure_is_zero_without_hiding_terminal_event():
     assert result["components"]["alive"]["score"] == 0
 
 
-def test_stationary_active_target_gets_no_positive_track_or_music_contribution():
-    result = reward().evaluate_step(actual_step())
-    assert result["transition_valid"]
-    assert result["activity"]["gate"] == 0
-    assert result["components"]["track"]["score"] == 1
-    assert result["components"]["track"]["weighted_rate"] == 0
-    assert result["components"]["music"]["weighted_rate"] == 0
-    assert result["reward"] == pytest.approx(.03)
 
 
-def test_inactive_paired_target_gives_full_gate_and_log_intensity_matches():
-    result = reward(0.).evaluate_step(actual_step())
-    assert result["activity"]["gate"] == 1
-    assert result["activity"]["intensity_score"] == 1
-    assert result["reward"] == pytest.approx(.092)
-    result = reward(1.).evaluate_step(actual_step(speed=2.05))
-    assert result["activity"]["intensity_log_ratio"] == pytest.approx(1.)
-    assert result["activity"]["intensity_score"] == pytest.approx(math.exp(-1))
 
 
 def test_activity_is_actual_velocity_rms_over_exact_matching_causal_window():
@@ -128,13 +71,6 @@ def test_activity_is_actual_velocity_rms_over_exact_matching_causal_window():
     assert result["activity"]["target_activity_rad_s"] == 1.
 
 
-def test_partial_window_has_explicit_beat_unavailable_but_valid_intensity():
-    result = reward().evaluate_step(actual_step(speed=1.))
-    raw = result["components"]["music"]["raw"]
-    assert not result["activity"]["window_complete"]
-    assert not raw["beat_valid"] and raw["beat_reason"] == "insufficient_causal_history"
-    assert raw["intensity_valid"]
-    assert result["components"]["music"]["score"] == .3
 
 
 @pytest.mark.parametrize("bad", ["absent", "window", "nonfinite", "no_source", "invalid"])
@@ -261,24 +197,8 @@ def test_link_slide_fallback_is_explicitly_named_proxy():
     assert result["raw"]["samples"][0]["slide_velocity_semantics"] == "ankle_link_horizontal_velocity_slide_proxy"
 
 
-def test_joint_limit_uses_max_actual_and_current_reference_with_five_percent_fallback():
-    row = actual_step(speed=1.)
-    row["actual_joint_pos_gmt"][0] = 1.9
-    row["reference"]["joint_pos"][1] = -2.
-    result = component(row, "joint_limit")
-    assert result["score"] == pytest.approx(.5 * .5 + .5 * 1.)
-    assert result["raw"]["safe_limits_source"] == "hard_range_inner_margin"
-    np.testing.assert_allclose(result["raw"]["safe_limits_rad"], np.tile([-1.8, 1.8], (21, 1)))
 
 
-def test_existing_soft_joint_limits_are_reused_and_costs_clipped():
-    row = actual_step(speed=1.)
-    row["physical_diagnostics"]["soft_joint_pos_limits_rad"] = np.tile([-1., 1.], (21, 1))
-    row["actual_joint_pos_gmt"][0] = 1.5
-    row["reference"]["joint_pos"][1] = -99.
-    result = component(row, "joint_limit")
-    assert result["score"] == pytest.approx(.75)
-    assert result["raw"]["safe_limits_source"] == "backend_soft_joint_position_limits"
 
 
 @pytest.mark.parametrize("key", ["joint_vel_rms_rad_s", "root_lin_vel_rms_m_s", "root_ang_vel_rms_rad_s"])

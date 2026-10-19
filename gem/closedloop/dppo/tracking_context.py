@@ -10,7 +10,7 @@ from __future__ import annotations
 import torch
 from gem.closedloop.contracts import STAGE1_CONDITION_KEYS, validate_stage1_condition_batch
 
-SCHEMA='genmo.critic.causal_tracking90.v1'
+SCHEMA='genmo.critic.causal_tracking90.v2'
 TRACKING_KEYS=('tracking_history','tracking_history_valid','tracking_history_times','tracking_reference_times')
 
 
@@ -51,7 +51,7 @@ def build_critic_context(actor_context,snapshot):
 def build_critic_context_batch(actor_context,snapshots):
     """同一决策批次合并H2D和因果核验；按原整数tick在CPU做FP64秒转换。"""
     if len(snapshots)!=len(actor_context['decision_time']) or any(
-            s.get('tracking_history_schema')!='gmt.causal_tracking_history90.v1' for s in snapshots):
+            s.get('tracking_history_schema')!='gmt.causal_tracking_history90.v2' for s in snapshots):
         raise ValueError('Backend has no audited causal tracking history')
     device=actor_context['decision_time'].device
     def tensor(key,dtype,scale=1.):

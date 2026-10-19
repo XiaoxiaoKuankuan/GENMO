@@ -1,115 +1,38 @@
 #!/usr/bin/env python3
-"""第十步完整 held-out 评估的只读、逐任务配对比较。
+"""当前第二阶段固定歌曲、种子与物理合同的逐任务配对比较。
 
-输入必须是 evaluation_shards 合并发布的两个完整报告，具有同一份父计划、完整
-task_id 集合、采样噪声起点、音乐切点、最长 episode 时长、训练/奖励/执行身份和
-分片工具实现 SHA；两个 checkpoint SHA 必须不同。完成标记、独立验收、报告和
-逐 episode 文件的 SHA 都重新核验。不会加载模型、调用 GPU、执行优化或重定义
-奖励；所有全体/来源/seed 奖励统计直接复用 aggregate_evaluation。
-
-输出保留每个 task 的初始值、最终值和差值，同时区分固定任务平均与真实执行区间
-加权指标。失败提前结束会缩短实际执行时长，控制区间平均可能存在幸存偏差，因此
-总回报、执行时长、失败及拒绝必须共同报告；不能仅从奖励率上涨推断策略提升。
-四类失败配对始终完整列出：双方未失败、新增失败、失败恢复、双方失败，不删除
-不利样本。少量更新前后结果仅是固定任务的小步比较，不证明收敛或长期改进。
-
-命令行只在指定的新 output 文件发布比较 JSON，不修改输入、源代码、checkpoint
-或原始评估证据；正式原始记录必须来自可信运行。临时文件原子发布且拒绝覆盖。
-显式--mode periodic_subset可比较周期均衡子集的内存模型评估：要求原32任务计划、
-逐episode来源文件SHA和模型指纹一致性证据，结果明确不是完整val/test验收；默认
-full_val仍保留原完整checkpoint/分片/独立审计的严格要求，不自动降级成小子集。
+读取periodic_monitor产生的当前32任务合并报告，重验原episode与无损控制侧车
+的SHA、完整任务计划、奖励积分聚合及模型不变证据。保留新增失败、恢复失败、
+双方失败和双方成功四类，分别报告总回报、真实时长、每秒回报与活动度。
+仅处理当前报告，不加载退役分片验收、旧checkpoint或历史配置；固定子集结果
+始终标记为非完整留出集验收。只读输入，输出须为新路径，不运行模型或物理。
 """
 from __future__ import annotations
 
 import argparse
-import math
 import sys
 from pathlib import Path
 
 if __package__ in (None, ''):
     sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from gem.closedloop.dppo.evaluation import _digest, _publish_json, _stats, aggregate_evaluation
-from tools.eval.audit_closedloop_stage10 import read_json, require, sha256
+from gem.closedloop.dppo.evaluation import _publish_json, _stats, aggregate_evaluation
+from gem.closedloop.dppo.compact_evidence import read_episode
+from gem.closedloop.dppo.training_checkpoint import file_sha256 as sha256
+import json
 
 VERSION = 'genmo.closedloop.stage10.paired_comparison.v1'
-MERGE_VERSION = 'genmo.closedloop.stage10.evaluation_merge.v1'
 FAILURE_GROUPS = ('both_without_failure', 'new_failure', 'failure_recovered', 'both_failed')
 
 
-def _path(root, reference):
-    value = (root/reference).resolve()
-    require(value.is_relative_to(root) and value.is_file(), 'Comparison artifact missing or outside merged directory')
-    return value
+def require(condition, message):
+    if not condition:
+        raise ValueError(message)
 
 
-def _finite(value, name):
-    require(type(value) in (int, float) and math.isfinite(value), f'Nonfinite comparison evidence: {name}')
-    return float(value)
-
-
-def _close(left, right, name):
-    require(math.isclose(_finite(left, name), _finite(right, name), abs_tol=1e-8, rel_tol=1e-9), f'Comparison evidence differs: {name}')
-
-
-def _load_merged(report_path):
-    report_path = Path(report_path).resolve()
-    root = report_path.parent
-    report = read_json(report_path)
-    completion = read_json(root/'completion.json')
-    audit_path = root/'independent_audit.json'
-    audit = read_json(audit_path)
-    report_sha = sha256(report_path)
-    require(completion.get('schema')==MERGE_VERSION+'.completion' and completion.get('status')=='passed', 'Merged evaluation has no successful completion marker')
-    require(completion.get('report_sha256')==report_sha and completion.get('audit_sha256')==sha256(audit_path), 'Merge completion SHA differs')
-    require(audit.get('schema')==MERGE_VERSION and audit.get('status')=='passed' and audit.get('report_sha256')==report_sha, 'Independent merge audit did not pass or names different report')
-    require(report.get('merge_schema')==MERGE_VERSION and report.get('status')=='passed', 'Input must be a complete successful merged evaluation')
-    assertions = report['merge_assertions']
-    require(assertions.get('exact_full_parent_task_set') is True and assertions.get('duplicate_tasks')==0
-            and assertions.get('original_task_identity_and_noise_preserved') is True
-            and assertions.get('all_shards_independently_audited') is True, 'Merge did not establish complete unaltered tasks')
-    require(bool(audit.get('shards')) and all(row.get('status')=='passed' for row in audit['shards']), 'A shard was not independently accepted')
-    require(report.get('updates_performed') is False and report.get('training_buffer_used') is False
-            and report.get('actor_gradients_unchanged') is True and report.get('rng_restored') is True,
-            'Evaluation changed optimizer/gradient/RNG boundary')
-    require(bool(report.get('networks_unchanged')) and all(report['networks_unchanged'].values())
-            and report['network_fingerprints_before']==report['network_fingerprints_after'], 'Evaluation changed a network')
-    checkpoint = Path(report['actor_identity']['checkpoint']).resolve()
-    require(checkpoint.is_file() and sha256(checkpoint)==report['actor_identity']['sha256'], 'Explicit evaluated checkpoint file SHA differs')
-    plan = read_json(_path(root, report['selection_path']))
-    require(_digest({key: value for key, value in plan.items() if key!='plan_sha256'})==plan['plan_sha256']==report['plan_sha256'], 'Parent plan digest differs')
-    require(plan.get('requested_eval_count')=='all' and plan['selected_sample_count']==plan['complete_pool_count']
-            and plan['split'] in ('val', 'test') and len(plan['seeds'])>=2, 'Comparison requires the full held-out paired-sample pool and multiple seeds')
-    tasks = plan['tasks']
-    ids = [task['task_id'] for task in tasks]
-    require(len(ids)==len(set(ids))==plan['task_count']==plan['selected_sample_count']*len(plan['seeds']), 'Parent tasks duplicate or omit a sample/seed')
-    require(len(tasks)==report['requested_task_count']==report['completed_episode_count']==len(report['episode_manifests']), 'Merged episode count differs from full parent plan')
-    extension = report['extension_provenance']
-    require(extension.get('included_in_original_checkpoint_identity') is False and bool(extension.get('files')), 'Missing independent evaluation implementation identity')
-    require(_digest([(row['relative_path'], row['sha256']) for row in extension['files']])==extension['source_manifest_sha256'], 'Evaluation implementation manifest SHA differs')
-    episodes = []
-    for task, reference in zip(tasks, report['episode_manifests']):
-        path = _path(root, reference['path'])
-        require(sha256(path)==reference['sha256'], 'Episode bytes differ from merged publication')
-        episode = read_json(path)
-        require(episode.get('transition_valid') is True and reference.get('transition_valid') is True
-                and episode['task_id']==reference['task_id']==task['task_id'], 'Episode invalid or not aligned with full task order')
-        for key in ('dataset', 'sample_id', 'split', 'seed', 'music_start_frame', 'noise_index_start'):
-            require(episode[key]==task[key], f'Episode task or noise changed: {key}')
-        require(episode['episode_seconds_limit']==report['episode_seconds_limit']==plan['episode_seconds'], 'Episode configured duration changed')
-        _close(episode['full_music_seconds'], task['full_music_seconds'], 'full music duration')
-        _close(episode['remaining_music_seconds'], task['remaining_music_seconds'], 'remaining music duration')
-        controls = [row for decision in episode['decisions'] for row in decision['controls']]
-        seconds = sum(_finite(row['dt_s'], 'control dt') for row in controls)
-        maximum = task['remaining_music_seconds'] if plan['episode_seconds'] is None else min(task['remaining_music_seconds'], plan['episode_seconds'])
-        require(seconds<=maximum+.02000001, 'Executed time exceeds the agreed task window')
-        for decision in episode['decisions']:
-            require(len(decision['controls'])==decision['executed_control_steps'] and decision['executed_physics_steps']==4*decision['executed_control_steps'], 'Episode actual control/physics counts differ')
-            _close(decision['reward_sum'], sum(row['reward'] for row in decision['controls'])+decision['zero_step_event_reward'], 'decision actual reward')
-        _close(episode['reward_sum'], sum(decision['reward_sum'] for decision in episode['decisions']), 'episode actual reward')
-        episodes.append(episode)
-    require(aggregate_evaluation(episodes)==report['aggregate'], 'Merged reward aggregate cannot be reproduced')
-    return report, plan, episodes, {'path': str(report_path), 'sha256': report_sha}
+def read_json(path):
+    return json.loads(Path(path).read_text(encoding='utf-8'),
+        parse_constant=lambda value: (_ for _ in ()).throw(ValueError(f'Nonfinite JSON {value}')))
 
 
 def _episode_metrics(episode):
@@ -132,7 +55,7 @@ def _episode_metrics(episode):
 
 
 def _load_periodic(report_path):
-    """显式小子集路径；核验不可变来源文件，不要求训练先落checkpoint。"""
+    """核验当前固定任务及不可变来源文件，不要求训练先落checkpoint。"""
     from gem.closedloop.dppo.periodic_monitor import VERSION as PERIODIC_VERSION
     from gem.closedloop.dppo.periodic_monitor import _episode_row, _plan_valid, _verify_episode
     report_path = Path(report_path).resolve(strict=True)
@@ -149,12 +72,12 @@ def _load_periodic(report_path):
             and assertions.get('full_heldout_acceptance') is False, 'Periodic evidence assertions incomplete')
     require(report.get('evaluation_identity') is not None and bool(report['actor_identity'].get('model_fingerprint')),
             'Periodic comparison requires explicit execution/reward identity and memory model fingerprint')
-    episodes = report['episodes']
     references = report['source_episode_manifests']
+    episodes = [read_episode(reference['path']) for reference in references]
     require(len(episodes) == len(references) == plan['task_count'] == report['task_count'], 'Periodic report omits tasks')
     for task, episode, reference in zip(plan['tasks'], episodes, references):
         path = Path(reference['path']).resolve(strict=True)
-        require(path.is_file() and sha256(path) == reference['sha256'] and read_json(path) == episode,
+        require(path.is_file() and sha256(path) == reference['sha256'],
                 'Periodic original episode bytes differ')
         require(episode.get('transition_valid') is True and reference['task_id'] == task['task_id'],
                 'Periodic episode invalid or out of order')
@@ -196,15 +119,11 @@ def paired_execution_identity(identity):
     return dict(identity,training_identity={k:training[k] for k in required})
 
 
-def compare_evaluations(initial_report, final_report, *, mode='full_val'):
+def compare_evaluations(initial_report, final_report):
     """完整读取和核验后生成比较；调用方负责选择新的输出文件，函数不写输入。"""
-    require(mode in ('full_val', 'periodic_subset'), 'Unknown comparison mode')
-    loader = _load_merged if mode == 'full_val' else _load_periodic
-    initial, parent, initial_episodes, initial_source = loader(initial_report)
-    final, other_parent, final_episodes, final_source = loader(final_report)
+    initial, parent, initial_episodes, initial_source = _load_periodic(initial_report)
+    final, other_parent, final_episodes, final_source = _load_periodic(final_report)
     require(parent==other_parent, 'Initial/final full parent plan, task noise or episode duration differs')
-    if mode == 'full_val':
-        require(initial['actor_identity']['sha256']!=final['actor_identity']['sha256'], 'Comparison requires two different checkpoint files')
     require(paired_execution_identity(initial['training_identity'])==paired_execution_identity(final['training_identity']),
             'Initial/final reward, physics, source, stochastic kernel or execution identity differs')
     require(initial['extension_provenance']['source_manifest_sha256']==final['extension_provenance']['source_manifest_sha256'], 'Initial/final evaluation implementation SHA differs')
@@ -240,10 +159,10 @@ def compare_evaluations(initial_report, final_report, *, mode='full_val'):
               'by_seed': {str(seed): group([index for index in indices if pairs[index]['seed']==seed]) for seed in parent['seeds']},
               'by_failure_pair': {name: group([index for index in indices if pairs[index]['failure_pair']==name]) for name in FAILURE_GROUPS},
               'pairs': pairs}
-    result.update(mode=mode, full_heldout_acceptance=(mode == 'full_val'))
+    result.update(mode='periodic_subset', full_heldout_acceptance=False)
     execution=initial['training_identity'].get('training_identity')
     if execution is not None:
-        from gem.closedloop.dppo.kl_calibration import digest
+        from gem.closedloop.dppo.actor_optimization import digest
         result.update(execution_kernel_sha256=digest(execution['kernel']),
                       execution_reward_sha256=digest(execution['reward']),
                       evaluated_actor_initialization=final['training_identity']['training_identity']['actor_initialization'])
@@ -255,9 +174,8 @@ def main(argv=None):
     parser.add_argument('--initial-report', required=True, type=Path)
     parser.add_argument('--final-report', required=True, type=Path)
     parser.add_argument('--output', required=True, type=Path)
-    parser.add_argument('--mode', choices=('full_val', 'periodic_subset'), default='full_val')
     args = parser.parse_args(argv)
-    result = compare_evaluations(args.initial_report, args.final_report, mode=args.mode)
+    result = compare_evaluations(args.initial_report, args.final_report)
     _publish_json(args.output, result)
     print(f"Stage10 paired comparison passed: {result['paired_task_count']} tasks; output={args.output}")
     return 0

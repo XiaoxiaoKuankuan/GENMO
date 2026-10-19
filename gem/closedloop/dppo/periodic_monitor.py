@@ -170,7 +170,8 @@ def _load_episode(root, reference):
     path = (root/reference['path']).resolve(strict=True)
     _require(path.is_relative_to(root) and path.is_file() and _hash(path) == reference['sha256'],
              'Periodic episode path or SHA differs')
-    episode = json.loads(path.read_text())
+    from .compact_evidence import read_episode
+    episode = read_episode(path)
     _require(episode.get('transition_valid') is True and reference.get('transition_valid') is True
              and episode['task_id'] == reference['task_id'], 'Invalid periodic episode')
     return episode
@@ -321,7 +322,7 @@ def merge_periodic_reports(plan, rankreports, *, baseline=None, evaluation_ident
             duration=_stats([r['executed_seconds'] for r in source_rows]),
             physical_failure_count=sum(r['physical_failure'] for r in source_rows))
     result = dict(schema=VERSION+'.merge', status='passed', mode='periodic_subset', plan=copy.deepcopy(plan),
-        plan_sha256=plan['plan_sha256'], task_count=len(rows), episodes=episodes, episode_metrics=rows,
+        plan_sha256=plan['plan_sha256'], task_count=len(rows), episode_metrics=rows,
         source_episode_manifests=[origins[t['task_id']] for t in plan['tasks']],
         aggregate=aggregate_evaluation(episodes), by_source=by_source, evaluation_identity=_plain(evaluation_identity),
         actor_identity=dict(model_fingerprint=fingerprint), deterministic=deterministic,

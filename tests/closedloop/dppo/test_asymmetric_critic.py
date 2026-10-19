@@ -30,13 +30,13 @@ def test_stage1_initialization_and_trainable_history_cache(actor_factory):
     before=copy.deepcopy(actor.state_dict())
     critic=PretrainedConditionCritic(actor,dimension=32,layers=2,heads=4)
     c=tracking_context(_conditions(batch));f=critic.encode_frozen(c)
-    old=actor.history_encoder.cell;new=critic.tracking_history_encoder.cell
+    old=actor.history_encoder.cell;new=critic.history_encoder.cell
     torch.testing.assert_close(new.weight_ih[:,:48],old.weight_ih[:,:48],atol=0,rtol=0)
     torch.testing.assert_close(new.weight_ih[:,90],old.weight_ih[:,48],atol=0,rtol=0)
     assert torch.count_nonzero(new.weight_ih[:,48:90])==0
     with torch.no_grad():
         expected=actor.history_encoder(f['history_input'][...,:48],f['history_valid'],f['history_relative'])
-        actual=critic.tracking_history_encoder(f['history_input'],f['history_valid'],f['history_relative'])
+        actual=critic.history_encoder(f['history_input'],f['history_valid'],f['history_relative'])
         torch.testing.assert_close(actual,expected,atol=2e-7,rtol=1e-6)
     assert not any(v.requires_grad for v in f.values())
     optimizer=torch.optim.Adam([p for p in critic.parameters() if p.requires_grad],lr=1e-3)

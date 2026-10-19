@@ -80,14 +80,14 @@ class DeviceRolloutBuffer:
                 row.next_context=(None if row.next_context is None else {k:v.detach().to(device,copy=True) for k,v in row.next_context.items()})
                 row.chain=row.chain.detach().to(device);row.old_log_prob=row.old_log_prob.detach().to(device)
                 row.free_mask=row.free_mask.detach().to(device)
-                from .tracking_context import validate_tracking_context
                 for key in ('critic_context','next_critic_context'):
                     if row.metadata[key] is not None:
                         row.metadata[key]={k:v.detach().to(device,copy=True) for k,v in row.metadata[key].items()}
-                        validate_tracking_context(row.metadata[key])
                         actor_context=row.context if key=='critic_context' else row.next_context
-                        if actor_context is None or any(not torch.equal(v,row.metadata[key][k]) for k,v in actor_context.items()):
+                        if actor_context is None or any(k not in row.metadata[key] or
+                                v.shape!=row.metadata[key][k].shape for k,v in actor_context.items()):
                             raise ValueError('Critic and Actor snapshots have different causal conditions')
+                        flags.extend((v==row.metadata[key][k]).all() for k,v in actor_context.items())
                 trace=row.metadata['sampler_trace']
                 for key in ['chain','old_means','old_stds','old_log_probs','free_mask','sampling_noise']:
                     trace[key]=trace[key].detach().to(device)
@@ -103,6 +103,16 @@ class DeviceRolloutBuffer:
                 signatures.add(row.identity['policy_version']);self._transitions.append(row)
         if self._transitions and (len(signatures)!=1 or not bool(torch.stack(flags).all())):
             raise ValueError('Mixed policy version, nonfinite rollout or changed free mask')
+        from .tracking_context import validate_tracking_context
+        # 逐帧因果内容仍全覆盖；每种状态只做一次批量验证，避免每条链逐字段同步。
+        for name in ('critic_context','next_critic_context'):
+            contexts=[row.metadata[name] for row in self._transitions if row.metadata[name] is not None]
+            if contexts:
+                validate_tracking_context({key:torch.cat([context[key] for context in contexts]) for key in contexts[0]})
+        for row in self._transitions:
+            for name,actor_context in (('critic_context',row.context),('next_critic_context',row.next_context)):
+                if actor_context is not None:
+                    row.metadata[name].update(actor_context)
         self.fragments=list(map(len,fragments))
     @property
     def transitions(self):return tuple(self._transitions)

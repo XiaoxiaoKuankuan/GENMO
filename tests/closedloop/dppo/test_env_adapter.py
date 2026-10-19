@@ -18,6 +18,8 @@ import pytest
 import torch
 
 from gem.closedloop.dppo.buffer import RolloutBuffer
+from gem.closedloop.contracts import GMT_EXPECTED_JOINT_ORDER
+from gem.closedloop.dppo.tracking_context import build_critic_context
 from gem.closedloop.dppo.env_adapter import ExecutionIntegrityError, UpperEnvironment
 from gem.closedloop.dppo.rewards import ExecutionReward
 from gem.closedloop.dppo.run_management import DiskCapacityError, DiskGuard
@@ -50,7 +52,13 @@ class FakeBackend:
     def snapshot(self):
         failed = self.fail_at is not None and self.tick >= self.fail_at
         return dict(env_id=0, episode_id="e", tick=self.tick, done=failed, terminated=failed,
-                    truncated=False, reason="physical_failure" if failed else None)
+                    truncated=False, reason="physical_failure" if failed else None,
+                    tracking_history_schema='gmt.causal_tracking_history90.v2',
+                    tracking_history_values=torch.zeros(50,90),tracking_history_valid=torch.ones(50,dtype=torch.bool),
+                    tracking_history_ticks=torch.arange(self.tick-588,self.tick+1,12),
+                    tracking_reference_ticks=torch.arange(self.tick-588,self.tick+1,12),
+                    joint_names=list(GMT_EXPECTED_JOINT_ORDER),joint_hard_limits_rad=[[-2.,2.]]*21,
+                    joint_soft_limits_rad=[[-1.8,1.8]]*21)
 
     def call(self, method, **payload):
         self.calls.append((method, copy.deepcopy(payload)))
@@ -87,6 +95,7 @@ class FakeBuilder:
         offset = snapshot["tick"] / 600. - 1.
         for key in ("proprio_history_times", "future_times", "decision_time"):
             conditions[key] += offset
+        conditions["proprio_history_times"]=snapshot["tracking_history_ticks"].double()[None]/600
         return conditions, {"request_id": reservation["request_id"]}
 
 
@@ -100,8 +109,8 @@ def adapter(tmp_path, *, elapsed=.75, mode="latency", prepared=True):
     env.music_end_tick = 600 + 3000
     env.soft_end_tick = 600 + 30 * 600
     env.reward = ExecutionReward(music_features=env.music, target_activity=target_activity_fixture)
-    sample = dict(context=context(), meta={"request_id": "req", "plan_id": "p", "parent_plan_id": "old"},
-                  generated={}, trace={"chain": torch.zeros(1, 3, 120, 30), "old_log_probs": torch.zeros(1, 2, dtype=torch.float64),
+    sample = dict(context=context(), critic_context=build_critic_context(context(),backend.snapshot()), meta={"request_id": "req", "plan_id": "p", "parent_plan_id": "old"},
+                  generated={}, trace={"chain": torch.zeros(1, 21, 120, 30), "old_log_probs": torch.zeros(1, 19, dtype=torch.float64),
                                        "free_mask": torch.ones(1, 120, 30, dtype=torch.bool)},
                   prepared={"prepared_plan_id": "ticket"} if prepared else None,
                   rejection=None if prepared else {"code": "invalid_plan_output"}, elapsed=elapsed,
@@ -182,7 +191,7 @@ def test_finite_rejected_plan_retains_chain_and_exactly_one_event(tmp_path, phas
     backend.reject_commit = phase == "commit"
     result = env.step()
     assert result.metadata["rejection"]
-    assert result.chain.shape == (3, 120, 30)
+    assert result.chain.shape == (21, 120, 30)
     baseline_sum = sum(item["reward"] for item in result.metadata["reward_details"])
     assert result.rewards.sum().item() == pytest.approx(baseline_sum - (.5 if phase == 'prepare' else 0.))
     assert result.metadata["event_reward"] == 0
@@ -350,7 +359,8 @@ def test_comparison_initial_noise_matches_despite_different_run_counters(tmp_pat
         env.builder = SimpleNamespace(build=lambda snapshot, reservation, *args, **kwargs:
             (context(), {**reservation, "parent_plan_id": "old", "world_anchor": [0., 0., 0., 0.]}))
         actor = torch.nn.Linear(1, 1)
-        actor.endecoder = SimpleNamespace(codec=SimpleNamespace(apply_world_anchor=lambda q, anchor: q))
+        actor.endecoder = SimpleNamespace(codec=SimpleNamespace(apply_world_anchor=lambda q, anchor: q),
+            kinematics=SimpleNamespace(joint_order=list(GMT_EXPECTED_JOINT_ORDER)))
         def output(noise):
             qpos = torch.zeros(1, 120, 28)
             qpos[..., 3] = 1.

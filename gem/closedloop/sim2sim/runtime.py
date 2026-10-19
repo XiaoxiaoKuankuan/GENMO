@@ -6,7 +6,6 @@ Stage1和Stage2统一采用20步eta=0 DDIM，仅初始噪声随机；不采样DP
 缓存条件/合批CFG只改执行组织，须与Stage1Actor.sample同条件/初始噪声核验。
 Stage2先校验checkpoint声明的训练随机核，再显式构造独立确定性推理身份。
 保留原训练身份、CFG、Horizon、数值算子和冻结前段；不构造Critic/optimizer。
-跨Torch版本时用来源版本标签重算冻结内容摘要，完整匹配后才允许构建本机推理核。
 
 600Hz整数tick组织30Hz源动作、50HzGMT和200Hz物理。生成期间物理继续执行；
 默认连续仿真：物理误差、迟到和音频漂移记录告警后继续；迟到/旧episode结果
@@ -35,7 +34,6 @@ from gem.closedloop.online_conditions import OnlineConditionBuilder, FrozenMusic
 from gem.closedloop.dppo.run_control import build_policy
 from .music import prepare_music, AudioPlayer, file_sha
 from .diagnostics import EpisodeDiagnostics, write_json
-from .kernel_compatibility import verify_source_kernel
 
 
 def settings_from_kernel(kernel):
@@ -66,7 +64,7 @@ class InferenceActor:
             runtime=dict(torch_threads=config['runtime']['torch_threads'],genmo_device=config['runtime']['device']),
             model=dict(history_steps=50,ddim_steps=20,guidance_scale=config['sampling']['guidance_scale']))
         self.owner=FrozenStage1Actor(base);self.actor=self.owner.actor;self.device=self.owner.device
-        self.source_identity=None;self.source_kernel=None;self.source_kernel_verification=None
+        self.source_identity=None;self.source_kernel=None
         sampling,precision=copy.deepcopy(config['sampling']),copy.deepcopy(config['precision'])
         self.source_checkpoint=payload.get('source_checkpoint',dict(path=str(self.path),sha256=self.sha,
             schema=payload.get('schema',payload.get('checkpoint_version')),
@@ -76,7 +74,8 @@ class InferenceActor:
             identity=payload.get('identity')
             if not isinstance(identity,dict) or 'kernel' not in identity or 'actor' not in payload:
                 raise ValueError('Stage2权重必须携带actor、identity.kernel和资产身份')
-            if payload.get('schema') not in ('genmo.closedloop.stage2.asymmetric_tracking.checkpoint.v1',
+            if payload.get('schema') not in ('genmo.closedloop.stage2.asymmetric_tracking.checkpoint.v2',
+                    'genmo.closedloop.stage2.asymmetric_tracking.checkpoint.v1',
                                            'genmo.closedloop.sim2sim.actor.v1'):
                 raise ValueError('不支持的Stage2 checkpoint schema')
             for key,local in (('checkpoint','stage1_checkpoint'),('stats','stats'),('kinematics','kinematics'),('gmt_policy','gmt_policy')):
@@ -95,11 +94,14 @@ class InferenceActor:
         self.actor.eval().requires_grad_(False)
         if self.source_kernel:
             source_policy=build_policy(self.actor,sampling,precision,frozen_actor=frozen_actor)
-            self.source_kernel_verification=verify_source_kernel(self.source_kernel,source_policy)
+            old=copy.deepcopy(self.source_kernel);new=copy.deepcopy(source_policy.kernel_config)
+            # 跨机器Torch版本可能不同：记录新行为身份并重新标定，不声称旧核逐位等价。
+            old['numerical_execution'].pop('torch_version',None);new['numerical_execution'].pop('torch_version',None)
+            if old!=new:raise ValueError('本机重建随机核与checkpoint声明不同')
             del source_policy
-        # 随机步的概率构造占位floor为正；显式确定性末步必须为零。推理仅取mean。
+        # 概率参数构造器要求正floor；推理仅取mean，绝不使用其std采样。
         # eta必须在构造前归零，确保DDIM均值中的方向系数也属于确定性路径。
-        sampling.update(denoising_steps=20,eta=0.,std_schedule=[.001]*19+[0.])
+        sampling.update(denoising_steps=20,eta=0.,std_schedule=[.001]*20)
         self.policy=build_policy(self.actor,sampling,precision,frozen_actor=frozen_actor)
         self.initial_fingerprint=_fingerprint(self.actor)
         self.builder=OnlineConditionBuilder(self.actor.endecoder.codec,history_steps=50,
@@ -114,7 +116,6 @@ class InferenceActor:
         self.identity=dict(name=self.name,checkpoint=str(self.path),checkpoint_sha256=self.sha,
             actor_fingerprint=self.initial_fingerprint,source_training_identity=self.source_identity,
             source_checkpoint=self.source_checkpoint,source_training_kernel=copy.deepcopy(self.source_kernel),
-            source_kernel_verification=self.source_kernel_verification,
             kernel=kernel,device=str(self.device),torch_version=torch.__version__,
             physics_backend='mujoco',purpose='inference_only_no_training_resume')
         self.identity['sampler']='ddim20_eta0_initial_noise_only'

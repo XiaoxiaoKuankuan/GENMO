@@ -76,7 +76,7 @@ def test_deployment_delay_rejects_unmeasured_forward_contract(changed):
     from pathlib import Path
     import yaml
     root = Path(training.__file__).resolve().parents[3]
-    profile = yaml.safe_load((root / 'configs/closedloop/stage2_asymmetric_server2.yaml').read_text())['timing']['deployment_profile']
+    profile = yaml.safe_load((root / 'configs/closedloop/stage2_credit_server2.yaml').read_text())['timing']['deployment_profile']
     execution = copy.deepcopy(profile['numerical_execution'])
     # 旧标定文件的展示文字不影响真实算子；纯反向实现不属于单请求前向计时。
     execution.update(mode='compensated_tensorcore_fp32_storage_candidate', weight_gradient='new_backward')
@@ -92,66 +92,6 @@ def test_deployment_delay_rejects_unmeasured_forward_contract(changed):
         training._validate_calibrated_execution(profile, execution, assets)
 
 
-def test_four_step_microbatches_keep_epoch_orders_old_chain_and_complete_logs(tmp_path, actor_factory):
-    from gem.closedloop.dppo import updater
-    from gem.closedloop.dppo.collectives import DistributedCollectives
-    from gem.closedloop.dppo.gradient_merge import BCGradientController
-    from gem.closedloop.dppo.tensor_cache import RolloutTensorCache
-    from gem.closedloop.dppo.frozen_prefix import FrozenPrefixPolicy
-    from gem.closedloop.dppo.dual_collector import split_trace
-    from tests.closedloop.dppo.test_asymmetric_critic import tracking_context
-    from gem.closedloop.contracts import STAGE1_CONDITION_KEYS
-    import torch.distributed as dist
-
-    class Anchor:
-        def __init__(self): self.calls = 0
-        def backward(self, actor, weight):
-            self.calls += 1
-            loss = sum(p.square().mean() for p in actor.parameters() if p.requires_grad)
-            (loss * weight).backward()
-            return dict(batch_size=2, loss=float(loss.detach()), samples=[[{'dataset_id':'fixture'}]*2])
-
-    actor, batch = actor_factory(motion_frames=60); _activate_branches(actor)
-    policy = FrozenPrefixPolicy(actor,std_schedule=[.001]*15+[.04,.06,.08,.1,0.],generation_frames=60)
-    privileged = tracking_context(_conditions(batch))
-    context = {k:privileged[k] for k in STAGE1_CONDITION_KEYS}
-    trace = policy.sample_rollout(context,generator=torch.Generator().manual_seed(17))
-    data = [SimpleNamespace(context={k:v[i:i+1].clone() for k,v in context.items()},identity={},
-        chain=trace['chain'][i].clone(),old_log_prob=trace['old_log_probs'][i].clone(),free_mask=trace['free_mask'][i].clone(),
-        metadata=dict(critic_context={k:v[i:i+1].clone() for k,v in privileged.items()},
-            sampler_trace=split_trace(trace,i,2),remaining_music_seconds=5.)) for _ in range(4) for i in range(2)]
-    old_chain = torch.stack([row.chain.clone() for row in data])
-    base = copy.deepcopy(policy.actor.state_dict())
-    targets = dict(advantages=torch.tensor([1., -.6] * 4))
-    manifest = [dict(owner_rank=0, local_index=i, valid=True, has_free=True) for i in range(8)]
-    reports, states = [], []
-    dist.init_process_group('gloo', init_method=(tmp_path / 'one_rank').as_uri(), rank=0, world_size=1)
-    cache = RolloutTensorCache(data, targets, 'cpu')
-    try:
-        for microbatch in (3, 8):
-            policy.actor.load_state_dict(base)
-            generator = torch.Generator().manual_seed(731)
-            anchor = Anchor()
-            report = updater.actor_update(policy, torch.optim.AdamW(policy.actor.parameters(), lr=1e-5),
-                data, targets, cache, manifest, BCGradientController(initial=.01),
-                distributed=DistributedCollectives(0, 1), anchor=anchor, generator=generator,
-                sampled_steps=4, minibatch_chains=2, microbatch=microbatch, soft_kl=None)
-            assert report['optimizer_steps'] == anchor.calls == 8
-            assert report['internal_sample_visits'] == 8 * 4 * 2
-            assert report['actual_global_bc_samples'] == 16
-            assert report['bc_samples_by_source'] == {'fixture':16}
-            for step in report['steps']:
-                assert [r['step'] for r in step['per_denoising_step'] if r['visits']] == [15,16,17,18]
-            reports.append(report)
-            states.append(generator.get_state().clone())
-    finally:
-        cache.close()
-        dist.destroy_process_group()
-    assert reports[0]['epoch_orders'] == reports[1]['epoch_orders']
-    assert torch.equal(states[0], states[1])
-    assert [s['denoising_sampling']['seed'] for s in reports[0]['steps']] == [
-        s['denoising_sampling']['seed'] for s in reports[1]['steps']]
-    assert torch.equal(torch.stack([row.chain for row in data]), old_chain)
 
 
 @pytest.mark.parametrize('fault', [None, 'assets', 'kernel', 'schema', 'hard_kl', 'soft_kl', 'partial', 'nonfinite', 'binding'])
@@ -347,7 +287,7 @@ def test_generation_delivers_conditions_on_the_sampling_device(device_trace):
         [dict(world_anchor=[0., 0., 0.]), dict(world_anchor=[0., 0., 0.])]))
     policy = SimpleNamespace(actor=actor, sample_rollout=sample, last_sample_timing={})
     snapshot=dict(joint_names=GMT_EXPECTED_JOINT_ORDER,joint_hard_limits_rad=np.tile([-2.,2.],(21,1)),
-        joint_soft_limits_rad=np.tile([-1.8,1.8],(21,1)),tracking_history_schema='gmt.causal_tracking_history90.v1',
+        joint_soft_limits_rad=np.tile([-1.8,1.8],(21,1)),tracking_history_schema='gmt.causal_tracking_history90.v2',
         tracking_history_values=np.zeros((50,90)),tracking_history_valid=np.ones(50,dtype=bool),
         tracking_history_ticks=np.arange(12,601,12),tracking_reference_ticks=np.arange(12,601,12))
     packets = [dict(builder=builder, snapshot=snapshot, reservation=dict(request_id=str(i)), music=None,
@@ -361,17 +301,6 @@ def test_generation_delivers_conditions_on_the_sampling_device(device_trace):
             assert item['context'] is item['trace']['conditions']
 
 
-def test_boundary_tail_is_part_of_complete_memory_execution_evidence():
-    from gem.closedloop.dppo.vector_boundary import finish_vector_fragment
-    from tests.closedloop.dppo.test_vector_fragment_boundary import fixture_env
-    env, row, _, _ = fixture_env(source=6280, actual=25)
-    prefix = [dict(tick=5088), dict(tick=5100)]
-    row.metadata['execution_trace'] = prefix
-    finish_vector_fragment(env, row, continue_episode=True)
-    saved = row.metadata['execution_trace']
-    assert len(saved) == row.executed_control_steps == 27
-    assert saved[:2] == prefix
-    assert [step['tick'] for step in saved] == list(range(5088, 5401, 12))
 
 
 def test_repeated_checkpoint_boundary_publishes_distinct_immutable_files(tmp_path):
@@ -390,31 +319,6 @@ def test_repeated_checkpoint_boundary_publishes_distinct_immutable_files(tmp_pat
     for item in published:
         assert file_sha256(tmp_path / item['path']) == item['sha256']
     assert json.loads((tmp_path / 'latest.json').read_text())['path'] == published[-1]['path']
-
-
-def test_iteration_milestones_survive_periodic_retention_without_rejected_duplicates(tmp_path):
-    from gem.closedloop.dppo.run_control import iteration_checkpoint_reason
-    from gem.closedloop.dppo.training_checkpoint import AsyncCheckpointWriter,SCHEMA
-    storage={'checkpoint_interval_iterations':100}
-    assert iteration_checkpoint_reason(99,storage) is None
-    assert iteration_checkpoint_reason(0,storage) is None
-    assert iteration_checkpoint_reason(100,storage,rejected=True) is None
-    assert iteration_checkpoint_reason(100,storage,is_warmup=True) is None
-    writer=AsyncCheckpointWriter(tmp_path,keep_last=2)
-    saved=[]
-    try:
-        for iteration,reason in [(100,iteration_checkpoint_reason(100,storage)),
-                (101,'periodic'),(102,'periodic'),(200,iteration_checkpoint_reason(200,storage)),(201,'periodic')]:
-            payload=dict(schema=SCHEMA,actor={'weight':torch.tensor([float(iteration)])},actor_fingerprint='test',
-                state=dict(iteration=iteration,rollouts_completed=iteration,actor_updates=iteration,critic_updates=iteration))
-            writer.submit(payload,reason=reason)
-            saved.append(writer.poll(wait=True))
-    finally:writer.close()
-    assert (tmp_path/saved[0]['path']).is_file() and (tmp_path/saved[3]['path']).is_file()
-    assert not (tmp_path/saved[1]['path']).exists()
-    assert len(list((tmp_path/'checkpoints').glob('*.pt')))==4
-    assert torch.load(tmp_path/saved[0]['path'],weights_only=False)['state']['iteration']==100
-    assert iteration_checkpoint_reason(2000,storage)=='iteration_002000'
 
 
 def test_rollback_restores_nonempty_adam_and_rng_exactly():

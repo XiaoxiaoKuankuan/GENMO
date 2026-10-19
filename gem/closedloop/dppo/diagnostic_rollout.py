@@ -74,3 +74,27 @@ def load_rollout(path):
         if row.metadata['sampler_trace']['kernel_config']!=payload['kernel']:
             raise ValueError('Stored behavior kernel changed')
     return payload
+
+
+def sampled_diagnostic(c, rows, targets, label, *, per_rank=8, keep_last=2):
+    """周期采样只留少量真实链；完整训练与KL覆盖不变，不导出全体物理journal。"""
+    indices=[i*len(rows)//min(per_rank,len(rows)) for i in range(min(per_rank,len(rows)))]
+    selected=[rows[i] for i in indices]
+    target={key:(value[indices] if torch.is_tensor(value) and value.ndim and len(value)==len(rows) else value)
+            for key,value in targets.items()}
+    local=[dict(owner_rank=c.distributed.rank,local_index=i,valid=True,has_free=bool(row.free_mask.any()))
+           for i,row in enumerate(selected)]
+    manifest=[item for part in c.distributed.all_gather_object(local) for item in part]
+    base=c.session/'diagnostics'
+    from .parallel_support import local_call,root_call
+    result=local_call(c.distributed,lambda:persist_rollout(base/label/f'rank{c.distributed.rank:02d}',selected,target,manifest,
+        kernel=c.policy.kernel_config,identity=c.identity,full_execution=False,guard=c.guard)
+        if selected else dict(real_upper_transitions=0,full_execution_evidence=False))
+    def prune():
+        import shutil
+        for expired in sorted(base.glob('train_*'))[:-keep_last]:
+            if expired.is_dir() and expired.parent==base:
+                shutil.rmtree(expired)
+    root_call(c.distributed,prune)
+    local_call(c.distributed,c.guard.refresh)
+    return result

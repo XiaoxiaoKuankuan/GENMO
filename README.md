@@ -1,23 +1,25 @@
 # GENMO / BUMI music closed-loop
 
-当前分支：`feature/bumi-music-closedloop`。本分支面向音乐驱动的 BUMI 动作生成，以及
-“音乐 + 实际状态历史 + 已承诺参考前缀”的 closed-loop Stage 1。
+当前第二阶段开发分支：`feature/stage2-asymmetric-denoising`，配套GMT使用
+`feature/stage2-tracking-history`。保留音乐驱动Stage1，以及基于真实物理反馈的Stage2。
 
 模型输出保持 **qpos30 + 独立 contact2**，不预测 joint velocity，不使用 51D 动作表示。
 Stage 2 的 Frozen GMT、动力学、Critic / DPPO 不由本页的离线入口启动。
 
-第二阶段当前基线也在本分支直接维护，统一从
+第二阶段只维护当前一套方案，统一从
 [`scripts/train_stage10_8gpu_server1.sh`](scripts/train_stage10_8gpu_server1.sh)
-启动，默认配置是 [`stage10_server1.yaml`](configs/closedloop/stage10_server1.yaml)。
-它使用 s595000、冻结 GMT 140500、同进程八卡 Isaac、K8 DPPO＋BC 和预训练条件 Critic。
-当前参数、运行边界、启动与恢复验收见
-[第二阶段正式训练说明](docs/closedloop/stage10_iteration_training.rst)。后续直接替换本分支实现，
-不另建版本分支；已撤下方法通过 Git 历史追溯。
+启动，默认配置是唯一的
+[`stage2_credit_server2.yaml`](configs/closedloop/stage2_credit_server2.yaml)。
+它使用s595000、冻结GMT140500、60帧生成、每卡128环境和8秒连续世界采集；
+前15步冻结、4步随机训练、末步冻结确定性去噪。Actor采用统一LR `3e-7`、
+单次全局joint-score策略梯度加原Stage1 BC，Critic独立使用历史跟踪特权信息和完整MC。
+坐标平均PPO只保留数学裁剪诊断，不再作为可选训练方法。
 
-第二阶段只保留 `stage10_server1.yaml` 作为正式配置。旧 Stage9 训练入口、噪声扫描、
-长预热和 120 帧实验配置，以及对应历史工作树、模型、日志与测试产物已清理。
-当前 60 帧基线的训练目录和恢复依赖保持完整；旧实现需要查阅时使用 Git 历史，
-不继续在工作目录保存并行副本。
+启动、当前参数、证据和恢复边界见
+[当前第二阶段训练说明](docs/closedloop/stage2_training.rst)。
+已替代的配置、学习率扫描、旧训练器、旧采集器和恢复转换只在Git历史中追溯；
+当前代码不提供旧方法兼容入口。源码或配置身份改变后不能把旧checkpoint冒充等价恢复。
+正在运行的作业继续使用它已绑定的源码，不能直接pull热更新。
 
 ## 当前代码与契约
 
@@ -32,8 +34,8 @@ Stage 2 的 Frozen GMT、动力学、Critic / DPPO 不由本页的离线入口�
 - [修改记录](记录文本.md)：按时间记录实现、测试和未验证事项。
 
 默认历史为 50 个采样点 @ 50 Hz，形状 `[B,50,48]`，首尾间隔 0.98 秒。
-未来为 120 个采样点 @ 30 Hz，形状 `[B,120,30]`，从首点到末点为 119/30 秒。
-已承诺前缀包含在这 120 帧内；前缀长度可以为零，不额外增加窗口。
+Stage1预训练最大窗口为120帧；当前Stage2实际计算60帧，形状 `[B,60,30]`，
+保持30Hz。已承诺前缀包含在生成窗口内，不额外增加窗口长度。
 
 ## 保留的 music-only 实验
 
@@ -59,7 +61,7 @@ python tools/eval/select_bumi_checkpoints.py --help
 正式执行前须核对本机环境、数据划分、checkpoint、stats、kinematics 和对应指纹。
 不要照搬历史文档中的服务器路径；本 README 不会下载模型、启动正式训练或同步服务器。
 
-## 保留的 8 个 Demo / 部署入口
+## Demo / 部署入口
 
 | 入口（均位于 `scripts/demo/`） | 用途 |
 |---|---|
@@ -71,6 +73,7 @@ python tools/eval/select_bumi_checkpoints.py --help
 | `demo_bumi_gmt_buffered_bridge.py` | 缓存播放桥 |
 | `check_bumi_deployment.py` | 部署检查 |
 | `run_bumi_deployment.py` | 部署启动入口 |
+| `run_genmo_gmt_sim2sim.py` | GENMO＋GMT在线MuJoCo动力学闭环 |
 
 buffered Python 入口仍在，绑定旧资产路径的两个 Shell 包装已删除。请通过 Python 入口
 显式提供匹配的发布清单/模型与资产，先查看 `--help`。buffered 仿真播放不等于实机支持。

@@ -82,9 +82,9 @@ def test_batch_condition_exact_against_scalar_reference():
 
 
 def test_gpu_config_declares_fixed_profile_and_batched_pipeline():
-    config=configuration(Path(__file__).resolve().parents[3]/'configs/closedloop/stage10_server1.yaml')
+    config=configuration(Path(__file__).resolve().parents[3]/'configs/closedloop/stage2_credit_server2.yaml')
     assert config['runtime']['timing_contract']==MODELED_CLOCK
-    assert DeploymentClock(config['timing']['deployment_profile']).budget_seconds==.30
+    assert DeploymentClock(config['timing']['deployment_profile']).budget_seconds==.32
 
 
 def test_columnar_concatenation_preserves_mixed_leaves():

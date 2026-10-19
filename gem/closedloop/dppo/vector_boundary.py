@@ -1,19 +1,9 @@
-"""把多环境轮末继续执行的真实控制区间并入最后一条上层转移。
+"""当前参考时间轴的合法bootstrap和再规划边界。
 
-各环境采满本轮配置的决策额度后仍属于同一个GPU场景，不能停止记录却继续移动机器人。
-提前完成的环境沿已提交参考继续执行，直到本rank所有环境达到共同决策边界；
-额外控制步保留原奖励公式、完整journal和实际时长，并入最后一条扩散动作的
-半马尔可夫转移，不额外生成动作或扩大配置的真实rollout数量。物理终止、音乐结束和行政
-上限单独处理。已采满额度的环境最多等到仍支持前缀及GMT前瞻的决策边界，随后
-按行政截断保留bootstrap并在下一轮重置，不把缺少未来参考误判成物理终止。
-其他未到边界的环境下一轮继续真实状态/历史，GAE仍在片段边界截断。
-副作用之前先预占有限执行额度，只有带ACK身份的精确回复才结算未用额度。
+严格保留最小前缀、GMT十控制步前瞻、插值右点和差分支持。只根据真实参考覆盖
+计算合法栅格；旧按环境配额等待、drain和向末条转移追加奖励的实现已经删除。
 """
-from __future__ import annotations
-import copy
-import torch
 from .env_adapter import ExecutionIntegrityError
-from .world_flow import backend_operation, run_synchronous, LocalOperation
 
 FRAGMENT_CONTRACT='available_reference_fragment_boundary.v3'
 
@@ -28,92 +18,3 @@ def fragment_reference_boundary(snapshot, *, minimum_prefix=12):
     if boundary<int(snapshot['tick']):
         raise ExecutionIntegrityError('Completed GPU fragment has no causal bootstrap reference')
     return boundary
-
-
-def finish_vector_fragment(env,row,*,continue_episode,maximum_wait_controls=None):
-    """同步兼容入口；世界级调度使用下面同一份续体，不复制奖励/预算公式。"""
-    return run_synchronous(env,finish_vector_fragment_flow(env,row,
-        continue_episode=continue_episode,maximum_wait_controls=maximum_wait_controls))
-
-
-def finish_vector_fragment_flow(env,row,*,continue_episode,maximum_wait_controls=None):
-    """有限轮末等待：所有实际控制步进入末条转移，超限明确截断并保留bootstrap。"""
-    previous=env.snapshot
-    remaining=min(env.music_end_tick,env.soft_end_tick)-previous['tick']
-    limit=max(0,remaining//12) if continue_episode and not previous['done'] else 0
-    requested_limit=limit
-    supported_tick=None
-    if continue_episode and not previous['done']:
-        supported_tick=fragment_reference_boundary(previous)
-        limit=min(limit,(supported_tick-previous['tick'])//12)
-    reference_limited=limit<requested_limit
-    wait_limited=False
-    if maximum_wait_controls is not None:
-        if type(maximum_wait_controls) is not int or not 25<=maximum_wait_controls<=2000 or maximum_wait_controls%25:
-            raise ValueError('Boundary wait limit must be 25..2000 controls on the decision grid')
-        wait_limited=maximum_wait_controls<limit
-        limit=min(limit,maximum_wait_controls)
-    if limit>2000:raise ExecutionIntegrityError('Vector fragment drain exceeds finite resource bound')
-    end_reason='music_end' if env.music_end_tick<=env.soft_end_tick else 'collection_limit'
-    if reference_limited:end_reason='reference_horizon_truncated'
-    if wait_limited:end_reason='bounded_boundary_wait_limit'
-    if limit:env.budget.reserve(env.phase,control_steps=limit,physics_steps=4*limit)
-    result=yield from backend_operation('drain_fragment',max_control_steps=limit,end_reason=end_reason,
-        advance_id=f"{previous['episode_id']}:fragment:{env.backend.sequence+1}")
-    if limit:env.budget.settle_control(env.phase,limit,result)
-    actual=result['executed_control_steps'];trace=result['trace'];snapshot=result['snapshot']
-    if (not result.get('transition_valid') or not result.get('physics_count_exact') or
-            len(trace)!=actual or not 0<=actual<=limit or result['executed_physics_steps']!=4*actual or
-            snapshot['episode_id']!=previous['episode_id'] or snapshot['tick']!=previous['tick']+12*actual):
-        raise ExecutionIntegrityError('Invalid vector fragment drain feedback')
-    values=[];details=[]
-    reward_batch = (env.reward.evaluate_batch(trace) if hasattr(env.reward,'evaluate_batch') else
-                    [env.reward.evaluate_step(step) for step in trace])
-    for n,(step,reward) in enumerate(zip(trace,reward_batch)):
-        if step['episode_id']!=row.identity['episode_id'] or step['env_id']!=row.identity['env_id'] or step['tick']!=previous['tick']+12*(n+1):
-            raise ExecutionIntegrityError('Cross-environment or discontinuous fragment tail')
-        if not reward.get('transition_valid'):raise ExecutionIntegrityError(f'Invalid tail reward: {reward.get("errors")}')
-        values.append(float(reward['reward']));details.append(reward)
-    newly_failed=bool(snapshot.get('terminated') and not previous.get('terminated'))
-    penalty=env.reward.event_reward('physical_failure') if newly_failed else 0.
-    if values:values[-1]+=penalty
-    elif penalty:
-        if row.rewards.numel():row.rewards[-1]+=penalty
-        else:row.metadata['event_reward']=row.metadata.get('event_reward',0.)+penalty
-    if values:row.rewards=torch.cat((row.rewards,torch.tensor(values,dtype=row.rewards.dtype)))
-    row.control_tick_end=snapshot['tick'];row.executed_control_steps+=actual;row.executed_physics_steps+=4*actual
-    env.snapshot=snapshot
-    reference_exhausted=reference_limited and not wait_limited and actual==limit
-    wait_exhausted=wait_limited and actual==limit
-    row.terminated=bool(row.terminated or snapshot.get('terminated') or snapshot['tick']>=env.music_end_tick)
-    row.truncated=not row.terminated
-    row.reason=snapshot.get('reason') or ('music_end' if row.terminated else
-        'reference_horizon_truncated' if reference_exhausted else
-        'bounded_boundary_wait_limit' if wait_exhausted else 'collector_fragment_boundary')
-    if row.terminated:row.next_context=None
-    else:
-        preview=(yield from env.preview_context_flow()) if hasattr(env,'preview_context_flow') else (
-            yield LocalOperation(env.preview_context,{}))
-        row.next_context=preview[0]
-    row.metadata['next_remaining_music_seconds']=env.remaining_music()
-    row.metadata['terminal_snapshot']=copy.deepcopy(snapshot)
-    row.metadata['reward_details'].extend(details)
-    if 'execution_trace' in row.metadata:
-        # 日常内存证据也须包含轮末真实推进的尾段，供异常时完整回放。
-        row.metadata['execution_trace']=[*row.metadata['execution_trace'],*trace]
-    row.metadata['event_penalty_total']+=penalty
-    consumed={str(p) for step in trace for p in step.get('consumed_plan_ids',[]) if p is not None}
-    row.metadata['consumed_plan_ids']=sorted(set(row.metadata['consumed_plan_ids'])|consumed)
-    first=row.metadata.setdefault('consumed_plan_first_gmt_input_tick',{})
-    for step in trace:
-        for plan in step.get('consumed_plan_ids',[]):
-            if plan is not None:first.setdefault(str(plan),int(step['control_tick_begin']))
-    row.metadata['fragment_tail']=dict(executed_control_steps=actual,executed_physics_steps=4*actual,
-        begin_tick=previous['tick'],end_tick=snapshot['tick'],contract=FRAGMENT_CONTRACT,
-        execution_sequence=result['mutation_seq'],budget_reserved_controls=limit,
-        requested_control_steps=requested_limit,maximum_supported_decision_tick=supported_tick,
-        reference_horizon_truncated=reference_exhausted,wait_limit_controls=maximum_wait_controls,
-        wait_limit_reached=wait_exhausted,reward_sum=sum(values)+ (penalty if not values else 0.))
-    row.validate()
-    return actual, bool(row.terminated or snapshot['tick']>=env.soft_end_tick or
-                       not continue_episode or reference_exhausted or wait_exhausted)

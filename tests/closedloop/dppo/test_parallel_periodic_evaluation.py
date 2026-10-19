@@ -20,6 +20,7 @@ import torch
 from gem.closedloop.dppo import evaluation
 from gem.closedloop.dppo import evaluation_runtime as training
 from gem.closedloop.dppo.budget import atomic_json
+from gem.closedloop.dppo.training_config import VERSION
 from gem.closedloop.dppo.periodic_monitor import (
     build_balanced_plan,
     build_fixed_critic_reference,
@@ -34,11 +35,14 @@ from tests.test_evaluation import Env
 
 
 class Policy:
+    trainable_steps=(0,)
+    def assert_frozen_identity(self):return {"checked":True}
     def __init__(self):
         self.actor = torch.nn.Linear(1, 1, bias=False)
         torch.nn.init.zeros_(self.actor.weight)
         self.steps, self.kernel_config = 1, {'kernel': 'cpu_test_gaussian'}
-    def transition_parameters(self, context, x, step):
+    def prepare_conditions(self,context,*,include_frozen=True):return context
+    def transition_parameters(self, context, x, step, *, prepared=None):
         return dict(mean=x+self.actor.weight.mean(), std=torch.ones_like(x))
 
 
@@ -64,13 +68,14 @@ class IndependentEnv(Env):
         trace = dict(conditions={'x': torch.ones(1, 1)}, chain=torch.stack([x, x], 1),
             old_means=params['mean'].detach()[:, None], old_stds=params['std'].detach()[:, None],
             free_mask=torch.ones_like(x, dtype=torch.bool))
+        self.trace=trace
         self.raw = self.output/'raw_samples'/f'{self.episode:06d}.pt'
         torch.save({'trace': trace}, self.raw)
     def step(self, deterministic=False):
         begin = self.steps
         row = super().step(deterministic)
         row['metadata'].update(raw_sample_path=str(self.raw), remaining_music_seconds=.2,
-                               next_remaining_music_seconds=0.)
+                               next_remaining_music_seconds=0.,sampler_trace=self.trace,critic_context={'x':torch.ones(1,1)},next_critic_context=None)
         return SimpleNamespace(**row, context={'x': torch.ones(1, 1)}, next_context=None,
             identity=dict(backend_session_id='cpu_backend', episode_id=self.episode, policy_version=self.policy_version),
             control_tick_begin=begin, control_tick_end=self.steps, transition_valid=True)
@@ -90,10 +95,10 @@ def context(tmp_path, monkeypatch, *, samples=1, world=1):
         config={'stage9': {'episode_seconds': 30.}, 'runtime': {'timing_contract': 'deployment_critical.v2'}},
         state=dict(iteration=0, policy_version=0), identity={'source': 'immutable'}, actor=loaded.actor,
         critic=critic, policy=loaded, backend=SimpleNamespace(journal=object()), builder=None, writer=None,
-        guard=SimpleNamespace(account_file=lambda path: None), budget=None,
+        guard=SimpleNamespace(account_file=lambda path: None,check=lambda *args:None), budget=None,
         settings={'gamma_upper': .99, 'lambda_upper': .95, 'episode_seconds': 30.},
         env=SimpleNamespace(latency_budget_s=.5, policy_version=0, iteration=0), catalog=Catalog(tmp_path),
-        stage={'evaluation': {'samples_per_source': samples, 'seeds': [42, 1729],
+        stage={'version':VERSION,'evaluation': {'samples_per_source': samples, 'seeds': [42, 1729],
                              'selection_seed': 42, 'episode_seconds': 10.}})
     credits = []
     def phase(context, name, per_rank):
@@ -148,9 +153,9 @@ def test_evaluate_connects_identity_fixed_references_curves_and_real_saved_bound
     assert 'validation/fixed_critic_diagnostic/mse' in rows[0]['metrics']
 
 
-def test_v3_periodic_critic_reports_fresh_independent_values_without_replacing_reference(tmp_path, monkeypatch):
+def test_current_periodic_critic_reports_fresh_independent_values_without_replacing_reference(tmp_path, monkeypatch):
     c, _ = context(tmp_path, monkeypatch)
-    c.stage['version'] = 'genmo.closedloop.stage10.iteration_horizon.v1'
+    c.stage['version'] = VERSION
     first = training._evaluate(c, 'initial')
     atomic_json(c.output/'evaluation_baseline.json', first)
     reference = (c.output/'fixed_diagnostic_reference.json').read_bytes()
@@ -162,6 +167,7 @@ def test_v3_periodic_critic_reports_fresh_independent_values_without_replacing_r
         def step(self, deterministic=False):
             row = super().step(deterministic)
             row.context = {'x': torch.full((1, 1), 11.)}
+            row.metadata['critic_context']=row.context
             return row
     monkeypatch.setattr(training, 'UpperEnvironment', NewPhysicalConditions)
     second = training._evaluate(c, '000001')
@@ -270,7 +276,7 @@ def test_fixed_critic_targets_preserve_bootstrap_and_models_are_readonly():
     row = SimpleNamespace(context={'x': torch.tensor([[2.]])}, next_context={'x': torch.tensor([[3.]])},
         identity={'backend_session_id': 'b', 'episode_id': 1, 'policy_version': 0}, rewards=[1.]*25,
         executed_control_steps=25, control_tick_begin=0, control_tick_end=25, terminated=False, truncated=True,
-        transition_valid=True, metadata={'remaining_music_seconds': 2., 'next_remaining_music_seconds': 1.5})
+        transition_valid=True, metadata={'remaining_music_seconds': 2., 'next_remaining_music_seconds': 1.5,'critic_context':{'x':torch.tensor([[2.]])},'next_critic_context':{'x':torch.tensor([[3.]])}})
     reference = build_fixed_critic_reference([row], critic, torch.device('cpu'), gamma_upper=.99, lambda_upper=.95)
     expected = sum(.99**(index/25) for index in range(25))+.99*3.
     assert reference['records'][0]['target'] == pytest.approx(expected)

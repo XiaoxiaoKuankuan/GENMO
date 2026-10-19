@@ -26,7 +26,7 @@ sys.path.insert(0, str(ROOT))
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--config', type=Path, default=ROOT / 'configs/closedloop/stage2_random20_server2.yaml')
+    parser.add_argument('--config', type=Path, default=ROOT / 'configs/closedloop/stage2_credit_server2.yaml')
     parser.add_argument('--gmt-repo', type=Path, required=True)
     parser.add_argument('--output', type=Path, required=True)
     parser.add_argument('--case', action='append', help='训练来源/样本名/音乐起点秒数，可重复指定')
@@ -99,7 +99,7 @@ def main():
                 evidence = actual['reset_initialization']
                 assert evidence['actual_state_verified'] and int(actual['history_append_count']) == 1
                 assert int(np.asarray(actual['history_valid']).sum()) == 1
-                assert actual['tracking_history_schema'] == 'gmt.causal_tracking_history90.v1'
+                assert actual['tracking_history_schema'] == 'gmt.causal_tracking_history90.v2'
                 assert np.asarray(actual['tracking_history_values']).shape == (50, 90)
                 assert int(np.asarray(actual['tracking_history_valid']).sum()) == 1
                 np.testing.assert_array_equal(actual['tracking_history_ticks'], actual['tracking_reference_ticks'])

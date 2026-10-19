@@ -100,7 +100,7 @@ def test_cfg_batch_replay_has_independent_density_and_shared_masks(actor_factory
         torch.testing.assert_close(current, independent, atol=1e-8, rtol=0)
     state = trace['chain'][:, 0]
     fused = policy.transition_parameters(conditions, state, 0)
-    policy.cfg_batch = False
+    policy = DPPODiffusionPolicy(actor,steps=3,cfg_batch=False)
     separate = policy.transition_parameters(conditions, state, 0)
     torch.testing.assert_close(fused['mean'], separate['mean'], atol=2e-6, rtol=2e-5)
     assert torch.equal(fused['free_mask'], separate['free_mask'])
@@ -119,7 +119,7 @@ def test_std_schedule_changes_noise_not_mean_and_is_identified(actor_factory):
         torch.testing.assert_close(first['mean'], second['mean'], atol=0, rtol=0)
         torch.testing.assert_close(first['base_std'], second['base_std'], atol=0, rtol=0)
         assert second['std'].item() >= [.2, .1, .01][step]-1e-8
-    assert ordinary.kernel_config['version'].endswith('.v1')
+    assert ordinary.kernel_config['cfg_forward']=='batched'
     assert scheduled.kernel_config['effective_std_floors'] == [.2, .1, .01]
     assert scheduled.kernel_config['version'].endswith('.v2')
     with pytest.raises(ValueError, match='std_schedule'):

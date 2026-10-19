@@ -377,6 +377,9 @@ def evaluation_episode_flow(env, task, index, plan, *, catalog, limit, determini
         env.comparison_noise_index = int(task['noise_index_start'])
         with torch.no_grad():
             reset=dict(seed=task['seed'],phase='evaluation',music_start_frame=task['music_start_frame'])
+            if plan.get('mc_start_distribution')=='match_training_reset.v1':
+                if transition_sink is None:raise ValueError('MC reset is restricted to an explicit complete-value bank')
+                reset.update(phase='critic_mc',initialization=task['initialization'])
             if hasattr(env,'reset_task_flow'):
                 yield from env.reset_task_flow(task['sample'],music,**reset)
             else:
@@ -402,11 +405,17 @@ def evaluation_episode_flow(env, task, index, plan, *, catalog, limit, determini
             else:
                 raise RuntimeError('Evaluation exceeded finite decision guard without termination')
     except Exception as caught:
-        episode.update(transition_valid=False, error={'type': type(caught).__name__, 'message': str(caught)},
+        from .env_adapter import WarmupEpisodeEnded
+        if isinstance(caught,WarmupEpisodeEnded) and plan.get('mc_start_distribution')=='match_training_reset.v1':
+            # 没有上层状态就没有MC标签；真实失败记入任务结果和资源账本，不伪造零价值样本。
+            episode.update(transition_valid=True,physical_failure=True,end_reason='physical_warmup_failure',
+                warmup_control_steps=int(env.snapshot['tick'])//12,mc_label_available=False)
+        else:
+            episode.update(transition_valid=False, error={'type': type(caught).__name__, 'message': str(caught)},
                        end_reason='infrastructure_failure')
-        error = caught
+            error = caught
     from .motion_diagnostics import episode_motion_diagnostic,generated_reference_diagnostic
-    episode['motion_diagnostic'] = episode_motion_diagnostic(actual_motion_rows,music) if episode.get('transition_valid') else dict(available=False,reason='invalid_episode')
+    episode['motion_diagnostic'] = episode_motion_diagnostic(actual_motion_rows,music) if episode.get('transition_valid') and actual_motion_rows else dict(available=False,reason='no_valid_actor_controls')
     episode['generated_reference_diagnostic']=generated_reference_diagnostic(generated_plans)
     if progress:
         progress(dict(event='evaluation_episode_end',episode_index=index,task_id=task['task_id'],
@@ -470,7 +479,8 @@ def evaluate_policy(env, policy, task_plan, output_dir, *, catalog=None, episode
             results=world_driver.run(plan['tasks'],flow)
         for index,episode,caught in sorted(results,key=lambda item:item[0]):
             episode_path=output/'episodes'/f'{index:06d}.json'
-            _publish_json(episode_path,episode)
+            from .compact_evidence import write_episode
+            write_episode(episode_path,episode,publish_json=_publish_json,disk_guard=getattr(env,'disk_guard',None))
             episodes.append(episode)
             manifests.append(dict(path=str(episode_path.relative_to(output)),
                 sha256=hashlib.sha256(episode_path.read_bytes()).hexdigest(),

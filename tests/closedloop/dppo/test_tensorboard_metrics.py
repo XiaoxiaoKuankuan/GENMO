@@ -39,7 +39,6 @@ def training_record(step=1):
     return dict(mode='dppo_bc', state={'iteration': step}, collection_by_rank=collections,
         actor={'steps': actor_steps}, critic={'before': {'mse': 9., 'explained_variance': .2}, 'after': {'mse': 1.}},
         trainable4_kl={ 'maximum_step_mean_coordinate_kl': .2,
-            'coordinate_kl': {'p95': .35}, 'chain_joint_kl': {'mean': 400.},
             'per_denoising_step': [dict(step=i, mean_coordinate_kl={'mean': .2},
                                        objective_clip_fraction=.1) for i in range(15,19)]},
         wall_seconds=20., time_utc='2026-10-16T00:00:00+00:00')
@@ -65,16 +64,33 @@ def evaluation_report(iteration=0, gain=0., error=.01, activity=1.):
         stage1_retention={'source_balanced_loss': 4.-gain})
 
 
+def test_compact_evaluation_preserves_dashboard_values_and_checks_sources(tmp_path):
+    from gem.closedloop.dppo.compact_evidence import write_episode, summary_only
+    from gem.closedloop.dppo.evaluation import _publish_json
+    original=evaluation_report()
+    compact=summary_only(original)
+    compact['source_episode_manifests']=[]
+    for i,episode in enumerate(original['episodes']):
+        path=tmp_path/f'{i:06d}.json'
+        write_episode(path,episode,publish_json=_publish_json)
+        compact['source_episode_manifests'].append(dict(path=str(path),task_id=episode['task_id'],
+            sha256=hashlib.sha256(path.read_bytes()).hexdigest()))
+    expected=evaluation_scalars(original)
+    assert evaluation_scalars(compact)==expected
+    assert evaluation_scalars(compact,compact)==expected
+    reference=compact['source_episode_manifests'][0]
+    Path(reference['path']).write_text(Path(reference['path']).read_text()+'\n')
+    with pytest.raises(ValueError,match='JSON SHA'):
+        evaluation_scalars(compact)
+
+
 def test_training_uses_actual_rank_denominators_and_excludes_frozen_steps():
     values = training_scalars(training_record())
     assert values['Reward/total_per_second'] == pytest.approx(9.1)
     assert values['Termination/physical_failures_per_1000s'] == pytest.approx(50.)
     assert values['Policy/trainable_kl'] == pytest.approx(.2)
-    assert values['Policy/p95_trainable_kl'] == pytest.approx(.35)
-    assert values['Policy/chain_joint_kl'] == pytest.approx(400.)
-    assert 'Reward/stable' not in EVENT_DEFINITIONS
-    assert values['Policy/clipped_objective_fraction'] == pytest.approx(.1)
-    assert values['Loss/ppo'] == pytest.approx(2.5)
+    assert 'Policy/clipped_objective_fraction' not in values  # joint-score没有真实PPO目标裁剪
+    assert values['Loss/joint_score'] == pytest.approx(2.5)
     assert values['Loss/bc'] == pytest.approx(1.5)
     assert values['Policy/bc_to_ppo_gradient_ratio'] == pytest.approx(.1)
     assert values['Perf/controls_per_second'] == 100.
@@ -172,7 +188,7 @@ def test_real_events_keep_one_run_and_separate_training_validation_reward(tmp_pa
     assert tags and set(tags) <= EVENT_DEFINITIONS.keys()
     groups = {tag.split('/')[0] for tag in tags}
     assert groups == {'Reward', 'Tracking', 'Motion', 'Termination', 'Policy', 'Loss', 'Sampling', 'Perf'}
-    assert len(EVENT_DEFINITIONS) <= 56
+    assert len(EVENT_DEFINITIONS) <= 54
     assert all(events.Scalars(tag) for tag in tags)
     train = events.Scalars('Reward/train_total_per_second')
     validation = events.Scalars('Reward/validation_total_per_second')

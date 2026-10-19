@@ -15,12 +15,19 @@ from __future__ import annotations
 from concurrent.futures import Future, TimeoutError as FutureTimeout
 import time
 import torch
-from .dual_collector import split_trace
+from .rollout_helpers import split_trace
 from .env_adapter import cpu_copy
 from gem.closedloop.frozen_actor import stable_noise_seed
 from gem.runtime.closedloop_protocol import RemoteError
 
 GENERATION_CONTRACT = 'genmo.vector_generation_pipeline.v1'
+
+
+def reference_plan_payload(generated):
+    """只向GMT提交参考合同实际消费的字段；训练诊断留在原生成记录中。"""
+    keys=('env_id','episode_id','request_id','parent_plan_id','plan_id','decision_tick',
+          'deadline_tick','prefix_frames','protected_end_tick','qpos_world','qpos30','contact')
+    return {key:generated[key] for key in keys}
 
 
 def await_generation(owner, future):
@@ -164,7 +171,7 @@ def generate_for_environment_flow(env):
     sample_ready = time.perf_counter()
     rejection, prepared = None, None
     try:
-        prepared = yield from backend_operation('prepare_plan', generated_plan=result['generated'])
+        prepared = yield from backend_operation('prepare_plan', generated_plan=reference_plan_payload(result['generated']))
     except RemoteError as exc:
         if exc.code not in {'invalid_qpos','invalid_quaternion','invalid_plan_output','known_source_changed'}: raise
         rejection = dict(code=exc.code, message=str(exc), policy_penalty=True, category='finite_invalid_reference')

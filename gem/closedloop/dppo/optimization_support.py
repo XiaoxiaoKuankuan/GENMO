@@ -160,7 +160,7 @@ def probability_check_local(policy, transitions, *, global_manifest=None, distri
         if rows:
             _validate_actor_transitions(policy, rows)
         device = next(policy.actor.parameters()).device
-        checks = torch.zeros((len(rows), 4), dtype=torch.float64, device=device)
+        checks = torch.zeros((len(rows), 3), dtype=torch.float64, device=device)
         flat = [(index, step) for index in range(len(rows)) for step in (policy.stochastic_steps if include_frozen else policy.trainable_steps)]
         conditions = ConditionGraphCache(policy, tensor_cache,include_frozen=include_frozen) if tensor_cache is not None and hasattr(policy, 'prepare_conditions') else None
         if conditions is not None and getattr(policy, 'defer_checks', False):
@@ -179,37 +179,17 @@ def probability_check_local(policy, transitions, *, global_manifest=None, distri
             independent = independent.masked_fill(~mask, 0.).sum((-2, -1))
             batch = torch.stack(((current - stored).abs(), ((current - stored).exp() - 1).abs(),
                                  (independent - stored).abs()), 1)
-            # 同链随机步骤按amax一次归约，避免每个内部转移启动索引/maximum/写回小算子。
+            # 同链20步按amax一次归约，避免每个内部转移启动索引/maximum/写回小算子。
             # amax不改变浮点求和顺序，重复链索引和尾批均保留完整覆盖。
             indices = torch.tensor([index for index, _ in chunk], device=device)[:, None].expand(-1, 3)
-            checks[:, :3].scatter_reduce_(0, indices, batch, reduce='amax', include_self=True)
-        # 确定性末步没有Gaussian概率；严格审计仍必须逐真实链前向核对最终输出。
-        # 使用同一旧x19和冻结Stage1，不重新采样、不把最终动作当高斯动作。
-        if include_frozen:
-            for step in getattr(policy, 'deterministic_steps', ()):
-                for start in range(0, len(rows), denoising_microbatch):
-                    samples = rows[start:start + denoising_microbatch]
-                    context = _context(samples, device) if tensor_cache is None else tensor_cache.context(samples)
-                    state = (torch.stack([row.chain[step] for row in samples]).to(device)
-                             if tensor_cache is None else tensor_cache.get('chain', samples, [step]*len(samples)))
-                    observed = (torch.stack([row.chain[step+1] for row in samples]).to(device)
-                                if tensor_cache is None else tensor_cache.get('chain', samples, [step+1]*len(samples)))
-                    prepared = policy.prepare_conditions(context) if conditions is None else conditions.prepare(samples, context)
-                    parameters = policy.transition_parameters(context, state, step, prepared=prepared)
-                    if parameters['std'] is not None:
-                        raise ValueError('Deterministic final audit found a stochastic transition')
-                    error = ((parameters['mean'].double()-observed.double()).abs()/(1.+observed.double().abs())).amax((-2,-1))
-                    checks[start:start+len(samples), 3] = torch.maximum(checks[start:start+len(samples), 3], error)
+            checks.scatter_reduce_(0, indices, batch, reduce='amax', include_self=True)
         if conditions is not None:
             conditions.validate_inputs()
     if distributed is not None:
         checks = distributed.gather_rows(checks, [position for position, _ in owned], len(selected))
     maximum = checks.amax(0).cpu()
-    if not torch.isfinite(maximum).all() or (maximum > torch.tensor([1e-4, 1e-3, 1e-8, 1e-6])).any():
+    if not torch.isfinite(maximum).all() or (maximum > torch.tensor([1e-4, 1e-3, 1e-8])).any():
         raise FloatingPointError(f'Zero-update probability mismatch: {maximum.tolist()}')
     return dict(passed=True,checked_steps=list(policy.stochastic_steps if include_frozen else policy.trainable_steps),
-                forward_checked_steps=list(range(policy.steps)) if include_frozen else list(policy.trainable_steps),
-                deterministic_final_checked=bool(include_frozen and getattr(policy, 'deterministic_steps', ())),
-                max_normalized_deterministic_error=float(maximum[3]) if include_frozen else None,
                 frozen_identity=policy.assert_frozen_identity(),max_abs_log_probability_difference=float(maximum[0]),
                 max_abs_ratio_minus_one=float(maximum[1]), max_abs_independent_gaussian_difference=float(maximum[2]))

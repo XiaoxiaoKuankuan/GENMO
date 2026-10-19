@@ -17,7 +17,7 @@ from gem.runtime.trajectory_blocks import ColumnarTrace, pack_trace
 from tests.closedloop.dppo.test_data_learning import actual_step, target_activity_fixture
 from tests.closedloop.dppo.test_vector_reward_adapter import packet
 
-CONFIG = dict(version='stage10.physical_reward.v1',music_reward_enabled=False,music_weight=0.)
+CONFIG = dict(version='stage2.gmt8_reference_limits.v1',music_reward_enabled=False,music_weight=0.)
 
 
 def test_disabled_music_skips_beats_intensity_and_preserves_every_integral(monkeypatch):
@@ -61,7 +61,7 @@ def test_disabled_music_retains_required_paired_activity_and_rejects_bad_switch(
 def test_failure_event_is_integrated_once_and_not_multiplied_by_dt():
     reward=ExecutionReward(CONFIG,target_activity=target_activity_fixture)
     detail=reward.evaluate_step(actual_step())
-    metadata=dict(latency_seconds=.2,reward_details=[detail],generated=dict(prefix_frames=0),event_penalty_total=-5.,event_reward=0.,
+    metadata=dict(latency_seconds=.2,reward_details=[detail],generated=dict(prefix_frames=0,joint_limit_diagnostics={}),event_penalty_total=-5.,event_reward=0.,
         terminal_snapshot=dict(terminated=True))
     transition=SimpleNamespace(transition_valid=True,metadata=metadata,rewards=[detail['reward']-5.],
         executed_control_steps=1,executed_physics_steps=4,terminated=True,truncated=False,reason='physical_failure')
@@ -72,8 +72,8 @@ def test_failure_event_is_integrated_once_and_not_multiplied_by_dt():
 
 
 def test_policy_receives_actual_eta_cfg_and_precision(monkeypatch):
-    from gem.closedloop.dppo import dense_policy
-    monkeypatch.setattr(dense_policy,'DenseDiffusionPolicy',lambda actor,**kwargs:kwargs)
+    from gem.closedloop.dppo import frozen_prefix
+    monkeypatch.setattr(frozen_prefix,'FrozenPrefixPolicy',lambda actor,**kwargs:kwargs)
     result=build_policy(object(),dict(std_schedule=[.02]*20,denoising_steps=20,eta=.23,guidance_scale=.7),
         dict(mode='native_fp32',attention='sdpa_math',linear_execution='stable_tf32x3',compile=False,precise_output=True))
     assert (result['eta'],result['guidance_scale'],result['steps'])==(.23,.7,20)

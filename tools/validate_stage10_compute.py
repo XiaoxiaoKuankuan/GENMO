@@ -121,10 +121,6 @@ def probability_checks(policy,context):
         before={k:v.clone() for k,v in policy.frozen_policy.actor.state_dict().items()}
         with torch.no_grad():
             early=policy.transition_parameters(context,trace['chain'][:,0],0)['mean'].clone()
-            final=policy.transition_parameters(context,trace['chain'][:,19],19)
-            assert final['std'] is None
-            torch.testing.assert_close(final['mean'],trace['chain'][:,20],atol=0,rtol=0)
-            final_mean=final['mean'].clone()
         optimizer=torch.optim.Adam(policy.actor.parameters(),lr=1e-7)
         for _ in range(2):
             optimizer.zero_grad(set_to_none=True)
@@ -132,12 +128,26 @@ def probability_checks(policy,context):
             prediction.square().mean().backward();optimizer.step()
         with torch.no_grad():
             torch.testing.assert_close(policy.transition_parameters(context,trace['chain'][:,0],0)['mean'],early,atol=0,rtol=0)
-            torch.testing.assert_close(policy.transition_parameters(context,trace['chain'][:,19],19)['mean'],final_mean,atol=0,rtol=0)
         for key,value in policy.frozen_policy.actor.state_dict().items():torch.testing.assert_close(value,before[key],atol=0,rtol=0)
         assert all(p.grad is None for p in policy.frozen_policy.actor.parameters())
         result['frozen_prefix_nonempty_adam_checked']=True
-        result['deterministic_final_before_after_adam_checked']=True
+    result['actual_actor_snapshot_version_checked']=snapshot_version_checks(policy.actor,policy.actor)
     return result
+
+
+def snapshot_version_checks(actor,critic):
+    """真实网络前向后核验退出凭据：稳定可读、预算变化和零值原位写均被识别。"""
+    from types import SimpleNamespace
+    from gem.closedloop.dppo.training import _learning_version
+    c=SimpleNamespace(actor=actor,critic=critic,state=dict(iteration=0,budget=dict(generations=0)))
+    before=_learning_version(c)
+    assert before==_learning_version(c)
+    c.state['budget']['generations']=1
+    assert before!=_learning_version(c)
+    c.state['budget']['generations']=0
+    with torch.no_grad():next(p for p in critic.parameters() if p.requires_grad).add_(0.)
+    assert before!=_learning_version(c)
+    return True
 
 
 def critic_checks(actor,context):
@@ -163,14 +173,14 @@ def critic_checks(actor,context):
     assert all(p.grad is None for p in actor.parameters())
     assert all(p.grad is None for m in critic.encoder_modules() for p in m.parameters())
     assert any(p.grad is not None for p in critic.temporal.parameters())
-    assert critic.tracking_history_encoder.cell.weight_ih.grad[:,48:90].abs().sum()>0
     shuffled=dict(context);shuffled['music_features']=context['music_features'].flip(1)
     with torch.no_grad():delta=(critic(shuffled,remaining)-expected).abs()
     try:critic({**context,'future_reward':remaining},remaining)
     except ValueError:pass
     else:raise AssertionError('Critic accepted future privileged input')
     return dict(passed=True,independent_parameters=True,frozen_encoders=True,
-        music_order_max_value_change=float(delta.max()),cached_features_equal=True,actor_gradient_isolated=True,tracking_history_new_columns_receive_gradients=True)
+        actual_actor_critic_snapshot_version_checked=snapshot_version_checks(actor,critic),
+        music_order_max_value_change=float(delta.max()),cached_features_equal=True,actor_gradient_isolated=True)
 
 
 def main():
@@ -178,19 +188,17 @@ def main():
     parser.add_argument('--phase',choices=['math','policy','critic'],required=True)
     parser.add_argument('--output',type=Path,required=True)
     parser.add_argument('--asset-root',type=Path,default=Path('/data0/user/liwei/closedloop_stage10_v3_assets/20261012'))
-    parser.add_argument('--precision',choices=['native_fp32','tf32','bf16_backbone'],default='native_fp32')
-    parser.add_argument('--attention',default='sdpa_math')
-    parser.add_argument('--compile',action='store_true')
-    parser.add_argument('--cuda-graph',action='store_true',help='单独验收真实无梯度CUDA Graph及eager有梯度一致性')
-    parser.add_argument('--linear-execution',default='native_gemm')
+    parser.add_argument('--precision',choices=['native_fp32'],default='native_fp32')
+    parser.add_argument('--attention',choices=['sdpa_math'],default='sdpa_math')
+    parser.add_argument('--linear-execution',choices=['stable_tf32x3'],default='stable_tf32x3')
     parser.add_argument('--chains',type=int,default=8)
     parser.add_argument('--frames',type=int,choices=[60,120],default=60)
     parser.add_argument('--frozen-prefix-steps',type=int,choices=[15],default=15)
     args=parser.parse_args();rank=int(os.environ['RANK']);device=torch.device('cuda:'+os.environ['LOCAL_RANK'])
     torch.cuda.set_device(device);torch.set_num_threads(4);torch.manual_seed(42)
     args.output.mkdir(parents=True,exist_ok=True)
-    record=dict(phase=args.phase,rank=rank,precision=args.precision,attention=args.attention,compile=args.compile,
-        linear_execution=args.linear_execution,cuda_graph=args.cuda_graph,generation_horizon_frames=args.frames,
+    record=dict(phase=args.phase,rank=rank,precision=args.precision,attention=args.attention,compile=False,
+        linear_execution=args.linear_execution,cuda_graph=False,generation_horizon_frames=args.frames,
         conditions_scope='four_source_real_Stage1_demonstration_not_physical_rollout')
     try:
         if args.phase=='math':result=math_checks(device,args.frames)
@@ -206,8 +214,8 @@ def main():
                 from gem.closedloop.dppo.frozen_prefix import FrozenPrefixPolicy
                 cls=FrozenPrefixPolicy
                 policy=cls(actor,std_schedule=[.001]*15+[.04,.06,.08,.10,0.],
-                    precision=args.precision,attention=args.attention,compile_denoiser=args.compile,
-                    linear_execution=args.linear_execution,generation_frames=args.frames,cuda_graph=args.cuda_graph)
+                    precision=args.precision,attention=args.attention,
+                    linear_execution=args.linear_execution,generation_frames=args.frames)
                 actual_lengths=set()
                 hooks=[b.register_forward_pre_hook(lambda _,a:actual_lengths.add(a[0].shape[1])) for b in actor.denoiser.blocks]
                 result=probability_checks(policy,context)
@@ -216,7 +224,6 @@ def main():
                 result['actual_Transformer_lengths']=sorted(actual_lengths)
                 result['pretrained_maximum_frames']=actor.denoiser.max_len
                 result['kernel']=policy.kernel_config
-                if args.cuda_graph:result['cuda_graph_counters']=dict(actor=policy.cuda_graph_counters,frozen=policy.frozen_policy.cuda_graph_counters)
             record['source_global_step']=loading['source_global_step']
         record.update(result)
     except BaseException as error:

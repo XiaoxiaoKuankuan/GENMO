@@ -125,8 +125,7 @@ class Sim2SimViewer:
                 mujoco.mjr_overlay(mujoco.mjtFont.mjFONT_NORMAL,mujoco.mjtGridPos.mjGRID_TOPLEFT,
                     rect,text,'',self.context)
                 mujoco.mjr_overlay(mujoco.mjtFont.mjFONT_NORMAL,mujoco.mjtGridPos.mjGRID_BOTTOMLEFT,
-                    rect,'SPACE pause | R replay | N/P song | '+
-                    '/'.join(str(i+1) for i in range(len(self.runtime.models)))+' model\n'+
+                    rect,'SPACE pause | R replay | N/P song | 1/2/3 model\n'
                     'G blue reference | ESC exit | physics 200 Hz / GMT 50 Hz',
                     '',self.context)
                 if (self.runtime.record and state.get('status')=='finished' and

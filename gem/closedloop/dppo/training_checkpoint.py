@@ -22,7 +22,7 @@ import torch
 
 from .budget import atomic_json
 
-SCHEMA='genmo.closedloop.stage2.asymmetric_tracking.checkpoint.v1'
+SCHEMA='genmo.closedloop.stage2.asymmetric_tracking.checkpoint.v2'
 
 
 def immutable_cpu_snapshot(value):
@@ -81,13 +81,23 @@ class AsyncCheckpointWriter:
             descriptor=dict(schema='genmo.stage10.checkpoint_publication',iteration=state['iteration'],
                 rollouts_completed=state['rollouts_completed'],path=str(path.relative_to(self.root)),
                 sha256=sha,size_bytes=size,publication_id=publication_id,metadata=dict(reason=reason,actor_updates=state['actor_updates'],
-                    critic_updates=state['critic_updates'],actor_model_fingerprint=payload['actor_fingerprint']))
+                critic_updates=state['critic_updates'],actor_model_fingerprint=payload['actor_fingerprint'],
+                reasons=reason.split('+')))
             atomic_json(self.root/'latest.json',descriptor)
             if reason=='best':atomic_json(self.root/'best_checkpoint.json',descriptor)
             # 只清理当前运行产生的普通周期文件；初始、评估、best和终态不在此集合。
-            candidates=sorted((self.root/'checkpoints').glob('stage10_r*_a*_periodic.pt'))
+            candidates=sorted(p for p in (self.root/'checkpoints').glob('stage10_r*_a*_periodic.pt')
+                              if '+' not in p.stem)
+            import json
+            protected={path}
+            for pointer_name in ('latest.json','best_checkpoint.json','best_saved.json'):
+                pointer_path=self.root/pointer_name
+                if pointer_path.exists():
+                    pointer=json.loads(pointer_path.read_text())
+                    reference=pointer.get('checkpoint',pointer)
+                    if reference.get('path'):protected.add(self.root/reference['path'])
             for expired in candidates[:-self.keep_last]:
-                if expired!=path:expired.unlink()
+                if expired not in protected:expired.unlink()
             return dict(**descriptor,background_write_seconds=time.perf_counter()-start)
         except BaseException:
             tmp.unlink(missing_ok=True);raise

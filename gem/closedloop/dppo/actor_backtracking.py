@@ -66,7 +66,8 @@ def backtracked_step(actor, optimizer, controller, *, evaluate, limits, distribu
     trials = []
     try:
         for index in range(max_attempts):
-            restore()
+            if index:
+                restore()
             lr = initial_lr * factor**index
             optimizer.param_groups[0]['lr'] = lr
             if reserve_attempt is not None:

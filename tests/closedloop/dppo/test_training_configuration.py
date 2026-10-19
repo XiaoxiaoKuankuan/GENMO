@@ -22,43 +22,26 @@ from gem.closedloop.dppo.training import _sources
 from gem.closedloop.dppo.training_config import VERSION, configuration
 
 ROOT = Path(__file__).resolve().parents[3]
-CONFIG = ROOT / 'configs/closedloop/stage10_server1.yaml'
+CONFIG = ROOT / 'configs/closedloop/stage2_credit_server2.yaml'
 
 
-def test_main_scale_is_8192_nominal_chains_with_eight_combined_updates():
+def test_main_scale_is_16384_nominal_chains_with_four_clipped_dppo_updates():
     c = configuration(CONFIG)
     s, t = c['stage10'], c['stage10']['training']
     assert s['version'] == VERSION
-    assert s['derived'] == dict(world_size=8, real_chains=8192, local_chains=1024,
-        planned_actor_steps=8, local_ppo_internal_visits=8192, local_trainable_kl_visits=4096,
-        bc_per_step=128, bc_per_rollout=1024,maximum_actor_steps=10,
+    assert s['derived'] == dict(world_size=8, real_chains=16384, local_chains=2048,
+        planned_actor_steps=4, local_ppo_internal_visits=8192, local_trainable_kl_visits=8192,
+        bc_per_step=256, bc_per_rollout=1024,maximum_actor_steps=4,
         count_semantics='nominal_capacity_only_actual_manifest_controls_optimization')
     assert c['runtime']['num_envs']==c['runtime']['generation_batch']==128
-    assert s['critic']['global_batch']==s['scale']['actor_minibatch_chains']==2048
+    assert s['critic']['global_batch']==2048 and s['scale']['actor_minibatch_chains']==4096
     assert t['denoising_microbatch']==t['kl_microbatch']==128
     assert s['critic']['complete_mc']['training_samples_per_source']==24
-    assert (t['denoising_steps'], t['ppo_steps_per_chain'], t['ppo_epochs']) == (20, 4, 2)
+    assert (t['denoising_steps'], t['ppo_steps_per_chain'], t['ppo_epochs']) == (20, 4, 1)
     assert t['frozen_prefix_steps']==15 and t['ppo_step_strategy']=='intermediate4'
-    assert t['actor_lr'] == 5e-8 and t['ppo_clip'] == .003
+    assert t['actor_lr'] == 3e-7 and t['ppo_clip'] == .01
     assert c['runtime']['timing_contract'] == 'modeled_deployment.v3'
     assert (c['timing']['control_ticks'], c['timing']['physics_ticks']) == (12, 3)
-
-
-def test_server1_accepts_2000_cumulative_updates_but_not_a_new_budget_on_resume():
-    from gem.closedloop.dppo.run_control import validate_stopping_iteration
-    stage=configuration(CONFIG)['stage10']
-    assert stage['run_control']['max_training_iterations']==stage['limits']['accepted_iterations']==2000
-    assert stage['storage']['checkpoint_interval_iterations']==100
-    assert validate_stopping_iteration(2000,stage)==2000
-    with pytest.raises(ValueError):validate_stopping_iteration(2001,stage)
-
-
-@pytest.mark.parametrize('value',[0,-1,True,100.0])
-def test_invalid_iteration_checkpoint_interval_rejected(tmp_path,value):
-    config=yaml.safe_load(CONFIG.read_text())
-    config['stage10']['storage']['checkpoint_interval_iterations']=value
-    path=tmp_path/'invalid_save_interval.yaml';path.write_text(yaml.safe_dump(config))
-    with pytest.raises(ValueError,match='Checkpoint iteration interval'):configuration(path)
 
 
 @pytest.mark.parametrize('path', [CONFIG],

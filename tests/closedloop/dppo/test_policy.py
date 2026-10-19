@@ -165,7 +165,7 @@ def test_cfg_shared_history_prefix_and_guided_x0_formula(actor_factory):
     actor, batch = actor_factory(starts=(45,))
     _activate_branches(actor)
     conditions = _conditions(batch)
-    policy = DPPODiffusionPolicy(actor, steps=3, guidance_scale=2.5)
+    policy = DPPODiffusionPolicy(actor, steps=3, guidance_scale=2.5,cfg_batch=False)
     state = torch.randn_like(conditions["known_qpos30"])
     adapted = actor.adapt_conditions(conditions)
     residual = actor._residual(adapted)

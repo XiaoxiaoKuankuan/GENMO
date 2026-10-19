@@ -14,7 +14,6 @@ GAE按各环境/episode/连续执行片段独立计算，全局标准化一次�
 from __future__ import annotations
 
 import copy
-import hashlib
 from pathlib import Path
 from types import SimpleNamespace
 import time
@@ -22,12 +21,12 @@ import time
 import torch
 
 from .budget import atomic_json
-from .dual_collector import fixed_fragment_targets
+from .rollout_helpers import fixed_fragment_targets
 from .full_dataset import FullMusicSampler
 from .time_sampling import StratifiedTimePool, execution_coverage
 from .memory_execution import MemoryReceiveJournal,PrepaidMemoryBudget,DeviceRolloutBuffer
 from .parallel_support import begin_lease,finish_lease,collection_credit,local_call,root_call
-from .returns import normalize_advantages_global, shuffle_advantages_global
+from .returns import normalize_advantages_global
 from .run_management import GuardedStepJournal
 from .trainer import populate_values
 from .vector_collector import VectorWorldClient,VectorLaneBackend
@@ -44,6 +43,8 @@ def freeze_buffer_targets(buffer, lengths, critic, device, *, critic_version, ba
     rows=buffer.transitions
     if sum(lengths)!=len(rows) or any(type(n) is not int or n<0 for n in lengths):
         raise ValueError('Vector fragment lengths must cover the complete buffer')
+    from .reference_credit import validate_reward_intervals
+    validate_reward_intervals(rows)
     populate_values(rows,critic,device,critic_version=critic_version,batch_size=batch_size)
     fragments=[];start=0
     for n in lengths:
@@ -196,10 +197,6 @@ class InProcessTrainingRuntime:
         manifest=[item for shard in c.distributed.all_gather_object(local) for item in shard]
         if manifest:targets=normalize_advantages_global(targets,distributed=c.distributed)
         else:targets.update(advantage_global_count=0,advantage_global_mean=0.,advantage_global_std=0.)
-        if manifest and c.settings.get('advantage_control','none')=='shuffle_global':
-            # 负对照的置换种子只由run种子和rollout序号决定，不消耗训练/Actor/Critic生成器。
-            seed=int(hashlib.sha256(f"{c.stage['seed']}:advantage_shuffle:{c.state['rollouts_completed']}".encode()).hexdigest()[:15],16)
-            targets=shuffle_advantages_global(targets,manifest,distributed=c.distributed,seed=seed)
         used,budget=self._finish()
         contiguous=[]
         for fragment in fragments:
@@ -233,6 +230,15 @@ class InProcessTrainingRuntime:
                 policy_version=c.state['policy_version'],chunk_size=64,disk_guard=c.guard)
             for row in rows:writer.append(row)
             writer.finish()
+        if c.stage['ppo_rollout'].get('credit_contract'):
+            path=c.session/'collections'/label/f'rank{c.distributed.rank:02d}'/'reference_credit.json'
+            updates=[dict(env_slot=i,**item) for i,state in enumerate(self.collector.states)
+                for item in state.resource.env.reference_credit.drain_updates()]
+            atomic_json(path,dict(contract=c.stage['ppo_rollout']['credit_contract'],
+                behavior_version=c.state['policy_version'],tick_hz=600,reward_reassignment=False,plans=updates))
+            c.guard.account_file(path)
+            report['reference_credit']=dict(path=str(path),plan_updates=len(updates),
+                gamma_upper=c.settings['gamma_upper'],lambda_upper=c.settings['lambda_upper'])
         atomic_json(c.session/'collections'/label/f'rank{c.distributed.rank:02d}'/'collection.json',report)
         self.iteration,self.policy_version=c.state['iteration'],c.state['policy_version']
         return buffer,targets,manifest,report

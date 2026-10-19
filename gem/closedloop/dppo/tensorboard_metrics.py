@@ -27,6 +27,7 @@ DEFINITIONS = {
     'Reward/total_per_second': '分/秒，越高越好。训练为各来源积分回报/实际采集秒数再四来源等权；验证为各任务每秒回报先来源内平均、再来源等权。',
     'Reward/episode_return': '分，固定验证任务积分回报的四来源等权平均；执行更久也会增加，必须一起看每秒回报和终止。',
     'Reward/tracking': '分/秒，已乘权重和活动度门控的跟踪奖励；越高越好，但不能替代原始误差。',
+    'Reward/stable': '分/秒，根高和非 yaw 姿态稳定奖励，越高越好。',
     'Reward/alive': '分/秒，有效存活控制区间奖励，越高越好。',
     'Reward/command_penalty': '分/秒，控制指令变化惩罚，非正，越接近零越好。',
     'Reward/torque_penalty': '分/秒，力矩惩罚，非正，越接近零越好。',
@@ -56,9 +57,7 @@ DEFINITIONS = {
     'Termination/reference_rejections_per_1000s': '次/1000机器人秒，固定验证参考拒绝次数/实际执行秒数，越低越好。',
     'Policy/learning_rate': '实际 Actor 优化器学习率，不是配置上限。',
     'Policy/trainable_kl': '本轮更新前后可训练去噪步骤的平均每自由坐标 KL；排除冻结步骤，大小本身不等于收益。',
-    'Policy/max_step_kl': '四个可训练随机步骤中最大的单步平均每自由坐标 KL，用于检查某一步是否变化过大。',
-    'Policy/p95_trainable_kl': '全部真实链×四个训练步骤的每自由坐标 KL 的95百分位，检查更新尾部；不包含冻结步骤。',
-    'Policy/chain_joint_kl': '每条真实链内四个随机转移联合 KL 求和后再对链取平均，单位不同于每坐标 KL；不是最终动作密度的直接 KL。',
+    'Policy/max_step_kl': '完整去噪链中最大的单步平均每自由坐标 KL，用于检查更新是否过大。',
     'Policy/clipped_objective_fraction': '可训练去噪步骤最终检查中真正被 PPO 裁剪的目标比例；接近零不单独证明无效。',
     'Policy/gradient_norm': 'Actor 每次更新裁剪前 PPO+BC 总梯度范数的均值；持续异常增大需检查。',
     'Policy/bc_to_ppo_gradient_ratio': '每次更新加权 BC 梯度范数/PPO 梯度范数的均值；不是 Adam 参数更新贡献比例。',
@@ -101,7 +100,7 @@ ERROR_TAGS = {
     'leg_joint_pos_squared_error': 'leg_joint_position_rms_rad',
 }
 
-COMPONENT_TAGS = dict(track='tracking', alive='alive', cmd='command_penalty',
+COMPONENT_TAGS = dict(track='tracking', stable='stable', alive='alive', cmd='command_penalty',
                       torque='torque_penalty', contact='contact_penalty', joint_limit='joint_limit_penalty')
 
 
@@ -156,7 +155,7 @@ def training_scalars(record):
         values['Termination/physical_failures_per_1000s'] = 1000*sum(c['physical_failures'] for c in collections)/seconds
     actor = record.get('actor') or {}
     steps = actor.get('steps', [])
-    objective = actor.get('objective', 'coordinate_dppo')
+    objective = actor.get('objective', 'joint_score_pg')
     loss_tag = 'Loss/joint_score' if objective == 'joint_score_pg' else 'Loss/ppo'
     for tag, key, weight in [(loss_tag, 'ppo_loss', 'internal_sample_visits'),
                              ('Loss/bc', 'bc_loss', 'bc_global_samples')]:
@@ -183,8 +182,6 @@ def training_scalars(record):
         if objective != 'joint_score_pg':
             values['Policy/clipped_objective_fraction'] = float(np.mean([s['objective_clip_fraction'] for s in active]))
     values['Policy/max_step_kl'] = kl.get('maximum_step_mean_coordinate_kl')
-    values['Policy/p95_trainable_kl'] = kl.get('coordinate_kl', {}).get('p95')
-    values['Policy/chain_joint_kl'] = kl.get('chain_joint_kl', {}).get('mean')
     critic = record.get('critic') or {}
     values['Loss/critic_mse_before'] = critic.get('before', {}).get('mse')
     values['Loss/critic_mse_after'] = critic.get('after', {}).get('mse')
@@ -203,7 +200,8 @@ def evaluation_view(report):
     tasks = {t['task_id']: t for t in report['plan']['tasks']}
     rows = {}
     errors = {source: defaultdict(list) for source in SOURCES}
-    for episode in report['episodes']:
+    from .compact_evidence import report_episodes
+    for episode in report_episodes(report):
         if not episode.get('transition_valid') or episode['task_id'] in rows:
             raise ValueError('Invalid or duplicate evaluation episode')
         task = tasks[episode['task_id']]

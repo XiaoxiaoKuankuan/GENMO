@@ -12,6 +12,29 @@ from functools import wraps
 import torch
 
 _CHECKS = ContextVar('stage10_deferred_checks', default=None)
+_ACTIVE_PRECISION = ContextVar('stage2_active_precision', default=None)
+
+
+@contextmanager
+def precision_scope(contract):
+    """固定当前FP32执行设置；进入和离开时保留原先全局状态，不选择其他数值核。"""
+    if contract is None:
+        yield
+        return
+    desired=bool(contract['matmul_tf32'])
+    if desired:
+        raise ValueError('Current execution forbids ordinary TF32 approximation')
+    if _ACTIVE_PRECISION.get()==desired:
+        yield
+        return
+    previous=torch.backends.cuda.matmul.allow_tf32,torch.backends.cudnn.allow_tf32
+    token=_ACTIVE_PRECISION.set(desired)
+    torch.backends.cuda.matmul.allow_tf32=desired
+    torch.backends.cudnn.allow_tf32=desired
+    try:yield
+    finally:
+        torch.backends.cuda.matmul.allow_tf32,torch.backends.cudnn.allow_tf32=previous
+        _ACTIVE_PRECISION.reset(token)
 
 
 def require_tensor(condition, message, error=ValueError):
@@ -25,7 +48,6 @@ def require_tensor(condition, message, error=ValueError):
 
 @contextmanager
 def policy_phase(policy):
-    from .numerical_execution import precision_scope
     with precision_scope(getattr(policy, 'numerical_execution', None)):
         with _validation_phase(policy):
             yield
@@ -37,6 +59,8 @@ def _validation_phase(policy):
         yield
         return
     policy._prepare_actor()
+    frozen_check=getattr(policy,'assert_frozen_identity',None)
+    if frozen_check is not None:frozen_check()
     signature = policy._parameter_signature()
     policy._phase_signature = signature
     checks = []
@@ -53,6 +77,7 @@ def _validation_phase(policy):
         _CHECKS.reset(token)
     if policy._parameter_signature() != signature:
         raise RuntimeError('Actor changed inside a fixed-parameter compute phase')
+    if frozen_check is not None:frozen_check()
 
 
 def checked_policy_phase(function):

@@ -12,10 +12,8 @@ import pytest
 
 from gem.closedloop.dppo.world_collector import WorldEnvironmentCollector
 from gem.closedloop.dppo.world_flow import backend_operation
-from gem.closedloop.dppo.prepaid_budget import PrepaidBudget
 from gem.closedloop.dppo.budget_ledger import replay_budget
 from gem.closedloop.dppo.run_management import TrainingBudget
-from gem.closedloop.dppo.training_scale import derive_training_scale, budget_requirements
 
 
 
@@ -106,38 +104,3 @@ def test_world_drains_deferred_pages_and_cross_page_ack_receipts_after_indexing(
 def limits():
     return dict(accepted_iterations=1, optimizer_attempts=8, generations=100,
                 control_steps=1000, physics_steps=4000)
-
-
-def test_prepaid_events_have_bounded_writeback_and_exact_legacy_replay(tmp_path):
-    root = TrainingBudget(tmp_path/'resource_lease.json', limits())
-    child = PrepaidBudget(tmp_path/'budget.json', limits(), parent_lease=root.path, maximum_pending=3)
-    for _ in range(7):child.reserve('collect', generations=1)
-    assert child.flush_count == 2 and len(child.pending) == 1 and child.peak_pending == 3
-    state = child.state_dict()
-    assert not child.pending and child.flush_count == 3
-    actual, sequence, head = replay_budget(child.path)
-    assert actual['used'] == state['used'] and sequence == 7 and head == state['ledger']['sha256']
-    child.close(); child.close()
-
-
-def test_unflushed_crash_does_not_refund_parent_reservation(tmp_path):
-    root = TrainingBudget(tmp_path/'root.json', limits()); root.reserve('rank0', generations=30)
-    lease = TrainingBudget(tmp_path/'resource_lease.json', dict(limits(), generations=30))
-    child = PrepaidBudget(tmp_path/'budget.json', dict(limits(), generations=30), parent_lease=lease.path)
-    child.reserve('collect', generations=1)
-    child.connection.close()  # 模拟未刷写进程退出，故意不调用close/结算。
-    assert replay_budget(child.path)[0]['used']['generations'] == 0
-    assert TrainingBudget(root.path, limits()).state_dict()['used']['generations'] == 30
-
-
-@pytest.mark.parametrize('decisions,steps', [(2,2),(4,2),(8,4),(16,8),(32,16)])
-def test_production_scale_derived_without_old_160_and_four_step_limits(decisions, steps):
-    config = dict(runtime=dict(num_envs=64), stage10=dict(distributed=dict(world_size=8),
-        scale=dict(decisions_per_environment=decisions, actor_minibatch_chains=2048, critic_epochs=4),
-        training=dict(denoising_steps=20, ppo_epochs=2, critic_batch=1024, bc_batch=128)))
-    derive_training_scale(config); train = config['stage10']['training']
-    assert train['rollout_upper_steps'] == 512*decisions
-    assert train['max_actor_optimizer_steps'] == steps
-    assert train['critic_steps'] == 4*512*decisions//1024
-    broken = copy.deepcopy(config); broken['stage10']['training']['rollout_upper_steps'] = 160
-    with pytest.raises(ValueError, match='Conflicting'):derive_training_scale(broken)

@@ -18,7 +18,8 @@
 张量只在 CPU 读取；本模块不加载网络、不运行 FK/GPU，也不修改音乐采样器条件字段。
 
 默认接口只返回活动度目标，不把示范轨迹加入Actor/Critic条件。普通Actor训练可显式
-指定return_motion=True，额外获得完整qpos的独立副本，以初始化配对运动状态和真实
+指定return_motion=True，额外获得完整qpos的独立副本；val还必须声明motion_phase=critic_mc，
+普通验证和test仍不返回初始化动作。副本用于初始化配对运动状态和真实
 控制预热；此通道拒绝val/test。调用方必须另行执行训练reset契约和后端实际状态核验。
 """
 from __future__ import annotations
@@ -172,7 +173,7 @@ class PairedActivityTarget:
 
 
 def load_paired_activity(data_root, sample, *, music_start_tick=600, window_s=0.5, dt=0.02,
-                         split="train", music_start_frame=0, return_motion=False):
+                         split="train", music_start_frame=0, return_motion=False, motion_phase="train"):
     """严格加载指定划分对应动作；旧调用默认 train，偏移仅作用于核验后的源数组。"""
     root = Path(data_root).expanduser().resolve()
     if not isinstance(sample, dict) or not isinstance(sample.get("row"), dict):
@@ -195,11 +196,11 @@ def load_paired_activity(data_root, sample, *, music_start_tick=600, window_s=0.
         raise ValueError(f"paired activity row must exactly match its unique {split} manifest row")
     return _load_verified_pair(root, sample, manifest_path, manifest_sha, split=split,
         music_start_tick=music_start_tick, window_s=window_s, dt=dt, music_start_frame=music_start_frame,
-        return_motion=return_motion)
+        return_motion=return_motion, motion_phase=motion_phase)
 
 
 def _load_verified_pair(root, sample, manifest_path, manifest_sha, *, split,
-                        music_start_tick=600, window_s=0.5, dt=0.02, music_start_frame=0, return_motion=False):
+                        music_start_tick=600, window_s=0.5, dt=0.02, music_start_frame=0, return_motion=False, motion_phase="train"):
     """共享文件核验核心；调用方必须已完整核验所属清单及唯一行，避免全量审计重复解析。"""
     folder, row = sample["dataset"], sample["row"]
     source_root = (root / folder).resolve()
@@ -273,7 +274,7 @@ def _load_verified_pair(root, sample, manifest_path, manifest_sha, *, split,
     target = PairedActivityTarget(qpos[int(music_start_frame):, 7:], joint_names=payload["joint_names"], source=provenance,
                                  music_start_tick=music_start_tick, window_s=window_s, dt=dt)
     if return_motion:
-        if split != 'train':
-            raise ValueError('Paired motion initialization is restricted to training data')
+        if not (motion_phase=='train' and split=='train' or motion_phase=='critic_mc' and split in ('train','val')):
+            raise ValueError('Paired motion requires train data or explicit train/val Critic MC phase')
         return target, np.array(qpos, dtype=np.float64, copy=True)
     return target

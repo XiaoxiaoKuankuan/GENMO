@@ -18,6 +18,7 @@ from .evaluation import build_evaluation_tasks, evaluate_policy, _digest, _model
 from .env_adapter import UpperEnvironment
 from .parallel_support import capture_local_rng, restore_local_rng, local_call, root_call, begin_lease, finish_lease
 from .run_management import GuardedStepJournal
+from .memory_execution import MemoryReceiveJournal
 from .training_checkpoint import immutable_cpu_snapshot
 from .updater import critic_update
 from .trainer import populate_values, fixed_targets
@@ -74,6 +75,38 @@ def complete_mc_plan(catalog, split, *, samples_per_source, seeds, selection_see
     return plan
 
 
+
+def matched_reset_mc_plan(plan, stage):
+    """匹配训练的站立/配对reset比例与合法时间bin，固定独立音乐及seed至真实终点。
+
+    这是选定起点后的完整episode MC，不宣称从歌曲开头完整播放；整曲质量评估仍
+    保持原固定32任务开头启动。MC任务独立采样，绝不污染训练无放回采样池。
+    """
+    from .time_sampling import MOTION_RESET_CONTRACT
+    from .evaluation import stable_noise_seed
+    import numpy as np
+    plan=copy.deepcopy(plan);dataset=stage['dataset']
+    plan['mc_start_distribution']='match_training_reset.v1'
+    plan['start_mode']='training_reset_mixture'
+    for task in plan['tasks']:
+        rng=np.random.default_rng(stable_noise_seed(stage['seed']+937,task['task_id']))
+        frames=int(task['full_music_frames'])
+        maximum=max(0,frames-max(2,math.ceil(stage['ppo_rollout']['world_seconds']*30)))
+        if rng.random()<dataset['standing_start_probability']:
+            start=0;initialization='standing'
+        else:
+            width=round(dataset['time_bin_seconds']*30)
+            begin=int(rng.integers(maximum//width+1))*width
+            start=int(rng.integers(begin,min(begin+width,maximum+1)))
+            initialization=MOTION_RESET_CONTRACT
+        task.update(music_start_frame=start,remaining_music_seconds=(frames-start)/30.,initialization=initialization)
+        identity={k:task[k] for k in ('dataset','sample_id','split','seed','music_start_frame','initialization')}
+        task['task_id']=_digest(identity)[:24]
+        task['noise_index_start']=stable_noise_seed(task['seed'],_digest(identity))
+    plan['plan_sha256']=_digest({k:v for k,v in plan.items() if k!='plan_sha256'})
+    return plan
+
+
 def collect_complete_bank(c, label, split, *, samples_per_source, seeds):
     from .vector_evaluation import isolated_vector_evaluation
     actor_before=_model_fingerprint(c.actor);signature=c.policy._parameter_signature()
@@ -81,6 +114,8 @@ def collect_complete_bank(c, label, split, *, samples_per_source, seeds):
         gamma_upper=c.settings['gamma_upper'])
     plan=root_call(c.distributed,lambda:complete_mc_plan(c.catalog,split,
         samples_per_source=samples_per_source,seeds=seeds,selection_seed=c.stage['seed']+419))
+    if c.stage['critic']['complete_mc'].get('start_distribution')=='match_training_reset.v1':
+        plan=matched_reset_mc_plan(plan,c.stage)
     nseed=len(seeds)
     from .evaluation_world import balanced_rank_tasks
     task_shards=balanced_rank_tasks(plan,c.distributed.world_size)
@@ -104,10 +139,11 @@ def collect_complete_bank(c, label, split, *, samples_per_source, seeds):
     saved_rng=capture_local_rng(c.generators)
     try:
         with isolated_vector_evaluation(c,'mc_'+label):
-            journal=GuardedStepJournal(path/'execution.sqlite',c.guard,format='genmo.execution_journal.ndarray.v2')
+            journal=MemoryReceiveJournal(path/'execution.sqlite')
             c.backend.journal=journal
             cfg=copy.deepcopy(c.config);cfg['stage10']['physical_episode']['safety_limit_seconds']=None
             cfg['runtime']['evidence_level']='full'
+            cfg['runtime']['evaluation_metrics_only']=True
             from .vector_environment import VectorUpperEnvironment
             from gem.closedloop.online_conditions import OnlineConditionBuilder
             driver=None
@@ -126,7 +162,14 @@ def collect_complete_bank(c, label, split, *, samples_per_source, seeds):
                     return evaluate_policy(env,c.policy,shards[c.distributed.rank],path/'report',catalog=c.catalog,
                         actor_identity=dict(model_fingerprint=actor_before,policy_version=c.state['policy_version']),
                         frozen_modules={'critic':c.critic},local_cuda_only=True,transition_sink=capture,world_driver=driver)
-                local_call(c.distributed,run)
+                evaluation_report=local_call(c.distributed,run)
+                if evaluation_report is not None:
+                    import json
+                    for entry in evaluation_report['episode_manifests']:
+                        episode=json.loads((path/'report'/entry['path']).read_text())
+                        if episode['end_reason']=='physical_warmup_failure':
+                            bank.excluded.append(dict(task_id=episode['task_id'],reason='physical_warmup_failure',
+                                states=0,warmup_control_steps=episode['warmup_control_steps']))
             finally:
                 try:
                     if driver is not None:driver.close()
@@ -147,20 +190,21 @@ def collect_complete_bank(c, label, split, *, samples_per_source, seeds):
             c.state['training_control_steps']+=consumed[0]
             c.state['training_physics_steps']+=consumed[1]
         bank.training_data(policy_version=c.state['policy_version'],kernel=c.policy.kernel_config)
-        bank_record=dict(schema='genmo.stage2.causal_tracking.complete_episode.value_dataset.v1',report=bank.report(),
-            execution_work=dict(actual_GMT_controls=execution_counts[0],active_physics_steps=execution_counts[1],
-                allocated_physics_steps=execution_counts[2],inactive_physics_steps=execution_counts[2]-execution_counts[1]),
-            actor_fingerprint=actor_before,policy_version=c.state['policy_version'],kernel=c.policy.kernel_config,
-            reward_configuration=c.stage['reward'],plan=plan,
-            episodes=[dict(task=e['task'],end_reason=e['end_reason'],control_steps=e['control_steps'],
-                states=len(e['rows'])) for e in bank.episodes],
-            rows=[dict(context=r.context,metadata=r.metadata,identity=r.identity,rewards=r.rewards,
-                executed_control_steps=r.executed_control_steps,begin=r.control_tick_begin,end=r.control_tick_end,
-                terminated=r.terminated,truncated=r.truncated)
-                for e in bank.episodes for r in e['rows']],
-            returns=torch.cat([e['returns'] for e in bank.episodes]) if bank.episodes else torch.empty(0))
-        torch.save(bank_record,path/'complete_mc.pt')
-        c.guard.account_file(path/'complete_mc.pt')
+        if c.stage['critic']['complete_mc'].get('retain_dataset',False):
+            bank_record=dict(schema='genmo.stage2.causal_tracking.complete_episode.value_dataset.v1',report=bank.report(),
+                execution_work=dict(actual_GMT_controls=execution_counts[0],active_physics_steps=execution_counts[1],
+                    allocated_physics_steps=execution_counts[2],inactive_physics_steps=execution_counts[2]-execution_counts[1]),
+                actor_fingerprint=actor_before,policy_version=c.state['policy_version'],kernel=c.policy.kernel_config,
+                reward_configuration=c.stage['reward'],plan=plan,
+                episodes=[dict(task=e['task'],end_reason=e['end_reason'],control_steps=e['control_steps'],
+                    states=len(e['rows'])) for e in bank.episodes],
+                rows=[dict(context=r.context,metadata=r.metadata,identity=r.identity,rewards=r.rewards,
+                    executed_control_steps=r.executed_control_steps,begin=r.control_tick_begin,end=r.control_tick_end,
+                    terminated=r.terminated,truncated=r.truncated)
+                    for e in bank.episodes for r in e['rows']],
+                returns=torch.cat([e['returns'] for e in bank.episodes]) if bank.episodes else torch.empty(0))
+            torch.save(bank_record,path/'complete_mc.pt')
+            c.guard.account_file(path/'complete_mc.pt')
         return bank
     finally:restore_local_rng(saved_rng,c.generators)
 
@@ -172,10 +216,14 @@ def independent_mc_metrics(c, bank):
     for start in range(0,len(rows),128):
         part=rows[start:start+128];cache=ValueConditionCache(part,c.distributed.device)
         predictions.extend(c.critic(cache.critic_context(part),cache.get('remaining_music_seconds',part)).cpu().tolist())
-    shards=c.distributed.all_gather_object(dict(predictions=predictions,targets=targets.tolist(),bank=bank.report()))
+    modes=[e['task'].get('initialization','standing') for e in bank.episodes for _ in e['rows']]
+    shards=c.distributed.all_gather_object(dict(predictions=predictions,targets=targets.tolist(),bank=bank.report(),modes=modes))
     p=[v for r in shards for v in r['predictions']];t=[v for r in shards for v in r['targets']]
     if not t:raise ValueError('No complete nonadministrative MC validation episode')
-    return dict(**summarize_critic_predictions(p,t),episodes=sum(r['bank']['complete_episodes'] for r in shards),
+    modes=[v for r in shards for v in r['modes']]
+    by_initialization={mode:summarize_critic_predictions([v for v,m in zip(p,modes) if m==mode],
+        [v for v,m in zip(t,modes) if m==mode]) for mode in sorted(set(modes))}
+    return dict(**summarize_critic_predictions(p,t),by_initialization=by_initialization,episodes=sum(r['bank']['complete_episodes'] for r in shards),
         physical_control_steps=sum(r['bank']['real_control_steps'] for r in shards),
         scope='independent_complete_MC_current_fixed_behavior_no_bootstrap')
 

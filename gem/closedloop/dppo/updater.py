@@ -1,29 +1,22 @@
-"""固定行为四步DPPO＋BC、可训练历史Critic和完整四步KL审查。
+"""四步Clipped DPPO＋Stage1 BC、完整KL与非对称Critic更新。
 
-20步行为仅索引15..18参与Actor优化；每个epoch打乱完整链，四步全部参与，不使用
-旧K8抽样权重或把冻结零KL加入分母。旧均值/标准差/联合概率、价值目标与优势整轮
-固定。自由有效坐标平均log-ratio是代理目标，原joint概率比及KL分别保存。
-当前optimizer minibatch的条件只编码一次，PPO与原Stage1 BC梯度统一SUM、裁剪及
-Adam更新。结束后无梯度检查全部有效链的四步KL，冻结部分检查不可变身份。
-少量同噪声重生成只诊断最终参考变化，单独计时，不冒充实际物理执行或完整KL覆盖。
-失败可回滚模型/优化器/BC/RNG，已发生的物理和资源消耗不能回滚。
+每epoch打乱真实有效行为链，按全局minibatch分片，15～18四个随机步骤全部参与。
+以采样时真实旧均值/方差计算自由坐标平均log-ratio及PPO裁剪；局部loss分母为
+全局实际链数×4，PPO/BC梯度一次SUM后统一裁剪，没有额外world_size平均。
+旧行为统计及GAE整轮固定；Actor条件图每次optimizer更新后重建。BC总量按实际
+计划更新次数分配；soft KL提前停止会同时停止剩余更新，明确记录已用BC数量。
 
-Critic只缓存冻结音乐/前缀特征及历史输入，历史GRU、时序层和Value Head每次优化
-重新建图；当前/下一批误差与独立MC验证分开。归约使用全局实际有效分母，尾批和
-空rank参与同一通信序列。本模块不推进物理，也不保存checkpoint。
-纯日志的BC来源与逐去噪统计在完整更新结束后合并读取；soft KL、非有限值检查、
-梯度比例控制仍在每次参数更新前执行。step_observer仅收到当步已就绪的优化字段，
-完整来源和逐步诊断在函数返回时补齐，避免日志逐微批阻塞设备。
+minibatch复用本次PPO前向的KL作轻量停止判断，不备份整模型、不执行全链回溯。
+整轮Actor/Critic/Adam/BC/RNG恢复由training中的唯一快照负责；最终无梯度KL
+覆盖所有有效链的全部四步。Critic只缓存冻结音乐/前缀及历史输入，可训练历史GRU
+每个optimizer step重新建图。物理时钟、奖励和原冻结去噪身份保持原合同。
 """
 from __future__ import annotations
 
 import math
 import time
 from collections import Counter
-
 import torch
-
-from .denoising_sampling import chain_steps, plan_record
 from .execution_checks import policy_phase
 from .gradient_merge import merge_global_gradients, take_gradients
 from .gaussian_probability import gaussian_statistics, ppo_surrogate
@@ -36,16 +29,19 @@ def _eligible(manifest,actor=True):
 
 
 def actor_update(policy,optimizer,rows,targets,cache,manifest,controller,*,distributed,anchor,
-                    generator,ppo_epochs=2,minibatch_chains=1024,microbatch=128,sampled_steps=4,
-                    clip=.05,gamma_denoising=.99,soft_kl=.002,kl_reduction='free_coordinate_mean',
+                    generator,ppo_epochs=1,minibatch_chains=4096,microbatch=128,sampled_steps=4,
+                    clip=.01,gamma_denoising=.99,soft_kl=.00075,kl_reduction='free_coordinate_mean',
                     objective_reduction='free_coordinate_mean',grad_clip_norm=1.,reserve_attempt=None,
-                    gradient_observer=None,step_observer=None,bc_samples_per_rollout=None,snr=False,step_strategy='intermediate4'):
+                    gradient_observer=None,step_observer=None,bc_samples_per_rollout=1024,snr=False,step_strategy='intermediate4',detailed_diagnostics=False):
     if step_strategy!='intermediate4' or sampled_steps!=4 or tuple(policy.trainable_steps)!=(15,16,17,18):
         raise ValueError('PPO must optimize exactly indices 15 to 18')
     if policy.steps!=20 or ppo_epochs<1 or minibatch_chains<1 or microbatch<1:
         raise ValueError('Invalid PPO iteration scale')
     if kl_reduction not in ('joint_sum','free_coordinate_mean'):raise ValueError('Unknown KL control units')
-    selected=_eligible(manifest);reports=[];orders=[];stop_reason=None
+    from .actor_backtracking import uniform_actor_optimizer
+    uniform_actor_optimizer(policy.actor,optimizer)
+    policy._accepted_kl_receipt=None
+    selected=_eligible(manifest);reports=[];orders=[];stop_reason=None;covered=set()
     pending_metrics=[];pending_bc=[]
     if not selected:raise ValueError('No free valid behavior chain remains for PPO')
     planned_steps=ppo_epochs*math.ceil(len(selected)/minibatch_chains)
@@ -55,19 +51,18 @@ def actor_update(policy,optimizer,rows,targets,cache,manifest,controller,*,distr
     sketch={} if snr else None
     for epoch in range(ppo_epochs):
         order=balanced_epoch_order(selected,manifest,generator) if distributed.rank==0 else None
-        order=distributed.broadcast_object(order);orders.append(order)
+        order=distributed.broadcast_object(order)
+        if detailed_diagnostics:orders.append(order)
         for begin in range(0,len(order),minibatch_chains):
             indices=order[begin:begin+minibatch_chains]
             owned=_owned(indices,manifest,distributed)
-            seed=(int(torch.randint(0,2**63-1,(1,),generator=generator)) if distributed.rank==0 else None)
-            seed=distributed.broadcast_object(seed)
-            pairs=[(i,s) for position,i in owned for s in chain_steps(seed,indices[position],20,sampled_steps,step_strategy)]
+            pairs=[(i,s) for _,i in owned for s in policy.trainable_steps]
             optimizer.zero_grad(set_to_none=True);actor.eval()
             summary=torch.zeros(7,device=device,dtype=torch.float64)
             step_metrics=torch.zeros(20,6,device=device,dtype=torch.float64)
             start=time.perf_counter()
             with _local_phase(distributed,'stage10_actor_local_forward_backward'),policy_phase(policy):
-                conditions=ConditionGraphCache(policy,cache);conditions.prime([rows[i] for _,i in owned])
+                conditions=ConditionGraphCache(policy,cache,include_frozen=False);conditions.prime([rows[i] for _,i in owned])
                 for offset in range(0,len(pairs),microbatch):
                     chunk=pairs[offset:offset+microbatch];samples=[rows[i] for i,_ in chunk];steps=[s for _,s in chunk]
                     params,mask=_parameters(policy,samples,steps,device,cache,conditions)
@@ -93,7 +88,7 @@ def actor_update(policy,optimizer,rows,targets,cache,manifest,controller,*,distr
             measured=values[4 if kl_reduction=='joint_sum' else 5]/visits
             if soft_kl is not None and measured>=soft_kl:
                 optimizer.zero_grad(set_to_none=True);stop_reason='pre_step_soft_kl'
-                discarded=dict(epoch=epoch,indices=indices,mean_kl=measured,kl_units=kl_reduction,
+                discarded=dict(epoch=epoch,global_chain_count=len(indices),mean_kl=measured,kl_units=kl_reduction,
                     sample_visits=int(visits),wall_seconds=time.perf_counter()-start,optimizer_step_executed=False)
                 break
             ppo=take_gradients(actor)
@@ -117,8 +112,10 @@ def actor_update(policy,optimizer,rows,targets,cache,manifest,controller,*,distr
             local_sources=Counter(meta['dataset_id'] for sample in bc_report.get('samples',[]) for meta in sample)
             pending_bc.append(dict(batch=bc_report['batch_size'],loss=bc_report['loss'],sources=dict(local_sources)))
             pending_metrics.append(step_metrics)
-            reports.append(dict(epoch=epoch,optimizer_step=len(reports)+1,global_chain_indices=indices,
-                sampled_steps=sampled_steps,denoising_sampling=plan_record(seed,indices,20,sampled_steps,step_strategy),
+            covered.update(indices)
+            reports.append(dict(objective='clipped_dppo',ppo_clip_applied=True,
+                epoch=epoch,optimizer_step=len(reports)+1,global_chain_count=len(indices),
+                sampled_steps=sampled_steps,denoising_steps=list(policy.trainable_steps),
                 internal_sample_visits=int(visits),full_objective_transitions=len(indices)*4,
                 ppo_loss=values[0],mean_proxy_ratio=values[1]/visits,clip_fraction=values[2]/visits,
                 objective_clip_fraction=values[3]/visits,pre_step_mean_joint_kl=values[4]/visits,
@@ -141,7 +138,6 @@ def actor_update(policy,optimizer,rows,targets,cache,manifest,controller,*,distr
                     mean_coordinate_kl=coordinate/n if n else None,mean_proxy_ratio=ratio/n if n else None,
                     clip_fraction=clipped/n if n else None,objective_clip_fraction=active/n if n else None)
                     for s,(joint,coordinate,ratio,clipped,active,n) in enumerate(metrics)])
-    covered={i for report in reports for i in report['global_chain_indices']}
     snr_report=None
     if snr:
         halves=[r['gradient_contributions'].get('half_split') for r in reports]
@@ -153,7 +149,8 @@ def actor_update(policy,optimizer,rows,targets,cache,manifest,controller,*,distr
             half_split_cosine_pooled=None if first2<=0 or second2<=0 else dot/math.sqrt(first2*second2),
             sketch_elements=sum(v.numel() for v in sketch.values()),
             scope='independent_half_rank_PPO_gradients_per_optimizer_step;sketch_is_iteration_sum_for_consecutive_cosine')
-    return dict(optimizer_steps=len(reports),steps=reports,epoch_orders=orders,early_stop_reason=stop_reason,
+    return dict(objective='clipped_dppo',ppo_clip_applied=True,
+        optimizer_steps=len(reports),attempted_optimizer_steps=len(reports),steps=reports,epoch_orders=orders,early_stop_reason=stop_reason,
         gradient_snr=snr_report,_ppo_gradient_sketch=sketch,
         epoch_order_rng_contract='fixed_four_steps_shuffled_chains',
         discarded_pending_minibatch=discarded if stop_reason else None,

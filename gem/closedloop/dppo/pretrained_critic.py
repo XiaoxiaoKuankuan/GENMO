@@ -24,10 +24,9 @@ class PretrainedConditionCritic(nn.Module):
         if dimension < 8 or dimension%heads or dimension%2 or layers < 1:
             raise ValueError('Invalid temporal Critic dimensions')
         self.dimension, self.cache_frozen_conditions = dimension, True
-        for name in ('music_embedder','cond_exists_embedder','prefix_encoder','proprio_normalizer'):
+        for name in ('music_embedder','cond_exists_embedder','history_encoder','prefix_encoder','proprio_normalizer'):
             setattr(self,name,copy.deepcopy(getattr(actor,name)))
-        self.tracking_history_encoder=copy.deepcopy(actor.history_encoder)
-        original=self.tracking_history_encoder.cell
+        original=self.history_encoder.cell
         expanded=nn.GRUCell(91,original.hidden_size,device=original.weight_ih.device,dtype=original.weight_ih.dtype)
         with torch.no_grad():
             expanded.weight_ih.zero_()
@@ -35,9 +34,9 @@ class PretrainedConditionCritic(nn.Module):
             expanded.weight_ih[:,90].copy_(original.weight_ih[:,48])
             for name in ('weight_hh','bias_ih','bias_hh'):
                 getattr(expanded,name).copy_(getattr(original,name))
-        self.tracking_history_encoder.cell=expanded
-        self.tracking_history_encoder.execution_backend='native'
-        self.tracking_history_encoder.requires_grad_(True)
+        self.history_encoder.cell=expanded
+        self.history_encoder.execution_backend='native'
+        self.history_encoder.requires_grad_(True)
         if len(history_scales)!=8 or any(not math.isfinite(v) or v<=0 for v in history_scales):
             raise ValueError('Eight explicit positive tracking physical scales required')
         self.register_buffer('tracking_scales',torch.cat([torch.full((n,),float(v)) for n,v in
@@ -113,7 +112,7 @@ class PretrainedConditionCritic(nn.Module):
         times=torch.stack((angle.sin(),angle.cos()),-1).flatten(-2)
         flags=torch.stack((f['future_valid'],f['music_valid'],f['prefix_valid']),-1).float()
         temporal=self.music_projection(f['music'])+self.prefix_projection(f['prefix'])+times+self.mask_projection(flags)
-        history=self.tracking_history_encoder(f['history_input'],f['history_valid'],f['history_relative'])
+        history=self.history_encoder(f['history_input'],f['history_valid'],f['history_relative'])
         temporal=temporal+self.history_projection(history)[:,None]
         temporal=torch.where(f['future_valid'][...,None],temporal,0.)
         token=self.value_token.expand(batch,-1,-1)+self.remaining_projection((remaining/30.)[:,None])[:,None]

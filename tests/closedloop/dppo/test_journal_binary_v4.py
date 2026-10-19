@@ -125,13 +125,6 @@ def test_reconnect_does_not_change_mutation_or_duplicate_record(tmp_path, monkey
         assert {p['mutation_seq'] for m,p in client.calls if m=='execute'} == {1}
 
 
-def test_independent_audit_reads_binary_and_checks_physics(tmp_path):
-    from tests.closedloop.dppo.test_audit import envelope
-    from tools.eval.audit_closedloop_dppo import check_journal
-    path = tmp_path/'journal.sqlite'
-    with StepJournal(path, format=FORMAT) as journal:
-        journal.append_result(envelope('session',1,'reset_episode',dict(episode_id='e')))
-    assert check_journal(path)['counts']['mutations'] == 1
 
 
 @pytest.mark.parametrize('value', [{1:'invalid'}, {'__journal_array_v2__':{}}, {'__nonfinite__':'nan'}])

@@ -21,27 +21,27 @@ from gem.closedloop.dppo.returns import compute_gae, normalize_advantages_global
 from gem.closedloop.dppo.env_adapter import WarmupEpisodeEnded, ExecutionIntegrityError
 from gem.closedloop.dppo.world_collector import WorldEnvironmentCollector
 
-CONFIG=Path(__file__).resolve().parents[3]/'configs/closedloop/stage2_asymmetric_server2.yaml'
+CONFIG=Path(__file__).resolve().parents[3]/'configs/closedloop/stage2_credit_server2.yaml'
 
 
 def test_production_parameters_and_cumulative_iteration_ceiling():
     config=configuration(CONFIG); stage=config['stage10']; train=stage['training']
-    assert train['actor_lr']==5e-8 and train['critic_lr']==1e-4
-    assert (train['eta'],train['ppo_steps_per_chain'],train['ppo_clip'])==(.1,4,.003)
+    assert train['actor_lr']==3e-7 and train['critic_lr']==1e-4
+    assert (train['eta'],train['ppo_steps_per_chain'],train['ppo_clip'])==(.1,4,.01)
     assert train['std_schedule']==[.001]*15+[.04,.06,.08,.10,0.]
-    assert stage['bc_gradient']['target_ratio']==.1 and stage['kl']['mean_coordinate']==.0003
-    assert stage['run_control']=={'max_training_iterations':4}
-    assert validate_stopping_iteration(4,stage)==4
-    for wrong in (0,5,True,4.0):
+    assert stage['bc_gradient']['target_ratio']==.1 and stage['kl']['mean_coordinate']==.0009
+    assert stage['run_control']=={'max_training_iterations':2000}
+    assert validate_stopping_iteration(2000,stage)==2000
+    for wrong in (0,2001,True,4.0):
         with pytest.raises(ValueError):validate_stopping_iteration(wrong,stage)
     assert train['kl_rejection']=='abort'
-    assert stage['limits']==dict(accepted_iterations=4,optimizer_attempts=40,
-        generations=3000000,control_steps=150000000,physics_steps=600000000)
+    assert stage['limits']==dict(accepted_iterations=2000,optimizer_attempts=18000,
+        generations=40000000,control_steps=1100000000,physics_steps=4400000000)
 
 
 @pytest.mark.parametrize('section,key,value',[
     ('run_control','max_walltime_seconds',172800),
-    ('run_control','max_training_iterations',501),
+    ('run_control','max_training_iterations',2001),
     ('runtime','vector_boundary_wait_contract','bounded_reference_wait.v1'),
 ])
 def test_retired_or_over_budget_settings_are_rejected(tmp_path,section,key,value):

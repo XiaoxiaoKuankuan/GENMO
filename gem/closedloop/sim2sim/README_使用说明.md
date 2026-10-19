@@ -14,8 +14,7 @@
 GENMO相关相对路径以本仓库为基准，GMT资产相对`paths.gmt_repo`，与启动目录无关；绝对路径也可使用。
 GMT仓库搬家只改`gmt_repo`，其余GMT相对路径自动跟随。更换Stage1改`stage1_checkpoint`并检查配套
 `stats/kinematics`，模式1通过YAML锚点自动复用该权重；更换Stage2只改对应`models`条目的`checkpoint`路径，
-`name`仅用于显示。默认只启用Stage1 s595000和服务器1 P1第500轮；旧147/246路径
-仅在YAML中注释保留，需要时替换第二项。无需手动计算或填写文件指纹，程序自动记录实际文件身份；
+`name`仅用于显示。无需手动计算或填写文件指纹，程序自动记录实际文件身份；
 Stage2绑定的基础资产仍须匹配，当前GMT后端仍限定140500。
 更换默认音乐可直接改`playlist`为音频目录或清单，命令行音乐参数优先。专项验收仍可在自定义YAML中
 覆盖运行项，例如`runtime.audio: false`；普通启动无需填写整套固定参数。
@@ -38,7 +37,7 @@ PYTHONDONTWRITEBYTECODE=1 /home/weili/GENMO/.venv/bin/python -B \
 # 替换成一个明确的Stage2 checkpoint，不能传latest指针或目录
 PYTHONDONTWRITEBYTECODE=1 /home/weili/GENMO/.venv/bin/python -B \
   scripts/demo/run_genmo_gmt_sim2sim.py \
-  --actor-checkpoint outputs/sim2sim/models/actor_iteration500.pt \
+  --actor-checkpoint outputs/sim2sim/models/actor_iteration147.pt \
   --audio /绝对路径/歌曲.wav --seed 42 --record
 
 # 无窗口自动验证；--mute明确关闭声音设备，音乐条件与音乐时钟继续工作
@@ -71,7 +70,7 @@ selection的`source/row`从配置`dataset_root`解析；manifest从所属数据�
 | 空格 | 控制边界暂停/恢复物理、音乐和逻辑截止时钟 |
 | R | 同一曲、同一随机种子，从站立初态重播 |
 | N / P | 下一首/上一首，新episode |
-| 1 / 2 | Stage1 s595000 / 当前P1第500轮，重新开始当前歌曲 |
+| 1 / 2 / 3 | Stage1 s595000 / 固定旧基线147轮 / 固定旧基线246轮，重新开始当前歌曲 |
 | G | 显示/隐藏半透明蓝色GENMO运动学参考 |
 | 鼠标拖动 / 滚轮 | 转动视角 / 缩放 |
 | Esc或关闭窗口 | 安全结束，保存报告，随后编码已请求的视频 |
@@ -104,7 +103,7 @@ selection的`source/row`从配置`dataset_root`解析；manifest从所属数据�
 ## 控制和数值合同
 
 - GENMO实际输入60帧（2秒，30Hz），每0.5秒重规划，完整20步扩散采样。120帧需显式配置并匹配checkpoint身份。
-- Stage1和Stage2（默认按键1/2及`--actor-checkpoint`）统一使用20步eta=0 DDIM，仅初始噪声随机；
+- Stage1和Stage2（按键1/2/3及`--actor-checkpoint`）统一使用20步eta=0 DDIM，仅初始噪声随机；
   每步只沿DDIM均值更新，实际附加噪声标准差全0，末步同样不添加探索噪声。保留音乐条件、真实状态反馈、
   已知前缀及checkpoint绑定的冻结前段。条件缓存和合批CFG复用既有执行算子，不做动作平滑或限速。
   同一初始噪声和条件下去噪过程确定；不同初始噪声仍允许动作多样性，`--seed`控制请求噪声序列。
@@ -138,7 +137,7 @@ selection的`source/row`从配置`dataset_root`解析；manifest从所属数据�
 全部集中在 `outputs/sim2sim/`：
 
 ```text
-models/                         当前第500轮Actor权重；旧模型文件保留但默认不启用
+models/                         固定147/246的Actor权重和导出来源、SHA
 music_cache/                    按音频内容＋提取配置命名的EDGE35缓存
 <独立运行目录>/
   launch.json                  CLI实际配置

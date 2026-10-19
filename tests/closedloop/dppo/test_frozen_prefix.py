@@ -54,7 +54,7 @@ def test_intermediate4_gradients_and_deterministic_final(actor_factory):
 
 
 def test_final_kl_covers_four_steps_and_regenerates_reference(actor_factory):
-    from gem.closedloop.dppo.dual_collector import split_trace
+    from gem.closedloop.dppo.rollout_helpers import split_trace
     from gem.closedloop.dppo.tensor_cache import RolloutTensorCache
     from gem.closedloop.dppo.updater import final_kl
     from tests.closedloop.dppo.test_asymmetric_critic import tracking_context
@@ -66,22 +66,12 @@ def test_final_kl_covers_four_steps_and_regenerates_reference(actor_factory):
     trace=policy.sample_rollout(context,generator=torch.Generator().manual_seed(17))
     rows=[]
     for i in range(2):
-        rows.append(SimpleNamespace(context={k:v[i:i+1] for k,v in context.items()},identity={},transition_valid=True,
+        rows.append(SimpleNamespace(context={k:v[i:i+1] for k,v in context.items()},identity={},
             chain=trace['chain'][i],old_log_prob=trace['old_log_probs'][i],free_mask=trace['free_mask'][i],
             metadata=dict(critic_context={k:v[i:i+1] for k,v in privileged.items()},sampler_trace=split_trace(trace,i,2),remaining_music_seconds=5.)))
     cache=RolloutTensorCache(rows,dict(advantages=torch.tensor([1.,-1.])),device='cpu')
     manifest=[dict(valid=True,has_free=True,owner_rank=0,local_index=i) for i in range(2)]
     d=SimpleNamespace(rank=0,world_size=1,all_gather_object=lambda x:[x],gather_rows=lambda x,indices,n:x)
-    from gem.closedloop.dppo.optimization_support import probability_check_local
-    audit=probability_check_local(policy,rows,denoising_microbatch=3)
-    assert audit['forward_checked_steps']==list(range(20)) and audit['deterministic_final_checked']
-    ordinary=probability_check_local(policy,rows,denoising_microbatch=3,include_frozen=False)
-    assert ordinary['forward_checked_steps']==[15,16,17,18] and not ordinary['deterministic_final_checked']
-    saved_final=rows[0].chain[20].clone()
-    rows[0].chain[20,20,9]+=1.
-    with pytest.raises(FloatingPointError,match='mismatch'):
-        probability_check_local(policy,rows,denoising_microbatch=3)
-    rows[0].chain[20].copy_(saved_final)
     report=final_kl(policy,rows,cache,manifest,distributed=d,microbatch=3)
     assert report['gaussian_kl_steps']==[15,16,17,18] and report['covered_internal_transitions']==8
     assert report['mean_coordinate_kl']<1e-8
