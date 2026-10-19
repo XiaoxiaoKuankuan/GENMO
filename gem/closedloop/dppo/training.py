@@ -39,7 +39,7 @@ from .run_management import RunManager,DiskGuard,StopSignal
 from .tensor_cache import RolloutTensorCache
 from .trainer import load_actor,trainable_actor_parameters
 from .optimization_support import probability_check_local
-from .updater import critic_update,final_kl,check_kl
+from .updater import actor_update,critic_update,final_kl,check_kl
 from .full_batch_actor import full_batch_actor_update
 from .compact_evidence import summary_only
 from .periodic_monitor import log_metrics
@@ -593,20 +593,32 @@ def run(cargs,config,distributed):
                 def reserve():
                     root_call(distributed,lambda:c.budget.reserve('actor_attempts',optimizer_attempts=1))
                     c.state['optimizer_attempts']+=1
-                snapshot=service.world.snapshots([0])[0]
-                c.policy.experimental_joint_limits={k:snapshot[k] for k in
-                    ('joint_names','joint_hard_limits_rad','joint_soft_limits_rad')}
-                actor=full_batch_actor_update(c.policy,c.actor_optimizer,rows,targets,cache,manifest,c.controller,
-                    distributed=distributed,anchor=c.bc,generator=c.generators['actor'],
-                    backtracking=c.settings['optimizer_backtracking'],kl_limits=c.stage['kl'],
-                    kl_microbatch=c.settings['kl_microbatch'],proposed_lr=c.settings['actor_lr'],
-                    detailed_diagnostics=(c.state['iteration']==0 or
-                        (c.state['iteration']+1)%c.stage['checks'].get('actor_diagnostics_every',100)==0),
-                    ppo_epochs=c.settings['ppo_epochs'],
-                    minibatch_chains=c.stage['scale']['actor_minibatch_chains'],microbatch=c.settings['denoising_microbatch'],
-                    clip=c.settings['ppo_clip'],
-                    grad_clip_norm=c.settings['grad_clip_norm'],reserve_attempt=reserve,bc_samples_per_rollout=c.settings['bc_samples_per_rollout'],
-                    snr=c.settings.get('gradient_snr_diagnostic',False))
+                if c.settings['actor_objective']=='joint_score_pg':
+                    snapshot=service.world.snapshots([0])[0]
+                    c.policy.experimental_joint_limits={k:snapshot[k] for k in
+                        ('joint_names','joint_hard_limits_rad','joint_soft_limits_rad')}
+                    actor=full_batch_actor_update(c.policy,c.actor_optimizer,rows,targets,cache,manifest,c.controller,
+                        distributed=distributed,anchor=c.bc,generator=c.generators['actor'],
+                        backtracking=c.settings['optimizer_backtracking'],kl_limits=c.stage['kl'],
+                        kl_microbatch=c.settings['kl_microbatch'],proposed_lr=c.settings['actor_lr'],
+                        detailed_diagnostics=(c.state['iteration']==0 or
+                            (c.state['iteration']+1)%c.stage['checks'].get('actor_diagnostics_every',100)==0),
+                        ppo_epochs=c.settings['ppo_epochs'],
+                        minibatch_chains=c.stage['scale']['actor_minibatch_chains'],microbatch=c.settings['denoising_microbatch'],
+                        clip=c.settings['ppo_clip'],
+                        grad_clip_norm=c.settings['grad_clip_norm'],reserve_attempt=reserve,bc_samples_per_rollout=c.settings['bc_samples_per_rollout'],
+                        snr=c.settings.get('gradient_snr_diagnostic',False))
+                else:
+                    actor=actor_update(c.policy,c.actor_optimizer,rows,targets,cache,manifest,c.controller,
+                        distributed=distributed,anchor=c.bc,generator=c.generators['actor'],
+                        ppo_epochs=c.settings['ppo_epochs'],minibatch_chains=c.stage['scale']['actor_minibatch_chains'],
+                        microbatch=c.settings['denoising_microbatch'],sampled_steps=c.settings['ppo_steps_per_chain'],
+                        clip=c.settings['ppo_clip'],gamma_denoising=c.settings['gamma_denoising'],
+                        soft_kl=c.settings['kl_soft_stop_coordinate'],kl_reduction=c.stage['kl']['reduction'],
+                        objective_reduction=c.settings['objective_logprob_reduction'],
+                        grad_clip_norm=c.settings['grad_clip_norm'],reserve_attempt=reserve,
+                        bc_samples_per_rollout=c.settings['bc_samples_per_rollout'],
+                        snr=c.settings.get('gradient_snr_diagnostic',False))
                 actor_seconds=max(distributed.all_gather_object(time.perf_counter()-actor_start))
                 from .kl_reuse import reusable_accepted_kl
                 kl=reusable_accepted_kl(actor,c.policy,cache,manifest,distributed,
@@ -627,9 +639,9 @@ def run(cargs,config,distributed):
                     c.kl_reuse_verified=True
                 from .actor_backtracking import check_candidate_kl
                 accepted=check_candidate_kl(kl,c.stage['kl'])
-                if actor.get('step_rejected'):
+                if actor.get('step_rejected') or actor['optimizer_steps']==0:
                     accepted['passed']=False
-                    accepted['failures']['optimizer_step_backtracking']='all_attempts_rejected'
+                    accepted['failures']['actor_optimizer']='no_accepted_optimizer_step'
                 if not accepted['passed']:
                     anomaly_saved=local_call(distributed,lambda:_preserve_rollout_anomaly(c,buffer,targets,manifest,label))
                     rollback=local_call(distributed,lambda:_restore_rollback(c,saved))

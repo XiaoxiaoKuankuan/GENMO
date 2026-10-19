@@ -18,7 +18,7 @@ import yaml
 
 from .rewards import resolve_reward_config
 
-VERSION='genmo.closedloop.stage2.continuous_joint_score.v1'
+VERSION='genmo.closedloop.stage2.continuous_tracking.v2'
 
 
 def _source_counts(value):
@@ -147,7 +147,7 @@ def configuration(path,*,genmo_repo=None,gmt_repo=None):
     if type(diagnostic_interval) is not int or diagnostic_interval<1:
         raise ValueError('actor_diagnostics_every must be a positive iteration interval')
     if t['actor_lr_control']!='fixed' or t['kl_rejection']!='abort':
-        raise ValueError('Only fixed proposed LR with bounded per-step backtracking and hard rejection is supported')
+        raise ValueError('Only fixed uniform LR and final whole-rollout hard rejection are supported')
     if any(key in t for key in ('actor_lr_bounds','kl_target_coordinate','kl_control_metric')):
         raise ValueError('Retired adaptive-LR settings are not supported')
     steps=t['ppo_epochs']*math.ceil(chains/scale['actor_minibatch_chains'])

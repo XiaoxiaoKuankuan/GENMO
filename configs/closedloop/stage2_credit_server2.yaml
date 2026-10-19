@@ -1,5 +1,5 @@
 # 服务器2正式延迟信用分配：用户明确授权最多2000个已接受迭代，每100轮保留完整checkpoint。
-# 8秒共享世界、lambda=.98、gamma=.99/0.5秒、单次全局joint-score更新，统一LR=3e-7。
+# 8秒共享世界、lambda=.98、gamma=.99/0.5秒、按4096条链分批Clipped DPPO更新，统一LR=3e-7。
 # 四步KL是实际更新保护，不宣称完整歌曲收益已经通过；源码清理后新运行重新进行MC。
 # MC覆盖训练reset分布；固定32任务完整歌曲仍从开头评估。奖励只按真实执行归属。
 diagnostics:
@@ -43,7 +43,7 @@ runtime:
   gmt_inference_contract: gmt.native_checkpoint_frozen_batch.v1
   headless: true
   isaaclab_root: /data0/user/liwei/closedloop_stage8_runtime/IsaacLab
-  noise_namespace: stage2_credit8_lambda98_joint_score_lr3e7_kl3_20261016
+  noise_namespace: stage2_credit8_clipped_dppo_tracking90v2_20261019
   num_envs: 128
   physics_device: cuda:0
   prefix_deadline_contract: available_reference_deadline_cap.v1
@@ -177,7 +177,7 @@ stage10:
     calibration:
       status: not_physically_validated
       scope: four_trainable_steps_only
-      optimization_sha256: 5c84d93830523bfc8cb526c97b8d8225cd20a6f6260f650ce9add6e8352c087a
+      optimization_sha256: 95f39303c35c94abcd4261b8a155cb51a788cf85091a8357e72a743b522ad5f1
     chain_joint_mean: null
     chain_joint_p95: null
     chain_joint_max: null
@@ -285,7 +285,7 @@ stage10:
   run_control:
     max_training_iterations: 2000
   scale:
-    actor_minibatch_chains: 16384
+    actor_minibatch_chains: 4096
   seed: 42
   storage:
     checkpoint_interval_seconds: 1800
@@ -327,7 +327,7 @@ stage10:
     latency_budget_s: 0.5
     log_probability_reduction: joint_sum
     objective_logprob_reduction: free_coordinate_mean
-    ppo_clip: 0.003
+    ppo_clip: 0.01
     ppo_epochs: 1
     ppo_step_strategy: intermediate4
     ppo_steps_per_chain: 4
@@ -354,13 +354,14 @@ stage10:
     - 0.1
     - 0.0
     x0_diagnostic_every: 0
-    actor_objective: joint_score_pg
+    actor_objective: clipped_dppo
+    # 仅显式joint_score_pg使用；Clipped DPPO仅保留整轮回滚。
     optimizer_backtracking:
       max_attempts: 9
       factor: 0.5
-  version: genmo.closedloop.stage2.continuous_joint_score.v1
+  version: genmo.closedloop.stage2.continuous_tracking.v2
   actor_optimization:
-    schema: genmo.stage2.continuous_joint_score.v1
+    schema: genmo.stage2.continuous_actor.v2
 termination:
   end_effector_relative_height_error_m: 0.15
   non_yaw_orientation_error_rad: 0.6

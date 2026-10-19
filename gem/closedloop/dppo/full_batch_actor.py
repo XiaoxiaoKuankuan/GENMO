@@ -22,7 +22,7 @@ from .actor_step_diagnostics import StepDiagnostics, output_probe, compare_probe
 from .dense_policy import dense_precision_scope
 from .execution_checks import policy_phase
 from .gaussian_probability import gaussian_statistics
-from .actor_optimization import ACTOR_OBJECTIVE
+ACTOR_OBJECTIVE='joint_score_pg'
 from .gradient_merge import merge_global_gradients, take_gradients
 from .optimization_support import _local_phase, _owned, _parameters, _old_kernel
 from .parallel_support import capture_local_rng, restore_local_rng, local_call

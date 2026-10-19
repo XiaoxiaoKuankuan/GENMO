@@ -137,7 +137,7 @@ def test_configuration_binds_every_actual_optimizer_choice(tmp_path):
     import yaml
     from gem.closedloop.dppo.training_config import configuration
     source=Path(__file__).resolve().parents[3]/'configs/closedloop/stage2_credit_server2.yaml'
-    assert configuration(source)['stage10']['derived']['maximum_actor_steps']==1
+    assert configuration(source)['stage10']['derived']['maximum_actor_steps']==4
     c=yaml.safe_load(source.read_text())
     c['stage10']['training']['actor_lr']=3e-6
     p=tmp_path/'changed.yaml';p.write_text(yaml.safe_dump(c))

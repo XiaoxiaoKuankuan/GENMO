@@ -27,7 +27,7 @@ CONFIG=Path(__file__).resolve().parents[3]/'configs/closedloop/stage2_credit_ser
 def test_production_parameters_and_cumulative_iteration_ceiling():
     config=configuration(CONFIG); stage=config['stage10']; train=stage['training']
     assert train['actor_lr']==3e-7 and train['critic_lr']==1e-4
-    assert (train['eta'],train['ppo_steps_per_chain'],train['ppo_clip'])==(.1,4,.003)
+    assert (train['eta'],train['ppo_steps_per_chain'],train['ppo_clip'])==(.1,4,.01)
     assert train['std_schedule']==[.001]*15+[.04,.06,.08,.10,0.]
     assert stage['bc_gradient']['target_ratio']==.1 and stage['kl']['mean_coordinate']==.0009
     assert stage['run_control']=={'max_training_iterations':2000}

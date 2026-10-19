@@ -98,7 +98,7 @@ def test_fragment_bootstrap_uses_actual_control_discount_only_once():
 
 def test_formal_configuration_and_milestone_cumulative_restore():
     c=configuration(ROOT/'configs/closedloop/stage2_credit_server2.yaml');s=c['stage10']
-    assert s['derived']['maximum_actor_steps']==s['derived']['planned_actor_steps']==1
+    assert s['derived']['maximum_actor_steps']==s['derived']['planned_actor_steps']==4
     assert s['derived']['real_chains']==16384 and s['derived']['bc_per_rollout']==1024
     assert s['training']['actor_lr']==3e-7 and s['generation_horizon']['frames']==60
     assert validate_stopping_iteration(2000,s)==2000

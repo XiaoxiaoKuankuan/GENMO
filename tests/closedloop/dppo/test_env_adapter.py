@@ -53,7 +53,7 @@ class FakeBackend:
         failed = self.fail_at is not None and self.tick >= self.fail_at
         return dict(env_id=0, episode_id="e", tick=self.tick, done=failed, terminated=failed,
                     truncated=False, reason="physical_failure" if failed else None,
-                    tracking_history_schema='gmt.causal_tracking_history90.v1',
+                    tracking_history_schema='gmt.causal_tracking_history90.v2',
                     tracking_history_values=torch.zeros(50,90),tracking_history_valid=torch.ones(50,dtype=torch.bool),
                     tracking_history_ticks=torch.arange(self.tick-588,self.tick+1,12),
                     tracking_reference_ticks=torch.arange(self.tick-588,self.tick+1,12),

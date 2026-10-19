@@ -22,7 +22,7 @@ import torch
 
 from .budget import atomic_json
 
-SCHEMA='genmo.closedloop.stage2.asymmetric_tracking.checkpoint.v1'
+SCHEMA='genmo.closedloop.stage2.asymmetric_tracking.checkpoint.v2'
 
 
 def immutable_cpu_snapshot(value):

@@ -287,7 +287,7 @@ def test_generation_delivers_conditions_on_the_sampling_device(device_trace):
         [dict(world_anchor=[0., 0., 0.]), dict(world_anchor=[0., 0., 0.])]))
     policy = SimpleNamespace(actor=actor, sample_rollout=sample, last_sample_timing={})
     snapshot=dict(joint_names=GMT_EXPECTED_JOINT_ORDER,joint_hard_limits_rad=np.tile([-2.,2.],(21,1)),
-        joint_soft_limits_rad=np.tile([-1.8,1.8],(21,1)),tracking_history_schema='gmt.causal_tracking_history90.v1',
+        joint_soft_limits_rad=np.tile([-1.8,1.8],(21,1)),tracking_history_schema='gmt.causal_tracking_history90.v2',
         tracking_history_values=np.zeros((50,90)),tracking_history_valid=np.ones(50,dtype=bool),
         tracking_history_ticks=np.arange(12,601,12),tracking_reference_ticks=np.arange(12,601,12))
     packets = [dict(builder=builder, snapshot=snapshot, reservation=dict(request_id=str(i)), music=None,

@@ -40,7 +40,7 @@ def test_batched_privileged_history_matches_individual_and_rejects_future(device
     from gem.closedloop.dppo.tracking_context import build_critic_context,build_critic_context_batch
     from tests.closedloop.dppo.test_data_learning import context
     c={k:v.to(device) for k,v in context(batch=3).items()}
-    snapshots=[dict(tracking_history_schema='gmt.causal_tracking_history90.v1',
+    snapshots=[dict(tracking_history_schema='gmt.causal_tracking_history90.v2',
         tracking_history_values=torch.zeros(50,90),tracking_history_valid=torch.ones(50,dtype=torch.bool),
         tracking_history_ticks=torch.arange(12,601,12),tracking_reference_ticks=torch.arange(12,601,12)) for _ in range(3)]
     result=build_critic_context_batch(c,snapshots)

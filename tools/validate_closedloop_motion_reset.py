@@ -99,7 +99,7 @@ def main():
                 evidence = actual['reset_initialization']
                 assert evidence['actual_state_verified'] and int(actual['history_append_count']) == 1
                 assert int(np.asarray(actual['history_valid']).sum()) == 1
-                assert actual['tracking_history_schema'] == 'gmt.causal_tracking_history90.v1'
+                assert actual['tracking_history_schema'] == 'gmt.causal_tracking_history90.v2'
                 assert np.asarray(actual['tracking_history_values']).shape == (50, 90)
                 assert int(np.asarray(actual['tracking_history_valid']).sum()) == 1
                 np.testing.assert_array_equal(actual['tracking_history_ticks'], actual['tracking_reference_ticks'])
