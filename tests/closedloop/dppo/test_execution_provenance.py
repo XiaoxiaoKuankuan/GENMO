@@ -88,3 +88,21 @@ def test_actual_window_time_sides_resolve_inherited_prefix_and_conserve_support(
     # tick636位于新plan源16.8帧，仍有0.2插值权重来自旧plan的继承前缀。
     assert view['p0']['future'][31]==pytest.approx(.2)
     assert view['p0']['past'][26]>0
+
+
+def test_consumed_joint_probe_interpolates_vectors_before_RMS_and_reports_missing_sources():
+    from tools.analyze_stage2_reference_consumption import joint_reference_changes,token
+    identity=dict(backend_session_id='backend',env_id=0,episode_id='episode',plan_id='p')
+    episode=token(identity)[:3];ticks=list(range(-108,133,12))
+    record=dict(schema=SCHEMA,plans={'p':dict(decision_tick=0,commit_tick=0,prefix_frames=0,
+        parent_plan_id='bootstrap:x',generation_frames=60)},steps=[dict(control_tick_begin=12,control_tick_end=24,
+        consumed_reference_ticks=ticks,consumed_plan_ids=['bootstrap:x' if tick<0 else 'p' for tick in ticks],
+        reference_tick=24,reference_plan_id='p')])
+    old=torch.zeros(1,60,28);new=old.clone();new[0,0,7:]=1.5;new[0,1,7:]=-1.
+    probe=dict(before=dict(identities=[identity],qpos=old),after=dict(identities=[identity],qpos=new))
+    verified=consumption_report([record]);episodes={episode:[record]};consumed={episode:verified}
+    result=joint_reference_changes(episodes,consumed,[probe],{token(identity):object()})
+    assert result['covered_generated_centers']==1
+    assert result['joint_rms_rad']['max']==pytest.approx(0.,abs=1e-15)
+    missing=joint_reference_changes(episodes,consumed,[],{token(identity):object()})
+    assert missing['covered_generated_centers']==0 and missing['missing_probe_or_lineage_centers']==1
