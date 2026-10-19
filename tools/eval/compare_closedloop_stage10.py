@@ -30,6 +30,7 @@ if __package__ in (None, ''):
     sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from gem.closedloop.dppo.evaluation import _digest, _publish_json, _stats, aggregate_evaluation
+from gem.closedloop.dppo.compact_evidence import read_episode
 from tools.eval.audit_closedloop_stage10 import read_json, require, sha256
 
 VERSION = 'genmo.closedloop.stage10.paired_comparison.v1'
@@ -91,7 +92,7 @@ def _load_merged(report_path):
     for task, reference in zip(tasks, report['episode_manifests']):
         path = _path(root, reference['path'])
         require(sha256(path)==reference['sha256'], 'Episode bytes differ from merged publication')
-        episode = read_json(path)
+        episode = read_episode(path)
         require(episode.get('transition_valid') is True and reference.get('transition_valid') is True
                 and episode['task_id']==reference['task_id']==task['task_id'], 'Episode invalid or not aligned with full task order')
         for key in ('dataset', 'sample_id', 'split', 'seed', 'music_start_frame', 'noise_index_start'):
@@ -149,12 +150,12 @@ def _load_periodic(report_path):
             and assertions.get('full_heldout_acceptance') is False, 'Periodic evidence assertions incomplete')
     require(report.get('evaluation_identity') is not None and bool(report['actor_identity'].get('model_fingerprint')),
             'Periodic comparison requires explicit execution/reward identity and memory model fingerprint')
-    episodes = report['episodes']
     references = report['source_episode_manifests']
+    episodes = [read_episode(reference['path']) for reference in references]
     require(len(episodes) == len(references) == plan['task_count'] == report['task_count'], 'Periodic report omits tasks')
     for task, episode, reference in zip(plan['tasks'], episodes, references):
         path = Path(reference['path']).resolve(strict=True)
-        require(path.is_file() and sha256(path) == reference['sha256'] and read_json(path) == episode,
+        require(path.is_file() and sha256(path) == reference['sha256'],
                 'Periodic original episode bytes differ')
         require(episode.get('transition_valid') is True and reference['task_id'] == task['task_id'],
                 'Periodic episode invalid or out of order')

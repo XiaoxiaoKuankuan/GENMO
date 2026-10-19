@@ -43,6 +43,25 @@ def test_training_evidence_preserves_bitwise_reward_and_full_audit_at_boundary()
         full.evaluate_batch(ColumnarTrace([pack_trace([row])]))[0])
 
 
+def test_metric_evidence_keeps_all_rewards_and_independent_scalar_audit():
+    from gem.runtime.trajectory_blocks import pack_trace,ColumnarTrace
+    oracle,_,full=calculators();metric=copy.deepcopy(full);metric.metrics_only=True
+    data=[]
+    for index in range(25):
+        row=actual_step(index,speed=1.+.01*index);row['env_id']=3
+        row['reward_primitives']=packet(row,oracle);data.append(row)
+    a=full.evaluate_batch(ColumnarTrace([pack_trace(data)]))
+    b=metric.evaluate_batch(ColumnarTrace([pack_trace(data)]))
+    assert [r['reward'] for r in a]==[r['reward'] for r in b]
+    assert full.scalar_audits==metric.scalar_audits==1
+    compare_reward_evidence(a[0],b[0])
+    for left,right in zip(a[1:],b[1:]):
+        assert 'power' not in right['diagnostics']
+        assert right['joint_limit_diagnostics']==left['joint_limit_diagnostics']
+        for name in left['components']:
+            assert right['components'][name]['integrated_reward']==left['components'][name]['integrated_reward']
+
+
 def packet(row,oracle):
     result={}
     for name in ('track','stable','alive','cmd','torque','contact','joint_limit'):

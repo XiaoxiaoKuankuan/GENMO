@@ -529,7 +529,8 @@ def audit_evaluation(root, path, data_lookup, dataset_identity, *, loaded_checkp
         require(task['sample']['manifest_sha256']==audited['manifest_sha256'], 'Evaluation paired sample differs from full manifest')
         episode_path = resolve(root, reference['path'], path.parent)
         require(sha256(episode_path)==reference['sha256'], 'Evaluation episode SHA differs')
-        episode = read_json(episode_path)
+        from gem.closedloop.dppo.compact_evidence import read_episode
+        episode = read_episode(episode_path)
         require(episode.get('transition_valid') is True and episode['task_id']==task['task_id']==reference['task_id'], 'Evaluation episode invalid or out of order')
         require(episode['seed']==task['seed'] and episode['sample_id']==task['sample_id'] and episode['dataset']==task['dataset'], 'Evaluation episode task identity differs')
         close(episode['reward_sum'], sum(item['reward_sum'] for item in episode['decisions']), 'Evaluation episode reward')

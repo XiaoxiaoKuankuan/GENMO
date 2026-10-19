@@ -246,6 +246,7 @@ class UpperEnvironment:
         if reward_type is not ExecutionReward:
             self.reward.audit_interval = int(self.config.get('runtime', {}).get('reward_audit_interval_controls', 100))
             self.reward.evidence_level=self.config.get('runtime',{}).get('evidence_level','full')
+            self.reward.metrics_only=self.config.get('runtime',{}).get('evaluation_metrics_only',False)
         self._warmup_last_target=None if last_warmup_row is None else last_warmup_row.get('joint_position_target')
         if self.snapshot['tick']<600:return None
         if self._warmup_last_target is not None:self.reward.seed_previous_target(self._warmup_last_target)

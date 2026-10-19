@@ -34,8 +34,11 @@ def evaluate_columns(reward, trace, *, timings=None):
     """纯计算本批结果及后继窗口；核对结束前不修改调用者的因果状态。"""
     n = len(trace)
     if not n: return [], []
+    metrics_only=getattr(reward,'metrics_only',False)
     full_indices=(set(range(n)) if getattr(reward,'evidence_level','full')=='full' else
         {i for i in range(n) if (reward.control_count+i)%reward.audit_interval==0})
+    physical_indices=({i for i in full_indices if (reward.control_count+i)%reward.audit_interval==0}
+                      if metrics_only else full_indices)
     marked=time.perf_counter()
     def mark(name):
         nonlocal marked
@@ -129,7 +132,7 @@ def evaluate_columns(reward, trace, *, timings=None):
         durations=_finite(col(*path,'dt_s'),'physical sample duration',(n,))
         if np.any(physics_ticks != ticks-12+(s+1)*3) or np.any(np.abs(durations-cfg['dt']/4)>1e-12):
             raise ValueError('Invalid physical sample timestamp/duration')
-        if not full_indices:continue
+        if not physical_indices:continue
         p = (*path,'physical_diagnostics')
         torque = _finite(col(*p,'pd_torque_estimate_nm'),'torque',(n,21))
         velocity = _finite(col(*path,'joint_vel_gmt'),'substep velocity',(n,21))
@@ -142,7 +145,7 @@ def evaluate_columns(reward, trace, *, timings=None):
         if (sync.dtype.kind != 'b' or np.any(sync != (tt==vt)) or np.any(vt!=physics_ticks) or
                 not all(math.isclose(float(t),int(p_tick)/600,abs_tol=1e-12) for t,p_tick in zip(seconds,physics_ticks))):
             raise ValueError('PD power sampling-time evidence differs')
-        for i in full_indices:
+        for i in physical_indices:
             power[i].append(dict(per_joint_w=values[i].tolist(),mean_w=float(values[i].mean()),
                 sum_w=float(values[i].sum()),max_w=float(values[i].max()),
                 torque_sample_tick=col(*meta,'torque_sample_tick')[i].item(),
@@ -199,6 +202,18 @@ def evaluate_columns(reward, trace, *, timings=None):
                 normalized=(dict(beat=float(beats[i]),intensity=intensity[i]) if reward.music_enabled else {}) if primitive is None else primitive['normalized'],
                 score=float(scores[name][i]),weight=cfg[key]*(-1 if 'penalty' in key else 1),gate=gate,
                 activity_gate=gate,weighted_rate=float(rates[name][i]),integrated_reward=float(cfg['dt']*rates[name][i]))
+        if metrics_only and i not in physical_indices:
+            for name,component in components.items():
+                raw=component['raw']
+                component['raw']=({key:float(value) for key,value in raw.items()
+                    if isinstance(value,(int,float,np.number)) and not isinstance(value,(bool,np.bool_))}
+                    if name=='track' else {})
+                component['normalized']={}
+            results.append(dict(version=cfg['version'],tick=int(ticks[i]),episode_id=str(episodes[i]),
+                reward=float(cfg['dt']*total[i]),reward_rate=float(total[i]),reward_is_integrated=True,dt_s=cfg['dt'],
+                transition_valid=True,errors=[],components=components,activity=activities[i],
+                joint_limit_diagnostics=boundary,diagnostics=dict(physical_state=physical_state)))
+            continue
         power_info = dict(valid=True,sampling='four_physics_substeps',
             semantics='PD_estimated_mechanical_power_proxy_not_electrical_power_or_energy',
             sampling_synchronized=all(p['sampling_synchronized'] for p in power[i]),

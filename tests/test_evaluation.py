@@ -147,7 +147,8 @@ def test_full_music_evaluation_uses_passed_policy_multisource_multiseed_and_reco
     for key, value in loaded.actor.state_dict().items():
         torch.testing.assert_close(value, before[key], atol=0, rtol=0)
     assert all(torch.equal(value, before['weight']) for value in env.seen_weights)
-    episodes = [json.loads((tmp_path/'evaluation'/item['path']).read_text()) for item in report['episode_manifests']]
+    from gem.closedloop.dppo.compact_evidence import read_episode
+    episodes = [read_episode(tmp_path/'evaluation'/item['path']) for item in report['episode_manifests']]
     assert all(len(episode['decisions']) > 4 for episode in episodes)
     assert all(episode['end_reason']=='music_end' for episode in episodes)
     assert aggregate_evaluation(episodes) == report['aggregate']

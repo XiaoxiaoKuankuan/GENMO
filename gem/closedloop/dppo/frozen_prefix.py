@@ -93,7 +93,7 @@ class FrozenPrefixPolicy(DenseDiffusionPolicy):
         return current if frozen is None else current+frozen._parameter_signature()
 
     def prepare_conditions(self, conditions, *, include_frozen=True):
-        self.assert_frozen_identity()
+        if self._phase_signature is None:self.assert_frozen_identity()
         prepared=super().prepare_conditions(conditions)
         # 有梯度调用只训练末段；冻结编码器仅在采样/周期概率回放/最终参考诊断计算。
         frozen=None

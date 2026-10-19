@@ -21,6 +21,7 @@ import yaml
 import torch
 from .parallel_support import local_call
 from .run_management import GuardedStepJournal
+from .memory_execution import MemoryReceiveJournal
 from .vector_collector import VectorWorldClient, VectorLaneBackend
 from gem.runtime.closedloop_protocol import RemoteError
 
@@ -83,7 +84,7 @@ def _open_isolated_world_once(c,label):
     # 独立评估/MC世界不重复首个列式-逐行全量对照；训练世界每会话已执行一次，数值路径相同。
     handle.num_envs=c.stage['evaluation'].get('envs_per_rank',1)
     config['runtime'].update(num_envs=handle.num_envs,asset_conversion_dir=str(path/'usd_assets'),
-        columnar_first_audit=False,evidence_level='full')
+        columnar_first_audit=False,evidence_level='training')
     config_path=path/'config.yaml';config_path.write_text(yaml.safe_dump(config,allow_unicode=True))
     handle.workers=Workers(config,path)
     try:
@@ -94,7 +95,7 @@ def _open_isolated_world_once(c,label):
             strip_distributed=True,environment=device_environment)
         if handle.workers.entries[0]['identity'].get('gpu_uuid')!=str(torch.cuda.get_device_properties(c.distributed.device).uuid):
             raise RuntimeError('Evaluation world is on a different physical GPU')
-        handle.journal=GuardedStepJournal(path/'world.sqlite',c.guard,format='genmo.execution_journal.ndarray.v2')
+        handle.journal=MemoryReceiveJournal(path/'world.sqlite')
         handle.world=VectorWorldClient(client,handle.journal,socket_path=socket)
         handle.backend=(VectorLaneBackend(SingleVectorLaneTransport(handle.world),None)
             if handle.num_envs==1 else SimpleNamespace(journal=None))
@@ -155,7 +156,7 @@ def isolated_vector_evaluation(c,label):
         path=c.session/'phases'/f'vector_eval_journal_{label}'/f'rank{c.distributed.rank:02d}'
         path.mkdir(parents=True,exist_ok=False)
         handle.journal.close()
-        handle.journal=GuardedStepJournal(path/'world.sqlite',c.guard,format='genmo.execution_journal.ndarray.v2')
+        handle.journal=MemoryReceiveJournal(path/'world.sqlite')
         handle.world.journal=handle.journal
     if not created:local_call(c.distributed,rotate_journal)
     if overhead is not None and created:

@@ -31,10 +31,12 @@ def main():
     parser.add_argument('--warmup-rollouts',type=int)
     parser.add_argument('--resume',choices=['latest'])
     parser.add_argument('--strict-evidence',action='store_true')
+    parser.add_argument('--verify-kl-reuse',action='store_true',help='仅本会话首次复用时独立重算完整KL并核对，额外耗时单独记录')
     parser.add_argument('--calibrate-only',action='store_true',help='只测新模型单机器人关键路径，不更新参数')
     parser.add_argument('--evaluate-only',action='store_true',help='新实验只做固定物理评估，用于实际噪声核标定，不采训练rollout')
     parser.add_argument('--evaluation-actor',type=Path,help='明确指定完整训练checkpoint或已验收固定数据Actor，只允许evaluate-only使用')
     parser.add_argument('--critic-preheat-only',action='store_true',help='固定Actor，完成完整MC/TD价值对照后结束，不进入Actor更新')
+    parser.add_argument('--mc-validation-only',action='store_true',help='固定当前Actor，仅完成独立完整episode MC诊断，不更新任何网络')
     parser.add_argument('--collect-only',action='store_true',help='只采一轮完整真实rollout供计算对照，不更新Actor/Critic')
     parser.add_argument('--collect-rollouts',type=int,default=1,help='collect-only连续世界窗口数；保留正常episode，不更新行为策略')
     parser.add_argument('--capture-validation-iteration',type=int,help='明确保存指定轮更新前的真实学习张量及Adam用于固定数据对照')
@@ -56,8 +58,8 @@ def main():
     if args.calibrate_only:
         config['runtime'].update(num_envs=1,generation_batch=1,phase_contract='single_request_calibration.v1',
             timing_contract='deployment_calibration.no_execution.v1')
-    if sum((args.calibrate_only,args.collect_only,args.evaluate_only,args.critic_preheat_only))>1:parser.error('Choose only one finite diagnostic phase')
-    if args.evaluate_only and args.resume:parser.error('Noise calibration requires a fresh explicit experiment identity')
+    if sum((args.calibrate_only,args.collect_only,args.evaluate_only,args.critic_preheat_only,args.mc_validation_only))>1:parser.error('Choose only one finite diagnostic phase')
+    if args.evaluation_actor and args.resume:parser.error('Explicit evaluation Actor and complete training resume are mutually exclusive')
     if args.evaluation_actor and not args.evaluate_only:parser.error('Fixed-data Actor candidates are evaluation-only, not training recovery points')
     if args.collect_only:args.capture_validation_iteration=1;args.warmup_rollouts=0
     rank,world,local=(int(os.environ.get(k,'-1')) for k in ['RANK','WORLD_SIZE','LOCAL_RANK'])

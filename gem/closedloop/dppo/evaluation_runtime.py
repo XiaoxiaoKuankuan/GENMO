@@ -20,7 +20,9 @@ from .evaluation import evaluate_policy
 from .parallel_support import (begin_lease, collection_credit, finish_lease, capture_local_rng,
     restore_local_rng, local_call, root_call)
 from .run_management import GuardedStepJournal
+from .memory_execution import MemoryReceiveJournal
 from gem.robots.bumi.kinematics import sha256_file
+from .compact_evidence import summary_only
 from .tensorboard_metrics import evaluation_scalars
 
 def _new_phase(c, name, credits):
@@ -122,7 +124,7 @@ def _evaluate_impl(c, label, *, write_report=True):
             vector_fragment_contract=c.config['runtime'].get('vector_fragment_contract'),
             prefix_deadline_contract=c.config['runtime']['prefix_deadline_contract'])
     baseline_path, reference_path = c.output/'evaluation_baseline.json', c.output/'fixed_diagnostic_reference.json'
-    baseline = root_call(c.distributed, lambda: json.loads(baseline_path.read_text()) if baseline_path.exists() else None)
+    baseline = root_call(c.distributed, lambda: summary_only(json.loads(baseline_path.read_text())) if baseline_path.exists() else None)
     references = root_call(c.distributed, lambda: json.loads(reference_path.read_text()) if reference_path.exists() else None)
     if references is not None and (references['plan_sha256'] != plan['plan_sha256']
             or references['evaluation_identity'] != evaluation_identity):
@@ -130,11 +132,11 @@ def _evaluate_impl(c, label, *, write_report=True):
     if references is None and (label != 'initial' or baseline is not None):
         raise ValueError('Periodic evaluation requires the durable initial diagnostic reference')
     path, lease, budget = _new_phase(c, f'eval_{label}', per_rank)
-    journal = GuardedStepJournal(path/'execution_journal.sqlite', c.guard,
-        format=c.stage.get('performance', {}).get('journal_format', 'json.v1'))
+    journal = MemoryReceiveJournal(path/'execution_journal.sqlite')
     c.backend.journal = journal
     config = copy.deepcopy(c.config)
     config.setdefault('runtime',{})['evidence_level']='full'
+    config['runtime']['evaluation_metrics_only']=True
     env_type = UpperEnvironment
     if getattr(c, 'vector', None) is not None:
         from .vector_environment import VectorUpperEnvironment
@@ -152,6 +154,12 @@ def _evaluate_impl(c, label, *, write_report=True):
     def capture_initial(task,row):
         if (references is None or fresh_critic_enabled) and hasattr(row,'context') and hasattr(row,'identity'):
             initial_rows.append(snapshot_critic_transition(row))
+            if references is None and len(initial_rows)<=4:
+                from .training_checkpoint import immutable_cpu_snapshot
+                target=path/'fixed_actor_reference'/f'chain_{len(initial_rows):02d}.pt'
+                target.parent.mkdir(exist_ok=True)
+                torch.save(immutable_cpu_snapshot(dict(trace=row.metadata['sampler_trace'])),target)
+                c.guard.account_file(target)
     try:
         def perform():
             if not shards[c.distributed.rank]['tasks']:
@@ -173,7 +181,7 @@ def _evaluate_impl(c, label, *, write_report=True):
                 return None
             if not hasattr(c, '_periodic_fixed_reference'):
                 if references is None:
-                    actor_reference = load_reference_traces(path/'raw_samples', max_chains=4)
+                    actor_reference = load_reference_traces(path/'fixed_actor_reference', max_chains=4)
                     critic_reference = None
                     if initial_rows:
                         critic_reference = build_fixed_critic_reference(initial_rows, c.critic, c.distributed.device,

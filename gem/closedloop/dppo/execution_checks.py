@@ -37,6 +37,8 @@ def _validation_phase(policy):
         yield
         return
     policy._prepare_actor()
+    frozen_check=getattr(policy,'assert_frozen_identity',None)
+    if frozen_check is not None:frozen_check()
     signature = policy._parameter_signature()
     policy._phase_signature = signature
     checks = []
@@ -53,6 +55,7 @@ def _validation_phase(policy):
         _CHECKS.reset(token)
     if policy._parameter_signature() != signature:
         raise RuntimeError('Actor changed inside a fixed-parameter compute phase')
+    if frozen_check is not None:frozen_check()
 
 
 def checked_policy_phase(function):

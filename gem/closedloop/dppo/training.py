@@ -2,9 +2,9 @@
 
 本模块组装Stage1可训练Actor、独立预训练特征Critic、冻结原生GMT及同进程Isaac
 世界。先固定Actor采集独立真实轨迹预热Critic，再执行固定行为rollout、GAE、
-多minibatch DPPO+BC、最后全20步KL和发布策略。普通执行数据更新后释放，完整
+一次全局策略梯度/DPPO+BC更新、可训练四步完整KL和发布策略。普通执行数据更新后释放，完整
 证据只在显式严格/诊断/异常边界保存。部署profile与训练墙钟独立，优化时不调用
-任何物理推进。CLI给定有限轮次，配置的500轮预算不自动触发长期训练。
+任何物理推进。CLI给定累计停止轮次，实验和正式任务分别受各自显式预算约束。
 
 整轮快照覆盖Actor/Critic/两个Adam/BC/控制器/训练RNG，KL拒绝恢复这些状态后
 停止会话；物理状态和已耗预算不退款。恢复独立当前完整checkpoint后重建PhysX
@@ -40,6 +40,7 @@ from .tensor_cache import RolloutTensorCache
 from .trainer import load_actor,trainable_actor_parameters
 from .optimization_support import probability_check_local
 from .updater import actor_update,critic_update,final_kl,check_kl
+from .compact_evidence import summary_only
 from .periodic_monitor import log_metrics
 from .tensorboard_metrics import DashboardWriter, training_scalars
 from .evaluation import _model_fingerprint
@@ -164,8 +165,8 @@ def _poll_checkpoint(c,*,wait=False):
     pending=getattr(c,'pending_evaluation',None)
     if publication is not None and pending is not None:
         result,label,report,baseline=pending
-        if publication['metadata']['reason']!='evaluated_'+label:
-            raise RuntimeError('Pending evaluation does not match published checkpoint')
+        if publication['iteration']!=result['iteration']:
+            raise RuntimeError('Pending evaluation does not match published checkpoint iteration')
         from .periodic_monitor import mark_saved_evaluation
         selection=mark_saved_evaluation(result,baseline,publication,
             actor_fingerprint=result['actor_identity']['model_fingerprint'],output_dir=c.output,
@@ -236,7 +237,7 @@ def _preserve_rollout_anomaly(c,buffer,targets,manifest,label):
         identity=c.identity,full_execution=True,guard=c.guard)
 
 
-def _evaluate(c,report,label):
+def _evaluate(c,report,label,*,save=True):
     from .evaluation_runtime import _evaluate as evaluate
     root_call(c.distributed,lambda:_poll_checkpoint(c,wait=True))
     started=time.perf_counter()
@@ -266,14 +267,49 @@ def _evaluate(c,report,label):
             {'Loss/stage1_validation':result['stage1_retention']['source_balanced_loss']}) if c.writer else None)
         _overhead(c,'evaluation_stage1_retention_seconds',stage)
     stage=time.perf_counter()
-    _snapshot(c,'evaluated_'+label)
-    _overhead(c,'evaluation_snapshot_seconds',stage)
-    stage=time.perf_counter()
-    baseline=root_call(c.distributed,lambda:json.loads((c.output/'evaluation_baseline.json').read_text())
+    baseline=root_call(c.distributed,lambda:summary_only(json.loads((c.output/'evaluation_baseline.json').read_text()))
         if (c.output/'evaluation_baseline.json').exists() else result)
     if c.distributed.rank==0:c.pending_evaluation=(result,label,report,baseline)
+    if save:
+        _snapshot(c,'evaluated_'+label)
     _overhead(c,'evaluation_total_seconds',started)
     return result
+
+
+def _maintain_after_iteration(c,report,*,is_warmup,rejected,last_save):
+    """先评估与MC维护，再合并保存原因；同轮只发布一份最终恢复状态。"""
+    distributed=c.distributed
+    complete_mc=c.stage['critic'].get('complete_mc',{})
+    save_reasons=[]
+    iteration_eval=c.stage['evaluation'].get('every_actor_iterations')
+    if (c.state['training_control_steps']>=c.state['next_evaluation_control_steps'] or
+            iteration_eval and not is_warmup and not rejected and c.state['iteration']%iteration_eval==0):
+        c.state['next_evaluation_control_steps']=_next_interaction_boundary(
+            c.state['training_control_steps'],c.stage['evaluation']['every_control_steps'])
+        evaluation_label=_periodic_evaluation_label(c.state)
+        _evaluate(c,report,evaluation_label,save=False)
+        save_reasons.append('evaluated_'+evaluation_label)
+    from .run_control import iteration_checkpoint_reason
+    checkpoint_reason=iteration_checkpoint_reason(c.state['iteration'],c.stage['storage'],
+        is_warmup=is_warmup,rejected=rejected)
+    if checkpoint_reason or time.perf_counter()-last_save>=c.stage['storage']['checkpoint_interval_seconds']:
+        stage=time.perf_counter()
+        save_reasons.append(checkpoint_reason or 'periodic')
+    iteration_mc=complete_mc.get('every_actor_iterations')
+    if complete_mc.get('enabled') and (c.state['training_control_steps']>=c.state['next_mc_calibration_control_steps'] or
+            iteration_mc and not is_warmup and not rejected and c.state['iteration']%iteration_mc==0):
+        from .mc_calibration import calibrate_critic
+        stage=time.perf_counter()
+        calibrate_critic(c,'policy_'+str(c.state['policy_version']),fit=False,
+            fit_if_ev_below=complete_mc.get('refit_if_ev_below'))
+        _overhead(c,'mc_calibration_seconds',stage)
+        c.state['next_mc_calibration_control_steps']=_next_interaction_boundary(c.state['training_control_steps'],complete_mc['every_control_steps'])
+        save_reasons.append('mc_calibrated')
+    if save_reasons:
+        stage=time.perf_counter()
+        _snapshot(c,'+'.join(save_reasons));last_save=time.perf_counter()
+        _overhead(c,'maintenance_snapshot_seconds',stage)
+    return last_save
 
 
 def run(cargs,config,distributed):
@@ -420,6 +456,11 @@ def run(cargs,config,distributed):
                 validate_calibration(c.stage['kl'],c.policy.kernel_config,c.settings['reward'],c.settings['kl_soft_stop_coordinate'],
                     optimization=optimization_binding(c.stage))
         complete_mc=c.stage['critic'].get('complete_mc',{})
+        if getattr(cargs,'mc_validation_only',False):
+            from .mc_calibration import calibrate_critic
+            report['independent_mc_validation']=calibrate_critic(c,'validation_'+str(c.state['policy_version']),fit=False)
+            report.update(status='passed',scope='independent_complete_MC_no_network_updates',final_state=c.state)
+            raise _FiniteDiagnosticComplete
         if complete_mc.get('enabled') and not cargs.collect_only and not cargs.evaluate_only and not c.state.get('mc_preheat_complete'):
             from .mc_calibration import calibrate_critic
             report['mc_preheat']=calibrate_critic(c,'preheat',fit=True)
@@ -450,8 +491,9 @@ def run(cargs,config,distributed):
             if any(distributed.all_gather_object(signal.stop_requested)):break
             is_warmup=c.state['warmup_completed']<warmups
             label=('warmup' if is_warmup else 'train')+f'_{c.state["rollouts_completed"]+1:06d}'
-            strict=cargs.strict_evidence or c.state['training_control_steps']>=c.state['next_diagnostic_control_steps']
-            if strict:c.state['next_diagnostic_control_steps']=_next_interaction_boundary(
+            periodic_diagnostic=c.state['training_control_steps']>=c.state['next_diagnostic_control_steps']
+            strict=cargs.strict_evidence
+            if strict or periodic_diagnostic:c.state['next_diagnostic_control_steps']=_next_interaction_boundary(
                 c.state['training_control_steps'],c.stage['storage']['diagnostic_every_control_steps'])
             round_start=time.perf_counter()
             torch.cuda.reset_peak_memory_stats(distributed.device)
@@ -464,6 +506,9 @@ def run(cargs,config,distributed):
             profile_token=activate(profiler)
             buffer,targets,manifest,collection=c.vector.collect(label,strict=strict)
             rows=buffer.transitions
+            if periodic_diagnostic and not strict:
+                from .diagnostic_rollout import sampled_diagnostic
+                collection['sampled_diagnostic']=sampled_diagnostic(c,rows,targets,label)
             used=distributed.sum_tensor(torch.tensor([collection['actual_confirmed_control_steps'],collection['actual_world_allocated_physics_steps'],len(rows)],
                 device=distributed.device,dtype=torch.int64)).cpu().tolist()
             # 实际交互已发生，KL拒绝只恢复学习状态，不能让交互计数回退。
@@ -544,7 +589,9 @@ def run(cargs,config,distributed):
                         ('joint_names','joint_hard_limits_rad','joint_soft_limits_rad')}
                     update_actor=partial(full_batch_actor_update,objective=c.settings['actor_objective'],
                         backtracking=c.settings['optimizer_backtracking'],kl_limits=c.stage['kl'],
-                        kl_microbatch=c.settings['kl_microbatch'],proposed_lr=c.settings['actor_lr'])
+                    kl_microbatch=c.settings['kl_microbatch'],proposed_lr=c.settings['actor_lr'],
+                    detailed_diagnostics=(c.state['iteration']==0 or
+                        (c.state['iteration']+1)%c.stage['checks'].get('actor_diagnostics_every',100)==0))
                 actor=update_actor(c.policy,c.actor_optimizer,rows,targets,cache,manifest,c.controller,distributed=distributed,
                     anchor=c.bc,generator=c.generators['actor'],ppo_epochs=c.settings['ppo_epochs'],
                     minibatch_chains=c.stage['scale']['actor_minibatch_chains'],microbatch=c.settings['denoising_microbatch'],
@@ -559,8 +606,23 @@ def run(cargs,config,distributed):
                     actor['gradient_snr']['consecutive_iteration_cosine']=_sketch_cosine(c.snr_previous_sketch,sketch)
                     c.snr_previous_sketch=sketch
                 actor_seconds=max(distributed.all_gather_object(time.perf_counter()-actor_start))
-                kl=final_kl(c.policy,rows,cache,manifest,distributed=distributed,microbatch=c.settings['kl_microbatch'],
-                    clip=c.settings['ppo_clip'],objective_reduction=c.settings['objective_logprob_reduction'])
+                from .kl_reuse import reusable_accepted_kl
+                kl=reusable_accepted_kl(actor,c.policy,cache,manifest,distributed,
+                    clip=c.settings['ppo_clip'],reduction=c.settings['objective_logprob_reduction'])
+                if kl is None:
+                    kl=final_kl(c.policy,rows,cache,manifest,distributed=distributed,microbatch=c.settings['kl_microbatch'],
+                        clip=c.settings['ppo_clip'],objective_reduction=c.settings['objective_logprob_reduction'])
+                elif getattr(cargs,'verify_kl_reuse',False) and not getattr(c,'kl_reuse_verified',False):
+                    started=time.perf_counter()
+                    independent=final_kl(c.policy,rows,cache,manifest,distributed=distributed,microbatch=c.settings['kl_microbatch'],
+                        clip=c.settings['ppo_clip'],objective_reduction=c.settings['objective_logprob_reduction'])
+                    fields=('mean_coordinate_kl','maximum_step_mean_coordinate_kl','coordinate_kl','chain_joint_kl',
+                        'per_denoising_step','covered_chains','covered_internal_transitions','gaussian_kl_steps')
+                    if any(kl[key]!=independent[key] for key in fields):
+                        raise RuntimeError('Reused KL differs from independent complete four-step recalculation')
+                    kl['reuse_verification']=dict(passed=True,all_valid_chains_and_four_steps=True,
+                        additional_wall_seconds=time.perf_counter()-started)
+                    c.kl_reuse_verified=True
                 from .actor_backtracking import check_candidate_kl
                 accepted=check_candidate_kl(kl,c.stage['kl'])
                 if actor.get('step_rejected'):
@@ -634,34 +696,12 @@ def run(cargs,config,distributed):
             if distributed.rank==0:print(f'[STAGE10 ACCEPTED] {label} chains={used[2]} actor_steps={0 if actor is None else actor["optimizer_steps"]} wall={wall:.3f}s',flush=True)
             if is_warmup and c.state['warmup_completed']==warmups:
                 _snapshot(c,'critic_warmup_complete');last_save=time.perf_counter()
-            iteration_eval=c.stage['evaluation'].get('every_actor_iterations')
-            if (c.state['training_control_steps']>=c.state['next_evaluation_control_steps'] or
-                    iteration_eval and not is_warmup and not rejected and c.state['iteration']%iteration_eval==0):
-                c.state['next_evaluation_control_steps']=_next_interaction_boundary(
-                    c.state['training_control_steps'],c.stage['evaluation']['every_control_steps'])
-                _evaluate(c,report,_periodic_evaluation_label(c.state))
-            from .run_control import iteration_checkpoint_reason
-            checkpoint_reason=iteration_checkpoint_reason(c.state['iteration'],c.stage['storage'],
-                is_warmup=is_warmup,rejected=rejected)
-            if checkpoint_reason or time.perf_counter()-last_save>=c.stage['storage']['checkpoint_interval_seconds']:
-                stage=time.perf_counter()
-                _snapshot(c,checkpoint_reason or 'periodic');last_save=time.perf_counter()
-                _overhead(c,'periodic_snapshot_seconds',stage)
-            iteration_mc=complete_mc.get('every_actor_iterations')
-            if complete_mc.get('enabled') and (c.state['training_control_steps']>=c.state['next_mc_calibration_control_steps'] or
-                    iteration_mc and not is_warmup and not rejected and c.state['iteration']%iteration_mc==0):
-                from .mc_calibration import calibrate_critic
-                stage=time.perf_counter()
-                calibrate_critic(c,'policy_'+str(c.state['policy_version']),fit=False,
-                    fit_if_ev_below=complete_mc.get('refit_if_ev_below'))
-                _overhead(c,'mc_calibration_seconds',stage)
-                c.state['next_mc_calibration_control_steps']=_next_interaction_boundary(c.state['training_control_steps'],complete_mc['every_control_steps'])
-                stage=time.perf_counter()
-                _snapshot(c,'mc_calibrated')
-                _overhead(c,'mc_snapshot_seconds',stage)
+            last_save=_maintain_after_iteration(c,report,is_warmup=is_warmup,rejected=rejected,last_save=last_save)
             root_call(distributed,lambda:_poll_checkpoint(c))
+        stopped=any(distributed.all_gather_object(signal.stop_requested))
+        if not stopped:
+            _evaluate(c,report,'final_'+f'{c.state["iteration"]:06d}',save=False)
         _snapshot(c,'controlled_end',wait=True)
-        _evaluate(c,report,'final_'+f'{c.state["iteration"]:06d}')
         report.update(status='passed',final_state=c.state)
     except _FiniteDiagnosticComplete:
         pass

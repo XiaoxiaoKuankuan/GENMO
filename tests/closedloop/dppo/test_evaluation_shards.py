@@ -127,13 +127,15 @@ def test_complete_merge_reaudits_every_shard_and_uses_parent_order(tmp_path, evi
         expected_checkpoint_sha256=sha256_file(evidence['checkpoint']))
     assert result['status'] == 'passed' and result['completed_episode_count'] == 8
     assert [row['task_id'] for row in result['episode_manifests']] == [task['task_id'] for task in evidence['parent']['tasks']]
-    episodes = [json.loads((tmp_path/'merged'/row['path']).read_text()) for row in result['episode_manifests']]
+    from gem.closedloop.dppo.compact_evidence import read_episode
+    episodes = [read_episode(tmp_path/'merged'/row['path']) for row in result['episode_manifests']]
     assert result['aggregate'] == aggregate_evaluation(episodes)
     assert result['aggregate']['overall']['executed_control_steps'] == 16
     assert json.loads((tmp_path/'merged'/'independent_audit.json').read_text())['status'] == 'passed'
     assert (tmp_path/'merged'/'completion.json').is_file()
     for row in result['episode_manifests']:
-        assert sha256_file(tmp_path/'merged'/row['path']) == row['sha256'] == sha256_file(row['source_episode_path'])
+        assert sha256_file(tmp_path/'merged'/row['path']) == row['sha256']
+        assert read_episode(tmp_path/'merged'/row['path'])['decisions']==read_episode(row['source_episode_path'])['decisions']
     with pytest.raises(ValueError, match='must be new'):
         merge_evaluation_shards(evidence['parent'], roots, tmp_path/'merged')
 

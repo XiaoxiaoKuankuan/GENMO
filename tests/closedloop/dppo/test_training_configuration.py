@@ -31,7 +31,7 @@ def test_main_scale_is_8192_nominal_chains_with_eight_combined_updates():
     assert s['version'] == VERSION
     assert s['derived'] == dict(world_size=8, real_chains=8192, local_chains=1024,
         planned_actor_steps=8, local_ppo_internal_visits=8192, local_trainable_kl_visits=4096,
-        bc_per_step=128, bc_per_rollout=1024,maximum_actor_steps=10,
+        bc_per_step=128, bc_per_rollout=1024,maximum_actor_steps=8,
         count_semantics='nominal_capacity_only_actual_manifest_controls_optimization')
     assert c['runtime']['num_envs']==c['runtime']['generation_batch']==128
     assert s['critic']['global_batch']==s['scale']['actor_minibatch_chains']==2048

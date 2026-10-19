@@ -479,7 +479,8 @@ def evaluate_policy(env, policy, task_plan, output_dir, *, catalog=None, episode
             results=world_driver.run(plan['tasks'],flow)
         for index,episode,caught in sorted(results,key=lambda item:item[0]):
             episode_path=output/'episodes'/f'{index:06d}.json'
-            _publish_json(episode_path,episode)
+            from .compact_evidence import write_episode
+            write_episode(episode_path,episode,publish_json=_publish_json,disk_guard=getattr(env,'disk_guard',None))
             episodes.append(episode)
             manifests.append(dict(path=str(episode_path.relative_to(output)),
                 sha256=hashlib.sha256(episode_path.read_bytes()).hexdigest(),

@@ -45,13 +45,12 @@ def test_rpc_contiguous_noncontiguous_arrays_remain_independent_after_encode():
     assert decoded['text'][0] == '中文'
 
 
-def test_music_beats_recomputed_only_when_episode_source_changes(monkeypatch):
+def test_disabled_music_does_not_compute_beats_for_episode_sources(monkeypatch):
     music = np.zeros((100, 35)); music[[3, 7, 20], 34] = 1.
     reward = ExecutionReward(music_features=music)
-    expected = 600 + np.rint(np.array([3, 7, 20])*20/12).astype(np.int64)*12
-    np.testing.assert_array_equal(reward._beat_ticks, expected)
+    assert reward._beat_ticks.size==0
     reward.reset(music_start_tick=1200)
-    np.testing.assert_array_equal(reward._beat_ticks, expected+600)
+    assert reward._beat_ticks.size==0
     music[:, 34] = 0.
     reward.reset(music_features=music)
     assert len(reward._beat_ticks) == 0
@@ -70,6 +69,9 @@ def test_batched_values_preserve_fixed_targets_and_terminal_bootstrap():
             identity=dict(backend_session_id='s', episode_id='e' if i<3 else 'f', policy_version=1),
             metadata=dict(remaining_music_seconds=float(10-i), next_remaining_music_seconds=float(9-i))))
     reference = copy.deepcopy(rows)
+    for collection in (rows,reference):
+        for row in collection:
+            row.metadata.update(critic_context=row.context,next_critic_context=row.next_context)
     populate_values(reference, Critic(), 'cpu', critic_version=0)
     populate_values(rows, Critic(), 'cpu', critic_version=0, batch_size=3)
     assert [r.old_value for r in rows] == [r.old_value for r in reference]

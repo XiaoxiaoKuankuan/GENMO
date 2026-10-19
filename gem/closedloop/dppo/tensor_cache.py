@@ -49,8 +49,10 @@ class RolloutTensorCache:
             for key in self.rows[0].context:
                 self.host['context/'+key] = torch.cat([row.context[key].detach().to(source_device) for row in self.rows], 0)
             for key in self.rows[0].metadata['critic_context']:
-                self.host['critic/'+key]=torch.cat([row.metadata['critic_context'][key].detach().to(source_device)
-                                                   for row in self.rows],0)
+                shared=('context/'+key in self.host and all(
+                    row.metadata['critic_context'][key] is row.context[key] for row in self.rows))
+                self.host['critic/'+key]=(self.host['context/'+key] if shared else
+                    torch.cat([row.metadata['critic_context'][key].detach().to(source_device) for row in self.rows],0))
             prototype = next((row for row in self.rows if row.chain is not None), None)
             if prototype is not None:
                 trace = prototype.metadata['sampler_trace']
@@ -74,7 +76,7 @@ class RolloutTensorCache:
                 row.metadata.get('remaining_music_seconds', 0.) for row in self.rows], dtype=torch.float32)
             self.host['local_indices'] = torch.arange(len(self.rows), dtype=torch.long)
             self.host['valid_lengths'] = self.host['context/future_valid'].sum(1)
-        self.bytes = sum(value.numel()*value.element_size() for value in self.host.values())
+        self.bytes = sum(value.numel()*value.element_size() for value in {id(v):v for v in self.host.values()}.values())
         per_row = max(1, math.ceil(self.bytes/len(self.rows)))
         if per_row > max_device_bytes:
             raise MemoryError(f'One complete rollout chain requires {per_row} cache bytes, budget={max_device_bytes}')
@@ -102,11 +104,17 @@ class RolloutTensorCache:
             self.blocks.popitem(last=False)
         start = index*self.block_size
         with measure('learning.tensor_cache_transfer', gpu=True):
-            block = {key: value[start:start+self.block_size].to(self.device, non_blocking=True)
-                     for key, value in self.host.items()}
+            transferred={};block={}
+            for key,value in self.host.items():
+                if id(value) not in transferred:
+                    transferred[id(value)]=value[start:start+self.block_size].to(self.device,non_blocking=True)
+                block[key]=transferred[id(value)]
         self.transfer_count += 1
-        self.transferred_bytes += sum(value.numel()*value.element_size() for key,value in block.items()
-                                      if self.host[key].device!=value.device)
+        counted=set()
+        for key,value in block.items():
+            if id(value) not in counted and self.host[key].device!=value.device:
+                self.transferred_bytes+=value.numel()*value.element_size()
+                counted.add(id(value))
         self.blocks[index] = block
         return block
 

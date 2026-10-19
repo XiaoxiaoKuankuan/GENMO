@@ -18,6 +18,7 @@ from .evaluation import build_evaluation_tasks, evaluate_policy, _digest, _model
 from .env_adapter import UpperEnvironment
 from .parallel_support import capture_local_rng, restore_local_rng, local_call, root_call, begin_lease, finish_lease
 from .run_management import GuardedStepJournal
+from .memory_execution import MemoryReceiveJournal
 from .training_checkpoint import immutable_cpu_snapshot
 from .updater import critic_update
 from .trainer import populate_values, fixed_targets
@@ -138,10 +139,11 @@ def collect_complete_bank(c, label, split, *, samples_per_source, seeds):
     saved_rng=capture_local_rng(c.generators)
     try:
         with isolated_vector_evaluation(c,'mc_'+label):
-            journal=GuardedStepJournal(path/'execution.sqlite',c.guard,format='genmo.execution_journal.ndarray.v2')
+            journal=MemoryReceiveJournal(path/'execution.sqlite')
             c.backend.journal=journal
             cfg=copy.deepcopy(c.config);cfg['stage10']['physical_episode']['safety_limit_seconds']=None
             cfg['runtime']['evidence_level']='full'
+            cfg['runtime']['evaluation_metrics_only']=True
             from .vector_environment import VectorUpperEnvironment
             from gem.closedloop.online_conditions import OnlineConditionBuilder
             driver=None
@@ -188,20 +190,21 @@ def collect_complete_bank(c, label, split, *, samples_per_source, seeds):
             c.state['training_control_steps']+=consumed[0]
             c.state['training_physics_steps']+=consumed[1]
         bank.training_data(policy_version=c.state['policy_version'],kernel=c.policy.kernel_config)
-        bank_record=dict(schema='genmo.stage2.causal_tracking.complete_episode.value_dataset.v1',report=bank.report(),
-            execution_work=dict(actual_GMT_controls=execution_counts[0],active_physics_steps=execution_counts[1],
-                allocated_physics_steps=execution_counts[2],inactive_physics_steps=execution_counts[2]-execution_counts[1]),
-            actor_fingerprint=actor_before,policy_version=c.state['policy_version'],kernel=c.policy.kernel_config,
-            reward_configuration=c.stage['reward'],plan=plan,
-            episodes=[dict(task=e['task'],end_reason=e['end_reason'],control_steps=e['control_steps'],
-                states=len(e['rows'])) for e in bank.episodes],
-            rows=[dict(context=r.context,metadata=r.metadata,identity=r.identity,rewards=r.rewards,
-                executed_control_steps=r.executed_control_steps,begin=r.control_tick_begin,end=r.control_tick_end,
-                terminated=r.terminated,truncated=r.truncated)
-                for e in bank.episodes for r in e['rows']],
-            returns=torch.cat([e['returns'] for e in bank.episodes]) if bank.episodes else torch.empty(0))
-        torch.save(bank_record,path/'complete_mc.pt')
-        c.guard.account_file(path/'complete_mc.pt')
+        if c.stage['critic']['complete_mc'].get('retain_dataset',False):
+            bank_record=dict(schema='genmo.stage2.causal_tracking.complete_episode.value_dataset.v1',report=bank.report(),
+                execution_work=dict(actual_GMT_controls=execution_counts[0],active_physics_steps=execution_counts[1],
+                    allocated_physics_steps=execution_counts[2],inactive_physics_steps=execution_counts[2]-execution_counts[1]),
+                actor_fingerprint=actor_before,policy_version=c.state['policy_version'],kernel=c.policy.kernel_config,
+                reward_configuration=c.stage['reward'],plan=plan,
+                episodes=[dict(task=e['task'],end_reason=e['end_reason'],control_steps=e['control_steps'],
+                    states=len(e['rows'])) for e in bank.episodes],
+                rows=[dict(context=r.context,metadata=r.metadata,identity=r.identity,rewards=r.rewards,
+                    executed_control_steps=r.executed_control_steps,begin=r.control_tick_begin,end=r.control_tick_end,
+                    terminated=r.terminated,truncated=r.truncated)
+                    for e in bank.episodes for r in e['rows']],
+                returns=torch.cat([e['returns'] for e in bank.episodes]) if bank.episodes else torch.empty(0))
+            torch.save(bank_record,path/'complete_mc.pt')
+            c.guard.account_file(path/'complete_mc.pt')
         return bank
     finally:restore_local_rng(saved_rng,c.generators)
 

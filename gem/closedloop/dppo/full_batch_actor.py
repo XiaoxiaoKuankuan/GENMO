@@ -40,7 +40,8 @@ def joint_score_objective(statistics, advantages):
 
 def prepare_full_batch_gradient(policy, optimizer, rows, targets, cache, manifest, controller, *,
         distributed, anchor, objective, minibatch_chains=16384, microbatch=128, clip=.003,
-        gamma_denoising=.99, grad_clip_norm=1., bc_samples_per_rollout=1024):
+        gamma_denoising=.99, grad_clip_norm=1., bc_samples_per_rollout=1024, detailed_diagnostics=True,
+        gradient_snr=False):
     if objective not in OBJECTIVES or tuple(policy.trainable_steps) != (15,16,17,18):
         raise ValueError('Explicit four-step full-batch objective required')
     selected = _eligible(manifest)
@@ -51,8 +52,8 @@ def prepare_full_batch_gradient(policy, optimizer, rows, targets, cache, manifes
     owned = _owned(selected, manifest, distributed)
     local = [rows[i] for _, i in owned]
     device = next(actor.parameters()).device
-    probe_before = output_probe(policy, local, cache)
-    observation = StepDiagnostics(actor)
+    probe_before = output_probe(policy, local, cache) if detailed_diagnostics else None
+    observation = StepDiagnostics(actor) if detailed_diagnostics else None
     optimizer.zero_grad(set_to_none=True)
     actor.eval()
     pairs = [(i,s) for _,i in owned for s in policy.trainable_steps]
@@ -95,7 +96,7 @@ def prepare_full_batch_gradient(policy, optimizer, rows, targets, cache, manifes
             bc_report = anchor.backward(actor, weight=anchor.batch_size/bc_samples_per_rollout)
         bc = take_gradients(actor)
     contributions = merge_global_gradients(actor, ppo, bc, controller, distributed=distributed,
-        half_split=True, component_observer=observation.capture_component)
+        half_split=gradient_snr, component_observer=None if observation is None else observation.capture_component)
     with _local_phase(distributed, 'full_batch_actor_clip'):
         norm = float(torch.nn.utils.clip_grad_norm_([p for p in actor.parameters() if p.requires_grad],
             grad_clip_norm, error_if_nonfinite=True))
@@ -120,9 +121,11 @@ def prepare_full_batch_gradient(policy, optimizer, rows, targets, cache, manifes
 def full_batch_actor_update(policy, optimizer, rows, targets, cache, manifest, controller, *,
         distributed, anchor, generator, objective, backtracking, kl_limits, kl_microbatch=128,
         ppo_epochs=1, minibatch_chains=16384, microbatch=128, clip=.003, gamma_denoising=.99,
-        grad_clip_norm=1., reserve_attempt=None, bc_samples_per_rollout=1024, proposed_lr=None, **unused):
+        grad_clip_norm=1., reserve_attempt=None, bc_samples_per_rollout=1024, proposed_lr=None,
+        detailed_diagnostics=True, snr=False, **unused):
     if ppo_epochs != 1:
         raise ValueError('Full-batch experiment permits exactly one on-policy update per rollout')
+    policy._accepted_kl_receipt=None
     if proposed_lr is not None:optimizer.param_groups[0]['lr']=proposed_lr
     control_before = copy.deepcopy(controller.state_dict())
     anchor_before = copy.deepcopy(anchor.state_dict())
@@ -130,7 +133,8 @@ def full_batch_actor_update(policy, optimizer, rows, targets, cache, manifest, c
     gradient, observation, before, local = prepare_full_batch_gradient(policy, optimizer, rows, targets, cache,
         manifest, controller, distributed=distributed, anchor=anchor, objective=objective,
         minibatch_chains=minibatch_chains, microbatch=microbatch, clip=clip, gamma_denoising=gamma_denoising,
-        grad_clip_norm=grad_clip_norm, bc_samples_per_rollout=bc_samples_per_rollout)
+        grad_clip_norm=grad_clip_norm, bc_samples_per_rollout=bc_samples_per_rollout,
+        detailed_diagnostics=detailed_diagnostics, gradient_snr=snr)
     def evaluate():
         result = final_kl(policy, rows, cache, manifest, distributed=distributed, microbatch=kl_microbatch,
             clip=clip, objective_reduction='free_coordinate_mean')
@@ -147,14 +151,15 @@ def full_batch_actor_update(policy, optimizer, rows, targets, cache, manifest, c
         return dict(parameters=parameter, outputs=outputs)
     transaction = backtracked_step(policy.actor, optimizer, controller, evaluate=evaluate, limits=kl_limits,
         distributed=distributed, generators=dict(actor=generator), max_attempts=backtracking['max_attempts'],
-        factor=backtracking['factor'], reserve_attempt=reserve_attempt, observe=observe)
+        factor=backtracking['factor'], reserve_attempt=reserve_attempt,
+        observe=observe if detailed_diagnostics else None)
     if not transaction['accepted']:
         controller.load_state_dict(control_before)
         anchor.load_state_dict(anchor_before)
         restore_local_rng(rng_before, dict(actor=generator))
     accepted = int(transaction['accepted'])
     step = dict(gradient, optimizer_step=1, learning_rate=transaction['accepted_lr'], backtracking=transaction)
-    return dict(optimizer_steps=accepted, planned_optimizer_steps=1, steps=[step] if accepted else [],
+    result = dict(optimizer_steps=accepted, planned_optimizer_steps=1, steps=[step] if accepted else [],
         rejected_step=step if not accepted else None, step_rejected=not bool(accepted),
         attempted_optimizer_steps=transaction['attempt_count'], objective=objective,
         eligible_chains=gradient['global_chain_count'], applied_unique_chains=gradient['global_chain_count']*accepted,
@@ -162,4 +167,11 @@ def full_batch_actor_update(policy, optimizer, rows, targets, cache, manifest, c
         bc_samples_by_source=gradient['bc_samples_by_source'], internal_sample_visits=gradient['internal_sample_visits'],
         early_stop_reason=None if accepted else 'optimizer_step_backtracking_exhausted',
         advantage_diagnostics=advantage_diagnostics(rows, targets, distributed),
-        old_statistics_fixed=True, final_trainable4_kl_pending=True)
+        old_statistics_fixed=True, final_trainable4_kl_pending=True,
+        detailed_diagnostics=bool(detailed_diagnostics))
+    if accepted:
+        from .kl_reuse import seal_accepted_kl
+        policy._accepted_kl_receipt = seal_accepted_kl(policy, cache, manifest,
+            transaction['attempts'][-1]['kl'], clip=clip, reduction='free_coordinate_mean')
+        result['complete_accepted_kl_available']=True
+    return result

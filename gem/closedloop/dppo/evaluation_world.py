@@ -49,7 +49,7 @@ class EvaluationWorldDriver:
         self.num_envs=handle.num_envs
         self.collector=WorldEnvironmentCollector(c.policy,self._factory,handle.world,
             num_envs=self.num_envs,generation_batch=self.num_envs,timeout_seconds=3600.,
-            training_storage='durable_cpu.v1')
+            training_storage='ephemeral_device')
         for slot in range(self.num_envs):self.collector._resource(slot)
         self.env=self.collector.states[0].resource.env
         self.results=[]

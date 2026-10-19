@@ -26,6 +26,7 @@ from pathlib import Path
 import shutil
 
 from gem.closedloop.dppo.evaluation import VERSION as EVALUATION_VERSION, _digest, _publish_json, aggregate_evaluation
+from .compact_evidence import read_episode, write_episode
 from gem.closedloop.evaluation_music import sha256_file
 from gem.closedloop.frozen_actor import stable_noise_seed
 from tools.eval.audit_closedloop_stage10 import audit_run, audit_data, audit_evaluation, read_json, require
@@ -248,7 +249,7 @@ def merge_evaluation_shards(parent_plan, shard_dirs, output_dir, *, expected_che
         for reference, task in zip(report['episode_manifests'], child['tasks']):
             episode_path = _inside(root, report_path.parent/reference['path'])
             require(task['task_id'] not in gathered, 'A parent task was executed by more than one shard')
-            episode = read_json(episode_path)
+            episode = read_episode(episode_path)
             require(episode.get('music_start_frame') == task['music_start_frame']
                     and episode.get('noise_index_start') == task['noise_index_start'], 'Shard changed task start or noise seed')
             gathered[task['task_id']] = (episode_path, reference['sha256'], episode, index)
@@ -266,16 +267,8 @@ def merge_evaluation_shards(parent_plan, shard_dirs, output_dir, *, expected_che
     for position, task in enumerate(parent_plan['tasks']):
         original, digest, episode, shard_index = gathered[task['task_id']]
         target = episode_dir/f'{position:06d}.json'
-        try:
-            os.link(original, target)
-        except OSError as error:
-            if error.errno != errno.EXDEV:
-                raise
-            with original.open('rb') as source, target.open('xb') as destination:
-                shutil.copyfileobj(source, destination)
-                destination.flush()
-                os.fsync(destination.fileno())
-        require(sha256_file(target) == digest, 'Episode changed while merging')
+        write_episode(target,episode,publish_json=_publish_json)
+        digest=sha256_file(target)
         episodes.append(episode)
         references.append(dict(path=str(target.relative_to(output)), sha256=digest, task_id=task['task_id'],
             transition_valid=True, parent_task_index=position, source_shard_index=shard_index,

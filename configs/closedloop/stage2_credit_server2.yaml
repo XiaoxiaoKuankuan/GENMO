@@ -80,6 +80,7 @@ stage10:
     target_ratio: 0.1
     initialize_from_gradient: true
   checks:
+    actor_diagnostics_every: 100
     full_fingerprint_every: 100
     full_probability_every: 100
     sentinel_chains_per_rank: 1

@@ -138,6 +138,9 @@ def configuration(path,*,genmo_repo=None,gmt_repo=None):
         raise ValueError('advantage_control must be none or shuffle_global')
     if type(t.get('gradient_snr_diagnostic',False)) is not bool:
         raise ValueError('gradient_snr_diagnostic must be boolean')
+    diagnostic_interval=s['checks'].get('actor_diagnostics_every',100)
+    if type(diagnostic_interval) is not int or diagnostic_interval<1:
+        raise ValueError('actor_diagnostics_every must be a positive iteration interval')
     # 学习率控制：fixed保持actor_lr；kl_adaptive按最终四个训练步骤平均坐标KL趋近目标，并受显式上下界约束。
     if t.get('actor_lr_control','fixed') not in ('fixed','kl_adaptive'):raise ValueError('actor_lr_control must be fixed or kl_adaptive')
     if t.get('kl_rejection','abort') not in ('abort','rollback_continue'):raise ValueError('kl_rejection must be abort or rollback_continue')
