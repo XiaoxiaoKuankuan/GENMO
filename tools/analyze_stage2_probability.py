@@ -170,12 +170,17 @@ def main():
         cache=RolloutTensorCache(rows,targets,distributed.device,max_device_bytes=4*1024**3)
         eligible=[row for i,row in enumerate(rows) if bool(targets['valid'][i]) and row.free_mask.any()]
         probability=probability_check_local(policy,rows,global_manifest=manifest,distributed=distributed,
-            denoising_microbatch=128,tensor_cache=cache,include_frozen=True)
+            denoising_microbatch=128,tensor_cache=cache,include_frozen=args.scope=='all')
+        root_call(distributed,lambda:atomic_json(args.output_dir/'zero_update_probability.json',dict(
+            report=probability,frozen_identity=policy.assert_frozen_identity(),
+            frozen_gaussian_replayed=args.scope=='all',case_sha256=file_sha256(args.case/'case.json'))))
         metadata=[m for shard in distributed.all_gather_object([row_metadata(r,cache.get('advantages',[r])[0],rank) for r in eligible]) for m in shard]
         initial=immutable_cpu_snapshot(actor.state_dict());initial_digest=exact_state_digest(initial)
         optimizer=torch.optim.AdamW(trainable_actor_parameters(actor),lr=args.learning_rate,weight_decay=0.)
         controller=BCGradientController(**config['stage10']['bc_gradient'])
-        controller.load_state_dict(learning['controller'])
+        # 旧行为采集使用旧BC梯度控制契约；本次候选统一从当前控制器冷启动，禁止伪恢复。
+        controller_origin=dict(kind='fresh_current_full_chain_controller',
+            legacy_behavior_controller=learning['controller'],current_controller=controller.state_dict())
         anchor_config=copy.deepcopy(config);anchor_config['stage9']['bc_batch']//=world
         anchor=Stage1RetentionAnchor(anchor_config,actor,train,source_global_step=loading['source_global_step'])
         generator=torch.Generator().manual_seed(3045)
@@ -245,6 +250,7 @@ def main():
             wall_seconds=max(distributed.all_gather_object(time.perf_counter()-started)),
             peak_allocated_bytes=max(distributed.all_gather_object(torch.cuda.max_memory_allocated(distributed.device))),
             physical_quality='unverified_counterfactual_generation_only',ESS_is_diagnostic_not_training_gate=True)
+        result['controller_initialization']=controller_origin
         root_call(distributed,lambda:atomic_json(args.output_dir/'summary.json',result))
     except BaseException as error:
         if rank==0 and args.output_dir.exists():
