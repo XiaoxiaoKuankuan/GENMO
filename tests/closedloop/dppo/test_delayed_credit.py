@@ -101,9 +101,11 @@ def test_formal_configuration_and_milestone_cumulative_restore():
     assert s['derived']['maximum_actor_steps']==s['derived']['planned_actor_steps']==4
     assert s['derived']['real_chains']==16384 and s['derived']['bc_per_rollout']==1024
     assert s['training']['actor_lr']==3e-7 and s['generation_horizon']['frames']==60
-    assert validate_stopping_iteration(2000,s)==2000
-    with pytest.raises(ValueError):validate_stopping_iteration(2001,s)
+    assert validate_stopping_iteration(200,s)==200
+    with pytest.raises(ValueError):validate_stopping_iteration(201,s)
     assert iteration_checkpoint_reason(100,s['storage'])=='iteration_000100'
+    assert iteration_checkpoint_reason(20,s['storage'])=='iteration_000020'
+    assert iteration_checkpoint_reason(19,s['storage']) is None
     assert iteration_checkpoint_reason(2000,s['storage'])=='iteration_002000'
     assert iteration_checkpoint_reason(101,s['storage']) is None
     assert iteration_checkpoint_reason(100,s['storage'],rejected=True) is None

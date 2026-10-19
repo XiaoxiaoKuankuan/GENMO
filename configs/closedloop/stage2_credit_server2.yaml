@@ -283,7 +283,7 @@ stage10:
         leg_joint_pos: 0.07936507936507936
     version: stage2.gmt8_reference_limits.v1
   run_control:
-    max_training_iterations: 2000
+    max_training_iterations: 200
   scale:
     actor_minibatch_chains: 4096
   seed: 42
@@ -297,7 +297,7 @@ stage10:
     mode: daily
     retain_best_and_evaluated: true
     tensor_cache_max_bytes: 4294967296
-    checkpoint_interval_iterations: 100
+    checkpoint_interval_iterations: 20
   training:
     actor_lr: 3.0e-07
     actor_lr_control: fixed

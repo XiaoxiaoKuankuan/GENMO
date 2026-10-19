@@ -30,9 +30,9 @@ def test_production_parameters_and_cumulative_iteration_ceiling():
     assert (train['eta'],train['ppo_steps_per_chain'],train['ppo_clip'])==(.1,4,.01)
     assert train['std_schedule']==[.001]*15+[.04,.06,.08,.10,0.]
     assert stage['bc_gradient']['target_ratio']==.1 and stage['kl']['mean_coordinate']==.0009
-    assert stage['run_control']=={'max_training_iterations':2000}
-    assert validate_stopping_iteration(2000,stage)==2000
-    for wrong in (0,2001,True,4.0):
+    assert stage['run_control']=={'max_training_iterations':200}
+    assert validate_stopping_iteration(200,stage)==200
+    for wrong in (0,201,True,4.0):
         with pytest.raises(ValueError):validate_stopping_iteration(wrong,stage)
     assert train['kl_rejection']=='abort'
     assert stage['limits']==dict(accepted_iterations=2000,optimizer_attempts=18000,

@@ -68,9 +68,9 @@ def validate_optimization_configuration(config,maximum_steps):
     if s['kl']['calibration']!=expected:
         raise ValueError('Optimization binding differs; regenerate the identity for the actual configuration')
     from .reference_credit import CREDIT_CONTRACT
+    # 保存频率由training_config校验正整数，不属于Actor优化合同，不能写死为100轮。
     if (s['run_control']['max_training_iterations']>2000 or s['limits']['accepted_iterations']>2000
             or s['ppo_rollout']['world_seconds']!=8 or t['lambda_upper']!=.98 or t['gamma_upper']!=.99
-            or s['storage']['checkpoint_interval_iterations']!=100
             or s['ppo_rollout']['credit_contract']!=CREDIT_CONTRACT
             or s['critic']['complete_mc']['start_distribution']!='match_training_reset.v1'):
         raise ValueError('Current 8s/.98/2000-iteration continuous-world training contract required')

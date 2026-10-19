@@ -61,27 +61,34 @@ GAE、BC和KL一起绑定；修改参数时同步更新optimization_sha256，不
 运行与恢复
 ----------
 
-2026-10-19八卡有限验证首轮被最终KL拒绝，接受轮数为0。用户明确要求保持全部
-参数、不再调参试跑。以下为运行接口说明，当前配置尚不能作为已通过的正式训练
-基线；不得将本次新Critic预热通过视为Actor训练通过。
+2026-10-19将soft KL提前到0.00045后，两轮有限八卡验证均通过，完成5次Actor
+更新；下文保留此前0.00075的失败记录。用户随后授权正式训练，累计最多200轮，
+每20轮保存里程碑。两轮短期物理对照不是长期收益保证，参考越界问题继续监测。
 
 先确认目标八张卡空闲及模型/数据路径正确。新运行必须使用独立空目录，下面命令
 仅为示例，不表示已自动启动新训练::
 
     bash scripts/train_stage10_8gpu_server1.sh \
       --output-dir /data1/user/liwei/GENMO_outputs/closedloop_stage10/新运行目录 \
-      --stop-after-iteration 2000
+      --stop-after-iteration 200
 
 同一份源码和配置的中断恢复::
 
     bash scripts/train_stage10_8gpu_server1.sh \
       --output-dir /data1/user/liwei/GENMO_outputs/closedloop_stage10/新运行目录 \
-      --resume latest --stop-after-iteration 2000
+      --resume latest --stop-after-iteration 200
 
-累计最多2000轮，每100轮保留里程碑，30分钟滚动容灾保留最近2份。评估和MC每
+本次配置及命令均明确限制累计200轮，每20轮保留里程碑，30分钟滚动容灾保留
+最近2份。资源账本其他上限不增加，实际停止采用200轮上限。评估和MC每
 100个已接受轮次执行，同一边界合并一份完整checkpoint，best保存实际权重。
 恢复Actor、Critic、两个Adam、BC、各rank RNG和累计资源，PhysX按合同重建并
 开始新episode，不恢复中途rollout。SIGINT/SIGTERM仍在合法边界保存后退出。
+
+本次正式运行使用stage2_formal200_20261019/train独立目录，原2轮模型及评估保留。
+修复actor_optimization.py中保存频率硬编码100轮后，源码身份发生变化，因此不能
+直接恢复旧2轮checkpoint。新运行从s595000 Actor及严格核验的同v2 Critic预热成果
+初始化；不用旧Actor Adam、BC游标和rollout，不绕过源码校验。runtime.yaml在主
+配置上明确绑定现有Critic初始化文件，完整行为/奖励/价值及冻结编码器校验保持。
 
 本次Critic输入改变了物理含义，checkpoint使用asymmetric_tracking.checkpoint.v2。
 旧运行不能直接用新代码--resume，不能改SHA或绕过检查。首次运行从s595000创建
