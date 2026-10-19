@@ -146,6 +146,23 @@ def test_completed_resume_does_not_block_explicit_diagnostics():
         assert not _completed_training_resume(NS(resume='latest',**{mode:True}),dict(iteration=2000),2000)
 
 
+def test_signal_exit_reuses_only_same_saved_budget_and_learning_boundary(monkeypatch):
+    from gem.closedloop.dppo import training
+    events=[]
+    c=NS(distributed=Collective(),actor=torch.nn.Linear(2,1),critic=torch.nn.Linear(2,1),
+        state=dict(iteration=100,budget=dict(control_steps=1000)))
+    c.last_saved_learning_version=training._learning_version(c)
+    monkeypatch.setattr(training,'root_call',lambda distributed,fn:fn())
+    monkeypatch.setattr(training,'_poll_checkpoint',lambda *args,**kwargs:None)
+    monkeypatch.setattr(training,'_evaluate',lambda *args,**kwargs:events.append('evaluate'))
+    monkeypatch.setattr(training,'_snapshot',lambda *args,**kwargs:events.append('save'))
+    training._finish_controlled_run(c,{},stopped=True)
+    assert not events
+    c.state['budget']['control_steps']+=50
+    training._finish_controlled_run(c,{},stopped=True)
+    assert events==['save']
+
+
 def test_engineering_migration_keeps_learning_content_and_rejects_algorithm_changes(monkeypatch):
     from tools.migrate_stage2_efficiency import digest,target_identity
     from gem.closedloop.dppo.training_config import configuration

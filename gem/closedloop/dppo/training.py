@@ -206,7 +206,9 @@ def _snapshot(c,reason,*,wait=False):
         queued['cpu_snapshot_seconds']=time.perf_counter()-before
         if wait:queued['publication']=_poll_checkpoint(c,wait=True)
         return queued
-    return root_call(c.distributed,save)
+    result=root_call(c.distributed,save)
+    c.last_saved_learning_version=_learning_version(c)
+    return result
 
 
 def _rollback_snapshot(c):
@@ -282,7 +284,8 @@ def _learning_version(c):
         ('iteration','rollouts_completed','actor_updates','critic_updates','policy_version'))
     tensors=tuple((id(value),value._version) for module in (c.actor,c.critic)
         for value in list(module.parameters())+list(module.buffers()))
-    return counters,tensors
+    budget=json.dumps(c.state.get('budget'),sort_keys=True,separators=(',',':'))
+    return counters,tensors,budget
 
 
 def _completed_training_resume(args,state,limit):
@@ -295,6 +298,7 @@ def _completed_training_resume(args,state,limit):
 def _finish_controlled_run(c,report,*,stopped):
     """已在最终轮维护中保存的同一完整状态不重复评估/序列化；任意rank失配则重做。"""
     stamp=getattr(c,'final_maintenance_version',None)
+    if stamp is None and stopped:stamp=getattr(c,'last_saved_learning_version',None)
     reusable=stamp is not None and stamp==_learning_version(c)
     if all(c.distributed.all_gather_object(reusable)):
         root_call(c.distributed,lambda:_poll_checkpoint(c,wait=True))

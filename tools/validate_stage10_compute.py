@@ -131,7 +131,23 @@ def probability_checks(policy,context):
         for key,value in policy.frozen_policy.actor.state_dict().items():torch.testing.assert_close(value,before[key],atol=0,rtol=0)
         assert all(p.grad is None for p in policy.frozen_policy.actor.parameters())
         result['frozen_prefix_nonempty_adam_checked']=True
+    result['actual_actor_snapshot_version_checked']=snapshot_version_checks(policy.actor,policy.actor)
     return result
+
+
+def snapshot_version_checks(actor,critic):
+    """真实网络前向后核验退出凭据：稳定可读、预算变化和零值原位写均被识别。"""
+    from types import SimpleNamespace
+    from gem.closedloop.dppo.training import _learning_version
+    c=SimpleNamespace(actor=actor,critic=critic,state=dict(iteration=0,budget=dict(generations=0)))
+    before=_learning_version(c)
+    assert before==_learning_version(c)
+    c.state['budget']['generations']=1
+    assert before!=_learning_version(c)
+    c.state['budget']['generations']=0
+    with torch.no_grad():next(p for p in critic.parameters() if p.requires_grad).add_(0.)
+    assert before!=_learning_version(c)
+    return True
 
 
 def critic_checks(actor,context):
@@ -163,6 +179,7 @@ def critic_checks(actor,context):
     except ValueError:pass
     else:raise AssertionError('Critic accepted future privileged input')
     return dict(passed=True,independent_parameters=True,frozen_encoders=True,
+        actual_actor_critic_snapshot_version_checked=snapshot_version_checks(actor,critic),
         music_order_max_value_change=float(delta.max()),cached_features_equal=True,actor_gradient_isolated=True)
 
 
