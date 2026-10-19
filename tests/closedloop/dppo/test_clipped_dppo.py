@@ -52,7 +52,7 @@ def case(actor_factory):
     return policy,rows,targets
 
 
-def run(rank,world,actor,rows,targets,directory,soft_kl=None):
+def run(rank,world,actor,rows,targets,directory,soft_kl=None,adaptive=False):
     torch.set_num_threads(1)
     # spawn会通过共享内存传递CPU Tensor；每个rank必须独占参数，避免重复原位Adam。
     actor=copy.deepcopy(actor)
@@ -75,8 +75,10 @@ def run(rank,world,actor,rows,targets,directory,soft_kl=None):
             BCGradientController(initialize_from_gradient=True),distributed=DistributedCollectives(rank,world),
             anchor=Anchor(),generator=torch.Generator().manual_seed(4),minibatch_chains=2,microbatch=3,
             bc_samples_per_rollout=7,soft_kl=soft_kl,reserve_attempt=lambda:attempts.append(1),
-            detailed_diagnostics=True)
-        assert len(attempts)==report['optimizer_steps']
+            detailed_diagnostics=True,min_ess_fraction=.5 if adaptive else .05,
+            trust_region=dict(maximum_lr=1e-7,growth=1.25,margin=.8,max_attempts=8) if adaptive else None,
+            kl_limits=dict(chain_joint_mean=.2,chain_joint_p95=.6,chain_joint_p99=.9,chain_joint_max=2.) if adaptive else None)
+        assert len(attempts)==report['attempted_optimizer_steps']
         assert all(torch.equal(v,cache.host[k]) for k,v in before.items())
         assert policy.assert_frozen_identity()['checked']
         torch.save(dict(actor=policy.actor.state_dict(),optimizer=opt.state_dict(),report=report),
@@ -112,6 +114,16 @@ def test_multistep_tail_empty_rank_bc_and_nonempty_adam(tmp_path,actor_factory):
         for a,b in zip(expected['report']['steps'],result['report']['steps']):
             assert a['ppo_loss']==pytest.approx(b['ppo_loss'],rel=1e-6,abs=1e-8)
             assert a['gradient_contributions']['all']['ppo_norm']==pytest.approx(b['gradient_contributions']['all']['ppo_norm'],rel=1e-6)
+
+
+def test_later_minibatches_recheck_earlier_chain_weights(tmp_path,actor_factory):
+    policy,rows,targets=case(actor_factory)
+    run(0,1,policy.actor,rows,targets,str(tmp_path),soft_kl=.1,adaptive=True)
+    report=torch.load(tmp_path/'rank0.pt',weights_only=False)['report']
+    assert report['optimizer_steps']==3
+    assert [s['candidate_checked_chains'] for s in report['steps']]==[2,4,5]
+    assert report['steps'][-1]['post_step_chain']['importance_weight_ess_fraction']>=.5
+    assert all(s['trust_region']['accepted'] for s in report['steps'])
 
 
 def test_soft_kl_stops_before_pending_optimizer_and_bc(tmp_path,actor_factory):

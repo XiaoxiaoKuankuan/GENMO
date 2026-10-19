@@ -154,6 +154,8 @@ def main():
                     anchor=anchor,generator=generators['actor'],ppo_epochs=args.epochs,minibatch_chains=2048,
                     microbatch=128,clip=.1,soft_kl=config['stage9']['kl_soft_stop_chain_joint'],
                     bc_samples_per_rollout=2048*args.epochs,bc_min_global_batch=256,
+                    min_ess_fraction=config['stage9']['min_ess_fraction'],
+                    max_active_clip=config['stage9']['max_active_clip_fraction'],
                     trust_region=trust,kl_limits=config['stage10']['kl'])
                 kl=final_kl(policy,rows,cache,manifest,distributed=distributed,microbatch=128,clip=.1)
                 acceptance=check_candidate_kl(kl,config['stage10']['kl'])

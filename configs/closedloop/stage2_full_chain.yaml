@@ -184,6 +184,8 @@ stage10:
     chain_joint_p95: 0.60
     chain_joint_p99: 0.90
     chain_joint_max: 2.0
+    minimum_ess: 0.5
+    maximum_active_clip: 0.95
   limits:
     accepted_iterations: 2000
     control_steps: 1100000000
@@ -333,7 +335,7 @@ stage10:
     kl_rejection: rollback_abort
     kl_soft_stop_chain_joint: 0.10
     max_active_clip_fraction: 0.95
-    min_ess_fraction: 0.05
+    min_ess_fraction: 0.5
     lambda_upper: 0.98
     latency_budget_s: 0.5
     log_probability_reduction: joint_sum

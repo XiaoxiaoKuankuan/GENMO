@@ -105,6 +105,12 @@ def actor_update(policy,optimizer,rows,targets,cache,manifest,controller,*,distr
             transaction_started=time.perf_counter();kl_elapsed=0.
             post_records=None;post=None;transaction=None
             if trust_region is not None:
+                # 更新还会影响先前批次；累计已用链全部参与候选检查，避免只在新批次
+                # ESS正常却破坏前面链的权重。最终仍检查包含未用链在内的完整rollout。
+                guarded=covered.union(indices)
+                guard_indices=[i for i in selected if i in guarded]
+                guard_owned=_owned(guard_indices,manifest,distributed)
+                guard_local=[rows[i] for _,i in guard_owned]
                 limits={k:v*trust_region['margin'] for k,v in kl_limits.items()
                     if k.startswith('chain_joint_')}
                 limits['chain_joint_mean']=min(limits['chain_joint_mean'],soft_kl*trust_region['margin'])
@@ -114,7 +120,7 @@ def actor_update(policy,optimizer,rows,targets,cache,manifest,controller,*,distr
                 def evaluate_candidate():
                     nonlocal post_records,post,kl_elapsed
                     measured=time.perf_counter()
-                    _,post_records,post_adv=collect_records(local,owned,len(indices))
+                    _,post_records,post_adv=collect_records(guard_local,guard_owned,len(guard_indices))
                     post=chain_diagnostics(from_records(post_records),post_adv,clip=clip)
                     kl_elapsed+=time.perf_counter()-measured
                     return post
@@ -158,6 +164,8 @@ def actor_update(policy,optimizer,rows,targets,cache,manifest,controller,*,distr
                     mean_coordinate_kl=distribution(post_records[:,s,1])) for s in range(4)],
                 gradient_contributions=contributions,total_gradient_norm=total_norm,gradient_clip_factor=clip_factor,
                 parameter_update=parameter_report,output_change=output_change,trust_region=transaction,
+                candidate_checked_chains=len(guard_indices) if trust_region is not None else len(indices),
+                candidate_check_scope='all_previously_used_plus_current_chains' if trust_region is not None else 'current_minibatch',
                 bc_global_samples=sum(s['batch'] for s in shards),bc_samples_by_source=dict(sources),
                 bc_loss=sum(s['batch']*s['loss'] for s in shards)/global_bc,
                 learning_rate=optimizer.param_groups[0]['lr'],ppo_ratio_seconds=ratio_seconds,
@@ -175,7 +183,8 @@ def actor_update(policy,optimizer,rows,targets,cache,manifest,controller,*,distr
     return dict(objective='full_chain_clipped_ppo',ppo_clip_applied=True,optimizer_steps=len(reports),
         attempted_optimizer_steps=sum((r['trust_region'] or {}).get('attempt_count',1) for r in reports),
         rejected_step_candidates=sum((r['trust_region'] or {}).get('backtracks',0) for r in reports),
-        executed_optimizer_steps=len(reports),
+        executed_optimizer_steps=sum((r['trust_region'] or {}).get('attempt_count',1) for r in reports),
+        minibatch_accepted_steps=len(reports),executed_step_scope='actual_Adam_calls_including_rejected_candidates',
         accepted_optimizer_steps=None,acceptance_scope='pending_full_rollout_joint_KL',
         planned_optimizer_steps=planned_steps,skipped_optimizer_steps=planned_steps-len(reports),
         steps=reports,epoch_orders=orders,early_stop_reason=stop_reason,discarded_pending_minibatch=discarded,

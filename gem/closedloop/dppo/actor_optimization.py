@@ -67,6 +67,9 @@ def validate_optimization_configuration(config,maximum_steps):
         raise ValueError('Soft chain KL and hard mean/tail thresholds must be ordered')
     if not 0<t['max_active_clip_fraction']<=1 or not 0<t['min_ess_fraction']<=1:
         raise ValueError('Explicit active-clip and ESS finite-experiment limits required')
+    if (s['kl'].get('minimum_ess')!=t['min_ess_fraction']
+            or s['kl'].get('maximum_active_clip')!=t['max_active_clip_fraction']):
+        raise ValueError('Full-rollout ESS and active-clip acceptance must match mini-batch guard')
     expected=dict(status='candidate_requires_joint_calibration',scope='four_trainable_steps_only',
         optimization_sha256=digest(optimization_binding(s)))
     if s['kl']['calibration'].get('optimization_sha256')=='auto':
