@@ -100,6 +100,9 @@ Server-2真实s595000＋原Stage1 BC八卡NCCL测试通过：9 AWR／3 BC 的相
 python3 tools/report_stage2_awr.py --run-dir <运行目录> --output <新的验收JSON路径>
 python3 tools/audit_stage2_awr_replay.py --run-dir <运行目录> \
   --max-episodes 24 --output <新的回报审计JSON路径>
+bash tools/run_stage2_awr_server2.sh retention \
+  --run-dir <已完成运行目录> --runtime-repo <原运行提交的GENMO工作树> \
+  --output-dir <新的独立验收目录>
 ```
 
 汇总只读取已提交的状态和JSON报告，不需要GPU，不重算评价或选择模型。它保留实际
@@ -111,6 +114,12 @@ python3 tools/audit_stage2_awr_replay.py --run-dir <运行目录> \
 新运行在`resources/gpu_<attempt>.jsonl`每秒记录整卡显存与利用率，结束发布同名summary；
 恢复生成新attempt。整卡峰值是离散采样的下界，包含GMT和驱动开销；Actor训练报告
 另给PyTorch allocator峰值及统计范围，二者不混用。
+
+`retention`在完整物理运行结束、GPU空闲后进行单GPU只读推理，默认从原Stage1 val
+每来源选择4个窗口、使用2个固定生成种子。三份Actor共享保存的原条件与同一噪声，
+比较完整Stage1生成损失、未知qpos30误差、真实Contact BCE和关节活动度/输出变化。
+使用原Dataset的真实标签及ground metadata，不构造Replay伪标签。该小批固定探针
+不冒称整个Stage1验证集或物理收益；条件分片、模型指纹和工具SHA均在独立输出留存。
 
 Replay `array_tree.v2`保留物理回执的共享列，兼容旧v1；训练视图只展开必要条件和事件，
 读取前仍核验完整manifest和全部数值数组SHA。完整原始证据未删除，训练视图明确禁止
