@@ -7,7 +7,9 @@
 任何物理推进。CLI给定累计停止轮次，实验和正式任务分别受各自显式预算约束。
 
 整轮快照覆盖Actor/Critic/两个Adam/BC/控制器/训练RNG，KL拒绝恢复这些状态后
-停止会话；物理状态和已耗预算不退款。恢复独立当前完整checkpoint后重建PhysX
+继续采集新rollout，不中断会话；物理状态和已耗预算不退款。首次拒绝补存尚未落盘的
+有效学习版本，普通拒绝仅保留小型诊断。非有限计算、损坏状态和资源异常仍安全退出。
+恢复独立当前完整checkpoint后重建PhysX
 episode，丢弃旧rollout。固定评估使用独立GPU世界、训练RNG隔离和原奖励协议，
 按累计真实控制交互触发；best保存实际完整权重。异步恢复点最多单在途，失败
 显式传播，结束排空后才释放run锁。异常/受控停止与正常接受必须分别记录。
@@ -182,6 +184,7 @@ def _snapshot(c,reason,*,wait=False):
         return queued
     result=root_call(c.distributed,save)
     c.last_saved_learning_version=_learning_version(c)
+    c.last_saved_accepted_version=_accepted_version(c)
     return result
 
 
@@ -203,6 +206,27 @@ def _restore_rollback(c,saved):
     if not audit['identical']:
         raise RuntimeError('Whole training rollback byte audit failed: '+json.dumps(audit,ensure_ascii=False))
     return audit
+
+
+def _rollback_kl_rejection(c,saved,*,kl,acceptance,actor,label):
+    """有限KL超限只拒绝本轮；完整回滚各rank学习状态，保留真实交互与尝试账本。
+
+    普通拒绝属于训练控制，不抛出终止异常、不归档完整链。非有限统计仍属于计算
+    故障，不能伪装为可继续的阈值超限。落盘小型诊断之后调用方正常推进rollout计数，
+    释放当前数据并从原物理世界重新采样；已接受轮数及行为版本保持不变。
+    """
+    for failure in acceptance['failures'].values():
+        if isinstance(failure,dict) and not math.isfinite(failure['value']):
+            raise FloatingPointError('Nonfinite final KL cannot be treated as an ordinary rejected update')
+    rollback=local_call(c.distributed,lambda:_restore_rollback(c,saved))
+    rollbacks=c.distributed.all_gather_object(rollback)
+    c.state['rejected_rollouts']=c.state.get('rejected_rollouts',0)+1
+    evidence=dict(kl=kl,acceptance=acceptance,actor=actor,
+        physical_and_resource_consumption_retained=True,training_state_restored=True,
+        rollback_audits=rollbacks,action='resample_and_continue',
+        retained_accepted_iteration=c.state['iteration'],retained_policy_version=c.state['policy_version'])
+    root_call(c.distributed,lambda:atomic_json(c.session/(label+'_rejected.json'),evidence))
+    return evidence
 
 
 def _preserve_rollout_anomaly(c,buffer,targets,manifest,label):
@@ -262,6 +286,11 @@ def _learning_version(c):
     return counters,tensors,budget
 
 
+def _accepted_version(c):
+    """只跟踪已接受学习水位，连续拒绝不因物理/RNG前进反复保存同一模型。"""
+    return tuple(c.state.get(key,0) for key in ('iteration','actor_updates','critic_updates','policy_version'))
+
+
 def _completed_training_resume(args,state,limit):
     """累计训练已达请求水位时直接结束；显式评估、MC等只读诊断仍允许执行。"""
     modes=('calibrate_only','evaluate_only','collect_only','critic_preheat_only','mc_validation_only')
@@ -315,11 +344,13 @@ def _maintain_after_iteration(c,report,*,is_warmup,rejected,last_save,finishing=
         c.state['next_mc_calibration_control_steps']=_next_interaction_boundary(c.state['training_control_steps'],complete_mc['every_control_steps'])
         save_reasons.append('mc_calibrated')
     if finishing:save_reasons.append('controlled_end')
+    rejected_unsaved=rejected and getattr(c,'last_saved_accepted_version',None)!=_accepted_version(c)
+    if rejected_unsaved:save_reasons.append('kl_rejected_rollback')
     if save_reasons:
         stage=time.perf_counter()
-        if finishing:
+        if finishing or rejected_unsaved:
             _snapshot(c,'+'.join(save_reasons),wait=True)
-            c.final_maintenance_version=_learning_version(c)
+            if finishing:c.final_maintenance_version=_learning_version(c)
         else:_snapshot(c,'+'.join(save_reasons))
         last_save=time.perf_counter()
         _overhead(c,'maintenance_snapshot_seconds',stage)
@@ -429,6 +460,7 @@ def run(cargs,config,distributed):
             from .run_management import validate_budget_progress
             root_call(distributed,lambda:validate_budget_progress(payload['budget'],c.budget.state_dict()))
             c.state=copy.deepcopy(payload['state'])
+            c.last_saved_accepted_version=_accepted_version(c)
             c.bc.load_state_dict(payload['rank_states'][distributed.rank]['bc'])
             restore_local_rng(payload['rank_states'][distributed.rank]['rng'],c.generators)
         from NoetixRobot.tasks.mimic.mimic_noetix_bumi4340_mha_sonic.closedloop.vector_backend import VectorFrozenGmtBackend
@@ -642,13 +674,14 @@ def run(cargs,config,distributed):
                 if actor.get('step_rejected') or actor['optimizer_steps']==0:
                     accepted['passed']=False
                     accepted['failures']['actor_optimizer']='no_accepted_optimizer_step'
+                decisions=distributed.all_gather_object(accepted['passed'])
+                if any(value!=decisions[0] for value in decisions):
+                    raise RuntimeError('Ranks disagree on final KL acceptance')
                 if not accepted['passed']:
-                    anomaly_saved=local_call(distributed,lambda:_preserve_rollout_anomaly(c,buffer,targets,manifest,label))
-                    rollback=local_call(distributed,lambda:_restore_rollback(c,saved))
-                    rollbacks=distributed.all_gather_object(rollback)
-                    root_call(distributed,lambda:atomic_json(c.session/(label+'_rejected.json'),dict(kl=kl,acceptance=accepted,actor=actor,
-                        physical_and_resource_consumption_retained=True,training_state_restored=True,rollback_audits=rollbacks)))
-                    raise RuntimeError('Final trainable-four KL rejected; whole training update rolled back')
+                    if strict:
+                        anomaly_saved=local_call(distributed,lambda:_preserve_rollout_anomaly(c,buffer,targets,manifest,label))
+                    _rollback_kl_rejection(c,saved,kl=kl,acceptance=accepted,actor=actor,label=label)
+                    rejected=True
             else:
                 actor_seconds=0.
             def assert_paused_physics():
@@ -691,8 +724,14 @@ def run(cargs,config,distributed):
             root_call(distributed,lambda:(c.manager.append_metrics(record),log_metrics(c.writer,c.output/'curves.jsonl',c.state['iteration'],
                 record,prefix='training',durable=False,dashboard_metrics=training_scalars(record))))
             c.overhead.clear()
-            report['warmup' if is_warmup else 'iterations'].append(dict(label=label,wall_seconds=wall,actor_steps=0 if actor is None else actor['optimizer_steps']))
-            if distributed.rank==0:print(f'[STAGE10 ACCEPTED] {label} chains={used[2]} actor_steps={0 if actor is None else actor["optimizer_steps"]} wall={wall:.3f}s',flush=True)
+            accepted_steps=0 if actor is None or rejected else actor['optimizer_steps']
+            attempted_steps=0 if actor is None else actor['optimizer_steps']
+            report['warmup' if is_warmup else 'iterations'].append(dict(label=label,mode=record['mode'],
+                wall_seconds=wall,actor_steps=accepted_steps,attempted_actor_steps=attempted_steps))
+            if distributed.rank==0:
+                status='REJECTED_CONTINUE' if rejected else 'ACCEPTED'
+                print(f'[STAGE10 {status}] {label} accepted_iteration={c.state["iteration"]} chains={used[2]} '
+                    f'actor_steps={accepted_steps} attempted_actor_steps={attempted_steps} wall={wall:.3f}s',flush=True)
             if is_warmup and c.state['warmup_completed']==warmups:
                 _snapshot(c,'critic_warmup_complete');last_save=time.perf_counter()
             last_save=_maintain_after_iteration(c,report,is_warmup=is_warmup,rejected=rejected,last_save=last_save,

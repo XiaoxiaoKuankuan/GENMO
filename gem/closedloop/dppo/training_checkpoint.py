@@ -85,9 +85,10 @@ class AsyncCheckpointWriter:
                 reasons=reason.split('+')))
             atomic_json(self.root/'latest.json',descriptor)
             if reason=='best':atomic_json(self.root/'best_checkpoint.json',descriptor)
-            # 只清理当前运行产生的普通周期文件；初始、评估、best和终态不在此集合。
-            candidates=sorted(p for p in (self.root/'checkpoints').glob('stage10_r*_a*_periodic.pt')
-                              if '+' not in p.stem)
+            # 周期/拒绝补存共用滚动保留；初始、里程碑、评估、best和终态不在此集合。
+            candidates=sorted(p for p in (self.root/'checkpoints').glob('stage10_r*_a*.pt')
+                              if all(role in ('periodic','kl_rejected_rollback')
+                                     for role in p.stem.split('_',5)[-1].split('+')))
             import json
             protected={path}
             for pointer_name in ('latest.json','best_checkpoint.json','best_saved.json'):

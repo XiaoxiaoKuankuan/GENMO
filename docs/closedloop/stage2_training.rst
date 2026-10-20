@@ -84,11 +84,24 @@ GAE、BC和KL一起绑定；修改参数时同步更新optimization_sha256，不
 恢复Actor、Critic、两个Adam、BC、各rank RNG和累计资源，PhysX按合同重建并
 开始新episode，不恢复中途rollout。SIGINT/SIGTERM仍在合法边界保存后退出。
 
-本次正式运行使用stage2_formal200_20261019/train独立目录，原2轮模型及评估保留。
-修复actor_optimization.py中保存频率硬编码100轮后，源码身份发生变化，因此不能
-直接恢复旧2轮checkpoint。新运行从s595000 Actor及严格核验的同v2 Critic预热成果
-初始化；不用旧Actor Adam、BC游标和rollout，不绕过源码校验。runtime.yaml在主
-配置上明确绑定现有Critic初始化文件，完整行为/奖励/价值及冻结编码器校验保持。
+2026-10-19正式运行stage2_formal200_20261019已在第3轮KL拒绝后退出；两轮有效
+更新未到保存周期，该运行latest仍为iteration0。原独立两轮测试模型和评估保留。
+2026-10-20当前实现改为rollback_continue，新运行使用stage2_formal200_20261020/train。
+因源码及拒绝行为身份改变，不能直接恢复旧运行；从s595000 Actor及严格核验的
+同v2 Critic预热成果初始化，不用旧Actor Adam、BC游标和rollout，不绕过源码校验。
+runtime.yaml在主配置上明确绑定现有Critic初始化文件，完整行为/奖励/价值及冻结
+编码器校验保持。后续同身份中断可使用--resume latest累计训练到200轮。
+
+有限KL超限时完整撤销本轮Actor/Critic/两Adam/BC/RNG更新，但保留已发生的物理
+状态与资源消耗，释放旧rollout后继续采集新数据，不抛出结束会话异常。拒绝不增加
+已接受轮数/行为版本；控制台REJECTED_CONTINUE与ACCEPTED分开计数。没有新增
+按拒绝次数终止的限制。soft提前停止和原完整四步硬KL门槛不变，非有限计算、损坏
+状态、仿真/存储故障、资源上限及用户停止仍按原安全流程处理。
+
+首次拒绝时，如果当前已接受模型尚未持久化，同步补存完整checkpoint；同一模型
+连续拒绝不反复保存GB级快照。补存与30分钟周期文件共同滚动保留最近2份，20轮
+里程碑及评估/best另行保留。普通KL拒绝只写小型KL/回滚诊断，显式strict模式才
+保留完整拒绝rollout。不得把拒绝的Adam尝试计为训练接受或展示成通过的学习曲线。
 
 本次Critic输入改变了物理含义，checkpoint使用asymmetric_tracking.checkpoint.v2。
 旧运行不能直接用新代码--resume，不能改SHA或绕过检查。首次运行从s595000创建

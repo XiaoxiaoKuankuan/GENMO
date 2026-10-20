@@ -23,7 +23,7 @@ def digest(value):
 
 def optimization_binding(stage):
     t=stage['training']
-    return dict(schema='genmo.stage2.actor_optimization_binding.v3',
+    return dict(schema='genmo.stage2.actor_optimization_binding.v4',
         actor_lr=t['actor_lr'],actor_lr_control=t['actor_lr_control'],
         actor_optimizer=dict(type='AdamW',parameter_groups=1,betas=[.9,.999],eps=1e-8,weight_decay=0.),
         ppo_epochs=t['ppo_epochs'],global_minibatch_chains=stage['scale']['actor_minibatch_chains'],
@@ -32,7 +32,7 @@ def optimization_binding(stage):
         bc_samples=t['bc_samples_per_rollout'],bc_controller=stage['bc_gradient'],
         backtracking=t['optimizer_backtracking'] if t['actor_objective']=='joint_score_pg' else None,
         hard_kl={key:value for key,value in stage['kl'].items() if key!='calibration'},
-        soft_kl=t['kl_soft_stop_coordinate'],rollout=stage['ppo_rollout'],
+        soft_kl=t['kl_soft_stop_coordinate'],kl_rejection=t['kl_rejection'],rollout=stage['ppo_rollout'],
         gamma_upper=t['gamma_upper'],lambda_upper=t['lambda_upper'],dataset=stage['dataset'],
         mc_start_distribution=stage['critic']['complete_mc']['start_distribution'],
         run_contract=stage['actor_optimization'])

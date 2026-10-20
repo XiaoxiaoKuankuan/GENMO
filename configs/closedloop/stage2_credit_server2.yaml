@@ -177,7 +177,7 @@ stage10:
     calibration:
       status: not_physically_validated
       scope: four_trainable_steps_only
-      optimization_sha256: 404184577525376ffb3dce2518041f416ea139b976f3888e9d03276e5cde9a74
+      optimization_sha256: 84645abdca5dfffebf6b222eec189c1511e90655ea23b73b85c63c04a46a0ec6
     chain_joint_mean: null
     chain_joint_p95: null
     chain_joint_max: null
@@ -321,7 +321,7 @@ stage10:
     gradient_snr_diagnostic: false
     guidance_scale: 2.5
     kl_microbatch: 128
-    kl_rejection: abort
+    kl_rejection: rollback_continue
     kl_soft_stop_coordinate: 0.00045
     lambda_upper: 0.98
     latency_budget_s: 0.5
