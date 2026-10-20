@@ -15,5 +15,10 @@ export LD_LIBRARY_PATH="/data0/user/liwei/closedloop_stage8_runtime/sysroot/usr/
 if [[ "${1:-}" == "preflight" || "${1:-}" == "stop" ]]; then
     exec "${AWR_PYTHON}" -B "${AWR_REPO}/tools/train_stage2_awr.py" "$@"
 fi
+if [[ "${1:-}" == "verify" ]]; then
+    shift
+    exec "${AWR_PYTHON}" -B -m torch.distributed.run --standalone --nnodes=1 --nproc_per_node=8 \
+        "${AWR_REPO}/tools/verify_stage2_awr_distributed.py" "$@"
+fi
 exec "${AWR_PYTHON}" -B -m torch.distributed.run --standalone --nnodes=1 --nproc_per_node=8 \
     "${AWR_REPO}/tools/train_stage2_awr.py" "$@"

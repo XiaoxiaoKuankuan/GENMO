@@ -10,6 +10,7 @@ Actor LR 1e-5；默认最多一个宏迭代。`smoke` 为独立 64 Episode 数�
 ```bash
 cd /home/user/liwei/awr-worktrees/GENMO
 bash tools/run_stage2_awr_server2.sh preflight
+bash tools/run_stage2_awr_server2.sh verify --report <独立证据目录>/distributed.json
 bash tools/run_stage2_awr_server2.sh run --profile smoke \
   --run-dir /data1/user/liwei/GENMO_outputs/stage2_awr/<独立64集运行名>
 bash tools/run_stage2_awr_server2.sh run --profile pilot \
@@ -84,3 +85,11 @@ Best 要求完成率/时长不降、失败不增、没有新增成对失败、�
 通过。更大范围得到 1032 通过、10 跳过；2 项 PPO 旧失败在基线复现，8 项旧测试依赖
 独立工作树外 s350000 资产。GMT 28 项参考 CPU 测试通过。NCCL、真实物理和首轮
 学习结果以随后 `记录文本.md` 与运行报告为准，不把上述 CPU 结果称为已完成物理验收。
+
+2026-10-20 后续验收：AWR CPU 测试增至25项，新增FVI中断恢复后逐元素一致性。
+旧s350000测试使用临时只读资产链接后9项全部通过，链接及临时目录已移除。
+Server-2真实s595000＋原Stage1 BC八卡NCCL测试通过：9 AWR／3 BC 的相对梯度L2误差
+4.72e-7，3 AWR／1 BC（含空rank）为5.14e-8；更新后各rank参数摘要完全一致。
+耗时16.73秒，单卡PyTorch峰值显存约1.65–1.73 GiB。原始报告见
+`docs/validation/stage2_awr_distributed_20261020.json`。这是计算验收，物理结果另报。
+小型64集只执行每组32个固定任务；全量54任务放在独立512集首轮最终对照中执行。

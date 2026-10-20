@@ -30,6 +30,7 @@ def load_config(path, *, profile=None):
         s = c["awr"]["smoke"]
         c["awr"]["initial_episodes"] = s["episodes"]
         c["awr"]["replay_capacity"] = s["episodes"]
+        c["awr"]["final_all_unique"] = False
         c["runtime"].update(num_envs=s["envs_per_rank"], generation_batch=s["envs_per_rank"])
     if c["model"] != dict(ddim_steps=20, guidance_scale=2.5, history_steps=50):
         raise ValueError("AWR v1 requires original Stage1 DDIM20/CFG2.5/history50")
