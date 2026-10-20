@@ -69,6 +69,8 @@ def write_tree(path, tree):
             value = value.detach().cpu().numpy()
         if isinstance(value, np.ndarray):
             if value.dtype.hasobject:
+                if all(isinstance(v, str) for v in value.reshape(-1)):
+                    return {"__object_strings__": encode(value.astype(str))}
                 raise TypeError("Object arrays are not an AWR storage format")
             key = value.dtype.str
             offset = sizes.get(key, 0)
@@ -133,6 +135,8 @@ def read_tree(path, *, verify=True):
         arrays[dtype] = np.load(target, mmap_mode="c", allow_pickle=False)
 
     def decode(value):
+        if isinstance(value, dict) and "__object_strings__" in value:
+            return decode(value["__object_strings__"]).astype(object)
         if isinstance(value, dict) and "__array__" in value:
             size = int(np.prod(value["shape"], dtype=np.int64))
             array = arrays[value["__array__"]][value["offset"]:value["offset"] + size]

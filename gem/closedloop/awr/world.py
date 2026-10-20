@@ -74,10 +74,8 @@ def calibrate(config, actor_policy, builder, catalog, tasks, path, distributed, 
     c["runtime"].update(timing_contract="deployment_calibration.no_execution.v1",
                         phase_contract="single_request_calibration.v1")
     local_path = Path(path)/f"rank{distributed.rank:02d}"
-    handle = open_world(c, local_path/"world", distributed, num_envs=1)
     budget = budget_for_tasks(tasks[:1], 1)
-    driver = CompleteCollector(c, actor_policy, builder, handle.world, budget, local_path/"calibration",
-                              num_envs=1, actor_fingerprint=fingerprint)
+    handle, driver = None, None
     measured = []
     def flow():
         env = driver.collector.states[0].resource.env
@@ -95,11 +93,20 @@ def calibrate(config, actor_policy, builder, catalog, tasks, path, distributed, 
             yield from backend_operation("discard_plan", prepared_plan_id=result["prepared"]["prepared_plan_id"])
             env.decision += 1
         yield from backend_operation("retire")
-    try:
-        with torch.no_grad():
-            driver.collector._drive({0: flow()})
-    finally:
-        driver.close(); close_isolated_world(handle)
+    def run_local():
+        nonlocal handle, driver
+        try:
+            handle = open_world(c, local_path/"world", distributed, num_envs=1)
+            driver = CompleteCollector(c, actor_policy, builder, handle.world, budget, local_path/"calibration",
+                                       num_envs=1, actor_fingerprint=fingerprint)
+            with torch.no_grad():
+                driver.collector._drive({0: flow()})
+        finally:
+            if driver is not None:
+                driver.close()
+            if handle is not None:
+                close_isolated_world(handle)
+    distributed.local(run_local)
     all_samples = [x for rank in distributed.gather(measured) for x in rank]
     evidence = dict(schema="genmo.awr.deployment_calibration.v1", samples_seconds=all_samples,
                     actor_fingerprint=fingerprint, sampler=actor_policy.kernel_config,

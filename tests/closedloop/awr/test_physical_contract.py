@@ -34,3 +34,54 @@ def test_lazy_mapping_is_copied_and_roundtrips(tmp_path):
     write_tree(tmp_path / "episode", original)
     restored = read_tree(tmp_path / "episode")
     np.testing.assert_array_equal(restored["control"]["qpos"], original["control"]["qpos"])
+
+
+def test_plan_id_object_strings_are_binary_and_exact(tmp_path):
+    plans = np.asarray(["bootstrap:e:0", "生成计划:1"], dtype=object)
+    write_tree(tmp_path / "plans", {"origins": plans})
+    restored = read_tree(tmp_path / "plans")["origins"]
+    assert restored.dtype == plans.dtype
+    np.testing.assert_array_equal(restored, plans)
+    with pytest.raises(TypeError, match="Object arrays"):
+        write_tree(tmp_path / "unsupported", {"objects": np.asarray([object()], dtype=object)})
+
+
+def test_current_consumption_and_reward_reference_are_distinct(episode_factory):
+    from gem.closedloop.awr.collection import finalize_episode
+    _, _, make = episode_factory
+    episode = make(lengths=(2, 1))
+    tick = 600
+    for row in episode.rows:
+        row.metadata.update(consumed_plan_first_gmt_input_tick={"p0": 600, "p1": 612}, execution_trace=[])
+        for _ in range(row.executed_control_steps):
+            plans = ["p0"] * 21
+            plans[10] = "p0" if tick == 600 else "p1"
+            row.metadata["execution_trace"].append(dict(consumed_plan_ids=plans,
+                consumed_reference_ticks=np.arange(tick-120, tick+121, 12), control_tick_begin=tick,
+                reference_plan_id="p1", reference_tick=tick+12))
+            tick += 12
+    task = dict(sample=dict(dataset="source", group_id="g0", row=dict(source_audio_sha256="audio-g0")))
+    finalized = finalize_episode(episode.rows, task, episode.contract)
+    assert finalized.rows[0].execution["actually_consumed_seconds"] == .02
+    assert finalized.rows[1].execution["actually_consumed_seconds"] == .04
+    assert finalized.rows[0].execution["reward_reference_ticks"].size == 0
+    assert finalized.rows[1].execution["reward_reference_ticks"].tolist() == [612, 624, 636]
+
+
+def test_physical_metrics_preserve_original_units_and_each_control():
+    from gem.closedloop.awr.physical_metrics import PhysicalMetrics, summarize_metrics
+    from gem.closedloop.common.rewards import TRACKING_FUNCTIONS
+    primitive = dict(track=dict(normalized=dict(scores={k: .75 for k in TRACKING_FUNCTIONS})),
+        contact=dict(normalized=dict(slide=.2, bad_contact=.1), raw=dict(samples=[
+            dict(foot_net_contact_forces_w_n=[[0, 0, 10], [0, 0, 0]], foot_contact_force_threshold_n=1.,
+                 slide_proxy=dict(left=[.2, .4]), support_selected=dict(left=[True, False]))])))
+    trace = [dict(tick=612+12*i, actual_qpos=[i*.1, 0, 1.], reward_primitives=dict(components=primitive),
+                  errors=dict(root_position_error_m=.3, joint_position_rmse_rad=.1)) for i in range(2)]
+    diagnostics = PhysicalMetrics()
+    diagnostics.observe({}, dict(metadata=dict(generated=dict(qpos_world=np.zeros((60, 28))), execution_trace=trace)))
+    report = summarize_metrics([dict(awr_physical_metrics=diagnostics.result())])
+    assert report["actual_control_samples"] == 2
+    assert set(report["tracking_eight_mean"].values()) == {.75}
+    assert report["supported_sphere_speed_mean_m_s"] == .2
+    assert report["foot_contact_fraction"] == .5
+    assert report["actual_root_path_length_m_per_episode"] == [.1]

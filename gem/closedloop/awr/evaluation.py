@@ -7,6 +7,7 @@ Critic指标不参与物理成功判定，未通过门槛时best_saved继续指�
 from __future__ import annotations
 
 from collections import Counter
+import copy
 from pathlib import Path
 import time
 import numpy as np
@@ -19,6 +20,7 @@ from .collection import CompleteCollector
 from .world import open_world, close_isolated_world, budget_for_tasks
 from .checkpoint import capture_rng, restore_rng
 from .io import atomic_json, write_tree, read_tree, digest
+from .physical_metrics import PhysicalMetrics, summarize_metrics
 
 
 def paired_comparison(baseline, current, *, bootstrap=2000, seed=42):
@@ -63,6 +65,9 @@ def paired_comparison(baseline, current, *, bootstrap=2000, seed=42):
 
 
 def evaluate(config, policy, builder, catalog, plan, path, distributed, *, fingerprint, physics_identity):
+    config = copy.deepcopy(config)
+    # 原完整评价合同要求每个真实控制步的分项，不能沿用训练的稀疏展示级别。
+    config["runtime"].update(evidence_level="full", evaluation_metrics_only=False)
     path = Path(path)
     local_tasks = balanced_rank_tasks(plan, distributed.world_size)[distributed.rank]
     local_path = path/f"rank{distributed.rank:02d}"
@@ -81,8 +86,10 @@ def evaluate(config, policy, builder, catalog, plan, path, distributed, *, finge
         def flow(slot):
             env = driver.collector.states[slot].resource.env
             for index, task in queues[slot]:
+                diagnostics = PhysicalMetrics()
                 episode, error = yield from evaluation_episode_flow(env, task, index, plan, catalog=catalog,
-                    limit=None, deterministic=True, transition_sink=None, progress=None)
+                    limit=None, deterministic=True, transition_sink=diagnostics.observe, progress=None)
+                episode["awr_physical_metrics"] = diagnostics.result()
                 target = local_path/"episodes"/task["task_id"]
                 sha = write_tree(target, episode)
                 references.append(dict(path=str(target), sha256=sha, task_id=task["task_id"]))
@@ -122,6 +129,9 @@ def evaluate(config, policy, builder, catalog, plan, path, distributed, *, finge
                       physics_identity=physics_identity, sampler_identity=digest(policy.kernel_config),
                       plan_identity=plan["plan_sha256"], task_summaries=summaries, episode_files=all_refs,
                       aggregate=aggregate, failure_reasons=dict(Counter(e["end_reason"] for e in episodes if e["physical_failure"])),
+                      physical_metrics=dict(overall=summarize_metrics(episodes),
+                          by_source={source: summarize_metrics([e for e in episodes if e["dataset"] == source])
+                                     for source in aggregate["by_source"]}),
                       source_balanced_reward_per_second=float(np.mean(source_rates)),
                       seconds=time.perf_counter()-started, fresh_physics_world=True)
         atomic_json(path/"report.json", report)

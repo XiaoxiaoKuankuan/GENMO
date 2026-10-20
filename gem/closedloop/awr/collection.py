@@ -95,19 +95,23 @@ class AWRUpperEnvironment(VectorUpperEnvironment):
 
 def finalize_episode(rows, task, contract):
     # 同一计划可能在下个决策区间才进入GMT；仅补充真实消费证据，绝不移动那段奖励。
-    observed, center_ticks = {}, {}
+    observed, center_ticks, reward_ticks = {}, {}, {}
     for row in rows:
         for plan, tick in row.metadata["consumed_plan_first_gmt_input_tick"].items():
             observed[plan] = min(tick, observed.get(plan, tick))
         for control in row.metadata["execution_trace"]:
-            plan = control.get("active_plan_id")
-            if plan is not None:
-                center_ticks.setdefault(str(plan), []).append(int(control["control_tick_begin"]))
+            plan = str(control["consumed_plan_ids"][10])
+            begin = int(control["control_tick_begin"])
+            if int(control["consumed_reference_ticks"][10]) != begin:
+                raise ValueError("AWR current consumption must use the actual GMT window center")
+            center_ticks.setdefault(plan, []).append(begin)
+            reward_ticks.setdefault(str(control["reference_plan_id"]), []).append(int(control["reference_tick"]))
     for row in rows:
         plan = row.identity["plan_id"]
         ticks = center_ticks.get(plan, [])
         row.execution.update(observed_by_gmt=plan in observed, gmt_input_first_tick=observed.get(plan),
                              current_point_ticks=np.asarray(ticks, dtype=np.int64),
+                             reward_reference_ticks=np.asarray(reward_ticks.get(plan, []), dtype=np.int64),
                              actually_consumed_seconds=len(ticks)*.02,
                              full_window_supervision=True,
                              unused_future_is_not_completed_motion=True)
