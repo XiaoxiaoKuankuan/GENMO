@@ -46,6 +46,29 @@ def test_plan_id_object_strings_are_binary_and_exact(tmp_path):
         write_tree(tmp_path / "unsupported", {"objects": np.asarray([object()], dtype=object)})
 
 
+def test_columnar_physics_keeps_exact_rows_without_expanding_25_copies(tmp_path):
+    from gem.runtime.trajectory_blocks import pack_trace, ColumnarTrace
+    original = [dict(tick=600+12*i, body=np.arange(42, dtype=np.float32).reshape(14, 3)+i,
+                     nested=dict(force=np.full((2, 3), i, dtype=np.float64)),
+                     source="original_physics", valid=True) for i in range(25)]
+    block = pack_trace(original)
+    rows = list(ColumnarTrace([block]))
+    copied = cpu_copy(rows)
+    block["columns"]["fields"]["body"]["values"].fill(-1)
+    write_tree(tmp_path / "columns", copied)
+    restored = read_tree(tmp_path / "columns")
+    for expected, actual in zip(original, restored):
+        assert actual["tick"] == expected["tick"] and actual["source"] == expected["source"]
+        np.testing.assert_array_equal(actual["body"], expected["body"])
+        np.testing.assert_array_equal(actual["nested"]["force"], expected["nested"]["force"])
+        assert not actual["body"].flags.writeable
+    assert len({id(row._fields) for row in restored}) == 1
+    import json
+    manifest = json.loads((tmp_path / "columns/manifest.json").read_text())
+    assert len(manifest["column_fields"]) == 1
+    assert manifest["schema"] == "genmo.awr.array_tree.v2"
+
+
 def test_current_consumption_and_reward_reference_are_distinct(episode_factory):
     from gem.closedloop.awr.collection import finalize_episode
     _, _, make = episode_factory

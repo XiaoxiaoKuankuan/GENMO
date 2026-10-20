@@ -1,0 +1,19 @@
+{
+  "schema": "genmo.awr.storage_acceptance.v1",
+  "source_run": "/data1/user/liwei/GENMO_outputs/stage2_awr/smoke64_20261020_03",
+  "source_genmo_commit": "ea81029142a571bb763282b46225bbdfadfc0648",
+  "episode_id": "03cc1484d7fe1d29f1e7db1139f70b1e2d090f2ac189e5cebedba09730e2a3bc",
+  "states": 35,
+  "controls": 861,
+  "comparison_location": "local_development_workstation",
+  "dense_bytes": 91823557,
+  "columnar_bytes": 49713973,
+  "dense_manifest_bytes": 56407623,
+  "columnar_manifest_bytes": 13112367,
+  "dense_read_seconds": 1.8249466189881787,
+  "columnar_read_seconds": 0.6537314989836887,
+  "all_physical_fields_exact_including_array_shape_and_dtype": true,
+  "original_server_episode_unchanged": true,
+  "temporary_copies_removed": true,
+  "caveat": "单个真实Episode在本地的格式对照；不是Server-2整轮吞吐或物理性能提升。"
+}
