@@ -382,8 +382,36 @@ class AWRRun:
         return self.checkpoint(name, payload, dict(macro=macro, phase="actor", method=method,
                                                  epoch=trainer.epoch, cursor=trainer.cursor, step=trainer.steps))
 
+    def manual_evaluate(self, reference=None, *, all_unique=False):
+        """单独评价不重开已完成训练；同模型/计划重入时恢复原评价账本。"""
+        parent = self.state.get("manual_evaluation_parent") or {
+            key: self.state[key] for key in ("status", "phase")}
+        self.publish(manual_evaluation_parent=parent, manual_evaluation_status="running")
+        try:
+            self.prepare()
+            reference = self.state.get("latest") if reference is None else reference
+            if reference:
+                self.actor.load_state_dict(self.checkpoints.load(reference)["payload"]["actor"])
+            plan = self.full_plan if all_unique else self.fixed_plan
+            name = "manual_"+digest(dict(actor=self.d.assert_models_equal(self.actor),
+                                         plan=plan["plan_sha256"]))
+            self.publish(manual_evaluation_key=name)
+            report = self.eval_actor(name, plan)
+            self.publish(manual_evaluation_status="complete")
+            return report
+        except GracefulStop:
+            self.publish(manual_evaluation_status="stopped")
+            return None
+        except Exception:
+            self.publish(manual_evaluation_status="failed")
+            raise
+        finally:
+            self.publish(**parent, manual_evaluation_parent=None)
+
     def run(self):
         try:
+            if self.state["status"] == "complete":
+                return 0
             self.prepare()
             for macro in range(self.state["macro"], self.config["awr"]["max_macro_iterations"]):
                 if not self.run_macro(macro):

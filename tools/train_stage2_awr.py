@@ -12,7 +12,6 @@ import json
 import os
 from pathlib import Path
 import sys
-import uuid
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
@@ -59,7 +58,6 @@ def main():
     import torch
     import torch.distributed as dist
     from gem.closedloop.awr.distributed import Distributed
-    from gem.closedloop.awr.checkpoint import GracefulStop
     dist.init_process_group("gloo", timeout=timedelta(hours=2))
     tensor_group = None
     resource_monitor = None
@@ -87,20 +85,8 @@ def main():
             resource_monitor = GPUResourceMonitor(args.run_dir).start()
         if args.operation == "evaluate":
             try:
-                run.prepare()
-                if args.checkpoint:
-                    reference = json.loads(args.checkpoint.read_text())
-                    state = run.checkpoints.load(reference)
-                    run.actor.load_state_dict(state["payload"]["actor"])
-                else:
-                    reference = run.state.get("latest")
-                    if reference:
-                        run.actor.load_state_dict(run.checkpoints.load(reference)["payload"]["actor"])
-                name = d.root(lambda: "manual_"+uuid.uuid4().hex[:8])
-                run.eval_actor(name, run.full_plan if args.all_unique else run.fixed_plan)
-                return 0
-            except GracefulStop:
-                run.publish(status="stopped")
+                reference = json.loads(args.checkpoint.read_text()) if args.checkpoint else None
+                run.manual_evaluate(reference, all_unique=args.all_unique)
                 return 0
             finally:
                 if run.replay: run.replay.close()

@@ -140,3 +140,29 @@ def test_evaluation_drains_then_resumes_exact_remaining_tasks(tmp_path, monkeypa
     # 已全部登记时发布报告只读取证据，不再创建物理世界。
     again = evaluation.evaluate(*args, tmp_path/"attempt3", d, **kwargs)
     assert len(worlds) == 2 and again["recovered_complete_tasks"] == 4
+
+
+def test_manual_evaluation_preserves_completed_training_and_stable_resume_key():
+    from gem.closedloop.awr.runtime import AWRRun
+    run = AWRRun.__new__(AWRRun)
+    run.state = dict(status="complete", phase="complete", finished_unix=123.)
+    run.d, run.actor = Distributed(), torch.nn.Linear(2, 1)
+    run.fixed_plan = run.full_plan = {"plan_sha256": "fixed"}
+    run.publish = lambda **kwargs: run.state.update(kwargs)
+    run.prepare = lambda: run.publish(status="running", phase="data_audit")
+    keys = []
+    def evaluate(name, plan):
+        keys.append(name)
+        if len(keys) == 1:
+            raise GracefulStop()
+        return {"complete": True}
+    run.eval_actor = evaluate
+    assert run.manual_evaluate() is None
+    assert run.state["status"] == "complete" and run.state["manual_evaluation_status"] == "stopped"
+    assert run.manual_evaluate() == {"complete": True}
+    assert keys[0] == keys[1]
+    assert run.state["status"] == run.state["phase"] == run.state["manual_evaluation_status"] == "complete"
+    assert run.state["finished_unix"] == 123.
+    run.replay = None
+    run.prepare = lambda: pytest.fail("Completed training must not restart prepare/physical evaluation")
+    assert run.run() == 0 and run.state["finished_unix"] == 123.
