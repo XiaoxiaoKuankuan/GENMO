@@ -23,6 +23,18 @@ from .io import atomic_json, write_tree, read_tree, digest
 from .physical_metrics import PhysicalMetrics, summarize_metrics
 
 
+def checkpoint_selection(state, reference, baseline_comparison, saved_comparison, evaluation_key):
+    """观察到的最高回报与满足完整物理门槛的最佳保存模型分开，后轮失败不清空旧最佳。"""
+    delta = baseline_comparison["balanced_return_delta"]
+    observed = delta > state.get("best_observed_delta", 0.)
+    promoted = baseline_comparison["acceptable"] and saved_comparison["acceptable"]
+    return dict(latest=reference,
+        best_observed=reference if observed else state.get("best_observed", "stage1_s595000"),
+        best_observed_delta=max(delta, state.get("best_observed_delta", 0.)),
+        best_saved=reference if promoted else state.get("best_saved", "stage1_s595000"),
+        best_evaluation_key=evaluation_key if promoted else state.get("best_evaluation_key", "stage1_fixed"))
+
+
 def paired_comparison(baseline, current, *, bootstrap=2000, seed=42):
     if baseline["plan_identity"] != current["plan_identity"]:
         raise ValueError("Paired evaluation tasks changed")

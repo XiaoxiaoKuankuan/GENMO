@@ -182,7 +182,13 @@ class ActorTrainer:
             d.assert_models_equal(self.actor)
             return dict(complete=True, steps=self.steps, seconds=time.perf_counter()-started,
                         replay_samples=len(self.dataset), physical_samples_duplicated=False,
+                        epoch_seconds={str(e["epoch"]): e["epoch_seconds"]
+                                       for e in self.history if "epoch_seconds" in e},
+                        awr_forward_backward_seconds=sum(e["awr_seconds"] for e in self.history),
+                        bc_reduction_update_seconds=sum(e["bc_and_update_seconds"] for e in self.history),
+                        optimizer_step_seconds_mean=sum(e["seconds"] for e in self.history)/self.steps,
                         replay_read_seconds=self.dataset.read_seconds,
+                        peak_gpu_memory_scope="process_start_through_this_actor_training",
                         peak_gpu_memory_bytes=torch.cuda.max_memory_allocated(d.device) if d.device.type == "cuda" else 0)
         finally:
             self.actor.eval()

@@ -69,6 +69,7 @@ def test_crossfit_full_fit_mc_fvi_is_finite(episode_factory, mode):
     config = dict(mode=mode, history_lr=1e-5, lr=1e-4, global_batch=4, microbatch=2,
                   mc_epochs=1, fvi_epochs=1, fvi_iterations=1, nstep=1, patience=1)
     labels, report, states = fit_crossfit(actor, episodes, folds, config, Distributed())
+    assert labels.identity["crossfit"] == report["crossfit_identity"]
     assert torch.isfinite(labels.values).all() and len(labels.sample_ids) == 16
     assert torch.equal(labels.advantages, labels.returns-labels.values)
     for evidence in report["provenance"]:
@@ -78,6 +79,34 @@ def test_crossfit_full_fit_mc_fvi_is_finite(episode_factory, mode):
         assert report["selected"] == "mc_only"
     else:
         assert all(r["fvi"][0]["frozen_target_identity"] for r in report["folds"])
+
+
+def test_validation_noise_is_paired_and_does_not_advance_training_rng():
+    from gem.closedloop.awr.metrics import stage1_validation
+    class RandomBC(ArithmeticBC):
+        def loss(self, actor, count):
+            self.bc_update_steps += 1
+            return torch.rand(count)+next(actor.parameters()).sum()
+    actor, bc = torch.nn.Linear(2, 1), RandomBC()
+    initial = torch.get_rng_state().clone()
+    first = stage1_validation(actor, bc, batches=3, batch_size=4, device="cpu", seed=1729)
+    torch.testing.assert_close(initial, torch.get_rng_state(), rtol=0, atol=0)
+    assert actor.training and bc.bc_update_steps == 0
+    torch.rand(100)
+    second = stage1_validation(actor, bc, batches=3, batch_size=4, device="cpu", seed=1729)
+    assert first == second and bc.bc_update_steps == 0
+
+
+def test_later_high_return_failure_never_replaces_previous_best():
+    from gem.closedloop.awr.evaluation import checkpoint_selection
+    old = dict(best_saved="safe", best_observed="safe", best_observed_delta=2., best_evaluation_key="safe_eval")
+    unsafe = checkpoint_selection(old, "unsafe", dict(balanced_return_delta=10., acceptable=False),
+                                  dict(acceptable=False), "unsafe_eval")
+    assert unsafe["latest"] == unsafe["best_observed"] == "unsafe"
+    assert unsafe["best_saved"] == "safe" and unsafe["best_evaluation_key"] == "safe_eval"
+    regressed = checkpoint_selection(unsafe, "regressed", dict(balanced_return_delta=1., acceptable=True),
+                                     dict(acceptable=False), "regressed_eval")
+    assert regressed["best_saved"] == "safe" and regressed["best_observed"] == "unsafe"
 
 
 def test_fvi_boundary_resume_does_not_repeat_committed_fits(episode_factory):

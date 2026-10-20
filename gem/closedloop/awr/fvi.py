@@ -46,6 +46,9 @@ def fit_crossfit(actor, episodes, fold_map, config, distributed, *, seed=42, che
         report = resume["current"] if continuing else dict(fold=fold, mc=fit.fit(train, validation), fvi=[],
                       groups={key: sorted({e.group_id for e in value}) for key, value in part.items()},
                       counts={key: dict(episodes=len(value), states=sum(len(e.rows) for e in value),
+                                        music_groups=len({e.group_id for e in value}),
+                                        source_fractions={s: sum(e.source == s for e in value)/len(value)
+                                                          for s in sorted({e.source for e in value})},
                                         sources={s: sum(e.source == s for e in value)
                                                  for s in sorted({e.source for e in value})})
                               for key, value in part.items()})
@@ -72,6 +75,7 @@ def fit_crossfit(actor, episodes, fold_map, config, distributed, *, seed=42, che
         fvi_states.append(fit.state_dict())
         reports.append(report)
         save(index+1, 0, None)
+    labeling_started = time.perf_counter()
     use_fvi = all(r["fvi"] and
                   r["fvi"][-1]["validation"]["overall"]["mse"] < r["mc"]["validation"]["overall"]["mse"] and
                   abs(r["fvi"][-1]["validation"]["overall"]["bias"]) <= abs(r["mc"]["validation"]["overall"]["bias"])
@@ -96,8 +100,12 @@ def fit_crossfit(actor, episodes, fold_map, config, distributed, *, seed=42, che
     report = dict(schema="genmo.awr.crossfit.v1", selected="mc_fvi" if use_fvi else "mc_only",
                   folds=reports, provenance=provenance, seconds=time.perf_counter()-started,
                   fold_identity=fold_map["sha256"], value_semantics="replay_behavior_mixture_baseline")
+    report["crossfit_identity"] = digest({k: v for k, v in report.items() if k != "seconds"})
     labels = label_advantages(ids, torch.stack(returns), torch.stack(values), sources=sources,
                               beta=config.get("beta", 1.), weight_cap=config.get("weight_cap", 20.),
                               weight_mean_normalize=config.get("weight_mean_normalize", True),
-                              identity=dict(crossfit=digest(report), folds=fold_map["sha256"]))
+                              identity=dict(crossfit=report["crossfit_identity"], folds=fold_map["sha256"]))
+    report["critic_seconds"] = labeling_started-started
+    report["advantage_labeling_seconds"] = time.perf_counter()-labeling_started
+    report["seconds"] = time.perf_counter()-started
     return labels, report, dict(selected=[f.state_dict() for f in fits], mc=mc_states, fvi=fvi_states)

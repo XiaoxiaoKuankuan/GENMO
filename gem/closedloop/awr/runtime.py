@@ -28,9 +28,9 @@ from .dataset import ReplayDataset
 from .fvi import fit_crossfit
 from .advantages import AdvantageLabelSet
 from .trainer import ActorTrainer
-from .evaluation import evaluate, paired_comparison
+from .evaluation import evaluate, paired_comparison, checkpoint_selection
 from .io import atomic_json, read_tree, write_tree, cpu_copy, digest
-from .metrics import exploration, parameter_changes, fixed_outputs
+from .metrics import exploration, parameter_changes, fixed_outputs, stage1_validation
 
 
 class AWRRun:
@@ -156,13 +156,14 @@ class AWRRun:
             return
         bc = Stage1Supervision(self.runtime_config, self.actor, self.train_config,
                                source_step=self.load_report["source_global_step"], split="val")
-        self.actor.eval()
-        with torch.no_grad():
-            losses = [float(bc.loss(self.actor, self.config["awr"]["actor"]["bc_microbatch"]).mean())
-                      for _ in range(4)]
+        seed = self.config["awr"]["seed"]+700001+self.d.rank
+        losses = stage1_validation(self.actor, bc, batches=4,
+            batch_size=self.config["awr"]["actor"]["bc_microbatch"], device=self.d.device, seed=seed)
         values = self.d.gather(losses)
         report = dict(stage1_full_loss=sum(sum(v) for v in values)/sum(map(len, values)),
-                      batches=sum(map(len, values)), split="val", source_step=bc.source_step)
+                      batches=sum(map(len, values)), split="val", source_step=bc.source_step,
+                      seeds=[self.config["awr"]["seed"]+700001+i for i in range(self.d.world_size)],
+                      fixed_validation_randomness=True, training_rng_restored=True)
         self.json_artifact(key, lambda: report)
         del bc
 
@@ -345,10 +346,14 @@ class AWRRun:
             if self.config["awr"]["run_ablation"]:
                 other = self.eval_actor(prefix+"_self_distillation_all", self.full_plan)
                 self.json_artifact(prefix+"_all_awr_vs_self_distillation", lambda: paired_comparison(other, current))
+        reference = self.state["artifacts"][prefix+"_awr_final"]
+        old_key = self.state.get("best_evaluation_key", "stage1_fixed")
+        previous = self.eval_actor(old_key, self.fixed_plan)
+        current = self.eval_actor(prefix+"_awr_fixed", self.fixed_plan)
+        versus_saved = paired_comparison(previous, current)
+        self.json_artifact(prefix+"_versus_best_saved", lambda: versus_saved)
         self.publish(macro=macro+1, phase="macro_complete",
-                     latest=self.state["artifacts"][prefix+"_awr_final"],
-                     best_observed=self.state["artifacts"][prefix+"_awr_final"] if awr["acceptable"] else "stage1_s595000",
-                     best_saved=self.state["artifacts"][prefix+"_awr_final"] if awr["acceptable"] else "stage1_s595000")
+                     **checkpoint_selection(self.state, reference, awr, versus_saved, prefix+"_awr_fixed"))
         self.json_artifact(prefix+"_replay_cost", self.replay.report)
         return True
 

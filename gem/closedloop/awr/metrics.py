@@ -11,6 +11,22 @@ import math
 import numpy as np
 import torch
 from .io import digest
+from .checkpoint import capture_rng, restore_rng
+
+
+@torch.no_grad()
+def stage1_validation(actor, bc, *, batches, batch_size, device, seed):
+    """使用同一验证随机流比较不同Actor，结束后恢复训练随机状态及BC采样器。"""
+    import copy
+    rng, bc_state, mode = capture_rng(device), copy.deepcopy(bc.state_dict()), actor.training
+    try:
+        torch.manual_seed(seed)
+        actor.eval()
+        return [float(bc.loss(actor, batch_size).mean()) for _ in range(batches)]
+    finally:
+        bc.load_state_dict(bc_state)
+        restore_rng(rng, device)
+        actor.train(mode)
 
 
 def exploration(episodes):
