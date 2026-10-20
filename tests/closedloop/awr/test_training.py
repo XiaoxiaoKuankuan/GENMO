@@ -80,6 +80,30 @@ def test_crossfit_full_fit_mc_fvi_is_finite(episode_factory, mode):
         assert all(r["fvi"][0]["frozen_target_identity"] for r in report["folds"])
 
 
+def test_fvi_boundary_resume_does_not_repeat_committed_fits(episode_factory):
+    actor, _, make = episode_factory
+    samples = [dict(split="train", group_id=f"g{i}", audio_sha256=f"a{i}", source="s") for i in range(8)]
+    folds = build_folds(samples)
+    episodes = [make(episode_id=str(i), group=f"g{i}", rewards=((float(i)-3., float(i)), (float(i)/2.,)))
+                for i in range(8)]
+    config = dict(mode="mc_fvi", history_lr=1e-5, lr=1e-4, global_batch=4, microbatch=2,
+                  mc_epochs=1, fvi_epochs=1, fvi_iterations=1, nstep=1, patience=1)
+    saved = []
+    class Interrupted(Exception): pass
+    def boundary(_, state):
+        if state["fold_index"] == 0 and state["next_fvi"] == 1:
+            saved.append(copy.deepcopy(state))
+            raise Interrupted()
+    with pytest.raises(Interrupted):
+        fit_crossfit(actor, episodes, folds, config, Distributed(), checkpoint=boundary)
+    resumed, report, _ = fit_crossfit(actor, episodes, folds, config, Distributed(), resume=saved[0])
+    complete, expected, _ = fit_crossfit(actor, episodes, folds, config, Distributed())
+    assert report["selected"] == expected["selected"]
+    assert torch.equal(resumed.values, complete.values)
+    assert torch.equal(resumed.weights, complete.weights)
+    assert len(report["folds"][0]["fvi"]) == 1
+
+
 def _distributed_gradient_worker(rank, world, path):
     torch.set_num_threads(1)
     dist.init_process_group("gloo", init_method="file://"+path+"/rendezvous", rank=rank, world_size=world)
