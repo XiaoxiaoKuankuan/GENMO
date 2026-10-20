@@ -1,0 +1,45 @@
+{
+  "atol": 1e-08,
+  "baseline_genmo": "063b09a10c0f07dc415bdb098e6ee2b19bd550b1",
+  "device": "cpu_recompute_of_saved_real_physx_states_and_references",
+  "episodes": [
+    {
+      "component_score_max_absolute_difference_vs_recorded_gpu": {
+        "alive": 0.0,
+        "cmd": 5.551115123125783e-17,
+        "contact": 2.220446049250313e-16,
+        "joint_limit": 0.0,
+        "stable": 0.0,
+        "torque": 5.551115123125783e-17,
+        "track": 2.220446049250313e-16
+      },
+      "controls": 861,
+      "episode_id": "03cc1484d7fe1d29f1e7db1139f70b1e2d090f2ac189e5cebedba09730e2a3bc",
+      "original_vs_common_all_fields_match": true,
+      "reason": "music_end"
+    },
+    {
+      "component_score_max_absolute_difference_vs_recorded_gpu": {
+        "alive": 0.0,
+        "cmd": 5.551115123125783e-17,
+        "contact": 2.220446049250313e-16,
+        "joint_limit": 0.0,
+        "stable": 0.0,
+        "torque": 1.1102230246251565e-16,
+        "track": 2.220446049250313e-16
+      },
+      "controls": 5684,
+      "episode_id": "812cd537cded99aae61a112af3c3f0ccb0d9256a9326bab97b4a58c2770e52a4",
+      "original_vs_common_all_fields_match": true,
+      "reason": "yaw_anchor_ori"
+    }
+  ],
+  "rtol": 1e-07,
+  "schema": "genmo.awr.real_reward_parity.v1",
+  "seconds": 94.91504378803074,
+  "source_commits": {
+    "genmo": "ea81029142a571bb763282b46225bbdfadfc0648",
+    "gmt": "4ca256fe79d2dda22240011947ead276690e40f7"
+  },
+  "source_run": "/data1/user/liwei/GENMO_outputs/stage2_awr/smoke64_20261020_03"
+}
