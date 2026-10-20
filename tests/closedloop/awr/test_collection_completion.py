@@ -85,7 +85,10 @@ def test_real_replay_seal_preserves_failure_and_counts_extra_attempts(tmp_path, 
             result.append(value["task_id"])
         return result
     run._recover_publications = recover
+    actor_fingerprint = run.d.assert_models_equal(actor)
     initial = make(episode_id="original_ok")
+    for row in initial.rows:
+        row.identity["actor_fingerprint"] = actor_fingerprint
     publication = replay.publish(initial)
     publication.update(task_id="original_ok", macro=0, published_unix_ns=1)
     atomic_json(root/"replay"/"publications"/(initial.episode_id+".json"), publication)
@@ -95,7 +98,7 @@ def test_real_replay_seal_preserves_failure_and_counts_extra_attempts(tmp_path, 
                               reason="physical_warmup_failure", physical_failure=True)]
     atomic_json(original_execution/"outcomes.json", original_outcomes)
     write_tree(original_execution/"excluded"/"original_fail",
-               dict(snapshot={"terminated": True, "truncated": False}))
+               dict(snapshot={"terminated": True, "truncated": False, "tick": 24, "reason": "test_failure"}))
     extra = [dict(task_id="extra_fail", rank=0), dict(task_id="extra_ok", rank=0)]
     monkeypatch.setattr(tool, "supplemental_candidates", lambda *a: extra[:limit])
     calls = []
@@ -110,9 +113,11 @@ def test_real_replay_seal_preserves_failure_and_counts_extra_attempts(tmp_path, 
                 outcome = dict(task_id="extra_fail", complete=False,
                                reason="physical_warmup_failure", physical_failure=True)
                 write_tree(self.path/"excluded"/"extra_fail",
-                           dict(snapshot={"terminated": True, "truncated": False}))
+                           dict(snapshot={"terminated": True, "truncated": False, "tick": 24, "reason": "test_failure"}))
             else:
                 episode = make(episode_id="extra_ok", group="g1")
+                for row in episode.rows:
+                    row.identity["actor_fingerprint"] = actor_fingerprint
                 outcome = dict(task_id="extra_ok", complete=True, reason="music_end",
                                publication=on_episode(episode))
             atomic_json(self.path/"outcomes.json", [outcome])
@@ -140,6 +145,8 @@ def test_real_replay_seal_preserves_failure_and_counts_extra_attempts(tmp_path, 
         assert accepted["complete_episodes"] == 2
         assert accepted["reserved_extra_attempts"] == accepted["confirmed_extra_attempts"] == 2
         assert accepted["excluded_tasks"] == 2 and len(accepted["failure_evidence"]) == 2
+        assert accepted["failed_warmup_seconds"] == .08
+        assert accepted["complete_episode_initialization_seconds"] == 2.
         snapshot = replay.load_snapshot(state["artifacts"]["macro000_replay"])
         assert len(snapshot.episode_ids) == 2
         assert tool.complete_collection(run, args, {"sha256": "reviewed_tool"})

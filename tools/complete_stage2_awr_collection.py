@@ -239,9 +239,20 @@ def complete_collection(run, args, tool_identity):
         by_task = {v["task_id"]: v for v in outcomes}
         if len(by_task) != len(outcomes) or not set(by_task) <= allowed:
             raise ValueError("Duplicate or unplanned physical outcomes")
+        initialization_controls, replay_controls = 0, 0
         for value in current:
             if value["task_id"] not in by_task or not by_task[value["task_id"]]["complete"]:
                 raise ValueError("Complete Episode has no authoritative successful publication outcome")
+            manifest = json.loads((run.root/"replay"/"episodes"/value["episode_id"]/"manifest.json").read_text())
+            rows = manifest["tree"]["rows"]
+            if (rows[0]["identity"]["actor_fingerprint"] != fingerprint
+                    or rows[0]["identity"]["policy_version"] != macro):
+                raise ValueError("Supplemental snapshot mixes behavior Actors within one macro iteration")
+            begin = rows[0]["control_tick_begin"]
+            if type(begin) is not int or begin < 0 or begin % 12:
+                raise ValueError("Initialization time is not on the original 600Hz control clock")
+            initialization_controls += begin//12
+            replay_controls += sum(row["executed_control_steps"] for row in rows)
         # 失败不是只留一个计数：核验每个预热失败原始二进制快照仍在且有真实终止。
         failure_evidence = []
         for outcome_path in sorted((run.root/prefix/"collection").glob("*/rank*/execution/outcomes.json")):
@@ -251,10 +262,14 @@ def complete_collection(run, args, tool_identity):
                 path = outcome_path.parent/"excluded"/outcome["task_id"]
                 value = read_tree(path)
                 snapshot = value["snapshot"]
-                if not snapshot["terminated"] or snapshot["truncated"]:
+                tick = snapshot["tick"]
+                if (not snapshot["terminated"] or snapshot["truncated"]
+                        or type(tick) is not int or tick < 0 or tick % 12):
                     raise ValueError("Warmup exclusion lacks a true physical termination")
                 failure_evidence.append(dict(task_id=outcome["task_id"], path=str(path),
-                    manifest_sha256=json.loads((path/"manifest.json").read_text())["sha256"]))
+                    manifest_sha256=json.loads((path/"manifest.json").read_text())["sha256"],
+                    termination_reason=snapshot["reason"], executed_controls=tick//12,
+                    executed_seconds=tick/600.))
         snapshot = run.replay.snapshot()
         if macro == 0 and len(snapshot.episode_ids) != target:
             raise ValueError("First-macro FIFO snapshot lost accepted complete Episodes")
@@ -266,6 +281,10 @@ def complete_collection(run, args, tool_identity):
             total_confirmed_attempts=len(outcomes), complete_episodes=len(completed),
             excluded_tasks=sum(not t["complete"] for t in outcomes),
             reasons=dict(Counter(t["reason"] for t in outcomes)), failure_evidence=failure_evidence,
+            replay_control_seconds=replay_controls/50.,
+            complete_episode_initialization_seconds=initialization_controls/50.,
+            failed_warmup_seconds=sum(v["executed_seconds"] for v in failure_evidence),
+            initialization_and_failed_warmup_are_not_actor_mc_labels=True,
             unused_or_interrupted_reservations=sorted(set(reserved)-set(by_task)),
             full_outcomes=outcomes, replay_snapshot=snapshot.to_dict(),
             current_invocation_seconds=time.perf_counter()-started,

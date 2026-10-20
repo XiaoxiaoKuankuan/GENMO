@@ -177,6 +177,8 @@ bash tools/run_stage2_awr_server2.sh complete-collection \
 此后原`resume`可继续Critic/Actor；已经开始价值拟合或Actor更新的数据不得替换。
 报告同时列原任务数、额外尝试数、失败数和有效Episode数，不将补采后的512冒称只有
 512次物理尝试。行政截断或未执行完的原任务应走正常恢复，不能用此入口静默替换。
+封存还验证本宏迭代全部记录的Actor指纹一致，并分别汇总Actor回报区间、成功进入
+采集的Episode初始化区间、失败预热区间的真实控制秒数；初始化不伪造为Actor MC。
 
 ## Replay字段和校验
 
