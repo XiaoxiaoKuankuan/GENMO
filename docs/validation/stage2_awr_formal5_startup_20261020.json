@@ -1,0 +1,234 @@
+{
+  "schema": "genmo.awr.formal5_startup.v1",
+  "checked_unix": 1792506230.059596,
+  "run_dir": "/data1/user/liwei/GENMO_outputs/stage2_awr/formal5_20261020_01",
+  "launch": {
+    "authorization": "用户于2026-10-20批准正式训练最多5轮；整次正式训练最多额外尝试26次，保留全部失败，额度用尽仍有缺额则停止。",
+    "budget": {
+      "evaluation_tasks_are_separate": true,
+      "max_extra_attempts_total": 26,
+      "max_macro_iterations": 5,
+      "max_training_collection_attempts": 1050,
+      "target_complete_episodes": 1024
+    },
+    "command": [
+      "bash",
+      "/home/user/liwei/awr-worktrees/GENMO-formal5-20261020/tools/run_stage2_awr_server2.sh",
+      "run",
+      "--config",
+      "/home/user/liwei/awr-worktrees/GENMO-formal5-20261020/configs/closedloop/stage2_awr_formal5.yaml",
+      "--run-dir",
+      "/data1/user/liwei/GENMO_outputs/stage2_awr/formal5_20261020_01"
+    ],
+    "config_file_sha256": "a47f0f3f169c3d7f4eb9918460d7a2ffb92cc2041ea3804ce8e03c0afcf7de25",
+    "config_sha256": "6cf432adaaaba61c80929917e1fd75188fb421217864410438f25a08a7ca4d8b",
+    "parent_pid": 3033480,
+    "pid": 3033569,
+    "source_commits": {
+      "genmo": "6c5fda0e006e949e31a8003506e596403b0bcee7",
+      "gmt": "4ca256fe79d2dda22240011947ead276690e40f7"
+    },
+    "started_unix": 1792506054.6908255
+  },
+  "state": {
+    "status": "running",
+    "phase": "evaluation_stage1_fixed",
+    "macro": 0,
+    "source_commits": {
+      "genmo": "6c5fda0e006e949e31a8003506e596403b0bcee7",
+      "gmt": "4ca256fe79d2dda22240011947ead276690e40f7"
+    },
+    "request_sha256": "6cf432adaaaba61c80929917e1fd75188fb421217864410438f25a08a7ca4d8b"
+  },
+  "state_snapshot_sha256": "b80899fa988a40ef54e6866c1fb6c98806b3520d5250cdd0ddc2e18d7d392153",
+  "workers": [
+    {
+      "pid": 3033587,
+      "ppid": 3033569,
+      "command": "/data0/user/liwei/closedloop_stage10_v3_runtime/env_isaac_genmo/bin/python -u /home/user/liwei/awr-worktrees/GENMO-formal5-20261020/tools/train_stage2_awr.py run --config /home/user/liwei/awr-worktrees/GENMO-formal5-20261020/configs/closedloop/stage2_awr_formal5.yaml --run-dir /data1/user/liwei/GENMO_outputs/stage2_awr/formal5_20261020_01"
+    },
+    {
+      "pid": 3033588,
+      "ppid": 3033569,
+      "command": "/data0/user/liwei/closedloop_stage10_v3_runtime/env_isaac_genmo/bin/python -u /home/user/liwei/awr-worktrees/GENMO-formal5-20261020/tools/train_stage2_awr.py run --config /home/user/liwei/awr-worktrees/GENMO-formal5-20261020/configs/closedloop/stage2_awr_formal5.yaml --run-dir /data1/user/liwei/GENMO_outputs/stage2_awr/formal5_20261020_01"
+    },
+    {
+      "pid": 3033589,
+      "ppid": 3033569,
+      "command": "/data0/user/liwei/closedloop_stage10_v3_runtime/env_isaac_genmo/bin/python -u /home/user/liwei/awr-worktrees/GENMO-formal5-20261020/tools/train_stage2_awr.py run --config /home/user/liwei/awr-worktrees/GENMO-formal5-20261020/configs/closedloop/stage2_awr_formal5.yaml --run-dir /data1/user/liwei/GENMO_outputs/stage2_awr/formal5_20261020_01"
+    },
+    {
+      "pid": 3033590,
+      "ppid": 3033569,
+      "command": "/data0/user/liwei/closedloop_stage10_v3_runtime/env_isaac_genmo/bin/python -u /home/user/liwei/awr-worktrees/GENMO-formal5-20261020/tools/train_stage2_awr.py run --config /home/user/liwei/awr-worktrees/GENMO-formal5-20261020/configs/closedloop/stage2_awr_formal5.yaml --run-dir /data1/user/liwei/GENMO_outputs/stage2_awr/formal5_20261020_01"
+    },
+    {
+      "pid": 3033591,
+      "ppid": 3033569,
+      "command": "/data0/user/liwei/closedloop_stage10_v3_runtime/env_isaac_genmo/bin/python -u /home/user/liwei/awr-worktrees/GENMO-formal5-20261020/tools/train_stage2_awr.py run --config /home/user/liwei/awr-worktrees/GENMO-formal5-20261020/configs/closedloop/stage2_awr_formal5.yaml --run-dir /data1/user/liwei/GENMO_outputs/stage2_awr/formal5_20261020_01"
+    },
+    {
+      "pid": 3033592,
+      "ppid": 3033569,
+      "command": "/data0/user/liwei/closedloop_stage10_v3_runtime/env_isaac_genmo/bin/python -u /home/user/liwei/awr-worktrees/GENMO-formal5-20261020/tools/train_stage2_awr.py run --config /home/user/liwei/awr-worktrees/GENMO-formal5-20261020/configs/closedloop/stage2_awr_formal5.yaml --run-dir /data1/user/liwei/GENMO_outputs/stage2_awr/formal5_20261020_01"
+    },
+    {
+      "pid": 3033593,
+      "ppid": 3033569,
+      "command": "/data0/user/liwei/closedloop_stage10_v3_runtime/env_isaac_genmo/bin/python -u /home/user/liwei/awr-worktrees/GENMO-formal5-20261020/tools/train_stage2_awr.py run --config /home/user/liwei/awr-worktrees/GENMO-formal5-20261020/configs/closedloop/stage2_awr_formal5.yaml --run-dir /data1/user/liwei/GENMO_outputs/stage2_awr/formal5_20261020_01"
+    },
+    {
+      "pid": 3033594,
+      "ppid": 3033569,
+      "command": "/data0/user/liwei/closedloop_stage10_v3_runtime/env_isaac_genmo/bin/python -u /home/user/liwei/awr-worktrees/GENMO-formal5-20261020/tools/train_stage2_awr.py run --config /home/user/liwei/awr-worktrees/GENMO-formal5-20261020/configs/closedloop/stage2_awr_formal5.yaml --run-dir /data1/user/liwei/GENMO_outputs/stage2_awr/formal5_20261020_01"
+    }
+  ],
+  "physical_backends": [
+    {
+      "pid": 3067600,
+      "ppid": 3033592,
+      "command": "/data0/user/liwei/closedloop_stage10_v3_runtime/env_isaac_genmo/bin/python -B /home/user/liwei/awr-worktrees/legged_lab_gmt/scripts/rsl_rl/serve_frozen_gmt_vector.py --config /data1/user/liwei/GENMO_outputs/stage2_awr/formal5_20261020_01/evaluation/stage1_fixed_c49b0912/rank05/world/physical.yaml --socket /tmp/stage8_rpc_l_qtrfqa/awr.sock --headless"
+    },
+    {
+      "pid": 3067601,
+      "ppid": 3033589,
+      "command": "/data0/user/liwei/closedloop_stage10_v3_runtime/env_isaac_genmo/bin/python -B /home/user/liwei/awr-worktrees/legged_lab_gmt/scripts/rsl_rl/serve_frozen_gmt_vector.py --config /data1/user/liwei/GENMO_outputs/stage2_awr/formal5_20261020_01/evaluation/stage1_fixed_c49b0912/rank02/world/physical.yaml --socket /tmp/stage8_rpc_bwzt4fi4/awr.sock --headless"
+    },
+    {
+      "pid": 3067602,
+      "ppid": 3033588,
+      "command": "/data0/user/liwei/closedloop_stage10_v3_runtime/env_isaac_genmo/bin/python -B /home/user/liwei/awr-worktrees/legged_lab_gmt/scripts/rsl_rl/serve_frozen_gmt_vector.py --config /data1/user/liwei/GENMO_outputs/stage2_awr/formal5_20261020_01/evaluation/stage1_fixed_c49b0912/rank01/world/physical.yaml --socket /tmp/stage8_rpc_2v_wr210/awr.sock --headless"
+    },
+    {
+      "pid": 3067603,
+      "ppid": 3033594,
+      "command": "/data0/user/liwei/closedloop_stage10_v3_runtime/env_isaac_genmo/bin/python -B /home/user/liwei/awr-worktrees/legged_lab_gmt/scripts/rsl_rl/serve_frozen_gmt_vector.py --config /data1/user/liwei/GENMO_outputs/stage2_awr/formal5_20261020_01/evaluation/stage1_fixed_c49b0912/rank07/world/physical.yaml --socket /tmp/stage8_rpc_0zkxlz1r/awr.sock --headless"
+    },
+    {
+      "pid": 3067604,
+      "ppid": 3033590,
+      "command": "/data0/user/liwei/closedloop_stage10_v3_runtime/env_isaac_genmo/bin/python -B /home/user/liwei/awr-worktrees/legged_lab_gmt/scripts/rsl_rl/serve_frozen_gmt_vector.py --config /data1/user/liwei/GENMO_outputs/stage2_awr/formal5_20261020_01/evaluation/stage1_fixed_c49b0912/rank03/world/physical.yaml --socket /tmp/stage8_rpc_52773zu5/awr.sock --headless"
+    },
+    {
+      "pid": 3067605,
+      "ppid": 3033593,
+      "command": "/data0/user/liwei/closedloop_stage10_v3_runtime/env_isaac_genmo/bin/python -B /home/user/liwei/awr-worktrees/legged_lab_gmt/scripts/rsl_rl/serve_frozen_gmt_vector.py --config /data1/user/liwei/GENMO_outputs/stage2_awr/formal5_20261020_01/evaluation/stage1_fixed_c49b0912/rank06/world/physical.yaml --socket /tmp/stage8_rpc_ip3a3x1t/awr.sock --headless"
+    },
+    {
+      "pid": 3067606,
+      "ppid": 3033591,
+      "command": "/data0/user/liwei/closedloop_stage10_v3_runtime/env_isaac_genmo/bin/python -B /home/user/liwei/awr-worktrees/legged_lab_gmt/scripts/rsl_rl/serve_frozen_gmt_vector.py --config /data1/user/liwei/GENMO_outputs/stage2_awr/formal5_20261020_01/evaluation/stage1_fixed_c49b0912/rank04/world/physical.yaml --socket /tmp/stage8_rpc_ae00nafg/awr.sock --headless"
+    },
+    {
+      "pid": 3067607,
+      "ppid": 3033587,
+      "command": "/data0/user/liwei/closedloop_stage10_v3_runtime/env_isaac_genmo/bin/python -B /home/user/liwei/awr-worktrees/legged_lab_gmt/scripts/rsl_rl/serve_frozen_gmt_vector.py --config /data1/user/liwei/GENMO_outputs/stage2_awr/formal5_20261020_01/evaluation/stage1_fixed_c49b0912/rank00/world/physical.yaml --socket /tmp/stage8_rpc_nudm9ho3/awr.sock --headless"
+    }
+  ],
+  "evaluation_progress": {
+    "evaluation_progress/stage1_fixed/rank03.json": {
+      "keys": [
+        "identity",
+        "references",
+        "schema",
+        "task_ids"
+      ],
+      "completed": 2
+    }
+  },
+  "calibration": {
+    "actor_fingerprint": "e881b975aaae97e344e57a8747e19de9817fd45357770fada3749801093ee28c",
+    "assets": {
+      "checkpoint": "51b522fbdeb0ec289e5ffc24e2fccca9888df90495f57f96714c1bb43c05f8e2",
+      "gmt_checkpoint": "79d1a99e54db42342927ec178329dab88772bafbc05df1b0dbe310bc6dd0b319",
+      "gmt_policy": "31a8f999b652d272246b803d4ffa708f3125de92c0d573411ef13fc3ee6ced20",
+      "kinematics": "c08731704dccece11351b6fa877e30bac5ca2a8d363de30af7ca2ea1398f4029",
+      "stats": "c7c0acb0e7a38797adb38ce0be41ee72820e34daed4e780275c64fb55c3e5326"
+    },
+    "sampler": {
+      "actor": "same_network_all_steps",
+      "eta": 0.0,
+      "guidance_scale": 2.5,
+      "noise": "initial_gaussian",
+      "schema": "genmo.awr.stage1_ddim.v1",
+      "steps": 20
+    },
+    "samples_seconds": [
+      0.23017525672912598,
+      0.23681944236159325,
+      0.2401799401268363,
+      0.22849297896027565,
+      0.23039616644382477,
+      0.22810209542512894,
+      0.22710395324975252,
+      0.22722259629517794,
+      0.224461292847991,
+      0.2248940048739314,
+      0.22489347588270903,
+      0.22779945004731417,
+      0.22502818796783686,
+      0.22402115538716316,
+      0.22371400892734528,
+      0.2229368630796671,
+      0.23038920015096664,
+      0.22702365648001432,
+      0.22663218434900045,
+      0.22718741465359926,
+      0.22575914952903986,
+      0.22586275823414326,
+      0.2299013053998351,
+      0.22550633642822504,
+      0.2315476117655635,
+      0.23192526306957006,
+      0.2303109299391508,
+      0.2323664491996169,
+      0.23414874356240034,
+      0.23572501074522734,
+      0.23103106301277876,
+      0.2305991305038333,
+      0.2293686242774129,
+      0.23021231405436993,
+      0.23018327727913857,
+      0.23402009718120098,
+      0.23086951579898596,
+      0.23011178988963366,
+      0.22911606915295124,
+      0.23056326620280743,
+      0.2224870976060629,
+      0.2215540949255228,
+      0.22114392928779125,
+      0.22627924848347902,
+      0.2220699805766344,
+      0.2167076962068677,
+      0.21351957693696022,
+      0.21419095527380705,
+      0.2196630546823144,
+      0.2200107192620635,
+      0.22003660909831524,
+      0.2203574227169156,
+      0.22342089843004942,
+      0.2259128112345934,
+      0.22553370520472527,
+      0.2205948168411851,
+      0.22014141641557217,
+      0.22129525803029537,
+      0.22009515762329102,
+      0.22033022344112396,
+      0.22069897036999464,
+      0.22688091360032558,
+      0.22064864542335272,
+      0.2206417741253972
+    ],
+    "schema": "genmo.awr.deployment_calibration.v1",
+    "scope": "single_request_condition_generation_prepare_wallclock_excluding_audit",
+    "source_commits": {
+      "genmo": "6c5fda0e006e949e31a8003506e596403b0bcee7",
+      "gmt": "4ca256fe79d2dda22240011947ead276690e40f7"
+    }
+  },
+  "gpu_inventory": "0, 8016 MiB, 1 %\n1, 7684 MiB, 42 %\n2, 7668 MiB, 48 %\n3, 7674 MiB, 48 %\n4, 7658 MiB, 50 %\n5, 7676 MiB, 95 %\n6, 7660 MiB, 50 %\n7, 7674 MiB, 51 %",
+  "exit_receipt_present": false,
+  "scope": "live_startup_evidence_not_completed_macro_or_learning_benefit",
+  "cpu_tests_sha256": "d0a9e35e6f6ac3db0ba57ddd49250c833af5a7bd4fb4c4f20657acc83ced49ca",
+  "preflight_sha256": "79a6e8f660a4f1cca9850bd8f728e53b55cbbe9c148d6c43df09f38dd9b4eb85"
+}

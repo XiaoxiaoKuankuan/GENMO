@@ -1,0 +1,10 @@
+{
+  "repository": "/home/user/liwei/awr-worktrees/GENMO-formal5-20261020",
+  "commit": "6c5fda0e006e949e31a8003506e596403b0bcee7",
+  "exit_code": 0,
+  "seconds": 14.125785090960562,
+  "stdout": ".....................................................................    [100%]\n=============================== warnings summary ===============================\ngem/network/base_arch/embeddings/rotary_embedding.py:16\n  /home/user/liwei/awr-worktrees/GENMO-formal5-20261020/gem/network/base_arch/embeddings/rotary_embedding.py:16: FutureWarning: `torch.cuda.amp.autocast(args...)` is deprecated. Please use `torch.amp.autocast('cuda', args...)` instead.\n    @autocast(enabled=False)\n\n-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html\n69 passed, 1 warning in 9.43s\n",
+  "stderr": "",
+  "gpu_visible": false,
+  "temporary_directory_removed": true
+}

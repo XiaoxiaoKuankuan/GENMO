@@ -1,0 +1,29 @@
+{
+  "schema": "genmo.awr.preflight.v1",
+  "assets": {
+    "checkpoint": "51b522fbdeb0ec289e5ffc24e2fccca9888df90495f57f96714c1bb43c05f8e2",
+    "gmt_checkpoint": "79d1a99e54db42342927ec178329dab88772bafbc05df1b0dbe310bc6dd0b319",
+    "gmt_policy": "31a8f999b652d272246b803d4ffa708f3125de92c0d573411ef13fc3ee6ced20",
+    "kinematics": "c08731704dccece11351b6fa877e30bac5ca2a8d363de30af7ca2ea1398f4029",
+    "stats": "c7c0acb0e7a38797adb38ce0be41ee72820e34daed4e780275c64fb55c3e5326"
+  },
+  "repositories": {
+    "genmo": {
+      "path": "/home/user/liwei/awr-worktrees/GENMO-formal5-20261020",
+      "branch": "feature/stage2-awr",
+      "commit": "6c5fda0e006e949e31a8003506e596403b0bcee7"
+    },
+    "gmt": {
+      "path": "/home/user/liwei/awr-worktrees/legged_lab_gmt",
+      "branch": "feature/stage2-awr",
+      "commit": "4ca256fe79d2dda22240011947ead276690e40f7"
+    }
+  },
+  "configuration_assets": {
+    "gmt_agent_config": "b633ab8ab057b9915a78424e0239cbea3ecd9e3a5ecc0c9b55c645699a6533b6",
+    "isaac_contract": "6f4af854170b6f6e5c2948a53bc822ac60beb000edf9e291bf1bddc37e797939"
+  },
+  "gpu_inventory": "0, GPU-cff52133-172a-53df-6063-aacf679a4455, 85651 MiB\n1, GPU-63d9acb7-e636-a376-ec35-0a661bd45e0f, 85651 MiB\n2, GPU-1fa4842f-9bb3-3bf9-e164-791adb11b576, 85651 MiB\n3, GPU-6e3fba66-b2e5-09c5-3ad5-a6d42ba18466, 85651 MiB\n4, GPU-4fb2d7c5-44ff-77f0-189f-70e52f4d6ce0, 85651 MiB\n5, GPU-8135d788-79ff-1d8c-88ca-5304f2a1d20d, 85651 MiB\n6, GPU-52661e90-d710-405e-24c5-91175147c6a0, 85651 MiB\n7, GPU-871238e9-1865-447b-205e-c7e76334b7b3, 85651 MiB",
+  "config_sha256": "6cf432adaaaba61c80929917e1fd75188fb421217864410438f25a08a7ca4d8b",
+  "checked_unix": 1792506004.1476076
+}

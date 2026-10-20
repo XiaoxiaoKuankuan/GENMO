@@ -4,6 +4,20 @@
 本次从原始Stage1 s595000新建运行，不修改已完成先导实验的request、模型或预算。
 训练目标、奖励、冻结GMT、初始化、学习率和完整评价协议沿用已验收配置。
 
+**已于北京时间2026-10-20 22:20:54启动。** 启动核对时状态为
+`running / evaluation_stage1_fixed / macro=0`：部署校准完成，正在建立新运行的冻结
+Stage1基线，尚未完成第一宏迭代。现场核验8个训练rank和8个GMT/PhysX后端存活，
+至少2个完整评价任务已写入逐任务账本；没有用父进程或会话存在冒称Actor更新完成。
+
+正式GENMO源码固定`6c5fda0e006e949e31a8003506e596403b0bcee7`，
+GMT固定`4ca256fe79d2dda22240011947ead276690e40f7`。
+回执父进程PID3033480，torchrun PID3033569，训练rank PID3033587–3033594。
+固定request摘要为`6cf432adaaaba61c80929917e1fd75188fb421217864410438f25a08a7ca4d8b`。
+[启动现场](validation/stage2_awr_formal5_startup_20261020.json)、
+[冻结资产和空闲资源预检](validation/stage2_awr_formal5_preflight_20261020.json)、
+[Server-2 CPU测试](validation/stage2_awr_formal5_cpu_tests_20261020.json)
+均已归档。这是启动时点证据，后续进度和结果以实时state及正式报告为准。
+
 | 参数 | 正式配置 |
 |---|---|
 | 最大宏迭代 | 5 |
@@ -76,5 +90,6 @@ tail -n 60 /data1/user/liwei/GENMO_outputs/stage2_awr/formal5_20261020_01.log
 
 本次代码检查：69项AWR CPU测试通过，包括跨轮26次共享、8+7+11耗尽、恢复不重置、
 中断预留不退还、未封存上一轮/篡改计划拒绝、原预热失败不重试以及正式参数与原配置
-逐项相同。AST、bash语法、diff检查通过，测试临时目录自动清理。
-这组测试不是五轮物理效果结论；实际启动身份和进度以启动后归档的证据为准。
+逐项相同。本地pytest7.64秒，Server-2同69项通过（pytest9.43秒），服务器测试禁用
+CUDA可见设备。AST、bash语法、diff检查通过，测试临时目录自动清理。
+这组测试与启动成功均不构成五轮物理效果结论；尚未提前记录学习收益。
