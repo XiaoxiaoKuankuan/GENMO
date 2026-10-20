@@ -117,6 +117,9 @@ def module_ablation(policy,rows,cache,initial,distributed,output,*,selected=None
             episodes[identity[:3]].append(row.metadata['compact_execution_provenance'])
     consumed={key:consumption_report(records) for key,records in episodes.items()}
     before_cpu=immutable_cpu_snapshot(before_probe)
+    summed_layer_direction=torch.zeros_like(before_probe['mean'],dtype=torch.float64)
+    individual_direction_energy=summed_layer_direction.new_zeros(())
+    backbone_direction=None
     def matches(name,group):
         if not layerwise:return _group(name)==group
         if group=='transformer_backbone':return name.startswith('denoiser.blocks.')
@@ -132,6 +135,11 @@ def module_ablation(policy,rows,cache,initial,distributed,output,*,selected=None
             ratio,_=whole_chain_statistics(policy,selected,cache,distributed,metadata)
             mask=before_probe['mask'][:,None].expand_as(before_probe['mean'])
             standardized=(probe['mean'].double()-before_probe['mean'].double())/before_probe['actual_std'].double()
+            if layerwise and group=='transformer_backbone':
+                backbone_direction=standardized.clone()
+            elif layerwise and group.startswith('transformer_'):
+                summed_layer_direction.add_(standardized)
+                individual_direction_energy+=standardized.square()[mask].sum()
             totals=distributed.all_gather_object(dict(
                 standardized_mean_square_sum=float(standardized.square()[mask].sum()),free_coordinates=int(mask.sum())))
             after_cpu=immutable_cpu_snapshot(probe)
@@ -149,8 +157,24 @@ def module_ablation(policy,rows,cache,initial,distributed,output,*,selected=None
                 complete=False,probe_selection='ordinary_plus_high_KL_and_log_ratio_tails',
                 scope='isolated_actual_same_Adam_delta_on_same_real_rows_nonlinear_effects_not_additive')))
             if distributed.rank==0:print(json.dumps(dict(ablation=group,joint_kl=ratio['joint_kl_mean'])),flush=True)
+        interaction=None
+        if layerwise:
+            # 只累加真实隔离后的均值变化向量，保留符号；不把单层KL相加冒充联合KL。
+            moments=torch.stack((individual_direction_energy,summed_layer_direction.square()[mask].sum(),
+                backbone_direction.square()[mask].sum(),
+                (backbone_direction-summed_layer_direction).square()[mask].sum(),
+                (backbone_direction*summed_layer_direction)[mask].sum()))
+            energy=distributed.sum_tensor(moments).cpu().tolist()
+            interaction=dict(individual_direction_energy_sum=energy[0],
+                isolated_directions_sum_energy=energy[1],actual_backbone_direction_energy=energy[2],
+                coherent_amplification=energy[1]/max(energy[0],1e-300),
+                isolated_sum_relative_residual=math.sqrt(energy[3]/max(energy[2],1e-300)),
+                isolated_sum_actual_backbone_cosine=energy[4]/max(math.sqrt(energy[1]*energy[2]),1e-300),
+                scope='signed_standardized_old_path_mean_directions_same_probe_mask; '
+                    'finite_isolated_update_sum_not_Jacobian_or_additive_KL')
         root_call(distributed,lambda:atomic_json(output/'module_ablation.json',dict(groups=result,
             complete=True,probe_selection='ordinary_plus_high_KL_and_log_ratio_tails',
+            transformer_direction_interaction=interaction,
             sensitive_layers=[int(r['module'].rsplit('_',1)[1]) for r in
                 sorted((r for r in result if r['module'].startswith('transformer_') and
                     r['module']!='transformer_backbone'),key=lambda r:r['probability']['joint_kl_mean'],reverse=True)[:2]],
