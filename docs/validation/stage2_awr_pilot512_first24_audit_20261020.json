@@ -1,0 +1,287 @@
+{
+  "schema": "genmo.awr.independent_replay_audit.v1",
+  "run_dir": "/data1/user/liwei/GENMO_outputs/stage2_awr/pilot512_20261020_01",
+  "source_commits": {
+    "genmo": "f417545456e9919e67b2b28fd963bdd680a8b5ec",
+    "gmt": "4ca256fe79d2dda22240011947ead276690e40f7"
+  },
+  "published_at_snapshot": 78,
+  "audited_episodes": 24,
+  "all_published_audited": false,
+  "independent_mc_formula": "per_control_reverse_sum_gamma_0.99_pow_1_over_25",
+  "reward_multiplied_by_dt_again": false,
+  "seconds": 53.01575171761215,
+  "outcomes": {
+    "non_yaw_anchor_ori": 7,
+    "ee_body_pos": 3,
+    "yaw_anchor_ori": 9,
+    "anchor_pos": 1,
+    "music_end": 4
+  },
+  "episodes": [
+    {
+      "episode_id": "e1b91b8e90ffaab7c8860d86ef9d20564628a539c3b8d28853598694855dd57d",
+      "source": "FineDance",
+      "states": 3,
+      "actor_samples": 2,
+      "controls": 64,
+      "reason": "non_yaw_anchor_ori",
+      "mc_max_absolute_error": 2.220446049250313e-15,
+      "generated_target_max_absolute_error": 0.0,
+      "full_manifest_and_all_array_sha_verified": true
+    },
+    {
+      "episode_id": "673e4106b45d8b1cee842e0217989d6084b3ee5b519a9d58beea45701882b7a5",
+      "source": "FineDance",
+      "states": 15,
+      "actor_samples": 14,
+      "controls": 352,
+      "reason": "ee_body_pos",
+      "mc_max_absolute_error": 7.105427357601002e-15,
+      "generated_target_max_absolute_error": 0.0,
+      "full_manifest_and_all_array_sha_verified": true
+    },
+    {
+      "episode_id": "51bc5171b44bb27922f7da21d0250fd48904d72b2cb5c466d1232b7f58415136",
+      "source": "FineDance",
+      "states": 22,
+      "actor_samples": 21,
+      "controls": 528,
+      "reason": "non_yaw_anchor_ori",
+      "mc_max_absolute_error": 1.0658141036401503e-14,
+      "generated_target_max_absolute_error": 0.0,
+      "full_manifest_and_all_array_sha_verified": true
+    },
+    {
+      "episode_id": "90a0bb2080cf0485115ad477d68d13ed9538031b56f0714adbc2b6c90e32cee8",
+      "source": "FineDance",
+      "states": 28,
+      "actor_samples": 27,
+      "controls": 690,
+      "reason": "non_yaw_anchor_ori",
+      "mc_max_absolute_error": 4.618527782440651e-14,
+      "generated_target_max_absolute_error": 0.0,
+      "full_manifest_and_all_array_sha_verified": true
+    },
+    {
+      "episode_id": "e140e686b86378d7e3d0982e15fa8404e05e4528af0b148b6b4fdd60152fe2bb",
+      "source": "FineDance",
+      "states": 32,
+      "actor_samples": 32,
+      "controls": 792,
+      "reason": "ee_body_pos",
+      "mc_max_absolute_error": 3.552713678800501e-14,
+      "generated_target_max_absolute_error": 0.0,
+      "full_manifest_and_all_array_sha_verified": true
+    },
+    {
+      "episode_id": "e897022bf79b10e3aed3d86d03df2333b1519a598910cb52cf0dfbe312a19e32",
+      "source": "FineDance",
+      "states": 53,
+      "actor_samples": 52,
+      "controls": 1307,
+      "reason": "non_yaw_anchor_ori",
+      "mc_max_absolute_error": 5.684341886080802e-14,
+      "generated_target_max_absolute_error": 0.0,
+      "full_manifest_and_all_array_sha_verified": true
+    },
+    {
+      "episode_id": "87f353b7085912cb8d4e0bbad23b122295ad433fe87257ec5617b9509204d27d",
+      "source": "FineDance",
+      "states": 56,
+      "actor_samples": 56,
+      "controls": 1397,
+      "reason": "ee_body_pos",
+      "mc_max_absolute_error": 1.2079226507921703e-13,
+      "generated_target_max_absolute_error": 0.0,
+      "full_manifest_and_all_array_sha_verified": true
+    },
+    {
+      "episode_id": "c88801360fe98e92e23903558ff305611f7f714330d5d4d998f206d42c933bbf",
+      "source": "FineDance",
+      "states": 62,
+      "actor_samples": 61,
+      "controls": 1536,
+      "reason": "non_yaw_anchor_ori",
+      "mc_max_absolute_error": 1.4210854715202004e-13,
+      "generated_target_max_absolute_error": 0.0,
+      "full_manifest_and_all_array_sha_verified": true
+    },
+    {
+      "episode_id": "068ebd51a03d73f3ca15cd3d34cfe40ad5cfdbc9d564d92954fe6cd1793239e1",
+      "source": "FineDance",
+      "states": 69,
+      "actor_samples": 68,
+      "controls": 1711,
+      "reason": "yaw_anchor_ori",
+      "mc_max_absolute_error": 1.3500311979441904e-13,
+      "generated_target_max_absolute_error": 0.0,
+      "full_manifest_and_all_array_sha_verified": true
+    },
+    {
+      "episode_id": "5d7053b632c66e24260302bcf0422cc5828412c3880785ef1b90acf92dfe9f94",
+      "source": "FineDance",
+      "states": 71,
+      "actor_samples": 71,
+      "controls": 1769,
+      "reason": "anchor_pos",
+      "mc_max_absolute_error": 1.4210854715202004e-13,
+      "generated_target_max_absolute_error": 0.0,
+      "full_manifest_and_all_array_sha_verified": true
+    },
+    {
+      "episode_id": "fda9bb70060858c477c1e20737177524935c722c62ff109c431ef70e4da1047a",
+      "source": "Mine",
+      "states": 87,
+      "actor_samples": 87,
+      "controls": 2169,
+      "reason": "yaw_anchor_ori",
+      "mc_max_absolute_error": 2.7000623958883807e-13,
+      "generated_target_max_absolute_error": 0.0,
+      "full_manifest_and_all_array_sha_verified": true
+    },
+    {
+      "episode_id": "02e59769747eac646167f1f235d18ef3fa1c229456bf4fee97e153f4398993c2",
+      "source": "AIOZ-GDANCE",
+      "states": 91,
+      "actor_samples": 91,
+      "controls": 2273,
+      "reason": "yaw_anchor_ori",
+      "mc_max_absolute_error": 1.7763568394002505e-13,
+      "generated_target_max_absolute_error": 0.0,
+      "full_manifest_and_all_array_sha_verified": true
+    },
+    {
+      "episode_id": "317e421dba410ecfac1cdd64c520cd8d2f7b52a9ac4b3f15a103c6fc4e85c40e",
+      "source": "FineDance",
+      "states": 93,
+      "actor_samples": 92,
+      "controls": 2313,
+      "reason": "non_yaw_anchor_ori",
+      "mc_max_absolute_error": 1.5631940186722204e-13,
+      "generated_target_max_absolute_error": 0.0,
+      "full_manifest_and_all_array_sha_verified": true
+    },
+    {
+      "episode_id": "1c063afa00af87b42680615100df6cab29f72b906cf5c8166f47f01c202d15f8",
+      "source": "Mine",
+      "states": 89,
+      "actor_samples": 88,
+      "controls": 2213,
+      "reason": "music_end",
+      "mc_max_absolute_error": 2.2737367544323206e-13,
+      "generated_target_max_absolute_error": 0.0,
+      "full_manifest_and_all_array_sha_verified": true
+    },
+    {
+      "episode_id": "50429a65ce8f7b15ac27a87f40d7bbd03745edce6ae63a800dfd74fe549156b0",
+      "source": "FineDance",
+      "states": 98,
+      "actor_samples": 97,
+      "controls": 2430,
+      "reason": "yaw_anchor_ori",
+      "mc_max_absolute_error": 9.237055564881302e-14,
+      "generated_target_max_absolute_error": 0.0,
+      "full_manifest_and_all_array_sha_verified": true
+    },
+    {
+      "episode_id": "a8560d06fc4c2e8031a929045bfa7fb56d3edbd9a1aa97ff964a835ba7051b2c",
+      "source": "FineDance",
+      "states": 97,
+      "actor_samples": 96,
+      "controls": 2408,
+      "reason": "yaw_anchor_ori",
+      "mc_max_absolute_error": 2.4158453015843406e-13,
+      "generated_target_max_absolute_error": 0.0,
+      "full_manifest_and_all_array_sha_verified": true
+    },
+    {
+      "episode_id": "f27715dae9acbc0bc71f03e6bc7f2a28dfc85608d68b326d97608d44564fcddf",
+      "source": "AIOZ-GDANCE",
+      "states": 76,
+      "actor_samples": 76,
+      "controls": 1900,
+      "reason": "music_end",
+      "mc_max_absolute_error": 1.3500311979441904e-13,
+      "generated_target_max_absolute_error": 0.0,
+      "full_manifest_and_all_array_sha_verified": true
+    },
+    {
+      "episode_id": "9925a0afd3a6d0c3ca9ea49e824ab2228b747bea6c49e05117f05f2d9ffeb530",
+      "source": "FineDance",
+      "states": 100,
+      "actor_samples": 99,
+      "controls": 2487,
+      "reason": "non_yaw_anchor_ori",
+      "mc_max_absolute_error": 4.973799150320701e-14,
+      "generated_target_max_absolute_error": 0.0,
+      "full_manifest_and_all_array_sha_verified": true
+    },
+    {
+      "episode_id": "f78f643b0f26503ad6712ee4e83e134da735787458c7ae18a296369518bdd8f3",
+      "source": "FineDance",
+      "states": 101,
+      "actor_samples": 101,
+      "controls": 2519,
+      "reason": "yaw_anchor_ori",
+      "mc_max_absolute_error": 8.526512829121202e-14,
+      "generated_target_max_absolute_error": 0.0,
+      "full_manifest_and_all_array_sha_verified": true
+    },
+    {
+      "episode_id": "5352fdb8f215d427e00145a218d6754b3b1aa353413efa437e64083c73b286e5",
+      "source": "FineDance",
+      "states": 106,
+      "actor_samples": 105,
+      "controls": 2628,
+      "reason": "yaw_anchor_ori",
+      "mc_max_absolute_error": 1.7053025658242404e-13,
+      "generated_target_max_absolute_error": 0.0,
+      "full_manifest_and_all_array_sha_verified": true
+    },
+    {
+      "episode_id": "7d6661a6a6ecca57e1691b394a6030f5a59e8f6875f9228a5f1784b722bea6f8",
+      "source": "AIOZ-GDANCE",
+      "states": 89,
+      "actor_samples": 88,
+      "controls": 2208,
+      "reason": "music_end",
+      "mc_max_absolute_error": 9.947598300641403e-14,
+      "generated_target_max_absolute_error": 0.0,
+      "full_manifest_and_all_array_sha_verified": true
+    },
+    {
+      "episode_id": "6d40538998977c553bad93d1482855269c050de921ad4e106a01a2dc18dd7ec6",
+      "source": "FineDance",
+      "states": 106,
+      "actor_samples": 105,
+      "controls": 2633,
+      "reason": "yaw_anchor_ori",
+      "mc_max_absolute_error": 1.5631940186722204e-13,
+      "generated_target_max_absolute_error": 0.0,
+      "full_manifest_and_all_array_sha_verified": true
+    },
+    {
+      "episode_id": "7b6a0e9bc2b5b52ac5a2d02e5b12f93c69f4cb0604b0d2883b854f2da71d8257",
+      "source": "FineDance",
+      "states": 107,
+      "actor_samples": 106,
+      "controls": 2654,
+      "reason": "yaw_anchor_ori",
+      "mc_max_absolute_error": 1.4210854715202004e-13,
+      "generated_target_max_absolute_error": 0.0,
+      "full_manifest_and_all_array_sha_verified": true
+    },
+    {
+      "episode_id": "1e88e187466349a29e095303f1d71be96df928cfa3a1687232b7fe737a7a1420",
+      "source": "AIOZ-GDANCE",
+      "states": 107,
+      "actor_samples": 106,
+      "controls": 2658,
+      "reason": "music_end",
+      "mc_max_absolute_error": 4.263256414560601e-13,
+      "generated_target_max_absolute_error": 0.0,
+      "full_manifest_and_all_array_sha_verified": true
+    }
+  ]
+}

@@ -11,11 +11,27 @@ import threading
 import pytest
 
 
-def test_partial_report_preserves_failures_and_run_identity(tmp_path):
-    module_path = Path(__file__).resolve().parents[3] / "tools" / "report_stage2_awr.py"
-    spec = importlib.util.spec_from_file_location("awr_report", module_path)
+def load_tool(name):
+    module_path = Path(__file__).resolve().parents[3] / "tools" / (name + ".py")
+    spec = importlib.util.spec_from_file_location(name, module_path)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
+    return module
+
+
+def test_independent_audit_uses_rewards_not_stored_mc_labels(episode_factory):
+    import numpy as np
+    module = load_tool("audit_stage2_awr_replay")
+    _, _, make = episode_factory
+    episode = make(lengths=(2, 0), rewards=((1., 2.), ()), event=-5.)
+    episode.returns.fill_(9999.)
+    gamma = .99 ** (1/25)
+    np.testing.assert_allclose(module.independent_mc(episode.rows),
+                               [1+2*gamma-5*gamma**2, -5.], rtol=1e-14, atol=1e-14)
+
+
+def test_partial_report_preserves_failures_and_run_identity(tmp_path):
+    module = load_tool("report_stage2_awr")
     compare = tmp_path / "comparison.json"
     compare.write_text(json.dumps(dict(balanced_return_delta=5., acceptable=False,
         improvement_supported=False, new_paired_failures=["failed_task"], paired=[{"task_id": "failed_task"}])))

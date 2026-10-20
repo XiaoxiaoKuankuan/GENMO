@@ -98,10 +98,16 @@ Server-2真实s595000＋原Stage1 BC八卡NCCL测试通过：9 AWR／3 BC 的相
 
 ```bash
 python3 tools/report_stage2_awr.py --run-dir <运行目录> --output <新的验收JSON路径>
+python3 tools/audit_stage2_awr_replay.py --run-dir <运行目录> \
+  --max-episodes 24 --output <新的回报审计JSON路径>
 ```
 
 汇总只读取已提交的状态和JSON报告，不需要GPU，不重算评价或选择模型。它保留实际
 运行的源码提交、报告摘要及失败门槛；进行中的阶段不会补写结果。已有输出文件拒绝覆盖。
+独立Replay审计还核验完整manifest及数组SHA、物理区间连续性、原始生成目标和实际提交，
+并逐50Hz控制步逆推MC，不调用训练的区间回报函数。省略`--max-episodes`时核验调用时
+所有已原子发布Episode；正在运行时未完成的Episode不会被当成完整数据。报告明确抽查
+数量和当时发布总量，不能将抽样通过说成全部Episode通过。
 新运行在`resources/gpu_<attempt>.jsonl`每秒记录整卡显存与利用率，结束发布同名summary；
 恢复生成新attempt。整卡峰值是离散采样的下界，包含GMT和驱动开销；Actor训练报告
 另给PyTorch allocator峰值及统计范围，二者不混用。
