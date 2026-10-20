@@ -1,0 +1,302 @@
+{
+  "paired": [
+    {
+      "task_id": "03428eec0d43d1b5c6e61dd5",
+      "reward_delta": -5.570255437770527,
+      "seconds_delta": 0.0
+    },
+    {
+      "task_id": "09c415ded3803cc7ed74b785",
+      "reward_delta": -5.08695501326298,
+      "seconds_delta": 0.0
+    },
+    {
+      "task_id": "0c7a0fc09abd15072ff4e6d3",
+      "reward_delta": -1.2664874432383044,
+      "seconds_delta": 0.0
+    },
+    {
+      "task_id": "1565ebe938e864ad61f1405c",
+      "reward_delta": -0.017824673840820537,
+      "seconds_delta": 0.0
+    },
+    {
+      "task_id": "1dd7b5b7abf39360ed8e85a8",
+      "reward_delta": 2.8825423514898603,
+      "seconds_delta": 0.0
+    },
+    {
+      "task_id": "286083fb40a5d6667fac1816",
+      "reward_delta": 1.1337087707645779,
+      "seconds_delta": 0.0
+    },
+    {
+      "task_id": "2aea7110132de7f2e178a4c4",
+      "reward_delta": 7.667044526867642,
+      "seconds_delta": 0.0
+    },
+    {
+      "task_id": "2c17f32d93cfa5ab71e6488b",
+      "reward_delta": 1.6624363932378934,
+      "seconds_delta": 0.0
+    },
+    {
+      "task_id": "3261eb2a1903b8b663f9dc6a",
+      "reward_delta": 0.4883485200458608,
+      "seconds_delta": 0.0
+    },
+    {
+      "task_id": "331cdce69faad689f96ac651",
+      "reward_delta": -1.6467538215724034,
+      "seconds_delta": 0.0
+    },
+    {
+      "task_id": "38a1273e6ea792ae34bf5ff0",
+      "reward_delta": 4.940638814565602,
+      "seconds_delta": 0.0
+    },
+    {
+      "task_id": "416112bf1edb74a1578e7e9b",
+      "reward_delta": -3.1802005469706103,
+      "seconds_delta": 0.0
+    },
+    {
+      "task_id": "431664876116ccc3585cea65",
+      "reward_delta": -0.39191511018644576,
+      "seconds_delta": 0.0
+    },
+    {
+      "task_id": "444bf7d1d20b55f9f8017103",
+      "reward_delta": 2.22172682304544,
+      "seconds_delta": 0.0
+    },
+    {
+      "task_id": "473f0bb5dc06ec02b77cfaf9",
+      "reward_delta": -1.06745299903249,
+      "seconds_delta": 0.0
+    },
+    {
+      "task_id": "52f727de98c3d43393bb7b07",
+      "reward_delta": 2.4550913367956184,
+      "seconds_delta": 0.0
+    },
+    {
+      "task_id": "5b9601d8b77fdc6ba239d68c",
+      "reward_delta": -0.30110050755829576,
+      "seconds_delta": 0.0
+    },
+    {
+      "task_id": "5e4f85adfe191f4a6c0a8f54",
+      "reward_delta": 0.962521015278611,
+      "seconds_delta": 0.0
+    },
+    {
+      "task_id": "631eb22a6980382911e187f3",
+      "reward_delta": -18.10072894819382,
+      "seconds_delta": -5.900000000000006
+    },
+    {
+      "task_id": "693028a1ee3677bdfe8218a9",
+      "reward_delta": 3.7770725209009584,
+      "seconds_delta": 0.0
+    },
+    {
+      "task_id": "6a5e4dd831f02999109762b0",
+      "reward_delta": 1.3443437182410776,
+      "seconds_delta": 0.0
+    },
+    {
+      "task_id": "6b660923eb127f34137fed7e",
+      "reward_delta": 4.166645380812781,
+      "seconds_delta": 0.0
+    },
+    {
+      "task_id": "73fa9e3a88b066ff01b02487",
+      "reward_delta": 3.720718176295051,
+      "seconds_delta": 0.0
+    },
+    {
+      "task_id": "7b2c721a7e9d978dc5104867",
+      "reward_delta": -0.05469747380631418,
+      "seconds_delta": 0.0
+    },
+    {
+      "task_id": "7b9599d87512b7196cc95a92",
+      "reward_delta": -0.5690830906123949,
+      "seconds_delta": 0.0
+    },
+    {
+      "task_id": "8a0d394b325b27eef58df09a",
+      "reward_delta": -6.346966786029924,
+      "seconds_delta": -1.0
+    },
+    {
+      "task_id": "8f06148b3df2e8a170887250",
+      "reward_delta": 8.039018327896898,
+      "seconds_delta": 0.0
+    },
+    {
+      "task_id": "9557ee5595a53e772bdb18c9",
+      "reward_delta": 3.634173960769971,
+      "seconds_delta": 0.0
+    },
+    {
+      "task_id": "961fd8d12d052a00d5ff5c82",
+      "reward_delta": -7.179675995861658,
+      "seconds_delta": 0.0
+    },
+    {
+      "task_id": "994e15e1201b19158ac33df4",
+      "reward_delta": 1.7686181867041668,
+      "seconds_delta": 0.0
+    },
+    {
+      "task_id": "a5da31ec91e7f1e911843696",
+      "reward_delta": -1.3333985276266844,
+      "seconds_delta": 0.0
+    },
+    {
+      "task_id": "a8089284e45eabfe31bbf403",
+      "reward_delta": -3.662218504286642,
+      "seconds_delta": 0.0
+    },
+    {
+      "task_id": "ab685174f0aed999e0376b75",
+      "reward_delta": -76.32736545330499,
+      "seconds_delta": -32.17999999999999
+    },
+    {
+      "task_id": "ae7b305f39c86dd120fe3363",
+      "reward_delta": 2.3429791894801326,
+      "seconds_delta": 0.0
+    },
+    {
+      "task_id": "b1440040e4d630ba9434bf0d",
+      "reward_delta": 1.8454315287275165,
+      "seconds_delta": 0.0
+    },
+    {
+      "task_id": "b5376df0b8a3313f3914d25a",
+      "reward_delta": -3.1339204941979233,
+      "seconds_delta": 0.0
+    },
+    {
+      "task_id": "b8ff8e0b7df04071d6d3105a",
+      "reward_delta": 4.774615470356068,
+      "seconds_delta": 0.0
+    },
+    {
+      "task_id": "bc2eb465d4f70d8bb407a9ef",
+      "reward_delta": 3.773309475600172,
+      "seconds_delta": 0.0
+    },
+    {
+      "task_id": "be279940ebabe2a21bc9c6ba",
+      "reward_delta": 19.9848841869766,
+      "seconds_delta": 3.539999999999999
+    },
+    {
+      "task_id": "ca60b6479759f610f913b6a9",
+      "reward_delta": 2.6834551153582993,
+      "seconds_delta": 0.6800000000000068
+    },
+    {
+      "task_id": "cf3b0ed210706e0399c4f0cb",
+      "reward_delta": -4.947201769883094,
+      "seconds_delta": 0.0
+    },
+    {
+      "task_id": "d319ffd548ab2f4849f434f8",
+      "reward_delta": -5.854271574580309,
+      "seconds_delta": -5.140000000000001
+    },
+    {
+      "task_id": "e1cc48a5009dd958caca84a1",
+      "reward_delta": -5.919139488782008,
+      "seconds_delta": 0.0
+    },
+    {
+      "task_id": "e2a16ce8038161bf532862b4",
+      "reward_delta": -4.021848461229709,
+      "seconds_delta": 0.0
+    },
+    {
+      "task_id": "e6c4f40b8ae3c09c13ccc33f",
+      "reward_delta": -1.262872611491332,
+      "seconds_delta": 0.0
+    },
+    {
+      "task_id": "e6f3627a49408b8c80343024",
+      "reward_delta": 1.1239499833495046,
+      "seconds_delta": 0.0
+    },
+    {
+      "task_id": "eaf3c58ee8283e1e8aabbd2d",
+      "reward_delta": 6.185944734870546,
+      "seconds_delta": 0.0
+    },
+    {
+      "task_id": "ef2a06b7161a1cd5012730eb",
+      "reward_delta": -0.24483701385808843,
+      "seconds_delta": 0.0
+    },
+    {
+      "task_id": "ef9343eb22a8f2f6db5834b1",
+      "reward_delta": 8.439003397406694,
+      "seconds_delta": 0.0
+    },
+    {
+      "task_id": "f3f62b96b664dc70f22ceb58",
+      "reward_delta": -3.8208146516265344,
+      "seconds_delta": 0.0
+    },
+    {
+      "task_id": "f570e292ed63e12104a532d8",
+      "reward_delta": -3.353261131342876,
+      "seconds_delta": 0.0
+    },
+    {
+      "task_id": "f5a7f32972a83d10659e415b",
+      "reward_delta": -5.183607597909273,
+      "seconds_delta": 0.0
+    },
+    {
+      "task_id": "fab4b64302fee045991a0a94",
+      "reward_delta": -1.5222560973626713,
+      "seconds_delta": 0.0
+    },
+    {
+      "task_id": "fcc33594118e53e429eaf09e",
+      "reward_delta": -0.7047617406697384,
+      "seconds_delta": 0.0
+    }
+  ],
+  "balanced_return_delta": -1.7893258344360303,
+  "balanced_return_95ci": [
+    -5.487814457853017,
+    1.3244088467553197
+  ],
+  "confidence_unit": "source_balanced_music_group_cluster",
+  "activity_ratio": 1.3612219841310906,
+  "new_paired_failures": [
+    "631eb22a6980382911e187f3",
+    "d319ffd548ab2f4849f434f8"
+  ],
+  "gates": {
+    "completion_not_decreased": false,
+    "failure_count_not_increased": false,
+    "no_new_paired_failure": false,
+    "duration_not_decreased": false,
+    "activity_retained": true,
+    "complete_return_improved": false
+  },
+  "acceptable": false,
+  "improvement_supported": false,
+  "source_run": "/data1/user/liwei/GENMO_outputs/stage2_awr/pilot512_20261020_01",
+  "source_commits": {
+    "genmo": "f417545456e9919e67b2b28fd963bdd680a8b5ec",
+    "gmt": "4ca256fe79d2dda22240011947ead276690e40f7"
+  },
+  "method": "self_distillation_vs_stage1_all",
+  "new_physical_tasks": 0
+}

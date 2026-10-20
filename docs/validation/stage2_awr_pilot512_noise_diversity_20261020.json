@@ -1,0 +1,532 @@
+{
+  "scope": "same_saved_validation_condition_two_initial_gaussian_seeds",
+  "new_generations": 0,
+  "new_physical_tasks": 0,
+  "methods": {
+    "stage1": {
+      "case_pairs": [
+        {
+          "case": 0,
+          "source": "aistpp_bumi",
+          "joint_rms_rad": 0.2001889761499936,
+          "root_xy_velocity_rms_m_s": 0.0020343764376197474,
+          "root_height_rms_m": 0.004160301670705095,
+          "root_rotation6d_rms": 0.04785974248387932,
+          "contact_probability_rms": 0.12234754317592408
+        },
+        {
+          "case": 1,
+          "source": "aistpp_bumi",
+          "joint_rms_rad": 0.11743286156990386,
+          "root_xy_velocity_rms_m_s": 0.001246888602767474,
+          "root_height_rms_m": 0.0016179626392868966,
+          "root_rotation6d_rms": 0.04113626544608034,
+          "contact_probability_rms": 0.03335223645751164
+        },
+        {
+          "case": 2,
+          "source": "aistpp_bumi",
+          "joint_rms_rad": 0.1290442270571202,
+          "root_xy_velocity_rms_m_s": 0.003148502840731651,
+          "root_height_rms_m": 0.01179359941746777,
+          "root_rotation6d_rms": 0.1194289731831344,
+          "contact_probability_rms": 0.23918875234377934
+        },
+        {
+          "case": 3,
+          "source": "aistpp_bumi",
+          "joint_rms_rad": 0.10228109150906009,
+          "root_xy_velocity_rms_m_s": 0.001453845472155194,
+          "root_height_rms_m": 0.008056528113201027,
+          "root_rotation6d_rms": 0.052517174019040706,
+          "contact_probability_rms": 0.03760547872195857
+        },
+        {
+          "case": 4,
+          "source": "aioz_gdance_bumi",
+          "joint_rms_rad": 0.0893766228925723,
+          "root_xy_velocity_rms_m_s": 0.0009910195674670502,
+          "root_height_rms_m": 0.007396106304114827,
+          "root_rotation6d_rms": 0.03288082145128726,
+          "contact_probability_rms": 0.20586291743632387
+        },
+        {
+          "case": 5,
+          "source": "aioz_gdance_bumi",
+          "joint_rms_rad": 0.09979096732848027,
+          "root_xy_velocity_rms_m_s": 0.0008571232650005473,
+          "root_height_rms_m": 0.006424605703491416,
+          "root_rotation6d_rms": 0.0587858995088953,
+          "contact_probability_rms": 0.22463667416141467
+        },
+        {
+          "case": 6,
+          "source": "aioz_gdance_bumi",
+          "joint_rms_rad": 0.10871755985465395,
+          "root_xy_velocity_rms_m_s": 0.0020167871097443325,
+          "root_height_rms_m": 0.004421996431104081,
+          "root_rotation6d_rms": 0.02215262184643158,
+          "contact_probability_rms": 0.2658703682957688
+        },
+        {
+          "case": 7,
+          "source": "aioz_gdance_bumi",
+          "joint_rms_rad": 0.12229766657466251,
+          "root_xy_velocity_rms_m_s": 0.00166943228831734,
+          "root_height_rms_m": 0.008999541843833272,
+          "root_rotation6d_rms": 0.04744713835160498,
+          "contact_probability_rms": 0.11077178424401647
+        },
+        {
+          "case": 8,
+          "source": "finedance_bumi",
+          "joint_rms_rad": 0.023161127786740354,
+          "root_xy_velocity_rms_m_s": 0.00013688433277560618,
+          "root_height_rms_m": 0.0006500316515593121,
+          "root_rotation6d_rms": 0.005723643983017613,
+          "contact_probability_rms": 0.0993330182402326
+        },
+        {
+          "case": 9,
+          "source": "finedance_bumi",
+          "joint_rms_rad": 0.03935757733585461,
+          "root_xy_velocity_rms_m_s": 0.0007558374457567976,
+          "root_height_rms_m": 0.0009862850487263935,
+          "root_rotation6d_rms": 0.010045904135041677,
+          "contact_probability_rms": 0.10109910104429122
+        },
+        {
+          "case": 10,
+          "source": "finedance_bumi",
+          "joint_rms_rad": 0.033701785000103124,
+          "root_xy_velocity_rms_m_s": 0.00021043586736556913,
+          "root_height_rms_m": 0.0005497156549576574,
+          "root_rotation6d_rms": 0.009387521927109618,
+          "contact_probability_rms": 0.007253175350358976
+        },
+        {
+          "case": 11,
+          "source": "finedance_bumi",
+          "joint_rms_rad": 0.07371619499966059,
+          "root_xy_velocity_rms_m_s": 0.0007603035379835464,
+          "root_height_rms_m": 0.0010071204409862,
+          "root_rotation6d_rms": 0.03586138020544173,
+          "contact_probability_rms": 0.17471793550929288
+        },
+        {
+          "case": 12,
+          "source": "mine_bumi",
+          "joint_rms_rad": 0.03999401715007929,
+          "root_xy_velocity_rms_m_s": 0.0008938947460361953,
+          "root_height_rms_m": 0.0008616179255548095,
+          "root_rotation6d_rms": 0.013367932565998865,
+          "contact_probability_rms": 0.15587055355840793
+        },
+        {
+          "case": 13,
+          "source": "mine_bumi",
+          "joint_rms_rad": 0.04259552470328124,
+          "root_xy_velocity_rms_m_s": 0.0003237209444633669,
+          "root_height_rms_m": 0.001099868085929539,
+          "root_rotation6d_rms": 0.0073867496538524684,
+          "contact_probability_rms": 0.10845381867930817
+        },
+        {
+          "case": 14,
+          "source": "mine_bumi",
+          "joint_rms_rad": 0.046942769428578474,
+          "root_xy_velocity_rms_m_s": 0.00030883022472328193,
+          "root_height_rms_m": 0.0008547656899756077,
+          "root_rotation6d_rms": 0.007470325987502282,
+          "contact_probability_rms": 0.04153477439502669
+        },
+        {
+          "case": 15,
+          "source": "mine_bumi",
+          "joint_rms_rad": 0.03870451661644582,
+          "root_xy_velocity_rms_m_s": 0.00016205833659514455,
+          "root_height_rms_m": 0.0010212481292648057,
+          "root_rotation6d_rms": 0.00356208387655568,
+          "contact_probability_rms": 0.0708133356106935
+        }
+      ],
+      "summary": {
+        "joint_rms_rad": {
+          "mean": 0.0817064678723244,
+          "min": 0.023161127786740354,
+          "max": 0.2001889761499936
+        },
+        "root_xy_velocity_rms_m_s": {
+          "mean": 0.0010606213137189277,
+          "min": 0.00013688433277560618,
+          "max": 0.003148502840731651
+        },
+        "root_height_rms_m": {
+          "mean": 0.003743830921884919,
+          "min": 0.0005497156549576574,
+          "max": 0.01179359941746777
+        },
+        "root_rotation6d_rms": {
+          "mean": 0.032188386164054617,
+          "min": 0.00356208387655568,
+          "max": 0.1194289731831344
+        },
+        "contact_probability_rms": {
+          "mean": 0.12491946670151934,
+          "min": 0.007253175350358976,
+          "max": 0.2658703682957688
+        }
+      }
+    },
+    "self_distillation": {
+      "case_pairs": [
+        {
+          "case": 0,
+          "source": "aistpp_bumi",
+          "joint_rms_rad": 0.23307498713022487,
+          "root_xy_velocity_rms_m_s": 0.0036342861925826725,
+          "root_height_rms_m": 0.0034833942667451753,
+          "root_rotation6d_rms": 0.07529612925264559,
+          "contact_probability_rms": 0.12673938374509489
+        },
+        {
+          "case": 1,
+          "source": "aistpp_bumi",
+          "joint_rms_rad": 0.13332703357887565,
+          "root_xy_velocity_rms_m_s": 0.0014530386697556132,
+          "root_height_rms_m": 0.003874100963091397,
+          "root_rotation6d_rms": 0.05905567074844466,
+          "contact_probability_rms": 0.10157758599680768
+        },
+        {
+          "case": 2,
+          "source": "aistpp_bumi",
+          "joint_rms_rad": 0.20070558414813175,
+          "root_xy_velocity_rms_m_s": 0.0043765027650754604,
+          "root_height_rms_m": 0.00984452031589484,
+          "root_rotation6d_rms": 0.12865998744722873,
+          "contact_probability_rms": 0.37548818977333565
+        },
+        {
+          "case": 3,
+          "source": "aistpp_bumi",
+          "joint_rms_rad": 0.13981210525875246,
+          "root_xy_velocity_rms_m_s": 0.001381126238724124,
+          "root_height_rms_m": 0.010014106833749854,
+          "root_rotation6d_rms": 0.07614855676544029,
+          "contact_probability_rms": 0.0692189018780566
+        },
+        {
+          "case": 4,
+          "source": "aioz_gdance_bumi",
+          "joint_rms_rad": 0.12682605840950403,
+          "root_xy_velocity_rms_m_s": 0.001509252944796368,
+          "root_height_rms_m": 0.008431199408640675,
+          "root_rotation6d_rms": 0.034635744763801046,
+          "contact_probability_rms": 0.21873827902217263
+        },
+        {
+          "case": 5,
+          "source": "aioz_gdance_bumi",
+          "joint_rms_rad": 0.1531579509745528,
+          "root_xy_velocity_rms_m_s": 0.0009135774384606557,
+          "root_height_rms_m": 0.011104111396993646,
+          "root_rotation6d_rms": 0.06422425037383489,
+          "contact_probability_rms": 0.25266153259608504
+        },
+        {
+          "case": 6,
+          "source": "aioz_gdance_bumi",
+          "joint_rms_rad": 0.147987091650469,
+          "root_xy_velocity_rms_m_s": 0.002508245054184745,
+          "root_height_rms_m": 0.007804796259639619,
+          "root_rotation6d_rms": 0.030357710809015014,
+          "contact_probability_rms": 0.3540486066734538
+        },
+        {
+          "case": 7,
+          "source": "aioz_gdance_bumi",
+          "joint_rms_rad": 0.14443525215647698,
+          "root_xy_velocity_rms_m_s": 0.0025975238271478,
+          "root_height_rms_m": 0.015530082708549593,
+          "root_rotation6d_rms": 0.057923011372389935,
+          "contact_probability_rms": 0.2547873529860724
+        },
+        {
+          "case": 8,
+          "source": "finedance_bumi",
+          "joint_rms_rad": 0.05442879691385626,
+          "root_xy_velocity_rms_m_s": 0.00047565444954368775,
+          "root_height_rms_m": 0.0017708506082258879,
+          "root_rotation6d_rms": 0.013647848028253834,
+          "contact_probability_rms": 0.03198925417560747
+        },
+        {
+          "case": 9,
+          "source": "finedance_bumi",
+          "joint_rms_rad": 0.09137689997710523,
+          "root_xy_velocity_rms_m_s": 0.0020482399509369987,
+          "root_height_rms_m": 0.0025095422994438586,
+          "root_rotation6d_rms": 0.019487001708606032,
+          "contact_probability_rms": 0.177897472692319
+        },
+        {
+          "case": 10,
+          "source": "finedance_bumi",
+          "joint_rms_rad": 0.05760120324259263,
+          "root_xy_velocity_rms_m_s": 0.0006196120911008557,
+          "root_height_rms_m": 0.0018290840923019368,
+          "root_rotation6d_rms": 0.029741938246181158,
+          "contact_probability_rms": 0.08271358704915711
+        },
+        {
+          "case": 11,
+          "source": "finedance_bumi",
+          "joint_rms_rad": 0.14105050146230305,
+          "root_xy_velocity_rms_m_s": 0.002016956538311944,
+          "root_height_rms_m": 0.0027491235311319505,
+          "root_rotation6d_rms": 0.07404633838631512,
+          "contact_probability_rms": 0.28912722036419797
+        },
+        {
+          "case": 12,
+          "source": "mine_bumi",
+          "joint_rms_rad": 0.09177922550491324,
+          "root_xy_velocity_rms_m_s": 0.0016435021729438006,
+          "root_height_rms_m": 0.00169467329903861,
+          "root_rotation6d_rms": 0.019392690142505695,
+          "contact_probability_rms": 0.16096011214453532
+        },
+        {
+          "case": 13,
+          "source": "mine_bumi",
+          "joint_rms_rad": 0.06867106458512826,
+          "root_xy_velocity_rms_m_s": 0.00046747150117989393,
+          "root_height_rms_m": 0.00193828915818032,
+          "root_rotation6d_rms": 0.014393442307418769,
+          "contact_probability_rms": 0.16002926185057517
+        },
+        {
+          "case": 14,
+          "source": "mine_bumi",
+          "joint_rms_rad": 0.07101336734673831,
+          "root_xy_velocity_rms_m_s": 0.0007392018625374594,
+          "root_height_rms_m": 0.0014547913057117497,
+          "root_rotation6d_rms": 0.015648370795299807,
+          "contact_probability_rms": 0.056080551295429326
+        },
+        {
+          "case": 15,
+          "source": "mine_bumi",
+          "joint_rms_rad": 0.04885058887283986,
+          "root_xy_velocity_rms_m_s": 0.00029484169508194275,
+          "root_height_rms_m": 0.0008216223849345677,
+          "root_rotation6d_rms": 0.007710349586178833,
+          "contact_probability_rms": 0.05673175786024233
+        }
+      ],
+      "summary": {
+        "joint_rms_rad": {
+          "mean": 0.11900610695077903,
+          "min": 0.04885058887283986,
+          "max": 0.23307498713022487
+        },
+        "root_xy_velocity_rms_m_s": {
+          "mean": 0.0016674395870227513,
+          "min": 0.00029484169508194275,
+          "max": 0.0043765027650754604
+        },
+        "root_height_rms_m": {
+          "mean": 0.005303393052017105,
+          "min": 0.0008216223849345677,
+          "max": 0.015530082708549593
+        },
+        "root_rotation6d_rms": {
+          "mean": 0.045023065045847466,
+          "min": 0.007710349586178833,
+          "max": 0.12865998744722873
+        },
+        "contact_probability_rms": {
+          "mean": 0.1730493156314464,
+          "min": 0.03198925417560747,
+          "max": 0.37548818977333565
+        }
+      }
+    },
+    "awr": {
+      "case_pairs": [
+        {
+          "case": 0,
+          "source": "aistpp_bumi",
+          "joint_rms_rad": 0.23200484970293467,
+          "root_xy_velocity_rms_m_s": 0.0031252395724444514,
+          "root_height_rms_m": 0.0043248459804559065,
+          "root_rotation6d_rms": 0.08123160404868178,
+          "contact_probability_rms": 0.1423105599494649
+        },
+        {
+          "case": 1,
+          "source": "aistpp_bumi",
+          "joint_rms_rad": 0.15164095723567658,
+          "root_xy_velocity_rms_m_s": 0.00176476859256475,
+          "root_height_rms_m": 0.002721537830260119,
+          "root_rotation6d_rms": 0.06440025031059676,
+          "contact_probability_rms": 0.20699052415236213
+        },
+        {
+          "case": 2,
+          "source": "aistpp_bumi",
+          "joint_rms_rad": 0.21929790643697245,
+          "root_xy_velocity_rms_m_s": 0.004251075398833111,
+          "root_height_rms_m": 0.012719544107354404,
+          "root_rotation6d_rms": 0.14849314433896976,
+          "contact_probability_rms": 0.43003313135102916
+        },
+        {
+          "case": 3,
+          "source": "aistpp_bumi",
+          "joint_rms_rad": 0.17358071955467735,
+          "root_xy_velocity_rms_m_s": 0.001404470475988693,
+          "root_height_rms_m": 0.008827202952767805,
+          "root_rotation6d_rms": 0.0677259703972206,
+          "contact_probability_rms": 0.047501759688435376
+        },
+        {
+          "case": 4,
+          "source": "aioz_gdance_bumi",
+          "joint_rms_rad": 0.13678667788124074,
+          "root_xy_velocity_rms_m_s": 0.001321851721820202,
+          "root_height_rms_m": 0.00865925530602261,
+          "root_rotation6d_rms": 0.04887461615615551,
+          "contact_probability_rms": 0.17216502007786014
+        },
+        {
+          "case": 5,
+          "source": "aioz_gdance_bumi",
+          "joint_rms_rad": 0.18817947303679627,
+          "root_xy_velocity_rms_m_s": 0.0016251462557229602,
+          "root_height_rms_m": 0.012410573677277884,
+          "root_rotation6d_rms": 0.07905897695007794,
+          "contact_probability_rms": 0.2512266590016514
+        },
+        {
+          "case": 6,
+          "source": "aioz_gdance_bumi",
+          "joint_rms_rad": 0.17469035115477355,
+          "root_xy_velocity_rms_m_s": 0.0024689401611977793,
+          "root_height_rms_m": 0.00661898639770832,
+          "root_rotation6d_rms": 0.03214798343281058,
+          "contact_probability_rms": 0.3848365134639488
+        },
+        {
+          "case": 7,
+          "source": "aioz_gdance_bumi",
+          "joint_rms_rad": 0.16801456714261367,
+          "root_xy_velocity_rms_m_s": 0.0025799556732887924,
+          "root_height_rms_m": 0.013957076579652948,
+          "root_rotation6d_rms": 0.08266865786102064,
+          "contact_probability_rms": 0.2948613226580674
+        },
+        {
+          "case": 8,
+          "source": "finedance_bumi",
+          "joint_rms_rad": 0.04894892012181948,
+          "root_xy_velocity_rms_m_s": 0.0005095910108542009,
+          "root_height_rms_m": 0.001599555899535653,
+          "root_rotation6d_rms": 0.014338020446173766,
+          "contact_probability_rms": 0.03251895985691153
+        },
+        {
+          "case": 9,
+          "source": "finedance_bumi",
+          "joint_rms_rad": 0.08785078159435274,
+          "root_xy_velocity_rms_m_s": 0.0018428268753173803,
+          "root_height_rms_m": 0.0030368794933125862,
+          "root_rotation6d_rms": 0.017195510840180048,
+          "contact_probability_rms": 0.14636496035423205
+        },
+        {
+          "case": 10,
+          "source": "finedance_bumi",
+          "joint_rms_rad": 0.08500118122993996,
+          "root_xy_velocity_rms_m_s": 0.0005520789811085267,
+          "root_height_rms_m": 0.002156993244730369,
+          "root_rotation6d_rms": 0.03155373488712054,
+          "contact_probability_rms": 0.01429994565994115
+        },
+        {
+          "case": 11,
+          "source": "finedance_bumi",
+          "joint_rms_rad": 0.1124723500962744,
+          "root_xy_velocity_rms_m_s": 0.0017301298383553111,
+          "root_height_rms_m": 0.002773195338192949,
+          "root_rotation6d_rms": 0.055468003814719426,
+          "contact_probability_rms": 0.16417261944526704
+        },
+        {
+          "case": 12,
+          "source": "mine_bumi",
+          "joint_rms_rad": 0.09432105949957743,
+          "root_xy_velocity_rms_m_s": 0.0018065480807580084,
+          "root_height_rms_m": 0.0019726644453056125,
+          "root_rotation6d_rms": 0.020724921509705,
+          "contact_probability_rms": 0.23574062910651605
+        },
+        {
+          "case": 13,
+          "source": "mine_bumi",
+          "joint_rms_rad": 0.06800673599877259,
+          "root_xy_velocity_rms_m_s": 0.0004840963327193043,
+          "root_height_rms_m": 0.0018900542201038446,
+          "root_rotation6d_rms": 0.01260880037861181,
+          "contact_probability_rms": 0.20556667669836756
+        },
+        {
+          "case": 14,
+          "source": "mine_bumi",
+          "joint_rms_rad": 0.06818231100103865,
+          "root_xy_velocity_rms_m_s": 0.0007338371031481412,
+          "root_height_rms_m": 0.001087065049138033,
+          "root_rotation6d_rms": 0.01852292182368717,
+          "contact_probability_rms": 0.05281096512695877
+        },
+        {
+          "case": 15,
+          "source": "mine_bumi",
+          "joint_rms_rad": 0.04927295408353521,
+          "root_xy_velocity_rms_m_s": 0.0003046541514042873,
+          "root_height_rms_m": 0.0011231613320681648,
+          "root_rotation6d_rms": 0.008883084400883616,
+          "contact_probability_rms": 0.04836394102615385
+        }
+      ],
+      "summary": {
+        "joint_rms_rad": {
+          "mean": 0.12864073723568722,
+          "min": 0.04894892012181948,
+          "max": 0.23200484970293467
+        },
+        "root_xy_velocity_rms_m_s": {
+          "mean": 0.0016565756390953686,
+          "min": 0.0003046541514042873,
+          "max": 0.004251075398833111
+        },
+        "root_height_rms_m": {
+          "mean": 0.00536741199086795,
+          "min": 0.001087065049138033,
+          "max": 0.013957076579652948
+        },
+        "root_rotation6d_rms": {
+          "mean": 0.04899351259978843,
+          "min": 0.008883084400883616,
+          "max": 0.14849314433896976
+        },
+        "contact_probability_rms": {
+          "mean": 0.17686026172607297,
+          "min": 0.01429994565994115,
+          "max": 0.43003313135102916
+        }
+      }
+    }
+  }
+}

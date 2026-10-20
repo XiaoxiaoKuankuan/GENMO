@@ -1,0 +1,112 @@
+{
+  "schema": "genmo.awr.real_checkpoint_components.v1",
+  "source_run": "/data1/user/liwei/GENMO_outputs/stage2_awr/pilot512_20261020_01",
+  "source_commits": {
+    "genmo": "f417545456e9919e67b2b28fd963bdd680a8b5ec",
+    "gmt": "4ca256fe79d2dda22240011947ead276690e40f7"
+  },
+  "request_sha256": "c1781b3b6acf238325eb338e6a80c39fec8c2b4c03c6b67ed392eb773b34b086",
+  "methods": {
+    "self_distillation": {
+      "optimizer_state_entries": 320,
+      "adam_step_min": 870.0,
+      "adam_step_max": 870.0,
+      "scheduler_last_epoch": 870,
+      "learning_rates": [
+        1.0000000000000002e-06
+      ],
+      "epoch": 5,
+      "cursor": 0,
+      "steps": 870,
+      "data_identity": "6198b05e6f8837c2fe481b1cce33d6dbe09ba76be9a867d3126d1d08cd9b7167",
+      "bc_weight": 0.016758175441898185,
+      "restored_tensors_exact": true,
+      "optimizer_updates": 0,
+      "checkpoint": {
+        "file": "macro000_self_distillation_final_85faf8d3.pt",
+        "identity": {
+          "request": "c1781b3b6acf238325eb338e6a80c39fec8c2b4c03c6b67ed392eb773b34b086",
+          "sources": {
+            "genmo": "f417545456e9919e67b2b28fd963bdd680a8b5ec",
+            "gmt": "4ca256fe79d2dda22240011947ead276690e40f7"
+          }
+        },
+        "progress": {
+          "cursor": 0,
+          "epoch": 5,
+          "macro": 0,
+          "method": "self_distillation",
+          "phase": "actor",
+          "step": 870
+        },
+        "sha256": "3ceabb44500f5656020788b098e47647f80bca4f9e411289d5b317237bba608d"
+      },
+      "restored_actor_fingerprint": "c38ad4f7e29101f7e9c7cd1ec52ac8bc1e87ab2016d9f5c7ed95972cd117f40b",
+      "evaluation_fingerprint_matches": true,
+      "evaluation_plans": {
+        "fixed": "50ef267ac797b2cf75c8ddc69638062cc2959d7daa601d01392948c12b7f7712",
+        "all": "0a8544172867b365c64210e7ae6c904e15a675ffe627af710dcdc20fc38393df"
+      },
+      "random_states": {
+        "rank_states": 8,
+        "cpu_random_states_restored": true,
+        "cuda_random_states_present": true,
+        "cuda_random_states_executed": false
+      }
+    },
+    "awr": {
+      "optimizer_state_entries": 320,
+      "adam_step_min": 870.0,
+      "adam_step_max": 870.0,
+      "scheduler_last_epoch": 870,
+      "learning_rates": [
+        1.0000000000000002e-06
+      ],
+      "epoch": 5,
+      "cursor": 0,
+      "steps": 870,
+      "data_identity": "6198b05e6f8837c2fe481b1cce33d6dbe09ba76be9a867d3126d1d08cd9b7167",
+      "bc_weight": 0.016758175441898185,
+      "restored_tensors_exact": true,
+      "optimizer_updates": 0,
+      "checkpoint": {
+        "file": "macro000_awr_final_9e745052.pt",
+        "identity": {
+          "request": "c1781b3b6acf238325eb338e6a80c39fec8c2b4c03c6b67ed392eb773b34b086",
+          "sources": {
+            "genmo": "f417545456e9919e67b2b28fd963bdd680a8b5ec",
+            "gmt": "4ca256fe79d2dda22240011947ead276690e40f7"
+          }
+        },
+        "progress": {
+          "cursor": 0,
+          "epoch": 5,
+          "macro": 0,
+          "method": "awr",
+          "phase": "actor",
+          "step": 870
+        },
+        "sha256": "0c9706f3c485c5f6cb7bb880ee653c1955df89151438734d2718ab447f2465a1"
+      },
+      "restored_actor_fingerprint": "3b74100f927a5f9474ee9c6bcb5d574c131e29ba76b7c19576bf272f63237815",
+      "evaluation_fingerprint_matches": true,
+      "evaluation_plans": {
+        "fixed": "50ef267ac797b2cf75c8ddc69638062cc2959d7daa601d01392948c12b7f7712",
+        "all": "0a8544172867b365c64210e7ae6c904e15a675ffe627af710dcdc20fc38393df"
+      },
+      "random_states": {
+        "rank_states": 8,
+        "cpu_random_states_restored": true,
+        "cuda_random_states_present": true,
+        "cuda_random_states_executed": false
+      }
+    }
+  },
+  "seconds": 5.835300563834608,
+  "optimizer_updates": 0,
+  "physical_controls": 0,
+  "state_unchanged": true,
+  "paired_data_budget_bc_random_streams_exact": true,
+  "scope": "cpu_component_restore_not_new_distributed_training",
+  "tool_sha256": "76d73f17d2ea32c858630415890f66385571da5401ae3029b68ca4c3a56337f8"
+}

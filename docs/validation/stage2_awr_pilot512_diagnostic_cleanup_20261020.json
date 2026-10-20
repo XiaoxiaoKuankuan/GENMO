@@ -1,0 +1,48 @@
+{
+  "purpose": "remove_only_temporary_diagnostic_checkpoint_after_success",
+  "removed": [
+    {
+      "path": "/data1/user/liwei/GENMO_outputs/stage2_awr/pilot512_20261020_01/acceptance/distributed_resume_20261020/diagnostic_checkpoints/step_one.pt",
+      "bytes": 2579570984
+    },
+    {
+      "path": "/data1/user/liwei/GENMO_outputs/stage2_awr/pilot512_20261020_01/acceptance/distributed_resume_20261020/diagnostic_checkpoints/step_one.json",
+      "bytes": 667
+    },
+    {
+      "path": "/data1/user/liwei/GENMO_outputs/stage2_awr/pilot512_20261020_01/acceptance/distributed_resume_20261020/diagnostic_checkpoints/latest.json",
+      "bytes": 667
+    }
+  ],
+  "diagnostic_reference": {
+    "file": "step_one.pt",
+    "identity": {
+      "actor": "3b74100f927a5f9474ee9c6bcb5d574c131e29ba76b7c19576bf272f63237815",
+      "config": {
+        "bc_global_batch": 1,
+        "bc_gradient_ratio": 0.1,
+        "bc_microbatch": 1,
+        "calibration_batches": 8,
+        "checkpoint_every_steps": 50,
+        "epochs": 2,
+        "global_batch": 3,
+        "gradient_clip": 1.0,
+        "lr": 1e-05,
+        "microbatch": 1,
+        "min_lr_ratio": 0.1,
+        "warmup_steps": 1,
+        "weight_decay": 0.01
+      },
+      "data": "11c3ceb04f25bcd870b6f76969578e94ced1b056ab9bc16c7dd85f9524344be1",
+      "purpose": "isolated_ddp_resume_acceptance",
+      "world_size": 8
+    },
+    "progress": {
+      "phase": "diagnostic_actor",
+      "step": 1
+    },
+    "sha256": "40d1c86d1656323d6390aac94fcd19938b4981e26b8bf0a7eea438c6b4a9b757"
+  },
+  "formal_checkpoint_inventory_unchanged": true,
+  "verification_report_retained": "/data1/user/liwei/GENMO_outputs/stage2_awr/pilot512_20261020_01/acceptance/distributed_resume_20261020/report.json"
+}

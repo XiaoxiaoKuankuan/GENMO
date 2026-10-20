@@ -1,0 +1,35 @@
+{
+  "source_commits": {
+    "genmo": "f417545456e9919e67b2b28fd963bdd680a8b5ec",
+    "gmt": "4ca256fe79d2dda22240011947ead276690e40f7"
+  },
+  "source_run": "/data1/user/liwei/GENMO_outputs/stage2_awr/pilot512_20261020_01",
+  "new_physical_tasks": 0,
+  "methods": {
+    "self_distillation": {
+      "optimizer_steps": 870,
+      "replay_presentations": 222235,
+      "bc_presentations": 111360,
+      "all_finite": true,
+      "gradient_norm_mean": 0.9241979233149824,
+      "gradient_norm_median": 0.8718754351139069,
+      "gradient_norm_max": 5.922573089599609,
+      "gradient_clipped_fraction": 0.30114942528735633,
+      "maximum_recorded_post_clip_norm": 1.0,
+      "source_log_sha256": "ddec7ce645615e87b9737c92756c82cc92cce9f815efc049523f133f279b39d0"
+    },
+    "awr": {
+      "optimizer_steps": 870,
+      "replay_presentations": 222235,
+      "bc_presentations": 111360,
+      "all_finite": true,
+      "gradient_norm_mean": 1.169989551757944,
+      "gradient_norm_median": 1.070240557193756,
+      "gradient_norm_max": 18.21567153930664,
+      "gradient_clipped_fraction": 0.5678160919540229,
+      "maximum_recorded_post_clip_norm": 1.0,
+      "source_log_sha256": "8f92d3414ca4761d9d3adec0a57a68a43ca31f54d3f614d3d416ec4b16472f9d"
+    }
+  },
+  "paired_step_budget_samples_bc_coefficient_lr_exact": true
+}

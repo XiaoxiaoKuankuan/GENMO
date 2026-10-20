@@ -5,6 +5,11 @@ Advantage Labeling → Weighted Diffusion Training → Evaluation。宏迭代与
 初始配置为 512 个完整 Episode、FIFO 512、Actor 5 Epoch、全局 256 AWR＋128 BC、
 Actor LR 1e-5；默认最多一个宏迭代。`smoke` 为独立 64 Episode 数据集。
 
+2026-10-20：64集及独立512首轮、三组完整音乐对照、真实八卡梯度与续算验收已完成。
+全54任务Stage1/自蒸馏/AWR成功数为50/49/52，但AWR成对回报收益CI跨零，且Root、
+Joint和滑动指标变差；固定32任务时长门槛未通过，`best_saved`仍为Stage1。
+详见[最终实现与有限验收报告](stage2_awr_acceptance_20261020.md)。未启动第二宏迭代。
+
 ## Server-2 命令
 
 最新交付源码放在`/home/user/liwei/awr-worktrees/GENMO-delivery`，使用同一AWR分支，
@@ -119,11 +124,11 @@ Best 要求完成率/时长不降、失败不增、没有新增成对失败、�
 完整任务回报改善。未满足时保留 Stage1。AWR 对 Stage1 与普通自蒸馏的物理收益
 都必须用独立评价判断；代码测试、Loss 或 Critic EV 不能替代该结论。
 
-2026-10-20交付源码`621bb9c`：本地torch2.6环境61项AWR CPU测试通过，Server-2
-原torch2.7.1环境同61项通过，含八进程Gloo、真实小型Stage1与BC合同、FVI/Actor
+2026-10-20最终代码验收源码`2f65089`：本地torch2.6环境62项AWR CPU测试通过，Server-2
+原torch2.7.1环境同62项通过，含八进程Gloo、真实小型Stage1与BC合同、FVI/Actor
 恢复、评价逐任务停止恢复。服务器验证禁用CUDA可见设备，临时目录自动清理。
 实际导入目录及全部冻结资产SHA亦通过；证据为
-`docs/validation/stage2_awr_delivery_cpu_tests_20261020.json`和
+`docs/validation/stage2_awr_delivery_final_cpu_tests_20261020.json`和
 `docs/validation/stage2_awr_delivery_assets_20261020.json`，此预检不宣称GPU空闲。
 公共回归69项通过。更大范围1032通过、10跳过，2项PPO旧失败在指定基线复现；
 8项缺s350000资产的旧测试使用临时只读链接后，相关9项通过，链接和临时目录已移除。
@@ -177,7 +182,7 @@ Replay `array_tree.v2`保留物理回执的共享列，兼容旧v1；训练视�
 耗时3.661秒，记录校验0.135秒，MC及其校验0.113秒，MC逐元素一致。
 证据见`docs/validation/stage2_awr_pilot512_read_profile_20261020.json`。这说明结构索引
 解析仍是工程瓶颈，不能用短Actor反向时间宣布整轮训练提速；该单例也不是无负载的
-整体吞吐基准。后续应单独验证更紧凑的结构索引编码，不在正在进行的实验中改写Replay。
+整体吞吐基准。后续应在独立数据副本验证更紧凑的结构索引编码，不改写本轮正式Replay。
 
 ## 代码与恢复边界
 
@@ -298,7 +303,8 @@ GMT `agent.yaml`和Isaac契约文件的内容摘要由预检自动计算，保�
 `docs/validation/stage2_awr_smoke64_20261020.json`；模型恢复与评价指纹绑定见
 `docs/validation/stage2_awr_real_checkpoint_restore_20261020.json`。32任务AWR相对Stage1
 及自蒸馏的来源平衡音乐组聚类收益CI均为正，并通过全部物理门槛。这仅是小型协议
-的结果；独立512首轮及54任务评价以各自后续报告为准。
+的结果；独立512首轮及54任务评价已完成，以[最终报告](stage2_awr_acceptance_20261020.md)
+及其绑定的独立运行证据为准，不能以64集的正收益替代512结论。
 
 ## 已完成的小型64集结果
 
@@ -345,7 +351,11 @@ rank加载前按`max(4096, 1024+32×Episode容量)`预留句柄，只提高进�
 不足时提前报错，并保存各rank实际限制。同步错误立即输出原始traceback，避免等待
 较慢rank时看不到原因。当前固定f417545的512运行通过启动父进程设置软限制65536恢复，
 保留原源码/Replay/任务/配置身份；不需要重新物理采集，也没有修改系统硬限制。
-训练和最终54任务对照仍须以随后完成的报告为准；按当前固定快照，B/C各应更新870步。
+恢复后训练与最终54任务对照已完成，B/C各实际更新870步，均为5 Epoch，数据预算、
+学习率、BC系数及八rank最终BC随机流配对一致。C全54成功52/54，累计回报6987.649650，
+Stage1为50/54、6960.838710；C相对Stage1来源平衡任务回报差1.475730，
+95%CI[-4.296548,7.188531]。固定32的执行时长比Stage1少3.10秒，未满足既定晋级门槛；
+最佳发布模型继续保留Stage1，未进入第二宏迭代。
 
 
 512条完整Episode独立审计已通过：44722条决策、44447条Actor样本、1113001个奖励
@@ -366,5 +376,13 @@ bash tools/run_stage2_awr_server2.sh backward-profile \
 ```
 
 新Trainer逐步拆分BC前反向、梯度归约、裁剪及优化器耗时，CUDA阶段末同步以免仅测
-到排队耗时；保留旧BC＋更新合计字段。当前512运行仍固定f417545，其历史BC时间
-只有合计字段，不能事后伪造分项；以上独立测量会明确标注为有限离线样本。
+到排队耗时；保留旧BC＋更新合计字段。已完成的512运行保留f417545，其历史BC时间
+只有合计字段，不能事后伪造分项。实际有限八卡测量已通过：AWR前反向0.157401秒、
+BC前反向1.367170秒，不含优化器的总时间1.714306秒；仅3个测量batch、0优化器更新，
+不能替代整轮成本。结果见`docs/validation/stage2_awr_pilot512_backward_profile_20261020.json`。
+
+最终B/C断点组件恢复及真实八卡续算均已通过，参数、AdamW、Scheduler、BC和CPU/CUDA
+RNG逐元素一致；3个独立诊断优化步不计入正式训练，0新物理交互。临时验收checkpoint
+已精确清理，正式checkpoint未变。证据为
+`docs/validation/stage2_awr_pilot512_checkpoint_restore_20261020.json`与
+`docs/validation/stage2_awr_pilot512_distributed_resume_20261020.json`。

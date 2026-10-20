@@ -1,0 +1,82 @@
+{
+  "schema": "genmo.awr.post_acceptance_manifest.v1",
+  "source_run": "/data1/user/liwei/GENMO_outputs/stage2_awr/pilot512_20261020_01",
+  "source_commits": {
+    "genmo": "f417545456e9919e67b2b28fd963bdd680a8b5ec",
+    "gmt": "4ca256fe79d2dda22240011947ead276690e40f7"
+  },
+  "core_summary_sha256": "a42f1cc2bf5285ab3e7c75b3486c17f5677777a05d5ab7d32b428983f9d1692b",
+  "main_state_sha256": "de97cf36243f6a5ed6dfc18cd58eec7422899b2938398f95940f2448693f38f1",
+  "probes": {
+    "checkpoint_components_20261020": {
+      "path": "/data1/user/liwei/GENMO_outputs/stage2_awr/pilot512_20261020_01/acceptance/checkpoint_components_20261020.json",
+      "sha256": "bd52fcee2382b9310d3d756136b572b94c1384b4f7ae6f06df456c5f50f99b57",
+      "exit_code": 0,
+      "pid": 1560041,
+      "launcher_wall_seconds": 9.058261632919312,
+      "reserved_gpu_count": 0,
+      "reserved_gpu_hours": 0.0,
+      "launch_path": "/data1/user/liwei/GENMO_outputs/stage2_awr/pilot512_20261020_01/acceptance/checkpoint_components_20261020.launch.json",
+      "exit_path": "/data1/user/liwei/GENMO_outputs/stage2_awr/pilot512_20261020_01/acceptance/checkpoint_components_20261020.exit.json"
+    },
+    "distributed_resume_20261020": {
+      "path": "/data1/user/liwei/GENMO_outputs/stage2_awr/pilot512_20261020_01/acceptance/distributed_resume_20261020/report.json",
+      "sha256": "4b47cfac4c938bdaf4016b9060604da8413809f36e5dc9ebf9b12a899ea458e8",
+      "exit_code": 0,
+      "pid": 1584428,
+      "launcher_wall_seconds": 30.351558446884155,
+      "reserved_gpu_count": 8,
+      "reserved_gpu_hours": 0.06744790765974257,
+      "launch_path": "/data1/user/liwei/GENMO_outputs/stage2_awr/pilot512_20261020_01/acceptance/distributed_resume_20261020.launch.json",
+      "exit_path": "/data1/user/liwei/GENMO_outputs/stage2_awr/pilot512_20261020_01/acceptance/distributed_resume_20261020.exit.json"
+    },
+    "backward_profile_20261020": {
+      "path": "/data1/user/liwei/GENMO_outputs/stage2_awr/pilot512_20261020_01/acceptance/backward_profile_20261020/report.json",
+      "sha256": "2e28edbb0116859a5485b3257d69bbab1068c34fa039f864aef8c9e17cedf592",
+      "exit_code": 0,
+      "pid": 1609141,
+      "launcher_wall_seconds": 27.53362512588501,
+      "reserved_gpu_count": 8,
+      "reserved_gpu_hours": 0.0611858336130778,
+      "launch_path": "/data1/user/liwei/GENMO_outputs/stage2_awr/pilot512_20261020_01/acceptance/backward_profile_20261020.launch.json",
+      "exit_path": "/data1/user/liwei/GENMO_outputs/stage2_awr/pilot512_20261020_01/acceptance/backward_profile_20261020.exit.json"
+    },
+    "stage1_generation_retention_20261020": {
+      "path": "/data1/user/liwei/GENMO_outputs/stage2_awr/pilot512_20261020_01/acceptance/stage1_generation_retention_20261020/report.json",
+      "sha256": "05cec81c939219deb6e0d3aedb1afa351a101780b71303b93b6646b0697ff215",
+      "exit_code": 0,
+      "pid": 1668776,
+      "launcher_wall_seconds": 33.9019615650177,
+      "reserved_gpu_count": 1,
+      "reserved_gpu_hours": 0.00941721154583825,
+      "launch_path": "/data1/user/liwei/GENMO_outputs/stage2_awr/pilot512_20261020_01/acceptance/stage1_generation_retention_20261020.launch.json",
+      "exit_path": "/data1/user/liwei/GENMO_outputs/stage2_awr/pilot512_20261020_01/acceptance/stage1_generation_retention_20261020.exit.json"
+    }
+  },
+  "core_reserved_gpu_hours": 32.545057660208805,
+  "additional_reserved_gpu_hours": 0.13805095281865862,
+  "total_reserved_gpu_hours_including_acceptance": 32.683108613027464,
+  "cost_scope": "full_pilot_B_C_baselines_failed_attempts_and_post_acceptance_not_C_only_attribution",
+  "paired_gain_per_budget": {
+    "macro000_all_awr_vs_stage1": {
+      "balanced_task_return_gain_per_reserved_gpu_hour": 0.0451526774118511,
+      "ci95_per_reserved_gpu_hour": [
+        -0.1314608082128251,
+        0.21994637909456158
+      ],
+      "gain_statistically_supported": false
+    },
+    "macro000_all_awr_vs_self_distillation": {
+      "balanced_task_return_gain_per_reserved_gpu_hour": 0.09990040216538959,
+      "ci95_per_reserved_gpu_hour": [
+        -0.027953606399901416,
+        0.2576907974252935
+      ],
+      "gain_statistically_supported": false
+    }
+  },
+  "diagnostic_optimizer_updates": 3,
+  "formal_B_optimizer_updates": 870,
+  "formal_C_optimizer_updates": 870,
+  "new_physical_controls_after_main": 0
+}
