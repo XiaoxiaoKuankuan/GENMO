@@ -155,6 +155,8 @@ def summarize(run_dir):
                                    "executed_seconds", "executed_control_steps", "decision_count",
                                    "reward_sum", "reward_per_executed_second")),
                 activity=overall["activity"], latency_seconds=overall["latency_seconds"],
+                reward_components=overall.get("components"),
+                joint_limit_diagnostics=overall.get("joint_limits"),
                 physical_metrics=value["physical_metrics"]["overall"],
                 by_source={source: select(v, ("episode_count", "music_completion_count",
                     "physical_failure_count", "executed_seconds", "reward_sum", "reward_per_executed_second"))
