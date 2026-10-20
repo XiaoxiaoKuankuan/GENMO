@@ -31,6 +31,18 @@ bash tools/run_stage2_awr_server2.sh evaluate --run-dir <现有运行目录> \
 再次执行该命令会接续未完成任务或读取已完整提交的报告。它不扩展宏迭代预算。
 已完成运行的`resume`直接返回，不重写原完成时间或重新执行评价。
 
+最终断点可在原运行源码下用归档工具进行只读CPU组件恢复核验：
+
+```bash
+python -B <归档工具路径>/verify_stage2_awr_checkpoint.py \
+  --run-dir <已完成运行目录> \
+  --runtime-repo /home/user/liwei/awr-worktrees/GENMO \
+  --output <新验收报告路径>.json
+```
+
+工具逐元素比较权重、AdamW矩和Scheduler，绑定固定/全量物理评价指纹，检查八rank
+CPU随机流与保存的CUDA状态；它不执行新的优化步或CUDA随机流，不能代替八卡续训测试。
+
 启动器只设置当前进程环境，显式使用两份 AWR 仓库，不修改 editable 安装。GPU 有计算
 进程时预检失败，不抢占。校准使用 AWR 同款单请求 DDIM20/eta0/CFG2.5；延迟曲线必须
 实际生成，配置中的空 `deployment_profile` 不能用原 DPPO 曲线填充。
