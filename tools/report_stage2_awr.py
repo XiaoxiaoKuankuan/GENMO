@@ -12,6 +12,7 @@ import argparse
 from collections import Counter
 import hashlib
 import json
+import math
 from pathlib import Path
 import sqlite3
 import time
@@ -19,6 +20,28 @@ import time
 
 def select(value, keys):
     return {key: value[key] for key in keys if key in value}
+
+
+def weight_concentration(statistics):
+    """由整轮总体矩计算权重有效样本数，不重算或改变任何训练权重。"""
+    weight = statistics["weight"]
+    count, mean, std = weight["count"], weight["mean"], weight["std"]
+    if count < 1 or mean <= 0 or std < 0 or not all(math.isfinite(v) for v in (mean, std)):
+        raise ValueError("Weight concentration requires positive finite population moments")
+    fraction = 1/(1+(std/mean)**2)
+    by_source = {}
+    for source, values in statistics["by_source"].items():
+        current = values["weight"]
+        by_source[source] = dict(sample_fraction=current["count"]/count,
+            weight_mass_fraction=current["count"]*current["mean"]/(count*mean))
+    if not math.isclose(sum(v["sample_fraction"] for v in by_source.values()), 1., abs_tol=1e-8):
+        raise ValueError("Source sample counts differ from the complete label set")
+    if not math.isclose(sum(v["weight_mass_fraction"] for v in by_source.values()), 1., abs_tol=1e-8):
+        raise ValueError("Source weight mass differs from the complete label set")
+    return dict(effective_sample_size=count*fraction, effective_sample_fraction=fraction,
+        formula="(sum_w)^2/sum_w_squared_from_full_replay_population_mean_and_std",
+        by_source=by_source, source_weight_mass_is_not_measured_loss_or_gradient_share=True,
+        weights_changed=False, sampling_policy_changed=False)
 
 
 def attempt_costs(root, *, now=None):
@@ -181,6 +204,8 @@ def summarize(run_dir):
         elif name.endswith(("_advantage_distribution", "_bc_calibration", "_bc_validation",
                             "_parameter_changes", "_replay_cost")):
             result["diagnostics"][name] = value
+            if name.endswith("_advantage_distribution"):
+                result["diagnostics"][name] = dict(value, concentration=weight_concentration(value))
         elif name.endswith("_exploration"):
             pairs = [p for g in value["groups"] for p in g["pairs"] if p["same_conditions_exact"]]
             result["diagnostics"][name] = dict(

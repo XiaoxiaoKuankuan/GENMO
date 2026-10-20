@@ -163,3 +163,17 @@ def test_attempt_costs_preserve_legacy_exit_without_inventing_pid(tmp_path):
     exit_path.write_text(json.dumps(dict(pid=2, finished_unix=10., exit_code=1)))
     with pytest.raises(ValueError, match="PID differs"):
         module.attempt_costs(root)
+
+
+def test_weight_concentration_reports_source_mass_without_reweighting():
+    module = load_tool("report_stage2_awr")
+    statistics = dict(weight=dict(count=4, mean=1., std=.75**.5),
+        by_source=dict(A=dict(weight=dict(count=3, mean=.5)),
+                       B=dict(weight=dict(count=1, mean=2.5))))
+    before = json.dumps(statistics, sort_keys=True)
+    value = module.weight_concentration(statistics)
+    assert value["effective_sample_size"] == pytest.approx(4/1.75)
+    assert value["by_source"]["A"] == dict(sample_fraction=.75, weight_mass_fraction=.375)
+    assert value["by_source"]["B"] == dict(sample_fraction=.25, weight_mass_fraction=.625)
+    assert not value["weights_changed"] and not value["sampling_policy_changed"]
+    assert json.dumps(statistics, sort_keys=True) == before
