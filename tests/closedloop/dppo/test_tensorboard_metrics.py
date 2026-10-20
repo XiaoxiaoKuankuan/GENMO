@@ -113,6 +113,19 @@ def test_missing_and_rejected_updates_do_not_fabricate_zero_learning_curves():
         checked_scalars({'Loss/ppo': float('nan')})
 
 
+def test_module_learning_rates_are_actual_values_and_missing_groups_are_omitted():
+    record=training_record()
+    assert 'Policy/transformer_lr_min' not in training_scalars(record)
+    record['actor']['steps'][-1].update(
+        learning_rate=1e-6,
+        learning_rates={'transformer_00':1e-7,'transformer_15':2.5e-8,'qpos_output':1e-6,'other':1e-7},
+        parameter_update={'modules':{'all':{'update_rms':4e-8},'transformer_backbone':{'update_rms':3e-8}}})
+    values=training_scalars(record)
+    assert values['Policy/transformer_lr_min']==2.5e-8
+    assert values['Policy/learning_rate']==1e-6
+    assert values['Policy/transformer_update_rms']==3e-8
+
+
 def test_validation_rms_and_paired_gain_keep_failure_and_motion_meaning():
     baseline = evaluation_report()
     current = evaluation_report(1, gain=.25, error=.04, activity=.8)

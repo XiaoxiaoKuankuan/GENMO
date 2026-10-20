@@ -55,7 +55,7 @@ DEFINITIONS = {
     'Termination/music_end_fraction': '固定验证真实到达可用音乐终点的任务比例；10秒短窗中的该比例不能当作整曲成功率。',
     'Termination/new_failure_count': '与 Stage1 同任务配对后新增的失败数，越低越好；不能被另一些任务恢复成功抵消。',
     'Termination/reference_rejections_per_1000s': '次/1000机器人秒，固定验证参考拒绝次数/实际执行秒数，越低越好。',
-    'Policy/learning_rate': '实际 Actor 优化器学习率，不是配置上限。',
+    'Policy/learning_rate': 'Actor当前共同基础学习率，本次配置等于qpos输出头LR；各Transformer层还需乘固定倍率，逐组实际值见JSON。',
     'Policy/trainable_kl': '本轮更新前后可训练去噪步骤的平均每自由坐标 KL；排除冻结步骤，大小本身不等于收益。',
     'Policy/max_step_kl': '四个可训练随机步骤中最大的单步平均每自由坐标 KL，仅作辅助诊断。',
     'Policy/clipped_objective_fraction': '完整链联合PPO中因符号相关裁剪失去梯度的链比例；0不证明无效，接近1说明饱和。',
@@ -75,6 +75,8 @@ DEFINITIONS = {
     'Perf/controls_per_second': '实际 Actor 采集控制步总数/本轮墙钟；用于判断吞吐，不是策略质量。',
 }
 DEFINITIONS.update({
+    'Policy/transformer_lr_min': '本轮最后一次接受更新中，16层Transformer实际学习率的最小值。',
+    'Policy/transformer_update_rms': 'Transformer主干每次Adam后实际FP32参数变化RMS的轮内均值；确认主干确实参与学习。',
     'Policy/chain_joint_kl': '全部有效旧rollout链四步联合KL之和的均值；主要更新约束，非未来物理安全保证。',
     'Policy/chain_joint_kl_p95': '上述每链联合KL的P95，检查尾部更新。完整P99/Max见每轮JSON。',
     'Policy/chain_clip_fraction': '完整链ratio落在[1-clip,1+clip]之外的比例；区别于真正失去梯度的active clip。',
@@ -178,6 +180,10 @@ def training_scalars(record):
         values[tag] = _weighted(steps, key, weight)
     if steps:
         values['Policy/learning_rate'] = steps[-1].get('learning_rate')
+        rates=steps[-1].get('learning_rates',{})
+        transformer=[value for name,value in rates.items() if name.startswith('transformer_')]
+        if transformer:
+            values['Policy/transformer_lr_min']=min(transformer)
         values['Policy/gradient_norm'] = float(np.mean([s['total_gradient_norm'] for s in steps]))
         ratios = []
         for step in steps:
@@ -210,6 +216,10 @@ def training_scalars(record):
     parameter=[v['parameter_update']['modules']['all']['update_rms'] for v in steps if 'parameter_update' in v]
     cosine=[v['gradient_contributions']['all']['cosine'] for v in steps if v.get('gradient_contributions',{}).get('all',{}).get('cosine') is not None]
     if parameter:values['Policy/parameter_update_rms']=float(np.mean(parameter))
+    transformer_changes=[v.get('parameter_update',{}).get('modules',{}).get('transformer_backbone',{}).get('update_rms')
+        for v in steps]
+    transformer_changes=[value for value in transformer_changes if value is not None]
+    if transformer_changes:values['Policy/transformer_update_rms']=float(np.mean(transformer_changes))
     if cosine:values['Policy/ppo_bc_cosine']=float(np.mean(cosine))
     efficiency=record.get('efficiency',{})
     for name in ('environment_seconds','actor_ppo_seconds','bc_seconds','critic_seconds','kl_seconds'):
