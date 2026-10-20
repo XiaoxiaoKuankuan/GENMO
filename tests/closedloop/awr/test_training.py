@@ -156,8 +156,9 @@ def _distributed_gradient_worker(rank, world, path):
 
 
 def test_eight_rank_cpu_global_denominators_and_empty_rank(tmp_path):
+    # 前序测试已经使用autograd线程池；spawn保证子进程不继承fork后不可用的线程状态。
     mp.start_processes(_distributed_gradient_worker, args=(8, str(tmp_path)), nprocs=8,
-                       join=True, start_method="fork")
+                       join=True, start_method="spawn")
     torch.manual_seed(22)
     model = torch.nn.Linear(3, 2).double()
     x = torch.arange(15, dtype=torch.float64).reshape(5, 3)/10

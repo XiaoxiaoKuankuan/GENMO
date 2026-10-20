@@ -18,7 +18,7 @@ from gem.closedloop.common.supervision import load_actor, Stage1Supervision
 from gem.closedloop.common.evaluation import _model_fingerprint
 from gem.closedloop.online_conditions import OnlineConditionBuilder
 from .config import physical_config
-from .checkpoint import Checkpoints, capture_rng, stop_requested
+from .checkpoint import Checkpoints, capture_rng, stop_requested, GracefulStop
 from .collection import CompleteCollector
 from .sampler import AWRSampler
 from .tasks import folds_for_catalog, training_tasks, evaluation_plan
@@ -149,11 +149,15 @@ class AWRRun:
     def eval_actor(self, name, plan):
         if name in self.state["artifacts"]:
             return self.d.root(lambda: json.loads(Path(self.state["artifacts"][name]).read_text()))
+        if self.d.root(lambda: stop_requested(self.root)):
+            raise GracefulStop("Stopped before launching new evaluation tasks")
         self.publish(phase="evaluation_"+name)
         attempt = self.d.root(lambda: uuid.uuid4().hex[:8])
         report = evaluate(self.runtime_config, self.policy, self.builder, self.catalog, plan,
             self.root/"evaluation"/(name+"_"+attempt),
-            self.d, fingerprint=self.d.assert_models_equal(self.actor), physics_identity=digest(self.contract))
+            self.d, fingerprint=self.d.assert_models_equal(self.actor), physics_identity=digest(self.contract),
+            progress_path=self.root/"evaluation_progress"/name,
+            should_stop=lambda: stop_requested(self.root))
         # 每个阶段只提交完全有效的报告；失败目录保留，重试使用独立尝试目录。
         path = self.root/"artifacts"/(name+".json")
         self.d.root(lambda: atomic_json(path, report))
@@ -273,6 +277,8 @@ class AWRRun:
                       if progress_key in self.state["artifacts"] else None)
             def save_critic(phase, payload):
                 self.checkpoint(progress_key, payload, dict(macro=macro, phase=phase))
+                if self.d.root(lambda: stop_requested(self.root)):
+                    raise GracefulStop("Critic stopped at committed MC/FVI fit boundary")
             labels, critic_report, critics = fit_crossfit(self.actor, episodes, self.folds,
                 self.config["awr"]["critic"], self.d, seed=self.config["awr"]["seed"]+macro*1009,
                 resume=resume, checkpoint=save_critic)
@@ -383,6 +389,9 @@ class AWRRun:
                 if not self.run_macro(macro):
                     return 0
             self.publish(status="complete", phase="complete", finished_unix=time.time())
+            return 0
+        except GracefulStop:
+            self.publish(status="stopped")
             return 0
         finally:
             if self.replay is not None:

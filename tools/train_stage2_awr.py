@@ -59,6 +59,7 @@ def main():
     import torch
     import torch.distributed as dist
     from gem.closedloop.awr.distributed import Distributed
+    from gem.closedloop.awr.checkpoint import GracefulStop
     dist.init_process_group("gloo", timeout=timedelta(hours=2))
     tensor_group = None
     resource_monitor = None
@@ -97,6 +98,9 @@ def main():
                         run.actor.load_state_dict(run.checkpoints.load(reference)["payload"]["actor"])
                 name = d.root(lambda: "manual_"+uuid.uuid4().hex[:8])
                 run.eval_actor(name, run.full_plan if args.all_unique else run.fixed_plan)
+                return 0
+            except GracefulStop:
+                run.publish(status="stopped")
                 return 0
             finally:
                 if run.replay: run.replay.close()

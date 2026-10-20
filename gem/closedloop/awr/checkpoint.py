@@ -17,6 +17,10 @@ import torch
 from .io import atomic_json, cpu_copy, digest, file_sha256, sync_directory
 
 
+class GracefulStop(Exception):
+    """已完成当前物理Episode或已提交拟合阶段，等待从持久化边界继续。"""
+
+
 def capture_rng(device):
     return dict(torch=torch.get_rng_state(), numpy=np.random.get_state(), python=random.getstate(),
                 cuda=torch.cuda.get_rng_state(device) if torch.device(device).type == "cuda" else None)

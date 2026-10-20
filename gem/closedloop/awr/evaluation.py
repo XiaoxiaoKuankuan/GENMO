@@ -18,7 +18,8 @@ from gem.closedloop.common.world_flow import backend_operation
 from gem.closedloop.dppo.evaluation_world import assign_tasks, balanced_rank_tasks
 from .collection import CompleteCollector
 from .world import open_world, close_isolated_world, budget_for_tasks
-from .checkpoint import capture_rng, restore_rng
+from .checkpoint import capture_rng, restore_rng, GracefulStop
+from .evaluation_progress import EvaluationLedger, record_attempt_seconds
 from .io import atomic_json, write_tree, read_tree, digest
 from .physical_metrics import PhysicalMetrics, summarize_metrics
 
@@ -76,37 +77,62 @@ def paired_comparison(baseline, current, *, bootstrap=2000, seed=42):
                 acceptable=all(gates.values()), improvement_supported=all(gates.values()) and ci[0] > 0)
 
 
-def evaluate(config, policy, builder, catalog, plan, path, distributed, *, fingerprint, physics_identity):
+def evaluate(config, policy, builder, catalog, plan, path, distributed, *, fingerprint, physics_identity,
+             progress_path=None, should_stop=lambda: False):
+    started = time.perf_counter()
     config = copy.deepcopy(config)
     # 原完整评价合同要求每个真实控制步的分项，不能沿用训练的稀疏展示级别。
     config["runtime"].update(evidence_level="full", evaluation_metrics_only=False)
     path = Path(path)
     local_tasks = balanced_rank_tasks(plan, distributed.world_size)[distributed.rank]
-    local_path = path/f"rank{distributed.rank:02d}"
+    progress_path = Path(progress_path) if progress_path is not None else path/"progress"
     slots = config["evaluation"]["envs_per_rank"]
+    identity = dict(actor=fingerprint, physics=physics_identity, sampler=digest(policy.kernel_config),
+                    plan=plan["plan_sha256"], world_size=distributed.world_size, envs_per_rank=slots)
+    ledger = distributed.local(lambda: EvaluationLedger(
+        progress_path/f"rank{distributed.rank:02d}.json", identity,
+        [task["task_id"] for task in local_tasks]))
+    pending = ledger.pending(local_tasks)
+    local_path = path/f"rank{distributed.rank:02d}"
     rng = capture_rng(distributed.device)
     handle = None; driver = None
-    started = time.perf_counter()
-    references = []
+    references = list(ledger.references.values())
+    stopped = False
     def run_local():
-        nonlocal handle, driver
+        nonlocal handle, driver, stopped
+        if not pending:
+            return
+        if should_stop():
+            stopped = True
+            return
         handle = open_world(config, local_path/"world", distributed, num_envs=slots)
         driver = CompleteCollector(config, policy, builder, handle.world, budget_for_tasks(local_tasks, slots),
                                    local_path/"execution", num_envs=slots, actor_fingerprint=fingerprint)
-        queues = assign_tasks(local_tasks, slots)
+        # 恢复不重新分配剩余任务：保留原rank/slot与任务索引，防止环境身份发生漂移。
+        queues = [[(index, task) for index, task in queue
+                   if task["task_id"] not in ledger.references]
+                  for queue in assign_tasks(local_tasks, slots)]
         errors = []
         def flow(slot):
             env = driver.collector.states[slot].resource.env
+            nonlocal stopped
             for index, task in queues[slot]:
+                if should_stop():
+                    stopped = True
+                    break
                 diagnostics = PhysicalMetrics()
                 episode, error = yield from evaluation_episode_flow(env, task, index, plan, catalog=catalog,
                     limit=None, deterministic=True, transition_sink=diagnostics.observe, progress=None)
                 episode["awr_physical_metrics"] = diagnostics.result()
                 target = local_path/"episodes"/task["task_id"]
                 sha = write_tree(target, episode)
-                references.append(dict(path=str(target), sha256=sha, task_id=task["task_id"]))
                 if error:
                     errors.append(str(error)); break
+                if not episode["transition_valid"] or episode["truncated"]:
+                    raise ValueError("Incomplete evaluation task cannot enter resume ledger")
+                reference = dict(path=str(target), sha256=sha, task_id=task["task_id"])
+                ledger.append(reference)
+                references.append(reference)
             yield from backend_operation("retire")
         with torch.no_grad():
             driver.collector._drive({i: flow(i) for i in range(slots)})
@@ -121,6 +147,15 @@ def evaluate(config, policy, builder, catalog, plan, path, distributed, *, finge
             close_isolated_world(handle)
         restore_rng(rng, distributed.device)
     all_refs = [ref for rank in distributed.gather(references) for ref in rank]
+    was_stopped = any(distributed.gather(stopped))
+    elapsed = distributed.root(lambda: record_attempt_seconds(
+        progress_path, identity, path.name, time.perf_counter()-started))
+    if was_stopped and len(all_refs) < len(plan["tasks"]):
+        distributed.root(lambda: atomic_json(path/"interrupted.json",
+            dict(identity=identity, completed_task_ids=[r["task_id"] for r in all_refs],
+                 planned_tasks=len(plan["tasks"]), seconds_all_recorded_attempts=elapsed,
+                 eligible_for_checkpoint_selection=False)))
+        raise GracefulStop("Evaluation drained active Episodes; remaining tasks saved for resume")
     def publish():
         task_map = {t["task_id"]: t for t in plan["tasks"]}
         if {r["task_id"] for r in all_refs} != set(task_map) or len(all_refs) != len(task_map):
@@ -145,9 +180,12 @@ def evaluate(config, policy, builder, catalog, plan, path, distributed, *, finge
                           by_source={source: summarize_metrics([e for e in episodes if e["dataset"] == source])
                                      for source in aggregate["by_source"]}),
                       source_balanced_reward_per_second=float(np.mean(source_rates)),
-                      seconds=time.perf_counter()-started, fresh_physics_world=True)
+                      seconds=elapsed, fresh_physics_world=True,
+                      recovered_complete_tasks=sum(distributed_counts),
+                      timing_scope="all_normally_closed_attempts_hard_interrupt_cost_in_outer_launch_ledger")
         atomic_json(path/"report.json", report)
         return report
+    distributed_counts = distributed.gather(len(local_tasks)-len(pending))
     report = distributed.root(publish)
     if distributed.assert_models_equal(policy.actor) != fingerprint:
         raise ValueError("Evaluation modified Actor weights or buffers")
