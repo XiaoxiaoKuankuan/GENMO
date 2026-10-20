@@ -69,7 +69,9 @@ def summarize(run_dir):
                     mc=select(f["mc"], ("epochs", "seconds", "validation")),
                     fvi=[select(v, ("epochs", "seconds", "validation", "frozen_target_identity"))
                          for v in f["fvi"]]) for f in value["folds"]])
-        elif "_collection_" in name:
+        elif name.endswith("_collection_amendment"):
+            result["collection"][name] = {k: v for k, v in value.items() if k != "full_outcomes"}
+        elif "_collection_" in name and "ranks" in value:
             outcomes = [task for rank in value["ranks"] for task in rank["tasks"]]
             complete = [task for task in outcomes if task["complete"]]
             decisions = sum(t["states"] for t in complete)

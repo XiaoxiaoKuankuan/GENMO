@@ -148,6 +148,36 @@ Critic和评价按阶段边界完成后响应。进程异常时保留原始日�
 独立工作树及其配置；只读汇总脚本可跨版本读取报告，但不能改变运行身份。
 后续多宏迭代由新运行配置的`max_macro_iterations`控制；已有运行的resume不会扩大预算。
 
+## 显式追加采集尝试
+
+若原固定计划全部执行完，但存在首次GENMO决策前的真实预热失败，则这些任务没有
+Actor动作或完整MC样本。默认采集仍拒绝缺额，不自动换歌。用户明确允许追加预算后，
+可使用独立入口；2026-10-20的512首轮授权为最多26次额外尝试，补足512条有效Episode。
+
+```bash
+bash tools/run_stage2_awr_server2.sh complete-collection \
+  --run-dir <原运行目录> --runtime-repo <原运行提交的GENMO工作树> \
+  --max-extra-attempts 26 \
+  --authorization '用户允许保留全部失败，最多26次额外尝试，补足512条有效完整Episode' \
+  --tool-commit <补采工具所在的已提交40位Git提交> --continue-training
+```
+
+先等待原进程退出，入口仍检查八卡空闲和原源码/资产身份。工具可以从已推送提交按原样
+归档到运行的`acceptance/tools/<commit>/`，使用同一八卡torchrun环境执行，并显式
+`--runtime-repo`导入原提交；此方式不更新运行工作树或关闭身份校验。报告另外绑定工具
+文件SHA与Git提交，物理、奖励、采样及训练代码继续绑定原提交。
+
+`macroNNN/supplement/plan.json`保存原采样机制生成的追加候选，原计划和request不改。
+每批先预留不超过剩余缺口的任务，成功和真实物理失败均接纳，只有无动作预热失败
+不能充当Actor样本。已预留但中断的任务也占额外尝试上限，防止恢复时无限重试；
+预算用尽仍不足会保存`exhausted.json`并停止，不能自动扩额。
+
+达到目标后重新执行生产Replay的SHA/时间/MC/隔离校验，保存失败快照摘要、完整
+尝试账本、授权与精确快照，发布`*_collection_amendment`和`*_replay`阶段产物。
+此后原`resume`可继续Critic/Actor；已经开始价值拟合或Actor更新的数据不得替换。
+报告同时列原任务数、额外尝试数、失败数和有效Episode数，不将补采后的512冒称只有
+512次物理尝试。行政截断或未执行完的原任务应走正常恢复，不能用此入口静默替换。
+
 ## Replay字段和校验
 
 | 数据 | 字段与含义 |

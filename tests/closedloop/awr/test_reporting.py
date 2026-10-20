@@ -72,6 +72,19 @@ def test_resource_monitor_preserves_query_failure_and_sampled_scope(tmp_path, mo
     assert len(list((tmp_path / "resources").glob("*.summary.json"))) == 1
 
 
+def test_report_preserves_explicit_collection_amendment(tmp_path):
+    module = load_tool("report_stage2_awr")
+    approval = tmp_path/"amendment.json"
+    approval.write_text(json.dumps(dict(schema="genmo.awr.collection_amendment.v1",
+        original_tasks=512, reserved_extra_attempts=8, total_confirmed_attempts=520,
+        complete_episodes=512, excluded_tasks=8, full_outcomes=[{"task_id": "failed"}])))
+    (tmp_path/"state.json").write_text(json.dumps(dict(created_unix=0.,
+        artifacts={"macro000_collection_amendment": str(approval)})))
+    value = module.summarize(tmp_path)["collection"]["macro000_collection_amendment"]
+    assert value["total_confirmed_attempts"] == 520 and value["excluded_tasks"] == 8
+    assert value["complete_episodes"] == 512 and "full_outcomes" not in value
+
+
 def test_resource_monitor_rejects_missing_gpu(monkeypatch, tmp_path):
     from gem.closedloop.awr.resources import GPUResourceMonitor
     monkeypatch.setattr("subprocess.check_output", lambda *args, **kwargs: "0, 100, 25\n")
