@@ -7,6 +7,7 @@
 """
 from __future__ import annotations
 
+from collections.abc import Mapping
 import hashlib
 import json
 import os
@@ -78,7 +79,7 @@ def write_tree(path, tree):
                     "tensor": tensor}
         if isinstance(value, np.generic):
             return value.item()
-        if isinstance(value, dict):
+        if isinstance(value, Mapping):
             return {str(k): encode(v) for k, v in value.items()}
         if isinstance(value, tuple):
             return {"__tuple__": [encode(v) for v in value]}
@@ -152,7 +153,7 @@ def cpu_copy(value):
         return value.detach().cpu().clone()
     if isinstance(value, np.ndarray):
         return value.copy()
-    if isinstance(value, dict):
+    if isinstance(value, Mapping):
         return {k: cpu_copy(v) for k, v in value.items()}
     if isinstance(value, (tuple, list)):
         return type(value)(cpu_copy(v) for v in value)

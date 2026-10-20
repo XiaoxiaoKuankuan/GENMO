@@ -1,6 +1,10 @@
 # 独立AWR配置：完整Episode回放、双Critic、单扩散时间监督及真实Stage1 BC。
 # 奖励/资产/物理合同从指定AWR基线逐项保留；部署延迟必须重新实测，默认仅1宏迭代。
 # 512/128为完整Episode数量；smoke独立64条，不混入正式Replay。
+diagnostics:
+  record_original_threshold_crossings: true
+  reward_substeps: true
+  verify_actor_condition_edges: true
 environment:
   actuator_delay_steps: 0
   curriculum: false

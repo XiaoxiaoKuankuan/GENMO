@@ -36,6 +36,8 @@ def load_config(path, *, profile=None):
         raise ValueError("AWR v1 requires original Stage1 DDIM20/CFG2.5/history50")
     if c["runtime"]["allow_shared_gpu"]:
         raise ValueError("AWR cannot take occupied GPUs")
+    if c.get("diagnostics", {}).get("reward_substeps") is not True:
+        raise ValueError("AWR requires original GMT contact/tracking substep diagnostics")
     if c["awr"]["max_macro_iterations"] < 1 or c["awr"]["initial_episodes"] > c["awr"]["replay_capacity"]:
         raise ValueError("Invalid macro/FIFO budget")
     fixed = dict(clock_hz=600, control_ticks=12, decision_ticks=300, physics_ticks=3,

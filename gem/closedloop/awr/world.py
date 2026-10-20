@@ -48,8 +48,11 @@ def open_world(config, path, distributed, *, num_envs):
         handle.world = VectorWorldClient(client, handle.journal, socket_path=socket)
         handle.start_seconds = time.perf_counter()-started
         return handle
-    except BaseException:
-        close_isolated_world(handle)
+    except BaseException as error:
+        try:
+            close_isolated_world(handle)
+        except BaseException as shutdown_error:
+            error.add_note(f"AWR world shutdown also failed: {shutdown_error!r}; see {path}/gmt_worker.log")
         raise
 
 
