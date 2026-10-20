@@ -1,0 +1,75 @@
+{
+  "schema": "genmo.awr.independent_replay_audit.v1",
+  "run_dir": "/data1/user/liwei/GENMO_outputs/stage2_awr/pilot512_20261020_01",
+  "source_commits": {
+    "genmo": "f417545456e9919e67b2b28fd963bdd680a8b5ec",
+    "gmt": "4ca256fe79d2dda22240011947ead276690e40f7"
+  },
+  "published_at_snapshot": 512,
+  "audited_episodes": 512,
+  "all_published_audited": true,
+  "independent_mc_formula": "per_control_reverse_sum_gamma_0.99_pow_1_over_25",
+  "reward_multiplied_by_dt_again": false,
+  "seconds": 1367.0876505747437,
+  "outcomes": {
+    "non_yaw_anchor_ori": 15,
+    "ee_body_pos": 3,
+    "yaw_anchor_ori": 67,
+    "anchor_pos": 1,
+    "music_end": 426
+  },
+  "full_report_path": "/data1/user/liwei/GENMO_outputs/stage2_awr/pilot512_20261020_01/acceptance/replay_all512_independent_20261020.json",
+  "full_report_sha256": "6a42fbb10109784e314e4a5b15c9aa1e343a7b953d79d8502fb7ae8e7898bb85",
+  "total_states": 44722,
+  "total_actor_samples": 44447,
+  "total_controls": 1113001,
+  "mc_max_absolute_error": 8.526512829121202e-13,
+  "generated_target_max_absolute_error": 0.0,
+  "all_manifest_and_array_sha_verified": true,
+  "by_source": {
+    "FineDance": {
+      "episodes": 123,
+      "states": 16580,
+      "actor_samples": 16501,
+      "controls": 413036,
+      "outcomes": {
+        "non_yaw_anchor_ori": 13,
+        "ee_body_pos": 3,
+        "yaw_anchor_ori": 49,
+        "anchor_pos": 1,
+        "music_end": 57
+      }
+    },
+    "Mine": {
+      "episodes": 101,
+      "states": 10992,
+      "actor_samples": 10928,
+      "controls": 273655,
+      "outcomes": {
+        "yaw_anchor_ori": 7,
+        "music_end": 94
+      }
+    },
+    "AIOZ-GDANCE": {
+      "episodes": 184,
+      "states": 14807,
+      "actor_samples": 14724,
+      "controls": 368653,
+      "outcomes": {
+        "yaw_anchor_ori": 11,
+        "music_end": 171,
+        "non_yaw_anchor_ori": 2
+      }
+    },
+    "AIST++": {
+      "episodes": 104,
+      "states": 2343,
+      "actor_samples": 2294,
+      "controls": 57657,
+      "outcomes": {
+        "music_end": 104
+      }
+    }
+  },
+  "concurrency_scope": "CPU audit concurrent with eight-rank loading; not isolated I/O benchmark"
+}
