@@ -52,7 +52,7 @@ def case(actor_factory):
     return policy,rows,targets
 
 
-def run(rank,world,actor,rows,targets,directory,soft_kl=None,adaptive=False):
+def run(rank,world,actor,rows,targets,directory,soft_kl=None,adaptive=False,grouped=False):
     torch.set_num_threads(1)
     # spawn会通过共享内存传递CPU Tensor；每个rank必须独占参数，避免重复原位Adam。
     actor=copy.deepcopy(actor)
@@ -64,7 +64,10 @@ def run(rank,world,actor,rows,targets,directory,soft_kl=None,adaptive=False):
     local=rows if rank==0 else []
     local_targets=targets if rank==0 else {k:v[:0] for k,v in targets.items()}
     cache=RolloutTensorCache(local,local_targets,'cpu')
-    opt=torch.optim.AdamW(trainable_actor_parameters(policy.actor),lr=1e-7,weight_decay=0.)
+    from gem.closedloop.dppo.actor_optimizer import make_actor_optimizer
+    options=dict(actor_lr=1e-7,actor_trainable_scope='all')
+    if grouped:options['actor_lr_multipliers']=dict(transformer=.1,qpos_output=1.,other=.1,transformer_overrides={})
+    opt=make_actor_optimizer(policy.actor,options)
     # 真实非空Adam初态：零梯度step只建立动量，不改变Actor及old statistics。
     for p in trainable_actor_parameters(policy.actor):p.grad=torch.zeros_like(p)
     opt.step();opt.zero_grad(set_to_none=True)
@@ -87,15 +90,16 @@ def run(rank,world,actor,rows,targets,directory,soft_kl=None,adaptive=False):
         cache.close();dist.destroy_process_group()
 
 
-def test_multistep_tail_empty_rank_bc_and_nonempty_adam(tmp_path,actor_factory):
+@pytest.mark.parametrize('grouped',[False,True])
+def test_multistep_tail_empty_rank_bc_and_nonempty_adam(tmp_path,actor_factory,grouped):
     policy,rows,targets=case(actor_factory)
     initial=copy.deepcopy(policy.actor.state_dict())
     one=tmp_path/'one';two=tmp_path/'two';one.mkdir();two.mkdir()
-    run(0,1,copy.deepcopy(policy.actor),rows,targets,str(one))
+    run(0,1,copy.deepcopy(policy.actor),rows,targets,str(one),grouped=grouped)
     child_actor=copy.deepcopy(policy.actor)
     # 扩散调度器含不可pickle的lambda；子进程按原1000步配置重建，模型/行为张量不变。
     child_actor.train_diffusion=None
-    mp.start_processes(run,args=(2,child_actor,rows,targets,str(two)),nprocs=2,start_method='spawn')
+    mp.start_processes(run,args=(2,child_actor,rows,targets,str(two),None,False,grouped),nprocs=2,start_method='spawn')
     expected=torch.load(one/'rank0.pt',weights_only=False)
     results=[torch.load(two/f'rank{i}.pt',weights_only=False) for i in range(2)]
     for result in [expected,*results]:
@@ -107,6 +111,10 @@ def test_multistep_tail_empty_rank_bc_and_nonempty_adam(tmp_path,actor_factory):
         assert sorted(r['epoch_orders'][0])==list(range(5))
         assert all(v['denoising_steps']==[15,16,17,18] for v in r['steps'])
         assert all(float(s['step'])==4 for s in result['optimizer']['state'].values())
+        if grouped:
+            assert len(result['optimizer']['param_groups'])>1
+            for group in result['optimizer']['param_groups']:
+                assert group['lr']==pytest.approx(1e-7*group['lr_multiplier'])
     assert any(not torch.equal(initial[k],expected['actor'][k]) for k in initial)
     for result in results:
         for key,value in expected['actor'].items():

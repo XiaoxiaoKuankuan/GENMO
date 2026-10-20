@@ -663,7 +663,11 @@ def run(cargs,config,distributed):
             local_call(distributed,assert_paused_physics)
             fingerprint_frequency=c.stage['checks']['full_fingerprint_every']
             fingerprints=None
-            if strict or (fingerprint_frequency>0 and (c.state['rollouts_completed']+1)%fingerprint_frequency==0):
+            # 分组Adam的首轮及本次明确停止边界也核验八rank完整参数一致性；
+            # 正式中间轮仍按原周期，避免把全模型hash变成每轮热路径成本。
+            if (strict or c.state['rollouts_completed']==0 or
+                    not is_warmup and c.state['iteration']+1>=stop_after_iteration or
+                    fingerprint_frequency>0 and (c.state['rollouts_completed']+1)%fingerprint_frequency==0):
                 fingerprints=distributed.all_gather_object(local_call(distributed,lambda:dict(
                     actor=_model_fingerprint(c.actor),critic=_model_fingerprint(c.critic))))
                 if any(value!=fingerprints[0] for value in fingerprints):
