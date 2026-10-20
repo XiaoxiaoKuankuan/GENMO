@@ -107,3 +107,42 @@ def test_resource_monitor_rejects_missing_gpu(monkeypatch, tmp_path):
     monkeypatch.setattr("subprocess.check_output", lambda *args, **kwargs: "0, 100, 25\n")
     with pytest.raises(ValueError, match="eight distinct"):
         GPUResourceMonitor(tmp_path).sample()
+
+
+def test_attempt_costs_keep_failed_work_and_open_attempt_explicit(tmp_path):
+    module = load_tool("report_stage2_awr")
+    root = tmp_path/"pilot"
+    root.mkdir()
+    def launch(name, pid, start, end=None, code=None):
+        (tmp_path/(name+".launch.json")).write_text(json.dumps(dict(pid=pid, started_unix=start,
+            command=["bash", "run_stage2_awr_server2.sh", "resume", "--run-dir", str(root)])))
+        if end is not None:
+            (tmp_path/(name+".exit.json")).write_text(json.dumps(dict(pid=pid, finished_unix=end, exit_code=code)))
+    launch("pilot", 1, 0., 100., 1)
+    launch("pilot.resume", 2, 110., 160., 0)
+    launch("pilot.check", 3, 170.)
+    # 相似前缀但不同运行名不能混入本运行的成本。
+    (tmp_path/"pilot_other.launch.json").write_text("{}")
+    value = module.attempt_costs(root, now=200.)
+    assert value["completed_attempt_seconds"] == 150.
+    assert value["all_attempt_seconds_including_open_estimates"] == 180.
+    assert value["failed_completed_attempts"] == 1 and value["open_attempts"] == 1
+    assert value["reserved_gpu_hours"] == pytest.approx(8*180/3600)
+    assert not value["overlapping_attempts"]
+    assert next(a for a in value["attempts"] if a["pid"] == 3)["elapsed_is_provisional"]
+
+
+def test_raw_gpu_samples_keep_interrupted_attempt_and_partial_tail(tmp_path):
+    module = load_tool("report_stage2_awr")
+    directory = tmp_path/"resources"
+    directory.mkdir()
+    sample = lambda timestamp, memory: dict(unix=timestamp,
+        gpus=[dict(index=0, memory_used_mib=memory, utilization_percent=20)])
+    (directory/"gpu_failed.jsonl").write_text(
+        json.dumps(sample(1., 100))+"\n"+json.dumps(sample(4., 300))+"\n"+'{"unix":')
+    value = module.gpu_sample_audit(tmp_path)[0]
+    assert not value["summary_present"]
+    assert value["sampled_peak_memory_mib"]["0"] == 300
+    assert value["maximum_sample_gap_seconds"] == 3.
+    assert value["incomplete_trailing_lines"] == 1
+    assert value["sample_counts"]["0"] == 2

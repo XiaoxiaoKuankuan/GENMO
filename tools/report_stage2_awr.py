@@ -21,6 +21,84 @@ def select(value, keys):
     return {key: value[key] for key in keys if key in value}
 
 
+def attempt_costs(root, *, now=None):
+    """纳入正常和失败启动的完整墙钟，不把I/O等待从八卡预约成本中扣除。"""
+    root = Path(root).resolve()
+    now = time.time() if now is None else now
+    attempts = []
+    for path in sorted(root.parent.glob(root.name+"*.launch.json")):
+        stem = path.name[:-len(".launch.json")]
+        if stem != root.name and not stem.startswith(root.name+"."):
+            continue
+        launch = json.loads(path.read_text())
+        command = launch.get("command", [])
+        if "--run-dir" not in command or command[command.index("--run-dir")+1] != str(root):
+            raise ValueError("Attempt launch does not bind this exact AWR run directory")
+        ending = path.with_name(stem+".exit.json")
+        exit_record = json.loads(ending.read_text()) if ending.exists() else None
+        if exit_record is not None and exit_record["pid"] != launch["pid"]:
+            raise ValueError("Attempt exit PID differs from launch")
+        end = exit_record["finished_unix"] if exit_record else now
+        if end < launch["started_unix"]:
+            raise ValueError("Attempt exit predates launch")
+        # 包装器和显式torchrun均是本项目八卡入口；未知外部命令不推断GPU数量。
+        eight_gpu = any(Path(v).name == "run_stage2_awr_server2.sh" for v in command) or "--nproc_per_node=8" in command
+        attempts.append(dict(name=stem, pid=launch["pid"], started_unix=launch["started_unix"],
+            finished_unix=exit_record["finished_unix"] if exit_record else None,
+            exit_code=exit_record["exit_code"] if exit_record else None,
+            exit_record_present=exit_record is not None, elapsed_seconds=end-launch["started_unix"],
+            elapsed_is_provisional=exit_record is None, reserved_gpu_count=8 if eight_gpu else None,
+            launch_path=str(path), exit_path=str(ending) if exit_record else None))
+    completed = [a for a in attempts if a["exit_record_present"]]
+    measured = sum(a["elapsed_seconds"] for a in completed)
+    known_gpus = all(a["reserved_gpu_count"] is not None for a in attempts)
+    ordered = sorted(attempts, key=lambda a: a["started_unix"])
+    overlap = any(a["started_unix"]+a["elapsed_seconds"] > b["started_unix"]
+                  for a, b in zip(ordered, ordered[1:]))
+    return dict(attempts=attempts, completed_attempt_seconds=measured,
+        failed_completed_attempts=sum(a["exit_code"] != 0 for a in completed),
+        open_attempts=sum(not a["exit_record_present"] for a in attempts),
+        all_attempt_seconds_including_open_estimates=sum(a["elapsed_seconds"] for a in attempts),
+        reserved_gpu_hours=(sum(a["elapsed_seconds"]*a["reserved_gpu_count"] for a in attempts)/3600.
+                            if attempts and known_gpus and not overlap else None),
+        overlapping_attempts=overlap,
+        scope="whole_eight_gpu_attempt_reservation_including_failed_runs_cpu_loading_io_and_gpu_idle",
+        gpu_hours_are_allocation_estimate_not_measured_gpu_busy_time=True,
+        missing_exit_is_provisional_not_proof_of_live_process=True)
+
+
+def gpu_sample_audit(root):
+    """包括被打断而未发布summary的资源采样，明确离散峰值和日志尾部完整性。"""
+    reports = []
+    for path in sorted((Path(root)/"resources").glob("gpu_*.jsonl")):
+        counts, peaks, utilization = {}, {}, {}
+        first, last, max_gap, errors, incomplete = None, None, 0., 0, 0
+        with path.open() as stream:
+            for line in stream:
+                if not line.endswith("\n"):
+                    incomplete += 1
+                    continue
+                row = json.loads(line)
+                timestamp = row["unix"]
+                if last is not None:
+                    max_gap = max(max_gap, timestamp-last)
+                first = timestamp if first is None else first
+                last = timestamp
+                errors += "error" in row
+                for gpu in row.get("gpus", []):
+                    key = str(gpu["index"])
+                    counts[key] = counts.get(key, 0)+1
+                    peaks[key] = max(peaks.get(key, 0), gpu["memory_used_mib"])
+                    utilization[key] = utilization.get(key, 0)+gpu["utilization_percent"]
+        reports.append(dict(path=str(path), summary_present=path.with_suffix(".summary.json").exists(),
+            first_sample_unix=first, last_sample_unix=last, maximum_sample_gap_seconds=max_gap,
+            sampled_peak_memory_mib=peaks, sample_counts=counts,
+            mean_sampled_utilization_percent={k: v/counts[k] for k, v in utilization.items()},
+            query_errors=errors, incomplete_trailing_lines=incomplete,
+            measurement="discrete_total_device_memory_peak_lower_bound_includes_interrupted_attempts"))
+    return reports
+
+
 def summarize(run_dir):
     root = Path(run_dir).resolve()
     state = json.loads((root / "state.json").read_text())
@@ -118,6 +196,8 @@ def summarize(run_dir):
                                     "retained_bytes", "active_episodes"), row))
     result["gpu_resources"] = [json.loads(path.read_text())
                               for path in sorted((root / "resources").glob("gpu_*.summary.json"))]
+    result["attempt_costs"] = attempt_costs(root)
+    result["gpu_sample_audit"] = gpu_sample_audit(root)
     return result
 
 
