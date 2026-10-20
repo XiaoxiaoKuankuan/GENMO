@@ -14,6 +14,14 @@ from .io import digest
 from .checkpoint import capture_rng, restore_rng
 
 
+def actor_module_name(parameter_name):
+    """将两个输出头与其余去噪网络分开计量，模块统计互不重叠。"""
+    for prefix in ("denoiser.final_layer", "denoiser.static_conf_head"):
+        if parameter_name.startswith(prefix + "."):
+            return prefix
+    return parameter_name.split(".")[0]
+
+
 @torch.no_grad()
 def stage1_validation(actor, bc, *, batches, batch_size, device, seed):
     """使用同一验证随机流比较不同Actor，结束后恢复训练随机状态及BC采样器。"""
@@ -64,7 +72,7 @@ def exploration(episodes):
 def parameter_changes(actor, previous):
     values = {}
     for name, parameter in actor.named_parameters():
-        module = name.split(".")[0]
+        module = actor_module_name(name)
         delta = parameter.detach().cpu().double()-previous[name].double()
         row = values.setdefault(module, dict(squared_l2=0., changed_elements=0, elements=0))
         row["squared_l2"] += float(delta.square().sum())

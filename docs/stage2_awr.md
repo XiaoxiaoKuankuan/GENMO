@@ -110,3 +110,76 @@ Replay `array_tree.v2`保留物理回执的共享列，兼容旧v1；训练视�
 读取前仍核验完整manifest和全部数值数组SHA。完整原始证据未删除，训练视图明确禁止
 回写为完整Episode。单样本的真实无损编码与读取验证见
 `docs/validation/stage2_awr_storage_20261020.json`，其本地读速不代表整轮Server-2吞吐。
+
+## 代码与恢复边界
+
+| 文件 | 实际职责 |
+|---|---|
+| `awr/sampler.py`、`actor.py` | 完整Stage1 DDIM采集；独立单时间步监督内核；原Stage1完整标签校验保留 |
+| `awr/collection.py`、`records.py` | 原始参考与提交/消费身份绑定、真实终止和完整Episode连续性 |
+| `awr/io.py`、`replay.py` | dtype二进制分片、列共享、SHA、SQLite事务、FIFO、快照引用与只读训练视图 |
+| `awr/returns.py` | FP64真实MC及可变时长N-step目标，调用公共600Hz时间审计 |
+| `awr/folds.py`、`tasks.py` | group/audio连通音乐折、内部验证、来源采样及持久化任务计划 |
+| `awr/critic.py`、`fvi.py` | 两份独立原非对称网络、MC/FVI比较、冻结目标和交叉标签身份 |
+| `awr/advantages.py`、`dataset.py` | 整轮固定标签、样本身份严格对齐、均匀回放及Contact诊断隔离 |
+| `awr/losses.py`、`trainer.py`、`distributed.py` | 每样本加权、真实BC、全局分母、梯度累积/SUM、裁剪及优化 |
+| `awr/checkpoint.py`、`runtime.py` | 原子checkpoint及五阶段调度，同Replay自蒸馏/AWR对照 |
+| `awr/evaluation.py`、`physical_metrics.py`、`metrics.py` | 完整任务/失败、成对CI、安全门槛、保留能力和探索诊断 |
+| `awr/world.py`、`config.py`、`resources.py` | 独立PhysX世界、AWR时钟校准、资产/资源检查及GPU采样 |
+| `closedloop/common/` | 原物理事务、奖励、Episode、Critic、BC与评价的算法无关实现；旧DPPO路径保留兼容导出 |
+
+`state.json`只引用已经提交的阶段产物。Actor断点保存参数、AdamW和Scheduler、
+Epoch/Batch游标、优化步数、数据身份、固定BC系数及各rank独立BC/RNG状态。
+Critic保存两份参数、Optimizer/Scheduler、拟合随机状态、MC/FVI候选与冻结目标身份；
+恢复边界是一次已完成的MC或FVI拟合，未完成拟合从上一已提交边界重做。
+
+正常停止在采集阶段停止发任务并排空当前Episode，在Actor阶段保存完整优化步；
+Critic和评价按阶段边界完成后响应。进程异常时保留原始日志、已发布Episode和
+已提交checkpoint；恢复不拼接旧世界的中间物理状态。若固定任务发生预热失败或行政
+截断，采集验收会失败并保存排除原因，不静默补成成功Episode或换一首音乐。
+
+配置与两个源码提交均参与恢复身份。更新源码后重新评价旧模型时，应使用原运行提交的
+独立工作树及其配置；只读汇总脚本可跨版本读取报告，但不能改变运行身份。
+后续多宏迭代由新运行配置的`max_macro_iterations`控制；已有运行的resume不会扩大预算。
+
+## Replay字段和校验
+
+| 数据 | 字段与含义 |
+|---|---|
+| Actor条件 | `context`保存原有十个Stage1条件张量，含音乐/有效Mask、proprio48历史/时间、决策时间、已知前缀/Mask、未来时间/Mask；单记录Batch维为1 |
+| 原始目标 | `target_qpos30 [60,30]`为生成的物理表示；`target_valid`和`free_mask`同形状且bool，后者严格等于有效未知坐标；`contact [60,2]`仅诊断 |
+| 提交与消费 | `execution.source_audit`含原始/实际提交世界参考摘要与数值；另存Root Anchor、坐标身份、窗口首次观察tick、当前点消费tick和奖励参考tick |
+| Critic状态 | `metadata.critic_context`及`remaining_music_seconds`来自生成前状态；包含Tracking90历史、时间/Mask和原条件，不加入该动作、种子或未来奖励 |
+| 真实反馈 | `rewards [n]`为实际50Hz已积分奖励；`control_tick_begin/end`、实际控制步数、终止/截断及原因；完整物理trace、奖励分项和事件保存在原始metadata |
+| 行为身份 | `identity`含session/env/episode/decision/plan、policy/actor版本和Actor指纹；metadata另存采样器、生成种子及源码；Episode含source/group/audio、任务和冻结契约 |
+| 完整标签 | `returns [K]`为这条Episode的K个上层状态MC；标签分片以唯一sample_id绑定跨折Value、原始/标准化Advantage、raw/final权重及Critic身份 |
+
+连续性检查采用整数tick：每个控制周期12 tick、4个物理子步；区间首尾必须相接。
+已知前缀逐坐标相等，目标不得与未来有效Mask冲突，行政截断没有完整MC。
+生成目标与实际提交自由坐标不一致时拒绝接纳；自然结束和物理失败均保存，
+未执行候选不参与Actor回归。完整60帧监督与实际消费范围分开记录。
+
+SQLite记录Episode顺序、摘要、来源、行为版本、Transition/Actor样本数、字节量及
+快照引用；数组目录先原子发布再登记。重复同一摘要幂等，身份相同内容不同立即报错。
+淘汰按整条Episode进行；被训练、对照或恢复快照引用的旧数据暂不删除，
+达到字节预算即停止接纳并要求处理引用，不能无限增长。
+
+## 结果的判定范围
+
+小型64集的音乐折每来源、每折只有两个音乐组，其中一个用于内部验证，所以该验收
+实际内部留出比例为50%；正式512使用全训练音乐清单预先构建的约20%映射。报告给出
+实际Episode、状态和音乐组数，不能用配置比例代替实际统计。
+
+MC/FVI内部验证改善只决定价值基线选择。Actor权重永远是实际MC减交叉Value，
+不用FVI目标替代MC。BC数据不进入Critic或标签，Contact Head直接监督来自真实BC。
+原始权重截顶与均值归一化后的上界不同；报告同时给两种权重分布及上界。
+
+梯度诊断和参数变化将`denoiser.final_layer`（qpos30 Head）、
+`denoiser.static_conf_head`（Contact Head）与其余denoiser参数分开统计，避免输出头
+变化被大网络总范数掩盖。分组互不重叠；Contact没有Replay真值，不能据此新增其AWR监督。
+
+八卡计算验证见`docs/validation/stage2_awr_distributed_20261020.json`。
+公共奖励在6545个真实控制步上的独立基线重算见
+`docs/validation/stage2_awr_real_reward_parity_20261020.json`。
+物理改善必须同时查看完成数、所有失败、时长、累计回报、活动度及成对置信区间；
+自蒸馏/AWR损失、参数变化和EV不承担此结论。

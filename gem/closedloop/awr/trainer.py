@@ -15,6 +15,7 @@ import torch
 from .checkpoint import capture_rng, restore_rng
 from .io import cpu_copy, digest
 from .losses import weighted_denoising
+from .metrics import actor_module_name
 
 
 def gradient_snapshot(model):
@@ -25,7 +26,7 @@ def gradient_report(first, second=None):
     norm = math.sqrt(sum(float(g.double().square().sum()) for g in first.values()))
     result = dict(norm=norm, modules={})
     for name, g in first.items():
-        module = name.split(".")[0]
+        module = actor_module_name(name)
         result["modules"][module] = result["modules"].get(module, 0.)+float(g.double().square().sum())
     result["modules"] = {k: math.sqrt(v) for k, v in result["modules"].items()}
     if second is not None:

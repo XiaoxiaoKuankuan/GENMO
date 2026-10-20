@@ -1,0 +1,85 @@
+{
+  "methods": {
+    "awr": {
+      "checkpoint": {
+        "file": "macro000_awr_final_ca32c292.pt",
+        "identity": {
+          "request": "0108232aff02a1747dfef84e2ab61e20781894d291e365aef54b5ff798624b1f",
+          "sources": {
+            "genmo": "ea81029142a571bb763282b46225bbdfadfc0648",
+            "gmt": "4ca256fe79d2dda22240011947ead276690e40f7"
+          }
+        },
+        "progress": {
+          "cursor": 0,
+          "epoch": 5,
+          "macro": 0,
+          "method": "awr",
+          "phase": "actor",
+          "step": 95
+        },
+        "sha256": "c4555e7b6fbb38cc1919da530dca96608c49680030819a23063eeef622e0d571"
+      },
+      "contact_probability_rms": 0.11985640222554472,
+      "fixed_output_samples": 4,
+      "heads": {
+        "denoiser.final_layer": {
+          "changed_elements": 1080330,
+          "elements": 1080350,
+          "l2": 0.0377163235259546
+        },
+        "denoiser.static_conf_head": {
+          "changed_elements": 1051641,
+          "elements": 1051650,
+          "l2": 0.06182481584863222
+        }
+      },
+      "joint_rms_rad": 0.07993922491362661,
+      "root_representation_rms": 0.03476123481076936,
+      "same_conditions_and_seeds": true
+    },
+    "self_distillation": {
+      "checkpoint": {
+        "file": "macro000_self_distillation_final_9d00fd9f.pt",
+        "identity": {
+          "request": "0108232aff02a1747dfef84e2ab61e20781894d291e365aef54b5ff798624b1f",
+          "sources": {
+            "genmo": "ea81029142a571bb763282b46225bbdfadfc0648",
+            "gmt": "4ca256fe79d2dda22240011947ead276690e40f7"
+          }
+        },
+        "progress": {
+          "cursor": 0,
+          "epoch": 5,
+          "macro": 0,
+          "method": "self_distillation",
+          "phase": "actor",
+          "step": 95
+        },
+        "sha256": "1e7553f0025c4e29f7051fe5713e8343a11dbecf0a2b35cda2e6cd6107d8fe04"
+      },
+      "contact_probability_rms": 0.13227031876886713,
+      "fixed_output_samples": 4,
+      "heads": {
+        "denoiser.final_layer": {
+          "changed_elements": 1080338,
+          "elements": 1080350,
+          "l2": 0.04328740618901726
+        },
+        "denoiser.static_conf_head": {
+          "changed_elements": 1051646,
+          "elements": 1051650,
+          "l2": 0.06250433048486034
+        }
+      },
+      "joint_rms_rad": 0.08801479267372882,
+      "root_representation_rms": 0.021906351880195286,
+      "same_conditions_and_seeds": true
+    }
+  },
+  "source_commits": {
+    "genmo": "ea81029142a571bb763282b46225bbdfadfc0648",
+    "gmt": "4ca256fe79d2dda22240011947ead276690e40f7"
+  },
+  "stage1_sha256": "51b522fbdeb0ec289e5ffc24e2fccca9888df90495f57f96714c1bb43c05f8e2"
+}
