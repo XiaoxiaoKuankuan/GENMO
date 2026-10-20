@@ -167,3 +167,94 @@ TensorBoard只打开该run的``tensorboard_compact``目录；``Policy/learning_r
 
 边界：本轮证明与否分开报告——算法和更新正常不等于物理收益已经成立；
 正式训练后的持续改善须看固定音乐完成、八项误差、活动度和奖励组成。
+
+
+2026-10-20 晚间显存滞留修复与同实验续训
+--------------------------------------
+
+原正式会话在第37轮OOM，GPU3的逐轮PyTorch已分配峰值从第3轮26.858GiB
+升到第36轮74.272GiB，其他卡约27GiB；最后完整保存的是34轮/270次Adam。
+独立复现确认bulk_cpu_copy和GMT to_host的递归局部函数形成循环引用，捕获的
+分组表会让CUDA输入等到Python循环GC才释放。empty_cache不能释放仍有引用的张量。
+
+本次只给这两个函数增加try/finally，清空分组/CPU查找表并断开递归函数引用。
+原函数体、输出数值、dtype、别名和合批传输原样保留，没有增加生产强制GC。
+全部16层Transformer、Full-chain PPO、BC、Critic、奖励、固定噪声核和GMT不改。
+运行时代码为GENMO 2512c90、GMT 867665f，仍在原两个固定分支。
+
+服务器1相关回归64通过，含完整链概率/流式梯度、部署时钟和GMT列构造。
+关闭自动循环GC后，每个函数连续4次搬运64MiB CUDA输入，返回CPU结果仍存活时
+已分配显存每次立即回到基线（增量均0）；正常及三条异常路径的引用释放均通过。
+临时源码、pytest目录和传输包已精确清理，正式训练和异常执行证据保留。
+
+旧checkpoint绑定全部源码，修复后不能透明加载。因此新增独立维护工具，要求
+两个旧Git blob与原checkpoint SHA一致，全部绑定源码恰好只变两条指定路径，
+AST证明原计算体与模块其他语句不变、只新增指定finally清理；任一其他差异都拒绝。
+完整2.6GB学习状态读回逐值一致后生成新维护快照并留原SHA/身份/指针及证明。
+严格训练加载器未改，原checkpoint保留，不重新初始化Actor/Critic/Adam/BC/RNG。
+维护后仍按既有协议重建PhysX并采新rollout，不导入旧行为数据。
+
+恢复后实际完成第35～37轮：
+
+.. list-table::
+   :header-rows: 1
+
+   * - 模型轮次
+     - 有效Chain数
+     - 计划/接受Adam
+     - GPU3峰值GiB
+     - 八卡最大峰值GiB
+   * - 35
+     - 14322
+     - 7/7
+     - 25.596040
+     - 25.596040
+   * - 36
+     - 15830
+     - 8/8
+     - 26.763201
+     - 26.794644
+   * - 37
+     - 16010
+     - 8/8
+     - 26.809019
+     - 26.815618
+
+上表为逐轮reset后的PyTorch peak_allocated，不含PhysX等外部分配。
+GPU3后两轮只增加0.045817GiB（约46.9MiB），八卡相近，没有复现原每轮约1.4GiB
+的持续单卡增长。reserved缓存和nvidia-smi总量可能继续变动，不等于活跃张量泄漏。
+这证明确定缺陷已修且三轮观察正常，不保证未来所有200轮都无其他OOM。
+
+23次计划更新全部接受，累计270→293；候选回溯0/2/0、提前停止均无。
+三个完整rollout联合KL均值0.023855/0.076203/0.062367，Max0.380011/1.263386/1.293636。
+逐步核验全部16层实际增量均非零，第37轮最后主干LR1e-7、输出头1e-6。
+这仍不是物理收益证明，原尾部KL会压低LR的问题也没有在本次被重新设计。
+
+为验证持久化并按剩余预算正常结束，本次通过训练自带StopSignal在第37轮完成后
+受控保存，退出0；source_unchanged、冻结GMT不变、world关闭和无pending均通过。
+新checkpoint完整SHA核验通过：
+
+``checkpoints/stage10_r000037_a000293_01792503211357382744_8614b47e2263_controlled_end.pt``
+
+SHA256 ``6c923cd744eb02cc4d64ba0584881125375c11e597bfbb8264f38922fb219ae2``，
+18组、320份Adam状态均step293、8份rank状态。已从此完整状态在原run目录继续
+八卡训练，tmux仍为``genmo_transformer_groups_train``。原故障会话35/36轮虽未落盘，
+已接受预算不退款；现已消耗39次接受预算而模型编号37，因此剩余161轮，命令
+``--stop-after-iteration 198``。配置累计上限和总接受预算仍200，无暗中扩限。
+固定50/100/150轮评估保持，最终在剩余额度结束时执行完整评估/保存。
+
+从本地查看本次正式续训日志：
+
+.. code-block:: bash
+
+   ssh 6000D-Server-1 'tail -n 40 -f /data1/user/liwei/GENMO_outputs/closedloop_stage10/stage2_transformer_groups_20261020_analysis/host_copy_continue.log'
+
+同一任务TensorBoard继续写原``tensorboard_compact``目录，不增加第二个run。
+测试、维护来源和三轮运行证据保留在本地
+``outputs/analysis/stage2_transformer_groups_20261020/host_copy_repair``，服务器analysis中
+对应``host_copy_repair_tests_20261020.log``、``host_copy_checkpoint_migration.json``和
+``host_copy_repair_runtime.json``；原run/maintenance中还保留旧身份、指针与AST证明。
+
+21:36正式恢复已越过严格加载与世界初始化，进入``train_000038``采集；
+按LOCAL_RANK核验恰好8个worker，无退出记录。最新完成轮次仍37，不能把
+正在采集第38轮写成已完成38轮。对应证据为``host_copy_continue_verified.json``。
