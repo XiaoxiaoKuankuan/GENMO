@@ -1,0 +1,30 @@
+{
+  "schema": "genmo.awr.preflight.v1",
+  "assets": {
+    "checkpoint": "51b522fbdeb0ec289e5ffc24e2fccca9888df90495f57f96714c1bb43c05f8e2",
+    "gmt_checkpoint": "79d1a99e54db42342927ec178329dab88772bafbc05df1b0dbe310bc6dd0b319",
+    "gmt_policy": "31a8f999b652d272246b803d4ffa708f3125de92c0d573411ef13fc3ee6ced20",
+    "kinematics": "c08731704dccece11351b6fa877e30bac5ca2a8d363de30af7ca2ea1398f4029",
+    "stats": "c7c0acb0e7a38797adb38ce0be41ee72820e34daed4e780275c64fb55c3e5326"
+  },
+  "repositories": {
+    "genmo": {
+      "path": "/home/user/liwei/awr-worktrees/GENMO-delivery",
+      "branch": "feature/stage2-awr",
+      "commit": "621bb9c75d977ec414822e568cb9fe141314fdf1"
+    },
+    "gmt": {
+      "path": "/home/user/liwei/awr-worktrees/legged_lab_gmt",
+      "branch": "feature/stage2-awr",
+      "commit": "4ca256fe79d2dda22240011947ead276690e40f7"
+    }
+  },
+  "configuration_assets": {
+    "gmt_agent_config": "b633ab8ab057b9915a78424e0239cbea3ecd9e3a5ecc0c9b55c645699a6533b6",
+    "isaac_contract": "6f4af854170b6f6e5c2948a53bc822ac60beb000edf9e291bf1bddc37e797939"
+  },
+  "config_sha256": "6a1acee4620798a729cdb92e64f6293c961921857d6b5e08a3398065e85ed94f",
+  "gpu_availability_checked": false,
+  "actual_import": "/home/user/liwei/awr-worktrees/GENMO-delivery/gem/closedloop/awr/runtime.py",
+  "purpose": "delivery_cpu_source_and_asset_audit"
+}

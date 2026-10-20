@@ -7,8 +7,11 @@ Actor LR 1e-5；默认最多一个宏迭代。`smoke` 为独立 64 Episode 数�
 
 ## Server-2 命令
 
+最新交付源码放在`/home/user/liwei/awr-worktrees/GENMO-delivery`，使用同一AWR分支，
+与冻结运行目录独立。以下新建运行命令从交付目录执行；不改共享环境的editable指向。
+
 ```bash
-cd /home/user/liwei/awr-worktrees/GENMO
+cd /home/user/liwei/awr-worktrees/GENMO-delivery
 bash tools/run_stage2_awr_server2.sh preflight
 bash tools/run_stage2_awr_server2.sh verify --report <独立证据目录>/distributed.json
 bash tools/run_stage2_awr_server2.sh run --profile smoke \
@@ -21,6 +24,11 @@ bash tools/run_stage2_awr_server2.sh evaluate --run-dir <现有运行目录> --a
 bash tools/run_stage2_awr_server2.sh evaluate --run-dir <现有运行目录> \
   --checkpoint <该运行checkpoints下的JSON引用>
 ```
+
+512首轮固定使用`/home/user/liwei/awr-worktrees/GENMO`的`f417545`，该目录保留原源码。
+对此运行的停止/恢复/重新评价必须从原目录调用；原版本恢复前设置当前shell软限制
+`ulimit -Sn 65536`，不改硬限制。新版入口自动预留句柄，但不能用新版冒充旧运行恢复。
+原64集源码为`ea81029`，重新物理评价也须使用该原提交的独立工作目录及匹配路径配置。
 
 `ablate` 与 `run` 一样执行配置中的同 Replay B/C 对照流程，必须使用新目录。
 `stop` 写该运行的停止标志，不发进程信号；采集与评价停止发新任务并排空，Actor 保存完整优化步。
@@ -111,13 +119,16 @@ Best 要求完成率/时长不降、失败不增、没有新增成对失败、�
 完整任务回报改善。未满足时保留 Stage1。AWR 对 Stage1 与普通自蒸馏的物理收益
 都必须用独立评价判断；代码测试、Loss 或 Critic EV 不能替代该结论。
 
-2026-10-20 首批验证：24 项 AWR CPU 测试通过，含八进程 Gloo；公共回归首次 69 项
-通过。更大范围得到 1032 通过、10 跳过；2 项 PPO 旧失败在基线复现，8 项旧测试依赖
-独立工作树外 s350000 资产。GMT 28 项参考 CPU 测试通过。NCCL、真实物理和首轮
-学习结果以随后 `记录文本.md` 与运行报告为准，不把上述 CPU 结果称为已完成物理验收。
+2026-10-20交付源码`621bb9c`：本地torch2.6环境61项AWR CPU测试通过，Server-2
+原torch2.7.1环境同61项通过，含八进程Gloo、真实小型Stage1与BC合同、FVI/Actor
+恢复、评价逐任务停止恢复。服务器验证禁用CUDA可见设备，临时目录自动清理。
+实际导入目录及全部冻结资产SHA亦通过；证据为
+`docs/validation/stage2_awr_delivery_cpu_tests_20261020.json`和
+`docs/validation/stage2_awr_delivery_assets_20261020.json`，此预检不宣称GPU空闲。
+公共回归69项通过。更大范围1032通过、10跳过，2项PPO旧失败在指定基线复现；
+8项缺s350000资产的旧测试使用临时只读链接后，相关9项通过，链接和临时目录已移除。
+GMT 28项参考接口和18项USD并发隔离测试通过。历史详细过程保留于`记录文本.md`。
 
-2026-10-20 后续验收：AWR CPU 测试增至25项，新增FVI中断恢复后逐元素一致性。
-旧s350000测试使用临时只读资产链接后9项全部通过，链接及临时目录已移除。
 Server-2真实s595000＋原Stage1 BC八卡NCCL测试通过：9 AWR／3 BC 的相对梯度L2误差
 4.72e-7，3 AWR／1 BC（含空rank）为5.14e-8；更新后各rank参数摘要完全一致。
 耗时16.73秒，单卡PyTorch峰值显存约1.65–1.73 GiB。原始报告见
