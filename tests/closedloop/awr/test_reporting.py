@@ -85,6 +85,23 @@ def test_report_preserves_explicit_collection_amendment(tmp_path):
     assert value["complete_episodes"] == 512 and "full_outcomes" not in value
 
 
+def test_report_distinguishes_parallel_generation_cost_from_wall_time(tmp_path):
+    module = load_tool("report_stage2_awr")
+    path = tmp_path/"collection.json"
+    rank = dict(seconds=3., tasks=[dict(complete=True, reason="music_end", states=2,
+        actor_samples=2, executed_seconds=1.)], generation_batches=[
+        dict(generation_seconds=2., effective_rows=2)], timing={"active_control_steps": 100},
+        actual_budget={"used": {"control_steps": 100}})
+    path.write_text(json.dumps(dict(seconds=3., ranks=[rank, rank])))
+    (tmp_path/"state.json").write_text(json.dumps(dict(created_unix=0.,
+        artifacts={"macro000_collection_a": str(path)})))
+    value = module.summarize(tmp_path)["collection"]["macro000_collection_a"]
+    assert value["seconds"] == 3.
+    assert value["generation"]["sum_over_ranks_seconds"] == 4.
+    assert value["generation"]["mean_batch_seconds"] == 2.
+    assert value["generation"]["effective_rows"] == 4
+
+
 def test_resource_monitor_rejects_missing_gpu(monkeypatch, tmp_path):
     from gem.closedloop.awr.resources import GPUResourceMonitor
     monkeypatch.setattr("subprocess.check_output", lambda *args, **kwargs: "0, 100, 25\n")

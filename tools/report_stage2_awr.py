@@ -82,6 +82,22 @@ def summarize(run_dir):
                 physical_seconds=sum(t["executed_seconds"] for t in complete),
                 valid_replans_per_wall_second=sum(t["actor_samples"] for t in complete)/value["seconds"],
                 rank_seconds=[v["seconds"] for v in value["ranks"]])
+            batches = [b for rank in value["ranks"] for b in rank.get("generation_batches", [])]
+            if batches:
+                generation_times = [b["generation_seconds"] for b in batches]
+                result["collection"][name]["generation"] = dict(
+                    batches=len(batches), effective_rows=sum(b["effective_rows"] for b in batches),
+                    sum_over_ranks_seconds=sum(generation_times),
+                    mean_batch_seconds=sum(generation_times)/len(batches),
+                    max_batch_seconds=max(generation_times),
+                    scope="batch_wall_latency_sum_over_parallel_ranks_not_whole_run_wall_time")
+            result["collection"][name]["world_timing_by_rank"] = [
+                select(rank.get("timing", {}), ("active_control_steps", "scene_control_steps",
+                    "allocated_physics_steps", "physx_step_wall_seconds", "gmt_wall_seconds",
+                    "reward_math_seconds", "diagnostics_seconds", "world_rpc_seconds"))
+                for rank in value["ranks"]]
+            result["collection"][name]["budget_charged_by_rank"] = [
+                rank.get("actual_budget", {}).get("used", {}) for rank in value["ranks"]]
         elif name.endswith(("_advantage_distribution", "_bc_calibration", "_bc_validation",
                             "_parameter_changes", "_replay_cost")):
             result["diagnostics"][name] = value

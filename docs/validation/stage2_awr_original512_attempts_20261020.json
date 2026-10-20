@@ -1,0 +1,145 @@
+{
+  "schema": "genmo.awr.original_attempt_audit.v1",
+  "source_commits": {
+    "genmo": "f417545456e9919e67b2b28fd963bdd680a8b5ec",
+    "gmt": "4ca256fe79d2dda22240011947ead276690e40f7"
+  },
+  "plan_sha256": "7ad2575b7c8ef771b2ea23a3b40a4e845fdf876e02471e16d2e195cc6bc031fb",
+  "plan_file_sha256": "ca70c123e7b6251c5a94876b078bae195d45728025cfce60618936a8de9d13f3",
+  "original_attempts": 512,
+  "valid_complete_episodes": 504,
+  "by_source": {
+    "FineDance": {
+      "attempts": 124,
+      "complete": 123,
+      "music_end": 57,
+      "post_generation_failure": 66,
+      "warmup_failure": 1,
+      "transitions": 16580,
+      "actor_samples": 16501,
+      "executed_seconds": 8260.720000000003,
+      "initialization": {
+        "paired_motion_warmup.v1": 106,
+        "standing": 18
+      }
+    },
+    "AIOZ-GDANCE": {
+      "attempts": 180,
+      "complete": 180,
+      "music_end": 167,
+      "post_generation_failure": 13,
+      "warmup_failure": 0,
+      "transitions": 14511,
+      "actor_samples": 14429,
+      "executed_seconds": 7225.480000000002,
+      "initialization": {
+        "paired_motion_warmup.v1": 146,
+        "standing": 34
+      }
+    },
+    "Mine": {
+      "attempts": 105,
+      "complete": 98,
+      "music_end": 91,
+      "post_generation_failure": 7,
+      "warmup_failure": 7,
+      "transitions": 10694,
+      "actor_samples": 10631,
+      "executed_seconds": 5324.420000000004,
+      "initialization": {
+        "paired_motion_warmup.v1": 90,
+        "standing": 15
+      }
+    },
+    "AIST++": {
+      "attempts": 103,
+      "complete": 103,
+      "music_end": 103,
+      "post_generation_failure": 0,
+      "warmup_failure": 0,
+      "transitions": 2323,
+      "actor_samples": 2275,
+      "executed_seconds": 1143.54,
+      "initialization": {
+        "standing": 23,
+        "paired_motion_warmup.v1": 80
+      }
+    }
+  },
+  "warmup_failures": [
+    {
+      "task_id": "37c1c8f2bd23a942ad609ca7049d90352af53b1316e65b5a1f6e4621132df435",
+      "dataset": "Mine",
+      "sample_id": "dance_3__Heartbeat",
+      "group_id": "70046dbcc207ac4eb3beab658bb18547c3eea82fe323beb66581c28e1758e439",
+      "music_start_frame": 187,
+      "seed": 321,
+      "initialization": "paired_motion_warmup.v1"
+    },
+    {
+      "task_id": "a5bc14a52fb2e638a4ec34aa896c23e9bac15e10bbcfe7e59c4e82626a888900",
+      "dataset": "Mine",
+      "sample_id": "dance_3__Tryeverything",
+      "group_id": "9f65ae264d0e4253c0bb6b12ca63ac416d0fbbc24672b6de303423ed4f3c7a63",
+      "music_start_frame": 34,
+      "seed": 336,
+      "initialization": "paired_motion_warmup.v1"
+    },
+    {
+      "task_id": "5fb8754e2d4d35d59463f28143bef9eff2e6ac45987ea5d17ccb4ad170c345a4",
+      "dataset": "Mine",
+      "sample_id": "dance_3__月光传说",
+      "group_id": "79f1f990a868e8ca3110b8a4e751beb343d48e336fc1b56af75fb18cf3e5e633",
+      "music_start_frame": 1194,
+      "seed": 475,
+      "initialization": "paired_motion_warmup.v1"
+    },
+    {
+      "task_id": "04740e3298369df7697a3ceb76b20e56124e8fe6a20982d0c60c3480355dab32",
+      "dataset": "Mine",
+      "sample_id": "dance_2__第一天2",
+      "group_id": "2c9e9b4fe5b54cb406b46ee70bd279c163f07da7f629d07abe47b69cf1c9b44a",
+      "music_start_frame": 525,
+      "seed": 130,
+      "initialization": "paired_motion_warmup.v1"
+    },
+    {
+      "task_id": "826cc8099ee960853573965d9a23d940b113596c4b1a319132952c1fa4ea4d7b",
+      "dataset": "Mine",
+      "sample_id": "dance_3__Heartbeat",
+      "group_id": "70046dbcc207ac4eb3beab658bb18547c3eea82fe323beb66581c28e1758e439",
+      "music_start_frame": 604,
+      "seed": 142,
+      "initialization": "paired_motion_warmup.v1"
+    },
+    {
+      "task_id": "4a78e58bcbae00e691d1894e81438b155586c2b75f3e9501e566dbb95f82a2f2",
+      "dataset": "Mine",
+      "sample_id": "dance_3__Foreveryoung",
+      "group_id": "9392072a073971e722779b7e864b8e7a6ca025cb25ca007c6d5ce80a3c1a95d9",
+      "music_start_frame": 2028,
+      "seed": 117,
+      "initialization": "paired_motion_warmup.v1"
+    },
+    {
+      "task_id": "873e9c7d6e93e7303ac3f2b9709c446c04b521d002dbb034d8a18dda4ad4073c",
+      "dataset": "FineDance",
+      "sample_id": "058",
+      "group_id": "348408965e0199bec6bd893b29fb1a1f74b51422e90e96ec56eeeb9dc497aafe",
+      "music_start_frame": 975,
+      "seed": 497,
+      "initialization": "paired_motion_warmup.v1"
+    },
+    {
+      "task_id": "34cff7843037625b034836a52dfde0431e39aa867bda2df2f73f0dfcd3e43278",
+      "dataset": "Mine",
+      "sample_id": "dance_2__大厨懒羊羊",
+      "group_id": "d3fc8dda015e7624919f6a4bb73b90a26d28a5d96f02356d59e0b844fecc72cf",
+      "music_start_frame": 201,
+      "seed": 407,
+      "initialization": "paired_motion_warmup.v1"
+    }
+  ],
+  "audit_unix": 1792491377.3766434,
+  "supplemental_attempts_included": false
+}
