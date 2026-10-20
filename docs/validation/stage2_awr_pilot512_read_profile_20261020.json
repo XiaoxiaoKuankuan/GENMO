@@ -1,0 +1,13 @@
+{
+  "schema": "genmo.awr.replay_read_profile.v1",
+  "episode_id": "b30736f3aea5b5b2c03b863d66c9c922a1c54e4b4b4d3e7d50ecaee5b257def2",
+  "rows": 266,
+  "controls": 6643,
+  "bytes": 447160691,
+  "manifest_bytes": 164336908,
+  "read_tree_verify_and_project_seconds": 3.66115865111351,
+  "from_dict_and_validate_seconds": 0.13496156502515078,
+  "mc_and_validate_seconds": 0.11289249453693628,
+  "stored_mc_exact": true,
+  "scope": "single_cpu_sample_during_concurrent_primary_registration_with_warm_page_cache_not_whole_run_benchmark"
+}
