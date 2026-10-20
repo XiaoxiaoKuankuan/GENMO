@@ -11,6 +11,7 @@ import json
 from pathlib import Path
 import time
 import uuid
+from types import SimpleNamespace
 import torch
 
 from gem.closedloop.common.full_dataset import FullMusicCatalog
@@ -188,8 +189,17 @@ class AWRRun:
         self.publish(phase="collect", macro=macro)
         plan = self.json_artifact(f"macro{macro:03d}_tasks",
                                  lambda: training_tasks(self.catalog, self.folds, self.config, self.d.world_size, macro))
+        completion = self.config["awr"].get("collection_completion")
+        if completion and self.d.root(lambda: (self.root/f"macro{macro:03d}"/"supplement"/"plan.json").exists()):
+            return self.complete_collection_with_budget()
         completed = self.d.root(lambda: self._recover_publications(macro))
-        tasks = [t for t in plan["tasks"] if t["rank"] == self.d.rank and t["task_id"] not in completed]
+        warmup_finished = []
+        if completion:
+            from .collection_budget import finished_warmup_tasks
+            warmup_finished = self.d.root(lambda: finished_warmup_tasks(
+                self.root, macro, {t["task_id"] for t in plan["tasks"]}))
+        finished = set(completed) | set(warmup_finished)
+        tasks = [t for t in plan["tasks"] if t["rank"] == self.d.rank and t["task_id"] not in finished]
         attempt = self.d.root(lambda: uuid.uuid4().hex[:8])
         path = self.root/f"macro{macro:03d}"/"collection"/attempt/f"rank{self.d.rank:02d}"
         handle, driver = None, None
@@ -226,10 +236,34 @@ class AWRRun:
             if self.d.root(lambda: stop_requested(self.root)):
                 self.publish(status="stopped", phase="collect")
                 return None
+            if completion:
+                return self.complete_collection_with_budget()
             raise RuntimeError(f"Complete Episode acceptance failed: {len(completed)}/{len(plan['tasks'])}; inspect excluded failures/truncations")
         snapshot = self.d.root(lambda: self.replay.snapshot().to_dict())
         self.artifact(key, snapshot["snapshot_id"])
         return self.replay.load_snapshot(snapshot["snapshot_id"])
+
+    def complete_collection_with_budget(self):
+        """沿用已验收的补采事务，全运行共享用户授权次数，不重新计算失败为成功。"""
+        from .collection_budget import allocate_collection_budget, update_collection_budget
+        from .io import file_sha256
+        from tools import complete_stage2_awr_collection as completion
+        settings = self.config["awr"]["collection_completion"]
+        options = dict(total_limit=settings["max_extra_attempts_total"],
+                       authorization=settings["authorization"])
+        limit = self.d.root(lambda: allocate_collection_budget(self.root, self.state, **options))
+        args = SimpleNamespace(max_extra_attempts=limit, authorization=options["authorization"])
+        tool_path = Path(completion.__file__).resolve()
+        identity = dict(git_commit=self.state["source_commits"]["genmo"], file=str(tool_path),
+                        sha256=file_sha256(tool_path))
+        try:
+            accepted = completion.complete_collection(self, args, identity)
+        finally:
+            self.d.root(lambda: update_collection_budget(self.root, self.state, **options))
+        if not accepted:
+            return None
+        key = f"macro{self.state['macro']:03d}_replay"
+        return self.replay.load_snapshot(self.state["artifacts"][key])
 
     def _recover_publications(self, macro):
         tasks = set()

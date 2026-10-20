@@ -49,6 +49,13 @@ def load_config(path, *, profile=None):
         raise ValueError("AWR requires original GMT contact/tracking substep diagnostics")
     if c["awr"]["max_macro_iterations"] < 1 or c["awr"]["initial_episodes"] > c["awr"]["replay_capacity"]:
         raise ValueError("Invalid macro/FIFO budget")
+    completion = c["awr"].get("collection_completion")
+    if completion is not None:
+        limit = completion.get("max_extra_attempts_total")
+        if (type(limit) is not int or limit < 1
+                or not isinstance(completion.get("authorization"), str)
+                or not completion["authorization"].strip()):
+            raise ValueError("Explicit run-wide supplemental attempt budget/authorization required")
     fixed = dict(clock_hz=600, control_ticks=12, decision_ticks=300, physics_ticks=3,
                  warmup_ticks=600, min_prefix_frames=12, lookahead_control_steps=10)
     if any(c["timing"][k] != v for k, v in fixed.items()):
