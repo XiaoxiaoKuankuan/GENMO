@@ -95,6 +95,13 @@ def check_rank_random_states(states):
                 cuda_random_states_present=True, cuda_random_states_executed=False)
 
 
+def pairing_state(payload):
+    """B/C必须有相同样本顺序身份、预算、BC系数及最终各rank BC随机流。"""
+    return {**{k: payload[k] for k in
+               ("data_identity", "total_steps", "steps", "config", "seed", "bc_weight")},
+            "rank_bc_states": [rank["bc"] for rank in payload["rank_states"]]}
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--run-dir", type=Path, required=True)
@@ -126,11 +133,16 @@ def main():
     checkpoints = Checkpoints(root/"checkpoints",
         dict(request=state["request_sha256"], sources=state["source_commits"]))
     prefix, reports = f"macro{state['macro']-1:03d}", {}
+    paired = None
     for method in ("self_distillation", "awr"):
         reference = state["artifacts"].get(prefix+"_"+method+"_final")
         if reference is None:
             continue
         payload = checkpoints.load(reference)["payload"]
+        if paired is None:
+            paired = pairing_state(payload)
+        else:
+            assert_tree_equal(pairing_state(payload), paired)
         report = restore_components(actor, payload)
         fingerprint = _model_fingerprint(actor)
         evaluations = {}
@@ -152,6 +164,7 @@ def main():
         source_commits=state["source_commits"], request_sha256=state["request_sha256"],
         methods=reports, seconds=time.perf_counter()-started, optimizer_updates=0,
         physical_controls=0, state_unchanged=True,
+        paired_data_budget_bc_random_streams_exact=len(reports) == 2,
         scope="cpu_component_restore_not_new_distributed_training",
         tool_sha256=hashlib.sha256(Path(__file__).read_bytes()).hexdigest())
     output.parent.mkdir(parents=True, exist_ok=True)

@@ -56,3 +56,17 @@ def test_resume_acceptance_uses_saved_boundary_and_restores_original_actor(tmp_p
     assert report["diagnostic_optimizer_updates"] == 3
     assert report["actor_optimizer_scheduler_bc_rng_exact"]
     assert report["original_actor_restored"] == original
+
+
+def test_paired_checkpoint_acceptance_rejects_changed_bc_random_stream():
+    path = Path(__file__).resolve().parents[3]/"tools/verify_stage2_awr_checkpoint.py"
+    spec = importlib.util.spec_from_file_location("checkpoint_pairing", path)
+    tool = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(tool)
+    payload = dict(data_identity="samples", total_steps=2, steps=2, config={"lr": 1e-5},
+        seed=42, bc_weight=.01, rank_states=[{"bc": {"generator": torch.tensor([1, 2])}}])
+    before = tool.pairing_state(payload)
+    changed = copy.deepcopy(payload)
+    changed["rank_states"][0]["bc"]["generator"][0] += 1
+    with pytest.raises(ValueError, match="tensor"):
+        tool.assert_tree_equal(tool.pairing_state(changed), before)
