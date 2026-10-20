@@ -1,0 +1,30 @@
+{
+  "methods": {
+    "awr": {
+      "checkpoint_file": "macro000_awr_final_ca32c292.pt",
+      "cursor": 0,
+      "epoch": 5,
+      "evaluation_fingerprint_matches": true,
+      "optimizer_state_entries": 320,
+      "rank_rng_states": 8,
+      "restored_actor_fingerprint": "5ea1a1c4c8e271bc558a7dbd5e214816c7f50042fec2b4185c6901109d2894fe",
+      "sha256": "c4555e7b6fbb38cc1919da530dca96608c49680030819a23063eeef622e0d571",
+      "steps": 95
+    },
+    "self_distillation": {
+      "checkpoint_file": "macro000_self_distillation_final_9d00fd9f.pt",
+      "cursor": 0,
+      "epoch": 5,
+      "evaluation_fingerprint_matches": true,
+      "optimizer_state_entries": 320,
+      "rank_rng_states": 8,
+      "restored_actor_fingerprint": "6d0a9e45d94eb783499d67becd055ddb1d2786f19b8bdb311475a8ee77963d61",
+      "sha256": "1e7553f0025c4e29f7051fe5713e8343a11dbecf0a2b35cda2e6cd6107d8fe04",
+      "steps": 95
+    }
+  },
+  "source_commits": {
+    "genmo": "ea81029142a571bb763282b46225bbdfadfc0648",
+    "gmt": "4ca256fe79d2dda22240011947ead276690e40f7"
+  }
+}
