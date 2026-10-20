@@ -99,6 +99,11 @@ class AWRRun:
         return reference
 
     def prepare(self):
+        from .resources import prepare_file_handles
+        limits = self.d.local(lambda: prepare_file_handles(self.config["awr"]["replay_capacity"]))
+        limits_by_rank = self.d.gather(limits)
+        self.d.root(lambda: atomic_json(self.root/"resources"/("file_handles_"+uuid.uuid4().hex[:12]+".json"),
+                                       dict(ranks=limits_by_rank, unix=time.time())))
         self.publish(phase="data_audit", status="running")
         if "data_audit" not in self.state["artifacts"]:
             def audit():

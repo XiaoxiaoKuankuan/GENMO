@@ -7,6 +7,8 @@ grad=None，避免AdamW对无监督参数产生伪更新。CPU/Gloo和CUDA/NCCL�
 from __future__ import annotations
 
 import os
+import sys
+import traceback
 import torch
 import torch.distributed as dist
 
@@ -38,6 +40,9 @@ class Distributed:
             value = function()
         except Exception as exc:
             error = f"rank {self.rank}: {type(exc).__name__}: {exc}"
+            # 对端可能仍在长时间读取Replay；立即保留出错位置，而非等集合通信才见到原因。
+            print("[AWR] " + error, file=sys.stderr, flush=True)
+            traceback.print_exc(file=sys.stderr)
         errors = [e for e in self.gather(error) if e]
         if errors:
             raise RuntimeError("AWR synchronized failure: " + " | ".join(errors))

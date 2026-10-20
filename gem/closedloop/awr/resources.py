@@ -1,5 +1,7 @@
-"""记录独占八卡作业中Actor与GMT物理进程共同占用的GPU资源。
+"""管理Replay进程句柄预算并记录独占八卡作业的GPU资源。
 
+各rank在加载Replay之前按完整Episode容量提高自己的文件句柄软限制，保留硬限制，
+避免大量只读mmap在512集规模耗尽默认1024句柄；不能满足预算则提前明确拒绝。
 主rank在Actor初始化后启动独立采样线程，每秒只读nvidia-smi，将各卡显存和利用率
 写入本次尝试的JSONL；结束发布独立摘要。峰值明确为离散采样的整卡显存下界，包含
 驱动及物理工作进程，不能冒充PyTorch allocator的精确峰值。查询失败单独留证，
@@ -9,12 +11,36 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+import resource
 import subprocess
 import threading
 import time
 import uuid
 
 from .io import atomic_json
+
+
+def prepare_file_handles(episode_capacity):
+    """为每个rank常驻的Replay mmap预留句柄，仅提高当前进程软限制。
+
+    每Episode预留32种dtype数组句柄，另留1024个通信/SQLite/加载句柄，最少4096。
+    不修改系统或用户硬限制；硬限制不足时在读取任何Episode前显式失败。
+    """
+    capacity = int(episode_capacity)
+    if capacity < 1 or capacity != episode_capacity:
+        raise ValueError("Replay episode capacity must be a positive integer")
+    required = max(4096, 1024+32*capacity)
+    before, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+    if hard != resource.RLIM_INFINITY and required > hard:
+        raise RuntimeError(f"AWR Replay needs RLIMIT_NOFILE >= {required}; hard limit is {hard}")
+    if before != resource.RLIM_INFINITY and before < required:
+        resource.setrlimit(resource.RLIMIT_NOFILE, (required, hard))
+    after, actual_hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+    if after != resource.RLIM_INFINITY and after < required:
+        raise RuntimeError("AWR file handle budget was not applied")
+    return dict(episode_capacity=capacity, required_soft=required, previous_soft=before,
+                actual_soft=after, hard=actual_hard, hard_limit_changed=False,
+                dtype_handles_per_episode_budget=32, other_handle_reserve=1024)
 
 
 class GPUResourceMonitor:

@@ -1,0 +1,16 @@
+{
+  "before": [
+    1024,
+    1048576
+  ],
+  "test_soft_limit": 65536,
+  "simultaneous_mmaps": 4096,
+  "values_exact": true,
+  "hard_limit_changed": false,
+  "restored": [
+    1024,
+    1048576
+  ],
+  "temporary_directory_removed_after_test": true,
+  "unix": 1792494992.6360054
+}
