@@ -11,6 +11,19 @@ import pytest
 import yaml
 
 from gem.closedloop.awr.config import load_config, physical_config
+
+
+def test_control_configuration_content_changes_cannot_reuse_identity(tmp_path):
+    from gem.closedloop.awr.config import configuration_assets
+    first, second = tmp_path / "agent.yaml", tmp_path / "isaac.json"
+    first.write_text("control: frozen\n")
+    second.write_text('{"dt": 0.005}\n')
+    config = dict(paths=dict(gmt_agent_config=str(first), isaac_contract=str(second)))
+    identity = configuration_assets(config)
+    assert configuration_assets(config, expected=identity) == identity
+    first.write_text("control: changed\n")
+    with pytest.raises(ValueError, match="contents changed"):
+        configuration_assets(config, expected=identity)
 from gem.closedloop.awr.io import cpu_copy, read_tree, write_tree
 
 

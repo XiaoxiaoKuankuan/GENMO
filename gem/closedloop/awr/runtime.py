@@ -44,11 +44,14 @@ class AWRRun:
                     raise ValueError("Resume cannot change the saved run configuration/budget")
                 if state["source_commits"] != {k: v["commit"] for k, v in preflight["repositories"].items()}:
                     raise ValueError("Resume source commits differ from the immutable run")
+                if state["configuration_assets"] != preflight["configuration_assets"]:
+                    raise ValueError("Resume GMT control/Isaac configuration identity changed")
                 (self.root/"STOP").unlink(missing_ok=True)
                 return state
             self.root.mkdir(parents=True, exist_ok=False)
             value = dict(schema="genmo.awr.run.v1", request_sha256=digest(config),
                          source_commits={k: v["commit"] for k, v in preflight["repositories"].items()},
+                         configuration_assets=preflight["configuration_assets"],
                          config=config, artifacts={}, macro=0, phase="initialize", status="running",
                          created_unix=time.time())
             atomic_json(self.root/"request.json", config)
@@ -58,6 +61,7 @@ class AWRRun:
         self.state = self.d.root(initialize)
         self.config = copy.deepcopy(self.state["config"])
         self.config["awr"]["source_commits"] = self.state["source_commits"]
+        self.config["awr"]["configuration_assets"] = self.state["configuration_assets"]
         self.runtime_config = physical_config(self.config, run_id=self.root.name,
                                               rank=self.d.rank, device=self.d.device)
         self.checkpoints = Checkpoints(self.root/"checkpoints",
@@ -120,6 +124,7 @@ class AWRRun:
             self.publish()
         self.runtime_config = physical_config(self.config, run_id=self.root.name, rank=self.d.rank, device=self.d.device)
         self.contract = dict(schema="genmo.awr.replay_physics.v1", assets=self.config["assets"],
+            configuration_assets=self.state["configuration_assets"],
             reward=self.config["reward"], environment=self.config["environment"], termination=self.config["termination"],
             timing=self.config["timing"], sampler=self.policy.kernel_config,
             horizon_frames=60, source_commits=self.state["source_commits"])

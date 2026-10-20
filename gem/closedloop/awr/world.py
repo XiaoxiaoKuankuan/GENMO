@@ -20,9 +20,11 @@ from gem.closedloop.common.world_flow import backend_operation
 from tools.eval.run_closedloop_baseline import Workers
 from .collection import CompleteCollector
 from .io import atomic_json, file_sha256
+from .config import configuration_assets
 
 
 def open_world(config, path, distributed, *, num_envs):
+    configuration_assets(config, expected=config["awr"]["configuration_assets"])
     path = Path(path)
     path.mkdir(parents=True, exist_ok=False)
     c = copy.deepcopy(config)

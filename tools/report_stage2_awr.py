@@ -26,7 +26,8 @@ def summarize(run_dir):
     state = json.loads((root / "state.json").read_text())
     result = dict(schema="genmo.awr.acceptance_summary.v1", run_dir=str(root),
         **select(state, ("status", "phase", "macro", "created_unix", "finished_unix",
-                         "source_commits", "request_sha256", "latest", "best_saved", "best_observed")))
+                         "source_commits", "configuration_assets", "request_sha256",
+                         "latest", "best_saved", "best_observed")))
     result["elapsed_wall_seconds"] = state.get("finished_unix", time.time()) - state["created_unix"]
     result["elapsed_scope"] = "run_creation_to_finish_or_snapshot_includes_initialization_and_io"
     result["evaluations"], result["comparisons"], result["training"] = {}, {}, {}

@@ -18,6 +18,15 @@ def git(repo, *args):
     return subprocess.check_output(["git", "-C", str(repo), *args], text=True).strip()
 
 
+def configuration_assets(config, *, expected=None):
+    """自动绑定控制配置内容，避免路径相同但文件改变后仍复用物理身份。"""
+    actual = {key: file_sha256(config["paths"][key])
+              for key in ("gmt_agent_config", "isaac_contract")}
+    if expected is not None and actual != expected:
+        raise ValueError("Frozen GMT control/Isaac configuration file contents changed")
+    return actual
+
+
 def load_config(path, *, profile=None):
     c = yaml.safe_load(Path(path).read_text())
     if c.get("version") != "genmo.stage2.awr.v1":
@@ -62,6 +71,7 @@ def physical_config(config, *, run_id, rank=0, device="cuda:0"):
 
 def preflight(config, *, check_gpus=True):
     report = dict(schema="genmo.awr.preflight.v1", assets={}, repositories={})
+    report["configuration_assets"] = configuration_assets(config)
     for name in ("genmo", "gmt"):
         root = Path(config["paths"][name+"_repo"]).resolve()
         branch = git(root, "branch", "--show-current")
