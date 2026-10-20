@@ -177,7 +177,7 @@ stage10:
     calibration:
       status: not_physically_validated
       scope: four_trainable_steps_only
-      optimization_sha256: 84645abdca5dfffebf6b222eec189c1511e90655ea23b73b85c63c04a46a0ec6
+      optimization_sha256: 483c63a064f72b424647271738fc52591038754301a880c45ddefaea94eb0750
     chain_joint_mean: null
     chain_joint_p95: null
     chain_joint_max: null
@@ -300,7 +300,15 @@ stage10:
     checkpoint_interval_iterations: 20
   training:
     actor_lr: 3.0e-07
-    actor_lr_control: fixed
+    actor_lr_control: adaptive_step_kl
+    actor_lr_adaptation:
+      minimum: 5.0e-08
+      maximum: 1.0e-06
+      decrease_factor: 0.6666666666666666
+      increase_factor: 1.2
+      low_utilization: 0.4
+      high_utilization: 0.8
+      low_rounds: 3
     bc_prefix:
       max_frames: 30
       min_frames: 6
@@ -321,8 +329,7 @@ stage10:
     gradient_snr_diagnostic: false
     guidance_scale: 2.5
     kl_microbatch: 128
-    kl_rejection: rollback_continue
-    kl_soft_stop_coordinate: 0.00045
+    kl_rejection: retain_accepted_steps
     lambda_upper: 0.98
     latency_budget_s: 0.5
     log_probability_reduction: joint_sum
@@ -355,13 +362,13 @@ stage10:
     - 0.0
     x0_diagnostic_every: 0
     actor_objective: clipped_dppo
-    # 仅显式joint_score_pg使用；Clipped DPPO仅保留整轮回滚。
+    # 每步完整四步KL回溯；只撤销当前步，跨轮缓慢调整统一学习率。
     optimizer_backtracking:
-      max_attempts: 9
+      max_attempts: 3
       factor: 0.5
   version: genmo.closedloop.stage2.continuous_tracking.v2
   actor_optimization:
-    schema: genmo.stage2.continuous_actor.v2
+    schema: genmo.stage2.continuous_actor.v3
 termination:
   end_effector_relative_height_error_m: 0.15
   non_yaw_orientation_error_rad: 0.6

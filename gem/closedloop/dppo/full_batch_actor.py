@@ -113,7 +113,7 @@ def full_batch_actor_update(policy, optimizer, rows, targets, cache, manifest, c
         distributed, anchor, generator, backtracking, kl_limits, kl_microbatch=128,
         ppo_epochs=1, minibatch_chains=16384, microbatch=128, clip=.003,
         grad_clip_norm=1., reserve_attempt=None, bc_samples_per_rollout=1024, proposed_lr=None,
-        detailed_diagnostics=True, snr=False):
+        detailed_diagnostics=True, snr=False, minimum_lr=0.):
     if ppo_epochs != 1:
         raise ValueError('Full-batch experiment permits exactly one on-policy update per rollout')
     policy._accepted_kl_receipt=None
@@ -143,7 +143,7 @@ def full_batch_actor_update(policy, optimizer, rows, targets, cache, manifest, c
     transaction = backtracked_step(policy.actor, optimizer, controller, evaluate=evaluate, limits=kl_limits,
         distributed=distributed, generators=dict(actor=generator), max_attempts=backtracking['max_attempts'],
         factor=backtracking['factor'], reserve_attempt=reserve_attempt,
-        observe=observe if detailed_diagnostics else None)
+        observe=observe if detailed_diagnostics else None, minimum_lr=minimum_lr)
     if not transaction['accepted']:
         controller.load_state_dict(control_before)
         anchor.load_state_dict(anchor_before)

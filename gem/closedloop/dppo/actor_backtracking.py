@@ -1,11 +1,12 @@
-"""统一Actor学习率的单步KL回溯事务，只用于显式有限实验。
+"""统一Actor学习率的单步KL回溯事务，供Clipped DPPO和单步score目标共用。
 
 调用前完成一次全批量PPO/BC合成与裁剪。本模块保留模型、AdamW、BC控制器、指定
 生成器及Python/NumPy/Torch随机状态，每次从相同起点用固定梯度执行一次AdamW，
 按1、1/2、1/4等有限次数尝试。KL必须在同一真实旧链上覆盖全部可训练四步；
 所有rank共同接受或拒绝，冻结参数不允许进入优化器。失败尝试的预算不退款。
 此处不提高噪声、不截断概率，也不改写行为统计；全部失败恢复起点并返回拒绝证据，
-由训练器拒绝整轮。单步通过后训练器仍执行独立最终KL审查。
+由调用者恢复本步BC采样游标并保留此前接受步骤。完整检查结果可绑定身份后复用，
+不重复最终前向。可复用快照只覆盖Actor及Adam，不复制Critic、GMT或冻结先验。
 """
 from __future__ import annotations
 
@@ -42,8 +43,54 @@ def check_candidate_kl(report, limits):
     return result
 
 
+def _copy_tree(source, destination=None):
+    """复用同设备张量存储；首次Adam状态出现时才分配，不往返CPU。"""
+    if isinstance(source, torch.Tensor):
+        if (not isinstance(destination, torch.Tensor) or destination.shape != source.shape
+                or destination.device != source.device or destination.dtype != source.dtype):
+            return source.detach().clone()
+        destination.copy_(source.detach())
+        return destination
+    if isinstance(source, dict):
+        destination = destination if isinstance(destination, dict) else {}
+        for key in list(destination):
+            if key not in source: del destination[key]
+        for key, value in source.items(): destination[key] = _copy_tree(value, destination.get(key))
+        return destination
+    return copy.deepcopy(source)
+
+
+class StepSnapshot:
+    """每轮复用一份Actor/Adam快照；restore不重新分配已有Adam大张量。"""
+    def __init__(self):
+        self.model = None
+        self.states = {}
+        self.groups = None
+
+    @torch.no_grad()
+    def capture(self, actor, optimizer):
+        self.model = _copy_tree(actor.state_dict(), self.model)
+        parameters = [p for g in optimizer.param_groups for p in g['params']]
+        for p in parameters:
+            self.states[p] = _copy_tree(optimizer.state.get(p, {}), self.states.get(p))
+        self.groups = [{k:copy.deepcopy(v) for k,v in g.items() if k != 'params'}
+                       for g in optimizer.param_groups]
+
+    @torch.no_grad()
+    def restore(self, actor, optimizer):
+        actor.load_state_dict(self.model)
+        for p, state in self.states.items():
+            if state: optimizer.state[p] = _copy_tree(state, optimizer.state.get(p))
+            else: optimizer.state.pop(p, None)
+        for group, saved in zip(optimizer.param_groups, self.groups):
+            for key in list(group):
+                if key != 'params' and key not in saved: del group[key]
+            group.update(copy.deepcopy(saved))
+
+
 def backtracked_step(actor, optimizer, controller, *, evaluate, limits, distributed, generators=None,
-                     max_attempts=9, factor=.5, reserve_attempt=None, observe=None):
+                     max_attempts=9, factor=.5, reserve_attempt=None, observe=None,
+                     minimum_lr=0., workspace=None):
     uniform_actor_optimizer(actor, optimizer)
     if type(max_attempts) is not int or not 1 <= max_attempts <= 10 or factor != .5:
         raise ValueError('Finite backtracking requires 1..10 attempts with factor 0.5')
@@ -51,14 +98,15 @@ def backtracked_step(actor, optimizer, controller, *, evaluate, limits, distribu
     initial_lr = float(group['lr'])
     if not math.isfinite(initial_lr) or not 0 < initial_lr <= 1e-5:
         raise ValueError('Explicit experimental Actor LR must be in (0,1e-5]')
-    model = copy.deepcopy(actor.state_dict())
-    adam = copy.deepcopy(optimizer.state_dict())
+    if not math.isfinite(minimum_lr) or not 0 <= minimum_lr <= initial_lr:
+        raise ValueError('Invalid minimum trial learning rate')
+    workspace = workspace if workspace is not None else StepSnapshot()
+    local_call(distributed, lambda:workspace.capture(actor, optimizer))
     control = copy.deepcopy(controller.state_dict())
     rng = capture_local_rng(generators)
     grads = {n: None if p.grad is None else p.grad.detach().clone() for n, p in actor.named_parameters()}
     def restore():
-        actor.load_state_dict(model)
-        optimizer.load_state_dict(copy.deepcopy(adam))
+        workspace.restore(actor, optimizer)
         controller.load_state_dict(control)
         restore_local_rng(rng, generators)
         for n, p in actor.named_parameters():
@@ -66,9 +114,10 @@ def backtracked_step(actor, optimizer, controller, *, evaluate, limits, distribu
     trials = []
     try:
         for index in range(max_attempts):
-            if index:
-                restore()
             lr = initial_lr * factor**index
+            if lr < minimum_lr: break
+            if index:
+                local_call(distributed, restore)
             optimizer.param_groups[0]['lr'] = lr
             if reserve_attempt is not None:
                 reserve_attempt()
@@ -77,6 +126,9 @@ def backtracked_step(actor, optimizer, controller, *, evaluate, limits, distribu
             with torch.no_grad():
                 kl = evaluate()
                 acceptance = check_candidate_kl(kl, limits)
+            if any(isinstance(f,dict) and not math.isfinite(f['value'])
+                   for f in acceptance['failures'].values()):
+                raise FloatingPointError('Nonfinite KL is a numerical failure, not a rejected step')
             flags = distributed.all_gather_object(acceptance['passed'])
             if any(flag != flags[0] for flag in flags):
                 raise RuntimeError('Ranks disagree on backtracking acceptance')
@@ -90,10 +142,10 @@ def backtracked_step(actor, optimizer, controller, *, evaluate, limits, distribu
                 return dict(accepted=True, initial_lr=initial_lr, accepted_lr=lr,
                     backtracks=index, attempts=trials, attempt_count=len(trials),
                     same_initial_adam_per_attempt=True, fixed_gradient_reused=True)
-        restore()
-        return dict(accepted=False, initial_lr=initial_lr, accepted_lr=None, backtracks=max_attempts-1,
+        local_call(distributed, restore)
+        return dict(accepted=False, initial_lr=initial_lr, accepted_lr=None, backtracks=max(0,len(trials)-1),
             attempts=trials, attempt_count=len(trials), same_initial_adam_per_attempt=True,
             fixed_gradient_reused=True, initial_state_restored=True)
     except BaseException:
-        restore()
+        local_call(distributed, restore)
         raise

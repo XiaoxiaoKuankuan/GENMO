@@ -1,9 +1,9 @@
 """当前连续世界Actor优化配置及实际参数身份。
 
 默认Clipped DPPO支持完整四步、多全局minibatch和一次统一学习率；joint_score_pg
-保留为显式单次全批量可选目标，只有它启用逐Adam回溯。两者共用Stage1 BC、真实
-行为统计、GAE和整轮四步KL保护。绑定实际目标、LR、批量、BC、折扣和KL定义，
-不把未启用的joint-score回溯参数计入DPPO实际优化合同，也不兼容旧Critic输入。
+保留为显式单次全批量可选目标。两者共用逐步回溯、跨轮统一学习率控制、Stage1 BC、
+真实行为统计及完整四步KL。绑定实际目标、LR控制器、批量、BC、折扣和KL定义，
+不兼容旧整轮回滚算法身份。
 本模块只校验配置，不启动训练；物理收益仍由真实完整歌曲执行结果判断。
 """
 from __future__ import annotations
@@ -14,7 +14,7 @@ import math
 
 ACTOR_OBJECTIVE='clipped_dppo'
 ACTOR_OBJECTIVES=('clipped_dppo','joint_score_pg')
-OPTIMIZATION_SCHEMA='genmo.stage2.continuous_actor.v2'
+OPTIMIZATION_SCHEMA='genmo.stage2.continuous_actor.v3'
 
 
 def digest(value):
@@ -23,16 +23,16 @@ def digest(value):
 
 def optimization_binding(stage):
     t=stage['training']
-    return dict(schema='genmo.stage2.actor_optimization_binding.v4',
+    return dict(schema='genmo.stage2.actor_optimization_binding.v5',
         actor_lr=t['actor_lr'],actor_lr_control=t['actor_lr_control'],
         actor_optimizer=dict(type='AdamW',parameter_groups=1,betas=[.9,.999],eps=1e-8,weight_decay=0.),
         ppo_epochs=t['ppo_epochs'],global_minibatch_chains=stage['scale']['actor_minibatch_chains'],
         objective=t['actor_objective'],proxy_reduction=t['objective_logprob_reduction'],ppo_clip=t['ppo_clip'],
         gamma_denoising=t['gamma_denoising'],gradient_clip=t['grad_clip_norm'],
         bc_samples=t['bc_samples_per_rollout'],bc_controller=stage['bc_gradient'],
-        backtracking=t['optimizer_backtracking'] if t['actor_objective']=='joint_score_pg' else None,
+        backtracking=t['optimizer_backtracking'],lr_controller=t['actor_lr_adaptation'],
         hard_kl={key:value for key,value in stage['kl'].items() if key!='calibration'},
-        soft_kl=t['kl_soft_stop_coordinate'],kl_rejection=t['kl_rejection'],rollout=stage['ppo_rollout'],
+        kl_rejection=t['kl_rejection'],rollout=stage['ppo_rollout'],
         gamma_upper=t['gamma_upper'],lambda_upper=t['lambda_upper'],dataset=stage['dataset'],
         mc_start_distribution=stage['critic']['complete_mc']['start_distribution'],
         run_contract=stage['actor_optimization'])
@@ -45,7 +45,7 @@ def validate_optimization_configuration(config,maximum_steps):
             or t['ppo_epochs']<1 or maximum_steps<1
             or s['scale']['actor_minibatch_chains']<1
             or t['objective_logprob_reduction']!='free_coordinate_mean'
-            or t['actor_lr_control']!='fixed' or not math.isfinite(t['actor_lr']) or t['actor_lr']<=0):
+            or t['actor_lr_control']!='adaptive_step_kl' or not math.isfinite(t['actor_lr']) or t['actor_lr']<=0):
         raise ValueError('Explicit clipped_dppo or single-step joint-score with one uniform Actor LR required')
     if t['actor_objective']=='joint_score_pg' and (t['ppo_epochs']!=1 or maximum_steps!=1):
         raise ValueError('joint-score requires exactly one full-rollout optimizer step')
@@ -53,9 +53,11 @@ def validate_optimization_configuration(config,maximum_steps):
     if (set(bt)!={'max_attempts','factor'} or type(bt['max_attempts']) is not int
             or not 1<=bt['max_attempts']<=10 or bt['factor']!=.5):
         raise ValueError('Bounded optimizer-step backtracking required')
-    attempts=bt['max_attempts'] if t['actor_objective']=='joint_score_pg' else maximum_steps
-    if s['limits']['optimizer_attempts']<s['limits']['accepted_iterations']*attempts:
-        raise ValueError('Budget must include every planned Actor step and any joint-score retries')
+    from .actor_lr import ActorLRController
+    ActorLRController(t['actor_lr'],t['actor_lr_adaptation'])
+    attempts=bt['max_attempts']*maximum_steps
+    if s['limits']['optimizer_attempts']<s['run_control']['max_training_iterations']*attempts:
+        raise ValueError('Budget must include every planned Actor step and all backtracking retries')
     for key in ('mean_coordinate','maximum_step_mean_coordinate','p95_coordinate'):
         if not math.isfinite(s['kl'][key]) or s['kl'][key]<=0:
             raise ValueError('Four-step KL limits must be positive and finite')

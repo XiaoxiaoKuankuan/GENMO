@@ -74,7 +74,8 @@ class InferenceActor:
             identity=payload.get('identity')
             if not isinstance(identity,dict) or 'kernel' not in identity or 'actor' not in payload:
                 raise ValueError('Stage2权重必须携带actor、identity.kernel和资产身份')
-            if payload.get('schema') not in ('genmo.closedloop.stage2.asymmetric_tracking.checkpoint.v2',
+            if payload.get('schema') not in ('genmo.closedloop.stage2.asymmetric_tracking.checkpoint.v3',
+                    'genmo.closedloop.stage2.asymmetric_tracking.checkpoint.v2',
                     'genmo.closedloop.stage2.asymmetric_tracking.checkpoint.v1',
                                            'genmo.closedloop.sim2sim.actor.v1'):
                 raise ValueError('不支持的Stage2 checkpoint schema')

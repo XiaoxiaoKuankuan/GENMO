@@ -6,9 +6,9 @@
 证据只在显式严格/诊断/异常边界保存。部署profile与训练墙钟独立，优化时不调用
 任何物理推进。CLI给定累计停止轮次，实验和正式任务分别受各自显式预算约束。
 
-整轮快照覆盖Actor/Critic/两个Adam/BC/控制器/训练RNG，KL拒绝恢复这些状态后
-继续采集新rollout，不中断会话；物理状态和已耗预算不退款。首次拒绝补存尚未落盘的
-有效学习版本，普通拒绝仅保留小型诊断。非有限计算、损坏状态和资源异常仍安全退出。
+每次Actor更新采用完整四步KL回溯，超限只缩小当前步；保留先前接受更新及独立
+Critic，跨轮缓慢调整统一学习率。物理状态和已耗预算不退款，普通拒绝仅保存小型
+诊断。只在显式固定数据导出时保留完整学习快照；非有限和资源故障仍安全退出。
 恢复独立当前完整checkpoint后重建PhysX
 episode，丢弃旧rollout。固定评估使用独立GPU世界、训练RNG隔离和原奖励协议，
 按累计真实控制交互触发；best保存实际完整权重。异步恢复点最多单在途，失败
@@ -175,7 +175,7 @@ def _snapshot(c,reason,*,wait=False):
         before=time.perf_counter()
         payload=immutable_cpu_snapshot(dict(schema=SCHEMA,identity=c.identity,config=c.base_config,
             actor=c.actor.state_dict(),critic=c.critic.state_dict(),actor_optimizer=c.actor_optimizer.state_dict(),
-            critic_optimizer=c.critic_optimizer.state_dict(),bc_controller=c.controller.state_dict(),scheduler=None,
+            critic_optimizer=c.critic_optimizer.state_dict(),bc_controller=c.controller.state_dict(),scheduler=c.actor_lr.state_dict(),
             state=c.state,rank_states=rank_states,budget=c.budget.state_dict(),
             actor_fingerprint=_model_fingerprint(c.actor)))
         queued=c.async_writer.submit(payload,reason=reason)
@@ -188,45 +188,11 @@ def _snapshot(c,reason,*,wait=False):
     return result
 
 
-def _rollback_snapshot(c):
+def _diagnostic_learning_snapshot(c):
     return immutable_cpu_snapshot(dict(actor=c.actor.state_dict(),critic=c.critic.state_dict(),
         actor_optimizer=c.actor_optimizer.state_dict(),critic_optimizer=c.critic_optimizer.state_dict(),
         bc=c.bc.state_dict(),controller=c.controller.state_dict(),rng=capture_local_rng(c.generators),
         actor_updates=c.state['actor_updates'],critic_updates=c.state['critic_updates']))
-
-
-def _restore_rollback(c,saved):
-    c.actor.load_state_dict(saved['actor']);c.critic.load_state_dict(saved['critic'])
-    c.actor_optimizer.load_state_dict(saved['actor_optimizer']);c.critic_optimizer.load_state_dict(saved['critic_optimizer'])
-    c.bc.load_state_dict(saved['bc']);c.controller.load_state_dict(saved['controller']);restore_local_rng(saved['rng'],c.generators)
-    c.state['actor_updates'],c.state['critic_updates']=saved['actor_updates'],saved['critic_updates']
-    c.actor_optimizer.zero_grad(set_to_none=True);c.critic_optimizer.zero_grad(set_to_none=True)
-    from .rollback_audit import compare_recovered_state
-    audit=compare_recovered_state(saved,_rollback_snapshot(c))
-    if not audit['identical']:
-        raise RuntimeError('Whole training rollback byte audit failed: '+json.dumps(audit,ensure_ascii=False))
-    return audit
-
-
-def _rollback_kl_rejection(c,saved,*,kl,acceptance,actor,label):
-    """有限KL超限只拒绝本轮；完整回滚各rank学习状态，保留真实交互与尝试账本。
-
-    普通拒绝属于训练控制，不抛出终止异常、不归档完整链。非有限统计仍属于计算
-    故障，不能伪装为可继续的阈值超限。落盘小型诊断之后调用方正常推进rollout计数，
-    释放当前数据并从原物理世界重新采样；已接受轮数及行为版本保持不变。
-    """
-    for failure in acceptance['failures'].values():
-        if isinstance(failure,dict) and not math.isfinite(failure['value']):
-            raise FloatingPointError('Nonfinite final KL cannot be treated as an ordinary rejected update')
-    rollback=local_call(c.distributed,lambda:_restore_rollback(c,saved))
-    rollbacks=c.distributed.all_gather_object(rollback)
-    c.state['rejected_rollouts']=c.state.get('rejected_rollouts',0)+1
-    evidence=dict(kl=kl,acceptance=acceptance,actor=actor,
-        physical_and_resource_consumption_retained=True,training_state_restored=True,
-        rollback_audits=rollbacks,action='resample_and_continue',
-        retained_accepted_iteration=c.state['iteration'],retained_policy_version=c.state['policy_version'])
-    root_call(c.distributed,lambda:atomic_json(c.session/(label+'_rejected.json'),evidence))
-    return evidence
 
 
 def _preserve_rollout_anomaly(c,buffer,targets,manifest,label):
@@ -288,7 +254,7 @@ def _learning_version(c):
 
 def _accepted_version(c):
     """只跟踪已接受学习水位，连续拒绝不因物理/RNG前进反复保存同一模型。"""
-    return tuple(c.state.get(key,0) for key in ('iteration','actor_updates','critic_updates','policy_version'))
+    return tuple(c.state.get(key,0) for key in ('iteration','actor_updates','policy_version'))
 
 
 def _completed_training_resume(args,state,limit):
@@ -345,7 +311,7 @@ def _maintain_after_iteration(c,report,*,is_warmup,rejected,last_save,finishing=
         save_reasons.append('mc_calibrated')
     if finishing:save_reasons.append('controlled_end')
     rejected_unsaved=rejected and getattr(c,'last_saved_accepted_version',None)!=_accepted_version(c)
-    if rejected_unsaved:save_reasons.append('kl_rejected_rollback')
+    if rejected_unsaved:save_reasons.append('retained_actor_state')
     if save_reasons:
         stage=time.perf_counter()
         if finishing or rejected_unsaved:
@@ -415,6 +381,8 @@ def run(cargs,config,distributed):
             dict(params=[p for p in c.critic.parameters() if p.requires_grad and id(p) not in history_ids],
                  lr=critic_config['learning_rate'],name='temporal_value')],weight_decay=0.)
         c.controller=BCGradientController(**c.stage['bc_gradient'])
+        from .actor_lr import ActorLRController
+        c.actor_lr=ActorLRController(c.settings['actor_lr'],c.settings['actor_lr_adaptation'])
         anchor_config=copy.deepcopy(c.config)
         anchor_config['stage9'].update(bc_batch=c.settings['bc_batch']//distributed.world_size,
             seed=(c.stage['seed']+1000003*distributed.rank)%2**32)
@@ -456,7 +424,7 @@ def run(cargs,config,distributed):
             checkpoint=c.output/pointer['path']
             if file_sha256(checkpoint)!=pointer['sha256']:raise ValueError('Complete checkpoint SHA mismatch')
             payload=local_call(distributed,lambda:load_training_checkpoint(checkpoint,identity=c.identity,actor=c.actor,critic=c.critic,
-                actor_optimizer=c.actor_optimizer,critic_optimizer=c.critic_optimizer,controller=c.controller))
+                actor_optimizer=c.actor_optimizer,critic_optimizer=c.critic_optimizer,controller=c.controller,lr_controller=c.actor_lr))
             from .run_management import validate_budget_progress
             root_call(distributed,lambda:validate_budget_progress(payload['budget'],c.budget.state_dict()))
             c.state=copy.deepcopy(payload['state'])
@@ -578,9 +546,9 @@ def run(cargs,config,distributed):
                 global_indices=None if full_probability else
                     [next(i for i,m in enumerate(manifest) if m['owner_rank']==rank and m['has_free'])
                      for rank in range(8) if any(m['owner_rank']==rank and m['has_free'] for m in manifest)])
-            saved=local_call(distributed,lambda:_rollback_snapshot(c))
             if (cargs.collect_only or not is_warmup and cargs.capture_validation_iteration is not None
                     and c.state['iteration']+1==cargs.capture_validation_iteration):
+                saved=local_call(distributed,lambda:_diagnostic_learning_snapshot(c))
                 from .diagnostic_rollout import persist_rollout
                 case_index=c.state['rollouts_completed']+1 if cargs.collect_only else cargs.capture_validation_iteration
                 case=c.session/'fixed_data_validation'/f'iteration{case_index:06d}'
@@ -622,6 +590,7 @@ def run(cargs,config,distributed):
             actor=None;kl=None
             if not is_warmup:
                 actor_start=time.perf_counter()
+                c.actor_optimizer.param_groups[0]['lr']=c.actor_lr.base_lr
                 def reserve():
                     root_call(distributed,lambda:c.budget.reserve('actor_attempts',optimizer_attempts=1))
                     c.state['optimizer_attempts']+=1
@@ -632,7 +601,7 @@ def run(cargs,config,distributed):
                     actor=full_batch_actor_update(c.policy,c.actor_optimizer,rows,targets,cache,manifest,c.controller,
                         distributed=distributed,anchor=c.bc,generator=c.generators['actor'],
                         backtracking=c.settings['optimizer_backtracking'],kl_limits=c.stage['kl'],
-                        kl_microbatch=c.settings['kl_microbatch'],proposed_lr=c.settings['actor_lr'],
+                        kl_microbatch=c.settings['kl_microbatch'],proposed_lr=c.actor_lr.base_lr,minimum_lr=c.settings['actor_lr_adaptation']['minimum'],
                         detailed_diagnostics=(c.state['iteration']==0 or
                             (c.state['iteration']+1)%c.stage['checks'].get('actor_diagnostics_every',100)==0),
                         ppo_epochs=c.settings['ppo_epochs'],
@@ -646,7 +615,9 @@ def run(cargs,config,distributed):
                         ppo_epochs=c.settings['ppo_epochs'],minibatch_chains=c.stage['scale']['actor_minibatch_chains'],
                         microbatch=c.settings['denoising_microbatch'],sampled_steps=c.settings['ppo_steps_per_chain'],
                         clip=c.settings['ppo_clip'],gamma_denoising=c.settings['gamma_denoising'],
-                        soft_kl=c.settings['kl_soft_stop_coordinate'],kl_reduction=c.stage['kl']['reduction'],
+                        backtracking=c.settings['optimizer_backtracking'],kl_limits=c.stage['kl'],
+                        kl_microbatch=c.settings['kl_microbatch'],minimum_lr=c.settings['actor_lr_adaptation']['minimum'],
+                        kl_reduction=c.stage['kl']['reduction'],
                         objective_reduction=c.settings['objective_logprob_reduction'],
                         grad_clip_norm=c.settings['grad_clip_norm'],reserve_attempt=reserve,
                         bc_samples_per_rollout=c.settings['bc_samples_per_rollout'],
@@ -671,17 +642,27 @@ def run(cargs,config,distributed):
                     c.kl_reuse_verified=True
                 from .actor_backtracking import check_candidate_kl
                 accepted=check_candidate_kl(kl,c.stage['kl'])
-                if actor.get('step_rejected') or actor['optimizer_steps']==0:
-                    accepted['passed']=False
-                    accepted['failures']['actor_optimizer']='no_accepted_optimizer_step'
                 decisions=distributed.all_gather_object(accepted['passed'])
                 if any(value!=decisions[0] for value in decisions):
                     raise RuntimeError('Ranks disagree on final KL acceptance')
                 if not accepted['passed']:
-                    if strict:
-                        anomaly_saved=local_call(distributed,lambda:_preserve_rollout_anomaly(c,buffer,targets,manifest,label))
-                    _rollback_kl_rejection(c,saved,kl=kl,acceptance=accepted,actor=actor,label=label)
-                    rejected=True
+                    raise RuntimeError('Final policy differs from optimizer-step complete KL acceptance')
+                # 所有候选仅算高斯KL；最终接受模型的参考生成诊断只执行一次。
+                if kl.get('reference_change') is None:
+                    from .updater import reference_change_diagnostics
+                    started_reference=time.perf_counter()
+                    kl['reference_change']=reference_change_diagnostics(c.policy,rows,cache,distributed)
+                    kl['reference_diagnostic_seconds']=max(distributed.all_gather_object(time.perf_counter()-started_reference))
+                actor['lr_control']=c.actor_lr.update(kl,c.stage['kl'],accepted=actor['optimizer_steps'],
+                    planned=actor['planned_optimizer_steps'],attempts=actor['attempted_optimizer_steps'])
+                lr_states=distributed.all_gather_object(c.actor_lr.state_dict())
+                if any(v!=lr_states[0] for v in lr_states):raise RuntimeError('Ranks disagree on adaptive LR state')
+                c.state['selected_actor_lr']=c.actor_lr.base_lr
+                rejected=actor['optimizer_steps']==0
+                if rejected:
+                    c.state['zero_actor_update_rollouts']=c.state.get('zero_actor_update_rollouts',0)+1
+                    root_call(distributed,lambda:atomic_json(c.session/(label+'_no_actor_update.json'),
+                        dict(actor=actor,kl=kl,critic_retained=True,action='resample_and_continue')))
             else:
                 actor_seconds=0.
             def assert_paused_physics():
@@ -719,17 +700,19 @@ def run(cargs,config,distributed):
                 performance_by_rank=distributed.all_gather_object(profile_report),physics_paused_during_optimization=True,
                 memory_by_rank=memory,periodic_model_fingerprints=fingerprints,
                 effective_upper_transitions_per_second=used[2]/wall,
-                mode='critic_warmup' if is_warmup else 'kl_rejected_rollback' if rejected else 'dppo_bc',
+                mode='critic_warmup' if is_warmup else 'no_actor_update' if rejected else 'dppo_bc',
+                timing_scope='actor_seconds_includes_all_step_KL_and_retries;final_KL_receipt_is_not_extra_time',
                 overhead_since_previous_record=dict(c.overhead))
             root_call(distributed,lambda:(c.manager.append_metrics(record),log_metrics(c.writer,c.output/'curves.jsonl',c.state['iteration'],
                 record,prefix='training',durable=False,dashboard_metrics=training_scalars(record))))
             c.overhead.clear()
             accepted_steps=0 if actor is None or rejected else actor['optimizer_steps']
-            attempted_steps=0 if actor is None else actor['optimizer_steps']
+            attempted_steps=0 if actor is None else actor['attempted_optimizer_steps']
             report['warmup' if is_warmup else 'iterations'].append(dict(label=label,mode=record['mode'],
                 wall_seconds=wall,actor_steps=accepted_steps,attempted_actor_steps=attempted_steps))
             if distributed.rank==0:
-                status='REJECTED_CONTINUE' if rejected else 'ACCEPTED'
+                status=('NO_ACTOR_UPDATE' if rejected else 'PARTIAL_ACCEPTED' if actor is not None and
+                    actor['optimizer_steps']<actor['planned_optimizer_steps'] else 'ACCEPTED')
                 print(f'[STAGE10 {status}] {label} accepted_iteration={c.state["iteration"]} chains={used[2]} '
                     f'actor_steps={accepted_steps} attempted_actor_steps={attempted_steps} wall={wall:.3f}s',flush=True)
             if is_warmup and c.state['warmup_completed']==warmups:
@@ -755,14 +738,6 @@ def run(cargs,config,distributed):
                 report['anomaly_rollouts']=distributed.all_gather_object(anomaly_saved)
             except BaseException as evidence_error:
                 report['anomaly_save_error']=repr(evidence_error)
-        if saved is not None:
-            try:
-                c.actor_optimizer.zero_grad(set_to_none=True);c.critic_optimizer.zero_grad(set_to_none=True)
-                rollback=local_call(distributed,lambda:_restore_rollback(c,saved))
-                report['rollback_audits']=distributed.all_gather_object(rollback)
-                report['whole_training_state_restored']=True
-            except BaseException as restore_error:
-                report['whole_training_state_restored']=False;report['rollback_error']=repr(restore_error)
     finally:
         if profile_token is not None:
             from .performance import deactivate

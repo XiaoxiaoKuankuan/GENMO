@@ -34,7 +34,7 @@ def test_production_parameters_and_cumulative_iteration_ceiling():
     assert validate_stopping_iteration(200,stage)==200
     for wrong in (0,201,True,4.0):
         with pytest.raises(ValueError):validate_stopping_iteration(wrong,stage)
-    assert train['kl_rejection']=='rollback_continue'
+    assert train['kl_rejection']=='retain_accepted_steps'
     assert stage['limits']==dict(accepted_iterations=2000,optimizer_attempts=18000,
         generations=40000000,control_steps=1100000000,physics_steps=4400000000)
 

@@ -188,7 +188,7 @@ def test_real_events_keep_one_run_and_separate_training_validation_reward(tmp_pa
     assert tags and set(tags) <= EVENT_DEFINITIONS.keys()
     groups = {tag.split('/')[0] for tag in tags}
     assert groups == {'Reward', 'Tracking', 'Motion', 'Termination', 'Policy', 'Loss', 'Sampling', 'Perf'}
-    assert len(EVENT_DEFINITIONS) <= 54
+    assert len(EVENT_DEFINITIONS) <= 58
     assert all(events.Scalars(tag) for tag in tags)
     train = events.Scalars('Reward/train_total_per_second')
     validation = events.Scalars('Reward/validation_total_per_second')

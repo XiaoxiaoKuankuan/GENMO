@@ -337,17 +337,17 @@ def test_rollback_restores_nonempty_adam_and_rng_exactly():
         state=dict(actor_updates=2, critic_updates=3, training_control_steps=101))
     for model, opt in ((actor, actor_opt), (critic, critic_opt)):
         model(torch.ones(2, 3)).square().sum().backward(); opt.step(); opt.zero_grad(set_to_none=True)
-    saved = training._rollback_snapshot(c)
+    saved = training._diagnostic_learning_snapshot(c)
+    saved_digest = exact_state_digest(saved)
     for model, opt in ((actor, actor_opt), (critic, critic_opt)):
         model(torch.full((2, 3), 2.)).sum().backward(); opt.step()
     torch.rand(3); torch.rand(3, generator=c.generators['actor'])
     c.bc.value['cursor'] += 1; c.controller.update(3., 4.)
     c.state.update(actor_updates=8, critic_updates=12, training_control_steps=109)
-    audit = training._restore_rollback(c, saved)
-    assert audit['identical']
-    assert exact_state_digest(saved) == exact_state_digest(training._rollback_snapshot(c))
+    assert exact_state_digest(saved) == saved_digest
+    assert exact_state_digest(saved) != exact_state_digest(training._diagnostic_learning_snapshot(c))
     assert c.state['training_control_steps'] == 109
-    assert all(p.grad is None for model in (actor, critic) for p in model.parameters())
+    assert c.state['critic_updates'] == 12
 
 
 def test_nan_p95_is_rejected_without_relaxing_kl_limits():

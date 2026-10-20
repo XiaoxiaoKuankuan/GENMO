@@ -22,7 +22,7 @@ import torch
 
 from .budget import atomic_json
 
-SCHEMA='genmo.closedloop.stage2.asymmetric_tracking.checkpoint.v2'
+SCHEMA='genmo.closedloop.stage2.asymmetric_tracking.checkpoint.v3'
 
 
 def immutable_cpu_snapshot(value):
@@ -87,7 +87,7 @@ class AsyncCheckpointWriter:
             if reason=='best':atomic_json(self.root/'best_checkpoint.json',descriptor)
             # 周期/拒绝补存共用滚动保留；初始、里程碑、评估、best和终态不在此集合。
             candidates=sorted(p for p in (self.root/'checkpoints').glob('stage10_r*_a*.pt')
-                              if all(role in ('periodic','kl_rejected_rollback')
+                              if all(role in ('periodic','retained_actor_state')
                                      for role in p.stem.split('_',5)[-1].split('+')))
             import json
             protected={path}
@@ -108,7 +108,7 @@ class AsyncCheckpointWriter:
         finally:self.pool.shutdown(wait=True);self.closed=True
 
 
-def load_training_checkpoint(path,*,identity,actor,critic,actor_optimizer,critic_optimizer,controller):
+def load_training_checkpoint(path,*,identity,actor,critic,actor_optimizer,critic_optimizer,controller,lr_controller=None):
     payload=torch.load(path,map_location='cpu',weights_only=False,mmap=True)
     if payload.get('schema')!=SCHEMA or payload.get('identity')!=identity:
         raise ValueError('Checkpoint schema/algorithm/kernel/asset/runtime identity differs; new experiment required')
@@ -120,9 +120,12 @@ def load_training_checkpoint(path,*,identity,actor,critic,actor_optimizer,critic
     # 先验证控制器，再修改任何模型；拒绝损坏快照时保持调用方当前学习状态。
     import copy
     copy.deepcopy(controller).load_state_dict(payload['bc_controller'])
+    if lr_controller is not None:
+        copy.deepcopy(lr_controller).load_state_dict(payload['scheduler'])
     actor.load_state_dict(payload['actor'],strict=True);critic.load_state_dict(payload['critic'],strict=True)
     actor_optimizer.load_state_dict(payload['actor_optimizer']);critic_optimizer.load_state_dict(payload['critic_optimizer'])
     controller.load_state_dict(payload['bc_controller'])
+    if lr_controller is not None:lr_controller.load_state_dict(payload['scheduler'])
     if any(p.dtype!=torch.float32 for p in actor.parameters()):raise ValueError('Restored Actor master dtype changed')
     return payload
 

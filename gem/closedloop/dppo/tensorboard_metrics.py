@@ -62,7 +62,11 @@ DEFINITIONS = {
     'Policy/gradient_norm': 'Actor 每次更新裁剪前 PPO+BC 总梯度范数的均值；持续异常增大需检查。',
     'Policy/bc_to_ppo_gradient_ratio': '每次更新加权 BC 梯度范数/PPO 梯度范数的均值；不是 Adam 参数更新贡献比例。',
     'Loss/joint_score': '四个随机步骤完整联合 Gaussian score 单次策略梯度损失；不是 clipped PPO，不能按单调下降验收。',
-    'Policy/backtracks': '本次接受前的学习率减半次数；实际学习率同时见 learning_rate。',
+    'Policy/backtracks': '本轮全部候选的学习率减半次数，包含最终没有接受的步骤。',
+    'Policy/next_base_lr': '跨轮控制器选定的下一轮统一基础学习率。',
+    'Policy/kl_utilization': '完整四步KL三项统计相对各自硬门槛的最大占用比例。',
+    'Policy/accepted_steps': '本轮实际保留的Actor optimizer step数。',
+    'Policy/optimizer_attempts': '本轮所有Adam候选计算次数，包含被撤销尝试。',
     'Loss/ppo': 'Actor 本轮 PPO 代理损失按内部样本访问数加权；优势归一化后常在零附近，不能按单调下降验收效果。',
     'Loss/bc': 'Actor 本轮 BC 损失按实际 BC 样本数加权；衡量监督约束拟合，不等于物理跟踪。',
     'Loss/critic_mse_before': '本轮 Critic 更新前，对本轮自举目标的 MSE；不同轮目标会变化。',
@@ -136,7 +140,7 @@ def _weighted(rows, key, weight):
 
 def training_scalars(record):
     """跨 rank 合并分子/分母；仅接受实际完成的 Actor 更新，避免预热/回退污染横轴。"""
-    if record.get('mode') != 'dppo_bc':
+    if record.get('mode') not in ('dppo_bc','no_actor_update'):
         return {}
     collections = record['collection_by_rank']
     seconds = sum(c['executed_seconds'] for c in collections)
@@ -170,9 +174,15 @@ def training_scalars(record):
                 ratios.append(gradients['weighted_bc_norm']/gradients['ppo_norm'])
         if ratios:
             values['Policy/bc_to_ppo_gradient_ratio'] = float(np.mean(ratios))
-    transaction = steps[-1].get('backtracking', {}) if steps else {}
-    if transaction:
-        values['Policy/backtracks'] = transaction.get('backtracks')
+    transactions=[s['backtracking'] for s in steps if s.get('backtracking')]
+    if actor.get('rejected_step',{}):
+        transactions.append(actor['rejected_step']['backtracking'])
+    if transactions:values['Policy/backtracks']=sum(t['backtracks'] for t in transactions)
+    control=actor.get('lr_control',{})
+    values['Policy/next_base_lr']=control.get('next_base_lr')
+    values['Policy/kl_utilization']=control.get('utilization')
+    values['Policy/accepted_steps']=actor.get('optimizer_steps')
+    values['Policy/optimizer_attempts']=actor.get('attempted_optimizer_steps')
     kl = record.get('trainable4_kl') or {}
     active = kl.get('per_denoising_step', [])
     if active and [step['step'] for step in active] != [15, 16, 17, 18]:
