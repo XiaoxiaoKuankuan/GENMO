@@ -316,3 +316,18 @@ rank加载前按`max(4096, 1024+32×Episode容量)`预留句柄，只提高进�
 全部manifest和数组SHA通过。包含全部86次生成后失败，另8次预热失败保留于原尝试
 账本。证据见`docs/validation/stage2_awr_pilot512_full_replay_audit_20261020.json`及其
 绑定的服务器完整报告。1367.088秒为并发加载期间CPU审计耗时，不是隔离读取基准。
+
+
+`backward-profile`在已完成运行、八卡空闲时执行1次预热和默认3次有限前反向，读取
+本轮真实Replay与固定权重、最终AWR Actor和原BC真标签，分别测量AWR、BC、SUM和
+裁剪，不调用优化器step，前后校验Actor指纹不变。该离线测量不能替代整轮成本：
+
+```bash
+bash tools/run_stage2_awr_server2.sh backward-profile \
+  --run-dir <已完成运行> --runtime-repo <该运行原源码目录> \
+  --output-dir <新的独立验收目录> --steps 3
+```
+
+新Trainer逐步拆分BC前反向、梯度归约、裁剪及优化器耗时，CUDA阶段末同步以免仅测
+到排队耗时；保留旧BC＋更新合计字段。当前512运行仍固定f417545，其历史BC时间
+只有合计字段，不能事后伪造分项；以上独立测量会明确标注为有限离线样本。

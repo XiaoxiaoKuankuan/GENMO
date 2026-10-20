@@ -29,5 +29,10 @@ if [[ "${1:-}" == "retention" ]]; then
     shift
     exec "${AWR_PYTHON}" -B "${AWR_REPO}/tools/validate_stage2_awr_generation.py" "$@"
 fi
+if [[ "${1:-}" == "backward-profile" ]]; then
+    shift
+    exec "${AWR_PYTHON}" -B -m torch.distributed.run --standalone --nnodes=1 --nproc_per_node=8 \
+        "${AWR_REPO}/tools/profile_stage2_awr_backward.py" "$@"
+fi
 exec "${AWR_PYTHON}" -B -m torch.distributed.run --standalone --nnodes=1 --nproc_per_node=8 \
     "${AWR_REPO}/tools/train_stage2_awr.py" "$@"

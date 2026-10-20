@@ -162,19 +162,29 @@ class ActorTrainer:
                     awr_loss = self.backward_awr(ids, step=self.steps)
                     awr_done = time.perf_counter()
                     bc_loss = self.backward_bc(self.bc_weight)
+                    bc_done = time.perf_counter()
                     d.gradients(self.actor)
+                    if d.device.type == "cuda":
+                        torch.cuda.synchronize(d.device)
+                    reduction_done = time.perf_counter()
                     norm = torch.nn.utils.clip_grad_norm_(
                         [p for p in self.actor.parameters() if p.requires_grad], c.get("gradient_clip", 1.),
                         error_if_nonfinite=True)
                     learning_rate = self.optimizer.param_groups[0]["lr"]
                     self.optimizer.step(); self.scheduler.step()
+                    if d.device.type == "cuda":
+                        torch.cuda.synchronize(d.device)
+                    update_done = time.perf_counter()
                     self.steps += 1; self.cursor += len(ids); self.bc.bc_update_steps += 1
                     entry = dict(step=self.steps, epoch=self.epoch, samples=len(ids), awr_loss=awr_loss,
                                  bc_loss=bc_loss, bc_weight=self.bc_weight, total_loss=awr_loss+self.bc_weight*bc_loss,
                                  gradient_norm=float(norm), clipped_gradient_norm=min(float(norm), c.get("gradient_clip", 1.)),
                                  lr=learning_rate, awr_seconds=awr_done-step_start,
-                                 bc_and_update_seconds=time.perf_counter()-awr_done,
-                                 seconds=time.perf_counter()-step_start)
+                                 bc_forward_backward_seconds=bc_done-awr_done,
+                                 gradient_reduction_seconds=reduction_done-bc_done,
+                                 clip_optimizer_seconds=update_done-reduction_done,
+                                 bc_and_update_seconds=update_done-awr_done,
+                                 seconds=update_done-step_start)
                     self.history.append(entry)
                     if on_step:
                         on_step(self, entry)
@@ -187,6 +197,9 @@ class ActorTrainer:
                                        for e in self.history if "epoch_seconds" in e},
                         awr_forward_backward_seconds=sum(e["awr_seconds"] for e in self.history),
                         bc_reduction_update_seconds=sum(e["bc_and_update_seconds"] for e in self.history),
+                        bc_forward_backward_seconds=sum(e["bc_forward_backward_seconds"] for e in self.history),
+                        gradient_reduction_seconds=sum(e["gradient_reduction_seconds"] for e in self.history),
+                        clip_optimizer_seconds=sum(e["clip_optimizer_seconds"] for e in self.history),
                         optimizer_step_seconds_mean=sum(e["seconds"] for e in self.history)/self.steps,
                         replay_read_seconds=self.dataset.read_seconds,
                         peak_gpu_memory_scope="process_start_through_this_actor_training",
