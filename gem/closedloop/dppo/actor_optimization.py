@@ -1,7 +1,7 @@
 """当前连续世界Actor优化配置及实际参数身份。
 
 只接受完整四步联合Clipped PPO，一个完整链比值对应一个上层GAE优势。显式绑定
-统一学习率、全局链批量、Epoch、BC批量下限、联合KL及裁剪早停阈值。旧坐标
+共同基础学习率和固定模块倍率、全局链批量、Epoch、BC批量下限、联合KL阈值。旧坐标
 代理训练和单次joint-score训练入口退役；joint-score函数仅留作数学梯度参考。
 联合KL初始阈值是待真实rollout标定的候选，不能沿用坐标平均阈值或声称物理安全。
 本模块只校验配置，不启动训练；物理收益仍由真实完整歌曲执行结果判断。
@@ -23,9 +23,13 @@ def digest(value):
 
 def optimization_binding(stage):
     t=stage['training']
+    from .actor_optimizer import validate_lr_multipliers
+    multipliers=validate_lr_multipliers(t)
     return dict(schema='genmo.stage2.full_chain_optimization_binding.v1',
         actor_lr=t['actor_lr'],actor_lr_control=t['actor_lr_control'],actor_trainable_scope=t.get('actor_trainable_scope','all'),
-        actor_optimizer=dict(type='AdamW',parameter_groups=1,betas=[.9,.999],eps=1e-8,weight_decay=0.),
+        actor_optimizer=dict(type='AdamW',parameter_groups=1 if multipliers is None else 'named_modules',
+            **({'lr_multipliers':multipliers} if multipliers is not None else {}),
+            betas=[.9,.999],eps=1e-8,weight_decay=0.),
         ppo_epochs=t['ppo_epochs'],global_minibatch_chains=stage['scale']['actor_minibatch_chains'],
         objective=t['actor_objective'],joint_reduction=t['objective_logprob_reduction'],ppo_clip=t['ppo_clip'],
         gamma_denoising=t['gamma_denoising'],gradient_clip=t['grad_clip_norm'],
@@ -49,7 +53,7 @@ def validate_optimization_configuration(config,maximum_steps):
             or s['scale']['actor_minibatch_chains']<1
             or t['objective_logprob_reduction']!='joint_sum' or t['gamma_denoising']!=1.
             or t['actor_lr_control']!='joint_kl_backtracking' or not math.isfinite(t['actor_lr']) or t['actor_lr']<=0):
-        raise ValueError('Explicit full-chain joint PPO with one undiscounted GAE and uniform Actor LR required')
+        raise ValueError('Explicit full-chain joint PPO with one undiscounted GAE and fixed Actor LR ratios required')
     trust=t['trust_region']
     if (set(trust)!={'maximum_lr','growth','margin','max_attempts'}
             or trust['maximum_lr']!=t['actor_lr'] or not 1<=trust['growth']<=2
@@ -84,7 +88,7 @@ def validate_optimization_configuration(config,maximum_steps):
             or s['ppo_rollout']['credit_contract']!=CREDIT_CONTRACT
             or s['critic']['complete_mc']['start_distribution']!='match_training_reset.v1'):
         raise ValueError('Current 8s/.98/2000-iteration continuous-world training contract required')
-    if any(container['every_actor_iterations']!=100 for container in
-            (s['evaluation'],s['critic']['complete_mc'])):
-        raise ValueError('Complete-song evaluation and MC run every 100 accepted iterations')
+    if (s['evaluation']['every_actor_iterations'] not in (50,100)
+            or s['critic']['complete_mc']['every_actor_iterations']!=100):
+        raise ValueError('Complete-song evaluation every 50/100 iterations and MC every 100 required')
     return optimization_binding(s)

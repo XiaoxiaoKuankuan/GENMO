@@ -17,7 +17,8 @@ import time
 from collections import Counter
 import torch
 
-from .actor_backtracking import backtracked_step, uniform_actor_optimizer
+from .actor_backtracking import backtracked_step
+from .actor_optimizer import validate_actor_optimizer, set_actor_base_lr
 from .actor_step_diagnostics import StepDiagnostics, output_probe, compare_probes, advantage_diagnostics
 from .dense_policy import dense_precision_scope
 from .execution_checks import policy_phase
@@ -44,7 +45,7 @@ def prepare_full_batch_gradient(policy, optimizer, rows, targets, cache, manifes
     selected = _eligible(manifest)
     if not selected or len(selected) > minibatch_chains:
         raise ValueError('Single on-policy update requires all valid chains in one global minibatch')
-    uniform_actor_optimizer(policy.actor, optimizer)
+    validate_actor_optimizer(policy.actor, optimizer)
     actor = policy.actor
     owned = _owned(selected, manifest, distributed)
     local = [rows[i] for _, i in owned]
@@ -117,7 +118,7 @@ def full_batch_actor_update(policy, optimizer, rows, targets, cache, manifest, c
     if ppo_epochs != 1:
         raise ValueError('Full-batch experiment permits exactly one on-policy update per rollout')
     policy._accepted_kl_receipt=None
-    if proposed_lr is not None:optimizer.param_groups[0]['lr']=proposed_lr
+    if proposed_lr is not None:set_actor_base_lr(optimizer,proposed_lr)
     control_before = copy.deepcopy(controller.state_dict())
     anchor_before = copy.deepcopy(anchor.state_dict())
     rng_before = capture_local_rng(dict(actor=generator))

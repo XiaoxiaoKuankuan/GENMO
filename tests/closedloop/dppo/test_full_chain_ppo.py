@@ -160,3 +160,30 @@ def test_real_small_network_streamed_full_autograd_and_initial_score_gradients(a
                 (-score['joint_log_ratio']*advantage/len(rows)).sum().backward()
         _compare_cpu_gradients(policy.actor,reference)
     finally:cache.close()
+
+
+def test_multigroup_adam_and_restore_both_invalidate_condition_cache(actor_factory):
+    from gem.closedloop.dppo.actor_optimizer import make_actor_optimizer
+    from gem.closedloop.dppo.tensor_cache import ConditionGraphCache
+    policy,rows,targets=case(actor_factory)
+    cache=RolloutTensorCache(rows,targets,'cpu')
+    settings=dict(actor_lr=1e-6,actor_trainable_scope='all',actor_lr_multipliers=dict(
+        transformer=.1,qpos_output=1.,other=.1,transformer_overrides={}))
+    optimizer=make_actor_optimizer(policy.actor,settings)
+    original=copy.deepcopy(policy.actor.state_dict())
+    try:
+        with policy_phase(policy):
+            bank=ConditionGraphCache(policy,cache,include_frozen=False);bank.prime(rows)
+            records=evaluate_chain_records(policy,rows,cache,microbatch=3)
+            backward_chain_surrogate(policy,rows,cache,records,clip=.1,global_chain_count=len(rows),microbatch=3)
+        optimizer.step()
+        with pytest.raises(ValueError,match='optimizer step'):
+            bank.prepare(rows,None)
+        with policy_phase(policy):
+            fresh=ConditionGraphCache(policy,cache,include_frozen=False);fresh.prime(rows)
+            fresh.prepare(rows,None)
+        policy.actor.load_state_dict(original)
+        with pytest.raises(ValueError,match='optimizer step'):
+            fresh.prepare(rows,None)
+        assert policy.assert_frozen_identity()['checked']
+    finally:cache.close()

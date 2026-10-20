@@ -36,7 +36,8 @@ def actor_update(policy,optimizer,rows,targets,cache,manifest,controller,*,distr
     """每条完整链一个联合比值；两遍微批反传与全局SUM严格保持同一目标。"""
     from .chain_ppo import evaluate_chain_records,from_records,backward_chain_surrogate
     from .gaussian_probability import chain_diagnostics,distribution
-    from .actor_backtracking import uniform_actor_optimizer,backtracked_step
+    from .actor_backtracking import backtracked_step
+    from .actor_optimizer import validate_actor_optimizer,actor_base_lr,set_actor_base_lr,actor_learning_rates
     from .actor_step_diagnostics import StepDiagnostics,output_probe,compare_probes
     from .parallel_support import local_call
     if step_strategy!='intermediate4' or sampled_steps!=4 or tuple(policy.trainable_steps)!=(15,16,17,18):
@@ -44,7 +45,7 @@ def actor_update(policy,optimizer,rows,targets,cache,manifest,controller,*,distr
     if (policy.steps!=20 or ppo_epochs<1 or minibatch_chains<1 or microbatch<1 or
             gamma_denoising!=1. or kl_reduction!='chain_joint' or objective_reduction!='joint_sum'):
         raise ValueError('Full-chain PPO requires joint-sum, chain KL and one undiscounted upper advantage')
-    uniform_actor_optimizer(policy.actor,optimizer)
+    validate_actor_optimizer(policy.actor,optimizer)
     policy._accepted_kl_receipt=None
     selected=_eligible(manifest);reports=[];orders=[];stop_reason=None;covered=set();discarded=None
     if not selected:raise ValueError('No free valid behavior chain remains for PPO')
@@ -116,8 +117,8 @@ def actor_update(policy,optimizer,rows,targets,cache,manifest,controller,*,distr
                     if k.startswith('chain_joint_')}
                 limits['chain_joint_mean']=min(limits['chain_joint_mean'],soft_kl*trust_region['margin'])
                 limits['maximum_active_clip']=max_active_clip
-                optimizer.param_groups[0]['lr']=min(trust_region['maximum_lr'],
-                    optimizer.param_groups[0]['lr']*trust_region['growth'])
+                set_actor_base_lr(optimizer,min(trust_region['maximum_lr'],
+                    actor_base_lr(optimizer)*trust_region['growth']))
                 def evaluate_candidate():
                     nonlocal post_records,post,kl_elapsed
                     measured=time.perf_counter()
@@ -170,7 +171,8 @@ def actor_update(policy,optimizer,rows,targets,cache,manifest,controller,*,distr
                 candidate_check_scope='all_previously_used_plus_current_chains' if trust_region is not None else 'current_minibatch',
                 bc_global_samples=sum(s['batch'] for s in shards),bc_samples_by_source=dict(sources),
                 bc_loss=sum(s['batch']*s['loss'] for s in shards)/global_bc,
-                learning_rate=optimizer.param_groups[0]['lr'],ppo_ratio_seconds=ratio_seconds,
+                learning_rate=actor_base_lr(optimizer),learning_rates=actor_learning_rates(optimizer),
+                ppo_ratio_seconds=ratio_seconds,
                 ppo_backward_seconds=ppo_seconds,ppo_seconds=ratio_seconds+ppo_seconds,
                 bc_seconds=bc_seconds,post_step_kl_seconds=kl_seconds,optimizer_transaction_seconds=transaction_seconds,
                 wall_seconds=max(distributed.all_gather_object(time.perf_counter()-started)))

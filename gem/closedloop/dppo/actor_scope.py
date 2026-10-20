@@ -5,7 +5,7 @@
 不修改state_dict键。输入范围冻结Transformer主干、条件编码及输出头，仍可反传输入梯度。
 腿部投影范围按真实joint_order屏蔽输出层非腿行的PPO/BC梯度；实际Gaussian仍覆盖
 全部自由坐标，其他行的概率因子因参数未变自然抵消。新鲜零衰减Adam保证其矩保持零。
-每个候选仍使用单组AdamW，因此共享原联合KL回溯、Adam恢复和完整链PPO数学目标。
+参数分组由actor_optimizer独立构造，共享联合KL回溯、Adam恢复和完整链PPO数学目标。
 范围名称进入优化身份；不能将旧全参数Adam状态透明加载到参数子集。参数量和确切
 名称返回日志，冻结接触头时BC仍保留原监督，只能更新候选范围中的参数。
 """
@@ -45,4 +45,4 @@ def configure_actor_scope(actor,scope='all'):
             effective+=int(mask.sum())
     return dict(scope=scope,parameter_count=count,parameter_names=names,
         effective_parameter_count=effective,row_masked_output_features=masked,
-        optimizer_groups=1,stage1_architecture_and_sampling_kernel_unchanged=True)
+        stage1_architecture_and_sampling_kernel_unchanged=True)

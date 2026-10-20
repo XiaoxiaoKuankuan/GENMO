@@ -33,15 +33,16 @@ class StepDiagnostics:
 
     @torch.no_grad()
     def finish(self, optimizer, bc_weight, clip_factor):
-        if len(optimizer.param_groups) != 1:
-            raise ValueError('Uniform Actor AdamW requires exactly one parameter group')
-        group = optimizer.param_groups[0]
+        from .actor_optimizer import validate_actor_optimizer, actor_parameter_group, actor_learning_rates
+        validate_actor_optimizer(self.actor, optimizer)
+        groups = {id(p): group for group in optimizer.param_groups for p in group['params']}
         totals = {}
         for name, p in self.actor.named_parameters():
             if not p.requires_grad:
                 continue
             if p.dtype != torch.float32:
                 raise ValueError('Actor master parameters must remain FP32')
+            group = groups[id(p)]
             old = self.before[name].double()
             delta = p.double() - old
             grad = torch.zeros_like(p) if p.grad is None else p.grad
@@ -61,7 +62,10 @@ class StepDiagnostics:
                 delta.square().sum(), delta.abs().max(), grad.double().square().sum(), (grad != 0).sum(),
                 ((grad != 0) & (delta == 0)).sum(), (ideal != 0).sum(),
                 ((ideal != 0) & (delta == 0)).sum(), ideal.square().sum(), ppo_dot, bc_dot))
-            for key in ('all', _group(name)):
+            keys = ['all', _group(name)]
+            if name.startswith('denoiser.blocks.'):
+                keys.append(actor_parameter_group(name))
+            for key in keys:
                 if key not in totals:
                     totals[key] = values.clone()
                 else:
@@ -81,7 +85,7 @@ class StepDiagnostics:
                 adam_subtraction_fp64_delta_rms=math.sqrt(ideal2/n),
                 update_dot_negative_ppo_gradient=pdot if self.components else None,
                 update_dot_negative_weighted_bc_gradient=bdot if self.components else None)
-        return dict(modules=output, master_dtype='float32',
+        return dict(modules=output, master_dtype='float32', learning_rates=actor_learning_rates(optimizer),
             rounding_scope='FP64_reconstruction_from_actual_FP32_Adam_moments_before_parameter_subtraction',
             gradient_projection_measured=bool(self.components),
             gradient_projection_is_not_separable_Adam_contribution=True)

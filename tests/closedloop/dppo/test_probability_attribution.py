@@ -24,7 +24,7 @@ from gem.closedloop.dppo.optimization_support import _local_phase,_parameters,_o
 from gem.closedloop.dppo.gaussian_probability import gaussian_statistics
 from gem.closedloop.dppo.attribution_runtime import collect_coordinates,probe_difference,probe_summary
 from gem.closedloop.dppo.actor_step_diagnostics import output_probe
-from gem.closedloop.dppo.actor_backtracking import backtracked_step,uniform_actor_optimizer
+from gem.closedloop.dppo.actor_backtracking import backtracked_step,validate_actor_optimizer
 from gem.closedloop.dppo.gradient_merge import BCGradientController
 from tests.closedloop.dppo.test_clipped_dppo import case
 from tests.closedloop.test_stage1_actor import actor_factory
@@ -121,9 +121,9 @@ def test_restricted_actor_keeps_kernel_and_real_streamed_score(scope,prefix,acto
         opt=torch.optim.AdamW([p for p in policy.actor.parameters() if p.requires_grad],lr=1e-6,weight_decay=0.)
         if scope=='leg_projection':
             opt.param_groups[0]['weight_decay']=.01
-            with pytest.raises(ValueError,match='weight_decay=0'):uniform_actor_optimizer(policy.actor,opt)
+            with pytest.raises(ValueError,match='weight_decay=0'):validate_actor_optimizer(policy.actor,opt)
             opt.param_groups[0]['weight_decay']=0.
-            uniform_actor_optimizer(policy.actor,opt)
+            validate_actor_optimizer(policy.actor,opt)
         opt.step()
         assert any(not torch.equal(original[n],p) for n,p in policy.actor.named_parameters() if n in report['parameter_names'])
         assert all(torch.equal(original[n],p) for n,p in policy.actor.named_parameters() if n not in report['parameter_names'])

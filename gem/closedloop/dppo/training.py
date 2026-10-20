@@ -37,7 +37,7 @@ from .retention_anchor import Stage1RetentionAnchor
 from .runtime import InProcessTrainingRuntime
 from .run_management import RunManager,DiskGuard,StopSignal
 from .tensor_cache import RolloutTensorCache
-from .trainer import load_actor,trainable_actor_parameters
+from .trainer import load_actor
 from .optimization_support import probability_check_local
 from .updater import actor_update,critic_update,final_kl,check_kl
 from .compact_evidence import summary_only
@@ -391,7 +391,8 @@ def run(cargs,config,distributed):
                 generation_horizon=c.stage['generation_horizon'],data_catalog=c.catalog.identity))
             actor_initialization=local_call(distributed,lambda:load_evaluation_actor(cargs.evaluation_actor,
                 actor=c.actor,kernel=c.policy.kernel_config,assets=c.stage['assets'],execution_binding=binding))
-        c.actor_optimizer=torch.optim.AdamW(trainable_actor_parameters(c.actor),lr=c.settings['actor_lr'],weight_decay=0.)
+        from .actor_optimizer import make_actor_optimizer
+        c.actor_optimizer=make_actor_optimizer(c.actor,c.settings)
         history_ids={id(p) for p in c.critic.history_encoder.parameters()}
         c.critic_optimizer=torch.optim.AdamW([
             dict(params=list(c.critic.history_encoder.parameters()),lr=critic_config['history_learning_rate'],name='tracking_history'),

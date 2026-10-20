@@ -1,8 +1,8 @@
 """服务器1八卡真实固定rollout的概率归因、模块隔离与候选优化实验。
 
 输入是带SHA的6144链等真实fixed_data_validation及显式完整配置。复用生产策略、
-真实高斯核、流式全链PPO、Stage1RetentionAnchor和单组AdamW；只切换允许训练的
-参数范围。行为张量只读，新目录独立保存每次尝试、整轮KL/ESS、坐标与输出归因、
+真实高斯核、流式全链PPO、Stage1RetentionAnchor和显式分组AdamW；只切换允许训练的
+参数范围及固定学习率倍率。行为张量只读，新目录独立保存每次尝试、整轮KL/ESS、坐标与输出归因、
 最高权重真实样本及可选评估Actor。ESS仅诊断，不恢复训练硬门限。
 
 坐标中间文件只在本次独立目录的私有工作子目录中短暂存在，精确汇总后删除；保留
@@ -29,6 +29,8 @@ import torch
 import torch.distributed as dist
 
 from gem.closedloop.dppo.actor_scope import SCOPES
+from gem.closedloop.dppo.actor_optimizer import (
+    make_actor_optimizer,actor_base_lr,actor_learning_rates,actor_parameter_group)
 from gem.closedloop.dppo.actor_backtracking import check_candidate_kl
 from gem.closedloop.dppo.actor_step_diagnostics import output_probe
 from gem.closedloop.dppo.attribution_runtime import collect_coordinates,row_metadata,probe_difference,probe_summary
@@ -45,7 +47,7 @@ from gem.closedloop.dppo.retention_anchor import Stage1RetentionAnchor
 from gem.closedloop.dppo.rollback_audit import exact_state_digest
 from gem.closedloop.dppo.run_control import build_policy
 from gem.closedloop.dppo.tensor_cache import RolloutTensorCache
-from gem.closedloop.dppo.trainer import load_actor,trainable_actor_parameters
+from gem.closedloop.dppo.trainer import load_actor
 from gem.closedloop.dppo.training_checkpoint import file_sha256,immutable_cpu_snapshot
 from gem.closedloop.dppo.training_config import configuration
 from gem.closedloop.dppo.updater import actor_update,final_kl
@@ -59,6 +61,9 @@ def whole_chain_statistics(policy,rows,cache,distributed,metadata):
     records=torch.cat(shards);stats=from_records(records)
     report=importance_report(stats['joint_log_ratio'],stats['joint_kl'],
         [m['advantage'] for m in metadata],metadata)
+    from gem.closedloop.dppo.gaussian_probability import ppo_surrogate
+    report['full_rollout_clipped_objective_mean']=float(ppo_surrogate(
+        stats,torch.tensor([m['advantage'] for m in metadata],dtype=torch.float64),clip=.1)['objective'].mean())
     return report,records
 
 
@@ -92,23 +97,63 @@ def coordinate_analysis(policy,rows,cache,distributed,output):
     return root_call(distributed,aggregate)
 
 
-def module_ablation(policy,rows,cache,initial,distributed,output):
-    """同一个全参数Adam增量的单组隔离；只在固定普通样本上比较，不冒充重新优化。"""
-    selected=rows[:16];after=immutable_cpu_snapshot(policy.actor.state_dict())
+def module_ablation(policy,rows,cache,initial,distributed,output,*,selected=None,layerwise=False):
+    """同一实际Adam增量逐层隔离，普通和尾部样本固定；结果不是可相加的KL贡献。"""
+    selected=rows[:16] if selected is None else selected
+    after=immutable_cpu_snapshot(policy.actor.state_dict())
     policy.actor.load_state_dict(initial)
     before_probe=output_probe(policy,selected,cache,max_chains=len(selected))
-    groups=sorted({_group(n) for n,p in policy.actor.named_parameters() if p.requires_grad})
+    groups=(['transformer_backbone','qpos_output','other']+
+        sorted({actor_parameter_group(n) for n,p in policy.actor.named_parameters()
+            if p.requires_grad and n.startswith('denoiser.blocks.')})) if layerwise else (
+        sorted({_group(n) for n,p in policy.actor.named_parameters() if p.requires_grad}))
+    from tools.analyze_stage2_reference_consumption import token,joint_reference_changes
+    from gem.closedloop.dppo.execution_provenance import consumption_report
+    from collections import defaultdict
+    episodes=defaultdict(list);rows_by_id={}
+    for row in rows:
+        identity=token(row.identity);rows_by_id[identity]=row
+        if 'compact_execution_provenance' in row.metadata:
+            episodes[identity[:3]].append(row.metadata['compact_execution_provenance'])
+    consumed={key:consumption_report(records) for key,records in episodes.items()}
+    before_cpu=immutable_cpu_snapshot(before_probe)
+    def matches(name,group):
+        if not layerwise:return _group(name)==group
+        if group=='transformer_backbone':return name.startswith('denoiser.blocks.')
+        return actor_parameter_group(name)==group
     result=[]
     try:
         for group in ['all',*groups]:
-            state={name:(after[name] if group=='all' or _group(name)==group else tensor) for name,tensor in initial.items()}
+            state={name:(after[name] if group=='all' or matches(name,group) else tensor) for name,tensor in initial.items()}
             policy.actor.load_state_dict(state)
             probe=output_probe(policy,selected,cache,max_chains=len(selected))
             samples=[s for shard in distributed.all_gather_object(probe_difference(before_probe,probe)) for s in shard]
             metadata=[m for shard in distributed.all_gather_object([row_metadata(r,cache.get('advantages',[r])[0],distributed.rank) for r in selected]) for m in shard]
             ratio,_=whole_chain_statistics(policy,selected,cache,distributed,metadata)
-            result.append(dict(module=group,probability=ratio,output=probe_summary(samples)))
+            mask=before_probe['mask'][:,None].expand_as(before_probe['mean'])
+            standardized=(probe['mean'].double()-before_probe['mean'].double())/before_probe['actual_std'].double()
+            totals=distributed.all_gather_object(dict(
+                standardized_mean_square_sum=float(standardized.square()[mask].sum()),free_coordinates=int(mask.sum())))
+            after_cpu=immutable_cpu_snapshot(probe)
+            consumption=joint_reference_changes(episodes,consumed,
+                [dict(before=before_cpu,after=after_cpu)],rows_by_id) if episodes else {'status':'unverified'}
+            consumption=distributed.all_gather_object(consumption)
+            result.append(dict(module=group,probability=ratio,output=probe_summary(samples),
+                standardized_mean_delta_rms=math.sqrt(sum(v['standardized_mean_square_sum'] for v in totals)/
+                    sum(v['free_coordinates'] for v in totals)),
+                actual_consumed_reference_by_rank=consumption))
+            if group in ('all','transformer_backbone','qpos_output'):
+                local_call(distributed,lambda:torch.save(dict(before=before_cpu,after=after_cpu),
+                    output/f'{group}_probe_vectors_rank{distributed.rank:02d}.pt'))
+            root_call(distributed,lambda:atomic_json(output/'module_ablation.json',dict(groups=result,
+                complete=False,probe_selection='ordinary_plus_high_KL_and_log_ratio_tails',
+                scope='isolated_actual_same_Adam_delta_on_same_real_rows_nonlinear_effects_not_additive')))
+            if distributed.rank==0:print(json.dumps(dict(ablation=group,joint_kl=ratio['joint_kl_mean'])),flush=True)
         root_call(distributed,lambda:atomic_json(output/'module_ablation.json',dict(groups=result,
+            complete=True,probe_selection='ordinary_plus_high_KL_and_log_ratio_tails',
+            sensitive_layers=[int(r['module'].rsplit('_',1)[1]) for r in
+                sorted((r for r in result if r['module'].startswith('transformer_') and
+                    r['module']!='transformer_backbone'),key=lambda r:r['probability']['joint_kl_mean'],reverse=True)[:2]],
             scope='isolated_actual_same_Adam_delta_on_same_real_rows_nonlinear_effects_not_additive')))
     finally:policy.actor.load_state_dict(after)
 
@@ -146,6 +191,8 @@ def main():
     parser.add_argument('--no-backtracking',action='store_true')
     parser.add_argument('--coordinates',action='store_true')
     parser.add_argument('--module-ablation',action='store_true')
+    parser.add_argument('--layer-ablation',action='store_true',
+        help='同一次真实Adam增量隔离16层及主干/输出头，覆盖普通和尾部探针并关联实际中心参考')
     parser.add_argument('--export-actor',action='store_true')
     parser.add_argument('--allow-measured-profile-transfer',action='store_true',
         help='显式将旧采集延迟样本池迁移到当前物理评估池；保留来源，必须新鲜配对PhysX评估，不允许训练恢复')
@@ -171,7 +218,11 @@ def main():
         header=json.loads((args.case/'case.json').read_text())
         if file_sha256(args.case/'learning_state.pt')!=header['learning_state_sha256']:raise ValueError('Behavior learning state SHA mismatch')
         learning=torch.load(args.case/'learning_state.pt',map_location='cpu',weights_only=False,mmap=True)
+        if any(not torch.equal(value.detach().cpu(),learning['actor'][name]) for name,value in actor.state_dict().items()):
+            raise ValueError('Fixed-data candidate must start from the unchanged original Stage1 Actor')
         actor.load_state_dict(learning['actor'])
+        if file_sha256(args.case/f'rank{rank:02d}'/'manifest.json')!=header['ranks'][rank]['rollout_manifest_sha256']:
+            raise ValueError('Behavior rollout manifest SHA differs from the case')
         payload=local_call(distributed,lambda:load_rollout(args.case/f'rank{rank:02d}'))
         if payload['kernel']!=policy.kernel_config:raise ValueError('Actual sampling kernel differs from immutable real data')
         if learning['actor_optimizer']['state']:raise ValueError('This experiment requires the audited empty behavior Adam; no implicit scope-state migration')
@@ -185,7 +236,8 @@ def main():
             frozen_gaussian_replayed=args.scope=='all',case_sha256=file_sha256(args.case/'case.json'))))
         metadata=[m for shard in distributed.all_gather_object([row_metadata(r,cache.get('advantages',[r])[0],rank) for r in eligible]) for m in shard]
         initial=immutable_cpu_snapshot(actor.state_dict());initial_digest=exact_state_digest(initial)
-        optimizer=torch.optim.AdamW(trainable_actor_parameters(actor),lr=args.learning_rate,weight_decay=0.)
+        optimizer_settings=dict(config['stage10']['training'],actor_lr=args.learning_rate)
+        optimizer=make_actor_optimizer(actor,optimizer_settings)
         controller=BCGradientController(**config['stage10']['bc_gradient'])
         # 旧行为采集使用旧BC梯度控制契约；本次候选统一从当前控制器冷启动，禁止伪恢复。
         controller_origin=dict(kind='fresh_current_full_chain_controller',
@@ -220,7 +272,8 @@ def main():
             measured,records=whole()
             change=probe_difference(before,output_probe(policy,eligible[:16],cache,max_chains=16))
             samples=[s for shard in distributed.all_gather_object(change) for s in shard]
-            entry=dict(attempt=len(attempt_history)+1,learning_rate=optimizer.param_groups[0]['lr'],
+            entry=dict(attempt=len(attempt_history)+1,learning_rate=actor_base_lr(optimizer),
+                learning_rates=actor_learning_rates(optimizer),
                 full_rollout=measured,output=probe_summary(samples))
             attempt_history.append(entry)
             root_call(distributed,lambda:atomic_json(args.output_dir/f'attempt_{len(attempt_history):03d}.json',entry))
@@ -230,6 +283,7 @@ def main():
             measured,records=whole()
             entry=dict(minibatch_accepted_adam_step=step['optimizer_step'],final_acceptance_pending=True,
                 learning_rate=step['learning_rate'],full_rollout=measured,
+                learning_rates=step['learning_rates'],
                 parameter_update=step['parameter_update'],gradient_contributions=step['gradient_contributions'],
                 trust_region=step['trust_region'])
             history.append(entry)
@@ -255,7 +309,11 @@ def main():
         # 普通样本加每个rank自身高KL/高ratio尾部，前后始终使用完全相同条件和噪声。
         local_records=records[sum(distributed.all_gather_object(len(eligible))[:rank]):][:len(eligible)]
         stats=from_records(local_records)
-        selected_indices=sorted(set(list(range(min(8,len(eligible))))+
+        ordinary=[]
+        for source in sorted({r.metadata.get('training_task',{}).get('dataset','unknown') for r in eligible}):
+            indices=[i for i,r in enumerate(eligible) if r.metadata.get('training_task',{}).get('dataset','unknown')==source]
+            ordinary.extend(indices[j*len(indices)//3] for j in (1,2))
+        selected_indices=sorted(set(ordinary+
             torch.topk(stats['joint_kl'],min(4,len(eligible))).indices.tolist()+
             torch.topk(stats['joint_log_ratio'],min(4,len(eligible))).indices.tolist()))
         selected=[eligible[i] for i in selected_indices]
@@ -272,7 +330,9 @@ def main():
         probes=[s for shard in distributed.all_gather_object(probe_difference(before_probe,after_probe)) for s in shard]
         root_call(distributed,lambda:atomic_json(args.output_dir/'output_attribution.json',probe_summary(probes)))
         coordinates=coordinate_analysis(policy,eligible,cache,distributed,args.output_dir) if args.coordinates else None
-        if args.module_ablation:module_ablation(policy,eligible,cache,initial,distributed,args.output_dir)
+        if args.module_ablation or args.layer_ablation:
+            module_ablation(policy,eligible,cache,initial,distributed,args.output_dir,
+                selected=selected,layerwise=args.layer_ablation)
         export=root_call(distributed,lambda:export_actor(policy,config,learning,report,acceptance,args.case,args.output_dir,
             allow_measured_profile_transfer=args.allow_measured_profile_transfer)) if args.export_actor else None
         actor.load_state_dict(initial);optimizer.load_state_dict(optimizer_initial);controller.load_state_dict(controller_initial)
@@ -280,6 +340,7 @@ def main():
         restored=exact_state_digest(actor.state_dict())==initial_digest
         if not restored:raise AssertionError('Candidate Actor byte restore failed')
         result=dict(status='passed',scope=args.scope,actor_scope=policy.actor_scope,learning_rate=args.learning_rate,
+            actor_lr_multipliers=optimizer_settings.get('actor_lr_multipliers'),
             epochs=args.epochs,source_commit=subprocess.check_output(['git','rev-parse','HEAD'],cwd=ROOT,text=True).strip(),
             case=str(args.case),case_sha256=file_sha256(args.case/'case.json'),zero_update_probability=probability,
             actor=report,final_kl=kl,acceptance=acceptance,importance=final_importance,coordinates=coordinates,

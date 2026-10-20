@@ -9,7 +9,7 @@ import copy
 from types import SimpleNamespace
 import pytest
 import torch
-from gem.closedloop.dppo.actor_backtracking import backtracked_step, uniform_actor_optimizer, check_candidate_kl
+from gem.closedloop.dppo.actor_backtracking import backtracked_step, validate_actor_optimizer, check_candidate_kl
 from gem.closedloop.dppo.actor_step_diagnostics import StepDiagnostics
 from gem.closedloop.dppo.full_batch_actor import joint_score_objective
 from gem.closedloop.dppo.gaussian_probability import gaussian_statistics, chain_statistics, chain_diagnostics
@@ -90,9 +90,9 @@ def test_exception_restores_and_multiple_groups_or_frozen_parameter_rejected():
         backtracked_step(actor,opt,c,evaluate=fail,limits={},distributed=Collective())
     assert equal_state(original,actor.state_dict())
     actor.bias.requires_grad_(False)
-    with pytest.raises(ValueError,match='frozen'):uniform_actor_optimizer(actor,opt)
+    with pytest.raises(ValueError,match='frozen'):validate_actor_optimizer(actor,opt)
     groups=torch.optim.AdamW([{'params':[actor.weight]},{'params':[actor.bias]}])
-    with pytest.raises(ValueError,match='one uniform'):uniform_actor_optimizer(actor,groups)
+    with pytest.raises(ValueError,match='explicit names'):validate_actor_optimizer(actor,groups)
 
 
 def test_joint_score_exact_gradient_without_exp_or_free_coordinate_division():
