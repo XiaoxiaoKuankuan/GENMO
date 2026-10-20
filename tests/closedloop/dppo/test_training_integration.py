@@ -321,7 +321,7 @@ def test_repeated_checkpoint_boundary_publishes_distinct_immutable_files(tmp_pat
     assert json.loads((tmp_path / 'latest.json').read_text())['path'] == published[-1]['path']
 
 
-def test_rollback_restores_nonempty_adam_and_rng_exactly():
+def test_diagnostic_snapshot_stays_immutable_without_rolling_back_learning():
     from gem.closedloop.dppo.gradient_merge import BCGradientController
     from gem.closedloop.dppo.rollback_audit import exact_state_digest
 

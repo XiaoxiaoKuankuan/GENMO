@@ -69,7 +69,7 @@ def test_first_rejection_saves_valid_state_once_and_new_accepted_state_saves_aga
     assert len(calls)==2
 
 
-def test_rollback_checkpoints_share_rolling_retention_preserving_milestones(tmp_path):
+def test_retained_actor_checkpoints_share_rolling_retention_preserving_milestones(tmp_path):
     writer=AsyncCheckpointWriter(tmp_path,keep_last=2);paths=[]
     try:
         for i,reason in enumerate(['iteration_000020','retained_actor_state','periodic','retained_actor_state','periodic+retained_actor_state']):

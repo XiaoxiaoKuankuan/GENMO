@@ -113,6 +113,19 @@ def test_missing_and_rejected_updates_do_not_fabricate_zero_learning_curves():
         checked_scalars({'Loss/ppo': float('nan')})
 
 
+def test_zero_actor_round_reports_real_compute_and_next_lr_without_fake_loss():
+    record=training_record()
+    record['mode']='no_actor_update'
+    record['actor']=dict(steps=[],optimizer_steps=0,attempted_optimizer_steps=3,
+        lr_control=dict(next_base_lr=2e-7,utilization=0.),
+        rejected_step=dict(backtracking=dict(backtracks=2)))
+    values=training_scalars(record)
+    assert values['Policy/accepted_steps']==0 and values['Policy/optimizer_attempts']==3
+    assert values['Policy/backtracks']==2 and values['Policy/next_base_lr']==2e-7
+    assert values['Reward/total_per_second']==pytest.approx(9.1)
+    assert 'Loss/ppo' not in values and 'Policy/learning_rate' not in values
+
+
 def test_validation_rms_and_paired_gain_keep_failure_and_motion_meaning():
     baseline = evaluation_report()
     current = evaluation_report(1, gain=.25, error=.04, activity=.8)
