@@ -151,5 +151,13 @@ def test_real_replay_seal_preserves_failure_and_counts_extra_attempts(tmp_path, 
         assert len(snapshot.episode_ids) == 2
         assert tool.complete_collection(run, args, {"sha256": "reviewed_tool"})
         assert calls == ["extra_fail", "extra_ok"]
+        # 接续索引不允许坏数组流入训练：生产读取始终再次校验完整二进制。
+        episode_path = root/"replay"/"episodes"/snapshot.episode_ids[0]
+        array_path = next(episode_path.glob("*.npy"))
+        data = bytearray(array_path.read_bytes())
+        data[-1] ^= 1
+        array_path.write_bytes(data)
+        with pytest.raises(ValueError, match="checksum"):
+            replay.read(snapshot.episode_ids[0], training=True)
     finally:
         replay.close()

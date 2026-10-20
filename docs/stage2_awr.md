@@ -172,7 +172,9 @@ bash tools/run_stage2_awr_server2.sh complete-collection \
 不能充当Actor样本。已预留但中断的任务也占额外尝试上限，防止恢复时无限重试；
 预算用尽仍不足会保存`exhausted.json`并停止，不能自动扩额。
 
-达到目标后重新执行生产Replay的SHA/时间/MC/隔离校验，保存失败快照摘要、完整
+原采集已完整验证并写入SQLite的数据按不可变摘要接续，新增分片仍执行原生产Replay的
+SHA/时间/MC/隔离校验；封存复核全部manifest，Actor训练读取再次核验全部数组。
+达到目标后保存失败快照摘要、完整
 尝试账本、授权与精确快照，发布`*_collection_amendment`和`*_replay`阶段产物。
 此后原`resume`可继续Critic/Actor；已经开始价值拟合或Actor更新的数据不得替换。
 报告同时列原任务数、额外尝试数、失败数和有效Episode数，不将补采后的512冒称只有

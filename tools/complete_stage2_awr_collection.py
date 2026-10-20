@@ -9,8 +9,9 @@
 
 工具可归档在运行acceptance目录，显式导入原运行提交的独立GENMO工作树；不替换
 正在运行的源码，不关闭源码身份检查。必须等原采集进程退出、八卡空闲后启动。
-最终使用原Replay校验器重新核验所有分片，发布精确数量的快照及采集修订报告，
-之后可在同进程继续原五阶段实现；正常resume也可读取此已审计的阶段产物。
+原采集已逐条校验入索引的数据按不可变摘要接续，新分片仍经过原Replay完整校验；
+训练读取会再次核验所有数组SHA。发布精确数量的快照及采集修订报告后，可在同
+进程继续原五阶段实现；正常resume也可读取此已审计的阶段产物。
 """
 from __future__ import annotations
 
@@ -80,6 +81,30 @@ def receipts(root, macro):
     return values
 
 
+def register_new_publications(run, macro):
+    """接续已验证SQLite索引；新增/孤立分片走完整生产校验，不重复反序列化旧数组。"""
+    from gem.closedloop.awr.io import atomic_json, read_tree
+    root = run.root
+    for folder in (root/"replay"/"episodes").glob("*"):
+        path = root/"replay"/"publications"/(folder.name+".json")
+        if folder.is_dir() and not folder.name.startswith(".") and not path.exists():
+            tree = read_tree(folder)
+            manifest = json.loads((folder/"manifest.json").read_text())
+            atomic_json(path, dict(episode_id=folder.name, sha256=manifest["sha256"],
+                task_id=tree["task"]["task_id"], macro=tree["task"]["macro_iteration"],
+                published_unix_ns=folder.stat().st_mtime_ns))
+    known = dict(run.replay.db.execute("SELECT id,sha FROM episodes"))
+    current = receipts(root, macro)
+    for value in sorted(current, key=lambda v: (v["published_unix_ns"], v["episode_id"])):
+        existing = known.get(value["episode_id"])
+        if existing is not None:
+            if existing != value["sha256"]:
+                raise ValueError("Validated index and publication identities differ")
+        else:
+            run.replay.register(value)
+    return sorted(v["task_id"] for v in current)
+
+
 def immutable_json(path, value):
     from gem.closedloop.awr.io import atomic_json
     if path.exists():
@@ -139,7 +164,7 @@ def complete_collection(run, args, tool_identity):
         run.actor.load_state_dict(previous["payload"]["actor"])
     fingerprint = d.assert_models_equal(run.actor)
     # 中断可能发生在数组原子发布与回执之间，先恢复回执再决定数量，避免超采。
-    d.root(lambda: run._recover_publications(macro))
+    d.root(lambda: register_new_publications(run, macro))
 
     def plan_or_create():
         path = folder/"plan.json"
@@ -221,8 +246,8 @@ def complete_collection(run, args, tool_identity):
         return False
 
     def seal():
-        # 原生产路径重新验证每条Episode的SHA、连续性、完整MC、资产与留出隔离。
-        completed = run._recover_publications(macro)
+        # 原采集已验证的索引继续有效；新分片仍执行生产SHA/连续性/MC/留出检查。
+        completed = register_new_publications(run, macro)
         current = receipts(run.root, macro)
         outcomes = read_outcomes(run.root, macro)
         original_outcomes = initial_coverage(original, outcomes, set(completed))
@@ -244,6 +269,9 @@ def complete_collection(run, args, tool_identity):
             if value["task_id"] not in by_task or not by_task[value["task_id"]]["complete"]:
                 raise ValueError("Complete Episode has no authoritative successful publication outcome")
             manifest = json.loads((run.root/"replay"/"episodes"/value["episode_id"]/"manifest.json").read_text())
+            if (manifest["sha256"] != value["sha256"]
+                    or sha({k: v for k, v in manifest.items() if k != "sha256"}) != manifest["sha256"]):
+                raise ValueError("Indexed manifest changed after original collection validation")
             rows = manifest["tree"]["rows"]
             if (rows[0]["identity"]["actor_fingerprint"] != fingerprint
                     or rows[0]["identity"]["policy_version"] != macro):
@@ -285,6 +313,8 @@ def complete_collection(run, args, tool_identity):
             complete_episode_initialization_seconds=initialization_controls/50.,
             failed_warmup_seconds=sum(v["executed_seconds"] for v in failure_evidence),
             initialization_and_failed_warmup_are_not_actor_mc_labels=True,
+            validation="previously_verified_index_plus_full_new_episode_validation_and_manifest_recheck",
+            training_read_requires_full_array_sha_verification=True,
             unused_or_interrupted_reservations=sorted(set(reserved)-set(by_task)),
             full_outcomes=outcomes, replay_snapshot=snapshot.to_dict(),
             current_invocation_seconds=time.perf_counter()-started,
