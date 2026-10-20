@@ -1,20 +1,8 @@
-"""当前参考时间轴的合法bootstrap和再规划边界。
+"""保留旧导入位置，实际实现位于算法公共层。
 
-严格保留最小前缀、GMT十控制步前瞻、插值右点和差分支持。只根据真实参考覆盖
-计算合法栅格；旧按环境配额等待、drain和向末条转移追加奖励的实现已经删除。
+PPO与AWR共享同一vector_boundary模块对象，不复制奖励或物理实现；既有测试的模块级补丁
+也作用于唯一实现。此兼容导出不增加AWR分支或改变原数据契约。
 """
-from .env_adapter import ExecutionIntegrityError
-
-FRAGMENT_CONTRACT='available_reference_fragment_boundary.v3'
-
-
-def fragment_reference_boundary(snapshot, *, minimum_prefix=12):
-    """返回同时支持最小前缀、GMT十控制步前瞻及差分的最后0.5秒决策点。"""
-    source=int(snapshot['source_end_tick'])
-    valid=int(snapshot['reference_valid_end_tick'])
-    latest_deadline=((min(valid,source-12)-120)//12)*12
-    latest_prefix=source-(minimum_prefix-1)*20
-    boundary=(min(latest_deadline,latest_prefix)//300)*300
-    if boundary<int(snapshot['tick']):
-        raise ExecutionIntegrityError('Completed GPU fragment has no causal bootstrap reference')
-    return boundary
+import sys
+from gem.closedloop.common import vector_boundary as _implementation
+sys.modules[__name__] = _implementation

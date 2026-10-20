@@ -1,0 +1,280 @@
+"""配对示范活动度监督，以及显式训练reset所需的已核验完整运动。
+
+本模块从 ``stage9.bc_data_root`` 的清单读取当前音乐严格对应的 BUMI 动作，默认仅
+接受 train；第十步可以显式选择 val/test 作只读评价，并以 music_start_frame 同时
+移动音乐与示范起点。完整源文件先核验再切片，裁剪不改清单身份或 Actor 条件。
+核对清单行、音乐身份、动作来源 SHA、元数据和关节名称，再把 30 Hz 示范关节角按时间
+线性插值到 50 Hz 区间端点，用每个真实控制区间的后向位置差计算 rad/s 速度。奖励只
+读取与实际执行窗口相同的最近 0.5 秒速度 RMS；reset 后尚不足半秒时双方使用已经
+执行的相同数量区间，明确标记窗口未满。源第零帧作为第一个区间左端点，不伪造零速度。
+
+音乐任务长度采用已有 N/30 秒约定；最后源姿态位于 (N-1)/30 秒，因此最后不足一帧的
+任务尾部显式保持末帧，不外推未知动作，并记录 terminal_hold_interval_count。越过
+音乐末尾、时间不在 50 Hz 网格、动作缺失或身份不符均报错，不以 GENMO 生成参考代替。
+
+``source_motion_sha256`` 是转换前原始动作的身份，按原 reader 规则与 motion payload
+核对；它不是 motion.pt 文件哈希。本模块另记录实际读取的 motion_file_sha256，明确
+区分来源声明核验和当前内容身份，不冒称重新打开了不在数据包中的原始动作文件。所有
+张量只在 CPU 读取；本模块不加载网络、不运行 FK/GPU，也不修改音乐采样器条件字段。
+
+默认接口只返回活动度目标，不把示范轨迹加入Actor/Critic条件。普通Actor训练可显式
+指定return_motion=True，额外获得完整qpos的独立副本；val还必须声明motion_phase=critic_mc，
+普通验证和test仍不返回初始化动作。副本用于初始化配对运动状态和真实
+控制预热；此通道拒绝val/test。调用方必须另行执行训练reset契约和后端实际状态核验。
+"""
+from __future__ import annotations
+
+from .asset_cache import ASSET_BYTES
+
+import copy
+import hashlib
+import io
+import json
+import math
+import re
+from collections import OrderedDict
+from numbers import Integral
+from pathlib import Path
+
+import numpy as np
+import torch
+
+from gem.closedloop.contracts import GMT_EXPECTED_JOINT_ORDER
+from gem.closedloop.dppo.music_tasks import SOURCES
+
+
+_SHA256 = re.compile(r"^[0-9a-f]{64}$")
+_TIMEBASE_HZ = 600
+_MOTION_TICKS = 20
+_CONTROL_TICKS = 12
+ACTIVITY_VERSION = "genmo.closedloop.paired_activity.linear_interval_rms.v1"
+
+# 每个已核验清单按内容身份建立索引，避免每个环境 reset 再解码/扫描全部行。
+# 缓存最多 12 个清单；重复 sample_id 保留全部行，不能用字典覆盖掩盖歧义。
+_MANIFEST_INDEX = OrderedDict()
+
+
+def _manifest_matches(path, payload, sha, sample_id):
+    key = (str(path), sha)
+    index = _MANIFEST_INDEX.pop(key, None)
+    if index is None:
+        index = {}
+        for line in payload.decode().splitlines():
+            if line.strip():
+                row = json.loads(line)
+                index.setdefault(row.get('sample_id'), []).append(row)
+        # 同一路径的新内容淘汰旧版本，不保留无用历史。
+        for previous in list(_MANIFEST_INDEX):
+            if previous[0] == key[0]: del _MANIFEST_INDEX[previous]
+        while len(_MANIFEST_INDEX) >= 12: _MANIFEST_INDEX.popitem(last=False)
+    _MANIFEST_INDEX[key] = index
+    return index.get(sample_id, ())
+
+
+def _sha(value, field):
+    if not isinstance(value, str) or _SHA256.fullmatch(value) is None:
+        raise ValueError(f"paired activity {field} must be a lowercase SHA256")
+    return value
+
+
+def _path(root, value, field):
+    if not isinstance(value, str) or not value or Path(value).is_absolute():
+        raise ValueError(f"paired activity {field} must be a relative path")
+    path = (root / value).resolve()
+    if not path.is_relative_to(root):
+        raise ValueError(f"paired activity {field} escapes dataset root")
+    if not path.is_file():
+        raise FileNotFoundError(f"paired activity missing {field}: {path}")
+    return path
+
+
+class PairedActivityTarget:
+    """在指定控制区间结束 tick 返回同窗口的配对示范关节速度 RMS。"""
+
+    def __init__(self, joint_positions, *, joint_names, source, music_start_tick=600,
+                 window_s=0.5, dt=0.02):
+        if isinstance(music_start_tick, bool) or not isinstance(music_start_tick, Integral) or music_start_tick < 0:
+            raise ValueError("paired activity music_start_tick must be a nonnegative integer")
+        if not math.isfinite(float(dt)) or not math.isclose(float(dt), .02, rel_tol=0, abs_tol=1e-12):
+            raise ValueError("paired activity requires 50 Hz dt=0.02")
+        if not math.isfinite(float(window_s)) or float(window_s) <= 0:
+            raise ValueError("paired activity window_s must be positive and finite")
+        steps = float(window_s) / float(dt)
+        if round(steps) < 1 or not math.isclose(steps, round(steps), rel_tol=0, abs_tol=1e-9):
+            raise ValueError("paired activity window must contain whole 50 Hz intervals")
+        names = tuple(joint_names)
+        expected = tuple(GMT_EXPECTED_JOINT_ORDER)
+        if len(names) != len(expected) or len(set(names)) != len(expected) or set(names) != set(expected):
+            raise ValueError("paired activity requires the exact 21 BUMI/GMT joint names")
+        positions = np.asarray(joint_positions, dtype=np.float64)
+        if positions.ndim != 2 or positions.shape[1] != 21 or len(positions) < 2 or not np.isfinite(positions).all():
+            raise ValueError("paired activity joint positions must be finite [T>=2,21] rad")
+        if not isinstance(source, dict) or not source:
+            raise ValueError("paired activity source provenance must be provided")
+        self.music_start_tick = int(music_start_tick)
+        self.window_steps = int(round(steps))
+        self.dt = float(dt)
+        self.num_frames = len(positions)
+        self._positions = positions[:, [names.index(name) for name in expected]].copy()
+        self._positions.setflags(write=False)
+        self._velocity_begin = self._velocity_end = 0
+        self._velocity = None
+        self.source = copy.deepcopy(source)
+        self.source.update({"activity_version": ACTIVITY_VERSION, "source_joint_order": list(names),
+                            "joint_order": list(expected), "position_unit": "rad", "velocity_unit": "rad/s",
+                            "source_fps": 30, "control_fps": 50, "timebase_hz": _TIMEBASE_HZ,
+                            "music_start_tick": self.music_start_tick, "source_num_frames": self.num_frames,
+                            "window_s": float(window_s), "dt": self.dt,
+                            "velocity_operator": "linear_q_at_50hz_endpoints_then_backward_interval_difference",
+                            "tail_policy": "hold_last_source_pose_until_music_duration_N_over_30",
+                            "supervision_scope": "reward_only"})
+
+    def _interpolate(self, elapsed_ticks):
+        sample = np.asarray(elapsed_ticks, dtype=np.float64) / _MOTION_TICKS
+        left = np.minimum(np.floor(sample).astype(np.int64), self.num_frames - 1)
+        right = np.minimum(left + 1, self.num_frames - 1)
+        weight = np.clip(sample - left, 0, 1)[:, None]
+        return self._positions[left] * (1 - weight) + self._positions[right] * weight
+
+    def _window_velocity(self, end, count):
+        """按最多 512 个新区间复用相邻端点，窗口 RMS 仍沿用原逐元素归约。
+
+        end 是已完成的控制区间数；缓存包含原样插值、后向差分的结果，既不使用
+        改变求和顺序的前缀和，也不外推任务尾部。乱序读取可重建有界缓存。
+        """
+        begin = end-count
+        if self._velocity is None or begin < self._velocity_begin or end > self._velocity_end:
+            self._velocity_begin = begin
+            self._velocity_end = min(max(end, begin+512), self.num_frames*_MOTION_TICKS//_CONTROL_TICKS)
+            endpoints = np.arange(begin, self._velocity_end+1, dtype=np.int64)*_CONTROL_TICKS
+            self._velocity = np.diff(self._interpolate(endpoints), axis=0)/self.dt
+            self._velocity.setflags(write=False)
+        return self._velocity[begin-self._velocity_begin:end-self._velocity_begin]
+
+    def __call__(self, tick):
+        if isinstance(tick, bool) or not isinstance(tick, Integral):
+            raise ValueError("paired activity tick must be an integer")
+        elapsed = int(tick) - self.music_start_tick
+        if elapsed <= 0 or elapsed % _CONTROL_TICKS:
+            raise ValueError("paired activity requires a positive completed 50 Hz control interval")
+        if elapsed > (self.num_frames * _MOTION_TICKS // _CONTROL_TICKS) * _CONTROL_TICKS:
+            raise ValueError("paired activity tick exceeds paired music duration")
+        count = min(elapsed // _CONTROL_TICKS, self.window_steps)
+        endpoints = np.arange(elapsed - count * _CONTROL_TICKS, elapsed + 1, _CONTROL_TICKS, dtype=np.int64)
+        velocity = self._window_velocity(elapsed//_CONTROL_TICKS, count)
+        joint_rms = np.sqrt(np.mean(velocity ** 2, axis=0))
+        return {"valid": True, "activity_rad_s": float(np.sqrt(np.mean(velocity ** 2))),
+                "per_joint_rms_rad_s": joint_rms.tolist(), "window_count": int(count),
+                "window_complete": count == self.window_steps,
+                "window_begin_tick": self.music_start_tick + int(endpoints[0]), "window_end_tick": int(tick),
+                "window_duration_s": count * self.dt,
+                "terminal_hold_interval_count": int(np.sum(endpoints[1:] > (self.num_frames - 1) * _MOTION_TICKS)),
+                "source": copy.deepcopy(self.source)}
+
+
+def load_paired_activity(data_root, sample, *, music_start_tick=600, window_s=0.5, dt=0.02,
+                         split="train", music_start_frame=0, return_motion=False, motion_phase="train"):
+    """严格加载指定划分对应动作；旧调用默认 train，偏移仅作用于核验后的源数组。"""
+    root = Path(data_root).expanduser().resolve()
+    if not isinstance(sample, dict) or not isinstance(sample.get("row"), dict):
+        raise ValueError("paired activity requires a selected train music sample")
+    folder, row = sample.get("dataset"), sample["row"]
+    if not isinstance(row.get("sample_id"), str) or not row["sample_id"] or not isinstance(sample.get("group_id"), str) or not sample["group_id"]:
+        raise ValueError("paired activity requires explicit sample and music group identities")
+    if not isinstance(folder, str) or folder not in SOURCES:
+        raise ValueError("paired activity dataset must name one of the four training sources")
+    if split not in ("train", "val", "test"):
+        raise ValueError("paired activity split must be train, val or test")
+    # 本地选取数据通过这四个明确的目录 symlink 复用既有数据；解析后的目录是文件边界。
+    source_root = (root / folder).resolve()
+    manifest_path = _path(source_root, f"manifests/{split}.jsonl", f"{split} manifest")
+    manifest_bytes, manifest_sha = ASSET_BYTES.read(manifest_path)
+    if manifest_sha != _sha(sample.get("manifest_sha256"), "manifest_sha256"):
+        raise ValueError("paired activity selected train manifest SHA mismatch")
+    matches = _manifest_matches(manifest_path, manifest_bytes, manifest_sha, row.get("sample_id"))
+    if len(matches) != 1 or matches[0] != row or row.get("split") != split or row.get("fps") != 30:
+        raise ValueError(f"paired activity row must exactly match its unique {split} manifest row")
+    return _load_verified_pair(root, sample, manifest_path, manifest_sha, split=split,
+        music_start_tick=music_start_tick, window_s=window_s, dt=dt, music_start_frame=music_start_frame,
+        return_motion=return_motion, motion_phase=motion_phase)
+
+
+def _load_verified_pair(root, sample, manifest_path, manifest_sha, *, split,
+                        music_start_tick=600, window_s=0.5, dt=0.02, music_start_frame=0, return_motion=False, motion_phase="train"):
+    """共享文件核验核心；调用方必须已完整核验所属清单及唯一行，避免全量审计重复解析。"""
+    folder, row = sample["dataset"], sample["row"]
+    source_root = (root / folder).resolve()
+    if row.get("split") != split or row.get("fps") != 30:
+        raise ValueError("paired activity verified row split/fps mismatch")
+    if isinstance(row.get("num_frames"), bool) or not isinstance(row.get("num_frames"), Integral) or row["num_frames"] < 2:
+        raise ValueError("paired activity requires at least two aligned source frames")
+    if row.get("quality_accepted") is not True:
+        raise ValueError("paired activity requires an accepted training motion")
+    if row.get("resplit_provenance", {}).get("group_id") != sample.get("group_id"):
+        raise ValueError("paired activity music group identity mismatch")
+    for name in ("source_motion_sha256", "source_music_feature_sha256", "source_audio_sha256"):
+        _sha(row.get(name), name)
+    music_path = _path(source_root, row.get("music_feature_path"), "music_feature_path")
+    if ASSET_BYTES.read(music_path)[1] != row["source_music_feature_sha256"]:
+        raise ValueError("paired activity music feature SHA mismatch")
+    info_path = _path(source_root, "meta/dataset_info.json", "dataset_info")
+    info_bytes, _ = ASSET_BYTES.read(info_path)
+    info = json.loads(info_bytes)
+    expected = {"contract_version": "genmo.bumi_music.v1", "fps": 30, "robot_name": "bumi",
+                "qpos_order": "mujoco_native", "quaternion_convention": "wxyz"}
+    for key, value in {**expected, "qpos_dim": 28, "joint_dim": 21, "quality_filter_applied": True}.items():
+        if info.get(key) != value:
+            raise ValueError(f"paired activity dataset metadata mismatch: {key}")
+    if row.get("dataset") != info.get("dataset_name"):
+        raise ValueError("paired activity dataset name differs from manifest")
+    motion_path = _path(source_root, row.get("motion_path"), "motion_path")
+    motion_bytes, motion_file_sha = ASSET_BYTES.read(motion_path)
+    if sample.get("motion_file_sha256") is not None and motion_file_sha != _sha(sample["motion_file_sha256"], "motion_file_sha256"):
+        raise ValueError("paired activity motion file changed after full dataset audit")
+    payload = torch.load(io.BytesIO(motion_bytes), map_location="cpu", weights_only=False)
+    if not isinstance(payload, dict):
+        raise ValueError("paired activity motion payload must be a dictionary")
+    for key, value in expected.items():
+        if payload.get(key) != value:
+            raise ValueError(f"paired activity motion metadata mismatch: {key}")
+    for key in ("source_mjcf_sha256", "quality_config_sha256", "retarget_config_sha256"):
+        if payload.get(key) != _sha(info.get(key), key):
+            raise ValueError(f"paired activity source metadata SHA mismatch: {key}")
+    if payload.get("source_motion_sha256") != row["source_motion_sha256"]:
+        raise ValueError("paired activity source_motion_sha256 mismatch")
+    if payload.get("source_sample_id") != row["sample_id"] or payload.get("quality_accepted") is not True:
+        raise ValueError("paired activity payload sample identity or quality mismatch")
+    if payload.get("joint_names") != info.get("joint_names"):
+        raise ValueError("paired activity payload joint order differs from dataset metadata")
+    for key in ("ground_semantics", "root_z_adjusted"):
+        if key not in info or payload.get(key) != info[key]:
+            raise ValueError(f"paired activity source metadata mismatch: {key}")
+    if "qpos" not in payload:
+        raise ValueError("paired activity motion payload has no qpos")
+    qpos = torch.as_tensor(payload["qpos"]).detach().cpu().numpy()
+    if qpos.ndim != 2 or qpos.shape[1] != 28 or len(qpos) != row.get("num_frames") or not np.isfinite(qpos).all():
+        raise ValueError("paired activity qpos shape, frame alignment or finite-value validation failed")
+    if np.max(np.abs(np.linalg.norm(qpos[:, 3:7], axis=1) - 1)) > 1e-3:
+        raise ValueError("paired activity root quaternion is not normalized")
+    if (isinstance(music_start_frame, bool) or not isinstance(music_start_frame, Integral)
+            or not 0 <= music_start_frame <= len(qpos) - 2):
+        raise ValueError("paired activity music_start_frame must leave at least two source frames")
+    provenance = {"dataset": folder, "sample_id": row["sample_id"], "group_id": sample["group_id"],
+                  "split": split, "data_root": str(root), "resolved_source_root": str(source_root),
+                  "manifest_path": str(manifest_path),
+                  "manifest_sha256": manifest_sha, "motion_path": str(motion_path),
+                  "motion_file_sha256": motion_file_sha,
+                  "source_motion_sha256": row["source_motion_sha256"],
+                  "source_motion_sha_validation": f"payload_equals_verified_{split}_manifest_declaration",
+                  "source_music_feature_sha256": row["source_music_feature_sha256"],
+                  "source_audio_sha256": row["source_audio_sha256"],
+                  "dataset_info_sha256": hashlib.sha256(info_bytes).hexdigest(),
+                  "music_start_frame": int(music_start_frame), "full_source_num_frames": len(qpos),
+                  "music_offset_seconds": int(music_start_frame) / 30.}
+    target = PairedActivityTarget(qpos[int(music_start_frame):, 7:], joint_names=payload["joint_names"], source=provenance,
+                                 music_start_tick=music_start_tick, window_s=window_s, dt=dt)
+    if return_motion:
+        if not (motion_phase=='train' and split=='train' or motion_phase=='critic_mc' and split in ('train','val')):
+            raise ValueError('Paired motion requires train data or explicit train/val Critic MC phase')
+        return target, np.array(qpos, dtype=np.float64, copy=True)
+    return target

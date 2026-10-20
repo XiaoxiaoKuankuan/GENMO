@@ -284,9 +284,38 @@ class Stage1Actor(nn.Module):
 
     def training_forward(self, batch, timesteps=None, noise=None):
         validate_stage1_training_batch(batch, history_steps=self.history_steps)
-        adapted = self.adapt_conditions(batch)
-        valid = batch["target_qpos30_valid"]
-        physical = torch.where(valid, batch["target_qpos30"], 0.0).to(adapted["known_x"])
+        return self.denoising_forward(
+            batch, batch["target_qpos30"], batch["target_qpos30_valid"],
+            timesteps=timesteps, noise=noise, music_dropout=True,
+        )
+
+    def denoising_forward(
+        self, conditions, target_qpos30, target_valid, *,
+        timesteps=None, noise=None, music_dropout=False,
+    ):
+        """共享x0监督内核；AWR仅传原始条件与表示目标，不伪造Contact/ground标签。
+
+        Stage1入口仍先执行原完整监督校验，并显式开启原音乐Dropout。AWR默认保留
+        采集条件。此处只前向一个训练扩散时间，不调用DDIM采样或策略概率计算。
+        """
+        adapted = self.adapt_conditions(conditions)
+        valid = target_valid
+        if valid.dtype != torch.bool or valid.shape != adapted["known_x"].shape:
+            raise ValueError("Denoising target validity must be bool [B,T,30]")
+        if target_qpos30.shape != valid.shape or target_qpos30.device != valid.device:
+            raise ValueError("Denoising target shape/device mismatch")
+        if valid.device != adapted["known_x"].device or not torch.isfinite(target_qpos30).all():
+            raise ValueError("Denoising target must be finite on the condition device")
+        if (valid & ~adapted["future_valid"][..., None]).any():
+            raise ValueError("Padding cannot be a valid denoising target")
+        if (adapted["known_mask"] & ~valid).any():
+            raise ValueError("Known coordinates need a valid target")
+        if not torch.equal(
+            target_qpos30[adapted["known_mask"]],
+            adapted["known_physical"][adapted["known_mask"]],
+        ):
+            raise ValueError("Denoising target changed the known prefix")
+        physical = torch.where(valid, target_qpos30, 0.0).to(adapted["known_x"])
         target_x = torch.where(valid, self.endecoder.normalize(physical), 0.0)
         if timesteps is None:
             timesteps = torch.randint(
@@ -304,7 +333,7 @@ class Stage1Actor(nn.Module):
         xt = torch.where(valid, xt, noise)
         xt = self._constrain(xt, adapted)
         drop_music = torch.zeros(target_x.shape[0], device=target_x.device, dtype=torch.bool)
-        if self.training and self.music_mask_prob:
+        if music_dropout and self.training and self.music_mask_prob:
             drop_music = (
                 torch.rand(target_x.shape[0], device=target_x.device) < self.music_mask_prob
             )
