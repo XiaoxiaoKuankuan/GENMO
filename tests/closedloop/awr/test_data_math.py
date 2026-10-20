@@ -13,6 +13,40 @@ from gem.closedloop.awr.advantages import label_advantages, AdvantageLabelSet
 from gem.closedloop.awr.folds import build_folds, partition_episodes
 
 
+def test_training_projection_preserves_learning_values_and_checks_omitted_evidence(tmp_path, episode_factory):
+    import json
+    import numpy as np
+    _, _, make = episode_factory
+    episode = make()
+    episode.rows[0].metadata["large_physical_diagnostic"] = np.arange(100, dtype=np.uint8)
+    replay = EpisodeReplay(tmp_path / "replay", capacity=2, contract=episode.contract)
+    try:
+        replay.append(episode)
+        full = replay.read(episode.episode_id)
+        view = replay.read(episode.episode_id, training=True)
+        assert view.training_view and "large_physical_diagnostic" not in view.rows[0].metadata
+        assert "large_physical_diagnostic" in full.rows[0].metadata
+        torch.testing.assert_close(view.returns, full.returns, atol=0, rtol=0)
+        for a, b in zip(full.rows, view.rows):
+            torch.testing.assert_close(a.target_qpos30, b.target_qpos30, atol=0, rtol=0)
+            for key in a.context:
+                torch.testing.assert_close(a.context[key], b.context[key], atol=0, rtol=0)
+            for key in a.metadata["critic_context"]:
+                torch.testing.assert_close(a.metadata["critic_context"][key], b.metadata["critic_context"][key], atol=0, rtol=0)
+        with pytest.raises(ValueError, match="projected"):
+            replay.publish(view)
+        with pytest.raises(ValueError, match="projected"):
+            view.to_dict()
+        folder = replay.root / "episodes" / episode.episode_id
+        manifest = json.loads((folder / "manifest.json").read_text())
+        unused = folder / manifest["files"]["|u1"]["file"]
+        data = bytearray(unused.read_bytes()); data[-1] ^= 1; unused.write_bytes(data)
+        with pytest.raises(ValueError, match="checksum"):
+            replay.read(episode.episode_id, training=True)
+    finally:
+        replay.close()
+
+
 def test_variable_mc_fvi_terminal_and_event(episode_factory):
     _, _, make = episode_factory
     episode = make(lengths=(2, 1), rewards=((1., 2.), (-3.,)))

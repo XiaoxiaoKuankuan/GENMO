@@ -149,7 +149,7 @@ def write_tree(path, tree):
             shutil.rmtree(temporary)
 
 
-def read_tree(path, *, verify=True):
+def read_tree(path, *, verify=True, episode_metadata_keys=None):
     path = Path(path)
     manifest = json.loads((path / "manifest.json").read_text())
     if manifest["schema"] not in ("genmo.awr.array_tree.v1", "genmo.awr.array_tree.v2"):
@@ -195,7 +195,14 @@ def read_tree(path, *, verify=True):
         if isinstance(value, list):
             return [decode(v) for v in value]
         return value
-    return decode(manifest["tree"])
+    tree = manifest["tree"]
+    if episode_metadata_keys is not None:
+        # 完整manifest及所有数组SHA已经验证；只减少训练常驻对象，不删改物理原始分片。
+        if not isinstance(tree, dict) or not isinstance(tree.get("rows"), list):
+            raise ValueError("Episode projection requires an actual complete Episode tree")
+        for row in tree["rows"]:
+            row["metadata"] = {k: v for k, v in row["metadata"].items() if k in episode_metadata_keys}
+    return decode(tree)
 
 
 def cpu_copy(value, memo=None):

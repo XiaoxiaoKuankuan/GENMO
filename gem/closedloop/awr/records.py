@@ -17,6 +17,10 @@ from gem.closedloop.contracts import validate_stage1_condition_batch
 from gem.closedloop.common.tracking_context import validate_tracking_context
 from .io import cpu_copy, digest
 
+TRAINING_METADATA_KEYS = frozenset((
+    "critic_context", "remaining_music_seconds", "data_split", "physical_failure",
+    "event_reward", "event_penalty_total", "physical_episode_administrative_truncation",
+))
 
 @dataclass
 class SamplingResult:
@@ -126,6 +130,7 @@ class AWRCompleteEpisode:
     contract: dict
     task: dict
     returns: torch.Tensor | None = None
+    training_view: bool = False
 
     @property
     def episode_id(self):
@@ -158,6 +163,8 @@ class AWRCompleteEpisode:
         return self
 
     def to_dict(self):
+        if self.training_view:
+            raise ValueError("A projected training view cannot replace complete physical replay evidence")
         return {**{f.name: getattr(self, f.name) for f in fields(self) if f.name != "rows"},
                 "rows": [r.to_dict() for r in self.rows]}
 

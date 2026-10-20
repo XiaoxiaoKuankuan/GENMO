@@ -249,7 +249,7 @@ class AWRRun:
         snapshot = self.collect(macro)
         if snapshot is None:
             return False
-        episodes = self.d.local(lambda: [self.replay.read(key) for key in snapshot.episode_ids])
+        episodes = self.d.local(lambda: [self.replay.read(key, training=True) for key in snapshot.episode_ids])
         prefix = f"macro{macro:03d}"
         exploration_report = self.json_artifact(prefix+"_exploration", lambda: exploration(episodes))
         if exploration_report["insufficient_reference_diversity"]:

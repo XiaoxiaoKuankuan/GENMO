@@ -16,7 +16,7 @@ import time
 
 import torch
 from .io import atomic_json, digest, read_tree, write_tree
-from .records import AWRCompleteEpisode
+from .records import AWRCompleteEpisode, TRAINING_METADATA_KEYS
 from .returns import mc_returns
 
 
@@ -85,6 +85,8 @@ class EpisodeReplay:
         return expected
 
     def publish(self, episode):
+        if episode.training_view:
+            raise ValueError("Never publish a projected training view as full physical evidence")
         self._validate(episode)
         if shutil.disk_usage(self.root).free < self.min_free_bytes:
             raise OSError("Replay disk reserve exhausted")
@@ -100,7 +102,9 @@ class EpisodeReplay:
         manifest = json.loads((path / "manifest.json").read_text())
         if manifest["sha256"] != publication["sha256"]:
             raise ValueError("Published episode identity mismatch")
-        episode = AWRCompleteEpisode.from_dict(read_tree(path))
+        episode = AWRCompleteEpisode.from_dict(read_tree(path, episode_metadata_keys=TRAINING_METADATA_KEYS))
+        if episode.training_view:
+            raise ValueError("Immutable replay must originate from complete physical evidence")
         supplied = episode.returns.clone() if episode.returns is not None else None
         expected = self._validate(episode)
         if supplied is None or not torch.equal(supplied, expected):
@@ -159,7 +163,7 @@ class EpisodeReplay:
             raise ValueError("Snapshot membership/counts no longer match immutable index")
         return snapshot
 
-    def read(self, episode_id):
+    def read(self, episode_id, *, training=False):
         started = time.perf_counter()
         record = self.db.execute("SELECT sha,bytes FROM episodes WHERE id=?", (episode_id,)).fetchone()
         if record is None:
@@ -167,7 +171,11 @@ class EpisodeReplay:
         path = self.root / "episodes" / episode_id
         if json.loads((path / "manifest.json").read_text())["sha256"] != record[0]:
             raise ValueError("Replay index/shard identity mismatch")
-        episode = AWRCompleteEpisode.from_dict(read_tree(path))
+        episode = AWRCompleteEpisode.from_dict(read_tree(path,
+            episode_metadata_keys=TRAINING_METADATA_KEYS if training else None))
+        if episode.training_view:
+            raise ValueError("Immutable replay must originate from complete physical evidence")
+        episode.training_view = bool(training)
         self.metrics["read_seconds"] += time.perf_counter() - started
         self.metrics["read_bytes"] += record[1]
         self.metrics["read_episodes"] += 1
