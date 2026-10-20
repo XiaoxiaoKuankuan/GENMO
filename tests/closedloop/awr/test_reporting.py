@@ -146,3 +146,20 @@ def test_raw_gpu_samples_keep_interrupted_attempt_and_partial_tail(tmp_path):
     assert value["maximum_sample_gap_seconds"] == 3.
     assert value["incomplete_trailing_lines"] == 1
     assert value["sample_counts"]["0"] == 2
+
+
+def test_attempt_costs_preserve_legacy_exit_without_inventing_pid(tmp_path):
+    module = load_tool("report_stage2_awr")
+    root = tmp_path/"pilot"
+    root.mkdir()
+    (tmp_path/"pilot.launch.json").write_text(json.dumps(dict(pid=1, started_unix=0.,
+        command=["bash", "run_stage2_awr_server2.sh", "run", "--run-dir", str(root)])))
+    exit_path = tmp_path/"pilot.exit.json"
+    exit_path.write_text(json.dumps(dict(finished_unix=10., exit_code=1)))
+    original = exit_path.read_bytes()
+    value = module.attempt_costs(root)["attempts"][0]
+    assert value["elapsed_seconds"] == 10. and value["legacy_exit_without_pid"]
+    assert not value["exit_pid_verified"] and exit_path.read_bytes() == original
+    exit_path.write_text(json.dumps(dict(pid=2, finished_unix=10., exit_code=1)))
+    with pytest.raises(ValueError, match="PID differs"):
+        module.attempt_costs(root)

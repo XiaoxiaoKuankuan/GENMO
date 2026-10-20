@@ -36,7 +36,7 @@ def attempt_costs(root, *, now=None):
             raise ValueError("Attempt launch does not bind this exact AWR run directory")
         ending = path.with_name(stem+".exit.json")
         exit_record = json.loads(ending.read_text()) if ending.exists() else None
-        if exit_record is not None and exit_record["pid"] != launch["pid"]:
+        if exit_record is not None and "pid" in exit_record and exit_record["pid"] != launch["pid"]:
             raise ValueError("Attempt exit PID differs from launch")
         end = exit_record["finished_unix"] if exit_record else now
         if end < launch["started_unix"]:
@@ -47,6 +47,8 @@ def attempt_costs(root, *, now=None):
             finished_unix=exit_record["finished_unix"] if exit_record else None,
             exit_code=exit_record["exit_code"] if exit_record else None,
             exit_record_present=exit_record is not None, elapsed_seconds=end-launch["started_unix"],
+            exit_pid_verified=bool(exit_record and exit_record.get("pid") == launch["pid"]),
+            legacy_exit_without_pid=bool(exit_record and "pid" not in exit_record),
             elapsed_is_provisional=exit_record is None, reserved_gpu_count=8 if eight_gpu else None,
             launch_path=str(path), exit_path=str(ending) if exit_record else None))
     completed = [a for a in attempts if a["exit_record_present"]]
