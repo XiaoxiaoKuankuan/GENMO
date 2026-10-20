@@ -93,3 +93,20 @@ Server-2真实s595000＋原Stage1 BC八卡NCCL测试通过：9 AWR／3 BC 的相
 耗时16.73秒，单卡PyTorch峰值显存约1.65–1.73 GiB。原始报告见
 `docs/validation/stage2_awr_distributed_20261020.json`。这是计算验收，物理结果另报。
 小型64集只执行每组32个固定任务；全量54任务放在独立512集首轮最终对照中执行。
+
+## 只读结果汇总与资源统计
+
+```bash
+python3 tools/report_stage2_awr.py --run-dir <运行目录> --output <新的验收JSON路径>
+```
+
+汇总只读取已提交的状态和JSON报告，不需要GPU，不重算评价或选择模型。它保留实际
+运行的源码提交、报告摘要及失败门槛；进行中的阶段不会补写结果。已有输出文件拒绝覆盖。
+新运行在`resources/gpu_<attempt>.jsonl`每秒记录整卡显存与利用率，结束发布同名summary；
+恢复生成新attempt。整卡峰值是离散采样的下界，包含GMT和驱动开销；Actor训练报告
+另给PyTorch allocator峰值及统计范围，二者不混用。
+
+Replay `array_tree.v2`保留物理回执的共享列，兼容旧v1；训练视图只展开必要条件和事件，
+读取前仍核验完整manifest和全部数值数组SHA。完整原始证据未删除，训练视图明确禁止
+回写为完整Episode。单样本的真实无损编码与读取验证见
+`docs/validation/stage2_awr_storage_20261020.json`，其本地读速不代表整轮Server-2吞吐。

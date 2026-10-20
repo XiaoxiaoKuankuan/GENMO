@@ -61,6 +61,7 @@ def main():
     from gem.closedloop.awr.distributed import Distributed
     dist.init_process_group("gloo", timeout=timedelta(hours=2))
     tensor_group = None
+    resource_monitor = None
     try:
         d = Distributed(device=f"cuda:{local}")
         audit = d.root(lambda: preflight(config))
@@ -80,6 +81,9 @@ def main():
         os.environ["LD_LIBRARY_PATH"] = libraries+os.pathsep+os.environ.get("LD_LIBRARY_PATH", "")
         from gem.closedloop.awr.runtime import AWRRun
         run = AWRRun(config, args.run_dir, d, audit, resume=resume)
+        from gem.closedloop.awr.resources import GPUResourceMonitor
+        if rank == 0:
+            resource_monitor = GPUResourceMonitor(args.run_dir).start()
         if args.operation == "evaluate":
             try:
                 run.prepare()
@@ -98,6 +102,8 @@ def main():
                 if run.replay: run.replay.close()
         return run.run()
     finally:
+        if resource_monitor is not None:
+            resource_monitor.close()
         if tensor_group is not None: dist.destroy_process_group(tensor_group)
         dist.destroy_process_group()
 
