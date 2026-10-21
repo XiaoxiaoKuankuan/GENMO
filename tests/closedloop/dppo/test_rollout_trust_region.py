@@ -2,7 +2,7 @@
 
 输入为非空分组Adam状态、小型真实Stage1扩散网络及可控的KL拒绝替身。先核对名义
 LR在新批次重试且组倍率/动量不丢失，再通过真实流式PPO反传与BC验证：额度接近
-上限时保留已接受更新；后续有限KL拒绝只恢复待接受小批次，BC控制器、游标和RNG
+上限但仍有有效步长时继续；后续有限KL拒绝只恢复待接受小批次，BC控制器、游标和RNG
 不能虚增。数值异常仍抛出，不能当作正常额度耗尽。
 
 解析KL替身仅用于覆盖控制分支，不代表真实信任域或物理收益。全部临时通信文件
@@ -65,6 +65,17 @@ def test_minimum_trial_restores_nonempty_adam_and_never_executes_tiny_steps():
     assert equal_state(before, (actor.state_dict(), optimizer.state_dict(), controller.state_dict()))
 
 
+@pytest.mark.parametrize('value', [float('nan'), float('inf')])
+def test_nonfinite_kl_cannot_be_reported_as_normal_rollout_exhaustion(value):
+    actor, optimizer, controller = prepared()
+    before = copy.deepcopy((actor.state_dict(), optimizer.state_dict(), controller.state_dict()))
+    result = backtracked_step(actor, optimizer, controller,
+        evaluate=lambda: dict(chain_joint_kl={'max': value}), limits={'chain_joint_max': 1.},
+        distributed=Collective(), minimum_lr=5e-7, max_attempts=2)
+    assert not result['accepted'] and not result['finite_trust_region_exhausted']
+    assert equal_state(before, (actor.state_dict(), optimizer.state_dict(), controller.state_dict()))
+
+
 class Anchor:
     def __init__(self):
         self.calls = 0
@@ -93,6 +104,9 @@ def test_real_streamed_update_keeps_accepted_steps_and_restores_discarded_BC(tmp
                                   lr=1e-6, weight_decay=0.)
     anchor = Anchor()
     controller = BCGradientController()
+    # 近额度用例只隔离“额度比例是否误触发停止”，小网络用自身的可测安全步长，
+    # 避免真实PPO裁剪饱和抢先触发另一条已独立覆盖的停止分支。
+    nominal = 1e-8 if boundary == 'near_budget' else 1e-6
     manifest = [dict(owner_rank=0, local_index=i, valid=True, has_free=True) for i in range(len(rows))]
     saved_noise = torch.get_rng_state().clone()
     original = actor_backtracking.backtracked_step
@@ -126,27 +140,29 @@ def test_real_streamed_update_keeps_accepted_steps_and_restores_discarded_BC(tmp
         call = lambda: updater.actor_update(policy, optimizer, rows, targets, cache, manifest, controller,
             distributed=DistributedCollectives(0, 1), anchor=anchor, generator=torch.Generator().manual_seed(5),
             minibatch_chains=1, microbatch=3, bc_samples_per_rollout=4, detailed_diagnostics=True,
-            soft_kl=1e6, trust_region=dict(maximum_lr=1e-6, growth=1.25, margin=.8,
-                max_attempts=2, minimum_trial_lr_ratio=.0625, stop_budget_fraction=.95),
+            soft_kl=1e6, trust_region=dict(maximum_lr=nominal, growth=1.25, margin=.8,
+                max_attempts=2, minimum_trial_lr_ratio=.0625),
             kl_limits={f'chain_joint_{k}': 1e6 for k in ('mean', 'p95', 'p99', 'max')})
         if boundary == 'numerical':
             with pytest.raises(FloatingPointError, match='whole iteration rollback'):
                 call()
             return
         report = call()
-        assert report['optimizer_steps'] == 1 and report['skipped_optimizer_steps'] == len(rows)-1
-        assert report['early_stop_reason'] == ('rollout_kl_budget_nearly_exhausted' if boundary == 'near_budget'
+        expected_steps = len(rows) if boundary == 'near_budget' else 1
+        assert report['optimizer_steps'] == expected_steps
+        assert report['skipped_optimizer_steps'] == len(rows)-expected_steps
+        assert report['early_stop_reason'] == (None if boundary == 'near_budget'
                                                 else 'rollout_no_useful_trust_region_step')
         assert report['steps'][0]['parameter_update']['gradient_projection_measured']
         assert equal_state((policy.actor.state_dict(), optimizer.state_dict()['state'], anchor.state_dict(),
                             controller.state_dict(), torch.get_rng_state()), accepted)
-        assert anchor.calls == controller.updates == 1
-        assert all(float(state['step']) == 1 for state in optimizer.state.values())
+        assert anchor.calls == controller.updates == expected_steps
+        assert all(float(state['step']) == expected_steps for state in optimizer.state.values())
         assert report['executed_optimizer_steps'] == sum(attempt_counts)
         if boundary == 'finite_rejected':
             assert attempt_counts[-1] == 2
             assert report['rejected_step_candidates'] == sum(attempt_counts)-1
-        assert actor_base_lr(optimizer) == pytest.approx(1e-6)
+        assert actor_base_lr(optimizer) == pytest.approx(nominal)
         assert policy.assert_frozen_identity()['checked']
     finally:
         cache.close()

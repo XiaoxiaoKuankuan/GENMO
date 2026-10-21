@@ -324,7 +324,6 @@ stage10:
       # 本批候选低于名义LR的1/16时结束剩余更新，不截断或强行接受概率比。
       minimum_trial_lr_ratio: 0.0625
       # 已接受更新用到候选联合KL额度95%时转入下一批；完整rollout最终KL仍检查。
-      stop_budget_fraction: 0.95
     bc_prefix:
       max_frames: 30
       min_frames: 6

@@ -5,7 +5,7 @@
 全局实际链数是唯一分母；PPO/BC梯度SUM后统一裁剪，不额外平均四步或world size。
 
 每个minibatch记录真实参数、同噪声最终输出及联合概率变化，链KL或裁剪饱和可
-提前停止。新rollout从名义LR试探，接近本批KL额度或剩余试探步长过小时保留此前
+提前停止。新rollout从名义LR试探，剩余试探步长过小时保留此前
 接受更新并结束剩余小批次；丢弃步骤的BC游标、控制器与RNG同时恢复。最后仍将
 优化器LR恢复为名义值，Adam动量不清零。所有旧rollout链的四步KL仍须通过；Actor/Critic/Adam/BC/RNG回滚由
 training统一管理。BC设置每步全局样本下限，监控实际样本量及成本。保持Critic
@@ -207,8 +207,8 @@ def _actor_update(policy,optimizer,rows,targets,cache,manifest,controller,*,dist
                 usage=max(post['chain_joint_kl'][name]/limits['chain_joint_'+name]
                     for name in ('mean','p95','p99','max') if 'chain_joint_'+name in limits)
                 report['rollout_kl_budget_fraction']=usage
-                if usage>=trust_region.get('stop_budget_fraction',.95):
-                    stop_reason='rollout_kl_budget_nearly_exhausted'
+                # 接近额度只是诊断，不能单独证明没有有意义的更新空间；下一小批次
+                # 继续真实试探，只有有限回溯仍拒绝且步长耗尽才保留前序更新并结束。
             if stop_reason:break
             if max_optimizer_steps is not None and len(reports)>=max_optimizer_steps:
                 stop_reason='explicit_diagnostic_optimizer_limit';break

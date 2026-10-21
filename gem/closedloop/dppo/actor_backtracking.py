@@ -105,7 +105,9 @@ def backtracked_step(actor, optimizer, controller, *, evaluate, limits, distribu
         restore()
         finite_rejections=bool(trials) and all(t['kl'] is not None and
             set(t['acceptance']['failures']) <= {'chain_joint_mean','chain_joint_p95',
-                'chain_joint_p99','chain_joint_max','active_clip_fraction'} for t in trials)
+                'chain_joint_p99','chain_joint_max','active_clip_fraction'} and
+            all(math.isfinite(f['value']) for f in t['acceptance']['failures'].values())
+            for t in trials)
         return dict(accepted=False, initial_lr=initial_lr, accepted_lr=None, backtracks=max(0,len(trials)-1),
             attempts=trials, attempt_count=len(trials), same_initial_adam_per_attempt=True,
             fixed_gradient_reused=True, initial_state_restored=True,

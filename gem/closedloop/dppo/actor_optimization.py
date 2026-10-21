@@ -56,13 +56,11 @@ def validate_optimization_configuration(config,maximum_steps):
         raise ValueError('Explicit full-chain joint PPO with one undiscounted GAE and fixed Actor LR ratios required')
     trust=t['trust_region']
     trust.setdefault('minimum_trial_lr_ratio',.0625)
-    trust.setdefault('stop_budget_fraction',.95)
-    if (set(trust)!={'maximum_lr','growth','margin','max_attempts','minimum_trial_lr_ratio','stop_budget_fraction'}
+    if (set(trust)!={'maximum_lr','growth','margin','max_attempts','minimum_trial_lr_ratio'}
             or trust['maximum_lr']!=t['actor_lr'] or not 1<=trust['growth']<=2
             or not 0<trust['margin']<1 or type(trust['max_attempts'])is not int
             or not 1<=trust['max_attempts']<=10
-            or not 0<trust['minimum_trial_lr_ratio']<=1
-            or not 0<trust['stop_budget_fraction']<=1):
+            or not 0<trust['minimum_trial_lr_ratio']<=1):
         raise ValueError('Explicit bounded joint-KL backtracking required')
     if s['limits']['optimizer_attempts']<s['limits']['accepted_iterations']*maximum_steps*trust['max_attempts']:
         raise ValueError('Budget must cover every planned optimizer update')

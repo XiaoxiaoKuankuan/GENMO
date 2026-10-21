@@ -311,7 +311,6 @@ stage10:
       margin: 0.8
       max_attempts: 8
       minimum_trial_lr_ratio: 0.0625
-      stop_budget_fraction: 0.95
     bc_prefix:
       max_frames: 30
       min_frames: 6
