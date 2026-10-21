@@ -149,6 +149,23 @@ def test_readonly_candidate_audit_binds_snapshot_and_recomputes_weights(episode_
     assert (tmp_path/"state.json").read_bytes() == before
 
 
+def test_natural_candidate_control_preserves_scope_and_restores_source_weights():
+    from tools.ablate_stage2_awr_uniform import natural_candidate_config
+    original = dict(bc_enabled=False, reference_weight=0., source_balance="uniform_sources",
+                    candidate_objective_fraction=.25, epochs=5, lr=1e-5,
+                    timestep_weighting={"mode": "uniform"})
+    control = natural_candidate_config(original)
+    assert original["candidate_objective_fraction"] == .25
+    assert control == dict(original, candidate_objective_fraction=None)
+    sources = ["a"]*10+["b"]*10
+    mask = torch.tensor([True]+[False]*9+[True]+[False]*9)
+    weights = candidate_objective_weights(sources, mask, fraction=control["candidate_objective_fraction"])
+    torch.testing.assert_close(weights, torch.ones(20, dtype=torch.float64))
+    for changed in (dict(original, bc_enabled=True), dict(original, reference_weight=.1)):
+        with pytest.raises(ValueError):
+            natural_candidate_config(changed)
+
+
 def test_group_only_control_changes_no_group_scores_and_freezes_one_global_scale(episode_factory):
     from tools.ablate_stage2_awr_uniform import group_only_weights
     from gem.closedloop.awr.advantages import label_episode_advantages

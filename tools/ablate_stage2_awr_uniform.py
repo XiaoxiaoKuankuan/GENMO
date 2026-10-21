@@ -7,6 +7,9 @@
 提交与工具SHA分别记录，评价复用原物理身份/时钟和任务随机流并新建PhysX世界。
 group_only变体保持原时间目标，仅将非首次有效候选的优势设为零(权重为1)，直接检验
 普通后续局部信用的加权是否有益；候选/普通监督份额、噪声、步数和学习率完全不变。
+natural_unweighted与natural_awr只取消首次候选的固定监督份额，恢复普通来源平衡，
+分别使用全1和原真实优势权重；用于同Replay隔离过度强调首次状态的影响。候选身份、
+样本顺序、扩散噪声、训练步数及奖励不变，不以新的采集分布冒充单因素对照。
 只允许八卡、一个64次以内的已完成有限运行；启动和评价前检查剩余墙钟，STOP或
 时间边界保存完整优化步，物理阶段停止发新任务并排空。它不是原运行的隐式续训。
 """
@@ -56,13 +59,25 @@ def group_only_weights(labels, sample_ids):
     return counterfactual.weights[ids].clone(), counterfactual
 
 
+def natural_candidate_config(actor_config):
+    """取消显式候选份额，保留来源平衡和原更新预算；不修改输入配置。"""
+    result = copy.deepcopy(actor_config)
+    if (result.get("bc_enabled", True) or result.get("reference_weight", 0.) != 0.
+            or result.get("source_balance") != "uniform_sources"
+            or result.get("candidate_objective_fraction") is None):
+        raise ValueError("Require the explicit no-BC/no-teacher candidate allocation experiment")
+    result["candidate_objective_fraction"] = None
+    return result
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--source-run", type=Path, required=True)
     parser.add_argument("--runtime-repo", type=Path, required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--finish-before-utc", required=True)
-    parser.add_argument("--variant", choices=("uniform_time", "group_only"), default="uniform_time")
+    parser.add_argument("--variant", choices=("uniform_time", "group_only", "natural_unweighted", "natural_awr"),
+                        default="uniform_time")
     args = parser.parse_args()
     source, repo, output = [p.resolve() for p in (args.source_run, args.runtime_repo, args.output_dir)]
     deadline = datetime.fromisoformat(args.finish_before_utc.replace("Z", "+00:00")).timestamp()
@@ -116,6 +131,8 @@ def main():
         config = copy.deepcopy(state["config"])
         c = (uniform_config(config["awr"]["actor"]) if args.variant == "uniform_time"
              else copy.deepcopy(config["awr"]["actor"]))
+        if args.variant in ("natural_unweighted", "natural_awr"):
+            c = natural_candidate_config(c)
         if c.get("bc_enabled", True) or c.get("reference_weight", 0.) != 0.:
             raise ValueError("This diagnostic requires BC and teacher disabled")
         snapshot_id = state["artifacts"]["macro000_replay"]
@@ -158,6 +175,8 @@ def main():
                 dataset.weights, counterfactual = group_only_weights(labels, dataset.sample_ids)
                 if rank == 0:
                     counterfactual.save(output/"counterfactual_labels")
+            elif args.variant == "natural_unweighted":
+                dataset.weights = torch.ones_like(dataset.weights)
             return dataset
         data = d.local(load_dataset)
         torch.manual_seed(config["awr"]["seed"]+rank*100003)
