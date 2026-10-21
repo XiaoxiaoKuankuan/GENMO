@@ -53,9 +53,10 @@ def episode_value_records(episode, predictions, *, gamma_upper=.99, lambda_upper
     failure=episode['end_reason'] not in ('music_end','task_complete')
     task=episode['task'];records=[]
     for i,row in enumerate(rows):
-        before_cut=any(0<=cut-row.control_tick_end<near_seconds*600 for cut in cuts)
+        # V预测对应生成前的状态；变长转移不能用结束时刻代替预测时刻。
+        before_cut=any(0<cut-row.control_tick_begin<=near_seconds*600 for cut in cuts)
         after_cut=any(0<=row.control_tick_begin-cut<near_seconds*600 for cut in cuts)
-        near_end=0<=final_tick-row.control_tick_end<near_seconds*600
+        near_end=0<=final_tick-row.control_tick_begin<=near_seconds*600
         records.append(dict(task_id=task['task_id'],source=task['dataset'],
             initialization=task.get('initialization','standing'),
             identity=row.identity.copy(),control_tick_begin=row.control_tick_begin,

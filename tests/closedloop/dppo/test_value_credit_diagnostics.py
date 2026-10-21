@@ -54,6 +54,17 @@ def test_real_discount_and_failure_event_match_the_production_MC():
     assert records[-1]['mc']<0
 
 
+def test_failure_window_uses_value_prediction_time_with_short_final_transition():
+    data=episode('fallen')
+    last=data['rows'][-1];last.executed_control_steps=5
+    last.rewards=last.rewards[:5];last.control_tick_end=last.control_tick_begin+60
+    data['returns']=complete_mc_returns(data['rows'],gamma_upper=1.)
+    records=episode_value_records(data,data['returns'],gamma_upper=1.)
+    final_tick=last.control_tick_end
+    for row in records:
+        assert row['near_physical_failure']==(0<=final_tick-row['control_tick_begin']<=900)
+
+
 def test_incomplete_episode_and_modified_targets_are_rejected():
     data=episode();data['rows'][-1].terminated=False
     with pytest.raises(ValueError,match='incomplete episode'):
