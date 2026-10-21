@@ -165,7 +165,8 @@ def main():
         peaks = d.gather(torch.cuda.max_memory_allocated(d.device))
         result.update(source_run=str(root), source_commits=state["source_commits"],
             snapshot=snapshot_id, original_checkpoint=ref, backend="nccl", real_replay=True,
-            real_stage1_bc=True, peak_memory_bytes=peaks, seconds=time.perf_counter()-started,
+            real_stage1_bc=config["awr"]["actor"].get("bc_enabled", True),
+            peak_memory_bytes=peaks, seconds=time.perf_counter()-started,
             tool_sha256=hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
             component_helper_sha256=hashlib.sha256(Path(__file__).with_name(
                 "verify_stage2_awr_checkpoint.py").read_bytes()).hexdigest())

@@ -1,6 +1,7 @@
 """只读核验真实AWR最终断点的CPU组件恢复及物理评价绑定。
 
 从指定运行的原源码装配Stage1 Actor，恢复B/C最终权重、AdamW矩和学习率调度状态，
+存在uniform时间对照时也独立恢复，配对合同仅允许该组的时间权重配置不同。
 逐元素核对恢复结果，并检查已保存八rank的CPU/BC随机流可恢复、CUDA随机状态存在。
 模型指纹必须与固定及全量音乐评价一致。此工具不推进优化器、调度器、数据采样或物理
 环境，不改运行状态；它是组件恢复验收，不冒充再次执行八卡续训或GPU随机流测试。
@@ -139,13 +140,20 @@ def main():
         dict(request=state["request_sha256"], sources=state["source_commits"]))
     prefix, reports = f"macro{state['macro']-1:03d}", {}
     paired = None
-    for method in ("self_distillation", "awr"):
+    for method in ("self_distillation", "awr", "self_distillation_uniform"):
         reference = state["artifacts"].get(prefix+"_"+method+"_final")
         if reference is None:
             continue
         payload = checkpoints.load(reference)["payload"]
         if paired is None:
             paired = pairing_state(payload)
+        elif method == "self_distillation_uniform":
+            candidate, expected = pairing_state(payload), dict(paired)
+            candidate["config"], expected["config"] = dict(candidate["config"]), dict(expected["config"])
+            if candidate["config"].pop("timestep_weighting") != {"mode": "uniform"}:
+                raise ValueError("Uniform control does not use the declared timestep objective")
+            expected["config"].pop("timestep_weighting")
+            assert_tree_equal(candidate, expected)
         else:
             assert_tree_equal(pairing_state(payload), paired)
         report = restore_components(actor, payload)
@@ -170,7 +178,9 @@ def main():
         source_commits=state["source_commits"], request_sha256=state["request_sha256"],
         methods=reports, seconds=time.perf_counter()-started, optimizer_updates=0,
         physical_controls=0, state_unchanged=True,
-        paired_data_budget_bc_random_streams_exact=len(reports) == 2,
+        paired_data_budget_bc_random_streams_exact=len(reports) >= 2,
+        uniform_control_present="self_distillation_uniform" in reports,
+        uniform_control_only_allowed_config_difference="timestep_weighting",
         scope="cpu_component_restore_not_new_distributed_training",
         tool_sha256=hashlib.sha256(Path(__file__).read_bytes()).hexdigest())
     output.parent.mkdir(parents=True, exist_ok=True)

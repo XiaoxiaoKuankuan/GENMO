@@ -2,8 +2,11 @@
 
 本实现运行于独立 `feature/stage2-awr` 工作树。训练顺序为 Collect → Critic/FVI →
 Advantage Labeling → Weighted Diffusion Training → Evaluation。宏迭代与 PPO iteration 无关。
-2026-10-21当前入口为独立`stage2_awr_group_credit.yaml`：64次预定尝试、1宏迭代、
-5 Epoch、256 AWR＋128 BC、基础LR1e-5。教师一致性系数为0，不创建教师；普通自蒸馏
+2026-10-21当前入口为独立`stage2_awr_rewardstd_nobc_minsnr.yaml`：64次预定尝试、1宏迭代、
+5 Epoch、256 AWR、关闭BC、基础LR1e-5。GMT原`source_std`严格不变，Stage2独立
+`reward_std`使用0.20/0.30/0.15/0.20及原其余四项。新增Min-SNR-5时间目标、来源校正和
+uniform时间无权重对照，详见[本次配置与有限实验](stage2_awr_rewardstd_nobc_20261021.md)。
+教师一致性系数为0，不创建教师；普通自蒸馏
 是权重全1的诊断对照，不作为AWR更新门槛。只评价s595000实际训练清单中的音乐，
 模型选择只依据来源平衡的完整任务回报增加。失败、时长、活动度与跟踪误差照常报告。
 候选组、局部信用与11种标签模式详见[当前实现与验收](stage2_awr_group_credit_20261021.md)。
@@ -22,7 +25,8 @@ Joint和滑动指标变差；固定32任务时长门槛未通过，`best_saved`�
 ## Server-2 命令
 
 最新交付源码位于`/home/user/liwei/awr-worktrees/GENMO-signals-delivery-20261021`。
-`GENMO-signals-20261021`固定本轮实际运行提交56014c3，GMT目录为
+`GENMO-rewardstd-20261021`固定本轮实际运行提交ef03e0b；原
+`GENMO-signals-20261021`仍固定上次运行提交56014c3。GMT目录为
 `/home/user/liwei/awr-worktrees/legged_lab_gmt-signals-20261021`，提交a1b6244。
 后续离线审计和数值精度修正只进入交付副本，未热更新正在训练的源码。
 旧`GENMO-repair-delivery-20261021`固定066bd1b，`GENMO-delivery`固定077024b，
@@ -30,9 +34,9 @@ Joint和滑动指标变差；固定32任务时长门槛未通过，`best_saved`�
 以下为独立新运行的接口示例，执行须遵守当前有限预算；不更新冻结运行源码或editable指向。
 
 ```bash
-cd /home/user/liwei/awr-worktrees/GENMO-signals-delivery-20261021
+cd /home/user/liwei/awr-worktrees/GENMO-rewardstd-20261021
 bash tools/run_stage2_awr_server2.sh preflight \
-  --config configs/closedloop/stage2_awr_group_credit.yaml \
+  --config configs/closedloop/stage2_awr_rewardstd_nobc_minsnr.yaml \
   --gmt-repo /home/user/liwei/awr-worktrees/legged_lab_gmt-signals-20261021
 /data0/user/liwei/closedloop_stage10_v3_runtime/env_isaac_genmo/bin/python -B \
   tools/launch_stage2_awr_signal_server2.py \
@@ -72,7 +76,8 @@ python -B <归档工具路径>/verify_stage2_awr_checkpoint.py \
 工具逐元素比较权重、AdamW矩和Scheduler，绑定固定/全量物理评价指纹，检查八rank
 CPU随机流与保存的CUDA状态；它不执行新的优化步或CUDA随机流，不能代替八卡续训测试。
 
-有限八卡续算工具`verify_stage2_awr_resume.py`使用三条真实Replay及一条真实BC，包含
+有限八卡续算工具`verify_stage2_awr_resume.py`使用三条真实Replay；BC启用时使用一条真实BC，
+当前无BC配置完全跳过其采样与前反向，包含
 空rank。连续两步，在第一步原子保存全部rank状态，再恢复重算第二步，逐元素比较
 Actor、AdamW、Scheduler、BC及CPU/CUDA RNG。共三个独立诊断优化步、零物理交互；
 验收后恢复输入Actor指纹，正式训练计数与checkpoint不变。归档时须同时复制
@@ -95,8 +100,8 @@ Actor、AdamW、Scheduler、BC及CPU/CUDA RNG。共三个独立诊断优化步�
 - 实际参考由 GMT `awr_reference_audit` 返回。保护前缀可按原逻辑精确恢复，自由源
   姿态必须逐元素不变。拒绝/未实际进入 GMT 输入的参考不进入 Actor 回归，相关时间、
   失败和奖励仍记录。随后才消费的计划只补充消费证据，不搬移其他决策区间奖励。
-- 保存的 Contact 是概率输出，绝不作为真值。原 Stage1 BC 使用真实预训练标签及
-  完整 Loss。AWR 回归整个 60 帧窗口；末端无 halo 的 Root XY 沿用无效标签规则。
+- 保存的 Contact 是概率输出，绝不作为真值。当前BC关闭；旧BC实现保留真实预训练标签及
+  完整 Loss供历史运行和独立无梯度诊断。AWR回归整个60帧窗口；末端无halo的Root XY沿用无效标签规则。
 
 ## 数学与优化
 
@@ -119,10 +124,12 @@ hybrid及group_hybrid。各分量单独以整轮FP64总体标准差归一化，�
 权重在本轮固定，Replay 每 Epoch 均匀遍历一次，不再按优势抽样。
 
 单条样本重新抽一个 t 和高斯噪声，只执行单时间步监督前反向。先对各自有效未知坐标
-求 MSE，再乘对应权重；AWR/BC 分别除实际全局样本数。各 rank 累积后 SUM，再裁剪、
+求 MSE，再乘对应优势、来源和时间权重，除实际全局样本数。各 rank 累积后 SUM，再裁剪、
 更新；全局无监督参数保持 grad=None。尾批和空 rank 不重复样本补齐。
-BC 系数由 8 批真实梯度诊断校准，之后宏迭代内固定。B/C 使用相同数据、噪声、Batch
-顺序、BC 随机流和系数。参数变化不代表物理改善。
+当前BC系数为0且不创建训练采样器，不执行梯度校准。U/B/C使用相同数据、噪声、Batch
+顺序、优化器与预算；U/B仅时间目标不同，B/C仅优势权重不同。Min-SNR的x0因子为
+`min(SNR(t),5)`除以整张1000步时间表均值，来源因子为`N/(S*N_source)`；
+不按mini-batch重新归一化。旧BC启用配置仍独立归约及校准固定系数。参数变化不代表物理改善。
 
 本实现参考[GTI §II-E、Figure 3、Equation (1)–(3)](https://arxiv.org/html/2609.31577v1#S2.SS5)
 的离策略回放、交叉优势和加权生成监督。GENMO保留DDPM的单时间步`x0`监督；
@@ -167,9 +174,9 @@ Server-2真实s595000＋原Stage1 BC八卡NCCL测试通过：9 AWR／3 BC 的相
 python3 tools/report_stage2_awr.py --run-dir <运行目录> --output <新的验收JSON路径>
 python3 tools/audit_stage2_awr_replay.py --run-dir <运行目录> \
   --max-episodes 24 --output <新的回报审计JSON路径>
-bash tools/run_stage2_awr_server2.sh retention \
+python -B <交付工具路径>/diagnose_stage2_awr_learning.py \
   --run-dir <已完成运行目录> --runtime-repo <原运行提交的GENMO工作树> \
-  --output-dir <新的独立验收目录>
+  --output <新的独立诊断目录> --gradient-batches 4 --timestep-gradients
 ```
 
 汇总只读取已提交的状态和JSON报告，不需要GPU，不重算评价或选择模型。它保留实际
@@ -187,11 +194,12 @@ bash tools/run_stage2_awr_server2.sh retention \
 即使因异常退出没有summary也参与峰值汇总，并报告最大采样间隔、查询失败和不完整
 末行；不能仅选择成功尝试的显存记录。
 
-`retention`在完整物理运行结束、GPU空闲后进行单GPU只读推理，默认从原Stage1 val
+历史`retention`工具在完整物理运行结束、GPU空闲后进行单GPU只读推理，默认从原Stage1 val
 每来源选择4个窗口、使用2个固定生成种子。三份Actor共享保存的原条件与同一噪声，
 比较完整Stage1生成损失、未知qpos30误差、真实Contact BCE和关节活动度/输出变化。
 使用原Dataset的真实标签及ground metadata，不构造Replay伪标签。该小批固定探针
 不冒称整个Stage1验证集或物理收益；条件分片、模型指纹和工具SHA均在独立输出留存。
+当前实验不调用该历史val探针或保留门槛；Stage1监督诊断与物理评价都使用train清单。
 
 Replay `array_tree.v2`保留物理回执的共享列，兼容旧v1；训练视图只展开必要条件和事件，
 读取前仍核验完整manifest和全部数值数组SHA。完整原始证据未删除，训练视图明确禁止
@@ -216,14 +224,15 @@ Replay `array_tree.v2`保留物理回执的共享列，兼容旧v1；训练视�
 | `awr/folds.py`、`tasks.py` | group/audio连通音乐折、内部验证、来源采样及持久化任务计划 |
 | `awr/critic.py`、`fvi.py` | 两份独立原非对称网络、MC/FVI比较、冻结目标和交叉标签身份 |
 | `awr/advantages.py`、`dataset.py` | 整轮固定标签、样本身份严格对齐、均匀回放及Contact诊断隔离 |
-| `awr/losses.py`、`trainer.py`、`distributed.py` | 每样本加权、真实BC、全局分母、梯度累积/SUM、裁剪及优化 |
+| `awr/losses.py`、`objective.py`、`trainer.py`、`distributed.py` | 每样本优势/时间/来源因子、显式BC开关、全局分母、梯度累积/SUM、裁剪及优化 |
 | `awr/checkpoint.py`、`runtime.py` | 原子checkpoint及五阶段调度，同Replay自蒸馏/AWR对照 |
-| `awr/evaluation.py`、`physical_metrics.py`、`metrics.py` | 完整任务/失败、成对CI、安全门槛、保留能力和探索诊断 |
+| `awr/evaluation.py`、`physical_metrics.py`、`metrics.py` | 完整任务/失败、成对CI、仅奖励选优、生成能力和探索诊断 |
 | `awr/world.py`、`config.py`、`resources.py` | 独立PhysX世界、AWR时钟校准、资产/资源检查及GPU采样 |
 | `closedloop/common/` | 原物理事务、奖励、Episode、Critic、BC与评价的算法无关实现；旧DPPO路径保留兼容导出 |
 
 `state.json`只引用已经提交的阶段产物。Actor断点保存参数、AdamW和Scheduler、
-Epoch/Batch游标、优化步数、数据身份、固定BC系数及各rank独立BC/RNG状态。
+Epoch/Batch游标、优化步数、数据和目标因子身份、固定BC系数及各rank独立BC/RNG状态；
+BC关闭时采样器状态为null、系数为0，恢复时也禁止静默开启。
 Critic保存两份参数、Optimizer/Scheduler、拟合随机状态、MC/FVI候选与冻结目标身份；
 恢复边界是一次已完成的MC或FVI拟合，未完成拟合从上一已提交边界重做。
 
