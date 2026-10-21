@@ -36,7 +36,7 @@ from gem.closedloop.dppo.evaluation import (
 )
 from gem.closedloop.dppo.full_dataset import SOURCES
 from .performance import profiled
-from .execution_compatibility import same_execution
+from .execution_compatibility import same_execution,same_evaluation_execution
 from gem.closedloop.frozen_actor import stable_noise_seed
 
 VERSION = 'genmo.closedloop.stage10.periodic_monitor.v1'
@@ -228,7 +228,7 @@ def _verify_episode(episode, task, limit):
 
 def paired_summary(baseline, current):
     _require(baseline['plan_sha256'] == current['plan_sha256'], 'Periodic baseline plan differs')
-    _require(same_execution(baseline.get('evaluation_identity'), current.get('evaluation_identity')), 'Periodic execution/reward configuration differs')
+    _require(same_evaluation_execution(baseline.get('evaluation_identity'), current.get('evaluation_identity')), 'Periodic execution/reward configuration differs')
     before = {r['task_id']: r for r in baseline['episode_metrics']}
     after = {r['task_id']: r for r in current['episode_metrics']}
     _require(set(before) == set(after), 'Periodic baseline tasks differ')
@@ -389,7 +389,7 @@ def load_best_pointers(output_dir, current, *, state=None):
         index = candidate.get('iteration')
         if (type(index) is not int or not 0 <= index <= current['iteration']
                 or candidate.get('plan_sha256') != current['plan_sha256']
-                or not same_execution(candidate.get('evaluation_identity'), current.get('evaluation_identity'))):
+                or not same_evaluation_execution(candidate.get('evaluation_identity'), current.get('evaluation_identity'))):
             return False
         for tail in tails:
             prior = tail.get('previous_accepted', {})

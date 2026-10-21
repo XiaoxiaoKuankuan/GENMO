@@ -31,6 +31,22 @@ def same_execution(left, right):
     return without_source_records(left) == without_source_records(right)
 
 
+def evaluation_execution(value):
+    """冻结Actor的物理配对不依赖优化器、Critic或监视频率；原记录不改写。"""
+    result=without_source_records(value)
+    if isinstance(result,dict) and isinstance(result.get('training_identity'),dict):
+        learning_only={'training','critic','bc_gradient','kl','scale','evaluation','run_control',
+                       'resource_limits','dataset','actor_initialization'}
+        result['training_identity']={key:item for key,item in result['training_identity'].items()
+                                     if key not in learning_only}
+    return result
+
+
+def same_evaluation_execution(left,right):
+    """保留奖励、真实采样核、时钟、物理、任务/噪声；训练超参数只记录。"""
+    return evaluation_execution(left)==evaluation_execution(right)
+
+
 def contains_execution(recorded, required):
     """评估加载只比较调用方需要的配置；源码记录即使缺失也不阻塞。"""
     old, new = without_source_records(recorded), without_source_records(required)

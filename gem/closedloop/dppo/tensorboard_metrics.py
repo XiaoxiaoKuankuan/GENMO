@@ -19,7 +19,7 @@ from pathlib import Path
 import time
 
 import numpy as np
-from .execution_compatibility import same_execution
+from .execution_compatibility import same_execution,same_evaluation_execution
 
 
 SOURCES = ('AIOZ-GDANCE', 'AIST++', 'FineDance', 'Mine')
@@ -305,7 +305,7 @@ def evaluation_scalars(report, baseline=None, *, bootstrap_repeats=2000):
     before = view if baseline is None else baseline
     if 'rows' not in before:
         before = evaluation_view(before)
-    if (view['plan_sha256'] != before['plan_sha256'] or not same_execution(view['evaluation_identity'], before['evaluation_identity'])
+    if (view['plan_sha256'] != before['plan_sha256'] or not same_evaluation_execution(view['evaluation_identity'], before['evaluation_identity'])
             or view['rows'].keys() != before['rows'].keys()):
         raise ValueError('Baseline tasks or execution identity differ')
     rows = list(view['rows'].values())

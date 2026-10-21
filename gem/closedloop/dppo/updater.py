@@ -142,10 +142,13 @@ def _actor_update(policy,optimizer,rows,targets,cache,manifest,controller,*,dist
                 from .optimizer_direction import FullRolloutDirection
                 all_local=[rows[i] for _,i in all_owned]
                 all_records=full_current[[position for position,_ in all_owned]]
-                with _local_phase(distributed,'diagnostic_full_rollout_gradient'),policy_phase(policy):
-                    direction=FullRolloutDirection.capture(actor,distributed,lambda:
+                def full_direction_backward():
+                    # 先完成各rank局部反向并同步异常，再进入梯度SUM；否则单卡异常
+                    # 会使其他卡停在NCCL，而出错卡已进入控制组异常同步。
+                    with _local_phase(distributed,'diagnostic_full_rollout_gradient'),policy_phase(policy):
                         backward_chain_surrogate(policy,all_local,cache,all_records,clip=clip,
-                            global_chain_count=len(selected),microbatch=microbatch))
+                            global_chain_count=len(selected),microbatch=microbatch)
+                direction=FullRolloutDirection.capture(actor,distributed,full_direction_backward)
             with _local_phase(distributed,'stage2_actor_clip'):
                 total_norm=float(torch.nn.utils.clip_grad_norm_([p for p in actor.parameters() if p.requires_grad],
                     grad_clip_norm,error_if_nonfinite=True))

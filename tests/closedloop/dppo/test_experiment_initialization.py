@@ -111,3 +111,19 @@ def test_supervisor_recovers_same_experiment_instead_of_reinitializing(tmp_path)
     resumed=training_command(config,tmp_path,200,init)
     assert resumed[-2:]==['--resume','latest'] and '--initialize-from-checkpoint' not in resumed
     assert latest_iteration(tmp_path)==9
+
+
+def test_frozen_actor_physics_comparison_ignores_batch_and_evaluation_interval():
+    from gem.closedloop.dppo.execution_compatibility import same_evaluation_execution,same_execution
+    before=dict(training_identity=dict(training={'lr':1e-6},scale={'batch':4096},critic={'lr':1e-4},
+        evaluation={'every':3},reward={'std':.2},kernel={'eta':.1},runtime={'clock':50}),
+        physics={'control_hz':50},critical_latency_budgets=[.26]*8)
+    original=copy.deepcopy(before);after=copy.deepcopy(before)
+    after['training_identity']['scale']['batch']=8192
+    after['training_identity']['evaluation']['every']=10
+    after['training_identity']['critic']['lr']=2e-4
+    assert not same_execution(before,after) and same_evaluation_execution(before,after)
+    assert before==original
+    for group,key,value in [('reward','std',.3),('kernel','eta',.2),('runtime','clock',100)]:
+        wrong=copy.deepcopy(after);wrong['training_identity'][group][key]=value
+        assert not same_evaluation_execution(before,wrong)
