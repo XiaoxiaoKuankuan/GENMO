@@ -116,6 +116,10 @@ def chain_diagnostics(statistics, advantages, *, clip):
     valid=statistics['free_count']>0
     logratio=surrogate['log_ratio'][valid].detach()
     return dict(chain_joint_log_ratio=distribution(logratio),
+        objective_mean=float(surrogate['objective'][valid].mean()),
+        behavior_objective_mean=float(advantages.detach().to(logratio)[valid].mean()),
+        objective_gain_mean=float((surrogate['objective'][valid]-advantages.detach().to(logratio)[valid]).mean()),
+        joint_score_gain_mean=float((advantages.detach().to(logratio)[valid]*logratio).mean()),
         chain_joint_ratio=distribution(surrogate['ratio'][valid]),chain_joint_kl=distribution(statistics['joint_kl'][valid]),
         clip_fraction=float(surrogate['clipped'][valid].double().mean()),
         active_clip_fraction=float(surrogate['objective_clipped'][valid].double().mean()),

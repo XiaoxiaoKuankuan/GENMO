@@ -25,6 +25,8 @@ def test_minimal_config_supplies_fixed_runtime_and_deterministic_sampling():
     assert config['runtime']['continue_on_failure'] and config['runtime']['audio']
     assert config['runtime']['warmup_control_steps']==50 and config['runtime']['viewer_fps']==25
     assert config['models'][0]['checkpoint']==config['paths']['stage1_checkpoint']
+    assert config['termination']['yaw_error_rad'] is None
+    assert config['termination']['non_yaw_orientation_error_rad']==.6
     assert Path(config['paths']['genmo_repo'])==GENMO_ROOT
     config['sampling']['std_schedule'][0]=99.
     assert load_config(CONFIG)['sampling']['std_schedule'][0]==.001

@@ -5,7 +5,9 @@
 全局实际链数是唯一分母；PPO/BC梯度SUM后统一裁剪，不额外平均四步或world size。
 
 每个minibatch记录真实参数、同噪声最终输出及联合概率变化，链KL或裁剪饱和可
-提前停止。最终所有旧rollout链的四步KL仍须通过；Actor/Critic/Adam/BC/RNG回滚由
+提前停止。新rollout从名义LR试探，接近本批KL额度或剩余试探步长过小时保留此前
+接受更新并结束剩余小批次；丢弃步骤的BC游标、控制器与RNG同时恢复。最后仍将
+优化器LR恢复为名义值，Adam动量不清零。所有旧rollout链的四步KL仍须通过；Actor/Critic/Adam/BC/RNG回滚由
 training统一管理。BC设置每步全局样本下限，监控实际样本量及成本。保持Critic
 结构、价值目标、物理时钟、原奖励和真实采样核，不把数值通过称为物理收益。
 """
@@ -13,6 +15,7 @@ from __future__ import annotations
 
 import math
 import time
+import copy
 from collections import Counter
 import torch
 from .execution_checks import policy_phase
@@ -26,7 +29,7 @@ def _eligible(manifest,actor=True):
     return [i for i,m in enumerate(manifest) if m['valid'] and (m['has_free'] or not actor)]
 
 
-def actor_update(policy,optimizer,rows,targets,cache,manifest,controller,*,distributed,anchor,
+def _actor_update(policy,optimizer,rows,targets,cache,manifest,controller,*,distributed,anchor,
                     generator,ppo_epochs=1,minibatch_chains=2048,microbatch=128,sampled_steps=4,
                     clip=.10,gamma_denoising=1.,soft_kl=.10,kl_reduction='chain_joint',
                     objective_reduction='joint_sum',grad_clip_norm=1.,reserve_attempt=None,
@@ -40,6 +43,7 @@ def actor_update(policy,optimizer,rows,targets,cache,manifest,controller,*,distr
     from .actor_optimizer import validate_actor_optimizer,actor_base_lr,set_actor_base_lr,actor_learning_rates
     from .actor_step_diagnostics import StepDiagnostics,output_probe,compare_probes
     from .parallel_support import local_call
+    from .parallel_support import capture_local_rng,restore_local_rng
     if step_strategy!='intermediate4' or sampled_steps!=4 or tuple(policy.trainable_steps)!=(15,16,17,18):
         raise ValueError('PPO must optimize exactly stochastic transitions 15..18')
     if (policy.steps!=20 or ppo_epochs<1 or minibatch_chains<1 or microbatch<1 or
@@ -80,6 +84,10 @@ def actor_update(policy,optimizer,rows,targets,cache,manifest,controller,*,distr
                 discarded=dict(epoch=epoch,global_chain_count=len(indices),diagnostics=pre,
                     wall_seconds=time.perf_counter()-started,optimizer_step_executed=False)
                 break
+            # 仅保存轻量学习状态；若本小批次未执行有效更新，BC游标/控制器和RNG也恢复。
+            pending_control=copy.deepcopy(controller.state_dict()) if trust_region is not None else None
+            pending_anchor=copy.deepcopy(anchor.state_dict()) if trust_region is not None else None
+            pending_rng=capture_local_rng({'actor':generator}) if trust_region is not None else None
             probe_before=local_call(distributed,lambda:output_probe(policy,local,cache,max_chains=2))
             gradient_started=time.perf_counter()
             with _local_phase(distributed,'full_chain_streamed_backward'),policy_phase(policy):
@@ -96,14 +104,15 @@ def actor_update(policy,optimizer,rows,targets,cache,manifest,controller,*,distr
                     bc_report=anchor.backward(actor,weight=anchor.batch_size/global_bc)
                 bc=take_gradients(actor)
             bc_seconds=max(distributed.all_gather_object(time.perf_counter()-bc_started))
-            contributions=merge_global_gradients(actor,ppo,bc,controller,distributed=distributed,half_split=snr,sketch=sketch)
+            observation=local_call(distributed,lambda:StepDiagnostics(actor) if distributed.rank==0 else None)
+            contributions=merge_global_gradients(actor,ppo,bc,controller,distributed=distributed,half_split=snr,sketch=sketch,
+                component_observer=observation.capture_component if detailed_diagnostics and observation is not None else None)
             if gradient_observer is not None:gradient_observer(actor,len(reports))
             with _local_phase(distributed,'stage2_actor_clip'):
                 total_norm=float(torch.nn.utils.clip_grad_norm_([p for p in actor.parameters() if p.requires_grad],
                     grad_clip_norm,error_if_nonfinite=True))
             clip_factor=min(1.,grad_clip_norm/(total_norm+1e-6))
             # 只在rank0保留可训练参数前值来测实际FP32更新，不复制Adam或冻结网络。
-            observation=local_call(distributed,lambda:StepDiagnostics(actor) if distributed.rank==0 else None)
             transaction_started=time.perf_counter();kl_elapsed=0.
             post_records=None;post=None;transaction=None
             if trust_region is not None:
@@ -129,8 +138,21 @@ def actor_update(policy,optimizer,rows,targets,cache,manifest,controller,*,distr
                 transaction=backtracked_step(actor,optimizer,controller,evaluate=evaluate_candidate,
                     limits=limits,distributed=distributed,generators={'actor':generator},
                     max_attempts=trust_region['max_attempts'],reserve_attempt=reserve_attempt,
-                    observe=candidate_observer)
+                    observe=candidate_observer,minimum_lr=trust_region['maximum_lr']*
+                        trust_region.get('minimum_trial_lr_ratio',.0625))
                 if not transaction['accepted']:
+                    if reports and transaction['finite_trust_region_exhausted']:
+                        controller.load_state_dict(pending_control)
+                        anchor.load_state_dict(pending_anchor)
+                        restore_local_rng(pending_rng,{'actor':generator})
+                        optimizer.zero_grad(set_to_none=True)
+                        stop_reason='rollout_no_useful_trust_region_step'
+                        discarded=dict(epoch=epoch,global_chain_count=len(indices),diagnostics=pre,
+                            trust_region=transaction,optimizer_step_executed=bool(transaction['attempt_count']),
+                            accepted_optimizer_steps=0,pending_BC_and_RNG_restored=True,
+                            wall_seconds=max(distributed.all_gather_object(time.perf_counter()-started)))
+                        del observation
+                        break
                     import json
                     raise FloatingPointError('Full-chain trust-region exhausted; whole iteration rollback: '+json.dumps(transaction))
             else:
@@ -181,14 +203,21 @@ def actor_update(policy,optimizer,rows,targets,cache,manifest,controller,*,distr
             # 回溯检查覆盖累计已用链；接受与否还要整轮所有链KL审查。
             if soft_kl is not None and post['chain_joint_kl']['mean']>=soft_kl:stop_reason='post_step_chain_joint_kl'
             elif post['active_clip_fraction']>=max_active_clip:stop_reason='post_step_active_clip_saturation'
+            if trust_region is not None and stop_reason is None:
+                usage=max(post['chain_joint_kl'][name]/limits['chain_joint_'+name]
+                    for name in ('mean','p95','p99','max') if 'chain_joint_'+name in limits)
+                report['rollout_kl_budget_fraction']=usage
+                if usage>=trust_region.get('stop_budget_fraction',.95):
+                    stop_reason='rollout_kl_budget_nearly_exhausted'
             if stop_reason:break
             if max_optimizer_steps is not None and len(reports)>=max_optimizer_steps:
                 stop_reason='explicit_diagnostic_optimizer_limit';break
         if stop_reason:break
+    discarded_attempts=((discarded or {}).get('trust_region') or {}).get('attempt_count',0)
     return dict(objective='full_chain_clipped_ppo',ppo_clip_applied=True,optimizer_steps=len(reports),
-        attempted_optimizer_steps=sum((r['trust_region'] or {}).get('attempt_count',1) for r in reports),
-        rejected_step_candidates=sum((r['trust_region'] or {}).get('backtracks',0) for r in reports),
-        executed_optimizer_steps=sum((r['trust_region'] or {}).get('attempt_count',1) for r in reports),
+        attempted_optimizer_steps=sum((r['trust_region'] or {}).get('attempt_count',1) for r in reports)+discarded_attempts,
+        rejected_step_candidates=sum((r['trust_region'] or {}).get('backtracks',0) for r in reports)+discarded_attempts,
+        executed_optimizer_steps=sum((r['trust_region'] or {}).get('attempt_count',1) for r in reports)+discarded_attempts,
         minibatch_accepted_steps=len(reports),executed_step_scope='actual_Adam_calls_including_rejected_candidates',
         accepted_optimizer_steps=None,acceptance_scope='pending_full_rollout_joint_KL',
         planned_optimizer_steps=planned_steps,skipped_optimizer_steps=planned_steps-len(reports),
@@ -202,6 +231,27 @@ def actor_update(policy,optimizer,rows,targets,cache,manifest,controller,*,distr
             for source in sorted({source for r in reports for source in r['bc_samples_by_source']})},
         planned_internal_visits=len(selected)*4*ppo_epochs,objective_reduction='joint_sum',
         proxy_is_joint_probability=True,old_statistics_fixed=True,final_trainable4_kl_pending=True)
+
+
+def actor_update(policy,optimizer,*args,trust_region=None,**kwargs):
+    """每次新rollout独立试探LR；Adam动量不清空，临时回溯LR不传给下一批。
+
+    原四步联合目标与模块倍率保持不变。接受步骤的实际LR记录在steps中，优化器
+    离开本函数时恢复共同名义LR，checkpoint不会把本批剩余额度误作长期LR。
+    正常结束剩余小批次仍须通过调用方完整rollout最终KL；异常继续由整轮事务恢复。
+    """
+    from .actor_optimizer import actor_base_lr,set_actor_base_lr,actor_learning_rates
+    incoming=actor_learning_rates(optimizer)
+    nominal=None if trust_region is None else trust_region['maximum_lr']
+    if nominal is not None:set_actor_base_lr(optimizer,nominal)
+    try:
+        result=_actor_update(policy,optimizer,*args,trust_region=trust_region,**kwargs)
+        last_accepted=(result.get('steps') or [{}])[-1].get('learning_rate',actor_base_lr(optimizer))
+        result.update(nominal_learning_rate=nominal,incoming_optimizer_learning_rates=incoming,
+            last_trial_learning_rate=last_accepted,rollout_learning_rate_reset=nominal is not None)
+        return result
+    finally:
+        if nominal is not None:set_actor_base_lr(optimizer,nominal)
 
 
 @torch.no_grad()

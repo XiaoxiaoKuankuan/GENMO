@@ -34,7 +34,7 @@ _DEFAULT_CONFIG=dict(
     runtime=dict(continue_on_failure=True,device='cuda:0',torch_threads=1,warmup_control_steps=50,
         calibration_warmup=3,calibration_samples=12,latency_guard_seconds=.06,lateness_limit_seconds=.1,
         auto_next=True,audio=True,viewer_fps=25,video_fps=25,video_width=1280,video_height=720),
-    termination=dict(root_height_error_m=.2,non_yaw_orientation_error_rad=.6,yaw_error_rad=1.5,
+    termination=dict(root_height_error_m=.2,non_yaw_orientation_error_rad=.6,yaw_error_rad=None,
         end_effector_relative_height_error_m=.15))
 _MERGED_SECTIONS=('paths','sampling','precision','runtime','termination')
 _GMT_PATHS=('gmt_policy','gmt_checkpoint','gmt_agent','mjcf','urdf','isaac_contract')

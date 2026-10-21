@@ -76,6 +76,8 @@ DEFINITIONS = {
     'Perf/controls_per_second': '实际 Actor 采集控制步总数/本轮墙钟；用于判断吞吐，不是策略质量。',
 }
 DEFINITIONS.update({
+    'Policy/nominal_actor_lr': '每批重新试探的共同名义LR；临时回溯LR不传给下一批，模块实际LR仍乘固定倍率。',
+    'Policy/ppo_objective_gain': '整批真实完整链clipped PPO目标减行为起点目标；越大越好，不能替代物理执行收益。',
     'Policy/transformer_lr_min': '本轮最后一次接受更新中，16层Transformer实际学习率的最小值。',
     'Policy/transformer_update_rms': 'Transformer主干每次Adam后实际FP32参数变化RMS的轮内均值；确认主干确实参与学习。',
     'Policy/chain_joint_kl': '全部有效旧rollout链四步联合KL之和的均值；主要更新约束，非未来物理安全保证。',
@@ -101,8 +103,10 @@ EVENT_TAG_OVERRIDES = {
     ('training', 'Reward/total_per_second'): 'Reward/train_total_per_second',
     ('validation', 'Reward/total_per_second'): 'Reward/validation_total_per_second',
 }
+# 坐标平均KL保留在JSON和历史读取中，面板用真实链KL、名义LR和PPO目标增益，标签总量不增加。
+JSON_ONLY_TAGS = {'Policy/trainable_kl', 'Policy/max_step_kl'}
 EVENT_DEFINITIONS = {tag: description for tag, description in DEFINITIONS.items()
-                     if tag != 'Reward/total_per_second'}
+                     if tag != 'Reward/total_per_second' and tag not in JSON_ONLY_TAGS}
 EVENT_DEFINITIONS.update({
     'Reward/train_total_per_second': '分/秒，普通训练采集各来源积分回报/实际采集秒数再来源等权；任务不断变化，只作训练监视。',
     'Reward/validation_total_per_second': '分/秒，固定验证各任务每秒回报先来源内平均再来源等权；优先用此曲线判断训练效果。',
@@ -142,7 +146,7 @@ def dashboard_scalars(scope, values):
     if scope not in SCOPES:
         raise ValueError('Invalid compact curve scope')
     result = {EVENT_TAG_OVERRIDES.get((scope, tag), tag): value
-              for tag, value in checked_scalars(values).items()}
+              for tag, value in checked_scalars(values).items() if tag not in JSON_ONLY_TAGS}
     if not result.keys() <= EVENT_DEFINITIONS.keys():
         raise ValueError('Metric has no single-run event definition')
     return result
@@ -213,6 +217,8 @@ def training_scalars(record):
         values['Policy/chain_joint_kl_p95']=kl['chain_joint_kl']['p95']
         values['Policy/chain_clip_fraction']=kl.get('clip_fraction')
     values['Policy/accepted_updates']=actor.get('accepted_optimizer_steps')
+    values['Policy/nominal_actor_lr']=actor.get('nominal_learning_rate')
+    values['Policy/ppo_objective_gain']=kl.get('objective_gain_mean')
     values['Policy/planned_updates']=actor.get('planned_optimizer_steps')
     parameter=[v['parameter_update']['modules']['all']['update_rms'] for v in steps if 'parameter_update' in v]
     cosine=[v['gradient_contributions']['all']['cosine'] for v in steps if v.get('gradient_contributions',{}).get('all',{}).get('cosine') is not None]

@@ -211,6 +211,8 @@ def main():
     parser.add_argument('--scope',choices=SCOPES,default='all')
     parser.add_argument('--learning-rate',type=float,default=1e-6)
     parser.add_argument('--epochs',type=int,default=1)
+    parser.add_argument('--minibatch-chains',type=int,default=2048,
+        help='每次Adam所用完整链数；固定同一真实数据比较有效批量，不改变微批或概率目标')
     parser.add_argument('--max-updates',type=int)
     parser.add_argument('--no-backtracking',action='store_true')
     parser.add_argument('--coordinates',action='store_true')
@@ -221,6 +223,7 @@ def main():
     parser.add_argument('--allow-measured-profile-transfer',action='store_true',
         help='显式将旧采集延迟样本池迁移到当前物理评估池；保留来源，必须新鲜配对PhysX评估，不允许训练恢复')
     args=parser.parse_args()
+    if args.minibatch_chains<1:parser.error('--minibatch-chains must be positive')
     rank=int(os.environ['RANK']);world=int(os.environ['WORLD_SIZE']);local=int(os.environ['LOCAL_RANK'])
     if world!=8 or local!=rank:raise ValueError('Explicit single-node eight-GPU allocation required')
     dist.init_process_group('gloo',timeout=timedelta(minutes=45));group=None;cache=None
@@ -318,10 +321,11 @@ def main():
         trust=None if args.no_backtracking else dict(config['stage9']['trust_region'],maximum_lr=args.learning_rate)
         started=time.perf_counter();torch.cuda.reset_peak_memory_stats(distributed.device)
         report=actor_update(policy,optimizer,rows,targets,cache,manifest,controller,distributed=distributed,
-            anchor=anchor,generator=generator,ppo_epochs=args.epochs,minibatch_chains=2048,microbatch=128,
+            anchor=anchor,generator=generator,ppo_epochs=args.epochs,minibatch_chains=args.minibatch_chains,microbatch=128,
             clip=.1,soft_kl=.1,bc_samples_per_rollout=2048*args.epochs,bc_min_global_batch=256,
             trust_region=trust,kl_limits=config['stage10']['kl'],max_optimizer_steps=args.max_updates,
-            step_observer=observe_step,candidate_observer=observe_attempt if trust is not None else None)
+            detailed_diagnostics=True,step_observer=observe_step,
+            candidate_observer=observe_attempt if trust is not None else None)
         kl=final_kl(policy,rows,cache,manifest,distributed=distributed,microbatch=128,clip=.1)
         acceptance=check_candidate_kl(kl,config['stage10']['kl'])
         if not report['optimizer_steps']:acceptance=dict(passed=False,failures={'optimizer':'no accepted step'})
@@ -365,7 +369,8 @@ def main():
         if not restored:raise AssertionError('Candidate Actor byte restore failed')
         result=dict(status='passed',scope=args.scope,actor_scope=policy.actor_scope,learning_rate=args.learning_rate,
             actor_lr_multipliers=optimizer_settings.get('actor_lr_multipliers'),
-            epochs=args.epochs,source_commit=subprocess.check_output(['git','rev-parse','HEAD'],cwd=ROOT,text=True).strip(),
+            epochs=args.epochs,minibatch_chains=args.minibatch_chains,
+            source_commit=subprocess.check_output(['git','rev-parse','HEAD'],cwd=ROOT,text=True).strip(),
             case=str(args.case),case_sha256=file_sha256(args.case/'case.json'),zero_update_probability=probability,
             actor=report,final_kl=kl,acceptance=acceptance,importance=final_importance,coordinates=coordinates,
             output=probe_summary(probes),history=history,attempts=len(attempt_history),actor_restored=restored,export=export,

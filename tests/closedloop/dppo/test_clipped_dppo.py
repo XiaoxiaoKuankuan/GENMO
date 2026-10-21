@@ -28,6 +28,8 @@ from gem.closedloop.dppo.updater import actor_update
 
 class Anchor:
     def __init__(self):self.batch_size=0
+    def state_dict(self):return dict(batch_size=self.batch_size)
+    def load_state_dict(self,state):self.batch_size=state['batch_size']
 
     def backward(self,actor,weight):
         loss=sum(p.square().mean() for p in actor.parameters() if p.requires_grad)

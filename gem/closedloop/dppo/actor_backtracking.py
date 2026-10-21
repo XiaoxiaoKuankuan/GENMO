@@ -5,7 +5,9 @@
 按1、1/2、1/4等有限次数尝试。生产检查累计已用完整链的全部四步；
 所有rank共同接受或拒绝，冻结参数不允许进入优化器或参数快照。失败尝试的预算不退款。
 此处不提高噪声、不截断概率，也不改写行为统计；全部失败恢复起点并返回拒绝证据，
-由训练器拒绝整轮。单步通过后训练器仍执行完整rollout最终KL审查。
+数值失败交给训练器恢复整轮；全部为有限信任域拒绝时，可由上层结束本批剩余
+更新，保留此前已接受状态。显式minimum_lr以下不再执行几乎无效的Adam尝试，
+不会把小于下限的候选强制接受。单步通过后仍执行完整rollout最终KL审查。
 梯度与BC只计算一次，候选从相同Adam时刻重试；不靠重复Adam累计动量缩小步长。
 """
 from __future__ import annotations
@@ -39,11 +41,13 @@ def check_candidate_kl(report, limits):
 
 
 def backtracked_step(actor, optimizer, controller, *, evaluate, limits, distributed, generators=None,
-                     max_attempts=9, factor=.5, reserve_attempt=None, observe=None):
+                     max_attempts=9, factor=.5, reserve_attempt=None, observe=None, minimum_lr=None):
     validate_actor_optimizer(actor, optimizer)
     if type(max_attempts) is not int or not 1 <= max_attempts <= 10 or factor != .5:
         raise ValueError('Finite backtracking requires 1..10 attempts with factor 0.5')
     initial_lr = actor_base_lr(optimizer)
+    if minimum_lr is not None and (not math.isfinite(minimum_lr) or not 0 < minimum_lr <= initial_lr):
+        raise ValueError('Minimum trial LR must be positive and no larger than the initial trial')
     initial_learning_rates = actor_learning_rates(optimizer)
     model = {n:p.detach().clone() for n,p in actor.named_parameters() if p.requires_grad}
     adam = copy.deepcopy(optimizer.state_dict())
@@ -70,6 +74,8 @@ def backtracked_step(actor, optimizer, controller, *, evaluate, limits, distribu
             if index:
                 restore()
             lr = initial_lr * factor**index
+            if minimum_lr is not None and lr < minimum_lr:
+                break
             set_actor_base_lr(optimizer, lr)
             if reserve_attempt is not None:
                 reserve_attempt()
@@ -97,9 +103,14 @@ def backtracked_step(actor, optimizer, controller, *, evaluate, limits, distribu
                     backtracks=index, attempts=trials, attempt_count=len(trials),
                     same_initial_adam_per_attempt=True, fixed_gradient_reused=True)
         restore()
-        return dict(accepted=False, initial_lr=initial_lr, accepted_lr=None, backtracks=max_attempts-1,
+        finite_rejections=bool(trials) and all(t['kl'] is not None and
+            set(t['acceptance']['failures']) <= {'chain_joint_mean','chain_joint_p95',
+                'chain_joint_p99','chain_joint_max','active_clip_fraction'} for t in trials)
+        return dict(accepted=False, initial_lr=initial_lr, accepted_lr=None, backtracks=max(0,len(trials)-1),
             attempts=trials, attempt_count=len(trials), same_initial_adam_per_attempt=True,
-            fixed_gradient_reused=True, initial_state_restored=True)
+            fixed_gradient_reused=True, initial_state_restored=True,
+            rejection_reason='minimum_trial_lr' if len(trials)<max_attempts else 'attempts_exhausted',
+            finite_trust_region_exhausted=finite_rejections)
     except BaseException:
         restore()
         raise

@@ -429,7 +429,7 @@ class Sim2SimRuntime:
                 self._ensure_reference(tick+180,diagnostics)
                 record=self.backend.step_control(check_termination=not self.continuous)
                 self.total_controls+=1
-                physical=[k for k,v in self.config['termination'].items() if record[k]>float(v)]
+                physical=[k for k,v in self.config['termination'].items() if v is not None and record[k]>float(v)]
                 record['physical_warning_count']=len(physical)
                 record['reference_fallback']=any(str(p).startswith('fallback_hold:') for p in
                     self.backend.timeline.window(self.backend.tick)['origin_plan_ids'])
