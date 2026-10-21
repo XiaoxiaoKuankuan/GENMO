@@ -10,6 +10,8 @@ group_only变体保持原时间目标，仅将非首次有效候选的优势设�
 natural_unweighted与natural_awr只取消首次候选的固定监督份额，恢复普通来源平衡，
 分别使用全1和原真实优势权重；用于同Replay隔离过度强调首次状态的影响。候选身份、
 样本顺序、扩散噪声、训练步数及奖励不变，不以新的采集分布冒充单因素对照。
+nstep变体仅将普通后续样本的参考信用优势改为已冻结的普通N-step优势；首次组优势、
+候选监督份额及Critic保持原样，用真实物理对照判断参考暴露近似是否有额外价值。
 只允许八卡、一个64次以内的已完成有限运行；启动和评价前检查剩余墙钟，STOP或
 时间边界保存完整优化步，物理阶段停止发新任务并排空。它不是原运行的隐式续训。
 """
@@ -37,8 +39,8 @@ def uniform_config(actor_config):
     return result
 
 
-def group_only_weights(labels, sample_ids):
-    """首次严格同状态候选保留原组优势，其他样本置零；整轮均值归一化，绝不按batch改权重。"""
+def group_only_weights(labels, sample_ids, *, ordinary="zero"):
+    """首次保留组优势，其他样本置零或切换冻结N-step；整轮归一化，不修改原标签。"""
     import torch
     from gem.closedloop.awr.advantages import label_advantages
     if labels.group_valid is None or not labels.group_valid.any():
@@ -48,14 +50,29 @@ def group_only_weights(labels, sample_ids):
     if set(sample_ids) != set(lookup):
         raise ValueError("Group-only weights must cover the identical Replay")
     normalized = torch.zeros_like(labels.weights)
+    if ordinary == "nstep":
+        scale = labels.identity["component_scales"]["nstep"]
+        if not scale["available"] or labels.nstep_advantage is None:
+            raise ValueError("N-step control requires frozen cross-fitted N-step labels")
+        normalized = labels.nstep_advantage/max(scale["std"], 1e-8)
+    elif ordinary != "zero":
+        raise ValueError("Ordinary signal must be zero or nstep")
     sigma = labels.identity["component_scales"]["group"]["std"]
     normalized[labels.group_valid] = labels.group_advantage[labels.group_valid]/max(sigma, 1e-8)
     c = labels.identity["weight_config"]
     counterfactual = label_advantages(labels.sample_ids, labels.returns, labels.values,
         sources=labels.source, identity=dict(original_label_id=labels.identity["label_id"],
-            ablation="verified_first_group_only_other_advantages_zero"),
+            ablation="verified_first_group_ordinary_"+ordinary,
+            source_signal_config=labels.identity.get("signal_config"),
+            component_scales=labels.identity["component_scales"]),
         beta=c["beta"], weight_cap=c["weight_cap"], epsilon=c["epsilon"],
         weight_mean_normalize=c["weight_mean_normalize"], final_normalized=normalized, allow_degenerate=True)
+    for key in ("mc_advantage", "nstep_advantage", "credit_advantage", "group_advantage",
+                "credit_valid", "credit_exposure", "group_valid"):
+        value = getattr(labels, key)
+        setattr(counterfactual, key, value.clone() if value is not None else None)
+    counterfactual.source = list(labels.source)
+    counterfactual.label_mode = "counterfactual_"+ordinary+":grouped"
     return counterfactual.weights[ids].clone(), counterfactual
 
 
@@ -76,7 +93,7 @@ def main():
     parser.add_argument("--runtime-repo", type=Path, required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--finish-before-utc", required=True)
-    parser.add_argument("--variant", choices=("uniform_time", "group_only", "natural_unweighted", "natural_awr"),
+    parser.add_argument("--variant", choices=("uniform_time", "group_only", "natural_unweighted", "natural_awr", "nstep"),
                         default="uniform_time")
     args = parser.parse_args()
     source, repo, output = [p.resolve() for p in (args.source_run, args.runtime_repo, args.output_dir)]
@@ -171,8 +188,9 @@ def main():
             labels = AdvantageLabelSet.load(state["artifacts"]["macro000_labels"])
             dataset = ReplayDataset(episodes, labels, expected_signal=config["awr"]["advantage"],
                 expected_candidates=config["awr"]["candidate_sampling"], expected_snapshot=snapshot_id)
-            if args.variant == "group_only":
-                dataset.weights, counterfactual = group_only_weights(labels, dataset.sample_ids)
+            if args.variant in ("group_only", "nstep"):
+                dataset.weights, counterfactual = group_only_weights(labels, dataset.sample_ids,
+                    ordinary="nstep" if args.variant == "nstep" else "zero")
                 if rank == 0:
                     counterfactual.save(output/"counterfactual_labels")
             elif args.variant == "natural_unweighted":

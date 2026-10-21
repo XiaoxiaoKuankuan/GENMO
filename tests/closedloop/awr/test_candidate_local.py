@@ -183,3 +183,11 @@ def test_group_only_control_changes_no_group_scores_and_freezes_one_global_scale
     assert (result.raw_weights[~labels.group_valid] == 1).all()
     torch.testing.assert_close(result.normalized[labels.group_valid], labels.normalized[labels.group_valid])
     assert result.weights.mean() == pytest.approx(1.)
+    _, nstep = group_only_weights(labels, labels.sample_ids, ordinary="nstep")
+    torch.testing.assert_close(nstep.normalized[labels.group_valid], labels.normalized[labels.group_valid])
+    torch.testing.assert_close(nstep.normalized[~labels.group_valid],
+        labels.nstep_advantage[~labels.group_valid]/labels.identity["component_scales"]["nstep"]["std"])
+    torch.testing.assert_close(nstep.returns, labels.returns)
+    torch.testing.assert_close(nstep.group_valid, labels.group_valid)
+    assert nstep.identity["label_id"] != result.identity["label_id"]
+    torch.testing.assert_close(labels.weights, before)
