@@ -86,3 +86,108 @@ launch/exit/verified JSON保留实际进度。启动器只执行既有统一入�
 
 后续阶段日志为through10.log、formal.log；本次全部阶段都写同一运行目录，
 前2轮和第10轮完整保存后自动恢复，累计上限保持200，不重置Adam或预算。
+
+
+新奖励真实MC与系数移除验证
+-------------------------
+
+13:45完成192/192训练、32/32独立验证任务采集，13:46新MC预热通过并保存完整
+checkpoint。总墙钟1397.18秒（含物理采集与价值拟合），选中mc_ratio=1纯MC监督；
+独立验证2447条上层状态MSE4243.5067→140.5231，EV-0.0002967→0.9240160，
+MSE相对下降96.6885%。配对运动reset子集EV0.919890、站立子集0.979962。
+这些只评价Stage1下Critic价值初始化，不是Actor物理收益，不与旧奖励MC数值直接比较。
+
+从preheat_val/rank07一个完整episode的无损控制侧车重算800控制步，跟踪分项
+gate/activity_gate均为1，weighted_rate与score×weight误差低于1e-12。
+其中旧活动度诊断比值最低0.22576398，该步跟踪奖励率仍为2.29494006，确认
+实际PhysX采集后的消费路径也不再打折。actual_reward_gate_verified.json保存样本
+路径和结果。未改变配对活动度完整性、参考/GMT时钟或其他权重。
+
+已开始phases/eval_initial的32完整任务Stage1基线；此处仍未记录PPO收益。
+
+
+新基线与正式PPO已执行
+--------------------
+
+13:56新Stage1基线32任务全部完成，status=passed、物理失败0，来源均衡episode
+回报134.76824495，平均实际执行56.385秒；完整报告为本run/evaluation_baseline.json，
+墙钟511.10秒。基线仍是Stage1，取消活动折扣及偏航终止后的数值不能和旧run直接
+相减声称收益。两种协议的原始结果都保留。
+
+14:02出现真实Actor Adam接受记录，14:06正式接受第1轮：14315有效链，
+计划4次/实际接受3次、实际Adam8次；应用12288条链，BC实际1536样本。
+第4小批次有限KL拒绝且下一步低于候选下限，正常结束本批剩余更新，保留前3步，
+不是整轮异常或回滚。最终全部14315链KL均值0.05775855、最大1.54782996通过。
+最后接受LR1.953125e-7、最后试探1.220703125e-7、名义LR恢复1e-6。
+
+首小批次16层Transformer均有真实更新，各层changed_fraction最低0.99974385，
+最小Adam增量RMS4.8631651e-8，更新传到最终参考。首轮整批PPO目标增益
+-0.00980845，明确记录尚无收益证据，不将旧奖励下4096的正增益移植为本轮结论。
+原预定流程继续第2轮，并不新增立即目标改善/个别新增失败门禁。
+
+首轮墙钟555.51秒，其中采集236.76秒，Actor更新事务200.49秒，Critic10.31秒；
+额外概率审计等计入整轮墙钟，分项存在包含关系不能盲目相加。峰值allocated
+显存28282096640字节；前两轮不冒充所有200轮的内存稳定保证。
+
+当前第2轮正在执行，首个训练后完整checkpoint计划在第2轮结束评估后发布。
+latest暂仍指向iteration0的evaluated_initial，不能用它否认已接受的第1轮，
+也不能把它冒充训练后模型。真实进度见metrics/<session>.jsonl和initial.log。
+
+
+第2轮完成、配对物理结果与真实续训
+--------------------------------
+
+14:12第2轮正式接受：15804条链全部参与，计划/接受4/4，实际Adam5次、BC2048；
+全链KL均值0.05976578、最大1.07106691通过。新rollout首个候选从1e-6试探，
+实际接受LR依次5e-7、6.25e-7、7.8125e-7、9.765625e-7，离开恢复名义1e-6，
+全部16层每次真实更新，确认临时步长未拖累下一批。整批PPO目标增益-0.00592847，
+本轮墙钟392.42秒，峰值allocated28490522112字节。累计2轮/7次接受更新。
+
+14:23完成训练后模型32任务评估、保存、正常退出0。原会话summary为passed，
+启动器initial.verified.json核对配置、基线、实际16层更新与完整保存后自动恢复。
+
+checkpoint：checkpoints/stage10_r000002_a000007_01792563802018114743_f89246b78882_evaluated_final_000002+controlled_end.pt
+
+SHA256：5e7bf84bad78f80b359a2fa61840ae49b42572025f8d933d54f47bbdc428c988。
+
+独立只读mmap核验完整checkpoint：Actor Adam所有已建状态step=7，18个参数组
+均保留lr_multiplier，实际lr等于1e-6×倍率；未因换rollout或会话清空Adam。
+通过既有加载检查后，新会话edd1c92d-ae51-45d5-9f47-d250a83f2def写出
+resolved_config.yaml，8个worker502730～502737对应rank0～7，父torchrun502689。
+同run已实际恢复到累计目标10，完成后启动器继续200，不重做MC或Stage1基线。
+
+同协议物理结果：基线0/32失败→第2轮0/32，参考拒绝0。来源均衡episode回报
+134.76824495→135.27276820（+0.3744%）；按每秒配对增益0.00440438，
+95%区间[-0.00011091,0.00995773]跨0。活动度保留99.8976%。两轮没有证明持续收益，
+不得用小幅回报变化宣称稳定改善；PPO目标仍负的事实也保留，训练按授权继续观察。
+
+以下为相同32任务、来源均衡的八项RMS及根位置尾部指标，负相对变化表示误差降低：
+
+* Tracking/root_position_rms_m: 0.36320115 → 0.34760217，-4.2949%。
+* Tracking/root_orientation_rms_rad: 0.53626452 → 0.52812515，-1.5178%。
+* Tracking/body_position_rms_m: 0.02635105 → 0.026280792，-0.2666%。
+* Tracking/body_orientation_rms_rad: 0.13752492 → 0.13757153，+0.0339%。
+* Tracking/body_lin_vel_rms_m_s: 0.16254515 → 0.16309394，+0.3376%。
+* Tracking/body_ang_vel_rms_rad_s: 1.0560918 → 1.0569907，+0.0851%。
+* Tracking/foot_height_rms_m: 0.010437941 → 0.010429589，-0.0800%。
+* Tracking/leg_joint_position_rms_rad: 0.089291733 → 0.089496136，+0.2289%。
+* Tracking/root_position_p95_m: 0.80720511 → 0.80697396，-0.0286%。
+
+完整配对指标、checkpoint/Adam核验和续训进程证明保存在本地及服务器analysis的
+paired_iteration2_summary.json、checkpoint2_optimizer_verified.json、formal_resume_verified.json。
+临时源码/patch清理完成，正式模型和全部32任务证据保留。
+
+当前查看继续到第10轮的训练：
+
+::
+
+  ssh 6000D-Server-1 'tail -n 30 -f /data1/user/liwei/GENMO_outputs/closedloop_stage10/stage2_transformer_4096_ungated_20261021_analysis/through10.log'
+
+查看自动续训阶段：
+
+::
+
+  ssh 6000D-Server-1 'tail -n 20 -f /data1/user/liwei/GENMO_outputs/closedloop_stage10/stage2_transformer_4096_ungated_20261021_analysis/launcher.log'
+
+第10轮结束后查看formal.log；TensorBoard始终为同一physical/tensorboard_compact，
+没有为2/10/200拆成三个run。旧54轮实验、旧模型和56轮异常证据完全保留。
