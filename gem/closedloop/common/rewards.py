@@ -36,6 +36,7 @@ from .performance import profiled
 
 
 TRACKING_OBJECTIVE = "gmt.motion_tracking.eight_terms.v1"
+NO_ACTIVITY_REWARD_VERSION = "stage2.gmt8_no_activity_gate.v2"
 TRACKING_FUNCTIONS = {
     "anchor_pos": "motion_global_anchor_position_error_exp",
     "anchor_ori": "motion_global_anchor_orientation_error_exp",
@@ -160,7 +161,7 @@ class ExecutionReward:
 
     def _validate_config(self):
         config = self.config
-        if config["version"] != "stage2.gmt8_reference_limits.v1":
+        if config["version"] not in ("stage2.gmt8_reference_limits.v1", NO_ACTIVITY_REWARD_VERSION):
             raise ValueError("Unknown explicit execution reward identity")
         if type(config['music_reward_enabled']) is not bool:
             raise ValueError('music_reward_enabled must be an explicit boolean')
@@ -633,7 +634,7 @@ class ExecutionReward:
             except (ValueError, KeyError, IndexError, TypeError) as error:
                 score, valid, raw, normalized = 0., False, {"reason": str(error)}, {}
                 errors.append(f"{name}: {error}")
-            multiplier = gate if name in {"track", "music"} else 1.
+            multiplier = self.reward_multiplier(name, gate)
             weight = self.config[weight_key] * (-1 if "penalty" in weight_key else 1)
             rate = score * weight * multiplier
             components[name] = {"enabled": True, "valid": bool(valid), "raw": raw, "normalized": normalized,
@@ -666,6 +667,16 @@ class ExecutionReward:
                 "errors": errors, "components": components, "activity": activity, "diagnostics": diagnostics,
                 "joint_limit_diagnostics":boundary,
                 "scales": copy.deepcopy(self.config["scales"])}
+
+    def reward_multiplier(self, name, activity_gate):
+        """新版AWR删除活动度乘数；活动窗口只作为动作保留诊断。
+
+        旧版本仅供显式旧配置的数值回归，原运行使用冻结源码。两种奖励身份不能
+        混入一个Replay，不能把删除门控带来的分数变化称为策略学习收益。
+        """
+        if self.config["version"] == NO_ACTIVITY_REWARD_VERSION:
+            return 1.0
+        return activity_gate if name in {"track", "music"} else 1.0
 
 
 def resolve_reward_config(config=None):

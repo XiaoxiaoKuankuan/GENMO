@@ -14,7 +14,7 @@ import torch
 
 from .checkpoint import capture_rng, restore_rng
 from .io import cpu_copy, digest
-from .losses import weighted_denoising
+from .losses import weighted_denoising, per_sample_denoising
 from .metrics import actor_module_name
 
 
@@ -42,9 +42,19 @@ class ActorTrainer:
         self.actor, self.dataset, self.bc = actor, dataset, bc
         self.config, self.distributed, self.seed = config, distributed, seed
         self.bc_weight = bc_weight
+        self.reference_weight = float(config.get("reference_weight", 0.))
+        if not math.isfinite(self.reference_weight) or self.reference_weight < 0:
+            raise ValueError("Invalid frozen-reference coefficient")
+        self.reference_actor = (copy.deepcopy(actor).eval().requires_grad_(False)
+                                if self.reference_weight else None)
+        self.last_reference_loss = 0.
         self.optimizer = torch.optim.AdamW([p for p in actor.parameters() if p.requires_grad],
                                           lr=config["lr"], weight_decay=config.get("weight_decay", .01))
         self.total_steps = config["epochs"]*math.ceil(len(dataset)/config["global_batch"])
+        if config.get("max_optimizer_steps") is not None:
+            if type(config["max_optimizer_steps"]) is not int or config["max_optimizer_steps"] < 1:
+                raise ValueError("max_optimizer_steps must be positive")
+            self.total_steps = min(self.total_steps, config["max_optimizer_steps"])
         warmup = config.get("warmup_steps", 100)
         def scale(step):
             if step < warmup:
@@ -61,13 +71,19 @@ class ActorTrainer:
                     bc_weight=self.bc_weight, epoch=self.epoch, cursor=self.cursor, steps=self.steps,
                     rng=capture_rng(self.distributed.device), history=self.history,
                     data_identity=digest(self.dataset.sample_ids), total_steps=self.total_steps,
-                    seed=self.seed, config=self.config)
+                    seed=self.seed, config=self.config,
+                    reference_actor=(cpu_copy(self.reference_actor.state_dict())
+                                     if self.reference_actor is not None else None))
 
     def load_state_dict(self, state, *, rank_state=None):
         if (state["data_identity"] != digest(self.dataset.sample_ids) or state["total_steps"] != self.total_steps
                 or state["seed"] != self.seed or state["config"] != self.config):
             raise ValueError("Actor optimizer/data/budget identity differs on resume")
         self.actor.load_state_dict(state["actor"]); self.optimizer.load_state_dict(state["optimizer"])
+        if self.reference_actor is not None:
+            if state.get("reference_actor") is None:
+                raise ValueError("Frozen reference missing from checkpoint")
+            self.reference_actor.load_state_dict(state["reference_actor"])
         self.scheduler.load_state_dict(state["scheduler"])
         local = rank_state or state
         self.bc.load_state_dict(local["bc"]); restore_rng(local["rng"], self.distributed.device)
@@ -88,16 +104,39 @@ class ActorTrainer:
     def backward_awr(self, indices, *, step):
         d, c = self.distributed, self.config
         local = indices[d.rank::d.world_size]
-        total = 0.
+        total, reference_total = 0., 0.
         for offset in range(0, len(local), c["microbatch"]):
             ids = local[offset:offset+c["microbatch"]]
             batch = self.dataset.batch(ids, d.device)
             t, noise = self._noise(ids, step=step)
-            out = self.actor.denoising_forward(batch["conditions"], batch["target"], batch["target_valid"],
-                                               timesteps=t, noise=noise, music_dropout=False)
+            # Replay监督对应部署去噪器；eval只关闭Dropout，梯度仍然开启。
+            mode = self.actor.training
+            if c.get("replay_eval_mode", True):
+                self.actor.eval()
+            try:
+                kwargs = dict(timesteps=t, noise=noise, music_dropout=False,
+                              guidance_scale=c.get("denoising_guidance_scale", 2.5))
+                out = self.actor.denoising_forward(batch["conditions"], batch["target"],
+                                                   batch["target_valid"], **kwargs)
+                teacher = None
+                if self.reference_actor is not None:
+                    with torch.no_grad():
+                        teacher = self.reference_actor.denoising_forward(batch["conditions"], batch["target"],
+                                                                         batch["target_valid"], **kwargs)
+            finally:
+                self.actor.train(mode)
             loss, _ = weighted_denoising(out["pred_x_start"], out["target_x_start"], batch["free_mask"],
                                          batch["weights"], global_count=len(indices))
-            loss.backward(); total += float(loss.detach())
+            objective = loss
+            if teacher is not None:
+                # 两分支各自锚定，避免CFG输出相同但分支互相抵消；不使用Contact伪标签。
+                anchor = sum(per_sample_denoising(out[key], teacher[key], batch["free_mask"])
+                             for key in ("conditional_x_start", "unconditional_x_start"))*.5
+                anchor = anchor.double().sum()/len(indices)
+                objective = objective+self.reference_weight*anchor
+                reference_total += float(anchor.detach())
+            objective.backward(); total += float(loss.detach())
+        self.last_reference_loss = float(d.sum(torch.tensor(reference_total, dtype=torch.float64, device=d.device)))
         return float(d.sum(torch.tensor(total, dtype=torch.float64, device=d.device)))
 
     def backward_bc(self, coefficient):
@@ -149,11 +188,11 @@ class ActorTrainer:
         c, d = self.config, self.distributed
         self.actor.train()
         try:
-            while self.epoch < c["epochs"]:
+            while self.epoch < c["epochs"] and self.steps < self.total_steps:
                 epoch_start = time.perf_counter()
                 order = torch.randperm(len(self.dataset), generator=torch.Generator().manual_seed(
                     self.seed+self.epoch)).tolist()
-                while self.cursor < len(order):
+                while self.cursor < len(order) and self.steps < self.total_steps:
                     if d.root(should_stop):
                         return dict(complete=False, steps=self.steps, seconds=time.perf_counter()-started)
                     ids = order[self.cursor:self.cursor+c["global_batch"]]
@@ -177,7 +216,9 @@ class ActorTrainer:
                     update_done = time.perf_counter()
                     self.steps += 1; self.cursor += len(ids); self.bc.bc_update_steps += 1
                     entry = dict(step=self.steps, epoch=self.epoch, samples=len(ids), awr_loss=awr_loss,
-                                 bc_loss=bc_loss, bc_weight=self.bc_weight, total_loss=awr_loss+self.bc_weight*bc_loss,
+                                 bc_loss=bc_loss, bc_weight=self.bc_weight,
+                                 reference_loss=self.last_reference_loss, reference_weight=self.reference_weight,
+                                 total_loss=awr_loss+self.bc_weight*bc_loss+self.reference_weight*self.last_reference_loss,
                                  gradient_norm=float(norm), clipped_gradient_norm=min(float(norm), c.get("gradient_clip", 1.)),
                                  lr=learning_rate, awr_seconds=awr_done-step_start,
                                  bc_forward_backward_seconds=bc_done-awr_done,

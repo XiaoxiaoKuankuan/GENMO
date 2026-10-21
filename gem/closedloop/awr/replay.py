@@ -102,6 +102,13 @@ class EpisodeReplay:
         manifest = json.loads((path / "manifest.json").read_text())
         if manifest["sha256"] != publication["sha256"]:
             raise ValueError("Published episode identity mismatch")
+        old = self.db.execute("SELECT sha FROM episodes WHERE id=?", (identifier,)).fetchone()
+        if old:
+            if old[0] != publication["sha256"]:
+                raise ValueError("Duplicate episode with changed content")
+            # 已登记的不可变分片在首次提交及每次训练read时完整校验；恢复只需核对回执。
+            # 避免STOP前重复扫描整个历史Replay。未登记的新分片仍走下面的完整验证。
+            return False
         episode = AWRCompleteEpisode.from_dict(read_tree(path, episode_metadata_keys=TRAINING_METADATA_KEYS))
         if episode.training_view:
             raise ValueError("Immutable replay must originate from complete physical evidence")
@@ -109,11 +116,6 @@ class EpisodeReplay:
         expected = self._validate(episode)
         if supplied is None or not torch.equal(supplied, expected):
             raise ValueError("Stored MC labels differ from actual rewards")
-        old = self.db.execute("SELECT sha FROM episodes WHERE id=?", (identifier,)).fetchone()
-        if old:
-            if old[0] != publication["sha256"]:
-                raise ValueError("Duplicate episode with changed content")
-            return False
         size = sum(p.stat().st_size for p in path.iterdir() if p.is_file())
         if self.size_bytes() + size > self.max_bytes:
             raise OSError("Replay byte budget exhausted; release unused snapshots first")

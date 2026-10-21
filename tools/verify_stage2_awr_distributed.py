@@ -69,7 +69,8 @@ def main():
                 target = batch["target_qpos30"][indices].to(d.device)
                 valid = batch["target_qpos30_valid"][indices].to(d.device)
                 out = actor.denoising_forward(context, target, valid,
-                                               timesteps=times[indices].to(d.device), noise=noise[indices].to(d.device))
+                                               timesteps=times[indices].to(d.device), noise=noise[indices].to(d.device),
+                                               guidance_scale=config["awr"]["actor"]["denoising_guidance_scale"])
                 weights = torch.tensor([1.+i/3 for i in indices], device=d.device)
                 loss, _ = weighted_denoising(out["pred_x_start"], out["target_x_start"],
                     valid & ~context["known_qpos30_mask"], weights, global_count=n_awr)

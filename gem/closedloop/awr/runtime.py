@@ -232,6 +232,9 @@ class AWRRun:
         reports = self.d.gather(local_report)
         self.json_artifact(f"macro{macro:03d}_collection_{attempt}", lambda: dict(ranks=reports, seconds=time.perf_counter()-started))
         completed = self.d.root(lambda: self._recover_publications(macro))
+        if self.d.root(lambda: stop_requested(self.root)):
+            self.publish(status="stopped", phase="collect")
+            return None
         if len(completed) != len(plan["tasks"]):
             if self.d.root(lambda: stop_requested(self.root)):
                 self.publish(status="stopped", phase="collect")
@@ -296,6 +299,9 @@ class AWRRun:
             behavior = cpu_copy(self.actor.state_dict())
         snapshot = self.collect(macro)
         if snapshot is None:
+            return False
+        if self.d.root(lambda: stop_requested(self.root)):
+            self.publish(status="stopped", phase="collect_complete")
             return False
         episodes = self.d.local(lambda: [self.replay.read(key, training=True) for key in snapshot.episode_ids])
         prefix = f"macro{macro:03d}"
@@ -382,6 +388,14 @@ class AWRRun:
             baseline = self.eval_actor("stage1_fixed", self.fixed_plan)
             comparison = paired_comparison(baseline, current)
             self.json_artifact(method_key+"_comparison", lambda: comparison)
+            if method == "self_distillation" and self.config["awr"].get("retention_gate"):
+                from .retention import retention_comparison
+                retention = self.json_artifact(method_key+"_retention", lambda: retention_comparison(
+                    baseline, current, self.config["awr"]["retention_gate"]))
+                if not retention["accepted"]:
+                    self.publish(status="retention_rejected", phase="self_distillation_retention",
+                                 rejected_checkpoint=self.state["artifacts"][final_key])
+                    return False
             if self.config["awr"]["final_all_unique"] and macro == self.config["awr"]["max_macro_iterations"]-1:
                 self.eval_actor(method_key+"_all", self.full_plan)
         awr = self.json_artifact(prefix+"_awr_comparison", lambda: None)
@@ -405,6 +419,9 @@ class AWRRun:
         self.publish(macro=macro+1, phase="macro_complete",
                      **checkpoint_selection(self.state, reference, awr, versus_saved, prefix+"_awr_fixed"))
         self.json_artifact(prefix+"_replay_cost", self.replay.report)
+        if self.config["awr"].get("stop_on_physical_rejection", False) and not awr["acceptable"]:
+            self.publish(status="physical_rejected", phase="awr_physical_rejection")
+            return False
         return True
 
     def save_actor(self, name, trainer, macro, method):

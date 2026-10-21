@@ -43,6 +43,13 @@ def load_config(path, *, profile=None):
         c["runtime"].update(num_envs=s["envs_per_rank"], generation_batch=s["envs_per_rank"])
     if c["model"] != dict(ddim_steps=20, guidance_scale=2.5, history_steps=50):
         raise ValueError("AWR v1 requires original Stage1 DDIM20/CFG2.5/history50")
+    from gem.closedloop.common.rewards import NO_ACTIVITY_REWARD_VERSION
+    if c["reward"]["version"] != NO_ACTIVITY_REWARD_VERSION:
+        raise ValueError("New AWR runs require the reward without activity multiplication")
+    if c["awr"]["actor"].get("denoising_guidance_scale") != c["model"]["guidance_scale"]:
+        raise ValueError("Replay training CFG must match the deployed sampler")
+    if not c["awr"].get("retention_gate") or not c["awr"].get("run_ablation"):
+        raise ValueError("Self-distillation retention must pass before AWR updates")
     if c["runtime"]["allow_shared_gpu"]:
         raise ValueError("AWR cannot take occupied GPUs")
     if c.get("diagnostics", {}).get("reward_substeps") is not True:

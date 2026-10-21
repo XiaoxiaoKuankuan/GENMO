@@ -386,3 +386,29 @@ RNG逐元素一致；3个独立诊断优化步不计入正式训练，0新物理
 已精确清理，正式checkpoint未变。证据为
 `docs/validation/stage2_awr_pilot512_checkpoint_restore_20261020.json`与
 `docs/validation/stage2_awr_pilot512_distributed_resume_20261020.json`。
+# 2026-10-21 修复验收边界
+
+正式五轮运行已由用户停止，完成四轮；原目录和源码保持冻结。新AWR配置使用
+`stage2.gmt8_no_activity_gate.v2`，Tracking分数不再乘活动度，仍报告活动度。
+旧奖励Replay不能直接作为新版Critic标签；旧Actor条件/参考可以由隔离诊断工具
+以全1权重只读用于自蒸馏，不携带旧优势进入新训练。
+
+Replay现在监督与部署相同的CFG2.5预测。Stage1真实BC保持原完整损失和真实Contact。
+`awr.actor.reference_weight`可为冻结起始Actor的两个去噪分支增加保留约束；0表示关闭。
+它是新增工程正则，不冒充原AWR公式。`max_optimizer_steps`为独立短实验显式上限。
+普通自蒸馏先通过`awr.retention_gate`的完整音乐检查，才进入AWR；物理退化则停止后续宏迭代。
+
+Server-2隔离诊断（在最新、干净AWR交付工作树；原正式源码不更新）：
+
+```bash
+export NCCL_CUMEM_HOST_ENABLE=0 NCCL_IB_DISABLE=1 NCCL_SOCKET_IFNAME=lo TORCH_NCCL_BLOCKING_WAIT=1
+export CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 PYTHONDONTWRITEBYTECODE=1 OMP_NUM_THREADS=4
+/data0/user/liwei/closedloop_stage10_v3_runtime/env_isaac_genmo/bin/python -B -m torch.distributed.run \
+  --standalone --nproc_per_node=8 tools/diagnose_stage2_awr_distillation.py train \
+  --source-run /data1/user/liwei/GENMO_outputs/stage2_awr/formal5_20261020_01 \
+  --output /data1/user/liwei/GENMO_outputs/stage2_awr/distillation_repair_20261021_01
+```
+
+`train`最多三组×120优化步，保存全部实际步数和固定val探针；`evaluate`使用同一命令
+替换操作并追加`--candidate bounded`，重建Stage1与候选的32任务物理基线。两步均不会
+启动后续AWR或长期训练。数学修复、离线生成保留、物理保留、强化收益必须分开报告。

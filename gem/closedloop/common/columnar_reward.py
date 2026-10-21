@@ -167,7 +167,7 @@ def evaluate_columns(reward, trace, *, timings=None):
         if np.any(scores[name]<0) or (name != "joint_limit" and np.any(scores[name]>1+1e-12)): raise ValueError('Reward score outside [0,1]')
         if name != "joint_limit": scores[name] = np.minimum(scores[name],1.)
     rates = {name: scores[name]*cfg[key]*(-1 if 'penalty' in key else 1)*
-             (np.asarray(gates) if name in ('track','music') else 1.) for name,key in WEIGHTS.items()}
+             reward.reward_multiplier(name, np.asarray(gates)) for name,key in WEIGHTS.items()}
     total = sum(rates.values())
     mark('consistency_and_reward_integration_seconds')
     results = []
@@ -196,7 +196,7 @@ def evaluate_columns(reward, trace, *, timings=None):
         components = {}
         for name,key in WEIGHTS.items():
             primitive = row['reward_primitives']['components'][name] if name!='music' else None
-            gate = gates[i] if name=='track' or name=='music' and reward.music_enabled else 1.
+            gate = reward.reward_multiplier(name, gates[i]) if name != 'music' or reward.music_enabled else 1.
             components[name] = dict(enabled=(name!='music' or reward.music_enabled) and (name!='stable' or cfg['stable_weight']!=0),valid=True if primitive is None else bool(primitive['valid']),
                 raw=music_raw if primitive is None else primitive['raw'],
                 normalized=(dict(beat=float(beats[i]),intensity=intensity[i]) if reward.music_enabled else {}) if primitive is None else primitive['normalized'],

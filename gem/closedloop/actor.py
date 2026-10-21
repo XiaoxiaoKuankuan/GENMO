@@ -282,6 +282,19 @@ class Stage1Actor(nn.Module):
             ),
         }
 
+    def _combine_guidance(self, conditional, unconditional, adapted, scale):
+        """采样与Replay监督共用同一CFG算式；两个分支都保留梯度。
+
+        这里只组合单个扩散时间的预测，不回放采样链。已知前缀在组合后再次回写，
+        避免s和1-s的浮点抵消改变输入承诺；Contact仍是预测，不成为Replay真值。
+        """
+        return {
+            "pred_x_start": self._constrain(unconditional["pred_x_start"] + scale * (
+                conditional["pred_x_start"] - unconditional["pred_x_start"]), adapted),
+            "static_conf_logits": unconditional["static_conf_logits"] + scale * (
+                conditional["static_conf_logits"] - unconditional["static_conf_logits"]),
+        }
+
     def training_forward(self, batch, timesteps=None, noise=None):
         validate_stage1_training_batch(batch, history_steps=self.history_steps)
         return self.denoising_forward(
@@ -291,13 +304,17 @@ class Stage1Actor(nn.Module):
 
     def denoising_forward(
         self, conditions, target_qpos30, target_valid, *,
-        timesteps=None, noise=None, music_dropout=False,
+        timesteps=None, noise=None, music_dropout=False, guidance_scale=1.0,
     ):
         """共享x0监督内核；AWR仅传原始条件与表示目标，不伪造Contact/ground标签。
 
         Stage1入口仍先执行原完整监督校验，并显式开启原音乐Dropout。AWR默认保留
         采集条件。此处只前向一个训练扩散时间，不调用DDIM采样或策略概率计算。
         """
+        if not math.isfinite(guidance_scale):
+            raise ValueError("guidance_scale must be finite")
+        if music_dropout and guidance_scale != 1.0:
+            raise ValueError("Guided Replay supervision cannot randomly drop music")
         adapted = self.adapt_conditions(conditions)
         valid = target_valid
         if valid.dtype != torch.bool or valid.shape != adapted["known_x"].shape:
@@ -338,6 +355,14 @@ class Stage1Actor(nn.Module):
                 torch.rand(target_x.shape[0], device=target_x.device) < self.music_mask_prob
             )
         output = self._denoise(xt, timesteps, adapted, self.encode_conditions(adapted, drop_music))
+        conditional = output["pred_x_start"]
+        unconditional = conditional
+        if guidance_scale != 1.0:
+            drop_all = torch.ones_like(drop_music)
+            uncond = self._denoise(xt, timesteps, adapted, self.encode_conditions(adapted, drop_all))
+            unconditional = uncond["pred_x_start"]
+            output = self._combine_guidance(output, uncond, adapted, guidance_scale)
+        output.update(conditional_x_start=conditional, unconditional_x_start=unconditional)
         return {**output, "target_x_start": target_x, "xt": xt, "music_dropout_mask": drop_music}
 
     def forward(self, batch, timesteps=None, noise=None):
@@ -367,17 +392,7 @@ class Stage1Actor(nn.Module):
             if guidance_scale == 1.0:
                 return cond
             uncond = self._denoise(value, timestep, adapted, unconditional)
-            # 沿用原 CFG 的 head 插值；两个分支的唯一条件差异是音乐可见性。
-            guided = uncond["pred_x_start"] + guidance_scale * (
-                cond["pred_x_start"] - uncond["pred_x_start"]
-            )
-            logits = uncond["static_conf_logits"] + guidance_scale * (
-                cond["static_conf_logits"] - uncond["static_conf_logits"]
-            )
-            return {
-                "pred_x_start": self._constrain(guided, adapted),
-                "static_conf_logits": logits,
-            }
+            return self._combine_guidance(cond, uncond, adapted, guidance_scale)
 
         diffusion = self._diffusion(int(steps))
         trace = []

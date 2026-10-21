@@ -166,7 +166,7 @@ reward:
       body_ang_vel: 0.15873015873015872
       foot_height: 0.126984126984127
       leg_joint_pos: 0.07936507936507936
-  version: stage2.gmt8_reference_limits.v1
+  version: stage2.gmt8_no_activity_gate.v2
 dataset:
   random_start: true
   sampling_contract: rank_shared_time_bins.v1
@@ -200,6 +200,13 @@ evaluation:
 awr:
   seed: 42
   actor_version: 0
+  stop_on_physical_rejection: true
+  retention_gate:
+    min_duration_ratio: 0.99
+    min_return_ratio: 0.99
+    min_activity_ratio: 0.9
+    max_motion_ratio: 1.1
+    max_error_ratio: 1.1
   initial_episodes: 512
   new_episodes: 128
   replay_capacity: 512
@@ -211,6 +218,9 @@ awr:
   profile: pilot
   source_commits: {}
   actor:
+    # 与部署采样同一CFG预测器；旧单分支只能由隔离诊断工具显式调用。
+    denoising_guidance_scale: 2.5
+    replay_eval_mode: true
     epochs: 5
     global_batch: 256
     microbatch: 8
