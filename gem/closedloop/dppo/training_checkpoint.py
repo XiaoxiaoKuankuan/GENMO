@@ -110,8 +110,13 @@ class AsyncCheckpointWriter:
 
 def load_training_checkpoint(path,*,identity,actor,critic,actor_optimizer,critic_optimizer,controller):
     payload=torch.load(path,map_location='cpu',weights_only=False,mmap=True)
-    if payload.get('schema')!=SCHEMA or not same_execution(payload.get('identity'),identity):
-        raise ValueError('Checkpoint format or actual training configuration differs')
+    # 固定评估是只读监视配置；更换清单不改变已学参数、Adam、奖励或采样策略。
+    # 配对评估仍严格比较自己的完整任务与执行配置，并单独重建Stage1基线。
+    previous=payload.get('identity') or {}
+    old_training={k:v for k,v in previous.items() if k!='evaluation'}
+    new_training={k:v for k,v in identity.items() if k!='evaluation'}
+    if payload.get('schema')!=SCHEMA or not same_execution(old_training,new_training):
+        raise ValueError('Checkpoint schema or actual training configuration differs')
     from .checkpoint import _validate_model_state,_validate_optimizer_state
     _validate_model_state(actor,payload['actor'],'当前 Actor')
     _validate_model_state(critic,payload['critic'],'当前 Critic')
@@ -123,6 +128,10 @@ def load_training_checkpoint(path,*,identity,actor,critic,actor_optimizer,critic
     actor.load_state_dict(payload['actor'],strict=True);critic.load_state_dict(payload['critic'],strict=True)
     actor_optimizer.load_state_dict(payload['actor_optimizer']);critic_optimizer.load_state_dict(payload['critic_optimizer'])
     controller.load_state_dict(payload['bc_controller'])
+    if previous.get('evaluation')!=identity.get('evaluation') and 'state' in payload:
+        payload['state']=dict(payload['state'])
+        for key in ('best_observed','best_saved','regression_monitor'):
+            payload['state'].pop(key,None)
     if any(p.dtype!=torch.float32 for p in actor.parameters()):raise ValueError('Restored Actor master dtype changed')
     return payload
 

@@ -34,6 +34,33 @@ stage2_transformer_4096_ungated_20261021_physical
 分析/启动日志：/data1/user/liwei/GENMO_outputs/closedloop_stage10/
 stage2_transformer_4096_ungated_20261021_analysis
 
+2026-10-21 用户更新：固定质量评估只使用训练集音乐
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+用户明确本次不评价泛化性，只要求训练集物理执行改善。主配置evaluation改为
+purpose=training_progress、split=train、original_split=train，选择当前Stage2训练集
+与重划分前原训练集的交集。仍固定16首不同音乐，AIST++/AIOZ-GDANCE/FineDance/Mine
+分别2/4/5/5首，每首种子42、1729，共32个任务，从头运行完整可用配对片段。
+服务器1真实目录选样已核验：全部当前train且原train，最短8秒、最长257.2秒、
+平均72.3167秒。它们用于评估，不进入PPO Buffer，也不冒充MC监督或未见测试。
+
+当前正在进行的through10会话继续至原定第10轮完整保存，不丢弃已训练轮次。
+随后同目录恢复至200时自动补测新清单Stage1基线：直接引用永久冻结的Stage1
+副本作为只读策略，完整20步随机采样和真实PhysX执行；当前训练Actor、Adam、BC、
+Critic、轮次和训练RNG保持。价值诊断使用该时点只读Critic，报告显式记录其来源。
+新基线成功后，旧验证集baseline/reference/best指针存档到evaluation_protocols，
+启用新的根baseline与固定漂移参考。旧episode/checkpoint保留；新旧音乐的原始
+分数不可直接连接解读，后续收益只与新清单Stage1基线配对。
+
+checkpoint恢复不再把只读evaluation配置变化当作算法改变；其余实际训练配置、
+模型映射、Adam结构、奖励、概率核及物理时钟仍检查。MC不因更换评估清单重做，
+总训练上限仍200，全部16层Transformer及4096链mini-batch不改。
+新流程最终114项CPU回归通过、1项原有跳过；包括真实小扩散网络的Stage1完整20步
+输出逐位一致、32任务分片/评估/配对、非空Adam恢复、原始归属筛选、成功存档及
+补测失败不覆盖旧基线，以及两进程Gloo验证只有rank0持预算管理器时仍能正确广播、
+所有rank保持轮次和当前Actor。补测世界启动/失败也恢复训练RNG。实际新Stage1
+物理基线在第10轮恢复后执行，不能提前声称完成。
+
 新实验累计上限从创建起为200。使用现有八卡入口，自动完成新协议的完整MC
 价值校准：96首独立训练音乐×2种子，训练重置分布下采到真实终点；独立32任务
 验证。固定质量评估以16首音乐×2种子从片段开头执行，建立新Stage1基线。

@@ -77,9 +77,12 @@ def configuration(path,*,genmo_repo=None,gmt_repo=None):
     if s['evaluation'].get('start_mode','beginning') not in ('beginning','center','mixed') or type(s['evaluation'].get('unique_music',False))is not bool:
         raise ValueError('Invalid evaluation music selection configuration')
     selection=s['evaluation'].get('samples_per_source',4)
-    if (s['evaluation'].get('split','val') not in ('val','test') or not
+    train_monitor=s['evaluation'].get('purpose')=='training_progress'
+    if train_monitor and s['evaluation'].get('original_split')!='train':
+        raise ValueError('Training progress evaluation requires explicit original train music')
+    if (s['evaluation'].get('split','val') not in (('train',) if train_monitor else ('val','test')) or not
             (_source_counts(selection) or selection=='all_unique' and s['evaluation'].get('unique_music',False))):
-        raise ValueError('Held-out evaluation requires val/test and explicit positive source counts or all_unique music selection')
+        raise ValueError('Held-out evaluation requires val/test; training progress requires explicit train purpose, and positive source counts or all_unique music selection')
     if s['evaluation'].get('episode_seconds') is None and s['evaluation'].get('start_mode','beginning')!='beginning':
         raise ValueError('Complete song evaluation cannot start in the middle')
     for key in ('eta', 'guidance_scale'):

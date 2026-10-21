@@ -156,6 +156,9 @@ stage10:
     collection: all_ranks
     world_size: 8
   evaluation:
+    # 当前只衡量训练集内物理收益：当前train与重划分前train的交集，单独重测Stage1基线。
+    purpose: training_progress
+    original_split: train
     envs_per_rank: 4
     episode_seconds: null
     every_control_steps: 100000000
@@ -169,7 +172,7 @@ stage10:
     - 42
     - 1729
     selection_seed: 42
-    split: val
+    split: train
     start_mode: beginning
     unique_music: true
     every_actor_iterations: 50

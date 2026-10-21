@@ -506,6 +506,9 @@ def run(cargs,config,distributed):
             report.update(status='passed',scope='complete_MC_critic_preheat_without_Actor_updates',final_state=c.state)
             raise _FiniteDiagnosticComplete
         # 正式训练的固定价值诊断必须绑定已预热Critic；纯Actor评估不隐式训练Critic。
+        from .evaluation_rebaseline import ensure_training_progress_baseline
+        if not cargs.collect_only:
+            report['evaluation_monitor_change']=ensure_training_progress_baseline(c)
         if cargs.collect_only:
             report['initial_evaluation_skipped_for_finite_data_diagnostic']=True
         elif _requires_initial_evaluation(cargs,c.state,root_call(distributed,lambda:(c.output/'evaluation_baseline.json').exists())):
