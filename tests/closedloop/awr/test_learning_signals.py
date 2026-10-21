@@ -305,7 +305,8 @@ def test_replay_and_label_binary_roundtrip_preserves_reference_ledger_and_candid
         replay.close()
 
 
-def test_offline_all_modes_use_one_frozen_snapshot_and_never_change_run(tmp_path, episode_factory):
+@pytest.mark.parametrize("weight_parameters", [{}, dict(beta=.7, weight_cap=7., weight_mean_normalize=False)])
+def test_offline_all_modes_use_one_frozen_snapshot_and_never_change_run(tmp_path, episode_factory, weight_parameters):
     import json
     from gem.closedloop.awr.checkpoint import Checkpoints
     from gem.closedloop.awr.replay import EpisodeReplay
@@ -326,7 +327,7 @@ def test_offline_all_modes_use_one_frozen_snapshot_and_never_change_run(tmp_path
                                         selected_critic_fingerprints=["a", "b"]))
     atomic_json(root/"tasks.json", dict(tasks=[e.task for e in episodes]))
     state = dict(request_sha256="test", source_commits={"genmo": "frozen"},
-        config=dict(awr=dict(advantage=dict(mode="group_hybrid", nstep=4, alpha=.5,
+        config=dict(awr=dict(critic=weight_parameters, advantage=dict(mode="group_hybrid", nstep=4, alpha=.5,
                                           credit_mode="current_plus_lookahead"),
                             candidate_sampling=dict(enabled=True, advantage_mode="hybrid"))),
         artifacts=dict(macro000_replay=snapshot.snapshot_id, macro000_critics=reference,
@@ -338,4 +339,9 @@ def test_offline_all_modes_use_one_frozen_snapshot_and_never_change_run(tmp_path
     assert len(result["variants"]) == 11 and result["full_credit_equals_nstep_max_error"] < 1e-12
     assert result["variants"]["mc"]["weight"] == result["variants"]["hybrid0"]["weight"]
     assert len({v["label_id"] for v in result["variants"].values()}) == 11
+    assert all(result["weight_parameters"][key] == value for key, value in weight_parameters.items())
+    from gem.closedloop.awr.advantages import AdvantageLabelSet
+    stored = AdvantageLabelSet.load(tmp_path/"audit"/"mc")
+    for key, value in weight_parameters.items():
+        assert stored.identity["weight_config"][key] == value
     assert (root/"state.json").read_bytes() == original
