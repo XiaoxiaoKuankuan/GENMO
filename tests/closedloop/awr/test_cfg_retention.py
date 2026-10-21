@@ -97,6 +97,12 @@ def test_no_activity_multiplier_scalar_and_columnar():
     for left, right in zip(actual, expected):
         compare_reward_evidence(left, right)
     assert vector.scalar_audits == 1 and vector.columnar_fallbacks == 0
+    from gem.closedloop.common.evaluation import _decision_evidence
+    evaluated = _decision_evidence(dict(rewards=[r["reward"] for r in actual],
+        executed_control_steps=len(actual), metadata=dict(reward_details=actual,
+        latency_seconds=.1, generated=dict(prefix_frames=17, generation_horizon_frames=60,
+                                           joint_limit_diagnostics={}))), 0)
+    assert evaluated["reward_sum"] == pytest.approx(sum(r["reward"] for r in expected))
 
 
 def test_retention_accepts_unchanged_but_rejects_more_violent_motion():
