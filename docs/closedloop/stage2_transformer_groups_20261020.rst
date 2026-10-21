@@ -258,3 +258,84 @@ SHA256 ``6c923cd744eb02cc4d64ba0584881125375c11e597bfbb8264f38922fb219ae2``，
 21:36正式恢复已越过严格加载与世界初始化，进入``train_000038``采集；
 按LOCAL_RANK核验恰好8个worker，无退出记录。最新完成轮次仍37，不能把
 正在采集第38轮写成已完成38轮。对应证据为``host_copy_continue_verified.json``。
+
+
+2026-10-21 取消源码门禁并通过完整恢复与固定评估
+--------------------------------------------
+
+用户明确要求源码版本不再作为训练/评估通行证。过去源码哈希表被放进训练和评估
+记录，再要求与当前文件逐项相同，导致工程修复后仍被拦截；这与PPO是否能正确
+计算无直接关系。此次统一取消该要求，不重写任何旧checkpoint或初始基线。
+
+具体改动：
+
+* execution_compatibility.py统一生成去除源码表的比较副本，三类源码记录仅作追溯。
+* training_checkpoint.py恢复及评估Actor加载不比较源码版本，仍校验实际模型/Adam/核。
+* evaluation_runtime.py、periodic_monitor.py、tensorboard_metrics.py及比较/回报审计工具
+  一起移除源码相等要求，覆盖固定参考、配对统计、best指针和验证曲线完整链条。
+* critic_preheat.py移除源码AST扫描/相等检查，导出只保留原checkpoint的来源记录；
+  真实Actor权重、价值目标、监督窗口、冻结编码器与结构校验保留，不因源码变化重做MC。
+* training.py源码快照只作best-effort日志，源码变化或记录失败不再影响训练退出码。
+* 删除退役repair_host_copy_checkpoint.py及源码迁移专用测试。今后不需要迁移旧文件哈希。
+* 两仓库AGENTS.md写入用户长期约定，禁止换个名字重新增加源码门禁。
+
+服务器1隔离回归156 passed（9.32秒），包括实际旧源码参考进入真实评估入口、
+非空Adam/BC恢复、配对统计/曲线/best、Critic预热、完整链PPO和GPU搬运回归。
+实际模型形状、概率核或奖励配置不匹配的反例仍拒绝。临时源码/pytest/传输包已清理。
+
+实际八卡验证直接加载原第49轮完整checkpoint，无源码迁移、无重新预热；
+session为0801785c-6a9b-41a1-a975-f2a21ba6e3d9。重新完成第50轮：14325条有效链，
+7/7更新接受、0次候选回溯，Actor累计388→395。32个完整音乐任务全部执行，
+固定参考入口、统计、曲线和完整保存全部通过，退出0，冻结GMT未变、world关闭。
+
+第50轮完整checkpoint SHA256：
+``0803bc1d0864962fb8171db2c516928397860162224c3168253b8a355f97d71c``。
+路径为原run下``checkpoints/stage10_r000050_a000395_01792551314932299248_52c841582412_evaluated_periodic_r000050_c000020666121_a000050+controlled_end.pt``。
+
+第50轮的实际物理结果与源码规则修复分开判断：Stage1物理失败3/32，当前4/32，
+其中新增失败2个、原失败恢复1个；参考拒绝为0。来源等权每秒回报
+2.387237→2.390481（+0.1359%），配对差0.003244分/秒，95%区间
+[-0.004090,0.011393]跨零，尚无明确整体收益。实际活动度保留99.8863%。
+八项跟踪RMS相对变化如下，负值为误差降低：
+
+.. list-table::
+   :header-rows: 1
+
+   * - 指标
+     - RMS变化
+   * - Anchor位置
+     - -2.292%
+   * - Anchor姿态
+     - +2.266%
+   * - 身体位置
+     - +0.268%
+   * - 身体姿态
+     - -0.171%
+   * - 身体线速度
+     - +1.634%
+   * - 身体角速度
+     - +2.043%
+   * - 双脚高度
+     - -0.810%
+   * - 十二腿关节位置
+     - +0.475%
+
+没有因为新增失败而禁止训练，也没有修改奖励、Critic、Transformer训练范围、
+Gaussian噪声、PPO或物理时钟。当前只是取消了人工源码门禁，不能把恢复训练称为物理收益。
+
+10:56服务器1已从同run第50轮/395次完整状态继续正式八卡训练，tmux为
+``genmo_transformer_groups_train``。10:58核验会话ed2c9524-cae0-4ef5-9931-a9421f96f402
+已进入第51轮采集，LOCAL_RANK 0～7恰好8个worker，无退出文件。
+总接受预算仍200；原未落盘的2轮及本次修复前丢失的第50轮均保留消耗，当前
+预算已接受53而模型编号50，剩余147轮，实际停止编号197，不暗中扩限。
+
+查看当前训练日志：
+
+.. code-block:: bash
+
+   ssh 6000D-Server-1 'tail -n 40 -f /data1/user/liwei/GENMO_outputs/closedloop_stage10/stage2_transformer_groups_20261020_analysis/source_records_formal.log'
+
+本地证据为``outputs/analysis/stage2_transformer_groups_20261020/source_records_fix``；
+服务器analysis保留``source_records_tests_20261021.log``、
+``source_records_validation_summary.json``及``source_records_formal_verified.json``。
+原基线和旧checkpoint仍为原记录；训练的新版本仅记录在新会话/新checkpoint中。
