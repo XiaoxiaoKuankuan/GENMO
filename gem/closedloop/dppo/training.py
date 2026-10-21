@@ -491,8 +491,14 @@ def run(cargs,config,distributed):
         complete_mc=c.stage['critic'].get('complete_mc',{})
         if getattr(cargs,'mc_validation_only',False):
             from .mc_calibration import calibrate_critic
-            report['independent_mc_validation']=calibrate_critic(c,'validation_'+str(c.state['policy_version']),fit=False)
-            report.update(status='passed',scope='independent_complete_MC_no_network_updates',final_state=c.state)
+            refit=getattr(cargs,'refit_critic',False)
+            report['independent_mc_validation']=calibrate_critic(c,'validation_'+str(c.state['policy_version']),fit=False,
+                fit_if_ev_below=1. if refit else None)
+            if refit:
+                # 复用现有候选/独立MSE比较；仅保存Critic学习及真实交互，Actor/Adam不更新。
+                _snapshot(c,'independent_complete_mc_critic_calibration',wait=True)
+            report.update(status='passed',scope=('independent_complete_MC_critic_calibration_no_Actor_updates'
+                if refit else 'independent_complete_MC_no_network_updates'),final_state=c.state)
             raise _FiniteDiagnosticComplete
         if complete_mc.get('enabled') and not cargs.collect_only and not cargs.evaluate_only and not c.state.get('mc_preheat_complete'):
             from .mc_calibration import calibrate_critic
