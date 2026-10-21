@@ -98,10 +98,11 @@ DEFINITIONS.update({
 for _source in SOURCES:
     DEFINITIONS[f'Sampling/time_share_{_source}'] = '本轮普通 Actor 实际采集秒数中该来源的占比；不是选曲概率，也不是唯一时间覆盖率。'
 
-SCOPES = ('training', 'validation', 'critic_mc')
+SCOPES = ('training', 'validation', 'train_evaluation', 'critic_mc')
 EVENT_TAG_OVERRIDES = {
     ('training', 'Reward/total_per_second'): 'Reward/train_total_per_second',
     ('validation', 'Reward/total_per_second'): 'Reward/validation_total_per_second',
+    ('train_evaluation', 'Reward/total_per_second'): 'Reward/validation_total_per_second',
 }
 # 坐标平均KL保留在JSON和历史读取中，面板用真实链KL、名义LR和PPO目标增益，标签总量不增加。
 JSON_ONLY_TAGS = {'Policy/trainable_kl', 'Policy/max_step_kl'}
@@ -109,7 +110,7 @@ EVENT_DEFINITIONS = {tag: description for tag, description in DEFINITIONS.items(
                      if tag != 'Reward/total_per_second' and tag not in JSON_ONLY_TAGS}
 EVENT_DEFINITIONS.update({
     'Reward/train_total_per_second': '分/秒，普通训练采集各来源积分回报/实际采集秒数再来源等权；任务不断变化，只作训练监视。',
-    'Reward/validation_total_per_second': '分/秒，固定验证各任务每秒回报先来源内平均再来源等权；优先用此曲线判断训练效果。',
+    'Reward/validation_total_per_second': '分/秒，固定评估任务的来源等权每秒回报；任务可来自显式train监视或val，原split保留在报告，不能自动称为泛化。',
 })
 
 ERROR_TAGS = {

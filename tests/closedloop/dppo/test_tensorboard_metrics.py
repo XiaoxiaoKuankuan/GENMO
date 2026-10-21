@@ -26,6 +26,16 @@ from gem.closedloop.dppo.tensorboard_metrics import (
 from tools.eval.export_stage10_tensorboard import export_run
 
 
+def test_training_music_evaluation_scope_writes_same_single_run(tmp_path):
+    writer=DashboardWriter(tmp_path/'events')
+    writer.write('train_evaluation',0,{'Reward/total_per_second':1.25})
+    writer.flush();writer.close()
+    events=EventAccumulator(str(tmp_path/'events'));events.Reload()
+    values=events.Scalars('Reward/validation_total_per_second')
+    assert len(values)==1 and values[0].value==pytest.approx(1.25)
+    assert not (tmp_path/'events/train_evaluation').exists()
+
+
 def training_record(step=1):
     collections = []
     for duration, rate, failures in [(1., 1., 0), (9., 10., 2)]:
