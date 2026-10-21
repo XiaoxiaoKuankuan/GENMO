@@ -84,7 +84,9 @@ def main():
     parser.add_argument('--config',type=Path,required=True)
     parser.add_argument('--output-dir',type=Path,required=True)
     parser.add_argument('--branches',nargs='+',choices=('4096','8192','full','objective4096'),
-                        default=['4096','8192','full','objective4096'])
+                        default=['4096','8192','full'])
+    parser.add_argument('--kl-only',action='store_true',help='显式旧对照；默认所有批量统一使用真实整批目标感知回溯')
+    parser.add_argument('--audit-full-gradient-direction',action='store_true',help='额外整批反向解释Adam实际增量，生产训练不增加该成本')
     args=parser.parse_args()
     rank=int(os.environ['RANK']);world=int(os.environ['WORLD_SIZE']);local=int(os.environ['LOCAL_RANK'])
     if world!=8 or rank!=local:raise ValueError('仅支持服务器单节点八卡')
@@ -149,7 +151,7 @@ def main():
             output=args.output_dir/name
             root_call(distributed,lambda:output.mkdir(exist_ok=False))
             trust=copy.deepcopy(config['stage9']['trust_region'])
-            trust['objective_aware']=name=='objective4096'
+            trust['objective_aware']=not args.kl_only
             trust['objective_search_attempts']=3
             batch=count if name=='full' else (4096 if name=='objective4096' else int(name))
             started=time.perf_counter();torch.cuda.reset_peak_memory_stats(distributed.device)
@@ -165,6 +167,7 @@ def main():
                 clip=.1,soft_kl=.1,bc_samples_per_rollout=2048,bc_min_global_batch=256,
                 bc_enabled=False,audit_full_rollout_objective=True,trust_region=trust,
                 kl_limits=config['stage10']['kl'],detailed_diagnostics=True,step_observer=observer,
+                audit_full_gradient_direction=args.audit_full_gradient_direction,
                 full_rollout_observer=retain_statistics)
             kl=final_kl(policy,rows,cache,manifest,distributed=distributed,microbatch=128,clip=.1)
             counts=distributed.all_gather_object(len(eligible));offset=sum(counts[:rank])
@@ -183,7 +186,9 @@ def main():
                 after=immutable_cpu_snapshot(after_probe),selection='ordinary_and_actual_high_KL_high_ratio',
                 generation_world_anchors=[r.metadata.get('generation_world_anchor') for r in selected]),
                 output/f'probe_rank{rank:02d}.pt'))
-            result=dict(branch=name,minibatch_chains=batch,effective_chains=count,actor=report,final_kl=kl,
+            result=dict(branch=name,minibatch_chains=batch,effective_chains=count,
+                objective_aware=trust['objective_aware'],full_gradient_direction_measured=args.audit_full_gradient_direction,
+                actor=report,final_kl=kl,
                 acceptance=check_candidate_kl(kl,config['stage10']['kl']),output=probe_summary(probes),
                 wall_seconds=max(distributed.all_gather_object(time.perf_counter()-started)),
                 peak_allocated_bytes=max(distributed.all_gather_object(torch.cuda.max_memory_allocated())),

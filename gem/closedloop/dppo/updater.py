@@ -36,7 +36,8 @@ def _actor_update(policy,optimizer,rows,targets,cache,manifest,controller,*,dist
                     gradient_observer=None,step_observer=None,bc_samples_per_rollout=2048,
                     bc_min_global_batch=1,snr=False,step_strategy='intermediate4',detailed_diagnostics=False,
                     max_active_clip=.95,trust_region=None,kl_limits=None,max_optimizer_steps=None,candidate_observer=None,
-                    bc_enabled=True,audit_full_rollout_objective=False,full_rollout_observer=None):
+                    bc_enabled=True,audit_full_rollout_objective=False,full_rollout_observer=None,
+                    audit_full_gradient_direction=False):
     """每条完整链一个联合比值；两遍微批反传与全局SUM严格保持同一目标。"""
     from .chain_ppo import evaluate_chain_records,from_records,backward_chain_surrogate
     from .gaussian_probability import chain_diagnostics,distribution
@@ -68,7 +69,7 @@ def _actor_update(policy,optimizer,rows,targets,cache,manifest,controller,*,dist
         full=distributed.gather_rows(packed,[position for position,_ in owned],count)
         return records,full[:,:32].reshape(count,4,8),full[:,32]
     objective_aware=bool((trust_region or {}).get('objective_aware',False))
-    audit_full_rollout_objective=audit_full_rollout_objective or objective_aware
+    audit_full_rollout_objective=audit_full_rollout_objective or objective_aware or audit_full_gradient_direction
     full_current=full_adv=full_before=None
     objective_history=[];source_names=[]
     selected_position={index:position for position,index in enumerate(selected)}
@@ -136,6 +137,15 @@ def _actor_update(policy,optimizer,rows,targets,cache,manifest,controller,*,dist
                 component_observer=observation.capture_component if (detailed_diagnostics or audit_full_rollout_objective) and observation is not None else None,
                 bc_enabled=bc_enabled)
             if gradient_observer is not None:gradient_observer(actor,len(reports))
+            direction=None
+            if audit_full_gradient_direction:
+                from .optimizer_direction import FullRolloutDirection
+                all_local=[rows[i] for _,i in all_owned]
+                all_records=full_current[[position for position,_ in all_owned]]
+                with _local_phase(distributed,'diagnostic_full_rollout_gradient'),policy_phase(policy):
+                    direction=FullRolloutDirection.capture(actor,distributed,lambda:
+                        backward_chain_surrogate(policy,all_local,cache,all_records,clip=clip,
+                            global_chain_count=len(selected),microbatch=microbatch))
             with _local_phase(distributed,'stage2_actor_clip'):
                 total_norm=float(torch.nn.utils.clip_grad_norm_([p for p in actor.parameters() if p.requires_grad],
                     grad_clip_norm,error_if_nonfinite=True))
@@ -194,7 +204,7 @@ def _actor_update(policy,optimizer,rows,targets,cache,manifest,controller,*,dist
                             trust_region=transaction,optimizer_step_executed=bool(transaction['attempt_count']),
                             accepted_optimizer_steps=0,pending_BC_and_RNG_restored=True,
                             wall_seconds=max(distributed.all_gather_object(time.perf_counter()-started)))
-                        del observation
+                        del observation,direction
                         break
                     import json
                     raise FloatingPointError('Full-chain trust-region exhausted; whole iteration rollback: '+json.dumps(transaction))
@@ -205,6 +215,9 @@ def _actor_update(policy,optimizer,rows,targets,cache,manifest,controller,*,dist
             parameter_report=local_call(distributed,lambda:observation.finish(optimizer,contributions['bc_weight'],clip_factor)
                 if observation is not None else None)
             parameter_report=distributed.broadcast_object(parameter_report)
+            direction_report=local_call(distributed,lambda:direction.finish(observation.before) if direction is not None else None)
+            direction_report=distributed.broadcast_object(direction_report)
+            del direction
             del observation
             probe_after=local_call(distributed,lambda:output_probe(policy,local,cache,max_chains=2))
             output_change=compare_probes(probe_before,probe_after,distributed)
@@ -244,7 +257,8 @@ def _actor_update(policy,optimizer,rows,targets,cache,manifest,controller,*,dist
                 per_denoising_step=[dict(step=s+15,joint_kl=distribution(post_records[:,s,0]),
                     mean_coordinate_kl=distribution(post_records[:,s,1])) for s in range(4)],
                 gradient_contributions=contributions,total_gradient_norm=total_norm,gradient_clip_factor=clip_factor,
-                parameter_update=parameter_report,output_change=output_change,trust_region=transaction,
+                parameter_update=parameter_report,full_gradient_direction=direction_report,
+                output_change=output_change,trust_region=transaction,
                 candidate_checked_chains=len(guard_indices) if trust_region is not None else len(indices),
                 candidate_check_scope=('full_rollout' if objective_aware else 'all_previously_used_plus_current_chains') if trust_region is not None else 'current_minibatch',
                 bc_global_samples=sum(s['batch'] for s in shards),bc_samples_by_source=dict(sources),
