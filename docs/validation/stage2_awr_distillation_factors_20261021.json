@@ -1,0 +1,769 @@
+{
+  "source_commit": "36eeb3d",
+  "physical_status": "pending",
+  "episodes": 32,
+  "replay_samples": 2188,
+  "arms": {
+    "legacy": {
+      "config": {
+        "bc_global_batch": 128,
+        "bc_gradient_ratio": 0.1,
+        "bc_microbatch": 4,
+        "calibration_batches": 8,
+        "checkpoint_every_steps": 50,
+        "denoising_guidance_scale": 1.0,
+        "epochs": 5,
+        "global_batch": 256,
+        "gradient_clip": 1.0,
+        "lr": 1e-05,
+        "max_optimizer_steps": 120,
+        "microbatch": 8,
+        "min_lr_ratio": 0.1,
+        "reference_weight": 0.0,
+        "replay_eval_mode": false,
+        "warmup_steps": 100,
+        "weight_decay": 0.01
+      },
+      "bc_coefficient": 0.01366578514366661,
+      "metrics": {
+        "acceleration": {
+          "baseline": 14.991103756627528,
+          "current": 18.272563793564405,
+          "ratio": 1.21889382464491
+        },
+        "jerk": {
+          "baseline": 306.3645673131471,
+          "current": 372.81893631444683,
+          "ratio": 1.2169127114930824
+        },
+        "normalized_unknown_qpos30_mse": {
+          "baseline": 1.2928317854450029,
+          "current": 1.4254583873065387,
+          "ratio": 1.1025861240067552
+        },
+        "speed": {
+          "baseline": 1.4036892950967719,
+          "current": 1.6795279156346816,
+          "ratio": 1.1965097415086385
+        },
+        "true_contact_bce": {
+          "baseline": 5.968125921220946,
+          "current": 5.844682983028521,
+          "ratio": 0.97931629797664
+        }
+      },
+      "joint_change_mean_rad": 0.13025418141667994,
+      "gates": {
+        "joint_change_bounded": false,
+        "motion_bounded": false,
+        "true_contact_retained": true
+      },
+      "steps": 45,
+      "training_seconds": 78.0382974203676,
+      "sample_exposures": 10940,
+      "bc_sample_exposures": 5760,
+      "max_actual_lr": 4.5e-06,
+      "peak_bytes_by_rank": [
+        4308592128,
+        4309902848,
+        4309902848,
+        4309902848,
+        4309902848,
+        4309902848,
+        4309902848,
+        4309902848
+      ],
+      "last_step": {
+        "step": 45,
+        "epoch": 4,
+        "samples": 140,
+        "awr_loss": 0.027501183528719206,
+        "bc_loss": 0.19179401427390985,
+        "bc_weight": 0.01366578514366661,
+        "reference_loss": 0.0,
+        "reference_weight": 0.0,
+        "total_loss": 0.030122199319627785,
+        "gradient_norm": 0.8158823847770691,
+        "clipped_gradient_norm": 0.8158823847770691,
+        "lr": 4.5e-06,
+        "awr_seconds": 0.10760676395148039,
+        "bc_forward_backward_seconds": 1.6059259613975883,
+        "gradient_reduction_seconds": 0.18968890141695738,
+        "clip_optimizer_seconds": 0.016420528292655945,
+        "bc_and_update_seconds": 1.8120353911072016,
+        "seconds": 1.919642155058682
+      },
+      "parameter_changes": {
+        "cond_exists_embedder": {
+          "changed_elements": 2100183,
+          "elements": 2100224,
+          "l2": 0.028478192426456696
+        },
+        "denoiser": {
+          "changed_elements": 204746332,
+          "elements": 209871872,
+          "l2": 0.2750602826792872
+        },
+        "denoiser.final_layer": {
+          "changed_elements": 1080319,
+          "elements": 1080350,
+          "l2": 0.01873121708235762
+        },
+        "denoiser.static_conf_head": {
+          "changed_elements": 1051631,
+          "elements": 1051650,
+          "l2": 0.02657029512708205
+        },
+        "history_encoder": {
+          "changed_elements": 200822,
+          "elements": 200832,
+          "l2": 0.006446886515417009
+        },
+        "music_embedder": {
+          "changed_elements": 2171836,
+          "elements": 2171904,
+          "l2": 0.025152445885179966
+        },
+        "prefix_encoder": {
+          "changed_elements": 139899,
+          "elements": 139904,
+          "l2": 0.006342601618184878
+        }
+      },
+      "checkpoint": {
+        "file": "legacy.pt",
+        "identity": {
+          "config": "6d904e1a85a8ae47eb982c222dc219d5b7535f1ef70394b518ca8afb1568469c",
+          "original_actor": "e881b975aaae97e344e57a8747e19de9817fd45357770fada3749801093ee28c",
+          "source_request": "6cf432adaaaba61c80929917e1fd75188fb421217864410438f25a08a7ca4d8b",
+          "source_run": "/data1/user/liwei/GENMO_outputs/stage2_awr/formal5_20261020_01",
+          "sources": {
+            "genmo": {
+              "branch": "feature/stage2-awr",
+              "commit": "36eeb3d1359084b09d4a87e7116de110384536fd",
+              "path": "/home/user/liwei/awr-worktrees/GENMO-delivery"
+            },
+            "gmt": {
+              "branch": "feature/stage2-awr",
+              "commit": "4ca256fe79d2dda22240011947ead276690e40f7",
+              "path": "/home/user/liwei/awr-worktrees/legged_lab_gmt"
+            }
+          }
+        },
+        "progress": {
+          "method": "legacy"
+        },
+        "sha256": "ce81404bf3cec62c29d8d652631d5a49825d7150ebc1532eac9868230b201cfe"
+      }
+    },
+    "conditional_eval": {
+      "config": {
+        "bc_global_batch": 128,
+        "bc_gradient_ratio": 0.1,
+        "bc_microbatch": 4,
+        "calibration_batches": 8,
+        "checkpoint_every_steps": 50,
+        "denoising_guidance_scale": 1.0,
+        "epochs": 5,
+        "global_batch": 256,
+        "gradient_clip": 1.0,
+        "lr": 1e-05,
+        "max_optimizer_steps": 120,
+        "microbatch": 8,
+        "min_lr_ratio": 0.1,
+        "reference_weight": 0.0,
+        "replay_eval_mode": true,
+        "warmup_steps": 100,
+        "weight_decay": 0.01
+      },
+      "bc_coefficient": 0.01366578514366661,
+      "metrics": {
+        "acceleration": {
+          "baseline": 14.991103756627528,
+          "current": 18.007906701574747,
+          "ratio": 1.2012395480628635
+        },
+        "jerk": {
+          "baseline": 306.3645673131471,
+          "current": 375.5126421180236,
+          "ratio": 1.22570519630032
+        },
+        "normalized_unknown_qpos30_mse": {
+          "baseline": 1.2928317854450029,
+          "current": 1.4029997118935618,
+          "ratio": 1.0852144321394745
+        },
+        "speed": {
+          "baseline": 1.4036892950967719,
+          "current": 1.6306118501657152,
+          "ratio": 1.16166152713539
+        },
+        "true_contact_bce": {
+          "baseline": 5.968125921220946,
+          "current": 5.921600841003048,
+          "ratio": 0.9922044070731705
+        }
+      },
+      "joint_change_mean_rad": 0.11726925057952871,
+      "gates": {
+        "joint_change_bounded": false,
+        "motion_bounded": false,
+        "true_contact_retained": true
+      },
+      "steps": 45,
+      "training_seconds": 75.99106236640364,
+      "sample_exposures": 10940,
+      "bc_sample_exposures": 5760,
+      "max_actual_lr": 4.5e-06,
+      "peak_bytes_by_rank": [
+        5994804736,
+        5994808832,
+        5994808832,
+        5994808832,
+        5994808832,
+        5994808832,
+        5994808832,
+        5994808832
+      ],
+      "last_step": {
+        "step": 45,
+        "epoch": 4,
+        "samples": 140,
+        "awr_loss": 0.022742497720173564,
+        "bc_loss": 0.19006699181045406,
+        "bc_weight": 0.01366578514366661,
+        "reference_loss": 0.0,
+        "reference_weight": 0.0,
+        "total_loss": 0.02533991239315827,
+        "gradient_norm": 1.269835114479065,
+        "clipped_gradient_norm": 1.0,
+        "lr": 4.5e-06,
+        "awr_seconds": 0.12836460769176483,
+        "bc_forward_backward_seconds": 1.3138456549495459,
+        "gradient_reduction_seconds": 0.18660135101526976,
+        "clip_optimizer_seconds": 0.016478280536830425,
+        "bc_and_update_seconds": 1.516925286501646,
+        "seconds": 1.6452898941934109
+      },
+      "parameter_changes": {
+        "cond_exists_embedder": {
+          "changed_elements": 2100201,
+          "elements": 2100224,
+          "l2": 0.029874485845057443
+        },
+        "denoiser": {
+          "changed_elements": 204746738,
+          "elements": 209871872,
+          "l2": 0.2898237981489301
+        },
+        "denoiser.final_layer": {
+          "changed_elements": 1080307,
+          "elements": 1080350,
+          "l2": 0.01946147740317465
+        },
+        "denoiser.static_conf_head": {
+          "changed_elements": 1051629,
+          "elements": 1051650,
+          "l2": 0.02619174098315124
+        },
+        "history_encoder": {
+          "changed_elements": 200823,
+          "elements": 200832,
+          "l2": 0.006231961251765738
+        },
+        "music_embedder": {
+          "changed_elements": 2171849,
+          "elements": 2171904,
+          "l2": 0.0264798127162501
+        },
+        "prefix_encoder": {
+          "changed_elements": 139899,
+          "elements": 139904,
+          "l2": 0.006176797307336493
+        }
+      },
+      "checkpoint": {
+        "file": "conditional_eval.pt",
+        "identity": {
+          "config": "6d904e1a85a8ae47eb982c222dc219d5b7535f1ef70394b518ca8afb1568469c",
+          "original_actor": "e881b975aaae97e344e57a8747e19de9817fd45357770fada3749801093ee28c",
+          "source_request": "6cf432adaaaba61c80929917e1fd75188fb421217864410438f25a08a7ca4d8b",
+          "source_run": "/data1/user/liwei/GENMO_outputs/stage2_awr/formal5_20261020_01",
+          "sources": {
+            "genmo": {
+              "branch": "feature/stage2-awr",
+              "commit": "36eeb3d1359084b09d4a87e7116de110384536fd",
+              "path": "/home/user/liwei/awr-worktrees/GENMO-delivery"
+            },
+            "gmt": {
+              "branch": "feature/stage2-awr",
+              "commit": "4ca256fe79d2dda22240011947ead276690e40f7",
+              "path": "/home/user/liwei/awr-worktrees/legged_lab_gmt"
+            }
+          }
+        },
+        "progress": {
+          "method": "conditional_eval"
+        },
+        "sha256": "dc72c2461afce2777db5668696fe9406539fc4303c807294ef4ea221b3407b3e"
+      }
+    },
+    "guided": {
+      "config": {
+        "bc_global_batch": 128,
+        "bc_gradient_ratio": 0.1,
+        "bc_microbatch": 4,
+        "calibration_batches": 8,
+        "checkpoint_every_steps": 50,
+        "denoising_guidance_scale": 2.5,
+        "epochs": 5,
+        "global_batch": 256,
+        "gradient_clip": 1.0,
+        "lr": 1e-05,
+        "max_optimizer_steps": 120,
+        "microbatch": 8,
+        "min_lr_ratio": 0.1,
+        "reference_weight": 0.0,
+        "replay_eval_mode": true,
+        "warmup_steps": 100,
+        "weight_decay": 0.01
+      },
+      "bc_coefficient": 0.01366578514366661,
+      "metrics": {
+        "acceleration": {
+          "baseline": 14.991103756627528,
+          "current": 13.17694452473124,
+          "ratio": 0.8789842788530996
+        },
+        "jerk": {
+          "baseline": 306.3645673131471,
+          "current": 271.41310391494426,
+          "ratio": 0.8859154513045315
+        },
+        "normalized_unknown_qpos30_mse": {
+          "baseline": 1.2928317854450029,
+          "current": 1.1442518873442045,
+          "ratio": 0.8850740678148967
+        },
+        "speed": {
+          "baseline": 1.4036892950967719,
+          "current": 1.2216396186981915,
+          "ratio": 0.8703062871288552
+        },
+        "true_contact_bce": {
+          "baseline": 5.968125921220946,
+          "current": 3.6171198923718277,
+          "ratio": 0.6060729850739888
+        }
+      },
+      "joint_change_mean_rad": 0.22440694376162074,
+      "gates": {
+        "joint_change_bounded": false,
+        "motion_bounded": false,
+        "true_contact_retained": true
+      },
+      "steps": 45,
+      "training_seconds": 84.1221442297101,
+      "sample_exposures": 10940,
+      "bc_sample_exposures": 5760,
+      "max_actual_lr": 4.5e-06,
+      "peak_bytes_by_rank": [
+        6671504896,
+        6673477120,
+        6673477120,
+        6673477120,
+        6673477120,
+        6673477120,
+        6673477120,
+        6673477120
+      ],
+      "last_step": {
+        "step": 45,
+        "epoch": 4,
+        "samples": 140,
+        "awr_loss": 0.052350925705728246,
+        "bc_loss": 0.37910985032794997,
+        "bc_weight": 0.01366578514366661,
+        "reference_loss": 0.0,
+        "reference_weight": 0.0,
+        "total_loss": 0.057531759466157614,
+        "gradient_norm": 2.4667067527770996,
+        "clipped_gradient_norm": 1.0,
+        "lr": 4.5e-06,
+        "awr_seconds": 0.20325334090739489,
+        "bc_forward_backward_seconds": 1.3685996942222118,
+        "gradient_reduction_seconds": 0.18660667166113853,
+        "clip_optimizer_seconds": 0.01648355182260275,
+        "bc_and_update_seconds": 1.5716899177059531,
+        "seconds": 1.774943258613348
+      },
+      "parameter_changes": {
+        "cond_exists_embedder": {
+          "changed_elements": 2100197,
+          "elements": 2100224,
+          "l2": 0.037364260604771986
+        },
+        "denoiser": {
+          "changed_elements": 204748201,
+          "elements": 209871872,
+          "l2": 0.42026792559971865
+        },
+        "denoiser.final_layer": {
+          "changed_elements": 1080345,
+          "elements": 1080350,
+          "l2": 0.03886194697715055
+        },
+        "denoiser.static_conf_head": {
+          "changed_elements": 1051638,
+          "elements": 1051650,
+          "l2": 0.05105521442222888
+        },
+        "history_encoder": {
+          "changed_elements": 200824,
+          "elements": 200832,
+          "l2": 0.009845560812636486
+        },
+        "music_embedder": {
+          "changed_elements": 2171861,
+          "elements": 2171904,
+          "l2": 0.03232682857027169
+        },
+        "prefix_encoder": {
+          "changed_elements": 139904,
+          "elements": 139904,
+          "l2": 0.008470000595464636
+        }
+      },
+      "checkpoint": {
+        "file": "guided.pt",
+        "identity": {
+          "config": "6d904e1a85a8ae47eb982c222dc219d5b7535f1ef70394b518ca8afb1568469c",
+          "original_actor": "e881b975aaae97e344e57a8747e19de9817fd45357770fada3749801093ee28c",
+          "source_request": "6cf432adaaaba61c80929917e1fd75188fb421217864410438f25a08a7ca4d8b",
+          "source_run": "/data1/user/liwei/GENMO_outputs/stage2_awr/formal5_20261020_01",
+          "sources": {
+            "genmo": {
+              "branch": "feature/stage2-awr",
+              "commit": "36eeb3d1359084b09d4a87e7116de110384536fd",
+              "path": "/home/user/liwei/awr-worktrees/GENMO-delivery"
+            },
+            "gmt": {
+              "branch": "feature/stage2-awr",
+              "commit": "4ca256fe79d2dda22240011947ead276690e40f7",
+              "path": "/home/user/liwei/awr-worktrees/legged_lab_gmt"
+            }
+          }
+        },
+        "progress": {
+          "method": "guided"
+        },
+        "sha256": "b53634df2f4fb56a3cf4bf4723d9f26dbdf4a33f3137cdea470c239a8fa16448"
+      }
+    },
+    "bc_only": {
+      "config": {
+        "bc_global_batch": 128,
+        "bc_gradient_ratio": 0.1,
+        "bc_microbatch": 4,
+        "calibration_batches": 8,
+        "checkpoint_every_steps": 50,
+        "denoising_guidance_scale": 2.5,
+        "epochs": 5,
+        "global_batch": 256,
+        "gradient_clip": 1.0,
+        "lr": 1e-05,
+        "max_optimizer_steps": 120,
+        "microbatch": 8,
+        "min_lr_ratio": 0.1,
+        "reference_weight": 0.0,
+        "replay_coefficient": 0.0,
+        "replay_eval_mode": true,
+        "warmup_steps": 100,
+        "weight_decay": 0.01
+      },
+      "bc_coefficient": 0.01366578514366661,
+      "metrics": {
+        "acceleration": {
+          "baseline": 14.991103756627528,
+          "current": 15.053487601446623,
+          "ratio": 1.004161391037769
+        },
+        "jerk": {
+          "baseline": 306.3645673131471,
+          "current": 324.05232838364105,
+          "ratio": 1.0577343562462775
+        },
+        "normalized_unknown_qpos30_mse": {
+          "baseline": 1.2928317854450029,
+          "current": 1.2922798321501663,
+          "ratio": 0.9995730664259259
+        },
+        "speed": {
+          "baseline": 1.4036892950967719,
+          "current": 1.3254705606481103,
+          "ratio": 0.9442763190387734
+        },
+        "true_contact_bce": {
+          "baseline": 5.968125921220946,
+          "current": 4.819233186241572,
+          "ratio": 0.8074952254451869
+        }
+      },
+      "joint_change_mean_rad": 0.12493316980731611,
+      "gates": {
+        "joint_change_bounded": false,
+        "motion_bounded": true,
+        "true_contact_retained": true
+      },
+      "steps": 45,
+      "training_seconds": 85.39674685057253,
+      "sample_exposures": 10940,
+      "bc_sample_exposures": 5760,
+      "max_actual_lr": 4.5e-06,
+      "peak_bytes_by_rank": [
+        6671504896,
+        6673477120,
+        6673477120,
+        6673477120,
+        6673477120,
+        6673477120,
+        6673477120,
+        6673477120
+      ],
+      "last_step": {
+        "step": 45,
+        "epoch": 4,
+        "samples": 140,
+        "awr_loss": 0.22042364854964297,
+        "bc_loss": 0.18544112773088273,
+        "bc_weight": 0.01366578514366661,
+        "reference_loss": 0.0,
+        "reference_weight": 0.0,
+        "total_loss": 0.0025341986083694795,
+        "gradient_norm": 0.06545520573854446,
+        "clipped_gradient_norm": 0.06545520573854446,
+        "lr": 4.5e-06,
+        "awr_seconds": 0.20193264912813902,
+        "bc_forward_backward_seconds": 1.4534061988815665,
+        "gradient_reduction_seconds": 0.17920418921858072,
+        "clip_optimizer_seconds": 0.016449393704533577,
+        "bc_and_update_seconds": 1.6490597818046808,
+        "seconds": 1.8509924309328198
+      },
+      "parameter_changes": {
+        "cond_exists_embedder": {
+          "changed_elements": 2100184,
+          "elements": 2100224,
+          "l2": 0.022763258487345193
+        },
+        "denoiser": {
+          "changed_elements": 204745149,
+          "elements": 209871872,
+          "l2": 0.2252799885577836
+        },
+        "denoiser.final_layer": {
+          "changed_elements": 1080305,
+          "elements": 1080350,
+          "l2": 0.014439409699098429
+        },
+        "denoiser.static_conf_head": {
+          "changed_elements": 1051605,
+          "elements": 1051650,
+          "l2": 0.013565254040936565
+        },
+        "history_encoder": {
+          "changed_elements": 200820,
+          "elements": 200832,
+          "l2": 0.0065341083438118985
+        },
+        "music_embedder": {
+          "changed_elements": 2171852,
+          "elements": 2171904,
+          "l2": 0.022522030724691344
+        },
+        "prefix_encoder": {
+          "changed_elements": 139900,
+          "elements": 139904,
+          "l2": 0.006799167397436648
+        }
+      },
+      "checkpoint": {
+        "file": "bc_only.pt",
+        "identity": {
+          "config": "6d904e1a85a8ae47eb982c222dc219d5b7535f1ef70394b518ca8afb1568469c",
+          "original_actor": "e881b975aaae97e344e57a8747e19de9817fd45357770fada3749801093ee28c",
+          "source_request": "6cf432adaaaba61c80929917e1fd75188fb421217864410438f25a08a7ca4d8b",
+          "source_run": "/data1/user/liwei/GENMO_outputs/stage2_awr/formal5_20261020_01",
+          "sources": {
+            "genmo": {
+              "branch": "feature/stage2-awr",
+              "commit": "36eeb3d1359084b09d4a87e7116de110384536fd",
+              "path": "/home/user/liwei/awr-worktrees/GENMO-delivery"
+            },
+            "gmt": {
+              "branch": "feature/stage2-awr",
+              "commit": "4ca256fe79d2dda22240011947ead276690e40f7",
+              "path": "/home/user/liwei/awr-worktrees/legged_lab_gmt"
+            }
+          }
+        },
+        "progress": {
+          "method": "bc_only"
+        },
+        "sha256": "8e38d5c96acbd532b5e9c0b483fe6294b5900c0e6b546ddef591aaa5e96f1558"
+      }
+    },
+    "bounded": {
+      "config": {
+        "bc_global_batch": 128,
+        "bc_gradient_ratio": 0.1,
+        "bc_microbatch": 4,
+        "calibration_batches": 8,
+        "checkpoint_every_steps": 50,
+        "denoising_guidance_scale": 2.5,
+        "epochs": 5,
+        "global_batch": 256,
+        "gradient_clip": 1.0,
+        "lr": 1e-07,
+        "max_optimizer_steps": 120,
+        "microbatch": 8,
+        "min_lr_ratio": 0.1,
+        "reference_weight": 10.0,
+        "replay_eval_mode": true,
+        "warmup_steps": 100,
+        "weight_decay": 0.0
+      },
+      "bc_coefficient": 0.01366578514366661,
+      "metrics": {
+        "acceleration": {
+          "baseline": 14.991103756627528,
+          "current": 14.455659227916744,
+          "ratio": 0.9642825146564632
+        },
+        "jerk": {
+          "baseline": 306.3645673131471,
+          "current": 296.6901794813235,
+          "ratio": 0.9684219754370778
+        },
+        "normalized_unknown_qpos30_mse": {
+          "baseline": 1.2928317854450029,
+          "current": 1.2664425205762264,
+          "ratio": 0.9795880135638118
+        },
+        "speed": {
+          "baseline": 1.4036892950967719,
+          "current": 1.3517789435683283,
+          "ratio": 0.9630186311815787
+        },
+        "true_contact_bce": {
+          "baseline": 5.968125921220946,
+          "current": 5.84346593171429,
+          "ratio": 0.9791123727695823
+        }
+      },
+      "joint_change_mean_rad": 0.01733984243077648,
+      "gates": {
+        "joint_change_bounded": true,
+        "motion_bounded": true,
+        "true_contact_retained": true
+      },
+      "steps": 45,
+      "training_seconds": 90.23200500849634,
+      "sample_exposures": 10940,
+      "bc_sample_exposures": 5760,
+      "max_actual_lr": 4.5e-08,
+      "peak_bytes_by_rank": [
+        6671504896,
+        7578990592,
+        7578990592,
+        7578990592,
+        7578990592,
+        7578990592,
+        7578990592,
+        7578990592
+      ],
+      "last_step": {
+        "step": 45,
+        "epoch": 4,
+        "samples": 140,
+        "awr_loss": 0.2360038610418477,
+        "bc_loss": 0.18120997115329374,
+        "bc_weight": 0.01366578514366661,
+        "reference_loss": 0.0004276904594657286,
+        "reference_weight": 10.0,
+        "total_loss": 0.24275714216817593,
+        "gradient_norm": 14.192498207092285,
+        "clipped_gradient_norm": 1.0,
+        "lr": 4.5e-08,
+        "awr_seconds": 0.27417660504579544,
+        "bc_forward_backward_seconds": 1.361489555798471,
+        "gradient_reduction_seconds": 0.17492206301540136,
+        "clip_optimizer_seconds": 0.015112617053091526,
+        "bc_and_update_seconds": 1.5515242358669639,
+        "seconds": 1.8257008409127593
+      },
+      "parameter_changes": {
+        "cond_exists_embedder": {
+          "changed_elements": 2098974,
+          "elements": 2100224,
+          "l2": 0.000568828538319877
+        },
+        "denoiser": {
+          "changed_elements": 204542750,
+          "elements": 209871872,
+          "l2": 0.008006981567445868
+        },
+        "denoiser.final_layer": {
+          "changed_elements": 1080125,
+          "elements": 1080350,
+          "l2": 0.0008430609975341151
+        },
+        "denoiser.static_conf_head": {
+          "changed_elements": 1049498,
+          "elements": 1051650,
+          "l2": 0.0003038956474317192
+        },
+        "history_encoder": {
+          "changed_elements": 200517,
+          "elements": 200832,
+          "l2": 0.00022099110467908208
+        },
+        "music_embedder": {
+          "changed_elements": 2170291,
+          "elements": 2171904,
+          "l2": 0.0007530841256361896
+        },
+        "prefix_encoder": {
+          "changed_elements": 139851,
+          "elements": 139904,
+          "l2": 0.00019769515189240765
+        }
+      },
+      "checkpoint": {
+        "file": "bounded.pt",
+        "identity": {
+          "config": "6d904e1a85a8ae47eb982c222dc219d5b7535f1ef70394b518ca8afb1568469c",
+          "original_actor": "e881b975aaae97e344e57a8747e19de9817fd45357770fada3749801093ee28c",
+          "source_request": "6cf432adaaaba61c80929917e1fd75188fb421217864410438f25a08a7ca4d8b",
+          "source_run": "/data1/user/liwei/GENMO_outputs/stage2_awr/formal5_20261020_01",
+          "sources": {
+            "genmo": {
+              "branch": "feature/stage2-awr",
+              "commit": "36eeb3d1359084b09d4a87e7116de110384536fd",
+              "path": "/home/user/liwei/awr-worktrees/GENMO-delivery"
+            },
+            "gmt": {
+              "branch": "feature/stage2-awr",
+              "commit": "4ca256fe79d2dda22240011947ead276690e40f7",
+              "path": "/home/user/liwei/awr-worktrees/legged_lab_gmt"
+            }
+          }
+        },
+        "progress": {
+          "method": "bounded"
+        },
+        "sha256": "4a6611cd58b54576b8ebddeb7725b2e5bd3686b02ccd207d1fd6fe498969bbfd"
+      }
+    }
+  }
+}

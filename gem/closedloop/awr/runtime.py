@@ -28,7 +28,7 @@ from .replay import EpisodeReplay
 from .dataset import ReplayDataset
 from .fvi import fit_crossfit
 from .advantages import AdvantageLabelSet
-from .trainer import ActorTrainer
+from .trainer import ActorTrainer, choose_bc_coefficient
 from .evaluation import evaluate, paired_comparison, checkpoint_selection
 from .io import atomic_json, read_tree, write_tree, cpu_copy, digest
 from .metrics import exploration, parameter_changes, fixed_outputs, stage1_validation
@@ -342,6 +342,7 @@ class AWRRun:
             self.publish(phase="gradient_calibration")
             calibration = trainer.calibrate(self.config["awr"]["actor"]["calibration_batches"],
                                             self.config["awr"]["actor"]["bc_gradient_ratio"])
+            calibration = choose_bc_coefficient(calibration, self.config["awr"]["actor"].get("bc_fixed_weight"))
             self.json_artifact(coefficient_key, lambda: calibration)
         coefficient = self.json_artifact(coefficient_key, lambda: None)["coefficient"]
         del trainer, bc
@@ -390,8 +391,11 @@ class AWRRun:
             self.json_artifact(method_key+"_comparison", lambda: comparison)
             if method == "self_distillation" and self.config["awr"].get("retention_gate"):
                 from .retention import retention_comparison
+                # 后续轮检验本轮起始行为的保留，不能把此前已接受的RL变化算成自蒸馏漂移。
+                behavior_evaluation = self.eval_actor(
+                    "stage1_fixed" if macro == 0 else f"macro{macro-1:03d}_awr_fixed", self.fixed_plan)
                 retention = self.json_artifact(method_key+"_retention", lambda: retention_comparison(
-                    baseline, current, self.config["awr"]["retention_gate"]))
+                    behavior_evaluation, current, self.config["awr"]["retention_gate"]))
                 if not retention["accepted"]:
                     self.publish(status="retention_rejected", phase="self_distillation_retention",
                                  rejected_checkpoint=self.state["artifacts"][final_key])

@@ -8,6 +8,8 @@ CFG监督算式，第四组只训练原BC，第五组显式缩小LR并加入原�
 固定真实val条件和种子检查更新前后生成质量；可另行用evaluate操作对指定候选与
 Stage1重新执行完整32任务，使用删除活动乘数后的同一奖励。保留所有失败与模型，
 不自动启动Critic/AWR或长期训练，不以少量探针通过宣称五轮自蒸馏稳定。
+可显式选择单个对照分支、固定BC系数及教师权重；每次写独立实验参数与数据身份，
+用于只改变一个因素的后续复验，不重写先前失败候选。
 """
 from __future__ import annotations
 
@@ -35,12 +37,25 @@ def main():
     parser.add_argument("--max-steps", type=int, default=120)
     parser.add_argument("--candidate", choices=("legacy", "conditional_eval", "guided", "bc_only", "bounded"), default="bounded")
     parser.add_argument("--bounded-lr", type=float, default=1e-7)
+    parser.add_argument("--reference-weight", type=float, default=10.)
+    parser.add_argument("--bc-weight", type=float)
+    parser.add_argument("--methods", nargs="+", choices=("legacy", "conditional_eval", "guided", "bc_only", "bounded"),
+                        default=["legacy", "conditional_eval", "guided", "bc_only", "bounded"])
     args = parser.parse_args()
     if not 0 < args.bounded_lr <= 1e-5 or not 1 <= args.episodes_per_source <= 16 or not 1 <= args.max_steps <= 200:
         parser.error("Bounded diagnosis permits 1–16 Episodes/source and at most 200 steps/arm")
     import torch
     import torch.distributed as dist
     import numpy as np
+    import math
+    if not math.isfinite(args.reference_weight) or args.reference_weight < 0:
+        parser.error("Reference weight must be finite and nonnegative")
+    if args.bc_weight is not None and (not math.isfinite(args.bc_weight) or args.bc_weight <= 0):
+        parser.error("BC weight must be finite and positive")
+    if len(set(args.methods)) != len(args.methods):
+        parser.error("Duplicate diagnostic arms are not allowed")
+    if args.operation == "train" and args.bc_weight is None and args.methods[0] != "legacy":
+        parser.error("Start with legacy calibration or provide an explicit fixed --bc-weight")
     from gem.closedloop.awr.config import load_config, physical_config, preflight
     from gem.closedloop.awr.distributed import Distributed
     from gem.closedloop.awr.io import atomic_json, cpu_copy, digest, read_tree, write_tree
@@ -84,6 +99,9 @@ def main():
             d.root(lambda: output.mkdir(parents=True, exist_ok=False))
             d.root(lambda: atomic_json(output/"identity.json", identity))
             d.root(lambda: atomic_json(output/"preflight.json", audit))
+            d.root(lambda: atomic_json(output/"experiment.json", dict(methods=args.methods, bounded_lr=args.bounded_lr,
+                reference_weight=args.reference_weight, bc_weight=args.bc_weight, max_steps=args.max_steps,
+                episodes_per_source=args.episodes_per_source)))
         else:
             if json.loads((output/"identity.json").read_text()) != identity:
                 raise ValueError("Diagnosis/evaluation source or configuration changed")
@@ -155,8 +173,8 @@ def main():
             before = probe("stage1", cases)
             base = copy.deepcopy(cfg["awr"]["actor"])
             base.update(max_optimizer_steps=args.max_steps, reference_weight=0.)
-            coefficient = None; summaries = {}
-            for name in ("legacy", "conditional_eval", "guided", "bc_only", "bounded"):
+            coefficient = args.bc_weight; summaries = {}
+            for name in args.methods:
                 if d.root(lambda: stop_requested(output)):
                     return 0
                 actor.load_state_dict(original); torch.manual_seed(42+rank*100003)
@@ -166,13 +184,13 @@ def main():
                 if name == "bc_only":
                     c.update(replay_coefficient=0.)
                 if name == "bounded":
-                    c.update(lr=args.bounded_lr, weight_decay=0., reference_weight=10.)
+                    c.update(lr=args.bounded_lr, weight_decay=0., reference_weight=args.reference_weight)
                 bc = Stage1Supervision(runtime, actor, train, source_step=report["source_global_step"])
                 trainer = ActorTrainer(actor, data, bc, c, d, seed=42, bc_weight=coefficient)
-                if name == "legacy":
+                if name == "legacy" and coefficient is None:
                     calibration = trainer.calibrate(8, .1)
                     d.root(lambda: atomic_json(output/(name+"_calibration.json"), calibration))
-                    if name == "legacy": coefficient = trainer.bc_weight
+                    coefficient = trainer.bc_weight
                 def log(current, entry):
                     if rank == 0:
                         with (output/(name+"_steps.jsonl")).open("a") as stream:

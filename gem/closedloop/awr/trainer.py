@@ -4,6 +4,8 @@ Replay每Epoch均匀遍历一次，先逐样本Mask归约再乘固定权重；�
 重新抽取的扩散时间。AWR与BC使用各自真实全局分母、独立随机流，在SUM梯度后裁剪。
 校准只诊断梯度并恢复所有RNG，不更新参数；宏迭代内固定BC系数。这里不调用采样链，
 不构造Contact伪标签，不把参数变化当作物理收益。
+Replay监督与部署共用CFG两分支组合；可选冻结教师只在同一随机扩散时间前向，
+分别约束条件/无音乐分支，不将教师Contact或真实执行关节伪装成Replay标签。
 """
 from __future__ import annotations
 
@@ -34,6 +36,22 @@ def gradient_report(first, second=None):
         dot = sum(float(first[n].double().flatten().dot(second[n].double().flatten()))
                   for n in first.keys() & second.keys())
         result.update(other_norm=other, cosine=dot/(norm*other) if norm*other > 0 else None)
+    return result
+
+
+def choose_bc_coefficient(calibration, fixed=None):
+    """保留真实梯度诊断，并支持显式固定BC系数；是否通过保留验收由物理报告判断。"""
+    result = copy.deepcopy(calibration)
+    if fixed is not None:
+        if isinstance(fixed, bool) or not math.isfinite(fixed) or fixed <= 0:
+            raise ValueError("Fixed BC coefficient must be finite and positive")
+        result["gradient_calibrated_coefficient"] = result["coefficient"]
+        result["coefficient"] = float(fixed)
+        result["coefficient_source"] = "explicit_fixed_config"
+    else:
+        result["coefficient_source"] = "current_macro_gradient_calibration"
+    result["actual_gradient_ratio"] = result["coefficient"]*sum(
+        row["other_norm"] for row in result["batches"])/sum(row["norm"] for row in result["batches"])
     return result
 
 
@@ -230,9 +248,12 @@ class ActorTrainer:
                     if on_step:
                         on_step(self, entry)
                 self.history[-1]["epoch_seconds"] = time.perf_counter()-epoch_start
-                self.epoch += 1; self.cursor = 0
+                self.history[-1]["epoch_complete"] = self.cursor == len(order)
+                if self.cursor == len(order):
+                    self.epoch += 1; self.cursor = 0
             d.assert_models_equal(self.actor)
             return dict(complete=True, steps=self.steps, seconds=time.perf_counter()-started,
+                        complete_epochs=self.epoch, partial_epoch_samples=self.cursor,
                         replay_samples=len(self.dataset), physical_samples_duplicated=False,
                         epoch_seconds={str(e["epoch"]): e["epoch_seconds"]
                                        for e in self.history if "epoch_seconds" in e},

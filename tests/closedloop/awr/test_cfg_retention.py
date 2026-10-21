@@ -150,3 +150,31 @@ def test_registered_episode_receipt_skips_full_rescan_but_read_still_checks(tmp_
     with pytest.raises(RuntimeError, match="full payload read"):
         replay.read(ep.episode_id)
     replay.close()
+
+
+def test_step_cap_preserves_partial_epoch_cursor(episode_factory):
+    from gem.closedloop.awr.dataset import ReplayDataset
+    from gem.closedloop.awr.distributed import Distributed
+    from gem.closedloop.awr.trainer import ActorTrainer
+    from tests.closedloop.awr.test_training import ArithmeticBC
+    actor, _, make = episode_factory
+    data = ReplayDataset([make(), make(episode_id="another")], unit_weights=True)
+    config = dict(epochs=5, global_batch=1, microbatch=1, bc_global_batch=1, bc_microbatch=1,
+                  lr=1e-6, max_optimizer_steps=2)
+    trainer = ActorTrainer(actor, data, ArithmeticBC(), config, Distributed(), bc_weight=.1)
+    result = trainer.run()
+    assert result["steps"] == 2 and result["complete"]
+    assert result["complete_epochs"] == 0 and result["partial_epoch_samples"] == 2
+    assert trainer.epoch == 0 and trainer.cursor == 2
+
+
+def test_fixed_bc_reports_actual_not_requested_gradient_ratio():
+    from gem.closedloop.awr.trainer import choose_bc_coefficient
+    measured = dict(coefficient=.2, target_gradient_ratio=.1,
+                    batches=[dict(norm=16., other_norm=8.)])
+    selected = choose_bc_coefficient(measured, .01)
+    assert measured["coefficient"] == .2
+    assert selected["coefficient"] == .01 and selected["gradient_calibrated_coefficient"] == .2
+    assert selected["actual_gradient_ratio"] == pytest.approx(.005)
+    with pytest.raises(ValueError):
+        choose_bc_coefficient(measured, 0.)
