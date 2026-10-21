@@ -56,7 +56,9 @@ def validate_measured_deployment_profile(profile, config):
 
 
 def load_config(path, *, profile=None):
-    c = yaml.safe_load(Path(path).read_text())
+    path = Path(path)
+    # 已保存request是JSON；YAML1.1会把JSON的1e-06误读成字符串，破坏奖励/优化器身份。
+    c = json.loads(path.read_text()) if path.suffix.lower() == ".json" else yaml.safe_load(path.read_text())
     if c.get("version") != "genmo.stage2.awr.v1":
         raise ValueError("An independent AWR config is required")
     if profile is not None:

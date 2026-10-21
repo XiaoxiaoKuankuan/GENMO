@@ -13,6 +13,17 @@ from tools.diagnose_stage2_awr_distillation import (
 )
 
 
+def test_saved_json_request_preserves_scientific_numbers(tmp_path):
+    import json
+    from pathlib import Path
+    from gem.closedloop.awr.config import load_config
+    config = load_config(Path(__file__).resolve().parents[3]/"configs/closedloop/stage2_awr_retention.yaml")
+    path = tmp_path/"request.json"
+    path.write_text(json.dumps(config))
+    assert load_config(path) == config
+    assert isinstance(load_config(path)["awr"]["actor"]["lr"], float)
+
+
 def test_refit_uses_complete_snapshot_order():
     rows = [("a", "source-z", "sha-a"), ("b", "source-a", "sha-b"), ("c", "source-a", "sha-c")]
     result = refit_snapshot_entries(dict(episode_ids=["b", "a"]), rows)
