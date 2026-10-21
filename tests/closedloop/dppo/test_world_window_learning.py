@@ -25,19 +25,20 @@ def test_empty_local_world_buffer_has_no_virtual_transition_or_critic_call():
     cache.close();buffer.clear()
 
 
-def test_current_config_accepts_nondivisible_bc_total_without_environment_quota(tmp_path):
+def test_current_config_expands_small_bc_total_without_environment_quota(tmp_path):
     root=Path(__file__).resolve().parents[3]
     config=yaml.safe_load((root/'configs/closedloop/stage2_full_chain.yaml').read_text())
     config['stage10']['training']['bc_samples_per_rollout']=517
-    from gem.closedloop.dppo.actor_optimization import optimization_binding,digest
-    config['stage10']['kl']['calibration']['optimization_sha256']=digest(optimization_binding(config['stage10']))
+    config['stage10']['kl']['calibration']['optimization_sha256']='auto'
     path=tmp_path/'candidate.yaml';path.write_text(yaml.safe_dump(config))
     resolved=configuration(path)
     assert 'decisions_per_environment' not in resolved['stage10']['scale']
-    assert resolved['stage10']['training']['bc_samples_per_rollout']==517
+    stage=resolved['stage10']
+    assert stage['training']['bc_samples_per_rollout']==max(517,
+        stage['derived']['planned_actor_steps']*stage['training']['bc_min_global_batch'])
     config['stage10']['scale']['decisions_per_environment']=8
     path.write_text(yaml.safe_dump(config))
-    with pytest.raises(ValueError,match='quotas'):configuration(path)
+    with pytest.raises(ValueError,match='quotas|Per-environment'):configuration(path)
 
 
 
