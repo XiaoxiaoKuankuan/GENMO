@@ -38,6 +38,7 @@ def main():
     parser.add_argument('--critic-preheat-only',action='store_true',help='固定Actor，完成完整MC/TD价值对照后结束，不进入Actor更新')
     parser.add_argument('--mc-validation-only',action='store_true',help='固定当前Actor，仅完成独立完整episode MC诊断，不更新任何网络')
     parser.add_argument('--refit-critic',action='store_true',help='仅配合mc-validation-only：用当前Actor的新完整轨迹校准Critic，独立MSE改善才保留，Actor不更新')
+    parser.add_argument('--critic-refit-musics-per-source',type=int,help='仅本次显式Critic校准的每来源训练音乐数，不改变预热配置或独立验证规模')
     parser.add_argument('--collect-only',action='store_true',help='只采一轮完整真实rollout供计算对照，不更新Actor/Critic')
     parser.add_argument('--collect-rollouts',type=int,default=1,help='collect-only连续世界窗口数；保留正常episode，不更新行为策略')
     parser.add_argument('--capture-validation-iteration',type=int,help='明确保存指定轮更新前的真实学习张量及Adam用于固定数据对照')
@@ -46,6 +47,8 @@ def main():
     args=parser.parse_args()
     if args.refit_critic and not args.mc_validation_only:
         parser.error('--refit-critic requires --mc-validation-only; it never enables Actor updates')
+    if args.critic_refit_musics_per_source is not None and (not args.refit_critic or args.critic_refit_musics_per_source<1):
+        parser.error('--critic-refit-musics-per-source requires --refit-critic and a positive count')
     if args.collect_rollouts<1 or (args.collect_rollouts!=1 and not args.collect_only):
         parser.error('--collect-rollouts requires a positive count and --collect-only')
     # 单机八卡使用已有验收的通信环境，不依赖当前shell的隐式NCCL默认值。

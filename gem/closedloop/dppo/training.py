@@ -493,7 +493,8 @@ def run(cargs,config,distributed):
             from .mc_calibration import calibrate_critic
             refit=getattr(cargs,'refit_critic',False)
             report['independent_mc_validation']=calibrate_critic(c,'validation_'+str(c.state['policy_version']),fit=False,
-                fit_if_ev_below=1. if refit else None)
+                fit_if_ev_below=1. if refit else None,
+                training_samples_per_source=getattr(cargs,'critic_refit_musics_per_source',None))
             if refit:
                 # 复用现有候选/独立MSE比较；仅保存Critic学习及真实交互，Actor/Adam不更新。
                 _snapshot(c,'independent_complete_mc_critic_calibration',wait=True)

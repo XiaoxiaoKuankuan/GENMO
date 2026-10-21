@@ -81,3 +81,18 @@ def test_low_ev_refit_with_improvement_is_accepted(monkeypatch, tmp_path):
     _patch(monkeypatch, [_metric(10., .5), _metric(6., .7), _metric(8., .6)], collected)
     report = mc_calibration.calibrate_critic(c, 'policy_3', fit=False, fit_if_ev_below=.9)
     assert report['refit_accepted'] and report['selected_mc_ratio'] == 0. and c.state['critic_updates'] == 15
+
+
+def test_finite_calibration_music_count_keeps_validation_and_default_unchanged(monkeypatch,tmp_path):
+    c,collected=_context(tmp_path),[]
+    _patch(monkeypatch,[_metric(10.,.5),_metric(6.,.7),_metric(8.,.6)],collected)
+    counts={}
+    def collect(c,label,split,*,samples_per_source,seeds):
+        counts[split]=samples_per_source
+        return _Bank()
+    monkeypatch.setattr(mc_calibration,'collect_complete_bank',collect)
+    report=mc_calibration.calibrate_critic(c,'finite',fit=False,fit_if_ev_below=1.,training_samples_per_source=8)
+    assert counts=={'val':1,'train':8}
+    assert report['training_count_override']==8 and report['training_samples_per_source']==8
+    assert c.stage['critic']['complete_mc']['samples_per_source']==1
+    assert 'training_samples_per_source' not in c.stage['critic']['complete_mc']
