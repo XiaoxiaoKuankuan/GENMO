@@ -70,7 +70,7 @@ def _group(name):
 
 
 def merge_global_gradients(actor,ppo,bc,controller,*,distributed=None,bucket_bytes=32*1024**2,
-                           half_split=False,sketch=None,sketch_budget=1<<20,component_observer=None):
+                           half_split=False,sketch=None,sketch_budget=1<<20,component_observer=None,bc_enabled=True):
     """PPO与BC梯度一次SUM合并；可选梯度信噪比诊断不改变p.grad。
 
     half_split在同一bucket增加第三行，只放前一半rank的PPO梯度，归约后得到两半rank
@@ -130,7 +130,9 @@ def merge_global_gradients(actor,ppo,bc,controller,*,distributed=None,bucket_byt
     for name,(a2,b2,dot) in zip(groups,torch.stack(list(groups.values())).cpu().tolist()):
         reports[name]=dict(ppo_norm=math.sqrt(a2),unweighted_bc_norm=math.sqrt(b2),
             cosine=None if a2<=0 or b2<=0 else max(-1.,min(1.,dot/math.sqrt(a2*b2))))
-    shared=reports['shared'];weight=controller.update(shared['ppo_norm'],shared['unweighted_bc_norm'])
+    shared=reports['shared'];weight=controller.update(shared['ppo_norm'],shared['unweighted_bc_norm']) if bc_enabled else 0.
+    if not bc_enabled and any(value['unweighted_bc_norm'] for value in reports.values()):
+        raise ValueError('Disabled BC must not supply gradients')
     for name,p in parameters:
         a,b=ppo.get(name),bc.get(name)
         if component_observer is not None:component_observer(name,a,b)

@@ -74,9 +74,12 @@ def configuration(path,*,genmo_repo=None,gmt_repo=None):
     if s['evaluation'].get('start_mode','beginning') not in ('beginning','center','mixed') or type(s['evaluation'].get('unique_music',False))is not bool:
         raise ValueError('Invalid evaluation music selection configuration')
     selection=s['evaluation'].get('samples_per_source',4)
-    if (s['evaluation'].get('split','val') not in ('val','test') or not
+    train_monitor=s['evaluation'].get('purpose')=='training_progress'
+    if train_monitor and s['evaluation'].get('original_split')!='train':
+        raise ValueError('Training progress evaluation requires explicit original train music')
+    if (s['evaluation'].get('split','val') not in (('train',) if train_monitor else ('val','test')) or not
             (_source_counts(selection) or selection=='all_unique' and s['evaluation'].get('unique_music',False))):
-        raise ValueError('Held-out evaluation requires val/test and explicit positive source counts or all_unique music selection')
+        raise ValueError('Held-out evaluation requires val/test; training progress requires explicit train purpose, and positive source counts or all_unique music selection')
     if s['evaluation'].get('episode_seconds') is None and s['evaluation'].get('start_mode','beginning')!='beginning':
         raise ValueError('Complete song evaluation cannot start in the middle')
     for key in ('eta', 'guidance_scale'):
@@ -154,8 +157,11 @@ def configuration(path,*,genmo_repo=None,gmt_repo=None):
         raise ValueError('Retired adaptive-LR settings are not supported')
     steps=t['ppo_epochs']*math.ceil(chains/scale['actor_minibatch_chains'])
     bc_total=t['bc_samples_per_rollout']
-    if type(bc_total)is not int or bc_total<1:
-        raise ValueError('BC total must be positive; actual ragged optimizer steps determine its allocation')
+    bc_enabled=t.get('bc_enabled',True)
+    if type(bc_enabled)is not bool or type(bc_total)is not int or (bc_enabled and bc_total<1) or (not bc_enabled and (bc_total!=0 or t['bc_weight']!=0)):
+        raise ValueError('Enabled BC needs positive samples; disabled BC requires exactly zero samples and weight')
+    if not bc_enabled and t['actor_objective']!='clipped_dppo':
+        raise ValueError('Disabled BC is supported by the original clipped DPPO updater')
     t.update(rollout_upper_steps=chains,rollout_upper_steps_per_rank=n*decisions,
         actor_minibatch_internal_transitions=scale['actor_minibatch_chains']*4,
         max_actor_optimizer_steps=steps,bc_batch=bc_total//steps,
@@ -168,7 +174,7 @@ def configuration(path,*,genmo_repo=None,gmt_repo=None):
     # 共享世界所有reset/决策都对齐25控制步网格；每格每环境至多一条Actor转移。
     # collector再次按真实片段校验此上限，失败/预热只减少有效链，不能偷偷多做PG更新。
     maximum_steps=t['ppo_epochs']*math.ceil(chains/scale['actor_minibatch_chains'])
-    if bc_total<maximum_steps:raise ValueError('BC must cover every possible actual optimizer step')
+    if bc_enabled and bc_total<maximum_steps:raise ValueError('BC must cover every possible actual optimizer step')
     if s['limits']['optimizer_attempts']<s['limits']['accepted_iterations']*maximum_steps:
         raise ValueError('Optimizer attempt budget must cover the complete declared workload')
     from .actor_optimization import validate_optimization_configuration

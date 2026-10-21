@@ -46,29 +46,35 @@ def await_generation(owner, future):
 def bulk_cpu_copy(tree):
     """每个device/dtype只传输一个连续块；返回只读用途的CPU张量视图。"""
     groups, converted = {}, {}
-    def visit(value):
-        if torch.is_tensor(value):
-            if id(value) not in converted:
-                converted[id(value)] = None
-                groups.setdefault((value.device, value.dtype), []).append(value)
-        elif isinstance(value, dict):
-            for item in value.values(): visit(item)
-        elif isinstance(value, (list, tuple)):
-            for item in value: visit(item)
-    visit(tree)
-    for _, values in groups.items():
-        host = torch.cat([v.detach().reshape(-1) for v in values]).cpu()
-        offset = 0
-        for value in values:
-            size = value.numel()
-            converted[id(value)] = host[offset:offset+size].reshape(value.shape)
-            offset += size
-    def rebuild(value):
-        if torch.is_tensor(value): return converted[id(value)]
-        if isinstance(value, dict): return {k:rebuild(v) for k,v in value.items()}
-        if isinstance(value, (list, tuple)): return type(value)(rebuild(v) for v in value)
-        return value
-    return rebuild(tree)
+    try:
+        def visit(value):
+            if torch.is_tensor(value):
+                if id(value) not in converted:
+                    converted[id(value)] = None
+                    groups.setdefault((value.device, value.dtype), []).append(value)
+            elif isinstance(value, dict):
+                for item in value.values(): visit(item)
+            elif isinstance(value, (list, tuple)):
+                for item in value: visit(item)
+        visit(tree)
+        for _, values in groups.items():
+            host = torch.cat([v.detach().reshape(-1) for v in values]).cpu()
+            offset = 0
+            for value in values:
+                size = value.numel()
+                converted[id(value)] = host[offset:offset+size].reshape(value.shape)
+                offset += size
+        def rebuild(value):
+            if torch.is_tensor(value): return converted[id(value)]
+            if isinstance(value, dict): return {k:rebuild(v) for k,v in value.items()}
+            if isinstance(value, (list, tuple)): return type(value)(rebuild(v) for v in value)
+            return value
+        return rebuild(tree)
+    finally:
+        # 递归局部函数形成自引用闭环；及时清空其捕获表并断开递归，异常退出也不滞留GPU。
+        groups.clear()
+        converted.clear()
+        visit = rebuild = None
 
 
 @torch.no_grad()

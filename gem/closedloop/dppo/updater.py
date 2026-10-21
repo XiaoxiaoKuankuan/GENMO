@@ -36,7 +36,9 @@ def actor_update(policy,optimizer,rows,targets,cache,manifest,controller,*,distr
                     objective_reduction='free_coordinate_mean',grad_clip_norm=1.,reserve_attempt=None,
                     gradient_observer=None,step_observer=None,bc_samples_per_rollout=1024,snr=False,
                     step_strategy='intermediate4',detailed_diagnostics=False,
-                    backtracking,kl_limits,kl_microbatch=128,minimum_lr=5e-8):
+                    backtracking,kl_limits,kl_microbatch=128,minimum_lr=5e-8,bc_enabled=True):
+    if not bc_enabled and bc_samples_per_rollout!=0:
+        raise ValueError('Disabled BC requires zero samples')
     if step_strategy!='intermediate4' or sampled_steps!=4 or tuple(policy.trainable_steps)!=(15,16,17,18):
         raise ValueError('PPO must optimize exactly indices 15 to 18')
     if policy.steps!=20 or ppo_epochs<1 or minibatch_chains<1 or microbatch<1:
@@ -100,16 +102,20 @@ def actor_update(policy,optimizer,rows,targets,cache,manifest,controller,*,distr
             summary,step_metrics=combined[:7],combined[7:].reshape(20,6)
             values=summary.cpu().tolist();visits=values[-1]
             ppo=take_gradients(actor)
-            with _local_phase(distributed,'stage10_bc_local_forward_backward'):
-                from .dense_policy import dense_precision_scope
-                global_bc=None if bc_batches is None else bc_batches[len(reports)]
-                if global_bc is not None:
-                    anchor.batch_size=global_bc//distributed.world_size+(distributed.rank<global_bc%distributed.world_size)
-                bc_weight=1/distributed.world_size if global_bc is None else (anchor.batch_size/global_bc if global_bc else 0.)
-                with dense_precision_scope(policy.precision):bc_report=anchor.backward(actor,weight=bc_weight)
-                bc=take_gradients(actor)
-            computed_bc+=global_bc if global_bc is not None else bc_report["batch_size"]*distributed.world_size
-            contributions=merge_global_gradients(actor,ppo,bc,controller,distributed=distributed,half_split=snr,sketch=sketch)
+            global_bc=0
+            if bc_enabled:
+                with _local_phase(distributed,'stage10_bc_local_forward_backward'):
+                    from .dense_policy import dense_precision_scope
+                    global_bc=None if bc_batches is None else bc_batches[len(reports)]
+                    if global_bc is not None:
+                        anchor.batch_size=global_bc//distributed.world_size+(distributed.rank<global_bc%distributed.world_size)
+                    bc_weight=1/distributed.world_size if global_bc is None else (anchor.batch_size/global_bc if global_bc else 0.)
+                    with dense_precision_scope(policy.precision):bc_report=anchor.backward(actor,weight=bc_weight)
+                    bc=take_gradients(actor)
+                computed_bc+=global_bc if global_bc is not None else bc_report["batch_size"]*distributed.world_size
+            else:
+                bc={};bc_report=dict(batch_size=0,loss=0.,samples=[])
+            contributions=merge_global_gradients(actor,ppo,bc,controller,distributed=distributed,half_split=snr,sketch=sketch,bc_enabled=bc_enabled)
             if gradient_observer is not None:gradient_observer(actor,len(reports))
             with _local_phase(distributed,'stage10_actor_combined_clip'):
                 total_norm=float(torch.nn.utils.clip_grad_norm_([p for p in actor.parameters() if p.requires_grad],

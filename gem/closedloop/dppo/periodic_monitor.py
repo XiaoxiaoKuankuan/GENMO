@@ -5,6 +5,8 @@
 各rank按配对样本索引分片，不改变task_id、音乐起点或噪声种子。汇总必须覆盖完整
 固定计划，逐episode文件SHA、身份、实际奖励/时长和网络/RNG只读边界重新检查。
 周期子集只作训练监视，不冒充完整val/test验收，也不声称第一阶段从未见过这些数据。
+显式training_progress计划也可固定选择当前train与原train交集，报告保留该用途，
+与MC价值监督严格分开；更换音乐清单后必须重新建立同任务Stage1物理基线。
 
 提供四来源等权回报及基线失败/时长保护的best observed/best saved选择，嵌套数值
 指标的完整JSONL记录、显式白名单TensorBoard曲线，以及固定初始随机链上的高斯KL漂移诊断。所有权重
@@ -55,13 +57,20 @@ def _hash(path):
 def _plan_valid(plan):
     _require(plan.get('plan_sha256') == _digest({k: v for k, v in plan.items() if k != 'plan_sha256'}),
              'Periodic plan SHA differs')
+    training_progress=plan.get('evaluation_purpose')=='training_progress'
     _require(plan.get('periodic_subset', {}).get('schema') == VERSION
-             and plan.get('split') in ('val','test') and plan.get('training_buffer_allowed') is False,
-             'Periodic evaluation requires an explicit held-out subset plan')
+             and plan.get('split') in (('train',) if training_progress else ('val','test'))
+             and plan.get('training_buffer_allowed') is False,
+             'Periodic evaluation requires an explicit evaluation-only subset plan')
     tasks = plan['tasks']
     _require(len(tasks) == plan['task_count'] == plan['selected_sample_count'] * len(plan['seeds'])
              and len({t['task_id'] for t in tasks}) == len(tasks), 'Periodic tasks duplicate or omit seeds')
     for task in tasks:
+        _require(task['split']==plan['split'] and task['sample']['row']['split']==plan['split'],
+                 'Periodic evaluation sample split differs')
+        if plan.get('pool_original_split') is not None:
+            _require(task['sample']['row'].get('resplit_provenance',{}).get('original_split')==plan['pool_original_split'],
+                     'Periodic evaluation original split differs')
         identity = {k: task[k] for k in ('dataset', 'sample_id', 'split', 'seed', 'music_start_frame')}
         _require(task['task_id'] == _digest(identity)[:24]
                  and task['noise_index_start'] == stable_noise_seed(int(task['seed']), _digest(identity)),
@@ -81,7 +90,7 @@ def _plan_valid(plan):
 
 
 def build_balanced_plan(catalog, *, samples_per_source=4, seeds=(42, 1729), seconds=10., selection_seed=42,
-                        start_mode='beginning',unique_music=False,split='val'):
+                        start_mode='beginning',unique_music=False,split='val',training_progress=False,original_split=None):
     """在独立局部RNG中固定选样，复用全池任务的原task/noise身份。"""
     all_music=samples_per_source=='all_unique'
     per_source=isinstance(samples_per_source,Mapping)
@@ -89,15 +98,19 @@ def build_balanced_plan(catalog, *, samples_per_source=4, seeds=(42, 1729), seco
         or per_source and set(samples_per_source)==set(SOURCES)
         and all(type(n) is int and n>0 for n in samples_per_source.values()),
         'samples_per_source must be positive, an explicit four-source count map, or all_unique with unique_music')
-    _require(split in ('val','test') and set(catalog.samples[split]) == set(SOURCES), 'Periodic plan requires four held-out sources')
+    _require(split in (('train',) if training_progress else ('val','test'))
+             and set(catalog.samples[split]) == set(SOURCES), 'Periodic plan requires four explicit evaluation sources')
+    from .evaluation import evaluation_samples
+    samples_by_source=evaluation_samples(catalog,split,original_split)
     _require(start_mode in ('beginning','center','mixed'), 'Invalid periodic start_mode')
     _require(start_mode=='beginning' or seconds is not None, 'Complete song evaluation must begin at music start')
     full = build_evaluation_tasks(catalog, split=split, eval_count='all', seeds=seeds,
-        selection_seed=selection_seed, start_mode='center' if start_mode=='center' else 'beginning', episode_seconds=seconds)
+        selection_seed=selection_seed, start_mode='center' if start_mode=='center' else 'beginning', episode_seconds=seconds,
+        training_progress=training_progress,original_split=original_split)
     rng = np.random.default_rng(selection_seed)
     chosen = set();source_counts={};seen_groups=set();seen_audio=set()
     for source in sorted(SOURCES):
-        samples = sorted(catalog.samples[split][source], key=lambda s: str(s['row']['sample_id']))
+        samples = sorted(samples_by_source[source], key=lambda s: str(s['row']['sample_id']))
         if unique_music:
             groups={}
             for sample in samples:groups.setdefault(sample['group_id'],[]).append(sample)
@@ -108,7 +121,7 @@ def build_balanced_plan(catalog, *, samples_per_source=4, seeds=(42, 1729), seco
             samples=[sample for sample in unique.values() if sample['group_id'] not in seen_groups
                      and sample['row']['source_audio_sha256'] not in seen_audio]
         count=len(samples) if all_music else samples_per_source[source] if per_source else samples_per_source
-        _require(len(samples) >= count>0, f'Insufficient periodic held-out samples: {source}')
+        _require(len(samples) >= count>0, f'Insufficient periodic evaluation samples: {source}')
         source_counts[source]=count
         for index in sorted(rng.choice(len(samples), size=count, replace=False).tolist()):
             sample=samples[index]
@@ -118,7 +131,8 @@ def build_balanced_plan(catalog, *, samples_per_source=4, seeds=(42, 1729), seco
     tasks = [t for t in plan['tasks'] if (t['dataset'], t['sample_id']) in chosen]
     if start_mode=='mixed':
         center=build_evaluation_tasks(catalog,split=split,eval_count='all',seeds=seeds,
-            selection_seed=selection_seed,start_mode='center',episode_seconds=seconds)
+            selection_seed=selection_seed,start_mode='center',episode_seconds=seconds,
+            training_progress=training_progress,original_split=original_split)
         centered={(t['dataset'],t['sample_id'],t['seed']):t for t in center['tasks']}
         counts={source:0 for source in SOURCES};mixed=[]
         for index in range(0,len(tasks),len(seeds)):
@@ -346,7 +360,8 @@ def choose_best(current, baseline, *, best_observed=None, best_saved=None, saved
     actual_activity=[r['activity_ratio'] for r in current['episode_metrics'] if r.get('activity_ratio') is not None]
     activity_ok=(not initial_activity or (len(actual_activity)==len(initial_activity)
         and sum(actual_activity)>=.8*sum(initial_activity)))
-    eligible=eligible and activity_ok
+    reward_only=((current.get('evaluation_identity') or {}).get('training_identity',{}).get('evaluation',{}).get('selection_policy')=='reward_only')
+    eligible=True if reward_only else eligible and activity_ok
     candidate = dict(iteration=iteration, plan_sha256=current['plan_sha256'], actor_identity=current['actor_identity'],
         score=current['source_balanced_reward'], physical_failure_count=current['physical_failure_count'],
         mean_executed_seconds=current['mean_executed_seconds'], saved=bool(saved),
@@ -448,12 +463,24 @@ def snapshot_critic_transition(row):
 def build_fixed_critic_reference(transitions, critic, device, *, gamma_upper=.99, lambda_upper=.95):
     """用初始独立eval实际奖励建立固定GAE targets，行政截断采用初始Critic自举。
 
+    并行世界按控制完成顺序交错返回不同环境；先按backend/env/episode/policy分组、
+    按真实控制起点排序，再调用原GAE。否则相邻列表项属于不同环境，会把连续音乐
+    错切成一步TD，导致独立价值诊断偏乐观。这里只整理独立快照，不修改执行顺序、
+    普通训练GAE或已经发布的固定参考；已有参考继续代表当时保存的原始标签。
     targets来自既有fixed_targets，继续/终止/无效mask及实际控制时间折扣保持原合同。
     后续诊断只向这些固定targets做回归，不能解释为无偏真实价值误差或物理质量。
     """
     from .trainer import fixed_targets
     rows = [snapshot_critic_transition(row) for row in transitions]
     _require(bool(rows), 'No executed initial evaluation transitions for Critic reference')
+    episodes = {}
+    for row in rows:
+        identity = row.identity
+        key = (identity['backend_session_id'], identity.get('env_id', 0),
+               identity['episode_id'], identity['policy_version'])
+        episodes.setdefault(key, []).append(row)
+    rows = [row for episode in episodes.values()
+            for row in sorted(episode, key=lambda item: item.control_tick_begin)]
     modes = {name: child.training for name, child in critic.named_modules()}
     try:
         targets = fixed_targets(rows, critic, device, gamma_upper=gamma_upper,

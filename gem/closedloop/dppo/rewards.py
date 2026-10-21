@@ -5,8 +5,9 @@
 body全局线/角速度、双脚相对高度及十二腿关节位置。使用 exp(-error/std²)，不再次平方 error，
 不重新构造坐标系或用旧 RMSE/末端高度/yaw 混合项回退；名称、选择、时刻和原值
 证据随 backend 诊断保存。内部 objective 版本独立标识这次 tracking 语义变化。
-独立稳定性奖励关闭，根高与姿态仍作为物理终止及诊断；活动门控继续保留。
-活动门控同时作用于跟踪和音乐；目标活动度来自配对训练动作的同一因果时间窗，
+独立稳定性奖励关闭，根高与姿态仍作为物理终止及诊断；显式v2/v3奖励不乘活动度系数。
+旧v1保留原门控仅供历史配置复算；新正式配置明确选择v3。
+活动度与旧门控比值只作诊断；目标活动度来自配对训练动作的同一因果时间窗，
 绝不使用 GENMO 生成参考代替监督。音乐节拍复用 BUMI 原有动作节拍和对齐函数。
 连续奖励率统一乘 0.02 秒，失败及有限非法参考的事件罚分由调用方单独加入一次。
 
@@ -49,6 +50,9 @@ TRACKING_FUNCTIONS = {
 TRACKING_ERROR_FIELDS = {name: name + "_squared_error" for name in TRACKING_FUNCTIONS}
 TRACKING_STD = dict(anchor_pos=.3, anchor_ori=.4, body_pos=.3, body_ori=.4,
                     body_lin_vel=1., body_ang_vel=3.14, foot_height=.07, leg_joint_pos=.25)
+STAGE2_REWARD_STD = dict(anchor_pos=.20, anchor_ori=.30, body_pos=.15, body_ori=.20,
+                         body_lin_vel=1., body_ang_vel=3.14, foot_height=.07, leg_joint_pos=.25)
+REWARD_STD_VERSION = 'stage2.gmt8_reward_std.v3'
 TRACKING_WEIGHTS = {name: weight/6.3 for name,weight in zip(TRACKING_FUNCTIONS,(.5,.5,1.,1.,1.,1.,.8,.5))}
 LEG_JOINT_NAMES = [side+'_'+joint+'_joint' for side in ('l','r') for joint in
     ('leg_pitch','leg_roll','leg_yaw','knee_pitch','ankle_pitch','ankle_roll')]
@@ -83,6 +87,22 @@ DEFAULT_CONFIG = {
     "diagnostics": {"mechanical_power_weight": 0., "impact_weight": 0.},
     "require_substeps": True,
 }
+
+
+def tracking_reward_std(config):
+    """旧v2按原GMT std评分；显式v3仅改变评分尺度，不改GMT误差来源的source_std。"""
+    tracking = config['tracking']
+    return tracking['reward_std'] if config['version'] == REWARD_STD_VERSION else tracking['std']
+
+
+def tracking_score_metadata(config):
+    """评分证据显式区分GMT权威来源与Stage2尺度；旧v2字段保持原样以便重算历史。"""
+    result=dict(std=copy.deepcopy(tracking_reward_std(config)),weights=copy.deepcopy(config['tracking']['weights']))
+    if config['version']==REWARD_STD_VERSION:
+        result.update(source_std=copy.deepcopy(config['tracking']['source_std']),
+            reward_std=copy.deepcopy(config['tracking']['reward_std']),
+            scoring='exp(-squared_error/reward_std^2)_not_original_GMT_score')
+    return result
 
 
 def _array(value, name, shape=None):
@@ -128,6 +148,11 @@ def _score(error, scale):
 class ExecutionReward:
     def __init__(self, config=None, music_features=None, music_start_tick=600, target_activity=None):
         self.config = copy.deepcopy(DEFAULT_CONFIG)
+        if (config or {}).get('version') == REWARD_STD_VERSION:
+            self.config['version'] = REWARD_STD_VERSION
+            self.config['tracking'].pop('std')
+            self.config['tracking'].update(source_std=copy.deepcopy(TRACKING_STD),
+                                           reward_std=copy.deepcopy(STAGE2_REWARD_STD))
         _merge(self.config, config or {})
         self._validate_config()
         self.music_enabled = self.config['music_reward_enabled']
@@ -160,7 +185,7 @@ class ExecutionReward:
 
     def _validate_config(self):
         config = self.config
-        if config["version"] != "stage2.gmt8_reference_limits.v1":
+        if config["version"] not in ("stage2.gmt8_reference_limits.v1", "stage2.gmt8_reference_limits.v2", REWARD_STD_VERSION):
             raise ValueError("Unknown explicit execution reward identity")
         if type(config['music_reward_enabled']) is not bool:
             raise ValueError('music_reward_enabled must be an explicit boolean')
@@ -182,9 +207,12 @@ class ExecutionReward:
         tracking = config["tracking"]
         if tracking["objective"] != TRACKING_OBJECTIVE:
             raise ValueError(f"tracking.objective must be {TRACKING_OBJECTIVE}")
-        if tracking['std'] != TRACKING_STD or tracking['weights'] != TRACKING_WEIGHTS:
-            raise ValueError('Tracking std/weights must match the eight authoritative GMT terms')
-        for name, value in tracking["std"].items():
+        source_std = tracking.get('source_std', tracking.get('std'))
+        reward_std = tracking_reward_std(config)
+        expected = STAGE2_REWARD_STD if config['version'] == REWARD_STD_VERSION else TRACKING_STD
+        if source_std != TRACKING_STD or reward_std != expected or tracking['weights'] != TRACKING_WEIGHTS:
+            raise ValueError('Tracking source_std must match frozen GMT; reward_std must match the explicit reward version')
+        for name, value in reward_std.items():
             finite_nonnegative(value, f"tracking.std.{name}", positive=True)
             squared = float(value) * float(value)
             if not math.isfinite(squared) or squared <= 0:
@@ -280,7 +308,7 @@ class ExecutionReward:
         cfg = self.config["activity"]
         ratio = actual / (cfg["full_gate_ratio"] * target_value + cfg["epsilon"])
         gate = 1. if target_value <= cfg["inactive_target_rad_s"] else min(1., ratio)
-        # tracking 仍消费配对活动门控；禁用音乐项时不计算强度匹配分数。
+        # 配对活动度只作诊断；禁用音乐项时不计算强度匹配分数，不影响跟踪奖励。
         log_ratio = (math.log((actual + cfg["intensity_epsilon"]) / (target_value + cfg["intensity_epsilon"]))
                      / math.log(cfg["intensity_log_ratio"])) if self.music_enabled else None
         intensity = math.exp(-min(abs(log_ratio), 1e150) ** 2) if self.music_enabled else None
@@ -375,7 +403,7 @@ class ExecutionReward:
             error = _scalar(term.get("error"), f"motion_tracking.{name}.error")
             if error < 0:
                 raise ValueError(f"motion_tracking.{name} squared error must be nonnegative")
-            std = self.config["tracking"]["std"][name]
+            std = tracking_reward_std(self.config)[name]
             normalized[name] = error / std ** 2
             if not math.isfinite(normalized[name]):
                 raise ValueError(f"nonfinite motion_tracking.{name} normalized error")
@@ -387,7 +415,7 @@ class ExecutionReward:
         cfg = self.config["tracking"]
         score = sum(cfg["weights"][name] * value for name, value in scores.items())
         return score, True, raw, {"error_over_std_squared": normalized, "scores": scores,
-                                 "std": copy.deepcopy(cfg["std"]), "weights": copy.deepcopy(cfg["weights"])}
+                                 **tracking_score_metadata(self.config)}
 
     def _stable(self, row):
         return 0., True, {'reason': 'stable_reward_disabled'}, {}
@@ -633,7 +661,7 @@ class ExecutionReward:
             except (ValueError, KeyError, IndexError, TypeError) as error:
                 score, valid, raw, normalized = 0., False, {"reason": str(error)}, {}
                 errors.append(f"{name}: {error}")
-            multiplier = gate if name in {"track", "music"} else 1.
+            multiplier = gate if self.config["version"] == "stage2.gmt8_reference_limits.v1" and name in {"track", "music"} else 1.
             weight = self.config[weight_key] * (-1 if "penalty" in weight_key else 1)
             rate = score * weight * multiplier
             components[name] = {"enabled": True, "valid": bool(valid), "raw": raw, "normalized": normalized,

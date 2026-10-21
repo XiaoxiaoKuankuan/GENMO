@@ -2,7 +2,7 @@
 
 调用方必须显式传入已经加载目标 checkpoint 的 policy，本模块不重新加载 Stage1
 权重、不创建或调用优化器，也不把评估转移放入训练 Buffer。评估计划从完整
-FullMusicCatalog 的 val/test manifest 池确定性选取不同配对样本，再与显式 seed 做
+FullMusicCatalog 的显式 manifest 池确定性选取不同配对样本，再与显式 seed 做
 笛卡尔积；支持 all。每次从歌曲开头或清单中记录的中心切点运行，默认完整剩余
 音乐；若调用者指定有限时长，则明确记录行政截断，不把两秒短对照当作全量评估。
 
@@ -15,6 +15,8 @@ FullMusicCatalog 的 val/test manifest 池确定性选取不同配对样本，�
 评估前后核验 Actor 参数及全部 buffers、已有梯度和显式传入的其他冻结网络；
 恢复模型模式、Python/NumPy/Torch/CUDA 随机状态及环境的评估设置，不消费训练
 音乐采样器。报告只证明这些清单上的执行结果，不声称 val/test 未曾进入预训练。
+默认独立评价使用val/test；显式training_progress允许当前train，并可进一步取
+重划分前original_split=train的交集，只衡量训练集内收益，仍不把评估链用于训练。
 """
 from __future__ import annotations
 
@@ -76,10 +78,22 @@ def _publish_json(path, value):
         temporary.unlink(missing_ok=True)
 
 
+def evaluation_samples(catalog, split, original_split=None):
+    """按当前划分及可选的重划分前归属取交集；缺少来源证明的样本不能冒充旧train。"""
+    if original_split not in (None, 'train', 'val', 'test'):
+        raise ValueError('Invalid original evaluation split')
+    return {source: tuple(sample for sample in samples if original_split is None or
+            sample['row'].get('resplit_provenance', {}).get('original_split') == original_split)
+            for source, samples in catalog.samples[split].items()}
+
+
 def build_evaluation_tasks(catalog, *, split='val', eval_count='all', seeds=(1729, 2718),
-                           selection_seed=42, start_mode='beginning', episode_seconds=None, critic_mc=False, balanced_samples_per_source=None):
+                           selection_seed=42, start_mode='beginning', episode_seconds=None, critic_mc=False,
+                           balanced_samples_per_source=None, training_progress=False, original_split=None):
     """构建可保存的评估计划；eval_count 是不同配对样本数，实际 episode 数还要乘 seed 数。"""
-    if split not in ({'train'} if critic_mc else {'val', 'test'}):
+    if type(training_progress) is not bool or critic_mc and training_progress:
+        raise ValueError('Training progress evaluation and MC supervision are separate purposes')
+    if split not in ({'train'} if critic_mc or training_progress else {'val', 'test'}):
         raise ValueError('Independent evaluation requires explicit val or test split')
     if start_mode not in {'beginning', 'center'}:
         raise ValueError('Evaluation start_mode must be beginning or center')
@@ -92,7 +106,7 @@ def build_evaluation_tasks(catalog, *, split='val', eval_count='all', seeds=(172
         raise ValueError('Evaluation requires distinct nonnegative integer seeds')
     if isinstance(selection_seed, bool) or not isinstance(selection_seed, (int, np.integer)):
         raise ValueError('Evaluation selection_seed must be an integer')
-    samples_by_source = catalog.samples[split]
+    samples_by_source = evaluation_samples(catalog, split, original_split)
     pool, source_positions = [], {}
     for source in sorted(samples_by_source):
         source_positions[source] = []
@@ -151,6 +165,8 @@ def build_evaluation_tasks(catalog, *, split='val', eval_count='all', seeds=(172
             'start_mode': start_mode, 'episode_seconds': episode_seconds, 'tasks': tasks,
             'pretraining_unseen_claim': False, 'training_buffer_allowed': bool(critic_mc)}
     if critic_mc:plan['critic_mc_supervision']=True
+    if training_progress:plan['evaluation_purpose']='training_progress'
+    if original_split is not None:plan['pool_original_split']=original_split
     plan['plan_sha256'] = _digest(plan)
     return plan
 
@@ -224,7 +240,7 @@ def _decision_evidence(result, index):
     for reward, detail in zip(rewards, details):
         if detail.get('transition_valid') is not True:
             raise ValueError('Invalid reward detail cannot enter evaluation statistics')
-        if detail.get('version') != 'stage2.gmt8_reference_limits.v1' or detail.get('activity', {}).get('valid') is not True:
+        if detail.get('version') not in ('stage2.gmt8_reference_limits.v1','stage2.gmt8_reference_limits.v2','stage2.gmt8_reward_std.v3') or detail.get('activity', {}).get('valid') is not True:
             raise ValueError('Evaluation requires current reward version and valid paired activity')
         if not math.isclose(_number(detail['dt_s'], 'dt'), .02, abs_tol=1e-12):
             raise ValueError('Evaluation control intervals must be 50Hz')
@@ -431,8 +447,10 @@ def evaluate_policy(env, policy, task_plan, output_dir, *, catalog=None, episode
         raise ValueError('Evaluation environment must use the explicitly supplied loaded Actor policy')
     plan = copy.deepcopy(task_plan)
     mc=bool(plan.get('critic_mc_supervision'))
+    training_progress=plan.get('evaluation_purpose')=='training_progress'
+    if mc and training_progress:raise ValueError('Training progress evaluation cannot be MC supervision')
     if mc and (plan.get('split')!='train' or transition_sink is None or plan.get('episode_seconds') is not None):raise ValueError('MC supervision requires full train episodes and explicit causal sink')
-    if plan.get('version') != VERSION or plan.get('split') not in (('train',) if mc else ('val', 'test')) or plan.get('training_buffer_allowed') is not mc:
+    if plan.get('version') != VERSION or plan.get('split') not in (('train',) if mc or training_progress else ('val', 'test')) or plan.get('training_buffer_allowed') is not mc:
         raise ValueError('Invalid independent evaluation task plan')
     declared = plan.pop('plan_sha256', None)
     if declared != _digest(plan):

@@ -67,6 +67,8 @@ def validate_optimization_configuration(config,maximum_steps):
             raise ValueError('Empirical joint-chain KL gates must be null or positive finite')
     expected=dict(status='not_physically_validated',scope='four_trainable_steps_only',
         optimization_sha256=digest(optimization_binding(s)))
+    if s['kl']['calibration'].get('optimization_sha256')=='auto':
+        s['kl']['calibration']=expected
     if s['kl']['calibration']!=expected:
         raise ValueError('Optimization binding differs; regenerate the identity for the actual configuration')
     from .reference_credit import CREDIT_CONTRACT
@@ -76,7 +78,7 @@ def validate_optimization_configuration(config,maximum_steps):
             or s['ppo_rollout']['credit_contract']!=CREDIT_CONTRACT
             or s['critic']['complete_mc']['start_distribution']!='match_training_reset.v1'):
         raise ValueError('Current 8s/.98/2000-iteration continuous-world training contract required')
-    if any(container['every_actor_iterations']!=100 for container in
-            (s['evaluation'],s['critic']['complete_mc'])):
-        raise ValueError('Complete-song evaluation and MC run every 100 accepted iterations')
+    if any(type(container['every_actor_iterations'])is not int or container['every_actor_iterations']<1
+            for container in (s['evaluation'],s['critic']['complete_mc'])):
+        raise ValueError('Evaluation and MC diagnostic intervals must be positive integers')
     return optimization_binding(s)

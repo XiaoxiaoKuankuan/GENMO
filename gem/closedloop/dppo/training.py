@@ -56,6 +56,10 @@ class _FiniteDiagnosticComplete(Exception):
 def _requires_initial_evaluation(args, state, baseline_exists):
     if args.collect_only or getattr(args,'critic_preheat_only',False) or baseline_exists:
         return False
+    parent=state.get('continuation_parent',{}).get('parent_progress')
+    if parent and all(state.get(key)==parent[key] for key in ('iteration','actor_updates','policy_version')):
+        # 新奖励以继承的DPPO模型建立新基线，明确不是原Stage1，不复用旧奖励评价。
+        return True
     if state['actor_updates'] or state['policy_version']:
         raise ValueError('Updated Actor has no durable initial evaluation; cannot invent Stage1 baseline')
     return True
@@ -208,6 +212,9 @@ def _evaluate(c,report,label,*,save=True):
     root_call(c.distributed,lambda:_poll_checkpoint(c,wait=True))
     started=time.perf_counter()
     result=evaluate(c,label,write_report=False)
+    if label=='initial' and c.state.get('continuation_parent'):
+        result['baseline_origin']=dict(scope='inherited_DPPO_under_new_reward_not_Stage1',
+            initialization=c.state['continuation_parent'])
     _overhead(c,'evaluation_run_seconds',started)
     alert=(result.get('paired_baseline') or {}).get('regression_alert') or {}
     from .periodic_monitor import advance_regression_alert
@@ -283,6 +290,9 @@ def _maintain_after_iteration(c,report,*,is_warmup,rejected,last_save,finishing=
     distributed=c.distributed
     complete_mc=c.stage['critic'].get('complete_mc',{})
     save_reasons=[]
+    parent=c.state.get('continuation_parent',{}).get('parent_progress',{})
+    if not rejected and not is_warmup and c.state['iteration']==parent.get('iteration',-2)+1:
+        save_reasons.append('continuation_first_update')
     iteration_eval=c.stage['evaluation'].get('every_actor_iterations')
     periodic_evaluation=(c.state['training_control_steps']>=c.state['next_evaluation_control_steps'] or
             iteration_eval and not is_warmup and not rejected and c.state['iteration']%iteration_eval==0)
@@ -386,12 +396,23 @@ def run(cargs,config,distributed):
         anchor_config=copy.deepcopy(c.config)
         anchor_config['stage9'].update(bc_batch=c.settings['bc_batch']//distributed.world_size,
             seed=(c.stage['seed']+1000003*distributed.rank)%2**32)
-        c.bc=Stage1RetentionAnchor(anchor_config,c.actor,train,source_global_step=loading['source_global_step'])
+        from .continuation import DisabledBC,initialize_actor_continuation
+        c.bc=(Stage1RetentionAnchor(anchor_config,c.actor,train,source_global_step=loading['source_global_step'])
+              if c.settings.get('bc_enabled',True) else DisabledBC())
+        parent_spec=c.stage.get('actor_initialization')
+        if parent_spec:
+            actor_initialization=local_call(distributed,lambda:initialize_actor_continuation(parent_spec,
+                actor=c.actor,optimizer=c.actor_optimizer,lr_controller=c.actor_lr,assets=c.stage['assets'],
+                kernel=c.policy.kernel_config,restore_learning=not cargs.resume))
         c.generators=dict(actor=torch.Generator().manual_seed(c.stage['seed']+3003),critic=torch.Generator().manual_seed(c.stage['seed']+2002))
         c.state=dict(iteration=0,rollouts_completed=0,warmup_completed=0,actor_updates=0,critic_updates=0,
             policy_version=0,optimizer_attempts=0,training_control_steps=0,training_physics_steps=0,
             training_upper_transitions=0,selected_actor_lr=c.settings['actor_lr'],
             execution_profile=dict(numerical_execution=c.policy.numerical_execution,microbatch=c.settings['denoising_microbatch']))
+        if parent_spec and not cargs.resume:
+            c.state.update(actor_initialization['parent_progress'])
+            c.state['continuation_parent']=actor_initialization
+            c.state['selected_actor_lr']=c.actor_lr.base_lr
         assets=root_call(distributed,lambda:{k:file_sha256(config['paths'][k]) for k in c.stage['assets']})
         if assets!=c.stage['assets']:raise ValueError('Initial Stage1/GMT assets differ from declared SHA')
         c.identity=dict(schema='genmo.stage10.training_identity',assets=assets,kernel=c.policy.kernel_config,
@@ -477,7 +498,8 @@ def run(cargs,config,distributed):
         if complete_mc.get('enabled') and not cargs.collect_only and not cargs.evaluate_only and not c.state.get('mc_preheat_complete'):
             from .mc_calibration import calibrate_critic
             report['mc_preheat']=calibrate_critic(c,'preheat',fit=True)
-            c.state['mc_preheat_complete']=report['mc_preheat']['quality_gate_passed']
+            c.state['mc_quality_passed']=report['mc_preheat']['quality_gate_passed']
+            c.state['mc_preheat_complete']=bool(c.state['mc_quality_passed'] or not complete_mc.get('enforce_quality_gate',True))
             c.state['next_mc_calibration_control_steps']=_next_interaction_boundary(c.state['training_control_steps'],complete_mc['every_control_steps'])
             _snapshot(c,'complete_mc_preheat',wait=True)
             if not c.state['mc_preheat_complete'] and not getattr(cargs,'critic_preheat_only',False):
@@ -617,6 +639,7 @@ def run(cargs,config,distributed):
                         clip=c.settings['ppo_clip'],gamma_denoising=c.settings['gamma_denoising'],
                         backtracking=c.settings['optimizer_backtracking'],kl_limits=c.stage['kl'],
                         kl_microbatch=c.settings['kl_microbatch'],minimum_lr=c.settings['actor_lr_adaptation']['minimum'],
+                        bc_enabled=c.settings.get('bc_enabled',True),
                         kl_reduction=c.stage['kl']['reduction'],
                         objective_reduction=c.settings['objective_logprob_reduction'],
                         grad_clip_norm=c.settings['grad_clip_norm'],reserve_attempt=reserve,
@@ -671,7 +694,9 @@ def run(cargs,config,distributed):
             local_call(distributed,assert_paused_physics)
             fingerprint_frequency=c.stage['checks']['full_fingerprint_every']
             fingerprints=None
-            if strict or (fingerprint_frequency>0 and (c.state['rollouts_completed']+1)%fingerprint_frequency==0):
+            parent=c.state.get('continuation_parent',{}).get('parent_progress',{})
+            first_continuation=(c.state['actor_updates']==parent.get('actor_updates',-1))
+            if strict or first_continuation or (fingerprint_frequency>0 and (c.state['rollouts_completed']+1)%fingerprint_frequency==0):
                 fingerprints=distributed.all_gather_object(local_call(distributed,lambda:dict(
                     actor=_model_fingerprint(c.actor),critic=_model_fingerprint(c.critic))))
                 if any(value!=fingerprints[0] for value in fingerprints):
@@ -700,7 +725,7 @@ def run(cargs,config,distributed):
                 performance_by_rank=distributed.all_gather_object(profile_report),physics_paused_during_optimization=True,
                 memory_by_rank=memory,periodic_model_fingerprints=fingerprints,
                 effective_upper_transitions_per_second=used[2]/wall,
-                mode='critic_warmup' if is_warmup else 'no_actor_update' if rejected else 'dppo_bc',
+                mode='critic_warmup' if is_warmup else 'no_actor_update' if rejected else 'dppo_bc' if c.settings.get('bc_enabled',True) else 'dppo',
                 timing_scope='actor_seconds_includes_all_step_KL_and_retries;final_KL_receipt_is_not_extra_time',
                 overhead_since_previous_record=dict(c.overhead))
             root_call(distributed,lambda:(c.manager.append_metrics(record),log_metrics(c.writer,c.output/'curves.jsonl',c.state['iteration'],

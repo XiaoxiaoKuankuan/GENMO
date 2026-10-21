@@ -1,7 +1,8 @@
 """已执行轨迹的列式奖励消费，不重新计算GPU连续分项或展开完整物理字典。
 
 输入是同一个环境、同一episode的已持久化ColumnarTrace。活动窗口按原时间顺序
-构造连续数组，成批计算RMS、门控和积分；音乐仍使用原动作节拍定义及FP32对齐
+构造连续数组，成批计算诊断RMS、旧门控比值和奖励积分；活动度不乘入任何奖励。
+音乐仍使用原动作节拍定义及FP32对齐
 归约。四个真实物理子步的功率与时间证据按列验证并计算，原跟踪raw/normalized
 由只读列视图提供，完整字段仍可回放。每100步的独立标量审计由调用者执行。
 
@@ -166,8 +167,9 @@ def evaluate_columns(reward, trace, *, timings=None):
             scores[name] = _finite(col('reward_primitives','components',name,'score'),name,(n,))
         if np.any(scores[name]<0) or (name != "joint_limit" and np.any(scores[name]>1+1e-12)): raise ValueError('Reward score outside [0,1]')
         if name != "joint_limit": scores[name] = np.minimum(scores[name],1.)
-    rates = {name: scores[name]*cfg[key]*(-1 if 'penalty' in key else 1)*
-             (np.asarray(gates) if name in ('track','music') else 1.) for name,key in WEIGHTS.items()}
+    rates = {name: scores[name]*cfg[key]*(-1 if 'penalty' in key else 1.)*
+             (np.asarray(gates) if cfg['version']=='stage2.gmt8_reference_limits.v1' and name in ('track','music') else 1.)
+             for name,key in WEIGHTS.items()}
     total = sum(rates.values())
     mark('consistency_and_reward_integration_seconds')
     results = []
@@ -196,7 +198,7 @@ def evaluate_columns(reward, trace, *, timings=None):
         components = {}
         for name,key in WEIGHTS.items():
             primitive = row['reward_primitives']['components'][name] if name!='music' else None
-            gate = gates[i] if name=='track' or name=='music' and reward.music_enabled else 1.
+            gate = gates[i] if cfg['version']=='stage2.gmt8_reference_limits.v1' and (name=='track' or name=='music' and reward.music_enabled) else 1.
             components[name] = dict(enabled=(name!='music' or reward.music_enabled) and (name!='stable' or cfg['stable_weight']!=0),valid=True if primitive is None else bool(primitive['valid']),
                 raw=music_raw if primitive is None else primitive['raw'],
                 normalized=(dict(beat=float(beats[i]),intensity=intensity[i]) if reward.music_enabled else {}) if primitive is None else primitive['normalized'],

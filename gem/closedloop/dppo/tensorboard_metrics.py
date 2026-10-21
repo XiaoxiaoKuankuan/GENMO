@@ -26,7 +26,7 @@ VERSION = 'genmo.stage2.asymmetric_compact_tensorboard.v1'
 DEFINITIONS = {
     'Reward/total_per_second': '分/秒，越高越好。训练为各来源积分回报/实际采集秒数再四来源等权；验证为各任务每秒回报先来源内平均、再来源等权。',
     'Reward/episode_return': '分，固定验证任务积分回报的四来源等权平均；执行更久也会增加，必须一起看每秒回报和终止。',
-    'Reward/tracking': '分/秒，已乘权重和活动度门控的跟踪奖励；越高越好，但不能替代原始误差。',
+    'Reward/tracking': '分/秒，已乘权重的跟踪奖励（当前v3无活动度乘数）；越高越好，但不能替代原始误差。',
     'Reward/stable': '分/秒，根高和非 yaw 姿态稳定奖励，越高越好。',
     'Reward/alive': '分/秒，有效存活控制区间奖励，越高越好。',
     'Reward/command_penalty': '分/秒，控制指令变化惩罚，非正，越接近零越好。',
@@ -34,7 +34,7 @@ DEFINITIONS = {
     'Reward/contact_penalty': '分/秒，滑脚和异常接触惩罚，非正，越接近零越好。',
     'Reward/joint_limit_penalty': '分/秒，实际及参考关节限位惩罚；不能当作硬限位最大越界距离。',
     'Reward/music': '分/秒，仅音乐奖励启用时记录；奖励关闭时不画恒零曲线。',
-    'Reward/paired_gain_per_second': '分/秒，同一固定任务相对 Stage1 的来源等权回报差，正值才是收益。',
+    'Reward/paired_gain_per_second': '分/秒，同一固定任务相对本运行初始Actor的来源等权回报差，正值才是收益。',
     'Reward/paired_gain_ci95_low': '上述收益的音乐组配对 bootstrap 95%区间下界；下界大于零才支持该验证集的明确收益。',
     'Reward/paired_gain_ci95_high': '上述收益的音乐组配对 bootstrap 95%区间上界；区间跨零表示提升不明确。',
     'Tracking/root_position_rms_m': '米，世界坐标根位置误差 RMS，越低越好；来源内按控制时间平均平方误差，再来源等权开方。',
@@ -81,16 +81,17 @@ DEFINITIONS = {
 for _source in SOURCES:
     DEFINITIONS[f'Sampling/time_share_{_source}'] = '本轮普通 Actor 实际采集秒数中该来源的占比；不是选曲概率，也不是唯一时间覆盖率。'
 
-SCOPES = ('training', 'validation', 'critic_mc')
+SCOPES = ('training', 'validation', 'train_evaluation', 'critic_mc')
 EVENT_TAG_OVERRIDES = {
     ('training', 'Reward/total_per_second'): 'Reward/train_total_per_second',
     ('validation', 'Reward/total_per_second'): 'Reward/validation_total_per_second',
+    ('train_evaluation', 'Reward/total_per_second'): 'Reward/validation_total_per_second',
 }
 EVENT_DEFINITIONS = {tag: description for tag, description in DEFINITIONS.items()
                      if tag != 'Reward/total_per_second'}
 EVENT_DEFINITIONS.update({
     'Reward/train_total_per_second': '分/秒，普通训练采集各来源积分回报/实际采集秒数再来源等权；任务不断变化，只作训练监视。',
-    'Reward/validation_total_per_second': '分/秒，固定验证各任务每秒回报先来源内平均再来源等权；优先用此曲线判断训练效果。',
+    'Reward/validation_total_per_second': '分/秒，固定评估任务每秒回报先来源内平均再来源等权；本正式配置使用原train音乐，不代表泛化。',
 })
 
 ERROR_TAGS = {

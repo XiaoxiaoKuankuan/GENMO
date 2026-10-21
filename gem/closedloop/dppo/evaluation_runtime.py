@@ -88,12 +88,16 @@ def _evaluate_impl(c, label, *, write_report=True):
     # train reset 重新建立状态，因此不假称恢复 PhysX 中途状态。
     rng = capture_local_rng(c.generators)
     old_backend_journal = c.backend.journal
+    selection_options={}
+    if c.stage['evaluation'].get('purpose')=='training_progress':
+        selection_options.update(training_progress=True,original_split=c.stage['evaluation'].get('original_split'))
     plan = root_call(c.distributed, lambda: build_balanced_plan(c.catalog,
         samples_per_source=c.stage['evaluation']['samples_per_source'],
         seeds=c.stage['evaluation']['seeds'], selection_seed=c.stage['evaluation']['selection_seed'],
         seconds=c.stage['evaluation']['episode_seconds'],
         start_mode=c.stage['evaluation'].get('start_mode','beginning'),
-        unique_music=c.stage['evaluation'].get('unique_music',False),split=c.stage['evaluation'].get('split','val')))
+        unique_music=c.stage['evaluation'].get('unique_music',False),split=c.stage['evaluation'].get('split','val'),
+        **selection_options))
     # 分片单位是样本，同一样本全部seed留在同rank；预算必须按实际child任务数计算。
     shards = [shard_plan(plan, rank, c.distributed.world_size) for rank in range(c.distributed.world_size)]
     latencies = c.distributed.all_gather_object(c.env.latency_budget_s)
@@ -305,6 +309,7 @@ def _evaluate_impl(c, label, *, write_report=True):
             paired_baseline=result.get('paired_baseline'), fixed_actor_drift=result['fixed_actor_drift'],
             fixed_critic_diagnostic=result['fixed_critic_diagnostic'],
             fresh_critic_diagnostic=result.get('fresh_critic_diagnostic'), wall_seconds=result['wall_seconds']),
-            prefix='validation',dashboard_metrics=evaluation_scalars(result,baseline) if c.writer is not None else None)
+            prefix='train_evaluation' if plan.get('evaluation_purpose')=='training_progress' else 'validation',
+            dashboard_metrics=evaluation_scalars(result,baseline) if c.writer is not None else None)
     root_call(c.distributed, publish_timing)
     return result
