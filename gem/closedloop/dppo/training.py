@@ -11,6 +11,8 @@
 episode，丢弃旧rollout。固定评估使用独立GPU世界、训练RNG隔离和原奖励协议，
 按累计真实控制交互触发；best保存实际完整权重。异步恢复点最多单在途，失败
 显式传播，结束排空后才释放run锁。异常/受控停止与正常接受必须分别记录。
+显式新实验可继承完整学习状态并更换有效批量；有限回溯没有可用Actor步时记录
+零更新并继续新物理采样，不增加Actor版本，不把普通探索失败作为整次训练停机条件。
 """
 from __future__ import annotations
 
@@ -501,6 +503,7 @@ def run(cargs,config,distributed):
             c.state=copy.deepcopy(payload['state'])
             for key in ('best_observed','best_saved','regression_monitor'):c.state.pop(key,None)
             c.state['experiment_initialization']=imported
+            c.state['budget']=root_call(distributed,lambda:c.budget.summary())
             c.bc.load_state_dict(payload['rank_states'][distributed.rank]['bc'])
             restore_local_rng(payload['rank_states'][distributed.rank]['rng'],c.generators)
         from NoetixRobot.tasks.mimic.mimic_noetix_bumi4340_mha_sonic.closedloop.vector_backend import VectorFrozenGmtBackend
@@ -533,8 +536,8 @@ def run(cargs,config,distributed):
                 calibrations=distributed.all_gather_object(calibration))
             root_call(distributed,lambda:atomic_json(c.output/'deployment_calibration.json',report))
             raise _FiniteDiagnosticComplete
-        if payload is None:
-            _snapshot(c,'initial',wait=True)
+        if payload is None or initialization:
+            _snapshot(c,'initial' if payload is None else 'experiment_initialized',wait=True)
         if not (cargs.calibrate_only or cargs.collect_only or cargs.evaluate_only or getattr(cargs,'critic_preheat_only',False)):
             from .actor_optimization import optimization_binding,validate_optimization_configuration
             validate_optimization_configuration(c.config,c.stage['derived']['maximum_actor_steps'])
