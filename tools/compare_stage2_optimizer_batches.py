@@ -45,6 +45,7 @@ from gem.closedloop.dppo.trainer import load_actor
 from gem.closedloop.dppo.training_checkpoint import file_sha256,immutable_cpu_snapshot
 from gem.closedloop.dppo.training_config import configuration
 from gem.closedloop.dppo.updater import actor_update,final_kl
+from tools.analyze_stage2_probability import export_actor
 
 
 def restore_experiment(actor,optimizer,controller,anchor,snapshot,generator):
@@ -170,6 +171,8 @@ def main():
                 wall_seconds=max(distributed.all_gather_object(time.perf_counter()-started)),
                 peak_allocated_bytes=max(distributed.all_gather_object(torch.cuda.max_memory_allocated())),
                 same_initial_state_digest=initial_digest,physical_quality='unverified_counterfactual_only')
+            result['export']=root_call(distributed,lambda:export_actor(policy,config,learning,report,
+                result['acceptance'],args.case,output))
             root_call(distributed,lambda:atomic_json(output/'result.json',result))
             root_call(distributed,lambda:torch.save(dict(**last_statistics,metadata=metadata,
                 scope='reused_production_full_rollout_FP64_statistics_no_extra_forward'),output/'final_chain_statistics.pt'))
