@@ -63,6 +63,21 @@ def restore_experiment(actor,optimizer,controller,anchor,snapshot,generator):
     restore_local_rng(snapshot['rng'],{'actor':generator})
 
 
+def producer_full_probability(case):
+    """复用采集器已完成的全19随机步审计；无证据就完整重算，不降低检查容差。"""
+    path=case.parents[1]/'summary.json'
+    if not path.is_file():return None
+    document=json.loads(path.read_text())
+    if document.get('status')!='passed' or document.get('exit_code')!=0:return None
+    for entry in document.get('fixed_data_cases',[]):
+        check=entry.get('full_zero_update_probability',{})
+        if (entry.get('fixed_data_case')==str(case) and check.get('passed') is True
+                and check.get('checked_steps')==list(range(19))):
+            return dict(source=str(path),sha256=file_sha256(path),audit=check,
+                reason='same_immutable_case_producer_completed_full_frozen_replay; current_four_steps_recomputed')
+    return None
+
+
 def main():
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--case',type=Path,required=True)
@@ -113,8 +128,10 @@ def main():
             controller=controller.state_dict(),bc=anchor.state_dict(),rng=capture_local_rng({'actor':generator})))
         rows,targets,manifest=payload['transitions'],payload['targets'],payload['global_manifest']
         cache=RolloutTensorCache(rows,targets,distributed.device,max_device_bytes=4*1024**3)
+        producer=producer_full_probability(args.case)
         zero=probability_check_local(policy,rows,global_manifest=manifest,distributed=distributed,
-            denoising_microbatch=128,tensor_cache=cache,include_frozen=True)
+            denoising_microbatch=128,tensor_cache=cache,include_frozen=producer is None)
+        zero['producer_full_probability_reuse']=producer
         root_call(distributed,lambda:atomic_json(args.output_dir/'zero_update.json',zero))
         eligible=[r for i,r in enumerate(rows) if bool(targets['valid'][i]) and r.free_mask.any()]
         selected=eligible[:4]

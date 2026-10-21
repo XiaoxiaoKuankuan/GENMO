@@ -206,3 +206,18 @@ def test_execution_audit_traces_original_prefix_across_rollouts():
     assert 31 in first['cross_rollout_source_frames']
     assert all(item['lambda1_type']=='right_censored_bootstrapped_not_full_MC' for item in v)
     assert not r['continuous_control_range']
+
+
+def test_full_probability_reuse_requires_same_completed_case(tmp_path):
+    import json
+    from tools.compare_stage2_optimizer_batches import producer_full_probability
+    case=tmp_path/'session/fixed_data_validation/iteration000001';case.mkdir(parents=True)
+    assert producer_full_probability(case) is None
+    path=case.parents[1]/'summary.json'
+    document=dict(status='passed',exit_code=0,fixed_data_cases=[dict(fixed_data_case=str(case),
+        full_zero_update_probability=dict(passed=True,checked_steps=list(range(19))))])
+    path.write_text(json.dumps(document));assert producer_full_probability(case)['audit']['passed']
+    document['fixed_data_cases'][0]['full_zero_update_probability']['checked_steps']=[15,16,17,18]
+    path.write_text(json.dumps(document));assert producer_full_probability(case) is None
+    document['fixed_data_cases'][0]['fixed_data_case']=str(case.parent/'iteration000002')
+    path.write_text(json.dumps(document));assert producer_full_probability(case) is None
