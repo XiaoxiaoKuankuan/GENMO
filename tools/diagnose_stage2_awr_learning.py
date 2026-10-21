@@ -184,6 +184,15 @@ def main():
         source_balance=objective.get("source_balance", "none"),
         time_weights=time_weights.tolist(),
         source_factors={s:float(source_factors[data.sources.index(s)]) for s in sorted(set(data.sources))})
+    effective_weights = source_factors*data.weights
+    report["training_objective"]["source_corrected_advantage_weights"] = dict(
+        mean=float(effective_weights.mean()),
+        effective_sample_size=float(effective_weights.sum().square()/effective_weights.square().sum()),
+        by_source={s:dict(samples=data.sources.count(s),
+            mass_fraction=float(effective_weights[torch.tensor([v == s for v in data.sources])].sum()/effective_weights.sum()))
+            for s in sorted(set(data.sources))},
+        scope="expected_training_coefficient_before_random_timestep_factor_not_measured_gradient_share",
+        weights_changed=False)
     def noise_for(ids,step):
         ts=[];noise=[]
         for i in ids:
