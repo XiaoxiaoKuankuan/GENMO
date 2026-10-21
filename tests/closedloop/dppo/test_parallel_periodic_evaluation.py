@@ -290,6 +290,43 @@ def test_fixed_critic_targets_preserve_bootstrap_and_models_are_readonly():
     assert not hasattr(row, 'old_value') and critic.weight.grad is None
 
 
+@pytest.mark.parametrize('order', ['grouped', 'interleaved', 'reversed'])
+def test_parallel_critic_reference_connects_each_real_episode_independent_of_arrival(order):
+    """复现四槽回调交错；gamma=lambda=1时独立完整回报可直接手算。"""
+    critic = Critic()
+    critic.train()
+    rows = []
+    # 第三条轨迹与第一条env/episode同名，但来自另一backend，不允许串联。
+    for backend, env, reward in [('world-a', 0, 1.), ('world-a', 1, 10.), ('world-b', 0, 100.)]:
+        for decision in range(2):
+            context = {'x': torch.zeros(1, 1)}
+            done = decision == 1
+            rows.append(SimpleNamespace(context=context, next_context=None if done else context,
+                identity=dict(backend_session_id=backend, env_id=env, episode_id='episode1',
+                              policy_version=7, decision_id=decision),
+                rewards=[reward * (decision + 1) / 25] * 25,
+                executed_control_steps=25, control_tick_begin=decision * 300,
+                control_tick_end=(decision + 1) * 300, terminated=done, truncated=False,
+                transition_valid=True, metadata=dict(remaining_music_seconds=1. - decision * .5,
+                    next_remaining_music_seconds=.5 - decision * .5,
+                    critic_context=context, next_critic_context=None if done else context)))
+    if order == 'interleaved':
+        rows = [rows[i] for i in (0, 2, 4, 1, 3, 5)]
+    elif order == 'reversed':
+        rows = rows[::-1]
+    original_ids = [id(row) for row in rows]
+    reference = build_fixed_critic_reference(rows, critic, torch.device('cpu'), gamma_upper=1., lambda_upper=1.)
+    scales = {('world-a', 0): 1., ('world-a', 1): 10., ('world-b', 0): 100.}
+    assert len(reference['records']) == 6
+    for record in reference['records']:
+        identity = record['identity']
+        scale = scales[identity['backend_session_id'], identity['env_id']]
+        assert record['target'] == pytest.approx(scale * (3 if identity['decision_id'] == 0 else 2))
+    assert [id(row) for row in rows] == original_ids
+    assert all(not hasattr(row, 'old_value') for row in rows)
+    assert critic.training and critic.weight.grad is None
+
+
 def test_rank_local_cuda_rng_never_uses_all_devices(monkeypatch):
     calls = []
     monkeypatch.setattr(torch.cuda, 'is_initialized', lambda: True)

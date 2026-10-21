@@ -449,12 +449,24 @@ def snapshot_critic_transition(row):
 def build_fixed_critic_reference(transitions, critic, device, *, gamma_upper=.99, lambda_upper=.95):
     """用初始独立eval实际奖励建立固定GAE targets，行政截断采用初始Critic自举。
 
+    并行世界按控制完成顺序交错返回不同环境；先按backend/env/episode/policy分组、
+    按真实控制起点排序，再调用原GAE。否则相邻列表项属于不同环境，会把连续音乐
+    错切成一步TD，导致独立价值诊断偏乐观。这里只整理独立快照，不修改执行顺序、
+    普通训练GAE或已经发布的固定参考；已有参考继续代表当时保存的原始标签。
     targets来自既有fixed_targets，继续/终止/无效mask及实际控制时间折扣保持原合同。
     后续诊断只向这些固定targets做回归，不能解释为无偏真实价值误差或物理质量。
     """
     from .trainer import fixed_targets
     rows = [snapshot_critic_transition(row) for row in transitions]
     _require(bool(rows), 'No executed initial evaluation transitions for Critic reference')
+    episodes = {}
+    for row in rows:
+        identity = row.identity
+        key = (identity['backend_session_id'], identity.get('env_id', 0),
+               identity['episode_id'], identity['policy_version'])
+        episodes.setdefault(key, []).append(row)
+    rows = [row for episode in episodes.values()
+            for row in sorted(episode, key=lambda item: item.control_tick_begin)]
     modes = {name: child.training for name, child in critic.named_modules()}
     try:
         targets = fixed_targets(rows, critic, device, gamma_upper=gamma_upper,
