@@ -301,6 +301,21 @@ class TrainingBudget:
                     raise ValueError('persistent lease physics counter differs from controls')
         self._validate_extensions()
 
+    def initialize_from_checkpoint(self, saved):
+        """只在新空账本继承父实验已耗预算；不清零交互或隐瞒既有优化尝试。"""
+        if any(self.state['used'].values()) or self.state['phases']:
+            raise ValueError('Checkpoint initialization requires an unused new experiment budget')
+        if saved['limits']!=self.limits or saved.get('limit_extensions'):
+            raise ValueError('Initialization requires unchanged limits without external extension records')
+        before=self.state
+        self.state=copy.deepcopy(saved)
+        try:
+            self._validate()
+            self._save(self.state)
+        except BaseException:
+            self.state=before
+            raise
+
     def _validate_extensions(self):
         entries = self.state.get('limit_extensions', [])
         if not isinstance(entries, list):

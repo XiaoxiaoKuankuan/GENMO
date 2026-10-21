@@ -108,13 +108,30 @@ class AsyncCheckpointWriter:
         finally:self.pool.shutdown(wait=True);self.closed=True
 
 
-def load_training_checkpoint(path,*,identity,actor,critic,actor_optimizer,critic_optimizer,controller):
+def _initialization_execution(identity):
+    """新实验仅允许变更有效批量及评估监视，实际学习/物理合同仍核对。"""
+    import copy
+    result=copy.deepcopy(identity)
+    result.pop('evaluation',None)
+    result.get('scale',{}).pop('actor_minibatch_chains',None)
+    for key in ('actor_minibatch_internal_transitions','max_actor_optimizer_steps','bc_batch'):
+        result.get('training',{}).pop(key,None)
+    # 此摘要由批量导出；所有原始核、KL、奖励、学习率与BC配置仍直接比较。
+    result.get('kl',{}).get('calibration',{}).pop('optimization_sha256',None)
+    return result
+
+
+def load_training_checkpoint(path,*,identity,actor,critic,actor_optimizer,critic_optimizer,controller,
+                             new_experiment=False):
     payload=torch.load(path,map_location='cpu',weights_only=False,mmap=True)
     # 固定评估是只读监视配置；更换清单不改变已学参数、Adam、奖励或采样策略。
     # 配对评估仍严格比较自己的完整任务与执行配置，并单独重建Stage1基线。
     previous=payload.get('identity') or {}
     old_training={k:v for k,v in previous.items() if k!='evaluation'}
     new_training={k:v for k,v in identity.items() if k!='evaluation'}
+    if new_experiment:
+        old_training=_initialization_execution(old_training)
+        new_training=_initialization_execution(new_training)
     if payload.get('schema')!=SCHEMA or not same_execution(old_training,new_training):
         raise ValueError('Checkpoint schema or actual training configuration differs')
     from .checkpoint import _validate_model_state,_validate_optimizer_state

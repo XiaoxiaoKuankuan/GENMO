@@ -58,6 +58,34 @@ def _requires_initial_evaluation(args, state, baseline_exists):
     return True
 
 
+def _final_actor_acceptance(actor,kl,limits):
+    """有限回溯无可用步是正常采样轮，不能因此终止整个长期训练。"""
+    from .actor_backtracking import check_candidate_kl
+    result=check_candidate_kl(kl,limits)
+    if actor.get('step_rejected'):
+        result['passed']=False
+        result['failures']['actor_optimizer']='explicit_invalid_optimizer_update'
+    if actor['optimizer_steps']==0:
+        normal={'rollout_no_useful_trust_region_step','pre_step_chain_joint_kl','active_clip_saturation'}
+        if actor.get('early_stop_reason') not in normal:
+            raise RuntimeError('Zero Actor steps without an explicit normal rollout stop reason')
+        result['no_actor_update_this_rollout']=True
+        result['continue_with_new_physical_rollout']=True
+    return result
+
+
+def _advance_training_iteration(state,actor):
+    """轮次表示已处理的新物理批次；Actor版本和更新计数只随真实接受步增加。"""
+    count=actor['optimizer_steps']
+    state['iteration']+=1
+    state['actor_updates']+=count
+    if count:
+        state['policy_version']+=1
+        state['last_accepted_actor_lr']=actor['steps'][-1]['learning_rate']
+    else:
+        state['actor_update_skipped_rollouts']=state.get('actor_update_skipped_rollouts',0)+1
+
+
 def _next_interaction_boundary(used, interval):
     """按累计真实控制步对齐周期；重启不把下一次评估延后一个完整周期。"""
     if type(used) is not int or used < 0 or type(interval) is not int or interval < 1:
@@ -427,7 +455,8 @@ def run(cargs,config,distributed):
             actor_initialization=actor_initialization,
             recovery='fresh_PhysX_episodes_no_partial_rollout_reuse',torch_version=torch.__version__)
         payload=None
-        if not cargs.resume and not cargs.evaluate_only and critic_config.get('preheat_artifact'):
+        initialization=getattr(cargs,'initialize_from_checkpoint',None)
+        if not cargs.resume and not initialization and not cargs.evaluate_only and critic_config.get('preheat_artifact'):
             from .critic_preheat import initialize_critic
             imported=local_call(distributed,lambda:initialize_critic(critic_config['preheat_artifact'],
                 identity=c.identity,actor=c.actor,critic=c.critic,optimizer=c.critic_optimizer,
@@ -449,6 +478,29 @@ def run(cargs,config,distributed):
             from .run_management import validate_budget_progress
             root_call(distributed,lambda:validate_budget_progress(payload['budget'],c.budget.state_dict()))
             c.state=copy.deepcopy(payload['state'])
+            c.bc.load_state_dict(payload['rank_states'][distributed.rank]['bc'])
+            restore_local_rng(payload['rank_states'][distributed.rank]['rng'],c.generators)
+        elif initialization:
+            checkpoint=Path(initialization).resolve()
+            payload=local_call(distributed,lambda:load_training_checkpoint(checkpoint,identity=c.identity,
+                actor=c.actor,critic=c.critic,actor_optimizer=c.actor_optimizer,
+                critic_optimizer=c.critic_optimizer,controller=c.controller,new_experiment=True))
+            def initialize_experiment():
+                import shutil
+                c.budget.initialize_from_checkpoint(payload['budget'])
+                parent=checkpoint.parent.parent
+                for name in ('evaluation_baseline.json','fixed_diagnostic_reference.json'):
+                    if (parent/name).exists():shutil.copy2(parent/name,c.output/name)
+                record=dict(checkpoint=str(checkpoint),sha256=file_sha256(checkpoint),
+                    source_iteration=payload['state']['iteration'],actor_and_adam_preserved=True,
+                    critic_and_adam_preserved=True,original_budget_preserved=True,
+                    fresh_physics_rollout_required=True)
+                atomic_json(c.output/'initialization.json',record)
+                return record
+            imported=root_call(distributed,initialize_experiment)
+            c.state=copy.deepcopy(payload['state'])
+            for key in ('best_observed','best_saved','regression_monitor'):c.state.pop(key,None)
+            c.state['experiment_initialization']=imported
             c.bc.load_state_dict(payload['rank_states'][distributed.rank]['bc'])
             restore_local_rng(payload['rank_states'][distributed.rank]['rng'],c.generators)
         from NoetixRobot.tasks.mimic.mimic_noetix_bumi4340_mha_sonic.closedloop.vector_backend import VectorFrozenGmtBackend
@@ -657,11 +709,7 @@ def run(cargs,config,distributed):
                     kl['reuse_verification']=dict(passed=True,all_valid_chains_and_four_steps=True,
                         additional_wall_seconds=time.perf_counter()-started)
                     c.kl_reuse_verified=True
-                from .actor_backtracking import check_candidate_kl
-                accepted=check_candidate_kl(kl,c.stage['kl'])
-                if actor.get('step_rejected') or actor['optimizer_steps']==0:
-                    accepted['passed']=False
-                    accepted['failures']['actor_optimizer']='no_accepted_optimizer_step'
+                accepted=_final_actor_acceptance(actor,kl,c.stage['kl'])
                 actor['accepted_optimizer_steps']=actor['optimizer_steps'] if accepted['passed'] else 0
                 actor['acceptance_scope']='full_rollout_chain_joint_KL'
                 if not accepted['passed']:
@@ -696,9 +744,7 @@ def run(cargs,config,distributed):
                 pass
             elif not is_warmup:
                 root_call(distributed,lambda:c.budget.accept_iteration('update',identity=f'{identity["session_id"]}/{label}'))
-                c.state['actor_updates']+=actor['optimizer_steps']
-                c.state['policy_version']+=1;c.state['iteration']+=1
-                c.state['last_accepted_actor_lr']=actor['steps'][-1]['learning_rate']
+                _advance_training_iteration(c.state,actor)
             else:
                 c.state['warmup_completed']+=1
             c.state['rollouts_completed']+=1
