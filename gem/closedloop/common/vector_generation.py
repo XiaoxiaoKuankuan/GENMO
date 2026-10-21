@@ -178,6 +178,7 @@ def generate_for_environment_flow(env):
             music_start_frame=env.music_start_frame))
     if getattr(env, 'active_awr_task', {}).get('candidate_group_id'):
         packet['candidate_task'] = env.active_awr_task
+        packet['candidate_decision_index'] = env.decision-env.awr_decision_origin
     result, shared_timing = yield GenerationOperation(packet)
     sample_ready = time.perf_counter()
     rejection, prepared = None, None

@@ -58,10 +58,16 @@ class AWRUpperEnvironment(VectorUpperEnvironment):
         self.rollout_window_reached = False
         self.actor_fingerprint = None
         self.active_awr_task = {}
+        self.awr_decision_origin = 0
+
+    def reset_task_flow(self, *args, **kwargs):
+        # 公共decision计数跨Episode累加，不能把全局decision==0误当每集首次生成。
+        self.awr_decision_origin = self.decision
+        return (yield from super().reset_task_flow(*args, **kwargs))
 
     def generation_noise_seed(self, decision):
         from .candidates import noise_seed
-        return noise_seed(self.active_awr_task, decision)
+        return noise_seed(self.active_awr_task, decision-self.awr_decision_origin)
 
     def generate_flow(self, **kwargs):
         # 评价与采集共享同一个DDIM，不进入原PPO sample_rollout，也不改变采样器。

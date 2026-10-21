@@ -59,7 +59,7 @@ def generate_batch(policy, packets, *, shared_storage=False, device_trace=False)
     conditions = {k: torch.cat([c[k] for c in contexts]) for k in contexts[0]}
     from .candidates import initial_state
     initial_states = [initial_state(p, contexts[i], metadata[i])
-                      if p.get("candidate_task") and p["decision"] == 0 else None
+                      if p.get("candidate_task") and p["candidate_decision_index"] == 0 else None
                       for i, p in enumerate(packets)]
     condition_end = time.perf_counter()
     result = policy.sample(conditions, seeds=[p["seed"] for p in packets])

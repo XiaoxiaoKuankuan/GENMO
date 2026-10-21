@@ -221,7 +221,7 @@ def group_advantages(episodes, config, *, gamma_upper=.99, planned_tasks=None):
             if not e.rows[0].actor_valid or e.rows[0].control_tick_begin != e.task["comparison_start_tick"]:
                 reasons.append("first_action_unexecuted_or_wrong_tick")
             for index, row in enumerate(e.rows):
-                if (row.identity["decision_id"] != index or
+                if (row.identity["decision_id"] != e.rows[0].identity["decision_id"]+index or
                         row.metadata.get("generation_seed") != noise_seed(e.task, index)):
                     reasons.append("generation_random_stream_mismatch"); break
         windows = {format(float(seconds), "g"): [window_return(e, seconds, gamma_upper=gamma_upper) for e in members]

@@ -71,6 +71,23 @@ def test_candidate_noise_is_rank_slot_task_independent_and_only_first_changes():
     assert noise_seed({}, 0) is None
 
 
+def test_first_generation_is_episode_relative_not_persistent_environment_counter(monkeypatch):
+    from gem.closedloop.awr.collection import AWRUpperEnvironment, VectorUpperEnvironment
+    def reset(self, *args, **kwargs):
+        yield from ()
+    monkeypatch.setattr(VectorUpperEnvironment, "reset_task_flow", reset)
+    env = AWRUpperEnvironment.__new__(AWRUpperEnvironment)
+    env.decision = 173
+    env.active_awr_task = dict(candidate_group_id="g", generation_seed=10, common_future_noise_key="future")
+    list(env.reset_task_flow())
+    assert env.awr_decision_origin == env.decision == 173
+    assert env.generation_noise_seed(173) == 10
+    assert env.generation_noise_seed(174) == noise_seed(env.active_awr_task, 1)
+    env.decision = 299
+    list(env.reset_task_flow())
+    assert env.generation_noise_seed(299) == 10
+
+
 def test_candidate_expansion_keeps_budget_all_music_and_independent_task_ids():
     tasks = [dict(task_id=f"t{i}-{j}", dataset=str(i//4), sample_id=f"s{i}", group_id=f"g{i}", seed=42,
                   music_start_frame=10, initialization="paired", rank=0) for i in range(16) for j in range(4)]
