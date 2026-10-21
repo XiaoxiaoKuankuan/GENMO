@@ -65,6 +65,18 @@ def test_minimum_trial_restores_nonempty_adam_and_never_executes_tiny_steps():
     assert equal_state(before, (actor.state_dict(), optimizer.state_dict(), controller.state_dict()))
 
 
+def test_last_rejected_trial_is_distinct_from_last_accepted_lr(monkeypatch):
+    _, optimizer, _ = prepared()
+    def inner(*args, **kwargs):
+        return dict(steps=[dict(learning_rate=2e-7)],discarded_pending_minibatch=dict(
+            trust_region=dict(attempts=[dict(learning_rate=1e-7),dict(learning_rate=5e-8)])))
+    monkeypatch.setattr(updater, '_actor_update', inner)
+    result = updater.actor_update(None, optimizer, trust_region={'maximum_lr': 1e-6})
+    assert result['last_accepted_learning_rate'] == pytest.approx(2e-7)
+    assert result['last_trial_learning_rate'] == pytest.approx(5e-8)
+    assert actor_base_lr(optimizer) == pytest.approx(1e-6)
+
+
 @pytest.mark.parametrize('value', [float('nan'), float('inf')])
 def test_nonfinite_kl_cannot_be_reported_as_normal_rollout_exhaustion(value):
     actor, optimizer, controller = prepared()

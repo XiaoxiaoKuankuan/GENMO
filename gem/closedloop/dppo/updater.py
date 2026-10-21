@@ -246,9 +246,14 @@ def actor_update(policy,optimizer,*args,trust_region=None,**kwargs):
     if nominal is not None:set_actor_base_lr(optimizer,nominal)
     try:
         result=_actor_update(policy,optimizer,*args,trust_region=trust_region,**kwargs)
-        last_accepted=(result.get('steps') or [{}])[-1].get('learning_rate',actor_base_lr(optimizer))
+        last_accepted=(result.get('steps') or [{}])[-1].get('learning_rate')
+        discarded_trials=(((result.get('discarded_pending_minibatch') or {}).get('trust_region') or {})
+            .get('attempts') or [])
+        last_trial=(discarded_trials[-1]['learning_rate'] if discarded_trials else
+            last_accepted if last_accepted is not None else actor_base_lr(optimizer))
         result.update(nominal_learning_rate=nominal,incoming_optimizer_learning_rates=incoming,
-            last_trial_learning_rate=last_accepted,rollout_learning_rate_reset=nominal is not None)
+            last_accepted_learning_rate=last_accepted,last_trial_learning_rate=last_trial,
+            rollout_learning_rate_reset=nominal is not None)
         return result
     finally:
         if nominal is not None:set_actor_base_lr(optimizer,nominal)
