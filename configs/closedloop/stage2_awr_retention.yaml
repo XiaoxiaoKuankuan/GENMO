@@ -91,6 +91,7 @@ assets:
   kinematics: c08731704dccece11351b6fa877e30bac5ca2a8d363de30af7ca2ea1398f4029
   stats: c7c0acb0e7a38797adb38ce0be41ee72820e34daed4e780275c64fb55c3e5326
 reward:
+  # v2仅保留活动度诊断参数；Tracking/音乐奖励乘数恒为1，不再使用该门控。
   activity:
     epsilon: 1.0e-08
     full_gate_ratio: 0.5

@@ -178,3 +178,31 @@ def test_fixed_bc_reports_actual_not_requested_gradient_ratio():
     assert selected["actual_gradient_ratio"] == pytest.approx(.005)
     with pytest.raises(ValueError):
         choose_bc_coefficient(measured, 0.)
+
+
+def test_reused_clock_must_match_original_measurement_assets_and_samples(tmp_path):
+    import copy
+    import json
+    from pathlib import Path
+    from gem.closedloop.awr.config import load_config, validate_measured_deployment_profile
+    from gem.closedloop.awr.io import file_sha256
+    config = load_config(Path(__file__).resolve().parents[3]/"configs/closedloop/stage2_awr.yaml")
+    sampler = dict(schema="genmo.awr.stage1_ddim.v1", steps=20, eta=0., guidance_scale=2.5,
+                   noise="initial_gaussian", actor="same_network_all_steps")
+    evidence = tmp_path/"measurement.json"
+    evidence.write_text(json.dumps(dict(schema="genmo.awr.deployment_calibration.v1",
+        sampler=sampler, assets=config["assets"], samples_seconds=[.22, .24])))
+    profile = dict(schema="genmo.deployment_delay_profile.v1", target="single_robot_single_request",
+        sampler=sampler, measured_assets=config["assets"], samples_seconds=[.22, .24],
+        prefix_budget_seconds=.28, provenance=[dict(path=str(evidence), sha256=file_sha256(evidence))])
+    assert validate_measured_deployment_profile(profile, config) == profile
+    assert validate_measured_deployment_profile(None, config) is None
+    changed = copy.deepcopy(profile); changed["samples_seconds"][0] = .23
+    with pytest.raises(ValueError, match="samples"):
+        validate_measured_deployment_profile(changed, config)
+    changed = copy.deepcopy(profile); changed["sampler"]["guidance_scale"] = 1.
+    with pytest.raises(ValueError, match="sampler"):
+        validate_measured_deployment_profile(changed, config)
+    evidence.write_text(evidence.read_text()+" ")
+    with pytest.raises(ValueError, match="SHA"):
+        validate_measured_deployment_profile(profile, config)

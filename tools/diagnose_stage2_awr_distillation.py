@@ -10,6 +10,8 @@ Stage1重新执行完整32任务，使用删除活动乘数后的同一奖励。
 不自动启动Critic/AWR或长期训练，不以少量探针通过宣称五轮自蒸馏稳定。
 可显式选择单个对照分支、固定BC系数及教师权重；每次写独立实验参数与数据身份，
 用于只改变一个因素的后续复验，不重写先前失败候选。
+对照可显式复用已测部署profile，校验采样器/资产/来源SHA与测量数组；不把重新
+测时导致的物理变化算成模型变化，训练与评价必须传同一profile。
 """
 from __future__ import annotations
 
@@ -33,6 +35,7 @@ def main():
     parser.add_argument("--source-run", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--config", type=Path, default=ROOT/"configs/closedloop/stage2_awr.yaml")
+    parser.add_argument("--deployment-profile", type=Path, help="复用已经SHA绑定的真实部署测量JSON；训练/评价须一致")
     parser.add_argument("--episodes-per-source", type=int, default=8)
     parser.add_argument("--max-steps", type=int, default=120)
     parser.add_argument("--candidate", choices=("legacy", "conditional_eval", "guided", "bc_only", "bounded"), default="bounded")
@@ -56,7 +59,7 @@ def main():
         parser.error("Duplicate diagnostic arms are not allowed")
     if args.operation == "train" and args.bc_weight is None and args.methods[0] != "legacy":
         parser.error("Start with legacy calibration or provide an explicit fixed --bc-weight")
-    from gem.closedloop.awr.config import load_config, physical_config, preflight
+    from gem.closedloop.awr.config import load_config, physical_config, preflight, validate_measured_deployment_profile
     from gem.closedloop.awr.distributed import Distributed
     from gem.closedloop.awr.io import atomic_json, cpu_copy, digest, read_tree, write_tree
     from gem.closedloop.awr.records import AWRCompleteEpisode, TRAINING_METADATA_KEYS
@@ -78,6 +81,9 @@ def main():
     started = time.perf_counter()
     try:
         cfg = load_config(args.config); cfg["paths"]["genmo_repo"] = str(ROOT)
+        if args.deployment_profile is not None:
+            cfg["timing"]["deployment_profile"] = validate_measured_deployment_profile(
+                json.loads(args.deployment_profile.read_text()), cfg)
         d = Distributed(f"cuda:{rank}")
         audit = d.root(lambda: preflight(cfg))
         cfg["awr"]["configuration_assets"] = audit["configuration_assets"]
@@ -241,8 +247,14 @@ def main():
             plan = json.loads(Path(state["artifacts"]["evaluation_fixed"]).read_text())
             builder = OnlineConditionBuilder(actor.endecoder.codec, history_steps=50, motion_frames=60)
             profile_path = output/"deployment_profile.json"
+            fixed_profile = cfg["timing"]["deployment_profile"]
             if profile_path.exists():
                 profile = json.loads(profile_path.read_text())
+                if fixed_profile is not None and profile != fixed_profile:
+                    raise ValueError("Evaluation must retain the explicitly bound deployment profile")
+            elif fixed_profile is not None:
+                profile = fixed_profile
+                d.root(lambda: atomic_json(profile_path, profile))
             else:
                 profile = calibrate(runtime, policy, builder, catalog, plan["tasks"], output/"calibration", d, fingerprint)
                 d.root(lambda: atomic_json(profile_path, profile))

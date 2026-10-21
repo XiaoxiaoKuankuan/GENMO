@@ -27,6 +27,34 @@ def configuration_assets(config, *, expected=None):
     return actual
 
 
+def validate_measured_deployment_profile(profile, config):
+    """复用真实已测时钟时核验原采样器、冻结资产和测量文件，避免把时钟变化算成学习。
+
+    这里只校验及复制，不重新测时、不修改延迟或前缀预算。允许代码文档提交变化，
+    但测量数组必须与SHA绑定的原证据完全相同；运行仍记录自己的完整物理身份。
+    """
+    if profile is None:
+        return None
+    from gem.closedloop.common.deployment_clock import DeploymentClock
+    DeploymentClock(profile)
+    sampler = dict(schema="genmo.awr.stage1_ddim.v1", steps=20, eta=0., guidance_scale=2.5,
+                   noise="initial_gaussian", actor="same_network_all_steps")
+    if profile.get("sampler") != sampler or profile.get("measured_assets") != config["assets"]:
+        raise ValueError("Deployment profile sampler/frozen assets differ")
+    samples = []
+    for reference in profile["provenance"]:
+        if file_sha256(reference["path"]) != reference["sha256"]:
+            raise ValueError("Deployment measurement evidence SHA differs")
+        evidence = json.loads(Path(reference["path"]).read_text())
+        if (evidence.get("schema") != "genmo.awr.deployment_calibration.v1"
+                or evidence.get("sampler") != sampler or evidence.get("assets") != config["assets"]):
+            raise ValueError("Deployment measurement provenance differs")
+        samples.extend(evidence["samples_seconds"])
+    if samples != profile["samples_seconds"]:
+        raise ValueError("Deployment delay samples differ from the measured evidence")
+    return copy.deepcopy(profile)
+
+
 def load_config(path, *, profile=None):
     c = yaml.safe_load(Path(path).read_text())
     if c.get("version") != "genmo.stage2.awr.v1":
@@ -69,6 +97,7 @@ def load_config(path, *, profile=None):
                  warmup_ticks=600, min_prefix_frames=12, lookahead_control_steps=10)
     if any(c["timing"][k] != v for k, v in fixed.items()):
         raise ValueError("AWR must preserve physical timing")
+    validate_measured_deployment_profile(c["timing"]["deployment_profile"], c)
     return c
 
 
@@ -87,6 +116,7 @@ def physical_config(config, *, run_id, rank=0, device="cuda:0"):
 
 def preflight(config, *, check_gpus=True):
     report = dict(schema="genmo.awr.preflight.v1", assets={}, repositories={})
+    validate_measured_deployment_profile(config["timing"]["deployment_profile"], config)
     report["configuration_assets"] = configuration_assets(config)
     for name in ("genmo", "gmt"):
         root = Path(config["paths"][name+"_repo"]).resolve()

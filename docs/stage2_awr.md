@@ -429,18 +429,21 @@ export CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 PYTHONDONTWRITEBYTECODE=1 OMP_NUM_TH
 export ISAACLAB_PATH=/data0/user/liwei/closedloop_stage8_runtime/IsaacLab
 export LD_LIBRARY_PATH=/data0/user/liwei/closedloop_stage8_runtime/sysroot/usr/lib/x86_64-linux-gnu
 AWR_DIAG_RUN=/data1/user/liwei/GENMO_outputs/stage2_awr/distillation_repair_$(date +%Y%m%d_%H%M%S)
+AWR_DIAG_PROFILE=/data1/user/liwei/GENMO_outputs/stage2_awr/distillation_repair_20261021_03/deployment_profile.json
 /data0/user/liwei/closedloop_stage10_v3_runtime/env_isaac_genmo/bin/python -B -m torch.distributed.run \
   --standalone --nproc_per_node=8 tools/diagnose_stage2_awr_distillation.py train \
   --methods bounded --bc-weight 0.01366578514366661 --bounded-lr 1e-7 \
   --reference-weight 1000 --max-steps 45 \
   --source-run /data1/user/liwei/GENMO_outputs/stage2_awr/formal5_20261020_01 \
-  --output "$AWR_DIAG_RUN"
+  --deployment-profile "$AWR_DIAG_PROFILE" --output "$AWR_DIAG_RUN"
 /data0/user/liwei/closedloop_stage10_v3_runtime/env_isaac_genmo/bin/python -B -m torch.distributed.run \
   --standalone --nproc_per_node=8 tools/diagnose_stage2_awr_distillation.py evaluate \
   --candidate bounded \
   --source-run /data1/user/liwei/GENMO_outputs/stage2_awr/formal5_20261020_01 \
-  --output "$AWR_DIAG_RUN"
+  --deployment-profile "$AWR_DIAG_PROFILE" --output "$AWR_DIAG_RUN"
 ```
 
 这是32条旧Stage1 Episode的单位权重诊断，只复用条件和参考；旧奖励不进入新版Critic。
 完整物理评价重新计算无活动乘数的新奖励；失败任务全部保留。该命令不启动 AWR。
+
+显式`--deployment-profile`在训练和评价必须一致；入口核验采样器、冻结资产、原测量文件SHA和延迟数组，不允许把重新测时的差异误算成模型收益。首次需要重新测部署时可省略；后续控制实验应复用第一次的固定profile。
