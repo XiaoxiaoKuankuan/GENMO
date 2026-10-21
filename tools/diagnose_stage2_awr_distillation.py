@@ -1,9 +1,9 @@
-"""Server-2有界自蒸馏定位：旧单分支、相同预算CFG修复、受控更新三组。
+"""Server-2有界自蒸馏定位：旧单分支、仅关闭Dropout、CFG修复、BC单独更新、受控更新五组。
 
 从已停止运行的首轮Stage1 Replay只读提取四来源等数完整Episode的Actor条件/参考，
-三组均从原s595000初始化、使用单位权重、同顺序/扩散噪声/真实BC流。旧奖励与优势
-只保留来源身份，不参与优化；这些历史记录绝不写入新奖励Replay。第一二组只改变
-CFG监督算式，第三组显式缩小LR并加入原模型两分支约束，用于有界候选验收。
+五组均从原s595000初始化、使用单位权重、同顺序/扩散噪声/真实BC流。旧奖励与优势
+只保留来源身份，不参与优化；这些历史记录绝不写入新奖励Replay。第一二组只改变网络Dropout，第二三组只改变
+CFG监督算式，第四组只训练原BC，第五组显式缩小LR并加入原模型两分支约束，用于有界候选验收。
 
 固定真实val条件和种子检查更新前后生成质量；可另行用evaluate操作对指定候选与
 Stage1重新执行完整32任务，使用删除活动乘数后的同一奖励。保留所有失败与模型，
@@ -33,9 +33,10 @@ def main():
     parser.add_argument("--config", type=Path, default=ROOT/"configs/closedloop/stage2_awr.yaml")
     parser.add_argument("--episodes-per-source", type=int, default=8)
     parser.add_argument("--max-steps", type=int, default=120)
-    parser.add_argument("--candidate", choices=("legacy", "guided", "bounded"), default="bounded")
+    parser.add_argument("--candidate", choices=("legacy", "conditional_eval", "guided", "bc_only", "bounded"), default="bounded")
+    parser.add_argument("--bounded-lr", type=float, default=1e-7)
     args = parser.parse_args()
-    if not 1 <= args.episodes_per_source <= 16 or not 1 <= args.max_steps <= 200:
+    if not 0 < args.bounded_lr <= 1e-5 or not 1 <= args.episodes_per_source <= 16 or not 1 <= args.max_steps <= 200:
         parser.error("Bounded diagnosis permits 1–16 Episodes/source and at most 200 steps/arm")
     import torch
     import torch.distributed as dist
@@ -155,19 +156,21 @@ def main():
             base = copy.deepcopy(cfg["awr"]["actor"])
             base.update(max_optimizer_steps=args.max_steps, reference_weight=0.)
             coefficient = None; summaries = {}
-            for name in ("legacy", "guided", "bounded"):
+            for name in ("legacy", "conditional_eval", "guided", "bc_only", "bounded"):
                 if d.root(lambda: stop_requested(output)):
                     return 0
                 actor.load_state_dict(original); torch.manual_seed(42+rank*100003)
                 c = copy.deepcopy(base)
-                if name == "legacy":
-                    c.update(denoising_guidance_scale=1., replay_eval_mode=False)
+                if name in ("legacy", "conditional_eval"):
+                    c.update(denoising_guidance_scale=1., replay_eval_mode=name != "legacy")
+                if name == "bc_only":
+                    c.update(replay_coefficient=0.)
                 if name == "bounded":
-                    c.update(lr=1e-6, weight_decay=0., reference_weight=1.)
+                    c.update(lr=args.bounded_lr, weight_decay=0., reference_weight=10.)
                 bc = Stage1Supervision(runtime, actor, train, source_step=report["source_global_step"])
                 trainer = ActorTrainer(actor, data, bc, c, d, seed=42, bc_weight=coefficient)
-                if name in ("legacy", "bounded"):
-                    calibration = trainer.calibrate(8, .1 if name == "legacy" else .3)
+                if name == "legacy":
+                    calibration = trainer.calibrate(8, .1)
                     d.root(lambda: atomic_json(output/(name+"_calibration.json"), calibration))
                     if name == "legacy": coefficient = trainer.bc_weight
                 def log(current, entry):

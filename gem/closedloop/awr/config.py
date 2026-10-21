@@ -48,6 +48,8 @@ def load_config(path, *, profile=None):
         raise ValueError("New AWR runs require the reward without activity multiplication")
     if c["awr"]["actor"].get("denoising_guidance_scale") != c["model"]["guidance_scale"]:
         raise ValueError("Replay training CFG must match the deployed sampler")
+    if c["awr"]["actor"].get("replay_coefficient", 1.) != 1.:
+        raise ValueError("AWR must retain its real Replay objective; BC-only is diagnostic only")
     if not c["awr"].get("retention_gate") or not c["awr"].get("run_ablation"):
         raise ValueError("Self-distillation retention must pass before AWR updates")
     if c["runtime"]["allow_shared_gpu"]:

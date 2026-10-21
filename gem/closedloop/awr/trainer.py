@@ -127,7 +127,7 @@ class ActorTrainer:
                 self.actor.train(mode)
             loss, _ = weighted_denoising(out["pred_x_start"], out["target_x_start"], batch["free_mask"],
                                          batch["weights"], global_count=len(indices))
-            objective = loss
+            objective = loss*c.get("replay_coefficient", 1.)
             if teacher is not None:
                 # 两分支各自锚定，避免CFG输出相同但分支互相抵消；不使用Contact伪标签。
                 anchor = sum(per_sample_denoising(out[key], teacher[key], batch["free_mask"])
@@ -218,7 +218,7 @@ class ActorTrainer:
                     entry = dict(step=self.steps, epoch=self.epoch, samples=len(ids), awr_loss=awr_loss,
                                  bc_loss=bc_loss, bc_weight=self.bc_weight,
                                  reference_loss=self.last_reference_loss, reference_weight=self.reference_weight,
-                                 total_loss=awr_loss+self.bc_weight*bc_loss+self.reference_weight*self.last_reference_loss,
+                                 total_loss=c.get("replay_coefficient", 1.)*awr_loss+self.bc_weight*bc_loss+self.reference_weight*self.last_reference_loss,
                                  gradient_norm=float(norm), clipped_gradient_norm=min(float(norm), c.get("gradient_clip", 1.)),
                                  lr=learning_rate, awr_seconds=awr_done-step_start,
                                  bc_forward_backward_seconds=bc_done-awr_done,

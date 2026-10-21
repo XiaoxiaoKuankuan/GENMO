@@ -409,6 +409,7 @@ export CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 PYTHONDONTWRITEBYTECODE=1 OMP_NUM_TH
   --output /data1/user/liwei/GENMO_outputs/stage2_awr/distillation_repair_20261021_01
 ```
 
-`train`最多三组×120优化步，保存全部实际步数和固定val探针；`evaluate`使用同一命令
+`train`比较旧方式、仅关闭Dropout、再修CFG、仅BC、受控更新五组，每组最多120优化步，
+保存全部实际步数和固定val探针；`evaluate`使用同一命令
 替换操作并追加`--candidate bounded`，重建Stage1与候选的32任务物理基线。两步均不会
 启动后续AWR或长期训练。数学修复、离线生成保留、物理保留、强化收益必须分开报告。
