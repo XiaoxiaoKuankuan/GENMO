@@ -32,6 +32,7 @@ from gem.closedloop.dppo.actor_step_diagnostics import output_probe
 from gem.closedloop.dppo.attribution_runtime import probe_difference,probe_summary
 from gem.closedloop.dppo.budget import atomic_json
 from gem.closedloop.dppo.collectives import DistributedCollectives
+from gem.closedloop.dppo.chain_ppo import from_records
 from gem.closedloop.dppo.diagnostic_rollout import load_rollout
 from gem.closedloop.dppo.gradient_merge import BCGradientController
 from gem.closedloop.dppo.optimization_support import probability_check_local
@@ -114,10 +115,14 @@ def main():
         zero=probability_check_local(policy,rows,global_manifest=manifest,distributed=distributed,
             denoising_microbatch=128,tensor_cache=cache,include_frozen=True)
         root_call(distributed,lambda:atomic_json(args.output_dir/'zero_update.json',zero))
-        selected=[r for i,r in enumerate(rows) if bool(targets['valid'][i]) and r.free_mask.any()][:4]
-        before=output_probe(policy,selected,cache,max_chains=len(selected))
+        eligible=[r for i,r in enumerate(rows) if bool(targets['valid'][i]) and r.free_mask.any()]
+        selected=eligible[:4]
         count=sum(bool(m['valid']) and bool(m['has_free']) for m in manifest)
         summaries=[]
+        metadata=[item for shard in distributed.all_gather_object([dict(identity=r.identity,
+            source=r.metadata.get('training_task',{}).get('dataset','unknown'),
+            music_start_frame=r.metadata.get('music_start_frame')) for i,r in enumerate(rows)
+            if bool(targets['valid'][i]) and r.free_mask.any()]) for item in shard]
         for name in args.branches:
             restore_experiment(actor,optimizer,controller,anchor,snapshot,generator)
             restored_digest=exact_state_digest(dict(actor=actor.state_dict(),optimizer=optimizer.state_dict(),
@@ -130,6 +135,9 @@ def main():
             trust['objective_search_attempts']=3
             batch=count if name=='full' else (4096 if name=='objective4096' else int(name))
             started=time.perf_counter();torch.cuda.reset_peak_memory_stats(distributed.device)
+            last_statistics={}
+            def retain_statistics(stage,records,advantages,sources):
+                last_statistics.update(records=records,advantages=advantages,sources=sources)
             def observer(step):
                 root_call(distributed,lambda:atomic_json(output/f"step_{step['optimizer_step']:03d}.json",step))
                 if rank==0:print(json.dumps(dict(branch=name,step=step['optimizer_step'],
@@ -138,16 +146,33 @@ def main():
                 anchor=anchor,generator=generator,ppo_epochs=1,minibatch_chains=batch,microbatch=128,
                 clip=.1,soft_kl=.1,bc_samples_per_rollout=2048,bc_min_global_batch=256,
                 bc_enabled=False,audit_full_rollout_objective=True,trust_region=trust,
-                kl_limits=config['stage10']['kl'],detailed_diagnostics=True,step_observer=observer)
+                kl_limits=config['stage10']['kl'],detailed_diagnostics=True,step_observer=observer,
+                full_rollout_observer=retain_statistics)
             kl=final_kl(policy,rows,cache,manifest,distributed=distributed,microbatch=128,clip=.1)
-            probes=[v for shard in distributed.all_gather_object(probe_difference(
-                before,output_probe(policy,selected,cache,max_chains=len(selected)))) for v in shard]
+            counts=distributed.all_gather_object(len(eligible));offset=sum(counts[:rank])
+            stats=from_records(last_statistics['records'][offset:offset+len(eligible)])
+            indices=sorted(set(list(range(min(4,len(eligible))))+
+                torch.topk(stats['joint_kl'],min(4,len(eligible))).indices.tolist()+
+                torch.topk(stats['joint_log_ratio'],min(4,len(eligible))).indices.tolist()))
+            selected=[eligible[i] for i in indices]
+            candidate_state=immutable_cpu_snapshot(actor.state_dict())
+            after_probe=output_probe(policy,selected,cache,max_chains=len(selected))
+            actor.load_state_dict(snapshot['actor'])
+            before_probe=output_probe(policy,selected,cache,max_chains=len(selected))
+            actor.load_state_dict(candidate_state)
+            probes=[v for shard in distributed.all_gather_object(probe_difference(before_probe,after_probe)) for v in shard]
+            local_call(distributed,lambda:torch.save(dict(before=immutable_cpu_snapshot(before_probe),
+                after=immutable_cpu_snapshot(after_probe),selection='ordinary_and_actual_high_KL_high_ratio',
+                generation_world_anchors=[r.metadata.get('generation_world_anchor') for r in selected]),
+                output/f'probe_rank{rank:02d}.pt'))
             result=dict(branch=name,minibatch_chains=batch,effective_chains=count,actor=report,final_kl=kl,
                 acceptance=check_candidate_kl(kl,config['stage10']['kl']),output=probe_summary(probes),
                 wall_seconds=max(distributed.all_gather_object(time.perf_counter()-started)),
                 peak_allocated_bytes=max(distributed.all_gather_object(torch.cuda.max_memory_allocated())),
                 same_initial_state_digest=initial_digest,physical_quality='unverified_counterfactual_only')
             root_call(distributed,lambda:atomic_json(output/'result.json',result))
+            root_call(distributed,lambda:torch.save(dict(**last_statistics,metadata=metadata,
+                scope='reused_production_full_rollout_FP64_statistics_no_extra_forward'),output/'final_chain_statistics.pt'))
             root_call(distributed,lambda:torch.save(dict(schema='stage2.batch_comparison.actor.v1',
                 actor=immutable_cpu_snapshot(actor.state_dict()),kernel=policy.kernel_config,
                 source_case=str(args.case),source_case_sha256=file_sha256(args.case/'case.json'),
@@ -156,7 +181,7 @@ def main():
             root_call(distributed,lambda:atomic_json(args.output_dir/'comparison.json',dict(
                 complete=len(summaries)==len(args.branches),results=summaries,bc_enabled=False,
                 objectives_are_not_physical_benefit=True)))
-            del result,report,probes
+            del result,report,probes,candidate_state,before_probe,after_probe
         restore_experiment(actor,optimizer,controller,anchor,snapshot,generator)
     finally:
         if cache is not None:cache.close()

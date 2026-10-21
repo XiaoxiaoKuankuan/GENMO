@@ -36,7 +36,7 @@ def _actor_update(policy,optimizer,rows,targets,cache,manifest,controller,*,dist
                     gradient_observer=None,step_observer=None,bc_samples_per_rollout=2048,
                     bc_min_global_batch=1,snr=False,step_strategy='intermediate4',detailed_diagnostics=False,
                     max_active_clip=.95,trust_region=None,kl_limits=None,max_optimizer_steps=None,candidate_observer=None,
-                    bc_enabled=True,audit_full_rollout_objective=False):
+                    bc_enabled=True,audit_full_rollout_objective=False,full_rollout_observer=None):
     """每条完整链一个联合比值；两遍微批反传与全局SUM严格保持同一目标。"""
     from .chain_ppo import evaluate_chain_records,from_records,backward_chain_surrogate
     from .gaussian_probability import chain_diagnostics,distribution
@@ -80,6 +80,7 @@ def _actor_update(policy,optimizer,rows,targets,cache,manifest,controller,*,dist
         names={position:name for shard in distributed.all_gather_object(labels) for position,name in shard}
         source_names=[names[i] for i in range(len(selected))]
         objective_history.append(dict(stage='before_update',**full_before))
+        if full_rollout_observer is not None:full_rollout_observer('before_update',full_current,full_adv,source_names)
     for epoch in range(ppo_epochs):
         order=balanced_epoch_order(selected,manifest,generator) if distributed.rank==0 else None
         order=distributed.broadcast_object(order)
@@ -226,8 +227,10 @@ def _actor_update(policy,optimizer,rows,targets,cache,manifest,controller,*,dist
             if audit_full_rollout_objective:
                 full_after=chain_diagnostics(from_records(full_current),full_adv,clip=clip)
                 from .objective_audit import grouped_objective
-                objective_groups=grouped_objective(from_records(full_current),full_adv,source_names,clip=clip)
+                objective_groups=grouped_objective(from_records(full_current),full_adv,source_names,clip=clip,
+                    before_statistics=from_records(accepted_full_current))
                 objective_history.append(dict(stage='accepted_Adam',optimizer_step=len(reports)+1,**full_after))
+                if full_rollout_observer is not None:full_rollout_observer('accepted_Adam',full_current,full_adv,source_names)
             report=dict(objective='full_chain_clipped_ppo',ppo_clip_applied=True,epoch=epoch,
                 optimizer_step=len(reports)+1,global_chain_count=len(indices),sampled_steps=4,
                 denoising_steps=list(policy.trainable_steps),internal_sample_visits=len(indices)*4,

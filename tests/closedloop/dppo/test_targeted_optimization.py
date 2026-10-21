@@ -71,15 +71,22 @@ def test_bc_disabled_has_zero_calls_and_same_full_objective_population(actor_fac
     distributed=DistributedCollectives(0,1,device='cpu')
     manifest=[dict(owner_rank=0,local_index=i,valid=True,has_free=True) for i in range(len(rows))]
     cache=RolloutTensorCache(rows,targets,'cpu')
+    observed=[]
     try:
         result=actor_update(policy,opt,rows,targets,cache,manifest,controller,distributed=distributed,
             anchor=anchor,generator=torch.Generator().manual_seed(73),minibatch_chains=2,microbatch=3,
-            soft_kl=None,max_active_clip=1.,bc_enabled=False,audit_full_rollout_objective=True)
+            soft_kl=None,max_active_clip=1.,bc_enabled=False,audit_full_rollout_objective=True,
+            full_rollout_observer=lambda stage,records,adv,sources:observed.append((stage,records.clone())))
         assert result['actual_global_bc_samples']==0 and result['planned_global_bc_samples']==0
         assert equal_state(controller.state_dict(),before)
         reference=final_kl(policy,rows,cache,manifest,distributed=distributed,microbatch=3,clip=.1)
         assert result['full_rollout_objective_history'][-1]['objective_mean']==pytest.approx(reference['objective_mean'],abs=1e-10)
         assert all(s['full_rollout_after']['complete_chain_count']==len(rows) for s in result['steps'])
+        assert len(observed)==1+result['optimizer_steps']
+        assert all(r.shape[:2]==(len(rows),4) for _,r in observed)
+        assert all(s['full_rollout_groups']['all']['gain_from_previous_same_membership']==pytest.approx(
+            s['full_rollout_after']['objective_mean']-s['full_rollout_before']['objective_mean'],abs=1e-12)
+            for s in result['steps'])
         assert result['steps'][0]['parameter_update']['gradient_projection_measured']
         assert result['steps'][0]['parameter_update']['modules']['all']['cosine_update_negative_ppo_gradient'] is not None
     finally:

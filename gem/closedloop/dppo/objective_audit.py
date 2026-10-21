@@ -13,7 +13,7 @@ import torch
 from .gaussian_probability import chain_diagnostics
 
 
-def grouped_objective(statistics, advantages, sources, *, clip):
+def grouped_objective(statistics, advantages, sources, *, clip,before_statistics=None):
     from .gaussian_probability import ppo_surrogate
     objective=ppo_surrogate(statistics,advantages,clip=clip)['objective']
     kl=statistics['joint_kl'];adv=advantages.double()
@@ -22,6 +22,9 @@ def grouped_objective(statistics, advantages, sources, *, clip):
         groups['source/'+source]=torch.tensor([s==source for s in sources],device=adv.device)
     cutoff=torch.quantile(kl,.99) if len(kl) else kl.new_tensor(0.)
     groups['KL_top1pct']=kl>=cutoff;groups['KL_ordinary']=kl<cutoff
+    previous=(None if before_statistics is None else
+        ppo_surrogate(before_statistics,advantages,clip=clip)['objective'])
     return {name:dict(count=int(mask.sum()),objective_mean=float(objective[mask].mean()),
-        gain_from_behavior=float((objective-adv)[mask].mean()),KL_mean=float(kl[mask].mean()))
+        gain_from_behavior=float((objective-adv)[mask].mean()),KL_mean=float(kl[mask].mean()),
+        gain_from_previous_same_membership=None if previous is None else float((objective-previous)[mask].mean()))
         for name,mask in groups.items() if mask.any()}

@@ -534,6 +534,7 @@ class UpperEnvironment:
                 if plan is not None:
                     first_consumption.setdefault(str(plan),int(row['control_tick_begin']))
         metadata = dict(critic_context=generated["critic_context"],next_critic_context=next_critic_context,
+            generation_world_anchor=cpu_copy(generated['meta'].get('world_anchor')),
             remaining_music_seconds=self.remaining_music(start),
             next_remaining_music_seconds=self.remaining_music(end), sampler_trace=trace,
             physical_episode_administrative_truncation=bool(truncated and not boundary_reached),
