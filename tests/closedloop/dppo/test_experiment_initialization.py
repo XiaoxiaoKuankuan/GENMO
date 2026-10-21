@@ -11,6 +11,7 @@ import torch
 from gem.closedloop.dppo.gradient_merge import BCGradientController
 from gem.closedloop.dppo.training_checkpoint import SCHEMA,load_training_checkpoint
 from gem.closedloop.dppo.run_management import TrainingBudget
+from gem.closedloop.dppo.budget_ledger import IncrementalBudget,replay_budget
 from gem.closedloop.dppo.training import _final_actor_acceptance,_advance_training_iteration
 
 
@@ -60,6 +61,29 @@ def test_new_experiment_keeps_spent_budget_without_reset(tmp_path):
     assert parent.state_dict()['used']['accepted_iterations']==6
     assert child.state_dict()['used']['accepted_iterations']==7
     with pytest.raises(ValueError,match='unused'):child.initialize_from_checkpoint(parent.state_dict())
+
+
+def test_production_sqlite_budget_inherits_by_transaction_and_replays(tmp_path):
+    limits=dict(accepted_iterations=200,optimizer_attempts=100,generations=1000,control_steps=1000,physics_steps=4000)
+    parent=IncrementalBudget(tmp_path/'parent.json',limits)
+    parent.reserve('old',optimizer_attempts=24)
+    parent.accept_iteration('old',identity='parent/1')
+    child=IncrementalBudget(tmp_path/'child.json',limits)
+    descriptor=(tmp_path/'child.json').read_bytes()
+    child.initialize_from_checkpoint(parent.state_dict())
+    expected=parent.state_dict();expected.pop('ledger')
+    actual=child.state_dict();actual.pop('ledger')
+    assert actual==expected
+    assert (tmp_path/'child.json').read_bytes()==descriptor
+    child.accept_iteration('new',identity='child/1')
+    assert child.state['used']['accepted_iterations']==2
+    assert parent.state['used']['accepted_iterations']==1
+    child.close()
+    reopened=IncrementalBudget(tmp_path/'child.json',limits)
+    assert reopened.state['accepted_identities']==['parent/1','child/1']
+    assert reopened.state['used']['optimizer_attempts']==24
+    with pytest.raises(ValueError,match='unused'):reopened.initialize_from_checkpoint(expected)
+    reopened.close();parent.close()
 
 
 def test_no_usable_actor_step_is_normal_but_kl_failure_still_visible():

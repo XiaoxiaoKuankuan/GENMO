@@ -70,6 +70,15 @@ class IncrementalBudget(TrainingBudget):
     def _save(self, value):
         raise RuntimeError('Incremental budget requires an explicit transaction; full-state overwrite forbidden')
 
+    def initialize_from_checkpoint(self, saved):
+        """新空实验以单个SQLite事务继承旧消耗，不改写不可变base或父账本。"""
+        if self.sequence!=0:
+            raise ValueError('Checkpoint initialization requires an unused new experiment budget')
+        snapshot=copy.deepcopy(saved)
+        snapshot.pop('ledger',None)
+        self._change([dict(kind='initialize',phase='checkpoint_initialization',state=snapshot)],
+            identity='initialize:'+str(uuid.uuid4()))
+
     def _change(self, operations, *, identity):
         if self.poisoned:
             raise RuntimeError('Budget transaction outcome requires recovery before continuing')
@@ -162,6 +171,15 @@ def _validate_operations(state, operations, settled_phases, accepted_ids):
     phases, settlements, accepted, controls = {}, {}, [], {}
     if not isinstance(operations, list) or not operations:
         raise ValueError('Budget transaction must contain operations')
+    if any(operation.get('kind')=='initialize' for operation in operations):
+        if len(operations)!=1 or any(state['used'].values()) or state['phases'] or settled_phases or accepted_ids:
+            raise ValueError('Checkpoint initialization requires an unused new experiment budget')
+        snapshot=copy.deepcopy(operations[0]['state'])
+        if snapshot.get('limits')!=state['limits'] or snapshot.get('limit_extensions'):
+            raise ValueError('Initialization requires unchanged limits without external extension records')
+        checker=object.__new__(TrainingBudget);checker.state=snapshot
+        checker._validate()
+        return dict(initialization_state=snapshot),snapshot.get('lease_settlements',{}),snapshot.get('accepted_identities',[])
     for operation in operations:
         phase, kind = operation.get('phase'), operation.get('kind')
         if not isinstance(phase, str) or not phase or phase in settled_phases:
@@ -221,6 +239,9 @@ def _validate_operations(state, operations, settled_phases, accepted_ids):
 
 
 def _apply(state, changes, settlements, accepted):
+    if 'initialization_state' in changes:
+        state.clear();state.update(copy.deepcopy(changes['initialization_state']))
+        return
     state['used'] = changes['used']
     state['phases'].update(changes['phases'])
     if changes.get('control_settlements'):
