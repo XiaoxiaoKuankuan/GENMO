@@ -123,6 +123,11 @@ def main():
     parser.add_argument('--output-dir',type=Path,required=True)
     args=parser.parse_args();args.output_dir.mkdir(parents=True,exist_ok=True)
     reports=[]
+    # 初始评估的session副本要等异步checkpoint轮询后发布；根基线已是完整原始合并报告。
+    baseline_path=args.run_dir/'evaluation_baseline.json'
+    if baseline_path.exists():
+        baseline=json.loads(baseline_path.read_text())
+        if baseline.get('status')=='passed':reports.append((int(baseline['iteration']),baseline_path,baseline))
     for path in args.run_dir.glob('sessions/*/evaluations/*.json'):
         report=json.loads(path.read_text())
         if report.get('status')=='passed':reports.append((int(report['iteration']),path,report))
