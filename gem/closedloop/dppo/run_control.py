@@ -28,6 +28,10 @@ def build_policy(actor, settings, precision, *, frozen_actor=None):
     from .frozen_prefix import FrozenPrefixPolicy
     cls=FrozenPrefixPolicy
     extra=dict(frozen_prefix_steps=15,frozen_actor=frozen_actor)
+    if settings.get('temporal_residual') is not None:
+        from .temporal_residual_policy import TemporalResidualPolicy
+        cls=TemporalResidualPolicy
+        extra['temporal_residual']=settings['temporal_residual']
     policy=cls(actor, **extra, std_schedule=settings['std_schedule'], steps=settings['denoising_steps'],
         eta=settings['eta'], guidance_scale=settings['guidance_scale'], precision=precision['mode'],
         attention=precision['attention'], linear_execution=precision['linear_execution'],

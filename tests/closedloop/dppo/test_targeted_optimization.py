@@ -127,3 +127,75 @@ def test_deterministic_display_preserves_frozen_hybrid_policy(actor_factory):
     with torch.no_grad():
         expected=policy.transition_parameters(context,a['chain'][:,19],19)['mean']
     torch.testing.assert_close(a['chain'][:,20],expected,rtol=0,atol=0)
+
+
+def test_temporal_gate_preserves_initial_chain_and_shared_probability_mean(actor_factory):
+    from gem.closedloop.dppo.temporal_residual_policy import TemporalResidualPolicy,residual_gate
+    policy,rows,_=case(actor_factory)
+    gated=TemporalResidualPolicy(copy.deepcopy(policy.actor),std_schedule=policy.std_schedule,
+        generation_frames=60,temporal_residual=dict(focus_free_frames=8,taper_frames=5,evidence='synthetic_test_only'))
+    context=rows[0].context
+    old=policy.sample_rollout(context,generator=torch.Generator().manual_seed(53))
+    new=gated.sample_rollout(context,generator=torch.Generator().manual_seed(53))
+    for field in ('chain','qpos30','contact','old_means','old_stds','old_log_probs'):
+        if field in old:torch.testing.assert_close(new[field],old[field],atol=0,rtol=0)
+    with torch.no_grad():
+        for name,parameter in gated.actor.named_parameters():
+            if name.startswith('denoiser.final_layer.'):parameter.add_(1e-4)
+        prepared=gated.prepare_conditions(context)
+        result=gated._transition_prepared(prepared,new['chain'][:,15],15)
+        prior=gated._frozen_transition(prepared,new['chain'][:,15],15,False)
+        gate=residual_gate(prepared['adapted']['known_mask'],prepared['adapted']['future_valid'],
+            focus_free_frames=8,taper_frames=5).expand_as(result['mean'])
+        torch.testing.assert_close(result['mean'][gate==0],prior['mean'][gate==0],atol=0,rtol=0)
+        # 全部自由坐标依旧参与概率，门控没有缩小free_mask。
+        assert torch.equal(result['free_mask'],prior['free_mask'])
+        assert bool((result['mean'][gate>0]!=prior['mean'][gate>0]).any())
+    # 梯度条件缓存原先不计算冻结特征；此候选仍必须正确提供无梯度冻结特征。
+    from gem.closedloop.dppo.tensor_cache import ConditionGraphCache
+    cache=ConditionGraphCache(gated,include_frozen=False)
+    cache.prime(rows[:1]);out=cache.transition(rows[:1],rows[0].chain[15:16],15)
+    out['mean'].sum().backward();cache.backward()
+    assert any(p.grad is not None for p in gated.actor.parameters() if p.requires_grad)
+    assert all(p.grad is None for p in gated.frozen_policy.actor.parameters())
+
+
+def test_comparison_restores_nonempty_adam_controller_bc_rng_exactly():
+    from tools.compare_stage2_optimizer_batches import restore_experiment
+    from gem.closedloop.dppo.parallel_support import capture_local_rng
+    from gem.closedloop.dppo.rollback_audit import exact_state_digest
+    actor=torch.nn.Linear(2,1);opt=torch.optim.AdamW(actor.parameters(),lr=1e-6,weight_decay=0.)
+    for p in actor.parameters():p.grad=torch.ones_like(p)
+    opt.step();controller=BCGradientController();anchor=Anchor();generator=torch.Generator().manual_seed(65)
+    initial=dict(actor=copy.deepcopy(actor.state_dict()),optimizer=copy.deepcopy(opt.state_dict()),
+        controller=copy.deepcopy(controller.state_dict()),bc=copy.deepcopy(anchor.state_dict()),
+        rng=capture_local_rng({'actor':generator}))
+    digest=exact_state_digest(initial)
+    opt.step();anchor.batch_size=12;torch.randn(8,generator=generator)
+    restore_experiment(actor,opt,controller,anchor,initial,generator)
+    assert digest==exact_state_digest(dict(actor=actor.state_dict(),optimizer=opt.state_dict(),
+        controller=controller.state_dict(),bc=anchor.state_dict(),rng=capture_local_rng({'actor':generator})))
+
+
+def test_execution_audit_traces_original_prefix_across_rollouts():
+    from types import SimpleNamespace
+    from gem.closedloop.dppo.execution_provenance import SCHEMA
+    from tools.analyze_stage2_execution_credit import episode_analysis
+    plans={'p0':dict(decision_tick=0,commit_tick=12,prefix_frames=0,parent_plan_id='bootstrap:x',generation_frames=60),
+        'p1':dict(decision_tick=300,commit_tick=468,prefix_frames=17,parent_plan_id='p0',generation_frames=60)}
+    entries=[]
+    for case,plan,begin in [('first','p0',600),('second','p1',624)]:
+        ticks=list(range(begin-120,begin+121,12))
+        record=dict(schema=SCHEMA,plans=plans,steps=[dict(control_tick_begin=begin,control_tick_end=begin+12,
+            consumed_reference_ticks=ticks,consumed_plan_ids=['p0' if t<=612 else 'p1' for t in ticks],
+            reference_tick=begin+12,reference_plan_id='p0' if begin+12<=612 else 'p1')])
+        row=SimpleNamespace(identity=dict(plan_id=plan,policy_version=0),
+            metadata=dict(compact_execution_provenance=record,training_task={'dataset':'fixture'}),
+            control_tick_begin=begin,control_tick_end=begin+12,rewards=torch.tensor([.1]),
+            old_value=1.,next_value=1.,executed_control_steps=1,terminated=False,truncated=True,transition_valid=True)
+        entries.append((case,row,torch.tensor(1.)))
+    p,v,r=episode_analysis(('backend','env','episode'),entries)
+    first=next(item for item in p if item['plan_id']=='p0')
+    assert 31 in first['cross_rollout_source_frames']
+    assert all(item['lambda1_type']=='right_censored_bootstrapped_not_full_MC' for item in v)
+    assert not r['continuous_control_range']

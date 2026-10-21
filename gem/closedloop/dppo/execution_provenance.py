@@ -42,6 +42,10 @@ def compact_execution(rows,*,ledger,plan_id,decision_tick,commit):
         parent_plan_id=item.get('parent_plan_id'),prefix_frames=item.get('prefix_frames'),
         generation_frames=item.get('generation_frames',60))
         for key,item in ledger.records.items() if not str(key).startswith('bootstrap:')}
+    for key,item in origins.items():
+        original=ledger.records[key]
+        for name in ('generation_ready_tick','generation_wall_seconds','policy_version'):
+            if name in original:item[name]=original[name]
     origins.setdefault(str(plan_id),{}).update(decision_tick=int(decision_tick),
         commit_tick=(None if commit is None else int(commit['effective_tick'])))
     return dict(schema=SCHEMA,plans=origins,steps=steps,plan_dictionary=dictionary,
