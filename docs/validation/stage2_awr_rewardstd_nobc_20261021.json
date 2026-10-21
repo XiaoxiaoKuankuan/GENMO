@@ -15484,7 +15484,8 @@
     "server2_primary_regression_passed": 228,
     "server2_gmt_isaac_math_passed": 29,
     "final_uniform_default_and_no_bc_components_passed": 17,
-    "counts_are_independent_runs_not_sum_of_unique_tests": true
+    "counts_are_independent_runs_not_sum_of_unique_tests": true,
+    "server2_final_uniform_default_and_no_bc_components_passed": 17
   },
   "learning_diagnosis": {
     "generation_probe_sample_ids": [
@@ -18577,5 +18578,77 @@
     "scope": "parameter_deltas_from_same_stage1_after_same_95_steps_not_a_causal_contribution_measure",
     "helper_sha256": "da9496f238b7afe5b1859962ac457996878c3b35511d39f259e7bee8ba3431db",
     "seconds": 4.354219198226929
-  }
+  },
+  "uniform_default_distributed": {
+    "bc_enabled": false,
+    "cases": [
+      {
+        "awr_samples": 9,
+        "bc_samples": 0,
+        "maximum_absolute_gradient_error": 8.642673492431641e-07,
+        "microbatch": 2,
+        "relative_gradient_l2": 1.4597731877268962e-06,
+        "updated_parameter_identity": "6c678f7c817c365f762b1e8943a942ff74c0825d54ad85219ec2bda2a2c0c335"
+      },
+      {
+        "awr_samples": 3,
+        "bc_samples": 0,
+        "maximum_absolute_gradient_error": 2.9802322387695312e-08,
+        "microbatch": 1,
+        "relative_gradient_l2": 2.1630390687941936e-08,
+        "updated_parameter_identity": "49d2eb1bf976d612844594ba77c3d4c4bfc8580832d09a395a79d46abb499f7f"
+      }
+    ],
+    "distributed_backend": "nccl",
+    "peak_memory_bytes": [
+      2709045248,
+      1871467520,
+      1871467520,
+      1871467520,
+      1871467520,
+      1871467520,
+      1871467520,
+      1871467520
+    ],
+    "preflight": {
+      "assets": {
+        "checkpoint": "51b522fbdeb0ec289e5ffc24e2fccca9888df90495f57f96714c1bb43c05f8e2",
+        "gmt_checkpoint": "79d1a99e54db42342927ec178329dab88772bafbc05df1b0dbe310bc6dd0b319",
+        "gmt_policy": "31a8f999b652d272246b803d4ffa708f3125de92c0d573411ef13fc3ee6ced20",
+        "kinematics": "c08731704dccece11351b6fa877e30bac5ca2a8d363de30af7ca2ea1398f4029",
+        "stats": "c7c0acb0e7a38797adb38ce0be41ee72820e34daed4e780275c64fb55c3e5326"
+      },
+      "config_sha256": "4347edd617164103b653324e59c37ee2ed6a6eaed112f0741f144b47a60885b4",
+      "configuration_assets": {
+        "gmt_agent_config": "b633ab8ab057b9915a78424e0239cbea3ecd9e3a5ecc0c9b55c645699a6533b6",
+        "isaac_contract": "6f4af854170b6f6e5c2948a53bc822ac60beb000edf9e291bf1bddc37e797939"
+      },
+      "gpu_inventory": "0, GPU-cff52133-172a-53df-6063-aacf679a4455, 85651 MiB\n1, GPU-63d9acb7-e636-a376-ec35-0a661bd45e0f, 85651 MiB\n2, GPU-1fa4842f-9bb3-3bf9-e164-791adb11b576, 85651 MiB\n3, GPU-6e3fba66-b2e5-09c5-3ad5-a6d42ba18466, 85651 MiB\n4, GPU-4fb2d7c5-44ff-77f0-189f-70e52f4d6ce0, 85651 MiB\n5, GPU-8135d788-79ff-1d8c-88ca-5304f2a1d20d, 85651 MiB\n6, GPU-52661e90-d710-405e-24c5-91175147c6a0, 85651 MiB\n7, GPU-871238e9-1865-447b-205e-c7e76334b7b3, 85651 MiB",
+      "repositories": {
+        "genmo": {
+          "branch": "feature/stage2-awr",
+          "commit": "2131677c11ee75dea788484f7035e065a38a0047",
+          "path": "/home/user/liwei/awr-worktrees/GENMO-signals-delivery-20261021"
+        },
+        "gmt": {
+          "branch": "feature/stage2-awr",
+          "commit": "a1b624490fff0468ac25dcd59daeeb55e259a20b",
+          "path": "/home/user/liwei/awr-worktrees/legged_lab_gmt-signals-20261021"
+        }
+      },
+      "schema": "genmo.awr.preflight.v1"
+    },
+    "real_stage1": true,
+    "real_stage1_bc": false,
+    "source_balance": "uniform_sources",
+    "status": "passed",
+    "timestep_weighting": {
+      "mode": "uniform"
+    },
+    "wall_seconds": 18.263727988116443,
+    "world_size": 8
+  },
+  "server_final_default_tests_log": "/data1/user/liwei/GENMO_outputs/stage2_awr/rewardstd_nobc_minsnr64_20261021_01/acceptance_uniform_default_tests.log",
+  "completed_runs_have_no_gpu_compute_processes_at_unix": 1792582170.8538315,
+  "gpu_compute_pids": ""
 }
