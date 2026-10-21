@@ -60,6 +60,9 @@ def backward_chain_surrogate(policy, rows, cache, records, *, clip, global_chain
     if global_chain_count<1:
         raise ValueError('Global denominator must count complete valid chains')
     device=next(policy.actor.parameters()).device
+    # 完整rollout汇总的小型FP64统计可位于CPU；反向索引和优势在Actor设备。
+    # 仅搬运[N,4,8]统计，不改变行为链或概率精度，原GPU路径为零拷贝。
+    records=records.to(device=device)
     if not rows:
         return dict(loss=records.new_zeros(()),recompute_max_error=records.new_zeros(()))
     surrogate=ppo_surrogate(from_records(records),cache.get('advantages',rows),clip=clip,reduction='joint_sum')

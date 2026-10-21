@@ -221,3 +221,25 @@ def test_full_probability_reuse_requires_same_completed_case(tmp_path):
     path.write_text(json.dumps(document));assert producer_full_probability(case) is None
     document['fixed_data_cases'][0]['fixed_data_case']=str(case.parent/'iteration000002')
     path.write_text(json.dumps(document));assert producer_full_probability(case) is None
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(),reason='需服务器1空闲GPU验证CPU统计/GPU反向边界')
+def test_cpu_full_records_match_gpu_streamed_gradients(actor_factory):
+    from gem.closedloop.dppo.frozen_prefix import FrozenPrefixPolicy
+    from gem.closedloop.dppo.chain_ppo import evaluate_chain_records,backward_chain_surrogate
+    from gem.closedloop.dppo.execution_checks import policy_phase
+    original,rows,targets=case(actor_factory)
+    actor=copy.deepcopy(original.actor).to('cuda:0')
+    policy=FrozenPrefixPolicy(actor,std_schedule=original.std_schedule,generation_frames=60)
+    cache=RolloutTensorCache(rows,targets,'cuda:0')
+    try:
+        with torch.no_grad(),policy_phase(policy):records=evaluate_chain_records(policy,rows,cache,microbatch=3)
+        with policy_phase(policy):
+            backward_chain_surrogate(policy,rows,cache,records,clip=.1,global_chain_count=len(rows),microbatch=3)
+        expected={name:p.grad.clone() for name,p in actor.named_parameters() if p.grad is not None}
+        actor.zero_grad(set_to_none=True)
+        with policy_phase(policy):
+            backward_chain_surrogate(policy,rows,cache,records.cpu(),clip=.1,global_chain_count=len(rows),microbatch=3)
+        for name,p in actor.named_parameters():
+            if name in expected:torch.testing.assert_close(p.grad,expected[name],atol=0,rtol=0)
+    finally:cache.close()

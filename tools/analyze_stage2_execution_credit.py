@@ -148,8 +148,11 @@ def episode_analysis(key,entries,*,control_stream=None,gamma=.99,lam=.98):
                 reward_before_generated_center=float(rewards[before_mask].sum()),total_reward=float(rewards.sum()),
                 reward_before_generated_future_window=float(rewards[before_future].sum()),
                 generated_center_not_observed=first is None,terminated=row.terminated,truncated=row.truncated,
+                end_reason=getattr(row,'reason',None),
                 near_real_termination=bool(rows[-1].terminated and i>=n-3),
-                rollout_end=i==n-1 or (i+1<n and fragment[i+1][0]!=case),
+                near_physical_failure=bool(rows[-1].terminated and getattr(rows[-1],'reason',None) not in
+                    (None,'music_end','task_complete') and i>=n-3),
+                rollout_end=not row.terminated and (i==n-1 or (i+1<n and fragment[i+1][0]!=case)),
                 bootstrap_value=row.next_value,old_value=row.old_value,frozen_gae_target=float(target),
                 linked_gae_target=float(linked[i]),lambda1_return=float(mc[i]),
                 lambda1_type='complete_observed_tail_no_bootstrap' if rows[-1].terminated else 'right_censored_bootstrapped_not_full_MC',
@@ -207,6 +210,7 @@ def main():
         critic_groups={name:dict(samples=len(rows),critic_error_lambda1=distribution([r['critic_error_lambda1'] for r in rows]),
             gae_target_error_lambda1=distribution([r['gae_target_error_lambda1'] for r in rows]))
             for name,rows in [('all',values),('near_termination',[r for r in values if r['near_real_termination']]),
+                ('near_physical_failure',[r for r in values if r['near_physical_failure']]),
                 ('rollout_end',[r for r in values if r['rollout_end']]),
                 ('full_observed_tail',[r for r in values if r['lambda1_type']=='complete_observed_tail_no_bootstrap'])]},
         velocity_evidence='actual_center_21point_window_confirms_interior_difference_support; '
