@@ -139,10 +139,14 @@ def episode_analysis(key,entries,*,control_stream=None,gamma=.99,lam=.98):
             rewards=row.rewards.double();ticks=torch.arange(len(rewards))*12+row.control_tick_begin
             # 没在保留区间看见首次消费时只能说尚未观察，不能假定此计划永远不消费。
             before_mask=torch.ones_like(ticks,dtype=torch.bool) if first is None else ticks<first
+            future_tick=first_future.get(plan)
+            before_future=torch.ones_like(ticks,dtype=torch.bool) if future_tick is None else ticks<future_tick
             values.append(dict(episode=key,plan_id=plan,case=case,policy_version=row.identity['policy_version'],
                 source=row.metadata.get('training_task',{}).get('dataset','unknown'),
                 controls=len(rewards),controls_before_generated_center=int(before_mask.sum()),
+                controls_before_generated_future_window=int(before_future.sum()),
                 reward_before_generated_center=float(rewards[before_mask].sum()),total_reward=float(rewards.sum()),
+                reward_before_generated_future_window=float(rewards[before_future].sum()),
                 generated_center_not_observed=first is None,terminated=row.terminated,truncated=row.truncated,
                 near_real_termination=bool(rows[-1].terminated and i>=n-3),
                 rollout_end=i==n-1 or (i+1<n and fragment[i+1][0]!=case),
@@ -191,9 +195,12 @@ def main():
             ('center_count','future_only_count','cross_rollout_count','decision_to_commit_seconds',
              'decision_to_first_center_seconds')}) for k,rows in groups.items()}
     controls=sum(v['controls'] for v in values);early=sum(v['controls_before_generated_center'] for v in values)
+    early_future=sum(v['controls_before_generated_future_window'] for v in values)
     report=dict(cases=[str(p) for p in args.cases],episodes=ranges,missing_compact_transitions=missing,
         plans=len(plans),by=summaries,controls=controls,controls_before_generated_center=early,
         before_center_control_fraction=early/controls if controls else None,
+        controls_before_generated_future_window=early_future,
+        before_future_window_control_fraction=early_future/controls if controls else None,
         complete_horizon_plan_count=sum(p['full_observed_horizon'] for p in plans),
         complete_horizon_center_count=distribution([p['center_count'] for p in plans if p['full_observed_horizon']]),
         cross_rollout_plan_count=sum(p['cross_rollout_count']>0 for p in plans),

@@ -48,6 +48,16 @@ def analyze(output,report=None):
                 B_abs_slope=2*error/sigma**2*float(new),
                 C_abs_slope=.95*2*error/sigma**2*float(new)+.05*2*error/sigma**2/(1+q)**2))
     fig.savefig(output/'reward_std_curves.png',dpi=180);fig.savefig(output/'reward_std_curves.pdf');plt.close(fig)
+    tail,tail_axes=plt.subplots(2,2,figsize=(11,8),layout='constrained')
+    for ax,name in zip(tail_axes.flat,('anchor_pos','anchor_ori','body_pos','body_ori')):
+        x=np.linspace(0,3.14 if name.endswith('ori') else 1.5,700)
+        for label,y in zip(('A: original','B: requested','C: analysis only'),scores(x*x,name)):
+            ax.semilogy(x,y,label=label)
+        ax.set(title=name,xlabel='sqrt(GMT squared error) [rad]' if name.endswith('ori') else 'sqrt(GMT squared error) [m]',
+            ylabel='Tracking score (log scale)',ylim=(1e-12,1.1))
+        ax.axhline(1e-3,color='gray',linestyle='--',linewidth=.8);ax.grid(alpha=.25);ax.legend(fontsize=8)
+    tail.savefig(output/'reward_std_tail_curves.png',dpi=180)
+    tail.savefig(output/'reward_std_tail_curves.pdf');plt.close(tail)
     with (output/'reward_std_values.csv').open('w') as f:
         writer=csv.DictWriter(f,fieldnames=list(table[0]));writer.writeheader();writer.writerows(table)
     result=dict(formula='A=exp(-squared_error/source_std^2); B=exp(-squared_error/reward_std^2); C=.95*B+.05/(1+squared_error/reward_std^2)',
