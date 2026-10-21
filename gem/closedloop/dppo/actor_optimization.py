@@ -90,7 +90,9 @@ def validate_optimization_configuration(config,maximum_steps):
             or s['ppo_rollout']['credit_contract']!=CREDIT_CONTRACT
             or s['critic']['complete_mc']['start_distribution']!='match_training_reset.v1'):
         raise ValueError('Current 8s/.98/2000-iteration continuous-world training contract required')
-    if (s['evaluation']['every_actor_iterations'] not in (50,100)
+    # 有限验证可以更频繁地完整评估；评估间隔不改变概率核、奖励或价值目标。
+    evaluation_interval=s['evaluation']['every_actor_iterations']
+    if (type(evaluation_interval)is not int or evaluation_interval<1
             or s['critic']['complete_mc']['every_actor_iterations']!=100):
-        raise ValueError('Complete-song evaluation every 50/100 iterations and MC every 100 required')
+        raise ValueError('Positive complete-song evaluation interval and MC every 100 required')
     return optimization_binding(s)
