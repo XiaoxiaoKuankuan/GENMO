@@ -286,3 +286,39 @@ def test_replay_and_label_binary_roundtrip_preserves_reference_ledger_and_candid
         assert replay.read(snapshot.episode_ids[0], training=True).reference_ledger["sha256"] == episodes[0].reference_ledger["sha256"]
     finally:
         replay.close()
+
+
+def test_offline_all_modes_use_one_frozen_snapshot_and_never_change_run(tmp_path, episode_factory):
+    import json
+    from gem.closedloop.awr.checkpoint import Checkpoints
+    from gem.closedloop.awr.replay import EpisodeReplay
+    from gem.closedloop.awr.io import atomic_json
+    from tools.audit_stage2_awr_signals import audit
+    _, _, make = episode_factory
+    episodes = candidate_episodes(make)
+    root = tmp_path/"run"
+    replay = EpisodeReplay(root/"replay", capacity=4, contract=episodes[0].contract)
+    for e in episodes:
+        replay.append(e)
+    snapshot = replay.snapshot(); replay.close()
+    identity = dict(request="test", sources={"genmo": "frozen"})
+    ck = Checkpoints(root/"checkpoints", identity)
+    reference = ck.save("critics", dict(replay_snapshot=snapshot.snapshot_id,
+        crossfit_values={e.episode_id: torch.arange(len(e.rows), dtype=torch.float64) for e in episodes}), progress={})
+    atomic_json(root/"critic.json", dict(crossfit_identity="crossfit", fold_identity="fold",
+                                        selected_critic_fingerprints=["a", "b"]))
+    atomic_json(root/"tasks.json", dict(tasks=[e.task for e in episodes]))
+    state = dict(request_sha256="test", source_commits={"genmo": "frozen"},
+        config=dict(awr=dict(advantage=dict(mode="group_hybrid", nstep=4, alpha=.5,
+                                          credit_mode="current_plus_lookahead"),
+                            candidate_sampling=dict(enabled=True, advantage_mode="hybrid"))),
+        artifacts=dict(macro000_replay=snapshot.snapshot_id, macro000_critics=reference,
+                       macro000_critic_report=str(root/"critic.json"), macro000_tasks=str(root/"tasks.json")))
+    atomic_json(root/"state.json", state)
+    original = (root/"state.json").read_bytes()
+    result = audit(root, tmp_path/"audit")
+    assert result["actor_optimizer_updates"] == result["new_physical_controls"] == 0
+    assert len(result["variants"]) == 11 and result["full_credit_equals_nstep_max_error"] < 1e-12
+    assert result["variants"]["mc"]["weight"] == result["variants"]["hybrid0"]["weight"]
+    assert len({v["label_id"] for v in result["variants"].values()}) == 11
+    assert (root/"state.json").read_bytes() == original
