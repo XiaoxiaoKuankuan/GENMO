@@ -413,3 +413,34 @@ export CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 PYTHONDONTWRITEBYTECODE=1 OMP_NUM_TH
 保存全部实际步数和固定val探针；`evaluate`使用同一命令
 替换操作并追加`--candidate bounded`，重建Stage1与候选的32任务物理基线。两步均不会
 启动后续AWR或长期训练。数学修复、离线生成保留、物理保留、强化收益必须分开报告。
+
+
+当前停止、漂移归因、五组对照及后续单因素复验统一见
+[2026-10-21 修复验收报告](stage2_awr_distillation_repair_20261021.md)。旧正式五轮已停止，
+不能把原有正式启动示例解释为已获重新启动授权。`stage2_awr_retention.yaml`是64集、
+一轮、每分支45步的有限候选配置，是否具备物理保留证据必须查报告，不自动扩成512集或五轮。
+
+复现教师约束单因素候选时使用全新的目录；训练和评价之间保持源码提交不变：
+
+```bash
+cd /home/user/liwei/awr-worktrees/GENMO-delivery
+export NCCL_CUMEM_HOST_ENABLE=0 NCCL_IB_DISABLE=1 NCCL_SOCKET_IFNAME=lo TORCH_NCCL_BLOCKING_WAIT=1
+export CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 PYTHONDONTWRITEBYTECODE=1 OMP_NUM_THREADS=4 MKL_NUM_THREADS=4
+export ISAACLAB_PATH=/data0/user/liwei/closedloop_stage8_runtime/IsaacLab
+export LD_LIBRARY_PATH=/data0/user/liwei/closedloop_stage8_runtime/sysroot/usr/lib/x86_64-linux-gnu
+AWR_DIAG_RUN=/data1/user/liwei/GENMO_outputs/stage2_awr/distillation_repair_$(date +%Y%m%d_%H%M%S)
+/data0/user/liwei/closedloop_stage10_v3_runtime/env_isaac_genmo/bin/python -B -m torch.distributed.run \
+  --standalone --nproc_per_node=8 tools/diagnose_stage2_awr_distillation.py train \
+  --methods bounded --bc-weight 0.01366578514366661 --bounded-lr 1e-7 \
+  --reference-weight 1000 --max-steps 45 \
+  --source-run /data1/user/liwei/GENMO_outputs/stage2_awr/formal5_20261020_01 \
+  --output "$AWR_DIAG_RUN"
+/data0/user/liwei/closedloop_stage10_v3_runtime/env_isaac_genmo/bin/python -B -m torch.distributed.run \
+  --standalone --nproc_per_node=8 tools/diagnose_stage2_awr_distillation.py evaluate \
+  --candidate bounded \
+  --source-run /data1/user/liwei/GENMO_outputs/stage2_awr/formal5_20261020_01 \
+  --output "$AWR_DIAG_RUN"
+```
+
+这是32条旧Stage1 Episode的单位权重诊断，只复用条件和参考；旧奖励不进入新版Critic。
+完整物理评价重新计算无活动乘数的新奖励；失败任务全部保留。该命令不启动 AWR。
