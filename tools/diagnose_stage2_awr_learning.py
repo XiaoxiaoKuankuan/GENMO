@@ -123,6 +123,8 @@ def main():
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--device", default="cuda:0")
     parser.add_argument("--gradient-batches", type=int, default=4)
+    parser.add_argument("--timestep-gradients", action="store_true",
+                        help="在同一32样本上核对固定扩散时间的无权重梯度和低噪声方向")
     args=parser.parse_args()
     if not 1<=args.gradient_batches<=8: parser.error("Use a bounded 1..8 batch audit")
     root, repo, output=(p.resolve() for p in (args.run_dir,args.runtime_repo,args.output))
@@ -174,10 +176,11 @@ def main():
             ts.append(torch.randint(actor.diffusion_steps,(),generator=rng))
             noise.append(torch.randn(data.rows[i].target_qpos30.shape,generator=rng))
         return torch.stack(ts).to(device),torch.stack(noise).to(device)
-    def gradients(ids,step,weighted):
+    def gradients(ids,step,weighted,fixed_t=None):
         actor.zero_grad(set_to_none=True); total=0.
         for offset in range(0,len(ids),8):
             part=ids[offset:offset+8];b=data.batch(part,device);t,noise=noise_for(part,step)
+            if fixed_t is not None: t=torch.full_like(t,fixed_t)
             out=actor.denoising_forward(b["conditions"],b["target"],b["target_valid"],timesteps=t,noise=noise,guidance_scale=2.5)
             losses=per_sample_denoising(out["pred_x_start"],out["target_x_start"],b["free_mask"])
             w=b["weights"] if weighted else torch.ones_like(b["weights"])
@@ -207,6 +210,17 @@ def main():
             if eligible: first.append(data.sample_ids.index(eligible[0].sample_id));seen.add(e.group_id)
     report["probe_sample_ids"]=[data.sample_ids[i] for i in probe]
     report["generation_probe_sample_ids"]=[data.sample_ids[i] for i in first]
+    if args.timestep_gradients:
+        report["timestep_gradient_comparisons"]=[]
+        clean=None
+        for timestep in (0,100,300,600,900,999):
+            grad,loss=gradients(probe,7000,False,fixed_t=timestep)
+            if clean is None: clean=grad
+            report["timestep_gradient_comparisons"].append(dict(timestep=timestep,loss=loss,
+                **vector_comparison(clean,grad)))
+            if timestep: del grad
+            save("timestep_gradient_"+str(timestep))
+        del clean;actor.zero_grad(set_to_none=True)
     checkpoint=Checkpoints(root/"checkpoints",dict(request=state["request_sha256"],sources=state["source_commits"]))
     payloads={m:checkpoint.load(state["artifacts"]["macro000_"+m+"_final"])["payload"] for m in ("self_distillation","awr")}
     delta={m:{k:p["actor"][k]-initial[k] for k in parameters} for m,p in payloads.items()}
