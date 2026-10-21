@@ -2,10 +2,9 @@
 
 本实现运行于独立 `feature/stage2-awr` 工作树。训练顺序为 Collect → Critic/FVI →
 Advantage Labeling → Weighted Diffusion Training → Evaluation。宏迭代与 PPO iteration 无关。
-2026-10-21当前入口为独立`stage2_awr_rewardstd_nobc_minsnr.yaml`：64次预定尝试、1宏迭代、
+2026-10-21当前入口为独立`stage2_awr_rewardstd_nobc.yaml`：64次预定尝试、1宏迭代、
 5 Epoch、256 AWR、关闭BC、基础LR1e-5。GMT原`source_std`严格不变，Stage2独立
-`reward_std`使用0.20/0.30/0.15/0.20及原其余四项。新增Min-SNR-5时间目标、来源校正和
-uniform时间无权重对照，详见[本次配置与有限实验](stage2_awr_rewardstd_nobc_20261021.md)。
+`reward_std`使用0.20/0.30/0.15/0.20及原其余四项。采用均匀时间目标与来源校正；Min-SNR-5保留为独立消融，真实五组结果详见[本次配置与有限实验](stage2_awr_rewardstd_nobc_20261021.md)。
 教师一致性系数为0，不创建教师；普通自蒸馏
 是权重全1的诊断对照，不作为AWR更新门槛。只评价s595000实际训练清单中的音乐，
 模型选择只依据来源平衡的完整任务回报增加。失败、时长、活动度与跟踪误差照常报告。
@@ -34,9 +33,9 @@ Joint和滑动指标变差；固定32任务时长门槛未通过，`best_saved`�
 以下为独立新运行的接口示例，执行须遵守当前有限预算；不更新冻结运行源码或editable指向。
 
 ```bash
-cd /home/user/liwei/awr-worktrees/GENMO-rewardstd-20261021
+cd /home/user/liwei/awr-worktrees/GENMO-signals-delivery-20261021
 bash tools/run_stage2_awr_server2.sh preflight \
-  --config configs/closedloop/stage2_awr_rewardstd_nobc_minsnr.yaml \
+  --config configs/closedloop/stage2_awr_rewardstd_nobc.yaml \
   --gmt-repo /home/user/liwei/awr-worktrees/legged_lab_gmt-signals-20261021
 /data0/user/liwei/closedloop_stage10_v3_runtime/env_isaac_genmo/bin/python -B \
   tools/launch_stage2_awr_signal_server2.py \

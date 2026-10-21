@@ -21,7 +21,7 @@ sys.path.insert(0, str(ROOT))
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--config", type=Path, default=ROOT/"configs/closedloop/stage2_awr.yaml")
+    parser.add_argument("--config", type=Path, default=ROOT/"configs/closedloop/stage2_awr_rewardstd_nobc.yaml")
     parser.add_argument("--report", type=Path, required=True)
     parser.add_argument("--gmt-repo", type=Path)
     args = parser.parse_args()

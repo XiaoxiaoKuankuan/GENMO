@@ -160,14 +160,19 @@ def test_time_source_weights_microbatch_gradient_equivalence(episode_factory):
         for key in other: torch.testing.assert_close(other[key], grads[0][key], atol=1e-6, rtol=2e-5)
 
 
-def test_experiment_config_explicitly_disables_bc_and_keeps_source_std():
+@pytest.mark.parametrize("filename,mode,uniform_control", [
+    ("stage2_awr_rewardstd_nobc_minsnr.yaml", "min_snr", True),
+    ("stage2_awr_rewardstd_nobc.yaml", "uniform", False),
+])
+def test_experiment_config_explicitly_disables_bc_and_keeps_source_std(filename,mode,uniform_control):
     root = Path(__file__).resolve().parents[3]
-    c = load_config(root/'configs/closedloop/stage2_awr_rewardstd_nobc_minsnr.yaml')
+    c = load_config(root/'configs/closedloop'/filename)
     assert c['reward']['tracking']['source_std'] == GMT_SOURCE_STD
     assert c['reward']['tracking']['reward_std'] == NEW_STD
     assert c['awr']['actor']['bc_enabled'] is False and c['awr']['actor']['bc_global_batch'] == 0
     assert c['awr']['actor']['reference_weight'] == 0
-    assert c['awr']['uniform_ablation'] and c['awr']['run_ablation']
+    assert c['awr']['uniform_ablation'] is uniform_control and c['awr']['run_ablation']
+    assert c['awr']['actor']['timestep_weighting']['mode'] == mode
     assert c['evaluation']['split'] == 'train'
 
 
