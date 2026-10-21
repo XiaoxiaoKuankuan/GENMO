@@ -89,10 +89,11 @@ microbatch8/4、warmup100、clip1、原Stage1 BC保留。BC系数通过本轮8�
 提供MC、N-step4/8/16、current/前瞻credit、hybrid alpha0/0.5/0.7、grouped。
 `extends`仅用于配置装配；运行request.json保存展开后的配置。
 
-以下命令在新且干净的Server-2两个AWR目录执行；不修改任何已有运行源码目录。
+新实验使用干净的Server-2交付目录；不修改任何已有运行源码目录。下面的启动命令会
+运行新一次64次尝试验收，不是继续旧五轮训练；每次须指定全新的输出目录。
 
 ```bash
-cd /home/user/liwei/awr-worktrees/GENMO-signals-20261021
+cd /home/user/liwei/awr-worktrees/GENMO-signals-delivery-20261021
 ulimit -n 131072
 bash tools/run_stage2_awr_server2.sh preflight \
   --config configs/closedloop/stage2_awr_group_credit.yaml \
@@ -102,13 +103,13 @@ bash tools/run_stage2_awr_server2.sh preflight \
 /data0/user/liwei/closedloop_stage10_v3_runtime/env_isaac_genmo/bin/python -B \
   tools/launch_stage2_awr_signal_server2.py \
   --gmt-repo /home/user/liwei/awr-worktrees/legged_lab_gmt-signals-20261021 \
-  --run-dir /data1/user/liwei/GENMO_outputs/stage2_awr/group_credit64_20261021_01
+  --run-dir /data1/user/liwei/GENMO_outputs/stage2_awr/<新的运行目录>
 
 # 同一冻结Replay/交叉Value的11种标签比较，不训练、不重跑物理。
 /data0/user/liwei/closedloop_stage10_v3_runtime/env_isaac_genmo/bin/python -B \
   tools/audit_stage2_awr_signals.py \
   --run-dir /data1/user/liwei/GENMO_outputs/stage2_awr/group_credit64_20261021_01 \
-  --output /data1/user/liwei/GENMO_outputs/stage2_awr/group_credit64_20261021_01/signal_audit
+  --output /data1/user/liwei/GENMO_outputs/stage2_awr/group_credit64_20261021_01/<新的审计目录>
 
 bash tools/run_stage2_awr_server2.sh stop --run-dir <本次运行目录>
 bash tools/run_stage2_awr_server2.sh resume --run-dir <本次运行目录>
@@ -117,9 +118,133 @@ bash tools/run_stage2_awr_server2.sh evaluate --run-dir <本次运行目录>
 
 resume要求相同源码、物理资产与保存的配置，不拼接中断的PhysX状态。候选缺成员时不
 生成伪group；已确认的预热失败不会被重新抽歌，且不再计为已完成动作Episode。
+本次已完成运行的原始源码是`GENMO-signals-20261021@56014c3`，其恢复/重评必须使用
+该目录；新交付目录包含后续离线审计精度修正，不能冒充原运行源码。
 
 ## 验收记录
 
-本地代码批次：167项GENMO/AWR/Stage1/评价回归通过，17项GMT快照、调度和列式回执
-测试通过。临时目录已自动清理。真实Server-2结果随后追加；以上CPU结果不证明候选
-物理初态可比或跟踪误差改善。
+本地首批167项GENMO/AWR/Stage1/评价回归通过，17项GMT快照、调度和列式回执通过。
+Server-2最终交付代码1381c4d执行175项回归全部通过（12.46秒），只有既有autocast
+弃用警告；测试进程不可见GPU，临时目录自动清理。后续83661a0仅改文档与注释，
+执行AST未改变。上述结果不代替下面的真实物理结论。
+
+## 2026-10-21真实64集结果：实现贯通，学习收益未成立
+
+运行目录：`/data1/user/liwei/GENMO_outputs/stage2_awr/group_credit64_20261021_01`。
+原始运行GENMO为`56014c3cb964b314b8d96f9c580a04aa669a31d9`，GMT为
+`a1b624490fff0468ac25dcd59daeeb55e259a20b`，全程未热更新。运行正常退出0，
+完成1宏迭代；旧formal5保持停止。数据、失败、B/C模型、原标签及原始回执完整保留。
+可移植指标与证据SHA见[验收归档](validation/stage2_awr_group_credit_20261021.json)。
+
+64次尝试得到64个完整Episode：56自然结束、8偏航失败，没有预热失败或补采。
+4796次决策中4757条是有效Actor样本；39条未实际暴露的生成不用于Actor监督，
+其物理账本和完整Episode仍保留。完整Replay为8,075,937,929字节，快照身份
+`15342906688024d8daf0509beff17c51eeab706a3f20cee47eded2ec4e260121`。
+
+物理评价是同一组原Stage1 **train** 音乐16首×2种子=32任务。四来源train清单SHA
+与s595000的qpos统计文件一致；早期发行元数据中的original_split不代表s595000
+实际训练划分。没有使用当前val/test清单；本次不报告泛化能力，也不是全训练集穷举。
+
+| 指标 | A：冻结Stage1 | B：无权重自蒸馏＋BC | C：Group-hybrid AWR＋BC |
+|---|---:|---:|---:|
+| 来源平衡平均完整任务回报↑ | 117.11446 | 113.26210 | 112.52847 |
+| 32任务原始奖励总和↑ | 4317.17280 | 4175.77545 | 4148.67175 |
+| 来源平衡每秒回报↑ | 2.58727 | 2.48940 | 2.47504 |
+| 完成/物理失败 | 30/2 | 30/2 | 30/2 |
+| 总执行时长，秒 | 1730.54 | 1744.92 | 1745.54 |
+| Root位置误差，米↓ | 0.24353 | 0.30200 | 0.28356 |
+| Body位置RMSE，米↓ | 0.14559 | 0.17755 | 0.16742 |
+| Yaw误差，弧度↓ | 0.30994 | 0.26836 | 0.29619 |
+| Joint位置RMSE，弧度↓ | 0.12585 | 0.14534 | 0.14627 |
+| Joint速度RMSE，弧度/秒↓ | 0.82401 | 0.95205 | 0.96176 |
+| 固定train监督探针Stage1完整Loss↓ | 0.16197 | 0.19214 | 0.18961 |
+
+完整任务回报先在同音乐组内平均种子，再在各来源内平均音乐组，最后等权平均来源；
+跟踪误差列取原物理报告的全控制步统计。95%置信区间按来源平衡、音乐组聚类重采样：
+
+- B−A：−3.85237，95%CI [−5.64513, −1.91636]。
+- C−A：−4.58599，95%CI [−6.44054, −2.56179]。
+- C−B：−0.73363，95%CI [−1.24325, −0.32536]。
+
+因此这次C相对A、B的奖励都下降。C相对B的Root/Body误差有所减少，但Joint/Yaw
+更差，且仍未达到原Stage1的Root/Body/Joint表现。三个模型都保留全部失败任务。
+best保留Stage1的唯一选择理由是回报更高；完成率、活动度和执行时长没有作为门禁。
+B的负结果没有中断C，C实际完成了所有训练和评价。
+
+## 候选组和信用信号的实际覆盖
+
+4个候选组/16个Episode全部成员完整，只有FineDance和AIOZ两组通过严格初态检查，
+全部被检查字段最大差精确为0。AIST和Mine两组初态不符，正确回退普通样本。
+不符字段包含实际qpos、速度、接触和输入历史；AIST组最大关节速度差0.02988rad/s、
+净接触力差0.68294N，Mine组分别0.03596rad/s、0.32772N，明显超过预设严格容差。
+没有放宽容差或把同seed当成同状态。预热/环境求解状态的具体差异来源尚未隔离，
+本系统仍不具备任意时刻克隆完整PhysX状态的证据。
+
+有效组内优势仅8条首次动作，占4757条有效Actor样本的0.168%。后续动作不冒充
+同状态比较；两组无效候选不产生group训练标签。FineDance有效组2秒回报为
+4.8937854/4.8815046/4.8886129/4.8957286，窗口各100控制步；四集均在之后失败，
+这些失败全部保留。纯grouped标签权重随共同窗口回报单调递增。group_hybrid同时
+混合MC/credit，可能改变这个排序；例如FineDance候选0的混合权重大于候选3，
+不能宣称混合信号一定遵从短窗口排序。
+
+首次计划账本实例如下：commit=744tick，首次进入GMT前瞻=792tick，首次成为当前
+参考=912tick。时间全部来自实际600Hz账本，未把生成时刻或前瞻首次观察当作中心消费。
+最终4757条样本具备有效前瞻信用，ESS=3646.10（76.65%），权重均值1、P50=0.79334、
+P95=2.22250、P99=2.60282、最大3.04724，原始cap触发比例0。
+各来源权重质量占比：AIOZ15.91%、AIST4.36%、FineDance42.87%、Mine36.86%。
+按来源观察，高权重组通常具有较低Root/Body/Yaw误差，但Joint排序仍不稳定，
+FineDance高权重四分位Joint误差0.15911rad，高于低权重组0.15331rad。
+这些是暴露/质量诊断，不是严格物理因果证明。
+
+同一冻结Replay/Critic完成11模式离线标签审计，耗时238.76秒，没有新增训练或物理：
+MC、nstep4/8/16、current/current+lookahead credit、hybrid0/0.5/0.7、grouped、
+group_hybrid。c全1与普通N-step最大差1.63425e−13；MC与alpha0权重逐值相同。
+后续FP64直接构造修正仅改变group分量中间舍入：原运行与新代码最终权重最大差
+3.58705e−8，原运行标签没有重写。各模式身份独立；11种标签审计不等于11组Actor
+物理消融，尚未据此确定最佳混合系数。
+
+## 更新、分布式和成本证据
+
+B/C都从s595000开始，使用同一4757条Replay，5Epoch各95次更新；全局AWR/BC
+batch=256/128，八卡microbatch=8/4。名义LR1e−5、warmup100，实际95步依次使用
+1e−7至9.5e−6；保存的下一步调度值为9.6e−6。无教师一致性，不设置45步上限。
+BC系数0.2720249901在本轮固定，八批校准AWR梯度范数22.59599、BC原始8.30659，
+平均夹角余弦0.15147，BC加权后梯度范数比例0.1。Clip=1；原Contact真实监督由BC提供。
+
+Critic两折均选择MC+FVI：内部验证MSE分别1420.07→469.74、1105.26→354.19，
+绝对偏差也减少。每折16训练Episode/4音乐组、16内部验证Episode/4音乐组，
+为另一折32Episode/8组标注；这是本64集小样本配置，不能解释为正式20%留出结果。
+优势当前/未来Value都来自未拟合该音乐组的同一冻结Critic。Critic改善不等于Actor改善。
+
+八卡真实Stage1/真实BC验收通过：9个AWR+3个BC的非整除尾批和3个AWR+1个BC
+的空rank场景，最大梯度相对L2误差分别1.84036e−6和5.23153e−8，更新后的八rank
+参数指纹相同，耗时13.58秒。B/C最终断点独立只读恢复检查耗时6.00秒，320个Adam
+状态均为95步，Actor/Optimizer/Scheduler逐元素精确恢复，8rank BC随机流及训练
+样本身份相同，恢复Actor指纹与真实物理评价一致。此检查没有额外执行续训或PhysX。
+
+| 阶段 | 实测墙钟 |
+|---|---:|
+| 64集采集 | 638.20秒 |
+| 双Critic | 120.37秒 |
+| 标签生成 | 7.88秒 |
+| B训练，5Epoch/95步 | 约189.9秒，约1.95秒/步 |
+| C训练，5Epoch/95步 | 约187.0秒，约1.92秒/步 |
+| Stage1/B/C各32任务评价 | 584.40/561.32/561.86秒 |
+| 整次启动至退出，含初始化/I/O | 3381.20秒，56.35分钟 |
+
+采集约7.45条有效重规划/墙钟秒；生成批次平均0.235秒。Replay首次读取8.08GB耗时
+158.07秒（约51.1MB/s），训练缓存读取另计。Actor进程Torch峰值每卡4,982,733,824
+字节（约4.64GiB）；整个运行nvidia-smi离散采样设备峰值11,838–12,322MiB，属于
+总设备显存的采样下界，不能与Torch分配峰值混用。两次5秒采样超时及最大7.23秒
+空隙保留。整次八卡分配成本约7.51GPU小时，不等于GPU持续繁忙时间。
+
+## 尚未解决的问题
+
+已经排除了“B/C使用不同Replay/BC预算”“八卡尾批错误归一化”“把FVI目标冒充MC”
+等本轮可检验的问题；仍没有证据把普通自蒸馏漂移归结为唯一原因。关闭教师并按正常
+更新预算训练后，B仍退化，说明必须继续检查生成样本再加噪的监督目标、扩散时间
+分布、闭环历史条件以及BC之间的梯度作用。不能靠教师、极小LR或门禁把退化藏起来。
+
+下一步应在相同Replay和更新预算上拆分Actor目标/分扩散时间诊断，独立比较纯MC、
+N-step、credit与grouped的真实Actor结果，同时提高严格初态一致候选的有效覆盖。
+本轮不自动扩大为512集或恢复旧五轮；所有负结果与现有实现均已保留供后续定位。
