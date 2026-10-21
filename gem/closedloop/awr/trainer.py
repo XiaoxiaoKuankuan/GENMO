@@ -20,7 +20,7 @@ from .checkpoint import capture_rng, restore_rng
 from .io import cpu_copy, digest
 from .losses import weighted_denoising, per_sample_denoising
 from .metrics import actor_module_name
-from .objective import timestep_weights, source_weights
+from .objective import timestep_weights, source_weights, candidate_objective_weights
 
 
 def gradient_snapshot(model):
@@ -72,7 +72,10 @@ class ActorTrainer:
         self.bc_weight = bc_weight if self.bc_enabled else 0.
         self.time_weights = timestep_weights(actor.train_diffusion.alphas_cumprod,
                                              config.get("timestep_weighting"))
-        self.source_weights = source_weights(dataset.sources, config.get("source_balance", "none"))
+        self.source_weights = candidate_objective_weights(dataset.sources,
+            getattr(dataset, "group_valid", torch.zeros(len(dataset), dtype=torch.bool)),
+            fraction=config.get("candidate_objective_fraction"),
+            source_balance=config.get("source_balance", "none"))
         self.objective_identity = digest(dict(timestep_weights=self.time_weights.tolist(),
             source_weights=self.source_weights.tolist(), advantage_weights=dataset.weights.tolist(),
             bc_enabled=self.bc_enabled))
@@ -296,8 +299,12 @@ class ActorTrainer:
                             mean=float(self.time_weights.mean()), minimum=float(self.time_weights.min()),
                             maximum=float(self.time_weights.max()), table=self.time_weights.tolist()),
                         source_balance=c.get("source_balance", "none"),
+                        candidate_objective_fraction=c.get("candidate_objective_fraction"),
+                        candidate_samples=int(getattr(self.dataset, "group_valid", torch.tensor([])).sum()),
+                        candidate_coefficient_mass=float(self.source_weights[getattr(self.dataset,
+                            "group_valid", torch.zeros(len(self.dataset), dtype=torch.bool))].sum()/self.source_weights.sum()),
                         source_objective={s:dict(samples=self.dataset.sources.count(s),
-                            multiplier=float(self.source_weights[self.dataset.sources.index(s)]))
+                            coefficient_mass=float(self.source_weights[torch.tensor([x == s for x in self.dataset.sources])].sum()/self.source_weights.sum()))
                             for s in sorted(set(self.dataset.sources))},
                         complete_epochs=self.epoch, partial_epoch_samples=self.cursor,
                         replay_samples=len(self.dataset), physical_samples_duplicated=False,

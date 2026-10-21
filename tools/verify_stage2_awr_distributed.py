@@ -30,7 +30,7 @@ def main():
     from gem.closedloop.awr.config import load_config, physical_config, preflight
     from gem.closedloop.awr.distributed import Distributed
     from gem.closedloop.awr.losses import weighted_denoising
-    from gem.closedloop.awr.objective import timestep_weights, source_weights
+    from gem.closedloop.awr.objective import timestep_weights, source_weights, candidate_objective_weights
     from gem.closedloop.awr.io import atomic_json
     from gem.closedloop.common.supervision import load_actor, Stage1Supervision
     from gem.closedloop.stage1_dataset import collate_stage1_training_samples
@@ -81,8 +81,9 @@ def main():
                                                timesteps=times[indices].to(d.device), noise=noise[indices].to(d.device),
                                                guidance_scale=config["awr"]["actor"]["denoising_guidance_scale"])
                 weights = torch.tensor([1.+i/3 for i in indices], device=d.device)
-                balance = source_weights([str(i % 4) for i in range(n_awr)],
-                                         config["awr"]["actor"].get("source_balance", "none"))
+                balance = candidate_objective_weights([str(i % 4) for i in range(n_awr)],
+                    [i < 2 for i in range(n_awr)], fraction=config["awr"]["actor"].get("candidate_objective_fraction"),
+                    source_balance=config["awr"]["actor"].get("source_balance", "none"))
                 weights = weights*time_table[times[indices]].to(d.device)*balance[indices].to(d.device)
                 loss, _ = weighted_denoising(out["pred_x_start"], out["target_x_start"],
                     valid & ~context["known_qpos30_mask"], weights, global_count=n_awr)

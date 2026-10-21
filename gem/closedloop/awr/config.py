@@ -102,6 +102,13 @@ def load_config(path, *, profile=None):
     from .objective import timestep_weights, source_weights
     timestep_weights([.9, .1], actor.get("timestep_weighting"))
     source_weights(["configuration_check"], actor.get("source_balance", "none"))
+    from .objective import candidate_objective_weights
+    candidate_objective_weights(["check", "check"], [True, False],
+        fraction=actor.get("candidate_objective_fraction"), source_balance=actor.get("source_balance", "none"))
+    if c["awr"]["critic"].get("regression_balance", "none") not in ("none", "source_episode_type"):
+        raise ValueError("Invalid Critic regression balance")
+    if c["awr"]["critic"].get("validation_selection", "overall") not in ("overall", "source_episode_type"):
+        raise ValueError("Invalid Critic validation selection")
     if c["awr"].get("uniform_ablation", False) and (not c["awr"]["run_ablation"] or actor.get("bc_enabled", True)):
         raise ValueError("The uniform-timestep control requires the explicit no-BC ablation experiment")
     if c["awr"]["actor"].get("denoising_guidance_scale") != c["model"]["guidance_scale"]:
@@ -118,6 +125,11 @@ def load_config(path, *, profile=None):
     from .advantages import signal_config
     signal_config(c["awr"].get("advantage"), c["awr"].get("candidate_sampling"))
     candidates = c["awr"].get("candidate_sampling", {})
+    if candidates.get("world_lifecycle", "shared") not in ("shared", "fresh_candidate_round"):
+        raise ValueError("Invalid candidate world lifecycle")
+    if candidates.get("world_lifecycle") == "fresh_candidate_round" and (
+            not candidates.get("enabled") or candidates.get("group_fraction") != 1.):
+        raise ValueError("Fresh candidate rounds require a fully grouped collection plan")
     if candidates.get("enabled"):
         import math
         if (type(candidates.get("candidates_per_group")) is not int or candidates["candidates_per_group"] < 2

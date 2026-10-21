@@ -31,6 +31,7 @@ class ReplayDataset:
             raise ValueError("Repeated Replay Actor sample")
         self.returns = torch.stack(self.returns).double()
         self.weights = torch.ones(len(self.rows), dtype=torch.float64)
+        self.group_valid = torch.zeros(len(self.rows), dtype=torch.bool)
         if labels is not None:
             if expected_signal is not None or expected_candidates is not None or expected_snapshot is not None:
                 from .advantages import signal_config
@@ -45,6 +46,8 @@ class ReplayDataset:
             if set(lookup) != set(self.sample_ids):
                 raise ValueError("Frozen labels differ from Replay snapshot")
             order = torch.tensor([lookup[key] for key in self.sample_ids])
+            if labels.group_valid is not None:
+                self.group_valid = labels.group_valid[order].clone()
             if not torch.equal(labels.returns[order], self.returns):
                 raise ValueError("Frozen MC labels changed")
             if not unit_weights:

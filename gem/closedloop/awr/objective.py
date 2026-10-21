@@ -51,3 +51,29 @@ def source_weights(sources, mode="none"):
     if mode != "uniform_sources":
         raise ValueError("Use none or uniform_sources for the Replay objective")
     return torch.tensor([len(sources)/(len(counts)*counts[s]) for s in sources], dtype=torch.float64)
+
+
+def candidate_objective_weights(sources, group_valid, *, fraction=None, source_balance="uniform_sources"):
+    """显式分配首次同状态样本的监督份额，组内不按优势再次采样。
+
+    全Replay仍每Epoch均匀遍历一次。fraction是固定训练目标比例，不是组优势大小，
+    两个消融分支使用相同系数；各层内来源等权，整轮系数均值为1。缺少任一层时回退
+    原来源目标并报告覆盖，不能为缺失候选制造标签或把重复训练称为新物理数据。
+    """
+    base = source_weights(sources, source_balance)
+    mask = torch.as_tensor(group_valid, dtype=torch.bool)
+    if mask.shape != base.shape:
+        raise ValueError("Candidate membership differs from Replay samples")
+    if fraction is None:
+        return base
+    if (isinstance(fraction, bool) or not math.isfinite(fraction) or not 0 < fraction < 1
+            or source_balance != "uniform_sources"):
+        raise ValueError("Candidate objective fraction requires (0,1) and balanced sources")
+    if not mask.any() or mask.all():
+        return base
+    result = torch.empty_like(base)
+    for selected, mass in ((mask, fraction), (~mask, 1-fraction)):
+        indices = selected.nonzero().flatten().tolist()
+        local_sources = [sources[i] for i in indices]
+        result[selected] = source_weights(local_sources, source_balance)*len(sources)/len(indices)*mass
+    return result

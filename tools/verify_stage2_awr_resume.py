@@ -148,6 +148,7 @@ def main():
                     break
             data = ReplayDataset(episodes, unit_weights=True)
             data.rows, data.sample_ids, data.sources = data.rows[:3], data.sample_ids[:3], data.sources[:3]
+            data.group_valid = data.group_valid[:3]
             data.returns = data.returns[:3]
             labels = AdvantageLabelSet.load(state["artifacts"][prefix+"_labels"])
             lookup = {name: i for i, name in enumerate(labels.sample_ids)}

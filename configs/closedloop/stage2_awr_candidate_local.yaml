@@ -1,0 +1,25 @@
+# 同状态候选与真实消费局部信号的有限对照：完整64集、16组、每组4个首次扩散噪声。
+# 各候选轮次新建单环境PhysX世界，严格核对首次生成前的物理/历史/前缀；不放宽容差。
+# 新std、关闭BC和教师、均匀扩散时间、LR与5 Epoch保持；只以真实任务奖励比较模型。
+# 首次有效组直接用组内2秒回报差；后续用自由参考暴露的4步TD信号。完整MC仍保留。
+# 候选监督占25%固定目标质量、其余75%；均匀遍历全部Replay，不做优势优先采样。
+# 对照两组使用相同固定目标系数，只有是否使用优势权重不同，原配置和旧标签不修改。
+extends: stage2_awr_rewardstd_nobc.yaml
+awr:
+  candidate_sampling:
+    group_fraction: 1.0
+    world_lifecycle: fresh_candidate_round
+    advantage_mode: grouped
+  smoke:
+    envs_per_rank: 1
+  actor:
+    candidate_objective_fraction: 0.25
+  advantage:
+    mode: credit_nstep
+    coordinate_scope: free_coordinates
+    nstep: 4
+    credit_mode: current_plus_lookahead
+    credit_fallback: nstep
+  critic:
+    regression_balance: source_episode_type
+    validation_selection: source_episode_type

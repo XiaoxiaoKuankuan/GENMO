@@ -79,7 +79,8 @@ def build_reference_ledger(episode):
     return value
 
 
-def reference_exposure(episode, *, mode="current_only", current_weight=.5, lookahead_weight=.5):
+def reference_exposure(episode, *, mode="current_only", current_weight=.5, lookahead_weight=.5,
+                       coordinate_scope="all_committed", include_control_weights=False):
     ledger = episode.reference_ledger
     if ledger is None:
         ledger = build_reference_ledger(episode)
@@ -93,6 +94,8 @@ def reference_exposure(episode, *, mode="current_only", current_weight=.5, looka
         raise ValueError("Credit ledger identity differs from immutable Episode")
     if mode not in ("current_only", "current_plus_lookahead"):
         raise ValueError("Unknown reference exposure mode")
+    if coordinate_scope not in ("all_committed", "free_coordinates"):
+        raise ValueError("Unknown reference coordinate scope")
     if (not np.isfinite([current_weight, lookahead_weight]).all() or min(current_weight, lookahead_weight) < 0
             or current_weight+lookahead_weight <= 0):
         raise ValueError("Invalid current/lookahead weights")
@@ -110,11 +113,29 @@ def reference_exposure(episode, *, mode="current_only", current_weight=.5, looka
         raise ValueError("Credit ledger no longer matches physical reward time intervals")
     table = ledger["plan_dictionary"]
     matrix = np.zeros((count, count), dtype=np.float64)
-    exposure, reports = np.zeros(count, dtype=np.float64), []
+    exposure, reports, control_weights = np.zeros(count, dtype=np.float64), [], []
     for i, row in enumerate(episode.rows):
         plan = str(row.identity["plan_id"])
         match = (window == table.index(plan)) if plan in table else np.zeros_like(window, dtype=bool)
-        control_weight = (match*weights[None]).sum(axis=1)
+        full_weight = (match*weights[None]).sum(axis=1)
+        coordinate_fraction = np.ones_like(window, dtype=np.float64)
+        if coordinate_scope == "free_coordinates":
+            # 30Hz源帧映射到实际50Hz窗口查询tick。部分自由坐标按占比计算，插值边界按
+            # 相邻帧线性分配；这是暴露近似，不把root积分传播冒充严格物理因果。
+            source_ticks = np.asarray(row.context["future_times"][0])*600
+            if not np.allclose(source_ticks, np.rint(source_ticks), atol=1e-6, rtol=0):
+                raise ValueError("Reference source times are not on the 600Hz clock")
+            source_ticks = np.rint(source_ticks).astype(np.int64)
+            if np.any(np.diff(source_ticks) != 20) or source_ticks[0] != row.control_tick_begin:
+                raise ValueError("Reference source times differ from the physical decision")
+            valid = np.asarray(row.target_valid).sum(axis=1)
+            fraction = np.divide(np.asarray(row.free_mask).sum(axis=1), valid,
+                                 out=np.zeros(60, dtype=np.float64), where=valid > 0)
+            coordinate_fraction = np.interp(np.asarray(ledger["consumed_reference_ticks"]),
+                                            source_ticks, fraction, left=0., right=0.)
+        control_weight = (match*coordinate_fraction*weights[None]).sum(axis=1)
+        if include_control_weights:
+            control_weights.append(control_weight)
         window_any, current, future = match.any(axis=1), match[:, 10], match[:, 11:].any(axis=1)
         sums = np.bincount(indices, weights=control_weight, minlength=count)
         lengths = np.array([r.executed_control_steps for r in episode.rows])
@@ -129,13 +150,18 @@ def reference_exposure(episode, *, mode="current_only", current_weight=.5, looka
             reward_reference_ticks=np.asarray(ledger["reward_reference_ticks"])[
                 np.asarray(ledger["reward_plan_indices"]) == table.index(plan)].tolist() if plan in table else [],
             last_current_tick=last,
+            first_free_exposure_tick=first(control_weight > 0),
+            full_plan_exposure_seconds=float(full_weight.sum()*.02),
+            excluded_known_coordinate_seconds=float((full_weight-control_weight).sum()*.02),
             replaced_after_tick=last+12 if last is not None and last+12 < episode.rows[-1].control_tick_end else None,
             actually_consumed_seconds=float(current.sum()*.02), weighted_exposure_seconds=float(exposure[i])))
     if (matrix < 0).any() or (matrix > 1+1e-12).any() or (matrix.sum(axis=0) > 1+1e-12).any():
         raise ValueError("Reference exposure exceeds one unit per physical control")
     matrix = np.clip(matrix, 0., 1.)
-    return dict(valid=True, mode=mode, ledger_sha256=ledger["sha256"], matrix=torch.from_numpy(matrix),
+    return dict(valid=True, mode=mode, coordinate_scope=coordinate_scope,
+                ledger_sha256=ledger["sha256"], matrix=torch.from_numpy(matrix),
                 exposure=torch.from_numpy(exposure), plans=reports,
+                control_weights=control_weights if include_control_weights else None,
                 point_weights=weights.tolist(), total_per_control=1.,
                 unassigned_semantics="bootstrap_reference_share_is_not_redistributed")
 

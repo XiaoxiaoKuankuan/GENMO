@@ -81,8 +81,34 @@ def add_candidates(tasks, config, *, world_size, macro):
     for index, task in enumerate(result):
         task["planned_index"] = index
         task["rank"] = index % world_size
+    if config.get("world_lifecycle", "shared") == "fresh_candidate_round":
+        if ordinary or world_size < k or world_size % k:
+            raise ValueError("Fresh candidate rounds require all-candidate tasks and ranks divisible by group size")
+        # 每rank每轮仅一个候选，slot恒为0；整轮新建世界，消除之前Episode与邻居轨迹的影响。
+        for index, task in enumerate(result):
+            task["collection_round"] = index // world_size
+            task["collection_slot"] = 0
     if len(result) != count or len({t["task_id"] for t in result}) != count:
         raise ValueError("Candidate expansion changed task quota or duplicated identity")
+    return result
+
+
+def collection_rounds(tasks, config, *, rank, finished=()):
+    """从不可变计划分轮，恢复只跳过已发布任务；不换歌、不重抽噪声或拼接物理状态。"""
+    pending = [t for t in tasks if t["rank"] == rank and t["task_id"] not in set(finished)]
+    if config.get("world_lifecycle", "shared") == "shared":
+        return [(0, pending)]
+    if config.get("world_lifecycle") != "fresh_candidate_round":
+        raise ValueError("Unknown candidate world lifecycle")
+    if any(not t.get("candidate_group_id") or t.get("collection_slot") != 0
+           or type(t.get("collection_round")) is not int for t in tasks):
+        raise ValueError("Fresh rounds require an explicit frozen candidate schedule")
+    result = []
+    for number in sorted({t["collection_round"] for t in tasks}):
+        local = [t for t in pending if t["collection_round"] == number]
+        if len(local) > 1:
+            raise ValueError("Fresh candidate rank cannot reuse a physical slot within a round")
+        result.append((number, local))
     return result
 
 

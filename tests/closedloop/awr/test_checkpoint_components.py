@@ -50,6 +50,7 @@ def test_resume_acceptance_uses_saved_boundary_and_restores_original_actor(tmp_p
     actor, _, make = episode_factory
     data = ReplayDataset([make(episode_id="a"), make(episode_id="b")], unit_weights=True)
     data.rows, data.sample_ids, data.sources = data.rows[:3], data.sample_ids[:3], data.sources[:3]
+    data.group_valid = data.group_valid[:3]
     data.returns, data.weights = data.returns[:3], torch.tensor([.5, 1., 2.], dtype=torch.float64)
     d = Distributed()
     original = d.assert_models_equal(actor)

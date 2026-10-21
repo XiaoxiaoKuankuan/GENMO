@@ -130,6 +130,8 @@ def signal_config(config=None, candidate_config=None):
         raise ValueError("Candidate advantage mode must be standard, grouped or hybrid")
     if c["mode"] == "group_hybrid" and (not group.get("enabled") or group["advantage_mode"] != "hybrid"):
         raise ValueError("group_hybrid requires enabled hybrid candidates")
+    if c.get("coordinate_scope", "all_committed") not in ("all_committed", "free_coordinates"):
+        raise ValueError("Invalid reference coordinate scope")
     return c, group
 
 
@@ -189,7 +191,8 @@ def label_episode_advantages(episodes, value_by_episode, *, identity, config=Non
         v = value_by_episode[episode.episode_id]
         n = nstep_advantages(episode, v, c["nstep"], gamma_upper)
         exposure = reference_exposure(episode, mode=c["credit_mode"],
-                    current_weight=c["current_weight"], lookahead_weight=c["lookahead_weight"])
+                    current_weight=c["current_weight"], lookahead_weight=c["lookahead_weight"],
+                    coordinate_scope=c.get("coordinate_scope", "all_committed"), include_control_weights=True)
         local = credit_advantages(episode, v, exposure["matrix"], nstep=c["nstep"], gamma_upper=gamma_upper)
         credit_reports.append(dict(episode_id=episode.episode_id, valid=exposure["valid"],
             reason=exposure.get("reason"), ledger_sha256=exposure.get("ledger_sha256"), plans=exposure["plans"]))
@@ -209,8 +212,7 @@ def label_episode_advantages(episodes, value_by_episode, *, identity, config=Non
                 # 质量指标跟随该计划真正进入GMT的当前/前瞻窗口，不能用生成所在区间冒充。
                 plan = str(row.identity["plan_id"])
                 if plan in ledger["plan_dictionary"]:
-                    mask = np.asarray(ledger["window_plan_indices"]) == ledger["plan_dictionary"].index(plan)
-                    mass = (mask*np.asarray(exposure["point_weights"])).sum(axis=1)
+                    mass = exposure["control_weights"][j]
                     if mass.sum() > 0:
                         errors = (mass[:, None]*np.asarray(ledger["tracking_errors"])).sum(axis=0)/mass.sum()
                         diagnostic.update(zip(ledger["error_names"], errors.tolist()))
@@ -274,6 +276,38 @@ def label_episode_advantages(episodes, value_by_episode, *, identity, config=Non
         label_mode=label.label_mode, final_advantage=distribution(final),
         physics=physical_weight_diagnostics(label.weights, sources, diagnostics),
         physical_quality_time_basis="actual_plan_current_and_lookahead_exposure_not_generation_interval",
-        candidate_groups=group_reports, within_condition_weight_quality=group_quality)
+        candidate_groups=group_reports, within_condition_weight_quality=group_quality,
+        same_condition_signal_ranking=candidate_ranking_audit(label, group_reports))
     return label, dict(credit=credit_reports, candidate_groups=group_reports,
                        approximation="reference_exposure_not_unbiased_policy_gradient")
+
+
+def candidate_ranking_audit(labels, reports):
+    """同一验证初态内检查各信号的动作排序；2秒组优势与2秒评分相符是定义，不是泛化证据。"""
+    lookup = {s: i for i, s in enumerate(labels.sample_ids)}
+    signals = dict(mc=labels.mc_advantage, nstep=labels.nstep_advantage,
+                   credit=labels.credit_advantage, group=labels.group_advantage,
+                   final=labels.final_advantage, weight=labels.weights)
+    result = {}
+    for report in reports:
+        if not report["valid"]:
+            continue
+        ids = [lookup[m["sample_id"]] for m in report["members"]]
+        for window, scores in report["windows"].items():
+            entry = result.setdefault(window, {name: dict(pairs=0, correct=0, tied=0) for name in signals})
+            for i in range(len(ids)):
+                for j in range(i+1, len(ids)):
+                    difference = scores[i]["return_value"]-scores[j]["return_value"]
+                    if abs(difference) <= 1e-8:
+                        continue
+                    for name, values in signals.items():
+                        value = float(values[ids[i]]-values[ids[j]])
+                        entry[name]["pairs"] += 1
+                        entry[name]["correct"] += int(value*difference > 0)
+                        entry[name]["tied"] += int(abs(value) <= 1e-12)
+    for entries in result.values():
+        for value in entries.values():
+            value["pair_accuracy"] = value["correct"]/value["pairs"] if value["pairs"] else None
+    return dict(windows=result, comparison_scope="within_verified_same_initial_state",
+                group_score_window_is_definition_not_independent_validation=True,
+                pair_dependence="pairs_within_one_music_group_are_not_independent")

@@ -13,6 +13,7 @@ from pathlib import Path
 import subprocess
 import sys
 import time
+from datetime import datetime
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
@@ -25,7 +26,12 @@ def main():
     parser.add_argument("--run-dir", type=Path, required=True)
     parser.add_argument("--gmt-repo", type=Path, required=True)
     parser.add_argument("--config", type=Path, default=ROOT/"configs/closedloop/stage2_awr_rewardstd_nobc.yaml")
+    parser.add_argument("--finish-before-utc", help="本次墙钟边界；提前10分钟请求排空，不恢复旧任务")
     args = parser.parse_args()
+    deadline = (datetime.fromisoformat(args.finish_before_utc.replace("Z", "+00:00")).timestamp()
+                if args.finish_before_utc else None)
+    if deadline is not None and deadline-time.time() < 20*60:
+        parser.error("A bounded physical run requires at least twenty minutes")
     config = load_config(args.config)
     if (config["version"] != "genmo.stage2.awr.signals.v2" or config["awr"]["max_macro_iterations"] != 1
             or config["awr"]["initial_episodes"] > 64 or config["awr"].get("collection_completion")):
@@ -52,7 +58,15 @@ def main():
             command=command, source_commits=sources, config_sha256=digest(config),
             budget=dict(planned_attempts=config["awr"]["initial_episodes"], macro_iterations=1,
                         actor_epochs=config["awr"]["actor"]["epochs"], supplemental_attempts=0)))
-        code = process.wait()
+        requested = False
+        while True:
+            try:
+                code = process.wait(timeout=5)
+                break
+            except subprocess.TimeoutExpired:
+                if deadline is not None and time.time() >= deadline-600 and not requested and root.exists():
+                    atomic_json(root/"STOP", dict(reason="authorized_two_hour_boundary_drain", deadline_unix=deadline))
+                    requested = True
     atomic_json(paths["exit.json"], dict(exit_code=code, pid=process.pid, finished_unix=time.time(),
         seconds=time.time()-started, source_commits=sources))
     return code

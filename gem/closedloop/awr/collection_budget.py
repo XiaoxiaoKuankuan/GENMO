@@ -111,8 +111,7 @@ def allocate_collection_budget(root, state, *, total_limit, authorization):
 def finished_warmup_tasks(root, macro, planned_ids):
     """正常停止恢复不重新执行已经留有真实预热失败结果的原任务。"""
     finished = set()
-    for path in sorted((Path(root)/f"macro{macro:03d}"/"collection").glob(
-            "*/rank*/execution/outcomes.json")):
+    for path in sorted((Path(root)/f"macro{macro:03d}"/"collection").rglob("execution/outcomes.json")):
         for outcome in json.loads(path.read_text()):
             if (outcome["task_id"] in planned_ids and not outcome["complete"]
                     and outcome["reason"] == "physical_warmup_failure"

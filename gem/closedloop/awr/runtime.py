@@ -201,7 +201,9 @@ class AWRRun:
             warmup_finished = self.d.root(lambda: finished_warmup_tasks(
                 self.root, macro, {t["task_id"] for t in plan["tasks"]}))
         finished = set(completed) | set(warmup_finished)
-        tasks = [t for t in plan["tasks"] if t["rank"] == self.d.rank and t["task_id"] not in finished]
+        from .candidates import collection_rounds
+        rounds = collection_rounds(plan["tasks"], self.config["awr"].get("candidate_sampling", {}),
+                                   rank=self.d.rank, finished=finished)
         attempt = self.d.root(lambda: uuid.uuid4().hex[:8])
         path = self.root/f"macro{macro:03d}"/"collection"/attempt/f"rank{self.d.rank:02d}"
         handle, driver = None, None
@@ -226,11 +228,31 @@ class AWRRun:
             return driver.collect(tasks, self.catalog, self.contract, on_episode=publish_episode,
                                   should_stop=lambda: stop_requested(self.root))
         self.d_fingerprint = self.d.assert_models_equal(self.actor)
-        try:
-            local_report = self.d.local(run_local)
-        finally:
-            if driver: driver.close()
-            if handle: close_isolated_world(handle)
+        round_reports = []
+        base_path = path
+        for number, tasks in rounds:
+            fresh_round = self.config["awr"].get("candidate_sampling", {}).get("world_lifecycle") == "fresh_candidate_round"
+            path = base_path/f"round{number:03d}" if fresh_round else base_path
+            handle = driver = None
+            try:
+                local_report = self.d.local(run_local)
+            finally:
+                if driver: driver.close()
+                if handle: close_isolated_world(handle)
+            round_reports.append(dict(round=number, report=local_report))
+            if self.d.root(lambda: stop_requested(self.root)):
+                break
+        from collections import Counter
+        timing, used = Counter(), Counter()
+        for item in round_reports:
+            report = item["report"]
+            timing.update({k: v for k, v in report.get("timing", {}).items() if isinstance(v, (int, float))})
+            used.update(report.get("actual_budget", {}).get("used", {}))
+        local_report = dict(rounds=round_reports,
+            tasks=[t for item in round_reports for t in item["report"]["tasks"]],
+            seconds=sum(item["report"]["seconds"] for item in round_reports),
+            timing=dict(timing), actual_budget=dict(used=dict(used)),
+            generation_batches=[b for item in round_reports for b in item["report"].get("generation_batches", [])])
         reports = self.d.gather(local_report)
         self.json_artifact(f"macro{macro:03d}_collection_{attempt}", lambda: dict(ranks=reports, seconds=time.perf_counter()-started))
         completed = self.d.root(lambda: self._recover_publications(macro))

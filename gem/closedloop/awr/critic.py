@@ -37,6 +37,46 @@ def flatten(episodes):
     return rows, torch.stack(values).double()
 
 
+def regression_weights(episodes, mode="none"):
+    """先平衡来源，再在各来源内等权自然结束/失败；不删失败、不使用回报优先采样。"""
+    from collections import Counter
+    keys = [(e.source, bool(e.rows[-1].metadata.get("physical_failure")))
+            for e in episodes for _ in e.rows]
+    if mode == "none":
+        return torch.ones(len(keys), dtype=torch.float64)
+    if mode != "source_episode_type":
+        raise ValueError("Unknown Critic regression balance")
+    counts = Counter(keys)
+    sources = {s for s, _ in counts}
+    types = {s: sum(key[0] == s for key in counts) for s in sources}
+    return torch.tensor([len(keys)/(len(sources)*types[s]*counts[(s, f)]) for s, f in keys], dtype=torch.float64)
+
+
+def validation_score(report, mode="overall"):
+    """独立验证仍对真实MC计算；分层评分避免多数成功/长歌掩盖失败段。"""
+    if mode == "overall":
+        return report["overall"]["mse"]
+    if mode != "source_episode_type":
+        raise ValueError("Unknown Critic validation selection")
+    groups = report["source_episode_types"]
+    return sum(sum(v["mse"] for v in types.values())/len(types) for types in groups.values())/len(groups)
+
+
+def fvi_selection(mc, fitted, mode="overall"):
+    """只用预定独立验证选MC/FVI，不参考Actor评价或标注折回报。"""
+    reasons = []
+    if validation_score(fitted, mode) >= validation_score(mc, mode):
+        reasons.append("validation_mse_not_improved")
+    if abs(fitted["overall"]["bias"]) > abs(mc["overall"]["bias"]):
+        reasons.append("overall_bias_increased")
+    if mode == "source_episode_type":
+        for name, old in mc["episode_types"].items():
+            if fitted["episode_types"][name]["mse"] > old["mse"]:
+                reasons.append(name+"_mse_increased")
+    return dict(accepted=not reasons, reasons=reasons, criterion=mode,
+                mc_score=validation_score(mc, mode), fvi_score=validation_score(fitted, mode))
+
+
 @torch.no_grad()
 def predict(model, rows, distributed, batch_size=128):
     """先按确定顺序分rank，按原序合并；预测量完全detach。"""
@@ -57,17 +97,20 @@ def predict(model, rows, distributed, batch_size=128):
 def evaluate(model, episodes, distributed, batch_size=128):
     rows, target = flatten(episodes)
     prediction = predict(model, rows, distributed, batch_size)
-    by_source, by_type = {}, {}
+    by_source, by_type, by_joint = {}, {}, {}
     cursor = 0
     for episode in episodes:
         ids = list(range(cursor, cursor+len(episode.rows)))
         by_source.setdefault(episode.source, []).extend(ids)
         kind = "physical_failure" if episode.rows[-1].metadata.get("physical_failure") else "natural_end"
         by_type.setdefault(kind, []).extend(ids)
+        by_joint.setdefault(episode.source, {}).setdefault(kind, []).extend(ids)
         cursor += len(episode.rows)
     return dict(overall=value_metrics(prediction, target),
                 sources={k: value_metrics(prediction[v], target[v]) for k, v in by_source.items()},
-                episode_types={k: value_metrics(prediction[v], target[v]) for k, v in by_type.items()})
+                episode_types={k: value_metrics(prediction[v], target[v]) for k, v in by_type.items()},
+                source_episode_types={s: {k: value_metrics(prediction[v], target[v]) for k, v in types.items()}
+                                      for s, types in by_joint.items()})
 
 
 class CriticFit:
@@ -108,6 +151,7 @@ class CriticFit:
         if targets.shape != mc.shape or not torch.isfinite(targets).all():
             raise ValueError("Fitted targets must cover exactly the training states")
         d, c = self.distributed, self.config
+        weights = regression_weights(train, c.get("regression_balance", "none"))
         batch_size, micro = int(c["global_batch"]), int(c["microbatch"])
         if min(batch_size, micro) < 1:
             raise ValueError("Positive Critic batch sizes required")
@@ -126,7 +170,8 @@ class CriticFit:
                     ids = local_ids[offset:offset+micro]
                     context, remaining = critic_batch([rows[i] for i in ids], d.device)
                     prediction = self.model(context, remaining)
-                    loss = (prediction.double()-targets[ids].to(d.device)).square().sum()/len(global_ids)
+                    loss = ((prediction.double()-targets[ids].to(d.device)).square()
+                            * weights[ids].to(d.device)).sum()/len(global_ids)
                     if not torch.isfinite(loss):
                         raise FloatingPointError("Nonfinite fitted Value loss")
                     loss.backward()
@@ -143,7 +188,7 @@ class CriticFit:
             report = evaluate(self.model, validation, d, micro)
             history.append(dict(epoch=epoch+1, train_mse=total_loss/samples, validation=report,
                                 gradient_norm=float(norm), optimizer_steps=self.fit_steps))
-            score = report["overall"]["mse"]
+            score = validation_score(report, c.get("validation_selection", "overall"))
             if score < best-c.get("min_delta", 0.):
                 best, stale, best_state = score, 0, self.state_dict()
             else:
@@ -153,6 +198,8 @@ class CriticFit:
         self.load_state_dict(best_state)
         d.assert_models_equal(self.model)
         return dict(phase=phase, epochs=len(history), history=history,
+                    regression_balance=c.get("regression_balance", "none"),
+                    validation_selection=c.get("validation_selection", "overall"),
                     validation=evaluate(self.model, validation, d, micro),
                     seconds=time.perf_counter()-started,
                     train_episode_ids=[e.episode_id for e in train],

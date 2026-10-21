@@ -11,7 +11,7 @@ import time
 import torch
 
 from .advantages import label_episode_advantages
-from .critic import CriticFit, assert_independent, flatten, predict
+from .critic import CriticFit, assert_independent, flatten, predict, fvi_selection
 from .folds import partition_episodes
 from .io import digest
 from .returns import nstep_targets
@@ -78,10 +78,10 @@ def fit_crossfit(actor, episodes, fold_map, config, distributed, *, seed=42, che
         reports.append(report)
         save(index+1, 0, None)
     labeling_started = time.perf_counter()
-    use_fvi = all(r["fvi"] and
-                  r["fvi"][-1]["validation"]["overall"]["mse"] < r["mc"]["validation"]["overall"]["mse"] and
-                  abs(r["fvi"][-1]["validation"]["overall"]["bias"]) <= abs(r["mc"]["validation"]["overall"]["bias"])
-                  for r in reports)
+    selection = [fvi_selection(r["mc"]["validation"], r["fvi"][-1]["validation"],
+                              config.get("validation_selection", "overall")) if r["fvi"]
+                 else dict(accepted=False, reasons=["mc_only_requested"]) for r in reports]
+    use_fvi = all(r["accepted"] for r in selection)
     chosen = fvi_states if use_fvi else mc_states
     value_by_episode, provenance, fingerprints = {}, [], []
     for index, (fit, part) in enumerate(zip(fits, partitions)):
@@ -99,6 +99,7 @@ def fit_crossfit(actor, episodes, fold_map, config, distributed, *, seed=42, che
                                labeled_groups=sorted({e.group_id for e in part["label"]}),
                                labeled_episodes=[e.episode_id for e in part["label"]]))
     report = dict(schema="genmo.awr.crossfit.v1", selected="mc_fvi" if use_fvi else "mc_only",
+                  selection_diagnostics=selection,
                   folds=reports, provenance=provenance, seconds=time.perf_counter()-started,
                   fold_identity=fold_map["sha256"], selected_critic_fingerprints=fingerprints,
                   value_semantics="replay_behavior_mixture_baseline")
