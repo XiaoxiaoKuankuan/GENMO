@@ -1,10 +1,12 @@
-"""限定预算的均匀扩散时间AWR对照，不改已完成运行、不追加采集或重新拟合Critic。
+"""限定预算的同Replay单因素对照，不改已完成运行、不追加采集或重新拟合Critic。
 
 输入为已完成四组实验的原始工作树、Replay快照、冻结优势和固定训练音乐评价计划。
 从原s595000重新初始化，复用原ActorTrainer，仅将Min-SNR切回uniform；保持真实
 优势权重、来源因子、batch顺序、噪声、95步对应的Epoch预算、学习率和无BC状态。
 所有训练与评价写入新的独立目录；原state、Replay、标签、模型均只读。原始源码
 提交与工具SHA分别记录，评价复用原物理身份/时钟和任务随机流并新建PhysX世界。
+group_only变体保持原时间目标，仅将非首次有效候选的优势设为零(权重为1)，直接检验
+普通后续局部信用的加权是否有益；候选/普通监督份额、噪声、步数和学习率完全不变。
 只允许八卡、一个64次以内的已完成有限运行；启动和评价前检查剩余墙钟，STOP或
 时间边界保存完整优化步，物理阶段停止发新任务并排空。它不是原运行的隐式续训。
 """
@@ -32,12 +34,35 @@ def uniform_config(actor_config):
     return result
 
 
+def group_only_weights(labels, sample_ids):
+    """首次严格同状态候选保留原组优势，其他样本置零；整轮均值归一化，绝不按batch改权重。"""
+    import torch
+    from gem.closedloop.awr.advantages import label_advantages
+    if labels.group_valid is None or not labels.group_valid.any():
+        raise ValueError("A group-only ablation requires actual verified candidate labels")
+    lookup = {s:i for i,s in enumerate(labels.sample_ids)}
+    ids = torch.tensor([lookup[s] for s in sample_ids])
+    if set(sample_ids) != set(lookup):
+        raise ValueError("Group-only weights must cover the identical Replay")
+    normalized = torch.zeros_like(labels.weights)
+    sigma = labels.identity["component_scales"]["group"]["std"]
+    normalized[labels.group_valid] = labels.group_advantage[labels.group_valid]/max(sigma, 1e-8)
+    c = labels.identity["weight_config"]
+    counterfactual = label_advantages(labels.sample_ids, labels.returns, labels.values,
+        sources=labels.source, identity=dict(original_label_id=labels.identity["label_id"],
+            ablation="verified_first_group_only_other_advantages_zero"),
+        beta=c["beta"], weight_cap=c["weight_cap"], epsilon=c["epsilon"],
+        weight_mean_normalize=c["weight_mean_normalize"], final_normalized=normalized, allow_degenerate=True)
+    return counterfactual.weights[ids].clone(), counterfactual
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--source-run", type=Path, required=True)
     parser.add_argument("--runtime-repo", type=Path, required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--finish-before-utc", required=True)
+    parser.add_argument("--variant", choices=("uniform_time", "group_only"), default="uniform_time")
     args = parser.parse_args()
     source, repo, output = [p.resolve() for p in (args.source_run, args.runtime_repo, args.output_dir)]
     deadline = datetime.fromisoformat(args.finish_before_utc.replace("Z", "+00:00")).timestamp()
@@ -89,9 +114,12 @@ def main():
         group = dist.new_group(backend="nccl", timeout=timedelta(minutes=30)); d.tensor_group = group
         prepare_file_handles(state["config"]["awr"]["replay_capacity"])
         config = copy.deepcopy(state["config"])
-        c = uniform_config(config["awr"]["actor"])
+        c = (uniform_config(config["awr"]["actor"]) if args.variant == "uniform_time"
+             else copy.deepcopy(config["awr"]["actor"]))
+        if c.get("bc_enabled", True) or c.get("reference_weight", 0.) != 0.:
+            raise ValueError("This diagnostic requires BC and teacher disabled")
         snapshot_id = state["artifacts"]["macro000_replay"]
-        identity = dict(source_run=str(source), original_sources=state["source_commits"],
+        identity = dict(source_run=str(source), variant=args.variant, original_sources=state["source_commits"],
             source_request=state["request_sha256"], replay_snapshot=snapshot_id, actor_config=c,
             label_manifest_sha256=file_sha256(Path(state["artifacts"]["macro000_labels"])/"manifest.json"),
             tool_sha256=file_sha256(__file__), source_state_sha256=hashlib.sha256(before).hexdigest())
@@ -124,8 +152,13 @@ def main():
             if snapshot["contract_sha256"] != baseline["physics_identity"]:
                 raise ValueError("Baseline and Replay physics differ")
             labels = AdvantageLabelSet.load(state["artifacts"]["macro000_labels"])
-            return ReplayDataset(episodes, labels, expected_signal=config["awr"]["advantage"],
+            dataset = ReplayDataset(episodes, labels, expected_signal=config["awr"]["advantage"],
                 expected_candidates=config["awr"]["candidate_sampling"], expected_snapshot=snapshot_id)
+            if args.variant == "group_only":
+                dataset.weights, counterfactual = group_only_weights(labels, dataset.sample_ids)
+                if rank == 0:
+                    counterfactual.save(output/"counterfactual_labels")
+            return dataset
         data = d.local(load_dataset)
         torch.manual_seed(config["awr"]["seed"]+rank*100003)
         trainer = ActorTrainer(actor, data, None, c, d, seed=config["awr"]["seed"], bc_weight=0.)
@@ -134,12 +167,12 @@ def main():
             ranks = d.gather(dict(bc=None, rng=capture_rng(d.device)))
             payload = trainer.state_dict() if rank == 0 else None
             if payload is not None: payload["rank_states"] = ranks
-            return d.root(lambda: cp.save(name, payload, progress=dict(step=trainer.steps, phase="actor_uniform_awr")))
+            return d.root(lambda: cp.save(name, payload, progress=dict(step=trainer.steps, phase="actor_"+args.variant)))
         def step(current, entry):
             if rank == 0:
                 with (output/"steps.jsonl").open("a") as f: f.write(json.dumps(entry)+"\n")
         stop = lambda: (output/"STOP").exists() or time.time() >= deadline-10*60
-        publish(phase="actor_uniform_awr")
+        publish(phase="actor_"+args.variant)
         result = trainer.run(on_step=step, should_stop=stop)
         final = save("final" if result["complete"] else "stopped")
         publish(checkpoint=final, training=d.gather(result))
@@ -162,13 +195,18 @@ def main():
             fingerprint=d.assert_models_equal(actor), physics_identity=baseline["physics_identity"],
             progress_path=output/"evaluation_progress", should_stop=stop)
         comparisons = {}
-        for name, key in (("stage1", "stage1_fixed"), ("uniform_self_distillation", "macro000_self_distillation_uniform_fixed"),
-                          ("minsnr_self_distillation", "macro000_self_distillation_fixed"), ("minsnr_awr", "macro000_awr_fixed")):
+        comparison_keys = (("stage1", "stage1_fixed"), ("self_distillation", "macro000_self_distillation_fixed"),
+                           ("source_awr", "macro000_awr_fixed"))
+        if args.variant == "uniform_time":
+            comparison_keys = (("stage1", "stage1_fixed"), ("uniform_self_distillation", "macro000_self_distillation_uniform_fixed"),
+                               ("minsnr_self_distillation", "macro000_self_distillation_fixed"), ("minsnr_awr", "macro000_awr_fixed"))
+        for name, key in comparison_keys:
             previous = json.loads(Path(state["artifacts"][key]).read_text())
             comparisons[name] = paired_comparison(previous, evaluation, selection_policy="reward_only")
         if (source/"state.json").read_bytes() != before:
             raise ValueError("Source experiment was mutated during independent control")
-        report = dict(schema="genmo.awr.uniform_time_ablation.v1", identity=identity, checkpoint=final,
+        schema = "genmo.awr.uniform_time_ablation.v1" if args.variant == "uniform_time" else "genmo.awr.replay_objective_ablation.v1"
+        report = dict(schema=schema, variant=args.variant, identity=identity, checkpoint=final,
             training=progress["training"], evaluation=evaluation, comparisons=comparisons,
             parameter_changes=changes, stage1_train_diagnostic_loss=sum(map(sum,losses))/sum(map(len,losses)),
             source_state_unchanged=True, new_collection_episodes=0, new_critic_updates=0,

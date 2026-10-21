@@ -147,3 +147,22 @@ def test_readonly_candidate_audit_binds_snapshot_and_recomputes_weights(episode_
     assert report["coefficient_mass_before_advantage"] == pytest.approx(.25)
     assert report["ranking"]["windows"]["2"]["weight"]["pair_accuracy"] == 1.
     assert (tmp_path/"state.json").read_bytes() == before
+
+
+def test_group_only_control_changes_no_group_scores_and_freezes_one_global_scale(episode_factory):
+    from tools.ablate_stage2_awr_uniform import group_only_weights
+    from gem.closedloop.awr.advantages import label_episode_advantages
+    from tests.closedloop.awr.test_learning_signals import candidate_episodes
+    _, _, make = episode_factory
+    episodes = candidate_episodes(make)
+    labels, _ = label_episode_advantages(episodes,
+        {e.episode_id: torch.zeros(len(e.rows)) for e in episodes}, identity={},
+        config=dict(mode="credit_nstep"), candidate_config=dict(enabled=True, advantage_mode="grouped"))
+    before = labels.weights.clone()
+    weights, result = group_only_weights(labels, list(reversed(labels.sample_ids)))
+    torch.testing.assert_close(weights, result.weights.flip(0))
+    torch.testing.assert_close(labels.weights, before)
+    assert (result.normalized[~labels.group_valid] == 0).all()
+    assert (result.raw_weights[~labels.group_valid] == 1).all()
+    torch.testing.assert_close(result.normalized[labels.group_valid], labels.normalized[labels.group_valid])
+    assert result.weights.mean() == pytest.approx(1.)
