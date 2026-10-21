@@ -196,6 +196,11 @@ P95=2.22250、P99=2.60282、最大3.04724，原始cap触发比例0。
 FineDance高权重四分位Joint误差0.15911rad，高于低权重组0.15331rad。
 这些是暴露/质量诊断，不是严格物理因果证明。
 
+2026-10-21补充核对：上述原标签报告的部分Tracking质量分组取生成所在决策区间，
+并非该plan实际被GMT消费的区间，不能据此宣称高权重对应更好的本次生成动作。
+原奖励和标签保留；新增只读工具已按真实21点窗口份额重新计算，具体差异、梯度与
+退化原因见[后续诊断](stage2_awr_learning_diagnosis_20261021.md)。
+
 同一冻结Replay/Critic完成11模式离线标签审计，耗时238.76秒，没有新增训练或物理：
 MC、nstep4/8/16、current/current+lookahead credit、hybrid0/0.5/0.7、grouped、
 group_hybrid。c全1与普通N-step最大差1.63425e−13；MC与alpha0权重逐值相同。
