@@ -62,7 +62,7 @@ LR调度沿用原5e-8至1e-6范围；Critic历史GRU1e-5、其他层1e-4，训�
     --stop-after-iteration 200
 
 日志monitor/formal.log；监督状态monitor/supervisor.json；完整快照train/latest.json；
-逐轮指标train/metrics；固定评价在train/sessions/<session>/evaluations；
+逐轮指标train/metrics；固定评价在train/sessions/<session>/phases/eval_<label>；
 TensorBoard在train/tensorboard_compact。用户停止时向supervisor.json的pid发送SIGTERM，
 监督器和当前进程组停止，不再自动拉起。正常使用相同命令会恢复latest完整状态。
 
@@ -79,3 +79,75 @@ GMT36项通过、1项已安装Isaac管理器测试因本地无Isaac跳过，服�
 早期发现并修复测试参数误含冻结参数、空评估身份、train_evaluation曲线scope，
 以及继承Actor的新奖励基线需显式区别Stage1的问题。首次更新额外保存/指纹修改
 另做针对性回归。正式运行和实测轮速在启动后追加，当前不宣称已改善物理收益。
+
+正式启动与新奖励预热实测
+------------------------
+
+运行源码为GENMO 921b563afafd50dd6abfa057397684ef2a15e750、
+GMT 9be857ce314fc6721eb71fe37fd7f415756e7824，均已推送并在服务器2快进同步。
+服务器原Isaac环境补验GENMO 86 passed（6.62秒）、GMT 37 passed（0.90秒）；
+本地首次更新额外保存与指纹回归55 passed（3.80秒）。这些批次存在交集，不相加。
+正式入口八卡NCCL SUM=36检查通过，所有模块导入路径均为指定的旧DPPO分支工作树。
+
+2026-10-21 22:33:38（北京时间）启动tmux stage2-dppo-server2-20261021；
+监督器初始PID2168863，torchrun初始PID2171114。启动会话为
+1befc54c-f832-485f-9599-78e2ce6251c9，目标累计200轮，不设置两小时截止。
+PID仅为启动证据，实时运行应查询monitor/supervisor.json、GPU进程和新轮指标。
+
+实际读取父模型和新initial完整checkpoint，逐张量核对Actor、非空Adam及LR控制器
+完全一致，保留22轮/87次Actor更新；新Critic Adam为空、Critic更新数为0，
+8rank的BC状态均为genmo.stage2.bc_disabled.v1。详细证据为运行根目录的
+continuation_state_audit.json，不能把initial文件落盘视为新增Actor更新。
+
+新奖励完整MC预热耗时1472.824秒，192个train任务全部有有效完整记录，包含8次
+non_yaw_anchor_ori物理失败；32个独立Critic验证任务全部自然结束。上层决策真实控制步
+分别333739和60841；失败样本没有被剔除。三组Critic混合候选实际比较后选择MC比例1.0，
+验证MSE3843.748484降至159.921476、EV由-0.000315升至0.911718，原质量诊断通过。
+该结果只证明价值拟合，不证明Actor或物理性能改善。预热checkpoint SHA为
+ae439f2a7d3bdf4984c39c3bec5d8cfbc011152f613f9b59cb30a0ba2b10bfd7。
+
+查看正式训练，无需重新启动::
+
+  ssh -t 6000D-Server-2 tmux attach -t stage2-dppo-server2-20261021
+
+只看主日志::
+
+  ssh 6000D-Server-2 'tail -n 60 -F /data1/user/liwei/GENMO_outputs/closedloop_stage10/stage2_dppo_return_20261021/monitor/formal.log'
+
+日志中的accepted_iteration只在真实Actor更新接受后前进；预热、物理采集、被撤销的
+Adam候选均不冒充新轮次。tmux使用Ctrl+b、再按d离开，不结束任务。
+
+首次真实Actor更新与持续运行
+--------------------------
+
+新协议初始整曲基线32任务全部执行，28个音乐完成、4次物理失败，来源均衡任务回报
+125.584386，按实际控制时间汇总的每秒回报2.250327；平均执行65.096秒，评估耗时
+598.694秒。失败证据完整保存，任务继续。这一基线对应继承的第22轮模型，不与旧奖励、
+旧评估音乐或AWR采样器的数值直接比较。
+
+2026-10-21 23:19（北京时间）核实第23轮已经完成：14313条有效链，409407个真实
+控制步、1638400个分配物理子步；轮内8次物理失败照常计入。4个Actor Adam步骤均首次
+接受，无重试、无撤销，累计Actor更新87→91。全局batch为4096/4096/4096/2025，
+实际BC样本、BC损失及BC梯度均为0，实际统一LR2.304e-7。四步PPO梯度范数分别约
+0.320268/0.318609/0.334412/0.528122，梯度裁剪倍率均为1；不能误读BC关闭后的空
+shared梯度分组为整个PPO梯度为零。
+
+完整八rank Actor与Critic指纹全部一致；新Actor指纹与基线不同。最终KL均值
+0.000138565、最大步均值0.000239241、P95为0.000307179，均通过原DPPO阈值。
+完整首次更新checkpoint实际读取并核对91次更新、八rank禁用BC状态、Actor指纹及文件SHA；
+SHA为432da7068bd997e970e5ac7e19fee0122551d83c11f1bd21ea8f2709fb4dd06a，文件为::
+
+  train/checkpoints/stage10_r000023_a000091_01792595825879716712_89044b6664e9_continuation_first_update.pt
+
+首轮墙钟368.033秒（6.13分钟）；物理采集连同目标/预算238.365秒、Critic10.186秒、
+Actor116.964秒，Actor项已经包括候选KL，不能再次相加。最大PyTorch分配峰值28.685GiB，
+不含PhysX外部分配。首次检查后的普通轮速仍需后续记录验证；按当前速度并计入每20轮约
+10分钟整曲评估，正常8小时可新增约60～70轮，属于估算，不是已完成轮数。
+
+随后已进入train_000024，监督器仍为attempt1。未执行用户停止，也没有修改正在运行
+的源码/配置；后台持续到既定累计200轮。首次更新只证明实际学习步骤和存储正确，
+收益是否改善等待后续同条件整曲评价，不能以KL或参数变化替代物理效果。
+
+运行根formal_startup_verification.json保存完整首次更新证据；本地小型证据同步到
+outputs/stage2_dppo_return_20261021/，与continuation_state_audit.json一起保留用于此次
+正式任务追溯，不属于临时pytest产物。主模型、全量日志和物理证据只保留在服务器正式根。
