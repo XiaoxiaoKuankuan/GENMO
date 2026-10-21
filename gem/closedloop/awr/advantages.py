@@ -210,7 +210,9 @@ def label_episode_advantages(episodes, value_by_episode, *, identity, config=Non
                 if mask.any():
                     diagnostic.update(zip(ledger["error_names"], np.asarray(ledger["tracking_errors"])[mask].mean(axis=0).tolist()))
             diagnostics.append(diagnostic)
-    g, v, n, a_credit, a_group, exposure_seconds = [torch.as_tensor(x).double() for x in (returns, values, ns, credit, ga, ce)]
+    # Python float列表默认先构造FP32再double会丢失组内微小回报差，必须直接构造FP64。
+    g, v, n, a_credit, a_group, exposure_seconds = [
+        torch.as_tensor(x, dtype=torch.float64) for x in (returns, values, ns, credit, ga, ce)]
     valid_credit, valid_group = torch.tensor(cv, dtype=torch.bool), torch.tensor(gv, dtype=torch.bool)
     a_mc = g-v
     components, scales = {}, {}

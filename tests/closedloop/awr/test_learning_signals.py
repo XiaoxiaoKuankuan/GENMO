@@ -305,6 +305,19 @@ def test_replay_and_label_binary_roundtrip_preserves_reference_ledger_and_candid
         replay.close()
 
 
+def test_group_float64_returns_are_not_rounded_through_float32(episode_factory):
+    _, _, make = episode_factory
+    episodes = candidate_episodes(make)
+    group = dict(enabled=True, advantage_mode="grouped")
+    exact, _ = group_advantages(episodes, group)
+    label, _ = label_episode_advantages(episodes,
+        {e.episode_id: torch.zeros(len(e.rows), dtype=torch.float64) for e in episodes},
+        identity={}, config=dict(mode="mc"), candidate_config=group)
+    for index, sample in enumerate(label.sample_ids):
+        if sample in exact:
+            assert label.group_advantage[index].item() == exact[sample]
+
+
 @pytest.mark.parametrize("weight_parameters", [{}, dict(beta=.7, weight_cap=7., weight_mean_normalize=False)])
 def test_offline_all_modes_use_one_frozen_snapshot_and_never_change_run(tmp_path, episode_factory, weight_parameters):
     import json
