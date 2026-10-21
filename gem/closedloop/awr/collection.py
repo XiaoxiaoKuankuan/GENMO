@@ -7,6 +7,7 @@ Episode正常保存，行政截断另存排除证据。奖励不跨计划搬移�
 from __future__ import annotations
 
 import hashlib
+import copy
 import math
 from pathlib import Path
 from types import SimpleNamespace
@@ -56,6 +57,11 @@ class AWRUpperEnvironment(VectorUpperEnvironment):
         self.reference_credit = ReferenceCreditLedger()
         self.rollout_window_reached = False
         self.actor_fingerprint = None
+        self.active_awr_task = {}
+
+    def generation_noise_seed(self, decision):
+        from .candidates import noise_seed
+        return noise_seed(self.active_awr_task, decision)
 
     def generate_flow(self, **kwargs):
         # 评价与采集共享同一个DDIM，不进入原PPO sample_rollout，也不改变采样器。
@@ -83,6 +89,11 @@ class AWRUpperEnvironment(VectorUpperEnvironment):
                         execution_trace=cpu_copy(list(rows)), source_commit=self.config["awr"]["source_commits"],
                         initial_target_valid=valid.clone())
         identity.update(actor_version=self.policy_version, actor_fingerprint=self.actor_fingerprint)
+        if self.active_awr_task.get("candidate_group_id"):
+            for key in ("candidate_group_id", "candidate_index", "candidate_count", "reset_seed",
+                        "common_future_noise_key", "comparison_start_tick"):
+                identity[key] = self.active_awr_task[key]
+            metadata["candidate_initial_state"] = generated.get("candidate_initial_state")
         return AWRTransition(identity=identity, context=cpu_copy(generated["context"]),
             next_context=cpu_copy(next_context), target_qpos30=target, target_valid=valid,
             free_mask=valid & ~known, contact=torch.from_numpy(original["contact"]).clone(),
@@ -116,10 +127,15 @@ def finalize_episode(rows, task, contract):
                              full_window_supervision=True,
                              unused_future_is_not_completed_motion=True)
         row.actor_valid = bool(row.execution["committed"] and plan in observed and row.free_mask.any())
+    task = copy.deepcopy(task)
+    if task.get("candidate_group_id"):
+        task["initial_state_fingerprint"] = (rows[0].metadata.get("candidate_initial_state") or {}).get("fingerprint")
     sample = task["sample"]
     episode = AWRCompleteEpisode(rows=rows, source=sample["dataset"], group_id=sample["group_id"],
         audio_sha256=sample["row"]["source_audio_sha256"], contract=contract, task=task)
     mc_returns(episode)
+    from .reference_credit import build_reference_ledger
+    episode.reference_ledger = build_reference_ledger(episode)
     return episode
 
 
@@ -154,10 +170,11 @@ class CompleteCollector:
                 if should_stop():
                     break
                 rows = []
+                env.active_awr_task = copy.deepcopy(task)
                 env.comparison_noise_index = task["noise_index_start"]
                 try:
                     yield from env.reset_task_flow(task["sample"], catalog.load_music(task["sample"]),
-                        seed=task["seed"], phase="train", music_start_frame=task["music_start_frame"],
+                        seed=task.get("reset_seed", task["seed"]), phase="train", music_start_frame=task["music_start_frame"],
                         initialization=task["initialization"])
                     guard = math.ceil(task["remaining_music_seconds"]/.02)+2
                     for _ in range(guard):

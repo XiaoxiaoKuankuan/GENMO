@@ -11,7 +11,8 @@ import torch
 
 
 class ReplayDataset:
-    def __init__(self, episodes, labels=None, *, unit_weights=False):
+    def __init__(self, episodes, labels=None, *, unit_weights=False, expected_signal=None,
+                 expected_candidates=None, expected_snapshot=None):
         self.episodes = list(episodes)
         self.rows, self.returns, self.sources = [], [], []
         for episode in self.episodes:
@@ -31,6 +32,15 @@ class ReplayDataset:
         self.returns = torch.stack(self.returns).double()
         self.weights = torch.ones(len(self.rows), dtype=torch.float64)
         if labels is not None:
+            if expected_signal is not None or expected_candidates is not None or expected_snapshot is not None:
+                from .advantages import signal_config
+                from .io import digest
+                config, candidates = signal_config(expected_signal, expected_candidates)
+                if (labels.identity.get("schema") != "genmo.awr.advantage_labels.v2"
+                        or digest(labels.identity.get("signal_config")) != digest(config)
+                        or digest(labels.identity.get("candidate_config")) != digest(candidates)
+                        or labels.identity.get("replay_snapshot") != expected_snapshot):
+                    raise ValueError("Frozen advantage label mode/config/snapshot differs; regenerate labels explicitly")
             lookup = {key: i for i, key in enumerate(labels.sample_ids)}
             if set(lookup) != set(self.sample_ids):
                 raise ValueError("Frozen labels differ from Replay snapshot")

@@ -88,20 +88,22 @@ def test_current_consumption_and_reward_reference_are_distinct(episode_factory):
     episode = make(lengths=(2, 1))
     tick = 600
     for row in episode.rows:
-        row.metadata.update(consumed_plan_first_gmt_input_tick={"p0": 600, "p1": 612}, execution_trace=[])
+        row.metadata.update(consumed_plan_first_gmt_input_tick={"p0": 600, "p1": 624}, execution_trace=[],
+                            published=dict(effective_tick=row.control_tick_begin))
         for _ in range(row.executed_control_steps):
-            plans = ["p0"] * 21
-            plans[10] = "p0" if tick == 600 else "p1"
+            plans = ["p0"] * 11+["p0" if tick < 624 else "p1"]*10
+            plans[10] = "bootstrap:test" if tick == 600 else "p0"
             row.metadata["execution_trace"].append(dict(consumed_plan_ids=plans,
                 consumed_reference_ticks=np.arange(tick-120, tick+121, 12), control_tick_begin=tick,
-                reference_plan_id="p1", reference_tick=tick+12))
+                tick=tick+12, episode_id=row.identity["episode_id"],
+                reference_plan_id="p0" if tick < 624 else "p1", reference_tick=tick+12))
             tick += 12
     task = dict(sample=dict(dataset="source", group_id="g0", row=dict(source_audio_sha256="audio-g0")))
     finalized = finalize_episode(episode.rows, task, episode.contract)
-    assert finalized.rows[0].execution["actually_consumed_seconds"] == .02
-    assert finalized.rows[1].execution["actually_consumed_seconds"] == .04
-    assert finalized.rows[0].execution["reward_reference_ticks"].size == 0
-    assert finalized.rows[1].execution["reward_reference_ticks"].tolist() == [612, 624, 636]
+    assert finalized.rows[0].execution["actually_consumed_seconds"] == .04
+    assert finalized.rows[1].execution["actually_consumed_seconds"] == 0.
+    assert finalized.rows[0].execution["reward_reference_ticks"].tolist() == [612, 624]
+    assert finalized.rows[1].execution["reward_reference_ticks"].tolist() == [636]
 
 
 def test_physical_metrics_preserve_original_units_and_each_control():

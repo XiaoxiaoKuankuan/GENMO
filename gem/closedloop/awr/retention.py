@@ -1,8 +1,8 @@
-"""普通自蒸馏进入优势强化前的生成与真实执行保留门槛。
+"""历史自蒸馏修复实验的保留门槛重现工具，当前AWR训练不再调用。
 
 自蒸馏无需提高回报，但必须在同任务、同种子、同物理和奖励身份下保持完成能力、
 执行时长及动作质量。本模块只读取完整物理报告，不按Loss挑选模型、不删除失败、
-不把动作更慢自动当成改善。阈值是明确可配置的工程候选，失败必须阻止后续AWR。
+不把动作更慢自动当成改善。该旧规则仅用于解释已完成的历史报告，不再阻止AWR。
 """
 from __future__ import annotations
 
@@ -12,7 +12,8 @@ from .evaluation import paired_comparison
 
 
 def retention_comparison(baseline, current, limits):
-    paired = paired_comparison(baseline, current)
+    # 历史修复实验的重现接口；当前AWR运行不调用此门槛。
+    paired = paired_comparison(baseline, current, selection_policy="legacy_physical_gates")
     before, after = (r["aggregate"]["overall"] for r in (baseline, current))
     ratios = {}
     def ratio(name, left, right):

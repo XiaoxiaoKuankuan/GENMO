@@ -9,14 +9,15 @@ from __future__ import annotations
 import time
 import torch
 
-from .advantages import label_advantages
+from .advantages import label_episode_advantages
 from .critic import CriticFit, assert_independent, flatten, predict
 from .folds import partition_episodes
 from .io import digest
 from .returns import nstep_targets
 
 
-def fit_crossfit(actor, episodes, fold_map, config, distributed, *, seed=42, checkpoint=None, resume=None):
+def fit_crossfit(actor, episodes, fold_map, config, distributed, *, seed=42, checkpoint=None, resume=None,
+                 label_config=None, candidate_config=None, replay_snapshot=None, candidate_plan=None):
     started = time.perf_counter()
     fits = [CriticFit(actor, config, distributed, seed=seed+i*1009) for i in range(2)]
     assert_independent(fits[0].model, fits[1].model)
@@ -81,17 +82,16 @@ def fit_crossfit(actor, episodes, fold_map, config, distributed, *, seed=42, che
                   abs(r["fvi"][-1]["validation"]["overall"]["bias"]) <= abs(r["mc"]["validation"]["overall"]["bias"])
                   for r in reports)
     chosen = fvi_states if use_fvi else mc_states
-    ids, returns, values, sources, provenance = [], [], [], [], []
+    value_by_episode, provenance, fingerprints = {}, [], []
     for index, (fit, part) in enumerate(zip(fits, partitions)):
         fit.load_state_dict(chosen[index])
+        from gem.closedloop.common.evaluation import _model_fingerprint
+        fingerprints.append(_model_fingerprint(fit.model))
         rows, target = flatten(part["label"])
         prediction = predict(fit.model, rows, distributed, config["microbatch"])
         cursor = 0
         for episode in part["label"]:
-            for j, row in enumerate(episode.rows):
-                if row.actor_valid:
-                    ids.append(row.sample_id); returns.append(target[cursor+j])
-                    values.append(prediction[cursor+j]); sources.append(episode.source)
+            value_by_episode[episode.episode_id] = prediction[cursor:cursor+len(episode.rows)].detach().cpu().double()
             cursor += len(episode.rows)
         provenance.append(dict(critic=("A", "B")[index],
                                trained_groups=sorted({e.group_id for e in part["train"]}),
@@ -99,13 +99,21 @@ def fit_crossfit(actor, episodes, fold_map, config, distributed, *, seed=42, che
                                labeled_episodes=[e.episode_id for e in part["label"]]))
     report = dict(schema="genmo.awr.crossfit.v1", selected="mc_fvi" if use_fvi else "mc_only",
                   folds=reports, provenance=provenance, seconds=time.perf_counter()-started,
-                  fold_identity=fold_map["sha256"], value_semantics="replay_behavior_mixture_baseline")
+                  fold_identity=fold_map["sha256"], selected_critic_fingerprints=fingerprints,
+                  value_semantics="replay_behavior_mixture_baseline")
     report["crossfit_identity"] = digest({k: v for k, v in report.items() if k != "seconds"})
-    labels = label_advantages(ids, torch.stack(returns), torch.stack(values), sources=sources,
+    labels, signal_report = label_episode_advantages(episodes, value_by_episode,
+                              config=label_config, candidate_config=candidate_config,
+                              candidate_plan=candidate_plan,
                               beta=config.get("beta", 1.), weight_cap=config.get("weight_cap", 20.),
                               weight_mean_normalize=config.get("weight_mean_normalize", True),
-                              identity=dict(crossfit=report["crossfit_identity"], folds=fold_map["sha256"]))
+                              gamma_upper=config.get("gamma_upper", .99),
+                              identity=dict(crossfit=report["crossfit_identity"], folds=fold_map["sha256"],
+                                  critic_fingerprints=fingerprints, replay_snapshot=replay_snapshot,
+                                  episode_ids=[e.episode_id for e in episodes]))
+    report["actor_signal_audit"] = signal_report
     report["critic_seconds"] = labeling_started-started
     report["advantage_labeling_seconds"] = time.perf_counter()-labeling_started
     report["seconds"] = time.perf_counter()-started
-    return labels, report, dict(selected=[f.state_dict() for f in fits], mc=mc_states, fvi=fvi_states)
+    return labels, report, dict(selected=[f.state_dict() for f in fits], mc=mc_states, fvi=fvi_states,
+                              crossfit_values=value_by_episode, replay_snapshot=replay_snapshot)

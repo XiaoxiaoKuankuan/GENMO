@@ -55,11 +55,28 @@ def validate_measured_deployment_profile(profile, config):
     return copy.deepcopy(profile)
 
 
-def load_config(path, *, profile=None):
+def _read_config(path, ancestors=()):
     path = Path(path)
+    if path.resolve() in ancestors:
+        raise ValueError("Cyclic AWR experiment config inheritance")
     # 已保存request是JSON；YAML1.1会把JSON的1e-06误读成字符串，破坏奖励/优化器身份。
     c = json.loads(path.read_text()) if path.suffix.lower() == ".json" else yaml.safe_load(path.read_text())
-    if c.get("version") != "genmo.stage2.awr.v1":
+    parent = c.pop("extends", None)
+    if parent is not None:
+        base = _read_config(path.parent/parent, (*ancestors, path.resolve()))
+        def merge(target, patch):
+            for key, value in patch.items():
+                if isinstance(value, dict) and isinstance(target.get(key), dict):
+                    merge(target[key], value)
+                else:
+                    target[key] = value
+        merge(base, c); c = base
+    return c
+
+
+def load_config(path, *, profile=None):
+    c = _read_config(path)
+    if c.get("version") not in ("genmo.stage2.awr.v1", "genmo.stage2.awr.signals.v2"):
         raise ValueError("An independent AWR config is required")
     if profile is not None:
         if profile not in ("smoke", "pilot"):
@@ -80,8 +97,31 @@ def load_config(path, *, profile=None):
         raise ValueError("Replay training CFG must match the deployed sampler")
     if c["awr"]["actor"].get("replay_coefficient", 1.) != 1.:
         raise ValueError("AWR must retain its real Replay objective; BC-only is diagnostic only")
-    if not c["awr"].get("retention_gate") or not c["awr"].get("run_ablation"):
-        raise ValueError("Self-distillation retention must pass before AWR updates")
+    if c["version"] == "genmo.stage2.awr.signals.v2":
+        if c["awr"]["actor"].get("reference_weight", 0.) != 0.:
+            raise ValueError("The signal experiment disables teacher/student consistency")
+        if c["awr"].get("retention_gate") or c["awr"].get("stop_on_physical_rejection", False):
+            raise ValueError("Self-distillation and physical retention gates are disabled")
+        if c["evaluation"]["split"] != "train" or c["evaluation"].get("selection_policy") != "reward_only":
+            raise ValueError("The signal experiment evaluates training music and selects by reward only")
+    from .advantages import signal_config
+    signal_config(c["awr"].get("advantage"), c["awr"].get("candidate_sampling"))
+    candidates = c["awr"].get("candidate_sampling", {})
+    if candidates.get("enabled"):
+        import math
+        if (type(candidates.get("candidates_per_group")) is not int or candidates["candidates_per_group"] < 2
+                or candidates.get("target_decision") != "first_generation"
+                or not 0 < candidates.get("group_fraction", 0) <= 1
+                or candidates.get("require_identical_initial_state") is not True
+                or type(candidates.get("common_future_noise")) is not bool
+                or type(candidates.get("fallback_to_standard_awr")) is not bool):
+            raise ValueError("Invalid first-generation candidate configuration")
+        windows = candidates.get("evaluation_windows_seconds", [2., 4.])
+        if (not windows or any(not math.isfinite(v) or v <= 0 or abs(v*50-round(v*50)) > 1e-8 for v in windows)
+                or candidates.get("score_window_seconds", 2.) not in windows
+                or any(not math.isfinite(candidates.get(k, v)) or candidates.get(k, v) < 0
+                       for k, v in (("state_atol", 1e-5), ("contact_atol", 1e-3)))):
+            raise ValueError("Invalid candidate time window or strict absolute tolerance")
     if c["runtime"]["allow_shared_gpu"]:
         raise ValueError("AWR cannot take occupied GPUs")
     if c.get("diagnostics", {}).get("reward_substeps") is not True:

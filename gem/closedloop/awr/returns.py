@@ -53,3 +53,15 @@ def nstep_targets(episode, previous_values, nstep=16, gamma_upper=.99):
         if stop < count:
             targets[start] += scale * values[stop]
     return targets
+
+
+def nstep_advantages(episode, crossfit_values, nstep=4, gamma_upper=.99):
+    """Actor标签专用N-step优势；当前和尾部Value必须来自同一交叉Critic快照。"""
+    if torch.is_tensor(crossfit_values) and crossfit_values.requires_grad:
+        raise ValueError("Actor advantage requires frozen cross-fitted values")
+    value = torch.as_tensor(crossfit_values).detach().cpu().double()
+    if nstep == "full_mc":
+        return mc_returns(episode, gamma_upper)-value
+    if nstep not in (4, 8, 16):
+        raise ValueError("Actor advantage horizon must be 4, 8, 16 or full_mc")
+    return nstep_targets(episode, value, nstep, gamma_upper)-value

@@ -20,6 +20,7 @@ from .io import cpu_copy, digest
 TRAINING_METADATA_KEYS = frozenset((
     "critic_context", "remaining_music_seconds", "data_split", "physical_failure",
     "event_reward", "event_penalty_total", "physical_episode_administrative_truncation",
+    "sampler", "generation_seed", "candidate_initial_state",
 ))
 
 @dataclass
@@ -131,6 +132,7 @@ class AWRCompleteEpisode:
     task: dict
     returns: torch.Tensor | None = None
     training_view: bool = False
+    reference_ledger: dict | None = None
 
     @property
     def episode_id(self):
@@ -157,6 +159,19 @@ class AWRCompleteEpisode:
             previous = row.control_tick_end
         if not self.rows[-1].terminated:
             raise ValueError("Episode has no true terminal")
+        if self.task.get("candidate_group_id"):
+            from .candidates import noise_seed
+            task = self.task
+            if (task.get("candidate_schema") != "genmo.awr.first_generation_candidate.v1"
+                    or type(task["candidate_count"]) is not int or task["candidate_count"] < 2
+                    or not 0 <= task["candidate_index"] < task["candidate_count"]):
+                raise ValueError("Malformed candidate membership")
+            for key in ("reset_seed", "generation_seed", "comparison_start_tick"):
+                if type(task.get(key)) is not int or task[key] < 0:
+                    raise ValueError("Invalid candidate integer identity")
+            for index, row in enumerate(self.rows):
+                if row.metadata.get("generation_seed") != noise_seed(task, index):
+                    raise ValueError("Candidate generation noise differs from frozen task stream")
         if self.returns is not None:
             if self.returns.shape != (len(self.rows),) or not torch.isfinite(self.returns).all():
                 raise ValueError("Invalid complete MC return vector")

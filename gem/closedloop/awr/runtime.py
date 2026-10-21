@@ -169,14 +169,15 @@ class AWRRun:
         key = name+"_bc_validation"
         if key in self.state["artifacts"]:
             return
+        split = self.config["evaluation"].get("stage1_diagnostic_split", self.config["evaluation"]["split"])
         bc = Stage1Supervision(self.runtime_config, self.actor, self.train_config,
-                               source_step=self.load_report["source_global_step"], split="val")
+                               source_step=self.load_report["source_global_step"], split=split)
         seed = self.config["awr"]["seed"]+700001+self.d.rank
         losses = stage1_validation(self.actor, bc, batches=4,
             batch_size=self.config["awr"]["actor"]["bc_microbatch"], device=self.d.device, seed=seed)
         values = self.d.gather(losses)
         report = dict(stage1_full_loss=sum(sum(v) for v in values)/sum(map(len, values)),
-                      batches=sum(map(len, values)), split="val", source_step=bc.source_step,
+                      batches=sum(map(len, values)), split=split, source_step=bc.source_step,
                       seeds=[self.config["awr"]["seed"]+700001+i for i in range(self.d.world_size)],
                       fixed_validation_randomness=True, training_rng_restored=True)
         self.json_artifact(key, lambda: report)
@@ -194,7 +195,8 @@ class AWRRun:
             return self.complete_collection_with_budget()
         completed = self.d.root(lambda: self._recover_publications(macro))
         warmup_finished = []
-        if completion:
+        finite_attempt_plan = self.config["version"] == "genmo.stage2.awr.signals.v2"
+        if completion or finite_attempt_plan:
             from .collection_budget import finished_warmup_tasks
             warmup_finished = self.d.root(lambda: finished_warmup_tasks(
                 self.root, macro, {t["task_id"] for t in plan["tasks"]}))
@@ -241,7 +243,18 @@ class AWRRun:
                 return None
             if completion:
                 return self.complete_collection_with_budget()
-            raise RuntimeError(f"Complete Episode acceptance failed: {len(completed)}/{len(plan['tasks'])}; inspect excluded failures/truncations")
+            if finite_attempt_plan:
+                from .collection_budget import finished_warmup_tasks
+                excluded = self.d.root(lambda: finished_warmup_tasks(
+                    self.root, macro, {t["task_id"] for t in plan["tasks"]}))
+                if set(completed) | set(excluded) != {t["task_id"] for t in plan["tasks"]}:
+                    raise RuntimeError("Candidate plan has unfinished nonterminal tasks; resume them before labeling")
+                self.json_artifact(f"macro{macro:03d}_candidate_completion", lambda: dict(
+                    planned_attempts=len(plan["tasks"]), complete_episodes=len(completed),
+                    warmup_failed_task_ids=excluded, supplemental_attempts=0,
+                    incomplete_candidate_groups_use_standard_advantage=True))
+            else:
+                raise RuntimeError(f"Complete Episode acceptance failed: {len(completed)}/{len(plan['tasks'])}; inspect excluded failures/truncations")
         snapshot = self.d.root(lambda: self.replay.snapshot().to_dict())
         self.artifact(key, snapshot["snapshot_id"])
         return self.replay.load_snapshot(snapshot["snapshot_id"])
@@ -306,8 +319,6 @@ class AWRRun:
         episodes = self.d.local(lambda: [self.replay.read(key, training=True) for key in snapshot.episode_ids])
         prefix = f"macro{macro:03d}"
         exploration_report = self.json_artifact(prefix+"_exploration", lambda: exploration(episodes))
-        if exploration_report["insufficient_reference_diversity"]:
-            raise ValueError("Fixed conditions show insufficient generation diversity; do not add Actor epochs")
         label_key = prefix+"_labels"
         if label_key not in self.state["artifacts"]:
             self.publish(phase="critic_fvi")
@@ -321,7 +332,9 @@ class AWRRun:
                     raise GracefulStop("Critic stopped at committed MC/FVI fit boundary")
             labels, critic_report, critics = fit_crossfit(self.actor, episodes, self.folds,
                 self.config["awr"]["critic"], self.d, seed=self.config["awr"]["seed"]+macro*1009,
-                resume=resume, checkpoint=save_critic)
+                resume=resume, checkpoint=save_critic, label_config=self.config["awr"].get("advantage"),
+                candidate_config=self.config["awr"].get("candidate_sampling"), replay_snapshot=snapshot.snapshot_id,
+                candidate_plan=self.json_artifact(prefix+"_tasks", lambda: None)["tasks"])
             self.checkpoint(prefix+"_critics", critics, dict(macro=macro, phase="advantage_labeling"))
             self.json_artifact(prefix+"_critic_report", lambda: critic_report)
             path = self.root/prefix/"labels"
@@ -330,7 +343,9 @@ class AWRRun:
             self.json_artifact(prefix+"_advantage_distribution", lambda: labels.statistics)
         labels = AdvantageLabelSet.load(self.state["artifacts"][label_key])
         self.actor.load_state_dict(behavior)
-        dataset = ReplayDataset(episodes, labels)
+        dataset_options = dict(expected_signal=self.config["awr"].get("advantage"),
+            expected_candidates=self.config["awr"].get("candidate_sampling"), expected_snapshot=snapshot.snapshot_id)
+        dataset = ReplayDataset(episodes, labels, **dataset_options)
         before_outputs = fixed_outputs(self.policy, dataset.rows)
         self.d.root(lambda: write_tree(self.root/prefix/"fixed_outputs_before", before_outputs))
         bc = Stage1Supervision(self.runtime_config, self.actor, self.train_config,
@@ -353,7 +368,7 @@ class AWRRun:
                 self.publish(phase="actor_"+method)
                 self.actor.load_state_dict(behavior)
                 torch.manual_seed(self.config["awr"]["seed"]+macro+self.d.rank*100003)
-                dataset = ReplayDataset(episodes, labels, unit_weights=method == "self_distillation")
+                dataset = ReplayDataset(episodes, labels, unit_weights=method == "self_distillation", **dataset_options)
                 bc = Stage1Supervision(self.runtime_config, self.actor, self.train_config,
                                       source_step=self.load_report["source_global_step"])
                 trainer = ActorTrainer(self.actor, dataset, bc, self.config["awr"]["actor"], self.d,
@@ -387,19 +402,8 @@ class AWRRun:
             self.bc_validation(method_key)
             current = self.eval_actor(method_key+"_fixed", self.fixed_plan)
             baseline = self.eval_actor("stage1_fixed", self.fixed_plan)
-            comparison = paired_comparison(baseline, current)
+            comparison = paired_comparison(baseline, current, selection_policy=self.config["evaluation"].get("selection_policy", "reward_only"))
             self.json_artifact(method_key+"_comparison", lambda: comparison)
-            if method == "self_distillation" and self.config["awr"].get("retention_gate"):
-                from .retention import retention_comparison
-                # 后续轮检验本轮起始行为的保留，不能把此前已接受的RL变化算成自蒸馏漂移。
-                behavior_evaluation = self.eval_actor(
-                    "stage1_fixed" if macro == 0 else f"macro{macro-1:03d}_awr_fixed", self.fixed_plan)
-                retention = self.json_artifact(method_key+"_retention", lambda: retention_comparison(
-                    behavior_evaluation, current, self.config["awr"]["retention_gate"]))
-                if not retention["accepted"]:
-                    self.publish(status="retention_rejected", phase="self_distillation_retention",
-                                 rejected_checkpoint=self.state["artifacts"][final_key])
-                    return False
             if self.config["awr"]["final_all_unique"] and macro == self.config["awr"]["max_macro_iterations"]-1:
                 self.eval_actor(method_key+"_all", self.full_plan)
         awr = self.json_artifact(prefix+"_awr_comparison", lambda: None)
@@ -418,14 +422,11 @@ class AWRRun:
         old_key = self.state.get("best_evaluation_key", "stage1_fixed")
         previous = self.eval_actor(old_key, self.fixed_plan)
         current = self.eval_actor(prefix+"_awr_fixed", self.fixed_plan)
-        versus_saved = paired_comparison(previous, current)
+        versus_saved = paired_comparison(previous, current, selection_policy=self.config["evaluation"].get("selection_policy", "reward_only"))
         self.json_artifact(prefix+"_versus_best_saved", lambda: versus_saved)
         self.publish(macro=macro+1, phase="macro_complete",
                      **checkpoint_selection(self.state, reference, awr, versus_saved, prefix+"_awr_fixed"))
         self.json_artifact(prefix+"_replay_cost", self.replay.report)
-        if self.config["awr"].get("stop_on_physical_rejection", False) and not awr["acceptable"]:
-            self.publish(status="physical_rejected", phase="awr_physical_rejection")
-            return False
         return True
 
     def save_actor(self, name, trainer, macro, method):

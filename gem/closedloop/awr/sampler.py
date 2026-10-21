@@ -57,6 +57,10 @@ def generate_batch(policy, packets, *, shared_storage=False, device_trace=False)
         [p["snapshot"] for p in packets], [p["reservation"] for p in packets],
         [p["music"] for p in packets])
     conditions = {k: torch.cat([c[k] for c in contexts]) for k in contexts[0]}
+    from .candidates import initial_state
+    initial_states = [initial_state(p, contexts[i], metadata[i])
+                      if p.get("candidate_task") and p["decision"] == 0 else None
+                      for i, p in enumerate(packets)]
     condition_end = time.perf_counter()
     result = policy.sample(conditions, seeds=[p["seed"] for p in packets])
     device = result["qpos"].device
@@ -82,7 +86,7 @@ def generate_batch(policy, packets, *, shared_storage=False, device_trace=False)
                          joint_limit_diagnostics=reports[index], awr_reference_audit=True)
         trace = dict(conditions=contexts[index], free_mask=free[index:index+1],
                      kernel_config=policy.kernel_config)
-        outputs.append(dict(context=contexts[index],
+        outputs.append(dict(context=contexts[index], candidate_initial_state=initial_states[index],
                             critic_context={k: v[index:index+1] for k, v in critic.items()},
                             meta=meta, generated=generated, trace=trace))
     if shared_storage:

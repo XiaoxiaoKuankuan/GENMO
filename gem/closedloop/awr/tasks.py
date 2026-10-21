@@ -14,6 +14,7 @@ from gem.closedloop.common.time_sampling import StratifiedTimePool, MOTION_RESET
 from gem.closedloop.common.evaluation_plan import build_balanced_plan
 from .folds import build_folds
 from .io import digest
+from .candidates import add_candidates
 
 
 def folds_for_catalog(catalog, seed=42):
@@ -73,12 +74,17 @@ def training_tasks(catalog, folds, config, world_size, macro=0):
                 item = sampler.next_task()
                 tasks.append(_task(item["sample"], item["music_start_frame"], seed+len(tasks),
                                    item["sampling"]["initialization"], rank, len(tasks), macro))
-    return dict(schema="genmo.awr.complete_task_plan.v1", tasks=tasks, macro_iteration=macro,
+    tasks = add_candidates(tasks, a.get("candidate_sampling", {}), world_size=world_size, macro=macro)
+    return dict(schema="genmo.awr.complete_task_plan.v2", tasks=tasks, macro_iteration=macro,
                 fold_identity=folds["sha256"], plan_sha256=digest(tasks))
 
 
 def evaluation_plan(catalog, config, *, all_unique=False):
     c = config["evaluation"]
+    if c.get("split") == "train":
+        from .train_evaluation_plan import build_train_plan
+        return build_train_plan(catalog, samples_per_source="all_unique" if all_unique else c["samples_per_source"],
+                                seeds=c["seeds"], selection_seed=c["selection_seed"])
     return build_balanced_plan(catalog, samples_per_source="all_unique" if all_unique else c["samples_per_source"],
                               seeds=c["seeds"], seconds=None, selection_seed=c["selection_seed"],
-                              start_mode="beginning", unique_music=True, split="val")
+                              start_mode="beginning", unique_music=True, split=c.get("split", "val"))

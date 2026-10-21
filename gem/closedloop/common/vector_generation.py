@@ -164,12 +164,20 @@ def generate_for_environment_flow(env):
     if env.comparison_noise_index is not None:
         seed = stable_noise_seed(1729, str(env.comparison_noise_index))
         env.comparison_noise_index += 1
+    # 算法可显式提供任务级随机流；原DPPO/评价没有此钩子，保留原行为。
+    # AWR候选流只依赖组和决策号，不能混入rank、slot、task_id或重试次数。
+    seed_provider = getattr(env, 'generation_noise_seed', None)
+    explicit_seed = seed_provider(env.decision) if seed_provider is not None else None
+    if explicit_seed is not None:
+        seed = explicit_seed
     packet = dict(_vector_generation=True, builder=env.builder, snapshot=env.snapshot,
         reservation=reservation, music=getattr(env,'condition_music',env.music), seed=seed, decision=env.decision,
         task_identity=dict(dataset=env.sample['dataset'], sample_id=env.sample['row']['sample_id'],
             split=env.data_split, manifest_sha256=env.sample['manifest_sha256'],
             source_music_feature_sha256=env.sample['row']['source_music_feature_sha256'],
             music_start_frame=env.music_start_frame))
+    if getattr(env, 'active_awr_task', {}).get('candidate_group_id'):
+        packet['candidate_task'] = env.active_awr_task
     result, shared_timing = yield GenerationOperation(packet)
     sample_ready = time.perf_counter()
     rejection, prepared = None, None

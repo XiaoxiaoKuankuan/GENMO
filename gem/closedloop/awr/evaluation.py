@@ -1,8 +1,9 @@
-"""AWR完整音乐评价、来源均衡音乐组置信区间与模型发布门槛。
+"""AWR完整音乐评价、来源均衡音乐组置信区间与仅奖励模型选择。
 
 直接使用公共真实物理评价流程，所有失败保留。报告绑定Actor、任务计划、冻结资产
 和新建世界身份；用音乐组聚类重采样而非把同歌不同种子当独立观察。训练Loss及
-Critic指标不参与物理成功判定，未通过门槛时best_saved继续指向Stage1。
+Critic指标不参与奖励判断。当前实验只在原训练音乐上评价；完成率、失败、时长及
+活动度完整报告但不是门槛。历史复现实验须显式请求legacy_physical_gates。
 """
 from __future__ import annotations
 
@@ -25,7 +26,7 @@ from .physical_metrics import PhysicalMetrics, summarize_metrics
 
 
 def checkpoint_selection(state, reference, baseline_comparison, saved_comparison, evaluation_key):
-    """观察到的最高回报与满足完整物理门槛的最佳保存模型分开，后轮失败不清空旧最佳。"""
+    """latest始终保存；best按显式比较策略选取，当前实验只要求完整任务回报增加。"""
     delta = baseline_comparison["balanced_return_delta"]
     observed = delta > state.get("best_observed_delta", 0.)
     promoted = baseline_comparison["acceptable"] and saved_comparison["acceptable"]
@@ -36,7 +37,7 @@ def checkpoint_selection(state, reference, baseline_comparison, saved_comparison
         best_evaluation_key=evaluation_key if promoted else state.get("best_evaluation_key", "stage1_fixed"))
 
 
-def paired_comparison(baseline, current, *, bootstrap=2000, seed=42):
+def paired_comparison(baseline, current, *, bootstrap=2000, seed=42, selection_policy="reward_only"):
     if baseline["plan_identity"] != current["plan_identity"]:
         raise ValueError("Paired evaluation tasks changed")
     for key in ("physics_identity", "sampler_identity"):
@@ -71,10 +72,15 @@ def paired_comparison(baseline, current, *, bootstrap=2000, seed=42):
                  duration_not_decreased=right["executed_seconds"] >= left["executed_seconds"]-1e-8,
                  activity_retained=activity is not None and activity >= .8,
                  complete_return_improved=point > 0)
+    if selection_policy not in ("reward_only", "legacy_physical_gates"):
+        raise ValueError("Unknown checkpoint selection policy")
+    accepted = point > 0 if selection_policy == "reward_only" else all(gates.values())
     return dict(paired= deltas, balanced_return_delta=point, balanced_return_95ci=ci,
                 confidence_unit="source_balanced_music_group_cluster",
-                activity_ratio=activity, new_paired_failures=new_failures, gates=gates,
-                acceptable=all(gates.values()), improvement_supported=all(gates.values()) and ci[0] > 0)
+                activity_ratio=activity, new_paired_failures=new_failures,
+                physical_diagnostics=gates, selection_policy=selection_policy,
+                gates={"complete_return_improved": point > 0} if selection_policy == "reward_only" else gates,
+                acceptable=accepted, improvement_supported=accepted and ci[0] > 0)
 
 
 def evaluate(config, policy, builder, catalog, plan, path, distributed, *, fingerprint, physics_identity,

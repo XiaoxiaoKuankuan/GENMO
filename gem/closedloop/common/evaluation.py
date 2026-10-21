@@ -77,9 +77,12 @@ def _publish_json(path, value):
 
 
 def build_evaluation_tasks(catalog, *, split='val', eval_count='all', seeds=(1729, 2718),
-                           selection_seed=42, start_mode='beginning', episode_seconds=None, critic_mc=False, balanced_samples_per_source=None):
+                           selection_seed=42, start_mode='beginning', episode_seconds=None, critic_mc=False,
+                           balanced_samples_per_source=None, training_music_evaluation=False):
     """构建可保存的评估计划；eval_count 是不同配对样本数，实际 episode 数还要乘 seed 数。"""
-    if split not in ({'train'} if critic_mc else {'val', 'test'}):
+    if critic_mc and training_music_evaluation:
+        raise ValueError('Training music evaluation is not a Critic data collection bank')
+    if split not in ({'train'} if critic_mc or training_music_evaluation else {'val', 'test'}):
         raise ValueError('Independent evaluation requires explicit val or test split')
     if start_mode not in {'beginning', 'center'}:
         raise ValueError('Evaluation start_mode must be beginning or center')
@@ -151,6 +154,8 @@ def build_evaluation_tasks(catalog, *, split='val', eval_count='all', seeds=(172
             'start_mode': start_mode, 'episode_seconds': episode_seconds, 'tasks': tasks,
             'pretraining_unseen_claim': False, 'training_buffer_allowed': bool(critic_mc)}
     if critic_mc:plan['critic_mc_supervision']=True
+    if training_music_evaluation:
+        plan.update(training_music_evaluation=True, generalization_claim=False)
     plan['plan_sha256'] = _digest(plan)
     return plan
 

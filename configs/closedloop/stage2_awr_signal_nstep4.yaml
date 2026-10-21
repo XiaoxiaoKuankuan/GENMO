@@ -1,0 +1,9 @@
+# 独立学习信号对照；继承同一候选任务、优化器、冻结奖励与训练音乐评价。
+# 所有参数展开后保存到运行request.json；更换模式必须重建标签，不改旧Replay。
+extends: stage2_awr_group_credit.yaml
+awr:
+  advantage:
+    mode: nstep
+    nstep: 4
+  candidate_sampling:
+    advantage_mode: standard
