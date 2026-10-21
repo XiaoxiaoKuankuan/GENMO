@@ -90,9 +90,10 @@ def complete_returns(report, gamma_upper):
 def load_conditions(reference, expected, report):
     import torch
     from gem.closedloop.dppo.training_checkpoint import file_sha256
+    from gem.closedloop.dppo.execution_compatibility import same_execution
     manifest = json.loads(reference.read_text())
     if (manifest['plan_sha256'] != report['plan_sha256']
-            or manifest['evaluation_identity'] != report['evaluation_identity']):
+            or not same_execution(manifest['evaluation_identity'], report['evaluation_identity'])):
         raise ValueError('Condition reference is from a different physical evaluation')
     result = {}
     for rank in manifest['ranks']:

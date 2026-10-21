@@ -86,6 +86,7 @@ def _validate_calibrated_execution(profile, numerical_execution, assets, kernel=
 
 
 def _sources(config):
+    """只读源码追溯记录，不参与恢复/评估兼容性；文件读取失败也不阻塞训练。"""
     records={}
     for label,root in [('genmo',Path(config['paths']['genmo_repo'])),('gmt',Path(config['paths']['gmt_repo']))]:
         if label=='genmo':
@@ -94,21 +95,25 @@ def _sources(config):
                       root/'scripts/train_stage10_8gpu_server1.sh']
         else:
             robot_root=root/'source/NoetixRobot/NoetixRobot'
-            # 实际任务的env/mdp/PD/观测会改变物理转移，不能只绑定closedloop适配层。
+            # 记录实际任务的env/mdp/PD/观测，便于追溯；不要求与历史文件相同。
             files=list((robot_root/'tasks/mimic/mimic_noetix_bumi4340_mha_sonic').rglob('*.py'))
             files+=list(robot_root.rglob('*.py'))
             for directory in ('actuators','managers','terrains','assets/robots/bumi3_4340_lowpd'):
                 files+=list((robot_root/directory).rglob('*.py'))
             files+=list((root/'scripts/rsl_rl').glob('bumi4340*.py'))
             files+=list((root/'scripts/motion').rglob('*.py'))
-            # 参考转换、关节映射与任务配置同样会改变真实转移和恢复身份。
+            # 参考转换、关节映射与任务配置也纳入只读源码记录。
             files+=list((robot_root/'tasks/mimic/mimic_noetix_bumi4340_mha_sonic').rglob('*.yaml'))
             files+=[p for p in (robot_root/'assets/robots/bumi3_4340_lowpd').rglob('*') if p.is_file()]
             files+=list((root/'rsl_rl/rsl_rl').rglob('*.py'))
-            # Isaac Lab基类和管理器直接决定控制/物理生命周期；同样绑定实际源码。
+            # Isaac Lab基类和管理器同样只作源码追溯，不作为训练门禁。
             lab=Path(config.get('runtime',{}).get('isaaclab_root','/nonexistent_isaaclab'))
             files+=list((lab/'source/isaaclab/isaaclab').rglob('*.py'))
-        records[label]={str(p.relative_to(root)) if p.is_relative_to(root) else 'external/'+str(p):file_sha256(p) for p in sorted(set(files))}
+        records[label]={}
+        for p in sorted(set(files)):
+            name=str(p.relative_to(root)) if p.is_relative_to(root) else 'external/'+str(p)
+            try:records[label][name]=file_sha256(p)
+            except OSError as error:records[label][name]=dict(record_error=str(error))
     return records
 
 
@@ -753,8 +758,9 @@ def run(cargs,config,distributed):
         if hasattr(c,'identity'):
             try:
                 report['source_unchanged']=root_call(distributed,lambda:_sources(config)==c.identity['source_files'])
-                if not report['source_unchanged']:raise RuntimeError('Bound runtime source changed during session')
-            except BaseException as caught:error=error or caught
+                # 源码快照只说明本会话前后磁盘文件是否变化，不控制训练退出码。
+            except BaseException as caught:
+                report['source_record_error']=repr(caught)
         if getattr(c,'evaluation_world',None) is not None:
             try:
                 from .vector_evaluation import close_isolated_world

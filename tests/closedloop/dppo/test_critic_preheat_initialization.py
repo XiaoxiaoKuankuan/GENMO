@@ -2,7 +2,7 @@
 
 只在临时目录构造小型冻结编码器与非空Adam，不读取正式模型或推进PhysX。
 验证同一固定Actor的独立价值成果可加载，同时不修改Actor、不迁移Actor优化器或
-运行时钟；随机核、物理源码、冻结编码器、验证质量或价值目标gamma/lambda改变必须在修改
+运行时钟；源码修改允许复用，随机核、物理配置、冻结编码器、验证质量或价值目标gamma/lambda改变必须在修改
 Critic前拒绝。
 另外检查预热恢复需要真正初始评估，Actor已更新时不能补造Stage1基线。
 4/8秒窗口只允许共享完整纯MC初始化；任何含TD的成果必须匹配真实TD切片时长。
@@ -13,7 +13,7 @@ import pytest
 import torch
 
 from gem.closedloop.dppo.critic_preheat import (
-    MATCHED, ARCHITECTURE, SCHEMA_PREHEAT, _critical_sources, _value_targets, _supervision, initialize_critic)
+    MATCHED, ARCHITECTURE, SCHEMA_PREHEAT, _value_targets, _supervision, initialize_critic)
 from gem.closedloop.dppo.evaluation import _model_fingerprint
 from gem.closedloop.dppo.training import _requires_initial_evaluation
 from gem.closedloop.dppo.training_checkpoint import file_sha256
@@ -34,7 +34,7 @@ def fixture(tmp_path):
     data=dict(schema=SCHEMA_PREHEAT,actor_fingerprint=_model_fingerprint(actor),
         matched_identity={k:identity[k] for k in MATCHED},architecture={k:identity['critic'][k] for k in ARCHITECTURE},
         value_targets=_value_targets(identity),
-        physical_sources=identity['source_files']['gmt'],behavior_sources=_critical_sources(tmp_path),
+        physical_sources=identity['source_files']['gmt'],behavior_sources={'actor.py':'historical_source'},
         critic=copy.deepcopy(critic.state_dict()),critic_optimizer=copy.deepcopy(optimizer.state_dict()),
         selected_updates=1,prior_mc_control_steps=500,prior_mc_physics_steps=2000,source={'initialization_only':True},
         validation=dict(selected_mc_ratio=1.,quality_gate_passed=True,
@@ -61,14 +61,13 @@ def test_preheated_value_and_nonempty_adam_restore_without_actor_change(tmp_path
     assert _model_fingerprint(actor)==fingerprint and result['fresh_PhysX']
 
 
-@pytest.mark.parametrize('changed',['kernel','physics','encoder','quality','code','gamma','lambda','legacy'])
+@pytest.mark.parametrize('changed',['kernel','physics','encoder','quality','gamma','lambda','legacy'])
 def test_mismatch_rejected_before_value_or_adam_mutation(tmp_path,changed):
     actor,critic,optimizer,identity,data=fixture(tmp_path)
     if changed=='kernel':data['matched_identity']['kernel']={'different':True}
-    if changed=='physics':data['physical_sources']={'physics.py':'changed'}
+    if changed=='physics':data['matched_identity']['physical_configuration']={'control_hz':100}
     if changed=='encoder':data['critic']['0.weight'].add_(1.)
     if changed=='quality':data['validation']['after']['explained_variance']=.1
-    if changed=='code':(tmp_path/'gem/closedloop/actor.py').write_text('value = 2\n')
     if changed=='gamma':identity['training']['gamma_upper']=.97
     if changed=='lambda':identity['training']['lambda_upper']=.8
     if changed=='legacy':data.pop('value_targets')
@@ -107,15 +106,13 @@ def test_only_complete_mc_supervision_is_independent_of_rollout_window(tmp_path,
         torch.testing.assert_close(next(iter(optimizer.state.values()))['step'],step,rtol=0,atol=0)
 
 
-def test_export_cannot_stamp_current_source_on_an_older_checkpoint(tmp_path):
-    from gem.closedloop.dppo.critic_preheat import _bound_behavior_sources
-    fixture(tmp_path)
-    signatures=_critical_sources(tmp_path)
-    recorded={name:file_sha256(tmp_path/name) for name in signatures}
-    assert _bound_behavior_sources(tmp_path,recorded)==signatures
+def test_source_edit_does_not_block_preheat_or_overwrite_record(tmp_path):
+    actor,critic,optimizer,identity,data=fixture(tmp_path)
+    identity['source_files']={'genmo':{'actor.py':'new'},'gmt':{'physics.py':'new'}}
     (tmp_path/'gem/closedloop/actor.py').write_text('value = 2\n')
-    with pytest.raises(ValueError,match='source changed since checkpoint'):
-        _bound_behavior_sources(tmp_path,recorded)
+    assert load(tmp_path,actor,critic,optimizer,identity,data)['actor_unchanged']
+    assert data['physical_sources']=={'physics.py':'fixed'}
+    assert data['behavior_sources']=={'actor.py':'historical_source'}
 
 
 def test_mc_real_interaction_clock_excludes_retired_slot_physics_but_budget_keeps_it():

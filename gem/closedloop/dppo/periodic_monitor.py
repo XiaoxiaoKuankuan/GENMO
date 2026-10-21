@@ -9,7 +9,7 @@
 提供四来源等权回报及基线失败/时长保护的best observed/best saved选择，嵌套数值
 指标的完整JSONL记录、显式白名单TensorBoard曲线，以及固定初始随机链上的高斯KL漂移诊断。所有权重
 身份可来自内存模型指纹，不强求周期评估先写checkpoint。调用者负责独立环境、
-独立物理预算、RNG隔离、原子发布报告和真实源码/奖励/执行合同的一致性。
+独立物理预算、RNG隔离、原子发布报告和实际奖励/执行配置的一致性；源码只作记录。
 """
 from __future__ import annotations
 
@@ -34,6 +34,7 @@ from gem.closedloop.dppo.evaluation import (
 )
 from gem.closedloop.dppo.full_dataset import SOURCES
 from .performance import profiled
+from .execution_compatibility import same_execution
 from gem.closedloop.frozen_actor import stable_noise_seed
 
 VERSION = 'genmo.closedloop.stage10.periodic_monitor.v1'
@@ -213,7 +214,7 @@ def _verify_episode(episode, task, limit):
 
 def paired_summary(baseline, current):
     _require(baseline['plan_sha256'] == current['plan_sha256'], 'Periodic baseline plan differs')
-    _require(baseline.get('evaluation_identity') == current.get('evaluation_identity'), 'Periodic execution/reward identity differs')
+    _require(same_execution(baseline.get('evaluation_identity'), current.get('evaluation_identity')), 'Periodic execution/reward configuration differs')
     before = {r['task_id']: r for r in baseline['episode_metrics']}
     after = {r['task_id']: r for r in current['episode_metrics']}
     _require(set(before) == set(after), 'Periodic baseline tasks differ')
@@ -374,7 +375,7 @@ def load_best_pointers(output_dir, current, *, state=None):
         index = candidate.get('iteration')
         if (type(index) is not int or not 0 <= index <= current['iteration']
                 or candidate.get('plan_sha256') != current['plan_sha256']
-                or candidate.get('evaluation_identity') != current.get('evaluation_identity')):
+                or not same_execution(candidate.get('evaluation_identity'), current.get('evaluation_identity'))):
             return False
         for tail in tails:
             prior = tail.get('previous_accepted', {})

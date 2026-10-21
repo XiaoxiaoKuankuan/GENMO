@@ -126,8 +126,9 @@ def _evaluate_impl(c, label, *, write_report=True):
     baseline_path, reference_path = c.output/'evaluation_baseline.json', c.output/'fixed_diagnostic_reference.json'
     baseline = root_call(c.distributed, lambda: summary_only(json.loads(baseline_path.read_text())) if baseline_path.exists() else None)
     references = root_call(c.distributed, lambda: json.loads(reference_path.read_text()) if reference_path.exists() else None)
+    from .execution_compatibility import same_execution
     if references is not None and (references['plan_sha256'] != plan['plan_sha256']
-            or references['evaluation_identity'] != evaluation_identity):
+            or not same_execution(references['evaluation_identity'], evaluation_identity)):
         raise ValueError('Fixed initial diagnostic reference differs from current evaluation contract')
     if references is None and (label != 'initial' or baseline is not None):
         raise ValueError('Periodic evaluation requires the durable initial diagnostic reference')

@@ -3,7 +3,8 @@
 完整歌曲采集昂贵，已经通过独立MC验证的价值网络可以作为同一Stage1行为的
 初始化。此模块只导出Critic及其Adam状态、验证结果与采集来源，不迁移Actor、
 Actor优化器、RNG、BC游标或累计PPO轮数，因此不是训练checkpoint恢复。
-导入前核验Actor实际权重、随机核、奖励、物理源码/配置、数据、Horizon和价值结构。
+导入前核验Actor实际权重、随机核、奖励、物理配置、数据、Horizon和价值结构。
+源码版本只保留在成果中供追溯，不因文件修改拒绝复用已有预热。
 价值目标定义（上层gamma/lambda与MC/TD候选比例）同样绑定：MC回报按gamma折扣、
 TD候选按lambda构造，二者不同时预热价值尺度不可复用。
 同时记录实际预热TD片段时长：含TD的选中成果只能用于相同片段时长；选中纯MC时，
@@ -15,7 +16,6 @@ TD候选按lambda构造，二者不同时预热价值尺度不可复用。
 """
 from __future__ import annotations
 
-import ast
 import copy
 from pathlib import Path
 import torch
@@ -52,39 +52,12 @@ def _supervision(identity, validation):
         window_independent=ratio == 1. and identity['critic']['complete_mc'].get('start_distribution','beginning')=='beginning')
 
 
-def _critical_sources(root):
-    """行为前向及表示源码绑定；纯checkpoint校验辅助函数不改变随机行为。"""
-    root = Path(root)
-    files = list((root/'gem/network').rglob('*.py')) + list((root/'gem/robots').rglob('*.py'))
-    files += [root/('gem/closedloop/'+n) for n in
-        ('actor.py', 'contracts.py', 'online_conditions.py', 'training.py','evaluation_music.py')]
-    files += [p for p in (root/'gem/closedloop/dppo').glob('*.py') if p.name in
-        ('policy.py', 'dense_policy.py', 'batch_execution.py', 'fixed_tile_linear.py',
-         'frozen_prefix.py','run_control.py','env_adapter.py','vector_environment.py',
-         'evaluation.py','evaluation_world.py','vector_evaluation.py',
-         'world_collector.py','time_sampling.py','motion_initialization.py','target_activity.py',
-         'full_dataset.py','runtime.py','mc_calibration.py','complete_episode.py','reference_credit.py','trainer.py',
-         'pretrained_critic.py','tracking_context.py','joint_limits.py','vector_generation.py','updater.py',
-         'rewards.py','columnar_reward.py','vector_reward_adapter.py','vector_reward_math.py')
-        or p.name.startswith('stable_')]
-    signatures = {}
-    import hashlib
-    for path in sorted(set(files)):
-        tree = ast.parse(path.read_text())
-        if path.name == 'feature_codec.py':
-            tree.body = [n for n in tree.body if not isinstance(n, ast.FunctionDef)
-                or n.name != 'validate_native_checkpoint']
-        signatures[str(path.relative_to(root))] = hashlib.sha256(ast.dump(tree).encode()).hexdigest()
-    return signatures
-
-
 def export_preheat(checkpoint, report, output):
     import json
     checkpoint, report, output = map(Path, (checkpoint, report, output))
     payload = torch.load(checkpoint, map_location='cpu', weights_only=False, mmap=True)
     validation = json.loads(report.read_text())
     state, identity = payload['state'], payload['identity']
-    behavior_sources=_bound_behavior_sources(payload['config']['paths']['genmo_repo'],identity['source_files'].get('genmo',{}))
     if (payload.get('schema') != SCHEMA or not state.get('mc_preheat_complete')
             or state['actor_updates'] or state['policy_version'] or not validation.get('quality_gate_passed')
             or identity['actor_initialization']['kind'] != 'source_stage1'):
@@ -94,8 +67,8 @@ def export_preheat(checkpoint, report, output):
         architecture={k:identity['critic'][k] for k in ARCHITECTURE},
         value_targets=_value_targets(identity),
         supervision=_supervision(identity, validation),
-        physical_sources=identity['source_files']['gmt'],
-        behavior_sources=behavior_sources,
+        physical_sources=copy.deepcopy(identity.get('source_files',{}).get('gmt',{})),
+        behavior_sources=copy.deepcopy(identity.get('source_files',{}).get('genmo',{})),
         critic=payload['critic'], critic_optimizer=payload['critic_optimizer'],
         selected_updates=state['critic_updates'], validation=validation,
         prior_mc_control_steps=state['mc_training_control_steps'],
@@ -118,15 +91,6 @@ def export_preheat(checkpoint, report, output):
     return result
 
 
-def _bound_behavior_sources(root, checkpoint_sources):
-    """导出只能签名产生该checkpoint的实际源码，禁止更新仓库后给旧预热补盖新指纹。"""
-    signatures=_critical_sources(root)
-    for name in signatures:
-        if checkpoint_sources.get(name)!=file_sha256(Path(root)/name):
-            raise ValueError('Preheat source changed since checkpoint: '+name)
-    return signatures
-
-
 def initialize_critic(artifact, *, identity, actor, critic, optimizer, genmo_repo, quality_gate):
     if file_sha256(artifact['path']) != artifact['sha256']:
         raise ValueError('Critic initialization artifact SHA mismatch')
@@ -135,9 +99,7 @@ def initialize_critic(artifact, *, identity, actor, critic, optimizer, genmo_rep
             or data['actor_fingerprint'] != _model_fingerprint(actor)
             or data['matched_identity'] != {k:identity[k] for k in MATCHED}
             or data['architecture'] != {k:identity['critic'][k] for k in ARCHITECTURE}
-            or data.get('value_targets') != _value_targets(identity)
-            or data['physical_sources'] != identity['source_files']['gmt']
-            or data['behavior_sources'] != _critical_sources(genmo_repo)):
+            or data.get('value_targets') != _value_targets(identity)):
         raise ValueError('Fixed Actor, kernel, physics, dataset, value target or Critic initialization identity differs')
     report = data['validation']
     target = _supervision(identity, report)

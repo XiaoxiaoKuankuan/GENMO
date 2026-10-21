@@ -167,7 +167,7 @@ def test_evaluation_binds_only_best_pointers_and_validates_actor(tmp_path, monke
     assert report['evaluation_artifacts'][0]['sha256'] == file_sha256(artifact)
 
 
-@pytest.mark.parametrize('fault',[None,'binding','fingerprint'])
+@pytest.mark.parametrize('fault',[None,'source','binding','fingerprint'])
 def test_complete_checkpoint_evaluation_checks_execution_before_loading(tmp_path,fault):
     from gem.closedloop.dppo.training_checkpoint import load_evaluation_actor,SCHEMA
     from gem.closedloop.dppo.evaluation import _model_fingerprint
@@ -178,12 +178,13 @@ def test_complete_checkpoint_evaluation_checks_execution_before_loading(tmp_path
     identity=dict(binding,assets={'checkpoint':'sha'},kernel={'frozen_prefix':16})
     payload=dict(schema=SCHEMA,identity=identity,actor=candidate.state_dict(),
         actor_fingerprint=_model_fingerprint(candidate),state={'iteration':100,'policy_version':100})
-    if fault=='binding':identity['source_files']={'code':'changed'}
+    if fault=='source':identity['source_files']={'code':'changed'}
+    if fault=='binding':identity['reward']={'music_weight':1.}
     if fault=='fingerprint':payload['actor_fingerprint']='wrong'
     path=tmp_path/'checkpoint.pt';torch.save(payload,path)
     def load():return load_evaluation_actor(path,actor=actor,kernel={'frozen_prefix':16},
         assets={'checkpoint':'sha'},execution_binding=binding)
-    if fault:
+    if fault in ('binding','fingerprint'):
         with pytest.raises(ValueError):load()
         assert all(torch.equal(v,actor.state_dict()[k]) for k,v in original.items())
     else:

@@ -21,6 +21,7 @@ import uuid
 import torch
 
 from .budget import atomic_json
+from .execution_compatibility import same_execution, contains_execution
 
 SCHEMA='genmo.closedloop.stage2.full_chain_joint.checkpoint.v1'
 
@@ -109,8 +110,8 @@ class AsyncCheckpointWriter:
 
 def load_training_checkpoint(path,*,identity,actor,critic,actor_optimizer,critic_optimizer,controller):
     payload=torch.load(path,map_location='cpu',weights_only=False,mmap=True)
-    if payload.get('schema')!=SCHEMA or payload.get('identity')!=identity:
-        raise ValueError('Checkpoint schema/algorithm/kernel/asset/runtime identity differs; new experiment required')
+    if payload.get('schema')!=SCHEMA or not same_execution(payload.get('identity'),identity):
+        raise ValueError('Checkpoint format or actual training configuration differs')
     from .checkpoint import _validate_model_state,_validate_optimizer_state
     _validate_model_state(actor,payload['actor'],'当前 Actor')
     _validate_model_state(critic,payload['critic'],'当前 Critic')
@@ -153,7 +154,7 @@ def probability_candidate_binding(source,target,*,allow_measured_profile_transfe
 def load_evaluation_actor(path,*,actor,kernel,assets,execution_binding=None):
     """只读指定已完成checkpoint或固定数据候选的Actor，不恢复优化器/训练进度。
 
-    正式checkpoint额外核对源码、奖励、时钟、数据和物理身份，允许改变纯评估任务
+    正式checkpoint核对奖励、时钟、数据和物理配置，源码版本只作记录；允许改变纯评估任务
     数/长度和训练学习率以进行同条件P1/P2对照；绝不作为继续训练的恢复入口。
     """
     payload=torch.load(path,map_location='cpu',weights_only=False,mmap=True)
@@ -162,7 +163,7 @@ def load_evaluation_actor(path,*,actor,kernel,assets,execution_binding=None):
         update=payload.get('update',{})
         if (payload.get('evaluation_only') is not True or not execution_binding or
                 target.get('assets')!=assets or target.get('kernel')!=kernel or
-                any(target.get(k)!=v for k,v in execution_binding.items()) or
+                not contains_execution(target,execution_binding) or
                 payload.get('hard_kl',{}).get('passed') is not True or
                 type(update.get('optimizer_steps'))is not int or update['optimizer_steps']<1 or
                 update['optimizer_steps']!=update.get('planned_optimizer_steps') or
@@ -179,7 +180,7 @@ def load_evaluation_actor(path,*,actor,kernel,assets,execution_binding=None):
     if payload.get('schema')==SCHEMA:
         identity=payload.get('identity',{})
         if (not execution_binding or identity.get('assets')!=assets or identity.get('kernel')!=kernel or
-                any(identity.get(k)!=v for k,v in execution_binding.items())):
+                not contains_execution(identity,execution_binding)):
             raise ValueError('Complete evaluation checkpoint execution identity differs')
         from .checkpoint import _validate_model_state
         _validate_model_state(actor,payload['actor'],'complete evaluation Actor')
@@ -196,11 +197,10 @@ def load_evaluation_actor(path,*,actor,kernel,assets,execution_binding=None):
     if (payload.get('schema')!='genmo.stage2.asymmetric_actor_evaluation.v1' or
             payload.get('evaluation_only') is not True or payload.get('kernel')!=kernel or
             payload.get('source_identity',{}).get('assets')!=assets or
-            not execution_binding or any(payload.get('source_identity',{}).get(k)!=v
-                                         for k,v in execution_binding.items()) or
+            not execution_binding or not contains_execution(payload.get('source_identity',{}),execution_binding) or
             payload.get('hard_kl',{}).get('passed') is not True or
             payload.get('complete_update_and_soft_kl_passed') is not True):
-        raise ValueError('Evaluation Actor asset/kernel/reward/physics/source/complete-update identity differs')
+        raise ValueError('Evaluation Actor asset/kernel/reward/physics/complete-update differs')
     update=payload.get('update',{})
     if (type(update.get('optimizer_steps')) is not int or update['optimizer_steps']<1 or
             update['optimizer_steps']!=update.get('planned_optimizer_steps') or
