@@ -6,6 +6,8 @@ Replay每Epoch均匀遍历一次，先逐样本Mask归约再乘固定权重；�
 不构造Contact伪标签，不把参数变化当作物理收益。
 Replay监督与部署共用CFG两分支组合。当前signals.v2明确关闭冻结教师且不分配教师
 网络；旧一致性实现仅供历史诊断复现。真实BC保持独立，不伪造Contact监督。
+bc_enabled=false时不创建BC采样器、不校准/前反向、不推进BC数据游标；Contact无伪标签。
+时间与来源权重是显式目标配置，在整轮固定，不改变AWR标签或microbatch分母。
 """
 from __future__ import annotations
 
@@ -18,6 +20,7 @@ from .checkpoint import capture_rng, restore_rng
 from .io import cpu_copy, digest
 from .losses import weighted_denoising, per_sample_denoising
 from .metrics import actor_module_name
+from .objective import timestep_weights, source_weights
 
 
 def gradient_snapshot(model):
@@ -59,7 +62,20 @@ class ActorTrainer:
     def __init__(self, actor, dataset, bc, config, distributed, *, seed=42, bc_weight=None):
         self.actor, self.dataset, self.bc = actor, dataset, bc
         self.config, self.distributed, self.seed = config, distributed, seed
-        self.bc_weight = bc_weight
+        self.bc_enabled = config.get("bc_enabled", True)
+        if type(self.bc_enabled) is not bool or (self.bc_enabled and bc is None) or (not self.bc_enabled and bc is not None):
+            raise ValueError("BC sampler presence must match explicit bc_enabled")
+        if not self.bc_enabled and bc_weight not in (None, 0.):
+            raise ValueError("Disabled BC cannot retain a nonzero coefficient")
+        if not self.bc_enabled and config.get("bc_global_batch", 0) != 0:
+            raise ValueError("Disabled BC requires zero global batch")
+        self.bc_weight = bc_weight if self.bc_enabled else 0.
+        self.time_weights = timestep_weights(actor.train_diffusion.alphas_cumprod,
+                                             config.get("timestep_weighting"))
+        self.source_weights = source_weights(dataset.sources, config.get("source_balance", "none"))
+        self.objective_identity = digest(dict(timestep_weights=self.time_weights.tolist(),
+            source_weights=self.source_weights.tolist(), advantage_weights=dataset.weights.tolist(),
+            bc_enabled=self.bc_enabled))
         self.reference_weight = float(config.get("reference_weight", 0.))
         if not math.isfinite(self.reference_weight) or self.reference_weight < 0:
             raise ValueError("Invalid frozen-reference coefficient")
@@ -85,17 +101,18 @@ class ActorTrainer:
 
     def state_dict(self):
         return dict(actor=cpu_copy(self.actor.state_dict()), optimizer=cpu_copy(self.optimizer.state_dict()),
-                    scheduler=self.scheduler.state_dict(), bc=self.bc.state_dict(),
+                    scheduler=self.scheduler.state_dict(), bc=self.bc.state_dict() if self.bc_enabled else None,
                     bc_weight=self.bc_weight, epoch=self.epoch, cursor=self.cursor, steps=self.steps,
                     rng=capture_rng(self.distributed.device), history=self.history,
                     data_identity=digest(self.dataset.sample_ids), total_steps=self.total_steps,
-                    seed=self.seed, config=self.config,
+                    seed=self.seed, config=self.config, objective_identity=self.objective_identity,
                     reference_actor=(cpu_copy(self.reference_actor.state_dict())
                                      if self.reference_actor is not None else None))
 
     def load_state_dict(self, state, *, rank_state=None):
         if (state["data_identity"] != digest(self.dataset.sample_ids) or state["total_steps"] != self.total_steps
-                or state["seed"] != self.seed or state["config"] != self.config):
+                or state["seed"] != self.seed or state["config"] != self.config
+                or state.get("objective_identity") != self.objective_identity):
             raise ValueError("Actor optimizer/data/budget identity differs on resume")
         self.actor.load_state_dict(state["actor"]); self.optimizer.load_state_dict(state["optimizer"])
         if self.reference_actor is not None:
@@ -104,7 +121,11 @@ class ActorTrainer:
             self.reference_actor.load_state_dict(state["reference_actor"])
         self.scheduler.load_state_dict(state["scheduler"])
         local = rank_state or state
-        self.bc.load_state_dict(local["bc"]); restore_rng(local["rng"], self.distributed.device)
+        if self.bc_enabled:
+            self.bc.load_state_dict(local["bc"])
+        elif local.get("bc") is not None or state["bc_weight"] != 0.:
+            raise ValueError("Disabled BC checkpoint must contain no sampler state or coefficient")
+        restore_rng(local["rng"], self.distributed.device)
         self.bc_weight, self.epoch, self.cursor, self.steps = (state[k] for k in
                                                            ("bc_weight", "epoch", "cursor", "steps"))
         self.history = state["history"]
@@ -122,7 +143,7 @@ class ActorTrainer:
     def backward_awr(self, indices, *, step):
         d, c = self.distributed, self.config
         local = indices[d.rank::d.world_size]
-        total, reference_total = 0., 0.
+        total, reference_total, unscaled_total = 0., 0., 0.
         for offset in range(0, len(local), c["microbatch"]):
             ids = local[offset:offset+c["microbatch"]]
             batch = self.dataset.batch(ids, d.device)
@@ -143,8 +164,11 @@ class ActorTrainer:
                                                                          batch["target_valid"], **kwargs)
             finally:
                 self.actor.train(mode)
-            loss, _ = weighted_denoising(out["pred_x_start"], out["target_x_start"], batch["free_mask"],
-                                         batch["weights"], global_count=len(indices))
+            time_factor = self.time_weights[t.detach().cpu()].to(d.device)
+            source_factor = self.source_weights[ids].to(d.device)
+            loss, per_sample = weighted_denoising(out["pred_x_start"], out["target_x_start"], batch["free_mask"],
+                batch["weights"]*time_factor*source_factor, global_count=len(indices))
+            unscaled_total += float((per_sample.detach().double()*batch["weights"]).sum()/len(indices))
             objective = loss*c.get("replay_coefficient", 1.)
             if teacher is not None:
                 # 两分支各自锚定，避免CFG输出相同但分支互相抵消；不使用Contact伪标签。
@@ -155,9 +179,14 @@ class ActorTrainer:
                 reference_total += float(anchor.detach())
             objective.backward(); total += float(loss.detach())
         self.last_reference_loss = float(d.sum(torch.tensor(reference_total, dtype=torch.float64, device=d.device)))
+        self.last_unscaled_loss = float(d.sum(torch.tensor(unscaled_total, dtype=torch.float64, device=d.device)))
         return float(d.sum(torch.tensor(total, dtype=torch.float64, device=d.device)))
 
     def backward_bc(self, coefficient):
+        if not self.bc_enabled:
+            if coefficient != 0.:
+                raise ValueError("Disabled BC coefficient must be zero")
+            return 0.
         d, c = self.distributed, self.config
         count = len(range(d.rank, c["bc_global_batch"], d.world_size))
         total = 0.
@@ -168,6 +197,11 @@ class ActorTrainer:
         return float(d.sum(torch.tensor(total, dtype=torch.float64, device=d.device)))
 
     def calibrate(self, batches=8, ratio=.1):
+        if not self.bc_enabled:
+            self.bc_weight = 0.
+            return dict(batches=[], coefficient=0., coefficient_source="bc_disabled",
+                        target_gradient_ratio=0., actual_gradient_ratio=0., optimizer_updates=0,
+                        bc_forward_backward_calls=0, rng_restored=True)
         original_rng = capture_rng(self.distributed.device)
         bc_state = copy.deepcopy(self.bc.state_dict())
         reports = []
@@ -200,7 +234,7 @@ class ActorTrainer:
             self.optimizer.zero_grad(set_to_none=True); self.actor.eval()
 
     def run(self, *, on_step=None, should_stop=lambda: False):
-        if self.bc_weight is None or self.bc_weight <= 0:
+        if self.bc_enabled and (self.bc_weight is None or self.bc_weight <= 0):
             raise ValueError("A fixed BC coefficient is required before Actor updates")
         started = time.perf_counter()
         c, d = self.config, self.distributed
@@ -232,9 +266,12 @@ class ActorTrainer:
                     if d.device.type == "cuda":
                         torch.cuda.synchronize(d.device)
                     update_done = time.perf_counter()
-                    self.steps += 1; self.cursor += len(ids); self.bc.bc_update_steps += 1
+                    self.steps += 1; self.cursor += len(ids)
+                    if self.bc_enabled:
+                        self.bc.bc_update_steps += 1
                     entry = dict(step=self.steps, epoch=self.epoch, samples=len(ids), awr_loss=awr_loss,
-                                 bc_loss=bc_loss, bc_weight=self.bc_weight,
+                                 unscaled_awr_loss=self.last_unscaled_loss,
+                                 bc_loss=bc_loss, bc_weight=self.bc_weight, bc_enabled=self.bc_enabled,
                                  reference_loss=self.last_reference_loss, reference_weight=self.reference_weight,
                                  total_loss=c.get("replay_coefficient", 1.)*awr_loss+self.bc_weight*bc_loss+self.reference_weight*self.last_reference_loss,
                                  gradient_norm=float(norm), clipped_gradient_norm=min(float(norm), c.get("gradient_clip", 1.)),
@@ -253,6 +290,15 @@ class ActorTrainer:
                     self.epoch += 1; self.cursor = 0
             d.assert_models_equal(self.actor)
             return dict(complete=True, steps=self.steps, seconds=time.perf_counter()-started,
+                        bc_enabled=self.bc_enabled, bc_optimizer_steps=self.steps if self.bc_enabled else 0,
+                        objective_identity=self.objective_identity,
+                        timestep_weighting=dict(config=c.get("timestep_weighting", {"mode": "uniform"}),
+                            mean=float(self.time_weights.mean()), minimum=float(self.time_weights.min()),
+                            maximum=float(self.time_weights.max()), table=self.time_weights.tolist()),
+                        source_balance=c.get("source_balance", "none"),
+                        source_objective={s:dict(samples=self.dataset.sources.count(s),
+                            multiplier=float(self.source_weights[self.dataset.sources.index(s)]))
+                            for s in sorted(set(self.dataset.sources))},
                         complete_epochs=self.epoch, partial_epoch_samples=self.cursor,
                         replay_samples=len(self.dataset), physical_samples_duplicated=False,
                         epoch_seconds={str(e["epoch"]): e["epoch_seconds"]

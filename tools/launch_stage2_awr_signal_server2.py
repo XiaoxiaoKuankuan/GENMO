@@ -24,7 +24,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--run-dir", type=Path, required=True)
     parser.add_argument("--gmt-repo", type=Path, required=True)
-    parser.add_argument("--config", type=Path, default=ROOT/"configs/closedloop/stage2_awr_group_credit.yaml")
+    parser.add_argument("--config", type=Path, default=ROOT/"configs/closedloop/stage2_awr_rewardstd_nobc_minsnr.yaml")
     args = parser.parse_args()
     config = load_config(args.config)
     if (config["version"] != "genmo.stage2.awr.signals.v2" or config["awr"]["max_macro_iterations"] != 1

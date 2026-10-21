@@ -90,9 +90,20 @@ def load_config(path, *, profile=None):
         c["runtime"].update(num_envs=s["envs_per_rank"], generation_batch=s["envs_per_rank"])
     if c["model"] != dict(ddim_steps=20, guidance_scale=2.5, history_steps=50):
         raise ValueError("AWR v1 requires original Stage1 DDIM20/CFG2.5/history50")
-    from gem.closedloop.common.rewards import NO_ACTIVITY_REWARD_VERSION
-    if c["reward"]["version"] != NO_ACTIVITY_REWARD_VERSION:
+    from gem.closedloop.common.rewards import NO_ACTIVITY_REWARD_VERSION, STAGE2_REWARD_STD_VERSION, resolve_reward_config
+    if c["reward"]["version"] not in (NO_ACTIVITY_REWARD_VERSION, STAGE2_REWARD_STD_VERSION):
         raise ValueError("New AWR runs require the reward without activity multiplication")
+    resolve_reward_config(c["reward"])
+    actor = c["awr"]["actor"]
+    if type(actor.get("bc_enabled", True)) is not bool:
+        raise ValueError("bc_enabled must be an explicit boolean")
+    if not actor.get("bc_enabled", True) and (actor.get("bc_fixed_weight") not in (None, 0.) or actor["bc_global_batch"] != 0):
+        raise ValueError("Disabled BC requires zero global batch and no nonzero BC coefficient")
+    from .objective import timestep_weights, source_weights
+    timestep_weights([.9, .1], actor.get("timestep_weighting"))
+    source_weights(["configuration_check"], actor.get("source_balance", "none"))
+    if c["awr"].get("uniform_ablation", False) and (not c["awr"]["run_ablation"] or actor.get("bc_enabled", True)):
+        raise ValueError("The uniform-timestep control requires the explicit no-BC ablation experiment")
     if c["awr"]["actor"].get("denoising_guidance_scale") != c["model"]["guidance_scale"]:
         raise ValueError("Replay training CFG must match the deployed sampler")
     if c["awr"]["actor"].get("replay_coefficient", 1.) != 1.:

@@ -9,7 +9,7 @@ import math
 import numpy as np
 import pytest
 import torch
-from test_data_learning import actual_step,target_activity_fixture
+from tests.closedloop.dppo.test_data_learning import actual_step,target_activity_fixture
 from gem.closedloop.dppo.rewards import ExecutionReward,TRACKING_WEIGHTS,TRACKING_STD
 from gem.closedloop.dppo.vector_reward_math import VectorRewardMath
 from gem.closedloop.dppo.vector_reward_adapter import VectorExecutionReward,compare_reward_evidence

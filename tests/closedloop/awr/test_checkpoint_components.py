@@ -37,7 +37,8 @@ def test_checkpoint_components_restore_actual_optimizer_without_update():
         tool.restore_components(actor, invalid)
 
 
-def test_resume_acceptance_uses_saved_boundary_and_restores_original_actor(tmp_path, episode_factory, monkeypatch):
+@pytest.mark.parametrize("bc_enabled", [True, False])
+def test_resume_acceptance_uses_saved_boundary_and_restores_original_actor(tmp_path, episode_factory, monkeypatch, bc_enabled):
     from gem.closedloop.awr.dataset import ReplayDataset
     from gem.closedloop.awr.distributed import Distributed
     from tests.closedloop.awr.test_training import ArithmeticBC
@@ -52,10 +53,14 @@ def test_resume_acceptance_uses_saved_boundary_and_restores_original_actor(tmp_p
     data.returns, data.weights = data.returns[:3], torch.tensor([.5, 1., 2.], dtype=torch.float64)
     d = Distributed()
     original = d.assert_models_equal(actor)
-    report = tool.verify_resume(actor, data, ArithmeticBC, dict(lr=1e-5), d, tmp_path/"checkpoint")
+    def bc_factory():
+        if not bc_enabled: raise AssertionError("Disabled BC sampler was created")
+        return ArithmeticBC()
+    report = tool.verify_resume(actor, data, bc_factory, dict(lr=1e-5, bc_enabled=bc_enabled), d, tmp_path/"checkpoint")
     assert report["diagnostic_optimizer_updates"] == 3
     assert report["actor_optimizer_scheduler_bc_rng_exact"]
     assert report["original_actor_restored"] == original
+    assert report["global_bc_samples"] == int(bc_enabled)
 
 
 def test_paired_checkpoint_acceptance_rejects_changed_bc_random_stream():

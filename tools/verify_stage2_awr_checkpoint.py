@@ -76,23 +76,28 @@ def restore_components(actor, payload):
         restored_tensors_exact=True, optimizer_updates=0)
 
 
-def check_rank_random_states(states):
+def check_rank_random_states(states, *, bc_enabled=True):
     import numpy as np
     import torch
     if len(states) != 8:
         raise ValueError("Expected all eight rank random states")
     for rank in states:
-        for node, keys in ((rank["rng"], ("torch", "numpy", "python", "cuda")),
-                           (rank["bc"], ("torch_rng", "numpy_rng", "python_rng", "cuda_rng"))):
+        nodes = [(rank["rng"], ("torch", "numpy", "python", "cuda"))]
+        if bc_enabled:
+            nodes.append((rank["bc"], ("torch_rng", "numpy_rng", "python_rng", "cuda_rng")))
+        elif rank["bc"] is not None:
+            raise ValueError("Disabled BC checkpoint unexpectedly retains a training sampler")
+        for node, keys in nodes:
             torch.Generator().set_state(node[keys[0]])
             np.random.RandomState().set_state(node[keys[1]])
             random.Random().setstate(node[keys[2]])
             cuda = node[keys[3]]
             if not torch.is_tensor(cuda) or cuda.dtype != torch.uint8 or cuda.numel() == 0:
                 raise ValueError("Missing stored CUDA random state")
-        torch.Generator().set_state(rank["bc"]["generator"])
+        if bc_enabled:
+            torch.Generator().set_state(rank["bc"]["generator"])
     return dict(rank_states=len(states), cpu_random_states_restored=True,
-                cuda_random_states_present=True, cuda_random_states_executed=False)
+                bc_enabled=bc_enabled, cuda_random_states_present=True, cuda_random_states_executed=False)
 
 
 def pairing_state(payload):
@@ -157,7 +162,8 @@ def main():
             raise ValueError("No fixed physical evaluation binds the restored Actor")
         reports[method] = dict(report, checkpoint=reference,
             restored_actor_fingerprint=fingerprint, evaluation_fingerprint_matches=True,
-            evaluation_plans=evaluations, random_states=check_rank_random_states(payload["rank_states"]))
+            evaluation_plans=evaluations, random_states=check_rank_random_states(payload["rank_states"],
+                bc_enabled=payload["config"].get("bc_enabled", True)))
     if (root/"state.json").read_bytes() != before:
         raise ValueError("Read-only verification observed a run state change")
     report = dict(schema="genmo.awr.real_checkpoint_components.v1", source_run=str(root),

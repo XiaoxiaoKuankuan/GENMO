@@ -72,8 +72,9 @@ def test_failure_event_is_integrated_once_and_not_multiplied_by_dt():
 
 
 def test_policy_receives_actual_eta_cfg_and_precision(monkeypatch):
+    import torch
     from gem.closedloop.dppo import frozen_prefix
-    monkeypatch.setattr(frozen_prefix,'FrozenPrefixPolicy',lambda actor,**kwargs:kwargs)
-    result=build_policy(object(),dict(std_schedule=[.02]*20,denoising_steps=20,eta=.23,guidance_scale=.7),
+    monkeypatch.setattr(frozen_prefix,'FrozenPrefixPolicy',lambda actor,**kwargs:SimpleNamespace(**kwargs))
+    result=build_policy(torch.nn.Linear(2,2),dict(std_schedule=[.02]*20,denoising_steps=20,eta=.23,guidance_scale=.7),
         dict(mode='native_fp32',attention='sdpa_math',linear_execution='stable_tf32x3',compile=False,precise_output=True))
-    assert (result['eta'],result['guidance_scale'],result['steps'])==(.23,.7,20)
+    assert (result.eta,result.guidance_scale,result.steps)==(.23,.7,20)

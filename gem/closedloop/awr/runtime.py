@@ -348,8 +348,7 @@ class AWRRun:
         dataset = ReplayDataset(episodes, labels, **dataset_options)
         before_outputs = fixed_outputs(self.policy, dataset.rows)
         self.d.root(lambda: write_tree(self.root/prefix/"fixed_outputs_before", before_outputs))
-        bc = Stage1Supervision(self.runtime_config, self.actor, self.train_config,
-                               source_step=self.load_report["source_global_step"])
+        bc = self.training_bc()
         trainer = ActorTrainer(self.actor, dataset, bc, self.config["awr"]["actor"], self.d,
                                seed=self.config["awr"]["seed"]+macro)
         coefficient_key = prefix+"_bc_calibration"
@@ -357,21 +356,27 @@ class AWRRun:
             self.publish(phase="gradient_calibration")
             calibration = trainer.calibrate(self.config["awr"]["actor"]["calibration_batches"],
                                             self.config["awr"]["actor"]["bc_gradient_ratio"])
-            calibration = choose_bc_coefficient(calibration, self.config["awr"]["actor"].get("bc_fixed_weight"))
+            if self.config["awr"]["actor"].get("bc_enabled", True):
+                calibration = choose_bc_coefficient(calibration, self.config["awr"]["actor"].get("bc_fixed_weight"))
             self.json_artifact(coefficient_key, lambda: calibration)
         coefficient = self.json_artifact(coefficient_key, lambda: None)["coefficient"]
         del trainer, bc
-        for method in (["self_distillation", "awr"] if self.config["awr"]["run_ablation"] else ["awr"]):
+        methods = ["self_distillation", "awr"] if self.config["awr"]["run_ablation"] else ["awr"]
+        if self.config["awr"].get("uniform_ablation", False):
+            methods.insert(0, "self_distillation_uniform")
+        for method in methods:
             method_key = prefix+"_"+method
             final_key = method_key+"_final"
             if final_key not in self.state["artifacts"]:
                 self.publish(phase="actor_"+method)
                 self.actor.load_state_dict(behavior)
                 torch.manual_seed(self.config["awr"]["seed"]+macro+self.d.rank*100003)
-                dataset = ReplayDataset(episodes, labels, unit_weights=method == "self_distillation", **dataset_options)
-                bc = Stage1Supervision(self.runtime_config, self.actor, self.train_config,
-                                      source_step=self.load_report["source_global_step"])
-                trainer = ActorTrainer(self.actor, dataset, bc, self.config["awr"]["actor"], self.d,
+                dataset = ReplayDataset(episodes, labels, unit_weights=method.startswith("self_distillation"), **dataset_options)
+                bc = self.training_bc()
+                training_config = copy.deepcopy(self.config["awr"]["actor"])
+                if method == "self_distillation_uniform":
+                    training_config["timestep_weighting"] = dict(mode="uniform")
+                trainer = ActorTrainer(self.actor, dataset, bc, training_config, self.d,
                     seed=self.config["awr"]["seed"]+macro, bc_weight=coefficient)
                 latest_key = method_key+"_progress"
                 if latest_key in self.state["artifacts"]:
@@ -411,6 +416,9 @@ class AWRRun:
             b = self.eval_actor(prefix+"_self_distillation_fixed", self.fixed_plan)
             c = self.eval_actor(prefix+"_awr_fixed", self.fixed_plan)
             self.json_artifact(prefix+"_awr_vs_self_distillation", lambda: paired_comparison(b, c))
+            if self.config["awr"].get("uniform_ablation", False):
+                uniform = self.eval_actor(prefix+"_self_distillation_uniform_fixed", self.fixed_plan)
+                self.json_artifact(prefix+"_minsnr_vs_uniform", lambda: paired_comparison(uniform, b))
         if self.config["awr"]["final_all_unique"] and macro == self.config["awr"]["max_macro_iterations"]-1:
             baseline = self.eval_actor("stage1_all", self.full_plan)
             current = self.eval_actor(prefix+"_awr_all", self.full_plan)
@@ -429,8 +437,15 @@ class AWRRun:
         self.json_artifact(prefix+"_replay_cost", self.replay.report)
         return True
 
+    def training_bc(self):
+        """关闭BC时完全不创建训练采样器；独立无梯度能力诊断仍可读取真实Stage1标签。"""
+        if not self.config["awr"]["actor"].get("bc_enabled", True):
+            return None
+        return Stage1Supervision(self.runtime_config, self.actor, self.train_config,
+                                 source_step=self.load_report["source_global_step"])
+
     def save_actor(self, name, trainer, macro, method):
-        local = dict(bc=trainer.bc.state_dict(), rng=capture_rng(self.d.device))
+        local = dict(bc=trainer.bc.state_dict() if trainer.bc_enabled else None, rng=capture_rng(self.d.device))
         ranks = self.d.gather(local)
         payload = trainer.state_dict() if self.d.rank == 0 else None
         if payload is not None:

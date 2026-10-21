@@ -3,6 +3,8 @@
 读取冻结s595000及原Stage1真实标签，固定t和noise，用相同加权去噪/完整BC损失比较
 单卡逐样本参考与八卡尾批、空rank、不同microbatch的SUM梯度。这里只证明计算等价，
 不采集PhysX、不产生RL学习结论；不更改源checkpoint，报告写用户指定独立证据路径。
+配置关闭BC时只将真实Stage1样本用作固定输入，不执行BC前反向；时间/来源因子与
+ActorTrainer使用同一实现，在不同rank切分前固定全局分母和权重表。
 """
 from __future__ import annotations
 
@@ -21,12 +23,14 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", type=Path, default=ROOT/"configs/closedloop/stage2_awr.yaml")
     parser.add_argument("--report", type=Path, required=True)
+    parser.add_argument("--gmt-repo", type=Path)
     args = parser.parse_args()
     import torch
     import torch.distributed as dist
     from gem.closedloop.awr.config import load_config, physical_config, preflight
     from gem.closedloop.awr.distributed import Distributed
     from gem.closedloop.awr.losses import weighted_denoising
+    from gem.closedloop.awr.objective import timestep_weights, source_weights
     from gem.closedloop.awr.io import atomic_json
     from gem.closedloop.common.supervision import load_actor, Stage1Supervision
     from gem.closedloop.stage1_dataset import collate_stage1_training_samples
@@ -39,6 +43,8 @@ def main():
     started = time.perf_counter()
     try:
         config = load_config(args.config); config["paths"]["genmo_repo"] = str(ROOT)
+        if args.gmt_repo is not None:
+            config["paths"]["gmt_repo"] = str(args.gmt_repo.resolve())
         d = Distributed(f"cuda:{rank}")
         evidence = d.root(lambda: preflight(config))
         torch.cuda.set_device(rank); torch.set_num_threads(4); torch.manual_seed(812)
@@ -60,6 +66,9 @@ def main():
         generator = torch.Generator().manual_seed(813)
         noise = torch.randn(batch["target_qpos30"].shape, generator=generator)
         times = torch.randint(actor.diffusion_steps, (9,), generator=generator)
+        time_table = timestep_weights(actor.train_diffusion.alphas_cumprod,
+                                     config["awr"]["actor"].get("timestep_weighting"))
+        bc_enabled = config["awr"]["actor"].get("bc_enabled", True)
         parameters = [p for p in actor.parameters() if p.requires_grad]
         reports = []
         def backward(ids, n_awr, n_bc, micro):
@@ -72,6 +81,9 @@ def main():
                                                timesteps=times[indices].to(d.device), noise=noise[indices].to(d.device),
                                                guidance_scale=config["awr"]["actor"]["denoising_guidance_scale"])
                 weights = torch.tensor([1.+i/3 for i in indices], device=d.device)
+                balance = source_weights([str(i % 4) for i in range(n_awr)],
+                                         config["awr"]["actor"].get("source_balance", "none"))
+                weights = weights*time_table[times[indices]].to(d.device)*balance[indices].to(d.device)
                 loss, _ = weighted_denoising(out["pred_x_start"], out["target_x_start"],
                     valid & ~context["known_qpos30_mask"], weights, global_count=n_awr)
                 loss.backward()
@@ -85,6 +97,8 @@ def main():
                                    global_step=report["source_global_step"])
                 (.1*loss/n_bc).backward()
         for n, bc_count, micro in ((9, 3, 2), (3, 1, 1)):
+            if not bc_enabled:
+                bc_count = 0
             actor.zero_grad(set_to_none=True)
             # 参考AWR和BC分别在rank0遍历全部真实样本，避免任何拓扑相关分母。
             reference = None
@@ -124,7 +138,9 @@ def main():
             result["updated_parameter_identity"] = d.assert_models_equal(actor)
             reports.append(result)
         peaks = d.gather(torch.cuda.max_memory_allocated(d.device))
-        d.root(lambda: atomic_json(args.report, dict(status="passed", real_stage1=True, real_stage1_bc=True,
+        d.root(lambda: atomic_json(args.report, dict(status="passed", real_stage1=True, real_stage1_bc=bc_enabled,
+            bc_enabled=bc_enabled, timestep_weighting=config["awr"]["actor"].get("timestep_weighting"),
+            source_balance=config["awr"]["actor"].get("source_balance", "none"),
             distributed_backend="nccl", world_size=8, cases=reports, peak_memory_bytes=peaks,
             wall_seconds=time.perf_counter()-started, preflight=evidence)))
         if rank == 0: print("真实Stage1八卡梯度和更新一致性验收通过", flush=True)

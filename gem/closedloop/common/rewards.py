@@ -4,7 +4,8 @@
 平方误差：世界 anchor 位置/完整姿态、原 MotionCommand 对齐后的 body 位置/姿态、
 body全局线/角速度、双脚相对高度及十二腿关节位置。使用 exp(-error/std²)，不再次平方 error，
 不重新构造坐标系或用旧 RMSE/末端高度/yaw 混合项回退；名称、选择、时刻和原值
-证据随 backend 诊断保存。内部 objective 版本独立标识这次 tracking 语义变化。
+证据随 backend 诊断保存。GMT权威source_std只验证来源；显式v3使用独立reward_std
+计算Stage2分数，不修改冻结GMT。旧v1/v2保留原std含义，禁止新旧身份静默混用。
 独立稳定性奖励关闭，根高与姿态仍作为物理终止及诊断。显式历史v1保留活动门控，
 新AWR v2删除全部活动奖励乘数，仅保留因果诊断；目标活动度来自配对动作的同一时间窗，
 绝不使用 GENMO 生成参考代替监督。音乐节拍复用 BUMI 原有动作节拍和对齐函数。
@@ -37,6 +38,7 @@ from .performance import profiled
 
 TRACKING_OBJECTIVE = "gmt.motion_tracking.eight_terms.v1"
 NO_ACTIVITY_REWARD_VERSION = "stage2.gmt8_no_activity_gate.v2"
+STAGE2_REWARD_STD_VERSION = "stage2.gmt8_reward_std.v3"
 TRACKING_FUNCTIONS = {
     "anchor_pos": "motion_global_anchor_position_error_exp",
     "anchor_ori": "motion_global_anchor_orientation_error_exp",
@@ -50,9 +52,35 @@ TRACKING_FUNCTIONS = {
 TRACKING_ERROR_FIELDS = {name: name + "_squared_error" for name in TRACKING_FUNCTIONS}
 TRACKING_STD = dict(anchor_pos=.3, anchor_ori=.4, body_pos=.3, body_ori=.4,
                     body_lin_vel=1., body_ang_vel=3.14, foot_height=.07, leg_joint_pos=.25)
+# 原GMT合同的权威来源常量，绝不可用Stage2可配置尺度覆盖。
+GMT_SOURCE_STD = TRACKING_STD.copy()
 TRACKING_WEIGHTS = {name: weight/6.3 for name,weight in zip(TRACKING_FUNCTIONS,(.5,.5,1.,1.,1.,1.,.8,.5))}
 LEG_JOINT_NAMES = [side+'_'+joint+'_joint' for side in ('l','r') for joint in
     ('leg_pitch','leg_roll','leg_yaw','knee_pitch','ankle_pitch','ankle_roll')]
+
+
+def tracking_reward_std(config):
+    """按显式奖励版本选择训练尺度；不以来源尺度替代新奖励配置。"""
+    key = "reward_std" if config["version"] == STAGE2_REWARD_STD_VERSION else "std"
+    return config["tracking"][key]
+
+
+def tracking_scale_evidence(config):
+    """新证据同时记录原始来源和训练尺度，旧证据保持逐值回归兼容。"""
+    if config["version"] == STAGE2_REWARD_STD_VERSION:
+        return {k: copy.deepcopy(config["tracking"][k]) for k in ("source_std", "reward_std")}
+    return dict(std=copy.deepcopy(config["tracking"]["std"]))
+
+
+def validate_tracking_source(terms):
+    """CPU/GPU入口均严格核对八项原GMT函数、原std和原权重，不检查训练reward_std。"""
+    if not isinstance(terms, Mapping) or set(terms) != set(TRACKING_FUNCTIONS):
+        raise ValueError("motion_tracking requires all eight original GMT terms")
+    for name, function in TRACKING_FUNCTIONS.items():
+        item = terms[name]
+        if (item.get("function") != function or item.get("source_std") != GMT_SOURCE_STD[name]
+                or not math.isclose(item.get("source_weight", -1)/6.3, TRACKING_WEIGHTS[name], abs_tol=1e-14)):
+            raise ValueError("GMT authoritative tracking source_std/function/weight differs")
 
 
 DEFAULT_CONFIG = {
@@ -129,6 +157,13 @@ def _score(error, scale):
 class ExecutionReward:
     def __init__(self, config=None, music_features=None, music_start_tick=600, target_activity=None):
         self.config = copy.deepcopy(DEFAULT_CONFIG)
+        if config and config.get("version") == STAGE2_REWARD_STD_VERSION:
+            tracking = config.get("tracking", {})
+            if ("std" in tracking or set(tracking.get("source_std", {})) != set(GMT_SOURCE_STD)
+                    or set(tracking.get("reward_std", {})) != set(GMT_SOURCE_STD)):
+                raise ValueError("v3 requires explicit complete source_std and reward_std, without ambiguous std")
+            self.config["tracking"].pop("std")
+            self.config["tracking"].update(source_std=GMT_SOURCE_STD.copy(), reward_std=GMT_SOURCE_STD.copy())
         _merge(self.config, config or {})
         self._validate_config()
         self.music_enabled = self.config['music_reward_enabled']
@@ -161,7 +196,7 @@ class ExecutionReward:
 
     def _validate_config(self):
         config = self.config
-        if config["version"] not in ("stage2.gmt8_reference_limits.v1", NO_ACTIVITY_REWARD_VERSION):
+        if config["version"] not in ("stage2.gmt8_reference_limits.v1", NO_ACTIVITY_REWARD_VERSION, STAGE2_REWARD_STD_VERSION):
             raise ValueError("Unknown explicit execution reward identity")
         if type(config['music_reward_enabled']) is not bool:
             raise ValueError('music_reward_enabled must be an explicit boolean')
@@ -183,13 +218,14 @@ class ExecutionReward:
         tracking = config["tracking"]
         if tracking["objective"] != TRACKING_OBJECTIVE:
             raise ValueError(f"tracking.objective must be {TRACKING_OBJECTIVE}")
-        if tracking['std'] != TRACKING_STD or tracking['weights'] != TRACKING_WEIGHTS:
-            raise ValueError('Tracking std/weights must match the eight authoritative GMT terms')
-        for name, value in tracking["std"].items():
-            finite_nonnegative(value, f"tracking.std.{name}", positive=True)
+        source = tracking["source_std"] if config["version"] == STAGE2_REWARD_STD_VERSION else tracking["std"]
+        if source != GMT_SOURCE_STD or tracking['weights'] != TRACKING_WEIGHTS:
+            raise ValueError('Tracking source_std/weights must match the eight authoritative GMT terms')
+        for name, value in tracking_reward_std(config).items():
+            finite_nonnegative(value, f"tracking.reward_std.{name}", positive=True)
             squared = float(value) * float(value)
             if not math.isfinite(squared) or squared <= 0:
-                raise ValueError(f"tracking.std.{name} squared must be finite and positive")
+                raise ValueError(f"tracking.reward_std.{name} squared must be finite and positive")
         for name, value in tracking["weights"].items():
             finite_nonnegative(value, f"tracking.weights.{name}")
         if not math.isclose(sum(tracking["weights"].values()), 1., abs_tol=1e-12):
@@ -349,8 +385,7 @@ class ExecutionReward:
         for field, shape in (("body_pos_relative_w", (len(body_names), 3)), ("body_quat_relative_w", (len(body_names), 4))):
             _array(diagnostic["reference"].get(field), f"motion_tracking.reference.{field}", shape)
         terms = diagnostic.get("terms")
-        if not isinstance(terms, Mapping) or set(terms) != set(TRACKING_FUNCTIONS):
-            raise ValueError("motion_tracking requires all eight original GMT terms")
+        validate_tracking_source(terms)
         raw, normalized, scores = {}, {}, {}
         for name, function in TRACKING_FUNCTIONS.items():
             term = terms[name]
@@ -371,12 +406,10 @@ class ExecutionReward:
                 raise ValueError('Foot height requires both ankle roll links')
             if name == 'leg_joint_pos' and term['joint_names'] != LEG_JOINT_NAMES:
                 raise ValueError('Tracking requires the exact twelve leg joints')
-            if term['source_std'] != TRACKING_STD[name] or not math.isclose(term['source_weight']/6.3,TRACKING_WEIGHTS[name],abs_tol=1e-14):
-                raise ValueError('GMT authoritative tracking configuration differs')
             error = _scalar(term.get("error"), f"motion_tracking.{name}.error")
             if error < 0:
                 raise ValueError(f"motion_tracking.{name} squared error must be nonnegative")
-            std = self.config["tracking"]["std"][name]
+            std = tracking_reward_std(self.config)[name]
             normalized[name] = error / std ** 2
             if not math.isfinite(normalized[name]):
                 raise ValueError(f"nonfinite motion_tracking.{name} normalized error")
@@ -388,7 +421,7 @@ class ExecutionReward:
         cfg = self.config["tracking"]
         score = sum(cfg["weights"][name] * value for name, value in scores.items())
         return score, True, raw, {"error_over_std_squared": normalized, "scores": scores,
-                                 "std": copy.deepcopy(cfg["std"]), "weights": copy.deepcopy(cfg["weights"])}
+                                 **tracking_scale_evidence(self.config), "weights": copy.deepcopy(cfg["weights"])}
 
     def _stable(self, row):
         return 0., True, {'reason': 'stable_reward_disabled'}, {}
@@ -674,7 +707,7 @@ class ExecutionReward:
         旧版本仅供显式旧配置的数值回归，原运行使用冻结源码。两种奖励身份不能
         混入一个Replay，不能把删除门控带来的分数变化称为策略学习收益。
         """
-        if self.config["version"] == NO_ACTIVITY_REWARD_VERSION:
+        if self.config["version"] in (NO_ACTIVITY_REWARD_VERSION, STAGE2_REWARD_STD_VERSION):
             return 1.0
         return activity_gate if name in {"track", "music"} else 1.0
 

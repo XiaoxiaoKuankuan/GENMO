@@ -205,10 +205,15 @@ def label_episode_advantages(episodes, value_by_episode, *, identity, config=Non
             diagnostic = dict(physical_failure=float(episode.rows[-1].metadata.get("physical_failure", False)),
                 episode_seconds=sum(r.executed_control_steps for r in episode.rows)*.02,
                 interval_seconds=row.executed_control_steps*.02)
-            if ledger.get("available"):
-                mask = np.asarray(ledger["interval_indices"]) == j
-                if mask.any():
-                    diagnostic.update(zip(ledger["error_names"], np.asarray(ledger["tracking_errors"])[mask].mean(axis=0).tolist()))
+            if exposure["valid"]:
+                # 质量指标跟随该计划真正进入GMT的当前/前瞻窗口，不能用生成所在区间冒充。
+                plan = str(row.identity["plan_id"])
+                if plan in ledger["plan_dictionary"]:
+                    mask = np.asarray(ledger["window_plan_indices"]) == ledger["plan_dictionary"].index(plan)
+                    mass = (mask*np.asarray(exposure["point_weights"])).sum(axis=1)
+                    if mass.sum() > 0:
+                        errors = (mass[:, None]*np.asarray(ledger["tracking_errors"])).sum(axis=0)/mass.sum()
+                        diagnostic.update(zip(ledger["error_names"], errors.tolist()))
             diagnostics.append(diagnostic)
     # Python float列表默认先构造FP32再double会丢失组内微小回报差，必须直接构造FP64。
     g, v, n, a_credit, a_group, exposure_seconds = [
@@ -268,6 +273,7 @@ def label_episode_advantages(episodes, value_by_episode, *, identity, config=Non
         group_valid_samples=int(valid_group.sum()), credit_fallback_samples=int((~usable_credit).sum()),
         label_mode=label.label_mode, final_advantage=distribution(final),
         physics=physical_weight_diagnostics(label.weights, sources, diagnostics),
+        physical_quality_time_basis="actual_plan_current_and_lookahead_exposure_not_generation_interval",
         candidate_groups=group_reports, within_condition_weight_quality=group_quality)
     return label, dict(credit=credit_reports, candidate_groups=group_reports,
                        approximation="reference_exposure_not_unbiased_policy_gradient")

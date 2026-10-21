@@ -28,18 +28,20 @@ def verify_resume(actor, dataset, bc_factory, config, distributed, output):
     d = distributed
     initial = cpu_copy(actor.state_dict())
     fingerprint = d.assert_models_equal(actor)
-    c = dict(config, epochs=2, global_batch=3, bc_global_batch=1,
+    enabled = config.get("bc_enabled", True)
+    c = dict(config, epochs=2, global_batch=3, bc_global_batch=1 if enabled else 0,
              microbatch=1, bc_microbatch=1, warmup_steps=1)
     if len(dataset) != 3:
         raise ValueError("This finite acceptance requires exactly three real Replay samples")
     checkpoint = Checkpoints(output, dict(purpose="isolated_ddp_resume_acceptance",
         actor=fingerprint, data=digest(dataset.sample_ids), config=c, world_size=d.world_size))
     torch.manual_seed(91821+d.rank*100003)
-    trainer = ActorTrainer(actor, dataset, bc_factory(), c, d, seed=91821, bc_weight=.01)
+    trainer = ActorTrainer(actor, dataset, bc_factory() if enabled else None, c, d,
+                           seed=91821, bc_weight=.01 if enabled else 0.)
     saved = []
     def first_step(current, _):
         if current.steps == 1:
-            ranks = d.gather(dict(bc=current.bc.state_dict(), rng=capture_rng(d.device)))
+            ranks = d.gather(dict(bc=current.bc.state_dict() if enabled else None, rng=capture_rng(d.device)))
             payload = current.state_dict() if d.rank == 0 else None
             if payload is not None:
                 payload["rank_states"] = ranks
@@ -49,14 +51,15 @@ def verify_resume(actor, dataset, bc_factory, config, distributed, output):
     expected = trainer.state_dict()
     expected_rng = capture_rng(d.device)
     expected_fingerprint = d.assert_models_equal(actor)
-    second = ActorTrainer(actor, dataset, bc_factory(), c, d, seed=91821, bc_weight=.01)
+    second = ActorTrainer(actor, dataset, bc_factory() if enabled else None, c, d,
+                          seed=91821, bc_weight=.01 if enabled else 0.)
     payload = d.local(lambda: checkpoint.load(saved[0])["payload"])
     second.load_state_dict(payload, rank_state=payload["rank_states"][d.rank])
     resumed = second.run()
     actual = second.state_dict()
     def compare():
         for key in ("actor", "optimizer", "scheduler", "bc", "bc_weight",
-                    "epoch", "cursor", "steps", "data_identity", "total_steps", "seed", "config"):
+                    "epoch", "cursor", "steps", "data_identity", "total_steps", "seed", "config", "objective_identity"):
             assert_tree_equal(actual[key], expected[key])
         assert_tree_equal(capture_rng(d.device), expected_rng)
         return True
@@ -69,7 +72,7 @@ def verify_resume(actor, dataset, bc_factory, config, distributed, output):
     return dict(status="passed", world_size=d.world_size, continuous_steps=continuous["steps"],
         resumed_total_steps=resumed["steps"], diagnostic_optimizer_updates=3,
         formal_run_optimizer_updates_added=0, physical_controls=0, global_awr_samples=3,
-        global_bc_samples=1, sample_ids=dataset.sample_ids,
+        global_bc_samples=1 if enabled else 0, bc_enabled=enabled, sample_ids=dataset.sample_ids,
         continuous_and_resumed_actor=expected_fingerprint, original_actor_restored=fingerprint,
         actor_optimizer_scheduler_bc_rng_exact=True, diagnostic_checkpoint=saved[0])
 
