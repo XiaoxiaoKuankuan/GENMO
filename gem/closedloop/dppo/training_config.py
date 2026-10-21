@@ -157,6 +157,8 @@ def configuration(path,*,genmo_repo=None,gmt_repo=None):
     if any(key in t for key in ('actor_lr_bounds','kl_target_coordinate','kl_control_metric')):
         raise ValueError('Retired adaptive-LR settings are not supported')
     steps=t['ppo_epochs']*math.ceil(chains/scale['actor_minibatch_chains'])
+    for key,default in (('bc_enabled',True),('audit_full_rollout_objective',False)):
+        if type(t.get(key,default)) is not bool:raise ValueError(key+' must be boolean')
     bc_total=t['bc_samples_per_rollout']
     minimum_bc=t['bc_min_global_batch']
     if type(minimum_bc)is not int or minimum_bc<256:

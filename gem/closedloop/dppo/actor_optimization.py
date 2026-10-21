@@ -56,7 +56,7 @@ def validate_optimization_configuration(config,maximum_steps):
         raise ValueError('Explicit full-chain joint PPO with one undiscounted GAE and fixed Actor LR ratios required')
     trust=t['trust_region']
     trust.setdefault('minimum_trial_lr_ratio',.0625)
-    if (set(trust)!={'maximum_lr','growth','margin','max_attempts','minimum_trial_lr_ratio'}
+    if (set(trust)-{'objective_aware','objective_tolerance','objective_search_attempts'}!={'maximum_lr','growth','margin','max_attempts','minimum_trial_lr_ratio'}
             or trust['maximum_lr']!=t['actor_lr'] or not 1<=trust['growth']<=2
             or not 0<trust['margin']<1 or type(trust['max_attempts'])is not int
             or not 1<=trust['max_attempts']<=10

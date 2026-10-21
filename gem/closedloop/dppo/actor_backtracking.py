@@ -35,13 +35,19 @@ def check_candidate_kl(report, limits):
         value=report['active_clip_fraction']
         if not math.isfinite(value) or value>bound:
             result['failures']['active_clip_fraction']=dict(value=value,limit=bound)
+    reference=limits.get('objective_reference')
+    if reference is not None:
+        value=report['objective_mean'];tolerance=limits.get('objective_tolerance',1e-10)
+        if not math.isfinite(value) or value<reference-tolerance:
+            result['failures']['objective_gain']=dict(value=value-reference,limit=-tolerance)
     result['passed'] = not result['failures']
     result['joint_gate_is_empirical_not_theoretical_safety'] = True
     return result
 
 
 def backtracked_step(actor, optimizer, controller, *, evaluate, limits, distributed, generators=None,
-                     max_attempts=9, factor=.5, reserve_attempt=None, observe=None, minimum_lr=None):
+                     max_attempts=9, factor=.5, reserve_attempt=None, observe=None, minimum_lr=None,
+                     select_best=False,search_attempts=3):
     validate_actor_optimizer(actor, optimizer)
     if type(max_attempts) is not int or not 1 <= max_attempts <= 10 or factor != .5:
         raise ValueError('Finite backtracking requires 1..10 attempts with factor 0.5')
@@ -68,7 +74,9 @@ def backtracked_step(actor, optimizer, controller, *, evaluate, limits, distribu
                 if grads[n] is not None and grads[n]._version!=versions[n]:
                     raise RuntimeError('KL candidate evaluation modified the fixed gradient')
                 p.grad=grads[n]
-    trials = []
+    if select_best and ('objective_reference' not in limits or type(search_attempts)is not int or search_attempts<1):
+        raise ValueError('Best candidate search requires explicit objective reference and positive search count')
+    trials = [];best=None
     try:
         for index in range(max_attempts):
             if index:
@@ -97,15 +105,35 @@ def backtracked_step(actor, optimizer, controller, *, evaluate, limits, distribu
                 wall_seconds=max(distributed.all_gather_object(time.perf_counter()-started))))
             if acceptance['passed']:
                 # 候选审查和诊断无权消耗学习RNG；下一轮从一次梯度计算后的随机状态继续。
+                if select_best:
+                    score=kl['objective_mean']
+                    if best is None or score>best['score']:
+                        best=dict(score=score,lr=lr,index=index,
+                            model={n:p.detach().clone() for n,p in actor.named_parameters() if p.requires_grad},
+                            adam=copy.deepcopy(optimizer.state_dict()))
+                    if len(trials)<search_attempts:continue
+                    break
                 restore_local_rng(rng, generators)
                 return dict(accepted=True, initial_lr=initial_lr, accepted_lr=lr,
                     initial_learning_rates=initial_learning_rates, accepted_learning_rates=actor_learning_rates(optimizer),
                     backtracks=index, attempts=trials, attempt_count=len(trials),
                     same_initial_adam_per_attempt=True, fixed_gradient_reused=True)
+        if best is not None:
+            with torch.no_grad():
+                for name,p in actor.named_parameters():
+                    if name in best['model']:p.copy_(best['model'][name])
+            optimizer.load_state_dict(best['adam']);controller.load_state_dict(control)
+            restore_local_rng(rng,generators)
+            return dict(accepted=True,initial_lr=initial_lr,accepted_lr=best['lr'],
+                initial_learning_rates=initial_learning_rates,accepted_learning_rates=actor_learning_rates(optimizer),
+                backtracks=len(trials)-1,attempts=trials,attempt_count=len(trials),
+                selected_attempt=best['index']+1,selected_objective=best['score'],
+                same_initial_adam_per_attempt=True,fixed_gradient_reused=True,
+                selection='best_true_clipped_objective_among_KL_qualified_trials')
         restore()
         finite_rejections=bool(trials) and all(t['kl'] is not None and
             set(t['acceptance']['failures']) <= {'chain_joint_mean','chain_joint_p95',
-                'chain_joint_p99','chain_joint_max','active_clip_fraction'} and
+                'chain_joint_p99','chain_joint_max','active_clip_fraction','objective_gain'} and
             all(math.isfinite(f['value']) for f in t['acceptance']['failures'].values())
             for t in trials)
         return dict(accepted=False, initial_lr=initial_lr, accepted_lr=None, backtracks=max(0,len(trials)-1),

@@ -124,4 +124,5 @@ def chain_diagnostics(statistics, advantages, *, clip):
         clip_fraction=float(surrogate['clipped'][valid].double().mean()),
         active_clip_fraction=float(surrogate['objective_clipped'][valid].double().mean()),
         nonfinite_fraction=0.,ratio_underflow_fraction=0.,
-        ratio_is_joint_probability=True,denominator='one_complete_chain_one_upper_GAE_advantage')
+        ratio_is_joint_probability=True,complete_chain_count=int(valid.sum()),
+        denominator='one_complete_chain_one_upper_GAE_advantage')

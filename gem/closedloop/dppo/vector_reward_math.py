@@ -14,7 +14,7 @@ from __future__ import annotations
 import hashlib
 import json
 import torch
-from .rewards import resolve_reward_config, TRACKING_ERROR_FIELDS, TRACKING_OBJECTIVE
+from .rewards import resolve_reward_config, TRACKING_ERROR_FIELDS, TRACKING_OBJECTIVE, tracking_reward_std, tracking_score_metadata, TRACKING_STD
 
 VECTOR_REWARD_VERSION='stage2.gmt8_gpu_reward.v1'
 
@@ -53,14 +53,16 @@ class VectorRewardMath:
         scores={};normalized={};raw={}
         for name,item in tracking['terms'].items():
             error=number(item['error']);checked(error>=0)
-            normalized[name]=error/cfg['tracking']['std'][name]**2
+            if item.get('source_std') != TRACKING_STD[name]:
+                raise ValueError('GPU tracking source_std differs from frozen GMT')
+            normalized[name]=error/tracking_reward_std(cfg)[name]**2
             scores[name]=torch.exp(-normalized[name]);raw[TRACKING_ERROR_FIELDS[name]]=error
         raw.update(source='frozen_gmt_current_motion_command',objective=TRACKING_OBJECTIVE,
             anchor_body_name=tracking['anchor_body_name'],body_names=tracking['body_names'],
             joint_names=tracking['joint_names'],terms=tracking['terms'],control_tick=ticks)
         track=sum(cfg['tracking']['weights'][name]*score for name,score in scores.items())
         output={'track':term(track,raw,dict(error_over_std_squared=normalized,scores=scores,
-            std=cfg['tracking']['std'],weights=cfg['tracking']['weights']))}
+            **tracking_score_metadata(cfg)))}
         output['stable']=term(torch.zeros_like(ticks,dtype=torch.float64),dict(reason='stable_reward_disabled'))
         output['alive']=term((~terminated).double(),dict(complete_control_interval=True,
             execution_valid=True,execution_failed=terminated))

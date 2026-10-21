@@ -32,7 +32,8 @@ def test_formal_transformer_candidate_uses_4096_and_ungated_new_reward():
     assert stage['derived']['maximum_actor_steps']==4
     assert settings['bc_batch']==512 and settings['bc_samples_per_rollout']==2048
     assert settings['actor_trainable_scope']=='all'
-    assert stage['reward']['version']=='stage2.gmt8_reference_limits.v2'
+    assert stage['reward']['version']=='stage2.gmt8_reward_std.v3'
+    assert settings['bc_enabled'] is False and settings['audit_full_rollout_objective'] is True
     assert resolved['termination']['yaw_error_rad'] is None
     assert stage['run_control']['max_training_iterations']==200
 

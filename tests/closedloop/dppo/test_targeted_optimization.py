@@ -1,0 +1,129 @@
+"""第二阶段限时优化的奖励、BC关闭与完整目标CPU回归。
+
+使用真实八项GMT标量/向量奖励夹具，验证来源std不改、新评分不重复平方、旧v2仍
+可复现且新旧配置不可混用；使用真实小扩散网络比较完整rollout目标，确保BC关闭
+不调用监督反向、不修改控制器与监督RNG。独立小Adam验证目标下降拒绝与恢复。
+只在pytest临时目录产生数据，不执行正式训练或宣称真实物理收益。
+"""
+import copy
+import math
+
+import pytest
+import torch
+
+from gem.closedloop.dppo.rewards import ExecutionReward,TRACKING_STD,STAGE2_REWARD_STD,REWARD_STD_VERSION
+from gem.closedloop.dppo.vector_reward_math import VectorRewardMath
+from gem.closedloop.dppo.vector_reward_adapter import VectorExecutionReward,compare_reward_evidence
+from gem.closedloop.dppo.gradient_merge import BCGradientController
+from gem.closedloop.dppo.actor_backtracking import backtracked_step,check_candidate_kl
+from gem.closedloop.dppo.collectives import DistributedCollectives
+from gem.closedloop.dppo.tensor_cache import RolloutTensorCache
+from gem.closedloop.dppo.updater import actor_update,final_kl
+from tests.closedloop.dppo.test_clipped_dppo import case,Anchor
+from tests.closedloop.dppo.test_stage2_reward import device_packet
+from tests.closedloop.dppo.test_actor_backtracking import Collective,equal_state
+from tests.closedloop.test_stage1_actor import actor_factory
+from test_data_learning import actual_step,target_activity_fixture
+
+
+def test_new_reward_std_preserves_source_and_scalar_vector_formula():
+    scalar=ExecutionReward({'version':REWARD_STD_VERSION},target_activity=target_activity_fixture)
+    vector=VectorExecutionReward({'version':REWARD_STD_VERSION},target_activity=target_activity_fixture)
+    engine=VectorRewardMath(scalar.config,1,'cpu')
+    import numpy as np
+    scalar.seed_previous_target(np.zeros(21));vector.seed_previous_target(np.zeros(21));engine.previous_valid.fill_(True)
+    row=actual_step(0,speed=1.);row['env_id']=0
+    for name,item in row['motion_tracking']['terms'].items():
+        item['error']=.04
+        item['source_score']=math.exp(-.04/TRACKING_STD[name]**2)
+    for substep in row['physics_substeps']:
+        d=substep['physical_diagnostics']
+        for field in ('foot_support_sphere_tangent_speed_m_s','foot_support_sphere_clearance_m'):
+            import numpy as np
+            d[field]={n:np.zeros(1) for n in d['foot_body_names']}
+    row['physical_diagnostics']=copy.deepcopy(row['physics_substeps'][-1]['physical_diagnostics'])
+    row['reward_primitives']=device_packet(row,engine)
+    expected=scalar.evaluate_step(row);observed=vector.evaluate_step(row)
+    assert expected['transition_valid'],expected['errors']
+    compare_reward_evidence(observed,expected)
+    scores=expected['components']['track']['normalized']['scores']
+    assert scores['anchor_pos']==pytest.approx(math.exp(-1.))
+    assert scores['body_pos']==pytest.approx(math.exp(-.04/.15**2))
+    assert scalar.config['tracking']['source_std']==TRACKING_STD
+    assert scalar.config['tracking']['reward_std']==STAGE2_REWARD_STD
+
+
+def test_reward_versions_reject_ambiguous_or_changed_source_std():
+    assert ExecutionReward().config['tracking']['std']==TRACKING_STD
+    with pytest.raises(ValueError):ExecutionReward({'tracking':{'std':STAGE2_REWARD_STD}})
+    with pytest.raises(ValueError):ExecutionReward({'version':REWARD_STD_VERSION,'tracking':{'std':TRACKING_STD}})
+    bad=copy.deepcopy(TRACKING_STD);bad['anchor_pos']=.2
+    with pytest.raises(ValueError):ExecutionReward({'version':REWARD_STD_VERSION,'tracking':{'source_std':bad}})
+
+
+def test_bc_disabled_has_zero_calls_and_same_full_objective_population(actor_factory,tmp_path):
+    import torch.distributed as dist
+    dist.init_process_group('gloo',init_method=(tmp_path/'gloo').as_uri(),rank=0,world_size=1)
+    policy,rows,targets=case(actor_factory)
+    opt=torch.optim.AdamW([p for p in policy.actor.parameters() if p.requires_grad],lr=1e-8,weight_decay=0.)
+    anchor=Anchor();anchor.backward=lambda *a,**kw:(_ for _ in ()).throw(AssertionError('BC called'))
+    controller=BCGradientController();before=copy.deepcopy(controller.state_dict())
+    distributed=DistributedCollectives(0,1,device='cpu')
+    manifest=[dict(owner_rank=0,local_index=i,valid=True,has_free=True) for i in range(len(rows))]
+    cache=RolloutTensorCache(rows,targets,'cpu')
+    try:
+        result=actor_update(policy,opt,rows,targets,cache,manifest,controller,distributed=distributed,
+            anchor=anchor,generator=torch.Generator().manual_seed(73),minibatch_chains=2,microbatch=3,
+            soft_kl=None,max_active_clip=1.,bc_enabled=False,audit_full_rollout_objective=True)
+        assert result['actual_global_bc_samples']==0 and result['planned_global_bc_samples']==0
+        assert equal_state(controller.state_dict(),before)
+        reference=final_kl(policy,rows,cache,manifest,distributed=distributed,microbatch=3,clip=.1)
+        assert result['full_rollout_objective_history'][-1]['objective_mean']==pytest.approx(reference['objective_mean'],abs=1e-10)
+        assert all(s['full_rollout_after']['complete_chain_count']==len(rows) for s in result['steps'])
+        assert result['steps'][0]['parameter_update']['gradient_projection_measured']
+        assert result['steps'][0]['parameter_update']['modules']['all']['cosine_update_negative_ppo_gradient'] is not None
+    finally:
+        cache.close();dist.destroy_process_group()
+
+
+def test_objective_aware_rejects_bad_gain_and_restores_nonempty_adam():
+    actor=torch.nn.Linear(2,1);opt=torch.optim.AdamW(actor.parameters(),lr=1e-6,weight_decay=0.)
+    for p in actor.parameters():p.grad=torch.ones_like(p)
+    opt.step();control=BCGradientController()
+    before=copy.deepcopy((actor.state_dict(),opt.state_dict(),control.state_dict()))
+    def evaluate():return dict(chain_joint_kl={'mean':0.,'p95':0.,'max':0.},objective_mean=-.1)
+    result=backtracked_step(actor,opt,control,evaluate=evaluate,limits={'objective_reference':0.},
+        distributed=Collective(),max_attempts=2)
+    assert not result['accepted'] and result['finite_trust_region_exhausted']
+    assert equal_state((actor.state_dict(),opt.state_dict(),control.state_dict()),before)
+    assert check_candidate_kl(evaluate(),{})['passed']
+
+
+def test_objective_search_keeps_best_trial_and_single_adam_history():
+    actor=torch.nn.Linear(2,1);opt=torch.optim.AdamW(actor.parameters(),lr=1e-6,weight_decay=0.)
+    for p in actor.parameters():p.grad=torch.ones_like(p)
+    opt.step();controller=BCGradientController()
+    expected=copy.deepcopy(actor);expected_opt=torch.optim.AdamW(expected.parameters(),lr=1e-6,weight_decay=0.)
+    expected_opt.load_state_dict(copy.deepcopy(opt.state_dict()))
+    for p in expected.parameters():p.grad=torch.ones_like(p)
+    expected_opt.param_groups[0]['lr']=5e-7;expected_opt.step()
+    result=backtracked_step(actor,opt,controller,
+        evaluate=lambda:dict(objective_mean={1e-6:.01,5e-7:.03,2.5e-7:.02}[opt.param_groups[0]['lr']]),
+        limits={'objective_reference':0.},distributed=Collective(),max_attempts=3,select_best=True,search_attempts=3)
+    assert result['accepted_lr']==5e-7 and result['selected_attempt']==2
+    # 验证恢复的是最佳候选自己的参数与Adam，而不是最后一次试探。
+    assert all(float(s['step'])==2 for s in opt.state.values())
+    assert equal_state(actor.state_dict(),expected.state_dict())
+    assert equal_state(opt.state_dict(),expected_opt.state_dict())
+
+
+def test_deterministic_display_preserves_frozen_hybrid_policy(actor_factory):
+    policy,rows,_=case(actor_factory)
+    context=rows[0].context
+    a=policy.sample_rollout(context,generator=torch.Generator().manual_seed(49),deterministic_transitions=True)
+    b=policy.sample_rollout(context,generator=torch.Generator().manual_seed(49),deterministic_transitions=True)
+    torch.testing.assert_close(a['chain'],b['chain'],rtol=0,atol=0)
+    assert not a['sampling_noise'].count_nonzero()
+    with torch.no_grad():
+        expected=policy.transition_parameters(context,a['chain'][:,19],19)['mean']
+    torch.testing.assert_close(a['chain'][:,20],expected,rtol=0,atol=0)

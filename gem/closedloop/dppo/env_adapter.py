@@ -322,10 +322,10 @@ class UpperEnvironment:
         timings['input_transfer_seconds'] = transferred-condition_end
         if deterministic:
             with torch.no_grad():
-                noise = torch.randn((1,batch['future_valid'].shape[1],30),device=device,generator=generator)
-                sample = self.policy.actor.sample(batch, steps=self.policy.steps,
-                    guidance_scale=self.policy.guidance_scale,noise=noise)
-            trace = {'conditions':cpu_copy(context), 'deterministic_baseline':True}
+                sample = self.policy.sample_rollout(batch,generator=generator,deterministic_transitions=True)
+            trace = {'conditions':cpu_copy(context), 'deterministic_baseline':True,
+                'sampling_definition':'hybrid15+4+1_fixed_initial_noise_zero_innovations_display_only',
+                'training_buffer_allowed':False}
         else:
             trace = self.policy.sample_rollout(batch, generator=generator)
             sample = trace

@@ -276,11 +276,20 @@ stage10:
     track_weight: 2.5
     tracking:
       objective: gmt.motion_tracking.eight_terms.v1
-      std:
+      source_std:
         anchor_pos: 0.3
         anchor_ori: 0.4
         body_pos: 0.3
         body_ori: 0.4
+        body_lin_vel: 1.0
+        body_ang_vel: 3.14
+        foot_height: 0.07
+        leg_joint_pos: 0.25
+      reward_std:
+        anchor_pos: 0.20
+        anchor_ori: 0.30
+        body_pos: 0.15
+        body_ori: 0.20
         body_lin_vel: 1.0
         body_ang_vel: 3.14
         foot_height: 0.07
@@ -294,7 +303,7 @@ stage10:
         body_ang_vel: 0.15873015873015872
         foot_height: 0.126984126984127
         leg_joint_pos: 0.07936507936507936
-    version: stage2.gmt8_reference_limits.v2
+    version: stage2.gmt8_reward_std.v3
   run_control:
     max_training_iterations: 200
   scale:
@@ -312,6 +321,9 @@ stage10:
     tensor_cache_max_bytes: 4294967296
     checkpoint_interval_iterations: 100
   training:
+    # 第二阶段关闭BC反向；保留原Stage1监督实现与独立验证，不新增约束网络。
+    bc_enabled: false
+    audit_full_rollout_objective: true
     actor_trainable_scope: all
     actor_lr: 1.0e-06
     actor_lr_multipliers:

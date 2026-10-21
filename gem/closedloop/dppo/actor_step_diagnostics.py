@@ -58,10 +58,14 @@ class StepDiagnostics:
             a, b = self.components.get(name, (None, None))
             ppo_dot = delta.new_zeros(()) if a is None else -(delta*a.double()).sum()
             bc_dot = delta.new_zeros(()) if b is None else -(delta*b.double()).sum()*bc_weight
+            ppo_energy=delta.new_zeros(()) if a is None else a.double().square().sum()
+            bc_energy=delta.new_zeros(()) if b is None else b.double().square().sum()*bc_weight**2
+            cross=delta.new_zeros(()) if a is None or b is None else (a.double()*b.double()).sum()*bc_weight
             values = torch.stack((delta.new_tensor(p.numel()), (delta != 0).sum(), old.square().sum(),
                 delta.square().sum(), delta.abs().max(), grad.double().square().sum(), (grad != 0).sum(),
                 ((grad != 0) & (delta == 0)).sum(), (ideal != 0).sum(),
-                ((ideal != 0) & (delta == 0)).sum(), ideal.square().sum(), ppo_dot, bc_dot))
+                ((ideal != 0) & (delta == 0)).sum(), ideal.square().sum(), ppo_dot, bc_dot,
+                ppo_energy,bc_energy,ppo_energy+bc_energy+2*cross))
             keys = ['all', _group(name)]
             if name.startswith('denoiser.blocks.'):
                 keys.append(actor_parameter_group(name))
@@ -74,7 +78,7 @@ class StepDiagnostics:
                     totals[key][4] = maximum
         output = {}
         for name, v in zip(totals, torch.stack(list(totals.values())).cpu().tolist()):
-            n, changed, norm2, delta2, maximum, grad2, nonzero, unchanged, ideal_n, rounded, ideal2, pdot, bdot = v
+            n, changed, norm2, delta2, maximum, grad2, nonzero, unchanged, ideal_n, rounded, ideal2, pdot, bdot, pe, be, ce = v
             output[name] = dict(elements=int(n), changed_elements=int(changed), changed_fraction=changed/n,
                 update_rms=math.sqrt(delta2/n), update_max=maximum,
                 relative_update_norm=math.sqrt(delta2/max(norm2, 1e-300)), parameter_rms=math.sqrt(norm2/n),
@@ -84,7 +88,13 @@ class StepDiagnostics:
                 nonzero_adam_delta_elements=int(ideal_n), fp32_rounded_to_zero_fraction=rounded/max(ideal_n, 1),
                 adam_subtraction_fp64_delta_rms=math.sqrt(ideal2/n),
                 update_dot_negative_ppo_gradient=pdot if self.components else None,
-                update_dot_negative_weighted_bc_gradient=bdot if self.components else None)
+                update_dot_negative_weighted_bc_gradient=bdot if self.components else None,
+                update_dot_negative_combined_gradient=pdot+bdot if self.components else None,
+                cosine_update_negative_ppo_gradient=pdot/math.sqrt(delta2*pe) if delta2*pe>0 else None,
+                cosine_update_negative_weighted_bc_gradient=bdot/math.sqrt(delta2*be) if delta2*be>0 else None,
+                cosine_update_negative_combined_gradient=(pdot+bdot)/math.sqrt(delta2*ce) if delta2*ce>0 else None,
+                ppo_gradient_norm=math.sqrt(max(pe,0)),weighted_bc_gradient_norm=math.sqrt(max(be,0)),
+                combined_gradient_norm=math.sqrt(max(ce,0)))
         return dict(modules=output, master_dtype='float32', learning_rates=actor_learning_rates(optimizer),
             rounding_scope='FP64_reconstruction_from_actual_FP32_Adam_moments_before_parameter_subtraction',
             gradient_projection_measured=bool(self.components),

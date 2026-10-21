@@ -240,7 +240,7 @@ def _decision_evidence(result, index):
     for reward, detail in zip(rewards, details):
         if detail.get('transition_valid') is not True:
             raise ValueError('Invalid reward detail cannot enter evaluation statistics')
-        if detail.get('version') != 'stage2.gmt8_reference_limits.v2' or detail.get('activity', {}).get('valid') is not True:
+        if detail.get('version') not in ('stage2.gmt8_reference_limits.v2','stage2.gmt8_reward_std.v3') or detail.get('activity', {}).get('valid') is not True:
             raise ValueError('Evaluation requires current reward version and valid paired activity')
         if not math.isclose(_number(detail['dt_s'], 'dt'), .02, abs_tol=1e-12):
             raise ValueError('Evaluation control intervals must be 50Hz')

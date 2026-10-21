@@ -627,6 +627,7 @@ def run(cargs,config,distributed):
                     objective_reduction=c.settings['objective_logprob_reduction'],
                     grad_clip_norm=c.settings['grad_clip_norm'],reserve_attempt=reserve,
                     bc_samples_per_rollout=c.settings['bc_samples_per_rollout'],bc_min_global_batch=c.settings['bc_min_global_batch'],
+                    bc_enabled=c.settings.get('bc_enabled',True),audit_full_rollout_objective=c.settings.get('audit_full_rollout_objective',False),
                     max_active_clip=c.settings['max_active_clip_fraction'],
                     trust_region=c.settings['trust_region'],kl_limits=c.stage['kl'],
                     step_observer=lambda step:_record_actor_step(c,label,step),
