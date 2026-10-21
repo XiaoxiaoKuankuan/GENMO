@@ -64,3 +64,25 @@ run与同一Adam恢复至第10轮，完成提前固定评估，再自动恢复�
 临时源码/tmp/stage2_4096_ungated_i57_8zjp与/tmp/stage2_4096_ungated_26q37upn
 和服务器传输patch已精确清理，本地patch在本批结束前清理。原始失败与通过日志
 保留上述analysis目录，作为本轮必要证据。正式模型与训练日志不做清理。
+
+
+真实启动记录
+------------
+
+13:22:24通过tmux genmo_transformer4096_ungated_train启动本次流程，实际代码
+03f469c；首会话69a9841d-31f1-4758-b757-dc7039208290，torchrun父PID3139333，
+LOCAL_RANK0～7对应worker3139339～3139346，均已存在且创建GPU上下文。
+13:23保存Stage1初始完整checkpoint，尚无Actor更新。
+
+startup_verified.json核对实际training_identity：4096、all、595000、reward v2、
+yaw=null、MC匹配训练reset，18组LR倍率正确。真实Isaac TerminationManager
+日志仅含anchor_pos、ee_body_pos、non_yaw_anchor_ori三项，偏航项未注册。
+当前已进入preheat_val物理采集；此处不将MC准备状态冒充PPO正式更新。
+
+本次运行启动器保存在analysis/launcher.py（本地同名outputs/analysis内有副本），
+中文头注释说明用途、数据流和边界，已通过compile语法检查；launcher.log及每阶段
+launch/exit/verified JSON保留实际进度。启动器只执行既有统一入口和同目录恢复，
+对源码版本、ESS、新增音乐失败、奖励立即改善均不设置门禁。
+
+后续阶段日志为through10.log、formal.log；本次全部阶段都写同一运行目录，
+前2轮和第10轮完整保存后自动恢复，累计上限保持200，不重置Adam或预算。
