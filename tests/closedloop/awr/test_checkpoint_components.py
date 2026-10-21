@@ -51,17 +51,22 @@ def test_resume_acceptance_uses_saved_boundary_and_restores_original_actor(tmp_p
     data = ReplayDataset([make(episode_id="a"), make(episode_id="b")], unit_weights=True)
     data.rows, data.sample_ids, data.sources = data.rows[:3], data.sample_ids[:3], data.sources[:3]
     data.group_valid = data.group_valid[:3]
+    data.group_valid[0] = True
     data.returns, data.weights = data.returns[:3], torch.tensor([.5, 1., 2.], dtype=torch.float64)
     d = Distributed()
     original = d.assert_models_equal(actor)
     def bc_factory():
         if not bc_enabled: raise AssertionError("Disabled BC sampler was created")
         return ArithmeticBC()
-    report = tool.verify_resume(actor, data, bc_factory, dict(lr=1e-5, bc_enabled=bc_enabled), d, tmp_path/"checkpoint")
+    report = tool.verify_resume(actor, data, bc_factory,
+        dict(lr=1e-5, bc_enabled=bc_enabled, candidate_objective_fraction=.25,
+             source_balance="uniform_sources"), d, tmp_path/"checkpoint")
     assert report["diagnostic_optimizer_updates"] == 3
     assert report["actor_optimizer_scheduler_bc_rng_exact"]
     assert report["original_actor_restored"] == original
     assert report["global_bc_samples"] == int(bc_enabled)
+    assert report["verified_candidate_samples"] == 1
+    assert report["candidate_coefficient_mass"] == pytest.approx(.25)
 
 
 def test_paired_checkpoint_acceptance_rejects_changed_bc_random_stream():

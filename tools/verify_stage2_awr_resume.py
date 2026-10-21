@@ -72,6 +72,8 @@ def verify_resume(actor, dataset, bc_factory, config, distributed, output):
     return dict(status="passed", world_size=d.world_size, continuous_steps=continuous["steps"],
         resumed_total_steps=resumed["steps"], diagnostic_optimizer_updates=3,
         formal_run_optimizer_updates_added=0, physical_controls=0, global_awr_samples=3,
+        verified_candidate_samples=int(dataset.group_valid.sum()),
+        candidate_coefficient_mass=float(trainer.source_weights[dataset.group_valid].sum()/trainer.source_weights.sum()),
         global_bc_samples=1 if enabled else 0, bc_enabled=enabled, sample_ids=dataset.sample_ids,
         continuous_and_resumed_actor=expected_fingerprint, original_actor_restored=fingerprint,
         actor_optimizer_scheduler_bc_rng_exact=True, diagnostic_checkpoint=saved[0])
@@ -156,6 +158,8 @@ def main():
             if not torch.equal(labels.returns[ids], data.returns):
                 raise ValueError("Fixed labels differ from actual Replay MC")
             data.weights = labels.weights[ids].clone()
+            if labels.group_valid is not None:
+                data.group_valid = labels.group_valid[ids].clone()
             return data
         dataset = d.local(subset)
         result = verify_resume(actor, dataset,
