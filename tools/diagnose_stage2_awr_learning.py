@@ -7,6 +7,8 @@
 不重新拟合Critic、不调用Optimizer.step，也不改原标签、模型或运行state。
 报告只能解释该冻结样本的相关性和优化方向，不能把它当成新策略的因果效果实验。
 使用原运行源码导入模型；诊断工具来自独立交付目录。输出必须是全新的独立目录。
+新目标按运行配置应用固定时间/来源因子，并额外比较均匀时间对照；旧运行无这些
+配置时保持旧公式。四组结果按实际checkpoint身份读取，不改正在运行的源码。
 """
 from __future__ import annotations
 
@@ -169,6 +171,19 @@ def main():
     actor,_,_=load_actor(physical_config(state["config"],run_id=root.name,device=str(device)))
     actor.eval(); initial={k:v.detach().cpu().clone() for k,v in actor.state_dict().items()}
     fingerprint=_model_fingerprint(actor); parameters={k:p for k,p in actor.named_parameters() if p.requires_grad}
+    objective = state["config"]["awr"]["actor"]
+    if "timestep_weighting" in objective or "source_balance" in objective:
+        from gem.closedloop.awr.objective import timestep_weights, source_weights
+        time_weights = timestep_weights(actor.train_diffusion.alphas_cumprod, objective.get("timestep_weighting"))
+        source_factors = source_weights(data.sources, objective.get("source_balance", "none"))
+    else:
+        time_weights = torch.ones(actor.diffusion_steps, dtype=torch.float64)
+        source_factors = torch.ones(len(data), dtype=torch.float64)
+    report["training_objective"] = dict(bc_enabled=objective.get("bc_enabled", True),
+        timestep_weighting=objective.get("timestep_weighting", {"mode":"uniform"}),
+        source_balance=objective.get("source_balance", "none"),
+        time_weights=time_weights.tolist(),
+        source_factors={s:float(source_factors[data.sources.index(s)]) for s in sorted(set(data.sources))})
     def noise_for(ids,step):
         ts=[];noise=[]
         for i in ids:
@@ -176,7 +191,7 @@ def main():
             ts.append(torch.randint(actor.diffusion_steps,(),generator=rng))
             noise.append(torch.randn(data.rows[i].target_qpos30.shape,generator=rng))
         return torch.stack(ts).to(device),torch.stack(noise).to(device)
-    def gradients(ids,step,weighted,fixed_t=None):
+    def gradients(ids,step,weighted,fixed_t=None,uniform_time=False):
         actor.zero_grad(set_to_none=True); total=0.
         for offset in range(0,len(ids),8):
             part=ids[offset:offset+8];b=data.batch(part,device);t,noise=noise_for(part,step)
@@ -184,10 +199,14 @@ def main():
             out=actor.denoising_forward(b["conditions"],b["target"],b["target_valid"],timesteps=t,noise=noise,guidance_scale=2.5)
             losses=per_sample_denoising(out["pred_x_start"],out["target_x_start"],b["free_mask"])
             w=b["weights"] if weighted else torch.ones_like(b["weights"])
+            w = w*source_factors[part].to(device)
+            if not uniform_time:
+                w = w*time_weights[t.detach().cpu()].to(device)
             loss=(losses.double()*w).sum()/len(ids);loss.backward();total+=float(loss.detach())
         return {n:p.grad.detach().cpu().clone() for n,p in parameters.items() if p.grad is not None},total
     order=torch.randperm(len(data),generator=torch.Generator().manual_seed(state["config"]["awr"]["seed"])).tolist()
     report["initial_gradient_comparisons"]=[]
+    report["initial_time_objective_comparisons"]=[]
     for step in range(args.gradient_batches):
         ids=order[step*256:(step+1)*256]
         if not ids: break
@@ -195,7 +214,13 @@ def main():
         entry=dict(step=step,samples=len(ids),unit_loss=lu,weighted_loss=lw,**vector_comparison(unweighted,weighted))
         entry["modules"]={m:vector_comparison({k:v for k,v in unweighted.items() if actor_module_name(k)==m},
             {k:v for k,v in weighted.items() if actor_module_name(k)==m}) for m in sorted({actor_module_name(k) for k in unweighted})}
-        report["initial_gradient_comparisons"].append(entry);del unweighted,weighted
+        report["initial_gradient_comparisons"].append(entry)
+        if objective.get("timestep_weighting", {}).get("mode", "uniform") != "uniform":
+            uniform, loss = gradients(ids,step,False,uniform_time=True)
+            report["initial_time_objective_comparisons"].append(dict(step=step,samples=len(ids),
+                uniform_loss=loss,configured_loss=lu,**vector_comparison(uniform,unweighted)))
+            del uniform
+        del unweighted,weighted
         save("initial_gradients_"+str(step+1))
     actor.zero_grad(set_to_none=True)
     if _model_fingerprint(actor)!=fingerprint: raise ValueError("Gradient diagnosis mutated Actor parameters")
@@ -222,9 +247,15 @@ def main():
             save("timestep_gradient_"+str(timestep))
         del clean;actor.zero_grad(set_to_none=True)
     checkpoint=Checkpoints(root/"checkpoints",dict(request=state["request_sha256"],sources=state["source_commits"]))
-    payloads={m:checkpoint.load(state["artifacts"]["macro000_"+m+"_final"])["payload"] for m in ("self_distillation","awr")}
+    methods = ["self_distillation", "awr"]
+    if "macro000_self_distillation_uniform_final" in state["artifacts"]:
+        methods.insert(0, "self_distillation_uniform")
+    payloads={m:checkpoint.load(state["artifacts"]["macro000_"+m+"_final"])["payload"] for m in methods}
     delta={m:{k:p["actor"][k]-initial[k] for k in parameters} for m,p in payloads.items()}
     report["parameter_delta_comparison"]=vector_comparison(delta["self_distillation"],delta["awr"])
+    if "self_distillation_uniform" in delta:
+        report["time_objective_parameter_delta_comparison"] = vector_comparison(
+            delta["self_distillation_uniform"],delta["self_distillation"])
     del delta;gc.collect()
     report["probes"]={};baseline_output=None
     for name,weights in [("stage1",initial),*((m,p["actor"]) for m,p in payloads.items())]:
