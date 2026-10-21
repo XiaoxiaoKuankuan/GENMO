@@ -4,8 +4,11 @@
 Advantage Labeling → Weighted Diffusion Training → Evaluation。宏迭代与 PPO iteration 无关。
 原先导配置为512集、FIFO512、5 Epoch、256 AWR＋128 BC、LR1e-5。
 2026-10-21原五轮已按用户要求停止。当前修复验收使用`stage2_awr_retention.yaml`：
-64集、1宏、B/C各最多45步、名义LR1e-7、固定BC和冻结教师约束。它是有限验收配置，
+64集、1宏、B/C各最多45步、名义LR1e-7、固定BC和教师系数10000。它是有限验收配置，
 不代表恢复512集或五轮正式训练；最新结论见[修复报告](stage2_awr_distillation_repair_20261021.md)。
+新64集的教师1000候选被物理门禁拒绝；同数据/时钟提高到10000后，无权重保留通过，
+AWR仍未证实收益且执行时长缩短，best仍保留Stage1。原`stage2_awr.yaml`中的512集/LR1e-5
+是历史候选，不能当成此次修复后的推荐参数直接继续正式训练。
 
 2026-10-20：64集及独立512首轮、三组完整音乐对照、真实八卡梯度与续算验收已完成。
 全54任务Stage1/自蒸馏/AWR成功数为50/49/52，但AWR成对回报收益CI跨零，且Root、
@@ -15,12 +18,14 @@ Joint和滑动指标变差；固定32任务时长门槛未通过，`best_saved`�
 
 ## Server-2 命令
 
-最新交付源码放在`/home/user/liwei/awr-worktrees/GENMO-repair-delivery-20261021`，使用同一AWR分支。
+最新交付源码放在`/home/user/liwei/awr-worktrees/GENMO-repair-final-20261021`，使用同一AWR分支。
+`GENMO-repair-delivery-20261021`固定实际物理验收提交066bd1b；后续验收工具/结果/配置注释在GitHub追加，
+没有热更新这份可复现的运行源码。完整验收工具来自309752c，独立归档执行。
 `GENMO-delivery`固定077024b供本次64集运行恢复；`GENMO-formal5-20261020`固定6c5fda0。
 以下为独立新运行的接口示例，执行须遵守当前有限预算；不更新冻结运行源码或editable指向。
 
 ```bash
-cd /home/user/liwei/awr-worktrees/GENMO-repair-delivery-20261021
+cd /home/user/liwei/awr-worktrees/GENMO-repair-final-20261021
 bash tools/run_stage2_awr_server2.sh preflight
 bash tools/run_stage2_awr_server2.sh verify --report <独立证据目录>/distributed.json
 bash tools/run_stage2_awr_server2.sh run --config configs/closedloop/stage2_awr_retention.yaml \

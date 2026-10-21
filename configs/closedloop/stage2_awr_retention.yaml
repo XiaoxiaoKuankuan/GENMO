@@ -1,7 +1,7 @@
 # 自蒸馏保留修复的有限候选：新奖励、同采样CFG、冻结两分支约束。
 # 只允许64个预定Episode的一轮验证，每个Actor分支最多45次真实更新；不自动补采或进入长期训练。
-# 教师系数1000已在历史32集/45步单位权重诊断通过32任务物理保留；系数10曾失败。
-# 新奖励64集宏迭代仍须重新通过本轮无权重门禁，不能把前一验收当作新数据的通过证据。
+# 教师1000曾在32集通过，但在新64集新增失败；10000在同64集/时钟的45步复验通过有限保留。
+# AWR的成对收益尚未证实，执行时长仍缩短；此配置不是正式训练推荐值，每次必须重新通过门禁。
 diagnostics:
   record_original_threshold_crossings: true
   reward_substeps: true
@@ -231,7 +231,7 @@ awr:
     calibration_batches: 8
     bc_gradient_ratio: 0.1
     checkpoint_every_steps: 50
-    reference_weight: 1000.0
+    reference_weight: 10000.0
     bc_fixed_weight: 0.01366578514366661
     max_optimizer_steps: 45
   critic:
