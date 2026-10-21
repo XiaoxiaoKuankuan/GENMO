@@ -12,6 +12,9 @@ Stage1重新执行完整32任务，使用删除活动乘数后的同一奖励。
 用于只改变一个因素的后续复验，不重写先前失败候选。
 对照可显式复用已测部署profile，校验采样器/资产/来源SHA与测量数组；不把重新
 测时导致的物理变化算成模型变化，训练与评价必须传同一profile。
+refit操作只读复用已停止的新奖励运行的全部至多64集、原快照顺序、MC与固定交叉标签，
+不新增训练采集。先执行单位权重生成和完整物理保留门禁，通过后才允许相同配置的
+AWR对照；每组最多45步，不恢复旧正式训练。失败候选、原数据和原时钟始终保留。
 """
 from __future__ import annotations
 
@@ -29,9 +32,36 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 
+def refit_snapshot_entries(snapshot, rows):
+    """保持原快照完整顺序，禁止默默抽样、重复或补足不同Episode。"""
+    ids = snapshot["episode_ids"]
+    if not 1 <= len(ids) <= 64 or len(set(ids)) != len(ids):
+        raise ValueError("Refit requires 1–64 unique complete Episodes")
+    lookup = {key: dict(id=key, source=source, sha=sha) for key, source, sha in rows}
+    if not set(ids).issubset(lookup):
+        raise ValueError("Refit snapshot contains missing Episodes")
+    return [lookup[key] for key in ids]
+
+
+def validate_refit_contract(contract, config, sampler):
+    """重用奖励标签必须保持资产、时钟、终止和采样定义；原采集提交身份不改写。"""
+    expected = {key: config[key] for key in ("assets", "reward", "environment", "termination", "timing")}
+    expected.update(configuration_assets=config["awr"]["configuration_assets"], sampler=sampler,
+                    horizon_frames=60, schema="genmo.awr.replay_physics.v1")
+    for key, value in expected.items():
+        if contract.get(key) != value:
+            raise ValueError(f"Refit Replay contract changed: {key}")
+
+
+def require_unweighted_refit(generation, physical):
+    """任何未通过或缺失的保留证据都禁止进入优势加权训练。"""
+    if generation.get("generation_probe_passed") is not True or physical.get("accepted") is not True:
+        raise ValueError("Unweighted generation and physical retention must pass before AWR")
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("operation", choices=("train", "evaluate"))
+    parser.add_argument("operation", choices=("train", "evaluate", "refit"))
     parser.add_argument("--source-run", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--config", type=Path, default=ROOT/"configs/closedloop/stage2_awr.yaml")
@@ -57,6 +87,10 @@ def main():
         parser.error("BC weight must be finite and positive")
     if len(set(args.methods)) != len(args.methods):
         parser.error("Duplicate diagnostic arms are not allowed")
+    if args.operation == "refit":
+        if args.max_steps > 45 or args.reference_weight <= 0:
+            parser.error("Refit requires a positive teacher constraint and at most 45 steps/arm")
+        args.methods = ["bounded", "awr"]
     if args.operation == "train" and args.bc_weight is None and args.methods[0] != "legacy":
         parser.error("Start with legacy calibration or provide an explicit fixed --bc-weight")
     from gem.closedloop.awr.config import load_config, physical_config, preflight, validate_measured_deployment_profile
@@ -80,18 +114,29 @@ def main():
     group = None
     started = time.perf_counter()
     try:
-        cfg = load_config(args.config); cfg["paths"]["genmo_repo"] = str(ROOT)
-        if args.deployment_profile is not None:
+        source, output = args.source_run.resolve(), args.output.resolve()
+        state = json.loads((source/"state.json").read_text())
+        if state["status"] not in ("stopped", "complete", "user_interrupted", "retention_rejected", "physical_rejected"):
+            raise ValueError("Source training must be stopped before diagnosis")
+        cfg = load_config(source/"request.json" if args.operation == "refit" else args.config)
+        cfg["paths"]["genmo_repo"] = str(ROOT)
+        if args.operation == "refit":
             cfg["timing"]["deployment_profile"] = validate_measured_deployment_profile(
+                state["config"]["timing"]["deployment_profile"], cfg)
+            if cfg["timing"]["deployment_profile"] is None:
+                raise ValueError("Refit must reuse its source's measured physical clock")
+            if args.bc_weight is None:
+                args.bc_weight = json.loads(Path(state["artifacts"]["macro000_bc_calibration"]).read_text())["coefficient"]
+        if args.deployment_profile is not None:
+            profile = validate_measured_deployment_profile(
                 json.loads(args.deployment_profile.read_text()), cfg)
+            if args.operation == "refit" and profile != cfg["timing"]["deployment_profile"]:
+                raise ValueError("Refit cannot change its source's physical clock")
+            cfg["timing"]["deployment_profile"] = profile
         d = Distributed(f"cuda:{rank}")
         audit = d.root(lambda: preflight(cfg))
         cfg["awr"]["configuration_assets"] = audit["configuration_assets"]
         cfg["awr"]["source_commits"] = {k: v["commit"] for k, v in audit["repositories"].items()}
-        source, output = args.source_run.resolve(), args.output.resolve()
-        state = json.loads((source/"state.json").read_text())
-        if state["status"] not in ("stopped", "complete", "user_interrupted"):
-            raise ValueError("Source training must be stopped before diagnosis")
         torch.cuda.set_device(rank); torch.set_num_threads(4); torch.manual_seed(812)
         torch.backends.cuda.matmul.allow_tf32 = torch.backends.cudnn.allow_tf32 = False
         torch.backends.cuda.enable_flash_sdp(False); torch.backends.cuda.enable_mem_efficient_sdp(False)
@@ -101,13 +146,15 @@ def main():
         original = cpu_copy(actor.state_dict()); fingerprint = d.assert_models_equal(actor)
         identity = dict(sources=audit["repositories"], config=digest(cfg), source_run=str(source),
                         source_request=state["request_sha256"], original_actor=fingerprint)
-        if args.operation == "train":
+        if args.operation in ("train", "refit"):
             d.root(lambda: output.mkdir(parents=True, exist_ok=False))
             d.root(lambda: atomic_json(output/"identity.json", identity))
             d.root(lambda: atomic_json(output/"preflight.json", audit))
             d.root(lambda: atomic_json(output/"experiment.json", dict(methods=args.methods, bounded_lr=args.bounded_lr,
                 reference_weight=args.reference_weight, bc_weight=args.bc_weight, max_steps=args.max_steps,
-                episodes_per_source=args.episodes_per_source)))
+                episodes_per_source=args.episodes_per_source, operation=args.operation,
+                new_collection_episodes=0, formal_training_restarted=False)))
+            d.root(lambda: atomic_json(output/"resolved_config.json", cfg))
         else:
             if json.loads((output/"identity.json").read_text()) != identity:
                 raise ValueError("Diagnosis/evaluation source or configuration changed")
@@ -134,12 +181,55 @@ def main():
             values = [v for items in d.gather(result) for v in items]
             d.root(lambda: write_tree(output/"probes"/name, values))
             return values
-        if args.operation == "train":
+        def physical_pair(candidate, summary):
+            from gem.closedloop.common.full_dataset import FullMusicCatalog
+            from gem.closedloop.online_conditions import OnlineConditionBuilder
+            from gem.closedloop.awr.world import calibrate
+            from gem.closedloop.awr.evaluation import evaluate
+            from gem.closedloop.awr.retention import retention_comparison
+            # 评价失败探针也允许保留真实反例，但绝不据此自动批准AWR。
+            catalog = d.local(lambda: FullMusicCatalog(cfg["paths"]["data_root"]))
+            audit_data = json.loads(Path(state["artifacts"]["data_audit"]).read_text())
+            d.local(lambda: catalog.apply_audit(audit_data))
+            plan = json.loads(Path(state["artifacts"]["evaluation_fixed"]).read_text())
+            builder = OnlineConditionBuilder(actor.endecoder.codec, history_steps=50, motion_frames=60)
+            profile_path = output/"deployment_profile.json"
+            fixed_profile = cfg["timing"]["deployment_profile"]
+            if profile_path.exists():
+                profile = json.loads(profile_path.read_text())
+                if fixed_profile is not None and profile != fixed_profile:
+                    raise ValueError("Evaluation must retain the explicitly bound deployment profile")
+            elif fixed_profile is not None:
+                profile = fixed_profile
+                d.root(lambda: atomic_json(profile_path, profile))
+            else:
+                profile = calibrate(runtime, policy, builder, catalog, plan["tasks"], output/"calibration", d, fingerprint)
+                d.root(lambda: atomic_json(profile_path, profile))
+            runtime["timing"]["deployment_profile"] = profile
+            physics = digest(dict(config=cfg, profile=profile, sources=audit["repositories"]))
+            reports = {}
+            for name in ("stage1", candidate):
+                path = output/(name+"_physical.json")
+                if path.exists(): reports[name] = json.loads(path.read_text()); continue
+                d.root(lambda: atomic_json(output/"evaluation_state.json", dict(status="evaluating", method=name)))
+                actor.load_state_dict(original if name == "stage1" else checkpoints.load(summary["checkpoint"])["payload"]["actor"])
+                physical = evaluate(runtime, policy, builder, catalog, plan, output/"physical"/name, d,
+                    fingerprint=d.assert_models_equal(actor), physics_identity=physics,
+                    progress_path=output/"evaluation_progress"/name, should_stop=lambda: stop_requested(output))
+                d.root(lambda: atomic_json(path, physical)); reports[name] = physical
+            retention = retention_comparison(reports["stage1"], reports[candidate], cfg["awr"]["retention_gate"])
+            retention["generation_probe_passed"] = summary["generation_probe_passed"]
+            retention["accepted"] = retention["accepted"] and summary["generation_probe_passed"]
+            d.root(lambda: atomic_json(output/(candidate+"_physical_retention.json"), retention))
+            return reports, retention
+        if args.operation in ("train", "refit"):
             def select():
                 snap = json.loads((source/"replay/snapshots"/(state["artifacts"]["macro000_replay"]+".json")).read_text())
                 allowed = set(snap["episode_ids"])
                 with sqlite3.connect("file:"+str(source/"replay/index.sqlite")+"?mode=ro", uri=True) as db:
                     rows = db.execute("SELECT id,source,sha FROM episodes ORDER BY seq").fetchall()
+                if args.operation == "refit":
+                    return refit_snapshot_entries(snap, rows)
                 groups = {}
                 for key, origin, sha in rows:
                     if key in allowed:
@@ -157,12 +247,23 @@ def main():
                         raise ValueError("Historical Replay identity mismatch")
                     ep = AWRCompleteEpisode.from_dict(read_tree(path, episode_metadata_keys=TRAINING_METADATA_KEYS))
                     ep.training_view = True; ep.validate()
+                    if args.operation == "refit":
+                        validate_refit_contract(ep.contract, cfg, policy.kernel_config)
                     if any(r.identity["actor_fingerprint"] != fingerprint for r in ep.rows):
                         raise ValueError("Self-distillation source must be the same frozen Stage1 teacher")
                     episodes.append(ep)
                 return episodes
             episodes = d.local(read_episodes)
-            data = ReplayDataset(episodes, unit_weights=True)
+            labels = None
+            if args.operation == "refit":
+                from gem.closedloop.awr.advantages import AdvantageLabelSet
+                labels = AdvantageLabelSet.load(state["artifacts"]["macro000_labels"])
+                labeled = ReplayDataset(episodes, labels)
+                d.root(lambda: atomic_json(output/"source_labels.json", dict(
+                    path=state["artifacts"]["macro000_labels"], identity=labels.identity,
+                    statistics=labels.statistics, replay_snapshot=state["artifacts"]["macro000_replay"],
+                    sample_ids_digest=digest(labeled.sample_ids))))
+                del labeled
             def validation_cases():
                 bc = Stage1Supervision(runtime, actor, train, source_step=report["source_global_step"], split="val")
                 cases = []; gen = torch.Generator().manual_seed(90317)
@@ -179,20 +280,23 @@ def main():
             before = probe("stage1", cases)
             base = copy.deepcopy(cfg["awr"]["actor"])
             base.update(max_optimizer_steps=args.max_steps, reference_weight=0.)
-            coefficient = args.bc_weight; summaries = {}
+            coefficient = args.bc_weight; summaries = {}; unit_retention = None
             for name in args.methods:
                 if d.root(lambda: stop_requested(output)):
                     return 0
-                actor.load_state_dict(original); torch.manual_seed(42+rank*100003)
+                if name == "awr":
+                    require_unweighted_refit(summaries["bounded"], unit_retention or {})
+                actor.load_state_dict(original); torch.manual_seed(cfg["awr"]["seed"]+rank*100003)
+                data = ReplayDataset(episodes, labels, unit_weights=name != "awr")
                 c = copy.deepcopy(base)
                 if name in ("legacy", "conditional_eval"):
                     c.update(denoising_guidance_scale=1., replay_eval_mode=name != "legacy")
                 if name == "bc_only":
                     c.update(replay_coefficient=0.)
-                if name == "bounded":
+                if name in ("bounded", "awr"):
                     c.update(lr=args.bounded_lr, weight_decay=0., reference_weight=args.reference_weight)
                 bc = Stage1Supervision(runtime, actor, train, source_step=report["source_global_step"])
-                trainer = ActorTrainer(actor, data, bc, c, d, seed=42, bc_weight=coefficient)
+                trainer = ActorTrainer(actor, data, bc, c, d, seed=cfg["awr"]["seed"], bc_weight=coefficient)
                 if name == "legacy" and coefficient is None:
                     calibration = trainer.calibrate(8, .1)
                     d.root(lambda: atomic_json(output/(name+"_calibration.json"), calibration))
@@ -228,51 +332,40 @@ def main():
                     return dict(config=c, coefficient=trainer.bc_weight, samples=len(data), episodes=len(episodes),
                         training=results, parameters=changes, metrics=metrics, joint_change_mean_rad=joint_change,
                         gates=gates, generation_probe_passed=all(gates.values()),
-                        checkpoint=reference, physical_retention="not_yet_evaluated")
+                        checkpoint=reference, physical_retention="not_yet_evaluated",
+                        data_identity=digest(data.sample_ids), optimizer_seed=trainer.seed,
+                        labels_identity=labels.identity if labels is not None else None)
                 summary = d.root(summarize); summaries[name] = summary
                 d.root(lambda: atomic_json(output/(name+"_summary.json"), summary))
                 del trainer, bc
+                if args.operation == "refit":
+                    if name == "bounded" and not summary["generation_probe_passed"]:
+                        d.root(lambda: atomic_json(output/"refit_state.json", dict(
+                            status="generation_retention_rejected", awr_steps=0, new_collection_episodes=0)))
+                        return 0
+                    reports, retention = physical_pair(name, summary)
+                    if name == "bounded":
+                        unit_retention = retention
+                        if not retention["accepted"]:
+                            d.root(lambda: atomic_json(output/"refit_state.json", dict(
+                                status="physical_retention_rejected", awr_steps=0, new_collection_episodes=0)))
+                            return 0
+                    else:
+                        from gem.closedloop.awr.evaluation import paired_comparison
+                        unweighted = json.loads((output/"bounded_physical.json").read_text())
+                        versus_base = paired_comparison(reports["stage1"], reports[name])
+                        versus_unit = paired_comparison(unweighted, reports[name])
+                        d.root(lambda: atomic_json(output/"awr_comparison.json", dict(
+                            versus_stage1=versus_base, versus_self_distillation=versus_unit)))
+                        d.root(lambda: atomic_json(output/"refit_state.json", dict(status="complete",
+                            physical_quality_passed=versus_base["acceptable"],
+                            advantage_effect_supported=versus_unit["improvement_supported"],
+                            awr_steps=results[0]["steps"], new_collection_episodes=0,
+                            formal_training_restarted=False)))
             d.root(lambda: atomic_json(output/"training_summary.json", dict(arms=summaries, seconds=time.perf_counter()-started)))
         else:
-            from gem.closedloop.common.full_dataset import FullMusicCatalog
-            from gem.closedloop.online_conditions import OnlineConditionBuilder
-            from gem.closedloop.awr.world import calibrate
-            from gem.closedloop.awr.evaluation import evaluate
-            from gem.closedloop.awr.retention import retention_comparison
             summary = json.loads((output/(args.candidate+"_summary.json")).read_text())
-            # 评价失败探针也允许保留真实反例，但绝不据此自动批准AWR。
-            catalog = d.local(lambda: FullMusicCatalog(cfg["paths"]["data_root"]))
-            audit_data = json.loads(Path(state["artifacts"]["data_audit"]).read_text())
-            d.local(lambda: catalog.apply_audit(audit_data))
-            plan = json.loads(Path(state["artifacts"]["evaluation_fixed"]).read_text())
-            builder = OnlineConditionBuilder(actor.endecoder.codec, history_steps=50, motion_frames=60)
-            profile_path = output/"deployment_profile.json"
-            fixed_profile = cfg["timing"]["deployment_profile"]
-            if profile_path.exists():
-                profile = json.loads(profile_path.read_text())
-                if fixed_profile is not None and profile != fixed_profile:
-                    raise ValueError("Evaluation must retain the explicitly bound deployment profile")
-            elif fixed_profile is not None:
-                profile = fixed_profile
-                d.root(lambda: atomic_json(profile_path, profile))
-            else:
-                profile = calibrate(runtime, policy, builder, catalog, plan["tasks"], output/"calibration", d, fingerprint)
-                d.root(lambda: atomic_json(profile_path, profile))
-            runtime["timing"]["deployment_profile"] = profile
-            physics = digest(dict(config=cfg, profile=profile, sources=audit["repositories"]))
-            reports = {}
-            for name in ("stage1", args.candidate):
-                path = output/(name+"_physical.json")
-                if path.exists(): reports[name] = json.loads(path.read_text()); continue
-                actor.load_state_dict(original if name == "stage1" else checkpoints.load(summary["checkpoint"])["payload"]["actor"])
-                physical = evaluate(runtime, policy, builder, catalog, plan, output/"physical"/name, d,
-                    fingerprint=d.assert_models_equal(actor), physics_identity=physics,
-                    progress_path=output/"evaluation_progress"/name, should_stop=lambda: stop_requested(output))
-                d.root(lambda: atomic_json(path, physical)); reports[name] = physical
-            retention = retention_comparison(reports["stage1"], reports[args.candidate], cfg["awr"]["retention_gate"])
-            retention["generation_probe_passed"] = summary["generation_probe_passed"]
-            retention["accepted"] = retention["accepted"] and summary["generation_probe_passed"]
-            d.root(lambda: atomic_json(output/(args.candidate+"_physical_retention.json"), retention))
+            physical_pair(args.candidate, summary)
         return 0
     finally:
         if group is not None: dist.destroy_process_group(group)

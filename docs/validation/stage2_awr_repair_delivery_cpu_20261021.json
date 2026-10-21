@@ -1,0 +1,41 @@
+{
+  "commit": "98eb27770f452592b0fe392f6311099614dabf94",
+  "exit_code": 0,
+  "stdout": "........................................................................ [ 92%]\n......                                                                   [100%]\n=============================== warnings summary ===============================\ngem/network/base_arch/embeddings/rotary_embedding.py:16\n  /home/user/liwei/awr-worktrees/GENMO-repair-delivery-20261021/gem/network/base_arch/embeddings/rotary_embedding.py:16: FutureWarning: `torch.cuda.amp.autocast(args...)` is deprecated. Please use `torch.amp.autocast('cuda', args...)` instead.\n    @autocast(enabled=False)\n\n-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html\n78 passed, 1 warning in 6.70s\n",
+  "stderr": "",
+  "seconds": 12.171021761372685,
+  "temporary_cleaned": true,
+  "gpu_tests": false,
+  "actual_profile_validated": true,
+  "preflight": {
+    "schema": "genmo.awr.preflight.v1",
+    "assets": {
+      "checkpoint": "51b522fbdeb0ec289e5ffc24e2fccca9888df90495f57f96714c1bb43c05f8e2",
+      "gmt_checkpoint": "79d1a99e54db42342927ec178329dab88772bafbc05df1b0dbe310bc6dd0b319",
+      "gmt_policy": "31a8f999b652d272246b803d4ffa708f3125de92c0d573411ef13fc3ee6ced20",
+      "kinematics": "c08731704dccece11351b6fa877e30bac5ca2a8d363de30af7ca2ea1398f4029",
+      "stats": "c7c0acb0e7a38797adb38ce0be41ee72820e34daed4e780275c64fb55c3e5326"
+    },
+    "repositories": {
+      "genmo": {
+        "path": "/home/user/liwei/awr-worktrees/GENMO-repair-delivery-20261021",
+        "branch": "feature/stage2-awr",
+        "commit": "98eb27770f452592b0fe392f6311099614dabf94"
+      },
+      "gmt": {
+        "path": "/home/user/liwei/awr-worktrees/legged_lab_gmt",
+        "branch": "feature/stage2-awr",
+        "commit": "4ca256fe79d2dda22240011947ead276690e40f7"
+      }
+    },
+    "configuration_assets": {
+      "gmt_agent_config": "b633ab8ab057b9915a78424e0239cbea3ecd9e3a5ecc0c9b55c645699a6533b6",
+      "isaac_contract": "6f4af854170b6f6e5c2948a53bc822ac60beb000edf9e291bf1bddc37e797939"
+    },
+    "config_sha256": "0e43ca64766a2ffb61131da4eb6811b20bc20e44bb473f73541b50c559b713fe"
+  },
+  "original_temporary_cleaned_flag": false,
+  "cleanup_note": "Original flag was sampled inside TemporaryDirectory before automatic cleanup; post-exit prefix check found no remaining directories.",
+  "post_exit_remaining_paths": [],
+  "original_report_sha256": "533212f4f120a36a8ee98f64a5065e630f8fd50f1da869d6ec060e01add43d12"
+}

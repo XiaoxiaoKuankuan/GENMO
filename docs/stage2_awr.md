@@ -2,27 +2,29 @@
 
 本实现运行于独立 `feature/stage2-awr` 工作树。训练顺序为 Collect → Critic/FVI →
 Advantage Labeling → Weighted Diffusion Training → Evaluation。宏迭代与 PPO iteration 无关。
-初始配置为 512 个完整 Episode、FIFO 512、Actor 5 Epoch、全局 256 AWR＋128 BC、
-Actor LR 1e-5；默认最多一个宏迭代。`smoke` 为独立 64 Episode 数据集。
+原先导配置为512集、FIFO512、5 Epoch、256 AWR＋128 BC、LR1e-5。
+2026-10-21原五轮已按用户要求停止。当前修复验收使用`stage2_awr_retention.yaml`：
+64集、1宏、B/C各最多45步、名义LR1e-7、固定BC和冻结教师约束。它是有限验收配置，
+不代表恢复512集或五轮正式训练；最新结论见[修复报告](stage2_awr_distillation_repair_20261021.md)。
 
 2026-10-20：64集及独立512首轮、三组完整音乐对照、真实八卡梯度与续算验收已完成。
 全54任务Stage1/自蒸馏/AWR成功数为50/49/52，但AWR成对回报收益CI跨零，且Root、
 Joint和滑动指标变差；固定32任务时长门槛未通过，`best_saved`仍为Stage1。
-详见[最终实现与有限验收报告](stage2_awr_acceptance_20261020.md)。未启动第二宏迭代。
+详见[最终实现与有限验收报告](stage2_awr_acceptance_20261020.md)。该512先导未运行第二宏；
+随后独立formal5的四轮及停止情况属于另一运行，不能合并计数。
 
 ## Server-2 命令
 
-最新交付源码放在`/home/user/liwei/awr-worktrees/GENMO-delivery`，使用同一AWR分支，
-与冻结运行目录独立。以下新建运行命令从交付目录执行；不改共享环境的editable指向。
+最新交付源码放在`/home/user/liwei/awr-worktrees/GENMO-repair-delivery-20261021`，使用同一AWR分支。
+`GENMO-delivery`固定077024b供本次64集运行恢复；`GENMO-formal5-20261020`固定6c5fda0。
+以下为独立新运行的接口示例，执行须遵守当前有限预算；不更新冻结运行源码或editable指向。
 
 ```bash
-cd /home/user/liwei/awr-worktrees/GENMO-delivery
+cd /home/user/liwei/awr-worktrees/GENMO-repair-delivery-20261021
 bash tools/run_stage2_awr_server2.sh preflight
 bash tools/run_stage2_awr_server2.sh verify --report <独立证据目录>/distributed.json
-bash tools/run_stage2_awr_server2.sh run --profile smoke \
+bash tools/run_stage2_awr_server2.sh run --config configs/closedloop/stage2_awr_retention.yaml \
   --run-dir /data1/user/liwei/GENMO_outputs/stage2_awr/<独立64集运行名>
-bash tools/run_stage2_awr_server2.sh run --profile pilot \
-  --run-dir /data1/user/liwei/GENMO_outputs/stage2_awr/<独立512集运行名>
 bash tools/run_stage2_awr_server2.sh stop --run-dir <现有运行目录>
 bash tools/run_stage2_awr_server2.sh resume --run-dir <现有运行目录>
 bash tools/run_stage2_awr_server2.sh evaluate --run-dir <现有运行目录> --all-unique
@@ -423,7 +425,7 @@ export CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 PYTHONDONTWRITEBYTECODE=1 OMP_NUM_TH
 复现教师约束单因素候选时使用全新的目录；训练和评价之间保持源码提交不变：
 
 ```bash
-cd /home/user/liwei/awr-worktrees/GENMO-delivery
+cd /home/user/liwei/awr-worktrees/GENMO-repair-delivery-20261021
 export NCCL_CUMEM_HOST_ENABLE=0 NCCL_IB_DISABLE=1 NCCL_SOCKET_IFNAME=lo TORCH_NCCL_BLOCKING_WAIT=1
 export CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 PYTHONDONTWRITEBYTECODE=1 OMP_NUM_THREADS=4 MKL_NUM_THREADS=4
 export ISAACLAB_PATH=/data0/user/liwei/closedloop_stage8_runtime/IsaacLab
