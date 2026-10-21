@@ -125,9 +125,11 @@ def joint_reference_changes(episodes,consumed,probes,rows_by_id):
         world_root_change='unverified_missing_world_alignment_not_inferred_from_model_root_features')
 
 
-def associate(case,chain_payload,probes=()):
+def associate(case,chain_payload,probes=(),*,execution_cases=()):
     episodes=defaultdict(list);rows_by_id={};missing=0
-    for path in sorted(Path(case).glob('rank[0-9][0-9]')):
+    # 附加窗口只补充真实执行来源，不增加任何PPO链或混合行为策略概率。
+    paths=[path for root in (case,*execution_cases) for path in sorted(Path(root).glob('rank[0-9][0-9]'))]
+    for path in paths:
         payload=load_rollout(path)
         for row in payload['transitions']:
             key=token(row.identity);rows_by_id[key]=row
@@ -194,6 +196,7 @@ def main():
     parser.add_argument('--chain-attribution',type=Path,required=True)
     parser.add_argument('--output',type=Path,required=True)
     parser.add_argument('--probe-vectors-dir',type=Path,help='可选固定条件探针目录；默认在同一归因实验目录自动发现')
+    parser.add_argument('--execution-case',type=Path,action='append',default=[],help='只补充后续真实消费记录，不加入概率batch')
     args=parser.parse_args();torch.set_num_threads(4)
     if args.output.exists():raise FileExistsError('Independent consumption report must not overwrite evidence')
     experiment=json.loads((args.chain_attribution.parent/'summary.json').read_text())
@@ -203,7 +206,7 @@ def main():
     directory=args.probe_vectors_dir or args.chain_attribution.parent
     paths=sorted(directory.glob('probe_vectors_rank*.pt')) or sorted(directory.glob('ordinary_probe_vectors_rank*.pt'))
     probes=[torch.load(path,map_location='cpu',weights_only=False) for path in paths]
-    result=associate(args.case,data,probes)
+    result=associate(args.case,data,probes,execution_cases=args.execution_case)
     result['probe_vector_sha256']={str(p):file_sha256(p) for p in paths}
     result.update(case_sha256=case_sha,chain_attribution_sha256=file_sha256(args.chain_attribution))
     atomic_json(args.output,result)

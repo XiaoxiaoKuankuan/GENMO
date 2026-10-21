@@ -184,7 +184,7 @@ def test_comparison_restores_nonempty_adam_controller_bc_rng_exactly():
         controller=controller.state_dict(),bc=anchor.state_dict(),rng=capture_local_rng({'actor':generator})))
 
 
-def test_execution_audit_traces_original_prefix_across_rollouts():
+def test_execution_audit_traces_original_prefix_across_rollouts(tmp_path,monkeypatch):
     from types import SimpleNamespace
     from gem.closedloop.dppo.execution_provenance import SCHEMA
     from tools.analyze_stage2_execution_credit import episode_analysis
@@ -206,6 +206,17 @@ def test_execution_audit_traces_original_prefix_across_rollouts():
     assert 31 in first['cross_rollout_source_frames']
     assert all(item['lambda1_type']=='right_censored_bootstrapped_not_full_MC' for item in v)
     assert not r['continuous_control_range']
+    import tools.analyze_stage2_reference_consumption as tool
+    roots=[tmp_path/'first',tmp_path/'second']
+    for root in roots:(root/'rank00').mkdir(parents=True)
+    for _,row,_ in entries:row.free_mask=torch.ones(60,30,dtype=torch.bool)
+    monkeypatch.setattr(tool,'load_rollout',lambda path:{'transitions':[entries[0 if path.parent.name=='first' else 1][1]]})
+    meta=dict(identity=entries[0][1].identity,source='fixture',music_frame=0,prefix_frames=0,
+        kl_by_frame=[1.]*60,log_ratio_by_frame=[0.]*60)
+    a=tool.associate(roots[0],{'metadata':[meta]})
+    b=tool.associate(roots[0],{'metadata':[meta]},execution_cases=[roots[1]])
+    assert 31 not in a['chains'][0]['current_generated_frames']
+    assert 31 in b['chains'][0]['current_generated_frames']
 
 
 def test_full_probability_reuse_requires_same_completed_case(tmp_path):
