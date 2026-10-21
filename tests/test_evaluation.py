@@ -74,7 +74,7 @@ class Env:
         generated_limits=generated_boundaries(np.zeros((60,28)),np.ones((60,21),bool),
             dict(joint_names=names,joint_hard_limits_rad=np.tile([-2,2],(21,1)),
                  joint_soft_limits_rad=np.tile([-1.8,1.8],(21,1))),names)
-        details = [{'version': 'stage2.gmt8_reference_limits.v1', 'tick': 600+12*(self.steps+i+1), 'dt_s': .02,
+        details = [{'version': 'stage2.gmt8_reference_limits.v2', 'tick': 600+12*(self.steps+i+1), 'dt_s': .02,
                     'transition_valid': True, 'reward': base, 'components': copy.deepcopy(components),
                     'joint_limit_diagnostics':copy.deepcopy(limits),'diagnostics':{'physical_state':{'root_height_error_m':.01}},
                     'activity': {'valid': True, 'actual_activity_rad_s': 1., 'target_activity_rad_s': 1.,

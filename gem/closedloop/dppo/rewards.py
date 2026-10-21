@@ -5,8 +5,8 @@
 body全局线/角速度、双脚相对高度及十二腿关节位置。使用 exp(-error/std²)，不再次平方 error，
 不重新构造坐标系或用旧 RMSE/末端高度/yaw 混合项回退；名称、选择、时刻和原值
 证据随 backend 诊断保存。内部 objective 版本独立标识这次 tracking 语义变化。
-独立稳定性奖励关闭，根高与姿态仍作为物理终止及诊断；活动门控继续保留。
-活动门控同时作用于跟踪和音乐；目标活动度来自配对训练动作的同一因果时间窗，
+独立稳定性奖励关闭，根高与姿态仍作为物理终止及诊断；奖励不再乘活动度系数。
+活动度与旧门控比值只作诊断；目标活动度来自配对训练动作的同一因果时间窗，
 绝不使用 GENMO 生成参考代替监督。音乐节拍复用 BUMI 原有动作节拍和对齐函数。
 连续奖励率统一乘 0.02 秒，失败及有限非法参考的事件罚分由调用方单独加入一次。
 
@@ -55,7 +55,7 @@ LEG_JOINT_NAMES = [side+'_'+joint+'_joint' for side in ('l','r') for joint in
 
 
 DEFAULT_CONFIG = {
-    "version": "stage2.gmt8_reference_limits.v1",
+    "version": "stage2.gmt8_reference_limits.v2",
     "music_reward_enabled": False,
     "dt": .02,
     "track_weight": 2.5, "music_weight": 0., "stable_weight": 0., "alive_weight": .5,
@@ -160,7 +160,7 @@ class ExecutionReward:
 
     def _validate_config(self):
         config = self.config
-        if config["version"] != "stage2.gmt8_reference_limits.v1":
+        if config["version"] != "stage2.gmt8_reference_limits.v2":
             raise ValueError("Unknown explicit execution reward identity")
         if type(config['music_reward_enabled']) is not bool:
             raise ValueError('music_reward_enabled must be an explicit boolean')
@@ -280,7 +280,7 @@ class ExecutionReward:
         cfg = self.config["activity"]
         ratio = actual / (cfg["full_gate_ratio"] * target_value + cfg["epsilon"])
         gate = 1. if target_value <= cfg["inactive_target_rad_s"] else min(1., ratio)
-        # tracking 仍消费配对活动门控；禁用音乐项时不计算强度匹配分数。
+        # 配对活动度只作诊断；禁用音乐项时不计算强度匹配分数，不影响跟踪奖励。
         log_ratio = (math.log((actual + cfg["intensity_epsilon"]) / (target_value + cfg["intensity_epsilon"]))
                      / math.log(cfg["intensity_log_ratio"])) if self.music_enabled else None
         intensity = math.exp(-min(abs(log_ratio), 1e150) ** 2) if self.music_enabled else None
@@ -633,7 +633,7 @@ class ExecutionReward:
             except (ValueError, KeyError, IndexError, TypeError) as error:
                 score, valid, raw, normalized = 0., False, {"reason": str(error)}, {}
                 errors.append(f"{name}: {error}")
-            multiplier = gate if name in {"track", "music"} else 1.
+            multiplier = 1.
             weight = self.config[weight_key] * (-1 if "penalty" in weight_key else 1)
             rate = score * weight * multiplier
             components[name] = {"enabled": True, "valid": bool(valid), "raw": raw, "normalized": normalized,

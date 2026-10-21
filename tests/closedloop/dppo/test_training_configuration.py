@@ -25,6 +25,18 @@ ROOT = Path(__file__).resolve().parents[3]
 CONFIG = ROOT / 'configs/closedloop/stage2_full_chain.yaml'
 
 
+def test_formal_transformer_candidate_uses_4096_and_ungated_new_reward():
+    resolved=configuration(ROOT/'configs/closedloop/stage2_transformer_groups.yaml')
+    stage=resolved['stage10'];settings=resolved['stage9']
+    assert stage['scale']['actor_minibatch_chains']==4096
+    assert stage['derived']['maximum_actor_steps']==4
+    assert settings['bc_batch']==512 and settings['bc_samples_per_rollout']==2048
+    assert settings['actor_trainable_scope']=='all'
+    assert stage['reward']['version']=='stage2.gmt8_reference_limits.v2'
+    assert resolved['termination']['yaw_error_rad'] is None
+    assert stage['run_control']['max_training_iterations']==200
+
+
 def test_main_scale_is_16384_nominal_chains_with_eight_full_chain_updates():
     c = configuration(CONFIG)
     s, t = c['stage10'], c['stage10']['training']

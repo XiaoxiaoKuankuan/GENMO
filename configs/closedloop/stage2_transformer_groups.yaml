@@ -3,7 +3,8 @@
 # 独立实验最多200轮，固定评估每50轮；短训与正式续训使用同一配置身份。
 # 最多200个接受轮次；须先固定真实数据比较和物理配对验证，显式CLI启动。
 # 完整链联合PPO首个候选：8卡×128环境，8秒采集，0.5秒上层决策，60帧参考。
-# LR=1e-6，真实chain clip=.10，epoch=1，全局2048链/更新；每步BC至少256样本。
+# LR=1e-6，真实chain clip=.10，epoch=1，全局4096链/更新；每步BC至少256样本。
+# 跟踪奖励不乘活动度系数；活动度保留诊断，偏航超限不再终止。
 # 联合KL门槛是待真实rollout标定的实验候选，不继承旧坐标平均KL阈值。
 # 奖励、Critic结构/目标、15+4+1采样核与噪声调度、GMT权重及时钟保持原定义。
 # CLI默认仅运行有限迭代；本候选累计上限200轮，不自动启动长期训练。
@@ -290,11 +291,11 @@ stage10:
         body_ang_vel: 0.15873015873015872
         foot_height: 0.126984126984127
         leg_joint_pos: 0.07936507936507936
-    version: stage2.gmt8_reference_limits.v1
+    version: stage2.gmt8_reference_limits.v2
   run_control:
     max_training_iterations: 200
   scale:
-    actor_minibatch_chains: 2048
+    actor_minibatch_chains: 4096
   seed: 42
   storage:
     checkpoint_interval_seconds: 1800

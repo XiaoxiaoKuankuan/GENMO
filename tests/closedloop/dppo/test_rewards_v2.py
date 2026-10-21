@@ -91,7 +91,10 @@ def test_missing_or_invalid_target_never_falls_back_to_generated_reference(bad):
     row["reference"]["joint_vel"][:] = 1.
     result = calculator.evaluate_step(row)
     assert not result["transition_valid"] and not result["activity"]["valid"]
-    assert result["components"]["track"]["weighted_rate"] == 0
+    # 配对数据仍须完整；活动诊断无效会使转移无效，但不再通过乘零改写跟踪分数。
+    tracking=result["components"]["track"]
+    assert tracking["gate"]==1.
+    assert tracking["weighted_rate"]==pytest.approx(tracking["score"]*tracking["weight"])
     assert result["components"]["music"]["weighted_rate"] == 0
 
 

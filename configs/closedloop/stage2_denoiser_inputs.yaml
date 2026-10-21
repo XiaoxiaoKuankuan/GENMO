@@ -288,7 +288,7 @@ stage10:
         body_ang_vel: 0.15873015873015872
         foot_height: 0.126984126984127
         leg_joint_pos: 0.07936507936507936
-    version: stage2.gmt8_reference_limits.v1
+    version: stage2.gmt8_reference_limits.v2
   run_control:
     max_training_iterations: 200
   scale:
