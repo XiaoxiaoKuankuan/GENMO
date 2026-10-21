@@ -122,6 +122,26 @@ def main():
             probe_cost_ratio=gate_seconds/full_seconds,chains=len(rows),initial_exact_equivalence=True,
             scope='same_actual_parameter_increment_counterfactual_not_independently_optimized_or_PhysX_executed',
             far_frames_not_guaranteed_unchanged=True)
+        # 反事实探针复用前15步，成本比例不能冒充完整20步生成的开销。
+        # 另测同一batch/seed的真实完整采样；首遍预热，不改std或innovation分布。
+        timings={};traces={}
+        with torch.no_grad():
+            for name,policy in [('full60',base),('time_gate',gated)]:
+                samples=[]
+                for repeat in range(4):
+                    generator=torch.Generator(device='cuda:0').manual_seed(739)
+                    torch.cuda.synchronize();start=time.perf_counter()
+                    trace=policy.sample_rollout(known,generator=generator)
+                    torch.cuda.synchronize()
+                    if repeat:samples.append(time.perf_counter()-start)
+                timings[name]=dict(seconds=samples,median_seconds=float(np.median(samples)))
+                traces[name]=trace
+            if (not torch.equal(traces['full60']['sampling_noise'],traces['time_gate']['sampling_noise']) or
+                    not torch.equal(traces['full60']['chain'][:,:16],traces['time_gate']['chain'][:,:16])):
+                raise AssertionError('完整采样前15步或实际innovation协议不同')
+        result['actual_full20_sampling_timing']=timings
+        result['actual_full20_sampling_cost_ratio']=timings['time_gate']['median_seconds']/timings['full60']['median_seconds']
+        result['full20_frozen_first15_and_actual_innovations_equal']=True
         atomic_json(args.output_dir/'summary.json',result)
         torch.save(dict(before=immutable_cpu_snapshot(before),full=immutable_cpu_snapshot(full),
             gated=immutable_cpu_snapshot(after),gate=gate.cpu()),args.output_dir/'probe.pt')
