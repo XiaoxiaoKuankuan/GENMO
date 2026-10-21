@@ -110,3 +110,40 @@ def test_candidate_local_config_preserves_reward_bc_and_explicit_objective():
     assert new["awr"]["actor"]["lr"] == 1e-5
     assert new["awr"]["smoke"]["envs_per_rank"] == 1
     assert new["awr"]["candidate_sampling"]["group_fraction"] == 1
+
+
+def test_readonly_candidate_audit_binds_snapshot_and_recomputes_weights(episode_factory, tmp_path):
+    import json
+    from tools.audit_stage2_awr_candidate_local import audit
+    from gem.closedloop.awr.io import write_tree, atomic_json, digest
+    from gem.closedloop.awr.advantages import label_episode_advantages, signal_config
+    from tests.closedloop.awr.test_learning_signals import candidate_episodes
+    _, _, make = episode_factory
+    episodes = candidate_episodes(make)
+    entries = []
+    for e in episodes:
+        path = tmp_path/"replay/episodes"/e.episode_id
+        write_tree(path, e.to_dict())
+        entries.append([e.episode_id, json.loads((path/"manifest.json").read_text())["sha256"]])
+    contract = digest(episodes[0].contract)
+    snapshot = digest(dict(contract=contract, episodes=entries))
+    atomic_json(tmp_path/"replay/snapshots"/(snapshot+".json"), dict(snapshot_id=snapshot,
+        episode_ids=[e.episode_id for e in episodes], contract_sha256=contract))
+    candidate = dict(enabled=True, advantage_mode="grouped", score_window_seconds=2., evaluation_windows_seconds=[2., 4.])
+    signal, _ = signal_config(dict(mode="credit_nstep"), candidate)
+    labels, _ = label_episode_advantages(episodes,
+        {e.episode_id: torch.zeros(len(e.rows)) for e in episodes}, identity=dict(replay_snapshot=snapshot),
+        config=signal, candidate_config=candidate)
+    labels.save(tmp_path/"labels")
+    atomic_json(tmp_path/"critic.json", dict(selected="mc_only", folds=[], selection_diagnostics=[]))
+    state = dict(source_commits=dict(genmo="synthetic"), config=dict(awr=dict(replay_capacity=4,
+        actor=dict(source_balance="uniform_sources", candidate_objective_fraction=.25),
+        advantage=signal, candidate_sampling=candidate)), artifacts=dict(macro000_replay=snapshot,
+        macro000_labels=str(tmp_path/"labels"), macro000_critic_report=str(tmp_path/"critic.json")))
+    atomic_json(tmp_path/"state.json", state)
+    before = (tmp_path/"state.json").read_bytes()
+    report = audit(tmp_path)
+    assert report["valid_groups"] == 1 and report["verified_candidate_samples"] == 4
+    assert report["coefficient_mass_before_advantage"] == pytest.approx(.25)
+    assert report["ranking"]["windows"]["2"]["weight"]["pair_accuracy"] == 1.
+    assert (tmp_path/"state.json").read_bytes() == before
