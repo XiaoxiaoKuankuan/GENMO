@@ -28,6 +28,7 @@ def audit(root):
     from gem.closedloop.awr.objective import candidate_objective_weights
     from gem.closedloop.awr.reference_credit import reference_exposure
     from gem.closedloop.awr.resources import prepare_file_handles
+    from gem.closedloop.awr.critic import value_metrics
     root = Path(root).resolve(); started = time.perf_counter()
     original = (root/"state.json").read_bytes()
     state = json.loads(original); prefix = "macro000"
@@ -59,6 +60,18 @@ def audit(root):
     expected = raw/raw.mean() if weight["weight_mean_normalize"] else raw
     torch.testing.assert_close(labels.weights, expected, atol=1e-12, rtol=1e-12)
     index = {s:i for i,s in enumerate(labels.sample_ids)}
+    crossfit_strata = {}
+    for e in episodes:
+        failed = bool(e.rows[-1].metadata.get("physical_failure"))
+        for position, row in enumerate(e.rows):
+            if row.sample_id not in index:
+                continue
+            i = index[row.sample_id]
+            kind = "physical_failure" if failed else "natural_end"
+            crossfit_strata.setdefault(kind, []).append(i)
+            crossfit_strata.setdefault(e.source+":"+kind, []).append(i)
+            if failed and position >= len(e.rows)-4:
+                crossfit_strata.setdefault("last_four_states_of_failure", []).append(i)
     rows = {r.sample_id:r for e in episodes for r in e.rows}
     groups = []
     for g in labels.statistics["candidate_groups"]:
@@ -86,7 +99,7 @@ def audit(root):
             crossfit_first_value_range=float(labels.values[ids].max()-labels.values[ids].min()),
             windows=g["windows"], selected_weights=labels.weights[ids].tolist())
         groups.append(summary)
-    exposure, excluded, complete_exposure = [], 0., 0.
+    exposure, excluded, complete_exposure, zero_free = [], 0., 0., []
     signal = config["awr"]["advantage"]
     for episode in episodes:
         result = reference_exposure(episode, mode=signal["credit_mode"],
@@ -95,6 +108,8 @@ def audit(root):
         for row, plan in zip(episode.rows, result["plans"]):
             excluded += plan["excluded_known_coordinate_seconds"]
             complete_exposure += plan["full_plan_exposure_seconds"]
+            if row.actor_valid and plan["weighted_exposure_seconds"] <= 0:
+                zero_free.append(row.sample_id)
             if plan["first_current_tick"] is not None:
                 exposure.append((plan["first_current_tick"]-row.control_tick_begin)/600)
     critic = json.loads(Path(state["artifacts"][prefix+"_critic_report"]).read_text())
@@ -111,7 +126,9 @@ def audit(root):
         effective_sample_size_after_all_fixed_factors=float(combined.sum().square()/combined.square().sum()),
         current_reference_delay_mean_seconds=float(np.mean(exposure)) if exposure else None,
         excluded_known_coordinate_exposure_fraction=excluded/complete_exposure if complete_exposure else None,
+        actor_samples_without_free_exposure=zero_free,
         critic_selected=critic["selected"], critic_selection=critic.get("selection_diagnostics"),
+        crossfit_mc_error={k:value_metrics(labels.values[ids], labels.returns[ids]) for k,ids in crossfit_strata.items()},
         critic_validation=[dict(fold=f["fold"], mc=f["mc"]["validation"],
                                fvi=f["fvi"][-1]["validation"] if f["fvi"] else None) for f in critic["folds"]],
         seconds=time.perf_counter()-started, optimizer_updates=0, new_physical_controls=0)
