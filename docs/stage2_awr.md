@@ -2,13 +2,16 @@
 
 本实现运行于独立 `feature/stage2-awr` 工作树。训练顺序为 Collect → Critic/FVI →
 Advantage Labeling → Weighted Diffusion Training → Evaluation。宏迭代与 PPO iteration 无关。
-原先导配置为512集、FIFO512、5 Epoch、256 AWR＋128 BC、LR1e-5。
-2026-10-21原五轮已按用户要求停止。当前修复验收使用`stage2_awr_retention.yaml`：
-64集、1宏、B/C各最多45步、名义LR1e-7、固定BC和教师系数10000。它是有限验收配置，
-不代表恢复512集或五轮正式训练；最新结论见[修复报告](stage2_awr_distillation_repair_20261021.md)。
-新64集的教师1000候选被物理门禁拒绝；同数据/时钟提高到10000后，无权重保留通过，
-AWR仍未证实收益且执行时长缩短，best仍保留Stage1。原`stage2_awr.yaml`中的512集/LR1e-5
-是历史候选，不能当成此次修复后的推荐参数直接继续正式训练。
+2026-10-21当前入口为独立`stage2_awr_group_credit.yaml`：64次预定尝试、1宏迭代、
+5 Epoch、256 AWR＋128 BC、基础LR1e-5。教师一致性系数为0，不创建教师；普通自蒸馏
+是权重全1的诊断对照，不作为AWR更新门槛。只评价s595000实际训练清单中的音乐，
+模型选择只依据来源平衡的完整任务回报增加。失败、时长、活动度与跟踪误差照常报告。
+候选组、局部信用与11种标签模式详见[当前实现与验收](stage2_awr_group_credit_20261021.md)。
+
+原五轮已按用户要求停止，没有恢复。之前的`stage2_awr_retention.yaml`、教师10000、
+LR1e-7、45步保留门槛仅用于历史诊断，不是当前入口或继续训练的前提。
+[历史修复报告](stage2_awr_distillation_repair_20261021.md)保留原始实验事实，不能用其中
+强约束下的保留结果声称漂移根因已解决。512/五轮历史运行也不能与本轮合并计数。
 
 2026-10-20：64集及独立512首轮、三组完整音乐对照、真实八卡梯度与续算验收已完成。
 全54任务Stage1/自蒸馏/AWR成功数为50/49/52，但AWR成对回报收益CI跨零，且Root、
@@ -18,21 +21,27 @@ Joint和滑动指标变差；固定32任务时长门槛未通过，`best_saved`�
 
 ## Server-2 命令
 
-最新交付源码放在`/home/user/liwei/awr-worktrees/GENMO-repair-final-20261021`，使用同一AWR分支。
-`GENMO-repair-delivery-20261021`固定实际物理验收提交066bd1b；后续验收工具/结果/配置注释在GitHub追加，
-没有热更新这份可复现的运行源码。完整验收工具来自309752c，独立归档执行。
-`GENMO-delivery`固定077024b供本次64集运行恢复；`GENMO-formal5-20261020`固定6c5fda0。
+最新交付源码位于`/home/user/liwei/awr-worktrees/GENMO-signals-delivery-20261021`。
+`GENMO-signals-20261021`固定本轮实际运行提交56014c3，GMT目录为
+`/home/user/liwei/awr-worktrees/legged_lab_gmt-signals-20261021`，提交a1b6244。
+后续离线审计和数值精度修正只进入交付副本，未热更新正在训练的源码。
+旧`GENMO-repair-delivery-20261021`固定066bd1b，`GENMO-delivery`固定077024b，
+`GENMO-formal5-20261020`固定6c5fda0，全部保留。
 以下为独立新运行的接口示例，执行须遵守当前有限预算；不更新冻结运行源码或editable指向。
 
 ```bash
-cd /home/user/liwei/awr-worktrees/GENMO-repair-final-20261021
-bash tools/run_stage2_awr_server2.sh preflight
-bash tools/run_stage2_awr_server2.sh verify --report <独立证据目录>/distributed.json
-bash tools/run_stage2_awr_server2.sh run --config configs/closedloop/stage2_awr_retention.yaml \
-  --run-dir /data1/user/liwei/GENMO_outputs/stage2_awr/<独立64集运行名>
+cd /home/user/liwei/awr-worktrees/GENMO-signals-delivery-20261021
+bash tools/run_stage2_awr_server2.sh preflight \
+  --config configs/closedloop/stage2_awr_group_credit.yaml \
+  --gmt-repo /home/user/liwei/awr-worktrees/legged_lab_gmt-signals-20261021
+/data0/user/liwei/closedloop_stage10_v3_runtime/env_isaac_genmo/bin/python -B \
+  tools/launch_stage2_awr_signal_server2.py \
+  --gmt-repo /home/user/liwei/awr-worktrees/legged_lab_gmt-signals-20261021 \
+  --run-dir /data1/user/liwei/GENMO_outputs/stage2_awr/<独立64次尝试运行名>
+# 控制既有运行时，先cd到其state.json绑定的实际源码目录。
 bash tools/run_stage2_awr_server2.sh stop --run-dir <现有运行目录>
 bash tools/run_stage2_awr_server2.sh resume --run-dir <现有运行目录>
-bash tools/run_stage2_awr_server2.sh evaluate --run-dir <现有运行目录> --all-unique
+bash tools/run_stage2_awr_server2.sh evaluate --run-dir <现有运行目录>
 bash tools/run_stage2_awr_server2.sh evaluate --run-dir <现有运行目录> \
   --checkpoint <该运行checkpoints下的JSON引用>
 ```
@@ -100,9 +109,13 @@ Early Stopping。先拟合 MC，再用冻结上一轮值构造 16-step FVI；不
 两折内部验证的真实 MC MSE 均下降且绝对偏差不升时选择 FVI，否则整轮采用 MC-only。
 Critic 是 Replay 行为混合分布的价值基线。
 
-`A = G - V_crossfit`，整轮 FP64 总体标准差归一化，不减均值。权重为
+原MC基线为`A = G - V_crossfit`；新增Actor N-step（4/8/16/full_mc）、真实GMT消费信用、
+hybrid及group_hybrid。各分量单独以整轮FP64总体标准差归一化，不减均值，再按配置
+混合一次。候选组只标真正同状态的首次动作，缺成员/初态超差回退；信用缺失按配置
+回退MC或N-step。所有模式绑定独立标签身份，不能静默复用旧标签。最终权重为
 `exp(min(A/std/beta, log(w_max)))`；默认整轮均值归一化后，上界是
-`w_max / mean(raw_weight)`。非有限、下溢、近零方差或全部权重退化拒绝 Actor 阶段。
+`w_max / mean(raw_weight)`。非有限或不可表示的下溢仍报错；新实验中缺失/零方差分量
+明确记为无信息并回退，不通过除极小数制造信号，也不新增生成质量门槛。
 权重在本轮固定，Replay 每 Epoch 均匀遍历一次，不再按优势抽样。
 
 单条样本重新抽一个 t 和高斯噪声，只执行单时间步监督前反向。先对各自有效未知坐标
@@ -124,12 +137,13 @@ BC 系数由 8 批真实梯度诊断校准，之后宏迭代内固定。B/C 使�
 
 `artifacts/` 保存计划、折、优势/权重、价值验证、模块变化、训练成本和物理比较；
 `evaluation/` 保存完整任务及失败；`replay/`、`checkpoints/` 与测试临时目录分开。
-固定 32 任务与最终全量 54 任务都使用固定种子、初态、冻结 GMT 和新建物理世界。
+当前32任务来自原Stage1训练音乐，使用固定种子、初态、冻结GMT和新建物理世界。
+旧32/54留出集评价仅属于2026-10-20历史实验，不能与当前训练音乐结果混合。
 成对收益按来源平衡音乐组聚类计算 95% CI。
 
-Best 要求完成率/时长不降、失败不增、没有新增成对失败、活动度至少保留 80%、
-完整任务回报改善。未满足时保留 Stage1。AWR 对 Stage1 与普通自蒸馏的物理收益
-都必须用独立评价判断；代码测试、Loss 或 Critic EV 不能替代该结论。
+当前Best只要求来源平衡的完整任务回报提高；完成率、失败、时长和活动度不是晋级
+门槛，也不阻止后续AWR更新。置信区间照常报告，不作为新模型保存门槛。AWR对Stage1
+及普通自蒸馏的物理收益仍须用成对执行判断，代码测试、Loss或Critic EV不能替代。
 
 2026-10-20最终代码验收源码`2f65089`：本地torch2.6环境62项AWR CPU测试通过，Server-2
 原torch2.7.1环境同62项通过，含八进程Gloo、真实小型Stage1与BC合同、FVI/Actor

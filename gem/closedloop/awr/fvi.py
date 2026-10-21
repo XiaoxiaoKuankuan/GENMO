@@ -2,7 +2,8 @@
 
 每一轮先在完整训练Episode上一次性生成detach目标，再执行下一轮拟合。内部验证只
 使用真实MC并决定停止；两折FVI都改善MSE且偏差不增时才选择FVI，否则整轮使用MC。
-标签始终等于真实MC减另一音乐折的Value，包含Critic训练/标注身份和统计证据。
+冻结同一交叉Critic的全部当前/后继Value，原MC标签仍为真实MC减Value；可选Actor
+N-step、参考信用与候选融合只改变标签层，不把FVI训练目标冒充MC回报。
 """
 from __future__ import annotations
 

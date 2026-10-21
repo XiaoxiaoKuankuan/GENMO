@@ -4,8 +4,8 @@ Replay每Epoch均匀遍历一次，先逐样本Mask归约再乘固定权重；�
 重新抽取的扩散时间。AWR与BC使用各自真实全局分母、独立随机流，在SUM梯度后裁剪。
 校准只诊断梯度并恢复所有RNG，不更新参数；宏迭代内固定BC系数。这里不调用采样链，
 不构造Contact伪标签，不把参数变化当作物理收益。
-Replay监督与部署共用CFG两分支组合；可选冻结教师只在同一随机扩散时间前向，
-分别约束条件/无音乐分支，不将教师Contact或真实执行关节伪装成Replay标签。
+Replay监督与部署共用CFG两分支组合。当前signals.v2明确关闭冻结教师且不分配教师
+网络；旧一致性实现仅供历史诊断复现。真实BC保持独立，不伪造Contact监督。
 """
 from __future__ import annotations
 
@@ -40,7 +40,7 @@ def gradient_report(first, second=None):
 
 
 def choose_bc_coefficient(calibration, fixed=None):
-    """保留真实梯度诊断，并支持显式固定BC系数；是否通过保留验收由物理报告判断。"""
+    """保留真实梯度诊断并支持显式固定BC系数，不以自蒸馏物理质量阻止AWR。"""
     result = copy.deepcopy(calibration)
     if fixed is not None:
         if isinstance(fixed, bool) or not math.isfinite(fixed) or fixed <= 0:

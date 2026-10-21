@@ -1,7 +1,7 @@
 # 同状态候选与真实参考消费信用实验：独立配置，旧正式配置保持不变。
 # 只评估原train音乐；无教师一致性、无自蒸馏/活动度/失败率晋级门槛。
 # 自蒸馏作为同Replay诊断对照，无论其表现如何均继续AWR；仅完整任务奖励决定best。
-# 默认64完整Episode、1宏迭代、LR1e-5、5Epoch，不自动恢复旧五轮训练。
+# 默认64次预定尝试、1宏迭代、LR1e-5、5Epoch；预热失败如实留证，不自动恢复旧五轮。
 diagnostics:
   record_original_threshold_crossings: true
   reward_substeps: true
