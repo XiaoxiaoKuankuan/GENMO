@@ -110,6 +110,10 @@ def test_candidate_local_config_preserves_reward_bc_and_explicit_objective():
     assert new["awr"]["actor"]["lr"] == 1e-5
     assert new["awr"]["smoke"]["envs_per_rank"] == 1
     assert new["awr"]["candidate_sampling"]["group_fraction"] == 1
+    nstep = load_config(root/"stage2_awr_candidate_nstep.yaml")
+    expected = copy.deepcopy(new)
+    expected["awr"]["advantage"]["mode"] = "nstep"
+    assert nstep == expected
 
 
 def test_readonly_candidate_audit_binds_snapshot_and_recomputes_weights(episode_factory, tmp_path):
