@@ -21,6 +21,9 @@ def residual_gate(known_mask,future_valid,*,focus_free_frames,taper_frames):
     if (type(focus_free_frames) is not int or focus_free_frames<1 or
             type(taper_frames) is not int or taper_frames<1):
         raise ValueError('时间门控必须显式给出正整数有效支持和过渡长度')
+    # 姿态前缀18帧时，最后一帧的两个outgoing根位移仍是自由坐标：它们影响
+    # 下一帧位置，不改变该已知姿态。因此从首个实际自由坐标帧构造门控，不能
+    # 把“17帧全坐标已知”误当作机器人只保留17帧前缀；原constrain仍保护已知坐标。
     known=known_mask.all(-1)
     prefix=known.long().cumprod(1).sum(1)
     if bool((known & (torch.arange(known.shape[1],device=known.device)[None]>=prefix[:,None])).any()):

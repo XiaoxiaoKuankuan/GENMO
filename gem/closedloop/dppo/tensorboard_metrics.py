@@ -27,7 +27,7 @@ VERSION = 'genmo.stage2.asymmetric_compact_tensorboard.v1'
 DEFINITIONS = {
     'Reward/total_per_second': '分/秒，越高越好。训练为各来源积分回报/实际采集秒数再四来源等权；验证为各任务每秒回报先来源内平均、再来源等权。',
     'Reward/episode_return': '分，固定验证任务积分回报的四来源等权平均；执行更久也会增加，必须一起看每秒回报和终止。',
-    'Reward/tracking': '分/秒，已乘权重和活动度门控的跟踪奖励；越高越好，但不能替代原始误差。',
+    'Reward/tracking': '分/秒，已乘track_weight的跟踪项；活动度门控依实际配置，当前无门控候选不乘活动度；不能替代原始误差。',
     'Reward/stable': '分/秒，根高和非 yaw 姿态稳定奖励，越高越好。',
     'Reward/alive': '分/秒，有效存活控制区间奖励，越高越好。',
     'Reward/command_penalty': '分/秒，控制指令变化惩罚，非正，越接近零越好。',

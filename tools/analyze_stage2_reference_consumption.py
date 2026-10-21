@@ -184,6 +184,8 @@ def associate(case,chain_payload,probes=(),*,execution_cases=()):
         missing_compact_transitions=missing,by_consumption=totals,by_temporal_consumption=temporal_totals,chains=details,
         consumed_joint_probe=joint_reference_changes(episodes,consumed,probes,rows_by_id) if probes else None,
         temporal_scope='actual_window_tick_vs_control_begin; current_priority_then_future_then_past; source_lineage_resolved',
+        gaussian_frame_alignment_scope='model_time_index_alignment_not_feature_to_world_pose_causal_decomposition; '
+            'outgoing_root_delta_at_t_affects_pose_t_plus_1_and_later; frozen_final_Transformer_couples_frames',
         reason=None if episodes else 'Historical learning-only rollout omitted real per-control GMT windows',
         association_scope='adjacent_source_pose_support_not_full_velocity_or_physical_causality',
         root_feature_association_is_temporal_index_not_world_pose_causality=True,
