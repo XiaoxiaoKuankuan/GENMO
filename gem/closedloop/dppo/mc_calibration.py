@@ -217,13 +217,24 @@ def independent_mc_metrics(c, bank):
         part=rows[start:start+128];cache=ValueConditionCache(part,c.distributed.device)
         predictions.extend(c.critic(cache.critic_context(part),cache.get('remaining_music_seconds',part)).cpu().tolist())
     modes=[e['task'].get('initialization','standing') for e in bank.episodes for _ in e['rows']]
-    shards=c.distributed.all_gather_object(dict(predictions=predictions,targets=targets.tolist(),bank=bank.report(),modes=modes))
+    from .value_credit_diagnostics import episode_value_records, summarize_value_credit
+    local_records=[];offset=0
+    for episode in bank.episodes:
+        count=len(episode['rows'])
+        local_records.extend(episode_value_records(episode,predictions[offset:offset+count],
+            gamma_upper=c.settings['gamma_upper'],lambda_upper=c.settings['lambda_upper'],
+            world_seconds=c.stage['ppo_rollout']['world_seconds']))
+        offset+=count
+    shards=c.distributed.all_gather_object(dict(predictions=predictions,targets=targets.tolist(),bank=bank.report(),modes=modes,
+        value_credit_records=local_records))
     p=[v for r in shards for v in r['predictions']];t=[v for r in shards for v in r['targets']]
     if not t:raise ValueError('No complete nonadministrative MC validation episode')
     modes=[v for r in shards for v in r['modes']]
     by_initialization={mode:summarize_critic_predictions([v for v,m in zip(p,modes) if m==mode],
         [v for v,m in zip(t,modes) if m==mode]) for mode in sorted(set(modes))}
-    return dict(**summarize_critic_predictions(p,t),by_initialization=by_initialization,episodes=sum(r['bank']['complete_episodes'] for r in shards),
+    return dict(**summarize_critic_predictions(p,t),by_initialization=by_initialization,
+        value_credit=summarize_value_credit([v for r in shards for v in r['value_credit_records']]),
+        episodes=sum(r['bank']['complete_episodes'] for r in shards),
         physical_control_steps=sum(r['bank']['real_control_steps'] for r in shards),
         scope='independent_complete_MC_current_fixed_behavior_no_bootstrap')
 
