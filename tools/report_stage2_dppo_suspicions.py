@@ -21,6 +21,7 @@ import numpy as np
 import torch
 
 from tools.stage2_dppo_diagnostic_math import summarize_records
+from gem.closedloop.dppo.optimization_support import balanced_epoch_order
 
 
 def read(path):return json.loads(Path(path).read_text())
@@ -42,6 +43,35 @@ def joined_objectives(payload):
             clipped={str(c):float(torch.minimum(ratio*advantage,ratio.clamp(1-c,1+c)*advantage).mean())
                      for c in [.01,.2,.5]}))
     return dict(scope='counterfactual_joint_chain_objective_not_production_loss',steps=results)
+
+
+def actual_minibatches(case,summary,probabilities):
+    counts=[read(case/f'rank{rank:02d}/manifest.json')['real_upper_transitions'] for rank in range(8)]
+    total=sum(counts)
+    if total!=len(probabilities['advantages']):
+        raise ValueError('轻量小批重建仅接受本次所有真实行均有效的case，不能假设缺失有效Mask')
+    manifest=[dict(owner_rank=rank,local_index=i,valid=True,has_free=True)
+              for rank,n in enumerate(counts) for i in range(n)]
+    state=torch.load(case/'rank00/rank_state.pt',map_location='cpu',weights_only=False)
+    generator=torch.Generator();generator.set_state(state['rng']['generators']['actor'])
+    order=balanced_epoch_order(list(range(total)),manifest,generator)
+    records=[probabilities['initial'],*probabilities['after_steps']]
+    results=[];start=0
+    for step,entry in enumerate(summary['optimizer']['steps']):
+        indices=order[start:start+entry['global_chain_count']];start+=len(indices)
+        actual=summarize_records(records[step][indices],probabilities['advantages'][indices],clip=summary['clip'])
+        difference=-actual['production_objective']-entry['ppo_loss']
+        if abs(difference)>1e-8 or abs(actual['active_clip_fraction']-entry['objective_clip_fraction'])>1e-12:
+            raise ValueError('重建的小批PPO目标或裁剪不能复现原更新器')
+        proposed={}
+        for clip in [.01,.005,.003,.001,.0005,.0003]:
+            s=summarize_records(records[step][indices],probabilities['advantages'][indices],clip=clip)
+            proposed[str(clip)]=dict(active_clip_fraction=s['active_clip_fraction'],
+                                    ordinary_clip_fraction=s['ordinary_clip_fraction'])
+        results.append(dict(step=step+1,global_chains=len(indices),production_loss_difference=difference,
+                            hypothetical_clip_on_same_actual_pre_step_minibatch=proposed))
+    if start!=total:raise ValueError('本次单Epoch重建没有覆盖全部真实训练样本')
+    return dict(scope='exact_preserved_RNG_and_original_balanced_order_reproduces_logged_PPO_loss_not_an_extra_update',steps=results)
 
 
 def current_consumption_delta(x,y,ia,ib):
@@ -149,6 +179,7 @@ def main():
         probabilities=torch.load(folder/'probability_records.pt',map_location='cpu',weights_only=False)
         report['clips'][tag]=dict(summary=summary,joint_counterfactual=joined_objectives(probabilities),
             common_clip_001_objective=summarize_records(probabilities['final'],probabilities['advantages'],clip=.01)['production_objective'],
+            actual_minibatch_audit=actual_minibatches(Path(replay['case']),summary,probabilities),
             all_actual_full_objective_steps_positive=all(s['actual_full_objective_gain']>0 for s in summary['step_history']),
             free_coordinate_counts=torch.unique(probabilities['final'][...,2]).tolist())
     report['shifted_clip_gradients']=read(root/'replay/clip_0_01/same_shifted_model_clip_gradients.json')
