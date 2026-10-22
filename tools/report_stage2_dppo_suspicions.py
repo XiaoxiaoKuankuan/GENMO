@@ -180,6 +180,8 @@ def main():
         raise ValueError('固定真实case身份被改写')
     report=dict(origin=origin,history=read(root/'history.json'),replay=replay,clips={},
                 production_preservation=read(root/'production_preservation.json'),input_probability_sha256={})
+    if (root/'baseline_repeatability.json').exists():
+        report['baseline_repeatability']=read(root/'baseline_repeatability.json')
     for tag in ['clip_0_01','clip_0_005','clip_0_003']:
         folder=root/'replay'/tag;summary=read(folder/'summary.json')
         probabilities=torch.load(folder/'probability_records.pt',map_location='cpu',weights_only=False)
