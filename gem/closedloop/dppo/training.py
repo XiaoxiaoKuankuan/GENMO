@@ -71,6 +71,14 @@ def _fragment_value_initialization(state, previous_gamma, gamma):
         requires_stage1_rebaseline=not inherited,requires_transfer_start_evaluation=True)
 
 
+def _checkpoint_initialization_identity(record):
+    """从持久化继承记录恢复来源，普通resume不误标为重新从Stage1开始。"""
+    return dict(kind='explicit_checkpoint_random_fragments' if record.get('transfer')
+        else 'explicit_checkpoint_new_experiment',checkpoint=record['checkpoint'],
+        checkpoint_sha256=record['sha256'],actor_fingerprint=record['actor_fingerprint'],
+        source_iteration=record['source_iteration'])
+
+
 def _final_actor_acceptance(actor,kl,limits):
     """有限回溯无可用步是正常采样轮，不能因此终止整个长期训练。"""
     from .actor_backtracking import check_candidate_kl
@@ -472,6 +480,9 @@ def run(cargs,config,distributed):
         payload=None
         initialization=getattr(cargs,'initialize_from_checkpoint',None)
         fragment_transfer=bool(getattr(cargs,'initialize_random_fragments',False))
+        if cargs.resume and (c.output/'initialization.json').exists():
+            initial_record=root_call(distributed,lambda:json.loads((c.output/'initialization.json').read_text()))
+            c.identity['actor_initialization']=_checkpoint_initialization_identity(initial_record)
         if not cargs.resume and not initialization and not cargs.evaluate_only and critic_config.get('preheat_artifact'):
             from .critic_preheat import initialize_critic
             imported=local_call(distributed,lambda:initialize_critic(critic_config['preheat_artifact'],
@@ -512,6 +523,7 @@ def run(cargs,config,distributed):
                     for name in ('evaluation_baseline.json','fixed_diagnostic_reference.json'):
                         if (parent/name).exists():shutil.copy2(parent/name,c.output/name)
                 record=dict(checkpoint=str(checkpoint),sha256=file_sha256(checkpoint),
+                    actor_fingerprint=payload['actor_fingerprint'],
                     source_iteration=payload['state']['iteration'],actor_and_adam_preserved=True,
                     critic_and_adam_preserved=True,original_budget_preserved=True,
                     fresh_physics_rollout_required=True)
@@ -532,10 +544,7 @@ def run(cargs,config,distributed):
                 atomic_json(c.output/'initialization.json',record)
                 return record
             imported=root_call(distributed,initialize_experiment)
-            c.identity['actor_initialization']=dict(kind='explicit_checkpoint_random_fragments' if fragment_transfer
-                else 'explicit_checkpoint_new_experiment',checkpoint=str(checkpoint),
-                checkpoint_sha256=imported['sha256'],actor_fingerprint=payload['actor_fingerprint'],
-                source_iteration=payload['state']['iteration'])
+            c.identity['actor_initialization']=_checkpoint_initialization_identity(imported)
             c.state=copy.deepcopy(payload['state'])
             for key in ('best_observed','best_saved','regression_monitor'):c.state.pop(key,None)
             c.state['experiment_initialization']=imported
