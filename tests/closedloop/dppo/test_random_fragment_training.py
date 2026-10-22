@@ -106,6 +106,21 @@ def test_disabled_bc_configuration_has_zero_real_samples_and_no_module_lr_transf
     assert config['stage9'].get('actor_lr_multipliers') is None
 
 
+def test_readonly_advantage_decomposition_keeps_timeout_bootstrap_and_real_event_once():
+    from tools.analyze_stage2_advantage_credit import decomposition
+    a=transition(600,reward=1.)
+    b=transition(a.control_tick_end,reward=2.)
+    a.old_value=10.;a.next_value=20.
+    b.old_value=20.;b.next_value=30.;b.truncated=True
+    b.metadata['event_reward']=-5.
+    total,reward,value,tail=decomposition([a,b],gamma=.95,lam=.98)
+    torch.testing.assert_close(total,reward+value)
+    assert tail[0]>0 and tail[1]>0
+    b.terminated=True;b.next_context=None
+    terminal=decomposition([a,b],gamma=.95,lam=.98)
+    assert torch.equal(terminal[3],torch.zeros(2,dtype=torch.float64))
+
+
 @pytest.mark.parametrize('old_gamma,gamma,preheated,requires_fit',[
     (.99,.95,True,True),(.99,.99,True,False),(.99,.99,False,True)])
 def test_only_changed_value_target_requires_unconditional_refit(old_gamma,gamma,preheated,requires_fit):

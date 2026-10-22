@@ -29,6 +29,9 @@ def episode_value_records(episode, predictions, *, gamma_upper=.99, lambda_upper
     if not math.isfinite(world_seconds) or world_seconds<=0 or near_seconds<=0:
         raise ValueError('Positive diagnostic physical intervals required')
     mc=complete_mc_returns(rows,gamma_upper=gamma_upper)
+    # 同一真实轨迹另算旧折扣的只读参照，专门区分“旧Critic本身误差”和“换gamma后量纲变化”。
+    # 这不是训练标签，Actor/价值拟合始终只使用上面的当前gamma MC。
+    legacy_mc=complete_mc_returns(rows,gamma_upper=.99)
     stored=torch.as_tensor(episode['returns'],dtype=torch.float64).detach().cpu()
     if stored.shape!=mc.shape or not torch.equal(stored,mc):
         raise ValueError('Stored MC differs from production complete-episode returns')
@@ -64,6 +67,8 @@ def episode_value_records(episode, predictions, *, gamma_upper=.99, lambda_upper
             prediction=float(prediction[i]),mc=float(mc[i]),gae=float(gae[i]),
             lambda1_bootstrap=float(bootstrap_return[i]),
             value_error=float(prediction[i]-mc[i]),gae_error=float(gae[i]-mc[i]),
+            legacy_gamma099_mc=float(legacy_mc[i]),
+            legacy_gamma099_value_error=float(prediction[i]-legacy_mc[i]),
             bootstrap_error=float(bootstrap_return[i]-mc[i]),
             near_true_terminal=near_end,near_physical_failure=near_end and failure,
             before_reconstructed_cut=before_cut,after_reconstructed_cut=after_cut,
@@ -75,7 +80,7 @@ def summarize_value_credit(records):
     """统一按状态重算误差；无样本返回缺测，保留失败数而非过滤失败。"""
     def summarize(selected):
         result=dict(states=len(selected),tasks=len({r['task_id'] for r in selected}))
-        for field in ('value_error','gae_error','bootstrap_error'):
+        for field in ('value_error','gae_error','bootstrap_error','legacy_gamma099_value_error'):
             if not selected:
                 result[field]=None;continue
             error=torch.tensor([r[field] for r in selected],dtype=torch.float64)
@@ -92,6 +97,9 @@ def summarize_value_credit(records):
                        for mode in sorted({r['initialization'] for r in records})}
     return dict(groups=groups,by_source=by_source,by_initialization=by_initialization,
         worst_overestimates=sorted(records,key=lambda r:r['value_error'],reverse=True)[:20],
+        worst_underestimates=sorted(records,key=lambda r:r['value_error'])[:20],
+        legacy_gamma099_worst_underestimates=sorted(records,key=lambda r:r['legacy_gamma099_value_error'])[:20],
+        legacy_gamma099_scope='read_only_same_real_trajectory_reference_not_current_training_labels',
         scope='current_fixed_policy_complete_MC_no_bootstrap_truth; reconstructed_8s_cuts_are_diagnostic_only',
         trajectory_noise='single_trajectory_MC_is_a_noisy_sample_of_expected_value',
         physical_failure_tasks=len({r['task_id'] for r in records if r['near_physical_failure']}))
