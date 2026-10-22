@@ -26,10 +26,14 @@ def validate_arguments(argv):
     parser.add_argument('--output-dir',type=Path,required=True)
     parser.add_argument('--evaluate-only',action='store_true')
     parser.add_argument('--evaluation-actor',type=Path,required=True)
+    parser.add_argument('--config',type=Path,required=True)
     parser.add_argument('--resume')
     args,_=parser.parse_known_args(argv)
     if not args.evaluate_only or args.resume:
         raise ValueError('真实消费观察只允许显式Actor的独立evaluate-only运行')
+    import yaml
+    if yaml.safe_load(args.config.read_text())['stage10'].get('actor_initialization'):
+        raise ValueError('独立评价必须关闭训练父模型初始化，防止覆盖显式评价Actor')
     root=args.output_dir.resolve()
     if root.name in ('train','capture') or root.exists():
         raise ValueError('评价必须使用尚不存在的独立目录')
