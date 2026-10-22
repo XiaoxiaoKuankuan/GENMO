@@ -2,7 +2,7 @@
 
 本模块只接受显式当前配置，自动从GPU数、环境数、连续决策数及完整链minibatch
 推导rollout、optimizer次数、四个随机训练步访问数和BC每步样本量，不继承160条或四次更新
-限制。联合链PPO和联合链KL为训练目标，coordinate KL仅作辅助诊断，不能复用一个
+限制。当前逐步坐标平均代理用于PPO目标，坐标KL校准步长，真实整链KL独立诊断，不能复用一个
 无量纲数字。初始参数是待有限标定的候选，任何算法或数值合同变化新建run。
 
 Stage1与GMT均绑定真实SHA和统计量，全部环境时序与奖励保留旧明确配置。检查
@@ -18,7 +18,8 @@ import yaml
 
 from .rewards import resolve_reward_config
 
-VERSION='genmo.closedloop.stage2.full_chain_joint.v1'
+VERSION='genmo.closedloop.stage2.stepwise_coordinate_mean.v1'
+LEGACY_VERSION='genmo.closedloop.stage2.full_chain_joint.v1'
 
 
 def _source_counts(value):
@@ -30,7 +31,7 @@ def _source_counts(value):
 
 def configuration(path,*,genmo_repo=None,gmt_repo=None):
     c=yaml.safe_load(Path(path).read_text())
-    if c.get('stage10',{}).get('version')!=VERSION or 'base_config' in c:
+    if c.get('stage10',{}).get('version') not in (VERSION,LEGACY_VERSION) or 'base_config' in c:
         raise ValueError('New 当前 full configuration required')
     if genmo_repo:c['paths']['genmo_repo']=str(Path(genmo_repo).resolve())
     if gmt_repo:c['paths']['gmt_repo']=str(Path(gmt_repo).resolve())
@@ -143,8 +144,9 @@ def configuration(path,*,genmo_repo=None,gmt_repo=None):
         raise ValueError('Calibration needs an explicit bounded reservation, not a measured delay')
     if c['runtime']['timing_contract']!='modeled_deployment.v3' or c['timing']['control_ticks']!=12 or c['timing']['physics_ticks']!=3:
         raise ValueError('Keep calibrated deployment clock and 50Hz/200Hz four physical substeps')
-    if t['objective_logprob_reduction']!='joint_sum' or t['gamma_denoising']!=1.:
-        raise ValueError('Full-chain joint PPO requires sum and one undiscounted upper advantage')
+    expected_reduction='free_coordinate_mean' if s['version']==VERSION else 'joint_sum'
+    if t['objective_logprob_reduction']!=expected_reduction or t['gamma_denoising']!=1.:
+        raise ValueError('PPO reduction must match explicit algorithm version with one undiscounted upper advantage')
     if not 0<t['ppo_clip']<1 or not math.isfinite(t['actor_lr']) or t['actor_lr']<=0:
         raise ValueError('Invalid independently calibrated Actor learning rate/clip')
     if t.get('advantage_control','none')!='none':
@@ -154,7 +156,8 @@ def configuration(path,*,genmo_repo=None,gmt_repo=None):
     diagnostic_interval=s['checks'].get('actor_diagnostics_every',100)
     if type(diagnostic_interval) is not int or diagnostic_interval<1:
         raise ValueError('actor_diagnostics_every must be a positive iteration interval')
-    if t['actor_lr_control']!='joint_kl_backtracking' or t['kl_rejection']!='rollback_abort':
+    expected_control='coordinate_kl_backtracking' if s['version']==VERSION else 'joint_kl_backtracking'
+    if t['actor_lr_control']!=expected_control or t['kl_rejection']!='rollback_abort':
         raise ValueError('AdamW with fixed LR ratios, joint-KL backtracking and final whole-rollout rejection required')
     if any(key in t for key in ('actor_lr_bounds','kl_target_coordinate','kl_control_metric')):
         raise ValueError('Retired adaptive-LR settings are not supported')

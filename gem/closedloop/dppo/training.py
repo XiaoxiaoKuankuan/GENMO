@@ -79,7 +79,7 @@ def _final_actor_acceptance(actor,kl,limits):
         result['passed']=False
         result['failures']['actor_optimizer']='explicit_invalid_optimizer_update'
     if actor['optimizer_steps']==0:
-        normal={'rollout_no_useful_trust_region_step','pre_step_chain_joint_kl','active_clip_saturation'}
+        normal={'rollout_no_useful_trust_region_step','pre_step_chain_joint_kl','pre_step_mean_coordinate_kl','active_clip_saturation'}
         if actor.get('early_stop_reason') not in normal:
             raise RuntimeError('Zero Actor steps without an explicit normal rollout stop reason')
         result['no_actor_update_this_rollout']=True
@@ -174,6 +174,9 @@ def _record_actor_step(c,label,step):
         print(f'[STAGE2 ACTOR] {label} update={step["optimizer_step"]} '
             f'chains={step["global_chain_count"]} lr={step["learning_rate"]:.6g} '
             f'chain_KL={post["chain_joint_kl"]["mean"]:.6g} '
+            f'coordinate_KL={post["mean_coordinate_kl"]:.6g} '
+            f'proxy_gain={post["stepwise_objective_gain"]:.6g} '
+            f'proxy_active_clip={post["proxy_active_clip_fraction"]:.6g} '
             f'backtracks={transaction.get("backtracks",0)} wall={step["wall_seconds"]:.3f}s '
             'acceptance=pending_full_rollout',flush=True)
     root_call(c.distributed,publish)
@@ -387,6 +390,9 @@ def _maintain_after_iteration(c,report,*,is_warmup,rejected,last_save,finishing=
 
 
 def run(cargs,config,distributed):
+    if not any(getattr(cargs,name,False) for name in ('collect_only','evaluate_only','calibrate_only','critic_preheat_only','mc_validation_only')):
+        from .actor_optimization import require_current_actor_objective
+        require_current_actor_objective(config['stage9'])
     c=SimpleNamespace(distributed=distributed,config=copy.deepcopy(config),base_config=copy.deepcopy(config),
         stage=config['stage10'],settings=copy.deepcopy(config['stage9']),manager=None,writer=None,
         async_writer=None,vector=None,workers=None,maintenance=None,budget=None,output=cargs.output_dir.resolve(),
@@ -470,6 +476,7 @@ def run(cargs,config,distributed):
         payload=None
         initialization=getattr(cargs,'initialize_from_checkpoint',None)
         fragment_transfer=bool(getattr(cargs,'initialize_random_fragments',False))
+        stepwise_transfer=bool(getattr(cargs,'initialize_stepwise_ppo',False))
         if not cargs.resume and not initialization and not cargs.evaluate_only and critic_config.get('preheat_artifact'):
             from .critic_preheat import initialize_critic
             imported=local_call(distributed,lambda:initialize_critic(critic_config['preheat_artifact'],
@@ -499,7 +506,7 @@ def run(cargs,config,distributed):
             payload=local_call(distributed,lambda:load_training_checkpoint(checkpoint,identity=c.identity,
                 actor=c.actor,critic=c.critic,actor_optimizer=c.actor_optimizer,
                 critic_optimizer=c.critic_optimizer,controller=c.controller,new_experiment=True,
-                fragment_transfer=fragment_transfer))
+                fragment_transfer=fragment_transfer,stepwise_transfer=stepwise_transfer))
             def initialize_experiment():
                 import shutil
                 c.budget.initialize_from_checkpoint(payload['budget'])
@@ -513,6 +520,11 @@ def run(cargs,config,distributed):
                     source_iteration=payload['state']['iteration'],actor_and_adam_preserved=True,
                     critic_and_adam_preserved=True,original_budget_preserved=True,
                     fresh_physics_rollout_required=True)
+                if stepwise_transfer:
+                    record.update(transfer='stepwise_coordinate_mean_ppo.v1',
+                        previous_objective=payload['identity']['training']['actor_objective'],
+                        objective=c.settings['actor_objective'],old_rollout_reused=False,
+                        value_target_changed=False,source_version_is_informational=True)
                 if fragment_transfer:
                     record.update(transfer='random_motion_fragments_timeout_bootstrap.v1',
                         previous_gamma_upper=payload['identity']['training']['gamma_upper'],
@@ -671,7 +683,7 @@ def run(cargs,config,distributed):
                 continue
             cache=RolloutTensorCache(rows,targets,distributed.device,max_device_bytes=c.stage['storage']['tensor_cache_max_bytes'],preserve_device=True)
             probability_frequency=c.stage['checks']['full_probability_every']
-            full_probability=(c.state['rollouts_completed']==0 or strict or
+            full_probability=(c.state['rollouts_completed']==0 or strict or cargs.collect_only or
                 (probability_frequency>0 and c.state['rollouts_completed']%probability_frequency==0))
             initial_probability=probability_check_local(c.policy,rows,global_manifest=manifest,distributed=distributed,
                 denoising_microbatch=c.settings['kl_microbatch'],tensor_cache=cache,include_frozen=full_probability,
@@ -730,7 +742,7 @@ def run(cargs,config,distributed):
                     ppo_epochs=c.settings['ppo_epochs'],minibatch_chains=c.stage['scale']['actor_minibatch_chains'],
                     microbatch=c.settings['denoising_microbatch'],sampled_steps=c.settings['ppo_steps_per_chain'],
                     clip=c.settings['ppo_clip'],gamma_denoising=c.settings['gamma_denoising'],
-                    soft_kl=c.settings['kl_soft_stop_chain_joint'],kl_reduction=c.stage['kl']['reduction'],
+                    soft_kl=c.settings['kl_soft_stop_mean_coordinate'],kl_reduction=c.stage['kl']['reduction'],
                     objective_reduction=c.settings['objective_logprob_reduction'],
                     grad_clip_norm=c.settings['grad_clip_norm'],reserve_attempt=reserve,
                     bc_samples_per_rollout=c.settings['bc_samples_per_rollout'],bc_min_global_batch=c.settings['bc_min_global_batch'],
@@ -759,7 +771,7 @@ def run(cargs,config,distributed):
                     c.kl_reuse_verified=True
                 accepted=_final_actor_acceptance(actor,kl,c.stage['kl'])
                 actor['accepted_optimizer_steps']=actor['optimizer_steps'] if accepted['passed'] else 0
-                actor['acceptance_scope']='full_rollout_chain_joint_KL'
+                actor['acceptance_scope']='full_rollout_stepwise_proxy_objective_and_separate_Gaussian_KLs'
                 if not accepted['passed']:
                     anomaly_saved=local_call(distributed,lambda:_preserve_rollout_anomaly(c,buffer,targets,manifest,label))
                     rollback=local_call(distributed,lambda:_restore_rollback(c,saved))
@@ -780,10 +792,12 @@ def run(cargs,config,distributed):
             if (strict or c.state['rollouts_completed']==0 or
                     not is_warmup and c.state['iteration']+1>=stop_after_iteration or
                     fingerprint_frequency>0 and (c.state['rollouts_completed']+1)%fingerprint_frequency==0):
+                from .rollback_audit import exact_state_digest
                 fingerprints=distributed.all_gather_object(local_call(distributed,lambda:dict(
-                    actor=_model_fingerprint(c.actor),critic=_model_fingerprint(c.critic))))
+                    actor=_model_fingerprint(c.actor),critic=_model_fingerprint(c.critic),
+                    optimizers=exact_state_digest(dict(actor=c.actor_optimizer.state_dict(),critic=c.critic_optimizer.state_dict())))))
                 if any(value!=fingerprints[0] for value in fingerprints):
-                    raise RuntimeError('Periodic complete Actor/Critic fingerprints differ across ranks')
+                    raise RuntimeError('Periodic complete Actor/Critic/Adam states differ across ranks')
             memory=distributed.all_gather_object(dict(pytorch_peak_allocated=torch.cuda.max_memory_allocated(distributed.device),
                 pytorch_peak_reserved=torch.cuda.max_memory_reserved(distributed.device),
                 scope='current_round_PyTorch_allocator_excludes_PhysX_external_allocations'))

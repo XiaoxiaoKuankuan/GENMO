@@ -58,8 +58,8 @@ DEFINITIONS = {
     'Termination/reference_rejections_per_1000s': '次/1000机器人秒，固定验证参考拒绝次数/实际执行秒数，越低越好。',
     'Policy/learning_rate': 'Actor当前共同基础学习率，本次配置等于qpos输出头LR；各Transformer层还需乘固定倍率，逐组实际值见JSON。',
     'Policy/trainable_kl': '本轮更新前后可训练去噪步骤的平均每自由坐标 KL；排除冻结步骤，大小本身不等于收益。',
-    'Policy/max_step_kl': '四个可训练随机步骤中最大的单步平均每自由坐标 KL，仅作辅助诊断。',
-    'Policy/clipped_objective_fraction': '完整链联合PPO中因符号相关裁剪失去梯度的链比例；0不证明无效，接近1说明饱和。',
+    'Policy/max_step_kl': '四个可训练随机步骤中最大的单步平均每自由坐标 KL，配合独立主控门限校准。',
+    'Policy/clipped_objective_fraction': '逐步坐标平均代理PPO中因符号相关裁剪失去梯度的有效内部转移比例；0不证明无效，接近1说明饱和。',
     'Policy/gradient_norm': 'Actor 每次更新裁剪前 PPO+BC 总梯度范数的均值；持续异常增大需检查。',
     'Policy/bc_to_ppo_gradient_ratio': '每次更新加权 BC 梯度范数/PPO 梯度范数的均值；不是 Adam 参数更新贡献比例。',
     'Loss/joint_score': '四个随机步骤完整联合 Gaussian score 单次策略梯度损失；不是 clipped PPO，不能按单调下降验收。',
@@ -77,18 +77,18 @@ DEFINITIONS = {
 }
 DEFINITIONS.update({
     'Policy/nominal_actor_lr': '每批重新试探的共同名义LR；临时回溯LR不传给下一批，模块实际LR仍乘固定倍率。',
-    'Policy/ppo_objective_gain': '整批真实完整链clipped PPO目标减行为起点目标；越大越好，不能替代物理执行收益。',
+    'Policy/ppo_objective_gain': '整批逐步代理clipped PPO目标减行为起点目标，四步各自裁剪后按4*N平均；越大越好，不能替代物理执行收益。',
     'Policy/transformer_lr_min': '本轮最后一次接受更新中，16层Transformer实际学习率的最小值。',
     'Policy/transformer_update_rms': 'Transformer主干每次Adam后实际FP32参数变化RMS的轮内均值；确认主干确实参与学习。',
-    'Policy/chain_joint_kl': '全部有效旧rollout链四步联合KL之和的均值；主要更新约束，非未来物理安全保证。',
+    'Policy/chain_joint_kl': '全部有效旧rollout链四步联合KL之和的均值；独立真实分布诊断及可选重新标定尾部保护，非物理安全保证。',
     'Policy/chain_joint_kl_p95': '上述每链联合KL的P95，检查尾部更新。完整P99/Max见每轮JSON。',
-    'Policy/chain_clip_fraction': '完整链ratio落在[1-clip,1+clip]之外的比例；区别于真正失去梯度的active clip。',
+    'Policy/proxy_clip_fraction': '有效单个内部转移的坐标平均代理ratio越界比例，非整链ratio；区别于真正平坦的active clip。',
     'Policy/parameter_update_rms': '每次Adam后真实FP32 Actor参数变化RMS的均值，非理论更新量。',
     'Policy/ppo_bc_cosine': '全局SUM后的PPO与BC梯度余弦；负值表示方向存在冲突。',
-    'Policy/accepted_updates': '通过完整rollout联合KL的实际Adam次数，区别于计划次数。',
+    'Policy/accepted_updates': '通过完整rollout逐步代理目标与配置KL检查的实际Adam次数，区别于计划次数。',
     'Policy/planned_updates': '本轮按真实有效链数、完整链minibatch及epoch推导的计划Adam次数。',
     'Perf/environment_seconds': '实际GMT闭环采集墙钟。',
-    'Perf/actor_ppo_seconds': '完整链ratio前向及流式PPO反向时间，不含BC和更新后KL。',
+    'Perf/actor_ppo_seconds': '四步代理ratio前向及流式PPO反向时间，不含BC和更新后KL。',
     'Perf/bc_seconds': '原Stage1 BC样本加载与前向反向时间。',
     'Perf/critic_seconds': '原价值目标的Critic更新墙钟。',
     'Perf/kl_seconds': '更新后minibatch及整轮联合KL/最终参考诊断墙钟。',
@@ -104,8 +104,8 @@ EVENT_TAG_OVERRIDES = {
     ('validation', 'Reward/total_per_second'): 'Reward/validation_total_per_second',
     ('train_evaluation', 'Reward/total_per_second'): 'Reward/validation_total_per_second',
 }
-# 坐标平均KL保留在JSON和历史读取中，面板用真实链KL、名义LR和PPO目标增益，标签总量不增加。
-JSON_ONLY_TAGS = {'Policy/trainable_kl', 'Policy/max_step_kl'}
+# 坐标平均KL保留在JSON和历史读取中，面板同时显示主控坐标KL、独立真实链KL和逐步目标增益；全参数RMS改留JSON，标签总量不增加。
+JSON_ONLY_TAGS = {'Policy/parameter_update_rms', 'Policy/max_step_kl'}
 EVENT_DEFINITIONS = {tag: description for tag, description in DEFINITIONS.items()
                      if tag != 'Reward/total_per_second' and tag not in JSON_ONLY_TAGS}
 EVENT_DEFINITIONS.update({
@@ -216,7 +216,7 @@ def training_scalars(record):
     if kl.get('chain_joint_kl'):
         values['Policy/chain_joint_kl']=kl['chain_joint_kl']['mean']
         values['Policy/chain_joint_kl_p95']=kl['chain_joint_kl']['p95']
-        values['Policy/chain_clip_fraction']=kl.get('clip_fraction')
+        values['Policy/proxy_clip_fraction']=kl.get('proxy_clip_fraction',kl.get('clip_fraction'))
     values['Policy/accepted_updates']=actor.get('accepted_optimizer_steps')
     values['Policy/nominal_actor_lr']=actor.get('nominal_learning_rate')
     values['Policy/ppo_objective_gain']=kl.get('objective_gain_mean')

@@ -64,7 +64,7 @@ def test_complete_song_evaluation_interval_must_be_positive_integer(tmp_path,int
 def test_main_scale_is_16384_nominal_chains_with_eight_full_chain_updates():
     c = configuration(CONFIG)
     s, t = c['stage10'], c['stage10']['training']
-    assert s['version'] == VERSION
+    assert s['version'] == 'genmo.closedloop.stage2.full_chain_joint.v1'
     assert s['derived'] == dict(world_size=8, real_chains=16384, local_chains=2048,
         planned_actor_steps=8, local_ppo_internal_visits=8192, local_trainable_kl_visits=8192,
         bc_per_step=256, bc_per_rollout=2048,maximum_actor_steps=8,

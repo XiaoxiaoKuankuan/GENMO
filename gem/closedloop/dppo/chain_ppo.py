@@ -1,10 +1,10 @@
-"""完整扩散链PPO的两遍流式计算，不同时保存四份Transformer反向图。
+"""逐去噪步自由坐标平均代理PPO的两遍流式计算。
 
 第一遍无梯度读取真实rollout的15～18步状态、采样值、旧均值/实际标准差与free mask，
-得到每链四步FP64统计；上层只据四步之和决定一个PPO裁剪分支和一个GAE系数。
-第二遍在相同Actor版本上逐微批重算四步联合log-ratio，以已固定的完整链导数反传。
+得到每链四步FP64统计；四步分别以joint_log_ratio/D计算代理比值和符号裁剪分支。
+第二遍在相同Actor版本逐微批重算，以-A*proxy_ratio/(4*N_global*D)反传；平坦区为0。
 条件编码器通过ConditionGraphCache汇总所有微批梯度后只反传一次；全局链数是唯一
-loss分母，四步之间不平均、不折扣，不对展开的内部转移单独执行PPO clipping。
+loss分母再乘4，无去噪折扣，不保存四份完整Transformer反向图，不合并四步裁剪。
 
 缓存只保存小型统计量；行为链和旧核来自不可变RolloutTensorCache。冻结步骤和
 确定性末步不进入高斯概率。首尾参数版本、条件和重算值受校验；异常交给外层分布式
@@ -15,7 +15,7 @@ from __future__ import annotations
 import torch
 
 from .execution_checks import require_tensor
-from .gaussian_probability import gaussian_statistics, chain_statistics, ppo_surrogate
+from .gaussian_probability import gaussian_statistics, step_statistics, stepwise_surrogate
 from .optimization_support import _parameters, _old_kernel
 from .tensor_cache import ConditionGraphCache
 
@@ -52,7 +52,7 @@ def evaluate_chain_records(policy, rows, cache, *, microbatch, physical_changes=
 
 
 def from_records(records):
-    return chain_statistics(records[:,:,2],records[:,:,0],records[:,:,3])
+    return step_statistics(records[:,:,2],records[:,:,0],records[:,:,3])
 
 
 def backward_chain_surrogate(policy, rows, cache, records, *, clip, global_chain_count, microbatch):
@@ -65,8 +65,8 @@ def backward_chain_surrogate(policy, rows, cache, records, *, clip, global_chain
     records=records.to(device=device)
     if not rows:
         return dict(loss=records.new_zeros(()),recompute_max_error=records.new_zeros(()))
-    surrogate=ppo_surrogate(from_records(records),cache.get('advantages',rows),clip=clip,reduction='joint_sum')
-    coefficients=-surrogate['objective_log_gradient']/global_chain_count
+    surrogate=stepwise_surrogate(from_records(records),cache.get('advantages',rows),clip=clip)
+    coefficients=-surrogate['joint_log_gradient']/(4*global_chain_count)
     conditions=ConditionGraphCache(policy,cache,include_frozen=False)
     conditions.prime(rows)
     pairs=[(i,s) for i in range(len(rows)) for s in policy.trainable_steps]
@@ -80,8 +80,8 @@ def backward_chain_surrogate(policy, rows, cache, records, *, clip, global_chain
         stats=gaussian_statistics(cache.get('chain',samples,[s+1 for s in steps]),
             old_mean,old_std,params['mean'],params['std'],mask)
         errors.append((stats['joint_log_ratio'].detach()-records[indices,cache.step_indices(steps)-15,2]).abs().max())
-        (stats['joint_log_ratio']*coefficients[indices]).sum().backward()
+        (stats['joint_log_ratio']*coefficients[indices,cache.step_indices(steps)-15]).sum().backward()
     conditions.backward()
     maximum=torch.stack(errors).max()
     require_tensor(maximum<=1e-4,'Streaming chain recomputation changed probabilities within one Actor version',FloatingPointError)
-    return dict(loss=-surrogate['objective'].sum().detach()/global_chain_count,recompute_max_error=maximum)
+    return dict(loss=-surrogate['objective'].sum().detach()/(4*global_chain_count),recompute_max_error=maximum)

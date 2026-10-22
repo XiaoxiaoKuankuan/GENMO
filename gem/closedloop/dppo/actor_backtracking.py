@@ -1,4 +1,4 @@
-"""Actor固定模块倍率、共同基础学习率的单步KL回溯事务。
+"""Actor固定模块倍率、逐步代理PPO目标和独立高斯KL的原子回溯事务。
 
 调用前完成一次全批量PPO/BC合成与裁剪。本模块保留模型、AdamW、BC控制器、指定
 生成器及Python/NumPy/Torch随机状态，每次从相同起点用固定梯度执行一次AdamW，
@@ -42,6 +42,8 @@ def check_candidate_kl(report, limits):
             result['failures']['objective_gain']=dict(value=value-reference,limit=-tolerance)
     result['passed'] = not result['failures']
     result['joint_gate_is_empirical_not_theoretical_safety'] = True
+    result['joint_gate_enabled']=any(limits.get('chain_joint_'+name) is not None for name in ('mean','p95','p99','max'))
+    result['objective_metric']=report.get('objective','external_test_objective')
     return result
 
 
@@ -101,6 +103,7 @@ def backtracked_step(actor, optimizer, controller, *, evaluate, limits, distribu
                 raise RuntimeError('Ranks disagree on backtracking acceptance')
             diagnostics = observe() if observe is not None and kl is not None else None
             trials.append(dict(attempt=index+1, learning_rate=lr, learning_rates=actor_learning_rates(optimizer), factor=factor**index,
+                adam_step_executed=True,initial_state_restored_before_attempt=index>0,
                 kl=kl, acceptance=acceptance, diagnostics=diagnostics,
                 wall_seconds=max(distributed.all_gather_object(time.perf_counter()-started))))
             if acceptance['passed']:
@@ -129,10 +132,11 @@ def backtracked_step(actor, optimizer, controller, *, evaluate, limits, distribu
                 backtracks=len(trials)-1,attempts=trials,attempt_count=len(trials),
                 selected_attempt=best['index']+1,selected_objective=best['score'],
                 same_initial_adam_per_attempt=True,fixed_gradient_reused=True,
-                selection='best_true_clipped_objective_among_KL_qualified_trials')
+                selection='best_configured_clipped_objective_among_KL_qualified_trials')
         restore()
         finite_rejections=bool(trials) and all(t['kl'] is not None and
-            set(t['acceptance']['failures']) <= {'chain_joint_mean','chain_joint_p95',
+            set(t['acceptance']['failures']) <= {'mean_coordinate','maximum_step_mean_coordinate','p95_coordinate','mean_joint',
+                'chain_joint_mean','chain_joint_p95',
                 'chain_joint_p99','chain_joint_max','active_clip_fraction','objective_gain'} and
             all(math.isfinite(f['value']) for f in t['acceptance']['failures'].values())
             for t in trials)

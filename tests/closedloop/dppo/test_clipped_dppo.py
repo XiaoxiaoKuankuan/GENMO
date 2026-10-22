@@ -54,7 +54,7 @@ def case(actor_factory):
     return policy,rows,targets
 
 
-def run(rank,world,actor,rows,targets,directory,soft_kl=None,adaptive=False,grouped=False):
+def run(rank,world,actor,rows,targets,directory,soft_kl=None,adaptive=False,grouped=False,uneven=False,epoch_order=None,bc_enabled=True):
     torch.set_num_threads(1)
     # spawn会通过共享内存传递CPU Tensor；每个rank必须独占参数，避免重复原位Adam。
     actor=copy.deepcopy(actor)
@@ -62,9 +62,14 @@ def run(rank,world,actor,rows,targets,directory,soft_kl=None,adaptive=False,grou
         actor.train_diffusion=actor._diffusion(actor.diffusion_steps)
     policy=FrozenPrefixPolicy(actor,std_schedule=[.001]*15+[.04,.06,.08,.1,0.],generation_frames=60)
     dist.init_process_group('gloo',init_method=(Path(directory)/'gloo').as_uri(),rank=rank,world_size=world)
-    manifest=[dict(owner_rank=0,local_index=i,valid=True,has_free=True) for i in range(len(rows))]
-    local=rows if rank==0 else []
-    local_targets=targets if rank==0 else {k:v[:0] for k,v in targets.items()}
+    owners=[0]*len(rows) if not uneven else [0,0,0,1,1]
+    manifest=[];counts={}
+    for owner in owners:
+        index=counts.get(owner,0);counts[owner]=index+1
+        manifest.append(dict(owner_rank=owner,local_index=index,valid=True,has_free=True))
+    positions=[i for i,owner in enumerate(owners) if owner==rank]
+    local=[rows[i] for i in positions]
+    local_targets={k:v[positions] for k,v in targets.items()}
     cache=RolloutTensorCache(local,local_targets,'cpu')
     from gem.closedloop.dppo.actor_optimizer import make_actor_optimizer
     options=dict(actor_lr=1e-7,actor_trainable_scope='all')
@@ -75,11 +80,17 @@ def run(rank,world,actor,rows,targets,directory,soft_kl=None,adaptive=False,grou
     opt.step();opt.zero_grad(set_to_none=True)
     before={k:cache.host[k].clone() for k in ('chain','old_log_prob','old_means','old_stds') if k in cache.host}
     attempts=[]
+    import gem.closedloop.dppo.updater as production_updater
+    original_order=production_updater.balanced_epoch_order
+    if epoch_order is not None:
+        # 数学分片对照必须保持同一组微批次；不同owner的轮询打乱本来会改变Adam轨迹。
+        production_updater.balanced_epoch_order=lambda selected,manifest,generator:list(epoch_order)
     try:
         report=actor_update(policy,opt,local,local_targets,cache,manifest,
             BCGradientController(initialize_from_gradient=True),distributed=DistributedCollectives(rank,world),
             anchor=Anchor(),generator=torch.Generator().manual_seed(4),minibatch_chains=2,microbatch=3,
             bc_samples_per_rollout=7,soft_kl=soft_kl,reserve_attempt=lambda:attempts.append(1),
+            bc_enabled=bc_enabled,
             detailed_diagnostics=True,
             trust_region=dict(maximum_lr=1e-7,growth=1.25,margin=.8,max_attempts=8) if adaptive else None,
             kl_limits=dict(chain_joint_mean=.2,chain_joint_p95=.6,chain_joint_p99=.9,chain_joint_max=2.) if adaptive else None)
@@ -89,11 +100,13 @@ def run(rank,world,actor,rows,targets,directory,soft_kl=None,adaptive=False,grou
         torch.save(dict(actor=policy.actor.state_dict(),optimizer=opt.state_dict(),report=report),
                    Path(directory)/f'rank{rank}.pt')
     finally:
+        production_updater.balanced_epoch_order=original_order
         cache.close();dist.destroy_process_group()
 
 
 @pytest.mark.parametrize('grouped',[False,True])
-def test_multistep_tail_empty_rank_bc_and_nonempty_adam(tmp_path,actor_factory,grouped):
+@pytest.mark.parametrize('world',[2,3])
+def test_multistep_tail_empty_rank_bc_and_nonempty_adam(tmp_path,actor_factory,grouped,world):
     policy,rows,targets=case(actor_factory)
     initial=copy.deepcopy(policy.actor.state_dict())
     one=tmp_path/'one';two=tmp_path/'two';one.mkdir();two.mkdir()
@@ -101,9 +114,12 @@ def test_multistep_tail_empty_rank_bc_and_nonempty_adam(tmp_path,actor_factory,g
     child_actor=copy.deepcopy(policy.actor)
     # 扩散调度器含不可pickle的lambda；子进程按原1000步配置重建，模型/行为张量不变。
     child_actor.train_diffusion=None
-    mp.start_processes(run,args=(2,child_actor,rows,targets,str(two),None,False,grouped),nprocs=2,start_method='spawn')
+    reference_order=torch.load(one/'rank0.pt',weights_only=False)['report']['epoch_orders'][0]
+    mp.start_processes(run,args=(world,child_actor,rows,targets,str(two),None,False,grouped,world==3,reference_order),nprocs=world,start_method='spawn')
     expected=torch.load(one/'rank0.pt',weights_only=False)
-    results=[torch.load(two/f'rank{i}.pt',weights_only=False) for i in range(2)]
+    results=[torch.load(two/f'rank{i}.pt',weights_only=False) for i in range(world)]
+    from tests.closedloop.dppo.test_actor_backtracking import equal_state
+    assert all(equal_state(results[0]['optimizer'],r['optimizer']) for r in results[1:])
     for result in [expected,*results]:
         r=result['report']
         assert r['optimizer_steps']==3 and r['actual_global_bc_samples']==7
@@ -131,7 +147,7 @@ def test_later_minibatches_recheck_earlier_chain_weights(tmp_path,actor_factory)
     run(0,1,policy.actor,rows,targets,str(tmp_path),soft_kl=.1,adaptive=True)
     report=torch.load(tmp_path/'rank0.pt',weights_only=False)['report']
     assert report['optimizer_steps']==3
-    assert [s['candidate_checked_chains'] for s in report['steps']]==[2,4,5]
+    assert [s['candidate_checked_chains'] for s in report['steps']]==[5,5,5]
     assert report['steps'][-1]['post_step_chain']['chain_joint_kl']['mean']<=.08
     assert all(s['trust_region']['accepted'] for s in report['steps'])
 
@@ -141,6 +157,28 @@ def test_soft_kl_stops_before_pending_optimizer_and_bc(tmp_path,actor_factory):
     run(0,1,policy.actor,rows,targets,str(tmp_path),soft_kl=1e-12)
     report=torch.load(tmp_path/'rank0.pt',weights_only=False)['report']
     assert report['optimizer_steps']==1 and report['actual_global_bc_samples']==3
-    assert report['early_stop_reason']=='post_step_chain_joint_kl'
+    assert report['early_stop_reason']=='post_step_mean_coordinate_kl'
     assert report['skipped_optimizer_steps']==2
     assert report['steps'][0]['post_step_chain']['chain_joint_kl']['mean']>1e-12
+
+
+def test_disabled_bc_uneven_ranks_and_empty_rank_sum_without_world_average(tmp_path,actor_factory):
+    from tests.closedloop.dppo.test_actor_backtracking import equal_state
+    policy,rows,targets=case(actor_factory)
+    one=tmp_path/'one';three=tmp_path/'three';one.mkdir();three.mkdir()
+    run(0,1,copy.deepcopy(policy.actor),rows,targets,str(one),grouped=True,bc_enabled=False)
+    expected=torch.load(one/'rank0.pt',weights_only=False)
+    actor=copy.deepcopy(policy.actor);actor.train_diffusion=None
+    order=expected['report']['epoch_orders'][0]
+    mp.start_processes(run,args=(3,actor,rows,targets,str(three),None,False,True,True,order,False),
+        nprocs=3,start_method='spawn')
+    results=[torch.load(three/f'rank{i}.pt',weights_only=False) for i in range(3)]
+    assert all(equal_state(results[0]['optimizer'],r['optimizer']) for r in results[1:])
+    for result in results:
+        assert result['report']['actual_global_bc_samples']==0
+        assert result['report']['optimizer_steps']==3
+        for key,value in expected['actor'].items():
+            torch.testing.assert_close(value,result['actor'][key],rtol=1e-5,atol=1e-7)
+        for one_step,three_step in zip(expected['report']['steps'],result['report']['steps']):
+            assert one_step['gradient_contributions']['all']['ppo_norm']==pytest.approx(
+                three_step['gradient_contributions']['all']['ppo_norm'],rel=1e-6)

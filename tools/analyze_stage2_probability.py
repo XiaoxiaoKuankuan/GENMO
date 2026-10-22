@@ -59,11 +59,14 @@ def whole_chain_statistics(policy,rows,cache,distributed,metadata):
         local=evaluate_chain_records(policy,rows,cache,microbatch=128).cpu()
     shards=distributed.all_gather_object(local)
     records=torch.cat(shards);stats=from_records(records)
-    report=importance_report(stats['joint_log_ratio'],stats['joint_kl'],
+    report=importance_report(stats['joint_log_ratio'].sum(1),stats['joint_kl'].sum(1),
         [m['advantage'] for m in metadata],metadata)
-    from gem.closedloop.dppo.gaussian_probability import ppo_surrogate
-    report['full_rollout_clipped_objective_mean']=float(ppo_surrogate(
-        stats,torch.tensor([m['advantage'] for m in metadata],dtype=torch.float64),clip=.1)['objective'].mean())
+    from gem.closedloop.dppo.gaussian_probability import stepwise_diagnostics
+    summary=stepwise_diagnostics(stats,torch.tensor([m['advantage'] for m in metadata],dtype=torch.float64),clip=policy.ppo_diagnostic_clip)
+    report['chain_importance_active_clip_fraction']=report['active_clip_fraction']
+    report['active_clip_fraction']=summary['proxy_active_clip_fraction']
+    report['full_rollout_clipped_objective_mean']=summary['stepwise_objective_mean']
+    report['stepwise_PPO']=summary
     return report,records
 
 
@@ -206,7 +209,7 @@ def export_actor(policy,config,learning,report,acceptance,case,output,*,allow_me
 def main():
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--case',type=Path,required=True)
-    parser.add_argument('--config',type=Path,default=ROOT/'configs/closedloop/stage2_full_chain.yaml')
+    parser.add_argument('--config',type=Path,default=ROOT/'configs/closedloop/stage2_stepwise_mean.yaml')
     parser.add_argument('--output-dir',type=Path,required=True)
     parser.add_argument('--scope',choices=SCOPES,default='all')
     parser.add_argument('--learning-rate',type=float,default=1e-6)
@@ -237,11 +240,14 @@ def main():
         group=dist.new_group(backend='nccl',timeout=timedelta(minutes=30))
         distributed=DistributedCollectives(rank,world,tensor_group=group,device=f'cuda:{local}')
         config=configuration(args.config,genmo_repo=ROOT);config['runtime']['genmo_device']=str(distributed.device)
+        from gem.closedloop.dppo.actor_optimization import require_current_actor_objective
+        require_current_actor_objective(config['stage9'])
         config['stage9']['actor_trainable_scope']=args.scope
         config['stage10']['training']['actor_trainable_scope']=args.scope
         config['stage9']['seed']+=1000003*rank
         actor,train,loading=local_call(distributed,lambda:load_actor(config))
         policy=build_policy(actor,config['stage9'],config['stage10']['precision'])
+        policy.ppo_diagnostic_clip=config['stage9']['ppo_clip']
         header=json.loads((args.case/'case.json').read_text())
         if file_sha256(args.case/'learning_state.pt')!=header['learning_state_sha256']:raise ValueError('Behavior learning state SHA mismatch')
         learning=torch.load(args.case/'learning_state.pt',map_location='cpu',weights_only=False,mmap=True)
@@ -322,11 +328,12 @@ def main():
         started=time.perf_counter();torch.cuda.reset_peak_memory_stats(distributed.device)
         report=actor_update(policy,optimizer,rows,targets,cache,manifest,controller,distributed=distributed,
             anchor=anchor,generator=generator,ppo_epochs=args.epochs,minibatch_chains=args.minibatch_chains,microbatch=128,
-            clip=.1,soft_kl=.1,bc_samples_per_rollout=2048*args.epochs,bc_min_global_batch=256,
+            clip=config['stage9']['ppo_clip'],soft_kl=config['stage9']['kl_soft_stop_mean_coordinate'],bc_samples_per_rollout=2048*args.epochs,bc_min_global_batch=256,
             trust_region=trust,kl_limits=config['stage10']['kl'],max_optimizer_steps=args.max_updates,
+            bc_enabled=config['stage9'].get('bc_enabled',False),audit_full_rollout_objective=True,
             detailed_diagnostics=True,step_observer=observe_step,
             candidate_observer=observe_attempt if trust is not None else None)
-        kl=final_kl(policy,rows,cache,manifest,distributed=distributed,microbatch=128,clip=.1)
+        kl=final_kl(policy,rows,cache,manifest,distributed=distributed,microbatch=128,clip=config['stage9']['ppo_clip'])
         acceptance=check_candidate_kl(kl,config['stage10']['kl'])
         if not report['optimizer_steps']:acceptance=dict(passed=False,failures={'optimizer':'no accepted step'})
         report['accepted_optimizer_steps']=report['optimizer_steps'] if acceptance['passed'] else 0
@@ -342,8 +349,8 @@ def main():
             indices=[i for i,r in enumerate(eligible) if r.metadata.get('training_task',{}).get('dataset','unknown')==source]
             ordinary.extend(indices[j*len(indices)//3] for j in (1,2))
         selected_indices=sorted(set(ordinary+
-            torch.topk(stats['joint_kl'],min(4,len(eligible))).indices.tolist()+
-            torch.topk(stats['joint_log_ratio'],min(4,len(eligible))).indices.tolist()))
+            torch.topk(stats['joint_kl'].sum(1),min(4,len(eligible))).indices.tolist()+
+            torch.topk(stats['joint_log_ratio'].sum(1),min(4,len(eligible))).indices.tolist()))
         selected=[eligible[i] for i in selected_indices]
         after_state=immutable_cpu_snapshot(actor.state_dict());after_probe=output_probe(policy,selected,cache,max_chains=len(selected))
         if args.export_actor:

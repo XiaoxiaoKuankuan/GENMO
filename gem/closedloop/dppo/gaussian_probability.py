@@ -1,8 +1,9 @@
-"""Stage2 的稳定高斯统计和完整随机链联合 PPO 概率。
+"""Stage2稳定高斯统计、逐步坐标平均代理PPO及独立真实联合KL。
 
 行为策略仍保存 normalized qpos30 的完整 FP64 联合概率、旧均值和实际标准差。
-训练目标将15～18四个随机转移的自由坐标 log-ratio 在FP64求和，每条链只裁剪一次，
-对应一个上层GAE优势。坐标平均值仅作诊断，已承诺前缀和padding不参与概率；
+训练目标对15～18四个随机转移分别取自由坐标平均log-ratio、指数和符号相关裁剪，
+同一上层GAE在四步共享，目标按完整链数乘4归一化；代理比值不是真实联合概率比。
+真实joint log-ratio与joint KL仍对全部自由坐标/四步求和。前缀和padding不参与概率；
 冻结前15步通过身份校验抵消，确定性末步不具有高斯密度，不参与联合概率。
 
 比值直接使用旧核的标准化残差和均值变化计算，不先求两个大联合 log-prob 再
@@ -111,7 +112,7 @@ def distribution(values):
 
 
 def chain_diagnostics(statistics, advantages, *, clip):
-    """真实联合ratio、符号相关裁剪及联合KL；每条完整链只统计一次。"""
+    """历史联合目标的只读数学诊断；当前训练/候选验收不得调用本函数。"""
     surrogate=ppo_surrogate(statistics,advantages,clip=clip,reduction='joint_sum')
     valid=statistics['free_count']>0
     logratio=surrogate['log_ratio'][valid].detach()
@@ -126,3 +127,80 @@ def chain_diagnostics(statistics, advantages, *, clip):
         nonfinite_fraction=0.,ratio_underflow_fraction=0.,
         ratio_is_joint_probability=True,complete_chain_count=int(valid.sum()),
         denominator='one_complete_chain_one_upper_GAE_advantage')
+
+
+def step_statistics(joint_log_ratios, joint_kls, free_counts):
+    """保留[N,4]内部转移轴；不能在PPO裁剪之前合并四步。"""
+    if joint_log_ratios.ndim!=2 or joint_log_ratios.shape[1]!=4:
+        raise ValueError('Stepwise PPO requires [complete_chains,4] stochastic transitions 15..18')
+    if joint_kls.shape!=joint_log_ratios.shape or free_counts.shape!=joint_log_ratios.shape:
+        raise ValueError('Step log ratios, KL and counts must have equal [N,4] shapes')
+    require_tensor(torch.isfinite(joint_log_ratios).all() & torch.isfinite(joint_kls).all()
+        & torch.isfinite(free_counts).all() & (joint_kls>=0).all() & (free_counts>=0).all()
+        & (free_counts==free_counts.round()).all(), 'Invalid stepwise Gaussian statistics',FloatingPointError)
+    # D=0是数学上的零目标项，不允许非零概率贡献通过clamp_min被隐藏。
+    require_tensor(((free_counts>0)|((joint_log_ratios==0)&(joint_kls==0))).all(),
+        'Empty Gaussian transition has a nonzero probability contribution',FloatingPointError)
+    return dict(joint_log_ratio=joint_log_ratios.double(),joint_kl=joint_kls.double(),free_count=free_counts,
+        mean_coordinate_log_ratio=joint_log_ratios.double()/free_counts.clamp_min(1),
+        mean_coordinate_kl=joint_kls.double()/free_counts.clamp_min(1))
+
+
+def stepwise_surrogate(statistics, advantages, *, clip):
+    """返回[N,4]目标及对joint_log_ratio的导数，尚未除4*N_global。
+
+    普通未裁剪项的导数为A*exp(joint_log_ratio/D)/D；真正符号相关平坦区和D=0
+    项导数为零。这里的proxy保留完整自由参考坐标，但明确不是真实联合概率比。
+    """
+    log=statistics['joint_log_ratio']
+    if log.ndim!=2 or log.shape[1]!=4 or advantages.shape!=(len(log),):
+        raise ValueError('Stepwise PPO needs four transitions and one advantage per complete chain')
+    result=ppo_surrogate(statistics,advantages[:,None],clip=clip,reduction='free_coordinate_mean')
+    result['joint_log_gradient']=result['objective_log_gradient']/statistics['free_count'].clamp_min(1)
+    result['chain_objective']=result['objective'].sum(1)/4
+    return result
+
+
+def stepwise_diagnostics(statistics, advantages, *, clip):
+    """统一训练、候选验收和整批审计；目标分母恒为4*N，零自由度项仍占槽。
+
+    ratio/clip分布的样本单位是D>0的单个内部转移，整链KL单位是完整行为链。
+    coordinate_kl是每个内部转移的自由坐标平均KL分布，不是单个标量坐标KL分布。
+    """
+    out=stepwise_surrogate(statistics,advantages,clip=clip)
+    valid=statistics['free_count']>0
+    if not len(advantages) or not bool(valid.any()):
+        raise ValueError('Stepwise diagnostics need at least one free valid behavior chain')
+    joint=statistics['joint_kl'];coordinate=statistics['mean_coordinate_kl']
+    ratio=distribution(out['ratio'][valid]);log=distribution(out['log_ratio'][valid])
+    baseline=advantages.detach().to(joint)[:,None]*valid
+    objective=float(out['objective'].mean());gain=float((out['objective']-baseline).mean())
+    clipped=float(out['clipped'][valid].double().mean())
+    active=float(out['objective_clipped'][valid].double().mean())
+    per_step=[]
+    for k in range(4):
+        mask=valid[:,k]
+        per_step.append(dict(step=k+15,statistical_unit='single_stochastic_transition',
+            valid_transitions=int(mask.sum()),joint_kl=distribution(joint[:,k]),
+            mean_coordinate_kl=distribution(coordinate[:,k]),joint_log_ratio=distribution(statistics['joint_log_ratio'][:,k]),
+            proxy_ratio=distribution(out['ratio'][mask,k]) if mask.any() else None,
+            proxy_clip_fraction=float(out['clipped'][mask,k].double().mean()) if mask.any() else 0.,
+            proxy_active_clip_fraction=float(out['objective_clipped'][mask,k].double().mean()) if mask.any() else 0.,
+            stepwise_objective_mean=float(out['objective'][:,k].mean()),
+            stepwise_objective_gain=float((out['objective']-baseline)[:,k].mean())))
+    return dict(objective='stepwise_coordinate_mean_clipped_ppo',ratio_is_joint_probability=False,
+        stepwise_objective_mean=objective,stepwise_objective_gain=gain,
+        objective_mean=objective,objective_gain_mean=gain,behavior_objective_mean=float(baseline.mean()),
+        mean_proxy_ratio=ratio['mean'],proxy_ratio=ratio,proxy_ratio_p95=ratio['p95'],proxy_ratio_p99=ratio['p99'],
+        mean_log_ratio=log,proxy_clip_fraction=clipped,proxy_active_clip_fraction=active,
+        clip_fraction=clipped,active_clip_fraction=active,
+        chain_joint_kl=distribution(joint.sum(1)),chain_joint_log_ratio=distribution(statistics['joint_log_ratio'].sum(1)),
+        mean_coordinate_kl=float(coordinate.mean()),maximum_step_mean_coordinate_kl=float(coordinate.mean(0).max()),
+        coordinate_kl=distribution(coordinate),coordinate_KL_p95=distribution(coordinate)['p95'],
+        mean_joint_kl=float(joint.mean()),joint_kl=distribution(joint),per_denoising_step=per_step,
+        complete_chain_count=len(advantages),valid_internal_transitions=int(valid.sum()),
+        nonfinite_fraction=0.,ratio_underflow_fraction=0.,
+        denominator='4_times_global_valid_behavior_chain_count',
+        proxy_statistical_unit='one_valid_stochastic_transition_15_to_18',
+        chain_KL_statistical_unit='one_complete_behavior_chain_sum_of_four_joint_KLs',
+        coordinate_KL_p95_scope='per_transition_free_coordinate_mean_KL_not_scalar_coordinate_KL')

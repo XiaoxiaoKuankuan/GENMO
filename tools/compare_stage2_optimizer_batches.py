@@ -2,7 +2,7 @@
 
 八卡只读加载fixed_data_validation中的Actor、分组Adam、BC控制器、监督采样器和
 各rank RNG；每个候选均从同一快照恢复，不重新生成或修改行为概率。复用生产路径的
-四步联合PPO、FP64概率、完整rollout目标审计及真实KL约束。BC按本次明确要求关闭，
+四步独立坐标平均代理PPO、FP64概率、完整rollout目标审计及真实KL约束。BC按本次明确要求关闭，
 但原监督资产和状态保留。仅优化可训练Actor，冻结Stage1先验在恢复Actor之前构造。
 
 输入不包含完整物理执行时不会补造记录。输出目标、梯度方向、参数和固定噪声参考
@@ -85,6 +85,7 @@ def main():
     parser.add_argument('--output-dir',type=Path,required=True)
     parser.add_argument('--branches',nargs='+',choices=('4096','8192','full','objective4096'),
                         default=['4096','8192','full'])
+    parser.add_argument('--learning-rates',nargs='+',type=float,help='显式共同基础LR候选；各组倍率固定，每个候选恢复相同Actor/Adam/RNG')
     parser.add_argument('--kl-only',action='store_true',help='显式旧对照；默认所有批量统一使用真实整批目标感知回溯')
     parser.add_argument('--audit-full-gradient-direction',action='store_true',help='额外整批反向解释Adam实际增量，生产训练不增加该成本')
     args=parser.parse_args()
@@ -103,6 +104,8 @@ def main():
         group=dist.new_group(backend='nccl',timeout=timedelta(minutes=30))
         distributed=DistributedCollectives(rank,world,tensor_group=group,device=f'cuda:{local}')
         config=configuration(args.config,genmo_repo=ROOT)
+        from gem.closedloop.dppo.actor_optimization import require_current_actor_objective
+        require_current_actor_objective(config['stage9'])
         config['runtime']['genmo_device']=str(distributed.device)
         config['stage9']['seed']+=1000003*rank
         actor,train,loading=local_call(distributed,lambda:load_actor(config))
@@ -143,7 +146,10 @@ def main():
             source=r.metadata.get('training_task',{}).get('dataset','unknown'),
             music_start_frame=r.metadata.get('music_start_frame')) for i,r in enumerate(rows)
             if bool(targets['valid'][i]) and r.free_mask.any()]) for item in shard]
-        for name in args.branches:
+        candidates=[(name,lr) for name in args.branches for lr in (args.learning_rates or [config['stage9']['actor_lr']])]
+        if any(not 0<lr<float('inf') for _,lr in candidates):raise ValueError('LR candidates must be finite positive values')
+        for batch_name,candidate_lr in candidates:
+            name=batch_name if args.learning_rates is None else batch_name+'_lr'+format(candidate_lr,'.3g')
             restore_experiment(actor,optimizer,controller,anchor,snapshot,generator)
             restored_digest=exact_state_digest(dict(actor=actor.state_dict(),optimizer=optimizer.state_dict(),
                 controller=controller.state_dict(),bc=anchor.state_dict(),rng=capture_local_rng({'actor':generator})))
@@ -153,7 +159,8 @@ def main():
             trust=copy.deepcopy(config['stage9']['trust_region'])
             trust['objective_aware']=not args.kl_only
             trust['objective_search_attempts']=3
-            batch=count if name=='full' else (4096 if name=='objective4096' else int(name))
+            trust['maximum_lr']=candidate_lr
+            batch=count if batch_name=='full' else (4096 if batch_name=='objective4096' else int(batch_name))
             started=time.perf_counter();torch.cuda.reset_peak_memory_stats(distributed.device)
             last_statistics={}
             def retain_statistics(stage,records,advantages,sources):
@@ -164,17 +171,21 @@ def main():
                     objective=step['full_rollout_after']['objective_mean'])),flush=True)
             report=actor_update(policy,optimizer,rows,targets,cache,manifest,controller,distributed=distributed,
                 anchor=anchor,generator=generator,ppo_epochs=1,minibatch_chains=batch,microbatch=128,
-                clip=.1,soft_kl=.1,bc_samples_per_rollout=2048,bc_min_global_batch=256,
+                clip=config['stage9']['ppo_clip'],soft_kl=config['stage9']['kl_soft_stop_mean_coordinate'],bc_samples_per_rollout=2048,bc_min_global_batch=256,
                 bc_enabled=False,audit_full_rollout_objective=True,trust_region=trust,
                 kl_limits=config['stage10']['kl'],detailed_diagnostics=True,step_observer=observer,
                 audit_full_gradient_direction=args.audit_full_gradient_direction,
                 full_rollout_observer=retain_statistics)
-            kl=final_kl(policy,rows,cache,manifest,distributed=distributed,microbatch=128,clip=.1)
+            kl=final_kl(policy,rows,cache,manifest,distributed=distributed,microbatch=128,clip=config['stage9']['ppo_clip'])
+            replica=local_call(distributed,lambda:exact_state_digest(dict(actor=actor.state_dict(),optimizer=optimizer.state_dict())))
+            replicas=distributed.all_gather_object(replica)
+            if any(value!=replicas[0] for value in replicas):
+                raise RuntimeError('八rank候选Actor与分组Adam不一致')
             counts=distributed.all_gather_object(len(eligible));offset=sum(counts[:rank])
             stats=from_records(last_statistics['records'][offset:offset+len(eligible)])
             indices=sorted(set(list(range(min(4,len(eligible))))+
-                torch.topk(stats['joint_kl'],min(4,len(eligible))).indices.tolist()+
-                torch.topk(stats['joint_log_ratio'],min(4,len(eligible))).indices.tolist()))
+                torch.topk(stats['joint_kl'].sum(1),min(4,len(eligible))).indices.tolist()+
+                torch.topk(stats['joint_log_ratio'].sum(1),min(4,len(eligible))).indices.tolist()))
             selected=[eligible[i] for i in indices]
             candidate_state=immutable_cpu_snapshot(actor.state_dict())
             after_probe=output_probe(policy,selected,cache,max_chains=len(selected))
@@ -189,6 +200,7 @@ def main():
             result=dict(branch=name,minibatch_chains=batch,effective_chains=count,
                 objective_aware=trust['objective_aware'],full_gradient_direction_measured=args.audit_full_gradient_direction,
                 actor=report,final_kl=kl,
+                replica_state_consistency=dict(passed=True,all_ranks=world,actor_and_adam_sha256=replica),
                 acceptance=check_candidate_kl(kl,config['stage10']['kl']),output=probe_summary(probes),
                 wall_seconds=max(distributed.all_gather_object(time.perf_counter()-started)),
                 peak_allocated_bytes=max(distributed.all_gather_object(torch.cuda.max_memory_allocated())),
@@ -204,7 +216,7 @@ def main():
                 source_identity=learning['identity'],evaluation_only=True,training_resume=False),output/'actor.pt'))
             summaries.append(result)
             root_call(distributed,lambda:atomic_json(args.output_dir/'comparison.json',dict(
-                complete=len(summaries)==len(args.branches),results=summaries,bc_enabled=False,
+                complete=len(summaries)==len(candidates),results=summaries,bc_enabled=False,
                 objectives_are_not_physical_benefit=True)))
             del result,report,probes,candidate_state,before_probe,after_probe
         restore_experiment(actor,optimizer,controller,anchor,snapshot,generator)

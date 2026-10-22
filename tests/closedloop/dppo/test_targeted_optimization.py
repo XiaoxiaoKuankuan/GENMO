@@ -79,7 +79,7 @@ def test_bc_disabled_has_zero_calls_and_same_full_objective_population(actor_fac
             full_rollout_observer=lambda stage,records,adv,sources:observed.append((stage,records.clone())))
         assert result['actual_global_bc_samples']==0 and result['planned_global_bc_samples']==0
         assert equal_state(controller.state_dict(),before)
-        reference=final_kl(policy,rows,cache,manifest,distributed=distributed,microbatch=3,clip=.1)
+        reference=final_kl(policy,rows,cache,manifest,distributed=distributed,microbatch=3,clip=.01)
         assert result['full_rollout_objective_history'][-1]['objective_mean']==pytest.approx(reference['objective_mean'],abs=1e-10)
         assert all(s['full_rollout_after']['complete_chain_count']==len(rows) for s in result['steps'])
         assert len(observed)==1+result['optimizer_steps']

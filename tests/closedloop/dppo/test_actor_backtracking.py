@@ -79,6 +79,7 @@ def test_all_rejected_restores_model_adam_bc_and_rng_without_refunding(device):
     result=backtracked_step(actor,opt,controller,evaluate=evaluate,limits={'mean_coordinate':.001},
         distributed=Collective(),max_attempts=3,reserve_attempt=lambda:count.append(1))
     assert not result['accepted'] and len(count)==3
+    assert result['finite_trust_region_exhausted']
     assert equal_state(before,(actor.state_dict(),opt.state_dict(),controller.state_dict()))
     assert torch.equal(rng,read_rng())
 
@@ -147,7 +148,7 @@ def test_configuration_binds_every_actual_optimizer_choice(tmp_path):
     c=yaml.safe_load(source.read_text())
     c['stage10']['training']['actor_objective']='coordinate_dppo'
     p.write_text(yaml.safe_dump(c))
-    with pytest.raises(ValueError,match='full-chain'):configuration(p)
+    with pytest.raises(ValueError,match='stepwise'):configuration(p)
 
 
 def test_numerical_candidate_rejected_then_retried_without_extra_adam_time():

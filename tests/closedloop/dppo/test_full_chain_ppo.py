@@ -141,8 +141,8 @@ def test_real_small_network_streamed_full_autograd_and_initial_score_gradients(a
                 new=torch.distributions.Normal(params['mean'].double(),params['std'].double())
                 old=torch.distributions.Normal(old_mean,old_std)
                 terms.append((new.log_prob(value)-old.log_prob(value)).masked_fill(~mask,0.).sum((-2,-1)))
-            log=torch.stack(terms,1).sum(1)
-            advantage=targets['advantages'].double()
+            log=torch.stack(terms,1)/mask.sum((-2,-1))[:,None].clamp_min(1)
+            advantage=targets['advantages'].double()[:,None]
             loss=-torch.minimum(log.exp()*advantage,log.exp().clamp(.9,1.1)*advantage).mean()
             loss.backward()
         reference={n:p.grad.clone() for n,p in policy.actor.named_parameters() if p.grad is not None}
@@ -157,7 +157,7 @@ def test_real_small_network_streamed_full_autograd_and_initial_score_gradients(a
                 params,mask=_parameters(policy,rows,[step]*len(rows),torch.device('cpu'),cache)
                 old_mean,old_std=_old_kernel(rows,[step]*len(rows),torch.device('cpu'),cache)
                 score=gaussian_statistics(cache.get('chain',rows,[step+1]*len(rows)),old_mean,old_std,params['mean'],params['std'],mask)
-                (-score['joint_log_ratio']*advantage/len(rows)).sum().backward()
+                (-score['joint_log_ratio']/score['free_count'].clamp_min(1)*advantage[:,0]/(4*len(rows))).sum().backward()
         _compare_cpu_gradients(policy.actor,reference)
     finally:cache.close()
 
