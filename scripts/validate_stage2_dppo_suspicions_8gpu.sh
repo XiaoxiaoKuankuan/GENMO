@@ -1,16 +1,17 @@
 #!/usr/bin/env bash
 # 原DPPO三项疑问验证的独立八卡入口。
-# 输入capture、replay或evaluate及对应Python参数；沿用服务器2已验收的Isaac动态库、NCCL与
+# 输入capture、replay、full-chain或evaluate及对应Python参数；沿用服务器2已验收的Isaac动态库、NCCL与
 # FP32执行环境，在独立输出目录采集或重放真实数据，不启动长期正式训练。
 # capture必须经来源登记克隆恢复；replay只读取固定学习状态并保存诊断候选。
 # evaluate只运行显式模型的固定任务，关闭训练父模型初始化并记录真实GMT消费。
 set -euo pipefail
 STAGE2_DIAGNOSTIC_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
-STAGE2_DIAGNOSTIC_MODE="${1:?需要capture、replay或evaluate}"
+STAGE2_DIAGNOSTIC_MODE="${1:?需要capture、replay、full-chain或evaluate}"
 shift
 case "$STAGE2_DIAGNOSTIC_MODE" in
   capture) STAGE2_DIAGNOSTIC_ENTRY=tools/capture_stage2_dppo_case.py ;;
   replay) STAGE2_DIAGNOSTIC_ENTRY=tools/validate_stage2_dppo_suspicions.py ;;
+  full-chain) STAGE2_DIAGNOSTIC_ENTRY=tools/validate_stage2_full_chain.py ;;
   evaluate) STAGE2_DIAGNOSTIC_ENTRY=tools/evaluate_stage2_dppo_consumed.py ;;
   *) exit 2 ;;
 esac
