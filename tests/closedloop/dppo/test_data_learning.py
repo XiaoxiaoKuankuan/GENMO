@@ -303,7 +303,7 @@ def test_substep_peak_is_not_replaced_with_last_control_snapshot():
     assert result["components"]["torque"]["raw"]["sampling"] == "control_end_proxy"
 
 
-def test_stationary_music_reward_is_gated_and_high_activity_bounded():
+def test_stationary_music_diagnostic_is_bounded_without_gating_tracking_reward():
     stationary = ExecutionReward(music_features=music_fixture(), target_activity=target_activity_fixture)
     active = ExecutionReward(music_features=music_fixture(), target_activity=target_activity_fixture)
     for i in range(70):
@@ -311,7 +311,10 @@ def test_stationary_music_reward_is_gated_and_high_activity_bounded():
         moving = active.evaluate_step(actual_step(i, speed=1e3 * (1. + abs(math.sin(i))), position=math.sin(i)))
     assert zero["components"]["music"]["valid"]
     assert zero["components"]["music"]["weighted_rate"] == 0
-    assert zero["components"]["track"]["weighted_rate"] == 0
+    # 当前已明确取消跟踪奖励的活动度系数；静止且完美跟踪时仍得到完整跟踪奖励。
+    # 本轮PPO重构不修改奖励，旧的“必须门控到0”断言不能用于要求恢复旧行为。
+    assert zero["components"]["track"]["gate"] == 1
+    assert zero["components"]["track"]["weighted_rate"] == pytest.approx(stationary.config['track_weight'])
     assert 0 <= moving["components"]["music"]["score"] <= 1
 
 

@@ -54,6 +54,16 @@ def case(actor_factory):
     return policy,rows,targets
 
 
+def close_cpu_group():
+    """测试清理阶段先回收图，再避免自动GC在Gloo销毁时重入；不改变实际通信。"""
+    import gc
+    gc.collect()
+    enabled=gc.isenabled();gc.disable()
+    try:dist.destroy_process_group()
+    finally:
+        if enabled:gc.enable()
+
+
 def run(rank,world,actor,rows,targets,directory,soft_kl=None,adaptive=False,grouped=False,uneven=False,epoch_order=None,bc_enabled=True):
     torch.set_num_threads(1)
     # spawn会通过共享内存传递CPU Tensor；每个rank必须独占参数，避免重复原位Adam。
@@ -101,7 +111,7 @@ def run(rank,world,actor,rows,targets,directory,soft_kl=None,adaptive=False,grou
                    Path(directory)/f'rank{rank}.pt')
     finally:
         production_updater.balanced_epoch_order=original_order
-        cache.close();dist.destroy_process_group()
+        cache.close();close_cpu_group()
 
 
 @pytest.mark.parametrize('grouped',[False,True])

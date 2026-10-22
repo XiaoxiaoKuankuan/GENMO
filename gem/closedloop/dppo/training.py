@@ -75,6 +75,20 @@ def _final_actor_acceptance(actor,kl,limits):
     """有限回溯无可用步是正常采样轮，不能因此终止整个长期训练。"""
     from .actor_backtracking import check_candidate_kl
     result=check_candidate_kl(kl,limits)
+    if actor.get('objective')=='stepwise_coordinate_mean_clipped_ppo':
+        if kl.get('objective')!=actor['objective'] or kl.get('ratio_is_joint_probability') is not False:
+            raise RuntimeError('Final Actor acceptance must audit the same stepwise proxy objective')
+        history=actor.get('full_rollout_objective_history') or []
+        if actor.get('objective_aware'):
+            if not history:raise RuntimeError('Objective-aware Actor has no immutable-rollout starting objective')
+            gain=kl['stepwise_objective_mean']-history[0]['stepwise_objective_mean']
+            tolerance=actor.get('objective_tolerance',1e-10)
+            result['final_stepwise_objective_gain']=gain
+            result['last_candidate_objective_absolute_difference']=abs(
+                kl['stepwise_objective_mean']-history[-1]['stepwise_objective_mean'])
+            if not math.isfinite(gain) or gain < -tolerance:
+                result['failures']['stepwise_objective_gain']=dict(value=gain,limit=-tolerance)
+                result['passed']=False
     if actor.get('step_rejected'):
         result['passed']=False
         result['failures']['actor_optimizer']='explicit_invalid_optimizer_update'

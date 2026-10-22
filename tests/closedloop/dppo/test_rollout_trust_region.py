@@ -23,7 +23,7 @@ from gem.closedloop.dppo.gradient_merge import BCGradientController
 from gem.closedloop.dppo.tensor_cache import RolloutTensorCache
 from tests.closedloop.dppo.test_actor_backtracking import Collective, equal_state
 from tests.closedloop.dppo.test_actor_optimizer_groups import prepared
-from tests.closedloop.dppo.test_clipped_dppo import case
+from tests.closedloop.dppo.test_clipped_dppo import case,close_cpu_group
 from tests.closedloop.test_stage1_actor import actor_factory
 
 
@@ -178,5 +178,5 @@ def test_real_streamed_update_keeps_accepted_steps_and_restores_discarded_BC(tmp
         assert policy.assert_frozen_identity()['checked']
     finally:
         cache.close()
-        dist.destroy_process_group()
+        close_cpu_group()
         torch.set_rng_state(saved_noise)

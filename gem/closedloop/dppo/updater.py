@@ -292,6 +292,7 @@ def _actor_update(policy,optimizer,rows,targets,cache,manifest,controller,*,dist
         if stop_reason:break
     discarded_attempts=((discarded or {}).get('trust_region') or {}).get('attempt_count',0)
     return dict(objective='stepwise_coordinate_mean_clipped_ppo',ppo_clip_applied=True,optimizer_steps=len(reports),
+        objective_aware=objective_aware,objective_tolerance=(trust_region or {}).get('objective_tolerance',1e-10),
         attempted_optimizer_steps=sum((r['trust_region'] or {}).get('attempt_count',1) for r in reports)+discarded_attempts,
         rejected_step_candidates=sum((r['trust_region'] or {}).get('backtracks',0) for r in reports)+discarded_attempts,
         executed_optimizer_steps=sum((r['trust_region'] or {}).get('attempt_count',1) for r in reports)+discarded_attempts,

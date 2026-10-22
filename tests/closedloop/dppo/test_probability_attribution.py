@@ -95,7 +95,7 @@ def test_restricted_actor_keeps_kernel_and_real_streamed_score(scope,prefix,acto
             old_mean,old_std=_old_kernel(rows,[step]*len(rows),'cpu',cache)
             terms.append(gaussian_statistics(cache.get('chain',rows,[step+1]*len(rows)),
                 old_mean,old_std,params['mean'],params['std'],mask)['joint_log_ratio'])
-        ratio=torch.stack(terms,1).sum(1).exp();adv=targets['advantages'].double()
+        ratio=(torch.stack(terms,1)/mask.sum((-2,-1))[:,None]).exp();adv=targets['advantages'].double()[:,None]
         reference=-torch.minimum(ratio*adv,ratio.clamp(.9,1.1)*adv).mean()
         reference.backward()
     expected={name:p.grad.detach().clone() for name,p in policy.actor.named_parameters()

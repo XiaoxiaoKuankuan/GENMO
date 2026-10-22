@@ -182,7 +182,9 @@ def stepwise_diagnostics(statistics, advantages, *, clip):
         mask=valid[:,k]
         per_step.append(dict(step=k+15,statistical_unit='single_stochastic_transition',
             valid_transitions=int(mask.sum()),joint_kl=distribution(joint[:,k]),
+            free_coordinates=distribution(statistics['free_count'][:,k]),
             mean_coordinate_kl=distribution(coordinate[:,k]),joint_log_ratio=distribution(statistics['joint_log_ratio'][:,k]),
+            mean_log_ratio=distribution(out['log_ratio'][mask,k]) if mask.any() else None,
             proxy_ratio=distribution(out['ratio'][mask,k]) if mask.any() else None,
             proxy_clip_fraction=float(out['clipped'][mask,k].double().mean()) if mask.any() else 0.,
             proxy_active_clip_fraction=float(out['objective_clipped'][mask,k].double().mean()) if mask.any() else 0.,
@@ -199,6 +201,7 @@ def stepwise_diagnostics(statistics, advantages, *, clip):
         coordinate_kl=distribution(coordinate),coordinate_KL_p95=distribution(coordinate)['p95'],
         mean_joint_kl=float(joint.mean()),joint_kl=distribution(joint),per_denoising_step=per_step,
         complete_chain_count=len(advantages),valid_internal_transitions=int(valid.sum()),
+        free_coordinates_per_transition=distribution(statistics['free_count'][valid]),
         nonfinite_fraction=0.,ratio_underflow_fraction=0.,
         denominator='4_times_global_valid_behavior_chain_count',
         proxy_statistical_unit='one_valid_stochastic_transition_15_to_18',

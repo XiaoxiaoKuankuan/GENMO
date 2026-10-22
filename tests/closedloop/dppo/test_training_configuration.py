@@ -154,7 +154,9 @@ def test_source_identity_covers_shell_entry_and_shared_execution_module(tmp_path
         path.write_text('original')
 
 
-def test_current_gmt_identity_keeps_rank_asset_conversion_separate(tmp_path):
+@pytest.mark.parametrize('algorithm_version',[
+    'genmo.closedloop.stage2.full_chain_joint.v1',VERSION,'future_algorithm_name_without_asset_semantics'])
+def test_current_gmt_identity_keeps_rank_asset_conversion_separate(tmp_path,algorithm_version):
     gmt = Path(os.environ.get('STAGE10_TEST_GMT_REPO', ROOT.parent / 'legged_lab_gmt'))
     path = gmt / ('source/NoetixRobot/NoetixRobot/tasks/mimic/'
                   'mimic_noetix_bumi4340_mha_sonic/closedloop/config.py')
@@ -171,7 +173,7 @@ def test_current_gmt_identity_keeps_rank_asset_conversion_separate(tmp_path):
         directory = tmp_path / f'rank{rank:02d}'
         spawn = SimpleNamespace(usd_dir='default')
         cfg = SimpleNamespace(scene=SimpleNamespace(robot=SimpleNamespace(spawn=spawn)))
-        settings = dict(stage10=dict(version=VERSION),
+        settings = dict(stage10=dict(version=algorithm_version),
                         runtime=dict(rank=rank, asset_conversion_dir=str(directory)))
         scope['configure_worker_asset_conversion'](cfg, settings)
         observed.append(spawn.usd_dir)

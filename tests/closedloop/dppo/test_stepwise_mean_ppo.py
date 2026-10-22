@@ -173,3 +173,19 @@ def test_explicit_new_objective_transfer_keeps_nonempty_adam_and_rejects_behavio
         changed=copy.deepcopy(new);changed[section][field]=value
         with pytest.raises(ValueError,match='configuration'):
             load_training_checkpoint(path,**dict(args,identity=changed),new_experiment=True,stepwise_transfer=True)
+
+
+def test_final_rollout_acceptance_uses_new_objective_and_preserves_normal_zero_step():
+    from gem.closedloop.dppo.training import _final_actor_acceptance
+    actor=dict(objective='stepwise_coordinate_mean_clipped_ppo',objective_aware=True,
+        optimizer_steps=1,full_rollout_objective_history=[dict(stepwise_objective_mean=0.),dict(stepwise_objective_mean=.02)])
+    report=dict(objective=actor['objective'],ratio_is_joint_probability=False,stepwise_objective_mean=.02)
+    assert _final_actor_acceptance(actor,report,{})['passed']
+    bad=dict(report,stepwise_objective_mean=-.001)
+    assert 'stepwise_objective_gain' in _final_actor_acceptance(actor,bad,{})['failures']
+    with pytest.raises(RuntimeError,match='same stepwise'):
+        _final_actor_acceptance(actor,dict(report,ratio_is_joint_probability=True),{})
+    empty=dict(actor,optimizer_steps=0,early_stop_reason='rollout_no_useful_trust_region_step',
+        full_rollout_objective_history=[dict(stepwise_objective_mean=0.)])
+    outcome=_final_actor_acceptance(empty,dict(report,stepwise_objective_mean=0.),{})
+    assert outcome['passed'] and outcome['continue_with_new_physical_rollout']
