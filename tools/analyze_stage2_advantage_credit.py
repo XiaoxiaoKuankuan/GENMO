@@ -19,6 +19,7 @@ from collections import defaultdict
 from functools import lru_cache
 import gzip
 import json
+import math
 from pathlib import Path
 import sys
 
@@ -141,8 +142,17 @@ def analyze_case(case):
                     reward_ref.append(share(control['reference_plan_id'],control['reference_tick'],plan)[0])
                     details=row.metadata.get('reward_details')
                     if details is not None:
-                        if details[j]['tick']!=end or abs(details[j]['reward']-float(row.rewards[j]))>1e-9:
-                            raise ValueError('Stored reward differs from actual control-end reward detail')
+                        # 回放奖励张量可能为FP32，原JSON明细为FP64；只容许对应一次量化误差。
+                        dtype=torch.as_tensor(row.rewards).dtype
+                        tolerance=2*torch.finfo(dtype).eps if dtype.is_floating_point else 0.
+                        # 生产约定将真实事件只加到最后一个已执行控制奖励，零步事件另存。
+                        event=float(row.metadata.get('event_penalty_total',0.)) if j+1==len(trace) else 0.
+                        expected=details[j]['reward']+event
+                        if details[j]['tick']!=end or not math.isclose(expected,float(row.rewards[j]),
+                                rel_tol=tolerance,abs_tol=1e-12):
+                            raise ValueError('Stored control reward differs: '+json.dumps(dict(
+                                end=end,detail_tick=details[j]['tick'],detail_reward=details[j]['reward'],
+                                event_reward=event,stored=float(row.rewards[j]),dtype=str(dtype))))
                         reward_checks+=1
                 record.update(reference_audit='actual_GMT_window_recursive_prefix_source',
                     own_current_share=sum(current)/len(current) if current else None,
