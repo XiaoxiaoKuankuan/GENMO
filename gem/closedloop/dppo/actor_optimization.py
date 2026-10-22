@@ -85,7 +85,8 @@ def validate_optimization_configuration(config,maximum_steps):
         raise ValueError('Optimization binding differs; regenerate the identity for the actual configuration')
     from .reference_credit import CREDIT_CONTRACT
     if (s['run_control']['max_training_iterations']>2000 or s['limits']['accepted_iterations']>2000
-            or s['ppo_rollout']['world_seconds']!=8 or t['lambda_upper']!=.98 or t['gamma_upper']!=.99
+            or s['ppo_rollout']['world_seconds']!=8 or t['lambda_upper']!=.98
+            or not math.isfinite(t['gamma_upper']) or not 0<t['gamma_upper']<=1
             or s['storage']['checkpoint_interval_iterations']!=100
             or s['ppo_rollout']['credit_contract']!=CREDIT_CONTRACT
             or s['critic']['complete_mc']['start_distribution']!='match_training_reset.v1'):

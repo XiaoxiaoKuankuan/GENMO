@@ -108,8 +108,12 @@ class AsyncCheckpointWriter:
         finally:self.pool.shutdown(wait=True);self.closed=True
 
 
-def _initialization_execution(identity):
-    """新实验仅允许变更有效批量及评估监视，实际学习/物理合同仍核对。"""
+def _initialization_execution(identity, *, fragment_transfer=False):
+    """显式新实验可以继承学习状态；片段实验另外重新校准折扣价值、重建采样池。
+
+    fragment_transfer只允许修改物理采样时限、站立混合比例、gamma和旧预热文件。
+    Actor输入、网络、参数组、奖励、噪声核和GMT执行设置仍逐项核对。
+    """
     import copy
     result=copy.deepcopy(identity)
     result.pop('evaluation',None)
@@ -118,11 +122,19 @@ def _initialization_execution(identity):
         result.get('training',{}).pop(key,None)
     # 此摘要由批量导出；所有原始核、KL、奖励、学习率与BC配置仍直接比较。
     result.get('kl',{}).get('calibration',{}).pop('optimization_sha256',None)
+    if fragment_transfer:
+        result.get('training',{}).pop('gamma_upper',None)
+        result.get('dataset',{}).pop('standing_start_probability',None)
+        result.get('critic',{}).pop('preheat_artifact',None)
+        for key in ('safety_limit_seconds','termination','time_limit_bootstrap'):
+            result.get('physical_episode',{}).pop(key,None)
     return result
 
 
 def load_training_checkpoint(path,*,identity,actor,critic,actor_optimizer,critic_optimizer,controller,
-                             new_experiment=False):
+                             new_experiment=False,fragment_transfer=False):
+    if fragment_transfer and not new_experiment:
+        raise ValueError('Fragment transfer requires an explicit new experiment, never ordinary resume')
     payload=torch.load(path,map_location='cpu',weights_only=False,mmap=True)
     # 固定评估是只读监视配置；更换清单不改变已学参数、Adam、奖励或采样策略。
     # 配对评估仍严格比较自己的完整任务与执行配置，并单独重建Stage1基线。
@@ -130,8 +142,8 @@ def load_training_checkpoint(path,*,identity,actor,critic,actor_optimizer,critic
     old_training={k:v for k,v in previous.items() if k!='evaluation'}
     new_training={k:v for k,v in identity.items() if k!='evaluation'}
     if new_experiment:
-        old_training=_initialization_execution(old_training)
-        new_training=_initialization_execution(new_training)
+        old_training=_initialization_execution(old_training,fragment_transfer=fragment_transfer)
+        new_training=_initialization_execution(new_training,fragment_transfer=fragment_transfer)
     if payload.get('schema')!=SCHEMA or not same_execution(old_training,new_training):
         raise ValueError('Checkpoint schema or actual training configuration differs')
     from .checkpoint import _validate_model_state,_validate_optimizer_state

@@ -446,7 +446,10 @@ class UpperEnvironment:
         arrival = self._arrival_tick(generated, start)
         ready_tick = max(start+300, int(math.ceil(arrival/300))*300)
         boundary = self._execution_boundary(generated, arrival, ready_tick)
-        execution_end = min(self.music_end_tick, boundary['tick']) if boundary else self.music_end_tick
+        # 物理时间上限必须真正限制advance，而不只是事后给超时的转移打标签。
+        # 预热的600 tick不计入片段；到时保留重置前的真实状态供Value自举。
+        execution_end = min(self.music_end_tick, self.soft_end_tick,
+                            boundary['tick'] if boundary else float('inf'))
         rows, rewards, details, events = [], [], [], []
         training_reward_seconds = 0.
         if self.reference_credit is not None:
@@ -499,6 +502,7 @@ class UpperEnvironment:
         terminated = bool(self.snapshot.get('terminated',False) or end >= self.music_end_tick)
         boundary_reached = bool(boundary and end>=boundary['tick'] and not terminated)
         truncated = bool(not terminated and (self.snapshot.get('truncated',False) or end>=self.soft_end_tick or boundary_reached))
+        time_limit_reached = bool(not terminated and end >= self.soft_end_tick)
         reason = self.snapshot.get('reason') or ('music_end' if terminated else
             boundary['reason'] if boundary_reached else 'physical_safety_limit' if truncated else None)
         rejected_action = bool(rejection and rejection.get('policy_penalty',
@@ -538,6 +542,10 @@ class UpperEnvironment:
             remaining_music_seconds=self.remaining_music(start),
             next_remaining_music_seconds=self.remaining_music(end), sampler_trace=trace,
             physical_episode_administrative_truncation=bool(truncated and not boundary_reached),
+            physical_episode_elapsed_seconds=max(0., (end-600)/600),
+            physical_episode_limit_seconds=(None if math.isinf(self.soft_end_tick) else (self.soft_end_tick-600)/600),
+            physical_time_limit_reached=time_limit_reached,
+            time_limit_bootstrap=bool(time_limit_reached and next_critic_context is not None),
             music_start_frame=getattr(self, 'music_start_frame', 0),
             full_music_num_frames=getattr(self, 'full_music_num_frames', len(self.music)),
             data_split=getattr(self, 'data_split', 'train'), backend_cpu_totals=backend_cpu_totals,

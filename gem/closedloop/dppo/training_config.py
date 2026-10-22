@@ -93,6 +93,8 @@ def configuration(path,*,genmo_repo=None,gmt_repo=None):
     if 'episode_seconds' in t:raise ValueError('physical_episode and ppo_rollout must be separate')
     seconds=s['physical_episode']['safety_limit_seconds']
     if seconds is not None and (not math.isfinite(seconds) or seconds<=0 or seconds%0.5):raise ValueError('Physical safety limit must lie on the decision grid')
+    if s['physical_episode'].get('time_limit_bootstrap',True) is not True:
+        raise ValueError('Physical time limits truncate sampling and bootstrap the pre-reset Value')
     if s['ppo_rollout']['world_seconds']<=0 or s['ppo_rollout']['world_seconds']%0.5:raise ValueError('Rollout world window must lie on the decision grid')
     if s['ppo_rollout']['collection_contract']!='shared_world_sim_time.v1':raise ValueError('Current collection uses shared world simulation time')
     if 'decisions_per_environment' in scale:raise ValueError('Per-environment decision quotas are no longer supported')

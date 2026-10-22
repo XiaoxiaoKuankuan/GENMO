@@ -27,11 +27,13 @@ sys.path.insert(0,str(ROOT))
 from gem.closedloop.dppo.budget import atomic_json
 
 
-def training_command(config,output,limit,initialization=None):
+def training_command(config,output,limit,initialization=None,*,random_fragments=False):
     command=['bash',str(ROOT/'scripts/train_stage10_8gpu_server1.sh'),'--config',str(config),
         '--output-dir',str(output),'--stop-after-iteration',str(limit)]
     if (output/'latest.json').is_file():command+=['--resume','latest']
-    elif initialization is not None:command+=['--initialize-from-checkpoint',str(initialization)]
+    elif initialization is not None:
+        command+=['--initialize-from-checkpoint',str(initialization)]
+        if random_fragments:command+=['--initialize-random-fragments']
     return command
 
 
@@ -47,6 +49,7 @@ def main():
     parser.add_argument('--status-dir',type=Path,required=True)
     parser.add_argument('--stop-after-iteration',type=int,default=200)
     parser.add_argument('--initialize-from-checkpoint',type=Path)
+    parser.add_argument('--initialize-random-fragments',action='store_true')
     args=parser.parse_args()
     status=args.status_dir.resolve();status.mkdir(parents=True,exist_ok=True)
     output=args.output_dir.resolve();stopping=False;child=None;attempt=0
@@ -62,7 +65,8 @@ def main():
                 completed_at=time.time(),pid=os.getpid(),attempts=attempt))
             return 0
         attempt+=1
-        command=training_command(args.config.resolve(),output,args.stop_after_iteration,args.initialize_from_checkpoint)
+        command=training_command(args.config.resolve(),output,args.stop_after_iteration,args.initialize_from_checkpoint,
+            random_fragments=args.initialize_random_fragments)
         started=time.time()
         with (status/'formal.log').open('ab',buffering=0) as log:
             log.write((json.dumps(dict(supervisor_attempt=attempt,command=command,time=started))+'\n').encode())

@@ -458,6 +458,7 @@ def run(cargs,config,distributed):
             recovery='fresh_PhysX_episodes_no_partial_rollout_reuse',torch_version=torch.__version__)
         payload=None
         initialization=getattr(cargs,'initialize_from_checkpoint',None)
+        fragment_transfer=bool(getattr(cargs,'initialize_random_fragments',False))
         if not cargs.resume and not initialization and not cargs.evaluate_only and critic_config.get('preheat_artifact'):
             from .critic_preheat import initialize_critic
             imported=local_call(distributed,lambda:initialize_critic(critic_config['preheat_artifact'],
@@ -486,23 +487,40 @@ def run(cargs,config,distributed):
             checkpoint=Path(initialization).resolve()
             payload=local_call(distributed,lambda:load_training_checkpoint(checkpoint,identity=c.identity,
                 actor=c.actor,critic=c.critic,actor_optimizer=c.actor_optimizer,
-                critic_optimizer=c.critic_optimizer,controller=c.controller,new_experiment=True))
+                critic_optimizer=c.critic_optimizer,controller=c.controller,new_experiment=True,
+                fragment_transfer=fragment_transfer))
             def initialize_experiment():
                 import shutil
                 c.budget.initialize_from_checkpoint(payload['budget'])
                 parent=checkpoint.parent.parent
-                for name in ('evaluation_baseline.json','fixed_diagnostic_reference.json'):
-                    if (parent/name).exists():shutil.copy2(parent/name,c.output/name)
+                if not fragment_transfer:
+                    for name in ('evaluation_baseline.json','fixed_diagnostic_reference.json'):
+                        if (parent/name).exists():shutil.copy2(parent/name,c.output/name)
                 record=dict(checkpoint=str(checkpoint),sha256=file_sha256(checkpoint),
                     source_iteration=payload['state']['iteration'],actor_and_adam_preserved=True,
                     critic_and_adam_preserved=True,original_budget_preserved=True,
                     fresh_physics_rollout_required=True)
+                if fragment_transfer:
+                    record.update(transfer='random_motion_fragments_timeout_bootstrap.v1',
+                        previous_gamma_upper=payload['identity']['training']['gamma_upper'],
+                        gamma_upper=c.settings['gamma_upper'],
+                        previous_physical_episode=payload['identity']['physical_episode'],
+                        physical_episode=c.stage['physical_episode'],
+                        previous_standing_probability=payload['identity']['dataset']['standing_start_probability'],
+                        standing_probability=c.stage['dataset']['standing_start_probability'],
+                        sampling_pool='fresh_for_new_reset_distribution',
+                        critic_recalibration_required=True,old_rollout_reused=False,
+                        new_fixed_value_reference_required=True)
                 atomic_json(c.output/'initialization.json',record)
                 return record
             imported=root_call(distributed,initialize_experiment)
             c.state=copy.deepcopy(payload['state'])
             for key in ('best_observed','best_saved','regression_monitor'):c.state.pop(key,None)
             c.state['experiment_initialization']=imported
+            if fragment_transfer:
+                # 继承Actor及Adam，但旧gamma的预热结论/固定GAE标签不能当成新目标。
+                c.state.update(mc_preheat_complete=False,requires_stage1_rebaseline=True,
+                    requires_transfer_start_evaluation=True)
             c.state['budget']=root_call(distributed,lambda:c.budget.summary())
             c.bc.load_state_dict(payload['rank_states'][distributed.rank]['bc'])
             restore_local_rng(payload['rank_states'][distributed.rank]['rng'],c.generators)
@@ -513,7 +531,8 @@ def run(cargs,config,distributed):
                 or service.world.policy.device!=distributed.device):
             raise RuntimeError('Actor, frozen GMT and PhysX world must use the same allocated GPU')
         c.vector=InProcessTrainingRuntime(c,service);c.env=c.vector
-        if payload:c.vector.restore_logical(payload['rank_states'][distributed.rank]['collector'])
+        if payload and not fragment_transfer:
+            c.vector.restore_logical(payload['rank_states'][distributed.rank]['collector'])
         if payload:restore_local_rng(payload['rank_states'][distributed.rank]['rng'],c.generators)
         c.backend=SimpleNamespace(journal=None)
         from gem.closedloop.online_conditions import OnlineConditionBuilder
@@ -579,6 +598,9 @@ def run(cargs,config,distributed):
         if cargs.evaluate_only:
             report.update(status='passed',scope='fixed_real_physics_evaluation_without_training',final_state=c.state)
             raise _FiniteDiagnosticComplete
+        if c.state.get('requires_transfer_start_evaluation') and not cargs.collect_only:
+            _evaluate(c,report,'fragment_transfer_start')
+            c.state.pop('requires_transfer_start_evaluation',None)
         started=time.perf_counter();last_save=started
         c.state.setdefault('next_evaluation_control_steps',_next_interaction_boundary(
             c.state['training_control_steps'],c.stage['evaluation']['every_control_steps']))

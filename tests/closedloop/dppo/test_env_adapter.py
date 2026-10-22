@@ -222,7 +222,8 @@ def test_music_end_and_admin_cutoff_have_different_bootstrap(tmp_path):
     capped.soft_end_tick = 900
     result = capped.step()
     assert result.truncated and not result.terminated
-    assert result.control_tick_end == 1200 and result.next_context is not None
+    assert result.control_tick_end == 900 and result.next_context is not None
+    assert result.metadata['physical_time_limit_reached'] and result.metadata['time_limit_bootstrap']
     RolloutBuffer().append(result)
 
 
@@ -367,7 +368,8 @@ def test_comparison_initial_noise_matches_despite_different_run_counters(tmp_pat
             return {"qpos": qpos, "qpos30": noise, "contact": torch.full((1, 120, 2), .5)}
         actor.sample = lambda batch, *, steps, guidance_scale, noise: output(noise)
         env.policy = SimpleNamespace(actor=actor, steps=20, guidance_scale=2.5,
-            sample_rollout=lambda batch, *, generator: output(torch.randn(1, 120, 30, generator=generator)))
+            sample_rollout=lambda batch, *, generator, deterministic_transitions=False:
+                output(torch.randn(1, 120, 30, generator=generator)))
         env.attempt, env.iteration = attempt, iteration
         env.episode_count = attempt + 2
         env.comparison_noise_index = 0

@@ -57,7 +57,8 @@ def ensure_training_progress_baseline(c):
         split=options['split'],training_progress=True,original_split=options['original_split']))
     previous=root_call(c.distributed,lambda:json.loads((c.output/'evaluation_baseline.json').read_text())
         if (c.output/'evaluation_baseline.json').exists() else None)
-    if previous is None or previous['plan_sha256']==plan['plan_sha256']:
+    fragment_transfer=bool(c.state.get('requires_stage1_rebaseline',False))
+    if not fragment_transfer and (previous is None or previous['plan_sha256']==plan['plan_sha256']):
         return None
     workspace=c.output/'evaluation_protocols'/plan['plan_sha256']/c.session.name
     root_call(c.distributed,lambda:workspace.mkdir(parents=True,exist_ok=False))
@@ -76,24 +77,27 @@ def ensure_training_progress_baseline(c):
 
     def publish():
         atomic_json(workspace/'evaluation_baseline.json',result)
-        archive=c.output/'evaluation_protocols'/('previous_'+previous['plan_sha256'])
-        archive.mkdir(parents=True,exist_ok=True)
-        for name in MONITOR_FILES:
-            source=c.output/name
-            if source.exists():
-                target=archive/name
-                if target.exists() and target.read_bytes()!=source.read_bytes():
-                    raise ValueError('Existing archived evaluation evidence differs: '+name)
-                if not target.exists():shutil.copy2(source,target)
+        archive=None
+        if previous is not None:
+            archive=c.output/'evaluation_protocols'/('previous_'+previous['plan_sha256'])
+            archive.mkdir(parents=True,exist_ok=True)
+            for name in MONITOR_FILES:
+                source=c.output/name
+                if source.exists():
+                    target=archive/name
+                    if target.exists() and target.read_bytes()!=source.read_bytes():
+                        raise ValueError('Existing archived evaluation evidence differs: '+name)
+                    if not target.exists():shutil.copy2(source,target)
         reference=json.loads((workspace/'fixed_diagnostic_reference.json').read_text())
         atomic_json(c.output/'fixed_diagnostic_reference.json',reference)
         atomic_json(c.output/'evaluation_baseline.json',result)
         for name in MONITOR_FILES[2:]:
             (c.output/name).unlink(missing_ok=True)
-        change=dict(previous_plan_sha256=previous['plan_sha256'],plan_sha256=plan['plan_sha256'],
+        change=dict(previous_plan_sha256=None if previous is None else previous['plan_sha256'],plan_sha256=plan['plan_sha256'],
             split=plan['split'],original_split=plan['pool_original_split'],task_count=plan['task_count'],
-            iteration=c.state['iteration'],archive=str(archive),stage1_baseline=str(workspace),
-            optimizer_reset=False,MC_preheat_repeated=False)
+            iteration=c.state['iteration'],archive=None if archive is None else str(archive),stage1_baseline=str(workspace),
+            optimizer_reset=False,MC_preheat_repeated=fragment_transfer,
+            reason='new_fragment_value_target' if fragment_transfer else 'evaluation_task_change')
         atomic_json(c.output/'evaluation_monitor_change.json',change)
         return change
     change=root_call(c.distributed,publish)
@@ -102,4 +106,5 @@ def ensure_training_progress_baseline(c):
     if hasattr(baseline,'_periodic_fixed_reference'):
         c._periodic_fixed_reference=baseline._periodic_fixed_reference
     c.state['budget']=root_call(c.distributed,lambda:c.budget.state_dict())
+    c.state.pop('requires_stage1_rebaseline',None)
     return change

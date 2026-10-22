@@ -36,7 +36,8 @@ def evaluation_execution(value):
     result=without_source_records(value)
     if isinstance(result,dict) and isinstance(result.get('training_identity'),dict):
         learning_only={'training','critic','bc_gradient','kl','scale','evaluation','run_control',
-                       'resource_limits','dataset','actor_initialization'}
+                       'resource_limits','dataset','actor_initialization','physical_episode'}
+        # evaluation_episode_flow按评估任务独立设置时限；训练20秒上限不作用于整曲评估。
         result['training_identity']={key:item for key,item in result['training_identity'].items()
                                      if key not in learning_only}
     return result
