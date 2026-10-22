@@ -17,7 +17,8 @@ import time
 from collections import Counter
 import torch
 
-from .actor_backtracking import backtracked_step, uniform_actor_optimizer
+from .actor_backtracking import backtracked_step
+from .actor_optimizer import validate_actor_optimizer, set_actor_base_lr
 from .actor_step_diagnostics import StepDiagnostics, output_probe, compare_probes, advantage_diagnostics
 from .dense_policy import dense_precision_scope
 from .execution_checks import policy_phase
@@ -44,7 +45,7 @@ def prepare_full_batch_gradient(policy, optimizer, rows, targets, cache, manifes
     selected = _eligible(manifest)
     if not selected or len(selected) > minibatch_chains:
         raise ValueError('Single on-policy update requires all valid chains in one global minibatch')
-    uniform_actor_optimizer(policy.actor, optimizer)
+    validate_actor_optimizer(policy.actor, optimizer)
     actor = policy.actor
     owned = _owned(selected, manifest, distributed)
     local = [rows[i] for _, i in owned]
@@ -113,11 +114,11 @@ def full_batch_actor_update(policy, optimizer, rows, targets, cache, manifest, c
         distributed, anchor, generator, backtracking, kl_limits, kl_microbatch=128,
         ppo_epochs=1, minibatch_chains=16384, microbatch=128, clip=.003,
         grad_clip_norm=1., reserve_attempt=None, bc_samples_per_rollout=1024, proposed_lr=None,
-        detailed_diagnostics=True, snr=False, minimum_lr=0.):
+        detailed_diagnostics=True, snr=False):
     if ppo_epochs != 1:
         raise ValueError('Full-batch experiment permits exactly one on-policy update per rollout')
     policy._accepted_kl_receipt=None
-    if proposed_lr is not None:optimizer.param_groups[0]['lr']=proposed_lr
+    if proposed_lr is not None:set_actor_base_lr(optimizer,proposed_lr)
     control_before = copy.deepcopy(controller.state_dict())
     anchor_before = copy.deepcopy(anchor.state_dict())
     rng_before = capture_local_rng(dict(actor=generator))
@@ -128,7 +129,7 @@ def full_batch_actor_update(policy, optimizer, rows, targets, cache, manifest, c
         detailed_diagnostics=detailed_diagnostics, gradient_snr=snr)
     def evaluate():
         result = final_kl(policy, rows, cache, manifest, distributed=distributed, microbatch=kl_microbatch,
-            clip=clip, objective_reduction='free_coordinate_mean')
+            clip=clip, objective_reduction='joint_sum')
         result['clip_is_counterfactual_dppo_diagnostic'] = True
         return result
     def observe():
@@ -143,7 +144,7 @@ def full_batch_actor_update(policy, optimizer, rows, targets, cache, manifest, c
     transaction = backtracked_step(policy.actor, optimizer, controller, evaluate=evaluate, limits=kl_limits,
         distributed=distributed, generators=dict(actor=generator), max_attempts=backtracking['max_attempts'],
         factor=backtracking['factor'], reserve_attempt=reserve_attempt,
-        observe=observe if detailed_diagnostics else None, minimum_lr=minimum_lr)
+        observe=observe if detailed_diagnostics else None)
     if not transaction['accepted']:
         controller.load_state_dict(control_before)
         anchor.load_state_dict(anchor_before)
@@ -163,6 +164,6 @@ def full_batch_actor_update(policy, optimizer, rows, targets, cache, manifest, c
     if accepted:
         from .kl_reuse import seal_accepted_kl
         policy._accepted_kl_receipt = seal_accepted_kl(policy, cache, manifest,
-            transaction['attempts'][-1]['kl'], clip=clip, reduction='free_coordinate_mean')
+            transaction['attempts'][-1]['kl'], clip=clip, reduction='joint_sum')
         result['complete_accepted_kl_available']=True
     return result

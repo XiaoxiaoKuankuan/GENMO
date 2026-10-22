@@ -65,6 +65,22 @@ def _source_summary(rows):
     return summary
 
 
+def episode_boundary_summary(rows):
+    """由真实转移核对20秒边界；PPO窗口截断不算物理重置，失败优先于超时。"""
+    timeouts=[r for r in rows if r.metadata.get('physical_time_limit_reached',False)]
+    elapsed=[r.metadata['physical_episode_elapsed_seconds'] for r in timeouts]
+    return dict(time_limit_episodes=len(timeouts),
+        bootstrap_time_limit_episodes=sum(bool(r.metadata.get('time_limit_bootstrap')) for r in timeouts),
+        elapsed_seconds_min=min(elapsed,default=None),elapsed_seconds_max=max(elapsed,default=None),
+        physical_failure_episodes=sum(bool(r.metadata.get('terminal_snapshot',{}).get('terminated',False)) for r in rows),
+        music_end_episodes=sum(r.reason=='music_end' for r in rows),
+        examples=[dict(episode_id=r.identity['episode_id'],env_id=r.identity.get('env_id'),
+            control_tick_end=r.control_tick_end,elapsed_seconds=r.metadata['physical_episode_elapsed_seconds'],
+            music_start_frame=r.metadata.get('music_start_frame'),
+            dataset=r.metadata.get('training_task',{}).get('dataset'),
+            bootstrapped=bool(r.metadata.get('time_limit_bootstrap'))) for r in timeouts[:8]])
+
+
 class _DirectTransport:
     def __init__(self,service):self.service=service;self.last_call_timing={}
     def call(self,method,**payload):return self.service.call(method,**payload)
@@ -210,6 +226,7 @@ class InProcessTrainingRuntime:
             if length:contiguous.append(length)
         samplers = [state.resource.sampler for state in self.collector.states if state is not None]
         report.update(time_sampling=self.time_pool.summary(),
+            episode_boundaries=episode_boundary_summary(rows),
             sampling_coverage=execution_coverage(c.catalog, samplers),
             through_targets_and_budget_seconds=time.perf_counter()-start,
             physics_accounting=self.last_physics_accounting,

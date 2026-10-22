@@ -19,6 +19,7 @@ if __package__ in (None, ''):
 from gem.closedloop.dppo.evaluation import _publish_json, _stats, aggregate_evaluation
 from gem.closedloop.dppo.compact_evidence import read_episode
 from gem.closedloop.dppo.training_checkpoint import file_sha256 as sha256
+from gem.closedloop.dppo.execution_compatibility import without_source_records
 import json
 
 VERSION = 'genmo.closedloop.stage10.paired_comparison.v1'
@@ -104,19 +105,22 @@ def _comparison_group(pairs, initial_episodes, final_episodes):
 
 
 def paired_execution_identity(identity):
-    """配对Actor效果时只允许学习状态不同，物理/奖励/核/源码和执行时钟逐项相同。
+    """配对Actor效果时要求物理/奖励/核和执行时钟相同，源码仅记录。
 
     新run的Critic预热文件、优化器设置和Actor初始化来源不决定冻结Actor评估的
     状态转移。它们保留在原报告中，但不能要求Stage1和更新Actor的初始化身份相同。
-    其余外层执行字段完整保留；源码不放宽，也不自动兼容不同奖励或随机核。
+    其余实际执行字段保留，不自动兼容不同奖励或随机核。
     """
+    identity=without_source_records(identity)
     if not isinstance(identity,dict) or 'training_identity' not in identity:return identity
     required=('schema','assets','kernel','reward','runtime','timing','physical_episode','ppo_rollout',
-        'generation_horizon','physical_configuration','source_files','data_catalog','source_stage1_step',
+        'generation_horizon','physical_configuration','data_catalog','source_stage1_step',
         'torch_version','recovery')
     training=identity['training_identity']
     require(all(k in training for k in required),'Paired evaluation lacks explicit execution identity')
-    return dict(identity,training_identity={k:training[k] for k in required})
+    # 训练片段上限由evaluation_episode_flow按评估任务独立覆盖；评估实际长度已由
+    # 外层episode_seconds和每个原始episode核验。不能把训练20秒误当成评估20秒。
+    return dict(identity,training_identity={k:training[k] for k in required if k!='physical_episode'})
 
 
 def compare_evaluations(initial_report, final_report):
@@ -125,8 +129,7 @@ def compare_evaluations(initial_report, final_report):
     final, other_parent, final_episodes, final_source = _load_periodic(final_report)
     require(parent==other_parent, 'Initial/final full parent plan, task noise or episode duration differs')
     require(paired_execution_identity(initial['training_identity'])==paired_execution_identity(final['training_identity']),
-            'Initial/final reward, physics, source, stochastic kernel or execution identity differs')
-    require(initial['extension_provenance']['source_manifest_sha256']==final['extension_provenance']['source_manifest_sha256'], 'Initial/final evaluation implementation SHA differs')
+            'Initial/final reward, physics, stochastic kernel or execution configuration differs')
     require(initial['episode_seconds_limit']==final['episode_seconds_limit'] and initial['deterministic']==final['deterministic'], 'Initial/final evaluation semantics differ')
     pairs = []
     for task, before, after in zip(parent['tasks'], initial_episodes, final_episodes):

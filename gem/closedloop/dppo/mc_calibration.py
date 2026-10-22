@@ -217,34 +217,50 @@ def independent_mc_metrics(c, bank):
         part=rows[start:start+128];cache=ValueConditionCache(part,c.distributed.device)
         predictions.extend(c.critic(cache.critic_context(part),cache.get('remaining_music_seconds',part)).cpu().tolist())
     modes=[e['task'].get('initialization','standing') for e in bank.episodes for _ in e['rows']]
-    shards=c.distributed.all_gather_object(dict(predictions=predictions,targets=targets.tolist(),bank=bank.report(),modes=modes))
+    from .value_credit_diagnostics import episode_value_records, summarize_value_credit
+    local_records=[];offset=0
+    for episode in bank.episodes:
+        count=len(episode['rows'])
+        local_records.extend(episode_value_records(episode,predictions[offset:offset+count],
+            gamma_upper=c.settings['gamma_upper'],lambda_upper=c.settings['lambda_upper'],
+            world_seconds=c.stage['ppo_rollout']['world_seconds']))
+        offset+=count
+    shards=c.distributed.all_gather_object(dict(predictions=predictions,targets=targets.tolist(),bank=bank.report(),modes=modes,
+        value_credit_records=local_records))
     p=[v for r in shards for v in r['predictions']];t=[v for r in shards for v in r['targets']]
     if not t:raise ValueError('No complete nonadministrative MC validation episode')
     modes=[v for r in shards for v in r['modes']]
     by_initialization={mode:summarize_critic_predictions([v for v,m in zip(p,modes) if m==mode],
         [v for v,m in zip(t,modes) if m==mode]) for mode in sorted(set(modes))}
-    return dict(**summarize_critic_predictions(p,t),by_initialization=by_initialization,episodes=sum(r['bank']['complete_episodes'] for r in shards),
+    return dict(**summarize_critic_predictions(p,t),by_initialization=by_initialization,
+        value_credit=summarize_value_credit([v for r in shards for v in r['value_credit_records']]),
+        episodes=sum(r['bank']['complete_episodes'] for r in shards),
         physical_control_steps=sum(r['bank']['real_control_steps'] for r in shards),
         scope='independent_complete_MC_current_fixed_behavior_no_bootstrap')
 
 
-def calibrate_critic(c, label, *, fit, fit_if_ev_below=None):
+def calibrate_critic(c, label, *, fit, fit_if_ev_below=None, training_samples_per_source=None):
     """完整MC价值校准；fit_if_ev_below只用于周期调用：独立验证EV低于阈值才拟合。
 
     周期重拟合在独立训练种子bank上训练候选，用验证bank选最优；最优候选验证MSE不优于
     拟合前时恢复原Critic/Adam，不计入critic_updates。预热(fit=True)语义不变。
     """
     started=time.perf_counter();cfg=c.stage['critic']['complete_mc']
+    training_count=(cfg.get('training_samples_per_source',cfg['samples_per_source'])
+        if training_samples_per_source is None else training_samples_per_source)
+    if type(training_count)is not int or training_count<1:
+        raise ValueError('Explicit positive training music count required for current-policy MC calibration')
     validation=collect_complete_bank(c,label+'_val','val',samples_per_source=cfg['samples_per_source'],seeds=cfg['validation_seeds'])
     before=independent_mc_metrics(c,validation)
     periodic_refit=False
     if not fit and fit_if_ev_below is not None:
         periodic_refit=fit=before['explained_variance'] is None or before['explained_variance']<fit_if_ev_below
     report=dict(before=before,after=before,candidates=[],behavior_version=c.state['policy_version'],fit=fit,
-        refit_threshold=fit_if_ev_below,periodic_refit=periodic_refit)
+        refit_threshold=fit_if_ev_below,periodic_refit=periodic_refit,
+        training_samples_per_source=training_count,training_count_override=training_samples_per_source)
     if fit:
         training=collect_complete_bank(c,label+'_train','train',
-            samples_per_source=cfg.get('training_samples_per_source',cfg['samples_per_source']),seeds=cfg['training_seeds'])
+            samples_per_source=training_count,seeds=cfg['training_seeds'])
         rows,mc=training.training_data(policy_version=c.state['policy_version'],kernel=c.policy.kernel_config)
         # TD/GAE以同一初始Critic为基准；真实终止没有自举，候选共享固定标签与样本。
         td=[]

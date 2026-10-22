@@ -35,6 +35,8 @@ def _local_phase(distributed, phase):
     with measure(f'wait.{phase}'):
         failures = [item for item in distributed.all_gather_object(local) if item is not None]
     if failures:
+        if all(item['type']=='FloatingPointError' for item in failures):
+            raise FloatingPointError(f'Cooperative numerical phase failed ({phase}): {failures}') from error
         raise RuntimeError(f'Cooperative local phase failed ({phase}): {failures}') from error
 
 

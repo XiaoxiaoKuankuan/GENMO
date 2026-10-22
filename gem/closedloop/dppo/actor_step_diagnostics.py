@@ -33,15 +33,16 @@ class StepDiagnostics:
 
     @torch.no_grad()
     def finish(self, optimizer, bc_weight, clip_factor):
-        if len(optimizer.param_groups) != 1:
-            raise ValueError('Uniform Actor AdamW requires exactly one parameter group')
-        group = optimizer.param_groups[0]
+        from .actor_optimizer import validate_actor_optimizer, actor_parameter_group, actor_learning_rates
+        validate_actor_optimizer(self.actor, optimizer)
+        groups = {id(p): group for group in optimizer.param_groups for p in group['params']}
         totals = {}
         for name, p in self.actor.named_parameters():
             if not p.requires_grad:
                 continue
             if p.dtype != torch.float32:
                 raise ValueError('Actor master parameters must remain FP32')
+            group = groups[id(p)]
             old = self.before[name].double()
             delta = p.double() - old
             grad = torch.zeros_like(p) if p.grad is None else p.grad
@@ -57,11 +58,18 @@ class StepDiagnostics:
             a, b = self.components.get(name, (None, None))
             ppo_dot = delta.new_zeros(()) if a is None else -(delta*a.double()).sum()
             bc_dot = delta.new_zeros(()) if b is None else -(delta*b.double()).sum()*bc_weight
+            ppo_energy=delta.new_zeros(()) if a is None else a.double().square().sum()
+            bc_energy=delta.new_zeros(()) if b is None else b.double().square().sum()*bc_weight**2
+            cross=delta.new_zeros(()) if a is None or b is None else (a.double()*b.double()).sum()*bc_weight
             values = torch.stack((delta.new_tensor(p.numel()), (delta != 0).sum(), old.square().sum(),
                 delta.square().sum(), delta.abs().max(), grad.double().square().sum(), (grad != 0).sum(),
                 ((grad != 0) & (delta == 0)).sum(), (ideal != 0).sum(),
-                ((ideal != 0) & (delta == 0)).sum(), ideal.square().sum(), ppo_dot, bc_dot))
-            for key in ('all', _group(name)):
+                ((ideal != 0) & (delta == 0)).sum(), ideal.square().sum(), ppo_dot, bc_dot,
+                ppo_energy,bc_energy,ppo_energy+bc_energy+2*cross))
+            keys = ['all', _group(name)]
+            if name.startswith('denoiser.blocks.'):
+                keys.append(actor_parameter_group(name))
+            for key in keys:
                 if key not in totals:
                     totals[key] = values.clone()
                 else:
@@ -70,7 +78,7 @@ class StepDiagnostics:
                     totals[key][4] = maximum
         output = {}
         for name, v in zip(totals, torch.stack(list(totals.values())).cpu().tolist()):
-            n, changed, norm2, delta2, maximum, grad2, nonzero, unchanged, ideal_n, rounded, ideal2, pdot, bdot = v
+            n, changed, norm2, delta2, maximum, grad2, nonzero, unchanged, ideal_n, rounded, ideal2, pdot, bdot, pe, be, ce = v
             output[name] = dict(elements=int(n), changed_elements=int(changed), changed_fraction=changed/n,
                 update_rms=math.sqrt(delta2/n), update_max=maximum,
                 relative_update_norm=math.sqrt(delta2/max(norm2, 1e-300)), parameter_rms=math.sqrt(norm2/n),
@@ -79,9 +87,17 @@ class StepDiagnostics:
                 nonzero_gradient_elements=int(nonzero), nonzero_gradient_unchanged_fraction=unchanged/max(nonzero, 1),
                 nonzero_adam_delta_elements=int(ideal_n), fp32_rounded_to_zero_fraction=rounded/max(ideal_n, 1),
                 adam_subtraction_fp64_delta_rms=math.sqrt(ideal2/n),
-                update_dot_negative_ppo_gradient=pdot, update_dot_negative_weighted_bc_gradient=bdot)
-        return dict(modules=output, master_dtype='float32',
+                update_dot_negative_ppo_gradient=pdot if self.components else None,
+                update_dot_negative_weighted_bc_gradient=bdot if self.components else None,
+                update_dot_negative_combined_gradient=pdot+bdot if self.components else None,
+                cosine_update_negative_ppo_gradient=pdot/math.sqrt(delta2*pe) if delta2*pe>0 else None,
+                cosine_update_negative_weighted_bc_gradient=bdot/math.sqrt(delta2*be) if delta2*be>0 else None,
+                cosine_update_negative_combined_gradient=(pdot+bdot)/math.sqrt(delta2*ce) if delta2*ce>0 else None,
+                ppo_gradient_norm=math.sqrt(max(pe,0)),weighted_bc_gradient_norm=math.sqrt(max(be,0)),
+                combined_gradient_norm=math.sqrt(max(ce,0)))
+        return dict(modules=output, master_dtype='float32', learning_rates=actor_learning_rates(optimizer),
             rounding_scope='FP64_reconstruction_from_actual_FP32_Adam_moments_before_parameter_subtraction',
+            gradient_projection_measured=bool(self.components),
             gradient_projection_is_not_separable_Adam_contribution=True)
 
 
@@ -95,7 +111,7 @@ def output_probe(policy, rows, cache, max_chains=16):
         context = cache.context(selected)
         prepared = policy.prepare_conditions(context)
         state = cache.get('chain', selected, [15]*len(selected)).clone()
-        means, logratios, stds = [], [], []
+        means, logratios, stds, moving_states = [], [], [], []
         for step in policy.trainable_steps:
             old_state = cache.get('chain', selected, [step]*len(selected))
             params = policy.transition_parameters(context, old_state, step, prepared=prepared)
@@ -109,6 +125,7 @@ def output_probe(policy, rows, cache, max_chains=16):
             moving = policy.transition_parameters(context, state, step, prepared=prepared)
             state = policy.actor._constrain(moving['mean'] + moving['std']*
                 cache.get('sampling_noise', selected, [step]*len(selected)), prepared['adapted'])
+            moving_states.append(state.clone())
         final = policy.transition_parameters(context, state, 19, prepared=prepared)
         qpos = policy.actor.endecoder.codec.decode_to_canonical_qpos(policy.actor.endecoder.denormalize(final['mean']))
         boundaries=None
@@ -117,6 +134,7 @@ def output_probe(policy, rows, cache, max_chains=16):
             boundaries=generated_boundaries_tensors(qpos,cache.get('free_mask',selected)[:,:,9:],
                 [policy.experimental_joint_limits]*len(selected),policy.actor.endecoder.kinematics.joint_order)
         return dict(mean=torch.stack(means, 1), joint_log_ratio=torch.stack(logratios, 1), boundaries=boundaries,
+            moving_states=torch.stack(moving_states,1),pre_final=state.clone(),
             actual_std=torch.stack(stds, 1), final=final['mean'].clone(), qpos=qpos,
             contact=final['contact_logits'].sigmoid(), mask=cache.get('free_mask', selected),
             advantages=cache.get('advantages', selected),
@@ -141,7 +159,11 @@ def compare_probes(before, after, distributed):
             joint_mask = mask[:, 9:]
             qdelta = after['qpos'][i, :, 7:].double()-before['qpos'][i, :, 7:].double()
             mean_delta = after['mean'][i].double()-before['mean'][i].double()
+            from .updater import _quaternion_angle
+            valid=mask.any(-1)
             record=dict(identity=before['identities'][i], source=before['sources'][i],
+                final_root_position_rms_m=float((after['qpos'][i,:,:3]-before['qpos'][i,:,:3]).double().square()[valid].mean().sqrt()),
+                final_root_orientation_rms_rad=float(_quaternion_angle(before['qpos'][i,:,3:7],after['qpos'][i,:,3:7])[valid].square().mean().sqrt()),
                 advantage=float(before['advantages'][i]),
                 joint_log_ratio_gain=float((after['joint_log_ratio'][i]-before['joint_log_ratio'][i]).sum()),
                 mean_change_rms=float(mean_delta[:, mask].square().mean().sqrt()),

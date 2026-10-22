@@ -21,8 +21,9 @@ import uuid
 import torch
 
 from .budget import atomic_json
+from .execution_compatibility import same_execution, contains_execution
 
-SCHEMA='genmo.closedloop.stage2.asymmetric_tracking.checkpoint.v3'
+SCHEMA='genmo.closedloop.stage2.full_chain_joint.checkpoint.v1'
 
 
 def immutable_cpu_snapshot(value):
@@ -85,10 +86,9 @@ class AsyncCheckpointWriter:
                 reasons=reason.split('+')))
             atomic_json(self.root/'latest.json',descriptor)
             if reason=='best':atomic_json(self.root/'best_checkpoint.json',descriptor)
-            # 周期/拒绝补存共用滚动保留；初始、里程碑、评估、best和终态不在此集合。
-            candidates=sorted(p for p in (self.root/'checkpoints').glob('stage10_r*_a*.pt')
-                              if all(role in ('periodic','retained_actor_state')
-                                     for role in p.stem.split('_',5)[-1].split('+')))
+            # 只清理当前运行产生的普通周期文件；初始、评估、best和终态不在此集合。
+            candidates=sorted(p for p in (self.root/'checkpoints').glob('stage10_r*_a*_periodic.pt')
+                              if '+' not in p.stem)
             import json
             protected={path}
             for pointer_name in ('latest.json','best_checkpoint.json','best_saved.json'):
@@ -108,10 +108,74 @@ class AsyncCheckpointWriter:
         finally:self.pool.shutdown(wait=True);self.closed=True
 
 
-def load_training_checkpoint(path,*,identity,actor,critic,actor_optimizer,critic_optimizer,controller,lr_controller=None):
+def _initialization_execution(identity, *, fragment_transfer=False):
+    """显式新实验可以继承学习状态；片段实验另外重新校准折扣价值、重建采样池。
+
+    fragment_transfer只允许修改物理采样时限、站立混合比例、gamma和旧预热文件。
+    Actor输入、网络、参数组、奖励、噪声核和GMT执行设置仍逐项核对。
+    """
+    import copy
+    result=copy.deepcopy(identity)
+    result.pop('evaluation',None)
+    result.get('scale',{}).pop('actor_minibatch_chains',None)
+    for key in ('actor_minibatch_internal_transitions','max_actor_optimizer_steps','bc_batch'):
+        result.get('training',{}).pop(key,None)
+    # 此摘要由批量导出；所有原始核、KL、奖励、学习率与BC配置仍直接比较。
+    result.get('kl',{}).get('calibration',{}).pop('optimization_sha256',None)
+    if fragment_transfer:
+        result.get('training',{}).pop('gamma_upper',None)
+        result.get('dataset',{}).pop('standing_start_probability',None)
+        result.get('critic',{}).pop('preheat_artifact',None)
+        for key in ('safety_limit_seconds','termination','time_limit_bootstrap'):
+            result.get('physical_episode',{}).pop(key,None)
+    return result
+
+
+def _legacy_fragment_execution(previous, current):
+    """显式迁移本分支旧坐标代理实验，保留真实物理核及全部模型/Adam。
+
+    仅供新目录的initialize-random-fragments使用：本次同时切换完整链PPO、8192
+    批量、20秒采样与gamma=.95，旧GAE/预热结论和学习率控制器不得当成等价恢复。
+    实际权重、奖励、GMT、观测、时钟和数据身份必须相同；参数/矩映射另行逐项校验。
+    """
+    keys=('assets','kernel','reward','physical_configuration','timing','data_catalog',
+          'source_stage1_step','generation_horizon')
+    if any(not same_execution(previous.get(k),current.get(k)) for k in keys):
+        return False
+    architecture=('type','dimension','layers','heads','history_scales','learning_rate','history_learning_rate')
+    if any(previous.get('critic',{}).get(k)!=current.get('critic',{}).get(k) for k in architecture):
+        return False
+    old_dataset=dict(previous.get('dataset',{}));new_dataset=dict(current.get('dataset',{}))
+    old_dataset.pop('standing_start_probability',None);new_dataset.pop('standing_start_probability',None)
+    if old_dataset!=new_dataset:
+        return False
+    for key in ('num_envs','generation_batch','physics_device','genmo_device'):
+        if previous.get('runtime',{}).get(key)!=current.get('runtime',{}).get(key):
+            return False
+    return (previous.get('training',{}).get('bc_enabled') is False
+            and current.get('training',{}).get('bc_enabled') is False
+            and current.get('training',{}).get('actor_objective')=='full_chain_clipped_ppo'
+            and current.get('training',{}).get('actor_trainable_scope','all')=='all')
+
+
+def load_training_checkpoint(path,*,identity,actor,critic,actor_optimizer,critic_optimizer,controller,
+                             new_experiment=False,fragment_transfer=False):
+    if fragment_transfer and not new_experiment:
+        raise ValueError('Fragment transfer requires an explicit new experiment, never ordinary resume')
     payload=torch.load(path,map_location='cpu',weights_only=False,mmap=True)
-    if payload.get('schema')!=SCHEMA or payload.get('identity')!=identity:
-        raise ValueError('Checkpoint schema/algorithm/kernel/asset/runtime identity differs; new experiment required')
+    # 固定评估是只读监视配置；更换清单不改变已学参数、Adam、奖励或采样策略。
+    # 配对评估仍严格比较自己的完整任务与执行配置，并单独重建Stage1基线。
+    previous=payload.get('identity') or {}
+    old_training={k:v for k,v in previous.items() if k!='evaluation'}
+    new_training={k:v for k,v in identity.items() if k!='evaluation'}
+    if new_experiment:
+        old_training=_initialization_execution(old_training,fragment_transfer=fragment_transfer)
+        new_training=_initialization_execution(new_training,fragment_transfer=fragment_transfer)
+    legacy_fragment=(new_experiment and fragment_transfer
+        and payload.get('schema')=='genmo.closedloop.stage2.asymmetric_tracking.checkpoint.v3'
+        and _legacy_fragment_execution(previous,identity))
+    if not legacy_fragment and (payload.get('schema')!=SCHEMA or not same_execution(old_training,new_training)):
+        raise ValueError('Checkpoint schema or actual training configuration differs')
     from .checkpoint import _validate_model_state,_validate_optimizer_state
     _validate_model_state(actor,payload['actor'],'当前 Actor')
     _validate_model_state(critic,payload['critic'],'当前 Critic')
@@ -120,27 +184,71 @@ def load_training_checkpoint(path,*,identity,actor,critic,actor_optimizer,critic
     # 先验证控制器，再修改任何模型；拒绝损坏快照时保持调用方当前学习状态。
     import copy
     copy.deepcopy(controller).load_state_dict(payload['bc_controller'])
-    if lr_controller is not None:
-        copy.deepcopy(lr_controller).load_state_dict(payload['scheduler'])
     actor.load_state_dict(payload['actor'],strict=True);critic.load_state_dict(payload['critic'],strict=True)
     actor_optimizer.load_state_dict(payload['actor_optimizer']);critic_optimizer.load_state_dict(payload['critic_optimizer'])
     controller.load_state_dict(payload['bc_controller'])
-    if lr_controller is not None:lr_controller.load_state_dict(payload['scheduler'])
+    if previous.get('evaluation')!=identity.get('evaluation') and 'state' in payload:
+        payload['state']=dict(payload['state'])
+        for key in ('best_observed','best_saved','regression_monitor'):
+            payload['state'].pop(key,None)
     if any(p.dtype!=torch.float32 for p in actor.parameters()):raise ValueError('Restored Actor master dtype changed')
     return payload
+
+
+def probability_candidate_binding(source,target,*,allow_measured_profile_transfer=False):
+    """只允许显式更换实测延迟样本池/来源，不改变时钟、前缀预算、奖励或物理合同。
+
+    旧rollout身份和目标评估身份分别保留；这种Actor只可做新鲜物理评估，绝不可作为
+    相同训练身份恢复。实际50/200Hz、重规划周期与部署核设置仍逐项相等。
+    """
+    for key in ('assets','kernel','reward','physical_configuration','data_catalog','generation_horizon'):
+        if source.get(key)!=target.get(key):raise ValueError('Candidate evaluation behavior contract differs: '+key)
+    old=dict(source['timing']);new=dict(target['timing'])
+    old_profile=old.pop('deployment_profile');new_profile=new.pop('deployment_profile')
+    if old!=new:raise ValueError('Candidate evaluation physical/replanning clock differs')
+    transferred=old_profile!=new_profile
+    if transferred:
+        if not allow_measured_profile_transfer:raise ValueError('Explicit measured delay profile transfer required')
+        for key in set(old_profile)|set(new_profile):
+            if key not in ('samples_seconds','provenance') and old_profile.get(key)!=new_profile.get(key):
+                raise ValueError('Measured delay transfer changes kernel or prefix budget: '+key)
+    import hashlib,json
+    sha=lambda value:hashlib.sha256(json.dumps(value,sort_keys=True,separators=(',',':')).encode()).hexdigest()
+    return dict(measured_delay_profile_transfer=transferred,source_profile_sha256=sha(old_profile),
+        evaluation_profile_sha256=sha(new_profile),allowed_differences=['samples_seconds','provenance'],
+        new_PhysX_paired_evaluation_required=True,training_resume=False)
 
 
 def load_evaluation_actor(path,*,actor,kernel,assets,execution_binding=None):
     """只读指定已完成checkpoint或固定数据候选的Actor，不恢复优化器/训练进度。
 
-    正式checkpoint额外核对源码、奖励、时钟、数据和物理身份，允许改变纯评估任务
+    正式checkpoint核对奖励、时钟、数据和物理配置，源码版本只作记录；允许改变纯评估任务
     数/长度和训练学习率以进行同条件P1/P2对照；绝不作为继续训练的恢复入口。
     """
     payload=torch.load(path,map_location='cpu',weights_only=False,mmap=True)
+    if payload.get('schema')=='genmo.stage2.probability_candidate_evaluation.v1':
+        target=payload.get('evaluation_identity',{})
+        update=payload.get('update',{})
+        if (payload.get('evaluation_only') is not True or not execution_binding or
+                target.get('assets')!=assets or target.get('kernel')!=kernel or
+                not contains_execution(target,execution_binding) or
+                payload.get('hard_kl',{}).get('passed') is not True or
+                type(update.get('optimizer_steps'))is not int or update['optimizer_steps']<1 or
+                update['optimizer_steps']!=update.get('planned_optimizer_steps') or
+                len(payload.get('source_case_sha256',''))!=64):
+            raise ValueError('Probability candidate evaluation identity or complete joint-KL update differs')
+        transfer=probability_candidate_binding(payload['source_identity'],target,allow_measured_profile_transfer=True)
+        if transfer!=payload.get('evaluation_transfer'):raise ValueError('Probability candidate profile transfer evidence differs')
+        from .checkpoint import _validate_model_state
+        _validate_model_state(actor,payload['actor'],'probability candidate evaluation Actor')
+        actor.load_state_dict(payload['actor'],strict=True)
+        return dict(kind='probability_candidate_fresh_evaluation_only',path=str(Path(path).resolve()),
+            sha256=file_sha256(path),source_case_sha256=payload['source_case_sha256'],update=update,
+            evaluation_transfer=transfer,training_resume=False)
     if payload.get('schema')==SCHEMA:
         identity=payload.get('identity',{})
         if (not execution_binding or identity.get('assets')!=assets or identity.get('kernel')!=kernel or
-                any(identity.get(k)!=v for k,v in execution_binding.items())):
+                not contains_execution(identity,execution_binding)):
             raise ValueError('Complete evaluation checkpoint execution identity differs')
         from .checkpoint import _validate_model_state
         _validate_model_state(actor,payload['actor'],'complete evaluation Actor')
@@ -157,11 +265,10 @@ def load_evaluation_actor(path,*,actor,kernel,assets,execution_binding=None):
     if (payload.get('schema')!='genmo.stage2.asymmetric_actor_evaluation.v1' or
             payload.get('evaluation_only') is not True or payload.get('kernel')!=kernel or
             payload.get('source_identity',{}).get('assets')!=assets or
-            not execution_binding or any(payload.get('source_identity',{}).get(k)!=v
-                                         for k,v in execution_binding.items()) or
+            not execution_binding or not contains_execution(payload.get('source_identity',{}),execution_binding) or
             payload.get('hard_kl',{}).get('passed') is not True or
             payload.get('complete_update_and_soft_kl_passed') is not True):
-        raise ValueError('Evaluation Actor asset/kernel/reward/physics/source/complete-update identity differs')
+        raise ValueError('Evaluation Actor asset/kernel/reward/physics/complete-update differs')
     update=payload.get('update',{})
     if (type(update.get('optimizer_steps')) is not int or update['optimizer_steps']<1 or
             update['optimizer_steps']!=update.get('planned_optimizer_steps') or

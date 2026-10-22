@@ -27,6 +27,9 @@ def _validate_optimizer_state(optimizer, saved):
         raise ValueError('Optimizer state group count differs')
     allowed=set()
     for current,previous in zip(optimizer.param_groups,saved['param_groups']):
+        for identity in ('name','param_names','lr_multiplier'):
+            if current.get(identity)!=previous.get(identity):
+                raise ValueError('Optimizer group identity differs: '+identity)
         if len(current['params'])!=len(previous['params']):
             raise ValueError('Optimizer state parameter count differs')
         for parameter,key in zip(current['params'],previous['params']):
@@ -41,3 +44,7 @@ def _validate_optimizer_state(optimizer, saved):
                         raise ValueError(f'Optimizer state tensor shape differs: {field}')
     if not set(saved['state']).issubset(allowed):
         raise ValueError('Optimizer state refers to unknown parameter keys')
+    if any('lr_multiplier' in group for group in optimizer.param_groups):
+        from .actor_optimizer import actor_base_lr
+        from types import SimpleNamespace
+        actor_base_lr(SimpleNamespace(param_groups=saved['param_groups']))

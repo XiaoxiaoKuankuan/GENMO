@@ -19,6 +19,7 @@ from pathlib import Path
 import time
 
 import numpy as np
+from .execution_compatibility import same_execution,same_evaluation_execution
 
 
 SOURCES = ('AIOZ-GDANCE', 'AIST++', 'FineDance', 'Mine')
@@ -26,7 +27,7 @@ VERSION = 'genmo.stage2.asymmetric_compact_tensorboard.v1'
 DEFINITIONS = {
     'Reward/total_per_second': '分/秒，越高越好。训练为各来源积分回报/实际采集秒数再四来源等权；验证为各任务每秒回报先来源内平均、再来源等权。',
     'Reward/episode_return': '分，固定验证任务积分回报的四来源等权平均；执行更久也会增加，必须一起看每秒回报和终止。',
-    'Reward/tracking': '分/秒，已乘权重的跟踪奖励（当前v3无活动度乘数）；越高越好，但不能替代原始误差。',
+    'Reward/tracking': '分/秒，已乘track_weight的跟踪项；活动度门控依实际配置，当前无门控候选不乘活动度；不能替代原始误差。',
     'Reward/stable': '分/秒，根高和非 yaw 姿态稳定奖励，越高越好。',
     'Reward/alive': '分/秒，有效存活控制区间奖励，越高越好。',
     'Reward/command_penalty': '分/秒，控制指令变化惩罚，非正，越接近零越好。',
@@ -34,7 +35,7 @@ DEFINITIONS = {
     'Reward/contact_penalty': '分/秒，滑脚和异常接触惩罚，非正，越接近零越好。',
     'Reward/joint_limit_penalty': '分/秒，实际及参考关节限位惩罚；不能当作硬限位最大越界距离。',
     'Reward/music': '分/秒，仅音乐奖励启用时记录；奖励关闭时不画恒零曲线。',
-    'Reward/paired_gain_per_second': '分/秒，同一固定任务相对本运行初始Actor的来源等权回报差，正值才是收益。',
+    'Reward/paired_gain_per_second': '分/秒，同一固定任务相对 Stage1 的来源等权回报差，正值才是收益。',
     'Reward/paired_gain_ci95_low': '上述收益的音乐组配对 bootstrap 95%区间下界；下界大于零才支持该验证集的明确收益。',
     'Reward/paired_gain_ci95_high': '上述收益的音乐组配对 bootstrap 95%区间上界；区间跨零表示提升不明确。',
     'Tracking/root_position_rms_m': '米，世界坐标根位置误差 RMS，越低越好；来源内按控制时间平均平方误差，再来源等权开方。',
@@ -55,18 +56,14 @@ DEFINITIONS = {
     'Termination/music_end_fraction': '固定验证真实到达可用音乐终点的任务比例；10秒短窗中的该比例不能当作整曲成功率。',
     'Termination/new_failure_count': '与 Stage1 同任务配对后新增的失败数，越低越好；不能被另一些任务恢复成功抵消。',
     'Termination/reference_rejections_per_1000s': '次/1000机器人秒，固定验证参考拒绝次数/实际执行秒数，越低越好。',
-    'Policy/learning_rate': '实际 Actor 优化器学习率，不是配置上限。',
+    'Policy/learning_rate': 'Actor当前共同基础学习率，本次配置等于qpos输出头LR；各Transformer层还需乘固定倍率，逐组实际值见JSON。',
     'Policy/trainable_kl': '本轮更新前后可训练去噪步骤的平均每自由坐标 KL；排除冻结步骤，大小本身不等于收益。',
-    'Policy/max_step_kl': '完整去噪链中最大的单步平均每自由坐标 KL，用于检查更新是否过大。',
-    'Policy/clipped_objective_fraction': '可训练去噪步骤最终检查中真正被 PPO 裁剪的目标比例；接近零不单独证明无效。',
+    'Policy/max_step_kl': '四个可训练随机步骤中最大的单步平均每自由坐标 KL，仅作辅助诊断。',
+    'Policy/clipped_objective_fraction': '完整链联合PPO中因符号相关裁剪失去梯度的链比例；0不证明无效，接近1说明饱和。',
     'Policy/gradient_norm': 'Actor 每次更新裁剪前 PPO+BC 总梯度范数的均值；持续异常增大需检查。',
     'Policy/bc_to_ppo_gradient_ratio': '每次更新加权 BC 梯度范数/PPO 梯度范数的均值；不是 Adam 参数更新贡献比例。',
     'Loss/joint_score': '四个随机步骤完整联合 Gaussian score 单次策略梯度损失；不是 clipped PPO，不能按单调下降验收。',
-    'Policy/backtracks': '本轮全部候选的学习率减半次数，包含最终没有接受的步骤。',
-    'Policy/next_base_lr': '跨轮控制器选定的下一轮统一基础学习率。',
-    'Policy/kl_utilization': '完整四步KL三项统计相对各自硬门槛的最大占用比例。',
-    'Policy/accepted_steps': '本轮实际保留的Actor optimizer step数。',
-    'Policy/optimizer_attempts': '本轮所有Adam候选计算次数，包含被撤销尝试。',
+    'Policy/backtracks': '本轮所有 minibatch 被拒绝并回退的 Adam 候选总次数；不是有效更新次数，实际学习率见 learning_rate。',
     'Loss/ppo': 'Actor 本轮 PPO 代理损失按内部样本访问数加权；优势归一化后常在零附近，不能按单调下降验收效果。',
     'Loss/bc': 'Actor 本轮 BC 损失按实际 BC 样本数加权；衡量监督约束拟合，不等于物理跟踪。',
     'Loss/critic_mse_before': '本轮 Critic 更新前，对本轮自举目标的 MSE；不同轮目标会变化。',
@@ -78,6 +75,26 @@ DEFINITIONS = {
     'Perf/iteration_seconds': '秒，本次接受迭代墙钟，不包含迭代之间另做的周期评估/MC/保存开销。',
     'Perf/controls_per_second': '实际 Actor 采集控制步总数/本轮墙钟；用于判断吞吐，不是策略质量。',
 }
+DEFINITIONS.update({
+    'Policy/nominal_actor_lr': '每批重新试探的共同名义LR；临时回溯LR不传给下一批，模块实际LR仍乘固定倍率。',
+    'Policy/ppo_objective_gain': '整批真实完整链clipped PPO目标减行为起点目标；越大越好，不能替代物理执行收益。',
+    'Policy/transformer_lr_min': '本轮最后一次接受更新中，16层Transformer实际学习率的最小值。',
+    'Policy/transformer_update_rms': 'Transformer主干每次Adam后实际FP32参数变化RMS的轮内均值；确认主干确实参与学习。',
+    'Policy/chain_joint_kl': '全部有效旧rollout链四步联合KL之和的均值；主要更新约束，非未来物理安全保证。',
+    'Policy/chain_joint_kl_p95': '上述每链联合KL的P95，检查尾部更新。完整P99/Max见每轮JSON。',
+    'Policy/chain_clip_fraction': '完整链ratio落在[1-clip,1+clip]之外的比例；区别于真正失去梯度的active clip。',
+    'Policy/parameter_update_rms': '每次Adam后真实FP32 Actor参数变化RMS的均值，非理论更新量。',
+    'Policy/ppo_bc_cosine': '全局SUM后的PPO与BC梯度余弦；负值表示方向存在冲突。',
+    'Policy/accepted_updates': '通过完整rollout联合KL的实际Adam次数，区别于计划次数。',
+    'Policy/planned_updates': '本轮按真实有效链数、完整链minibatch及epoch推导的计划Adam次数。',
+    'Perf/environment_seconds': '实际GMT闭环采集墙钟。',
+    'Perf/actor_ppo_seconds': '完整链ratio前向及流式PPO反向时间，不含BC和更新后KL。',
+    'Perf/bc_seconds': '原Stage1 BC样本加载与前向反向时间。',
+    'Perf/critic_seconds': '原价值目标的Critic更新墙钟。',
+    'Perf/kl_seconds': '更新后minibatch及整轮联合KL/最终参考诊断墙钟。',
+    'Perf/actor_step_seconds': 'Actor小批更新阶段墙钟/最终接受Adam次数，含BC、候选回退及小批KL；整轮最终KL另计。',
+    'Perf/peak_memory_gib': '本轮PyTorch峰值显存GiB，不含PhysX外部分配。',
+})
 for _source in SOURCES:
     DEFINITIONS[f'Sampling/time_share_{_source}'] = '本轮普通 Actor 实际采集秒数中该来源的占比；不是选曲概率，也不是唯一时间覆盖率。'
 
@@ -87,11 +104,13 @@ EVENT_TAG_OVERRIDES = {
     ('validation', 'Reward/total_per_second'): 'Reward/validation_total_per_second',
     ('train_evaluation', 'Reward/total_per_second'): 'Reward/validation_total_per_second',
 }
+# 坐标平均KL保留在JSON和历史读取中，面板用真实链KL、名义LR和PPO目标增益，标签总量不增加。
+JSON_ONLY_TAGS = {'Policy/trainable_kl', 'Policy/max_step_kl'}
 EVENT_DEFINITIONS = {tag: description for tag, description in DEFINITIONS.items()
-                     if tag != 'Reward/total_per_second'}
+                     if tag != 'Reward/total_per_second' and tag not in JSON_ONLY_TAGS}
 EVENT_DEFINITIONS.update({
     'Reward/train_total_per_second': '分/秒，普通训练采集各来源积分回报/实际采集秒数再来源等权；任务不断变化，只作训练监视。',
-    'Reward/validation_total_per_second': '分/秒，固定评估任务每秒回报先来源内平均再来源等权；本正式配置使用原train音乐，不代表泛化。',
+    'Reward/validation_total_per_second': '分/秒，固定评估任务的来源等权每秒回报；任务可来自显式train监视或val，原split保留在报告，不能自动称为泛化。',
 })
 
 ERROR_TAGS = {
@@ -128,7 +147,7 @@ def dashboard_scalars(scope, values):
     if scope not in SCOPES:
         raise ValueError('Invalid compact curve scope')
     result = {EVENT_TAG_OVERRIDES.get((scope, tag), tag): value
-              for tag, value in checked_scalars(values).items()}
+              for tag, value in checked_scalars(values).items() if tag not in JSON_ONLY_TAGS}
     if not result.keys() <= EVENT_DEFINITIONS.keys():
         raise ValueError('Metric has no single-run event definition')
     return result
@@ -141,7 +160,7 @@ def _weighted(rows, key, weight):
 
 def training_scalars(record):
     """跨 rank 合并分子/分母；仅接受实际完成的 Actor 更新，避免预热/回退污染横轴。"""
-    if record.get('mode') not in ('dppo_bc','no_actor_update'):
+    if record.get('mode') != 'dppo_bc':
         return {}
     collections = record['collection_by_rank']
     seconds = sum(c['executed_seconds'] for c in collections)
@@ -167,6 +186,10 @@ def training_scalars(record):
         values[tag] = _weighted(steps, key, weight)
     if steps:
         values['Policy/learning_rate'] = steps[-1].get('learning_rate')
+        rates=steps[-1].get('learning_rates',{})
+        transformer=[value for name,value in rates.items() if name.startswith('transformer_')]
+        if transformer:
+            values['Policy/transformer_lr_min']=min(transformer)
         values['Policy/gradient_norm'] = float(np.mean([s['total_gradient_norm'] for s in steps]))
         ratios = []
         for step in steps:
@@ -175,15 +198,12 @@ def training_scalars(record):
                 ratios.append(gradients['weighted_bc_norm']/gradients['ppo_norm'])
         if ratios:
             values['Policy/bc_to_ppo_gradient_ratio'] = float(np.mean(ratios))
-    transactions=[s['backtracking'] for s in steps if s.get('backtracking')]
-    if actor.get('rejected_step',{}):
-        transactions.append(actor['rejected_step']['backtracking'])
-    if transactions:values['Policy/backtracks']=sum(t['backtracks'] for t in transactions)
-    control=actor.get('lr_control',{})
-    values['Policy/next_base_lr']=control.get('next_base_lr')
-    values['Policy/kl_utilization']=control.get('utilization')
-    values['Policy/accepted_steps']=actor.get('optimizer_steps')
-    values['Policy/optimizer_attempts']=actor.get('attempted_optimizer_steps')
+    if actor.get('rejected_step_candidates') is not None:
+        values['Policy/backtracks'] = actor['rejected_step_candidates']
+    elif steps:
+        transaction = steps[-1].get('backtracking', {})
+        if transaction:
+            values['Policy/backtracks'] = transaction.get('backtracks')
     kl = record.get('trainable4_kl') or {}
     active = kl.get('per_denoising_step', [])
     if active and [step['step'] for step in active] != [15, 16, 17, 18]:
@@ -191,8 +211,29 @@ def training_scalars(record):
     if active:
         values['Policy/trainable_kl'] = float(np.mean([s['mean_coordinate_kl']['mean'] for s in active]))
         if objective != 'joint_score_pg':
-            values['Policy/clipped_objective_fraction'] = float(np.mean([s['objective_clip_fraction'] for s in active]))
+            values['Policy/clipped_objective_fraction'] = kl.get('active_clip_fraction',kl.get('objective_clip_fraction'))
     values['Policy/max_step_kl'] = kl.get('maximum_step_mean_coordinate_kl')
+    if kl.get('chain_joint_kl'):
+        values['Policy/chain_joint_kl']=kl['chain_joint_kl']['mean']
+        values['Policy/chain_joint_kl_p95']=kl['chain_joint_kl']['p95']
+        values['Policy/chain_clip_fraction']=kl.get('clip_fraction')
+    values['Policy/accepted_updates']=actor.get('accepted_optimizer_steps')
+    values['Policy/nominal_actor_lr']=actor.get('nominal_learning_rate')
+    values['Policy/ppo_objective_gain']=kl.get('objective_gain_mean')
+    values['Policy/planned_updates']=actor.get('planned_optimizer_steps')
+    parameter=[v['parameter_update']['modules']['all']['update_rms'] for v in steps if 'parameter_update' in v]
+    cosine=[v['gradient_contributions']['all']['cosine'] for v in steps if v.get('gradient_contributions',{}).get('all',{}).get('cosine') is not None]
+    if parameter:values['Policy/parameter_update_rms']=float(np.mean(parameter))
+    transformer_changes=[v.get('parameter_update',{}).get('modules',{}).get('transformer_backbone',{}).get('update_rms')
+        for v in steps]
+    transformer_changes=[value for value in transformer_changes if value is not None]
+    if transformer_changes:values['Policy/transformer_update_rms']=float(np.mean(transformer_changes))
+    if cosine:values['Policy/ppo_bc_cosine']=float(np.mean(cosine))
+    efficiency=record.get('efficiency',{})
+    for name in ('environment_seconds','actor_ppo_seconds','bc_seconds','critic_seconds','kl_seconds'):
+        values['Perf/'+name]=efficiency.get(name)
+    values['Perf/actor_step_seconds']=efficiency.get('actor_seconds_per_accepted_step')
+    if 'peak_allocated_bytes' in efficiency:values['Perf/peak_memory_gib']=efficiency['peak_allocated_bytes']/2**30
     critic = record.get('critic') or {}
     values['Loss/critic_mse_before'] = critic.get('before', {}).get('mse')
     values['Loss/critic_mse_after'] = critic.get('after', {}).get('mse')
@@ -264,7 +305,7 @@ def evaluation_scalars(report, baseline=None, *, bootstrap_repeats=2000):
     before = view if baseline is None else baseline
     if 'rows' not in before:
         before = evaluation_view(before)
-    if (view['plan_sha256'] != before['plan_sha256'] or view['evaluation_identity'] != before['evaluation_identity']
+    if (view['plan_sha256'] != before['plan_sha256'] or not same_evaluation_execution(view['evaluation_identity'], before['evaluation_identity'])
             or view['rows'].keys() != before['rows'].keys()):
         raise ValueError('Baseline tasks or execution identity differ')
     rows = list(view['rows'].values())

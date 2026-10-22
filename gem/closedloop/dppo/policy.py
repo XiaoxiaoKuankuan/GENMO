@@ -348,6 +348,7 @@ class DPPODiffusionPolicy:
         *,
         generator: torch.Generator | None = None,
         initial_noise: torch.Tensor | None = None,
+        deterministic_transitions: bool = False,
     ) -> dict[str, Any]:
         """采样完整随机链和只读条件副本；概率在最终物理解码之前记录。"""
         self._prepare_actor()
@@ -387,7 +388,8 @@ class DPPODiffusionPolicy:
                 if index in self.deterministic_steps:
                     following=parameters['mean'].clone()
                 else:
-                    noise = draw(state.shape)
+                    # 展示模式保留同一混合网络和全部20步，只把innovation置零；不可作行为rollout。
+                    noise = torch.zeros_like(state) if deterministic_transitions else draw(state.shape)
                     innovations.append(noise.clone())
                     following = self.actor._constrain(parameters["mean"] + parameters["std"] * noise, adapted)
                     probabilities.append(masked_joint_log_prob(following, parameters["mean"],

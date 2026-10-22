@@ -1,6 +1,6 @@
 """用户明确授权的Stage2正式八卡训练后台恢复入口，持续运行至累计轮次上限。
 
-数据流：启动原八卡训练脚本，首次按配置继承父DPPO的Actor/Adam，并用新奖励重建Critic；目录已有
+数据流：启动原八卡训练脚本，首次可在新目录继承指定完整checkpoint；目录已有
 latest时只恢复同一实验。子进程真实输出追加到同一正式日志，每次退出记录退出码、
 最新完整checkpoint轮次和时间。意外退出或尚未达到上限就正常结束时，等待30秒后
 从最新完整状态重启；不重置Adam，不更改学习率、概率、奖励、任务或任何数值校验。
@@ -14,7 +14,6 @@ latest时只恢复同一实验。子进程真实输出追加到同一正式日�
 from __future__ import annotations
 
 import argparse
-import fcntl
 import json
 import os
 from pathlib import Path
@@ -28,10 +27,13 @@ sys.path.insert(0,str(ROOT))
 from gem.closedloop.dppo.budget import atomic_json
 
 
-def training_command(config,output,limit):
+def training_command(config,output,limit,initialization=None,*,random_fragments=False):
     command=['bash',str(ROOT/'scripts/train_stage10_8gpu_server1.sh'),'--config',str(config),
         '--output-dir',str(output),'--stop-after-iteration',str(limit)]
     if (output/'latest.json').is_file():command+=['--resume','latest']
+    elif initialization is not None:
+        command+=['--initialize-from-checkpoint',str(initialization)]
+        if random_fragments:command+=['--initialize-random-fragments']
     return command
 
 
@@ -46,15 +48,15 @@ def main():
     parser.add_argument('--output-dir',type=Path,required=True)
     parser.add_argument('--status-dir',type=Path,required=True)
     parser.add_argument('--stop-after-iteration',type=int,default=200)
+    parser.add_argument('--initialize-from-checkpoint',type=Path)
+    parser.add_argument('--initialize-random-fragments',action='store_true')
     args=parser.parse_args()
     status=args.status_dir.resolve();status.mkdir(parents=True,exist_ok=True)
     output=args.output_dir.resolve();stopping=False;child=None;attempt=0
-    lock=(status/'supervisor.lock').open('a+')
-    fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
     def request_stop(signum,frame):
         nonlocal stopping
         stopping=True
-        if child is not None and child.poll() is None:os.killpg(child.pid,signal.SIGTERM)
+        if child is not None and child.poll() is None:child.send_signal(signal.SIGTERM)
     signal.signal(signal.SIGTERM,request_stop);signal.signal(signal.SIGINT,request_stop)
     while not stopping:
         iteration=latest_iteration(output)
@@ -62,19 +64,13 @@ def main():
             atomic_json(status/'supervisor.json',dict(status='complete',iteration=iteration,
                 completed_at=time.time(),pid=os.getpid(),attempts=attempt))
             return 0
-        if (output/'.run.lock').exists() and not (output/'latest.json').exists():
-            archive=output.with_name(output.name+'_incomplete_startup_'+str(time.time_ns()))
-            with (output/'.run.lock').open('a+b') as run_lock:
-                fcntl.flock(run_lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
-                output.rename(archive)
-            atomic_json(status/('startup_archive_'+str(time.time_ns())+'.json'),
-                dict(path=str(archive),reason='no_complete_checkpoint_restart_MC_and_physics'))
         attempt+=1
-        command=training_command(args.config.resolve(),output,args.stop_after_iteration)
+        command=training_command(args.config.resolve(),output,args.stop_after_iteration,args.initialize_from_checkpoint,
+            random_fragments=args.initialize_random_fragments)
         started=time.time()
         with (status/'formal.log').open('ab',buffering=0) as log:
             log.write((json.dumps(dict(supervisor_attempt=attempt,command=command,time=started))+'\n').encode())
-            child=subprocess.Popen(command,cwd=ROOT,stdout=log,stderr=subprocess.STDOUT,stdin=subprocess.DEVNULL,start_new_session=True)
+            child=subprocess.Popen(command,cwd=ROOT,stdout=log,stderr=subprocess.STDOUT,stdin=subprocess.DEVNULL)
             atomic_json(status/'supervisor.json',dict(status='running',pid=os.getpid(),child_pid=child.pid,
                 attempt=attempt,started_at=started,iteration_at_start=iteration,command=command,
                 requested_iteration_limit=args.stop_after_iteration))

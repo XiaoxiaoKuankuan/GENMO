@@ -1,16 +1,15 @@
-"""四步Clipped DPPO＋Stage1 BC、完整KL与非对称Critic更新。
+"""完整四步联合Clipped PPO与Stage1 BC、整轮联合KL和非对称Critic更新。
 
-每epoch打乱真实有效行为链，按全局minibatch分片，15～18四个随机步骤全部参与。
-以采样时真实旧均值/方差计算自由坐标平均log-ratio及PPO裁剪；局部loss分母为
-全局实际链数×4，PPO/BC梯度一次SUM后统一裁剪，没有额外world_size平均。
-旧行为统计及GAE整轮固定；Actor条件图每次optimizer更新后重建。BC总量按实际
-计划更新次数分配；本步回溯耗尽时只恢复本步，并明确记录已经接受的BC数量。
+每条链15～18步自由坐标的FP64 log-ratio先求和，只执行一次符号相关PPO裁剪，
+对应同一个上层GAE。两遍流式计算保持完整链梯度，条件图在每个Adam版本重建。
+全局实际链数是唯一分母；PPO/BC梯度SUM后统一裁剪，不额外平均四步或world size。
 
-每次optimizer候选都对原行为rollout的全部链、四步计算无梯度KL；失败只缩小
-当前步长，梯度只计算一次，先前通过的更新和独立Critic不回滚。最近完整KL绑定
-模型/rollout身份后复用，参考生成诊断只在最终模型计算。Critic只缓存冻结音乐/
-前缀及历史输入，可训练历史GRU
-每个optimizer step重新建图。物理时钟、奖励和原冻结去噪身份保持原合同。
+每个minibatch记录真实参数、同噪声最终输出及联合概率变化，链KL或裁剪饱和可
+提前停止。新rollout从名义LR试探，剩余试探步长过小时保留此前
+接受更新并结束剩余小批次；丢弃步骤的BC游标、控制器与RNG同时恢复。最后仍将
+优化器LR恢复为名义值，Adam动量不清零。所有旧rollout链的四步KL仍须通过；Actor/Critic/Adam/BC/RNG回滚由
+training统一管理。BC设置每步全局样本下限，监控实际样本量及成本。保持Critic
+结构、价值目标、物理时钟、原奖励和真实采样核，不把数值通过称为物理收益。
 """
 from __future__ import annotations
 
@@ -30,245 +29,360 @@ def _eligible(manifest,actor=True):
     return [i for i,m in enumerate(manifest) if m['valid'] and (m['has_free'] or not actor)]
 
 
-def actor_update(policy,optimizer,rows,targets,cache,manifest,controller,*,distributed,anchor,
-                    generator,ppo_epochs=1,minibatch_chains=4096,microbatch=128,sampled_steps=4,
-                    clip=.01,gamma_denoising=.99,kl_reduction='free_coordinate_mean',
-                    objective_reduction='free_coordinate_mean',grad_clip_norm=1.,reserve_attempt=None,
-                    gradient_observer=None,step_observer=None,bc_samples_per_rollout=1024,snr=False,
-                    step_strategy='intermediate4',detailed_diagnostics=False,
-                    backtracking,kl_limits,kl_microbatch=128,minimum_lr=5e-8,bc_enabled=True):
-    if not bc_enabled and bc_samples_per_rollout!=0:
-        raise ValueError('Disabled BC requires zero samples')
-    if step_strategy!='intermediate4' or sampled_steps!=4 or tuple(policy.trainable_steps)!=(15,16,17,18):
-        raise ValueError('PPO must optimize exactly indices 15 to 18')
-    if policy.steps!=20 or ppo_epochs<1 or minibatch_chains<1 or microbatch<1:
-        raise ValueError('Invalid PPO iteration scale')
-    if kl_reduction not in ('joint_sum','free_coordinate_mean'):raise ValueError('Unknown KL control units')
-    from .actor_backtracking import uniform_actor_optimizer,backtracked_step,StepSnapshot
+def _actor_update(policy,optimizer,rows,targets,cache,manifest,controller,*,distributed,anchor,
+                    generator,ppo_epochs=1,minibatch_chains=2048,microbatch=128,sampled_steps=4,
+                    clip=.10,gamma_denoising=1.,soft_kl=.10,kl_reduction='chain_joint',
+                    objective_reduction='joint_sum',grad_clip_norm=1.,reserve_attempt=None,
+                    gradient_observer=None,step_observer=None,bc_samples_per_rollout=2048,
+                    bc_min_global_batch=1,snr=False,step_strategy='intermediate4',detailed_diagnostics=False,
+                    max_active_clip=.95,trust_region=None,kl_limits=None,max_optimizer_steps=None,candidate_observer=None,
+                    bc_enabled=True,audit_full_rollout_objective=False,full_rollout_observer=None,
+                    audit_full_gradient_direction=False):
+    """每条完整链一个联合比值；两遍微批反传与全局SUM严格保持同一目标。"""
+    from .chain_ppo import evaluate_chain_records,from_records,backward_chain_surrogate
+    from .gaussian_probability import chain_diagnostics,distribution
+    from .actor_backtracking import backtracked_step
+    from .actor_optimizer import validate_actor_optimizer,actor_base_lr,set_actor_base_lr,actor_learning_rates
+    from .actor_step_diagnostics import StepDiagnostics,output_probe,compare_probes
+    from .parallel_support import local_call
     from .parallel_support import capture_local_rng,restore_local_rng
-    from .kl_reuse import seal_accepted_kl
-    uniform_actor_optimizer(policy.actor,optimizer)
+    if step_strategy!='intermediate4' or sampled_steps!=4 or tuple(policy.trainable_steps)!=(15,16,17,18):
+        raise ValueError('PPO must optimize exactly stochastic transitions 15..18')
+    if (policy.steps!=20 or ppo_epochs<1 or minibatch_chains<1 or microbatch<1 or
+            gamma_denoising!=1. or kl_reduction!='chain_joint' or objective_reduction!='joint_sum'):
+        raise ValueError('Full-chain PPO requires joint-sum, chain KL and one undiscounted upper advantage')
+    validate_actor_optimizer(policy.actor,optimizer)
     policy._accepted_kl_receipt=None
-    selected=_eligible(manifest);reports=[];orders=[];stop_reason=None;covered=set()
-    pending_metrics=[];pending_bc=[]
+    selected=_eligible(manifest);reports=[];orders=[];stop_reason=None;covered=set();discarded=None
     if not selected:raise ValueError('No free valid behavior chain remains for PPO')
     planned_steps=ppo_epochs*math.ceil(len(selected)/minibatch_chains)
-    bc_batches=(None if bc_samples_per_rollout is None else [
-        bc_samples_per_rollout//planned_steps+(i<bc_samples_per_rollout%planned_steps) for i in range(planned_steps)])
-    actor=policy.actor;device=next(actor.parameters()).device
-    workspace=StepSnapshot()
-    attempts=0;rejected_step=None;last_kl=None;computed_bc=0;candidate_kl_seconds=0.
-    def evaluate_kl():
-        return final_kl(policy,rows,cache,manifest,distributed=distributed,microbatch=kl_microbatch,
-                        clip=clip,objective_reduction=objective_reduction,include_reference=False)
-    sketch={} if snr else None
+    if max_optimizer_steps is not None and (type(max_optimizer_steps)is not int or max_optimizer_steps<1):
+        raise ValueError('Explicit diagnostic optimizer limit must be positive')
+    bc_total=max(bc_samples_per_rollout,planned_steps*bc_min_global_batch) if bc_enabled else 0
+    bc_batches=[bc_total//planned_steps+(i<bc_total%planned_steps) for i in range(planned_steps)]
+    actor=policy.actor;device=next(actor.parameters()).device;sketch={} if snr else None
+    def collect_records(local,owned,count):
+        with _local_phase(distributed,'full_chain_ratio_forward'),policy_phase(policy):
+            records=evaluate_chain_records(policy,local,cache,microbatch=microbatch)
+            adv=cache.get('advantages',local).double() if local else torch.zeros(0,device=device,dtype=torch.float64)
+        packed=torch.cat((records.reshape(len(local),32),adv[:,None]),1)
+        full=distributed.gather_rows(packed,[position for position,_ in owned],count)
+        return records,full[:,:32].reshape(count,4,8),full[:,32]
+    objective_aware=bool((trust_region or {}).get('objective_aware',False))
+    audit_full_rollout_objective=audit_full_rollout_objective or objective_aware or audit_full_gradient_direction
+    full_current=full_adv=full_before=None
+    objective_history=[];source_names=[]
+    selected_position={index:position for position,index in enumerate(selected)}
+    if audit_full_rollout_objective:
+        all_owned=_owned(selected,manifest,distributed)
+        _,full_current,full_adv=collect_records([rows[i] for _,i in all_owned],all_owned,len(selected))
+        full_before=chain_diagnostics(from_records(full_current),full_adv,clip=clip)
+        labels=[(position,rows[i].metadata.get('training_task',{}).get('dataset','unknown')) for position,i in all_owned]
+        names={position:name for shard in distributed.all_gather_object(labels) for position,name in shard}
+        source_names=[names[i] for i in range(len(selected))]
+        objective_history.append(dict(stage='before_update',**full_before))
+        if full_rollout_observer is not None:full_rollout_observer('before_update',full_current,full_adv,source_names)
     for epoch in range(ppo_epochs):
         order=balanced_epoch_order(selected,manifest,generator) if distributed.rank==0 else None
         order=distributed.broadcast_object(order)
         if detailed_diagnostics:orders.append(order)
         for begin in range(0,len(order),minibatch_chains):
-            before_control=copy.deepcopy(controller.state_dict())
-            before_anchor=copy.deepcopy(anchor.state_dict())
-            before_rng=capture_local_rng(dict(actor=generator))
             indices=order[begin:begin+minibatch_chains]
-            owned=_owned(indices,manifest,distributed)
-            pairs=[(i,s) for _,i in owned for s in policy.trainable_steps]
-            optimizer.zero_grad(set_to_none=True);actor.eval()
-            summary=torch.zeros(7,device=device,dtype=torch.float64)
-            step_metrics=torch.zeros(20,6,device=device,dtype=torch.float64)
-            start=time.perf_counter()
-            with _local_phase(distributed,'stage10_actor_local_forward_backward'),policy_phase(policy):
-                conditions=ConditionGraphCache(policy,cache,include_frozen=False);conditions.prime([rows[i] for _,i in owned])
-                for offset in range(0,len(pairs),microbatch):
-                    chunk=pairs[offset:offset+microbatch];samples=[rows[i] for i,_ in chunk];steps=[s for _,s in chunk]
-                    params,mask=_parameters(policy,samples,steps,device,cache,conditions)
-                    old_mean,old_std=_old_kernel(samples,steps,device,cache)
-                    observed=cache.get('chain',samples,[s+1 for s in steps])
-                    stats=gaussian_statistics(observed,old_mean,old_std,params['mean'],params['std'],mask)
-                    advantage=cache.get('advantages',samples)*cache.denoising_discounts(steps,20,gamma_denoising)
-                    proxy=ppo_surrogate(stats,advantage,clip=clip,reduction=objective_reduction)
-                    loss=-proxy['objective'].sum()/(len(indices)*4)
-                    loss.backward()
-                    with torch.no_grad():
-                        summary+=torch.stack((loss.detach(),proxy['ratio'].sum(),proxy['clipped'].double().sum(),
-                            proxy['objective_clipped'].double().sum(),stats['joint_kl'].sum(),stats['mean_coordinate_kl'].sum(),
-                            proxy['ratio'].new_tensor(len(chunk))))
-                        step_metrics.index_add_(0,cache.step_indices(steps),torch.stack((stats['joint_kl'],
-                            stats['mean_coordinate_kl'],proxy['ratio'].detach(),proxy['clipped'].double(),
-                            proxy['objective_clipped'].double(),torch.ones_like(stats['joint_kl'])),1))
-                    del loss,params,stats,proxy
-                conditions.backward()
-            combined=distributed.sum_tensor(torch.cat((summary,step_metrics.flatten())))
-            summary,step_metrics=combined[:7],combined[7:].reshape(20,6)
-            values=summary.cpu().tolist();visits=values[-1]
-            ppo=take_gradients(actor)
-            global_bc=0
-            if bc_enabled:
-                with _local_phase(distributed,'stage10_bc_local_forward_backward'):
-                    from .dense_policy import dense_precision_scope
-                    global_bc=None if bc_batches is None else bc_batches[len(reports)]
-                    if global_bc is not None:
-                        anchor.batch_size=global_bc//distributed.world_size+(distributed.rank<global_bc%distributed.world_size)
-                    bc_weight=1/distributed.world_size if global_bc is None else (anchor.batch_size/global_bc if global_bc else 0.)
-                    with dense_precision_scope(policy.precision):bc_report=anchor.backward(actor,weight=bc_weight)
-                    bc=take_gradients(actor)
-                computed_bc+=global_bc if global_bc is not None else bc_report["batch_size"]*distributed.world_size
+            accepted_full_current=full_current
+            owned=_owned(indices,manifest,distributed);local=[rows[i] for _,i in owned]
+            optimizer.zero_grad(set_to_none=True);actor.eval();started=time.perf_counter()
+            if audit_full_rollout_objective:
+                positions=[selected_position[i] for i in indices]
+                full=full_current[positions];adv=full_adv[positions]
+                records=full[[position for position,_ in owned]]
+                step_full_before=chain_diagnostics(from_records(full_current),full_adv,clip=clip)
             else:
-                bc={};bc_report=dict(batch_size=0,loss=0.,samples=[])
-            contributions=merge_global_gradients(actor,ppo,bc,controller,distributed=distributed,half_split=snr,sketch=sketch,bc_enabled=bc_enabled)
+                records,full,adv=collect_records(local,owned,len(indices))
+                step_full_before=None
+            ratio_seconds=max(distributed.all_gather_object(time.perf_counter()-started))
+            statistics=from_records(full)
+            pre=chain_diagnostics(statistics,adv,clip=clip)
+            if soft_kl is not None and pre['chain_joint_kl']['mean']>=soft_kl:stop_reason='pre_step_chain_joint_kl'
+            elif pre['active_clip_fraction']>=max_active_clip:stop_reason='active_clip_saturation'
+            if stop_reason:
+                discarded=dict(epoch=epoch,global_chain_count=len(indices),diagnostics=pre,
+                    wall_seconds=time.perf_counter()-started,optimizer_step_executed=False)
+                break
+            # 仅保存轻量学习状态；若本小批次未执行有效更新，BC游标/控制器和RNG也恢复。
+            pending_control=copy.deepcopy(controller.state_dict()) if trust_region is not None else None
+            pending_anchor=copy.deepcopy(anchor.state_dict()) if trust_region is not None and bc_enabled else None
+            pending_rng=capture_local_rng({'actor':generator}) if trust_region is not None else None
+            probe_before=local_call(distributed,lambda:output_probe(policy,local,cache,max_chains=2))
+            gradient_started=time.perf_counter()
+            with _local_phase(distributed,'full_chain_streamed_backward'),policy_phase(policy):
+                backward=backward_chain_surrogate(policy,local,cache,records,clip=clip,
+                    global_chain_count=len(indices),microbatch=microbatch)
+            ppo=take_gradients(actor)
+            ppo_seconds=max(distributed.all_gather_object(time.perf_counter()-gradient_started))
+            bc_started=time.perf_counter()
+            global_bc=bc_batches[len(reports)]
+            if bc_enabled:
+              with _local_phase(distributed,'stage2_bc_local_backward'):
+                from .dense_policy import dense_precision_scope
+                anchor.batch_size=global_bc//distributed.world_size+(distributed.rank<global_bc%distributed.world_size)
+                with dense_precision_scope(policy.precision):
+                    bc_report=anchor.backward(actor,weight=anchor.batch_size/global_bc)
+                bc=take_gradients(actor)
+            else:
+                bc_report=dict(loss=0.,batch_size=0,samples=[])
+                bc={}
+            bc_seconds=max(distributed.all_gather_object(time.perf_counter()-bc_started))
+            observation=local_call(distributed,lambda:StepDiagnostics(actor) if distributed.rank==0 else None)
+            contributions=merge_global_gradients(actor,ppo,bc,controller,distributed=distributed,half_split=snr,sketch=sketch,
+                component_observer=observation.capture_component if (detailed_diagnostics or audit_full_rollout_objective) and observation is not None else None,
+                bc_enabled=bc_enabled)
             if gradient_observer is not None:gradient_observer(actor,len(reports))
-            with _local_phase(distributed,'stage10_actor_combined_clip'):
+            direction=None
+            if audit_full_gradient_direction:
+                from .optimizer_direction import FullRolloutDirection
+                all_local=[rows[i] for _,i in all_owned]
+                all_records=full_current[[position for position,_ in all_owned]]
+                def full_direction_backward():
+                    # 先完成各rank局部反向并同步异常，再进入梯度SUM；否则单卡异常
+                    # 会使其他卡停在NCCL，而出错卡已进入控制组异常同步。
+                    with _local_phase(distributed,'diagnostic_full_rollout_gradient'),policy_phase(policy):
+                        backward_chain_surrogate(policy,all_local,cache,all_records,clip=clip,
+                            global_chain_count=len(selected),microbatch=microbatch)
+                direction=FullRolloutDirection.capture(actor,distributed,full_direction_backward)
+            with _local_phase(distributed,'stage2_actor_clip'):
                 total_norm=float(torch.nn.utils.clip_grad_norm_([p for p in actor.parameters() if p.requires_grad],
                     grad_clip_norm,error_if_nonfinite=True))
-            with _local_phase(distributed,'stage10_actor_optimizer_step'):
-                transaction=backtracked_step(actor,optimizer,controller,evaluate=evaluate_kl,
-                    limits=kl_limits,distributed=distributed,generators=dict(actor=generator),
-                    max_attempts=backtracking['max_attempts'],factor=backtracking['factor'],
-                    minimum_lr=minimum_lr,workspace=workspace,reserve_attempt=reserve_attempt)
-            attempts+=transaction['attempt_count']
-            candidate_kl_seconds+=sum(t['kl']['kl_only_wall_seconds'] for t in transaction['attempts'])
-            if not transaction['accepted']:
-                def restore_sampling():
-                    controller.load_state_dict(before_control)
-                    anchor.load_state_dict(before_anchor)
-                    restore_local_rng(before_rng,dict(actor=generator))
-                    optimizer.zero_grad(set_to_none=True)
-                from .parallel_support import local_call
-                local_call(distributed,restore_sampling)
-                stop_reason='optimizer_step_backtracking_exhausted'
-                rejected_step=dict(epoch=epoch,global_chain_count=len(indices),backtracking=transaction,
-                    retained_optimizer_steps=len(reports),wall_seconds=time.perf_counter()-start)
-                # load_state_dict改变Tensor版本，恢复后的模型重新全量检查再封存，绝不盲复用。
-                last_kl=evaluate_kl()
-                break
-            last_kl=transaction['attempts'][-1]['kl']
-            # 后续minibatch不会复用旧条件图，old statistics则保持同一份rollout。
+            clip_factor=min(1.,grad_clip_norm/(total_norm+1e-6))
+            # 只在rank0保留可训练参数前值来测实际FP32更新，不复制Adam或冻结网络。
+            transaction_started=time.perf_counter();kl_elapsed=0.
+            post_records=None;post=None;transaction=None
+            if trust_region is not None:
+                # 更新还会影响先前批次；累计已用链全部参与候选检查，避免只在新批次
+                # KL通过却遗漏前面链的变化。最终仍检查包含未用链在内的完整rollout。
+                guarded=set(selected) if objective_aware else covered.union(indices)
+                guard_indices=[i for i in selected if i in guarded]
+                guard_owned=_owned(guard_indices,manifest,distributed)
+                guard_local=[rows[i] for _,i in guard_owned]
+                limits={k:v*trust_region['margin'] for k,v in kl_limits.items()
+                    if k.startswith('chain_joint_')}
+                limits['chain_joint_mean']=min(limits['chain_joint_mean'],soft_kl*trust_region['margin'])
+                limits['maximum_active_clip']=max_active_clip
+                if objective_aware:
+                    limits['objective_reference']=step_full_before['objective_mean']
+                    limits['objective_tolerance']=trust_region.get('objective_tolerance',1e-10)
+                set_actor_base_lr(optimizer,min(trust_region['maximum_lr'],
+                    actor_base_lr(optimizer)*trust_region['growth']))
+                candidate_cache={}
+                def evaluate_candidate():
+                    nonlocal post_records,post,kl_elapsed,full_current
+                    measured=time.perf_counter()
+                    if audit_full_rollout_objective:
+                        _,candidate_records,candidate_adv=collect_records([rows[i] for _,i in all_owned],all_owned,len(selected))
+                        full_current=candidate_records
+                        positions=[selected_position[i] for i in guard_indices]
+                        post_records=candidate_records[positions];post_adv=candidate_adv[positions]
+                    else:
+                        _,post_records,post_adv=collect_records(guard_local,guard_owned,len(guard_indices))
+                    post=chain_diagnostics(from_records(post_records),post_adv,clip=clip)
+                    if objective_aware:candidate_cache[actor_base_lr(optimizer)]=(full_current,post_records,post)
+                    kl_elapsed+=time.perf_counter()-measured
+                    return post
+                transaction=backtracked_step(actor,optimizer,controller,evaluate=evaluate_candidate,
+                    limits=limits,distributed=distributed,generators={'actor':generator},
+                    max_attempts=trust_region['max_attempts'],reserve_attempt=reserve_attempt,
+                    observe=candidate_observer,minimum_lr=trust_region['maximum_lr']*
+                        trust_region.get('minimum_trial_lr_ratio',.0625),
+                    select_best=objective_aware,search_attempts=trust_region.get('objective_search_attempts',3))
+                if transaction['accepted'] and objective_aware:
+                    full_current,post_records,post=candidate_cache[transaction['accepted_lr']]
+                if not transaction['accepted']:
+                    if (reports or objective_aware) and transaction['finite_trust_region_exhausted']:
+                        controller.load_state_dict(pending_control)
+                        if bc_enabled:anchor.load_state_dict(pending_anchor)
+                        full_current=accepted_full_current
+                        restore_local_rng(pending_rng,{'actor':generator})
+                        optimizer.zero_grad(set_to_none=True)
+                        stop_reason='rollout_no_useful_trust_region_step'
+                        discarded=dict(epoch=epoch,global_chain_count=len(indices),diagnostics=pre,
+                            trust_region=transaction,optimizer_step_executed=bool(transaction['attempt_count']),
+                            accepted_optimizer_steps=0,pending_BC_and_RNG_restored=True,
+                            wall_seconds=max(distributed.all_gather_object(time.perf_counter()-started)))
+                        del observation,direction
+                        break
+                    import json
+                    raise FloatingPointError('Full-chain trust-region exhausted; whole iteration rollback: '+json.dumps(transaction))
+            else:
+                if reserve_attempt is not None:reserve_attempt()
+                with _local_phase(distributed,'stage2_actor_optimizer_step'):optimizer.step()
+            transaction_seconds=max(distributed.all_gather_object(time.perf_counter()-transaction_started))
+            parameter_report=local_call(distributed,lambda:observation.finish(optimizer,contributions['bc_weight'],clip_factor)
+                if observation is not None else None)
+            parameter_report=distributed.broadcast_object(parameter_report)
+            direction_report=local_call(distributed,lambda:direction.finish(observation.before) if direction is not None else None)
+            direction_report=distributed.broadcast_object(direction_report)
+            del direction
+            del observation
+            probe_after=local_call(distributed,lambda:output_probe(policy,local,cache,max_chains=2))
+            output_change=compare_probes(probe_before,probe_after,distributed)
+            if post is None:
+                measured=time.perf_counter()
+                if audit_full_rollout_objective:
+                    _,full_current,post_adv=collect_records([rows[i] for _,i in all_owned],all_owned,len(selected))
+                    post_records=full_current
+                else:
+                    _,post_records,post_adv=collect_records(local,owned,len(indices))
+                post=chain_diagnostics(from_records(post_records),post_adv,clip=clip)
+                kl_elapsed+=time.perf_counter()-measured
+            kl_seconds=max(distributed.all_gather_object(kl_elapsed))
             local_sources=Counter(meta['dataset_id'] for sample in bc_report.get('samples',[]) for meta in sample)
-            pending_bc.append(dict(batch=bc_report['batch_size'],loss=bc_report['loss'],sources=dict(local_sources)))
-            pending_metrics.append(step_metrics)
+            shards=distributed.all_gather_object(dict(batch=bc_report['batch_size'],loss=bc_report['loss'],sources=dict(local_sources)))
+            sources=Counter()
+            for shard in shards:sources.update(shard['sources'])
             covered.update(indices)
-            reports.append(dict(objective='clipped_dppo',ppo_clip_applied=True,
-                epoch=epoch,optimizer_step=len(reports)+1,global_chain_count=len(indices),
-                sampled_steps=sampled_steps,denoising_steps=list(policy.trainable_steps),
-                internal_sample_visits=int(visits),full_objective_transitions=len(indices)*4,
-                ppo_loss=values[0],mean_proxy_ratio=values[1]/visits,clip_fraction=values[2]/visits,
-                objective_clip_fraction=values[3]/visits,pre_step_mean_joint_kl=values[4]/visits,
-                pre_step_mean_coordinate_kl=values[5]/visits,
-                gradient_contributions=contributions,total_gradient_norm=total_norm,
-                gradient_clip_factor=min(1.,grad_clip_norm/(total_norm+1e-6)),
-                backtracking=transaction,
-                learning_rate=optimizer.param_groups[0]['lr'],wall_seconds=time.perf_counter()-start))
-            if step_observer is not None:step_observer(reports[-1])
+            full_after=None;objective_groups=None
+            if audit_full_rollout_objective:
+                full_after=chain_diagnostics(from_records(full_current),full_adv,clip=clip)
+                from .objective_audit import grouped_objective
+                objective_groups=grouped_objective(from_records(full_current),full_adv,source_names,clip=clip,
+                    before_statistics=from_records(accepted_full_current))
+                objective_history.append(dict(stage='accepted_Adam',optimizer_step=len(reports)+1,**full_after))
+                if full_rollout_observer is not None:full_rollout_observer('accepted_Adam',full_current,full_adv,source_names)
+            report=dict(objective='full_chain_clipped_ppo',ppo_clip_applied=True,epoch=epoch,
+                optimizer_step=len(reports)+1,global_chain_count=len(indices),sampled_steps=4,
+                denoising_steps=list(policy.trainable_steps),internal_sample_visits=len(indices)*4,
+                full_objective_transitions=len(indices)*4,ppo_loss=float(distributed.sum_tensor(backward['loss'])),
+                streaming_recompute_max_error=max(distributed.all_gather_object(float(backward['recompute_max_error']))),
+                clip_fraction=pre['clip_fraction'],objective_clip_fraction=pre['active_clip_fraction'],
+                pre_step_chain=pre,post_step_chain=post,
+                full_rollout_before=step_full_before,full_rollout_after=full_after,full_rollout_groups=objective_groups,
+                pre_step_mean_joint_kl=pre['chain_joint_kl']['mean'],
+                pre_step_mean_coordinate_kl=float(statistics['mean_coordinate_kl'].mean()),
+                per_denoising_step=[dict(step=s+15,joint_kl=distribution(post_records[:,s,0]),
+                    mean_coordinate_kl=distribution(post_records[:,s,1])) for s in range(4)],
+                gradient_contributions=contributions,total_gradient_norm=total_norm,gradient_clip_factor=clip_factor,
+                parameter_update=parameter_report,full_gradient_direction=direction_report,
+                output_change=output_change,trust_region=transaction,
+                candidate_checked_chains=len(guard_indices) if trust_region is not None else len(indices),
+                candidate_check_scope=('full_rollout' if objective_aware else 'all_previously_used_plus_current_chains') if trust_region is not None else 'current_minibatch',
+                bc_global_samples=sum(s['batch'] for s in shards),bc_samples_by_source=dict(sources),
+                bc_loss=sum(s['batch']*s['loss'] for s in shards)/global_bc if global_bc else 0.,
+                bc_enabled=bc_enabled,
+                learning_rate=actor_base_lr(optimizer),learning_rates=actor_learning_rates(optimizer),
+                ppo_ratio_seconds=ratio_seconds,
+                ppo_backward_seconds=ppo_seconds,ppo_seconds=ratio_seconds+ppo_seconds,
+                bc_seconds=bc_seconds,post_step_kl_seconds=kl_seconds,optimizer_transaction_seconds=transaction_seconds,
+                wall_seconds=max(distributed.all_gather_object(time.perf_counter()-started)))
+            reports.append(report)
+            if step_observer is not None:step_observer(report)
+            # 回溯检查覆盖累计已用链；接受与否还要整轮所有链KL审查。
+            if soft_kl is not None and post['chain_joint_kl']['mean']>=soft_kl:stop_reason='post_step_chain_joint_kl'
+            elif post['active_clip_fraction']>=max_active_clip:stop_reason='post_step_active_clip_saturation'
+            if trust_region is not None and stop_reason is None:
+                usage=max(post['chain_joint_kl'][name]/limits['chain_joint_'+name]
+                    for name in ('mean','p95','p99','max') if 'chain_joint_'+name in limits)
+                report['rollout_kl_budget_fraction']=usage
+                # 接近额度只是诊断，不能单独证明没有有意义的更新空间；下一小批次
+                # 继续真实试探，只有有限回溯仍拒绝且步长耗尽才保留前序更新并结束。
+            if stop_reason:break
+            if max_optimizer_steps is not None and len(reports)>=max_optimizer_steps:
+                stop_reason='explicit_diagnostic_optimizer_limit';break
         if stop_reason:break
-    if reports:
-        shards=distributed.all_gather_object(pending_bc)
-        if any(len(shard)!=len(reports) for shard in shards):raise RuntimeError('Rank optimizer/log counts differ')
-        for index,(report,metrics) in enumerate(zip(reports,torch.stack(pending_metrics).cpu().tolist())):
-            source_counts=Counter();bc_shards=[s[index] for s in shards]
-            for shard in bc_shards:source_counts.update(shard['sources'])
-            total=sum(s['batch'] for s in bc_shards)
-            report.update(bc_global_samples=total,bc_samples_by_source=dict(source_counts),
-                bc_loss=sum(s['batch']*s['loss'] for s in bc_shards)/max(total,1),
-                per_denoising_step=[dict(step=s,visits=int(n),mean_joint_kl=joint/n if n else None,
-                    mean_coordinate_kl=coordinate/n if n else None,mean_proxy_ratio=ratio/n if n else None,
-                    clip_fraction=clipped/n if n else None,objective_clip_fraction=active/n if n else None)
-                    for s,(joint,coordinate,ratio,clipped,active,n) in enumerate(metrics)])
-    snr_report=None
-    if snr:
-        halves=[r['gradient_contributions'].get('half_split') for r in reports]
-        halves=[h for h in halves if h is not None]
-        first2=sum(h['first_half_square'] for h in halves);second2=sum(h['second_half_square'] for h in halves)
-        dot=sum(h['dot'] for h in halves);cosines=[h['cosine'] for h in halves if h['cosine'] is not None]
-        snr_report=dict(half_split_cosine_per_step=[h['cosine'] for h in halves],
-            half_split_cosine_mean=sum(cosines)/len(cosines) if cosines else None,
-            half_split_cosine_pooled=None if first2<=0 or second2<=0 else dot/math.sqrt(first2*second2),
-            sketch_elements=sum(v.numel() for v in sketch.values()),
-            scope='independent_half_rank_PPO_gradients_per_optimizer_step;sketch_is_iteration_sum_for_consecutive_cosine')
-    if last_kl is not None:
-        policy._accepted_kl_receipt=seal_accepted_kl(policy,cache,manifest,last_kl,
-            clip=clip,reduction=objective_reduction)
-    return dict(objective='clipped_dppo',ppo_clip_applied=True,
-        optimizer_steps=len(reports),attempted_optimizer_steps=attempts,steps=reports,epoch_orders=orders,early_stop_reason=stop_reason,
-        complete_accepted_kl_available=last_kl is not None,rejected_step=rejected_step,
-        retained_previous_steps=True,step_rejected=False,computed_global_bc_samples=computed_bc,
-        candidate_kl_seconds=candidate_kl_seconds,kl_timing_is_part_of_actor_wall=True,
-        gradient_snr=snr_report,_ppo_gradient_sketch=sketch,
-        epoch_order_rng_contract='fixed_four_steps_shuffled_chains',
+    discarded_attempts=((discarded or {}).get('trust_region') or {}).get('attempt_count',0)
+    return dict(objective='full_chain_clipped_ppo',ppo_clip_applied=True,optimizer_steps=len(reports),
+        attempted_optimizer_steps=sum((r['trust_region'] or {}).get('attempt_count',1) for r in reports)+discarded_attempts,
+        rejected_step_candidates=sum((r['trust_region'] or {}).get('backtracks',0) for r in reports)+discarded_attempts,
+        executed_optimizer_steps=sum((r['trust_region'] or {}).get('attempt_count',1) for r in reports)+discarded_attempts,
+        minibatch_accepted_steps=len(reports),executed_step_scope='actual_Adam_calls_including_rejected_candidates',
+        accepted_optimizer_steps=None,acceptance_scope='pending_full_rollout_joint_KL',
+        planned_optimizer_steps=planned_steps,skipped_optimizer_steps=planned_steps-len(reports),
+        steps=reports,epoch_orders=orders,early_stop_reason=stop_reason,discarded_pending_minibatch=discarded,
+        gradient_snr=None,_ppo_gradient_sketch=sketch,epoch_order_rng_contract='fixed_four_steps_shuffled_complete_chains',
+        full_rollout_objective_history=objective_history,bc_enabled=bc_enabled,
         eligible_chains=len(selected),applied_unique_chains=len(covered),applied_chain_fraction=len(covered)/len(selected),
-        planned_optimizer_steps=ppo_epochs*math.ceil(len(selected)/minibatch_chains),
         internal_sample_visits=sum(r['internal_sample_visits'] for r in reports),
-        actual_global_bc_samples=sum(r['bc_global_samples'] for r in reports),
+        actual_global_bc_samples=sum(r['bc_global_samples'] for r in reports),planned_global_bc_samples=bc_total,
+        bc_min_global_batch=bc_min_global_batch,
         bc_samples_by_source={source:sum(r['bc_samples_by_source'].get(source,0) for r in reports)
             for source in sorted({source for r in reports for source in r['bc_samples_by_source']})},
-        planned_internal_visits=len(selected)*sampled_steps*ppo_epochs,
-        objective_reduction=objective_reduction,proxy_is_joint_probability=objective_reduction=='joint_sum',
-        old_statistics_fixed=True,final_trainable4_kl_pending=True)
+        planned_internal_visits=len(selected)*4*ppo_epochs,objective_reduction='joint_sum',
+        proxy_is_joint_probability=True,old_statistics_fixed=True,final_trainable4_kl_pending=True)
+
+
+def actor_update(policy,optimizer,*args,trust_region=None,**kwargs):
+    """每次新rollout独立试探LR；Adam动量不清空，临时回溯LR不传给下一批。
+
+    原四步联合目标与模块倍率保持不变。接受步骤的实际LR记录在steps中，优化器
+    离开本函数时恢复共同名义LR，checkpoint不会把本批剩余额度误作长期LR。
+    正常结束剩余小批次仍须通过调用方完整rollout最终KL；异常继续由整轮事务恢复。
+    """
+    from .actor_optimizer import actor_base_lr,set_actor_base_lr,actor_learning_rates
+    incoming=actor_learning_rates(optimizer)
+    nominal=None if trust_region is None else trust_region['maximum_lr']
+    if nominal is not None:set_actor_base_lr(optimizer,nominal)
+    try:
+        result=_actor_update(policy,optimizer,*args,trust_region=trust_region,**kwargs)
+        last_accepted=(result.get('steps') or [{}])[-1].get('learning_rate')
+        discarded_trials=(((result.get('discarded_pending_minibatch') or {}).get('trust_region') or {})
+            .get('attempts') or [])
+        last_trial=(discarded_trials[-1]['learning_rate'] if discarded_trials else
+            last_accepted if last_accepted is not None else actor_base_lr(optimizer))
+        result.update(nominal_learning_rate=nominal,incoming_optimizer_learning_rates=incoming,
+            last_accepted_learning_rate=last_accepted,last_trial_learning_rate=last_trial,
+            rollout_learning_rate_reset=nominal is not None)
+        return result
+    finally:
+        if nominal is not None:set_actor_base_lr(optimizer,nominal)
 
 
 @torch.no_grad()
-def final_kl(policy,rows,cache,manifest,*,distributed,microbatch=256,clip=.05,
-             objective_reduction='free_coordinate_mean',include_reference=True):
+def final_kl(policy,rows,cache,manifest,*,distributed,microbatch=256,clip=.10,objective_reduction='joint_sum'):
+    """所有有效链的真实联合KL；四步各自诊断，ratio与clip均按完整链统计。"""
+    from .chain_ppo import evaluate_chain_records,from_records
+    from .gaussian_probability import chain_diagnostics,distribution
+    if objective_reduction!='joint_sum':raise ValueError('Final PPO diagnostics require complete-chain joint ratio')
     selected=_eligible(manifest);owned=_owned(selected,manifest,distributed)
     local=[rows[i] for _,i in owned];device=next(policy.actor.parameters()).device
-    columns=9
-    records=torch.zeros(len(local),4,columns,device=device,dtype=torch.float64)
     start=time.perf_counter()
     with _local_phase(distributed,'stage2_final_trainable4_kl'),policy_phase(policy):
-        conditions=ConditionGraphCache(policy,cache,include_frozen=False);conditions.prime(local)
-        pairs=[(i,s) for i in range(len(local)) for s in policy.trainable_steps]
-        for offset in range(0,len(pairs),microbatch):
-            part=pairs[offset:offset+microbatch];samples=[local[i] for i,_ in part];steps=[s for _,s in part]
-            params,mask=_parameters(policy,samples,steps,device,cache,conditions)
-            old_mean,old_std=_old_kernel(samples,steps,device,cache)
-            stats=gaussian_statistics(cache.get('chain',samples,[s+1 for s in steps]),old_mean,old_std,
-                params['mean'],params['std'],mask)
-            proxy=ppo_surrogate(stats,cache.get('advantages',samples),clip=clip,reduction=objective_reduction)
-            shift=((params['mean'].double()-old_mean).square().masked_fill(~mask,0.).sum((-2,-1))/stats['free_count']).sqrt()
-            physical_delta=(params['mean'].double()-old_mean)*policy.actor.endecoder.std.double()
-            physical=[]
-            for section in (slice(0,3),slice(3,9),slice(9,30)):
-                part_mask=mask[:,:,section]
-                physical.append((physical_delta[:,:,section].square().masked_fill(~part_mask,0.).sum((-2,-1))/
-                    part_mask.sum((-2,-1)).clamp_min(1)).sqrt())
-            i=torch.tensor([i for i,_ in part],device=device);s=cache.step_indices(steps)
-            records[i,s-15]=torch.stack((stats['joint_kl'],stats['mean_coordinate_kl'],proxy['ratio'],
-                stats['joint_log_ratio'],shift,*physical,proxy['objective_clipped'].double()),1)
-        conditions.validate_inputs()
-    full=distributed.gather_rows(records.reshape(len(local),4*columns),[p for p,_ in owned],len(selected)).reshape(-1,4,columns)
-    joint,coordinate,ratio,logratio,shift=[full[:,:,i] for i in range(5)]
+        records=evaluate_chain_records(policy,local,cache,microbatch=microbatch,physical_changes=True)
+        adv=cache.get('advantages',local).double() if local else torch.zeros(0,device=device,dtype=torch.float64)
+    packed=torch.cat((records.reshape(len(local),32),adv[:,None]),1)
+    gathered=distributed.gather_rows(packed,[p for p,_ in owned],len(selected))
+    full=gathered[:,:32].reshape(-1,4,8);adv=gathered[:,32]
+    joint,coordinate,logratio,counts,shift=[full[:,:,i] for i in range(5)]
+    chain=chain_diagnostics(from_records(full),adv,clip=clip)
     frozen_identity=policy.assert_frozen_identity()
     identities=distributed.all_gather_object(frozen_identity)
     if any(v!=identities[0] for v in identities):raise RuntimeError('Frozen prior identity differs across ranks')
-    def quantile(x):return dict(mean=float(x.mean()),p95=float(torch.quantile(x.flatten(),.95)),max=float(x.max()))
-    step_reports=[]
-    for s in range(4):
-        step_reports.append(dict(step=s+15,joint_kl=quantile(joint[:,s]),mean_coordinate_kl=quantile(coordinate[:,s]),
-            proxy_ratio=quantile(ratio[:,s]),clip_fraction=float(((ratio[:,s]<1-clip)|(ratio[:,s]>1+clip)).double().mean()),
-            objective_clip_fraction=float(full[:,s,8].mean()),
-            mean_normalized_mean_change_rms=float(shift[:,s].mean())))
     kl_seconds=max(distributed.all_gather_object(time.perf_counter()-start))
-    reference_change=reference_change_diagnostics(policy,local,cache,distributed) if include_reference else None
-    return dict(mean_joint_kl=float(joint.mean()),mean_coordinate_kl=float(coordinate.mean()),
-        clip_fraction=float(((ratio<1-clip)|(ratio>1+clip)).double().mean()),
-        joint_kl=quantile(joint),coordinate_kl=quantile(coordinate),chain_joint_kl=quantile(joint.sum(1)),
+    reference_change=reference_change_diagnostics(policy,local,cache,distributed)
+    return dict(**chain,mean_joint_kl=float(joint.mean()),mean_coordinate_kl=float(coordinate.mean()),
+        joint_kl=distribution(joint),coordinate_kl=distribution(coordinate),
         maximum_step_mean_coordinate_kl=float(coordinate.mean(0).max()),
-        per_denoising_step=step_reports,covered_chains=len(selected),covered_internal_transitions=len(selected)*4,
-        gaussian_kl_steps=list(policy.trainable_steps),statistical_denominator="all_valid_chains_times_four_trainable_steps",
+        per_denoising_step=[dict(step=s+15,joint_kl=distribution(joint[:,s]),
+            mean_coordinate_kl=distribution(coordinate[:,s]),joint_log_ratio=distribution(logratio[:,s]),
+            mean_normalized_mean_change_rms=float(shift[:,s].mean())) for s in range(4)],
+        covered_chains=len(selected),covered_internal_transitions=len(selected)*4,
+        gaussian_kl_steps=list(policy.trainable_steps),statistical_denominator='one_complete_chain_four_joint_Gaussian_transitions',
         frozen_identity=frozen_identity,
         terminal_two_step_joint_kl_fraction=float(joint[:,-2:].sum()/joint.sum()) if joint.sum()>0 else None,
-        joint_log_ratio_range=[float(logratio.min()),float(logratio.max())],
+        joint_log_ratio_range=[chain['chain_joint_log_ratio']['min'],chain['chain_joint_log_ratio']['max']],
         effective_mean_change=dict(mean_rms=float(shift.mean()),max_rms=float(shift.max()),
-            unchanged_internal_fraction=float((shift==0).double().mean()),
-            scope='final_policy_means_on_old_sampling_path_not_resampled_physical_trajectory'),
-        objective_clip_fraction=float(full[:,:,8].mean()),
-        final_reference_mean_change=dict(root_feature_rms_m=quantile(full[:,-1,5]),
-            rotation6d_rms_unitless=quantile(full[:,-1,6]),joint_rms_rad=quantile(full[:,-1,7]),
+            unchanged_internal_fraction=float((shift==0).double().mean()),scope='new_means_on_fixed_old_sampling_path'),
+        objective_clip_fraction=chain['active_clip_fraction'],
+        final_reference_mean_change=dict(root_feature_rms_m=distribution(full[:,-1,5]),
+            rotation6d_rms_unitless=distribution(full[:,-1,6]),joint_rms_rad=distribution(full[:,-1,7]),
             root_semantics='heading_local_xy_increments_and_root_height_not_world_xyz',
-            scope='denormalized_index18_gaussian_mean_not_final_deterministic_reference'),
-        kl_scope='four_trainable_old_path_gaussians_not_deterministic_final_action_density',
-        p95_scope='four_trainable_steps_per_chain_coordinate_means_only',
-        reference_change=reference_change,kl_only_wall_seconds=kl_seconds,
-        wall_seconds=max(distributed.all_gather_object(time.perf_counter()-start)))
+            scope='denormalized_index18_Gaussian_mean_not_final_reference'),
+        kl_scope='old_rollout_conditional_chain_KL_estimate_not_future_physics_safety',
+        p95_scope='sum_four_joint_KLs_per_complete_chain',reference_change=reference_change,
+        kl_only_wall_seconds=kl_seconds,wall_seconds=max(distributed.all_gather_object(time.perf_counter()-start)))
+
+
+def _quaternion_angle(a,b):
+    a=torch.nn.functional.normalize(a.double(),dim=-1)
+    b=torch.nn.functional.normalize(b.double(),dim=-1)
+    return 2*torch.acos((a*b).sum(-1).abs().clamp(max=1.))
 
 
 @torch.no_grad()
@@ -298,6 +412,7 @@ def reference_change_diagnostics(policy,rows,cache,distributed,max_local_chains=
                 changes.append(dict(normalized_rms=float((state[i]-before[i]).square()[free[i]].mean().sqrt()),
                     joint_rms_rad=float(delta[i,:,9:].square()[joint].mean().sqrt()) if joint.any() else None,
                     root_position_rms_m=float((q1[i,:,:3]-q0[i,:,:3]).square()[mask[i]].mean().sqrt()),
+                    root_orientation_rms_rad=float(_quaternion_angle(q0[i,:,3:7],q1[i,:,3:7])[mask[i]].square().mean().sqrt()),
                     maximum_joint_change_rad=float(delta[i,:,9:].abs()[joint].max()) if joint.any() else None,
                     protected_coordinates_unchanged=bool(torch.equal(state[i][~free[i]],before[i][~free[i]]))))
     all_rows=[r for shard in distributed.all_gather_object(changes) for r in shard]

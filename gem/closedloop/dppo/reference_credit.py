@@ -25,11 +25,16 @@ class ReferenceCreditLedger:
             item['episode_closed']=True;self.dirty[key]=item
         self.records={};self.episode=str(episode);self.last_tick=0
 
-    def register(self, plan_id, *, decision_tick, policy_version, parent_plan_id, horizon_ticks):
+    def register(self, plan_id, *, decision_tick, policy_version, parent_plan_id, horizon_ticks,prefix_frames=None,
+                 generation_ready_tick=None,generation_wall_seconds=None):
         key=str(plan_id)
         if key in self.records:raise ValueError('Duplicate reference plan identity')
         self.records[key]=dict(plan_id=key,episode_id=self.episode,policy_version=policy_version,
             parent_plan_id=parent_plan_id,decision_tick=int(decision_tick),
+            prefix_frames=None if prefix_frames is None else int(prefix_frames),
+            generation_frames=int(horizon_ticks)//20,
+            generation_ready_tick=None if generation_ready_tick is None else int(generation_ready_tick),
+            generation_wall_seconds=None if generation_wall_seconds is None else float(generation_wall_seconds),
             last_possible_tick=int(decision_tick)+int(horizon_ticks)+120,
             commit_tick=None,first_window_observed_tick=None,first_current_consumed_tick=None,
             first_reward_reference_tick=None,episode_closed=False)

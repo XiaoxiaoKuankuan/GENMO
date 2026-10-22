@@ -2,7 +2,7 @@
 
 本模块只接受显式当前配置，自动从GPU数、环境数、连续决策数及完整链minibatch
 推导rollout、optimizer次数、四个随机训练步访问数和BC每步样本量，不继承160条或四次更新
-限制。代理目标与joint诊断、coordinate/joint KL门槛分别定义，不能复用一个
+限制。联合链PPO和联合链KL为训练目标，coordinate KL仅作辅助诊断，不能复用一个
 无量纲数字。初始参数是待有限标定的候选，任何算法或数值合同变化新建run。
 
 Stage1与GMT均绑定真实SHA和统计量，全部环境时序与奖励保留旧明确配置。检查
@@ -18,7 +18,7 @@ import yaml
 
 from .rewards import resolve_reward_config
 
-VERSION='genmo.closedloop.stage2.continuous_tracking.v2'
+VERSION='genmo.closedloop.stage2.full_chain_joint.v1'
 
 
 def _source_counts(value):
@@ -69,6 +69,9 @@ def configuration(path,*,genmo_repo=None,gmt_repo=None):
     if 'effect_check_iterations' in s['evaluation']:
         raise ValueError('effect_check_iterations is unsupported; use actual interaction evaluation intervals')
     eval_envs=s['evaluation'].get('envs_per_rank',1)
+    mc_envs=s['critic']['complete_mc'].get('envs_per_rank',eval_envs)
+    if type(mc_envs)is not int or not 1<=mc_envs<=64:
+        raise ValueError('Complete MC requires 1..64 independent slots per GPU')
     if type(eval_envs)is not int or not 1<=eval_envs<=64 or type(s['evaluation'].get('persistent_world',False))is not bool:
         raise ValueError('Evaluation requires 1..64 slots in one world and explicit persistent_world boolean')
     if s['evaluation'].get('start_mode','beginning') not in ('beginning','center','mixed') or type(s['evaluation'].get('unique_music',False))is not bool:
@@ -90,6 +93,8 @@ def configuration(path,*,genmo_repo=None,gmt_repo=None):
     if 'episode_seconds' in t:raise ValueError('physical_episode and ppo_rollout must be separate')
     seconds=s['physical_episode']['safety_limit_seconds']
     if seconds is not None and (not math.isfinite(seconds) or seconds<=0 or seconds%0.5):raise ValueError('Physical safety limit must lie on the decision grid')
+    if s['physical_episode'].get('time_limit_bootstrap',True) is not True:
+        raise ValueError('Physical time limits truncate sampling and bootstrap the pre-reset Value')
     if s['ppo_rollout']['world_seconds']<=0 or s['ppo_rollout']['world_seconds']%0.5:raise ValueError('Rollout world window must lie on the decision grid')
     if s['ppo_rollout']['collection_contract']!='shared_world_sim_time.v1':raise ValueError('Current collection uses shared world simulation time')
     if 'decisions_per_environment' in scale:raise ValueError('Per-environment decision quotas are no longer supported')
@@ -123,7 +128,7 @@ def configuration(path,*,genmo_repo=None,gmt_repo=None):
     if world!=8 or s['distributed']['backend']!='nccl' or s['distributed']['collection']!='all_ranks':
         raise ValueError('当前 production requires eight synchronous GPU ranks')
     if (t['denoising_steps']!=20 or t['ppo_step_strategy']!='intermediate4' or
-            t['ppo_steps_per_chain']!=4 or t['frozen_prefix_steps']!=15 or t['ppo_epochs'] not in (1,2)):
+            t['ppo_steps_per_chain']!=4 or t['frozen_prefix_steps']!=15 or t['ppo_epochs'] not in (1,2,3,5)):
         raise ValueError('Only frozen15 + stochastic trainable4 + deterministic final is supported')
     if len(t['std_schedule'])!=20 or t['std_schedule'][-1]!=0. or any(
             not math.isfinite(x) or x<=0 for x in t['std_schedule'][:-1]):
@@ -138,8 +143,8 @@ def configuration(path,*,genmo_repo=None,gmt_repo=None):
         raise ValueError('Calibration needs an explicit bounded reservation, not a measured delay')
     if c['runtime']['timing_contract']!='modeled_deployment.v3' or c['timing']['control_ticks']!=12 or c['timing']['physics_ticks']!=3:
         raise ValueError('Keep calibrated deployment clock and 50Hz/200Hz four physical substeps')
-    if t['objective_logprob_reduction']!='free_coordinate_mean':
-        raise ValueError('Only current free-coordinate diagnostic reduction is supported')
+    if t['objective_logprob_reduction']!='joint_sum' or t['gamma_denoising']!=1.:
+        raise ValueError('Full-chain joint PPO requires sum and one undiscounted upper advantage')
     if not 0<t['ppo_clip']<1 or not math.isfinite(t['actor_lr']) or t['actor_lr']<=0:
         raise ValueError('Invalid independently calibrated Actor learning rate/clip')
     if t.get('advantage_control','none')!='none':
@@ -149,19 +154,21 @@ def configuration(path,*,genmo_repo=None,gmt_repo=None):
     diagnostic_interval=s['checks'].get('actor_diagnostics_every',100)
     if type(diagnostic_interval) is not int or diagnostic_interval<1:
         raise ValueError('actor_diagnostics_every must be a positive iteration interval')
-    if t['actor_lr_control']!='adaptive_step_kl' or t['kl_rejection']!='retain_accepted_steps':
-        raise ValueError('Uniform adaptive LR and optimizer-step rollback are required')
-    if 'kl_soft_stop_coordinate' in t:
-        raise ValueError('Retired pre-step soft KL must be removed')
+    if t['actor_lr_control']!='joint_kl_backtracking' or t['kl_rejection']!='rollback_abort':
+        raise ValueError('AdamW with fixed LR ratios, joint-KL backtracking and final whole-rollout rejection required')
     if any(key in t for key in ('actor_lr_bounds','kl_target_coordinate','kl_control_metric')):
         raise ValueError('Retired adaptive-LR settings are not supported')
     steps=t['ppo_epochs']*math.ceil(chains/scale['actor_minibatch_chains'])
+    for key,default in (('bc_enabled',True),('audit_full_rollout_objective',False)):
+        if type(t.get(key,default)) is not bool:raise ValueError(key+' must be boolean')
     bc_total=t['bc_samples_per_rollout']
-    bc_enabled=t.get('bc_enabled',True)
-    if type(bc_enabled)is not bool or type(bc_total)is not int or (bc_enabled and bc_total<1) or (not bc_enabled and (bc_total!=0 or t['bc_weight']!=0)):
-        raise ValueError('Enabled BC needs positive samples; disabled BC requires exactly zero samples and weight')
-    if not bc_enabled and t['actor_objective']!='clipped_dppo':
-        raise ValueError('Disabled BC is supported by the original clipped DPPO updater')
+    minimum_bc=t['bc_min_global_batch']
+    if t.get('bc_enabled',True) and (type(minimum_bc)is not int or minimum_bc<256):
+        raise ValueError('Production BC requires at least 256 global samples per Adam step')
+    bc_total=max(bc_total,steps*minimum_bc) if t.get('bc_enabled',True) else 0
+    t['bc_samples_per_rollout']=bc_total
+    if type(bc_total)is not int or bc_total<0 or t.get('bc_enabled',True) and bc_total<1:
+        raise ValueError('BC total must be positive; actual ragged optimizer steps determine its allocation')
     t.update(rollout_upper_steps=chains,rollout_upper_steps_per_rank=n*decisions,
         actor_minibatch_internal_transitions=scale['actor_minibatch_chains']*4,
         max_actor_optimizer_steps=steps,bc_batch=bc_total//steps,
@@ -174,7 +181,7 @@ def configuration(path,*,genmo_repo=None,gmt_repo=None):
     # 共享世界所有reset/决策都对齐25控制步网格；每格每环境至多一条Actor转移。
     # collector再次按真实片段校验此上限，失败/预热只减少有效链，不能偷偷多做PG更新。
     maximum_steps=t['ppo_epochs']*math.ceil(chains/scale['actor_minibatch_chains'])
-    if bc_enabled and bc_total<maximum_steps:raise ValueError('BC must cover every possible actual optimizer step')
+    if t.get('bc_enabled',True) and bc_total<maximum_steps:raise ValueError('BC must cover every possible actual optimizer step')
     if s['limits']['optimizer_attempts']<s['limits']['accepted_iterations']*maximum_steps:
         raise ValueError('Optimizer attempt budget must cover the complete declared workload')
     from .actor_optimization import validate_optimization_configuration

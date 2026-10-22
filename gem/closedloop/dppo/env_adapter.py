@@ -322,10 +322,10 @@ class UpperEnvironment:
         timings['input_transfer_seconds'] = transferred-condition_end
         if deterministic:
             with torch.no_grad():
-                noise = torch.randn((1,batch['future_valid'].shape[1],30),device=device,generator=generator)
-                sample = self.policy.actor.sample(batch, steps=self.policy.steps,
-                    guidance_scale=self.policy.guidance_scale,noise=noise)
-            trace = {'conditions':cpu_copy(context), 'deterministic_baseline':True}
+                sample = self.policy.sample_rollout(batch,generator=generator,deterministic_transitions=True)
+            trace = {'conditions':cpu_copy(context), 'deterministic_baseline':True,
+                'sampling_definition':'hybrid15+4+1_fixed_initial_noise_zero_innovations_display_only',
+                'training_buffer_allowed':False}
         else:
             trace = self.policy.sample_rollout(batch, generator=generator)
             sample = trace
@@ -446,13 +446,18 @@ class UpperEnvironment:
         arrival = self._arrival_tick(generated, start)
         ready_tick = max(start+300, int(math.ceil(arrival/300))*300)
         boundary = self._execution_boundary(generated, arrival, ready_tick)
-        execution_end = min(self.music_end_tick, boundary['tick']) if boundary else self.music_end_tick
+        # 物理时间上限必须真正限制advance，而不只是事后给超时的转移打标签。
+        # 预热的600 tick不计入片段；到时保留重置前的真实状态供Value自举。
+        execution_end = min(self.music_end_tick, self.soft_end_tick,
+                            boundary['tick'] if boundary else float('inf'))
         rows, rewards, details, events = [], [], [], []
         training_reward_seconds = 0.
         if self.reference_credit is not None:
             self.reference_credit.register(generated['meta']['plan_id'],decision_tick=start,
                 policy_version=self.policy_version,parent_plan_id=generated['meta']['parent_plan_id'],
-                horizon_ticks=self.config['stage10']['generation_horizon']['frames']*20)
+                horizon_ticks=self.config['stage10']['generation_horizon']['frames']*20,
+                prefix_frames=generated['meta'].get('prefix_frames'),generation_ready_tick=arrival,
+                generation_wall_seconds=generated['elapsed'])
         commit, rejection = None, generated['rejection']
         pending = candidate is not None
         while not self.snapshot['done'] and self.snapshot['tick'] < execution_end:
@@ -497,6 +502,7 @@ class UpperEnvironment:
         terminated = bool(self.snapshot.get('terminated',False) or end >= self.music_end_tick)
         boundary_reached = bool(boundary and end>=boundary['tick'] and not terminated)
         truncated = bool(not terminated and (self.snapshot.get('truncated',False) or end>=self.soft_end_tick or boundary_reached))
+        time_limit_reached = bool(not terminated and end >= self.soft_end_tick)
         reason = self.snapshot.get('reason') or ('music_end' if terminated else
             boundary['reason'] if boundary_reached else 'physical_safety_limit' if truncated else None)
         rejected_action = bool(rejection and rejection.get('policy_penalty',
@@ -532,9 +538,14 @@ class UpperEnvironment:
                 if plan is not None:
                     first_consumption.setdefault(str(plan),int(row['control_tick_begin']))
         metadata = dict(critic_context=generated["critic_context"],next_critic_context=next_critic_context,
+            generation_world_anchor=cpu_copy(generated['meta'].get('world_anchor')),
             remaining_music_seconds=self.remaining_music(start),
             next_remaining_music_seconds=self.remaining_music(end), sampler_trace=trace,
             physical_episode_administrative_truncation=bool(truncated and not boundary_reached),
+            physical_episode_elapsed_seconds=max(0., (end-600)/600),
+            physical_episode_limit_seconds=(None if math.isinf(self.soft_end_tick) else (self.soft_end_tick-600)/600),
+            physical_time_limit_reached=time_limit_reached,
+            time_limit_bootstrap=bool(time_limit_reached and next_critic_context is not None),
             music_start_frame=getattr(self, 'music_start_frame', 0),
             full_music_num_frames=getattr(self, 'full_music_num_frames', len(self.music)),
             data_split=getattr(self, 'data_split', 'train'), backend_cpu_totals=backend_cpu_totals,
@@ -551,6 +562,10 @@ class UpperEnvironment:
             critical_ready_seconds=generated.get('critical_ready_seconds', generated['elapsed']),
             commit_seconds=generated.get('commit_seconds',0.),terminal_snapshot=cpu_copy(self.snapshot))
         if boundary is not None:metadata['reference_execution_boundary']=dict(boundary,reached=boundary_reached)
+        if self.config.get('runtime',{}).get('record_compact_execution_provenance',False):
+            from .execution_provenance import compact_execution
+            metadata['compact_execution_provenance']=compact_execution(rows,ledger=self.reference_credit,
+                plan_id=generated['meta']['plan_id'],decision_tick=start,commit=commit)
         if self.config.get('runtime', {}).get('training_evidence_lifecycle') == 'ephemeral_until_update':
             # 完整物理列保持只读视图到本轮更新结束；普通训练不落盘，异常可据此完整保存。
             metadata['execution_trace'] = rows
