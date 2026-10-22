@@ -1,9 +1,11 @@
-"""服务器八卡真实旧rollout的完整链PPO概率、梯度与学习率标定入口。
+"""服务器八卡真实旧rollout的逐步坐标平均代理PPO数值与学习率验证。
 
 输入为已有不可变fixed_data_validation目录及当前显式配置。先核对原始文件SHA，
 重建冻结Stage1先验并加载采样时Actor，使用原状态/创新噪声/均值/实际标准差/mask，
 验证零更新概率、FP64独立Normal公式、完整Autograd与流式微批梯度、多卡SUM。
-随后各学习率从相同Actor/Adam/BC/控制器/RNG起点执行有限完整链更新，保存所有
+四步使用同一优势，各自joint_log_ratio/D、各自裁剪，再按4*N归一化；文件名保留
+历史路径，不代表当前仍使用整链PPO。随后各学习率从相同非空分组Adam、Actor、
+BC控制状态和原rank RNG起点执行有限更新，BC保持关闭，保存所有
 接受、拒绝、裁剪、参数变化、输出变化和耗时；候选之间完整恢复并核验字节。
 
 本入口不创建Isaac世界、不产生新物理交互、不改变旧行为数据，也不把数值通过
@@ -41,20 +43,20 @@ from gem.closedloop.dppo.retention_anchor import Stage1RetentionAnchor
 from gem.closedloop.dppo.rollback_audit import compare_recovered_state
 from gem.closedloop.dppo.run_control import build_policy
 from gem.closedloop.dppo.tensor_cache import RolloutTensorCache
-from gem.closedloop.dppo.trainer import load_actor,trainable_actor_parameters
+from gem.closedloop.dppo.trainer import load_actor
+from gem.closedloop.dppo.actor_optimizer import make_actor_optimizer,set_actor_base_lr,validate_actor_optimizer
 from gem.closedloop.dppo.training_checkpoint import file_sha256,immutable_cpu_snapshot
 from gem.closedloop.dppo.training_config import configuration
 from gem.closedloop.dppo.updater import actor_update,final_kl
-from gem.closedloop.dppo.actor_backtracking import check_candidate_kl
 
 
-def gradient_validation(policy,rows,cache,distributed):
+def gradient_validation(policy,rows,cache,distributed,*,clip=.01,microbatches=(1,3,8)):
     selected=[row for row in rows if row.free_mask.any()][:2]
     denominator=sum(distributed.all_gather_object(len(selected)))
     actor=policy.actor;device=distributed.device
     actor.zero_grad(set_to_none=True)
     with policy_phase(policy):
-        terms=[]
+        terms=[];counts=[]
         for step in policy.trainable_steps:
             params,mask=_parameters(policy,selected,[step]*len(selected),device,cache)
             old_mean,old_std=_old_kernel(selected,[step]*len(selected),device,cache)
@@ -62,17 +64,20 @@ def gradient_validation(policy,rows,cache,distributed):
             a=torch.distributions.Normal(params['mean'].double(),params['std'].double())
             b=torch.distributions.Normal(old_mean,old_std)
             terms.append((a.log_prob(value)-b.log_prob(value)).masked_fill(~mask,0.).sum((-2,-1)))
-        log=torch.stack(terms,1).sum(1);adv=cache.get('advantages',selected).double()
-        loss=-torch.minimum(log.exp()*adv,log.exp().clamp(.9,1.1)*adv).sum()/denominator
+            counts.append(mask.sum((-2,-1)))
+        count=torch.stack(counts,1)
+        log=torch.stack(terms,1)/count.clamp_min(1);adv=cache.get('advantages',selected).double()[:,None]
+        objective=torch.minimum(log.exp()*adv,log.exp().clamp(1-clip,1+clip)*adv)
+        loss=-objective.masked_fill(count==0,0.).sum()/(4*denominator)
         loss.backward()
     distributed.sum_gradients(actor)
     reference={n:p.grad.detach().clone() for n,p in actor.named_parameters() if p.grad is not None}
     variants=[]
-    for micro in (1,3,8):
+    for micro in microbatches:
         actor.zero_grad(set_to_none=True)
         with policy_phase(policy):
             records=evaluate_chain_records(policy,selected,cache,microbatch=micro)
-            backward_chain_surrogate(policy,selected,cache,records,clip=.1,
+            backward_chain_surrogate(policy,selected,cache,records,clip=clip,
                 global_chain_count=denominator,microbatch=micro)
         distributed.sum_gradients(actor)
         delta=sum((p.grad.double()-reference[n].double()).square().sum()
@@ -84,18 +89,19 @@ def gradient_validation(policy,rows,cache,distributed):
         if relative>2e-5:raise AssertionError('Real GPU streamed gradient mismatch: '+repr(variants[-1]))
     actor.zero_grad(set_to_none=True)
     return dict(passed=True,global_chains=denominator,variants=variants,
-        reference='independent_FP64_Normal_full_four_step_Autograd_global_SUM',
+        objective='stepwise_coordinate_mean_clipped_ppo',ratio_is_joint_probability=False,
+        reference='independent_FP64_Normal_four_independent_clips_full_Autograd_global_SUM',
         scope='actual_stage1_network_and_real_behavior_rows_not_physics_quality')
 
 
 def main():
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--case',type=Path,required=True)
-    parser.add_argument('--config',type=Path,default=ROOT/'configs/closedloop/stage2_full_chain.yaml')
+    parser.add_argument('--config',type=Path,default=ROOT/'configs/closedloop/stage2_stepwise_mean.yaml')
     parser.add_argument('--output-dir',type=Path,required=True)
     parser.add_argument('--learning-rates',type=float,nargs='+',default=[1e-6,3e-6,1e-5])
     parser.add_argument('--epochs',type=int,default=1)
-    parser.add_argument('--adaptive-kl',action='store_true',help='实际联合KL回溯；各LR为候选上限而非承诺接受步长')
+    parser.add_argument('--gradient-only',action='store_true',help='只核验真实旧链概率及独立完整Autograd/流式梯度，不执行任何Adam')
     args=parser.parse_args()
     rank=int(os.environ['RANK']);world=int(os.environ['WORLD_SIZE']);local=int(os.environ['LOCAL_RANK'])
     if world!=8 or rank!=local:raise ValueError('Requires one explicitly allocated eight-GPU node')
@@ -112,6 +118,8 @@ def main():
         distributed=DistributedCollectives(rank,world,tensor_group=group,device=f'cuda:{local}')
         root_call(distributed,lambda:args.output_dir.mkdir(parents=True,exist_ok=False))
         config=configuration(args.config,genmo_repo=ROOT)
+        from gem.closedloop.dppo.actor_optimization import require_current_actor_objective
+        require_current_actor_objective(config['stage9'])
         config['runtime']['genmo_device']=str(distributed.device)
         config['stage9']['bc_batch']=config['stage9']['bc_batch']//world
         config['stage9']['seed']+=1000003*rank
@@ -129,13 +137,24 @@ def main():
         cache=RolloutTensorCache(rows,targets,distributed.device,max_device_bytes=4*1024**3)
         probability=probability_check_local(policy,rows,global_manifest=manifest,distributed=distributed,
             denoising_microbatch=128,tensor_cache=cache,include_frozen=True)
-        gradients=gradient_validation(policy,rows,cache,distributed)
+        gradients=gradient_validation(policy,rows,cache,distributed,clip=config['stage9']['ppo_clip'])
         root_call(distributed,lambda:atomic_json(args.output_dir/'probability_and_gradient.json',dict(probability=probability,gradients=gradients)))
-        optimizer=torch.optim.AdamW(trainable_actor_parameters(actor),lr=args.learning_rates[0],weight_decay=0.)
+        if args.gradient_only:
+            root_call(distributed,lambda:atomic_json(args.output_dir/'summary.json',dict(status='passed',
+                scope='fixed_real_data_stepwise_probability_and_gradient_no_Adam_no_physics',
+                case=str(args.case),case_sha256=file_sha256(args.case/'case.json'),
+                probability=probability,gradient_validation=gradients)))
+            return
+        optimizer=make_actor_optimizer(actor,config['stage10']['training'])
         optimizer.load_state_dict(learning['actor_optimizer'])
+        validate_actor_optimizer(actor,optimizer)
         controller=BCGradientController(**config['stage10']['bc_gradient'])
+        controller.load_state_dict(learning['controller'])
         anchor=Stage1RetentionAnchor(config,actor,train,source_global_step=loading['source_global_step'])
-        generators={'actor':torch.Generator().manual_seed(3045)}
+        rank_state=torch.load(args.case/f'rank{rank:02d}'/'rank_state.pt',map_location='cpu',weights_only=False)
+        anchor.load_state_dict(rank_state['bc'])
+        generators={'actor':torch.Generator()}
+        restore_local_rng(rank_state['rng'],generators)
         def snapshot():return immutable_cpu_snapshot(dict(actor=actor.state_dict(),optimizer=optimizer.state_dict(),
             controller=controller.state_dict(),bc=anchor.state_dict(),rng=capture_local_rng(generators)))
         initial=snapshot();trials=[]
@@ -145,19 +164,21 @@ def main():
             restore_local_rng(initial['rng'],generators)
             audit=compare_recovered_state(initial,snapshot())
             if not audit['identical']:raise AssertionError('Candidate start restore failed: '+repr(audit))
-            optimizer.param_groups[0]['lr']=lr
+            set_actor_base_lr(optimizer,lr)
             started=time.perf_counter();torch.cuda.reset_peak_memory_stats(distributed.device)
             try:
-                trust=copy.deepcopy(config['stage9']['trust_region']) if args.adaptive_kl else None
-                if trust is not None:trust['maximum_lr']=lr
+                trust=copy.deepcopy(config['stage9']['trust_region']);trust['maximum_lr']=lr
                 report=actor_update(policy,optimizer,rows,targets,cache,manifest,controller,distributed=distributed,
-                    anchor=anchor,generator=generators['actor'],ppo_epochs=args.epochs,minibatch_chains=2048,
-                    microbatch=128,clip=.1,soft_kl=config['stage9']['kl_soft_stop_chain_joint'],
+                    anchor=anchor,generator=generators['actor'],ppo_epochs=args.epochs,
+                    minibatch_chains=config['stage10']['scale']['actor_minibatch_chains'],
+                    microbatch=128,clip=config['stage9']['ppo_clip'],soft_kl=config['stage9']['kl_soft_stop_mean_coordinate'],
                     bc_samples_per_rollout=2048*args.epochs,bc_min_global_batch=256,
                     max_active_clip=config['stage9']['max_active_clip_fraction'],
-                    trust_region=trust,kl_limits=config['stage10']['kl'])
-                kl=final_kl(policy,rows,cache,manifest,distributed=distributed,microbatch=128,clip=.1)
-                acceptance=check_candidate_kl(kl,config['stage10']['kl'])
+                    trust_region=trust,kl_limits=config['stage10']['kl'],bc_enabled=False,
+                    audit_full_rollout_objective=True)
+                kl=final_kl(policy,rows,cache,manifest,distributed=distributed,microbatch=128,clip=config['stage9']['ppo_clip'])
+                from gem.closedloop.dppo.training import _final_actor_acceptance
+                acceptance=_final_actor_acceptance(report,kl,config['stage10']['kl'])
                 report['accepted_optimizer_steps']=report['optimizer_steps'] if acceptance['passed'] else 0
                 trial=dict(learning_rate=lr,epochs=args.epochs,actor=report,kl=kl,acceptance=acceptance,
                     start_restore=audit,wall_seconds=max(distributed.all_gather_object(time.perf_counter()-started)),

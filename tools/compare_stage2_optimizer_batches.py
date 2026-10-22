@@ -26,7 +26,6 @@ sys.path.insert(0,str(ROOT))
 import torch
 import torch.distributed as dist
 
-from gem.closedloop.dppo.actor_backtracking import check_candidate_kl
 from gem.closedloop.dppo.actor_optimizer import make_actor_optimizer,validate_actor_optimizer
 from gem.closedloop.dppo.actor_step_diagnostics import output_probe
 from gem.closedloop.dppo.attribution_runtime import probe_difference,probe_summary
@@ -197,11 +196,14 @@ def main():
                 after=immutable_cpu_snapshot(after_probe),selection='ordinary_and_actual_high_KL_high_ratio',
                 generation_world_anchors=[r.metadata.get('generation_world_anchor') for r in selected]),
                 output/f'probe_rank{rank:02d}.pt'))
+            from gem.closedloop.dppo.training import _final_actor_acceptance
+            acceptance=_final_actor_acceptance(report,kl,config['stage10']['kl'])
+            report['accepted_optimizer_steps']=report['optimizer_steps'] if acceptance['passed'] else 0
             result=dict(branch=name,minibatch_chains=batch,effective_chains=count,
                 objective_aware=trust['objective_aware'],full_gradient_direction_measured=args.audit_full_gradient_direction,
                 actor=report,final_kl=kl,
                 replica_state_consistency=dict(passed=True,all_ranks=world,actor_and_adam_sha256=replica),
-                acceptance=check_candidate_kl(kl,config['stage10']['kl']),output=probe_summary(probes),
+                acceptance=acceptance,output=probe_summary(probes),
                 wall_seconds=max(distributed.all_gather_object(time.perf_counter()-started)),
                 peak_allocated_bytes=max(distributed.all_gather_object(torch.cuda.max_memory_allocated())),
                 same_initial_state_digest=initial_digest,physical_quality='unverified_counterfactual_only')

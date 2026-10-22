@@ -216,7 +216,8 @@ def training_scalars(record):
     if kl.get('chain_joint_kl'):
         values['Policy/chain_joint_kl']=kl['chain_joint_kl']['mean']
         values['Policy/chain_joint_kl_p95']=kl['chain_joint_kl']['p95']
-        values['Policy/proxy_clip_fraction']=kl.get('proxy_clip_fraction',kl.get('clip_fraction'))
+        # 历史整链clip_fraction量纲不同，读取旧记录时不能改名冒充逐步代理裁剪。
+        values['Policy/proxy_clip_fraction']=kl.get('proxy_clip_fraction')
     values['Policy/accepted_updates']=actor.get('accepted_optimizer_steps')
     values['Policy/nominal_actor_lr']=actor.get('nominal_learning_rate')
     values['Policy/ppo_objective_gain']=kl.get('objective_gain_mean')

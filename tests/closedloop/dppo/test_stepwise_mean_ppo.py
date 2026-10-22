@@ -17,6 +17,7 @@ from gem.closedloop.dppo.objective_audit import grouped_objective
 from gem.closedloop.dppo.actor_backtracking import check_candidate_kl
 from gem.closedloop.dppo.actor_optimization import require_current_actor_objective
 from gem.closedloop.dppo.training_config import configuration
+from tests.closedloop.test_stage1_actor import actor_factory
 
 
 def statistics(log,counts=None):
@@ -189,3 +190,20 @@ def test_final_rollout_acceptance_uses_new_objective_and_preserves_normal_zero_s
         full_rollout_objective_history=[dict(stepwise_objective_mean=0.)])
     outcome=_final_actor_acceptance(empty,dict(report,stepwise_objective_mean=0.),{})
     assert outcome['passed'] and outcome['continue_with_new_physical_rollout']
+
+
+def test_standalone_validator_uses_independent_stepwise_gradient_reference(actor_factory):
+    from tools.validate_stage2_full_chain import gradient_validation
+    from tests.closedloop.dppo.test_clipped_dppo import case
+    from gem.closedloop.dppo.tensor_cache import RolloutTensorCache
+    from types import SimpleNamespace
+    policy,rows,targets=case(actor_factory)
+    cache=RolloutTensorCache(rows,targets,'cpu')
+    try:
+        single=SimpleNamespace(device=torch.device('cpu'),all_gather_object=lambda value:[value],sum_gradients=lambda model:None)
+        result=gradient_validation(policy,rows,cache,single,clip=.01,microbatches=(1,3,8))
+        assert result['passed'] and result['ratio_is_joint_probability'] is False
+        assert result['objective']=='stepwise_coordinate_mean_clipped_ppo'
+        assert len(result['variants'])==3
+        assert all(parameter.grad is None for parameter in policy.actor.parameters())
+    finally:cache.close()

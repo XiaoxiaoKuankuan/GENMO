@@ -295,3 +295,13 @@ def test_joint_score_curves_are_not_mislabeled_as_clipped_ppo():
     record['trainable4_kl']['per_denoising_step'].append(dict(step=19))
     with pytest.raises(ValueError, match='four trainable'):
         training_scalars(record)
+
+
+def test_historical_chain_clip_is_not_mislabeled_as_stepwise_proxy_clip():
+    record=training_record()
+    record['actor']['objective']='full_chain_clipped_ppo'
+    record['trainable4_kl'].update(chain_joint_kl={'mean':.1,'p95':.2},clip_fraction=.8)
+    assert 'Policy/proxy_clip_fraction' not in training_scalars(record)
+    record['actor']['objective']='stepwise_coordinate_mean_clipped_ppo'
+    record['trainable4_kl']['proxy_clip_fraction']=.04
+    assert training_scalars(record)['Policy/proxy_clip_fraction']==pytest.approx(.04)

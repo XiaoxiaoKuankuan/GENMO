@@ -4,7 +4,7 @@
 两遍流式计算按4*N_global和各步D准确归一化，条件图在每个Adam版本重建。
 PPO/BC梯度SUM后统一裁剪，不额外平均world size；正式BC关闭时完全不计算BC。
 
-每个minibatch记录真实参数、同噪声最终输出及联合概率变化，链KL或裁剪饱和可
+每个minibatch记录真实参数、同噪声最终输出及联合概率变化，坐标KL或裁剪饱和可
 提前停止。新rollout从名义LR试探，剩余试探步长过小时保留此前
 接受更新并结束剩余小批次；丢弃步骤的BC游标、控制器与RNG同时恢复。最后仍将
 优化器LR恢复为名义值，Adam动量不清零。所有旧rollout链的四步KL仍须通过；Actor/Critic/Adam/BC/RNG回滚由
@@ -278,7 +278,7 @@ def _actor_update(policy,optimizer,rows,targets,cache,manifest,controller,*,dist
                 wall_seconds=max(distributed.all_gather_object(time.perf_counter()-started)))
             reports.append(report)
             if step_observer is not None:step_observer(report)
-            # 回溯检查覆盖累计已用链；接受与否还要整轮所有链KL审查。
+            # 回溯覆盖全部有效链；接受与否还要独立整轮目标与KL审查。
             if soft_kl is not None and post['mean_coordinate_kl']>=soft_kl:stop_reason='post_step_mean_coordinate_kl'
             elif post['active_clip_fraction']>=max_active_clip:stop_reason='post_step_active_clip_saturation'
             if trust_region is not None and stop_reason is None:

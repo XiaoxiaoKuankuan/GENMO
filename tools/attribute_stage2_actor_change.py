@@ -6,7 +6,7 @@
 源帧变化。输出的反事实参考可与同一case实际消费来源关联；checkpoint自己的真实
 PhysX评估另由其报告证明，禁止把这里的反事实变化当作机器人实际改善。
 
-checkpoint必须通过当前资产、奖励、时钟、物理配置、数据和源码绑定；已有训练
+checkpoint必须通过当前资产、奖励、时钟、物理配置和数据核验，源码仅记录；已有训练
 优化器及进度不恢复、不修改。完整累计Actor变化可能超过单轮信任域，这只是跨版本
 诊断，不据此撤销已通过各自新rollout验收的更新。所有结果写新独立目录。
 """
@@ -79,8 +79,8 @@ def main():
         importance,records=whole_chain_statistics(policy,eligible,cache,distributed,metadata)
         sizes=distributed.all_gather_object(len(eligible));local_records=records[sum(sizes[:rank]):sum(sizes[:rank+1])]
         stats=from_records(local_records)
-        indices=sorted(set(list(range(min(8,len(eligible))))+torch.topk(stats['joint_kl'],min(4,len(eligible))).indices.tolist()+
-            torch.topk(stats['joint_log_ratio'],min(4,len(eligible))).indices.tolist()))
+        indices=sorted(set(list(range(min(8,len(eligible))))+torch.topk(stats['joint_kl'].sum(1),min(4,len(eligible))).indices.tolist()+
+            torch.topk(stats['joint_log_ratio'].sum(1),min(4,len(eligible))).indices.tolist()))
         selected=[eligible[i] for i in indices]
         after=output_probe(policy,selected,cache,max_chains=len(selected))
         coordinates=coordinate_analysis(policy,eligible,cache,distributed,args.output_dir)
