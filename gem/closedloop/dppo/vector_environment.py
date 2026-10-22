@@ -13,7 +13,8 @@ preview和真实reserve使用相同快照/公式，Critic与下一次Actor得到
 from __future__ import annotations
 from .env_adapter import UpperEnvironment,ExecutionIntegrityError
 
-DEADLINE_CONTRACT='available_reference_deadline_cap.v2'
+DEADLINE_CONTRACT='available_reference_deadline_cap.v1'
+ROLLING_DEADLINE_CONTRACT='available_reference_deadline_cap.v2'
 
 
 def bounded_reference_deadline(snapshot, requested, *, minimum_prefix=12, rolling=False):
@@ -30,7 +31,7 @@ def bounded_reference_deadline(snapshot, requested, *, minimum_prefix=12, rollin
     if source_end<tick+(minimum_prefix-1)*20 or maximum<tick:
         raise ExecutionIntegrityError('No causal reference horizon for a new GPU decision')
     deadline=min(requested,maximum)
-    return deadline,dict(contract=DEADLINE_CONTRACT,requested_deadline_tick=requested,
+    return deadline,dict(contract=ROLLING_DEADLINE_CONTRACT if rolling else DEADLINE_CONTRACT,requested_deadline_tick=requested,
         effective_deadline_tick=deadline,maximum_supported_deadline_tick=maximum,
         reduced=deadline<requested,source_end_tick=source_end,reference_valid_end_tick=reference_end,
         waiting_lookahead_ticks=120)

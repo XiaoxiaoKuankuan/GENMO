@@ -44,7 +44,7 @@ runtime:
   noise_namespace: stage2_full_chain_joint_tracking90v2_20261019
   num_envs: 4
   physics_device: cuda:0
-  prefix_deadline_contract: available_reference_deadline_cap.v1
+  prefix_deadline_contract: available_reference_deadline_cap.v2
   record_compact_execution_provenance: true
   reward_audit_interval_controls: 1000
   rpc_timeout_s: 600
