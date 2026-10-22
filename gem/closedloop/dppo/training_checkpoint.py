@@ -149,7 +149,7 @@ def _legacy_fragment_execution(previous, current):
     old_dataset.pop('standing_start_probability',None);new_dataset.pop('standing_start_probability',None)
     if old_dataset!=new_dataset:
         return False
-    for key in ('num_envs','generation_batch','physics_device','genmo_device'):
+    for key in ('num_envs','generation_batch','physics_device','genmo_device','generation_schedule'):
         if previous.get('runtime',{}).get(key)!=current.get('runtime',{}).get(key):
             return False
     return (previous.get('training',{}).get('bc_enabled') is False

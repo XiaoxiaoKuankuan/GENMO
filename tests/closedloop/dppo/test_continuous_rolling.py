@@ -105,3 +105,13 @@ def test_rolling_window_prepayment_covers_inflight_twenty_five_control_warmup():
     credit.reserve('warmup',control_steps=25,physics_steps=100)
     credit.settle_control('warmup',25,dict(executed_control_steps=1,executed_physics_steps=4))
     assert credit.used==dict(control_steps=400,physics_steps=1600)
+
+
+def test_legacy_fragment_migration_cannot_bypass_rolling_reference_identity():
+    from gem.closedloop.dppo.training_checkpoint import _legacy_fragment_execution
+    old=dict(runtime={'num_envs':128},training={'bc_enabled':False})
+    new=copy.deepcopy(old)
+    new['training'].update(actor_objective='full_chain_clipped_ppo',actor_trainable_scope='all')
+    assert _legacy_fragment_execution(old,new)
+    new['runtime']['generation_schedule']=SCHEDULE
+    assert not _legacy_fragment_execution(old,new)
