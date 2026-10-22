@@ -24,6 +24,30 @@ from gem.closedloop.dppo.execution_provenance import consumption_report, source_
 from tools.analyze_stage2_reference_consumption import source_origin
 
 
+def audit_world_windows(cases):
+    """缺失世界步数或概率验收也必须失败，不能把没有证据当作通过。"""
+    previous={};worlds=[];probabilities=[]
+    for window,case in enumerate(cases):
+        probability=case.get('full_zero_update_probability',{})
+        if not probability.get('passed') or probability.get('checked_steps')!=list(range(19)):
+            raise ValueError('Missing complete zero-update stochastic-chain audit')
+        probabilities.append(probability)
+        ranks=case.get('collection_by_rank',[])
+        if not ranks or previous and len(ranks)!=len(previous):
+            raise ValueError('Missing or inconsistent distributed world evidence')
+        for rank,item in enumerate(ranks):
+            record=item.get('world_window',item.get('collector',{}).get('world_window'))
+            if record is None:
+                raise ValueError('Missing actual shared-world control evidence')
+            begin,end=record['begin_control'],record['current_control']
+            if (record['actual_world_controls']!=400 or not record['reached'] or end-begin!=400
+                    or end!=record['target_control'] or rank in previous and begin!=previous[rank]):
+                raise ValueError('Shared physical windows are not contiguous eight-second intervals')
+            previous[rank]=end
+            worlds.append(dict(window=window,rank=rank,**record))
+    return worlds,probabilities
+
+
 def audit(run):
     sessions=list(Path(run).glob('sessions/*/summary.json'))
     if len(sessions)!=1:raise ValueError('Exactly one finite collection session required')
@@ -81,18 +105,14 @@ def audit(run):
             p=plans[row.identity['plan_id']];first=p['first_generated_current_tick']
             delayed_rewards+=sum(1 for tick in range(row.control_tick_begin,row.control_tick_end,12) if first is None or tick<first)
             all_controls+=row.executed_control_steps
-    for window in summary['fixed_data_cases']:
-        for rank in window['collection_by_rank']:
-            record=rank['world_window'] if 'world_window' in rank else rank.get('collector',{}).get('world_window')
-            if record is not None and (record['actual_world_controls']!=400 or not record['reached']):
-                raise ValueError('Shared physical window is not exactly eight seconds')
+    worlds,probabilities=audit_world_windows(summary['fixed_data_cases'])
     return dict(schema='genmo.rolling.windows_audit.v1',status='passed',windows=counts,
         continuing_physical_episodes=episodes_continuing,previous_window_generated_source_center_controls=crossing,
         unresolved_source_support_weight=unresolved,behavior_versions=sorted(versions),
         actor_updates=state['actor_updates'],critic_updates=state['critic_updates'],
         rewards_before_this_action_first_direct_source_control=delayed_rewards,actual_actor_controls=all_controls,
         delayed_reward_semantics='只读统计，不按plan重新分配奖励；窗口影响、直接中心和动力学影响不同',
-        summary_path=str(sessions[0]),probability_audit='original complete zero-update probability checks in session summary')
+        summary_path=str(sessions[0]),shared_world_intervals=worlds,probability_audit=probabilities)
 
 
 def main():

@@ -10,6 +10,7 @@
 的物理标定单位，实际转移用executed_control_steps指数换算。
 """
 from __future__ import annotations
+import math
 
 ROLLING = 'continuous_rolling.v1'
 REFERENCE = 'executed_only_future_replace.v1'
@@ -56,3 +57,10 @@ def capacity(config, seconds):
     if seconds <= 0 or round(ticks) != ticks or round(ticks) % grid:
         raise ValueError('Physical window must lie on the configured common decision grid')
     return round(ticks) // grid
+
+
+def generation_credit(config, seconds, *, overhead):
+    """为非整网格音乐尾段预占生成次数；只影响资源上界，不强迫实际采样。"""
+    if not math.isfinite(seconds) or seconds<0 or type(overhead)is not int or overhead<0:
+        raise ValueError('Finite duration and nonnegative generation overhead required')
+    return math.ceil(seconds/(decision_ticks(config)/600.))+overhead

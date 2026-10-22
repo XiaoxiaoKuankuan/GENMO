@@ -119,3 +119,32 @@ def test_rollout_end_prepays_full_warmup_request_but_settles_actual_five_control
     budget.settle_control('train',25,dict(executed_control_steps=5,executed_physics_steps=20,
         physics_count_exact=True,transition_valid=True))
     assert budget.used['control_steps']==400 and budget.used['physics_steps']==1600
+
+
+def test_world_audit_rejects_missing_evidence_and_noncontiguous_windows():
+    from copy import deepcopy
+    from tools.audit_continuous_rolling_windows import audit_world_windows
+    case=dict(full_zero_update_probability=dict(passed=True,checked_steps=list(range(19))),
+        collection_by_rank=[dict(world_window=dict(begin_control=0,current_control=400,
+            target_control=400,actual_world_controls=400,reached=True))])
+    following=deepcopy(case)
+    following['collection_by_rank'][0]['world_window'].update(begin_control=400,current_control=800,target_control=800)
+    assert len(audit_world_windows([case,following])[0])==2
+    missing=deepcopy(case);missing['collection_by_rank'][0].pop('world_window')
+    with pytest.raises(ValueError,match='Missing actual'):audit_world_windows([missing])
+    with pytest.raises(ValueError,match='contiguous'):audit_world_windows([case,case])
+    missing=deepcopy(case);missing.pop('full_zero_update_probability')
+    with pytest.raises(ValueError,match='zero-update'):audit_world_windows([missing])
+
+
+def test_mc_and_evaluation_credit_covers_non_grid_music_tail():
+    from gem.closedloop.dppo.rolling_schedule import generation_credit
+    from gem.closedloop.dppo.memory_execution import PrepaidMemoryBudget
+    config={'runtime':{'generation_schedule':'continuous_rolling.v1'}}
+    count=generation_credit(config,1.23,overhead=5)
+    budget=PrepaidMemoryBudget(dict(control_steps=200,physics_steps=800,generations=count))
+    # 最快合法生成时刻0.0～1.2秒，共13请求；尾段不能向下取整，也不能用旧2Hz额度。
+    for _ in range(13):budget.reserve('train',generations=1)
+    assert budget.used['generations']==13 and count==18
+    assert generation_credit({},1.23,overhead=5)==8
+    with pytest.raises(ValueError):generation_credit(config,float('nan'),overhead=5)

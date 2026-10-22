@@ -101,17 +101,16 @@ def _evaluate_impl(c, label, *, write_report=True):
     # 分片单位是样本，同一样本全部seed留在同rank；预算必须按实际child任务数计算。
     shards = [shard_plan(plan, rank, c.distributed.world_size) for rank in range(c.distributed.world_size)]
     latencies = c.distributed.all_gather_object(c.env.latency_budget_s)
-    from .rolling_schedule import decision_ticks
-    decision_seconds=decision_ticks(c.config)/600.
+    from .rolling_schedule import generation_credit
     per_rank = []
     for rank, child in enumerate(shards):
         seconds=c.stage['evaluation']['episode_seconds']
         if seconds is None:
             controls=sum(math.ceil(t['remaining_music_seconds']*50)+75 for t in child['tasks'])
-            generations=sum(math.ceil(t['remaining_music_seconds']/decision_seconds)+5 for t in child['tasks'])
+            generations=sum(generation_credit(c.config,t['remaining_music_seconds'],overhead=5) for t in child['tasks'])
             per_rank.append(dict(control_steps=max(1,controls),physics_steps=4*max(1,controls),generations=max(1,generations)))
         else:
-            decisions=len(child['tasks'])*(math.ceil(seconds/decision_seconds)+2)
+            decisions=len(child['tasks'])*generation_credit(c.config,seconds,overhead=2)
             per_rank.append(collection_credit(decisions,seconds,latencies[rank]))
         slots=c.stage['evaluation'].get('envs_per_rank',1)
         # 预付覆盖最坏的多slot不等长尾部；结算仅使用实际执行/分配的物理步。

@@ -183,7 +183,7 @@ def configuration(path,*,genmo_repo=None,gmt_repo=None):
         bc_data_root=c['paths']['data_root'],bc_distribution='all_ranks')
     if s['limits']['physics_steps']!=4*s['limits']['control_steps']:
         raise ValueError('Physical resource budget must preserve four substeps')
-    # 共享世界所有reset/决策都对齐25控制步网格；每格每环境至多一条Actor转移。
+    # reset/决策对齐模式对应的公共格（固定25步或滚动5步）；每格每环境至多一条转移。
     # collector再次按真实片段校验此上限，失败/预热只减少有效链，不能偷偷多做PG更新。
     maximum_steps=t['ppo_epochs']*math.ceil(chains/scale['actor_minibatch_chains'])
     if bc_total<maximum_steps:raise ValueError('BC must cover every possible actual optimizer step')
