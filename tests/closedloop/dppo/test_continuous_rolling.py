@@ -78,3 +78,33 @@ def test_variable_interval_gae_matches_independent_physical_time_equations():
     # 正常采集截断自举终态，不能被误做真实失败而删除V(next)。
     terminated=compute_gae([rewards[-1]],[3.],[4.],[5],[False],[False],gamma_upper=.95,lambda_upper=.98)
     assert got['advantages_raw'][-1]-terminated['advantages_raw'][0]==pytest.approx(gamma**5*4)
+
+
+def test_velocity_lineage_resolves_prefix_and_is_not_position_weight():
+    from tools.analyze_continuous_rolling import velocity_dependencies
+    plans={'a':dict(decision_tick=300,prefix_frames=0,parent_plan_id='bootstrap:x',generation_frames=60),
+           'b':dict(decision_tick=600,prefix_frames=6,parent_plan_id='a',generation_frames=60)}
+    ticks=list(range(600,841,12))
+    evidence=[dict(steps=[dict(control_tick_begin=720,consumed_reference_ticks=ticks,
+        consumed_plan_ids=['a' if t<=720 else 'b' for t in ticks])])]
+    frames,rows=velocity_dependencies(evidence,plans)
+    assert rows[0]['control_tick']==720 and not rows[0]['has_bootstrap_support']
+    assert frames['a']==[20,21] and frames['b']==[6,7]
+    coefficients=rows[0]['linear_joint_velocity_source_support']
+    assert sum(v['coefficient_per_second'] for v in coefficients)==pytest.approx(0.)
+    assert sum(abs(v['coefficient_per_second']) for v in coefficients)==pytest.approx(50.)
+
+
+def test_dynamic_prefix_estimate_does_not_peek_future_and_roundtrips(tmp_path):
+    from gem.closedloop.dppo.execution_state import capture_execution_state,restore_execution_state
+    env,_=adapter(tmp_path,elapsed=.26)
+    env.rolling=True;env.config['runtime']={'generation_schedule':'continuous_rolling.v1'}
+    env.rolling_delay_samples=[72,84]
+    # 已测最大0.14秒+40ms，deadline为708；不读取任何下一请求延迟。
+    assert env._request()['deadline_tick']==708
+    env.attempt=2;env.decision=1
+    saved=capture_execution_state(env)
+    saved.update(policy_version=2,iteration=2)
+    env.rolling_delay_samples=[]
+    restore_execution_state(env,saved)
+    assert env._request()['deadline_tick']==708 and env.rolling_delay_samples==[72,84]

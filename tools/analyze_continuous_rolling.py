@@ -21,17 +21,53 @@ sys.path.insert(0,str(ROOT))
 from tools.eval.compare_closedloop_stage10 import _load_periodic, _episode_metrics
 from gem.closedloop.dppo.execution_provenance import consumption_report
 from gem.closedloop.dppo.evaluation import _stats
+from tools.analyze_stage2_reference_consumption import source_origin, temporal_window_support
+from gem.closedloop.dppo.execution_provenance import source_frame_support
+
+
+def velocity_dependencies(evidence,plans):
+    """实际中心速度的两侧50Hz差分支持，递归映射至原生成源帧。
+
+    评估控制均在1秒预热之后，中心不是权威数组首末点，使用原中心差分±25/s。
+    线性系数适用于位置/关节的舍入前差分；姿态角速度和FK身体速度仅共享支持，
+    不将这些系数解释成非线性旋转或身体速度的数值贡献。
+    """
+    controls={};result={key:set() for key in plans};rows=[]
+    for record in evidence:
+        for row in record['steps']:
+            controls[row['control_tick_begin']]=(record,row)
+    for begin,(record,row) in sorted(controls.items()):
+        if begin<600:raise ValueError('Expected post-warmup centers with two-sided difference support')
+        ids=row.get('consumed_plan_ids')
+        if ids is None:ids=[record['plan_dictionary'][i] for i in row['consumed_plan_indices']]
+        coefficients={};bootstrap=False
+        for index,sign in ((9,-25.),(11,25.)):
+            plan=ids[index];tick=row['consumed_reference_ticks'][index]
+            if plan.startswith('bootstrap:'):bootstrap=True;continue
+            for frame,weight in source_frame_support(tick,plans[plan]['decision_tick'],60):
+                origin=source_origin(plans,plan,frame)
+                if origin is None:raise ValueError('Missing source ancestry for actual velocity support')
+                if origin[0]=='bootstrap':bootstrap=True;continue
+                coefficients[origin]=coefficients.get(origin,0.)+sign*weight
+        support=[dict(plan_id=p,frame=f,coefficient_per_second=v) for (p,f),v in coefficients.items() if v!=0.]
+        for item in support:result[item['plan_id']].add(item['frame'])
+        rows.append(dict(control_tick=begin,linear_joint_velocity_source_support=support,
+            has_bootstrap_support=bootstrap,orientation_and_body_velocity='same dependency support, nonlinear mapping'))
+    return {k:sorted(v) for k,v in result.items()},rows
 
 
 def schedule_metrics(episodes):
     records=[];intervals=[];ready_read=[];state_center=[];prefixes=[];frames=[];durations=[]
-    shared_position=[];shared_velocity=[];splices={};unresolved=0.
+    shared_position=[];shared_velocity=[];splices={};unresolved=0.;velocity_rows=[]
     for episode in episodes:
         decisions=episode['decisions']
         evidence=[d.get('compact_execution_provenance') for d in decisions]
         result=consumption_report(evidence)
         if result['status']=='unverified':raise ValueError('Physical comparison lacks retained control provenance')
         unresolved+=sum(result['unresolved_source_support_weight'].values())
+        sides=temporal_window_support(evidence,result['plans'])
+        velocities,dependencies=velocity_dependencies(evidence,result['plans'])
+        velocity_rows.append(dict(task_id=episode['task_id'],controls=dependencies))
         starts=[]
         for d in decisions:
             commit=d.get('reference_commit')
@@ -64,6 +100,8 @@ def schedule_metrics(episodes):
                 current_source_frame_weights=p['current_generated_frame_weight'],
                 actual_source_weighted_seconds=seconds,
                 source_support_in_window=p['window_generated_frame_weight'],
+                past_source_frame_weights=sides[key]['past'],future_source_frame_weights=sides[key]['future'],
+                current_velocity_dependency_frames=velocities[key],
                 right_censored_at_episode_end=True))
     mean=sum(intervals)/len(intervals) if intervals else None
     return dict(decision_intervals_seconds=_stats(intervals),effective_generation_hz=None if not mean else 1/mean,
@@ -73,7 +111,8 @@ def schedule_metrics(episodes):
         source_weighted_execution_seconds_per_plan=_stats(durations),
         shared_reference_max_position_error=_stats(shared_position),shared_reference_max_velocity_error=_stats(shared_velocity),
         splice_metrics={k:_stats(v) for k,v in splices.items()},unresolved_source_support_weight=unresolved,
-        plans=records,physical_time_semantics='measured single-request discrete-event delay; all 50Hz controls and 200Hz substeps executed',
+        plans=records,velocity_dependencies=velocity_rows,
+        physical_time_semantics='measured single-request discrete-event delay; all 50Hz controls and 200Hz substeps executed',
         consumption_semantics='recursive source-frame lineage, linear position/joints and SLERP supports; not a causal influence score')
 
 
