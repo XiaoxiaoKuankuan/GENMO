@@ -117,14 +117,23 @@ Actor/Critic更新均为0，behavior_version唯一为0，所有随机步0～18�
 
 完整MC采集的生成次数预占也改用模式对应网格，并与常规评估共用同一计算函数，
 防止旧2Hz额度截断滚动MC。MC监督定义不变，非整网格音乐尾段测试通过。
-本轮未执行Actor优化或新调度下的完整MC预热；正式规模有限采集结果另记。长期RL收益、
-末端失败前价值准确性和操作系统实时并发均未在此次冻结生成器验收中证明。
+正式规模8卡×128环境的单个8秒窗口collect-only也已退出0，获得24538条真实行为链。
+每rank实际400个共享控制步，共1638400个环境物理子步；各rank采集墙钟358.44～
+377.54秒，整个命令含启动、概率重算和保存约628.03秒，不能当作一次PPO训练耗时。
+全部旧链随机步骤零更新概率重算最大差9.095e-13，Actor/Critic更新均0；冻结GMT参数
+和运行参数未变，执行journal全部确认，无pending环境，GPU进程已退出。
+
+本轮未执行Actor优化或新调度下的完整MC预热。长期RL收益、末端失败前价值准确性和
+操作系统实时并发均未在此次冻结生成器验收中证明。
 
 物理证据目录：
 /data1/user/liwei/GENMO_outputs/closedloop_stage10/continuous_rolling_20261022/
 
 paired_physics.json逐任务保留两侧指标、源帧、插值/速度支持、首次窗口/中心和替换时间。
 fixed_stage1与rolling_stage1各保留原报告和控制侧车；rolling_windows为首次失败证据。
+rolling_windows_retry为成功跨窗口采集，rolling_fullscale为8卡×128环境单窗口采集。
+本地对照报告镜像保留于
+/home/weili/bumi-closedloop-worktrees/rolling/evidence/continuous_rolling_20261022/。
 所有目录为独立验收资产，正式checkpoint未覆盖。
 
 使用命令
