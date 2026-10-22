@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 from collections import Counter
 import json
+import math
 from pathlib import Path
 import sys
 import time
@@ -24,6 +25,7 @@ def audit(cases):
     durations=Counter();prefixes=Counter();failures=Counter();rejections=Counter();versions=set()
     last={};last_content={};kernel=None;windows=[];timeouts=[];commits=cancelled=controls=overwrites=0
     future_first=[];center_first=[];all_plans={};observed_future={};observed_center={}
+    boundary_target_errors=[];gammas=set()
     for case in cases:
         info=json.loads((case/'case.json').read_text());window=Counter()
         for rank in range(8):
@@ -32,8 +34,10 @@ def audit(cases):
             assert schedule.get('schema')==SCHEMA and schedule.get('reference_contract')==REFERENCE_CONTRACT
             if kernel is None:kernel=payload['kernel']
             assert payload['kernel']==kernel
+            gamma=float(payload['identity']['training']['gamma_upper']);gammas.add(gamma)
+            gamma_control=gamma**(1/25)
             rows=payload['transitions'];window['chains']+=len(rows)
-            for row in rows:
+            for row_index,row in enumerate(rows):
                 key=tuple(row.identity[k] for k in ('backend_session_id','env_id','episode_id'))
                 start,end=int(row.control_tick_begin),int(row.control_tick_end)
                 n=int(row.executed_control_steps)
@@ -71,6 +75,14 @@ def audit(cases):
                     assert abs(float(row.next_context['decision_time'].reshape(-1)[0])-21.)<1e-8
                     timeouts.append(dict(rank=rank,episode=key[-1],tick=end,next_value=float(row.next_value)))
                     window['timeouts']+=1
+                if row.transition_valid and (row.terminated or meta.get('physical_time_limit_reached')):
+                    # 独立标量重算真实边界目标，防止“保存了末态”却实际漏用自举。
+                    target=math.fsum(gamma_control**j*float(r) for j,r in enumerate(row.rewards))
+                    target+=gamma_control**max(n-1,0)*float(meta.get('event_reward',0.))
+                    if not row.terminated:target+=gamma_control**n*float(row.next_value)
+                    error=abs(target-float(payload['targets']['returns'][row_index]))
+                    assert error<1e-8,('boundary_bootstrap_target_differs',key,error)
+                    boundary_target_errors.append(error)
                 for index,step in enumerate(packet['steps']):
                     begin=int(step['control_tick_begin'])
                     assert begin==start+12*index and step['control_tick_end']==begin+12
@@ -85,6 +97,7 @@ def audit(cases):
         assert window['chains']==info['real_global_chains']
         windows.append(dict(case=str(case),**window))
     assert len(versions)==1,'mixed behavior policy versions'
+    assert len(gammas)==1,'mixed physical-time discounts'
     for k,origin in all_plans.items():
         commit=origin['commit_tick']
         if commit is None:continue
@@ -104,6 +117,8 @@ def audit(cases):
         duration_control_histogram=dict(sorted(durations.items())),prefix_frame_histogram=dict(sorted(prefixes.items())),
         successful_commits=commits,cancelled_at_boundary=cancelled,rejections=dict(rejections),terminal_reasons=dict(failures),
         timeout_count=len(timeouts),timeout_samples=timeouts[:8],overwritten_reference_ranges=overwrites,
+        gamma_upper=next(iter(gammas)),boundary_targets_checked=len(boundary_target_errors),
+        maximum_boundary_target_error=max(boundary_target_errors,default=0.),
         first_plan_future_observation_seconds=stats(future_first),first_plan_current_center_seconds=stats(center_first),
         first_plan_scope='reference_plan_identity_includes_inherited_prefix_not_all_new_free_coordinates',
         actor_updated=False,reward_units_unchanged=True,all_retained_controls_contiguous_once=True,
