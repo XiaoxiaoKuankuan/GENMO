@@ -1,0 +1,2207 @@
+{
+  "description": "连续滚动生成有限验收的数值摘要；原始临时采集和模型在完成审计后按仓库规则清理。不是学习收益报告。",
+  "schema": "genmo.continuous_rolling.acceptance_report.v1",
+  "date": "2026-10-22",
+  "temporary_source_root": "/data1/user/liwei/GENMO_outputs/closedloop_stage10/stage2_continuous_rolling_acceptance_20261022",
+  "code_commits": {
+    "three_windows_genmo": "61ea68f",
+    "three_windows_gmt": "ff7c781",
+    "final_genmo": "3e6dda2719196feb500e03f19caffef1e20363b7",
+    "final_gmt": "4ae73704c5878afd5c8cd0b28fc201b2455295aa"
+  },
+  "local_tests": {
+    "genmo_passed": 70,
+    "gmt_passed": 49,
+    "gmt_includes_actual_cuda": true
+  },
+  "long_training_started": false,
+  "physical_gain_proven": false,
+  "exits": {
+    "audit02_all.exit.json": {
+      "exit_code": 0,
+      "elapsed_seconds": 225.1974642276764,
+      "nvidia_peak_used_mib": {},
+      "samples": 0
+    },
+    "audit02_first.exit.json": {
+      "exit_code": 0,
+      "seconds": 68.31670188903809
+    },
+    "audit03.exit.json": {
+      "exit_code": 0,
+      "elapsed_seconds": 70.06411004066467,
+      "nvidia_peak_used_mib": {},
+      "samples": 0
+    },
+    "capture.exit.json": {
+      "exit_code": 1,
+      "elapsed_seconds": 465.73364305496216
+    },
+    "capture02.exit.json": {
+      "exit_code": 0,
+      "elapsed_seconds": 1614.5357961654663,
+      "nvidia_peak_used_mib": {
+        "0": 17974,
+        "1": 17634,
+        "2": 17616,
+        "3": 17592,
+        "4": 17628,
+        "5": 17632,
+        "6": 17586,
+        "7": 18366
+      },
+      "samples": 314
+    },
+    "capture03.exit.json": {
+      "exit_code": 0,
+      "elapsed_seconds": 624.8650515079498,
+      "nvidia_peak_used_mib": {
+        "0": 17936,
+        "1": 17598,
+        "2": 17576,
+        "3": 17552,
+        "4": 17588,
+        "5": 17596,
+        "6": 17546,
+        "7": 18320
+      },
+      "samples": 120
+    },
+    "credit02_all.exit.json": {
+      "exit_code": 0,
+      "elapsed_seconds": 293.44384384155273
+    },
+    "full_chain_math.exit.json": {
+      "exit_code": 0,
+      "elapsed_seconds": 511.62986421585083,
+      "nvidia_peak_used_mib": {
+        "0": 30521,
+        "1": 30529,
+        "2": 31705,
+        "3": 31721,
+        "4": 30521,
+        "5": 31721,
+        "6": 30513,
+        "7": 30537
+      },
+      "samples": 100
+    },
+    "rpc_chunking_comparison.exit.json": {
+      "exit_code": 1,
+      "elapsed_seconds": 18.167316198349
+    },
+    "rpc_chunking_comparison02.exit.json": {
+      "exit_code": 1,
+      "elapsed_seconds": 78.82340812683105
+    },
+    "rpc_chunking_differences.exit.json": {
+      "exit_code": 0,
+      "elapsed_seconds": 148.7463183403015
+    }
+  },
+  "audits": {
+    "audit02_all": {
+      "status": "passed",
+      "schema": "genmo.continuous_rolling.physical_audit.v1",
+      "windows": [
+        {
+          "case": "/data1/user/liwei/GENMO_outputs/closedloop_stage10/stage2_continuous_rolling_acceptance_20261022/capture02/sessions/21d5ed00-c055-43c1-8bd3-f33e3d42ffe4/fixed_data_validation/iteration000001",
+          "chains": 24537,
+          "controls": 357836,
+          "commits": 23512,
+          "cancelled": 1025,
+          "terminal": 10
+        },
+        {
+          "case": "/data1/user/liwei/GENMO_outputs/closedloop_stage10/stage2_continuous_rolling_acceptance_20261022/capture02/sessions/21d5ed00-c055-43c1-8bd3-f33e3d42ffe4/fixed_data_validation/iteration000002",
+          "chains": 26727,
+          "controls": 393802,
+          "commits": 25580,
+          "cancelled": 1147,
+          "terminal": 313
+        },
+        {
+          "case": "/data1/user/liwei/GENMO_outputs/closedloop_stage10/stage2_continuous_rolling_acceptance_20261022/capture02/sessions/21d5ed00-c055-43c1-8bd3-f33e3d42ffe4/fixed_data_validation/iteration000003",
+          "chains": 25282,
+          "controls": 370065,
+          "commits": 23592,
+          "cancelled": 1690,
+          "timeouts": 603,
+          "terminal": 177
+        }
+      ],
+      "behavior_policy_versions": [
+        0
+      ],
+      "total_control_steps": 1121703,
+      "total_physics_steps": 4486812,
+      "duration_control_histogram": {
+        "1": 40,
+        "2": 1,
+        "3": 45,
+        "4": 2,
+        "5": 1275,
+        "6": 51,
+        "8": 46,
+        "9": 3,
+        "10": 2301,
+        "11": 50,
+        "12": 2,
+        "13": 46,
+        "15": 72684
+      },
+      "prefix_frame_histogram": {
+        "10": 76546
+      },
+      "successful_commits": 72684,
+      "cancelled_at_boundary": 3862,
+      "rejections": {},
+      "terminal_reasons": {
+        "music_end": 479,
+        "non_yaw_anchor_ori": 21
+      },
+      "timeout_count": 603,
+      "timeout_samples": [
+        {
+          "rank": 0,
+          "episode": "env0:episode1",
+          "tick": 12600,
+          "next_value": -0.08021299540996552
+        },
+        {
+          "rank": 0,
+          "episode": "env3:episode1",
+          "tick": 12600,
+          "next_value": -0.057187315076589584
+        },
+        {
+          "rank": 0,
+          "episode": "env5:episode1",
+          "tick": 12600,
+          "next_value": -0.07599325478076935
+        },
+        {
+          "rank": 0,
+          "episode": "env8:episode1",
+          "tick": 12600,
+          "next_value": -0.06569737195968628
+        },
+        {
+          "rank": 0,
+          "episode": "env9:episode1",
+          "tick": 12600,
+          "next_value": -0.04307757318019867
+        },
+        {
+          "rank": 0,
+          "episode": "env10:episode1",
+          "tick": 12600,
+          "next_value": -0.06037911772727966
+        },
+        {
+          "rank": 0,
+          "episode": "env12:episode1",
+          "tick": 12600,
+          "next_value": -0.05535128340125084
+        },
+        {
+          "rank": 0,
+          "episode": "env15:episode1",
+          "tick": 12600,
+          "next_value": -0.07207757234573364
+        }
+      ],
+      "overwritten_reference_ranges": 72684,
+      "gamma_upper": 0.95,
+      "boundary_targets_checked": 1103,
+      "maximum_boundary_target_error": 8.881784197001252e-16,
+      "first_plan_future_observation_seconds": {
+        "count": 72684,
+        "minimum": 0.26,
+        "p50": 0.26,
+        "p95": 0.28,
+        "maximum": 0.28
+      },
+      "first_plan_current_center_seconds": {
+        "count": 72618,
+        "minimum": 0.28,
+        "p50": 0.28,
+        "p95": 0.3,
+        "maximum": 0.3
+      },
+      "first_plan_scope": "reference_plan_identity_includes_inherited_prefix_not_all_new_free_coordinates",
+      "actor_updated": false,
+      "reward_units_unchanged": true,
+      "all_retained_controls_contiguous_once": true,
+      "input_reward_reference_versions_equal": true,
+      "seconds": 221.67645309865475
+    },
+    "audit03": {
+      "status": "passed",
+      "schema": "genmo.continuous_rolling.physical_audit.v1",
+      "windows": [
+        {
+          "case": "/data1/user/liwei/GENMO_outputs/closedloop_stage10/stage2_continuous_rolling_acceptance_20261022/capture03/sessions/b6fd7c78-ccd0-489d-9f40-c7de3976911b/fixed_data_validation/iteration000001",
+          "chains": 24536,
+          "controls": 357831,
+          "commits": 23512,
+          "cancelled": 1024,
+          "terminal": 10
+        }
+      ],
+      "behavior_policy_versions": [
+        0
+      ],
+      "total_control_steps": 357831,
+      "total_physics_steps": 1431324,
+      "duration_control_histogram": {
+        "1": 1,
+        "3": 2,
+        "5": 1012,
+        "6": 2,
+        "9": 1,
+        "10": 5,
+        "13": 1,
+        "15": 23512
+      },
+      "prefix_frame_histogram": {
+        "10": 24536
+      },
+      "successful_commits": 23512,
+      "cancelled_at_boundary": 1024,
+      "rejections": {},
+      "terminal_reasons": {
+        "music_end": 1,
+        "non_yaw_anchor_ori": 9
+      },
+      "timeout_count": 0,
+      "timeout_samples": [],
+      "overwritten_reference_ranges": 23512,
+      "gamma_upper": 0.95,
+      "boundary_targets_checked": 10,
+      "maximum_boundary_target_error": 8.881784197001252e-16,
+      "first_plan_future_observation_seconds": {
+        "count": 23512,
+        "minimum": 0.26,
+        "p50": 0.26,
+        "p95": 0.28,
+        "maximum": 0.28
+      },
+      "first_plan_current_center_seconds": {
+        "count": 23509,
+        "minimum": 0.28,
+        "p50": 0.28,
+        "p95": 0.3,
+        "maximum": 0.3
+      },
+      "first_plan_scope": "reference_plan_identity_includes_inherited_prefix_not_all_new_free_coordinates",
+      "actor_updated": false,
+      "reward_units_unchanged": true,
+      "all_retained_controls_contiguous_once": true,
+      "input_reward_reference_versions_equal": true,
+      "seconds": 66.29741564020514
+    },
+    "rpc_chunking_differences": {
+      "scope": "RPC_chunking_real_run_comparison_not_bitwise_reproducibility_claim",
+      "common_rows": 24536,
+      "identical_initial_noise_rows": 24536,
+      "identical_chain_rows": 24536,
+      "identical_reward_rows": 24536,
+      "max_absolute_chain_difference": 0.0,
+      "max_absolute_reward_difference": 0.0,
+      "task_identity_differences": 0,
+      "arrival_tick_differences": 0,
+      "boundary_label_differences": 1,
+      "unmatched": [
+        {
+          "rank": 4,
+          "side": "old_only",
+          "key": [
+            "13",
+            "env13:episode2",
+            1320
+          ],
+          "end": 1380,
+          "published": false,
+          "pending": true,
+          "reason": "ppo_world_window_boundary"
+        }
+      ],
+      "seconds": 145.9600096307695
+    }
+  },
+  "collections": [
+    {
+      "run": "capture02",
+      "window": "train_000001",
+      "per_rank_world_controls": [
+        400,
+        400,
+        400,
+        400,
+        400,
+        400,
+        400,
+        400
+      ],
+      "chains": 24537,
+      "rollout_controls": 357836,
+      "non_rollout_controls": 51685,
+      "warmup_failures": 3,
+      "physical_failures": 9,
+      "music_ends": 1,
+      "timeouts": 0,
+      "bootstrap_timeouts": 0,
+      "collection_max_seconds": 395.3345381412655,
+      "through_targets_max_seconds": 404.36615611892194,
+      "allocated_world_physics_steps": 1638400,
+      "schedules": [
+        {
+          "schema": "genmo.continuous_rolling.v1",
+          "transitions": 3069,
+          "control_steps": 44748,
+          "duration_control_histogram": {
+            "3": 1,
+            "5": 127,
+            "10": 1,
+            "15": 2940
+          },
+          "prefix_frame_histogram": {
+            "10": 3069
+          },
+          "successful_commits": 2940,
+          "cancelled_at_boundary": 129,
+          "rejections": {},
+          "storage": "host_complete_chains_with_bounded_device_cache"
+        },
+        {
+          "schema": "genmo.continuous_rolling.v1",
+          "transitions": 3067,
+          "control_steps": 44733,
+          "duration_control_histogram": {
+            "5": 127,
+            "13": 1,
+            "15": 2939
+          },
+          "prefix_frame_histogram": {
+            "10": 3067
+          },
+          "successful_commits": 2939,
+          "cancelled_at_boundary": 128,
+          "rejections": {},
+          "storage": "host_complete_chains_with_bounded_device_cache"
+        },
+        {
+          "schema": "genmo.continuous_rolling.v1",
+          "transitions": 3064,
+          "control_steps": 44686,
+          "duration_control_histogram": {
+            "5": 126,
+            "6": 1,
+            "10": 1,
+            "15": 2936
+          },
+          "prefix_frame_histogram": {
+            "10": 3064
+          },
+          "successful_commits": 2936,
+          "cancelled_at_boundary": 128,
+          "rejections": {},
+          "storage": "host_complete_chains_with_bounded_device_cache"
+        },
+        {
+          "schema": "genmo.continuous_rolling.v1",
+          "transitions": 3065,
+          "control_steps": 44706,
+          "duration_control_histogram": {
+            "1": 1,
+            "5": 125,
+            "10": 1,
+            "15": 2938
+          },
+          "prefix_frame_histogram": {
+            "10": 3065
+          },
+          "successful_commits": 2938,
+          "cancelled_at_boundary": 127,
+          "rejections": {},
+          "storage": "host_complete_chains_with_bounded_device_cache"
+        },
+        {
+          "schema": "genmo.continuous_rolling.v1",
+          "transitions": 3069,
+          "control_steps": 44743,
+          "duration_control_histogram": {
+            "3": 1,
+            "5": 128,
+            "15": 2940
+          },
+          "prefix_frame_histogram": {
+            "10": 3069
+          },
+          "successful_commits": 2940,
+          "cancelled_at_boundary": 129,
+          "rejections": {},
+          "storage": "host_complete_chains_with_bounded_device_cache"
+        },
+        {
+          "schema": "genmo.continuous_rolling.v1",
+          "transitions": 3064,
+          "control_steps": 44689,
+          "duration_control_histogram": {
+            "5": 126,
+            "9": 1,
+            "10": 1,
+            "15": 2936
+          },
+          "prefix_frame_histogram": {
+            "10": 3064
+          },
+          "successful_commits": 2936,
+          "cancelled_at_boundary": 128,
+          "rejections": {},
+          "storage": "host_complete_chains_with_bounded_device_cache"
+        },
+        {
+          "schema": "genmo.continuous_rolling.v1",
+          "transitions": 3067,
+          "control_steps": 44731,
+          "duration_control_histogram": {
+            "5": 126,
+            "6": 1,
+            "10": 1,
+            "15": 2939
+          },
+          "prefix_frame_histogram": {
+            "10": 3067
+          },
+          "successful_commits": 2939,
+          "cancelled_at_boundary": 128,
+          "rejections": {},
+          "storage": "host_complete_chains_with_bounded_device_cache"
+        },
+        {
+          "schema": "genmo.continuous_rolling.v1",
+          "transitions": 3072,
+          "control_steps": 44800,
+          "duration_control_histogram": {
+            "5": 128,
+            "15": 2944
+          },
+          "prefix_frame_histogram": {
+            "10": 3072
+          },
+          "successful_commits": 2944,
+          "cancelled_at_boundary": 128,
+          "rejections": {},
+          "storage": "host_complete_chains_with_bounded_device_cache"
+        }
+      ],
+      "effective_chains_per_wall_second": 62.0664213032461
+    },
+    {
+      "run": "capture02",
+      "window": "train_000002",
+      "per_rank_world_controls": [
+        400,
+        400,
+        400,
+        400,
+        400,
+        400,
+        400,
+        400
+      ],
+      "chains": 26727,
+      "rollout_controls": 393802,
+      "non_rollout_controls": 15242,
+      "warmup_failures": 8,
+      "physical_failures": 6,
+      "music_ends": 307,
+      "timeouts": 0,
+      "bootstrap_timeouts": 0,
+      "collection_max_seconds": 431.3138850387186,
+      "through_targets_max_seconds": 451.7216231506318,
+      "allocated_world_physics_steps": 1638400,
+      "schedules": [
+        {
+          "schema": "genmo.continuous_rolling.v1",
+          "transitions": 3358,
+          "control_steps": 49517,
+          "duration_control_histogram": {
+            "1": 3,
+            "3": 5,
+            "4": 1,
+            "5": 16,
+            "6": 3,
+            "8": 1,
+            "10": 102,
+            "11": 6,
+            "13": 6,
+            "15": 3215
+          },
+          "prefix_frame_histogram": {
+            "10": 3358
+          },
+          "successful_commits": 3215,
+          "cancelled_at_boundary": 143,
+          "rejections": {},
+          "storage": "host_complete_chains_with_bounded_device_cache"
+        },
+        {
+          "schema": "genmo.continuous_rolling.v1",
+          "transitions": 3323,
+          "control_steps": 48914,
+          "duration_control_histogram": {
+            "1": 4,
+            "3": 7,
+            "5": 23,
+            "6": 5,
+            "8": 3,
+            "10": 95,
+            "11": 4,
+            "13": 2,
+            "15": 3180
+          },
+          "prefix_frame_histogram": {
+            "10": 3323
+          },
+          "successful_commits": 3180,
+          "cancelled_at_boundary": 143,
+          "rejections": {},
+          "storage": "host_complete_chains_with_bounded_device_cache"
+        },
+        {
+          "schema": "genmo.continuous_rolling.v1",
+          "transitions": 3327,
+          "control_steps": 48988,
+          "duration_control_histogram": {
+            "1": 5,
+            "5": 17,
+            "6": 8,
+            "8": 8,
+            "10": 106,
+            "11": 2,
+            "12": 1,
+            "13": 4,
+            "15": 3176
+          },
+          "prefix_frame_histogram": {
+            "10": 3327
+          },
+          "successful_commits": 3176,
+          "cancelled_at_boundary": 151,
+          "rejections": {},
+          "storage": "host_complete_chains_with_bounded_device_cache"
+        },
+        {
+          "schema": "genmo.continuous_rolling.v1",
+          "transitions": 3340,
+          "control_steps": 49200,
+          "duration_control_histogram": {
+            "1": 4,
+            "3": 5,
+            "5": 20,
+            "6": 4,
+            "8": 1,
+            "9": 1,
+            "10": 103,
+            "11": 4,
+            "13": 2,
+            "15": 3196
+          },
+          "prefix_frame_histogram": {
+            "10": 3340
+          },
+          "successful_commits": 3196,
+          "cancelled_at_boundary": 144,
+          "rejections": {},
+          "storage": "host_complete_chains_with_bounded_device_cache"
+        },
+        {
+          "schema": "genmo.continuous_rolling.v1",
+          "transitions": 3344,
+          "control_steps": 49294,
+          "duration_control_histogram": {
+            "1": 4,
+            "3": 3,
+            "5": 25,
+            "8": 4,
+            "10": 96,
+            "11": 2,
+            "13": 4,
+            "15": 3206
+          },
+          "prefix_frame_histogram": {
+            "10": 3344
+          },
+          "successful_commits": 3206,
+          "cancelled_at_boundary": 138,
+          "rejections": {},
+          "storage": "host_complete_chains_with_bounded_device_cache"
+        },
+        {
+          "schema": "genmo.continuous_rolling.v1",
+          "transitions": 3343,
+          "control_steps": 49265,
+          "duration_control_histogram": {
+            "1": 3,
+            "3": 3,
+            "5": 20,
+            "6": 3,
+            "8": 5,
+            "10": 102,
+            "11": 6,
+            "13": 3,
+            "15": 3198
+          },
+          "prefix_frame_histogram": {
+            "10": 3343
+          },
+          "successful_commits": 3198,
+          "cancelled_at_boundary": 145,
+          "rejections": {},
+          "storage": "host_complete_chains_with_bounded_device_cache"
+        },
+        {
+          "schema": "genmo.continuous_rolling.v1",
+          "transitions": 3361,
+          "control_steps": 49579,
+          "duration_control_histogram": {
+            "1": 2,
+            "3": 1,
+            "5": 22,
+            "6": 3,
+            "8": 5,
+            "10": 100,
+            "11": 2,
+            "13": 3,
+            "15": 3223
+          },
+          "prefix_frame_histogram": {
+            "10": 3361
+          },
+          "successful_commits": 3223,
+          "cancelled_at_boundary": 138,
+          "rejections": {},
+          "storage": "host_complete_chains_with_bounded_device_cache"
+        },
+        {
+          "schema": "genmo.continuous_rolling.v1",
+          "transitions": 3331,
+          "control_steps": 49045,
+          "duration_control_histogram": {
+            "1": 3,
+            "3": 5,
+            "4": 1,
+            "5": 24,
+            "6": 4,
+            "8": 3,
+            "10": 96,
+            "11": 6,
+            "13": 3,
+            "15": 3186
+          },
+          "prefix_frame_histogram": {
+            "10": 3331
+          },
+          "successful_commits": 3186,
+          "cancelled_at_boundary": 145,
+          "rejections": {},
+          "storage": "host_complete_chains_with_bounded_device_cache"
+        }
+      ],
+      "effective_chains_per_wall_second": 61.96647250899596
+    },
+    {
+      "run": "capture02",
+      "window": "train_000003",
+      "per_rank_world_controls": [
+        400,
+        400,
+        400,
+        400,
+        400,
+        400,
+        400,
+        400
+      ],
+      "chains": 25282,
+      "rollout_controls": 370065,
+      "non_rollout_controls": 39209,
+      "warmup_failures": 14,
+      "physical_failures": 6,
+      "music_ends": 171,
+      "timeouts": 603,
+      "bootstrap_timeouts": 603,
+      "collection_max_seconds": 421.58400335069746,
+      "through_targets_max_seconds": 437.1206234190613,
+      "allocated_world_physics_steps": 1638400,
+      "schedules": [
+        {
+          "schema": "genmo.continuous_rolling.v1",
+          "transitions": 3145,
+          "control_steps": 46009,
+          "duration_control_histogram": {
+            "1": 1,
+            "5": 17,
+            "6": 4,
+            "8": 2,
+            "10": 184,
+            "11": 2,
+            "13": 2,
+            "15": 2933
+          },
+          "prefix_frame_histogram": {
+            "10": 3145
+          },
+          "successful_commits": 2933,
+          "cancelled_at_boundary": 212,
+          "rejections": {},
+          "storage": "host_complete_chains_with_bounded_device_cache"
+        },
+        {
+          "schema": "genmo.continuous_rolling.v1",
+          "transitions": 3183,
+          "control_steps": 46629,
+          "duration_control_histogram": {
+            "1": 1,
+            "3": 5,
+            "5": 13,
+            "6": 2,
+            "8": 1,
+            "9": 1,
+            "10": 175,
+            "11": 1,
+            "13": 1,
+            "15": 2983
+          },
+          "prefix_frame_histogram": {
+            "10": 3183
+          },
+          "successful_commits": 2983,
+          "cancelled_at_boundary": 200,
+          "rejections": {},
+          "storage": "host_complete_chains_with_bounded_device_cache"
+        },
+        {
+          "schema": "genmo.continuous_rolling.v1",
+          "transitions": 3155,
+          "control_steps": 46168,
+          "duration_control_histogram": {
+            "1": 3,
+            "2": 1,
+            "5": 15,
+            "6": 4,
+            "8": 3,
+            "10": 173,
+            "11": 5,
+            "13": 5,
+            "15": 2946
+          },
+          "prefix_frame_histogram": {
+            "10": 3155
+          },
+          "successful_commits": 2946,
+          "cancelled_at_boundary": 209,
+          "rejections": {},
+          "storage": "host_complete_chains_with_bounded_device_cache"
+        },
+        {
+          "schema": "genmo.continuous_rolling.v1",
+          "transitions": 3157,
+          "control_steps": 46183,
+          "duration_control_histogram": {
+            "1": 2,
+            "5": 7,
+            "6": 4,
+            "8": 4,
+            "10": 200,
+            "11": 2,
+            "13": 1,
+            "15": 2937
+          },
+          "prefix_frame_histogram": {
+            "10": 3157
+          },
+          "successful_commits": 2937,
+          "cancelled_at_boundary": 220,
+          "rejections": {},
+          "storage": "host_complete_chains_with_bounded_device_cache"
+        },
+        {
+          "schema": "genmo.continuous_rolling.v1",
+          "transitions": 3159,
+          "control_steps": 46236,
+          "duration_control_histogram": {
+            "1": 3,
+            "3": 2,
+            "5": 8,
+            "8": 2,
+            "10": 195,
+            "11": 2,
+            "13": 3,
+            "15": 2944
+          },
+          "prefix_frame_histogram": {
+            "10": 3159
+          },
+          "successful_commits": 2944,
+          "cancelled_at_boundary": 215,
+          "rejections": {},
+          "storage": "host_complete_chains_with_bounded_device_cache"
+        },
+        {
+          "schema": "genmo.continuous_rolling.v1",
+          "transitions": 3170,
+          "control_steps": 46462,
+          "duration_control_histogram": {
+            "1": 1,
+            "3": 1,
+            "5": 7,
+            "6": 1,
+            "8": 1,
+            "10": 194,
+            "11": 1,
+            "13": 1,
+            "15": 2963
+          },
+          "prefix_frame_histogram": {
+            "10": 3170
+          },
+          "successful_commits": 2963,
+          "cancelled_at_boundary": 207,
+          "rejections": {},
+          "storage": "host_complete_chains_with_bounded_device_cache"
+        },
+        {
+          "schema": "genmo.continuous_rolling.v1",
+          "transitions": 3143,
+          "control_steps": 45950,
+          "duration_control_histogram": {
+            "3": 6,
+            "5": 14,
+            "6": 1,
+            "10": 191,
+            "11": 3,
+            "12": 1,
+            "13": 2,
+            "15": 2925
+          },
+          "prefix_frame_histogram": {
+            "10": 3143
+          },
+          "successful_commits": 2925,
+          "cancelled_at_boundary": 218,
+          "rejections": {},
+          "storage": "host_complete_chains_with_bounded_device_cache"
+        },
+        {
+          "schema": "genmo.continuous_rolling.v1",
+          "transitions": 3170,
+          "control_steps": 46428,
+          "duration_control_histogram": {
+            "5": 14,
+            "6": 3,
+            "8": 3,
+            "10": 184,
+            "11": 2,
+            "13": 3,
+            "15": 2961
+          },
+          "prefix_frame_histogram": {
+            "10": 3170
+          },
+          "successful_commits": 2961,
+          "cancelled_at_boundary": 209,
+          "rejections": {},
+          "storage": "host_complete_chains_with_bounded_device_cache"
+        }
+      ],
+      "effective_chains_per_wall_second": 59.96906855825125
+    },
+    {
+      "run": "capture03",
+      "window": "train_000001",
+      "per_rank_world_controls": [
+        400,
+        400,
+        400,
+        400,
+        400,
+        400,
+        400,
+        400
+      ],
+      "chains": 24536,
+      "rollout_controls": 357831,
+      "non_rollout_controls": 51685,
+      "warmup_failures": 3,
+      "physical_failures": 9,
+      "music_ends": 1,
+      "timeouts": 0,
+      "bootstrap_timeouts": 0,
+      "collection_max_seconds": 368.60315292328596,
+      "through_targets_max_seconds": 375.5247611710802,
+      "allocated_world_physics_steps": 1638400,
+      "schedules": [
+        {
+          "schema": "genmo.continuous_rolling.v1",
+          "transitions": 3069,
+          "control_steps": 44748,
+          "duration_control_histogram": {
+            "3": 1,
+            "5": 127,
+            "10": 1,
+            "15": 2940
+          },
+          "prefix_frame_histogram": {
+            "10": 3069
+          },
+          "successful_commits": 2940,
+          "cancelled_at_boundary": 129,
+          "rejections": {},
+          "storage": "host_complete_chains_with_bounded_device_cache"
+        },
+        {
+          "schema": "genmo.continuous_rolling.v1",
+          "transitions": 3067,
+          "control_steps": 44733,
+          "duration_control_histogram": {
+            "5": 127,
+            "13": 1,
+            "15": 2939
+          },
+          "prefix_frame_histogram": {
+            "10": 3067
+          },
+          "successful_commits": 2939,
+          "cancelled_at_boundary": 128,
+          "rejections": {},
+          "storage": "host_complete_chains_with_bounded_device_cache"
+        },
+        {
+          "schema": "genmo.continuous_rolling.v1",
+          "transitions": 3064,
+          "control_steps": 44686,
+          "duration_control_histogram": {
+            "5": 126,
+            "6": 1,
+            "10": 1,
+            "15": 2936
+          },
+          "prefix_frame_histogram": {
+            "10": 3064
+          },
+          "successful_commits": 2936,
+          "cancelled_at_boundary": 128,
+          "rejections": {},
+          "storage": "host_complete_chains_with_bounded_device_cache"
+        },
+        {
+          "schema": "genmo.continuous_rolling.v1",
+          "transitions": 3065,
+          "control_steps": 44706,
+          "duration_control_histogram": {
+            "1": 1,
+            "5": 125,
+            "10": 1,
+            "15": 2938
+          },
+          "prefix_frame_histogram": {
+            "10": 3065
+          },
+          "successful_commits": 2938,
+          "cancelled_at_boundary": 127,
+          "rejections": {},
+          "storage": "host_complete_chains_with_bounded_device_cache"
+        },
+        {
+          "schema": "genmo.continuous_rolling.v1",
+          "transitions": 3068,
+          "control_steps": 44738,
+          "duration_control_histogram": {
+            "3": 1,
+            "5": 127,
+            "15": 2940
+          },
+          "prefix_frame_histogram": {
+            "10": 3068
+          },
+          "successful_commits": 2940,
+          "cancelled_at_boundary": 128,
+          "rejections": {},
+          "storage": "host_complete_chains_with_bounded_device_cache"
+        },
+        {
+          "schema": "genmo.continuous_rolling.v1",
+          "transitions": 3064,
+          "control_steps": 44689,
+          "duration_control_histogram": {
+            "5": 126,
+            "9": 1,
+            "10": 1,
+            "15": 2936
+          },
+          "prefix_frame_histogram": {
+            "10": 3064
+          },
+          "successful_commits": 2936,
+          "cancelled_at_boundary": 128,
+          "rejections": {},
+          "storage": "host_complete_chains_with_bounded_device_cache"
+        },
+        {
+          "schema": "genmo.continuous_rolling.v1",
+          "transitions": 3067,
+          "control_steps": 44731,
+          "duration_control_histogram": {
+            "5": 126,
+            "6": 1,
+            "10": 1,
+            "15": 2939
+          },
+          "prefix_frame_histogram": {
+            "10": 3067
+          },
+          "successful_commits": 2939,
+          "cancelled_at_boundary": 128,
+          "rejections": {},
+          "storage": "host_complete_chains_with_bounded_device_cache"
+        },
+        {
+          "schema": "genmo.continuous_rolling.v1",
+          "transitions": 3072,
+          "control_steps": 44800,
+          "duration_control_histogram": {
+            "5": 128,
+            "15": 2944
+          },
+          "prefix_frame_histogram": {
+            "10": 3072
+          },
+          "successful_commits": 2944,
+          "cancelled_at_boundary": 128,
+          "rejections": {},
+          "storage": "host_complete_chains_with_bounded_device_cache"
+        }
+      ],
+      "effective_chains_per_wall_second": 66.56481314772273
+    }
+  ],
+  "case_headers": [
+    {
+      "path": "/data1/user/liwei/GENMO_outputs/closedloop_stage10/stage2_continuous_rolling_acceptance_20261022/capture02/sessions/21d5ed00-c055-43c1-8bd3-f33e3d42ffe4/fixed_data_validation/iteration000001/case.json",
+      "sha256": "99239b4a46c06de11e8c3ac196f5b3b83f888e11ae575564fe0023b473f6a1ed",
+      "global_chains": 24537,
+      "learning_state_sha256": "5cd9bf9d98b8a6162298b9dbc735e8be842808045bb9a005cfb77bb7eb35a071",
+      "ranks": [
+        {
+          "schema": "genmo.stage2.asymmetric_validation_rollout.v1",
+          "path": "rollout.pt",
+          "size_bytes": 2312834230,
+          "sha256": "dd3a6b7b14933a51bfac001cdba26a1510d205b987b1d2efb16339f7563420ef",
+          "real_upper_transitions": 3069,
+          "real_control_steps": 44748,
+          "real_physics_steps": 178992,
+          "full_execution_evidence": false
+        },
+        {
+          "schema": "genmo.stage2.asymmetric_validation_rollout.v1",
+          "path": "rollout.pt",
+          "size_bytes": 2311280568,
+          "sha256": "c36b9755b50dbb736f7230170803445083d73677da1fc1b68bf1604918e4f19b",
+          "real_upper_transitions": 3067,
+          "real_control_steps": 44733,
+          "real_physics_steps": 178932,
+          "full_execution_evidence": false
+        },
+        {
+          "schema": "genmo.stage2.asymmetric_validation_rollout.v1",
+          "path": "rollout.pt",
+          "size_bytes": 2309018192,
+          "sha256": "66db60551babc475be8f610cb02d7cc285cdd9c7844c7093e720dd4364868101",
+          "real_upper_transitions": 3064,
+          "real_control_steps": 44686,
+          "real_physics_steps": 178744,
+          "full_execution_evidence": false
+        },
+        {
+          "schema": "genmo.stage2.asymmetric_validation_rollout.v1",
+          "path": "rollout.pt",
+          "size_bytes": 2309825942,
+          "sha256": "1285f467d73af1c91953713f99c0f33e7b75707fb57ecfb016eed43a55b1e99d",
+          "real_upper_transitions": 3065,
+          "real_control_steps": 44706,
+          "real_physics_steps": 178824,
+          "full_execution_evidence": false
+        },
+        {
+          "schema": "genmo.stage2.asymmetric_validation_rollout.v1",
+          "path": "rollout.pt",
+          "size_bytes": 2312832758,
+          "sha256": "bf83d077c1f40f7dd73297ef140e3dac4bd995bdb3b02134620695d4b51ceca4",
+          "real_upper_transitions": 3069,
+          "real_control_steps": 44743,
+          "real_physics_steps": 178972,
+          "full_execution_evidence": false
+        },
+        {
+          "schema": "genmo.stage2.asymmetric_validation_rollout.v1",
+          "path": "rollout.pt",
+          "size_bytes": 2309016528,
+          "sha256": "ef058fb9f830e5121efcc8a024b2e60ac3bffaca311ae6cea58cc123343b0b63",
+          "real_upper_transitions": 3064,
+          "real_control_steps": 44689,
+          "real_physics_steps": 178756,
+          "full_execution_evidence": false
+        },
+        {
+          "schema": "genmo.stage2.asymmetric_validation_rollout.v1",
+          "path": "rollout.pt",
+          "size_bytes": 2311331718,
+          "sha256": "2198846fedd4e51e73847c9d26ef0e7eaa8655d34095ebcdf81bf113812ecb0c",
+          "real_upper_transitions": 3067,
+          "real_control_steps": 44731,
+          "real_physics_steps": 178924,
+          "full_execution_evidence": false
+        },
+        {
+          "schema": "genmo.stage2.asymmetric_validation_rollout.v1",
+          "path": "rollout.pt",
+          "size_bytes": 2315150188,
+          "sha256": "69bee988fab11d5003fffc57aebb3ee24270d27ebf901331d4bf6e48fc32af78",
+          "real_upper_transitions": 3072,
+          "real_control_steps": 44800,
+          "real_physics_steps": 179200,
+          "full_execution_evidence": false
+        }
+      ]
+    },
+    {
+      "path": "/data1/user/liwei/GENMO_outputs/closedloop_stage10/stage2_continuous_rolling_acceptance_20261022/capture02/sessions/21d5ed00-c055-43c1-8bd3-f33e3d42ffe4/fixed_data_validation/iteration000002/case.json",
+      "sha256": "6b86bdffa8908be2b920f06b68b439ae54ca1a0b75d8dd05168a6c1d203d36a8",
+      "global_chains": 26727,
+      "learning_state_sha256": "5cd9bf9d98b8a6162298b9dbc735e8be842808045bb9a005cfb77bb7eb35a071",
+      "ranks": [
+        {
+          "schema": "genmo.stage2.asymmetric_validation_rollout.v1",
+          "path": "rollout.pt",
+          "size_bytes": 2529461664,
+          "sha256": "8c652e649048f338ea6a1720eaab7e11a4d90ea9383faa54dc7a124ea64fc99d",
+          "real_upper_transitions": 3358,
+          "real_control_steps": 49517,
+          "real_physics_steps": 198068,
+          "full_execution_evidence": false
+        },
+        {
+          "schema": "genmo.stage2.asymmetric_validation_rollout.v1",
+          "path": "rollout.pt",
+          "size_bytes": 2502433296,
+          "sha256": "efab336834216a7fb2b9cdf09b92f423de7d637bf71abb1df0a9239d14138dce",
+          "real_upper_transitions": 3323,
+          "real_control_steps": 48914,
+          "real_physics_steps": 195656,
+          "full_execution_evidence": false
+        },
+        {
+          "schema": "genmo.stage2.asymmetric_validation_rollout.v1",
+          "path": "rollout.pt",
+          "size_bytes": 2505602458,
+          "sha256": "64f8c993f92b3446e8d5f136725cce362801bb8052e3bd590e1335cd398c853b",
+          "real_upper_transitions": 3327,
+          "real_control_steps": 48988,
+          "real_physics_steps": 195952,
+          "full_execution_evidence": false
+        },
+        {
+          "schema": "genmo.stage2.asymmetric_validation_rollout.v1",
+          "path": "rollout.pt",
+          "size_bytes": 2515664696,
+          "sha256": "fa43ebf30182d6e2326b250d118593ac5055822b02faed0e28a372d3a2f6cb6a",
+          "real_upper_transitions": 3340,
+          "real_control_steps": 49200,
+          "real_physics_steps": 196800,
+          "full_execution_evidence": false
+        },
+        {
+          "schema": "genmo.stage2.asymmetric_validation_rollout.v1",
+          "path": "rollout.pt",
+          "size_bytes": 2518747686,
+          "sha256": "87a42f242986c7e6499b39664d14f354fbc3c306a9de968cfc5b73ee5194bcdb",
+          "real_upper_transitions": 3344,
+          "real_control_steps": 49294,
+          "real_physics_steps": 197176,
+          "full_execution_evidence": false
+        },
+        {
+          "schema": "genmo.stage2.asymmetric_validation_rollout.v1",
+          "path": "rollout.pt",
+          "size_bytes": 2517934368,
+          "sha256": "3d21403894662716be323792891218a63942e3764db8f659d6ed27ef01fed960",
+          "real_upper_transitions": 3343,
+          "real_control_steps": 49265,
+          "real_physics_steps": 197060,
+          "full_execution_evidence": false
+        },
+        {
+          "schema": "genmo.stage2.asymmetric_validation_rollout.v1",
+          "path": "rollout.pt",
+          "size_bytes": 2531774230,
+          "sha256": "253676749d88a25f9fa0d14d6db30675313dc0124905479561368df89de54bc3",
+          "real_upper_transitions": 3361,
+          "real_control_steps": 49579,
+          "real_physics_steps": 198316,
+          "full_execution_evidence": false
+        },
+        {
+          "schema": "genmo.stage2.asymmetric_validation_rollout.v1",
+          "path": "rollout.pt",
+          "size_bytes": 2508569324,
+          "sha256": "c12b378d6f1530379375259ad08eb3a15942f8a043bfc357e9f599e46c260ff2",
+          "real_upper_transitions": 3331,
+          "real_control_steps": 49045,
+          "real_physics_steps": 196180,
+          "full_execution_evidence": false
+        }
+      ]
+    },
+    {
+      "path": "/data1/user/liwei/GENMO_outputs/closedloop_stage10/stage2_continuous_rolling_acceptance_20261022/capture02/sessions/21d5ed00-c055-43c1-8bd3-f33e3d42ffe4/fixed_data_validation/iteration000003/case.json",
+      "sha256": "fc793298d1de3a77f2cd876d2f901ddade80dc732b3fb4244d432050367e3a42",
+      "global_chains": 25282,
+      "learning_state_sha256": "5cd9bf9d98b8a6162298b9dbc735e8be842808045bb9a005cfb77bb7eb35a071",
+      "ranks": [
+        {
+          "schema": "genmo.stage2.asymmetric_validation_rollout.v1",
+          "path": "rollout.pt",
+          "size_bytes": 2368961080,
+          "sha256": "9e9c6d84533488fb25dbb6aea50e0d28ff3f23ad5148d22b960270b90e57a0fa",
+          "real_upper_transitions": 3145,
+          "real_control_steps": 46009,
+          "real_physics_steps": 184036,
+          "full_execution_evidence": false
+        },
+        {
+          "schema": "genmo.stage2.asymmetric_validation_rollout.v1",
+          "path": "rollout.pt",
+          "size_bytes": 2397743972,
+          "sha256": "550df52fcb20cba03b331feef4054dca1716aa2da292830a167aff97ad826cab",
+          "real_upper_transitions": 3183,
+          "real_control_steps": 46629,
+          "real_physics_steps": 186516,
+          "full_execution_evidence": false
+        },
+        {
+          "schema": "genmo.stage2.asymmetric_validation_rollout.v1",
+          "path": "rollout.pt",
+          "size_bytes": 2376361406,
+          "sha256": "9da06fa62fada2b412d7d49a78861eeb1a6e27762b78996d24a725eeb62463e1",
+          "real_upper_transitions": 3155,
+          "real_control_steps": 46168,
+          "real_physics_steps": 184672,
+          "full_execution_evidence": false
+        },
+        {
+          "schema": "genmo.stage2.asymmetric_validation_rollout.v1",
+          "path": "rollout.pt",
+          "size_bytes": 2378374330,
+          "sha256": "a4e87532ca4e0e798f028ec63166341c88b24739e86f7425209761d6be04f90e",
+          "real_upper_transitions": 3157,
+          "real_control_steps": 46183,
+          "real_physics_steps": 184732,
+          "full_execution_evidence": false
+        },
+        {
+          "schema": "genmo.stage2.asymmetric_validation_rollout.v1",
+          "path": "rollout.pt",
+          "size_bytes": 2379781838,
+          "sha256": "f69318af9076fb56a46400b2b54f46b46ecd9aae69ee0f4ed4d8bb72f0e4c9b9",
+          "real_upper_transitions": 3159,
+          "real_control_steps": 46236,
+          "real_physics_steps": 184944,
+          "full_execution_evidence": false
+        },
+        {
+          "schema": "genmo.stage2.asymmetric_validation_rollout.v1",
+          "path": "rollout.pt",
+          "size_bytes": 2388400906,
+          "sha256": "87dd3fe4f930dbc644492ba05ed9565a676d837631e9f49d3590c6d326957daf",
+          "real_upper_transitions": 3170,
+          "real_control_steps": 46462,
+          "real_physics_steps": 185848,
+          "full_execution_evidence": false
+        },
+        {
+          "schema": "genmo.stage2.asymmetric_validation_rollout.v1",
+          "path": "rollout.pt",
+          "size_bytes": 2367702926,
+          "sha256": "f78065b9f0fc3610f03f3b288ceee3b4f9a53f1e2f1c2e620f7aba0815cc39ba",
+          "real_upper_transitions": 3143,
+          "real_control_steps": 45950,
+          "real_physics_steps": 183800,
+          "full_execution_evidence": false
+        },
+        {
+          "schema": "genmo.stage2.asymmetric_validation_rollout.v1",
+          "path": "rollout.pt",
+          "size_bytes": 2388037416,
+          "sha256": "89688589e55353b32576fc0aaa102818e3328ec221068d9becfa323c65349fe4",
+          "real_upper_transitions": 3170,
+          "real_control_steps": 46428,
+          "real_physics_steps": 185712,
+          "full_execution_evidence": false
+        }
+      ]
+    },
+    {
+      "path": "/data1/user/liwei/GENMO_outputs/closedloop_stage10/stage2_continuous_rolling_acceptance_20261022/capture03/sessions/b6fd7c78-ccd0-489d-9f40-c7de3976911b/fixed_data_validation/iteration000001/case.json",
+      "sha256": "9516fca8b10fed0f6a896c0e9d46632ead47ca2da686f0def06cbaedeeaa616a",
+      "global_chains": 24536,
+      "learning_state_sha256": "c537efdc5ba3262406f777e929fff908d263b51648fe700e83aa9ffb4a754827",
+      "ranks": [
+        {
+          "schema": "genmo.stage2.asymmetric_validation_rollout.v1",
+          "path": "rollout.pt",
+          "size_bytes": 2312427318,
+          "sha256": "1e145a388b897117df0ab82c30fccac662620c08eca1f9de096af3e6a7843f15",
+          "real_upper_transitions": 3069,
+          "real_control_steps": 44748,
+          "real_physics_steps": 178992,
+          "full_execution_evidence": false
+        },
+        {
+          "schema": "genmo.stage2.asymmetric_validation_rollout.v1",
+          "path": "rollout.pt",
+          "size_bytes": 2310873720,
+          "sha256": "66194012feda0b6b190b22e99597d241a3d25cd9224a991dca1f21a9818a6173",
+          "real_upper_transitions": 3067,
+          "real_control_steps": 44733,
+          "real_physics_steps": 178932,
+          "full_execution_evidence": false
+        },
+        {
+          "schema": "genmo.stage2.asymmetric_validation_rollout.v1",
+          "path": "rollout.pt",
+          "size_bytes": 2308611792,
+          "sha256": "4e12b366ebc8e73202a1daf2d573750f5127896ae0f242472c56d47a12dc362f",
+          "real_upper_transitions": 3064,
+          "real_control_steps": 44686,
+          "real_physics_steps": 178744,
+          "full_execution_evidence": false
+        },
+        {
+          "schema": "genmo.stage2.asymmetric_validation_rollout.v1",
+          "path": "rollout.pt",
+          "size_bytes": 2309419350,
+          "sha256": "1f96654caa63ed3799de65b3d64560a2394f9e437a0782fd2b266fa667018889",
+          "real_upper_transitions": 3065,
+          "real_control_steps": 44706,
+          "real_physics_steps": 178824,
+          "full_execution_evidence": false
+        },
+        {
+          "schema": "genmo.stage2.asymmetric_validation_rollout.v1",
+          "path": "rollout.pt",
+          "size_bytes": 2311674942,
+          "sha256": "f2b59178b56a384ece7171fb9e8c44ae5d2b282442c378472b75a5da6e71efb6",
+          "real_upper_transitions": 3068,
+          "real_control_steps": 44738,
+          "real_physics_steps": 178952,
+          "full_execution_evidence": false
+        },
+        {
+          "schema": "genmo.stage2.asymmetric_validation_rollout.v1",
+          "path": "rollout.pt",
+          "size_bytes": 2308610128,
+          "sha256": "e361d7fc0acbe8ef0de760d6c688c11f9a3b2a8dcaf0e90ada6c1280f159b5d1",
+          "real_upper_transitions": 3064,
+          "real_control_steps": 44689,
+          "real_physics_steps": 178756,
+          "full_execution_evidence": false
+        },
+        {
+          "schema": "genmo.stage2.asymmetric_validation_rollout.v1",
+          "path": "rollout.pt",
+          "size_bytes": 2310924806,
+          "sha256": "581fae9c1056b3efcacc6edfb7c3b17db5c19af9ccaad0b56f87ef01a38e6612",
+          "real_upper_transitions": 3067,
+          "real_control_steps": 44731,
+          "real_physics_steps": 178924,
+          "full_execution_evidence": false
+        },
+        {
+          "schema": "genmo.stage2.asymmetric_validation_rollout.v1",
+          "path": "rollout.pt",
+          "size_bytes": 2314742764,
+          "sha256": "c16e21e01bbc534c8866da7ad43451d68bc1ca015ca6861801f5214f7340ae9a",
+          "real_upper_transitions": 3072,
+          "real_control_steps": 44800,
+          "real_physics_steps": 179200,
+          "full_execution_evidence": false
+        }
+      ]
+    }
+  ],
+  "source_credit": {
+    "missing_compact_transitions": 0,
+    "plans": 76546,
+    "controls": 1121703,
+    "controls_before_generated_center": 1121703,
+    "before_center_control_fraction": 1.0,
+    "controls_before_generated_future_window": 1008053,
+    "before_future_window_control_fraction": 0.8986808451078405,
+    "complete_horizon_plan_count": 63553,
+    "complete_horizon_center_count": {
+      "count": 63553,
+      "mean": 8.873633030698787,
+      "p50": 9.0,
+      "p95": 9.0,
+      "min": 0.0,
+      "max": 15.0
+    },
+    "cross_rollout_plan_count": 2158,
+    "velocity_evidence": "actual_center_21point_window_confirms_interior_difference_support; linear_position_joint_coefficients_separate_from_nonlinear_rotation_FK",
+    "causal_scope": "direct_center_future_window_and_Transformer_temporal_coupling_are_distinct; unconsumed_probability_factors_are_not_deleted",
+    "MC_scope": "only_true_termination_gives_no_bootstrap_observed_tail; clipped_rollout_is_not_complete_episode_MC",
+    "physical_episodes": 2109,
+    "complete_lineage_episodes": 2109,
+    "continuous_episodes": 2109,
+    "latencies": {
+      "decision_to_first_future_seconds": {
+        "count": 72684,
+        "min": 0.26,
+        "p50": 0.26,
+        "p95": 0.28,
+        "max": 0.28
+      },
+      "decision_to_first_center_seconds": {
+        "count": 72515,
+        "min": 0.32,
+        "p50": 0.32,
+        "p95": 0.32,
+        "max": 0.32
+      }
+    }
+  },
+  "ppo_math": {
+    "status": "passed",
+    "scope": "fixed_real_data_math_and_KL_calibration_not_physical_acceptance",
+    "source_commit": "3e6dda2719196feb500e03f19caffef1e20363b7",
+    "case_sha256": "9516fca8b10fed0f6a896c0e9d46632ead47ca2da686f0def06cbaedeeaa616a",
+    "probability": {
+      "passed": true,
+      "checked_steps": [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        8,
+        9,
+        10,
+        11,
+        12,
+        13,
+        14,
+        15,
+        16,
+        17,
+        18
+      ],
+      "frozen_identity": {
+        "schema": "genmo.stage2.frozen_identity_check.v1",
+        "checked": true,
+        "content_sha256": "6a8315e5cbce99cb06c4d6a8be434c698d67c517331169134521d0b7239a5a74",
+        "stochastic_frozen_steps": [
+          0,
+          1,
+          2,
+          3,
+          4,
+          5,
+          6,
+          7,
+          8,
+          9,
+          10,
+          11,
+          12,
+          13,
+          14
+        ],
+        "deterministic_frozen_steps": [
+          19
+        ],
+        "verification": "immutable_tensor_versions_storage_runtime_settings_not_gaussian_replay"
+      },
+      "max_abs_log_probability_difference": 9.094947017729282e-13,
+      "max_abs_ratio_minus_one": 9.094947017729282e-13,
+      "max_abs_independent_gaussian_difference": 9.094947017729282e-13
+    },
+    "gradients": {
+      "passed": true,
+      "global_chains": 16,
+      "variants": [
+        {
+          "microbatch": 1,
+          "relative_gradient_l2": 3.058286783295575e-07,
+          "maximum_coordinate_error": 0.0004119873046875
+        },
+        {
+          "microbatch": 3,
+          "relative_gradient_l2": 4.117397542468717e-07,
+          "maximum_coordinate_error": 0.0006256103515625
+        },
+        {
+          "microbatch": 8,
+          "relative_gradient_l2": 4.423716565606082e-07,
+          "maximum_coordinate_error": 0.00058746337890625
+        }
+      ],
+      "reference": "independent_FP64_Normal_full_four_step_Autograd_global_SUM",
+      "scope": "actual_stage1_network_and_real_behavior_rows_not_physics_quality"
+    },
+    "acceptance": {
+      "passed": true,
+      "failures": {},
+      "units": "explicit_joint_or_coordinate_never_reuse_one_threshold",
+      "joint_gate_is_empirical_not_theoretical_safety": true
+    },
+    "joint_kl": {
+      "min": 0.0013637578275397077,
+      "p01": 0.004172951353299352,
+      "p05": 0.0058989415121069476,
+      "median": 0.00957708621864334,
+      "p95": 0.014362641808152518,
+      "p99": 0.019263139241734756,
+      "max": 0.04293409497017148,
+      "mean": 0.009837158220658544
+    },
+    "nominal_learning_rate": 3e-07,
+    "optimizer_steps": 3,
+    "attempted_adam_steps": 7,
+    "rejected_candidates": 4,
+    "planned_steps": 3,
+    "bc_samples": 0,
+    "eligible_chains": 24536,
+    "update_stage_seconds": 341.6270751906559,
+    "peak_allocated_bytes": 29672095744,
+    "steps": [
+      {
+        "optimizer_step": 1,
+        "global_chain_count": 8192,
+        "learning_rate": 1.875e-08,
+        "seconds": 172.04863508418202,
+        "objective_before": 9.266941451060974e-17,
+        "objective_after": 0.004661442464053082,
+        "active_clip_fraction": 0.24462014998369744,
+        "gradient_norm": 1295.807373046875,
+        "gradient_clip_factor": 0.0007717196398388651,
+        "modules": {
+          "all": {
+            "changed_elements": 210400160,
+            "changed_fraction": 0.9948151634831849,
+            "update_rms": 1.8516753973980955e-08,
+            "update_max": 2.9802322387695312e-08,
+            "relative_update_norm": 7.95515451927213e-07
+          },
+          "transformer_backbone": {
+            "changed_elements": 201527637,
+            "changed_fraction": 0.9997781689822223,
+            "update_rms": 1.8559641253338992e-08,
+            "update_max": 2.9802322387695312e-08,
+            "relative_update_norm": 7.905907269843497e-07
+          },
+          "transformer_00": {
+            "changed_elements": 12595811,
+            "changed_fraction": 0.999804655749614,
+            "update_rms": 1.8581373038540174e-08,
+            "update_max": 2.2351741790771484e-08,
+            "relative_update_norm": 8.703214034471314e-07
+          },
+          "transformer_01": {
+            "changed_elements": 12595772,
+            "changed_fraction": 0.9998015600869706,
+            "update_rms": 1.8579594274981204e-08,
+            "update_max": 2.2351741790771484e-08,
+            "relative_update_norm": 8.62742954439836e-07
+          },
+          "transformer_02": {
+            "changed_elements": 12595724,
+            "changed_fraction": 0.9997977500406405,
+            "update_rms": 1.8585113346046602e-08,
+            "update_max": 2.2351741790771484e-08,
+            "relative_update_norm": 8.365843383832555e-07
+          },
+          "transformer_03": {
+            "changed_elements": 12595812,
+            "changed_fraction": 0.9998047351255791,
+            "update_rms": 1.8591205906043913e-08,
+            "update_max": 2.2351741790771484e-08,
+            "relative_update_norm": 8.30642592246556e-07
+          },
+          "transformer_04": {
+            "changed_elements": 12595804,
+            "changed_fraction": 0.9998041001178575,
+            "update_rms": 1.8590784184469543e-08,
+            "update_max": 2.2351741790771484e-08,
+            "relative_update_norm": 8.195260948546473e-07
+          },
+          "transformer_05": {
+            "changed_elements": 12595779,
+            "changed_fraction": 0.9998021157187271,
+            "update_rms": 1.8592909569980458e-08,
+            "update_max": 2.2351741790771484e-08,
+            "relative_update_norm": 8.040685616738724e-07
+          },
+          "transformer_06": {
+            "changed_elements": 12595831,
+            "changed_fraction": 0.9998062432689182,
+            "update_rms": 1.859601374725535e-08,
+            "update_max": 2.2351741790771484e-08,
+            "relative_update_norm": 8.013495012849949e-07
+          },
+          "transformer_07": {
+            "changed_elements": 12595854,
+            "changed_fraction": 0.9998080689161181,
+            "update_rms": 1.8594776189827608e-08,
+            "update_max": 2.2351741790771484e-08,
+            "relative_update_norm": 7.994289342017722e-07
+          },
+          "transformer_08": {
+            "changed_elements": 12595782,
+            "changed_fraction": 0.9998023538466227,
+            "update_rms": 1.8596488812872287e-08,
+            "update_max": 2.2351741790771484e-08,
+            "relative_update_norm": 7.905891165334768e-07
+          },
+          "transformer_09": {
+            "changed_elements": 12595833,
+            "changed_fraction": 0.9998064020208486,
+            "update_rms": 1.8599104593381344e-08,
+            "update_max": 2.2351741790771484e-08,
+            "relative_update_norm": 7.889953353876536e-07
+          },
+          "transformer_10": {
+            "changed_elements": 12595696,
+            "changed_fraction": 0.9997955275136146,
+            "update_rms": 1.858268709588237e-08,
+            "update_max": 2.2351741790771484e-08,
+            "relative_update_norm": 7.89948602742546e-07
+          },
+          "transformer_11": {
+            "changed_elements": 12595862,
+            "changed_fraction": 0.9998087039238397,
+            "update_rms": 1.8602165156072772e-08,
+            "update_max": 2.9802322387695312e-08,
+            "relative_update_norm": 7.758817641256554e-07
+          },
+          "transformer_12": {
+            "changed_elements": 12595847,
+            "changed_fraction": 0.9998075132843616,
+            "update_rms": 1.8599750101224157e-08,
+            "update_max": 2.2351741790771484e-08,
+            "relative_update_norm": 7.669478790105563e-07
+          },
+          "transformer_13": {
+            "changed_elements": 12595606,
+            "changed_fraction": 0.9997883836767455,
+            "update_rms": 1.8573103553915935e-08,
+            "update_max": 2.9802322387695312e-08,
+            "relative_update_norm": 7.53665364389355e-07
+          },
+          "transformer_14": {
+            "changed_elements": 12594506,
+            "changed_fraction": 0.9997010701150126,
+            "update_rms": 1.8448999990590475e-08,
+            "update_max": 2.9802322387695312e-08,
+            "relative_update_norm": 7.352119717071664e-07
+          },
+          "transformer_15": {
+            "changed_elements": 12592118,
+            "changed_fraction": 0.9995115203100869,
+            "update_rms": 1.8236668139805197e-08,
+            "update_max": 2.9802322387695312e-08,
+            "relative_update_norm": 6.832229007926973e-07
+          },
+          "denoiser": {
+            "changed_elements": 3179497,
+            "changed_fraction": 0.9999927662037037,
+            "update_rms": 1.859898960220654e-08,
+            "update_max": 1.955777406692505e-08,
+            "relative_update_norm": 1.1607530786023059e-06
+          },
+          "qpos_output": {
+            "changed_elements": 1080343,
+            "changed_fraction": 0.9999935206183181,
+            "update_rms": 1.864157665468108e-08,
+            "update_max": 2.9802322387695312e-08,
+            "relative_update_norm": 9.83582946684935e-07
+          },
+          "contact_head": {
+            "changed_elements": 0,
+            "changed_fraction": 0.0,
+            "update_rms": 0.0,
+            "update_max": 0.0,
+            "relative_update_norm": 0.0
+          },
+          "music_embedder": {
+            "changed_elements": 2171752,
+            "changed_fraction": 0.9999300153229609,
+            "update_rms": 1.8620696678684187e-08,
+            "update_max": 2.9802322387695312e-08,
+            "relative_update_norm": 8.31442676714503e-07
+          },
+          "cond_exists_embedder": {
+            "changed_elements": 2100216,
+            "changed_fraction": 0.9999961908824964,
+            "update_rms": 1.8690079235591933e-08,
+            "update_max": 2.2351741790771484e-08,
+            "relative_update_norm": 1.668241843352436e-06
+          },
+          "history_encoder": {
+            "changed_elements": 200812,
+            "changed_fraction": 0.9999004142766093,
+            "update_rms": 1.881966146958398e-08,
+            "update_max": 2.9802322387695312e-08,
+            "relative_update_norm": 4.910706259005777e-07
+          },
+          "prefix_encoder": {
+            "changed_elements": 139903,
+            "changed_fraction": 0.999992852241537,
+            "update_rms": 1.873610608660429e-08,
+            "update_max": 2.2351741790771484e-08,
+            "relative_update_norm": 9.199454408339319e-07
+          }
+        }
+      },
+      {
+        "optimizer_step": 2,
+        "global_chain_count": 8192,
+        "learning_rate": 2.34375e-08,
+        "seconds": 53.640396864153445,
+        "objective_before": 0.004661442464053082,
+        "objective_after": 0.020820956725538783,
+        "active_clip_fraction": 0.3102380176067819,
+        "gradient_norm": 1731.429443359375,
+        "gradient_clip_factor": 0.0005775574645896112,
+        "modules": {
+          "all": {
+            "changed_elements": 206365340,
+            "changed_fraction": 0.9757377059473863,
+            "update_rms": 1.580989476185711e-08,
+            "update_max": 2.9802322387695312e-08,
+            "relative_update_norm": 6.792235611732385e-07
+          },
+          "transformer_backbone": {
+            "changed_elements": 197631356,
+            "changed_fraction": 0.9804487274127753,
+            "update_rms": 1.5853272050390166e-08,
+            "update_max": 2.9802322387695312e-08,
+            "relative_update_norm": 6.753066885029484e-07
+          },
+          "transformer_00": {
+            "changed_elements": 12370936,
+            "changed_fraction": 0.9819549855726246,
+            "update_rms": 1.5490175626588362e-08,
+            "update_max": 2.9802322387695312e-08,
+            "relative_update_norm": 7.255347258033308e-07
+          },
+          "transformer_01": {
+            "changed_elements": 12370304,
+            "changed_fraction": 0.9819048199626107,
+            "update_rms": 1.5725441883977995e-08,
+            "update_max": 2.9802322387695312e-08,
+            "relative_update_norm": 7.302104658140766e-07
+          },
+          "transformer_02": {
+            "changed_elements": 12365591,
+            "changed_fraction": 0.9815307210385679,
+            "update_rms": 1.5900974930582606e-08,
+            "update_max": 2.421438694000244e-08,
+            "relative_update_norm": 7.157613915123161e-07
+          },
+          "transformer_03": {
+            "changed_elements": 12363650,
+            "changed_fraction": 0.9813766522900919,
+            "update_rms": 1.587874358671614e-08,
+            "update_max": 2.421438694000244e-08,
+            "relative_update_norm": 7.094515978352561e-07
+          },
+          "transformer_04": {
+            "changed_elements": 12361158,
+            "changed_fraction": 0.9811788473847842,
+            "update_rms": 1.591687709991241e-08,
+            "update_max": 2.421438694000244e-08,
+            "relative_update_norm": 7.016538955567244e-07
+          },
+          "transformer_05": {
+            "changed_elements": 12360372,
+            "changed_fraction": 0.9811164578761278,
+            "update_rms": 1.5980255582352195e-08,
+            "update_max": 2.9802322387695312e-08,
+            "relative_update_norm": 6.910817841480198e-07
+          },
+          "transformer_06": {
+            "changed_elements": 12358398,
+            "changed_fraction": 0.9809597697207998,
+            "update_rms": 1.598113826406473e-08,
+            "update_max": 2.9802322387695312e-08,
+            "relative_update_norm": 6.886678698776713e-07
+          },
+          "transformer_07": {
+            "changed_elements": 12358711,
+            "changed_fraction": 0.9809846143979111,
+            "update_rms": 1.59975404357291e-08,
+            "update_max": 2.9802322387695312e-08,
+            "relative_update_norm": 6.877682511749348e-07
+          },
+          "transformer_08": {
+            "changed_elements": 12356165,
+            "changed_fraction": 0.980782523190482,
+            "update_rms": 1.6026006777668303e-08,
+            "update_max": 2.9802322387695312e-08,
+            "relative_update_norm": 6.81310685109453e-07
+          },
+          "transformer_09": {
+            "changed_elements": 12351621,
+            "changed_fraction": 0.9804218388045599,
+            "update_rms": 1.5966420741393424e-08,
+            "update_max": 2.9802322387695312e-08,
+            "relative_update_norm": 6.773138688914132e-07
+          },
+          "transformer_10": {
+            "changed_elements": 12351131,
+            "changed_fraction": 0.9803829445816061,
+            "update_rms": 1.5938815950284925e-08,
+            "update_max": 2.9802322387695312e-08,
+            "relative_update_norm": 6.775578432672954e-07
+          },
+          "transformer_11": {
+            "changed_elements": 12346307,
+            "changed_fraction": 0.9800000349254246,
+            "update_rms": 1.5921150357909956e-08,
+            "update_max": 2.9802322387695312e-08,
+            "relative_update_norm": 6.640587330401336e-07
+          },
+          "transformer_12": {
+            "changed_elements": 12341429,
+            "changed_fraction": 0.9796128389671218,
+            "update_rms": 1.5882132257428277e-08,
+            "update_max": 2.9802322387695312e-08,
+            "relative_update_norm": 6.548887795544376e-07
+          },
+          "transformer_13": {
+            "changed_elements": 12337208,
+            "changed_fraction": 0.9792777930179631,
+            "update_rms": 1.5824165750315228e-08,
+            "update_max": 2.9802322387695312e-08,
+            "relative_update_norm": 6.421180829602012e-07
+          },
+          "transformer_14": {
+            "changed_elements": 12327125,
+            "changed_fraction": 0.9784774451607332,
+            "update_rms": 1.5711878072132846e-08,
+            "update_max": 2.9802322387695312e-08,
+            "relative_update_norm": 6.261347966355041e-07
+          },
+          "transformer_15": {
+            "changed_elements": 12311250,
+            "changed_fraction": 0.9772173517129968,
+            "update_rms": 1.5497668808584554e-08,
+            "update_max": 2.9802322387695312e-08,
+            "relative_update_norm": 5.806083736821365e-07
+          },
+          "denoiser": {
+            "changed_elements": 3119494,
+            "changed_fraction": 0.9811210497181965,
+            "update_rms": 1.5337039240886316e-08,
+            "update_max": 2.421438694000244e-08,
+            "relative_update_norm": 9.571764881000526e-07
+          },
+          "qpos_output": {
+            "changed_elements": 1058133,
+            "changed_fraction": 0.9794353681677235,
+            "update_rms": 1.5242313849394785e-08,
+            "update_max": 2.9802322387695312e-08,
+            "relative_update_norm": 8.042281047599502e-07
+          },
+          "contact_head": {
+            "changed_elements": 0,
+            "changed_fraction": 0.0,
+            "update_rms": 0.0,
+            "update_max": 0.0,
+            "relative_update_norm": 0.0
+          },
+          "music_embedder": {
+            "changed_elements": 2140615,
+            "changed_fraction": 0.9855937463165959,
+            "update_rms": 1.6165029010026904e-08,
+            "update_max": 2.9802322387695312e-08,
+            "relative_update_norm": 7.217933479012655e-07
+          },
+          "cond_exists_embedder": {
+            "changed_elements": 2081959,
+            "changed_fraction": 0.9913033085994637,
+            "update_rms": 1.621863088078754e-08,
+            "update_max": 2.9802322387695312e-08,
+            "relative_update_norm": 1.4476449421971277e-06
+          },
+          "history_encoder": {
+            "changed_elements": 196151,
+            "changed_fraction": 0.9766919614404079,
+            "update_rms": 1.5825352983912943e-08,
+            "update_max": 2.9802322387695312e-08,
+            "relative_update_norm": 4.129386717004676e-07
+          },
+          "prefix_encoder": {
+            "changed_elements": 137632,
+            "changed_fraction": 0.9837602927721867,
+            "update_rms": 1.572467771645151e-08,
+            "update_max": 2.9802322387695312e-08,
+            "relative_update_norm": 7.720838818048736e-07
+          }
+        }
+      },
+      {
+        "optimizer_step": 3,
+        "global_chain_count": 8152,
+        "learning_rate": 2.9296875e-08,
+        "seconds": 56.453405229374766,
+        "objective_before": 0.020820956725538783,
+        "objective_after": 0.029926389648788073,
+        "active_clip_fraction": 0.41294424519074013,
+        "gradient_norm": 1516.2462158203125,
+        "gradient_clip_factor": 0.0006595234922314125,
+        "modules": {
+          "all": {
+            "changed_elements": 204674476,
+            "changed_fraction": 0.9677429537257729,
+            "update_rms": 1.5368952506016746e-08,
+            "update_max": 2.9802322387695312e-08,
+            "relative_update_norm": 6.602798318674322e-07
+          },
+          "transformer_backbone": {
+            "changed_elements": 196020633,
+            "changed_fraction": 0.9724579341119163,
+            "update_rms": 1.5423078920541253e-08,
+            "update_max": 2.9802322387695312e-08,
+            "relative_update_norm": 6.569816200533799e-07
+          },
+          "transformer_00": {
+            "changed_elements": 12245711,
+            "changed_fraction": 0.9720151303289848,
+            "update_rms": 1.4607365072198425e-08,
+            "update_max": 2.9802322387695312e-08,
+            "relative_update_norm": 6.841853099739087e-07
+          },
+          "transformer_01": {
+            "changed_elements": 12263919,
+            "changed_fraction": 0.9734604079035601,
+            "update_rms": 1.5073083681116443e-08,
+            "update_max": 2.9802322387695312e-08,
+            "relative_update_norm": 6.999182307951269e-07
+          },
+          "transformer_02": {
+            "changed_elements": 12273585,
+            "changed_fraction": 0.9742276559832967,
+            "update_rms": 1.544667784466611e-08,
+            "update_max": 2.9802322387695312e-08,
+            "relative_update_norm": 6.953118079955564e-07
+          },
+          "transformer_03": {
+            "changed_elements": 12271275,
+            "changed_fraction": 0.9740442975036576,
+            "update_rms": 1.5380450124493604e-08,
+            "update_max": 2.9802322387695312e-08,
+            "relative_update_norm": 6.871881805026288e-07
+          },
+          "transformer_04": {
+            "changed_elements": 12272740,
+            "changed_fraction": 0.9741605832926928,
+            "update_rms": 1.5504920300812362e-08,
+            "update_max": 2.9802322387695312e-08,
+            "relative_update_norm": 6.834938580322156e-07
+          },
+          "transformer_05": {
+            "changed_elements": 12272253,
+            "changed_fraction": 0.9741219271976347,
+            "update_rms": 1.5634288272222733e-08,
+            "update_max": 2.9802322387695312e-08,
+            "relative_update_norm": 6.761200895482431e-07
+          },
+          "transformer_06": {
+            "changed_elements": 12271078,
+            "changed_fraction": 0.9740286604385109,
+            "update_rms": 1.5662994535133933e-08,
+            "update_max": 2.9802322387695312e-08,
+            "relative_update_norm": 6.749582478988134e-07
+          },
+          "transformer_07": {
+            "changed_elements": 12265834,
+            "changed_fraction": 0.9736124128769406,
+            "update_rms": 1.558971461477438e-08,
+            "update_max": 2.9802322387695312e-08,
+            "relative_update_norm": 6.702349529282017e-07
+          },
+          "transformer_08": {
+            "changed_elements": 12265317,
+            "changed_fraction": 0.9735713755029262,
+            "update_rms": 1.5682199117770063e-08,
+            "update_max": 2.9802322387695312e-08,
+            "relative_update_norm": 6.666944530900399e-07
+          },
+          "transformer_09": {
+            "changed_elements": 12258377,
+            "changed_fraction": 0.9730205063043567,
+            "update_rms": 1.5583730450618854e-08,
+            "update_max": 2.9802322387695312e-08,
+            "relative_update_norm": 6.610797082743949e-07
+          },
+          "transformer_10": {
+            "changed_elements": 12255904,
+            "changed_fraction": 0.972824209542388,
+            "update_rms": 1.5585707205128186e-08,
+            "update_max": 2.9802322387695312e-08,
+            "relative_update_norm": 6.625472178379409e-07
+          },
+          "transformer_11": {
+            "changed_elements": 12244094,
+            "changed_fraction": 0.9718867793932374,
+            "update_rms": 1.5534144171461536e-08,
+            "update_max": 2.9802322387695312e-08,
+            "relative_update_norm": 6.479170077339062e-07
+          },
+          "transformer_12": {
+            "changed_elements": 12232094,
+            "changed_fraction": 0.9709342678106966,
+            "update_rms": 1.5435873686104856e-08,
+            "update_max": 2.9802322387695312e-08,
+            "relative_update_norm": 6.364876151108474e-07
+          },
+          "transformer_13": {
+            "changed_elements": 12221626,
+            "changed_fraction": 0.9701033602068602,
+            "update_rms": 1.536771396433407e-08,
+            "update_max": 2.9802322387695312e-08,
+            "relative_update_norm": 6.235960358284721e-07
+          },
+          "transformer_14": {
+            "changed_elements": 12208285,
+            "changed_fraction": 0.9690444054549703,
+            "update_rms": 1.5344462122484372e-08,
+            "update_max": 2.9802322387695312e-08,
+            "relative_update_norm": 6.114928865096219e-07
+          },
+          "transformer_15": {
+            "changed_elements": 12198541,
+            "changed_fraction": 0.9682709660499471,
+            "update_rms": 1.5300828341475444e-08,
+            "update_max": 2.9802322387695312e-08,
+            "relative_update_norm": 5.732338955270117e-07
+          },
+          "denoiser": {
+            "changed_elements": 3073216,
+            "changed_fraction": 0.9665660225442834,
+            "update_rms": 1.3529204687869266e-08,
+            "update_max": 2.9802322387695312e-08,
+            "relative_update_norm": 8.443504931360872e-07
+          },
+          "qpos_output": {
+            "changed_elements": 1041867,
+            "changed_fraction": 0.9643791363909844,
+            "update_rms": 1.4018888501244328e-08,
+            "update_max": 2.9802322387695312e-08,
+            "relative_update_norm": 7.396766848020566e-07
+          },
+          "contact_head": {
+            "changed_elements": 0,
+            "changed_fraction": 0.0,
+            "update_rms": 0.0,
+            "update_max": 0.0,
+            "relative_update_norm": 0.0
+          },
+          "music_embedder": {
+            "changed_elements": 2131471,
+            "changed_fraction": 0.981383615482084,
+            "update_rms": 1.6310802750601753e-08,
+            "update_max": 2.9802322387695312e-08,
+            "relative_update_norm": 7.283023680765039e-07
+          },
+          "cond_exists_embedder": {
+            "changed_elements": 2075885,
+            "changed_fraction": 0.9884112361348123,
+            "update_rms": 1.6297541909384843e-08,
+            "update_max": 2.9802322387695312e-08,
+            "relative_update_norm": 1.4546883937228306e-06
+          },
+          "history_encoder": {
+            "changed_elements": 194051,
+            "changed_fraction": 0.9662354604843849,
+            "update_rms": 1.464114518438816e-08,
+            "update_max": 2.9802322387695312e-08,
+            "relative_update_norm": 3.820385594616242e-07
+          },
+          "prefix_encoder": {
+            "changed_elements": 137353,
+            "changed_fraction": 0.9817660681610247,
+            "update_rms": 1.586777042082347e-08,
+            "update_max": 2.9802322387695312e-08,
+            "relative_update_norm": 7.791097570539118e-07
+          }
+        }
+      }
+    ],
+    "final_restore": {
+      "scope": "complete_state_exact_bytes",
+      "fields": {
+        "actor": {
+          "expected_sha256": "68cf37aacc6c0a7e26cca66ba9210f786a3525d688247f9ce32500edc711e1b0",
+          "recovered_sha256": "68cf37aacc6c0a7e26cca66ba9210f786a3525d688247f9ce32500edc711e1b0",
+          "identical": true
+        },
+        "optimizer": {
+          "expected_sha256": "22ba037f4aa106178a3bd10665055aa1e63af90fc3c0003c59f6d2f0af6852a6",
+          "recovered_sha256": "22ba037f4aa106178a3bd10665055aa1e63af90fc3c0003c59f6d2f0af6852a6",
+          "identical": true
+        },
+        "controller": {
+          "expected_sha256": "4eb1d96e9b606c7ff9718a563637f84e1a0f9cd815f6c460a0c89da8b5937a51",
+          "recovered_sha256": "4eb1d96e9b606c7ff9718a563637f84e1a0f9cd815f6c460a0c89da8b5937a51",
+          "identical": true
+        },
+        "bc": {
+          "expected_sha256": "e1fc4564cf95729e4fe9737b4465d0d6a50f481ec5c1eebab4334a0ff261717f",
+          "recovered_sha256": "e1fc4564cf95729e4fe9737b4465d0d6a50f481ec5c1eebab4334a0ff261717f",
+          "identical": true
+        },
+        "rng": {
+          "expected_sha256": "4b088c38cd450df5cd9e8ef32785a967d7bd38a9944e6fed93ce80fd432f54d5",
+          "recovered_sha256": "4b088c38cd450df5cd9e8ef32785a967d7bd38a9944e6fed93ce80fd432f54d5",
+          "identical": true
+        }
+      },
+      "identical": true
+    }
+  },
+  "temporary_cleanup": {
+    "required": true,
+    "pending": false,
+    "completed": true,
+    "removed_root": "/data1/user/liwei/GENMO_outputs/closedloop_stage10/stage2_continuous_rolling_acceptance_20261022",
+    "removed_bytes": 83486305080,
+    "removed_files": 454,
+    "seconds": 9.189085483551025,
+    "scope": "task-specific temporary acceptance data only; reports archived in Git; historical production assets untouched",
+    "gpu_processes_at_cleanup": 0
+  },
+  "diagnostic_attempt_notes": {
+    "capture": "预付余量5步不足以承接25步预热RPC，恢复25步预付余量后成功；真实世界仍400步。",
+    "rpc_chunking_comparison": "临时脚本误将list Anchor当dict，修正审计脚本，生产实现不变。",
+    "rpc_chunking_comparison02": "严格集合相等断言揭示一条未提交尾部候选差异；随后差异审计记录全部共同链和奖励完全相同。"
+  }
+}
