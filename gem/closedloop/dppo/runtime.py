@@ -154,12 +154,8 @@ class InProcessTrainingRuntime:
         local_call(c.distributed,lambda:path.mkdir(parents=True,exist_ok=False))
         credits=[collection_credit(n+3,c.stage['ppo_rollout']['world_seconds'],self.latency_budget_s) for n in counts]
         if world_seconds is not None:
-            # 全世界时间含reset预热，额外最多一格用于合法边界；失败不凭配额增加执行。
-            from .rolling import decision_grid
-            grid_controls=decision_grid(c.config)//12
-            controls=round(world_seconds*50)+grid_controls
-            credits=[dict(control_steps=controls,physics_steps=4*controls,
-                generations=(controls+grid_controls-1)//grid_controls+2) for _ in counts]
+            from .rolling import world_window_credit
+            credits=[world_window_credit(c.config,world_seconds) for _ in counts]
         total={key:sum(v[key] for v in credits) for key in credits[0]}
         per_rank=c.distributed.all_gather_object(total);lease=f'{c.session.name}/{label}'
         parent=local_call(c.distributed,lambda:begin_lease(c.distributed,c.manager,c.budget,path,lease,per_rank,c.guard))

@@ -92,3 +92,16 @@ def test_variable_duration_gae_hand_calculation_and_terminal_tail():
         tail=delta+((.95*.98)**(counts[i]/25)*tail if i<2 else 0.)
         expected.insert(0,tail)
     torch.testing.assert_close(result['advantages_raw'],torch.tensor(expected,dtype=torch.float64),rtol=1e-12,atol=1e-12)
+
+
+def test_rolling_window_prepayment_covers_inflight_twenty_five_control_warmup():
+    from gem.closedloop.dppo.memory_execution import PrepaidMemoryBudget
+    # 第399个实际控制后仍能预付一次25步；后端只执行最后1步并退款。
+    from gem.closedloop.dppo.rolling import world_window_credit
+    limits=world_window_credit({'runtime':{'generation_schedule':SCHEDULE}},8.)
+    assert limits['generations']==87
+    credit=PrepaidMemoryBudget({key:limits[key] for key in ('control_steps','physics_steps')})
+    credit.reserve('collect',control_steps=399,physics_steps=1596)
+    credit.reserve('warmup',control_steps=25,physics_steps=100)
+    credit.settle_control('warmup',25,dict(executed_control_steps=1,executed_physics_steps=4))
+    assert credit.used==dict(control_steps=400,physics_steps=1600)

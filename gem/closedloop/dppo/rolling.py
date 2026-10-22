@@ -77,3 +77,11 @@ def scheduling_report(rows):
         cancelled_at_boundary=sum(r.metadata.get('pending_cancelled_at_boundary',False) for r in rows),
         rejections=dict(Counter(r.metadata['rejection']['code'] for r in rows if r.metadata.get('rejection'))),
         storage='host_complete_chains_with_bounded_device_cache')
+
+
+def world_window_credit(config, seconds):
+    """预付覆盖最大25步在途RPC；真实窗口只执行400步，未执行部分必须退款。"""
+    controls=round(seconds*50)+25
+    grid_controls=decision_grid(config)//12
+    return dict(control_steps=controls, physics_steps=4*controls,
+        generations=(controls+grid_controls-1)//grid_controls+2)
