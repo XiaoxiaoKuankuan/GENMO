@@ -196,7 +196,7 @@ stage10:
     accepted_iterations: 2000
     control_steps: 1100000000
     generations: 40000000
-    optimizer_attempts: 32000
+    optimizer_attempts: 18000
     physics_steps: 4400000000
   performance:
     bc_batch_forward: true

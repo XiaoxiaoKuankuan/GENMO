@@ -62,7 +62,7 @@ def validate_optimization_configuration(config,maximum_steps):
             or not 1<=trust['max_attempts']<=10
             or not 0<trust['minimum_trial_lr_ratio']<=1):
         raise ValueError('Explicit bounded joint-KL backtracking required')
-    if s['limits']['optimizer_attempts']<s['limits']['accepted_iterations']*maximum_steps*trust['max_attempts']:
+    if s['limits']['optimizer_attempts']<s['run_control']['max_training_iterations']*maximum_steps*trust['max_attempts']:
         raise ValueError('Budget must cover every planned optimizer update')
     if s['kl']['reduction']!='chain_joint':raise ValueError('Trust-region must use complete-chain joint KL')
     for key in ('mean_coordinate','maximum_step_mean_coordinate','p95_coordinate','mean_joint'):
