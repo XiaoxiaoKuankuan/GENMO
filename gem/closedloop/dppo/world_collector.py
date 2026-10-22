@@ -232,8 +232,18 @@ class WorldEnvironmentCollector:
                 if not ready and not waiting and len(results)<len(flows):raise RuntimeError('World state machine made no progress')
             if waiting:raise RuntimeError('World finished with pending physical replies')
             return results
-        except BaseException:
+        except BaseException as error:
             self.cancelled.set()
+            # 未完成的MC任务可能尚无episode文件；保留各lane接管证据。
+            from .reference_lifecycle import flush_reference_events
+            for state in self.states:
+                if state is None:
+                    continue
+                try:
+                    flush_reference_events(state.resource.env,'world_failure:'+type(error).__name__)
+                except Exception as evidence_error:
+                    import warnings
+                    warnings.warn('Reference lifecycle evidence failed: '+str(evidence_error))
             raise
         finally:self.active=False
 

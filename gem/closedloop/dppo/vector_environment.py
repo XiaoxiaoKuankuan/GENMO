@@ -13,7 +13,7 @@ preview和真实reserve使用相同快照/公式，Critic与下一次Actor得到
 from __future__ import annotations
 from .env_adapter import UpperEnvironment,ExecutionIntegrityError
 
-DEADLINE_CONTRACT='available_reference_deadline_cap.v1'
+DEADLINE_CONTRACT='available_reference_deadline_cap.v2'
 
 
 def bounded_reference_deadline(snapshot, requested, *, minimum_prefix=12, rolling=False):
@@ -21,13 +21,19 @@ def bounded_reference_deadline(snapshot, requested, *, minimum_prefix=12, rollin
     source_end=int(snapshot['source_end_tick'])
     reference_end=int(snapshot['reference_valid_end_tick'])
     # ceil(protected+12,20)<=source_end；deadline需额外保护10*12 tick。
-    maximum=((min(reference_end,source_end-12)-(0 if rolling else 120))//12)*12
+    # 前瞻可改写，不代表等待期间可缺失。到达前旧参考仍须覆盖完整GMT窗口。
+    maximum=((min(reference_end,source_end-12)-120)//12)*12
+    if rolling:
+        # 最坏情况下提交会被拒绝；必须仍能在30/50Hz共同格构造真实终态条件。
+        # 仅在参考临近耗尽时收紧deadline，不改变实际到达时间或常规生成周期。
+        maximum=(maximum//60)*60
     if source_end<tick+(minimum_prefix-1)*20 or maximum<tick:
         raise ExecutionIntegrityError('No causal reference horizon for a new GPU decision')
     deadline=min(requested,maximum)
     return deadline,dict(contract=DEADLINE_CONTRACT,requested_deadline_tick=requested,
         effective_deadline_tick=deadline,maximum_supported_deadline_tick=maximum,
-        reduced=deadline<requested,source_end_tick=source_end,reference_valid_end_tick=reference_end)
+        reduced=deadline<requested,source_end_tick=source_end,reference_valid_end_tick=reference_end,
+        waiting_lookahead_ticks=120)
 
 
 class VectorUpperEnvironment(UpperEnvironment):
@@ -50,6 +56,8 @@ class VectorUpperEnvironment(UpperEnvironment):
             if fragment_reference_boundary(self.snapshot, minimum_prefix=6 if self.rolling else 12, grid=self.decision_ticks, rolling=self.rolling)==self.snapshot['tick']:
                 row.truncated=True;row.reason='reference_horizon_truncated'
                 row.metadata['reference_boundary_reset']=dict(contract=FRAGMENT_CONTRACT,tick=self.snapshot['tick'])
+                from .reference_lifecycle import flush_reference_events
+                flush_reference_events(self,row.reason)
             if not row.executed_control_steps:
                 raise ExecutionIntegrityError('GPU collection cannot count a zero-control administrative action')
         return row

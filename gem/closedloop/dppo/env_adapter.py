@@ -38,6 +38,7 @@ from gem.closedloop.dppo.target_activity import load_paired_activity
 from gem.closedloop.frozen_actor import stable_noise_seed
 from gem.runtime.closedloop_protocol import RemoteError
 from .world_flow import run_synchronous, backend_operation, LocalOperation
+from .reference_lifecycle import record_reference_event, flush_reference_events
 
 
 def cpu_copy(value):
@@ -456,6 +457,13 @@ class UpperEnvironment:
         from .rolling_schedule import next_decision_tick
         ready_tick = next_decision_tick(start, arrival, self.config)
         boundary = self._execution_boundary(generated, arrival, ready_tick)
+        record_reference_event(self,'generation_ready',plan_id=generated['meta']['plan_id'],
+            deadline_tick=generated['meta'].get('deadline_tick'),arrival_tick=arrival,
+            ready_tick=ready_tick,prefix_frames=generated['meta'].get('prefix_frames'),
+            seed=generated.get('seed'),prepared=candidate is not None,rejection=generated['rejection'],
+            boundary=boundary)
+        if generated['rejection']:
+            flush_reference_events(self,'prepare_rejected')
         # 物理时间上限必须真正限制advance，而不只是事后给超时的转移打标签。
         # 预热的600 tick不计入片段；到时保留重置前的真实状态供Value自举。
         execution_end = min(self.music_end_tick, self.soft_end_tick,
@@ -477,7 +485,16 @@ class UpperEnvironment:
                 try:
                     commit = yield from backend_operation('commit_plan', prepared_plan_id=candidate['prepared_plan_id'],
                                                expected_control_tick=tick)
+                    # 提交可恰好发生在下一决策格；无需多推进物理一步，就应看到新权威范围。
+                    # ACK只携带参考元数据，真实机器人状态/历史/tick保持原快照。
+                    if 'reference_state' in commit:
+                        state=commit['reference_state']
+                        if (state['episode_id']!=self.snapshot['episode_id'] or
+                                state['env_id']!=self.snapshot['env_id']):
+                            raise ExecutionIntegrityError('Committed reference belongs to another environment/episode')
+                        self.snapshot={**self.snapshot,**state}
                     if self.reference_credit is not None:self.reference_credit.committed(generated['meta']['plan_id'],tick)
+                    record_reference_event(self,'committed',plan_id=generated['meta']['plan_id'],tick=tick)
                 except RemoteError as exc:
                     recoverable = {'late_plan'} | ({'splice_discontinuity','protection_advanced','protected_reference_changed'} if self.rolling else set())
                     if exc.code not in recoverable:
@@ -485,8 +502,16 @@ class UpperEnvironment:
                     # 延迟到达不是有限但非法的动作；保留事件，不让策略替时序故障付罚分。
                     rejection = dict(code=exc.code, message=str(exc), policy_penalty=False,
                                      category='late_arrival' if exc.code == 'late_plan' else 'reference_continuity')
+                    record_reference_event(self,'commit_rejected',plan_id=generated['meta']['plan_id'],rejection=rejection)
+                    flush_reference_events(self,'commit_rejected')
+                    # prepare成功不保证commit成功；继续旧参考时重新核对耗尽边界。
+                    boundary=self._execution_boundary({**generated,'prepared':None},arrival,ready_tick)
+                    if boundary is not None:
+                        execution_end=min(execution_end,boundary['tick'])
                 generated['commit_seconds'] = time.perf_counter()-commit_begin
                 pending = False
+                if tick>=execution_end:
+                    break
             if not pending and tick >= ready_tick:
                 break
             stop = min(execution_end, arrival if pending and arrival>tick else ready_tick,
@@ -516,6 +541,10 @@ class UpperEnvironment:
         time_limit_reached = bool(not terminated and end >= self.soft_end_tick)
         reason = self.snapshot.get('reason') or ('music_end' if terminated else
             boundary['reason'] if boundary_reached else 'physical_safety_limit' if truncated else None)
+        record_reference_event(self,'execution_end',tick=end,reason=reason,
+            committed=commit is not None,rejection=rejection,boundary_reached=boundary_reached)
+        if boundary_reached or (rejection and (terminated or truncated)):
+            flush_reference_events(self,reason or 'rejected_at_episode_end')
         rejected_action = bool(rejection and rejection.get('policy_penalty',
             rejection.get('code') in {'invalid_qpos','invalid_quaternion','invalid_plan_output','known_source_changed'}))
         event_reward = self.reward.event_reward('reference_rejected') if rejected_action else 0.

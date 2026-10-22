@@ -9,7 +9,7 @@ FRAGMENT_CONTRACT='available_reference_fragment_boundary.v3'
 
 
 def fragment_reference_boundary(snapshot, *, minimum_prefix=12, grid=300, rolling=False):
-    """返回同时支持最小前缀、GMT十控制步前瞻及差分的最后0.5秒决策点。"""
+    """返回支持最小前缀、GMT十控制步前瞻及差分的最后共同决策格点。"""
     source=int(snapshot['source_end_tick'])
     valid=int(snapshot['reference_valid_end_tick'])
     latest_deadline=((min(valid,source-12)-120)//12)*12
