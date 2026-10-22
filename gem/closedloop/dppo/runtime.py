@@ -157,7 +157,9 @@ class InProcessTrainingRuntime:
             # 全世界时间含reset预热，额外最多一格用于合法边界；失败不凭配额增加执行。
             from .rolling_schedule import decision_ticks
             grid_controls=decision_ticks(c.config)//12
-            controls=round(world_seconds*50)+grid_controls
+            # 边界可截短到0.1秒，但reset预热仍按最多25控制步预占；
+            # settle只结算实际执行步，不能把请求预占余量误缩成决策网格。
+            controls=round(world_seconds*50)+25
             credits=[dict(control_steps=controls,physics_steps=4*controls,
                 generations=(controls+grid_controls-1)//grid_controls+2) for _ in counts]
         total={key:sum(v[key] for v in credits) for key in credits[0]}

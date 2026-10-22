@@ -108,3 +108,14 @@ def test_dynamic_prefix_estimate_does_not_peek_future_and_roundtrips(tmp_path):
     env.rolling_delay_samples=[]
     restore_execution_state(env,saved)
     assert env._request()['deadline_tick']==708 and env.rolling_delay_samples==[72,84]
+
+
+def test_rollout_end_prepays_full_warmup_request_but_settles_actual_five_controls():
+    from gem.closedloop.dppo.memory_execution import PrepaidMemoryBudget
+    credit=dict(control_steps=425,physics_steps=1700,generations=82,accepted_iterations=1,optimizer_attempts=1)
+    budget=PrepaidMemoryBudget(credit)
+    budget.reserve('train',control_steps=395,physics_steps=1580)
+    budget.reserve('train',control_steps=25,physics_steps=100)
+    budget.settle_control('train',25,dict(executed_control_steps=5,executed_physics_steps=20,
+        physics_count_exact=True,transition_valid=True))
+    assert budget.used['control_steps']==400 and budget.used['physics_steps']==1600
