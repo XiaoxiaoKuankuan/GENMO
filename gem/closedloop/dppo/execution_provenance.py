@@ -72,7 +72,9 @@ def consumption_report(records,*,frames=60):
     result={key:dict(**item,window_frame_weight=[0.]*frames,current_frame_weight=[0.]*frames,
         reward_frame_weight=[0.]*frames,window_generated_frame_weight=[0.]*frames,
         current_generated_frame_weight=[0.]*frames,reward_generated_frame_weight=[0.]*frames,
-        first_window_tick=None,first_current_tick=None) for key,item in plans.items()}
+        first_window_tick=None,first_current_tick=None,
+        first_generated_window_tick=None,first_generated_current_tick=None,last_generated_current_tick=None,
+        generated_current_control_weight=0.) for key,item in plans.items()}
     unresolved={kind:0. for kind in ('window','current','reward')}
     def origin(plan,frame,seen=()):
         if plan.startswith('bootstrap:'):return ('bootstrap',frame)
@@ -104,7 +106,15 @@ def consumption_report(records,*,frames=60):
                 item[kind+'_frame_weight'][frame]+=weight
                 source=origin(plan,frame)
                 if source is None:unresolved[kind]+=weight
-                elif source[0]!='bootstrap':result[source[0]][kind+'_generated_frame_weight'][source[1]]+=weight
+                elif source[0]!='bootstrap':
+                    target=result[source[0]]
+                    target[kind+'_generated_frame_weight'][source[1]]+=weight
+                    if kind in ('window','current'):
+                        field='first_generated_'+kind+'_tick'
+                        if target[field] is None:target[field]=begin
+                    if kind=='current':
+                        target['last_generated_current_tick']=begin
+                        target['generated_current_control_weight']+=weight
             if kind in ('window','current') and item['first_'+kind+'_tick'] is None:item['first_'+kind+'_tick']=begin
     for item in result.values():
         current=item['current_frame_weight'];window=item['window_frame_weight']

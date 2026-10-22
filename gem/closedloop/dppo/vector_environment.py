@@ -16,12 +16,12 @@ from .env_adapter import UpperEnvironment,ExecutionIntegrityError
 DEADLINE_CONTRACT='available_reference_deadline_cap.v1'
 
 
-def bounded_reference_deadline(snapshot, requested, *, minimum_prefix=12):
+def bounded_reference_deadline(snapshot, requested, *, minimum_prefix=12, rolling=False):
     tick=int(snapshot['tick'])
     source_end=int(snapshot['source_end_tick'])
     reference_end=int(snapshot['reference_valid_end_tick'])
     # ceil(protected+12,20)<=source_end；deadline需额外保护10*12 tick。
-    maximum=((min(reference_end,source_end-12)-120)//12)*12
+    maximum=((min(reference_end,source_end-12)-(0 if rolling else 120))//12)*12
     if source_end<tick+(minimum_prefix-1)*20 or maximum<tick:
         raise ExecutionIntegrityError('No causal reference horizon for a new GPU decision')
     deadline=min(requested,maximum)
@@ -33,7 +33,7 @@ def bounded_reference_deadline(snapshot, requested, *, minimum_prefix=12):
 class VectorUpperEnvironment(UpperEnvironment):
     def _execution_boundary(self, generated, arrival, ready_tick):
         from .vector_boundary import fragment_reference_boundary,FRAGMENT_CONTRACT
-        supported=fragment_reference_boundary(self.snapshot)
+        supported=fragment_reference_boundary(self.snapshot, minimum_prefix=6 if self.rolling else 12, grid=self.decision_ticks, rolling=self.rolling)
         # 迟于已承诺deadline的票据不可能安装。到达前仅执行现有真实参考，最多到
         # 仍具有合法bootstrap条件的网格点；不得在参考耗尽后虚构GMT输入。
         cannot_extend=generated['prepared'] is None or arrival>generated['meta']['deadline_tick']
@@ -47,7 +47,7 @@ class VectorUpperEnvironment(UpperEnvironment):
         from .vector_boundary import fragment_reference_boundary,FRAGMENT_CONTRACT
         row=yield from super().step_flow(**kwargs)
         if not kwargs.get('deterministic',False) and not row.terminated:
-            if fragment_reference_boundary(self.snapshot)==self.snapshot['tick']:
+            if fragment_reference_boundary(self.snapshot, minimum_prefix=6 if self.rolling else 12, grid=self.decision_ticks, rolling=self.rolling)==self.snapshot['tick']:
                 row.truncated=True;row.reason='reference_horizon_truncated'
                 row.metadata['reference_boundary_reset']=dict(contract=FRAGMENT_CONTRACT,tick=self.snapshot['tick'])
             if not row.executed_control_steps:
@@ -57,7 +57,7 @@ class VectorUpperEnvironment(UpperEnvironment):
     def _request(self):
         request=super()._request()
         request['deadline_tick'],self.deadline_diagnostic=bounded_reference_deadline(
-            self.snapshot,request['deadline_tick'],minimum_prefix=request['min_prefix'])
+            self.snapshot,request['deadline_tick'],minimum_prefix=request['min_prefix'],rolling=self.rolling)
         return request
 
     def generate(self,**kwargs):

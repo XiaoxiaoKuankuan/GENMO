@@ -67,6 +67,10 @@ class UpperEnvironment:
         self.snapshot = None
         from .reference_credit import ReferenceCreditLedger
         self.reference_credit = ReferenceCreditLedger() if config.get('stage10',{}).get('ppo_rollout',{}).get('credit_contract') else None
+        from .rolling_schedule import rolling, decision_ticks
+        self.rolling = rolling(config)
+        self.decision_ticks = decision_ticks(config)
+        self.rolling_delay_samples = []
         self.attempt = self.decision = self.episode_count = 0
         self.latency_budget_s = float(config['stage9'].get('latency_budget_s', .5))
         self.mode = config['stage9'].get('execution_mode', 'latency')
@@ -269,9 +273,14 @@ class UpperEnvironment:
         request_id = f"{self.snapshot['episode_id']}:decision:{self.decision}"
         if self.rank is not None:
             request_id += f':rank:{self.rank}'
+        budget_ticks=ceil_control_tick(self.latency_budget_s*600)
+        if self.rolling and self.rolling_delay_samples:
+            # 只用已经完成的请求，不提前读取本次随机延迟；最长8条观测加明确40ms裕量。
+            guard=ceil_control_tick(self.config.get('timing',{}).get('latency_guard_s',.04)*600)
+            budget_ticks=min(564,max(self.rolling_delay_samples[-8:])+guard)
         return dict(env_id=self.snapshot['env_id'], episode_id=self.snapshot['episode_id'],
             request_id=request_id, decision_tick=tick,
-            deadline_tick=tick+ceil_control_tick(self.latency_budget_s*600), min_prefix=12)
+            deadline_tick=tick+budget_ticks, min_prefix=6 if self.rolling else 12)
 
     def preview_context(self):
         return run_synchronous(self, self.preview_context_flow())
@@ -438,13 +447,14 @@ class UpperEnvironment:
 
     def _step_flow(self, *, deterministic=False):
         start = int(self.snapshot['tick'])
-        if start%300:
+        if start%self.decision_ticks:
             raise ExecutionIntegrityError('Upper action requested outside the decision grid')
         generated = yield from self.generate_flow(deterministic=deterministic)
         self._inflight_sample = generated
         candidate = generated['prepared']
         arrival = self._arrival_tick(generated, start)
-        ready_tick = max(start+300, int(math.ceil(arrival/300))*300)
+        from .rolling_schedule import next_decision_tick
+        ready_tick = next_decision_tick(start, arrival, self.config)
         boundary = self._execution_boundary(generated, arrival, ready_tick)
         # 物理时间上限必须真正限制advance，而不只是事后给超时的转移打标签。
         # 预热的600 tick不计入片段；到时保留重置前的真实状态供Value自举。
@@ -469,17 +479,18 @@ class UpperEnvironment:
                                                expected_control_tick=tick)
                     if self.reference_credit is not None:self.reference_credit.committed(generated['meta']['plan_id'],tick)
                 except RemoteError as exc:
-                    if exc.code != 'late_plan':
+                    recoverable = {'late_plan'} | ({'splice_discontinuity','protection_advanced','protected_reference_changed'} if self.rolling else set())
+                    if exc.code not in recoverable:
                         raise
                     # 延迟到达不是有限但非法的动作；保留事件，不让策略替时序故障付罚分。
                     rejection = dict(code=exc.code, message=str(exc), policy_penalty=False,
-                                     category='late_arrival')
+                                     category='late_arrival' if exc.code == 'late_plan' else 'reference_continuity')
                 generated['commit_seconds'] = time.perf_counter()-commit_begin
                 pending = False
             if not pending and tick >= ready_tick:
                 break
             stop = min(execution_end, arrival if pending and arrival>tick else ready_tick,
-                       ((tick//300)+1)*300)
+                       ((tick//self.decision_ticks)+1)*self.decision_ticks)
             advanced = yield from self.advance_flow(min(25,(stop-tick)//12))
             reward_started = time.perf_counter()
             for row, result in zip(advanced, self.reward.evaluate_batch(advanced)):
@@ -492,7 +503,7 @@ class UpperEnvironment:
                 rewards.append(float(result['reward']))
             training_reward_seconds += time.perf_counter()-reward_started
             if getattr(self,'rollout_window_reached',False):break
-            if pending and self.snapshot['tick']%300==0:
+            if pending and self.snapshot['tick']%self.decision_ticks==0:
                 events.append(dict(kind='decision_missed',tick=self.snapshot['tick']))
             if self.snapshot['tick'] > self.soft_end_tick+600*max(2.,2*self.latency_budget_s+.5):
                 raise ExecutionIntegrityError('Pending drain exceeded finite guard')
@@ -515,6 +526,8 @@ class UpperEnvironment:
             zero_step_event = 0.
         else:
             zero_step_event = event_reward
+        if self.rolling and end >= arrival:
+            self.rolling_delay_samples=(self.rolling_delay_samples+[arrival-start])[-8:]
         self.decision += 1
         next_context = None
         next_critic_context = None
@@ -537,7 +550,10 @@ class UpperEnvironment:
             for plan in row.get('consumed_plan_ids', []):
                 if plan is not None:
                     first_consumption.setdefault(str(plan),int(row['control_tick_begin']))
-        metadata = dict(critic_context=generated["critic_context"],next_critic_context=next_critic_context,
+        metadata = dict(generation_schedule=self.config.get('runtime',{}).get('generation_schedule','fixed_grid.v1'),
+            actual_decision_interval_ticks=end-start, actual_decision_interval_seconds=(end-start)/600.,
+            next_legal_decision_tick=ready_tick, measured_arrival_tick=arrival,
+            critic_context=generated["critic_context"],next_critic_context=next_critic_context,
             generation_world_anchor=cpu_copy(generated['meta'].get('world_anchor')),
             remaining_music_seconds=self.remaining_music(start),
             next_remaining_music_seconds=self.remaining_music(end), sampler_trace=trace,

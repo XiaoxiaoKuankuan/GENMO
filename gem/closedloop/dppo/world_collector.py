@@ -278,7 +278,7 @@ class WorldEnvironmentCollector:
         return rows
 
     def collect(self, *,world_seconds,policy_version):
-        if world_seconds<=0 or world_seconds%0.5:raise ValueError('World duration must lie on the decision grid')
+        from .rolling_schedule import capacity as schedule_capacity
         for slot in range(self.num_envs):self._resource(slot)
         for state in self.states:state.resource.env.rollout_window_reached=False
         self.window_record=None
@@ -315,7 +315,7 @@ class WorldEnvironmentCollector:
                 profile.dump_stats(str(self.states[0].resource.env.output.parent/'world_python_profile.pstats'))
         if signature!=self.policy._parameter_signature():raise RuntimeError('Policy changed during collection')
         rows=[fragments[i] for i in range(self.num_envs)]
-        capacity=round(world_seconds/.5)
+        capacity=schedule_capacity(self.states[0].resource.env.config,world_seconds)
         if any(len(fragment)>capacity for fragment in rows):
             raise RuntimeError('Shared decision-grid capacity exceeded; cannot perform multiple on-policy PG steps')
         protocol_after=self.world_call('transport_statistics') if protocol_before is not None else {}
@@ -327,6 +327,7 @@ class WorldEnvironmentCollector:
         return rows,dict(schema=WORLD_FLOW_CONTRACT,fragment_contract=WORLD_FLOW_CONTRACT,
             collection_contract='shared_world_sim_time.v1',world_window=self.window_record,
             quota_alignment_removed=True,physical_episodes_preserved=True,
+            decision_capacity_per_environment=capacity,
             total_transitions=sum(map(len,rows)),fragment_lengths=list(map(len,rows)),allocated_envs=self.num_envs,
             active_envs=self.num_envs,seconds=time.perf_counter()-started,batches=self.batch_reports,
             world_timing=self.world_timing,columnar_reward_cpu_timings=reward_timings,

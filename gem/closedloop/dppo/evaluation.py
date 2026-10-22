@@ -306,6 +306,11 @@ def _decision_evidence(result, index):
             'generation_horizon_frames':frames,'new_reference_frames':frames-prefix,
             'generated_joint_limit_diagnostics':_plain(generated['joint_limit_diagnostics']),
             'events': _plain(metadata.get('events', [])), 'raw_sample_path': str(metadata.get('raw_sample_path', '')),
+            'compact_execution_provenance':_plain(metadata.get('compact_execution_provenance')),
+            'reference_commit':_plain(metadata.get('published')),
+            'measured_arrival_tick':metadata.get('measured_arrival_tick'),
+            'actual_decision_interval_ticks':metadata.get('actual_decision_interval_ticks'),
+            'generation_schedule':metadata.get('generation_schedule','fixed_grid.v1'),
             'controls': controls}
 
 

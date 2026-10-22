@@ -37,13 +37,17 @@ class ReferenceCreditLedger:
             generation_wall_seconds=None if generation_wall_seconds is None else float(generation_wall_seconds),
             last_possible_tick=int(decision_tick)+int(horizon_ticks)+120,
             commit_tick=None,first_window_observed_tick=None,first_current_consumed_tick=None,
-            first_reward_reference_tick=None,episode_closed=False)
+            first_reward_reference_tick=None,replaced_future_tick=None,replaced_by_plan_id=None,episode_closed=False)
         self.dirty[key]=self.records[key]
 
     def committed(self, plan_id, tick):
         item=self.records[str(plan_id)]
         if item['commit_tick'] is not None:raise ValueError('Reference plan committed twice')
         item['commit_tick']=int(tick);self.dirty[str(plan_id)]=item
+        parent=self.records.get(str(item.get('parent_plan_id')))
+        if parent is not None:
+            parent['replaced_future_tick']=int(tick);parent['replaced_by_plan_id']=str(plan_id)
+            self.dirty[str(item['parent_plan_id'])]=parent
 
     def _mark(self, plan, field, tick):
         key=str(plan)

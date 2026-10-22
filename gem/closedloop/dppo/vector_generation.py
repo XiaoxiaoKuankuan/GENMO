@@ -179,8 +179,10 @@ def generate_for_environment_flow(env):
     try:
         prepared = yield from backend_operation('prepare_plan', generated_plan=reference_plan_payload(result['generated']))
     except RemoteError as exc:
-        if exc.code not in {'invalid_qpos','invalid_quaternion','invalid_plan_output','known_source_changed'}: raise
-        rejection = dict(code=exc.code, message=str(exc), policy_penalty=True, category='finite_invalid_reference')
+        recoverable={'invalid_qpos','invalid_quaternion','invalid_plan_output','known_source_changed'}
+        if env.rolling:recoverable |= {'splice_discontinuity','protected_reference_changed','protection_advanced'}
+        if exc.code not in recoverable: raise
+        rejection = dict(code=exc.code, message=str(exc), policy_penalty=exc.code in {'invalid_qpos','invalid_quaternion','invalid_plan_output','known_source_changed'}, category='finite_invalid_reference')
     journal_seconds += env.backend.last_call_timing.get('journal_seconds', 0.)
     prepared_at = time.perf_counter()
     shared = result.pop('_raw_evidence', None)

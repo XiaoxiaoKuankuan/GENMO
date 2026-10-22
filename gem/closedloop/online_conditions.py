@@ -118,6 +118,8 @@ class OnlineConditionBuilder:
         prefix = _integer(meta["prefix_frames"], "prefix_frames")
         if not 0 <= prefix < self.motion_frames:
             raise ValueError("prefix_frames must leave new space in the configured horizon")
+        if meta.get('reference_update_contract') == 'executed_only_future_replace.v1' and not (prefix == 0 or 6 <= prefix <= 30):
+            raise ValueError('Rolling prefix lies outside Stage1 trained range')
         source = _tensor(reservation["source_qpos"], torch.float32)
         source_ticks = _tensor(reservation["source_ticks"])
         if source.shape != (prefix, 28) or source_ticks.shape != (prefix,):

@@ -31,6 +31,8 @@ def capture_execution_state(env):
     result = {name:getattr(env,name) for name in ('decision', 'attempt', 'episode_count', 'latency_budget_s')}
     clock = getattr(env, 'deployment_clock', None)
     if clock is not None: result['deployment_profile_sha256'] = clock.sha256
+    if getattr(env,'rolling',False):
+        result['rolling_delay_samples']=list(env.rolling_delay_samples)
     validate_execution_state(result)
     return result
 
@@ -50,6 +52,11 @@ def restore_execution_state(env, state, *, spent_generations=None):
     if clock is not None and state['latency_budget_s'] != clock.budget_seconds:
         raise ValueError('Checkpoint changed modeled prefix budget')
     env.latency_budget_s = state['latency_budget_s']
+    if getattr(env,'rolling',False):
+        samples=state.get('rolling_delay_samples',[])
+        if len(samples)>8 or any(type(t)is not int or t<0 or t%12 for t in samples):
+            raise ValueError('Invalid causal rolling latency estimator state')
+        env.rolling_delay_samples=list(samples)
 
 
 

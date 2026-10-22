@@ -35,6 +35,8 @@ def configuration(path,*,genmo_repo=None,gmt_repo=None):
         raise ValueError('New 当前 full configuration required')
     if genmo_repo:c['paths']['genmo_repo']=str(Path(genmo_repo).resolve())
     if gmt_repo:c['paths']['gmt_repo']=str(Path(gmt_repo).resolve())
+    from .rolling_schedule import validate_schedule, capacity, decision_ticks
+    validate_schedule(c)
     s=c['stage10'];t=s['training'];scale=s['scale'];world=s['distributed']['world_size']
     precision=s['precision']
     if (precision['mode']!='native_fp32' or precision['attention']!='sdpa_math'
@@ -93,10 +95,10 @@ def configuration(path,*,genmo_repo=None,gmt_repo=None):
         raise ValueError('model and training guidance_scale differ')
     if 'episode_seconds' in t:raise ValueError('physical_episode and ppo_rollout must be separate')
     seconds=s['physical_episode']['safety_limit_seconds']
-    if seconds is not None and (not math.isfinite(seconds) or seconds<=0 or seconds%0.5):raise ValueError('Physical safety limit must lie on the decision grid')
+    if seconds is not None and (not math.isfinite(seconds) or seconds<=0 or round(seconds*600)%decision_ticks(c)):raise ValueError('Physical safety limit must lie on the decision grid')
     if s['physical_episode'].get('time_limit_bootstrap',True) is not True:
         raise ValueError('Physical time limits truncate sampling and bootstrap the pre-reset Value')
-    if s['ppo_rollout']['world_seconds']<=0 or s['ppo_rollout']['world_seconds']%0.5:raise ValueError('Rollout world window must lie on the decision grid')
+    if s['ppo_rollout']['world_seconds']<=0 or round(s['ppo_rollout']['world_seconds']*600)%decision_ticks(c):raise ValueError('Rollout world window must lie on the decision grid')
     if s['ppo_rollout']['collection_contract']!='shared_world_sim_time.v1':raise ValueError('Current collection uses shared world simulation time')
     if 'decisions_per_environment' in scale:raise ValueError('Per-environment decision quotas are no longer supported')
     horizon=s['generation_horizon']
@@ -122,7 +124,7 @@ def configuration(path,*,genmo_repo=None,gmt_repo=None):
         refit=mc.get('refit_if_ev_below')
         if refit is not None and (not isinstance(refit,(int,float)) or not 0<refit<=1):
             raise ValueError('refit_if_ev_below must be null or in (0, 1]')
-    n=c['runtime']['num_envs'];decisions=math.ceil(s['ppo_rollout']['world_seconds']/.5);chains=n*decisions*world
+    n=c['runtime']['num_envs'];decisions=capacity(c,s['ppo_rollout']['world_seconds']);chains=n*decisions*world
     for k,v in [('world',world),('environments',n),('decisions',decisions),('optimizer chains',scale['actor_minibatch_chains']),
                 ('Actor microbatch',t['denoising_microbatch']),('KL microbatch',t['kl_microbatch'])]:
         if type(v)is not int or v<1:raise ValueError(f'{k} must be positive integer')
