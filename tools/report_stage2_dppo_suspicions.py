@@ -114,6 +114,8 @@ def physics(root,expected_fingerprint):
                                for group in report['aggregate']['by_source'].values()]))
     result=dict(tasks=report['task_count'],completed=aggregate['music_completion_count'],
         failures=aggregate['physical_failure_count'],duration=aggregate['executed_seconds'],
+        administrative_truncations=aggregate['administrative_truncation_count'],
+        infrastructure_failures=aggregate['infrastructure_failure_count'],
         source_balanced_task_return=report['source_balanced_reward'],source_balanced_return_per_second=balanced_rate,
         total_return=aggregate['reward_sum'],raw_errors=aggregate['raw_errors'],
         tracking=aggregate['components'],actual_actor_fingerprint=expected_fingerprint,
@@ -160,7 +162,8 @@ def paired(before,after):
         paired_95_interval=np.quantile(bootstrap,[.025,.975]).tolist(),
         cluster_scope='source_balanced_music_group_clusters_fixed_training_music_not_generalization_claim',
         newly_failed_tasks=[s['task_id'] for s in samples if s['candidate_failure'] and not s['baseline_failure']],
-        reference_change_scope='real_reward_center_reference_on_common_executed_times_after_state_divergence_not_same_state_causal_comparison',
+        reference_change_scope='real_GMT_current_verified_by_immutable_plan_and_tick_plus_reward_center_after_state_divergence_not_same_state_causal_comparison',
+        initial_actual_joint_max_difference=max(s['first_control_actual_joint_max_difference'] for s in samples),
         actual_reward_center_joint_delta_rms_rad_mean=available_mean([s['actual_reward_center_joint_delta_rms_rad'] for s in samples]),
         actual_gmt_current_reference_delta_rms_rad_mean=available_mean([s['actual_gmt_current_reference_delta']['rms_rad'] for s in samples]),
         actual_gmt_current_reference_verified_controls=sum(s['actual_gmt_current_reference_delta']['verified_controls'] for s in samples),
@@ -173,10 +176,14 @@ def main():
     args=parser.parse_args();root=args.root.resolve(strict=True)
     replay=read(root/'replay/summary.json');origin=read(root/'origin.json')
     if replay['source_checkpoint_sha256']!=origin['checkpoint_sha']:raise ValueError('计算验证来源不是已停止正式模型')
-    report=dict(origin=origin,history=read(root/'history.json'),replay=replay,clips={})
+    if hashlib.sha256((Path(replay['case'])/'case.json').read_bytes()).hexdigest()!=replay['case_sha256']:
+        raise ValueError('固定真实case身份被改写')
+    report=dict(origin=origin,history=read(root/'history.json'),replay=replay,clips={},
+                production_preservation=read(root/'production_preservation.json'),input_probability_sha256={})
     for tag in ['clip_0_01','clip_0_005','clip_0_003']:
         folder=root/'replay'/tag;summary=read(folder/'summary.json')
         probabilities=torch.load(folder/'probability_records.pt',map_location='cpu',weights_only=False)
+        report['input_probability_sha256'][tag]=hashlib.sha256((folder/'probability_records.pt').read_bytes()).hexdigest()
         report['clips'][tag]=dict(summary=summary,joint_counterfactual=joined_objectives(probabilities),
             common_clip_001_objective=summarize_records(probabilities['final'],probabilities['advantages'],clip=.01)['production_objective'],
             actual_minibatch_audit=actual_minibatches(Path(replay['case']),summary,probabilities),
