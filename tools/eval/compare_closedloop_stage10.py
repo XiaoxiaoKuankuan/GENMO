@@ -118,7 +118,9 @@ def paired_execution_identity(identity):
         'torch_version','recovery')
     training=identity['training_identity']
     require(all(k in training for k in required),'Paired evaluation lacks explicit execution identity')
-    return dict(identity,training_identity={k:training[k] for k in required})
+    # 训练片段上限由evaluation_episode_flow按评估任务独立覆盖；评估实际长度已由
+    # 外层episode_seconds和每个原始episode核验。不能把训练20秒误当成评估20秒。
+    return dict(identity,training_identity={k:training[k] for k in required if k!='physical_episode'})
 
 
 def compare_evaluations(initial_report, final_report):

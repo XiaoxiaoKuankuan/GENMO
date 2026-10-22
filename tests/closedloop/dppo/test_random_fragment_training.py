@@ -88,7 +88,8 @@ def test_only_changed_value_target_requires_unconditional_refit(old_gamma,gamma,
     result=_fragment_value_initialization(state,old_gamma,gamma)
     assert result['mc_preheat_complete'] is not requires_fit
     assert result['requires_fragment_value_validation'] is not requires_fit
-    assert result['requires_stage1_rebaseline'] and result['requires_transfer_start_evaluation']
+    assert result['requires_stage1_rebaseline'] is requires_fit
+    assert result['requires_transfer_start_evaluation']
     assert state==original
 
 
@@ -162,6 +163,24 @@ def test_supervisor_uses_fragment_transfer_once_then_exact_resume(tmp_path):
     resumed=training_command(config,tmp_path,200,parent,random_fragments=True)
     assert resumed[-2:]==['--resume','latest']
     assert '--initialize-random-fragments' not in resumed
+
+
+def test_full_music_comparison_uses_actual_evaluation_limit_and_keeps_real_physics_checks():
+    from tools.eval.compare_closedloop_stage10 import paired_execution_identity
+    training=dict(schema='test',assets={'stage1':'same'},kernel={'eta':.1},reward={'version':'v3'},
+        runtime={'control_hz':50},timing={'decision_ticks':300},
+        physical_episode={'safety_limit_seconds':None},ppo_rollout={'world_seconds':8.},
+        generation_horizon={'frames':60},physical_configuration={'yaw_error_rad':None},
+        data_catalog={'split':'train'},source_stage1_step=595000,torch_version='same',recovery='fresh')
+    a=dict(training_identity=training,episode_seconds=None,physics={'control_hz':50})
+    b=copy.deepcopy(a);b['training_identity']['physical_episode']['safety_limit_seconds']=20.
+    assert paired_execution_identity(a)==paired_execution_identity(b)
+    for group,key,value in [('reward','version','changed'),('kernel','eta',.2),
+        ('physical_configuration','yaw_error_rad',.6),('generation_horizon','frames',120)]:
+        changed=copy.deepcopy(b);changed['training_identity'][group][key]=value
+        assert paired_execution_identity(a)!=paired_execution_identity(changed)
+    b['episode_seconds']=20.
+    assert paired_execution_identity(a)!=paired_execution_identity(b)
 
 
 def test_new_discount_rebuilds_stage1_reference_without_resetting_current_actor(tmp_path,monkeypatch):

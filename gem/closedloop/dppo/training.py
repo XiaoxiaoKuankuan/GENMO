@@ -63,12 +63,12 @@ def _requires_initial_evaluation(args, state, baseline_exists):
 def _fragment_value_initialization(state, previous_gamma, gamma):
     """超时自举不改变Value定义；gamma相同先验证，gamma改变才完整重新拟合。
 
-    只安排新实验的价值维护，不改模型、Adam或训练计数；两种情况都重建独立固定
-    参考。旧Critic尚未完成预热时，即使gamma相同也必须执行完整预热。
+    只安排新实验的价值维护，不改模型、Adam或训练计数；同gamma可保留原始固定
+    参考，新gamma重建标签。旧Critic尚未完成预热时仍必须执行完整预热。
     """
     inherited=bool(state.get('mc_preheat_complete')) and previous_gamma==gamma
     return dict(mc_preheat_complete=inherited,requires_fragment_value_validation=inherited,
-        requires_stage1_rebaseline=True,requires_transfer_start_evaluation=True)
+        requires_stage1_rebaseline=not inherited,requires_transfer_start_evaluation=True)
 
 
 def _final_actor_acceptance(actor,kl,limits):
@@ -504,7 +504,9 @@ def run(cargs,config,distributed):
                 import shutil
                 c.budget.initialize_from_checkpoint(payload['budget'])
                 parent=checkpoint.parent.parent
-                if not fragment_transfer:
+                reuse_reference=(not fragment_transfer or not _fragment_value_initialization(payload['state'],
+                    payload['identity']['training']['gamma_upper'],c.settings['gamma_upper'])['requires_stage1_rebaseline'])
+                if reuse_reference:
                     for name in ('evaluation_baseline.json','fixed_diagnostic_reference.json'):
                         if (parent/name).exists():shutil.copy2(parent/name,c.output/name)
                 record=dict(checkpoint=str(checkpoint),sha256=file_sha256(checkpoint),
@@ -523,7 +525,8 @@ def run(cargs,config,distributed):
                         critic_recalibration_required=(payload['identity']['training']['gamma_upper']!=c.settings['gamma_upper']
                             or not payload['state'].get('mc_preheat_complete',False)),
                         critic_independent_validation_required=True,old_rollout_reused=False,
-                        new_fixed_value_reference_required=True)
+                        new_fixed_value_reference_required=not reuse_reference,
+                        original_immutable_evaluation_reference_reused=reuse_reference)
                 atomic_json(c.output/'initialization.json',record)
                 return record
             imported=root_call(distributed,initialize_experiment)
