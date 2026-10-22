@@ -40,10 +40,16 @@ class ReferenceCreditLedger:
             first_reward_reference_tick=None,episode_closed=False)
         self.dirty[key]=self.records[key]
 
-    def committed(self, plan_id, tick):
+    def committed(self, plan_id, tick, *, commit=None):
         item=self.records[str(plan_id)]
         if item['commit_tick'] is not None:raise ValueError('Reference plan committed twice')
         item['commit_tick']=int(tick);self.dirty[str(plan_id)]=item
+        for replacement in (commit or {}).get('overwritten_reference_ranges', []):
+            old=self.records.get(str(replacement['plan_id']))
+            if old is not None:
+                old.setdefault('overwritten_ranges', []).append(dict(replacement, replacement_tick=int(tick),
+                    replacement_plan_id=str(plan_id)))
+                self.dirty[str(replacement['plan_id'])]=old
 
     def _mark(self, plan, field, tick):
         key=str(plan)
@@ -60,6 +66,9 @@ class ReferenceCreditLedger:
     def observe(self, rows):
         for row in rows:
             begin,end=int(row['control_tick_begin']),int(row['tick'])
+            if ('gmt_reference_version' in row and
+                    row['gmt_reference_version'] != row['reward_reference_version']):
+                raise ValueError('GMT input and physical reward used different reference versions')
             if str(row['episode_id'])!=self.episode or begin!=self.last_tick or end!=begin+12:
                 raise ValueError('Duplicate, missing, or cross-episode physical control in reference ledger')
             ticks=[int(t) for t in row['consumed_reference_ticks']]

@@ -269,7 +269,10 @@ class WorldEnvironmentCollector:
             row.metadata.update(collector_env_slot=slot,training_task=dict(dataset=task['sample']['dataset'],
                 sample_id=task['sample']['row']['sample_id'],split='train',music_start_frame=task['music_start_frame'],
                 manifest_sha256=task['sample']['manifest_sha256'],sampling=copy.deepcopy(task.get('sampling'))))
-            sampler.record_execution(task,row.executed_control_steps);rows.append(row);state.transitions+=1
+            sampler.record_execution(task,row.executed_control_steps)
+            from .rolling import rolling_enabled, store_rollout_on_host
+            if rolling_enabled(env.config):store_rollout_on_host(row)
+            rows.append(row);state.transitions+=1
             if row.terminated or row.truncated:state.task=None
         if rows and not rows[-1].terminated:
             # 这里只切当前Actor版本的GAE；正常物理episode、参考和音乐继续存在。
@@ -315,7 +318,8 @@ class WorldEnvironmentCollector:
                 profile.dump_stats(str(self.states[0].resource.env.output.parent/'world_python_profile.pstats'))
         if signature!=self.policy._parameter_signature():raise RuntimeError('Policy changed during collection')
         rows=[fragments[i] for i in range(self.num_envs)]
-        capacity=round(world_seconds/.5)
+        from .rolling import generation_capacity
+        capacity=generation_capacity(self.states[0].resource.env.config, world_seconds)
         if any(len(fragment)>capacity for fragment in rows):
             raise RuntimeError('Shared decision-grid capacity exceeded; cannot perform multiple on-policy PG steps')
         protocol_after=self.world_call('transport_statistics') if protocol_before is not None else {}
@@ -327,6 +331,7 @@ class WorldEnvironmentCollector:
         return rows,dict(schema=WORLD_FLOW_CONTRACT,fragment_contract=WORLD_FLOW_CONTRACT,
             collection_contract='shared_world_sim_time.v1',world_window=self.window_record,
             quota_alignment_removed=True,physical_episodes_preserved=True,
+            decision_capacity_per_environment=capacity,
             total_transitions=sum(map(len,rows)),fragment_lengths=list(map(len,rows)),allocated_envs=self.num_envs,
             active_envs=self.num_envs,seconds=time.perf_counter()-started,batches=self.batch_reports,
             world_timing=self.world_timing,columnar_reward_cpu_timings=reward_timings,

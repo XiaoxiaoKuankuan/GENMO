@@ -38,6 +38,7 @@ from gem.closedloop.dppo.target_activity import load_paired_activity
 from gem.closedloop.frozen_actor import stable_noise_seed
 from gem.runtime.closedloop_protocol import RemoteError
 from .world_flow import run_synchronous, backend_operation, LocalOperation
+from .rolling import rolling_enabled, decision_grid, next_decision_tick
 
 
 def cpu_copy(value):
@@ -271,7 +272,16 @@ class UpperEnvironment:
             request_id += f':rank:{self.rank}'
         return dict(env_id=self.snapshot['env_id'], episode_id=self.snapshot['episode_id'],
             request_id=request_id, decision_tick=tick,
-            deadline_tick=tick+ceil_control_tick(self.latency_budget_s*600), min_prefix=12)
+            deadline_tick=self._reservation_deadline(tick),
+            min_prefix=6 if rolling_enabled(self.config) else 12)
+
+    def _reservation_deadline(self, tick):
+        # 实测延迟样本在请求身份确定后即可复现；不以训练推理墙钟缩放。
+        if rolling_enabled(self.config) and self.deployment_clock is not None:
+            return self.deployment_clock.sample(seed=self.config['stage10']['seed'],
+                sample_id=self.sample['row']['sample_id'], music_start_frame=self.music_start_frame,
+                decision_tick=tick)['arrival_tick']
+        return tick+ceil_control_tick(self.latency_budget_s*600)
 
     def preview_context(self):
         return run_synchronous(self, self.preview_context_flow())
@@ -368,9 +378,9 @@ class UpperEnvironment:
         try:
             prepared = self.backend.call('prepare_plan', generated_plan=generated)
         except RemoteError as exc:
-            if exc.code not in {'invalid_qpos','invalid_quaternion','invalid_plan_output','known_source_changed'}:
+            if exc.code not in {'invalid_qpos','invalid_quaternion','invalid_plan_output','known_source_changed'} and not (rolling_enabled(self.config) and exc.code in {'protected_reference_changed','protection_advanced','locked_source_changed','stale_reference_version','stale_plan'}):
                 raise
-            rejection = dict(code=exc.code, message=str(exc), policy_penalty=True,
+            rejection = dict(code=exc.code, message=str(exc), policy_penalty=exc.code in {'invalid_qpos','invalid_quaternion','invalid_plan_output','known_source_changed'},
                              category='finite_invalid_reference')
         prepared_at = time.perf_counter()
         timings['prepare_rpc_seconds'] = prepared_at-preparing
@@ -438,13 +448,14 @@ class UpperEnvironment:
 
     def _step_flow(self, *, deterministic=False):
         start = int(self.snapshot['tick'])
-        if start%300:
+        grid = decision_grid(self.config)
+        if start%grid:
             raise ExecutionIntegrityError('Upper action requested outside the decision grid')
         generated = yield from self.generate_flow(deterministic=deterministic)
         self._inflight_sample = generated
         candidate = generated['prepared']
         arrival = self._arrival_tick(generated, start)
-        ready_tick = max(start+300, int(math.ceil(arrival/300))*300)
+        ready_tick = next_decision_tick(start, arrival, grid)
         boundary = self._execution_boundary(generated, arrival, ready_tick)
         # 物理时间上限必须真正限制advance，而不只是事后给超时的转移打标签。
         # 预热的600 tick不计入片段；到时保留重置前的真实状态供Value自举。
@@ -467,19 +478,20 @@ class UpperEnvironment:
                 try:
                     commit = yield from backend_operation('commit_plan', prepared_plan_id=candidate['prepared_plan_id'],
                                                expected_control_tick=tick)
-                    if self.reference_credit is not None:self.reference_credit.committed(generated['meta']['plan_id'],tick)
+                    if self.reference_credit is not None:self.reference_credit.committed(generated['meta']['plan_id'],tick, commit=commit)
                 except RemoteError as exc:
-                    if exc.code != 'late_plan':
+                    if exc.code != 'late_plan' and not (rolling_enabled(self.config) and exc.code in {
+                            'stale_plan','stale_reference_version','protection_advanced','locked_source_changed','protected_reference_changed'}):
                         raise
                     # 延迟到达不是有限但非法的动作；保留事件，不让策略替时序故障付罚分。
                     rejection = dict(code=exc.code, message=str(exc), policy_penalty=False,
-                                     category='late_arrival')
+                                     category='reference_transaction_rejected')
                 generated['commit_seconds'] = time.perf_counter()-commit_begin
                 pending = False
             if not pending and tick >= ready_tick:
                 break
             stop = min(execution_end, arrival if pending and arrival>tick else ready_tick,
-                       ((tick//300)+1)*300)
+                       ((tick//grid)+1)*grid)
             advanced = yield from self.advance_flow(min(25,(stop-tick)//12))
             reward_started = time.perf_counter()
             for row, result in zip(advanced, self.reward.evaluate_batch(advanced)):
@@ -492,7 +504,7 @@ class UpperEnvironment:
                 rewards.append(float(result['reward']))
             training_reward_seconds += time.perf_counter()-reward_started
             if getattr(self,'rollout_window_reached',False):break
-            if pending and self.snapshot['tick']%300==0:
+            if pending and self.snapshot['tick']%grid==0:
                 events.append(dict(kind='decision_missed',tick=self.snapshot['tick']))
             if self.snapshot['tick'] > self.soft_end_tick+600*max(2.,2*self.latency_budget_s+.5):
                 raise ExecutionIntegrityError('Pending drain exceeded finite guard')
@@ -537,7 +549,10 @@ class UpperEnvironment:
             for plan in row.get('consumed_plan_ids', []):
                 if plan is not None:
                     first_consumption.setdefault(str(plan),int(row['control_tick_begin']))
-        metadata = dict(critic_context=generated["critic_context"],next_critic_context=next_critic_context,
+        metadata = dict(generation_schedule=self.config.get('runtime',{}).get('generation_schedule'),
+            scheduled_next_decision_tick=ready_tick, simulated_arrival_tick=arrival,
+            pending_cancelled_at_boundary=bool(pending), actual_decision_duration_seconds=(end-start)/600,
+            critic_context=generated["critic_context"],next_critic_context=next_critic_context,
             generation_world_anchor=cpu_copy(generated['meta'].get('world_anchor')),
             remaining_music_seconds=self.remaining_music(start),
             next_remaining_music_seconds=self.remaining_music(end), sampler_trace=trace,

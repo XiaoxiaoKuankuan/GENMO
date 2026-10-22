@@ -686,7 +686,9 @@ def run(cargs,config,distributed):
                     collection_by_rank=empty_collections,state=copy.deepcopy(c.state),
                     actor_steps=0,critic_steps=0,policy_version_unchanged=True)))
                 continue
-            cache=RolloutTensorCache(rows,targets,distributed.device,max_device_bytes=c.stage['storage']['tensor_cache_max_bytes'],preserve_device=True)
+            from .rolling import rolling_enabled
+            cache=RolloutTensorCache(rows,targets,distributed.device,max_device_bytes=c.stage['storage']['tensor_cache_max_bytes'],
+                preserve_device=not rolling_enabled(c.config))
             probability_frequency=c.stage['checks']['full_probability_every']
             full_probability=(c.state['rollouts_completed']==0 or strict or
                 (probability_frequency>0 and c.state['rollouts_completed']%probability_frequency==0))

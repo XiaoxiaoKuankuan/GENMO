@@ -106,10 +106,12 @@ def _evaluate_impl(c, label, *, write_report=True):
         seconds=c.stage['evaluation']['episode_seconds']
         if seconds is None:
             controls=sum(math.ceil(t['remaining_music_seconds']*50)+75 for t in child['tasks'])
-            generations=sum(math.ceil(t['remaining_music_seconds']/.5)+5 for t in child['tasks'])
+            from .rolling import generation_capacity
+            generations=sum(generation_capacity(c.config,t['remaining_music_seconds'])+5 for t in child['tasks'])
             per_rank.append(dict(control_steps=max(1,controls),physics_steps=4*max(1,controls),generations=max(1,generations)))
         else:
-            decisions=len(child['tasks'])*(math.ceil(seconds/.5)+2)
+            from .rolling import generation_capacity
+            decisions=len(child['tasks'])*(generation_capacity(c.config,seconds)+2)
             per_rank.append(collection_credit(decisions,seconds,latencies[rank]))
         slots=c.stage['evaluation'].get('envs_per_rank',1)
         # 预付覆盖最坏的多slot不等长尾部；结算仅使用实际执行/分配的物理步。

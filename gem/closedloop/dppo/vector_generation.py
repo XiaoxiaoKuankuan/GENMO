@@ -16,6 +16,7 @@ from concurrent.futures import Future, TimeoutError as FutureTimeout
 import time
 import torch
 from .rollout_helpers import split_trace
+from .rolling import rolling_enabled
 from .env_adapter import cpu_copy
 from gem.closedloop.frozen_actor import stable_noise_seed
 from gem.runtime.closedloop_protocol import RemoteError
@@ -179,8 +180,8 @@ def generate_for_environment_flow(env):
     try:
         prepared = yield from backend_operation('prepare_plan', generated_plan=reference_plan_payload(result['generated']))
     except RemoteError as exc:
-        if exc.code not in {'invalid_qpos','invalid_quaternion','invalid_plan_output','known_source_changed'}: raise
-        rejection = dict(code=exc.code, message=str(exc), policy_penalty=True, category='finite_invalid_reference')
+        if exc.code not in {'invalid_qpos','invalid_quaternion','invalid_plan_output','known_source_changed'} and not (rolling_enabled(env.config) and exc.code in {'protected_reference_changed','protection_advanced','locked_source_changed','stale_reference_version','stale_plan'}): raise
+        rejection = dict(code=exc.code, message=str(exc), policy_penalty=exc.code in {'invalid_qpos','invalid_quaternion','invalid_plan_output','known_source_changed'}, category='finite_invalid_reference')
     journal_seconds += env.backend.last_call_timing.get('journal_seconds', 0.)
     prepared_at = time.perf_counter()
     shared = result.pop('_raw_evidence', None)

@@ -38,6 +38,9 @@ def compact_execution(rows,*,ledger,plan_id,decision_tick,commit):
         steps.append(dict(control_tick_begin=begin,control_tick_end=int(row['tick']),
             consumed_reference_ticks=ticks,consumed_plan_indices=[lookup[plan] for plan in plans],
             reference_tick=int(row['reference_tick']),reference_plan_id=str(row['reference_plan_id'])))
+        if 'gmt_reference_version' in row:
+            steps[-1].update(gmt_reference_version=int(row['gmt_reference_version']),
+                reward_reference_version=int(row['reward_reference_version']))
     origins={str(key):dict(decision_tick=int(item['decision_tick']),commit_tick=item['commit_tick'],
         parent_plan_id=item.get('parent_plan_id'),prefix_frames=item.get('prefix_frames'),
         generation_frames=item.get('generation_frames',60))

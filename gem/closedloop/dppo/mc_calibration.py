@@ -130,7 +130,8 @@ def collect_complete_bank(c, label, split, *, samples_per_source, seeds):
     for child in shards:
         # 每首独立reset预热50控制步；真实轨迹期间每个动作至少一个合法决策间隔。
         controls=sum(math.ceil(t['remaining_music_seconds']*50)+75 for t in child['tasks'])
-        generations=sum(math.ceil(t['remaining_music_seconds']/.5)+5 for t in child['tasks'])
+        from .rolling import generation_capacity
+        generations=sum(generation_capacity(c.config,t['remaining_music_seconds'])+5 for t in child['tasks'])
         credits.append(dict(control_steps=max(1,controls),physics_steps=4*max(1,controls),generations=max(1,generations)))
         for key in ('control_steps','physics_steps'):credits[-1][key]*=isolated_env_count(c,'mc_'+label)
     path=c.session/'mc_calibration'/label/f'rank{c.distributed.rank:02d}'

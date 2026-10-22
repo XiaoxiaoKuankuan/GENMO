@@ -155,9 +155,11 @@ class InProcessTrainingRuntime:
         credits=[collection_credit(n+3,c.stage['ppo_rollout']['world_seconds'],self.latency_budget_s) for n in counts]
         if world_seconds is not None:
             # 全世界时间含reset预热，额外最多一格用于合法边界；失败不凭配额增加执行。
-            controls=round(world_seconds*50)+25
+            from .rolling import decision_grid
+            grid_controls=decision_grid(c.config)//12
+            controls=round(world_seconds*50)+grid_controls
             credits=[dict(control_steps=controls,physics_steps=4*controls,
-                generations=(controls+24)//25+2) for _ in counts]
+                generations=(controls+grid_controls-1)//grid_controls+2) for _ in counts]
         total={key:sum(v[key] for v in credits) for key in credits[0]}
         per_rank=c.distributed.all_gather_object(total);lease=f'{c.session.name}/{label}'
         parent=local_call(c.distributed,lambda:begin_lease(c.distributed,c.manager,c.budget,path,lease,per_rank,c.guard))
@@ -196,7 +198,8 @@ class InProcessTrainingRuntime:
         start=time.perf_counter()
         fragments,report=local_call(c.distributed,lambda:self.collector.collect(world_seconds=seconds,policy_version=c.state['policy_version']))
         def prepare_learning():
-            buffer=DeviceRolloutBuffer(fragments,c.policy,c.distributed.device)
+            from .rolling import rolling_enabled
+            buffer=DeviceRolloutBuffer(fragments,c.policy,'cpu' if rolling_enabled(c.config) else c.distributed.device)
             rows=buffer.transitions
             targets=freeze_buffer_targets(buffer,buffer.fragments,c.critic,c.distributed.device,
                 critic_version=c.state['critic_updates'],batch_size=256,gamma_upper=c.settings['gamma_upper'],
@@ -204,6 +207,8 @@ class InProcessTrainingRuntime:
             return buffer,targets
         buffer,targets=local_call(c.distributed,prepare_learning)
         rows=buffer.transitions
+        from .rolling import rolling_enabled, scheduling_report
+        if rolling_enabled(c.config):report['continuous_rolling']=scheduling_report(rows)
         from .joint_limits import summarize_boundaries
         report['joint_limits']=summarize_boundaries(
             [d['joint_limit_diagnostics'] for r in rows for d in r.metadata['reward_details']],

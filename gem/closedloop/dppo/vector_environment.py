@@ -12,28 +12,33 @@ preview和真实reserve使用相同快照/公式，Critic与下一次Actor得到
 """
 from __future__ import annotations
 from .env_adapter import UpperEnvironment,ExecutionIntegrityError
+from .rolling import rolling_enabled, decision_grid
 
 DEADLINE_CONTRACT='available_reference_deadline_cap.v1'
 
 
-def bounded_reference_deadline(snapshot, requested, *, minimum_prefix=12):
+def bounded_reference_deadline(snapshot, requested, *, minimum_prefix=12, rolling=False):
     tick=int(snapshot['tick'])
     source_end=int(snapshot['source_end_tick'])
     reference_end=int(snapshot['reference_valid_end_tick'])
     # ceil(protected+12,20)<=source_end；deadline需额外保护10*12 tick。
+    # 即便前瞻允许被替换，到达前仍靠旧参考推进GMT，必须保留等待期间的前瞻覆盖。
+    # 这是最晚到达限制，不再是新Motion的已知前缀长度。
     maximum=((min(reference_end,source_end-12)-120)//12)*12
     if source_end<tick+(minimum_prefix-1)*20 or maximum<tick:
         raise ExecutionIntegrityError('No causal reference horizon for a new GPU decision')
     deadline=min(requested,maximum)
     return deadline,dict(contract=DEADLINE_CONTRACT,requested_deadline_tick=requested,
         effective_deadline_tick=deadline,maximum_supported_deadline_tick=maximum,
-        reduced=deadline<requested,source_end_tick=source_end,reference_valid_end_tick=reference_end)
+        reduced=deadline<requested,source_end_tick=source_end,reference_valid_end_tick=reference_end,
+        prefix_protects_read_lookahead=not rolling)
 
 
 class VectorUpperEnvironment(UpperEnvironment):
     def _execution_boundary(self, generated, arrival, ready_tick):
         from .vector_boundary import fragment_reference_boundary,FRAGMENT_CONTRACT
-        supported=fragment_reference_boundary(self.snapshot)
+        supported=fragment_reference_boundary(self.snapshot, grid=decision_grid(self.config),
+            minimum_prefix=6 if rolling_enabled(self.config) else 12)
         # 迟于已承诺deadline的票据不可能安装。到达前仅执行现有真实参考，最多到
         # 仍具有合法bootstrap条件的网格点；不得在参考耗尽后虚构GMT输入。
         cannot_extend=generated['prepared'] is None or arrival>generated['meta']['deadline_tick']
@@ -47,7 +52,8 @@ class VectorUpperEnvironment(UpperEnvironment):
         from .vector_boundary import fragment_reference_boundary,FRAGMENT_CONTRACT
         row=yield from super().step_flow(**kwargs)
         if not kwargs.get('deterministic',False) and not row.terminated:
-            if fragment_reference_boundary(self.snapshot)==self.snapshot['tick']:
+            if fragment_reference_boundary(self.snapshot, grid=decision_grid(self.config),
+            minimum_prefix=6 if rolling_enabled(self.config) else 12)==self.snapshot['tick']:
                 row.truncated=True;row.reason='reference_horizon_truncated'
                 row.metadata['reference_boundary_reset']=dict(contract=FRAGMENT_CONTRACT,tick=self.snapshot['tick'])
             if not row.executed_control_steps:
@@ -57,7 +63,7 @@ class VectorUpperEnvironment(UpperEnvironment):
     def _request(self):
         request=super()._request()
         request['deadline_tick'],self.deadline_diagnostic=bounded_reference_deadline(
-            self.snapshot,request['deadline_tick'],minimum_prefix=request['min_prefix'])
+            self.snapshot,request['deadline_tick'],minimum_prefix=request['min_prefix'], rolling=rolling_enabled(self.config))
         return request
 
     def generate(self,**kwargs):
