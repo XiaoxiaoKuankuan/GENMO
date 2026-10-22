@@ -485,13 +485,15 @@ class UpperEnvironment:
                         raise
                     # 延迟到达不是有限但非法的动作；保留事件，不让策略替时序故障付罚分。
                     rejection = dict(code=exc.code, message=str(exc), policy_penalty=False,
-                                     category='reference_transaction_rejected')
+                                     category='reference_transaction_rejected' if rolling_enabled(self.config) else 'late_arrival')
                 generated['commit_seconds'] = time.perf_counter()-commit_begin
                 pending = False
             if not pending and tick >= ready_tick:
                 break
-            stop = min(execution_end, arrival if pending and arrival>tick else ready_tick,
-                       ((tick//grid)+1)*grid)
+            # 100ms网格只限定下一次决策；在途期间直接推进到到达事件，无需每格重做快照。
+            # 单次RPC仍最多25控制步，共享世界会在其他环境事件/窗口边界处提前返回。
+            advance_limit = tick+25*12 if rolling_enabled(self.config) else ((tick//grid)+1)*grid
+            stop = min(execution_end, arrival if pending and arrival>tick else ready_tick, advance_limit)
             advanced = yield from self.advance_flow(min(25,(stop-tick)//12))
             reward_started = time.perf_counter()
             for row, result in zip(advanced, self.reward.evaluate_batch(advanced)):
@@ -504,7 +506,7 @@ class UpperEnvironment:
                 rewards.append(float(result['reward']))
             training_reward_seconds += time.perf_counter()-reward_started
             if getattr(self,'rollout_window_reached',False):break
-            if pending and self.snapshot['tick']%grid==0:
+            if pending and self.snapshot['tick']%grid==0 and not rolling_enabled(self.config):
                 events.append(dict(kind='decision_missed',tick=self.snapshot['tick']))
             if self.snapshot['tick'] > self.soft_end_tick+600*max(2.,2*self.latency_budget_s+.5):
                 raise ExecutionIntegrityError('Pending drain exceeded finite guard')

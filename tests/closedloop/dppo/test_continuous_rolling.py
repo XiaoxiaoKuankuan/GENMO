@@ -115,3 +115,12 @@ def test_legacy_fragment_migration_cannot_bypass_rolling_reference_identity():
     assert _legacy_fragment_execution(old,new)
     new['runtime']['generation_schedule']=SCHEDULE
     assert not _legacy_fragment_execution(old,new)
+
+
+def test_pending_generation_advances_to_arrival_event_without_unneeded_grid_snapshots(tmp_path):
+    env,backend=adapter(tmp_path,elapsed=.26)
+    env.config['runtime']={'generation_schedule':SCHEDULE}
+    row=env.step()
+    assert [payload['control_steps'] for method,payload in backend.calls if method=='advance']==[13,2]
+    assert row.executed_control_steps==15 and row.control_tick_end==780
+    assert not row.metadata['events'] # 忙碌期间经过100ms不是错过一次固定周期决策。
