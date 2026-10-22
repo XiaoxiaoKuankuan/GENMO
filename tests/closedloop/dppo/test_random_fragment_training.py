@@ -23,6 +23,7 @@ from gem.closedloop.dppo.runtime import episode_boundary_summary
 from gem.closedloop.dppo.trainer import fixed_targets
 from gem.closedloop.dppo.training_checkpoint import SCHEMA,load_training_checkpoint
 from gem.closedloop.dppo.training_config import configuration
+from gem.closedloop.dppo.training import _fragment_value_initialization
 from tests.closedloop.dppo.test_delayed_credit import transition
 from tests.closedloop.dppo.test_env_adapter import adapter
 from tests.closedloop.dppo.test_data_learning import actual_step
@@ -77,6 +78,18 @@ def test_new_episode_never_supplies_timeout_value_and_discount_is_physical_time(
     out=fixed_targets([a],None,'cpu',reuse_values=True,critic_version=0,
         gamma_upper=.95,lambda_upper=.98)
     assert out['returns'][0].item()==pytest.approx(.2+.95**(1/25)*.3+.95**(2/25)*4.,abs=2e-8)
+
+
+@pytest.mark.parametrize('old_gamma,gamma,preheated,requires_fit',[
+    (.99,.95,True,True),(.99,.99,True,False),(.99,.99,False,True)])
+def test_only_changed_value_target_requires_unconditional_refit(old_gamma,gamma,preheated,requires_fit):
+    state=dict(iteration=85,actor_updates=182,mc_preheat_complete=preheated)
+    original=copy.deepcopy(state)
+    result=_fragment_value_initialization(state,old_gamma,gamma)
+    assert result['mc_preheat_complete'] is not requires_fit
+    assert result['requires_fragment_value_validation'] is not requires_fit
+    assert result['requires_stage1_rebaseline'] and result['requires_transfer_start_evaluation']
+    assert state==original
 
 
 def test_fragment_transfer_preserves_all_adam_groups_and_rejects_other_behavior_changes(tmp_path):

@@ -60,6 +60,17 @@ def _requires_initial_evaluation(args, state, baseline_exists):
     return True
 
 
+def _fragment_value_initialization(state, previous_gamma, gamma):
+    """超时自举不改变Value定义；gamma相同先验证，gamma改变才完整重新拟合。
+
+    只安排新实验的价值维护，不改模型、Adam或训练计数；两种情况都重建独立固定
+    参考。旧Critic尚未完成预热时，即使gamma相同也必须执行完整预热。
+    """
+    inherited=bool(state.get('mc_preheat_complete')) and previous_gamma==gamma
+    return dict(mc_preheat_complete=inherited,requires_fragment_value_validation=inherited,
+        requires_stage1_rebaseline=True,requires_transfer_start_evaluation=True)
+
+
 def _final_actor_acceptance(actor,kl,limits):
     """有限回溯无可用步是正常采样轮，不能因此终止整个长期训练。"""
     from .actor_backtracking import check_candidate_kl
@@ -509,7 +520,9 @@ def run(cargs,config,distributed):
                         previous_standing_probability=payload['identity']['dataset']['standing_start_probability'],
                         standing_probability=c.stage['dataset']['standing_start_probability'],
                         sampling_pool='fresh_for_new_reset_distribution',
-                        critic_recalibration_required=True,old_rollout_reused=False,
+                        critic_recalibration_required=(payload['identity']['training']['gamma_upper']!=c.settings['gamma_upper']
+                            or not payload['state'].get('mc_preheat_complete',False)),
+                        critic_independent_validation_required=True,old_rollout_reused=False,
                         new_fixed_value_reference_required=True)
                 atomic_json(c.output/'initialization.json',record)
                 return record
@@ -519,8 +532,8 @@ def run(cargs,config,distributed):
             c.state['experiment_initialization']=imported
             if fragment_transfer:
                 # 继承Actor及Adam，但旧gamma的预热结论/固定GAE标签不能当成新目标。
-                c.state.update(mc_preheat_complete=False,requires_stage1_rebaseline=True,
-                    requires_transfer_start_evaluation=True)
+                c.state.update(_fragment_value_initialization(c.state,
+                    payload['identity']['training']['gamma_upper'],c.settings['gamma_upper']))
             c.state['budget']=root_call(distributed,lambda:c.budget.summary())
             c.bc.load_state_dict(payload['rank_states'][distributed.rank]['bc'])
             restore_local_rng(payload['rank_states'][distributed.rank]['rng'],c.generators)
@@ -575,6 +588,13 @@ def run(cargs,config,distributed):
             report.update(status='passed',scope=('independent_complete_MC_critic_calibration_no_Actor_updates'
                 if refit else 'independent_complete_MC_no_network_updates'),final_state=c.state)
             raise _FiniteDiagnosticComplete
+        if (complete_mc.get('enabled') and not cargs.collect_only and not cargs.evaluate_only
+                and c.state.get('requires_fragment_value_validation')):
+            from .mc_calibration import calibrate_critic
+            report['fragment_value_validation']=calibrate_critic(c,'fragment_reset_validation',fit=False,
+                fit_if_ev_below=complete_mc['quality_gate'].get('minimum_explained_variance',.6))
+            c.state.pop('requires_fragment_value_validation',None)
+            _snapshot(c,'fragment_reset_value_validation',wait=True)
         if complete_mc.get('enabled') and not cargs.collect_only and not cargs.evaluate_only and not c.state.get('mc_preheat_complete'):
             from .mc_calibration import calibrate_critic
             report['mc_preheat']=calibrate_critic(c,'preheat',fit=True)
