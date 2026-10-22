@@ -87,6 +87,30 @@ def test_persistent_world_restores_backend_and_rotates_journal(tmp_path,monkeypa
     assert context.overhead['evaluation_world_start_seconds']==2.
 
 
+@pytest.mark.parametrize('primary_failure',[False,True])
+def test_cleanup_failure_does_not_hide_original_execution_failure(tmp_path,monkeypatch,primary_failure):
+    from gem.closedloop.dppo import vector_evaluation as m
+    handle=SimpleNamespace(backend=object(),start_seconds=0.,close_seconds=1.)
+    context=SimpleNamespace(backend=object(),session=tmp_path,stage={'evaluation':{}},
+        distributed=SimpleNamespace(rank=0,all_gather_object=lambda x:[x]),overhead={})
+    original=context.backend
+    monkeypatch.setattr(m,'open_isolated_world',lambda *args:handle)
+    def close(*args):raise RuntimeError('incomplete execution or changed parameters')
+    monkeypatch.setattr(m,'close_isolated_world',close)
+    if primary_failure:
+        with pytest.warns(UserWarning,match='primary failure preserved'):
+            with pytest.raises(ValueError,match='original reference_underrun'):
+                with m.isolated_vector_evaluation(context,'mc_replay'):
+                    raise ValueError('original reference_underrun')
+        import json
+        record=json.loads((tmp_path/'phases/vector_eval_cleanup_mc_replay/rank00.json').read_text())
+        assert record['primary_type']=='ValueError' and 'incomplete execution' in record['cleanup_message']
+    else:
+        with pytest.raises(RuntimeError,match='incomplete execution'):
+            with m.isolated_vector_evaluation(context,'mc_replay'):pass
+    assert context.backend is original and context.active_evaluation_world is None
+
+
 def test_persistent_lane_preserves_episode_only_at_same_confirmed_watermark(tmp_path,monkeypatch):
     from gem.closedloop.dppo import evaluation_world as m
     class Lane:

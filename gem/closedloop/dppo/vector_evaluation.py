@@ -172,11 +172,33 @@ def isolated_vector_evaluation(c,label):
     if overhead is not None and created:
         overhead[kind+'_world_start_seconds']=overhead.get(kind+'_world_start_seconds',0.)+handle.start_seconds
     c.backend=handle.backend
+    primary_error=None
     try:
         yield
+    except BaseException as error:
+        primary_error=error
+        raise
     finally:
         c.backend=old_backend
         c.active_evaluation_world=None
-        if not persistent:local_call(c.distributed,lambda:close_isolated_world(handle))
+        if not persistent:
+            try:
+                local_call(c.distributed,lambda:close_isolated_world(handle))
+            except Exception as cleanup_error:
+                if primary_error is None:
+                    raise
+                # 有未完成控制请求的失败世界常同时无法干净close；不能把原始
+                # reference_underrun等原因替换成笼统的“incomplete or changed parameters”。
+                from .budget import atomic_json
+                import warnings
+                detail=dict(primary_type=type(primary_error).__name__,
+                    primary_message=str(primary_error)[:2000],cleanup_type=type(cleanup_error).__name__,
+                    cleanup_message=str(cleanup_error)[:2000])
+                try:
+                    atomic_json(c.session/'phases'/f'vector_eval_cleanup_{label}'/
+                        f'rank{c.distributed.rank:02d}.json',detail)
+                except Exception as evidence_error:
+                    warnings.warn('Evaluation cleanup evidence failed: '+str(evidence_error))
+                warnings.warn('Evaluation primary failure preserved; secondary cleanup failure: '+str(cleanup_error)[:500])
         if overhead is not None and not persistent:
             overhead[kind+'_world_close_seconds']=overhead.get(kind+'_world_close_seconds',0.)+handle.close_seconds
