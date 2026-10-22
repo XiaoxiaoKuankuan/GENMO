@@ -112,6 +112,7 @@ def main():
     parser.add_argument('--clips', nargs='+', type=float, default=[.01, .005, .003])
     parser.add_argument('--microbatch', type=int, default=128)
     parser.add_argument('--skip-lr-sweep', action='store_true')
+    parser.add_argument('--lr-multiplier', type=float, default=1., help='独立有限对照的基础学习率倍率，正式配置不改')
     args = parser.parse_args()
     rank, world, local = (int(os.environ[name]) for name in ('RANK', 'WORLD_SIZE', 'LOCAL_RANK'))
     if world != 8 or rank != local:
@@ -155,7 +156,10 @@ def main():
             raise ValueError('采集Actor与完整来源模型不一致')
         if exact_state_digest(learning['actor_optimizer']) != exact_state_digest(source['actor_optimizer']):
             raise ValueError('采集Adam与完整来源状态不一致')
-        base_lr = float(source['scheduler']['base_lr'])
+        source_base_lr = float(source['scheduler']['base_lr'])
+        base_lr = source_base_lr*args.lr_multiplier
+        if not math.isfinite(base_lr) or not settings['actor_lr_adaptation']['minimum']<=base_lr<=settings['actor_lr_adaptation']['maximum']:
+            raise ValueError('独立LR对照超出原配置候选范围')
         optimizer = torch.optim.AdamW([p for p in actor.parameters() if p.requires_grad], lr=base_lr, weight_decay=0.)
         controller = BCGradientController(**stage['bc_gradient']);anchor = DisabledBC();generator = torch.Generator()
         rank_state = torch.load(rank_path/'rank_state.pt', map_location='cpu', weights_only=False)
@@ -279,7 +283,8 @@ def main():
         if restored!=initial_digest:raise RuntimeError('独立候选结束后无法精确恢复起点')
         root_call(collective,lambda:atomic_json(args.output_dir/'summary.json',dict(status='passed',
             case=str(args.case),case_sha256=file_sha256(args.case/'case.json'),source_checkpoint=str(args.source_checkpoint),
-            source_checkpoint_sha256=file_sha256(args.source_checkpoint),base_lr=base_lr,nonempty_adam_states=len(optimizer.state),
+            source_checkpoint_sha256=file_sha256(args.source_checkpoint),base_lr=base_lr,
+            source_base_lr=source_base_lr,lr_multiplier=args.lr_multiplier,nonempty_adam_states=len(optimizer.state),
             clips=[dict(clip=x['clip'],full_objective_gain=x['full_objective_gain'],actor_fingerprint=x['actor_fingerprint'],
                         optimizer_steps=x['optimizer']['optimizer_steps']) for x in outcomes],
             starting_state_restored_exactly=True,wall_seconds=time.perf_counter()-started)))
