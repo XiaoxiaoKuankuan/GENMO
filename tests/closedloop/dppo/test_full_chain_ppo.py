@@ -21,7 +21,7 @@ from tests.closedloop.dppo.test_clipped_dppo import case
 from tests.closedloop.test_stage1_actor import actor_factory
 
 
-@pytest.mark.parametrize('count',[4,10])
+@pytest.mark.parametrize('count',[4,5,10])
 def test_independent_transition_normal_formula_mask_and_equal_policy(count):
     generator=torch.Generator().manual_seed(372)
     shape=(7,count,9,3)
@@ -47,7 +47,7 @@ def test_independent_transition_normal_formula_mask_and_equal_policy(count):
     ignored=new.clone();ignored[~mask]=float('nan')
     protected=gaussian_statistics(flat(value),flat(old),flat(sigma),flat(ignored),flat(new_sigma),flat(mask))
     torch.testing.assert_close(protected['joint_log_ratio'],actual['joint_log_ratio'],rtol=0,atol=0)
-    with pytest.raises(ValueError,match='15..18'):
+    with pytest.raises(ValueError,match='supported schedule'):
         chain_statistics(torch.zeros(2,4),torch.zeros(2,4),torch.ones(2,4),steps=(16,17,18,19))
 
 

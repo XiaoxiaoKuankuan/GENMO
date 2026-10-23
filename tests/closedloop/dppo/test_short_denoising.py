@@ -102,6 +102,20 @@ def test_range_rejections_are_recoverable_but_nan_is_fatal():
         assert equal_state(before,(actor.state_dict(),opt.state_dict()))
 
 
+@pytest.mark.parametrize('logratio,expected',[(-800.,CandidateRatioRangeError),
+    (800.,CandidateRatioRangeError),(float('nan'),FloatingPointError),
+    (float('inf'),FloatingPointError)])
+def test_production_ratio_check_distinguishes_finite_range_from_corruption(logratio,expected):
+    from gem.closedloop.dppo.gaussian_probability import ppo_surrogate
+    statistics=dict(joint_log_ratio=torch.tensor([0.,logratio],dtype=torch.float64),
+        free_count=torch.ones(2,dtype=torch.long))
+    original=statistics['joint_log_ratio'].clone()
+    with pytest.raises(expected) as error:
+        ppo_surrogate(statistics,torch.tensor([1.,-1.]),clip=.1)
+    assert type(error.value) is expected
+    torch.testing.assert_close(statistics['joint_log_ratio'],original,equal_nan=True)
+
+
 @pytest.mark.parametrize('frames',[15,30,60])
 def test_new_config_and_old_config_remain_distinct(frames):
     from gem.closedloop.dppo.training_config import configuration
