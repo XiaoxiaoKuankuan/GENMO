@@ -8,6 +8,12 @@
 输入不包含完整物理执行时不会补造记录。输出目标、梯度方向、参数和固定噪声参考
 变化，仅证明反事实优化行为，不等价于PhysX执行收益。每个候选独立目录保留Actor
 证据；本工具不启动物理、不启动正式训练，不覆写原case或训练checkpoint。
+
+显式single-device模式只改变固定数据的计算分配：完整读取原八rank的所有链与全局
+标准化优势，重新标记本进程的数据所有权，不修改行为条件、概率、奖励或GAE。使用
+rank0的共同Actor/Adam及优化顺序RNG，各候选从同一起点恢复。允许与正式任务共享
+一张GPU，并限制本进程分配器份额；正式八卡路径仍保留原空闲设备检查。单卡结果不
+声称完成八卡通信验证，旧奖励优势也不冒充新奖励重新采集、重新估值的训练结果。
 """
 from __future__ import annotations
 
@@ -77,6 +83,41 @@ def producer_full_probability(case):
     return None
 
 
+def combine_rollout_shards(payloads):
+    """将全部真实分片分配给一个计算rank，保持链、全局优势和有效性逐元素不变。"""
+    if not payloads:raise ValueError('Need at least one complete behavior shard')
+    first=payloads[0];rows=[];targets={};manifest=[]
+    original=first['global_manifest']
+    for rank,payload in enumerate(payloads):
+        if payload['kernel']!=first['kernel'] or payload['global_manifest']!=original:
+            raise ValueError('Behavior shard kernel/global manifest differs')
+        expected=[m for m in original if m['owner_rank']==rank]
+        if len(expected)!=len(payload['transitions']):raise ValueError('Incomplete behavior shard')
+        offset=len(rows)
+        for i,(row,entry) in enumerate(zip(payload['transitions'],expected)):
+            if entry['local_index']!=i:raise ValueError('Behavior manifest order differs')
+            rows.append(row);manifest.append(dict(entry,owner_rank=0,local_index=offset+i))
+    if len(rows)!=len(original):raise ValueError('All original ranks must be present')
+    for key,value in first['targets'].items():
+        if torch.is_tensor(value) and value.ndim and len(value)==len(first['transitions']):
+            targets[key]=torch.cat([p['targets'][key] for p in payloads])
+        else:
+            if any(p['targets'][key]!=value for p in payloads[1:]):
+                raise ValueError('Shared target normalization metadata differs')
+            targets[key]=value
+    return dict(first,transitions=rows,targets=targets,global_manifest=manifest)
+
+
+def single_device_payload(case,header):
+    payloads=[]
+    for rank,entry in enumerate(header['ranks']):
+        folder=case/f'rank{rank:02d}'
+        for name,key in [('manifest.json','rollout_manifest_sha256'),('rank_state.pt','rank_state_sha256')]:
+            if file_sha256(folder/name)!=entry[key]:raise ValueError('Immutable shard evidence SHA differs')
+        payloads.append(load_rollout(folder))
+    return combine_rollout_shards(payloads)
+
+
 def main():
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--case',type=Path,required=True)
@@ -87,21 +128,33 @@ def main():
     parser.add_argument('--learning-rates',nargs='+',type=float,help='显式共同基础LR候选；各组倍率固定，每个候选恢复相同Actor/Adam/RNG')
     parser.add_argument('--kl-only',action='store_true',help='显式旧对照；默认所有批量统一使用真实整批目标感知回溯')
     parser.add_argument('--audit-full-gradient-direction',action='store_true',help='额外整批反向解释Adam实际增量，生产训练不增加该成本')
+    parser.add_argument('--single-device',help='显式单卡重放全部八rank旧数据，例如cuda:4；不改变正式训练')
+    parser.add_argument('--microbatch',type=int,default=128)
+    parser.add_argument('--device-memory-fraction',type=float,default=.30,help='单卡共享测试的分配器上限，不作用于正式进程')
+    parser.add_argument('--max-updates',type=int,help='显式限制每个候选的Adam次数；KL仍检查全部旧链')
+    parser.add_argument('--frozen-audit-chains',type=int,help='完整19随机步的均匀抽样链数；四个可训练步仍检查全部链和冻结身份')
+    parser.add_argument('--probe-chains',type=int,default=32,help='候选间相同的均匀输出探针数，另加真实KL/ratio尾部')
     args=parser.parse_args()
     rank=int(os.environ['RANK']);world=int(os.environ['WORLD_SIZE']);local=int(os.environ['LOCAL_RANK'])
-    if world!=8 or rank!=local:raise ValueError('仅支持服务器单节点八卡')
+    if (world!=(1 if args.single_device else 8) or rank!=local):
+        raise ValueError('Use eight ranks normally, or one rank with explicit single-device replay')
+    if (args.microbatch<1 or args.probe_chains<1 or not 0<args.device_memory_fraction<=1
+            or args.frozen_audit_chains is not None and args.frozen_audit_chains<1):
+        raise ValueError('Invalid explicit memory/microbatch/probe setting')
     dist.init_process_group('gloo',timeout=timedelta(minutes=35))
     cache=None;group=None
     try:
         control=DistributedCollectives(rank,world)
         def reserve():
             busy=subprocess.check_output(['nvidia-smi','--query-compute-apps=pid','--format=csv,noheader'],text=True).strip()
-            if busy:raise RuntimeError('八卡仍被占用: '+busy)
+            if busy and not args.single_device:raise RuntimeError('八卡仍被占用: '+busy)
             args.output_dir.mkdir(parents=True,exist_ok=False)
         root_call(control,reserve)
-        torch.cuda.set_device(local);torch.set_num_threads(4)
+        device=args.single_device or f'cuda:{local}'
+        torch.cuda.set_device(device);torch.set_num_threads(4)
+        if args.single_device:torch.cuda.set_per_process_memory_fraction(args.device_memory_fraction,device)
         group=dist.new_group(backend='nccl',timeout=timedelta(minutes=30))
-        distributed=DistributedCollectives(rank,world,tensor_group=group,device=f'cuda:{local}')
+        distributed=DistributedCollectives(rank,world,tensor_group=group,device=device)
         config=configuration(args.config,genmo_repo=ROOT)
         from gem.closedloop.dppo.actor_optimization import require_current_actor_objective
         require_current_actor_objective(config['stage9'])
@@ -116,9 +169,11 @@ def main():
         for name,expected in [('manifest.json','rollout_manifest_sha256'),('rank_state.pt','rank_state_sha256')]:
             if file_sha256(args.case/f'rank{rank:02d}'/name)!=header['ranks'][rank][expected]:
                 raise ValueError('不可变rank证据SHA不一致')
-        payload=local_call(distributed,lambda:load_rollout(args.case/f'rank{rank:02d}'))
+        payload=local_call(distributed,lambda:single_device_payload(args.case,header) if args.single_device
+            else load_rollout(args.case/f'rank{rank:02d}'))
         if payload['kernel']!=policy.kernel_config:raise ValueError('实际行为采样核不一致')
         actor.load_state_dict(learning['actor'])
+        if rank==0:print(json.dumps(dict(phase='loaded_all_behavior',chains=len(payload['global_manifest']),compute_world_size=world)),flush=True)
         optimizer=make_actor_optimizer(actor,config['stage10']['training'])
         controller=BCGradientController(**config['stage10']['bc_gradient'])
         anchor_config=copy.deepcopy(config);anchor_config['stage9']['bc_batch']//=world
@@ -134,9 +189,18 @@ def main():
         cache=RolloutTensorCache(rows,targets,distributed.device,max_device_bytes=4*1024**3)
         producer=producer_full_probability(args.case)
         zero=probability_check_local(policy,rows,global_manifest=manifest,distributed=distributed,
-            denoising_microbatch=128,tensor_cache=cache,include_frozen=producer is None)
+            denoising_microbatch=args.microbatch,tensor_cache=cache,
+            include_frozen=producer is None and args.frozen_audit_chains is None)
+        if args.frozen_audit_chains is not None:
+            valid=[i for i,m in enumerate(manifest) if m['valid'] and m['has_free']]
+            n=min(args.frozen_audit_chains,len(valid));indices=[valid[i*len(valid)//n] for i in range(n)]
+            zero['sampled_full_random_steps']=dict(chains=n,global_indices=indices,
+                **probability_check_local(policy,rows,global_manifest=manifest,distributed=distributed,
+                    denoising_microbatch=args.microbatch,tensor_cache=cache,include_frozen=True,global_indices=indices))
+        zero['all_valid_behavior_chains_checked']=sum(m['valid'] and m['has_free'] for m in manifest)
         zero['producer_full_probability_reuse']=producer
         root_call(distributed,lambda:atomic_json(args.output_dir/'zero_update.json',zero))
+        if rank==0:print(json.dumps(dict(phase='zero_update_passed',checks=zero)),flush=True)
         eligible=[r for i,r in enumerate(rows) if bool(targets['valid'][i]) and r.free_mask.any()]
         selected=eligible[:4]
         count=sum(bool(m['valid']) and bool(m['has_free']) for m in manifest)
@@ -161,6 +225,7 @@ def main():
             trust['maximum_lr']=candidate_lr
             batch=count if batch_name=='full' else (4096 if batch_name=='objective4096' else int(batch_name))
             started=time.perf_counter();torch.cuda.reset_peak_memory_stats(distributed.device)
+            if rank==0:print(json.dumps(dict(phase='candidate_started',branch=name)),flush=True)
             last_statistics={}
             def retain_statistics(stage,records,advantages,sources):
                 last_statistics.update(records=records,advantages=advantages,sources=sources)
@@ -169,20 +234,22 @@ def main():
                 if rank==0:print(json.dumps(dict(branch=name,step=step['optimizer_step'],
                     objective=step['full_rollout_after']['objective_mean'])),flush=True)
             report=actor_update(policy,optimizer,rows,targets,cache,manifest,controller,distributed=distributed,
-                anchor=anchor,generator=generator,ppo_epochs=1,minibatch_chains=batch,microbatch=128,
+                anchor=anchor,generator=generator,ppo_epochs=1,minibatch_chains=batch,microbatch=args.microbatch,
                 clip=config['stage9']['ppo_clip'],soft_kl=config['stage9']['kl_soft_stop_mean_coordinate'],bc_samples_per_rollout=2048,bc_min_global_batch=256,
                 bc_enabled=False,audit_full_rollout_objective=True,trust_region=trust,
                 kl_limits=config['stage10']['kl'],detailed_diagnostics=True,step_observer=observer,
                 audit_full_gradient_direction=args.audit_full_gradient_direction,
+                max_optimizer_steps=args.max_updates,
                 full_rollout_observer=retain_statistics)
-            kl=final_kl(policy,rows,cache,manifest,distributed=distributed,microbatch=128,clip=config['stage9']['ppo_clip'])
+            kl=final_kl(policy,rows,cache,manifest,distributed=distributed,microbatch=args.microbatch,clip=config['stage9']['ppo_clip'])
             replica=local_call(distributed,lambda:exact_state_digest(dict(actor=actor.state_dict(),optimizer=optimizer.state_dict())))
             replicas=distributed.all_gather_object(replica)
             if any(value!=replicas[0] for value in replicas):
                 raise RuntimeError('八rank候选Actor与分组Adam不一致')
             counts=distributed.all_gather_object(len(eligible));offset=sum(counts[:rank])
             stats=from_records(last_statistics['records'][offset:offset+len(eligible)])
-            indices=sorted(set(list(range(min(4,len(eligible))))+
+            ordinary=[i*len(eligible)//min(args.probe_chains,len(eligible)) for i in range(min(args.probe_chains,len(eligible)))]
+            indices=sorted(set(ordinary+
                 torch.topk(stats['joint_kl'].sum(1),min(4,len(eligible))).indices.tolist()+
                 torch.topk(stats['joint_log_ratio'].sum(1),min(4,len(eligible))).indices.tolist()))
             selected=[eligible[i] for i in indices]
@@ -194,12 +261,17 @@ def main():
             probes=[v for shard in distributed.all_gather_object(probe_difference(before_probe,after_probe)) for v in shard]
             local_call(distributed,lambda:torch.save(dict(before=immutable_cpu_snapshot(before_probe),
                 after=immutable_cpu_snapshot(after_probe),selection='ordinary_and_actual_high_KL_high_ratio',
+                ordinary_probe_identities=[eligible[i].identity for i in ordinary],
                 generation_world_anchors=[r.metadata.get('generation_world_anchor') for r in selected]),
                 output/f'probe_rank{rank:02d}.pt'))
             from gem.closedloop.dppo.training import _final_actor_acceptance
             acceptance=_final_actor_acceptance(report,kl,config['stage10']['kl'])
             report['accepted_optimizer_steps']=report['optimizer_steps'] if acceptance['passed'] else 0
             result=dict(branch=name,minibatch_chains=batch,effective_chains=count,
+                compute_world_size=world,original_behavior_world_size=len(header['ranks']),
+                behavior_reward=learning['config']['stage10']['reward'],requested_reward=config['stage10']['reward'],
+                fixed_advantages_recomputed_for_requested_reward=False,
+                requested_optimizer_limit=args.max_updates,
                 objective_aware=trust['objective_aware'],full_gradient_direction_measured=args.audit_full_gradient_direction,
                 actor=report,final_kl=kl,
                 replica_state_consistency=dict(passed=True,all_ranks=world,actor_and_adam_sha256=replica),

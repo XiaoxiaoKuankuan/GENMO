@@ -72,16 +72,16 @@ def make_actor_optimizer(actor, settings):
 
 def actor_base_lr(optimizer):
     rates = [float(group['lr']) / float(group.get('lr_multiplier', 1.)) for group in optimizer.param_groups]
-    if not rates or not all(math.isfinite(lr) and 0 < lr <= 1e-5 for lr in rates):
-        raise ValueError('Explicit experimental Actor base LR must be in (0,1e-5]')
+    if not rates or not all(math.isfinite(lr) and lr > 0 for lr in rates):
+        raise ValueError('Explicit experimental Actor base LR must be finite and positive')
     if any(not math.isclose(lr, rates[0], rel_tol=1e-12, abs_tol=0.) for lr in rates):
         raise ValueError('Actor parameter groups lost their fixed LR ratios')
     return rates[0]
 
 
 def set_actor_base_lr(optimizer, learning_rate):
-    if not math.isfinite(learning_rate) or not 0 < learning_rate <= 1e-5:
-        raise ValueError('Explicit experimental Actor base LR must be in (0,1e-5]')
+    if not math.isfinite(learning_rate) or learning_rate <= 0:
+        raise ValueError('Explicit experimental Actor base LR must be finite and positive')
     for group in optimizer.param_groups:
         group['lr'] = learning_rate * group.get('lr_multiplier', 1.)
 

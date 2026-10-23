@@ -77,6 +77,28 @@ def test_group_backtrack_matches_direct_nonempty_adam_and_preserves_ratios():
     validate_actor_optimizer(actor, optimizer)
 
 
+@pytest.mark.parametrize('lr',[1e-5,5e-5])
+def test_explicit_large_lr_preserves_group_ratios_and_atomic_rejection(lr):
+    actor,optimizer,controller=prepared()
+    set_actor_base_lr(optimizer,lr)
+    before=copy.deepcopy((actor.state_dict(),optimizer.state_dict(),controller.state_dict()))
+    rng=torch.get_rng_state().clone()
+    result=backtracked_step(actor,optimizer,controller,
+        evaluate=lambda:dict(chain_joint_kl=dict(mean=1.)),limits=dict(chain_joint_mean=.1),
+        distributed=Collective(),max_attempts=2)
+    assert not result['accepted']
+    assert equal_state(before,(actor.state_dict(),optimizer.state_dict(),controller.state_dict()))
+    assert torch.equal(rng,torch.get_rng_state())
+    assert actor_base_lr(optimizer)==pytest.approx(lr)
+    assert actor_learning_rates(optimizer)['transformer_00']==pytest.approx(lr*.1)
+
+
+@pytest.mark.parametrize('lr',[0.,-1.,float('nan'),float('inf')])
+def test_large_lr_support_keeps_nonfinite_and_nonpositive_rejection(lr):
+    _,optimizer,_=prepared()
+    with pytest.raises(ValueError,match='finite and positive'):set_actor_base_lr(optimizer,lr)
+
+
 @pytest.mark.parametrize('exception', [False, True])
 def test_rejection_restores_all_groups_adam_controller_and_rng(exception):
     actor, optimizer, controller = prepared()

@@ -18,18 +18,23 @@ import numpy as np
 
 ROOT=Path(__file__).resolve().parents[1]
 sys.path.insert(0,str(ROOT))
-from gem.closedloop.dppo.rewards import TRACKING_STD,STAGE2_REWARD_STD
+from gem.closedloop.dppo.rewards import TRACKING_STD,STAGE2_REWARD_STD,REWARD_STD_BY_VERSION,REWARD_STD_VERSION
 
 
-def scores(squared_error,name,alpha=.05):
+def scores(squared_error,name,alpha=.05,*,reward_std=None,baseline_std=None):
     e=np.asarray(squared_error,dtype=np.float64)
     if not np.isfinite(e).all() or (e<0).any():raise ValueError('Expected finite nonnegative squared error')
-    q=e/STAGE2_REWARD_STD[name]**2
-    old=np.exp(-e/TRACKING_STD[name]**2);new=np.exp(-q)
+    reward_std=STAGE2_REWARD_STD if reward_std is None else reward_std
+    baseline_std=TRACKING_STD if baseline_std is None else baseline_std
+    q=e/reward_std[name]**2
+    old=np.exp(-e/baseline_std[name]**2);new=np.exp(-q)
     return old,new,(1-alpha)*new+alpha/(1+q)
 
 
-def analyze(output,report=None):
+def analyze(output,report=None,*,reward_version=REWARD_STD_VERSION):
+    reward_std=REWARD_STD_BY_VERSION[reward_version]
+    baseline_std=TRACKING_STD if reward_version==REWARD_STD_VERSION else STAGE2_REWARD_STD
+    def score(e,name):return scores(e,name,reward_std=reward_std,baseline_std=baseline_std)
     output=Path(output);output.mkdir(parents=True,exist_ok=False)
     import matplotlib
     matplotlib.use('Agg')
@@ -37,13 +42,13 @@ def analyze(output,report=None):
     fig,axes=plt.subplots(2,2,figsize=(11,8),layout='constrained');table=[]
     for ax,name in zip(axes.flat,('anchor_pos','anchor_ori','body_pos','body_ori')):
         angular=name.endswith('ori');x=np.linspace(0,3.14 if angular else 1.5,700)
-        values=scores(x*x,name)
+        values=score(x*x,name)
         for label,y in zip(('A: original exponential','B: new exponential','C: 5% slow tail (analysis only)'),values):ax.plot(x,y,label=label)
-        ax.set(title=f'{name}: source std={TRACKING_STD[name]}, reward std={STAGE2_REWARD_STD[name]}',xlabel='sqrt(GMT squared error) [rad]' if angular else 'sqrt(GMT squared error) [m]',ylabel='Tracking score',ylim=(0,1.02))
+        ax.set(title=f'{name}: baseline std={baseline_std[name]}, reward std={reward_std[name]}',xlabel='sqrt(GMT squared error) [rad]' if angular else 'sqrt(GMT squared error) [m]',ylabel='Tracking score',ylim=(0,1.02))
         ax.grid(alpha=.25);ax.legend(fontsize=8)
         for error in (0,.05,.1,.2,.3,.5,.8,1.,1.5,2.,3.):
-            old,new,slow=scores(error*error,name)
-            sigma=STAGE2_REWARD_STD[name];q=(error/sigma)**2
+            old,new,slow=score(error*error,name)
+            sigma=reward_std[name];q=(error/sigma)**2
             table.append(dict(term=name,error=error,A=float(old),B=float(new),C=float(slow),
                 B_abs_slope=2*error/sigma**2*float(new),
                 C_abs_slope=.95*2*error/sigma**2*float(new)+.05*2*error/sigma**2/(1+q)**2))
@@ -51,7 +56,7 @@ def analyze(output,report=None):
     tail,tail_axes=plt.subplots(2,2,figsize=(11,8),layout='constrained')
     for ax,name in zip(tail_axes.flat,('anchor_pos','anchor_ori','body_pos','body_ori')):
         x=np.linspace(0,3.14 if name.endswith('ori') else 1.5,700)
-        for label,y in zip(('A: original','B: requested','C: analysis only'),scores(x*x,name)):
+        for label,y in zip(('A: baseline','B: requested','C: analysis only'),score(x*x,name)):
             ax.semilogy(x,y,label=label)
         ax.set(title=name,xlabel='sqrt(GMT squared error) [rad]' if name.endswith('ori') else 'sqrt(GMT squared error) [m]',
             ylabel='Tracking score (log scale)',ylim=(1e-12,1.1))
@@ -60,9 +65,9 @@ def analyze(output,report=None):
     tail.savefig(output/'reward_std_tail_curves.pdf');plt.close(tail)
     with (output/'reward_std_values.csv').open('w') as f:
         writer=csv.DictWriter(f,fieldnames=list(table[0]));writer.writeheader();writer.writerows(table)
-    result=dict(formula='A=exp(-squared_error/source_std^2); B=exp(-squared_error/reward_std^2); C=.95*B+.05/(1+squared_error/reward_std^2)',
-        source_std=TRACKING_STD,reward_std=STAGE2_REWARD_STD,formal_candidate='B',C_training_enabled=False,
-        saturation_thresholds={n:{str(p):STAGE2_REWARD_STD[n]*float(np.sqrt(-np.log(p))) for p in (1e-3,1e-6)} for n in TRACKING_STD},table=table)
+    result=dict(formula='A=exp(-squared_error/baseline_std^2); B=exp(-squared_error/reward_std^2); C=.95*B+.05/(1+squared_error/reward_std^2)',
+        source_std=TRACKING_STD,baseline_std=baseline_std,reward_std=reward_std,reward_version=reward_version,formal_candidate='B',C_training_enabled=False,
+        saturation_thresholds={n:{str(p):reward_std[n]*float(np.sqrt(-np.log(p))) for p in (1e-3,1e-6)} for n in TRACKING_STD},table=table)
     if report is not None:
         from gem.closedloop.dppo.compact_evidence import report_episodes
         report=Path(report);document=json.loads(report.read_text());samples={n:[] for n in TRACKING_STD}
@@ -73,7 +78,7 @@ def analyze(output,report=None):
         result['actual_control_scoring']={}
         for name,values in samples.items():
             if not values:continue
-            a,b,c=scores(values,name)
+            a,b,c=score(values,name)
             result['actual_control_scoring'][name]=dict(count=len(values),A_mean=float(a.mean()),B_mean=float(b.mean()),C_mean=float(c.mean()),
                 A_below_1e_3=float((a<1e-3).mean()),B_below_1e_3=float((b<1e-3).mean()),B_below_1e_6=float((b<1e-6).mean()))
         result['physical_claim']='same_recorded_physics_counterfactual_scoring_only'
@@ -83,4 +88,5 @@ def analyze(output,report=None):
 
 if __name__=='__main__':
     parser=argparse.ArgumentParser(description=__doc__);parser.add_argument('--output',type=Path,required=True);parser.add_argument('--report',type=Path)
-    args=parser.parse_args();analyze(args.output,args.report)
+    parser.add_argument('--reward-version',choices=tuple(REWARD_STD_BY_VERSION),default=REWARD_STD_VERSION)
+    args=parser.parse_args();analyze(args.output,args.report,reward_version=args.reward_version)

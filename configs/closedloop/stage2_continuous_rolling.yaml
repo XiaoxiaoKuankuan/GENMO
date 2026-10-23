@@ -277,8 +277,8 @@ stage10:
     tracking:
       objective: gmt.motion_tracking.eight_terms.v1
       reward_std:
-        anchor_ori: 0.3
-        anchor_pos: 0.2
+        anchor_ori: 0.4
+        anchor_pos: 0.3
         body_ang_vel: 3.14
         body_lin_vel: 1.0
         body_ori: 0.2
@@ -303,7 +303,7 @@ stage10:
         body_pos: 0.15873015873015872
         foot_height: 0.126984126984127
         leg_joint_pos: 0.07936507936507936
-    version: stage2.gmt8_reward_std.v3
+    version: stage2.gmt8_reward_std.v4
   run_control:
     max_training_iterations: 200
   scale:

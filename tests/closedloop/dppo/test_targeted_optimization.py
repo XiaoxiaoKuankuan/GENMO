@@ -11,7 +11,8 @@ import math
 import pytest
 import torch
 
-from gem.closedloop.dppo.rewards import ExecutionReward,TRACKING_STD,STAGE2_REWARD_STD,REWARD_STD_VERSION
+from gem.closedloop.dppo.rewards import (ExecutionReward,TRACKING_STD,STAGE2_REWARD_STD,REWARD_STD_VERSION,
+    ROOT_RELAXED_REWARD_VERSION,ROOT_RELAXED_REWARD_STD)
 from gem.closedloop.dppo.vector_reward_math import VectorRewardMath
 from gem.closedloop.dppo.vector_reward_adapter import VectorExecutionReward,compare_reward_evidence
 from gem.closedloop.dppo.gradient_merge import BCGradientController
@@ -26,9 +27,11 @@ from tests.closedloop.test_stage1_actor import actor_factory
 from test_data_learning import actual_step,target_activity_fixture
 
 
-def test_new_reward_std_preserves_source_and_scalar_vector_formula():
-    scalar=ExecutionReward({'version':REWARD_STD_VERSION},target_activity=target_activity_fixture)
-    vector=VectorExecutionReward({'version':REWARD_STD_VERSION},target_activity=target_activity_fixture)
+@pytest.mark.parametrize('version,expected_std',[(REWARD_STD_VERSION,STAGE2_REWARD_STD),
+    (ROOT_RELAXED_REWARD_VERSION,ROOT_RELAXED_REWARD_STD)])
+def test_new_reward_std_preserves_source_and_scalar_vector_formula(version,expected_std):
+    scalar=ExecutionReward({'version':version},target_activity=target_activity_fixture)
+    vector=VectorExecutionReward({'version':version},target_activity=target_activity_fixture)
     engine=VectorRewardMath(scalar.config,1,'cpu')
     import numpy as np
     scalar.seed_previous_target(np.zeros(21));vector.seed_previous_target(np.zeros(21));engine.previous_valid.fill_(True)
@@ -47,10 +50,23 @@ def test_new_reward_std_preserves_source_and_scalar_vector_formula():
     assert expected['transition_valid'],expected['errors']
     compare_reward_evidence(observed,expected)
     scores=expected['components']['track']['normalized']['scores']
-    assert scores['anchor_pos']==pytest.approx(math.exp(-1.))
+    assert scores['anchor_pos']==pytest.approx(math.exp(-.04/expected_std['anchor_pos']**2))
+    assert scores['anchor_ori']==pytest.approx(math.exp(-.04/expected_std['anchor_ori']**2))
     assert scores['body_pos']==pytest.approx(math.exp(-.04/.15**2))
     assert scalar.config['tracking']['source_std']==TRACKING_STD
-    assert scalar.config['tracking']['reward_std']==STAGE2_REWARD_STD
+    assert scalar.config['tracking']['reward_std']==expected_std
+
+
+def test_root_relaxation_changes_only_two_scales_and_rejects_cross_version_mix():
+    old=ExecutionReward({'version':REWARD_STD_VERSION}).config
+    new=ExecutionReward({'version':ROOT_RELAXED_REWARD_VERSION}).config
+    assert {k for k in STAGE2_REWARD_STD if STAGE2_REWARD_STD[k]!=ROOT_RELAXED_REWARD_STD[k]}=={'anchor_pos','anchor_ori'}
+    restored=copy.deepcopy(new);restored['version']=old['version']
+    restored['tracking']['reward_std']=old['tracking']['reward_std']
+    assert restored==old
+    for version,std in ((REWARD_STD_VERSION,ROOT_RELAXED_REWARD_STD),(ROOT_RELAXED_REWARD_VERSION,STAGE2_REWARD_STD)):
+        with pytest.raises(ValueError,match='explicit reward version'):
+            ExecutionReward({'version':version,'tracking':{'reward_std':std}})
 
 
 def test_reward_versions_reject_ambiguous_or_changed_source_std():
