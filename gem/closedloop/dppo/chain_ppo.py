@@ -23,6 +23,12 @@ from .tensor_cache import ConditionGraphCache
 @torch.no_grad()
 def evaluate_chain_records(policy, rows, cache, *, microbatch, physical_changes=False):
     """返回[N,4,8]：joint KL、coordinate KL、log-ratio、count及四种均值变化。"""
+    limit=getattr(policy,'condition_cache_max_chains',None)
+    if limit is not None:
+        if type(limit)is not int or limit<1:raise ValueError('Condition cache chain bound must be positive')
+        if len(rows)>limit:
+            return torch.cat([evaluate_chain_records(policy,rows[i:i+limit],cache,microbatch=microbatch,
+                physical_changes=physical_changes) for i in range(0,len(rows),limit)])
     device=next(policy.actor.parameters()).device
     records=torch.zeros(len(rows),4,8,device=device,dtype=torch.float64)
     conditions=ConditionGraphCache(policy,cache,include_frozen=False)
@@ -59,6 +65,16 @@ def backward_chain_surrogate(policy, rows, cache, records, *, clip, global_chain
     """逐微批重算链梯度；返回真实目标和最大重算误差，不执行参数更新。"""
     if global_chain_count<1:
         raise ValueError('Global denominator must count complete valid chains')
+    limit=getattr(policy,'condition_cache_max_chains',None)
+    if limit is not None:
+        if type(limit)is not int or limit<1:raise ValueError('Condition cache chain bound must be positive')
+        if len(rows)>limit:
+            # 每块立即释放条件反向图；保留同一参数版本和全局分母，不按块平均梯度。
+            parts=[backward_chain_surrogate(policy,rows[i:i+limit],cache,records[i:i+limit],
+                clip=clip,global_chain_count=global_chain_count,microbatch=microbatch)
+                for i in range(0,len(rows),limit)]
+            return dict(loss=torch.stack([p['loss'] for p in parts]).sum(),
+                recompute_max_error=torch.stack([p['recompute_max_error'] for p in parts]).max())
     device=next(policy.actor.parameters()).device
     # 完整rollout汇总的小型FP64统计可位于CPU；反向索引和优势在Actor设备。
     # 仅搬运[N,4,8]统计，不改变行为链或概率精度，原GPU路径为零拷贝。

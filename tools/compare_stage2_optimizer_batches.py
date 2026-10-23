@@ -134,11 +134,12 @@ def main():
     parser.add_argument('--max-updates',type=int,help='显式限制每个候选的Adam次数；KL仍检查全部旧链')
     parser.add_argument('--frozen-audit-chains',type=int,help='完整19随机步的均匀抽样链数；四个可训练步仍检查全部链和冻结身份')
     parser.add_argument('--probe-chains',type=int,default=32,help='候选间相同的均匀输出探针数，另加真实KL/ratio尾部')
+    parser.add_argument('--condition-batch-chains',type=int,default=512,help='单卡重放时的条件编码图上限；全局PPO分母和全部链检查不变')
     args=parser.parse_args()
     rank=int(os.environ['RANK']);world=int(os.environ['WORLD_SIZE']);local=int(os.environ['LOCAL_RANK'])
     if (world!=(1 if args.single_device else 8) or rank!=local):
         raise ValueError('Use eight ranks normally, or one rank with explicit single-device replay')
-    if (args.microbatch<1 or args.probe_chains<1 or not 0<args.device_memory_fraction<=1
+    if (args.microbatch<1 or args.probe_chains<1 or args.condition_batch_chains<1 or not 0<args.device_memory_fraction<=1
             or args.frozen_audit_chains is not None and args.frozen_audit_chains<1):
         raise ValueError('Invalid explicit memory/microbatch/probe setting')
     dist.init_process_group('gloo',timeout=timedelta(minutes=35))
@@ -162,6 +163,7 @@ def main():
         config['stage9']['seed']+=1000003*rank
         actor,train,loading=local_call(distributed,lambda:load_actor(config))
         policy=build_policy(actor,config['stage9'],config['stage10']['precision'])
+        if args.single_device:policy.condition_cache_max_chains=args.condition_batch_chains
         header=json.loads((args.case/'case.json').read_text())
         if file_sha256(args.case/'learning_state.pt')!=header['learning_state_sha256']:
             raise ValueError('不可变学习状态SHA不一致')

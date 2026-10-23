@@ -15,6 +15,7 @@ import yaml
 from gem.closedloop.dppo.training_config import configuration
 from gem.closedloop.dppo.rewards import ROOT_RELAXED_REWARD_VERSION,ROOT_RELAXED_REWARD_STD
 from tools.compare_stage2_optimizer_batches import combine_rollout_shards
+from tests.closedloop.test_stage1_actor import actor_factory
 
 
 def shards():
@@ -58,3 +59,31 @@ def test_requested_lr_and_reward_configuration_preserve_other_contracts(tmp_path
     for field in ('actor_lr_multipliers','std_schedule','frozen_prefix_steps','ppo_steps_per_chain','bc_enabled'):
         assert c['stage9'][field]==original['stage10']['training'][field]
     assert stage['reward']['tracking']['weights']==original['stage10']['reward']['tracking']['weights']
+
+
+def test_bounded_condition_encoding_preserves_all_probabilities_and_global_gradient(actor_factory):
+    from tests.closedloop.dppo.test_clipped_dppo import case
+    from gem.closedloop.dppo.chain_ppo import evaluate_chain_records,backward_chain_surrogate
+    from gem.closedloop.dppo.tensor_cache import RolloutTensorCache
+    from gem.closedloop.dppo.execution_checks import policy_phase
+    from gem.closedloop.dppo.optimization_support import probability_check_local
+    policy,rows,targets=case(actor_factory)
+    for row in rows:row.transition_valid=True
+    cache=RolloutTensorCache(rows,targets,'cpu')
+    try:
+        with policy_phase(policy):
+            before=evaluate_chain_records(policy,rows,cache,microbatch=3)
+            a=backward_chain_surrogate(policy,rows,cache,before,clip=.01,global_chain_count=11,microbatch=3)
+            grads={n:p.grad.clone() for n,p in policy.actor.named_parameters() if p.grad is not None}
+            policy.actor.zero_grad(set_to_none=True);policy.condition_cache_max_chains=2
+            after=evaluate_chain_records(policy,rows,cache,microbatch=3)
+            b=backward_chain_surrogate(policy,rows,cache,after,clip=.01,global_chain_count=11,microbatch=3)
+        # FP32条件编码批形变化会在高维joint log-ratio中累积；沿用生产1e-4重算容差。
+        torch.testing.assert_close(before,after,rtol=1e-6,atol=1e-4)
+        torch.testing.assert_close(a['loss'],b['loss'],rtol=1e-6,atol=1e-8)
+        for name,p in policy.actor.named_parameters():
+            if name in grads:torch.testing.assert_close(p.grad,grads[name],rtol=1e-5,atol=1e-7)
+        audit=probability_check_local(policy,rows,denoising_microbatch=3,tensor_cache=cache)
+        assert audit['passed'] and audit['condition_cache_chunks']==3 and audit['checked_chains']==5
+        assert audit['checked_steps']==list(range(19))
+    finally:cache.close()

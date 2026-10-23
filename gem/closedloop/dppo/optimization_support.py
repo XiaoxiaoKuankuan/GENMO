@@ -150,6 +150,21 @@ def probability_check_local(policy, transitions, *, global_manifest=None, distri
     from gem.closedloop.dppo.trainer import _validate_actor_transitions
     if type(denoising_microbatch) is not int or denoising_microbatch < 1:
         raise ValueError('Denoising microbatch must be a positive integer')
+    limit=getattr(policy,'condition_cache_max_chains',None)
+    if limit is not None:
+        if type(limit)is not int or limit<1:raise ValueError('Condition cache chain bound must be positive')
+        manifest=_manifest(transitions,{},distributed,global_manifest)
+        selected=([i for i,m in enumerate(manifest) if m['valid'] and m['has_free']]
+                  if global_indices is None else list(global_indices))
+        if len(selected)>limit:
+            parts=[probability_check_local(policy,transitions,global_manifest=manifest,distributed=distributed,
+                denoising_microbatch=denoising_microbatch,global_indices=selected[i:i+limit],
+                tensor_cache=tensor_cache,include_frozen=include_frozen) for i in range(0,len(selected),limit)]
+            # 仅分配计算；每条有效链仍核对真实旧概率，误差最大值与一次整批检查相同。
+            result=dict(parts[0],condition_cache_chunks=len(parts),checked_chains=len(selected))
+            for key in ('max_abs_log_probability_difference','max_abs_ratio_minus_one','max_abs_independent_gaussian_difference'):
+                result[key]=max(p[key] for p in parts)
+            return result
     with _local_phase(distributed, 'initial_probability_local_forward'), policy_phase(policy):
         manifest = _manifest(transitions, {}, distributed, global_manifest)
         selected = ([i for i, item in enumerate(manifest) if item['valid'] and item['has_free']]
