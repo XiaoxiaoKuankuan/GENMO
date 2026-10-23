@@ -48,6 +48,22 @@ from gem.closedloop.dppo.updater import actor_update,final_kl
 from gem.closedloop.dppo.actor_backtracking import check_candidate_kl
 
 
+@torch.no_grad()
+def rejected_probability_diagnostics(policy,rows,cache,distributed,microbatch):
+    """高LR指数溢出时只报告真实log-ratio/KL，不截断概率、不把拒绝更新当作成功。"""
+    from gem.closedloop.dppo.gaussian_probability import distribution
+    selected=[row for row in rows if row.free_mask.any()]
+    with policy_phase(policy):
+        records=evaluate_chain_records(policy,selected,cache,microbatch=microbatch)
+    local=torch.stack((records[:,:,0].sum(1),records[:,:,2].sum(1)),1).cpu()
+    full=torch.cat(distributed.all_gather_object(local),0)
+    return dict(chain_joint_kl=distribution(full[:,0]),chain_joint_log_ratio=distribution(full[:,1]),
+        gaussian_steps=list(policy.trainable_steps),chains=len(full),
+        ratio_underflow_fraction=float((full[:,1]<-745.).double().mean()),
+        ratio_overflow_fraction=float((full[:,1]>709.).double().mean()),
+        accepted=False,scope='unclamped_Gaussian_statistics_after_rejected_Adam_attempt')
+
+
 def gradient_validation(policy,rows,cache,distributed):
     selected=[row for row in rows if row.free_mask.any()][:2]
     denominator=sum(distributed.all_gather_object(len(selected)))
@@ -161,6 +177,7 @@ def main():
                     anchor=anchor,generator=generators['actor'],ppo_epochs=args.epochs,minibatch_chains=config['stage10']['scale']['actor_minibatch_chains'],
                     sampled_steps=len(policy.trainable_steps),step_strategy=f'intermediate{len(policy.trainable_steps)}',
                     max_optimizer_steps=args.max_optimizer_steps,audit_full_rollout_objective=True,
+                    detailed_diagnostics=True,
                     microbatch=config['stage9']['denoising_microbatch'],clip=config['stage9']['ppo_clip'],soft_kl=config['stage9']['kl_soft_stop_chain_joint'],
                     bc_samples_per_rollout=config['stage9']['bc_samples_per_rollout'],
                     bc_min_global_batch=config['stage9']['bc_min_global_batch'],
@@ -178,6 +195,8 @@ def main():
                 if not any(word in message.lower() for word in ('ppo','nonfinite','overflow','underflow','streaming')):raise
                 trial=dict(learning_rate=lr,epochs=args.epochs,acceptance=dict(passed=False,
                     failures={'numerical':message}),start_restore=audit,
+                    rejected_probability=rejected_probability_diagnostics(policy,rows,cache,distributed,
+                        config['stage9']['denoising_microbatch']),
                     wall_seconds=max(distributed.all_gather_object(time.perf_counter()-started)))
             trials.append(trial)
             root_call(distributed,lambda:atomic_json(args.output_dir/f'candidate_lr{lr:.0e}_epoch{args.epochs}.json',trial))
