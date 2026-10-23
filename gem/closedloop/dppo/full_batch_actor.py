@@ -1,7 +1,7 @@
 """当前单次on-policy全批量joint-score Actor更新及原Stage1 BC。
 
 每次更新使用完整真实rollout、GAE、BC、统一学习率和固定梯度KL回溯。score目标为：
-每条链四步真实joint_log_ratio求和乘同一GAE优势，再除以实际链数；不取joint
+每条链所有可训练步真实joint_log_ratio求和乘同一GAE优势，再除以实际链数；不取joint
 指数、不做PPO clip、不额外乘去噪折扣，不将其伪称为联合概率PPO。
 
 只接受更新前旧链概率一致的完整批量和一次optimizer提交。16384表示全局链容量，

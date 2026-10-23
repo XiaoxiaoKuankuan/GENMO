@@ -82,7 +82,8 @@ def test_expansion_rejects_unrelated_changes_before_mutation(tmp_path,changed):
 
 
 @pytest.mark.parametrize('prefix',[9,15])
-def test_complete_configured_chain_adam_update_with_tail_batch(actor_factory,tmp_path,prefix):
+@pytest.mark.parametrize('use_trust',[False,True])
+def test_complete_configured_chain_adam_update_with_tail_batch(actor_factory,tmp_path,prefix,use_trust):
     import torch.distributed as dist
     from tests.closedloop.dppo.test_clipped_dppo import case
     from gem.closedloop.dppo.collectives import DistributedCollectives
@@ -95,18 +96,25 @@ def test_complete_configured_chain_adam_update_with_tail_batch(actor_factory,tmp
     cache=RolloutTensorCache(rows,targets,'cpu')
     optimizer=torch.optim.AdamW([p for p in policy.actor.parameters() if p.requires_grad],lr=1e-9,weight_decay=0.)
     manifest=[dict(owner_rank=0,local_index=i,valid=True,has_free=True) for i in range(len(rows))]
+    trust=(dict(maximum_lr=1e-9,growth=1.25,margin=.8,max_attempts=3,
+        minimum_trial_lr_ratio=.0625,objective_aware=True,objective_search_attempts=1)
+        if use_trust else None)
     try:
         result=actor_update(policy,optimizer,rows,targets,cache,manifest,BCGradientController(),
             distributed=DistributedCollectives(0,1,device='cpu'),anchor=DisabledBC(),
             generator=torch.Generator().manual_seed(4),minibatch_chains=3,microbatch=3,
             sampled_steps=19-prefix,step_strategy=f'intermediate{19-prefix}',
-            bc_enabled=False,bc_samples_per_rollout=0,audit_full_rollout_objective=True)
+            bc_enabled=False,bc_samples_per_rollout=0,audit_full_rollout_objective=True,
+            trust_region=trust,kl_limits=dict(chain_joint_mean=.2,chain_joint_p95=.6,
+                chain_joint_p99=.9,chain_joint_max=2.))
         assert result['optimizer_steps']==2 and result['actual_global_bc_samples']==0
         assert result['internal_sample_visits']==5*(19-prefix)
         assert result['steps'][-1]['global_chain_count']==2
         assert result['steps'][0]['denoising_steps']==list(range(prefix,19))
         assert result['steps'][0]['candidate_checked_chains']==5
         assert result['steps'][0]['post_step_chain_scope']=='full_rollout'
+        if use_trust:
+            assert all(step['trust_region']['accepted'] for step in result['steps'])
         policy.assert_frozen_identity()
     finally:
         cache.close();dist.destroy_process_group()

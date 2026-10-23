@@ -21,21 +21,23 @@ class Collective:
     def all_gather_object(self,value):return [value]
 
 
-def objects():
+def objects(prefix=15):
     actor=torch.nn.Linear(2,1)
     actor.register_buffer('counter',torch.zeros(1))
-    policy=NS(actor=actor,kernel_config={'kernel':'fixed'},trainable_steps=(15,16,17,18),
+    steps=tuple(range(prefix,19))
+    policy=NS(actor=actor,kernel_config={'kernel':'fixed'},trainable_steps=steps,
         timestep_map=list(range(20)),eta=.1,guidance_scale=2.5,std_schedule=[.1]*20,
         assert_frozen_identity=lambda:True)
     cache=NS(host={'chain':torch.zeros(2,21,60,30)},blocks={},closed=False)
     manifest=[dict(owner_rank=0,local_index=i,valid=True,has_free=True) for i in range(2)]
-    report=dict(covered_chains=2,covered_internal_transitions=8,gaussian_kl_steps=[15,16,17,18])
+    report=dict(covered_chains=2,covered_internal_transitions=2*len(steps),gaussian_kl_steps=list(steps))
     return policy,cache,manifest,report
 
 
 @pytest.mark.parametrize('mutation',['none','parameter','buffer','cache','kernel','manifest','closed'])
-def test_kl_reuse_binds_actual_model_data_and_complete_coverage(mutation):
-    policy,cache,manifest,report=objects()
+@pytest.mark.parametrize('prefix',[9,15])
+def test_kl_reuse_binds_actual_model_data_and_complete_coverage(mutation,prefix):
+    policy,cache,manifest,report=objects(prefix)
     token=seal_accepted_kl(policy,cache,manifest,report,clip=.003,reduction='free_coordinate_mean')
     with torch.no_grad():
         if mutation=='parameter':policy.actor.weight.add_(1.)
@@ -48,6 +50,13 @@ def test_kl_reuse_binds_actual_model_data_and_complete_coverage(mutation):
     result=reusable_accepted_kl({'complete_accepted_kl_available':True},policy,cache,manifest,Collective(),
         clip=.003,reduction='free_coordinate_mean')
     assert (result is not None)==(mutation=='none')
+
+
+def test_ten_step_kl_receipt_rejects_partial_four_step_coverage():
+    policy,cache,manifest,report=objects(9)
+    report['covered_internal_transitions']=8
+    with pytest.raises(ValueError,match='complete rollout'):
+        seal_accepted_kl(policy,cache,manifest,report,clip=.1,reduction='joint_sum')
 
 
 def test_any_rank_stale_forces_global_recomputation():
