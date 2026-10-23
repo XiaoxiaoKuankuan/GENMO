@@ -148,7 +148,8 @@ def test_calibration_does_not_consume_training_time_bins(tmp_path,monkeypatch,fa
     assert runtime.time_pool.state_dict()==before
 
 
-def test_motion_bootstrap_matches_music_phase_velocity_and_canonical_frame(tmp_path):
+@pytest.mark.parametrize('frames',[15,30,60,120])
+def test_motion_bootstrap_matches_music_phase_velocity_and_canonical_frame(tmp_path,frames):
     catalog=FullMusicCatalog(make_catalog_data(tmp_path,frames=300))
     sample=catalog.samples['train']['Mine'][0]
     target,qpos=load_paired_activity(catalog.data_root,sample,music_start_frame=150,return_motion=True)
@@ -157,12 +158,12 @@ def test_motion_bootstrap_matches_music_phase_velocity_and_canonical_frame(tmp_p
     yaw=math.pi/2
     qpos[:,3:7]=[math.cos(yaw/2),0,0,math.sin(yaw/2)]
     original=qpos.copy()
-    reset=make_motion_initialization(qpos,target.source,start_frame=150,plan_frames=120)
+    reset=make_motion_initialization(qpos,target.source,start_frame=150,plan_frames=frames)
     boot=reset['bootstrap_qpos']
-    assert boot.shape==(126,28) and reset['music_start_tick']==600
+    assert boot.shape==(max(60,frames)+6,28) and reset['music_start_tick']==600
     np.testing.assert_allclose(boot[6,:2],0,atol=1e-12)
     np.testing.assert_allclose(boot[36,:3],[2,-1,.72],atol=1e-12)
-    np.testing.assert_allclose(boot[:,3:7],np.tile([1,0,0,0],(126,1)),atol=1e-12)
+    np.testing.assert_allclose(boot[:,3:7],np.tile([1,0,0,0],(max(60,frames)+6,1)),atol=1e-12)
     np.testing.assert_allclose(boot[36,7:],qpos[150,7:])
     np.testing.assert_array_equal(qpos,original)
     assert target.source['music_start_frame']==reset['music_start_frame']==150

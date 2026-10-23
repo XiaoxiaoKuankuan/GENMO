@@ -36,7 +36,8 @@ def make_motion_initialization(qpos, source, *, start_frame, plan_frames, phase=
     if not isinstance(names, list) or len(names) != 21 or len(set(names)) != 21:
         raise ValueError('Motion initialization requires explicit source joint order')
     # -0.2秒是GMT回看；第0秒重置，第1秒交给GENMO，对应音乐start_frame。
-    indices = start_frame - 30 + np.arange(-6, plan_frames)
+    bootstrap_frames=max(60,plan_frames)  # 一秒真实预热+生成延迟+GMT前瞻，不随Actor短窗口缩短。
+    indices = start_frame - 30 + np.arange(-6, bootstrap_frames)
     values = qpos[np.clip(indices, 0, len(qpos) - 1)].copy()
     anchor = values[6].copy()
     w, x, y, z = anchor[3:7] / np.linalg.norm(anchor[3:7])
