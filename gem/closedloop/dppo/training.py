@@ -17,6 +17,7 @@ episode，丢弃旧rollout。固定评估使用独立GPU世界、训练RNG隔离
 from __future__ import annotations
 
 import copy
+import gc
 import hashlib
 import json
 import math
@@ -673,6 +674,16 @@ def run(cargs,config,distributed):
         report.update(run_id=identity['run_id'],session_id=identity['session_id'],initial_state=copy.deepcopy(c.state))
         root_call(distributed,lambda:atomic_json(c.output/'training_identity.json',c.identity))
         root_call(distributed,lambda:(c.session/'resolved_config.yaml').write_text(yaml.safe_dump(c.base_config,allow_unicode=True,sort_keys=False)))
+        # Isaac/模型/配置装配留下的循环对象在首个物理请求前统一回收，避免首次自动
+        # generation-2 GC 落入参考生成关键路径。标定与训练共用此启动边界，不关闭
+        # 自动GC、不扣减请求墙钟、不改变RNG；启动成本和回收数量单独如实记录。
+        def finish_startup_memory():
+            started=time.perf_counter()
+            collected=gc.collect()
+            return dict(collected_objects=collected,seconds=time.perf_counter()-started,
+                automatic_gc_enabled=gc.isenabled(),scope='once_before_first_physical_request')
+        startup_memory=local_call(distributed,finish_startup_memory)
+        report['startup_memory_cleanup']=distributed.all_gather_object(startup_memory)
         if _completed_training_resume(cargs,c.state,stop_after_iteration):
             report.update(status='passed',scope='already_at_requested_cumulative_iteration_no_updates_or_extra_checkpoint',
                 final_state=c.state)

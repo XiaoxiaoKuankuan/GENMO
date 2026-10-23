@@ -7,9 +7,10 @@
 显式配置为 `configs/closedloop/stage2_continuous_rolling_robofft.yaml`，
 从 `stage2_continuous_rolling_train10.yaml` 复制并仅更换 Actor 优化相关设置。
 
-**交付状态：CPU 数学、真实小型网络、双进程 Gloo、fake world 接线及恢复通过；
-生产权重的 CUDA/Isaac 训练与物理收益尚未验证。候选参数不代表最优。**
-本次未停止训练、未切换共享工作树分支、未覆盖旧实验。
+**首次代码验收：CPU 数学、真实小型网络、双进程 Gloo、fake world 接线及恢复通过；
+候选参数不代表最优。服务器2的实际部署进展另见文末记录，物理收益须独立验证。**
+首次代码验收没有停止训练；随后用户明确授权服务器2停止旧任务并启动正式八卡训练。
+整个过程保留共享工作树分支及旧实验目录。
 
 ## 官方依据与适配边界
 
@@ -164,21 +165,18 @@ Actor/Critic/Adam 一致性，沿用原子 checkpoint 与 SHA 指针发布。
 
 ## 显式启动命令
 
-以下命令用于具有配置中已绑定资产的服务器独立工作树。当前本机不具备这些条件。
+以下命令用于具有配置中已绑定资产的服务器独立工作树。本地开发机不具备这些条件。
 入口要求八张空闲 GPU、完整资产 SHA、同一 Python 3.11 Isaac/GENMO 环境和新输出目录；
 不满足时主动失败，不停止其他作业。将代码同步到独立目标分支并确认没有使用该源码的
 正式训练后，再执行。先执行当前 compact 核的实际标定，再启动最多两轮 Actor 试验。
-源配置中的 deployment_profile 是历史实测样本；本次未重新测量，不能仅修改其
+源配置中的 deployment_profile 是历史实测样本；部署前必须重新测量，不能仅修改其
 kernel SHA 冒充新标定。正式入口保留行为核/数值执行/资产的实际兼容检查。
 
 第一步只标定，不训练 Actor，输出独立 `deployment_calibration.json`：
 
 ```bash
 cd /home/user/liwei/continuous-rolling/GENMO
-CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 \
-/data0/user/liwei/closedloop_stage10_v3_runtime/env_isaac_genmo/bin/python \
-  -m torch.distributed.run --standalone --nproc-per-node=8 \
-  tools/train_closedloop_stage10.py \
+bash scripts/train_stage10_8gpu_server1.sh \
   --config configs/closedloop/stage2_continuous_rolling_robofft.yaml \
   --genmo-repo /home/user/liwei/continuous-rolling/GENMO \
   --gmt-repo /home/user/liwei/continuous-rolling/legged_lab_gmt \
@@ -204,10 +202,7 @@ cp --no-clobber configs/closedloop/stage2_continuous_rolling_robofft.yaml \
 
 ```bash
 cd /home/user/liwei/continuous-rolling/GENMO
-CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 \
-/data0/user/liwei/closedloop_stage10_v3_runtime/env_isaac_genmo/bin/python \
-  -m torch.distributed.run --standalone --nproc-per-node=8 \
-  tools/train_closedloop_stage10.py \
+bash scripts/train_stage10_8gpu_server1.sh \
   --config /data1/user/liwei/robofft_runs/setup_20261023_trial01/stage2_continuous_rolling_robofft.yaml \
   --genmo-repo /home/user/liwei/continuous-rolling/GENMO \
   --gmt-repo /home/user/liwei/continuous-rolling/legged_lab_gmt \
@@ -216,6 +211,8 @@ CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 \
   --capture-validation-iteration 1
 ```
 
+脚本名称保留历史 `server1`，实际上是两台服务器共用的八卡入口；它在 Python 启动前
+设置 Isaac 动态库、八卡可见顺序、NCCL 和线程数，避免直接调用 Python 时缺少动态库。
 Critic 原有完整 MC 预热和质量门禁仍执行，原固定物理初始/结束评估仍执行。
 `--stop-after-iteration` 限制累计 Actor 轮次，不缩减预热或评估任务；初始试验可能耗时较长。
 需要先采一轮真实固定数据时，在同一命令上增加 `--collect-only` 并使用另一个新目录；
@@ -293,8 +290,8 @@ TensorBoard 指标上限从 70 调整为 75，新增五个明确命名的 RoboFF
 
 ## 未验证事项与下一步验收
 
-本机只检测到一张 RTX 4090，已有 python 作业 PID 1133978 使用 GPU；配置中的
-`/data0/.../env_isaac_genmo`、Stage1 权重和 IsaacLab 目录不存在。未连接或修改训练
+首次本地代码验收时只检测到一张 RTX 4090，已有 python 作业 PID 1133978 使用 GPU；配置中的
+`/data0/.../env_isaac_genmo`、Stage1 权重和 IsaacLab 目录不存在。当时未连接或修改训练
 服务器，服务器当前空闲资源及资产状态为待核验。因此真实两轮训练和固定物理评估
 均未运行，GPU 耗时/峰值显存、生产权重的数值稳定性、8192 动作实际吞吐为待核验。
 
@@ -302,3 +299,32 @@ TensorBoard 指标上限从 70 调整为 75，新增五个明确命名的 RoboFF
 比较原物理报告中的真实跟踪误差、失败率、关节活动/幅度、奖励各项及完成时长；
 并结合新固定噪声参考变化，区分参考更活跃与机器人实际跟得更好。
 本次未获得真实跟踪误差或失败率，不用 fake world 的零误差或代理 KL 替代这些结果。
+
+## 服务器2部署记录（2026-10-23，Asia/Shanghai）
+
+用户在代码交付后明确授权正式八卡训练，并要求停止服务器2已有训练。新代码同步到
+`/home/user/liwei/continuous-rolling/GENMO`，配套 GMT 位于同级 `legged_lab_gmt`；
+两者均为 `feature/bumi-continuous-rolling`。服务器旧工作树没有切分支或覆盖源码。
+Stage1/GMT/kinematics/stats 五项资产 SHA 全部通过，服务器 CPU 专项为
+11 passed、1 项既有弃用 warning，耗时 13.52 秒。
+
+旧任务 `stage2_ddim10_last5_motion1s_formal_20261023` 的自动恢复器先暂停，8 个 worker
+收到合法整轮边界退出请求。旧代码随后在参考变化诊断触发 CUDA 索引越界，该轮未发布；
+17:35:24 全部 worker、launcher、恢复器均确认退出。保留原日志、模型与最新完整
+iteration 0 checkpoint，大小 931772507 bytes，SHA256
+`ba933b156ebbaeadd54d9f2b003171977f4a8e3af465cb7d5a7cc2402dd750ac`。
+这次停止包含故障退出，不宣称旧任务的未完成更新已正常保存。
+
+部署证据集中保存在服务器
+`/data1/user/liwei/GENMO_outputs/closedloop_stage10/stage2_robofft_20261023_setup`。
+初始候选配置只复制到该目录，未导入旧 DPPO 的 Adam、Critic、rollout 或概率缓存。
+两次原样八卡标定各 64 个样本，分别有 2 个超 0.32 秒预算，最大值为 0.682396 和
+0.720339 秒；正常会话退出不等于延迟预算通过，profile 更新工具拒绝首轮数据。
+没有筛除慢样本，也没有提高预算或降低学习率。
+
+只读 GC 观察器进一步确认：rank 2/6 在冻结模型身份核验处触发第 2 代垃圾回收，
+各回收 39208 个对象，耗时 0.438554/0.451320 秒，对应请求为 0.677289/0.699498 秒。
+观察器没有关闭 GC 或修改随机数，这组带诊断开销的测量不进入正式 profile。
+`training.py` 因此在模型、Isaac、配置全部初始化完成后、首个物理请求前执行一次完整
+回收；标定和训练共用此边界，session 报告记录各 rank 的对象数、耗时及自动 GC 状态。
+自动 GC、真实请求计时、物理时钟、奖励、冻结模型校验和训练超参保持原样。
