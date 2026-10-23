@@ -1,8 +1,41 @@
-第二阶段训练入口与历史联合PPO记录
-================================
+第二阶段显式训练入口与历史记录
+==============================
 
-当前入口（2026-10-22）
----------------------
+当前入口（2026-10-23，continuous-rolling 分支）
+---------------------------------------------
+
+本分支正式训练使用 RoboFFT-D，源配置是
+configs/closedloop/stage2_continuous_rolling_robofft.yaml，详细数学、标定流程、
+服务器1实际命令和验证结果见 stage2_robofft.md。
+GENMO/GMT 均使用 feature/bumi-continuous-rolling 的独立工作树。
+
+所有正式入口必须显式传入 --config，包括 tools/train_closedloop_stage10.py、
+scripts/train_stage10_8gpu_server1.sh 和 tools/run_stage2_training_supervisor.py。
+遗漏配置会在启动 CUDA/Isaac 前报错；不存在自动回退到旧 DPPO 的默认配置。
+使用八卡 Bash 包装保持 Python 启动前的动态库、Isaac、NCCL 和线程设置。
+
+服务器1的已标定配置为::
+
+    /data1/user/liwei/GENMO_outputs/closedloop_stage10/stage2_robofft_server1_20261023_setup/stage2_continuous_rolling_robofft_server1.yaml
+
+在该任务已停止并确认八卡空闲后，恢复同一实验的命令为::
+
+    cd /home/user/liwei/continuous-rolling/GENMO
+    bash scripts/train_stage10_8gpu_server1.sh \
+      --config /data1/user/liwei/GENMO_outputs/closedloop_stage10/stage2_robofft_server1_20261023_setup/stage2_continuous_rolling_robofft_server1.yaml \
+      --output-dir /data1/user/liwei/GENMO_outputs/closedloop_stage10/stage2_robofft_server1_formal_20261023 \
+      --resume latest --stop-after-iteration 200
+
+后台持续恢复的 supervisor 命令见 stage2_robofft.md；不能与上述前台命令同时启动。
+新实验必须使用新目录并去掉 --resume，从相同 Stage1 权重开始；部署 profile 必须
+对应目标服务器的真实请求延迟。旧 DPPO 仅在显式传入其配置（例如
+stage2_continuous_rolling_train10.yaml）和独立目录时作为对照，不共享 RoboFFT 的
+rollout、旧概率或 Adam，不允许 DPPO checkpoint 完整恢复成 RoboFFT。
+
+以下内容是有日期的历史算法和实测记录，不是本分支当前启动默认值。
+
+历史逐步 DPPO 入口（2026-10-22）
+--------------------------------
 
 当前正式候选配置为configs/closedloop/stage2_stepwise_mean.yaml，完整说明与实际
 验收见stage2_stepwise_mean_20261022.rst。15～18步各自计算joint_log_ratio/D，

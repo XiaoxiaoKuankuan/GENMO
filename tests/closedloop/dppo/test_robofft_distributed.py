@@ -46,12 +46,14 @@ def _worker(rank,directory):
                 if empty_rank else [dict(valid=True,has_free=True,owner_rank=i,local_index=0) for i in range(2)])
             optimizer=make_actor_optimizer(actor,t)
             result['update']=actor_update(policy,optimizer,rows,targets,cache,manifest,distributed=distributed,
-                generator=torch.Generator().manual_seed(15),minibatch_actions=1,microbatch=1)
+                generator=torch.Generator().manual_seed(15),minibatch_actions=1,microbatch=1,
+                diagnostic_sentinel_actions=1)
             result['state']=copy.deepcopy(actor.state_dict())
             # 同一全局 surrogate 触发全部 rank 的相同早停，包含完全空的 rank。
             policy.robofft['surrogate_kl_stop']=1e-30
             stopped=actor_update(policy,optimizer,rows,targets,cache,manifest,distributed=distributed,
-                generator=torch.Generator().manual_seed(16),minibatch_actions=1,microbatch=1)
+                generator=torch.Generator().manual_seed(16),minibatch_actions=1,microbatch=1,
+                diagnostic_sentinel_actions=1)
             result['early_stop']=(stopped['optimizer_steps'],stopped['stop_reason'])
             if rank==0:
                 def broken(*args,**kwargs):raise FloatingPointError('injected_rank0_numeric_failure')

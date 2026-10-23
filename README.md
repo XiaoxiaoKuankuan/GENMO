@@ -1,25 +1,28 @@
 # GENMO / BUMI music closed-loop
 
-当前第二阶段开发分支：`feature/stage2-asymmetric-denoising`，配套GMT使用
-`feature/stage2-tracking-history`。保留音乐驱动Stage1，以及基于真实物理反馈的Stage2。
+当前第二阶段开发分支为 `feature/bumi-continuous-rolling`，配套 GMT 使用同名分支。
+保留音乐驱动 Stage1，以及基于真实物理反馈的 Stage2。模型输出为
+**qpos30 + 独立 contact2**，Stage2 生成 60 帧 @ 30 Hz。
 
-模型输出保持 **qpos30 + 独立 contact2**，不预测 joint velocity，不使用 51D 动作表示。
-Stage 2 的 Frozen GMT、动力学、Critic / DPPO 不由本页的离线入口启动。
+本分支正式第二阶段采用 **RoboFFT-D 动作级代理 PPO**，配置源为
+[`stage2_continuous_rolling_robofft.yaml`](configs/closedloop/stage2_continuous_rolling_robofft.yaml)。
+八卡统一入口仍是 [`scripts/train_stage10_8gpu_server1.sh`](scripts/train_stage10_8gpu_server1.sh)，
+Python 入口、八卡脚本和后台 supervisor 都**要求显式 `--config`**；省略配置会报错，
+没有隐式 DPPO 默认值。正式运行传入由该源配置复制并完成目标服务器延迟标定的独立 YAML。
 
-第二阶段只维护当前一套方案，统一从
-[`scripts/train_stage10_8gpu_server1.sh`](scripts/train_stage10_8gpu_server1.sh)
-启动，默认配置是唯一的
-[`stage2_full_chain.yaml`](configs/closedloop/stage2_full_chain.yaml)。
-它使用s595000、冻结GMT140500、60帧生成、每卡128环境和8秒连续世界采集；
-前15步冻结、4步随机训练、末步冻结确定性去噪。Actor采用统一LR `3e-7`、
-单次全局joint-score策略梯度加原Stage1 BC，Critic独立使用历史跟踪特权信息和完整MC。
-坐标平均PPO只保留数学裁剪诊断，不再作为可选训练方法。
+RoboFFT 保持 s595000 初始化、冻结 GMT140500、20 步采样（前 9 步冻结、9..18 可训练、
+末步冻结确定性）、CFG=2.5、50 Hz 控制/200 Hz 物理和连续滚动时钟。Actor 使用固定
+16 个前向 MC，平均对数比后对每个上层动作裁剪一次；BC 和 best-policy anchor 关闭。
+Critic、奖励、真实时长 GAE 与终止/截断语义沿用原运行基础设施。
 
-启动、当前参数、证据和恢复边界见
-[当前第二阶段训练说明](docs/closedloop/stage2_training.rst)。
-已替代的配置、学习率扫描、旧训练器、旧采集器和恢复转换只在Git历史中追溯；
-当前代码不提供旧方法兼容入口。源码或配置身份改变后不能把旧checkpoint冒充等价恢复。
-正在运行的作业继续使用它已绑定的源码，不能直接pull热更新。
+启动命令、候选超参、恢复和当前实际验收见
+[Stage2 RoboFFT-D](docs/closedloop/stage2_robofft.md)；
+[统一启动说明及旧实验记录](docs/closedloop/stage2_training.rst)明确区分历史方案。
+旧 DPPO 连续滚动配置
+[`stage2_continuous_rolling_train10.yaml`](configs/closedloop/stage2_continuous_rolling_train10.yaml)
+保留为显式独立对照，使用自己的运行目录和 checkpoint，不能作为 RoboFFT 完整恢复。
+导入旧 Actor 只能显式 weights-only 并新建实验。源码 SHA 仅追溯；恢复校验实际模型、
+优化器、采样核和执行合同。活动训练退出前不能 pull 更新其源码。
 
 ## 当前代码与契约
 

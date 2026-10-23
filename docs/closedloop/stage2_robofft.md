@@ -4,7 +4,8 @@
 `/home/weili/bumi-closedloop-worktrees/rolling/GENMO`，起始 HEAD 为
 `40f8067750be39e51827ba10aa236d0318ab4b25`。入口是
 `tools/train_closedloop_stage10.py`，包路径是 `gem/closedloop/`。
-显式配置为 `configs/closedloop/stage2_continuous_rolling_robofft.yaml`，
+Python、八卡 Bash 包装和 supervisor 均要求显式 `--config`；漏传会在创建
+CUDA/Isaac 上下文前失败。RoboFFT 源配置为 `configs/closedloop/stage2_continuous_rolling_robofft.yaml`，
 从 `stage2_continuous_rolling_train10.yaml` 复制并仅更换 Actor 优化相关设置。
 
 **首次代码验收：CPU 数学、真实小型网络、双进程 Gloo、fake world 接线及恢复通过；
@@ -111,6 +112,15 @@ loss[i] *= beta_neg if A[i] < 0 else 1
 
 两遍流式反传先无梯度求全部新损失，再对动作目标求每个 MC 的系数，随后逐 MC
 微批重算并反传。它与完整单遍图的链式法则一致，并限制同时存活的激活。
+
+逐 optimizer.step 的诊断覆盖**当前全局 minibatch 与固定哨兵的去重并集**，
+不再重算整个 rollout。哨兵是本轮全局有效且有 free 坐标的 manifest 顺序中等距选取
+的最多 64 个动作，跨 epoch 不变、不消耗环境/MC/重排 RNG。诊断记录 scope、实际
+覆盖动作数、哨兵与当前小批的重叠数及耗时；这些样本不额外进入目标或梯度分母。
+初始化和整轮结束各做一次完整有效动作诊断，最终指标仍覆盖全量。
+可选 surrogate 早停使用逐步并集诊断的全 rank 同一归约值，不能将该子集指标冒称
+全量或真实 KL；默认仍为 null。空 rank 和尾批参与原有 SUM 与一致错误传播。
+
 
 `surrogate_kl = mean((ratio-1)-logratio)` 仅是前向代理的诊断量，不是真实策略 KL。
 同时记录每 MC logratio clamp 命中率、动作 clip 率及单个 logp 范围命中率。
@@ -409,3 +419,31 @@ BC/anchor 关闭，8 个 worker 均存活，监督器 attempt 1，日志无 trac
 历史 fork 用例等待，独立新进程执行该用例及剩余 70 项得到 71 passed（15.53 秒）；
 完整覆盖 796 passed、7 skipped，不将它写成一次无中断全量通过。此前首次数学接线
 提交的 796 passed/7 skipped/83.82 秒是另一轮已完成验证，二者不累加。
+
+## 2026-10-23 审查修正与 MC 微批对照
+
+`updater.py` 已按前述策略移除每小批后的整轮重复前向；有界诊断与旧全量诊断
+在相同 MC、动作、优势、参数、Adam 和 epoch 重排起点上的所有最终参数/Adam 状态
+逐项完全相等。专项21项通过（20.09秒）；扩大集合812项通过（91.23秒），既有fork
+单用例在CUDA不可见的独立进程中1项通过（3.14秒），总覆盖813项。该fork用例此前
+在CUDA可见时等待，已精确清理本次测试进程与临时目录，不计为一次无中断全量通过。
+
+真实GPU微批对照使用下面的有限工具。在目标GPU空闲时执行；输出指定临时目录，
+记录结果后按仓库约定清理：
+
+```bash
+cd /home/user/liwei/continuous-rolling/GENMO
+task_bench_dir=$(mktemp -d /tmp/robofft-mc-benchmark.XXXXXX)
+PYTHONDONTWRITEBYTECODE=1 OMP_NUM_THREADS=4 MKL_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 \
+/data0/user/liwei/closedloop_stage10_v3_runtime/env_isaac_genmo/bin/python -B \
+  tools/benchmark_robofft_mc.py \
+  --config /data1/user/liwei/GENMO_outputs/closedloop_stage10/stage2_robofft_server1_20261023_setup/stage2_continuous_rolling_robofft_server1.yaml \
+  --gmt-repo /home/user/liwei/continuous-rolling/legged_lab_gmt \
+  --device cuda:0 --actions 8 --repeats 3 --output "$task_bench_dir/result.json"
+```
+
+每种形状先预热一次再测三次；共享真实 s595000、同一组真实四来源条件、最终
+compact动作、16个MC、旧损失和人工非零优势。测量范围是生产两遍目标反传，不含
+Adam、MC准备、rollout、Critic或物理；分配/保留峰值也不包括训练中的Critic/PhysX。
+工具检查完整可训练参数梯度与代理数值一致，以及旧数据、MC RNG、网络参数未变。
+这项计算对照不证明真实跟踪质量，正式训练的四阶段资源与固定物理评估另行报告。
