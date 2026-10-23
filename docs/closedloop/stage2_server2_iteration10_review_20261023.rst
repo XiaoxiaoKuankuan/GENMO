@@ -6,9 +6,9 @@
 
 本报告基于独立工作树 ``dppo/GENMO`` 的已保存JSON证据，审查两秒音乐、
 一秒动作的Stage2运行前十轮。2026-10-24形成初稿，本次已补齐固定case A/B、
-全批小LR扫描、保持8192的仅LR消融，以及初始化快照的待恢复采样状态修复。
-编写基线为 ``feature/stage2-asymmetric-denoising`` / ``675c686``，上述快照修复
-在该基线之后本地实施，正式恢复验收仍待新run产物确认。
+全批小LR扫描、保持8192的仅LR消融、候选固定物理评估及正式续训启动记录。
+当前代码基线为 ``feature/stage2-asymmetric-denoising`` / ``e6b8365``，包含
+初始化快照的待恢复采样状态修复；正式初始化和第11轮完整checkpoint均已发布并通过审计。
 训练日志、完整歌曲物理配对、独立完整MC和代码执行等价性分别说明，
 缺少的结果留空，不将代理目标变化或CPU测试当作物理改善。
 
@@ -23,7 +23,15 @@ FP32零舍入，部分轮次未应用全部采样链。物理结果只有很小�
 原run已在完整第10轮保存后正常退出，没有进入第11轮。八卡梯度边界等价及固定case
 A/B计算诊断及小LR对照已完成，均未向正式训练提交更新。保持8192、仅降LR至3e-8
 的消融完成5/5步、100%链覆盖，完整目标gain为+0.012469；主会话据此选择该最小改动
-候选，已启动固定train32物理验收。本稿尚无候选物理收益或正式重训结果。
+候选。其固定train32物理评估已完整结束：完成30/32不变、无新增失败，但奖励/秒
+下降0.1173%，anchor位置平方误差和完整角差平方误差分别上升15.94%和16.49%，
+未证明物理改善。新run已于2026-10-24 01:50:09启动，从完整第10轮显式迁移LR，
+以累计20轮为有限探索边界。源checkpoint与新初始化快照的两网络、两Adam、八rank
+RNG/collector及预算继承已完成CPU逐项审计。正式第11轮已完成5/5步、100%链覆盖、
+零回退，完整目标gain为+0.012469；其Actor全部322个张量与已物理评估候选逐字节
+相同，所以上述固定32物理结果也对应正式第11轮Actor，仍不构成物理改善证明。
+截至02:07:39交接快照，新run已进入第12轮采样、监督器attempt1无重启；累计20轮
+结果及长期效果仍未知。
 后续更新位置见文末，必须以实际产物填写，不把计划描述成已经执行。
 
 运行与证据身份
@@ -85,6 +93,38 @@ clip=0.1、8192链minibatch、epoch=1、BC关闭、最高候选LR=3e-6。
      - 4874f08d522094c5d95cab570ec540af5436868efe460d75da9aa6af74561019
    * - fixed_case_learning_rate_comparison_manifest.json
      - a0e61b87c9c4d5cc62a03af5648e50c56f6e65861a45a2f8966311b05b9aa9bd
+   * - iteration10_vs_selected_lr3e8_train32.json
+     - a7e193b15456dce403c1b0b90634be780ef1c1890f472e3554e9e8ea98c9a094
+   * - selected_lr3e8_effect_summary.json
+     - 4f69911789c26732215bebcd70eb701652a03c5d981cbdd15b1c72a25b0afd9e
+   * - selected_lr3e8_identity_audit.json
+     - 99d4ca0e6bd17958ed59c41f41bb02ae62d77b42bf6d9ee55d3c3be17709fcb3
+   * - formal_lr3e8_launch_receipt.json
+     - dad07be0df7830e0ba7846748da9ee2bc589f31f5018ee4b4b960b70720334ca
+   * - selected_lr3e8_finedance_drift_attribution.json
+     - 8a36e7738634318b355e45162b705a873733e1d6362295aa2304a457771eec22
+   * - selected_lr3e8_finedance115_pose.json
+     - c83f67208b268c2b1c9991344d1d3107dac443536217a40f8401a220c21d5f1b
+   * - iteration10_vs_selected_lr3e8_finedance102_margin.json
+     - 7cd137b612c5d112e2657a989e11dd11e7f5c4df700fc539496d2ace27386e14
+   * - selected_lr3e8_tracking_score_saturation.json
+     - 949d0409f1b8841e07c8202f4cd536a2c2468ba2c0d2695b9a8dcda3665c148e
+   * - lr3e8_formal_initialization_state_audit_qualified.json
+     - 63dbcbb3e48988e54b00d2c4c31be999f12b24fa287ed40ff497fa1d35b65114
+   * - lr3e8_formal_initialization_state_audit.json
+     - 62deecde8460b94e139fc6afd8dab3c5b0099d9adf0959b77ee03d55a8a0cabe
+   * - lr3e8_formal_initialization_summary.json
+     - 310155a3dbdd7071138f2882fb812f99dcaa97db07652bc7811bd7361f4f4e76
+   * - lr3e8_formal_iteration11_summary_corrected.json
+     - 48ebfef9b87ca6dc54f1825c65ebef3d8792a2910ce5644021ac6f6887a4487b
+   * - lr3e8_formal_iteration11_evidence.json
+     - adf5572efc727a90fe636465c9a26b6a8e89040638d6af61b8e8eb78a0ad3357
+   * - lr3e8_formal_iteration11_actor_binding_audit_corrected.json
+     - a83b07cc651889f3e7466b8a385fcc3bb66d975311fd94627a0901d597358421
+   * - lr3e8_formal_iteration11_actor_binding_audit.json
+     - ee19bc59681b73ad8add2654dd83a9b69b275e6d1050cb1d9fd7e06014dc0b09
+   * - lr3e8_formal_handoff_snapshot.json
+     - 4cb311a754b6b141225849758ed41899138e39d2ebd19426b55d7301d6534a83
 
 ``fixed_train_stage1_vs_iteration10.json``保留32任务逐对结果；效应汇总的
 ``source_comparison_sha256``已与其实际字节核对。四联图为同目录
@@ -602,15 +642,15 @@ FineDance102的seed42峰值non-yaw误差约0.597154rad，距0.6rad终止阈值�
 末段证据见 ``finedance_terminal_interpretation.json`` 及其绑定的原始控制误差归档。
 FineDance115末0.2秒的完整四元数角差约1.36至2.21rad，说明不能假定完整姿态差
 始终很小；但该角差包含yaw，而本run明确禁用yaw终止，不能将大全角直接解释为
-危险roll/pitch误差或跌倒。已保存的是聚合误差，缺少实际/参考根四元数及xyz，
-故目前只能确定终止指标实测越阈，真实倾斜跟踪差与去yaw分解贡献无法分离。
+危险roll/pitch误差或跌倒。原评价保存的是聚合误差，缺少实际/参考anchor四元数及xyz，
+故原评价只能确定终止指标实测越阈，真实倾斜跟踪差与去yaw分解贡献无法分离。
 原始数据115在该片段大pitch伴转向仅为辅助线索，原数据姿态不等于生成参考或
-实际机器人姿态；后续需要定向记录后再归因，不据此修改终止阈值。
+实际机器人姿态；新候选的定向姿态证据见文末，不能倒推旧评价的未保存姿态。
 现有execution_trace包含与终止计算同对象的anchor姿态，但旧evaluation证据裁剪后
 没有保存。最小evaluation侧车姿态取证代码已完成，沿用已有anchor名称、世界系位置
 和wxyz四元数；坏姿态只记invalid、旧记录缺失记unknown，不改变GMT、IPC、奖励或
-终止。28项新增加10项既有CPU回归通过；定向物理结果仍待完成，不能用新增代码补造
-旧轨迹根姿态，也不能把任意anchor自动称作机器人root。
+终止。28项新增加10项既有CPU回归通过；新候选已保存定向物理姿态，不能用新增
+代码补造旧轨迹姿态，也不能把任意anchor自动称作机器人root。
 
 每执行秒奖励2.317188→2.308874（-0.35879%），跟踪score 0.762648→0.757335
 （-0.69673%），实际活动度1.166343→1.163448rad/s（-0.24819%），没有动作塌缩证据。
@@ -774,7 +814,8 @@ None无界与1024+1条件块对照，完整参数梯度relative L2=3.4392e-7，l
 1025与1024+1的峰allocated分别27139942400和27134515200字节（约27.14GB），
 几乎相同。测量范围为backward与全rank SUM的PyTorch峰值，包含既有模型/缓存，
 明确不含Adam和PhysX。该边界对照证明执行等价，不能据此宣称已实测大幅降低显存；
-完整全批候选的工具峰值现已测量，见下节；正式物理环境常驻峰值仍待测量。
+完整全批候选的工具峰值现已测量，见下节；正式11轮PyTorch峰值及含PhysX的设备
+离散观测见文末，设备绝对峰值仍未被连续测量。
 第一遍无梯度条件池、模型/Adam、全量records和PhysX仍占显存，离线工具没有物理世界，
 不能仅凭工具峰值宣称正式8×128环境安全。配置容量上限10240链/rank也必须纳入判断。
 
@@ -803,7 +844,8 @@ Actor各组lr；Actor/Critic参数、Adam矩/步数、原预算、各rank RNG/co
 记录旧配置LR、旧Adam实际LR、新分组LR，不宣称整个Adam逐字节不变。
 初始完整快照已经使用新LR；supervisor有latest后仅按新合同resume。原新实验的
 best/monitor清理不变，刷新 ``selected_actor_lr``，历史 ``last_accepted_actor_lr``
-保留。MC完成标记与校准边界继承，生产预热门槛未修改；实际未重复预热仍须正式日志确认。
+保留。MC完成标记与校准边界继承，生产预热门槛未修改；正式初始化至第11轮的
+实际产物已确认没有重复MC预热，具体运行证据见文末。
 
 该迁移的48项新增CPU回归与31项相关既有回归共79通过；真实非空单/多组Adam除LR
 逐项相同，下一次同梯度更新与手动load+setLR参考完全一致，非法差异在写入前拒绝，
@@ -831,8 +873,8 @@ GAE、概率和KL逻辑不变；PhysX仍按原恢复合同新建episode，并非
 active拒绝及只应用一次。8项新增与27项既有恢复回归共35通过。独立CPU进程仅在
 内存替换为HEAD旧方法时，两项真实采样器首collect往返对照均按预期失败，下一任务
 来源为FineDance而不中断参考为AIST++，明确复现了该恢复缺口。
-这些测试没有运行Isaac或CUDA；正式初始化快照与源第10轮逻辑状态逐项审计仍待
-新run产生，不能把CPU回归写成八卡物理恢复已验收。
+这些测试没有运行Isaac或CUDA；新run实际初始化快照与源第10轮逻辑状态的逐项
+CPU审计现已通过，见文末。CPU回归和快照审计都不能写成逐物理步恢复已经验收。
 
 固定case A/B：已完成计算诊断
 --------------------------------------------
@@ -1062,24 +1104,248 @@ AIST++ +0.00066356、FineDance +0.00778502、Mine +0.00123069，均为正；正�
 样本逐一口径核对、保护坐标均不变；每步 ``separate_step_probe_16``、旧路径最后
 高斯均值与这128条最终参考不混合，也都不能当作实际物理轨迹改善。
 
-候选选择、物理与正式重训：待验收
+候选物理评估已完成，正式续训已启动
 --------------------------------------------
 
 依据上述完整消融，主会话选择保留8192、仅LR3e-8作为最小改动候选，不采用
-fullbatch。待选配置 ``stage2_ddim10_last5_motion30_music60_lr3e8_server2.yaml``
+fullbatch。配置 ``stage2_ddim10_last5_motion30_music60_lr3e8_server2.yaml``
 只修改Actor基础LR和trust_region.maximum_lr两个字段，batch、KL、clip、奖励、
 随机核及接受门槛保持原合同。选择理由是同数据下完整覆盖、零回退、完整目标与
 各来源贡献均正，且已有原batch路径；不是已经证明物理收益或最优学习率。
 
-固定32任务物理验收 ``selected_lr3e8_train32`` 已由主会话启动，尚待完整结果。
-需保留同音乐/seed/噪声/奖励/终止合同，比较完成、新增失败、每执行秒奖励、
-活动度、来源差异及FineDance末段姿态证据；代理改善和导出成功不代替这一步。
+固定32任务物理评估 ``selected_lr3e8_train32`` 已完整结束，strict比较状态passed。
+这是同一train子集的16首音乐×2个seed，原第10轮与小LR冻结case五步更新后的Actor
+配对，不能称heldout。计划SHA、音乐起点/噪声身份、执行核、奖励与终止合同一致；
+八rank各4个任务报告Actor/Critic参数及Actor梯度不变、RNG恢复、未使用训练buffer、
+未执行优化。strict passed表示比较证据和身份检查通过，**不表示物理收益通过**。
 
-正式恢复及第11轮验收仍待完成。使用已实现的显式LR迁移和第10轮完整checkpoint，
-新run继承计数、预算、两网络两Adam和RNG，核对首个初始化checkpoint保留的pending
-采样逻辑、真实未重复MC预热、含PhysX的峰值和首轮完整发布。后续收益与是否扩大训练预算由实际
-物理配对、正式首轮优化状态和固定复评决定，不把候选选定当作正式训练已验收。
+.. list-table:: 第10轮与所选8192/LR3e-8候选的固定train32物理配对
+   :header-rows: 1
+
+   * - 指标与口径
+     - 第10轮
+     - 小LR候选
+     - 变化
+   * - 完整完成/计划任务
+     - 30/32
+     - 30/32
+     - 无新增失败、无恢复失败
+   * - 实际执行时长（秒）
+     - 2088.78
+     - 2088.80
+     - +0.02
+   * - 总奖励/实际执行秒
+     - 2.308874
+     - 2.306167
+     - -0.1173%
+   * - track score控制样本均值
+     - 0.757335
+     - 0.756182
+     - -0.1521%
+   * - 实际关节活动度均值（rad/s）
+     - 1.163448
+     - 1.163007
+     - -0.0379%
+   * - anchor位置平方误差均值（m²）
+     - 0.184408
+     - 0.213794
+     - +15.9353%
+   * - anchor完整角差平方误差均值（rad²）
+     - 0.702935
+     - 0.818875
+     - +16.4937%
+   * - non_yaw角差均值（rad）
+     - 0.053596
+     - 0.053396
+     - -0.3721%
+   * - 生产reference rejection/非有限非法参考
+     - 0/0
+     - 0/0
+     - 不变
+
+32个任务中每秒奖励10升22降；将同一音乐的两个seed合并后，16首音乐6升10降。
+两边都完成的30个任务每秒奖励上升0.0568%，但剔除两个失败任务后的子集不能
+替代整体：FineDance115两个seed均仍终止，其中seed42仅多执行一个0.02秒控制步。
+按来源，奖励/秒AIOZ-GDANCE为+0.2731%、AIST++为+0.0012%、FineDance为-0.2202%、
+Mine为-0.1391%，不能用单一来源或完成子集宣称整体提升。
+
+按来源分层，以同音乐双seed为不可拆分cluster进行20000次bootstrap（seed=20261024），
+总体奖励/秒相对变化95%百分位区间为[-0.6712%, +0.5020%]。该区间跨0，既未证实
+收益，也不是等效性或无退化证明；16个音乐cluster来自优化期间使用的固定训练子集，
+不支持泛化、收敛或长期收益结论。
+
+原始跟踪误差的上升必须保留：anchor位置平方误差增加0.029386m²，完整角差平方
+误差增加0.115940rad²，主要来自FineDance。该来源对应均值分别上升20.1070%和
+17.8383%，而全体non_yaw角差均值略降。完整角差包含yaw，当前run有意关闭yaw终止；
+不能将其等同于危险倾斜或直接推出跌倒，也不能因non_yaw均值下降掩盖位置/完整
+朝向跟踪变差。已完成的定向分解见下文，不能把辅助几何指标替换生产终止指标。
+已保存contact score混合滑移与异常接触，缺少独立足端切向速度，故不宣称独立足滑改善。
+
+``selected_lr3e8_tracking_score_saturation.json`` 从两策略共64个episode的每个控制点
+重算8项 ``exp(-squared_error/reward_std²)``，再按原权重汇总，track与记录的最大
+绝对差为4.45e-16。它没有用 ``exp(-平均误差)`` 冒充逐点均值，也没有重写奖励。
+位置误差超过9倍std²的控制点占比由3.2852%升至5.8962%，完整朝向由17.5854%升至
+19.9971%；此区域单项exp得分低于 ``exp(-9)≈0.0001234``，对继续增大的误差
+分辨力很低。虽然位置原始平方误差上升15.94%，其逐点exp得分均值却由0.431327
+变为0.432946；完整朝向exp均值只由0.435377降至0.433246。两anchor项在track中的
+归一化权重各为0.079365，它们合计只使总体track均值改变-0.00004051。
+
+FineDance102/115的前后两策略、两个seed，在各自末20秒的完整朝向误差均有100%
+控制点超过9倍std²，exp均值已在约4.9e-13至2.7e-7。该证据解释了为什么大幅原始
+漂移变化可以伴随很小的track变化，提示单看总奖励会遗漏尾部质量风险；它并未证明
+当前奖励是训练低效的唯一原因，也未证明改奖励就能改善物理表现。本轮维持奖励
+和保护合同不变，只改变两个LR字段。下一阶段可独立对照非饱和anchor惩罚或更稳健
+的heading表达，但必须建立新的奖励/指标身份、验证Critic目标及标定，重新做固定
+物理配对；若涉及终止表达还须单独验证保护语义，不能直接放松阈值。
+
+FineDance候选的同控制tick姿态取证
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+``selected_lr3e8_finedance_drift_attribution.json`` 保留两个模型的10条FineDance
+原始误差轨迹，候选额外具备完整参考/实际anchor姿态。对102、115、200的两个seed，
+候选位置平方误差的99.8971%至99.9875%来自水平XY；完整角差与heading角差逐tick
+绝对差的均值为0.00521至0.02154rad，重力方向夹角均值为0.04951至0.07517rad。
+这为候选长曲的水平位置/朝向漂移提供直接几何证据，但第10轮旧评价没有姿态，
+不能将新候选的分解比例当作前后变化的因果归因。
+
+FineDance115两个seed仍在144.60秒越过原non_yaw阈值。记录的base_link、world/wxyz
+姿态在全部7230个控制点有效；使用原生产算法重算non_yaw的最大绝对误差低于
+2.2e-15rad，完整角差与记录误差低于8.2e-7rad，支持保存姿态与生产指标的时刻/对象对齐。
+终止点生产non_yaw分别为0.86347/0.83935rad，而重力方向跟踪角差为
+0.15740/0.15422rad，完整角差为2.31399/2.42492rad。此时参考前向水平投影范数
+仅0.08660/0.08714，实际为0.19879/0.19770；参考绝对倾角约1.55rad，实际约1.39rad。
+这些数据支持参考前向轴接近竖直、水平投影很小时，heading提取敏感性参与
+non_yaw的快速上升，同时存在真实跟踪差和较大绝对倾斜，不能简单判为
+“纯误终止”或“已证明跌倒”。
+重力夹角是辅助诊断，没有替换生产规则，也没有修改0.6rad阈值。
+
+.. figure:: ../../outputs/stage2_music60_iter10_review_20261023/selected_lr3e8_finedance115_pose_attribution.png
+   :alt: FineDance115两seed末0.2秒的原non-yaw、辅助重力角差、完整角差和前向水平投影
+
+   同一控制tick、同一anchor的参考与实际姿态分解；图SHA256为
+   ``dbfc9e4193900fd54a1cc1f14185deaae00f3ef901869480783aa2f72afd8427``。
+   两seed均越过原生产阈值；辅助倾斜量不替代终止规则，本图不证明误终止。
+
+FineDance102两seed仍在158.96秒完成。seed42的峰值non_yaw由0.597154降至
+0.587019rad，距0.6阈值的裕度由0.002846增至0.012981rad；seed1729峰值则由
+0.562944小幅升至0.563101rad。这里有局部裕度改善，但两任务每秒奖励均下降，
+不能用单个峰值改善抵消总体位置/朝向误差的上升，也不足以证明鲁棒性。
+
+正式续训、第11轮验收与交接状态
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+主会话在记录物理收益尚未证实及上述漂移风险后，选择累计20轮的有限续训。
+启动回执记录2026-10-24 01:50:09（Asia/Shanghai），代码 ``e6b8365``，新run::
+
+    /data1/user/liwei/GENMO_outputs/closedloop_stage10/stage2_music60_motion30_lr3e8_from10_20261024_015007
+
+监督器使用原run ``checkpoints/`` 下完整第10轮checkpoint及
+``--initialize-actor-lr --stop-after-iteration 20``；配置SHA256为
+``f94ea522723a1d41435e9e96f4171e4e3edafed776ce30eeccfcb1901e7f4422``，
+与原配置的解析差异严格为Actor基础LR和maximum_lr两处3e-6→3e-8。
+累计20意味着在源iteration10之上最多再完成10轮，不是额外20轮。
+
+实际 ``experiment_initialized.pt`` 已发布，SHA256为
+``435175b82930656a5e35fa0e6b86a8dca8f2dba8f4dc7f59f44acac3be26f463``。
+qualified CPU审计通过：Actor322个张量、Critic64个张量、Critic Adam144个张量
+完全相同；Actor Adam948个张量及其他状态除 ``param_groups.lr`` 外完全相同。
+uniform组LR由3e-6改为3e-8，组身份和倍率保留。八rank的RNG、BC及完整collector
+逻辑状态逐项一致，原两份固定baseline文件字节相同，确认pending采样恢复点已
+进入真实初始化快照。iteration/policy_version保持10，Actor/Critic更新计数保持
+48/7680；MC完成和质量标记为true、下一MC/评估控制步边界均为100000000并继承。
+这是控制步边界，另外仍有每20轮固定评价和每100轮MC的轮次安排，不能误写为
+到1e8控制步之前绝不评价。
+
+保留原始严格审计的failed结果及其差异清单，不把差异隐藏为逐字节全同：新run的
+budget账本锚点由源sequence171转为新sequence1；qualified审计只读核对新SQLite
+首个initialize事件载入完整源budget、hash chain与checkpoint锚点一致，累计使用量、
+限额、phase、settlement及identity全部保留。解析后配置另外有stage9的两个LR投影
+和optimization_sha256随新LR改变，逐项重算确认它们只来自同两个独立LR字段。
+因此原配置只有两个有意修改的输入，不等于解析后配置或整个budget字节不变。
+
+上述初始化审计针对两份真实完整checkpoint，在CPU执行，没有CUDA上下文；它本身
+不证明后续采集或PhysX状态连续恢复。随后正式第11轮的完整metrics及latest已发布，
+对应checkpoint大小2630255601字节，SHA256为::
+
+    69385d9de323704fab9c3664ec4d2b8924b21b05a8edca3dc26192b63be8f1f0
+
+.. list-table:: 正式第11轮完整发布结果
+   :header-rows: 1
+
+   * - 指标
+     - 实测结果
+     - 口径
+   * - iteration / policy_version
+     - 11 / 11
+     - 初始化10之后的新完整轮次
+   * - 有效链 / 实际唯一应用链
+     - 35785 / 35785
+     - 100%覆盖
+   * - 接受 / 计划Actor步，拒绝试探
+     - 5 / 5，0次拒绝
+     - 每步LR均3e-8，无提前结束
+   * - Actor / Critic累计更新
+     - 53 / 8256
+     - 本轮分别增加5 / 576
+   * - 完整rollout PPO目标gain
+     - +0.01246935912835269
+     - 相对本轮采样行为策略；仍不作单调接受门禁
+   * - 完整链KL均值 / 最大值
+     - 0.004797651 / 0.176339191
+     - 同完整35785链
+   * - 普通clip / active clip
+     - 29.5319% / 19.1253%
+     - 两种裁剪口径，不等于零梯度比例
+   * - 非有限 / ratio下溢比例
+     - 0 / 0
+     - 完整rollout最终概率统计
+   * - Critic MSE更新前 / 后
+     - 0.984888 / 0.195976
+     - 本轮固定bootstrap训练目标
+   * - Critic EV更新前 / 后
+     - 0.969269 / 0.994415
+     - 同目标训练拟合，不是独立MC
+   * - 整轮前台wall
+     - 876.898秒（约14分37秒）
+     - 实际正式轮次，不是离线候选诊断wall
+
+Critic计数按实际链数与batch核算：``7680 + 32 × ceil(35785 / 2048) = 8256``。
+先前预估8448不成立，是审计期望值错误而非训练故障；原始failed审计保留，corrected
+审计明确记录更正并通过。初始化和第11轮MC完成/质量标记持续为true，Critic本轮仅
+增加上述正常拟合的576步；交接快照中各新session无mc_calibration目录，实际没有
+重复MC预热。训练拟合改善不替代下一批或独立MC价值验证。
+
+CPU mmap加载正式checkpoint和已评估候选导出，逐一比较Actor全部322张量、
+221736736元素、886946944字节，dtype/shape/layout及每个字节全部相同，无浮点
+容差；执行资产、随机核、奖励、物理配置、时钟和动作合同也匹配。Actor指纹均为
+``f1e25e5f3f646b1fe70f8a8659634c3385815e0bc452e3a366a8f38664412687``。
+因此本报告所列selected_lr3e8固定train32物理结果可绑定正式第11轮Actor，这不是
+又运行了一次物理评估，也不是从evaluation-only文件恢复训练。正式Critic已在第11轮
+更新；该Actor-only物理评估仅装载Actor，Critic是评价中新建的，任何该评价Critic
+价值诊断都不作为正式第11轮Critic验收。原独立MC第10轮验证才是完整恢复第10轮
+训练Critic的证据，两者不能混用。
+
+五个接受步的概率/完整目标快照、最终概率与KL数值、128条同噪声重生成参考都与
+A_small逐项相同；最终关节RMS均值6.84822396e-5rad，所有保护坐标不变。但正式
+训练没有导出完整链cache，未证明链数据逐字节身份，也没有重新计算实际ratio ESS
+或完整参数梯度方向。正式 ``epoch_orders=[]`` 是未启用详细顺序记录，比较结果应为
+null/未取证，不能说顺序相同或不同；旧summary的false比较已明确撤回并保留原文件。
+
+本轮collection为334.004秒、Critic拟合25.539秒、Actor更新循环462.066秒。
+PPO backward合计131.013秒；candidate及最终KL合计326.536秒，其中candidate KL
+已包含于Actor循环，最终KL在循环之外，不能把这些字段全部相加。PyTorch记录峰
+allocated为29495393792字节（29.495GB），不包含外部PhysX分配。
+
+02:07:39（Asia/Shanghai）的冻结交接快照核对了supervisor、torchrun及8个worker的
+PID/父子关系和命令：监督器attempt1、无attempt退出记录，8worker仍运行，已进入
+``train_000012`` 采样，累计上限仍为20。前10次设备显存离散采样最大为39004MiB/卡，
+交接即时样本最大为39006MiB/卡；均包含实际训练进程及PhysX所在设备的used memory，
+不是allocator峰值或连续测量的绝对峰值，不能当作配置容量上限的证明。
+
+第11轮实证支持保留原batch并降低LR，使本轮完整目标转正且无回退试探；固定物理仍有奖励率略降
+及原始漂移上升，不能据单轮目标转正宣称长期有效。累计20轮尚未完成，其结果未知；
+是否扩大预算须依据后续完整轮次、固定物理复评和跟踪漂移，而不是只看代理目标。
 
 ``evaluation_actor`` 导出只供评价，不含完整Adam/Critic/RNG，不得作为正式训练
 resume点。保留第10轮完整checkpoint和原运行作为对照，后续由主会话按实际产物
-补齐候选物理配对、正式第11轮及是否扩大训练预算的结论。
+补齐累计20轮、后续固定物理复评及是否扩大训练预算的结论。
