@@ -46,6 +46,19 @@ def test_incomplete_or_inconsistent_shards_are_rejected():
     with pytest.raises(ValueError,match='normalization'):combine_rollout_shards(parts)
 
 
+@pytest.mark.parametrize('same_reward',[False,True])
+def test_reward_changed_comparison_is_not_mislabeled_as_physics_export(monkeypatch,same_reward):
+    import tools.compare_stage2_optimizer_batches as module
+    calls=[]
+    monkeypatch.setattr(module,'export_actor',lambda *args:calls.append(args) or {'exported':True})
+    learning={'identity':{'reward':{'version':'v3'}}}
+    config={'stage9':{'reward':{'version':'v3' if same_reward else 'v4'}}}
+    result=module.export_comparison_actor(None,config,learning,{}, {},None,None)
+    assert result['exported'] is same_reward
+    assert len(calls)==int(same_reward)
+    if not same_reward:assert result['reason']=='behavior_reward_differs_from_requested_reward'
+
+
 @pytest.mark.parametrize('factor',[10,50])
 def test_requested_lr_and_reward_configuration_preserve_other_contracts(tmp_path,factor):
     path=Path(__file__).resolve().parents[3]/'configs/closedloop/stage2_continuous_rolling.yaml'

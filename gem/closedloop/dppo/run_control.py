@@ -27,8 +27,9 @@ def iteration_checkpoint_reason(iteration, storage, *, is_warmup=False, rejected
 def build_policy(actor, settings, precision, *, frozen_actor=None):
     from .frozen_prefix import FrozenPrefixPolicy
     cls=FrozenPrefixPolicy
-    extra=dict(frozen_prefix_steps=15,frozen_actor=frozen_actor)
+    extra=dict(frozen_prefix_steps=settings.get('frozen_prefix_steps',15),frozen_actor=frozen_actor)
     if settings.get('temporal_residual') is not None:
+        if extra['frozen_prefix_steps']!=15:raise ValueError('Temporal residual experiment only supports the original four steps')
         from .temporal_residual_policy import TemporalResidualPolicy
         cls=TemporalResidualPolicy
         extra['temporal_residual']=settings['temporal_residual']

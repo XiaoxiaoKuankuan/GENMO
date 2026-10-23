@@ -118,6 +118,14 @@ def single_device_payload(case,header):
     return combine_rollout_shards(payloads)
 
 
+def export_comparison_actor(policy,config,learning,report,acceptance,case,output):
+    """旧优势可以做独立计算对照，但不能把它导出成新奖励的合格物理评估模型。"""
+    if learning['identity']['reward']!=config['stage9']['reward']:
+        return dict(exported=False,reason='behavior_reward_differs_from_requested_reward',
+                    diagnostic_comparison_retained=True,training_resume=False)
+    return export_actor(policy,config,learning,report,acceptance,case,output)
+
+
 def main():
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--case',type=Path,required=True)
@@ -135,6 +143,7 @@ def main():
     parser.add_argument('--frozen-audit-chains',type=int,help='完整19随机步的均匀抽样链数；四个可训练步仍检查全部链和冻结身份')
     parser.add_argument('--probe-chains',type=int,default=32,help='候选间相同的均匀输出探针数，另加真实KL/ratio尾部')
     parser.add_argument('--condition-batch-chains',type=int,default=512,help='单卡重放时的条件编码图上限；全局PPO分母和全部链检查不变')
+    parser.add_argument('--allow-stage1-step-expansion',action='store_true',help='显式只读4→10步诊断；要求初始Actor逐张量等于Stage1并全链19步核验，不改旧数据')
     args=parser.parse_args()
     rank=int(os.environ['RANK']);world=int(os.environ['WORLD_SIZE']);local=int(os.environ['LOCAL_RANK'])
     if (world!=(1 if args.single_device else 8) or rank!=local):
@@ -173,8 +182,12 @@ def main():
                 raise ValueError('不可变rank证据SHA不一致')
         payload=local_call(distributed,lambda:single_device_payload(args.case,header) if args.single_device
             else load_rollout(args.case/f'rank{rank:02d}'))
-        if payload['kernel']!=policy.kernel_config:raise ValueError('实际行为采样核不一致')
         actor.load_state_dict(learning['actor'])
+        expansion=None
+        if args.allow_stage1_step_expansion:
+            from gem.closedloop.dppo.step_expansion_diagnostic import bind_stage1_step_expansion
+            expansion=bind_stage1_step_expansion(policy,payload['kernel'])
+        elif payload['kernel']!=policy.kernel_config:raise ValueError('实际行为采样核不一致')
         if rank==0:print(json.dumps(dict(phase='loaded_all_behavior',chains=len(payload['global_manifest']),compute_world_size=world)),flush=True)
         optimizer=make_actor_optimizer(actor,config['stage10']['training'])
         controller=BCGradientController(**config['stage10']['bc_gradient'])
@@ -192,7 +205,7 @@ def main():
         producer=producer_full_probability(args.case)
         zero=probability_check_local(policy,rows,global_manifest=manifest,distributed=distributed,
             denoising_microbatch=args.microbatch,tensor_cache=cache,
-            include_frozen=producer is None and args.frozen_audit_chains is None)
+            include_frozen=expansion is not None or producer is None and args.frozen_audit_chains is None)
         if args.frozen_audit_chains is not None:
             valid=[i for i,m in enumerate(manifest) if m['valid'] and m['has_free']]
             n=min(args.frozen_audit_chains,len(valid));indices=[valid[i*len(valid)//n] for i in range(n)]
@@ -242,6 +255,7 @@ def main():
                 kl_limits=config['stage10']['kl'],detailed_diagnostics=True,step_observer=observer,
                 audit_full_gradient_direction=args.audit_full_gradient_direction,
                 max_optimizer_steps=args.max_updates,
+                sampled_steps=len(policy.trainable_steps),step_strategy=f'intermediate{len(policy.trainable_steps)}',
                 full_rollout_observer=retain_statistics)
             kl=final_kl(policy,rows,cache,manifest,distributed=distributed,microbatch=args.microbatch,clip=config['stage9']['ppo_clip'])
             replica=local_call(distributed,lambda:exact_state_digest(dict(actor=actor.state_dict(),optimizer=optimizer.state_dict())))
@@ -273,6 +287,7 @@ def main():
                 compute_world_size=world,original_behavior_world_size=len(header['ranks']),
                 behavior_reward=learning['config']['stage10']['reward'],requested_reward=config['stage10']['reward'],
                 fixed_advantages_recomputed_for_requested_reward=False,
+                stage1_step_expansion=expansion,trainable_denoising_steps=list(policy.trainable_steps),
                 requested_optimizer_limit=args.max_updates,
                 objective_aware=trust['objective_aware'],full_gradient_direction_measured=args.audit_full_gradient_direction,
                 actor=report,final_kl=kl,
@@ -281,7 +296,7 @@ def main():
                 wall_seconds=max(distributed.all_gather_object(time.perf_counter()-started)),
                 peak_allocated_bytes=max(distributed.all_gather_object(torch.cuda.max_memory_allocated())),
                 same_initial_state_digest=initial_digest,physical_quality='unverified_counterfactual_only')
-            result['export']=root_call(distributed,lambda:export_actor(policy,config,learning,report,
+            result['export']=root_call(distributed,lambda:export_comparison_actor(policy,config,learning,report,
                 result['acceptance'],args.case,output))
             root_call(distributed,lambda:atomic_json(output/'result.json',result))
             root_call(distributed,lambda:torch.save(dict(**last_statistics,metadata=metadata,

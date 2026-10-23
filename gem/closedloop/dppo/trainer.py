@@ -126,7 +126,8 @@ def _validate_actor_transitions(policy, transitions):
         if not torch.equal(item.free_mask.cpu(), expected[0].cpu()):
             raise ValueError('Stored free mask differs from the original conditions')
         trace = item.metadata['sampler_trace']
-        if trace['kernel_config'] != policy.kernel_config:
+        if (trace['kernel_config'] != policy.kernel_config
+                and trace['kernel_config'] != getattr(policy,'_diagnostic_behavior_kernel',None)):
             raise ValueError('Rollout and learner stochastic kernel configuration differs')
         if trace['probability_steps'].tolist() != list(policy.stochastic_steps):
             raise ValueError('Deterministic final step cannot have a probability density')

@@ -160,13 +160,13 @@ def associate(case,chain_payload,probes=(),*,execution_cases=()):
             elif window[frame]>0:category='window_observed_not_current'
             else:category='not_observed_in_retained_controls'
             item=totals[category];item['joint_kl']+=kl
-            item['free_coordinates']+=int(row.free_mask[frame].sum())*4
+            item['free_coordinates']+=int(row.free_mask[frame].sum())*len(meta['kl_by_step'])
             item['frame_log_ratio_signed']+=log;item['frame_log_ratio_abs_sum']+=abs(log);counts[category]+=1
             temporal_category=category
             if category=='window_observed_not_current':
                 temporal_category='future_window_only_source_support' if time_support['future'][frame]>0 else 'past_window_only_source_support'
             temporal_totals[temporal_category]['joint_kl']+=kl
-            temporal_totals[temporal_category]['free_coordinates']+=int(row.free_mask[frame].sum())*4
+            temporal_totals[temporal_category]['free_coordinates']+=int(row.free_mask[frame].sum())*len(meta['kl_by_step'])
         details.append(dict(identity=meta['identity'],source=meta['source'],music_frame=meta['music_frame'],
             prefix_frames=meta['prefix_frames'],frame_categories=counts,
             current_frames=(plan or {}).get('observed_current_frames'),

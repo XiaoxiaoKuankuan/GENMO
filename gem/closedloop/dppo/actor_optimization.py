@@ -42,7 +42,8 @@ def optimization_binding(stage):
         trust_region=t['trust_region'],
         gamma_upper=t['gamma_upper'],lambda_upper=t['lambda_upper'],dataset=stage['dataset'],
         mc_start_distribution=stage['critic']['complete_mc']['start_distribution'],
-        run_contract=stage['actor_optimization'])
+        run_contract=stage['actor_optimization'],
+        **({'trainable_denoising_steps':list(range(9,19))} if t.get('ppo_steps_per_chain')==10 else {}))
 
 
 def _validate_legacy_configuration(config,maximum_steps):
@@ -138,7 +139,8 @@ def validate_optimization_configuration(config,maximum_steps):
         raise ValueError('Absent joint KL limits must explicitly declare uncalibrated diagnostic-only status')
     if not 0<t['max_active_clip_fraction']<=1 or s['kl'].get('maximum_active_clip')!=t['max_active_clip_fraction']:
         raise ValueError('Stepwise active clip guards must agree')
-    expected=dict(status='candidate_requires_stepwise_calibration',scope='four_trainable_steps_only',
+    expected=dict(status='candidate_requires_stepwise_calibration',scope=(
+        'four_trainable_steps_only' if t['ppo_steps_per_chain']==4 else 'ten_trainable_steps_only'),
         joint_tail_status=tail_status,optimization_sha256=digest(optimization_binding(s)))
     if s['kl']['calibration'].get('optimization_sha256')=='auto':
         s['kl']['calibration']['optimization_sha256']=expected['optimization_sha256']

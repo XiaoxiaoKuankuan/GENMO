@@ -39,9 +39,10 @@ def collect_coordinates(policy,rows,cache,*,rank=0,microbatch=128):
     if not rows:raise ValueError('Coordinate attribution requires real valid rows')
     n=len(rows);frames=rows[0].free_mask.shape[0];device=next(policy.actor.parameters()).device
     names=('kl','log_ratio','mean_delta','standardized_mean_delta','residual','actual_std','std_log_change','sampling_noise_error')
-    detail={name:torch.zeros(n,4,frames,30,dtype=torch.float64) for name in names}
-    detail['mask']=torch.zeros(n,4,frames,30,dtype=torch.bool)
-    old_error=torch.zeros(n,4,dtype=torch.float64)
+    count=len(policy.trainable_steps)
+    detail={name:torch.zeros(n,count,frames,30,dtype=torch.float64) for name in names}
+    detail['mask']=torch.zeros(n,count,frames,30,dtype=torch.bool)
+    old_error=torch.zeros(n,count,dtype=torch.float64)
     with policy_phase(policy):
         conditions=ConditionGraphCache(policy,cache,include_frozen=False);conditions.prime(rows)
         pairs=[(i,step) for i in range(n) for step in policy.trainable_steps]
@@ -53,7 +54,7 @@ def collect_coordinates(policy,rows,cache,*,rank=0,microbatch=128):
             values=coordinate_statistics(value,old_mean,old_std,params['mean'],params['std'],mask)
             noise=cache.get('sampling_noise',samples,steps).double()
             values['sampling_noise_error']=torch.where(mask,(values['residual']-noise).abs(),0.)
-            index=torch.tensor([i for i,_ in chunk]);step=torch.tensor([s-15 for s in steps])
+            index=torch.tensor([i for i,_ in chunk]);step=torch.tensor([s-policy.trainable_steps[0] for s in steps])
             for name,tensor in values.items():detail[name][index,step]=tensor.cpu()
             reference=torch.distributions.Normal(old_mean.double(),old_std.double()).log_prob(value.double()).masked_fill(~mask,0.).sum((-2,-1))
             old_error[index,step]=(reference-cache.get('old_log_prob',samples,steps)).abs().cpu()
@@ -92,8 +93,8 @@ def probe_difference(before,after):
         result.append(dict(identity=identity,source=before['sources'][i],advantage=float(before['advantages'][i]),
             final_normalized_rms=after_rms,pre_final_normalized_rms=before_rms,
             deterministic_final_gain=after_rms/before_rms if before_rms else None,
-            moving_state_delta_rms=[rms((after['moving_states'][i,k]-before['moving_states'][i,k]).double(),mask) for k in range(4)],
-            old_path_mean_delta_rms=[rms((after['mean'][i,k]-before['mean'][i,k]).double(),mask) for k in range(4)],
+            moving_state_delta_rms=[rms((after['moving_states'][i,k]-before['moving_states'][i,k]).double(),mask) for k in range(before['moving_states'].shape[1])],
+            old_path_mean_delta_rms=[rms((after['mean'][i,k]-before['mean'][i,k]).double(),mask) for k in range(before['mean'].shape[1])],
             canonical_root_position_rms_m=rms((after['qpos'][i,:,:3]-before['qpos'][i,:,:3]).double(),valid),
             canonical_root_orientation_rms_rad=rms(_quaternion_angle(before['qpos'][i,:,3:7],after['qpos'][i,:,3:7]),valid),
             final_joint_rms_rad=rms(joints,mask[:,9:]),

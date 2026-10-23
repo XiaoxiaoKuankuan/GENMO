@@ -2,6 +2,7 @@
 
 初始化时从Stage1 Actor深拷贝独立、永久无梯度的前段网络。前15个去噪步骤使用
 此副本，索引15至18使用原Actor；不共享Parameter，不把前段重新生成结果当训练数据。
+独立10步候选显式改为前9步冻结、9至18可训练；总20步、19确定性及实际噪声不改。
 条件编码各自来自对应网络；采样执行20步，概率只含19个随机步，普通KL只覆盖15..18。
 条件缓存显式保存冻结特征，训练末段的条件编码仍正常反向；缓存不可跨参数更新。
 冻结权重由已绑定SHA的Stage1资产重建，其完整指纹进入kernel/训练/checkpoint身份；
@@ -19,8 +20,8 @@ class FrozenPrefixPolicy(DenseDiffusionPolicy):
     condition_feature_names=('conditional','unconditional','frozen_conditional','frozen_unconditional')
 
     def __init__(self, actor, *, frozen_prefix_steps=15, frozen_actor=None, **kwargs):
-        if frozen_prefix_steps!=15:
-            raise ValueError('The accepted frozen-prefix design fixes the first 15 and deterministic final step of 20 steps')
+        if type(frozen_prefix_steps)is not int or frozen_prefix_steps not in (9,15):
+            raise ValueError('Explicit frozen15/train4 or frozen9/train10 with deterministic final required')
         frozen=copy.deepcopy(actor) if frozen_actor is None else frozen_actor
         if ({id(p) for p in actor.parameters()} & {id(p) for p in frozen.parameters()} or
                 {p.data_ptr() for p in actor.parameters()} & {p.data_ptr() for p in frozen.parameters()}):
@@ -30,11 +31,12 @@ class FrozenPrefixPolicy(DenseDiffusionPolicy):
         super().__init__(actor,**kwargs)
         self.frozen_policy=DenseDiffusionPolicy(frozen,**kwargs)
         self.frozen_prefix_steps=frozen_prefix_steps
+        self.trainable_steps=tuple(range(frozen_prefix_steps,19))
         self._frozen_coefficients=self.frozen_policy._coefficients(next(frozen.parameters()).device)
         from .evaluation import _model_fingerprint
-        self.kernel_config.update(frozen_prefix=dict(schema='genmo.stage2.frozen15_train4_deterministic1.v1',
+        self.kernel_config.update(frozen_prefix=dict(schema=f'genmo.stage2.frozen{frozen_prefix_steps}_train{len(self.trainable_steps)}_deterministic1.v1',
             steps=frozen_prefix_steps,model_fingerprint=_model_fingerprint(frozen),
-            initialization='bound_Stage1_before_trainable_Actor_restore',gaussian_kl_steps=[15,16,17,18],deterministic_final_step=19))
+            initialization='bound_Stage1_before_trainable_Actor_restore',gaussian_kl_steps=list(self.trainable_steps),deterministic_final_step=19))
         import hashlib
         digest=hashlib.sha256()
         for name,value in list(frozen.named_parameters())+list(frozen.named_buffers())+list(self._frozen_coefficients.items()):
@@ -83,7 +85,7 @@ class FrozenPrefixPolicy(DenseDiffusionPolicy):
             raise RuntimeError('Frozen prior parameters/buffers/numerical kernel or condition encoder changed')
         return dict(schema='genmo.stage2.frozen_identity_check.v1',checked=True,
             content_sha256=self.kernel_config['frozen_prefix']['content_sha256'],
-            stochastic_frozen_steps=list(range(15)),deterministic_frozen_steps=[19],
+            stochastic_frozen_steps=list(range(self.frozen_prefix_steps)),deterministic_frozen_steps=[19],
             verification='immutable_tensor_versions_storage_runtime_settings_not_gaussian_replay')
 
     def _parameter_signature(self):

@@ -1,6 +1,7 @@
 # 连续滚动生成实验：从两个固定基线的独立分支运行，不覆盖正式训练。
 # 实测单请求延迟期间逐步执行GMT/PhysX；提交后在下一个0.1秒公共格采真实历史。
-# 60帧/30Hz、15+4+1扩散、逐步坐标平均PPO、v3奖励、全部Transformer、BC关闭不变。
+# 60帧/30Hz、15+4+1扩散、逐步坐标平均PPO、全部Transformer、BC关闭不变。
+# v4奖励仅将根位置/姿态reward_std改为0.3/0.4；GMT来源及其余六项保持v3数值。
 # 未来前瞻可替换，已执行及差分支持不变；没有人工混合窗口。
 diagnostics:
   record_original_threshold_crossings: true

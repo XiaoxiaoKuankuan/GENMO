@@ -110,7 +110,7 @@ def output_probe(policy, rows, cache, max_chains=16):
     with policy_phase(policy):
         context = cache.context(selected)
         prepared = policy.prepare_conditions(context)
-        state = cache.get('chain', selected, [15]*len(selected)).clone()
+        state = cache.get('chain', selected, [policy.trainable_steps[0]]*len(selected)).clone()
         means, logratios, stds, moving_states = [], [], [], []
         for step in policy.trainable_steps:
             old_state = cache.get('chain', selected, [step]*len(selected))

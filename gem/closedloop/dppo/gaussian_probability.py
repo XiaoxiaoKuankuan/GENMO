@@ -130,11 +130,11 @@ def chain_diagnostics(statistics, advantages, *, clip):
 
 
 def step_statistics(joint_log_ratios, joint_kls, free_counts):
-    """保留[N,4]内部转移轴；不能在PPO裁剪之前合并四步。"""
-    if joint_log_ratios.ndim!=2 or joint_log_ratios.shape[1]!=4:
-        raise ValueError('Stepwise PPO requires [complete_chains,4] stochastic transitions 15..18')
+    """保留[N,K]内部转移轴，K为显式4或10；不能在PPO裁剪之前合并步骤。"""
+    if joint_log_ratios.ndim!=2 or joint_log_ratios.shape[1] not in (4,10):
+        raise ValueError('Stepwise PPO requires four or ten stochastic transitions ending at step 18')
     if joint_kls.shape!=joint_log_ratios.shape or free_counts.shape!=joint_log_ratios.shape:
-        raise ValueError('Step log ratios, KL and counts must have equal [N,4] shapes')
+        raise ValueError('Step log ratios, KL and counts must have equal [N,K] shapes')
     require_tensor(torch.isfinite(joint_log_ratios).all() & torch.isfinite(joint_kls).all()
         & torch.isfinite(free_counts).all() & (joint_kls>=0).all() & (free_counts>=0).all()
         & (free_counts==free_counts.round()).all(), 'Invalid stepwise Gaussian statistics',FloatingPointError)
@@ -147,22 +147,22 @@ def step_statistics(joint_log_ratios, joint_kls, free_counts):
 
 
 def stepwise_surrogate(statistics, advantages, *, clip):
-    """返回[N,4]目标及对joint_log_ratio的导数，尚未除4*N_global。
+    """返回[N,K]目标及对joint_log_ratio的导数，尚未除K*N_global。
 
     普通未裁剪项的导数为A*exp(joint_log_ratio/D)/D；真正符号相关平坦区和D=0
     项导数为零。这里的proxy保留完整自由参考坐标，但明确不是真实联合概率比。
     """
     log=statistics['joint_log_ratio']
-    if log.ndim!=2 or log.shape[1]!=4 or advantages.shape!=(len(log),):
-        raise ValueError('Stepwise PPO needs four transitions and one advantage per complete chain')
+    if log.ndim!=2 or log.shape[1] not in (4,10) or advantages.shape!=(len(log),):
+        raise ValueError('Stepwise PPO needs four or ten transitions and one advantage per complete chain')
     result=ppo_surrogate(statistics,advantages[:,None],clip=clip,reduction='free_coordinate_mean')
     result['joint_log_gradient']=result['objective_log_gradient']/statistics['free_count'].clamp_min(1)
-    result['chain_objective']=result['objective'].sum(1)/4
+    result['chain_objective']=result['objective'].mean(1)
     return result
 
 
 def stepwise_diagnostics(statistics, advantages, *, clip):
-    """统一训练、候选验收和整批审计；目标分母恒为4*N，零自由度项仍占槽。
+    """统一训练、候选验收和整批审计；目标分母为K*N，零自由度项仍占槽。
 
     ratio/clip分布的样本单位是D>0的单个内部转移，整链KL单位是完整行为链。
     coordinate_kl是每个内部转移的自由坐标平均KL分布，不是单个标量坐标KL分布。
@@ -177,10 +177,10 @@ def stepwise_diagnostics(statistics, advantages, *, clip):
     objective=float(out['objective'].mean());gain=float((out['objective']-baseline).mean())
     clipped=float(out['clipped'][valid].double().mean())
     active=float(out['objective_clipped'][valid].double().mean())
-    per_step=[]
-    for k in range(4):
+    per_step=[];step_count=joint.shape[1];first_step=19-step_count
+    for k in range(step_count):
         mask=valid[:,k]
-        per_step.append(dict(step=k+15,statistical_unit='single_stochastic_transition',
+        per_step.append(dict(step=k+first_step,statistical_unit='single_stochastic_transition',
             valid_transitions=int(mask.sum()),joint_kl=distribution(joint[:,k]),
             free_coordinates=distribution(statistics['free_count'][:,k]),
             mean_coordinate_kl=distribution(coordinate[:,k]),joint_log_ratio=distribution(statistics['joint_log_ratio'][:,k]),
@@ -203,7 +203,7 @@ def stepwise_diagnostics(statistics, advantages, *, clip):
         complete_chain_count=len(advantages),valid_internal_transitions=int(valid.sum()),
         free_coordinates_per_transition=distribution(statistics['free_count'][valid]),
         nonfinite_fraction=0.,ratio_underflow_fraction=0.,
-        denominator='4_times_global_valid_behavior_chain_count',
-        proxy_statistical_unit='one_valid_stochastic_transition_15_to_18',
-        chain_KL_statistical_unit='one_complete_behavior_chain_sum_of_four_joint_KLs',
+        denominator=f'{step_count}_times_global_valid_behavior_chain_count',
+        proxy_statistical_unit=f'one_valid_stochastic_transition_{first_step}_to_18',
+        chain_KL_statistical_unit=f'one_complete_behavior_chain_sum_of_{step_count}_joint_KLs',
         coordinate_KL_p95_scope='per_transition_free_coordinate_mean_KL_not_scalar_coordinate_KL')

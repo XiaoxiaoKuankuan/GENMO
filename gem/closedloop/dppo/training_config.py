@@ -130,9 +130,11 @@ def configuration(path,*,genmo_repo=None,gmt_repo=None):
         if type(v)is not int or v<1:raise ValueError(f'{k} must be positive integer')
     if world!=8 or s['distributed']['backend']!='nccl' or s['distributed']['collection']!='all_ranks':
         raise ValueError('当前 production requires eight synchronous GPU ranks')
-    if (t['denoising_steps']!=20 or t['ppo_step_strategy']!='intermediate4' or
-            t['ppo_steps_per_chain']!=4 or t['frozen_prefix_steps']!=15 or t['ppo_epochs'] not in (1,2,3,5)):
-        raise ValueError('Only frozen15 + stochastic trainable4 + deterministic final is supported')
+    trainable_count=t['ppo_steps_per_chain']
+    if (type(trainable_count)is not int or trainable_count not in (4,10) or t['denoising_steps']!=20
+            or t['ppo_step_strategy']!=f'intermediate{trainable_count}' or t['frozen_prefix_steps']!=19-trainable_count
+            or t['ppo_epochs'] not in (1,2,3,5) or trainable_count==10 and s['version']!=VERSION):
+        raise ValueError('Explicit frozen15/train4 or frozen9/train10, plus deterministic final, required')
     if len(t['std_schedule'])!=20 or t['std_schedule'][-1]!=0. or any(
             not math.isfinite(x) or x<=0 for x in t['std_schedule'][:-1]):
         raise ValueError('Nineteen positive stochastic floors and an explicit zero deterministic final are required')
@@ -140,8 +142,8 @@ def configuration(path,*,genmo_repo=None,gmt_repo=None):
         raise ValueError('Independent trainable tracking history Critic required')
     if not 0<s['critic']['history_learning_rate']<=s['critic']['learning_rate']:
         raise ValueError('Invalid separate history GRU learning rate')
-    if s['kl']['calibration']['scope']!='four_trainable_steps_only':
-        raise ValueError('Old full20 KL thresholds cannot identify the new four-step KL')
+    if s['kl']['calibration']['scope']!=('four_trainable_steps_only' if trainable_count==4 else 'ten_trainable_steps_only'):
+        raise ValueError('KL calibration scope must identify the actual trainable steps')
     if not 0<c['timing']['calibration_reservation_seconds']<=.5:
         raise ValueError('Calibration needs an explicit bounded reservation, not a measured delay')
     if c['runtime']['timing_contract']!='modeled_deployment.v3' or c['timing']['control_ticks']!=12 or c['timing']['physics_ticks']!=3:
@@ -175,7 +177,7 @@ def configuration(path,*,genmo_repo=None,gmt_repo=None):
     if type(bc_total)is not int or bc_total<1:
         raise ValueError('BC total must be positive; actual ragged optimizer steps determine its allocation')
     t.update(rollout_upper_steps=chains,rollout_upper_steps_per_rank=n*decisions,
-        actor_minibatch_internal_transitions=scale['actor_minibatch_chains']*4,
+        actor_minibatch_internal_transitions=scale['actor_minibatch_chains']*trainable_count,
         max_actor_optimizer_steps=steps,bc_batch=bc_total//steps,
         critic_steps=s['critic']['epochs']*math.ceil(chains/s['critic']['global_batch']),
         critic_batch=s['critic']['global_batch'],critic_lr=s['critic']['learning_rate'])
@@ -194,7 +196,7 @@ def configuration(path,*,genmo_repo=None,gmt_repo=None):
     if c['runtime']['generation_batch']>n:raise ValueError('No duplicated environments to pad effective GENMO batches')
     s['derived']=dict(world_size=world,real_chains=chains,local_chains=n*decisions,planned_actor_steps=steps,
         local_ppo_internal_visits=n*decisions*t['ppo_steps_per_chain']*t['ppo_epochs'],
-        local_trainable_kl_visits=n*decisions*4,bc_per_step=t['bc_batch'],bc_per_rollout=bc_total)
+        local_trainable_kl_visits=n*decisions*trainable_count,bc_per_step=t['bc_batch'],bc_per_rollout=bc_total)
     s['derived'].update(count_semantics='nominal_capacity_only_actual_manifest_controls_optimization',
         maximum_actor_steps=maximum_steps)
     return c

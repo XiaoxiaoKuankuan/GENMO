@@ -17,7 +17,7 @@ def grouped_objective(statistics, advantages, sources, *, clip,before_statistics
     current=stepwise_surrogate(statistics,advantages,clip=clip)
     objective=current['chain_objective']
     kl=statistics['joint_kl'].sum(1);adv=advantages.double()
-    baseline=adv*(statistics['free_count']>0).sum(1)/4
+    baseline=adv*(statistics['free_count']>0).double().mean(1)
     groups={'all':torch.ones_like(adv,dtype=torch.bool),'advantage_positive':adv>0,'advantage_negative':adv<0}
     for source in sorted(set(sources)):
         groups['source/'+source]=torch.tensor([s==source for s in sources],device=adv.device)
@@ -30,7 +30,7 @@ def grouped_objective(statistics, advantages, sources, *, clip,before_statistics
         gain_from_behavior=float((objective-baseline)[mask].mean()),KL_mean=float(kl[mask].mean()),
         proxy_clip_fraction=float(current['clipped'][mask].double().mean()),
         proxy_active_clip_fraction=float(current['objective_clipped'][mask].double().mean()),
-        objective_unit='mean_of_four_independently_clipped_coordinate_mean_proxy_transitions',
+        objective_unit=f"mean_of_{statistics['joint_kl'].shape[1]}_independently_clipped_coordinate_mean_proxy_transitions",
         KL_unit='complete_chain_joint_KL',
         gain_from_previous_same_membership=None if previous is None else float((objective-previous)[mask].mean()))
         for name,mask in groups.items() if mask.any()}

@@ -73,12 +73,12 @@ def contribution_summary(detail,mask,total_kl):
 def coordinate_report(detail,metadata,joint_order):
     """detail为CPU [N,4,T,30]；各分组独立划分，禁止跨分组重复相加。"""
     mask=detail['mask'];n,k,t,d=mask.shape
-    if k!=4 or d!=30 or len(metadata)!=n:raise ValueError('Complete four-step chain attribution shape mismatch')
+    if k not in (4,10) or d!=30 or len(metadata)!=n:raise ValueError('Complete four/ten-step chain attribution shape mismatch')
     total=float(detail['kl'][mask].sum());groups=feature_groups(joint_order)
     report=dict(total=contribution_summary(detail,mask,total),by_step={},by_frame={},by_feature={},by_joint={},
         by_prefix={},by_source={},by_music_time_bin={},root_feature_semantics='model_motion_features_not_world_XYZ')
     def selected(selector):return contribution_summary({key:value[selector] for key,value in detail.items()},mask[selector],total)
-    for i,step in enumerate(STEPS):report['by_step'][str(step)]=selected((slice(None),i))
+    for i,step in enumerate(range(19-k,19)):report['by_step'][str(step)]=selected((slice(None),i))
     for frame in range(t):report['by_frame'][str(frame)]=selected((slice(None),slice(None),frame))
     for name,indices in groups.items():report['by_feature'][name]=selected((slice(None),slice(None),slice(None),indices))
     for i,name in enumerate(joint_order):report['by_joint'][name]=selected((slice(None),slice(None),slice(None),9+i))
