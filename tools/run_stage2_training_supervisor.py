@@ -3,7 +3,9 @@
 数据流：启动原八卡训练脚本，首次可在新目录继承指定完整checkpoint；目录已有
 latest时只恢复同一实验。子进程真实输出追加到同一正式日志，每次退出记录退出码、
 最新完整checkpoint轮次和时间。意外退出或尚未达到上限就正常结束时，等待30秒后
-从最新完整状态重启；不重置Adam，不更改学习率、概率、奖励、任务或任何数值校验。
+从最新完整状态重启；不重置Adam，不更改概率、奖励、任务或任何数值校验。
+默认不更改学习率；仅显式initialize-actor-lr首次允许从config迁移Actor基础/
+最大LR，保留Adam矩和步数。latest发布后只按新合同resume，不重复执行迁移。
 
 本工具只能由明确长训授权启动，不停止其他GPU作业，不删除锁文件、证据或模型。
 不以ESS、奖励涨跌、新增失败或短训提升作为停止条件；OOM和数值异常仍由原训练器
@@ -27,13 +29,16 @@ sys.path.insert(0,str(ROOT))
 from gem.closedloop.dppo.budget import atomic_json
 
 
-def training_command(config,output,limit,initialization=None,*,random_fragments=False):
+def training_command(config,output,limit,initialization=None,*,random_fragments=False,actor_lr_transfer=False):
+    if actor_lr_transfer and (initialization is None or random_fragments):
+        raise ValueError('Actor LR transfer requires its own explicit checkpoint initialization')
     command=['bash',str(ROOT/'scripts/train_stage10_8gpu_server1.sh'),'--config',str(config),
         '--output-dir',str(output),'--stop-after-iteration',str(limit)]
     if (output/'latest.json').is_file():command+=['--resume','latest']
     elif initialization is not None:
         command+=['--initialize-from-checkpoint',str(initialization)]
         if random_fragments:command+=['--initialize-random-fragments']
+        if actor_lr_transfer:command+=['--initialize-actor-lr']
     return command
 
 
@@ -50,7 +55,11 @@ def main():
     parser.add_argument('--stop-after-iteration',type=int,default=200)
     parser.add_argument('--initialize-from-checkpoint',type=Path)
     parser.add_argument('--initialize-random-fragments',action='store_true')
+    parser.add_argument('--initialize-actor-lr',action='store_true',
+        help='仅首次完整初始化允许config中的Actor LR变更；后续latest恢复严格使用新合同')
     args=parser.parse_args()
+    if args.initialize_actor_lr and (not args.initialize_from_checkpoint or args.initialize_random_fragments):
+        parser.error('--initialize-actor-lr requires its own explicit checkpoint initialization')
     status=args.status_dir.resolve();status.mkdir(parents=True,exist_ok=True)
     output=args.output_dir.resolve();stopping=False;child=None;attempt=0
     def request_stop(signum,frame):
@@ -66,7 +75,7 @@ def main():
             return 0
         attempt+=1
         command=training_command(args.config.resolve(),output,args.stop_after_iteration,args.initialize_from_checkpoint,
-            random_fragments=args.initialize_random_fragments)
+            random_fragments=args.initialize_random_fragments,actor_lr_transfer=args.initialize_actor_lr)
         started=time.time()
         with (status/'formal.log').open('ab',buffering=0) as log:
             log.write((json.dumps(dict(supervisor_attempt=attempt,command=command,time=started))+'\n').encode())

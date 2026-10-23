@@ -11,7 +11,9 @@
 episode，丢弃旧rollout。固定评估使用独立GPU世界、训练RNG隔离和原奖励协议，
 按累计真实控制交互触发；best保存实际完整权重。异步恢复点最多单在途，失败
 显式传播，结束排空后才释放run锁。异常/受控停止与正常接受必须分别记录。
-显式新实验可继承完整学习状态并更换有效批量；有限回溯没有可用Actor步时记录
+显式新实验可继承完整学习状态并更换有效批量；另有默认关闭的Actor LR迁移，
+仅更换配置基础/最大试探LR并记录来源，保留Adam矩/步数、RNG和已完成MC。
+有限回溯没有可用Actor步时记录
 零更新并继续新物理采样，不增加Actor版本，不把普通探索失败作为整次训练停机条件。
 """
 from __future__ import annotations
@@ -73,11 +75,28 @@ def _fragment_value_initialization(state, previous_gamma, gamma):
 
 def _checkpoint_initialization_identity(record):
     """从持久化继承记录恢复来源，普通resume不误标为重新从Stage1开始。"""
-    return dict(kind='explicit_checkpoint_expanded_policy' if record.get('transfer')=='expanded_denoising_root_reward.v1'
+    identity=dict(kind='explicit_checkpoint_expanded_policy' if record.get('transfer')=='expanded_denoising_root_reward.v1'
+        else 'explicit_checkpoint_actor_lr' if record.get('transfer')=='actor_learning_rate_only.v1'
         else 'explicit_checkpoint_random_fragments' if record.get('transfer')
         else 'explicit_checkpoint_new_experiment',checkpoint=record['checkpoint'],
         checkpoint_sha256=record['sha256'],actor_fingerprint=record['actor_fingerprint'],
         source_iteration=record['source_iteration'])
+    if record.get('transfer')=='actor_learning_rate_only.v1':
+        identity['transfer']=record['transfer']
+        identity['actor_learning_rates']={key:record[key] for key in (
+            'previous_actor_base_lr','actor_base_lr','previous_optimizer_base_lr',
+            'previous_actor_learning_rates','actor_learning_rates')}
+    return identity
+
+
+def _initialized_experiment_state(payload, imported):
+    """继承完整计数和MC状态；显式LR迁移只更新配置LR显示，不改历史接受步LR。"""
+    state=copy.deepcopy(payload['state'])
+    for key in ('best_observed','best_saved','regression_monitor'):state.pop(key,None)
+    state['experiment_initialization']=imported
+    if imported.get('transfer')=='actor_learning_rate_only.v1':
+        state['selected_actor_lr']=imported['actor_base_lr']
+    return state
 
 
 def _final_actor_acceptance(actor,kl,limits):
@@ -482,6 +501,7 @@ def run(cargs,config,distributed):
         initialization=getattr(cargs,'initialize_from_checkpoint',None)
         fragment_transfer=bool(getattr(cargs,'initialize_random_fragments',False))
         expanded_transfer=bool(getattr(cargs,'initialize_denoising_reward',False))
+        actor_lr_transfer=bool(getattr(cargs,'initialize_actor_lr',False))
         if cargs.resume and (c.output/'initialization.json').exists():
             initial_record=root_call(distributed,lambda:json.loads((c.output/'initialization.json').read_text()))
             c.identity['actor_initialization']=_checkpoint_initialization_identity(initial_record)
@@ -521,7 +541,7 @@ def run(cargs,config,distributed):
             payload=local_call(distributed,lambda:load_training_checkpoint(checkpoint,identity=c.identity,
                 actor=c.actor,critic=c.critic,actor_optimizer=c.actor_optimizer,
                 critic_optimizer=c.critic_optimizer,controller=c.controller,new_experiment=True,
-                fragment_transfer=fragment_transfer))
+                fragment_transfer=fragment_transfer,actor_lr_transfer=actor_lr_transfer))
             def initialize_experiment():
                 import shutil
                 c.budget.initialize_from_checkpoint(payload['budget'])
@@ -536,6 +556,10 @@ def run(cargs,config,distributed):
                     source_iteration=payload['state']['iteration'],actor_and_adam_preserved=True,
                     critic_and_adam_preserved=True,original_budget_preserved=True,
                     fresh_physics_rollout_required=True)
+                if actor_lr_transfer:
+                    # 组LR已显式改变，仅声明Adam矩/步数保留，不声明整个Adam逐字节不变。
+                    record.pop('actor_and_adam_preserved')
+                    record.update(payload['actor_lr_transfer'])
                 if fragment_transfer:
                     record.update(transfer='random_motion_fragments_timeout_bootstrap.v1',
                         previous_gamma_upper=payload['identity']['training']['gamma_upper'],
@@ -554,9 +578,7 @@ def run(cargs,config,distributed):
                 return record
             imported=root_call(distributed,initialize_experiment)
             c.identity['actor_initialization']=_checkpoint_initialization_identity(imported)
-            c.state=copy.deepcopy(payload['state'])
-            for key in ('best_observed','best_saved','regression_monitor'):c.state.pop(key,None)
-            c.state['experiment_initialization']=imported
+            c.state=_initialized_experiment_state(payload,imported)
             if fragment_transfer:
                 # 继承Actor及Adam，但旧gamma的预热结论/固定GAE标签不能当成新目标。
                 c.state.update(_fragment_value_initialization(c.state,

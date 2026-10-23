@@ -9,6 +9,8 @@
 恢复重建PhysX并重新采样，不携带当前rollout或中途仿真状态。模型/优化器状态
 在正式写入前固定，历史checkpoint不覆盖。best/重要评估点保存实际完整权重。
 保存异常在下一个安全边界传播并受控停止，不能在后台失败后继续宣称已持久化。
+显式Actor LR迁移仅适用于新实验；在全部验证成功后覆盖Actor各组lr，其他Adam
+状态、两网络和BC保持加载结果。它不放宽普通resume合同，不重新预热Critic。
 """
 from __future__ import annotations
 
@@ -108,11 +110,12 @@ class AsyncCheckpointWriter:
         finally:self.pool.shutdown(wait=True);self.closed=True
 
 
-def _initialization_execution(identity, *, fragment_transfer=False):
+def _initialization_execution(identity, *, fragment_transfer=False, actor_lr_transfer=False):
     """显式新实验可以继承学习状态；片段实验另外重新校准折扣价值、重建采样池。
 
     fragment_transfer只允许修改物理采样时限、站立混合比例、gamma和旧预热文件。
-    Actor输入、网络、参数组、奖励、噪声核和GMT执行设置仍逐项核对。
+    actor_lr_transfer仅额外放行Actor基础LR及其最大试探LR；不放行组倍率、
+    其他trust_region字段、Critic、奖励或采样核，不能与片段迁移合用。
     """
     import copy
     result=copy.deepcopy(identity)
@@ -120,8 +123,11 @@ def _initialization_execution(identity, *, fragment_transfer=False):
     result.get('scale',{}).pop('actor_minibatch_chains',None)
     for key in ('actor_minibatch_internal_transitions','max_actor_optimizer_steps','bc_batch'):
         result.get('training',{}).pop(key,None)
-    # 此摘要由批量导出；所有原始核、KL、奖励、学习率与BC配置仍直接比较。
+    # 此摘要由批量导出；原始核、KL、奖励、BC及未显式迁移的学习率仍直接比较。
     result.get('kl',{}).get('calibration',{}).pop('optimization_sha256',None)
+    if actor_lr_transfer:
+        result.get('training',{}).pop('actor_lr',None)
+        result.get('training',{}).get('trust_region',{}).pop('maximum_lr',None)
     if fragment_transfer:
         result.get('training',{}).pop('gamma_upper',None)
         result.get('dataset',{}).pop('standing_start_probability',None)
@@ -129,6 +135,40 @@ def _initialization_execution(identity, *, fragment_transfer=False):
         for key in ('safety_limit_seconds','termination','time_limit_bootstrap'):
             result.get('physical_episode',{}).pop(key,None)
     return result
+
+
+def _actor_lr_transfer_audit(previous, current, actor_optimizer, saved_optimizer):
+    """加载前核对两个显式LR合同，并记录只更换组LR的迁移来源。
+
+    配置中的actor_lr必须等于maximum_lr；旧Adam可能保存一次回溯后的实际LR，
+    因此单独记录旧配置基础LR、旧优化器基础LR和各组实际LR。参数组身份/映射
+    已由通用checkpoint校验核对，此处仍核对固定倍率与正有限LR，不修改任何状态。
+    """
+    import math
+    from types import SimpleNamespace
+    from .actor_optimizer import actor_base_lr, actor_learning_rates
+    values=[]
+    for label, identity in (('previous',previous),('current',current)):
+        training=identity.get('training',{})
+        base=training.get('actor_lr')
+        maximum=training.get('trust_region',{}).get('maximum_lr')
+        if any(type(value) not in (int,float) or not math.isfinite(value) or value<=0
+               for value in (base,maximum)) or base!=maximum:
+            raise ValueError(label+' Actor LR transfer requires actor_lr == maximum_lr, finite and positive')
+        values.append(base)
+    saved=SimpleNamespace(param_groups=saved_optimizer['param_groups'])
+    old_optimizer_base=actor_base_lr(saved)
+    if not math.isclose(actor_base_lr(actor_optimizer),values[1],rel_tol=1e-12,abs_tol=0.):
+        raise ValueError('Target Actor optimizer base LR differs from the target configuration')
+    return dict(transfer='actor_learning_rate_only.v1',
+        previous_actor_base_lr=values[0],actor_base_lr=values[1],
+        previous_optimizer_base_lr=old_optimizer_base,
+        previous_actor_learning_rates=actor_learning_rates(saved),
+        actor_learning_rates={group.get('name','uniform'):values[1]*group.get('lr_multiplier',1.)
+                              for group in saved.param_groups},
+        actor_parameters_preserved=True,actor_adam_moments_and_steps_preserved=True,
+        actor_optimizer_changed_fields=['param_groups.lr'],
+        actor_optimizer_state_except_learning_rates_preserved=True)
 
 
 def _legacy_fragment_execution(previous, current):
@@ -159,9 +199,11 @@ def _legacy_fragment_execution(previous, current):
 
 
 def load_training_checkpoint(path,*,identity,actor,critic,actor_optimizer,critic_optimizer,controller,
-                             new_experiment=False,fragment_transfer=False):
+                             new_experiment=False,fragment_transfer=False,actor_lr_transfer=False):
     if fragment_transfer and not new_experiment:
         raise ValueError('Fragment transfer requires an explicit new experiment, never ordinary resume')
+    if actor_lr_transfer and (not new_experiment or fragment_transfer):
+        raise ValueError('Actor LR transfer requires its own explicit new experiment, never resume or fragment transfer')
     payload=torch.load(path,map_location='cpu',weights_only=False,mmap=True)
     # 固定评估是只读监视配置；更换清单不改变已学参数、Adam、奖励或采样策略。
     # 配对评估仍严格比较自己的完整任务与执行配置，并单独重建Stage1基线。
@@ -169,8 +211,10 @@ def load_training_checkpoint(path,*,identity,actor,critic,actor_optimizer,critic
     old_training={k:v for k,v in previous.items() if k!='evaluation'}
     new_training={k:v for k,v in identity.items() if k!='evaluation'}
     if new_experiment:
-        old_training=_initialization_execution(old_training,fragment_transfer=fragment_transfer)
-        new_training=_initialization_execution(new_training,fragment_transfer=fragment_transfer)
+        old_training=_initialization_execution(old_training,fragment_transfer=fragment_transfer,
+            actor_lr_transfer=actor_lr_transfer)
+        new_training=_initialization_execution(new_training,fragment_transfer=fragment_transfer,
+            actor_lr_transfer=actor_lr_transfer)
     legacy_fragment=(new_experiment and fragment_transfer
         and payload.get('schema')=='genmo.closedloop.stage2.asymmetric_tracking.checkpoint.v3'
         and _legacy_fragment_execution(previous,identity))
@@ -181,12 +225,21 @@ def load_training_checkpoint(path,*,identity,actor,critic,actor_optimizer,critic
     _validate_model_state(critic,payload['critic'],'当前 Critic')
     _validate_optimizer_state(actor_optimizer,payload['actor_optimizer'])
     _validate_optimizer_state(critic_optimizer,payload['critic_optimizer'])
+    migration=None
+    if actor_lr_transfer:
+        from .actor_optimizer import validate_actor_optimizer, set_actor_base_lr
+        validate_actor_optimizer(actor,actor_optimizer)
+        migration=_actor_lr_transfer_audit(previous,identity,actor_optimizer,payload['actor_optimizer'])
     # 先验证控制器，再修改任何模型；拒绝损坏快照时保持调用方当前学习状态。
     import copy
     copy.deepcopy(controller).load_state_dict(payload['bc_controller'])
     actor.load_state_dict(payload['actor'],strict=True);critic.load_state_dict(payload['critic'],strict=True)
     actor_optimizer.load_state_dict(payload['actor_optimizer']);critic_optimizer.load_state_dict(payload['critic_optimizer'])
     controller.load_state_dict(payload['bc_controller'])
+    if migration is not None:
+        # 所有身份/模型/优化器/控制器验证完成后，唯独覆盖Actor组LR；两Adam矩和步数保留。
+        set_actor_base_lr(actor_optimizer,migration['actor_base_lr'])
+        payload['actor_lr_transfer']=migration
     if previous.get('evaluation')!=identity.get('evaluation') and 'state' in payload:
         payload['state']=dict(payload['state'])
         for key in ('best_observed','best_saved','regression_monitor'):
