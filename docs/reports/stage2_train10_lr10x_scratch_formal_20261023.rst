@@ -72,3 +72,20 @@ latest是最近完整保存点，可能落后于实际迭代，不据此单独�
 CUDA/Isaac世界前逐一核对Stage1、qpos统计、运动学和冻结GMT资产SHA。
 实际进程、初始checkpoint空Adam、source_stage1身份及物理阶段进度由启动后现场
 核验，不以本文命令或“配置已准备好”代替已启动证明。
+
+启动后现场核验
+--------------
+
+2026-10-23北京时间13:58:53已启动，监督器PID 3101045，torchrun PID 3101046，
+首次attempt=1；启动代码GENMO e4871b86、GMT 88b43daa。八个主worker以及对应GMT
+校准世界已就绪，MC预热独立数据采集阶段已进入，现场检查未见Traceback或子进程退出。
+
+14:01读取新初始checkpoint并核验SHA：
+``c6f8b2f5a5accbfad45a299369492ee9f393686a090c626039a3992c8a7f9a12``。
+actor_initialization为source_stage1/595000，Actor指纹与冻结原始Stage1指纹完全相同；
+Actor与Critic的Adam state均为空，iteration/actor_updates/critic_updates/policy_version
+均为0，优化器初始LR确为3e-6，可训练步为9～18。完整证据在同名JSON及正式根目录
+startup_verification.json。此证据证明从头启动正确，不表示Actor已经完成更新或产生收益。
+
+本次为持续后台正式运行。文档中的状态是上述时刻的快照，后续实际轮次、有效Actor
+更新、接受LR和物理结果应读取运行目录的新日志，不能用本段静态文字替代实时检查。

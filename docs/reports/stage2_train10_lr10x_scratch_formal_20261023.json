@@ -1,0 +1,53 @@
+{
+  "verified_utc": "2026-10-23T06:01:00.596870+00:00",
+  "schema": "genmo.stage2.fresh_formal_start.v1",
+  "checkpoint": "/data1/user/liwei/GENMO_outputs/closedloop_stage10/stage2_continuous_train10_lr10x_scratch_formal_20261023/train/checkpoints/stage10_r000000_a000000_01792735189237844156_02d4769a9bd9_initial.pt",
+  "checkpoint_sha256": "c6f8b2f5a5accbfad45a299369492ee9f393686a090c626039a3992c8a7f9a12",
+  "checkpoint_size_bytes": 914399931,
+  "actor_initialization": {
+    "kind": "source_stage1",
+    "source_global_step": 595000
+  },
+  "source_stage1_sha256": "51b522fbdeb0ec289e5ffc24e2fccca9888df90495f57f96714c1bb43c05f8e2",
+  "actor_fingerprint": "e881b975aaae97e344e57a8747e19de9817fd45357770fada3749801093ee28c",
+  "frozen_stage1_fingerprint": "e881b975aaae97e344e57a8747e19de9817fd45357770fada3749801093ee28c",
+  "actor_equals_original_stage1": true,
+  "actor_adam_empty": true,
+  "critic_adam_empty": true,
+  "initial_state": {
+    "iteration": 0,
+    "actor_updates": 0,
+    "critic_updates": 0,
+    "policy_version": 0,
+    "selected_actor_lr": 3e-06
+  },
+  "configured_actor_lr": 3e-06,
+  "optimizer_initial_lr": 3e-06,
+  "trainable_steps": [
+    9,
+    10,
+    11,
+    12,
+    13,
+    14,
+    15,
+    16,
+    17,
+    18
+  ],
+  "reward_std": {
+    "anchor_pos": 0.3,
+    "anchor_ori": 0.4,
+    "body_pos": 0.15,
+    "body_ori": 0.2,
+    "body_lin_vel": 1.0,
+    "body_ang_vel": 3.14,
+    "foot_height": 0.07,
+    "leg_joint_pos": 0.25
+  },
+  "supervisor_pid": 3101045,
+  "torchrun_pid": 3101046,
+  "attempt": 1,
+  "no_old_checkpoint_or_resume": true,
+  "scope": "initial_checkpoint_and_live_worker_start; MC and Actor learning progress must be reported separately"
+}
