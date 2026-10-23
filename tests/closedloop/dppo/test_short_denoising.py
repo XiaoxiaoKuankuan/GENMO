@@ -127,7 +127,7 @@ def test_aligned_one_second_enters_transformer_as_thirty_positions(actor_factory
     config=configuration(root/'configs/closedloop/stage2_ddim10_last5_motion30_music30_klrelaxed_server2.yaml')
     stage=config['stage10'];t=stage['training']
     assert t['music_context_frames']==t['generation_frames']==30
-    assert stage['kl']['chain_joint_mean']==2. and t['kl_soft_stop_chain_joint']==1.
+    assert stage['kl']['chain_joint_mean']==10. and t['kl_soft_stop_chain_joint']==5.
     assert optimization_binding(stage)['candidate_acceptance']=='finite_KL_only_first_qualified.v1'
     assert set(t['trust_region'])=={'maximum_lr','growth','margin','max_attempts','minimum_trial_lr_ratio'}
 

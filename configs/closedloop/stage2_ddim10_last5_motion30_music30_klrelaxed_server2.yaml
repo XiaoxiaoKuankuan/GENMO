@@ -1,7 +1,7 @@
 # 一秒音乐与一秒动作的十步扩散实验：Transformer实际序列为30个位置，不保留两秒音乐尾部。
 # 数据流为最新本体历史/已知前缀/30帧音乐 -> 4冻结+5随机微调+1冻结收尾 -> 30帧GMT参考。
 # 完整PPO目标只记录，不参与接受或学习率挑选；数值有效且KL合格的首个候选直接接受。
-# 联合KL均值/分位数/最大值及soft stop相对旧配置放宽10倍，最高LR仍3e-6，BC关闭。
+# 联合KL均值/分位数/最大值及soft stop相对旧配置放宽50倍，最高LR仍3e-6，BC关闭。
 # 奖励、Gamma/Lambda、GMT与连续物理调度不变。新条件/优化身份不能直接恢复旧checkpoint。
 # 部署profile需由本核的真实Server-2标定更新；未标定前不启动正式物理训练。
 diagnostics:
@@ -192,10 +192,10 @@ stage10:
       optimization_sha256: auto
       scope: five_trainable_steps_only
       status: candidate_requires_joint_calibration
-    chain_joint_max: 20.0
-    chain_joint_mean: 2.0
-    chain_joint_p95: 6.0
-    chain_joint_p99: 9.0
+    chain_joint_max: 100.0
+    chain_joint_mean: 10.0
+    chain_joint_p95: 30.0
+    chain_joint_p99: 45.0
     maximum_active_clip: 0.95
     maximum_step_mean_coordinate: null
     mean_coordinate: null
@@ -358,7 +358,7 @@ stage10:
     guidance_scale: 2.5
     kl_microbatch: 128
     kl_rejection: rollback_abort
-    kl_soft_stop_chain_joint: 1.0
+    kl_soft_stop_chain_joint: 5.0
     lambda_upper: 0.98
     latency_budget_s: 0.5
     log_probability_reduction: joint_sum
