@@ -8,8 +8,9 @@
 从 `stage2_continuous_rolling_train10.yaml` 复制并仅更换 Actor 优化相关设置。
 
 **首次代码验收：CPU 数学、真实小型网络、双进程 Gloo、fake world 接线及恢复通过；
-候选参数不代表最优。服务器2的实际部署进展另见文末记录，物理收益须独立验证。**
-首次代码验收没有停止训练；随后用户明确授权服务器2停止旧任务并启动正式八卡训练。
+候选参数不代表最优。实际部署进展另见文末记录，物理收益须独立验证。**
+首次代码验收没有停止训练；用户随后授权八卡正式训练，最终更正目标为服务器1，
+并明确要求服务器1若有训练则停止旧任务后启动 RoboFFT。
 整个过程保留共享工作树分支及旧实验目录。
 
 ## 官方依据与适配边界
@@ -292,15 +293,16 @@ TensorBoard 指标上限从 70 调整为 75，新增五个明确命名的 RoboFF
 
 首次本地代码验收时只检测到一张 RTX 4090，已有 python 作业 PID 1133978 使用 GPU；配置中的
 `/data0/.../env_isaac_genmo`、Stage1 权重和 IsaacLab 目录不存在。当时未连接或修改训练
-服务器，服务器当前空闲资源及资产状态为待核验。因此真实两轮训练和固定物理评估
-均未运行，GPU 耗时/峰值显存、生产权重的数值稳定性、8192 动作实际吞吐为待核验。
+服务器，当时空闲资源及资产状态尚未核验。后续服务器部署证据另见下文。
+完整 Actor 训练轮次的 GPU 耗时/峰值显存、生产权重更新的数值稳定性和
+8192 动作实际吞吐，仍须等待新训练记录，不能用标定前向替代。
 
 资源满足后，使用上述最多两轮命令，从相同 Stage1 开始，与固定音乐/种子的原基线
 比较原物理报告中的真实跟踪误差、失败率、关节活动/幅度、奖励各项及完成时长；
 并结合新固定噪声参考变化，区分参考更活跃与机器人实际跟得更好。
 本次未获得真实跟踪误差或失败率，不用 fake world 的零误差或代理 KL 替代这些结果。
 
-## 服务器2部署记录（2026-10-23，Asia/Shanghai）
+## 服务器2部署历史（2026-10-23，任务随后按用户更正取消）
 
 用户在代码交付后明确授权正式八卡训练，并要求停止服务器2已有训练。新代码同步到
 `/home/user/liwei/continuous-rolling/GENMO`，配套 GMT 位于同级 `legged_lab_gmt`；
@@ -328,3 +330,82 @@ iteration 0 checkpoint，大小 931772507 bytes，SHA256
 `training.py` 因此在模型、Isaac、配置全部初始化完成后、首个物理请求前执行一次完整
 回收；标定和训练共用此边界，session 报告记录各 rank 的对象数、耗时及自动 GC 状态。
 自动 GC、真实请求计时、物理时钟、奖励、冻结模型校验和训练超参保持原样。
+
+修正后无观察器标定通过：64 个样本全部在原 0.32 秒预算内，最小 0.225769 秒、
+中位数 0.236210 秒、平均 0.236199 秒、最大 0.253676 秒，8 rank 正常结束。
+一次性启动回收为 0.426954–0.714729 秒，各 rank 自动 GC 均保持开启。
+报告位于 `stage2_robofft_calibration_20261023_startupfix03/deployment_calibration.json`；
+运行 YAML 相对候选仅实测 `timing.deployment_profile` 不同。
+
+17:53:49 曾启动服务器2的新任务 `stage2_robofft_formal_20261023`。用户随后更正为
+服务器1，17:55:37 先暂停自动恢复器并请求停止；由于仍处于 Critic 预热的初始物理采集、没有任何
+Actor 更新，校验完整初始 checkpoint 后终止本次启动及评估子进程。
+17:58:37 确认全部 worker/评估子进程退出、服务器2 GPU 进程为空，自动恢复器随后退出。
+初始 checkpoint 保留（iteration 0、Actor/Critic updates 均为 0），大小 914459819 bytes，
+SHA256 `607259039e6b86c13e44d2492ea0ac8e89ffc33279b32f0b9596658e3bbca6f9`。
+该任务的取消不是数学或 Actor 更新失败，不将部分预热采集视为已完成固定物理验证。
+
+## 服务器1正式部署（2026-10-23，最终目标）
+
+服务器1为 ZP-NC578，SSH 公网端口为 50030。用户已明确授权停止其旧训练后启动
+RoboFFT；使用已有独立 `continuous-rolling/GENMO` 和 `continuous-rolling/legged_lab_gmt`，
+不切换共享主工作树分支。服务器1的五项模型/统计/运动学资产 SHA 全部与候选匹配。
+等待旧训练整轮退出期间，使用 GitHub 已提交 `125833f` 的隔离临时源码执行 CPU 专项：
+11 passed、1 项既有 warning、13.79 秒；原活动源码 HEAD 仍为 `e95562e`，临时目录已删除。
+
+新配置与操作证据集中在服务器1
+`/data1/user/liwei/GENMO_outputs/closedloop_stage10/stage2_robofft_server1_20261023_setup`。
+新实验从原 Stage1 s595000 初始化，保持 MC16、clip .01、beta_neg .125、Actor base LR
+1e-5、倍率 1/.1/.1、全局动作 minibatch 8192、action microbatch 8；不继承旧 DPPO
+学习状态。服务器2的延迟样本不会冒充服务器1实测，需要在服务器1重新标定。
+
+服务器1旧训练于 18:03:11 确认正常退出（退出码 0），第 76 轮完整保存，累计
+Actor updates 303、Critic updates 32672。最终完整 checkpoint 为
+`stage2_rolling_formal_20261022_182720/checkpoints/stage10_r000076_a000303_01792749730840219957_87b4f561e8e3_periodic.pt`，
+2633464025 bytes，SHA256
+`ff4e835d82f9540b2e85916c3eaa92869a1e9f286f62a3e37cdce0d5974a463a`，已逐字节核验。
+旧日志和模型保留。确认八卡空闲后才把独立 GENMO 工作树从 `e95562e` 快进到
+`125833f`，配套 GMT 仍为 `12c5a080`；18:03:14 启动服务器1实际八卡标定。
+
+服务器1标定报告正常结束，64/64 样本满足 0.32 秒预算：最小 0.227651 秒、
+中位数 0.232755 秒、平均 0.232853 秒、最大 0.237989 秒。八个 rank 的核、数值执行和
+资产一致，profile 更新工具 exit 0；配置逐项比对确认仅部署 profile 变化。
+实际运行配置 SHA256 为
+`122941a9c85f921dec576173812e0256c894de4ba5592e7a6ce83c115c81325a`。
+
+18:05:18 在**服务器1**启动正式任务：监督器 PID 3171991，torchrun PID 3172071，
+8 个 worker PID 3174681–3174688，累计上限 200 轮。运行目录为
+`/data1/user/liwei/GENMO_outputs/closedloop_stage10/stage2_robofft_server1_formal_20261023`，
+监督状态和主日志位于同名加 `_supervision` 的目录。首次启动没有 `--resume` 或旧模型
+初始化参数；之后监督器仅从这个新实验自身的完整 `latest.json` 恢复。
+
+本次正式监督器实际命令如下（任务已经启动）：
+
+```bash
+cd /home/user/liwei/continuous-rolling/GENMO
+task_run_root=/data1/user/liwei/GENMO_outputs/closedloop_stage10
+/data0/user/liwei/closedloop_stage10_v3_runtime/env_isaac_genmo/bin/python -B \
+  tools/run_stage2_training_supervisor.py \
+  --config "$task_run_root/stage2_robofft_server1_20261023_setup/stage2_continuous_rolling_robofft_server1.yaml" \
+  --output-dir "$task_run_root/stage2_robofft_server1_formal_20261023" \
+  --status-dir "$task_run_root/stage2_robofft_server1_formal_20261023_supervision" \
+  --stop-after-iteration 200
+```
+
+监督器内部使用前述八卡 shell 入口，保留 Critic 完整 MC 预热、质量门禁和固定初始
+物理评估。启动时的 worker/GPU 存活只证明任务已运行，不能替代完整 Actor 更新验证。
+首轮完成后，从 `metrics/` 中读取 `phase_resources.rollout/actor/critic/round` 的耗时和
+各 rank PyTorch 峰值显存；真实跟踪误差、失败率、活动幅度及参考变化由后续固定物理
+评估报告提供。截至本次启动，尚未生成完整 RoboFFT Actor 训练轮次和物理收益对照。
+
+18:08:34 启动核验：正式 `training_identity.json` 的目标确认为
+`robofft_d_action_clipped_ppo`，初始化为 `source_stage1/global_step=595000`，MC16、
+BC/anchor 关闭，8 个 worker 均存活，监督器 attempt 1，日志无 traceback/OOM。
+初始 checkpoint 已发布（iteration 0、Actor/Critic updates 0），正在
+`mc_calibration/preheat_val` 的真实物理采集阶段。八卡当时使用约 13.6–14.1 GiB，
+这是 `nvidia-smi` 当前占用，不能当作 Actor 训练峰值。完整训练轮次统计仍待生成。
+
+启动内存修正 `125833f` 的 CPU 验收分两批完成：725 passed、7 CUDA skipped 后，
+历史 fork 用例等待，独立新进程执行该用例及剩余 70 项得到 71 passed（15.53 秒）；
+完整覆盖 796 passed、7 skipped，不将它写成一次无中断全量通过。此前首次数学接线
+提交的 796 passed/7 skipped/83.82 秒是另一轮已完成验证，二者不累加。
