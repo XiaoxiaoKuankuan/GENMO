@@ -44,6 +44,11 @@ def test_new_reward_std_preserves_source_and_scalar_vector_formula(version,std):
     assert scores['body_pos']==pytest.approx(math.exp(-.04/.15**2))
     assert scalar.config['tracking']['source_std']==TRACKING_STD
     assert scalar.config['tracking']['reward_std']==std
+    from gem.closedloop.dppo.evaluation import _decision_evidence
+    result=dict(rewards=[expected['reward']],executed_control_steps=1,executed_physics_steps=4,
+        terminated=False,truncated=False,reason=None,metadata=dict(reward_details=[expected],
+        generated=dict(prefix_frames=18,generation_horizon_frames=60,joint_limit_diagnostics={}),latency_seconds=.24))
+    assert _decision_evidence(result,0)['reward_sum']==pytest.approx(expected['reward'])
 
 def test_reward_versions_reject_ambiguous_or_changed_source_std():
     assert ExecutionReward().config['tracking']['std']==TRACKING_STD

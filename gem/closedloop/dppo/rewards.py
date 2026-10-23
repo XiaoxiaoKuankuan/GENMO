@@ -56,6 +56,7 @@ REWARD_STD_VERSION = 'stage2.gmt8_reward_std.v3'
 ROOT_REWARD_STD_VERSION = 'stage2.gmt8_reward_root_std.v4'
 ROOT_REWARD_STD = dict(STAGE2_REWARD_STD, anchor_pos=.30, anchor_ori=.40)
 REWARD_STD_BY_VERSION = {REWARD_STD_VERSION: STAGE2_REWARD_STD, ROOT_REWARD_STD_VERSION: ROOT_REWARD_STD}
+SUPPORTED_REWARD_VERSIONS = ('stage2.gmt8_reference_limits.v1', 'stage2.gmt8_reference_limits.v2', *REWARD_STD_BY_VERSION)
 TRACKING_WEIGHTS = {name: weight/6.3 for name,weight in zip(TRACKING_FUNCTIONS,(.5,.5,1.,1.,1.,1.,.8,.5))}
 LEG_JOINT_NAMES = [side+'_'+joint+'_joint' for side in ('l','r') for joint in
     ('leg_pitch','leg_roll','leg_yaw','knee_pitch','ankle_pitch','ankle_roll')]
@@ -188,7 +189,7 @@ class ExecutionReward:
 
     def _validate_config(self):
         config = self.config
-        if config["version"] not in ("stage2.gmt8_reference_limits.v1", "stage2.gmt8_reference_limits.v2", *REWARD_STD_BY_VERSION):
+        if config["version"] not in SUPPORTED_REWARD_VERSIONS:
             raise ValueError("Unknown explicit execution reward identity")
         if type(config['music_reward_enabled']) is not bool:
             raise ValueError('music_reward_enabled must be an explicit boolean')
