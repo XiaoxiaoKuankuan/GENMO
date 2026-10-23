@@ -382,7 +382,7 @@ def final_kl(policy,rows,cache,manifest,*,distributed,microbatch=256,clip=.10,ob
         final_reference_mean_change=dict(root_feature_rms_m=distribution(full[:,-1,5]),
             rotation6d_rms_unitless=distribution(full[:,-1,6]),joint_rms_rad=distribution(full[:,-1,7]),
             root_semantics='heading_local_xy_increments_and_root_height_not_world_xyz',
-            scope='denormalized_index18_Gaussian_mean_not_final_reference'),
+            scope=f'denormalized_index{policy.trainable_steps[-1]}_Gaussian_mean_not_final_reference'),
         kl_scope='old_rollout_conditional_chain_KL_estimate_not_future_physics_safety',
         p95_scope=f'sum_{step_count}_joint_KLs_per_complete_chain',reference_change=reference_change,
         kl_only_wall_seconds=kl_seconds,wall_seconds=max(distributed.all_gather_object(time.perf_counter()-start)))
@@ -407,8 +407,9 @@ def reference_change_diagnostics(policy,rows,cache,distributed,max_local_chains=
                 params=policy.transition_parameters(context,state,step,prepared=prepared)
                 state=policy.actor._constrain(params['mean']+params['std']*
                     cache.get('sampling_noise',selected,[step]*len(selected)),prepared['adapted'])
-            state=policy.transition_parameters(context,state,19,prepared=prepared)['mean']
-            before=cache.get('chain',selected,[20]*len(selected))
+            # 最后确定性步骤与最终状态跟随当前采样核；十步核不能读取旧二十步索引。
+            state=policy.transition_parameters(context,state,policy.steps-1,prepared=prepared)['mean']
+            before=cache.get('chain',selected,[policy.steps]*len(selected))
             free=cache.get('free_mask',selected)
             delta=(state.double()-before.double())*policy.actor.endecoder.std.double()
             physical_before=policy.actor.endecoder.denormalize(before)

@@ -2,7 +2,8 @@
 
 采用原Stage1小型真实网络，检查15/30帧动作与60帧音乐各自保持30Hz，未来音乐
 确实影响输出、前缀不变、完整十步概率可重算，以及五个可训练随机步骤的真实Adam
-更新和Critic缓存。另验证有限log-ratio下溢只拒绝试更新，NaN仍视为真正异常。
+更新、Critic缓存及整轮末尾的完整KL/实际参考变化检查，防止优化结束后仍访问旧二十步
+索引而无法保存。另验证有限log-ratio下溢只拒绝试更新，NaN仍视为真正异常。
 所有临时模型和Gloo文件由pytest专用临时目录管理，不写正式训练资产；不替代PhysX。
 """
 from pathlib import Path
@@ -58,7 +59,7 @@ def test_ten_steps_and_music_context_survive_replay(actor_factory,frames):
     policy.assert_frozen_identity()
 
 
-@pytest.mark.parametrize('frames',[15,30])
+@pytest.mark.parametrize('frames',[15,30,60])
 def test_short_motion_critic_and_five_step_optimizer(actor_factory,tmp_path,frames):
     from gem.closedloop.dppo.pretrained_critic import PretrainedConditionCritic
     from gem.closedloop.dppo.rollout_helpers import split_trace
@@ -66,7 +67,7 @@ def test_short_motion_critic_and_five_step_optimizer(actor_factory,tmp_path,fram
     from gem.closedloop.dppo.collectives import DistributedCollectives
     from gem.closedloop.dppo.continuation import DisabledBC
     from gem.closedloop.dppo.gradient_merge import BCGradientController
-    from gem.closedloop.dppo.updater import actor_update
+    from gem.closedloop.dppo.updater import actor_update, final_kl
     policy,c=short_case(actor_factory,frames);priv=tracking_context(c)
     critic=PretrainedConditionCritic(policy.actor,dimension=32,layers=2,heads=4)
     values=critic(priv,[3.,4.]);values.square().mean().backward()
@@ -90,6 +91,38 @@ def test_short_motion_critic_and_five_step_optimizer(actor_factory,tmp_path,fram
         assert report['optimizer_steps']==1 and report['internal_sample_visits']==10
         assert report['steps'][0]['denoising_steps']==[4,5,6,7,8]
         assert opt.state
+        final=final_kl(policy,rows,cache,manifest,
+            distributed=DistributedCollectives(0,1,device='cpu'),microbatch=3)
+        assert final['covered_internal_transitions']==10
+        assert final['reference_change']['covered_chains']==2
+        assert final['final_reference_mean_change']['scope']==(
+            'denormalized_index8_Gaussian_mean_not_final_reference')
+        for sample in final['reference_change']['samples']:
+            assert sample['protected_coordinates_unchanged']
+            assert sample['normalized_rms']>=0.
+    finally:cache.close();dist.destroy_process_group()
+
+
+@pytest.mark.parametrize('prefix',[9,15])
+def test_old_twenty_step_final_diagnostics_remain_compatible(actor_factory,tmp_path,prefix):
+    from tests.closedloop.dppo.test_clipped_dppo import case
+    from gem.closedloop.dppo.tensor_cache import RolloutTensorCache
+    from gem.closedloop.dppo.collectives import DistributedCollectives
+    from gem.closedloop.dppo.updater import final_kl
+    policy,rows,targets=case(actor_factory,frozen_prefix_steps=prefix)
+    cache=RolloutTensorCache(rows,targets,'cpu')
+    manifest=[dict(owner_rank=0,local_index=i,valid=True,has_free=True) for i in range(len(rows))]
+    dist.init_process_group('gloo',init_method=(tmp_path/'gloo').as_uri(),rank=0,world_size=1)
+    try:
+        result=final_kl(policy,rows,cache,manifest,
+            distributed=DistributedCollectives(0,1,device='cpu'),microbatch=3)
+        assert result['covered_internal_transitions']==len(rows)*len(policy.trainable_steps)
+        assert result['final_reference_mean_change']['scope']==(
+            'denormalized_index18_Gaussian_mean_not_final_reference')
+        assert result['reference_change']['covered_chains']==len(rows)
+        for sample in result['reference_change']['samples']:
+            assert sample['protected_coordinates_unchanged']
+            assert sample['normalized_rms']<1e-5
     finally:cache.close();dist.destroy_process_group()
 
 
