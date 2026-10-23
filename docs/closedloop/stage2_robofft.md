@@ -491,3 +491,41 @@ RMS：根位置0.548527m、根姿态0.842045rad、局部身体位置0.033514m、
 本次修复前监督目录保留；恢复使用新的监督目录
 `/data1/user/liwei/GENMO_outputs/closedloop_stage10/stage2_robofft_server1_formal_20261023_reviewfix_supervision`，
 以免覆盖旧attempt退出记录。原运行目录、已标定config及累计200轮上限均保留。
+
+### 审查修正后的正式恢复（18:58:30）
+
+服务器1 ZP-NC578 已于2026-10-23 18:58:30（Asia/Shanghai）启动八卡正式恢复，
+训练代码提交c0e93a9，启动时HEAD 5623716（后者只追加实测文档）。监督器335404、
+torchrun335469、八worker335475–335482；新session为
+`4befe6bb-67cc-4d22-be40-8ca0eeec0658`。恢复前实际载入checkpoint核验RoboFFT
+schema、mc_preheat_complete=true、8份MC RNG，Actor Adam为空符合Actor0步，
+Critic Adam有48个状态条目。配置SHA仍为122941a9c85f921dec576173812e0256c894de4ba5592e7a6ce83c115c81325a。
+
+以下是已执行的实际命令；当前任务已运行，不能重复开启第二个监督器：
+
+```bash
+cd /home/user/liwei/continuous-rolling/GENMO
+/data0/user/liwei/closedloop_stage10_v3_runtime/env_isaac_genmo/bin/python -B \
+  tools/run_stage2_training_supervisor.py \
+  --config /data1/user/liwei/GENMO_outputs/closedloop_stage10/stage2_robofft_server1_20261023_setup/stage2_continuous_rolling_robofft_server1.yaml \
+  --output-dir /data1/user/liwei/GENMO_outputs/closedloop_stage10/stage2_robofft_server1_formal_20261023 \
+  --status-dir /data1/user/liwei/GENMO_outputs/closedloop_stage10/stage2_robofft_server1_formal_20261023_reviewfix_supervision \
+  --stop-after-iteration 200
+```
+
+监督器生成的八卡命令已带`--resume latest`，没有DPPO初始化参数。19:02:44核验
+attempt1、八worker运行，已进入`collections/train_000001/rank00..07`，参考执行
+日志持续更新；未重新做Critic预热，未见Traceback、OOM或异常退出。尚无新的Actor
+小批记录或已完成训练轮，不把进程存活和首次采集等同于Actor已完成更新。
+
+实时查看（在本地主机执行）：
+
+```bash
+ssh -p 50030 user@112.65.216.193 \
+  'tail -n 50 -f /data1/user/liwei/GENMO_outputs/closedloop_stage10/stage2_robofft_server1_formal_20261023_reviewfix_supervision/formal.log'
+```
+
+首轮完成后，四阶段耗时和逐rank峰值位于原运行目录
+`metrics/4befe6bb-67cc-4d22-be40-8ca0eeec0658.jsonl`的`phase_resources`，逐小批
+记录的`post_step_surrogate.scope`应为`current_minibatch_union_fixed_sentinel`，
+最终`final_surrogate.scope`为`full_rollout`。当前仍未完成更新后的固定物理效果比较。
