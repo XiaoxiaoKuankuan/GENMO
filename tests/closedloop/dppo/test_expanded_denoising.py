@@ -97,7 +97,7 @@ def test_complete_configured_chain_adam_update_with_tail_batch(actor_factory,tmp
     optimizer=torch.optim.AdamW([p for p in policy.actor.parameters() if p.requires_grad],lr=1e-9,weight_decay=0.)
     manifest=[dict(owner_rank=0,local_index=i,valid=True,has_free=True) for i in range(len(rows))]
     trust=(dict(maximum_lr=1e-9,growth=1.25,margin=.8,max_attempts=3,
-        minimum_trial_lr_ratio=.0625,objective_aware=True,objective_search_attempts=1)
+        minimum_trial_lr_ratio=.0625)
         if use_trust else None)
     try:
         result=actor_update(policy,optimizer,rows,targets,cache,manifest,BCGradientController(),
@@ -120,7 +120,7 @@ def test_complete_configured_chain_adam_update_with_tail_batch(actor_factory,tmp
         cache.close();dist.destroy_process_group()
 
 
-def test_fixed_lr_hard_kl_pass_does_not_mean_objective_improves():
+def test_fixed_lr_accepts_lower_objective_when_kl_passes():
     from tools.validate_stage2_full_chain import candidate_update_checks
     config=configuration(ROOT/'configs/closedloop/stage2_continuous_train10_base_server2.yaml',genmo_repo=ROOT)
     kl=dict(chain_joint_kl=dict(mean=.05,p95=.08,p99=.1,max=.2),active_clip_fraction=.2,
@@ -128,7 +128,7 @@ def test_fixed_lr_hard_kl_pass_does_not_mean_objective_improves():
     report=dict(optimizer_steps=1,steps=[dict(optimizer_step=1,
         full_rollout_before={'objective_mean':0.},full_rollout_after=dict(kl,objective_mean=-.0795))])
     hard,eligible=candidate_update_checks(report,kl,config)
-    assert hard['passed'] and not eligible['passed']
-    assert 'objective_gain' in eligible['failures']
+    assert hard['passed'] and eligible['passed']
+    assert not eligible['failures']
     report['steps'][0]['full_rollout_after']['objective_mean']=.01
     assert candidate_update_checks(report,kl,config)[1]['passed']

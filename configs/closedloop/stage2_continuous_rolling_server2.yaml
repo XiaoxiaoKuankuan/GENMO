@@ -393,9 +393,6 @@ stage10:
       max_attempts: 8
       maximum_lr: 3.0e-07
       minimum_trial_lr_ratio: 0.0625
-      objective_aware: true
-      objective_search_attempts: 3
-      objective_tolerance: 1.0e-10
     x0_diagnostic_every: 0
   version: genmo.closedloop.stage2.full_chain_joint.v1
 termination:

@@ -27,6 +27,7 @@ def optimization_binding(stage):
     multipliers=validate_lr_multipliers(t)
     from .denoising_contract import trainable_steps
     return dict(schema='genmo.stage2.full_chain_optimization_binding.v1',
+        candidate_acceptance='finite_KL_only_first_qualified.v1',
         **({'trainable_gaussian_steps':list(trainable_steps(t['frozen_prefix_steps'],t['denoising_steps']))} if t['frozen_prefix_steps']!=15 else {}),
         actor_lr=t['actor_lr'],actor_lr_control=t['actor_lr_control'],actor_trainable_scope=t.get('actor_trainable_scope','all'),
         actor_optimizer=dict(type='AdamW',parameter_groups=1 if multipliers is None else 'named_modules',
@@ -58,7 +59,7 @@ def validate_optimization_configuration(config,maximum_steps):
         raise ValueError('Explicit full-chain joint PPO with one undiscounted GAE and fixed Actor LR ratios required')
     trust=t['trust_region']
     trust.setdefault('minimum_trial_lr_ratio',.0625)
-    if (set(trust)-{'objective_aware','objective_tolerance','objective_search_attempts'}!={'maximum_lr','growth','margin','max_attempts','minimum_trial_lr_ratio'}
+    if (set(trust)!={'maximum_lr','growth','margin','max_attempts','minimum_trial_lr_ratio'}
             or trust['maximum_lr']!=t['actor_lr'] or not 1<=trust['growth']<=2
             or not 0<trust['margin']<1 or type(trust['max_attempts'])is not int
             or not 1<=trust['max_attempts']<=10

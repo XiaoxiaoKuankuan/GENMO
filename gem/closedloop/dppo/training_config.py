@@ -104,9 +104,13 @@ def configuration(path,*,genmo_repo=None,gmt_repo=None):
     if type(horizon['frames'])is not int or horizon['frames'] not in (15,30,60,120) or horizon['fps']!=30:raise ValueError('Actual GENMO horizon must be 15/30/60/120 frames at 30Hz')
     t['generation_frames']=horizon['frames']
     if horizon['frames'] in (15,30):
-        if horizon.get('music_frames')!=60 or horizon.get('context_contract')!='music_only_tail.v1':
-            raise ValueError('Short horizon needs explicit 2s music-only tail context')
-        t['music_context_frames']=60
+        if (horizon.get('music_frames')==horizon['frames'] and
+                horizon.get('context_contract')=='aligned_music_motion.v1'):
+            t['music_context_frames']=horizon['frames']
+        elif horizon.get('music_frames')==60 and horizon.get('context_contract')=='music_only_tail.v1':
+            t['music_context_frames']=60
+        else:
+            raise ValueError('Short horizon needs explicit aligned music/motion or 2s music-only tail context')
     mc=s['critic'].get('complete_mc',{})
     if s['critic']['complete_mc'].get('start_distribution','beginning') not in ('beginning','match_training_reset.v1'):
         raise ValueError('Unknown complete-MC reset distribution')

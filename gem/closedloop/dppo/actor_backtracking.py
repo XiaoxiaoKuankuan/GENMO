@@ -4,6 +4,7 @@
 生成器及Python/NumPy/Torch随机状态，每次从相同起点用固定梯度执行一次AdamW，
 按1、1/2、1/4等有限次数尝试。生产检查目标配置要求的完整链及全部可训练随机步；
 所有rank共同接受或拒绝，冻结参数不允许进入优化器或参数快照。失败尝试的预算不退款。
+完整PPO目标仅记录，首个满足有限数值和KL条件的候选直接接受，不再比较目标增益或搜索最优目标。
 此处不提高噪声、不截断概率，也不改写行为统计；全部失败恢复起点并返回拒绝证据，
 数值失败交给训练器恢复整轮；全部为有限信任域拒绝时，可由上层结束本批剩余
 更新，保留此前已接受状态。显式minimum_lr以下不再执行几乎无效的Adam尝试，
@@ -35,19 +36,13 @@ def check_candidate_kl(report, limits):
         value=report['active_clip_fraction']
         if not math.isfinite(value) or value>bound:
             result['failures']['active_clip_fraction']=dict(value=value,limit=bound)
-    reference=limits.get('objective_reference')
-    if reference is not None:
-        value=report['objective_mean'];tolerance=limits.get('objective_tolerance',1e-10)
-        if not math.isfinite(value) or value<reference-tolerance:
-            result['failures']['objective_gain']=dict(value=value-reference,limit=-tolerance)
     result['passed'] = not result['failures']
     result['joint_gate_is_empirical_not_theoretical_safety'] = True
     return result
 
 
 def backtracked_step(actor, optimizer, controller, *, evaluate, limits, distributed, generators=None,
-                     max_attempts=9, factor=.5, reserve_attempt=None, observe=None, minimum_lr=None,
-                     select_best=False,search_attempts=3):
+                     max_attempts=9, factor=.5, reserve_attempt=None, observe=None, minimum_lr=None):
     from .gaussian_probability import CandidateRatioRangeError
     validate_actor_optimizer(actor, optimizer)
     if type(max_attempts) is not int or not 1 <= max_attempts <= 10 or factor != .5:
@@ -75,9 +70,7 @@ def backtracked_step(actor, optimizer, controller, *, evaluate, limits, distribu
                 if grads[n] is not None and grads[n]._version!=versions[n]:
                     raise RuntimeError('KL candidate evaluation modified the fixed gradient')
                 p.grad=grads[n]
-    if select_best and ('objective_reference' not in limits or type(search_attempts)is not int or search_attempts<1):
-        raise ValueError('Best candidate search requires explicit objective reference and positive search count')
-    trials = [];best=None
+    trials = []
     try:
         for index in range(max_attempts):
             if index:
@@ -109,35 +102,16 @@ def backtracked_step(actor, optimizer, controller, *, evaluate, limits, distribu
                 wall_seconds=max(distributed.all_gather_object(time.perf_counter()-started))))
             if acceptance['passed']:
                 # 候选审查和诊断无权消耗学习RNG；下一轮从一次梯度计算后的随机状态继续。
-                if select_best:
-                    score=kl['objective_mean']
-                    if best is None or score>best['score']:
-                        best=dict(score=score,lr=lr,index=index,
-                            model={n:p.detach().clone() for n,p in actor.named_parameters() if p.requires_grad},
-                            adam=copy.deepcopy(optimizer.state_dict()))
-                    if len(trials)<search_attempts:continue
-                    break
                 restore_local_rng(rng, generators)
                 return dict(accepted=True, initial_lr=initial_lr, accepted_lr=lr,
                     initial_learning_rates=initial_learning_rates, accepted_learning_rates=actor_learning_rates(optimizer),
                     backtracks=index, attempts=trials, attempt_count=len(trials),
-                    same_initial_adam_per_attempt=True, fixed_gradient_reused=True)
-        if best is not None:
-            with torch.no_grad():
-                for name,p in actor.named_parameters():
-                    if name in best['model']:p.copy_(best['model'][name])
-            optimizer.load_state_dict(best['adam']);controller.load_state_dict(control)
-            restore_local_rng(rng,generators)
-            return dict(accepted=True,initial_lr=initial_lr,accepted_lr=best['lr'],
-                initial_learning_rates=initial_learning_rates,accepted_learning_rates=actor_learning_rates(optimizer),
-                backtracks=len(trials)-1,attempts=trials,attempt_count=len(trials),
-                selected_attempt=best['index']+1,selected_objective=best['score'],
-                same_initial_adam_per_attempt=True,fixed_gradient_reused=True,
-                selection='best_true_clipped_objective_among_KL_qualified_trials')
+                    same_initial_adam_per_attempt=True, fixed_gradient_reused=True,
+                    selection='first_finite_KL_qualified_candidate')
         restore()
         finite_rejections=bool(trials) and all(t['recoverable_ratio_range_error'] or (t['kl'] is not None and
             set(t['acceptance']['failures']) <= {'chain_joint_mean','chain_joint_p95',
-                'chain_joint_p99','chain_joint_max','active_clip_fraction','objective_gain'} and
+                'chain_joint_p99','chain_joint_max','active_clip_fraction'} and
             all(math.isfinite(f['value']) for f in t['acceptance']['failures'].values()))
             for t in trials)
         return dict(accepted=False, initial_lr=initial_lr, accepted_lr=None, backtracks=max(0,len(trials)-1),

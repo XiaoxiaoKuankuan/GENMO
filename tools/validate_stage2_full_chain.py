@@ -50,10 +50,10 @@ from gem.closedloop.dppo.actor_backtracking import check_candidate_kl
 
 
 def candidate_update_checks(report,kl,config):
-    """分开报告硬KL和正式目标感知条件；离线候选不会提交到正式训练计数。
+    """分开报告硬KL和正式候选KL；PPO目标变化仅作诊断，不作为接受条件。
 
     固定LR试探故意不回溯，可能KL硬门槛通过但PPO目标下降。按生产原有margin、
-    soft KL、active clip和目标条件重新判读；这里只解释结果，不改变本次真实更新。
+    soft KL与active clip重新判读；这里只解释结果，不改变本次真实更新。
     """
     hard=check_candidate_kl(kl,config['stage10']['kl'])
     settings=config['stage9'];trust=settings['trust_region']
@@ -62,17 +62,11 @@ def candidate_update_checks(report,kl,config):
     limits['maximum_active_clip']=settings['max_active_clip_fraction']
     eligible=check_candidate_kl(kl,limits)
     if report['optimizer_steps']<1:eligible['failures']['no_optimizer_step']=True
-    if trust.get('objective_aware'):
-        for step in report['steps']:
-            before=step.get('full_rollout_before');after=step.get('full_rollout_after')
-            if before is None or after is None:
-                eligible['failures']['objective_evidence_missing']=True
-            else:
-                step_check=check_candidate_kl(after,limits)
-                if step_check['failures']:eligible['failures'][f'step_{step["optimizer_step"]}']=step_check['failures']
-                if after['objective_mean']<before['objective_mean']-trust.get('objective_tolerance',1e-10):
-                    eligible['failures']['objective_gain']=dict(value=after['objective_mean']-before['objective_mean'],
-                        optimizer_step=step['optimizer_step'])
+    for step in report['steps']:
+        after=step.get('full_rollout_after')
+        if after is not None:
+            step_check=check_candidate_kl(after,limits)
+            if step_check['failures']:eligible['failures'][f'step_{step["optimizer_step"]}']=step_check['failures']
     eligible['passed']=not eligible['failures']
     eligible['scope']='existing_production_conditions_diagnostic_only_no_formal_step_committed'
     return hard,eligible

@@ -1,4 +1,4 @@
-"""配置指定四步或十步的完整联合Clipped PPO与Stage1 BC、整轮联合KL和非对称Critic更新。
+"""配置指定四/五/十步的完整联合Clipped PPO与Stage1 BC、整轮联合KL和非对称Critic更新。
 
 每条链全部可训练随机步自由坐标的FP64 log-ratio先求和，只执行一次符号相关PPO裁剪，
 对应同一个上层GAE。两遍流式计算保持完整链梯度，条件图在每个Adam版本重建。
@@ -71,8 +71,8 @@ def _actor_update(policy,optimizer,rows,targets,cache,manifest,controller,*,dist
         packed=torch.cat((records.reshape(len(local),record_width),adv[:,None]),1)
         full=distributed.gather_rows(packed,[position for position,_ in owned],count)
         return records,full[:,:record_width].reshape(count,step_count,8),full[:,record_width]
-    objective_aware=bool((trust_region or {}).get('objective_aware',False))
-    audit_full_rollout_objective=audit_full_rollout_objective or objective_aware or audit_full_gradient_direction
+    # 完整批次目标只记录，不参与候选接受、回溯或挑选学习率。
+    audit_full_rollout_objective=audit_full_rollout_objective or audit_full_gradient_direction
     full_current=full_adv=full_before=None
     objective_history=[];source_names=[]
     selected_position={index:position for position,index in enumerate(selected)}
@@ -162,7 +162,7 @@ def _actor_update(policy,optimizer,rows,targets,cache,manifest,controller,*,dist
             if trust_region is not None:
                 # 更新还会影响先前批次；累计已用链全部参与候选检查，避免只在新批次
                 # KL通过却遗漏前面链的变化。最终仍检查包含未用链在内的完整rollout。
-                guarded=set(selected) if objective_aware else covered.union(indices)
+                guarded=set(selected) if audit_full_rollout_objective else covered.union(indices)
                 guard_indices=[i for i in selected if i in guarded]
                 guard_owned=_owned(guard_indices,manifest,distributed)
                 guard_local=[rows[i] for _,i in guard_owned]
@@ -170,12 +170,8 @@ def _actor_update(policy,optimizer,rows,targets,cache,manifest,controller,*,dist
                     if k.startswith('chain_joint_')}
                 limits['chain_joint_mean']=min(limits['chain_joint_mean'],soft_kl*trust_region['margin'])
                 limits['maximum_active_clip']=max_active_clip
-                if objective_aware:
-                    limits['objective_reference']=step_full_before['objective_mean']
-                    limits['objective_tolerance']=trust_region.get('objective_tolerance',1e-10)
                 set_actor_base_lr(optimizer,min(trust_region['maximum_lr'],
                     actor_base_lr(optimizer)*trust_region['growth']))
-                candidate_cache={}
                 def evaluate_candidate():
                     nonlocal post_records,post,kl_elapsed,full_current
                     measured=time.perf_counter()
@@ -187,19 +183,15 @@ def _actor_update(policy,optimizer,rows,targets,cache,manifest,controller,*,dist
                     else:
                         _,post_records,post_adv=collect_records(guard_local,guard_owned,len(guard_indices))
                     post=chain_diagnostics(from_records(post_records),post_adv,clip=clip)
-                    if objective_aware:candidate_cache[actor_base_lr(optimizer)]=(full_current,post_records,post)
                     kl_elapsed+=time.perf_counter()-measured
                     return post
                 transaction=backtracked_step(actor,optimizer,controller,evaluate=evaluate_candidate,
                     limits=limits,distributed=distributed,generators={'actor':generator},
                     max_attempts=trust_region['max_attempts'],reserve_attempt=reserve_attempt,
                     observe=candidate_observer,minimum_lr=trust_region['maximum_lr']*
-                        trust_region.get('minimum_trial_lr_ratio',.0625),
-                    select_best=objective_aware,search_attempts=trust_region.get('objective_search_attempts',3))
-                if transaction['accepted'] and objective_aware:
-                    full_current,post_records,post=candidate_cache[transaction['accepted_lr']]
+                        trust_region.get('minimum_trial_lr_ratio',.0625))
                 if not transaction['accepted']:
-                    if (reports or objective_aware) and transaction['finite_trust_region_exhausted']:
+                    if transaction['finite_trust_region_exhausted']:
                         controller.load_state_dict(pending_control)
                         if bc_enabled:anchor.load_state_dict(pending_anchor)
                         full_current=accepted_full_current
@@ -258,7 +250,7 @@ def _actor_update(policy,optimizer,rows,targets,cache,manifest,controller,*,dist
                 clip_fraction=pre['clip_fraction'],objective_clip_fraction=pre['active_clip_fraction'],
                 pre_step_chain=pre,post_step_chain=post,
                 pre_step_chain_scope='current_minibatch',
-                post_step_chain_scope=(('full_rollout' if objective_aware else 'all_previously_used_plus_current_chains')
+                post_step_chain_scope=(('full_rollout' if audit_full_rollout_objective else 'all_previously_used_plus_current_chains')
                     if trust_region is not None else 'full_rollout' if audit_full_rollout_objective else 'current_minibatch'),
                 full_rollout_before=step_full_before,full_rollout_after=full_after,full_rollout_groups=objective_groups,
                 pre_step_mean_joint_kl=pre['chain_joint_kl']['mean'],
@@ -270,7 +262,7 @@ def _actor_update(policy,optimizer,rows,targets,cache,manifest,controller,*,dist
                 output_change=output_change,trust_region=transaction,
                 candidate_checked_chains=(len(guard_indices) if trust_region is not None else
                     len(selected) if audit_full_rollout_objective else len(indices)),
-                candidate_check_scope=(('full_rollout' if objective_aware else 'all_previously_used_plus_current_chains')
+                candidate_check_scope=(('full_rollout' if audit_full_rollout_objective else 'all_previously_used_plus_current_chains')
                     if trust_region is not None else 'full_rollout' if audit_full_rollout_objective else 'current_minibatch'),
                 bc_global_samples=sum(s['batch'] for s in shards),bc_samples_by_source=dict(sources),
                 bc_loss=sum(s['batch']*s['loss'] for s in shards)/global_bc if global_bc else 0.,
@@ -304,7 +296,7 @@ def _actor_update(policy,optimizer,rows,targets,cache,manifest,controller,*,dist
         accepted_optimizer_steps=None,acceptance_scope='pending_full_rollout_joint_KL',
         planned_optimizer_steps=planned_steps,skipped_optimizer_steps=planned_steps-len(reports),
         steps=reports,epoch_orders=orders,early_stop_reason=stop_reason,discarded_pending_minibatch=discarded,
-        gradient_snr=None,_ppo_gradient_sketch=sketch,epoch_order_rng_contract=('fixed_four_steps_shuffled_complete_chains' if step_count==4 else 'fixed_ten_steps_shuffled_complete_chains'),
+        gradient_snr=None,_ppo_gradient_sketch=sketch,epoch_order_rng_contract=f'fixed_{step_count}_steps_shuffled_complete_chains',
         full_rollout_objective_history=objective_history,bc_enabled=bc_enabled,
         eligible_chains=len(selected),applied_unique_chains=len(covered),applied_chain_fraction=len(covered)/len(selected),
         internal_sample_visits=sum(r['internal_sample_visits'] for r in reports),

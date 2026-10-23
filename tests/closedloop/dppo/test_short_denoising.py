@@ -21,14 +21,16 @@ from gem.closedloop.dppo.gaussian_probability import CandidateRatioRangeError
 from gem.closedloop.dppo.actor_backtracking import backtracked_step
 
 
-def short_case(actor_factory, frames):
+def short_case(actor_factory, frames, music_frames=60):
     actor,batch=actor_factory(motion_frames=60);_activate_branches(actor)
     c=_conditions(batch)
     for key in ('known_qpos30','known_qpos30_mask','future_valid','future_times'):
         c[key]=c[key][:,:frames].clone()
+    for key in ('music_features','music_valid'):
+        c[key]=c[key][:,:music_frames].clone()
     validate_stage1_condition_batch(c)
     policy=FrozenPrefixPolicy(actor,steps=10,frozen_prefix_steps=4,
-        std_schedule=[.001]*4+[.02,.04,.06,.08,.1,0.],generation_frames=frames,music_context_frames=60)
+        std_schedule=[.001]*4+[.02,.04,.06,.08,.1,0.],generation_frames=frames,music_context_frames=music_frames)
     return policy,c
 
 
@@ -59,8 +61,8 @@ def test_ten_steps_and_music_context_survive_replay(actor_factory,frames):
     policy.assert_frozen_identity()
 
 
-@pytest.mark.parametrize('frames',[15,30,60])
-def test_short_motion_critic_and_five_step_optimizer(actor_factory,tmp_path,frames):
+@pytest.mark.parametrize('frames,music_frames',[(15,60),(30,60),(60,60),(30,30)])
+def test_short_motion_critic_and_five_step_optimizer(actor_factory,tmp_path,frames,music_frames):
     from gem.closedloop.dppo.pretrained_critic import PretrainedConditionCritic
     from gem.closedloop.dppo.rollout_helpers import split_trace
     from gem.closedloop.dppo.tensor_cache import RolloutTensorCache
@@ -68,7 +70,7 @@ def test_short_motion_critic_and_five_step_optimizer(actor_factory,tmp_path,fram
     from gem.closedloop.dppo.continuation import DisabledBC
     from gem.closedloop.dppo.gradient_merge import BCGradientController
     from gem.closedloop.dppo.updater import actor_update, final_kl
-    policy,c=short_case(actor_factory,frames);priv=tracking_context(c)
+    policy,c=short_case(actor_factory,frames,music_frames);priv=tracking_context(c)
     critic=PretrainedConditionCritic(policy.actor,dimension=32,layers=2,heads=4)
     values=critic(priv,[3.,4.]);values.square().mean().backward()
     assert torch.isfinite(values).all() and critic.history_encoder.cell.weight_ih.grad is not None
@@ -101,6 +103,33 @@ def test_short_motion_critic_and_five_step_optimizer(actor_factory,tmp_path,fram
             assert sample['protected_coordinates_unchanged']
             assert sample['normalized_rms']>=0.
     finally:cache.close();dist.destroy_process_group()
+
+
+def test_aligned_one_second_enters_transformer_as_thirty_positions(actor_factory):
+    policy,c=short_case(actor_factory,30,30)
+    observed=[]
+    def observe(module,args,kwargs):
+        observed.append((args[0].shape[1],kwargs['y']['f_cond'].shape[1]))
+    handles=[model.denoiser.register_forward_pre_hook(observe,with_kwargs=True)
+        for model in (policy.actor,policy.frozen_policy.actor)]
+    try:
+        trace=policy.sample_rollout(c,generator=torch.Generator().manual_seed(71))
+    finally:
+        for handle in handles:handle.remove()
+    assert observed and all(item==(30,30) for item in observed)
+    assert trace['chain'].shape==(2,11,30,30)
+    adapted=policy.actor.adapt_conditions(c)
+    mask=adapted['known_mask']
+    torch.testing.assert_close(trace['chain'][:,-1][mask],adapted['known_x'][mask],rtol=0,atol=0)
+    from gem.closedloop.dppo.training_config import configuration
+    from gem.closedloop.dppo.actor_optimization import optimization_binding
+    root=Path(__file__).resolve().parents[3]
+    config=configuration(root/'configs/closedloop/stage2_ddim10_last5_motion30_music30_klrelaxed_server2.yaml')
+    stage=config['stage10'];t=stage['training']
+    assert t['music_context_frames']==t['generation_frames']==30
+    assert stage['kl']['chain_joint_mean']==2. and t['kl_soft_stop_chain_joint']==1.
+    assert optimization_binding(stage)['candidate_acceptance']=='finite_KL_only_first_qualified.v1'
+    assert set(t['trust_region'])=={'maximum_lr','growth','margin','max_attempts','minimum_trial_lr_ratio'}
 
 
 @pytest.mark.parametrize('prefix',[9,15])

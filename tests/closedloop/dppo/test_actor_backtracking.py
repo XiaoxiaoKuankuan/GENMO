@@ -162,6 +162,21 @@ def test_numerical_candidate_rejected_then_retried_without_extra_adam_time():
     assert all(float(s['step'])==2 for s in opt.state.values())
 
 
+def test_lower_full_objective_accepts_first_kl_qualified_step():
+    # 目标大幅下降也不缩LR或搜索其他候选；只检验用户保留的KL/有限数值条件。
+    actor,opt,c=setup();calls=[]
+    def evaluate():
+        calls.append(opt.param_groups[0]['lr'])
+        return dict(kl(.0001),objective_mean=-100.,active_clip_fraction=.4)
+    result=backtracked_step(actor,opt,c,evaluate=evaluate,
+        limits=dict(chain_joint_mean=.1,chain_joint_max=1.,maximum_active_clip=.95),
+        distributed=Collective())
+    assert result['accepted'] and result['accepted_lr']==1e-6
+    assert calls==[1e-6] and result['attempt_count']==1
+    assert result['selection']=='first_finite_KL_qualified_candidate'
+    assert result['attempts'][0]['kl']['objective_mean']==-100.
+
+
 def test_concentrated_finite_ratios_do_not_reject_valid_joint_kl():
     # 构造一条罕见但有限的旧高斯样本；其大ratio已被正优势PPO裁剪。
     # 权重集中本身不拒绝更新；真正超出联合KL或active clip上限时仍拒绝。
