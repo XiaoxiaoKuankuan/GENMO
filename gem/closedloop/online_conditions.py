@@ -68,12 +68,15 @@ class FrozenMusicFeatures:
 class OnlineConditionBuilder:
     """只读取快照，不修改后端缓存；构造 batch=1 的原始 physical 条件。"""
 
-    def __init__(self, codec: BumiMotionFeatureCodec, history_steps: int = 50, motion_frames: int = 120) -> None:
+    def __init__(self, codec: BumiMotionFeatureCodec, history_steps: int = 50, motion_frames: int = 120, music_frames: int | None = None) -> None:
         if not isinstance(codec, BumiMotionFeatureCodec):
             raise TypeError("codec must be the existing BumiMotionFeatureCodec")
         self.codec = codec
-        if type(motion_frames)is not int or motion_frames not in (60,120):raise ValueError('Explicit 60/120 frame horizon required')
+        if type(motion_frames)is not int or motion_frames not in (15,30,60,120):raise ValueError('Explicit 15/30/60/120 frame horizon required')
         self.motion_frames=motion_frames
+        self.music_frames=motion_frames if music_frames is None else music_frames
+        if self.music_frames!=motion_frames and not (motion_frames in (15,30) and self.music_frames==60):
+            raise ValueError("Short output must preserve the 60-frame music context")
         self.history_steps = _integer(history_steps, "history_steps")
         if self.history_steps <= 0:
             raise ValueError("history_steps must be positive")
@@ -157,9 +160,10 @@ class OnlineConditionBuilder:
             music = _tensor(music_features, torch.float32)
             if music.ndim != 2 or music.shape[1] != MUSIC_FEATURE_DIM or not torch.isfinite(music).all():
                 raise ValueError("music_features must be finite float [N,35] at 30 Hz")
-        indices = (future_ticks - music_start_tick) // SOURCE_TICKS
+        music_ticks=decision_tick+torch.arange(self.music_frames,dtype=torch.int64)*SOURCE_TICKS
+        indices = (music_ticks - music_start_tick) // SOURCE_TICKS
         music_valid = (indices >= 0) & (indices < len(music))
-        window = torch.zeros((self.motion_frames, MUSIC_FEATURE_DIM), dtype=torch.float32)
+        window = torch.zeros((self.music_frames, MUSIC_FEATURE_DIM), dtype=torch.float32)
         window[music_valid] = music[indices[music_valid]]
         conditions = {
             "music_features": window[None],

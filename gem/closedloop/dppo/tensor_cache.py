@@ -287,7 +287,7 @@ class ConditionGraphCache:
                 self.bank['indices'][positions] = torch.tensor(positions, device=self.bank['adapted']['known_x'].device)
             index = self.bank['indices'][positions]
             prepared = dict(self.bank['originals'][0])
-            keys = self.bank['adapted'] if context is not None else ('known_x', 'known_mask', 'future_valid')
+            keys = self.bank['adapted'] if context is not None else ('known_x', 'known_mask', 'future_valid', 'context_valid')
             prepared['adapted'] = {key: self.bank['adapted'][key].index_select(0, index) for key in keys}
             for key, value in self.bank['leaves'].items():
                 prepared[key] = (None if value is None else

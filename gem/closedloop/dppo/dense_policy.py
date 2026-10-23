@@ -114,17 +114,20 @@ def dense_precision_scope(precision):
 
 class DenseDiffusionPolicy(DPPODiffusionPolicy):
     def __init__(self,actor,*,std_schedule,precision='native_fp32',attention='sdpa_math',compile_denoiser=False,
-                 precise_output=True,linear_execution='native_gemm',weight_gradient='direct_joint_gemm',steps=20,eta=.1,guidance_scale=2.5,generation_frames=120,deterministic_steps=(),cuda_graph=False):
-        if steps!=20 or len(std_schedule)!=20:
-            raise ValueError('当前 production behavior must retain the full 20-step chain')
+                 precise_output=True,linear_execution='native_gemm',weight_gradient='direct_joint_gemm',steps=20,eta=.1,guidance_scale=2.5,generation_frames=120,deterministic_steps=(),cuda_graph=False,music_context_frames=None):
+        if steps not in (10,20) or len(std_schedule)!=steps:
+            raise ValueError('Production behavior requires an explicit complete 10 or 20 step chain')
         super().__init__(actor,steps=steps,eta=eta,std_floor=min(v for v in std_schedule if v>0),std_schedule=std_schedule,
             deterministic_steps=deterministic_steps,
             guidance_scale=guidance_scale,cfg_batch=True,defer_checks=True)
         self.numerical_layout='native_dense'
         self.batched_conditions=True
         self.precision=precision
-        if generation_frames not in (60,120) or generation_frames>actor.denoiser.max_len:raise ValueError('Invalid actual generation horizon')
+        if generation_frames not in (15,30,60,120) or generation_frames>actor.denoiser.max_len:raise ValueError('Invalid actual generation horizon')
         self.generation_frames=generation_frames
+        self.music_context_frames=generation_frames if music_context_frames is None else music_context_frames
+        if self.music_context_frames!=generation_frames and not (generation_frames in (15,30) and self.music_context_frames==60):
+            raise ValueError("Invalid music-only context horizon")
         self.numerical_execution=configure_dense_actor(actor,precision=precision,attention=attention,
             precise_output=precise_output,linear_execution=linear_execution,weight_gradient=weight_gradient)
         if compile_denoiser or cuda_graph:
@@ -135,9 +138,12 @@ class DenseDiffusionPolicy(DPPODiffusionPolicy):
             condition_batch_size='unique_chains',execution_batch_size=None,
             network_batch='actual_rows_no_fixed64_tiles',effective_std_floors=list(std_schedule))
         self.kernel_config.update(generation_horizon_frames=generation_frames,generation_fps=30)
+        if self.music_context_frames!=generation_frames:
+            self.kernel_config.update(music_context_frames=self.music_context_frames,context_contract="music_only_tail.v1")
 
     def prepare_conditions(self,conditions):
         if conditions['future_valid'].shape[1]!=self.generation_frames:raise ValueError('Condition horizon differs from actual behavior kernel')
+        if conditions['music_valid'].shape[1]!=self.music_context_frames:raise ValueError('Music context differs from kernel')
         with dense_precision_scope(self.precision):return super().prepare_conditions(conditions)
 
     def _transition_prepared(self,prepared,x_k,step_index,*,diagnostics=False):

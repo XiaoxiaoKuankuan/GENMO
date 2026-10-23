@@ -51,7 +51,7 @@ def _actor_update(policy,optimizer,rows,targets,cache,manifest,controller,*,dist
     step_count=len(active_steps);record_width=step_count*8
     if step_strategy!=f'intermediate{step_count}' or sampled_steps!=step_count:
         raise ValueError('PPO strategy/count must match every trainable stochastic transition')
-    if (policy.steps!=20 or ppo_epochs<1 or minibatch_chains<1 or microbatch<1 or
+    if (policy.steps not in (10,20) or ppo_epochs<1 or minibatch_chains<1 or microbatch<1 or
             gamma_denoising!=1. or kl_reduction!='chain_joint' or objective_reduction!='joint_sum'):
         raise ValueError('Full-chain PPO requires joint-sum, chain KL and one undiscounted upper advantage')
     validate_actor_optimizer(policy.actor,optimizer)

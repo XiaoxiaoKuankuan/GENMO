@@ -92,7 +92,7 @@ class DeviceRolloutBuffer:
                 for key in ['chain','old_means','old_stds','old_log_probs','free_mask','sampling_noise']:
                     trace[key]=trace[key].detach().to(device)
                 if trace['kernel_config']!=policy.kernel_config:raise ValueError('Behavior and learner kernel identities differ')
-                if row.chain.shape!=(21,policy.generation_frames,30) or row.chain.dtype!=torch.float32 or row.old_log_prob.shape!=(19,) or row.old_log_prob.dtype!=torch.float64:
+                if row.chain.shape!=(policy.steps+1,policy.generation_frames,30) or row.chain.dtype!=torch.float32 or row.old_log_prob.shape!=(len(policy.stochastic_steps),) or row.old_log_prob.dtype!=torch.float64:
                     raise ValueError('GPU buffer requires the full FP32 20-step chain and FP64 joint old probability')
                 if row.executed_physics_steps!=4*row.executed_control_steps or row.control_tick_end-row.control_tick_begin!=12*row.executed_control_steps:
                     raise ValueError('Physical work or timestamp count changed')

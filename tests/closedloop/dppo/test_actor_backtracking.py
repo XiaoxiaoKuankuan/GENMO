@@ -136,8 +136,8 @@ def test_configuration_binds_every_actual_optimizer_choice(tmp_path):
     from pathlib import Path
     import yaml
     from gem.closedloop.dppo.training_config import configuration
-    source=Path(__file__).resolve().parents[3]/'configs/closedloop/stage2_full_chain.yaml'
-    assert configuration(source)['stage10']['derived']['maximum_actor_steps']==8
+    source=Path(__file__).resolve().parents[3]/'configs/closedloop/stage2_continuous_train10_base_server2.yaml'
+    assert configuration(source)['stage10']['derived']['maximum_actor_steps']==10
     c=yaml.safe_load(source.read_text())
     c['stage10']['kl']['calibration']=configuration(source)['stage10']['kl']['calibration']
     c['stage10']['training']['actor_lr']=3e-6

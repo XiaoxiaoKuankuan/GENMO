@@ -116,8 +116,10 @@ class UpperTransition:
             raise ValueError("valid transition requires a FP32 [K+1,T,30] chain")
         if self.chain.shape[1:] != (self.context["future_valid"].shape[1], 30) or self.chain.shape[0] < 2:
             raise ValueError("invalid denoising chain shape")
-        if self.old_log_prob is None or self.old_log_prob.shape != (19,):
-            raise ValueError("old_log_prob must contain only the 19 stochastic transitions; final map has no density")
+        if self.chain.shape[0] not in (11,21):
+            raise ValueError("Unsupported complete diffusion chain length")
+        if self.old_log_prob is None or self.old_log_prob.shape != (self.chain.shape[0]-2,):
+            raise ValueError("old_log_prob must match all stochastic transitions; final map has no density")
         if self.old_log_prob.dtype != torch.float64:
             raise ValueError("old joint log probabilities must preserve FP64 precision")
         if self.free_mask is None or self.free_mask.dtype != torch.bool or self.free_mask.shape != (self.context["future_valid"].shape[1], 30):

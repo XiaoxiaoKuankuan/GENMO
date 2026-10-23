@@ -288,7 +288,7 @@ def _decision_evidence(result, index):
         if mask is not None:
             prefix = int(torch.as_tensor(mask).any(-1).sum())
     frames=generated.get('generation_horizon_frames',120)
-    if type(frames)is not int or frames not in (60,120):raise ValueError('Invalid evaluated generation horizon')
+    if type(frames)is not int or frames not in (15,30,60,120):raise ValueError('Invalid evaluated generation horizon')
     if type(prefix) is not int or not 0 <= prefix < frames:
         raise ValueError('Evaluation requires actual known prefix frame count')
     terminal_snapshot = metadata.get('terminal_snapshot') or {}

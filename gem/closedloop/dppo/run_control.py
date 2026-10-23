@@ -37,7 +37,7 @@ def build_policy(actor, settings, precision, *, frozen_actor=None):
         attention=precision['attention'], linear_execution=precision['linear_execution'],
         compile_denoiser=precision['compile'], precise_output=precision['precise_output'],
         cuda_graph=precision.get('cuda_graph',False),
-        weight_gradient=precision.get('weight_gradient', 'direct_joint_gemm'),generation_frames=settings.get('generation_frames',120))
+        weight_gradient=precision.get('weight_gradient', 'direct_joint_gemm'),generation_frames=settings.get('generation_frames',120),music_context_frames=settings.get('music_context_frames'))
     from .actor_scope import configure_actor_scope
     policy.actor_scope=configure_actor_scope(actor,settings.get('actor_trainable_scope','all'))
     return policy

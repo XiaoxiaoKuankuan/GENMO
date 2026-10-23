@@ -57,6 +57,10 @@ def gaussian_statistics(value, old_mean, old_std, new_mean, new_std, free_mask, 
     return result
 
 
+class CandidateRatioRangeError(FloatingPointError):
+    """有限log概率的试更新超出指数表示范围；只拒绝候选，不代表原状态损坏。"""
+
+
 def ppo_surrogate(statistics, advantages, *, clip, reduction='joint_sum'):
     """执行真正的符号相关 PPO clipping；零自由度转移不贡献目标。"""
     if reduction not in ('joint_sum','free_coordinate_mean') or not 0 < clip < 1:
@@ -68,7 +72,8 @@ def ppo_surrogate(statistics, advantages, *, clip, reduction='joint_sum'):
     overflow=log_ratio>math.log(torch.finfo(torch.float64).max)
     underflow=log_ratio<math.log(float.fromhex('0x0.0000000000001p-1022'))
     if bool((bad|overflow|underflow).any()):
-        raise FloatingPointError('PPO candidate must be rolled back: '+json.dumps(dict(
+        error_type=FloatingPointError if bool(bad.any()) else CandidateRatioRangeError
+        raise error_type('PPO candidate must be rolled back: '+json.dumps(dict(
             nonfinite_fraction=float(bad.double().mean()),ratio_overflow_fraction=float(overflow.double().mean()),
             ratio_underflow_fraction=float(underflow.double().mean()),
             action='reject_candidate_without_ratio_clamp_or_sample_filter')))

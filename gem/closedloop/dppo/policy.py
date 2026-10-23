@@ -177,7 +177,7 @@ class DPPODiffusionPolicy:
             if self.actor.cond_exists_embedder is not None:
                 flag = empty.new_zeros((*empty.shape[:-1], 1))
                 empty = self.actor.cond_exists_embedder(torch.cat((empty, flag), -1))
-            unconditional = torch.where(adapted['future_valid'][..., None], empty, 0.) + residual
+            unconditional = torch.where(adapted.get('context_valid',adapted['future_valid'])[..., None], empty, 0.) + residual
         return conditional, unconditional
 
     def _coefficients(self, device):
@@ -259,7 +259,7 @@ class DPPODiffusionPolicy:
                 or prepared.get('grad_enabled') != torch.is_grad_enabled()):
             raise ValueError('Prepared conditions differ from inputs, Actor version or grad mode')
         with torch.autocast(device_type=x_k.device.type, enabled=False):
-            adapted = {key: prepared['adapted'][key] for key in ('known_x', 'known_mask', 'future_valid')}
+            adapted = {key: prepared['adapted'][key] for key in ('known_x', 'known_mask', 'future_valid', 'context_valid')}
             state = self._state(x_k, adapted["known_x"], "x_k")
             state = self.actor._constrain(state, adapted)
             indices = self._step_indices(step_index, state)

@@ -126,7 +126,7 @@ def output_probe(policy, rows, cache, max_chains=16):
             state = policy.actor._constrain(moving['mean'] + moving['std']*
                 cache.get('sampling_noise', selected, [step]*len(selected)), prepared['adapted'])
             moving_states.append(state.clone())
-        final = policy.transition_parameters(context, state, 19, prepared=prepared)
+        final = policy.transition_parameters(context, state, policy.final_step, prepared=prepared)
         qpos = policy.actor.endecoder.codec.decode_to_canonical_qpos(policy.actor.endecoder.denormalize(final['mean']))
         boundaries=None
         if hasattr(policy,'experimental_joint_limits'):

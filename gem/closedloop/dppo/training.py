@@ -578,7 +578,7 @@ def run(cargs,config,distributed):
         from gem.closedloop.online_conditions import OnlineConditionBuilder
         from gem.robots.bumi.feature_codec import BumiMotionFeatureCodec
         from gem.robots.bumi.kinematics import BumiKinematics
-        c.builder=OnlineConditionBuilder(BumiMotionFeatureCodec(BumiKinematics(config['paths']['kinematics'])),motion_frames=config['stage10']['generation_horizon']['frames'])
+        c.builder=OnlineConditionBuilder(BumiMotionFeatureCodec(BumiKinematics(config['paths']['kinematics'])),motion_frames=config['stage10']['generation_horizon']['frames'],music_frames=config['stage10']['generation_horizon'].get('music_frames'))
         if distributed.rank==0:
             c.writer=DashboardWriter(c.output/'tensorboard_compact')
         report.update(run_id=identity['run_id'],session_id=identity['session_id'],initial_state=copy.deepcopy(c.state))

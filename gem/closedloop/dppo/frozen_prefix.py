@@ -1,8 +1,8 @@
-"""完整20步行为扩散中的固定Stage1前段与可训练末段。
+"""完整10/20步行为扩散中的固定Stage1前段与可训练末段。
 
-初始化时从Stage1 Actor深拷贝独立、永久无梯度的前段网络。显式支持15+4+1与
-9+10+1：前段及末步使用副本，中间连续随机步使用原Actor；不共享Parameter。
-条件编码各自来自对应网络；采样执行20步，KL覆盖配置指定的全部可训练随机步。
+初始化时从Stage1 Actor深拷贝独立、永久无梯度的前段网络。显式支持15+4+1、
+9+10+1和4+5+1：前段及末步使用副本，中间连续随机步使用原Actor；不共享Parameter。
+条件编码各自来自对应网络；采样执行配置指定的完整步数，KL覆盖配置指定的全部可训练随机步。
 条件缓存显式保存冻结特征，训练末段的条件编码仍正常反向；缓存不可跨参数更新。
 冻结权重由已绑定SHA的Stage1资产重建，其完整指纹进入kernel/训练/checkpoint身份；
 恢复只覆盖可训练Actor，不能把恢复后的Actor误复制成冻结前段。物理时钟与噪声不变。
@@ -20,13 +20,15 @@ class FrozenPrefixPolicy(DenseDiffusionPolicy):
     condition_feature_names=('conditional','unconditional','frozen_conditional','frozen_unconditional')
 
     def __init__(self, actor, *, frozen_prefix_steps=15, frozen_actor=None, **kwargs):
-        self.trainable_steps=trainable_steps(frozen_prefix_steps)
+        total_steps=kwargs.get("steps",20)
+        self.trainable_steps=trainable_steps(frozen_prefix_steps,total_steps)
+        self.final_step=total_steps-1
         frozen=copy.deepcopy(actor) if frozen_actor is None else frozen_actor
         if ({id(p) for p in actor.parameters()} & {id(p) for p in frozen.parameters()} or
                 {p.data_ptr() for p in actor.parameters()} & {p.data_ptr() for p in frozen.parameters()}):
             raise ValueError('Frozen prefix cannot share Actor parameters')
         frozen.requires_grad_(False).eval()
-        kwargs["deterministic_steps"]=(19,)
+        kwargs["deterministic_steps"]=(self.final_step,)
         super().__init__(actor,**kwargs)
         self.frozen_policy=DenseDiffusionPolicy(frozen,**kwargs)
         self.frozen_prefix_steps=frozen_prefix_steps
@@ -34,7 +36,7 @@ class FrozenPrefixPolicy(DenseDiffusionPolicy):
         from .evaluation import _model_fingerprint
         self.kernel_config.update(frozen_prefix=dict(schema=f'genmo.stage2.frozen{frozen_prefix_steps}_train{len(self.trainable_steps)}_deterministic1.v1',
             steps=frozen_prefix_steps,model_fingerprint=_model_fingerprint(frozen),
-            initialization='bound_Stage1_before_trainable_Actor_restore',gaussian_kl_steps=list(self.trainable_steps),deterministic_final_step=19))
+            initialization='bound_Stage1_before_trainable_Actor_restore',gaussian_kl_steps=list(self.trainable_steps),deterministic_final_step=self.final_step))
         import hashlib
         digest=hashlib.sha256()
         for name,value in list(frozen.named_parameters())+list(frozen.named_buffers())+list(self._frozen_coefficients.items()):
@@ -81,7 +83,7 @@ class FrozenPrefixPolicy(DenseDiffusionPolicy):
             raise RuntimeError('Frozen prior parameters/buffers/numerical kernel or condition encoder changed')
         return dict(schema='genmo.stage2.frozen_identity_check.v1',checked=True,
             content_sha256=self.kernel_config['frozen_prefix']['content_sha256'],
-            stochastic_frozen_steps=list(range(self.frozen_prefix_steps)),deterministic_frozen_steps=[19],
+            stochastic_frozen_steps=list(range(self.frozen_prefix_steps)),deterministic_frozen_steps=[self.final_step],
             verification='immutable_tensor_versions_storage_runtime_settings_not_gaussian_replay')
 
     def _parameter_signature(self):
@@ -124,7 +126,7 @@ class FrozenPrefixPolicy(DenseDiffusionPolicy):
         if (prepared.get('owner')!=id(self) or prepared.get('parameters')!=self._parameter_signature()
                 or prepared.get('grad_enabled')!=torch.is_grad_enabled()):
             raise ValueError('Frozen-prefix cache differs from Actor version or gradient mode')
-        if isinstance(step_index,int) and step_index==19:
+        if isinstance(step_index,int) and step_index==self.final_step:
             if torch.is_grad_enabled():raise ValueError('Final Stage1 mapping must be frozen and no-grad')
             result=self._frozen_transition(prepared,x_k,step_index,diagnostics)
             result['std']=None
@@ -135,7 +137,7 @@ class FrozenPrefixPolicy(DenseDiffusionPolicy):
                 return self._frozen_transition(prepared,x_k,step_index,diagnostics)
             return super()._transition_prepared(prepared,x_k,step_index,diagnostics=diagnostics)
         steps=self._step_indices(step_index,x_k)
-        if bool((steps==19).any()):raise ValueError('Deterministic step has no Gaussian probability or KL')
+        if bool((steps==self.final_step).any()):raise ValueError('Deterministic step has no Gaussian probability or KL')
         early=torch.nonzero(steps<self.frozen_prefix_steps,as_tuple=False).flatten()
         late=torch.nonzero(steps>=self.frozen_prefix_steps,as_tuple=False).flatten()
         if not len(early):return super()._transition_prepared(prepared,x_k,steps,diagnostics=diagnostics)

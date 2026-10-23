@@ -212,7 +212,13 @@ class Stage1Actor(nn.Module):
         # 先隔离任意有限未知占位，normalize 后再遮罩非零 mean 导致的未知数值。
         known_x = self.endecoder.normalize(torch.where(known_mask, physical, 0.0))
         known_x = torch.where(known_mask, known_x, 0.0)
-        music_valid = selected["music_valid"] & future_valid
+        # 短动作仅扩展音乐上下文，不扩展扩散随机变量。尾部token始终没有运动输入；
+        # 时间仍按原30Hz对齐，绝不把两秒音乐压缩/重采样成一秒。
+        context_valid=future_valid
+        extra=selected['music_valid'].shape[1]-future_valid.shape[1]
+        if extra:
+            context_valid=torch.cat((future_valid,selected['music_valid'][:,-extra:]),1)
+        music_valid = selected["music_valid"] & context_valid
         music_embed = torch.where(
             music_valid[..., None], selected["music_features"].to(dtype=dtype), 0.0
         )
@@ -231,6 +237,7 @@ class Stage1Actor(nn.Module):
             "history_valid": history_valid,
             "history_relative_times": torch.where(history_valid, relative, 0.0).to(dtype),
             "future_valid": future_valid,
+            "context_valid": context_valid,
             "future_relative_times": (
                 selected["future_times"] - selected["decision_time"][:, None]
             ).to(dtype),
@@ -241,7 +248,10 @@ class Stage1Actor(nn.Module):
             adapted["history"], adapted["history_valid"], adapted["history_relative_times"]
         )
         prefix = self.prefix_encoder(adapted["known_x"], adapted["known_mask"])
-        return torch.where(adapted["future_valid"][..., None], history[:, None] + prefix, 0.0)
+        context_valid=adapted.get('context_valid',adapted['future_valid'])
+        if prefix.shape[1]<context_valid.shape[1]:
+            prefix=torch.nn.functional.pad(prefix,(0,0,0,context_valid.shape[1]-prefix.shape[1]))
+        return torch.where(context_valid[..., None], history[:, None] + prefix, 0.0)
 
     def _music_condition(self, adapted, drop_music=None):
         valid = adapted["music_valid"]
@@ -254,7 +264,7 @@ class Stage1Actor(nn.Module):
             music = torch.where(valid[..., None], music, 0.0)
         if self.cond_exists_embedder is not None:
             music = self.cond_exists_embedder(torch.cat((music, valid[..., None].to(music)), -1))
-        return torch.where(adapted["future_valid"][..., None], music, 0.0)
+        return torch.where(adapted.get('context_valid',adapted['future_valid'])[..., None], music, 0.0)
 
     def encode_conditions(self, adapted, drop_music=None):
         return self._music_condition(adapted, drop_music) + self._residual(adapted)
@@ -268,7 +278,11 @@ class Stage1Actor(nn.Module):
         xt = self._constrain(xt, adapted)
         # 全 padding 条件也允许推理：开放一个零 sentinel key，随后把该样本全部输出屏蔽。
         # 原 Transformer 不接受全 mask softmax，长度 clamp 不会影响任何有效样本。
-        length = adapted["future_valid"].sum(dim=1).clamp_min(1)
+        frames=xt.shape[1]
+        context_valid=adapted.get('context_valid',adapted['future_valid'])
+        length = context_valid.sum(dim=1).clamp_min(1)
+        if f_cond.shape[1]>frames:
+            xt=torch.nn.functional.pad(xt,(0,0,0,f_cond.shape[1]-frames))
         output = self.denoiser(
             xt,
             timesteps,
@@ -276,9 +290,9 @@ class Stage1Actor(nn.Module):
             inputs={},
         )
         return {
-            "pred_x_start": self._constrain(output["pred_x_start"], adapted),
+            "pred_x_start": self._constrain(output["pred_x_start"][:,:frames], adapted),
             "static_conf_logits": torch.where(
-                adapted["future_valid"][..., None], output["static_conf_logits"], 0.0
+                adapted["future_valid"][..., None], output["static_conf_logits"][:,:frames], 0.0
             ),
         }
 

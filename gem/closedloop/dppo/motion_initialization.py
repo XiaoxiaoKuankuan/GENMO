@@ -26,7 +26,7 @@ def make_motion_initialization(qpos, source, *, start_frame, plan_frames, phase=
             or np.max(np.abs(np.linalg.norm(qpos[:, 3:7], axis=1) - 1)) > 1e-3):
         raise ValueError('Motion initialization requires verified finite qpos28 with unit wxyz quaternions')
     if (type(start_frame) is not int or not 0 <= start_frame <= len(qpos) - 2
-            or type(plan_frames) is not int or plan_frames not in (60, 120)):
+            or type(plan_frames) is not int or plan_frames not in (15, 30, 60, 120)):
         raise ValueError('Invalid motion initialization source start or reference horizon')
     allowed_split=(source.get('split') in ('train','val') if phase=='critic_mc' else
         phase=='train' and source.get('split')=='train')

@@ -1,7 +1,7 @@
 """BUMI closed-loop Stage 1 的条件与监督批次契约。
 
 本模块只固定第一版上层 GENMO 所消费的数据结构、物理语义和可机械检查的因果边界：
-音乐与未来 qpos30 共用 30 Hz、实际60/120点时间轴，机器人真实状态使用 50 Hz、48 维历史，
+音乐与未来 qpos30 共用30Hz；Stage1为60/120帧，Stage2短动作15/30帧保留60帧音乐，机器人真实状态使用 50 Hz、48 维历史，
 上一轮已发布且短期内不可改写的参考使用现有 physical qpos30 与逐坐标 known mask。
 
 本模块不修改 qpos30/contact2 表示，也不实现 GMT 的 69/690/1092 维输入、执行侧 30→50 Hz
@@ -33,14 +33,14 @@ MUSIC_FPS = EDGE_TARGET_FPS
 MUSIC_FEATURE_DIM = EDGE_FEATURE_DIM
 MOTION_FPS = 30
 MOTION_WINDOW_FRAMES = int(BUMI_ONNX_INPUTS["music"][1])
-SUPPORTED_MOTION_WINDOW_FRAMES = (60, 120)
+SUPPORTED_MOTION_WINDOW_FRAMES = (15, 30, 60, 120)
 
 
 def motion_frames_of(batch):
-    """实际时间轴只能为60/120帧，不补到预训练最大长度；同批所有条件共用该轴。"""
+    """读取真实动作轴；短动作允许独立的60帧音乐上下文，不压缩音乐时间。"""
     future=batch['future_valid']
     if not torch.is_tensor(future) or future.ndim!=2 or future.shape[1] not in SUPPORTED_MOTION_WINDOW_FRAMES:
-        raise ValueError('future_valid must contain an actual 60 or 120 frame horizon')
+        raise ValueError('future_valid must contain 15, 30, 60 or 120 actual motion frames')
     return int(future.shape[1])
 QPOS30_DIM = BUMI_FEATURE_DIM
 CONTACT_DIM = int(BUMI_ONNX_OUTPUTS["pred_foot_contact_logits"][2])
@@ -306,9 +306,12 @@ def validate_stage1_condition_batch(
     batch_size = int(decision_time.shape[0])
     motion_frames=motion_frames_of(batch)
 
+    music_frames=values['music_features'].shape[1]
+    if music_frames != motion_frames and not (motion_frames in (15,30) and music_frames==60):
+        raise ValueError('Short motion requires the explicit original 60-frame music context')
     expected_shapes = {
-        "music_features": (batch_size, motion_frames, MUSIC_FEATURE_DIM),
-        "music_valid": (batch_size, motion_frames),
+        "music_features": (batch_size, music_frames, MUSIC_FEATURE_DIM),
+        "music_valid": (batch_size, music_frames),
         "proprio_history": (batch_size, history_steps, PROPRIO_DIM),
         "proprio_history_valid": (batch_size, history_steps),
         "proprio_history_times": (batch_size, history_steps),

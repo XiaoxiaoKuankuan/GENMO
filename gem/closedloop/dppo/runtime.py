@@ -117,7 +117,7 @@ class InProcessTrainingRuntime:
         config=copy.deepcopy(c.config)
         config['stage9']['seed']=(c.config['stage10']['seed']+1000003*c.distributed.rank+100003*slot)%2**32
         backend=VectorLaneBackend(self.collector.lane_client(slot),None)
-        builder=OnlineConditionBuilder(BumiMotionFeatureCodec(BumiKinematics(config['paths']['kinematics'])),motion_frames=config['stage10']['generation_horizon']['frames'])
+        builder=OnlineConditionBuilder(BumiMotionFeatureCodec(BumiKinematics(config['paths']['kinematics'])),motion_frames=config['stage10']['generation_horizon']['frames'],music_frames=config['stage10']['generation_horizon'].get('music_frames'))
         env=VectorUpperEnvironment(config,backend,builder,proxy,None,c.rank_dir/'ephemeral'/f'env{slot:03d}')
         env.disk_guard=c.guard
         resource=SimpleNamespace(env=env,journal=None,sampler=FullMusicSampler(c.catalog,split='train',

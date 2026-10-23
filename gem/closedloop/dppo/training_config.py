@@ -101,8 +101,12 @@ def configuration(path,*,genmo_repo=None,gmt_repo=None):
     if s['ppo_rollout']['collection_contract']!='shared_world_sim_time.v1':raise ValueError('Current collection uses shared world simulation time')
     if 'decisions_per_environment' in scale:raise ValueError('Per-environment decision quotas are no longer supported')
     horizon=s['generation_horizon']
-    if type(horizon['frames'])is not int or horizon['frames'] not in (60,120) or horizon['fps']!=30:raise ValueError('Actual GENMO horizon must be 60/120 frames at 30Hz')
+    if type(horizon['frames'])is not int or horizon['frames'] not in (15,30,60,120) or horizon['fps']!=30:raise ValueError('Actual GENMO horizon must be 15/30/60/120 frames at 30Hz')
     t['generation_frames']=horizon['frames']
+    if horizon['frames'] in (15,30):
+        if horizon.get('music_frames')!=60 or horizon.get('context_contract')!='music_only_tail.v1':
+            raise ValueError('Short horizon needs explicit 2s music-only tail context')
+        t['music_context_frames']=60
     mc=s['critic'].get('complete_mc',{})
     if s['critic']['complete_mc'].get('start_distribution','beginning') not in ('beginning','match_training_reset.v1'):
         raise ValueError('Unknown complete-MC reset distribution')
@@ -129,19 +133,19 @@ def configuration(path,*,genmo_repo=None,gmt_repo=None):
         if type(v)is not int or v<1:raise ValueError(f'{k} must be positive integer')
     if world!=8 or s['distributed']['backend']!='nccl' or s['distributed']['collection']!='all_ranks':
         raise ValueError('当前 production requires eight synchronous GPU ranks')
-    from .denoising_contract import trainable_steps
-    active_steps=trainable_steps(t['frozen_prefix_steps']);step_count=len(active_steps)
-    if (t['denoising_steps']!=20 or t['ppo_step_strategy']!=f'intermediate{step_count}' or
+    from .denoising_contract import trainable_steps, calibration_scope
+    active_steps=trainable_steps(t['frozen_prefix_steps'],t['denoising_steps']);step_count=len(active_steps)
+    if (t['denoising_steps']!=c['model']['ddim_steps'] or t['ppo_step_strategy']!=f'intermediate{step_count}' or
             t['ppo_steps_per_chain']!=step_count or t['ppo_epochs'] not in (1,2,3,5)):
-        raise ValueError('Explicit 15+4+1 or 9+10+1 configuration must match all trainable steps')
-    if len(t['std_schedule'])!=20 or t['std_schedule'][-1]!=0. or any(
+        raise ValueError('Explicit 15+4+1, 9+10+1 or 4+5+1 schedule must match all trainable steps')
+    if len(t['std_schedule'])!=t['denoising_steps'] or t['std_schedule'][-1]!=0. or any(
             not math.isfinite(x) or x<=0 for x in t['std_schedule'][:-1]):
-        raise ValueError('Nineteen positive stochastic floors and an explicit zero deterministic final are required')
+        raise ValueError('Every stochastic step needs a positive floor; the deterministic final has zero floor')
     if s['critic']['type']!='asymmetric_tracking_temporal' or 'freeze_encoders' in s['critic']:
         raise ValueError('Independent trainable tracking history Critic required')
     if not 0<s['critic']['history_learning_rate']<=s['critic']['learning_rate']:
         raise ValueError('Invalid separate history GRU learning rate')
-    if s['kl']['calibration']['scope']!=('four_trainable_steps_only' if step_count==4 else 'ten_trainable_steps_only'):
+    if s['kl']['calibration']['scope']!=calibration_scope(step_count):
         raise ValueError('KL scope must identify the configured trainable Gaussian interval')
     if not 0<c['timing']['calibration_reservation_seconds']<=.5:
         raise ValueError('Calibration needs an explicit bounded reservation, not a measured delay')

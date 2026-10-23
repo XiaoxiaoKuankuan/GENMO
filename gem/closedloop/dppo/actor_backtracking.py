@@ -48,6 +48,7 @@ def check_candidate_kl(report, limits):
 def backtracked_step(actor, optimizer, controller, *, evaluate, limits, distributed, generators=None,
                      max_attempts=9, factor=.5, reserve_attempt=None, observe=None, minimum_lr=None,
                      select_best=False,search_attempts=3):
+    from .gaussian_probability import CandidateRatioRangeError
     validate_actor_optimizer(actor, optimizer)
     if type(max_attempts) is not int or not 1 <= max_attempts <= 10 or factor != .5:
         raise ValueError('Finite backtracking requires 1..10 attempts with factor 0.5')
@@ -89,12 +90,14 @@ def backtracked_step(actor, optimizer, controller, *, evaluate, limits, distribu
                 reserve_attempt()
             started = time.perf_counter()
             local_call(distributed,optimizer.step)
+            recoverable_range_error=False
             try:
                 with torch.no_grad():
                     kl = evaluate()
                     acceptance = check_candidate_kl(kl, limits)
             except FloatingPointError as error:
                 kl=None
+                recoverable_range_error=isinstance(error,CandidateRatioRangeError)
                 acceptance=dict(passed=False,failures={'numerical':str(error)})
             flags = distributed.all_gather_object(acceptance['passed'])
             if any(flag != flags[0] for flag in flags):
@@ -102,6 +105,7 @@ def backtracked_step(actor, optimizer, controller, *, evaluate, limits, distribu
             diagnostics = observe() if observe is not None and kl is not None else None
             trials.append(dict(attempt=index+1, learning_rate=lr, learning_rates=actor_learning_rates(optimizer), factor=factor**index,
                 kl=kl, acceptance=acceptance, diagnostics=diagnostics,
+                recoverable_ratio_range_error=recoverable_range_error,
                 wall_seconds=max(distributed.all_gather_object(time.perf_counter()-started))))
             if acceptance['passed']:
                 # 候选审查和诊断无权消耗学习RNG；下一轮从一次梯度计算后的随机状态继续。
@@ -131,10 +135,10 @@ def backtracked_step(actor, optimizer, controller, *, evaluate, limits, distribu
                 same_initial_adam_per_attempt=True,fixed_gradient_reused=True,
                 selection='best_true_clipped_objective_among_KL_qualified_trials')
         restore()
-        finite_rejections=bool(trials) and all(t['kl'] is not None and
+        finite_rejections=bool(trials) and all(t['recoverable_ratio_range_error'] or (t['kl'] is not None and
             set(t['acceptance']['failures']) <= {'chain_joint_mean','chain_joint_p95',
                 'chain_joint_p99','chain_joint_max','active_clip_fraction','objective_gain'} and
-            all(math.isfinite(f['value']) for f in t['acceptance']['failures'].values())
+            all(math.isfinite(f['value']) for f in t['acceptance']['failures'].values()))
             for t in trials)
         return dict(accepted=False, initial_lr=initial_lr, accepted_lr=None, backtracks=max(0,len(trials)-1),
             attempts=trials, attempt_count=len(trials), same_initial_adam_per_attempt=True,

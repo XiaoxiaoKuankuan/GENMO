@@ -78,7 +78,14 @@ class PretrainedConditionCritic(nn.Module):
         validate_tracking_context(context)
         device=self.qpos_mean.device
         c={k:v.to(device) for k,v in context.items()}
-        future=c['future_valid'];music_valid=c['music_valid']&future
+        future=c['future_valid'];extra=c['music_valid'].shape[1]-future.shape[1]
+        if extra:
+            # Critic保留完整音乐轴；新增尾部没有伪造运动或已知前缀。
+            future=torch.cat((future,c['music_valid'][:,-extra:]),1)
+            c['known_qpos30']=torch.nn.functional.pad(c['known_qpos30'],(0,0,0,extra))
+            c['known_qpos30_mask']=torch.nn.functional.pad(c['known_qpos30_mask'],(0,0,0,extra))
+            c['future_times']=c['future_times'][:,:1]+torch.arange(future.shape[1],device=device,dtype=torch.float64)[None]/30.
+        music_valid=c['music_valid']&future
         mask=c['known_qpos30_mask']&future[...,None]
         physical=torch.where(mask,c['known_qpos30'].float(),0.)
         known=torch.where(mask,(physical-self.qpos_mean)/self.qpos_std,0.)
