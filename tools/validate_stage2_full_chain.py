@@ -11,7 +11,10 @@
 输出必须是新的独立目录。原rollout、模型及正式日志只读；复用同一个脚本研究不同
 LR/Epoch，不复制实验脚本。生产仍通过真实闭环训练和完整音乐配对评估判断质量。
 
-三个诊断开关默认关闭：audit-full-gradient-direction复用更新器的整批真实PPO
+四个诊断开关默认关闭：audit-condition-chunk-boundary在每rank至少1025条真实
+有效链上，一次性比较无界条件图与默认1024+1块，保持微批128与全局SUM，单独
+记录完整梯度差、loss、重算误差、耗时和显存；样本不足明确拒绝，不以16链代替。
+audit-full-gradient-direction复用更新器的整批真实PPO
 反向，比较小批次梯度与实际Adam方向，增加反向成本但不改变候选接受规则；
 save-probability-records把更新前、每次接受后及最终重新测量的[N,K,8]统计和固定
 优势保存到独立子目录，不保存扩散链或改变概率。前四列是每链每步的联合KL、
@@ -225,24 +228,124 @@ def gradient_validation(policy,rows,cache,distributed):
     distributed.sum_gradients(actor)
     reference={n:p.grad.detach().clone() for n,p in actor.named_parameters() if p.grad is not None}
     variants=[]
-    for micro in (1,3,8):
+    # 同一独立Normal参考额外核验条件图分块；每rank两条真实链可实际触发1+1尾块。
+    # None保留原无界执行参考，1024对应正式默认；此小样本不替代全批量显存测量。
+    for micro,condition_chunk in ((1,None),(3,1024),(8,1024),(128,None),(128,1)):
         actor.zero_grad(set_to_none=True)
         with policy_phase(policy):
             records=evaluate_chain_records(policy,selected,cache,microbatch=micro)
-            backward_chain_surrogate(policy,selected,cache,records,clip=.1,
-                global_chain_count=denominator,microbatch=micro)
+            streamed=backward_chain_surrogate(policy,selected,cache,records,clip=.1,
+                global_chain_count=denominator,microbatch=micro,
+                condition_chunk_chains=condition_chunk)
         distributed.sum_gradients(actor)
         delta=sum((p.grad.double()-reference[n].double()).square().sum()
             for n,p in actor.named_parameters() if n in reference)
         scale=sum(g.double().square().sum() for g in reference.values())
         relative=float((delta/scale).sqrt())
         maximum=max(float((p.grad-reference[n]).abs().max()) for n,p in actor.named_parameters() if n in reference)
-        variants.append(dict(microbatch=micro,relative_gradient_l2=relative,maximum_coordinate_error=maximum))
+        variants.append(dict(microbatch=micro,condition_chunk_chains=condition_chunk,
+            relative_gradient_l2=relative,maximum_coordinate_error=maximum,
+            recompute_max_error=float(streamed['recompute_max_error'])))
         if relative>2e-5:raise AssertionError('Real GPU streamed gradient mismatch: '+repr(variants[-1]))
     actor.zero_grad(set_to_none=True)
     return dict(passed=True,global_chains=denominator,variants=variants,
         reference=f'independent_FP64_Normal_full_{len(policy.trainable_steps)}_step_Autograd_global_SUM',
         scope='actual_stage1_network_and_real_behavior_rows_not_physics_quality')
+
+
+def condition_chunk_boundary_validation(policy,rows,cache,manifest,distributed):
+    """每rank真实1025链比较默认块边界；不更新参数/RNG，异常也清空诊断梯度。
+
+    两次反向共用同一份概率统计、完整链优势和全局分母，均在结束后执行一次SUM。
+    无界参考梯度移到CPU，避免额外GPU参考副本污染第二次峰值；每次峰值仅描述
+    本工具的反向与SUM，包含已有模型/cache常驻，不含PhysX或候选实际Adam。
+    参数/buffer指纹及Python/NumPy/Torch/CUDA RNG前后核对，失败不放宽2e-5门槛。
+    """
+    from gem.closedloop.dppo.evaluation import _model_fingerprint
+    from gem.closedloop.dppo.rollback_audit import exact_state_digest
+    actor=policy.actor
+    actor.zero_grad(set_to_none=True)
+    selected=[i for i,m in enumerate(manifest) if m['valid'] and m['has_free']]
+    owned=_owned(selected,manifest,distributed)
+    available=distributed.all_gather_object(len(owned))
+    if any(count<1025 for count in available):
+        raise ValueError('Condition boundary audit requires at least 1025 eligible chains per rank: '+repr(available))
+    local=[rows[i] for _,i in owned[:1025]]
+    counts=distributed.all_gather_object(len(local));denominator=sum(counts)
+    device=torch.device(distributed.device)
+    started=time.perf_counter()
+    rng=local_call(distributed,capture_local_rng)
+    before=local_call(distributed,lambda:dict(actor=_model_fingerprint(actor),rng=exact_state_digest(rng)))
+    reference=None;reference_loss=None;variants=[]
+    try:
+        def collect():
+            with policy_phase(policy):return evaluate_chain_records(policy,local,cache,microbatch=128)
+        records=local_call(distributed,collect)
+        for condition_chunk in (None,1024):
+            actor.zero_grad(set_to_none=True)
+            if device.type=='cuda':
+                torch.cuda.synchronize(device);torch.cuda.reset_peak_memory_stats(device)
+            phase_start=time.perf_counter()
+            def backward():
+                with policy_phase(policy):
+                    return backward_chain_surrogate(policy,local,cache,records,clip=.1,
+                        global_chain_count=denominator,microbatch=128,condition_chunk_chains=condition_chunk)
+            streamed=local_call(distributed,backward)
+            distributed.sum_gradients(actor)
+            loss=float(distributed.sum_tensor(streamed['loss']))
+            if device.type=='cuda':torch.cuda.synchronize(device)
+            measurements=distributed.all_gather_object(dict(wall_seconds=time.perf_counter()-phase_start,
+                peak_allocated_bytes=torch.cuda.max_memory_allocated(device) if device.type=='cuda' else None,
+                peak_reserved_bytes=torch.cuda.max_memory_reserved(device) if device.type=='cuda' else None,
+                recompute_max_error=float(streamed['recompute_max_error'])))
+            if reference is None:
+                reference=local_call(distributed,lambda:{name:p.grad.detach().cpu().clone()
+                    for name,p in actor.named_parameters() if p.grad is not None})
+                reference_loss=loss
+                comparison=dict(relative_gradient_l2=0.,maximum_coordinate_error=0.)
+            else:
+                def compare():
+                    current={name:p.grad for name,p in actor.named_parameters() if p.grad is not None}
+                    if set(current)!=set(reference):raise AssertionError('Condition boundary gradient presence differs')
+                    numbers=torch.zeros(3,dtype=torch.float64,device=device)
+                    for name,gradient in current.items():
+                        expected=reference[name].to(device=device,dtype=torch.float64)
+                        difference=gradient.double()-expected
+                        numbers[0]+=difference.square().sum();numbers[1]+=expected.square().sum()
+                        numbers[2]=torch.maximum(numbers[2],difference.abs().max())
+                    delta,scale,maximum=numbers.cpu().tolist()
+                    relative=math.sqrt(delta/scale) if scale>0 else 0. if delta==0 else float('inf')
+                    return dict(relative_gradient_l2=relative,maximum_coordinate_error=maximum)
+                comparisons=distributed.all_gather_object(local_call(distributed,compare))
+                comparison={key:max(value[key] for value in comparisons) for key in comparisons[0]}
+            variant=dict(condition_chunk_chains=condition_chunk,chains_per_condition_block=
+                [1025] if condition_chunk is None else [1024,1],microbatch=128,loss=loss,
+                absolute_loss_difference=abs(loss-reference_loss),**comparison,
+                recompute_max_error=max(value['recompute_max_error'] for value in measurements),
+                wall_seconds=max(value['wall_seconds'] for value in measurements),
+                peak_allocated_bytes=max(value['peak_allocated_bytes'] for value in measurements) if device.type=='cuda' else None,
+                peak_reserved_bytes=max(value['peak_reserved_bytes'] for value in measurements) if device.type=='cuda' else None,
+                measurements_by_rank=measurements)
+            variants.append(variant)
+            if (not math.isfinite(variant['relative_gradient_l2']) or variant['relative_gradient_l2']>2e-5
+                    or not math.isclose(loss,reference_loss,rel_tol=1e-10,abs_tol=1e-10)
+                    or variant['recompute_max_error']>1e-4):
+                raise AssertionError('Real GPU 1024-chain boundary mismatch: '+repr(variant))
+        after=local_call(distributed,lambda:dict(actor=_model_fingerprint(actor),
+            rng=exact_state_digest(capture_local_rng())))
+        unchanged=distributed.all_gather_object(dict(before=before,after=after,identical=before==after))
+        if not all(value['identical'] for value in unchanged):
+            raise AssertionError('Condition boundary audit changed Actor parameters/buffers or RNG')
+        return dict(enabled=True,passed=True,available_chains_by_rank=available,selected_chains_by_rank=counts,
+            global_chains=denominator,trainable_steps=list(policy.trainable_steps),variants=variants,
+            relative_gradient_l2_tolerance=2e-5,state_unchanged_by_rank=unchanged,
+            wall_seconds=max(distributed.all_gather_object(time.perf_counter()-started)),
+            reference='same_records_unbounded_condition_graph_complete_gradient_global_SUM',
+            scope='1024_plus_1_real_chain_boundary_not_independent_Normal_or_physical_quality',
+            memory_scope='backward_and_SUM_PyTorch_peak_includes_existing_model_cache_excludes_PhysX_and_Adam')
+    finally:
+        actor.zero_grad(set_to_none=True)
+        restore_local_rng(rng)
 
 
 def argument_parser():
@@ -255,6 +358,8 @@ def argument_parser():
     parser.add_argument('--epochs',type=int,default=1)
     parser.add_argument('--max-optimizer-steps',type=int,help='有限固定数据比较可限制优化步数，保留实际完整链Mini-batch')
     parser.add_argument('--adaptive-kl',action='store_true',help='实际联合KL回溯；各LR为候选上限而非承诺接受步长')
+    parser.add_argument('--audit-condition-chunk-boundary',action='store_true',
+        help='一次性用每rank1025条有效真实链验证默认1024+1条件块；样本不足明确失败')
     parser.add_argument('--audit-full-gradient-direction',action='store_true',
         help='每接受步额外计算整批PPO真实梯度和Adam方向，不改变候选接受规则')
     parser.add_argument('--save-probability-records',action='store_true',
@@ -309,7 +414,10 @@ def main():
         probability['actual_std_first_eligible_chain_by_rank']=distributed.all_gather_object(local_std)
         probability['actual_std_scope']='normalized_Gaussian_sigma_not_floor_not_trajectory_diversity'
         gradients=gradient_validation(policy,rows,cache,distributed)
-        root_call(distributed,lambda:atomic_json(args.output_dir/'probability_and_gradient.json',dict(probability=probability,gradients=gradients)))
+        condition_boundary=(condition_chunk_boundary_validation(policy,rows,cache,manifest,distributed)
+            if args.audit_condition_chunk_boundary else None)
+        root_call(distributed,lambda:atomic_json(args.output_dir/'probability_and_gradient.json',dict(
+            probability=probability,gradients=gradients,condition_chunk_boundary=condition_boundary)))
         optimizer=torch.optim.AdamW(trainable_actor_parameters(actor),lr=args.learning_rates[0],weight_decay=0.)
         optimizer.load_state_dict(learning['actor_optimizer'])
         controller=BCGradientController(**config['stage10']['bc_gradient'])
@@ -410,7 +518,8 @@ def main():
             scope='fixed_real_data_math_and_KL_calibration_not_physical_acceptance',
             source_commit=subprocess.check_output(['git','rev-parse','HEAD'],cwd=ROOT,text=True).strip(),
             case=str(args.case),case_sha256=file_sha256(args.case/'case.json'),
-            probability=probability,gradient_validation=gradients,trials=trials,final_restore=restored)))
+            probability=probability,gradient_validation=gradients,condition_chunk_boundary=condition_boundary,
+            trials=trials,final_restore=restored)))
         restore_initial=None
     finally:
         try:
