@@ -34,12 +34,13 @@ def test_source_interpolation_and_lookahead_is_not_current_consumption():
     with pytest.raises(ValueError,match='before successful commit'):consumption_report([record])
 
 
-def test_consumed_frame_KL_association_does_not_invent_missing_history(tmp_path,monkeypatch):
+@pytest.mark.parametrize('step_count',[4,10])
+def test_consumed_frame_KL_association_does_not_invent_missing_history(tmp_path,monkeypatch,step_count):
     import tools.analyze_stage2_reference_consumption as tool
     (tmp_path/'rank00').mkdir()
     identity=dict(backend_session_id='backend',env_id=0,episode_id='episode',plan_id='p')
     metadata=dict(identity=identity,source='A',music_frame=0,prefix_frames=0,
-        kl_by_frame=[1.]*60,log_ratio_by_frame=[-.1]*60)
+        kl_by_frame=[1.]*60,kl_by_step=[60/step_count]*step_count,log_ratio_by_frame=[-.1]*60)
     row=SimpleNamespace(identity=identity,metadata={},free_mask=torch.ones(60,30,dtype=torch.bool))
     monkeypatch.setattr(tool,'load_rollout',lambda path:{'transitions':[row]})
     result=tool.associate(tmp_path,dict(metadata=[metadata]))
@@ -55,6 +56,7 @@ def test_consumed_frame_KL_association_does_not_invent_missing_history(tmp_path,
     assert result['by_consumption']['current_consumed_source_support']['joint_kl']==0
     assert result['by_consumption']['window_observed_not_current']['joint_kl']==7
     assert sum(v['joint_kl'] for v in result['by_consumption'].values())==60
+    assert sum(v['free_coordinates'] for v in result['by_consumption'].values())==60*30*step_count
 
 
 def test_interpolation_reaches_previous_plan_through_exact_committed_prefix():

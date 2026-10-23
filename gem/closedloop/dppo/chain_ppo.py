@@ -25,7 +25,7 @@ from .tensor_cache import ConditionGraphCache
 
 @torch.no_grad()
 def evaluate_chain_records(policy, rows, cache, *, microbatch, physical_changes=False):
-    """返回[N,4,8]：joint KL、coordinate KL、log-ratio、count及四种均值变化。"""
+    """返回[N,K,8]，K为实际可训练步骤数：joint KL、coordinate KL、log-ratio、count及四种均值变化。"""
     limit=getattr(policy,'condition_cache_max_chains',None)
     if limit is not None:
         if type(limit)is not int or limit<1:raise ValueError('Condition cache chain bound must be positive')
@@ -80,7 +80,7 @@ def backward_chain_surrogate(policy, rows, cache, records, *, clip, global_chain
                 recompute_max_error=torch.stack([p['recompute_max_error'] for p in parts]).max())
     device=next(policy.actor.parameters()).device
     # 完整rollout汇总的小型FP64统计可位于CPU；反向索引和优势在Actor设备。
-    # 仅搬运[N,4,8]统计，不改变行为链或概率精度，原GPU路径为零拷贝。
+    # 仅搬运[N,K,8]统计，不改变行为链或概率精度，原GPU路径为零拷贝。
     records=records.to(device=device)
     if not rows:
         return dict(loss=records.new_zeros(()),recompute_max_error=records.new_zeros(()))

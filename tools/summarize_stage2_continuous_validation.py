@@ -112,7 +112,7 @@ def training_summary(run):
                 full_rollout_objective_gain=values[-1]-values[0] if values else None,
                 each_accepted_objective_nondecreasing=all(b>=a-1e-10 for a,b in zip(values,values[1:])),
                 nominal_lr=actor['nominal_learning_rate'],accepted_lrs=[s['learning_rate'] for s in actor['steps']],
-                chain_joint_kl=row['trainable4_kl']['chain_joint_kl'],
+                chain_joint_kl=(row.get('trainable_steps_kl') or row['trainable4_kl'])['chain_joint_kl'],
                 actual_bc_samples=actor['actual_global_bc_samples'],efficiency=row['efficiency']))
     return sorted(records,key=lambda r:r['iteration'])
 

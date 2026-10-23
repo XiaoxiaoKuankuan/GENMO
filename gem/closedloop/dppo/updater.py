@@ -347,7 +347,7 @@ def actor_update(policy,optimizer,*args,trust_region=None,**kwargs):
 
 @torch.no_grad()
 def final_kl(policy,rows,cache,manifest,*,distributed,microbatch=256,clip=.01,objective_reduction='free_coordinate_mean'):
-    """所有有效链的真实联合KL独立保留；PPO目标与裁剪按四个内部转移计算。"""
+    """所有有效链的真实联合KL独立保留；PPO目标与裁剪按实际4或10个内部转移计算。"""
     from .chain_ppo import evaluate_chain_records,from_records
     from .gaussian_probability import stepwise_diagnostics,distribution
     if objective_reduction!='free_coordinate_mean':raise ValueError('Final PPO diagnostics require independent coordinate-mean steps')
@@ -355,7 +355,7 @@ def final_kl(policy,rows,cache,manifest,*,distributed,microbatch=256,clip=.01,ob
     count_steps=len(policy.trainable_steps);packed_width=8*count_steps
     local=[rows[i] for _,i in owned];device=next(policy.actor.parameters()).device
     start=time.perf_counter()
-    with _local_phase(distributed,'stage2_final_trainable4_kl'),policy_phase(policy):
+    with _local_phase(distributed,'stage2_final_trainable_steps_kl'),policy_phase(policy):
         records=evaluate_chain_records(policy,local,cache,microbatch=microbatch,physical_changes=True)
         adv=cache.get('advantages',local).double() if local else torch.zeros(0,device=device,dtype=torch.float64)
     packed=torch.cat((records.reshape(len(local),packed_width),adv[:,None]),1)

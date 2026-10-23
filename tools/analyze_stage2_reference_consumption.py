@@ -146,6 +146,8 @@ def associate(case,chain_payload,probes=(),*,execution_cases=()):
     temporal_totals={name:dict(joint_kl=0.,free_coordinates=0) for name in temporal_names}
     details=[]
     for meta in chain_payload['metadata']:
+        step_count=len(meta['kl_by_step'])
+        if step_count not in (4,10):raise ValueError('Attribution must identify four or ten trainable stochastic steps')
         key=token(meta['identity']);row=rows_by_id.get(key)
         if row is None:raise ValueError('Attribution chain identity is absent from the supplied real rollout')
         episode=consumed.get(key[:3]);plan=(episode or {}).get('plans',{}).get(key[3])
@@ -160,13 +162,13 @@ def associate(case,chain_payload,probes=(),*,execution_cases=()):
             elif window[frame]>0:category='window_observed_not_current'
             else:category='not_observed_in_retained_controls'
             item=totals[category];item['joint_kl']+=kl
-            item['free_coordinates']+=int(row.free_mask[frame].sum())*len(meta['kl_by_step'])
+            item['free_coordinates']+=int(row.free_mask[frame].sum())*step_count
             item['frame_log_ratio_signed']+=log;item['frame_log_ratio_abs_sum']+=abs(log);counts[category]+=1
             temporal_category=category
             if category=='window_observed_not_current':
                 temporal_category='future_window_only_source_support' if time_support['future'][frame]>0 else 'past_window_only_source_support'
             temporal_totals[temporal_category]['joint_kl']+=kl
-            temporal_totals[temporal_category]['free_coordinates']+=int(row.free_mask[frame].sum())*len(meta['kl_by_step'])
+            temporal_totals[temporal_category]['free_coordinates']+=int(row.free_mask[frame].sum())*step_count
         details.append(dict(identity=meta['identity'],source=meta['source'],music_frame=meta['music_frame'],
             prefix_frames=meta['prefix_frames'],frame_categories=counts,
             current_frames=(plan or {}).get('observed_current_frames'),

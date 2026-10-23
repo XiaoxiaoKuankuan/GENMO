@@ -228,7 +228,7 @@ def test_execution_audit_traces_original_prefix_across_rollouts(tmp_path,monkeyp
     for _,row,_ in entries:row.free_mask=torch.ones(60,30,dtype=torch.bool)
     monkeypatch.setattr(tool,'load_rollout',lambda path:{'transitions':[entries[0 if path.parent.name=='first' else 1][1]]})
     meta=dict(identity=entries[0][1].identity,source='fixture',music_frame=0,prefix_frames=0,
-        kl_by_frame=[1.]*60,log_ratio_by_frame=[0.]*60)
+        kl_by_frame=[1.]*60,kl_by_step=[15.]*4,log_ratio_by_frame=[0.]*60)
     a=tool.associate(roots[0],{'metadata':[meta]})
     b=tool.associate(roots[0],{'metadata':[meta]},execution_cases=[roots[1]])
     assert 31 not in a['chains'][0]['current_generated_frames']

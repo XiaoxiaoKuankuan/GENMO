@@ -35,10 +35,11 @@ JOINTS=['l_leg_pitch_joint','r_leg_pitch_joint','waist_yaw_joint','l_leg_roll_jo
     'r_ankle_pitch_joint','l_elbow_pitch_joint','r_elbow_pitch_joint','l_ankle_roll_joint','r_ankle_roll_joint']
 
 
-def test_coordinate_full_unequal_variance_formula_and_partition_sums():
+@pytest.mark.parametrize('step_count',[4,10])
+def test_coordinate_full_unequal_variance_formula_and_partition_sums(step_count):
     g=torch.Generator().manual_seed(916)
-    old=torch.randn(12,7,30,generator=g,dtype=torch.float64)
-    sigma=torch.rand(12,1,1,generator=g,dtype=torch.float64)+.2
+    old=torch.randn(3*step_count,7,30,generator=g,dtype=torch.float64)
+    sigma=torch.rand(3*step_count,1,1,generator=g,dtype=torch.float64)+.2
     new=old+.03*torch.randn(old.shape,generator=g,dtype=torch.float64)
     new_sigma=sigma*1.13
     value=old+sigma*torch.randn(old.shape,generator=g,dtype=torch.float64)
@@ -47,7 +48,7 @@ def test_coordinate_full_unequal_variance_formula_and_partition_sums():
     a=torch.distributions.Normal(old,sigma);b=torch.distributions.Normal(new,new_sigma)
     torch.testing.assert_close(detail['kl'],torch.distributions.kl_divergence(a,b).masked_fill(~mask,0),rtol=1e-10,atol=1e-12)
     torch.testing.assert_close(detail['log_ratio'],(b.log_prob(value)-a.log_prob(value)).masked_fill(~mask,0),rtol=1e-10,atol=1e-12)
-    reshaped={k:v.reshape(3,4,7,30) for k,v in detail.items()}
+    reshaped={k:v.reshape(3,step_count,7,30) for k,v in detail.items()}
     metadata=[dict(prefix_frames=2,source='A',music_time_bin=str(i)) for i in range(3)]
     report=coordinate_report(reshaped,metadata,JOINTS)
     for partition in ('by_step','by_frame','by_feature','by_prefix','by_source','by_music_time_bin'):

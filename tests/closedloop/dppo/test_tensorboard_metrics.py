@@ -293,7 +293,7 @@ def test_joint_score_curves_are_not_mislabeled_as_clipped_ppo():
     assert values['Policy/clipped_objective_fraction'] == pytest.approx(.3)
     assert 'Loss/joint_score' not in values
     record['trainable4_kl']['per_denoising_step'].append(dict(step=19))
-    with pytest.raises(ValueError, match='four trainable'):
+    with pytest.raises(ValueError, match='four or ten trainable'):
         training_scalars(record)
 
 
@@ -305,3 +305,17 @@ def test_historical_chain_clip_is_not_mislabeled_as_stepwise_proxy_clip():
     record['actor']['objective']='stepwise_coordinate_mean_clipped_ppo'
     record['trainable4_kl']['proxy_clip_fraction']=.04
     assert training_scalars(record)['Policy/proxy_clip_fraction']==pytest.approx(.04)
+
+
+def test_ten_step_metrics_use_actual_trainable_steps_and_preserve_old_record_reader():
+    record=training_record()
+    kl=record.pop('trainable4_kl')
+    kl['per_denoising_step']=[dict(step=k,mean_coordinate_kl={'mean':.01}) for k in range(9,19)]
+    kl.update(chain_joint_kl={'mean':2.,'p95':3.},proxy_clip_fraction=.02)
+    record['trainable_steps_kl']=kl
+    values=training_scalars(record)
+    assert values['Policy/trainable_kl']==pytest.approx(.01)
+    assert values['Policy/chain_joint_kl']==2.
+    assert values['Policy/proxy_clip_fraction']==.02
+    kl['per_denoising_step'].append(dict(step=19))
+    with pytest.raises(ValueError,match='four or ten trainable'):training_scalars(record)

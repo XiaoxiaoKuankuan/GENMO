@@ -779,8 +779,9 @@ def run(cargs,config,distributed):
                     fields=('mean_coordinate_kl','maximum_step_mean_coordinate_kl','coordinate_kl','chain_joint_kl',
                         'per_denoising_step','covered_chains','covered_internal_transitions','gaussian_kl_steps')
                     if any(kl[key]!=independent[key] for key in fields):
-                        raise RuntimeError('Reused KL differs from independent complete four-step recalculation')
-                    kl['reuse_verification']=dict(passed=True,all_valid_chains_and_four_steps=True,
+                        raise RuntimeError('Reused KL differs from independent complete trainable-step recalculation')
+                    kl['reuse_verification']=dict(passed=True,all_valid_chains_and_trainable_steps=True,
+                        trainable_steps=list(c.policy.trainable_steps),
                         additional_wall_seconds=time.perf_counter()-started)
                     c.kl_reuse_verified=True
                 accepted=_final_actor_acceptance(actor,kl,c.stage['kl'])
@@ -792,7 +793,7 @@ def run(cargs,config,distributed):
                     rollbacks=distributed.all_gather_object(rollback)
                     root_call(distributed,lambda:atomic_json(c.session/(label+'_rejected.json'),dict(kl=kl,acceptance=accepted,actor=actor,
                         physical_and_resource_consumption_retained=True,training_state_restored=True,rollback_audits=rollbacks)))
-                    raise RuntimeError('Final trainable-four KL rejected; whole training update rolled back')
+                    raise RuntimeError('Final trainable-step KL rejected; whole training update rolled back')
             else:
                 actor_seconds=0.
             def assert_paused_physics():
@@ -829,7 +830,7 @@ def run(cargs,config,distributed):
             wall=max(distributed.all_gather_object(time.perf_counter()-round_start))
             profile_report=profiler.report();deactivate(profile_token);profile_token=None
             record=dict(label=label,state=copy.deepcopy(c.state),collection_by_rank=distributed.all_gather_object(collection),
-                probability=initial_probability,critic=critic,actor=actor,trainable4_kl=kl,tensor_cache=cache_report,
+                probability=initial_probability,critic=critic,actor=actor,trainable_steps_kl=kl,tensor_cache=cache_report,
                 actor_seconds=actor_seconds,critic_seconds=critic_seconds,wall_seconds=wall,
                 efficiency=dict(environment_seconds=collection_seconds,actor_total_seconds=actor_seconds,
                     actor_ppo_seconds=sum(v['ppo_seconds'] for v in (actor or {}).get('steps',[])),

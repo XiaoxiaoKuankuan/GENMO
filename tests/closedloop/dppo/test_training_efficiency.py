@@ -34,8 +34,11 @@ def objects():
 
 
 @pytest.mark.parametrize('mutation',['none','parameter','buffer','cache','kernel','manifest','closed'])
-def test_kl_reuse_binds_actual_model_data_and_complete_coverage(mutation):
+@pytest.mark.parametrize('step_count',[4,10])
+def test_kl_reuse_binds_actual_model_data_and_complete_coverage(mutation,step_count):
     policy,cache,manifest,report=objects()
+    policy.trainable_steps=tuple(range(19-step_count,19))
+    report.update(covered_internal_transitions=2*step_count,gaussian_kl_steps=list(policy.trainable_steps))
     token=seal_accepted_kl(policy,cache,manifest,report,clip=.003,reduction='free_coordinate_mean')
     with torch.no_grad():
         if mutation=='parameter':policy.actor.weight.add_(1.)
@@ -48,6 +51,13 @@ def test_kl_reuse_binds_actual_model_data_and_complete_coverage(mutation):
     result=reusable_accepted_kl({'complete_accepted_kl_available':True},policy,cache,manifest,Collective(),
         clip=.003,reduction='free_coordinate_mean')
     assert (result is not None)==(mutation=='none')
+
+
+def test_ten_step_kl_receipt_rejects_report_that_only_checked_four_steps():
+    policy,cache,manifest,report=objects()
+    policy.trainable_steps=tuple(range(9,19))
+    with pytest.raises(ValueError,match='complete rollout'):
+        seal_accepted_kl(policy,cache,manifest,report,clip=.01,reduction='free_coordinate_mean')
 
 
 def test_any_rank_stale_forces_global_recomputation():

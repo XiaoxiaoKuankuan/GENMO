@@ -204,10 +204,10 @@ def training_scalars(record):
         transaction = steps[-1].get('backtracking', {})
         if transaction:
             values['Policy/backtracks'] = transaction.get('backtracks')
-    kl = record.get('trainable4_kl') or {}
+    kl = record.get('trainable_steps_kl') or record.get('trainable4_kl') or {}
     active = kl.get('per_denoising_step', [])
-    if active and [step['step'] for step in active] != [15, 16, 17, 18]:
-        raise ValueError('Compact curves require exactly the four trainable Gaussian steps')
+    if active and [step['step'] for step in active] not in (list(range(15,19)),list(range(9,19))):
+        raise ValueError('Compact curves require exactly the four or ten trainable Gaussian steps')
     if active:
         values['Policy/trainable_kl'] = float(np.mean([s['mean_coordinate_kl']['mean'] for s in active]))
         if objective != 'joint_score_pg':
