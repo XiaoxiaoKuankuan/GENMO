@@ -314,7 +314,7 @@ def _actor_update(policy,optimizer,rows,targets,cache,manifest,controller,*,dist
 def actor_update(policy,optimizer,*args,trust_region=None,**kwargs):
     """每次新rollout独立试探LR；Adam动量不清空，临时回溯LR不传给下一批。
 
-    原四步联合目标与模块倍率保持不变。接受步骤的实际LR记录在steps中，优化器
+    完整链联合目标与模块倍率保持不变。接受步骤的实际LR记录在steps中，优化器
     离开本函数时恢复共同名义LR，checkpoint不会把本批剩余额度误作长期LR。
     正常结束剩余小批次仍须通过调用方完整rollout最终KL；异常继续由整轮事务恢复。
     """
@@ -339,7 +339,7 @@ def actor_update(policy,optimizer,*args,trust_region=None,**kwargs):
 
 @torch.no_grad()
 def final_kl(policy,rows,cache,manifest,*,distributed,microbatch=256,clip=.10,objective_reduction='joint_sum'):
-    """所有有效链的真实联合KL；四步各自诊断，ratio与clip均按完整链统计。"""
+    """所有有效链的真实联合KL；配置指定各步分别诊断，ratio与clip按完整链统计。"""
     from .chain_ppo import evaluate_chain_records,from_records
     from .gaussian_probability import chain_diagnostics,distribution
     if objective_reduction!='joint_sum':raise ValueError('Final PPO diagnostics require complete-chain joint ratio')

@@ -758,6 +758,7 @@ def run(cargs,config,distributed):
                     distributed=distributed,anchor=c.bc,generator=c.generators['actor'],
                     ppo_epochs=c.settings['ppo_epochs'],minibatch_chains=c.stage['scale']['actor_minibatch_chains'],
                     microbatch=c.settings['denoising_microbatch'],sampled_steps=c.settings['ppo_steps_per_chain'],
+                    step_strategy=c.settings['ppo_step_strategy'],
                     clip=c.settings['ppo_clip'],gamma_denoising=c.settings['gamma_denoising'],
                     soft_kl=c.settings['kl_soft_stop_chain_joint'],kl_reduction=c.stage['kl']['reduction'],
                     objective_reduction=c.settings['objective_logprob_reduction'],
