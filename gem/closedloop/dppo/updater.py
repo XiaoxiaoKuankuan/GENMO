@@ -1,13 +1,13 @@
-"""完整四步联合Clipped PPO与Stage1 BC、整轮联合KL和非对称Critic更新。
+"""配置指定四步或十步的完整联合Clipped PPO与Stage1 BC、整轮联合KL和非对称Critic更新。
 
-每条链15～18步自由坐标的FP64 log-ratio先求和，只执行一次符号相关PPO裁剪，
+每条链全部可训练随机步自由坐标的FP64 log-ratio先求和，只执行一次符号相关PPO裁剪，
 对应同一个上层GAE。两遍流式计算保持完整链梯度，条件图在每个Adam版本重建。
-全局实际链数是唯一分母；PPO/BC梯度SUM后统一裁剪，不额外平均四步或world size。
+全局实际链数是唯一分母；PPO/BC梯度SUM后统一裁剪，不额外平均去噪步或world size。
 
 每个minibatch记录真实参数、同噪声最终输出及联合概率变化，链KL或裁剪饱和可
 提前停止。新rollout从名义LR试探，剩余试探步长过小时保留此前
 接受更新并结束剩余小批次；丢弃步骤的BC游标、控制器与RNG同时恢复。最后仍将
-优化器LR恢复为名义值，Adam动量不清零。所有旧rollout链的四步KL仍须通过；Actor/Critic/Adam/BC/RNG回滚由
+优化器LR恢复为名义值，Adam动量不清零。所有旧rollout链的可训练步KL仍须通过；Actor/Critic/Adam/BC/RNG回滚由
 training统一管理。BC设置每步全局样本下限，监控实际样本量及成本。保持Critic
 结构、价值目标、物理时钟、原奖励和真实采样核，不把数值通过称为物理收益。
 """
@@ -46,8 +46,11 @@ def _actor_update(policy,optimizer,rows,targets,cache,manifest,controller,*,dist
     from .actor_step_diagnostics import StepDiagnostics,output_probe,compare_probes
     from .parallel_support import local_call
     from .parallel_support import capture_local_rng,restore_local_rng
-    if step_strategy!='intermediate4' or sampled_steps!=4 or tuple(policy.trainable_steps)!=(15,16,17,18):
-        raise ValueError('PPO must optimize exactly stochastic transitions 15..18')
+    from .denoising_contract import validate_trainable_steps
+    active_steps=validate_trainable_steps(policy.trainable_steps)
+    step_count=len(active_steps);record_width=step_count*8
+    if step_strategy!=f'intermediate{step_count}' or sampled_steps!=step_count:
+        raise ValueError('PPO strategy/count must match every trainable stochastic transition')
     if (policy.steps!=20 or ppo_epochs<1 or minibatch_chains<1 or microbatch<1 or
             gamma_denoising!=1. or kl_reduction!='chain_joint' or objective_reduction!='joint_sum'):
         raise ValueError('Full-chain PPO requires joint-sum, chain KL and one undiscounted upper advantage')
@@ -65,9 +68,9 @@ def _actor_update(policy,optimizer,rows,targets,cache,manifest,controller,*,dist
         with _local_phase(distributed,'full_chain_ratio_forward'),policy_phase(policy):
             records=evaluate_chain_records(policy,local,cache,microbatch=microbatch)
             adv=cache.get('advantages',local).double() if local else torch.zeros(0,device=device,dtype=torch.float64)
-        packed=torch.cat((records.reshape(len(local),32),adv[:,None]),1)
+        packed=torch.cat((records.reshape(len(local),record_width),adv[:,None]),1)
         full=distributed.gather_rows(packed,[position for position,_ in owned],count)
-        return records,full[:,:32].reshape(count,4,8),full[:,32]
+        return records,full[:,:record_width].reshape(count,step_count,8),full[:,record_width]
     objective_aware=bool((trust_region or {}).get('objective_aware',False))
     audit_full_rollout_objective=audit_full_rollout_objective or objective_aware or audit_full_gradient_direction
     full_current=full_adv=full_before=None
@@ -248,17 +251,17 @@ def _actor_update(policy,optimizer,rows,targets,cache,manifest,controller,*,dist
                 objective_history.append(dict(stage='accepted_Adam',optimizer_step=len(reports)+1,**full_after))
                 if full_rollout_observer is not None:full_rollout_observer('accepted_Adam',full_current,full_adv,source_names)
             report=dict(objective='full_chain_clipped_ppo',ppo_clip_applied=True,epoch=epoch,
-                optimizer_step=len(reports)+1,global_chain_count=len(indices),sampled_steps=4,
-                denoising_steps=list(policy.trainable_steps),internal_sample_visits=len(indices)*4,
-                full_objective_transitions=len(indices)*4,ppo_loss=float(distributed.sum_tensor(backward['loss'])),
+                optimizer_step=len(reports)+1,global_chain_count=len(indices),sampled_steps=step_count,
+                denoising_steps=list(policy.trainable_steps),internal_sample_visits=len(indices)*step_count,
+                full_objective_transitions=len(indices)*step_count,ppo_loss=float(distributed.sum_tensor(backward['loss'])),
                 streaming_recompute_max_error=max(distributed.all_gather_object(float(backward['recompute_max_error']))),
                 clip_fraction=pre['clip_fraction'],objective_clip_fraction=pre['active_clip_fraction'],
                 pre_step_chain=pre,post_step_chain=post,
                 full_rollout_before=step_full_before,full_rollout_after=full_after,full_rollout_groups=objective_groups,
                 pre_step_mean_joint_kl=pre['chain_joint_kl']['mean'],
                 pre_step_mean_coordinate_kl=float(statistics['mean_coordinate_kl'].mean()),
-                per_denoising_step=[dict(step=s+15,joint_kl=distribution(post_records[:,s,0]),
-                    mean_coordinate_kl=distribution(post_records[:,s,1])) for s in range(4)],
+                per_denoising_step=[dict(step=policy.trainable_steps[s],joint_kl=distribution(post_records[:,s,0]),
+                    mean_coordinate_kl=distribution(post_records[:,s,1])) for s in range(step_count)],
                 gradient_contributions=contributions,total_gradient_norm=total_norm,gradient_clip_factor=clip_factor,
                 parameter_update=parameter_report,full_gradient_direction=direction_report,
                 output_change=output_change,trust_region=transaction,
@@ -296,7 +299,7 @@ def _actor_update(policy,optimizer,rows,targets,cache,manifest,controller,*,dist
         accepted_optimizer_steps=None,acceptance_scope='pending_full_rollout_joint_KL',
         planned_optimizer_steps=planned_steps,skipped_optimizer_steps=planned_steps-len(reports),
         steps=reports,epoch_orders=orders,early_stop_reason=stop_reason,discarded_pending_minibatch=discarded,
-        gradient_snr=None,_ppo_gradient_sketch=sketch,epoch_order_rng_contract='fixed_four_steps_shuffled_complete_chains',
+        gradient_snr=None,_ppo_gradient_sketch=sketch,epoch_order_rng_contract=('fixed_four_steps_shuffled_complete_chains' if step_count==4 else 'fixed_ten_steps_shuffled_complete_chains'),
         full_rollout_objective_history=objective_history,bc_enabled=bc_enabled,
         eligible_chains=len(selected),applied_unique_chains=len(covered),applied_chain_fraction=len(covered)/len(selected),
         internal_sample_visits=sum(r['internal_sample_visits'] for r in reports),
@@ -304,8 +307,8 @@ def _actor_update(policy,optimizer,rows,targets,cache,manifest,controller,*,dist
         bc_min_global_batch=bc_min_global_batch,
         bc_samples_by_source={source:sum(r['bc_samples_by_source'].get(source,0) for r in reports)
             for source in sorted({source for r in reports for source in r['bc_samples_by_source']})},
-        planned_internal_visits=len(selected)*4*ppo_epochs,objective_reduction='joint_sum',
-        proxy_is_joint_probability=True,old_statistics_fixed=True,final_trainable4_kl_pending=True)
+        planned_internal_visits=len(selected)*step_count*ppo_epochs,objective_reduction='joint_sum',
+        proxy_is_joint_probability=True,old_statistics_fixed=True,final_trainable_steps_kl_pending=True)
 
 
 def actor_update(policy,optimizer,*args,trust_region=None,**kwargs):
@@ -341,14 +344,15 @@ def final_kl(policy,rows,cache,manifest,*,distributed,microbatch=256,clip=.10,ob
     from .gaussian_probability import chain_diagnostics,distribution
     if objective_reduction!='joint_sum':raise ValueError('Final PPO diagnostics require complete-chain joint ratio')
     selected=_eligible(manifest);owned=_owned(selected,manifest,distributed)
+    step_count=len(policy.trainable_steps);record_width=step_count*8
     local=[rows[i] for _,i in owned];device=next(policy.actor.parameters()).device
     start=time.perf_counter()
-    with _local_phase(distributed,'stage2_final_trainable4_kl'),policy_phase(policy):
+    with _local_phase(distributed,'stage2_final_trainable_steps_kl'),policy_phase(policy):
         records=evaluate_chain_records(policy,local,cache,microbatch=microbatch,physical_changes=True)
         adv=cache.get('advantages',local).double() if local else torch.zeros(0,device=device,dtype=torch.float64)
-    packed=torch.cat((records.reshape(len(local),32),adv[:,None]),1)
+    packed=torch.cat((records.reshape(len(local),record_width),adv[:,None]),1)
     gathered=distributed.gather_rows(packed,[p for p,_ in owned],len(selected))
-    full=gathered[:,:32].reshape(-1,4,8);adv=gathered[:,32]
+    full=gathered[:,:record_width].reshape(-1,step_count,8);adv=gathered[:,record_width]
     joint,coordinate,logratio,counts,shift=[full[:,:,i] for i in range(5)]
     chain=chain_diagnostics(from_records(full),adv,clip=clip)
     frozen_identity=policy.assert_frozen_identity()
@@ -359,11 +363,11 @@ def final_kl(policy,rows,cache,manifest,*,distributed,microbatch=256,clip=.10,ob
     return dict(**chain,mean_joint_kl=float(joint.mean()),mean_coordinate_kl=float(coordinate.mean()),
         joint_kl=distribution(joint),coordinate_kl=distribution(coordinate),
         maximum_step_mean_coordinate_kl=float(coordinate.mean(0).max()),
-        per_denoising_step=[dict(step=s+15,joint_kl=distribution(joint[:,s]),
+        per_denoising_step=[dict(step=policy.trainable_steps[s],joint_kl=distribution(joint[:,s]),
             mean_coordinate_kl=distribution(coordinate[:,s]),joint_log_ratio=distribution(logratio[:,s]),
-            mean_normalized_mean_change_rms=float(shift[:,s].mean())) for s in range(4)],
-        covered_chains=len(selected),covered_internal_transitions=len(selected)*4,
-        gaussian_kl_steps=list(policy.trainable_steps),statistical_denominator='one_complete_chain_four_joint_Gaussian_transitions',
+            mean_normalized_mean_change_rms=float(shift[:,s].mean())) for s in range(step_count)],
+        covered_chains=len(selected),covered_internal_transitions=len(selected)*step_count,
+        gaussian_kl_steps=list(policy.trainable_steps),statistical_denominator=f'one_complete_chain_{step_count}_joint_Gaussian_transitions',
         frozen_identity=frozen_identity,
         terminal_two_step_joint_kl_fraction=float(joint[:,-2:].sum()/joint.sum()) if joint.sum()>0 else None,
         joint_log_ratio_range=[chain['chain_joint_log_ratio']['min'],chain['chain_joint_log_ratio']['max']],
@@ -375,7 +379,7 @@ def final_kl(policy,rows,cache,manifest,*,distributed,microbatch=256,clip=.10,ob
             root_semantics='heading_local_xy_increments_and_root_height_not_world_xyz',
             scope='denormalized_index18_Gaussian_mean_not_final_reference'),
         kl_scope='old_rollout_conditional_chain_KL_estimate_not_future_physics_safety',
-        p95_scope='sum_four_joint_KLs_per_complete_chain',reference_change=reference_change,
+        p95_scope=f'sum_{step_count}_joint_KLs_per_complete_chain',reference_change=reference_change,
         kl_only_wall_seconds=kl_seconds,wall_seconds=max(distributed.all_gather_object(time.perf_counter()-start)))
 
 
@@ -393,7 +397,7 @@ def reference_change_diagnostics(policy,rows,cache,distributed,max_local_chains=
     with _local_phase(distributed,'stage2_updated_reference_diagnostic'),policy_phase(policy):
         if selected:
             context=cache.context(selected);prepared=policy.prepare_conditions(context)
-            state=cache.get('chain',selected,[15]*len(selected))
+            state=cache.get('chain',selected,[policy.trainable_steps[0]]*len(selected))
             for step in policy.trainable_steps:
                 params=policy.transition_parameters(context,state,step,prepared=prepared)
                 state=policy.actor._constrain(params['mean']+params['std']*

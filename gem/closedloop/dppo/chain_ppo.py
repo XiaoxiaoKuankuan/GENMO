@@ -1,10 +1,10 @@
-"""完整扩散链PPO的两遍流式计算，不同时保存四份Transformer反向图。
+"""完整扩散链PPO的两遍流式计算，支持四步与十步且不保存整条反向图。
 
-第一遍无梯度读取真实rollout的15～18步状态、采样值、旧均值/实际标准差与free mask，
-得到每链四步FP64统计；上层只据四步之和决定一个PPO裁剪分支和一个GAE系数。
-第二遍在相同Actor版本上逐微批重算四步联合log-ratio，以已固定的完整链导数反传。
+第一遍读取真实rollout中配置指定的全部可训练随机步与旧核，得到每链FP64统计；
+上层只据这些步骤之和决定一个PPO裁剪分支和一个GAE系数。第二遍在相同Actor
+版本上逐微批重算联合log-ratio，以已固定的完整链导数反传。
 条件编码器通过ConditionGraphCache汇总所有微批梯度后只反传一次；全局链数是唯一
-loss分母，四步之间不平均、不折扣，不对展开的内部转移单独执行PPO clipping。
+loss分母，训练步之间不平均、不折扣，不对展开的内部转移单独执行PPO clipping。
 
 缓存只保存小型统计量；行为链和旧核来自不可变RolloutTensorCache。冻结步骤和
 确定性末步不进入高斯概率。首尾参数版本、条件和重算值受校验；异常交给外层分布式
@@ -22,9 +22,9 @@ from .tensor_cache import ConditionGraphCache
 
 @torch.no_grad()
 def evaluate_chain_records(policy, rows, cache, *, microbatch, physical_changes=False):
-    """返回[N,4,8]：joint KL、coordinate KL、log-ratio、count及四种均值变化。"""
+    """返回[N,K,8]：K为4或10，统计列定义不随训练步数改变。"""
     device=next(policy.actor.parameters()).device
-    records=torch.zeros(len(rows),4,8,device=device,dtype=torch.float64)
+    records=torch.zeros(len(rows),len(policy.trainable_steps),8,device=device,dtype=torch.float64)
     conditions=ConditionGraphCache(policy,cache,include_frozen=False)
     conditions.prime(rows)
     pairs=[(i,s) for i in range(len(rows)) for s in policy.trainable_steps]
@@ -45,7 +45,7 @@ def evaluate_chain_records(policy, rows, cache, *, microbatch, physical_changes=
                 changes[j]=(physical[:,:,section].square().masked_fill(~submask,0.).sum((-2,-1))/
                     submask.sum((-2,-1)).clamp_min(1)).sqrt()
         index=torch.tensor([i for i,_ in chunk],device=device)
-        records[index,cache.step_indices(steps)-15]=torch.stack((stats['joint_kl'],
+        records[index,cache.step_indices(steps)-policy.trainable_steps[0]]=torch.stack((stats['joint_kl'],
             stats['mean_coordinate_kl'],stats['joint_log_ratio'],stats['free_count'],*changes),1)
     conditions.validate_inputs()
     return records
@@ -61,7 +61,7 @@ def backward_chain_surrogate(policy, rows, cache, records, *, clip, global_chain
         raise ValueError('Global denominator must count complete valid chains')
     device=next(policy.actor.parameters()).device
     # 完整rollout汇总的小型FP64统计可位于CPU；反向索引和优势在Actor设备。
-    # 仅搬运[N,4,8]统计，不改变行为链或概率精度，原GPU路径为零拷贝。
+    # 仅搬运[N,K,8]统计，不改变行为链或概率精度，原GPU路径为零拷贝。
     records=records.to(device=device)
     if not rows:
         return dict(loss=records.new_zeros(()),recompute_max_error=records.new_zeros(()))
@@ -79,7 +79,7 @@ def backward_chain_surrogate(policy, rows, cache, records, *, clip, global_chain
         old_mean,old_std=_old_kernel(samples,steps,device,cache)
         stats=gaussian_statistics(cache.get('chain',samples,[s+1 for s in steps]),
             old_mean,old_std,params['mean'],params['std'],mask)
-        errors.append((stats['joint_log_ratio'].detach()-records[indices,cache.step_indices(steps)-15,2]).abs().max())
+        errors.append((stats['joint_log_ratio'].detach()-records[indices,cache.step_indices(steps)-policy.trainable_steps[0],2]).abs().max())
         (stats['joint_log_ratio']*coefficients[indices]).sum().backward()
     conditions.backward()
     maximum=torch.stack(errors).max()

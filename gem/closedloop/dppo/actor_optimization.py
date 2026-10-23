@@ -1,6 +1,6 @@
 """当前连续世界Actor优化配置及实际参数身份。
 
-只接受完整四步联合Clipped PPO，一个完整链比值对应一个上层GAE优势。显式绑定
+接受配置指定四步或十步的完整联合Clipped PPO，一个完整链比值对应一个上层GAE优势。显式绑定
 共同基础学习率和固定模块倍率、全局链批量、Epoch、BC批量下限、联合KL阈值。旧坐标
 代理训练和单次joint-score训练入口退役；joint-score函数仅留作数学梯度参考。
 联合KL初始阈值是待真实rollout标定的候选，不能沿用坐标平均阈值或声称物理安全。
@@ -26,6 +26,7 @@ def optimization_binding(stage):
     from .actor_optimizer import validate_lr_multipliers
     multipliers=validate_lr_multipliers(t)
     return dict(schema='genmo.stage2.full_chain_optimization_binding.v1',
+        **({'trainable_gaussian_steps':list(range(t['frozen_prefix_steps'],19))} if t['frozen_prefix_steps']!=15 else {}),
         actor_lr=t['actor_lr'],actor_lr_control=t['actor_lr_control'],actor_trainable_scope=t.get('actor_trainable_scope','all'),
         actor_optimizer=dict(type='AdamW',parameter_groups=1 if multipliers is None else 'named_modules',
             **({'lr_multipliers':multipliers} if multipliers is not None else {}),
@@ -77,7 +78,7 @@ def validate_optimization_configuration(config,maximum_steps):
         raise ValueError('Explicit active-clip finite-experiment limit required')
     if s['kl'].get('maximum_active_clip')!=t['max_active_clip_fraction']:
         raise ValueError('Full-rollout active-clip acceptance must match mini-batch guard')
-    expected=dict(status='candidate_requires_joint_calibration',scope='four_trainable_steps_only',
+    expected=dict(status='candidate_requires_joint_calibration',scope=('four_trainable_steps_only' if t['ppo_steps_per_chain']==4 else 'ten_trainable_steps_only'),
         optimization_sha256=digest(optimization_binding(s)))
     if s['kl']['calibration'].get('optimization_sha256')=='auto':
         s['kl']['calibration']['optimization_sha256']=expected['optimization_sha256']

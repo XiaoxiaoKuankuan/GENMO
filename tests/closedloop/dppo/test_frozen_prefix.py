@@ -13,9 +13,10 @@ from gem.closedloop.dppo.policy import masked_joint_log_prob
 from gem.closedloop.dppo.tensor_cache import ConditionGraphCache
 
 
-def test_intermediate4_gradients_and_deterministic_final(actor_factory):
+@pytest.mark.parametrize('prefix',[9,15])
+def test_intermediate_gradients_and_deterministic_final(actor_factory,prefix):
     actor,batch=actor_factory(motion_frames=60);_activate_branches(actor)
-    policy=FrozenPrefixPolicy(actor,std_schedule=[.001]*15+[.04,.06,.08,.1,0.],generation_frames=60)
+    policy=FrozenPrefixPolicy(actor,frozen_prefix_steps=prefix,std_schedule=[.001]*15+[.04,.06,.08,.1,0.],generation_frames=60)
     context=_conditions(batch)
     rollout=policy.sample_rollout(context,generator=torch.Generator().manual_seed(17))
     assert rollout['old_log_probs'].shape==(2,19)
@@ -53,7 +54,8 @@ def test_intermediate4_gradients_and_deterministic_final(actor_factory):
     with pytest.raises(RuntimeError):policy.assert_frozen_identity()
 
 
-def test_final_kl_covers_four_steps_and_regenerates_reference(actor_factory):
+@pytest.mark.parametrize('prefix',[9,15])
+def test_final_kl_covers_configured_steps_and_regenerates_reference(actor_factory,prefix):
     from gem.closedloop.dppo.rollout_helpers import split_trace
     from gem.closedloop.dppo.tensor_cache import RolloutTensorCache
     from gem.closedloop.dppo.updater import final_kl
@@ -62,7 +64,7 @@ def test_final_kl_covers_four_steps_and_regenerates_reference(actor_factory):
     actor,batch=actor_factory(motion_frames=60);_activate_branches(actor)
     privileged=tracking_context(_conditions(batch))
     context={k:privileged[k] for k in STAGE1_CONDITION_KEYS}
-    policy=FrozenPrefixPolicy(actor,std_schedule=[.001]*15+[.04,.06,.08,.1,0.],generation_frames=60)
+    policy=FrozenPrefixPolicy(actor,frozen_prefix_steps=prefix,std_schedule=[.001]*15+[.04,.06,.08,.1,0.],generation_frames=60)
     trace=policy.sample_rollout(context,generator=torch.Generator().manual_seed(17))
     rows=[]
     for i in range(2):
@@ -73,9 +75,9 @@ def test_final_kl_covers_four_steps_and_regenerates_reference(actor_factory):
     manifest=[dict(valid=True,has_free=True,owner_rank=0,local_index=i) for i in range(2)]
     d=SimpleNamespace(rank=0,world_size=1,all_gather_object=lambda x:[x],gather_rows=lambda x,indices,n:x)
     report=final_kl(policy,rows,cache,manifest,distributed=d,microbatch=3)
-    assert report['gaussian_kl_steps']==[15,16,17,18] and report['covered_internal_transitions']==8
+    assert report['gaussian_kl_steps']==list(range(prefix,19)) and report['covered_internal_transitions']==2*(19-prefix)
     assert report['mean_coordinate_kl']<1e-8
-    assert len(report['per_denoising_step'])==4
+    assert len(report['per_denoising_step'])==19-prefix
     assert all(x['protected_coordinates_unchanged'] for x in report['reference_change']['samples'])
     assert all(p.grad is None for p in actor.parameters())
     cache.close()

@@ -73,7 +73,8 @@ def _fragment_value_initialization(state, previous_gamma, gamma):
 
 def _checkpoint_initialization_identity(record):
     """从持久化继承记录恢复来源，普通resume不误标为重新从Stage1开始。"""
-    return dict(kind='explicit_checkpoint_random_fragments' if record.get('transfer')
+    return dict(kind='explicit_checkpoint_expanded_policy' if record.get('transfer')=='expanded_denoising_root_reward.v1'
+        else 'explicit_checkpoint_random_fragments' if record.get('transfer')
         else 'explicit_checkpoint_new_experiment',checkpoint=record['checkpoint'],
         checkpoint_sha256=record['sha256'],actor_fingerprint=record['actor_fingerprint'],
         source_iteration=record['source_iteration'])
@@ -480,6 +481,7 @@ def run(cargs,config,distributed):
         payload=None
         initialization=getattr(cargs,'initialize_from_checkpoint',None)
         fragment_transfer=bool(getattr(cargs,'initialize_random_fragments',False))
+        expanded_transfer=bool(getattr(cargs,'initialize_denoising_reward',False))
         if cargs.resume and (c.output/'initialization.json').exists():
             initial_record=root_call(distributed,lambda:json.loads((c.output/'initialization.json').read_text()))
             c.identity['actor_initialization']=_checkpoint_initialization_identity(initial_record)
@@ -507,6 +509,13 @@ def run(cargs,config,distributed):
             c.state=copy.deepcopy(payload['state'])
             c.bc.load_state_dict(payload['rank_states'][distributed.rank]['bc'])
             restore_local_rng(payload['rank_states'][distributed.rank]['rng'],c.generators)
+        elif initialization and expanded_transfer:
+            from .training_checkpoint import initialize_expanded_policy
+            imported=local_call(distributed,lambda:initialize_expanded_policy(initialization,
+                identity=c.identity,actor=c.actor,actor_optimizer=c.actor_optimizer))
+            root_call(distributed,lambda:atomic_json(c.output/'initialization.json',imported))
+            c.identity['actor_initialization']=_checkpoint_initialization_identity(imported)
+            c.state.update(experiment_initialization=imported,mc_preheat_complete=False)
         elif initialization:
             checkpoint=Path(initialization).resolve()
             payload=local_call(distributed,lambda:load_training_checkpoint(checkpoint,identity=c.identity,
@@ -821,7 +830,8 @@ def run(cargs,config,distributed):
             wall=max(distributed.all_gather_object(time.perf_counter()-round_start))
             profile_report=profiler.report();deactivate(profile_token);profile_token=None
             record=dict(label=label,state=copy.deepcopy(c.state),collection_by_rank=distributed.all_gather_object(collection),
-                probability=initial_probability,critic=critic,actor=actor,trainable4_kl=kl,tensor_cache=cache_report,
+                probability=initial_probability,critic=critic,actor=actor,
+                **({'trainable4_kl':kl} if len(c.policy.trainable_steps)==4 else {'trainable_steps_kl':kl}),tensor_cache=cache_report,
                 actor_seconds=actor_seconds,critic_seconds=critic_seconds,wall_seconds=wall,
                 efficiency=dict(environment_seconds=collection_seconds,actor_total_seconds=actor_seconds,
                     actor_ppo_seconds=sum(v['ppo_seconds'] for v in (actor or {}).get('steps',[])),

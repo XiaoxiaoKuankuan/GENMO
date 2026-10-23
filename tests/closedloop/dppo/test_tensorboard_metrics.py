@@ -273,5 +273,14 @@ def test_joint_score_curves_are_not_mislabeled_as_clipped_ppo():
     assert 'Loss/ppo' not in values
     assert 'Policy/clipped_objective_fraction' not in values
     record['trainable4_kl']['per_denoising_step'].append(dict(step=19))
-    with pytest.raises(ValueError, match='four trainable'):
+    with pytest.raises(ValueError, match='15..18 or 9..18'):
         training_scalars(record)
+
+
+def test_ten_step_metrics_cover_real_trainable_interval():
+    record=training_record()
+    kl=record.pop('trainable4_kl')
+    template=kl['per_denoising_step'][0]
+    kl['per_denoising_step']=[dict(template,step=i) for i in range(9,19)]
+    record['trainable_steps_kl']=kl
+    assert 'Policy/trainable_kl' in training_scalars(record)

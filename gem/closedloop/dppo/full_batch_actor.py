@@ -40,8 +40,8 @@ def prepare_full_batch_gradient(policy, optimizer, rows, targets, cache, manifes
         distributed, anchor, minibatch_chains=16384, microbatch=128,
         grad_clip_norm=1., bc_samples_per_rollout=1024, detailed_diagnostics=True,
         gradient_snr=False):
-    if tuple(policy.trainable_steps) != (15,16,17,18):
-        raise ValueError('Explicit four-step full-batch objective required')
+    from .denoising_contract import validate_trainable_steps
+    validate_trainable_steps(policy.trainable_steps)
     selected = _eligible(manifest)
     if not selected or len(selected) > minibatch_chains:
         raise ValueError('Single on-policy update requires all valid chains in one global minibatch')
@@ -159,7 +159,7 @@ def full_batch_actor_update(policy, optimizer, rows, targets, cache, manifest, c
         bc_samples_by_source=gradient['bc_samples_by_source'], internal_sample_visits=gradient['internal_sample_visits'],
         early_stop_reason=None if accepted else 'optimizer_step_backtracking_exhausted',
         advantage_diagnostics=advantage_diagnostics(rows, targets, distributed),
-        old_statistics_fixed=True, final_trainable4_kl_pending=True,
+        old_statistics_fixed=True, final_trainable_steps_kl_pending=True,
         detailed_diagnostics=bool(detailed_diagnostics))
     if accepted:
         from .kl_reuse import seal_accepted_kl

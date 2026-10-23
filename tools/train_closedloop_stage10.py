@@ -34,6 +34,8 @@ def main():
         help='新独立实验从完整checkpoint继承Actor/Critic、两个Adam及RNG，仅允许更换有效批量与评估监视')
     parser.add_argument('--initialize-random-fragments',action='store_true',
         help='配合initialize-from-checkpoint：允许修改采样时限、站立比例和gamma；重新采样并重新校准Critic')
+    parser.add_argument('--initialize-denoising-reward',action='store_true',
+        help='新目录显式4步扩为10步并恢复Root奖励尺度；仅继承Actor/Adam，重新采集和校准Critic')
     parser.add_argument('--strict-evidence',action='store_true')
     parser.add_argument('--verify-kl-reuse',action='store_true',help='仅本会话首次复用时独立重算完整KL并核对，额外耗时单独记录')
     parser.add_argument('--calibrate-only',action='store_true',help='只测新模型单机器人关键路径，不更新参数')
@@ -53,6 +55,8 @@ def main():
         parser.error('--initialize-from-checkpoint requires a new training experiment')
     if args.initialize_random_fragments and not args.initialize_from_checkpoint:
         parser.error('--initialize-random-fragments requires --initialize-from-checkpoint')
+    if args.initialize_denoising_reward and (not args.initialize_from_checkpoint or args.initialize_random_fragments):
+        parser.error('--initialize-denoising-reward requires its own explicit checkpoint initialization')
     if args.refit_critic and not args.mc_validation_only:
         parser.error('--refit-critic requires --mc-validation-only; it never enables Actor updates')
     if args.critic_refit_musics_per_source is not None and (not args.refit_critic or args.critic_refit_musics_per_source<1):

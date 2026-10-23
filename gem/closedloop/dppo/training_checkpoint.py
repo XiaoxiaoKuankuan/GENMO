@@ -195,6 +195,68 @@ def load_training_checkpoint(path,*,identity,actor,critic,actor_optimizer,critic
     return payload
 
 
+def initialize_expanded_policy(path, *, identity, actor, actor_optimizer):
+    """新实验显式从四步迁移到十步：只继承Actor和Adam，重新估计新奖励下的Value。
+
+    先逐项核对资产、冻结Stage1、噪声、物理/观测及未授权的训练参数，再加载权重。
+    旧rollout、Critic、优势、运行预算和仿真游标均不返回给恢复流程；普通resume仍严格
+    要求原合同。新的学习率覆盖Adam中的旧lr，动量和步数保留用于公平的倍率对照。
+    """
+    import copy
+    from .checkpoint import _validate_model_state, _validate_optimizer_state
+    from .rewards import ROOT_REWARD_STD_VERSION, REWARD_STD_VERSION, ExecutionReward
+    payload=torch.load(path,map_location='cpu',weights_only=False,mmap=True)
+    old=payload.get('identity',{})
+    if payload.get('schema')!=SCHEMA:
+        raise ValueError('Expanded policy initialization requires a complete current checkpoint')
+    for key in ('assets','physical_configuration','data_catalog','source_stage1_step',
+                'generation_horizon','dataset','physical_episode','ppo_rollout','bc_gradient'):
+        if not same_execution(old.get(key),identity.get(key)):
+            raise ValueError('Expanded policy changes an unauthorized identity: '+key)
+    for section in ('kernel','training','runtime','timing','kl'):
+        before=copy.deepcopy(old[section]);after=copy.deepcopy(identity[section])
+        if section=='kernel':
+            b=before['frozen_prefix'];a=after['frozen_prefix']
+            if b['steps']!=15 or a['steps']!=9:
+                raise ValueError('Explicit expansion must be frozen15/train4 to frozen9/train10')
+            for key in ('schema','steps','gaussian_kl_steps'):
+                b.pop(key);a.pop(key)
+        elif section=='training':
+            for key in ('actor_lr','frozen_prefix_steps','ppo_step_strategy','ppo_steps_per_chain',
+                        'actor_minibatch_internal_transitions'):
+                before.pop(key,None);after.pop(key,None)
+            before['trust_region'].pop('maximum_lr');after['trust_region'].pop('maximum_lr')
+        elif section=='runtime':
+            # 单机器人测时只改变标定运行的world规模，不改变后续训练物理配置。
+            for key in ('num_envs','generation_batch','phase_contract','timing_contract'):
+                before.pop(key,None);after.pop(key,None)
+        elif section=='timing':
+            before.pop('deployment_profile');after.pop('deployment_profile')
+        elif section=='kl':
+            before.pop('calibration');after.pop('calibration')
+        if not same_execution(before,after):
+            raise ValueError('Expanded policy changes an unauthorized contract: '+section)
+    if old['reward']['version']!=REWARD_STD_VERSION or identity['reward']['version']!=ROOT_REWARD_STD_VERSION:
+        raise ValueError('Explicit root reward v3 to v4 migration required')
+    b=copy.deepcopy(ExecutionReward(old['reward']).config);a=copy.deepcopy(ExecutionReward(identity['reward']).config)
+    b['version']=a['version'];b['tracking']['reward_std'].update(anchor_pos=.3,anchor_ori=.4)
+    if b!=a:raise ValueError('Only root position/orientation reward std may change')
+    _validate_model_state(actor,payload['actor'],'十步新实验 Actor')
+    _validate_optimizer_state(actor_optimizer,payload['actor_optimizer'])
+    desired_lrs=[group['lr'] for group in actor_optimizer.param_groups]
+    actor.load_state_dict(payload['actor'],strict=True)
+    actor_optimizer.load_state_dict(payload['actor_optimizer'])
+    for group,lr in zip(actor_optimizer.param_groups,desired_lrs):group['lr']=lr
+    return dict(checkpoint=str(Path(path).resolve()),sha256=file_sha256(path),
+        actor_fingerprint=payload['actor_fingerprint'],source_iteration=payload['state']['iteration'],
+        source_actor_updates=payload['state']['actor_updates'],
+        transfer='expanded_denoising_root_reward.v1',actor_and_adam_preserved=True,
+        critic_and_adam_preserved=False,original_budget_preserved=False,old_rollout_reused=False,
+        fresh_physics_rollout_required=True,critic_recalibration_required=True,
+        previous_kernel=old['kernel'],kernel=identity['kernel'],
+        previous_reward=old['reward'],reward=identity['reward'],actor_learning_rates=desired_lrs)
+
+
 def probability_candidate_binding(source,target,*,allow_measured_profile_transfer=False):
     """只允许显式更换实测延迟样本池/来源，不改变时钟、前缀预算、奖励或物理合同。
 

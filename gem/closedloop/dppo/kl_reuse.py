@@ -57,6 +57,6 @@ def reusable_accepted_kl(result, policy, cache, manifest, distributed, *, clip, 
     policy.assert_frozen_identity()
     report = dict(sealed['report'])
     report['reused_accepted_optimizer_step'] = True
-    report['reuse_scope'] = 'same_actor_buffers_kernel_cache_manifest_complete_four_steps'
+    report['reuse_scope'] = f'same_actor_buffers_kernel_cache_manifest_complete_{len(policy.trainable_steps)}_steps'
     report['additional_final_forward_seconds'] = 0.
     return report

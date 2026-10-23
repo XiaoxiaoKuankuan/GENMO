@@ -21,28 +21,29 @@ from tests.closedloop.dppo.test_clipped_dppo import case
 from tests.closedloop.test_stage1_actor import actor_factory
 
 
-def test_independent_four_transition_normal_formula_mask_and_equal_policy():
+@pytest.mark.parametrize('count',[4,10])
+def test_independent_transition_normal_formula_mask_and_equal_policy(count):
     generator=torch.Generator().manual_seed(372)
-    shape=(7,4,9,3)
+    shape=(7,count,9,3)
     old=torch.randn(shape,generator=generator,dtype=torch.float64)
-    sigma=torch.rand(7,4,1,1,generator=generator,dtype=torch.float64)+.1
+    sigma=torch.rand(7,count,1,1,generator=generator,dtype=torch.float64)+.1
     value=old+sigma*torch.randn(shape,generator=generator,dtype=torch.float64)
     new=old+.03*torch.randn(shape,generator=generator,dtype=torch.float64)
     new_sigma=sigma*1.00001
     mask=torch.rand(shape,generator=generator)>.25
     mask[:,:,:2]=False;mask[:,:,-1]=False;mask[0]=False
-    flat=lambda v:v.reshape(28,*v.shape[2:])
+    flat=lambda v:v.reshape(7*count,*v.shape[2:])
     actual=gaussian_statistics(flat(value),flat(old),flat(sigma),flat(new),flat(new_sigma),flat(mask))
-    chain=chain_statistics(*(actual[k].reshape(7,4) for k in ('joint_log_ratio','joint_kl','free_count')))
+    chain=chain_statistics(*(actual[k].reshape(7,count) for k in ('joint_log_ratio','joint_kl','free_count')))
     a=torch.distributions.Normal(old,sigma);b=torch.distributions.Normal(new,new_sigma)
     reference=(b.log_prob(value)-a.log_prob(value)).masked_fill(~mask,0.).sum((1,2,3))
     kl=torch.distributions.kl_divergence(a,b).masked_fill(~mask,0.).sum((1,2,3))
     torch.testing.assert_close(chain['joint_log_ratio'],reference,rtol=1e-10,atol=1e-11)
     torch.testing.assert_close(chain['joint_kl'],kl,rtol=1e-9,atol=1e-11)
     same=gaussian_statistics(flat(value),flat(old),flat(sigma),flat(old),flat(sigma),flat(mask))
-    assert torch.equal(same['joint_log_ratio'],torch.zeros(28,dtype=torch.float64))
-    assert torch.equal(same['joint_kl'],torch.zeros(28,dtype=torch.float64))
-    assert torch.equal(same['joint_log_ratio'].exp(),torch.ones(28,dtype=torch.float64))
+    assert torch.equal(same['joint_log_ratio'],torch.zeros(7*count,dtype=torch.float64))
+    assert torch.equal(same['joint_kl'],torch.zeros(7*count,dtype=torch.float64))
+    assert torch.equal(same['joint_log_ratio'].exp(),torch.ones(7*count,dtype=torch.float64))
     ignored=new.clone();ignored[~mask]=float('nan')
     protected=gaussian_statistics(flat(value),flat(old),flat(sigma),flat(ignored),flat(new_sigma),flat(mask))
     torch.testing.assert_close(protected['joint_log_ratio'],actual['joint_log_ratio'],rtol=0,atol=0)
@@ -126,15 +127,16 @@ def _compare_cpu_gradients(actor,reference):
     assert relative<2e-4,relative
 
 
+@pytest.mark.parametrize('prefix',[9,15])
 @pytest.mark.parametrize('microbatch',[1,3,11])
-def test_real_small_network_streamed_full_autograd_and_initial_score_gradients(actor_factory,microbatch):
-    policy,rows,targets=case(actor_factory)
+def test_real_small_network_streamed_full_autograd_and_initial_score_gradients(actor_factory,microbatch,prefix):
+    policy,rows,targets=case(actor_factory,frozen_prefix_steps=prefix)
     cache=RolloutTensorCache(rows,targets,'cpu')
     try:
         # 同一行为起点，完整Autograd参考保留四步图，用独立Normal公式而非流式系数。
         with policy_phase(policy):
             terms=[]
-            for step in (15,16,17,18):
+            for step in policy.trainable_steps:
                 params,mask=_parameters(policy,rows,[step]*len(rows),torch.device('cpu'),cache)
                 old_mean,old_std=_old_kernel(rows,[step]*len(rows),torch.device('cpu'),cache)
                 value=cache.get('chain',rows,[step+1]*len(rows)).double()
@@ -153,7 +155,7 @@ def test_real_small_network_streamed_full_autograd_and_initial_score_gradients(a
         _compare_cpu_gradients(policy.actor,reference)
         policy.actor.zero_grad(set_to_none=True)
         with policy_phase(policy):
-            for step in (15,16,17,18):
+            for step in policy.trainable_steps:
                 params,mask=_parameters(policy,rows,[step]*len(rows),torch.device('cpu'),cache)
                 old_mean,old_std=_old_kernel(rows,[step]*len(rows),torch.device('cpu'),cache)
                 score=gaussian_statistics(cache.get('chain',rows,[step+1]*len(rows)),old_mean,old_std,params['mean'],params['std'],mask)

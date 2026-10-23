@@ -40,9 +40,9 @@ class Anchor:
             samples=[[{'dataset_id':'fixture'}]*self.batch_size])
 
 
-def case(actor_factory):
+def case(actor_factory, frozen_prefix_steps=15):
     actor,batch=actor_factory(motion_frames=60);_activate_branches(actor)
-    policy=FrozenPrefixPolicy(actor,std_schedule=[.001]*15+[.04,.06,.08,.1,0.],generation_frames=60)
+    policy=FrozenPrefixPolicy(actor,frozen_prefix_steps=frozen_prefix_steps,std_schedule=[.001]*15+[.04,.06,.08,.1,0.],generation_frames=60)
     privileged=tracking_context(_conditions(batch));context={k:privileged[k] for k in STAGE1_CONDITION_KEYS}
     trace=policy.sample_rollout(context,generator=torch.Generator().manual_seed(17))
     rows=[]

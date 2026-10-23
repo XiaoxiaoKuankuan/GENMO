@@ -88,12 +88,16 @@ def ppo_surrogate(statistics, advantages, *, clip, reduction='joint_sum'):
         reduction=reduction, ratio_is_joint_probability=reduction=='joint_sum')
 
 
-def chain_statistics(joint_log_ratios, joint_kls, free_counts, *, steps=(15,16,17,18)):
-    """四个旧路径条件高斯组成一个扩散链；不除坐标数、不做去噪折扣。"""
-    if tuple(steps)!=(15,16,17,18) or joint_log_ratios.ndim!=2 or joint_log_ratios.shape[1]!=4:
-        raise ValueError('Exactly four stochastic transitions 15..18 required per complete chain')
+def chain_statistics(joint_log_ratios, joint_kls, free_counts, *, steps=None):
+    """四步或十步旧路径条件高斯组成一个扩散链；不除坐标数或训练步数。"""
+    from .denoising_contract import steps_for_count, validate_trainable_steps
+    if joint_log_ratios.ndim!=2:
+        raise ValueError('Complete-chain log ratios must have [chains,trainable_steps] shape')
+    expected=steps_for_count(joint_log_ratios.shape[1])
+    if steps is not None and validate_trainable_steps(steps)!=expected:
+        raise ValueError('Declared trainable steps differ from complete-chain probability width')
     if joint_kls.shape!=joint_log_ratios.shape or free_counts.shape!=joint_log_ratios.shape:
-        raise ValueError('Chain log ratios, KL and free counts must have identical [chains,4] shape')
+        raise ValueError('Chain log ratios, KL and free counts must have identical [chains,trainable_steps] shape')
     counts=free_counts.sum(1)
     logratio=joint_log_ratios.double().sum(1)
     kl=joint_kls.double().sum(1)

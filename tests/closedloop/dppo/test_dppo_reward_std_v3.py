@@ -8,7 +8,7 @@ import copy
 import math
 import numpy as np
 import pytest
-from gem.closedloop.dppo.rewards import ExecutionReward,TRACKING_STD,STAGE2_REWARD_STD,REWARD_STD_VERSION
+from gem.closedloop.dppo.rewards import ExecutionReward,TRACKING_STD,STAGE2_REWARD_STD,REWARD_STD_VERSION,ROOT_REWARD_STD,ROOT_REWARD_STD_VERSION
 from gem.closedloop.dppo.vector_reward_math import VectorRewardMath
 from gem.closedloop.dppo.vector_reward_adapter import VectorExecutionReward,compare_reward_evidence
 from gem.runtime.trajectory_blocks import pack_trace,ColumnarTrace
@@ -16,9 +16,10 @@ from tests.closedloop.dppo.test_stage2_reward import device_packet
 from test_data_learning import actual_step,target_activity_fixture
 
 
-def test_new_reward_std_preserves_source_and_scalar_vector_formula():
-    scalar=ExecutionReward({'version':REWARD_STD_VERSION},target_activity=target_activity_fixture)
-    vector=VectorExecutionReward({'version':REWARD_STD_VERSION},target_activity=target_activity_fixture)
+@pytest.mark.parametrize('version,std',[(REWARD_STD_VERSION,STAGE2_REWARD_STD),(ROOT_REWARD_STD_VERSION,ROOT_REWARD_STD)])
+def test_new_reward_std_preserves_source_and_scalar_vector_formula(version,std):
+    scalar=ExecutionReward({'version':version},target_activity=target_activity_fixture)
+    vector=VectorExecutionReward({'version':version},target_activity=target_activity_fixture)
     engine=VectorRewardMath(scalar.config,1,'cpu')
     import numpy as np
     scalar.seed_previous_target(np.zeros(21));vector.seed_previous_target(np.zeros(21));engine.previous_valid.fill_(True)
@@ -39,10 +40,10 @@ def test_new_reward_std_preserves_source_and_scalar_vector_formula():
     assert expected['activity']['gate'] < 1.
     assert expected['components']['track']['activity_gate'] == 1.
     scores=expected['components']['track']['normalized']['scores']
-    assert scores['anchor_pos']==pytest.approx(math.exp(-1.))
+    assert scores['anchor_pos']==pytest.approx(math.exp(-.04/std['anchor_pos']**2))
     assert scores['body_pos']==pytest.approx(math.exp(-.04/.15**2))
     assert scalar.config['tracking']['source_std']==TRACKING_STD
-    assert scalar.config['tracking']['reward_std']==STAGE2_REWARD_STD
+    assert scalar.config['tracking']['reward_std']==std
 
 def test_reward_versions_reject_ambiguous_or_changed_source_std():
     assert ExecutionReward().config['tracking']['std']==TRACKING_STD

@@ -53,6 +53,9 @@ TRACKING_STD = dict(anchor_pos=.3, anchor_ori=.4, body_pos=.3, body_ori=.4,
 STAGE2_REWARD_STD = dict(anchor_pos=.20, anchor_ori=.30, body_pos=.15, body_ori=.20,
                          body_lin_vel=1., body_ang_vel=3.14, foot_height=.07, leg_joint_pos=.25)
 REWARD_STD_VERSION = 'stage2.gmt8_reward_std.v3'
+ROOT_REWARD_STD_VERSION = 'stage2.gmt8_reward_root_std.v4'
+ROOT_REWARD_STD = dict(STAGE2_REWARD_STD, anchor_pos=.30, anchor_ori=.40)
+REWARD_STD_BY_VERSION = {REWARD_STD_VERSION: STAGE2_REWARD_STD, ROOT_REWARD_STD_VERSION: ROOT_REWARD_STD}
 TRACKING_WEIGHTS = {name: weight/6.3 for name,weight in zip(TRACKING_FUNCTIONS,(.5,.5,1.,1.,1.,1.,.8,.5))}
 LEG_JOINT_NAMES = [side+'_'+joint+'_joint' for side in ('l','r') for joint in
     ('leg_pitch','leg_roll','leg_yaw','knee_pitch','ankle_pitch','ankle_roll')]
@@ -90,15 +93,15 @@ DEFAULT_CONFIG = {
 
 
 def tracking_reward_std(config):
-    """旧v2按原GMT std评分；显式v3仅改变评分尺度，不改GMT误差来源的source_std。"""
+    """v3收紧四项尺度，v4仅恢复Root为0.3/0.4；GMT权威source_std始终不变。"""
     tracking = config['tracking']
-    return tracking['reward_std'] if config['version'] == REWARD_STD_VERSION else tracking['std']
+    return tracking['reward_std'] if config['version'] in REWARD_STD_BY_VERSION else tracking['std']
 
 
 def tracking_score_metadata(config):
     """评分证据显式区分GMT权威来源与Stage2尺度；旧v2字段保持原样以便重算历史。"""
     result=dict(std=copy.deepcopy(tracking_reward_std(config)),weights=copy.deepcopy(config['tracking']['weights']))
-    if config['version']==REWARD_STD_VERSION:
+    if config['version'] in REWARD_STD_BY_VERSION:
         result.update(source_std=copy.deepcopy(config['tracking']['source_std']),
             reward_std=copy.deepcopy(config['tracking']['reward_std']),
             scoring='exp(-squared_error/reward_std^2)_not_original_GMT_score')
@@ -148,11 +151,11 @@ def _score(error, scale):
 class ExecutionReward:
     def __init__(self, config=None, music_features=None, music_start_tick=600, target_activity=None):
         self.config = copy.deepcopy(DEFAULT_CONFIG)
-        if (config or {}).get('version') == REWARD_STD_VERSION:
-            self.config['version'] = REWARD_STD_VERSION
+        if (config or {}).get('version') in REWARD_STD_BY_VERSION:
+            self.config['version'] = config['version']
             self.config['tracking'].pop('std')
             self.config['tracking'].update(source_std=copy.deepcopy(TRACKING_STD),
-                                           reward_std=copy.deepcopy(STAGE2_REWARD_STD))
+                                           reward_std=copy.deepcopy(REWARD_STD_BY_VERSION[config['version']]))
         _merge(self.config, config or {})
         self._validate_config()
         self.music_enabled = self.config['music_reward_enabled']
@@ -185,7 +188,7 @@ class ExecutionReward:
 
     def _validate_config(self):
         config = self.config
-        if config["version"] not in ("stage2.gmt8_reference_limits.v1", "stage2.gmt8_reference_limits.v2", REWARD_STD_VERSION):
+        if config["version"] not in ("stage2.gmt8_reference_limits.v1", "stage2.gmt8_reference_limits.v2", *REWARD_STD_BY_VERSION):
             raise ValueError("Unknown explicit execution reward identity")
         if type(config['music_reward_enabled']) is not bool:
             raise ValueError('music_reward_enabled must be an explicit boolean')
@@ -209,7 +212,7 @@ class ExecutionReward:
             raise ValueError(f"tracking.objective must be {TRACKING_OBJECTIVE}")
         source_std = tracking.get('source_std', tracking.get('std'))
         reward_std = tracking_reward_std(config)
-        expected = STAGE2_REWARD_STD if config['version'] == REWARD_STD_VERSION else TRACKING_STD
+        expected = REWARD_STD_BY_VERSION.get(config['version'], TRACKING_STD)
         if source_std != TRACKING_STD or reward_std != expected or tracking['weights'] != TRACKING_WEIGHTS:
             raise ValueError('Tracking source_std must match frozen GMT; reward_std must match the explicit reward version')
         for name, value in reward_std.items():

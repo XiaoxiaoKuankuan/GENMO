@@ -5,10 +5,10 @@
 已经计算的动量，在FP64中重建尚未减到参数上的更新，区分零梯度和浮点舍入丢失。
 此重建仅解释参数减法的精度，不冒充另一套优化器，也不修改实际梯度或权重。
 
-固定输出探针保持音乐、观测、承诺前缀、冻结前15步状态及四次真实创新噪声不变，
-重新执行四个训练步和冻结确定性末步，记录最终qpos/contact。旧链上的均值与真实
+固定输出探针保持音乐、观测、承诺前缀、配置的冻结前段状态及真实创新噪声不变，
+重新执行全部可训练步和冻结确定性末步，记录最终qpos/contact。旧链上的均值与真实
 joint log-ratio另算，优势相关性是统计诊断，不把它称为真实物理性能改善。
-探针和逐模块统计有明确额外成本；完整四步KL仍由原updater覆盖全部有效链。
+探针和逐模块统计有明确额外成本；全部可训练步KL仍由原updater覆盖全部有效链。
 """
 from __future__ import annotations
 
@@ -110,7 +110,7 @@ def output_probe(policy, rows, cache, max_chains=16):
     with policy_phase(policy):
         context = cache.context(selected)
         prepared = policy.prepare_conditions(context)
-        state = cache.get('chain', selected, [15]*len(selected)).clone()
+        state = cache.get('chain', selected, [policy.trainable_steps[0]]*len(selected)).clone()
         means, logratios, stds, moving_states = [], [], [], []
         for step in policy.trainable_steps:
             old_state = cache.get('chain', selected, [step]*len(selected))

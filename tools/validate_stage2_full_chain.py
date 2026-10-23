@@ -84,7 +84,7 @@ def gradient_validation(policy,rows,cache,distributed):
         if relative>2e-5:raise AssertionError('Real GPU streamed gradient mismatch: '+repr(variants[-1]))
     actor.zero_grad(set_to_none=True)
     return dict(passed=True,global_chains=denominator,variants=variants,
-        reference='independent_FP64_Normal_full_four_step_Autograd_global_SUM',
+        reference=f'independent_FP64_Normal_full_{len(policy.trainable_steps)}_step_Autograd_global_SUM',
         scope='actual_stage1_network_and_real_behavior_rows_not_physics_quality')
 
 
@@ -95,6 +95,7 @@ def main():
     parser.add_argument('--output-dir',type=Path,required=True)
     parser.add_argument('--learning-rates',type=float,nargs='+',default=[1e-6,3e-6,1e-5])
     parser.add_argument('--epochs',type=int,default=1)
+    parser.add_argument('--max-optimizer-steps',type=int,help='有限固定数据比较可限制优化步数，保留实际完整链Mini-batch')
     parser.add_argument('--adaptive-kl',action='store_true',help='实际联合KL回溯；各LR为候选上限而非承诺接受步长')
     args=parser.parse_args()
     rank=int(os.environ['RANK']);world=int(os.environ['WORLD_SIZE']);local=int(os.environ['LOCAL_RANK'])
@@ -158,7 +159,9 @@ def main():
                 if trust is not None:trust['maximum_lr']=lr
                 report=actor_update(policy,optimizer,rows,targets,cache,manifest,controller,distributed=distributed,
                     anchor=anchor,generator=generators['actor'],ppo_epochs=args.epochs,minibatch_chains=config['stage10']['scale']['actor_minibatch_chains'],
-                    microbatch=128,clip=.1,soft_kl=config['stage9']['kl_soft_stop_chain_joint'],
+                    sampled_steps=len(policy.trainable_steps),step_strategy=f'intermediate{len(policy.trainable_steps)}',
+                    max_optimizer_steps=args.max_optimizer_steps,audit_full_rollout_objective=True,
+                    microbatch=config['stage9']['denoising_microbatch'],clip=config['stage9']['ppo_clip'],soft_kl=config['stage9']['kl_soft_stop_chain_joint'],
                     bc_samples_per_rollout=config['stage9']['bc_samples_per_rollout'],
                     bc_min_global_batch=config['stage9']['bc_min_global_batch'],
                     bc_enabled=config['stage9'].get('bc_enabled',True),
