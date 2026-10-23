@@ -17,6 +17,7 @@ import argparse
 import copy
 from datetime import timedelta
 import json
+import math
 import os
 from pathlib import Path
 import subprocess
@@ -49,18 +50,19 @@ from gem.closedloop.dppo.actor_backtracking import check_candidate_kl
 
 
 @torch.no_grad()
-def rejected_probability_diagnostics(policy,rows,cache,distributed,microbatch):
+def rejected_probability_diagnostics(policy,rows,cache,manifest,distributed,microbatch):
     """高LR指数溢出时只报告真实log-ratio/KL，不截断概率、不把拒绝更新当作成功。"""
     from gem.closedloop.dppo.gaussian_probability import distribution
-    selected=[row for row in rows if row.free_mask.any()]
+    selected=[rows[m['local_index']] for m in manifest
+        if m['owner_rank']==distributed.rank and m['valid'] and m['has_free']]
     with policy_phase(policy):
         records=evaluate_chain_records(policy,selected,cache,microbatch=microbatch)
     local=torch.stack((records[:,:,0].sum(1),records[:,:,2].sum(1)),1).cpu()
     full=torch.cat(distributed.all_gather_object(local),0)
     return dict(chain_joint_kl=distribution(full[:,0]),chain_joint_log_ratio=distribution(full[:,1]),
         gaussian_steps=list(policy.trainable_steps),chains=len(full),
-        ratio_underflow_fraction=float((full[:,1]<-745.).double().mean()),
-        ratio_overflow_fraction=float((full[:,1]>709.).double().mean()),
+        ratio_underflow_fraction=float((full[:,1]<math.log(float.fromhex('0x0.0000000000001p-1022'))).double().mean()),
+        ratio_overflow_fraction=float((full[:,1]>math.log(torch.finfo(torch.float64).max)).double().mean()),
         accepted=False,scope='unclamped_Gaussian_statistics_after_rejected_Adam_attempt')
 
 
@@ -195,11 +197,11 @@ def main():
                 if not any(word in message.lower() for word in ('ppo','nonfinite','overflow','underflow','streaming')):raise
                 trial=dict(learning_rate=lr,epochs=args.epochs,acceptance=dict(passed=False,
                     failures={'numerical':message}),start_restore=audit,
-                    rejected_probability=rejected_probability_diagnostics(policy,rows,cache,distributed,
+                    rejected_probability=rejected_probability_diagnostics(policy,rows,cache,manifest,distributed,
                         config['stage9']['denoising_microbatch']),
                     wall_seconds=max(distributed.all_gather_object(time.perf_counter()-started)))
             trials.append(trial)
-            root_call(distributed,lambda:atomic_json(args.output_dir/f'candidate_lr{lr:.0e}_epoch{args.epochs}.json',trial))
+            root_call(distributed,lambda:atomic_json(args.output_dir/f'candidate_lr{lr:.8g}_epoch{args.epochs}.json',trial))
             if rank==0:print(json.dumps(dict(lr=lr,accepted=trial['acceptance']['passed'],
                 steps=trial.get('actor',{}).get('optimizer_steps'),
                 joint_kl=trial.get('kl',{}).get('chain_joint_kl'),
