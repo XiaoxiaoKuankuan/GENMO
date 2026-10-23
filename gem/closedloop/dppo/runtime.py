@@ -9,6 +9,8 @@
 GAE按各环境/episode/连续执行片段独立计算，全局标准化一次。Critic只在采集
 完成且尚未优化时固定old/next值；训练期间世界不推进。恢复只恢复逻辑计数、
 音乐游标和RNG身份，明确关闭旧episode并创建新PhysX状态，不恢复部分rollout。
+若已读入逻辑恢复状态但尚未开始首次采集，初始化快照保留这份待应用状态的独立
+副本；快照不提前创建环境、不消费采样游标，避免在首次采集前重启时遗失恢复点。
 完整随机链在当前优化和最终20步KL验收完成前由DeviceRolloutBuffer持有。
 """
 from __future__ import annotations
@@ -279,6 +281,10 @@ class InProcessTrainingRuntime:
 
     def checkpoint_state(self):
         if self.collector.active:raise RuntimeError('Checkpoint requires an idle world')
+        # 首次collect才在已预占的物理阶段应用逻辑恢复；此前仍须保存原采样池和
+        # 各环境游标，不能把新建的空collector冒充恢复后的状态。保留pending，
+        # 返回独立副本供异步快照使用；PhysX仍按原合同新建episode。
+        if hasattr(self,'saved_logical'):return copy.deepcopy(self.saved_logical)
         from gem.closedloop.dppo.execution_state import capture_execution_state
         records=[]
         for state in self.collector.states:
