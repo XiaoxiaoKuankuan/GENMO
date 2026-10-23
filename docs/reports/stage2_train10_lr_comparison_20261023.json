@@ -1,0 +1,827 @@
+{
+  "schema": "genmo.stage2.train10_root_reward_fixed_lr_comparison.v1",
+  "created_utc": "2026-10-23T05:23:05.293154+00:00",
+  "scope": "Finite eight-GPU fixed-real-data Adam experiments; not a post-update physical improvement evaluation.",
+  "source_commit": "d125376f61e172d814b047904a7559c2119c3f32",
+  "old_training": {
+    "path": "/data1/user/liwei/GENMO_outputs/closedloop_stage10/stage2_continuous_rolling_formal_20261022",
+    "status": "explicitly_stopped",
+    "iteration": 64,
+    "actor_updates": 253,
+    "checkpoint_sha256": "60163ce06a00ce1f514824318048f9c9fe3f5c34683eab82f5f5abbcc084321a"
+  },
+  "settings": {
+    "reward_std": {
+      "anchor_pos": 0.3,
+      "anchor_ori": 0.4,
+      "body_pos": 0.15,
+      "body_ori": 0.2,
+      "body_lin_vel": 1.0,
+      "body_ang_vel": 3.14,
+      "foot_height": 0.07,
+      "leg_joint_pos": 0.25
+    },
+    "source_std": {
+      "anchor_pos": 0.3,
+      "anchor_ori": 0.4,
+      "body_pos": 0.3,
+      "body_ori": 0.4,
+      "body_lin_vel": 1.0,
+      "body_ang_vel": 3.14,
+      "foot_height": 0.07,
+      "leg_joint_pos": 0.25
+    },
+    "trainable_denoising_steps": [
+      9,
+      10,
+      11,
+      12,
+      13,
+      14,
+      15,
+      16,
+      17,
+      18
+    ],
+    "total_denoising_steps": 20,
+    "frozen_prefix_steps": 9,
+    "deterministic_frozen_final_step": 19,
+    "ppo_clip": 0.1,
+    "ppo_objective": "full_chain_clipped_ppo",
+    "bc_enabled": false,
+    "gamma_upper": 0.95,
+    "lambda_upper": 0.98,
+    "lr_comparison_base": "Old nominal LR 3e-7; each comparison uses a fixed actual LR without backtracking, not old accepted LR."
+  },
+  "case": {
+    "path": "/data1/user/liwei/GENMO_outputs/closedloop_stage10/stage2_train10_lr_comparison_20261023/data_run/sessions/44f7b54f-42e9-4b23-92de-5161d58d663e/fixed_data_validation/iteration000001",
+    "case_sha256": "27cc278734c84ac44ead340a34de3d4b715945bfcd843288d31de2d4ed60ff13",
+    "learning_state_sha256": "40fc40d9e64c8f872f285283e8c352db89ce5a9304773ed22d247591aa8ae732",
+    "chains": 24536,
+    "control_steps": 357828,
+    "rollout_bytes": 18487608020,
+    "manifests": [
+      {
+        "schema": "genmo.stage2.asymmetric_validation_rollout.v1",
+        "path": "rollout.pt",
+        "size_bytes": 2312467766,
+        "sha256": "06a24713db7a938e88d7614c27790f0c5068af155766565bc0399085deb45129",
+        "real_upper_transitions": 3069,
+        "real_control_steps": 44748,
+        "real_physics_steps": 178992,
+        "full_execution_evidence": false
+      },
+      {
+        "schema": "genmo.stage2.asymmetric_validation_rollout.v1",
+        "path": "rollout.pt",
+        "size_bytes": 2310914360,
+        "sha256": "f0fc137e35b803d0e0adeb9759653cbaa7987fd8ab9cc936d3fc14c47fcf89cd",
+        "real_upper_transitions": 3067,
+        "real_control_steps": 44732,
+        "real_physics_steps": 178928,
+        "full_execution_evidence": false
+      },
+      {
+        "schema": "genmo.stage2.asymmetric_validation_rollout.v1",
+        "path": "rollout.pt",
+        "size_bytes": 2308652176,
+        "sha256": "d59ddcb809950215aa08cafa8d453942930df4e5903c3b407628d26f0f3907c7",
+        "real_upper_transitions": 3064,
+        "real_control_steps": 44686,
+        "real_physics_steps": 178744,
+        "full_execution_evidence": false
+      },
+      {
+        "schema": "genmo.stage2.asymmetric_validation_rollout.v1",
+        "path": "rollout.pt",
+        "size_bytes": 2309459670,
+        "sha256": "ac2a08a8aadd40529abe6c3feb8a7fc3a086f9ad420c3f1b5ea9eb585cecdc62",
+        "real_upper_transitions": 3065,
+        "real_control_steps": 44706,
+        "real_physics_steps": 178824,
+        "full_execution_evidence": false
+      },
+      {
+        "schema": "genmo.stage2.asymmetric_validation_rollout.v1",
+        "path": "rollout.pt",
+        "size_bytes": 2311715198,
+        "sha256": "81dd3b1cd21bd688cfb8eb86e3f442db9376e9d87b70e0f615a4f471255b2511",
+        "real_upper_transitions": 3068,
+        "real_control_steps": 44737,
+        "real_physics_steps": 178948,
+        "full_execution_evidence": false
+      },
+      {
+        "schema": "genmo.stage2.asymmetric_validation_rollout.v1",
+        "path": "rollout.pt",
+        "size_bytes": 2308650320,
+        "sha256": "27319229fd2ce0e94e90a36297aa47b60cd7881f7b10a6d04d69d9221f9602c6",
+        "real_upper_transitions": 3064,
+        "real_control_steps": 44688,
+        "real_physics_steps": 178752,
+        "full_execution_evidence": false
+      },
+      {
+        "schema": "genmo.stage2.asymmetric_validation_rollout.v1",
+        "path": "rollout.pt",
+        "size_bytes": 2310965254,
+        "sha256": "f1f6f54e64bb823e323878aeb846e816cfddb252eae90f30c3ba87cb9a2ae545",
+        "real_upper_transitions": 3067,
+        "real_control_steps": 44731,
+        "real_physics_steps": 178924,
+        "full_execution_evidence": false
+      },
+      {
+        "schema": "genmo.stage2.asymmetric_validation_rollout.v1",
+        "path": "rollout.pt",
+        "size_bytes": 2314783276,
+        "sha256": "01ecdd9fa7dcc23797102e1b593cc5017b720494be4a7043a757df47366db961",
+        "real_upper_transitions": 3072,
+        "real_control_steps": 44800,
+        "real_physics_steps": 179200,
+        "full_execution_evidence": false
+      }
+    ]
+  },
+  "mc_collection": {
+    "scope": "fresh_10_step_behavior_root_reward_v4_before_LR_updates",
+    "phases": {
+      "preheat_val": {
+        "episodes": 32,
+        "physical_failures": 0,
+        "end_reasons": {
+          "music_end": 32
+        },
+        "upper_decisions": 3547,
+        "control_steps": 52989,
+        "execution_seconds": 1059.78,
+        "zero_decision_episodes": 0,
+        "reward_sum": 2672.0091120734046,
+        "source_counts": {
+          "FineDance": 10,
+          "AIOZ-GDANCE": 8,
+          "Mine": 10,
+          "AIST++": 4
+        },
+        "episode_manifest_sha256": "a41ef13bdede12ffbd5a1c9b7a22ffc8769349c57e325aa0bd088ba2a6434529"
+      },
+      "preheat_train": {
+        "episodes": 192,
+        "physical_failures": 6,
+        "end_reasons": {
+          "non_yaw_anchor_ori": 5,
+          "music_end": 186,
+          "ee_body_pos": 1
+        },
+        "upper_decisions": 20066,
+        "control_steps": 299689,
+        "execution_seconds": 5993.78,
+        "zero_decision_episodes": 0,
+        "reward_sum": 13328.692977372188,
+        "source_counts": {
+          "FineDance": 48,
+          "Mine": 48,
+          "AIOZ-GDANCE": 48,
+          "AIST++": 48
+        },
+        "episode_manifest_sha256": "18d6ed60555aadbd07f8d50335317bc737645370cad8cf4ba21d182af18751f6"
+      }
+    }
+  },
+  "mc_preheat_report": {
+    "path": "/data1/user/liwei/GENMO_outputs/closedloop_stage10/stage2_train10_lr_comparison_20261023/data_run/sessions/f4de7942-7c2b-420e-b015-c68455629e5d/mc_calibration/preheat.json",
+    "sha256": "c0347aa942016b65f3b585e1c4fed9dd302d6784727b861591f66a9e6920fe32"
+  },
+  "probability": {
+    "passed": true,
+    "checked_steps": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12,
+      13,
+      14,
+      15,
+      16,
+      17,
+      18
+    ],
+    "frozen_identity": {
+      "schema": "genmo.stage2.frozen_identity_check.v1",
+      "checked": true,
+      "content_sha256": "6a8315e5cbce99cb06c4d6a8be434c698d67c517331169134521d0b7239a5a74",
+      "stochastic_frozen_steps": [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        8
+      ],
+      "deterministic_frozen_steps": [
+        19
+      ],
+      "verification": "immutable_tensor_versions_storage_runtime_settings_not_gaussian_replay"
+    },
+    "max_abs_log_probability_difference": 9.094947017729282e-13,
+    "max_abs_ratio_minus_one": 9.094947017729282e-13,
+    "max_abs_independent_gaussian_difference": 9.094947017729282e-13,
+    "actual_std_first_eligible_chain_by_rank": [
+      {
+        "9": 0.03621632605791092,
+        "10": 0.03284760192036629,
+        "11": 0.03003774583339691,
+        "12": 0.026982130482792854,
+        "13": 0.023747336119413376,
+        "14": 0.02063784748315811,
+        "15": 0.03999999910593033,
+        "16": 0.05999999865889549,
+        "17": 0.07999999821186066,
+        "18": 0.10000000149011612
+      },
+      {
+        "9": 0.03621632605791092,
+        "10": 0.03284760192036629,
+        "11": 0.03003774583339691,
+        "12": 0.026982130482792854,
+        "13": 0.023747336119413376,
+        "14": 0.02063784748315811,
+        "15": 0.03999999910593033,
+        "16": 0.05999999865889549,
+        "17": 0.07999999821186066,
+        "18": 0.10000000149011612
+      },
+      {
+        "9": 0.03621632605791092,
+        "10": 0.03284760192036629,
+        "11": 0.03003774583339691,
+        "12": 0.026982130482792854,
+        "13": 0.023747336119413376,
+        "14": 0.02063784748315811,
+        "15": 0.03999999910593033,
+        "16": 0.05999999865889549,
+        "17": 0.07999999821186066,
+        "18": 0.10000000149011612
+      },
+      {
+        "9": 0.03621632605791092,
+        "10": 0.03284760192036629,
+        "11": 0.03003774583339691,
+        "12": 0.026982130482792854,
+        "13": 0.023747336119413376,
+        "14": 0.02063784748315811,
+        "15": 0.03999999910593033,
+        "16": 0.05999999865889549,
+        "17": 0.07999999821186066,
+        "18": 0.10000000149011612
+      },
+      {
+        "9": 0.03621632605791092,
+        "10": 0.03284760192036629,
+        "11": 0.03003774583339691,
+        "12": 0.026982130482792854,
+        "13": 0.023747336119413376,
+        "14": 0.02063784748315811,
+        "15": 0.03999999910593033,
+        "16": 0.05999999865889549,
+        "17": 0.07999999821186066,
+        "18": 0.10000000149011612
+      },
+      {
+        "9": 0.03621632605791092,
+        "10": 0.03284760192036629,
+        "11": 0.03003774583339691,
+        "12": 0.026982130482792854,
+        "13": 0.023747336119413376,
+        "14": 0.02063784748315811,
+        "15": 0.03999999910593033,
+        "16": 0.05999999865889549,
+        "17": 0.07999999821186066,
+        "18": 0.10000000149011612
+      },
+      {
+        "9": 0.03621632605791092,
+        "10": 0.03284760192036629,
+        "11": 0.03003774583339691,
+        "12": 0.026982130482792854,
+        "13": 0.023747336119413376,
+        "14": 0.02063784748315811,
+        "15": 0.03999999910593033,
+        "16": 0.05999999865889549,
+        "17": 0.07999999821186066,
+        "18": 0.10000000149011612
+      },
+      {
+        "9": 0.03621632605791092,
+        "10": 0.03284760192036629,
+        "11": 0.03003774583339691,
+        "12": 0.026982130482792854,
+        "13": 0.023747336119413376,
+        "14": 0.02063784748315811,
+        "15": 0.03999999910593033,
+        "16": 0.05999999865889549,
+        "17": 0.07999999821186066,
+        "18": 0.10000000149011612
+      }
+    ],
+    "actual_std_scope": "normalized_Gaussian_sigma_not_floor_not_trajectory_diversity"
+  },
+  "gradient_validation": {
+    "passed": true,
+    "global_chains": 16,
+    "variants": [
+      {
+        "microbatch": 1,
+        "relative_gradient_l2": 2.851671888677268e-07,
+        "maximum_coordinate_error": 0.0001068115234375
+      },
+      {
+        "microbatch": 3,
+        "relative_gradient_l2": 3.771306518334974e-07,
+        "maximum_coordinate_error": 0.0001430511474609375
+      },
+      {
+        "microbatch": 8,
+        "relative_gradient_l2": 4.182835138685057e-07,
+        "maximum_coordinate_error": 0.000202178955078125
+      }
+    ],
+    "reference": "independent_FP64_Normal_full_10_step_Autograd_global_SUM",
+    "scope": "actual_stage1_network_and_real_behavior_rows_not_physics_quality"
+  },
+  "same_start_across_all_three_candidates": true,
+  "start_state_hashes": {
+    "actor": "bcb396e221bcf122982c3a60bf442d7563eb3e9c1ca160e4a4672a38e6a6f7e6",
+    "optimizer": "c77504972a4dc68dedca2bc23f74d1cc0b686c1e5936b114f7281558a127b35e",
+    "controller": "4eb1d96e9b606c7ff9718a563637f84e1a0f9cd815f6c460a0c89da8b5937a51",
+    "bc": "e1fc4564cf95729e4fe9737b4465d0d6a50f481ec5c1eebab4334a0ff261717f",
+    "rng": "e3b27fe38615f5bcab45eb60fee2a1528f642698160afd918b8d0dff9b897ff9"
+  },
+  "trials": [
+    {
+      "learning_rate": 3e-07,
+      "nominal_multiplier": 1.0,
+      "source_report": "/data1/user/liwei/GENMO_outputs/closedloop_stage10/stage2_train10_lr_comparison_20261023/fixed_lr/candidate_lr3e-07_epoch1.json",
+      "source_report_sha256": "0c875266927c64cdbd0ffb0e8cd59b251d1cb1ea352bf841e245e9fe2fb03c9e",
+      "wall_seconds": 279.71386747807264,
+      "start_restore": {
+        "scope": "complete_state_exact_bytes",
+        "fields": {
+          "actor": {
+            "expected_sha256": "bcb396e221bcf122982c3a60bf442d7563eb3e9c1ca160e4a4672a38e6a6f7e6",
+            "recovered_sha256": "bcb396e221bcf122982c3a60bf442d7563eb3e9c1ca160e4a4672a38e6a6f7e6",
+            "identical": true
+          },
+          "optimizer": {
+            "expected_sha256": "c77504972a4dc68dedca2bc23f74d1cc0b686c1e5936b114f7281558a127b35e",
+            "recovered_sha256": "c77504972a4dc68dedca2bc23f74d1cc0b686c1e5936b114f7281558a127b35e",
+            "identical": true
+          },
+          "controller": {
+            "expected_sha256": "4eb1d96e9b606c7ff9718a563637f84e1a0f9cd815f6c460a0c89da8b5937a51",
+            "recovered_sha256": "4eb1d96e9b606c7ff9718a563637f84e1a0f9cd815f6c460a0c89da8b5937a51",
+            "identical": true
+          },
+          "bc": {
+            "expected_sha256": "e1fc4564cf95729e4fe9737b4465d0d6a50f481ec5c1eebab4334a0ff261717f",
+            "recovered_sha256": "e1fc4564cf95729e4fe9737b4465d0d6a50f481ec5c1eebab4334a0ff261717f",
+            "identical": true
+          },
+          "rng": {
+            "expected_sha256": "e3b27fe38615f5bcab45eb60fee2a1528f642698160afd918b8d0dff9b897ff9",
+            "recovered_sha256": "e3b27fe38615f5bcab45eb60fee2a1528f642698160afd918b8d0dff9b897ff9",
+            "identical": true
+          }
+        },
+        "identical": true
+      },
+      "formal_optimizer_steps_committed": 0,
+      "global_gradient_batch_chains": 8192,
+      "full_diagnostic_chains": 24536,
+      "diagnostic_adam_steps": 1,
+      "hard_kl_acceptance": {
+        "passed": true,
+        "failures": {},
+        "units": "explicit_joint_or_coordinate_never_reuse_one_threshold",
+        "joint_gate_is_empirical_not_theoretical_safety": true
+      },
+      "production_conditions": {
+        "passed": false,
+        "failures": {
+          "chain_joint_mean": {
+            "value": 0.1858818153370568,
+            "limit": 0.08000000000000002
+          },
+          "step_1": {
+            "chain_joint_mean": {
+              "value": 0.1858818153370568,
+              "limit": 0.08000000000000002
+            }
+          },
+          "objective_gain": {
+            "value": -0.07948126225932224,
+            "optimizer_step": 1
+          }
+        },
+        "units": "explicit_joint_or_coordinate_never_reuse_one_threshold",
+        "joint_gate_is_empirical_not_theoretical_safety": true,
+        "scope": "existing_production_conditions_diagnostic_only_no_formal_step_committed"
+      },
+      "full_rollout_objective_before": 9.266941451060974e-18,
+      "full_rollout_objective_after": -0.07948126225932223,
+      "full_rollout_objective_gain": -0.07948126225932223,
+      "joint_score_gain": 0.1194577903616275,
+      "chain_joint_kl": {
+        "min": 0.023389552303064304,
+        "p01": 0.05978704592983846,
+        "p05": 0.0836834870254783,
+        "median": 0.18438584310129874,
+        "p95": 0.2971396224507749,
+        "p99": 0.3687012876824135,
+        "max": 1.3668820928249152,
+        "mean": 0.1858818153370568
+      },
+      "active_clip_fraction": 0.4400065210303228,
+      "ratio_clip_fraction": 0.8706390609716336,
+      "parameter_update_all": {
+        "elements": 211496736,
+        "changed_elements": 208804175,
+        "changed_fraction": 0.987269018657574,
+        "update_rms": 6.82017619754223e-08,
+        "update_max": 4.637986421585083e-07,
+        "relative_update_norm": 2.930079165960064e-06,
+        "parameter_rms": 0.023276422960768515,
+        "gradient_rms_after_clip": 6.876194517506322e-05,
+        "gradient_norm_after_clip": 0.9999999733445952,
+        "gradient_norm_before_clip": 2303.6876837348955,
+        "clip_factor": 0.0004340866083562712,
+        "nonzero_gradient_elements": 210445086,
+        "nonzero_gradient_unchanged_fraction": 0.007797335785735572,
+        "nonzero_adam_delta_elements": 210445086,
+        "fp32_rounded_to_zero_fraction": 0.007797335785735572,
+        "adam_subtraction_fp64_delta_rms": 6.819888309545496e-08,
+        "update_dot_negative_ppo_gradient": 0.3402363579969615,
+        "update_dot_negative_weighted_bc_gradient": 0.0,
+        "update_dot_negative_combined_gradient": 0.3402363579969615,
+        "cosine_update_negative_ppo_gradient": 0.14890513773975084,
+        "cosine_update_negative_weighted_bc_gradient": null,
+        "cosine_update_negative_combined_gradient": 0.14890513773975084,
+        "ppo_gradient_norm": 2303.6877284509064,
+        "weighted_bc_gradient_norm": 0.0,
+        "combined_gradient_norm": 2303.6877284509064
+      },
+      "per_step_kl_means": {
+        "9": 0.00558964659966796,
+        "10": 0.007174849523271396,
+        "11": 0.010174386558299628,
+        "12": 0.015058774538854396,
+        "13": 0.02349620463632899,
+        "14": 0.04319249006846315,
+        "15": 0.01630728170787187,
+        "16": 0.012494872738601785,
+        "17": 0.01443756774399433,
+        "18": 0.037955741221703344
+      },
+      "newly_trainable_six_step_kl_fraction": 0.5631876993188347,
+      "reference_probe": {
+        "scope": "regenerated_final_deterministic_reference_same_initial_state_and_saved_innovations_not_physics",
+        "samples": 128,
+        "mean_joint_rms_rad": 0.00035896411143215314,
+        "mean_root_position_rms_m": 2.396641689195178e-05,
+        "mean_root_orientation_rms_rad": 0.00020711688637697857
+      },
+      "peak_allocated_bytes": 29673350656,
+      "original_report_caveat": "Original acceptance was hard KL only; original current_minibatch scope is a report bug. Objective fields explicitly use the full 24536-chain rollout. No formal checkpoint was written."
+    },
+    {
+      "learning_rate": 3e-06,
+      "nominal_multiplier": 10.0,
+      "source_report": "/data1/user/liwei/GENMO_outputs/closedloop_stage10/stage2_train10_lr_comparison_20261023/fixed_lr/candidate_lr3e-06_epoch1.json",
+      "source_report_sha256": "9e94365ecaf87b61fc4e8121ca4c977dd58eb9e87d1a57fa60e82da7799e6244",
+      "wall_seconds": 278.6822046721354,
+      "start_restore": {
+        "scope": "complete_state_exact_bytes",
+        "fields": {
+          "actor": {
+            "expected_sha256": "bcb396e221bcf122982c3a60bf442d7563eb3e9c1ca160e4a4672a38e6a6f7e6",
+            "recovered_sha256": "bcb396e221bcf122982c3a60bf442d7563eb3e9c1ca160e4a4672a38e6a6f7e6",
+            "identical": true
+          },
+          "optimizer": {
+            "expected_sha256": "c77504972a4dc68dedca2bc23f74d1cc0b686c1e5936b114f7281558a127b35e",
+            "recovered_sha256": "c77504972a4dc68dedca2bc23f74d1cc0b686c1e5936b114f7281558a127b35e",
+            "identical": true
+          },
+          "controller": {
+            "expected_sha256": "4eb1d96e9b606c7ff9718a563637f84e1a0f9cd815f6c460a0c89da8b5937a51",
+            "recovered_sha256": "4eb1d96e9b606c7ff9718a563637f84e1a0f9cd815f6c460a0c89da8b5937a51",
+            "identical": true
+          },
+          "bc": {
+            "expected_sha256": "e1fc4564cf95729e4fe9737b4465d0d6a50f481ec5c1eebab4334a0ff261717f",
+            "recovered_sha256": "e1fc4564cf95729e4fe9737b4465d0d6a50f481ec5c1eebab4334a0ff261717f",
+            "identical": true
+          },
+          "rng": {
+            "expected_sha256": "e3b27fe38615f5bcab45eb60fee2a1528f642698160afd918b8d0dff9b897ff9",
+            "recovered_sha256": "e3b27fe38615f5bcab45eb60fee2a1528f642698160afd918b8d0dff9b897ff9",
+            "identical": true
+          }
+        },
+        "identical": true
+      },
+      "formal_optimizer_steps_committed": 0,
+      "global_gradient_batch_chains": 8192,
+      "full_diagnostic_chains": 24536,
+      "diagnostic_adam_steps": 1,
+      "hard_kl_acceptance": {
+        "passed": false,
+        "failures": {
+          "chain_joint_mean": {
+            "value": 18.584600292329256,
+            "limit": 0.2
+          },
+          "chain_joint_p95": {
+            "value": 29.710687250799793,
+            "limit": 0.6
+          },
+          "chain_joint_p99": {
+            "value": 36.83111474927965,
+            "limit": 0.9
+          },
+          "chain_joint_max": {
+            "value": 136.4024272026354,
+            "limit": 2.0
+          }
+        },
+        "units": "explicit_joint_or_coordinate_never_reuse_one_threshold",
+        "joint_gate_is_empirical_not_theoretical_safety": true
+      },
+      "production_conditions": {
+        "passed": false,
+        "failures": {
+          "chain_joint_mean": {
+            "value": 18.584600292329256,
+            "limit": 0.08000000000000002
+          },
+          "chain_joint_p95": {
+            "value": 29.710687250799793,
+            "limit": 0.48
+          },
+          "chain_joint_p99": {
+            "value": 36.83111474927965,
+            "limit": 0.7200000000000001
+          },
+          "chain_joint_max": {
+            "value": 136.4024272026354,
+            "limit": 1.6
+          },
+          "step_1": {
+            "chain_joint_mean": {
+              "value": 18.584600292329256,
+              "limit": 0.08000000000000002
+            },
+            "chain_joint_p95": {
+              "value": 29.710687250799793,
+              "limit": 0.48
+            },
+            "chain_joint_p99": {
+              "value": 36.83111474927965,
+              "limit": 0.7200000000000001
+            },
+            "chain_joint_max": {
+              "value": 136.4024272026354,
+              "limit": 1.6
+            }
+          },
+          "objective_gain": {
+            "value": -0.25111215957851196,
+            "optimizer_step": 1
+          }
+        },
+        "units": "explicit_joint_or_coordinate_never_reuse_one_threshold",
+        "joint_gate_is_empirical_not_theoretical_safety": true,
+        "scope": "existing_production_conditions_diagnostic_only_no_formal_step_committed"
+      },
+      "full_rollout_objective_before": 9.266941451060974e-18,
+      "full_rollout_objective_after": -0.25111215957851196,
+      "full_rollout_objective_gain": -0.25111215957851196,
+      "joint_score_gain": 2.0343044668773307,
+      "chain_joint_kl": {
+        "min": 2.3443628843446134,
+        "p01": 5.976331018820076,
+        "p05": 8.378096006622364,
+        "median": 18.424453060850674,
+        "p95": 29.710687250799793,
+        "p99": 36.83111474927965,
+        "max": 136.4024272026354,
+        "mean": 18.584600292329256
+      },
+      "active_clip_fraction": 0.432222041082491,
+      "ratio_clip_fraction": 0.9993886534072384,
+      "parameter_update_all": {
+        "elements": 211496736,
+        "changed_elements": 210280704,
+        "changed_fraction": 0.99425035098414,
+        "update_rms": 6.819891116622922e-07,
+        "update_max": 4.636123776435852e-06,
+        "relative_update_norm": 2.929956689701668e-05,
+        "parameter_rms": 0.023276422960768515,
+        "gradient_rms_after_clip": 6.876194517506322e-05,
+        "gradient_norm_after_clip": 0.9999999733445952,
+        "gradient_norm_before_clip": 2303.6876837348955,
+        "clip_factor": 0.0004340866083562712,
+        "nonzero_gradient_elements": 210445086,
+        "nonzero_gradient_unchanged_fraction": 0.0007811158869254852,
+        "nonzero_adam_delta_elements": 210445086,
+        "fp32_rounded_to_zero_fraction": 0.0007811158869254852,
+        "adam_subtraction_fp64_delta_rms": 6.819888309545498e-07,
+        "update_dot_negative_ppo_gradient": 3.4023422163476478,
+        "update_dot_negative_weighted_bc_gradient": 0.0,
+        "update_dot_negative_combined_gradient": 3.4023422163476478,
+        "cosine_update_negative_ppo_gradient": 0.14891042715892253,
+        "cosine_update_negative_weighted_bc_gradient": null,
+        "cosine_update_negative_combined_gradient": 0.14891042715892253,
+        "ppo_gradient_norm": 2303.6877284509064,
+        "weighted_bc_gradient_norm": 0.0,
+        "combined_gradient_norm": 2303.6877284509064
+      },
+      "per_step_kl_means": {
+        "9": 0.5592334199465612,
+        "10": 0.7176879026443814,
+        "11": 1.017694357489889,
+        "12": 1.5059622283967122,
+        "13": 2.3495234145409323,
+        "14": 4.317532508978568,
+        "15": 1.6302607194591947,
+        "16": 1.2490105155262177,
+        "17": 1.443380360220928,
+        "18": 3.79431486512587
+      },
+      "newly_trainable_six_step_kl_fraction": 0.563242344056091,
+      "reference_probe": {
+        "scope": "regenerated_final_deterministic_reference_same_initial_state_and_saved_innovations_not_physics",
+        "samples": 128,
+        "mean_joint_rms_rad": 0.0035866539118770105,
+        "mean_root_position_rms_m": 0.00023975697034472887,
+        "mean_root_orientation_rms_rad": 0.002065319172762523
+      },
+      "peak_allocated_bytes": 29678906880,
+      "original_report_caveat": "Original acceptance was hard KL only; original current_minibatch scope is a report bug. Objective fields explicitly use the full 24536-chain rollout. No formal checkpoint was written."
+    },
+    {
+      "learning_rate": 1.5e-05,
+      "nominal_multiplier": 50.0,
+      "source_report": "/data1/user/liwei/GENMO_outputs/closedloop_stage10/stage2_train10_lr_comparison_20261023/fixed_lr_50x/candidate_lr1.5e-05_epoch1.json",
+      "source_report_sha256": "572c64c6f3462408a7219bf8e87e85b32cc4d145103ee9021aac1935b355f188",
+      "wall_seconds": 278.52486700285226,
+      "start_restore": {
+        "scope": "complete_state_exact_bytes",
+        "fields": {
+          "actor": {
+            "expected_sha256": "bcb396e221bcf122982c3a60bf442d7563eb3e9c1ca160e4a4672a38e6a6f7e6",
+            "recovered_sha256": "bcb396e221bcf122982c3a60bf442d7563eb3e9c1ca160e4a4672a38e6a6f7e6",
+            "identical": true
+          },
+          "optimizer": {
+            "expected_sha256": "c77504972a4dc68dedca2bc23f74d1cc0b686c1e5936b114f7281558a127b35e",
+            "recovered_sha256": "c77504972a4dc68dedca2bc23f74d1cc0b686c1e5936b114f7281558a127b35e",
+            "identical": true
+          },
+          "controller": {
+            "expected_sha256": "4eb1d96e9b606c7ff9718a563637f84e1a0f9cd815f6c460a0c89da8b5937a51",
+            "recovered_sha256": "4eb1d96e9b606c7ff9718a563637f84e1a0f9cd815f6c460a0c89da8b5937a51",
+            "identical": true
+          },
+          "bc": {
+            "expected_sha256": "e1fc4564cf95729e4fe9737b4465d0d6a50f481ec5c1eebab4334a0ff261717f",
+            "recovered_sha256": "e1fc4564cf95729e4fe9737b4465d0d6a50f481ec5c1eebab4334a0ff261717f",
+            "identical": true
+          },
+          "rng": {
+            "expected_sha256": "e3b27fe38615f5bcab45eb60fee2a1528f642698160afd918b8d0dff9b897ff9",
+            "recovered_sha256": "e3b27fe38615f5bcab45eb60fee2a1528f642698160afd918b8d0dff9b897ff9",
+            "identical": true
+          }
+        },
+        "identical": true
+      },
+      "formal_optimizer_steps_committed": 0,
+      "global_gradient_batch_chains": 8192,
+      "full_diagnostic_chains": 24536,
+      "diagnostic_adam_steps": 1,
+      "diagnostic_adam_evidence": "Fixed candidate executes one Adam before full-rollout ratio checking; unchanged starting state has zero KL, post-attempt KL is nonzero.",
+      "full_rollout_objective_gain": null,
+      "objective_unavailable_reason": "Strict FP64 ratio underflow; no clamping or sample exclusion was used.",
+      "production_conditions": {
+        "passed": false,
+        "failures": {
+          "numerical": "PPO candidate must be rolled back: {\"nonfinite_fraction\": 0.0, \"ratio_overflow_fraction\": 0.0, \"ratio_underflow_fraction\": 0.05171992174763613, \"action\": \"reject_candidate_without_ratio_clamp_or_sample_filter\"}"
+        }
+      },
+      "chain_joint_kl": {
+        "min": 59.1488640319095,
+        "p01": 149.48317250614238,
+        "p05": 209.87872792620982,
+        "median": 460.42391282605786,
+        "p95": 742.362083803198,
+        "p99": 920.0065393400707,
+        "max": 3372.899757660178,
+        "mean": 464.35897032851653
+      },
+      "rejected_probability": {
+        "chain_joint_kl": {
+          "min": 59.1488640319095,
+          "p01": 149.48317250614238,
+          "p05": 209.87872792620982,
+          "median": 460.42391282605786,
+          "p95": 742.362083803198,
+          "p99": 920.0065393400707,
+          "max": 3372.899757660178,
+          "mean": 464.35897032851653
+        },
+        "chain_joint_log_ratio": {
+          "min": -3793.632370100717,
+          "p01": -928.5554232071826,
+          "p05": -747.8056000113647,
+          "median": -457.59705882491437,
+          "p95": -207.1441888743985,
+          "p99": -147.9818262482441,
+          "max": -40.79814983414526,
+          "mean": -464.62568014622616
+        },
+        "gaussian_steps": [
+          9,
+          10,
+          11,
+          12,
+          13,
+          14,
+          15,
+          16,
+          17,
+          18
+        ],
+        "chains": 24536,
+        "ratio_underflow_fraction": 0.05171992174763613,
+        "ratio_overflow_fraction": 0.0,
+        "accepted": false,
+        "scope": "unclamped_Gaussian_statistics_after_rejected_Adam_attempt"
+      }
+    }
+  ],
+  "final_restore": {
+    "scope": "complete_state_exact_bytes",
+    "fields": {
+      "actor": {
+        "expected_sha256": "bcb396e221bcf122982c3a60bf442d7563eb3e9c1ca160e4a4672a38e6a6f7e6",
+        "recovered_sha256": "bcb396e221bcf122982c3a60bf442d7563eb3e9c1ca160e4a4672a38e6a6f7e6",
+        "identical": true
+      },
+      "optimizer": {
+        "expected_sha256": "c77504972a4dc68dedca2bc23f74d1cc0b686c1e5936b114f7281558a127b35e",
+        "recovered_sha256": "c77504972a4dc68dedca2bc23f74d1cc0b686c1e5936b114f7281558a127b35e",
+        "identical": true
+      },
+      "controller": {
+        "expected_sha256": "4eb1d96e9b606c7ff9718a563637f84e1a0f9cd815f6c460a0c89da8b5937a51",
+        "recovered_sha256": "4eb1d96e9b606c7ff9718a563637f84e1a0f9cd815f6c460a0c89da8b5937a51",
+        "identical": true
+      },
+      "bc": {
+        "expected_sha256": "e1fc4564cf95729e4fe9737b4465d0d6a50f481ec5c1eebab4334a0ff261717f",
+        "recovered_sha256": "e1fc4564cf95729e4fe9737b4465d0d6a50f481ec5c1eebab4334a0ff261717f",
+        "identical": true
+      },
+      "rng": {
+        "expected_sha256": "e3b27fe38615f5bcab45eb60fee2a1528f642698160afd918b8d0dff9b897ff9",
+        "recovered_sha256": "e3b27fe38615f5bcab45eb60fee2a1528f642698160afd918b8d0dff9b897ff9",
+        "identical": true
+      }
+    },
+    "identical": true
+  },
+  "formal_optimizer_steps_committed": 0,
+  "finite_trial_completion_proof": {
+    "path": "/data1/user/liwei/GENMO_outputs/closedloop_stage10/stage2_train10_lr_comparison_20261023/fixed_lr_50x/summary.json",
+    "sha256": "170333813581d43b99a48b565bf9d1e36b165af359aba180873d605e91302e98"
+  },
+  "limitations": [
+    "No post-update PhysX paired reward evaluation.",
+    "Only the first 8192-chain optimizer step was compared; all 24536 chains were used to audit the objective/KL.",
+    "The first combined trial process exited before 50x because of a legacy 1e-5 LR ceiling; original files are retained. The corrected 50x run used identical saved Actor/Adam/RNG.",
+    "KL and gradient agreement do not establish physical learning benefit."
+  ]
+}
