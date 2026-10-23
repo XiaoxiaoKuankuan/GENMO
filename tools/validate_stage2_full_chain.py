@@ -209,48 +209,62 @@ def rejected_probability_diagnostics(policy,rows,cache,manifest,distributed,micr
 
 
 def gradient_validation(policy,rows,cache,distributed):
-    selected=[row for row in rows if row.free_mask.any()][:2]
-    denominator=sum(distributed.all_gather_object(len(selected)))
+    """本地计算先协作传播异常，再执行SUM；独立Normal公式和2e-5门槛不变。"""
     actor=policy.actor;device=distributed.device
-    actor.zero_grad(set_to_none=True)
-    with policy_phase(policy):
-        terms=[]
-        for step in policy.trainable_steps:
-            params,mask=_parameters(policy,selected,[step]*len(selected),device,cache)
-            old_mean,old_std=_old_kernel(selected,[step]*len(selected),device,cache)
-            value=cache.get('chain',selected,[step+1]*len(selected)).double()
-            a=torch.distributions.Normal(params['mean'].double(),params['std'].double())
-            b=torch.distributions.Normal(old_mean,old_std)
-            terms.append((a.log_prob(value)-b.log_prob(value)).masked_fill(~mask,0.).sum((-2,-1)))
-        log=torch.stack(terms,1).sum(1);adv=cache.get('advantages',selected).double()
-        loss=-torch.minimum(log.exp()*adv,log.exp().clamp(.9,1.1)*adv).sum()/denominator
-        loss.backward()
-    distributed.sum_gradients(actor)
-    reference={n:p.grad.detach().clone() for n,p in actor.named_parameters() if p.grad is not None}
-    variants=[]
-    # 同一独立Normal参考额外核验条件图分块；每rank两条真实链可实际触发1+1尾块。
-    # None保留原无界执行参考，1024对应正式默认；此小样本不替代全批量显存测量。
-    for micro,condition_chunk in ((1,None),(3,1024),(8,1024),(128,None),(128,1)):
+    try:
+        selected=local_call(distributed,lambda:[row for row in rows if row.free_mask.any()][:2])
+        denominator=sum(distributed.all_gather_object(len(selected)))
         actor.zero_grad(set_to_none=True)
-        with policy_phase(policy):
-            records=evaluate_chain_records(policy,selected,cache,microbatch=micro)
-            streamed=backward_chain_surrogate(policy,selected,cache,records,clip=.1,
-                global_chain_count=denominator,microbatch=micro,
-                condition_chunk_chains=condition_chunk)
+        def independent_backward():
+            with policy_phase(policy):
+                terms=[]
+                for step in policy.trainable_steps:
+                    params,mask=_parameters(policy,selected,[step]*len(selected),device,cache)
+                    old_mean,old_std=_old_kernel(selected,[step]*len(selected),device,cache)
+                    value=cache.get('chain',selected,[step+1]*len(selected)).double()
+                    a=torch.distributions.Normal(params['mean'].double(),params['std'].double())
+                    b=torch.distributions.Normal(old_mean,old_std)
+                    terms.append((a.log_prob(value)-b.log_prob(value)).masked_fill(~mask,0.).sum((-2,-1)))
+                log=torch.stack(terms,1).sum(1);adv=cache.get('advantages',selected).double()
+                loss=-torch.minimum(log.exp()*adv,log.exp().clamp(.9,1.1)*adv).sum()/denominator
+                loss.backward()
+        local_call(distributed,independent_backward)
         distributed.sum_gradients(actor)
-        delta=sum((p.grad.double()-reference[n].double()).square().sum()
-            for n,p in actor.named_parameters() if n in reference)
-        scale=sum(g.double().square().sum() for g in reference.values())
-        relative=float((delta/scale).sqrt())
-        maximum=max(float((p.grad-reference[n]).abs().max()) for n,p in actor.named_parameters() if n in reference)
-        variants.append(dict(microbatch=micro,condition_chunk_chains=condition_chunk,
-            relative_gradient_l2=relative,maximum_coordinate_error=maximum,
-            recompute_max_error=float(streamed['recompute_max_error'])))
-        if relative>2e-5:raise AssertionError('Real GPU streamed gradient mismatch: '+repr(variants[-1]))
-    actor.zero_grad(set_to_none=True)
-    return dict(passed=True,global_chains=denominator,variants=variants,
-        reference=f'independent_FP64_Normal_full_{len(policy.trainable_steps)}_step_Autograd_global_SUM',
-        scope='actual_stage1_network_and_real_behavior_rows_not_physics_quality')
+        reference=local_call(distributed,lambda:{n:p.grad.detach().clone()
+            for n,p in actor.named_parameters() if p.grad is not None})
+        variants=[]
+        # 同一独立Normal参考额外核验条件图分块；每rank两条真实链可实际触发1+1尾块。
+        # None保留原无界执行参考，1024对应正式默认；此小样本不替代全批量显存测量。
+        for micro,condition_chunk in ((1,None),(3,1024),(8,1024),(128,None),(128,1)):
+            actor.zero_grad(set_to_none=True)
+            def streamed_backward():
+                with policy_phase(policy):
+                    records=evaluate_chain_records(policy,selected,cache,microbatch=micro)
+                    return backward_chain_surrogate(policy,selected,cache,records,clip=.1,
+                        global_chain_count=denominator,microbatch=micro,
+                        condition_chunk_chains=condition_chunk)
+            streamed=local_call(distributed,streamed_backward)
+            distributed.sum_gradients(actor)
+            def compare():
+                current={n:p.grad for n,p in actor.named_parameters() if p.grad is not None}
+                if set(current)!=set(reference):raise AssertionError('Streamed gradient presence differs')
+                delta=sum((current[n].double()-reference[n].double()).square().sum() for n in reference)
+                scale=sum(g.double().square().sum() for g in reference.values())
+                relative=float((delta/scale).sqrt())
+                maximum=max(float((current[n]-reference[n]).abs().max()) for n in reference)
+                result=dict(relative_gradient_l2=relative,maximum_coordinate_error=maximum,
+                    recompute_max_error=float(streamed['recompute_max_error']))
+                if not all(math.isfinite(value) for value in result.values()) or relative>2e-5:
+                    raise AssertionError('Real GPU streamed gradient mismatch: '+repr(result))
+                return result
+            comparisons=distributed.all_gather_object(local_call(distributed,compare))
+            variants.append(dict(microbatch=micro,condition_chunk_chains=condition_chunk,
+                **{key:max(value[key] for value in comparisons) for key in comparisons[0]}))
+        return dict(passed=True,global_chains=denominator,variants=variants,
+            reference=f'independent_FP64_Normal_full_{len(policy.trainable_steps)}_step_Autograd_global_SUM',
+            scope='actual_stage1_network_and_real_behavior_rows_not_physics_quality')
+    finally:
+        actor.zero_grad(set_to_none=True)
 
 
 def condition_chunk_boundary_validation(policy,rows,cache,manifest,distributed):
