@@ -91,6 +91,7 @@ def generate_batch(policy, packets, *, shared_storage=False, device_trace=False)
     device_conditions = {k:v.to(device) for k,v in conditions.items()}
     generators = [torch.Generator(device=device).manual_seed(p['seed']) for p in packets]
     trace = policy.sample_rollout(device_conditions, generator=generators)
+    sampled_end = time.perf_counter()
     anchors = torch.tensor([m['world_anchor'] for m in metadata], device=device, dtype=torch.float32)
     world = policy.actor.endecoder.codec.apply_world_anchor(trace['qpos'], anchors)
     finite = torch.stack([torch.isfinite(v).all() for v in (world,trace['qpos30'],trace['contact'])]).all()
@@ -98,6 +99,7 @@ def generate_batch(policy, packets, *, shared_storage=False, device_trace=False)
     from .joint_limits import generated_boundaries_tensors,generated_boundary_reports
     boundary=generated_boundaries_tensors(world,trace['free_mask'][:,:,9:],
         [p['snapshot'] for p in packets],policy.actor.endecoder.kinematics.joint_order,check_finite=False)
+    world_end = time.perf_counter()
     # 部署必需输出与训练专用完整链分开计时；不能将前者误扣成审计传输。
     output_transfer_begin = time.perf_counter()
     critical = bulk_cpu_copy(dict(qpos_world=world, qpos30=trace['qpos30'], contact=trace['contact'],boundary=boundary))
@@ -134,6 +136,8 @@ def generate_batch(policy, packets, *, shared_storage=False, device_trace=False)
         block=dict(schema='genmo.stage2.asymmetric_world_batch.v1',trace=copied['trace'],generated=[item['generated'] for item in outputs])
         for index,item in enumerate(outputs):item['_shared_raw_block']=(block,index)
     return outputs, dict(condition_batch_seconds=condition_end-started,
+        complete_sample_seconds=sampled_end-condition_end,
+        world_and_boundary_seconds=world_end-sampled_end,
         generate_and_world_seconds=generated_end-condition_end, bulk_trace_transfer_seconds=finished-generated_end,
         critical_output_transfer_seconds=generated_end-output_transfer_begin,
         boundary_report_cpu_seconds=boundary_report_end-finished,

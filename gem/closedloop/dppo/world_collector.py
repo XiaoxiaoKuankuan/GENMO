@@ -360,14 +360,29 @@ class WorldEnvironmentCollector:
             yield from backend_operation('discard_plan',prepared_plan_id=sample['prepared']['prepared_plan_id'])
             env.decision+=1
             return sample['critical_ready_seconds']
-        for index in range(warmup+samples):
-            records=self._drive({i:generate(i) for i in range(self.num_envs)})
-            if index>=warmup:
-                for slot,value in records.items():durations[slot].append(value)
+        # 记录Python循环垃圾回收真实停顿，不删慢样本，不从部署延迟扣除。
+        import gc
+        gc_events=[];gc_started={}
+        def observe_gc(phase,info):
+            generation=info['generation']
+            if phase=='start':gc_started[generation]=time.perf_counter()
+            elif generation in gc_started:
+                gc_events.append(dict(sample_index=index,generation=generation,
+                    seconds=time.perf_counter()-gc_started.pop(generation),
+                    collected=info['collected'],uncollectable=info['uncollectable']))
+        gc.callbacks.append(observe_gc)
+        try:
+            for index in range(warmup+samples):
+                records=self._drive({i:generate(i) for i in range(self.num_envs)})
+                if index>=warmup:
+                    for slot,value in records.items():durations[slot].append(value)
+        finally:
+            gc.callbacks.remove(observe_gc)
         self._drive({i:backend_operation('retire') for i in range(self.num_envs)})
         clock=self.states[0].resource.env.deployment_clock
         return dict(durations=durations,calibration_reservation_seconds=self.states[0].resource.env.latency_budget_s,
-            batches=self.batch_reports,deployment_profile_sha256=None if clock is None else clock.sha256,
+            batches=self.batch_reports,gc_events=gc_events,
+            deployment_profile_sha256=None if clock is None else clock.sha256,
             scope='measured_generation_prepare_wallclock_without_execution_no_prior_latency_profile')
 
     def close(self):
