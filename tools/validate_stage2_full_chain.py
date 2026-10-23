@@ -49,6 +49,35 @@ from gem.closedloop.dppo.updater import actor_update,final_kl
 from gem.closedloop.dppo.actor_backtracking import check_candidate_kl
 
 
+def candidate_update_checks(report,kl,config):
+    """分开报告硬KL和正式目标感知条件；离线候选不会提交到正式训练计数。
+
+    固定LR试探故意不回溯，可能KL硬门槛通过但PPO目标下降。按生产原有margin、
+    soft KL、active clip和目标条件重新判读；这里只解释结果，不改变本次真实更新。
+    """
+    hard=check_candidate_kl(kl,config['stage10']['kl'])
+    settings=config['stage9'];trust=settings['trust_region']
+    limits={k:v*trust['margin'] for k,v in config['stage10']['kl'].items() if k.startswith('chain_joint_')}
+    limits['chain_joint_mean']=min(limits['chain_joint_mean'],settings['kl_soft_stop_chain_joint']*trust['margin'])
+    limits['maximum_active_clip']=settings['max_active_clip_fraction']
+    eligible=check_candidate_kl(kl,limits)
+    if report['optimizer_steps']<1:eligible['failures']['no_optimizer_step']=True
+    if trust.get('objective_aware'):
+        for step in report['steps']:
+            before=step.get('full_rollout_before');after=step.get('full_rollout_after')
+            if before is None or after is None:
+                eligible['failures']['objective_evidence_missing']=True
+            else:
+                step_check=check_candidate_kl(after,limits)
+                if step_check['failures']:eligible['failures'][f'step_{step["optimizer_step"]}']=step_check['failures']
+                if after['objective_mean']<before['objective_mean']-trust.get('objective_tolerance',1e-10):
+                    eligible['failures']['objective_gain']=dict(value=after['objective_mean']-before['objective_mean'],
+                        optimizer_step=step['optimizer_step'])
+    eligible['passed']=not eligible['failures']
+    eligible['scope']='existing_production_conditions_diagnostic_only_no_formal_step_committed'
+    return hard,eligible
+
+
 @torch.no_grad()
 def rejected_probability_diagnostics(policy,rows,cache,manifest,distributed,microbatch):
     """高LR指数溢出时只报告真实log-ratio/KL，不截断概率、不把拒绝更新当作成功。"""
@@ -193,9 +222,11 @@ def main():
                     max_active_clip=config['stage9']['max_active_clip_fraction'],
                     trust_region=trust,kl_limits=config['stage10']['kl'])
                 kl=final_kl(policy,rows,cache,manifest,distributed=distributed,microbatch=128,clip=.1)
-                acceptance=check_candidate_kl(kl,config['stage10']['kl'])
-                report['accepted_optimizer_steps']=report['optimizer_steps'] if acceptance['passed'] else 0
+                hard,acceptance=candidate_update_checks(report,kl,config)
+                report['accepted_optimizer_steps']=0
+                report['diagnostic_optimizer_steps']=report['optimizer_steps']
                 trial=dict(learning_rate=lr,epochs=args.epochs,actor=report,kl=kl,acceptance=acceptance,
+                    hard_kl_acceptance=hard,formal_optimizer_steps_committed=0,
                     start_restore=audit,wall_seconds=max(distributed.all_gather_object(time.perf_counter()-started)),
                     peak_allocated_bytes=max(distributed.all_gather_object(torch.cuda.max_memory_allocated(distributed.device))))
             except (FloatingPointError,RuntimeError) as error:
@@ -203,6 +234,7 @@ def main():
                 if not any(word in message.lower() for word in ('ppo','nonfinite','overflow','underflow','streaming')):raise
                 trial=dict(learning_rate=lr,epochs=args.epochs,acceptance=dict(passed=False,
                     failures={'numerical':message}),start_restore=audit,
+                    hard_kl_acceptance=None,formal_optimizer_steps_committed=0,
                     rejected_probability=rejected_probability_diagnostics(policy,rows,cache,manifest,distributed,
                         config['stage9']['denoising_microbatch']),
                     wall_seconds=max(distributed.all_gather_object(time.perf_counter()-started)))

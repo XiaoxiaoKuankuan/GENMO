@@ -105,6 +105,22 @@ def test_complete_configured_chain_adam_update_with_tail_batch(actor_factory,tmp
         assert result['internal_sample_visits']==5*(19-prefix)
         assert result['steps'][-1]['global_chain_count']==2
         assert result['steps'][0]['denoising_steps']==list(range(prefix,19))
+        assert result['steps'][0]['candidate_checked_chains']==5
+        assert result['steps'][0]['post_step_chain_scope']=='full_rollout'
         policy.assert_frozen_identity()
     finally:
         cache.close();dist.destroy_process_group()
+
+
+def test_fixed_lr_hard_kl_pass_does_not_mean_objective_improves():
+    from tools.validate_stage2_full_chain import candidate_update_checks
+    config=configuration(ROOT/'configs/closedloop/stage2_continuous_train10_base_server2.yaml',genmo_repo=ROOT)
+    kl=dict(chain_joint_kl=dict(mean=.05,p95=.08,p99=.1,max=.2),active_clip_fraction=.2,
+        mean_coordinate_kl=0.,maximum_step_mean_coordinate_kl=0.,coordinate_kl={'p95':0.})
+    report=dict(optimizer_steps=1,steps=[dict(optimizer_step=1,
+        full_rollout_before={'objective_mean':0.},full_rollout_after=dict(kl,objective_mean=-.0795))])
+    hard,eligible=candidate_update_checks(report,kl,config)
+    assert hard['passed'] and not eligible['passed']
+    assert 'objective_gain' in eligible['failures']
+    report['steps'][0]['full_rollout_after']['objective_mean']=.01
+    assert candidate_update_checks(report,kl,config)[1]['passed']

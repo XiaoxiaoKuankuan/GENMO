@@ -9,6 +9,7 @@ denoiser.blocks层号分组，原qpos输出MLP单独分组，其余允许训练�
 为分组Adam。每个可训练参数必须且只能出现一次，冻结参数不得进入优化器。
 未声明倍率的既有实验仍为一个Adam组；这不改变其概率或参数更新数学定义。
 本模块只构造及校验优化器，不选择候选、不启动训练、不判断物理收益。
+基础学习率仅要求正有限；实验上限由显式配置及原有回溯控制，不另设隐藏上限。
 """
 from __future__ import annotations
 
@@ -72,16 +73,16 @@ def make_actor_optimizer(actor, settings):
 
 def actor_base_lr(optimizer):
     rates = [float(group['lr']) / float(group.get('lr_multiplier', 1.)) for group in optimizer.param_groups]
-    if not rates or not all(math.isfinite(lr) and 0 < lr <= 1e-5 for lr in rates):
-        raise ValueError('Explicit experimental Actor base LR must be in (0,1e-5]')
+    if not rates or not all(math.isfinite(lr) and lr > 0 for lr in rates):
+        raise ValueError('Explicit experimental Actor base LR must be finite and positive')
     if any(not math.isclose(lr, rates[0], rel_tol=1e-12, abs_tol=0.) for lr in rates):
         raise ValueError('Actor parameter groups lost their fixed LR ratios')
     return rates[0]
 
 
 def set_actor_base_lr(optimizer, learning_rate):
-    if not math.isfinite(learning_rate) or not 0 < learning_rate <= 1e-5:
-        raise ValueError('Explicit experimental Actor base LR must be in (0,1e-5]')
+    if not math.isfinite(learning_rate) or learning_rate <= 0:
+        raise ValueError('Explicit experimental Actor base LR must be finite and positive')
     for group in optimizer.param_groups:
         group['lr'] = learning_rate * group.get('lr_multiplier', 1.)
 

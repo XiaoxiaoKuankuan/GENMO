@@ -77,6 +77,35 @@ def test_group_backtrack_matches_direct_nonempty_adam_and_preserves_ratios():
     validate_actor_optimizer(actor, optimizer)
 
 
+def test_explicit_fifty_times_lr_executes_adam_without_hidden_ceiling():
+    actor, optimizer, _ = prepared()
+    reference = copy.deepcopy(actor)
+    expected = make_actor_optimizer(reference, settings())
+    expected.load_state_dict(copy.deepcopy(optimizer.state_dict()))
+    fill_gradients(reference, .2)
+    for group in expected.param_groups:
+        group['lr'] = 1.5e-5 * group['lr_multiplier']
+    expected.step()
+    set_actor_base_lr(optimizer, 1.5e-5)
+    validate_actor_optimizer(actor, optimizer)
+    optimizer.step()
+    assert actor_base_lr(optimizer) == pytest.approx(1.5e-5)
+    assert equal_state(actor.state_dict(), reference.state_dict())
+    assert equal_state(optimizer.state_dict(), expected.state_dict())
+    assert all(float(state['step']) == 2 for state in optimizer.state.values())
+
+
+@pytest.mark.parametrize('learning_rate', [0., -1e-5, float('nan'), float('inf')])
+def test_explicit_lr_still_rejects_nonpositive_and_nonfinite(learning_rate):
+    actor, optimizer, _ = prepared()
+    with pytest.raises(ValueError, match='finite and positive'):
+        set_actor_base_lr(optimizer, learning_rate)
+    for group in optimizer.param_groups:
+        group['lr'] = learning_rate
+    with pytest.raises(ValueError, match='finite and positive'):
+        validate_actor_optimizer(actor, optimizer)
+
+
 @pytest.mark.parametrize('exception', [False, True])
 def test_rejection_restores_all_groups_adam_controller_and_rng(exception):
     actor, optimizer, controller = prepared()

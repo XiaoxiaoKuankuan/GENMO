@@ -257,6 +257,9 @@ def _actor_update(policy,optimizer,rows,targets,cache,manifest,controller,*,dist
                 streaming_recompute_max_error=max(distributed.all_gather_object(float(backward['recompute_max_error']))),
                 clip_fraction=pre['clip_fraction'],objective_clip_fraction=pre['active_clip_fraction'],
                 pre_step_chain=pre,post_step_chain=post,
+                pre_step_chain_scope='current_minibatch',
+                post_step_chain_scope=(('full_rollout' if objective_aware else 'all_previously_used_plus_current_chains')
+                    if trust_region is not None else 'full_rollout' if audit_full_rollout_objective else 'current_minibatch'),
                 full_rollout_before=step_full_before,full_rollout_after=full_after,full_rollout_groups=objective_groups,
                 pre_step_mean_joint_kl=pre['chain_joint_kl']['mean'],
                 pre_step_mean_coordinate_kl=float(statistics['mean_coordinate_kl'].mean()),
@@ -265,8 +268,10 @@ def _actor_update(policy,optimizer,rows,targets,cache,manifest,controller,*,dist
                 gradient_contributions=contributions,total_gradient_norm=total_norm,gradient_clip_factor=clip_factor,
                 parameter_update=parameter_report,full_gradient_direction=direction_report,
                 output_change=output_change,trust_region=transaction,
-                candidate_checked_chains=len(guard_indices) if trust_region is not None else len(indices),
-                candidate_check_scope=('full_rollout' if objective_aware else 'all_previously_used_plus_current_chains') if trust_region is not None else 'current_minibatch',
+                candidate_checked_chains=(len(guard_indices) if trust_region is not None else
+                    len(selected) if audit_full_rollout_objective else len(indices)),
+                candidate_check_scope=(('full_rollout' if objective_aware else 'all_previously_used_plus_current_chains')
+                    if trust_region is not None else 'full_rollout' if audit_full_rollout_objective else 'current_minibatch'),
                 bc_global_samples=sum(s['batch'] for s in shards),bc_samples_by_source=dict(sources),
                 bc_loss=sum(s['batch']*s['loss'] for s in shards)/global_bc if global_bc else 0.,
                 bc_enabled=bc_enabled,
