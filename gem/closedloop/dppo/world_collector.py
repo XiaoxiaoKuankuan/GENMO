@@ -66,6 +66,14 @@ class WorldEnvironmentCollector:
         self.active=False;self.cancelled=threading.Event();self.rpc_pending={};self.rpc_sequence=0
         self.batch_reports=[];self.world_timing={};self.restore_records=None;self.shutdown_result=None
         self.audit_seconds=0.
+        # 模型/运行时初始化遗留的大量循环对象应在服务就绪前清理；否则首次几次
+        # GENMO请求会触发约半秒的全代回收。标定和真实采集共用此启动步骤，
+        # 运行中仍启用GC且其暂停计入延迟；不通过屏蔽回收或删慢样本伪造速度。
+        import gc
+        startup_gc_begin=time.perf_counter()
+        collected=gc.collect()
+        self.startup_gc=dict(collected=collected,seconds=time.perf_counter()-startup_gc_begin,
+            scope='service_startup_before_first_generation_not_recurring_request_latency')
 
     def _request_id(self):
         self.rpc_sequence+=1
@@ -381,7 +389,7 @@ class WorldEnvironmentCollector:
         self._drive({i:backend_operation('retire') for i in range(self.num_envs)})
         clock=self.states[0].resource.env.deployment_clock
         return dict(durations=durations,calibration_reservation_seconds=self.states[0].resource.env.latency_budget_s,
-            batches=self.batch_reports,gc_events=gc_events,
+            batches=self.batch_reports,gc_events=gc_events,startup_gc=self.startup_gc,
             deployment_profile_sha256=None if clock is None else clock.sha256,
             scope='measured_generation_prepare_wallclock_without_execution_no_prior_latency_profile')
 
