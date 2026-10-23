@@ -176,7 +176,8 @@ def load_rollout_record(path, record, *, rank_directory, physical=lambda path: p
     if raw['policy_version'] != fields['identity']['policy_version']:
         raise ValueError('Raw trace policy identity mismatch')
     fields['metadata'] = dict(fields['metadata'], sampler_trace=trace, generated=generated)
-    result = UpperTransition(**fields, chain=trace['chain'][0], old_log_prob=trace['old_log_probs'][0],
+    result = UpperTransition(**fields, chain=None if 'chain' not in trace else trace['chain'][0],
+                             old_log_prob=None if 'old_log_probs' not in trace else trace['old_log_probs'][0],
                              free_mask=trace['free_mask'][0])
     result.validate()
     return result

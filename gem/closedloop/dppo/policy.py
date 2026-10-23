@@ -248,6 +248,47 @@ class DPPODiffusionPolicy:
             raise ValueError('Prepared conditions differ from inputs, Actor version or grad mode')
         return self._transition_prepared(prepared, x_k, step_index, diagnostics=diagnostics)
 
+    def _predict_prepared(self, prepared, state, original_t, *, diagnostics=False):
+        """采样与前向代理共用同一确定性 music-only CFG；保留全部条件梯度。"""
+        adapted = {key: prepared['adapted'][key] for key in ('known_x', 'known_mask', 'future_valid')}
+        conditional, unconditional = prepared['conditional'], prepared['unconditional']
+        if self.cfg_batch and unconditional is not None:
+            # 同一条采样链20步共享条件，CFG固定输入只拼接一次。学习微批各自
+            # 持有prepared，不跨optimizer复用；cat仍保留条件编码器的梯度。
+            signature = tuple((id(v), v._version) for v in
+                (*adapted.values(), conditional, unconditional))
+            cached = prepared.get('_cfg_inputs')
+            if cached is None or cached[0] != signature:
+                cached = (signature, {key: torch.cat((value, value), dim=0)
+                          for key, value in adapted.items()},
+                          torch.cat((conditional, unconditional), dim=0))
+                prepared['_cfg_inputs'] = cached
+            combined, cfg_condition = cached[1:]
+            output = self.actor._denoise(torch.cat((state, state), dim=0),
+                torch.cat((original_t, original_t), dim=0), combined,
+                cfg_condition)
+            conditional_output = {key: value[:state.shape[0]] for key, value in output.items()}
+            unconditional_output = {key: value[state.shape[0]:] for key, value in output.items()}
+        else:
+            conditional_output = self.actor._denoise(state, original_t, adapted, conditional)
+            unconditional_output = None
+        prediction = conditional_output["pred_x_start"]
+        logits = conditional_output["static_conf_logits"]
+        if self.guidance_scale != 1.0:
+            output = (unconditional_output if unconditional_output is not None else
+                      self.actor._denoise(state, original_t, adapted, unconditional))
+            prediction = output["pred_x_start"] + self.guidance_scale * (
+                prediction - output["pred_x_start"])
+            logits = output["static_conf_logits"] + self.guidance_scale * (
+                logits - output["static_conf_logits"])
+        prediction = self.actor._constrain(prediction, adapted)
+        result = dict(pred_x_start=prediction, contact_logits=logits)
+        if diagnostics:
+            result.update(conditional_encoding=conditional, unconditional_encoding=unconditional,
+                conditional_prediction=conditional_output['pred_x_start'],
+                unconditional_prediction=(output['pred_x_start'] if self.guidance_scale != 1. else None))
+        return result
+
     def _transition_prepared(self, prepared, x_k, step_index, *, diagnostics=False):
         """条件缓存专用张量入口；原输入在prime校验，更新前仍核验原张量版本。
 
@@ -265,38 +306,9 @@ class DPPODiffusionPolicy:
             indices = self._step_indices(step_index, state)
             coefficients = self._coefficients(state.device)
             original_t = coefficients['timesteps'][indices]
-            conditional, unconditional = prepared['conditional'], prepared['unconditional']
             actual_batch = state.shape[0]
-            if self.cfg_batch and unconditional is not None:
-                # 同一条采样链20步共享条件，CFG固定输入只拼接一次。学习微批各自
-                # 持有prepared，不跨optimizer复用；cat仍保留条件编码器的梯度。
-                signature = tuple((id(v), v._version) for v in
-                    (*adapted.values(), conditional, unconditional))
-                cached = prepared.get('_cfg_inputs')
-                if cached is None or cached[0] != signature:
-                    cached = (signature, {key: torch.cat((value, value), dim=0)
-                              for key, value in adapted.items()},
-                              torch.cat((conditional, unconditional), dim=0))
-                    prepared['_cfg_inputs'] = cached
-                combined, cfg_condition = cached[1:]
-                output = self.actor._denoise(torch.cat((state, state), dim=0),
-                    torch.cat((original_t, original_t), dim=0), combined,
-                    cfg_condition)
-                conditional_output = {key: value[:state.shape[0]] for key, value in output.items()}
-                unconditional_output = {key: value[state.shape[0]:] for key, value in output.items()}
-            else:
-                conditional_output = self.actor._denoise(state, original_t, adapted, conditional)
-                unconditional_output = None
-            prediction = conditional_output["pred_x_start"]
-            logits = conditional_output["static_conf_logits"]
-            if self.guidance_scale != 1.0:
-                output = (unconditional_output if unconditional_output is not None else
-                          self.actor._denoise(state, original_t, adapted, unconditional))
-                prediction = output["pred_x_start"] + self.guidance_scale * (
-                    prediction - output["pred_x_start"])
-                logits = output["static_conf_logits"] + self.guidance_scale * (
-                    logits - output["static_conf_logits"])
-            prediction = self.actor._constrain(prediction, adapted)
+            predicted = self._predict_prepared(prepared, state, original_t, diagnostics=diagnostics)
+            prediction, logits = predicted["pred_x_start"], predicted["contact_logits"]
             spaced_t = self.steps - 1 - indices
             alpha = coefficients['alpha'][spaced_t, None, None]
             previous_alpha = coefficients['previous'][spaced_t, None, None]
@@ -317,10 +329,7 @@ class DPPODiffusionPolicy:
                 "contact_logits": logits,
             }
             if diagnostics:
-                result.update(conditional_encoding=conditional,
-                    unconditional_encoding=unconditional,
-                    conditional_prediction=conditional_output['pred_x_start'],
-                    unconditional_prediction=(output['pred_x_start'] if self.guidance_scale != 1. else None))
+                result.update(predicted)
             return {key: None if value is None else value[:actual_batch]
                     for key, value in result.items()}
 
@@ -349,6 +358,7 @@ class DPPODiffusionPolicy:
         generator: torch.Generator | None = None,
         initial_noise: torch.Tensor | None = None,
         deterministic_transitions: bool = False,
+        store_chain: bool = True,
     ) -> dict[str, Any]:
         """采样完整随机链和只读条件副本；概率在最终物理解码之前记录。"""
         self._prepare_actor()
@@ -382,7 +392,7 @@ class DPPODiffusionPolicy:
             noise = (draw(template.shape) if initial_noise is None
                      else self._state(initial_noise, template, "initial_noise"))
             state = self.actor._constrain(noise, adapted)
-            chain, means, stds, probabilities, innovations = [state.clone()], [], [], [], []
+            chain, means, stds, probabilities, innovations = ([state.clone()] if store_chain else []), [], [], [], []
             for index in range(self.steps):
                 parameters = self.transition_parameters(snapshot, state, index, prepared=prepared)
                 if index in self.deterministic_steps:
@@ -390,15 +400,17 @@ class DPPODiffusionPolicy:
                 else:
                     # 展示模式保留同一混合网络和全部20步，只把innovation置零；不可作行为rollout。
                     noise = torch.zeros_like(state) if deterministic_transitions else draw(state.shape)
-                    innovations.append(noise.clone())
+                    if store_chain: innovations.append(noise.clone())
                     following = self.actor._constrain(parameters["mean"] + parameters["std"] * noise, adapted)
-                    probabilities.append(masked_joint_log_prob(following, parameters["mean"],
-                                         parameters["std"], parameters["free_mask"]))
-                    means.append(parameters["mean"].clone())
-                    stds.append(parameters["std"].clone())
-                chain.append(following.clone())
+                    if store_chain:
+                        probabilities.append(masked_joint_log_prob(following, parameters["mean"],
+                                             parameters["std"], parameters["free_mask"]))
+                        means.append(parameters["mean"].clone())
+                        stds.append(parameters["std"].clone())
+                if store_chain: chain.append(following.clone())
                 state = following
             mark()
+            normalized_action = state.detach().clone()  # 最后一步完成、物理解码前固定 normalized x0。
             physical = self.actor.endecoder.denormalize(state)
             physical = torch.where(adapted["known_mask"], adapted["known_physical"], physical)
             physical = torch.where(adapted["future_valid"][..., None], physical, 0.0)
@@ -413,7 +425,7 @@ class DPPODiffusionPolicy:
                 denoising_seconds=durations[1], decode_seconds=durations[2],
                 total_wall_seconds=time.perf_counter()-beginning,
                 interval_scope='current_stream_cuda_events' if device.type == 'cuda' else 'cpu_wall_clock')
-            return {
+            evidence = {
                 "chain": torch.stack(chain, dim=1),
                 "probability_steps":torch.tensor(self.stochastic_steps,device=state.device,dtype=torch.long),
                 "deterministic_final_mean":state.clone() if self.deterministic_steps else None,
@@ -421,11 +433,13 @@ class DPPODiffusionPolicy:
                 "sampling_noise":torch.stack(innovations,dim=1),
                 "old_means": torch.stack(means, dim=1),
                 "old_stds": torch.stack(stds, dim=1),
+            } if store_chain else {}
+            return {**evidence,
                 "free_mask": parameters["free_mask"].clone(),
                 "conditions": snapshot,
                 "timestep_map": torch.as_tensor(self.timestep_map, dtype=torch.long, device=state.device),
                 "kernel_config": {**self.kernel_config, "timestep_map": list(self.timestep_map)},
-                "normalized": state.clone(),
+                "normalized": normalized_action,
                 "qpos30": physical,
                 "qpos": qpos,
                 "contact_logits": logits,

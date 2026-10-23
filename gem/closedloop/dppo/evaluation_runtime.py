@@ -84,6 +84,12 @@ def _evaluate_impl(c, label, *, write_report=True):
         snapshot_critic_transition,
         summarize_critic_predictions,
     )
+    from ..robofft import OBJECTIVE, VERSION as ROBOFFT_VERSION
+    robofft=c.stage.get('version')==ROBOFFT_VERSION
+    load_actor_references,actor_drift_fn=load_reference_traces,fixed_chain_drift
+    if robofft:
+        from ..robofft.evaluation import load_references as load_actor_references
+        from ..robofft.evaluation import fixed_action_drift as actor_drift_fn
     # 一个独立 UpperEnvironment 隔离所有 episode/decision/noise 计数；物理后端在下一
     # train reset 重新建立状态，因此不假称恢复 PhysX 中途状态。
     rng = capture_local_rng(c.generators)
@@ -156,7 +162,7 @@ def _evaluate_impl(c, label, *, write_report=True):
     env.latency_budget_s, env.policy_version, env.iteration = c.env.latency_budget_s, c.env.policy_version, c.env.iteration
     initial_rows = []
     from .training_config import VERSION as CURRENT_TRAINING_VERSION
-    fresh_critic_enabled = c.stage.get('version')==CURRENT_TRAINING_VERSION
+    fresh_critic_enabled = c.stage.get('version') in (CURRENT_TRAINING_VERSION,ROBOFFT_VERSION)
     def capture_initial(task,row):
         if (references is None or fresh_critic_enabled) and hasattr(row,'context') and hasattr(row,'identity'):
             initial_rows.append(snapshot_critic_transition(row))
@@ -164,7 +170,11 @@ def _evaluate_impl(c, label, *, write_report=True):
                 from .training_checkpoint import immutable_cpu_snapshot
                 target=path/'fixed_actor_reference'/f'chain_{len(initial_rows):02d}.pt'
                 target.parent.mkdir(exist_ok=True)
-                torch.save(immutable_cpu_snapshot(dict(trace=row.metadata['sampler_trace'])),target)
+                if robofft:
+                    from ..robofft.evaluation import make_reference
+                    payload=make_reference(c.policy,row.metadata['sampler_trace'],seed=60101+len(initial_rows))
+                else:payload=immutable_cpu_snapshot(dict(trace=row.metadata['sampler_trace']))
+                torch.save(payload,target)
                 c.guard.account_file(target)
     try:
         def perform():
@@ -187,7 +197,7 @@ def _evaluate_impl(c, label, *, write_report=True):
                 return None
             if not hasattr(c, '_periodic_fixed_reference'):
                 if references is None:
-                    actor_reference = load_reference_traces(path/'fixed_actor_reference', max_chains=4)
+                    actor_reference = load_actor_references(path/'fixed_actor_reference', max_chains=4)
                     critic_reference = None
                     if initial_rows:
                         critic_reference = build_fixed_critic_reference(initial_rows, c.critic, c.distributed.device,
@@ -213,7 +223,7 @@ def _evaluate_impl(c, label, *, write_report=True):
                     for record in description['actor_records']:
                         if sha256_file(record['path']) != record['sha256']:
                             raise ValueError('Initial Actor reference raw trace SHA differs')
-                    actor_reference = load_reference_traces([r['path'] for r in description['actor_records']], max_chains=4)
+                    actor_reference = load_actor_references([r['path'] for r in description['actor_records']], max_chains=4)
                     if actor_reference['reference_sha256'] != description['actor_reference_sha256']:
                         raise ValueError('Fixed Actor reference identity differs')
                     critic_reference = None
@@ -236,7 +246,7 @@ def _evaluate_impl(c, label, *, write_report=True):
                 fresh_critic = dict(predictions=[r['initial_prediction'] for r in fresh_reference['records']],
                     targets=[r['target'] for r in fresh_reference['records']],
                     reference_sha256=fresh_reference['reference_sha256'])
-            return dict(reference=description, actor=fixed_chain_drift(c.policy, actor_reference, include_values=True),
+            return dict(reference=description, actor=actor_drift_fn(c.policy, actor_reference, include_values=True),
                         critic=None if critic_reference is None else fixed_critic_diagnostic(c.critic, critic_reference),
                         fresh_critic=fresh_critic)
         diagnostics = c.distributed.all_gather_object(local_call(c.distributed, diagnose))
@@ -249,11 +259,20 @@ def _evaluate_impl(c, label, *, write_report=True):
                     initial_iteration=c.state['iteration'], ranks=[d['reference'] for d in diagnostics]))
             result['iteration'] = c.state['iteration']
             result['session_id'] = c.session.name
-            values = [value for diagnostic in diagnostics for value in diagnostic['actor']['joint_kl_values']]
-            stats = _stats(values)
-            result['fixed_actor_drift'] = dict(reference_sha256=_digest([d['reference'] for d in diagnostics]),
-                internal_transition_count=len(values), mean_joint_kl=stats['mean'], p95_joint_kl=stats['p95'],
-                max_joint_kl=stats['max'], diagnostic_scope='fixed_initial_chain_gaussian_drift_not_physics_quality')
+            if robofft:
+                values=[v for d in diagnostics for v in d['actor']['surrogate_kl_values']]
+                stats=_stats(values)
+                result['fixed_actor_drift']=dict(algorithm='robofft_d.v1',
+                    reference_sha256=_digest([d['reference'] for d in diagnostics]),
+                    action_count=len(values),surrogate_kl_mean=stats['mean'],surrogate_kl_p95=stats['p95'],
+                    surrogate_kl_max=stats['max'],reference_changes=[v for d in diagnostics for v in d['actor']['reference_changes']],
+                    diagnostic_scope='fixed_initial_action_surrogate_and_reference_change_not_physics')
+            else:
+                values = [value for diagnostic in diagnostics for value in diagnostic['actor']['joint_kl_values']]
+                stats = _stats(values)
+                result['fixed_actor_drift'] = dict(reference_sha256=_digest([d['reference'] for d in diagnostics]),
+                    internal_transition_count=len(values), mean_joint_kl=stats['mean'], p95_joint_kl=stats['p95'],
+                    max_joint_kl=stats['max'], diagnostic_scope='fixed_initial_chain_gaussian_drift_not_physics_quality')
             critics = [d['critic'] for d in diagnostics]
             if any(d is not None for d in critics) and not all(d is not None for d in critics):
                 raise ValueError('Fixed Critic reference must be available on every rank or explicitly unavailable')

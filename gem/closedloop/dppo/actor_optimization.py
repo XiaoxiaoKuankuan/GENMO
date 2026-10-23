@@ -13,7 +13,8 @@ import json
 import math
 
 ACTOR_OBJECTIVE='stepwise_coordinate_mean_clipped_ppo'
-ACTOR_OBJECTIVES=(ACTOR_OBJECTIVE,)
+from ..robofft import OBJECTIVE as ROBOFFT_OBJECTIVE
+ACTOR_OBJECTIVES=(ACTOR_OBJECTIVE,ROBOFFT_OBJECTIVE)
 OPTIMIZATION_SCHEMA='genmo.stage2.stepwise_coordinate_mean_actor.v1'
 
 
@@ -23,6 +24,10 @@ def digest(value):
 
 def optimization_binding(stage):
     t=stage['training']
+    from ..robofft import OBJECTIVE
+    if t['actor_objective']==OBJECTIVE:
+        from ..robofft.configuration import optimization_binding as binding
+        return binding(stage)
     from .actor_optimizer import validate_lr_multipliers
     multipliers=validate_lr_multipliers(t)
     return dict(schema=('genmo.stage2.full_chain_optimization_binding.v1' if t['actor_objective']=='full_chain_clipped_ppo'
@@ -105,6 +110,10 @@ def _validate_legacy_configuration(config,maximum_steps):
 def validate_optimization_configuration(config,maximum_steps):
     """历史配置仅可只读解析；当前训练只允许显式逐步坐标平均代理合同。"""
     s=config['stage10'];t=s['training']
+    from ..robofft import OBJECTIVE
+    if t.get('actor_objective')==OBJECTIVE:
+        from ..robofft.configuration import validate_configuration
+        return validate_configuration(config,maximum_steps)
     if t.get('actor_objective')=='full_chain_clipped_ppo':
         return _validate_legacy_configuration(config,maximum_steps)
     if (s.get('actor_optimization')!={'schema':OPTIMIZATION_SCHEMA} or 'actor_experiment' in s
@@ -162,5 +171,5 @@ def validate_optimization_configuration(config,maximum_steps):
 
 def require_current_actor_objective(settings):
     """旧配置只读可识别，但不能从当前训练入口误启动旧联合PPO。"""
-    if settings.get('actor_objective')!=ACTOR_OBJECTIVE:
+    if settings.get('actor_objective') not in ACTOR_OBJECTIVES:
         raise ValueError('Historical full-chain config is read-only; use stage2_stepwise_mean.yaml for Actor training')

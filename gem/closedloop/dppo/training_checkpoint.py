@@ -28,6 +28,12 @@ from .execution_compatibility import same_execution, contains_execution
 SCHEMA='genmo.closedloop.stage2.full_chain_joint.checkpoint.v1'
 
 
+def schema_for_identity(identity):
+    """算法身份决定完整恢复格式；源码变更不参与门禁。"""
+    from ..robofft import OBJECTIVE, CHECKPOINT_SCHEMA
+    return CHECKPOINT_SCHEMA if identity.get('training',{}).get('actor_objective')==OBJECTIVE else SCHEMA
+
+
 def immutable_cpu_snapshot(value):
     if isinstance(value,torch.Tensor):return value.detach().to('cpu',copy=True)
     if isinstance(value,dict):return {k:immutable_cpu_snapshot(v) for k,v in value.items()}
@@ -61,7 +67,7 @@ class AsyncCheckpointWriter:
         return result
 
     def submit(self,payload,*,reason):
-        if self.closed or payload.get('schema')!=SCHEMA:raise ValueError('Invalid async checkpoint state')
+        if self.closed or payload.get('schema')!=schema_for_identity(payload.get('identity',{})):raise ValueError('Invalid async checkpoint state')
         wait=self.poll(wait=True)
         if any(v.is_cuda for v in payload['actor'].values()):raise ValueError('Async writer accepts only immutable CPU model snapshots')
         self.pending=self.pool.submit(self._write,payload,reason)
@@ -154,11 +160,21 @@ def load_training_checkpoint(path,*,identity,actor,critic,actor_optimizer,critic
         raise ValueError('Explicit stepwise transfer must go from historical full-chain to current stepwise PPO')
     old_training={k:v for k,v in previous.items() if k!='evaluation'}
     new_training={k:v for k,v in identity.items() if k!='evaluation'}
+    from ..robofft import CHECKPOINT_SCHEMA
+    if payload.get('schema')==CHECKPOINT_SCHEMA and not new_experiment:
+        # 初始化来源是血缘记录；恢复将加载已验证的完整参数和 Adam，而非重新初始化。
+        # 仍严格比较 Stage1 资产、采样核、算法、优化器和实际执行配置。
+        old_training.pop('actor_initialization',None)
+        new_training.pop('actor_initialization',None)
     if new_experiment:
         old_training=_initialization_execution(old_training,fragment_transfer=fragment_transfer,stepwise_transfer=stepwise_transfer)
         new_training=_initialization_execution(new_training,fragment_transfer=fragment_transfer,stepwise_transfer=stepwise_transfer)
-    if payload.get('schema')!=SCHEMA or not same_execution(old_training,new_training):
+    if payload.get('schema')!=schema_for_identity(identity) or not same_execution(old_training,new_training):
         raise ValueError('Checkpoint schema or actual training configuration differs')
+    if payload.get('schema')==CHECKPOINT_SCHEMA:
+        if new_experiment or not payload.get('rank_states') or any(
+                'robofft_mc' not in rank.get('rng',{}).get('generators',{}) for rank in payload['rank_states']):
+            raise ValueError('RoboFFT resume requires complete independent MC RNG; use explicit weights-only for a new experiment')
     from .checkpoint import _validate_model_state,_validate_optimizer_state
     _validate_model_state(actor,payload['actor'],'当前 Actor')
     _validate_model_state(critic,payload['critic'],'当前 Critic')
@@ -228,7 +244,7 @@ def load_evaluation_actor(path,*,actor,kernel,assets,execution_binding=None):
         return dict(kind='probability_candidate_fresh_evaluation_only',path=str(Path(path).resolve()),
             sha256=file_sha256(path),source_case_sha256=payload['source_case_sha256'],update=update,
             evaluation_transfer=transfer,training_resume=False)
-    if payload.get('schema')==SCHEMA:
+    if payload.get('schema')==schema_for_identity(payload.get('identity',{})):
         identity=payload.get('identity',{})
         if (not execution_binding or identity.get('assets')!=assets or identity.get('kernel')!=kernel or
                 not contains_execution(identity,execution_binding)):

@@ -1,7 +1,8 @@
 """当前唯一第二阶段八卡Isaac同进程训练入口，默认只做有限训练。
 
 先用Gloo在任何CUDA/Isaac上下文创建前核验八张卡空闲、模型SHA和独立输出目录，
-再为每rank启动一个Isaac App和对应GPU世界，NCCL同步DPPO/BC/Critic梯度。
+再为每rank启动一个Isaac App和对应GPU世界，NCCL同步显式配置选择的 Actor/Critic 梯度。
+RoboFFT 配置使用紧凑动作、固定 MC 代理与独立恢复格式，不要求 Gaussian PPO/KL。
 Actor初始化s595000，冻结原生GMT140500；本入口直接维护当前训练实现和恢复格式。
 训练配置的累计轮次预算不会自动开启，必须显式指定stop-after-iteration。正常结束
 保存一致checkpoint、运行固定评估、关闭物理世界和通信组；异常返回真实非零码。
@@ -30,6 +31,8 @@ def main():
     parser.add_argument('--stop-after-iteration',type=int,default=2)
     parser.add_argument('--warmup-rollouts',type=int)
     parser.add_argument('--resume',choices=['latest'])
+    parser.add_argument('--initialize-actor-weights-only',type=Path,
+        help='仅新 RoboFFT 实验显式导入 Stage2 Actor；不继承 Critic、Adam、rollout、概率、MC 或 RNG')
     parser.add_argument('--initialize-from-checkpoint',type=Path,
         help='新独立实验从完整checkpoint继承Actor/Critic、两个Adam及RNG，仅允许更换有效批量与评估监视')
     parser.add_argument('--initialize-random-fragments',action='store_true',
@@ -51,6 +54,8 @@ def main():
     parser.add_argument('--genmo-repo',type=Path,default=ROOT)
     parser.add_argument('--gmt-repo',type=Path)
     args=parser.parse_args()
+    if args.initialize_actor_weights_only and (args.resume or args.initialize_from_checkpoint or args.evaluate_only or args.evaluation_actor):
+        parser.error('--initialize-actor-weights-only requires a fresh RoboFFT training experiment')
     if args.initialize_from_checkpoint and (args.resume or args.evaluation_actor or args.evaluate_only):
         parser.error('--initialize-from-checkpoint requires a new training experiment')
     if args.initialize_random_fragments and not args.initialize_from_checkpoint:
@@ -71,6 +76,12 @@ def main():
     import torch.distributed as dist
     from gem.closedloop.dppo.training_config import configuration
     config=configuration(args.config,genmo_repo=args.genmo_repo,gmt_repo=args.gmt_repo)
+    from gem.closedloop.robofft import OBJECTIVE
+    robofft=config['stage9']['actor_objective']==OBJECTIVE
+    if args.initialize_actor_weights_only and not robofft:
+        parser.error('--initialize-actor-weights-only is reserved for explicit RoboFFT initialization')
+    if robofft and (args.initialize_from_checkpoint or args.verify_kl_reuse):
+        parser.error('RoboFFT has no Gaussian KL reuse or DPPO full-state initialization; use explicit weights-only')
     if config['stage10']['evaluation'].get('split','val')=='test' and not args.evaluate_only:
         parser.error('Held-out test music is only allowed in independent --evaluate-only runs')
     if args.calibrate_only:
@@ -93,6 +104,14 @@ def main():
             busy=subprocess.check_output(['nvidia-smi','--query-compute-apps=pid,process_name','--format=csv,noheader'],text=True).strip()
             if busy:raise RuntimeError('Eight GPU resource check found an existing job: '+busy)
             if args.output_dir.exists() and not args.resume:raise FileExistsError(args.output_dir)
+            if robofft and args.resume:
+                import json
+                from gem.closedloop.robofft import CHECKPOINT_SCHEMA
+                pointer=json.loads((args.output_dir/'latest.json').read_text())
+                payload=torch.load(args.output_dir/pointer['path'],map_location='cpu',weights_only=False,mmap=True)
+                if payload.get('schema')!=CHECKPOINT_SCHEMA:
+                    raise ValueError('DPPO cannot resume as RoboFFT; use --initialize-actor-weights-only with a new output directory')
+                del payload
             from gem.closedloop.dppo.training_checkpoint import file_sha256
             for key,expected in config['stage10']['assets'].items():
                 if file_sha256(config['paths'][key])!=expected:raise ValueError('Asset SHA mismatch: '+key)

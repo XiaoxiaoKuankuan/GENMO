@@ -28,6 +28,11 @@ def build_policy(actor, settings, precision, *, frozen_actor=None):
     from .frozen_prefix import FrozenPrefixPolicy
     cls=FrozenPrefixPolicy
     extra=dict(frozen_prefix_steps=settings.get('frozen_prefix_steps',15),frozen_actor=frozen_actor)
+    from ..robofft import OBJECTIVE
+    if settings.get('actor_objective')==OBJECTIVE:
+        from ..robofft.policy import RoboFFTDiffusionPolicy
+        cls=RoboFFTDiffusionPolicy
+        extra['robofft']=settings['robofft']
     if settings.get('temporal_residual') is not None:
         if extra['frozen_prefix_steps']!=15:raise ValueError('Temporal residual experiment only supports the original four steps')
         from .temporal_residual_policy import TemporalResidualPolicy

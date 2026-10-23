@@ -116,6 +116,11 @@ def _validate_actor_transitions(policy, transitions):
     for item in transitions:
         if not item.transition_valid:
             raise ValueError('Invalid transitions cannot enter Actor optimization')
+        from ..robofft import ALGORITHM
+        if getattr(policy,'algorithm',None)==ALGORITHM:
+            from ..robofft.records import validate_action
+            validate_action(item,policy)
+            continue
         if item.chain.shape != (policy.steps + 1, item.context["future_valid"].shape[1], 30):
             raise ValueError('Rollout chain differs from the configured denoising steps')
         if item.chain.dtype != torch.float32 or item.old_log_prob.dtype != torch.float64:

@@ -56,8 +56,14 @@ def test_production_config_preserves_algorithm_and_only_expands_capacity():
     for key in ('actor_objective','ppo_clip','eta','std_schedule','bc_enabled','actor_lr_multipliers',
                 'gamma_upper','lambda_upper','actor_trainable_scope'):
         assert new['stage10']['training'][key]==old['stage10']['training'][key]
-    for key in ('reward','physical_episode','generation_horizon','critic'):
+    for key in ('physical_episode','generation_horizon','critic'):
         assert new['stage10'][key]==old['stage10'][key]
+    # 分支既有 v4 调整根位置/姿态 std；不是本次调度或 RoboFFT 修改奖励。
+    import copy
+    expected=copy.deepcopy(old['stage10']['reward'])
+    expected['version']='stage2.gmt8_reward_std.v4'
+    expected['tracking']['reward_std'].update(anchor_pos=.3,anchor_ori=.4)
+    assert new['stage10']['reward']==expected
     validate_schedule(new)
     new['timing']['decision_ticks']=180
     with pytest.raises(ValueError):validate_schedule(new)

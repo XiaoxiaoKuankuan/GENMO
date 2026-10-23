@@ -1,9 +1,9 @@
 """Stage10 独立配置解析、训练规模推导与新旧身份隔离。
 
-本模块只接受显式当前配置，自动从GPU数、环境数、连续决策数及完整链minibatch
-推导rollout、optimizer次数、四个随机训练步访问数和BC每步样本量，不继承160条或四次更新
-限制。当前逐步坐标平均代理用于PPO目标，坐标KL校准步长，真实整链KL独立诊断，不能复用一个
-无量纲数字。初始参数是待有限标定的候选，任何算法或数值合同变化新建run。
+本模块只接受显式配置，从GPU数、环境数、连续决策数及全局动作批量推导规模。
+RoboFFT 使用 MC 平均对数比与动作级裁剪，禁止接入旧 Gaussian KL/回溯；旧 Gaussian
+配置保留对应随机步骤、KL 和 BC 的校验。两者算法与恢复身份明确区分，不继承历史
+固定批量限制。初始参数是待有限标定的候选，算法或数值合同变化必须新建 run。
 
 Stage1与GMT均绑定真实SHA和统计量，全部环境时序与奖励保留旧明确配置。检查
 CPU/GPU资源、模型加载和完整数据审计由入口执行；这里不启动训练、不扩预算，
@@ -17,6 +17,7 @@ from pathlib import Path
 import yaml
 
 from .rewards import resolve_reward_config
+from ..robofft import VERSION as ROBOFFT_VERSION
 
 VERSION='genmo.closedloop.stage2.stepwise_coordinate_mean.v1'
 LEGACY_VERSION='genmo.closedloop.stage2.full_chain_joint.v1'
@@ -31,13 +32,15 @@ def _source_counts(value):
 
 def configuration(path,*,genmo_repo=None,gmt_repo=None):
     c=yaml.safe_load(Path(path).read_text())
-    if c.get('stage10',{}).get('version') not in (VERSION,LEGACY_VERSION) or 'base_config' in c:
+    if c.get('stage10',{}).get('version') not in (VERSION,LEGACY_VERSION,ROBOFFT_VERSION) or 'base_config' in c:
         raise ValueError('New 当前 full configuration required')
     if genmo_repo:c['paths']['genmo_repo']=str(Path(genmo_repo).resolve())
     if gmt_repo:c['paths']['gmt_repo']=str(Path(gmt_repo).resolve())
     from .rolling_schedule import validate_schedule, capacity, decision_ticks
     validate_schedule(c)
     s=c['stage10'];t=s['training'];scale=s['scale'];world=s['distributed']['world_size']
+    robofft=s['version']==ROBOFFT_VERSION
+    actor_batch=scale['actor_minibatch_actions' if robofft else 'actor_minibatch_chains']
     precision=s['precision']
     if (precision['mode']!='native_fp32' or precision['attention']!='sdpa_math'
             or precision['linear_execution']!='stable_tf32x3' or precision['compile']
@@ -125,15 +128,16 @@ def configuration(path,*,genmo_repo=None,gmt_repo=None):
         if refit is not None and (not isinstance(refit,(int,float)) or not 0<refit<=1):
             raise ValueError('refit_if_ev_below must be null or in (0, 1]')
     n=c['runtime']['num_envs'];decisions=capacity(c,s['ppo_rollout']['world_seconds']);chains=n*decisions*world
-    for k,v in [('world',world),('environments',n),('decisions',decisions),('optimizer chains',scale['actor_minibatch_chains']),
-                ('Actor microbatch',t['denoising_microbatch']),('KL microbatch',t['kl_microbatch'])]:
+    for k,v in [('world',world),('environments',n),('decisions',decisions),('optimizer chains',actor_batch),
+                ('Actor microbatch',t['action_microbatch'] if robofft else t['denoising_microbatch']),
+                ('diagnostic microbatch',t['action_microbatch'] if robofft else t['kl_microbatch'])]:
         if type(v)is not int or v<1:raise ValueError(f'{k} must be positive integer')
     if world!=8 or s['distributed']['backend']!='nccl' or s['distributed']['collection']!='all_ranks':
         raise ValueError('当前 production requires eight synchronous GPU ranks')
     trainable_count=t['ppo_steps_per_chain']
     if (type(trainable_count)is not int or trainable_count not in (4,10) or t['denoising_steps']!=20
             or t['ppo_step_strategy']!=f'intermediate{trainable_count}' or t['frozen_prefix_steps']!=19-trainable_count
-            or t['ppo_epochs'] not in (1,2,3,5) or trainable_count==10 and s['version']!=VERSION):
+            or t['ppo_epochs'] not in (1,2,3,5) or trainable_count==10 and s['version'] not in (VERSION,ROBOFFT_VERSION)):
         raise ValueError('Explicit frozen15/train4 or frozen9/train10, plus deterministic final, required')
     if len(t['std_schedule'])!=20 or t['std_schedule'][-1]!=0. or any(
             not math.isfinite(x) or x<=0 for x in t['std_schedule'][:-1]):
@@ -142,13 +146,13 @@ def configuration(path,*,genmo_repo=None,gmt_repo=None):
         raise ValueError('Independent trainable tracking history Critic required')
     if not 0<s['critic']['history_learning_rate']<=s['critic']['learning_rate']:
         raise ValueError('Invalid separate history GRU learning rate')
-    if s['kl']['calibration']['scope']!=('four_trainable_steps_only' if trainable_count==4 else 'ten_trainable_steps_only'):
+    if not robofft and s['kl']['calibration']['scope']!=('four_trainable_steps_only' if trainable_count==4 else 'ten_trainable_steps_only'):
         raise ValueError('KL calibration scope must identify the actual trainable steps')
     if not 0<c['timing']['calibration_reservation_seconds']<=.5:
         raise ValueError('Calibration needs an explicit bounded reservation, not a measured delay')
     if c['runtime']['timing_contract']!='modeled_deployment.v3' or c['timing']['control_ticks']!=12 or c['timing']['physics_ticks']!=3:
         raise ValueError('Keep calibrated deployment clock and 50Hz/200Hz four physical substeps')
-    expected_reduction='free_coordinate_mean' if s['version']==VERSION else 'joint_sum'
+    expected_reduction='mc_mean_logratio_action_clip' if robofft else ('free_coordinate_mean' if s['version']==VERSION else 'joint_sum')
     if t['objective_logprob_reduction']!=expected_reduction or t['gamma_denoising']!=1.:
         raise ValueError('PPO reduction must match explicit algorithm version with one undiscounted upper advantage')
     if not 0<t['ppo_clip']<1 or not math.isfinite(t['actor_lr']) or t['actor_lr']<=0:
@@ -161,34 +165,39 @@ def configuration(path,*,genmo_repo=None,gmt_repo=None):
     if type(diagnostic_interval) is not int or diagnostic_interval<1:
         raise ValueError('actor_diagnostics_every must be a positive iteration interval')
     expected_control='coordinate_kl_backtracking' if s['version']==VERSION else 'joint_kl_backtracking'
-    if t['actor_lr_control']!=expected_control or t['kl_rejection']!='rollback_abort':
+    if not robofft and (t['actor_lr_control']!=expected_control or t['kl_rejection']!='rollback_abort'):
         raise ValueError('AdamW with fixed LR ratios, joint-KL backtracking and final whole-rollout rejection required')
     if any(key in t for key in ('actor_lr_bounds','kl_target_coordinate','kl_control_metric')):
         raise ValueError('Retired adaptive-LR settings are not supported')
-    steps=t['ppo_epochs']*math.ceil(chains/scale['actor_minibatch_chains'])
+    steps=t['ppo_epochs']*math.ceil(chains/actor_batch)
     for key,default in (('bc_enabled',True),('audit_full_rollout_objective',False)):
         if type(t.get(key,default)) is not bool:raise ValueError(key+' must be boolean')
-    bc_total=t['bc_samples_per_rollout']
-    minimum_bc=t['bc_min_global_batch']
-    if type(minimum_bc)is not int or minimum_bc<256:
-        raise ValueError('Production BC requires at least 256 global samples per Adam step')
-    bc_total=max(bc_total,steps*minimum_bc)
-    t['bc_samples_per_rollout']=bc_total
-    if type(bc_total)is not int or bc_total<1:
-        raise ValueError('BC total must be positive; actual ragged optimizer steps determine its allocation')
+    bc_total=0
+    if not robofft:
+        bc_total=t['bc_samples_per_rollout']
+        minimum_bc=t['bc_min_global_batch']
+        if type(minimum_bc)is not int or minimum_bc<256:
+            raise ValueError('Production BC requires at least 256 global samples per Adam step')
+        bc_total=max(bc_total,steps*minimum_bc)
+        t['bc_samples_per_rollout']=bc_total
+        if type(bc_total)is not int or bc_total<1:
+            raise ValueError('BC total must be positive; actual ragged optimizer steps determine its allocation')
     t.update(rollout_upper_steps=chains,rollout_upper_steps_per_rank=n*decisions,
-        actor_minibatch_internal_transitions=scale['actor_minibatch_chains']*trainable_count,
+        actor_minibatch_internal_transitions=actor_batch*trainable_count,
         max_actor_optimizer_steps=steps,bc_batch=bc_total//steps,
         critic_steps=s['critic']['epochs']*math.ceil(chains/s['critic']['global_batch']),
         critic_batch=s['critic']['global_batch'],critic_lr=s['critic']['learning_rate'])
+    if robofft:
+        t.pop('actor_minibatch_internal_transitions',None)
+        t['actor_minibatch_mc_evaluations']=actor_batch*t['robofft']['mc_samples']
     c['stage9']=dict(t,reward=resolve_reward_config(s['reward']),seed=s['seed'],run_id='assigned_training_run',
         bc_data_root=c['paths']['data_root'],bc_distribution='all_ranks')
     if s['limits']['physics_steps']!=4*s['limits']['control_steps']:
         raise ValueError('Physical resource budget must preserve four substeps')
     # reset/决策对齐模式对应的公共格（固定25步或滚动5步）；每格每环境至多一条转移。
     # collector再次按真实片段校验此上限，失败/预热只减少有效链，不能偷偷多做PG更新。
-    maximum_steps=t['ppo_epochs']*math.ceil(chains/scale['actor_minibatch_chains'])
-    if bc_total<maximum_steps:raise ValueError('BC must cover every possible actual optimizer step')
+    maximum_steps=t['ppo_epochs']*math.ceil(chains/actor_batch)
+    if not robofft and bc_total<maximum_steps:raise ValueError('BC must cover every possible actual optimizer step')
     if s['limits']['optimizer_attempts']<s['limits']['accepted_iterations']*maximum_steps:
         raise ValueError('Optimizer attempt budget must cover the complete declared workload')
     from .actor_optimization import validate_optimization_configuration
@@ -199,4 +208,7 @@ def configuration(path,*,genmo_repo=None,gmt_repo=None):
         local_trainable_kl_visits=n*decisions*trainable_count,bc_per_step=t['bc_batch'],bc_per_rollout=bc_total)
     s['derived'].update(count_semantics='nominal_capacity_only_actual_manifest_controls_optimization',
         maximum_actor_steps=maximum_steps)
+    if robofft:
+        s['derived'].update(local_mc_visits=n*decisions*t['robofft']['mc_samples']*t['ppo_epochs'],
+            local_trainable_kl_visits=0,local_ppo_internal_visits=0)
     return c

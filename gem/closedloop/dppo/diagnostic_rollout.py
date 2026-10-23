@@ -1,14 +1,14 @@
 """Stage10 内存rollout的显式诊断发布与固定数据重放读取。
 
-普通训练不调用本模块。异常或明确的固定数据验收需要保存时，将当前完整随机
-链、旧均值/实际方差/联合概率、因果条件、GAE目标、真实控制奖励和物理证据发布
+周期诊断、异常或明确的固定数据验收需要保存时，将当前算法的真实学习记录
+（Gaussian 完整链或 RoboFFT 最终 action_x0/固定 MC）、因果条件、GAE目标和物理证据发布
 为独立当前格式；它不要求存在旧v2的raw_samples文件，不伪造磁盘路径或SHA。
 同一CPU快照用共享memo保留列式大数组引用，不把控制字段展开成Python列表。
 完整文件先排他写临时路径、fsync、原子发布，再以实际SHA发布manifest。
 
 可选完整证据用于异常回放；固定Actor计算对照可以明确只保留学习张量与真实执行
 身份/计数，此时manifest必须标明不是完整物理回放。原始当前轮的物理数据仍在
-训练进程中保持到最终KL完成。读取检查schema、大小、SHA、行为核和逐条转移，
+训练进程中保持到当前算法更新与诊断完成。读取检查schema、大小、SHA、行为核和逐条转移，
 不改写old统计量，不重新采样，不透明兼容旧逐文件/归档格式。
 """
 from __future__ import annotations
@@ -35,11 +35,17 @@ def persist_rollout(path,rows,targets,manifest,*,kernel,identity,full_execution=
         fields['metadata']=metadata
         origins.append(fields)  # 共享memo的id键要求原容器保持存活，禁止循环中id复用。
         snapshot=UpperTransition(**cpu_snapshot(fields,memo));snapshot.validate();packed.append(snapshot)
-    payload=dict(schema=SCHEMA,identity=identity,kernel=kernel,transitions=packed,
+    algorithms=sorted({row.algorithm for row in rows})
+    payload=dict(schema=SCHEMA,algorithms=algorithms,identity=identity,kernel=kernel,transitions=packed,
         targets=cpu_snapshot(targets,memo),global_manifest=copy.deepcopy(manifest),
         full_execution_evidence=bool(full_execution))
     output=path/'rollout.pt';temporary=path/'rollout.pt.partial'
-    if guard:guard.check(sum(row.chain.numel()*row.chain.element_size()*3 for row in rows)+65536)
+    if guard:
+        learning_bytes=sum((row.chain if row.chain is not None else row.action_x0).numel()*4*3 for row in rows)
+        mc_bytes=sum(v.numel()*v.element_size() for row in rows if row.mc_record is not None
+            for v in (row.mc_record.eps,row.mc_record.old_loss,row.mc_record.sampling_indices,
+                row.mc_record.original_timesteps,row.mc_record.mc_numbers))
+        guard.check(learning_bytes+mc_bytes+65536)
     try:
         with temporary.open('xb') as stream:
             torch.save(payload,stream);stream.flush();os.fsync(stream.fileno())
@@ -48,7 +54,7 @@ def persist_rollout(path,rows,targets,manifest,*,kernel,identity,full_execution=
         fd=os.open(path,os.O_DIRECTORY|os.O_RDONLY)
         try:os.fsync(fd)
         finally:os.close(fd)
-        record=dict(schema=SCHEMA,path=output.name,size_bytes=size,sha256=sha,
+        record=dict(schema=SCHEMA,algorithms=algorithms,path=output.name,size_bytes=size,sha256=sha,
             real_upper_transitions=len(rows),real_control_steps=sum(r.executed_control_steps for r in rows),
             real_physics_steps=sum(r.executed_physics_steps for r in rows),
             full_execution_evidence=bool(full_execution))
@@ -69,6 +75,9 @@ def load_rollout(path):
     payload=torch.load(source,map_location='cpu',weights_only=False,mmap=True)
     if payload.get('schema')!=SCHEMA or len(payload['transitions'])!=record['real_upper_transitions']:
         raise ValueError('Incomplete diagnostic rollout')
+    if 'algorithms' in record and (record['algorithms']!=payload.get('algorithms') or
+            record['algorithms']!=sorted({row.algorithm for row in payload['transitions']})):
+        raise ValueError('Diagnostic rollout algorithm marker differs')
     for row in payload['transitions']:
         row.validate()
         if row.metadata['sampler_trace']['kernel_config']!=payload['kernel']:

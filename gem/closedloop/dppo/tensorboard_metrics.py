@@ -98,6 +98,13 @@ DEFINITIONS.update({
 for _source in SOURCES:
     DEFINITIONS[f'Sampling/time_share_{_source}'] = '本轮普通 Actor 实际采集秒数中该来源的占比；不是选曲概率，也不是唯一时间覆盖率。'
 
+DEFINITIONS.update({
+    'Policy/surrogate_kl': 'RoboFFT 动作代理 ratio-1-logratio；不是真实策略 KL。',
+    'Policy/action_ratio': 'MC 对数比平均后 exp 的上层动作代理比值。',
+    'Policy/mc_logratio_clamp_fraction': '每个 MC 的原始 logp 差越过 [-10,10] 的比例。',
+    'Policy/action_clip_fraction': '平均 MC 对数比后，上层动作 PPO ratio 越界比例。',
+    'Loss/robofft_action_ppo': '一次全局优势标准化后的动作 PPO 与负优势折扣损失。',
+})
 SCOPES = ('training', 'validation', 'train_evaluation', 'critic_mc')
 EVENT_TAG_OVERRIDES = {
     ('training', 'Reward/total_per_second'): 'Reward/train_total_per_second',
@@ -160,7 +167,7 @@ def _weighted(rows, key, weight):
 
 def training_scalars(record):
     """跨 rank 合并分子/分母；仅接受实际完成的 Actor 更新，避免预热/回退污染横轴。"""
-    if record.get('mode') != 'dppo_bc':
+    if record.get('mode') not in ('dppo_bc','robofft_d'):
         return {}
     collections = record['collection_by_rank']
     seconds = sum(c['executed_seconds'] for c in collections)
@@ -190,7 +197,7 @@ def training_scalars(record):
         transformer=[value for name,value in rates.items() if name.startswith('transformer_')]
         if transformer:
             values['Policy/transformer_lr_min']=min(transformer)
-        values['Policy/gradient_norm'] = float(np.mean([s['total_gradient_norm'] for s in steps]))
+        values['Policy/gradient_norm'] = float(np.mean([s.get('total_gradient_norm',s.get('gradient_norm',0.)) for s in steps]))
         ratios = []
         for step in steps:
             gradients = step.get('gradient_contributions', {}).get('all', {})
@@ -204,6 +211,13 @@ def training_scalars(record):
         transaction = steps[-1].get('backtracking', {})
         if transaction:
             values['Policy/backtracks'] = transaction.get('backtracks')
+    surrogate=record.get('surrogate_metrics') or {}
+    if surrogate:
+        values.update({'Policy/surrogate_kl':surrogate['surrogate_kl'],
+            'Policy/action_ratio':surrogate['ratio'],
+            'Policy/mc_logratio_clamp_fraction':surrogate['logratio_clamp_fraction'],
+            'Policy/action_clip_fraction':surrogate['ratio_clip_fraction'],
+            'Loss/robofft_action_ppo':surrogate['loss']})
     kl = record.get('trainable_steps_kl') or record.get('trainable4_kl') or {}
     active = kl.get('per_denoising_step', [])
     if active and [step['step'] for step in active] not in (list(range(15,19)),list(range(9,19))):

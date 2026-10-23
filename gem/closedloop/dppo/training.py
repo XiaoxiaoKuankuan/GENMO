@@ -30,7 +30,7 @@ import torch
 import yaml
 
 from .budget import atomic_json
-from .training_checkpoint import SCHEMA,AsyncCheckpointWriter,immutable_cpu_snapshot,load_training_checkpoint,file_sha256
+from .training_checkpoint import schema_for_identity,AsyncCheckpointWriter,immutable_cpu_snapshot,load_training_checkpoint,file_sha256
 from .gradient_merge import BCGradientController
 from .full_dataset import FullMusicCatalog
 from .parallel_support import local_call,root_call,capture_local_rng,restore_local_rng
@@ -181,6 +181,13 @@ def _periodic_evaluation_label(state):
 def _record_actor_step(c,label,step):
     """即时保留小批候选及回退证据；整轮检查通过前不能计作最终接受更新。"""
     def publish():
+        if getattr(c,'robofft',False):
+            c.manager.append_metrics(dict(event='robofft_actor_minibatch',label=label,
+                pending_iteration=c.state['iteration']+1,actor_step=step))
+            print(f'[RoboFFT ACTOR] {label} actions={step["global_action_count"]} '
+                f'surrogate_kl={step["post_step_surrogate"]["surrogate_kl"]:.6g} '
+                f'lr={step["learning_rate"]:.6g}',flush=True)
+            return
         c.manager.append_metrics(dict(event='actor_minibatch',label=label,
             pending_iteration=c.state['iteration']+1,acceptance_scope='pending_full_rollout_joint_KL',
             actor_step=step))
@@ -248,7 +255,7 @@ def _snapshot(c,reason,*,wait=False):
         _poll_checkpoint(c,wait=True)
         c.manager.check_disk(c.stage['storage']['checkpoint_reserve_bytes'])
         before=time.perf_counter()
-        payload=immutable_cpu_snapshot(dict(schema=SCHEMA,identity=c.identity,config=c.base_config,
+        payload=immutable_cpu_snapshot(dict(schema=schema_for_identity(c.identity),identity=c.identity,config=c.base_config,
             actor=c.actor.state_dict(),critic=c.critic.state_dict(),actor_optimizer=c.actor_optimizer.state_dict(),
             critic_optimizer=c.critic_optimizer.state_dict(),bc_controller=c.controller.state_dict(),scheduler=None,
             state=c.state,rank_states=rank_states,budget=c.budget.state_dict(),
@@ -403,6 +410,69 @@ def _maintain_after_iteration(c,report,*,is_warmup,rejected,last_save,finishing=
     return last_save
 
 
+def _prepare_actor_rollout(c,rows,cache,manifest,*,args,strict=False):
+    """整轮学习前固定旧代理或核验旧 Gaussian 概率，二者不交叉调用。"""
+    distributed=c.distributed
+    if c.robofft:
+        from ..robofft.updater import prepare_mc,diagnostics
+        local_call(distributed,lambda:prepare_mc(c.policy,rows,cache,c.generators['robofft_mc'],
+            microbatch=c.settings['action_microbatch']))
+        initial_probability=diagnostics(c.policy,rows,cache,manifest,distributed,
+            microbatch=c.settings['action_microbatch'],clip=c.settings['ppo_clip'])
+    else:
+        probability_frequency=c.stage['checks']['full_probability_every']
+        full_probability=(c.state['rollouts_completed']==0 or strict or args.collect_only or
+            (probability_frequency>0 and c.state['rollouts_completed']%probability_frequency==0))
+        initial_probability=probability_check_local(c.policy,rows,global_manifest=manifest,distributed=distributed,
+            denoising_microbatch=c.settings['kl_microbatch'],tensor_cache=cache,include_frozen=full_probability,
+            global_indices=None if full_probability else
+                [next(i for i,m in enumerate(manifest) if m['owner_rank']==rank and m['has_free'])
+                 for rank in range(8) if any(m['owner_rank']==rank and m['has_free'] for m in manifest)])
+    return initial_probability
+
+
+def _update_actor(c,rows,targets,cache,manifest,*,label,reserve=None,step_observer=None):
+    """真实训练与接线测试共用算法分发；RoboFFT 不进入 Gaussian Actor 更新器。"""
+    distributed=c.distributed
+    observer=step_observer or (lambda step:_record_actor_step(c,label,step))
+    if c.robofft:
+        from ..robofft.updater import actor_update as robofft_update
+        return robofft_update(c.policy,c.actor_optimizer,rows,targets,cache,manifest,
+            distributed=distributed,generator=c.generators['actor'],ppo_epochs=c.settings['ppo_epochs'],
+            minibatch_actions=c.stage['scale']['actor_minibatch_actions'],microbatch=c.settings['action_microbatch'],
+            clip=c.settings['ppo_clip'],grad_clip_norm=c.settings['grad_clip_norm'],reserve_attempt=reserve,
+            step_observer=observer)
+    else:
+        return actor_update(c.policy,c.actor_optimizer,rows,targets,cache,manifest,c.controller,
+            distributed=distributed,anchor=c.bc,generator=c.generators['actor'],
+            ppo_epochs=c.settings['ppo_epochs'],minibatch_chains=c.stage['scale']['actor_minibatch_chains'],
+            microbatch=c.settings['denoising_microbatch'],sampled_steps=c.settings['ppo_steps_per_chain'],
+            clip=c.settings['ppo_clip'],gamma_denoising=c.settings['gamma_denoising'],
+            soft_kl=c.settings['kl_soft_stop_mean_coordinate'],kl_reduction=c.stage['kl']['reduction'],
+            objective_reduction=c.settings['objective_logprob_reduction'],
+            grad_clip_norm=c.settings['grad_clip_norm'],reserve_attempt=reserve,
+            bc_samples_per_rollout=c.settings['bc_samples_per_rollout'],bc_min_global_batch=c.settings['bc_min_global_batch'],
+            bc_enabled=c.settings.get('bc_enabled',True),audit_full_rollout_objective=c.settings.get('audit_full_rollout_objective',False),
+            max_active_clip=c.settings['max_active_clip_fraction'],
+            trust_region=c.settings['trust_region'],kl_limits=c.stage['kl'],
+            step_observer=observer,
+            snr=c.settings.get('gradient_snr_diagnostic',False))
+
+
+def _phase_memory(distributed):
+    """报告本阶段各 rank 的 PyTorch allocator 峰值；不冒充 PhysX 总显存。"""
+    return distributed.all_gather_object(dict(
+        pytorch_peak_allocated=torch.cuda.max_memory_allocated(distributed.device),
+        pytorch_peak_reserved=torch.cuda.max_memory_reserved(distributed.device),
+        scope='PyTorch_allocator_excludes_PhysX_external_allocations'))
+
+
+def _maximum_memory(*phases):
+    return [dict(scope='PyTorch_allocator_excludes_PhysX_external_allocations',
+        **{key:max(phase[rank][key] for phase in phases) for key in
+            ('pytorch_peak_allocated','pytorch_peak_reserved')}) for rank in range(len(phases[0]))]
+
+
 def run(cargs,config,distributed):
     if not any(getattr(cargs,name,False) for name in ('collect_only','evaluate_only','calibrate_only','critic_preheat_only','mc_validation_only')):
         from .actor_optimization import require_current_actor_objective
@@ -411,6 +481,8 @@ def run(cargs,config,distributed):
         stage=config['stage10'],settings=copy.deepcopy(config['stage9']),manager=None,writer=None,
         async_writer=None,vector=None,workers=None,maintenance=None,budget=None,output=cargs.output_dir.resolve(),
         overhead={})
+    from ..robofft import OBJECTIVE
+    c.robofft=c.settings['actor_objective']==OBJECTIVE
     report=dict(schema='genmo.stage10.session',status='running',iterations=[],warmup=[],evaluations=[],evaluation_artifacts=[])
     from .run_control import build_policy,validate_stopping_iteration
     stop_after_iteration=validate_stopping_iteration(cargs.stop_after_iteration,c.stage)
@@ -457,6 +529,11 @@ def run(cargs,config,distributed):
                 generation_horizon=c.stage['generation_horizon'],data_catalog=c.catalog.identity))
             actor_initialization=local_call(distributed,lambda:load_evaluation_actor(cargs.evaluation_actor,
                 actor=c.actor,kernel=c.policy.kernel_config,assets=c.stage['assets'],execution_binding=binding))
+        weights_only=getattr(cargs,'initialize_actor_weights_only',None)
+        if weights_only:
+            from ..robofft.checkpoint import initialize_actor_weights_only
+            actor_initialization=local_call(distributed,lambda:initialize_actor_weights_only(
+                weights_only,c.actor,assets=c.stage['assets']))
         from .actor_optimizer import make_actor_optimizer
         c.actor_optimizer=make_actor_optimizer(c.actor,c.settings)
         history_ids={id(p) for p in c.critic.history_encoder.parameters()}
@@ -468,16 +545,21 @@ def run(cargs,config,distributed):
         anchor_config=copy.deepcopy(c.config)
         anchor_config['stage9'].update(bc_batch=c.settings['bc_batch']//distributed.world_size,
             seed=(c.stage['seed']+1000003*distributed.rank)%2**32)
-        c.bc=Stage1RetentionAnchor(anchor_config,c.actor,train,source_global_step=loading['source_global_step'])
+        from ..robofft.configuration import DisabledAnchor
+        c.bc=(DisabledAnchor() if c.robofft else
+            Stage1RetentionAnchor(anchor_config,c.actor,train,source_global_step=loading['source_global_step']))
         c.generators=dict(actor=torch.Generator().manual_seed(c.stage['seed']+3003),critic=torch.Generator().manual_seed(c.stage['seed']+2002))
+        if c.robofft:
+            c.generators['robofft_mc']=torch.Generator().manual_seed(
+                c.stage['seed']+c.settings['robofft']['mc_seed_offset']+1000003*distributed.rank)
         c.state=dict(iteration=0,rollouts_completed=0,warmup_completed=0,actor_updates=0,critic_updates=0,
             policy_version=0,optimizer_attempts=0,training_control_steps=0,training_physics_steps=0,
             training_upper_transitions=0,selected_actor_lr=c.settings['actor_lr'],
-            execution_profile=dict(numerical_execution=c.policy.numerical_execution,microbatch=c.settings['denoising_microbatch']))
+            execution_profile=dict(numerical_execution=c.policy.numerical_execution,microbatch=c.settings['action_microbatch'] if c.robofft else c.settings['denoising_microbatch']))
         assets=root_call(distributed,lambda:{k:file_sha256(config['paths'][k]) for k in c.stage['assets']})
         if assets!=c.stage['assets']:raise ValueError('Initial Stage1/GMT assets differ from declared SHA')
         c.identity=dict(schema='genmo.stage10.training_identity',assets=assets,kernel=c.policy.kernel_config,
-            training=c.stage['training'],critic=c.stage['critic'],bc_gradient=c.stage['bc_gradient'],kl=c.stage['kl'],
+            training=c.stage['training'],critic=c.stage['critic'],bc_gradient=c.stage['bc_gradient'],**({} if c.robofft else dict(kl=c.stage['kl'])),
             scale=c.stage['scale'],reward=c.settings['reward'],runtime=c.base_config['runtime'],timing=c.base_config['timing'],
             dataset=c.stage['dataset'],evaluation=c.stage['evaluation'],
             run_control=c.stage['run_control'],resource_limits=c.stage['limits'],
@@ -504,6 +586,8 @@ def run(cargs,config,distributed):
                 prior_mc_physics_steps=imported['prior_mc_physics_steps'])
             c.state['next_mc_calibration_control_steps']=_next_interaction_boundary(
                 c.state['training_control_steps'],critic_config['complete_mc']['every_control_steps'])
+        if c.robofft and initialization:
+            raise ValueError('DPPO full-state transfer is forbidden; use --initialize-actor-weights-only in a new RoboFFT run')
         if cargs.resume:
             pointer=root_call(distributed,lambda:json.loads((c.output/'latest.json').read_text()))
             checkpoint=c.output/pointer['path']
@@ -513,6 +597,9 @@ def run(cargs,config,distributed):
             from .run_management import validate_budget_progress
             root_call(distributed,lambda:validate_budget_progress(payload['budget'],c.budget.state_dict()))
             c.state=copy.deepcopy(payload['state'])
+            if c.robofft:
+                c.identity['actor_initialization']=copy.deepcopy(payload['identity'].get('actor_initialization',
+                    c.identity['actor_initialization']))
             c.bc.load_state_dict(payload['rank_states'][distributed.rank]['bc'])
             restore_local_rng(payload['rank_states'][distributed.rank]['rng'],c.generators)
         elif initialization:
@@ -677,6 +764,9 @@ def run(cargs,config,distributed):
             buffer,targets,manifest,collection=c.vector.collect(label,strict=strict)
             collection_seconds=max(distributed.all_gather_object(time.perf_counter()-collection_start))
             rows=buffer.transitions
+            if c.robofft:
+                rollout_memory=_phase_memory(distributed)
+                torch.cuda.reset_peak_memory_stats(distributed.device)
             if periodic_diagnostic and not strict:
                 from .diagnostic_rollout import sampled_diagnostic
                 collection['sampled_diagnostic']=sampled_diagnostic(c,rows,targets,label)
@@ -696,15 +786,13 @@ def run(cargs,config,distributed):
                     actor_steps=0,critic_steps=0,policy_version_unchanged=True)))
                 continue
             cache=RolloutTensorCache(rows,targets,distributed.device,max_device_bytes=c.stage['storage']['tensor_cache_max_bytes'],preserve_device=True)
-            probability_frequency=c.stage['checks']['full_probability_every']
-            full_probability=(c.state['rollouts_completed']==0 or strict or cargs.collect_only or
-                (probability_frequency>0 and c.state['rollouts_completed']%probability_frequency==0))
-            initial_probability=probability_check_local(c.policy,rows,global_manifest=manifest,distributed=distributed,
-                denoising_microbatch=c.settings['kl_microbatch'],tensor_cache=cache,include_frozen=full_probability,
-                global_indices=None if full_probability else
-                    [next(i for i,m in enumerate(manifest) if m['owner_rank']==rank and m['has_free'])
-                     for rank in range(8) if any(m['owner_rank']==rank and m['has_free'] for m in manifest)])
             saved=local_call(distributed,lambda:_rollback_snapshot(c))
+            prepare_start=time.perf_counter()
+            initial_probability=_prepare_actor_rollout(c,rows,cache,manifest,args=cargs,strict=strict)
+            actor_prepare_seconds=max(distributed.all_gather_object(time.perf_counter()-prepare_start))
+            if c.robofft:
+                actor_prepare_memory=_phase_memory(distributed)
+                torch.cuda.reset_peak_memory_stats(distributed.device)
             if (cargs.collect_only or not is_warmup and cargs.capture_validation_iteration is not None
                     and c.state['iteration']+1==cargs.capture_validation_iteration):
                 from .diagnostic_rollout import persist_rollout
@@ -719,8 +807,10 @@ def run(cargs,config,distributed):
                 rank_files=distributed.all_gather_object(dict(rank=distributed.rank,
                     rollout_manifest_sha256=file_sha256(case/f'rank{distributed.rank:02d}'/'manifest.json'),
                     rank_state_sha256=file_sha256(case/f'rank{distributed.rank:02d}'/'rank_state.pt')))
-                root_call(distributed,lambda:atomic_json(case/'case.json',dict(schema='genmo.stage2.asymmetric_fixed_learning_case.v1',
-                    real_global_chains=len(manifest),learning_state_sha256=file_sha256(case/'learning_state.pt'),
+                root_call(distributed,lambda:atomic_json(case/'case.json',dict(schema=(
+                    'genmo.stage2.robofft_fixed_learning_case.v1' if c.robofft else 'genmo.stage2.asymmetric_fixed_learning_case.v1'),
+                    **({'real_global_actions':len(manifest)} if c.robofft else {'real_global_chains':len(manifest)}),
+                    learning_state_sha256=file_sha256(case/'learning_state.pt'),
                     nonempty_adam=bool(saved['actor_optimizer']['state']),ranks=rank_files,
                     evidence_scope='real_PhysX_training_inputs_not_full_physical_archive',
                     joint_limits={key:(list(value) if key=='joint_names' else value.tolist())
@@ -745,55 +835,46 @@ def run(cargs,config,distributed):
                 generator=c.generators['critic'],epochs=critic_config['epochs'],batch=critic_config['global_batch'])
             critic_seconds=max(distributed.all_gather_object(time.perf_counter()-update_start))
             c.state['critic_updates']+=critic['optimizer_steps']
+            if c.robofft:
+                critic_memory=_phase_memory(distributed)
+                torch.cuda.reset_peak_memory_stats(distributed.device)
             actor=None;kl=None
             if not is_warmup:
                 actor_start=time.perf_counter()
                 def reserve():
                     root_call(distributed,lambda:c.budget.reserve('actor_attempts',optimizer_attempts=1))
                     c.state['optimizer_attempts']+=1
-                actor=actor_update(c.policy,c.actor_optimizer,rows,targets,cache,manifest,c.controller,
-                    distributed=distributed,anchor=c.bc,generator=c.generators['actor'],
-                    ppo_epochs=c.settings['ppo_epochs'],minibatch_chains=c.stage['scale']['actor_minibatch_chains'],
-                    microbatch=c.settings['denoising_microbatch'],sampled_steps=c.settings['ppo_steps_per_chain'],
-                    clip=c.settings['ppo_clip'],gamma_denoising=c.settings['gamma_denoising'],
-                    soft_kl=c.settings['kl_soft_stop_mean_coordinate'],kl_reduction=c.stage['kl']['reduction'],
-                    objective_reduction=c.settings['objective_logprob_reduction'],
-                    grad_clip_norm=c.settings['grad_clip_norm'],reserve_attempt=reserve,
-                    bc_samples_per_rollout=c.settings['bc_samples_per_rollout'],bc_min_global_batch=c.settings['bc_min_global_batch'],
-                    bc_enabled=c.settings.get('bc_enabled',True),audit_full_rollout_objective=c.settings.get('audit_full_rollout_objective',False),
-                    max_active_clip=c.settings['max_active_clip_fraction'],
-                    trust_region=c.settings['trust_region'],kl_limits=c.stage['kl'],
-                    step_observer=lambda step:_record_actor_step(c,label,step),
-                    snr=c.settings.get('gradient_snr_diagnostic',False))
+                actor=_update_actor(c,rows,targets,cache,manifest,label=label,reserve=reserve)
                 actor_seconds=max(distributed.all_gather_object(time.perf_counter()-actor_start))
-                from .kl_reuse import reusable_accepted_kl
-                kl=reusable_accepted_kl(actor,c.policy,cache,manifest,distributed,
-                    clip=c.settings['ppo_clip'],reduction=c.settings['objective_logprob_reduction'])
-                if kl is None:
-                    kl=final_kl(c.policy,rows,cache,manifest,distributed=distributed,microbatch=c.settings['kl_microbatch'],
-                        clip=c.settings['ppo_clip'],objective_reduction=c.settings['objective_logprob_reduction'])
-                elif getattr(cargs,'verify_kl_reuse',False) and not getattr(c,'kl_reuse_verified',False):
-                    started=time.perf_counter()
-                    independent=final_kl(c.policy,rows,cache,manifest,distributed=distributed,microbatch=c.settings['kl_microbatch'],
-                        clip=c.settings['ppo_clip'],objective_reduction=c.settings['objective_logprob_reduction'])
-                    fields=('mean_coordinate_kl','maximum_step_mean_coordinate_kl','coordinate_kl','chain_joint_kl',
-                        'per_denoising_step','covered_chains','covered_internal_transitions','gaussian_kl_steps')
-                    if any(kl[key]!=independent[key] for key in fields):
-                        raise RuntimeError('Reused KL differs from independent complete trainable-step recalculation')
-                    kl['reuse_verification']=dict(passed=True,all_valid_chains_and_trainable_steps=True,
-                        trainable_steps=list(c.policy.trainable_steps),
-                        additional_wall_seconds=time.perf_counter()-started)
-                    c.kl_reuse_verified=True
-                accepted=_final_actor_acceptance(actor,kl,c.stage['kl'])
-                actor['accepted_optimizer_steps']=actor['optimizer_steps'] if accepted['passed'] else 0
-                actor['acceptance_scope']='full_rollout_stepwise_proxy_objective_and_separate_Gaussian_KLs'
-                if not accepted['passed']:
-                    anomaly_saved=local_call(distributed,lambda:_preserve_rollout_anomaly(c,buffer,targets,manifest,label))
-                    rollback=local_call(distributed,lambda:_restore_rollback(c,saved))
-                    rollbacks=distributed.all_gather_object(rollback)
-                    root_call(distributed,lambda:atomic_json(c.session/(label+'_rejected.json'),dict(kl=kl,acceptance=accepted,actor=actor,
-                        physical_and_resource_consumption_retained=True,training_state_restored=True,rollback_audits=rollbacks)))
-                    raise RuntimeError('Final trainable-step KL rejected; whole training update rolled back')
+                if not c.robofft:
+                    from .kl_reuse import reusable_accepted_kl
+                    kl=reusable_accepted_kl(actor,c.policy,cache,manifest,distributed,
+                        clip=c.settings['ppo_clip'],reduction=c.settings['objective_logprob_reduction'])
+                    if kl is None:
+                        kl=final_kl(c.policy,rows,cache,manifest,distributed=distributed,microbatch=c.settings['kl_microbatch'],
+                            clip=c.settings['ppo_clip'],objective_reduction=c.settings['objective_logprob_reduction'])
+                    elif getattr(cargs,'verify_kl_reuse',False) and not getattr(c,'kl_reuse_verified',False):
+                        started=time.perf_counter()
+                        independent=final_kl(c.policy,rows,cache,manifest,distributed=distributed,microbatch=c.settings['kl_microbatch'],
+                            clip=c.settings['ppo_clip'],objective_reduction=c.settings['objective_logprob_reduction'])
+                        fields=('mean_coordinate_kl','maximum_step_mean_coordinate_kl','coordinate_kl','chain_joint_kl',
+                            'per_denoising_step','covered_chains','covered_internal_transitions','gaussian_kl_steps')
+                        if any(kl[key]!=independent[key] for key in fields):
+                            raise RuntimeError('Reused KL differs from independent complete trainable-step recalculation')
+                        kl['reuse_verification']=dict(passed=True,all_valid_chains_and_trainable_steps=True,
+                            trainable_steps=list(c.policy.trainable_steps),
+                            additional_wall_seconds=time.perf_counter()-started)
+                        c.kl_reuse_verified=True
+                    accepted=_final_actor_acceptance(actor,kl,c.stage['kl'])
+                    actor['accepted_optimizer_steps']=actor['optimizer_steps'] if accepted['passed'] else 0
+                    actor['acceptance_scope']='full_rollout_stepwise_proxy_objective_and_separate_Gaussian_KLs'
+                    if not accepted['passed']:
+                        anomaly_saved=local_call(distributed,lambda:_preserve_rollout_anomaly(c,buffer,targets,manifest,label))
+                        rollback=local_call(distributed,lambda:_restore_rollback(c,saved))
+                        rollbacks=distributed.all_gather_object(rollback)
+                        root_call(distributed,lambda:atomic_json(c.session/(label+'_rejected.json'),dict(kl=kl,acceptance=accepted,actor=actor,
+                            physical_and_resource_consumption_retained=True,training_state_restored=True,rollback_audits=rollbacks)))
+                        raise RuntimeError('Final trainable-step KL rejected; whole training update rolled back')
             else:
                 actor_seconds=0.
             def assert_paused_physics():
@@ -813,9 +894,10 @@ def run(cargs,config,distributed):
                     optimizers=exact_state_digest(dict(actor=c.actor_optimizer.state_dict(),critic=c.critic_optimizer.state_dict())))))
                 if any(value!=fingerprints[0] for value in fingerprints):
                     raise RuntimeError('Periodic complete Actor/Critic/Adam states differ across ranks')
-            memory=distributed.all_gather_object(dict(pytorch_peak_allocated=torch.cuda.max_memory_allocated(distributed.device),
-                pytorch_peak_reserved=torch.cuda.max_memory_reserved(distributed.device),
-                scope='current_round_PyTorch_allocator_excludes_PhysX_external_allocations'))
+            memory=_phase_memory(distributed)
+            if c.robofft:
+                actor_memory=_maximum_memory(actor_prepare_memory,memory)
+                memory=_maximum_memory(rollout_memory,critic_memory,actor_memory)
             # 全部验收完成后再推进接受轮次，失败可回滚学习状态；已用物理/优化尝试不退款。
             if rejected:
                 pass
@@ -831,21 +913,28 @@ def run(cargs,config,distributed):
             profile_report=profiler.report();deactivate(profile_token);profile_token=None
             record=dict(label=label,state=copy.deepcopy(c.state),collection_by_rank=distributed.all_gather_object(collection),
                 probability=initial_probability,critic=critic,actor=actor,trainable_steps_kl=kl,tensor_cache=cache_report,
-                actor_seconds=actor_seconds,critic_seconds=critic_seconds,wall_seconds=wall,
-                efficiency=dict(environment_seconds=collection_seconds,actor_total_seconds=actor_seconds,
-                    actor_ppo_seconds=sum(v['ppo_seconds'] for v in (actor or {}).get('steps',[])),
-                    bc_seconds=sum(v['bc_seconds'] for v in (actor or {}).get('steps',[])),
-                    kl_seconds=sum(v['post_step_kl_seconds'] for v in (actor or {}).get('steps',[]))+(kl or {}).get('wall_seconds',0.),
+                actor_seconds=actor_seconds+actor_prepare_seconds if c.robofft else actor_seconds,
+                actor_prepare_seconds=actor_prepare_seconds,critic_seconds=critic_seconds,wall_seconds=wall,
+                surrogate_metrics=(actor or {}).get('final_surrogate'),
+                phase_resources=(dict(rollout=dict(seconds=collection_seconds,memory_by_rank=rollout_memory),
+                    actor=dict(seconds=actor_seconds+actor_prepare_seconds,memory_by_rank=actor_memory),
+                    critic=dict(seconds=critic_seconds,memory_by_rank=critic_memory),
+                    round=dict(seconds=wall,memory_by_rank=memory)) if c.robofft else None),
+                efficiency=dict(environment_seconds=collection_seconds,actor_total_seconds=actor_seconds+actor_prepare_seconds if c.robofft else actor_seconds,
+                    actor_ppo_seconds=sum(v.get('ppo_seconds',0.) for v in (actor or {}).get('steps',[])),
+                    bc_seconds=sum(v.get('bc_seconds',0.) for v in (actor or {}).get('steps',[])),
+                    kl_seconds=sum(v.get('post_step_kl_seconds',0.) for v in (actor or {}).get('steps',[]))+(kl or {}).get('wall_seconds',0.),
                     critic_seconds=critic_seconds,total_seconds=wall,effective_chains=(actor or {}).get('eligible_chains',0),
                     accepted_actor_steps=(actor or {}).get('accepted_optimizer_steps',0),
                     actor_seconds_per_accepted_step=actor_seconds/max((actor or {}).get('optimizer_steps',0),1),
                     peak_allocated_bytes=max(m['pytorch_peak_allocated'] for m in memory),
-                    timing_scope='foreground_wall_phases; actor_total_is_update_loop_excludes_final_rollout_KL; '
-                        'kl_seconds_includes_candidate_and_final_checks; overlapping_fields_must_not_be_summed'),
+                    timing_scope=('RoboFFT_actor_includes_MC_prepare_update_surrogate_and_output_checks; '
+                        'foreground_round_excludes_later_checkpoint_and_physical_evaluation' if c.robofft else
+                        'foreground_wall_phases; actor_total_excludes_final_Gaussian_KL; overlapping_fields_must_not_be_summed')),
                 performance_by_rank=distributed.all_gather_object(profile_report),physics_paused_during_optimization=True,
                 memory_by_rank=memory,periodic_model_fingerprints=fingerprints,
                 effective_upper_transitions_per_second=used[2]/wall,
-                mode='critic_warmup' if is_warmup else 'kl_rejected_rollback' if rejected else 'dppo_bc',
+                mode='critic_warmup' if is_warmup else 'kl_rejected_rollback' if rejected else 'robofft_d' if c.robofft else 'dppo_bc',
                 overhead_since_previous_record=dict(c.overhead))
             root_call(distributed,lambda:(c.manager.append_metrics(record),log_metrics(c.writer,c.output/'curves.jsonl',c.state['iteration'],
                 record,prefix='training',durable=False,dashboard_metrics=training_scalars(record))))

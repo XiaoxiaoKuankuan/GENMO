@@ -1,7 +1,8 @@
 """第九步上层执行转移、独立 CPU 快照和可确认的执行日志。
 
-本模块只保存数据，不调用 Actor、GMT 或物理推进。每条转移同时保留决策条件、完整
-归一化去噪链、逐去噪步旧联合概率、真实控制步奖励及两类结束标记。写入 Buffer 时
+本模块只保存数据，不调用 Actor、GMT 或物理推进。每条转移同时保留决策条件、算法
+身份、真实控制步奖励及两类结束标记。Gaussian 路径保存完整链和旧联合概率；RoboFFT
+路径保存最终 normalized action_x0，更新前再固定独立 MC 和旧代理损失，不制造零链。写入 Buffer 时
 递归 detach、搬到 CPU 并复制，避免下一次历史更新、参考窗口回收或 autograd 图改变
 已经采集的数据；采样链必须是 FP32，概率保留 FP64，不能用量化节省存储。
 
@@ -67,6 +68,9 @@ class UpperTransition:
     transition_valid: bool = True
     reason: str | None = None
     metadata: dict = field(default_factory=dict)
+    algorithm: str = 'gaussian_dppo.v1'
+    action_x0: torch.Tensor | None = None
+    mc_record: Any = None
 
     def snapshot(self) -> "UpperTransition":
         result = UpperTransition(**{key: cpu_snapshot(value) for key, value in vars(self).items()})
@@ -112,20 +116,26 @@ class UpperTransition:
             raise ValueError("Stage9 buffer requires single-environment conditions")
         if self.next_context is not None:
             validate_stage1_condition_batch(self.next_context, history_steps=50)
-        if self.chain is None or self.chain.dtype != torch.float32 or self.chain.ndim != 3:
+        from ..robofft import ALGORITHM
+        if self.algorithm == ALGORITHM:
+            from ..robofft.records import validate_action
+            validate_action(self)
+        elif self.algorithm != 'gaussian_dppo.v1':
+            raise ValueError('Unknown Actor optimization data algorithm')
+        elif self.chain is None or self.chain.dtype != torch.float32 or self.chain.ndim != 3:
             raise ValueError("valid transition requires a FP32 [K+1,T,30] chain")
-        if self.chain.shape[1:] != (self.context["future_valid"].shape[1], 30) or self.chain.shape[0] < 2:
+        if self.algorithm != ALGORITHM and (self.chain.shape[1:] != (self.context["future_valid"].shape[1], 30) or self.chain.shape[0] < 2):
             raise ValueError("invalid denoising chain shape")
-        if self.old_log_prob is None or self.old_log_prob.shape != (19,):
+        if self.algorithm != ALGORITHM and (self.old_log_prob is None or self.old_log_prob.shape != (19,)):
             raise ValueError("old_log_prob must contain only the 19 stochastic transitions; final map has no density")
-        if self.old_log_prob.dtype != torch.float64:
+        if self.algorithm != ALGORITHM and self.old_log_prob.dtype != torch.float64:
             raise ValueError("old joint log probabilities must preserve FP64 precision")
         if self.free_mask is None or self.free_mask.dtype != torch.bool or self.free_mask.shape != (self.context["future_valid"].shape[1], 30):
             raise ValueError("free_mask must be bool [T,30]")
         expected_free = self.context["future_valid"][0, :, None] & ~self.context["known_qpos30_mask"][0]
         if not torch.equal(self.free_mask, expected_free):
             raise ValueError("stored free_mask differs from the sampled condition mask")
-        for name in ("chain", "old_log_prob", "rewards"):
+        for name in (("action_x0", "rewards") if self.algorithm == ALGORITHM else ("chain", "old_log_prob", "rewards")):
             if not torch.isfinite(getattr(self, name)).all():
                 raise ValueError(f"nonfinite {name} in valid transition")
         if not all(math.isfinite(float(value)) for value in (self.old_value, self.next_value)):

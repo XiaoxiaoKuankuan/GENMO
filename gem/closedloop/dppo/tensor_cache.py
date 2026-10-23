@@ -54,6 +54,14 @@ class RolloutTensorCache:
                 self.host['critic/'+key]=(self.host['context/'+key] if shared else
                     torch.cat([row.metadata['critic_context'][key].detach().to(source_device) for row in self.rows],0))
             prototype = next((row for row in self.rows if row.chain is not None), None)
+            from ..robofft import ALGORITHM
+            compact = [r for r in self.rows if getattr(r,'algorithm',None)==ALGORITHM]
+            if compact:
+                if len(compact)!=len(self.rows) or prototype is not None:
+                    raise ValueError('Cannot mix RoboFFT actions with Gaussian chains')
+                self.kernel=json.dumps(compact[0].metadata['sampler_trace']['kernel_config'],sort_keys=True)
+                self.host['action_x0']=torch.stack([r.action_x0.detach().to(source_device) for r in compact])
+                self.host['free_mask']=torch.stack([r.free_mask.detach().to(source_device) for r in compact])
             if prototype is not None:
                 trace = prototype.metadata['sampler_trace']
                 self.kernel = json.dumps(trace['kernel_config'], sort_keys=True)
@@ -186,7 +194,11 @@ class RolloutTensorCache:
         return {key.removeprefix('context/'): self.get(key, rows) for key in self.host if key.startswith('context/')}
 
     def report(self):
+        records=[getattr(row,'mc_record',None) for row in self.rows]
+        mc_bytes=sum(v.numel()*v.element_size() for record in records if record is not None
+            for v in (record.eps,record.sampling_indices,record.original_timesteps,record.old_loss,record.mc_numbers))
         return dict(mode=self.mode, bytes=self.bytes, block_upper_chains=self.block_size,
+                    fixed_mc_host_bytes=mc_bytes,
                     input_storage='device_rollout' if self.preserve_device else 'cpu_snapshot',
                     block_transfers=self.transfer_count, transferred_bytes=self.transferred_bytes,
                     block_hits=self.block_hits, gather_calls=self.gather_calls,

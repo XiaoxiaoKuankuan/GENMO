@@ -211,7 +211,8 @@ def test_real_events_keep_one_run_and_separate_training_validation_reward(tmp_pa
     assert tags and set(tags) <= EVENT_DEFINITIONS.keys()
     groups = {tag.split('/')[0] for tag in tags}
     assert groups == {'Reward', 'Tracking', 'Motion', 'Termination', 'Policy', 'Loss', 'Sampling', 'Perf'}
-    assert len(EVENT_DEFINITIONS) <= 70
+    # 新增五个 RoboFFT 专用量；实际运行只写对应算法的标签，不混称 Gaussian KL。
+    assert len(EVENT_DEFINITIONS) <= 75
     assert all(events.Scalars(tag) for tag in tags)
     train = events.Scalars('Reward/train_total_per_second')
     validation = events.Scalars('Reward/validation_total_per_second')

@@ -622,7 +622,11 @@ class UpperEnvironment:
             request_id=generated['meta']['request_id'],plan_id=generated['meta']['plan_id'],
             parent_plan_id=generated['meta']['parent_plan_id'],policy_version=self.policy_version)
         return UpperTransition(identity=identity,context=generated['context'],next_context=next_context,
-            chain=trace['chain'][0],old_log_prob=trace['old_log_probs'][0],free_mask=trace['free_mask'][0],
+            chain=None if 'chain' not in trace else trace['chain'][0],
+            old_log_prob=None if 'old_log_probs' not in trace else trace['old_log_probs'][0],
+            algorithm=trace.get('algorithm','gaussian_dppo.v1'),
+            action_x0=None if 'action_x0' not in trace else trace['action_x0'][0].detach().clone(),
+            free_mask=trace['free_mask'][0],
             rewards=torch.tensor(rewards,dtype=torch.float64),old_value=0.,next_value=0.,
             control_tick_begin=start,control_tick_end=end,executed_control_steps=len(rows),
             executed_physics_steps=4*len(rows),terminated=terminated,truncated=truncated,

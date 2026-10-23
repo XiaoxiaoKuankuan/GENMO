@@ -75,10 +75,15 @@ class DeviceRolloutBuffer:
         flags=[]
         for fragment in fragments:
             for row in fragment:
-                if not row.transition_valid or row.chain is None:raise ValueError('Invalid physical row in GPU rollout')
+                from ..robofft import ALGORITHM
+                compact=row.algorithm==ALGORITHM
+                if not row.transition_valid or not compact and row.chain is None:raise ValueError('Invalid physical row in GPU rollout')
                 row.context={k:v.detach().to(device,copy=True) for k,v in row.context.items()}
                 row.next_context=(None if row.next_context is None else {k:v.detach().to(device,copy=True) for k,v in row.next_context.items()})
-                row.chain=row.chain.detach().to(device);row.old_log_prob=row.old_log_prob.detach().to(device)
+                if compact:
+                    row.action_x0=row.action_x0.detach().to(device,copy=True)
+                else:
+                    row.chain=row.chain.detach().to(device);row.old_log_prob=row.old_log_prob.detach().to(device)
                 row.free_mask=row.free_mask.detach().to(device)
                 for key in ('critic_context','next_critic_context'):
                     if row.metadata[key] is not None:
@@ -89,17 +94,21 @@ class DeviceRolloutBuffer:
                             raise ValueError('Critic and Actor snapshots have different causal conditions')
                         flags.extend((v==row.metadata[key][k]).all() for k,v in actor_context.items())
                 trace=row.metadata['sampler_trace']
-                for key in ['chain','old_means','old_stds','old_log_probs','free_mask','sampling_noise']:
+                for key in (['action_x0','normalized','free_mask'] if compact else ['chain','old_means','old_stds','old_log_probs','free_mask','sampling_noise']):
                     trace[key]=trace[key].detach().to(device)
                 if trace['kernel_config']!=policy.kernel_config:raise ValueError('Behavior and learner kernel identities differ')
-                if row.chain.shape!=(21,policy.generation_frames,30) or row.chain.dtype!=torch.float32 or row.old_log_prob.shape!=(19,) or row.old_log_prob.dtype!=torch.float64:
+                if compact:
+                    from ..robofft.records import validate_action
+                    validate_action(row,policy)
+                elif row.chain.shape!=(21,policy.generation_frames,30) or row.chain.dtype!=torch.float32 or row.old_log_prob.shape!=(19,) or row.old_log_prob.dtype!=torch.float64:
                     raise ValueError('GPU buffer requires the full FP32 20-step chain and FP64 joint old probability')
                 if row.executed_physics_steps!=4*row.executed_control_steps or row.control_tick_end-row.control_tick_begin!=12*row.executed_control_steps:
                     raise ValueError('Physical work or timestamp count changed')
                 if len(row.rewards)!=row.executed_control_steps or not row.terminated and row.next_context is None:
                     raise ValueError('Missing actual reward or causal bootstrap state')
                 expected=row.context['future_valid'][0,:,None]&~row.context['known_qpos30_mask'][0]
-                flags.extend([torch.isfinite(row.chain).all(),torch.isfinite(row.old_log_prob).all(),(row.free_mask==expected).all()])
+                values=[row.action_x0] if compact else [row.chain,row.old_log_prob]
+                flags.extend([*(torch.isfinite(v).all() for v in values),(row.free_mask==expected).all()])
                 signatures.add(row.identity['policy_version']);self._transitions.append(row)
         if self._transitions and (len(signatures)!=1 or not bool(torch.stack(flags).all())):
             raise ValueError('Mixed policy version, nonfinite rollout or changed free mask')
