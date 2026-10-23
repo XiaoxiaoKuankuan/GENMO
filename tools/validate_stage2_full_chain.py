@@ -10,6 +10,16 @@
 当作物理收益。旧rollout的Critic/GAE目标仅用于同数据数值对照，不作为新策略MC。
 输出必须是新的独立目录。原rollout、模型及正式日志只读；复用同一个脚本研究不同
 LR/Epoch，不复制实验脚本。生产仍通过真实闭环训练和完整音乐配对评估判断质量。
+
+三个诊断开关默认关闭：audit-full-gradient-direction复用更新器的整批真实PPO
+反向，比较小批次梯度与实际Adam方向，增加反向成本但不改变候选接受规则；
+save-probability-records把更新前、每次接受后及最终重新测量的[N,K,8]统计和固定
+优势保存到独立子目录，不保存扩散链或改变概率。前四列是每链每步的联合KL、
+坐标平均KL、联合log-ratio和自由坐标数；后四个物理变化槽保持未测量标记，不能
+把占位零解释为动作不变。export-evaluation-actors只导出
+完成全部原计划步骤且生产soft/margin/active-clip与hard KL均通过的Actor。
+导出格式仅供load_evaluation_actor重新做物理评价，不含Adam/Critic/RNG，绝不能
+用作继续训练的checkpoint。全部候选仍从相同学习状态开始，结束或异常均恢复起点。
 """
 from __future__ import annotations
 
@@ -36,7 +46,7 @@ from gem.closedloop.dppo.collectives import DistributedCollectives
 from gem.closedloop.dppo.diagnostic_rollout import load_rollout
 from gem.closedloop.dppo.execution_checks import policy_phase
 from gem.closedloop.dppo.gradient_merge import BCGradientController
-from gem.closedloop.dppo.optimization_support import _parameters,_old_kernel,probability_check_local
+from gem.closedloop.dppo.optimization_support import _parameters,_old_kernel,_owned,probability_check_local
 from gem.closedloop.dppo.parallel_support import capture_local_rng,restore_local_rng,local_call,root_call
 from gem.closedloop.dppo.retention_anchor import Stage1RetentionAnchor
 from gem.closedloop.dppo.rollback_audit import compare_recovered_state
@@ -47,6 +57,112 @@ from gem.closedloop.dppo.training_checkpoint import file_sha256,immutable_cpu_sn
 from gem.closedloop.dppo.training_config import configuration
 from gem.closedloop.dppo.updater import actor_update,final_kl
 from gem.closedloop.dppo.actor_backtracking import check_candidate_kl
+
+
+RECORD_COLUMNS=('joint_kl','mean_coordinate_kl','joint_log_ratio','free_count',
+    'normalized_mean_change_rms','root_mean_change_rms','orientation_mean_change_rms','joint_mean_change_rms')
+
+
+def save_new_tensor_payload(path,payload):
+    """仅发布本诊断新文件；临时文件失败即清理，不覆盖原证据或半成品。"""
+    path=Path(path);partial=path.with_suffix(path.suffix+'.partial')
+    if path.exists() or partial.exists():raise FileExistsError(path)
+    created=False
+    try:
+        with partial.open('xb') as stream:
+            created=True
+            torch.save(payload,stream);stream.flush();os.fsync(stream.fileno())
+        os.link(partial,path)
+    finally:
+        if created:partial.unlink(missing_ok=True)
+    return dict(path=str(path),sha256=file_sha256(path),size_bytes=path.stat().st_size)
+
+
+class ProbabilityRecordWriter:
+    """rank0持久化原全局链顺序的小型概率统计，明确首步、接受步与最终边界。"""
+    def __init__(self,directory,*,case_sha256,manifest,trainable_steps):
+        self.directory=Path(directory);self.directory.mkdir(exist_ok=False)
+        self.case_sha256=case_sha256;self.steps=list(trainable_steps)
+        self.manifest=[dict(global_manifest_index=i,**m) for i,m in enumerate(manifest) if m['valid'] and m['has_free']]
+        self.entries=[];self.advantages=None;self.sources=None
+
+    def observe(self,stage,records,advantages,sources):
+        if stage not in ('before_update','accepted_Adam','final'):
+            raise ValueError('Unknown full-rollout probability observation stage')
+        if ((not self.entries and stage!='before_update') or
+                self.entries and (stage=='before_update' or self.entries[-1]['stage']=='final')):
+            raise ValueError('Probability observations must begin once and finish once')
+        records=records.detach().cpu().clone();advantages=advantages.detach().cpu().clone()
+        if (records.shape!=(len(self.manifest),len(self.steps),8) or records.dtype!=torch.float64
+                or advantages.shape!=(len(self.manifest),) or not torch.isfinite(records).all()
+                or not torch.isfinite(advantages).all() or len(sources)!=len(self.manifest)):
+            raise ValueError('Probability record shape, finite values or chain order differs')
+        if self.advantages is None:
+            self.advantages=advantages.clone();self.sources=list(sources)
+        elif not torch.equal(self.advantages,advantages) or self.sources!=list(sources):
+            raise ValueError('Fixed advantages or source order changed between diagnostic observations')
+        accepted=sum(e['stage']=='accepted_Adam' for e in self.entries)+(stage=='accepted_Adam')
+        path=self.directory/f'{len(self.entries):03d}_{stage}.pt'
+        artifact=save_new_tensor_payload(path,dict(schema='genmo.stage2.full_chain_probability_records.v1',
+            stage=stage,accepted_optimizer_steps_observed=accepted,source_case_sha256=self.case_sha256,
+            trainable_steps=self.steps,columns=list(RECORD_COLUMNS),records=records,advantages=advantages,
+            sources=self.sources,global_manifest=self.manifest,
+            physical_change_columns_measured=False,
+            scope='fixed_behavior_full_rollout_conditional_Gaussian_statistics_not_physical_return'))
+        self.entries.append(dict(stage=stage,accepted_optimizer_steps_observed=accepted,
+            **{**artifact,'path':path.name}))
+        summary=dict(source_case_sha256=self.case_sha256,trainable_steps=self.steps,
+            chains=len(self.manifest),entries=self.entries,complete=stage=='final')
+        atomic_json(self.directory/'index.json',summary)
+        return dict(directory=str(self.directory),**summary)
+
+
+@torch.no_grad()
+def observe_final_probability(policy,rows,cache,manifest,distributed,microbatch,observer):
+    """最终模型另做一次只读整批前向，包含提前停步后的真实保留状态。"""
+    selected=[i for i,m in enumerate(manifest) if m['valid'] and m['has_free']]
+    owned=_owned(selected,manifest,distributed);local=[rows[i] for _,i in owned]
+    def evaluate():
+        with policy_phase(policy):
+            records=evaluate_chain_records(policy,local,cache,microbatch=microbatch)
+            advantages=cache.get('advantages',local).double() if local else torch.zeros(
+                0,device=distributed.device,dtype=torch.float64)
+        return records,advantages
+    records,advantages=local_call(distributed,evaluate)
+    width=len(policy.trainable_steps)*8
+    full=distributed.gather_rows(torch.cat((records.reshape(len(local),width),advantages[:,None]),1),
+        [position for position,_ in owned],len(selected))
+    labels=[(position,rows[i].metadata.get('training_task',{}).get('dataset','unknown')) for position,i in owned]
+    names={position:name for shard in distributed.all_gather_object(labels) for position,name in shard}
+    return observer('final',full[:,:width].reshape(-1,len(policy.trainable_steps),8),full[:,width],
+        [names[i] for i in range(len(selected))])
+
+
+def export_evaluation_actor(path,*,actor,kernel,source_identity,case_sha256,report,hard,acceptance,
+                            learning_rate,epochs,clip):
+    """只发布完整且满足现行soft/hard KL的Actor；未通过时仅返回原因，不写模型。"""
+    steps=report.get('optimizer_steps');planned=report.get('planned_optimizer_steps')
+    if (type(steps)is not int or type(planned)is not int or steps<1 or steps!=planned
+            or len(report.get('steps',[]))!=steps):
+        return dict(exported=False,reason='incomplete_planned_optimizer_update')
+    if hard.get('passed') is not True or acceptance.get('passed') is not True:
+        return dict(exported=False,reason='production_soft_or_hard_KL_failed')
+    if (source_identity.get('kernel')!=kernel or not source_identity.get('assets')
+            or not isinstance(case_sha256,str) or len(case_sha256)!=64
+            or any(c not in '0123456789abcdef' for c in case_sha256)):
+        raise ValueError('Evaluation export requires bound behavior kernel/assets and immutable case SHA')
+    from gem.closedloop.dppo.checkpoint import _validate_model_state
+    from gem.closedloop.dppo.evaluation import _model_fingerprint
+    state=immutable_cpu_snapshot(actor.state_dict());_validate_model_state(actor,state,'evaluation-only Actor')
+    update=dict(optimizer_steps=steps,planned_optimizer_steps=planned,learning_rate=learning_rate,
+        epochs=epochs,clip=clip,actor_fingerprint=_model_fingerprint(actor),
+        source='fixed_real_full_chain_validation_only')
+    artifact=save_new_tensor_payload(path,dict(schema='genmo.stage2.asymmetric_actor_evaluation.v1',
+        evaluation_only=True,training_resume=False,actor=state,kernel=copy.deepcopy(kernel),
+        source_identity=copy.deepcopy(source_identity),source_case_sha256=case_sha256,
+        hard_kl=copy.deepcopy(hard),complete_update_and_soft_kl_passed=True,
+        production_candidate_checks=copy.deepcopy(acceptance),update=update))
+    return dict(exported=True,evaluation_only=True,training_resume=False,update=update,**artifact)
 
 
 def candidate_update_checks(report,kl,config):
@@ -129,7 +245,8 @@ def gradient_validation(policy,rows,cache,distributed):
         scope='actual_stage1_network_and_real_behavior_rows_not_physics_quality')
 
 
-def main():
+def argument_parser():
+    """仅构造CLI便于CPU核验；解析help或可选开关不会初始化分布式/CUDA。"""
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--case',type=Path,required=True)
     parser.add_argument('--config',type=Path,default=ROOT/'configs/closedloop/stage2_random20s_gamma095_server2.yaml')
@@ -138,10 +255,24 @@ def main():
     parser.add_argument('--epochs',type=int,default=1)
     parser.add_argument('--max-optimizer-steps',type=int,help='有限固定数据比较可限制优化步数，保留实际完整链Mini-batch')
     parser.add_argument('--adaptive-kl',action='store_true',help='实际联合KL回溯；各LR为候选上限而非承诺接受步长')
+    parser.add_argument('--audit-full-gradient-direction',action='store_true',
+        help='每接受步额外计算整批PPO真实梯度和Adam方向，不改变候选接受规则')
+    parser.add_argument('--save-probability-records',action='store_true',
+        help='保存更新前/每接受步/最终整批轻量概率和固定优势；最终额外只读前向')
+    parser.add_argument('--export-evaluation-actors',action='store_true',
+        help='仅完整计划更新且生产soft/hard KL通过时导出只供评价的Actor')
+    return parser
+
+
+def main():
+    parser=argument_parser()
     args=parser.parse_args()
+    if ((args.save_probability_records or args.export_evaluation_actors)
+            and len({f'{lr:.8g}' for lr in args.learning_rates})!=len(args.learning_rates)):
+        parser.error('概率/Actor新文件要求各学习率生成不同的候选文件名')
     rank=int(os.environ['RANK']);world=int(os.environ['WORLD_SIZE']);local=int(os.environ['LOCAL_RANK'])
     if world!=8 or rank!=local:raise ValueError('Requires one explicitly allocated eight-GPU node')
-    dist.init_process_group('gloo',timeout=timedelta(minutes=30));group=None;cache=None
+    dist.init_process_group('gloo',timeout=timedelta(minutes=30));group=None;cache=None;restore_initial=None
     try:
         check=[None]
         if rank==0:
@@ -193,13 +324,28 @@ def main():
         def snapshot():return immutable_cpu_snapshot(dict(actor=actor.state_dict(),optimizer=optimizer.state_dict(),
             controller=controller.state_dict(),bc=anchor.state_dict(),rng=capture_local_rng(generators)))
         initial=snapshot();trials=[]
-        for lr in args.learning_rates:
+        def restore_initial():
             actor.load_state_dict(initial['actor']);optimizer.load_state_dict(copy.deepcopy(initial['optimizer']))
             controller.load_state_dict(initial['controller']);anchor.load_state_dict(initial['bc'])
             restore_local_rng(initial['rng'],generators)
+        case_sha256=file_sha256(args.case/'case.json')
+        for lr in args.learning_rates:
+            restore_initial()
             audit=compare_recovered_state(initial,snapshot())
             if not audit['identical']:raise AssertionError('Candidate start restore failed: '+repr(audit))
             optimizer.param_groups[0]['lr']=lr
+            candidate_stem=f'candidate_lr{lr:.8g}_epoch{args.epochs}'
+            writer=None;probability_artifact=None
+            if args.save_probability_records:
+                def create_writer():
+                    nonlocal writer
+                    writer=ProbabilityRecordWriter(args.output_dir/f'{candidate_stem}_probability',
+                        case_sha256=case_sha256,manifest=manifest,trainable_steps=policy.trainable_steps)
+                root_call(distributed,create_writer)
+            def observe_probability(stage,records,advantages,sources):
+                nonlocal probability_artifact
+                probability_artifact=root_call(distributed,lambda:writer.observe(stage,records,advantages,sources))
+                return probability_artifact
             started=time.perf_counter();torch.cuda.reset_peak_memory_stats(distributed.device)
             try:
                 trust=copy.deepcopy(config['stage9']['trust_region']) if args.adaptive_kl else None
@@ -208,6 +354,8 @@ def main():
                     anchor=anchor,generator=generators['actor'],ppo_epochs=args.epochs,minibatch_chains=config['stage10']['scale']['actor_minibatch_chains'],
                     sampled_steps=len(policy.trainable_steps),step_strategy=f'intermediate{len(policy.trainable_steps)}',
                     max_optimizer_steps=args.max_optimizer_steps,audit_full_rollout_objective=True,
+                    audit_full_gradient_direction=args.audit_full_gradient_direction,
+                    full_rollout_observer=observe_probability if args.save_probability_records else None,
                     detailed_diagnostics=True,
                     microbatch=config['stage9']['denoising_microbatch'],clip=config['stage9']['ppo_clip'],soft_kl=config['stage9']['kl_soft_stop_chain_joint'],
                     bc_samples_per_rollout=config['stage9']['bc_samples_per_rollout'],
@@ -217,12 +365,23 @@ def main():
                     trust_region=trust,kl_limits=config['stage10']['kl'])
                 kl=final_kl(policy,rows,cache,manifest,distributed=distributed,microbatch=128,clip=.1)
                 hard,acceptance=candidate_update_checks(report,kl,config)
+                if args.save_probability_records:
+                    observe_final_probability(policy,rows,cache,manifest,distributed,
+                        config['stage9']['denoising_microbatch'],observe_probability)
                 report['accepted_optimizer_steps']=0
                 report['diagnostic_optimizer_steps']=report['optimizer_steps']
                 trial=dict(learning_rate=lr,epochs=args.epochs,actor=report,kl=kl,acceptance=acceptance,
                     hard_kl_acceptance=hard,formal_optimizer_steps_committed=0,
                     start_restore=audit,wall_seconds=max(distributed.all_gather_object(time.perf_counter()-started)),
                     peak_allocated_bytes=max(distributed.all_gather_object(torch.cuda.max_memory_allocated(distributed.device))))
+                if args.export_evaluation_actors:
+                    from gem.closedloop.dppo.evaluation import _model_fingerprint
+                    fingerprints=distributed.all_gather_object(local_call(distributed,lambda:_model_fingerprint(actor)))
+                    if len(set(fingerprints))!=1:raise RuntimeError('Evaluation candidate Actor fingerprints differ across ranks')
+                    trial['evaluation_actor']=root_call(distributed,lambda:export_evaluation_actor(
+                        args.output_dir/f'{candidate_stem}_evaluation_actor.pt',actor=actor,kernel=policy.kernel_config,
+                        source_identity=learning['identity'],case_sha256=case_sha256,report=report,hard=hard,
+                        acceptance=acceptance,learning_rate=lr,epochs=args.epochs,clip=config['stage9']['ppo_clip']))
             except (FloatingPointError,RuntimeError) as error:
                 message=str(error)
                 if not any(word in message.lower() for word in ('ppo','nonfinite','overflow','underflow','streaming')):raise
@@ -232,14 +391,19 @@ def main():
                     rejected_probability=rejected_probability_diagnostics(policy,rows,cache,manifest,distributed,
                         config['stage9']['denoising_microbatch']),
                     wall_seconds=max(distributed.all_gather_object(time.perf_counter()-started)))
+                if args.export_evaluation_actors:
+                    trial['evaluation_actor']=dict(exported=False,reason='numerical_candidate_rejected')
+                if args.save_probability_records:
+                    observe_final_probability(policy,rows,cache,manifest,distributed,
+                        config['stage9']['denoising_microbatch'],observe_probability)
+            if args.save_probability_records:trial['probability_records']=probability_artifact
             trials.append(trial)
             root_call(distributed,lambda:atomic_json(args.output_dir/f'candidate_lr{lr:.8g}_epoch{args.epochs}.json',trial))
             if rank==0:print(json.dumps(dict(lr=lr,accepted=trial['acceptance']['passed'],
                 steps=trial.get('actor',{}).get('optimizer_steps'),
                 joint_kl=trial.get('kl',{}).get('chain_joint_kl'),
                 failures=trial['acceptance']['failures']),ensure_ascii=False),flush=True)
-        actor.load_state_dict(initial['actor']);optimizer.load_state_dict(copy.deepcopy(initial['optimizer']))
-        controller.load_state_dict(initial['controller']);anchor.load_state_dict(initial['bc']);restore_local_rng(initial['rng'],generators)
+        restore_initial()
         restored=compare_recovered_state(initial,snapshot())
         if not restored['identical']:raise AssertionError(restored)
         root_call(distributed,lambda:atomic_json(args.output_dir/'summary.json',dict(status='passed',
@@ -247,10 +411,17 @@ def main():
             source_commit=subprocess.check_output(['git','rev-parse','HEAD'],cwd=ROOT,text=True).strip(),
             case=str(args.case),case_sha256=file_sha256(args.case/'case.json'),
             probability=probability,gradient_validation=gradients,trials=trials,final_restore=restored)))
+        restore_initial=None
     finally:
-        if cache is not None:cache.close()
-        if group is not None:dist.destroy_process_group(group)
-        dist.destroy_process_group()
+        try:
+            if restore_initial is not None:
+                restore_initial()
+                restored=compare_recovered_state(initial,snapshot())
+                if not restored['identical']:raise AssertionError('Diagnostic final restore failed: '+repr(restored))
+        finally:
+            if cache is not None:cache.close()
+            if group is not None:dist.destroy_process_group(group)
+            dist.destroy_process_group()
 
 
 if __name__=='__main__':main()
