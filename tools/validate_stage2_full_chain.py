@@ -148,6 +148,12 @@ def main():
         cache=RolloutTensorCache(rows,targets,distributed.device,max_device_bytes=4*1024**3)
         probability=probability_check_local(policy,rows,global_manifest=manifest,distributed=distributed,
             denoising_microbatch=128,tensor_cache=cache,include_frozen=True)
+        # 新加入的训练时刻沿用原真实噪声；记录实际sigma，不能把floor当成全部噪声。
+        first=[row for row in rows if row.free_mask.any()][:1]
+        local_std={str(step):float(cache.get('old_stds',first,[step]).double().mean())
+            for step in policy.trainable_steps} if first else {}
+        probability['actual_std_first_eligible_chain_by_rank']=distributed.all_gather_object(local_std)
+        probability['actual_std_scope']='normalized_Gaussian_sigma_not_floor_not_trajectory_diversity'
         gradients=gradient_validation(policy,rows,cache,distributed)
         root_call(distributed,lambda:atomic_json(args.output_dir/'probability_and_gradient.json',dict(probability=probability,gradients=gradients)))
         optimizer=torch.optim.AdamW(trainable_actor_parameters(actor),lr=args.learning_rates[0],weight_decay=0.)
