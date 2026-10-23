@@ -9,8 +9,9 @@ FullMusicCatalog 的显式 manifest 池确定性选取不同配对样本，再�
 每首歌保存逐上层决策及逐 50Hz 控制区间的实际奖励、奖励分项、原始跟踪/稳定误差、
 活动度、延迟、前缀长度、执行失败和参考拒绝。聚合只从这些已落盘 episode 记录
 计算，包含全体、来源、seed 和来源×seed 统计。基础设施故障单独记 invalid 并
-停止本批评估，不能计为策略失败。详细物理数组和完整去噪链仍由执行 journal 与
-原始采样文件保留，评估 JSON 只引用它们，避免再次复制所有大数组。
+停止本批评估，不能计为策略失败。控制侧车额外保留已有跟踪记录中的参考/实际
+anchor 姿态，缺失时显式 unknown；其余详细物理数组和去噪链是否保留依运行证据
+生命周期决定，不能仅凭 journal 路径假定内存接收记录已持久化。
 
 评估前后核验 Actor 参数及全部 buffers、已有梯度和显式传入的其他冻结网络；
 恢复模型模式、Python/NumPy/Torch/CUDA 随机状态及环境的评估设置，不消费训练
@@ -27,6 +28,7 @@ import math
 import os
 import random
 import tempfile
+from collections.abc import Sequence
 from pathlib import Path
 
 import numpy as np
@@ -34,6 +36,7 @@ import torch
 
 from gem.closedloop.evaluation_music import load_music_features
 from gem.closedloop.frozen_actor import stable_noise_seed
+from .evaluation_pose import FIELD as ANCHOR_POSE_FIELD, extract_anchor_pose_evidence
 
 VERSION = 'genmo.closedloop.stage10.evaluation.v1'
 
@@ -237,8 +240,12 @@ def _decision_evidence(result, index):
     details = metadata.get('reward_details')
     if not isinstance(details, list) or len(details) != count:
         raise ValueError('Evaluation requires one reward detail per actual control interval')
+    execution_trace = metadata.get('execution_trace')
+    trace_error = None
+    if execution_trace is not None and (not isinstance(execution_trace, Sequence) or len(execution_trace) != count):
+        trace_error = 'Evaluation anchor pose trace is not a sequence matching executed controls'
     controls = []
-    for reward, detail in zip(rewards, details):
+    for control_index, (reward, detail) in enumerate(zip(rewards, details)):
         if detail.get('transition_valid') is not True:
             raise ValueError('Invalid reward detail cannot enter evaluation statistics')
         if detail.get('version') not in SUPPORTED_REWARD_VERSIONS or detail.get('activity', {}).get('valid') is not True:
@@ -275,6 +282,9 @@ def _decision_evidence(result, index):
                          'reward': actual, 'continuous_reward': continuous, 'event_reward': actual-continuous,
                          'components': components, 'raw_errors': raw_errors, 'activity': activity,
                          'joint_limit_diagnostics':_plain(detail['joint_limit_diagnostics'])})
+        controls[-1][ANCHOR_POSE_FIELD] = extract_anchor_pose_evidence(
+            None if execution_trace is None or trace_error else execution_trace[control_index],
+            int(detail['tick']), trace_error=trace_error)
     zero_step_event = _number(metadata.get('event_reward', 0.), 'zero step event')
     event_penalty = _number(metadata.get('event_penalty_total', zero_step_event), 'event penalty')
     total = sum(_number(value, 'reward') for value in rewards) + zero_step_event
