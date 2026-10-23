@@ -9,6 +9,7 @@
 from __future__ import annotations
 import numpy as np
 import torch
+from gem.closedloop.contracts import MOTION_FPS, SUPPORTED_MOTION_WINDOW_FRAMES
 from gem.robots.bumi.metrics import _derive_motion_beats, _beat_alignment
 
 
@@ -40,15 +41,19 @@ def episode_motion_diagnostic(rows, music, *, music_start_tick=600):
 
 
 def generated_reference_diagnostic(plans):
-    """单独统计完整生成提案的30Hz质量，不把未执行的后缀当成物理运动。"""
+    """按动作合同接受15/30/60/120帧，使用真实30Hz间隔统计完整提案。
+
+    qpos_world沿用采样输出动作轴，独立音乐上下文长度不改变动作采样间隔；
+    这里只修正诊断可用性，不改变提案、发布保护、奖励或物理拒绝条件。
+    """
     speeds=[];accelerations=[];jerks=[];quaternion_error=[];prefixes=[];invalid=0
     for plan in plans:
         q=np.asarray(plan.get('qpos_world',[]),dtype=np.float64)
-        if q.shape not in ((60,28),(120,28)) or not np.isfinite(q).all():invalid+=1;continue
-        velocity=np.diff(q[:,7:],axis=0)*30
-        acceleration=np.diff(velocity,axis=0)*30
+        if q.ndim!=2 or q.shape[0] not in SUPPORTED_MOTION_WINDOW_FRAMES or q.shape[1]!=28 or not np.isfinite(q).all():invalid+=1;continue
+        velocity=np.diff(q[:,7:],axis=0)*MOTION_FPS
+        acceleration=np.diff(velocity,axis=0)*MOTION_FPS
         speeds.append(velocity.reshape(-1));accelerations.append(acceleration.reshape(-1))
-        jerks.append((np.diff(acceleration,axis=0)*30).reshape(-1))
+        jerks.append((np.diff(acceleration,axis=0)*MOTION_FPS).reshape(-1))
         quaternion_error.append(float(np.max(np.abs(np.linalg.norm(q[:,3:7],axis=-1)-1))))
         prefixes.append(int(plan['prefix_frames']))
     if not speeds:return dict(available=False,reason='no_valid_generated_proposals',invalid_proposals=invalid,reward_weight=0.)
