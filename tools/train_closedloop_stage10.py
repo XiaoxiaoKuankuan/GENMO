@@ -13,6 +13,8 @@ GENMO和Isaac必须使用同一Python3.11测试运行环境，不能混用3.10�
 App初始化期间暂时隐藏分布式环境变量，避免Kit误启动额外分布式资源；GPU编号
 仍明确按CUDA_VISIBLE_DEVICES全局0..7与local_rank匹配，启动后恢复通信身份。
 本入口不停止已有作业、不覆盖任何旧run，也不自动重启失败任务。
+未来参考Critic仅允许显式三轮短实验：继承旧共享参数、零初始化新分支，禁用完整
+MC轨迹采集并使用至多20秒的新世界评估；不将有限训练试验视为长期方法验收。
 """
 from __future__ import annotations
 import argparse
@@ -39,7 +41,9 @@ def main():
     parser.add_argument('--initialize-from-checkpoint',type=Path,
         help='新独立实验从完整checkpoint继承Actor/Critic、两个Adam及RNG，仅允许更换有效批量与评估监视')
     parser.add_argument('--initialize-robofft-variant',type=Path,
-        help='新 RoboFFT 优化变体：同一行为/价值契约继承两模型与 Adam；新计轮、新采集、新 MC、新物理基线')
+        help='新 RoboFFT 优化变体：继承两模型与Adam；新计轮、新在线数据、固定去噪MC噪声及新物理基线')
+    parser.add_argument('--future-critic-trial',action='store_true',
+        help='显式最多三轮未来参考Critic短训练；旧共享权重零扩展，不采完整MC，仅20秒独立物理对照')
     parser.add_argument('--initialize-random-fragments',action='store_true',
         help='配合initialize-from-checkpoint：允许修改采样时限、站立比例和gamma；重新采样并重新校准Critic')
     parser.add_argument('--initialize-stepwise-ppo',action='store_true',
@@ -93,6 +97,12 @@ def main():
     config=configuration(args.config,genmo_repo=args.genmo_repo,gmt_repo=args.gmt_repo)
     from gem.closedloop.robofft import OBJECTIVE
     robofft=config['stage9']['actor_objective']==OBJECTIVE
+    if args.future_critic_trial and (not robofft or config['stage10']['critic']['type']!='asymmetric_tracking_committed_temporal'
+            or not (args.initialize_robofft_variant or args.resume)
+            or any((args.calibrate_only,args.collect_only,args.evaluate_only,args.critic_preheat_only,args.mc_validation_only,args.decisive_diagnostic))):
+        parser.error('Future Critic trial requires a fresh variant or bounded resume and cannot mix finite diagnostic phases')
+    from gem.closedloop.dppo.training import _validate_future_critic_release
+    _validate_future_critic_release(args,config)
     if args.initialize_actor_weights_only and not robofft:
         parser.error('--initialize-actor-weights-only is reserved for explicit RoboFFT initialization')
     if robofft and (args.initialize_from_checkpoint or args.verify_kl_reuse):
@@ -133,11 +143,11 @@ def main():
             if args.output_dir.exists() and not args.resume:raise FileExistsError(args.output_dir)
             if robofft and args.resume:
                 import json
-                from gem.closedloop.robofft import CHECKPOINT_SCHEMA
+                from gem.closedloop.dppo.training_checkpoint import schema_for_identity
                 pointer=json.loads((args.output_dir/'latest.json').read_text())
                 payload=torch.load(args.output_dir/pointer['path'],map_location='cpu',weights_only=False,mmap=True)
-                if payload.get('schema')!=CHECKPOINT_SCHEMA:
-                    raise ValueError('DPPO cannot resume as RoboFFT; use --initialize-actor-weights-only with a new output directory')
+                if payload.get('schema')!=schema_for_identity(dict(critic=config['stage10']['critic'],training=config['stage9'])):
+                    raise ValueError('Checkpoint schema differs from the explicit Actor/Critic architecture; use a compatible complete checkpoint')
                 del payload
             from gem.closedloop.dppo.training_checkpoint import file_sha256
             for key,expected in config['stage10']['assets'].items():

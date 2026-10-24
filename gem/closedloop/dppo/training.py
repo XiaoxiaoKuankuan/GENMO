@@ -475,16 +475,26 @@ def _maximum_memory(*phases):
 
 
 def _validate_future_critic_release(args,config):
-    """未来参考Critic困难状态验收未通过，仅允许不更新Actor的有限阶段。
+    """区分尚未发布的长期训练与用户明确要求的最多三轮短训练实验。
 
-    整体EV预热门槛不能替代同预算旧Critic、失败前状态及优势一致性比较。
-    2026-10-24独立验证未通过，因此不提供可静默绕过的配置开关；正式放行
-    必须在新的困难状态/物理验收实现和证据齐备后显式修改此发布边界。
+    短实验显式初始化旧共享Critic，零初始化未来分支，不重采完整MC；20秒
+    独立世界评估及三轮累计预算必须同时满足。这个入口不把此前失败的困难
+    状态验证改成通过，完整checkpoint续训仍不能突破相同三轮累计边界。
     """
     if config['stage10']['critic']['type']!='asymmetric_tracking_committed_temporal':return
     finite=('collect_only','evaluate_only','calibrate_only','critic_preheat_only','mc_validation_only','decisive_diagnostic')
-    if not any(getattr(args,name,False) for name in finite):
-        raise ValueError('Future committed Critic is diagnostic-only: hard-state validation failed; Actor updates are disabled')
+    if any(getattr(args,name,False) for name in finite):return
+    if not getattr(args,'future_critic_trial',False):
+        raise ValueError('Future committed Critic is diagnostic-only unless an explicit bounded three-iteration trial is selected')
+    stage=config['stage10'];evaluation=stage['evaluation']
+    if (not (getattr(args,'initialize_robofft_variant',None) or getattr(args,'resume',None))
+            or type(args.stop_after_iteration)is not int or not 1<=args.stop_after_iteration<=3
+            or not 1<=stage['run_control']['max_training_iterations']<=3
+            or not 1<=stage['limits']['accepted_iterations']<=3
+            or stage['critic']['complete_mc']['enabled']
+            or evaluation['episode_seconds'] is None or not 0<evaluation['episode_seconds']<=20
+            or evaluation.get('persistent_world') is not False):
+        raise ValueError('Future Critic trial requires at most three cumulative iterations, no complete MC and fresh <=20s evaluations')
 
 
 def run(cargs,config,distributed):
@@ -595,9 +605,11 @@ def run(cargs,config,distributed):
             from ..robofft.checkpoint import initialize_optimization_variant
             imported=local_call(distributed,lambda:initialize_optimization_variant(variant,
                 identity=c.identity,actor=c.actor,critic=c.critic,actor_optimizer=c.actor_optimizer,
-                critic_optimizer=c.critic_optimizer))
+                critic_optimizer=c.critic_optimizer,future_critic_trial=getattr(cargs,'future_critic_trial',False)))
             c.identity['actor_initialization']=imported
-            c.state.update(experiment_initialization=imported,mc_preheat_complete=True)
+            c.state.update(experiment_initialization=imported,
+                mc_preheat_complete=not getattr(cargs,'future_critic_trial',False),
+                bounded_future_critic_trial=bool(getattr(cargs,'future_critic_trial',False)))
             c.state['next_mc_calibration_control_steps']=_next_interaction_boundary(
                 c.state['training_control_steps'],critic_config['complete_mc']['every_control_steps'])
             root_call(distributed,lambda:atomic_json(c.output/'initialization.json',imported))

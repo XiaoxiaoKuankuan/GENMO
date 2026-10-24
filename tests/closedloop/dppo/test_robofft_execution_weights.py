@@ -119,13 +119,13 @@ def test_weighted_fixed_mc_streamed_gradient_and_mutation(actor_factory,tmp_path
 
 
 def test_variant_warm_start_preserves_adam_but_not_progress_and_rejects_value_change(tmp_path):
-    from gem.closedloop.robofft import CHECKPOINT_SCHEMA
+    from gem.closedloop.robofft import CHECKPOINT_SCHEMA, OBJECTIVE
     from gem.closedloop.robofft.checkpoint import initialize_optimization_variant
     actor=torch.nn.Linear(2,2);critic=torch.nn.Linear(2,1)
     ao=torch.optim.Adam(actor.parameters(),lr=1e-6);co=torch.optim.Adam(critic.parameters(),lr=1e-4)
     actor(torch.ones(1,2)).sum().backward();ao.step()
     critic(torch.ones(1,2)).sum().backward();co.step()
-    identity=dict(training=dict(gamma_upper=.95,robofft=dict(mc_samples=16,beta_neg=.125)),
+    identity=dict(training=dict(actor_objective=OBJECTIVE,gamma_upper=.95,robofft=dict(mc_samples=16,beta_neg=.125)),
         runtime=dict(num_envs=128,generation_batch=128))
     payload=dict(schema=CHECKPOINT_SCHEMA,identity=identity,actor=actor.state_dict(),critic=critic.state_dict(),
         actor_optimizer=ao.state_dict(),critic_optimizer=co.state_dict(),
