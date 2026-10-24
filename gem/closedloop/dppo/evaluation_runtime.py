@@ -159,7 +159,8 @@ def _evaluate_impl(c, label, *, write_report=True):
         driver=EvaluationWorldDriver(c,config,budget,path);env=driver.env
     else:env = env_type(config, c.backend, c.builder, c.policy, budget, path)
     env.disk_guard = c.guard
-    env.latency_budget_s, env.policy_version, env.iteration = c.env.latency_budget_s, c.env.policy_version, c.env.iteration
+    env.latency_budget_s = c.env.latency_budget_s
+    env.policy_version, env.iteration = c.state['policy_version'], c.state['iteration']
     initial_rows = []
     from .training_config import VERSION as CURRENT_TRAINING_VERSION
     fresh_critic_enabled = c.stage.get('version') in (CURRENT_TRAINING_VERSION,ROBOFFT_VERSION)
@@ -291,6 +292,12 @@ def _evaluate_impl(c, label, *, write_report=True):
                     critic_updates=c.state.get('critic_updates'),
                     diagnostic_scope='fresh_independent_physics_current_critic_bootstrapped_GAE_not_unbiased_V_truth')
             initial = result if baseline is None else baseline
+            if c.stage['evaluation'].get('physical_guard'):
+                from .learning_guards import physical_guard,physical_quality_metrics
+                result['physical_quality']=physical_quality_metrics(result)
+                if 'physical_quality' not in initial:
+                    initial['physical_quality']=physical_quality_metrics(initial)
+                result['physical_guard']=physical_guard(result,initial,c.stage['evaluation']['physical_guard'])
             previous_best = load_best_pointers(c.output, result, state=c.state)
             choice = choose_best(result, initial, **previous_best, iteration=c.state['iteration'])
             checkpoint = None

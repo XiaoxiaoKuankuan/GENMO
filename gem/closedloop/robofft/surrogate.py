@@ -59,6 +59,9 @@ def action_objective(new_loss, old_loss, advantages, *, clip=.01, beta_neg=.125,
     return dict(loss=loss, ratio=ratio, logratio=logratio,
         surrogate_kl=(ratio - 1.) - logratio,
         ratio_clip_fraction=((ratio - 1.).abs() > clip).double(),
+        ppo_zero_gradient_fraction=(((advantage > 0) & (ratio > 1.+clip)) |
+                                    ((advantage < 0) & (ratio < 1.-clip))).double(),
+        zero_advantage_fraction=(advantage == 0).double(),
         logratio_clamp_fraction=((raw < -10.) | (raw > 10.)).double().mean(-1),
         new_logp_range_fraction=((new_logp < -200.) | (new_logp > 2.)).double().mean(-1),
         old_logp_range_fraction=((old_logp < -200.) | (old_logp > 2.)).double().mean(-1))

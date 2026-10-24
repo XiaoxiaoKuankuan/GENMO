@@ -361,7 +361,7 @@ def choose_best(current, baseline, *, best_observed=None, best_saved=None, saved
     actual_activity=[r['activity_ratio'] for r in current['episode_metrics'] if r.get('activity_ratio') is not None]
     activity_ok=(not initial_activity or (len(actual_activity)==len(initial_activity)
         and sum(actual_activity)>=.8*sum(initial_activity)))
-    eligible=eligible and activity_ok
+    eligible=eligible and activity_ok and current.get('physical_guard',{}).get('passed',True)
     candidate = dict(iteration=iteration, plan_sha256=current['plan_sha256'], actor_identity=current['actor_identity'],
         score=current['source_balanced_reward'], physical_failure_count=current['physical_failure_count'],
         mean_executed_seconds=current['mean_executed_seconds'], saved=bool(saved),

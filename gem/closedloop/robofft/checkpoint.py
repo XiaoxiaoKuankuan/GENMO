@@ -9,6 +9,8 @@ rollout、概率缓存、MC RNG 和进度全部由新实验重新初始化。源
 重新计轮、重新采集、重新固定 MC/时间权重并重新评估，绝不复用旧 rollout 或 RNG。
 显式未来Critic短实验只继承旧Critic共享权重，新增分支必须零投影、Critic Adam重建；
 输入输出初值等同旧Critic，但不继承新结构的MC验收结论，不触发完整轨迹采集。
+用户授权的正式入口只从相同未来Critic结构导入两模型和两个Adam，允许增加验证
+与更新约束；源MC验收标记按事实保留，重新计200轮目标，不冒充原实验完整恢复。
 """
 from __future__ import annotations
 
@@ -38,13 +40,18 @@ def initialize_actor_weights_only(path, actor, *, assets):
 
 
 def initialize_optimization_variant(path, *, identity, actor, critic, actor_optimizer, critic_optimizer,
-                                    future_critic_trial=False):
+                                    future_critic_trial=False, future_critic_formal=False):
     """仅同一 RoboFFT 行为/价值目标 warm-start；所有门禁先于任何模型写入。"""
     payload = torch.load(path, map_location='cpu', weights_only=False, mmap=True)
     expected_schema=CHECKPOINT_SCHEMA if future_critic_trial else schema_for_identity(identity)
     if payload.get('schema') != expected_schema:
         raise ValueError('Optimization variant requires a complete RoboFFT checkpoint')
     previous = payload['identity']
+    if future_critic_formal and (future_critic_trial or
+            previous.get('critic',{}).get('type')!='asymmetric_tracking_committed_temporal' or
+            identity.get('critic',{}).get('type')!='asymmetric_tracking_committed_temporal' or
+            identity['critic']['complete_mc']['enabled']):
+        raise ValueError('Guarded formal initialization requires the same future Critic and no new complete MC')
     if future_critic_trial:
         if (previous['critic']['type']!='asymmetric_tracking_temporal'
                 or identity['critic']['type']!='asymmetric_tracking_committed_temporal'
@@ -54,8 +61,12 @@ def initialize_optimization_variant(path, *, identity, actor, critic, actor_opti
         for item in (old_critic,new_critic):
             item.pop('type');item['complete_mc'].pop('enabled')
         if old_critic!=new_critic:raise ValueError('Future Critic trial changes shared architecture or value fitting')
-    elif previous.get('critic')!=identity.get('critic'):
-        raise ValueError('RoboFFT variant changes behavior or value contract: critic')
+    else:
+        old_critic,new_critic=(copy.deepcopy(v.get('critic')) for v in (previous,identity))
+        if future_critic_formal:
+            old_critic.pop('validation_guard',None);new_critic.pop('validation_guard',None)
+        if old_critic!=new_critic:
+            raise ValueError('RoboFFT variant changes behavior or value contract: critic')
     for key in ('assets', 'kernel', 'reward', 'timing', 'dataset', 'physical_episode',
                 'ppo_rollout', 'generation_horizon', 'physical_configuration', 'data_catalog'):
         if previous.get(key) != identity.get(key):
@@ -72,9 +83,9 @@ def initialize_optimization_variant(path, *, identity, actor, critic, actor_opti
         if old != new:
             raise ValueError('RoboFFT variant changes protected contract: ' + section)
     old, new = (copy.deepcopy(v['training']['robofft']) for v in (previous, identity))
-    for key in ('beta_neg', 'mc_microbatch', 'execution_weighting'):
+    for key in ('beta_neg', 'mc_microbatch', 'execution_weighting')+ (('update_guard',) if future_critic_formal else ()):
         old.pop(key, None); new.pop(key, None)
-    if old != new or not payload['state'].get('mc_preheat_complete'):
+    if old != new or (not future_critic_formal and not payload['state'].get('mc_preheat_complete')):
         raise ValueError('RoboFFT variant requires unchanged MC estimator and a calibrated source Critic')
     _validate_model_state(actor, payload['actor'], 'RoboFFT variant Actor')
     critic_state=payload['critic']
@@ -104,12 +115,14 @@ def initialize_optimization_variant(path, *, identity, actor, critic, actor_opti
     critic.load_state_dict(critic_state, strict=True)
     actor_optimizer.load_state_dict(states[0])
     if not future_critic_trial:critic_optimizer.load_state_dict(states[1])
-    return dict(kind=('explicit_robofft_future_critic_bounded_trial' if future_critic_trial else
+    return dict(kind=('explicit_robofft_future_critic_guarded_formal' if future_critic_formal else
+                     'explicit_robofft_future_critic_bounded_trial' if future_critic_trial else
                       'explicit_robofft_optimization_variant_new_experiment'),
         path=str(Path(path).resolve()), sha256=file_sha256(path), source_iteration=payload['state']['iteration'],
         source_actor_updates=payload['state']['actor_updates'], source_files=previous.get('source_files'),
         source_version_is_informational=True, actor_and_adam_preserved=True,
         critic_and_adam_preserved=not future_critic_trial,critic_shared_weights_preserved=True,
         future_branch_zero_initialized=bool(future_critic_trial),critic_optimizer_fresh=bool(future_critic_trial),
-        inherited_mc_preheat_for_unchanged_value_contract=not future_critic_trial, independent_new_mc_validation=False,
+        inherited_mc_preheat_for_unchanged_value_contract=bool(payload['state'].get('mc_preheat_complete')) and not future_critic_trial,
+        independent_new_mc_validation=False,
         rollout_reused=False, rng_restored=False, counters_restarted=True, fresh_paired_evaluation_required=True)

@@ -12,6 +12,8 @@
 逐步诊断只覆盖当前全局动作小批与本轮固定的最多 64 个哨兵的去重并集；哨兵从
 有效 manifest 等距确定，不消耗任何 RNG，不进入 PPO 反传。初始与整轮结束各做
 一次全量诊断；可选早停使用明确标注范围的逐步 surrogate，不冒称全量或真实 KL。
+正式受监控模式另在每个epoch后核对全rollout的符号相关PPO零梯度率与固定噪声
+参考变化；越界则恢复该epoch之前的Actor和完整Adam，消耗的尝试预算不退款。
 """
 from __future__ import annotations
 
@@ -115,7 +117,8 @@ def objective_batch(policy, rows, cache, *, clip, global_count, backward):
 
 
 METRICS = ('loss', 'ratio', 'surrogate_kl', 'ratio_clip_fraction', 'logratio_clamp_fraction',
-           'new_logp_range_fraction', 'old_logp_range_fraction')
+           'new_logp_range_fraction', 'old_logp_range_fraction',
+           'ppo_zero_gradient_fraction', 'zero_advantage_fraction')
 
 
 def diagnostics(policy, rows, cache, manifest, distributed, *, microbatch, clip,
@@ -203,11 +206,18 @@ def actor_update(policy, optimizer, rows, targets, cache, manifest, *, distribut
             if row.mc_record is None:
                 raise ValueError('Every action must have fixed MC and old loss before PPO')
     reports, stop_reason, orders = [], None, []
+    guard = policy.robofft.get('update_guard')
+    epoch_checks, accepted_steps = [], 0
+    from ..dppo.learning_guards import capture_learning, restore_learning, actor_guard_failures
     sentinels = fixed_sentinel_indices(selected, diagnostic_sentinel_actions)
     initial = diagnostics(policy, rows, cache, manifest, distributed, microbatch=microbatch, clip=clip)
     with _local_phase(distributed, 'robofft_output_probe'), policy_phase(policy):
         before = output_probe(policy, local, cache)
     for epoch in range(ppo_epochs):
+        if guard:
+            with _local_phase(distributed, 'robofft_guard_snapshot'):
+                saved_epoch = capture_learning(policy.actor, optimizer)
+        epoch_start = len(reports)
         order = balanced_epoch_order(selected, manifest, generator) if distributed.rank == 0 else None
         order = distributed.broadcast_object(order)
         orders.append(order)
@@ -247,13 +257,37 @@ def actor_update(policy, optimizer, rows, targets, cache, manifest, *, distribut
             if threshold is not None and post['surrogate_kl'] > threshold:
                 stop_reason = 'surrogate_kl_early_stop'
                 break
+        if guard:
+            checked = diagnostics(policy, rows, cache, manifest, distributed, microbatch=microbatch, clip=clip)
+            with _local_phase(distributed, 'robofft_guard_reference'), policy_phase(policy):
+                change = compare_outputs(before, output_probe(policy, local, cache))
+            changes = distributed.all_gather_object(change)
+            failures = actor_guard_failures(checked, changes, guard)
+            epoch_checks.append(dict(epoch=epoch, full_rollout=checked, reference_change=changes,
+                                     passed=not failures, failures=failures))
+            if distributed.rank == 0:
+                print(f'[RoboFFT EPOCH GUARD] epoch={epoch+1} outside={checked["ratio_clip_fraction"]:.4f} '
+                      f'ppo_zero_gradient={checked["ppo_zero_gradient_fraction"]:.4f} '
+                      f'accepted={not failures} failures={failures}', flush=True)
+            if failures:
+                with _local_phase(distributed, 'robofft_guard_restore'):
+                    restore_learning(policy.actor, optimizer, saved_epoch)
+                for step in reports[epoch_start:]:
+                    step['rolled_back_by_epoch_guard'] = True
+                stop_reason = 'epoch_guard_rollback_actor_and_adam'
+            else:
+                accepted_steps = len(reports)
+            del saved_epoch
+        else:
+            accepted_steps = len(reports)
         if stop_reason:
             break
     with _local_phase(distributed, 'robofft_final_reference'), policy_phase(policy):
         reference = compare_outputs(before, output_probe(policy, local, cache))
     final = diagnostics(policy, rows, cache, manifest, distributed, microbatch=microbatch, clip=clip)
-    return dict(algorithm=ALGORITHM, objective=OBJECTIVE, optimizer_steps=len(reports),
-        accepted_optimizer_steps=len(reports), steps=reports, epochs=ppo_epochs,
+    return dict(algorithm=ALGORITHM, objective=OBJECTIVE, optimizer_steps=accepted_steps,
+        attempted_optimizer_steps=len(reports), accepted_optimizer_steps=accepted_steps,
+        epoch_guard=epoch_checks, steps=reports, epochs=ppo_epochs,
         eligible_actions=len(selected), eligible_chains=len(selected), orders=orders, stop_reason=stop_reason,
         initial_surrogate=initial, final_surrogate=final, reference_change=distributed.all_gather_object(reference),
         execution_weight_audit=distributed.all_gather_object(getattr(cache,'robofft_weight_audit',None)),
@@ -261,5 +295,6 @@ def actor_update(policy, optimizer, rows, targets, cache, manifest, *, distribut
             selection='evenly_spaced_valid_manifest_midpoints_no_rng',
             post_step_scope='current_minibatch_union_fixed_sentinel', final_scope='full_rollout',
             early_stop_scope='current_minibatch_union_fixed_sentinel'),
-        acceptance_scope='finite_action_surrogate_no_Gaussian_KL',
+        acceptance_scope=('full_rollout_active_clip_and_fixed_reference_epoch_guard' if guard else
+                          'finite_action_surrogate_no_Gaussian_KL'),
         global_normalization='actual_valid_free_actions_once_then_SUM_gradients', mc_samples=policy.robofft['mc_samples'])

@@ -243,6 +243,8 @@ def _poll_checkpoint(c,*,wait=False):
         choice=selection.get('best_saved')
         if choice and choice.get('checkpoint',{}).get('path')==publication['path']:
             atomic_json(c.output/'best_checkpoint.json',publication)
+        if result.get('physical_guard',{}).get('passed'):
+            atomic_json(c.output/'quality_last_safe.json',publication)
         c.pending_evaluation=None
         _overhead(c,'evaluation_selection_publish_seconds',started)
     return publication
@@ -305,9 +307,11 @@ def _evaluate(c,report,label,*,save=True):
     result=evaluate(c,label,write_report=False)
     _overhead(c,'evaluation_run_seconds',started)
     alert=(result.get('paired_baseline') or {}).get('regression_alert') or {}
+    quality_guard=getattr(c,'stage',{}).get('evaluation',{}).get('physical_guard')
     from .periodic_monitor import advance_regression_alert
     result['consecutive_regression_alert']=advance_regression_alert(c.state,alert,c.state['iteration'])
-    if result['consecutive_regression_alert']['triggered'] and c.distributed.rank==0:
+    if (result['consecutive_regression_alert']['triggered'] and c.distributed.rank==0
+            and not quality_guard):
         print(f'[STAGE10 ALERT] {label} paired reward delta upper90={alert["upper90"]:.4f}<0; training continues',flush=True)
     if hasattr(c.bc,'validation_report'):
         stage=time.perf_counter()
@@ -330,6 +334,11 @@ def _evaluate(c,report,label,*,save=True):
     stage=time.perf_counter()
     baseline=root_call(c.distributed,lambda:summary_only(json.loads((c.output/'evaluation_baseline.json').read_text()))
         if (c.output/'evaluation_baseline.json').exists() else result)
+    if quality_guard:
+        if not result['physical_guard']['passed']:
+            c.state['quality_stop']=dict(iteration=c.state['iteration'],evaluation_label=label,
+                                         **result['physical_guard'])
+            root_call(c.distributed,lambda:atomic_json(c.output/'quality_stop.json',c.state['quality_stop']))
     if c.distributed.rank==0:c.pending_evaluation=(result,label,report,baseline)
     if save:
         _snapshot(c,'evaluated_'+label)
@@ -475,15 +484,25 @@ def _maximum_memory(*phases):
 
 
 def _validate_future_critic_release(args,config):
-    """区分尚未发布的长期训练与用户明确要求的最多三轮短训练实验。
+    """区分三轮短实验与用户明确授权的200轮受监控正式训练。
 
     短实验显式初始化旧共享Critic，零初始化未来分支，不重采完整MC；20秒
     独立世界评估及三轮累计预算必须同时满足。这个入口不把此前失败的困难
     状态验证改成通过，完整checkpoint续训仍不能突破相同三轮累计边界。
+    正式模式另要求同结构初始化、Critic/Actor约束及每五轮独立短物理评估；
+    不采完整MC、不伪造MC验收，允许完整checkpoint恢复同一个200轮实验。
     """
     if config['stage10']['critic']['type']!='asymmetric_tracking_committed_temporal':return
     finite=('collect_only','evaluate_only','calibrate_only','critic_preheat_only','mc_validation_only','decisive_diagnostic')
     if any(getattr(args,name,False) for name in finite):return
+    if getattr(args,'future_critic_formal',False):
+        from .learning_guards import validate_formal_configuration
+        validate_formal_configuration(config)
+        if (getattr(args,'future_critic_trial',False) or
+                not (getattr(args,'initialize_robofft_variant',None) or getattr(args,'resume',None)) or
+                not 1<=args.stop_after_iteration<=config['stage10']['run_control']['max_training_iterations']):
+            raise ValueError('Guarded formal training requires explicit same-structure initialization or resume')
+        return
     if not getattr(args,'future_critic_trial',False):
         raise ValueError('Future committed Critic is diagnostic-only unless an explicit bounded three-iteration trial is selected')
     stage=config['stage10'];evaluation=stage['evaluation']
@@ -499,6 +518,8 @@ def _validate_future_critic_release(args,config):
 
 def run(cargs,config,distributed):
     _validate_future_critic_release(cargs,config)
+    if getattr(cargs,'future_critic_formal',False) and (cargs.output_dir/'quality_stop.json').exists():
+        raise ValueError('This experiment was explicitly stopped by paired physical quality checks; automatic resume is forbidden')
     if not any(getattr(cargs,name,False) for name in ('collect_only','evaluate_only','calibrate_only','critic_preheat_only','mc_validation_only','decisive_diagnostic')):
         from .actor_optimization import require_current_actor_objective
         require_current_actor_objective(config['stage9'])
@@ -605,10 +626,12 @@ def run(cargs,config,distributed):
             from ..robofft.checkpoint import initialize_optimization_variant
             imported=local_call(distributed,lambda:initialize_optimization_variant(variant,
                 identity=c.identity,actor=c.actor,critic=c.critic,actor_optimizer=c.actor_optimizer,
-                critic_optimizer=c.critic_optimizer,future_critic_trial=getattr(cargs,'future_critic_trial',False)))
+                critic_optimizer=c.critic_optimizer,future_critic_trial=getattr(cargs,'future_critic_trial',False),
+                future_critic_formal=getattr(cargs,'future_critic_formal',False)))
             c.identity['actor_initialization']=imported
             c.state.update(experiment_initialization=imported,
-                mc_preheat_complete=not getattr(cargs,'future_critic_trial',False),
+                mc_preheat_complete=imported['inherited_mc_preheat_for_unchanged_value_contract'],
+                guarded_future_critic_formal=bool(getattr(cargs,'future_critic_formal',False)),
                 bounded_future_critic_trial=bool(getattr(cargs,'future_critic_trial',False)))
             c.state['next_mc_calibration_control_steps']=_next_interaction_boundary(
                 c.state['training_control_steps'],critic_config['complete_mc']['every_control_steps'])
@@ -896,8 +919,14 @@ def run(cargs,config,distributed):
             update_start=time.perf_counter()
             physical_ticks=tuple(service.world.control_ticks)
             physics_time=service.world.env.sim.current_time
+            critic_guard=critic_config.get('validation_guard')
+            if critic_guard:
+                from .learning_guards import fixed_reference_for_update
+                fixed_reference=local_call(distributed,lambda:fixed_reference_for_update(c))
+            else:fixed_reference=None
             critic=critic_update(c.critic,c.critic_optimizer,rows,targets,cache,manifest,distributed=distributed,
-                generator=c.generators['critic'],epochs=critic_config['epochs'],batch=critic_config['global_batch'])
+                generator=c.generators['critic'],epochs=critic_config['epochs'],batch=critic_config['global_batch'],
+                validation_guard=critic_guard,fixed_reference=fixed_reference)
             critic_seconds=max(distributed.all_gather_object(time.perf_counter()-update_start))
             c.state['critic_updates']+=critic['optimizer_steps']
             if c.robofft:
@@ -1011,9 +1040,13 @@ def run(cargs,config,distributed):
             last_save=_maintain_after_iteration(c,report,is_warmup=is_warmup,rejected=rejected,last_save=last_save,
                 finishing=not is_warmup and not rejected and c.state['iteration']>=stop_after_iteration)
             root_call(distributed,lambda:_poll_checkpoint(c))
-        stopped=any(distributed.all_gather_object(signal.stop_requested))
+            if c.state.get('quality_stop'):
+                from .learning_guards import rollback_quality_stop
+                rollback_quality_stop(c,report)
+                break
+        stopped=any(distributed.all_gather_object(signal.stop_requested)) or bool(c.state.get('quality_stop'))
         _finish_controlled_run(c,report,stopped=stopped)
-        report.update(status='passed',final_state=c.state)
+        report.update(status='quality_stopped' if c.state.get('quality_stop') else 'passed',final_state=c.state)
     except _FiniteDiagnosticComplete:
         pass
     except BaseException as caught:

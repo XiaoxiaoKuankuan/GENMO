@@ -465,7 +465,13 @@ def kl_budget_fraction(report,limits):
     return max(fractions,default=0.)
 
 
-def critic_update(critic,optimizer,rows,targets,cache,manifest,*,distributed,generator,epochs=4,batch=1024,grad_clip=1.):
+def critic_update(critic,optimizer,rows,targets,cache,manifest,*,distributed,generator,epochs=4,batch=1024,grad_clip=1.,
+                  validation_guard=None,fixed_reference=None):
+    if validation_guard:
+        from .critic_validation import guarded_critic_update
+        return guarded_critic_update(critic,optimizer,rows,targets,cache,manifest,distributed=distributed,
+            generator=generator,epochs=epochs,batch=batch,grad_clip=grad_clip,
+            guard=validation_guard,fixed_reference=fixed_reference)
     critic.train()
     selected=_eligible(manifest,False);owned=_owned(selected,manifest,distributed);local_indices=[i for _,i in owned]
     local_rows=[rows[i] for i in local_indices]

@@ -6,8 +6,8 @@ latest时只恢复同一实验。子进程真实输出追加到同一正式日�
 从最新完整状态重启；不重置Adam，不更改学习率、概率、奖励、任务或任何数值校验。
 
 本工具只能由明确长训授权启动，不停止其他GPU作业，不删除锁文件、证据或模型。
-不以ESS、奖励涨跌、新增失败或短训提升作为停止条件；OOM和数值异常仍由原训练器
-如实报错并回滚，恢复行为不能掩盖错误或保证物理收益。SIGTERM/SIGINT显式终止
+正式受监控模式尊重物理质量停止标记，不得重启绕过它；异常恢复次数有界，无轮次
+推进时最多重试两次。OOM和数值异常仍如实报错，不保证物理收益。SIGTERM/SIGINT显式终止
 监督器和当前子任务，不在用户要求停止后重新拉起。状态文件可区分后台存活与轮次
 真实推进，不能仅凭监督器PID宣称训练正常。
 """
@@ -27,11 +27,13 @@ sys.path.insert(0,str(ROOT))
 from gem.closedloop.dppo.budget import atomic_json
 
 
-def training_command(config,output,limit,initialization=None,*,random_fragments=False,robofft_variant=None):
+def training_command(config,output,limit,initialization=None,*,random_fragments=False,robofft_variant=None,
+                     future_critic_formal=False):
     if robofft_variant is not None and (initialization is not None or random_fragments):
         raise ValueError('RoboFFT optimization variant cannot mix another transfer mode')
     command=['bash',str(ROOT/'scripts/train_stage10_8gpu_server1.sh'),'--config',str(config),
         '--output-dir',str(output),'--stop-after-iteration',str(limit)]
+    if future_critic_formal:command+=['--future-critic-formal']
     if (output/'latest.json').is_file():command+=['--resume','latest']
     elif robofft_variant is not None:
         command+=['--initialize-robofft-variant',str(robofft_variant)]
@@ -55,9 +57,11 @@ def main():
     parser.add_argument('--initialize-from-checkpoint',type=Path)
     parser.add_argument('--initialize-robofft-variant',type=Path)
     parser.add_argument('--initialize-random-fragments',action='store_true')
+    parser.add_argument('--future-critic-formal',action='store_true')
+    parser.add_argument('--max-stalled-restarts',type=int,default=2)
     args=parser.parse_args()
     status=args.status_dir.resolve();status.mkdir(parents=True,exist_ok=True)
-    output=args.output_dir.resolve();stopping=False;child=None;attempt=0
+    output=args.output_dir.resolve();stopping=False;child=None;attempt=0;stalled=0
     def request_stop(signum,frame):
         nonlocal stopping
         stopping=True
@@ -65,13 +69,18 @@ def main():
     signal.signal(signal.SIGTERM,request_stop);signal.signal(signal.SIGINT,request_stop)
     while not stopping:
         iteration=latest_iteration(output)
+        if (output/'quality_stop.json').exists():
+            atomic_json(status/'supervisor.json',dict(status='quality_stopped',iteration=iteration,
+                pid=os.getpid(),quality_stop=json.loads((output/'quality_stop.json').read_text())))
+            return 0
         if iteration is not None and iteration>=args.stop_after_iteration:
             atomic_json(status/'supervisor.json',dict(status='complete',iteration=iteration,
                 completed_at=time.time(),pid=os.getpid(),attempts=attempt))
             return 0
         attempt+=1
         command=training_command(args.config.resolve(),output,args.stop_after_iteration,args.initialize_from_checkpoint,
-            random_fragments=args.initialize_random_fragments,robofft_variant=args.initialize_robofft_variant)
+            random_fragments=args.initialize_random_fragments,robofft_variant=args.initialize_robofft_variant,
+            future_critic_formal=args.future_critic_formal)
         started=time.time()
         with (status/'formal.log').open('ab',buffering=0) as log:
             log.write((json.dumps(dict(supervisor_attempt=attempt,command=command,time=started))+'\n').encode())
@@ -83,6 +92,12 @@ def main():
         record=dict(attempt=attempt,exit_code=child.returncode,wall_seconds=time.time()-started,
             iteration=latest_iteration(output),ended_at=time.time(),explicit_stop=stopping)
         atomic_json(status/f'formal_attempt_{attempt:03d}.exit.json',record)
+        progressed=(record['iteration'] or 0)>(iteration or 0)
+        stalled=0 if progressed else stalled+1
+        if not stopping and not (output/'quality_stop.json').exists() and stalled>args.max_stalled_restarts:
+            atomic_json(status/'supervisor.json',dict(status='failed_no_progress',pid=os.getpid(),
+                attempts=attempt,iteration=record['iteration'],last_exit_code=child.returncode))
+            return 1
         if not stopping:
             for _ in range(30):
                 if stopping:break

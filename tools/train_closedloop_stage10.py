@@ -13,8 +13,9 @@ GENMO和Isaac必须使用同一Python3.11测试运行环境，不能混用3.10�
 App初始化期间暂时隐藏分布式环境变量，避免Kit误启动额外分布式资源；GPU编号
 仍明确按CUDA_VISIBLE_DEVICES全局0..7与local_rank匹配，启动后恢复通信身份。
 本入口不停止已有作业、不覆盖任何旧run，也不自动重启失败任务。
-未来参考Critic仅允许显式三轮短实验：继承旧共享参数、零初始化新分支，禁用完整
-MC轨迹采集并使用至多20秒的新世界评估；不将有限训练试验视为长期方法验收。
+未来参考Critic支持显式三轮短实验及用户授权的200轮受监控正式入口。正式入口
+要求整段留出验证、Actor更新回退和周期物理退化停止，继续禁用完整MC；这项授权
+不将此前未通过的困难状态诊断改写为通过，也不预先承诺长期训练效果。
 """
 from __future__ import annotations
 import argparse
@@ -44,6 +45,8 @@ def main():
         help='新 RoboFFT 优化变体：继承两模型与Adam；新计轮、新在线数据、固定去噪MC噪声及新物理基线')
     parser.add_argument('--future-critic-trial',action='store_true',
         help='显式最多三轮未来参考Critic短训练；旧共享权重零扩展，不采完整MC，仅20秒独立物理对照')
+    parser.add_argument('--future-critic-formal',action='store_true',
+        help='用户授权的受监控正式训练；保持未来Critic/两个Adam，启用留出验证、Actor回退和周期物理退化停止')
     parser.add_argument('--initialize-random-fragments',action='store_true',
         help='配合initialize-from-checkpoint：允许修改采样时限、站立比例和gamma；重新采样并重新校准Critic')
     parser.add_argument('--initialize-stepwise-ppo',action='store_true',
@@ -97,6 +100,9 @@ def main():
     config=configuration(args.config,genmo_repo=args.genmo_repo,gmt_repo=args.gmt_repo)
     from gem.closedloop.robofft import OBJECTIVE
     robofft=config['stage9']['actor_objective']==OBJECTIVE
+    if args.future_critic_formal and (not robofft or args.future_critic_trial or
+            any((args.calibrate_only,args.collect_only,args.evaluate_only,args.critic_preheat_only,args.mc_validation_only,args.decisive_diagnostic))):
+        parser.error('Guarded future Critic formal training cannot mix trial or diagnostic phases')
     if args.future_critic_trial and (not robofft or config['stage10']['critic']['type']!='asymmetric_tracking_committed_temporal'
             or not (args.initialize_robofft_variant or args.resume)
             or any((args.calibrate_only,args.collect_only,args.evaluate_only,args.critic_preheat_only,args.mc_validation_only,args.decisive_diagnostic))):
