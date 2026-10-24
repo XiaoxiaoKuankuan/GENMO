@@ -13,6 +13,7 @@ import torch
 from supermimic.mdp import flatten_state, unflatten_state
 from supermimic.rotations import so3_log
 from .returns import actor_return
+from .execution_audit import state_probe
 
 
 def state_errors(predicted, real, kin=None):
@@ -85,18 +86,26 @@ def audit_generated_reference(engine, collector, music, initial, *, noise_seed, 
         candidates = []
         for joint in joint_indices:
             amplitude = torch.zeros((), device=initial.device, requires_grad=True)
-            objective, _, _, _ = run(False, joint, amplitude)
-            gradient, = torch.autograd.grad(objective, amplitude)
+            objective, _, probe_intervals, _ = run(False, joint, amplitude)
+            gradient, = torch.autograd.grad(objective, amplitude, retain_graph=True)
+            execution_gradient, = torch.autograd.grad(state_probe(probe_intervals[-1].end.state), amplitude)
             changes = []
             for amount in (-epsilon, epsilon, epsilon * float(gradient.sign())):
                 mr, _, _, _ = run(False, joint, amount)
                 pr, _, intervals, _ = run(True, joint, amount)
                 changes.append({"amplitude_rad": amount, "model_return": float(mr.detach()),
-                                "physical_return": float(pr), "physical_end": intervals[-1].reason})
+                                "physical_return": float(pr), "physical_end": intervals[-1].reason,
+                                "physical_control_steps": sum(x.steps for x in intervals),
+                                "physical_state_probe": float(state_probe(intervals[-1].end.state))})
             physical_slope = (changes[1]["physical_return"] - changes[0]["physical_return"]) / (2 * epsilon)
+            state_slope = (changes[1]["physical_state_probe"] - changes[0]["physical_state_probe"]) / (2 * epsilon)
+            equal_horizons = all(c["physical_control_steps"] == len(model_trace) for c in changes[:2])
             candidates.append({"joint_index": joint, "model_autograd": float(gradient),
                                "physical_centered_difference": physical_slope,
                                "direction_agrees": bool(gradient * physical_slope > 0), "candidates": changes,
+                               "state_only_model_autograd": float(execution_gradient),
+                               "state_only_physical_difference": state_slope,
+                               "state_only_direction_agrees": equal_horizons and bool(execution_gradient * state_slope > 0),
                                "optimized_physical_delta": changes[2]["physical_return"] - float(physical_base)})
         repeat_n = min(len(real_trace), len(repeated_trace))
         repeat_error = float((real_trace[:repeat_n] - repeated_trace[:repeat_n]).abs().max()) if repeat_n else None
@@ -104,8 +113,10 @@ def audit_generated_reference(engine, collector, music, initial, *, noise_seed, 
             "status" not in values and all(values[name] <= bound for name, bound in criteria["state_rmse_limits"].items())
             for values in horizons.values())
         direction_fraction = sum(c["direction_agrees"] for c in candidates) / len(candidates)
+        state_direction_fraction = sum(c["state_only_direction_agrees"] for c in candidates) / len(candidates)
         direction_passed = (criteria is not None and len(candidates) >= criteria["minimum_directions"] and
                             direction_fraction >= criteria["minimum_direction_fraction"] and
+                            state_direction_fraction >= criteria.get("minimum_state_direction_fraction", 2/3) and
                             sum(c["optimized_physical_delta"] for c in candidates) / len(candidates) >= criteria["minimum_optimized_delta"])
         repeat_passed = criteria is not None and repeat_error is not None and repeat_error <= criteria["reset_replay_max_abs"] and len(real_trace) == len(repeated_trace)
         paired = list(itertools.chain.from_iterable(c["candidates"][:2] for c in candidates))
@@ -120,6 +131,7 @@ def audit_generated_reference(engine, collector, music, initial, *, noise_seed, 
                 "main_control_steps": len(model_trace), "required_dependency_steps": dependency_steps,
                 "forecast_branches": model_intervals[-1].event.get("forecast_branches", []),
                 "candidates": candidates, "direction_fraction": direction_fraction,
+                "state_only_direction_fraction": state_direction_fraction,
                 "candidate_pairwise_rank_agreement": rank_agreement, "reset_repeat_max_abs": repeat_error,
                 "prediction_passed": bool(prediction_passed), "physical_direction_passed": bool(direction_passed),
                 "reset_replay_repeatability_passed": bool(repeat_passed),
