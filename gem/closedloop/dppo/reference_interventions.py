@@ -100,8 +100,17 @@ def project_free_joints(base,proposal,free,limits):
         result=minimize(lambda x:.5*x@H@x+linear@x,np.clip(target,lower,upper),
             jac=lambda x:H@x+linear,method='SLSQP',bounds=Bounds(lower,upper),
             constraints=[LinearConstraint(A,-bound-b,bound-b)],options=dict(maxiter=100,ftol=1e-10))
+        # 已提交前缀不是优化变量，不能把纯前缀的零Jacobian行当成自由区约束。
+        # 短段原解保持不变；仅失败时去掉这些恒定行再解，新增自由区的边界约束不变。
+        if np.any(np.abs(A@result.x+b)>bound+1e-7):
+            movable=np.any(np.abs(A)>0,axis=1)
+            result=minimize(lambda x:.5*x@H@x+linear@x,np.clip(target,lower,upper),
+                jac=lambda x:H@x+linear,method='SLSQP',bounds=Bounds(lower,upper),
+                constraints=[LinearConstraint(A[movable],(-bound-b)[movable],(bound-b)[movable])],
+                options=dict(maxiter=200,ftol=1e-10))
+        else:movable=np.ones(len(A),dtype=bool)
         x=result.x;constraint=A@x+b
-        if (np.any(x<lower-1e-7) or np.any(x>upper+1e-7) or np.any(np.abs(constraint)>bound+1e-7)):
+        if (np.any(x<lower-1e-7) or np.any(x>upper+1e-7) or np.any(np.abs(constraint[movable])>bound[movable]+1e-7)):
             raise ValueError('No legal free joint projection preserving committed prefix: '+str(result.message))
         out[ids,joint+7]=base[ids,joint+7]+x;total+=1
     if not np.array_equal(out[~mask.any(-1)],proposal[~mask.any(-1)]):raise AssertionError('Projection changed committed frame')
@@ -118,15 +127,21 @@ def check_proposal(base,new,free,kin,resample):
     metrics=dict(free_hard_limit_coordinates=new_hard,
         inherited_prefix_limit_coordinates=int(((excess>1e-5)&~free_joint).sum()),
         worsened_limit_coordinates=int(((excess>np.maximum(base_excess,0)+1e-5)&free_joint).sum()))
-    active=np.flatnonzero(free.any(-1))
+    # qpos30首两维为平面速度，最后已知姿态帧的这两维可未知；不能误当可改姿态。
+    active=np.flatnonzero(free[:,2:].any(-1))
     if not len(active):return True,metrics
     stop=int(active[-1])+1
     # 音乐无效尾部不属于可消费参考，差分不能跨过真实有效端点。
     for hz,a,b in ((30,base[:stop],new[:stop]),(50,resample(base[:stop]),resample(new[:stop]))):
         delta=pose_delta(a,b);v=np.diff(delta,axis=0)*hz;acc=np.diff(v,axis=0)*hz
+        # 仅验收此次可改自由区及其连接边界，已提交前缀的历史差异不属于此次干预。
+        # 完整消费序列仍由独立后验审核检查，不能靠这个局部窗口宣布全轨迹合法。
+        boundary=(int(active[0])-1)/30.
+        velocity_mask=np.arange(1,len(a))/hz>boundary+1e-10
+        acceleration_mask=np.arange(2,len(a))/hz>boundary+1e-10
         for label,sl in (('root_position',slice(0,3)),('root_orientation',slice(3,6)),('joint',slice(6,None))):
-            metrics[f'{label}_velocity_delta_{hz}']=float(np.abs(v[:,sl]).max())
-            metrics[f'{label}_acceleration_delta_{hz}']=float(np.abs(acc[:,sl]).max())
+            metrics[f'{label}_velocity_delta_{hz}']=float(np.abs(v[velocity_mask,sl]).max())
+            metrics[f'{label}_acceleration_delta_{hz}']=float(np.abs(acc[acceleration_mask,sl]).max())
         device=kin.joint_limits.device
         with torch.no_grad():
             fa=kin.forward_body_positions(torch.as_tensor(a,dtype=torch.float32,device=device))
@@ -134,7 +149,7 @@ def check_proposal(base,new,free,kin,resample):
             d=(fb-fa).cpu().numpy()
         if not np.isfinite(d).all():raise ValueError('Nonfinite reference FK')
         bv=np.diff(d,axis=0)*hz;ba=np.diff(bv,axis=0)*hz
-        metrics[f'body_velocity_delta_{hz}']=float(np.abs(bv).max());metrics[f'body_acceleration_delta_{hz}']=float(np.abs(ba).max())
+        metrics[f'body_velocity_delta_{hz}']=float(np.abs(bv[velocity_mask]).max());metrics[f'body_acceleration_delta_{hz}']=float(np.abs(ba[acceleration_mask]).max())
     legal=(new_hard==0 and all(metrics[f'joint_velocity_delta_{hz}']<=.6 and
         metrics[f'joint_acceleration_delta_{hz}']<=20 and metrics[f'body_velocity_delta_{hz}']<=.25 and
         metrics[f'body_acceleration_delta_{hz}']<=12 and metrics[f'root_orientation_velocity_delta_{hz}']<=.25 and
@@ -173,7 +188,13 @@ def fixed_world_intervention(c,bank,variant,audit):
                 proposal[:n]=prefix
                 proposal[~free.any(-1)]=np.asarray(generated['qpos_world'])[~free.any(-1)]
                 proposal[:n]=prefix
-                proposal,projected=project_free_joints(base,proposal,free,limits)
+                try:proposal,projected=project_free_joints(base,proposal,free,limits)
+                except ValueError as error:
+                    audit['invalid_plans']=audit.get('invalid_plans',0)+1
+                    audit['rejected_source']=dict(seed=seed,decision_tick=int(generated['decision_tick']),error=str(error))
+                    failure=c.output/'reference_c'/f'projection_failure_rank{c.distributed.rank:02d}.npz'
+                    np.savez(failure,base=base,proposal=proposal,free=free,limits=limits)
+                    raise
                 legal,metrics=check_proposal(base,proposal,free,kin,resample)
                 if legal:accepted=True;break
             audit['plans']+=1

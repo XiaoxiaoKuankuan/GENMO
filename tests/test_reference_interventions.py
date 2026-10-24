@@ -59,3 +59,17 @@ def test_joint_projection_anticipates_limit_without_clipping_kink():
     np.testing.assert_array_equal(new[:10],base[:10])
     legal,metrics=check_proposal(base,new,free,Kinematics(),mod.resample)
     assert legal,metrics
+
+
+def test_immutable_prefix_is_not_optimized_and_global_audit_still_catches_old_jump():
+    from tools.summarize_decisive_physics import reference_continuity
+    base=np.zeros((60,28));base[:,3]=1.;proposal=base.copy();proposal[:4,7]=.04
+    free=np.ones((60,30),bool);free[:10]=False;free[9,:2]=True
+    new,_=project_free_joints(base,proposal,free,Kinematics.joint_limits.numpy())
+    np.testing.assert_array_equal(new[:10],proposal[:10])
+    legal,_=check_proposal(base,new,free,Kinematics(),mod.resample)
+    assert legal  # 本次自由区与接缝合法，历史跳变仍不能从前缀中改掉。
+    a,b=mod.resample(base),mod.resample(new)
+    audit=reference_continuity({('task',i*12):q for i,q in enumerate(a)},
+        {('task',i*12):q for i,q in enumerate(b)},Kinematics())
+    assert audit['maxima']['joint_velocity_delta_max']>.6
