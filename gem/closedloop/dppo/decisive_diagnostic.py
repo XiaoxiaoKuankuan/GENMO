@@ -240,7 +240,7 @@ def evaluate_local_candidates(c,plan,label):
     path,lease,budget=_new_phase(c,'decisive_'+label,credits)
     conditions=[];reference_sums=dict(count=0,root_position_squared=0.,root_rotation_squared=0.,leg_squared=0.)
     def sink(task,row):
-        if label=='A_baseline' or label.startswith('repeatability_'):
+        if label=='A_baseline' or label.startswith(('repeatability_','fresh_')):
             snapshot=snapshot_critic_transition(row);snapshot['task_id']=task['task_id'];conditions.append(snapshot)
         # 逐状态生成输出单独保存，后续只按实际消费帧匹配，不使用执行后状态作目标。
         trace=row.metadata['sampler_trace']
@@ -510,6 +510,46 @@ def run_repeatability(c):
         second=evaluate_local_candidates(c,plan,'repeatability_second')
         rows=c.distributed.all_gather_object(dict(rank=rank,actor='parent28' if rank<4 else 'Stage1',first=first,second=second))
         result=dict(status='passed',reports=rows,wall_seconds=time.time()-started,training_updates=0)
+        root_call(c.distributed,lambda:atomic_json(output/'summary.json',result));return result
+    finally:
+        c.actor.load_state_dict(base);c.actor.zero_grad(set_to_none=True)
+
+
+def run_fresh_physics(c,source):
+    """排除持久世界跨phase复位残留：每个候选使用独立新建并关闭的PhysX世界。
+
+    A复用同一真实行为计算且已存档的八个方向，和原首次新建世界基线比较完整音乐；
+    C重新生成相同Stage1参考银行，在新世界进行20秒有界配对，以满足总诊断时限。
+    不把20秒C结果冒充长音乐或晚期失败修复。保存全部首状态、消费参考及拒绝账本，
+    供离线核对新参考生效前的状态和奖励是否逐元素一致。
+    """
+    import json
+    from .evaluation import _digest
+    if c.distributed.world_size!=8 or not c.robofft:raise ValueError('Explicit eight-GPU finite diagnosis required')
+    started=time.time();rank=c.distributed.rank;base={n:t.detach().cpu().clone() for n,t in c.actor.state_dict().items()}
+    output=c.output/'fresh_physics';output.mkdir(exist_ok=True);source=Path(source)
+    try:
+        plan=json.loads((source/'decisive/plan.json').read_text())
+        c.stage['evaluation']['envs_per_rank']=8;c.stage['evaluation']['persistent_world']=False
+        label=('A','B','C','D')[rank//2];sign=1 if rank%2==0 else -1
+        direction=torch.load(source/'decisive'/f'direction_rank{rank:02d}.pt',map_location='cpu',weights_only=False)
+        apply_direction(c.actor,base,direction,sign);del direction
+        a=evaluate_local_candidates(c,plan,'fresh_'+label+('_plus' if sign>0 else '_minus'))
+        c.actor.load_state_dict(c.policy.frozen_policy.actor.state_dict())
+        bounded=copy.deepcopy(plan);bounded['episode_seconds']=20.;bounded['complete_music_scope']=False
+        bounded['evaluation_purpose']='fresh_world_reference_intervention_20s_not_complete_music'
+        bounded.pop('plan_sha256');bounded['plan_sha256']=_digest(bounded)
+        root_call(c.distributed,lambda:atomic_json(output/'reference_plan.json',bounded))
+        bank={}
+        with frozen_reference_bank(c.policy,bank):b=evaluate_local_candidates(c,bounded,'fresh_C_Stage1')
+        variant=('height_plus','height_minus','yaw_plus','yaw_minus','leg_plus','leg_minus','smooth10','smooth20')[rank]
+        audit=dict(variant=variant,plans=0,accepted=0,rejected=0)
+        with frozen_reference_bank(c.policy,bank,variant=variant,audit=audit):
+            candidate=evaluate_local_candidates(c,bounded,'fresh_C_'+variant)
+        local=dict(rank=rank,direction=label,sign=sign,reference_audit=audit,reports=dict(A_candidate=a,C_baseline=b,C_candidate=candidate))
+        atomic_json(output/f'results_rank{rank:02d}.json',local)
+        results=c.distributed.all_gather_object(local)
+        result=dict(status='passed',results=results,source=str(source),wall_seconds=time.time()-started,training_updates=0,world_reuse=False)
         root_call(c.distributed,lambda:atomic_json(output/'summary.json',result));return result
     finally:
         c.actor.load_state_dict(base);c.actor.zero_grad(set_to_none=True)

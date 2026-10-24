@@ -132,6 +132,11 @@ def compare_one(work):
         if any(a[k]!=b[k] for k in ('dataset','sample_id','seed','music_start_frame','noise_index_start')):raise ValueError('Task initial state or noise differs')
         first,last=metrics(a),metrics(b)
         row=dict(task_id=a['task_id'],dataset=a['dataset'],sample_id=a['sample_id'],seed=a['seed'],initial=first,final=last)
+        early_a=[c for d in a['decisions'] for c in d['controls']][:12]
+        early_b=[c for d in b['decisions'] for c in d['controls']][:12]
+        if len(early_a)!=12 or [c['tick'] for c in early_a]!=[c['tick'] for c in early_b]:raise ValueError('Initial physical time differs')
+        row['pre_influence_reward_max_difference']=max(abs(x['reward']-y['reward']) for x,y in zip(early_a,early_b))
+        row['pre_influence_tracking_max_difference']=max(abs(x['raw_errors'][k+'_squared_error']-y['raw_errors'][k+'_squared_error']) for x,y in zip(early_a,early_b) for k in ERRORS)
         for key in ('reward_per_second','full_task_reward','seconds','failure','activity','music_alignment','completion'):
             row[key+'_delta']=last[key]-first[key];row[key+'_initial']=first[key];row[key+'_final']=last[key]
         rows.append(row);prefixes.append(matched_control_prefix(a,b));pair_keys.append({k:row[k] for k in ('task_id','dataset','sample_id','seed')})
@@ -160,6 +165,7 @@ def compare_one(work):
         executed_reference_changes={k:cluster_summary(refs,k) for k in ('root_position_rms_m','root_angle_rms_rad','leg_rms_rad')},
         executed_reference_checks=continuity,
         reference_scope='actual_GMT_center_interpolation_from_world_plans; bootstrap_reference_excluded; no_counterfactual_after_failure',
+        strict_pre_influence_match=all(r['pre_influence_reward_max_difference']==0. and r['pre_influence_tracking_max_difference']==0. for r in rows),
         tasks=rows,reference_tasks=refs)
     atomic_json(Path(output)/f'{kind}_rank{rank:02d}.json',result)
     return result
@@ -168,7 +174,9 @@ def compare_one(work):
 def main():
     parser=argparse.ArgumentParser(description=__doc__);parser.add_argument('--run',type=Path,required=True)
     parser.add_argument('--kind',choices=['A','C'],required=True);parser.add_argument('--output-dir',type=Path,required=True)
-    parser.add_argument('--workers',type=int,default=4);args=parser.parse_args()
+    parser.add_argument('--workers',type=int,default=4)
+    parser.add_argument('--fresh-parent-run',type=Path,help='新世界复测A读取此目录的首次新建世界基线，C使用当前新世界20秒基线')
+    args=parser.parse_args()
     args.output_dir.mkdir(parents=True,exist_ok=False)
     import yaml
     config_path=next(args.run.glob('sessions/*/resolved_config.yaml'));config=yaml.safe_load(config_path.read_text())
@@ -176,15 +184,20 @@ def main():
     kin=BumiKinematics(config['paths']['kinematics'])
     leg=[7+i for i,n in enumerate(kin.joint_order) if any(s in n.lower() for s in ('hip','knee','ankle'))]
     phase=config_path.parent/'phases';base='A_baseline' if args.kind=='A' else 'C_Stage1';work=[]
+    base_phase=phase
+    if args.fresh_parent_run:
+        if args.kind=='A':base_phase=next(args.fresh_parent_run.glob('sessions/*/resolved_config.yaml')).parent/'phases'
+        else:base='fresh_C_Stage1'
     labels=(['A_plus','A_minus','B_plus','B_minus','C_plus','C_minus','D_plus','D_minus'] if args.kind=='A' else
             ['C_height_plus','C_height_minus','C_yaw_plus','C_yaw_minus','C_leg_plus','C_leg_minus','C_smooth10','C_smooth20'])
     for rank,label in enumerate(labels):
-        before=phase/f'decisive_{base}'/f'rank{rank:02d}'/'report/report.json'
-        after=phase/f'decisive_{label}'/f'rank{rank:02d}'/'report/report.json'
+        before=base_phase/f'decisive_{base}'/f'rank{rank:02d}'/'report/report.json'
+        prefix='fresh_' if args.fresh_parent_run else ''
+        after=phase/f'decisive_{prefix}{label}'/f'rank{rank:02d}'/'report/report.json'
         if not before.exists() or not after.exists():raise FileNotFoundError(f'Incomplete paired phase: {before}, {after}')
         work.append((rank,args.kind,before,after,args.output_dir,leg,config['paths']['kinematics']))
     with ProcessPoolExecutor(max_workers=args.workers) as pool:results=list(pool.map(compare_one,work))
-    summary=dict(kind=args.kind,candidates=[dict(label=label,**{k:r[k] for k in ('rank','metrics','baseline_metrics','candidate_metrics','common_prefix_tracking_rms','executed_reference_changes','executed_reference_checks')}) for label,r in zip(labels,results)])
+    summary=dict(kind=args.kind,fresh_world_per_candidate=bool(args.fresh_parent_run),candidates=[dict(label=label,**{k:r[k] for k in ('rank','metrics','baseline_metrics','candidate_metrics','common_prefix_tracking_rms','executed_reference_changes','executed_reference_checks','strict_pre_influence_match')}) for label,r in zip(labels,results)])
     task_ids=[r['task_id'] for r in results[0]['tasks']]
     spreads=[]
     for i,task in enumerate(task_ids):
@@ -206,7 +219,8 @@ def main():
             contrasts[derivatives[left]['direction']+'_minus_'+derivatives[right]['direction']]=cluster_summary(rows,'contrast')
         summary['direction_contrasts']=contrasts
     else:
-        summary['legality']=[json.loads((args.run/'decisive'/f'results_rank{rank:02d}.json').read_text())['reference_audit'] for rank in range(8)]
+        folder='fresh_physics' if args.fresh_parent_run else 'decisive'
+        summary['legality']=[json.loads((args.run/folder/f'results_rank{rank:02d}.json').read_text())['reference_audit'] for rank in range(8)]
     atomic_json(args.output_dir/'summary.json',summary)
     print(json.dumps({k:v for k,v in summary.items() if k!='candidates'},ensure_ascii=False),flush=True)
 
