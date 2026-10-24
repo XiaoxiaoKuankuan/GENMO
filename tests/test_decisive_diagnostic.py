@@ -87,3 +87,13 @@ def test_consumed_reference_derivatives_do_not_cross_time_gaps():
     assert result['new_limit_coordinate_count']==0
     assert abs(result['maxima']['joint_velocity_delta_max']-.5)<1e-12
     assert result['maxima']['joint_acceleration_delta_max']<1e-10
+
+
+def test_reward_reference_origin_tracks_copied_prefix():
+    from tools.trace_decisive_plan_credit import origin_resolver
+    plans={'one':dict(decision_tick=600,prefix_frames=10,parent_plan_id='bootstrap:one'),
+           'two':dict(decision_tick=780,prefix_frames=10,parent_plan_id='one'),
+           'three':dict(decision_tick=960,prefix_frames=10,parent_plan_id='two')}
+    origin=origin_resolver(plans)
+    assert origin('three',0)=='one' and origin('three',1)=='two' and origin('three',10)=='three'
+    assert origin('one',2)=='bootstrap'
