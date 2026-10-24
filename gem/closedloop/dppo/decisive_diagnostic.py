@@ -536,6 +536,7 @@ def run_fresh_physics(c,source):
         apply_direction(c.actor,base,direction,sign);del direction
         a=evaluate_local_candidates(c,plan,'fresh_'+label+('_plus' if sign>0 else '_minus'))
         c.actor.load_state_dict(c.policy.frozen_policy.actor.state_dict())
+        c.stage['evaluation']['envs_per_rank']=16
         bounded=copy.deepcopy(plan);bounded['episode_seconds']=20.;bounded['complete_music_scope']=False
         bounded['evaluation_purpose']='fresh_world_reference_intervention_20s_not_complete_music'
         bounded.pop('plan_sha256');bounded['plan_sha256']=_digest(bounded)
