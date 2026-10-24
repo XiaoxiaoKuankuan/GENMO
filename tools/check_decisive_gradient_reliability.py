@@ -94,6 +94,16 @@ def main():
         if half==0:grads['S_D']=_gradient(c,chosen,part,torch.ones_like(adv),'gaussian')
         part.close()
     for label in ('A','D'):report['split'][label]=module_stats(grads[label+'0'],grads[label+'1'])
+    full_d={name:(grads['D0'][name]+grads['D1'][name])*.5 for name in grads['D0']}
+    full_a={name:(grads['A0'][name]+grads['A1'][name])*.5 for name in grads['A0']}
+    report['recomputed_A_D']=module_stats(full_a,full_d);del full_a
+    report['bias_isolation']={}
+    for label,weighted in [('beta1',True),('beta1_uniform',False)]:
+        print(f'[RELIABILITY rank={rank}] bias isolation {label}',flush=True)
+        probe_gradient=_gradient(c,rows,cache,targets['advantages'].double().cpu(),'proxy',weighted=weighted)
+        report['bias_isolation'][label+'_versus_D']=module_stats(probe_gradient,full_d)
+        del probe_gradient
+    del full_d
     norms=json.loads((source/'gradient_directions.json').read_text())['matched_module_update_norms']
     score_direction=matched_direction(grads['S_D'],norms);del grads
     projections=[]
@@ -111,6 +121,11 @@ def main():
     mean=np.array([np.mean(v) for v in music.values()]);rng=np.random.default_rng(20261024)
     boot=rng.choice(mean,(10000,len(mean)),replace=True).mean(1)
     report['true_gaussian_heldout_score']=dict(mean=float(mean.mean()),music_cluster_95=np.quantile(boot,[.025,.975]).tolist(),music_clusters=len(mean),states=len(allrows))
+    fit_local=[(r.metadata['training_task']['dataset'],r.metadata['training_task']['sample_id']) for r in rows[:len(rows)//2]]
+    fit_music={tuple(v) for part in collective.all_gather_object(fit_local) for v in part}
+    unseen=[v for key,v in music.items() if key not in fit_music];unseen_mean=np.array([np.mean(v) for v in unseen])
+    boot=rng.choice(unseen_mean,(10000,len(unseen_mean)),replace=True).mean(1)
+    report['true_gaussian_unseen_music_score']=dict(mean=float(unseen_mean.mean()),music_cluster_95=np.quantile(boot,[.025,.975]).tolist(),music_clusters=len(unseen),states=sum(len(v) for v in unseen))
     common=torch.load(source/'behavior_rank00.pt',map_location='cpu',weights_only=False)
     probes=common['rows'][:8];masks=torch.stack([r.free_mask.cpu() for r in probes]);current=replay_outputs(policy,probes)
     original=torch.cat([r.metadata['sampler_trace']['qpos30'].cpu() for r in probes])
