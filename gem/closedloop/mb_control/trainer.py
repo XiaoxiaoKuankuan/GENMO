@@ -89,7 +89,9 @@ class Stage2Trainer:
             raise ValueError("真实快照与外生延迟批次必须非空且对齐")
         if self.config.get("require_critic_quality", False) and not self.critic_ready:
             raise ValueError("正式Actor更新要求独立真实回报验证通过的Critic")
-        warming = not self.critic_ready and self.update_index < self.config["warmup_updates"]
+        # 有界smoke也不能靠“已经拟合两次”解锁未经验证的终点价值。
+        # 未加载真实质量通过状态时，仅允许Critic管线更新；Actor保持固定。
+        warming = not self.critic_ready
         if not physical_intervals:
             raise ValueError("每轮需要当前策略真实采集，不能只优化WM自反馈")
         self.actor.eval()

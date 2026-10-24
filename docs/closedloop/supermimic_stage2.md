@@ -1,128 +1,173 @@
-# GENMO × SuperMimic Stage2 实施说明
+# GENMO × SuperMimic Stage2：服务器2真实验收与正式启动门禁
 
-2026-10-24。**P0–P7 代码初版；本轮未运行测试、权重加载、模型推理、物理或训练。** 用户最后明确要求“先编写所有步骤代码、先不测试”，因此方案中要求实际通过的验收全部延期。这里列出的命令是后续运行说明，不是已执行记录。
+更新时间：2026-10-24。代码、资产装配、真实闭环、梯度与物理验收均已推进；**当前固定 `ckpt_024000.pt` 未通过正式配置需要的 WM 预测/方向门槛，正式训练没有启动，accepted Actor 更新为 0。**
 
-## 工作树与资产
+正式启动脚本已经在服务器2实际执行，退出码为 2，最终唯一失败检查为 `world_model_physics_and_direction`。没有创建训练 tmux/PID，没有执行 Critic 预热或 GENMO 优化。不能把以下基线、数值梯度或模型内预测通过解释为 Stage2 训练收益。
 
-| 仓库 | 独立工作树 | 分支与基线 |
+## 工作目录、环境与固定资产
+
+本地独立分支：
+
+- GENMO：`/home/weili/bumi-closedloop-worktrees/supermimic/GENMO`，`feature/stage2-supermimic-worldmodel`。
+- SuperMimic：`/home/weili/bumi-closedloop-worktrees/supermimic/SuperMimic`，`feature/genmo-worldmodel-bridge`。
+
+所有测试在服务器2 `6000D-Server-2` / `ZP-NC579` 执行。本地只修改源码、文档和 Git；没有本地模型测试。没有切换固定共享工作树、修改原训练环境或停止原有正式任务。最初存在的旧固定评价自然结束后，才使用对应空闲 GPU。
+
+服务器2：
+
+| 项目 | 实际路径或身份 |
+|---|---|
+| GENMO | `/home/user/liwei/bumi-closedloop-worktrees/supermimic/GENMO` |
+| SuperMimic | `/home/user/liwei/bumi-closedloop-worktrees/supermimic/SuperMimic` |
+| 独立 Python | `/data0/user/liwei/envs/genmo_sm_runtime/bin/python` |
+| IsaacLab 源码 | `/data0/user/liwei/GENMO_assets/supermimic_bridge_20261024/IsaacLab` |
+| Stage1 | `/data0/user/liwei/closedloop_stage10_v3_assets/20261012/stage1_s595000/s595000.pt` |
+| stats/FK | 与 Stage1 同目录的 `qpos30_train_stats.json`、`bumi_kinematics_robot_retargeter_fe934_v1.json` |
+| 固定 SM pi/wm | `/data0/user/liwei/GENMO_assets/supermimic_bridge_20261024/ckpt_024000.pt` |
+| 原机器人资产 | SuperMimic 下 `data/bumi3_4340/robot`，保留 XML 相对 mesh 路径 |
+| 原配对库 | `/data0/user/liwei/datasets/bumi_music_umr70_mine_pass_90505_v1` |
+| 验收根目录 | `/data0/user/liwei/GENMO_outputs/stage2_supermimic_worldmodel/acceptance_20261024` |
+
+独立运行环境实际加载 Python 3.12.13、PyTorch 2.11.0+cu130、MuJoCo 3.15.0、Warp 1.17.0、Newton 1.8.0.dev0；IsaacLab 固定源码提交 `46d6cc3d7b115906fad12efd372fbf69f4e3d3ed`。原 GENMO 环境只读保留。依赖来源、失败安装和复核记录见验收目录及根目录 `记录文本.md`。
+
+Stage1 SHA256：`51b522fbdeb0ec289e5ffc24e2fccca9888df90495f57f96714c1bb43c05f8e2`。
+
+SM SHA256：`172fbc720583f415fdf27560c91bb8c6f6efe8165738d961cf2455694789cb54`。
+
+选择 024000 的依据包含已有固定 SM 跟踪评价；该评价不能证明 WM 长时动力学或物理梯度可信。本轮在同一候选中固定 Actor、WM 和全部 normalizer，没有追随 `last.pt`。没有重新训练 Stage1 或重建音乐动作配对库。
+
+## P0–P7 的实际状态
+
+| 阶段 | 已修改及实际执行 | 失败或未验证边界 |
 |---|---|---|
-| GENMO | `/home/weili/bumi-closedloop-worktrees/supermimic/GENMO` | `feature/stage2-supermimic-worldmodel`，从当前 rolling `85d9cb1` 建立 |
-| SuperMimic | `/home/weili/bumi-closedloop-worktrees/supermimic/SuperMimic` | `feature/genmo-worldmodel-bridge`，从 main `bf833cf` 建立 |
+| P0 | 定位原权重、stats、FK、四库监督配置；装配 4287 训练任务、8 独立验证任务、24 固定评价任务；保留原 P6–30、15% 零前缀监督采样 | 正式配置未获准生效 |
+| P1 | 真实 SM CPU 原网络/Bridge Actor 与 WM 最大差均 0；normalizer 固定，输入可求导；真实 MotionLib 对照通过 | 不表示模型动力学可靠 |
+| P2 | 原 TrackingSim 与 Streaming 在 Newton 上 50 步对照通过；Stage1+SM 8/8 全曲完成，累计 364.54 秒物理时间、1066 次接管、11 次晚到拒绝 | 墙钟 522.19 秒，18227 个控制步超时；没有证明实时运行 |
+| P3 | 5/10/15/20/32、候选45步及正式所需102步的三类 WM/物理对照；三关节方向、复位重复性、扰动幅度复查 | 102步已知参考完整验收1/8、方向5/8；**正式支持时域为0/未获准** |
+| P4 | 原全20步DDIM、eta0、CFG2.5、独立ForecastContext、CFG拼批、解析参考缓存；GPU前向/反向/有限差分/主动断链全部执行 | 只证明数值执行链，不替代P3 |
+| P5 | 三次实际生成、缓存覆盖、变长回报、第一参考到第二/第三决策梯度；累计主线与前瞻依赖分别记录 | 当前所需依赖长度超过固定WM可信验收范围 |
+| P6 | 独立PlanAwareCritic、真实MC质量门槛、有效更新计数、两个优化器、v2完整checkpoint与恢复代码 | 真实Critic预热、有效优化、训练checkpoint保存后继续运行尚未执行 |
+| P7 | 全曲基线、完整部署延迟、单/双GPU独立采集基准、CPU/GPU profiling；实际执行正式启动器 | 启动被P3阻断；没有Stage2/current配对收益、no_forecast训练或多GPU梯度同步证据 |
 
-固定共享GENMO/GMT工作树没有切换；原SM main没有修改；没有操作正式训练进程、GPU、模型、数据或日志。新方法不导入旧PPO/DPPO/AWR/RoboFFT训练器，不增加动作残差，不生成latent。原Stage1仍是60帧@30Hz的qpos30/contact2及原编解码/前缀语义。
+CPU 合同回归：17 项通过、1 项跳过。跳过的是需要显式 GPU 配置的整链 pytest；对应真实权重整链通过独立 GPU CLI 执行，不将 skip 当成 pass。
 
-SM候选固定为 `/home/weili/supermimic_vibed/logs/bumi3_seven_filtered_v1/ckpt_024000.pt`。文件存在；内部张量和质量未加载核验。运行时只接收同一个文件的pi/wm，统计一起冻结。不会追随`last.pt`。详细静态证据见 [supermimic_asset_audit.md](supermimic_asset_audit.md)。
+原物理/Bridge 最大状态差 `4.98295e-5`，动作差 `1.92225e-5`，奖励差 `1.26660e-7`，终止一致；FK 最大差约 `3.6e-7 m`，初态回读差 0。首次编译/图捕获单独预热并记录，未计为稳定运行延迟。
 
-本机未找到`s595000.pt/ckpt`；配置的`stage1.checkpoint`保持null。已有stats文件存在，但其与未来提供的checkpoint配套关系仍待严格加载检查。SM的派生XML/USD由`robot_asset_dir`显式指向原资产目录，只读使用。Stage1原配对数据配置、实际音乐任务、延迟profile和P3报告均需提供，不生成假资产或重新建库。
+## 最关键的 WM 结论
 
-## 分阶段实现与实际状态
+完整前瞻标定采集80个请求，全部合法提交、没有晚到拒绝；延迟最小262、中位281、P90 298、最大342 tick（600Hz，约0.437/0.468/0.497/0.570秒）。使用保留的 bootstrap 360 tick 与历史延迟裕量36 tick，三决策主线90个50Hz控制步，最长累计模型依赖102步；三个前瞻分支各33步，依赖深度33/67/101。
 
-| 阶段 | 实际修改 | 本轮执行/失败/未验证 |
+P3用实测最大342 tick作为三次事件延迟，条件构造仍只读取过去延迟。为测量完整102步，在三次真实生成/接管后增加12步明确标注的配对诊断尾段。尾段不进入Actor目标、物理方向探针或正式BPTT，也不替代多决策闭环。
+
+| 102步检查 | 实际结果 |
+|---|---|
+| 完整GENMO连续滚动状态预测 | 8/8通过 |
+| 固定参考下SM闭环预测 | 8/8通过 |
+| 固定真实动作序列的WM动力学预测 | 1/8通过 |
+| 总回报方向、纯执行状态方向和优化候选联合门槛 | 5/8通过 |
+| 同reset真实重放重复性 | 8/8通过 |
+| 整体正式训练门禁 | 失败，`supported_control_steps=0` |
+
+阈值在第一次P3前已声明，没有根据结果放宽。典型102步累计RMSE：
+
+| 验证曲目 | 根XY误差/阈值 | 根姿态误差/阈值 |
 |---|---|---|
-| P0 | 本地与远端基线、工作树、资产、进程和导入合同审读；独立分支 | Git/文件/源码只读检查已执行；未找到本机Stage1模型；候选SM内容未核验 |
-| P1 | SM `bridge/bundle.py`、`runtime.py`、导出和验证CLI；固定pi/wm/normalizers | 未加载/导出/验证模型；parity、bf16差异、输入导数、冻结不变性待测 |
-| P2 | 共享原SM物理初始化/执行器步进；连续环境；动态Tensor参考、名称映射、600Hz调度 | 原环境回归、MotionLib parity、Stage1+SM真实闭环均未执行；不能称已跑通 |
-| P3 | 旧参考闭环forecast、58维上下文、已知/生成参考预测与真实方向审计 | 未取得8/16/24/32步或多决策时域证据；当前没有可支持正式训练的WM结论 |
-| P4 | 零输出未来编码、共享CFG、全20步DDIM、纯Tensor条件、非重入checkpoint | Stage1同noise一致性、输入泄漏、整链/有限差分、重算梯度待测 |
-| P5 | 三决策事件想象、旧参考等待、覆盖、逐步折扣、lambda targets、近期真实回放 | 跨决策梯度、覆盖支持和变长时序对照待测 |
-| P6 | 完整缓存感知Critic、真实异步采集、八项奖励、原监督正则、两optimizer、完整训练checkpoint | 预热/优化、隔离、冻结检查、保存恢复均未运行 |
-| P7 | 短测/全曲评价/物理模型审计/纯导数入口、测试源、性能采样与本说明 | 没有测试通过或失败记录；所有运行验收未执行，未声称生成质量提升 |
+| AIST `gPO_sBM_cAll_d11_mPO0_ch09` | 0.09410 / 0.05 m | 0.27492 / 0.10 rad |
+| AIOZ `Utb4GaKWsiU_01_80_1500_dancer_00` | 0.14656 / 0.05 m | 0.68636 / 0.10 rad |
+| FineDance `194` | 0.23048 / 0.05 m | 1.11162 / 0.10 rad |
 
-未执行测试不是测试失败。当前已知缺项是资产/标定/验证证据未提供；隐藏的运行、数值和物理问题仍可能存在。
+5–32步已知参考预测通过，不等于这些短时域已经获得正式训练许可。候选45步的状态预测虽通过，方向仍有2/8失败；0.005、0.0025 rad复查显示方向对扰动尺度敏感。复查保留独立目录，没有用更小扰动结果覆盖原0.01 rad验收。
 
-## 模块和梯度边界
+原Actor/WM与Bridge一致、真实物理步进一致、reset重复性通过，支持把当前主要阻塞定位为固定WM在所需时域/验证分布上的动力学与方向可信性不足。这里不声称其他checkpoint必然失败，也没有在GENMO Stage2中更新WM。
 
-`ForecastActor.stage1`持有原Stage1；独立`FutureStateEncoder`是58→128→原latent，末投影零初始化。58维为旧参考heading中的平移、相对旋转6D、线/角速度、21个q/qd误差和提前时间。相对帧时间也经零投影，invalid分支严格为零。音乐CFG只删除音乐，前瞻和原历史/前缀两支共享。
+## 算法与关键实现边界
 
-新`sampler.py`复用原1000步日程和DDIM公式，每步使用当前同一个GENMO，eta=0，无概率缓存、混合网络或冻结采样尾段。known逐坐标where后，decode、anchor、关节映射、30→50插值、差分与FK均保留图。原配对监督直接调用原training_forward和Stage1BumiLosses，完全不进入未来条件分支。
+- 原60帧@30Hz qpos30/contact2、世界anchor、编解码、原历史及前缀保留。SM合同为state55、xi25、history10×75、goal570、action21，关节按名称双向映射。
+- `ForecastContext`与真实历史分离。真实状态只在起点detach；多决策内部的状态、预测、缓存与输入导数保留。SM参数冻结不等于将act/step_model放进永久no_grad。
+- 调度默认eager：提交或拒绝后在最早合法60tick公共网格请求，不额外等待0.5秒。fixed_interval仅作对照。预计延迟不读取当次尚未发生的实际延迟。
+- 每个50Hz时刻只append一次75维观测；同tick更新参考只替换最后一槽。缓存包括左右速度halo，已消费支持点不能修改。
+- 同一不可变参考的插值、速度、FK向量化缓存；merge、detach、源张量变化或从无图转有图时失效，trim保留正确缓存。CFG条件/无条件拼批仍使用同一个当前GENMO和原DDIM公式。
+- GPU拼批与原Stage1同噪声输出最大差 `3.09944e-6`，小于既定`1e-5`；重算前向/梯度差0。纯执行状态损失到GENMO参数梯度范数约379.434，状态探针解析0.08957349、有限差分0.08952618；主动断链被识别。原监督loss约0.1329265、梯度约7.33530。这些不是训练收益。
+- 八项奖励、0.02秒dt、变长折扣、终止和行政截断区分；原SM六项单独报告。音乐代理未启用，音乐表现靠原监督与独立节拍/幅度评价。
+- accepted_actor_updates要求至少两次合法接管、无BC/无Critic状态链连通、BC之前模型目标梯度有限非零、实际参数变化。无效样本不做BC-only更新；Critic次数单独统计。参考变化使用同状态、同噪声比较未知关节RMS。
+- 正式Critic预热按四库分层选择16训练episode，与8验证歌曲分离，使用真实完整episode MC。预声明至少100次拟合、MSE≤0.25、解释方差≥0.1、相对训练均值常数基线改进≥20%；当前未执行，不能填“合格”。
+- 有界smoke也不会在拟合两次后自动解锁Actor；未加载真实质量通过状态时只检查Critic管线，Actor保持固定。
+- 训练域用独立held-out来源覆盖、名义Newton物理、实测时域与真实状态支持包络核对。超域样本拒绝，不逐首限制到P3的8首音乐，也不取消OOD检查。
+- checkpoint v2保存两个优化器、计数、模型、RNG、监督游标、延迟RNG、回放、评价状态。编号文件不覆盖，latest/best原子更新。恢复从新物理episode开始，不保存求解器隐状态。源码提交仅记录。
 
-SM保存的state55、history10×75、goal570、action21、xi25以及WM101→54严格校验。`eval()`与`requires_grad_(False)`固定参数，`FrozenRunningNorm.update()`直接拒绝；act/step_model不加永久no_grad。xi在边界只normalize一次。世界线/角速度、wxyz，以及仿真xyzw转换沿用权威SM公式。
+## 正式候选参数与实际启动结果
 
-GENMO的原proprio48历史与qpos28的关节顺序不同。适配器按原Stage1历史名称排列，并使用q减active default；SM历史保留参考姿态误差6维。`ForecastContext`独立存在，真实历史从物理更新；想象历史明确标记来源。
+候选参数尚未生效：目标5000次accepted Actor更新；GENMO LR `1e-5`、FutureEncoder LR `1e-4`、Critic LR `1e-4`，BC权重1，clip1，控制折扣0.99；physical batch1、Actor微批1（支持1–4逐样本累积），三决策；最多500万采集控制步/72小时。
 
-首版真实物理为固定名义参数、无观测噪声、单机器人，使用SM相同IsaacLab3 / Newton / MuJoCo-Warp，50Hz控制、四物理子步、零执行器延迟、自碰撞关闭。上层可见完整仿真状态和xi，不是已实现硬件无特权部署。
+计划GPU0训练、GPU1独立评价；每100次accepted保存完整checkpoint并运行固定24任务真实评价，首次有效更新也保存。best依据物理结果，latest用于完整恢复。连续两次评价若完成率下降超过0.1、执行时长比低于0.9、幅度比低于0.8或节拍分数下降超过0.1，则保留证据暂停。没有把模型回报用于挑选best。
 
-缓存保存全部仍可能被读取的源点及左右halo。请求/预计到达/实际到达/提交/首次影响/中心消费分开记录。首次影响由当前+未来10帧、插值和速度差分的支持集计算；中心消费也考虑插值，不硬减0.2秒。超时侵犯保护支持即拒绝，连续超时或缓存不足明确终止；没有回写历史或平移计划。
+实际最终预飞行目录：
 
-真实采集worker计算生成时，主线程持续用旧参考推进物理。单卡资源竞争导致的墙钟超期会记录，不能将“异步代码”当作已证明实时。行政采集窗口保留episode；有界训练的优化阶段是离线仿真工作流，未提供与实机并行不停机学习服务。
+`/data0/user/liwei/GENMO_outputs/stage2_supermimic_worldmodel/formal_20261024_234204_310323`
 
-多决策想象只detach初始真实快照，后续状态、前瞻、历史和缓存继续连图。每控制步r已乘0.02一次；区间保存实际n、Gamma和存活C。音乐结束与失败是终止，行政分段仍自举。Critic在无pending请求边界读取完整状态、两套历史、有效缓存/halo/contact/时间/版本、音乐、剩余时间、延迟与保护状态。Actor反传期间仅冻结Critic参数，输入导数保留；Critic targets在任何更新前固定detach。
+其中`config.yaml`与`preflight.json`真实存在；唯一失败检查为`world_model_physics_and_direction`。GPU、磁盘、环境、分支、资产、完整基线、执行梯度和完整路径延迟检查通过。**没有训练tmux/PID、没有训练checkpoint、Critic更新0、accepted Actor更新0。**
 
-八项奖励名称与选集显式迁移自原确认配置：22个身体、双足ankle_roll、12腿关节；尺度取rolling `reward_std`，根0.3m/0.4rad，权重归一化为(.5,.5,1,1,1,1,.8,.5)/6.3。SM六项单独报告。FK由当前生成参考计算，contact2不屏蔽代价。音乐代理关闭；根Huber候选公式已写但默认权重0，尚未启用验证。
+首次启动尝试误写了基线报告路径，保留在`formal_20261024_234048_897679`；更正路径后重新执行了启动脚本，最终仅WM项失败。精确命令、退出码和输出保存在验收目录`formal_launch_attempt.json`。
 
-只有GENMO和上层Critic两个optimizer。先固定初始GENMO收集当前任务预热，再启用终点价值梯度。checkpoint保存模型、两optimizer、RNG、确定性配对采样游标、外生延迟RNG、任务游标和紧凑真实回放；没有物理求解器状态，恢复明确新建episode。源码提交仅记录；冻结资产、几何/PD、数据和实际行为合同仍检查。
+## 在服务器2复现、查看与恢复
 
-## 后续可复制运行流程（本轮没有执行）
-
-以下命令在**同时具备GENMO依赖和当前SM IsaacLab3/Newton依赖的独立Python环境**运行。原训练容器没有被重启或改挂载；本轮也未安装环境。若使用容器，需先将两个独立工作树、实际Stage1/SM资产与原数据只读映射，并将配置路径改为容器内真实路径。不要在正在训练的共享目录切分支。
-
-```bash
-export GENMO_MB_REPO=/home/weili/bumi-closedloop-worktrees/supermimic/GENMO
-export SM_BRIDGE_REPO=/home/weili/bumi-closedloop-worktrees/supermimic/SuperMimic
-export PYTHONPATH="$GENMO_MB_REPO:$SM_BRIDGE_REPO${PYTHONPATH:+:$PYTHONPATH}"
-cd "$GENMO_MB_REPO"
-```
-
-1. 在独立运行配置副本中填入实际Stage1 checkpoint、其配套stats/FK、原配对data_config和任务清单。任务结构见`configs/closedloop/supermimic_tasks.example.json`；music_features是现有30Hz EDGE35 `.npy [N,35]`，initial_state可为`.npy [55]`，未给时从名义站立开始。P3已知参考是GENMO原生关节序、world/wxyz、30Hz `.npy [N,28]`，不是新配对训练库。未见音乐/未见动作两个字段不确定时保持null。
-
-2. P1显式导出和真实权重张量验证，输出目录均使用新路径：
+先设置独立环境，不能改用其他共享环境：
 
 ```bash
-python "$SM_BRIDGE_REPO/tools/export_genmo_bundle.py" \
-  --checkpoint /home/weili/supermimic_vibed/logs/bumi3_seven_filtered_v1/ckpt_024000.pt \
-  --robot-asset-dir /home/weili/supermimic_vibed/data/bumi3_4340/robot \
-  --output /tmp/genmo_sm_bundle_024000.pt
-python "$SM_BRIDGE_REPO/tools/validate_genmo_bridge.py" \
-  --checkpoint /home/weili/supermimic_vibed/logs/bumi3_seven_filtered_v1/ckpt_024000.pt \
-  --robot-asset-dir /home/weili/supermimic_vibed/data/bumi3_4340/robot \
-  --device cuda:0 --bf16 --output /tmp/genmo_sm_bundle_validation.json
+ssh -A 6000D-Server-2
+cd /home/user/liwei/bumi-closedloop-worktrees/supermimic/GENMO
+export GENMO_SM_PYTHON=/data0/user/liwei/envs/genmo_sm_runtime/bin/python
+export ISAACLAB_PATH=/data0/user/liwei/GENMO_assets/supermimic_bridge_20261024/IsaacLab
+export PYTHONDONTWRITEBYTECODE=1
+export OMP_NUM_THREADS=4
+export MKL_NUM_THREADS=4
+GENMO_SM_AUDIT=/data0/user/liwei/GENMO_outputs/stage2_supermimic_worldmodel/acceptance_20261024
 ```
 
-FP32容差预置atol=1e-6/rtol=1e-5；bf16差异单列，不以FP32逐位相同要求替代。导出的文件与原文件可任选其一固定整个run；更换文件后必须重新绑定固定资产。
-
-3. P2先使用`--mode stage1`的真实baseline。初次没有延迟profile时在配置中显式填入候选`clock.bootstrap_latency_ticks`，或传同名CLI选项；这只是首次测量预算，不是已标定延迟，不默认旧路线0.26秒。
+实际执行过的正式启动命令（当前报告仍会阻断，不能手工把validated字段改为102绕过）：
 
 ```bash
-python tools/evaluate_stage2_supermimic.py --config /实际路径/stage2_local.yaml \
-  --mode stage1 --max-seconds 5 --output /独立测试目录/stage1_sm_p2
+tools/launch_stage2_supermimic_formal.sh \
+  --config "$GENMO_SM_AUDIT/assets/formal_candidate_blocked.yaml" \
+  --output-root /data0/user/liwei/GENMO_outputs/stage2_supermimic_worldmodel \
+  --train-tasks "$GENMO_SM_AUDIT/assets/tasks_train.json" \
+  --validation-tasks "$GENMO_SM_AUDIT/assets/tasks_validation.json" \
+  --evaluation-tasks "$GENMO_SM_AUDIT/assets/tasks_evaluation.json" \
+  --gradient-report "$GENMO_SM_AUDIT/gradient_batched_cfg/gradient_audit.json" \
+  --baseline-report "$GENMO_SM_AUDIT/stage1_full_songs/physical_summary.json" \
+  --training-gpu 0 --evaluation-gpu 1 --max-actor-updates 5000
 ```
 
-输出`physical_results.jsonl`、`physical_summary.json`、紧凑真实轨迹和`deployment_latency.json`。短测因行政截断不计全曲完成。完整前瞻增加额外成本，正式使用前需以新完整部署路径重新标定，不能将无前瞻baseline延迟直接当完整配置标定。
-
-首次完整路径标定使用`--mode calibration`：仍加载原Stage1和零输出未来分支，但实际执行WM前瞻，因此无需先有Stage2训练checkpoint。该模式不执行优化，报告明确标为calibration。其`deployment_latency.json`包含前瞻开关和固定SM资产，训练入口检查匹配。
+查看当前实际阻塞与原始结果：
 
 ```bash
-python tools/evaluate_stage2_supermimic.py --config /实际路径/stage2_local.yaml \
-  --mode calibration --max-seconds 5 --output /独立测试目录/full_path_latency
+cat /data0/user/liwei/GENMO_outputs/stage2_supermimic_worldmodel/formal_20261024_234204_310323/preflight.json
+cat "$GENMO_SM_AUDIT/wm_physics_measured_worst/model_physics_audit.json"
+cat "$GENMO_SM_AUDIT/formal_launch_attempt.json"
 ```
 
-4. P3先审核WM的预测与真实方向。`--criteria`参考`supermimic_model_criteria.example.json`，事先填入实际验收阈值；未提供阈值仍能输出测量，但不会判通过。所有任务/种子从同一显式reset重新运行，并重复baseline验证复位可重复性。已知参考、Stage1生成参考、三个关节方向及优化候选分别保留证据。
+将来有通过验收的固定组合包后，启动器执行的真实入口是：
 
 ```bash
-python tools/audit_stage2_supermimic_model.py --config /实际路径/stage2_local.yaml \
-  --mode full --criteria /实际路径/wm_criteria.json --output /独立测试目录/wm_physical_audit
-python tools/audit_stage2_supermimic_gradients.py --config /实际路径/stage2_local.yaml \
-  --finite-difference --output /独立测试目录/genmo_sm_gradient_audit
+"$GENMO_SM_PYTHON" -u tools/train_stage2_supermimic.py \
+  --config /实际新run/config.yaml --run-mode formal --mode full \
+  --max-actor-updates 5000 --output /实际新run
 ```
 
-前一项是离线配对物理审计，生成计算可离线暂停，不作为实时证据；后一项只检查数值链路。接触力、执行器子步力矩和求解器状态不在state55中，报告不会伪造这些预测。模型失准时保留报告，不自动更新WM或扩大时域。
+基础设施中断后，在同一启动命令追加`--resume-run /实际已有run`；启动器使用原run配置、检查latest完整checkpoint及原PID已退出，再传`--resume-latest`。记录为质量/数值失败的run不会盲目恢复。该完整优化恢复路径尚未通过实际训练验证。
 
-5. 根据通过的P3报告填`imagination.physical_validation_report`及`validated_model_steps`；入口要求同一冻结资产、已审计任务范围和实际时域。批次默认为真实采集1、Actor微批1；微批最多4采用逐样本梯度累积，保留全链。
+正式运行时查看`logs/train.log`、`training.jsonl`、`status.json`、`evaluations/paired_*.json`及`checkpoints/latest.pt`；TensorBoard目录为`tensorboard/`。停止时先核对`launch_*.json`或`training.lock`的PID与`/proc/<PID>/cmdline`属于该run，再发送SIGTERM；运行器在当前更新边界保存完整checkpoint后退出。**当前没有训练进程需要停止或恢复。**
 
-```bash
-python tools/train_stage2_supermimic.py --config /实际路径/stage2_local.yaml \
-  --updates 4 --profile --output /独立测试目录/stage2_bptt_short
-```
+## 性能与保留证据
 
-默认最多8次显式更新；前2次是候选Critic预热设置，不是经验证最佳值。输出training.jsonl分开标记模型目标/真实采集/原监督/梯度，编号checkpoint不覆盖。`--resume /实际路径/stage2_000004.pt`恢复训练状态，但创建新物理episode和新输出目录；恢复不了未保存的求解器隐状态。
+单卡顺序与双GPU独立真实环境完成同一两任务集合，各12次接管；含启动墙钟55.297秒/27.335秒，约2.02倍。该基准证明独立采集并行，未证明多GPU训练吞吐。单次显式profiling的峰值allocated约1.012GB、reserved约1.051GB；完整trace保留，不将带profiler的延迟当部署标定。
 
-6. 全曲固定评估去掉`--max-seconds`。`--mode full --actor-checkpoint ...`评估完整模型；`--mode no_forecast`必须加载对应无前瞻训练模型，不接受只在评估删条件的伪消融。增加`--profile`可记录CPU/GPU活动、阶段标签和峰值内存。报告分别记录失败/完成、漂移、动作幅度/速度、节拍、多样性、超时/耗尽、控制墙钟超期；模型回报不进入真实收益结论。
+以下产物均在验收根目录，按本任务保留证据要求留存；pytest临时目录已删除，禁用pytest缓存与Python字节码：
 
-## 测试源与后续验收顺序
+- `bridge_cpu.json`、`physics_original/`、`physics_streaming/`：SM与真实物理接口。
+- `cpu_final_contracts.xml`、`gradient_batched_cfg/gradient_audit.json`：CPU合同与完整真实权重梯度。
+- `stage1_full_songs/physical_summary.json`、`calibration_batched/deployment_latency.json`：全曲基线与完整路径延迟。
+- `wm_physics_45/`、`wm_physics_measured_worst/`、`direction_eps005/`、`direction_eps0025/`：真实WM与方向原始证据。
+- `benchmark_collectors/benchmark.json`、`profile_collector/`：独立多卡采集与CPU/GPU性能证据。
 
-- SM `tests/bridge/`：真实checkpoint parity、normalizer冻结、输入导数、纯网络无Isaac/MuJoCo导入、小角旋转导数和非单位姿态坐标转换。
-- GENMO `tests/closedloop/mb_control/`：依赖halo/中心消费、晚到/重复提交、两次覆盖梯度、变长折扣/终止、Critic状态缓存梯度、零投影学习顺序、实际动作MotionLib parity及真实权重整链。
-- 实际资产测试通过环境变量`SM_BRIDGE_CHECKPOINT`、`SM_ROBOT_ASSET_DIR`、`SM_BRIDGE_MOTION_FILE`、`GENMO_SM_TEST_CONFIG`选择；缺少资产则skip，不生成假checkpoint。
-- 按P1→P2→P3→P4→P5→P6→P7运行，先确认CPU/FP32数学，再单卡物理/反传。测试产物使用精确独立目录，完成后按仓库约定清理；正式模型和数据不清理。
-
-本轮仅完成代码、中文日志和静态审读。实际训练收益、音乐质量、实时性、WM可用范围和真实机器人效果全部待验证。
+继续正式训练的前提是固定WM在所需累计时域及独立验证分布上通过预测与物理方向验收。当前没有放宽阈值、解冻WM或将模型奖励改善当作真实收益。
