@@ -1,0 +1,47 @@
+"""有限诊断的独立数学测试：裁剪导数、模块范数和已知前缀窗。
+
+这些测试以Autograd直接验证符号相关的零梯度区域，检查模块匹配不把随机方向
+变成真实梯度，并检查已知前缀与末帧过渡。它们不替代真实GPU行为链或物理评估。
+"""
+import torch
+from gem.closedloop.dppo.decisive_diagnostic import clip_masks,matched_direction,module_stats,smooth_free_window
+from gem.closedloop.robofft.surrogate import action_objective
+
+
+def test_actual_clip_matches_autograd_for_both_signs():
+    ratios=torch.tensor([.97,.97,1.03,1.03,1.,1.],dtype=torch.float64)
+    adv=torch.tensor([1.,-1.,1.,-1.,1.,-1.],dtype=torch.float64)
+    new=(-ratios.log()/.1)[:,None].repeat(1,16).requires_grad_()
+    result=action_objective(new,torch.zeros_like(new),adv,beta_neg=.5)
+    result['loss'].sum().backward()
+    masks=clip_masks(ratios,adv)
+    assert torch.equal(new.grad.abs().sum(1)==0,masks['active'])
+    assert masks['outside'].sum()==4 and masks['active'].sum()==2
+    assert masks['outside_active_gradient'].sum()==2
+
+
+def test_nonzero_score_mean_and_beta_create_advantage_independent_term():
+    score=torch.tensor([[2.,3.],[3.,4.],[4.,2.],[1.,3.]],dtype=torch.float64)
+    adv=torch.tensor([-2.,-1.,1.,2.],dtype=torch.float64)
+    weight=torch.where(adv<0,.5*adv,adv)
+    gradient=(weight[:,None]*score).mean(0)
+    covariance=((weight-weight.mean())[:,None]*(score-score.mean(0))).mean(0)
+    torch.testing.assert_close(gradient,covariance+weight.mean()*score.mean(0))
+    assert weight.mean()>0 and torch.linalg.vector_norm(weight.mean()*score.mean(0))>0
+
+
+def test_module_matching_preserves_direction_and_exact_norm():
+    a={'denoiser.blocks.0.weight':torch.tensor([3.,4.]),'denoiser.final_layer.weight':torch.tensor([0.,2.])}
+    matched=matched_direction(a,{'transformer_00':.1,'qpos_output':.2})
+    stats=module_stats(a,matched)
+    assert abs(stats['transformer_00']['second_norm']-.1)<1e-7
+    assert abs(stats['qpos_output']['second_norm']-.2)<1e-7
+    assert abs(stats['transformer_00']['cosine']-1)<1e-7
+
+
+def test_smooth_window_zero_on_prefix_and_boundaries():
+    mask=torch.zeros(2,60,30,dtype=torch.bool);mask[0,11:]=True;mask[1,20:52]=True
+    window=smooth_free_window(mask)
+    assert (window[0,:12]==0).all() and window[0,-1]==0
+    assert (window[1,:21]==0).all() and (window[1,51:]==0).all()
+    assert window.min()>=0 and window.max()<=1 and window[0,20]==1

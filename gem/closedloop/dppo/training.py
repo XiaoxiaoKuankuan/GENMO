@@ -475,7 +475,7 @@ def _maximum_memory(*phases):
 
 
 def run(cargs,config,distributed):
-    if not any(getattr(cargs,name,False) for name in ('collect_only','evaluate_only','calibrate_only','critic_preheat_only','mc_validation_only')):
+    if not any(getattr(cargs,name,False) for name in ('collect_only','evaluate_only','calibrate_only','critic_preheat_only','mc_validation_only','decisive_diagnostic')):
         from .actor_optimization import require_current_actor_objective
         require_current_actor_objective(config['stage9'])
     c=SimpleNamespace(distributed=distributed,config=copy.deepcopy(config),base_config=copy.deepcopy(config),
@@ -700,6 +700,11 @@ def run(cargs,config,distributed):
         if _completed_training_resume(cargs,c.state,stop_after_iteration):
             report.update(status='passed',scope='already_at_requested_cumulative_iteration_no_updates_or_extra_checkpoint',
                 final_state=c.state)
+            raise _FiniteDiagnosticComplete
+        if getattr(cargs,'decisive_diagnostic',False):
+            from .decisive_diagnostic import run_diagnostic
+            report['decisive_diagnostic']=run_diagnostic(c)
+            report.update(status='passed',scope='finite_paired_gradient_and_reference_PhysX_diagnostic_no_training',final_state=c.state)
             raise _FiniteDiagnosticComplete
         if cargs.calibrate_only:
             calibration=c.vector.calibrate(warmup=c.config['timing']['calibration_warmup'],

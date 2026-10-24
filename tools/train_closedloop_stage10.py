@@ -54,6 +54,7 @@ def main():
     parser.add_argument('--refit-critic',action='store_true',help='仅配合mc-validation-only：用当前Actor的新完整轨迹校准Critic，独立MSE改善才保留，Actor不更新')
     parser.add_argument('--critic-refit-musics-per-source',type=int,help='仅本次显式Critic校准的每来源训练音乐数，不改变预热配置或独立验证规模')
     parser.add_argument('--collect-only',action='store_true',help='只采一轮完整真实rollout供计算对照，不更新Actor/Critic')
+    parser.add_argument('--decisive-diagnostic',action='store_true',help='有限A/C因果诊断：真实行为链、四方向正反扰动与冻结Stage1参考干预；不训练')
     parser.add_argument('--collect-rollouts',type=int,default=1,help='collect-only连续世界窗口数；保留正常episode，不更新行为策略')
     parser.add_argument('--capture-validation-iteration',type=int,help='明确保存指定轮更新前的真实学习张量及Adam用于固定数据对照')
     parser.add_argument('--genmo-repo',type=Path,default=ROOT)
@@ -94,7 +95,9 @@ def main():
     if args.calibrate_only:
         config['runtime'].update(num_envs=1,generation_batch=1,phase_contract='single_request_calibration.v1',
             timing_contract='deployment_calibration.no_execution.v1')
-    if sum((args.calibrate_only,args.collect_only,args.evaluate_only,args.critic_preheat_only,args.mc_validation_only))>1:parser.error('Choose only one finite diagnostic phase')
+    if sum((args.calibrate_only,args.collect_only,args.evaluate_only,args.critic_preheat_only,args.mc_validation_only,args.decisive_diagnostic))>1:parser.error('Choose only one finite diagnostic phase')
+    if args.decisive_diagnostic and (not robofft or not args.initialize_robofft_variant or args.resume):
+        parser.error('Decisive diagnostics require a fresh RoboFFT variant with an explicit complete behavior checkpoint')
     if args.evaluation_actor and args.resume:parser.error('Explicit evaluation Actor and complete training resume are mutually exclusive')
     if args.evaluation_actor and not args.evaluate_only:parser.error('Fixed-data Actor candidates are evaluation-only, not training recovery points')
     if args.collect_only:args.capture_validation_iteration=1;args.warmup_rollouts=0
