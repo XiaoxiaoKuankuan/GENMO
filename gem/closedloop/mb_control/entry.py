@@ -29,6 +29,8 @@ def main(kind):
     parser.add_argument("--criteria", help="WM审计的显式JSON数值/方向验收阈值")
     parser.add_argument("--perturbation-epsilon", type=float, default=.01,
                         help="真实方向中心差分的关节扰动幅度；改幅度的复查不能覆盖原验收报告")
+    parser.add_argument("--latency-scenario", choices=("sample", "measured_worst"), default="sample",
+                        help="P3可按实测延迟上界构造全部决策的保守时域；不更改延迟样本")
     parser.add_argument("--finite-difference", action="store_true")
     parser.add_argument("--profile", action="store_true")
     parser.add_argument("--bootstrap-latency-ticks", type=int, help="首轮部署测量可显式给候选预算；报告保留未标定状态")
@@ -165,6 +167,10 @@ def main(kind):
                         seed_all(seed)
                         music, initial = task_inputs(task, adapter, args.torch_device)
                         latencies = profile.sample(engine.decisions) if profile else [scheduler.bootstrap_latency_ticks] * engine.decisions
+                        if args.latency_scenario == "measured_worst":
+                            if profile is None:
+                                raise ValueError("实测最坏延迟验收必须已有完整部署profile")
+                            latencies = [max(profile.samples)] * engine.decisions
                         item = audit_generated_reference(engine, collector, music, initial, noise_seed=seed,
                                                          latencies=latencies, joint_indices=indices, criteria=criteria,
                                                          epsilon=args.perturbation_epsilon)
@@ -194,6 +200,7 @@ def main(kind):
                               validated_state_envelope=combine_envelopes(envelopes),
                               task_identities={t["id"]: task_identity(t) for t in tasks},
                               forecast_enabled=cfg["model"]["forecast_enabled"],
+                              latency_scenario=args.latency_scenario,
                               scope="selected_tasks_seeds_and_nominal_physics_only",
                               supported_control_steps=min(item["supported_control_steps"] for item in cases) if all(result.values()) else 0)
                 (output / "model_physics_audit.json").write_text(json.dumps(result, ensure_ascii=False, indent=2, allow_nan=False))
