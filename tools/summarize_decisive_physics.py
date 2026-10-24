@@ -98,6 +98,7 @@ def executed_references(report_path):
 
 def reference_continuity(before,after,kin):
     """沿真实50Hz消费序列检查拼接后增量，覆盖参考银行重新接入前缀的边界。"""
+    from scipy.spatial.transform import Rotation
     identities=sorted(set(before)&set(after));checks=[];limits=kin.joint_limits.numpy()
     for task in sorted({key[0] for key in identities}):
         keys=[key for key in identities if key[0]==task];ticks=np.asarray([key[1] for key in keys])
@@ -117,6 +118,12 @@ def reference_continuity(before,after,kin):
             row[name+'_velocity_candidate_max']=float(np.abs(vb[contiguous]).max())
             row[name+'_velocity_delta_max']=float(np.abs((vb-va)[contiguous]).max())
             row[name+'_acceleration_delta_max']=float(np.abs(np.diff(vb-va,axis=0)[second]/.02).max())
+        rotation_a=Rotation.from_quat(a[:,[4,5,6,3]])
+        rotation_b=Rotation.from_quat(b[:,[4,5,6,3]])
+        delta=(rotation_b*rotation_a.inv()).as_rotvec()
+        velocity=np.diff(delta,axis=0)/.02
+        row['root_orientation_velocity_delta_max']=float(np.abs(velocity[contiguous]).max())
+        row['root_orientation_acceleration_delta_max']=float(np.abs(np.diff(velocity,axis=0)[second]/.02).max())
         checks.append(row)
     return dict(scope='matched_actual_50Hz_center_reference_including_plan_splices; derivatives_do_not_cross_gaps; all_body_FK_includes_feet',
         tasks=checks,new_limit_coordinate_count=sum(r['new_limit_coordinate_count'] for r in checks),
@@ -132,6 +139,9 @@ def compare_one(work):
         if any(a[k]!=b[k] for k in ('dataset','sample_id','seed','music_start_frame','noise_index_start')):raise ValueError('Task initial state or noise differs')
         first,last=metrics(a),metrics(b)
         row=dict(task_id=a['task_id'],dataset=a['dataset'],sample_id=a['sample_id'],seed=a['seed'],initial=first,final=last)
+        if 'initial_pairing_state' in a or 'initial_pairing_state' in b:
+            row['initial_pairing_state_exact']=a.get('initial_pairing_state') is not None and a.get('initial_pairing_state')==b.get('initial_pairing_state')
+            if not row['initial_pairing_state_exact']:raise ValueError('Initial physics/controller/reference cache differs')
         early_a=[c for d in a['decisions'] for c in d['controls']][:12]
         early_b=[c for d in b['decisions'] for c in d['controls']][:12]
         if len(early_a)!=12 or [c['tick'] for c in early_a]!=[c['tick'] for c in early_b]:raise ValueError('Initial physical time differs')

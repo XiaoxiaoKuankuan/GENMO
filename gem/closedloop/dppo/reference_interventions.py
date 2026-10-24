@@ -15,6 +15,7 @@ import sys
 import numpy as np
 import torch
 from scipy.spatial.transform import Rotation
+from scipy.optimize import Bounds,LinearConstraint,minimize
 
 
 VARIANTS=('height_plus','height_minus','yaw_plus','yaw_minus','pitch_plus','roll_plus','leg_minus','smooth05')
@@ -72,6 +73,39 @@ def desired_delta(base,tick,variant,standing,joint_names):
         delta[:,6:]=.05*gate[:,None]*(smooth-base[:,7:])
     elif variant!='identity':raise ValueError('Unknown legal reference intervention')
     return delta
+
+
+def project_free_joints(base,proposal,free,limits):
+    """只对自由关节求小型凸二次投影，同时满足限位及30/50Hz增量连续性。
+
+    逐点硬裁剪会在触限处制造速度折角。这里联合优化同一关节整段自由轨迹，
+    已提交前缀固定，一阶增量差限制0.018rad/帧，二阶限制0.011rad/帧平方；
+    原生产分段线性重采样的50Hz加速度增量亦有余量。FK仍由后续独立检查验收。
+    """
+    out=proposal.copy();mask=np.asarray(free)[:,9:];total=0
+    active=np.flatnonzero(mask.any(-1))
+    if not len(active):return out,total
+    stop=int(active[-1])+1;eye=np.eye(stop);D1=np.diff(eye,axis=0);D2=np.diff(eye,n=2,axis=0)
+    for joint in range(21):
+        ids=np.flatnonzero(mask[:stop,joint])
+        if not len(ids):continue
+        desired=out[:stop,joint+7]-base[:stop,joint+7]
+        lower=limits[joint,0]+1e-6-base[ids,joint+7];upper=limits[joint,1]-1e-6-base[ids,joint+7]
+        if (np.all(desired[ids]>=lower) and np.all(desired[ids]<=upper)
+                and np.max(np.abs(D1@desired))<=.018 and np.max(np.abs(D2@desired))<=.011):continue
+        fixed=desired.copy();fixed[ids]=0.;A=np.concatenate((D1[:,ids],D2[:,ids]))
+        b=np.concatenate((D1@fixed,D2@fixed));bound=np.r_[np.full(len(D1),.018),np.full(len(D2),.011)]
+        target=desired[ids];H=np.eye(len(ids))+.1*D2[:,ids].T@D2[:,ids]
+        linear=-target+.1*D2[:,ids].T@(D2@fixed)
+        result=minimize(lambda x:.5*x@H@x+linear@x,np.clip(target,lower,upper),
+            jac=lambda x:H@x+linear,method='SLSQP',bounds=Bounds(lower,upper),
+            constraints=[LinearConstraint(A,-bound-b,bound-b)],options=dict(maxiter=100,ftol=1e-10))
+        x=result.x;constraint=A@x+b
+        if (np.any(x<lower-1e-7) or np.any(x>upper+1e-7) or np.any(np.abs(constraint)>bound+1e-7)):
+            raise ValueError('No legal free joint projection preserving committed prefix: '+str(result.message))
+        out[ids,joint+7]=base[ids,joint+7]+x;total+=1
+    if not np.array_equal(out[~mask.any(-1)],proposal[~mask.any(-1)]):raise AssertionError('Projection changed committed frame')
+    return out,total
 
 
 def check_proposal(base,new,free,kin,resample):
@@ -136,11 +170,10 @@ def fixed_world_intervention(c,bank,variant,audit):
             for factor in (1.,.5,.25,.125,0.):
                 delta=bridge_delta(desired*factor,base,prefix)
                 proposal=apply_delta(base,delta)
-                # 自由关节投影到硬限位；已提交超限前缀只记录，绝不修改。
-                proposal[:,7:]=np.where(free[:,9:],np.clip(proposal[:,7:],limits[:,0]+1e-6,limits[:,1]-1e-6),proposal[:,7:])
                 proposal[:n]=prefix
                 proposal[~free.any(-1)]=np.asarray(generated['qpos_world'])[~free.any(-1)]
                 proposal[:n]=prefix
+                proposal,projected=project_free_joints(base,proposal,free,limits)
                 legal,metrics=check_proposal(base,proposal,free,kin,resample)
                 if legal:accepted=True;break
             audit['plans']+=1
@@ -149,6 +182,7 @@ def fixed_world_intervention(c,bank,variant,audit):
                 raise ValueError('Reference intervention rejected before submission: '+repr(metrics))
             audit['free_limit_projection_coordinates']=audit.get('free_limit_projection_coordinates',0)+int(
                 (((base[:,7:]<limits[:,0])|(base[:,7:]>limits[:,1]))&free[:,9:]).sum())
+            audit['smooth_joint_projection_count']=audit.get('smooth_joint_projection_count',0)+projected
             audit['minimum_amplitude_factor']=min(audit.get('minimum_amplitude_factor',1.),factor)
             for name,value in metrics.items():audit[name]=max(audit.get(name,0),value)
             if not np.array_equal(proposal[:n],prefix):raise AssertionError('Committed source prefix modified')
@@ -165,6 +199,9 @@ def fixed_world_intervention(c,bank,variant,audit):
             boundary=generated_boundaries_tensors(q,trace['free_mask'][:,:,9:],[packet['snapshot']],kin.joint_order)
             generated.update(qpos_world=proposal,qpos30=physical[0].cpu().numpy().copy(),
                 joint_limit_diagnostics=generated_boundary_reports({k:v.cpu() for k,v in boundary.items()})[0])
+            if seed in bank:
+                generated['contact']=np.asarray(bank[seed]['contact']).copy()
+                trace['contact']=torch.as_tensor(generated['contact'],device=device,dtype=trace['contact'].dtype)[None]
             block,position=item['_shared_raw_block']
             for field in ('qpos','qpos30','normalized','action_x0','contact'):block['trace'][field][position:position+1]=trace[field]
         return outputs,timing

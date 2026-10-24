@@ -660,6 +660,9 @@ def run_reference_after_p0(c,source,*,local_source=None):
         local=json.loads((Path(local_source)/'reference_c/summary.json').read_text())
         if local['status']!='passed' or not all(r['zero_gate']['passed'] and not r['audit'].get('invalid_plans') for r in local['results']):
             raise ValueError('Local legal-reference/zero gates must pass before full music')
+        local_analysis=json.loads((Path(local_source)/'reference_c_analysis/summary.json').read_text())
+        if not local_analysis['all_zero_passed'] or not local_analysis['eligible_full_variants']:
+            raise ValueError('No legal consumed-reference local gain qualifies for full music')
     else:
         plan.update(episode_seconds=20.,complete_music_scope=False)
         plan.pop('plan_sha256');plan['plan_sha256']=_digest(plan)
@@ -678,12 +681,14 @@ def run_reference_after_p0(c,source,*,local_source=None):
             if not all(c.distributed.all_gather_object(zero_gate['passed'])):raise ValueError('C zero replay failed; no candidate executed')
         else:
             zero_gate=local['results'][rank]['zero_gate'];zero=str(baseline)
-        variant=VARIANTS[rank];audit=dict(variant=variant,plans=0,allow_unpaired_extension=full)
+        variant=VARIANTS[rank]
+        if full and variant not in local_analysis['eligible_full_variants']:variant='identity'
+        audit=dict(variant=variant,plans=0,allow_unpaired_extension=full)
         try:
             with fixed_world_intervention(c,bank,variant,audit):
                 candidate=evaluate_local_candidates(c,plan,'fresh_C_'+('full_' if full else '')+variant)
         finally:atomic_json(output/f'audit_rank{rank:02d}.json',audit)
-        row=dict(rank=rank,variant=variant,zero_gate=zero_gate,audit=audit,baseline=zero,candidate=candidate,
+        row=dict(rank=rank,variant=variant,requested_variant=VARIANTS[rank],zero_gate=zero_gate,audit=audit,baseline=zero,candidate=candidate,
             full_music=full,original_full_baseline=str(baseline))
         atomic_json(output/f'rank{rank:02d}.json',row)
         summary=dict(status='passed',results=c.distributed.all_gather_object(row),full_music=full,

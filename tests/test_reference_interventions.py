@@ -8,7 +8,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 import torch
-from gem.closedloop.dppo.reference_interventions import desired_delta,bridge_delta,apply_delta,check_proposal
+from gem.closedloop.dppo.reference_interventions import desired_delta,bridge_delta,apply_delta,check_proposal,project_free_joints
 
 P=Path(__file__).resolve().parents[2]/'legged_lab_gmt/scripts/motion/bumi4340_reference_kinematics.py'
 spec=importlib.util.spec_from_file_location('reference_resample_test',P);mod=importlib.util.module_from_spec(spec);spec.loader.exec_module(mod)
@@ -49,3 +49,13 @@ def test_hard_limit_or_large_splice_is_rejected():
     new=base.copy();new[20:,2]=.1
     legal,_=check_proposal(base,new,free,Kinematics(),mod.resample)
     assert not legal
+
+
+def test_joint_projection_anticipates_limit_without_clipping_kink():
+    base=np.zeros((60,28));base[:,3]=1.;base[:,7]=.98;base[30,7]=1.03
+    free=np.ones((60,30),bool);free[:10]=False
+    new,count=project_free_joints(base,base.copy(),free,Kinematics.joint_limits.numpy())
+    assert count==1 and new[10:,7].max()<=1.
+    np.testing.assert_array_equal(new[:10],base[:10])
+    legal,metrics=check_proposal(base,new,free,Kinematics(),mod.resample)
+    assert legal,metrics
