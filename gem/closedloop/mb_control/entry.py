@@ -10,6 +10,7 @@ from contextlib import nullcontext
 import json
 from pathlib import Path
 import sys
+import time
 
 
 def main(kind):
@@ -119,6 +120,14 @@ def main(kind):
     profiler = torch.profiler.profile(activities=activity, profile_memory=True) if args.profile else nullcontext()
     with launch_simulation(sim_cfg, args), profiler as measured:
         env = StreamingPhysicalEnv(sim_cfg, 1, adapter.bundle)
+        # Newton首次step触发编译/图捕获。显式在episode前完成，不计入部署生成延迟。
+        warm_started = time.perf_counter()
+        with torch.no_grad():
+            for _ in range(3):
+                env.step_physics(torch.zeros(1, 21, device=args.torch_device))
+        torch.cuda.synchronize()
+        (output / "physics_startup.json").write_text(json.dumps({"warmup_control_steps": 3,
+            "startup_seconds": time.perf_counter() - warm_started, "episode_reset_after_warmup": True}))
         collector = PhysicalCollector(env, actor, adapter, scheduler, rewards, forecast_enabled=cfg["model"]["forecast_enabled"],
                                       gamma=cfg["critic"]["gamma_per_control"], record_trajectory=kind == "evaluate")
         try:
@@ -148,10 +157,16 @@ def main(kind):
                         if known:
                             array = np.load(require_file(known, "已知参考qpos28"), allow_pickle=False)
                             reference = torch.as_tensor(array, device=args.torch_device, dtype=torch.float32)[None]
-                            item["known_reference"] = audit_known_reference(collector, music, initial, reference)
-                            item["known_reference_passed"] = criteria is not None and all(
-                                all(v[k] <= bound for k, bound in criteria["state_rmse_limits"].items()) for v in item["known_reference"].values())
+                            horizons = sorted(set([5, 10, 15, 20, 32, item["required_dependency_steps"]]))
+                            item["known_reference"] = audit_known_reference(collector, music, initial, reference, horizons=horizons, criteria=criteria)
+                            item["known_reference_passed"] = item["known_reference"]["passed"]
                         cases.append(item)
+                        with (output / "model_physics_cases.jsonl").open("a") as stream:
+                            stream.write(json.dumps(item, ensure_ascii=False, allow_nan=False) + "\n")
+                        print(json.dumps({"event": "model_physics_case", "task": task["id"], "seed": seed,
+                            "prediction_passed": item["prediction_passed"], "physical_direction_passed": item["physical_direction_passed"],
+                            "known_reference_passed": item["known_reference_passed"],
+                            "required_dependency_steps": item["required_dependency_steps"]}, ensure_ascii=False), flush=True)
                 keys = ("prediction_passed", "physical_direction_passed", "reset_replay_repeatability_passed", "known_reference_passed")
                 result = {k: all(item[k] for item in cases) for k in keys}
                 result.update(cases=cases, frozen_sha256=adapter.bundle.metadata["sha256"], task_ids=[t["id"] for t in tasks],

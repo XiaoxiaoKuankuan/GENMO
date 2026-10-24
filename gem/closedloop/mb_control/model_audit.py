@@ -10,7 +10,7 @@ import itertools
 
 import torch
 
-from supermimic.mdp import unflatten_state
+from supermimic.mdp import flatten_state, unflatten_state
 from supermimic.rotations import so3_log
 from .returns import actor_return
 
@@ -76,7 +76,10 @@ def audit_generated_reference(engine, collector, music, initial, *, noise_seed, 
         repeated, repeated_trace, _, _ = run(True, joint_indices[0], 0.)
         length = min(len(model_trace), len(real_trace))
         horizons = {}
-        for horizon in sorted(set([8, 16, 24, 32, len(model_trace)])):
+        dependency_steps = max((max(x.event.get("longest_model_dependency_steps", 0),
+                                    x.event.get("maximum_forecast_dependency_steps", 0)) for x in model_intervals), default=0)
+        requested_horizons = criteria.get("horizons", [5, 10, 15, 20, 32]) if criteria else [5, 10, 15, 20, 32]
+        for horizon in sorted(set([*requested_horizons, len(model_trace), dependency_steps])):
             horizons[str(horizon)] = ({k: float(v) for k, v in state_errors(model_trace[:horizon], real_trace[:horizon], collector.adapter.runtime.kin).items()}
                                       if horizon <= length else {"status": "insufficient_physical_horizon"})
         candidates = []
@@ -114,6 +117,8 @@ def audit_generated_reference(engine, collector, music, initial, *, noise_seed, 
                 "model_base_return": float(model_base.detach()), "physical_base_return": float(physical_base),
                 "physical_repeat_return": float(repeated), "physical_reward_dt": real_rewards,
                 "physical_end": real_intervals[-1].reason, "model_end": model_intervals[-1].reason,
+                "main_control_steps": len(model_trace), "required_dependency_steps": dependency_steps,
+                "forecast_branches": model_intervals[-1].event.get("forecast_branches", []),
                 "candidates": candidates, "direction_fraction": direction_fraction,
                 "candidate_pairwise_rank_agreement": rank_agreement, "reset_repeat_max_abs": repeat_error,
                 "prediction_passed": bool(prediction_passed), "physical_direction_passed": bool(direction_passed),
@@ -125,19 +130,44 @@ def audit_generated_reference(engine, collector, music, initial, *, noise_seed, 
         engine.actor, engine.max_model_steps = base_actor, old_limit
 
 
-def audit_known_reference(collector, music, initial, reference, horizons=(8, 16, 24, 32)):
-    results = []
-    for physical in (False, True):
-        z = collector.reset(music, initial, initial_reference=reference)
-        trace = []
-        with torch.no_grad():
-            for _ in range(max(horizons)):
+def audit_known_reference(collector, music, initial, reference, horizons=(5, 10, 15, 20, 32), criteria=None):
+    """分离固定真实动作的动力学与固定参考下SM闭环；均从真实参考首状态显式复位。"""
+    horizons = sorted(set(horizons))
+    z = collector.reset(music, initial, initial_reference=reference)
+    ref0, _, _ = z.reference.read_current_future(0)
+    matched_initial = flatten_state((ref0.root_p, ref0.root_R, ref0.root_v, ref0.root_w, ref0.q, ref0.qd))
+    traces, real_actions = {}, []
+    with torch.no_grad():
+        for regime in ("real", "fixed_real_actions", "fixed_reference_closed_loop"):
+            z = collector.reset(music, matched_initial, initial_reference=reference)
+            trace = []
+            for step in range(max(horizons)):
+                if regime == "fixed_real_actions" and step >= len(real_actions):
+                    break
                 z = collector.adapter.refresh_current_observation(z)
                 _, _, goal = z.reference.read_current_future(z.tick)
-                a = collector.adapter.bundle.act(z.sm_history, goal)
-                state = (collector.env.step_physics(a) if physical else
+                a = real_actions[step] if regime == "fixed_real_actions" else collector.adapter.bundle.act(z.sm_history, goal)
+                state = (collector.env.step_physics(a) if regime == "real" else
                          collector.adapter.bundle.step_model(z.state, a, z.xi))
-                z = collector.adapter.advance(z, state, a, origin="real" if physical else "imagined")
+                z = collector.adapter.advance(z, state, a, origin="real" if regime == "real" else "imagined")
                 trace.append(state.cpu())
-        results.append(torch.cat(trace))
-    return {str(h): {k: float(v) for k, v in state_errors(results[0][:h], results[1][:h], collector.adapter.runtime.kin).items()} for h in horizons}
+                if regime == "real":
+                    real_actions.append(a.detach().clone())
+                    current, _, _ = z.reference.read_current_future(z.tick)
+                    if bool(collector.adapter.runtime.termination(state, current).any()):
+                        break
+            traces[regime] = torch.cat(trace)
+    result = {}
+    for regime in ("fixed_real_actions", "fixed_reference_closed_loop"):
+        prediction, real = traces[regime], traces["real"]
+        errors = {}
+        for horizon in horizons:
+            if min(len(prediction), len(real)) < horizon:
+                errors[str(horizon)] = {"status": "insufficient_physical_horizon"}
+            else:
+                errors[str(horizon)] = {k: float(v) for k, v in state_errors(prediction[:horizon], real[:horizon], collector.adapter.runtime.kin).items()}
+        result[regime] = errors
+    passed = criteria is not None and all("status" not in value and all(value[k] <= bound for k, bound in criteria["state_rmse_limits"].items())
+                                         for regime in result.values() for value in regime.values())
+    return {"regimes": result, "passed": bool(passed), "horizons": horizons,
+            "real_control_steps": len(traces["real"]), "initialization": "reference_first_full_state_no_future_real_state"}
