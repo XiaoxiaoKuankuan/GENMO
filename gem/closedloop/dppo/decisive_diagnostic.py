@@ -689,8 +689,9 @@ def run_reference_after_p0(c,source,*,local_source=None,zero_source=None):
         if local['status']!='passed' or not all(r['zero_gate']['passed'] and not r['audit'].get('invalid_plans') for r in local['results']):
             raise ValueError('Local legal-reference/zero gates must pass before full music')
         local_analysis=json.loads((Path(local_source)/'reference_c_analysis/summary.json').read_text())
-        if not local_analysis['all_zero_passed'] or not local_analysis['eligible_full_variants']:
-            raise ValueError('No legal consumed-reference local gain qualifies for full music')
+        if not (local_analysis['all_zero_passed'] and local_analysis['all_legal']
+                and all(r['paired_initial_and_pre_influence'] for r in local_analysis['candidates'])):
+            raise ValueError('Local zero, consumed legality and pre-influence gates must all pass')
     else:
         plan.update(episode_seconds=20.,complete_music_scope=False)
         plan.pop('plan_sha256');plan['plan_sha256']=_digest(plan)
@@ -714,7 +715,6 @@ def run_reference_after_p0(c,source,*,local_source=None,zero_source=None):
         else:
             zero_gate=local['results'][rank]['zero_gate'];zero=str(baseline)
         variant=VARIANTS[rank]
-        if full and variant not in local_analysis['eligible_full_variants']:variant='identity'
         audit=dict(variant=variant,plans=0,allow_unpaired_extension=full)
         try:
             with fixed_world_intervention(c,bank,variant,audit):
@@ -724,6 +724,7 @@ def run_reference_after_p0(c,source,*,local_source=None,zero_source=None):
             full_music=full,original_full_baseline=str(baseline))
         atomic_json(output/f'rank{rank:02d}.json',row)
         summary=dict(status='passed',results=c.distributed.all_gather_object(row),full_music=full,
-            p0_source=str(source),local_source=None if local_source is None else str(local_source),training_updates=0)
+            p0_source=str(source),local_source=None if local_source is None else str(local_source),training_updates=0,
+            full_admission_rule='all_original_directions_with_passed_local_physics_and_legality_no_selection_by_gain')
         root_call(c.distributed,lambda:atomic_json(output/'summary.json',summary));return summary
     finally:c.actor.load_state_dict(base);c.actor.zero_grad(set_to_none=True)
