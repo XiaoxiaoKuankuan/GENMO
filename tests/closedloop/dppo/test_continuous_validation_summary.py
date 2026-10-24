@@ -9,6 +9,33 @@ import json
 from tools.summarize_stage2_continuous_validation import balanced_rate_and_interval,matched_control_prefix,ERRORS
 
 
+def test_tracking_cluster_interval_uses_squared_integrals_and_both_seeds():
+    from tools.summarize_stage2_continuous_validation import tracking_distribution
+    pairs=[];prefixes=[]
+    for source,count in [('Mine',1),('FineDance',3)]:
+        for music in range(count):
+            for seed in (42,1729):
+                identity=f'{source}_{music}_{seed}'
+                pairs.append(dict(task_id=identity,dataset=source,sample_id=str(music),seed=seed))
+                # 时长、源、seed不同，但每个实际控制点候选误差幅度均减半。
+                value=(music+1)*seed
+                prefixes.append(dict(task_id=identity,seconds=float(seed),squared_error_integrals={
+                    'initial':{k:4.*value for k in ERRORS},'final':{k:float(value) for k in ERRORS}}))
+    result=tracking_distribution(pairs,prefixes,draws=100)
+    assert result['music_clusters']==4
+    for metric in result['metrics'].values():
+        assert metric['common_prefix_rms_relative_change']==-.5
+        assert metric['music_cluster_bootstrap_95']==[-.5,-.5]
+        assert metric['improved_tasks']==8 and metric['worsened_tasks']==0
+        assert metric['largest_increases']==[]
+    with pytest.raises(ValueError,match='exactly once'):
+        tracking_distribution(pairs,prefixes[:-1],draws=100)
+    for task in prefixes:
+        task['squared_error_integrals']['initial']['anchor_pos']=0.
+    zero=tracking_distribution(pairs,prefixes,draws=10)['metrics']['anchor_pos']
+    assert zero['common_prefix_rms_relative_change'] is None and zero['music_cluster_bootstrap_95'] is None
+
+
 def test_robofft_summary_preserves_proxy_boundary_and_execution_evidence(tmp_path):
     from tools.summarize_stage2_continuous_validation import training_summary
     folder=tmp_path/'metrics';folder.mkdir()

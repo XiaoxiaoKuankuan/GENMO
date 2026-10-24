@@ -11,6 +11,8 @@
 不训练、不挑选checkpoint、不改变奖励、不自动开训或因统计阈值阻止训练。
 同时支持RoboFFT的动作代理、固定参考变化与执行权重审计；不把surrogate KL填入
 Gaussian KL字段。warm-start的初始模型来源随结果记录，不能被误称为Stage1模型。
+跟踪误差同时报告逐任务改善数量与音乐cluster置信区间；这些是训练子集上的探索
+统计，没有多指标校正，不将少数长片段主导的总体RMS变化说成普遍改善。
 """
 from __future__ import annotations
 
@@ -76,6 +78,47 @@ def matched_control_prefix(before, after):
         full_task_failures=[bool(before['physical_failure']),bool(after['physical_failure'])])
 
 
+def tracking_distribution(pairs, prefixes, *, draws=10000):
+    """共同执行前缀内的时间加权RMS；两个seed随同一首音乐一起重采样。"""
+    by_id={p['task_id']:p for p in pairs}
+    if len(by_id)!=len(pairs) or {p['task_id'] for p in prefixes}!=set(by_id) or len(prefixes)!=len(pairs):
+        raise ValueError('Tracking distribution requires each paired task exactly once')
+    groups=defaultdict(lambda:defaultdict(list))
+    for task in prefixes:
+        pair=by_id[task['task_id']]
+        groups[pair['dataset']][pair['sample_id']].append(task)
+    if not groups or draws<1:raise ValueError('Nonempty paired tasks and positive draws required')
+    rng=np.random.default_rng(20261024)
+    bootstrap=np.zeros((draws,2,len(ERRORS)))
+    for _,musics in sorted(groups.items()):
+        values=np.array([[[sum(t['squared_error_integrals'][side][k] for t in tasks) for k in ERRORS]
+            for side in ('initial','final')] for _,tasks in sorted(musics.items())])
+        if not np.isfinite(values).all() or (values<0).any():raise ValueError('Invalid tracking squared integrals')
+        indices=rng.integers(len(values),size=(draws,len(values)))
+        bootstrap+=values[indices].sum(axis=1)
+    # 同一bootstrap样本内新旧共享真实前缀时长，RMS相对变化中的时长分母相消。
+    metrics={}
+    for j,k in enumerate(ERRORS):
+        initial=sum(t['squared_error_integrals']['initial'][k] for t in prefixes)
+        final=sum(t['squared_error_integrals']['final'][k] for t in prefixes)
+        valid=bootstrap[:,0,j]>0
+        interval=np.quantile(np.sqrt(bootstrap[valid,1,j]/bootstrap[valid,0,j])-1,[.025,.975]).tolist() if valid.all() else None
+        differences=[]
+        for task in prefixes:
+            pair=by_id[task['task_id']]
+            differences.append(dict(task_id=task['task_id'],dataset=pair['dataset'],sample_id=pair['sample_id'],seed=pair['seed'],
+                squared_error_integral_delta=task['squared_error_integrals']['final'][k]-task['squared_error_integrals']['initial'][k]))
+        ordered=sorted(differences,key=lambda v:v['squared_error_integral_delta'])
+        metrics[k]=dict(common_prefix_rms_relative_change=math.sqrt(final/initial)-1 if initial else None,
+            music_cluster_bootstrap_95=interval,improved_tasks=sum(v['squared_error_integral_delta']<0 for v in differences),
+            worsened_tasks=sum(v['squared_error_integral_delta']>0 for v in differences),
+            largest_reductions=[v for v in ordered if v['squared_error_integral_delta']<0][:4],
+            largest_increases=[v for v in reversed(ordered) if v['squared_error_integral_delta']>0][:4])
+    return dict(scope='paired_common_executed_prefix_fixed_train_music_exploratory_no_multiple_comparison_adjustment',
+        seed=20261024,draws=draws,music_clusters=sum(len(v) for v in groups.values()),
+        weighting='pooled_execution_time_RMS_not_source_balanced',metrics=metrics)
+
+
 def physical_summary(comparison, initial_report, final_report):
     physical=comparison['overall']['actual_execution_aggregate']
     def rms(side,k):return math.sqrt(physical[side]['raw_errors'][k+'_squared_error']['mean'])
@@ -87,6 +130,7 @@ def physical_summary(comparison, initial_report, final_report):
                if duration else None for side in ('initial','final')} for k in ERRORS}
     return dict(tasks=comparison['paired_task_count'],failure_pairs=comparison['overall']['failure_pair_counts'],
         source_balanced_reward_rate=balanced_rate_and_interval(comparison['pairs']),all_actual_tracking_rms=errors,
+        tracking_distribution=tracking_distribution(comparison['pairs'],prefixes),
         actual_seconds={side:physical[side]['executed_seconds'] for side in ('initial','final')},
         completed={side:physical[side]['music_completion_count'] for side in ('initial','final')},
         reward_integral={side:physical[side]['reward_sum'] for side in ('initial','final')},
