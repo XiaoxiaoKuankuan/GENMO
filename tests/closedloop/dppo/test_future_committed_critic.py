@@ -64,6 +64,17 @@ def test_future_checkpoint_identity_is_separate():
     assert schema_for_identity(old)!=schema_for_identity(new)
 
 
+def test_unvalidated_future_critic_cannot_start_or_resume_actor_training():
+    from gem.closedloop.dppo.training import _validate_future_critic_release,run
+    config={'stage10':{'critic':{'type':'asymmetric_tracking_committed_temporal'}}}
+    for resume in (None,'complete_future_checkpoint.pt'):
+        with pytest.raises(ValueError,match='diagnostic-only'):
+            run(NS(resume=resume),config,None)  # 在分配GPU、创建输出及恢复网络前拒绝。
+    for phase in ('collect_only','evaluate_only','calibrate_only','critic_preheat_only','mc_validation_only','decisive_diagnostic'):
+        _validate_future_critic_release(NS(**{phase:True}),config)
+    _validate_future_critic_release(NS(),{'stage10':{'critic':{'type':'asymmetric_tracking_temporal'}}})
+
+
 def test_current_and_bootstrap_use_separate_visible_cache(actor_factory):
     _,batch=actor_factory(motion_frames=60);c={k:v[:1].clone() for k,v in future_context(batch).items()}
     nxt={k:v.clone() for k,v in c.items()}

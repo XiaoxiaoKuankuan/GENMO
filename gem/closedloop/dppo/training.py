@@ -474,7 +474,21 @@ def _maximum_memory(*phases):
             ('pytorch_peak_allocated','pytorch_peak_reserved')}) for rank in range(len(phases[0]))]
 
 
+def _validate_future_critic_release(args,config):
+    """未来参考Critic困难状态验收未通过，仅允许不更新Actor的有限阶段。
+
+    整体EV预热门槛不能替代同预算旧Critic、失败前状态及优势一致性比较。
+    2026-10-24独立验证未通过，因此不提供可静默绕过的配置开关；正式放行
+    必须在新的困难状态/物理验收实现和证据齐备后显式修改此发布边界。
+    """
+    if config['stage10']['critic']['type']!='asymmetric_tracking_committed_temporal':return
+    finite=('collect_only','evaluate_only','calibrate_only','critic_preheat_only','mc_validation_only','decisive_diagnostic')
+    if not any(getattr(args,name,False) for name in finite):
+        raise ValueError('Future committed Critic is diagnostic-only: hard-state validation failed; Actor updates are disabled')
+
+
 def run(cargs,config,distributed):
+    _validate_future_critic_release(cargs,config)
     if not any(getattr(cargs,name,False) for name in ('collect_only','evaluate_only','calibrate_only','critic_preheat_only','mc_validation_only','decisive_diagnostic')):
         from .actor_optimization import require_current_actor_objective
         require_current_actor_objective(config['stage9'])
