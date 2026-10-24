@@ -4,7 +4,8 @@
 # GMT实际中心及相邻控制点追溯30Hz源帧与复制前缀父计划，仅本批真正消费的自由坐标
 # 进入逐步骤PPO和KL；完整远景、原始采样概率和物理奖励保留，GAE按真实控制时间。
 # 未消费的本批动作没有Actor更新；旧版本参考只计物理统计，不归给新的生成决策。
-# Actor初始候选LR=1e-6；须先在新核/新mask真实八卡数据上验收，不沿用旧1e-7标定。
+# Actor实测LR=1e-7：新核/新mask的35790条真实链上5/5更新全部实际1e-7并通过KL。
+# 1e-6候选需退到2.5e-7且仅1/5更新，整批PPO下降；此配置依据新数据重新标定。
 # 新实验不加载旧Stage2 checkpoint；Critic、两Adam、采样池和预算重新建立。
 # 固定整曲评价、困难采样、原物理终止阈值保留；数值通过不代表真实跟随改善。
 diagnostics:
@@ -356,7 +357,7 @@ stage10:
     tensor_cache_max_bytes: 4294967296
     checkpoint_interval_iterations: 1
   training:
-    actor_lr: 1.0e-06
+    actor_lr: 1.0e-07
     actor_lr_control: step_kl_backtracking
     actor_objective: denoising_step_clipped_ppo
     ppo_action_scope: genmo.ppo.executed_source_frames.v1
@@ -410,7 +411,7 @@ stage10:
       growth: 1.25
       margin: 0.8
       max_attempts: 4
-      maximum_lr: 1.0e-06
+      maximum_lr: 1.0e-07
       minimum_trial_lr_ratio: 0.125
     x0_diagnostic_every: 0
     objective_step_reduction: mean
