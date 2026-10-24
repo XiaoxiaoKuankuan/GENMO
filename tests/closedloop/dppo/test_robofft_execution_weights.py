@@ -181,3 +181,17 @@ def test_weighted_objective_requires_explicit_distinct_schema(tmp_path):
     c['stage10']['training']['robofft'].pop('execution_weighting')
     p.write_text(yaml.safe_dump(c))
     with pytest.raises(ValueError,match='Explicit RoboFFT'):configuration(p)
+
+
+def test_plan_auditor_recomputes_cached_weights_and_rejects_changed_provenance(actor_factory):
+    from tools.audit_robofft_execution_weights import audit_rows
+    policy,context=make_policy(actor_factory)
+    policy.robofft.update(execution_weighting=WEIGHTS,mc_microbatch=4)
+    rows,targets,cache,_=make_rows(policy,context)
+    prepare_mc(policy,rows,cache,torch.Generator().manual_seed(58))
+    entries=audit_rows(rows,WEIGHTS,rank=0)
+    assert len(entries)==2 and len(entries[0]['normalized_frame_weights'])==60
+    assert entries[0]['audit']['normalized_weight_mass']==entries[0]['audit']['free_coordinate_count']
+    rows[0].metadata['execution_weighting']['near_free_frames']+=1
+    with pytest.raises(ValueError,match='Cached per-plan'):audit_rows(rows,WEIGHTS,rank=0)
+    cache.close()
