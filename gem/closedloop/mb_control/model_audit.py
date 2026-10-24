@@ -53,6 +53,8 @@ class PerturbedGenerator:
 def audit_generated_reference(engine, collector, music, initial, *, noise_seed, latencies,
                               joint_indices, epsilon=.01, criteria=None):
     """返回原始证据；只有显式阈值满足且多次方向支持才填supported，不默认判好。"""
+    if epsilon <= 0:
+        raise ValueError("物理扰动幅度必须为正")
     base_actor, old_limit = engine.actor, engine.max_model_steps
     engine.max_model_steps = None  # 这是测量所需时域的审计，不是越界训练。
     generator = torch.Generator(device=initial.device).manual_seed(noise_seed)
@@ -70,6 +72,28 @@ def audit_generated_reference(engine, collector, music, initial, *, noise_seed, 
             intervals = engine.rollout(z, noises, latencies, transition_fn=collector.env.step_physics if physical else None,
                                        on_step=record)
             objective = actor_return(intervals, torch.zeros_like(intervals[-1].reward)).mean()
+        # 安全延迟裕量可使前瞻分支的最长依赖大于三次决策的主时间线。
+        # 在已完成多次生成/覆盖之后，用最后有效缓存补足配对预测测量；此诊断尾段
+        # 不加入Actor目标、方向探针或正式BPTT，不用单计划尾段替代多决策验证。
+        required = max((max(x.event.get("longest_model_dependency_steps", 0),
+                            x.event.get("maximum_forecast_dependency_steps", 0)) for x in intervals), default=0)
+        with torch.no_grad():
+            tail = intervals[-1].end.detached()
+            while len(trace) < required and not intervals[-1].terminal and tail.tick < tail.music_end_tick:
+                from .contracts import ReferenceExhausted
+                try:
+                    tail = collector.adapter.refresh_current_observation(tail)
+                    ref1, _, _ = tail.reference.read_current_future(tail.tick + 12)
+                    goal = tail.reference.read_current_future(tail.tick)[2]
+                    action = collector.adapter.bundle.act(tail.sm_history, goal)
+                    state = (collector.env.step_physics(action) if physical else
+                             collector.adapter.bundle.step_model(tail.state, action, tail.xi))
+                    tail = collector.adapter.advance(tail, state, action, origin="real" if physical else "imagined")
+                    trace.append(state.cpu())
+                    if physical and bool(collector.adapter.runtime.termination(state, ref1).any()):
+                        break
+                except ReferenceExhausted:
+                    break
         return objective, torch.cat(trace) if trace else torch.empty(0, 55), intervals, rewards
 
     try:
@@ -100,7 +124,7 @@ def audit_generated_reference(engine, collector, music, initial, *, noise_seed, 
                                 "physical_state_probe": float(state_probe(intervals[-1].end.state))})
             physical_slope = (changes[1]["physical_return"] - changes[0]["physical_return"]) / (2 * epsilon)
             state_slope = (changes[1]["physical_state_probe"] - changes[0]["physical_state_probe"]) / (2 * epsilon)
-            equal_horizons = all(c["physical_control_steps"] == len(model_trace) for c in changes[:2])
+            equal_horizons = all(c["physical_control_steps"] == sum(x.steps for x in model_intervals) for c in changes[:2])
             candidates.append({"joint_index": joint, "model_autograd": float(gradient),
                                "physical_centered_difference": physical_slope,
                                "direction_agrees": bool(gradient * physical_slope > 0), "candidates": changes,
@@ -126,10 +150,13 @@ def audit_generated_reference(engine, collector, music, initial, *, noise_seed, 
         rank_agreement = (sum((a["model_return"] - b["model_return"]) *
                               (a["physical_return"] - b["physical_return"]) > 0 for a, b in rank_pairs) / len(rank_pairs)) if rank_pairs else None
         return {"evidence": "offline_reset_and_replay_real_physics_not_realtime", "horizons": horizons,
+                "perturbation_epsilon_rad": epsilon, "latency_ticks": latencies,
                 "model_base_return": float(model_base.detach()), "physical_base_return": float(physical_base),
                 "physical_repeat_return": float(repeated), "physical_reward_dt": real_rewards,
                 "physical_end": real_intervals[-1].reason, "model_end": model_intervals[-1].reason,
-                "main_control_steps": len(model_trace), "required_dependency_steps": dependency_steps,
+                "main_control_steps": sum(x.steps for x in model_intervals), "prediction_control_steps": len(model_trace),
+                "diagnostic_tail_steps": len(model_trace)-sum(x.steps for x in model_intervals),
+                "required_dependency_steps": dependency_steps,
                 "real_state_envelope": state_envelope(torch.cat((initial.detach().cpu(), real_trace))),
                 "forecast_branches": model_intervals[-1].event.get("forecast_branches", []),
                 "candidates": candidates, "direction_fraction": direction_fraction,

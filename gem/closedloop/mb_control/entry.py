@@ -27,6 +27,8 @@ def main(kind):
     parser.add_argument("--mode", choices=("stage1", "full", "no_forecast", "calibration"), default="stage1" if kind == "evaluate" else "full")
     parser.add_argument("--max-seconds", type=float)
     parser.add_argument("--criteria", help="WM审计的显式JSON数值/方向验收阈值")
+    parser.add_argument("--perturbation-epsilon", type=float, default=.01,
+                        help="真实方向中心差分的关节扰动幅度；改幅度的复查不能覆盖原验收报告")
     parser.add_argument("--finite-difference", action="store_true")
     parser.add_argument("--profile", action="store_true")
     parser.add_argument("--bootstrap-latency-ticks", type=int, help="首轮部署测量可显式给候选预算；报告保留未标定状态")
@@ -164,7 +166,8 @@ def main(kind):
                         music, initial = task_inputs(task, adapter, args.torch_device)
                         latencies = profile.sample(engine.decisions) if profile else [scheduler.bootstrap_latency_ticks] * engine.decisions
                         item = audit_generated_reference(engine, collector, music, initial, noise_seed=seed,
-                                                         latencies=latencies, joint_indices=indices, criteria=criteria)
+                                                         latencies=latencies, joint_indices=indices, criteria=criteria,
+                                                         epsilon=args.perturbation_epsilon)
                         item.update(task=task["id"], seed=seed, known_reference_passed=False)
                         known = task.get("known_reference_world_qpos28")
                         if known:
