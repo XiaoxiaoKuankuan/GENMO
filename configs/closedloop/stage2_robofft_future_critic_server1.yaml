@@ -110,7 +110,7 @@ stage10:
         AIST++: 2
         FineDance: 5
         Mine: 5
-      start_distribution: match_training_reset.v1
+      start_distribution: beginning
       training_samples_per_source: 24
       training_seeds:
       - 42
