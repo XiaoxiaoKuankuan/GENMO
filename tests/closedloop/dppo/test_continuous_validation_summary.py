@@ -5,7 +5,21 @@
 把失败说成成功。这些是统计工具测试，不涉及Actor或物理采样算法。
 """
 import pytest
+import json
 from tools.summarize_stage2_continuous_validation import balanced_rate_and_interval,matched_control_prefix,ERRORS
+
+
+def test_robofft_summary_preserves_proxy_boundary_and_execution_evidence(tmp_path):
+    from tools.summarize_stage2_continuous_validation import training_summary
+    folder=tmp_path/'metrics';folder.mkdir()
+    row=dict(state=dict(iteration=1),label='train_000001',mode='robofft_d',efficiency={'total_seconds':12},
+        actor=dict(algorithm='robofft',eligible_actions=20,epochs=10,accepted_optimizer_steps=10,stop_reason=None,
+            initial_surrogate={'loss':-.2},final_surrogate={'loss':-.25},steps=[{'learning_rate':1e-5}],
+            reference_change=[{'near_joint_change_rms_rad':.002}],execution_weight_audit=[{'near_free_frames':120}]))
+    (folder/'one.jsonl').write_text(json.dumps(row)+'\n')
+    result=training_summary(tmp_path)[0]
+    assert result['surrogate_loss_decrease']==pytest.approx(.05) and result['proxy_is_not_physical_gain']
+    assert result['reference_change']==row['actor']['reference_change'] and 'chain_joint_kl' not in result
 
 
 def test_sources_are_equal_weight_and_seeds_are_one_music_cluster():

@@ -1,6 +1,6 @@
 """汇总有限连续Stage2训练及相同完整音乐任务的物理结果。
 
-输入为独立训练目录及证据输出目录。通过既有完整配对校验器读取Stage1基线与各轮
+输入为独立训练目录及证据输出目录。通过既有完整配对校验器读取本实验初始基线与各轮
 评估，保留所有失败、奖励组成、时长与活动度；另对双方共同执行的时间前缀统计八项
 真实平方跟踪误差，避免提前失败、缩短轨迹使误差看起来下降。原完整任务回报与失败
 结果保持完整，共同前缀只是附加诊断，不删除提前失败代价，也不作反事实补全。
@@ -9,6 +9,8 @@
 音乐聚合两个种子，在来源内重采样，不把两个种子误当两首独立音乐。训练统计区分
 计划、执行、接受更新与真实整批目标，以及每轮墙钟和显存。此工具只读源报告，
 不训练、不挑选checkpoint、不改变奖励、不自动开训或因统计阈值阻止训练。
+同时支持RoboFFT的动作代理、固定参考变化与执行权重审计；不把surrogate KL填入
+Gaussian KL字段。warm-start的初始模型来源随结果记录，不能被误称为Stage1模型。
 """
 from __future__ import annotations
 
@@ -102,7 +104,18 @@ def training_summary(run):
     for path in sorted((run/'metrics').glob('*.jsonl')):
         for line in path.read_text().splitlines():
             row=json.loads(line)
-            if 'state' not in row or 'actor' not in row or row.get('mode')!='dppo_bc':continue
+            if 'state' not in row or 'actor' not in row or row.get('mode') not in ('dppo_bc','robofft_d'):continue
+            if row['mode']=='robofft_d':
+                actor=row['actor'];before=actor['initial_surrogate'];after=actor['final_surrogate']
+                records.append(dict(iteration=row['state']['iteration'],label=row['label'],algorithm=actor['algorithm'],
+                    eligible_actions=actor['eligible_actions'],epochs=actor['epochs'],
+                    accepted_steps=actor['accepted_optimizer_steps'],stop_reason=actor['stop_reason'],
+                    initial_surrogate=before,final_surrogate=after,surrogate_loss_decrease=before['loss']-after['loss'],
+                    accepted_lrs=[s['learning_rate'] for s in actor['steps']],
+                    reference_change=actor['reference_change'],execution_weight_audit=actor.get('execution_weight_audit'),
+                    phase_resources=row.get('phase_resources'),efficiency=row['efficiency'],
+                    proxy_is_not_physical_gain=True))
+                continue
             actor=row['actor'];history=actor.get('full_rollout_objective_history',[])
             values=[r['objective_mean'] for r in history]
             records.append(dict(iteration=row['state']['iteration'],label=row['label'],
@@ -133,7 +146,7 @@ def main():
         if report.get('status')=='passed':reports.append((int(report['iteration']),path,report))
     reports.sort(key=lambda r:r[0])
     initial=next((r for r in reports if r[0]==0),None)
-    if initial is None:raise ValueError('No completed Stage1 baseline in this run')
+    if initial is None:raise ValueError('No completed initial Actor baseline in this run')
     summaries=[]
     for iteration,path,report in reports:
         if iteration==0:continue
@@ -143,6 +156,7 @@ def main():
         summary=physical_summary(comparison,initial[2],report)
         summaries.append(dict(iteration=iteration,report=str(path),**summary))
     result=dict(schema='genmo.stage2.continuous_finite_validation.v1',run_dir=str(args.run_dir),
+        baseline_actor_initialization=initial[2]['evaluation_identity']['training_identity'].get('actor_initialization'),
         baseline=str(initial[1]),training=training_summary(args.run_dir),physical=summaries,
         no_automatic_training_launch=True)
     (args.output_dir/'continuous_summary.json').write_text(json.dumps(result,ensure_ascii=False,indent=2,allow_nan=False))
