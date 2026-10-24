@@ -1,0 +1,11 @@
+[
+  {
+    "id": "填写原配对库中的实际音乐任务ID",
+    "music_features": null,
+    "initial_state": null,
+    "known_reference_world_qpos28": null,
+    "seeds": [42, 43],
+    "generator_unseen_music": null,
+    "controller_unseen_motion": null
+  }
+]

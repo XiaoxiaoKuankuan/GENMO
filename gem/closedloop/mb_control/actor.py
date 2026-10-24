@@ -1,7 +1,7 @@
 """现有Stage1 Actor的轻量封装，只新增独立未来条件编码。
 
 输入仍为十字段条件与单独ForecastContext，输出仍为60帧qpos30/contact2。监督调用
-直接沿用原Stage1 training_forward，未来分支等价invalid=false贡献零，不改配对库。
+直接沿用原Stage1 training_forward，未来分支等价valid=false贡献零，不改配对库。
 GENMO在BPTT中使用eval关闭dropout但保留参数梯度；部署在外层显式no_grad。
 """
 
@@ -28,9 +28,12 @@ class ForecastActor(nn.Module):
                                      activation_checkpointing=self.activation_checkpointing)
 
     def generate(self, state, ticket, context, noise):
-        conditions, anchor = build_conditions(state, ticket, self.stage1.endecoder.codec)
-        output = self.sample_differentiable(conditions, context, noise)
-        world = self.stage1.endecoder.codec.apply_world_anchor(output["qpos28"], anchor)
+        with torch.profiler.record_function("mb/conditions"):
+            conditions, anchor = build_conditions(state, ticket, self.stage1.endecoder.codec)
+        with torch.profiler.record_function("mb/ddim20_and_decode"):
+            output = self.sample_differentiable(conditions, context, noise)
+        with torch.profiler.record_function("mb/reference_anchor"):
+            world = self.stage1.endecoder.codec.apply_world_anchor(output["qpos28"], anchor)
         return GeneratedPlan(ticket, world, output["contact"])
 
     def original_supervision(self, batch):

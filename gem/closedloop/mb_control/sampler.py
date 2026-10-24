@@ -17,6 +17,10 @@ def sample_differentiable(actor, conditions, context, initial_noise, *, guidance
     adapted = base.adapt_conditions(conditions)
     if initial_noise.shape != (len(adapted["known_x"]), 60, 30):
         raise ValueError("采样固定60帧qpos30，初始噪声必须为[B,60,30]")
+    if not torch.isfinite(initial_noise).all():
+        raise ValueError("初始噪声不能含NaN/Inf")
+    if bool(((conditions["decision_time"] * 600 - context.request_tick).abs() > 1e-6).any()):
+        raise ValueError("前瞻上下文不属于本次请求快照")
     value = base._constrain(initial_noise.to(adapted["known_x"]), adapted)
     residual = base._residual(adapted) + actor.future_encoder(context, conditions["future_times"])
     conditional = base._music_condition(adapted) + residual
@@ -46,6 +50,7 @@ def sample_differentiable(actor, conditions, context, initial_noise, *, guidance
     physical = torch.where(adapted["known_mask"], adapted["known_physical"], physical)
     physical = torch.where(adapted["future_valid"][..., None], physical, 0.)
     qpos = base.endecoder.codec.decode_to_canonical_qpos(physical)
+    qpos = torch.where(adapted["future_valid"][..., None], qpos, 0.)
     return {"qpos30": physical, "qpos28": qpos,
             "contact": torch.where(adapted["future_valid"][..., None], out["static_conf_logits"].sigmoid(), 0.),
             "contact_logits": out["static_conf_logits"]}

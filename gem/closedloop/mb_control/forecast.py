@@ -29,8 +29,10 @@ def forecast_rollout(state, adapter, forecast_tick):
     while predicted.tick < forecast_tick:
         predicted = adapter.refresh_current_observation(predicted)
         _, _, goal = predicted.reference.read_current_future(predicted.tick)
-        action = adapter.bundle.act(predicted.sm_history, goal)
-        next_state = adapter.bundle.step_model(predicted.state, action, predicted.xi)
+        with torch.profiler.record_function("mb/forecast_sm_actor"):
+            action = adapter.bundle.act(predicted.sm_history, goal)
+        with torch.profiler.record_function("mb/forecast_world_model"):
+            next_state = adapter.bundle.step_model(predicted.state, action, predicted.xi)
         predicted = adapter.advance(predicted, next_state, action, origin="imagined")
     ref, _, _ = predicted.reference.read_current_future(forecast_tick)
     p, R, v, w, q, qd = unflatten_state(predicted.state)

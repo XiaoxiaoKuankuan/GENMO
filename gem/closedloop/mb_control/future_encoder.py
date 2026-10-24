@@ -19,7 +19,7 @@ class FutureStateEncoder(nn.Module):
         nn.init.zeros_(self.output.bias)
 
     def forward(self, context, future_times):
-        if context.features.shape != (len(future_times), 58) or context.valid.dtype != torch.bool:
+        if context.features.shape != (len(future_times), 58) or context.valid.dtype != torch.bool or context.valid.shape != (len(future_times),):
             raise ValueError("ForecastContext需要[B,58]及bool valid")
         if context.forecast_tick < context.request_tick:
             raise ValueError("预测时间早于请求")

@@ -24,7 +24,9 @@ class Imagination:
         self.decisions, self.gamma = decisions, gamma
         self.forecast_enabled, self.max_model_steps = forecast_enabled, max_model_steps
 
-    def rollout(self, initial, noises, actual_latency_ticks, *, detach_initial=True):
+    def rollout(self, initial, noises, actual_latency_ticks, *, detach_initial=True,
+                transition_fn=None, on_step=None):
+        """transition_fn仅供离线配对物理审计；正式异步采集由PhysicalCollector执行。"""
         if len(noises) != self.decisions or len(actual_latency_ticks) != self.decisions:
             raise ValueError("每个决策必须有独立重参数噪声和外生延迟")
         z = initial.detached() if detach_initial else initial
@@ -35,7 +37,13 @@ class Imagination:
             if type(latency) is not int or latency < 0:
                 raise ValueError("实际延迟是非负整数外生tick")
             start = z
-            ticket = self.scheduler.reserve(z)
+            try:
+                ticket = self.scheduler.reserve(z)
+            except ReferenceExhausted as error:
+                zero = torch.zeros_like(z.state[:, 0])
+                intervals.append(DecisionInterval(start, z, zero, zero, 0, self.gamma, True,
+                                                  f"reference_exhausted:{error}", {}))
+                break
             if self.forecast_enabled:
                 forecast = forecast_rollout(z, self.adapter, ticket.first_influence_tick)
                 context = forecast.context
@@ -56,6 +64,9 @@ class Imagination:
                         break
                     if z.pending and z.tick >= ready:
                         z, event = self.scheduler.commit(z, plan, actual_ready_tick=ready)
+                        if event["terminal_timeout"]:
+                            terminal, reason = True, "consecutive_timeouts"
+                            break
                     boundary = self.scheduler.next_request_tick(ticket, ceil_grid(ready, 12))
                     if not z.pending and z.tick >= boundary:
                         break
@@ -63,14 +74,24 @@ class Imagination:
                         raise ValueError("多决策展开超过已验证WM时域")
                     z = self.adapter.refresh_current_observation(z)
                     _, _, goal = z.reference.read_current_future(z.tick)
-                    action = self.adapter.bundle.act(z.sm_history, goal)
-                    state1 = self.adapter.bundle.step_model(z.state, action, z.xi)
+                    with torch.profiler.record_function("mb/sm_actor"):
+                        action = self.adapter.bundle.act(z.sm_history, goal)
+                    with torch.profiler.record_function("mb/world_model_or_physics"):
+                        state1 = (self.adapter.bundle.step_model(z.state, action, z.xi) if transition_fn is None
+                                  else transition_fn(action))
                     ref1, _, _ = z.reference.read_current_future(z.tick + 12)
                     reward, _ = self.rewards(state1, action, z.previous_action, ref1)
-                    alive = 1 - self.adapter.runtime.termination(state1, ref1, soft=True)
+                    failed = self.adapter.runtime.termination(state1, ref1)
+                    alive = (1 - self.adapter.runtime.termination(state1, ref1, soft=True) if transition_fn is None
+                             else (~failed).to(reward))
                     totals.add(reward, alive)
-                    z = self.adapter.advance(z, state1, action, origin="imagined")
+                    z = self.adapter.advance(z, state1, action, origin="imagined" if transition_fn is None else "real")
                     model_steps += 1
+                    if on_step is not None:
+                        on_step(z, reward)
+                    if transition_fn is not None and bool(failed.any()):
+                        terminal, reason = True, "physical_failure"
+                        break
             except ReferenceExhausted as error:
                 terminal, reason = True, f"reference_exhausted:{error}"
             z = replace(z, pending=False, decision_id=z.decision_id + 1)

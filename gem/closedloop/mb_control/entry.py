@@ -1,0 +1,192 @@
+"""新Stage2显式命令行入口，默认有界，导入本模块没有GPU/Isaac副作用。
+
+先读用户配置及实际资产，再按需加载SM桥接和Isaac。提供短测训练、真实全曲评价、
+WM物理方向审计和纯数值梯度审计；任何运行必须由用户显式执行命令。新输出目录
+独占创建，续训也写新目录；源码版本仅落manifest，不作恢复门禁。
+"""
+
+import argparse
+from contextlib import nullcontext
+import json
+from pathlib import Path
+import sys
+
+
+def main(kind):
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--config", default="configs/closedloop/stage2_supermimic_worldmodel.yaml")
+    parser.add_argument("--output", required=True)
+    parser.add_argument("--torch-device", default="cuda:0")
+    parser.add_argument("--updates", type=int, default=4)
+    parser.add_argument("--resume")
+    parser.add_argument("--actor-checkpoint")
+    parser.add_argument("--mode", choices=("stage1", "full", "no_forecast", "calibration"), default="stage1" if kind == "evaluate" else "full")
+    parser.add_argument("--max-seconds", type=float)
+    parser.add_argument("--criteria", help="WM审计的显式JSON数值/方向验收阈值")
+    parser.add_argument("--finite-difference", action="store_true")
+    parser.add_argument("--profile", action="store_true")
+    parser.add_argument("--bootstrap-latency-ticks", type=int, help="首轮部署测量可显式给候选预算；报告保留未标定状态")
+    preliminary, _ = parser.parse_known_args()
+    from omegaconf import OmegaConf
+    initial_config = OmegaConf.load(preliminary.config)
+    sys.path.insert(0, str(Path(initial_config.supermimic.repo).expanduser().resolve()))
+    if kind != "gradients":
+        from isaaclab.app import add_launcher_args, launch_simulation
+        add_launcher_args(parser)
+    args = parser.parse_args()
+    import numpy as np
+    import torch
+    from .application import (read_config, require_file, build_components, seed_all, read_tasks, task_inputs,
+                              behavior_config, provenance, SupervisionStream, LatencyProfile, build_stage1_losses, task_identity)
+    from .collector import PhysicalCollector
+    from .evaluation import evaluate_tasks
+    from .trainer import Stage2Trainer
+    from .replay import RecentReplay
+    from .checkpoint import save_checkpoint, load_checkpoint, SCHEMA
+    cfg = read_config(args.config)
+    cfg["model"]["forecast_enabled"] = args.mode in ("full", "calibration")
+    if args.bootstrap_latency_ticks is not None:
+        cfg["clock"]["bootstrap_latency_ticks"] = args.bootstrap_latency_ticks
+    seed_all(cfg["training"]["seed"])
+    tasks = read_tasks(cfg["tasks"])
+    profile = LatencyProfile(cfg["latency_profile"], cfg["training"]["seed"] + 1) if cfg["latency_profile"] else None
+    if cfg["clock"]["bootstrap_latency_ticks"] is None and profile is not None:
+        cfg["clock"]["bootstrap_latency_ticks"] = int(np.quantile(profile.samples, .9, method="higher"))
+    if cfg["clock"]["bootstrap_latency_ticks"] is None:
+        raise ValueError("需要新延迟profile或显式首轮测量预算，不能继承旧控制器延迟")
+    if kind == "train":
+        if args.mode in ("stage1", "calibration"):
+            raise ValueError("Stage1 baseline不启动优化器")
+        if not 1 <= args.updates <= cfg["execution"]["maximum_explicit_updates"]:
+            raise ValueError("本入口仅执行配置允许的显式有界更新")
+        if not 1 <= cfg["training"]["actor_microbatch"] <= 4 or cfg["execution"]["physical_batch"] != 1:
+            raise ValueError("首版物理batch1，BPTT微批1–4逐样本梯度累积")
+        if profile is None:
+            raise ValueError("训练需要独立实测部署延迟分布")
+        report = json.loads(require_file(cfg["imagination"]["physical_validation_report"], "P3物理方向报告").read_text())
+        for key in ("prediction_passed", "physical_direction_passed", "reset_replay_repeatability_passed", "known_reference_passed"):
+            if report.get(key) is not True:
+                raise ValueError(f"P3尚未支持训练: {key}")
+        steps = cfg["imagination"]["validated_model_steps"]
+        if not isinstance(steps, int) or steps < 1 or steps > report["supported_control_steps"]:
+            raise ValueError("训练WM时域必须受实际P3证据支持")
+        if not {t["id"] for t in tasks} <= set(report.get("task_ids", [])):
+            raise ValueError("当前任务超出P3已审计音乐/初态范围")
+        if any(report.get("task_identities", {}).get(t["id"]) != task_identity(t) for t in tasks):
+            raise ValueError("P3报告的实际音乐、初态或种子与当前任务不一致")
+        if report.get("forecast_enabled") != cfg["model"]["forecast_enabled"]:
+            raise ValueError("P3报告与本次前瞻条件设置不一致")
+    actor, adapter, scheduler, rewards, critic, engine, original = build_components(cfg, args.torch_device)
+    if kind == "train":
+        report_frozen = report.get("frozen_sha256")
+        if report_frozen != adapter.bundle.metadata["sha256"]:
+            raise ValueError("P3报告不属于当前冻结资产")
+        if profile.metadata.get("forecast_enabled") != cfg["model"]["forecast_enabled"] or profile.metadata.get("frozen_sha256") != adapter.bundle.metadata["sha256"]:
+            raise ValueError("部署延迟必须来自同一冻结资产及同样的前瞻路径，不能借用无前瞻baseline延迟")
+    if args.actor_checkpoint:
+        ck = torch.load(require_file(args.actor_checkpoint, "Stage2 Actor"), map_location="cpu", weights_only=False)
+        if ck.get("schema") != SCHEMA or ck["frozen_sha256"] != adapter.bundle.metadata["sha256"]:
+            raise ValueError("评估必须使用同一SM资产的新Stage2 checkpoint")
+        if args.mode in ("stage1", "calibration") or ck["behavior_config"]["model"]["forecast_enabled"] != cfg["model"]["forecast_enabled"]:
+            raise ValueError("条件消融必须匹配训练条件，不能只在测试时删除未来条件")
+        actor.load_state_dict(ck["actor"], strict=True)
+    elif kind == "evaluate" and args.mode not in ("stage1", "calibration"):
+        raise ValueError("完整/无前瞻训练模型评估需要明确Actor checkpoint")
+    output = Path(args.output).expanduser().resolve()
+    output.mkdir(parents=True, exist_ok=False)
+    source_info = provenance(cfg)
+    (output / "manifest.json").write_text(json.dumps(source_info, ensure_ascii=False, indent=2))
+    if kind == "gradients":
+        from .gradient_audit import tensor_fixture, audit_gradients
+        music, initial = task_inputs(tasks[0], adapter, args.torch_device)
+        z = tensor_fixture(adapter, music, initial)
+        latencies = profile.sample(engine.decisions) if profile else [scheduler.bootstrap_latency_ticks] * engine.decisions
+        result = audit_gradients(actor, critic, engine, z, latencies, finite_difference=args.finite_difference)
+        (output / "gradient_audit.json").write_text(json.dumps(result, ensure_ascii=False, indent=2, allow_nan=False))
+        print(json.dumps(result, ensure_ascii=False))
+        return
+    from supermimic.env import make_sim
+    from supermimic.bridge.streaming_env import StreamingPhysicalEnv
+    sim_cfg = make_sim(args.torch_device, args)
+    activity = [torch.profiler.ProfilerActivity.CPU, torch.profiler.ProfilerActivity.CUDA]
+    profiler = torch.profiler.profile(activities=activity, profile_memory=True) if args.profile else nullcontext()
+    with launch_simulation(sim_cfg, args), profiler as measured:
+        env = StreamingPhysicalEnv(sim_cfg, 1, adapter.bundle)
+        collector = PhysicalCollector(env, actor, adapter, scheduler, rewards, forecast_enabled=cfg["model"]["forecast_enabled"],
+                                      gamma=cfg["critic"]["gamma_per_control"], record_trajectory=kind == "evaluate")
+        try:
+            if kind == "evaluate":
+                evaluate_tasks(collector, tasks, output, mode=args.mode, device=args.torch_device, max_seconds=args.max_seconds)
+            elif kind == "model":
+                from .model_audit import audit_generated_reference, audit_known_reference
+                criteria = json.loads(Path(args.criteria).read_text()) if args.criteria else None
+                if criteria is not None:
+                    required = ("minimum_directions", "minimum_direction_fraction", "minimum_optimized_delta", "reset_replay_max_abs")
+                    if any(not isinstance(criteria.get(k), (int, float)) for k in required) or not criteria.get("state_rmse_limits"):
+                        raise ValueError("验收阈值必须显式填入数值；null模板不能判定通过")
+                    if any(not isinstance(v, (int, float)) or v < 0 for v in criteria["state_rmse_limits"].values()):
+                        raise ValueError("状态误差阈值必须显式为非负数值")
+                names = ["l_knee_pitch_joint", "r_knee_pitch_joint", "l_arm_roll_joint"]
+                indices = [actor.stage1.endecoder.kinematics.joint_order.index(n) for n in names]
+                cases = []
+                for task in tasks:
+                    for seed in task.get("seeds", [42]):
+                        seed_all(seed)
+                        music, initial = task_inputs(task, adapter, args.torch_device)
+                        latencies = profile.sample(engine.decisions) if profile else [scheduler.bootstrap_latency_ticks] * engine.decisions
+                        item = audit_generated_reference(engine, collector, music, initial, noise_seed=seed,
+                                                         latencies=latencies, joint_indices=indices, criteria=criteria)
+                        item.update(task=task["id"], seed=seed, known_reference_passed=False)
+                        known = task.get("known_reference_world_qpos28")
+                        if known:
+                            array = np.load(require_file(known, "已知参考qpos28"), allow_pickle=False)
+                            reference = torch.as_tensor(array, device=args.torch_device, dtype=torch.float32)[None]
+                            item["known_reference"] = audit_known_reference(collector, music, initial, reference)
+                            item["known_reference_passed"] = criteria is not None and all(
+                                all(v[k] <= bound for k, bound in criteria["state_rmse_limits"].items()) for v in item["known_reference"].values())
+                        cases.append(item)
+                keys = ("prediction_passed", "physical_direction_passed", "reset_replay_repeatability_passed", "known_reference_passed")
+                result = {k: all(item[k] for item in cases) for k in keys}
+                result.update(cases=cases, frozen_sha256=adapter.bundle.metadata["sha256"], task_ids=[t["id"] for t in tasks],
+                              task_identities={t["id"]: task_identity(t) for t in tasks},
+                              forecast_enabled=cfg["model"]["forecast_enabled"],
+                              scope="selected_tasks_seeds_and_nominal_physics_only",
+                              supported_control_steps=min(item["supported_control_steps"] for item in cases) if all(result.values()) else 0)
+                (output / "model_physics_audit.json").write_text(json.dumps(result, ensure_ascii=False, indent=2, allow_nan=False))
+            elif kind == "train":
+                losses = build_stage1_losses(actor.stage1, original).to(args.torch_device)
+                trainer = Stage2Trainer(actor, critic, engine, losses, cfg["training"])
+                replay = RecentReplay(cfg["training"]["replay_capacity"], cfg["training"]["seed"])
+                supervised = SupervisionStream(cfg["stage1"]["data_config"], cfg["training"]["supervision_batch"],
+                                               cfg["training"]["seed"], args.torch_device)
+                behavior = behavior_config(cfg, actor, adapter)
+                task_cursor = 0
+                if args.resume:
+                    state = load_checkpoint(args.resume, trainer, replay, behavior_config=behavior, device=args.torch_device)
+                    supervised.load_state_dict(state["supervision"])
+                    profile.rng.setstate(state["latency_rng"])
+                    task_cursor = state["task_cursor"]
+                for _ in range(args.updates):
+                    if collector.state is None or collector.terminal:
+                        task = tasks[task_cursor % len(tasks)]
+                        task_cursor += 1
+                        music, initial = task_inputs(task, adapter, args.torch_device)
+                        collector.reset(music, initial)
+                    physical = collector.collect(cfg["training"]["collect_decisions"], replay=replay)
+                    states = replay.sample(cfg["training"]["actor_microbatch"])
+                    latencies = [profile.sample(engine.decisions) for _ in states]
+                    result = trainer.update(states, supervised.next(), latencies, physical_intervals=physical)
+                    with (output / "training.jsonl").open("a") as stream:
+                        stream.write(json.dumps(result, ensure_ascii=False, allow_nan=False) + "\n")
+                    save_checkpoint(output / f"stage2_{trainer.update_index:06d}.pt", trainer, replay,
+                                    behavior_config=behavior, runtime_state={"supervision": supervised.state_dict(),
+                                    "latency_rng": profile.rng.getstate(), "task_cursor": task_cursor,
+                                    "collector_restart": "new_episode_required_no_solver_snapshot"}, provenance=source_info)
+                    print(json.dumps(result, ensure_ascii=False))
+        finally:
+            collector.close()
+    if args.profile:
+        (output / "performance.txt").write_text(measured.key_averages().table(sort_by="self_cuda_time_total", row_limit=60))
+        measured.export_chrome_trace(str(output / "performance_trace.json"))
+        (output / "gpu_memory.json").write_text(json.dumps({"peak_allocated_bytes": torch.cuda.max_memory_allocated(),
+                                                            "peak_reserved_bytes": torch.cuda.max_memory_reserved()}))

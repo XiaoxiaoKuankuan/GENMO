@@ -29,8 +29,14 @@ class ReferenceBuffer:
             raise ValueError("缓存需要至少两个30Hz姿态点及contact2")
         if self.ticks.dtype != torch.long or not bool(((self.ticks[1:] - self.ticks[:-1]) == 20).all()):
             raise ValueError("源时刻必须连续递增20tick")
-        if len(self.to_sm) != 21 or len(set(self.to_sm)) != 21:
+        if tuple(sorted(self.to_sm)) != tuple(range(21)):
             raise ValueError("关节映射必须为21维唯一排列")
+        if self.source_versions.shape != self.ticks.shape or self.source_versions.dtype != torch.long:
+            raise ValueError("每个参考源点需要整数来源版本")
+        if not torch.isfinite(self.world_qpos).all() or not torch.isfinite(self.contact).all():
+            raise ValueError("动态参考包含非有限数值")
+        if bool((self.world_qpos[..., 3:7].norm(dim=-1) < 1e-8).any()):
+            raise ValueError("动态参考包含零四元数")
 
     @property
     def lower(self):
@@ -87,6 +93,15 @@ class ReferenceBuffer:
                 return tick
             tick += 12
         raise ReferenceExhausted("找不到新参考影响时刻")
+
+    def first_center_consumed(self, commit_tick, first_mutable_tick):
+        for tick in range(((commit_tick + 11) // 12) * 12, self.upper + 1, 12):
+            source = self.ticks.new_tensor([tick])
+            lo, hi, fraction = self._indices(source)
+            if bool((self.ticks[lo] >= first_mutable_tick).any() or
+                    ((self.ticks[hi] >= first_mutable_tick) & (fraction != 0)).any()):
+                return tick
+        raise ReferenceExhausted("没有可消费的新参考中心支持点")
 
     def merge_plan(self, plan, commit_tick, protection):
         ticket = plan.ticket

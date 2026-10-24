@@ -25,10 +25,10 @@ class GenerationWorker:
         self.executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="genmo-plan")
         self.future = None
 
-    def submit(self, snapshot, ticket, noise):
+    def submit(self, snapshot, ticket, noise, *, request_wall=None):
         if self.future is not None:
             raise RuntimeError("每环境只允许一个在途请求")
-        self.started = time.perf_counter()
+        self.started = time.perf_counter() if request_wall is None else request_wall
         # 张量克隆在调用线程完成，worker流必须等待这些输入准备完成。
         producer_stream = torch.cuda.current_stream(snapshot.state.device) if snapshot.state.is_cuda else None
         def generate():
@@ -119,17 +119,25 @@ class PhysicalCollector:
         for _ in range(decisions):
             z = self.state
             z.validate(decision=True)
+            request_wall = time.perf_counter()
             start = z.detached()
             if replay is not None:
                 replay.add(start)
-            ticket = self.scheduler.reserve(z)
+            try:
+                ticket = self.scheduler.reserve(z)
+            except ReferenceExhausted as error:
+                self.terminal = True
+                zero = torch.zeros_like(z.state[:, 0])
+                intervals.append(DecisionInterval(start, z.detached(), zero, zero, 0, self.gamma, True,
+                                                  f"reference_exhausted:{error}", {}))
+                break
             noise = torch.randn(len(z.state), 60, 30, device=z.state.device)
-            self.worker.submit(start, ticket, noise)
+            self.worker.submit(start, ticket, noise, request_wall=request_wall)
             z = replace(z, pending=True)
             totals = IntervalAccumulator(z.state[:, 0], self.gamma)
             reason, event = "decision_boundary", {}
             next_boundary = None
-            wall_origin, tick_origin = time.perf_counter(), z.tick
+            wall_origin, tick_origin = request_wall, z.tick
             try:
                 while True:
                     if z.tick >= z.music_end_tick:
@@ -145,14 +153,19 @@ class PhysicalCollector:
                             self.events.append(event)
                             self.worker.clear()
                             next_boundary = self.scheduler.next_request_tick(ticket, z.tick)
+                            if event["terminal_timeout"]:
+                                self.terminal, reason = True, "consecutive_timeouts"
+                                break
                     if not z.pending and z.tick >= next_boundary:
                         break
                     z = self.adapter.refresh_current_observation(z)
                     _, _, goal = z.reference.read_current_future(z.tick)
-                    action = self.adapter.bundle.act(z.sm_history, goal)
+                    with torch.profiler.record_function("mb/physical_sm_actor"):
+                        action = self.adapter.bundle.act(z.sm_history, goal)
                     # 先核对下一步目标支持，物理推进后不偷偷reset或丢弃终态。
                     ref1, _, _ = z.reference.read_current_future(z.tick + 12)
-                    state1 = self.env.step_physics(action)
+                    with torch.profiler.record_function("mb/physics"):
+                        state1 = self.env.step_physics(action)
                     reward, metrics = self.rewards(state1, action, z.previous_action, ref1)
                     failed = bool(self.adapter.runtime.termination(state1, ref1).any())
                     totals.add(reward, torch.zeros_like(reward) if failed else torch.ones_like(reward))

@@ -19,6 +19,11 @@ from .reference_buffer import ReferenceBuffer
 SCHEMA = "genmo.supermimic.bptt.training.v1"
 
 
+def optimizer_layout(module, optimizer):
+    names = {id(p): name for name, p in module.named_parameters()}
+    return [[names[id(p)] for p in group["params"]] for group in optimizer.param_groups]
+
+
 def pack_state(state):
     values = {f.name: getattr(state, f.name) for f in fields(state) if f.name != "reference"}
     values = {k: v.detach().cpu() if isinstance(v, torch.Tensor) else v for k, v in values.items()}
@@ -56,6 +61,8 @@ def save_checkpoint(path, trainer, replay, *, behavior_config, runtime_state, pr
     atomic_save({"schema": SCHEMA, "actor": trainer.actor.state_dict(), "critic": trainer.critic.state_dict(),
                  "genmo_optimizer": trainer.actor_optimizer.state_dict(),
                  "upper_critic_optimizer": trainer.critic_optimizer.state_dict(),
+                 "optimizer_layout": {"genmo": optimizer_layout(trainer.actor, trainer.actor_optimizer),
+                                      "critic": optimizer_layout(trainer.critic, trainer.critic_optimizer)},
                  "update": trainer.update_index, "rng": capture_rng(), "replay": replay_payload,
                  "runtime_state": runtime_state, "behavior_config": behavior_config,
                  "frozen_sha256": trainer.imagination.adapter.bundle.metadata["sha256"],
@@ -70,6 +77,10 @@ def load_checkpoint(path, trainer, replay, *, behavior_config, device):
         raise ValueError("实际采样、奖励、时序或优化合同改变，不能伪装等价续训")
     if ck["frozen_sha256"] != trainer.imagination.adapter.bundle.metadata["sha256"]:
         raise ValueError("续训必须使用同一固定pi/wm资产")
+    expected_layout = {"genmo": optimizer_layout(trainer.actor, trainer.actor_optimizer),
+                       "critic": optimizer_layout(trainer.critic, trainer.critic_optimizer)}
+    if ck.get("optimizer_layout") != expected_layout:
+        raise ValueError("优化器参数名称/分组改变；不能仅按位置加载动量")
     trainer.actor.load_state_dict(ck["actor"], strict=True)
     trainer.critic.load_state_dict(ck["critic"], strict=True)
     trainer.actor_optimizer.load_state_dict(ck["genmo_optimizer"])

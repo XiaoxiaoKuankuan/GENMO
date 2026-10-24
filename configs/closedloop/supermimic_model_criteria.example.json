@@ -1,0 +1,18 @@
+{
+  "说明": "仅阈值结构模板；填入事先确定的实际验收阈值后才可用。null不会判为通过。",
+  "state_rmse_limits": {
+    "root_xy_m": null,
+    "root_height_m": null,
+    "root_orientation_rad": null,
+    "root_linear_velocity_m_s": null,
+    "root_angular_velocity_rad_s": null,
+    "joint_position_rad": null,
+    "joint_velocity_rad_s": null,
+    "foot_position_m": null,
+    "foot_height_m": null
+  },
+  "minimum_directions": null,
+  "minimum_direction_fraction": null,
+  "minimum_optimized_delta": null,
+  "reset_replay_max_abs": null
+}

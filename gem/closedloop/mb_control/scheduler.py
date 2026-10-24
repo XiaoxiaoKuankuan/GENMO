@@ -58,14 +58,13 @@ class Scheduler:
         if accepted:
             cache = cache.merge_plan(plan, state.tick, protection)
         timeouts = 0 if accepted else state.consecutive_timeouts + 1
-        if timeouts >= self.max_consecutive_timeouts:
-            raise ReferenceExhausted("连续超时超过预算；停止该episode")
         history = (*state.latency_history, actual_ready_tick - ticket.request_tick)[-16:]
         event = {"request_tick": ticket.request_tick, "predicted_ready_tick": ticket.predicted_ready_tick,
                  "actual_ready_tick": actual_ready_tick, "commit_tick": state.tick if accepted else None,
                  "first_mutable_source_tick": ticket.first_mutable_source_tick,
                  "first_influence_tick": cache.first_influence(state.tick, ticket.first_mutable_source_tick) if accepted else None,
-                 "first_center_consumed_tick": ceil_grid(ticket.first_mutable_source_tick, 12) if accepted else None,
+                 "first_center_consumed_tick": cache.first_center_consumed(state.tick, ticket.first_mutable_source_tick) if accepted else None,
+                 "terminal_timeout": timeouts >= self.max_consecutive_timeouts,
                  "accepted": accepted, "reason": "committed" if accepted else "late_protected_support"}
         return replace(state, reference=cache, pending=False, latency_history=history,
                        protected_until=protection, consecutive_timeouts=timeouts), event

@@ -65,9 +65,9 @@ class ClosedLoopState:
             raise ValueError("历史延迟不能为负")
 
     def detached(self):
-        names = ("state", "xi", "previous_action", "sm_history", "genmo_history", "genmo_valid", "music")
+        names = ("state", "xi", "previous_action", "sm_history", "genmo_history", "genmo_valid")
         return replace(self, **{k: getattr(self, k).detach().clone() for k in names},
-                       reference=self.reference.detached())
+                       music=self.music.detach(), reference=self.reference.detached())
 
 
 @dataclass(frozen=True)

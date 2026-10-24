@@ -48,6 +48,8 @@ class Stage2Trainer:
 
     def update(self, initial_states, supervised_batch, actual_latencies, *, physical_intervals):
         started = time.perf_counter()
+        if not initial_states or len(initial_states) != len(actual_latencies):
+            raise ValueError("真实快照与外生延迟批次必须非空且对齐")
         warming = self.update_index < self.config["warmup_updates"]
         if not physical_intervals:
             raise ValueError("每轮需要当前策略真实采集，不能只优化WM自反馈")
@@ -57,6 +59,7 @@ class Stage2Trainer:
         self.critic_optimizer.zero_grad(set_to_none=True)
         training_pairs = self._targets(physical_intervals)
         returns = []
+        graph_rollouts, accepted_commits = 0, 0
         for z, latencies in zip(initial_states, actual_latencies):
             noises = [torch.randn(len(z.state), 60, 30, device=z.state.device)
                       for _ in range(self.imagination.decisions)]
@@ -67,14 +70,18 @@ class Stage2Trainer:
                 terminal_value = torch.zeros_like(final.reward) if final.terminal or warming else self.critic(final.end)
                 objective = actor_return(intervals, terminal_value).mean()
                 returns.append(float(objective.detach()))
-                if not warming:
-                    (-objective / len(initial_states)).backward()
+                accepted_commits += sum(x.event.get("accepted", False) for x in intervals)
+                graph_rollouts += int(objective.requires_grad)
+                if not warming and objective.requires_grad:
+                    with torch.profiler.record_function("mb/actor_bptt_backward"):
+                        (-objective / len(initial_states)).backward()
         bc_value, actor_norm = 0., 0.
         if not warming:
             output = self.actor.original_supervision(supervised_batch)
             bc, _ = self.stage1_losses(supervised_batch, output["pred_x_start"], output["static_conf_logits"],
                                       global_step=self.config.get("stage1_supervision_step", 595000))
-            (self.config["bc_weight"] * bc).backward()
+            with torch.profiler.record_function("mb/stage1_supervision_backward"):
+                (self.config["bc_weight"] * bc).backward()
             bc_value = float(bc.detach())
             actor_norm = float(torch.nn.utils.clip_grad_norm_(self.actor.parameters(), self.config.get("grad_clip", 1.), error_if_nonfinite=True))
             self.actor_optimizer.step()
@@ -83,8 +90,9 @@ class Stage2Trainer:
         critic_loss = 0.
         self.critic.train()
         for z, target in training_pairs:
-            loss = torch.nn.functional.mse_loss(self.critic(z), target)
-            (loss / len(training_pairs)).backward()
+            with torch.profiler.record_function("mb/critic_forward_backward"):
+                loss = torch.nn.functional.mse_loss(self.critic(z), target)
+                (loss / len(training_pairs)).backward()
             critic_loss += float(loss.detach()) / len(training_pairs)
         critic_norm = float(torch.nn.utils.clip_grad_norm_(self.critic.parameters(), self.config.get("grad_clip", 1.), error_if_nonfinite=True))
         self.critic_optimizer.step()
@@ -95,5 +103,6 @@ class Stage2Trainer:
                 "physical_reward_dt_sum": sum(float(x.reward.mean()) for x in physical_intervals),
                 "original_stage1_loss": bc_value, "critic_mse": critic_loss,
                 "actor_grad_norm": actor_norm, "critic_grad_norm": critic_norm,
+                "imagined_accepted_commits": accepted_commits, "execution_graph_rollouts": graph_rollouts,
                 "update_wall_seconds": time.perf_counter() - started,
                 "evidence": "model_objective_and_separate_physical_collection_not_quality_gain"}
