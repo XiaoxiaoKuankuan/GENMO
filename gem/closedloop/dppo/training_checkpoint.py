@@ -117,9 +117,12 @@ def _initialization_execution(identity, *, fragment_transfer=False, actor_lr_tra
     fragment_transfer只允许修改物理采样时限、站立混合比例、gamma和旧预热文件。
     actor_lr_transfer仅额外放行Actor基础LR及其最大试探LR；不放行组倍率、
     其他trust_region字段、Critic、奖励或采样核，不能与片段迁移合用。
+    actor_initialization仅记录来源，新实验加载后会绑定所选checkpoint；普通resume
+    不经过此规范化，仍严格校验该记录。模型、Adam与实际执行合同另行逐项校验。
     """
     import copy
     result=copy.deepcopy(identity)
+    result.pop('actor_initialization',None)
     result.pop('evaluation',None)
     result.get('scale',{}).pop('actor_minibatch_chains',None)
     for key in ('actor_minibatch_internal_transitions','max_actor_optimizer_steps','bc_batch'):

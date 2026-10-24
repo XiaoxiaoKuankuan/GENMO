@@ -5,6 +5,8 @@
 评估报告检查配对统计、TensorBoard和最佳指针读取。源码修改/缺失必须通过，
 模型形状、实际奖励、采样核和执行条件不兼容仍须拒绝，避免把去掉源码门禁误写
 成绕过概率或张量校验。文件仅写pytest临时目录，不执行正式PhysX或改写旧模型。
+显式新实验允许重新绑定初始化来源，并逐张量检查两模型、非空Adam和BC原样恢复；
+普通resume仍拒绝来源变化，新实验仍拒绝kernel、reward或学习率的未授权变化。
 """
 import copy
 import json
@@ -73,6 +75,51 @@ def test_resume_preserves_real_model_adam_and_bc_without_source_gate(tmp_path, c
         assert torch.equal(actor.weight, payload['actor']['weight'])
         assert aopt.state and control.value == payload['bc_controller']['value']
         assert loaded['identity'] == payload['identity']  # 原记录未被盖上当前源码。
+
+
+@pytest.mark.parametrize('change', ['provenance', 'resume', 'kernel', 'reward', 'actor_lr'])
+def test_new_experiment_rebinds_only_provenance_and_preserves_learning_state(tmp_path, change):
+    from tests.closedloop.dppo.test_actor_lr_initialization import _equal, _networks, _snapshot
+
+    source = _networks(1e-7)
+    for name in ('actor', 'critic'):
+        optimizer = source[name + '_optimizer']
+        source[name](torch.ones(2, 3)).square().sum().backward()
+        optimizer.step()
+        optimizer.zero_grad(set_to_none=True)
+    source['controller'].update(2., 1.)
+    old = dict(actor_initialization={'kind': 'explicit_checkpoint', 'checkpoint_sha256': 'previous'},
+               kernel={'eta': .1}, reward={'track_weight': 2.5}, training={'actor_lr': 1e-7})
+    payload = dict(schema=SCHEMA, identity=copy.deepcopy(old), **_snapshot(source))
+    payload['bc_controller'] = payload.pop('controller')
+    path = tmp_path / 'nonempty_adam.pt'
+    torch.save(payload, path)
+    target = _networks(1e-7)
+    before = _snapshot(target)
+    identity = copy.deepcopy(old)
+    identity['actor_initialization'] = {'kind': 'source_stage1', 'source_global_step': 595000}
+    if change == 'kernel':
+        identity['kernel']['eta'] = .2
+    elif change == 'reward':
+        identity['reward']['track_weight'] = 1.
+    elif change == 'actor_lr':
+        identity['training']['actor_lr'] = 1e-6
+    original_identity = copy.deepcopy(identity)
+    if change == 'provenance':
+        loaded = load_training_checkpoint(path, identity=identity, **target, new_experiment=True)
+        for name in ('actor', 'critic', 'actor_optimizer', 'critic_optimizer'):
+            _equal(target[name].state_dict(), payload[name])
+        _equal(target['controller'].state_dict(), payload['bc_controller'])
+        for name in ('actor_optimizer', 'critic_optimizer'):
+            assert target[name].state
+            assert all(state['step'] == 1 for state in target[name].state.values())
+        assert loaded['identity'] == old
+    else:
+        with pytest.raises(ValueError, match='actual training configuration differs'):
+            load_training_checkpoint(path, identity=identity, **target, new_experiment=change != 'resume')
+        _equal(_snapshot(target), before)
+    assert identity == original_identity
+    assert torch.load(path, weights_only=False)['identity'] == old
 
 
 @pytest.mark.parametrize('changed_reward', [False, True])
