@@ -1,7 +1,8 @@
 # 服务器2逐去噪步骤DPPO正式配置（2026-10-24用户明确要求）。
 # 5个可训练高斯步独立PPO裁剪，共享一个上层GAE；loss先平均5步再平均物理链。
 # 每步内部自由坐标log概率仍求和；不得跨步相乘，也不得用坐标平均代理真实概率。
-# Actor名义LR=1e-6（旧3e-8的33.3倍），clip=.2；单步条件KL有限回溯最低1.25e-7。
+# Actor基础LR=1e-7（旧3e-8的3.33倍），clip=.2；八卡实测5/5步均使用基础LR，无回退。
+# 1e-6与3e-6名义LR实测仅覆盖2/5与1/5且PPO目标下降，故不以名义大数值代替有效更新。
 # 新目录从完整第20轮显式--initialize-step-dppo：保留两网络/Critic Adam、重置Actor Adam与采样池。
 # 1秒困难bin通过真实跟踪/失败EMA、30%均匀分量和最大10倍权重采样，来源配额不变。
 # 多轮反复物理失败且高风险或长期不改善才隔离短段；原终止阈值及固定整曲评估不变。
@@ -357,7 +358,7 @@ stage10:
     tensor_cache_max_bytes: 4294967296
     checkpoint_interval_iterations: 1
   training:
-    actor_lr: 1.0e-06
+    actor_lr: 1.0e-07
     actor_lr_control: step_kl_backtracking
     actor_objective: denoising_step_clipped_ppo
     actor_trainable_scope: all
@@ -410,7 +411,7 @@ stage10:
       growth: 1.25
       margin: 0.8
       max_attempts: 4
-      maximum_lr: 1.0e-06
+      maximum_lr: 1.0e-07
       minimum_trial_lr_ratio: 0.125
     x0_diagnostic_every: 0
     objective_step_reduction: mean

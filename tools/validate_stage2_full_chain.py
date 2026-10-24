@@ -366,7 +366,7 @@ def argument_parser():
     """仅构造CLI便于CPU核验；解析help或可选开关不会初始化分布式/CUDA。"""
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--case',type=Path,required=True)
-    parser.add_argument('--config',type=Path,default=ROOT/'configs/closedloop/stage2_random20s_gamma095_server2.yaml')
+    parser.add_argument('--config',type=Path,default=ROOT/'configs/closedloop/stage2_step_dppo_adaptive_server2.yaml')
     parser.add_argument('--output-dir',type=Path,required=True)
     parser.add_argument('--learning-rates',type=float,nargs='+',default=[1e-6,3e-6,1e-5])
     parser.add_argument('--epochs',type=int,default=1)

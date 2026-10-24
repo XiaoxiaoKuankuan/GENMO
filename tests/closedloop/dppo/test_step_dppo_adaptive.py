@@ -211,10 +211,10 @@ def test_warmup_failure_does_not_fabricate_tracking_score():
 def test_new_configuration_rejects_old_joint_training_contract():
     from gem.closedloop.dppo.training_config import configuration
     root=Path(__file__).resolve().parents[3]
-    config=configuration(root/'configs/closedloop/stage2_step_dppo_adaptive_lr1e6_server2.yaml')
+    config=configuration(root/'configs/closedloop/stage2_step_dppo_adaptive_server2.yaml')
     assert config['stage9']['actor_objective']=='denoising_step_clipped_ppo'
     assert config['stage9']['objective_step_reduction']=='mean'
-    assert config['stage9']['actor_lr']==1e-6
+    assert config['stage9']['actor_lr']==1e-7
     with pytest.raises(ValueError):
         configuration(root/'configs/closedloop/stage2_ddim10_last5_motion30_music60_lr3e8_server2.yaml')
 
