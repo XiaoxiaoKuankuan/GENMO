@@ -64,10 +64,57 @@ def physical_differences(a,b,masks,codec):
         joint_velocity_rms_ratio=float(torch.diff(a[:,:,9:],dim=1).square().mean().sqrt()/torch.diff(b[:,:,9:],dim=1).square().mean().sqrt()))
 
 
+def exact_score_projection(c,rows,cache,direction,kind):
+    """逐动作精确VJP投影，避免有限半径logratio差分的高阶项冒充score均值。"""
+    from gem.closedloop.dppo.gaussian_probability import gaussian_statistics
+    vector={name:value.to(c.distributed.device) for name,value in direction.items()};values=[]
+    with policy_phase(c.policy):
+        for row in rows:
+            c.actor.zero_grad(set_to_none=True);condition=cache.context([row])
+            if kind=='gaussian':
+                trace=row.metadata['sampler_trace']
+                for step in range(9,19):
+                    get=lambda field,k:trace['diagnostic_'+field][:,k].to(c.distributed.device)
+                    parameters=c.policy.transition_parameters(condition,get('chain',step),step)
+                    statistic=gaussian_statistics(get('chain',step+1),get('old_means',step),get('old_stds',step),parameters['mean'],parameters['std'],parameters['free_mask'])
+                    statistic['joint_log_ratio'].sum().backward()
+            else:
+                record=row.mc_record
+                for start in range(0,16,4):
+                    loss=c.policy.losses(condition,cache.get('action_x0',[row]),record.eps[None,start:start+4],record.sampling_indices[None,start:start+4],record.original_timesteps[None,start:start+4],time_weights=record.time_weights[None])
+                    (-loss.sum()*c.policy.robofft['logratio_alpha']*c.policy.robofft['logprob_normalizer']/16).backward()
+            value=sum((parameter.grad.double()*vector[name].double()).sum() for name,parameter in c.actor.named_parameters() if name in vector and parameter.grad is not None)
+            values.append(float(value));c.actor.zero_grad(set_to_none=True)
+    return values
+
+
+def exact_score_audit(c,rows,targets,cache,source):
+    """拟合/留出均为真实旧策略行为，Gaussian作为有限样本显著性检查的对照。"""
+    half=len(rows)//2;chosen=rows[:half];sub={k:v[:half] if torch.is_tensor(v) and v.shape==(len(rows),) else v for k,v in targets.items()}
+    part=RolloutTensorCache(chosen,sub,c.distributed.device,max_device_bytes=2*1024**3)
+    norms=json.loads((source/'gradient_directions.json').read_text())['matched_module_update_norms'];result={}
+    fit=[(r.metadata['training_task']['dataset'],r.metadata['training_task']['sample_id']) for r in chosen]
+    fitted={tuple(v) for group in c.distributed.all_gather_object(fit) for v in group}
+    for kind in ('proxy','gaussian'):
+        print(f'[EXACT SCORE rank={c.distributed.rank}] {kind}',flush=True)
+        gradient=_gradient(c,chosen,part,torch.ones(half,dtype=torch.float64),kind)
+        direction=matched_direction(gradient,norms);del gradient
+        projections=exact_score_projection(c,rows[half:],cache,direction,kind);del direction
+        local=[dict(source=r.metadata['training_task']['dataset'],music=r.metadata['training_task']['sample_id'],projection=value) for r,value in zip(rows[half:],projections)]
+        allrows=[v for group in c.distributed.all_gather_object(local) for v in group];music={}
+        for row in allrows:
+            key=(row['source'],row['music'])
+            if key not in fitted:music.setdefault(key,[]).append(row['projection'])
+        means=np.asarray([np.mean(v) for v in music.values()]);rng=np.random.default_rng(20261024)
+        boots=rng.choice(means,(10000,len(means)),replace=True).mean(1)
+        result[kind]=dict(mean=float(means.mean()),music_cluster_95=np.quantile(boots,[.025,.975]).tolist(),music_clusters=len(means),states=sum(len(v) for v in music.values()),rows=allrows)
+    part.close();return dict(scope='exact_autograd_score_directional_projection_at_old_theta_no_finite_difference',results=result)
+
+
 def main():
     parser=argparse.ArgumentParser(description=__doc__);parser.add_argument('--run',type=Path,required=True)
     parser.add_argument('--config',type=Path,required=True);parser.add_argument('--checkpoint',type=Path,required=True)
-    parser.add_argument('--output-dir',type=Path,required=True);args=parser.parse_args()
+    parser.add_argument('--output-dir',type=Path,required=True);parser.add_argument('--exact-score-only',action='store_true');args=parser.parse_args()
     rank=int(os.environ['RANK']);local=int(os.environ['LOCAL_RANK']);world=int(os.environ['WORLD_SIZE'])
     if world!=8 or rank!=local:raise ValueError('Requires explicitly allocated eight GPUs')
     torch.set_num_threads(3);torch.cuda.set_device(local)
@@ -81,6 +128,10 @@ def main():
     c=SimpleNamespace(actor=actor,policy=policy,distributed=collective)
     source=args.run/'decisive';data=torch.load(source/f'behavior_rank{rank:02d}.pt',map_location='cpu',weights_only=False)
     rows=data['rows'];targets=data['targets'];cache=RolloutTensorCache(rows,targets,collective.device,max_device_bytes=2*1024**3)
+    if args.exact_score_only:
+        result=exact_score_audit(c,rows,targets,cache,source)
+        root_call(collective,lambda:atomic_json(args.output_dir/'summary.json',result))
+        cache.close();dist.destroy_process_group(group);dist.destroy_process_group();return
     zero,zero_metrics=gaussian_ratios(c,rows,cache)
     report=dict(behavior_actions=sum(collective.all_gather_object(len(rows))),gaussian_zero_replay=collective.all_gather_object(zero_metrics),split={})
     grads={}
