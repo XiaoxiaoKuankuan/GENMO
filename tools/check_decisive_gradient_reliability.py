@@ -20,7 +20,7 @@ import torch
 import torch.distributed as dist
 
 ROOT=Path(__file__).resolve().parents[1];sys.path.insert(0,str(ROOT))
-from gem.closedloop.dppo.decisive_diagnostic import _gradient,matched_direction,module_stats,apply_direction,replay_outputs
+from gem.closedloop.dppo.decisive_diagnostic import _gradient,matched_direction,module_stats,apply_direction,replay_outputs,proxy_losses
 from gem.closedloop.dppo.collectives import DistributedCollectives
 from gem.closedloop.dppo.training_config import configuration
 from gem.closedloop.dppo.trainer import load_actor
@@ -34,10 +34,10 @@ from gem.closedloop.dppo.budget import atomic_json
 @torch.no_grad()
 def gaussian_ratios(c,rows,cache):
     from gem.closedloop.dppo.gaussian_probability import gaussian_statistics
-    values=[];maximum_mean=maximum_log=0.
+    values=[];kls=[];maximum_mean=maximum_log=0.
     with policy_phase(c.policy):
         for start in range(0,len(rows),4):
-            selected=rows[start:start+4];condition=cache.context(selected);total=torch.zeros(len(selected),device=c.distributed.device,dtype=torch.float64)
+            selected=rows[start:start+4];condition=cache.context(selected);total=torch.zeros(len(selected),device=c.distributed.device,dtype=torch.float64);kl=torch.zeros_like(total)
             for step in range(9,19):
                 traces=[r.metadata['sampler_trace'] for r in selected]
                 get=lambda field,k:torch.cat([t['diagnostic_'+field][:,k] for t in traces]).to(c.distributed.device)
@@ -45,14 +45,17 @@ def gaussian_ratios(c,rows,cache):
                 old=get('old_means',step);std=get('old_stds',step)
                 result=gaussian_statistics(get('chain',step+1),old,std,params['mean'],params['std'],params['free_mask'])
                 total+=result['joint_log_ratio']
+                kl+=result['joint_kl']
                 maximum_mean=max(maximum_mean,float((params['mean']-old).abs().max()))
-            maximum_log=max(maximum_log,float(total.abs().max()));values.extend(total.cpu().tolist())
-    return torch.tensor(values,dtype=torch.float64),dict(maximum_mean_difference=maximum_mean,maximum_joint_logratio=maximum_log)
+            maximum_log=max(maximum_log,float(total.abs().max()));values.extend(total.cpu().tolist());kls.extend(kl.cpu().tolist())
+    return torch.tensor(values,dtype=torch.float64),dict(maximum_mean_difference=maximum_mean,maximum_joint_logratio=maximum_log,
+        mean_conditional_chain_KL=float(np.mean(kls)),per_action_conditional_chain_KL=kls)
 
 
 def physical_differences(a,b,masks,codec):
     delta=(a-b).double();q1=codec.decode_to_canonical_qpos(a);q0=codec.decode_to_canonical_qpos(b)
-    selected=masks.any(-1);dot=(q1[:,:,3:7].double()*q0[:,:,3:7].double()).sum(-1).abs().clamp(0,1)
+    selected=masks.any(-1);qa=torch.nn.functional.normalize(q1[:,:,3:7].double(),dim=-1);qb=torch.nn.functional.normalize(q0[:,:,3:7].double(),dim=-1)
+    dot=(qa*qb).sum(-1).abs().clamp(0,1)
     angle=2*dot.acos();position=(q1[:,:,:3]-q0[:,:,:3]).double().square().sum(-1)
     legs=[9+i for i,n in enumerate(codec.kinematics.joint_order) if any(k in n.lower() for k in ('hip','knee','ankle'))]
     return dict(free_qpos30_rms=float(delta[masks].square().mean().sqrt()),
@@ -114,7 +117,12 @@ def main():
     actor.load_state_dict(policy.frozen_policy.actor.state_dict());teacher=replay_outputs(policy,probes);actor.load_state_dict(base)
     direction=torch.load(source/f'direction_rank{rank:02d}.pt',map_location='cpu',weights_only=False)
     sign=1 if rank%2==0 else -1;apply_direction(actor,base,direction,sign)
-    candidate=replay_outputs(policy,probes);actor.load_state_dict(base)
+    candidate=replay_outputs(policy,probes)
+    chain_ratio,chain_stat=gaussian_ratios(c,rows,cache)
+    old_loss=torch.stack([r.mc_record.old_loss for r in rows]);new_loss=proxy_losses(c,rows,cache)
+    raw=(old_loss-new_loss)*policy.robofft['logprob_normalizer']
+    proxy_ratio=raw.clamp(-10,10).mean(1)*policy.robofft['logratio_alpha']
+    actor.load_state_dict(base)
     consumed=masks.clone()
     for i,audit in enumerate(common['weight_audits'][:8]):
         frames=torch.zeros(60,dtype=torch.bool);frames[audit['current_generated_frames']]=True;consumed[i]&=frames[:,None]
@@ -125,6 +133,10 @@ def main():
         actually_consumed_change=physical_differences(candidate,current,consumed,codec),
         parent_stage1_fidelity=physical_differences(current,teacher,consumed,codec),
         candidate_stage1_fidelity=physical_differences(candidate,teacher,consumed,codec),
+        conditional_chain_statistics=chain_stat,
+        proxy_and_joint_logratio=dict(correlation=float(np.corrcoef(proxy_ratio.numpy(),chain_ratio.numpy())[0,1]),
+            proxy_mean=float(proxy_ratio.mean()),joint_mean=float(chain_ratio.mean()),proxy_std=float(proxy_ratio.std()),joint_std=float(chain_ratio.std()),
+            scope='same_old_chain_conditionals; joint_latent_ratio_is_not_explicit_final_action_density'),
         parameter_update_l2=math.sqrt(sum(float(v.double().square().sum()) for v in direction.values())))
     report['fixed_common_inputs']=collective.all_gather_object(difference)
     root_call(collective,lambda:atomic_json(args.output_dir/'summary.json',report))

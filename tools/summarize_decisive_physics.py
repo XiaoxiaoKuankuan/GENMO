@@ -96,8 +96,35 @@ def executed_references(report_path):
     return result
 
 
+def reference_continuity(before,after,kin):
+    """沿真实50Hz消费序列检查拼接后增量，覆盖参考银行重新接入前缀的边界。"""
+    identities=sorted(set(before)&set(after));checks=[];limits=kin.joint_limits.numpy()
+    for task in sorted({key[0] for key in identities}):
+        keys=[key for key in identities if key[0]==task];ticks=np.asarray([key[1] for key in keys])
+        a=np.stack([before[key] for key in keys]);b=np.stack([after[key] for key in keys])
+        contiguous=np.diff(ticks)==12;second=contiguous[:-1]&contiguous[1:]
+        bodies_a=kin.forward_body_positions(torch.tensor(a,dtype=torch.float32)).numpy()
+        bodies_b=kin.forward_body_positions(torch.tensor(b,dtype=torch.float32)).numpy()
+        if not np.isfinite(bodies_b).all():raise ValueError('Nonfinite executed FK')
+        excess_a=np.maximum(limits[:,0]-a[:,7:],a[:,7:]-limits[:,1])
+        excess_b=np.maximum(limits[:,0]-b[:,7:],b[:,7:]-limits[:,1])
+        row=dict(task_id=task,controls=len(keys),new_limit_coordinate_count=int(((excess_b>1e-5)&(excess_a<=1e-5)).sum()),
+            baseline_limit_coordinate_count=int((excess_a>1e-5).sum()),candidate_limit_coordinate_count=int((excess_b>1e-5).sum()),
+            maximum_additional_limit_excess_rad=float(np.maximum(excess_b-np.maximum(excess_a,0),0).max()))
+        for name,first,last in [('joint',a[:,7:],b[:,7:]),('root_position',a[:,:3],b[:,:3]),('body_position',bodies_a,bodies_b)]:
+            va=np.diff(first,axis=0)/.02;vb=np.diff(last,axis=0)/.02
+            row[name+'_velocity_baseline_max']=float(np.abs(va[contiguous]).max())
+            row[name+'_velocity_candidate_max']=float(np.abs(vb[contiguous]).max())
+            row[name+'_velocity_delta_max']=float(np.abs((vb-va)[contiguous]).max())
+            row[name+'_acceleration_delta_max']=float(np.abs(np.diff(vb-va,axis=0)[second]/.02).max())
+        checks.append(row)
+    return dict(scope='matched_actual_50Hz_center_reference_including_plan_splices; derivatives_do_not_cross_gaps; all_body_FK_includes_feet',
+        tasks=checks,new_limit_coordinate_count=sum(r['new_limit_coordinate_count'] for r in checks),
+        maxima={key:max(r[key] for r in checks) for key in checks[0] if key.endswith('_max') or key=='maximum_additional_limit_excess_rad'})
+
+
 def compare_one(work):
-    rank,kind,base_path,new_path,output,leg_indices=work;torch.set_num_threads(2)
+    rank,kind,base_path,new_path,output,leg_indices,kinematics_path=work;torch.set_num_threads(2)
     br,bp,before=load_report(base_path);nr,np_,after=load_report(new_path)
     if br['plan_sha256']!=nr['plan_sha256'] or [x['task_id'] for x in before]!=[x['task_id'] for x in after]:raise ValueError('Unpaired physics')
     rows=[];prefixes=[];pair_keys=[]
@@ -122,6 +149,8 @@ def compare_one(work):
         if not len(values):raise ValueError('Missing actual consumed references')
         r.update(controls=len(values),root_position_rms_m=float(np.sqrt(values[:,0].mean())),root_angle_rms_rad=float(np.sqrt(values[:,1].mean())),leg_rms_rad=float(np.sqrt(values[:,2].mean())))
         refs.append(r)
+    from gem.robots.bumi.kinematics import BumiKinematics
+    continuity=reference_continuity(actual_a,actual_b,BumiKinematics(kinematics_path))
     result=dict(rank=rank,kind=kind,baseline=str(base_path),candidate=str(new_path),plan_sha256=br['plan_sha256'],
         cohort='four_sources_eight_music_two_seeds_fixed_train_music_exploratory_no_multiplicity_correction',
         metrics={field:cluster_summary(rows,field+'_delta') for field in ('reward_per_second','full_task_reward','seconds','failure','activity','music_alignment','completion')},
@@ -129,6 +158,7 @@ def compare_one(work):
         candidate_metrics={field:cluster_summary(rows,field+'_final') for field in ('reward_per_second','full_task_reward','failure','activity')},
         common_prefix_tracking_rms=tracking,tracking_confidence=tracking_distribution(pair_keys,prefixes),
         executed_reference_changes={k:cluster_summary(refs,k) for k in ('root_position_rms_m','root_angle_rms_rad','leg_rms_rad')},
+        executed_reference_checks=continuity,
         reference_scope='actual_GMT_center_interpolation_from_world_plans; bootstrap_reference_excluded; no_counterfactual_after_failure',
         tasks=rows,reference_tasks=refs)
     atomic_json(Path(output)/f'{kind}_rank{rank:02d}.json',result)
@@ -152,9 +182,9 @@ def main():
         before=phase/f'decisive_{base}'/f'rank{rank:02d}'/'report/report.json'
         after=phase/f'decisive_{label}'/f'rank{rank:02d}'/'report/report.json'
         if not before.exists() or not after.exists():raise FileNotFoundError(f'Incomplete paired phase: {before}, {after}')
-        work.append((rank,args.kind,before,after,args.output_dir,leg))
+        work.append((rank,args.kind,before,after,args.output_dir,leg,config['paths']['kinematics']))
     with ProcessPoolExecutor(max_workers=args.workers) as pool:results=list(pool.map(compare_one,work))
-    summary=dict(kind=args.kind,candidates=[dict(label=label,**{k:r[k] for k in ('rank','metrics','baseline_metrics','candidate_metrics','common_prefix_tracking_rms','executed_reference_changes')}) for label,r in zip(labels,results)])
+    summary=dict(kind=args.kind,candidates=[dict(label=label,**{k:r[k] for k in ('rank','metrics','baseline_metrics','candidate_metrics','common_prefix_tracking_rms','executed_reference_changes','executed_reference_checks')}) for label,r in zip(labels,results)])
     task_ids=[r['task_id'] for r in results[0]['tasks']]
     spreads=[]
     for i,task in enumerate(task_ids):

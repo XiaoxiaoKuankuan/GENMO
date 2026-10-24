@@ -63,3 +63,27 @@ def test_complete_mc_rejects_missing_control_interval():
     rows=[dict(controls=[dict(tick=12,dt_s=.02,reward=1.),dict(tick=36,dt_s=.02,reward=2.)],
                executed_control_steps=2,zero_step_event_reward=0.)]
     with pytest.raises(ValueError,match='Noncontiguous'):discounted_complete(rows,.95)
+
+
+def test_consumed_reference_slerp_matches_half_turn_and_sign():
+    import numpy as np
+    from tools.summarize_decisive_physics import interpolate
+    q=np.zeros((2,28));q[0,3]=1.;q[1,6]=-1.;q[1,0]=2.
+    midpoint=interpolate(q,[(0,.5),(1,.5)])
+    assert midpoint[0]==1. and abs(np.linalg.norm(midpoint[3:7])-1.)<1e-12
+    assert abs(abs(midpoint[3])-2**-.5)<1e-12 and abs(abs(midpoint[6])-2**-.5)<1e-12
+
+
+def test_consumed_reference_derivatives_do_not_cross_time_gaps():
+    import numpy as np
+    from tools.summarize_decisive_physics import reference_continuity
+    class Kinematics:
+        joint_limits=torch.tensor([[-1.,1.]]*21)
+        def forward_body_positions(self,q):return q[:,:3,None].transpose(1,2)
+    before={};after={}
+    for i,tick in enumerate([0,12,24,60,72,84]):
+        q=np.zeros(28);q[3]=1.;before[('task',tick)]=q.copy();q[7]=[0,.01,.02,.5,.51,.52][i];after[('task',tick)]=q
+    result=reference_continuity(before,after,Kinematics())
+    assert result['new_limit_coordinate_count']==0
+    assert abs(result['maxima']['joint_velocity_delta_max']-.5)<1e-12
+    assert result['maxima']['joint_acceleration_delta_max']<1e-10
