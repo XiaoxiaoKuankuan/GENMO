@@ -593,11 +593,25 @@ def run_reference_only(c,source):
     finally:c.actor.load_state_dict(base);c.actor.zero_grad(set_to_none=True)
 
 
+def deployed_clock_evidence(decision):
+    """modeled_deployment.v3的真实部署时刻；训练GPU墙钟不参与仿真推进。"""
+    required=('prefix_frames','measured_arrival_tick','actual_decision_interval_ticks',
+        'generation_schedule','reference_commit','events','compact_execution_provenance')
+    if any(k not in decision for k in required) or decision['measured_arrival_tick'] is None:
+        raise ValueError('Missing actual deployment timing evidence')
+    result={k:copy.deepcopy(decision[k]) for k in required}
+    provenance=result['compact_execution_provenance']
+    if provenance is None:raise ValueError('Missing consumption timeline')
+    for plan in provenance['plans'].values():plan.pop('generation_wall_seconds',None)
+    return result
+
+
 def compare_zero_reports(before,after,*,prefix_only=False):
     """严格核验完整零扰动：初态/控制器/缓存、所有奖励误差及生成噪声时钟。"""
     from tools.summarize_decisive_physics import load_report
     _,plan,left=load_report(before);_,other,right=load_report(after)
     if (plan!=other if not prefix_only else plan['tasks']!=other['tasks']):raise ValueError('Zero intervention task plans differ')
+    if len(left)!=len(right) or not left:raise ValueError('Missing zero paired tasks')
     result=[]
     for a,b in zip(left,right):
         if a['task_id']!=b['task_id']:raise ValueError('Zero task order differs')
@@ -615,7 +629,7 @@ def compare_zero_reports(before,after,*,prefix_only=False):
         checks['all_rewards_exact']=differences['reward']==0.;checks['all_ticks_exact']=differences['tick']==0.
         checks['all_eight_errors_exact']=error==0.
         checks['deployment_clock']=(len(a['decisions'])>=len(b['decisions']) if prefix_only else len(a['decisions'])==len(b['decisions'])) and all(
-            x['latency_seconds']==y['latency_seconds'] and x['prefix_frames']==y['prefix_frames']
+            deployed_clock_evidence(x)==deployed_clock_evidence(y)
             for x,y in zip(a['decisions'],b['decisions']))
         result.append(dict(task_id=a['task_id'],passed=all(checks.values()),checks=checks,
             reward_max_difference=differences['reward'],tracking_max_difference=error,controls=len(ca)))
@@ -651,7 +665,9 @@ def run_reference_after_p0(c,source,*,local_source=None):
     import json
     from .evaluation import _digest
     from .reference_interventions import fixed_world_intervention,VARIANTS
-    source=Path(source);gate=json.loads((source/'p0/summary.json').read_text())
+    source=Path(source);gate_path=source/'p0/revalidated_summary.json'
+    if not gate_path.exists():gate_path=source/'p0/summary.json'
+    gate=json.loads(gate_path.read_text())
     if gate['status']!='passed':raise ValueError('P0 zero gate has not passed')
     rank=c.distributed.rank;baseline=Path(gate['results'][rank]['before'])
     plan=json.loads((baseline.parent/'selection.json').read_text())

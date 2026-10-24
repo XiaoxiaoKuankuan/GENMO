@@ -8,6 +8,19 @@ from gem.closedloop.dppo.decisive_diagnostic import clip_masks,matched_direction
 from gem.closedloop.robofft.surrogate import action_objective
 
 
+def test_modeled_deployment_compares_real_ticks_not_training_wall_clock():
+    import copy
+    from gem.closedloop.dppo.decisive_diagnostic import deployed_clock_evidence
+    a=dict(prefix_frames=12,measured_arrival_tick=744,actual_decision_interval_ticks=180,
+        generation_schedule='continuous_rolling.v1',reference_commit={'effective_tick':744},events=[],
+        compact_execution_provenance={'plans':{'plan':{'generation_wall_seconds':1.4,'commit_tick':744}},'steps':[]},
+        latency_seconds=1.4)
+    b=copy.deepcopy(a);b['latency_seconds']=.9;b['compact_execution_provenance']['plans']['plan']['generation_wall_seconds']=.9
+    assert deployed_clock_evidence(a)==deployed_clock_evidence(b)
+    b['measured_arrival_tick']+=12
+    assert deployed_clock_evidence(a)!=deployed_clock_evidence(b)
+
+
 def test_actual_clip_matches_autograd_for_both_signs():
     ratios=torch.tensor([.97,.97,1.03,1.03,1.,1.],dtype=torch.float64)
     adv=torch.tensor([1.,-1.,1.,-1.,1.,-1.],dtype=torch.float64)
