@@ -171,7 +171,7 @@ def export_evaluation_actor(path,*,actor,kernel,source_identity,case_sha256,repo
 def candidate_update_checks(report,kl,config):
     """分开报告硬KL和正式候选KL；PPO目标变化仅作诊断，不作为接受条件。
 
-    固定LR试探故意不回溯，可能KL硬门槛通过但PPO目标下降。按生产原有margin、
+    LR试探可显式启用回溯，仍可能KL通过但PPO目标下降或未覆盖完整轮次。按生产原有margin、
     soft KL与active clip重新判读；这里只解释结果，不改变本次真实更新。
     """
     hard=check_candidate_kl(kl,config['stage10']['kl'])
@@ -372,7 +372,7 @@ def argument_parser():
     parser.add_argument('--epochs',type=int,default=1)
     parser.add_argument('--max-optimizer-steps',type=int,help='有限固定数据比较可限制优化步数，保留实际完整链Mini-batch')
     parser.add_argument('--reset-actor-adam',action='store_true',help='模拟新逐步DPPO迁移时重置旧联合目标Adam矩')
-    parser.add_argument('--adaptive-kl',action='store_true',help='实际联合KL回溯；各LR为候选上限而非承诺接受步长')
+    parser.add_argument('--adaptive-kl',action='store_true',help='逐去噪步骤KL回溯；各LR为候选上限而非承诺接受步长')
     parser.add_argument('--audit-condition-chunk-boundary',action='store_true',
         help='一次性用每rank1025条有效真实链验证默认1024+1条件块；样本不足明确失败')
     parser.add_argument('--audit-full-gradient-direction',action='store_true',
@@ -523,9 +523,11 @@ def main():
             if args.save_probability_records:trial['probability_records']=probability_artifact
             trials.append(trial)
             root_call(distributed,lambda:atomic_json(args.output_dir/f'candidate_lr{lr:.8g}_epoch{args.epochs}.json',trial))
-            if rank==0:print(json.dumps(dict(lr=lr,accepted=trial['acceptance']['passed'],
+            if rank==0:print(json.dumps(dict(lr=lr,kl_passed=trial['acceptance']['passed'],
+                completed_planned_steps=(trial.get('actor',{}).get('optimizer_steps',0)==
+                    trial.get('actor',{}).get('planned_optimizer_steps',-1)),
                 steps=trial.get('actor',{}).get('optimizer_steps'),
-                joint_kl=trial.get('kl',{}).get('denoising_step_kl'),
+                step_kl=trial.get('kl',{}).get('denoising_step_kl'),
                 failures=trial['acceptance']['failures']),ensure_ascii=False),flush=True)
         restore_initial()
         restored=compare_recovered_state(initial,snapshot())
