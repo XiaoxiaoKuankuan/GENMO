@@ -35,8 +35,8 @@ def read_config(path):
     expected = {"motion_frames": 60, "motion_fps": 30, "ddim_steps": 20, "eta": 0.0}
     if any(cfg["model"].get(k) != v for k, v in expected.items()):
         raise ValueError("首版固定60@30、全20步DDIM eta0")
-    if cfg["execution"]["start_large_scale_training"]:
-        raise ValueError("此交付默认仅显式有界运行，不自动启动大规模训练")
+    if cfg["model"]["cfg_scale"] != 2.5:
+        raise ValueError("本次正式合同固定CFG=2.5")
     return cfg
 
 
@@ -66,7 +66,7 @@ def build_components(cfg, device):
     load_stage1_checkpoint(base, checkpoint)
     base.eval()
     actor = ForecastActor(base, activation_checkpointing=cfg["model"]["activation_checkpointing"],
-                          guidance_scale=cfg["model"]["cfg_scale"]).to(device)
+                          guidance_scale=cfg["model"]["cfg_scale"], batch_cfg=cfg["model"].get("batch_cfg", True)).to(device)
     bundle = load_bundle(require_file(cfg["supermimic"]["checkpoint"], "supermimic.checkpoint"), device,
                          robot_asset_dir=cfg["supermimic"]["robot_asset_dir"])
     adapter = SMAdapter(bundle, base.endecoder.kinematics.joint_order, device)
@@ -81,6 +81,7 @@ def build_components(cfg, device):
 
 def behavior_config(cfg, actor, adapter):
     return {k: cfg[k] for k in ("algorithm", "physics_backend", "model", "clock", "imagination", "critic", "rewards", "training")} | {
+        "formal": cfg.get("formal"),
         "stage1_asset": {k: v for k, v in actor_asset_identity(actor.stage1).items() if not k.endswith("_path")},
         "robot_contract": adapter.bundle.metadata["robot"],
         "task_sequence": [task_identity(t) for t in read_tasks(cfg["tasks"])],

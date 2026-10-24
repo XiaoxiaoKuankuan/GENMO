@@ -23,6 +23,7 @@ class Imagination:
         self.actor, self.adapter, self.scheduler, self.rewards = actor, adapter, scheduler, rewards
         self.decisions, self.gamma = decisions, gamma
         self.forecast_enabled, self.max_model_steps = forecast_enabled, max_model_steps
+        self.support_guard = None
 
     def rollout(self, initial, noises, actual_latency_ticks, *, detach_initial=True,
                 transition_fn=None, on_step=None, on_plan=None, on_transition=None):
@@ -31,6 +32,8 @@ class Imagination:
             raise ValueError("每个决策必须有独立重参数噪声和外生延迟")
         z = initial.detached() if detach_initial else initial
         z.validate(decision=True)
+        if self.support_guard is not None:
+            self.support_guard(z.state)
         intervals = []
         model_steps = 0
         state_depth, reference_depth = 0, 0
@@ -47,7 +50,7 @@ class Imagination:
                                                   f"reference_exhausted:{error}", {}))
                 break
             if self.forecast_enabled:
-                forecast = forecast_rollout(z, self.adapter, ticket.first_influence_tick)
+                forecast = forecast_rollout(z, self.adapter, ticket.first_influence_tick, support_guard=self.support_guard)
                 context = forecast.context
                 plan_depth = max(state_depth, reference_depth) + forecast.control_steps
                 forecast_branches.append({"control_steps": forecast.control_steps, "dependency_steps": plan_depth})
@@ -90,6 +93,8 @@ class Imagination:
                         state1 = (self.adapter.bundle.step_model(z.state, action, z.xi) if transition_fn is None
                                   else transition_fn(action))
                     ref1, _, _ = z.reference.read_current_future(z.tick + 12)
+                    if self.support_guard is not None:
+                        self.support_guard(state1)
                     if on_transition is not None:
                         on_transition(z, action, state1, ref1)
                     reward, _ = self.rewards(state1, action, z.previous_action, ref1)

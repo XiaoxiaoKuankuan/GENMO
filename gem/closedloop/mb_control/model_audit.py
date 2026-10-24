@@ -14,6 +14,7 @@ from supermimic.mdp import flatten_state, unflatten_state
 from supermimic.rotations import so3_log
 from .returns import actor_return
 from .execution_audit import state_probe
+from .validation import state_envelope
 
 
 def state_errors(predicted, real, kin=None):
@@ -129,6 +130,7 @@ def audit_generated_reference(engine, collector, music, initial, *, noise_seed, 
                 "physical_repeat_return": float(repeated), "physical_reward_dt": real_rewards,
                 "physical_end": real_intervals[-1].reason, "model_end": model_intervals[-1].reason,
                 "main_control_steps": len(model_trace), "required_dependency_steps": dependency_steps,
+                "real_state_envelope": state_envelope(torch.cat((initial.detach().cpu(), real_trace))),
                 "forecast_branches": model_intervals[-1].event.get("forecast_branches", []),
                 "candidates": candidates, "direction_fraction": direction_fraction,
                 "state_only_direction_fraction": state_direction_fraction,
@@ -182,4 +184,5 @@ def audit_known_reference(collector, music, initial, reference, horizons=(5, 10,
     passed = criteria is not None and all("status" not in value and all(value[k] <= bound for k, bound in criteria["state_rmse_limits"].items())
                                          for regime in result.values() for value in regime.values())
     return {"regimes": result, "passed": bool(passed), "horizons": horizons,
+            "real_state_envelope": state_envelope(traces["real"]),
             "real_control_steps": len(traces["real"]), "initialization": "reference_first_full_state_no_future_real_state"}

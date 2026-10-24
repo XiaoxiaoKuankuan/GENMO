@@ -22,7 +22,7 @@ class ForecastResult:
     control_steps: int
 
 
-def forecast_rollout(state, adapter, forecast_tick):
+def forecast_rollout(state, adapter, forecast_tick, *, support_guard=None):
     if state.pending or forecast_tick < state.tick or (forecast_tick - state.tick) % 12:
         raise ValueError("前瞻必须从无pending请求预测到未来控制网格")
     predicted = state
@@ -33,6 +33,8 @@ def forecast_rollout(state, adapter, forecast_tick):
             action = adapter.bundle.act(predicted.sm_history, goal)
         with torch.profiler.record_function("mb/forecast_world_model"):
             next_state = adapter.bundle.step_model(predicted.state, action, predicted.xi)
+        if support_guard is not None:
+            support_guard(next_state)
         predicted = adapter.advance(predicted, next_state, action, origin="imagined")
     ref, _, _ = predicted.reference.read_current_future(forecast_tick)
     p, R, v, w, q, qd = unflatten_state(predicted.state)

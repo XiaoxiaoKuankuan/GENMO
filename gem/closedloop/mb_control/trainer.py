@@ -81,6 +81,7 @@ class Stage2Trainer:
 
     def update(self, initial_states, supervised_batch, actual_latencies, *, physical_intervals):
         from .execution_audit import state_probe
+        from .validation import UnsupportedModelState
         started = time.perf_counter()
         if not initial_states or len(initial_states) != len(actual_latencies):
             raise ValueError("真实快照与外生延迟批次必须非空且对齐")
@@ -102,7 +103,11 @@ class Stage2Trainer:
                       for _ in range(self.imagination.decisions)]
             noises[0].requires_grad_(not warming)
             with torch.set_grad_enabled(not warming), frozen_parameters(self.critic):
-                intervals = self.imagination.rollout(z, noises, latencies)
+                try:
+                    intervals = self.imagination.rollout(z, noises, latencies)
+                except UnsupportedModelState as error:
+                    rejected.append(str(error))
+                    continue
                 training_pairs.extend(self._targets(intervals))
                 final = intervals[-1]
                 terminal_value = torch.zeros_like(final.reward) if final.terminal or warming else self.critic(final.end)
@@ -157,7 +162,7 @@ class Stage2Trainer:
         critic_loss, critic_norm = self.fit_critic(training_pairs)
         self.imagination.adapter.bundle.assert_unchanged(self.frozen_identity)
         self.update_index += 1
-        return {"update": self.update_index, "critic_warmup": warming, "model_return": sum(returns) / len(returns),
+        return {"update": self.update_index, "critic_warmup": warming, "model_return": sum(returns) / len(returns) if returns else None,
                 "accepted_actor_updates": self.accepted_actor_updates, "accepted_execution_feedback_update": accepted,
                 "critic_updates": self.critic_updates, "invalid_actor_attempts": self.invalid_actor_attempts,
                 "bc_only_update": False, "model_gradient_norm_before_bc": model_norm,

@@ -45,6 +45,8 @@ def audit_gradients(actor, critic, engine, z, latencies, *, finite_difference=Fa
         original = actor.stage1.sample(conditions, steps=20, guidance_scale=actor.guidance_scale, noise=noise)
         zero = actor.sample(conditions, context, noise)
     zero_error = float((original["qpos30"] - zero["qpos30"]).abs().max())
+    if zero_error > 1e-5:
+        raise AssertionError(f"零未来分支不满足原Stage1同噪声输出精度: {zero_error}")
     enabled = actor.activation_checkpointing
     actor.activation_checkpointing = False
     plain = actor.sample_differentiable(conditions, context, noise)

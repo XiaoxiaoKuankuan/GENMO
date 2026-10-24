@@ -25,12 +25,20 @@ def sample_differentiable(actor, conditions, context, initial_noise, *, guidance
     residual = base._residual(adapted) + actor.future_encoder(context, conditions["future_times"])
     conditional = base._music_condition(adapted) + residual
     unconditional = base._music_condition(adapted, torch.ones(len(value), dtype=torch.bool, device=value.device)) + residual
+    doubled = {k: torch.cat((adapted[k], adapted[k]), 0) for k in ("known_mask", "known_x", "future_valid")}
 
     def guided_impl(x, t, c, u):
-        cond = base._denoise(x, t, adapted, c)
         if guidance_scale == 1.0:
-            return cond
-        uncond = base._denoise(x, t, adapted, u)
+            return base._denoise(x, t, adapted, c)
+        if actor.batch_cfg:
+            # 同一当前网络的两个CFG分支拼批，数学公式和20次采样日程保持不变。
+            combined = base._denoise(torch.cat((x, x)), torch.cat((t, t)), doubled, torch.cat((c, u)))
+            cond, uncond = {}, {}
+            for key, output in combined.items():
+                cond[key], uncond[key] = output.chunk(2)
+        else:
+            cond = base._denoise(x, t, adapted, c)
+            uncond = base._denoise(x, t, adapted, u)
         return {"pred_x_start": base._constrain(uncond["pred_x_start"] + guidance_scale *
                                                  (cond["pred_x_start"] - uncond["pred_x_start"]), adapted),
                 "static_conf_logits": uncond["static_conf_logits"] + guidance_scale *

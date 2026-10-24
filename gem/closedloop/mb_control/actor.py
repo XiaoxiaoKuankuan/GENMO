@@ -15,12 +15,13 @@ from .online_conditions import build_conditions
 
 
 class ForecastActor(nn.Module):
-    def __init__(self, stage1, *, activation_checkpointing=True, guidance_scale=2.5):
+    def __init__(self, stage1, *, activation_checkpointing=True, guidance_scale=2.5, batch_cfg=True):
         super().__init__()
         self.stage1 = stage1
         self.future_encoder = FutureStateEncoder(stage1.denoiser.latent_dim)
         self.activation_checkpointing = activation_checkpointing
         self.guidance_scale = guidance_scale
+        self.batch_cfg = batch_cfg
 
     def sample_differentiable(self, conditions, context, noise):
         self.eval()

@@ -19,6 +19,9 @@ def main(kind):
     parser.add_argument("--output", required=True)
     parser.add_argument("--torch-device", default="cuda:0")
     parser.add_argument("--updates", type=int, default=4)
+    parser.add_argument("--run-mode", choices=("smoke", "formal"), default="smoke")
+    parser.add_argument("--max-actor-updates", type=int, default=5000)
+    parser.add_argument("--resume-latest", action="store_true")
     parser.add_argument("--resume")
     parser.add_argument("--actor-checkpoint")
     parser.add_argument("--mode", choices=("stage1", "full", "no_forecast", "calibration"), default="stage1" if kind == "evaluate" else "full")
@@ -45,6 +48,12 @@ def main(kind):
     from .replay import RecentReplay
     from .checkpoint import save_checkpoint, load_checkpoint, SCHEMA
     cfg = read_config(args.config)
+    if args.run_mode == "formal" and kind != "train":
+        raise ValueError("formal只用于显式训练命令")
+    if args.run_mode == "formal":
+        if args.max_actor_updates < 1 or not cfg.get("formal"):
+            raise ValueError("正式模式需要正数accepted目标和完整formal配置")
+        cfg["training"]["require_critic_quality"] = True
     cfg["model"]["forecast_enabled"] = args.mode in ("full", "calibration")
     if args.bootstrap_latency_ticks is not None:
         cfg["clock"]["bootstrap_latency_ticks"] = args.bootstrap_latency_ticks
@@ -58,7 +67,7 @@ def main(kind):
     if kind == "train":
         if args.mode in ("stage1", "calibration"):
             raise ValueError("Stage1 baseline不启动优化器")
-        if not 1 <= args.updates <= cfg["execution"]["maximum_explicit_updates"]:
+        if args.run_mode == "smoke" and not 1 <= args.updates <= cfg["execution"]["maximum_explicit_updates"]:
             raise ValueError("本入口仅执行配置允许的显式有界更新")
         if not 1 <= cfg["training"]["actor_microbatch"] <= 4 or cfg["execution"]["physical_batch"] != 1:
             raise ValueError("首版物理batch1，BPTT微批1–4逐样本梯度累积")
@@ -71,10 +80,8 @@ def main(kind):
         steps = cfg["imagination"]["validated_model_steps"]
         if not isinstance(steps, int) or steps < 1 or steps > report["supported_control_steps"]:
             raise ValueError("训练WM时域必须受实际P3证据支持")
-        if not {t["id"] for t in tasks} <= set(report.get("task_ids", [])):
-            raise ValueError("当前任务超出P3已审计音乐/初态范围")
-        if any(report.get("task_identities", {}).get(t["id"]) != task_identity(t) for t in tasks):
-            raise ValueError("P3报告的实际音乐、初态或种子与当前任务不一致")
+        from .validation import validate_coverage
+        validate_coverage(tasks, report)
         if report.get("forecast_enabled") != cfg["model"]["forecast_enabled"]:
             raise ValueError("P3报告与本次前瞻条件设置不一致")
     actor, adapter, scheduler, rewards, critic, engine, original = build_components(cfg, args.torch_device)
@@ -94,9 +101,15 @@ def main(kind):
     elif kind == "evaluate" and args.mode not in ("stage1", "calibration"):
         raise ValueError("完整/无前瞻训练模型评估需要明确Actor checkpoint")
     output = Path(args.output).expanduser().resolve()
-    output.mkdir(parents=True, exist_ok=False)
+    if args.run_mode == "formal":
+        if output.exists() and (output / "training.jsonl").exists() and not (args.resume or args.resume_latest):
+            raise ValueError("正式目录已有训练，必须明确resume，不能覆盖")
+        output.mkdir(parents=True, exist_ok=True)
+    else:
+        output.mkdir(parents=True, exist_ok=False)
     source_info = provenance(cfg)
-    (output / "manifest.json").write_text(json.dumps(source_info, ensure_ascii=False, indent=2))
+    manifest = output / (f"resume_manifest_{time.time_ns()}.json" if (output / "manifest.json").exists() else "manifest.json")
+    manifest.write_text(json.dumps(source_info, ensure_ascii=False, indent=2))
     if kind == "gradients":
         from .gradient_audit import tensor_fixture, audit_gradients
         music, initial = task_inputs(tasks[0], adapter, args.torch_device)
@@ -169,7 +182,13 @@ def main(kind):
                             "required_dependency_steps": item["required_dependency_steps"]}, ensure_ascii=False), flush=True)
                 keys = ("prediction_passed", "physical_direction_passed", "reset_replay_repeatability_passed", "known_reference_passed")
                 result = {k: all(item[k] for item in cases) for k in keys}
+                from .validation import combine_envelopes
+                envelopes = [item["real_state_envelope"] for item in cases]
+                envelopes.extend(item["known_reference"]["real_state_envelope"] for item in cases if "known_reference" in item)
                 result.update(cases=cases, frozen_sha256=adapter.bundle.metadata["sha256"], task_ids=[t["id"] for t in tasks],
+                              coverage={"physics": "nominal_flat_newton_mujoco_warp",
+                                        "tasks": [{k:t.get(k) for k in ("id", "source", "split", "distribution_id")} for t in tasks]},
+                              validated_state_envelope=combine_envelopes(envelopes),
                               task_identities={t["id"]: task_identity(t) for t in tasks},
                               forecast_enabled=cfg["model"]["forecast_enabled"],
                               scope="selected_tasks_seeds_and_nominal_physics_only",
@@ -178,6 +197,10 @@ def main(kind):
             elif kind == "train":
                 losses = build_stage1_losses(actor.stage1, original).to(args.torch_device)
                 trainer = Stage2Trainer(actor, critic, engine, losses, cfg["training"])
+                if args.run_mode == "formal":
+                    from .formal import run_formal
+                    run_formal(args, cfg, output, trainer, collector, profile, tasks, report, source_info)
+                    return
                 replay = RecentReplay(cfg["training"]["replay_capacity"], cfg["training"]["seed"])
                 supervised = SupervisionStream(cfg["stage1"]["data_config"], cfg["training"]["supervision_batch"],
                                                cfg["training"]["seed"], args.torch_device)
