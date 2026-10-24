@@ -576,7 +576,7 @@ def run_reference_only(c,source):
     output=c.output/'fresh_physics';output.mkdir(exist_ok=True)
     try:
         plan=json.loads((Path(source)/'decisive/plan.json').read_text());plan['tasks']=[t for t in plan['tasks'] if t['seed']==42]
-        plan.update(episode_seconds=20.,task_count=8,seeds=[42],complete_music_scope=False,evaluation_purpose='continuous_bank_bridge_20s_one_seed_zero_intervention_control')
+        plan.update(episode_seconds=20.,task_count=8,seeds=[42],complete_music_scope=False,evaluation_purpose='training_progress',diagnostic_scope='continuous_bank_bridge_20s_one_seed_zero_intervention_control')
         plan.pop('plan_sha256');plan['plan_sha256']=_digest(plan)
         root_call(c.distributed,lambda:atomic_json(output/'reference_plan.json',plan))
         c.stage['evaluation']['envs_per_rank']=8;c.stage['evaluation']['persistent_world']=False
