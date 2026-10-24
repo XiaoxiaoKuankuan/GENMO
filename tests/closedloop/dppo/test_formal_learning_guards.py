@@ -96,6 +96,15 @@ def test_episode_holdout_keeps_all_adjacent_states_together():
     assert sorted(train+val)==list(range(24))
 
 
+def test_episode_holdout_does_not_switch_sides_when_next_window_changes_population():
+    manifest=[dict(owner_rank=0,local_index=i) for i in range(60)]
+    ids={(0,i):dict(backend_session_id='test',env_id=0,episode_id=i//2) for i in range(60)}
+    small_train,small_val=split_episodes(list(range(12)),manifest,ids,.2)
+    large_train,large_val=split_episodes(list(range(60)),manifest,ids,.2)
+    assert set(small_train)<=set(large_train)
+    assert set(small_val)<=set(large_val)
+
+
 def test_critic_fixed_reference_rejection_restores_best_adam(actor_factory):
     from gem.closedloop.dppo.pretrained_critic import PretrainedConditionCritic
     from gem.closedloop.dppo.tensor_cache import RolloutTensorCache

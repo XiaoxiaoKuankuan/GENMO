@@ -45,10 +45,14 @@ def split_episodes(selected, manifest, identities, fraction):
         identity = identities[(item['owner_rank'], item['local_index'])]
         keys[index] = (item['owner_rank'], identity['backend_session_id'],
                        identity.get('env_id', 0), identity['episode_id'])
-    groups = sorted(set(keys.values()), key=lambda k: hashlib.sha256(repr(k).encode()).digest())
+    groups = set(keys.values())
     if len(groups) < 2:
         raise ValueError('Critic validation requires at least two independent episodes')
-    held = set(groups[:max(1, math.ceil(len(groups)*fraction))])
+    # 按episode身份固定分桶，不能按当前窗口的分位数重排；同一episode跨越多个
+    # 8秒窗口时，新episode加入不能使它从训练侧转到验证侧或反过来。
+    held = {k for k in groups if int.from_bytes(hashlib.sha256(repr(k).encode()).digest(), 'big')/(1 << 256) < fraction}
+    if not held or held == groups:
+        raise ValueError('Critic episode hash split requires nonempty training and validation sets')
     return ([i for i in selected if keys[i] not in held],
             [i for i in selected if keys[i] in held])
 
