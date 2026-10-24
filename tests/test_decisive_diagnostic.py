@@ -45,3 +45,21 @@ def test_smooth_window_zero_on_prefix_and_boundaries():
     assert (window[0,:12]==0).all() and window[0,-1]==0
     assert (window[1,:21]==0).all() and (window[1,51:]==0).all()
     assert window.min()>=0 and window.max()<=1 and window[0,20]==1
+
+
+def test_complete_mc_independent_discount_and_terminal_event():
+    from tools.analyze_decisive_credit import discounted_complete
+    gamma=.95;g=gamma**(1/25)
+    rows=[dict(controls=[dict(tick=12,dt_s=.02,reward=1.),dict(tick=24,dt_s=.02,reward=2.)],
+               executed_control_steps=2,zero_step_event_reward=0.),
+          dict(controls=[dict(tick=36,dt_s=.02,reward=3.)],executed_control_steps=1,zero_step_event_reward=-5.)]
+    result=discounted_complete(rows,gamma)
+    assert abs(result[0]-(1+2*g-2*g*g))<1e-12 and result[1]==-2
+
+
+def test_complete_mc_rejects_missing_control_interval():
+    import pytest
+    from tools.analyze_decisive_credit import discounted_complete
+    rows=[dict(controls=[dict(tick=12,dt_s=.02,reward=1.),dict(tick=36,dt_s=.02,reward=2.)],
+               executed_control_steps=2,zero_step_event_reward=0.)]
+    with pytest.raises(ValueError,match='Noncontiguous'):discounted_complete(rows,.95)
