@@ -11,6 +11,7 @@ from datetime import timedelta
 from pathlib import Path
 
 import torch
+import pytest
 import torch.distributed as dist
 import torch.multiprocessing as mp
 
@@ -33,7 +34,7 @@ def _worker(rank,directory):
             data=torch.load(directory/'inputs.pt',weights_only=False)
             actor=data['actor'];t=settings()
             policy=RoboFFTDiffusionPolicy(actor,frozen_actor=data['frozen'],frozen_prefix_steps=9,
-                generation_frames=60,std_schedule=t['std_schedule'],robofft=t['robofft'])
+                generation_frames=60,std_schedule=t['std_schedule'],robofft=data['robofft'])
             owned=([0,1] if rank==0 else []) if empty_rank else [rank]
             rows=[data['rows'][i] for i in owned]
             targets=dict(data['targets'],advantages=data['targets']['advantages'][owned])
@@ -47,6 +48,7 @@ def _worker(rank,directory):
             optimizer=make_actor_optimizer(actor,t)
             result['update']=actor_update(policy,optimizer,rows,targets,cache,manifest,distributed=distributed,
                 generator=torch.Generator().manual_seed(15),minibatch_actions=1,microbatch=1,
+                ppo_epochs=data['epochs'],
                 diagnostic_sentinel_actions=1)
             result['state']=copy.deepcopy(actor.state_dict())
             # 同一全局 surrogate 触发全部 rank 的相同早停，包含完全空的 rank。
@@ -69,21 +71,26 @@ def _worker(rank,directory):
         dist.destroy_process_group()
 
 
-def test_gloo_sum_matches_concatenated_and_empty_rank(actor_factory,tmp_path):
+@pytest.mark.parametrize('weighted',[False,True])
+def test_gloo_sum_matches_concatenated_and_empty_rank(actor_factory,tmp_path,weighted):
     policy,context=make_policy(actor_factory)
+    if weighted:
+        from tests.closedloop.dppo.test_robofft_execution_weights import WEIGHTS
+        policy.robofft.update(execution_weighting=WEIGHTS,beta_neg=.5,mc_microbatch=4)
     rows,targets,cache,_=make_rows(policy,context)
     prepare_mc(policy,rows,cache,torch.Generator().manual_seed(444),microbatch=1)
     actor, frozen=copy.deepcopy(policy.actor),copy.deepcopy(policy.frozen_policy.actor)
     # 夹具跨进程仅传网络；原 GaussianDiffusion 带局部 lambda，策略会从参数重建日程。
     actor.train_diffusion=None;frozen.train_diffusion=None
-    torch.save(dict(actor=actor,frozen=frozen,rows=rows,targets=targets),tmp_path/'inputs.pt')
+    torch.save(dict(actor=actor,frozen=frozen,rows=rows,targets=targets,robofft=policy.robofft,
+        epochs=2 if weighted else 1),tmp_path/'inputs.pt')
     objective_batch(policy,rows,cache,clip=.01,global_count=2,backward=True)
     expected=gradients(policy.actor)
     mp.spawn(_worker,args=(str(tmp_path),),nprocs=2,join=True)
     for empty in (False,True):
         results=[torch.load(tmp_path/f'rank{rank}_empty{empty}.pt',weights_only=False) for rank in range(2)]
         for result in results:
-            assert result['update']['optimizer_steps']==2
+            assert result['update']['optimizer_steps']==(4 if weighted else 2)
             assert result['early_stop']==(1,'surrogate_kl_early_stop')
             assert result['cooperative_failure']
             for name,value in expected.items():

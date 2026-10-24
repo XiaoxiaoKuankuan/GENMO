@@ -32,10 +32,14 @@ def _losses(policy, rows, cache, start, end):
     for row in rows:
         row.mc_record.validate()
     records = [row.mc_record for row in rows]
+    temporal = ([r.time_weights for r in records] if records[0].time_weights is not None else None)
+    if any((r.time_weights is None) != (temporal is None) for r in records):
+        raise ValueError('Cannot mix weighted and original MC records')
     return policy.losses(cache.context(rows), cache.get('action_x0', rows),
         torch.stack([r.eps[start:end] for r in records]),
         torch.stack([r.sampling_indices[start:end] for r in records]),
-        torch.stack([r.original_timesteps[start:end] for r in records]))
+        torch.stack([r.original_timesteps[start:end] for r in records]),
+        **({} if temporal is None else dict(time_weights=torch.stack(temporal))))
 
 
 def _cache_signature(cache):
@@ -49,6 +53,23 @@ def prepare_mc(policy, rows, cache, generator, *, microbatch=8):
         raise ValueError('MC records already fixed; old losses must not be regenerated')
     m = policy.robofft['mc_samples']
     chunk = policy.robofft['mc_microbatch']
+    temporal = None
+    weighting = policy.robofft.get('execution_weighting')
+    if weighting is not None:
+        from .execution_weights import weights_for_rows
+        temporal, audits = weights_for_rows(rows, weighting)
+        for row, audit in zip(rows, audits):
+            row.metadata['execution_weighting'] = audit
+        cache.robofft_weight_audit = dict(actions=len(rows),
+            current_generated_frames=sum(len(a['current_generated_frames']) for a in audits),
+            window_only_generated_frames=sum(len(a['window_only_generated_frames']) for a in audits),
+            overwritten_unobserved_free_frames=sum(len(a['unobserved_free_frames_overwritten_by_committed_child']) for a in audits),
+            near_free_frames=sum(a['near_free_frames'] for a in audits),
+            middle_free_frames=sum(a['middle_free_frames'] for a in audits),
+            far_free_frames=sum(a['far_free_frames'] for a in audits),
+            predicted_actions=sum(a['scope'].startswith('predicted') for a in audits),
+            incomplete_lineage_actions=sum(not a['source_lineage_complete'] for a in audits),
+            objective='execution_weighted_robofft_surrogate_not_original_RoboFFT')
     for start in range(0, len(rows), microbatch):
         selected = rows[start:start + microbatch]
         for row in selected:
@@ -59,11 +80,13 @@ def prepare_mc(policy, rows, cache, generator, *, microbatch=8):
         for k in range(0, m, chunk):
             losses.append(policy.losses(cache.context(selected), action,
                 mc['eps'][:, k:k+chunk], mc['sampling_indices'][:, k:k+chunk],
-                mc['original_timesteps'][:, k:k+chunk]).cpu())
+                mc['original_timesteps'][:, k:k+chunk],
+                **({} if temporal is None else dict(time_weights=torch.stack(temporal[start:start+len(selected)])))).cpu())
         old = torch.cat(losses, dim=1)
         for i, row in enumerate(selected):
             row.mc_record = MCRecord(mc['eps'][i], mc['sampling_indices'][i],
-                mc['original_timesteps'][i], old[i], torch.arange(m))
+                mc['original_timesteps'][i], old[i], torch.arange(m),
+                time_weights=None if temporal is None else temporal[start+i])
     cache.robofft_input_signature = _cache_signature(cache)
     return dict(algorithm=ALGORITHM, local_actions=len(rows), mc_samples=m,
         old_loss_fixed_before_any_optimizer=True, gaussian_probability_evaluations=0)
@@ -130,7 +153,10 @@ def output_probe(policy, rows, cache):
         return None
     generators = [torch.Generator(device=cache.device).manual_seed(80917+i) for i in range(len(selected))]
     trace = policy.sample_rollout(cache.context(selected), generator=generators)
-    return {k: trace[k].detach().clone() for k in ('normalized', 'qpos', 'free_mask')}
+    result = {k: trace[k].detach().clone() for k in ('normalized', 'qpos', 'free_mask')}
+    if selected[0].mc_record is not None and selected[0].mc_record.time_weights is not None:
+        result['time_weights'] = torch.stack([r.mc_record.time_weights for r in selected]).to(cache.device)
+    return result
 
 
 def compare_outputs(before, after):
@@ -143,12 +169,24 @@ def compare_outputs(before, after):
     change = (joint_after - joint_before)[joint_free].double()
     rms=lambda v: float(v.double().square().mean().sqrt()) if v.numel() else None
     maximum=lambda v: float(v.abs().max()) if v.numel() else None
-    return dict(actions=len(before['normalized']), normalized_change_rms=rms(delta),
+    result = dict(actions=len(before['normalized']), normalized_change_rms=rms(delta),
         normalized_change_max=maximum(delta), joint_change_rms_rad=rms(change),
         joint_change_max_rad=maximum(change),
         joint_amplitude_before_rad=rms(joint_before[joint_free]),
         joint_amplitude_after_rad=rms(joint_after[joint_free]),
         scope='same_conditions_fixed_independent_noise_reference_change_not_physics')
+    if before.get('time_weights') is not None:
+        w = before['time_weights'].to(free.device)
+        relative = w / w.amax(-1, keepdim=True).clamp_min(1e-30)
+        whole = (joint_after-joint_before).double().square()
+        total = whole[joint_free].sum()
+        for name, mask in [('near', relative > .99), ('middle', (relative > .15) & (relative <= .99)),
+                           ('far', (relative > 0) & (relative <= .15))]:
+            selected = joint_free & mask[..., None]
+            result[name+'_joint_change_rms_rad'] = rms((joint_after-joint_before)[selected])
+            result[name+'_change_energy_fraction'] = float(whole[selected].sum()/total) if total > 0 else 0.
+        result['execution_region_scope'] = 'fixed_per_action_weight_regions_not_actual_robot_motion'
+    return result
 
 
 def actor_update(policy, optimizer, rows, targets, cache, manifest, *, distributed, generator,
@@ -218,6 +256,7 @@ def actor_update(policy, optimizer, rows, targets, cache, manifest, *, distribut
         accepted_optimizer_steps=len(reports), steps=reports, epochs=ppo_epochs,
         eligible_actions=len(selected), eligible_chains=len(selected), orders=orders, stop_reason=stop_reason,
         initial_surrogate=initial, final_surrogate=final, reference_change=distributed.all_gather_object(reference),
+        execution_weight_audit=distributed.all_gather_object(getattr(cache,'robofft_weight_audit',None)),
         diagnostic_policy=dict(sentinel_manifest_indices=sentinels,
             selection='evenly_spaced_valid_manifest_midpoints_no_rng',
             post_step_scope='current_minibatch_union_fixed_sentinel', final_scope='full_rollout',

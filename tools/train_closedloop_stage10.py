@@ -38,6 +38,8 @@ def main():
         help='仅新 RoboFFT 实验显式导入 Stage2 Actor；不继承 Critic、Adam、rollout、概率、MC 或 RNG')
     parser.add_argument('--initialize-from-checkpoint',type=Path,
         help='新独立实验从完整checkpoint继承Actor/Critic、两个Adam及RNG，仅允许更换有效批量与评估监视')
+    parser.add_argument('--initialize-robofft-variant',type=Path,
+        help='新 RoboFFT 优化变体：同一行为/价值契约继承两模型与 Adam；新计轮、新采集、新 MC、新物理基线')
     parser.add_argument('--initialize-random-fragments',action='store_true',
         help='配合initialize-from-checkpoint：允许修改采样时限、站立比例和gamma；重新采样并重新校准Critic')
     parser.add_argument('--initialize-stepwise-ppo',action='store_true',
@@ -57,6 +59,8 @@ def main():
     parser.add_argument('--genmo-repo',type=Path,default=ROOT)
     parser.add_argument('--gmt-repo',type=Path)
     args=parser.parse_args()
+    if args.initialize_robofft_variant and (args.resume or args.initialize_from_checkpoint or args.initialize_actor_weights_only or args.evaluate_only or args.evaluation_actor):
+        parser.error('--initialize-robofft-variant requires a fresh independent RoboFFT experiment')
     if args.initialize_actor_weights_only and (args.resume or args.initialize_from_checkpoint or args.evaluate_only or args.evaluation_actor):
         parser.error('--initialize-actor-weights-only requires a fresh RoboFFT training experiment')
     if args.initialize_from_checkpoint and (args.resume or args.evaluation_actor or args.evaluate_only):

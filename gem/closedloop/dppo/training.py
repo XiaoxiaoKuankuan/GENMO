@@ -572,6 +572,19 @@ def run(cargs,config,distributed):
             recovery='fresh_PhysX_episodes_no_partial_rollout_reuse',torch_version=torch.__version__)
         payload=None
         initialization=getattr(cargs,'initialize_from_checkpoint',None)
+        variant=getattr(cargs,'initialize_robofft_variant',None)
+        if variant:
+            if not c.robofft or cargs.resume or initialization or weights_only or critic_config.get('preheat_artifact'):
+                raise ValueError('Optimization variant requires a fresh RoboFFT run without another initializer')
+            from ..robofft.checkpoint import initialize_optimization_variant
+            imported=local_call(distributed,lambda:initialize_optimization_variant(variant,
+                identity=c.identity,actor=c.actor,critic=c.critic,actor_optimizer=c.actor_optimizer,
+                critic_optimizer=c.critic_optimizer))
+            c.identity['actor_initialization']=imported
+            c.state.update(experiment_initialization=imported,mc_preheat_complete=True)
+            c.state['next_mc_calibration_control_steps']=_next_interaction_boundary(
+                c.state['training_control_steps'],critic_config['complete_mc']['every_control_steps'])
+            root_call(distributed,lambda:atomic_json(c.output/'initialization.json',imported))
         fragment_transfer=bool(getattr(cargs,'initialize_random_fragments',False))
         stepwise_transfer=bool(getattr(cargs,'initialize_stepwise_ppo',False))
         if not cargs.resume and not initialization and not cargs.evaluate_only and critic_config.get('preheat_artifact'):

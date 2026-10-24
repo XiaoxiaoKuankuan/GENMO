@@ -529,3 +529,52 @@ ssh -p 50030 user@112.65.216.193 \
 `metrics/4befe6bb-67cc-4d22-be40-8ca0eeec0658.jsonl`的`phase_resources`，逐小批
 记录的`post_step_surrogate.scope`应为`current_minibatch_union_fixed_sentinel`，
 最终`final_surrogate.scope`为`full_rollout`。当前仍未完成更新后的固定物理效果比较。
+
+## 2026-10-24 执行相关时间权重与三轮优化变体
+
+这是 **execution-weighted RoboFFT surrogate**，不是未经修改的原始 RoboFFT。
+60帧输入、Stage1/GMT、20步采样核、已知前缀、奖励、GAE和Critic目标都保持原值。
+`execution_weights.py`按环境/episode合并来源账本，沿父计划解析复制前缀；已在实际
+GMT窗口出现的自由生成帧取权重1，随后0.5秒取0.3，更远取0.1。跨采集边界尚未有
+充分观测时，用本计划前缀、提交/到达时间、决策间隔及前瞻预测，明确标为预测。
+窗口含前瞻和回看；源帧插值支持不等于完整动力学因果导数。未观察不等于永不消费。
+审计分别报告中心生成帧、只在窗口出现的生成帧、被已提交后继新生成区覆盖的未见自由帧。
+
+令`m[t,j]`为有效自由坐标掩码，`u[t]`为1/0.3/0.1原始时间权重：
+
+```text
+Z = sum(t,j) m[t,j]
+W = sum(t,j) u[t] * m[t,j]
+w[t] = u[t] * Z/W                  # 非自由帧权重为0
+L_k = 0.5 * DeltaLogSNR_k / 30
+      * sum(t,j) w[t] * m[t,j] * (epsilon_theta - epsilon_k)^2
+logratio = mean_k(alpha * clamp(-L_new,k + L_old,k, -10, 10))
+ratio = exp(logratio)
+```
+
+全一时间权重精确退化为原整窗目标；任意整体缩放原始权重不改变归一后的结果。
+同一条动作的时间权重、MC噪声、t和旧损失在首个optimizer前固定，所有epoch和新旧
+代理共用；时间权重进入MCRecord的不可变检查和固定评估记录。上述ratio和KL仍为
+代理量，不是最终动作真实密度比/真实KL，也不保证梯度方差或裁剪率与原目标相同。
+
+候选配置`configs/closedloop/stage2_robofft_execution_weighted_server1.yaml`采用10epoch、
+global minibatch2048、beta_neg0.5、MC微批4、每卡16环境、每轮8秒，MC样本数仍16。
+主干倍率仍0.1（实际1e-6），输出头1e-5。提高到0.3需要先看到近期参考变化小且代理
+裁剪不饱和；不能仅凭代理loss下降决定。减小并行环境是本次三小时时限内的有限实验，
+三轮数据量与原128环境/卡不同，不将“三轮”解释为同等采样预算的正式消融。
+
+`--initialize-robofft-variant`在新目录严格核对行为、价值、资产、物理契约，保留两模型
+与Adam动量，新计轮、新RNG、新rollout、新MC并重新建立固定32任务物理基线。继承的
+Critic预热结论仅限同一Actor/价值契约的warm-start，不冒称新独立MC评估。监督器只在
+首次启动导入源checkpoint，重启使用新实验自己的完整checkpoint。执行命令为：
+
+```bash
+# Server-1 主机，rolling GENMO仓库内；PARENT须为已核验完整RoboFFT checkpoint。
+bash scripts/train_stage10_8gpu_server1.sh \
+  --config configs/closedloop/stage2_robofft_execution_weighted_server1.yaml \
+  --output-dir /data1/user/liwei/GENMO_outputs/closedloop_stage10/stage2_robofft_execweighted_20261024_3round \
+  --initialize-robofft-variant "$PARENT" --stop-after-iteration 3
+```
+
+物理效果以新基线和每轮相同32任务/seed的完成率、失败、每秒奖励、跟踪误差和活动幅度
+判断；旧原训练在第28轮正常退出，保留原模型/日志。实际运行结果在记录文本继续追加。

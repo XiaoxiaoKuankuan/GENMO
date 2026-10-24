@@ -31,9 +31,13 @@ def x0_to_epsilon(x_t, pred_x0, alpha):
     return (x_t - alpha.sqrt() * pred_x0) / (1. - alpha).sqrt()
 
 
-def epsilon_loss(x_t, pred_x0, eps, alpha, weight, free_mask):
+def epsilon_loss(x_t, pred_x0, eps, alpha, weight, free_mask, time_weights=None):
     residual = x0_to_epsilon(x_t, pred_x0, alpha) - eps
     error = torch.where(free_mask, residual, 0.).double().square()
+    if time_weights is not None:
+        if time_weights.shape != error.shape[:-1] or time_weights.requires_grad:
+            raise ValueError('Fixed execution time weights must align with frames')
+        error = error * time_weights.to(error)[..., None]
     return .5 * weight * error.mean(dim=-1).sum(dim=-1)
 
 

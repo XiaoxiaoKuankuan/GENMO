@@ -54,7 +54,7 @@ class RoboFFTDiffusionPolicy(FrozenPrefixPolicy):
                     original_timesteps=original_timesteps)
 
     @checked_policy_phase
-    def losses(self, conditions, action_x0, eps, sampling_indices, original_timesteps):
+    def losses(self, conditions, action_x0, eps, sampling_indices, original_timesteps, time_weights=None):
         """计算 [动作, MC] 旧/新代理损失；不对 MC 求均值、不做 PPO clip。"""
         self._prepare_actor()
         b, m = eps.shape[:2]
@@ -79,7 +79,8 @@ class RoboFFTDiffusionPolicy(FrozenPrefixPolicy):
             prediction = self._predict_prepared(prepared, state, timesteps.flatten())['pred_x_start']
             free = adapted['future_valid'][..., None] & ~adapted['known_mask']
             weights = self.delta_weights.to(device)[indices.flatten() - 9]
-            loss = epsilon_loss(state, prediction, noise, alpha, weights, free).reshape(b, m)
+            temporal = None if time_weights is None else time_weights.detach().to(device)[:, None].expand(-1, m, -1).flatten(0, 1)
+            loss = epsilon_loss(state, prediction, noise, alpha, weights, free, temporal).reshape(b, m)
             if not bool(torch.isfinite(loss).all()):
                 raise FloatingPointError('Nonfinite RoboFFT surrogate loss')
             return loss

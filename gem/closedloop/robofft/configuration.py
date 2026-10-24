@@ -15,6 +15,7 @@ from . import OBJECTIVE, VERSION
 def optimization_binding(stage):
     t = stage['training']
     return dict(schema=VERSION, objective=OBJECTIVE, candidate_not_calibrated=True,
+        objective_variant=('execution_weighted_robofft_surrogate.v1' if t['robofft'].get('execution_weighting') else 'original_equal_time_robofft_surrogate'),
         robofft=copy.deepcopy(t['robofft']), actor_lr=t['actor_lr'],
         actor_lr_multipliers=copy.deepcopy(t['actor_lr_multipliers']),
         ppo_epochs=t['ppo_epochs'], global_minibatch_actions=stage['scale']['actor_minibatch_actions'],
@@ -25,6 +26,8 @@ def optimization_binding(stage):
 def validate_configuration(config, maximum_steps):
     s, t = config['stage10'], config['stage10']['training']
     r = t['robofft']
+    from .execution_weights import validate_settings
+    validate_settings(r.get('execution_weighting'))
     if (s['version'] != VERSION or s['actor_optimization'] != {'schema': VERSION} or
             t['actor_objective'] != OBJECTIVE or t['actor_lr_control'] != 'fixed' or
             t['objective_logprob_reduction'] != 'mc_mean_logratio_action_clip' or

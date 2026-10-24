@@ -137,7 +137,8 @@ def configuration(path,*,genmo_repo=None,gmt_repo=None):
     trainable_count=t['ppo_steps_per_chain']
     if (type(trainable_count)is not int or trainable_count not in (4,10) or t['denoising_steps']!=20
             or t['ppo_step_strategy']!=f'intermediate{trainable_count}' or t['frozen_prefix_steps']!=19-trainable_count
-            or t['ppo_epochs'] not in (1,2,3,5) or trainable_count==10 and s['version'] not in (VERSION,ROBOFFT_VERSION)):
+            or type(t['ppo_epochs']) is not int or t['ppo_epochs'] not in ((1,2,3,5,10,20) if robofft else (1,2,3,5))
+            or trainable_count==10 and s['version'] not in (VERSION,ROBOFFT_VERSION)):
         raise ValueError('Explicit frozen15/train4 or frozen9/train10, plus deterministic final, required')
     if len(t['std_schedule'])!=20 or t['std_schedule'][-1]!=0. or any(
             not math.isfinite(x) or x<=0 for x in t['std_schedule'][:-1]):

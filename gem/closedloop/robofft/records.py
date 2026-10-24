@@ -22,22 +22,28 @@ class MCRecord:
     old_loss: torch.Tensor
     mc_numbers: torch.Tensor
     algorithm: str = ALGORITHM
+    time_weights: torch.Tensor | None = None
     _versions: tuple = field(init=False, repr=False, compare=False)
 
     def __post_init__(self):
         for name in ('eps', 'sampling_indices', 'original_timesteps', 'old_loss', 'mc_numbers'):
             object.__setattr__(self, name, getattr(self, name).detach().cpu().clone())
+        if self.time_weights is not None:
+            object.__setattr__(self, 'time_weights', self.time_weights.detach().cpu().clone())
         object.__setattr__(self, '_versions', self.signature())
 
     def signature(self):
-        return tuple((id(v), v._version) for v in
-            (self.eps, self.sampling_indices, self.original_timesteps, self.old_loss, self.mc_numbers))
+        values = (self.eps, self.sampling_indices, self.original_timesteps, self.old_loss, self.mc_numbers)
+        if self.time_weights is not None:
+            values += (self.time_weights,)
+        return tuple((id(v), v._version) for v in values)
 
     def __getstate__(self):
         self.validate()
         return {key: value for key, value in vars(self).items() if key != '_versions'}
 
     def __setstate__(self, state):
+        state.setdefault('time_weights', None)
         for key, value in state.items():
             object.__setattr__(self, key, value)
         object.__setattr__(self, '_versions', self.signature())
@@ -45,6 +51,10 @@ class MCRecord:
 
     def validate(self, *, check_versions=True):
         m = len(self.old_loss)
+        if self.time_weights is not None and (self.time_weights.shape != self.eps.shape[1:2]
+                or self.time_weights.requires_grad or not torch.isfinite(self.time_weights).all()
+                or (self.time_weights < 0).any()):
+            raise ValueError('Invalid immutable execution time weights')
         if check_versions and self.signature() != self._versions:
             raise ValueError('Immutable RoboFFT MC record was modified')
         if (self.algorithm != ALGORITHM or m != 16 or self.old_loss.shape != (m,) or

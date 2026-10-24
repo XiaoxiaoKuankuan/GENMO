@@ -172,7 +172,7 @@ def _evaluate_impl(c, label, *, write_report=True):
                 target.parent.mkdir(exist_ok=True)
                 if robofft:
                     from ..robofft.evaluation import make_reference
-                    payload=make_reference(c.policy,row.metadata['sampler_trace'],seed=60101+len(initial_rows))
+                    payload=make_reference(c.policy,row.metadata['sampler_trace'],seed=60101+len(initial_rows),row=row)
                 else:payload=immutable_cpu_snapshot(dict(trace=row.metadata['sampler_trace']))
                 torch.save(payload,target)
                 c.guard.account_file(target)

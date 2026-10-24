@@ -24,12 +24,13 @@ def _loss(policy, trace, mc):
     parts=[]
     for k in range(len(mc['sampling_indices'])):
         parts.append(policy.losses(context,trace['action_x0'].to(device),mc['eps'][None,k:k+1],
-            mc['sampling_indices'][None,k:k+1],mc['original_timesteps'][None,k:k+1]))
+            mc['sampling_indices'][None,k:k+1],mc['original_timesteps'][None,k:k+1],
+            **({} if mc.get('time_weights') is None else dict(time_weights=mc['time_weights'][None]))))
     return torch.cat(parts,1)
 
 
 @torch.no_grad()
-def make_reference(policy, trace, *, seed):
+def make_reference(policy, trace, *, seed, row=None):
     device=next(policy.actor.parameters()).device
     trace={k:v for k,v in trace.items() if k in ('conditions','action_x0','normalized','free_mask','kernel_config','algorithm')}
     action=trace['action_x0'].to(device)
@@ -37,12 +38,22 @@ def make_reference(policy, trace, *, seed):
         raise ValueError('Fixed RoboFFT reference requires one actual compact action')
     draw=policy.draw_mc(action,torch.Generator().manual_seed(seed))
     mc={k:v[0] for k,v in draw.items()}
+    if policy.robofft.get('execution_weighting') is not None:
+        from .execution_weights import weights_for_rows, predicted_weights, normalize_frame_weights
+        if row is not None:
+            mc['time_weights'] = weights_for_rows([row], policy.robofft['execution_weighting'])[0][0]
+        else:
+            free=trace['free_mask'][0].cpu()
+            mc['time_weights']=normalize_frame_weights(predicted_weights(free,
+                settings=policy.robofft['execution_weighting']),free)
     old=_loss(policy,trace,mc)[0]
-    record=MCRecord(mc['eps'],mc['sampling_indices'],mc['original_timesteps'],old,torch.arange(len(old)))
+    record=MCRecord(mc['eps'],mc['sampling_indices'],mc['original_timesteps'],old,torch.arange(len(old)),
+        time_weights=mc.get('time_weights'))
     probe=policy.sample_rollout({k:v.to(device) for k,v in trace['conditions'].items()},
         generator=torch.Generator(device=device).manual_seed(seed))
-    return immutable_cpu_snapshot(dict(trace=trace,mc=record,probe_seed=seed,
-        probe={k:probe[k] for k in ('normalized','qpos','free_mask')}))
+    snapshot={k:probe[k] for k in ('normalized','qpos','free_mask')}
+    if mc.get('time_weights') is not None:snapshot['time_weights']=mc['time_weights'][None]
+    return immutable_cpu_snapshot(dict(trace=trace,mc=record,probe_seed=seed,probe=snapshot))
 
 
 def load_references(paths, *, max_chains=4):
@@ -69,7 +80,7 @@ def fixed_action_drift(policy, reference, *, include_values=False):
         trace=record['trace'];mc=record['mc'];mc.validate()
         if trace['kernel_config']!=policy.kernel_config:
             raise ValueError('Fixed RoboFFT reference behavior kernel differs')
-        current=_loss(policy,trace,{k:getattr(mc,k) for k in ('eps','sampling_indices','original_timesteps')})
+        current=_loss(policy,trace,{k:getattr(mc,k) for k in ('eps','sampling_indices','original_timesteps','time_weights')})
         metrics=action_objective(current,mc.old_loss[None].to(current),current.new_ones(1),
             **{k:policy.robofft[k] for k in ('beta_neg','logprob_normalizer','logratio_alpha')})
         values.extend(metrics['surrogate_kl'].cpu().tolist())
