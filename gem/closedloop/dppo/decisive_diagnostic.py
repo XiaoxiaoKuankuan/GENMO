@@ -294,19 +294,20 @@ def perturb_reference(policy,variant,audit):
             factor=.02 if variant.endswith('plus') else -.02
             for i in indices:proposal[:,:,i]+=factor*window*(base[:,:,i]-standing[i-9])
         else:
-            strength=.1 if variant=='smooth10' else .2
+            strength={'smooth05':.05,'smooth10':.1,'smooth20':.2,'identity':0.}[variant]
             smooth=base.clone();smooth[:,1:-1,9:]=.25*base[:,:-2,9:]+.5*base[:,1:-1,9:]+.25*base[:,2:,9:]
             proposal[:,:,9:]+=strength*window[:,:,None]*(smooth[:,:,9:]-base[:,:,9:])
         proposal=torch.where(free,proposal,base)
         # 只接受相对Stage1未新增硬限位的扰动；原模型已有超限不在此被静默修正。
         limits=kin.joint_limits.to(base)
-        before=(base[:,:,9:]<limits[:,0])|(base[:,:,9:]>limits[:,1])
+        guard_base=trace.get('diagnostic_bank_baseline',base)
+        before=(guard_base[:,:,9:]<limits[:,0])|(guard_base[:,:,9:]>limits[:,1])
         after=(proposal[:,:,9:]<limits[:,0])|(proposal[:,:,9:]>limits[:,1])
         legal=~(after&~before).flatten(1).any(1)
-        qbase=codec.decode_to_canonical_qpos(base);qnew=codec.decode_to_canonical_qpos(proposal)
+        qbase=codec.decode_to_canonical_qpos(guard_base);qnew=codec.decode_to_canonical_qpos(proposal)
         oldbody=kin.forward_body_positions(qbase);newbody=kin.forward_body_positions(qnew)
         # 额外速度/加速度/FK连续性增量上限，小扰动不通过则整条计划回退原参考。
-        delta=proposal-base;velocity=torch.diff(delta[:,:,9:],dim=1)*30
+        delta=proposal-guard_base;velocity=torch.diff(delta[:,:,9:],dim=1)*30
         acceleration=torch.diff(velocity,dim=1)*30
         body_delta=newbody-oldbody
         body_velocity=torch.diff(body_delta,dim=1)*30
@@ -330,7 +331,7 @@ def perturb_reference(policy,variant,audit):
 
 
 @contextmanager
-def frozen_reference_bank(policy,bank,*,variant=None,audit=None):
+def frozen_reference_bank(policy,bank,*,variant=None,audit=None,bridge=False):
     """保存Stage1世界参考；干预重用同seed计划自由段，仅重新接入当前已承诺前缀。
 
     相同任务/决策噪声身份从基线银行取世界qpos和contact，不重新选择更有利的参考。
@@ -352,10 +353,21 @@ def frozen_reference_bank(policy,bank,*,variant=None,audit=None):
             current=torch.as_tensor(generated['qpos_world'],device=device,dtype=torch.float32)[None]
             if key in bank:
                 fixed=torch.as_tensor(bank[key]['qpos_world'],device=device,dtype=torch.float32)[None].clone()
+                untouched=fixed.clone()
                 prefix=int(generated['prefix_frames']);fixed[:,:prefix]=current[:,:prefix]
                 anchor=codec.build_canonical_anchor(current)
                 components,_,_=codec.canonicalize(fixed,kin.forward_body_positions(fixed),anchor=anchor)
                 physical=codec.assemble_features(components)
+                if bridge:
+                    original_components,_,_=codec.canonicalize(untouched,kin.forward_body_positions(untouched),anchor=anchor)
+                    original_physical=codec.assemble_features(original_components)
+                    # 已承诺偏移及其末端斜率在六帧内Hermite衰减，防止每次重规划强行归零。
+                    difference=trace['qpos30']-original_physical
+                    value=difference[:,prefix-1:prefix];slope=difference[:,prefix-1:prefix]-difference[:,prefix-2:prefix-1]
+                    u=((torch.arange(60,device=device)-prefix+1)/6).clamp(0,1)[None,:,None]
+                    carry=(2*u**3-3*u**2+1)*value+(u**3-2*u**2+u)*6*slope
+                    physical=physical+carry
+                    trace['diagnostic_bank_baseline']=original_physical
                 trace['qpos30']=torch.where(trace['free_mask'],physical,trace['qpos30'])
                 trace['qpos']=codec.decode_to_canonical_qpos(trace['qpos30'])
                 trace['contact']=bank[key]['contact'].to(device)
@@ -554,3 +566,28 @@ def run_fresh_physics(c,source):
         root_call(c.distributed,lambda:atomic_json(output/'summary.json',result));return result
     finally:
         c.actor.load_state_dict(base);c.actor.zero_grad(set_to_none=True)
+
+
+def run_reference_only(c,source):
+    """单种子八音乐的20秒合法参考诊断，独立新世界、连续前缀桥接及零扰动对照。"""
+    import json
+    from .evaluation import _digest
+    started=time.time();rank=c.distributed.rank;base={n:t.detach().cpu().clone() for n,t in c.actor.state_dict().items()}
+    output=c.output/'fresh_physics';output.mkdir(exist_ok=True)
+    try:
+        plan=json.loads((Path(source)/'decisive/plan.json').read_text());plan['tasks']=[t for t in plan['tasks'] if t['seed']==42]
+        plan.update(episode_seconds=20.,task_count=8,seeds=[42],complete_music_scope=False,evaluation_purpose='continuous_bank_bridge_20s_one_seed_zero_intervention_control')
+        plan.pop('plan_sha256');plan['plan_sha256']=_digest(plan)
+        root_call(c.distributed,lambda:atomic_json(output/'reference_plan.json',plan))
+        c.stage['evaluation']['envs_per_rank']=8;c.stage['evaluation']['persistent_world']=False
+        c.actor.load_state_dict(c.policy.frozen_policy.actor.state_dict());bank={}
+        with frozen_reference_bank(c.policy,bank):before=evaluate_local_candidates(c,plan,'fresh_C_Stage1')
+        variant=('height_plus','height_minus','yaw_plus','yaw_minus','leg_minus','smooth05','smooth10','identity')[rank]
+        audit=dict(variant=variant,plans=0,accepted=0,rejected=0,bridge=True)
+        with frozen_reference_bank(c.policy,bank,variant=variant,audit=audit,bridge=True):
+            after=evaluate_local_candidates(c,plan,'fresh_C_'+variant)
+        row=dict(rank=rank,reference_audit=audit,reports=dict(C_baseline=before,C_candidate=after))
+        atomic_json(output/f'results_rank{rank:02d}.json',row)
+        result=dict(status='passed',results=c.distributed.all_gather_object(row),wall_seconds=time.time()-started,training_updates=0,world_reuse=False)
+        root_call(c.distributed,lambda:atomic_json(output/'summary.json',result));return result
+    finally:c.actor.load_state_dict(base);c.actor.zero_grad(set_to_none=True)

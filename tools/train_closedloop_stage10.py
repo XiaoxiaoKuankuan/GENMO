@@ -57,6 +57,7 @@ def main():
     parser.add_argument('--decisive-diagnostic',action='store_true',help='有限A/C因果诊断：真实行为链、四方向正反扰动与冻结Stage1参考干预；不训练')
     parser.add_argument('--diagnostic-repeatability-only',action='store_true',help='配合决定性诊断入口，仅做两次零更新20秒物理重复性核对')
     parser.add_argument('--diagnostic-fresh-physics-source',type=Path,help='读取已保存方向，每个配对候选新建PhysX世界；A完整音乐，C有限20秒参考干预')
+    parser.add_argument('--diagnostic-reference-only',action='store_true',help='仅做带连续前缀桥接与零扰动对照的八音乐20秒参考配对')
     parser.add_argument('--collect-rollouts',type=int,default=1,help='collect-only连续世界窗口数；保留正常episode，不更新行为策略')
     parser.add_argument('--capture-validation-iteration',type=int,help='明确保存指定轮更新前的真实学习张量及Adam用于固定数据对照')
     parser.add_argument('--genmo-repo',type=Path,default=ROOT)
@@ -104,6 +105,8 @@ def main():
         parser.error('Repeatability-only is an explicit decisive diagnostic, never a training modifier')
     if args.diagnostic_fresh_physics_source and (not args.decisive_diagnostic or args.diagnostic_repeatability_only):
         parser.error('Fresh paired physics requires only the explicit decisive diagnostic mode')
+    if args.diagnostic_reference_only and not args.diagnostic_fresh_physics_source:
+        parser.error('Reference-only requires the explicit saved diagnostic source')
     if args.evaluation_actor and args.resume:parser.error('Explicit evaluation Actor and complete training resume are mutually exclusive')
     if args.evaluation_actor and not args.evaluate_only:parser.error('Fixed-data Actor candidates are evaluation-only, not training recovery points')
     if args.collect_only:args.capture_validation_iteration=1;args.warmup_rollouts=0
