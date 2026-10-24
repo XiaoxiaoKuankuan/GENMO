@@ -593,25 +593,28 @@ def run_reference_only(c,source):
     finally:c.actor.load_state_dict(base);c.actor.zero_grad(set_to_none=True)
 
 
-def compare_zero_reports(before,after):
+def compare_zero_reports(before,after,*,prefix_only=False):
     """严格核验完整零扰动：初态/控制器/缓存、所有奖励误差及生成噪声时钟。"""
     from tools.summarize_decisive_physics import load_report
     _,plan,left=load_report(before);_,other,right=load_report(after)
-    if plan!=other:raise ValueError('Zero intervention task plans differ')
+    if (plan!=other if not prefix_only else plan['tasks']!=other['tasks']):raise ValueError('Zero intervention task plans differ')
     result=[]
     for a,b in zip(left,right):
         if a['task_id']!=b['task_id']:raise ValueError('Zero task order differs')
         checks={k:a.get(k)==b.get(k) for k in ('initial_pairing_state','pairing_clock','pairing_music_sha256',
             'noise_index_start','seed','music_start_frame','physical_failure','end_reason')}
+        if prefix_only:
+            checks.pop('physical_failure');checks.pop('end_reason')
         checks['initial_present']=a.get('initial_pairing_state') is not None
         ca=[r for d in a['decisions'] for r in d['controls']]
         cb=[r for d in b['decisions'] for r in d['controls']]
+        if prefix_only:ca=ca[:len(cb)]
         checks['control_count']=len(ca)==len(cb)
         differences={k:max((abs(x[k]-y[k]) for x,y in zip(ca,cb)),default=0.) for k in ('reward','tick')}
         error=max((abs(x['raw_errors'][k]-y['raw_errors'][k]) for x,y in zip(ca,cb) for k in x['raw_errors']),default=0.)
         checks['all_rewards_exact']=differences['reward']==0.;checks['all_ticks_exact']=differences['tick']==0.
         checks['all_eight_errors_exact']=error==0.
-        checks['deployment_clock']=len(a['decisions'])==len(b['decisions']) and all(
+        checks['deployment_clock']=(len(a['decisions'])>=len(b['decisions']) if prefix_only else len(a['decisions'])==len(b['decisions'])) and all(
             x['latency_seconds']==y['latency_seconds'] and x['prefix_frames']==y['prefix_frames']
             for x,y in zip(a['decisions'],b['decisions']))
         result.append(dict(task_id=a['task_id'],passed=all(checks.values()),checks=checks,
@@ -640,4 +643,50 @@ def run_p0(c,source):
         root_call(c.distributed,lambda:atomic_json(output/'summary.json',summary))
         if summary['status']!='passed':raise RuntimeError('P0 zero intervention failed; no physical superiority claim allowed')
         return summary
+    finally:c.actor.load_state_dict(base);c.actor.zero_grad(set_to_none=True)
+
+
+def run_reference_after_p0(c,source,*,local_source=None):
+    """只有完整P0和本入口零参考回放通过后才运行合法C；局部先于完整困难音乐。"""
+    import json
+    from .evaluation import _digest
+    from .reference_interventions import fixed_world_intervention,VARIANTS
+    source=Path(source);gate=json.loads((source/'p0/summary.json').read_text())
+    if gate['status']!='passed':raise ValueError('P0 zero gate has not passed')
+    rank=c.distributed.rank;baseline=Path(gate['results'][rank]['before'])
+    plan=json.loads((baseline.parent/'selection.json').read_text())
+    full=local_source is not None
+    if full:
+        local=json.loads((Path(local_source)/'reference_c/summary.json').read_text())
+        if local['status']!='passed' or not all(r['zero_gate']['passed'] and not r['audit'].get('invalid_plans') for r in local['results']):
+            raise ValueError('Local legal-reference/zero gates must pass before full music')
+    else:
+        plan.update(episode_seconds=20.,complete_music_scope=False)
+        plan.pop('plan_sha256');plan['plan_sha256']=_digest(plan)
+    data=torch.load(baseline.parent.parent/'causal_references.pt',map_location='cpu',weights_only=False)
+    bank={int(r['generated']['seed']):r['generated'] for r in data['references']};del data
+    output=c.output/'reference_c';output.mkdir(exist_ok=True)
+    c.stage['evaluation'].update(envs_per_rank=len(plan['tasks']),persistent_world=False)
+    c.config['runtime'].update(paired_state_audit=True,future_reference_context=True)
+    base={n:t.detach().cpu().clone() for n,t in c.actor.state_dict().items()}
+    try:
+        c.actor.load_state_dict(c.policy.frozen_policy.actor.state_dict())
+        if not full:
+            zero_audit=dict(plans=0)
+            with fixed_world_intervention(c,bank,'identity',zero_audit):zero=evaluate_local_candidates(c,plan,'fresh_C_zero')
+            zero_gate=local_call(c.distributed,lambda:compare_zero_reports(baseline,zero,prefix_only=True))
+            if not all(c.distributed.all_gather_object(zero_gate['passed'])):raise ValueError('C zero replay failed; no candidate executed')
+        else:
+            zero_gate=local['results'][rank]['zero_gate'];zero=str(baseline)
+        variant=VARIANTS[rank];audit=dict(variant=variant,plans=0,allow_unpaired_extension=full)
+        try:
+            with fixed_world_intervention(c,bank,variant,audit):
+                candidate=evaluate_local_candidates(c,plan,'fresh_C_'+('full_' if full else '')+variant)
+        finally:atomic_json(output/f'audit_rank{rank:02d}.json',audit)
+        row=dict(rank=rank,variant=variant,zero_gate=zero_gate,audit=audit,baseline=zero,candidate=candidate,
+            full_music=full,original_full_baseline=str(baseline))
+        atomic_json(output/f'rank{rank:02d}.json',row)
+        summary=dict(status='passed',results=c.distributed.all_gather_object(row),full_music=full,
+            p0_source=str(source),local_source=None if local_source is None else str(local_source),training_updates=0)
+        root_call(c.distributed,lambda:atomic_json(output/'summary.json',summary));return summary
     finally:c.actor.load_state_dict(base);c.actor.zero_grad(set_to_none=True)

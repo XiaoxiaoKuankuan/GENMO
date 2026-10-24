@@ -25,6 +25,8 @@ def complete_mc_returns(rows, *, gamma_upper=.99):
     validate_reward_intervals(rows)
     physical_key=tuple(rows[0].identity.get(k,0) for k in ('backend_session_id','env_id','episode_id'))
     for row in rows:
+        from .returns import validate_value_state_boundaries
+        validate_value_state_boundaries(row)
         if tuple(row.identity.get(k,0) for k in ('backend_session_id','env_id','episode_id'))!=physical_key:
             raise ValueError('MC cannot cross physical sessions or environments')
         if row.identity['policy_version']!=policy or row.identity['episode_id']!=episode:

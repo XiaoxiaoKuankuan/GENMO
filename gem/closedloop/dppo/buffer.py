@@ -108,6 +108,12 @@ class UpperTransition:
         validate_tracking_context(self.metadata['critic_context'])
         if self.next_context is not None:
             validate_tracking_context(self.metadata['next_critic_context'])
+        for key,tick in (('critic_context',self.control_tick_begin),('next_critic_context',self.control_tick_end)):
+            current=self.metadata.get(key)
+            if current is not None and 'committed_reference' in current:
+                if (int(current['committed_snapshot_tick'][0])!=tick or
+                        int(current['committed_policy_version'][0])!=self.identity['policy_version']):
+                    raise ValueError('Current/bootstrap committed cache timestamp or Actor version differs')
         for actor,critic in ((self.context,self.metadata['critic_context']),
                              (self.next_context,self.metadata.get('next_critic_context'))):
             if actor is not None and any(not torch.equal(v,critic[k].to(v.device)) for k,v in actor.items()):

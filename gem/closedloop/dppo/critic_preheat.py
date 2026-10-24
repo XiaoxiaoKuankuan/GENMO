@@ -23,7 +23,7 @@ import torch
 from .budget import atomic_json
 from .checkpoint import _validate_model_state, _validate_optimizer_state
 from .evaluation import _model_fingerprint
-from .training_checkpoint import SCHEMA, file_sha256, immutable_cpu_snapshot
+from .training_checkpoint import SCHEMA, schema_for_identity, file_sha256, immutable_cpu_snapshot
 
 SCHEMA_PREHEAT = 'genmo.stage2.asymmetric_fixed_actor_critic_preheat.v2'
 MATCHED = ('assets', 'kernel', 'reward', 'timing', 'physical_configuration',
@@ -58,11 +58,11 @@ def export_preheat(checkpoint, report, output):
     payload = torch.load(checkpoint, map_location='cpu', weights_only=False, mmap=True)
     validation = json.loads(report.read_text())
     state, identity = payload['state'], payload['identity']
-    if (payload.get('schema') != SCHEMA or not state.get('mc_preheat_complete')
+    if (payload.get('schema') != schema_for_identity(identity) or not state.get('mc_preheat_complete')
             or state['actor_updates'] or state['policy_version'] or not validation.get('quality_gate_passed')
             or identity['actor_initialization']['kind'] != 'source_stage1'):
         raise ValueError('Only validated complete MC under unchanged Stage1 Actor can initialize Critic')
-    record = dict(schema=SCHEMA_PREHEAT, actor_fingerprint=payload['actor_fingerprint'],
+    record = dict(schema=(SCHEMA_PREHEAT+'.future_committed' if identity['critic']['type']=='asymmetric_tracking_committed_temporal' else SCHEMA_PREHEAT), actor_fingerprint=payload['actor_fingerprint'],
         matched_identity={k:identity[k] for k in MATCHED},
         architecture={k:identity['critic'][k] for k in ARCHITECTURE},
         value_targets=_value_targets(identity),
@@ -95,7 +95,7 @@ def initialize_critic(artifact, *, identity, actor, critic, optimizer, genmo_rep
     if file_sha256(artifact['path']) != artifact['sha256']:
         raise ValueError('Critic initialization artifact SHA mismatch')
     data = torch.load(artifact['path'], map_location='cpu', weights_only=False, mmap=True)
-    if (data.get('schema') != SCHEMA_PREHEAT
+    if (data.get('schema') != (SCHEMA_PREHEAT+'.future_committed' if identity['critic']['type']=='asymmetric_tracking_committed_temporal' else SCHEMA_PREHEAT)
             or data['actor_fingerprint'] != _model_fingerprint(actor)
             or data['matched_identity'] != {k:identity[k] for k in MATCHED}
             or data['architecture'] != {k:identity['critic'][k] for k in ARCHITECTURE}

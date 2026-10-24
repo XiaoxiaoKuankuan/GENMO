@@ -15,7 +15,7 @@ import numpy as np
 import torch
 from omegaconf import OmegaConf
 from gem.closedloop.checkpoint import load_stage1_checkpoint
-from .returns import compute_gae
+from .returns import compute_gae,validate_value_state_boundaries
 from gem.closedloop.training import build_stage1_actor, build_stage1_losses, batch_to_device
 from .performance import measure
 
@@ -63,6 +63,7 @@ def populate_values(transitions, critic, device, *, critic_version=None, batch_s
     critic.eval()
     work = []
     for row in transitions:
+        validate_value_state_boundaries(row)
         work.append((row, 'old_value', row.metadata['critic_context'], row.metadata['remaining_music_seconds']))
         row.next_value = 0.
         if row.next_context is not None and not row.terminated:
@@ -84,6 +85,7 @@ def populate_values(transitions, critic, device, *, critic_version=None, batch_s
 
 def fixed_targets(transitions, critic, device, *, gamma_upper=.99, lambda_upper=.95,
                   reuse_values=False, critic_version=None, normalize=False):
+    for row in transitions:validate_value_state_boundaries(row)
     if reuse_values:
         if critic_version is None:
             raise ValueError('Reusing populated values requires an explicit Critic version')

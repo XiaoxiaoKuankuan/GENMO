@@ -4,7 +4,10 @@ Actor原有条件完全不变。本网络持有独立参数和存储，以50×90
 时间替代原49维GRU输入。输入权重前48列、最后时间列、循环权重、bias和输出投影
 从Stage1复制，新增42列严格零初始化。音乐/已承诺前缀编码冻结且可跨epoch缓存；
 历史GRU每次forward_encoded重新计算梯度图，绝不缓存可训练历史特征。
-仍使用256维、2层、4头Temporal Transformer与Value Head，不增加第四个编码器。
+旧schema保持三编码器结构；显式future_reference启用第四个轻量已提交未来参考编码器。
+新分支只读取因果缓存及有效mask，按时间注意力汇聚后接入原Temporal Transformer。
+最后投影零初始化，显式继承旧Critic共享参数时初始值逐元素一致，新增信息的有效性
+必须在相同完整MC的独立困难状态上验证，不能把初始化或训练loss下降当作物理收益。
 """
 from __future__ import annotations
 
@@ -15,15 +18,42 @@ import torch
 from torch import nn
 
 from gem.closedloop.contracts import STAGE1_CONDITION_KEYS
-from .tracking_context import validate_tracking_context
+from .tracking_context import validate_tracking_context, SCHEMA, FUTURE_SCHEMA
+
+
+class FutureCommittedReferenceEncoder(nn.Module):
+    """逐帧MLP和带有效mask的时间注意力；不缓存任何可训练编码结果。"""
+    def __init__(self,dimension):
+        super().__init__()
+        self.frames=nn.Sequential(nn.Linear(39,128),nn.LayerNorm(128),nn.SiLU(),nn.Linear(128,128),nn.SiLU())
+        self.attention=nn.Linear(128,1)
+        self.projection=nn.Linear(128,dimension,bias=False)
+        self.metadata=nn.Sequential(nn.Linear(20,64),nn.SiLU(),nn.Linear(64,dimension,bias=False))
+        self.register_buffer('scales',torch.tensor([1.]*9+[2.]*3+[4.]*3+[3.14]*21+[2.,2.]))
+        self.register_buffer('metadata_scales',torch.tensor([2.,1.,2.,1.,1.,1.,1.,1.,5.,100.]))
+        nn.init.zeros_(self.projection.weight);nn.init.zeros_(self.metadata[-1].weight)
+
+    def forward(self,f):
+        valid=f['committed_valid'];x=f['committed_reference']/self.scales
+        times=f['committed_relative'][...,None]
+        h=self.frames(torch.cat((x,times),-1))
+        logits=self.attention(h).squeeze(-1).masked_fill(~valid,-1e4)
+        weights=logits.softmax(1)*valid
+        weights=weights/weights.sum(1,keepdim=True).clamp_min(1e-12)
+        pooled=(h*weights[...,None]).sum(1)
+        meta=f['committed_metadata']/self.metadata_scales
+        meta=torch.cat((meta*f['committed_metadata_valid'],f['committed_metadata_valid'].float()),-1)
+        return self.projection(pooled)+self.metadata(meta)
 
 
 class PretrainedConditionCritic(nn.Module):
-    def __init__(self, actor, *, dimension=256, layers=2, heads=4, history_scales=(1.5,1.,1.,1.,.3,1.,1.5,3.14)):
+    def __init__(self, actor, *, dimension=256, layers=2, heads=4, history_scales=(1.5,1.,1.,1.,.3,1.,1.5,3.14),future_reference=False):
         super().__init__()
         if dimension < 8 or dimension%heads or dimension%2 or layers < 1:
             raise ValueError('Invalid temporal Critic dimensions')
         self.dimension, self.cache_frozen_conditions = dimension, True
+        self.context_schema=FUTURE_SCHEMA if future_reference else SCHEMA
+        self.future_reference=bool(future_reference)
         for name in ('music_embedder','cond_exists_embedder','history_encoder','prefix_encoder','proprio_normalizer'):
             setattr(self,name,copy.deepcopy(getattr(actor,name)))
         original=self.history_encoder.cell
@@ -56,6 +86,7 @@ class PretrainedConditionCritic(nn.Module):
         self.value_head=nn.Sequential(nn.LayerNorm(dimension),nn.Linear(dimension,dimension//2),nn.SiLU(),nn.Linear(dimension//2,1))
         frequency=torch.exp(torch.arange(0,dimension,2,dtype=torch.float32)*(-math.log(10000.)/dimension))
         self.register_buffer('time_frequency',frequency)
+        if self.future_reference:self.future_reference_encoder=FutureCommittedReferenceEncoder(dimension)
         if self.cache_frozen_conditions:
             for module in self.encoder_modules():
                 module.requires_grad_(False);module.eval()
@@ -92,10 +123,15 @@ class PretrainedConditionCritic(nn.Module):
         extra=torch.where(valid[...,None],c['tracking_history'][...,48:].float(),0.)/self.tracking_scales
         relative=torch.where(valid,c['proprio_history_times']-c['decision_time'][:,None],0.).float()
         prefix=self.prefix_encoder(known,mask)
-        return dict(music=music,prefix=prefix,history_input=torch.cat((history,extra),-1),
+        result=dict(music=music,prefix=prefix,history_input=torch.cat((history,extra),-1),
             history_valid=valid,history_relative=relative,future_valid=future,
             music_valid=music_valid,prefix_valid=mask.any(-1),
             relative_times=torch.where(future,c['future_times']-c['decision_time'][:,None],0.).float())
+        if self.future_reference:
+            if 'committed_reference' not in c:raise ValueError('Future Critic cannot use legacy or reconstructed-after-action cache')
+            result.update({k:c[k] for k in ('committed_reference','committed_valid','committed_metadata','committed_metadata_valid')})
+            result['committed_relative']=(c['committed_times']-c['decision_time'][:,None]).float()
+        return result
 
     @torch.no_grad()
     def encode_frozen(self, context):
@@ -114,8 +150,11 @@ class PretrainedConditionCritic(nn.Module):
         temporal=self.music_projection(f['music'])+self.prefix_projection(f['prefix'])+times+self.mask_projection(flags)
         history=self.history_encoder(f['history_input'],f['history_valid'],f['history_relative'])
         temporal=temporal+self.history_projection(history)[:,None]
+        future_feature=self.future_reference_encoder(f) if self.future_reference else None
+        if future_feature is not None:temporal=temporal+future_feature[:,None]
         temporal=torch.where(f['future_valid'][...,None],temporal,0.)
         token=self.value_token.expand(batch,-1,-1)+self.remaining_projection((remaining/30.)[:,None])[:,None]
+        if future_feature is not None:token=token+future_feature[:,None]
         sequence=torch.cat((token,temporal),1)
         blocked=torch.cat((torch.zeros(batch,1,dtype=torch.bool,device=sequence.device),~f['future_valid']),1)
         value=self.value_head(self.temporal(sequence,src_key_padding_mask=blocked)[:,0]).squeeze(-1)
@@ -125,3 +164,13 @@ class PretrainedConditionCritic(nn.Module):
     def forward(self, context, remaining_music_seconds):
         f=self.encode_frozen(context)
         return self.forward_encoded(f,remaining_music_seconds)
+
+
+def initialize_future_critic_shared(critic,legacy_state):
+    """显式新schema初始化，只复制旧共享权重；不恢复旧Adam或冒充旧checkpoint恢复。"""
+    if not critic.future_reference:raise ValueError('Explicit new future Critic required')
+    current=critic.state_dict();shared={k for k in current if not k.startswith('future_reference_encoder.')}
+    if set(legacy_state)!=shared or any(current[k].shape!=legacy_state[k].shape for k in shared):
+        raise ValueError('Legacy Critic parameter mapping differs')
+    critic.load_state_dict({**current,**legacy_state},strict=True)
+    return dict(source_schema=SCHEMA,target_schema=FUTURE_SCHEMA,optimizer_restored=False,new_projection_zero=True)

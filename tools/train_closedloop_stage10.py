@@ -57,6 +57,8 @@ def main():
     parser.add_argument('--decisive-diagnostic',action='store_true',help='有限A/C因果诊断：真实行为链、四方向正反扰动与冻结Stage1参考干预；不训练')
     parser.add_argument('--diagnostic-repeatability-only',action='store_true',help='配合决定性诊断入口，仅做两次零更新20秒物理重复性核对')
     parser.add_argument('--diagnostic-fresh-physics-source',type=Path,help='读取已保存方向，每个配对候选新建PhysX世界；A完整音乐，C有限20秒参考干预')
+    parser.add_argument('--diagnostic-reference-after-p0',action='store_true',help='P0通过后的零参考回放与合法20秒干预')
+    parser.add_argument('--diagnostic-reference-local-source',type=Path,help='已通过局部C的来源；显式开启完整困难音乐验证')
     parser.add_argument('--diagnostic-p0',action='store_true',help='全音乐原模型/零扰动独立世界硬门槛及未来缓存采集')
     parser.add_argument('--diagnostic-reference-only',action='store_true',help='仅做带连续前缀桥接与零扰动对照的八音乐20秒参考配对')
     parser.add_argument('--collect-rollouts',type=int,default=1,help='collect-only连续世界窗口数；保留正常episode，不更新行为策略')
@@ -106,6 +108,8 @@ def main():
         parser.error('Repeatability-only is an explicit decisive diagnostic, never a training modifier')
     if args.diagnostic_fresh_physics_source and (not args.decisive_diagnostic or args.diagnostic_repeatability_only):
         parser.error('Fresh paired physics requires only the explicit decisive diagnostic mode')
+    if args.diagnostic_reference_after_p0 and not args.diagnostic_fresh_physics_source:parser.error('Reference C requires P0 source')
+    if args.diagnostic_reference_local_source and not args.diagnostic_reference_after_p0:parser.error('Full C requires explicit after-P0 mode')
     if args.diagnostic_p0 and not args.diagnostic_fresh_physics_source:parser.error('P0 requires explicit source plan')
     if args.diagnostic_reference_only and not args.diagnostic_fresh_physics_source:
         parser.error('Reference-only requires the explicit saved diagnostic source')

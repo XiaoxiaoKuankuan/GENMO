@@ -514,8 +514,10 @@ def run(cargs,config,distributed):
             c.base_config['stage10']['critic']['warmup_rollouts']=cargs.warmup_rollouts
         def create_critic():
             return PretrainedConditionCritic(c.actor,dimension=critic_config['dimension'],layers=critic_config['layers'],
-                heads=critic_config['heads'],history_scales=critic_config['history_scales']).to(distributed.device)
+                heads=critic_config['heads'],history_scales=critic_config['history_scales'],
+                future_reference=critic_config['type']=='asymmetric_tracking_committed_temporal').to(distributed.device)
         c.critic=local_call(distributed,create_critic)
+        if c.critic.future_reference:c.config['runtime']['future_reference_context']=True
         distributed.broadcast_module(c.actor);distributed.broadcast_module(c.critic)
         precision=c.stage['precision']
         c.policy=build_policy(c.actor,c.settings,precision)
@@ -702,10 +704,12 @@ def run(cargs,config,distributed):
                 final_state=c.state)
             raise _FiniteDiagnosticComplete
         if getattr(cargs,'decisive_diagnostic',False):
-            from .decisive_diagnostic import run_diagnostic,run_repeatability,run_fresh_physics,run_reference_only,run_p0
+            from .decisive_diagnostic import run_diagnostic,run_repeatability,run_fresh_physics,run_reference_only,run_p0,run_reference_after_p0
             if getattr(cargs,'diagnostic_fresh_physics_source',None):
                 function=run_p0 if getattr(cargs,'diagnostic_p0',False) else (run_reference_only if getattr(cargs,'diagnostic_reference_only',False) else run_fresh_physics)
-                report['decisive_diagnostic']=function(c,cargs.diagnostic_fresh_physics_source)
+                if getattr(cargs,'diagnostic_reference_after_p0',False):
+                    report['decisive_diagnostic']=run_reference_after_p0(c,cargs.diagnostic_fresh_physics_source,local_source=cargs.diagnostic_reference_local_source)
+                else:report['decisive_diagnostic']=function(c,cargs.diagnostic_fresh_physics_source)
             else:
                 function=run_repeatability if getattr(cargs,'diagnostic_repeatability_only',False) else run_diagnostic
                 report['decisive_diagnostic']=function(c)

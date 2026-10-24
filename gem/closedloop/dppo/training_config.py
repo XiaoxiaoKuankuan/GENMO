@@ -143,7 +143,7 @@ def configuration(path,*,genmo_repo=None,gmt_repo=None):
     if len(t['std_schedule'])!=20 or t['std_schedule'][-1]!=0. or any(
             not math.isfinite(x) or x<=0 for x in t['std_schedule'][:-1]):
         raise ValueError('Nineteen positive stochastic floors and an explicit zero deterministic final are required')
-    if s['critic']['type']!='asymmetric_tracking_temporal' or 'freeze_encoders' in s['critic']:
+    if s['critic']['type'] not in ('asymmetric_tracking_temporal','asymmetric_tracking_committed_temporal') or 'freeze_encoders' in s['critic']:
         raise ValueError('Independent trainable tracking history Critic required')
     if not 0<s['critic']['history_learning_rate']<=s['critic']['learning_rate']:
         raise ValueError('Invalid separate history GRU learning rate')

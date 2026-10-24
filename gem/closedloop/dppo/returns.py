@@ -14,6 +14,19 @@ from __future__ import annotations
 import torch
 
 
+def validate_value_state_boundaries(row):
+    """仅校验价值状态的因果时刻/行为版本，不平移奖励，不改变半马尔可夫GAE。"""
+    from .tracking_context import validate_tracking_context
+    for key,tick in (('critic_context',row.control_tick_begin),('next_critic_context',row.control_tick_end)):
+        context=row.metadata.get(key)
+        if context is None:continue
+        if 'committed_reference' not in context:continue
+        validate_tracking_context(context)
+        if (not bool((context['committed_snapshot_tick']==tick).all()) or
+                not bool((context['committed_policy_version']==row.identity['policy_version']).all())):
+            raise ValueError('Value state cache belongs to another time or behavior version')
+
+
 def compute_gae(rewards, values, next_values, executed_steps, bootstrap_mask, continuation_mask,
                 valid=None, *, gamma_upper=.99, lambda_upper=.95, event_rewards=None, normalize=False):
     if not 0 < float(gamma_upper) <= 1 or not 0 < float(lambda_upper) <= 1:

@@ -14,14 +14,14 @@ from pathlib import Path
 import copy
 import torch
 from . import CHECKPOINT_SCHEMA
-from ..dppo.training_checkpoint import SCHEMA, file_sha256
+from ..dppo.training_checkpoint import SCHEMA, schema_for_identity, file_sha256
 from ..dppo.checkpoint import _validate_model_state, _validate_optimizer_state
 
 
 def initialize_actor_weights_only(path, actor, *, assets):
     payload = torch.load(path, map_location='cpu', weights_only=False, mmap=True)
     previous = payload.get('identity', {})
-    if payload.get('schema') not in (SCHEMA, CHECKPOINT_SCHEMA):
+    if payload.get('schema') not in (SCHEMA, CHECKPOINT_SCHEMA, 'genmo.stage2.future_committed_critic.checkpoint.v1'):
         raise ValueError('Explicit weights-only initialization requires a recognized Stage2 checkpoint')
     for key in ('checkpoint', 'stats', 'kinematics'):
         if previous.get('assets', {}).get(key) != assets[key]:
@@ -38,7 +38,7 @@ def initialize_actor_weights_only(path, actor, *, assets):
 def initialize_optimization_variant(path, *, identity, actor, critic, actor_optimizer, critic_optimizer):
     """仅同一 RoboFFT 行为/价值目标 warm-start；所有门禁先于任何模型写入。"""
     payload = torch.load(path, map_location='cpu', weights_only=False, mmap=True)
-    if payload.get('schema') != CHECKPOINT_SCHEMA:
+    if payload.get('schema') != schema_for_identity(identity):
         raise ValueError('Optimization variant requires a complete RoboFFT checkpoint')
     previous = payload['identity']
     for key in ('assets', 'kernel', 'critic', 'reward', 'timing', 'dataset', 'physical_episode',

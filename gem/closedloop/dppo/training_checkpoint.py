@@ -31,6 +31,8 @@ SCHEMA='genmo.closedloop.stage2.full_chain_joint.checkpoint.v1'
 def schema_for_identity(identity):
     """算法身份决定完整恢复格式；源码变更不参与门禁。"""
     from ..robofft import OBJECTIVE, CHECKPOINT_SCHEMA
+    if identity.get('critic',{}).get('type')=='asymmetric_tracking_committed_temporal':
+        return 'genmo.stage2.future_committed_critic.checkpoint.v1'
     return CHECKPOINT_SCHEMA if identity.get('training',{}).get('actor_objective')==OBJECTIVE else SCHEMA
 
 
@@ -160,8 +162,9 @@ def load_training_checkpoint(path,*,identity,actor,critic,actor_optimizer,critic
         raise ValueError('Explicit stepwise transfer must go from historical full-chain to current stepwise PPO')
     old_training={k:v for k,v in previous.items() if k!='evaluation'}
     new_training={k:v for k,v in identity.items() if k!='evaluation'}
-    from ..robofft import CHECKPOINT_SCHEMA
-    if payload.get('schema')==CHECKPOINT_SCHEMA and not new_experiment:
+    from ..robofft import CHECKPOINT_SCHEMA, OBJECTIVE
+    robofft_identity=identity.get('training',{}).get('actor_objective')==OBJECTIVE
+    if robofft_identity and not new_experiment:
         # 初始化来源是血缘记录；恢复将加载已验证的完整参数和 Adam，而非重新初始化。
         # 仍严格比较 Stage1 资产、采样核、算法、优化器和实际执行配置。
         old_training.pop('actor_initialization',None)
@@ -171,7 +174,7 @@ def load_training_checkpoint(path,*,identity,actor,critic,actor_optimizer,critic
         new_training=_initialization_execution(new_training,fragment_transfer=fragment_transfer,stepwise_transfer=stepwise_transfer)
     if payload.get('schema')!=schema_for_identity(identity) or not same_execution(old_training,new_training):
         raise ValueError('Checkpoint schema or actual training configuration differs')
-    if payload.get('schema')==CHECKPOINT_SCHEMA:
+    if robofft_identity:
         if new_experiment or not payload.get('rank_states') or any(
                 'robofft_mc' not in rank.get('rng',{}).get('generators',{}) for rank in payload['rank_states']):
             raise ValueError('RoboFFT resume requires complete independent MC RNG; use explicit weights-only for a new experiment')
