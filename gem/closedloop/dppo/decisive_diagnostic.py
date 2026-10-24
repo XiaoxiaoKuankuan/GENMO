@@ -241,7 +241,7 @@ def evaluate_local_candidates(c,plan,label):
     conditions=[];reference_sums=dict(count=0,root_position_squared=0.,root_rotation_squared=0.,leg_squared=0.)
     def sink(task,row):
         if label=='A_baseline' or label.startswith(('repeatability_','fresh_')):
-            snapshot=snapshot_critic_transition(row);snapshot['task_id']=task['task_id'];conditions.append(snapshot)
+            snapshot=snapshot_critic_transition(row);snapshot.task_id=task['task_id'];conditions.append(snapshot)
         # 逐状态生成输出单独保存，后续只按实际消费帧匹配，不使用执行后状态作目标。
         trace=row.metadata['sampler_trace']
         record=dict(task_id=task['task_id'],identity=row.identity,decision_index=row.identity.get('decision_index'),
