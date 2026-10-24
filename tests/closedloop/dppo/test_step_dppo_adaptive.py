@@ -174,6 +174,28 @@ def test_song_tail_failure_uses_true_time_bin_not_last_legal_start():
         if sample==0:assert start+20*30<=197*30
 
 
+def test_production_compact_rewards_feed_same_real_tracking_scores():
+    from gem.runtime.trajectory_blocks import pack_trace,ColumnarTrace
+    from test_vector_reward_adapter import calculators,packet
+    from test_data_learning import actual_step
+    oracle,_,reward=calculators();reward.evidence_level='training'
+    data=[]
+    for i in range(4):
+        row=actual_step(i,speed=1.+.1*i);row['env_id']=0
+        row['reward_primitives']=packet(row,oracle);data.append(row)
+    details=reward.evaluate_batch(ColumnarTrace([pack_trace(data)]))
+    assert 'components' in details[0] and 'components' not in details[1]
+    expected=sum(r['reward_primitives']['components']['track']['score'] for r in data)
+    row=SimpleNamespace(identity={'episode_id':'one'},reason=None,metadata=dict(
+        training_task={'dataset':'FineDance','sample_id':'0','music_start_frame':0},
+        collector_env_slot=0,terminal_snapshot={'terminated':True},reward_details=details))
+    pool=make_pool();events=pool.feedback([row])
+    assert len(events)==1 and events[0]['controls']==4
+    assert events[0]['track_sum']==pytest.approx(expected)
+    pool.update(events)
+    assert pool.statistics['FineDance/0']['track_ema']==pytest.approx(expected/4)
+
+
 def test_warmup_failure_does_not_fabricate_tracking_score():
     pool=make_pool()
     task=dict(sample=dict(dataset='FineDance',row={'sample_id':'0'}),music_start_frame=80*30)

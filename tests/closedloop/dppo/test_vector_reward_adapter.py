@@ -36,6 +36,7 @@ def test_training_evidence_preserves_bitwise_reward_and_full_audit_at_boundary()
             else:
                 assert 'diagnostics' not in right and 'components' not in right
                 assert right['activity']['gate']==left['activity']['gate']
+                assert right['tracking_score']==left['components']['track']['score']
     assert lean.scalar_audits==full.scalar_audits==3
     lean.evidence_level='full'
     row=actual_step(125,speed=1.);row['env_id']=3;row['reward_primitives']=packet(row,oracle)

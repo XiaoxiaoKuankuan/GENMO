@@ -155,6 +155,12 @@ class AdaptiveTimePool(StratifiedTimePool):
             episode = str(row.identity['episode_id'])
             details = row.metadata.get('reward_details', [])
             for detail in details:
+                # 训练明细只保留真实GPU跟踪分数；审计步仍有完整components。
+                # 不从综合奖励反推分数，也不把字段缺失默认为零。
+                score = float(detail['tracking_score'] if 'tracking_score' in detail
+                    else detail['components']['track']['score'])
+                if not math.isfinite(score) or not 0 <= score <= 1:
+                    raise ValueError('adaptive feedback requires a finite tracking score in [0,1]')
                 frame = task['music_start_frame']+max(0, int(detail['tick'])-600)//20
                 bin_id = self._bin(source, sample_id, frame)
                 current = self.pending.get(slot)
@@ -166,7 +172,7 @@ class AdaptiveTimePool(StratifiedTimePool):
                         track_sum=0., failure=False, severe=False)
                     self.pending[slot] = current
                 current['controls'] += 1
-                current['track_sum'] += float(detail['components']['track']['score'])
+                current['track_sum'] += score
             failed = bool(row.metadata.get('terminal_snapshot', {}).get('terminated', False))
             physical_end = failed or row.metadata.get('physical_time_limit_reached', False) or row.reason == 'music_end'
             if physical_end and slot in self.pending:
