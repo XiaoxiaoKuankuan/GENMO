@@ -165,3 +165,19 @@ def test_variant_supervisor_only_initializes_first_launch(tmp_path):
     resumed=training_command('new.yaml',tmp_path,3,robofft_variant='parent.pt')
     assert resumed[-2:]==['--resume','latest'] and '--initialize-robofft-variant' not in resumed
     with pytest.raises(ValueError):training_command('new.yaml',tmp_path,3,'old.pt',robofft_variant='parent.pt')
+
+
+def test_weighted_objective_requires_explicit_distinct_schema(tmp_path):
+    import yaml
+    from gem.closedloop.dppo.training_config import configuration
+    from gem.closedloop.robofft.configuration import optimization_binding, EXECUTION_SCHEMA
+    c=yaml.safe_load((ROOT/'configs/closedloop/stage2_robofft_execution_weighted_server1.yaml').read_text())
+    p=tmp_path/'variant.yaml';p.write_text(yaml.safe_dump(c))
+    assert optimization_binding(configuration(p)['stage10'])['schema']==EXECUTION_SCHEMA
+    c['stage10']['actor_optimization']['schema']='genmo.closedloop.stage2.robofft_d.v1'
+    p.write_text(yaml.safe_dump(c))
+    with pytest.raises(ValueError,match='Explicit RoboFFT'):configuration(p)
+    c['stage10']['actor_optimization']['schema']=EXECUTION_SCHEMA
+    c['stage10']['training']['robofft'].pop('execution_weighting')
+    p.write_text(yaml.safe_dump(c))
+    with pytest.raises(ValueError,match='Explicit RoboFFT'):configuration(p)

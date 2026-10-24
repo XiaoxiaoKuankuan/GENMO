@@ -11,10 +11,13 @@ import copy
 import math
 from . import OBJECTIVE, VERSION
 
+EXECUTION_SCHEMA = 'genmo.closedloop.stage2.robofft_execution_weighted.v1'
+
 
 def optimization_binding(stage):
     t = stage['training']
-    return dict(schema=VERSION, objective=OBJECTIVE, candidate_not_calibrated=True,
+    return dict(schema=EXECUTION_SCHEMA if t['robofft'].get('execution_weighting') else VERSION,
+        objective=OBJECTIVE, candidate_not_calibrated=True,
         objective_variant=('execution_weighted_robofft_surrogate.v1' if t['robofft'].get('execution_weighting') else 'original_equal_time_robofft_surrogate'),
         robofft=copy.deepcopy(t['robofft']), actor_lr=t['actor_lr'],
         actor_lr_multipliers=copy.deepcopy(t['actor_lr_multipliers']),
@@ -28,7 +31,8 @@ def validate_configuration(config, maximum_steps):
     r = t['robofft']
     from .execution_weights import validate_settings
     validate_settings(r.get('execution_weighting'))
-    if (s['version'] != VERSION or s['actor_optimization'] != {'schema': VERSION} or
+    expected_schema=EXECUTION_SCHEMA if r.get('execution_weighting') else VERSION
+    if (s['version'] != VERSION or s['actor_optimization'] != {'schema': expected_schema} or
             t['actor_objective'] != OBJECTIVE or t['actor_lr_control'] != 'fixed' or
             t['objective_logprob_reduction'] != 'mc_mean_logratio_action_clip' or
             t.get('bc_enabled') is not False or r.get('anchor_enabled') is not False or

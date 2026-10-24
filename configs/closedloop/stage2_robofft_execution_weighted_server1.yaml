@@ -69,7 +69,7 @@ runtime:
   reference_update_contract: executed_only_future_replace.v1
 stage10:
   actor_optimization:
-    schema: genmo.closedloop.stage2.robofft_d.v1
+    schema: genmo.closedloop.stage2.robofft_execution_weighted.v1
   assets:
     checkpoint: 51b522fbdeb0ec289e5ffc24e2fccca9888df90495f57f96714c1bb43c05f8e2
     gmt_checkpoint: 79d1a99e54db42342927ec178329dab88772bafbc05df1b0dbe310bc6dd0b319
