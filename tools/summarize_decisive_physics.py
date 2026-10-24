@@ -157,7 +157,7 @@ def compare_one(work):
     from gem.robots.bumi.kinematics import BumiKinematics
     continuity=reference_continuity(actual_a,actual_b,BumiKinematics(kinematics_path))
     result=dict(rank=rank,kind=kind,baseline=str(base_path),candidate=str(new_path),plan_sha256=br['plan_sha256'],
-        cohort='four_sources_eight_music_two_seeds_fixed_train_music_exploratory_no_multiplicity_correction',
+        cohort=dict(scope='fixed_train_music_exploratory_no_multiplicity_correction',seeds=bp['seeds'],episode_seconds=bp['episode_seconds'],tasks=len(before)),
         metrics={field:cluster_summary(rows,field+'_delta') for field in ('reward_per_second','full_task_reward','seconds','failure','activity','music_alignment','completion')},
         baseline_metrics={field:cluster_summary(rows,field+'_initial') for field in ('reward_per_second','full_task_reward','failure','activity')},
         candidate_metrics={field:cluster_summary(rows,field+'_final') for field in ('reward_per_second','full_task_reward','failure','activity')},
@@ -176,6 +176,7 @@ def main():
     parser.add_argument('--kind',choices=['A','C'],required=True);parser.add_argument('--output-dir',type=Path,required=True)
     parser.add_argument('--workers',type=int,default=4)
     parser.add_argument('--fresh-parent-run',type=Path,help='新世界复测A读取此目录的首次新建世界基线，C使用当前新世界20秒基线')
+    parser.add_argument('--reference-bridge',action='store_true',help='八音乐单种子连续桥接参考干预及零扰动对照标签')
     args=parser.parse_args()
     args.output_dir.mkdir(parents=True,exist_ok=False)
     import yaml
@@ -190,6 +191,9 @@ def main():
         else:base='fresh_C_Stage1'
     labels=(['A_plus','A_minus','B_plus','B_minus','C_plus','C_minus','D_plus','D_minus'] if args.kind=='A' else
             ['C_height_plus','C_height_minus','C_yaw_plus','C_yaw_minus','C_leg_plus','C_leg_minus','C_smooth10','C_smooth20'])
+    if args.reference_bridge:
+        if args.kind!='C' or not args.fresh_parent_run:raise ValueError('Reference bridge requires fresh-world C comparison')
+        labels=['C_height_plus','C_height_minus','C_yaw_plus','C_yaw_minus','C_leg_minus','C_smooth05','C_smooth10','C_identity']
     for rank,label in enumerate(labels):
         before=base_phase/f'decisive_{base}'/f'rank{rank:02d}'/'report/report.json'
         prefix='fresh_' if args.fresh_parent_run else ''
