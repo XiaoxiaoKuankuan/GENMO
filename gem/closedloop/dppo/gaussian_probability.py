@@ -96,7 +96,7 @@ def chain_statistics(joint_log_ratios, joint_kls, free_counts, *, steps=None):
     if joint_log_ratios.ndim!=2:
         raise ValueError('Complete-chain log ratios must have [chains,trainable_steps] shape')
     expected=steps_for_count(joint_log_ratios.shape[1])
-    if steps is not None and validate_trainable_steps(steps)!=expected:
+    if steps is not None and len(validate_trainable_steps(steps))!=len(expected):
         raise ValueError('Declared trainable steps differ from complete-chain probability width')
     if joint_kls.shape!=joint_log_ratios.shape or free_counts.shape!=joint_log_ratios.shape:
         raise ValueError('Chain log ratios, KL and free counts must have identical [chains,trainable_steps] shape')

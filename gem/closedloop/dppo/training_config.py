@@ -141,14 +141,22 @@ def configuration(path,*,genmo_repo=None,gmt_repo=None):
         if type(v)is not int or v<1:raise ValueError(f'{k} must be positive integer')
     if world!=8 or s['distributed']['backend']!='nccl' or s['distributed']['collection']!='all_ranks':
         raise ValueError('当前 production requires eight synchronous GPU ranks')
-    from .denoising_contract import trainable_steps, calibration_scope
+    from .denoising_contract import trainable_steps, calibration_scope, step_strategy
     active_steps=trainable_steps(t['frozen_prefix_steps'],t['denoising_steps']);step_count=len(active_steps)
-    if (t['denoising_steps']!=c['model']['ddim_steps'] or t['ppo_step_strategy']!=f'intermediate{step_count}' or
+    if (t['denoising_steps']!=c['model']['ddim_steps'] or t['ppo_step_strategy']!=step_strategy(active_steps,t['denoising_steps']) or
             t['ppo_steps_per_chain']!=step_count or t['ppo_epochs'] not in (1,2,3,5)):
-        raise ValueError('Explicit 15+4+1, 9+10+1 or 4+5+1 schedule must match all trainable steps')
-    if len(t['std_schedule'])!=t['denoising_steps'] or t['std_schedule'][-1]!=0. or any(
-            not math.isfinite(x) or x<=0 for x in t['std_schedule'][:-1]):
+        raise ValueError('Explicit denoising schedule must match all trainable steps')
+    terminal=t['denoising_steps']-1 in active_steps
+    stochastic=t['std_schedule'] if terminal else t['std_schedule'][:-1]
+    if len(t['std_schedule'])!=t['denoising_steps'] or (not terminal and t['std_schedule'][-1]!=0.) or any(
+            not math.isfinite(x) or x<=0 for x in stochastic):
         raise ValueError('Every stochastic step needs a positive floor; the deterministic final has zero floor')
+    from .executed_action_mask import CONTRACT as EXECUTED_ACTION
+    action_scope=t.get('ppo_action_scope')
+    if action_scope not in (None,EXECUTED_ACTION) or terminal!=(action_scope==EXECUTED_ACTION):
+        raise ValueError('Terminal-five training requires the explicit executed-source-frame PPO contract')
+    if action_scope is not None and c['runtime'].get('record_compact_execution_provenance') is not True:
+        raise ValueError('Executed-frame PPO requires actual per-control source provenance')
     if s['critic']['type']!='asymmetric_tracking_temporal' or 'freeze_encoders' in s['critic']:
         raise ValueError('Independent trainable tracking history Critic required')
     if not 0<s['critic']['history_learning_rate']<=s['critic']['learning_rate']:

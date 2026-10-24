@@ -47,6 +47,7 @@ def _rank(distributed):
 
 
 def _manifest(transitions, targets, distributed, global_manifest):
+    from .executed_action_mask import action_mask
     rank = _rank(distributed)
     valid = torch.as_tensor(targets.get('valid', [row.transition_valid for row in transitions])).bool()
     if valid.shape != (len(transitions),):
@@ -54,7 +55,7 @@ def _manifest(transitions, targets, distributed, global_manifest):
     if global_manifest is None:
         world = 1 if distributed is None else distributed.world_size
         result = [dict(owner_rank=i % world, local_index=i, valid=bool(valid[i]),
-                       has_free=bool(row.free_mask.any())) for i, row in enumerate(transitions)]
+                       has_free=bool(action_mask(row).any())) for i, row in enumerate(transitions)]
     else:
         result = list(global_manifest)
     seen = set()
@@ -69,7 +70,7 @@ def _manifest(transitions, targets, distributed, global_manifest):
         if owner == rank:
             if index >= len(transitions) or bool(valid[index]) != bool(item['valid']):
                 raise ValueError('Global rollout manifest differs from local validity')
-            if bool(transitions[index].free_mask.any()) != bool(item['has_free']):
+            if bool(action_mask(transitions[index]).any()) != bool(item['has_free']):
                 raise ValueError('Global rollout manifest differs from local free mask')
     if global_manifest is not None:
         actual_local_indices = {index for owner, index in seen if owner == rank}
@@ -110,7 +111,7 @@ def _context(rows, device):
 
 
 @profiled('learning.parameters', gpu=True)
-def _parameters(policy, rows, steps, device, cache=None, conditions=None):
+def _parameters(policy, rows, steps, device, cache=None, conditions=None, *, executed_only=False):
     prepared_only = (conditions is not None and conditions.bank is not None
                      and hasattr(policy, '_transition_prepared'))
     context = None if prepared_only else (_context(rows, device) if cache is None else cache.context(rows))
@@ -127,6 +128,12 @@ def _parameters(policy, rows, steps, device, cache=None, conditions=None):
     mask = torch.stack([row.free_mask for row in rows]).to(device) if cache is None else cache.get('free_mask', rows)
     if 'free_mask' in result:
         require_tensor((result['free_mask'] == mask).all(), 'Current policy changed the fixed rollout free-coordinate mask')
+    if executed_only:
+        from .executed_action_mask import action_mask
+        selected=(torch.stack([action_mask(row) for row in rows]).to(device) if cache is None
+                  else cache.get('ppo_action_mask',rows))
+        require_tensor((~selected | mask).all(),'Executed PPO coordinates escaped the sampled free mask')
+        mask=selected
     return result, mask
 
 

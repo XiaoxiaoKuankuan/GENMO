@@ -212,14 +212,15 @@ def gradient_validation(policy,rows,cache,distributed):
     """本地计算先协作传播异常，再执行SUM；独立Normal公式和2e-5门槛不变。"""
     actor=policy.actor;device=distributed.device
     try:
-        selected=local_call(distributed,lambda:[row for row in rows if row.free_mask.any()][:2])
+        from gem.closedloop.dppo.executed_action_mask import action_mask
+        selected=local_call(distributed,lambda:[row for row in rows if action_mask(row).any()][:2])
         denominator=sum(distributed.all_gather_object(len(selected)))
         actor.zero_grad(set_to_none=True)
         def independent_backward():
             with policy_phase(policy):
                 terms=[]
                 for step in policy.trainable_steps:
-                    params,mask=_parameters(policy,selected,[step]*len(selected),device,cache)
+                    params,mask=_parameters(policy,selected,[step]*len(selected),device,cache,executed_only=True)
                     old_mean,old_std=_old_kernel(selected,[step]*len(selected),device,cache)
                     value=cache.get('chain',selected,[step+1]*len(selected)).double()
                     a=torch.distributions.Normal(params['mean'].double(),params['std'].double())
@@ -366,7 +367,7 @@ def argument_parser():
     """仅构造CLI便于CPU核验；解析help或可选开关不会初始化分布式/CUDA。"""
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--case',type=Path,required=True)
-    parser.add_argument('--config',type=Path,default=ROOT/'configs/closedloop/stage2_step_dppo_adaptive_server2.yaml')
+    parser.add_argument('--config',type=Path,default=ROOT/'configs/closedloop/stage2_terminal5_executed_server2.yaml')
     parser.add_argument('--output-dir',type=Path,required=True)
     parser.add_argument('--learning-rates',type=float,nargs='+',default=[1e-6,3e-6,1e-5])
     parser.add_argument('--epochs',type=int,default=1)
@@ -476,7 +477,7 @@ def main():
                 if trust is not None:trust['maximum_lr']=lr
                 report=actor_update(policy,optimizer,rows,targets,cache,manifest,controller,distributed=distributed,
                     anchor=anchor,generator=generators['actor'],ppo_epochs=args.epochs,minibatch_chains=config['stage10']['scale']['actor_minibatch_chains'],
-                    sampled_steps=len(policy.trainable_steps),step_strategy=f'intermediate{len(policy.trainable_steps)}',
+                    sampled_steps=len(policy.trainable_steps),step_strategy=config['stage9']['ppo_step_strategy'],
                     max_optimizer_steps=args.max_optimizer_steps,audit_full_rollout_objective=True,
                     audit_full_gradient_direction=args.audit_full_gradient_direction,
                     full_rollout_observer=observe_probability if args.save_probability_records else None,

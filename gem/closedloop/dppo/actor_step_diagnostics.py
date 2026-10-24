@@ -6,7 +6,7 @@
 此重建仅解释参数减法的精度，不冒充另一套优化器，也不修改实际梯度或权重。
 
 固定输出探针保持音乐、观测、承诺前缀、配置的冻结前段状态及真实创新噪声不变，
-重新执行全部可训练步和冻结确定性末步，记录最终qpos/contact。旧链上的均值与真实
+重新执行全部可训练步；仅旧核补执行冻结确定性末步，记录最终qpos/contact。旧链上的均值与真实
 joint log-ratio另算，优势相关性是统计诊断，不把它称为真实物理性能改善。
 探针和逐模块统计有明确额外成本；全部可训练步KL仍由原updater覆盖全部有效链。
 """
@@ -118,7 +118,7 @@ def output_probe(policy, rows, cache, max_chains=16):
             stats = gaussian_statistics(cache.get('chain', selected, [step+1]*len(selected)),
                 cache.get('old_means', selected, [step]*len(selected)),
                 cache.get('old_stds', selected, [step]*len(selected)),
-                params['mean'], params['std'], params['free_mask'])
+                params['mean'], params['std'], cache.get('ppo_action_mask',selected))
             means.append(params['mean'].clone())
             logratios.append(stats['joint_log_ratio'].clone())
             stds.append(params['std'].clone())
@@ -126,8 +126,12 @@ def output_probe(policy, rows, cache, max_chains=16):
             state = policy.actor._constrain(moving['mean'] + moving['std']*
                 cache.get('sampling_noise', selected, [step]*len(selected)), prepared['adapted'])
             moving_states.append(state.clone())
-        final = policy.transition_parameters(context, state, policy.final_step, prepared=prepared)
-        qpos = policy.actor.endecoder.codec.decode_to_canonical_qpos(policy.actor.endecoder.denormalize(final['mean']))
+        if policy.final_step in policy.trainable_steps:
+            final_state,final_contact=state,moving['contact_logits']
+        else:
+            final = policy.transition_parameters(context, state, policy.final_step, prepared=prepared)
+            final_state,final_contact=final['mean'],final['contact_logits']
+        qpos = policy.actor.endecoder.codec.decode_to_canonical_qpos(policy.actor.endecoder.denormalize(final_state))
         boundaries=None
         if hasattr(policy,'experimental_joint_limits'):
             from .joint_limits import generated_boundaries_tensors
@@ -135,8 +139,9 @@ def output_probe(policy, rows, cache, max_chains=16):
                 [policy.experimental_joint_limits]*len(selected),policy.actor.endecoder.kinematics.joint_order)
         return dict(mean=torch.stack(means, 1), joint_log_ratio=torch.stack(logratios, 1), boundaries=boundaries,
             moving_states=torch.stack(moving_states,1),pre_final=state.clone(),
-            actual_std=torch.stack(stds, 1), final=final['mean'].clone(), qpos=qpos,
-            contact=final['contact_logits'].sigmoid(), mask=cache.get('free_mask', selected),
+            actual_std=torch.stack(stds, 1), final=final_state.clone(), qpos=qpos,
+            contact=final_contact.sigmoid(), mask=cache.get('ppo_action_mask', selected),
+            protected_mask=~cache.get('free_mask', selected),
             advantages=cache.get('advantages', selected),
             sources=[r.metadata.get('training_task', {}).get('dataset', 'unknown') for r in selected],
             identities=[r.identity for r in selected])
@@ -171,7 +176,9 @@ def compare_probes(before, after, distributed):
                 final_joint_rms_rad=float(qdelta[joint_mask].square().mean().sqrt()) if joint_mask.any() else 0.,
                 final_joint_max_rad=float(qdelta[joint_mask].abs().max()) if joint_mask.any() else 0.,
                 contact_rms=float((after['contact'][i]-before['contact'][i]).square().mean().sqrt()),
-                protected_unchanged=bool(torch.equal(after['final'][i][~mask], before['final'][i][~mask])))
+                # 未进PPO的远景仍可随共享参数变化；只有采样时已承诺的坐标必须冻结。
+                protected_unchanged=bool(torch.equal(after['final'][i][before['protected_mask'][i]],
+                    before['final'][i][before['protected_mask'][i]])))
             if after.get('boundaries') is not None:
                 for j,kind in enumerate(('hard','soft')):
                     record[kind+'_max_excess_before']=float(before['boundaries']['max_excess_rad'][i,j])

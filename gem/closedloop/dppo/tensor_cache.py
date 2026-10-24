@@ -55,10 +55,11 @@ class RolloutTensorCache:
                     torch.cat([row.metadata['critic_context'][key].detach().to(source_device) for row in self.rows],0))
             prototype = next((row for row in self.rows if row.chain is not None), None)
             if prototype is not None:
+                from .executed_action_mask import action_mask
                 trace = prototype.metadata['sampler_trace']
                 self.kernel = json.dumps(trace['kernel_config'], sort_keys=True)
                 extractors = dict(sampling_noise=lambda r:r.metadata['sampler_trace']['sampling_noise'][0],chain=lambda r: r.chain, old_log_prob=lambda r: r.old_log_prob,
-                    free_mask=lambda r: r.free_mask,
+                    free_mask=lambda r: r.free_mask,ppo_action_mask=action_mask,
                     old_means=lambda r: r.metadata['sampler_trace']['old_means'][0],
                     old_stds=lambda r: r.metadata['sampler_trace']['old_stds'][0])
                 for name, extract in extractors.items():

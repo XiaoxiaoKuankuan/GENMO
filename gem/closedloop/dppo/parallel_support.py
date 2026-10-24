@@ -53,8 +53,9 @@ def local_call(collective, function):
 
 
 def build_global_manifest(rows, collective):
+    from .executed_action_mask import action_mask
     local = [dict(owner_rank=collective.rank, local_index=i,
-                  valid=bool(row.transition_valid), has_free=bool(row.free_mask.any()))
+                  valid=bool(row.transition_valid), has_free=bool(action_mask(row).any()))
              for i, row in enumerate(rows)]
     return [entry for shard in collective.all_gather_object(local) for entry in shard]
 

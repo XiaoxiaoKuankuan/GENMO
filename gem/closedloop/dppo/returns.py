@@ -83,6 +83,8 @@ def normalize_advantages_global(targets, *, distributed=None):
     """
     raw = torch.as_tensor(targets['advantages_raw'], dtype=torch.float64).detach()
     valid = torch.as_tensor(targets['valid'], dtype=torch.bool, device=raw.device)
+    if 'actor_valid' in targets:
+        valid=valid & torch.as_tensor(targets['actor_valid'],dtype=torch.bool,device=raw.device)
     if raw.shape != valid.shape or not torch.isfinite(raw[valid]).all():
         raise ValueError('Global advantage normalization requires finite aligned valid values')
     selected = raw[valid]
@@ -101,7 +103,8 @@ def normalize_advantages_global(targets, *, distributed=None):
     if not torch.isfinite(normalized[valid]).all():
         raise FloatingPointError('Nonfinite globally normalized advantages')
     return {**targets, 'advantages': normalized, 'advantages_normalized': True,
-            'advantage_normalization_scope': 'global_valid_upper_transitions',
+            'advantage_normalization_scope': ('global_executed_action_transitions' if 'actor_valid' in targets
+                                             else 'global_valid_upper_transitions'),
             'advantage_global_count': int(count), 'advantage_global_mean': float(mean),
             'advantage_global_std': float(variance.sqrt())}
 

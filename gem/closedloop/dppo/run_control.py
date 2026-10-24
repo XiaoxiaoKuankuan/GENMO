@@ -40,4 +40,6 @@ def build_policy(actor, settings, precision, *, frozen_actor=None):
         weight_gradient=precision.get('weight_gradient', 'direct_joint_gemm'),generation_frames=settings.get('generation_frames',120),music_context_frames=settings.get('music_context_frames'))
     from .actor_scope import configure_actor_scope
     policy.actor_scope=configure_actor_scope(actor,settings.get('actor_trainable_scope','all'))
+    if settings.get('ppo_action_scope') is not None:
+        policy.kernel_config['actor_probability_scope']=settings['ppo_action_scope']
     return policy

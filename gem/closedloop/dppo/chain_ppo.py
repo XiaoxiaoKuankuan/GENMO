@@ -30,7 +30,7 @@ def evaluate_chain_records(policy, rows, cache, *, microbatch, physical_changes=
     for offset in range(0,len(pairs),microbatch):
         chunk=pairs[offset:offset+microbatch]
         samples=[rows[i] for i,_ in chunk];steps=[s for _,s in chunk]
-        params,mask=_parameters(policy,samples,steps,device,cache,conditions)
+        params,mask=_parameters(policy,samples,steps,device,cache,conditions,executed_only=True)
         old_mean,old_std=_old_kernel(samples,steps,device,cache)
         stats=gaussian_statistics(cache.get('chain',samples,[s+1 for s in steps]),
             old_mean,old_std,params['mean'],params['std'],mask)
@@ -82,7 +82,7 @@ def backward_chain_surrogate(policy, rows, cache, records, *, clip, global_chain
             chunk=pairs[offset:offset+microbatch]
             samples=[rows[i] for i,_ in chunk];steps=[s for _,s in chunk]
             indices=torch.tensor([i for i,_ in chunk],device=device)
-            params,mask=_parameters(policy,samples,steps,device,cache,conditions)
+            params,mask=_parameters(policy,samples,steps,device,cache,conditions,executed_only=True)
             old_mean,old_std=_old_kernel(samples,steps,device,cache)
             stats=gaussian_statistics(cache.get('chain',samples,[s+1 for s in steps]),
                 old_mean,old_std,params['mean'],params['std'],mask)

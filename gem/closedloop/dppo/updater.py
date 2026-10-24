@@ -41,10 +41,10 @@ def _actor_update(policy,optimizer,rows,targets,cache,manifest,controller,*,dist
     from .actor_step_diagnostics import StepDiagnostics,output_probe,compare_probes
     from .parallel_support import local_call
     from .parallel_support import capture_local_rng,restore_local_rng
-    from .denoising_contract import validate_trainable_steps
+    from .denoising_contract import validate_trainable_steps, step_strategy as expected_strategy
     active_steps=validate_trainable_steps(policy.trainable_steps)
     step_count=len(active_steps);record_width=step_count*8
-    if step_strategy!=f'intermediate{step_count}' or sampled_steps!=step_count:
+    if step_strategy!=expected_strategy(active_steps,policy.steps) or sampled_steps!=step_count:
         raise ValueError('PPO strategy/count must match every trainable stochastic transition')
     if (policy.steps not in (10,20) or ppo_epochs<1 or minibatch_chains<1 or microbatch<1 or
             gamma_denoising!=1. or kl_reduction!='denoising_step' or objective_reduction!='joint_sum'):
@@ -396,7 +396,8 @@ def reference_change_diagnostics(policy,rows,cache,distributed,max_local_chains=
                 state=policy.actor._constrain(params['mean']+params['std']*
                     cache.get('sampling_noise',selected,[step]*len(selected)),prepared['adapted'])
             # 最后确定性步骤与最终状态跟随当前采样核；十步核不能读取旧二十步索引。
-            state=policy.transition_parameters(context,state,policy.steps-1,prepared=prepared)['mean']
+            if policy.steps-1 not in policy.trainable_steps:
+                state=policy.transition_parameters(context,state,policy.steps-1,prepared=prepared)['mean']
             before=cache.get('chain',selected,[policy.steps]*len(selected))
             free=cache.get('free_mask',selected)
             delta=(state.double()-before.double())*policy.actor.endecoder.std.double()
@@ -414,7 +415,9 @@ def reference_change_diagnostics(policy,rows,cache,distributed,max_local_chains=
                     maximum_joint_change_rad=float(delta[i,:,9:].abs()[joint].max()) if joint.any() else None,
                     protected_coordinates_unchanged=bool(torch.equal(state[i][~free[i]],before[i][~free[i]]))))
     all_rows=[r for shard in distributed.all_gather_object(changes) for r in shard]
-    return dict(scope='regenerated_final_deterministic_reference_same_initial_state_and_saved_innovations_not_physics',
+    return dict(scope=('regenerated_final_stochastic_reference_same_initial_state_and_saved_innovations_not_physics'
+        if policy.steps-1 in policy.trainable_steps else
+        'regenerated_final_deterministic_reference_same_initial_state_and_saved_innovations_not_physics'),
         covered_chains=len(all_rows),selection='first_up_to_16_eligible_chains_per_rank',samples=all_rows,
         wall_seconds=max(distributed.all_gather_object(time.perf_counter()-started)))
 

@@ -27,7 +27,7 @@ sys.path.insert(0,str(ROOT))
 
 def main():
     parser=argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--config',type=Path,default=ROOT/'configs/closedloop/stage2_step_dppo_adaptive_server2.yaml')
+    parser.add_argument('--config',type=Path,default=ROOT/'configs/closedloop/stage2_terminal5_executed_server2.yaml')
     parser.add_argument('--output-dir',type=Path,required=True)
     parser.add_argument('--stop-after-iteration',type=int,default=2)
     parser.add_argument('--warmup-rollouts',type=int)

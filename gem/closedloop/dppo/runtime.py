@@ -203,11 +203,16 @@ class InProcessTrainingRuntime:
             from .rolling import rolling_enabled
             buffer=DeviceRolloutBuffer(fragments,c.policy,'cpu' if rolling_enabled(c.config) else c.distributed.device)
             rows=buffer.transitions
+            action_report=None
+            if c.settings.get('ppo_action_scope') is not None:
+                from .executed_action_mask import bind_executed_action_masks
+                action_report=bind_executed_action_masks(rows)
             targets=freeze_buffer_targets(buffer,buffer.fragments,c.critic,c.distributed.device,
                 critic_version=c.state['critic_updates'],batch_size=256,gamma_upper=c.settings['gamma_upper'],
                 lambda_upper=c.settings['lambda_upper'])
-            return buffer,targets
-        buffer,targets=local_call(c.distributed,prepare_learning)
+            return buffer,targets,action_report
+        buffer,targets,action_report=local_call(c.distributed,prepare_learning)
+        if action_report is not None:report['executed_action_mask']=action_report
         rows=buffer.transitions
         if hasattr(self.time_pool, 'feedback'):
             events=local_call(c.distributed,lambda:self.time_pool.feedback(rows))
@@ -228,9 +233,12 @@ class InProcessTrainingRuntime:
         report['joint_limits']=summarize_boundaries(
             [d['joint_limit_diagnostics'] for r in rows for d in r.metadata['reward_details']],
             generated=[r.metadata['generated']['joint_limit_diagnostics'] for r in rows])
-        counts=torch.stack([row.free_mask.sum() for row in rows]).cpu().tolist() if rows else []
+        from .executed_action_mask import action_mask
+        counts=torch.stack([action_mask(row).sum() for row in rows]).cpu().tolist() if rows else []
         local=[dict(owner_rank=c.distributed.rank,local_index=i,valid=True,has_free=n>0) for i,n in enumerate(counts)]
         manifest=[item for shard in c.distributed.all_gather_object(local) for item in shard]
+        if action_report is not None:
+            targets['actor_valid']=torch.tensor([n>0 for n in counts],dtype=torch.bool)
         if manifest:targets=normalize_advantages_global(targets,distributed=c.distributed)
         else:targets.update(advantage_global_count=0,advantage_global_mean=0.,advantage_global_std=0.)
         used,budget=self._finish()

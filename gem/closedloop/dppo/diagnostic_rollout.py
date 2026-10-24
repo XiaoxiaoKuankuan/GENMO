@@ -82,7 +82,8 @@ def sampled_diagnostic(c, rows, targets, label, *, per_rank=8, keep_last=2):
     selected=[rows[i] for i in indices]
     target={key:(value[indices] if torch.is_tensor(value) and value.ndim and len(value)==len(rows) else value)
             for key,value in targets.items()}
-    local=[dict(owner_rank=c.distributed.rank,local_index=i,valid=True,has_free=bool(row.free_mask.any()))
+    from .executed_action_mask import action_mask
+    local=[dict(owner_rank=c.distributed.rank,local_index=i,valid=True,has_free=bool(action_mask(row).any()))
            for i,row in enumerate(selected)]
     manifest=[item for part in c.distributed.all_gather_object(local) for item in part]
     base=c.session/'diagnostics'

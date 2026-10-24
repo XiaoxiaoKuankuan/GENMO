@@ -29,6 +29,7 @@ def optimization_binding(stage):
     return dict(schema='genmo.stage2.denoising_step_optimization_binding.v1',
         candidate_acceptance='finite_KL_only_first_qualified.v1',
         **({'trainable_gaussian_steps':list(trainable_steps(t['frozen_prefix_steps'],t['denoising_steps']))} if t['frozen_prefix_steps']!=15 else {}),
+        **({'ppo_action_scope':t['ppo_action_scope']} if t.get('ppo_action_scope') is not None else {}),
         actor_lr=t['actor_lr'],actor_lr_control=t['actor_lr_control'],actor_trainable_scope=t.get('actor_trainable_scope','all'),
         actor_optimizer=dict(type='AdamW',parameter_groups=1 if multipliers is None else 'named_modules',
             **({'lr_multipliers':multipliers} if multipliers is not None else {}),
