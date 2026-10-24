@@ -50,6 +50,7 @@ def _without_pose(decision):
     decision = copy.deepcopy(decision)
     for row in decision['controls']:
         row.pop(FIELD, None)
+        row.pop('feasibility', None)
     return decision
 
 

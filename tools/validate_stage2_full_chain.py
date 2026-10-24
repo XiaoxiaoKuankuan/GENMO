@@ -1,4 +1,4 @@
-"""服务器八卡真实旧rollout的完整链PPO概率、梯度与学习率标定入口。
+"""服务器八卡真实旧rollout的逐去噪步骤DPPO概率、梯度与学习率标定入口。
 
 输入为已有不可变fixed_data_validation目录及当前显式配置。先核对原始文件SHA，
 重建冻结Stage1先验并加载采样时Actor，使用原状态/创新噪声/均值/实际标准差/mask，
@@ -176,8 +176,8 @@ def candidate_update_checks(report,kl,config):
     """
     hard=check_candidate_kl(kl,config['stage10']['kl'])
     settings=config['stage9'];trust=settings['trust_region']
-    limits={k:v*trust['margin'] for k,v in config['stage10']['kl'].items() if k.startswith('chain_joint_')}
-    limits['chain_joint_mean']=min(limits['chain_joint_mean'],settings['kl_soft_stop_chain_joint']*trust['margin'])
+    limits={k:v*trust['margin'] for k,v in config['stage10']['kl'].items() if k.startswith('denoising_step_')}
+    limits['denoising_step_mean']=min(limits['denoising_step_mean'],settings['kl_soft_stop_denoising_step']*trust['margin'])
     limits['maximum_active_clip']=settings['max_active_clip_fraction']
     eligible=check_candidate_kl(kl,limits)
     if report['optimizer_steps']<1:eligible['failures']['no_optimizer_step']=True
@@ -199,9 +199,9 @@ def rejected_probability_diagnostics(policy,rows,cache,manifest,distributed,micr
         if m['owner_rank']==distributed.rank and m['valid'] and m['has_free']]
     with policy_phase(policy):
         records=evaluate_chain_records(policy,selected,cache,microbatch=microbatch)
-    local=torch.stack((records[:,:,0].sum(1),records[:,:,2].sum(1)),1).cpu()
+    local=torch.stack((records[:,:,0].reshape(-1),records[:,:,2].reshape(-1)),1).cpu()
     full=torch.cat(distributed.all_gather_object(local),0)
-    return dict(chain_joint_kl=distribution(full[:,0]),chain_joint_log_ratio=distribution(full[:,1]),
+    return dict(denoising_step_kl=distribution(full[:,0]),denoising_step_log_ratio=distribution(full[:,1]),
         gaussian_steps=list(policy.trainable_steps),chains=len(full),
         ratio_underflow_fraction=float((full[:,1]<math.log(float.fromhex('0x0.0000000000001p-1022'))).double().mean()),
         ratio_overflow_fraction=float((full[:,1]>math.log(torch.finfo(torch.float64).max)).double().mean()),
@@ -225,8 +225,8 @@ def gradient_validation(policy,rows,cache,distributed):
                     a=torch.distributions.Normal(params['mean'].double(),params['std'].double())
                     b=torch.distributions.Normal(old_mean,old_std)
                     terms.append((a.log_prob(value)-b.log_prob(value)).masked_fill(~mask,0.).sum((-2,-1)))
-                log=torch.stack(terms,1).sum(1);adv=cache.get('advantages',selected).double()
-                loss=-torch.minimum(log.exp()*adv,log.exp().clamp(.9,1.1)*adv).sum()/denominator
+                log=torch.stack(terms,1);adv=cache.get('advantages',selected).double()[:,None]
+                loss=-torch.minimum(log.exp()*adv,log.exp().clamp(.9,1.1)*adv).sum()/(denominator*len(policy.trainable_steps))
                 loss.backward()
         local_call(distributed,independent_backward)
         distributed.sum_gradients(actor)
@@ -371,6 +371,7 @@ def argument_parser():
     parser.add_argument('--learning-rates',type=float,nargs='+',default=[1e-6,3e-6,1e-5])
     parser.add_argument('--epochs',type=int,default=1)
     parser.add_argument('--max-optimizer-steps',type=int,help='有限固定数据比较可限制优化步数，保留实际完整链Mini-batch')
+    parser.add_argument('--reset-actor-adam',action='store_true',help='模拟新逐步DPPO迁移时重置旧联合目标Adam矩')
     parser.add_argument('--adaptive-kl',action='store_true',help='实际联合KL回溯；各LR为候选上限而非承诺接受步长')
     parser.add_argument('--audit-condition-chunk-boundary',action='store_true',
         help='一次性用每rank1025条有效真实链验证默认1024+1条件块；样本不足明确失败')
@@ -434,6 +435,7 @@ def main():
             probability=probability,gradients=gradients,condition_chunk_boundary=condition_boundary)))
         optimizer=torch.optim.AdamW(trainable_actor_parameters(actor),lr=args.learning_rates[0],weight_decay=0.)
         optimizer.load_state_dict(learning['actor_optimizer'])
+        if args.reset_actor_adam:optimizer.state.clear()
         controller=BCGradientController(**config['stage10']['bc_gradient'])
         from gem.closedloop.dppo.continuation import DisabledBC
         anchor=(Stage1RetentionAnchor(config,actor,train,source_global_step=loading['source_global_step'])
@@ -479,13 +481,13 @@ def main():
                     audit_full_gradient_direction=args.audit_full_gradient_direction,
                     full_rollout_observer=observe_probability if args.save_probability_records else None,
                     detailed_diagnostics=True,
-                    microbatch=config['stage9']['denoising_microbatch'],clip=config['stage9']['ppo_clip'],soft_kl=config['stage9']['kl_soft_stop_chain_joint'],
+                    microbatch=config['stage9']['denoising_microbatch'],clip=config['stage9']['ppo_clip'],soft_kl=config['stage9']['kl_soft_stop_denoising_step'],
                     bc_samples_per_rollout=config['stage9']['bc_samples_per_rollout'],
                     bc_min_global_batch=config['stage9']['bc_min_global_batch'],
                     bc_enabled=config['stage9'].get('bc_enabled',True),
                     max_active_clip=config['stage9']['max_active_clip_fraction'],
                     trust_region=trust,kl_limits=config['stage10']['kl'])
-                kl=final_kl(policy,rows,cache,manifest,distributed=distributed,microbatch=128,clip=.1)
+                kl=final_kl(policy,rows,cache,manifest,distributed=distributed,microbatch=128,clip=config['stage9']['ppo_clip'])
                 hard,acceptance=candidate_update_checks(report,kl,config)
                 if args.save_probability_records:
                     observe_final_probability(policy,rows,cache,manifest,distributed,
@@ -523,7 +525,7 @@ def main():
             root_call(distributed,lambda:atomic_json(args.output_dir/f'candidate_lr{lr:.8g}_epoch{args.epochs}.json',trial))
             if rank==0:print(json.dumps(dict(lr=lr,accepted=trial['acceptance']['passed'],
                 steps=trial.get('actor',{}).get('optimizer_steps'),
-                joint_kl=trial.get('kl',{}).get('chain_joint_kl'),
+                joint_kl=trial.get('kl',{}).get('denoising_step_kl'),
                 failures=trial['acceptance']['failures']),ensure_ascii=False),flush=True)
         restore_initial()
         restored=compare_recovered_state(initial,snapshot())

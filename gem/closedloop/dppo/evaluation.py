@@ -285,6 +285,11 @@ def _decision_evidence(result, index):
         controls[-1][ANCHOR_POSE_FIELD] = extract_anchor_pose_evidence(
             None if execution_trace is None or trace_error else execution_trace[control_index],
             int(detail['tick']), trace_error=trace_error)
+        from .feasibility import pose_diagnostics
+        pose=controls[-1][ANCHOR_POSE_FIELD]
+        controls[-1]['feasibility']=(pose_diagnostics(pose['reference']['anchor_quat_w'],
+            pose['actual']['anchor_quat_w'],non_yaw=raw_errors.get('non_yaw_orientation_error_rad'))
+            if pose.get('available') else dict(available=False,reason=pose.get('reason')))
     zero_step_event = _number(metadata.get('event_reward', 0.), 'zero step event')
     event_penalty = _number(metadata.get('event_penalty_total', zero_step_event), 'event penalty')
     total = sum(_number(value, 'reward') for value in rewards) + zero_step_event

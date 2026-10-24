@@ -105,9 +105,9 @@ def independent_loss(policy, rows, targets, denominator):
         old = torch.distributions.Normal(torch.zeros_like(mean), torch.ones_like(mean))
         new = torch.distributions.Normal(mean, torch.ones_like(mean))
         terms.append((new.log_prob(value) - old.log_prob(value)).masked_fill(~mask, 0.).sum((-2, -1)))
-    ratio = torch.stack(terms, 1).sum(1).exp()
-    advantage = targets['advantages']
-    return -torch.minimum(ratio * advantage, ratio.clamp(.9, 1.1) * advantage).sum() / denominator
+    ratio = torch.stack(terms, 1).exp()
+    advantage = targets['advantages'][:, None]
+    return -torch.minimum(ratio * advantage, ratio.clamp(.9, 1.1) * advantage).sum() / (denominator * len(policy.trainable_steps))
 
 
 def observe_condition_lifetime(monkeypatch):

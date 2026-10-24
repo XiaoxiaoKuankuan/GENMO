@@ -268,6 +268,9 @@ class WorldEnvironmentCollector:
             except WarmupEpisodeEnded:
                 # 只接收已结算的正常物理终止，完整性错误仍交给上层停止运行。
                 self.world_timing['warmup_physical_failures']=self.world_timing.get('warmup_physical_failures',0)+1
+                pool=getattr(sampler,'time_pool',None)
+                if hasattr(pool,'record_warmup_failure'):
+                    pool.record_warmup_failure(state.task or task,getattr(env,'last_warmup_feasibility',{}))
                 state.task=None
                 continue
             if env.rollout_window_reached:break

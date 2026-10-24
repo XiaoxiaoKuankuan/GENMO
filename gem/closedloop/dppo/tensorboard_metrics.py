@@ -80,8 +80,8 @@ DEFINITIONS.update({
     'Policy/ppo_objective_gain': '整批真实完整链clipped PPO目标减行为起点目标；越大越好，不能替代物理执行收益。',
     'Policy/transformer_lr_min': '本轮最后一次接受更新中，16层Transformer实际学习率的最小值。',
     'Policy/transformer_update_rms': 'Transformer主干每次Adam后实际FP32参数变化RMS的轮内均值；确认主干确实参与学习。',
-    'Policy/chain_joint_kl': '全部有效旧rollout链四步联合KL之和的均值；主要更新约束，非未来物理安全保证。',
-    'Policy/chain_joint_kl_p95': '上述每链联合KL的P95，检查尾部更新。完整P99/Max见每轮JSON。',
+    'Policy/denoising_step_kl': '全部有效旧rollout链的单个可训练去噪步条件KL均值；主要更新约束，非未来物理安全保证。',
+    'Policy/denoising_step_kl_p95': '上述单步条件KL的P95，检查尾部更新。完整P99/Max见每轮JSON。',
     'Policy/chain_clip_fraction': '完整链ratio落在[1-clip,1+clip]之外的比例；区别于真正失去梯度的active clip。',
     'Policy/parameter_update_rms': '每次Adam后真实FP32 Actor参数变化RMS的均值，非理论更新量。',
     'Policy/ppo_bc_cosine': '全局SUM后的PPO与BC梯度余弦；负值表示方向存在冲突。',
@@ -214,9 +214,9 @@ def training_scalars(record):
         if objective != 'joint_score_pg':
             values['Policy/clipped_objective_fraction'] = kl.get('active_clip_fraction',kl.get('objective_clip_fraction'))
     values['Policy/max_step_kl'] = kl.get('maximum_step_mean_coordinate_kl')
-    if kl.get('chain_joint_kl'):
-        values['Policy/chain_joint_kl']=kl['chain_joint_kl']['mean']
-        values['Policy/chain_joint_kl_p95']=kl['chain_joint_kl']['p95']
+    if kl.get('denoising_step_kl'):
+        values['Policy/denoising_step_kl']=kl['denoising_step_kl']['mean']
+        values['Policy/denoising_step_kl_p95']=kl['denoising_step_kl']['p95']
         values['Policy/chain_clip_fraction']=kl.get('clip_fraction')
     values['Policy/accepted_updates']=actor.get('accepted_optimizer_steps')
     values['Policy/nominal_actor_lr']=actor.get('nominal_learning_rate')

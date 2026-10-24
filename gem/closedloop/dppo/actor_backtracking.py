@@ -26,11 +26,11 @@ from .actor_optimizer import validate_actor_optimizer, actor_base_lr, set_actor_
 def check_candidate_kl(report, limits):
     result = check_kl(report, limits)
     for name in ('mean', 'p95', 'p99', 'max'):
-        bound = limits.get('chain_joint_'+name)
+        bound = limits.get('denoising_step_'+name)
         if bound is not None:
-            value = report['chain_joint_kl'][name]
+            value = report['denoising_step_kl'][name]
             if not math.isfinite(value) or value > bound:
-                result['failures']['chain_joint_'+name] = dict(value=value, limit=bound)
+                result['failures']['denoising_step_'+name] = dict(value=value, limit=bound)
     bound=limits.get('maximum_active_clip')
     if bound is not None:
         value=report['active_clip_fraction']
@@ -110,8 +110,8 @@ def backtracked_step(actor, optimizer, controller, *, evaluate, limits, distribu
                     selection='first_finite_KL_qualified_candidate')
         restore()
         finite_rejections=bool(trials) and all(t['recoverable_ratio_range_error'] or (t['kl'] is not None and
-            set(t['acceptance']['failures']) <= {'chain_joint_mean','chain_joint_p95',
-                'chain_joint_p99','chain_joint_max','active_clip_fraction'} and
+            set(t['acceptance']['failures']) <= {'denoising_step_mean','denoising_step_p95',
+                'denoising_step_p99','denoising_step_max','active_clip_fraction'} and
             all(math.isfinite(f['value']) for f in t['acceptance']['failures'].values()))
             for t in trials)
         return dict(accepted=False, initial_lr=initial_lr, accepted_lr=None, backtracks=max(0,len(trials)-1),

@@ -25,7 +25,8 @@ import torch
 from .budget import atomic_json
 from .execution_compatibility import same_execution, contains_execution
 
-SCHEMA='genmo.closedloop.stage2.full_chain_joint.checkpoint.v1'
+SCHEMA='genmo.closedloop.stage2.denoising_step.checkpoint.v1'
+LEGACY_JOINT_SCHEMA='genmo.closedloop.stage2.full_chain_joint.checkpoint.v1'
 
 
 def immutable_cpu_snapshot(value):
@@ -198,12 +199,30 @@ def _legacy_fragment_execution(previous, current):
             and current.get('training',{}).get('actor_trainable_scope','all')=='all')
 
 
+def _step_dppo_initialization(identity):
+    """仅显式新算法迁移移除获准变化；物理、噪声、奖励、模型和GAE仍逐项严格比较。"""
+    result=_initialization_execution(identity)
+    result.pop('actor_initialization',None)
+    result.pop('kl',None)
+    training=result.get('training',{})
+    for key in ('actor_objective','objective_step_reduction','actor_lr','actor_lr_control',
+                'ppo_clip','kl_soft_stop_chain_joint','kl_soft_stop_denoising_step',
+                'max_active_clip_fraction','trust_region'):
+        training.pop(key,None)
+    for key in ('sampling_contract','adaptive'):
+        result.get('dataset',{}).pop(key,None)
+    return result
+
+
 def load_training_checkpoint(path,*,identity,actor,critic,actor_optimizer,critic_optimizer,controller,
-                             new_experiment=False,fragment_transfer=False,actor_lr_transfer=False):
+                             new_experiment=False,fragment_transfer=False,actor_lr_transfer=False,
+                             step_dppo_transfer=False):
     if fragment_transfer and not new_experiment:
         raise ValueError('Fragment transfer requires an explicit new experiment, never ordinary resume')
     if actor_lr_transfer and (not new_experiment or fragment_transfer):
         raise ValueError('Actor LR transfer requires its own explicit new experiment, never resume or fragment transfer')
+    if step_dppo_transfer and (not new_experiment or fragment_transfer or actor_lr_transfer):
+        raise ValueError('Step DPPO transfer requires its own explicit new experiment, never ordinary resume')
     payload=torch.load(path,map_location='cpu',weights_only=False,mmap=True)
     # 固定评估是只读监视配置；更换清单不改变已学参数、Adam、奖励或采样策略。
     # 配对评估仍严格比较自己的完整任务与执行配置，并单独重建Stage1基线。
@@ -218,7 +237,14 @@ def load_training_checkpoint(path,*,identity,actor,critic,actor_optimizer,critic
     legacy_fragment=(new_experiment and fragment_transfer
         and payload.get('schema')=='genmo.closedloop.stage2.asymmetric_tracking.checkpoint.v3'
         and _legacy_fragment_execution(previous,identity))
-    if not legacy_fragment and (payload.get('schema')!=SCHEMA or not same_execution(old_training,new_training)):
+    if step_dppo_transfer:
+        if (payload.get('schema')!=LEGACY_JOINT_SCHEMA
+                or previous.get('training',{}).get('actor_objective')!='full_chain_clipped_ppo'
+                or identity.get('training',{}).get('actor_objective')!='denoising_step_clipped_ppo'
+                or identity.get('training',{}).get('objective_step_reduction')!='mean'
+                or not same_execution(_step_dppo_initialization(previous),_step_dppo_initialization(identity))):
+            raise ValueError('Step DPPO transfer changed an unapproved physical, kernel, reward or learning contract')
+    elif not legacy_fragment and (payload.get('schema')!=SCHEMA or not same_execution(old_training,new_training)):
         raise ValueError('Checkpoint schema or actual training configuration differs')
     from .checkpoint import _validate_model_state,_validate_optimizer_state
     _validate_model_state(actor,payload['actor'],'当前 Actor')
@@ -230,11 +256,27 @@ def load_training_checkpoint(path,*,identity,actor,critic,actor_optimizer,critic
         from .actor_optimizer import validate_actor_optimizer, set_actor_base_lr
         validate_actor_optimizer(actor,actor_optimizer)
         migration=_actor_lr_transfer_audit(previous,identity,actor_optimizer,payload['actor_optimizer'])
+    if step_dppo_transfer:
+        # 在修改任何模型前校验目标LR和参数组；新目标不沿用旧联合裁剪Adam矩。
+        from .actor_optimizer import validate_actor_optimizer, actor_base_lr
+        validate_actor_optimizer(actor,actor_optimizer)
+        if not math_is_valid_step_lr(identity,actor_base_lr(actor_optimizer)):
+            raise ValueError('Step DPPO target optimizer LR differs from its configuration')
     # 先验证控制器，再修改任何模型；拒绝损坏快照时保持调用方当前学习状态。
     import copy
     copy.deepcopy(controller).load_state_dict(payload['bc_controller'])
     actor.load_state_dict(payload['actor'],strict=True);critic.load_state_dict(payload['critic'],strict=True)
-    actor_optimizer.load_state_dict(payload['actor_optimizer']);critic_optimizer.load_state_dict(payload['critic_optimizer'])
+    if step_dppo_transfer:
+        actor_optimizer.state.clear()
+        payload['step_dppo_transfer']=dict(transfer='joint_to_denoising_step_mean.v1',
+            previous_objective='full_chain_clipped_ppo',objective='denoising_step_clipped_ppo',
+            actor_parameters_preserved=True,actor_adam_reset=True,critic_and_adam_preserved=True,
+            actor_base_lr=identity['training']['actor_lr'],
+            old_rollout_reused=False,sampling_pool='fresh_adaptive_pool',
+            checkpoint_schema_changed=True,ordinary_resume_compatibility=False)
+    else:
+        actor_optimizer.load_state_dict(payload['actor_optimizer'])
+    critic_optimizer.load_state_dict(payload['critic_optimizer'])
     controller.load_state_dict(payload['bc_controller'])
     if migration is not None:
         # 所有身份/模型/优化器/控制器验证完成后，唯独覆盖Actor组LR；两Adam矩和步数保留。
@@ -246,6 +288,14 @@ def load_training_checkpoint(path,*,identity,actor,critic,actor_optimizer,critic
             payload['state'].pop(key,None)
     if any(p.dtype!=torch.float32 for p in actor.parameters()):raise ValueError('Restored Actor master dtype changed')
     return payload
+
+
+def math_is_valid_step_lr(identity, optimizer_lr):
+    import math
+    value=identity.get('training',{}).get('actor_lr')
+    maximum=identity.get('training',{}).get('trust_region',{}).get('maximum_lr')
+    return (type(value) in (int,float) and math.isfinite(value) and value>0
+        and value==maximum and math.isclose(value,optimizer_lr,rel_tol=1e-12,abs_tol=0.))
 
 
 def initialize_expanded_policy(path, *, identity, actor, actor_optimizer):
@@ -360,7 +410,8 @@ def load_evaluation_actor(path,*,actor,kernel,assets,execution_binding=None):
         return dict(kind='probability_candidate_fresh_evaluation_only',path=str(Path(path).resolve()),
             sha256=file_sha256(path),source_case_sha256=payload['source_case_sha256'],update=update,
             evaluation_transfer=transfer,training_resume=False)
-    if payload.get('schema')==SCHEMA:
+    if payload.get('schema') in (SCHEMA,LEGACY_JOINT_SCHEMA):
+        # 只读物理对照允许旧算法完整权重；不放宽任何训练resume合同。
         identity=payload.get('identity',{})
         if (not execution_binding or identity.get('assets')!=assets or identity.get('kernel')!=kernel or
                 not contains_execution(identity,execution_binding)):

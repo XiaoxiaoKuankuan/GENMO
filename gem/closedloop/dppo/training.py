@@ -86,6 +86,9 @@ def _checkpoint_initialization_identity(record):
         identity['actor_learning_rates']={key:record[key] for key in (
             'previous_actor_base_lr','actor_base_lr','previous_optimizer_base_lr',
             'previous_actor_learning_rates','actor_learning_rates')}
+    if record.get('transfer')=='joint_to_denoising_step_mean.v1':
+        identity.update(transfer=record['transfer'],objective=record['objective'],
+            actor_adam_reset=True,actor_base_lr=record['actor_base_lr'])
     return identity
 
 
@@ -94,7 +97,7 @@ def _initialized_experiment_state(payload, imported):
     state=copy.deepcopy(payload['state'])
     for key in ('best_observed','best_saved','regression_monitor'):state.pop(key,None)
     state['experiment_initialization']=imported
-    if imported.get('transfer')=='actor_learning_rate_only.v1':
+    if imported.get('transfer') in ('actor_learning_rate_only.v1','joint_to_denoising_step_mean.v1'):
         state['selected_actor_lr']=imported['actor_base_lr']
     return state
 
@@ -107,7 +110,7 @@ def _final_actor_acceptance(actor,kl,limits):
         result['passed']=False
         result['failures']['actor_optimizer']='explicit_invalid_optimizer_update'
     if actor['optimizer_steps']==0:
-        normal={'rollout_no_useful_trust_region_step','pre_step_chain_joint_kl','active_clip_saturation'}
+        normal={'rollout_no_useful_trust_region_step','pre_step_denoising_step_kl','active_clip_saturation'}
         if actor.get('early_stop_reason') not in normal:
             raise RuntimeError('Zero Actor steps without an explicit normal rollout stop reason')
         result['no_actor_update_this_rollout']=True
@@ -196,12 +199,12 @@ def _record_actor_step(c,label,step):
     """即时保留小批候选及回退证据；整轮检查通过前不能计作最终接受更新。"""
     def publish():
         c.manager.append_metrics(dict(event='actor_minibatch',label=label,
-            pending_iteration=c.state['iteration']+1,acceptance_scope='pending_full_rollout_joint_KL',
+            pending_iteration=c.state['iteration']+1,acceptance_scope='pending_full_rollout_denoising_step_KL',
             actor_step=step))
         post=step['post_step_chain'];transaction=step.get('trust_region') or {}
         print(f'[STAGE2 ACTOR] {label} update={step["optimizer_step"]} '
             f'chains={step["global_chain_count"]} lr={step["learning_rate"]:.6g} '
-            f'chain_KL={post["chain_joint_kl"]["mean"]:.6g} '
+            f'chain_KL={post["denoising_step_kl"]["mean"]:.6g} '
             f'backtracks={transaction.get("backtracks",0)} wall={step["wall_seconds"]:.3f}s '
             'acceptance=pending_full_rollout',flush=True)
     root_call(c.distributed,publish)
@@ -502,6 +505,7 @@ def run(cargs,config,distributed):
         fragment_transfer=bool(getattr(cargs,'initialize_random_fragments',False))
         expanded_transfer=bool(getattr(cargs,'initialize_denoising_reward',False))
         actor_lr_transfer=bool(getattr(cargs,'initialize_actor_lr',False))
+        step_dppo_transfer=bool(getattr(cargs,'initialize_step_dppo',False))
         if cargs.resume and (c.output/'initialization.json').exists():
             initial_record=root_call(distributed,lambda:json.loads((c.output/'initialization.json').read_text()))
             c.identity['actor_initialization']=_checkpoint_initialization_identity(initial_record)
@@ -541,7 +545,7 @@ def run(cargs,config,distributed):
             payload=local_call(distributed,lambda:load_training_checkpoint(checkpoint,identity=c.identity,
                 actor=c.actor,critic=c.critic,actor_optimizer=c.actor_optimizer,
                 critic_optimizer=c.critic_optimizer,controller=c.controller,new_experiment=True,
-                fragment_transfer=fragment_transfer,actor_lr_transfer=actor_lr_transfer))
+                fragment_transfer=fragment_transfer,actor_lr_transfer=actor_lr_transfer,step_dppo_transfer=step_dppo_transfer))
             def initialize_experiment():
                 import shutil
                 c.budget.initialize_from_checkpoint(payload['budget'])
@@ -560,6 +564,9 @@ def run(cargs,config,distributed):
                     # 组LR已显式改变，仅声明Adam矩/步数保留，不声明整个Adam逐字节不变。
                     record.pop('actor_and_adam_preserved')
                     record.update(payload['actor_lr_transfer'])
+                if step_dppo_transfer:
+                    record.pop('actor_and_adam_preserved')
+                    record.update(payload['step_dppo_transfer'])
                 if fragment_transfer:
                     record.update(transfer='random_motion_fragments_timeout_bootstrap.v1',
                         previous_gamma_upper=payload['identity']['training']['gamma_upper'],
@@ -593,7 +600,7 @@ def run(cargs,config,distributed):
                 or service.world.policy.device!=distributed.device):
             raise RuntimeError('Actor, frozen GMT and PhysX world must use the same allocated GPU')
         c.vector=InProcessTrainingRuntime(c,service);c.env=c.vector
-        if payload and not fragment_transfer:
+        if payload and not fragment_transfer and not step_dppo_transfer:
             c.vector.restore_logical(payload['rank_states'][distributed.rank]['collector'])
         if payload:restore_local_rng(payload['rank_states'][distributed.rank]['rng'],c.generators)
         c.backend=SimpleNamespace(journal=None)
@@ -782,7 +789,7 @@ def run(cargs,config,distributed):
                     microbatch=c.settings['denoising_microbatch'],sampled_steps=c.settings['ppo_steps_per_chain'],
                     step_strategy=c.settings['ppo_step_strategy'],
                     clip=c.settings['ppo_clip'],gamma_denoising=c.settings['gamma_denoising'],
-                    soft_kl=c.settings['kl_soft_stop_chain_joint'],kl_reduction=c.stage['kl']['reduction'],
+                    soft_kl=c.settings['kl_soft_stop_denoising_step'],kl_reduction=c.stage['kl']['reduction'],
                     objective_reduction=c.settings['objective_logprob_reduction'],
                     grad_clip_norm=c.settings['grad_clip_norm'],reserve_attempt=reserve,
                     bc_samples_per_rollout=c.settings['bc_samples_per_rollout'],bc_min_global_batch=c.settings['bc_min_global_batch'],
@@ -802,7 +809,7 @@ def run(cargs,config,distributed):
                     started=time.perf_counter()
                     independent=final_kl(c.policy,rows,cache,manifest,distributed=distributed,microbatch=c.settings['kl_microbatch'],
                         clip=c.settings['ppo_clip'],objective_reduction=c.settings['objective_logprob_reduction'])
-                    fields=('mean_coordinate_kl','maximum_step_mean_coordinate_kl','coordinate_kl','chain_joint_kl',
+                    fields=('mean_coordinate_kl','maximum_step_mean_coordinate_kl','coordinate_kl','denoising_step_kl',
                         'per_denoising_step','covered_chains','covered_internal_transitions','gaussian_kl_steps')
                     if any(kl[key]!=independent[key] for key in fields):
                         raise RuntimeError('Reused KL differs from independent complete four-step recalculation')
@@ -811,7 +818,7 @@ def run(cargs,config,distributed):
                     c.kl_reuse_verified=True
                 accepted=_final_actor_acceptance(actor,kl,c.stage['kl'])
                 actor['accepted_optimizer_steps']=actor['optimizer_steps'] if accepted['passed'] else 0
-                actor['acceptance_scope']='full_rollout_chain_joint_KL'
+                actor['acceptance_scope']='full_rollout_denoising_step_KL'
                 if not accepted['passed']:
                     anomaly_saved=local_call(distributed,lambda:_preserve_rollout_anomaly(c,buffer,targets,manifest,label))
                     rollback=local_call(distributed,lambda:_restore_rollback(c,saved))

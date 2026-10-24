@@ -2,7 +2,7 @@
 
 本模块只接受显式当前配置，自动从GPU数、环境数、连续决策数及完整链minibatch
 推导rollout、optimizer次数、配置指定随机训练步访问数和BC每步样本量，不继承160条或四次更新
-限制。联合链PPO和联合链KL为训练目标，coordinate KL仅作辅助诊断，不能复用一个
+限制。逐步骤PPO和单步条件KL为训练目标，coordinate KL仅作辅助诊断，不能复用一个
 无量纲数字。初始参数是待有限标定的候选，任何算法或数值合同变化新建run。
 
 Stage1与GMT均绑定真实SHA和统计量，全部环境时序与奖励保留旧明确配置。检查
@@ -18,7 +18,7 @@ import yaml
 
 from .rewards import resolve_reward_config
 
-VERSION='genmo.closedloop.stage2.full_chain_joint.v1'
+VERSION='genmo.closedloop.stage2.denoising_step.v1'
 
 
 def _source_counts(value):
@@ -43,11 +43,15 @@ def configuration(path,*,genmo_repo=None,gmt_repo=None):
             or not precision['precise_output'] or precision.get('cuda_graph',False)
             or precision.get('weight_gradient','direct_joint_gemm')!='direct_joint_gemm'):
         raise ValueError('Only the validated stable_tf32x3 FP32 execution is supported')
-    from .time_sampling import TIME_SAMPLING_CONTRACT, MOTION_RESET_CONTRACT
+    from .time_sampling import MOTION_RESET_CONTRACT
+    from .adaptive_sampling import CONTRACT as TIME_SAMPLING_CONTRACT, validate_adaptive
     dataset = s['dataset']
     if (dataset.get('random_start') is not True or dataset.get('sampling_contract') != TIME_SAMPLING_CONTRACT
             or dataset.get('initialization') != MOTION_RESET_CONTRACT or dataset.get('split') != 'train'):
         raise ValueError('Actor training requires explicit random time sampling and paired motion initialization')
+    validate_adaptive(dataset.get('adaptive'))
+    if dataset['adaptive']['episode_seconds'] != s['physical_episode']['safety_limit_seconds']:
+        raise ValueError('Quarantine sampling horizon must cover the physical episode')
     bin_seconds, standing = dataset.get('time_bin_seconds'), dataset.get('standing_start_probability')
     if (type(bin_seconds) not in (int, float) or not math.isfinite(bin_seconds) or bin_seconds <= 0
             or not math.isclose(bin_seconds * 30, round(bin_seconds * 30), abs_tol=1e-9)
@@ -156,7 +160,7 @@ def configuration(path,*,genmo_repo=None,gmt_repo=None):
     if c['runtime']['timing_contract']!='modeled_deployment.v3' or c['timing']['control_ticks']!=12 or c['timing']['physics_ticks']!=3:
         raise ValueError('Keep calibrated deployment clock and 50Hz/200Hz four physical substeps')
     if t['objective_logprob_reduction']!='joint_sum' or t['gamma_denoising']!=1.:
-        raise ValueError('Full-chain joint PPO requires sum and one undiscounted upper advantage')
+        raise ValueError('Step-mean DPPO requires sum and one undiscounted upper advantage')
     if not 0<t['ppo_clip']<1 or not math.isfinite(t['actor_lr']) or t['actor_lr']<=0:
         raise ValueError('Invalid independently calibrated Actor learning rate/clip')
     if t.get('advantage_control','none')!='none':
@@ -166,7 +170,7 @@ def configuration(path,*,genmo_repo=None,gmt_repo=None):
     diagnostic_interval=s['checks'].get('actor_diagnostics_every',100)
     if type(diagnostic_interval) is not int or diagnostic_interval<1:
         raise ValueError('actor_diagnostics_every must be a positive iteration interval')
-    if t['actor_lr_control']!='joint_kl_backtracking' or t['kl_rejection']!='rollback_abort':
+    if t['actor_lr_control']!='step_kl_backtracking' or t['kl_rejection']!='rollback_abort':
         raise ValueError('AdamW with fixed LR ratios, joint-KL backtracking and final whole-rollout rejection required')
     if any(key in t for key in ('actor_lr_bounds','kl_target_coordinate','kl_control_metric')):
         raise ValueError('Retired adaptive-LR settings are not supported')

@@ -29,9 +29,11 @@ sys.path.insert(0,str(ROOT))
 from gem.closedloop.dppo.budget import atomic_json
 
 
-def training_command(config,output,limit,initialization=None,*,random_fragments=False,actor_lr_transfer=False):
+def training_command(config,output,limit,initialization=None,*,random_fragments=False,actor_lr_transfer=False,step_dppo_transfer=False):
     if actor_lr_transfer and (initialization is None or random_fragments):
         raise ValueError('Actor LR transfer requires its own explicit checkpoint initialization')
+    if step_dppo_transfer and (initialization is None or random_fragments or actor_lr_transfer):
+        raise ValueError('Step DPPO transfer requires its own explicit initialization')
     command=['bash',str(ROOT/'scripts/train_stage10_8gpu_server1.sh'),'--config',str(config),
         '--output-dir',str(output),'--stop-after-iteration',str(limit)]
     if (output/'latest.json').is_file():command+=['--resume','latest']
@@ -39,6 +41,7 @@ def training_command(config,output,limit,initialization=None,*,random_fragments=
         command+=['--initialize-from-checkpoint',str(initialization)]
         if random_fragments:command+=['--initialize-random-fragments']
         if actor_lr_transfer:command+=['--initialize-actor-lr']
+        if step_dppo_transfer:command+=['--initialize-step-dppo']
     return command
 
 
@@ -57,9 +60,12 @@ def main():
     parser.add_argument('--initialize-random-fragments',action='store_true')
     parser.add_argument('--initialize-actor-lr',action='store_true',
         help='仅首次完整初始化允许config中的Actor LR变更；后续latest恢复严格使用新合同')
+    parser.add_argument('--initialize-step-dppo',action='store_true')
     args=parser.parse_args()
     if args.initialize_actor_lr and (not args.initialize_from_checkpoint or args.initialize_random_fragments):
         parser.error('--initialize-actor-lr requires its own explicit checkpoint initialization')
+    if args.initialize_step_dppo and (not args.initialize_from_checkpoint or args.initialize_random_fragments or args.initialize_actor_lr):
+        parser.error('--initialize-step-dppo requires its own explicit checkpoint initialization')
     status=args.status_dir.resolve();status.mkdir(parents=True,exist_ok=True)
     output=args.output_dir.resolve();stopping=False;child=None;attempt=0
     def request_stop(signum,frame):
@@ -75,7 +81,8 @@ def main():
             return 0
         attempt+=1
         command=training_command(args.config.resolve(),output,args.stop_after_iteration,args.initialize_from_checkpoint,
-            random_fragments=args.initialize_random_fragments,actor_lr_transfer=args.initialize_actor_lr)
+            random_fragments=args.initialize_random_fragments,actor_lr_transfer=args.initialize_actor_lr,
+            step_dppo_transfer=args.initialize_step_dppo)
         started=time.time()
         with (status/'formal.log').open('ab',buffering=0) as log:
             log.write((json.dumps(dict(supervisor_attempt=attempt,command=command,time=started))+'\n').encode())

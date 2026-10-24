@@ -40,6 +40,8 @@ def main():
         help='新目录显式4步扩为10步并恢复Root奖励尺度；仅继承Actor/Adam，重新采集和校准Critic')
     parser.add_argument('--initialize-actor-lr',action='store_true',
         help='新目录显式只迁移Actor基础/最大LR（取自config）；保留两网络、两Adam矩与步数、RNG、计数和已完成MC')
+    parser.add_argument('--initialize-step-dppo',action='store_true',
+        help='新实验从联合PPO迁移到逐步骤平均DPPO；保留Actor/Critic和Critic Adam，重置Actor Adam及采样池')
     parser.add_argument('--strict-evidence',action='store_true')
     parser.add_argument('--verify-kl-reuse',action='store_true',help='仅本会话首次复用时独立重算完整KL并核对，额外耗时单独记录')
     parser.add_argument('--calibrate-only',action='store_true',help='只测新模型单机器人关键路径，不更新参数')
@@ -64,6 +66,9 @@ def main():
     if args.initialize_actor_lr and (not args.initialize_from_checkpoint or args.resume
             or args.initialize_random_fragments or args.initialize_denoising_reward):
         parser.error('--initialize-actor-lr requires its own explicit checkpoint initialization')
+    if args.initialize_step_dppo and (not args.initialize_from_checkpoint or args.resume
+            or args.initialize_actor_lr or args.initialize_random_fragments or args.initialize_denoising_reward):
+        parser.error('--initialize-step-dppo requires its own explicit checkpoint initialization')
     if args.refit_critic and not args.mc_validation_only:
         parser.error('--refit-critic requires --mc-validation-only; it never enables Actor updates')
     if args.critic_refit_musics_per_source is not None and (not args.refit_critic or args.critic_refit_musics_per_source<1):

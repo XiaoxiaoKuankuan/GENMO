@@ -1,24 +1,20 @@
-"""完整扩散链PPO的两遍流式计算，覆盖合同指定的全部随机步而不保存整条反向图。
+"""逐去噪步骤 DPPO 的两遍流式计算。
 
-第一遍读取真实rollout中配置指定的全部可训练随机步与旧核，得到每链FP64统计；
-上层只据这些步骤之和决定一个PPO裁剪分支和一个GAE系数。第二遍在相同Actor
-版本上逐微批重算联合log-ratio，以已固定的完整链导数反传。
-第二遍按最多1024条链分块：每条链只编码一次条件，在块内完成其全部随机步的
-去噪微批反向后，立即反传并释放该块条件图，参数梯度跨块累计。可显式传入None
-保留无界条件图作为等价性验证参考；这不是新的优化器minibatch或独立Adam步骤。
-全局链数始终是唯一loss分母，训练步之间不平均、不折扣，不对展开的内部转移
-单独执行PPO clipping。这里只限制反向条件图，第一遍只读条件与rollout缓存另有边界。
-
-缓存只保存小型统计量；行为链和旧核来自不可变RolloutTensorCache。冻结步骤和
-确定性末步不进入高斯概率。首尾参数版本、条件和重算值受校验；异常交给外层分布式
-事务统一拒绝与回滚。本模块不执行Adam、不改变噪声、奖励、物理状态或BC定义。
+第一遍返回 [N,K,8] 的单步真实高斯统计；每步独立计算 PPO 裁剪分支，共享链上的
+上层 GAE。第二遍按相同参数版本重算每步 log-ratio，以其独立导数反传。
+损失分母为全局物理链数 N 乘可训练步数 K，不将 K 步当成 K 倍物理样本。
+每个步骤内自由坐标的概率仍求和，不能用坐标平均冒充真实概率。
+条件编码按最多1024条链分块释放，梯度跨块SUM；微批/分块不增加Adam次数。
+冻结前段、确定性末步、前缀和padding不参与概率，重算误差必须低于1e-4。
+本模块不改变物理、奖励、噪声或行为数据，不直接执行优化器更新。
 """
 from __future__ import annotations
 
 import torch
 
 from .execution_checks import require_tensor
-from .gaussian_probability import gaussian_statistics, chain_statistics, ppo_surrogate
+from .gaussian_probability import gaussian_statistics
+from .step_probability import step_statistics, step_surrogate
 from .optimization_support import _parameters, _old_kernel
 from .tensor_cache import ConditionGraphCache
 
@@ -55,7 +51,7 @@ def evaluate_chain_records(policy, rows, cache, *, microbatch, physical_changes=
 
 
 def from_records(records):
-    return chain_statistics(records[:,:,2],records[:,:,0],records[:,:,3])
+    return step_statistics(records[:,:,2],records[:,:,0],records[:,:,3])
 
 
 def backward_chain_surrogate(policy, rows, cache, records, *, clip, global_chain_count, microbatch,
@@ -71,15 +67,16 @@ def backward_chain_surrogate(policy, rows, cache, records, *, clip, global_chain
     records=records.to(device=device)
     if not rows:
         return dict(loss=records.new_zeros(()),recompute_max_error=records.new_zeros(()))
-    surrogate=ppo_surrogate(from_records(records),cache.get('advantages',rows),clip=clip,reduction='joint_sum')
-    coefficients=-surrogate['objective_log_gradient']/global_chain_count
+    surrogate=step_surrogate(from_records(records),cache.get('advantages',rows),clip=clip)
+    denominator=global_chain_count*len(policy.trainable_steps)
+    coefficients=-surrogate['objective_log_gradient']/denominator
     chain_chunk=len(rows) if condition_chunk_chains is None else condition_chunk_chains
     errors=[]
     for begin in range(0,len(rows),chain_chunk):
         end=min(begin+chain_chunk,len(rows))
         conditions=ConditionGraphCache(policy,cache,include_frozen=False)
         conditions.prime(rows[begin:end])
-        # i始终是本rank原链索引；块边界不重新归一化，也不拆开一条链的PPO系数。
+        # i始终是本rank原链索引；块边界不重新归一化，每个去噪步使用自己的PPO系数。
         pairs=[(i,s) for i in range(begin,end) for s in policy.trainable_steps]
         for offset in range(0,len(pairs),microbatch):
             chunk=pairs[offset:offset+microbatch]
@@ -90,11 +87,11 @@ def backward_chain_surrogate(policy, rows, cache, records, *, clip, global_chain
             stats=gaussian_statistics(cache.get('chain',samples,[s+1 for s in steps]),
                 old_mean,old_std,params['mean'],params['std'],mask)
             errors.append((stats['joint_log_ratio'].detach()-records[indices,cache.step_indices(steps)-policy.trainable_steps[0],2]).abs().max())
-            (stats['joint_log_ratio']*coefficients[indices]).sum().backward()
+            (stats['joint_log_ratio']*coefficients[indices,cache.step_indices(steps)-policy.trainable_steps[0]]).sum().backward()
         conditions.backward()
         # 未反传的KL诊断图仍可经最后一次params/stats持有ConditionGather梯度池；
         # 新块prime之前一起释放，避免相邻两块FP64条件池同时驻留。
         del params,stats,conditions
     maximum=torch.stack(errors).max()
     require_tensor(maximum<=1e-4,'Streaming chain recomputation changed probabilities within one Actor version',FloatingPointError)
-    return dict(loss=-surrogate['objective'].sum().detach()/global_chain_count,recompute_max_error=maximum)
+    return dict(loss=-surrogate['objective'].sum().detach()/denominator,recompute_max_error=maximum)

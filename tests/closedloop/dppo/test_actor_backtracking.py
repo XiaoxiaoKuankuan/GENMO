@@ -12,7 +12,8 @@ import torch
 from gem.closedloop.dppo.actor_backtracking import backtracked_step, validate_actor_optimizer, check_candidate_kl
 from gem.closedloop.dppo.actor_step_diagnostics import StepDiagnostics
 from gem.closedloop.dppo.full_batch_actor import joint_score_objective
-from gem.closedloop.dppo.gaussian_probability import gaussian_statistics, chain_statistics, chain_diagnostics
+from gem.closedloop.dppo.gaussian_probability import gaussian_statistics
+from gem.closedloop.dppo.step_probability import step_statistics, step_diagnostics
 from gem.closedloop.dppo.gradient_merge import BCGradientController
 from tests.closedloop.test_stage1_actor import actor_factory
 
@@ -23,7 +24,7 @@ class Collective:
 
 def kl(value):
     return dict(mean_coordinate_kl=value, maximum_step_mean_coordinate_kl=value,
-        coordinate_kl={'p95':value}, chain_joint_kl={'mean':100*value,'p95':120*value,'max':150*value})
+        coordinate_kl={'p95':value}, denoising_step_kl={'mean':100*value,'p95':120*value,'max':150*value})
 
 
 def setup(device='cpu'):
@@ -125,7 +126,7 @@ def test_fp32_rounding_diagnostic_identifies_real_zero_updates():
 
 
 def test_joint_gate_is_additional_and_bc_first_step_uses_measured_norm():
-    assert not check_candidate_kl(kl(.001),{'mean_coordinate':.002,'chain_joint_max':.1})['passed']
+    assert not check_candidate_kl(kl(.001),{'mean_coordinate':.002,'denoising_step_max':.1})['passed']
     c=BCGradientController(initialize_from_gradient=True,target_ratio=.1)
     assert c.update(2.,4.)==pytest.approx(.05)
     before=c.value
@@ -136,7 +137,7 @@ def test_configuration_binds_every_actual_optimizer_choice(tmp_path):
     from pathlib import Path
     import yaml
     from gem.closedloop.dppo.training_config import configuration
-    source=Path(__file__).resolve().parents[3]/'configs/closedloop/stage2_continuous_train10_base_server2.yaml'
+    source=Path(__file__).resolve().parents[3]/'configs/closedloop/stage2_step_dppo_adaptive_lr1e6_server2.yaml'
     assert configuration(source)['stage10']['derived']['maximum_actor_steps']==10
     c=yaml.safe_load(source.read_text())
     c['stage10']['kl']['calibration']=configuration(source)['stage10']['kl']['calibration']
@@ -147,7 +148,7 @@ def test_configuration_binds_every_actual_optimizer_choice(tmp_path):
     c=yaml.safe_load(source.read_text())
     c['stage10']['training']['actor_objective']='coordinate_dppo'
     p.write_text(yaml.safe_dump(c))
-    with pytest.raises(ValueError,match='full-chain'):configuration(p)
+    with pytest.raises(ValueError,match='step-mean'):configuration(p)
 
 
 def test_numerical_candidate_rejected_then_retried_without_extra_adam_time():
@@ -169,7 +170,7 @@ def test_lower_full_objective_accepts_first_kl_qualified_step():
         calls.append(opt.param_groups[0]['lr'])
         return dict(kl(.0001),objective_mean=-100.,active_clip_fraction=.4)
     result=backtracked_step(actor,opt,c,evaluate=evaluate,
-        limits=dict(chain_joint_mean=.1,chain_joint_max=1.,maximum_active_clip=.95),
+        limits=dict(denoising_step_mean=.1,denoising_step_max=1.,maximum_active_clip=.95),
         distributed=Collective())
     assert result['accepted'] and result['accepted_lr']==1e-6
     assert calls==[1e-6] and result['attempt_count']==1
@@ -185,19 +186,19 @@ def test_concentrated_finite_ratios_do_not_reject_valid_joint_kl():
     sigma=torch.ones_like(old);mask=torch.ones_like(old,dtype=torch.bool)
     flat=lambda tensor:tensor.reshape(128,1,1)
     steps=gaussian_statistics(flat(value),flat(old),flat(sigma),flat(old+.1),flat(sigma),flat(mask))
-    chain=chain_statistics(*(steps[key].reshape(32,4) for key in ('joint_log_ratio','joint_kl','free_count')))
-    report=chain_diagnostics(chain,torch.ones(32),clip=.1)
-    assert report['chain_joint_ratio']['max']>1e4
-    assert report['chain_joint_kl']['mean']==pytest.approx(.02)
+    chain=step_statistics(*(steps[key].reshape(32,4) for key in ('joint_log_ratio','joint_kl','free_count')))
+    report=step_diagnostics(chain,torch.ones(32),clip=.1)
+    assert report['denoising_step_ratio']['max']>10
+    assert report['denoising_step_kl']['mean']==pytest.approx(.005)
     assert report['active_clip_fraction']==pytest.approx(1/32)
-    limits=dict(chain_joint_mean=.1,chain_joint_p95=.6,chain_joint_p99=.9,chain_joint_max=2.,maximum_active_clip=.95)
+    limits=dict(denoising_step_mean=.1,denoising_step_p95=.6,denoising_step_p99=.9,denoising_step_max=2.,maximum_active_clip=.95)
     assert check_candidate_kl(report,limits)['passed']
     actor,opt,c=setup()
     accepted=backtracked_step(actor,opt,c,evaluate=lambda:report,limits=limits,distributed=Collective())
     assert accepted['accepted'] and accepted['attempt_count']==1
     assert accepted['accepted_lr']==1e-6
-    joint_failure=check_candidate_kl(report,{**limits,'chain_joint_mean':.01})
-    assert set(joint_failure['failures'])=={'chain_joint_mean'}
+    joint_failure=check_candidate_kl(report,{**limits,'denoising_step_mean':.001})
+    assert set(joint_failure['failures'])=={'denoising_step_mean'}
     clip_failure=check_candidate_kl(report,{**limits,'maximum_active_clip':.01})
     assert set(clip_failure['failures'])=={'active_clip_fraction'}
 

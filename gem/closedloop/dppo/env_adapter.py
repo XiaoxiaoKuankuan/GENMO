@@ -222,10 +222,13 @@ class UpperEnvironment:
                         ('dataset', 'sample_id', 'motion_file_sha256'))):
                 raise ExecutionIntegrityError('Backend did not apply the requested paired motion initialization')
         last_warmup_row = None
+        self.last_warmup_feasibility={}
         while self.snapshot['tick'] < 600 and not self.snapshot['done'] and not getattr(self,'rollout_window_reached',False):
             warmup_rows = yield from self.advance_flow(min(25, (600-self.snapshot['tick'])//12))
             if warmup_rows:
                 last_warmup_row = warmup_rows[-1]
+                from .feasibility import summarize_execution
+                self.last_warmup_feasibility=summarize_execution(warmup_rows)
         if self.snapshot['done']:
             if self.snapshot.get('terminated'):
                 raise WarmupEpisodeEnded('Physical failure during startup warmup')
@@ -257,7 +260,10 @@ class UpperEnvironment:
         """重置预热跨世界rollout继续，音乐尚未启动，不构造虚假上层状态。"""
         while self.snapshot['tick']<600 and not self.snapshot['done'] and not self.rollout_window_reached:
             rows=yield from self.advance_flow(min(25,(600-self.snapshot['tick'])//12))
-            if rows:self._warmup_last_target=rows[-1].get('joint_position_target')
+            if rows:
+                self._warmup_last_target=rows[-1].get('joint_position_target')
+                from .feasibility import summarize_execution
+                self.last_warmup_feasibility=summarize_execution(rows)
         if self.snapshot['done']:
             if self.snapshot.get('terminated'):
                 raise WarmupEpisodeEnded('Physical failure during continued startup warmup')
@@ -578,6 +584,8 @@ class UpperEnvironment:
             reward_last_columnar_fallback=getattr(self.reward,'last_columnar_fallback',None),
             critical_ready_seconds=generated.get('critical_ready_seconds', generated['elapsed']),
             commit_seconds=generated.get('commit_seconds',0.),terminal_snapshot=cpu_copy(self.snapshot))
+        from .feasibility import summarize_execution
+        metadata['feasibility']=summarize_execution(rows)
         if boundary is not None:metadata['reference_execution_boundary']=dict(boundary,reached=boundary_reached)
         if self.config.get('runtime',{}).get('record_compact_execution_provenance',False):
             from .execution_provenance import compact_execution

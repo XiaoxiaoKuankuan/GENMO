@@ -94,10 +94,14 @@ class InProcessTrainingRuntime:
         self.c,self.service=c,service
         self.num_envs=c.config['runtime']['num_envs'];self.phase=None;self.strict=False
         dataset = c.stage['dataset']
-        self.time_pool = StratifiedTimePool(c.catalog, seed=c.stage['seed'], rank=c.distributed.rank,
+        from .adaptive_sampling import AdaptiveTimePool, CONTRACT
+        adaptive = dataset.get('sampling_contract') == CONTRACT
+        pool_class = AdaptiveTimePool if adaptive else StratifiedTimePool
+        self.time_pool = pool_class(c.catalog, seed=c.stage['seed'], rank=c.distributed.rank,
             world_size=c.stage['distributed']['world_size'],
             minimum_remaining_seconds=c.stage['ppo_rollout']['world_seconds'],
-            bin_seconds=dataset['time_bin_seconds'], standing_start_probability=dataset['standing_start_probability'])
+            bin_seconds=dataset['time_bin_seconds'], standing_start_probability=dataset['standing_start_probability'],
+            **({'adaptive': dataset['adaptive']} if adaptive else {}))
         world_path=c.rank_dir/'bootstrap_world.sqlite'
         world=VectorWorldClient(_DirectTransport(service),MemoryReceiveJournal(world_path))
         self.collector=WorldEnvironmentCollector(c.policy,self._factory,world,num_envs=self.num_envs,
@@ -205,6 +209,19 @@ class InProcessTrainingRuntime:
             return buffer,targets
         buffer,targets=local_call(c.distributed,prepare_learning)
         rows=buffer.transitions
+        if hasattr(self.time_pool, 'feedback'):
+            events=local_call(c.distributed,lambda:self.time_pool.feedback(rows))
+            global_events=[event for shard in c.distributed.all_gather_object(events) for event in shard]
+            report['adaptive_feedback']=local_call(c.distributed,lambda:self.time_pool.update(global_events))
+        report['feasibility']=dict(
+            controls=sum(r.metadata.get('feasibility',{}).get('controls',0) for r in rows),
+            unknown_controls=sum(r.metadata.get('feasibility',{}).get('unknown_controls',0) for r in rows),
+            heading_degenerate_controls=sum(r.metadata.get('feasibility',{}).get('heading_degenerate_controls',0) for r in rows),
+            combined_risk_controls=sum(r.metadata.get('feasibility',{}).get('combined_risk_controls',0) for r in rows),
+            failed_terminal_states=[dict(task=r.metadata.get('training_task'),
+                episode_id=r.identity['episode_id'],control_tick_end=r.control_tick_end,
+                pose=r.metadata.get('feasibility',{}).get('terminal')) for r in rows
+                if r.metadata.get('terminal_snapshot',{}).get('terminated',False)])
         from .rolling import rolling_enabled, scheduling_report
         if rolling_enabled(c.config):report['continuous_rolling']=scheduling_report(rows)
         from .joint_limits import summarize_boundaries
