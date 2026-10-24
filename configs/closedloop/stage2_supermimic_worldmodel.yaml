@@ -25,6 +25,7 @@ model:
 clock:
   bootstrap_latency_ticks: null
   latency_margin_ticks: 0
+  request_mode: eager
   request_interval_ticks: 300
   max_consecutive_timeouts: 3
 imagination:

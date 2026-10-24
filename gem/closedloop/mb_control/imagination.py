@@ -33,6 +33,8 @@ class Imagination:
         z.validate(decision=True)
         intervals = []
         model_steps = 0
+        state_depth, reference_depth = 0, 0
+        forecast_branches = []
         for noise, latency in zip(noises, actual_latency_ticks):
             if type(latency) is not int or latency < 0:
                 raise ValueError("实际延迟是非负整数外生tick")
@@ -47,10 +49,13 @@ class Imagination:
             if self.forecast_enabled:
                 forecast = forecast_rollout(z, self.adapter, ticket.first_influence_tick)
                 context = forecast.context
-                if self.max_model_steps is not None and model_steps + forecast.control_steps > self.max_model_steps:
+                plan_depth = max(state_depth, reference_depth) + forecast.control_steps
+                forecast_branches.append({"control_steps": forecast.control_steps, "dependency_steps": plan_depth})
+                if self.max_model_steps is not None and plan_depth > self.max_model_steps:
                     raise ValueError("预测分支超过已验证WM时域")
             else:
                 context = ForecastContext.invalid(z.state, z.tick)
+                plan_depth = max(state_depth, reference_depth)
             plan = self.actor.generate(z, ticket, context, noise)
             # latency从此刻才进入事件系统，不能进入上面的forecast/condition。
             ready = ticket.request_tick + latency
@@ -64,13 +69,16 @@ class Imagination:
                         break
                     if z.pending and z.tick >= ready:
                         z, event = self.scheduler.commit(z, plan, actual_ready_tick=ready)
+                        if event["accepted"]:
+                            reference_depth = max(reference_depth, plan_depth)
                         if event["terminal_timeout"]:
                             terminal, reason = True, "consecutive_timeouts"
                             break
                     boundary = self.scheduler.next_request_tick(ticket, ceil_grid(ready, 12))
                     if not z.pending and z.tick >= boundary:
                         break
-                    if self.max_model_steps is not None and model_steps >= self.max_model_steps:
+                    next_depth = max(state_depth, reference_depth) + 1
+                    if self.max_model_steps is not None and next_depth > self.max_model_steps:
                         raise ValueError("多决策展开超过已验证WM时域")
                     z = self.adapter.refresh_current_observation(z)
                     _, _, goal = z.reference.read_current_future(z.tick)
@@ -87,6 +95,7 @@ class Imagination:
                     totals.add(reward, alive)
                     z = self.adapter.advance(z, state1, action, origin="imagined" if transition_fn is None else "real")
                     model_steps += 1
+                    state_depth = next_depth
                     if on_step is not None:
                         on_step(z, reward)
                     if transition_fn is not None and bool(failed.any()):
@@ -95,6 +104,9 @@ class Imagination:
             except ReferenceExhausted as error:
                 terminal, reason = True, f"reference_exhausted:{error}"
             z = replace(z, pending=False, decision_id=z.decision_id + 1)
+            event.update(cumulative_control_steps=model_steps, longest_model_dependency_steps=state_depth,
+                         forecast_branches=list(forecast_branches),
+                         maximum_forecast_dependency_steps=max((x["dependency_steps"] for x in forecast_branches), default=0))
             intervals.append(DecisionInterval(start, z, totals.reward, totals.survival, totals.steps,
                                               self.gamma, terminal, reason, event))
             if terminal:

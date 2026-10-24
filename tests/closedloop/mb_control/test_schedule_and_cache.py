@@ -13,6 +13,16 @@ from gem.closedloop.mb_control.contracts import GeneratedPlan, RequestTicket, Re
 from gem.closedloop.mb_control.scheduler import Scheduler
 
 
+def test_eager_requests_use_first_grid_after_resolution(tensor_state):
+    ticket = Scheduler(120).reserve(tensor_state)
+    assert Scheduler(120).next_request_tick(ticket, 120) == 120
+    assert Scheduler(120).next_request_tick(ticket, 132) == 180
+    assert Scheduler(120).next_request_tick(ticket, 0) == 60
+    fixed = Scheduler(120, request_mode="fixed_interval")
+    assert fixed.next_request_tick(ticket, 120) == 300
+    assert fixed.next_request_tick(ticket, 324) == 360
+
+
 def test_halo_changes_first_influence_and_center_consumption(tensor_state):
     ref = tensor_state.reference
     assert 140 in ref.dependency_support(0).tolist()

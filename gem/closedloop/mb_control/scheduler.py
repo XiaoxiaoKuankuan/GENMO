@@ -21,10 +21,13 @@ class Scheduler:
     latency_margin_ticks: int = 0
     request_interval_ticks: int = 300
     max_consecutive_timeouts: int = 3
+    request_mode: str = "eager"
 
     def __post_init__(self):
         if type(self.bootstrap_latency_ticks) is not int or self.bootstrap_latency_ticks < 0:
             raise ValueError("需要显式新框架延迟标定；禁止默用旧后端延迟")
+        if self.request_mode not in ("eager", "fixed_interval"):
+            raise ValueError("调度模式只能是eager或fixed_interval")
         if self.request_interval_ticks < 60 or self.request_interval_ticks % 60:
             raise ValueError("生成请求间隔必须为60tick的正整数倍")
 
@@ -61,6 +64,7 @@ class Scheduler:
         history = (*state.latency_history, actual_ready_tick - ticket.request_tick)[-16:]
         event = {"request_tick": ticket.request_tick, "predicted_ready_tick": ticket.predicted_ready_tick,
                  "actual_ready_tick": actual_ready_tick, "commit_tick": state.tick if accepted else None,
+                 "rejection_tick": None if accepted else state.tick,
                  "first_mutable_source_tick": ticket.first_mutable_source_tick,
                  "first_influence_tick": cache.first_influence(state.tick, ticket.first_mutable_source_tick) if accepted else None,
                  "first_center_consumed_tick": cache.first_center_consumed(state.tick, ticket.first_mutable_source_tick) if accepted else None,
@@ -70,4 +74,6 @@ class Scheduler:
                        protected_until=protection, consecutive_timeouts=timeouts), event
 
     def next_request_tick(self, ticket, current_tick):
-        return ceil_grid(max(ticket.request_tick + self.request_interval_ticks, current_tick), 60)
+        # 至少前进一个公共网格，避免零延迟样本在同一tick无限请求。
+        minimum = ticket.request_tick + (60 if self.request_mode == "eager" else self.request_interval_ticks)
+        return ceil_grid(max(minimum, current_tick), 60)
