@@ -53,6 +53,16 @@ def main():
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
     output = Path(args.resume_run).resolve() if args.resume_run else Path(args.output_root).resolve()/f"formal_{timestamp}"
     output.mkdir(parents=True, exist_ok=bool(args.resume_run))
+    if args.resume_run:
+        cfg = OmegaConf.to_container(OmegaConf.load(output/"config.yaml"), resolve=True)
+    else:
+        cfg["tasks"] = str(Path(args.train_tasks).resolve())
+        cfg["formal"] = dict(cfg.get("formal", {}), critic_validation_tasks=str(Path(args.validation_tasks).resolve()),
+                             evaluation_tasks=str(Path(args.evaluation_tasks).resolve()), evaluation_gpu=args.evaluation_gpu,
+                             preflight={"gradient_report":str(Path(args.gradient_report).resolve()),
+                                        "baseline_report":str(Path(args.baseline_report).resolve())})
+        cfg["training"]["require_critic_quality"] = True
+        OmegaConf.save(OmegaConf.create(cfg), output/"config.yaml")
     failures, checks = [], {}
     def check(name, predicate):
         try:
@@ -85,6 +95,8 @@ def main():
         for key in keys:
             check(f"asset_{group}_{key}", lambda group=group,key=key: Path(cfg[group][key]).is_file())
     check("task_manifests", lambda: all(Path(p).is_file() for p in (args.train_tasks,args.validation_tasks,args.evaluation_tasks)))
+    check("formal_settings", lambda: all(k in cfg["formal"] for k in ("critic_warmup", "max_control_steps", "max_wall_hours",
+        "maximum_invalid_streak", "checkpoint_every", "evaluate_every", "degradation")))
     def gradients():
         report = json.loads(Path(args.gradient_report).read_text())
         return (report["execution_paths"]["passed"] is True and report["zero_forecast_stage1_max_abs"] <= 1e-5 and
@@ -126,12 +138,6 @@ def main():
         (output/f"preflight_blocked_{timestamp}.json").write_text(json.dumps(evidence,ensure_ascii=False,indent=2))
         print(json.dumps({"status":"blocked_before_training","output":str(output),"failed_checks":failures},ensure_ascii=False))
         return 2
-    if not args.resume_run:
-        cfg["tasks"] = str(Path(args.train_tasks).resolve())
-        cfg["formal"] = dict(cfg["formal"], critic_validation_tasks=str(Path(args.validation_tasks).resolve()),
-                             evaluation_tasks=str(Path(args.evaluation_tasks).resolve()), evaluation_gpu=args.evaluation_gpu)
-        cfg["training"]["require_critic_quality"] = True
-        OmegaConf.save(OmegaConf.create(cfg), output/"config.yaml")
     command = [sys.executable,"-u","tools/train_stage2_supermimic.py","--config",str(output/"config.yaml"),
                "--run-mode","formal","--mode","full","--max-actor-updates",str(args.max_actor_updates),"--output",str(output)]
     if args.resume_run:
