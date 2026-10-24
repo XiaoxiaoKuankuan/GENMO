@@ -708,7 +708,8 @@ def run(cargs,config,distributed):
             if getattr(cargs,'diagnostic_fresh_physics_source',None):
                 function=run_p0 if getattr(cargs,'diagnostic_p0',False) else (run_reference_only if getattr(cargs,'diagnostic_reference_only',False) else run_fresh_physics)
                 if getattr(cargs,'diagnostic_reference_after_p0',False):
-                    report['decisive_diagnostic']=run_reference_after_p0(c,cargs.diagnostic_fresh_physics_source,local_source=cargs.diagnostic_reference_local_source)
+                    report['decisive_diagnostic']=run_reference_after_p0(c,cargs.diagnostic_fresh_physics_source,
+                        local_source=cargs.diagnostic_reference_local_source,zero_source=cargs.diagnostic_reference_zero_source)
                 else:report['decisive_diagnostic']=function(c,cargs.diagnostic_fresh_physics_source)
             else:
                 function=run_repeatability if getattr(cargs,'diagnostic_repeatability_only',False) else run_diagnostic

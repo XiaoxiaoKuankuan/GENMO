@@ -62,3 +62,53 @@ def test_future_checkpoint_identity_is_separate():
     old={'critic':{'type':'asymmetric_tracking_temporal'}}
     new={'critic':{'type':'asymmetric_tracking_committed_temporal'}}
     assert schema_for_identity(old)!=schema_for_identity(new)
+
+
+def test_current_and_bootstrap_use_separate_visible_cache(actor_factory):
+    _,batch=actor_factory(motion_frames=60);c={k:v[:1].clone() for k,v in future_context(batch).items()}
+    nxt={k:v.clone() for k,v in c.items()}
+    for key in ('decision_time','proprio_history_times','tracking_history_times','tracking_reference_times','future_times','committed_times'):
+        nxt[key]+=.3
+    nxt['committed_snapshot_tick']+=180
+    row=NS(metadata={'critic_context':c,'next_critic_context':nxt},control_tick_begin=int(c['committed_snapshot_tick'][0]),
+        control_tick_end=int(nxt['committed_snapshot_tick'][0]),identity={'policy_version':0})
+    validate_value_state_boundaries(row)
+    row.metadata['next_critic_context']=c
+    with pytest.raises(ValueError,match='another time'):validate_value_state_boundaries(row)
+
+
+def test_future_preheat_schema_cannot_be_replaced_by_legacy(tmp_path):
+    from tests.closedloop.dppo.test_critic_preheat_initialization import fixture,load
+    from gem.closedloop.dppo.critic_preheat import SCHEMA_PREHEAT
+    actor,critic,optimizer,identity,data=fixture(tmp_path)
+    identity['critic']['type']=data['architecture']['type']='asymmetric_tracking_committed_temporal'
+    data['schema']=SCHEMA_PREHEAT+'.future_committed'
+    assert load(tmp_path,actor,critic,optimizer,identity,data)['actor_unchanged']
+    before=copy.deepcopy(critic.state_dict());data['schema']=SCHEMA_PREHEAT
+    with pytest.raises(ValueError):load(tmp_path,actor,critic,optimizer,identity,data)
+    assert all(torch.equal(v,critic.state_dict()[k]) for k,v in before.items())
+
+
+def test_future_full_checkpoint_preserves_adam_and_requires_robofft_rng(actor_factory,tmp_path):
+    from gem.closedloop.dppo.training_checkpoint import load_training_checkpoint,immutable_cpu_snapshot
+    from gem.closedloop.dppo.gradient_merge import BCGradientController
+    from gem.closedloop.robofft import OBJECTIVE
+    actor,batch=actor_factory(motion_frames=60)
+    critic=PretrainedConditionCritic(actor,dimension=32,layers=1,heads=4,future_reference=True)
+    ao=torch.optim.AdamW(actor.parameters(),lr=1e-6);co=torch.optim.AdamW(critic.parameters(),lr=1e-4)
+    critic(future_context(batch),[4.,5.]).square().mean().backward();co.step();co.zero_grad(set_to_none=True)
+    controller=BCGradientController();rng=torch.Generator().manual_seed(42)
+    identity=dict(critic={'type':'asymmetric_tracking_committed_temporal'},training={'actor_objective':OBJECTIVE})
+    payload=immutable_cpu_snapshot(dict(schema=schema_for_identity(identity),identity=identity,
+        actor=actor.state_dict(),critic=critic.state_dict(),actor_optimizer=ao.state_dict(),critic_optimizer=co.state_dict(),
+        bc_controller=controller.state_dict(),rank_states=[{'rng':{'generators':{'robofft_mc':rng.get_state()}}}]))
+    path=tmp_path/'future.pt';torch.save(payload,path)
+    with torch.no_grad():critic.value_token.add_(1.)
+    co.state.clear()
+    loaded=load_training_checkpoint(path,identity=identity,actor=actor,critic=critic,actor_optimizer=ao,critic_optimizer=co,controller=controller)
+    assert co.state and all(torch.equal(v,critic.state_dict()[k]) for k,v in payload['critic'].items())
+    expected=torch.rand(8,generator=rng);rng.set_state(loaded['rank_states'][0]['rng']['generators']['robofft_mc'])
+    torch.testing.assert_close(expected,torch.rand(8,generator=rng),atol=0,rtol=0)
+    payload['rank_states'][0]['rng']['generators'].clear();torch.save(payload,path)
+    with pytest.raises(ValueError,match='complete independent MC RNG'):
+        load_training_checkpoint(path,identity=identity,actor=actor,critic=critic,actor_optimizer=ao,critic_optimizer=co,controller=controller)

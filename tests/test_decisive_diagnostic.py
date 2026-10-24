@@ -21,6 +21,22 @@ def test_modeled_deployment_compares_real_ticks_not_training_wall_clock():
     assert deployed_clock_evidence(a)!=deployed_clock_evidence(b)
 
 
+def test_prefix_clock_excludes_only_events_after_administrative_cut():
+    import copy
+    from gem.closedloop.dppo.decisive_diagnostic import deployed_clock_evidence
+    a=dict(prefix_frames=12,measured_arrival_tick=744,actual_decision_interval_ticks=180,
+        generation_schedule='continuous_rolling.v1',reference_commit={'effective_tick':744},events=[{'tick':660}],
+        compact_execution_provenance={'plan_dictionary':['old','new'],
+            'plans':{'old':{'commit_tick':444},'new':{'commit_tick':744}},
+            'steps':[dict(control_tick_begin=t,control_tick_end=t+12,consumed_plan_indices=[0]) for t in range(600,780,12)]})
+    b=copy.deepcopy(a);b['actual_decision_interval_ticks']=120;b['reference_commit']=None
+    b['compact_execution_provenance']['plans'].pop('new');b['compact_execution_provenance']['plan_dictionary']=['old']
+    b['compact_execution_provenance']['steps']=b['compact_execution_provenance']['steps'][:10]
+    assert deployed_clock_evidence(a,through_tick=720)==deployed_clock_evidence(b,through_tick=720)
+    b['compact_execution_provenance']['steps'][0]['control_tick_end']+=12
+    assert deployed_clock_evidence(a,through_tick=720)!=deployed_clock_evidence(b,through_tick=720)
+
+
 def test_actual_clip_matches_autograd_for_both_signs():
     ratios=torch.tensor([.97,.97,1.03,1.03,1.,1.],dtype=torch.float64)
     adv=torch.tensor([1.,-1.,1.,-1.,1.,-1.],dtype=torch.float64)

@@ -59,6 +59,7 @@ def main():
     parser.add_argument('--diagnostic-fresh-physics-source',type=Path,help='读取已保存方向，每个配对候选新建PhysX世界；A完整音乐，C有限20秒参考干预')
     parser.add_argument('--diagnostic-reference-after-p0',action='store_true',help='P0通过后的零参考回放与合法20秒干预')
     parser.add_argument('--diagnostic-reference-local-source',type=Path,help='已通过局部C的来源；显式开启完整困难音乐验证')
+    parser.add_argument('--diagnostic-reference-zero-source',type=Path,help='重审已有20秒零回放的全部证据，候选仍新建物理世界')
     parser.add_argument('--diagnostic-p0',action='store_true',help='全音乐原模型/零扰动独立世界硬门槛及未来缓存采集')
     parser.add_argument('--diagnostic-reference-only',action='store_true',help='仅做带连续前缀桥接与零扰动对照的八音乐20秒参考配对')
     parser.add_argument('--collect-rollouts',type=int,default=1,help='collect-only连续世界窗口数；保留正常episode，不更新行为策略')
@@ -110,6 +111,7 @@ def main():
         parser.error('Fresh paired physics requires only the explicit decisive diagnostic mode')
     if args.diagnostic_reference_after_p0 and not args.diagnostic_fresh_physics_source:parser.error('Reference C requires P0 source')
     if args.diagnostic_reference_local_source and not args.diagnostic_reference_after_p0:parser.error('Full C requires explicit after-P0 mode')
+    if args.diagnostic_reference_zero_source and (not args.diagnostic_reference_after_p0 or args.diagnostic_reference_local_source):parser.error('Zero evidence reuse is only for local after-P0 C')
     if args.diagnostic_p0 and not args.diagnostic_fresh_physics_source:parser.error('P0 requires explicit source plan')
     if args.diagnostic_reference_only and not args.diagnostic_fresh_physics_source:
         parser.error('Reference-only requires the explicit saved diagnostic source')

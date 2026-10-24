@@ -593,7 +593,7 @@ def run_reference_only(c,source):
     finally:c.actor.load_state_dict(base);c.actor.zero_grad(set_to_none=True)
 
 
-def deployed_clock_evidence(decision):
+def deployed_clock_evidence(decision,*,through_tick=None):
     """modeled_deployment.v3的真实部署时刻；训练GPU墙钟不参与仿真推进。"""
     required=('prefix_frames','measured_arrival_tick','actual_decision_interval_ticks',
         'generation_schedule','reference_commit','events','compact_execution_provenance')
@@ -603,6 +603,17 @@ def deployed_clock_evidence(decision):
     provenance=result['compact_execution_provenance']
     if provenance is None:raise ValueError('Missing consumption timeline')
     for plan in provenance['plans'].values():plan.pop('generation_wall_seconds',None)
+    if through_tick is not None:
+        # 行政20秒截断之后的提交并未发生在配对范围内，不能与整曲后续事件比较。
+        steps=[step for step in provenance['steps'] if step['control_tick_end']<=through_tick]
+        for step in steps:
+            if 'consumed_plan_indices' in step:
+                step['consumed_plan_ids']=[provenance['plan_dictionary'][i] for i in step.pop('consumed_plan_indices')]
+        provenance['steps']=steps;provenance.pop('plan_dictionary',None)
+        provenance['plans']={k:v for k,v in provenance['plans'].items() if v.get('commit_tick') is not None and v['commit_tick']<=through_tick}
+        result['actual_decision_interval_ticks']=sum(s['control_tick_end']-s['control_tick_begin'] for s in steps)
+        if result['reference_commit'] is not None and result['reference_commit']['effective_tick']>through_tick:result['reference_commit']=None
+        result['events']=[v for v in result['events'] if v['tick']<=through_tick]
     return result
 
 
@@ -629,7 +640,8 @@ def compare_zero_reports(before,after,*,prefix_only=False):
         checks['all_rewards_exact']=differences['reward']==0.;checks['all_ticks_exact']=differences['tick']==0.
         checks['all_eight_errors_exact']=error==0.
         checks['deployment_clock']=(len(a['decisions'])>=len(b['decisions']) if prefix_only else len(a['decisions'])==len(b['decisions'])) and all(
-            deployed_clock_evidence(x)==deployed_clock_evidence(y)
+            deployed_clock_evidence(x,through_tick=(y['controls'][-1]['tick'] if prefix_only and y['controls'] else None))==
+            deployed_clock_evidence(y,through_tick=(y['controls'][-1]['tick'] if prefix_only and y['controls'] else None))
             for x,y in zip(a['decisions'],b['decisions']))
         result.append(dict(task_id=a['task_id'],passed=all(checks.values()),checks=checks,
             reward_max_difference=differences['reward'],tracking_max_difference=error,controls=len(ca)))
@@ -660,7 +672,7 @@ def run_p0(c,source):
     finally:c.actor.load_state_dict(base);c.actor.zero_grad(set_to_none=True)
 
 
-def run_reference_after_p0(c,source,*,local_source=None):
+def run_reference_after_p0(c,source,*,local_source=None,zero_source=None):
     """只有完整P0和本入口零参考回放通过后才运行合法C；局部先于完整困难音乐。"""
     import json
     from .evaluation import _digest
@@ -692,8 +704,12 @@ def run_reference_after_p0(c,source,*,local_source=None):
         c.actor.load_state_dict(c.policy.frozen_policy.actor.state_dict())
         if not full:
             zero_audit=dict(plans=0)
-            with fixed_world_intervention(c,bank,'identity',zero_audit):zero=evaluate_local_candidates(c,plan,'fresh_C_zero')
+            if zero_source is None:
+                with fixed_world_intervention(c,bank,'identity',zero_audit):zero=evaluate_local_candidates(c,plan,'fresh_C_zero')
+            else:
+                zero=str(next(Path(zero_source).glob(f'sessions/*/phases/decisive_fresh_C_zero/rank{rank:02d}/report/report.json')))
             zero_gate=local_call(c.distributed,lambda:compare_zero_reports(baseline,zero,prefix_only=True))
+            atomic_json(output/f'zero_gate_rank{rank:02d}.json',dict(zero_gate,source=zero))
             if not all(c.distributed.all_gather_object(zero_gate['passed'])):raise ValueError('C zero replay failed; no candidate executed')
         else:
             zero_gate=local['results'][rank]['zero_gate'];zero=str(baseline)
