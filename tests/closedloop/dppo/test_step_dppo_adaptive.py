@@ -163,6 +163,29 @@ def test_window_boundary_is_not_failure_and_same_bin_visit_is_counted_once():
     pool.update(events);assert pool.statistics['FineDance/0']['visits']==1
 
 
+def test_song_tail_failure_uses_true_time_bin_not_last_legal_start():
+    pool=make_pool()
+    assert pool._bin('FineDance','0',197*30)==197
+    for _ in range(3):pool.update([event(197,severe=True)]*4)
+    assert pool.quarantine[0]['begin_seconds']==197
+    for _ in range(500):
+        sample,start,_=pool.draw('FineDance')
+        assert start <= (200-8)*30
+        if sample==0:assert start+20*30<=197*30
+
+
+def test_warmup_failure_does_not_fabricate_tracking_score():
+    pool=make_pool()
+    task=dict(sample=dict(dataset='FineDance',row={'sample_id':'0'}),music_start_frame=80*30)
+    for _ in range(8):
+        for _ in range(4):pool.record_warmup_failure(task,{})
+        pool.update(pool.feedback([]))
+    stat=pool.statistics['FineDance/80']
+    assert stat['warmup_failures']==32 and stat['tracking_observed_rounds']==0
+    assert stat['first_track']==[] and stat['recent_track']==[] and stat['track_ema']==1.
+    assert pool.quarantine[0]['reason']=='persistent_warmup_failure'
+
+
 def test_new_configuration_rejects_old_joint_training_contract():
     from gem.closedloop.dppo.training_config import configuration
     root=Path(__file__).resolve().parents[3]

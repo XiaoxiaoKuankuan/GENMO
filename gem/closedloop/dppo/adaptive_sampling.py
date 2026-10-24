@@ -67,8 +67,22 @@ class AdaptiveTimePool(StratifiedTimePool):
         self._lookup = {}
         self._sample_bins = {}
         self._probabilities = {}
-        for source in SOURCES:
+        # 观察bin覆盖整首，起点bin另受最少剩余时长限制。否则歌曲最后8秒的
+        # 真实失败会被错误归到最后一个可抽起点，隔离区间也会偏移。
+        self._maximum_start = {}
+        for source_index, source in enumerate(SOURCES):
             self._lookup[source] = {s['row']['sample_id']: i for i, s in enumerate(catalog.samples['train'][source])}
+            self._maximum_start[source] = {}
+            bins = []
+            for index, sample in enumerate(catalog.samples['train'][source]):
+                frames = sample['row']['num_frames']
+                self._maximum_start[source][index] = max(0, frames-max(2, math.ceil(self.identity['minimum_remaining_seconds']*30)))
+                bins.extend((index, begin, min(begin+self.identity['bin_frames'], frames))
+                    for begin in range(0, frames, self.identity['bin_frames']))
+            self.bins[source] = bins
+            partition = np.random.default_rng(np.random.SeedSequence([self.identity['seed'], source_index, 947])).permutation(len(bins))
+            self.shards[source] = [int(i) for i in partition[self.identity['rank']::self.identity['world_size']]
+                if bins[i][1] <= self._maximum_start[source][bins[i][0]]]
             by_sample = {}
             for bin_id, (index, begin, end) in enumerate(self.bins[source]):
                 by_sample.setdefault(index, []).append(bin_id)
@@ -124,6 +138,7 @@ class AdaptiveTimePool(StratifiedTimePool):
         bin_id = int(self.rng.choice(eligible, p=probabilities))
         sample_index, begin, end = self.bins[source][bin_id]
         self.motion_draws += 1
+        end = min(end, self._maximum_start[source][sample_index]+1)
         return sample_index, int(self.rng.integers(begin, end)), dict(initialization=MOTION_RESET_CONTRACT,
             time_bin=dict(source=source, bin_id=bin_id, begin_frame=begin, end_frame_exclusive=end,
                 rank=self.identity['rank'], adaptive_round=self.round),
@@ -183,9 +198,11 @@ class AdaptiveTimePool(StratifiedTimePool):
         newly = []
         for key, visits in grouped.items():
             stat = self.statistics.setdefault(key, dict(visits=0, failures=0, severe_failures=0,
-                observed_rounds=0, warmup_failures=0, failure_ema=0., track_ema=1., recent_track=[], first_track=[]))
+                observed_rounds=0, tracking_observed_rounds=0, warmup_failures=0, failure_ema=0., track_ema=1., recent_track=[], first_track=[]))
             failures = sum(v['failure'] for v in visits)
-            track = sum(v['track_sum']/v['controls'] for v in visits)/len(visits)
+            tracking_visits=[v for v in visits if not v.get('warmup')]
+            track = (sum(v['track_sum']/v['controls'] for v in tracking_visits)/len(tracking_visits)
+                if tracking_visits else stat['track_ema'])
             a = self.config['ema_alpha'] if stat['visits'] else 1.
             stat['failure_ema'] = (1-a)*stat['failure_ema']+a*failures/len(visits)
             stat['track_ema'] = (1-a)*stat['track_ema']+a*track
@@ -193,25 +210,32 @@ class AdaptiveTimePool(StratifiedTimePool):
             stat['severe_failures'] += sum(v['severe'] for v in visits)
             stat['observed_rounds'] += 1
             stat['warmup_failures'] += sum(bool(v.get('warmup')) for v in visits)
-            if len(stat['first_track']) < 4:stat['first_track'].append(track)
-            stat['recent_track'] = (stat['recent_track']+[track])[-8:]
+            if tracking_visits:
+                stat['tracking_observed_rounds'] += 1
+                if len(stat['first_track']) < 4:stat['first_track'].append(track)
+                stat['recent_track'] = (stat['recent_track']+[track])[-8:]
             rate = stat['failures']/stat['visits']
             enough = (stat['visits'] >= self.config['minimum_visits']
                 and stat['observed_rounds'] >= self.config['minimum_rounds']
                 and rate >= self.config['failure_rate_threshold'])
             severe = stat['severe_failures']/max(1, stat['failures']) >= self.config['severe_fraction']
-            improvement = float(np.mean(stat['recent_track'])-np.mean(stat['first_track']))
+            improvement = (float(np.mean(stat['recent_track'])-np.mean(stat['first_track']))
+                if stat['recent_track'] else None)
             unlearnable = (stat['visits'] >= self.config['unlearnable_visits']
+                and stat['tracking_observed_rounds'] >= self.config['unlearnable_rounds']
+                and improvement is not None and improvement <= self.config['minimum_improvement'])
+            warmup_unlearnable = (stat['warmup_failures'] >= self.config['unlearnable_visits']
                 and stat['observed_rounds'] >= self.config['unlearnable_rounds']
-                and improvement <= self.config['minimum_improvement'])
-            if enough and (severe or unlearnable):
+                and stat['warmup_failures']/stat['visits'] >= self.config['failure_rate_threshold'])
+            if enough and (severe or unlearnable or warmup_unlearnable):
                 source = visits[0]['source'];bin_id = visits[0]['bin_id']
                 sample_index, begin, end = self.bins[source][bin_id]
                 sample_id = self.catalog.samples['train'][source][sample_index]['row']['sample_id']
                 if not any(q['source'] == source and q['sample_id'] == sample_id and
                            q['begin_seconds'] <= begin/30 < q['end_seconds'] for q in self.quarantine):
                     item = dict(source=source, sample_id=sample_id, begin_seconds=begin/30, end_seconds=end/30,
-                        reason='repeated_physical_failure_with_pose_risk' if severe else 'persistent_failure_without_tracking_improvement',
+                        reason=('repeated_physical_failure_with_pose_risk' if severe else
+                            'persistent_warmup_failure' if warmup_unlearnable else 'persistent_failure_without_tracking_improvement'),
                         evidence=dict(round=self.round, **copy.deepcopy(stat), tracking_improvement=improvement))
                     self.quarantine.append(item);newly.append(item)
         self._recompute()

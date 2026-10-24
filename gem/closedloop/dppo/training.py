@@ -204,7 +204,7 @@ def _record_actor_step(c,label,step):
         post=step['post_step_chain'];transaction=step.get('trust_region') or {}
         print(f'[STAGE2 ACTOR] {label} update={step["optimizer_step"]} '
             f'chains={step["global_chain_count"]} lr={step["learning_rate"]:.6g} '
-            f'chain_KL={post["denoising_step_kl"]["mean"]:.6g} '
+            f'step_KL={post["denoising_step_kl"]["mean"]:.6g} '
             f'backtracks={transaction.get("backtracks",0)} wall={step["wall_seconds"]:.3f}s '
             'acceptance=pending_full_rollout',flush=True)
     root_call(c.distributed,publish)
