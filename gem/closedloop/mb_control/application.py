@@ -114,11 +114,24 @@ def read_tasks(path):
     return tasks
 
 
-def task_inputs(task, adapter, device):
-    array = np.load(require_file(task["music_features"], "music_features"), allow_pickle=False)
-    if array.ndim != 2 or array.shape[1] != 35 or len(array) < 1 or not np.isfinite(array).all():
+def read_music_features(path):
+    path = require_file(path, "music_features")
+    if path.suffix in (".pt", ".pth"):
+        music = torch.load(path, map_location="cpu", weights_only=True)
+        if not isinstance(music, torch.Tensor):
+            raise ValueError("原配对库音乐必须是EDGE35 Tensor，不能猜测字典字段")
+        music = music.detach().float()
+    elif path.suffix == ".npy":
+        music = torch.from_numpy(np.load(path, allow_pickle=False)).float()
+    else:
+        raise ValueError("音乐只接受原库.pt Tensor或明确的.npy EDGE35，不猜测压缩容器格式")
+    if music.ndim != 2 or music.shape[1] != 35 or len(music) < 1 or not torch.isfinite(music).all():
         raise ValueError("音乐资产必须是原30Hz EDGE35有限[N,35]")
-    music = torch.as_tensor(array, dtype=torch.float32, device=device)[None]
+    return music.contiguous()
+
+
+def task_inputs(task, adapter, device):
+    music = read_music_features(task["music_features"]).to(device)[None]
     if task.get("initial_state"):
         initial = torch.as_tensor(np.load(require_file(task["initial_state"], "initial_state"), allow_pickle=False),
                                   dtype=torch.float32, device=device).reshape(1, 55)

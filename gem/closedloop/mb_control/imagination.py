@@ -25,7 +25,7 @@ class Imagination:
         self.forecast_enabled, self.max_model_steps = forecast_enabled, max_model_steps
 
     def rollout(self, initial, noises, actual_latency_ticks, *, detach_initial=True,
-                transition_fn=None, on_step=None):
+                transition_fn=None, on_step=None, on_plan=None, on_transition=None):
         """transition_fn仅供离线配对物理审计；正式异步采集由PhysicalCollector执行。"""
         if len(noises) != self.decisions or len(actual_latency_ticks) != self.decisions:
             raise ValueError("每个决策必须有独立重参数噪声和外生延迟")
@@ -57,6 +57,8 @@ class Imagination:
                 context = ForecastContext.invalid(z.state, z.tick)
                 plan_depth = max(state_depth, reference_depth)
             plan = self.actor.generate(z, ticket, context, noise)
+            if on_plan is not None:
+                on_plan(plan)
             # latency从此刻才进入事件系统，不能进入上面的forecast/condition。
             ready = ticket.request_tick + latency
             z = replace(z, pending=True)
@@ -88,6 +90,8 @@ class Imagination:
                         state1 = (self.adapter.bundle.step_model(z.state, action, z.xi) if transition_fn is None
                                   else transition_fn(action))
                     ref1, _, _ = z.reference.read_current_future(z.tick + 12)
+                    if on_transition is not None:
+                        on_transition(z, action, state1, ref1)
                     reward, _ = self.rewards(state1, action, z.previous_action, ref1)
                     failed = self.adapter.runtime.termination(state1, ref1)
                     alive = (1 - self.adapter.runtime.termination(state1, ref1, soft=True) if transition_fn is None

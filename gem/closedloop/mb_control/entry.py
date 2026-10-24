@@ -102,6 +102,13 @@ def main(kind):
         z = tensor_fixture(adapter, music, initial)
         latencies = profile.sample(engine.decisions) if profile else [scheduler.bootstrap_latency_ticks] * engine.decisions
         result = audit_gradients(actor, critic, engine, z, latencies, finite_difference=args.finite_difference)
+        from .execution_audit import audit_execution_paths
+        supervision = SupervisionStream(cfg["stage1"]["data_config"], cfg["training"]["supervision_batch"],
+                                         cfg["training"]["seed"], args.torch_device)
+        result["execution_paths"] = audit_execution_paths(actor, critic, engine, z,
+            [torch.randn(1, 60, 30, device=args.torch_device) for _ in range(engine.decisions)], latencies,
+            supervised_batch=supervision.next(), stage1_losses=build_stage1_losses(actor.stage1, original).to(args.torch_device),
+            finite_difference=args.finite_difference)
         (output / "gradient_audit.json").write_text(json.dumps(result, ensure_ascii=False, indent=2, allow_nan=False))
         print(json.dumps(result, ensure_ascii=False))
         return
