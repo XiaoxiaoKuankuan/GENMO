@@ -21,6 +21,7 @@ def test_motionlib_dynamic_buffer_goal_obs_reward_action():
     from supermimic.motion import MotionLib
     from supermimic.mdp import MDP, flatten_state
     from gem.closedloop.mb_control.reference_buffer import ReferenceBuffer
+    from supermimic.bridge.reference import build_reference, current_future
     bundle = load_bundle(checkpoint, robot_asset_dir=os.getenv("SM_ROBOT_ASSET_DIR"))
     runtime = SuperMimicRuntime(bundle)
     p, quat, q, fps = read_umr_npz(motion_file, bundle.spec)
@@ -41,6 +42,10 @@ def test_motionlib_dynamic_buffer_goal_obs_reward_action():
             pytest.skip("动作过短，无法覆盖未来10帧与速度halo")
         f = torch.tensor([frame])
         ref, future, goal = buffer.read_current_future(frame * 12)
+        raw = build_reference(buffer.pose_at, frame * 12 + torch.arange(11) * 12,
+                              buffer.lower, buffer.upper, runtime.kin)
+        _, _, raw_goal = current_future(raw)
+        torch.testing.assert_close(goal, raw_goal, atol=2e-5, rtol=2e-5)
         state = motion.ref_state(f)
         old_goal = motion.goal(f, 10)
         torch.testing.assert_close(goal, old_goal, atol=2e-4, rtol=2e-4)
@@ -53,3 +58,18 @@ def test_motionlib_dynamic_buffer_goal_obs_reward_action():
         reward, _ = runtime.reward(flatten_state(state), a, previous, ref)
         old_reward = original.reward(state, f, old_a, previous)
         torch.testing.assert_close(reward, old_reward, atol=2e-4, rtol=2e-4)
+
+    # no_grad预读之后再请求导数必须重建图；trim不允许引用错误的源张量。
+    from dataclasses import replace
+    differentiable = world[:, :60].clone().requires_grad_(True)
+    active = replace(buffer, ticks=ticks[:60], world_qpos=differentiable,
+                     contact=buffer.contact[:, :60], source_versions=buffer.source_versions[:60])
+    with torch.no_grad():
+        active.read_current_future(0)
+    cached = active.trim(24).read_current_future(24)[2]
+    cached_grad, = torch.autograd.grad(cached.square().sum(), differentiable)
+    raw = build_reference(active.pose_at, 24 + torch.arange(11) * 12, active.lower, active.upper, runtime.kin)
+    direct = current_future(raw)[2]
+    raw_grad, = torch.autograd.grad(direct.square().sum(), differentiable)
+    torch.testing.assert_close(cached, direct, atol=2e-5, rtol=2e-5)
+    torch.testing.assert_close(cached_grad, raw_grad, atol=2e-4, rtol=2e-4)

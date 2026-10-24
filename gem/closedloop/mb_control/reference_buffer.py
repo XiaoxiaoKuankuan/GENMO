@@ -10,6 +10,7 @@ from dataclasses import dataclass, replace
 import torch
 
 from supermimic.bridge.reference import build_reference, current_future, derivative_ticks, slerp
+from supermimic.motion import select_reference
 from .contracts import CONTROL_TICKS, SOURCE_TICKS, ReferenceExhausted
 
 
@@ -22,6 +23,10 @@ class ReferenceBuffer:
     kin: object
     to_sm: tuple[int, ...]
     version: int = 0
+    prepared_reference: object = None
+    prepared_start: int | None = None
+    prepared_source: object = None
+    prepared_with_grad: bool = False
 
     def __post_init__(self):
         n = self.ticks.numel()
@@ -72,7 +77,22 @@ class ReferenceBuffer:
         # 对正常滚动保留完整右halo，禁止尾部用单侧差分冒充完整目标。
         if int(ticks[-1]) + CONTROL_TICKS > self.upper:
             raise ReferenceExhausted("未来目标或右速度halo已耗尽")
-        ref = build_reference(self.pose_at, ticks, self.lower, self.upper, self.kin)
+        if control_tick % CONTROL_TICKS or control_tick < self.lower:
+            raise ReferenceExhausted("当前参考读取必须在有效50Hz网格")
+        # 同一不可变源缓存的插值、差分、FK一次向量化计算，随后仅选片。
+        # 这是当前计划的解析缓存，不含任何未来真实状态；不detach、不改写源张量。
+        # trim保留此缓存，merge/detached必须失效，避免复用旧图或旧计划。
+        if (self.prepared_reference is None or self.prepared_source is not self.world_qpos or
+                (torch.is_grad_enabled() and self.world_qpos.requires_grad and not self.prepared_with_grad)):
+            start = ((self.lower + CONTROL_TICKS - 1) // CONTROL_TICKS) * CONTROL_TICKS
+            grid = torch.arange(start, self.upper - CONTROL_TICKS + 1, CONTROL_TICKS, device=self.ticks.device)
+            prepared = build_reference(self.pose_at, grid, self.lower, self.upper, self.kin)
+            object.__setattr__(self, "prepared_reference", prepared)
+            object.__setattr__(self, "prepared_start", start)
+            object.__setattr__(self, "prepared_source", self.world_qpos)
+            object.__setattr__(self, "prepared_with_grad", torch.is_grad_enabled())
+        offset = (control_tick - self.prepared_start) // CONTROL_TICKS
+        ref = select_reference(self.prepared_reference, (slice(None), slice(offset, offset + future_steps + 1)))
         return current_future(ref)
 
     def dependency_support(self, control_tick, future_steps=10):
@@ -120,15 +140,17 @@ class ReferenceBuffer:
                        world_qpos=torch.cat((self.world_qpos[:, keep], plan.world_qpos[:, start:]), 1),
                        contact=torch.cat((self.contact[:, keep], plan.contact[:, start:]), 1),
                        source_versions=torch.cat((self.source_versions[keep], torch.full_like(new_ticks, self.version + 1))),
-                       version=self.version + 1)
+                       version=self.version + 1, prepared_reference=None, prepared_start=None, prepared_source=None)
 
     def trim(self, control_tick):
         # 留足最早当前速度差分的左右30Hz插值端点。
         first = ((control_tick - 12 - self.lower) // 20) * 20 + self.lower
         keep = self.ticks >= max(self.lower, first)
-        return replace(self, ticks=self.ticks[keep], world_qpos=self.world_qpos[:, keep],
+        pose = self.world_qpos[:, keep]
+        return replace(self, ticks=self.ticks[keep], world_qpos=pose, prepared_source=pose,
                        contact=self.contact[:, keep], source_versions=self.source_versions[keep])
 
     def detached(self):
         return replace(self, world_qpos=self.world_qpos.detach().clone(), contact=self.contact.detach().clone(),
-                       ticks=self.ticks.clone(), source_versions=self.source_versions.clone())
+                       ticks=self.ticks.clone(), source_versions=self.source_versions.clone(),
+                       prepared_reference=None, prepared_start=None, prepared_source=None)

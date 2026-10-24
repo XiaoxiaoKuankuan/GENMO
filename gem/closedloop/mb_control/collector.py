@@ -80,6 +80,7 @@ class PhysicalCollector:
         self.record_trajectory = record_trajectory
         self.state, self.terminal = None, False
         self.events, self.trajectory, self.metrics = [], [], []
+        self.cancelled_requests = []
         self.overruns, self.wall_started = 0, None
 
     @torch.no_grad()
@@ -107,6 +108,7 @@ class PhysicalCollector:
                                      music_start_tick, music_start_tick + music.shape[1] * 20)
         self.terminal = False
         self.events, self.trajectory, self.metrics = [], [], []
+        self.cancelled_requests = []
         self.overruns = 0
         self.wall_started = time.perf_counter()
         return self.state.detached()
@@ -186,7 +188,10 @@ class PhysicalCollector:
                 self.terminal, reason = True, f"reference_exhausted:{error}"
             if self.terminal and self.worker.future is not None:
                 # episode已经停止后收束worker，确保优化器不会与生成并发改权重。
-                self.worker.future.result()
+                _, finished, timings = self.worker.future.result()
+                self.cancelled_requests.append({"request_tick": ticket.request_tick, "terminal_tick": z.tick,
+                    "actual_ready_tick": ticket.request_tick + math.ceil((finished - self.worker.started) * 600),
+                    "reason": reason, "timings": timings, "consumed_by_scheduler": False})
                 self.worker.clear()
             z = replace(z, pending=False, decision_id=z.decision_id + 1)
             self.state = z

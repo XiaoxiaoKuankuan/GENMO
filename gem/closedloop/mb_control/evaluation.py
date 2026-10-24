@@ -70,6 +70,7 @@ def evaluate_tasks(collector, tasks, output, *, mode, device, max_seconds=None):
                    "commits": sum(e["accepted"] for e in collector.events),
                    "timeouts": sum(not e["accepted"] for e in collector.events),
                    "control_wall_overruns": collector.overruns, "latency_ticks": latencies,
+                   "events": collector.events, "cancelled_requests": collector.cancelled_requests,
                    "generator_unseen_music": task.get("generator_unseen_music"),
                    "controller_unseen_motion": task.get("controller_unseen_motion"),
                    "evidence": "real_isaaclab3_newton_mujoco_warp"}

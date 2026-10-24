@@ -16,7 +16,7 @@ from supermimic.bridge.bundle import atomic_save
 from .contracts import ClosedLoopState
 from .reference_buffer import ReferenceBuffer
 
-SCHEMA = "genmo.supermimic.bptt.training.v1"
+SCHEMA = "genmo.supermimic.bptt.training.v2"
 
 
 def optimizer_layout(module, optimizer):
@@ -63,7 +63,7 @@ def save_checkpoint(path, trainer, replay, *, behavior_config, runtime_state, pr
                  "upper_critic_optimizer": trainer.critic_optimizer.state_dict(),
                  "optimizer_layout": {"genmo": optimizer_layout(trainer.actor, trainer.actor_optimizer),
                                       "critic": optimizer_layout(trainer.critic, trainer.critic_optimizer)},
-                 "update": trainer.update_index, "rng": capture_rng(), "replay": replay_payload,
+                 "update": trainer.update_index, "counters": trainer.counters(), "rng": capture_rng(), "replay": replay_payload,
                  "runtime_state": runtime_state, "behavior_config": behavior_config,
                  "frozen_sha256": trainer.imagination.adapter.bundle.metadata["sha256"],
                  "provenance": provenance, "physical_solver_state_saved": False}, path)
@@ -85,7 +85,7 @@ def load_checkpoint(path, trainer, replay, *, behavior_config, device):
     trainer.critic.load_state_dict(ck["critic"], strict=True)
     trainer.actor_optimizer.load_state_dict(ck["genmo_optimizer"])
     trainer.critic_optimizer.load_state_dict(ck["upper_critic_optimizer"])
-    trainer.update_index = ck["update"]
+    trainer.restore_counters(ck["counters"])
     payload = dict(ck["replay"])
     payload["items"] = [unpack_state(z, trainer.imagination.adapter, device) for z in payload["items"]]
     replay.load_state_dict(payload)
