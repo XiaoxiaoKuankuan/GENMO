@@ -406,6 +406,11 @@ def evaluation_episode_flow(env, task, index, plan, *, catalog, limit, determini
                 yield from env.reset_task_flow(task['sample'],music,**reset)
             else:
                 yield LocalOperation(env.reset_task,dict(sample=task['sample'],music=music,**reset))
+            if env.config.get('runtime',{}).get('paired_state_audit',False):
+                episode['initial_pairing_state']=copy.deepcopy(env.snapshot.get('pairing_state'))
+                if episode['initial_pairing_state'] is None:raise ValueError('Backend omitted full initial pairing state')
+                episode['pairing_clock']=copy.deepcopy(env.config['timing'])
+                episode['pairing_music_sha256']=hashlib.sha256(np.ascontiguousarray(music).tobytes()).hexdigest()
             maximum_decisions = math.ceil(min(task['remaining_music_seconds'], float(limit) if limit is not None else task['remaining_music_seconds'])/.02)+2
             for decision_index in range(maximum_decisions):
                 if hasattr(env,'step_flow'):result=yield from env.step_flow(deterministic=deterministic)

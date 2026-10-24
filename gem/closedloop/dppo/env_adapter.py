@@ -396,7 +396,7 @@ class UpperEnvironment:
             excluded_audit_seconds=(timings['trace_copy_seconds']+timings['raw_evidence_seconds']
                 +timings['journal_seconds']) if self.timing_contract != 'legacy_audit_inclusive.v1' else 0.)
         from .tracking_context import build_critic_context
-        critic_context=build_critic_context(context,self.snapshot)
+        critic_context=build_critic_context(context,self.snapshot,policy_version=self.policy_version)
         return dict(context=context,critic_context=critic_context,meta=meta,generated=generated,trace=trace,prepared=prepared,
                     rejection=rejection,elapsed=elapsed,critical_ready_seconds=critical,
                     timing=timings,seed=seed,raw_path=str(raw_path))
@@ -565,7 +565,7 @@ class UpperEnvironment:
             # GMT preview 允许同一终态上的只读条件，行政截断仍需合法参考才可自举。
             next_context, _ = yield from self.preview_context_flow()
             from .tracking_context import build_critic_context
-            next_critic_context=build_critic_context(next_context,self.snapshot)
+            next_critic_context=build_critic_context(next_context,self.snapshot,policy_version=self.policy_version)
         trace = generated['trace']
         backend_cpu_totals = {}
         for row in rows:

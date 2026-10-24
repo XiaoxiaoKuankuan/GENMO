@@ -702,9 +702,9 @@ def run(cargs,config,distributed):
                 final_state=c.state)
             raise _FiniteDiagnosticComplete
         if getattr(cargs,'decisive_diagnostic',False):
-            from .decisive_diagnostic import run_diagnostic,run_repeatability,run_fresh_physics,run_reference_only
+            from .decisive_diagnostic import run_diagnostic,run_repeatability,run_fresh_physics,run_reference_only,run_p0
             if getattr(cargs,'diagnostic_fresh_physics_source',None):
-                function=run_reference_only if getattr(cargs,'diagnostic_reference_only',False) else run_fresh_physics
+                function=run_p0 if getattr(cargs,'diagnostic_p0',False) else (run_reference_only if getattr(cargs,'diagnostic_reference_only',False) else run_fresh_physics)
                 report['decisive_diagnostic']=function(c,cargs.diagnostic_fresh_physics_source)
             else:
                 function=run_repeatability if getattr(cargs,'diagnostic_repeatability_only',False) else run_diagnostic

@@ -107,7 +107,7 @@ def generate_batch(policy, packets, *, shared_storage=False, device_trace=False)
     boundary_report_end=time.perf_counter()
     from .tracking_context import build_critic_context_batch
     critic_conditions=build_critic_context_batch(trace['conditions'] if device_trace else conditions,
-        [p['snapshot'] for p in packets])
+        [p['snapshot'] for p in packets],policy_version=[p.get('policy_version',0) for p in packets])
     critic_condition_end=time.perf_counter()
     outputs = []
     for i,p in enumerate(packets):
@@ -167,7 +167,7 @@ def generate_for_environment_flow(env):
     if env.comparison_noise_index is not None:
         seed = stable_noise_seed(1729, str(env.comparison_noise_index))
         env.comparison_noise_index += 1
-    packet = dict(_vector_generation=True, builder=env.builder, snapshot=env.snapshot,
+    packet = dict(_vector_generation=True, builder=env.builder, snapshot=env.snapshot,policy_version=env.policy_version,
         reservation=reservation, music=getattr(env,'condition_music',env.music), seed=seed, decision=env.decision,
         task_identity=dict(dataset=env.sample['dataset'], sample_id=env.sample['row']['sample_id'],
             split=env.data_split, manifest_sha256=env.sample['manifest_sha256'],

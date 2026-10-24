@@ -591,3 +591,53 @@ def run_reference_only(c,source):
         result=dict(status='passed',results=c.distributed.all_gather_object(row),wall_seconds=time.time()-started,training_updates=0,world_reuse=False)
         root_call(c.distributed,lambda:atomic_json(output/'summary.json',result));return result
     finally:c.actor.load_state_dict(base);c.actor.zero_grad(set_to_none=True)
+
+
+def compare_zero_reports(before,after):
+    """严格核验完整零扰动：初态/控制器/缓存、所有奖励误差及生成噪声时钟。"""
+    from tools.summarize_decisive_physics import load_report
+    _,plan,left=load_report(before);_,other,right=load_report(after)
+    if plan!=other:raise ValueError('Zero intervention task plans differ')
+    result=[]
+    for a,b in zip(left,right):
+        if a['task_id']!=b['task_id']:raise ValueError('Zero task order differs')
+        checks={k:a.get(k)==b.get(k) for k in ('initial_pairing_state','pairing_clock','pairing_music_sha256',
+            'noise_index_start','seed','music_start_frame','physical_failure','end_reason')}
+        checks['initial_present']=a.get('initial_pairing_state') is not None
+        ca=[r for d in a['decisions'] for r in d['controls']]
+        cb=[r for d in b['decisions'] for r in d['controls']]
+        checks['control_count']=len(ca)==len(cb)
+        differences={k:max((abs(x[k]-y[k]) for x,y in zip(ca,cb)),default=0.) for k in ('reward','tick')}
+        error=max((abs(x['raw_errors'][k]-y['raw_errors'][k]) for x,y in zip(ca,cb) for k in x['raw_errors']),default=0.)
+        checks['all_rewards_exact']=differences['reward']==0.;checks['all_ticks_exact']=differences['tick']==0.
+        checks['all_eight_errors_exact']=error==0.
+        checks['deployment_clock']=len(a['decisions'])==len(b['decisions']) and all(
+            x['latency_seconds']==y['latency_seconds'] and x['prefix_frames']==y['prefix_frames']
+            for x,y in zip(a['decisions'],b['decisions']))
+        result.append(dict(task_id=a['task_id'],passed=all(checks.values()),checks=checks,
+            reward_max_difference=differences['reward'],tracking_max_difference=error,controls=len(ca)))
+    return dict(passed=all(r['passed'] for r in result),tasks=result,scope='complete_music_exact_zero_intervention')
+
+
+def run_p0(c,source):
+    """每槽单任务、每阶段新世界的Stage1全音乐零扰动门槛，同时采集未来缓存MC。"""
+    import json
+    started=time.time();output=c.output/'p0';output.mkdir(exist_ok=True)
+    base={n:t.detach().cpu().clone() for n,t in c.actor.state_dict().items()}
+    try:
+        plan=json.loads((Path(source)/'decisive/plan.json').read_text())
+        c.stage['evaluation'].update(envs_per_rank=len(plan['tasks']),persistent_world=False)
+        c.config['runtime'].update(paired_state_audit=True,future_reference_context=True)
+        c.actor.load_state_dict(c.policy.frozen_policy.actor.state_dict())
+        before=evaluate_local_candidates(c,plan,'fresh_p0_baseline')
+        after=evaluate_local_candidates(c,plan,'fresh_p0_zero')
+        result=local_call(c.distributed,lambda:compare_zero_reports(before,after))
+        result.update(rank=c.distributed.rank,before=before,after=after)
+        atomic_json(output/f'rank{c.distributed.rank:02d}.json',result)
+        all_results=c.distributed.all_gather_object(result)
+        summary=dict(status='passed' if all(r['passed'] for r in all_results) else 'failed',results=all_results,
+            world_reuse=False,tasks_per_slot=1,training_updates=0,wall_seconds=time.time()-started)
+        root_call(c.distributed,lambda:atomic_json(output/'summary.json',summary))
+        if summary['status']!='passed':raise RuntimeError('P0 zero intervention failed; no physical superiority claim allowed')
+        return summary
+    finally:c.actor.load_state_dict(base);c.actor.zero_grad(set_to_none=True)

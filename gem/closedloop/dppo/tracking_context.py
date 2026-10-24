@@ -11,11 +11,15 @@ import torch
 from gem.closedloop.contracts import STAGE1_CONDITION_KEYS, validate_stage1_condition_batch
 
 SCHEMA='genmo.critic.causal_tracking90.v2'
+FUTURE_SCHEMA='genmo.critic.causal_tracking90_committed38.v3'
 TRACKING_KEYS=('tracking_history','tracking_history_valid','tracking_history_times','tracking_reference_times')
+COMMITTED_KEYS=('committed_reference','committed_valid','committed_times','committed_metadata',
+    'committed_metadata_valid','committed_snapshot_tick','committed_policy_version')
 
 
 def validate_tracking_context(context):
-    if set(context)!=set(STAGE1_CONDITION_KEYS)|set(TRACKING_KEYS):
+    legacy=set(STAGE1_CONDITION_KEYS)|set(TRACKING_KEYS)
+    if set(context) not in (legacy,legacy|set(COMMITTED_KEYS)):
         raise ValueError('Critic requires exactly Actor conditions plus causal tracking history')
     actor={key:context[key] for key in STAGE1_CONDITION_KEYS}
     validate_stage1_condition_batch(actor,history_steps=50)
@@ -41,14 +45,31 @@ def validate_tracking_context(context):
         raise ValueError('Noncausal or mismatched tracking history: '+','.join(failed)+
             f'; timestamp_delta={float((times-context["proprio_history_times"]).abs().max())}; '+
             f'proprio_delta={float(torch.where(valid[...,None],values[...,:48]-context["proprio_history"],0.).abs().max())}')
+    if 'committed_reference' in context:
+        f=context['committed_reference'];v=context['committed_valid'];t=context['committed_times']
+        m=context['committed_metadata'];mv=context['committed_metadata_valid']
+        tick=context['committed_snapshot_tick'];version=context['committed_policy_version']
+        if (f.shape!=(batch,41,38) or v.shape!=(batch,41) or v.dtype!=torch.bool
+                or t.shape!=v.shape or t.dtype!=torch.float64 or m.shape!=(batch,10)
+                or mv.shape!=m.shape or mv.dtype!=torch.bool or tick.shape!=(batch,)
+                or version.shape!=(batch,) or tick.dtype!=torch.int64 or version.dtype!=torch.int64):
+            raise ValueError('Invalid future committed reference schema')
+        expected=context['decision_time'][:,None]+torch.arange(10,51,device=t.device,dtype=torch.float64)[None]/50
+        if not (torch.isfinite(f).all() and torch.isfinite(m).all()
+                and torch.allclose(t,expected,atol=1e-10,rtol=0)
+                and torch.allclose(tick.double()/600,context['decision_time'],atol=1e-10,rtol=0)
+                and (version>=0).all() and torch.where(~v[...,None],f==0,True).all()
+                and torch.where(~mv,m==0,True).all() and not mv[:,6:8].any()
+                and (f[...,36:][v]>=0).all()):
+            raise ValueError('Noncausal committed cache, unknown arrival exposed, or invalid padding')
     return context
 
 
-def build_critic_context(actor_context,snapshot):
-    return build_critic_context_batch(actor_context,[snapshot])
+def build_critic_context(actor_context,snapshot,*,policy_version=0):
+    return build_critic_context_batch(actor_context,[snapshot],policy_version=policy_version)
 
 
-def build_critic_context_batch(actor_context,snapshots):
+def build_critic_context_batch(actor_context,snapshots,*,policy_version=0):
     """同一决策批次合并H2D和因果核验；按原整数tick在CPU做FP64秒转换。"""
     if len(snapshots)!=len(actor_context['decision_time']) or any(
             s.get('tracking_history_schema')!='gmt.causal_tracking_history90.v2' for s in snapshots):
@@ -62,4 +83,17 @@ def build_critic_context_batch(actor_context,snapshots):
         tracking_history_valid=tensor('tracking_history_valid',torch.bool),
         tracking_history_times=tensor('tracking_history_ticks',torch.float64,600.),
         tracking_reference_times=tensor('tracking_reference_ticks',torch.float64,600.))
+    present=['committed_reference' in s for s in snapshots]
+    if any(present):
+        if not all(present):raise ValueError('Mixed Critic state schemas in one batch')
+        refs=[s['committed_reference'] for s in snapshots]
+        if any(r['schema']!='gmt.causal_committed_reference38.v1' for r in refs):
+            raise ValueError('Unknown backend committed cache schema')
+        for target,key,dtype in (('committed_reference','values',torch.float32),('committed_valid','valid',torch.bool),
+                ('committed_times','ticks',torch.float64),('committed_metadata','metadata',torch.float32),
+                ('committed_metadata_valid','metadata_valid',torch.bool),('committed_snapshot_tick','snapshot_tick',torch.int64)):
+            result[target]=torch.stack([torch.as_tensor(r[key],dtype=dtype) for r in refs]).to(device)
+        result['committed_times']=result['committed_times']/600.
+        versions=torch.as_tensor(policy_version,dtype=torch.int64,device=device)
+        result['committed_policy_version']=versions.expand(len(refs)).clone()
     return validate_tracking_context(result)
