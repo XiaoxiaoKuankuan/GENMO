@@ -702,8 +702,9 @@ def run(cargs,config,distributed):
                 final_state=c.state)
             raise _FiniteDiagnosticComplete
         if getattr(cargs,'decisive_diagnostic',False):
-            from .decisive_diagnostic import run_diagnostic
-            report['decisive_diagnostic']=run_diagnostic(c)
+            from .decisive_diagnostic import run_diagnostic,run_repeatability
+            function=run_repeatability if getattr(cargs,'diagnostic_repeatability_only',False) else run_diagnostic
+            report['decisive_diagnostic']=function(c)
             report.update(status='passed',scope='finite_paired_gradient_and_reference_PhysX_diagnostic_no_training',final_state=c.state)
             raise _FiniteDiagnosticComplete
         if cargs.calibrate_only:

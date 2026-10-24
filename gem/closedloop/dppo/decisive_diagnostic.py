@@ -240,7 +240,8 @@ def evaluate_local_candidates(c,plan,label):
     path,lease,budget=_new_phase(c,'decisive_'+label,credits)
     conditions=[];reference_sums=dict(count=0,root_position_squared=0.,root_rotation_squared=0.,leg_squared=0.)
     def sink(task,row):
-        if label=='A_baseline':conditions.append(snapshot_critic_transition(row))
+        if label=='A_baseline' or label.startswith('repeatability_'):
+            snapshot=snapshot_critic_transition(row);snapshot['task_id']=task['task_id'];conditions.append(snapshot)
         # 逐状态生成输出单独保存，后续只按实际消费帧匹配，不使用执行后状态作目标。
         trace=row.metadata['sampler_trace']
         record=dict(task_id=task['task_id'],identity=row.identity,decision_index=row.identity.get('decision_index'),
@@ -483,5 +484,32 @@ def run_diagnostic(c):
         result=dict(status='passed',results=all_results,wall_seconds=time.time()-started,actor_restored=True,training_updates=0)
         root_call(c.distributed,lambda:atomic_json(output/'summary.json',result))
         return result
+    finally:
+        c.actor.load_state_dict(base);c.actor.zero_grad(set_to_none=True)
+
+
+def run_repeatability(c):
+    """有限零干预复测：每个Actor重复两次20秒队列，保存初始因果状态供独立比对。
+
+    前四rank为父Actor，后四rank为Stage1；同组权重、音乐、物理reset合同与全部
+    采样噪声相同，第二次复用已reset的评估世界。没有训练或方向扰动，专门量化
+    持久PhysX世界/数值执行在跨phase重复时的误差；20秒上限不冒充完整音乐验证。
+    """
+    if c.distributed.world_size!=8 or not c.robofft:raise ValueError('Explicit eight-GPU finite diagnosis required')
+    from .evaluation import _digest
+    started=time.time();rank=c.distributed.rank;base={n:t.detach().cpu().clone() for n,t in c.actor.state_dict().items()}
+    output=c.output/'repeatability';output.mkdir(exist_ok=True)
+    try:
+        if rank>=4:c.actor.load_state_dict(c.policy.frozen_policy.actor.state_dict())
+        plan=root_call(c.distributed,lambda:_plan(c));plan['episode_seconds']=20.
+        plan['evaluation_purpose']='zero_update_repeatability_20s_not_complete_music';plan['complete_music_scope']=False
+        plan.pop('plan_sha256');plan['plan_sha256']=_digest(plan)
+        root_call(c.distributed,lambda:atomic_json(output/'plan.json',plan))
+        c.stage['evaluation']['envs_per_rank']=8;c.stage['evaluation']['persistent_world']=True
+        first=evaluate_local_candidates(c,plan,'repeatability_first')
+        second=evaluate_local_candidates(c,plan,'repeatability_second')
+        rows=c.distributed.all_gather_object(dict(rank=rank,actor='parent28' if rank<4 else 'Stage1',first=first,second=second))
+        result=dict(status='passed',reports=rows,wall_seconds=time.time()-started,training_updates=0)
+        root_call(c.distributed,lambda:atomic_json(output/'summary.json',result));return result
     finally:
         c.actor.load_state_dict(base);c.actor.zero_grad(set_to_none=True)
