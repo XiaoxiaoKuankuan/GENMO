@@ -243,3 +243,42 @@ def test_new_behavior_missing_execution_mask_cannot_fall_back_to_full_horizon():
     row=NS(free_mask=torch.ones(3,30,dtype=torch.bool),metadata={
         'sampler_trace':{'kernel_config':{'actor_probability_scope':CONTRACT}}})
     with pytest.raises(ValueError,match='never full-horizon'):action_mask(row)
+
+
+@pytest.mark.parametrize('terminal',[False,True])
+def test_real_transition_persistence_uses_declared_gaussian_steps(actor_factory,tmp_path,terminal):
+    from gem.closedloop.dppo.buffer import UpperTransition
+    from gem.closedloop.dppo.diagnostic_rollout import persist_rollout,load_rollout
+    from gem.closedloop.dppo.rollout_helpers import split_trace
+    from gem.closedloop.dppo.frozen_prefix import FrozenPrefixPolicy
+    from tests.closedloop.dppo.test_asymmetric_critic import tracking_context
+    policy,c=terminal_policy(actor_factory)
+    if not terminal:
+        policy=FrozenPrefixPolicy(policy.actor,steps=10,frozen_prefix_steps=4,
+            std_schedule=[.001]*4+[.02,.04,.06,.08,.1,0.],generation_frames=30,music_context_frames=60)
+    else:policy.kernel_config['actor_probability_scope']=CONTRACT
+    privileged=tracking_context(c)
+    c={k:privileged[k] for k in c}
+    trace=policy.sample_rollout(c,generator=torch.Generator().manual_seed(17))
+    row=UpperTransition(identity=dict(run_id='test',backend_session_id='test',episode_id='test',
+        decision_id=0,policy_version=0),context={k:v[:1] for k,v in c.items()},next_context=None,
+        chain=trace['chain'][0],old_log_prob=trace['old_log_probs'][0],free_mask=trace['free_mask'][0],
+        rewards=torch.ones(5,dtype=torch.float64),old_value=0.,next_value=0.,control_tick_begin=0,
+        control_tick_end=60,executed_control_steps=5,executed_physics_steps=20,terminated=True,
+        metadata=dict(critic_context={k:v[:1] for k,v in privileged.items()},
+            sampler_trace=split_trace(trace,0,2)))
+    if terminal:row.metadata.update(ppo_action_mask=row.free_mask.clone(),ppo_action_scope=CONTRACT)
+    row.validate()
+    manifest=[dict(owner_rank=0,local_index=0,valid=True,has_free=True)]
+    persist_rollout(tmp_path/'case',[row],dict(advantages=torch.ones(1)),manifest,
+        kernel=policy.kernel_config,identity={},full_execution=False)
+    restored=load_rollout(tmp_path/'case')['transitions'][0]
+    assert restored.old_log_prob.shape==((10 if terminal else 9),)
+    torch.testing.assert_close(restored.old_log_prob,row.old_log_prob,rtol=0,atol=0)
+    torch.testing.assert_close(action_mask(restored),action_mask(row),rtol=0,atol=0)
+    wrong=copy.deepcopy(row);wrong.old_log_prob=wrong.old_log_prob[:-1]
+    with pytest.raises(ValueError,match='declared stochastic'):wrong.validate()
+    wrong=copy.deepcopy(row);wrong.metadata['sampler_trace']['probability_steps']=torch.arange(8)
+    with pytest.raises(ValueError,match='step indices'):wrong.validate()
+    wrong=copy.deepcopy(row);wrong.metadata['sampler_trace']['kernel_config']['deterministic_steps']=[0]
+    with pytest.raises(ValueError,match='step identity'):wrong.validate()

@@ -118,8 +118,22 @@ class UpperTransition:
             raise ValueError("invalid denoising chain shape")
         if self.chain.shape[0] not in (11,21):
             raise ValueError("Unsupported complete diffusion chain length")
-        if self.old_log_prob is None or self.old_log_prob.shape != (self.chain.shape[0]-2,):
-            raise ValueError("old_log_prob must match all stochastic transitions; final map has no density")
+        # 保存与重载必须依据真实采样核；末五步合同的最后一步也有高斯密度。
+        trace=self.metadata.get('sampler_trace',{})
+        kernel=trace.get('kernel_config',{})
+        total=self.chain.shape[0]-1
+        stochastic=kernel.get('stochastic_steps',list(range(total-1)))
+        if 'stochastic_steps' in kernel:
+            deterministic=kernel.get('deterministic_steps')
+            if (kernel.get('steps')!=total or deterministic not in ([],[total-1])
+                    or stochastic!=[s for s in range(total) if s not in deterministic]
+                    or kernel.get('final_step_noise')!=(not bool(deterministic))):
+                raise ValueError('Stored stochastic/deterministic step identity differs from complete chain')
+            if (not torch.is_tensor(trace.get('probability_steps'))
+                    or trace['probability_steps'].tolist()!=stochastic):
+                raise ValueError('Stored probability step indices differ from behavior kernel')
+        if self.old_log_prob is None or self.old_log_prob.shape != (len(stochastic),):
+            raise ValueError("old_log_prob must match all declared stochastic transitions")
         if self.old_log_prob.dtype != torch.float64:
             raise ValueError("old joint log probabilities must preserve FP64 precision")
         if self.free_mask is None or self.free_mask.dtype != torch.bool or self.free_mask.shape != (self.context["future_valid"].shape[1], 30):
