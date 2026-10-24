@@ -7,6 +7,7 @@
 冻结Stage1 Actor及其条件编码，只拟合Critic；复算整体/切分/大根误差/失败前/100秒后
 Value误差、EV和8秒GAE对完整MC优势一致性。只有困难状态与整体均改善才发布有效标志。
 保存独立新schema的权重和分析，不冒充Actor训练checkpoint或自动部署的预热成果。
+可只读加载已拟合权重，分别遮蔽参考几何与时序信息，检查改善来自哪里；不再优化或选epoch。
 """
 from __future__ import annotations
 import argparse
@@ -72,6 +73,7 @@ def main():
     p=argparse.ArgumentParser(description=__doc__);p.add_argument('--run',type=Path,required=True)
     p.add_argument('--checkpoint',type=Path,required=True);p.add_argument('--output-dir',type=Path,required=True)
     p.add_argument('--device',default='cuda:0');p.add_argument('--updates',type=int,default=384);p.add_argument('--batch',type=int,default=128)
+    p.add_argument('--fitted-source',type=Path,help='只读已有比较权重做消融，新增Critic更新为零')
     a=p.parse_args();a.output_dir.mkdir(parents=True,exist_ok=False);torch.set_num_threads(4)
     torch.manual_seed(20261024);np.random.seed(20261024);torch.backends.cuda.matmul.allow_tf32=False
     started=time.time();session=next(a.run.glob('sessions/*/resolved_config.yaml')).parent
@@ -114,13 +116,20 @@ def main():
         features.append(new.encode_frozen(ctx));remaining.extend(r.metadata['remaining_music_seconds'] for r in part)
     f={k:torch.cat([v[k] for v in features]) for k in features[0]};remaining=torch.tensor(remaining,device=a.device)
     target=torch.tensor(y,device=a.device,dtype=torch.float32)
-    def predict(model,zero_future=False):
+    def predict(model,zero_future=False,ablation=None):
         result=[];model.eval()
         with torch.no_grad():
             for start in range(0,len(rows),a.batch):
                 ff={k:v[start:start+a.batch] for k,v in f.items()}
                 if zero_future:
                     ff={k:(torch.zeros_like(v) if k.startswith('committed_') else v) for k,v in ff.items()}
+                if ablation:
+                    ff['committed_reference']=ff['committed_reference'].clone()
+                    if ablation=='geometry':ff['committed_reference'][...,:36]=0.
+                    elif ablation=='timing':
+                        ff['committed_reference'][...,36:]=0.
+                        for key in ('committed_metadata','committed_metadata_valid'):ff[key]=torch.zeros_like(ff[key])
+                    else:raise ValueError('Unknown future cache ablation')
                 result.extend(model.forward_encoded(ff,remaining[start:start+a.batch]).cpu().tolist())
         return np.asarray(result)
     initial=predict(old);np.testing.assert_array_equal(initial,predict(new))
@@ -142,11 +151,23 @@ def main():
         train_states=int(train.sum()),test_states=int(test.sum()),train_seed=42,test_seed=1729,
         complete_tasks=len(episodes),excluded=excluded,updates=a.updates,batch=a.batch,hard_sampling_fraction=.5,
         initial=evaluate(initial,y,episodes,groups,gamma,lam),models={},training_updates_actor=0)
+    report_out['new_critic_updates_per_model']=0 if a.fitted_source else a.updates
+    if a.fitted_source:
+        prior=json.loads((a.fitted_source/'summary.json').read_text())
+        for key in ('actor_fingerprint','source_reports_sha256','updates','train_seed','test_seed'):
+            if prior[key]!=report_out[key]:raise ValueError('Fitted source behavior/data/schedule differs: '+key)
+        report_out['fitted_source']=str(a.fitted_source)
     for name,model in (('old_refit',old),('future_refit',new)):
+        if a.fitted_source:
+            fitted=torch.load(a.fitted_source/(name+'.pt'),map_location='cpu',weights_only=False)
+            if (fitted['schema']!='genmo.stage2.future_committed_critic_mc_comparison.v1'
+                    or fitted['context_schema']!=model.context_schema or fitted['actor_fingerprint']!=fingerprint):
+                raise ValueError('Wrong fixed fitted Critic identity')
+            model.load_state_dict(fitted['critic'],strict=True)
         history_ids={id(v) for v in model.history_encoder.parameters()}
         optimizer=torch.optim.AdamW([dict(params=list(model.history_encoder.parameters()),lr=cc['history_learning_rate']),
             dict(params=[v for v in model.parameters() if v.requires_grad and id(v) not in history_ids],lr=cc['learning_rate'])],weight_decay=0.)
-        for step,indices in enumerate(schedule):
+        for step,indices in enumerate([] if a.fitted_source else schedule):
             model.train();optimizer.zero_grad(set_to_none=True)
             value=model.forward_encoded({k:v[indices] for k,v in f.items()},remaining[indices]);loss=(value-target[indices]).square().mean()
             if not torch.isfinite(loss):raise FloatingPointError('Nonfinite MC regression')
@@ -154,10 +175,17 @@ def main():
             if step%64==0:print(name,step,float(loss),flush=True)
         pred=predict(model);report_out['models'][name]=evaluate(pred,y,episodes,groups,gamma,lam)
         np.savez(a.output_dir/(name+'_predictions.npz'),prediction=pred,target=y,train=train,test=test)
-        torch.save(dict(schema='genmo.stage2.future_committed_critic_mc_comparison.v1',context_schema=model.context_schema,
-            critic={k:v.detach().cpu() for k,v in model.state_dict().items()},optimizer=optimizer.state_dict(),
-            actor_fingerprint=fingerprint,updates=a.updates,not_full_training_checkpoint=True),a.output_dir/(name+'.pt'))
+        if not a.fitted_source:
+            torch.save(dict(schema='genmo.stage2.future_committed_critic_mc_comparison.v1',context_schema=model.context_schema,
+                critic={k:v.detach().cpu() for k,v in model.state_dict().items()},optimizer=optimizer.state_dict(),
+                actor_fingerprint=fingerprint,updates=a.updates,not_full_training_checkpoint=True),a.output_dir/(name+'.pt'))
     report_out['models']['future_without_cache']=evaluate(predict(new,True),y,episodes,groups,gamma,lam)
+    for ablation in ('geometry','timing'):
+        report_out['models']['future_without_'+ablation]=evaluate(predict(new,ablation=ablation),y,episodes,groups,gamma,lam)
+    if a.fitted_source:
+        for name in ('old_refit','future_refit','future_without_cache'):
+            for group in groups:
+                np.testing.assert_allclose(report_out['models'][name][group]['rmse'],prior['models'][name][group]['rmse'],atol=1e-6,rtol=0)
     hard_groups=[k for k,ids in groups.items() if k!='all' and len(ids)]
     report_out['quality_gate_passed']=bool(hard_groups and all(
         report_out['models']['future_refit'][k]['rmse']<report_out['models']['old_refit'][k]['rmse'] for k in hard_groups)
