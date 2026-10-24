@@ -82,6 +82,8 @@ class Stage2Trainer:
     def update(self, initial_states, supervised_batch, actual_latencies, *, physical_intervals):
         from .execution_audit import state_probe
         from .validation import UnsupportedModelState
+        from .forecast import forecast_rollout
+        from .contracts import ForecastContext
         started = time.perf_counter()
         if not initial_states or len(initial_states) != len(actual_latencies):
             raise ValueError("真实快照与外生延迟批次必须非空且对齐")
@@ -98,13 +100,15 @@ class Stage2Trainer:
         returns = []
         graph_rollouts, accepted_commits, valid_rollouts = 0, 0, 0
         execution_norms, rejected = [], []
+        comparison = None
         for z, latencies in zip(initial_states, actual_latencies):
             noises = [torch.randn(len(z.state), 60, 30, device=z.state.device)
                       for _ in range(self.imagination.decisions)]
             noises[0].requires_grad_(not warming)
             with torch.set_grad_enabled(not warming), frozen_parameters(self.critic):
+                plans = []
                 try:
-                    intervals = self.imagination.rollout(z, noises, latencies)
+                    intervals = self.imagination.rollout(z, noises, latencies, on_plan=plans.append)
                 except UnsupportedModelState as error:
                     rejected.append(str(error))
                     continue
@@ -132,12 +136,15 @@ class Stage2Trainer:
                     with torch.profiler.record_function("mb/actor_bptt_backward"):
                         (-objective / len(initial_states)).backward()
                     valid_rollouts += 1
+                    if comparison is None:
+                        comparison = (z.detached(), plans[0].ticket, noises[0].detach(), plans[0].world_qpos.detach())
         bc_value, actor_norm = 0., 0.
         model_norm = gradient_norm(self.actor.parameters())
         if not torch.isfinite(torch.tensor(model_norm)):
             raise FloatingPointError("模型执行目标梯度包含NaN/Inf")
         accepted = not warming and valid_rollouts > 0 and model_norm > 0
         parameter_delta = 0.
+        reference_change = None
         if accepted:
             before = [p.detach().clone() for p in self.actor.parameters()]
             output = self.actor.original_supervision(supervised_batch)
@@ -155,6 +162,13 @@ class Stage2Trainer:
                 raise FloatingPointError("Actor优化没有产生有限非零参数变化")
             self.accepted_actor_updates += 1
             self.actor_optimizer.zero_grad(set_to_none=True)
+            if comparison is not None:
+                with torch.no_grad():
+                    z0, ticket0, noise0, pose0 = comparison
+                    context0 = (forecast_rollout(z0, self.imagination.adapter, ticket0.first_influence_tick).context
+                                if self.imagination.forecast_enabled else ForecastContext.invalid(z0.state, z0.tick))
+                    after = self.actor.generate(z0, ticket0, context0, noise0).world_qpos
+                    reference_change = float((after[:, ticket0.prefix_frames:, 7:] - pose0[:, ticket0.prefix_frames:, 7:]).square().mean().sqrt())
         elif not warming:
             self.invalid_actor_attempts += 1
             self.actor_optimizer.zero_grad(set_to_none=True)
@@ -168,6 +182,7 @@ class Stage2Trainer:
                 "bc_only_update": False, "model_gradient_norm_before_bc": model_norm,
                 "execution_state_noise_gradient_norms": execution_norms, "valid_execution_rollouts": valid_rollouts,
                 "actor_parameter_delta_l2": parameter_delta, "rejection_reasons": rejected,
+                "fixed_noise_reference_joint_change_rms_rad": reference_change,
                 "frozen_parameters_and_buffers_unchanged": True,
                 "physical_reward_dt_sum": sum(float(x.reward.mean()) for x in physical_intervals),
                 "original_stage1_loss": bc_value, "critic_mse": critic_loss,

@@ -9,6 +9,7 @@ episode开始。资源预算、质量退化、数值错误均留证据退出，�
 
 import json
 import os
+import random
 from pathlib import Path
 import signal
 import subprocess
@@ -119,6 +120,8 @@ def run_formal(args, cfg, output, trainer, collector, profile, tasks, report, so
 
     def snapshot(tag=None):
         path = checkpoint_dir / (tag or f"actor_{trainer.accepted_actor_updates:06d}.pt")
+        if path.exists():
+            path = path.with_stem(path.stem + f"_state_{time.time_ns()}")
         save_checkpoint(path, trainer, replay, behavior_config=behavior,
             runtime_state={"supervision": supervised.state_dict(), "latency_rng": profile.rng.getstate(),
                 "task_cursor": task_cursor, "physical_control_steps": control_steps,
@@ -127,6 +130,24 @@ def run_formal(args, cfg, output, trainer, collector, profile, tasks, report, so
                 "collector_restart": "new_episode_required_no_solver_snapshot"}, provenance=source_info)
         checkpoint_link(checkpoint_dir, "latest.pt", path)
         return path
+
+    def run_evaluation(n):
+        nonlocal best_score, degradation_count, last_evaluated
+        checkpoint = snapshot()
+        rng = capture_rng()
+        try:
+            quality = evaluate_checkpoint(cfg, output, checkpoint, update=n)
+        finally:
+            restore_rng(rng)
+        last_evaluated = n
+        degradation_count = degradation_count+1 if quality["degraded"] else 0
+        score = quality["physical_tracking_score"]
+        if not quality["degraded"] and (best_score is None or score > best_score):
+            best_score = score
+            checkpoint_link(checkpoint_dir, "best.pt", checkpoint)
+        snapshot()
+        if degradation_count >= settings["degradation"]["consecutive_evaluations"]:
+            raise RuntimeError("独立真实物理连续评价退化，按预设规则暂停")
 
     try:
         resume = args.resume or (str(checkpoint_dir/"latest.pt") if args.resume_latest else None)
@@ -139,12 +160,24 @@ def run_formal(args, cfg, output, trainer, collector, profile, tasks, report, so
             best_score, degradation_count, last_evaluated = state["best_score"], state["degradation_count"], state["last_evaluated"]
         if not trainer.critic_ready:
             validation = read_tasks(settings["critic_validation_tasks"])
-            chosen = tasks[:settings["critic_warmup"]["train_episodes"]]
+            groups = {}
+            for task in tasks:
+                groups.setdefault(task["source"], []).append(task)
+            randomizer = random.Random(settings["critic_warmup"]["seed"])
+            for values in groups.values():
+                randomizer.shuffle(values)
+            chosen = []
+            while len(chosen) < settings["critic_warmup"]["train_episodes"] and any(groups.values()):
+                for source in sorted(groups):
+                    if groups[source] and len(chosen) < settings["critic_warmup"]["train_episodes"]:
+                        chosen.append(groups[source].pop())
             quality = warmup_critic(trainer, collector, chosen, validation, settings["critic_warmup"],
                                     output/"diagnostics"/f"critic_warmup_{time.time_ns()}", device=args.torch_device)
             control_steps += quality["physical_control_steps"]
             snapshot("critic_ready.pt")
         trainer.imagination.support_guard = ModelSupport(report["validated_state_envelope"], device=args.torch_device)
+        if trainer.accepted_actor_updates > last_evaluated and trainer.accepted_actor_updates % settings["evaluate_every"] == 0:
+            run_evaluation(trainer.accepted_actor_updates)
         invalid_streak = 0
         while trainer.accepted_actor_updates < args.max_actor_updates:
             elapsed = total_wall_seconds + time.perf_counter()-started
@@ -194,21 +227,7 @@ def run_formal(args, cfg, output, trainer, collector, profile, tasks, report, so
             if accepted and (n == 1 or n % settings["checkpoint_every"] == 0):
                 checkpoint = snapshot()
             if accepted and n % settings["evaluate_every"] == 0 and n > last_evaluated:
-                checkpoint = snapshot()
-                rng = capture_rng()
-                try:
-                    quality = evaluate_checkpoint(cfg, output, checkpoint, update=n)
-                finally:
-                    restore_rng(rng)
-                last_evaluated = n
-                degradation_count = degradation_count+1 if quality["degraded"] else 0
-                score = quality["physical_tracking_score"]
-                if not quality["degraded"] and (best_score is None or score > best_score):
-                    best_score = score
-                    checkpoint_link(checkpoint_dir, "best.pt", checkpoint)
-                snapshot()
-                if degradation_count >= settings["degradation"]["consecutive_evaluations"]:
-                    raise RuntimeError("独立真实物理连续评价退化，按预设规则暂停")
+                run_evaluation(n)
         snapshot()
         write_json(output/"status.json", {"status": "target_reached", "accepted_actor_updates": trainer.accepted_actor_updates})
     except BaseException as error:

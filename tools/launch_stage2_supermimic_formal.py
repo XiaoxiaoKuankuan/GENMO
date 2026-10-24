@@ -107,6 +107,10 @@ def main():
         return profile.get("forecast_enabled") is True and len(profile.get("latency_ticks", [])) >= 20 and profile["frozen_sha256"] == digest(cfg["supermimic"]["checkpoint"])
     check("measured_full_path_latency", latency)
     if args.resume_run:
+        status_path = output/"status.json"
+        if status_path.exists():
+            status = json.loads(status_path.read_text())
+            check("not_restarting_recorded_quality_or_numeric_failure", lambda: status.get("status") != "failed")
         check("complete_latest_exists", lambda: (output/"checkpoints/latest.pt").is_file())
         stale = output/"training.lock"
         if stale.exists():
