@@ -10,6 +10,7 @@ import torch
 
 from supermimic.bridge.runtime import SuperMimicRuntime
 from supermimic.mdp import unflatten_state
+from gem.closedloop.contracts import GMT_EXPECTED_JOINT_ORDER
 
 
 class SMAdapter:
@@ -22,12 +23,15 @@ class SMAdapter:
             raise ValueError("GENMO与SM关节名称不是一一对应")
         self.to_sm = tuple(native.index(name) for name in policy)
         self.to_genmo = tuple(policy.index(name) for name in native)
+        # 这是已训练Stage1的历史字段顺序，不是引入旧控制后端。
+        self.to_history = tuple(policy.index(name) for name in GMT_EXPECTED_JOINT_ORDER)
 
-    def proprio(self, state):
+    def proprio(self, state, xi):
         _, R, _, w, q, qd = unflatten_state(state)
-        # 与原proprio48一致：gravity、body angular velocity、原生q、qd。
+        # 与原proprio48一致：gravity、body angular velocity、相对active default的q、qd。
+        relative_q = q - self.runtime.mdp.default_q - xi[..., 1:22]
         return torch.cat((-R[..., 2, :], (R.transpose(-1, -2) @ w.unsqueeze(-1)).squeeze(-1),
-                          q[..., self.to_genmo], qd[..., self.to_genmo]), -1)
+                          relative_q[..., self.to_history], qd[..., self.to_history]), -1)
 
     def refresh_current_observation(self, z):
         current, _, _ = z.reference.read_current_future(z.tick)
@@ -40,6 +44,6 @@ class SMAdapter:
         obs = self.runtime.observation(state, action, z.xi, current)
         return replace(z, tick=tick, state=state, previous_action=action,
                        sm_history=torch.cat((z.sm_history[:, 1:], obs[:, None]), 1),
-                       genmo_history=torch.cat((z.genmo_history[:, 1:], self.proprio(state)[:, None]), 1),
+                       genmo_history=torch.cat((z.genmo_history[:, 1:], self.proprio(state, z.xi)[:, None]), 1),
                        genmo_valid=torch.cat((z.genmo_valid[:, 1:], torch.ones_like(z.genmo_valid[:, :1])), 1),
                        reference=z.reference.trim(tick), history_origin=origin)
