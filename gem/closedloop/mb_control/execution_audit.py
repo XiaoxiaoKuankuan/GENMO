@@ -29,7 +29,15 @@ def audit_execution_paths(actor, critic, engine, initial, noises, latencies, *,
             if len(plans) < 3 or len(intervals) < 3:
                 raise AssertionError("梯度验收需要实际完成三次生成和决策")
             first = plans[0].world_qpos
-            executed = [t for t in transitions if t[0].reference.version > initial.reference.version]
+            first_version = initial.reference.version + 1
+            def consumes_first_reference(transition):
+                snapshot = transition[0]
+                support = snapshot.reference.dependency_support(snapshot.tick)
+                indices = ((support - snapshot.reference.lower) // 20).long()
+                return bool((snapshot.reference.source_versions[indices] == first_version).any())
+            # 提交只更新缓存；安全裕量内控制仍然读取旧点，此时梯度为0是正确行为。
+            # 用真正进入本步目标/速度halo的第一份参考版本选择执行梯度探针。
+            executed = [t for t in transitions if consumes_first_reference(t)]
             if not executed:
                 raise AssertionError("没有合法接管后的执行步骤")
             z, action, state1, reference = executed[0]
@@ -45,6 +53,15 @@ def audit_execution_paths(actor, critic, engine, initial, noises, latencies, *,
             direct, _ = engine.rewards(direct_state.detach(), direct_action.detach(), direct_z.previous_action.detach(), direct_ref)
             inspect("reference_direct_reward", direct.mean(), first)
             inspect("reference_to_sm_action", action.square().mean(), first)
+            pre_influence = [t for t in transitions if t[0].tick < z.tick]
+            before_norm = 0.
+            if pre_influence:
+                before_action = pre_influence[-1][1].square().mean()
+                before_gradient = (torch.autograd.grad(before_action, first, retain_graph=True, allow_unused=True)[0]
+                                   if before_action.requires_grad else None)
+                before_norm = float(before_gradient.norm()) if before_gradient is not None else 0.
+            paths["unconsumed_reference_has_no_control_gradient"] = {"norm": before_norm,
+                "passed": before_norm == 0., "first_consumption_tick": z.tick}
             inspect("sm_action_to_wm_state", state_probe(state1), action)
             inspect("first_reference_to_second_decision", state_probe(intervals[1].end.state), first)
             inspect("first_reference_to_third_decision", state_probe(intervals[2].end.state), first)
