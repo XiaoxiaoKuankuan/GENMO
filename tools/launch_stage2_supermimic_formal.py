@@ -109,6 +109,11 @@ def main():
     check("complete_physical_baseline", baseline)
     def world_model():
         report = json.loads(Path(cfg["imagination"]["physical_validation_report"]).read_text())
+        if cfg["imagination"].get("mode") == "physical_anchor_short_bptt":
+            sys.path.insert(0, str(repo))
+            from gem.closedloop.mb_control.validation import select_short_horizon
+            select_short_horizon(cfg, report)
+            return report["frozen_sha256"] == digest(cfg["supermimic"]["checkpoint"]) and bool(report.get("validated_state_envelope"))
         needed = cfg["imagination"]["validated_model_steps"]
         return (all(report.get(k) is True for k in ("prediction_passed","physical_direction_passed","known_reference_passed","reset_replay_repeatability_passed")) and
                 isinstance(needed,int) and 0 < needed <= report["supported_control_steps"] and
@@ -138,6 +143,7 @@ def main():
         (output/f"preflight_blocked_{timestamp}.json").write_text(json.dumps(evidence,ensure_ascii=False,indent=2))
         print(json.dumps({"status":"blocked_before_training","output":str(output),"failed_checks":failures},ensure_ascii=False))
         return 2
+    OmegaConf.save(OmegaConf.create(cfg), output/"config.yaml")
     command = [sys.executable,"-u","tools/train_stage2_supermimic.py","--config",str(output/"config.yaml"),
                "--run-mode","formal","--mode","full","--max-actor-updates",str(args.max_actor_updates),"--output",str(output)]
     if args.resume_run:

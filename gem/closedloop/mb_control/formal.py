@@ -101,6 +101,10 @@ def evaluate_checkpoint(cfg, output, checkpoint, *, update):
 def run_formal(args, cfg, output, trainer, collector, profile, tasks, report, source_info):
     from torch.utils.tensorboard import SummaryWriter
     settings = cfg["formal"]
+    short = cfg["imagination"].get("mode") == "physical_anchor_short_bptt"
+    if short:
+        collector.anchor_horizon = trainer.imagination.horizon_steps
+        collector.record_controls = True
     for name in ("logs", "checkpoints", "evaluations", "diagnostics", "tensorboard"):
         (output/name).mkdir(exist_ok=True)
     lock = output / "training.lock"
@@ -176,7 +180,7 @@ def run_formal(args, cfg, output, trainer, collector, profile, tasks, report, so
             control_steps += quality["physical_control_steps"]
             snapshot("critic_ready.pt")
         trainer.imagination.support_guard = ModelSupport(report["validated_state_envelope"], device=args.torch_device)
-        if trainer.accepted_actor_updates > last_evaluated and trainer.accepted_actor_updates % settings["evaluate_every"] == 0:
+        if trainer.accepted_actor_updates > last_evaluated and (trainer.accepted_actor_updates == 1 or trainer.accepted_actor_updates % settings["evaluate_every"] == 0):
             run_evaluation(trainer.accepted_actor_updates)
         invalid_streak = 0
         while trainer.accepted_actor_updates < args.max_actor_updates:
@@ -191,17 +195,28 @@ def run_formal(args, cfg, output, trainer, collector, profile, tasks, report, so
                 task_cursor += 1
                 music, initial = task_inputs(task, collector.adapter, args.torch_device)
                 collector.reset(music, initial)
+            collector.actor_version = trainer.accepted_actor_updates
             collect_started = time.perf_counter()
             physical = collector.collect(cfg["training"]["collect_decisions"], replay=replay)
             control_steps += sum(x.steps for x in physical)
             collect_seconds = time.perf_counter()-collect_started
             if collector.worker.future is not None:
                 raise RuntimeError("采集Actor仍在生成，禁止并发修改其权重")
-            states = replay.sample(cfg["training"]["actor_microbatch"])
-            latencies = [profile.sample(trainer.imagination.decisions) for _ in states]
+            if short:
+                physical = collector.take_controls()
+                if replay.eligible_count(trainer.accepted_actor_updates) == 0:
+                    # 正在积累H个真实执行步，不把尚未完成的anchor计作训练失败或收益。
+                    print(json.dumps({"event": "waiting_for_real_anchor", "physical_control_steps": control_steps,
+                                      "actor_version": trainer.accepted_actor_updates}), flush=True)
+                    continue
+                states = replay.sample(cfg["training"]["actor_microbatch"], actor_version=trainer.accepted_actor_updates)
+            else:
+                states = replay.sample(cfg["training"]["actor_microbatch"])
+                latencies = [profile.sample(trainer.imagination.decisions) for _ in states]
             gpu_start, gpu_end = torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True)
             gpu_start.record()
-            row = trainer.update(states, supervised.next(), latencies, physical_intervals=physical)
+            row = (trainer.update_anchors(states, supervised.next(), physical_intervals=physical) if short else
+                   trainer.update(states, supervised.next(), latencies, physical_intervals=physical))
             gpu_end.record()
             gpu_end.synchronize()
             row.update(physical_control_steps=control_steps, collection_wall_seconds=collect_seconds,
@@ -226,7 +241,7 @@ def run_formal(args, cfg, output, trainer, collector, profile, tasks, report, so
             n = trainer.accepted_actor_updates
             if accepted and (n == 1 or n % settings["checkpoint_every"] == 0):
                 checkpoint = snapshot()
-            if accepted and n % settings["evaluate_every"] == 0 and n > last_evaluated:
+            if accepted and (n == 1 or n % settings["evaluate_every"] == 0) and n > last_evaluated:
                 run_evaluation(n)
         snapshot()
         write_json(output/"status.json", {"status": "target_reached", "accepted_actor_updates": trainer.accepted_actor_updates})

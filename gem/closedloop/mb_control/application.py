@@ -22,7 +22,7 @@ from .actor import ForecastActor
 from .sm_adapter import SMAdapter
 from .scheduler import Scheduler
 from .critic import PlanAwareCritic
-from .imagination import Imagination
+from .imagination import Imagination, PhysicalAnchorImagination
 from .rewards import TrackingRewards
 
 
@@ -79,6 +79,10 @@ def build_components(cfg, device):
     imagination = Imagination(actor, adapter, scheduler, rewards, decisions=cfg["imagination"]["decision_intervals"],
                               gamma=cfg["critic"]["gamma_per_control"], forecast_enabled=cfg["model"]["forecast_enabled"],
                               max_model_steps=cfg["imagination"]["validated_model_steps"])
+    if cfg["imagination"].get("mode") == "physical_anchor_short_bptt":
+        imagination = PhysicalAnchorImagination(actor, adapter, scheduler, rewards,
+            horizon_steps=cfg["imagination"]["horizon_steps"], gamma=cfg["critic"]["gamma_per_control"],
+            forecast_enabled=cfg["model"]["forecast_enabled"])
     return actor, adapter, scheduler, rewards, critic, imagination, original
 
 

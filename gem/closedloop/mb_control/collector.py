@@ -8,12 +8,14 @@
 
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
+from collections import deque
 import math
 import time
 
 import torch
 
-from .contracts import ClosedLoopState, ForecastContext, ReferenceExhausted
+from .contracts import (ClosedLoopState, ForecastContext, ReferenceExhausted, PendingGeneration,
+                        GenerationRecord, PhysicalAnchor)
 from .forecast import forecast_rollout
 from .reference_buffer import ReferenceBuffer
 from .returns import DecisionInterval, IntervalAccumulator
@@ -47,7 +49,7 @@ class GenerationWorker:
                     return plan, finished, {"queue_seconds": begin - self.started,
                                             "forecast_seconds": forecast_end - begin,
                                             "generation_decode_seconds": finished - forecast_end,
-                                            "total_seconds": finished - self.started}
+                                            "total_seconds": finished - self.started}, context
             if producer_stream is None:
                 return run()
             stream = torch.cuda.Stream(device=snapshot.state.device)
@@ -82,6 +84,15 @@ class PhysicalCollector:
         self.events, self.trajectory, self.metrics = [], [], []
         self.cancelled_requests = []
         self.overruns, self.wall_started = 0, None
+        self.actor_version = 0
+        self.anchor_horizon = 0
+        self.record_controls = False
+        self.record_contacts = False
+        self.controls = []
+        self.generations = {}
+        self.consumed_versions = set()
+        self.active_anchors = {}
+        self.ready_anchors = deque(maxlen=128)
 
     @torch.no_grad()
     def reset(self, music, initial_state, *, music_start_tick=0, initial_reference=None):
@@ -110,6 +121,9 @@ class PhysicalCollector:
         self.events, self.trajectory, self.metrics = [], [], []
         self.cancelled_requests = []
         self.overruns = 0
+        self.controls = []
+        self.generations, self.consumed_versions, self.active_anchors = {}, set(), {}
+        self.ready_anchors.clear()
         self.wall_started = time.perf_counter()
         return self.state.detached()
 
@@ -123,7 +137,7 @@ class PhysicalCollector:
             z.validate(decision=True)
             request_wall = time.perf_counter()
             start = z.detached()
-            if replay is not None:
+            if replay is not None and not self.anchor_horizon:
                 replay.add(start)
             try:
                 ticket = self.scheduler.reserve(z)
@@ -135,7 +149,8 @@ class PhysicalCollector:
                 break
             noise = torch.randn(len(z.state), 60, 30, device=z.state.device)
             self.worker.submit(start, ticket, noise, request_wall=request_wall)
-            z = replace(z, pending=True)
+            request = PendingGeneration(start, ticket, noise.detach().clone(), self.actor_version)
+            z = replace(z, pending=True, pending_request=request)
             totals = IntervalAccumulator(z.state[:, 0], self.gamma)
             reason, event = "decision_boundary", {}
             next_boundary = None
@@ -147,12 +162,16 @@ class PhysicalCollector:
                         break
                     arrival = self.worker.poll() if z.pending else None
                     if arrival is not None:
-                        plan, finished, timings = arrival
+                        plan, finished, timings, context = arrival
                         actual_ready = ticket.request_tick + math.ceil((finished - self.worker.started) * 600)
                         if z.tick >= actual_ready:
                             z, event = self.scheduler.commit(z, plan, actual_ready_tick=actual_ready)
                             event["timings"] = timings
+                            event["actor_version"] = self.actor_version
+                            event["reference_version"] = z.reference.version if event["accepted"] else None
                             self.events.append(event)
+                            self.generations[ticket.decision_id] = GenerationRecord(request, context, plan,
+                                actual_ready, event["commit_tick"], event["reference_version"], event["accepted"])
                             self.worker.clear()
                             next_boundary = self.scheduler.next_request_tick(ticket, z.tick)
                             if event["terminal_timeout"]:
@@ -161,6 +180,9 @@ class PhysicalCollector:
                     if not z.pending and z.tick >= next_boundary:
                         break
                     z = self.adapter.refresh_current_observation(z)
+                    before_control = z.detached() if self.record_controls or self.anchor_horizon else None
+                    if self.anchor_horizon:
+                        self._find_first_consumption(before_control)
                     _, _, goal = z.reference.read_current_future(z.tick)
                     with torch.profiler.record_function("mb/physical_sm_actor"):
                         action = self.adapter.bundle.act(z.sm_history, goal)
@@ -172,6 +194,15 @@ class PhysicalCollector:
                     failed = bool(self.adapter.runtime.termination(state1, ref1).any())
                     totals.add(reward, torch.zeros_like(reward) if failed else torch.ones_like(reward))
                     z = self.adapter.advance(z, state1, action, origin="real")
+                    if before_control is not None:
+                        end = z.detached()
+                        control_event = {"contacts": self.env.contact_events()} if self.record_contacts else {}
+                        step = DecisionInterval(before_control, end, reward.detach().clone(),
+                            torch.zeros_like(reward) if failed else torch.ones_like(reward), 1, self.gamma,
+                            failed or z.tick >= z.music_end_tick, "physical_failure" if failed else "control_step", control_event)
+                        self.controls.append(step)
+                        if self.anchor_horizon:
+                            self._append_anchor_step(step, replay)
                     self.metrics.append({k: float(v.mean()) for k, v in metrics.items()})
                     if self.record_trajectory:
                         self.trajectory.append((z.tick, state1.cpu(), ref1.root_p.cpu(), action.cpu()))
@@ -188,18 +219,61 @@ class PhysicalCollector:
                 self.terminal, reason = True, f"reference_exhausted:{error}"
             if self.terminal and self.worker.future is not None:
                 # episode已经停止后收束worker，确保优化器不会与生成并发改权重。
-                _, finished, timings = self.worker.future.result()
+                _, finished, timings, _ = self.worker.future.result()
                 self.cancelled_requests.append({"request_tick": ticket.request_tick, "terminal_tick": z.tick,
                     "actual_ready_tick": ticket.request_tick + math.ceil((finished - self.worker.started) * 600),
                     "reason": reason, "timings": timings, "consumed_by_scheduler": False})
                 self.worker.clear()
-            z = replace(z, pending=False, decision_id=z.decision_id + 1)
+            z = replace(z, pending=False, pending_request=None, decision_id=z.decision_id + 1)
+            if self.terminal and self.controls:
+                self.controls[-1] = replace(self.controls[-1], terminal=True, reason=reason)
             self.state = z
             intervals.append(DecisionInterval(start, z.detached(), totals.reward, totals.survival, totals.steps,
                                               self.gamma, self.terminal, reason, event))
             if self.terminal:
                 break
         return intervals
+
+    def take_controls(self):
+        controls, self.controls = self.controls, []
+        return controls
+
+    def _find_first_consumption(self, z):
+        support = z.reference.dependency_support(z.tick)
+        indices = (support-z.reference.lower)//20
+        versions = set(z.reference.source_versions[indices].tolist())
+        by_version = {g.reference_version: g for g in self.generations.values() if g.accepted}
+        for version in versions - self.consumed_versions:
+            if version in by_version:
+                record = by_version[version]
+                source_ticks = support[z.reference.source_versions[indices] == version].tolist()
+                self.active_anchors[version] = [record, z, [], set(source_ticks), tuple(sorted(self.consumed_versions))]
+                for event in self.events:
+                    if event.get("reference_version") == version:
+                        event["observed_first_control_tick"] = z.tick
+                        event["no_previous_consumption_verified"] = True
+        self.consumed_versions.update(versions)
+
+    def _append_anchor_step(self, step, replay):
+        finished = []
+        for version, values in self.active_anchors.items():
+            record, anchor, transitions, consumed, prior = values
+            transitions.append(step)
+            ref = step.start.reference
+            support = ref.dependency_support(step.start.tick)
+            indices = (support-ref.lower)//20
+            consumed.update(support[ref.source_versions[indices] == version].tolist())
+            if len(transitions) == self.anchor_horizon:
+                sample = PhysicalAnchor(record, anchor, tuple(transitions), tuple(sorted(consumed)), prior)
+                sample.validate(self.anchor_horizon)
+                self.ready_anchors.append(sample)
+                if replay is not None:
+                    replay.add(sample)
+                finished.append(version)
+            elif step.terminal:
+                finished.append(version)
+        for version in finished:
+            del self.active_anchors[version]
 
     def close(self):
         self.worker.close()

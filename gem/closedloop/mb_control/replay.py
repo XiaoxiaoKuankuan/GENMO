@@ -16,15 +16,26 @@ class RecentReplay:
         self.random = random.Random(seed)
 
     def add(self, state):
+        from .contracts import PhysicalAnchor
+        if isinstance(state, PhysicalAnchor):
+            state.validate(len(state.transitions))
+            self.items.append(state)
+            return
         state.validate(decision=True)
         if state.history_origin != "real":
             raise ValueError("真实状态回放不接收WM预测历史")
         self.items.append(state.detached())
 
-    def sample(self, count=1):
-        if not self.items:
+    def sample(self, count=1, *, actor_version=None):
+        eligible = list(self.items) if actor_version is None else [x for x in self.items
+            if getattr(x, "generation", None) is not None and x.generation.request.actor_version == actor_version]
+        if not eligible:
             raise ValueError("必须先真实采集")
-        return [self.items[self.random.randrange(len(self.items))] for _ in range(count)]
+        return [eligible[self.random.randrange(len(eligible))] for _ in range(count)]
+
+    def eligible_count(self, actor_version):
+        return sum(getattr(x, "generation", None) is not None and
+                   x.generation.request.actor_version == actor_version for x in self.items)
 
     def state_dict(self):
         return {"capacity": self.items.maxlen, "rng": self.random.getstate(), "items": list(self.items)}

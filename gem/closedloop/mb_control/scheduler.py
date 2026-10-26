@@ -70,7 +70,7 @@ class Scheduler:
                  "first_center_consumed_tick": cache.first_center_consumed(state.tick, ticket.first_mutable_source_tick) if accepted else None,
                  "terminal_timeout": timeouts >= self.max_consecutive_timeouts,
                  "accepted": accepted, "reason": "committed" if accepted else "late_protected_support"}
-        return replace(state, reference=cache, pending=False, latency_history=history,
+        return replace(state, reference=cache, pending=False, pending_request=None, latency_history=history,
                        protected_until=protection, consecutive_timeouts=timeouts), event
 
     def next_request_tick(self, ticket, current_tick):

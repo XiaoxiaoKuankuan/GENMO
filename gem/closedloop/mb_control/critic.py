@@ -2,7 +2,8 @@
 
 每类输入形成独立投影token，256宽两层四头Transformer和Value Token输出标量。
 缓存包含仍可能被读取的全部源点、halo、contact、相对时间与来源版本；音乐和剩余
-时间、延迟历史共同进入状态。只定义在无pending请求边界，不加载旧价值或no-grad编码。
+时间、延迟历史共同进入状态。支持任意合法50Hz时刻；在途请求额外编码原请求完整状态与噪声。未知完成时间不入网，
+不加载旧价值或no-grad编码。
 """
 
 import torch
@@ -18,15 +19,17 @@ class PlanAwareCritic(nn.Module):
         self.history_proj = nn.Linear(50, width)
         self.reference_proj = nn.Linear(33, width)
         self.music_proj = nn.Linear(37, width)
-        self.schedule_proj = nn.Linear(40, width)
+        self.schedule_proj = nn.Linear(50, width)
+        self.noise_proj = nn.Linear(30, width)
+        self.pending_type = nn.Parameter(torch.zeros(1, 1, width))
         self.value_token = nn.Parameter(torch.zeros(1, 1, width))
         self.types = nn.Parameter(torch.zeros(7, width))
         layer = nn.TransformerEncoderLayer(width, heads, width * 4, dropout=0., batch_first=True, norm_first=True)
         self.encoder = nn.TransformerEncoder(layer, layers, enable_nested_tensor=False)
         self.head = nn.Sequential(nn.LayerNorm(width), nn.Linear(width, width), nn.SiLU(), nn.Linear(width, 1))
 
-    def forward(self, z):
-        z.validate(decision=True)
+    def tokens(self, z):
+        z.validate()
         b, dev = len(z.state), z.state.device
         ones = lambda n: torch.ones(b, n, dtype=torch.bool, device=dev)
         current = self.state_proj(torch.cat((z.state, z.xi, z.previous_action), -1))[:, None]
@@ -52,11 +55,29 @@ class PlanAwareCritic(nn.Module):
                   (z.protected_until - z.tick) / 600, (cache.lower - z.tick) / 600,
                   (cache.upper - z.tick) / 600, z.consecutive_timeouts, z.decision_id,
                   self.scheduler.estimated_latency(z) / 600]
-        timing = z.state.new_tensor(scalar + [0.] * (16 - len(old)) + [x / 600 for x in old] +
+        pending = z.pending_request
+        if pending is None:
+            extra = [0., cache.version] + [0.]*8
+        else:
+            t = pending.ticket
+            extra = [1., cache.version, (z.tick-t.request_tick)/600, (t.predicted_ready_tick-z.tick)/600,
+                     (t.first_mutable_source_tick-z.tick)/600, (t.first_influence_tick-z.tick)/600,
+                     t.prefix_frames/60, t.base_version-cache.version, pending.actor_version, t.decision_id]
+        timing = z.state.new_tensor(scalar + extra + [0.] * (16 - len(old)) + [x / 600 for x in old] +
                                     [0.] * (16 - len(old)) + [1.] * len(old))
         schedule = self.schedule_proj(timing[None].expand(b, -1))[:, None]
         tokens = [self.value_token.expand(b, -1, -1), current, sm, hist, ref, music, schedule]
         mask = torch.cat((ones(1), ones(1), ones(10), z.genmo_valid, ones(ref.shape[1]),
                           valid_music[None].expand(b, -1), ones(1)), 1)
-        encoded = self.encoder(torch.cat([x + self.types[i] for i, x in enumerate(tokens)], 1), src_key_padding_mask=~mask)
+        return torch.cat([x + self.types[i] for i, x in enumerate(tokens)], 1), mask
+
+    def forward(self, z):
+        tokens, mask = self.tokens(z)
+        if z.pending_request is not None:
+            # 条件仍为请求当时的快照；没有当次实测延迟，也没有未来真实状态。
+            pending, visible = self.tokens(z.pending_request.snapshot)
+            noise = self.noise_proj(z.pending_request.noise)
+            tokens = torch.cat((tokens, pending+self.pending_type, noise+self.pending_type), 1)
+            mask = torch.cat((mask, visible, torch.ones(noise.shape[:2], device=mask.device, dtype=torch.bool)), 1)
+        encoded = self.encoder(tokens, src_key_padding_mask=~mask)
         return self.head(encoded[:, 0]).squeeze(-1)

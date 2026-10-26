@@ -18,6 +18,7 @@ from .returns import actor_return
 
 
 def collect_mc(collector, tasks, *, seed, device, max_control_steps):
+    collector.record_controls = True
     pairs, episodes, steps = [], [], 0
     for i, task in enumerate(tasks):
         seed_all(seed + i)
@@ -25,7 +26,8 @@ def collect_mc(collector, tasks, *, seed, device, max_control_steps):
         collector.reset(music, initial)
         intervals = []
         while not collector.terminal:
-            block = collector.collect(1)
+            collector.collect(1)
+            block = collector.take_controls()
             intervals.extend(block)
             steps += sum(x.steps for x in block)
             if steps > max_control_steps:
@@ -36,11 +38,16 @@ def collect_mc(collector, tasks, *, seed, device, max_control_steps):
         episode_pairs = []
         for x in reversed(intervals):
             value = x.reward + x.continuation * value
-            episode_pairs.append((x.start.detached(), value.detach().clone()))
+            # 以五种50Hz相位覆盖非请求网格和pending；H端点相位也自然落在分布中。
+            # 保存每五控制步，完整MC仍逐控制步递推，未采样时刻的奖励不会丢失。
+            if (x.start.tick//12) % 5 == i % 5:
+                episode_pairs.append((x.start.detached(), value.detach().clone()))
         pairs.extend(reversed(episode_pairs))
         episodes.append({"task": task["id"], "seed": seed+i, "reason": intervals[-1].reason,
                          "steps": sum(x.steps for x in intervals), "mc_return": float(value.mean()),
-                         "commits": sum(bool(x.event.get("accepted")) for x in intervals)})
+                         "commits": sum(bool(x.get("accepted")) for x in collector.events),
+                         "pending_value_samples": sum(z.pending for z, _ in episode_pairs),
+                         "non_request_grid_samples": sum(z.tick % 60 != 0 for z, _ in episode_pairs)})
     return pairs, episodes, steps
 
 
@@ -53,6 +60,8 @@ def value_quality(critic, pairs, training_mean):
     baseline = float((targets-training_mean).square().mean())
     variance = float(targets.var(unbiased=False))
     return {"mse": mse, "constant_baseline_mse": baseline,
+            "pending_samples": sum(z.pending for z, _ in pairs),
+            "non_request_grid_samples": sum(z.tick % 60 != 0 for z, _ in pairs),
             "relative_mse_improvement": 1-mse/baseline if baseline > 1e-12 else None,
             "explained_variance": 1-float((targets-predictions).var(unbiased=False))/variance if variance > 1e-12 else None,
             "target_variance": variance, "samples": len(targets)}
@@ -72,7 +81,8 @@ def warmup_critic(trainer, collector, train_tasks, validation_tasks, config, out
                "validation": [(pack_state(z), y.cpu()) for z,y in validation],
                "train_episodes": train_episodes, "validation_episodes": val_episodes, "criteria": config}
     torch.save(payload, output / "real_mc.pt")
-    if min(len(train), len(validation)) < config["minimum_samples_per_split"]:
+    if min(len(train), len(validation)) < config["minimum_samples_per_split"] or not all(
+            any(z.pending for z, _ in pairs) and any(z.tick % 60 for z, _ in pairs) for pairs in (train, validation)):
         raise RuntimeError("独立真实MC样本不足，Critic不能获准正式使用")
     mean = torch.cat([y for _, y in train]).mean()
     rng = random.Random(config["seed"])

@@ -6,7 +6,7 @@
 恢复后采集必须显式新episode，不把qpos/回放恢复宣传为物理精确续跑。
 """
 
-from dataclasses import fields
+from dataclasses import fields, is_dataclass
 import random
 
 import numpy as np
@@ -16,7 +16,7 @@ from supermimic.bridge.bundle import atomic_save
 from .contracts import ClosedLoopState
 from .reference_buffer import ReferenceBuffer
 
-SCHEMA = "genmo.supermimic.bptt.training.v2"
+SCHEMA = "genmo.supermimic.bptt.training.v3"
 
 
 def optimizer_layout(module, optimizer):
@@ -27,6 +27,7 @@ def optimizer_layout(module, optimizer):
 def pack_state(state):
     values = {f.name: getattr(state, f.name) for f in fields(state) if f.name != "reference"}
     values = {k: v.detach().cpu() if isinstance(v, torch.Tensor) else v for k, v in values.items()}
+    values["pending_request"] = pack_value(state.pending_request)
     cache = state.reference
     values["reference"] = {k: getattr(cache, k).detach().cpu() for k in
                            ("ticks", "world_qpos", "contact", "source_versions")}
@@ -38,7 +39,41 @@ def unpack_state(payload, adapter, device):
     data = {k: v.to(device) if isinstance(v, torch.Tensor) else v for k, v in payload.items() if k != "reference"}
     ref = {k: v.to(device) if isinstance(v, torch.Tensor) else v for k, v in payload["reference"].items()}
     data["reference"] = ReferenceBuffer(**ref, kin=adapter.runtime.kin, to_sm=adapter.to_sm)
+    data["pending_request"] = unpack_value(data.get("pending_request"), adapter, device)
     return ClosedLoopState(**data)
+
+
+def pack_value(value):
+    """显式数据合同序列化，不把FK、求解器或线程pickle进训练检查点。"""
+    if isinstance(value, ClosedLoopState):
+        return {"kind": "ClosedLoopState", "data": pack_state(value)}
+    if isinstance(value, torch.Tensor):
+        return value.detach().cpu()
+    if is_dataclass(value):
+        return {"kind": type(value).__name__, "data": {f.name: pack_value(getattr(value, f.name)) for f in fields(value)}}
+    if isinstance(value, tuple):
+        return {"kind": "tuple", "data": [pack_value(v) for v in value]}
+    if isinstance(value, dict):
+        return {k: pack_value(v) for k, v in value.items()}
+    return value
+
+
+def unpack_value(value, adapter, device):
+    from .contracts import PendingGeneration, GenerationRecord, PhysicalAnchor, RequestTicket, GeneratedPlan, ForecastContext
+    from .returns import DecisionInterval
+    if isinstance(value, torch.Tensor):
+        return value.to(device)
+    if not isinstance(value, dict):
+        return value
+    if "kind" not in value:
+        return {k: unpack_value(v, adapter, device) for k, v in value.items()}
+    if value["kind"] == "ClosedLoopState":
+        return unpack_state(value["data"], adapter, device)
+    if value["kind"] == "tuple":
+        return tuple(unpack_value(v, adapter, device) for v in value["data"])
+    registry = {c.__name__: c for c in (PendingGeneration, GenerationRecord, PhysicalAnchor, RequestTicket,
+                                       GeneratedPlan, ForecastContext, DecisionInterval)}
+    return registry[value["kind"]](**{k: unpack_value(v, adapter, device) for k, v in value["data"].items()})
 
 
 def capture_rng():
@@ -57,7 +92,7 @@ def restore_rng(value):
 def save_checkpoint(path, trainer, replay, *, behavior_config, runtime_state, provenance):
     trainer.imagination.adapter.bundle.assert_unchanged(trainer.frozen_identity)
     replay_payload = replay.state_dict()
-    replay_payload["items"] = [pack_state(z) for z in replay_payload["items"]]
+    replay_payload["items"] = [pack_value(z) for z in replay_payload["items"]]
     atomic_save({"schema": SCHEMA, "actor": trainer.actor.state_dict(), "critic": trainer.critic.state_dict(),
                  "genmo_optimizer": trainer.actor_optimizer.state_dict(),
                  "upper_critic_optimizer": trainer.critic_optimizer.state_dict(),
@@ -87,7 +122,7 @@ def load_checkpoint(path, trainer, replay, *, behavior_config, device):
     trainer.critic_optimizer.load_state_dict(ck["upper_critic_optimizer"])
     trainer.restore_counters(ck["counters"])
     payload = dict(ck["replay"])
-    payload["items"] = [unpack_state(z, trainer.imagination.adapter, device) for z in payload["items"]]
+    payload["items"] = [unpack_value(z, trainer.imagination.adapter, device) for z in payload["items"]]
     replay.load_state_dict(payload)
     restore_rng(ck["rng"])
     return {**ck["runtime_state"], "requires_new_physical_episode": True}

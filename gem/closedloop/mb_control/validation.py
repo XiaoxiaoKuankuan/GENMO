@@ -66,3 +66,23 @@ def validate_coverage(tasks, report):
         raise ValueError("训练数据来源缺少独立held-out P3覆盖")
     if not report.get("validated_state_envelope"):
         raise ValueError("P3必须提供真实状态分布支持，不能只检查歌曲标签")
+
+
+def select_short_horizon(cfg, report):
+    """只认可新方法逐时域实测报告，旧supported_control_steps永不用于短时授权。"""
+    if report.get("schema") != "physical_anchor_short_bptt.v1" or report.get("passed") is not True:
+        raise ValueError("真实anchor短时物理精度/方向尚未通过")
+    if not report.get("frozen_unchanged") or not report.get("forecast_prediction_passed") or not report.get("phase_coverage_passed"):
+        raise ValueError("冻结合同、预测条件或真实运动阶段覆盖不足")
+    candidates = [h for h in report.get("supported_horizons", []) if h in (16, 24, 32) and
+                  report["horizons"][str(h)]["passed"] is True]
+    if not candidates or report.get("legal_real_anchors", 0) < 1:
+        raise ValueError("没有合法真实执行样本或合格16/24/32时域")
+    requested = cfg["imagination"].get("horizon_steps")
+    selected = min(candidates) if requested in (None, "auto") else requested
+    if selected not in candidates:
+        raise ValueError("配置短时域未获得对应物理验收")
+    if cfg["imagination"].get("critic_bootstrap") is not True:
+        raise ValueError("短时训练必须启用独立上层Critic终点价值")
+    cfg["imagination"]["horizon_steps"] = selected
+    return selected

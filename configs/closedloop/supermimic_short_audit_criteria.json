@@ -1,0 +1,27 @@
+{
+  "horizons": [8, 16, 24, 32],
+  "joint_epsilons_rad": [0.0025, 0.005, 0.01],
+  "root_epsilons_m": [0.00125, 0.0025, 0.005],
+  "collection_seconds": 16,
+  "anchors_per_task": 4,
+  "required_phases": ["double_support", "single_support", "stepping", "landing", "turning", "active_upper_body", "tracking_deviation"],
+  "autograd_fd_atol": 0.0005,
+  "autograd_fd_rtol": 0.1,
+  "minimum_resolvable_return_delta": 0.000001,
+  "noise_multiplier": 5,
+  "minimum_determinate_per_group": 12,
+  "minimum_direction_fraction": 0.6666666666666666,
+  "minimum_optimized_delta": 0,
+  "reset_replay_max_abs": 0.0001,
+  "state_rmse_limits": {
+    "root_xy_m": 0.05,
+    "root_height_m": 0.025,
+    "root_orientation_rad": 0.1,
+    "root_linear_velocity_m_s": 0.4,
+    "root_angular_velocity_rad_s": 0.8,
+    "joint_position_rad": 0.075,
+    "joint_velocity_rad_s": 1.5,
+    "foot_position_m": 0.03,
+    "foot_height_m": 0.02
+  }
+}

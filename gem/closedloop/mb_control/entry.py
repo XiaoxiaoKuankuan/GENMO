@@ -80,12 +80,16 @@ def main(kind):
         if profile is None:
             raise ValueError("训练需要独立实测部署延迟分布")
         report = json.loads(require_file(cfg["imagination"]["physical_validation_report"], "P3物理方向报告").read_text())
-        for key in ("prediction_passed", "physical_direction_passed", "reset_replay_repeatability_passed", "known_reference_passed"):
-            if report.get(key) is not True:
-                raise ValueError(f"P3尚未支持训练: {key}")
-        steps = cfg["imagination"]["validated_model_steps"]
-        if not isinstance(steps, int) or steps < 1 or steps > report["supported_control_steps"]:
-            raise ValueError("训练WM时域必须受实际P3证据支持")
+        if cfg["imagination"].get("mode") == "physical_anchor_short_bptt":
+            from .validation import select_short_horizon
+            select_short_horizon(cfg, report)
+        else:
+            for key in ("prediction_passed", "physical_direction_passed", "reset_replay_repeatability_passed", "known_reference_passed"):
+                if report.get(key) is not True:
+                    raise ValueError(f"P3尚未支持训练: {key}")
+            steps = cfg["imagination"]["validated_model_steps"]
+            if not isinstance(steps, int) or steps < 1 or steps > report["supported_control_steps"]:
+                raise ValueError("训练WM时域必须受实际P3证据支持")
         from .validation import validate_coverage
         validate_coverage(tasks, report)
         if report.get("forecast_enabled") != cfg["model"]["forecast_enabled"]:
@@ -160,6 +164,11 @@ def main(kind):
         try:
             if kind == "evaluate":
                 evaluate_tasks(collector, tasks, output, mode=args.mode, device=args.torch_device, max_seconds=args.max_seconds)
+            elif kind == "short":
+                from .short_audit import audit_short
+                if not args.criteria:
+                    raise ValueError("短时物理验收必须预先声明完整阈值与扰动尺度")
+                audit_short(collector, tasks, output, cfg, json.loads(Path(args.criteria).read_text()), device=args.torch_device)
             elif kind == "dynamics":
                 from .model_audit import audit_known_reference
                 criteria = json.loads(Path(args.criteria).read_text()) if args.criteria else None

@@ -79,6 +79,100 @@ class Stage2Trainer:
             targets = lambda_targets(intervals, values, self.config.get("lambda_per_half_second", .95))
         return [(x.start.detached(), y) for x, y in zip(intervals, targets)]
 
+    def update_anchors(self, samples, supervised_batch, *, physical_intervals):
+        """仅真实、当前Actor版本、完整H步的首次接管样本可计作有效执行反馈。"""
+        from .execution_audit import state_probe
+        from .validation import UnsupportedModelState
+        started = time.perf_counter()
+        if not self.critic_ready or not physical_intervals or not samples:
+            raise ValueError("短时Actor更新需要已验收Critic和新鲜真实控制轨迹")
+        self.actor.eval()
+        self.critic.eval()
+        self.actor_optimizer.zero_grad(set_to_none=True)
+        self.critic_optimizer.zero_grad(set_to_none=True)
+        # 只用真实控制轨迹回归；不把WM自己的终点当成价值验证真值。
+        targets = self._targets(physical_intervals)
+        targets = targets[::max(1, len(targets)//16)]
+        objectives, execution_norms, rejected = [], [], []
+        comparison, valid = None, 0
+        for sample in samples:
+            if sample.generation.request.actor_version != self.accepted_actor_updates:
+                rejected.append("stale_actor_request")
+                continue
+            try:
+                with frozen_parameters(self.critic):
+                    interval, plan, noise = self.imagination.rollout_anchor(sample)
+                    value = torch.zeros_like(interval.reward) if interval.terminal else self.critic(interval.end)
+                    objective = actor_return([interval], value).mean()
+                    probe = state_probe(interval.end.state)
+                    grad = torch.autograd.grad(probe, noise, retain_graph=True, allow_unused=True)[0]
+                    norm = 0. if grad is None else float(grad.detach().norm())
+                    if grad is not None and not torch.isfinite(grad).all():
+                        raise FloatingPointError("短时执行状态梯度非有限")
+                    if norm <= 0 or interval.steps != self.imagination.horizon_steps:
+                        rejected.append("disconnected_or_incomplete_short_execution")
+                        continue
+                    (-objective/len(samples)).backward()
+                    objectives.append(float(objective.detach()))
+                    execution_norms.append(norm)
+                    valid += 1
+                    if comparison is None:
+                        comparison = (sample.generation, plan.world_qpos.detach().clone())
+            except UnsupportedModelState as error:
+                rejected.append(str(error))
+        params = [p for p in self.actor.parameters() if p.requires_grad]
+        model_norm = gradient_norm(params)
+        if not torch.isfinite(torch.tensor(model_norm)):
+            raise FloatingPointError("短时执行目标参数梯度非有限")
+        accepted = valid > 0 and model_norm > 0
+        bc_value = bc_norm = actor_norm = delta = 0.
+        output_change = None
+        if accepted:
+            before = [p.detach().clone() for p in params]
+            model_grads = [p.grad.detach().clone() if p.grad is not None else None for p in params]
+            out = self.actor.original_supervision(supervised_batch)
+            bc, _ = self.stage1_losses(supervised_batch, out["pred_x_start"], out["static_conf_logits"],
+                global_step=self.config.get("stage1_supervision_step", 595000))
+            (self.config["bc_weight"]*bc).backward()
+            bc_value = float(bc.detach())
+            differences = [(p.grad.detach()-(old if old is not None else 0.)).float().square().sum()
+                           for p, old in zip(params, model_grads) if p.grad is not None]
+            bc_norm = float(torch.stack(differences).sum().sqrt())
+            del model_grads
+            actor_norm = float(torch.nn.utils.clip_grad_norm_(params, self.config.get("grad_clip", 1.), error_if_nonfinite=True))
+            self.actor_optimizer.step()
+            delta = float(torch.stack([(p.detach()-old).float().square().sum() for p, old in zip(params, before)]).sum().sqrt())
+            del before
+            if not 0 < delta < float("inf"):
+                raise FloatingPointError("Actor没有产生有限非零参数更新")
+            self.accepted_actor_updates += 1
+            self.actor_optimizer.zero_grad(set_to_none=True)
+            with torch.no_grad():
+                record, old_plan = comparison
+                request = record.request
+                after = self.actor.generate(request.snapshot, request.ticket, record.forecast, request.noise).world_qpos
+                output_change = float((after[:, request.ticket.prefix_frames:, 7:]-old_plan[:, request.ticket.prefix_frames:, 7:]).square().mean().sqrt())
+        else:
+            self.invalid_actor_attempts += 1
+            self.actor_optimizer.zero_grad(set_to_none=True)
+        loss, critic_norm = self.fit_critic(targets)
+        self.imagination.adapter.bundle.assert_unchanged(self.frozen_identity)
+        self.update_index += 1
+        return {"update": self.update_index, "training_method": "physical_anchor_short_bptt",
+                "accepted_actor_updates": self.accepted_actor_updates, "accepted_execution_feedback_update": accepted,
+                "model_return": sum(objectives)/len(objectives) if objectives else None,
+                "model_gradient_norm_before_bc": model_norm, "weighted_bc_gradient_norm": bc_norm,
+                "original_stage1_loss": bc_value, "actor_grad_norm": actor_norm, "critic_grad_norm": critic_norm,
+                "critic_mse": loss, "critic_updates": self.critic_updates, "bc_only_update": False,
+                "execution_state_noise_gradient_norms": execution_norms, "valid_execution_rollouts": valid,
+                "real_anchor_ticks": [s.state.tick for s in samples],
+                "horizon_steps": self.imagination.horizon_steps, "actor_parameter_delta_l2": delta,
+                "fixed_noise_reference_joint_change_rms_rad": output_change,
+                "physical_reward_dt_sum": sum(float(x.reward.mean()) for x in physical_intervals),
+                "frozen_parameters_and_buffers_unchanged": True, "rejection_reasons": rejected,
+                "update_wall_seconds": time.perf_counter()-started,
+                "evidence": "real_anchor_model_gradient_separate_from_physical_quality"}
+
     def update(self, initial_states, supervised_batch, actual_latencies, *, physical_intervals):
         from .execution_audit import state_probe
         from .validation import UnsupportedModelState
