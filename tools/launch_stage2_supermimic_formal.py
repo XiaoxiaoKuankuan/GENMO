@@ -122,6 +122,15 @@ def main():
                 isinstance(needed,int) and 0 < needed <= report["supported_control_steps"] and
                 report["frozen_sha256"] == digest(cfg["supermimic"]["checkpoint"]) and bool(report.get("validated_state_envelope")))
     check("world_model_physics_and_direction", world_model)
+    def parallel_collection():
+        report = json.loads(Path(cfg["formal"]["parallel_collection_report"]).read_text())
+        return (report["passed"] is True and report["physical_collectors"] == 1+len(worker_gpus) and
+                report["frozen_sha256"] == digest(cfg["supermimic"]["checkpoint"]) and
+                report["contract"] == {k: cfg[k] for k in ("model", "clock", "rewards")} and
+                report["physics_determinism"] == cfg["execution"].get("physics_determinism") and
+                report["horizon_steps"] == cfg["imagination"]["horizon_steps"])
+    if worker_gpus:
+        check("real_parallel_collection", parallel_collection)
     def latency():
         profile = json.loads(Path(cfg["latency_profile"]).read_text())
         return profile.get("forecast_enabled") is True and len(profile.get("latency_ticks", [])) >= 20 and profile["frozen_sha256"] == digest(cfg["supermimic"]["checkpoint"])

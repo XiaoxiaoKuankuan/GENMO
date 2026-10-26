@@ -66,6 +66,10 @@ def main():
         passed = all(r["parallel_overlap_seconds"] > 0 and min(r["controls_per_worker"]) > 0 for r in rows) and all(
             sum(r["anchors_per_worker"][i] for r in rows) > 0 for i in range(2))
         result = {"passed": passed, "rows": rows, "accepted_actor_updates": 0,
+                  "frozen_sha256": adapter.bundle.metadata["sha256"], "physical_collectors": 2,
+                  "contract": {k: cfg[k] for k in ("model", "clock", "rewards")},
+                  "physics_determinism": cfg.get("execution", {}).get("physics_determinism"),
+                  "horizon_steps": cfg["imagination"]["horizon_steps"],
                   "evidence": "real_parallel_newton_collection_not_training_gain"}
         (output/"parallel_collection_audit.json").write_text(json.dumps(result, indent=2))
         if not passed:
