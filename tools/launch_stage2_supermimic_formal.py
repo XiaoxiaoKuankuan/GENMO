@@ -128,6 +128,7 @@ def main():
         report = json.loads(Path(cfg["imagination"]["physical_validation_report"]).read_text())
         if cfg["imagination"].get("mode") == "physical_anchor_short_bptt":
             sys.path.insert(0, str(repo))
+            sys.path.insert(0, cfg["supermimic"]["repo"])
             from gem.closedloop.mb_control.validation import select_short_horizon
             select_short_horizon(cfg, report)
             return report["frozen_sha256"] == digest(cfg["supermimic"]["checkpoint"]) and bool(report.get("validated_state_envelope"))
