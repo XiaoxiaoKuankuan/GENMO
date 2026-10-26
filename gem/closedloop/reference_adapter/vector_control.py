@@ -55,7 +55,9 @@ class VectorControl:
 
     def nominal_goal(self, z):
         frames = z['frame'][:, None]+self.bank.offset11
-        ref = self.bank.ref(z['song'][:, None], frames)
+        idx = self.bank.indices(z['song'][:, None], frames)
+        r = self.bank.reference
+        ref = base_reference(r.root_p[idx], r.root_R[idx], r.root_v[idx], r.root_w[idx], r.q[idx], r.qd[idx])
         current = select_reference(ref, (slice(None), 0))
         future = select_reference(ref, (slice(None), slice(1, None)))
         return current, goal_from_reference(current, future)

@@ -23,7 +23,7 @@ def save_vector(path, engine, critic, optimizers, replay, tangent, collector, st
         frozen_bundle=engine.step.bundle.state_dict(), input_spec=engine.step.adapter.input_spec,
         music_s0=engine.step.rewards.music.s0, config=config, state=state,
         replay=replay.state_dict(), tangent=tangent.data, tangent_total=tangent.total_pairs,
-        validation_replay=validation_replay.state_dict() if validation_replay else None,
+        validation_replay=validation_replay.state_dict() if validation_replay is not None else None,
         collector_state=collector.state, collector_episode_serial=collector.episode_serial,
         collector_real_transitions=collector.real_transitions, collector_resets=collector.reset_count,
         collector_vector_steps=collector.vector_steps, collector_rng=collector.generator.get_state(),
@@ -52,7 +52,7 @@ def load_vector(path, engine, critic, optimizers, replay, tangent, collector, co
     replay.load_state_dict(ck['replay'])
     tangent.data = {k: v.to(collector.device) for k, v in ck['tangent'].items()}
     tangent.total_pairs = ck['tangent_total']
-    if ck['validation_replay'] and validation_replay:
+    if ck['validation_replay'] is not None and validation_replay is not None:
         validation_replay.load_state_dict(ck['validation_replay'])
     collector.episode_serial = ck['collector_episode_serial']
     collector.real_transitions = ck['collector_real_transitions']; collector.reset_count = ck['collector_resets']

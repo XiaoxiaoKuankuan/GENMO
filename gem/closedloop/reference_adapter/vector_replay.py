@@ -34,6 +34,10 @@ class VectorReplay:
         if not self.data:
             self.dynamic_keys = tuple(start)
             self.data = {k: torch.empty((self.slots, *v.shape), dtype=v.dtype, device=self.device) for k, v in values.items()}
+            self.data['vector_time'].fill_(-10**9)
+            self.data['z_episode'].fill_(-1)
+            self.data['done'].fill_(True)
+            self.data['mc_valid'].fill_(False)
         if len(action) != self.num_envs:
             raise ValueError('Replay环境列数改变')
         for k, value in values.items():

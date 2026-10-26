@@ -45,6 +45,12 @@ def gpu_usage():
     return None
 
 
+def gpu_utilization():
+    raw = subprocess.run(['nvidia-smi', '-i', os.environ['CUDA_VISIBLE_DEVICES'],
+        '--query-gpu=utilization.gpu', '--format=csv,noheader,nounits'], capture_output=True, text=True).stdout.strip()
+    return int(raw) if raw.isdigit() else None
+
+
 def numerical_check(engine, bank, control):
     import torch
     from .collector import initial_state
@@ -81,6 +87,28 @@ def numerical_check(engine, bank, control):
     torch.testing.assert_close(g1, g2, atol=0, rtol=0)
     return dict(passed=True, goal_actor_gradient=errors, reward_max_abs=float((old_r-new_r).abs().max()),
                 reward_gradient_max_abs=float((g1-g2).abs().max()), source='actual_SM_weights_float32')
+
+
+def compile_kinematics(engine, bank):
+    import torch
+    from supermimic.mdp import unflatten_state
+    kin = engine.step.runtime.kin
+    original = kin.forward
+    compiled = torch.compile(original, dynamic=True)
+    states = bank.initial[:1].expand(32, -1).clone()
+    p, R, v, w, q, qd = unflatten_state(states)
+    a, b = q.clone().requires_grad_(), q.clone().requires_grad_()
+    old = original(p, R, v, w, a, qd)
+    new = compiled(p, R, v, w, b, qd)
+    for x, y in zip(old, new):
+        torch.testing.assert_close(x, y, atol=2e-6, rtol=2e-5)
+    probes = [torch.randn_like(x) for x in old]
+    ga, = torch.autograd.grad(sum((x*t).sum() for x,t in zip(old, probes)), a)
+    gb, = torch.autograd.grad(sum((x*t).sum() for x,t in zip(new, probes)), b)
+    torch.testing.assert_close(ga, gb, atol=2e-5, rtol=2e-4)
+    kin.forward = compiled
+    return dict(passed=True, output_max_abs=max(float((x-y).abs().max()) for x,y in zip(old,new)),
+                input_gradient_max_abs=float((ga-gb).abs().max()))
 
 
 def main():
@@ -140,7 +168,7 @@ def main():
         return 0
     if not args.no_compile and vc.get('compile_fk', True):
         # 只编译纯Tensor FK，冻结权重、参考公式和Actor架构均不变。
-        engine.step.runtime.kin.forward = torch.compile(engine.step.runtime.kin.forward, dynamic=True)
+        json_write(output/'compiled_kinematics.json', compile_kinematics(engine, bank))
     optimizers = dict(adapter=torch.optim.Adam(engine.step.adapter.parameters(), lr=train['adapter_lr']),
         critic=torch.optim.Adam(critic.parameters(), lr=train['critic_lr']),
         wm=torch.optim.Adam(engine.dynamics.model.net.parameters(), lr=train['wm_lr']))
@@ -160,13 +188,21 @@ def main():
                 # 第一次分配完整百万容量Replay；统计真实向量步和采集/反传峰值。
                 for _ in range(8):
                     collector.step(replay, zero=False)
+                before_reset = env.observe()['state'].clone()
+                old_episode = collector.state['episode'].clone()
+                collector.reset(torch.tensor([0], device=bank.device))
+                after_reset = env.observe()['state']
+                torch.testing.assert_close(before_reset[1:], after_reset[1:], atol=1e-5, rtol=1e-5)
+                assert torch.equal(old_episode[1:], collector.state['episode'][1:])
                 tick = time.perf_counter()
                 timings = []
                 for _ in range(args.pressure_steps):
                     timings.append(collector.step(replay)['timing'])
                 elapsed = time.perf_counter()-tick
                 pair = collector.tangent_pairs(); tangent.add(pair)
-                fitted = fit_wm(engine.dynamics, optimizers['wm'], replay.windows(train['wm_batch'], 8),
+                windows = replay.windows(train['wm_batch'], 8)
+                torch.testing.assert_close(windows['state'][:, 1:], windows['next_state'][:, :-1], atol=0, rtol=0)
+                fitted = fit_wm(engine.dynamics, optimizers['wm'], windows,
                                 tangent.sample(train['wm_batch']), vc['wm_tangent'])
                 engine.step.adapter.zero_grad(set_to_none=True)
                 with engine.dynamics.adapter_phase(), frozen_parameters(critic):
@@ -184,6 +220,11 @@ def main():
                     timing_mean_ms={k: sum(t[k] for t in timings)/len(timings) for k in timings[0]},
                     wm_fit=fitted, bptt8_microbatch=train['backward_microbatch'], adapter_gradient_norm=float(norm),
                     accepted_adapter_updates=0, numerical=numerical)
+                result['partial_reset_other_state_max_abs'] = float((before_reset[1:]-after_reset[1:]).abs().max())
+                result['partial_reset_other_episode_ids_unchanged'] = True
+                result.update(real_window_state_continuity_exact=True, completed_reset_segments=replay.completed_segments,
+                    completed_full_songs=replay.completed_full_songs, head_truncated_terminals=replay.head_truncated_terminals,
+                    replay_wraps=replay.total_vector_steps//replay.slots, gpu_utilization_percent=gpu_utilization())
                 json_write(output/'pressure.json', result)
                 print(json.dumps(result, ensure_ascii=False), flush=True)
                 return 0
@@ -194,14 +235,22 @@ def main():
                 result = physical_directions(collector, control, engine.dynamics, critic, criteria)
                 json_write(output/'directions.json', result)
                 return 0 if result['passed_horizons'] else 2
+            status['phase'] = 'importing_fixed_real_zero_baseline'
+            json_write(output/'status.json', status, replace=True)
             baseline = import_zero_mc(vc['initial_real_checkpoint'], control)
             warm_critic = fit_critic(critic, optimizers['critic'], baseline['train'], train['critic_epochs'], train['critic_batch'])
             json_write(output/'critic_initial_fit.json', warm_critic)
             collector.reset(perturb=True)
+            status['phase'] = 'collecting_real_difficult_training_states'
+            json_write(output/'status.json', status, replace=True)
             for _ in range(vc.get('warmup_vector_steps', 128)):
                 collector.step(replay, zero=True)
             pair = collector.tangent_pairs(); tangent.add(pair)
+            status.update(phase='collecting_independent_real_validation', real_transitions=collector.real_transitions)
+            json_write(output/'status.json', status, replace=True)
             collect_validation(collector, validation, vc.get('validation_vector_steps', 300), zero=True)
+            status.update(phase='evaluating_zero_adapter_full_songs', real_transitions=collector.real_transitions)
+            json_write(output/'status.json', status, replace=True)
             zero_evaluation = evaluate_physical(collector, zero=True)
             json_write(output/'evaluation_zero.json', zero_evaluation)
             collector.reset(perturb=True)
@@ -242,6 +291,7 @@ def main():
                 critic_report = validate_critic(critic, validation_mc, training_mc['y'].mean(), train['critic_quality'],
                                                 len(training_mc['y']), tasks)
                 critic_ready = critic_report['gate']['passed']
+                prediction = engine.dynamics.validate_real(validation.windows(32, 16))
                 # 初始至少25次真实WM监督；之后未通过时继续监督修复，每100 WM步重测。
                 due_audit = engine.dynamics.model_version >= 25 and (last_audit_wm < 0 or
                     (horizon is None and engine.dynamics.model_version-last_audit_wm >= vc.get('repair_audit_wm_interval', 100)))
@@ -289,12 +339,14 @@ def main():
                     num_envs=collector.num_envs, nvidia_peak_observed_mib=peak_nvidia,
                     torch_peak_allocated_mib=torch.cuda.max_memory_allocated()/2**20,
                     torch_peak_reserved_mib=torch.cuda.max_memory_reserved()/2**20,
+                    gpu_utilization_percent=gpu_utilization(),
                     real_transitions_per_second=train['collect_vector_steps_per_update']*collector.num_envs/collect_seconds,
                     accepted_updates_per_hour=status['accepted_updates']*3600/max(1, time.time()-started),
                     wall_unix=time.time(), iteration_seconds=time.perf_counter()-loop_start,
                     complete_reset_segments=replay.completed_segments, complete_full_songs=replay.completed_full_songs,
                     head_truncated_terminals=replay.head_truncated_terminals)
-                report = dict(status=status.copy(), wm=wm_reports, critic=critic_report, critic_fit=critic_fit, adapter=update,
+                report = dict(status=status.copy(), wm=wm_reports, wm_independent_prediction=prediction,
+                              critic=critic_report, critic_fit=critic_fit, adapter=update,
                               control_timing=collector.timing)
                 append_json(output/'training.jsonl', report)
                 json_write(output/'status.json', status, replace=True)

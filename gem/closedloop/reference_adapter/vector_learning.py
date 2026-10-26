@@ -115,6 +115,7 @@ def rollout(control, dynamics, critic, start, horizon, *, terminal_value, gamma=
     score = alive*0
     rewards, continuations, features, values, weighted, actions = [], [], [], [], {}, []
     states = []
+    execution_score = score*0
     for t in range(horizon):
         x = control.critic_features(z) if terminal_value else z['state'].new_empty(len(z['state']), 0)
         value = critic(x) if terminal_value else alive*0
@@ -124,6 +125,7 @@ def rollout(control, dynamics, critic, start, horizon, *, terminal_value, gamma=
         valid = (z['frame'] < control.bank.ends[z['song']]).to(alive)
         alive = alive*valid
         score = score+gamma**t*alive*reward
+        execution_score = execution_score+gamma**t*alive*(raw['track']+terms['music'])
         for k, v in terms.items():
             weighted[k] = weighted.get(k, score*0)+gamma**t*alive*v
         features.append(x); values.append(value); rewards.append(reward); continuations.append(cont*valid)
@@ -136,7 +138,7 @@ def rollout(control, dynamics, critic, start, horizon, *, terminal_value, gamma=
     features.append(x); values.append(value)
     return dict(objective=score, rewards=torch.stack(rewards), continuation=torch.stack(continuations),
         features=torch.stack(features), values=torch.stack(values), weighted=weighted, actions=actions,
-        states=states, end=z, terminal_contribution=gamma**horizon*alive*value)
+        states=states, end=z, terminal_contribution=gamma**horizon*alive*value, execution_objective=execution_score)
 
 
 def fit_critic(critic, optimizer, dataset, epochs=3, batch=2048):
@@ -185,7 +187,7 @@ def adapter_update(control, dynamics, critic, optimizer, starts, horizon, *, ter
                 trajectory = rollout(control, dynamics, critic, z, horizon, terminal_value=terminal_value)
                 loss = -trajectory['objective'].sum()/count
                 if offset == 0:
-                    execution = trajectory['weighted']['sm']+trajectory['weighted']['music']
+                    execution = trajectory['execution_objective']
                     grads = torch.autograd.grad(execution.mean(), parameters, retain_graph=True, allow_unused=True)
                     totals['execution_gradient_norm'] = float(sum(g.square().sum() for g in grads if g is not None).sqrt())
                     for name, term in trajectory['weighted'].items():

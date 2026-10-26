@@ -98,6 +98,6 @@ class DynamicsModel(nn.Module):
         state, reports = windows["state"][:, 0], {}
         for i in range(16):
             state = self.step(state, windows["action"][:, i], windows["xi"][:, i])
-            if i+1 in (1, 8, 16):
+            if i+1 in (1, 4, 8, 16):
                 reports[str(i+1)] = _state_error(state, windows["next_state"][:, i])
         return reports

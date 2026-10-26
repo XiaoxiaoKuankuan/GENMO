@@ -127,3 +127,64 @@ def test_critic_training_only_group_normalization(system):
     x.requires_grad_()
     grad, = torch.autograd.grad(critic(x).sum(), x)
     assert torch.isfinite(grad).all() and grad.norm() > 0
+
+
+def test_batched_imagination_and_dense_update(system):
+    from dataclasses import replace
+    from gem.closedloop.reference_adapter.music_reward import AudioTrack
+    from gem.closedloop.reference_adapter.vector_learning import rollout, adapter_update
+    from gem.closedloop.reference_adapter.dynamics import frozen_parameters
+    engine, old = system
+    old = replace(old, audio=AudioTrack.from_features(old.audio.features[:, :-10]))
+    engine, old, control, z = vector((engine, old), count=4)
+    critic = GroupNormalizedCritic(2835, engine.step.adapter.input_spec)
+    snapshot = engine.step.bundle.frozen_snapshot()
+    with engine.dynamics.adapter_phase(), frozen_parameters(critic):
+        batch = rollout(control, engine.dynamics, critic, z, 8, terminal_value=False)
+        single = rollout(control, engine.dynamics, critic, select_state(z, slice(0, 1)), 8, terminal_value=False)
+        torch.testing.assert_close(batch['objective'], single['objective'].expand(4), atol=1e-5, rtol=1e-4)
+        grad, = torch.autograd.grad(batch['objective'].mean(), engine.step.adapter.net[-1].bias)
+        assert grad.norm() > 0 and torch.isfinite(grad).all()
+    optimizer = torch.optim.Adam(engine.step.adapter.parameters(), lr=1e-4)
+    report, labels = adapter_update(control, engine.dynamics, critic, optimizer, z, 1, terminal_value=False, microbatch=2)
+    assert labels is None and report['phase'] == 'dense_tracking_no_terminal_value'
+    assert report['parameter_delta'] > 0 and report['action_rms_delta'] > 0 and report['goal_rms_delta'] > 0
+    engine.step.bundle.assert_unchanged(snapshot)
+
+
+def test_vector_complete_checkpoint_restores_optimizers(system, tmp_path):
+    from dataclasses import replace
+    from types import SimpleNamespace
+    from gem.closedloop.reference_adapter.music_reward import AudioTrack
+    from gem.closedloop.reference_adapter.vector_learning import TangentReplay
+    from gem.closedloop.reference_adapter.vector_checkpoint import save_vector, load_vector
+    engine, old = system
+    old = replace(old, audio=AudioTrack.from_features(old.audio.features[:, :-10]))
+    engine, old, control, z = vector((engine, old), count=2)
+    critic = GroupNormalizedCritic(2835, engine.step.adapter.input_spec)
+    modules = dict(adapter=engine.step.adapter, critic=critic, wm=engine.dynamics.model.net)
+    optimizers = {k:torch.optim.Adam(m.parameters(), lr=1e-4) for k,m in modules.items()}
+    # 这里只验证三个优化器状态序列化，不称这些代数更新为真实训练/物理验收。
+    for k,module in modules.items():
+        optimizer=optimizers[k]
+        sum(p.square().mean() for p in module.parameters()).backward();optimizer.step();optimizer.zero_grad(set_to_none=True)
+    replay = VectorReplay(80, 2, 'cpu')
+    replay.add(z, z['action'], z['state'], torch.ones(2), torch.zeros(2), torch.ones(2,dtype=torch.bool), torch.zeros(2,dtype=torch.bool), 0)
+    validation = VectorReplay(80, 2, 'cpu')
+    validation.add(z, z['action'], z['state'], torch.ones(2), torch.zeros(2), torch.ones(2,dtype=torch.bool), torch.zeros(2,dtype=torch.bool), 0)
+    generator=torch.Generator().manual_seed(42)
+    collector=SimpleNamespace(state=z, episode_serial=2, real_transitions=2, reset_count=2, vector_steps=1,
+        generator=generator, device='cpu', reset=lambda **kwargs:None)
+    config=dict(music={},rewards=control.weights,reference_steps=10,control_hz=50)
+    expected={k:{n:v.clone() for n,v in m.state_dict().items()} for k,m in modules.items()}
+    path=tmp_path/'vector_full.pt'
+    save_vector(path,engine,critic,optimizers,replay,TangentReplay(),collector,dict(wm_updates=1,accepted_updates=0),config,validation)
+    with torch.no_grad():
+        for module in modules.values():
+            for p in module.parameters():p.zero_()
+    empty_validation=VectorReplay(80,2,'cpu')
+    restored=load_vector(path,engine,critic,optimizers,replay,TangentReplay(),collector,config,empty_validation)
+    assert restored['wm_updates']==1 and len(empty_validation)==2
+    for k,module in modules.items():
+        for name,value in module.state_dict().items():torch.testing.assert_close(value,expected[k][name])
+        assert optimizers[k].state_dict()['state']

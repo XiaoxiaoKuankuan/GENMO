@@ -37,6 +37,8 @@ def evaluate_physical(collector, *, zero=False, split='evaluation'):
         end_failed |= active & row['failed'][:count]
         active &= ~row['done'][:count]
         times.append(row['timing'])
+        if len(times) % 256 == 0:
+            print(f'真实整歌评价 split={split} zero={zero} vector_steps={len(times)} active={int(active.sum())}', flush=True)
     states, live, feet = torch.stack(states), torch.stack(live), torch.stack(feet)
     raw_all = {k: torch.stack([r[k] for r in raws]) for k in raws[0]}
     weighted_all = {k: torch.stack([r[k] for r in weighted]) for k in weighted[0]}
