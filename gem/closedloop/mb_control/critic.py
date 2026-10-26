@@ -11,9 +11,12 @@ from torch import nn
 
 
 class PlanAwareCritic(nn.Module):
-    def __init__(self, scheduler, width=256, layers=2, heads=4):
+    def __init__(self, scheduler, width=256, layers=2, heads=4, teacher_conditioned=False):
         super().__init__()
         self.scheduler = scheduler
+        self.teacher_conditioned = teacher_conditioned
+        if teacher_conditioned:
+            self.teacher_proj = nn.Linear(30, width)
         self.state_proj = nn.Linear(101, width)
         self.sm_proj = nn.Linear(76, width)
         self.history_proj = nn.Linear(50, width)
@@ -23,7 +26,7 @@ class PlanAwareCritic(nn.Module):
         self.noise_proj = nn.Linear(30, width)
         self.pending_type = nn.Parameter(torch.zeros(1, 1, width))
         self.value_token = nn.Parameter(torch.zeros(1, 1, width))
-        self.types = nn.Parameter(torch.zeros(7, width))
+        self.types = nn.Parameter(torch.zeros(8 if teacher_conditioned else 7, width))
         layer = nn.TransformerEncoderLayer(width, heads, width * 4, dropout=0., batch_first=True, norm_first=True)
         self.encoder = nn.TransformerEncoder(layer, layers, enable_nested_tensor=False)
         self.head = nn.Sequential(nn.LayerNorm(width), nn.Linear(width, width), nn.SiLU(), nn.Linear(width, 1))
@@ -70,6 +73,13 @@ class PlanAwareCritic(nn.Module):
         tokens = [self.value_token.expand(b, -1, -1), current, sm, hist, ref, music, schedule]
         mask = torch.cat((ones(1), ones(1), ones(10), z.genmo_valid, ones(ref.shape[1]),
                           valid_music[None].expand(b, -1), ones(1)), 1)
+        if self.teacher_conditioned:
+            if z.teacher_reference is None:
+                raise ValueError("新奖励Critic必须观察固定音乐目标，不能沿用旧价值输入")
+            fixed = z.teacher_reference.source_at(future_ticks).detach()
+            teacher = self.teacher_proj(torch.cat((fixed, mt, valid_music[None,:,None].expand(b,-1,-1).to(fixed)), -1))
+            tokens.append(teacher)
+            mask = torch.cat((mask, valid_music[None].expand(b,-1)), 1)
         return torch.cat([x + self.types[i] for i, x in enumerate(tokens)], 1), mask
 
     def forward(self, z):

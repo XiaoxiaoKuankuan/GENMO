@@ -39,13 +39,16 @@ def pack_tensor(value, memo):
 
 def pack_state(state, memo=None):
     memo = {} if memo is None else memo
-    values = {f.name: getattr(state, f.name) for f in fields(state) if f.name != "reference"}
+    values = {f.name: getattr(state, f.name) for f in fields(state) if f.name not in ("reference", "teacher_reference")}
     values = {k: pack_tensor(v, memo) if isinstance(v, torch.Tensor) else v for k, v in values.items()}
     values["pending_request"] = pack_value(state.pending_request, memo)
     cache = state.reference
     values["reference"] = {k: pack_tensor(getattr(cache, k), memo) for k in
                            ("ticks", "world_qpos", "contact", "source_versions")}
     values["reference"]["version"] = cache.version
+    teacher = state.teacher_reference
+    values["teacher_reference"] = None if teacher is None else {
+        k: pack_tensor(getattr(teacher, k), memo) for k in ("ticks", "world_qpos", "contact", "source_versions")}
     return values
 
 
@@ -60,9 +63,12 @@ def unpack_tensor(value, device, memo):
 def unpack_state(payload, adapter, device, memo=None):
     memo = {} if memo is None else memo
     data = {k: unpack_tensor(v, device, memo) if isinstance(v, torch.Tensor) else v
-            for k, v in payload.items() if k != "reference"}
+            for k, v in payload.items() if k not in ("reference", "teacher_reference")}
     ref = {k: unpack_tensor(v, device, memo) if isinstance(v, torch.Tensor) else v for k, v in payload["reference"].items()}
     data["reference"] = ReferenceBuffer(**ref, kin=adapter.runtime.kin, to_sm=adapter.to_sm)
+    teacher = payload.get("teacher_reference")
+    data["teacher_reference"] = None if teacher is None else ReferenceBuffer(
+        **{k: unpack_tensor(v, device, memo) for k, v in teacher.items()}, kin=adapter.runtime.kin, to_sm=adapter.to_sm)
     data["pending_request"] = unpack_value(data.get("pending_request"), adapter, device, memo)
     return ClosedLoopState(**data)
 

@@ -20,7 +20,7 @@ WEIGHTS = (.5, .5, 1., 1., 1., 1., .8, .5)
 class TrackingRewards:
     def __init__(self, runtime, config):
         self.runtime, self.config = runtime, dict(config)
-        if config.get("mode") not in ("sm_six", "upper_eight"):
+        if config.get("mode") not in ("sm_six", "upper_eight", "teacher_music"):
             raise ValueError("奖励必须显式选择sm_six或upper_eight")
         self.mode = config["mode"]
         self.scales = config["scales"]
@@ -39,7 +39,7 @@ class TrackingRewards:
         if config.get("music_surrogate_enabled", False):
             raise ValueError("音乐代理未验证，首版仅原Stage1监督与独立音乐评价")
 
-    def __call__(self, state, action, previous_action, reference):
+    def __call__(self, state, action, previous_action, reference, *, teacher_reference=None):
         sm_reward, sm_terms = self.runtime.reward(state, action, previous_action, reference)
         p, R, v, w, q, qd = unflatten_state(state)
         kin, ref = self.runtime.kin, reference
@@ -76,4 +76,17 @@ class TrackingRewards:
                    "action_rate": rate, "joint_limit": limits, "root_huber": root_cost,
                    **{f"error/{k}": value for k, value in e.items()},
                    **{f"score/{k}": value for k, value in scores.items()}}
+        if self.mode == "teacher_music":
+            if teacher_reference is None:
+                raise ValueError("音乐执行主目标缺少固定原Stage1时间线，不能退回学生自参考奖励")
+            from .dance_losses import execution_loss
+            dance, dance_groups = execution_loss(state, teacher_reference, kin, self.config.get("dance_scales"))
+            track, track_groups = execution_loss(state, reference, kin, self.config.get("dance_scales"))
+            physical = self.config.get("action_rate_weight", .1)*rate + self.config.get("joint_limit_weight", 2.)*limits
+            music_reward = -(dance + self.config.get("track_weight", .1)*track + physical)*.02
+            metrics.update(dance_loss=dance, current_reference_loss=track, physical_cost=physical,
+                teacher_music_reward_dt=music_reward,
+                **{f"dance/{k}":v for k,v in dance_groups.items()},
+                **{f"current_reference/{k}":v for k,v in track_groups.items()})
+            return music_reward, metrics
         return (sm_reward if self.mode == "sm_six" else upper), metrics

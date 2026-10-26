@@ -72,6 +72,9 @@ def paired_quality(baseline, current, criteria, tasks=None):
         def values(row):
             metrics = row["physical_metrics_mean"]
             return {"tracking": metrics["upper_eight_tracking"],
+                    "original_music_execution_loss":metrics.get("dance_loss"),
+                    "current_reference_tracking_loss":metrics.get("current_reference_loss"),
+                    "physical_cost":metrics.get("physical_cost"),
                     "root_position_rmse_m": float(np.sqrt(metrics["error/anchor_pos"])),
                     "root_xy_rmse_m": float(np.sqrt(metrics["root_xy_error_sq"])),
                     "root_orientation_rmse_rad": float(np.sqrt(metrics["error/anchor_ori"])),
@@ -95,7 +98,11 @@ def paired_quality(baseline, current, criteria, tasks=None):
             "current_completed": sum(r["current_complete"] for r in selected),
             "mean_tracking_delta": float(np.mean([r["delta"]["tracking"] for r in selected])),
             "mean_root_position_rmse_delta_m": float(np.mean([r["delta"]["root_position_rmse_m"] for r in selected]))})
+    teacher_losses=[r["physical_metrics_mean"]["dance_loss"] for r in rows if "dance_loss" in r["physical_metrics_mean"]]
+    baseline_teacher=[r["physical_metrics_mean"]["dance_loss"] for r in before.values() if "dance_loss" in r["physical_metrics_mean"]]
     return {"completion_rate": completion, "baseline_completion_rate": old_completion, "duration_ratio": duration_ratio,
+            "physical_music_execution_loss":float(np.mean(teacher_losses)) if teacher_losses else None,
+            "baseline_physical_music_execution_loss":float(np.mean(baseline_teacher)) if baseline_teacher else None,
             "activity_ratio": activity_ratio, "beat_alignment_drop": beat_drop, "beat_available": beat_drop is not None,
             "physical_tracking_score": score, "baseline_physical_tracking_score": old_score,
             "physical_tracking_delta": score-old_score, "paired_tasks": comparisons, "source_split": source_split,
@@ -207,6 +214,7 @@ def run_formal(args, cfg, output, trainer, collector, profile, tasks, report, so
     if short:
         collector.anchor_horizon = trainer.imagination.horizon_steps
         collector.record_controls = True
+        collector.record_contacts = True
     for name in ("logs", "checkpoints", "evaluations", "diagnostics", "tensorboard"):
         (output/name).mkdir(exist_ok=True)
     lock = output / "training.lock"
@@ -216,7 +224,8 @@ def run_formal(args, cfg, output, trainer, collector, profile, tasks, report, so
     writer = SummaryWriter(str(output/"tensorboard"))
     stopping = []
     previous_handlers = {s: signal.signal(s, lambda signum, frame: stopping.append(signum)) for s in (signal.SIGTERM, signal.SIGINT)}
-    replay = RecentReplay(cfg["training"]["replay_capacity"], cfg["training"]["seed"])
+    replay = RecentReplay(cfg["training"]["replay_capacity"], cfg["training"]["seed"],
+                          balanced=cfg["training"].get("balanced_motion_sampling", False))
     supervised = SupervisionStream(cfg["stage1"]["data_config"], cfg["training"]["supervision_batch"], cfg["training"]["seed"], args.torch_device)
     behavior = behavior_config(cfg, trainer.actor, trainer.imagination.adapter)
     task_cursor, control_steps, total_wall_seconds = 0, 0, 0.
@@ -250,7 +259,8 @@ def run_formal(args, cfg, output, trainer, collector, profile, tasks, report, so
             restore_rng(rng)
         last_evaluated = n
         degradation_count = degradation_count+1 if quality["degraded"] else 0
-        score = quality["physical_tracking_score"]
+        score = (-quality["physical_music_execution_loss"] if cfg.get("teacher",{}).get("enabled")
+                 else quality["physical_tracking_score"])
         if not quality["degraded"] and (best_score is None or score > best_score):
             best_score = score
             checkpoint_link(checkpoint_dir, "best.pt", checkpoint)
@@ -367,6 +377,11 @@ def run_formal(args, cfg, output, trainer, collector, profile, tasks, report, so
                                       "actor_version": trainer.accepted_actor_updates}), flush=True)
                     continue
                 states = replay.sample(cfg["training"]["actor_microbatch"], actor_version=trainer.accepted_actor_updates)
+                candidate_distribution = None
+                if cfg.get("teacher", {}).get("enabled"):
+                    from .sample_distribution import describe_sample
+                    candidate_distribution = [describe_sample(x,trainer.imagination.adapter) for x in replay.items
+                        if x.generation.request.actor_version == trainer.accepted_actor_updates]
             else:
                 states = replay.sample(cfg["training"]["actor_microbatch"])
                 latencies = [profile.sample(trainer.imagination.decisions) for _ in states]
@@ -378,6 +393,8 @@ def run_formal(args, cfg, output, trainer, collector, profile, tasks, report, so
                    trainer.update(states, supervised.next(), latencies, physical_intervals=physical))
             gpu_end.record()
             gpu_end.synchronize()
+            if short and candidate_distribution is not None:
+                row["real_candidate_distribution"] = candidate_distribution
             row.update(physical_control_steps=control_steps, collection_wall_seconds=collect_seconds,
                        physical_collectors=1+len(remotes), remote_collection_seconds=remote_timings if short else [],
                        collection_policy_version=trainer.accepted_actor_updates-int(row["accepted_execution_feedback_update"]),

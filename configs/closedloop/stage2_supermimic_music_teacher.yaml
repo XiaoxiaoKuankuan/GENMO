@@ -1,0 +1,116 @@
+# 冻结s595000音乐教师修复：独立固定音乐目标 + 同请求局部教师 + H=32真实接管BPTT。
+# Actor先使用短时执行目标，终点价值权重为零；新Critic仍用新奖励真实MC重新训练并独立验证。
+# 基于真实首次接管状态的短时BPTT；formal必须提供新短时物理方向与梯度报告。
+# 60帧@30Hz，SM 50Hz / Newton四子步；所有路径可在独立运行副本中重定位。
+algorithm: genmo_supermimic_model_based
+training_method: physical_anchor_short_bptt
+physics_backend: isaaclab3_newton_mujoco_warp
+stage1:
+  checkpoint: null
+  stats: /home/weili/bumi-closedloop-worktrees/stage1_server2_scratch600k_20260930/assets/qpos30_train_stats.json
+  kinematics: configs/bumi/bumi_kinematics_robot_retargeter_fe934_v1.json
+  data_config: null
+supermimic:
+  repo: /home/weili/bumi-closedloop-worktrees/supermimic/SuperMimic
+  checkpoint: /home/weili/supermimic_vibed/logs/bumi3_seven_filtered_v1/ckpt_024000.pt
+  robot_asset_dir: /home/weili/supermimic_vibed/data/bumi3_4340/robot
+tasks: null
+latency_profile: null
+model:
+  motion_frames: 60
+  motion_fps: 30
+  ddim_steps: 20
+  eta: 0.0
+  cfg_scale: 2.5
+  forecast_enabled: true
+  activation_checkpointing: true
+  batch_cfg: true
+clock:
+  bootstrap_latency_ticks: null
+  latency_margin_ticks: 0
+  request_mode: eager
+  request_interval_ticks: 300
+  max_consecutive_timeouts: 3
+imagination:
+  mode: physical_anchor_short_bptt
+  horizon_steps: 32
+  critic_bootstrap: false
+  anchor_gradient_report: null
+  decision_intervals: 3
+  validated_model_steps: null
+  physical_validation_report: null
+critic:
+  network: {width: 256, layers: 2, heads: 4, teacher_conditioned: true}
+  gamma_per_control: 0.99
+training:
+  genmo_lr: 0.000001
+  forecast_lr: 0.000001
+  critic_lr: 0.0001
+  weight_decay: 0.01
+  bc_weight: 1.0
+  prior_weight: 2.0
+  terminal_value_weight: 0.0
+  balanced_motion_sampling: true
+  grad_clip: 1.0
+  lambda_per_half_second: 0.95
+  warmup_updates: 2  # 仅smoke管线检查；正式使用下方独立真实MC质量门槛。
+  stage1_supervision_step: 595000
+  actor_microbatch: 2
+  supervision_batch: 1
+  collect_decisions: 6  # 扩大当前版本真实候选池，分层抽样有实际选择空间。
+  replay_capacity: 128
+  seed: 42
+rewards:
+  mode: teacher_music
+  track_weight: 0.1
+  dance_scales: {root_position: 0.3, root_orientation: 0.4, root_velocity: 1.0, body_position: 0.15, body_orientation: 0.3, body_velocity: 1.0, joint_position: 0.35, joint_velocity: 2.0, joint_acceleration: 20.0}
+  # 尺度来自rolling configs/closedloop/stage2_continuous_rolling.yaml reward_std，非SM默认值。
+  scales: {anchor_pos: 0.3, anchor_ori: 0.4, body_pos: 0.15, body_ori: 0.2, body_lin_vel: 1.0, body_ang_vel: 3.14, foot_height: 0.07, leg_joint_pos: 0.25}
+  # 名称来自原已确认BUMI4340 tracking_env_cfg CommandsCfg.body_names，共22体。
+  body_names: [base_link, waist_yaw_link, l_arm_pitch_link, l_arm_roll_link, l_arm_yaw_link, l_elbow_pitch_link, r_arm_pitch_link, r_arm_roll_link, r_arm_yaw_link, r_elbow_pitch_link, l_leg_pitch_link, l_leg_roll_link, l_leg_yaw_link, l_knee_pitch_link, l_ankle_pitch_link, l_ankle_roll_link, r_leg_pitch_link, r_leg_roll_link, r_leg_yaw_link, r_knee_pitch_link, r_ankle_pitch_link, r_ankle_roll_link]
+  foot_names: [l_ankle_roll_link, r_ankle_roll_link]
+  leg_joint_names: [l_leg_pitch_joint, l_leg_roll_joint, l_leg_yaw_joint, l_knee_pitch_joint, l_ankle_pitch_joint, l_ankle_roll_joint, r_leg_pitch_joint, r_leg_roll_joint, r_leg_yaw_joint, r_knee_pitch_joint, r_ankle_pitch_joint, r_ankle_roll_joint]
+  action_rate_weight: 0.1
+  joint_limit_weight: 2.0
+  root_huber_weight: 0.0
+  music_surrogate_enabled: false
+execution:
+  physics_determinism: run_to_run
+  start_large_scale_training: false
+  maximum_explicit_updates: 8
+  preserve_episode_across_collection_windows: true
+  physical_batch: 1
+formal:
+  critic_validation_tasks: null
+  evaluation_tasks: null
+  evaluation_gpu: 1
+  checkpoint_every: 100
+  evaluate_every: 100
+  max_control_steps: 5000000
+  max_wall_hours: 72
+  maximum_invalid_streak: 20
+  critic_warmup:
+    seed: 3042
+    train_episodes: 16
+    minimum_samples_per_split: 24
+    max_collection_steps: 100000
+    batch_size: 8
+    minimum_updates: 100
+    max_updates: 2000
+    validate_every: 25
+    maximum_mse: 0.25
+    minimum_explained_variance: 0.1
+    minimum_relative_improvement: 0.2
+  degradation:
+    completion_drop: 0.1
+    minimum_duration_ratio: 0.9
+    minimum_activity_ratio: 0.8
+    maximum_beat_drop: 0.1
+    # 仅报告指标变化，不因连续退化停止训练。
+
+teacher:
+  enabled: true
+  cache_dir: null  # 运行配置必须提供独立训练侧缓存目录；不放入部署生成线程。
+  seed: 73421
+  local_cache_size: 256
+  timeline_memory_cache_size: 4

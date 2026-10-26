@@ -83,6 +83,13 @@ def build_components(cfg, device):
         imagination = PhysicalAnchorImagination(actor, adapter, scheduler, rewards,
             horizon_steps=cfg["imagination"]["horizon_steps"], gamma=cfg["critic"]["gamma_per_control"],
             forecast_enabled=cfg["model"]["forecast_enabled"])
+    imagination.teacher = None
+    if cfg.get("teacher", {}).get("enabled", False):
+        from .teacher import FrozenStage1Teacher
+        teacher = FrozenStage1Teacher(cfg, adapter, scheduler, device)
+        imagination.teacher = rewards.teacher = teacher
+        if rewards.mode != "teacher_music" or not cfg["critic"]["network"].get("teacher_conditioned"):
+            raise ValueError("冻结音乐教师需要新的执行目标和包含教师目标的独立Critic")
     return actor, adapter, scheduler, rewards, critic, imagination, original
 
 
@@ -95,7 +102,8 @@ def behavior_config(cfg, actor, adapter):
         "robot_contract": adapter.bundle.metadata["robot"],
         "task_sequence": [task_identity(t) for t in read_tasks(cfg["tasks"])],
         "deployment_latency_samples": json.loads(Path(cfg["latency_profile"]).read_text())["latency_ticks"],
-        "supervision_sampling": OmegaConf.to_container(OmegaConf.load(cfg["stage1"]["data_config"]), resolve=True)}
+        "supervision_sampling": OmegaConf.to_container(OmegaConf.load(cfg["stage1"]["data_config"]), resolve=True),
+        "teacher": cfg.get("teacher")}
 
 
 def task_identity(task):
@@ -141,6 +149,7 @@ def read_music_features(path):
 
 
 def task_inputs(task, adapter, device):
+    adapter.current_task = dict(task)
     music = read_music_features(task["music_features"]).to(device)[None]
     if task.get("initial_state"):
         initial = torch.as_tensor(np.load(require_file(task["initial_state"], "initial_state"), allow_pickle=False),

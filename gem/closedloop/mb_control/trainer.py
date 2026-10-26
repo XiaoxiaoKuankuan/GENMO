@@ -43,8 +43,12 @@ class Stage2Trainer:
         self.critic_optimizer = torch.optim.AdamW(critic.parameters(), lr=config["critic_lr"])
         groups = [set(p.untyped_storage().data_ptr() for p in module.parameters())
                   for module in (actor, critic, imagination.adapter.bundle)]
-        if any(groups[i] & groups[j] for i in range(3) for j in range(i)):
-            raise ValueError("GENMO、Critic、冻结模型不能共享参数存储")
+        teacher = getattr(imagination, "teacher", None)
+        if teacher is not None:
+            teacher.assert_frozen()
+            groups.append({p.untyped_storage().data_ptr() for p in teacher.parameters()})
+        if any(groups[i] & groups[j] for i in range(len(groups)) for j in range(i)):
+            raise ValueError("GENMO、Critic、冻结SM与音乐教师不能共享参数存储")
         if config["warmup_updates"] < 1 or config["bc_weight"] <= 0:
             raise ValueError("必须预热独立Critic并保留原Stage1监督")
         self.frozen_identity = imagination.adapter.bundle.frozen_snapshot()
@@ -82,6 +86,9 @@ class Stage2Trainer:
 
     def update_anchors(self, samples, supervised_batch, *, physical_intervals, physical_interval_groups=None):
         """仅真实、当前Actor版本、完整H步的首次接管样本可计作有效执行反馈。"""
+        if getattr(self.imagination, "teacher", None) is not None:
+            from .teacher_training import update_teacher_anchors
+            return update_teacher_anchors(self, samples, supervised_batch, physical_intervals, physical_interval_groups)
         from .execution_audit import state_probe
         from .validation import UnsupportedModelState
         started = time.perf_counter()

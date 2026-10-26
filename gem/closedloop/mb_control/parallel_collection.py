@@ -56,6 +56,7 @@ def run_collector_service(args, cfg, collector):
     collector.collector_id = args.collector_id
     collector.anchor_horizon = cfg["imagination"]["horizon_steps"]
     collector.record_controls = True
+    collector.record_contacts = True
     if not isinstance(collector.anchor_horizon, int):
         raise ValueError("并行物理采集需要已解析的真实验证短时域")
     frozen = collector.adapter.bundle.frozen_snapshot()

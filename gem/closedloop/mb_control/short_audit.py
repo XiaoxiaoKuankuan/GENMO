@@ -65,8 +65,8 @@ def phase_labels(sample, event, previous_event, adapter):
 def audit_short(collector, tasks, output, cfg, criteria, *, device):
     output = Path(output)
     horizons = criteria["horizons"]
-    if horizons != [8, 16, 24, 32]:
-        raise ValueError("短时审计必须分别测量8/16/24/32，不外推时域")
+    if not horizons or sorted(set(horizons)) != horizons or not set(horizons) <= {8, 16, 24, 32}:
+        raise ValueError("只允许明确选择8/16/24/32中的独立实测时域，不外推未测试时域")
     (output/"declared_criteria.json").write_text(json.dumps(criteria, ensure_ascii=False, indent=2))
     collector.anchor_horizon = max(horizons)
     collector.record_controls = True
@@ -181,11 +181,11 @@ def audit_short(collector, tasks, output, cfg, criteria, *, device):
                             plan_override=perturb_plan(sample.generation.plan, coordinate, amplitude),
                             transition_fn=collector.env.step_physics if physical_run else None, on_step=record)
                         objective = actor_return([interval], torch.zeros_like(interval.reward)).mean()
-                    return objective, torch.cat(trace), contact, interval.steps
+                    return objective, torch.cat(trace), contact, interval.steps, interval.event.get("objective_terms", {})
 
-                model, mt, _, _ = run(False)
-                real, rt, rc, rs = run(True)
-                repeated, repeated_states, repeat_contacts, repeated_steps = run(True)
+                model, mt, _, _, model_terms = run(False)
+                real, rt, rc, rs, real_terms = run(True)
+                repeated, repeated_states, repeat_contacts, repeated_steps, _ = run(True)
                 length = min(len(mt), len(rt))
                 statistics = trajectory_metrics(mt[:length], rt[:length], collector.adapter.runtime.kin,
                     limits=criteria["state_rmse_limits"], start_tick=sample.state.tick)
@@ -195,13 +195,17 @@ def audit_short(collector, tasks, output, cfg, criteria, *, device):
                 directions_report = []
                 for name, coordinate, epsilons in directions:
                     amplitude = torch.zeros((), device=device, requires_grad=True)
-                    objective, _, _, _ = run(False, coordinate, amplitude)
-                    gradient, = torch.autograd.grad(objective, amplitude)
+                    objective, _, _, _, parts = run(False, coordinate, amplitude)
+                    gradient, = torch.autograd.grad(objective, amplitude, retain_graph=bool(parts))
+                    component_gradients = {}
+                    weights = {"dance_loss":1., "current_reference_loss":cfg["rewards"].get("track_weight", .1), "physical_cost":1.}
+                    for name, value in parts.items():
+                        component_gradients[name] = float(torch.autograd.grad(-weights[name]*value.mean(),amplitude,retain_graph=True)[0])
                     for eps in epsilons:
-                        minus, _, _, _ = run(False, coordinate, -eps)
-                        plus, _, _, _ = run(False, coordinate, eps)
-                        negative, _, nc, ns = run(True, coordinate, -eps)
-                        positive, _, pc, ps = run(True, coordinate, eps)
+                        minus, _, _, _, _ = run(False, coordinate, -eps)
+                        plus, _, _, _, _ = run(False, coordinate, eps)
+                        negative, _, nc, ns, negative_parts = run(True, coordinate, -eps)
+                        positive, _, pc, ps, positive_parts = run(True, coordinate, eps)
                         model_fd = float((plus-minus)/(2*eps))
                         physical_delta = float(positive-negative)
                         slope = physical_delta/(2*eps)
@@ -218,12 +222,17 @@ def audit_short(collector, tasks, output, cfg, criteria, *, device):
                                "status": "determinate" if determinate else "indeterminate_noise_or_early_termination",
                                "direction_agrees": float(gradient)*slope > 0 if determinate else None,
                                "optimized_physical_delta": delta, "contact_events_changed": changed,
+                               "component_model_derivatives":component_gradients,
+                               "component_physical_centered_difference":{name:-weights[name]*float(
+                                   (positive_parts[name]-negative_parts[name]).mean())/(2*eps) for name in positive_parts},
                                "physical_positive_contacts": [c["pair_signature"] for c in pc],
                                "physical_negative_contacts": [c["pair_signature"] for c in nc]}
                         directions_report.append(row)
                 case["horizons"][str(horizon)] = {"statistics": statistics,
                     "prediction_passed": rs == horizon and all(v["rmse"] <= criteria["state_rmse_limits"][k] for k,v in statistics.items()),
                     "model_return": float(model), "physical_return": float(real), "physical_repeat_return": float(repeated),
+                    "model_loss_components":{k:float(v.mean()) for k,v in model_terms.items()},
+                    "physical_loss_components":{k:float(v.mean()) for k,v in real_terms.items()},
                     "reset_repeat_state_max_abs": reset_error, "reset_repeat_return_delta": repeat_delta,
                     "reset_repeat_passed": rs == repeated_steps == horizon and reset_error <= criteria["reset_replay_max_abs"],
                     "base_contacts": [c["pair_signature"] for c in rc], "directions": directions_report}
@@ -237,14 +246,15 @@ def audit_short(collector, tasks, output, cfg, criteria, *, device):
             with (output/"short_cases.jsonl").open("a") as stream:
                 stream.write(json.dumps(case, ensure_ascii=False, allow_nan=False)+"\n")
     collector.adapter.bundle.assert_unchanged(before)
-    report = summarize_short(all_cases, criteria)
+    report = summarize_short(all_cases, criteria, numerical_rule=criteria.get("numerical_rule", "all_scales"))
     report.update(schema="physical_anchor_short_bptt.v1", training_method="physical_anchor_short_bptt",
         cases=all_cases, frozen_sha256=collector.adapter.bundle.metadata["sha256"], frozen_unchanged=True,
         forecast_enabled=True, source_hash_gate=False, validated_state_envelope=combine_envelopes(envelopes),
         physics_determinism=cfg.get("execution", {}).get("physics_determinism", "not_guaranteed"),
         coverage={"physics": "nominal_flat_newton_mujoco_warp", "tasks": [
             {k: t.get(k) for k in ("id", "source", "split", "distribution_id")} for t in tasks]},
-        task_identities={t["id"]: task_identity(t) for t in tasks}, criteria=criteria)
+        task_identities={t["id"]: task_identity(t) for t in tasks}, criteria=criteria,
+        reward_contract=cfg["rewards"], teacher_identity=getattr(getattr(collector.rewards, "teacher", None), "identity", None))
     (output/"short_physics_audit.json").write_text(json.dumps(report, ensure_ascii=False, indent=2, allow_nan=False))
     return report
 

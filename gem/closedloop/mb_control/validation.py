@@ -84,8 +84,14 @@ def select_short_horizon(cfg, report):
     selected = min(candidates) if requested in (None, "auto") else requested
     if selected not in candidates:
         raise ValueError("配置短时域未获得对应物理验收")
-    if cfg["imagination"].get("critic_bootstrap") is not True:
+    teacher_only_short = (cfg.get("teacher", {}).get("enabled") and
+                          cfg["training"].get("terminal_value_weight") == 0.)
+    if cfg["imagination"].get("critic_bootstrap") is not True and not teacher_only_short:
         raise ValueError("短时训练必须启用独立上层Critic终点价值")
+    if cfg.get("teacher", {}).get("enabled") and report.get("reward_contract") != cfg["rewards"]:
+        raise ValueError("教师音乐目标需要对应新奖励的实际H物理方向验证")
+    if cfg.get("teacher", {}).get("enabled") and report.get("teacher_seed")!=cfg["teacher"]["seed"]:
+        raise ValueError("物理方向必须对应同一个固定教师音乐时间线")
     import json
     from pathlib import Path
     path = cfg["imagination"].get("anchor_gradient_report")
@@ -95,5 +101,7 @@ def select_short_horizon(cfg, report):
     if (gradient.get("method") != "physical_anchor_short_bptt" or gradient.get("passed") is not True or
             gradient.get("horizon") != selected or gradient.get("frozen_sha256") != report.get("frozen_sha256")):
         raise ValueError("真实anchor执行梯度报告不匹配或未通过")
+    if cfg.get("teacher", {}).get("enabled") and gradient.get("reward_contract") != cfg["rewards"]:
+        raise ValueError("真实anchor梯度必须验证当前冻结教师的新奖励")
     cfg["imagination"]["horizon_steps"] = selected
     return selected

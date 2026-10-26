@@ -37,18 +37,25 @@ def save_warmup(path, trainer, cfg):
     from supermimic.bridge.bundle import atomic_save
     if not trainer.critic_ready:
         raise ValueError("未通过独立质量的Critic不能导出为ready")
-    atomic_save({"schema": "genmo.real_mc_critic.control50.v1", "actor": trainer.actor.state_dict(),
+    atomic_save({"schema": "genmo.real_mc_critic.teacher_music.v2" if cfg.get("teacher",{}).get("enabled") else "genmo.real_mc_critic.control50.v1", "actor": trainer.actor.state_dict(),
         "critic": trainer.critic.state_dict(), "optimizer": trainer.critic_optimizer.state_dict(),
         "quality": trainer.critic_quality, "critic_updates": trainer.critic_updates,
         "contract": {k: cfg[k] for k in ("model", "clock", "rewards", "critic")},
+        "teacher_identity": trainer.imagination.teacher.identity if getattr(trainer.imagination,"teacher",None) else None,
+        "teacher_seed":cfg.get("teacher",{}).get("seed"),
         "physics_determinism": cfg.get("execution", {}).get("physics_determinism", "not_guaranteed"),
         "frozen_sha256": trainer.imagination.adapter.bundle.metadata["sha256"]}, path)
 
 
 def load_warmup(path, trainer, cfg):
     ck = torch.load(path, weights_only=False, map_location="cpu")
-    if ck.get("schema") != "genmo.real_mc_critic.control50.v1" or ck["quality"].get("passed") is not True:
+    expected_schema = "genmo.real_mc_critic.teacher_music.v2" if cfg.get("teacher",{}).get("enabled") else "genmo.real_mc_critic.control50.v1"
+    if ck.get("schema") != expected_schema or ck["quality"].get("passed") is not True:
         raise ValueError("需要任意50Hz真实MC质量通过的Upper Critic")
+    if cfg.get("teacher",{}).get("enabled") and ck.get("teacher_identity") != trainer.imagination.teacher.identity:
+        raise ValueError("新Critic必须来自当前冻结音乐教师与新执行奖励，不能导入旧价值")
+    if cfg.get("teacher",{}).get("enabled") and ck.get("teacher_seed")!=cfg["teacher"]["seed"]:
+        raise ValueError("固定音乐时间线的教师噪声种子不匹配，Critic目标不相同")
     if ck["frozen_sha256"] != trainer.imagination.adapter.bundle.metadata["sha256"] or ck["contract"] != {
             k: cfg[k] for k in ("model", "clock", "rewards", "critic")}:
         raise ValueError("Critic实际资产、模型条件、奖励或调度合同改变")
@@ -63,10 +70,11 @@ def load_warmup(path, trainer, cfg):
     return ck["quality"]
 
 
-def collect_mc(collector, tasks, *, seed, device, max_control_steps, output=None, split="train"):
+def collect_mc(collector, tasks, *, seed, device, max_control_steps, output=None, split="train", episode_offset=0):
     collector.record_controls = True
     pairs, episodes, steps = [], [], 0
     for i, task in enumerate(tasks):
+        i += episode_offset
         seed_all(seed + i)
         music, initial = task_inputs(task, collector.adapter, device)
         collector.reset(music, initial)
@@ -139,6 +147,12 @@ def warmup_critic(trainer, collector, train_tasks, validation_tasks, config, out
                "validation": [(pack_state(z, memo), y.cpu()) for z,y in validation],
                "train_episodes": train_episodes, "validation_episodes": val_episodes, "criteria": config}
     torch.save(payload, output / "real_mc.pt")
+    return fit_mc_dataset(trainer, train, validation, config, output, ntrain+nval, actor_before)
+
+
+def fit_mc_dataset(trainer, train, validation, config, output, physical_steps, actor_before):
+    """使用完整真实MC训练新Critic；允许多个物理进程提前收集，监督定义不变。"""
+    output = Path(output)
     if min(len(train), len(validation)) < config["minimum_samples_per_split"] or not all(
             any(z.pending for z, _ in pairs) and any(z.tick % 60 for z, _ in pairs) for pairs in (train, validation)):
         raise RuntimeError("独立真实MC样本不足，Critic不能获准正式使用")
@@ -164,8 +178,11 @@ def warmup_critic(trainer, collector, train_tasks, validation_tasks, config, out
     trainer.imagination.adapter.bundle.assert_unchanged(trainer.frozen_identity)
     if any(not torch.equal(p, actor_before[n]) for n, p in trainer.actor.named_parameters()):
         raise RuntimeError("Critic预热期间GENMO发生变化")
-    trainer.critic_quality = {**metrics, "passed": trainer.critic_ready, "physical_control_steps": ntrain+nval,
+    trainer.critic_quality = {**metrics, "passed": trainer.critic_ready, "physical_control_steps": physical_steps,
                               "criteria": config, "targets": "real_complete_episode_mc", "genmo_unchanged": True}
+    trainer.critic_quality["reward_mode"] = trainer.imagination.rewards.mode
+    trainer.critic_quality["teacher_identity"] = (trainer.imagination.teacher.identity
+        if getattr(trainer.imagination,"teacher",None) else None)
     (output/"quality.json").write_text(json.dumps(trainer.critic_quality, ensure_ascii=False, indent=2))
     if not trainer.critic_ready:
         raise RuntimeError("Critic独立验证未达到预先声明门槛，禁止正式Actor更新")

@@ -10,11 +10,12 @@ import random
 
 
 class RecentReplay:
-    def __init__(self, capacity=128, seed=42):
+    def __init__(self, capacity=128, seed=42, balanced=False):
         if capacity < 1:
             raise ValueError("回放容量必须为正")
         self.items = deque(maxlen=capacity)
         self.random = random.Random(seed)
+        self.balanced = balanced
 
     def add(self, state):
         from .contracts import PhysicalAnchor
@@ -34,6 +35,9 @@ class RecentReplay:
             raise ValueError("必须先真实采集")
         if count < 1 or len(eligible) < count:
             raise ValueError("同版本独立真实样本不足，不能重复一个anchor冒充多样本微批")
+        if self.balanced and actor_version is not None:
+            from .sample_distribution import stratified_sample
+            return stratified_sample(eligible, count, self.random)
         return self.random.sample(eligible, count)
 
     def eligible_count(self, actor_version):

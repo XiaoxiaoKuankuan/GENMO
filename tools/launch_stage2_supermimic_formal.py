@@ -105,6 +105,17 @@ def main():
         "maximum_invalid_streak", "checkpoint_every", "evaluate_every", "degradation")))
     def gradients():
         report = json.loads(Path(args.gradient_report).read_text())
+        if cfg.get("teacher", {}).get("enabled"):
+            return (report.get("passed") is True and report.get("reward_contract") == cfg["rewards"] and
+                    report.get("horizon") == cfg["imagination"]["horizon_steps"] and
+                    report.get("teacher_storage_independent") is True and
+                    report.get("teacher_parameters_statistics_unchanged") is True and
+                    report.get("teacher_preserves_student_rng") is True and
+                    report.get("fixed_timeline_unchanged_after_actor_update") is True and
+                    report.get("known_prefix_prior_gradient_max_abs") == 0 and
+                    report.get("zero_forecast_stage1_max_abs", 1) <= 1e-5 and
+                    report.get("frozen_parameters_and_buffers_unchanged") is True and
+                    report["actual_update"]["accepted_execution_feedback_update"] is True)
         return (report["execution_paths"]["passed"] is True and report["zero_forecast_stage1_max_abs"] <= 1e-5 and
                 report["checkpoint_gradient_max_abs"] <= 1e-5 and report["frozen_parameters_and_buffers_unchanged"] is True)
     check("execution_gradients", gradients)

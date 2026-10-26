@@ -103,7 +103,9 @@ class Imagination:
                         self.support_guard(state1)
                     if on_transition is not None:
                         on_transition(z, action, state1, ref1)
-                    reward, _ = self.rewards(state1, action, z.previous_action, ref1)
+                    target = (z.teacher_reference.read_current_future(z.tick+12, future_steps=0)[0]
+                              if z.teacher_reference is not None else None)
+                    reward, _ = self.rewards(state1, action, z.previous_action, ref1, teacher_reference=target)
                     failed = self.adapter.runtime.termination(state1, ref1)
                     alive = (1 - self.adapter.runtime.termination(state1, ref1, soft=True) if transition_fn is None
                              else (~failed).to(reward))
@@ -176,6 +178,7 @@ class PhysicalAnchorImagination:
         pending_by_id = {}
         version = record.reference_version
         consumed_steps = 0
+        objective_terms = {}
 
         def schedule(current, recorded):
             pending = recorded.pending_request
@@ -209,9 +212,16 @@ class PhysicalAnchorImagination:
             if self.support_guard is not None:
                 self.support_guard(state1)
             ref1, _, _ = z.reference.read_current_future(z.tick+12)
-            reward, _ = self.rewards(state1, action, z.previous_action, ref1)
+            target = (z.teacher_reference.read_current_future(z.tick+12, future_steps=0)[0]
+                      if z.teacher_reference is not None else None)
+            reward, metrics = self.rewards(state1, action, z.previous_action, ref1, teacher_reference=target)
+            if self.rewards.mode == "teacher_music":
+                # 短时 Actor 的固定H目标不靠缩短软存活时域逃避负损失；真实终止仍独立记录。
+                for name in ("dance_loss", "current_reference_loss", "physical_cost"):
+                    objective_terms[name] = objective_terms.get(name, 0.) + self.gamma**index*.02*metrics[name]
             failed = self.adapter.runtime.termination(state1, ref1)
-            alive = (1-self.adapter.runtime.termination(state1, ref1, soft=True) if transition_fn is None
+            alive = (torch.ones_like(reward) if self.rewards.mode == "teacher_music" and transition_fn is None else
+                     1-self.adapter.runtime.termination(state1, ref1, soft=True) if transition_fn is None
                      else (~failed).to(reward))
             totals.add(reward, alive)
             z = self.adapter.advance(z, state1, action, origin="imagined" if transition_fn is None else "real")
@@ -233,5 +243,6 @@ class PhysicalAnchorImagination:
                  "longest_model_dependency_steps": totals.steps, "future_reference_policy": "fixed_recorded_behavior_continuation",
                  "genmo_condition_tick": request.snapshot.tick, "forecast_condition_is_recorded_prediction": True,
                  "no_previous_consumption_verified": True}
+        event["objective_terms"] = objective_terms
         interval = DecisionInterval(start, z, totals.reward, totals.survival, totals.steps, self.gamma, terminal, reason, event)
         return interval, plan, noise

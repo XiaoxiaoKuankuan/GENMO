@@ -17,7 +17,12 @@ from .application import seed_all, task_inputs, task_identity
 
 def evaluation_contract(cfg, tasks, frozen_sha256):
     """允许预先运行更新前物理基线；比较实际条件和任务，不比较源码版本。"""
-    return {"model": cfg["model"], "clock": cfg["clock"], "rewards": cfg["rewards"],
+    teacher = None
+    if cfg.get("teacher",{}).get("enabled"):
+        from supermimic.bridge.bundle import file_digest
+        teacher = {"seed":cfg["teacher"]["seed"],"schema":"frozen_stage1_music_teacher.v1",
+            "assets":{k:file_digest(cfg["stage1"][k]) for k in ("checkpoint","stats","kinematics")}}
+    return {"model": cfg["model"], "clock": cfg["clock"], "rewards": cfg["rewards"], "teacher":teacher,
             "physics_determinism": cfg.get("execution", {}).get("physics_determinism", "not_guaranteed"),
             "frozen_sha256": frozen_sha256,
             "tasks": [{"id": t["id"], "identity": task_identity(t), "seeds": t.get("seeds", [42])} for t in tasks]}
@@ -89,6 +94,14 @@ def evaluate_tasks(collector, tasks, output, *, mode, device, max_seconds=None):
             rows.append(row)
             if collector.trajectory:
                 state = torch.cat([v[1] for v in collector.trajectory])
+                reference_q = torch.cat([v[5] for v in collector.trajectory])
+                row["reference_motion"] = {"joint_range_mean_rad":float((reference_q.amax(0)-reference_q.amin(0)).mean()),
+                    "joint_speed_rms_rad_s":float((torch.diff(reference_q,dim=0)*50).square().mean().sqrt())}
+                teacher_arrays = {}
+                if collector.state.teacher_reference is not None:
+                    clock = torch.tensor([v[0] for v in collector.trajectory],device=collector.state.state.device)
+                    teacher_arrays["fixed_stage1_teacher_world_qpos28"] = collector.state.teacher_reference.source_at(clock).squeeze(0).cpu().numpy()
+                    teacher_arrays["fixed_stage1_teacher_joint_names"] = np.asarray(collector.actor.stage1.endecoder.kinematics.joint_order)
                 diversity.setdefault(task["id"], []).append(state[:, 13:34])
                 # 同一文件兼容SM现有渲染器：真实状态与当帧原始世界参考逐帧配对。
                 # 不保存扩散链，不重新对齐影子，不使用未来覆盖后的缓存补造参考。
@@ -109,7 +122,7 @@ def evaluate_tasks(collector, tasks, output, *, mode, device, max_seconds=None):
                     joint_names=np.asarray(collector.adapter.bundle.spec.joint_names),
                     actor_version=np.asarray(collector.actor_version),
                     termination_reason=np.asarray(reason), music_seconds=np.asarray(music.shape[1]/30),
-                    physics_backend=np.asarray("isaaclab3_newton_mujoco_warp"))
+                    physics_backend=np.asarray("isaaclab3_newton_mujoco_warp"),**teacher_arrays)
             with (output / "physical_results.jsonl").open("a") as stream:
                 stream.write(json.dumps(row, ensure_ascii=False, allow_nan=False) + "\n")
     pairwise = {}

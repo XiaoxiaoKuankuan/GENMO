@@ -48,6 +48,10 @@ class ClosedLoopState:
     pending: bool = False
     history_origin: str = "real"
     pending_request: Any = None
+    teacher_reference: Any = None
+    task_id: str = ""
+    task_source: str = "unknown"
+    motion_class: str = "unlabelled"
 
     def validate(self, *, decision=False):
         b = len(self.state)

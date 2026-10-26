@@ -102,6 +102,8 @@ class PhysicalCollector:
         if self.worker.future is not None:
             raise RuntimeError("复位前必须显式结束旧请求")
         dev = initial_state.device
+        teacher = getattr(self.rewards, "teacher", None)
+        teacher_reference = teacher.timeline(music, initial_state) if teacher is not None else None
         self.episode_index += 1
         self.env.reset(torch.arange(1, device=dev), initial_state)
         observed = self.env.observe()
@@ -121,6 +123,9 @@ class PhysicalCollector:
         self.state = ClosedLoopState(0, observed["state"], observed["xi"], observed["previous_action"],
                                      obs[:, None].expand(-1, 10, -1).clone(), history, mask, ref, music,
                                      music_start_tick, music_start_tick + music.shape[1] * 20)
+        task = getattr(self.adapter, "current_task", {})
+        self.state = replace(self.state, teacher_reference=teacher_reference, task_id=str(task.get("id", "")),
+            task_source=task.get("source", "unknown"), motion_class=task.get("motion_class", "unlabelled"))
         self.terminal = False
         self.events, self.trajectory, self.metrics = [], [], []
         self.cancelled_requests = []
@@ -195,7 +200,9 @@ class PhysicalCollector:
                     ref1, _, _ = z.reference.read_current_future(z.tick + 12)
                     with torch.profiler.record_function("mb/physics"):
                         state1 = self.env.step_physics(action)
-                    reward, metrics = self.rewards(state1, action, z.previous_action, ref1)
+                    target = (z.teacher_reference.read_current_future(z.tick+12, future_steps=0)[0]
+                              if z.teacher_reference is not None else None)
+                    reward, metrics = self.rewards(state1, action, z.previous_action, ref1, teacher_reference=target)
                     failed = bool(self.adapter.runtime.termination(state1, ref1).any())
                     totals.add(reward, torch.zeros_like(reward) if failed else torch.ones_like(reward))
                     z = self.adapter.advance(z, state1, action, origin="real")

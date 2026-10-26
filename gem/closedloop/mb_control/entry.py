@@ -203,11 +203,27 @@ def main(kind):
                 warmup_critic(trainer, collector, selected, validation, cfg["formal"]["critic_warmup"], output,
                               device=args.torch_device)
                 save_warmup(output/"critic_ready.pt", trainer, cfg)
+            elif kind == "mc":
+                from .critic_warmup import collect_mc
+                settings = cfg["mc_collection"]
+                _, episodes, steps = collect_mc(collector,tasks,seed=settings["seed"],device=args.torch_device,
+                    max_control_steps=cfg["formal"]["critic_warmup"]["max_collection_steps"],output=output,
+                    split=settings["split"],episode_offset=settings["episode_offset"])
+                torch.save({"actor":actor.state_dict(),"episodes":episodes,"physical_control_steps":steps,
+                    "split":settings["split"],"contract":{k:cfg[k] for k in ("model","clock","rewards","critic")},
+                    "teacher_identity":engine.teacher.identity,"frozen_sha256":adapter.bundle.metadata["sha256"],
+                    "physics_determinism":cfg["execution"].get("physics_determinism")},output/"mc_complete.pt")
+            elif kind == "teacher_audit":
+                from .teacher_audit import audit_teacher
+                audit_teacher(collector,actor,critic,engine,original,cfg,tasks,output,args.torch_device)
             elif kind == "short":
                 from .short_audit import audit_short
                 if not args.criteria:
                     raise ValueError("短时物理验收必须预先声明完整阈值与扰动尺度")
                 audit_short(collector, tasks, output, cfg, json.loads(Path(args.criteria).read_text()), device=args.torch_device)
+            elif kind == "collapse":
+                from .collapse_audit import audit_collapse
+                audit_collapse(collector,tasks,cfg,output,args.torch_device)
             elif kind == "dynamics":
                 from .model_audit import audit_known_reference
                 criteria = json.loads(Path(args.criteria).read_text()) if args.criteria else None
@@ -299,10 +315,12 @@ def main(kind):
                 if short:
                     collector.anchor_horizon = engine.horizon_steps
                     collector.record_controls = True
+                    collector.record_contacts = True
                     if cfg["formal"].get("critic_warmup_checkpoint") and not args.resume:
                         from .critic_warmup import load_warmup
                         load_warmup(cfg["formal"]["critic_warmup_checkpoint"], trainer, cfg)
-                replay = RecentReplay(cfg["training"]["replay_capacity"], cfg["training"]["seed"])
+                replay = RecentReplay(cfg["training"]["replay_capacity"], cfg["training"]["seed"],
+                                      balanced=cfg["training"].get("balanced_motion_sampling",False))
                 supervised = SupervisionStream(cfg["stage1"]["data_config"], cfg["training"]["supervision_batch"],
                                                cfg["training"]["seed"], args.torch_device)
                 behavior = behavior_config(cfg, actor, adapter)
@@ -321,7 +339,7 @@ def main(kind):
                     collector.actor_version = trainer.accepted_actor_updates
                     physical = collector.collect(cfg["training"]["collect_decisions"], replay=replay)
                     if short:
-                        while replay.eligible_count(trainer.accepted_actor_updates) == 0 and not collector.terminal:
+                        while replay.eligible_count(trainer.accepted_actor_updates) < cfg["training"]["actor_microbatch"] and not collector.terminal:
                             collector.collect(1, replay=replay)
                         physical = collector.take_controls()
                         states = replay.sample(cfg["training"]["actor_microbatch"], actor_version=trainer.accepted_actor_updates)
