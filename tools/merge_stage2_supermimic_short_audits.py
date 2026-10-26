@@ -18,6 +18,8 @@ def main():
     parser.add_argument("--reports", nargs="+", required=True)
     parser.add_argument("--supermimic-repo", required=True)
     parser.add_argument("--output", required=True)
+    parser.add_argument("--numerical-rule", choices=("all_scales", "local_convergence"), default="all_scales",
+                        help="原始全尺度弦斜率规则保留；局部规则需最小尺度同阈值通过且误差随步长缩小而收敛")
     args = parser.parse_args()
     sys.path.insert(0, args.supermimic_repo)
     from gem.closedloop.mb_control.short_audit import summarize_short
@@ -39,7 +41,7 @@ def main():
         tasks.extend(r["coverage"]["tasks"])
         identities.update(r["task_identities"])
         cases.extend(r["cases"])
-    merged = dict(first, **summarize_short(cases, first["criteria"]))
+    merged = dict(first, **summarize_short(cases, first["criteria"], numerical_rule=args.numerical_rule))
     merged.update(cases=cases, coverage={"physics": first["coverage"]["physics"], "tasks": tasks},
         task_identities=identities, validated_state_envelope=combine_envelopes([r["validated_state_envelope"] for r in reports]),
         source_reports=[str(Path(p).resolve()) for p in args.reports])

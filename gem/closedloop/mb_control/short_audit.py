@@ -248,7 +248,25 @@ def audit_short(collector, tasks, output, cfg, criteria, *, device):
     return report
 
 
-def summarize_short(cases, criteria):
+def numerical_convergence(rows, criteria):
+    """区分局部导数与有限幅度弦斜率；物理方向仍检查全部预声明尺度。
+
+    最小步长必须满足原误差阈值；若大步长不满足，还要求缩小步长时误差递减。
+    小于原绝对误差阈值的波动视为已处于原数值容差内，不能用更大误差放宽小步检查。
+    """
+    result = {}
+    for name in sorted({r["direction"] for r in rows}):
+        sequence = sorted([r for r in rows if r["direction"] == name], key=lambda r: -r["epsilon"])
+        errors = [abs(r["model_autograd"]-r["model_centered_difference"]) for r in sequence]
+        decreasing = all(b <= max(a, criteria["autograd_fd_atol"]) for a,b in zip(errors, errors[1:]))
+        result[name] = {"epsilons": [r["epsilon"] for r in sequence], "absolute_errors": errors,
+            "all_scales_within_tolerance": all(r["autograd_fd_passed"] for r in sequence),
+            "finest_scale_passed": sequence[-1]["autograd_fd_passed"], "error_converges": decreasing,
+            "passed": sequence[-1]["autograd_fd_passed"] and decreasing}
+    return result
+
+
+def summarize_short(cases, criteria, *, numerical_rule="all_scales"):
     phases = set().union(*(set(c["phases"]) for c in cases)) if cases else set()
     coverage_ok = set(criteria["required_phases"]) <= phases
     result, supported = {}, []
@@ -268,16 +286,20 @@ def summarize_short(cases, criteria):
                     fraction >= criteria["minimum_direction_fraction"] and delta >= criteria["minimum_optimized_delta"]}
         prediction = bool(entries) and all(x["prediction_passed"] for x in entries)
         repeatable = bool(entries) and all(x["reset_repeat_passed"] for x in entries)
-        numerical = bool(rows) and all(r["autograd_fd_passed"] for r in rows)
+        original_numerical = bool(rows) and all(r["autograd_fd_passed"] for r in rows)
+        convergence = [numerical_convergence(x["directions"], criteria) for x in entries]
+        numerical = (original_numerical if numerical_rule == "all_scales" else
+                     bool(entries) and all(g["passed"] for entry in convergence for g in entry.values()))
         direction = all(g["passed"] for g in groups.values())
         passed = prediction and repeatable and numerical and direction and coverage_ok
         if passed:
             supported.append(h)
         result[str(h)] = {"prediction_passed": prediction, "repeatability_passed": repeatable,
-            "autograd_fd_passed": numerical, "direction_passed": direction, "groups": groups, "passed": passed}
+            "autograd_fd_passed": numerical, "original_all_scales_numerical_passed": original_numerical,
+            "numerical_convergence": convergence, "direction_passed": direction, "groups": groups, "passed": passed}
     forecast = bool(cases) and all(c["forecast_prediction"]["passed"] for c in cases)
     choices = [h for h in supported if h in (16, 24, 32)]
-    return {"horizons": result, "supported_horizons": supported,
+    return {"horizons": result, "supported_horizons": supported, "numerical_derivative_rule": numerical_rule,
             "selected_horizon_steps": min(choices) if choices and forecast else None,
             "forecast_prediction_passed": forecast, "phase_coverage_passed": coverage_ok,
             "phases_observed": sorted(phases), "missing_phases": sorted(set(criteria["required_phases"])-phases),
