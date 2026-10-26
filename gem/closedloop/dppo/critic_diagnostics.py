@@ -8,6 +8,8 @@
 """
 from __future__ import annotations
 
+from .adaptive_sampling import consumed_tracking_errors
+
 
 GROUPS = ('large_leg_error', 'large_root_height_error', 'large_non_yaw_error',
           'reference_switch', 'rollout_boundary_1s', 'observed_failure_before_5s',
@@ -29,13 +31,12 @@ def subgroup_labels(rows):
         flags = set()
         details = row.metadata.get('reward_details', [])
         for detail in details:
-            raw = detail.get('components', {}).get('track', {}).get('raw', {})
-            physical = detail.get('diagnostics', {}).get('physical_state', {})
-            if raw.get('leg_joint_pos_squared_error', 0.) > .04:
+            errors = consumed_tracking_errors(detail)
+            if errors['leg_joint_pos_squared_error'] > .04:
                 flags.add('large_leg_error')
-            if abs(physical.get('root_height_error_m', 0.)) > .05:
+            if abs(errors['root_height_error_m']) > .05:
                 flags.add('large_root_height_error')
-            if abs(physical.get('non_yaw_orientation_error_rad', 0.)) > .2:
+            if abs(errors['non_yaw_orientation_error_rad']) > .2:
                 flags.add('large_non_yaw_error')
         if len(row.metadata.get('consumed_plan_ids', [])) > 1:
             flags.add('reference_switch')

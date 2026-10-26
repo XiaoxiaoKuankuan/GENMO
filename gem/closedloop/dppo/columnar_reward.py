@@ -182,6 +182,9 @@ def evaluate_columns(reward, trace, *, timings=None):
         if i not in full_indices:
             results.append(dict(version=cfg['version'],tick=int(ticks[i]),episode_id=str(episodes[i]),
                 reward=float(cfg['dt']*total[i]),reward_rate=float(total[i]),reward_is_integrated=True,dt_s=cfg['dt'],
+                tracking_errors=dict(leg_joint_pos_squared_error=float(row['reward_primitives']['components']['track']['raw']['leg_joint_pos_squared_error']),
+                    root_height_error_m=physical_state['root_height_error_m'],
+                    non_yaw_orientation_error_rad=physical_state['non_yaw_orientation_error_rad']),
                 transition_valid=True,errors=[],activity=activities[i],joint_limit_diagnostics=boundary,evidence_level='training'))
             continue
         music_raw = {'reason': 'music_reward_disabled'}

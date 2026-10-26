@@ -34,13 +34,23 @@ def adaptive_settings(settings=None):
     return result
 
 
-def physical_severity(detail):
-    """只用消费参考的腿、根高度与非偏航姿态误差，输出[0,1]困难度。"""
+def consumed_tracking_errors(detail):
+    """统一读取完整审计与精简训练记录中的三个真实误差，不用缺省零掩盖缺测。"""
+    if 'tracking_errors' in detail:
+        return detail['tracking_errors']
     track = detail['components']['track']['raw']
     physical = detail['diagnostics']['physical_state']
-    values = (float(track['leg_joint_pos_squared_error'])/.04,
-              abs(float(physical['root_height_error_m']))/.1,
-              abs(float(physical['non_yaw_orientation_error_rad']))/.3)
+    return dict(leg_joint_pos_squared_error=track['leg_joint_pos_squared_error'],
+                root_height_error_m=physical['root_height_error_m'],
+                non_yaw_orientation_error_rad=physical['non_yaw_orientation_error_rad'])
+
+
+def physical_severity(detail):
+    """只用消费参考的腿、根高度与非偏航姿态误差，输出[0,1]困难度。"""
+    errors = consumed_tracking_errors(detail)
+    values = (float(errors['leg_joint_pos_squared_error'])/.04,
+              abs(float(errors['root_height_error_m']))/.1,
+              abs(float(errors['non_yaw_orientation_error_rad']))/.3)
     if not all(math.isfinite(x) and x >= 0 for x in values):
         raise ValueError('Invalid consumed tracking error in adaptive sampler')
     return sum(min(1., x) for x in values)/len(values)
@@ -149,6 +159,7 @@ class AdaptiveTimeWeights:
     def summary(self):
         totals = np.sum(list(self.statistics.values()), axis=0) if self.statistics else np.zeros(len(FIELDS))
         return dict(enabled=True, fraction=self.settings['fraction'], updates=self.updates,
+            statistics_scope='global_all_ranks_do_not_sum_rank_reports',
             observed_start_bins=len(self.statistics), totals=dict(zip(FIELDS, totals.tolist())),
             adaptive_probability_ratio_bound=self.settings['max_priority'],
             scope='training_start_bin_following_execution_not_action_credit',

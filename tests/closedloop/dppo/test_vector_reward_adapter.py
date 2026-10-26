@@ -20,6 +20,9 @@ def calculators():
 
 def test_training_evidence_preserves_bitwise_reward_and_full_audit_at_boundary():
     from gem.runtime.trajectory_blocks import pack_trace,ColumnarTrace
+    from gem.closedloop.dppo.adaptive_sampling import consumed_tracking_errors, physical_severity, AdaptiveTimeWeights
+    from types import SimpleNamespace
+    adaptive=AdaptiveTimeWeights({'Mine':[0]},dict(enabled=True))
     oracle,_,full=calculators();lean=copy.deepcopy(full)
     lean.evidence_level='training';lean.audit_interval=full.audit_interval=50
     for begin in range(0,125,25):
@@ -31,12 +34,18 @@ def test_training_evidence_preserves_bitwise_reward_and_full_audit_at_boundary()
         b=lean.evaluate_batch(ColumnarTrace([pack_trace(data)]))
         assert [r['reward'] for r in a]==[r['reward'] for r in b]
         assert [r['transition_valid'] for r in a]==[r['transition_valid'] for r in b]
+        adaptive.observe(dict(sampling=dict(time_bin=dict(source='Mine',bin_id=0))),
+            SimpleNamespace(executed_control_steps=len(b),reason=None,metadata=dict(reward_details=b)))
         for i,(left,right) in enumerate(zip(a,b)):
+            assert consumed_tracking_errors(left)==consumed_tracking_errors(right)
+            assert physical_severity(left)==physical_severity(right)
             if (begin+i)%50==0:compare_reward_evidence(right,left)
             else:
                 assert 'diagnostics' not in right and 'components' not in right
                 assert right['activity']['gate']==left['activity']['gate']
     assert lean.scalar_audits==full.scalar_audits==3
+    adaptive.merge([adaptive.pending])
+    assert adaptive.summary()['totals']['seconds']==pytest.approx(2.5)
     lean.evidence_level='full'
     row=actual_step(125,speed=1.);row['env_id']=3;row['reward_primitives']=packet(row,oracle)
     compare_reward_evidence(lean.evaluate_batch(ColumnarTrace([pack_trace([row])]))[0],
