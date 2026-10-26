@@ -20,22 +20,32 @@ class ForecastResult:
     predicted: object
     old_reference: object
     control_steps: int
+    dependency_steps: int
 
 
-def forecast_rollout(state, adapter, forecast_tick, *, support_guard=None):
+def forecast_rollout(state, adapter, forecast_tick, *, support_guard=None,
+                     reference_dependencies=None, initial_dependency_steps=0,
+                     transition_fn=None, on_step=None):
     if state.pending or forecast_tick < state.tick or (forecast_tick - state.tick) % 12:
         raise ValueError("前瞻必须从无pending请求预测到未来控制网格")
     predicted = state
+    depth = initial_dependency_steps
     while predicted.tick < forecast_tick:
+        reference_depth = (reference_dependencies.control_depth(predicted.reference, predicted.tick)
+                           if reference_dependencies is not None else 0)
+        depth = max(depth, reference_depth) + 1
         predicted = adapter.refresh_current_observation(predicted)
         _, _, goal = predicted.reference.read_current_future(predicted.tick)
         with torch.profiler.record_function("mb/forecast_sm_actor"):
             action = adapter.bundle.act(predicted.sm_history, goal)
         with torch.profiler.record_function("mb/forecast_world_model"):
-            next_state = adapter.bundle.step_model(predicted.state, action, predicted.xi)
+            next_state = (adapter.bundle.step_model(predicted.state, action, predicted.xi)
+                          if transition_fn is None else transition_fn(action))
         if support_guard is not None:
             support_guard(next_state)
-        predicted = adapter.advance(predicted, next_state, action, origin="imagined")
+        predicted = adapter.advance(predicted, next_state, action, origin="imagined" if transition_fn is None else "real")
+        if on_step is not None:
+            on_step(predicted)
     ref, _, _ = predicted.reference.read_current_future(forecast_tick)
     p, R, v, w, q, qd = unflatten_state(predicted.state)
     Ht = yaw_mat(ref.root_R).transpose(-1, -2)
@@ -48,4 +58,6 @@ def forecast_rollout(state, adapter, forecast_tick, *, support_guard=None):
     if not bool(torch.isfinite(error).all()):
         raise FloatingPointError("冻结WM前瞻产生非有限状态")
     ctx = ForecastContext(error, torch.ones(len(p), dtype=torch.bool, device=p.device), state.tick, forecast_tick)
-    return ForecastResult(ctx, predicted, ref, (forecast_tick - state.tick) // 12)
+    if reference_dependencies is not None:
+        depth = max(depth, reference_dependencies.control_depth(predicted.reference, forecast_tick, future_steps=0))
+    return ForecastResult(ctx, predicted, ref, (forecast_tick - state.tick) // 12, depth)

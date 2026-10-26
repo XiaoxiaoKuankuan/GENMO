@@ -13,6 +13,7 @@ from .contracts import ForecastContext, ReferenceExhausted
 from .forecast import forecast_rollout
 from .returns import DecisionInterval, IntervalAccumulator
 from .scheduler import ceil_grid
+from .dependency import ReferenceDependencies
 
 
 class Imagination:
@@ -26,7 +27,7 @@ class Imagination:
         self.support_guard = None
 
     def rollout(self, initial, noises, actual_latency_ticks, *, detach_initial=True,
-                transition_fn=None, on_step=None, on_plan=None, on_transition=None):
+                transition_fn=None, on_step=None, on_plan=None, on_transition=None, on_request=None):
         """transition_fn仅供离线配对物理审计；正式异步采集由PhysicalCollector执行。"""
         if len(noises) != self.decisions or len(actual_latency_ticks) != self.decisions:
             raise ValueError("每个决策必须有独立重参数噪声和外生延迟")
@@ -36,9 +37,10 @@ class Imagination:
             self.support_guard(z.state)
         intervals = []
         model_steps = 0
-        state_depth, reference_depth = 0, 0
+        state_depth = 0
+        dependencies = ReferenceDependencies(z.reference)
         forecast_branches = []
-        for noise, latency in zip(noises, actual_latency_ticks):
+        for decision_index, (noise, latency) in enumerate(zip(noises, actual_latency_ticks)):
             if type(latency) is not int or latency < 0:
                 raise ValueError("实际延迟是非负整数外生tick")
             start = z
@@ -49,16 +51,20 @@ class Imagination:
                 intervals.append(DecisionInterval(start, z, zero, zero, 0, self.gamma, True,
                                                   f"reference_exhausted:{error}", {}))
                 break
+            if on_request is not None:
+                on_request(z, ticket, decision_index)
+            plan_depth = max(state_depth, dependencies.prefix_depth(z.reference, ticket))
             if self.forecast_enabled:
-                forecast = forecast_rollout(z, self.adapter, ticket.first_influence_tick, support_guard=self.support_guard)
+                forecast = forecast_rollout(z, self.adapter, ticket.first_influence_tick, support_guard=self.support_guard,
+                                            reference_dependencies=dependencies, initial_dependency_steps=state_depth)
                 context = forecast.context
-                plan_depth = max(state_depth, reference_depth) + forecast.control_steps
-                forecast_branches.append({"control_steps": forecast.control_steps, "dependency_steps": plan_depth})
+                plan_depth = max(plan_depth, forecast.dependency_steps)
+                forecast_branches.append({"request_tick": z.tick, "forecast_tick": ticket.first_influence_tick,
+                                          "control_steps": forecast.control_steps, "dependency_steps": plan_depth})
                 if self.max_model_steps is not None and plan_depth > self.max_model_steps:
                     raise ValueError("预测分支超过已验证WM时域")
             else:
                 context = ForecastContext.invalid(z.state, z.tick)
-                plan_depth = max(state_depth, reference_depth)
             plan = self.actor.generate(z, ticket, context, noise)
             if on_plan is not None:
                 on_plan(plan)
@@ -75,14 +81,14 @@ class Imagination:
                     if z.pending and z.tick >= ready:
                         z, event = self.scheduler.commit(z, plan, actual_ready_tick=ready)
                         if event["accepted"]:
-                            reference_depth = max(reference_depth, plan_depth)
+                            dependencies.register(z.reference, plan_depth)
                         if event["terminal_timeout"]:
                             terminal, reason = True, "consecutive_timeouts"
                             break
                     boundary = self.scheduler.next_request_tick(ticket, ceil_grid(ready, 12))
                     if not z.pending and z.tick >= boundary:
                         break
-                    next_depth = max(state_depth, reference_depth) + 1
+                    next_depth = max(state_depth, dependencies.control_depth(z.reference, z.tick)) + 1
                     if self.max_model_steps is not None and next_depth > self.max_model_steps:
                         raise ValueError("多决策展开超过已验证WM时域")
                     z = self.adapter.refresh_current_observation(z)
@@ -114,6 +120,7 @@ class Imagination:
                 terminal, reason = True, f"reference_exhausted:{error}"
             z = replace(z, pending=False, decision_id=z.decision_id + 1)
             event.update(cumulative_control_steps=model_steps, longest_model_dependency_steps=state_depth,
+                         terminal_cache_dependency_steps=dependencies.cache_depth(z.reference),
                          forecast_branches=list(forecast_branches),
                          maximum_forecast_dependency_steps=max((x["dependency_steps"] for x in forecast_branches), default=0))
             intervals.append(DecisionInterval(start, z, totals.reward, totals.survival, totals.steps,

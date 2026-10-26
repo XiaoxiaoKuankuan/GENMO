@@ -15,6 +15,7 @@ from supermimic.rotations import so3_log
 from .returns import actor_return
 from .execution_audit import state_probe
 from .validation import state_envelope
+from .forecast import forecast_rollout
 
 
 def state_errors(predicted, real, kin=None):
@@ -72,29 +73,37 @@ def audit_generated_reference(engine, collector, music, initial, *, noise_seed, 
             intervals = engine.rollout(z, noises, latencies, transition_fn=collector.env.step_physics if physical else None,
                                        on_step=record)
             objective = actor_return(intervals, torch.zeros_like(intervals[-1].reward)).mean()
-        # 安全延迟裕量可使前瞻分支的最长依赖大于三次决策的主时间线。
-        # 在已完成多次生成/覆盖之后，用最后有效缓存补足配对预测测量；此诊断尾段
-        # 不加入Actor目标、方向探针或正式BPTT，不用单计划尾段替代多决策验证。
-        required = max((max(x.event.get("longest_model_dependency_steps", 0),
-                            x.event.get("maximum_forecast_dependency_steps", 0)) for x in intervals), default=0)
-        with torch.no_grad():
-            tail = intervals[-1].end.detached()
-            while len(trace) < required and not intervals[-1].terminal and tail.tick < tail.music_end_tick:
-                from .contracts import ReferenceExhausted
-                try:
-                    tail = collector.adapter.refresh_current_observation(tail)
-                    ref1, _, _ = tail.reference.read_current_future(tail.tick + 12)
-                    goal = tail.reference.read_current_future(tail.tick)[2]
-                    action = collector.adapter.bundle.act(tail.sm_history, goal)
-                    state = (collector.env.step_physics(action) if physical else
-                             collector.adapter.bundle.step_model(tail.state, action, tail.xi))
-                    tail = collector.adapter.advance(tail, state, action, origin="real" if physical else "imagined")
-                    trace.append(state.cpu())
-                    if physical and bool(collector.adapter.runtime.termination(state, ref1).any()):
-                        break
-                except ReferenceExhausted:
-                    break
         return objective, torch.cat(trace) if trace else torch.empty(0, 55), intervals, rewards
+
+    def run_forecast_branch(physical, branch_index):
+        # 真实分支必须从episode初态重放所有先前决策，再执行该请求看到的旧参考。
+        # 不回写中途state55冒充求解器恢复，不用最后一份新计划补尾段替代旧参考前瞻。
+        class BranchComplete(Exception):
+            pass
+        z = collector.reset(music, initial)
+        engine.actor = base_actor
+        trace, branch_states, metadata = [], [], {}
+        def capture_request(state, ticket, index):
+            if index != branch_index:
+                return
+            result = forecast_rollout(state, collector.adapter, ticket.first_influence_tick,
+                transition_fn=collector.env.step_physics if physical else None,
+                on_step=lambda value: branch_states.append(value.state.detach().cpu()))
+            metadata.update(request_tick=state.tick, forecast_tick=ticket.first_influence_tick,
+                            branch_control_steps=result.control_steps, prefix_control_steps=len(trace))
+            trace.extend(branch_states)
+            raise BranchComplete
+        with torch.no_grad():
+            try:
+                engine.rollout(z, noises, latencies,
+                    transition_fn=collector.env.step_physics if physical else None,
+                    on_step=lambda state, reward: trace.append(state.state.detach().cpu()),
+                    on_request=capture_request)
+            except BranchComplete:
+                pass
+        if not metadata:
+            return None, {"status": "request_not_reached", "branch_index": branch_index}
+        return torch.cat(trace), metadata
 
     try:
         model_base, model_trace, model_intervals, _ = run(False, joint_indices[0], 0.)
@@ -105,9 +114,26 @@ def audit_generated_reference(engine, collector, music, initial, *, noise_seed, 
         dependency_steps = max((max(x.event.get("longest_model_dependency_steps", 0),
                                     x.event.get("maximum_forecast_dependency_steps", 0)) for x in model_intervals), default=0)
         requested_horizons = criteria.get("horizons", [5, 10, 15, 20, 32]) if criteria else [5, 10, 15, 20, 32]
-        for horizon in sorted(set([*requested_horizons, len(model_trace), dependency_steps])):
+        for horizon in sorted(set([*requested_horizons, len(model_trace)])):
             horizons[str(horizon)] = ({k: float(v) for k, v in state_errors(model_trace[:horizon], real_trace[:horizon], collector.adapter.runtime.kin).items()}
                                       if horizon <= length else {"status": "insufficient_physical_horizon"})
+        forecast_audits = []
+        for index, branch in enumerate(model_intervals[-1].event.get("forecast_branches", [])):
+            predicted_branch, model_meta = run_forecast_branch(False, index)
+            real_branch, real_meta = run_forecast_branch(True, index)
+            complete = (predicted_branch is not None and real_branch is not None and
+                        model_meta == real_meta and len(predicted_branch) == len(real_branch) and
+                        len(predicted_branch) >= branch["dependency_steps"])
+            errors = ({k: float(v) for k, v in state_errors(predicted_branch, real_branch,
+                collector.adapter.runtime.kin).items()} if complete else {"status": "incomplete_paired_forecast"})
+            start = model_meta.get("prefix_control_steps", 0)
+            branch_errors = ({k: float(v) for k, v in state_errors(predicted_branch[start:], real_branch[start:],
+                collector.adapter.runtime.kin).items()} if complete else errors)
+            passed = complete and criteria is not None and all(
+                values[k] <= bound for values in (errors, branch_errors) for k, bound in criteria["state_rmse_limits"].items())
+            forecast_audits.append({"branch_index": index, "model": model_meta, "physical": real_meta,
+                "dependency_steps": branch["dependency_steps"], "prefix_and_branch_errors": errors,
+                "branch_only_errors": branch_errors, "passed": bool(passed)})
         candidates = []
         for joint in joint_indices:
             amplitude = torch.zeros((), device=initial.device, requires_grad=True)
@@ -137,6 +163,7 @@ def audit_generated_reference(engine, collector, music, initial, *, noise_seed, 
         prediction_passed = criteria is not None and all(
             "status" not in values and all(values[name] <= bound for name, bound in criteria["state_rmse_limits"].items())
             for values in horizons.values())
+        prediction_passed = prediction_passed and all(b["passed"] for b in forecast_audits)
         direction_fraction = sum(c["direction_agrees"] for c in candidates) / len(candidates)
         state_direction_fraction = sum(c["state_only_direction_agrees"] for c in candidates) / len(candidates)
         direction_passed = (criteria is not None and len(candidates) >= criteria["minimum_directions"] and
@@ -159,12 +186,13 @@ def audit_generated_reference(engine, collector, music, initial, *, noise_seed, 
                 "required_dependency_steps": dependency_steps,
                 "real_state_envelope": state_envelope(torch.cat((initial.detach().cpu(), real_trace))),
                 "forecast_branches": model_intervals[-1].event.get("forecast_branches", []),
+                "paired_forecast_audits": forecast_audits,
                 "candidates": candidates, "direction_fraction": direction_fraction,
                 "state_only_direction_fraction": state_direction_fraction,
                 "candidate_pairwise_rank_agreement": rank_agreement, "reset_repeat_max_abs": repeat_error,
                 "prediction_passed": bool(prediction_passed), "physical_direction_passed": bool(direction_passed),
                 "reset_replay_repeatability_passed": bool(repeat_passed),
-                "supported_control_steps": length if prediction_passed and direction_passed and repeat_passed else 0,
+                "supported_control_steps": dependency_steps if prediction_passed and direction_passed and repeat_passed else 0,
                 "criteria": criteria, "source_hash_gate": False,
                 "contact_force_or_solver_state": "state55不包含接触力或求解器状态，不伪造该项预测"}
     finally:
