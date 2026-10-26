@@ -184,12 +184,15 @@ def main(kind):
             for _ in range(3):
                 env.step_physics(torch.zeros(1, 21, device=args.torch_device))
         serial = (restored.get("cursor") or {}).get("episodes", 0) if restored else 0
+        fixed_assets = {}
 
         def assets(task):
             nonlocal serial
             serial += 1
             seed_all(task["seed"])
-            initial, nominal, audio, contract = task_assets(task, engine, args.torch_device)
+            if task["id"] not in fixed_assets:
+                fixed_assets[task["id"]] = task_assets(task, engine, args.torch_device)
+            initial, nominal, audio, contract = fixed_assets[task["id"]]
             metadata = dict(episode_id=f"{task['id']}_{uuid.uuid4().hex}", song_id=task["song_id"], split=task["split"])
             return initial, nominal, audio, contract, metadata
 
@@ -257,10 +260,10 @@ def main(kind):
             atomic_save(dict(source="zero_adapter_real_training_episodes", s0=calibrate_s0(torch.cat(samples)).cpu(),
                              sum_square_qd=torch.cat(samples).square().sum(0).cpu(),
                              joint_names=engine.step.bundle.spec.joint_names, samples=sum(len(x) for x in samples), tasks=provenance), output/"music_baseline.pt")
-            from .contracts import map_tensors
+            from .checkpoint import shared_cpu_state
             atomic_save(dict(source="zero_adapter_real_replay", sm_checkpoint_sha256=file_digest(cfg["supermimic"]["checkpoint"]),
                              observation_noise=cfg["observation_noise"], tasks=tasks,
-                             replay=map_tensors(replay.state_dict(), lambda x: x.detach().cpu())), output/"real_replay.pt")
+                             replay=shared_cpu_state(replay.state_dict())), output/"real_replay.pt")
         elif kind == "evaluate":
             episodes, contracts = [], []
             for task in tasks:

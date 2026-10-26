@@ -6,6 +6,7 @@ d11=2*d10-d9作用于真实存在的名义点；原SM中心差分/FK/Goal公式�
 """
 
 from dataclasses import dataclass
+from collections import OrderedDict
 
 import torch
 
@@ -14,6 +15,9 @@ from supermimic.rotations import quat_to_mat, mat_to_quat, so3_exp, so3_log
 from gem.closedloop.mb_control.contracts import ReferenceExhausted
 from gem.closedloop.mb_control.reference_buffer import ReferenceBuffer
 from .contracts import Pose, ResidualPlan, CONTROL_TICKS
+
+
+_NOMINAL_CACHE = OrderedDict()
 
 
 def make_nominal(world_qpos, joint_names, spec, *, start_tick=0, version=0, contact=None):
@@ -30,8 +34,22 @@ def make_nominal(world_qpos, joint_names, spec, *, start_tick=0, version=0, cont
 def nominal_window(nominal, tick, kin):
     if tick < nominal.lower or tick + 132 > nominal.upper:
         raise ReferenceExhausted("当前+十未来点+真实第11halo支持不足")
-    ticks = tick + torch.arange(11, device=nominal.ticks.device) * CONTROL_TICKS
-    return current_future(build_reference(nominal.pose_at, ticks, nominal.lower, nominal.upper, kin))
+    if nominal.world_qpos.requires_grad:
+        ticks = tick + torch.arange(11, device=nominal.ticks.device) * CONTROL_TICKS
+        return current_future(build_reference(nominal.pose_at, ticks, nominal.lower, nominal.upper, kin))
+    # 名义轨迹冻结且完整已知：复用原ReferenceBuffer向量化FK缓存。
+    # Replay中只读tensor的detach视图共享存储；持有源tensor防止地址复用，版本防原地变更。
+    # 修正参考及执行图不进入此缓存，Adapter/Actor/WM的输入梯度不受影响。
+    source = nominal.world_qpos
+    key = (source.untyped_storage().data_ptr(), source.storage_offset(), tuple(source.shape), source.device,
+           source.dtype, source._version, nominal.lower, nominal.upper, nominal.to_sm, id(kin))
+    if key not in _NOMINAL_CACHE:
+        from dataclasses import replace
+        _NOMINAL_CACHE[key] = replace(nominal, kin=kin, prepared_reference=None, prepared_source=None)
+        if len(_NOMINAL_CACHE) > 32:
+            _NOMINAL_CACHE.popitem(last=False)
+    _NOMINAL_CACHE.move_to_end(key)
+    return _NOMINAL_CACHE[key].read_current_future(tick)
 
 
 def nominal_pose(nominal, ticks):

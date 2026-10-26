@@ -17,15 +17,20 @@ from .contracts import map_tensors
 SCHEMA = "genmo.supermimic.reference_adapter.full.v2"
 
 
-def save_checkpoint(path, trainer, *, collector=None, behavior=None, provenance=None, cursor=None):
-    if trainer.dynamics._graph_active:
-        raise RuntimeError("只能在WM版本屏障之外保存完整checkpoint")
+def shared_cpu_state(value):
+    """同一只读名义/音频张量只复制一次，避免长曲回放的二次方内存膨胀。"""
     cpu_cache = {}
     def cpu(tensor):
         key = (tensor.untyped_storage().data_ptr(), tensor.storage_offset(), tuple(tensor.shape), tensor.stride(), tensor.dtype, tensor.device)
         if key not in cpu_cache:
             cpu_cache[key] = tensor.detach().cpu()
         return cpu_cache[key]
+    return map_tensors(value, cpu)
+
+
+def save_checkpoint(path, trainer, *, collector=None, behavior=None, provenance=None, cursor=None):
+    if trainer.dynamics._graph_active:
+        raise RuntimeError("只能在WM版本屏障之外保存完整checkpoint")
     payload = dict(schema=SCHEMA, adapter=trainer.adapter.state_dict(), critic=trainer.critic.state_dict(),
                    dynamics=trainer.dynamics.state_dict(), adapter_optimizer=trainer.adapter_optimizer.state_dict(),
                    critic_optimizer=trainer.critic_optimizer.state_dict(), wm_optimizer=trainer.wm_optimizer.state_dict(),
@@ -39,7 +44,7 @@ def save_checkpoint(path, trainer, *, collector=None, behavior=None, provenance=
                    rng=dict(python=random.getstate(), numpy=np.random.get_state(), torch=torch.get_rng_state(),
                             cuda=torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None),
                    physics_resume="new_episode_required_solver_hidden_state_not_saved")
-    atomic_save(map_tensors(payload, cpu), path)
+    atomic_save(shared_cpu_state(payload), path)
 
 
 def load_checkpoint(path, trainer, *, behavior=None, device="cpu"):
