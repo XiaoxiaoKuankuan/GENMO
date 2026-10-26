@@ -6,7 +6,7 @@ latest时只恢复同一实验。子进程真实输出追加到同一正式日�
 从最新完整状态重启；不重置Adam，不更改学习率、概率、奖励、任务或任何数值校验。
 
 本工具只能由明确长训授权启动，不停止其他GPU作业，不删除锁文件、证据或模型。
-正式受监控模式尊重物理质量停止标记，不得重启绕过它；异常恢复次数有界，无轮次
+质量动作由配置明确选择：report_only保留历史标记但继续，stop尊重质量停止；异常恢复次数有界，无轮次
 推进时最多重试两次。OOM和数值异常仍如实报错，不保证物理收益。SIGTERM/SIGINT显式终止
 监督器和当前子任务，不在用户要求停止后重新拉起。状态文件可区分后台存活与轮次
 真实推进，不能仅凭监督器PID宣称训练正常。
@@ -25,6 +25,7 @@ import time
 ROOT=Path(__file__).resolve().parents[1]
 sys.path.insert(0,str(ROOT))
 from gem.closedloop.dppo.budget import atomic_json
+from gem.closedloop.dppo.learning_guards import quality_stop_blocks
 
 
 def training_command(config,output,limit,initialization=None,*,random_fragments=False,robofft_variant=None,
@@ -60,6 +61,9 @@ def main():
     parser.add_argument('--future-critic-formal',action='store_true')
     parser.add_argument('--max-stalled-restarts',type=int,default=2)
     args=parser.parse_args()
+    import yaml
+    configuration=yaml.safe_load(args.config.read_text())
+    evaluation=configuration['stage10']['evaluation']
     status=args.status_dir.resolve();status.mkdir(parents=True,exist_ok=True)
     output=args.output_dir.resolve();stopping=False;child=None;attempt=0;stalled=0
     def request_stop(signum,frame):
@@ -69,7 +73,7 @@ def main():
     signal.signal(signal.SIGTERM,request_stop);signal.signal(signal.SIGINT,request_stop)
     while not stopping:
         iteration=latest_iteration(output)
-        if (output/'quality_stop.json').exists():
+        if quality_stop_blocks(output,evaluation):
             atomic_json(status/'supervisor.json',dict(status='quality_stopped',iteration=iteration,
                 pid=os.getpid(),quality_stop=json.loads((output/'quality_stop.json').read_text())))
             return 0
@@ -94,7 +98,7 @@ def main():
         atomic_json(status/f'formal_attempt_{attempt:03d}.exit.json',record)
         progressed=(record['iteration'] or 0)>(iteration or 0)
         stalled=0 if progressed else stalled+1
-        if not stopping and not (output/'quality_stop.json').exists() and stalled>args.max_stalled_restarts:
+        if not stopping and not quality_stop_blocks(output,evaluation) and stalled>args.max_stalled_restarts:
             atomic_json(status/'supervisor.json',dict(status='failed_no_progress',pid=os.getpid(),
                 attempts=attempt,iteration=record['iteration'],last_exit_code=child.returncode))
             return 1

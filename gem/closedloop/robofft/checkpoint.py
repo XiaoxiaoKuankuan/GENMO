@@ -67,7 +67,14 @@ def initialize_optimization_variant(path, *, identity, actor, critic, actor_opti
             old_critic.pop('validation_guard',None);new_critic.pop('validation_guard',None)
         if old_critic!=new_critic:
             raise ValueError('RoboFFT variant changes behavior or value contract: critic')
-    for key in ('assets', 'kernel', 'reward', 'timing', 'dataset', 'physical_episode',
+    old_dataset, new_dataset = (copy.deepcopy(v.get('dataset', {})) for v in (previous, identity))
+    sampling_changed = old_dataset.get('adaptive') != new_dataset.get('adaptive')
+    if future_critic_formal:
+        # 显式新目录warm-start允许更换抽样课程，模型与Adam继承；旧rollout及采样状态不继承。
+        old_dataset.pop('adaptive', None); new_dataset.pop('adaptive', None)
+    if old_dataset != new_dataset:
+        raise ValueError('RoboFFT variant changes behavior or value contract: dataset')
+    for key in ('assets', 'kernel', 'reward', 'timing', 'physical_episode',
                 'ppo_rollout', 'generation_horizon', 'physical_configuration', 'data_catalog'):
         if previous.get(key) != identity.get(key):
             raise ValueError('RoboFFT variant changes behavior or value contract: ' + key)
@@ -123,6 +130,7 @@ def initialize_optimization_variant(path, *, identity, actor, critic, actor_opti
         source_version_is_informational=True, actor_and_adam_preserved=True,
         critic_and_adam_preserved=not future_critic_trial,critic_shared_weights_preserved=True,
         future_branch_zero_initialized=bool(future_critic_trial),critic_optimizer_fresh=bool(future_critic_trial),
-        inherited_mc_preheat_for_unchanged_value_contract=bool(payload['state'].get('mc_preheat_complete')) and not future_critic_trial,
+        inherited_mc_preheat_for_unchanged_value_contract=bool(payload['state'].get('mc_preheat_complete')) and not future_critic_trial and not sampling_changed,
+        sampling_distribution_changed=sampling_changed,
         independent_new_mc_validation=False,
         rollout_reused=False, rng_restored=False, counters_restarted=True, fresh_paired_evaluation_required=True)

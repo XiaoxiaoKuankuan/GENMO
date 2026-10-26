@@ -192,7 +192,8 @@ def _evaluate_impl(c, label, *, write_report=True):
         reports = c.distributed.all_gather_object(str(path/'report/report.json') if shards[c.distributed.rank]['tasks'] else None)
         reports = [report for report in reports if report is not None]
         result = root_call(c.distributed, lambda: merge_periodic_reports(plan, reports, baseline=baseline,
-                                                                       evaluation_identity=evaluation_identity))
+            evaluation_identity=evaluation_identity,
+            source_probabilities=c.stage.get('dataset',{}).get('source_probabilities', (.2,.35,.25,.2))))
         def diagnose():
             if not shards[c.distributed.rank]['tasks']:
                 return None

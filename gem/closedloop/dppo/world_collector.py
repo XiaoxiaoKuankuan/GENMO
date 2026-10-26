@@ -255,6 +255,7 @@ class WorldEnvironmentCollector:
         yield from backend_operation('join_fragment')
         rows=[]
         while not env.rollout_window_reached:
+            task=state.task
             try:
                 if state.task is None:
                     task=sampler.next_task()
@@ -270,6 +271,8 @@ class WorldEnvironmentCollector:
             except WarmupEpisodeEnded:
                 # 只接收已结算的正常物理终止，完整性错误仍交给上层停止运行。
                 self.world_timing['warmup_physical_failures']=self.world_timing.get('warmup_physical_failures',0)+1
+                if hasattr(sampler,'record_outcome'):
+                    sampler.record_outcome(task,warmup_failure=True)
                 state.task=None
                 continue
             if env.rollout_window_reached:break
@@ -280,6 +283,8 @@ class WorldEnvironmentCollector:
                 sample_id=task['sample']['row']['sample_id'],split='train',music_start_frame=task['music_start_frame'],
                 manifest_sha256=task['sample']['manifest_sha256'],sampling=copy.deepcopy(task.get('sampling'))))
             sampler.record_execution(task,row.executed_control_steps);rows.append(row);state.transitions+=1
+            if hasattr(sampler,'record_outcome'):
+                sampler.record_outcome(task,row)
             if row.terminated or row.truncated:state.task=None
         if rows and not rows[-1].terminated:
             # 这里只切当前Actor版本的GAE；正常物理episode、参考和音乐继续存在。

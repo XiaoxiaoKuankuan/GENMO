@@ -1,8 +1,8 @@
-"""用整段留出验证选择在线 Critic 的更新轮数，并守住固定检查集。
+"""用当前整段留出验证选择在线Critic，旧自举标签只作漂移诊断。
 
 真实 rollout 先按物理 episode 分成训练与留出集，同一段的相邻状态不能交叉。
 只对训练集反传，所有目标保持本轮采集时固定的半马尔可夫 GAE。每个 epoch
-检查留出 MSE 及初始独立短物理评估的固定标签，保存符合限制的最佳参数与 Adam；
+检查留出MSE并记录初始短评估固定标签误差，按当前留出误差保存最佳参数与Adam；
 连续无改善则提前结束并恢复最佳状态。固定集从不用于反传，也不重新采完整 MC。
 这些指标仍含 bootstrap 偏差，仅防止已见的拟合过头，不能证明价值真值或物理收益。
 冻结 Stage1 条件只编码一次，历史和已提交未来参考编码器仍在每次前向重新计算。
@@ -23,6 +23,12 @@ def guarded_critic_update(critic, optimizer, rows, targets, cache, manifest, *, 
         local_ids = {(distributed.rank, i): r.identity for i, r in enumerate(rows)}
     identities = {k: v for shard in distributed.all_gather_object(local_ids) for k, v in shard.items()}
     train, validation = split_episodes(selected, manifest, identities, guard['holdout_fraction'])
+    from .critic_diagnostics import GROUPS, subgroup_labels
+    with _local_phase(distributed, 'critic_subgroup_labels'):
+        local_groups = {(distributed.rank, i): flags for i, flags in enumerate(subgroup_labels(rows))}
+    group_labels = {k: v for shard in distributed.all_gather_object(local_groups) for k, v in shard.items()}
+    subgroups = {name: [i for i in validation if name in group_labels[(manifest[i]['owner_rank'],
+                  manifest[i]['local_index'])]] for name in GROUPS}
     indices = [i for _, i in _owned(selected, manifest, distributed)]
     lookup = {i: j for j, i in enumerate(indices)}
     with _local_phase(distributed, 'critic_guard_encode'):
@@ -46,12 +52,14 @@ def guarded_critic_update(critic, optimizer, rows, targets, cache, manifest, *, 
         features = {k: v.index_select(0, ix) for k, v in encoded.items()}
         return critic.forward_encoded(features, cache.get('remaining_music_seconds', [rows[i] for i in local]))
 
-    def summarize(totals):
+    def summarize(totals, allow_empty=False):
         n, s, s2, e, e2, absolute = distributed.sum_tensor(totals).cpu().tolist()
         if n < 1:
+            if allow_empty:
+                return dict(count=0, mse=None, rmse=None, mae=None, bias=None, explained_variance=None, target_variance=None)
             raise ValueError('Empty global Critic validation set')
         variance = max(0., s2/n-(s/n)**2)
-        return dict(mse=e2/n, mae=absolute/n, bias=e/n, target_variance=variance,
+        return dict(mse=e2/n, rmse=(e2/n)**.5, mae=absolute/n, bias=e/n, target_variance=variance,
                     explained_variance=None if variance <= 1e-12 else 1-(e2/n-(e/n)**2)/variance, count=int(n))
 
     def moments(expected, prediction):
@@ -61,14 +69,14 @@ def guarded_critic_update(critic, optimizer, rows, targets, cache, manifest, *, 
                             error.sum(), error.square().sum(), error.abs().sum()))
 
     @torch.no_grad()
-    def metrics(global_indices):
+    def metrics(global_indices, allow_empty=False):
         with _local_phase(distributed, 'critic_guard_validation'):
             totals = torch.zeros(6, device=cache.device, dtype=torch.float64)
             local = [i for _, i in _owned(global_indices, manifest, distributed)]
             for start in range(0, len(local), 128):
                 chunk = local[start:start+128]
                 totals += moments(target[chunk], forward(chunk))
-        return summarize(totals)
+        return summarize(totals, allow_empty=allow_empty)
 
     @torch.no_grad()
     def fixed_metrics(initial=False):
@@ -79,8 +87,8 @@ def guarded_critic_update(critic, optimizer, rows, targets, cache, manifest, *, 
         return summarize(totals)
 
     initial, holdout_before = metrics(selected), metrics(validation)
+    subgroup_before = {name: metrics(indices, allow_empty=True) for name, indices in subgroups.items()}
     fixed_initial, fixed_before = fixed_metrics(initial=True), fixed_metrics()
-    fixed_limit = fixed_initial['mse']*(1+guard['max_fixed_mse_increase'])
     best_loss, best_epoch, best_steps, stale = holdout_before['mse'], 0, 0, 0
     with _local_phase(distributed, 'critic_guard_snapshot'):
         best = capture_learning(critic, optimizer)
@@ -105,7 +113,7 @@ def guarded_critic_update(critic, optimizer, rows, targets, cache, manifest, *, 
                 optimizer.step()
             losses.append(loss.detach()); norms.append(float(norm)); visits += len(chosen)
         holdout, stable = metrics(validation), fixed_metrics()
-        accepted = holdout['mse'] < best_loss and stable['mse'] <= fixed_limit
+        accepted = holdout['mse'] < best_loss
         checks.append(dict(epoch=epoch+1, holdout=holdout, fixed=stable, selected=accepted))
         if accepted:
             with _local_phase(distributed, 'critic_guard_best_snapshot'):
@@ -118,11 +126,15 @@ def guarded_critic_update(critic, optimizer, rows, targets, cache, manifest, *, 
     with _local_phase(distributed, 'critic_guard_restore_best'):
         restore_learning(critic, optimizer, best)
     final, holdout_after, fixed_after = metrics(selected), metrics(validation), fixed_metrics()
+    subgroup_after = {name: metrics(indices, allow_empty=True) for name, indices in subgroups.items()}
     return dict(before=initial, after=final, optimizer_steps=best_steps, attempted_optimizer_steps=len(losses),
                 epochs=len(checks), selected_epoch=best_epoch, validation_epochs=checks,
                 holdout_before=holdout_before, holdout_after=holdout_after,
+                subgroup_before=subgroup_before, subgroup_after=subgroup_after,
+                subgroup_scope='current_holdout_observed_intervals_bootstrapped_targets_not_MC_truth',
                 fixed_before=fixed_before, fixed_after=fixed_after, fixed_initial=fixed_initial,
-                fixed_mse_limit=fixed_limit, training_actions=len(train), validation_actions=len(validation),
+                fixed_reference_role='diagnostic_only', selection_metric='current_episode_holdout_mse',
+                training_actions=len(train), validation_actions=len(validation),
                 split_scope='whole_physical_episodes_no_adjacent_state_leakage',
                 losses=distributed.sum_tensor(torch.stack(losses)).cpu().tolist() if losses else [],
                 gradient_norms=norms, global_sample_visits=visits, frozen_encoder_passes=int(bool(indices)),

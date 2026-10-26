@@ -375,6 +375,11 @@ class FullMusicSampler:
             self._intervals[key] = _merge_intervals(self._intervals.get(key, []), begin, begin + count * 12)
         self._active["control_steps"] += count
 
+    def record_outcome(self, task, row=None, *, warmup_failure=False):
+        """重置前回填真实结果；PPO切分不结算失败，预热失败单独记账。"""
+        if self.time_pool is not None:
+            self.time_pool.observe(task, row, warmup_failure=warmup_failure)
+
     def coverage(self):
         result = {}
         for source in SOURCES:

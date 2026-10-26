@@ -25,6 +25,15 @@ from .execution_compatibility import same_execution,same_evaluation_execution
 SOURCES = ('AIOZ-GDANCE', 'AIST++', 'FineDance', 'Mine')
 VERSION = 'genmo.stage2.asymmetric_compact_tensorboard.v1'
 DEFINITIONS = {
+    'Reward/training_source_weighted_return': '固定评估各来源积分回报按训练来源抽样比例加权；不代表自适应片段分布。',
+    'Reward/music_improvement_fraction': '同一固定评估音乐先合并种子，再计算积分回报改善的音乐比例。',
+    'Reward/music_delta_median': '每首音乐合并种子后积分回报变化的中位数，分。',
+    'Reward/music_delta_p10': '每首音乐合并种子后积分回报变化的第10百分位，分。',
+    'Loss/critic_holdout_mse_before': '当前整段留出集更新前自举MSE，与旧固定标签分开。',
+    'Loss/critic_holdout_mse_after': '当前整段留出集选定更新后的自举MSE，不是独立MC精度。',
+    'Policy/ppo_zero_gradient_fraction': 'RoboFFT按优势符号计算的真实代理裁剪平坦比例，区别于ratio越界比例。',
+    'Policy/saturation_finished_epoch': '本轮因代理裁剪饱和停止后续epoch且保留已完成更新时为1。',
+    'Sampling/adaptive_cumulative_draw_fraction': '截至当前轮自适应抽取次数/全部运动起点抽取次数；是任务数比例。',
     'Reward/total_per_second': '分/秒，越高越好。训练为各来源积分回报/实际采集秒数再四来源等权；验证为各任务每秒回报先来源内平均、再来源等权。',
     'Reward/episode_return': '分，固定验证任务积分回报的四来源等权平均；执行更久也会增加，必须一起看每秒回报和终止。',
     'Reward/tracking': '分/秒，已乘track_weight的跟踪项；活动度门控依实际配置，当前无门控候选不乘活动度；不能替代原始误差。',
@@ -170,9 +179,13 @@ def training_scalars(record):
     if record.get('mode') not in ('dppo_bc','robofft_d'):
         return {}
     collections = record['collection_by_rank']
+    pools = [c.get('time_sampling', {}) for c in collections]
     seconds = sum(c['executed_seconds'] for c in collections)
     sources = {}
     values = {}
+    draws = sum(p.get('motion_tasks_drawn', 0) for p in pools)
+    if draws and any(p.get('adaptive') for p in pools):
+        values['Sampling/adaptive_cumulative_draw_fraction'] = sum(p.get('adaptive_tasks_drawn',0) for p in pools)/draws
     for source in SOURCES:
         rows = [c.get('by_source', {}).get(source, {}) for c in collections]
         duration = sum(r.get('executed_seconds', 0.) for r in rows)
@@ -185,6 +198,8 @@ def training_scalars(record):
     if seconds > 0:
         values['Termination/physical_failures_per_1000s'] = 1000*sum(c['physical_failures'] for c in collections)/seconds
     actor = record.get('actor') or {}
+    if actor:
+        values['Policy/saturation_finished_epoch'] = float(actor.get('stop_reason')=='surrogate_saturation_finish_epoch_without_rollback')
     steps = actor.get('steps', [])
     objective = actor.get('objective', 'joint_score_pg')
     loss_tag = 'Loss/joint_score' if objective == 'joint_score_pg' else 'Loss/ppo'
@@ -213,6 +228,7 @@ def training_scalars(record):
             values['Policy/backtracks'] = transaction.get('backtracks')
     surrogate=record.get('surrogate_metrics') or {}
     if surrogate:
+        values['Policy/ppo_zero_gradient_fraction'] = surrogate.get('ppo_zero_gradient_fraction')
         values.update({'Policy/surrogate_kl':surrogate['surrogate_kl'],
             'Policy/action_ratio':surrogate['ratio'],
             'Policy/mc_logratio_clamp_fraction':surrogate['logratio_clamp_fraction'],
@@ -250,6 +266,8 @@ def training_scalars(record):
     values['Perf/actor_step_seconds']=efficiency.get('actor_seconds_per_accepted_step')
     if 'peak_allocated_bytes' in efficiency:values['Perf/peak_memory_gib']=efficiency['peak_allocated_bytes']/2**30
     critic = record.get('critic') or {}
+    values['Loss/critic_holdout_mse_before'] = critic.get('holdout_before',{}).get('mse')
+    values['Loss/critic_holdout_mse_after'] = critic.get('holdout_after',{}).get('mse')
     values['Loss/critic_mse_before'] = critic.get('before', {}).get('mse')
     values['Loss/critic_mse_after'] = critic.get('after', {}).get('mse')
     values['Loss/critic_ev_before'] = critic.get('before', {}).get('explained_variance')
@@ -328,6 +346,11 @@ def evaluation_scalars(report, baseline=None, *, bootstrap_repeats=2000):
               'Reward/episode_return': _balanced(rows, lambda r: r['reward']),
               'Motion/activity_rad_s': _balanced(rows, lambda r: r['activity']),
               'Motion/music_alignment': _balanced(rows, lambda r: r['music_alignment'])}
+    values['Reward/training_source_weighted_return'] = report.get('training_source_weighted_reward')
+    music = report.get('paired_baseline',{}).get('music_summary',{})
+    values['Reward/music_improvement_fraction'] = music.get('improvement_fraction')
+    values['Reward/music_delta_median'] = music.get('reward_delta',{}).get('p50')
+    values['Reward/music_delta_p10'] = music.get('reward_delta',{}).get('p10')
     initial_activity = _balanced(before['rows'].values(), lambda r: r['activity'])
     if initial_activity is not None and initial_activity > 0 and values['Motion/activity_rad_s'] is not None:
         values['Motion/activity_retention'] = values['Motion/activity_rad_s']/initial_activity

@@ -1,8 +1,9 @@
 # 服务器1用户授权的200轮正式训练：未来已提交参考Critic、整段留出验证和学习状态回退。
 # 数据来自普通8秒在线rollout；不采当前Actor完整轨迹MC，不继承或伪造新Critic的MC验收。
-# Critic最多32 epochs，由20%整段留出集选最佳，固定短评估标签MSE不得超过初始值5%。
-# Actor保留LR/10 epochs上限/执行时间权重；每epoch核对真实PPO零梯度率和固定噪声参考变化，超限恢复Actor及Adam。
-# 每5轮用8首音乐x2seed在全新PhysX世界评估；新增失败或显著奖励退化超过0.5%则保存证据、恢复上一合格模型并停止。
+# Critic最多32 epochs，由当前20%整段留出集选最佳，旧短评估标签仅作诊断。
+# Actor保留LR/10 epochs上限/执行时间权重；代理饱和保留更新并结束本轮，参考变化超限才回退。
+# 每10轮用16首音乐x2seed在全新PhysX世界评估，起点混合开头/中段；质量变化只报告，不自动终止。
+# 训练起点80%按原分层覆盖、20%按实际非偏航跟踪困难度有界采样；概率与EMA均随checkpoint保存。
 # 200是新实验累计目标，完整checkpoint续训；数值门槛是监控候选，不宣称已证明物理或长期失败改善。
 diagnostics:
   record_original_threshold_crossings: true
@@ -144,8 +145,12 @@ stage10:
     validation_guard:
       holdout_fraction: 0.2
       patience_epochs: 4
-      max_fixed_mse_increase: 0.05
   dataset:
+    adaptive:
+      enabled: true
+      fraction: 0.2
+      ema_alpha: 0.1
+      max_priority: 3.0
     initialization: paired_motion_warmup.v1
     random_start: true
     require_audio: true
@@ -163,24 +168,25 @@ stage10:
     collection: all_ranks
     world_size: 8
   evaluation:
+    quality_action: report_only
     envs_per_rank: 2
     episode_seconds: 20.0
-    every_actor_iterations: 5
+    every_actor_iterations: 10
     every_control_steps: 100000000
     original_split: train
     persistent_world: false
     purpose: training_progress
     samples_per_source:
-      AIOZ-GDANCE: 2
-      AIST++: 2
-      FineDance: 2
-      Mine: 2
+      AIOZ-GDANCE: 4
+      AIST++: 4
+      FineDance: 4
+      Mine: 4
     seeds:
     - 42
     - 1729
     selection_seed: 42
     split: train
-    start_mode: beginning
+    start_mode: mixed
     unique_music: true
     physical_guard:
       max_new_failures: 0

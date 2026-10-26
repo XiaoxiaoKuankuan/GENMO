@@ -105,7 +105,7 @@ def test_episode_holdout_does_not_switch_sides_when_next_window_changes_populati
     assert set(small_val)<=set(large_val)
 
 
-def test_critic_fixed_reference_rejection_restores_best_adam(actor_factory):
+def test_current_critic_holdout_can_improve_despite_old_fixed_labels(actor_factory):
     from gem.closedloop.dppo.pretrained_critic import PretrainedConditionCritic
     from gem.closedloop.dppo.tensor_cache import RolloutTensorCache
     from gem.closedloop.dppo.updater import critic_update
@@ -119,6 +119,8 @@ def test_critic_fixed_reference_rejection_restores_best_adam(actor_factory):
     records=[]
     for i,row in enumerate(rows):
         row.identity=dict(backend_session_id='test',episode_id=i//2,env_id=0)
+        row.control_tick_begin=600+(i%2)*120;row.control_tick_end=row.control_tick_begin+120
+        row.truncated=False;row.terminated=False
         with torch.no_grad():value=float(critic(row.metadata['critic_context'],[5.])[0])
         records.append(dict(critic_context=row.metadata['critic_context'],remaining_music_seconds=5.,
                             target=value,initial_prediction=value))
@@ -130,10 +132,13 @@ def test_critic_fixed_reference_rejection_restores_best_adam(actor_factory):
         generator=torch.Generator().manual_seed(2),epochs=5,batch=8,
         validation_guard=dict(holdout_fraction=.2,max_fixed_mse_increase=.05,patience_epochs=2),
         fixed_reference=dict(records=records))
-    assert result['optimizer_steps']==0 and result['attempted_optimizer_steps']>0
-    assert result['selected_epoch']==0 and result['epochs']==2
+    assert result['optimizer_steps']>0 and result['attempted_optimizer_steps']>=result['optimizer_steps']
+    assert result['selected_epoch']>0
+    assert result['holdout_after']['mse']<result['holdout_before']['mse']
+    assert result['fixed_after']['mse']>result['fixed_before']['mse']
+    assert result['fixed_reference_role']=='diagnostic_only'
     assert result['training_actions']+result['validation_actions']==12
-    assert_tree_equal(before,capture_learning(critic,optimizer))
+    assert any(not torch.equal(before['parameters'][k],v) for k,v in critic.named_parameters() if v.requires_grad)
     cache.close()
 
 
@@ -226,7 +231,8 @@ def test_physical_stop_restores_two_models_and_adams_without_refunding_budget(tm
     assert state['iteration']==10 and state['optimizer_attempts']==80 and state['training_control_steps']==10000
     assert state['policy_version']==11 and publications==['quality_rollback_controlled_stop']
     assert (tmp_path/'quality_stop.json').is_file()
-    monkeypatch.setattr('sys.argv',['supervisor','--config','unused.yaml','--output-dir',str(tmp_path),
+    config=tmp_path/'stop.yaml';config.write_text('stage10:\n  evaluation:\n    quality_action: stop\n')
+    monkeypatch.setattr('sys.argv',['supervisor','--config',str(config),'--output-dir',str(tmp_path),
                                   '--status-dir',str(tmp_path/'status'),'--future-critic-formal'])
     assert supervisor.main()==0
     assert json.loads((tmp_path/'status/supervisor.json').read_text())['status']=='quality_stopped'

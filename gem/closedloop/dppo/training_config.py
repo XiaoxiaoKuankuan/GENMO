@@ -49,6 +49,10 @@ def configuration(path,*,genmo_repo=None,gmt_repo=None):
         raise ValueError('Only the validated stable_tf32x3 FP32 execution is supported')
     from .time_sampling import TIME_SAMPLING_CONTRACT, MOTION_RESET_CONTRACT
     dataset = s['dataset']
+    from .adaptive_sampling import adaptive_settings
+    adaptive_settings(dataset.get('adaptive'))
+    from .learning_guards import quality_action
+    quality_action(s['evaluation'])
     if (dataset.get('random_start') is not True or dataset.get('sampling_contract') != TIME_SAMPLING_CONTRACT
             or dataset.get('initialization') != MOTION_RESET_CONTRACT or dataset.get('split') != 'train'):
         raise ValueError('Actor training requires explicit random time sampling and paired motion initialization')

@@ -3,8 +3,8 @@
 输入为当前模型及 Adam、真实 rollout 的 episode 身份和独立配对评估报告。
 快照只保存可训练参数、buffer 和完整优化器状态，恢复时不回退物理交互、预算或
 随机数；被拒绝的数据本轮结束后丢弃。Critic 按完整 episode 留出，避免相邻状态
-分别进入训练和验证。固定旧自举标签仅限制预测漂移，不冒充完整 MC 真值。
-物理判据使用同任务评估的新失败和音乐成簇奖励区间；没有触发退化不等于有效。
+分别进入训练和验证。固定旧自举标签只诊断预测漂移，不否决当前留出改善。
+物理判据使用同任务评估的新失败和音乐成簇奖励区间，默认仅报告；没有触发退化不等于有效。
 本模块不改变 Actor 输入、扩散采样、奖励、GMT 或半马尔可夫回报。
 """
 from __future__ import annotations
@@ -59,9 +59,7 @@ def split_episodes(selected, manifest, identities, fraction):
 
 def actor_guard_failures(metrics, references, settings):
     failures = {}
-    key = 'ppo_zero_gradient_fraction'
-    if metrics[key] > settings['max_ppo_zero_gradient_fraction']:
-        failures[key] = metrics[key]
+    # 代理裁剪饱和只结束后续epoch，不证明已完成更新损害了实际参考。
     for key in ('joint_change_rms_rad', 'near_joint_change_rms_rad', 'normalized_change_rms'):
         values = [(r['actions'], r.get(key)) for r in references if r.get(key) is not None]
         if not values:
@@ -70,6 +68,41 @@ def actor_guard_failures(metrics, references, settings):
         if value > settings['max_'+key]:
             failures[key] = value
     return failures
+
+
+def quality_action(evaluation):
+    """短物理监视默认仅报告；只有显式stop配置才停止整个实验。"""
+    action = evaluation.get('quality_action', 'report_only')
+    if action not in ('report_only', 'stop'):
+        raise ValueError('evaluation.quality_action must be report_only or stop')
+    return action
+
+
+def quality_stop_blocks(output, evaluation):
+    return quality_action(evaluation) == 'stop' and (output/'quality_stop.json').exists()
+
+
+def retain_quality_stop_history(state, evaluation):
+    """报告模式恢复旧模型时保留历史停训事件，但不继续执行旧停止指令。"""
+    if quality_action(evaluation) == 'report_only' and state.get('quality_stop'):
+        state.setdefault('quality_stop_history', []).append(state.pop('quality_stop'))
+
+
+def record_quality_result(c, result, label):
+    """记录质量诊断与明确的处理方式，报告模式不回退模型、不写停止文件。"""
+    from .parallel_support import root_call
+    from .budget import atomic_json
+    action = quality_action(c.stage['evaluation'])
+    quality = result.get('physical_guard')
+    if quality is None or quality['passed']:
+        return
+    record = dict(iteration=c.state['iteration'], evaluation_label=label, action=action, **quality)
+    key = 'quality_stop' if action == 'stop' else 'quality_warning'
+    c.state[key] = record
+    root_call(c.distributed, lambda: atomic_json(c.output/(key+'.json'), record))
+    if c.distributed.rank == 0:
+        print(f'[STAGE10 QUALITY] action={action} iteration={c.state["iteration"]} '
+              f'reasons={quality["reasons"]}', flush=True)
 
 
 def physical_guard(result, baseline, settings):
@@ -133,14 +166,14 @@ def validate_formal_configuration(config):
     actor = stage['training']['robofft'].get('update_guard') or {}
     evaluation = stage['evaluation']
     physics = evaluation.get('physical_guard') or {}
+    quality_action(evaluation)
     if (stage['critic']['complete_mc']['enabled'] or evaluation.get('persistent_world') is not False or
             evaluation['episode_seconds'] is None or not 0 < evaluation['episode_seconds'] <= 20 or
-            not 1 <= evaluation.get('every_actor_iterations', 0) <= 5 or
+            not 1 <= evaluation.get('every_actor_iterations', 0) <= 10 or
             stage['run_control']['max_training_iterations'] != stage['limits']['accepted_iterations'] or
             not 1 <= stage['run_control']['max_training_iterations'] <= 200):
-        raise ValueError('Formal guard requires <=200 iterations, no complete MC and fresh <=20s physics every <=5 iterations')
+        raise ValueError('Formal configuration requires <=200 iterations, no complete MC and fresh <=20s physics every <=10 iterations')
     required = dict(holdout_fraction=critic.get('holdout_fraction'),
-                    max_fixed_mse_increase=critic.get('max_fixed_mse_increase'),
                     max_ppo_zero_gradient_fraction=actor.get('max_ppo_zero_gradient_fraction'),
                     max_relative_reward_drop=physics.get('max_relative_reward_drop'))
     required.update({key: actor.get(key) for key in ('max_joint_change_rms_rad',
@@ -148,8 +181,8 @@ def validate_formal_configuration(config):
     if any(type(v) not in (int, float) or not math.isfinite(v) or not 0 < v < 1 for v in required.values()):
         raise ValueError('Formal guard requires explicit finite positive subunit limits')
     if (not 0 < critic['holdout_fraction'] < .5 or type(critic.get('patience_epochs')) is not int or
-            critic['patience_epochs'] < 1 or physics.get('max_new_failures') != 0):
-        raise ValueError('Formal Critic episode holdout, patience and zero-new-failure guards required')
+            critic['patience_epochs'] < 1):
+        raise ValueError('Formal Critic episode holdout and patience required')
 
 
 def fixed_reference_for_update(c):

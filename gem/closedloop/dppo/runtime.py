@@ -95,7 +95,8 @@ class InProcessTrainingRuntime:
         self.time_pool = StratifiedTimePool(c.catalog, seed=c.stage['seed'], rank=c.distributed.rank,
             world_size=c.stage['distributed']['world_size'],
             minimum_remaining_seconds=c.stage['ppo_rollout']['world_seconds'],
-            bin_seconds=dataset['time_bin_seconds'], standing_start_probability=dataset['standing_start_probability'])
+            bin_seconds=dataset['time_bin_seconds'], standing_start_probability=dataset['standing_start_probability'],
+            adaptive=dataset.get('adaptive'))
         world_path=c.rank_dir/'bootstrap_world.sqlite'
         world=VectorWorldClient(_DirectTransport(service),MemoryReceiveJournal(world_path))
         self.collector=WorldEnvironmentCollector(c.policy,self._factory,world,num_envs=self.num_envs,
@@ -199,6 +200,7 @@ class InProcessTrainingRuntime:
         self.apply_restore()
         start=time.perf_counter()
         fragments,report=local_call(c.distributed,lambda:self.collector.collect(world_seconds=seconds,policy_version=c.state['policy_version']))
+        self.time_pool.sync_feedback(c.distributed)
         def prepare_learning():
             buffer=DeviceRolloutBuffer(fragments,c.policy,c.distributed.device)
             rows=buffer.transitions

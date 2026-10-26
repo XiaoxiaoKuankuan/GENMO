@@ -263,8 +263,10 @@ def actor_update(policy, optimizer, rows, targets, cache, manifest, *, distribut
                 change = compare_outputs(before, output_probe(policy, local, cache))
             changes = distributed.all_gather_object(change)
             failures = actor_guard_failures(checked, changes, guard)
+            saturated = checked['ppo_zero_gradient_fraction'] > guard['max_ppo_zero_gradient_fraction']
             epoch_checks.append(dict(epoch=epoch, full_rollout=checked, reference_change=changes,
-                                     passed=not failures, failures=failures))
+                                     passed=not failures, failures=failures, surrogate_saturated=saturated,
+                                     action='rollback' if failures else 'retain_and_finish' if saturated else 'continue'))
             if distributed.rank == 0:
                 print(f'[RoboFFT EPOCH GUARD] epoch={epoch+1} outside={checked["ratio_clip_fraction"]:.4f} '
                       f'ppo_zero_gradient={checked["ppo_zero_gradient_fraction"]:.4f} '
@@ -277,6 +279,8 @@ def actor_update(policy, optimizer, rows, targets, cache, manifest, *, distribut
                 stop_reason = 'epoch_guard_rollback_actor_and_adam'
             else:
                 accepted_steps = len(reports)
+                if saturated:
+                    stop_reason = 'surrogate_saturation_finish_epoch_without_rollback'
             del saved_epoch
         else:
             accepted_steps = len(reports)

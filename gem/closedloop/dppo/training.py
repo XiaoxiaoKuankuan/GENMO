@@ -335,10 +335,8 @@ def _evaluate(c,report,label,*,save=True):
     baseline=root_call(c.distributed,lambda:summary_only(json.loads((c.output/'evaluation_baseline.json').read_text()))
         if (c.output/'evaluation_baseline.json').exists() else result)
     if quality_guard:
-        if not result['physical_guard']['passed']:
-            c.state['quality_stop']=dict(iteration=c.state['iteration'],evaluation_label=label,
-                                         **result['physical_guard'])
-            root_call(c.distributed,lambda:atomic_json(c.output/'quality_stop.json',c.state['quality_stop']))
+        from .learning_guards import record_quality_result
+        record_quality_result(c,result,label)
     if c.distributed.rank==0:c.pending_evaluation=(result,label,report,baseline)
     if save:
         _snapshot(c,'evaluated_'+label)
@@ -489,7 +487,7 @@ def _validate_future_critic_release(args,config):
     短实验显式初始化旧共享Critic，零初始化未来分支，不重采完整MC；20秒
     独立世界评估及三轮累计预算必须同时满足。这个入口不把此前失败的困难
     状态验证改成通过，完整checkpoint续训仍不能突破相同三轮累计边界。
-    正式模式另要求同结构初始化、Critic/Actor约束及每五轮独立短物理评估；
+    正式模式要求同结构初始化、Critic留出验证及每十轮以内的独立短物理评估；
     不采完整MC、不伪造MC验收，允许完整checkpoint恢复同一个200轮实验。
     """
     if config['stage10']['critic']['type']!='asymmetric_tracking_committed_temporal':return
@@ -518,7 +516,8 @@ def _validate_future_critic_release(args,config):
 
 def run(cargs,config,distributed):
     _validate_future_critic_release(cargs,config)
-    if getattr(cargs,'future_critic_formal',False) and (cargs.output_dir/'quality_stop.json').exists():
+    from .learning_guards import quality_stop_blocks, retain_quality_stop_history
+    if getattr(cargs,'future_critic_formal',False) and quality_stop_blocks(cargs.output_dir,config['stage10']['evaluation']):
         raise ValueError('This experiment was explicitly stopped by paired physical quality checks; automatic resume is forbidden')
     if not any(getattr(cargs,name,False) for name in ('collect_only','evaluate_only','calibrate_only','critic_preheat_only','mc_validation_only','decisive_diagnostic')):
         from .actor_optimization import require_current_actor_objective
@@ -718,6 +717,7 @@ def run(cargs,config,distributed):
             c.state['budget']=root_call(distributed,lambda:c.budget.summary())
             c.bc.load_state_dict(payload['rank_states'][distributed.rank]['bc'])
             restore_local_rng(payload['rank_states'][distributed.rank]['rng'],c.generators)
+        retain_quality_stop_history(c.state,c.stage['evaluation'])
         from NoetixRobot.tasks.mimic.mimic_noetix_bumi4340_mha_sonic.closedloop.vector_backend import VectorFrozenGmtBackend
         from NoetixRobot.tasks.mimic.mimic_noetix_bumi4340_mha_sonic.closedloop.inprocess_service import InProcessVectorService
         service=local_call(distributed,lambda:InProcessVectorService(VectorFrozenGmtBackend(c.config)))

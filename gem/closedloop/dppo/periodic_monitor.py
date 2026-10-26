@@ -35,6 +35,7 @@ from gem.closedloop.dppo.evaluation import (
     build_evaluation_tasks,
 )
 from gem.closedloop.dppo.full_dataset import SOURCES
+from gem.closedloop.dppo.music_tasks import SOURCE_PROBABILITIES
 from .performance import profiled
 from .execution_compatibility import same_execution,same_evaluation_execution
 from gem.closedloop.frozen_actor import stable_noise_seed
@@ -242,7 +243,19 @@ def paired_summary(baseline, current):
     deltas = [r['reward_delta'] for r in pairs]
     tasks={t['task_id']:t for t in baseline.get('plan',{}).get('tasks',[])}
     groups=[(r['dataset'],tasks.get(r['task_id'],{}).get('sample',{}).get('group_id',r['task_id'])) for r in pairs]
+    music = {}
+    for key, pair in zip(groups, pairs):
+        music.setdefault(key, []).append(pair['reward_delta'])
+    means = [float(np.mean(values)) for values in music.values()]
+    music_summary = dict(count=len(means), improved=sum(v > 0 for v in means),
+        regressed=sum(v < 0 for v in means), unchanged=sum(v == 0 for v in means),
+        improvement_fraction=sum(v > 0 for v in means)/len(means),
+        reward_delta=dict(**_stats(means), p10=float(np.quantile(means, .1))),
+        scope='one_vote_per_music_seeds_averaged',
+        music=[dict(dataset=key[0], group_id=key[1], reward_delta=float(np.mean(values)), seed_count=len(values))
+               for key, values in music.items()])
     return dict(task_count=len(pairs), reward_delta=_stats(deltas),
+        music_summary=music_summary,
         duration_delta=_stats([r['duration_delta'] for r in pairs]), new_failures=sum(r['new_failure'] for r in pairs),
         failure_recovered=sum(r['failure_recovered'] for r in pairs), pairs=pairs, regression_alert=_regression_alert(deltas,groups=groups))
 
@@ -281,7 +294,8 @@ def advance_regression_alert(state, alert, iteration):
     return result
 
 
-def merge_periodic_reports(plan, rankreports, *, baseline=None, evaluation_identity=None):
+def merge_periodic_reports(plan, rankreports, *, baseline=None, evaluation_identity=None,
+                           source_probabilities=SOURCE_PROBABILITIES):
     """逐文件核验并汇总全部固定任务；报告/模型可来自内存，不要求checkpoint SHA。"""
     _plan_valid(plan)
     reports = list(rankreports)
@@ -346,6 +360,13 @@ def merge_periodic_reports(plan, rankreports, *, baseline=None, evaluation_ident
         physical_failure_count=sum(r['physical_failure'] for r in rows),
         assertions=dict(all_fixed_tasks_included=True, original_task_identity_and_noise_preserved=True,
             rank_models_unchanged=True, full_heldout_acceptance=False))
+    probabilities = dict(zip(SOURCES, source_probabilities))
+    _require(len(source_probabilities) == len(SOURCES) and
+             all(math.isfinite(p) and p > 0 for p in probabilities.values()) and
+             math.isclose(sum(probabilities.values()), 1.), 'Invalid evaluation source weights')
+    result['training_source_weighted_reward'] = sum(probabilities[s]*by_source[s]['reward']['mean'] for s in SOURCES)
+    result['training_source_weights'] = probabilities
+    result['weighting_scope'] = 'source_mixture_only_fixed_music_panel_not_adaptive_training_distribution'
     if baseline is not None:
         result['paired_baseline'] = paired_summary(baseline, result)
     return result
