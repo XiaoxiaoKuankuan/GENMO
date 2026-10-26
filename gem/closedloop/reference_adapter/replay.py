@@ -61,7 +61,7 @@ class RealReplay:
                 and len({r.policy_version for r in episode[i:i+window]}) == 1]
         return self._windows[key]
 
-    def sample_windows(self, batch, window=8, split="train", *, latest_only=False):
+    def sample_windows(self, batch, window=8, split="train", *, latest_only=False, deterministic=False):
         candidates = self.candidates(window, split)
         if candidates and latest_only:
             latest = max(r.policy_version for e in self.episodes.values() for r in e if r.start.split == split)
@@ -70,7 +70,19 @@ class RealReplay:
             raise ValueError(f"没有{split}真实连续{window}步窗口")
         baseline = [w for w in candidates if all(r.policy_version == 0 for r in w)]
         recent = [w for w in candidates if any(r.policy_version > 0 for r in w)]
-        chosen = [self.rng.choice((baseline if i % 2 == 0 else recent) or candidates) for i in range(batch)]
+        if deterministic:
+            # 验证固定覆盖当前策略各首歌及首尾时间，不能反复抽样直到幸运批次通过。
+            groups = {}
+            for w in candidates:
+                groups.setdefault(w[0].start.song_id, []).append(w)
+            chosen = []
+            batch = max(batch, len(groups))
+            for i, song in enumerate(sorted(groups)):
+                group = groups[song]
+                count = batch//len(groups) + int(i < batch % len(groups))
+                chosen.extend(group[round(j*(len(group)-1)/max(1, count-1))] for j in range(count))
+        else:
+            chosen = [self.rng.choice((baseline if i % 2 == 0 else recent) or candidates) for i in range(batch)]
         def stack(getter):
             return torch.cat([torch.stack([getter(row) for row in w], 1) for w in chosen], 0)
         return {"origin": "real", "state": stack(lambda r: r.start.executed_state),

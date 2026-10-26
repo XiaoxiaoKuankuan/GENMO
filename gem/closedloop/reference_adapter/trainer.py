@@ -87,7 +87,9 @@ class AdapterTrainer:
 
     def warmup_real(self, epochs=20, *, dataset=None):
         x, y, xv, yv, near = self.warmup_dataset() if dataset is None else dataset
-        best, best_state = float("inf"), None
+        with torch.no_grad():
+            best = float((self.critic(xv)-yv).square().mean())
+        best_state = (copy.deepcopy(self.critic.state_dict()), copy.deepcopy(self.critic_optimizer.state_dict()))
         batch = self.config.get("critic_batch_size", 256)
         for _ in range(epochs):
             order = torch.randperm(len(y), device=y.device)
@@ -123,9 +125,12 @@ class AdapterTrainer:
 
     def validate_wm(self):
         batch = self.config.get("wm_validation_batch_size", 32)
-        report = self.dynamics.validate_real(self.replay.sample_windows(batch, 16, "validation", latest_only=True))
+        windows = self.replay.sample_windows(batch, 16, "validation", latest_only=True, deterministic=True)
+        report = self.dynamics.validate_real(windows)
         gate = prediction_gate(report, self.config.get("wm_quality"))
-        return {"errors": report, "quality_gate": gate}
+        return {"errors": report, "quality_gate": gate, "validation_windows": len(windows["episode_ids"]),
+                "validation_episodes": sorted(set(windows["episode_ids"])),
+                "sampling": "latest_policy_song_balanced_even_time"}
 
     def rollback_last_update(self):
         if self._rollback is not None:

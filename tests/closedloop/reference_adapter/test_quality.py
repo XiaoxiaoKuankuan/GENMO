@@ -135,3 +135,20 @@ def test_zero_replay_reprice_preserves_physics_and_matches_music(system):
     stats = [dict(source="zero_adapter_real_training_episodes", joint_names=range(21), samples=2,
                   sum_square_qd=torch.ones(21)*8)]
     torch.testing.assert_close(combined_s0(stats), torch.ones(21)*2)
+
+
+def test_fixed_wm_validation_covers_songs_without_random_retry(system):
+    engine, z = system
+    replay = tensor_replay(engine, z, 24)
+    other = list(replay.episodes["validation"])
+    for row in other:
+        replay.add(replace(row, start=replace(row.start, song_id="heldout2", episode_id="heldout2"),
+                           end=replace(row.end, song_id="heldout2", episode_id="heldout2")))
+    before = replay.rng.getstate()
+    a = replay.sample_windows(4, 16, "validation", latest_only=True, deterministic=True)
+    b = replay.sample_windows(4, 16, "validation", latest_only=True, deterministic=True)
+    assert set(a["episode_ids"]) == {"validation", "heldout2"}
+    assert a["episode_ids"] == b["episode_ids"] and replay.rng.getstate() == before
+    assert torch.equal(a["state"], b["state"])
+    for i in (0, 2):
+        assert not torch.equal(a["state"][i], a["state"][i+1])
