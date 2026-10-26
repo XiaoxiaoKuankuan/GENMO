@@ -149,8 +149,11 @@ def main(kind):
     sim_cfg = make_sim(args.torch_device, args)
     if cfg.get("execution", {}).get("physics_determinism"):
         from isaaclab.utils import replace as config_replace
+        # SM观测来自实际刚体/关节状态；不使用MuJoCo内部sensor计算。
+        # Newton确定性模式要求关闭该独立计算，真实碰撞数据仍从solver.contact读取。
+        solver = config_replace(sim_cfg.physics.solver_cfg, disable_sensors=True)
         sim_cfg = config_replace(sim_cfg, physics=config_replace(sim_cfg.physics,
-            class_type=None, deterministic_mode=cfg["execution"]["physics_determinism"]))
+            class_type=None, solver_cfg=solver, deterministic_mode=cfg["execution"]["physics_determinism"]))
     activity = [torch.profiler.ProfilerActivity.CPU, torch.profiler.ProfilerActivity.CUDA]
     profiler = torch.profiler.profile(activities=activity, profile_memory=True) if args.profile else nullcontext()
     with launch_simulation(sim_cfg, args), profiler as measured:
