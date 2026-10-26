@@ -4,7 +4,7 @@
 真实终止bootstrap为零，行政截断保留终点价值。Actor目标保持图，Critic目标整体detach。
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 import torch
 
@@ -36,6 +36,22 @@ class IntervalAccumulator:
         self.reward = self.reward + (self.gamma ** self.steps) * self.survival * reward_dt
         self.survival = self.survival * alive
         self.steps += 1
+
+
+def close_real_mc_episode(intervals, terminal_event):
+    """把零控制步的真实任务终止关联到最后一个已执行步，拒绝行政截断。
+
+    音乐结束、物理失败、参考耗尽或连续超时都可以在请求边界被发现；此时不能
+    虚构新状态转移，但已有最后一步的bootstrap必须为零。终止时间必须恰好相同。
+    """
+    allowed = terminal_event.reason in ("music_end", "physical_failure", "consecutive_timeouts") or (
+        terminal_event.reason.startswith("reference_exhausted:"))
+    if not intervals or not terminal_event.terminal or not allowed:
+        raise RuntimeError("MC需要真实episode终点，不能使用行政截断或空轨迹")
+    if intervals[-1].end.tick != terminal_event.end.tick:
+        raise RuntimeError("MC终止时间不属于最后一个已记录的真实控制步")
+    intervals[-1] = replace(intervals[-1], terminal=True, reason=terminal_event.reason)
+    return intervals
 
 
 def actor_return(intervals, terminal_value):

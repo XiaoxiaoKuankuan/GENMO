@@ -14,7 +14,7 @@ import torch
 
 from .application import task_inputs, seed_all
 from .checkpoint import pack_state
-from .returns import actor_return
+from .returns import close_real_mc_episode
 
 
 def choose_warmup_tasks(tasks, config):
@@ -63,7 +63,7 @@ def load_warmup(path, trainer, cfg):
     return ck["quality"]
 
 
-def collect_mc(collector, tasks, *, seed, device, max_control_steps):
+def collect_mc(collector, tasks, *, seed, device, max_control_steps, output=None, split="train"):
     collector.record_controls = True
     pairs, episodes, steps = [], [], 0
     for i, task in enumerate(tasks):
@@ -72,14 +72,13 @@ def collect_mc(collector, tasks, *, seed, device, max_control_steps):
         collector.reset(music, initial)
         intervals = []
         while not collector.terminal:
-            collector.collect(1)
+            decisions = collector.collect(1)
             block = collector.take_controls()
             intervals.extend(block)
             steps += sum(x.steps for x in block)
             if steps > max_control_steps:
                 raise RuntimeError("Critic真实MC采集达到预设控制步预算，禁止将截断伪装MC")
-        if not intervals or not intervals[-1].terminal:
-            raise RuntimeError("MC需要真实episode终点")
+        close_real_mc_episode(intervals, decisions[-1])
         value = torch.zeros_like(intervals[-1].reward)
         episode_pairs = []
         for x in reversed(intervals):
@@ -89,11 +88,22 @@ def collect_mc(collector, tasks, *, seed, device, max_control_steps):
             if (x.start.tick//12) % 5 == i % 5:
                 episode_pairs.append((x.start.detached(), value.detach().clone()))
         pairs.extend(reversed(episode_pairs))
-        episodes.append({"task": task["id"], "seed": seed+i, "reason": intervals[-1].reason,
+        episode = {"task": task["id"], "seed": seed+i, "reason": intervals[-1].reason,
                          "steps": sum(x.steps for x in intervals), "mc_return": float(value.mean()),
                          "commits": sum(bool(x.get("accepted")) for x in collector.events),
                          "pending_value_samples": sum(z.pending for z, _ in episode_pairs),
-                         "non_request_grid_samples": sum(z.tick % 60 != 0 for z, _ in episode_pairs)})
+                         "non_request_grid_samples": sum(z.tick % 60 != 0 for z, _ in episode_pairs)}
+        episodes.append(episode)
+        if output is not None:
+            from supermimic.bridge.bundle import atomic_save
+            directory = Path(output)/"mc_episodes"
+            directory.mkdir(exist_ok=True)
+            atomic_save({"episode": episode, "pairs": [(pack_state(z), y.cpu()) for z,y in reversed(episode_pairs)],
+                         "evidence": "real_complete_episode_mc"}, directory/f"{split}_{i:03d}.pt")
+            with (Path(output)/"mc_progress.jsonl").open("a") as stream:
+                stream.write(json.dumps({"split": split, "episode": i, **episode}, ensure_ascii=False)+"\n")
+        print(json.dumps({"event": "critic_real_mc_episode", "split": split, "episode": i, **episode},
+                         ensure_ascii=False), flush=True)
     return pairs, episodes, steps
 
 
@@ -120,9 +130,9 @@ def warmup_critic(trainer, collector, train_tasks, validation_tasks, config, out
         raise ValueError("Critic预热与验证音乐必须独立")
     actor_before = {n: p.detach().clone() for n, p in trainer.actor.named_parameters()}
     train, train_episodes, ntrain = collect_mc(collector, train_tasks, seed=config["seed"], device=device,
-                                              max_control_steps=config["max_collection_steps"])
+        max_control_steps=config["max_collection_steps"], output=output, split="train")
     validation, val_episodes, nval = collect_mc(collector, validation_tasks, seed=config["seed"]+100000,
-                                              device=device, max_control_steps=config["max_collection_steps"]-ntrain)
+        device=device, max_control_steps=config["max_collection_steps"]-ntrain, output=output, split="validation")
     payload = {"train": [(pack_state(z), y.cpu()) for z,y in train],
                "validation": [(pack_state(z), y.cpu()) for z,y in validation],
                "train_episodes": train_episodes, "validation_episodes": val_episodes, "criteria": config}
