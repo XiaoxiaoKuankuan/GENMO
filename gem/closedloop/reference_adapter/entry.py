@@ -2,7 +2,7 @@
 
 默认有界且必须显式执行；只读help和self-test不初始化物理。真实路径先绑定资产，
 独占新输出目录，然后复用SM原StreamingPhysicalEnv，按完整episode采集再更新/审计，
-不因采集分段reset。恢复学习状态时明确新建物理episode，不启动旧Trainer或正式长训。
+不因采集分段reset。恢复从新物理episode开始；正式训练必须通过真实门槛，按绝对accepted目标和分层审计执行。
 """
 
 import argparse
@@ -30,7 +30,8 @@ def main(kind):
     parser.add_argument("--resume")
     parser.add_argument("--checkpoint")
     parser.add_argument("--variant", choices=("zero", "no_music", "music"), default="zero" if kind == "evaluate" else "music")
-    parser.add_argument("--updates", type=int, default=1)
+    parser.add_argument("--updates", type=int, default=1, help="有界测试的绝对目标，正式/恢复使用target-updates")
+    parser.add_argument("--target-updates", type=int, help="绝对accepted更新目标，恢复不追加预算")
     parser.add_argument("--formal", action="store_true")
     parser.add_argument("--physical", action="store_true", help="audit显式运行8/16步真实物理审计")
     parser.add_argument("--self-test", action="store_true", help="audit运行CPU合同测试，无物理或优化任务")
@@ -76,7 +77,7 @@ def main(kind):
         if temp.exists() and temp.resolve().parent == output:
             shutil.rmtree(temp)
         write_json(output/"result.json", dict(command=command, exit_code=result.returncode, physical_run=False,
-                   music_proxy_sharp_valley_generalization="known_counterexample_not_accepted"))
+                   music_reward="causal_event_matching_v2", physics_quality="not_run"))
         return result.returncode
     if args.compare:
         from .evaluation import validate_comparison
@@ -85,14 +86,18 @@ def main(kind):
         output.mkdir(parents=True)
         write_json(output/"comparison.json", comparison)
         return 0
+    target_updates = args.target_updates if args.target_updates is not None else args.updates
+    if (args.formal or args.resume) and args.target_updates is None:
+        raise ValueError("正式训练/恢复必须显式指定绝对--target-updates")
     if kind == "train" and not args.calibrate_music:
-        if args.variant == "zero" or args.updates < 1:
+        if args.variant == "zero" or target_updates < 1:
             raise ValueError("零Adapter只评价/标定；更新次数必须为正")
-        if not args.formal and args.updates > cfg["training"]["maximum_bounded_updates"]:
+        if not args.formal and target_updates > cfg["training"]["maximum_bounded_updates"]:
             raise ValueError("超出有界更新预算；长训必须显式--formal")
-        if not cfg["training"]["physical_audit_each_update"]:
-            raise ValueError("真实训练不能绕过当前Adapter分布8/16步物理核验")
+
     tasks = read_tasks(cfg["tasks"], preparing=kind == "prepare")
+    if args.formal and {t["split"] for t in tasks} != {"train", "validation", "audit", "evaluation"}:
+        raise ValueError("正式训练需song/audio SHA互斥的train/validation/audit/evaluation四组")
     seed_all(cfg["training"]["seed"])
     engine = build_engine(cfg, args.torch_device, calibrating=args.calibrate_music or kind == "prepare")
     from .replay import RealReplay
@@ -180,13 +185,17 @@ def main(kind):
                 stream.write(json.dumps(report, ensure_ascii=False, allow_nan=False)+"\n")
             return rows, report, contract
 
-        def gate():
+        def gate(*, small=False):
             reports = []
-            for task in tasks:
+            audit_tasks = [t for t in tasks if t["split"] == "audit"]
+            if not audit_tasks:
+                raise ValueError("真实方向审计需要独立audit歌曲")
+            for task in (audit_tasks[:1] if small else audit_tasks):
                 initial, nominal, audio, _, metadata = assets(task)
-                for start_steps in task.get("audit_start_steps", cfg["training"]["physical_audit_start_steps"]):
+                for start_steps in ([0] if small else task.get("audit_start_steps", cfg["training"]["physical_audit_start_steps"])):
                     reports.append(dict(task=task["id"], **physical_audit(collector, engine, initial, nominal, audio, metadata, criteria, start_steps=start_steps)))
-            result = dict(passed=all(r["passed"] for r in reports), tasks=reports)
+            result = dict(passed=all(r["passed"] for r in reports), tasks=reports, measured_unix=time.time(),
+                          evidence="real_reset_paired_directions", audit_scope="small" if small else "full")
             write_json(output/f"physics_model{engine.dynamics.model_version}_adapter{trainer.update_index}_{time.time_ns()}.json", result)
             return result
 
@@ -222,42 +231,95 @@ def main(kind):
                 contracts.append(dict(id=task["id"], contract=contract, robot_contract=engine.step.bundle.metadata["robot"],
                                       observation_noise=cfg["observation_noise"], music_s0=engine.step.rewards.music.s0.cpu().tolist()))
             write_json(output/"evaluation.json", dict(variant=args.variant, task_contract=contracts, episodes=episodes,
-                       budget=dict(updates=trainer.update_index, real_steps=trainer.real_steps), physical_quality_passed=False))
+                       budget=dict(updates=trainer.update_index, real_steps=trainer.real_steps),
+                       physical_quality_passed=None, physical_quality_status="measured_without_acceptance_comparison",
+                       measured_unix=time.time()))
         elif kind == "audit":
             result = gate()
             write_json(output/"physical_audit.json", result)
             return 0 if result["passed"] else 2
         else:
-            if not trainer.critic_ready:
-                if {t["split"] for t in tasks} != {"train", "validation"}:
-                    raise ValueError("价值预热与WM验证需要歌曲互斥的train/validation任务")
-                for task in tasks:
-                    collect_episode(task, zero=True)
-                write_json(output/"critic_warmup.json", trainer.warmup_real(cfg["training"]["critic_warmup_epochs"]))
-            for _ in range(args.updates):
-                # 分段收集不reset；本入口在完整episode结束后才更新/使用同一物理环境审计。
-                collected = 0
-                while collected < cfg["training"]["collect_steps_per_round"]:
-                    for task in tasks:
+            training_tasks = [t for t in tasks if t["split"] == "train"]
+            validation_tasks = [t for t in tasks if t["split"] == "validation"]
+            evaluation_tasks = [t for t in tasks if t["split"] == "evaluation"]
+            cursor = (restored.get("cursor") or {}).get("task_cursor", 0) if restored else 0
+            baseline = (restored.get("cursor") or {}).get("evaluation_baseline") if restored else None
+            started_training = time.perf_counter()
+
+            def save(label):
+                save_checkpoint(output/f"{label}_{trainer.update_index:06d}_{time.time_ns()}.pt", trainer, collector=collector,
+                    behavior=behavior_config(cfg), provenance={"genmo_source_commit": source},
+                    cursor={"episodes": serial, "task_cursor": cursor, "target_updates": target_updates,
+                            "evaluation_baseline": baseline})
+
+            def evaluate_fixed(zero=False, small=False):
+                selected = evaluation_tasks[:1] if small else evaluation_tasks
+                if not selected:
+                    raise ValueError("缺少独立固定真实评价歌曲")
+                return [collect_episode(t, zero=zero, add_replay=False)[1] for t in selected]
+
+            try:
+                if not trainer.critic_ready:
+                    for task in training_tasks+validation_tasks:
+                        collect_episode(task, zero=True)
+                    for warmup_round in range(cfg["training"].get("critic_warmup_rounds", 5)):
+                        report = trainer.warmup_real(cfg["training"]["critic_warmup_epochs"])
+                        write_json(output/f"critic_warmup_{warmup_round:02d}.json", report)
+                        if trainer.critic_ready:
+                            break
+                    if not trainer.critic_ready:
+                        raise RuntimeError(f"Critic真实MC预热门槛失败: {trainer.warmup_report}")
+                # 独立WM先真实监督到验证合格；物理方向仍必须随后独立通过。
+                for warmup in range(cfg["training"].get("wm_warmup_steps", 200)):
+                    if trainer.validate_wm()["quality_gate"]["passed"]:
+                        break
+                    trainer.dynamics.fit(replay.sample_windows(cfg["training"]["batch_size"], 8), trainer.wm_optimizer)
+                wm_preflight = trainer.validate_wm()
+                write_json(output/"wm_preflight.json", wm_preflight)
+                if not wm_preflight["quality_gate"]["passed"]:
+                    raise RuntimeError(f"WM真实1/8/16步预热门槛失败: {wm_preflight}")
+                trainer.register_physical_gate(gate())
+                if baseline is None:
+                    baseline = evaluate_fixed(zero=True)
+                    write_json(output/"zero_physical_baseline.json", baseline)
+                from .evaluation import quality_comparison
+                while trainer.update_index < target_updates:
+                    # 单环境方案只在真episode边界优化/审计。只轮转必要歌曲，不每轮重跑全表。
+                    collected = 0
+                    while collected < cfg["training"]["collect_steps_per_round"]:
+                        task = training_tasks[cursor % len(training_tasks)]
+                        cursor += 1
                         rows, _, _ = collect_episode(task, zero=trainer.update_index == 0)
                         collected += len(rows)
-                try:
-                    report = trainer.update(model_gate=gate)
-                    current_gate = gate()
-                    report["post_update_physics_passed"] = current_gate["passed"]
-                    # 当前策略独立真实验证回报，不沿用旧策略/旧模型value targets。
-                    validation_episodes = [collect_episode(t, zero=False, add_replay=True)[0] for t in tasks if t["split"] == "validation"]
-                    report["real_critic_calibration"] = trainer.check_real_calibration(validation_episodes)
+                    # 当前分布独立真实WM与MC校验，验证episode不复用训练歌曲。
+                    collect_episode(validation_tasks[(cursor-1) % len(validation_tasks)], zero=trainer.update_index == 0)
+                    report = trainer.update()
+                    index = trainer.update_index
+                    small_due = index == 1 or index % cfg["training"].get("small_audit_every", 25) == 0
+                    full_due = index % cfg["training"].get("full_audit_every", 100) == 0
+                    if small_due or full_due:
+                        current_gate = gate(small=not full_due)
+                        measured = evaluate_fixed(small=not full_due)
+                        comparison = quality_comparison(baseline, measured, cfg["training"]["physical_monitor"])
+                        report["post_update_physical"] = dict(direction=current_gate, comparison=comparison, episodes=measured)
+                        if not current_gate["passed"] or not comparison["passed"]:
+                            trainer.rollback_last_update()
+                            raise RuntimeError(f"候选Adapter真实配对质量失败，回滚拒绝计数: {comparison}; direction={current_gate['passed']}")
+                        trainer.register_physical_gate(current_gate)
+                    report.update(real_environment_count=1, collector_resets=collector.reset_count,
+                                  accepted_updates_per_hour=3600*trainer.update_index/max(time.perf_counter()-started_training, 1e-6),
+                                  target_updates=target_updates, continuity="updates_only_after_true_episode_end")
                     with (output/"training.jsonl").open("a") as stream:
                         stream.write(json.dumps(report, ensure_ascii=False, allow_nan=False)+"\n")
-                    save_checkpoint(output/f"update_{trainer.update_index:06d}.pt", trainer, collector=collector,
-                                    behavior=behavior_config(cfg), provenance={"genmo_source_commit": source}, cursor={"episodes": serial})
-                    if not current_gate["passed"]:
-                        write_json(output/"stopped.json", dict(reason="new_adapter_distribution_physics_not_passed", update=trainer.update_index))
-                        return 2
-                except (RuntimeError, FloatingPointError) as error:
-                    save_checkpoint(output/f"stopped_{time.time_ns()}.pt", trainer, collector=collector,
-                                    behavior=behavior_config(cfg), provenance={"genmo_source_commit": source}, cursor={"episodes": serial})
-                    write_json(output/"stopped.json", dict(reason=str(error), update=trainer.update_index))
-                    return 2
+                        stream.flush()
+                    if index == 1 or index % cfg["training"].get("checkpoint_every", 25) == 0:
+                        save("accepted")
+                    print(json.dumps({k: report[k] for k in ("accepted_adapter_updates", "model_version", "real_steps", "update_wall_seconds")}), flush=True)
+                save("completed")
+                write_json(output/"completed.json", dict(accepted_adapter_updates=trainer.update_index, target_updates=target_updates))
+            except (RuntimeError, FloatingPointError, ValueError) as error:
+                save("stopped")
+                write_json(output/"stopped.json", dict(reason=str(error), accepted_adapter_updates=trainer.update_index,
+                           attempted_updates=trainer.attempted_updates, physical_gate=trainer.physical_gate))
+                return 2
     return 0

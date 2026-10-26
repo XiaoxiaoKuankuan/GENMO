@@ -14,7 +14,7 @@ import torch
 from supermimic.bridge.bundle import atomic_save
 from .contracts import map_tensors
 
-SCHEMA = "genmo.supermimic.reference_adapter.full.v1"
+SCHEMA = "genmo.supermimic.reference_adapter.full.v2"
 
 
 def save_checkpoint(path, trainer, *, collector=None, behavior=None, provenance=None, cursor=None):

@@ -46,13 +46,17 @@ class ControlStep:
         self.adapter, self.bundle, self.runtime, self.rewards = adapter, bundle, runtime, rewards
         self.observation_noise = observation_noise
 
-    def propose(self, z, *, zero=False):
+    def propose(self, z, *, zero=False, residual_offset=None, action_offset=None):
         z.validate()
         current, future, goal = nominal_window(z.nominal_reference, z.tick, self.runtime.kin)
         values = adapter_fields(z, self.adapter, self.bundle, current, goal)
         residual = z.executed_state.new_zeros(len(z.executed_state), 10, 27) if zero else self.adapter(values)
+        if residual_offset is not None:
+            residual = (residual+residual_offset).clamp(-self.adapter.bounds, self.adapter.bounds)
         corrected = reconstruct(z, residual, self.runtime.kin)
         action = self.bundle.act(z.control_history, corrected.goal)
+        if action_offset is not None:
+            action = action+action_offset
         return Proposal(corrected, select_reference(future, (slice(None), 0)), action)
 
     def advance(self, z, proposal, state_next, *, origin):
@@ -90,7 +94,7 @@ def initial_state(observed, nominal, audio, step, *, episode_id, song_id, split=
     return AdapterState(tick, observed["state"], observed["xi"], observed["previous_action"],
                         obs[:, None].expand(-1, 10, -1).clone(), nominal, left, pose, None,
                         yaw_mat(current.root_R), audio, memory, episode_id, song_id, split,
-                        mode=mode, known_at_tick=tick, plan_boundary_tick=boundary_tick)
+                        mode=mode, known_at_tick=tick, plan_boundary_tick=boundary_tick, episode_start_tick=tick)
 
 
 class PhysicalCollector:
@@ -127,7 +131,7 @@ class PhysicalCollector:
                              plan_boundary_tick=boundary_tick)
 
     @torch.no_grad()
-    def collect(self, count, replay=None, *, zero=False):
+    def collect(self, count, replay=None, *, zero=False, intervention=None):
         if self.terminal or self.state is None:
             raise RuntimeError("episode已结束或未初始化，必须显式reset")
         rows = []
@@ -139,7 +143,7 @@ class PhysicalCollector:
             if dev.type == "cuda":
                 torch.cuda.synchronize(dev)
             started = time.perf_counter()
-            proposal = self.step.propose(self.state, zero=zero)
+            proposal = self.step.propose(self.state, zero=zero, **(intervention or {}))
             next_state = self.env.step_physics(proposal.action)
             row = self.step.advance(self.state, proposal, next_state, origin="real")
             if dev.type == "cuda":

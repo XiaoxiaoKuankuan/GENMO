@@ -23,7 +23,7 @@ from .dynamics import DynamicsModel
 from .critic import AdapterCritic
 from .features import critic_dimension
 from .imagination import Imagination
-from .nominal import load_nominal
+from .nominal import load_nominal, check_support
 
 
 def read_config(path):
@@ -53,12 +53,12 @@ def read_tasks(path, *, preparing=False):
     tasks = json.loads(require_file(path, "tasks").read_text())
     if not isinstance(tasks, list) or not tasks:
         raise ValueError("tasks必须为非空JSON数组")
-    songs, hashes, ids = {}, {}, set()
+    songs, hashes, audio_hashes, ids = {}, {}, {}, set()
     for task in tasks:
         for key in ("id", "song_id", "split", "seed", "initial_state", "music_features"):
             if key not in task:
                 raise ValueError(f"任务缺少{key}")
-        if task["id"] in ids or task["split"] not in ("train", "validation"):
+        if task["id"] in ids or task["split"] not in ("train", "validation", "audit", "evaluation"):
             raise ValueError("任务id重复或缺少显式数据划分")
         ids.add(task["id"])
         require_file(task["initial_state"], "initial_state.npy")
@@ -66,6 +66,10 @@ def read_tasks(path, *, preparing=False):
         for mapping, key in ((songs, task["song_id"]), (hashes, file_digest(music))):
             if mapping.setdefault(key, task["split"]) != task["split"]:
                 raise ValueError("同歌或相同音频内容泄漏到训练/验证两侧")
+        if task.get("audio_path"):
+            audio_hash = file_digest(require_file(task["audio_path"], "audio_path"))
+            if task.get("audio_sha256") != audio_hash or audio_hashes.setdefault(audio_hash, task["split"]) != task["split"]:
+                raise ValueError("原音频SHA不符或跨数据划分泄漏")
         if not preparing:
             require_file(task.get("nominal_reference"), "nominal_reference")
     return tasks
@@ -89,6 +93,7 @@ def task_assets(task, engine, device):
     nominal, contract = load_nominal(task["nominal_reference"], engine.step.bundle, device=device,
                                      music_path=task["music_features"], initial_path=task["initial_state"], seed=task["seed"],
                                      music_start_tick=task.get("music_start_tick", 0))
+    contract.update(check_support(nominal, audio.end_tick))
     return initial, nominal, audio, contract
 
 

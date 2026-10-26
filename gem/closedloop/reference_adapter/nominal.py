@@ -16,6 +16,18 @@ from .reference import make_nominal
 NOMINAL_SCHEMA = "genmo.reference_adapter.nominal.v1"
 
 
+def required_support_tick(music_end_tick):
+    """最后合法控制时刻仍需10帧+右halo；不要求执行越过音乐尾部。"""
+    return (music_end_tick//12)*12 + 132
+
+
+def check_support(nominal, music_end_tick):
+    required = required_support_tick(music_end_tick)
+    if nominal.upper < required:
+        raise ValueError(f"真实GENMO名义尾部不足: upper={nominal.upper}, required={required}; 重新生成缓存，禁止外推")
+    return dict(music_end_tick=music_end_tick, required_support_tick=required, actual_support_tick=nominal.upper)
+
+
 def load_nominal(path, bundle, *, device, music_path, initial_path, seed, music_start_tick=0):
     payload = torch.load(path, map_location=device, weights_only=False)
     if payload.get("schema") != NOMINAL_SCHEMA or payload.get("source") != "frozen_genmo_accepted_reference":
@@ -79,13 +91,16 @@ def prepare_cache(env, bundle, genmo_cfg, task, music, initial, destination, *, 
     finally:
         collector.close()
     end = task.get("music_start_tick", 0)+(music.shape[1]-1)*20
-    keep = archive.ticks <= end
+    support = check_support(archive, end)
+    # 保留真正已生成且接管的源点，包括末尾超过音乐结束的导数/Goal支持。
+    # 不插值外推不存在的GENMO点，不以物理早结束放宽所声明音乐长度。
+    keep = archive.ticks <= ((required_support_tick(end)+19)//20)*20
     if int(keep.sum()) < 8:
         raise ValueError("实际GENMO缓存过短，不创建可训练替代动作")
     contract = dict(music_sha256=file_digest(task["music_features"]), initial_sha256=file_digest(task["initial_state"]),
                     genmo_checkpoint_sha256=file_digest(genmo_cfg["checkpoint"]), seed=int(task["seed"]),
                     music_start_tick=task.get("music_start_tick", 0),
-                    forecast_enabled=False, generation_reason=reason, actual_control_end_tick=collector.state.tick,
+                    forecast_enabled=False, generation_reason=reason, actual_control_end_tick=collector.state.tick, **support,
                     generation_scope="real_frozen_genmo_accepted_plans_without_adapter", bootstrap_latency_ticks=bootstrap_latency_ticks)
     atomic_save(dict(schema=NOMINAL_SCHEMA, source="frozen_genmo_accepted_reference", contract=contract,
                      world_qpos=archive.world_qpos[:, keep].cpu(), contact=archive.contact[:, keep].cpu(),

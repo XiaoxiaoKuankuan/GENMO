@@ -30,11 +30,15 @@ def lambda_returns(reward, continuation, values, gamma=.99, lam=.95):
     return torch.stack(result[::-1])
 
 
-def calibration(predicted, actual, near_failure=None):
+def calibration(predicted, actual, near_failure=None, *, constant_value=None):
     error = (predicted-actual).square()
     variance = actual.var(unbiased=False)
     ev = float(1-(predicted-actual).var(unbiased=False)/variance) if float(variance) > 1e-12 else None
+    constant_value = actual.mean() if constant_value is None else constant_value
+    baseline = (actual-constant_value).square()
     return {"mse": float(error.mean()), "explained_variance": ev,
-            "constant_baseline_mse": float(variance),
+            "constant_baseline_mse": float(baseline.mean()), "constant_value": float(constant_value),
             "near_failure_mse": float(error[near_failure].mean()) if near_failure is not None and near_failure.any() else None,
+            "near_failure_constant_mse": float(baseline[near_failure].mean()) if near_failure is not None and near_failure.any() else None,
+            "near_failure_samples": int(near_failure.sum()) if near_failure is not None else 0,
             "samples": actual.numel(), "target": "independent_real_discounted_return"}

@@ -98,3 +98,18 @@ def validate_comparison(reports):
     if a != b:
         raise ValueError("有/无音乐训练必须匹配真实采集量和Adapter更新数")
     return {name: r["episodes"] for name, r in reports.items()}
+
+
+def quality_comparison(baseline, current, thresholds):
+    """同任务真实配对监控：完成、名义跟踪和音乐任一显著退化即拒绝候选。"""
+    by_task = {r["task"]: r for r in baseline}
+    cases = []
+    for row in current:
+        old = by_task[row["task"]]
+        checks = dict(completion=int(row["full_music_complete"]) >= int(old["full_music_complete"]),
+                      tracking=row["sm_terms"]["track"] >= old["sm_terms"]["track"]*(1-thresholds["tracking_relative_drop"]),
+                      music_reward=row["sm_terms"]["music"] >= old["sm_terms"]["music"]-thresholds["music_absolute_drop"])
+        if old["music"]["f1"] is not None:
+            checks["music_f1"] = row["music"]["f1"] is not None and row["music"]["f1"] >= old["music"]["f1"]-thresholds["f1_absolute_drop"]
+        cases.append(dict(task=row["task"], checks=checks, passed=all(checks.values())))
+    return dict(passed=bool(cases) and all(c["passed"] for c in cases), cases=cases, thresholds=thresholds)

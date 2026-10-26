@@ -52,7 +52,7 @@ def test_real_weights_bptt_isolated_input_gradients(system, horizon):
 @pytest.mark.parametrize("component", ["music", "execution"])
 def test_adapter_music_only_finite_difference_and_detach_negative(system, component):
     engine, z = system
-    engine.bptt_steps = 6
+    engine.bptt_steps = 8
     bias = engine.step.adapter.net[-1].bias
     with engine.dynamics.adapter_phase(), frozen_parameters(engine.critic):
         def objective():
@@ -61,6 +61,7 @@ def test_adapter_music_only_finite_difference_and_detach_negative(system, compon
                     else trajectory.rows[-1].end.executed_state[:, 34:].square().mean())
         value = objective()
         grad, = torch.autograd.grad(value, bias)
+        assert grad.norm() > 0
         direction = grad / grad.norm()
         original = bias.detach().clone()
         eps = 1e-3
@@ -92,7 +93,7 @@ def tensor_replay(engine, z, count=10):
                 proposal = engine.step.propose(state, zero=True)
                 row = engine.step.advance(state, proposal, engine.dynamics.step(state.executed_state, proposal.action, state.xi), origin="real")
                 if i == count-1:
-                    row = replace(row, terminated=torch.ones_like(row.terminated), reason="fixture_end", continuation=torch.zeros_like(row.continuation))
+                    row = replace(row, terminated=torch.ones_like(row.terminated), reason="physical_failure", continuation=torch.zeros_like(row.continuation))
                 row = map_tensors(row, lambda x: x.detach())
                 replay.add(row)
                 state = row.end
@@ -126,13 +127,18 @@ def test_replay_reset_guards_and_independent_wm_update(system):
             engine.dynamics.fit(w, optimizer)
 
 
-def test_full_checkpoint_optimizers_rng_music_and_resume(system, tmp_path):
+def test_full_checkpoint_optimizers_rng_music_and_resume(system, tmp_path, monkeypatch):
     from gem.closedloop.reference_adapter.trainer import AdapterTrainer
     from gem.closedloop.reference_adapter.checkpoint import save_checkpoint, load_checkpoint
     engine, z = system
-    replay = tensor_replay(engine, z)
-    engine.bptt_steps = 6
+    replay = tensor_replay(engine, z, count=16)
+    engine.bptt_steps = 8
+    # 只在序列化测试mock外部门槛，不把数值夹具当成物理验收；门槛本身另有失败测试。
+    import gem.closedloop.reference_adapter.trainer as training_module
+    monkeypatch.setattr(training_module, "critic_gate", lambda *a, **kw: {"passed": True, "fixture_only": True})
+    monkeypatch.setattr(training_module, "prediction_gate", lambda *a, **kw: {"passed": True, "fixture_only": True})
     trainer = AdapterTrainer(engine, replay, dict(batch_size=1, wm_fit_window=8))
+    trainer.register_physical_gate({"passed": True, "tasks": [{"fixture_only": True}]})
     trainer.warmup_real(epochs=1)
     report = trainer.update()
     assert report["update"] == 1 and report["component_parameter_gradient_norm"]["sm"] > 0
@@ -167,7 +173,7 @@ def test_full_checkpoint_optimizers_rng_music_and_resume(system, tmp_path):
 
 def test_music_only_action_finite_difference(system):
     engine, z = system
-    engine.bptt_steps = 6
+    engine.bptt_steps = 8
     original_step = engine.dynamics.step
     offset = torch.zeros(1, 21, requires_grad=True)
     calls = 0

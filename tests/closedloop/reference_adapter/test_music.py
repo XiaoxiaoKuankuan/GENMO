@@ -59,11 +59,17 @@ def test_signal_ordering_delay_and_activity():
     scores = {k: float(run_signal(v, a)[0].mean()) for k, v in signals.items()}
     print("music_signal_scores", scores)
     assert all(scores["sync"] > scores[k] for k in scores if k != "sync")
-    # 保留首轮真实发现的反例：固定公式对尖锐谷的正目标肩部惩罚过大。
-    # 这不是放宽验收门槛；通用反站立/音乐性仍明确未通过。
+    # 保留原始反例信号，反向激励必须真正消失，不能更换信号规避。
     sharp = float(run_signal(sync(0, amplitude=.75, width=.045), a)[0].mean())
-    print("known_music_proxy_counterexample", {"sharp_sync": sharp, "static": scores["static"]})
-    assert sharp < scores["static"]
+    print("sharp_valley_regression", {"sharp_sync": sharp, "static": scores["static"]})
+    assert sharp > scores["static"] and sharp > scores["quarter"]
+    weak = float(run_signal(sync(0, amplitude=.08), a)[0].mean())
+    low = float(run_signal(sync(0)*.01, a)[0].mean())
+    extra = sync(0) - .3*torch.exp(-.5*((((t-.25+.25) % .5)-.25)/.03)**2)[:, None]
+    multi = float(run_signal(extra, a)[0].mean())
+    assert weak > scores["static"]
+    assert scores["sync"] > low and scores["sync"] > multi
+    print("event_extra_signals", dict(weak=weak, low_activity=low, extra_peaks=multi))
     _, centers, memory = run_signal(signals["sync"], a)
     assert centers[0] == 24 and centers[-1] == (239-2)*12
     assert len(set(centers)) == len(centers)
@@ -80,7 +86,7 @@ def test_signal_ordering_delay_and_activity():
 
 def test_music_gradient_and_finite_difference_uses_executed_velocity():
     a = audio()
-    qd = (.3+torch.arange(9)[:, None]*.03+torch.arange(21)[None]*.001).requires_grad_()
+    qd = (.3+(torch.arange(9)[:, None]-4).square()*.015+torch.arange(21)[None]*.001).requires_grad_()
     def objective(x):
         return run_signal(x, a)[0].sum()
     value = objective(qd)
@@ -91,3 +97,20 @@ def test_music_gradient_and_finite_difference_uses_executed_velocity():
     finite = (objective(qd.detach()+eps*direction)-objective(qd.detach()-eps*direction))/(2*eps)
     torch.testing.assert_close(finite, (grad*direction).sum(), atol=2e-3, rtol=.02)
     assert not objective(qd.detach()).requires_grad
+
+
+def test_event_zero_ramp_and_coverage_paid_once():
+    reward, a = MusicReward(torch.ones(21)), audio()
+    flat = torch.ones(1, 20)
+    assert not reward.events(flat).any()
+    assert not reward.events(torch.arange(20)[None].float()*.1).any()
+    memory = MusicState.empty(torch.zeros(1, 21))
+    paid = []
+    for i in range(75):
+        qd = torch.full((1, 21), .5)
+        memory = reward.push(memory, qd, qd, i*12)
+        memory, _, _, info = reward.settle(memory, a)
+        if info["music_settled_beats"].item():
+            paid.append((i*12, info["music_center_tick"], info["music_coverage_latest_tick"]))
+    assert paid == [(360, 336, 300), (660, 636, 600)]
+    assert memory.last_paid_tick == 72*12

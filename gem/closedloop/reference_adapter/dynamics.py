@@ -88,3 +88,16 @@ class DynamicsModel(nn.Module):
         optimizer.zero_grad(set_to_none=True)
         self.model_version += 1
         return report | {"wm_grad_norm": float(norm), "model_version": self.model_version}
+
+    @torch.no_grad()
+    def validate_real(self, windows):
+        """同一批独立真实连续16步，报告单步/8/16步可解释物理量误差。"""
+        from .audit import _state_error
+        if windows.get("origin") != "real" or windows["action"].shape[1] < 16:
+            raise ValueError("WM门槛需要完整真实16步窗口")
+        state, reports = windows["state"][:, 0], {}
+        for i in range(16):
+            state = self.step(state, windows["action"][:, i], windows["xi"][:, i])
+            if i+1 in (1, 8, 16):
+                reports[str(i+1)] = _state_error(state, windows["next_state"][:, i])
+        return reports

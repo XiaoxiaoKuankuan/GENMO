@@ -66,32 +66,26 @@ def _state_error(a, b):
 
 def physical_audit(collector, engine, initial, nominal, audio, metadata, criteria, *, start_steps=0):
     required = {"repeatability_max_abs", "root_position_m", "root_rotation_rad", "joint_position_rad",
-                "joint_velocity_rad_s", "direction_noise_floor", "epsilon"}
+                "joint_velocity_rad_s", "direction_noise_floor", "residual_epsilon", "action_epsilon"}
     if not required <= set(criteria) or any(criteria[k] <= 0 for k in required):
-        raise ValueError("物理验收需要预先声明正数阈值和扰动尺度，不在结果后放宽")
-    bias = engine.step.adapter.net[-1].bias
-    original = bias.detach().clone()
-    old_horizon = engine.bptt_steps
-    results = []
+        raise ValueError("物理验收需要事前误差/噪声及物理残差和动作扰动尺度")
+    old_horizon, results = engine.bptt_steps, []
     rng = torch.get_rng_state()
     cuda_rng = torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None
 
-    def collect(horizon, offset):
+    def collect(horizon, intervention=None):
         with torch.no_grad():
             torch.set_rng_state(rng)
             if cuda_rng is not None:
                 torch.cuda.set_rng_state_all(cuda_rng)
-            bias.copy_(original)
             collector.reset(initial, nominal, audio, **metadata)
-            # 相同初态重放未扰动的完整前缀，再从相同真实起点施加正负扰动。
             if start_steps:
                 prefix = collector.collect(start_steps)
                 if len(prefix) != start_steps or collector.terminal:
                     return [], []
-            bias.copy_(original+offset)
             rows, contacts = [], []
-            for _ in range(horizon):
-                part = collector.collect(1)
+            for i in range(horizon):
+                part = collector.collect(1, intervention=intervention if i == 0 else None)
                 if not part:
                     break
                 rows.extend(part)
@@ -105,55 +99,67 @@ def physical_audit(collector, engine, initial, nominal, audio, metadata, criteri
 
     try:
         for horizon in (8, 16):
-            base, contacts = collect(horizon, torch.zeros_like(original))
-            repeat, repeated_contacts = collect(horizon, torch.zeros_like(original))
+            base, contacts = collect(horizon)
+            repeat, repeated_contacts = collect(horizon)
             if len(base) != horizon or len(repeat) != horizon:
                 results.append(dict(horizon=horizon, passed=False, reason="real_episode_ended_before_horizon"))
                 continue
             initial_difference = float((base[0].start.executed_state-repeat[0].start.executed_state).abs().max())
             repeat_error = max(float((a.end.executed_state-b.end.executed_state).abs().max()) for a, b in zip(base, repeat))
-            engine.bptt_steps = horizon
-            with engine.dynamics.adapter_phase(), frozen_parameters(engine.critic):
-                trajectory = engine.rollout(base[0].start)
-                value = task_return(trajectory.rows)
-                gradient, = torch.autograd.grad(value, bias)
-            direction = gradient / gradient.norm().clamp_min(1e-12)
-            if not torch.isfinite(gradient).all() or gradient.norm() == 0:
-                results.append(dict(horizon=horizon, passed=False, reason="zero_or_nonfinite_model_task_gradient"))
-                continue
-            epsilon = criteria["epsilon"]
-            plus, cp = collect(horizon, epsilon*direction)
-            minus, cm = collect(horizon, -epsilon*direction)
-            if len(plus) != horizon or len(minus) != horizon:
-                results.append(dict(horizon=horizon, passed=False, reason="perturbation_caused_real_terminal"))
-                continue
+            signature = lambda cs: [c["pair_signature"] for c in cs]
+            repeat_ok = max(repeat_error, initial_difference) <= criteria["repeatability_max_abs"] and signature(contacts) == signature(repeated_contacts)
+            noise = max(criteria["direction_noise_floor"], abs(float(task_return(base)-task_return(repeat)))*5)
             with torch.no_grad():
-                bias.copy_(original)
-                state = base[0].start.executed_state
-                predictions = []
+                state, predictions = base[0].start.executed_state, []
                 for row in base:
                     state = engine.dynamics.step(state, row.action, row.start.xi)
                     predictions.append(state)
                 errors = _state_error(torch.cat(predictions), torch.cat([r.end.executed_state for r in base]))
-            delta = float(task_return(plus)-task_return(minus))
-            noise = max(criteria["direction_noise_floor"], abs(float(task_return(base)-task_return(repeat)))*5)
-            signature = lambda cs: [c["pair_signature"] for c in cs]
-            contact_change = signature(cp) != signature(cm)
-            repeat_ok = max(repeat_error, initial_difference) <= criteria["repeatability_max_abs"]
-            prediction_ok = all(errors[k] <= criteria[k] for k in errors)
-            direction_ok = delta > noise and not contact_change and len(trajectory.rows) == horizon
-            results.append(dict(horizon=horizon, passed=repeat_ok and prediction_ok and direction_ok,
+            engine.bptt_steps = horizon
+            directions = []
+            # 直接扰动本次部署的十帧残差和第一步Actor控制，覆盖两个执行接口。
+            # 不局限最后bias子空间，另外报告全部Adapter参数的任务梯度。
+            for kind, shape, epsilon in (("residual_offset", (1, 10, 27), criteria["residual_epsilon"]),
+                                         ("action_offset", (1, 21), criteria["action_epsilon"])):
+                offset = initial.new_zeros(shape, requires_grad=True)
+                with engine.dynamics.adapter_phase(), frozen_parameters(engine.critic):
+                    trajectory = engine.rollout(base[0].start, intervention={kind: offset})
+                    value = task_return(trajectory.rows)
+                    gradient, = torch.autograd.grad(value, offset, retain_graph=True)
+                    parameters = tuple(engine.step.adapter.parameters())
+                    pg = torch.autograd.grad(value, parameters, allow_unused=True)
+                    parameter_norm = float(sum((g.square().sum() for g in pg if g is not None), initial.new_zeros(())).sqrt())
+                norm = gradient.norm()
+                if not torch.isfinite(gradient).all() or norm <= 1e-12:
+                    directions.append(dict(kind=kind, passed=False, reason="zero_or_nonfinite_execution_gradient"))
+                    continue
+                direction = gradient/norm
+                plus, cp = collect(horizon, {kind: epsilon*direction})
+                minus, cm = collect(horizon, {kind: -epsilon*direction})
+                if len(plus) != horizon or len(minus) != horizon:
+                    directions.append(dict(kind=kind, passed=False, reason="perturbation_caused_real_terminal"))
+                    continue
+                delta = float(task_return(plus)-task_return(minus))
+                contact_change = signature(cp) != signature(cm)
+                action_rms = float((plus[0].action-minus[0].action).square().mean().sqrt())
+                residual_delta = plus[0].end.previous_plan.residual-minus[0].end.previous_plan.residual
+                direction_ok = delta > noise and not contact_change and len(trajectory.rows) == horizon and action_rms > 0
+                directions.append(dict(kind=kind, passed=direction_ok, physical_central_derivative=delta/(2*epsilon),
+                    model_directional_derivative=float(norm), all_adapter_parameter_gradient_norm=parameter_norm,
+                    physical_return_difference=delta, noise_floor=noise, signal_to_noise=abs(delta)/noise,
+                    contact_branch_changed=contact_change, action_rms_difference=action_rms,
+                    residual_root_rms=float(residual_delta[..., :6].square().mean().sqrt()),
+                    residual_joint_rms=float(residual_delta[..., 6:].square().mean().sqrt()),
+                    direction_status="uncertain_contact_change" if contact_change else "uncertain_below_noise" if abs(delta) <= noise else "positive" if delta > 0 else "negative"))
+            results.append(dict(horizon=horizon, passed=repeat_ok and all(errors[k] <= criteria[k] for k in errors)
+                                and all(d["passed"] for d in directions),
                                 initial_max_abs=initial_difference, repeatability_max_abs=repeat_error,
-                                model_errors=errors, physical_central_derivative=delta/(2*epsilon),
-                                model_directional_derivative=float(gradient.norm()), physical_return_difference=delta,
-                                noise_floor=noise, contact_branch_changed=contact_change,
-                                direction_status="uncertain_contact_change" if contact_change else "uncertain_below_noise" if abs(delta) <= noise else "positive" if delta > 0 else "negative",
-                                base_return=float(task_return(base)), plus_return=float(task_return(plus)), minus_return=float(task_return(minus))))
+                                model_errors=errors, directions=directions, base_return=float(task_return(base))))
     finally:
-        with torch.no_grad():
-            bias.copy_(original)
         engine.bptt_steps = old_horizon
-        # 审计反复reset已经消耗了物理上下文，调用方必须开启新采集episode。
+        torch.set_rng_state(rng)
+        if cuda_rng is not None:
+            torch.cuda.set_rng_state_all(cuda_rng)
         collector.terminal = True
     return dict(passed=bool(results) and all(r["passed"] for r in results), cases=results, criteria=criteria, start_steps=start_steps,
                 adapter_tensor_sha256=tensor_identity(engine.step.adapter), dynamics_tensor_sha256=tensor_identity(engine.dynamics),

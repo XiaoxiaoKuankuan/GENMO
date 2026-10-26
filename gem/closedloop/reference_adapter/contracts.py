@@ -97,6 +97,7 @@ class AdapterState:
     known_at_tick: int = 0
     plan_boundary_tick: int | None = None
     scheduling: Any = None
+    episode_start_tick: int = 0
 
     def validate(self):
         b = len(self.executed_state)
@@ -109,7 +110,7 @@ class AdapterState:
             raise ValueError("时钟错误或使用尚未可见的名义计划")
         if self.origin not in ("real", "imagined") or self.mode not in ("fixed", "rolling"):
             raise ValueError("未知状态来源或参考模式")
-        if self.split not in ("train", "validation"):
+        if self.split not in ("train", "validation", "audit", "evaluation"):
             raise ValueError("必须按歌曲指定train/validation划分")
 
     def detached(self):

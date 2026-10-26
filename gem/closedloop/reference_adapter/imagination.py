@@ -30,7 +30,7 @@ class Imagination:
         self.step, self.dynamics, self.critic = step, dynamics, critic
         self.bptt_steps, self.gamma = bptt_steps, gamma
 
-    def rollout(self, initial):
+    def rollout(self, initial, *, intervention=None):
         if initial.origin != "real":
             raise ValueError("想象必须从真实采样起点开始")
         z = initial.detached()
@@ -44,7 +44,7 @@ class Imagination:
                     (z.plan_boundary_tick is not None and z.tick >= z.plan_boundary_tick)):
                 boundary = "known_nominal_plan_boundary_bootstrap"
                 break
-            proposal = self.step.propose(z)
+            proposal = self.step.propose(z, **(intervention if k == 0 and intervention is not None else {}))
             next_state = self.dynamics.step(z.executed_state, proposal.action, z.xi)
             row = self.step.advance(z, proposal, next_state, origin="imagined")
             for name, value in row.weighted.items():

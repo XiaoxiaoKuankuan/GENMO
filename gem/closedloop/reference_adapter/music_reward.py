@@ -1,8 +1,10 @@
 """固定音频目标与因果、纯Torch的执行节拍奖励。
 
 EDGE35第34列只在音频侧离线取拍点；运动侧使用执行关节速度的连续能量谷，不调用
-布尔节拍指标。推进到n时只结算n-2，用n-4/n-2/n；尾随20点活动统计随增强状态保存。
-无beat、无效音频和不足五点各自mask，不复制未来状态补分；s0与音频均值始终固定。
+布尔节拍指标。n时提取n-2的事件，立即结算该事件的非拍点成本；拍点的覆盖项在
+固定容差窗关闭后结算一次，允许音乐预知，不允许未来执行状态。用soft union匹配
+事件而不要求高斯肩部逐点出现速度谷；所有记忆仍来自尾随20点执行速度并保留图。
+无beat/无效/不完整窗口不补分，s0固定；此v2奖励不能等价恢复旧逐点BCE训练。
 """
 
 from dataclasses import dataclass, replace
@@ -93,7 +95,8 @@ class MusicState:
 
 
 class MusicReward:
-    def __init__(self, s0, *, tau=.05, margin=.01, epsilon=1e-6, activity_fraction=.7, activity_floor=.05):
+    def __init__(self, s0, *, tau=.05, margin=.01, epsilon=1e-6, activity_fraction=.7, activity_floor=.05,
+                 match_tolerance_s=.06, event_activity_floor=.1, extra_event_weight=1.):
         self.s0 = torch.as_tensor(s0).detach().clone()
         if self.s0.numel() not in (1, 21) or not torch.isfinite(self.s0).all() or (self.s0 < 1e-4).any():
             raise ValueError("s0必须来自固定训练基线，形状为标量或21维且>=1e-4")
@@ -101,6 +104,22 @@ class MusicReward:
             raise ValueError("音乐数值参数无效")
         self.tau, self.margin, self.epsilon = tau, margin, epsilon
         self.activity_fraction, self.activity_floor = activity_fraction, activity_floor
+        self.tolerance_ticks = round(match_tolerance_s * CLOCK_HZ)
+        if not 12 <= self.tolerance_ticks <= 72 or event_activity_floor <= 0 or margin <= 0:
+            raise ValueError("事件匹配窗口必须落在20点因果历史支持内，活动/显著性尺度须为正")
+        self.event_activity_floor, self.extra_event_weight = event_activity_floor, extra_event_weight
+
+    def events(self, energy):
+        """连续双侧谷响应：常值严格零，幅度门槛拒绝微小噪声伪事件。"""
+        left, center, right = energy[:, :-4], energy[:, 2:-2], energy[:, 4:]
+        dl, dr = left-center, right-center
+        valley = torch.sigmoid((dl-self.margin)/self.tau) * torch.sigmoid((dr-self.margin)/self.tau)
+        # 减去恒速响应，禁止斜坡两侧仅靠速度变化幅度产生伪事件。
+        baseline = torch.sigmoid(energy.new_tensor(-self.margin/self.tau)).square()
+        valley = torch.relu(valley-baseline)/(1-baseline)
+        flank = (left+right)*.5
+        activity = flank.square()/(flank.square()+self.event_activity_floor**2)
+        return valley * activity
 
     def energy(self, qd):
         return (torch.sqrt((qd / self.s0.to(qd))**2 + self.epsilon**2) - self.epsilon).mean(-1)
@@ -123,12 +142,41 @@ class MusicReward:
         valid = memory.valid[:, -5:].all(-1)
         b, audio_valid = audio.target([center])
         valid = valid & audio_valid[:, 0]
-        e = memory.energy
-        p = torch.sigmoid((e[:, -5] - e[:, -3] - self.margin) / self.tau) * torch.sigmoid((e[:, -1] - e[:, -3] - self.margin) / self.tau)
-        p_eps = self.epsilon + (1 - 2 * self.epsilon) * p
-        mu = audio.mean_target.clamp(1e-4, 1-1e-4)
-        loss = -.5 * b[:, 0] / mu * p_eps.log() - .5 * (1-b[:, 0]) / (1-mu) * torch.log1p(-p_eps)
-        reward = torch.where(valid, -loss, torch.zeros_like(loss))
+        events = self.events(memory.energy)
+        event_ticks = memory.ticks[2:-2]
+        event_valid = memory.valid.unfold(1, 5, 1).all(-1) & audio.target(event_ticks)[1]
+        events = events * event_valid
+        p = events[:, -1]
+        # 每事件按最近音频拍点容差匹配；音频固定密度用于跨歌曲量纲平衡。
+        density = memory.energy.new_tensor([len(bs)/max(1, (audio.end_tick-audio.start_tick)//12+1)
+                                           for bs in audio.beat_ticks]).clamp_min(1e-4)
+        precision_cost = p * (1-b[:, 0]) / density
+        coverage_cost, duplicate_cost, paid_beats = [], [], []
+        for i, beats in enumerate(audio.beat_ticks):
+            closed = beats[(beats+self.tolerance_ticks > center-CONTROL_TICKS) &
+                           (beats+self.tolerance_ticks <= center)]
+            loss, duplicates = p[i]*0, p[i]*0
+            count_beats = 0
+            for beat in closed:
+                inside = (event_ticks-beat).abs() <= self.tolerance_ticks
+                # 首/尾缺观测或音频洞不能用零状态补完整beat窗。
+                if not bool(inside.any()) or not bool(event_valid[i, inside].all()):
+                    continue
+                if int(event_ticks[0]) > int(beat)-self.tolerance_ticks:
+                    continue
+                kernel = torch.exp(-.5*((event_ticks[inside]-beat)/(CLOCK_HZ*audio.sigma_s))**2)
+                matched = (events[i, inside]*kernel).clamp(max=1-self.epsilon)
+                coverage = -torch.expm1(torch.log1p(-matched).sum())
+                loss = loss + 1-coverage
+                # 同一拍点容差内大量事件不能通过coverage饱和获利。
+                duplicates = duplicates + torch.relu(matched.sum()-1).square()
+                count_beats += 1
+            coverage_cost.append(loss/density[i])
+            duplicate_cost.append(duplicates/density[i])
+            paid_beats.append(count_beats)
+        coverage_cost, duplicate_cost = torch.stack(coverage_cost), torch.stack(duplicate_cost)
+        reward = -(precision_cost+self.extra_event_weight*duplicate_cost+coverage_cost)
+        reward = torch.where(valid, reward, torch.zeros_like(reward))
         count = memory.valid.sum(-1).clamp_min(1)
         actual = (memory.activity * memory.valid).sum(-1) / count
         nominal = (memory.nominal_activity * memory.valid).sum(-1) / count
@@ -136,7 +184,11 @@ class MusicReward:
         activity = activity * memory.valid.all(-1) * (nominal > self.activity_floor)
         return replace(memory, last_paid_tick=center), reward, activity, {
             "music_probability": p, "music_target": b[:, 0], "music_valid": valid,
-            "music_center_tick": center, "activity_actual": actual, "activity_nominal": nominal}
+            "music_center_tick": center, "music_precision_cost": precision_cost,
+            "music_coverage_cost": coverage_cost, "music_duplicate_cost": duplicate_cost,
+            "music_settled_beats": memory.energy.new_tensor(paid_beats),
+            "music_coverage_latest_tick": center-self.tolerance_ticks,
+            "activity_actual": actual, "activity_nominal": nominal}
 
 
 def calibrate_s0(baseline_joint_velocities):
