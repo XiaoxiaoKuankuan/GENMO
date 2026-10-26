@@ -69,7 +69,8 @@ def prepare_cache(env, bundle, genmo_cfg, task, music, initial, destination, *, 
     from gem.closedloop.mb_control.collector import PhysicalCollector as GenmoCollector
     actor = load_frozen_genmo(genmo_cfg, initial.device)
     adapter = SMAdapter(bundle, actor.stage1.endecoder.kinematics.joint_order, str(initial.device))
-    scheduler = Scheduler(bootstrap_latency_ticks=bootstrap_latency_ticks)
+    scheduler = Scheduler(bootstrap_latency_ticks=bootstrap_latency_ticks,
+                          latency_margin_ticks=int(genmo_cfg.get("latency_margin_ticks", 0)))
     collector = GenmoCollector(env, actor, adapter, scheduler, adapter.runtime.reward,
                               forecast_enabled=False, record_trajectory=True)
     initial_z = collector.reset(music, initial, music_start_tick=task.get("music_start_tick", 0))
@@ -115,7 +116,8 @@ def prepare_cache(env, bundle, genmo_cfg, task, music, initial, destination, *, 
                     genmo_checkpoint_sha256=file_digest(genmo_cfg["checkpoint"]), seed=int(task["seed"]),
                     music_start_tick=task.get("music_start_tick", 0),
                     forecast_enabled=False, generation_reason=reason, actual_control_end_tick=collector.state.tick, **support,
-                    generation_scope="real_frozen_genmo_accepted_plans_without_adapter", bootstrap_latency_ticks=bootstrap_latency_ticks)
+                    generation_scope="real_frozen_genmo_accepted_plans_without_adapter", bootstrap_latency_ticks=bootstrap_latency_ticks,
+                    latency_margin_ticks=scheduler.latency_margin_ticks)
     atomic_save(dict(schema=NOMINAL_SCHEMA, source="frozen_genmo_accepted_reference", contract=contract,
                      world_qpos=archive.world_qpos[:, keep].cpu(), contact=archive.contact[:, keep].cpu(),
                      start_tick=int(archive.ticks[0]), joint_names=tuple(actor.stage1.endecoder.kinematics.joint_order),

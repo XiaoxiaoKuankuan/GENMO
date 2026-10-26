@@ -12,6 +12,7 @@ genmo:
   stats: /home/weili/bumi-closedloop-worktrees/stage1_server2_scratch600k_20260930/assets/qpos30_train_stats.json
   kinematics: configs/bumi/bumi_kinematics_robot_retargeter_fe934_v1.json
   bootstrap_latency_ticks: null
+  latency_margin_ticks: 60
 tasks: null
 music_baseline: null
 reference_steps: 10
