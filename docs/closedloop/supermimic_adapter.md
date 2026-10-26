@@ -106,12 +106,12 @@ python -B tools/prepare_stage2_supermimic_adapter_assets.py \
   --dataset-root /data0/user/liwei/datasets/bumi_music_umr70_mine_pass_90505_v1 \
   --output /data0/user/liwei/GENMO_outputs/stage2_supermimic_adapter/acceptance_20261026/assets
 # 后续每个输出必须是不存在的新目录；不得覆盖失败证据或已有模型。
-python -B tools/prepare_stage2_supermimic_adapter_reference.py --config RUNTIME --output CACHE --torch-device cuda:0 --headless
-python -B tools/train_stage2_supermimic_adapter.py --config RUNTIME --tasks CACHE/tasks.json --calibrate-music --output S0 --torch-device cuda:0 --headless
-python -B tools/audit_stage2_supermimic_adapter.py --config RUNTIME --tasks CACHE/tasks.json --music-baseline S0/music_baseline.pt --physical --output AUDIT --torch-device cuda:0 --headless
-python -B tools/train_stage2_supermimic_adapter.py --config RUNTIME --tasks CACHE/tasks.json --music-baseline S0/music_baseline.pt --variant music --formal --target-updates 1000 --output FORMAL --torch-device cuda:0 --headless
-python -B tools/train_stage2_supermimic_adapter.py --config RUNTIME --tasks CACHE/tasks.json --music-baseline S0/music_baseline.pt --variant music --formal --target-updates 1000 --resume FULL_CHECKPOINT --output RESUME_NEW --torch-device cuda:0 --headless
-python -B tools/evaluate_stage2_supermimic_adapter.py --config RUNTIME --tasks CACHE/tasks.json --music-baseline S0/music_baseline.pt --variant zero --output EVAL_ZERO --torch-device cuda:0 --headless
+python -B tools/prepare_stage2_supermimic_adapter_reference.py --config RUNTIME --output CACHE --torch-device cuda:0 --visualizer none --deterministic
+python -B tools/train_stage2_supermimic_adapter.py --config RUNTIME --tasks CACHE/tasks.json --calibrate-music --output S0 --torch-device cuda:0 --visualizer none --deterministic
+python -B tools/audit_stage2_supermimic_adapter.py --config RUNTIME --tasks CACHE/tasks.json --music-baseline S0/music_baseline.pt --physical --output AUDIT --torch-device cuda:0 --visualizer none --deterministic
+python -B tools/train_stage2_supermimic_adapter.py --config RUNTIME --tasks CACHE/tasks.json --music-baseline S0/music_baseline.pt --variant music --formal --target-updates 1000 --output FORMAL --torch-device cuda:0 --visualizer none --deterministic
+python -B tools/train_stage2_supermimic_adapter.py --config RUNTIME --tasks CACHE/tasks.json --music-baseline S0/music_baseline.pt --variant music --formal --target-updates 1000 --resume FULL_CHECKPOINT --output RESUME_NEW --torch-device cuda:0 --visualizer none --deterministic
+python -B tools/evaluate_stage2_supermimic_adapter.py --config RUNTIME --tasks CACHE/tasks.json --music-baseline S0/music_baseline.pt --variant zero --output EVAL_ZERO --torch-device cuda:0 --visualizer none --deterministic
 # no_music/music评价各自完整checkpoint，用--compare校验三组名义/初态/预算一致。
 ```
 

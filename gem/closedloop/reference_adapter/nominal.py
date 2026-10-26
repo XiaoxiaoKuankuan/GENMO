@@ -7,6 +7,7 @@
 """
 
 from pathlib import Path
+import json
 
 import torch
 
@@ -70,7 +71,7 @@ def prepare_cache(env, bundle, genmo_cfg, task, music, initial, destination, *, 
     adapter = SMAdapter(bundle, actor.stage1.endecoder.kinematics.joint_order, str(initial.device))
     scheduler = Scheduler(bootstrap_latency_ticks=bootstrap_latency_ticks)
     collector = GenmoCollector(env, actor, adapter, scheduler, adapter.runtime.reward,
-                              forecast_enabled=False, record_trajectory=False)
+                              forecast_enabled=False, record_trajectory=True)
     initial_z = collector.reset(music, initial, music_start_tick=task.get("music_start_tick", 0))
     archive = initial_z.reference
     generation_cursor = 0
@@ -91,6 +92,19 @@ def prepare_cache(env, bundle, genmo_cfg, task, music, initial, destination, *, 
     finally:
         collector.close()
     end = task.get("music_start_tick", 0)+(music.shape[1]-1)*20
+    diagnostic = dict(task=task["id"], reason=reason, actual_control_end_tick=collector.state.tick,
+                      music_end_tick=end, actual_support_tick=archive.upper,
+                      required_support_tick=required_support_tick(end), events=collector.events,
+                      cancelled_requests=collector.cancelled_requests, control_steps=len(collector.metrics),
+                      average_sm_terms={k: sum(m[k] for m in collector.metrics)/len(collector.metrics)
+                                        for k in collector.metrics[0]} if collector.metrics else {},
+                      evidence="real_frozen_genmo_cache_preparation_not_adapter_training")
+    # 即便尾部不足也保留真实失败轨迹，不能只留异常字符串或用成功片段覆盖失败。
+    with Path(destination).with_suffix(".diagnostics.json").open("x") as stream:
+        json.dump(diagnostic, stream, ensure_ascii=False, indent=2, allow_nan=False)
+    if collector.trajectory:
+        atomic_save(dict(origin="real", task=task, trajectory=collector.trajectory,
+                         metrics=collector.metrics, diagnostic=diagnostic), Path(destination).with_suffix(".execution.pt"))
     support = check_support(archive, end)
     # 保留真正已生成且接管的源点，包括末尾超过音乐结束的导数/Goal支持。
     # 不插值外推不存在的GENMO点，不以物理早结束放宽所声明音乐长度。
