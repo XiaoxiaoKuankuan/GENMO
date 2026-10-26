@@ -17,6 +17,49 @@ from .checkpoint import pack_state
 from .returns import actor_return
 
 
+def choose_warmup_tasks(tasks, config):
+    groups = {}
+    for task in tasks:
+        groups.setdefault(task["source"], []).append(task)
+    rng = random.Random(config["seed"])
+    for values in groups.values():
+        rng.shuffle(values)
+    chosen = []
+    while len(chosen) < config["train_episodes"] and any(groups.values()):
+        for source in sorted(groups):
+            if groups[source] and len(chosen) < config["train_episodes"]:
+                chosen.append(groups[source].pop())
+    return chosen
+
+
+def save_warmup(path, trainer, cfg):
+    """真实MC质量通过的独立价值状态，可在同模型/奖励/调度合同下导入正式训练。"""
+    from supermimic.bridge.bundle import atomic_save
+    if not trainer.critic_ready:
+        raise ValueError("未通过独立质量的Critic不能导出为ready")
+    atomic_save({"schema": "genmo.real_mc_critic.control50.v1", "actor": trainer.actor.state_dict(),
+        "critic": trainer.critic.state_dict(), "optimizer": trainer.critic_optimizer.state_dict(),
+        "quality": trainer.critic_quality, "critic_updates": trainer.critic_updates,
+        "contract": {k: cfg[k] for k in ("model", "clock", "rewards", "critic")},
+        "frozen_sha256": trainer.imagination.adapter.bundle.metadata["sha256"]}, path)
+
+
+def load_warmup(path, trainer, cfg):
+    ck = torch.load(path, weights_only=False, map_location="cpu")
+    if ck.get("schema") != "genmo.real_mc_critic.control50.v1" or ck["quality"].get("passed") is not True:
+        raise ValueError("需要任意50Hz真实MC质量通过的Upper Critic")
+    if ck["frozen_sha256"] != trainer.imagination.adapter.bundle.metadata["sha256"] or ck["contract"] != {
+            k: cfg[k] for k in ("model", "clock", "rewards", "critic")}:
+        raise ValueError("Critic实际资产、模型条件、奖励或调度合同改变")
+    if any(not torch.equal(v.detach().cpu(), ck["actor"][n]) for n,v in trainer.actor.state_dict().items()):
+        raise ValueError("预热回报不属于当前GENMO权重")
+    trainer.critic.load_state_dict(ck["critic"], strict=True)
+    trainer.critic_optimizer.load_state_dict(ck["optimizer"])
+    trainer.critic_updates = ck["critic_updates"]
+    trainer.critic_quality, trainer.critic_ready = ck["quality"], True
+    return ck["quality"]
+
+
 def collect_mc(collector, tasks, *, seed, device, max_control_steps):
     collector.record_controls = True
     pairs, episodes, steps = [], [], 0

@@ -23,7 +23,7 @@ from omegaconf import OmegaConf
 
 from .application import task_inputs, read_tasks, behavior_config, SupervisionStream
 from .checkpoint import save_checkpoint, load_checkpoint, capture_rng, restore_rng
-from .critic_warmup import warmup_critic
+from .critic_warmup import warmup_critic, load_warmup, choose_warmup_tasks
 from .replay import RecentReplay
 from .validation import ModelSupport
 
@@ -162,6 +162,10 @@ def run_formal(args, cfg, output, trainer, collector, profile, tasks, report, so
             task_cursor, control_steps = state["task_cursor"], state["physical_control_steps"]
             total_wall_seconds = state["total_wall_seconds"]
             best_score, degradation_count, last_evaluated = state["best_score"], state["degradation_count"], state["last_evaluated"]
+        if not trainer.critic_ready and settings.get("critic_warmup_checkpoint"):
+            quality = load_warmup(settings["critic_warmup_checkpoint"], trainer, cfg)
+            control_steps += quality["physical_control_steps"]
+            snapshot("critic_ready_imported.pt")
         if not trainer.critic_ready:
             validation = read_tasks(settings["critic_validation_tasks"])
             groups = {}

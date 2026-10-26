@@ -164,6 +164,15 @@ def main(kind):
         try:
             if kind == "evaluate":
                 evaluate_tasks(collector, tasks, output, mode=args.mode, device=args.torch_device, max_seconds=args.max_seconds)
+            elif kind == "critic":
+                from .critic_warmup import choose_warmup_tasks, warmup_critic, save_warmup
+                losses = build_stage1_losses(actor.stage1, original).to(args.torch_device)
+                trainer = Stage2Trainer(actor, critic, engine, losses, cfg["training"])
+                selected = choose_warmup_tasks(tasks, cfg["formal"]["critic_warmup"])
+                validation = read_tasks(cfg["formal"]["critic_validation_tasks"])
+                warmup_critic(trainer, collector, selected, validation, cfg["formal"]["critic_warmup"], output,
+                              device=args.torch_device)
+                save_warmup(output/"critic_ready.pt", trainer, cfg)
             elif kind == "short":
                 from .short_audit import audit_short
                 if not args.criteria:
