@@ -33,24 +33,41 @@ def perturb_plan(plan, coordinate, amplitude):
     # 保护前缀严格零扰动，之后六个源帧平滑接入；全样本使用预声明同一形状。
     phase = ((frame-plan.ticket.prefix_frames)/6).clamp(0, 1)
     envelope = (.5-.5*torch.cos(torch.pi*phase))[None, :, None]
+    if coordinate == -1:
+        angle=amplitude*envelope[...,0]*.5;c,s=torch.cos(angle),torch.sin(angle)
+        q=plan.world_qpos[...,3:7];w,x,y,z=q.unbind(-1)
+        rotated=torch.stack((c*w-s*z,c*x-s*y,c*y+s*x,c*z+s*w),-1)
+        return replace(plan,world_qpos=torch.cat((plan.world_qpos[...,:3],rotated,plan.world_qpos[...,7:]),-1))
     vector = torch.nn.functional.one_hot(frame.new_tensor(coordinate, dtype=torch.long), 28).to(frame)
     return replace(plan, world_qpos=plan.world_qpos+amplitude*envelope*vector)
 
 
-def phase_labels(sample, event, previous_event, adapter):
+def phase_labels(sample, event, previous_event, adapter, horizon=None):
     from supermimic.mdp import unflatten_state
     s = sample.state
-    _, _, velocity, angular, _, joint_velocity = unflatten_state(s.state)
+    window=sample.transitions[:horizon] if horizon is not None else sample.transitions
+    states=torch.cat([s.state]+[step.end.state for step in window])
+    _, _, velocity, angular, _, joint_velocity = unflatten_state(states)
     left, right = event["left_foot"], event["right_foot"]
     labels = []
     if left and right:
         labels.append("double_support")
-    if left != right:
+    contacts=[event]+[step.event.get("contacts") for step in window if step.event.get("contacts") is not None]
+    if any(c["left_foot"] and c["right_foot"] for c in contacts) and "double_support" not in labels:labels.append("double_support")
+    if any(c["left_foot"] != c["right_foot"] for c in contacts):
         labels.append("single_support")
-        if float(velocity[:, :2].norm()) > .08 or float(joint_velocity[:, :12].abs().max()) > .5:
+        leg_indices=[i for i,n in enumerate(adapter.bundle.spec.joint_names) if any(k in n for k in ("leg","knee","ankle"))]
+        if float(velocity[:, :2].norm(dim=-1).max()) > .08 or float(joint_velocity[:,leg_indices].abs().max()) > .5:
             labels.append("stepping")
     if previous_event is not None and ((left and not previous_event["left_foot"]) or (right and not previous_event["right_foot"])):
         labels.append("landing")
+        if left and not previous_event["left_foot"]:labels.append("left_landing")
+        if right and not previous_event["right_foot"]:labels.append("right_landing")
+    for before,after in zip(contacts,contacts[1:]):
+        for side in ("left","right"):
+            if after[side+"_foot"] and not before[side+"_foot"]:
+                labels.extend(("landing",side+"_landing"))
+    if float(joint_velocity.square().mean().sqrt())>.7:labels.append("high_speed")
     if float(angular[:, 2].abs().max()) > .2:
         labels.append("turning")
     arm_indices = [i for i, n in enumerate(adapter.bundle.spec.joint_names) if "arm" in n or "elbow" in n]
@@ -59,7 +76,7 @@ def phase_labels(sample, event, previous_event, adapter):
     current, _, _ = s.reference.read_current_future(s.tick)
     if float((s.state[:, :3]-current.root_p).norm()) > .03 or float((s.state[:, 13:34]-current.q).square().mean().sqrt()) > .04:
         labels.append("tracking_deviation")
-    return labels
+    return sorted(set(labels))
 
 
 def audit_short(collector, tasks, output, cfg, criteria, *, device):
@@ -78,6 +95,9 @@ def audit_short(collector, tasks, output, cfg, criteria, *, device):
                   ("root_z", 2, criteria["root_epsilons_m"]),
                   ("leg", 7+joints.index("l_knee_pitch_joint"), criteria["joint_epsilons_rad"]),
                   ("arm", 7+joints.index("l_arm_roll_joint"), criteria["joint_epsilons_rad"])]
+    if cfg.get("teacher",{}).get("target_mode")=="online_consumed_reference_v1":
+        directions.extend([("leg_right",7+joints.index("r_knee_pitch_joint"),criteria["joint_epsilons_rad"]),
+                           ("root_yaw",-1,criteria["joint_epsilons_rad"])])
     for task in tasks:
         seed = task.get("seeds", [42])[0]
         seed_all(seed)
@@ -156,6 +176,9 @@ def audit_short(collector, tasks, output, cfg, criteria, *, device):
                 collector.adapter.runtime.kin, limits=criteria["state_rmse_limits"], start_tick=request.ticket.request_tick)
             forecast_ok = all(v["rmse"] <= criteria["state_rmse_limits"][k] for k,v in forecast_stats.items())
             case = {"task": task["id"], "seed": seed, "anchor_tick": sample.state.tick, "phases": labels,
+                    "phase_scope":"real_states_and_contacts_over_each_H_window",
+                    "phases_by_horizon":{str(h):phase_labels(sample,events_by_tick[sample.state.tick],
+                        events_by_tick.get(sample.state.tick-12),collector.adapter,h) for h in horizons},
                     "request_tick": request.ticket.request_tick, "actor_version": request.actor_version,
                     "actual_ready_tick": sample.generation.actual_ready_tick, "commit_tick": sample.generation.commit_tick,
                     "consumed_source_ticks": sample.consumed_source_ticks, "previously_consumed_versions": sample.previously_consumed_versions,
@@ -181,6 +204,10 @@ def audit_short(collector, tasks, output, cfg, criteria, *, device):
                             plan_override=perturb_plan(sample.generation.plan, coordinate, amplitude),
                             transition_fn=collector.env.step_physics if physical_run else None, on_step=record)
                         objective = actor_return([interval], torch.zeros_like(interval.reward)).mean()
+                        if cfg.get("teacher",{}).get("target_mode")=="online_consumed_reference_v1":
+                            candidate=perturb_plan(sample.generation.plan,coordinate,amplitude)
+                            local=collector.rewards.teacher.local(sample.generation.request)
+                            objective,_,_=music_actor_objective(interval,candidate,local,sample,collector.adapter,cfg,horizon)
                     return objective, torch.cat(trace), contact, interval.steps, interval.event.get("objective_terms", {})
 
                 model, mt, _, _, model_terms = run(False)
@@ -193,19 +220,25 @@ def audit_short(collector, tasks, output, cfg, criteria, *, device):
                 reset_error = float((rt[:min(len(rt), len(repeated_states))]-repeated_states[:min(len(rt), len(repeated_states))]).abs().max())
                 floor = max(criteria["minimum_resolvable_return_delta"], repeat_delta*criteria["noise_multiplier"])
                 directions_report = []
+                traces={"model":mt,"physical":rt,"repeat_physical":repeated_states,"contacts":rc,"perturbations":[]}
                 for name, coordinate, epsilons in directions:
                     amplitude = torch.zeros((), device=device, requires_grad=True)
                     objective, _, _, _, parts = run(False, coordinate, amplitude)
                     gradient, = torch.autograd.grad(objective, amplitude, retain_graph=bool(parts))
                     component_gradients = {}
-                    weights = {"dance_loss":1., "current_reference_loss":cfg["rewards"].get("track_weight", .1), "physical_cost":1.}
-                    for name, value in parts.items():
-                        component_gradients[name] = float(torch.autograd.grad(-weights[name]*value.mean(),amplitude,retain_graph=True)[0])
+                    weights = {"dance_loss":1., "current_reference_loss":cfg["rewards"].get("track_weight", .1),
+                        "action_rate_cost":cfg["rewards"].get("action_rate_weight",.1),
+                        "joint_limit_cost":cfg["rewards"].get("joint_limit_weight",2.)}
+                    if "local_prior" in parts:weights.update(local_prior=cfg["training"].get("local_prior_weight",2.),global_prior=cfg["training"].get("global_prior_weight",.2))
+                    weights={k:v for k,v in weights.items() if k in parts}
+                    for component in weights:
+                        value=parts[component]
+                        component_gradients[component] = float(torch.autograd.grad(-value.mean(),amplitude,retain_graph=True)[0])
                     for eps in epsilons:
-                        minus, _, _, _, _ = run(False, coordinate, -eps)
-                        plus, _, _, _, _ = run(False, coordinate, eps)
-                        negative, _, nc, ns, negative_parts = run(True, coordinate, -eps)
-                        positive, _, pc, ps, positive_parts = run(True, coordinate, eps)
+                        minus, _, _, _, minus_parts = run(False, coordinate, -eps)
+                        plus, _, _, _, plus_parts = run(False, coordinate, eps)
+                        negative, nt, nc, ns, negative_parts = run(True, coordinate, -eps)
+                        positive, pt, pc, ps, positive_parts = run(True, coordinate, eps)
                         model_fd = float((plus-minus)/(2*eps))
                         physical_delta = float(positive-negative)
                         slope = physical_delta/(2*eps)
@@ -214,8 +247,8 @@ def audit_short(collector, tasks, output, cfg, criteria, *, device):
                         changed = [contact_signature(x) for x in pc] != [contact_signature(x) for x in nc]
                         determinate = abs(physical_delta) > floor and rs == ns == ps == horizon
                         delta = float((positive if float(gradient) > 0 else negative)-real)
-                        row = {"direction": name, "coordinate": coordinate, "epsilon": eps,
-                               "unit": "m" if name.startswith("root") else "rad",
+                        row = {"direction": "leg" if name.startswith("leg_") else name,"probe_label":name, "coordinate": coordinate, "epsilon": eps,
+                               "unit": "m" if name in ("root_x","root_z") else "rad",
                                "model_autograd": float(gradient), "model_centered_difference": model_fd,
                                "autograd_fd_passed": fd_ok, "physical_centered_difference": slope,
                                "physical_return_delta_plus_minus": physical_delta, "noise_floor": floor,
@@ -223,12 +256,20 @@ def audit_short(collector, tasks, output, cfg, criteria, *, device):
                                "direction_agrees": float(gradient)*slope > 0 if determinate else None,
                                "optimized_physical_delta": delta, "contact_events_changed": changed,
                                "component_model_derivatives":component_gradients,
-                               "component_physical_centered_difference":{name:-weights[name]*float(
-                                   (positive_parts[name]-negative_parts[name]).mean())/(2*eps) for name in positive_parts},
+                               "component_weights":weights,
+                               "component_physical_centered_difference":{name:-float(
+                                   (positive_parts[name]-negative_parts[name]).mean())/(2*eps) for name in weights},
+                               "component_model_centered_difference":{component:-float(
+                                   (plus_parts[component]-minus_parts[component]).mean())/(2*eps) for component in weights},
                                "physical_positive_contacts": [c["pair_signature"] for c in pc],
                                "physical_negative_contacts": [c["pair_signature"] for c in nc]}
                         directions_report.append(row)
+                        traces["perturbations"].append({"probe":name,"epsilon":eps,"negative_states":nt,
+                            "positive_states":pt,"negative_contacts":nc,"positive_contacts":pc})
+                trace_path=output/f"anchor_{len(all_cases):04d}_H{horizon}_physical_traces.pt"
+                torch.save(traces,trace_path)
                 case["horizons"][str(horizon)] = {"statistics": statistics,
+                    "trace_artifact":str(trace_path),
                     "prediction_passed": rs == horizon and all(v["rmse"] <= criteria["state_rmse_limits"][k] for k,v in statistics.items()),
                     "model_return": float(model), "physical_return": float(real), "physical_repeat_return": float(repeated),
                     "model_loss_components":{k:float(v.mean()) for k,v in model_terms.items()},
@@ -255,8 +296,39 @@ def audit_short(collector, tasks, output, cfg, criteria, *, device):
             {k: t.get(k) for k in ("id", "source", "split", "distribution_id")} for t in tasks]},
         task_identities={t["id"]: task_identity(t) for t in tasks}, criteria=criteria,
         reward_contract=cfg["rewards"], teacher_identity=getattr(getattr(collector.rewards, "teacher", None), "identity", None))
+    report["teacher_target_contract"] = teacher_target_contract(cfg)
+    report["teacher_seed"]=cfg.get("teacher",{}).get("seed")
     (output/"short_physics_audit.json").write_text(json.dumps(report, ensure_ascii=False, indent=2, allow_nan=False))
     return report
+
+
+def music_actor_objective(interval,candidate,local,sample,adapter,cfg,horizon):
+    """实际短时Actor目标的统一计算，供新Newton审计及已保存真实轨迹重算使用。"""
+    from .dance_losses import reference_objectives,consumed_music_support,consumed_music_ticks
+    terms=interval.event["objective_terms"]
+    local_loss,global_loss,_=reference_objectives(candidate,local,sample.state.teacher_reference,adapter,
+        anchor_state=sample.state.state,anchor_tick=sample.state.tick,scales=cfg["rewards"].get("dance_scales"),
+        global_support_ticks=consumed_music_support(sample,horizon),global_control_ticks=consumed_music_ticks(sample,horizon),
+        global_reference_records=sample.transitions[:horizon],global_reference_version=sample.generation.reference_version)
+    terms.update(local_prior=local_loss,global_prior=global_loss)
+    # BC不依赖该固定参考扰动；实际参数候选另外使用完整BC和真实20步GENMO。
+    weights={"dance_loss":1.,"current_reference_loss":cfg["rewards"].get("track_weight",.1),
+        "action_rate_cost":cfg["rewards"].get("action_rate_weight",0.),"joint_limit_cost":cfg["rewards"].get("joint_limit_weight",2.),
+        "local_prior":cfg["training"].get("local_prior_weight",2.),"global_prior":cfg["training"].get("global_prior_weight",.2)}
+    return -sum(weights[k]*terms[k].mean() for k in weights),terms,weights
+
+
+def teacher_target_contract(cfg):
+    """只绑定真实目标数据与损失合同，源码版本不进入门禁。"""
+    from supermimic.bridge.bundle import file_digest
+    teacher=cfg.get("teacher",{})
+    return {"mode":teacher.get("target_mode","independent_kinematic"),"online_seed":teacher.get("online_seed"),
+        "manifest_sha256":file_digest(teacher["online_manifest"]) if teacher.get("online_manifest") else None,
+        "dance_alignment":cfg["rewards"].get("dance_alignment","world"),
+        "local_prior_weight":cfg["training"].get("local_prior_weight"),
+        "global_prior_weight":cfg["training"].get("global_prior_weight"),
+        "global_support":"actual_50hz_mixed_version_recorded_reference_anchor_relative.v6",
+        "bc_weight":cfg["training"].get("bc_weight"),"terminal_value_weight":cfg["training"].get("terminal_value_weight")}
 
 
 def numerical_convergence(rows, criteria):
@@ -266,8 +338,8 @@ def numerical_convergence(rows, criteria):
     小于原绝对误差阈值的波动视为已处于原数值容差内，不能用更大误差放宽小步检查。
     """
     result = {}
-    for name in sorted({r["direction"] for r in rows}):
-        sequence = sorted([r for r in rows if r["direction"] == name], key=lambda r: -r["epsilon"])
+    for name in sorted({r.get("probe_label",r["direction"]) for r in rows}):
+        sequence = sorted([r for r in rows if r.get("probe_label",r["direction"]) == name], key=lambda r: -r["epsilon"])
         errors = [abs(r["model_autograd"]-r["model_centered_difference"]) for r in sequence]
         decreasing = all(b <= max(a, criteria["autograd_fd_atol"]) for a,b in zip(errors, errors[1:]))
         result[name] = {"epsilons": [r["epsilon"] for r in sequence], "absolute_errors": errors,
@@ -282,10 +354,12 @@ def summarize_short(cases, criteria, *, numerical_rule="all_scales"):
     coverage_ok = set(criteria["required_phases"]) <= phases
     result, supported = {}, []
     for h in criteria["horizons"]:
+        horizon_phases=set().union(*(set(c.get("phases_by_horizon",{}).get(str(h),c["phases"])) for c in cases)) if cases else set()
+        horizon_coverage=set(criteria["required_phases"])<=horizon_phases
         entries = [c["horizons"][str(h)] for c in cases]
         rows = [r for x in entries for r in x["directions"]]
         groups = {}
-        for group in ("root_x", "root_z", "leg", "arm"):
+        for group in ("root_x", "root_z", "leg", "arm")+(("root_yaw",) if any(r["direction"]=="root_yaw" for r in rows) else ()):
             determinate = [r for r in rows if r["direction"] == group and r["status"] == "determinate"]
             agrees = sum(r["direction_agrees"] for r in determinate)
             delta = sum(r["optimized_physical_delta"] for r in determinate)/len(determinate) if determinate else None
@@ -302,12 +376,31 @@ def summarize_short(cases, criteria, *, numerical_rule="all_scales"):
         numerical = (original_numerical if numerical_rule == "all_scales" else
                      bool(entries) and all(g["passed"] for entry in convergence for g in entry.values()))
         direction = all(g["passed"] for g in groups.values())
-        passed = prediction and repeatable and numerical and direction and coverage_ok
+        components={}
+        for component in sorted({k for r in rows for k in r.get("component_model_derivatives",{})}):
+            selected=[r for r in rows if component in r.get("component_physical_centered_difference",{}) and
+                abs(r["component_physical_centered_difference"][component]*2*r["epsilon"])>r["noise_floor"]]
+            components[component]={"determinate":len(selected),"agreement_fraction":sum(
+                r["component_model_derivatives"][component]*r["component_physical_centered_difference"][component]>0 for r in selected)/len(selected) if selected else None,
+                "per_probe":{probe:{"determinate":len(rs),"agreement_fraction":sum(
+                    r["component_model_derivatives"][component]*r["component_physical_centered_difference"][component]>0 for r in rs)/len(rs) if rs else None}
+                    for probe in sorted({r.get("probe_label",r["direction"]) for r in rows})
+                    for rs in [[r for r in selected if r.get("probe_label",r["direction"])==probe]]}}
+        # 新音乐目标必须单独查看dance主任务的物理方向，不能被参考正则的直接导数掩盖。
+        dance_components=components.get("dance_loss",{}).get("per_probe",{})
+        main_direction=(not criteria.get("require_dance_main_direction",False) or
+            bool(dance_components) and all(v["determinate"]>=criteria["minimum_determinate_per_group"] and
+                v["agreement_fraction"]>=criteria["minimum_direction_fraction"] for v in dance_components.values()))
+        passed = prediction and repeatable and numerical and direction and main_direction and horizon_coverage
         if passed:
             supported.append(h)
         result[str(h)] = {"prediction_passed": prediction, "repeatability_passed": repeatable,
             "autograd_fd_passed": numerical, "original_all_scales_numerical_passed": original_numerical,
-            "numerical_convergence": convergence, "direction_passed": direction, "groups": groups, "passed": passed}
+            "numerical_convergence": convergence, "direction_passed": direction,"dance_main_direction_passed":main_direction,
+            "phase_coverage_passed":horizon_coverage,"phases_observed":sorted(horizon_phases),
+            "missing_phases":sorted(set(criteria["required_phases"])-horizon_phases),
+            "groups": groups, "passed": passed}
+        result[str(h)]["component_directions"]=components
     forecast = bool(cases) and all(c["forecast_prediction"]["passed"] for c in cases)
     choices = [h for h in supported if h in (16, 24, 32)]
     return {"horizons": result, "supported_horizons": supported, "numerical_derivative_rule": numerical_rule,

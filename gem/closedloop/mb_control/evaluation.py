@@ -22,9 +22,12 @@ def evaluation_contract(cfg, tasks, frozen_sha256):
         from supermimic.bridge.bundle import file_digest
         teacher = {"seed":cfg["teacher"]["seed"],"schema":"frozen_stage1_music_teacher.v1",
             "assets":{k:file_digest(cfg["stage1"][k]) for k in ("checkpoint","stats","kinematics")}}
+        if cfg["teacher"].get("target_mode")=="online_consumed_reference_v1":
+            from .short_audit import teacher_target_contract
+            teacher["target_contract"]=teacher_target_contract(cfg)
     return {"model": cfg["model"], "clock": cfg["clock"], "rewards": cfg["rewards"], "teacher":teacher,
             "physics_determinism": cfg.get("execution", {}).get("physics_determinism", "not_guaranteed"),
-            "frozen_sha256": frozen_sha256,
+            "frozen_sha256": frozen_sha256,"evaluation_timing":cfg.get("evaluation",{}),
             "tasks": [{"id": t["id"], "identity": task_identity(t), "seeds": t.get("seeds", [42])} for t in tasks]}
 
 
@@ -59,11 +62,19 @@ def motion_metrics(trajectory, music):
 def evaluate_tasks(collector, tasks, output, *, mode, device, max_seconds=None):
     output = Path(output)
     rows, diversity, latency = [], {}, []
+    online_teacher = getattr(getattr(collector.rewards, "teacher", None), "config", {}).get("target_mode") == "online_consumed_reference_v1"
+    if online_teacher:
+        collector.record_controls = True
+        collector.record_contacts = True
     for task in tasks:
         for seed in task.get("seeds", [42]):
             seed_all(seed)
             music, initial = task_inputs(task, collector.adapter, device)
             collector.reset(music, initial)
+            if collector.timing_mode=="fixed_delay_replay":
+                target=collector.state.teacher_reference
+                if target is None or not hasattr(target,"identity"):raise ValueError("固定延迟回放需要明确的冻结在线教师事件")
+                collector.delay_events=target.identity["delivery_events"]
             start = time.perf_counter()
             reason = "administrative_truncation"
             while not collector.terminal:
@@ -77,7 +88,9 @@ def evaluate_tasks(collector, tasks, output, *, mode, device, max_seconds=None):
             latencies = [e["actual_ready_tick"] - e["request_tick"] for e in collector.events]
             latency.extend(latencies)
             row = {"task": task["id"], "seed": seed, "mode": mode, "reason": reason,
+                   "input_identity":task_identity(task),"noise_seed":collector.noise_seed,
                    "actor_version": collector.actor_version,
+                   "timing_mode":collector.timing_mode,"noise_rule":"request_tick_seeded" if collector.noise_seed is not None else "global_rng",
                    "source": task.get("source"), "split": task.get("split"),
                    "complete": reason == "music_end", "physical_seconds": collector.state.tick / 600,
                    "music_seconds": music.shape[1] / 30, "wall_seconds": time.perf_counter() - start,
@@ -91,6 +104,11 @@ def evaluate_tasks(collector, tasks, output, *, mode, device, max_seconds=None):
                    "generator_unseen_music": task.get("generator_unseen_music"),
                    "controller_unseen_motion": task.get("controller_unseen_motion"),
                    "evidence": "real_isaaclab3_newton_mujoco_warp"}
+            if online_teacher:
+                # 离线计算放在全曲真实执行结束之后，不把审计计算混进部署延迟。
+                from .dance_evaluation import model_physics_gap
+                row["model_physics_gap"] = model_physics_gap(collector)
+                row["physical_metrics_alignment"] = "unaligned_world; paired anchor-aligned objective in model_physics_gap"
             rows.append(row)
             if collector.trajectory:
                 state = torch.cat([v[1] for v in collector.trajectory])
@@ -102,11 +120,15 @@ def evaluate_tasks(collector, tasks, output, *, mode, device, max_seconds=None):
                     clock = torch.tensor([v[0] for v in collector.trajectory],device=collector.state.state.device)
                     teacher_arrays["fixed_stage1_teacher_world_qpos28"] = collector.state.teacher_reference.source_at(clock).squeeze(0).cpu().numpy()
                     teacher_arrays["fixed_stage1_teacher_joint_names"] = np.asarray(collector.actor.stage1.endecoder.kinematics.joint_order)
+                    from .dance_evaluation import trajectory_content
+                    row["music_content"]=trajectory_content(state,reference_q,
+                        torch.from_numpy(teacher_arrays["fixed_stage1_teacher_world_qpos28"]),collector.adapter)
                 diversity.setdefault(task["id"], []).append(state[:, 13:34])
                 # 同一文件兼容SM现有渲染器：真实状态与当帧原始世界参考逐帧配对。
                 # 不保存扩散链，不重新对齐影子，不使用未来覆盖后的缓存补造参考。
                 safe_id = str(task["id"]).replace("/", "_").replace("..", "_")
                 n = len(state)
+                row["trajectory_artifact"]=str(output/f"{safe_id}_seed{seed}_physical.npz")
                 alive = np.ones((n, 1), dtype=bool)
                 if reason == "physical_failure":
                     alive[-1] = False
@@ -123,6 +145,12 @@ def evaluate_tasks(collector, tasks, output, *, mode, device, max_seconds=None):
                     actor_version=np.asarray(collector.actor_version),
                     termination_reason=np.asarray(reason), music_seconds=np.asarray(music.shape[1]/30),
                     physics_backend=np.asarray("isaaclab3_newton_mujoco_warp"),**teacher_arrays)
+                if online_teacher:
+                    from .checkpoint import pack_value
+                    torch.save({"controls":pack_value(tuple(collector.controls)),
+                        "generations":pack_value(tuple(collector.generations.values())),
+                        "events":collector.events,"reason":reason,"timing_mode":collector.timing_mode,
+                        "seed":seed,"noise_seed":collector.noise_seed},output/f"{safe_id}_seed{seed}_real_controls.pt")
             with (output / "physical_results.jsonl").open("a") as stream:
                 stream.write(json.dumps(row, ensure_ascii=False, allow_nan=False) + "\n")
     pairwise = {}

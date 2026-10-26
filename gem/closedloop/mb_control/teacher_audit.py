@@ -13,7 +13,7 @@ import torch
 
 from .application import task_inputs, seed_all, SupervisionStream, build_stage1_losses
 from .checkpoint import pack_value
-from .dance_losses import reference_prior
+from .dance_losses import reference_prior,reference_objectives,consumed_music_ticks,consumed_music_support
 from .trainer import Stage2Trainer
 
 
@@ -51,6 +51,19 @@ def audit_teacher(collector, actor, critic, engine, original, cfg, tasks, output
     gradient, = torch.autograd.grad(prior, variable)
     known_gradient = float(gradient[:,:p].abs().max())
     mutable_gradient = float(gradient[:,p:].norm())
+    global_known_gradient=global_mutable_gradient=None
+    if cfg.get("teacher",{}).get("target_mode")=="online_consumed_reference_v1":
+        variable_global=local.world_qpos.clone().requires_grad_(True)
+        changed_global=variable_global.clone();changed_global[:,p:,7]+= .03
+        _,global_prior,_=reference_objectives(replace(local,world_qpos=changed_global),local,
+            sample.state.teacher_reference,engine.adapter,anchor_state=sample.state.state,
+            anchor_tick=sample.state.tick,scales=cfg["rewards"].get("dance_scales"),
+            global_support_ticks=consumed_music_support(sample,engine.horizon_steps),
+            global_control_ticks=consumed_music_ticks(sample,engine.horizon_steps),
+            global_reference_records=sample.transitions[:engine.horizon_steps],global_reference_version=sample.generation.reference_version)
+        global_gradient,=torch.autograd.grad(global_prior,variable_global)
+        global_known_gradient=float(global_gradient[:,:p].abs().max())
+        global_mutable_gradient=float(global_gradient[:,p:].norm())
     zero_prior, _ = reference_prior(local,local,engine.adapter)
     static = local.world_qpos.clone();static[:,p:] = static[:,p:p+1]
     static_prior, _ = reference_prior(replace(local,world_qpos=static),local,engine.adapter)
@@ -77,13 +90,18 @@ def audit_teacher(collector, actor, critic, engine, original, cfg, tasks, output
         float(zero_prior) == 0 and float(static_prior) > 0 and frozen and fixed_timeline and unchanged_local and
         row["accepted_execution_feedback_update"] and row["future_encoder_gradient_norms"]["dance"] > 0 and
         prior_future_norm > 0 and row["future_encoder_stage1_bc_gradient"] == 0)
+    if global_known_gradient is not None:
+        passed=passed and global_known_gradient==0. and global_mutable_gradient>0.
+    from .short_audit import teacher_target_contract
     report = {"method":"physical_anchor_short_bptt","horizon":engine.horizon_steps,"passed":bool(passed),
         "reward_contract":cfg["rewards"],"teacher_identity":teacher.identity,
+        "teacher_target_contract":teacher_target_contract(cfg),
         "frozen_sha256":engine.adapter.bundle.metadata["sha256"],
         "zero_forecast_stage1_max_abs":parity,"teacher_storage_independent":independent,
         "teacher_preserves_student_rng":teacher_rng_unchanged,
         "after_update_prior_future_gradient_norm":prior_future_norm,
         "known_prefix_prior_gradient_max_abs":known_gradient,"mutable_prior_gradient_norm":mutable_gradient,
+        "known_prefix_global_gradient_max_abs":global_known_gradient,"mutable_global_gradient_norm":global_mutable_gradient,
         "matched_prior":float(zero_prior),"static_candidate_prior":float(static_prior),
         "teacher_parameters_statistics_unchanged":frozen,"fixed_timeline_unchanged_after_actor_update":fixed_timeline,
         "same_request_teacher_unchanged_after_actor_update":unchanged_local,"actual_update":row,

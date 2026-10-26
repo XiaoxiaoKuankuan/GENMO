@@ -110,9 +110,11 @@ def main(kind):
             raise ValueError("部署延迟必须来自同一冻结资产及同样的前瞻路径，不能借用无前瞻baseline延迟")
     if args.actor_checkpoint:
         ck = torch.load(require_file(args.actor_checkpoint, "Stage2 Actor"), map_location="cpu", weights_only=False)
-        if ck.get("schema") != SCHEMA or ck["frozen_sha256"] != adapter.bundle.metadata["sha256"]:
+        inference_only=ck.get("schema")=="genmo.stage2.inference_export.v1" and kind=="evaluate"
+        if (ck.get("schema") != SCHEMA and not inference_only) or ck["frozen_sha256"] != adapter.bundle.metadata["sha256"]:
             raise ValueError("评估必须使用同一SM资产的新Stage2 checkpoint")
-        if args.mode in ("stage1", "calibration") or ck["behavior_config"]["model"]["forecast_enabled"] != cfg["model"]["forecast_enabled"]:
+        model_contract=ck["model_contract"] if inference_only else ck["behavior_config"]["model"]
+        if args.mode in ("stage1", "calibration") or model_contract["forecast_enabled"] != cfg["model"]["forecast_enabled"]:
             raise ValueError("条件消融必须匹配训练条件，不能只在测试时删除未来条件")
         actor.load_state_dict(ck["actor"], strict=True)
     elif kind == "evaluate" and args.mode not in ("stage1", "calibration") and not args.initial_actor:
@@ -185,11 +187,19 @@ def main(kind):
         collector = PhysicalCollector(env, actor, adapter, scheduler, rewards, forecast_enabled=cfg["model"]["forecast_enabled"],
                                       gamma=cfg["critic"]["gamma_per_control"], record_trajectory=kind == "evaluate")
         collector.record_contact_metrics = kind == "evaluate"
+        if cfg.get("teacher",{}).get("target_mode")=="online_consumed_reference_v1":
+            collector.noise_seed=cfg["teacher"].get("online_seed",42)
+        # 固定事件仅用于离线评价；正式采集仍使用真实墙钟异步，不能由评价设置改写。
+        collector.timing_mode=("wall_clock_async" if kind in ("train","collector") else
+            cfg.get("evaluation",{}).get("timing_mode","wall_clock_async"))
         try:
-            if kind == "evaluate":
+            if kind == "online_teacher":
+                from .online_teacher import build_online_timelines
+                build_online_timelines(collector,engine.teacher,tasks,cfg,output,args.torch_device)
+            elif kind == "evaluate":
                 # 推理已加载checkpoint中的实际权重，事件元数据也须携带同一个
                 # 有效更新版本；保留参考版本自己的编号，不改物理/采样/调度。
-                collector.actor_version = int(ck["counters"]["accepted_actor_updates"]) if args.actor_checkpoint else 0
+                collector.actor_version = (int(ck["accepted_actor_updates"] if inference_only else ck["counters"]["accepted_actor_updates"]) if args.actor_checkpoint else 0)
                 evaluate_tasks(collector, tasks, output, mode=args.mode, device=args.torch_device, max_seconds=args.max_seconds)
             elif kind == "collector":
                 from .parallel_collection import run_collector_service
@@ -216,6 +226,9 @@ def main(kind):
             elif kind == "teacher_audit":
                 from .teacher_audit import audit_teacher
                 audit_teacher(collector,actor,critic,engine,original,cfg,tasks,output,args.torch_device)
+            elif kind == "music_repair":
+                from .music_repair_audit import run_music_repair_audit
+                run_music_repair_audit(collector,actor,critic,engine,original,cfg,tasks,output,args.torch_device)
             elif kind == "short":
                 from .short_audit import audit_short
                 if not args.criteria:

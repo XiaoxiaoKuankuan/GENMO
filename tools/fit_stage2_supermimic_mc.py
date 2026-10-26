@@ -44,6 +44,10 @@ def main():
             raise ValueError("真实MC教师或冻结资产不一致")
         if complete["physics_determinism"]!=cfg["execution"].get("physics_determinism"):
             raise ValueError("真实MC物理设置不一致")
+        if cfg.get("teacher",{}).get("target_mode")=="online_consumed_reference_v1":
+            from gem.closedloop.mb_control.music_mc import critic_reward_contract
+            if complete.get("critic_reward_contract")!=critic_reward_contract(cfg):
+                raise ValueError("完整MC不是同一anchor对齐的新奖励合同")
         if any(not torch.equal(v.detach().cpu(),complete["actor"][n]) for n,v in actor.state_dict().items()):
             raise ValueError("真实MC不是当前原Stage1初始Actor产生")
         split=complete["split"];steps+=complete["physical_control_steps"]
@@ -60,7 +64,16 @@ def main():
     (output/"collection_manifest.json").write_text(json.dumps({"shards":args.shards,"episodes":episodes,
         "physical_control_steps":steps,"reward":cfg["rewards"],"teacher":engine.teacher.identity,
         "teacher_seed":cfg["teacher"]["seed"]},ensure_ascii=False,indent=2))
-    fit_mc_dataset(trainer,pairs["train"],pairs["validation"],cfg["formal"]["critic_warmup"],output,steps,actor_before)
+    try:
+        fit_mc_dataset(trainer,pairs["train"],pairs["validation"],cfg["formal"]["critic_warmup"],output,steps,actor_before)
+    finally:
+        from gem.closedloop.mb_control.trainer import frozen_parameters
+        with frozen_parameters(critic):
+            audits=[critic.audit_mutable_reference_gradient(z) for z,_ in pairs["validation"][::max(1,len(pairs["validation"])//12)]]
+        (output/"critic_mutable_reference_gradient.json").write_text(json.dumps({"samples":audits,
+            "terminal_value_weight":0.,"gradient_is_not_execution_improvement":True},indent=2,allow_nan=False))
+        torch.save({"schema":"critic_fit_diagnostic_not_actor_authorization.v1","critic":critic.state_dict(),
+            "quality":trainer.critic_quality,"qualified":trainer.critic_ready},output/"critic_diagnostic.pt")
     save_warmup(output/"critic_ready.pt",trainer,cfg)
 
 

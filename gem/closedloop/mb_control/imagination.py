@@ -164,7 +164,9 @@ class PhysicalAnchorImagination:
         self.support_guard = None
         self.decisions = 1
 
-    def rollout_anchor(self, sample, *, noise=None, plan_override=None, transition_fn=None, on_step=None):
+    def rollout_anchor(self, sample, *, noise=None, plan_override=None, transition_fn=None, on_step=None,support_check_only=False):
+        if support_check_only and (transition_fn is not None or self.support_guard is None or plan_override is None):
+            raise ValueError("仅域检查需要已记录计划和固定支持域，不能用于真实物理或训练奖励")
         sample.validate(self.horizon_steps)
         record = sample.generation
         request = record.request
@@ -179,6 +181,13 @@ class PhysicalAnchorImagination:
         version = record.reference_version
         consumed_steps = 0
         objective_terms = {}
+        alignment = None
+        if not support_check_only and self.rewards.config.get("dance_alignment")=="anchor_se2":
+            from .dance_losses import AnchorAlignment
+            if z.teacher_reference is None:raise ValueError("anchor对齐缺少冻结音乐目标")
+            alignment=AnchorAlignment.at_anchor(z.state,z.teacher_reference.read_current_future(z.tick,future_steps=0)[0])
+            z=replace(z,teacher_alignment_rotation=alignment.rotation,teacher_alignment_translation=alignment.translation)
+            start=z;states_by_tick[z.tick]=z
 
         def schedule(current, recorded):
             pending = recorded.pending_request
@@ -199,27 +208,41 @@ class PhysicalAnchorImagination:
                 decision_id=recorded.decision_id, consecutive_timeouts=recorded.consecutive_timeouts)
 
         terminal, reason = False, "short_model_horizon"
+        def verify_support(state,tick):
+            if self.support_guard is not None:
+                try:self.support_guard(state)
+                except Exception as error:
+                    if hasattr(error,"details"):error.details.update(tick=tick,anchor_tick=start.tick,prediction_step=(tick-start.tick)//12)
+                    raise
         for index, step in enumerate(sample.transitions[:self.horizon_steps]):
             z = schedule(z, step.start)
             z = self.adapter.refresh_current_observation(z)
-            if self.support_guard is not None:
-                self.support_guard(z.state)
+            verify_support(z.state,z.tick)
             support = z.reference.dependency_support(z.tick)
             consumed_steps += int(bool((z.reference.source_versions[(support-z.reference.lower)//20] == version).any()))
             _, _, goal = z.reference.read_current_future(z.tick)
             action = self.adapter.bundle.act(z.sm_history, goal)
             state1 = (self.adapter.bundle.step_model(z.state, action, z.xi) if transition_fn is None else transition_fn(action))
-            if self.support_guard is not None:
-                self.support_guard(state1)
+            verify_support(state1,z.tick+12)
             ref1, _, _ = z.reference.read_current_future(z.tick+12)
-            target = (z.teacher_reference.read_current_future(z.tick+12, future_steps=0)[0]
-                      if z.teacher_reference is not None else None)
-            reward, metrics = self.rewards(state1, action, z.previous_action, ref1, teacher_reference=target)
-            if self.rewards.mode == "teacher_music":
+            if support_check_only:
+                # 域检查只检查完全相同的状态递推，不计算无关的多组FK奖励；结果不得训练。
+                reward=state1.new_zeros(len(state1));metrics={}
+            else:
+                target = (z.teacher_reference.read_current_future(z.tick+12, future_steps=0)[0]
+                          if z.teacher_reference is not None else None)
+                reward, metrics = self.rewards(state1, action, z.previous_action, ref1, teacher_reference=target,
+                                              teacher_alignment=alignment)
+            if not support_check_only and self.rewards.mode == "teacher_music":
                 # 短时 Actor 的固定H目标不靠缩短软存活时域逃避负损失；真实终止仍独立记录。
-                for name in ("dance_loss", "current_reference_loss", "physical_cost"):
+                for name in ("dance_loss", "dance_loss_unaligned", "current_reference_loss", "physical_cost",
+                             "action_rate_cost", "joint_limit_cost", "action_rate_mean", "hard_joint_limit_cost"):
                     objective_terms[name] = objective_terms.get(name, 0.) + self.gamma**index*.02*metrics[name]
-            failed = self.adapter.runtime.termination(state1, ref1)
+                for name,value in metrics.items():
+                    if name.startswith(("joint_soft_","joint_hard_","joint_near_")):
+                        objective_terms[name]=objective_terms.get(name,0.)+value/self.horizon_steps
+            failed = (torch.zeros(len(state1),device=state1.device,dtype=torch.bool) if support_check_only else
+                      self.adapter.runtime.termination(state1, ref1))
             alive = (torch.ones_like(reward) if self.rewards.mode == "teacher_music" and transition_fn is None else
                      1-self.adapter.runtime.termination(state1, ref1, soft=True) if transition_fn is None
                      else (~failed).to(reward))
@@ -244,5 +267,7 @@ class PhysicalAnchorImagination:
                  "genmo_condition_tick": request.snapshot.tick, "forecast_condition_is_recorded_prediction": True,
                  "no_previous_consumption_verified": True}
         event["objective_terms"] = objective_terms
+        event["support_check_only"]=support_check_only
+        event["teacher_alignment"] = alignment
         interval = DecisionInterval(start, z, totals.reward, totals.survival, totals.steps, self.gamma, terminal, reason, event)
         return interval, plan, noise

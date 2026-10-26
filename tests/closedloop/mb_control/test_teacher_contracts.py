@@ -44,3 +44,44 @@ def test_old_critic_not_shape_compatible_with_teacher_critic():
     new=PlanAwareCritic(Scheduler(120),width=32,layers=1,heads=4,teacher_conditioned=True)
     with pytest.raises(RuntimeError):
         new.load_state_dict(old.state_dict(),strict=True)
+
+
+def test_anchor_alignment_fixed_once_and_teacher_detached(tensor_state):
+    from gem.closedloop.mb_control.dance_losses import AnchorAlignment
+    from supermimic.motion import ReferenceBatch
+    p=tensor_state.state[:,:3];rotation=torch.eye(3)[None];v=torch.zeros_like(p);q=torch.zeros(1,21)
+    target=ReferenceBatch(p,rotation,v,v,q,q,p[:,None],rotation[:,None],v[:,None],v[:,None],v,v,torch.ones(1))
+    state=tensor_state.state.clone().requires_grad_(True)
+    with torch.no_grad():state[:,:2]+=state.new_tensor([1.,2.])
+    alignment=AnchorAlignment.at_anchor(state,target)
+    assert not alignment.rotation.requires_grad and not alignment.translation.requires_grad
+    first=alignment.reference(target)
+    future=target._replace(root_p=target.root_p+target.root_p.new_tensor([.2,.3,0.]))
+    moved=alignment.reference(future)
+    assert torch.allclose(moved.root_p-first.root_p,future.root_p-target.root_p,atol=1e-6)
+    assert torch.allclose(alignment.reference(target).root_p,first.root_p)
+    # 参考未改变但机器人已落后时，参考保持不能继承机器人的累计位置误差。
+    preservation=AnchorAlignment.at_reference_anchor(target,target)
+    assert torch.allclose(preservation.reference(future).root_p,future.root_p)
+    assert not torch.allclose(alignment.reference(future).root_p,preservation.reference(future).root_p)
+    assert not preservation.rotation.requires_grad and not preservation.translation.requires_grad
+
+
+def test_critic_direct_mutable_reference_gradient_is_auditable(tensor_state):
+    critic=PlanAwareCritic(Scheduler(120),width=32,layers=1,heads=4,teacher_conditioned=True)
+    z=replace(tensor_state,teacher_reference=tensor_state.reference,protected_until=120)
+    with frozen_parameters(critic):report=critic.audit_mutable_reference_gradient(z)
+    assert report['finite'] and report['mutable_reference_gradient_norm']>0
+    assert report['protected_reference_gradient_max_abs']==0
+
+
+def test_delivery_replay_preserves_observed_commit_and_censors_last_request():
+    from gem.closedloop.mb_control.online_teacher import recorded_delivery_events
+    payload={"events":[{"request_tick":0,"actual_ready_tick":93,"commit_tick":108},
+        {"request_tick":60,"actual_ready_tick":111,"commit_tick":None,"rejection_tick":120}],
+        "ticks":torch.tensor([0,12,120]),"controls":{"data":[{"data":{"start":{"data":{
+            "pending_request":{"data":{"ticket":{"data":{"request_tick":120}}}}}}}}]}}
+    events=recorded_delivery_events(payload)
+    assert events["0"]["actual_ready_tick"]==93 and events["0"]["commit_tick"]==108
+    assert events["60"]["delivery_tick"]==120 and events["60"]["commit_tick"] is None
+    assert events["120"]=={"delivered":False,"censored_at_tick":120}

@@ -39,7 +39,7 @@ class TrackingRewards:
         if config.get("music_surrogate_enabled", False):
             raise ValueError("音乐代理未验证，首版仅原Stage1监督与独立音乐评价")
 
-    def __call__(self, state, action, previous_action, reference, *, teacher_reference=None):
+    def __call__(self, state, action, previous_action, reference, *, teacher_reference=None, teacher_alignment=None):
         sm_reward, sm_terms = self.runtime.reward(state, action, previous_action, reference)
         p, R, v, w, q, qd = unflatten_state(state)
         kin, ref = self.runtime.kin, reference
@@ -63,6 +63,9 @@ class TrackingRewards:
         scores = {key: torch.exp(-value / self.scales[key] ** 2) for key, value in e.items()}
         tracking = sum(weight * scores[key] for key, weight in zip(TERM_NAMES, WEIGHTS)) / 6.3
         rate = (action - previous_action).square().sum(-1)
+        rate_mean = (action - previous_action).square().mean(-1)
+        soft_violation = torch.relu(q-self.runtime.mdp.soft_hi)+torch.relu(self.runtime.mdp.soft_lo-q)
+        hard_violation = torch.relu(q-kin.q_hi)+torch.relu(kin.q_lo-q)
         limits = (torch.relu(q - self.runtime.mdp.soft_hi) + torch.relu(self.runtime.mdp.soft_lo - q)).sum(-1)
         root_cost_weight = float(self.config.get("root_huber_weight", 0.))
         root_norm = torch.stack((e["anchor_pos"] / .3**2, e["anchor_ori"] / .4**2), -1)
@@ -76,15 +79,28 @@ class TrackingRewards:
                    "action_rate": rate, "joint_limit": limits, "root_huber": root_cost,
                    **{f"error/{k}": value for k, value in e.items()},
                    **{f"score/{k}": value for k, value in scores.items()}}
+        metrics.update(action_rate_sum=rate,action_rate_mean=rate_mean,action_rate_cost=rate,
+            joint_limit_cost=limits,hard_joint_limit_cost=hard_violation.sum(-1))
+        for i,name in enumerate(kin.joint_names):
+            metrics.update({f"joint_soft_violation/{name}":soft_violation[:,i],
+                f"joint_soft_frequency/{name}":(soft_violation[:,i]>0).to(q),
+                f"joint_hard_frequency/{name}":(hard_violation[:,i]>0).to(q),
+                f"joint_near_hard/{name}":(torch.minimum(q[:,i]-kin.q_lo[i],kin.q_hi[i]-q[:,i])<.05).to(q)})
         if self.mode == "teacher_music":
             if teacher_reference is None:
                 raise ValueError("音乐执行主目标缺少固定原Stage1时间线，不能退回学生自参考奖励")
             from .dance_losses import execution_loss
             dance, dance_groups = execution_loss(state, teacher_reference, kin, self.config.get("dance_scales"))
+            unaligned = dance
+            if teacher_alignment is not None:
+                dance, dance_groups = execution_loss(state,teacher_alignment.reference(teacher_reference),kin,self.config.get("dance_scales"))
             track, track_groups = execution_loss(state, reference, kin, self.config.get("dance_scales"))
             physical = self.config.get("action_rate_weight", .1)*rate + self.config.get("joint_limit_weight", 2.)*limits
             music_reward = -(dance + self.config.get("track_weight", .1)*track + physical)*.02
             metrics.update(dance_loss=dance, current_reference_loss=track, physical_cost=physical,
+                dance_loss_unaligned=unaligned, absolute_teacher_root_position_error=(p-teacher_reference.root_p).norm(dim=-1),
+                weighted_action_rate_cost=self.config.get("action_rate_weight",.1)*rate,
+                weighted_joint_limit_cost=self.config.get("joint_limit_weight",2.)*limits,
                 teacher_music_reward_dt=music_reward,
                 **{f"dance/{k}":v for k,v in dance_groups.items()},
                 **{f"current_reference/{k}":v for k,v in track_groups.items()})

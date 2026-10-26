@@ -3,9 +3,9 @@
 教师从 s595000 原始检查点重新构造独立网络，严格加载原网络、统计与编解码合同，
 从不复制正在优化的学生，也不加入任何优化器。局部标签使用真实请求的音乐、历史、
 已知前缀及相同 DDIM 初始噪声；标签计算无梯度，学生的完整 DDIM 路径仍可微。
-固定时间线由教师独立连续生成，使用教师自己的因果运动学历史及前缀，绝不读取
-学生后续输出或未来实测状态。这些运动学历史仅用于离线教师，明确标记 imagined，
-不会写入学生的真实历史。固定时间线是生成目标，不是物理执行或训练收益证据。
+新目标优先加载原Stage1+冻结SM真实在线执行时实际消费的参考，不随学生更新改写。
+旧独立运动学时间线保留为研究对照，使用教师自身的因果历史和前缀，明确标记
+imagined，不会写入学生真实历史。固定参考本身不是学生执行或训练收益证据。
 整曲目标在 episode 开始前按音乐内容缓存；局部标签只在训练侧按请求缓存。
 GenerationWorker 不调用教师，部署时不增加教师推理延迟。
 """
@@ -43,6 +43,7 @@ class FrozenStage1Teacher(nn.Module):
         super().__init__()
         self.adapter, self.scheduler = adapter, scheduler
         self.config = dict(cfg["teacher"])
+        self.physics_determinism = cfg.get("execution", {}).get("physics_determinism", "not_guaranteed")
         path = Path(cfg["stage1"]["checkpoint"])
         ck = torch.load(path, map_location="cpu", weights_only=False, mmap=True)
         original = OmegaConf.create(ck["config"])
@@ -61,6 +62,11 @@ class FrozenStage1Teacher(nn.Module):
             "kinematics_sha256": file_digest(cfg["stage1"]["kinematics"]),
             "ddim_steps": 20, "eta": 0., "cfg_scale": 2.5,
             "timeline_history": "teacher_own_causal_kinematics_not_student_real_history"}
+        if self.config.get("target_mode") == "online_consumed_reference_v1":
+            self.identity.update(target_definition="online_consumed_reference_v1",
+                timeline_history="frozen_original_stage1_real_online_reference",
+                request_noise_rule="seed_plus_request_tick_grid_times_1009.v1",
+                online_seed=self.config.get("online_seed",42))
         self.cache_dir = Path(self.config["cache_dir"])
         self.cache_dir.mkdir(parents=True, exist_ok=True)
         self.local_cache = OrderedDict()
@@ -110,6 +116,19 @@ class FrozenStage1Teacher(nn.Module):
 
     @torch.no_grad()
     def timeline(self, music, initial):
+        if self.config.get("target_mode") == "online_consumed_reference_v1":
+            from .online_teacher import load_online_timeline
+            key=tensor_digest(music,initial)
+            if key not in self.timeline_cache:
+                self.timeline_cache[key]=load_online_timeline(self,music,initial)
+                while len(self.timeline_cache)>self.config.get("timeline_memory_cache_size",4):
+                    self.timeline_cache.popitem(last=False)
+            self.timeline_cache.move_to_end(key)
+            return self.timeline_cache[key]
+        return self.independent_timeline(music,initial)
+
+    @torch.no_grad()
+    def independent_timeline(self, music, initial):
         key = tensor_digest(music, initial)
         identity = dict(self.identity, music_initial_sha256=key, seed=self.config.get("seed", 73421),
                         request_interval_ticks=300, prefix_clock=dict(self.scheduler.__dict__))

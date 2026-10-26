@@ -10,7 +10,8 @@ import torch
 
 
 class UnsupportedModelState(ValueError):
-    pass
+    def __init__(self,message,details=None):
+        super().__init__(message);self.details=details or {}
 
 
 def support_features(state):
@@ -36,6 +37,30 @@ def combine_envelopes(envelopes):
             "real_state_count": sum(e["real_state_count"] for e in envelopes)}
 
 
+def training_support_envelope(cfg, report):
+    """新时域审计不能自动扩大旧支持域；配置旧边界时使用两者交集。"""
+    import json
+    from pathlib import Path
+    current = report["validated_state_envelope"]
+    path = cfg.get("imagination", {}).get("state_support_reference_report")
+    if not path:
+        return current
+    previous = json.loads(Path(path).read_text())
+    if previous.get("frozen_sha256") != report.get("frozen_sha256"):
+        raise ValueError("固定状态支持域必须来自同一冻结SM/WM资产")
+    old = previous["validated_state_envelope"]
+    if old["schema"] != current["schema"] or len(old["minimum"]) != len(current["minimum"]):
+        raise ValueError("状态支持坐标定义不一致")
+    lower = [max(a,b) for a,b in zip(old["minimum"],current["minimum"])]
+    upper = [min(a,b) for a,b in zip(old["maximum"],current["maximum"])]
+    if any(a>b for a,b in zip(lower,upper)):
+        raise ValueError("新旧已验证状态支持没有共同范围")
+    return {"schema":current["schema"],"minimum":lower,"maximum":upper,
+        "real_state_count":current["real_state_count"],
+        "definition":"intersection_with_preserved_prior_support",
+        "prior_report":str(Path(path).resolve())}
+
+
 class ModelSupport:
     def __init__(self, envelope, *, device):
         if envelope.get("schema") != "height_gravity_body_velocity_q_qd_v1":
@@ -45,12 +70,17 @@ class ModelSupport:
         # 固定数值容差用于浮点与小扰动；不从验收结果反推扩大范围。
         self.margin = self.lower.new_tensor([.01] + [.02]*3 + [.05]*3 + [.1]*3 + [.02]*21 + [.1]*21)
 
-    def __call__(self, state):
+    def __call__(self, state, tick=None):
         f = support_features(state.detach())
         if not torch.isfinite(f).all():
             raise FloatingPointError("WM状态非有限")
-        if ((f < self.lower - self.margin) | (f > self.upper + self.margin)).any():
-            raise UnsupportedModelState("当前状态超出独立P3真实状态支持，拒绝执行反馈更新")
+        outside=(f < self.lower-self.margin)|(f > self.upper+self.margin)
+        if outside.any():
+            labels=["root_height"]+["gravity_"+x for x in "xyz"]+["body_velocity_"+x for x in "xyz"]+["body_angular_"+x for x in "xyz"]+[f"joint_position_sm_{i}" for i in range(21)]+[f"joint_velocity_sm_{i}" for i in range(21)]
+            indices=outside.nonzero().tolist()
+            raise UnsupportedModelState("当前状态超出独立P3真实状态支持，拒绝执行反馈更新",{"tick":tick,
+                "components":[{"name":labels[j],"value":float(f[i,j]),"lower":float(self.lower[j]-self.margin[j]),
+                               "upper":float(self.upper[j]+self.margin[j])} for i,j in indices]})
 
 
 def validate_coverage(tasks, report):
@@ -90,6 +120,12 @@ def select_short_horizon(cfg, report):
         raise ValueError("短时训练必须启用独立上层Critic终点价值")
     if cfg.get("teacher", {}).get("enabled") and report.get("reward_contract") != cfg["rewards"]:
         raise ValueError("教师音乐目标需要对应新奖励的实际H物理方向验证")
+    if cfg.get("teacher",{}).get("target_mode")=="online_consumed_reference_v1":
+        from .short_audit import teacher_target_contract
+        if report.get("teacher_target_contract")!=teacher_target_contract(cfg):
+            raise ValueError("新在线音乐目标、对齐或Actor损失改变，需要重做H16/H32物理验证")
+        if not report.get("criteria",{}).get("require_dance_main_direction") or not report["horizons"][str(selected)].get("dance_main_direction_passed"):
+            raise ValueError("新音乐目标需独立验证dance主任务及左右腿物理方向，不能仅由组合目标通过代替")
     if cfg.get("teacher", {}).get("enabled") and report.get("teacher_seed")!=cfg["teacher"]["seed"]:
         raise ValueError("物理方向必须对应同一个固定教师音乐时间线")
     import json
@@ -103,5 +139,10 @@ def select_short_horizon(cfg, report):
         raise ValueError("真实anchor执行梯度报告不匹配或未通过")
     if cfg.get("teacher", {}).get("enabled") and gradient.get("reward_contract") != cfg["rewards"]:
         raise ValueError("真实anchor梯度必须验证当前冻结教师的新奖励")
+    if cfg.get("teacher",{}).get("target_mode")=="online_consumed_reference_v1":
+        if (gradient.get("teacher_target_contract")!=teacher_target_contract(cfg) or
+                gradient.get("known_prefix_global_gradient_max_abs")!=0. or
+                not gradient.get("mutable_global_gradient_norm",0.)>0.):
+            raise ValueError("当前固定在线音乐保持目标尚未通过真实anchor可修改参考梯度验证")
     cfg["imagination"]["horizon_steps"] = selected
     return selected

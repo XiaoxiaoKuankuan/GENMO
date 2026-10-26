@@ -47,8 +47,12 @@ def pack_state(state, memo=None):
                            ("ticks", "world_qpos", "contact", "source_versions")}
     values["reference"]["version"] = cache.version
     teacher = state.teacher_reference
-    values["teacher_reference"] = None if teacher is None else {
+    from .online_teacher import OnlineTeacherTimeline
+    values["teacher_reference"] = None if teacher is None or isinstance(teacher,OnlineTeacherTimeline) else {
         k: pack_tensor(getattr(teacher, k), memo) for k in ("ticks", "world_qpos", "contact", "source_versions")}
+    if isinstance(teacher, OnlineTeacherTimeline):
+        values["teacher_reference"] = {"kind":"OnlineTeacherTimeline","identity":teacher.identity,
+            **{k:pack_tensor(getattr(teacher,k),memo) for k in ("ticks","reference_state","source_versions")}}
     return values
 
 
@@ -67,8 +71,13 @@ def unpack_state(payload, adapter, device, memo=None):
     ref = {k: unpack_tensor(v, device, memo) if isinstance(v, torch.Tensor) else v for k, v in payload["reference"].items()}
     data["reference"] = ReferenceBuffer(**ref, kin=adapter.runtime.kin, to_sm=adapter.to_sm)
     teacher = payload.get("teacher_reference")
-    data["teacher_reference"] = None if teacher is None else ReferenceBuffer(
-        **{k: unpack_tensor(v, device, memo) for k, v in teacher.items()}, kin=adapter.runtime.kin, to_sm=adapter.to_sm)
+    if teacher is not None and teacher.get("kind")=="OnlineTeacherTimeline":
+        from .online_teacher import OnlineTeacherTimeline
+        data["teacher_reference"]=OnlineTeacherTimeline(**{k:unpack_tensor(v,device,memo) if isinstance(v,torch.Tensor) else v
+            for k,v in teacher.items() if k!="kind"},kin=adapter.runtime.kin,to_sm=adapter.to_sm)
+    else:
+        data["teacher_reference"] = None if teacher is None else ReferenceBuffer(
+            **{k: unpack_tensor(v, device, memo) for k, v in teacher.items()}, kin=adapter.runtime.kin, to_sm=adapter.to_sm)
     data["pending_request"] = unpack_value(data.get("pending_request"), adapter, device, memo)
     return ClosedLoopState(**data)
 
@@ -92,6 +101,7 @@ def pack_value(value, memo=None):
 def unpack_value(value, adapter, device, memo=None):
     from .contracts import PendingGeneration, GenerationRecord, PhysicalAnchor, RequestTicket, GeneratedPlan, ForecastContext
     from .returns import DecisionInterval
+    from .dance_losses import AnchorAlignment
     memo = {} if memo is None else memo
     if isinstance(value, torch.Tensor):
         return unpack_tensor(value, device, memo)
@@ -104,7 +114,7 @@ def unpack_value(value, adapter, device, memo=None):
     if value["kind"] == "tuple":
         return tuple(unpack_value(v, adapter, device, memo) for v in value["data"])
     registry = {c.__name__: c for c in (PendingGeneration, GenerationRecord, PhysicalAnchor, RequestTicket,
-                                       GeneratedPlan, ForecastContext, DecisionInterval)}
+                                       GeneratedPlan, ForecastContext, DecisionInterval,AnchorAlignment)}
     return registry[value["kind"]](**{k: unpack_value(v, adapter, device, memo) for k, v in value["data"].items()})
 
 

@@ -76,19 +76,41 @@ class PlanAwareCritic(nn.Module):
         if self.teacher_conditioned:
             if z.teacher_reference is None:
                 raise ValueError("新奖励Critic必须观察固定音乐目标，不能沿用旧价值输入")
-            fixed = z.teacher_reference.source_at(future_ticks).detach()
+            teacher_valid=(future_ticks>=z.teacher_reference.lower)&(future_ticks<=z.teacher_reference.upper)
+            fixed = z.teacher_reference.source_at(future_ticks.clamp(z.teacher_reference.lower,z.teacher_reference.upper)).detach()
+            if z.teacher_alignment_rotation is not None:
+                from .dance_losses import AnchorAlignment
+                fixed=AnchorAlignment(z.teacher_alignment_rotation,z.teacher_alignment_translation).poses(fixed)
+            fixed=torch.where(teacher_valid[None,:,None],fixed,0.)
             teacher = self.teacher_proj(torch.cat((fixed, mt, valid_music[None,:,None].expand(b,-1,-1).to(fixed)), -1))
             tokens.append(teacher)
-            mask = torch.cat((mask, valid_music[None].expand(b,-1)), 1)
+            mask = torch.cat((mask, (valid_music&teacher_valid)[None].expand(b,-1)), 1)
         return torch.cat([x + self.types[i] for i, x in enumerate(tokens)], 1), mask
 
     def forward(self, z):
         tokens, mask = self.tokens(z)
         if z.pending_request is not None:
             # 条件仍为请求当时的快照；没有当次实测延迟，也没有未来真实状态。
-            pending, visible = self.tokens(z.pending_request.snapshot)
+            from dataclasses import replace
+            snapshot=replace(z.pending_request.snapshot,teacher_alignment_rotation=z.teacher_alignment_rotation,
+                             teacher_alignment_translation=z.teacher_alignment_translation)
+            pending, visible = self.tokens(snapshot)
             noise = self.noise_proj(z.pending_request.noise)
             tokens = torch.cat((tokens, pending+self.pending_type, noise+self.pending_type), 1)
             mask = torch.cat((mask, visible, torch.ones(noise.shape[:2], device=mask.device, dtype=torch.bool)), 1)
         encoded = self.encoder(tokens, src_key_padding_mask=~mask)
         return self.head(encoded[:, 0]).squeeze(-1)
+
+    def audit_mutable_reference_gradient(self,z):
+        """审计Critic绕过执行路径的未来参考输入导数；存在导数不代表价值可靠。"""
+        from dataclasses import replace
+        source=z.reference.world_qpos.detach().clone().requires_grad_(True)
+        free=z.reference.ticks>z.protected_until
+        cache=replace(z.reference,world_qpos=torch.where(free[None,:,None],source,source.detach()),
+            prepared_reference=None,prepared_source=None,prepared_start=None)
+        value=self(replace(z,reference=cache))
+        grad=torch.autograd.grad(value.sum(),source,allow_unused=True)[0]
+        return {"value":float(value.detach().mean()),"mutable_reference_gradient_norm":float(grad[:,free].norm()) if grad is not None else 0.,
+            "protected_reference_gradient_max_abs":float(grad[:,~free].abs().max()) if grad is not None and (~free).any() else 0.,
+            "finite":grad is not None and bool(torch.isfinite(grad).all()),
+            "meaning":"direct_reference_input_path_not_execution_improvement"}

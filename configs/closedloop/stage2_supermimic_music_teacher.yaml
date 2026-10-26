@@ -1,4 +1,4 @@
-# 冻结s595000音乐教师修复：独立固定音乐目标 + 同请求局部教师 + H=32真实接管BPTT。
+# 冻结s595000音乐教师修复：真实在线固定音乐目标 + 同请求局部教师 + 短时真实接管BPTT。
 # Actor先使用短时执行目标，终点价值权重为零；新Critic仍用新奖励真实MC重新训练并独立验证。
 # 基于真实首次接管状态的短时BPTT；formal必须提供新短时物理方向与梯度报告。
 # 60帧@30Hz，SM 50Hz / Newton四子步；所有路径可在独立运行副本中重定位。
@@ -33,22 +33,43 @@ clock:
   max_consecutive_timeouts: 3
 imagination:
   mode: physical_anchor_short_bptt
-  horizon_steps: 32
+  horizon_steps: 16  # 首轮候选；H16/H32均须重新验证，不能借用旧H32通过记录。
   critic_bootstrap: false
   anchor_gradient_report: null
   decision_intervals: 3
   validated_model_steps: null
   physical_validation_report: null
+  state_support_reference_report: null  # 沿用既有实验时填原支持报告；与新域取交集，禁止自动放宽。
 critic:
   network: {width: 256, layers: 2, heads: 4, teacher_conditioned: true}
   gamma_per_control: 0.99
 training:
-  genmo_lr: 0.000001
-  forecast_lr: 0.000001
+  genmo_lr: 0.00000025  # 整曲对照表明旧首候选仍过大；与0.01rad单步输出界限一起实测校准。
+  forecast_lr: 0.00000025
   critic_lr: 0.0001
   weight_decay: 0.01
   bc_weight: 1.0
   prior_weight: 2.0
+  local_prior_weight: 2.0
+  global_prior_weight: 0.2
+  auxiliary_gradient_projection: false
+  defer_critic: true
+  output_trust_region:
+    enabled: true
+    maximum_attempts: 3
+    lr_shrink: 0.25
+    joint_step_rad: 0.010
+    root_step_m: 0.005
+    orientation_step_rad: 0.01
+    local_joint_drift_rad: 0.20
+    global_joint_drift_rad: 0.35
+    global_root_drift_m: 0.15
+    global_orientation_drift_rad: 0.25
+    minimum_activity_ratio: 0.65
+    minimum_phase_cosine: -0.2
+    dance_worsening_atol: 0.00001
+    dance_worsening_rtol: 0.005
+    calibration_report: null
   terminal_value_weight: 0.0
   balanced_motion_sampling: true
   grad_clip: 1.0
@@ -62,6 +83,8 @@ training:
   seed: 42
 rewards:
   mode: teacher_music
+  target_definition: online_music_anchor_se2_v1
+  dance_alignment: anchor_se2
   track_weight: 0.1
   dance_scales: {root_position: 0.3, root_orientation: 0.4, root_velocity: 1.0, body_position: 0.15, body_orientation: 0.3, body_velocity: 1.0, joint_position: 0.35, joint_velocity: 2.0, joint_acceleration: 20.0}
   # 尺度来自rolling configs/closedloop/stage2_continuous_rolling.yaml reward_std，非SM默认值。
@@ -70,7 +93,7 @@ rewards:
   body_names: [base_link, waist_yaw_link, l_arm_pitch_link, l_arm_roll_link, l_arm_yaw_link, l_elbow_pitch_link, r_arm_pitch_link, r_arm_roll_link, r_arm_yaw_link, r_elbow_pitch_link, l_leg_pitch_link, l_leg_roll_link, l_leg_yaw_link, l_knee_pitch_link, l_ankle_pitch_link, l_ankle_roll_link, r_leg_pitch_link, r_leg_roll_link, r_leg_yaw_link, r_knee_pitch_link, r_ankle_pitch_link, r_ankle_roll_link]
   foot_names: [l_ankle_roll_link, r_ankle_roll_link]
   leg_joint_names: [l_leg_pitch_joint, l_leg_roll_joint, l_leg_yaw_joint, l_knee_pitch_joint, l_ankle_pitch_joint, l_ankle_roll_joint, r_leg_pitch_joint, r_leg_roll_joint, r_leg_yaw_joint, r_knee_pitch_joint, r_ankle_pitch_joint, r_ankle_roll_joint]
-  action_rate_weight: 0.1
+  action_rate_weight: 0.0  # 仍记录21维sum及mean；只关闭上层sum惩罚，不改执行器。
   joint_limit_weight: 2.0
   root_huber_weight: 0.0
   music_surrogate_enabled: false
@@ -81,6 +104,7 @@ execution:
   preserve_episode_across_collection_windows: true
   physical_batch: 1
 formal:
+  evaluation_timing_modes: [fixed_delay_replay, wall_clock_async]
   critic_validation_tasks: null
   evaluation_tasks: null
   evaluation_gpu: 1
@@ -109,6 +133,9 @@ formal:
     # 仅报告指标变化，不因连续退化停止训练。
 
 teacher:
+  target_mode: online_consumed_reference_v1
+  online_manifest: null
+  online_seed: 42
   enabled: true
   cache_dir: null  # 运行配置必须提供独立训练侧缓存目录；不放入部署生成线程。
   seed: 73421

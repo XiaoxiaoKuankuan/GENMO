@@ -2,7 +2,8 @@
 
 训练/验证音乐ID和随机种子分离；从真实终止向前累计带dt和变长折扣的MC目标，
 行政截断不能伪装完整回报。预先配置MSE、解释方差与训练均值常数基线改进门槛，
-达到门槛才允许正式Actor更新。质量不合格留存原始目标和曲线并退出；不修改WM，
+达到门槛才允许使用该Critic；lambdaV=0的短时Actor依据独立物理验证，不由Critic
+失败自动否决。质量不合格留存原始目标和曲线并退出独立拟合；不修改WM，
 不将想象目标当成独立验证集。保存紧凑快照用于审计，不保存物理求解器隐藏状态。
 """
 
@@ -13,7 +14,8 @@ from pathlib import Path
 import torch
 
 from .application import task_inputs, seed_all
-from .checkpoint import pack_state
+from .checkpoint import pack_state,pack_value
+from .music_mc import critic_reward_contract
 from .returns import close_real_mc_episode
 
 
@@ -37,25 +39,32 @@ def save_warmup(path, trainer, cfg):
     from supermimic.bridge.bundle import atomic_save
     if not trainer.critic_ready:
         raise ValueError("未通过独立质量的Critic不能导出为ready")
-    atomic_save({"schema": "genmo.real_mc_critic.teacher_music.v2" if cfg.get("teacher",{}).get("enabled") else "genmo.real_mc_critic.control50.v1", "actor": trainer.actor.state_dict(),
+    schema=("genmo.real_mc_critic.online_teacher_alignment.v3" if cfg.get("teacher",{}).get("target_mode")=="online_consumed_reference_v1" else
+            "genmo.real_mc_critic.teacher_music.v2" if cfg.get("teacher",{}).get("enabled") else "genmo.real_mc_critic.control50.v1")
+    atomic_save({"schema": schema, "actor": trainer.actor.state_dict(),
         "critic": trainer.critic.state_dict(), "optimizer": trainer.critic_optimizer.state_dict(),
         "quality": trainer.critic_quality, "critic_updates": trainer.critic_updates,
         "contract": {k: cfg[k] for k in ("model", "clock", "rewards", "critic")},
         "teacher_identity": trainer.imagination.teacher.identity if getattr(trainer.imagination,"teacher",None) else None,
         "teacher_seed":cfg.get("teacher",{}).get("seed"),
+        "critic_reward_contract":critic_reward_contract(cfg) if cfg.get("teacher",{}).get("target_mode")=="online_consumed_reference_v1" else None,
         "physics_determinism": cfg.get("execution", {}).get("physics_determinism", "not_guaranteed"),
         "frozen_sha256": trainer.imagination.adapter.bundle.metadata["sha256"]}, path)
 
 
 def load_warmup(path, trainer, cfg):
     ck = torch.load(path, weights_only=False, map_location="cpu")
-    expected_schema = "genmo.real_mc_critic.teacher_music.v2" if cfg.get("teacher",{}).get("enabled") else "genmo.real_mc_critic.control50.v1"
+    expected_schema = ("genmo.real_mc_critic.online_teacher_alignment.v3" if cfg.get("teacher",{}).get("target_mode")=="online_consumed_reference_v1" else
+        "genmo.real_mc_critic.teacher_music.v2" if cfg.get("teacher",{}).get("enabled") else "genmo.real_mc_critic.control50.v1")
     if ck.get("schema") != expected_schema or ck["quality"].get("passed") is not True:
         raise ValueError("需要任意50Hz真实MC质量通过的Upper Critic")
     if cfg.get("teacher",{}).get("enabled") and ck.get("teacher_identity") != trainer.imagination.teacher.identity:
         raise ValueError("新Critic必须来自当前冻结音乐教师与新执行奖励，不能导入旧价值")
     if cfg.get("teacher",{}).get("enabled") and ck.get("teacher_seed")!=cfg["teacher"]["seed"]:
         raise ValueError("固定音乐时间线的教师噪声种子不匹配，Critic目标不相同")
+    if cfg.get("teacher",{}).get("target_mode")=="online_consumed_reference_v1":
+        if ck.get("critic_reward_contract")!=critic_reward_contract(cfg):
+            raise ValueError("旧MC奖励或在线教师目标合同不兼容，不允许导入")
     if ck["frozen_sha256"] != trainer.imagination.adapter.bundle.metadata["sha256"] or ck["contract"] != {
             k: cfg[k] for k in ("model", "clock", "rewards", "critic")}:
         raise ValueError("Critic实际资产、模型条件、奖励或调度合同改变")
@@ -96,7 +105,15 @@ def collect_mc(collector, tasks, *, seed, device, max_control_steps, output=None
             if (x.start.tick//12) % 5 == i % 5:
                 episode_pairs.append((x.start.detached(), value.detach().clone()))
         pairs.extend(reversed(episode_pairs))
+        if getattr(getattr(collector.rewards,"teacher",None),"config",{}).get("target_mode")=="online_consumed_reference_v1":
+            from .music_mc import aligned_real_mc
+            # 替换上面的旧世界坐标回报，当前音乐目标使用每个价值状态固定一次的对齐。
+            if episode_pairs:del pairs[-len(episode_pairs):]
+            episode_pairs=list(reversed(aligned_real_mc(intervals,collector.adapter,collector.rewards.config,
+                collector.gamma,phase=i%5)))
+            pairs.extend(reversed(episode_pairs));value=episode_pairs[-1][1]
         episode = {"task": task["id"], "seed": seed+i, "reason": intervals[-1].reason,
+                         "mc_return_start_tick":episode_pairs[-1][0].tick if getattr(getattr(collector.rewards,"teacher",None),"config",{}).get("target_mode")=="online_consumed_reference_v1" else intervals[0].start.tick,
                          "steps": sum(x.steps for x in intervals), "mc_return": float(value.mean()),
                          "commits": sum(bool(x.get("accepted")) for x in collector.events),
                          "pending_value_samples": sum(z.pending for z, _ in episode_pairs),
@@ -108,6 +125,7 @@ def collect_mc(collector, tasks, *, seed, device, max_control_steps, output=None
             directory.mkdir(exist_ok=True)
             memo = {}
             atomic_save({"episode": episode, "pairs": [(pack_state(z, memo), y.cpu()) for z,y in reversed(episode_pairs)],
+                         "controls":pack_value(tuple(intervals),memo),
                          "evidence": "real_complete_episode_mc"}, directory/f"{split}_{i:03d}.pt")
             with (Path(output)/"mc_progress.jsonl").open("a") as stream:
                 stream.write(json.dumps({"split": split, "episode": i, **episode}, ensure_ascii=False)+"\n")
@@ -185,5 +203,5 @@ def fit_mc_dataset(trainer, train, validation, config, output, physical_steps, a
         if getattr(trainer.imagination,"teacher",None) else None)
     (output/"quality.json").write_text(json.dumps(trainer.critic_quality, ensure_ascii=False, indent=2))
     if not trainer.critic_ready:
-        raise RuntimeError("Critic独立验证未达到预先声明门槛，禁止正式Actor更新")
+        raise RuntimeError("Critic独立验证未达标，不得用于Actor终点价值；lambdaV=0的短时Actor仍单独按物理证据验收")
     return trainer.critic_quality

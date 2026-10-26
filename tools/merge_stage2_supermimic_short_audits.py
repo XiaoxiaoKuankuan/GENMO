@@ -31,7 +31,7 @@ def main():
         for key in ("schema", "training_method", "frozen_sha256", "physics_determinism", "criteria", "forecast_enabled"):
             if r[key] != first[key]:
                 raise ValueError(f"分片实际合同不一致: {key}")
-        for key in ("reward_contract", "teacher_identity"):
+        for key in ("reward_contract", "teacher_identity", "teacher_target_contract"):
             if r.get(key) != first.get(key):
                 raise ValueError(f"分片奖励或教师不一致: {key}")
         if r["frozen_unchanged"] is not True:
@@ -50,7 +50,9 @@ def main():
         task_identities=identities, validated_state_envelope=combine_envelopes([r["validated_state_envelope"] for r in reports]),
         source_reports=[str(Path(p).resolve()) for p in args.reports])
     if first.get("teacher_identity"):
-        seeds={json.loads((Path(p).parent/"manifest.json").read_text())["config"]["teacher"]["seed"] for p in args.reports}
+        seeds={r["teacher_seed"] if "teacher_seed" in r else
+            json.loads((Path(p).parent/"manifest.json").read_text())["config"]["teacher"]["seed"]
+            for p,r in zip(args.reports,reports)}
         if len(seeds)!=1:raise ValueError("物理报告固定音乐时间线的教师种子不同")
         merged["teacher_seed"]=seeds.pop()
     if args.local_derivative_report:

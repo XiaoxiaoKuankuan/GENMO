@@ -109,6 +109,7 @@ def run_collector_service(args, cfg, collector):
                 "anchors": pack_value(anchors, memo), "controls": pack_value(tuple(controls), memo),
                 "rng": capture_rng(), "terminal": collector.terminal, "tick": collector.state.tick,
                 "physical_steps": len(controls), "seconds": time.perf_counter()-started,
+                "sample_funnel":collector.take_distribution(),
                 "started_monotonic": started, "ended_monotonic": time.perf_counter(),
                 "frozen_unchanged": True, "worker_future_finished": True}
             publish_tensor(payload, directory/"response.pt")

@@ -96,6 +96,11 @@ class PhysicalCollector:
         self.consumed_versions = set()
         self.active_anchors = {}
         self.ready_anchors = deque(maxlen=128)
+        self.noise_seed = None
+        self.timing_mode = "wall_clock_async"
+        self.delay_events = None
+        self.request_distribution = []
+        self.anchor_outcomes = []
 
     @torch.no_grad()
     def reset(self, music, initial_state, *, music_start_tick=0, initial_reference=None):
@@ -104,6 +109,8 @@ class PhysicalCollector:
         dev = initial_state.device
         teacher = getattr(self.rewards, "teacher", None)
         teacher_reference = teacher.timeline(music, initial_state) if teacher is not None else None
+        self.delay_events = (teacher_reference.identity.get("delivery_events")
+            if self.timing_mode=="fixed_delay_replay" and teacher_reference is not None else None)
         self.episode_index += 1
         self.env.reset(torch.arange(1, device=dev), initial_state)
         observed = self.env.observe()
@@ -134,6 +141,7 @@ class PhysicalCollector:
         self.generations, self.consumed_versions, self.active_anchors = {}, set(), {}
         self.contact_counts, self.previous_contact = {}, None
         self.ready_anchors.clear()
+        self.request_distribution, self.anchor_outcomes = [], []
         self.wall_started = time.perf_counter()
         return self.state.detached()
 
@@ -157,8 +165,26 @@ class PhysicalCollector:
                 intervals.append(DecisionInterval(start, z.detached(), zero, zero, 0, self.gamma, True,
                                                   f"reference_exhausted:{error}", {}))
                 break
-            noise = torch.randn(len(z.state), 60, 30, device=z.state.device)
+            generator = (torch.Generator(device=z.state.device).manual_seed(self.noise_seed+(z.tick//60)*1009)
+                         if self.noise_seed is not None else None)
+            noise = torch.randn(len(z.state), 60, 30, device=z.state.device, generator=generator)
+            from .sample_distribution import describe_request
+            description=describe_request(start,self.adapter,self.collector_id,self.episode_index)
+            description["actor_version"]=self.actor_version
+            if self.record_contacts:
+                contact=self.env.contact_events()
+                description["contact"]="double_support" if contact["left_foot"] and contact["right_foot"] else "single_support" if contact["left_foot"]!=contact["right_foot"] else "airborne"
+            self.request_distribution.append(description)
             self.worker.submit(start, ticket, noise, request_wall=request_wall)
+            # 离线固定事件对照：先准备数值计划再按记录事件推进仿真时钟；不可称实时部署。
+            replay_arrival = None
+            delivery_event = None
+            if self.timing_mode == "fixed_delay_replay":
+                if self.delay_events is None or str(ticket.request_tick) not in self.delay_events:
+                    raise ValueError(f"固定延迟回放缺少请求{ticket.request_tick}的外生事件，不能猜测或重复末事件")
+                delivery_event=self.delay_events[str(ticket.request_tick)]
+                if not isinstance(delivery_event,dict):raise ValueError("回放需要实际完成/接收两个时刻，不能仅按完成延迟推断接管")
+                replay_arrival = self.worker.future.result()
             request = PendingGeneration(start, ticket, noise.detach().clone(), self.actor_version)
             z = replace(z, pending=True, pending_request=request)
             totals = IntervalAccumulator(z.state[:, 0], self.gamma)
@@ -170,15 +196,24 @@ class PhysicalCollector:
                     if z.tick >= z.music_end_tick:
                         self.terminal, reason = True, "music_end"
                         break
-                    arrival = self.worker.poll() if z.pending else None
+                    if self.timing_mode=="fixed_delay_replay":
+                        arrival=(replay_arrival if z.pending and delivery_event["delivered"] and
+                            z.tick>=delivery_event.get("delivery_tick",delivery_event["commit_tick"]) else None)
+                    else:
+                        arrival=self.worker.poll() if z.pending else None
                     if arrival is not None:
                         plan, finished, timings, context = arrival
                         actual_ready = ticket.request_tick + math.ceil((finished - self.worker.started) * 600)
+                        if self.timing_mode == "fixed_delay_replay":
+                            actual_ready = delivery_event["actual_ready_tick"]
                         if z.tick >= actual_ready:
                             z, event = self.scheduler.commit(z, plan, actual_ready_tick=actual_ready)
                             event["timings"] = timings
+                            event["timing_mode"] = self.timing_mode
                             event["actor_version"] = self.actor_version
                             event["reference_version"] = z.reference.version if event["accepted"] else None
+                            description.update(generation_accepted=event["accepted"],generation_event=event.get("reason"),
+                                actual_ready_tick=actual_ready,commit_tick=event["commit_tick"])
                             self.events.append(event)
                             self.generations[ticket.decision_id] = GenerationRecord(request, context, plan,
                                 actual_ready, event["commit_tick"], event["reference_version"], event["accepted"])
@@ -218,7 +253,9 @@ class PhysicalCollector:
                         self.controls.append(step)
                         if self.anchor_horizon:
                             self._append_anchor_step(step, replay)
-                    self.metrics.append({k: float(v.mean()) for k, v in metrics.items()})
+                    metric_keys=list(metrics)
+                    metric_values=torch.stack([metrics[k].mean() for k in metric_keys]).detach().cpu().tolist()
+                    self.metrics.append(dict(zip(metric_keys,metric_values)))
                     if self.record_trajectory:
                         # 保存该控制帧实际读取的参考，供影子渲染；不能事后用新缓存
                         # 重建已被覆盖的旧参考，也不把参考根平移到实际机器人位置。
@@ -229,7 +266,9 @@ class PhysicalCollector:
                         break
                     deadline = wall_origin + (z.tick - tick_origin) / 600
                     slack = deadline - time.perf_counter()
-                    if slack > 0:
+                    if self.timing_mode == "fixed_delay_replay":
+                        pass
+                    elif slack > 0:
                         time.sleep(slack)
                     else:
                         self.overruns += 1
@@ -245,6 +284,13 @@ class PhysicalCollector:
             z = replace(z, pending=False, pending_request=None, decision_id=z.decision_id + 1)
             if self.terminal and self.controls:
                 self.controls[-1] = replace(self.controls[-1], terminal=True, reason=reason)
+            if self.terminal:
+                for record,anchor,transitions,_,_ in self.active_anchors.values():
+                    self.anchor_outcomes.append({"stage":"B_incomplete_H_anchor","request_tick":record.request.ticket.request_tick,
+                        "steps":len(transitions),"required":self.anchor_horizon,"reason":reason,
+                        "task":anchor.task_id,"source":anchor.task_source,"collector":self.collector_id,
+                        "episode":self.episode_index,"actor_version":record.request.actor_version})
+                self.active_anchors.clear()
             self.state = z
             intervals.append(DecisionInterval(start, z.detached(), totals.reward, totals.survival, totals.steps,
                                               self.gamma, self.terminal, reason, event))
@@ -255,6 +301,11 @@ class PhysicalCollector:
     def take_controls(self):
         controls, self.controls = self.controls, []
         return controls
+
+    def take_distribution(self):
+        result={"A_all_real_requests":self.request_distribution,"B_anchor_outcomes":self.anchor_outcomes}
+        self.request_distribution,self.anchor_outcomes=[],[]
+        return result
 
     def _accumulate_contacts(self, event):
         left, right = event["left_foot"], event["right_foot"]
@@ -298,10 +349,15 @@ class PhysicalCollector:
                                         self.collector_id, self.episode_index)
                 sample.validate(self.anchor_horizon)
                 self.ready_anchors.append(sample)
+                from .sample_distribution import describe_sample
+                self.anchor_outcomes.append(dict(describe_sample(sample,self.adapter),stage="B_formed_H_anchor"))
                 if replay is not None:
                     replay.add(sample)
                 finished.append(version)
             elif step.terminal:
+                self.anchor_outcomes.append({"stage":"B_incomplete_H_anchor","request_tick":record.request.ticket.request_tick,
+                    "steps":len(transitions),"required":self.anchor_horizon,"reason":step.reason,
+                    "task":anchor.task_id,"source":anchor.task_source})
                 finished.append(version)
         for version in finished:
             del self.active_anchors[version]

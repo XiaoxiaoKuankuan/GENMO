@@ -69,6 +69,10 @@ def paired_quality(baseline, current, criteria, tasks=None):
     comparisons = []
     for key, new in after.items():
         old = before[key]
+        if old.get("timing_mode","wall_clock_async")!=new.get("timing_mode","wall_clock_async"):
+            raise ValueError("固定外生事件回放与真实墙钟异步评价不能作为同一种配对比较")
+        if old.get("input_identity")!=new.get("input_identity") or old.get("noise_seed")!=new.get("noise_seed"):
+            raise ValueError("物理比较的音乐/初态资产或DDIM噪声身份不一致")
         def values(row):
             metrics = row["physical_metrics_mean"]
             return {"tracking": metrics["upper_eight_tracking"],
@@ -82,6 +86,7 @@ def paired_quality(baseline, current, criteria, tasks=None):
                     "joint_speed_rms_rad_s": row["motion"]["joint_speed_rms_rad_s"],
                     "beat_alignment": row["motion"].get("beat_alignment")}
         old_values, new_values = values(old), values(new)
+        from .dance_evaluation import common_window,paired_delivery_context
         meta = metadata.get(key[0], new)
         comparisons.append({"task": key[0], "seed": key[1], "source": meta.get("source"), "split": meta.get("split"),
             "baseline_complete": old["complete"], "current_complete": new["complete"],
@@ -89,6 +94,9 @@ def paired_quality(baseline, current, criteria, tasks=None):
             "baseline": old_values, "current": new_values,
             "delta": {k: new_values[k]-v if v is not None and new_values[k] is not None else None for k,v in old_values.items()},
             "baseline_contacts": old.get("contacts"), "current_contacts": new.get("contacts"),
+            "delivery_pairing":paired_delivery_context(old,new),
+            "common_valid_window":common_window(old,new),"baseline_music_content":old.get("music_content"),
+            "current_music_content":new.get("music_content"),
             "contact_pair_available": old.get("contacts") is not None and new.get("contacts") is not None})
     source_split = []
     for group in sorted({(str(r["source"]), str(r["split"])) for r in comparisons}):
@@ -100,7 +108,24 @@ def paired_quality(baseline, current, criteria, tasks=None):
             "mean_root_position_rmse_delta_m": float(np.mean([r["delta"]["root_position_rmse_m"] for r in selected]))})
     teacher_losses=[r["physical_metrics_mean"]["dance_loss"] for r in rows if "dance_loss" in r["physical_metrics_mean"]]
     baseline_teacher=[r["physical_metrics_mean"]["dance_loss"] for r in before.values() if "dance_loss" in r["physical_metrics_mean"]]
+    content_reasons=[]
+    if teacher_losses and baseline_teacher and np.mean(teacher_losses)>=np.mean(baseline_teacher):
+        content_reasons.append({"task":None,"reason":"fixed_music_objective_not_improved_over_original_stage1"})
+    if any(r.get("music_content") for r in rows):
+        for key,new in after.items():
+            old=before[key]
+            if (old["complete"] and not new["complete"]) or new["physical_seconds"]+1e-6<old["physical_seconds"]:
+                content_reasons.append({"task":key[0],"reason":"shorter_or_new_failed_episode_cannot_improve_selection"})
+            for group in ("upper","lower"):
+                prior=old.get("music_content",{}).get(group,{});now=new.get("music_content",{}).get(group,{})
+                for metric in ("actual_range_rad","actual_speed_rad_s"):
+                    if prior.get(metric,0.)>.001 and now.get(metric,0.)<criteria["minimum_activity_ratio"]*prior[metric]:
+                        content_reasons.append({"task":key[0],"reason":group+"_"+metric+"_degraded"})
+                old_phase=prior.get("velocity_phase_cosine");phase=now.get("velocity_phase_cosine")
+                if old_phase is not None and phase is not None and phase<old_phase-criteria["maximum_beat_drop"]:
+                    content_reasons.append({"task":key[0],"reason":group+"_motion_phase_degraded"})
     return {"completion_rate": completion, "baseline_completion_rate": old_completion, "duration_ratio": duration_ratio,
+            "music_content_selection_eligible":not content_reasons,"music_content_selection_reasons":content_reasons,
             "physical_music_execution_loss":float(np.mean(teacher_losses)) if teacher_losses else None,
             "baseline_physical_music_execution_loss":float(np.mean(baseline_teacher)) if baseline_teacher else None,
             "activity_ratio": activity_ratio, "beat_alignment_drop": beat_drop, "beat_available": beat_drop is not None,
@@ -166,8 +191,8 @@ def run_evaluation_processes(cfg, config_path, checkpoint, path, model_mode, env
             log.close()
 
 
-def evaluate_checkpoint(cfg, output, checkpoint, *, update):
-    directory = output / "evaluations"
+def _evaluate_checkpoint_mode(cfg, output, checkpoint, *, update, directory):
+    directory.mkdir(parents=True,exist_ok=True)
     eval_cfg = dict(cfg, tasks=cfg["formal"]["evaluation_tasks"])
     config_path = directory / "fixed_evaluation.yaml"
     if not config_path.exists():
@@ -205,6 +230,25 @@ def evaluate_checkpoint(cfg, output, checkpoint, *, update):
     quality = paired_quality(baseline, current, cfg["formal"]["degradation"], read_tasks(cfg["formal"]["evaluation_tasks"]))
     write_json(directory / f"paired_{update:06d}.json", quality)
     return quality
+
+
+def evaluate_checkpoint(cfg, output, checkpoint, *, update):
+    """固定事件主对照与墙钟异步独立保存，禁止混合均值选best。"""
+    modes=cfg["formal"].get("evaluation_timing_modes")
+    if not modes:
+        return _evaluate_checkpoint_mode(cfg,output,checkpoint,update=update,directory=output/"evaluations")
+    if modes != ["fixed_delay_replay","wall_clock_async"]:
+        raise ValueError("双模式评价需以固定外生事件为主对照，并独立保留真实墙钟结果")
+    qualities={}
+    for mode in modes:
+        per_mode=dict(cfg,evaluation=dict(cfg.get("evaluation",{}),timing_mode=mode),
+            formal=dict(cfg["formal"],initial_physical_baseline=cfg["formal"].get("initial_physical_baselines",{}).get(mode)))
+        qualities[mode]=_evaluate_checkpoint_mode(per_mode,output,checkpoint,update=update,
+            directory=output/"evaluations"/mode)
+    primary=dict(qualities["fixed_delay_replay"],selection_timing_mode="fixed_delay_replay",
+        wall_clock_async_quality=qualities["wall_clock_async"])
+    write_json(output/"evaluations"/f"paired_{update:06d}.json",primary)
+    return primary
 
 
 def run_formal(args, cfg, output, trainer, collector, profile, tasks, report, source_info):
@@ -261,7 +305,10 @@ def run_formal(args, cfg, output, trainer, collector, profile, tasks, report, so
         degradation_count = degradation_count+1 if quality["degraded"] else 0
         score = (-quality["physical_music_execution_loss"] if cfg.get("teacher",{}).get("enabled")
                  else quality["physical_tracking_score"])
-        if not quality["degraded"] and (best_score is None or score > best_score):
+        if best_score is None and cfg.get("teacher",{}).get("target_mode")=="online_consumed_reference_v1":
+            best_score=-quality["baseline_physical_music_execution_loss"]
+            checkpoint_link(checkpoint_dir,"best.pt",checkpoint_dir/"initial_actor.pt")
+        if not quality["degraded"] and quality.get("music_content_selection_eligible",True) and (best_score is None or score > best_score):
             best_score = score
             checkpoint_link(checkpoint_dir, "best.pt", checkpoint)
         snapshot()
@@ -277,11 +324,13 @@ def run_formal(args, cfg, output, trainer, collector, profile, tasks, report, so
             total_wall_seconds = state["total_wall_seconds"]
             best_score, degradation_count, last_evaluated = state["best_score"], state["degradation_count"], state["last_evaluated"]
             restored_worker_rng = state.get("physical_worker_rng", {})
-        if not trainer.critic_ready and settings.get("critic_warmup_checkpoint"):
+        defer_critic=cfg["training"].get("defer_critic",False)
+        if defer_critic and cfg["training"].get("terminal_value_weight",0.)!=0:raise ValueError("未验证新Critic不得进入Actor")
+        if not defer_critic and not trainer.critic_ready and settings.get("critic_warmup_checkpoint"):
             quality = load_warmup(settings["critic_warmup_checkpoint"], trainer, cfg)
             control_steps += quality["physical_control_steps"]
             snapshot("critic_ready_imported.pt")
-        if not trainer.critic_ready:
+        if not defer_critic and not trainer.critic_ready:
             validation = read_tasks(settings["critic_validation_tasks"])
             groups = {}
             for task in tasks:
@@ -315,7 +364,10 @@ def run_formal(args, cfg, output, trainer, collector, profile, tasks, report, so
                 remote.wait_ready(trainer.imagination.adapter.bundle.metadata["sha256"])
             print(json.dumps({"event": "parallel_physical_collectors_ready", "environments": 1+len(remotes),
                 "worker_pids": [w.process.pid for w in remotes]}), flush=True)
-        trainer.imagination.support_guard = ModelSupport(report["validated_state_envelope"], device=args.torch_device)
+        from .validation import training_support_envelope
+        support_envelope=training_support_envelope(cfg,report)
+        write_json(output/"state_support_contract.json",support_envelope)
+        trainer.imagination.support_guard = ModelSupport(support_envelope, device=args.torch_device)
         if not (checkpoint_dir/"initial_actor.pt").is_file():
             if trainer.accepted_actor_updates != 0:
                 raise ValueError("缺少更新前Actor，不能用已训练权重伪造配对基线")
@@ -357,6 +409,7 @@ def run_formal(args, cfg, output, trainer, collector, profile, tasks, report, so
                 raise RuntimeError("采集Actor仍在生成，禁止并发修改其权重")
             if short:
                 physical = collector.take_controls()
+                sample_funnel=collector.take_distribution()
                 physical_groups = [physical]
                 remote_timings = []
                 for remote in remotes:
@@ -366,9 +419,16 @@ def run_formal(args, cfg, output, trainer, collector, profile, tasks, report, so
                     for anchor in response["anchors"]:
                         replay.add(anchor)
                     physical_groups.append(list(response["controls"]))
+                    for key,values in response.get("sample_funnel",{}).items():sample_funnel.setdefault(key,[]).extend(values)
                     control_steps += response["physical_steps"]
                     remote_timings.append(response["seconds"])
                 physical = [step for group in physical_groups for step in group]
+                if cfg["training"].get("output_trust_region",{}).get("enabled"):
+                    sample_funnel["BC_support_classification"]=replay.classify_support(trainer.imagination,trainer.accepted_actor_updates)
+                    from .sample_distribution import coverage_summary
+                    sample_funnel["legal_pool_coverage"]=coverage_summary([r for r in sample_funnel["BC_support_classification"] if r["legal"]])
+                    with (output/"sampling_funnel.jsonl").open("a") as stream:
+                        stream.write(json.dumps({"actor_version":trainer.accepted_actor_updates,**sample_funnel},ensure_ascii=False)+"\n")
                 if replay.eligible_count(trainer.accepted_actor_updates) < cfg["training"]["actor_microbatch"]:
                     # 正在积累H个真实执行步，不把尚未完成的anchor计作训练失败或收益。
                     print(json.dumps({"event": "waiting_for_real_anchor", "physical_control_steps": control_steps,
@@ -395,6 +455,7 @@ def run_formal(args, cfg, output, trainer, collector, profile, tasks, report, so
             gpu_end.synchronize()
             if short and candidate_distribution is not None:
                 row["real_candidate_distribution"] = candidate_distribution
+                row["sample_funnel"] = sample_funnel
             row.update(physical_control_steps=control_steps, collection_wall_seconds=collect_seconds,
                        physical_collectors=1+len(remotes), remote_collection_seconds=remote_timings if short else [],
                        collection_policy_version=trainer.accepted_actor_updates-int(row["accepted_execution_feedback_update"]),
@@ -412,7 +473,10 @@ def run_formal(args, cfg, output, trainer, collector, profile, tasks, report, so
             write_json(output/"status.json", {"status": "running", "pid": os.getpid(), **trainer.counters(),
                                                "physical_control_steps": control_steps})
             accepted = row["accepted_execution_feedback_update"]
-            invalid_streak = 0 if accepted else invalid_streak+1
+            # 新实验拒绝候选意味着继续采集，不把音乐/输出验收失败变成质量退化退出。
+            finite_feedback_rejection=("output_trust_region" in row and row.get("valid_execution_rollouts",0)>0 and
+                "nonfinite_candidate" not in row.get("rejection_reasons",[]))
+            invalid_streak = 0 if accepted or finite_feedback_rejection else invalid_streak+1
             if invalid_streak >= settings["maximum_invalid_streak"]:
                 raise RuntimeError("连续没有合法执行反馈更新，暂停保留证据")
             n = trainer.accepted_actor_updates
