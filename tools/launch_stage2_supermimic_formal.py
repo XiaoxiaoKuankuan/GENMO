@@ -164,12 +164,20 @@ def main():
         command.append("--resume-latest")
     session = f"genmo-sm-{timestamp}"
     (output/"logs").mkdir(exist_ok=True)
-    invocation = ["env", f"CUDA_VISIBLE_DEVICES={args.training_gpu}", "PYTHONDONTWRITEBYTECODE=1", "OMP_NUM_THREADS=4", "MKL_NUM_THREADS=4", *command]
+    # 已运行的tmux服务器不会继承新客户端的环境，必须把已验收的物理依赖和
+    # 编译缓存路径显式交给训练进程；只传白名单，不把凭据等整个环境写入日志。
+    runtime_environment = {key: os.environ[key] for key in (
+        "ISAACLAB_PATH", "TORCHINDUCTOR_CACHE_DIR", "TRITON_CACHE_DIR",
+        "TORCHINDUCTOR_COMPILE_THREADS") if key in os.environ}
+    invocation = ["env", f"CUDA_VISIBLE_DEVICES={args.training_gpu}", "PYTHONDONTWRITEBYTECODE=1",
+                  "OMP_NUM_THREADS=4", "MKL_NUM_THREADS=4",
+                  *(f"{key}={value}" for key, value in runtime_environment.items()), *command]
     shell_command = "exec " + shlex.join(invocation) + " >> " + shlex.quote(str(output/"logs/train.log")) + " 2>&1"
     subprocess.run(["tmux","new-session","-d","-s",session,"-c",str(repo),shell_command],check=True)
     pid = int(run(["tmux","display-message","-p","-t",session,"#{pane_pid}"]))
     (output/f"launch_{timestamp}.json").write_text(json.dumps({**evidence,"command":command,"session":session,"pid":pid,
-        "status":"launched_pending_effective_update_verification","training_gpu":args.training_gpu,"evaluation_gpu":args.evaluation_gpu},ensure_ascii=False,indent=2))
+        "status":"launched_pending_effective_update_verification","training_gpu":args.training_gpu,"evaluation_gpu":args.evaluation_gpu,
+        "runtime_environment":runtime_environment},ensure_ascii=False,indent=2))
     print(json.dumps({"output":str(output),"session":session,"pid":pid,"status":"launched_not_yet_verified"},ensure_ascii=False))
     return 0
 
