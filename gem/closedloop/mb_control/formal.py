@@ -135,6 +135,8 @@ def run_formal(args, cfg, output, trainer, collector, profile, tasks, report, so
     behavior = behavior_config(cfg, trainer.actor, trainer.imagination.adapter)
     task_cursor, control_steps, total_wall_seconds = 0, 0, 0.
     best_score, degradation_count, last_evaluated = None, 0, 0
+    remotes, restored_worker_rng = [], {}
+    published_version = -1
     started = time.perf_counter()
     checkpoint_dir = output/"checkpoints"
 
@@ -147,6 +149,7 @@ def run_formal(args, cfg, output, trainer, collector, profile, tasks, report, so
                 "task_cursor": task_cursor, "physical_control_steps": control_steps,
                 "total_wall_seconds": total_wall_seconds + time.perf_counter()-started,
                 "best_score": best_score, "degradation_count": degradation_count, "last_evaluated": last_evaluated,
+                "physical_worker_rng": {str(w.collector_id): w.rng for w in remotes},
                 "collector_restart": "new_episode_required_no_solver_snapshot"}, provenance=source_info)
         checkpoint_link(checkpoint_dir, "latest.pt", path)
         return path
@@ -178,6 +181,7 @@ def run_formal(args, cfg, output, trainer, collector, profile, tasks, report, so
             task_cursor, control_steps = state["task_cursor"], state["physical_control_steps"]
             total_wall_seconds = state["total_wall_seconds"]
             best_score, degradation_count, last_evaluated = state["best_score"], state["degradation_count"], state["last_evaluated"]
+            restored_worker_rng = state.get("physical_worker_rng", {})
         if not trainer.critic_ready and settings.get("critic_warmup_checkpoint"):
             quality = load_warmup(settings["critic_warmup_checkpoint"], trainer, cfg)
             control_steps += quality["physical_control_steps"]
@@ -199,6 +203,23 @@ def run_formal(args, cfg, output, trainer, collector, profile, tasks, report, so
                                     output/"diagnostics"/f"critic_warmup_{time.time_ns()}", device=args.torch_device)
             control_steps += quality["physical_control_steps"]
             snapshot("critic_ready.pt")
+        worker_gpus = cfg.get("execution", {}).get("physical_worker_gpus", [])
+        if worker_gpus:
+            if not short or len(worker_gpus) > 1:
+                raise ValueError("首轮并行只支持短时真实anchor及两个独立物理采集器")
+            from .parallel_collection import RemotePhysicalCollector
+            directory = output/"collectors"
+            directory.mkdir(exist_ok=True)
+            worker_cfg = directory/"resolved_config.yaml"
+            OmegaConf.save(OmegaConf.create(cfg), worker_cfg)
+            for index, gpu in enumerate(worker_gpus, 1):
+                remote = RemotePhysicalCollector(cfg, worker_cfg, directory/f"worker_{index}_{time.time_ns()}",
+                    gpu, index, restored_rng=restored_worker_rng.get(str(index)))
+                remotes.append(remote)
+            for remote in remotes:
+                remote.wait_ready(trainer.imagination.adapter.bundle.metadata["sha256"])
+            print(json.dumps({"event": "parallel_physical_collectors_ready", "environments": 1+len(remotes),
+                "worker_pids": [w.process.pid for w in remotes]}), flush=True)
         trainer.imagination.support_guard = ModelSupport(report["validated_state_envelope"], device=args.torch_device)
         if not (checkpoint_dir/"initial_actor.pt").is_file():
             if trainer.accepted_actor_updates != 0:
@@ -221,13 +242,38 @@ def run_formal(args, cfg, output, trainer, collector, profile, tasks, report, so
                 collector.reset(music, initial)
             collector.actor_version = trainer.accepted_actor_updates
             collect_started = time.perf_counter()
+            if remotes:
+                from supermimic.bridge.bundle import atomic_save
+                weights_path = output/"collectors"/"current_actor.pt"
+                if published_version != trainer.accepted_actor_updates:
+                    atomic_save({"schema": "genmo.collection.actor.v1", "actor": trainer.actor.state_dict(),
+                        "actor_version": trainer.accepted_actor_updates,
+                        "frozen_sha256": trainer.imagination.adapter.bundle.metadata["sha256"]}, weights_path)
+                    published_version = trainer.accepted_actor_updates
+                for remote in remotes:
+                    task = None
+                    if remote.needs_task:
+                        task = tasks[task_cursor % len(tasks)]
+                        task_cursor += 1
+                    remote.submit(weights_path, trainer.accepted_actor_updates, cfg["training"]["collect_decisions"], task)
             physical = collector.collect(cfg["training"]["collect_decisions"], replay=replay)
             control_steps += sum(x.steps for x in physical)
-            collect_seconds = time.perf_counter()-collect_started
             if collector.worker.future is not None:
                 raise RuntimeError("采集Actor仍在生成，禁止并发修改其权重")
             if short:
                 physical = collector.take_controls()
+                physical_groups = [physical]
+                remote_timings = []
+                for remote in remotes:
+                    response = remote.receive(trainer.imagination.adapter, args.torch_device)
+                    if response["actor_version"] != trainer.accepted_actor_updates:
+                        raise RuntimeError("并行采集响应不是本轮当前Actor")
+                    for anchor in response["anchors"]:
+                        replay.add(anchor)
+                    physical_groups.append(list(response["controls"]))
+                    control_steps += response["physical_steps"]
+                    remote_timings.append(response["seconds"])
+                physical = [step for group in physical_groups for step in group]
                 if replay.eligible_count(trainer.accepted_actor_updates) < cfg["training"]["actor_microbatch"]:
                     # 正在积累H个真实执行步，不把尚未完成的anchor计作训练失败或收益。
                     print(json.dumps({"event": "waiting_for_real_anchor", "physical_control_steps": control_steps,
@@ -239,13 +285,16 @@ def run_formal(args, cfg, output, trainer, collector, profile, tasks, report, so
             else:
                 states = replay.sample(cfg["training"]["actor_microbatch"])
                 latencies = [profile.sample(trainer.imagination.decisions) for _ in states]
+            collect_seconds = time.perf_counter()-collect_started
             gpu_start, gpu_end = torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True)
             gpu_start.record()
-            row = (trainer.update_anchors(states, supervised.next(), physical_intervals=physical) if short else
+            row = (trainer.update_anchors(states, supervised.next(), physical_intervals=physical,
+                                          physical_interval_groups=physical_groups) if short else
                    trainer.update(states, supervised.next(), latencies, physical_intervals=physical))
             gpu_end.record()
             gpu_end.synchronize()
             row.update(physical_control_steps=control_steps, collection_wall_seconds=collect_seconds,
+                       physical_collectors=1+len(remotes), remote_collection_seconds=remote_timings if short else [],
                        collection_policy_version=trainer.accepted_actor_updates-int(row["accepted_execution_feedback_update"]),
                        cuda_event_interval_ms=gpu_start.elapsed_time(gpu_end),
                        cuda_event_note="事件间隔含CPU调度间隙，不冒充纯GPU内核活跃时间",
@@ -278,6 +327,8 @@ def run_formal(args, cfg, output, trainer, collector, profile, tasks, report, so
         # 仅保留之前已完成的完整latest；数值错误后的部分优化状态不冒充可恢复checkpoint。
         raise
     finally:
+        for remote in remotes:
+            remote.close()
         writer.close()
         for signum, handler in previous_handlers.items():
             signal.signal(signum, handler)

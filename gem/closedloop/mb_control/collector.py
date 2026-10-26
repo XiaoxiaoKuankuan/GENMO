@@ -85,6 +85,7 @@ class PhysicalCollector:
         self.cancelled_requests = []
         self.overruns, self.wall_started = 0, None
         self.actor_version = 0
+        self.collector_id, self.episode_index = 0, -1
         self.anchor_horizon = 0
         self.record_controls = False
         self.record_contacts = False
@@ -99,6 +100,7 @@ class PhysicalCollector:
         if self.worker.future is not None:
             raise RuntimeError("复位前必须显式结束旧请求")
         dev = initial_state.device
+        self.episode_index += 1
         self.env.reset(torch.arange(1, device=dev), initial_state)
         observed = self.env.observe()
         if initial_reference is None:
@@ -264,7 +266,8 @@ class PhysicalCollector:
             indices = (support-ref.lower)//20
             consumed.update(support[ref.source_versions[indices] == version].tolist())
             if len(transitions) == self.anchor_horizon:
-                sample = PhysicalAnchor(record, anchor, tuple(transitions), tuple(sorted(consumed)), prior)
+                sample = PhysicalAnchor(record, anchor, tuple(transitions), tuple(sorted(consumed)), prior,
+                                        self.collector_id, self.episode_index)
                 sample.validate(self.anchor_horizon)
                 self.ready_anchors.append(sample)
                 if replay is not None:

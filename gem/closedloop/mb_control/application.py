@@ -90,6 +90,7 @@ def behavior_config(cfg, actor, adapter):
     return {k: cfg[k] for k in ("algorithm", "physics_backend", "model", "clock", "imagination", "critic", "rewards", "training")} | {
         "formal": cfg.get("formal"),
         "physics_determinism": cfg.get("execution", {}).get("physics_determinism", "not_guaranteed"),
+        "physical_collector_count": 1+len(cfg.get("execution", {}).get("physical_worker_gpus", [])),
         "stage1_asset": {k: v for k, v in actor_asset_identity(actor.stage1).items() if not k.endswith("_path")},
         "robot_contract": adapter.bundle.metadata["robot"],
         "task_sequence": [task_identity(t) for t in read_tasks(cfg["tasks"])],

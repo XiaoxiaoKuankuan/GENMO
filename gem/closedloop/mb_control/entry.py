@@ -24,6 +24,9 @@ def main(kind):
     parser.add_argument("--resume-latest", action="store_true")
     parser.add_argument("--resume")
     parser.add_argument("--actor-checkpoint")
+    parser.add_argument("--rpc-directory")
+    parser.add_argument("--parent-pid", type=int)
+    parser.add_argument("--collector-id", type=int, default=0)
     parser.add_argument("--initial-actor", action="store_true",
                         help="仅评价：用明确的未更新GENMO运行完整Forecast路径并导出权重身份")
     parser.add_argument("--mode", choices=("stage1", "full", "no_forecast", "calibration"), default="stage1" if kind == "evaluate" else "full")
@@ -184,6 +187,9 @@ def main(kind):
         try:
             if kind == "evaluate":
                 evaluate_tasks(collector, tasks, output, mode=args.mode, device=args.torch_device, max_seconds=args.max_seconds)
+            elif kind == "collector":
+                from .parallel_collection import run_collector_service
+                run_collector_service(args, cfg, collector)
             elif kind == "critic":
                 from .critic_warmup import choose_warmup_tasks, warmup_critic, save_warmup
                 losses = build_stage1_losses(actor.stage1, original).to(args.torch_device)

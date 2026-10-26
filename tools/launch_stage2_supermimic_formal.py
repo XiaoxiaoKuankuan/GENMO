@@ -79,6 +79,9 @@ def main():
     check("tmux", lambda: shutil.which("tmux") is not None)
     check("disk_at_least_200GiB", lambda: shutil.disk_usage(output).free >= 200*1024**3)
     check("independent_eval_gpu", lambda: args.training_gpu != args.evaluation_gpu)
+    worker_gpus = cfg.get("execution", {}).get("physical_worker_gpus", [])
+    check("independent_collection_gpus", lambda: len(worker_gpus) <= 1 and
+          len(set([args.training_gpu, args.evaluation_gpu, *worker_gpus])) == 2+len(worker_gpus))
     check("isaaclab_path", lambda: Path(os.environ.get("ISAACLAB_PATH", "/nonexistent")).is_dir())
     gpu_info = []
     try:
@@ -86,7 +89,7 @@ def main():
         gpu_info = [list(map(str.strip,line.split(","))) for line in lines]
         used = run(["nvidia-smi","--query-compute-apps=gpu_uuid,pid","--format=csv,noheader"]).splitlines()
         occupied = {line.split(",")[0].strip() for line in used if "," in line}
-        for index in (args.training_gpu,args.evaluation_gpu):
+        for index in (args.training_gpu,args.evaluation_gpu,*worker_gpus):
             check(f"gpu_{index}_free", lambda index=index: any(int(g[0]) == index and g[1] not in occupied and int(g[2]) < 1024 for g in gpu_info))
     except Exception as error:
         failures.append("gpu_inventory")

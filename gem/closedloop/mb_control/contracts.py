@@ -126,6 +126,8 @@ class PhysicalAnchor:
     transitions: tuple
     consumed_source_ticks: tuple[int, ...]
     previously_consumed_versions: tuple[int, ...]
+    collector_id: int = 0
+    episode_index: int = 0
 
     def validate(self, horizon):
         g = self.generation

@@ -79,7 +79,7 @@ class Stage2Trainer:
             targets = lambda_targets(intervals, values, self.config.get("lambda_per_half_second", .95))
         return [(x.start.detached(), y) for x, y in zip(intervals, targets)]
 
-    def update_anchors(self, samples, supervised_batch, *, physical_intervals):
+    def update_anchors(self, samples, supervised_batch, *, physical_intervals, physical_interval_groups=None):
         """仅真实、当前Actor版本、完整H步的首次接管样本可计作有效执行反馈。"""
         from .execution_audit import state_probe
         from .validation import UnsupportedModelState
@@ -91,7 +91,8 @@ class Stage2Trainer:
         self.actor_optimizer.zero_grad(set_to_none=True)
         self.critic_optimizer.zero_grad(set_to_none=True)
         # 只用真实控制轨迹回归；不把WM自己的终点当成价值验证真值。
-        targets = self._targets(physical_intervals)
+        groups = physical_interval_groups if physical_interval_groups is not None else [physical_intervals]
+        targets = [pair for group in groups if group for pair in self._targets(group)]
         targets = targets[::max(1, len(targets)//16)]
         objectives, execution_norms, rejected = [], [], []
         comparison, valid = None, 0
@@ -166,6 +167,8 @@ class Stage2Trainer:
                 "critic_mse": loss, "critic_updates": self.critic_updates, "bc_only_update": False,
                 "execution_state_noise_gradient_norms": execution_norms, "valid_execution_rollouts": valid,
                 "real_anchor_ticks": [s.state.tick for s in samples],
+                "real_anchor_identities": [{"collector": s.collector_id, "episode": s.episode_index,
+                    "tick": s.state.tick, "decision": s.generation.request.ticket.decision_id} for s in samples],
                 "horizon_steps": self.imagination.horizon_steps, "actor_parameter_delta_l2": delta,
                 "fixed_noise_reference_joint_change_rms_rad": output_change,
                 "physical_reward_dt_sum": sum(float(x.reward.mean()) for x in physical_intervals),
