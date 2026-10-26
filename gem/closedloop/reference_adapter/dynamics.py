@@ -1,0 +1,90 @@
+"""由冻结原bundle深拷贝得到的独立可监督动力学模型。
+
+只开放WM.net参数；原in/out normalizer统计保持固定。监督标签必须来自真实且连续的
+物理转移，使用原WorldModel.targets/state_error定义；多步闭环预测对照真实标签。
+Adapter阶段冻结参数但不关闭输入autograd，想象显式调用本实例step，绝不回落原bundle。
+"""
+
+from contextlib import contextmanager
+import copy
+
+import torch
+from torch import nn
+
+from supermimic.mdp import flatten_state, unflatten_state, normalize_xi
+
+
+@contextmanager
+def frozen_parameters(*modules):
+    snapshots = [(p, p.requires_grad) for module in modules for p in module.parameters()]
+    for p, _ in snapshots:
+        p.grad = None
+        p.requires_grad_(False)
+    try:
+        yield
+    finally:
+        for p, enabled in snapshots:
+            p.requires_grad_(enabled)
+            p.grad = None
+
+
+class DynamicsModel(nn.Module):
+    def __init__(self, bundle):
+        super().__init__()
+        self.model = copy.deepcopy(bundle.world_model)
+        self.model.requires_grad_(False)
+        self.model.net.requires_grad_(True)
+        self.model.eval()
+        self.model_version = 0
+        self._graph_active = False
+        # 与SM train.py同一误差归一化下限，非PD/机器人常量。
+        floors = [3e-3]*3 + [5e-3]*3 + [2e-2]*3 + [5e-2]*3 + [3e-3]*21 + [5e-2]*21
+        self.register_buffer("error_floor", torch.tensor(floors, device=next(self.model.parameters()).device))
+
+    def step(self, state, action, xi):
+        return flatten_state(self.model.step(unflatten_state(state), action, normalize_xi(xi)))
+
+    @contextmanager
+    def adapter_phase(self):
+        if self._graph_active:
+            raise RuntimeError("不能嵌套WM版本屏障")
+        self._graph_active = True
+        try:
+            with frozen_parameters(self):
+                yield self.model_version
+        finally:
+            self._graph_active = False
+
+    def supervised_loss(self, windows):
+        if windows.get("origin") != "real":
+            raise ValueError("WM禁止使用想象状态作为真实标签")
+        s, a, xi, target, mask = (windows[k] for k in ("state", "action", "xi", "next_state", "mask"))
+        if mask.shape != a.shape[:2] or not bool(mask[:, 0].all()):
+            raise ValueError("WM窗口起点必须有效")
+        state = unflatten_state(s[:, 0])
+        std = torch.maximum(self.model.out_norm.std(), self.error_floor)
+        errors, one_step = [], []
+        for t in range(a.shape[1]):
+            state = self.model.step(state, a[:, t], normalize_xi(xi[:, t]))
+            errors.append((self.model.state_error(state, unflatten_state(target[:, t])) / std).square().mean(-1))
+            predicted = self.model.net(self.model.in_norm(self.model.inputs(unflatten_state(s[:, t]), a[:, t], normalize_xi(xi[:, t]))))
+            expected = self.model.out_norm(self.model.targets(unflatten_state(s[:, t]), unflatten_state(target[:, t])))
+            one_step.append((predicted-expected).square().mean(-1))
+        error = torch.stack(errors, 1)
+        one = torch.stack(one_step, 1)
+        # 沿用SM的多步state_error主损失；单步targets误差另列，不改变归一化。
+        loss = (error * mask).sum() / mask.sum().clamp_min(1)
+        return loss, {"wm_state_error": loss.detach(), "wm_targets_mse": (one*mask).sum().detach()/mask.sum().clamp_min(1),
+                      "wm_last_error": (error[:, -1]*mask[:, -1]).sum().detach()/mask[:, -1].sum().clamp_min(1)}
+
+    def fit(self, windows, optimizer, grad_clip=1.):
+        if self._graph_active:
+            raise RuntimeError("Adapter计算图存活时禁止更新WM参数")
+        optimizer.zero_grad(set_to_none=True)
+        loss, report = self.supervised_loss(windows)
+        loss.backward()
+        norm = nn.utils.clip_grad_norm_(self.model.net.parameters(), grad_clip, error_if_nonfinite=True)
+        optimizer.step()
+        optimizer.zero_grad(set_to_none=True)
+        self.model_version += 1
+        return report | {"wm_grad_norm": float(norm), "model_version": self.model_version}

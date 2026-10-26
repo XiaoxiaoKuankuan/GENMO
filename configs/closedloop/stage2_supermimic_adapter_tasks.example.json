@@ -1,0 +1,24 @@
+[
+  {
+    "id": "train_song_seed42",
+    "song_id": "train_song",
+    "split": "train",
+    "seed": 42,
+    "music_features": "/ABSOLUTE/EXISTING/EDGE35_train.pt",
+    "music_start_tick": 0,
+    "initial_state": "/ABSOLUTE/EXISTING/train_initial_state55.npy",
+    "nominal_reference": "/ABSOLUTE/NEW_CACHE/nominal_0000.pt",
+    "audit_start_steps": [0, 50]
+  },
+  {
+    "id": "validation_song_seed42",
+    "song_id": "validation_song",
+    "split": "validation",
+    "seed": 42,
+    "music_features": "/ABSOLUTE/EXISTING/EDGE35_validation.pt",
+    "music_start_tick": 0,
+    "initial_state": "/ABSOLUTE/EXISTING/validation_initial_state55.npy",
+    "nominal_reference": "/ABSOLUTE/NEW_CACHE/nominal_0001.pt",
+    "audit_start_steps": [0, 50]
+  }
+]
