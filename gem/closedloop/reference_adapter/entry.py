@@ -27,6 +27,7 @@ def main(kind):
     parser.add_argument("--torch-device", default="cpu" if kind == "audit" else "cuda:0")
     parser.add_argument("--tasks")
     parser.add_argument("--music-baseline")
+    parser.add_argument("--baseline-replay", nargs="+", help="复用零Adapter真实采集回放，音乐按最终固定s0因果重算")
     parser.add_argument("--resume")
     parser.add_argument("--checkpoint")
     parser.add_argument("--variant", choices=("zero", "no_music", "music"), default="zero" if kind == "evaluate" else "music")
@@ -107,6 +108,36 @@ def main(kind):
     trainer = AdapterTrainer(engine, replay, cfg["training"])
     resume = args.resume or args.checkpoint
     restored = load_checkpoint(resume, trainer, behavior=behavior_config(cfg), device=args.torch_device) if resume else None
+    if args.baseline_replay:
+        if resume or kind != "train" or args.calibrate_music:
+            raise ValueError("baseline-replay仅用于新训练预热，不能与恢复或标定混用")
+        import torch
+        from supermimic.bridge.bundle import file_digest
+        from .baseline import reprice_zero_replay
+        expected = {t["id"]: t for t in tasks if t["split"] in ("train", "validation")}
+        imported = set()
+        for path in args.baseline_replay:
+            baseline = torch.load(path, map_location=args.torch_device, weights_only=False)
+            if baseline.get("source") != "zero_adapter_real_replay" or baseline["sm_checkpoint_sha256"] != file_digest(cfg["supermimic"]["checkpoint"]):
+                raise ValueError("零策略回放来源或冻结物理资产不一致")
+            if baseline["observation_noise"] != cfg["observation_noise"]:
+                raise ValueError("基线观测噪声合同不一致")
+            for task in baseline["tasks"]:
+                if task["split"] not in ("train", "validation"):
+                    continue
+                target = expected.get(task["id"])
+                if target is None or any(task[k] != target[k] for k in ("split", "seed", "song_id")):
+                    raise ValueError("基线任务与本次划分/种子不一致")
+                if any(file_digest(task[k]) != file_digest(target[k]) for k in ("nominal_reference", "music_features", "initial_state")):
+                    raise ValueError("基线与正式任务的名义/音乐/初态不一致")
+                imported.add(task["id"])
+            for episode in baseline["replay"]["episodes"].values():
+                for row in episode:
+                    replay.add(row)
+                    trainer.real_steps += 1
+        if imported != set(expected):
+            raise ValueError("零Adapter真实基线未覆盖本次全部训练/验证任务")
+        reprice_zero_replay(replay, engine.step.rewards.music, engine.step.rewards.weights["music"])
     if kind == "evaluate" and args.variant != "zero" and not resume:
         raise ValueError("有/无音乐Adapter评价必须加载各自真实训练checkpoint")
     criteria = None
@@ -215,14 +246,21 @@ def main(kind):
             from supermimic.bridge.bundle import atomic_save, file_digest
             samples, provenance = [], []
             for task in tasks:
-                if task["split"] == "train":
-                    rows, _, contract = collect_episode(task, zero=True, add_replay=False)
+                if task["split"] in ("train", "validation"):
+                    rows, _, contract = collect_episode(task, zero=True, add_replay=True)
+                    if task["split"] != "train":
+                        continue
                     samples.extend(r.end.executed_state[:, 34:] for r in rows)
                     provenance.append(dict(task=task["id"], contract=contract, nominal_sha256=file_digest(task["nominal_reference"])))
             if not samples:
                 raise ValueError("标定缺少训练集真实零Adapterepisode")
             atomic_save(dict(source="zero_adapter_real_training_episodes", s0=calibrate_s0(torch.cat(samples)).cpu(),
+                             sum_square_qd=torch.cat(samples).square().sum(0).cpu(),
                              joint_names=engine.step.bundle.spec.joint_names, samples=sum(len(x) for x in samples), tasks=provenance), output/"music_baseline.pt")
+            from .contracts import map_tensors
+            atomic_save(dict(source="zero_adapter_real_replay", sm_checkpoint_sha256=file_digest(cfg["supermimic"]["checkpoint"]),
+                             observation_noise=cfg["observation_noise"], tasks=tasks,
+                             replay=map_tensors(replay.state_dict(), lambda x: x.detach().cpu())), output/"real_replay.pt")
         elif kind == "evaluate":
             episodes, contracts = [], []
             for task in tasks:
@@ -260,8 +298,9 @@ def main(kind):
 
             try:
                 if not trainer.critic_ready:
-                    for task in training_tasks+validation_tasks:
-                        collect_episode(task, zero=True)
+                    if not args.baseline_replay:
+                        for task in training_tasks+validation_tasks:
+                            collect_episode(task, zero=True)
                     for warmup_round in range(cfg["training"].get("critic_warmup_rounds", 5)):
                         report = trainer.warmup_real(cfg["training"]["critic_warmup_epochs"])
                         write_json(output/f"critic_warmup_{warmup_round:02d}.json", report)

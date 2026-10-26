@@ -116,3 +116,22 @@ def test_microbatch_objective_and_all_parameter_gradient_parity(system):
     torch.testing.assert_close(a, b, atol=0, rtol=0)
     for x, y in zip(ga, gb):
         torch.testing.assert_close(x, y, atol=1e-6, rtol=1e-5)
+
+
+def test_zero_replay_reprice_preserves_physics_and_matches_music(system):
+    from gem.closedloop.reference_adapter.baseline import reprice_zero_replay, combined_s0
+    from gem.closedloop.reference_adapter.music_reward import MusicReward
+    engine, z = system
+    replay = tensor_replay(engine, z, 16)
+    old = list(replay.episodes["train"])
+    reprice_zero_replay(replay, engine.step.rewards.music, .2)
+    for a, b in zip(old, replay.episodes["train"]):
+        torch.testing.assert_close(a.reward, b.reward, atol=1e-6, rtol=1e-6)
+        assert torch.equal(a.action, b.action) and torch.equal(a.end.executed_state, b.end.executed_state)
+        assert a.end.music_state.last_paid_tick == b.end.music_state.last_paid_tick
+    reprice_zero_replay(replay, MusicReward(torch.ones(21)*2), .2)
+    assert not torch.equal(old[-1].end.music_state.energy, replay.episodes["train"][-1].end.music_state.energy)
+    assert torch.equal(old[-1].weighted["sm"], replay.episodes["train"][-1].weighted["sm"])
+    stats = [dict(source="zero_adapter_real_training_episodes", joint_names=range(21), samples=2,
+                  sum_square_qd=torch.ones(21)*8)]
+    torch.testing.assert_close(combined_s0(stats), torch.ones(21)*2)

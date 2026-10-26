@@ -8,6 +8,7 @@
 
 from pathlib import Path
 import json
+import gc
 
 import torch
 
@@ -77,6 +78,11 @@ def prepare_cache(env, bundle, genmo_cfg, task, music, initial, destination, *, 
     archive = initial_z.reference
     generation_cursor = 0
     reason = "not_started"
+    # 此阶段全部no_grad且episode有界；循环GC的长停顿不应侵入GENMO实时预约。
+    # 引用计数仍工作，退出恢复调用前GC模式，不改变仿真dt或伪造worker实际耗时。
+    gc.collect()
+    gc_was_enabled = gc.isenabled()
+    gc.disable()
     try:
         while not collector.terminal:
             intervals = collector.collect(1)
@@ -92,6 +98,8 @@ def prepare_cache(env, bundle, genmo_cfg, task, music, initial, destination, *, 
                 generation_cursor = key+1
     finally:
         collector.close()
+        if gc_was_enabled:
+            gc.enable()
     end = task.get("music_start_tick", 0)+(music.shape[1]-1)*20
     diagnostic = dict(task=task["id"], reason=reason, actual_control_end_tick=collector.state.tick,
                       music_end_tick=end, actual_support_tick=archive.upper,
@@ -118,6 +126,7 @@ def prepare_cache(env, bundle, genmo_cfg, task, music, initial, destination, *, 
                     forecast_enabled=False, generation_reason=reason, actual_control_end_tick=collector.state.tick, **support,
                     generation_scope="real_frozen_genmo_accepted_plans_without_adapter", bootstrap_latency_ticks=bootstrap_latency_ticks,
                     latency_margin_ticks=scheduler.latency_margin_ticks)
+    contract["cyclic_gc_during_generation"] = False
     atomic_save(dict(schema=NOMINAL_SCHEMA, source="frozen_genmo_accepted_reference", contract=contract,
                      world_qpos=archive.world_qpos[:, keep].cpu(), contact=archive.contact[:, keep].cpu(),
                      start_tick=int(archive.ticks[0]), joint_names=tuple(actor.stage1.endecoder.kinematics.joint_order),
