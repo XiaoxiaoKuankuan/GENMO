@@ -135,7 +135,10 @@ def load_checkpoint(path, trainer, replay, *, behavior_config, device):
     ck = torch.load(path, map_location="cpu", weights_only=False)
     if ck.get("schema") != SCHEMA:
         raise ValueError("仅接受新BPTT完整状态，不接受旧策略/价值/优化器")
-    if ck["behavior_config"] != behavior_config:
+    saved_behavior = dict(ck["behavior_config"])
+    # 本字段新增之前实现只有一个物理环境；显式默认1不是源码版本迁移门禁。
+    saved_behavior.setdefault("physical_collector_count", 1)
+    if saved_behavior != behavior_config:
         raise ValueError("实际采样、奖励、时序或优化合同改变，不能伪装等价续训")
     if ck["frozen_sha256"] != trainer.imagination.adapter.bundle.metadata["sha256"]:
         raise ValueError("续训必须使用同一固定pi/wm资产")

@@ -102,6 +102,63 @@ def paired_quality(baseline, current, criteria, tasks=None):
             "degraded": degraded, "model_return_used": False}
 
 
+def run_evaluation_processes(cfg, config_path, checkpoint, path, model_mode, environment):
+    """固定任务按完整歌曲分到独立GPU，保持每个机器人的物理和请求时序独立。"""
+    gpus = cfg["formal"].get("evaluation_gpus", [cfg["formal"]["evaluation_gpu"]])
+    if len(gpus) == 1:
+        command = [sys.executable, "-u", "tools/evaluate_stage2_supermimic.py", "--config", str(config_path),
+                   "--mode", model_mode, "--output", str(path), "--actor-checkpoint", str(checkpoint)]
+        with path.with_suffix(".log").open("w") as log:
+            subprocess.run(command, env=dict(environment, CUDA_VISIBLE_DEVICES=str(gpus[0])),
+                           stdout=log, stderr=subprocess.STDOUT, check=True)
+        return
+    if len(gpus) != 2 or len(set(gpus)) != 2:
+        raise ValueError("独立固定评价首轮仅支持1或2张不同GPU")
+    path.mkdir(exist_ok=False)
+    tasks = read_tasks(cfg["formal"]["evaluation_tasks"])
+    workers, logs, manifest = [], [], []
+    try:
+        for index, gpu in enumerate(gpus):
+            selected = tasks[index::len(gpus)]
+            task_file, config_file = path/f"tasks_{index}.json", path/f"config_{index}.yaml"
+            write_json(task_file, selected)
+            OmegaConf.save(OmegaConf.create(dict(cfg, tasks=str(task_file))), config_file)
+            log = (path/f"shard_{index}.log").open("w")
+            logs.append(log)
+            command = [sys.executable, "-u", "tools/evaluate_stage2_supermimic.py", "--config", str(config_file),
+                "--mode", model_mode, "--output", str(path/f"shard_{index}"), "--actor-checkpoint", str(checkpoint)]
+            process = subprocess.Popen(command, env=dict(environment, CUDA_VISIBLE_DEVICES=str(gpu)),
+                                       stdout=log, stderr=subprocess.STDOUT)
+            workers.append(process)
+            manifest.append({"gpu": gpu, "pid": process.pid, "tasks": [t["id"] for t in selected], "command": command})
+        write_json(path/"processes.json", manifest)
+        while any(p.poll() is None for p in workers):
+            if any(p.poll() not in (None, 0) for p in workers):
+                raise RuntimeError(f"独立物理评价子进程失败，原日志保留在{path}")
+            time.sleep(.2)
+        if any(p.returncode for p in workers):
+            raise RuntimeError("独立物理评价未正常结束")
+        summaries = [json.loads((path/f"shard_{i}"/"physical_summary.json").read_text()) for i in range(len(gpus))]
+        rows = [r for s in summaries for r in s["physical_results"]]
+        expected = {(t["id"], seed) for t in tasks for seed in t.get("seeds", [42])}
+        if len(rows) != len(expected) or {(r["task"], r["seed"]) for r in rows} != expected:
+            raise RuntimeError("并行物理评价遗漏或重复了固定任务/种子")
+        summary = {"mode": model_mode, "episodes": len(rows), "completed": sum(r["complete"] for r in rows),
+            "physical_results": rows, "diversity": {k:v for s in summaries for k,v in s["diversity"].items()},
+            "model_reward": None, "quality_improvement_claim": False, "physical_processes": manifest}
+        write_json(path/"physical_summary.json", summary)
+        with (path/"physical_results.jsonl").open("w") as stream:
+            for row in rows:
+                stream.write(json.dumps(row, ensure_ascii=False, allow_nan=False)+"\n")
+    finally:
+        for process in workers:
+            if process.poll() is None:
+                process.terminate()
+                process.wait(timeout=20)
+        for log in logs:
+            log.close()
+
+
 def evaluate_checkpoint(cfg, output, checkpoint, *, update):
     directory = output / "evaluations"
     eval_cfg = dict(cfg, tasks=cfg["formal"]["evaluation_tasks"])
@@ -134,12 +191,8 @@ def evaluate_checkpoint(cfg, output, checkpoint, *, update):
         # 配对基线也运行相同Forecast/DDIM/异步路径，仅GENMO参数取更新前版本。
         # 原Stage1无前瞻全曲能力由独立preflight报告验收，不能混入这里比较训练收益。
         model_mode = "full" if cfg["model"]["forecast_enabled"] else "no_forecast"
-        command = [sys.executable, "-u", "tools/evaluate_stage2_supermimic.py", "--config", str(config_path),
-                   "--mode", model_mode, "--output", str(path)]
         model_checkpoint = output/"checkpoints"/"initial_actor.pt" if mode == "initial" else checkpoint
-        command += ["--actor-checkpoint", str(model_checkpoint)]
-        with (directory / (path.name+".log")).open("w") as log:
-            subprocess.run(command, env=environment, stdout=log, stderr=subprocess.STDOUT, check=True)
+        run_evaluation_processes(cfg, config_path, model_checkpoint, path, model_mode, environment)
     baseline = json.loads((outputs["initial"] / "physical_summary.json").read_text())
     current = json.loads((outputs["full"] / "physical_summary.json").read_text())
     quality = paired_quality(baseline, current, cfg["formal"]["degradation"], read_tasks(cfg["formal"]["evaluation_tasks"]))
