@@ -72,10 +72,15 @@ Critic按InputSpec字段组及physical/xi/action/heading/clock/reference字段�
 和失败前16步误差。校准阈值仍为EV≥0.1、比训练均值常数MSE改善≥20%、失败附近样本≥16
 且MSE比≤0.8；不足时不使用Critic终端价值，但不因此停止WM/数据采集。
 
-H1/H4/H8/H16分别做同初态/前缀真实配对，包含FineDance189。基线、重复、残差±和
-动作±在同一仿真并列，前缀0/50步。保持重复误差1e-4、方向噪声底max(1e-6,5倍重复
-回报差)、原状态误差阈值、残差epsilon0.005、动作epsilon0.01。接触切换或噪声下结果
-不冒充通过，明确反向不放行。每组优先H8；未通过可选择已经验证的H4或H1，H16通过前
+H1/H4/H8/H16分别做真实配对，包含FineDance189。基线、重复、残差±和动作±在同一
+仿真并列，前缀0/50步。50步先真实执行，再用同一主机器人的当前真实状态及因果
+控制/残差/音乐历史建立新配对，检查全部六变体初态；明确重新初始化求解器，不
+冒充保留隐藏接触状态。保留前缀漂移与实际动作扰动误差。保持重复误差1e-4、方向噪声底max(1e-6,5倍重复
+回报差)、原状态误差阈值、残差epsilon0.005、动作epsilon0.01。接触切换先记为不确定，
+再按固定1/5、1/25、1/125、1/625扰动序列真实重放；连续两档均需同基线接触、原噪声/
+重复性/状态误差合格，才确认局部方向。所有原尺度与复测结果保留；任意有效配对上的
+高信噪比反向均不放行，不能选择某一次小尺度好结果掩盖已验证反例。
+每组优先H8；未通过可选择已经验证的H4或H1，H16通过前
 绝不用于Adapter。全部短时域未通过时继续WM/Critic真实监督并定期重验，记录阻塞。
 
 阶段一是`dense_tracking_no_terminal_value`：只用已验收短时域的密集奖励，没有不可信
@@ -112,6 +117,8 @@ Adapter batch2048、backward microbatch32，梯度裁剪1。执行Tracking+music
 
 每100次有效更新保存唯一完整checkpoint（首次也保存），含三优化器、三网络、归一化、
 紧凑Replay、切向数据、RNG、collector音乐/残差及计数。只读歌曲由固定资产ID重建。
+纯监督等待阶段最多每30分钟保存一次完整Replay；显式创建运行目录中的
+`stop_after_checkpoint.request`可请求在当前迭代结束完整保存后退出，评价好坏不触发此操作。
 `--resume FULL.pt --output NEW_DIR`恢复学习状态，物理从新episode开始，不能声称恢复了
 求解器隐藏状态。源码SHA仅溯源，不作恢复门禁。目标3000是绝对accepted目标。
 
@@ -126,7 +133,7 @@ Python `/data0/user/liwei/envs/genmo_adapter_runtime_20261026/bin/python`；只�
 `/data0/user/liwei/GENMO_assets/adapter_20261026`。20首固定名义缓存复用
 `/data0/user/liwei/GENMO_outputs/stage2_supermimic_adapter/acceptance_20261026/tasks_all.json`。
 
-本轮38项CPU测试通过，包含真实SM零/非零Goal、Actor、奖励与梯度对齐、独立音乐时钟、
+最终40项CPU测试通过，包含真实SM零/非零Goal、Actor、奖励与梯度对齐、独立音乐时钟、
 批量想象、reset/MC边界和三优化器完整恢复。GPU零/非零数值对齐通过，原SM奖励与其输入
 梯度差为0。64/256/512/1024/2048环境真实压力全部通过；2048长压力实际2097152条
 转移、两次Replay环绕，吞吐131904条/s、进程显存9040MiB；只reset环境0时其他环境
@@ -140,3 +147,7 @@ state55最大变化0，episode ID不变，真实WM窗口状态连续性逐元素
 [2026-10-26早期验收报告](supermimic_adapter_acceptance_20261026.md)。新八组实际PID、
 首个有效更新、真实评价与失败情况将在本轮交付记录中以现场数据报告，不能从命令或
 压力测试推断正式Adapter已经产生更新。
+
+八组首更新与后续正式运行、实际PID和完整命令见
+[八组Server-1交付报告](supermimic_adapter_vector8_delivery_20261026.md)。原运行与接触复测
+修复后的运行分开保存，各组从自己的完整checkpoint恢复；未混用不同实验在线数据。

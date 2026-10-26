@@ -17,6 +17,23 @@ def collect(root):
     for folder in sorted(root.glob('gpu[0-7]')):
         status_path = folder/'status.json'
         status = json.loads(status_path.read_text()) if status_path.exists() else dict(phase='not_started', accepted_updates=0)
+        manifest_path = folder/'manifest.json'
+        manifest = json.loads(manifest_path.read_text()) if manifest_path.exists() else {}
+        command = manifest.get('command', [])
+        initial_accepted = 0
+        if '--resume' in command:
+            # 本项目完整文件名含接受计数，恢复链父目录的latest可核实同一路径。
+            checkpoint = Path(command[command.index('--resume')+1])
+            import re
+            match = re.search(r'_(\d{6})_\d+\.pt$', checkpoint.name)
+            if match:
+                initial_accepted = int(match.group(1))
+        process_start = manifest.get('status', {}).get('started_unix', status.get('started_unix', time.time()))
+        new_updates = status['accepted_updates']-initial_accepted
+        status['process_initial_accepted'] = initial_accepted
+        status['process_accepted_updates'] = new_updates
+        status['accepted_updates_per_hour'] = new_updates*3600/max(1, time.time()-process_start)
+        status['lifetime_updates_per_hour'] = status['accepted_updates']*3600/max(1, time.time()-status.get('started_unix', time.time()))
         pid = status.get('pid')
         alive = False
         if pid:
@@ -24,12 +41,24 @@ def collect(root):
                 os.kill(pid, 0); alive = True
             except ProcessLookupError:
                 pass
+        # 源码维护后的完整恢复延续同一个实验；沿各组自己的恢复链读取已有真实评价。
+        # 不混入另一组结果，也不要求恢复后重复已经完成的相同预算评价。
+        ancestry, visited, cursor = [], set(), folder
+        while cursor not in visited and cursor.is_dir():
+            visited.add(cursor); ancestry.append(cursor)
+            manifest_path = cursor/'manifest.json'
+            command = json.loads(manifest_path.read_text()).get('command', []) if manifest_path.exists() else []
+            if '--resume' not in command:
+                break
+            cursor = Path(command[command.index('--resume')+1]).parent
         evaluations = {}
-        for path in folder.glob('evaluation_*.json'):
-            if path.stem == 'evaluation_zero':
-                continue
-            value = json.loads(path.read_text())
-            evaluations[int(value['accepted_updates'])] = value
+        for ancestor in reversed(ancestry):
+            for path in ancestor.glob('evaluation_*.json'):
+                if path.stem == 'evaluation_zero':
+                    continue
+                value = json.loads(path.read_text())
+                value['evaluation_source'] = str(path)
+                evaluations[int(value['accepted_updates'])] = value
         groups.append(dict(group=folder.name, directory=str(folder), pid_alive=alive, status=status,
                            evaluations=evaluations))
     common = set.intersection(*(set(g['evaluations']) for g in groups)) if len(groups) == 8 else set()

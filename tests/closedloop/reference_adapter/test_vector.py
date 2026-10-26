@@ -225,3 +225,26 @@ def test_contact_refinement_never_hides_negative_or_noise():
     original_negative = copy.deepcopy(coarse)
     original_negative['directions'][0].update(direction_status='negative', physical_return_difference=-.0055)
     assert not resolve_contact_case(original_negative, [trial, trial], criteria)['passed']
+
+
+def test_sweep_report_keeps_same_budget_across_own_resume_chain(tmp_path):
+    import json
+    from tools.report_stage2_supermimic_adapter_sweep import collect
+    current, previous = tmp_path/'current', tmp_path/'previous'
+    for i in range(8):
+        now, old = current/f'gpu{i}', previous/f'gpu{i}'
+        now.mkdir(parents=True); old.mkdir(parents=True)
+        (now/'status.json').write_text(json.dumps(dict(phase='training', accepted_updates=200 if i == 0 else 150)))
+        (now/'manifest.json').write_text(json.dumps(dict(command=['train', '--resume', str(old/'full_000100_1793028800000000.pt')])))
+        value=dict(accepted_updates=100, completion_rate=1., mean_tracking=.09+i*.001, mean_beat_f1=.4,
+                   tracking_change_from_zero=0.)
+        (old/'evaluation_000100.json').write_text(json.dumps(value))
+        if i == 0:
+            (now/'evaluation_000200.json').write_text(json.dumps(dict(value, accepted_updates=200)))
+    report = collect(current)
+    assert report['comparison_budget'] == 100
+    assert len(report['ranking']) == 8 and report['ranking'][0]['group'] == 'gpu7'
+    assert report['groups'][0]['latest_evaluation']['accepted_updates'] == 200
+    assert 'previous/gpu1/' in report['groups'][1]['latest_evaluation']['evaluation_source']
+    assert report['groups'][1]['status']['process_initial_accepted'] == 100
+    assert report['groups'][1]['status']['process_accepted_updates'] == 50

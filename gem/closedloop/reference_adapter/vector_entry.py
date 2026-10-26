@@ -272,6 +272,7 @@ def main():
             collector.reset(perturb=True)
             horizon = None
             critic_ready = False
+            process_initial_accepted = status['accepted_updates']
             iteration = int(status.get('iteration', 0))
             last_audit_wm = -1
             last_saved = -1
@@ -361,7 +362,9 @@ def main():
                     torch_peak_reserved_mib=torch.cuda.max_memory_reserved()/2**20,
                     gpu_utilization_percent=gpu_utilization(),
                     real_transitions_per_second=train['collect_vector_steps_per_update']*collector.num_envs/collect_seconds,
-                    accepted_updates_per_hour=status['accepted_updates']*3600/max(1, time.time()-started),
+                    process_initial_accepted=process_initial_accepted,
+                    accepted_updates_per_hour=(status['accepted_updates']-process_initial_accepted)*3600/max(1, time.time()-started),
+                    lifetime_updates_per_hour=status['accepted_updates']*3600/max(1, time.time()-status['started_unix']),
                     wall_unix=time.time(), iteration_seconds=time.perf_counter()-loop_start,
                     complete_reset_segments=replay.completed_segments, complete_full_songs=replay.completed_full_songs,
                     head_truncated_terminals=replay.head_truncated_terminals)
