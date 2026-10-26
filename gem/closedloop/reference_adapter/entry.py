@@ -304,7 +304,8 @@ def main(kind):
 
             try:
                 failures = []
-                if not trainer.critic_ready:
+                reuse_critic_measurement = args.preflight_only and restored is not None and trainer.warmup_report is not None
+                if not trainer.critic_ready and not reuse_critic_measurement:
                     if not args.baseline_replay:
                         for task in training_tasks+validation_tasks:
                             collect_episode(task, zero=True)
@@ -317,15 +318,15 @@ def main(kind):
                         if trainer.critic_ready:
                             break
                     del warmup_data
-                    if not trainer.critic_ready:
-                        failures.append("critic_real_mc_quality")
-                        if not args.preflight_only:
-                            raise RuntimeError(f"Critic真实MC预热门槛失败: {trainer.warmup_report}")
+                if not trainer.critic_ready:
+                    failures.append("critic_real_mc_quality")
+                    if not args.preflight_only:
+                        raise RuntimeError(f"Critic真实MC预热门槛失败: {trainer.warmup_report}")
                 # 独立WM先真实监督到验证合格；物理方向仍必须随后独立通过。
                 wm_history = []
                 for warmup in range(cfg["training"].get("wm_warmup_steps", 200)):
                     validation = trainer.validate_wm()
-                    if validation["quality_gate"]["passed"]:
+                    if warmup >= cfg["training"].get("wm_warmup_min_steps", 25) and validation["quality_gate"]["passed"]:
                         break
                     fit = trainer.dynamics.fit(replay.sample_windows(cfg["training"]["batch_size"], 8), trainer.wm_optimizer)
                     row = dict(step=warmup+1, validation=validation,

@@ -45,6 +45,7 @@ training:
   critic_warmup_rounds: 5
   critic_batch_size: 256
   wm_warmup_steps: 200
+  wm_warmup_min_steps: 25
   wm_validation_batch_size: 32
   backward_microbatch: 1
   max_wm_relative_drift: 0.005
