@@ -89,6 +89,7 @@ def run_collector_service(args, cfg, collector):
                 "anchors": pack_value(anchors, memo), "controls": pack_value(tuple(controls), memo),
                 "rng": capture_rng(), "terminal": collector.terminal, "tick": collector.state.tick,
                 "physical_steps": len(controls), "seconds": time.perf_counter()-started,
+                "started_monotonic": started, "ended_monotonic": time.perf_counter(),
                 "frozen_unchanged": True, "worker_future_finished": True}
             atomic_save(payload, directory/"response.pt")
             publish(directory/"response.json", {"id": last_request, "actor_version": actor_version,
