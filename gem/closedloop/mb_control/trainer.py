@@ -1,8 +1,9 @@
 """仅GENMO与独立上层Critic两个优化器的模型路径导数训练器。
 
-初始GENMO固定期间用当前策略真实/想象轨迹预热价值；随后Actor目标为多区间回报加
-冻结参数但输入可微的终点价值，以及原Stage1配对监督。Critic targets在任何更新前
-固定并detach，价值回归不向GENMO累计梯度。冻结pi/wm逐张量核对，绝不创建其优化器。
+正式模式在初始GENMO固定期间使用真实完整MC预热并独立验证价值；短时Actor目标为
+真实接管起点的H步模型回报、冻结参数但输入可微的终点价值以及原Stage1配对监督。
+原多区间长链保留研究对照。Critic targets在任何更新前固定并detach，短时模式只用
+各物理环境各自的真实控制轨迹回归。冻结pi/wm逐张量核对，绝不创建其优化器。
 """
 
 from contextlib import contextmanager
