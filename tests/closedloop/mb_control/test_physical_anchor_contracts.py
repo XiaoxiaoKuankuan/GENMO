@@ -66,3 +66,16 @@ def test_replay_microbatch_requires_distinct_current_version_anchors():
     assert len({id(s) for s in batch}) == 2
     with pytest.raises(ValueError, match="独立真实样本不足"):
         replay.sample(2, actor_version=0)
+
+
+def test_checkpoint_music_alias_is_shared_but_distinct_views_stay_exact(tensor_state):
+    from gem.closedloop.mb_control.checkpoint import pack_state, pack_tensor
+    memo = {}
+    a = pack_state(tensor_state, memo)
+    b = pack_state(tensor_state.detached(), memo)
+    assert a["music"] is b["music"]
+    values = torch.arange(12).reshape(3, 4)
+    left, right = pack_tensor(values[:, :2], memo), pack_tensor(values[:, 2:], memo)
+    assert left is not right
+    torch.testing.assert_close(left, values[:, :2])
+    torch.testing.assert_close(right, values[:, 2:])

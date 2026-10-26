@@ -98,7 +98,8 @@ def collect_mc(collector, tasks, *, seed, device, max_control_steps, output=None
             from supermimic.bridge.bundle import atomic_save
             directory = Path(output)/"mc_episodes"
             directory.mkdir(exist_ok=True)
-            atomic_save({"episode": episode, "pairs": [(pack_state(z), y.cpu()) for z,y in reversed(episode_pairs)],
+            memo = {}
+            atomic_save({"episode": episode, "pairs": [(pack_state(z, memo), y.cpu()) for z,y in reversed(episode_pairs)],
                          "evidence": "real_complete_episode_mc"}, directory/f"{split}_{i:03d}.pt")
             with (Path(output)/"mc_progress.jsonl").open("a") as stream:
                 stream.write(json.dumps({"split": split, "episode": i, **episode}, ensure_ascii=False)+"\n")
@@ -133,8 +134,9 @@ def warmup_critic(trainer, collector, train_tasks, validation_tasks, config, out
         max_control_steps=config["max_collection_steps"], output=output, split="train")
     validation, val_episodes, nval = collect_mc(collector, validation_tasks, seed=config["seed"]+100000,
         device=device, max_control_steps=config["max_collection_steps"]-ntrain, output=output, split="validation")
-    payload = {"train": [(pack_state(z), y.cpu()) for z,y in train],
-               "validation": [(pack_state(z), y.cpu()) for z,y in validation],
+    memo = {}
+    payload = {"train": [(pack_state(z, memo), y.cpu()) for z,y in train],
+               "validation": [(pack_state(z, memo), y.cpu()) for z,y in validation],
                "train_episodes": train_episodes, "validation_episodes": val_episodes, "criteria": config}
     torch.save(payload, output / "real_mc.pt")
     if min(len(train), len(validation)) < config["minimum_samples_per_split"] or not all(

@@ -24,12 +24,26 @@ def optimizer_layout(module, optimizer):
     return [[names[id(p)] for p in group["params"]] for group in optimizer.param_groups]
 
 
-def pack_state(state):
+def pack_tensor(value, memo):
+    """一次保存内复用相同张量视图的CPU副本，尤其是所有时刻共享的整首音乐。
+
+    不按数值近似合并不同状态；键包含存储、偏移、形状、步幅、类型和设备。
+    memo仅在一次同步保存内有效，不能跨Actor更新或物理推进复用。
+    """
+    key = (str(value.device), value.untyped_storage().data_ptr(), value.storage_offset(),
+           tuple(value.shape), tuple(value.stride()), value.dtype)
+    if key not in memo:
+        memo[key] = value.detach().cpu()
+    return memo[key]
+
+
+def pack_state(state, memo=None):
+    memo = {} if memo is None else memo
     values = {f.name: getattr(state, f.name) for f in fields(state) if f.name != "reference"}
-    values = {k: v.detach().cpu() if isinstance(v, torch.Tensor) else v for k, v in values.items()}
-    values["pending_request"] = pack_value(state.pending_request)
+    values = {k: pack_tensor(v, memo) if isinstance(v, torch.Tensor) else v for k, v in values.items()}
+    values["pending_request"] = pack_value(state.pending_request, memo)
     cache = state.reference
-    values["reference"] = {k: getattr(cache, k).detach().cpu() for k in
+    values["reference"] = {k: pack_tensor(getattr(cache, k), memo) for k in
                            ("ticks", "world_qpos", "contact", "source_versions")}
     values["reference"]["version"] = cache.version
     return values
@@ -43,18 +57,19 @@ def unpack_state(payload, adapter, device):
     return ClosedLoopState(**data)
 
 
-def pack_value(value):
+def pack_value(value, memo=None):
     """显式数据合同序列化，不把FK、求解器或线程pickle进训练检查点。"""
+    memo = {} if memo is None else memo
     if isinstance(value, ClosedLoopState):
-        return {"kind": "ClosedLoopState", "data": pack_state(value)}
+        return {"kind": "ClosedLoopState", "data": pack_state(value, memo)}
     if isinstance(value, torch.Tensor):
-        return value.detach().cpu()
+        return pack_tensor(value, memo)
     if is_dataclass(value):
-        return {"kind": type(value).__name__, "data": {f.name: pack_value(getattr(value, f.name)) for f in fields(value)}}
+        return {"kind": type(value).__name__, "data": {f.name: pack_value(getattr(value, f.name), memo) for f in fields(value)}}
     if isinstance(value, tuple):
-        return {"kind": "tuple", "data": [pack_value(v) for v in value]}
+        return {"kind": "tuple", "data": [pack_value(v, memo) for v in value]}
     if isinstance(value, dict):
-        return {k: pack_value(v) for k, v in value.items()}
+        return {k: pack_value(v, memo) for k, v in value.items()}
     return value
 
 
@@ -92,7 +107,8 @@ def restore_rng(value):
 def save_checkpoint(path, trainer, replay, *, behavior_config, runtime_state, provenance):
     trainer.imagination.adapter.bundle.assert_unchanged(trainer.frozen_identity)
     replay_payload = replay.state_dict()
-    replay_payload["items"] = [pack_value(z) for z in replay_payload["items"]]
+    memo = {}
+    replay_payload["items"] = [pack_value(z, memo) for z in replay_payload["items"]]
     atomic_save({"schema": SCHEMA, "actor": trainer.actor.state_dict(), "critic": trainer.critic.state_dict(),
                  "genmo_optimizer": trainer.actor_optimizer.state_dict(),
                  "upper_critic_optimizer": trainer.critic_optimizer.state_dict(),
