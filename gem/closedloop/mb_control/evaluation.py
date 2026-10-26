@@ -72,6 +72,7 @@ def evaluate_tasks(collector, tasks, output, *, mode, device, max_seconds=None):
             latencies = [e["actual_ready_tick"] - e["request_tick"] for e in collector.events]
             latency.extend(latencies)
             row = {"task": task["id"], "seed": seed, "mode": mode, "reason": reason,
+                   "actor_version": collector.actor_version,
                    "source": task.get("source"), "split": task.get("split"),
                    "complete": reason == "music_end", "physical_seconds": collector.state.tick / 600,
                    "music_seconds": music.shape[1] / 30, "wall_seconds": time.perf_counter() - start,

@@ -187,6 +187,9 @@ def main(kind):
         collector.record_contact_metrics = kind == "evaluate"
         try:
             if kind == "evaluate":
+                # 推理已加载checkpoint中的实际权重，事件元数据也须携带同一个
+                # 有效更新版本；保留参考版本自己的编号，不改物理/采样/调度。
+                collector.actor_version = int(ck["counters"]["accepted_actor_updates"]) if args.actor_checkpoint else 0
                 evaluate_tasks(collector, tasks, output, mode=args.mode, device=args.torch_device, max_seconds=args.max_seconds)
             elif kind == "collector":
                 from .parallel_collection import run_collector_service

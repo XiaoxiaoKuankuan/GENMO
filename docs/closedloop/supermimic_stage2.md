@@ -8,6 +8,18 @@
 
 `PhysicalCollector`记录实际完成、提交、首次影响、消费支持点和完整短时轨迹。拒绝、首次消费前被覆盖、过期Actor版本或不足H步的记录不能计为有效执行反馈。`PlanAwareCritic`显式编码任意50Hz时刻的完整pending请求快照/noise、参考版本、音乐和调度；预热目标来自真实逐控制步完整MC，并覆盖pending与非请求网格。checkpoint升级v3，保存两个优化器、原请求与anchor回放、RNG与训练游标；物理求解器不保存，异常恢复明确从新episode采集。
 
+| 文件与入口 | 本次修复后的行为与理由 |
+|---|---|
+| `model_audit.audit_known_reference`、`entry`、`dependency.paired_forecast_timeline` | 一步、固定动作压力、参考反馈闭环、物理方向、Forecast分开；物理完整性按时间戳/终点/控制状态，图深度另计，避免把93真实步/101图深度误判缺轨迹。 |
+| `contracts.PhysicalAnchor/PendingGeneration`、`collector.PhysicalCollector`、`replay.RecentReplay` | 请求条件和首次真实消费起点分开；保存原预测/noise/版本/完整缓存/历史/调度/真实H步。只抽不同当前版本的合法真实anchor，拒绝未执行、被覆盖或不完整样本。 |
+| `imagination.PhysicalAnchorImagination.rollout_anchor`、`sampler.sample_differentiable`、`compilation` | 原请求重新全20步DDIM eta0，真实anchor只初始化SM/WM；H内参考接管按真实记录续接，后续pending由模型状态重建。保留原长链研究模式；关闭编译反向缓冲原地复用以保持输入导数。 |
+| `critic.PlanAwareCritic`、`critic_warmup`、`returns` | 任意合法50Hz终点包含完整在途请求、参考版本和时序。真实完整MC预热与独立验证，修复零步终止事件未闭合上一真实转移的问题；不伪造终止奖励。 |
+| `trainer.Stage2Trainer.update_anchors` | 真实执行路径非零、有限且参数实际变化才accepted加1；模型梯度、原BC梯度分别报告。每路环境独立计算真实Critic目标，只有两个优化器，SM逐张量固定。 |
+| `parallel_collection.publish_tensor/RemotePhysicalCollector`、`formal.run_formal` | 两GPU各自Newton时序并行，所有请求收束后再优化；IPC允许原子替换，编号checkpoint仍禁止覆盖。首更立即保存和全曲评价，每100次重复，保持目标5000。 |
+| `checkpoint.save_checkpoint/load_checkpoint`、`tools/audit_stage2_supermimic_checkpoint.py` | 完整模型/两个AdamW/RNG/真实回放/任务与监督游标恢复，音乐共享视图避免重复大拷贝；实际检查下一监督批次重现性，不比较源码hash。 |
+| `formal.run_evaluation_processes/paired_quality`、`evaluation`、SM `StreamingPhysicalEnv.contact_events` | 固定24任务按整首分到两张独立GPU，检查任务种子全集；模型回报与逐任务/来源/split物理跟踪、根误差、幅度/节拍/真实接触分开。 |
+| `tools/launch_stage2_supermimic_formal.py` | 新短H报告自动选16、核验真实并行采集，检查独立GPU资源；向已有tmux显式传入已验证的IsaacLab/编译环境，修复客户端环境不继承的问题。 |
+
 已发现并修正的工程/审计问题：
 
 1. 原依赖深度把计划提交即当作物理消费，曾高估最长路径；按实际插值/速度halo/目标支持点追踪后，旧高延迟配置主线90步、最长依赖93步。前瞻物理完整性只验证实际时间戳及终点，不比较图深度；93物理步/101图依赖合成回归通过。
