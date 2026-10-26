@@ -184,6 +184,7 @@ def main(kind):
             "startup_seconds": time.perf_counter() - warm_started, "episode_reset_after_warmup": True}))
         collector = PhysicalCollector(env, actor, adapter, scheduler, rewards, forecast_enabled=cfg["model"]["forecast_enabled"],
                                       gamma=cfg["critic"]["gamma_per_control"], record_trajectory=kind == "evaluate")
+        collector.record_contact_metrics = kind == "evaluate"
         try:
             if kind == "evaluate":
                 evaluate_tasks(collector, tasks, output, mode=args.mode, device=args.torch_device, max_seconds=args.max_seconds)

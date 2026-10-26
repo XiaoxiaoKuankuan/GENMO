@@ -89,6 +89,8 @@ class PhysicalCollector:
         self.anchor_horizon = 0
         self.record_controls = False
         self.record_contacts = False
+        self.record_contact_metrics = False
+        self.contact_counts, self.previous_contact = {}, None
         self.controls = []
         self.generations = {}
         self.consumed_versions = set()
@@ -125,6 +127,7 @@ class PhysicalCollector:
         self.overruns = 0
         self.controls = []
         self.generations, self.consumed_versions, self.active_anchors = {}, set(), {}
+        self.contact_counts, self.previous_contact = {}, None
         self.ready_anchors.clear()
         self.wall_started = time.perf_counter()
         return self.state.detached()
@@ -196,9 +199,12 @@ class PhysicalCollector:
                     failed = bool(self.adapter.runtime.termination(state1, ref1).any())
                     totals.add(reward, torch.zeros_like(reward) if failed else torch.ones_like(reward))
                     z = self.adapter.advance(z, state1, action, origin="real")
+                    contact = self.env.contact_events() if self.record_contacts or self.record_contact_metrics else None
+                    if self.record_contact_metrics:
+                        self._accumulate_contacts(contact)
                     if before_control is not None:
                         end = z.detached()
-                        control_event = {"contacts": self.env.contact_events()} if self.record_contacts else {}
+                        control_event = {"contacts": contact} if self.record_contacts else {}
                         step = DecisionInterval(before_control, end, reward.detach().clone(),
                             torch.zeros_like(reward) if failed else torch.ones_like(reward), 1, self.gamma,
                             failed or z.tick >= z.music_end_tick, "physical_failure" if failed else "control_step", control_event)
@@ -239,6 +245,18 @@ class PhysicalCollector:
     def take_controls(self):
         controls, self.controls = self.controls, []
         return controls
+
+    def _accumulate_contacts(self, event):
+        left, right = event["left_foot"], event["right_foot"]
+        previous = self.previous_contact
+        increments = {"frames": 1, "double_support_frames": int(left and right),
+            "single_support_frames": int(left != right), "airborne_frames": int(not left and not right),
+            "left_landings": int(previous is not None and left and not previous["left_foot"]),
+            "right_landings": int(previous is not None and right and not previous["right_foot"]),
+            "pair_changes": int(previous is not None and event["pair_signature"] != previous["pair_signature"])}
+        for key, value in increments.items():
+            self.contact_counts[key] = self.contact_counts.get(key, 0)+value
+        self.previous_contact = event
 
     def _find_first_consumption(self, z):
         support = z.reference.dependency_support(z.tick)

@@ -44,7 +44,7 @@ def checkpoint_link(directory, name, target):
     os.replace(temporary, destination)
 
 
-def paired_quality(baseline, current, criteria):
+def paired_quality(baseline, current, criteria, tasks=None):
     before = {(r["task"], r["seed"]): r for r in baseline["physical_results"]}
     after = {(r["task"], r["seed"]): r for r in current["physical_results"]}
     if before.keys() != after.keys():
@@ -64,9 +64,42 @@ def paired_quality(baseline, current, criteria):
                 activity_ratio is None or activity_ratio < criteria["minimum_activity_ratio"] or
                 (beat_drop is not None and beat_drop > criteria["maximum_beat_drop"]))
     score = float(np.mean([r["physical_metrics_mean"].get("upper_eight_tracking", 0.) for r in rows]))
+    old_score = float(np.mean([r["physical_metrics_mean"].get("upper_eight_tracking", 0.) for r in before.values()]))
+    metadata = {t["id"]: t for t in tasks or []}
+    comparisons = []
+    for key, new in after.items():
+        old = before[key]
+        def values(row):
+            metrics = row["physical_metrics_mean"]
+            return {"tracking": metrics["upper_eight_tracking"],
+                    "root_position_rmse_m": float(np.sqrt(metrics["error/anchor_pos"])),
+                    "root_xy_rmse_m": float(np.sqrt(metrics["root_xy_error_sq"])),
+                    "root_orientation_rmse_rad": float(np.sqrt(metrics["error/anchor_ori"])),
+                    "joint_range_mean_rad": row["motion"]["joint_range_mean_rad"],
+                    "joint_speed_rms_rad_s": row["motion"]["joint_speed_rms_rad_s"],
+                    "beat_alignment": row["motion"].get("beat_alignment")}
+        old_values, new_values = values(old), values(new)
+        meta = metadata.get(key[0], new)
+        comparisons.append({"task": key[0], "seed": key[1], "source": meta.get("source"), "split": meta.get("split"),
+            "baseline_complete": old["complete"], "current_complete": new["complete"],
+            "baseline_reason": old["reason"], "current_reason": new["reason"],
+            "baseline": old_values, "current": new_values,
+            "delta": {k: new_values[k]-v if v is not None and new_values[k] is not None else None for k,v in old_values.items()},
+            "baseline_contacts": old.get("contacts"), "current_contacts": new.get("contacts"),
+            "contact_pair_available": old.get("contacts") is not None and new.get("contacts") is not None})
+    source_split = []
+    for group in sorted({(str(r["source"]), str(r["split"])) for r in comparisons}):
+        selected = [r for r in comparisons if (str(r["source"]), str(r["split"])) == group]
+        source_split.append({"source": group[0], "split": group[1], "episodes": len(selected),
+            "baseline_completed": sum(r["baseline_complete"] for r in selected),
+            "current_completed": sum(r["current_complete"] for r in selected),
+            "mean_tracking_delta": float(np.mean([r["delta"]["tracking"] for r in selected])),
+            "mean_root_position_rmse_delta_m": float(np.mean([r["delta"]["root_position_rmse_m"] for r in selected]))})
     return {"completion_rate": completion, "baseline_completion_rate": old_completion, "duration_ratio": duration_ratio,
             "activity_ratio": activity_ratio, "beat_alignment_drop": beat_drop, "beat_available": beat_drop is not None,
-            "physical_tracking_score": score, "degraded": degraded, "model_return_used": False}
+            "physical_tracking_score": score, "baseline_physical_tracking_score": old_score,
+            "physical_tracking_delta": score-old_score, "paired_tasks": comparisons, "source_split": source_split,
+            "degraded": degraded, "model_return_used": False}
 
 
 def evaluate_checkpoint(cfg, output, checkpoint, *, update):
@@ -109,7 +142,7 @@ def evaluate_checkpoint(cfg, output, checkpoint, *, update):
             subprocess.run(command, env=environment, stdout=log, stderr=subprocess.STDOUT, check=True)
     baseline = json.loads((outputs["initial"] / "physical_summary.json").read_text())
     current = json.loads((outputs["full"] / "physical_summary.json").read_text())
-    quality = paired_quality(baseline, current, cfg["formal"]["degradation"])
+    quality = paired_quality(baseline, current, cfg["formal"]["degradation"], read_tasks(cfg["formal"]["evaluation_tasks"]))
     write_json(directory / f"paired_{update:06d}.json", quality)
     return quality
 

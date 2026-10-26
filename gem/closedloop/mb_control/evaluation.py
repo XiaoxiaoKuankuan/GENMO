@@ -72,6 +72,7 @@ def evaluate_tasks(collector, tasks, output, *, mode, device, max_seconds=None):
             latencies = [e["actual_ready_tick"] - e["request_tick"] for e in collector.events]
             latency.extend(latencies)
             row = {"task": task["id"], "seed": seed, "mode": mode, "reason": reason,
+                   "source": task.get("source"), "split": task.get("split"),
                    "complete": reason == "music_end", "physical_seconds": collector.state.tick / 600,
                    "music_seconds": music.shape[1] / 30, "wall_seconds": time.perf_counter() - start,
                    "physical_metrics_mean": averages, "motion": motion_metrics(collector.trajectory, music),
@@ -79,6 +80,8 @@ def evaluate_tasks(collector, tasks, output, *, mode, device, max_seconds=None):
                    "timeouts": sum(not e["accepted"] for e in collector.events),
                    "control_wall_overruns": collector.overruns, "latency_ticks": latencies,
                    "events": collector.events, "cancelled_requests": collector.cancelled_requests,
+                   "contacts": ({"source": "mujoco_warp_solver_active_contacts", **collector.contact_counts}
+                                if collector.record_contact_metrics else None),
                    "generator_unseen_music": task.get("generator_unseen_music"),
                    "controller_unseen_motion": task.get("controller_unseen_motion"),
                    "evidence": "real_isaaclab3_newton_mujoco_warp"}
