@@ -100,7 +100,7 @@ RNG、回放元数据、音乐/残差/游标、接受计数、目标和审计锚
 
 ## 入口与Server-1路径
 
-代码目录计划为`/home/user/liwei/bumi-closedloop-worktrees/adapter/GENMO`；SM同级`SuperMimic`。
+Server-1实际代码目录为`/home/user/liwei/bumi-closedloop-worktrees/adapter/GENMO`；SM同级`SuperMimic`。
 独立Python为`/data0/user/liwei/envs/genmo_adapter_runtime_20261026/bin/python`，独立资产根
 `/data0/user/liwei/GENMO_assets/adapter_20261026`；原Stage1继续只读使用
 `/data0/user/liwei/closedloop_stage10_v3_assets/20261012/stage1_s595000`。
@@ -126,9 +126,15 @@ python -B tools/evaluate_stage2_supermimic_adapter.py --config RUNTIME --tasks C
 ```
 
 CPU验证命令：`PYTHONDONTWRITEBYTECODE=1 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 /home/weili/GENMO/.venv/bin/python -B -m pytest tests/closedloop/reference_adapter -q -p no:cacheprovider --basetemp=独立临时目录`。
-当前30项通过；8步music→Adapter梯度39.949802/FD39.941036，music→动作6.796803/FD6.810326。
-Server-1已采集11首完整零策略训练/验证歌曲，FK缓存后完整控制P50约23.5ms，仍超过20ms。
-真实执行qd上的音乐方向梯度0.9056448/FD0.9064674，相对误差0.000908；该片段使用单曲
-训练标尺用于诊断，正式标尺必须合并全部训练歌曲后固定。
-冻结权重8/16步数值图不代表真实物理方向通过。首次正式accepted/PID/物理值必须以服务器
-实际记录补充，不能从本命令模板推断已启动。
+本地与Server-1最终31项通过。GPU H16 microbatch1/2目标完全一致，全部1822734个参数
+梯度最大差4.77e-7。8步music→Adapter数值梯度39.949802/FD39.941036。
+20首名义缓存完整；12首训练/验证零策略全部music_end，共38492真实步。固定s0只由
+8首训练歌30993步统计，最终标尺的真实479点执行qd音乐函数FD相对误差4.40e-10。
+独立4首评价全歌完成，tracking(dt)0.0954~0.0973、F1=0.419~0.545；完整路径P50约22.8ms，
+8028/8028控制步超过20ms，仍未达到实时50Hz墙钟能力。
+
+2026-10-26实际正式启动门槛失败：Critic真实验证EV=-0.474264、MSE3.938287，差于常数
+基线1.999986，且失败附近样本0。独立WM真实监督25次后，固定H1/H8/H16预测误差通过，
+但真实方向16个case仅9个通过；存在明确反向、接触切换和重复性/噪声不确定。正式训练
+未启动，accepted=0，没有第一有效更新。保留两份完整失败checkpoint及全部证据，恢复
+不改变失败状态；不能从上述命令模板推断已启动。详见[Server-1实际验收报告](supermimic_adapter_acceptance_20261026.md)。
