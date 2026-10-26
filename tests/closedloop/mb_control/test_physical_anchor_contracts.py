@@ -69,11 +69,17 @@ def test_replay_microbatch_requires_distinct_current_version_anchors():
 
 
 def test_checkpoint_music_alias_is_shared_but_distinct_views_stay_exact(tensor_state):
-    from gem.closedloop.mb_control.checkpoint import pack_state, pack_tensor
+    from types import SimpleNamespace
+    from gem.closedloop.mb_control.checkpoint import pack_state, pack_tensor, unpack_state
     memo = {}
     a = pack_state(tensor_state, memo)
     b = pack_state(tensor_state.detached(), memo)
     assert a["music"] is b["music"]
+    adapter = SimpleNamespace(runtime=SimpleNamespace(kin=None), to_sm=tuple(range(21)))
+    loaded = {}
+    restored_a, restored_b = unpack_state(a, adapter, "cpu", loaded), unpack_state(b, adapter, "cpu", loaded)
+    assert restored_a.music is restored_b.music
+    torch.testing.assert_close(restored_a.state, tensor_state.state)
     values = torch.arange(12).reshape(3, 4)
     left, right = pack_tensor(values[:, :2], memo), pack_tensor(values[:, 2:], memo)
     assert left is not right

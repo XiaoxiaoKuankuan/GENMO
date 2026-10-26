@@ -49,11 +49,21 @@ def pack_state(state, memo=None):
     return values
 
 
-def unpack_state(payload, adapter, device):
-    data = {k: v.to(device) if isinstance(v, torch.Tensor) else v for k, v in payload.items() if k != "reference"}
-    ref = {k: v.to(device) if isinstance(v, torch.Tensor) else v for k, v in payload["reference"].items()}
+def unpack_tensor(value, device, memo):
+    key = (str(device), str(value.device), value.untyped_storage().data_ptr(), value.storage_offset(),
+           tuple(value.shape), tuple(value.stride()), value.dtype)
+    if key not in memo:
+        memo[key] = value.to(device)
+    return memo[key]
+
+
+def unpack_state(payload, adapter, device, memo=None):
+    memo = {} if memo is None else memo
+    data = {k: unpack_tensor(v, device, memo) if isinstance(v, torch.Tensor) else v
+            for k, v in payload.items() if k != "reference"}
+    ref = {k: unpack_tensor(v, device, memo) if isinstance(v, torch.Tensor) else v for k, v in payload["reference"].items()}
     data["reference"] = ReferenceBuffer(**ref, kin=adapter.runtime.kin, to_sm=adapter.to_sm)
-    data["pending_request"] = unpack_value(data.get("pending_request"), adapter, device)
+    data["pending_request"] = unpack_value(data.get("pending_request"), adapter, device, memo)
     return ClosedLoopState(**data)
 
 
@@ -73,22 +83,23 @@ def pack_value(value, memo=None):
     return value
 
 
-def unpack_value(value, adapter, device):
+def unpack_value(value, adapter, device, memo=None):
     from .contracts import PendingGeneration, GenerationRecord, PhysicalAnchor, RequestTicket, GeneratedPlan, ForecastContext
     from .returns import DecisionInterval
+    memo = {} if memo is None else memo
     if isinstance(value, torch.Tensor):
-        return value.to(device)
+        return unpack_tensor(value, device, memo)
     if not isinstance(value, dict):
         return value
     if "kind" not in value:
-        return {k: unpack_value(v, adapter, device) for k, v in value.items()}
+        return {k: unpack_value(v, adapter, device, memo) for k, v in value.items()}
     if value["kind"] == "ClosedLoopState":
-        return unpack_state(value["data"], adapter, device)
+        return unpack_state(value["data"], adapter, device, memo)
     if value["kind"] == "tuple":
-        return tuple(unpack_value(v, adapter, device) for v in value["data"])
+        return tuple(unpack_value(v, adapter, device, memo) for v in value["data"])
     registry = {c.__name__: c for c in (PendingGeneration, GenerationRecord, PhysicalAnchor, RequestTicket,
                                        GeneratedPlan, ForecastContext, DecisionInterval)}
-    return registry[value["kind"]](**{k: unpack_value(v, adapter, device) for k, v in value["data"].items()})
+    return registry[value["kind"]](**{k: unpack_value(v, adapter, device, memo) for k, v in value["data"].items()})
 
 
 def capture_rng():
@@ -138,7 +149,8 @@ def load_checkpoint(path, trainer, replay, *, behavior_config, device):
     trainer.critic_optimizer.load_state_dict(ck["upper_critic_optimizer"])
     trainer.restore_counters(ck["counters"])
     payload = dict(ck["replay"])
-    payload["items"] = [unpack_value(z, trainer.imagination.adapter, device) for z in payload["items"]]
+    memo = {}
+    payload["items"] = [unpack_value(z, trainer.imagination.adapter, device, memo) for z in payload["items"]]
     replay.load_state_dict(payload)
     restore_rng(ck["rng"])
     return {**ck["runtime_state"], "requires_new_physical_episode": True}
