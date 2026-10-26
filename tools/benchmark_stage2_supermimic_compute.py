@@ -34,6 +34,7 @@ def main():
     output = Path(args.output).resolve()
     output.mkdir(parents=True, exist_ok=False)
     cfg = read_config(args.config)
+    cfg["model"]["compile_networks"] = False  # 基线始终先走原计算，避免配置已启用时标签失真。
     seed_all(42)
     actor, adapter, scheduler, _, _, _, _ = build_components(cfg, "cuda:0")
     before = adapter.bundle.frozen_snapshot()

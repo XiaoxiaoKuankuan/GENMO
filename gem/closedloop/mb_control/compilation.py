@@ -13,6 +13,10 @@ import torch
 
 
 def compile_networks(actor, adapter):
+    # AOTAutograd默认捐赠反向缓冲区，不能用于执行探针、Critic输入导数与随后loss
+    # backward共享同一图的retain_graph路径。关闭的只是缓存复用，不是输入求导。
+    from torch._functorch import config as aot_config
+    aot_config.donated_buffer = False
     actor.stage1.denoiser.compile(fullgraph=True, dynamic=False)
     actor.stage1.history_encoder.compile(fullgraph=True, dynamic=False)
     adapter.bundle.actor.compile(fullgraph=True, dynamic=False)
