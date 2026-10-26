@@ -12,7 +12,15 @@ import time
 import numpy as np
 import torch
 
-from .application import seed_all, task_inputs
+from .application import seed_all, task_inputs, task_identity
+
+
+def evaluation_contract(cfg, tasks, frozen_sha256):
+    """允许预先运行更新前物理基线；比较实际条件和任务，不比较源码版本。"""
+    return {"model": cfg["model"], "clock": cfg["clock"], "rewards": cfg["rewards"],
+            "physics_determinism": cfg.get("execution", {}).get("physics_determinism", "not_guaranteed"),
+            "frozen_sha256": frozen_sha256,
+            "tasks": [{"id": t["id"], "identity": task_identity(t), "seeds": t.get("seeds", [42])} for t in tasks]}
 
 
 def motion_metrics(trajectory, music):

@@ -24,6 +24,8 @@ def main(kind):
     parser.add_argument("--resume-latest", action="store_true")
     parser.add_argument("--resume")
     parser.add_argument("--actor-checkpoint")
+    parser.add_argument("--initial-actor", action="store_true",
+                        help="仅评价：用明确的未更新GENMO运行完整Forecast路径并导出权重身份")
     parser.add_argument("--mode", choices=("stage1", "full", "no_forecast", "calibration"), default="stage1" if kind == "evaluate" else "full")
     parser.add_argument("--max-seconds", type=float)
     parser.add_argument("--criteria", help="WM审计的显式JSON数值/方向验收阈值")
@@ -44,6 +46,8 @@ def main(kind):
         from isaaclab.app import add_launcher_args, launch_simulation
         add_launcher_args(parser)
     args = parser.parse_args()
+    if args.initial_actor and (kind != "evaluate" or args.actor_checkpoint or args.mode not in ("full", "no_forecast")):
+        raise ValueError("initial-actor只用于没有训练checkpoint的更新前完整条件物理基线")
     import numpy as np
     import torch
     from .application import (read_config, require_file, build_components, seed_all, read_tasks, task_inputs,
@@ -108,7 +112,7 @@ def main(kind):
         if args.mode in ("stage1", "calibration") or ck["behavior_config"]["model"]["forecast_enabled"] != cfg["model"]["forecast_enabled"]:
             raise ValueError("条件消融必须匹配训练条件，不能只在测试时删除未来条件")
         actor.load_state_dict(ck["actor"], strict=True)
-    elif kind == "evaluate" and args.mode not in ("stage1", "calibration"):
+    elif kind == "evaluate" and args.mode not in ("stage1", "calibration") and not args.initial_actor:
         raise ValueError("完整/无前瞻训练模型评估需要明确Actor checkpoint")
     output = Path(args.output).expanduser().resolve()
     if args.run_mode == "formal":
@@ -120,6 +124,15 @@ def main(kind):
     source_info = provenance(cfg)
     manifest = output / (f"resume_manifest_{time.time_ns()}.json" if (output / "manifest.json").exists() else "manifest.json")
     manifest.write_text(json.dumps(source_info, ensure_ascii=False, indent=2))
+    if kind == "evaluate":
+        from .evaluation import evaluation_contract
+        contract = evaluation_contract(cfg, tasks, adapter.bundle.metadata["sha256"])
+        (output/"evaluation_contract.json").write_text(json.dumps(contract, ensure_ascii=False, indent=2))
+        if args.initial_actor:
+            from supermimic.bridge.bundle import atomic_save
+            # 推理身份资产不包含优化器，不能冒充已开始训练或可恢复训练checkpoint。
+            atomic_save({"schema": "genmo.evaluation.initial_actor.v1", "actor": actor.state_dict(),
+                         "accepted_actor_updates": 0, "contract": contract}, output/"evaluation_actor.pt")
     if cfg["model"].get("compile_networks", False):
         from .compilation import warmup_inference
         from .gradient_audit import tensor_fixture

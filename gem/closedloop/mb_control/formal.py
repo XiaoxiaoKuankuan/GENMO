@@ -77,6 +77,20 @@ def evaluate_checkpoint(cfg, output, checkpoint, *, update):
         OmegaConf.save(OmegaConf.create(eval_cfg), config_path)
     environment = dict(os.environ, CUDA_VISIBLE_DEVICES=str(cfg["formal"]["evaluation_gpu"]), PYTHONDONTWRITEBYTECODE="1")
     outputs = {"initial": directory / "initial_genmo_baseline", "full": directory / f"actor_{update:06d}"}
+    if cfg["formal"].get("initial_physical_baseline"):
+        from .evaluation import evaluation_contract
+        initial_path = Path(cfg["formal"]["initial_physical_baseline"])
+        identity = torch.load(initial_path/"evaluation_actor.pt", map_location="cpu", weights_only=False)
+        baseline_actor = torch.load(output/"checkpoints"/"initial_actor.pt", map_location="cpu", weights_only=False)
+        contract = evaluation_contract(cfg, read_tasks(cfg["formal"]["evaluation_tasks"]), baseline_actor["frozen_sha256"])
+        if identity.get("schema") != "genmo.evaluation.initial_actor.v1" or identity.get("accepted_actor_updates") != 0 or identity["contract"] != contract:
+            raise ValueError("预先评价的更新前基线与本次物理、任务或条件合同不一致")
+        if identity["actor"].keys() != baseline_actor["actor"].keys() or any(
+                not torch.equal(value, baseline_actor["actor"][name]) for name, value in identity["actor"].items()):
+            raise ValueError("预先评价的基线不属于本次更新前GENMO张量")
+        if not (initial_path/"physical_summary.json").is_file():
+            raise ValueError("预先评价尚未完整结束，不能使用部分结果作为固定基线")
+        outputs["initial"] = initial_path
     for mode, path in outputs.items():
         if (path / "physical_summary.json").is_file():
             continue
