@@ -26,6 +26,12 @@ class ReferenceAdapter(nn.Module):
 
     def forward(self, fields):
         x = self.input_spec.flatten(fields)
+        return self.forward_packed(x)
+
+    def forward_packed(self, x):
+        """已按InputSpec打包的内部批量路径；动作出口统一执行有限性检查。"""
+        if x.shape[-1] != self.input_spec.dimension:
+            raise ValueError("Adapter输入必须保持2654维")
         d = self.net(x).reshape(len(x), 10, 27).tanh() * self.bounds
         rotation = d[..., 3:6]
         rotation = rotation / (rotation.norm(dim=-1, keepdim=True) / .05).clamp_min(1.)

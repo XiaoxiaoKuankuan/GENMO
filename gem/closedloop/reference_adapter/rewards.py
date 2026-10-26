@@ -38,7 +38,7 @@ class Rewards:
             raise ValueError("未知附加奖励名称")
 
     def __call__(self, z, corrected, state_next, action, nominal_next, bounds):
-        r_sm, original = self.runtime.reward(state_next, action, z.previous_action, nominal_next)
+        r_sm, original = self.runtime.reward(state_next, action, z.previous_action, nominal_next, diagnostics=True)
         memory = self.music.push(z.music_state, state_next[..., 34:], nominal_next.qd, z.tick+12)
         memory, r_music, activity, music_info = self.music.settle(memory, z.audio)
         normalized = corrected.plan.residual / bounds
@@ -49,7 +49,7 @@ class Rewards:
                      reference_limit=(torch.relu(q-self.runtime.mdp.soft_hi)+torch.relu(self.runtime.mdp.soft_lo-q)).sum(-1).mean(-1),
                      activity=activity)
         raw = {"sm": r_sm, "music": r_music, **costs, **original,
-               **sm_diagnostics(self.runtime, state_next, nominal_next), **music_info,
+               **music_info,
                "halo_max_abs": corrected.halo_residual.abs().amax(-1),
                "target_qd_max_abs": corrected.future.qd.abs().amax((1, 2)),
                "residual_saturation": (normalized.abs() >= .98).to(q).mean((1, 2))}
