@@ -46,3 +46,14 @@ def test_overwritten_future_version_does_not_pollute_current_support(tensor_stat
     assert deps.control_depth(committed.reference, 0) == 0
     assert deps.control_depth(committed.reference, 120) == 100
     assert deps.control_depth(committed.reference, 120, future_steps=0) == 0
+def test_forecast_physical_ticks_are_independent_of_graph_depth():
+    """93个物理控制步可具有101步图依赖；缺失中间状态仍必须被拒绝。"""
+    from gem.closedloop.mb_control.dependency import paired_forecast_timeline
+    meta = {"episode_start_tick": 0, "request_tick": 720, "forecast_tick": 1116,
+            "branch_control_steps": 33, "recorded_control_steps": 93,
+            "state_ticks": list(range(12, 1117, 12)), "dependency_steps": 101}
+    assert paired_forecast_timeline(meta, dict(meta), expected_forecast_tick=1116)
+    missing = dict(meta, state_ticks=meta["state_ticks"][:70]+meta["state_ticks"][71:])
+    assert not paired_forecast_timeline(missing, missing, expected_forecast_tick=1116)
+    assert not paired_forecast_timeline(meta, dict(meta, forecast_tick=1104), expected_forecast_tick=1116)
+

@@ -16,6 +16,8 @@ from .returns import actor_return
 from .execution_audit import state_probe
 from .validation import state_envelope
 from .forecast import forecast_rollout
+from .dependency import paired_forecast_timeline
+from .audit_metrics import trajectory_metrics
 
 
 def state_errors(predicted, real, kin=None):
@@ -82,22 +84,26 @@ def audit_generated_reference(engine, collector, music, initial, *, noise_seed, 
             pass
         z = collector.reset(music, initial)
         engine.actor = base_actor
-        trace, branch_states, metadata = [], [], {}
+        trace, branch_states, metadata, ticks = [], [], {}, []
+        def record_state(value):
+            trace.append(value.state.detach().cpu())
+            ticks.append(value.tick)
         def capture_request(state, ticket, index):
             if index != branch_index:
                 return
             result = forecast_rollout(state, collector.adapter, ticket.first_influence_tick,
                 transition_fn=collector.env.step_physics if physical else None,
-                on_step=lambda value: branch_states.append(value.state.detach().cpu()))
+                on_step=lambda value: (branch_states.append(value.state.detach().cpu()), ticks.append(value.tick)))
             metadata.update(request_tick=state.tick, forecast_tick=ticket.first_influence_tick,
-                            branch_control_steps=result.control_steps, prefix_control_steps=len(trace))
+                            branch_control_steps=result.control_steps, prefix_control_steps=len(trace),
+                            episode_start_tick=0, state_ticks=ticks, recorded_control_steps=len(ticks))
             trace.extend(branch_states)
             raise BranchComplete
         with torch.no_grad():
             try:
                 engine.rollout(z, noises, latencies,
                     transition_fn=collector.env.step_physics if physical else None,
-                    on_step=lambda state, reward: trace.append(state.state.detach().cpu()),
+                    on_step=lambda state, reward: record_state(state),
                     on_request=capture_request)
             except BranchComplete:
                 pass
@@ -122,8 +128,8 @@ def audit_generated_reference(engine, collector, music, initial, *, noise_seed, 
             predicted_branch, model_meta = run_forecast_branch(False, index)
             real_branch, real_meta = run_forecast_branch(True, index)
             complete = (predicted_branch is not None and real_branch is not None and
-                        model_meta == real_meta and len(predicted_branch) == len(real_branch) and
-                        len(predicted_branch) >= branch["dependency_steps"])
+                        len(predicted_branch) == len(real_branch) == model_meta.get("recorded_control_steps") and
+                        paired_forecast_timeline(model_meta, real_meta, expected_forecast_tick=branch["forecast_tick"]))
             errors = ({k: float(v) for k, v in state_errors(predicted_branch, real_branch,
                 collector.adapter.runtime.kin).items()} if complete else {"status": "incomplete_paired_forecast"})
             start = model_meta.get("prefix_control_steps", 0)
@@ -187,6 +193,9 @@ def audit_generated_reference(engine, collector, music, initial, *, noise_seed, 
                 "real_state_envelope": state_envelope(torch.cat((initial.detach().cpu(), real_trace))),
                 "forecast_branches": model_intervals[-1].event.get("forecast_branches", []),
                 "paired_forecast_audits": forecast_audits,
+                "closed_loop_prediction": {"passed": bool(prediction_passed), "statistics": trajectory_metrics(model_trace[:length], real_trace[:length], collector.adapter.runtime.kin, limits=criteria["state_rmse_limits"] if criteria else None)},
+                "forecast_prediction": {"passed": all(b["passed"] for b in forecast_audits), "branches": forecast_audits},
+                "closed_loop_physical_direction": {"passed": bool(direction_passed), "candidates": candidates},
                 "candidates": candidates, "direction_fraction": direction_fraction,
                 "state_only_direction_fraction": state_direction_fraction,
                 "candidate_pairwise_rank_agreement": rank_agreement, "reset_repeat_max_abs": repeat_error,
@@ -238,19 +247,27 @@ def audit_known_reference(collector, music, initial, reference, horizons=(5, 10,
         diagnostics["teacher_forced_mean_error"] = {
             "root_position_m": (teacher_forced[:, :3] - traces["real"][:, :3]).mean(0).tolist(),
             "joint_position_rad": (unflatten_state(teacher_forced)[4] - unflatten_state(traces["real"])[4]).mean(0).tolist()}
-    result = {}
+    result, detailed = {}, {}
     for regime in ("fixed_real_actions", "fixed_reference_closed_loop"):
         prediction, real = traces[regime], traces["real"]
-        errors = {}
+        errors, stats = {}, {}
         for horizon in horizons:
             if min(len(prediction), len(real)) < horizon:
                 errors[str(horizon)] = {"status": "insufficient_physical_horizon"}
             else:
                 errors[str(horizon)] = {k: float(v) for k, v in state_errors(prediction[:horizon], real[:horizon], collector.adapter.runtime.kin).items()}
-        result[regime] = errors
-    passed = criteria is not None and all("status" not in value and all(value[k] <= bound for k, bound in criteria["state_rmse_limits"].items())
+                stats[str(horizon)] = trajectory_metrics(prediction[:horizon], real[:horizon], collector.adapter.runtime.kin, limits=criteria["state_rmse_limits"] if criteria else None)
+        result[regime], detailed[regime] = errors, stats
+    legacy_combined_passed = criteria is not None and all("status" not in value and all(value[k] <= bound for k, bound in criteria["state_rmse_limits"].items())
                                          for regime in result.values() for value in regime.values())
-    return {"regimes": result, "passed": bool(passed), "horizons": horizons,
+    def regime_passed(name):
+        return criteria is not None and all("status" not in v and all(v[k] <= bound for k, bound in criteria["state_rmse_limits"].items()) for v in result[name].values())
+    return {"regimes": result, "passed": bool(regime_passed("fixed_reference_closed_loop")), "horizons": horizons,
+            "pass_semantics": "closed_loop_only_at_requested_horizons",
+            "legacy_combined_passed": bool(legacy_combined_passed),
+            "one_step_dynamics": trajectory_metrics(teacher_forced, traces["real"], collector.adapter.runtime.kin, limits=criteria["state_rmse_limits"] if criteria else None),
+            "fixed_action_stress": {"passed": regime_passed("fixed_real_actions"), "formal_gate": False, "statistics": detailed["fixed_real_actions"]},
+            "closed_loop_prediction": {"passed": regime_passed("fixed_reference_closed_loop"), "statistics": detailed["fixed_reference_closed_loop"]},
             "diagnostics": diagnostics,
             "real_state_envelope": state_envelope(traces["real"]),
             "real_control_steps": len(traces["real"]), "initialization": "reference_first_full_state_no_future_real_state"}

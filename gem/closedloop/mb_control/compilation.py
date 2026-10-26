@@ -17,6 +17,10 @@ def compile_networks(actor, adapter):
     # backward共享同一图的retain_graph路径。关闭的只是缓存复用，不是输入求导。
     from torch._functorch import config as aot_config
     aot_config.donated_buffer = False
+    # 同一冻结网络在BPTT图中被反复调用，保存的激活不能被后续调用复用写入。
+    from torch._inductor import config as inductor_config
+    inductor_config.inplace_buffers = False
+    inductor_config.allow_buffer_reuse = False
     actor.stage1.denoiser.compile(fullgraph=True, dynamic=False)
     actor.stage1.history_encoder.compile(fullgraph=True, dynamic=False)
     adapter.bundle.actor.compile(fullgraph=True, dynamic=False)

@@ -8,6 +8,24 @@
 """
 
 
+def paired_forecast_timeline(model, physical, *, expected_forecast_tick):
+    """物理完整性只看600Hz时间戳；图的最长依赖另由ReferenceDependencies验收。"""
+    if model.get("state_ticks") != physical.get("state_ticks"):
+        return False
+    ticks = model.get("state_ticks", [])
+    start = model.get("episode_start_tick", 0)
+    if not ticks or ticks != list(range(start + 12, expected_forecast_tick + 1, 12)):
+        return False
+    for meta in (model, physical):
+        if meta.get("forecast_tick") != expected_forecast_tick:
+            return False
+        if meta.get("recorded_control_steps") != len(ticks):
+            return False
+        if meta.get("branch_control_steps") * 12 != expected_forecast_tick - meta.get("request_tick"):
+            return False
+    return True
+
+
 class ReferenceDependencies:
     def __init__(self, initial_reference):
         self.version_depths = {int(v): 0 for v in initial_reference.source_versions.unique().tolist()}
