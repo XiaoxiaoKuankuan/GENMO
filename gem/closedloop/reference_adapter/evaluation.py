@@ -62,8 +62,10 @@ def summarize(rows, *, contacts=None, runtime=None):
     keys = ["body_pos", "body_ori", "body_linvel", "body_angvel", "root_pos", "root_ori",
             "error_body_pos", "error_body_ori", "error_body_linvel", "error_body_angvel",
             "error_root_pos", "error_root_ori", "track", "action_rate", "joint_limit", "residual_saturation",
-            "halo_max_abs", "target_qd_max_abs", "music", "activity"]
+            "halo_max_abs", "target_qd_max_abs", "sm", "music", "activity", "magnitude", "smooth",
+            "overlap", "reference_limit", "music_precision_cost", "music_coverage_cost", "music_duplicate_cost"]
     terms = {k: float(torch.cat([r.raw[k].reshape(-1) for r in rows]).mean()) for k in keys}
+    weighted_sums = {k: float(torch.cat([r.weighted[k].reshape(-1) for r in rows]).sum()) for k in rows[0].weighted}
     slip = None
     if contacts is not None and runtime is not None:
         from supermimic.mdp import unflatten_state
@@ -77,6 +79,9 @@ def summarize(rows, *, contacts=None, runtime=None):
                 supported_reference_complete=rows[-1].reason in ("music_end", "reference_end"),
                 full_music_complete=rows[-1].reason == "music_end", final_tick=rows[-1].end.tick,
                 total_reward=float(sum(r.reward.sum() for r in rows)), sm_terms=terms,
+                weighted_reward_sums=weighted_sums,
+                weighted_step_terms={k: v/len(rows) for k, v in weighted_sums.items()},
+                music_valid_fraction=float(torch.cat([r.raw["music_valid"].reshape(-1) for r in rows]).float().mean()),
                 root_position_rmse_m=terms["error_root_pos"]**.5, root_orientation_rmse_rad=terms["error_root_ori"]**.5,
                 music=beat_report(qd, ticks, rows[0].start.audio),
                 mean_abs_joint_speed=float(qd.abs().mean()), joint_range_mean=float((q.amax(0)-q.amin(0)).mean()),
