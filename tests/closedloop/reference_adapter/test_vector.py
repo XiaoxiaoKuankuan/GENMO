@@ -188,3 +188,33 @@ def test_vector_complete_checkpoint_restores_optimizers(system, tmp_path):
     for k,module in modules.items():
         for name,value in module.state_dict().items():torch.testing.assert_close(value,expected[k][name])
         assert optimizers[k].state_dict()['state']
+
+
+def test_contact_refinement_never_hides_negative_or_noise():
+    import copy
+    from gem.closedloop.reference_adapter.vector_audit import resolve_contact_case
+    criteria = dict(repeatability_max_abs=1e-4, root_position_m=.05)
+    probe = dict(kind='residual_offset', direction_status='uncertain_contact_change', passed=False,
+                 physical_return_difference=.0055, noise_floor=1e-6, contact_matches_baseline=False)
+    coarse = dict(passed=False, real_terminal=False, repeat_contacts_equal=True, initial_max_abs=0.,
+                  repeatability_max_abs=1e-6, model_errors=dict(root_position_m=.0005), directions=[probe])
+    trial = copy.deepcopy(coarse)
+    trial.update(passed=True)
+    trial['directions'][0].update(passed=True, direction_status='positive', contact_matches_baseline=True,
+                                  physical_return_difference=.0002)
+    assert resolve_contact_case(coarse, [trial, copy.deepcopy(trial)], criteria)['passed']
+    assert not resolve_contact_case(coarse, [trial], criteria)['passed']
+    negative = copy.deepcopy(trial)
+    negative['directions'][0].update(direction_status='negative', passed=False, physical_return_difference=-.0002)
+    assert not resolve_contact_case(coarse, [trial, negative], criteria)['passed']
+    # 已通过的大尺度也不能掩盖新测得的小尺度高信噪比反向。
+    assert not resolve_contact_case(trial, [trial, negative], criteria)['passed']
+    noisy = copy.deepcopy(trial)
+    noisy['directions'][0].update(direction_status='uncertain_below_noise', passed=False, physical_return_difference=1e-8)
+    assert not resolve_contact_case(coarse, [trial, noisy], criteria)['passed']
+    crossed = copy.deepcopy(trial)
+    crossed['directions'][0]['contact_matches_baseline'] = False
+    assert not resolve_contact_case(coarse, [trial, crossed], criteria)['passed']
+    original_negative = copy.deepcopy(coarse)
+    original_negative['directions'][0].update(direction_status='negative', physical_return_difference=-.0055)
+    assert not resolve_contact_case(original_negative, [trial, trial], criteria)['passed']

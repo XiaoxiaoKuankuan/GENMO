@@ -2,8 +2,9 @@
 
 仅用审计歌曲比较H1/H4/H8/H16的实际回报、接触分支、重复噪声与独立WM预测。
 每个case从固定初态重放0/50步前缀，不以直接写入预测状态冒充真实起点。接触分支
-变化和噪声以下信号保持不确定；高信噪比反向明确失败，不能由loss下降或短时通过
-覆盖H16反例。允许选择通过的较短时域，不放宽既有数值/物理阈值。
+变化先保持不确定，再用预先固定的1/5、1/25扰动做两次真实局部复测，两档均在相同
+接触分支且通过原噪声/重复性/状态门槛才确认局部方向。任何高信噪比反向明确失败，
+不能由更小扰动、loss下降或短时通过覆盖H16反例；所有原始结果完整保存。
 """
 
 import torch
@@ -44,7 +45,7 @@ def contact_tensors(env, count):
     return signature, feet
 
 
-def physical_directions(collector, control, dynamics, critic, criteria, horizons=(1, 4, 8, 16)):
+def _physical_directions_once(collector, control, dynamics, critic, criteria, horizons):
     bank = control.bank
     audit = bank.by_split['audit']
     if len(audit) != 4 or collector.num_envs < 24:
@@ -116,12 +117,15 @@ def physical_directions(collector, control, dynamics, critic, criteria, horizons
                         finite = bool(torch.isfinite(gradients[kind][k]))
                         rms = float((first_actions[k*6+plus]-first_actions[k*6+minus]).square().mean().sqrt())
                         status = ('nonfinite_or_zero_gradient' if not finite or norm <= 1e-12 else
+                                  'negative' if delta < -noise else
                                   'uncertain_contact_change' if changed else 'uncertain_below_noise' if abs(delta) <= noise else
                                   'positive' if delta > 0 else 'negative')
                         direction_reports.append(dict(kind=kind, direction_status=status, passed=status == 'positive' and rms > 0,
                             physical_return_difference=delta, physical_central_derivative=delta/(2*epsilon),
                             model_directional_derivative=norm, noise_floor=noise, signal_to_noise=abs(delta)/noise,
-                            contact_branch_changed=changed, action_rms_difference=rms))
+                            contact_branch_changed=changed, action_rms_difference=rms,
+                            contact_matches_baseline=bool((contact_series[:, k, plus] == contact_series[:, k, 0]).all()
+                                and (contact_series[:, k, minus] == contact_series[:, k, 0]).all()), epsilon=epsilon))
                     repeat_ok = max(initial_error, repeat_error) <= criteria['repeatability_max_abs'] and repeat_contacts
                     passed = repeat_ok and all(error[key] <= criteria[key] for key in error)
                     passed &= all(d['passed'] for d in direction_reports) and not bool(done[k*6:k*6+6].any())
@@ -134,3 +138,64 @@ def physical_directions(collector, control, dynamics, critic, criteria, horizons
                 evidence='same_simulation_real_paired_reset_prefix_no_future_execution',
                 finedance189=[c for c in cases if '189' in c['task']],
                 h16_allowed=16 in passed)
+
+
+def resolve_contact_case(coarse, trials, criteria):
+    """只补证原本为正但跨接触的局部方向；负方向和其它失败不能被小步长覆盖。"""
+    import copy
+    result = copy.deepcopy(coarse)
+    result['coarse_passed'] = coarse['passed']
+    result['local_trials'] = trials
+    for trial in trials:
+        for probe in trial['directions']:
+            if probe['direction_status'] == 'negative':
+                result['passed'] = False
+                result['local_high_snr_negative'] = probe
+                return result
+    if coarse['passed']:
+        return result
+    def physics_ok(case):
+        return (not case['real_terminal'] and case['repeat_contacts_equal']
+                and max(case['initial_max_abs'], case['repeatability_max_abs']) <= criteria['repeatability_max_abs']
+                and all(value <= criteria[key] for key, value in case['model_errors'].items()))
+    if not physics_ok(coarse) or len(trials) != 2 or not all(physics_ok(t) for t in trials):
+        return result
+    if any(d['direction_status'] not in ('positive', 'uncertain_contact_change')
+           or d['physical_return_difference'] < -d['noise_floor'] for d in coarse['directions']):
+        return result
+    for direction in result['directions']:
+        probes = [next(d for d in t['directions'] if d['kind'] == direction['kind']) for t in trials]
+        # 任何复测发现明确反向都保留失败；不挑选一次好结果覆盖反例。
+        if any(d['direction_status'] == 'negative' for d in probes):
+            return result
+        if direction['passed']:
+            continue
+        if not all(d['passed'] and d['contact_matches_baseline'] for d in probes):
+            return result
+        direction.update(coarse_direction_status=direction['direction_status'],
+                         direction_status='positive_two_local_scales', passed=True)
+    result['passed'] = all(d['passed'] for d in result['directions'])
+    return result
+
+
+def physical_directions(collector, control, dynamics, critic, criteria, horizons=(1, 4, 8, 16)):
+    coarse = _physical_directions_once(collector, control, dynamics, critic, criteria, horizons)
+    pending = sorted({c['horizon'] for c in coarse['cases'] if not c['passed']
+        and any(d['direction_status'] == 'uncertain_contact_change' for d in c['directions'])
+        and all(d['direction_status'] in ('positive', 'uncertain_contact_change') for d in c['directions'])})
+    trials = []
+    for factor in (.2, .04):
+        if not pending:
+            break
+        refined = dict(criteria, residual_epsilon=criteria['residual_epsilon']*factor,
+                       action_epsilon=criteria['action_epsilon']*factor)
+        trials.append(_physical_directions_once(collector, control, dynamics, critic, refined, pending))
+    def identity(case):
+        return case['task'], case['start_steps'], case['horizon']
+    by_trial = [{identity(c): c for c in trial['cases']} for trial in trials]
+    cases = [resolve_contact_case(c, [t[identity(c)] for t in by_trial if identity(c) in t], criteria)
+             for c in coarse['cases']]
+    passed = [h for h in horizons if all(c['passed'] for c in cases if c['horizon'] == h)]
+    return dict(coarse, cases=cases, passed_horizons=passed, coarse_passed_horizons=coarse['passed_horizons'],
+                local_refinement_factors=[.2, .04], h16_allowed=16 in passed,
+                finedance189=[c for c in cases if '189' in c['task']])

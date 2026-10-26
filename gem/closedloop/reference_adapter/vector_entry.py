@@ -229,8 +229,10 @@ def main():
                 print(json.dumps(result, ensure_ascii=False), flush=True)
                 return 0
             if args.resume:
+                running_source = status['source']
                 status.update(load_vector(args.resume, engine, critic, optimizers, replay, tangent, collector, cfg, validation))
-                status.update(pid=os.getpid(), started_unix=started, phase='resume_requires_fresh_physics_gate')
+                status.update(pid=os.getpid(), source=running_source, resumed_from=args.resume,
+                              restarted_unix=started, phase='resume_requires_fresh_physics_gate')
             if args.mode == 'audit':
                 result = physical_directions(collector, control, engine.dynamics, critic, criteria)
                 json_write(output/'directions.json', result)
@@ -260,10 +262,11 @@ def main():
             iteration = int(status.get('iteration', 0))
             last_audit_wm = -1
             last_saved = -1
+            last_checkpoint_unix = time.time()
             peak_nvidia = gpu_usage() or 0
 
             def checkpoint(label):
-                nonlocal last_saved
+                nonlocal last_saved, last_checkpoint_unix
                 status.update(wm_updates=engine.dynamics.model_version, real_transitions=collector.real_transitions,
                               real_transitions_by_role=collector.real_by_role.copy(),
                               collector_resets=collector.reset_count, iteration=iteration)
@@ -271,6 +274,7 @@ def main():
                 save_vector(destination, engine, critic, optimizers, replay, tangent, collector, status.copy(), cfg, validation)
                 json_write(output/'latest_checkpoint.json', dict(path=str(destination), **status), replace=True)
                 last_saved = status['accepted_updates']
+                last_checkpoint_unix = time.time()
 
             while status['accepted_updates'] < vc['target_accepted_updates']:
                 loop_start = time.perf_counter()
@@ -333,7 +337,7 @@ def main():
                     status['direction_passed_horizons'] = gate['passed_horizons']
                     collector.reset(perturb=True)
                     checkpoint('full')
-                if horizon is None and iteration % 100 == 0:
+                if horizon is None and time.time()-last_checkpoint_unix >= 1800:
                     checkpoint('supervised_waiting')
                 peak_nvidia = max(peak_nvidia, gpu_usage() or 0)
                 status.update(iteration=iteration, wm_updates=engine.dynamics.model_version, real_transitions=collector.real_transitions,
@@ -354,6 +358,12 @@ def main():
                 append_json(output/'training.jsonl', report)
                 json_write(output/'status.json', status, replace=True)
                 print(json.dumps(status, ensure_ascii=False), flush=True)
+                # 仅响应用户/维护者显式请求，在完整更新边界保存再退出，不由指标好坏触发。
+                if (output/'stop_after_checkpoint.request').exists():
+                    checkpoint('requested_exit')
+                    status['phase'] = 'stopped_after_requested_checkpoint'
+                    json_write(output/'status.json', status, replace=True)
+                    return 0
             checkpoint('complete')
             status['phase'] = 'completed_target_accepted_updates'
             json_write(output/'status.json', status, replace=True)

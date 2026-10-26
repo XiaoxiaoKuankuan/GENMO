@@ -21,8 +21,17 @@ def main():
     p.add_argument('--python', required=True); p.add_argument('--num-envs', type=int, default=1024)
     p.add_argument('--session-prefix', required=True)
     p.add_argument('--isaaclab', required=True); p.add_argument('--inductor-cache', required=True)
+    p.add_argument('--resume-root', help='八组各自完整checkpoint所在的旧根目录；不共享在线数据')
     args=p.parse_args()
     root=Path(args.root).resolve(); pressure=Path(args.pressure_root).resolve()
+    resumes = {}
+    if args.resume_root:
+        for gpu in range(8):
+            record = json.loads((Path(args.resume_root)/f'gpu{gpu}/latest_checkpoint.json').read_text())
+            checkpoint = Path(record['path'])
+            if not checkpoint.is_file():
+                raise ValueError(f'GPU{gpu}缺少自己的完整恢复文件')
+            resumes[gpu] = str(checkpoint)
     repo=Path(__file__).resolve().parents[1]
     if args.num_envs not in (512, 1024, 2048):
         raise ValueError('正式环境数只接受已验证的512/1024/2048')
@@ -70,6 +79,8 @@ def main():
             args.python,'-B','-u',str(runtime_repo/'tools/train_stage2_supermimic_adapter_vector.py'),
             '--config',str(config),'--output',str(output),'--mode','train','--num-envs',str(args.num_envs),
             '--visualizer','none','--deterministic']
+        if gpu in resumes:
+            command += ['--resume', resumes[gpu]]
         runner=root/f'run_gpu{gpu}.sh'
         content='#!/usr/bin/env bash\n# 单GPU独立实验；不自动重启、不停止其他组。\nset -u\n'
         content+='cd '+shlex.quote(str(runtime_repo))+' || exit 3\n'
