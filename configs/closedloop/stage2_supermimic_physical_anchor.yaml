@@ -69,6 +69,7 @@ rewards:
   root_huber_weight: 0.0
   music_surrogate_enabled: false
 execution:
+  physics_determinism: run_to_run
   start_large_scale_training: false
   maximum_explicit_updates: 8
   preserve_episode_across_collection_windows: true

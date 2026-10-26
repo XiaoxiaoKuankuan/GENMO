@@ -41,6 +41,7 @@ def save_warmup(path, trainer, cfg):
         "critic": trainer.critic.state_dict(), "optimizer": trainer.critic_optimizer.state_dict(),
         "quality": trainer.critic_quality, "critic_updates": trainer.critic_updates,
         "contract": {k: cfg[k] for k in ("model", "clock", "rewards", "critic")},
+        "physics_determinism": cfg.get("execution", {}).get("physics_determinism", "not_guaranteed"),
         "frozen_sha256": trainer.imagination.adapter.bundle.metadata["sha256"]}, path)
 
 
@@ -51,6 +52,8 @@ def load_warmup(path, trainer, cfg):
     if ck["frozen_sha256"] != trainer.imagination.adapter.bundle.metadata["sha256"] or ck["contract"] != {
             k: cfg[k] for k in ("model", "clock", "rewards", "critic")}:
         raise ValueError("Critic实际资产、模型条件、奖励或调度合同改变")
+    if ck.get("physics_determinism", "not_guaranteed") != cfg.get("execution", {}).get("physics_determinism", "not_guaranteed"):
+        raise ValueError("价值预热与当前Newton确定性设置不一致")
     if any(not torch.equal(v.detach().cpu(), ck["actor"][n]) for n,v in trainer.actor.state_dict().items()):
         raise ValueError("预热回报不属于当前GENMO权重")
     trainer.critic.load_state_dict(ck["critic"], strict=True)

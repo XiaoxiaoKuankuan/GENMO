@@ -147,6 +147,10 @@ def main(kind):
     from supermimic.env import make_sim
     from supermimic.bridge.streaming_env import StreamingPhysicalEnv
     sim_cfg = make_sim(args.torch_device, args)
+    if cfg.get("execution", {}).get("physics_determinism"):
+        from isaaclab.utils import replace as config_replace
+        sim_cfg = config_replace(sim_cfg, physics=config_replace(sim_cfg.physics,
+            deterministic_mode=cfg["execution"]["physics_determinism"]))
     activity = [torch.profiler.ProfilerActivity.CPU, torch.profiler.ProfilerActivity.CUDA]
     profiler = torch.profiler.profile(activities=activity, profile_memory=True) if args.profile else nullcontext()
     with launch_simulation(sim_cfg, args), profiler as measured:

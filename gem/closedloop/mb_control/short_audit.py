@@ -115,12 +115,28 @@ def audit_short(collector, tasks, output, cfg, criteria, *, device):
                 labels = phase_labels(sample, event, events_by_tick.get(sample.state.tick-12), collector.adapter)
                 selected.append((sample, labels)); phases_seen.update(labels)
         actions = {x.start.tick: x.end.previous_action for x in controls}
+        controls_by_tick = {x.start.tick: x for x in controls}
 
         def restore_prefix(tick):
             collector.env.reset(torch.arange(1, device=initial.device), initial)
+            state = controls[0].start.detached()
             with torch.no_grad():
                 for t in range(0, tick, 12):
-                    collector.env.step_physics(actions[t])
+                    # 长前缀不能开环重放固定动作：极小求解器噪声会破坏恢复起点。
+                    # 重放同一已记录参考时间轴，SM仍按真实反馈计算动作，不使用未来真值。
+                    state = replace(state, reference=controls_by_tick[t].start.reference)
+                    state = collector.adapter.refresh_current_observation(state)
+                    _, _, goal = state.reference.read_current_future(t)
+                    action = collector.adapter.bundle.act(state.sm_history, goal)
+                    next_state = collector.env.step_physics(action)
+                    state = collector.adapter.advance(state, next_state, action, origin="real")
+            expected = controls_by_tick[tick].start.state
+            error = float((state.state-expected).abs().max())
+            if error > criteria["reset_replay_max_abs"]:
+                (output/"prefix_restore_failure.json").write_text(json.dumps({"task": task["id"],
+                    "tick": tick, "state_max_abs": error, "method": "same_reference_closed_loop_reset_replay",
+                    "not_world_model_evidence": True}, indent=2))
+                raise RuntimeError(f"物理前缀恢复偏差{error}，不能把不配对的anchor当作WM误差")
 
         for anchor_index, (sample, labels) in enumerate(selected):
             request = sample.generation.request
@@ -143,6 +159,7 @@ def audit_short(collector, tasks, output, cfg, criteria, *, device):
                     "actual_ready_tick": sample.generation.actual_ready_tick, "commit_tick": sample.generation.commit_tick,
                     "consumed_source_ticks": sample.consumed_source_ticks, "previously_consumed_versions": sample.previously_consumed_versions,
                     "no_previous_consumption_verified": True, "artifact": str(saved),
+                    "prefix_restore": "same_reference_closed_loop_reset_replay",
                     "forecast_prediction": {"passed": forecast_ok, "statistics": forecast_stats,
                         "recorded_context_max_abs": float((predicted.context.features-sample.generation.forecast.features).abs().max()),
                         "condition_error_rms": float((predicted.context.features-physical.context.features).square().mean().sqrt())}, "horizons": {}}
@@ -223,6 +240,7 @@ def audit_short(collector, tasks, output, cfg, criteria, *, device):
     report.update(schema="physical_anchor_short_bptt.v1", training_method="physical_anchor_short_bptt",
         cases=all_cases, frozen_sha256=collector.adapter.bundle.metadata["sha256"], frozen_unchanged=True,
         forecast_enabled=True, source_hash_gate=False, validated_state_envelope=combine_envelopes(envelopes),
+        physics_determinism=cfg.get("execution", {}).get("physics_determinism", "not_guaranteed"),
         coverage={"physics": "nominal_flat_newton_mujoco_warp", "tasks": [
             {k: t.get(k) for k in ("id", "source", "split", "distribution_id")} for t in tasks]},
         task_identities={t["id"]: task_identity(t) for t in tasks}, criteria=criteria)

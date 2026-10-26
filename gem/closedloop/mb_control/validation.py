@@ -72,6 +72,8 @@ def select_short_horizon(cfg, report):
     """只认可新方法逐时域实测报告，旧supported_control_steps永不用于短时授权。"""
     if report.get("schema") != "physical_anchor_short_bptt.v1" or report.get("passed") is not True:
         raise ValueError("真实anchor短时物理精度/方向尚未通过")
+    if report.get("physics_determinism", "not_guaranteed") != cfg.get("execution", {}).get("physics_determinism", "not_guaranteed"):
+        raise ValueError("短时配对报告与本次Newton确定性设置不一致")
     if not report.get("frozen_unchanged") or not report.get("forecast_prediction_passed") or not report.get("phase_coverage_passed"):
         raise ValueError("冻结合同、预测条件或真实运动阶段覆盖不足")
     candidates = [h for h in report.get("supported_horizons", []) if h in (16, 24, 32) and
