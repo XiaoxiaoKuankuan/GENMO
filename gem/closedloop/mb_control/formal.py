@@ -76,7 +76,7 @@ def evaluate_checkpoint(cfg, output, checkpoint, *, update):
     if not config_path.exists():
         OmegaConf.save(OmegaConf.create(eval_cfg), config_path)
     environment = dict(os.environ, CUDA_VISIBLE_DEVICES=str(cfg["formal"]["evaluation_gpu"]), PYTHONDONTWRITEBYTECODE="1")
-    outputs = {"stage1": directory / "stage1_baseline", "full": directory / f"actor_{update:06d}"}
+    outputs = {"initial": directory / "initial_genmo_baseline", "full": directory / f"actor_{update:06d}"}
     for mode, path in outputs.items():
         if (path / "physical_summary.json").is_file():
             continue
@@ -84,14 +84,16 @@ def evaluate_checkpoint(cfg, output, checkpoint, *, update):
         if path.exists():
             path = path.with_name(path.name + f"_retry_{time.time_ns()}")
             outputs[mode] = path
-        model_mode = "stage1" if mode == "stage1" else ("full" if cfg["model"]["forecast_enabled"] else "no_forecast")
+        # 配对基线也运行相同Forecast/DDIM/异步路径，仅GENMO参数取更新前版本。
+        # 原Stage1无前瞻全曲能力由独立preflight报告验收，不能混入这里比较训练收益。
+        model_mode = "full" if cfg["model"]["forecast_enabled"] else "no_forecast"
         command = [sys.executable, "-u", "tools/evaluate_stage2_supermimic.py", "--config", str(config_path),
                    "--mode", model_mode, "--output", str(path)]
-        if mode != "stage1":
-            command += ["--actor-checkpoint", str(checkpoint)]
+        model_checkpoint = output/"checkpoints"/"initial_actor.pt" if mode == "initial" else checkpoint
+        command += ["--actor-checkpoint", str(model_checkpoint)]
         with (directory / (path.name+".log")).open("w") as log:
             subprocess.run(command, env=environment, stdout=log, stderr=subprocess.STDOUT, check=True)
-    baseline = json.loads((outputs["stage1"] / "physical_summary.json").read_text())
+    baseline = json.loads((outputs["initial"] / "physical_summary.json").read_text())
     current = json.loads((outputs["full"] / "physical_summary.json").read_text())
     quality = paired_quality(baseline, current, cfg["formal"]["degradation"])
     write_json(directory / f"paired_{update:06d}.json", quality)
@@ -184,6 +186,10 @@ def run_formal(args, cfg, output, trainer, collector, profile, tasks, report, so
             control_steps += quality["physical_control_steps"]
             snapshot("critic_ready.pt")
         trainer.imagination.support_guard = ModelSupport(report["validated_state_envelope"], device=args.torch_device)
+        if not (checkpoint_dir/"initial_actor.pt").is_file():
+            if trainer.accepted_actor_updates != 0:
+                raise ValueError("缺少更新前Actor，不能用已训练权重伪造配对基线")
+            snapshot("initial_actor.pt")
         if trainer.accepted_actor_updates > last_evaluated and (trainer.accepted_actor_updates == 1 or trainer.accepted_actor_updates % settings["evaluate_every"] == 0):
             run_evaluation(trainer.accepted_actor_updates)
         invalid_streak = 0

@@ -215,6 +215,7 @@ def audit_known_reference(collector, music, initial, reference, horizons=(5, 10,
     ref0, _, _ = z.reference.read_current_future(0)
     matched_initial = flatten_state((ref0.root_p, ref0.root_R, ref0.root_v, ref0.root_w, ref0.q, ref0.qd))
     traces, real_actions, real_inputs, real_context = {}, [], [], []
+    contact_motion_labels, actual_contact_trace = [], []
     with torch.no_grad():
         for regime in ("real", "fixed_real_actions", "fixed_reference_closed_loop"):
             z = collector.reset(music, matched_initial, initial_reference=reference)
@@ -235,6 +236,29 @@ def audit_known_reference(collector, music, initial, reference, horizons=(5, 10,
                 if regime == "real":
                     real_actions.append(a.detach().clone())
                     current, _, _ = z.reference.read_current_future(z.tick)
+                    contact = collector.env.contact_events()
+                    actual_contact_trace.append(contact)
+                    labels = []
+                    left, right = contact["left_foot"], contact["right_foot"]
+                    if left and right:
+                        labels.append("double_support")
+                    if left != right:
+                        labels.append("single_support")
+                    if len(actual_contact_trace) > 1:
+                        prior = actual_contact_trace[-2]
+                        if (left and not prior["left_foot"]) or (right and not prior["right_foot"]):
+                            labels.append("landing")
+                    _, _, velocity, angular, _, joint_velocity = unflatten_state(state)
+                    if left != right and (float(velocity[:, :2].norm()) > .08 or float(joint_velocity[:, :12].abs().max()) > .5):
+                        labels.append("stepping")
+                    if float(angular[:, 2].abs().max()) > .2:
+                        labels.append("turning")
+                    arms = [i for i,n in enumerate(collector.adapter.bundle.spec.joint_names) if "arm" in n or "elbow" in n]
+                    if float(joint_velocity[:, arms].abs().max()) > .7:
+                        labels.append("active_upper_body")
+                    if float((state[:, :3]-current.root_p).norm()) > .03 or float((state[:, 13:34]-current.q).square().mean().sqrt()) > .04:
+                        labels.append("tracking_deviation")
+                    contact_motion_labels.append(labels)
                     if bool(collector.adapter.runtime.termination(state, current).any()):
                         break
             traces[regime] = torch.cat(trace)
@@ -256,12 +280,21 @@ def audit_known_reference(collector, music, initial, reference, horizons=(5, 10,
                 errors[str(horizon)] = {"status": "insufficient_physical_horizon"}
             else:
                 errors[str(horizon)] = {k: float(v) for k, v in state_errors(prediction[:horizon], real[:horizon], collector.adapter.runtime.kin).items()}
-                stats[str(horizon)] = trajectory_metrics(prediction[:horizon], real[:horizon], collector.adapter.runtime.kin, limits=criteria["state_rmse_limits"] if criteria else None)
+                stats[str(horizon)] = trajectory_metrics(prediction[:horizon], real[:horizon], collector.adapter.runtime.kin,
+                    limits=criteria["state_rmse_limits"] if criteria else None, labels=contact_motion_labels[:horizon])
         result[regime], detailed[regime] = errors, stats
     legacy_combined_passed = criteria is not None and all("status" not in value and all(value[k] <= bound for k, bound in criteria["state_rmse_limits"].items())
                                          for regime in result.values() for value in regime.values())
     def regime_passed(name):
         return criteria is not None and all("status" not in v and all(v[k] <= bound for k, bound in criteria["state_rmse_limits"].items()) for v in result[name].values())
+    phase_statistics = {}
+    for label in sorted(set().union(*(set(v) for v in contact_motion_labels))):
+        indices = [i for i, labels in enumerate(contact_motion_labels) if label in labels]
+        phase_statistics[label] = {"control_steps": len(indices)}
+        for regime in ("fixed_real_actions", "fixed_reference_closed_loop"):
+            phase_statistics[label][regime] = trajectory_metrics(traces[regime][indices], traces["real"][indices],
+                collector.adapter.runtime.kin, limits=criteria["state_rmse_limits"] if criteria else None,
+                labels=[contact_motion_labels[i] for i in indices], ticks=[(i+1)*12 for i in indices])
     return {"regimes": result, "passed": bool(regime_passed("fixed_reference_closed_loop")), "horizons": horizons,
             "pass_semantics": "closed_loop_only_at_requested_horizons",
             "legacy_combined_passed": bool(legacy_combined_passed),
@@ -269,5 +302,6 @@ def audit_known_reference(collector, music, initial, reference, horizons=(5, 10,
             "fixed_action_stress": {"passed": regime_passed("fixed_real_actions"), "formal_gate": False, "statistics": detailed["fixed_real_actions"]},
             "closed_loop_prediction": {"passed": regime_passed("fixed_reference_closed_loop"), "statistics": detailed["fixed_reference_closed_loop"]},
             "diagnostics": diagnostics,
+            "phase_statistics": phase_statistics, "actual_contact_trace": actual_contact_trace,
             "real_state_envelope": state_envelope(traces["real"]),
             "real_control_steps": len(traces["real"]), "initialization": "reference_first_full_state_no_future_real_state"}

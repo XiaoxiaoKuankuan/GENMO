@@ -42,10 +42,11 @@ def motion_labels(states):
     return labels
 
 
-def trajectory_metrics(predicted, real, kin, *, limits=None, start_tick=0):
+def trajectory_metrics(predicted, real, kin, *, limits=None, start_tick=0, labels=None, ticks=None):
     if len(predicted) != len(real) or not len(real):
         raise ValueError("配对误差需要等长非空真实轨迹")
-    labels, result = motion_labels(real), {}
+    labels, result = motion_labels(real) if labels is None else labels, {}
+    ticks = [start_tick+(i+1)*12 for i in range(len(real))] if ticks is None else ticks
     for name, delta in component_errors(predicted, real, kin).items():
         frame = delta.square().mean(-1).sqrt()
         limit = (limits or {}).get(name)
@@ -54,7 +55,7 @@ def trajectory_metrics(predicted, real, kin, *, limits=None, start_tick=0):
         result[name] = {"rmse": float(delta.square().mean().sqrt()),
                        "p95_frame_error": float(torch.quantile(frame, .95)),
                        "endpoint_error": float(frame[-1]), "deviation_threshold": limit,
-                       "first_deviation_tick": start_tick + (first+1)*12 if first is not None else None,
-                       "first_deviation_seconds": (first+1)*.02 if first is not None else None,
+                       "first_deviation_tick": ticks[first] if first is not None else None,
+                       "first_deviation_seconds": (ticks[first]-start_tick)/600 if first is not None else None,
                        "first_deviation_motion": labels[first] if first is not None else None}
     return result

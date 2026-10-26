@@ -272,6 +272,13 @@ def main(kind):
                     from .formal import run_formal
                     run_formal(args, cfg, output, trainer, collector, profile, tasks, report, source_info)
                     return
+                short = cfg["imagination"].get("mode") == "physical_anchor_short_bptt"
+                if short:
+                    collector.anchor_horizon = engine.horizon_steps
+                    collector.record_controls = True
+                    if cfg["formal"].get("critic_warmup_checkpoint") and not args.resume:
+                        from .critic_warmup import load_warmup
+                        load_warmup(cfg["formal"]["critic_warmup_checkpoint"], trainer, cfg)
                 replay = RecentReplay(cfg["training"]["replay_capacity"], cfg["training"]["seed"])
                 supervised = SupervisionStream(cfg["stage1"]["data_config"], cfg["training"]["supervision_batch"],
                                                cfg["training"]["seed"], args.torch_device)
@@ -288,10 +295,18 @@ def main(kind):
                         task_cursor += 1
                         music, initial = task_inputs(task, adapter, args.torch_device)
                         collector.reset(music, initial)
+                    collector.actor_version = trainer.accepted_actor_updates
                     physical = collector.collect(cfg["training"]["collect_decisions"], replay=replay)
-                    states = replay.sample(cfg["training"]["actor_microbatch"])
-                    latencies = [profile.sample(engine.decisions) for _ in states]
-                    result = trainer.update(states, supervised.next(), latencies, physical_intervals=physical)
+                    if short:
+                        while replay.eligible_count(trainer.accepted_actor_updates) == 0 and not collector.terminal:
+                            collector.collect(1, replay=replay)
+                        physical = collector.take_controls()
+                        states = replay.sample(cfg["training"]["actor_microbatch"], actor_version=trainer.accepted_actor_updates)
+                        result = trainer.update_anchors(states, supervised.next(), physical_intervals=physical)
+                    else:
+                        states = replay.sample(cfg["training"]["actor_microbatch"])
+                        latencies = [profile.sample(engine.decisions) for _ in states]
+                        result = trainer.update(states, supervised.next(), latencies, physical_intervals=physical)
                     with (output / "training.jsonl").open("a") as stream:
                         stream.write(json.dumps(result, ensure_ascii=False, allow_nan=False) + "\n")
                     save_checkpoint(output / f"stage2_{trainer.update_index:06d}.pt", trainer, replay,
