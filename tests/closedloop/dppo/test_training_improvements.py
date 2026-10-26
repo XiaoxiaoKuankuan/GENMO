@@ -175,6 +175,23 @@ def test_music_statistics_average_seeds_before_counting_wins():
     assert result['improvement_fraction']==.75 and result['reward_delta']['p50']==1
 
 
+def test_formal_panel_never_reuses_a_physics_slot_between_music_tasks(tmp_path):
+    from pathlib import Path
+    import yaml
+    from gem.closedloop.dppo.evaluation_world import assign_tasks
+    from gem.closedloop.dppo.periodic_monitor import build_balanced_plan, shard_plan
+    from tests.closedloop.dppo.test_training_music_monitor import train_catalog
+    config=Path(__file__).resolve().parents[3]/'configs/closedloop/stage2_robofft_future_critic_formal_server1.yaml'
+    stage=yaml.safe_load(config.read_text())['stage10'];options=stage['evaluation']
+    plan=build_balanced_plan(train_catalog(tmp_path),samples_per_source=options['samples_per_source'],
+        seeds=options['seeds'],seconds=options['episode_seconds'],selection_seed=options['selection_seed'],
+        start_mode=options['start_mode'],unique_music=True,split='train',training_progress=True,original_split='train')
+    assert plan['task_count']==32 and options['persistent_world'] is False
+    for rank in range(stage['distributed']['world_size']):
+        queues=assign_tasks(shard_plan(plan,rank,8)['tasks'],options['envs_per_rank'])
+        assert all(len(queue)<=1 for queue in queues)
+
+
 def test_critic_difficult_groups_distinguish_absolute_music_time_from_continuous_execution():
     from gem.closedloop.dppo.critic_diagnostics import subgroup_labels
     rows=[]

@@ -1,4 +1,4 @@
-"""训练中更换固定音乐评估清单时，保留学习状态并补建真实Stage1物理基线。
+"""更换固定音乐评估清单或物理slot数量时，保留学习状态并补建真实Stage1物理基线。
 
 输入是已恢复完整checkpoint、Critic预热完成的训练上下文。只在用户显式配置的
 training_progress评估使用新任务清单时执行：从冻结Stage1副本构造只读策略视图，
@@ -46,7 +46,7 @@ def _stage1_context(c, workspace):
 
 
 def ensure_training_progress_baseline(c):
-    """仅为已存在且任务变化的训练集监视清单补建基线；首次训练沿用原初始化流程。"""
+    """任务或评估物理slot变化时补建基线；首次训练沿用原初始化流程。"""
     options=c.stage['evaluation']
     if options.get('purpose')!='training_progress':
         return None
@@ -58,7 +58,10 @@ def ensure_training_progress_baseline(c):
     previous=root_call(c.distributed,lambda:json.loads((c.output/'evaluation_baseline.json').read_text())
         if (c.output/'evaluation_baseline.json').exists() else None)
     fragment_transfer=bool(c.state.get('requires_stage1_rebaseline',False))
-    if not fragment_transfer and (previous is None or previous['plan_sha256']==plan['plan_sha256']):
+    slots=options.get('envs_per_rank',1)
+    old_slots=((previous or {}).get('evaluation_identity',{}).get('physics') or {}).get('evaluation_envs_per_rank',slots)
+    physics_change=previous is not None and old_slots!=slots
+    if not fragment_transfer and not physics_change and (previous is None or previous['plan_sha256']==plan['plan_sha256']):
         return None
     workspace=c.output/'evaluation_protocols'/plan['plan_sha256']/c.session.name
     root_call(c.distributed,lambda:workspace.mkdir(parents=True,exist_ok=False))
@@ -79,7 +82,8 @@ def ensure_training_progress_baseline(c):
         atomic_json(workspace/'evaluation_baseline.json',result)
         archive=None
         if previous is not None:
-            archive=c.output/'evaluation_protocols'/('previous_'+previous['plan_sha256'])
+            suffix=f'_slots{old_slots}' if physics_change else ''
+            archive=c.output/'evaluation_protocols'/('previous_'+previous['plan_sha256']+suffix)
             archive.mkdir(parents=True,exist_ok=True)
             for name in MONITOR_FILES:
                 source=c.output/name
@@ -97,7 +101,9 @@ def ensure_training_progress_baseline(c):
             split=plan['split'],original_split=plan['pool_original_split'],task_count=plan['task_count'],
             iteration=c.state['iteration'],archive=None if archive is None else str(archive),stage1_baseline=str(workspace),
             optimizer_reset=False,MC_preheat_repeated=fragment_transfer,
-            reason='new_fragment_value_target' if fragment_transfer else 'evaluation_task_change')
+            previous_evaluation_slots=old_slots,evaluation_slots=slots,
+            reason=('new_fragment_value_target' if fragment_transfer else
+                    'evaluation_physics_slots_change' if physics_change else 'evaluation_task_change'))
         atomic_json(c.output/'evaluation_monitor_change.json',change)
         return change
     change=root_call(c.distributed,publish)
@@ -107,4 +113,7 @@ def ensure_training_progress_baseline(c):
         c._periodic_fixed_reference=baseline._periodic_fixed_reference
     c.state['budget']=root_call(c.distributed,lambda:c.budget.state_dict())
     c.state.pop('requires_stage1_rebaseline',None)
+    if physics_change:
+        # 同一checkpoint先补做新物理布局的当前Actor评估；旧布局分数不混入新曲线。
+        c.state['requires_evaluation_protocol_start']=True
     return change

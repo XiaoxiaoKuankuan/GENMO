@@ -169,7 +169,8 @@ stage10:
     world_size: 8
   evaluation:
     quality_action: report_only
-    envs_per_rank: 2
+    # 32任务分到8卡，每个slot只运行一个任务，避免reset后的PhysX残留污染配对初态。
+    envs_per_rank: 4
     episode_seconds: 20.0
     every_actor_iterations: 10
     every_control_steps: 100000000

@@ -122,16 +122,18 @@ def test_monitor_change_retains_adam_and_progress_but_not_old_best(tmp_path,chan
 
 
 @pytest.mark.parametrize('fail',[False,True])
-def test_rebaseline_archives_only_after_real_stage1_evaluation_and_preserves_training(tmp_path,monkeypatch,fail):
-    catalog=train_catalog(tmp_path);old=build_balanced_plan(catalog)
+@pytest.mark.parametrize('physics_change',[False,True])
+def test_rebaseline_archives_only_after_real_stage1_evaluation_and_preserves_training(tmp_path,monkeypatch,fail,physics_change):
+    catalog=train_catalog(tmp_path);old=train_plan(catalog) if physics_change else build_balanced_plan(catalog)
     prior={'plan_sha256':old['plan_sha256'],'old_validation':True}
+    if physics_change:prior['evaluation_identity']={'physics':{'evaluation_envs_per_rank':2}}
     (tmp_path/'evaluation_baseline.json').write_text(json.dumps(prior))
     (tmp_path/'fixed_diagnostic_reference.json').write_text(json.dumps({'old_reference':True}))
     (tmp_path/'best_saved.json').write_text(json.dumps({'old_best':True}))
     actor=torch.nn.Linear(2,2);frozen=copy.deepcopy(actor).requires_grad_(False)
     actor(torch.ones(1,2)).sum().backward();before=actor.weight.detach().clone();gradient=actor.weight.grad.clone()
     options=dict(split='train',purpose='training_progress',original_split='train',samples_per_source=4,
-        seeds=[42,1729],episode_seconds=None,selection_seed=42,unique_music=True)
+        seeds=[42,1729],episode_seconds=None,selection_seed=42,unique_music=True,envs_per_rank=4 if physics_change else 1)
     state=dict(iteration=10,actor_updates=39,policy_version=10,best_saved={'old_val':True},
         regression_monitor={'iteration':10,'consecutive':2})
     c=NS(output=tmp_path,session=tmp_path/'session',catalog=catalog,stage={'evaluation':options},state=state,
@@ -146,7 +148,8 @@ def test_rebaseline_archives_only_after_real_stage1_evaluation_and_preserves_tra
         if fail:raise RuntimeError('physics unavailable')
         plan=train_plan(catalog)
         (view.output/'fixed_diagnostic_reference.json').write_text(json.dumps({'plan_sha256':plan['plan_sha256']}))
-        return {'plan_sha256':plan['plan_sha256'],'actor_identity':{'source':'Stage1'}}
+        return {'plan_sha256':plan['plan_sha256'],'actor_identity':{'source':'Stage1'},
+                'evaluation_identity':{'physics':{'evaluation_envs_per_rank':options['envs_per_rank']}}}
     monkeypatch.setattr('gem.closedloop.dppo.evaluation_runtime._evaluate',evaluate)
     training_rng=torch.get_rng_state().clone()
     if fail:
@@ -157,7 +160,10 @@ def test_rebaseline_archives_only_after_real_stage1_evaluation_and_preserves_tra
         change=ensure_training_progress_baseline(c)
         assert change['iteration']==10 and not change['optimizer_reset']
         assert json.loads((tmp_path/'evaluation_baseline.json').read_text())['baseline_provenance']['source_stage1_step']==595000
-        assert json.loads((tmp_path/'evaluation_protocols'/('previous_'+old['plan_sha256'])/'evaluation_baseline.json').read_text())==prior
+        suffix='_slots2' if physics_change else ''
+        assert json.loads((tmp_path/'evaluation_protocols'/('previous_'+old['plan_sha256']+suffix)/'evaluation_baseline.json').read_text())==prior
+        assert bool(state.get('requires_evaluation_protocol_start')) is physics_change
+        if physics_change:assert change['reason']=='evaluation_physics_slots_change'
         assert not (tmp_path/'best_saved.json').exists() and 'best_saved' not in state
         assert 'regression_monitor' not in state
         assert ensure_training_progress_baseline(c) is None

@@ -819,6 +819,9 @@ def run(cargs,config,distributed):
         elif _requires_initial_evaluation(cargs,c.state,root_call(distributed,lambda:(c.output/'evaluation_baseline.json').exists())):
             baseline=_evaluate(c,report,'initial')
             root_call(distributed,lambda:atomic_json(c.output/'evaluation_baseline.json',baseline))
+        if c.state.get('requires_evaluation_protocol_start'):
+            _evaluate(c,report,'evaluation_protocol_start')
+            c.state.pop('requires_evaluation_protocol_start',None)
         if cargs.evaluate_only:
             report.update(status='passed',scope='fixed_real_physics_evaluation_without_training',final_state=c.state)
             raise _FiniteDiagnosticComplete
