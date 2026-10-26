@@ -94,4 +94,4 @@ formal:
     minimum_duration_ratio: 0.9
     minimum_activity_ratio: 0.8
     maximum_beat_drop: 0.1
-    consecutive_evaluations: 2
+    # 仅报告指标变化，不因连续退化停止训练。

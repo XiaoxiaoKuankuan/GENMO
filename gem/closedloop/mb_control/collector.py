@@ -213,7 +213,10 @@ class PhysicalCollector:
                             self._append_anchor_step(step, replay)
                     self.metrics.append({k: float(v.mean()) for k, v in metrics.items()})
                     if self.record_trajectory:
-                        self.trajectory.append((z.tick, state1.cpu(), ref1.root_p.cpu(), action.cpu()))
+                        # 保存该控制帧实际读取的参考，供影子渲染；不能事后用新缓存
+                        # 重建已被覆盖的旧参考，也不把参考根平移到实际机器人位置。
+                        self.trajectory.append((z.tick, state1.cpu(), ref1.root_p.cpu(), action.cpu(),
+                                                ref1.root_R.cpu(), ref1.q.cpu()))
                     if failed:
                         self.terminal, reason = True, "physical_failure"
                         break

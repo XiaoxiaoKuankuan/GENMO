@@ -36,7 +36,10 @@ def test_physical_degradation_is_not_overridden_by_model_return():
     criteria={"completion_drop":.1,"minimum_duration_ratio":.9,"minimum_activity_ratio":.8,"maximum_beat_drop":.1}
     def report(duration,complete,activity):
         return {"model_return":10000.,"physical_results":[{"task":"a","seed":1,"complete":complete,
-            "physical_seconds":duration,"physical_metrics_mean":{"upper_eight_tracking":.9},
-            "motion":{"joint_range_mean_rad":activity,"beat_alignment":.5}}]}
+            "physical_seconds":duration,"reason":"music_end" if complete else "physical_failure",
+            "physical_metrics_mean":{"upper_eight_tracking":.9,"error/anchor_pos":.01,
+                "root_xy_error_sq":.009,"error/anchor_ori":.001},
+            "motion":{"joint_range_mean_rad":activity,"joint_speed_rms_rad_s":activity,"beat_alignment":.5}}]}
     quality=paired_quality(report(10,True,1),report(5,False,.5),criteria)
     assert quality["degraded"] and quality["model_return_used"] is False
+    assert quality["quality_exit_enabled"] is False

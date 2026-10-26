@@ -3,7 +3,8 @@
 读取已标定配置和明确的训练/验证/固定评价集合，记录两个源码提交但不作相等门禁。
 真实WM、梯度、全曲基线未通过时写preflight_blocked.json并退出，绝不把空会话算启动。
 成功则固定配置、命令、GPU UUID与PID；--resume-run使用最近完整checkpoint并从新
-物理episode采集。质量或数值失败不自动无限重启，也不占用已有计算进程的GPU。
+物理episode采集。允许显式恢复旧版本因质量评价停止的完整检查点；不自动重启，
+不占用已有计算进程的GPU。质量指标仅记录，数值故障仍保留原诊断。
 """
 
 import argparse
@@ -141,7 +142,8 @@ def main():
         status_path = output/"status.json"
         if status_path.exists():
             status = json.loads(status_path.read_text())
-            check("not_restarting_recorded_quality_or_numeric_failure", lambda: status.get("status") != "failed")
+            check("previous_failure_allows_explicit_resume", lambda: status.get("status") != "failed" or
+                  "独立真实物理连续评价退化" in status.get("error", ""))
         check("complete_latest_exists", lambda: (output/"checkpoints/latest.pt").is_file())
         stale = output/"training.lock"
         if stale.exists():

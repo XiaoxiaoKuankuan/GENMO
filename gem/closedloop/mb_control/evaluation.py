@@ -90,10 +90,26 @@ def evaluate_tasks(collector, tasks, output, *, mode, device, max_seconds=None):
             if collector.trajectory:
                 state = torch.cat([v[1] for v in collector.trajectory])
                 diversity.setdefault(task["id"], []).append(state[:, 13:34])
-                # 只保存真实紧凑轨迹；没有扩散链/每请求完整状态JSON。
+                # 同一文件兼容SM现有渲染器：真实状态与当帧原始世界参考逐帧配对。
+                # 不保存扩散链，不重新对齐影子，不使用未来覆盖后的缓存补造参考。
                 safe_id = str(task["id"]).replace("/", "_").replace("..", "_")
+                n = len(state)
+                alive = np.ones((n, 1), dtype=bool)
+                if reason == "physical_failure":
+                    alive[-1] = False
                 np.savez_compressed(output / f"{safe_id}_seed{seed}_physical.npz",
-                                    ticks=np.asarray([v[0] for v in collector.trajectory]), state=state.numpy())
+                    ticks=np.asarray([v[0] for v in collector.trajectory]), state=state.numpy(),
+                    root_p=state[:, None, :3].numpy(), root_quat=state[:, None, 3:7].numpy(),
+                    q=state[:, None, 13:34].numpy(), alive=alive, f=np.arange(n)[:, None],
+                    ref_root_p=torch.cat([v[2] for v in collector.trajectory]).numpy(),
+                    ref_root_R=torch.cat([v[4] for v in collector.trajectory]).numpy(),
+                    ref_q=torch.cat([v[5] for v in collector.trajectory]).numpy(),
+                    names=np.asarray([task["id"]]), clip_start=np.asarray([0]),
+                    robot_id=np.asarray(collector.adapter.bundle.spec.robot_id),
+                    joint_names=np.asarray(collector.adapter.bundle.spec.joint_names),
+                    actor_version=np.asarray(collector.actor_version),
+                    termination_reason=np.asarray(reason), music_seconds=np.asarray(music.shape[1]/30),
+                    physics_backend=np.asarray("isaaclab3_newton_mujoco_warp"))
             with (output / "physical_results.jsonl").open("a") as stream:
                 stream.write(json.dumps(row, ensure_ascii=False, allow_nan=False) + "\n")
     pairwise = {}

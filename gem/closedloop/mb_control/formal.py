@@ -4,7 +4,7 @@
 优化GENMO。Actor更新只在采集请求全部收束后发生；每环境episode跨采集轮保持。
 评价使用独立进程和固定音乐/初态/噪声种子，不修改训练对象，模型回报不用于挑选
 物理best。完整checkpoint含两个优化器、回放、RNG、数据与任务游标；恢复从新物理
-episode开始。资源预算、质量退化、数值错误均留证据退出，不无限重启质量失败。
+episode开始。质量变化仅记录和展示，不因退化退出；资源预算及数值错误仍留证据。
 """
 
 import json
@@ -99,7 +99,7 @@ def paired_quality(baseline, current, criteria, tasks=None):
             "activity_ratio": activity_ratio, "beat_alignment_drop": beat_drop, "beat_available": beat_drop is not None,
             "physical_tracking_score": score, "baseline_physical_tracking_score": old_score,
             "physical_tracking_delta": score-old_score, "paired_tasks": comparisons, "source_split": source_split,
-            "degraded": degraded, "model_return_used": False}
+            "degraded": degraded, "quality_exit_enabled": False, "model_return_used": False}
 
 
 def run_evaluation_processes(cfg, config_path, checkpoint, path, model_mode, environment):
@@ -255,8 +255,7 @@ def run_formal(args, cfg, output, trainer, collector, profile, tasks, report, so
             best_score = score
             checkpoint_link(checkpoint_dir, "best.pt", checkpoint)
         snapshot()
-        if degradation_count >= settings["degradation"]["consecutive_evaluations"]:
-            raise RuntimeError("独立真实物理连续评价退化，按预设规则暂停")
+        # 2026-10-26 用户要求：保留完整评价和连续退化记录，评价结果不终止训练。
 
     try:
         resume = args.resume or (str(checkpoint_dir/"latest.pt") if args.resume_latest else None)
