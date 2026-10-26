@@ -18,10 +18,10 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", required=True)
     parser.add_argument("--output", required=True)
-    parser.add_argument("--gpus", type=int, nargs=2, required=True)
+    parser.add_argument("--gpus", type=int, nargs="+", required=True)
     args = parser.parse_args()
-    if len(set(args.gpus)) != 2:
-        raise ValueError("真实并行验收需要两张独立GPU")
+    if not 2 <= len(args.gpus) <= 8 or len(set(args.gpus)) != len(args.gpus):
+        raise ValueError("真实并行验收需要2至8张独立GPU")
     from omegaconf import OmegaConf
     cfg = OmegaConf.to_container(OmegaConf.load(args.config), resolve=True)
     sys.path.insert(0, cfg["supermimic"]["repo"])
@@ -46,7 +46,7 @@ def main():
         tasks = read_tasks(cfg["tasks"])
         for round_index in range(2):
             for index, worker in enumerate(workers):
-                worker.submit(weights, 0, 3, tasks[index] if worker.needs_task else None)
+                worker.submit(weights, 0, 3, tasks[index % len(tasks)] if worker.needs_task else None)
             responses = [worker.receive(adapter, "cpu") for worker in workers]
             for response in responses:
                 if response["actor_version"] != 0 or not response["frozen_unchanged"]:
@@ -60,20 +60,22 @@ def main():
                    "controls_per_worker": [r["physical_steps"] for r in responses],
                    "anchors_per_worker": [len(r["anchors"]) for r in responses],
                    "worker_ticks": [r["tick"] for r in responses],
+                   "collector_ids": [r["collector_id"] for r in responses],
+                   "gpu_indices": args.gpus,
                    "frozen_unchanged": all(r["frozen_unchanged"] for r in responses)}
             rows.append(row)
             print(json.dumps(row), flush=True)
         passed = all(r["parallel_overlap_seconds"] > 0 and min(r["controls_per_worker"]) > 0 for r in rows) and all(
-            sum(r["anchors_per_worker"][i] for r in rows) > 0 for i in range(2))
+            sum(r["anchors_per_worker"][i] for r in rows) > 0 for i in range(len(workers)))
         result = {"passed": passed, "rows": rows, "accepted_actor_updates": 0,
-                  "frozen_sha256": adapter.bundle.metadata["sha256"], "physical_collectors": 2,
+                  "frozen_sha256": adapter.bundle.metadata["sha256"], "physical_collectors": len(workers),
                   "contract": {k: cfg[k] for k in ("model", "clock", "rewards")},
                   "physics_determinism": cfg.get("execution", {}).get("physics_determinism"),
                   "horizon_steps": cfg["imagination"]["horizon_steps"],
                   "evidence": "real_parallel_newton_collection_not_training_gain"}
         (output/"parallel_collection_audit.json").write_text(json.dumps(result, indent=2))
         if not passed:
-            raise RuntimeError("真实两路采集验收失败")
+            raise RuntimeError("真实多卡采集验收失败")
     finally:
         for worker in workers:
             worker.close()

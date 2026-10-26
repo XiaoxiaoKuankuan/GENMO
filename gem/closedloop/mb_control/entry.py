@@ -82,8 +82,8 @@ def main(kind):
             raise ValueError("Stage1 baseline不启动优化器")
         if args.run_mode == "smoke" and not 1 <= args.updates <= cfg["execution"]["maximum_explicit_updates"]:
             raise ValueError("本入口仅执行配置允许的显式有界更新")
-        if not 1 <= cfg["training"]["actor_microbatch"] <= 4 or cfg["execution"]["physical_batch"] != 1:
-            raise ValueError("首版物理batch1，BPTT微批1–4逐样本梯度累积")
+        if not 1 <= cfg["training"]["actor_microbatch"] <= 8 or cfg["execution"]["physical_batch"] != 1:
+            raise ValueError("每环境物理batch1，BPTT微批1–8逐样本梯度累积")
         if profile is None:
             raise ValueError("训练需要独立实测部署延迟分布")
         report = json.loads(require_file(cfg["imagination"]["physical_validation_report"], "P3物理方向报告").read_text())

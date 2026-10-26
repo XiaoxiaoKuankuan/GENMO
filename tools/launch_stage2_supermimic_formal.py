@@ -79,12 +79,16 @@ def main():
     check("clean_code", lambda: not run(["git","status","--porcelain"]))
     check("tmux", lambda: shutil.which("tmux") is not None)
     check("disk_at_least_200GiB", lambda: shutil.disk_usage(output).free >= 200*1024**3)
-    check("independent_eval_gpu", lambda: args.training_gpu != args.evaluation_gpu)
     evaluation_gpus = cfg["formal"].get("evaluation_gpus", [args.evaluation_gpu])
     worker_gpus = cfg.get("execution", {}).get("physical_worker_gpus", [])
-    check("independent_collection_gpus", lambda: len(worker_gpus) <= 1 and
-          1 <= len(evaluation_gpus) <= 2 and args.evaluation_gpu == evaluation_gpus[0] and
-          len(set([args.training_gpu, *evaluation_gpus, *worker_gpus])) == 1+len(evaluation_gpus)+len(worker_gpus))
+    sys.path.insert(0, str(repo))
+    from gem.closedloop.mb_control.parallel_layout import physical_gpu_layout
+    layout = {}
+    def layout_check():
+        layout.update(physical_gpu_layout(args.training_gpu, worker_gpus, evaluation_gpus,
+            share_evaluation=cfg["formal"].get("reuse_collection_gpus_for_evaluation", False)))
+        return args.evaluation_gpu == evaluation_gpus[0]
+    check("physical_gpu_layout", layout_check)
     check("isaaclab_path", lambda: Path(os.environ.get("ISAACLAB_PATH", "/nonexistent")).is_dir())
     gpu_info = []
     try:
@@ -92,7 +96,7 @@ def main():
         gpu_info = [list(map(str.strip,line.split(","))) for line in lines]
         used = run(["nvidia-smi","--query-compute-apps=gpu_uuid,pid","--format=csv,noheader"]).splitlines()
         occupied = {line.split(",")[0].strip() for line in used if "," in line}
-        for index in (args.training_gpu,*evaluation_gpus,*worker_gpus):
+        for index in sorted(set([args.training_gpu,*evaluation_gpus,*worker_gpus])):
             check(f"gpu_{index}_free", lambda index=index: any(int(g[0]) == index and g[1] not in occupied and int(g[2]) < 1024 for g in gpu_info))
     except Exception as error:
         failures.append("gpu_inventory")
@@ -165,6 +169,7 @@ def main():
                 stale.unlink()
     evidence = {"host":socket.gethostname(),"checks":checks,"failures":failures,"gpu_inventory":gpu_info,
                 "actual_actor_updates":0 if not args.resume_run else None,"source_hash_gate":False,
+                "physical_gpu_layout": layout,
                 "genmo_commit":run(["git","rev-parse","HEAD"]),"supermimic_commit":run(["git","-C",cfg["supermimic"]["repo"],"rev-parse","HEAD"])}
     (output/(f"preflight_{timestamp}.json" if args.resume_run else "preflight.json")).write_text(json.dumps(evidence,ensure_ascii=False,indent=2))
     if failures:

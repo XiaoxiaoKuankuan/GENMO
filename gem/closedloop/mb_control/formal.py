@@ -134,20 +134,32 @@ def paired_quality(baseline, current, criteria, tasks=None):
             "degraded": degraded, "quality_exit_enabled": False, "model_return_used": False}
 
 
-def run_evaluation_processes(cfg, config_path, checkpoint, path, model_mode, environment):
+def run_evaluation_processes(cfg, config_path, checkpoint, path, model_mode, environment, *, cancel_requested=None):
     """固定任务按完整歌曲分到独立GPU，保持每个机器人的物理和请求时序独立。"""
     gpus = cfg["formal"].get("evaluation_gpus", [cfg["formal"]["evaluation_gpu"]])
     if len(gpus) == 1:
         command = [sys.executable, "-u", "tools/evaluate_stage2_supermimic.py", "--config", str(config_path),
                    "--mode", model_mode, "--output", str(path), "--actor-checkpoint", str(checkpoint)]
         with path.with_suffix(".log").open("w") as log:
-            subprocess.run(command, env=dict(environment, CUDA_VISIBLE_DEVICES=str(gpus[0])),
-                           stdout=log, stderr=subprocess.STDOUT, check=True)
+            process = subprocess.Popen(command, env=dict(environment, CUDA_VISIBLE_DEVICES=str(gpus[0])),
+                                       stdout=log, stderr=subprocess.STDOUT)
+            try:
+                while process.poll() is None:
+                    if cancel_requested and cancel_requested():
+                        raise InterruptedError("收到停止请求，结束独立评价并回到完整检查点边界")
+                    time.sleep(.2)
+                if process.returncode:
+                    raise subprocess.CalledProcessError(process.returncode, command)
+            finally:
+                if process.poll() is None:
+                    process.terminate()
+                    process.wait(timeout=20)
         return
-    if len(gpus) != 2 or len(set(gpus)) != 2:
-        raise ValueError("独立固定评价首轮仅支持1或2张不同GPU")
+    if not 1 <= len(gpus) <= 8 or len(set(gpus)) != len(gpus):
+        raise ValueError("独立固定评价支持1至8张不同GPU")
     path.mkdir(exist_ok=False)
     tasks = read_tasks(cfg["formal"]["evaluation_tasks"])
+    gpus = gpus[:len(tasks)]
     workers, logs, manifest = [], [], []
     try:
         for index, gpu in enumerate(gpus):
@@ -165,6 +177,8 @@ def run_evaluation_processes(cfg, config_path, checkpoint, path, model_mode, env
             manifest.append({"gpu": gpu, "pid": process.pid, "tasks": [t["id"] for t in selected], "command": command})
         write_json(path/"processes.json", manifest)
         while any(p.poll() is None for p in workers):
+            if cancel_requested and cancel_requested():
+                raise InterruptedError("收到停止请求，结束独立评价并回到完整检查点边界")
             if any(p.poll() not in (None, 0) for p in workers):
                 raise RuntimeError(f"独立物理评价子进程失败，原日志保留在{path}")
             time.sleep(.2)
@@ -191,7 +205,7 @@ def run_evaluation_processes(cfg, config_path, checkpoint, path, model_mode, env
             log.close()
 
 
-def _evaluate_checkpoint_mode(cfg, output, checkpoint, *, update, directory):
+def _evaluate_checkpoint_mode(cfg, output, checkpoint, *, update, directory, cancel_requested=None):
     directory.mkdir(parents=True,exist_ok=True)
     eval_cfg = dict(cfg, tasks=cfg["formal"]["evaluation_tasks"])
     config_path = directory / "fixed_evaluation.yaml"
@@ -224,7 +238,8 @@ def _evaluate_checkpoint_mode(cfg, output, checkpoint, *, update, directory):
         # 原Stage1无前瞻全曲能力由独立preflight报告验收，不能混入这里比较训练收益。
         model_mode = "full" if cfg["model"]["forecast_enabled"] else "no_forecast"
         model_checkpoint = output/"checkpoints"/"initial_actor.pt" if mode == "initial" else checkpoint
-        run_evaluation_processes(cfg, config_path, model_checkpoint, path, model_mode, environment)
+        run_evaluation_processes(cfg, config_path, model_checkpoint, path, model_mode, environment,
+                                 cancel_requested=cancel_requested)
     baseline = json.loads((outputs["initial"] / "physical_summary.json").read_text())
     current = json.loads((outputs["full"] / "physical_summary.json").read_text())
     quality = paired_quality(baseline, current, cfg["formal"]["degradation"], read_tasks(cfg["formal"]["evaluation_tasks"]))
@@ -232,11 +247,12 @@ def _evaluate_checkpoint_mode(cfg, output, checkpoint, *, update, directory):
     return quality
 
 
-def evaluate_checkpoint(cfg, output, checkpoint, *, update):
+def evaluate_checkpoint(cfg, output, checkpoint, *, update, cancel_requested=None):
     """固定事件主对照与墙钟异步独立保存，禁止混合均值选best。"""
     modes=cfg["formal"].get("evaluation_timing_modes")
     if not modes:
-        return _evaluate_checkpoint_mode(cfg,output,checkpoint,update=update,directory=output/"evaluations")
+        return _evaluate_checkpoint_mode(cfg,output,checkpoint,update=update,directory=output/"evaluations",
+                                        cancel_requested=cancel_requested)
     if modes != ["fixed_delay_replay","wall_clock_async"]:
         raise ValueError("双模式评价需以固定外生事件为主对照，并独立保留真实墙钟结果")
     qualities={}
@@ -244,7 +260,7 @@ def evaluate_checkpoint(cfg, output, checkpoint, *, update):
         per_mode=dict(cfg,evaluation=dict(cfg.get("evaluation",{}),timing_mode=mode),
             formal=dict(cfg["formal"],initial_physical_baseline=cfg["formal"].get("initial_physical_baselines",{}).get(mode)))
         qualities[mode]=_evaluate_checkpoint_mode(per_mode,output,checkpoint,update=update,
-            directory=output/"evaluations"/mode)
+            directory=output/"evaluations"/mode,cancel_requested=cancel_requested)
     primary=dict(qualities["fixed_delay_replay"],selection_timing_mode="fixed_delay_replay",
         wall_clock_async_quality=qualities["wall_clock_async"])
     write_json(output/"evaluations"/f"paired_{update:06d}.json",primary)
@@ -295,10 +311,22 @@ def run_formal(args, cfg, output, trainer, collector, profile, tasks, report, so
 
     def run_evaluation(n):
         nonlocal best_score, degradation_count, last_evaluated
+        if collector.worker.future is not None or any(w.request_id is not None for w in remotes):
+            raise RuntimeError("采集尚未收束，不允许评价复用GPU")
         checkpoint = snapshot()
         rng = capture_rng()
         try:
-            quality = evaluate_checkpoint(cfg, output, checkpoint, update=n)
+            quality = evaluate_checkpoint(cfg, output, checkpoint, update=n, cancel_requested=lambda: bool(stopping))
+        except Exception as error:
+            # 独立评价的负结果、子进程故障或主动中断都不能杀死已合法更新的Actor。
+            # 原始日志与失败现场保留，下一评价周期继续尝试；不把失败当成合格best。
+            write_json(output/"diagnostics"/f"evaluation_failure_{n}_{time.time_ns()}.json",
+                       {"error": repr(error), "traceback": traceback.format_exc(),
+                        "accepted_actor_updates": n, "training_continues": not bool(stopping)})
+            last_evaluated = n
+            print(json.dumps({"event": "evaluation_incomplete_training_continues", "update": n,
+                              "error": repr(error)}), flush=True)
+            return
         finally:
             restore_rng(rng)
         last_evaluated = n
@@ -349,8 +377,8 @@ def run_formal(args, cfg, output, trainer, collector, profile, tasks, report, so
             snapshot("critic_ready.pt")
         worker_gpus = cfg.get("execution", {}).get("physical_worker_gpus", [])
         if worker_gpus:
-            if not short or len(worker_gpus) > 1:
-                raise ValueError("首轮并行只支持短时真实anchor及两个独立物理采集器")
+            if not short or len(worker_gpus) > 7 or len(set(worker_gpus)) != len(worker_gpus):
+                raise ValueError("并行支持短时真实anchor及最多八个独立物理采集器")
             from .parallel_collection import RemotePhysicalCollector
             directory = output/"collectors"
             directory.mkdir(exist_ok=True)
@@ -372,13 +400,16 @@ def run_formal(args, cfg, output, trainer, collector, profile, tasks, report, so
             if trainer.accepted_actor_updates != 0:
                 raise ValueError("缺少更新前Actor，不能用已训练权重伪造配对基线")
             snapshot("initial_actor.pt")
-        if trainer.accepted_actor_updates > last_evaluated and (trainer.accepted_actor_updates == 1 or trainer.accepted_actor_updates % settings["evaluate_every"] == 0):
+        if trainer.accepted_actor_updates > last_evaluated and ((trainer.accepted_actor_updates == 1 and settings.get("evaluate_first_update", True)) or trainer.accepted_actor_updates % settings["evaluate_every"] == 0):
             run_evaluation(trainer.accepted_actor_updates)
         invalid_streak = 0
         while trainer.accepted_actor_updates < args.max_actor_updates:
             elapsed = total_wall_seconds + time.perf_counter()-started
-            if stopping or control_steps >= settings["max_control_steps"] or elapsed >= settings["max_wall_hours"]*3600:
+            from .parallel_layout import resource_stop_reason
+            budget_reason = resource_stop_reason(settings, control_steps, elapsed)
+            if stopping or budget_reason:
                 write_json(output/"status.json", {"status": "stopped_at_signal_or_resource_budget", "signals": stopping,
+                                                   "resource_stop_reason": budget_reason,
                                                    "accepted_actor_updates": trainer.accepted_actor_updates})
                 snapshot()
                 return
@@ -411,6 +442,7 @@ def run_formal(args, cfg, output, trainer, collector, profile, tasks, report, so
                 physical = collector.take_controls()
                 sample_funnel=collector.take_distribution()
                 physical_groups = [physical]
+                per_collector = [{"collector_id": 0, "physical_steps": len(physical), "tick": collector.state.tick}]
                 remote_timings = []
                 for remote in remotes:
                     response = remote.receive(trainer.imagination.adapter, args.torch_device)
@@ -422,6 +454,9 @@ def run_formal(args, cfg, output, trainer, collector, profile, tasks, report, so
                     for key,values in response.get("sample_funnel",{}).items():sample_funnel.setdefault(key,[]).extend(values)
                     control_steps += response["physical_steps"]
                     remote_timings.append(response["seconds"])
+                    per_collector.append({"collector_id": remote.collector_id,
+                        "physical_steps": response["physical_steps"], "anchors": len(response["anchors"]),
+                        "tick": response["tick"], "seconds": response["seconds"]})
                 physical = [step for group in physical_groups for step in group]
                 if cfg["training"].get("output_trust_region",{}).get("enabled"):
                     sample_funnel["BC_support_classification"]=replay.classify_support(trainer.imagination,trainer.accepted_actor_updates)
@@ -435,6 +470,9 @@ def run_formal(args, cfg, output, trainer, collector, profile, tasks, report, so
                                       "eligible_anchors": replay.eligible_count(trainer.accepted_actor_updates),
                                       "required_anchors": cfg["training"]["actor_microbatch"],
                                       "actor_version": trainer.accepted_actor_updates}), flush=True)
+                    write_json(output/"status.json", {"status": "collecting_real_anchors", "pid": os.getpid(),
+                        **trainer.counters(), "physical_control_steps": control_steps,
+                        "physical_collectors": 1+len(remotes), "per_collector": per_collector})
                     continue
                 states = replay.sample(cfg["training"]["actor_microbatch"], actor_version=trainer.accepted_actor_updates)
                 candidate_distribution = None
@@ -458,6 +496,8 @@ def run_formal(args, cfg, output, trainer, collector, profile, tasks, report, so
                 row["sample_funnel"] = sample_funnel
             row.update(physical_control_steps=control_steps, collection_wall_seconds=collect_seconds,
                        physical_collectors=1+len(remotes), remote_collection_seconds=remote_timings if short else [],
+                       per_collector=per_collector if short else [],
+                       drawn_collector_ids=[sample.collector_id for sample in states] if short else [],
                        collection_policy_version=trainer.accepted_actor_updates-int(row["accepted_execution_feedback_update"]),
                        cuda_event_interval_ms=gpu_start.elapsed_time(gpu_end),
                        cuda_event_note="事件间隔含CPU调度间隙，不冒充纯GPU内核活跃时间",
@@ -471,18 +511,23 @@ def run_formal(args, cfg, output, trainer, collector, profile, tasks, report, so
             writer.flush()
             print(json.dumps(row, ensure_ascii=False, allow_nan=False), flush=True)
             write_json(output/"status.json", {"status": "running", "pid": os.getpid(), **trainer.counters(),
-                                               "physical_control_steps": control_steps})
+                                               "physical_control_steps": control_steps,
+                                               "physical_collectors": 1+len(remotes),
+                                               "quality_exit_enabled": False})
             accepted = row["accepted_execution_feedback_update"]
             # 新实验拒绝候选意味着继续采集，不把音乐/输出验收失败变成质量退化退出。
             finite_feedback_rejection=("output_trust_region" in row and row.get("valid_execution_rollouts",0)>0 and
                 "nonfinite_candidate" not in row.get("rejection_reasons",[]))
             invalid_streak = 0 if accepted or finite_feedback_rejection else invalid_streak+1
-            if invalid_streak >= settings["maximum_invalid_streak"]:
-                raise RuntimeError("连续没有合法执行反馈更新，暂停保留证据")
+            report_every = settings.get("maximum_invalid_streak", 20) or 20
+            if invalid_streak and invalid_streak % max(1, report_every) == 0:
+                print(json.dumps({"event": "invalid_update_streak_continuing_collection",
+                    "invalid_streak": invalid_streak, "accepted_actor_updates": trainer.accepted_actor_updates,
+                    "quality_exit_enabled": False}), flush=True)
             n = trainer.accepted_actor_updates
             if accepted and (n == 1 or n % settings["checkpoint_every"] == 0):
                 checkpoint = snapshot()
-            if accepted and (n == 1 or n % settings["evaluate_every"] == 0) and n > last_evaluated:
+            if accepted and ((n == 1 and settings.get("evaluate_first_update", True)) or n % settings["evaluate_every"] == 0) and n > last_evaluated:
                 run_evaluation(n)
         snapshot()
         write_json(output/"status.json", {"status": "target_reached", "accepted_actor_updates": trainer.accepted_actor_updates})
