@@ -150,7 +150,7 @@ def main(kind):
     if cfg.get("execution", {}).get("physics_determinism"):
         from isaaclab.utils import replace as config_replace
         sim_cfg = config_replace(sim_cfg, physics=config_replace(sim_cfg.physics,
-            deterministic_mode=cfg["execution"]["physics_determinism"]))
+            class_type=None, deterministic_mode=cfg["execution"]["physics_determinism"]))
     activity = [torch.profiler.ProfilerActivity.CPU, torch.profiler.ProfilerActivity.CUDA]
     profiler = torch.profiler.profile(activities=activity, profile_memory=True) if args.profile else nullcontext()
     with launch_simulation(sim_cfg, args), profiler as measured:
