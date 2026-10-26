@@ -13,6 +13,7 @@ import os
 from pathlib import Path
 import subprocess
 import sys
+import tempfile
 import time
 import traceback
 
@@ -28,6 +29,24 @@ def publish(path, data):
     temporary = path.with_suffix(path.suffix+".tmp")
     temporary.write_text(json.dumps(data, ensure_ascii=False, allow_nan=False))
     os.replace(temporary, path)
+
+
+def publish_tensor(payload, destination):
+    """仅用于已消费IPC邮箱和当前采集权重；不用于编号训练checkpoint。
+
+    SM的atomic_save故意禁止覆盖有效编号产物，通信邮箱则需要完整替换上一轮。
+    先写同目录临时文件并fsync，最后一次os.replace发布，读取方不会看到半份数据。
+    """
+    destination = Path(destination)
+    descriptor, temporary = tempfile.mkstemp(prefix=".ipc-", dir=destination.parent)
+    try:
+        with os.fdopen(descriptor, "wb") as stream:
+            torch.save(payload, stream)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, destination)
+    finally:
+        Path(temporary).unlink(missing_ok=True)
 
 
 def run_collector_service(args, cfg, collector):
@@ -91,7 +110,7 @@ def run_collector_service(args, cfg, collector):
                 "physical_steps": len(controls), "seconds": time.perf_counter()-started,
                 "started_monotonic": started, "ended_monotonic": time.perf_counter(),
                 "frozen_unchanged": True, "worker_future_finished": True}
-            atomic_save(payload, directory/"response.pt")
+            publish_tensor(payload, directory/"response.pt")
             publish(directory/"response.json", {"id": last_request, "actor_version": actor_version,
                 "collector_id": args.collector_id, "real_controls": len(controls), "real_anchors": len(anchors),
                 "terminal": collector.terminal})

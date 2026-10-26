@@ -329,10 +329,10 @@ def run_formal(args, cfg, output, trainer, collector, profile, tasks, report, so
             collector.actor_version = trainer.accepted_actor_updates
             collect_started = time.perf_counter()
             if remotes:
-                from supermimic.bridge.bundle import atomic_save
+                from .parallel_collection import publish_tensor
                 weights_path = output/"collectors"/"current_actor.pt"
                 if published_version != trainer.accepted_actor_updates:
-                    atomic_save({"schema": "genmo.collection.actor.v1", "actor": trainer.actor.state_dict(),
+                    publish_tensor({"schema": "genmo.collection.actor.v1", "actor": trainer.actor.state_dict(),
                         "actor_version": trainer.accepted_actor_updates,
                         "frozen_sha256": trainer.imagination.adapter.bundle.metadata["sha256"]}, weights_path)
                     published_version = trainer.accepted_actor_updates
