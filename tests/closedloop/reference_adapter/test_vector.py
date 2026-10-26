@@ -209,6 +209,10 @@ def test_contact_refinement_never_hides_negative_or_noise():
     assert not resolve_contact_case(coarse, [trial, negative], criteria)['passed']
     # 已通过的大尺度也不能掩盖新测得的小尺度高信噪比反向。
     assert not resolve_contact_case(trial, [trial, negative], criteria)['passed']
+    invalid_pair = copy.deepcopy(negative)
+    invalid_pair['initial_max_abs'] = .1
+    assert resolve_contact_case(trial, [trial, invalid_pair], criteria)['passed']
+    assert not resolve_contact_case(coarse, [trial, invalid_pair], criteria)['passed']
     noisy = copy.deepcopy(trial)
     noisy['directions'][0].update(direction_status='uncertain_below_noise', passed=False, physical_return_difference=1e-8)
     assert not resolve_contact_case(coarse, [trial, noisy], criteria)['passed']

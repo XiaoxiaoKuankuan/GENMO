@@ -64,6 +64,25 @@ def _physical_directions_once(collector, control, dynamics, critic, criteria, ho
                 for _ in range(start_step):
                     row = collector.step(auto_reset=False, perturb=False, split='audit')
                     prefix_failed |= row['done'][:count]
+                prefix_states = collector.state['state'][:count].reshape(len(audit), 6, 55)
+                prefix_spread = (prefix_states-prefix_states[:, :1]).abs().flatten(1).amax(-1)
+                if start_step:
+                    # 各并排世界重放后可能发生混沌漂移，不能把不同起点的差当作动作响应。
+                    # 来源是刚真实执行过的主机器人当前状态和因果历史，不是想象/名义状态。
+                    source = detach_state(select_state(collector.state, primary))
+                    repeated = {k: v.repeat_interleave(6, dim=0).clone() for k, v in source.items()}
+                    ids = torch.arange(count, device=bank.device)
+                    collector.reset(ids, songs=repeated['song'], frames=repeated['frame'],
+                                    initial=repeated['state'], joint_bias=repeated['xi'][:, 1:22], perturb=False)
+                    fresh_episodes = collector.state['episode'][:count].clone()
+                    for key, value in repeated.items():
+                        collector.state[key][:count] = value
+                    collector.env.xi[:count] = repeated['xi']
+                    collector.env.a_prev[:count] = repeated['action']
+                    collector.state['state'][:count] = collector.env.observe()['state'][:count]
+                    collector.state['episode'][:count] = fresh_episodes
+                    collector.state['start_frame'][:count] = repeated['frame']
+                    prefix_failed = prefix_failed.reshape(len(audit), 6)[:, :1].expand(-1, 6).reshape(-1).clone()
                 start = detach_state(select_state(collector.state, primary))
                 initial = collector.state['state'][:count].clone()
             directions, gradients = {}, {}
@@ -103,7 +122,7 @@ def _physical_directions_once(collector, control, dynamics, critic, criteria, ho
                 state_series = torch.stack(repeats)
                 contact_series = torch.stack(contacts)
                 for k, song in enumerate(audit.tolist()):
-                    initial_error = float((initial[k*6]-initial[k*6+1]).abs().max())
+                    initial_error = float((initial[k*6:k*6+6]-initial[k*6]).abs().max())
                     repeat_error = float((state_series[:, k, 0]-state_series[:, k, 1]).abs().max())
                     repeat_contacts = bool((contact_series[:, k, 0] == contact_series[:, k, 1]).all())
                     noise = max(criteria['direction_noise_floor'], abs(float(returns[k, 0]-returns[k, 1]))*5)
@@ -125,12 +144,16 @@ def _physical_directions_once(collector, control, dynamics, critic, criteria, ho
                             model_directional_derivative=norm, noise_floor=noise, signal_to_noise=abs(delta)/noise,
                             contact_branch_changed=changed, action_rms_difference=rms,
                             contact_matches_baseline=bool((contact_series[:, k, plus] == contact_series[:, k, 0]).all()
-                                and (contact_series[:, k, minus] == contact_series[:, k, 0]).all()), epsilon=epsilon))
+                                and (contact_series[:, k, minus] == contact_series[:, k, 0]).all()), epsilon=epsilon,
+                            action_offset_pair_error=(float((first_actions[k*6+plus]-first_actions[k*6+minus]
+                                -2*directions[kind][k]).abs().max()) if kind == 'action_offset' else None)))
                     repeat_ok = max(initial_error, repeat_error) <= criteria['repeatability_max_abs'] and repeat_contacts
                     passed = repeat_ok and all(error[key] <= criteria[key] for key in error)
                     passed &= all(d['passed'] for d in direction_reports) and not bool(done[k*6:k*6+6].any())
                     cases.append(dict(task=bank.tasks[song]['id'], song_id=bank.tasks[song]['song_id'],
                         start_steps=start_step, horizon=horizon, passed=bool(passed), initial_max_abs=initial_error,
+                        prefix_all_variant_spread_before_pair_reset=float(prefix_spread[k]),
+                        pair_initialization='true_observed_prefix_state_and_causal_history_fresh_solver' if start_step else 'original_fixed_reset',
                         repeatability_max_abs=repeat_error, repeat_contacts_equal=repeat_contacts,
                         real_terminal=bool(done[k*6:k*6+6].any()), model_errors=error, directions=direction_reports))
     passed = [h for h in horizons if all(c['passed'] for c in cases if c['horizon'] == h)]
@@ -146,18 +169,18 @@ def resolve_contact_case(coarse, trials, criteria):
     result = copy.deepcopy(coarse)
     result['coarse_passed'] = coarse['passed']
     result['local_trials'] = trials
+    def physics_ok(case):
+        return (not case['real_terminal'] and case['repeat_contacts_equal']
+                and max(case['initial_max_abs'], case['repeatability_max_abs']) <= criteria['repeatability_max_abs']
+                and all(value <= criteria[key] for key, value in case['model_errors'].items()))
     for trial in trials:
         for probe in trial['directions']:
-            if probe['direction_status'] == 'negative':
+            if physics_ok(trial) and probe['direction_status'] == 'negative':
                 result['passed'] = False
                 result['local_high_snr_negative'] = probe
                 return result
     if coarse['passed']:
         return result
-    def physics_ok(case):
-        return (not case['real_terminal'] and case['repeat_contacts_equal']
-                and max(case['initial_max_abs'], case['repeatability_max_abs']) <= criteria['repeatability_max_abs']
-                and all(value <= criteria[key] for key, value in case['model_errors'].items()))
     if not physics_ok(coarse) or len(trials) != 2 or not all(physics_ok(t) for t in trials):
         return result
     if any(d['direction_status'] not in ('positive', 'uncertain_contact_change')

@@ -114,7 +114,7 @@ def compile_kinematics(engine, bank):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--config', required=True); parser.add_argument('--output', required=True)
-    parser.add_argument('--mode', choices=('train', 'pressure', 'numerical', 'audit'), default='train')
+    parser.add_argument('--mode', choices=('train', 'pressure', 'numerical', 'audit', 'evaluate'), default='train')
     parser.add_argument('--num-envs', type=int); parser.add_argument('--resume')
     parser.add_argument('--pressure-steps', type=int, default=96)
     parser.add_argument('--no-compile', action='store_true')
@@ -232,11 +232,24 @@ def main():
                 running_source = status['source']
                 status.update(load_vector(args.resume, engine, critic, optimizers, replay, tangent, collector, cfg, validation))
                 status.update(pid=os.getpid(), source=running_source, resumed_from=args.resume,
-                              restarted_unix=started, phase='resume_requires_fresh_physics_gate')
+                              restarted_unix=started, formal=args.mode == 'train',
+                              phase='resume_requires_fresh_physics_gate')
             if args.mode == 'audit':
                 result = physical_directions(collector, control, engine.dynamics, critic, criteria)
                 json_write(output/'directions.json', result)
                 return 0 if result['passed_horizons'] else 2
+            if args.mode == 'evaluate':
+                zero = evaluate_physical(collector, zero=True)
+                result = evaluate_physical(collector, zero=False)
+                result.update(accepted_updates=status['accepted_updates'],
+                              tracking_change_from_zero=result['mean_tracking']-zero['mean_tracking'])
+                json_write(output/'evaluation_zero.json', zero)
+                json_write(output/f'evaluation_{status["accepted_updates"]:06d}.json', result)
+                status.update(phase='evaluation_complete_no_optimizer_updates',
+                              real_transitions=collector.real_transitions,
+                              real_transitions_by_role=collector.real_by_role.copy())
+                json_write(output/'status.json', status, replace=True)
+                return 0
             status['phase'] = 'importing_fixed_real_zero_baseline'
             json_write(output/'status.json', status, replace=True)
             baseline = import_zero_mc(vc['initial_real_checkpoint'], control)
