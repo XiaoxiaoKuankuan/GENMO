@@ -116,6 +116,14 @@ def main(kind):
     source_info = provenance(cfg)
     manifest = output / (f"resume_manifest_{time.time_ns()}.json" if (output / "manifest.json").exists() else "manifest.json")
     manifest.write_text(json.dumps(source_info, ensure_ascii=False, indent=2))
+    if cfg["model"].get("compile_networks", False):
+        from .compilation import warmup_inference
+        from .gradient_audit import tensor_fixture
+        music, initial = task_inputs(tasks[0], adapter, args.torch_device)
+        warmup = warmup_inference(actor, adapter, scheduler, tensor_fixture(adapter, music, initial))
+        warmup_path = output / (f"compile_warmup_{time.time_ns()}.json" if (output / "compile_warmup.json").exists()
+                                else "compile_warmup.json")
+        warmup_path.write_text(json.dumps(warmup, ensure_ascii=False, indent=2))
     if kind == "gradients":
         from .gradient_audit import tensor_fixture, audit_gradients
         music, initial = task_inputs(tasks[0], adapter, args.torch_device)

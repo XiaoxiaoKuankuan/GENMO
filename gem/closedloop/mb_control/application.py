@@ -70,6 +70,9 @@ def build_components(cfg, device):
     bundle = load_bundle(require_file(cfg["supermimic"]["checkpoint"], "supermimic.checkpoint"), device,
                          robot_asset_dir=cfg["supermimic"]["robot_asset_dir"])
     adapter = SMAdapter(bundle, base.endecoder.kinematics.joint_order, device)
+    if cfg["model"].get("compile_networks", False):
+        from .compilation import compile_networks
+        compile_networks(actor, adapter)
     scheduler = Scheduler(**cfg["clock"])
     rewards = TrackingRewards(adapter.runtime, cfg["rewards"])
     critic = PlanAwareCritic(scheduler, **cfg["critic"]["network"]).to(device)

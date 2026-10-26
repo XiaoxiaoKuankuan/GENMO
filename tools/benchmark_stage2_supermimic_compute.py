@@ -30,6 +30,7 @@ def main():
     from gem.closedloop.mb_control.gradient_audit import tensor_fixture
     from gem.closedloop.mb_control.forecast import forecast_rollout
     from gem.closedloop.mb_control.online_conditions import build_conditions
+    from gem.closedloop.mb_control.compilation import compile_networks
     output = Path(args.output).resolve()
     output.mkdir(parents=True, exist_ok=False)
     cfg = read_config(args.config)
@@ -60,10 +61,7 @@ def main():
     original, original_context, _ = measure()
     rows["eager"] = [measure()[2] for _ in range(args.samples)]
     compile_start = time.perf_counter()
-    actor.stage1.denoiser.compile(fullgraph=True, dynamic=False)
-    actor.stage1.history_encoder.compile(fullgraph=True, dynamic=False)
-    adapter.bundle.actor.compile(fullgraph=True, dynamic=False)
-    adapter.bundle.world_model.step = torch.compile(adapter.bundle.world_model.step, fullgraph=True, dynamic=False)
+    compile_networks(actor, adapter)
     for _ in range(2):
         measure()
     compile_seconds = time.perf_counter() - compile_start
