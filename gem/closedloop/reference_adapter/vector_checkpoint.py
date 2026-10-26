@@ -26,6 +26,7 @@ def save_vector(path, engine, critic, optimizers, replay, tangent, collector, st
         validation_replay=validation_replay.state_dict() if validation_replay is not None else None,
         collector_state=collector.state, collector_episode_serial=collector.episode_serial,
         collector_real_transitions=collector.real_transitions, collector_resets=collector.reset_count,
+        collector_real_by_role=getattr(collector, 'real_by_role', {}),
         collector_vector_steps=collector.vector_steps, collector_rng=collector.generator.get_state(),
         rng=dict(python=random.getstate(), numpy=np.random.get_state(), torch=torch.get_rng_state(),
                  cuda=torch.cuda.get_rng_state_all()),
@@ -57,6 +58,7 @@ def load_vector(path, engine, critic, optimizers, replay, tangent, collector, co
     collector.episode_serial = ck['collector_episode_serial']
     collector.real_transitions = ck['collector_real_transitions']; collector.reset_count = ck['collector_resets']
     collector.vector_steps = ck['collector_vector_steps']; collector.generator.set_state(ck['collector_rng'])
+    collector.real_by_role = ck.get('collector_real_by_role', {})
     random.setstate(ck['rng']['python']); np.random.set_state(ck['rng']['numpy']); torch.set_rng_state(ck['rng']['torch'])
     torch.cuda.set_rng_state_all(ck['rng']['cuda'])
     engine.dynamics.model_version = ck['state']['wm_updates']

@@ -61,7 +61,7 @@ def physical_directions(collector, control, dynamics, critic, criteria, horizons
                 collector.reset(songs=songs, frames=frames, perturb=False)
                 prefix_failed = torch.zeros(count, dtype=torch.bool, device=bank.device)
                 for _ in range(start_step):
-                    row = collector.step(auto_reset=False, perturb=False)
+                    row = collector.step(auto_reset=False, perturb=False, split='audit')
                     prefix_failed |= row['done'][:count]
                 start = detach_state(select_state(collector.state, primary))
                 initial = collector.state['state'][:count].clone()
@@ -88,7 +88,7 @@ def physical_directions(collector, control, dynamics, critic, criteria, horizons
                 predicted = start['state']
                 first_actions = None
                 for t in range(horizon):
-                    row = collector.step(auto_reset=False, perturb=False,
+                    row = collector.step(auto_reset=False, perturb=False, split='audit',
                         residual_offset=r_offset if t == 0 else None, action_offset=a_offset if t == 0 else None)
                     if first_actions is None:
                         first_actions = row['proposal']['action'][:count].clone()

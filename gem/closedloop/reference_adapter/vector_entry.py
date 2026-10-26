@@ -238,6 +238,7 @@ def main():
             status['phase'] = 'importing_fixed_real_zero_baseline'
             json_write(output/'status.json', status, replace=True)
             baseline = import_zero_mc(vc['initial_real_checkpoint'], control)
+            status['imported_fixed_zero_real_transitions'] = sum(len(v['y']) for v in baseline.values())
             warm_critic = fit_critic(critic, optimizers['critic'], baseline['train'], train['critic_epochs'], train['critic_batch'])
             json_write(output/'critic_initial_fit.json', warm_critic)
             collector.reset(perturb=True)
@@ -264,6 +265,7 @@ def main():
             def checkpoint(label):
                 nonlocal last_saved
                 status.update(wm_updates=engine.dynamics.model_version, real_transitions=collector.real_transitions,
+                              real_transitions_by_role=collector.real_by_role.copy(),
                               collector_resets=collector.reset_count, iteration=iteration)
                 destination = output/f'{label}_{status["accepted_updates"]:06d}_{time.time_ns()}.pt'
                 save_vector(destination, engine, critic, optimizers, replay, tangent, collector, status.copy(), cfg, validation)
@@ -335,6 +337,7 @@ def main():
                     checkpoint('supervised_waiting')
                 peak_nvidia = max(peak_nvidia, gpu_usage() or 0)
                 status.update(iteration=iteration, wm_updates=engine.dynamics.model_version, real_transitions=collector.real_transitions,
+                    real_transitions_by_role=collector.real_by_role.copy(),
                     replay_transitions=len(replay), tangent_pairs=tangent.total_pairs, critic_ready=critic_ready, bptt_steps=horizon,
                     num_envs=collector.num_envs, nvidia_peak_observed_mib=peak_nvidia,
                     torch_peak_allocated_mib=torch.cuda.max_memory_allocated()/2**20,

@@ -22,6 +22,7 @@ class VectorCollector:
         self.state = None
         self.episode_serial = self.real_transitions = self.reset_count = 0
         self.vector_steps = 0
+        self.real_by_role = {}
         self.policy_version = 0
         self.timing = {}
 
@@ -124,6 +125,7 @@ class VectorCollector:
         # reset只写采集器下一状态；返回的真实末态和起点不能被原地改成reset状态。
         self.state = {k: v.detach().clone() for k, v in end.items()}
         self.real_transitions += self.num_envs
+        self.real_by_role[split] = self.real_by_role.get(split, 0)+self.num_envs
         self.vector_steps += 1
         ended = done.nonzero().flatten()
         if auto_reset and len(ended):
@@ -152,7 +154,7 @@ class VectorCollector:
         d = 2*self.random((half, 21))-1
         d = d/d.norm(dim=-1, keepdim=True).clamp_min(1e-12)*epsilon
         offsets = torch.stack((d, -d), 1).flatten(0, 1)
-        row = self.step(zero=True, auto_reset=False, action_offset=offsets)
+        row = self.step(zero=True, auto_reset=False, action_offset=offsets, split='tangent')
         mismatch = (z['state'][0::2]-z['state'][1::2]).abs().amax(-1)
         valid = (mismatch <= 1e-5) & ~row['done'][0::2] & ~row['done'][1::2]
         action = row['proposal']['action']

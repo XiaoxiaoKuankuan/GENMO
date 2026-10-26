@@ -31,7 +31,7 @@ music:
   match_tolerance_s: 0.06
   event_activity_floor: 0.1
   extra_event_weight: 1.0
-rewards: {music: 0.2, magnitude: 0.02, smooth: 0.01, overlap: 0.02, reference_limit: 0.1, activity: 0.05}
+rewards: {music: 0.0001, magnitude: 0.02, smooth: 0.01, overlap: 0.02, reference_limit: 0.1, activity: 0.05}
 training:
   batch_size: 64
   adapter_lr: 0.0001

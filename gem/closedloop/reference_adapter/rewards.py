@@ -12,7 +12,7 @@ from supermimic.rotations import yaw_mat, rot_angle_sq
 from .contracts import DT
 from .reference import overlap_cost
 
-DEFAULT_WEIGHTS = dict(music=.2, magnitude=.02, smooth=.01, overlap=.02, reference_limit=.1, activity=.05)
+DEFAULT_WEIGHTS = dict(music=1e-4, magnitude=.02, smooth=.01, overlap=.02, reference_limit=.1, activity=.05)
 
 
 def sm_diagnostics(runtime, state, nominal):
