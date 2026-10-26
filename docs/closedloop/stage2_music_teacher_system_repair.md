@@ -98,5 +98,12 @@ export PYTHONDONTWRITEBYTECODE=1
 | `reference_relabel_full_equivalence_v15.json` | 一真实anchor两时域36条扰动，分量复用与完整WM重算的组合导数最大差4.08e-9，真实中心差分差1.12e-6，方向判定全相同。 |
 | `teacher_metadata_v17/` | 最终构建实现独立真实采集gLO整曲成功，保存实际源点/混合版本及原Stage1同噪声检查；不改写24首冻结目标。 |
 | `unit_v19.log` | 40 passed / 3 skipped；跳过的是要求显式外部资产环境变量的旧夹具入口，真实资产、DDIM与Newton另由上述独立审计实际执行。 |
+| `new_objective_physics_merged_v19.json` | 最终v6重新核对同一32个真实anchor，H16完整通过、H32仍未通过数值导数；已去除跨H阶段覆盖误并集。 |
+| `output_trust_calibration_v19.json` | 最终v6八个候选共十次尝试，八个接受；真实短时误差七降一升，接受最大关节单步0.009946 rad。单候选中位1.163秒，一轮中位1.168秒；三次尝试成本另见保留的前轮标定。 |
+| `paired_evaluation_v19.json` | 最终v6单候选三首校准歌曲全部完成；固定事件音乐误差均值0.0123973→0.0165265，仍未改善，不选为best。真实墙钟结果另列，不混合平均。 |
+| `parallel_music_teacher_v19/` | 两个独立Newton采集器实际运行，两轮均有采集时间重叠，各获得四个完整真实anchor；冻结资产不变，不冒充优化收益。 |
+| `formal_verified_start_v19.json` | 新正式进程从s595000重新启动并完成一次有效更新；325个AdamW参数状态均含完整step/一二阶矩，Actor/Critic/RNG/replay/运行游标检查点完整。首微批两个来源、均为真实高速且包含接触切换。 |
 
 最终v6组合方向、真实候选与启动状态追加到 `记录文本.md`，不以旧目标报告授权。原始Newton数据、完整请求、教师、候选与失败记录都保存在上述根目录；各临时源码包另在 `source_snapshots/` 留存用于复核，源码哈希只记录。新奖励长期训练不坍缩、真实音乐质量持续改善以及非零Critic价值消融，均需要独立持续实验证明。
+
+本轮正式目录为服务器2 `/data0/user/liwei/GENMO_outputs/stage2_supermimic_worldmodel/music_teacher_system_formal_20261027/formal_20261027_012121_930751`。启动时实现提交213b8c7、入口修复5571bf2；GPU4训练、GPU7第二采集器、GPU5/6独立评价。沿用此前5000个有效更新目标及72小时资源预算；初始化不恢复旧退化权重。首批明确限制在已准备好的14首完整目标，未覆盖原4287首全部音乐，缺失原因见 `formal_initial_teacher_pool.json`。首次评价包含8首音乐，分别执行固定交付回放与真实墙钟；评价期间Actor计数停留在1属于正常等待，不能称整曲收益已经通过。
