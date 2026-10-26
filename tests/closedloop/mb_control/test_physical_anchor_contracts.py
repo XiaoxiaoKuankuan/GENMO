@@ -54,3 +54,15 @@ def test_old_long_horizon_report_cannot_unlock_anchor_method():
     cfg = {"imagination": {"mode": "physical_anchor_short_bptt", "horizon_steps": "auto", "critic_bootstrap": True}}
     with pytest.raises(ValueError, match="短时"):
         select_short_horizon(cfg, {"supported_control_steps": 102, "passed": True})
+
+
+def test_replay_microbatch_requires_distinct_current_version_anchors():
+    from types import SimpleNamespace
+    from gem.closedloop.mb_control.replay import RecentReplay
+    replay = RecentReplay(4, 42)
+    for version in (0, 1, 1):
+        replay.items.append(SimpleNamespace(generation=SimpleNamespace(request=SimpleNamespace(actor_version=version))))
+    batch = replay.sample(2, actor_version=1)
+    assert len({id(s) for s in batch}) == 2
+    with pytest.raises(ValueError, match="独立真实样本不足"):
+        replay.sample(2, actor_version=0)

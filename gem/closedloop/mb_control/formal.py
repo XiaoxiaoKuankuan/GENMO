@@ -228,9 +228,11 @@ def run_formal(args, cfg, output, trainer, collector, profile, tasks, report, so
                 raise RuntimeError("采集Actor仍在生成，禁止并发修改其权重")
             if short:
                 physical = collector.take_controls()
-                if replay.eligible_count(trainer.accepted_actor_updates) == 0:
+                if replay.eligible_count(trainer.accepted_actor_updates) < cfg["training"]["actor_microbatch"]:
                     # 正在积累H个真实执行步，不把尚未完成的anchor计作训练失败或收益。
                     print(json.dumps({"event": "waiting_for_real_anchor", "physical_control_steps": control_steps,
+                                      "eligible_anchors": replay.eligible_count(trainer.accepted_actor_updates),
+                                      "required_anchors": cfg["training"]["actor_microbatch"],
                                       "actor_version": trainer.accepted_actor_updates}), flush=True)
                     continue
                 states = replay.sample(cfg["training"]["actor_microbatch"], actor_version=trainer.accepted_actor_updates)

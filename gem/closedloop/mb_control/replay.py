@@ -31,7 +31,9 @@ class RecentReplay:
             if getattr(x, "generation", None) is not None and x.generation.request.actor_version == actor_version]
         if not eligible:
             raise ValueError("必须先真实采集")
-        return [eligible[self.random.randrange(len(eligible))] for _ in range(count)]
+        if count < 1 or len(eligible) < count:
+            raise ValueError("同版本独立真实样本不足，不能重复一个anchor冒充多样本微批")
+        return self.random.sample(eligible, count)
 
     def eligible_count(self, actor_version):
         return sum(getattr(x, "generation", None) is not None and
