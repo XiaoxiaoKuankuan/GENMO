@@ -75,13 +75,18 @@ class AdapterTrainer:
         x, y = torch.cat(features), torch.cat(targets)
         return x, y, torch.tensor(near_failure, device=y.device)
 
-    def warmup_real(self, epochs=20):
+    def warmup_dataset(self):
+        """只在零策略完整回放固定后构造一次；各预热轮复用同一真实标签。"""
         train = self.replay.complete_episodes("train")
         validation = self.replay.complete_episodes("validation")
         if any(r.policy_version != 0 for e in train+validation for r in e):
             raise ValueError("首次Critic预热必须使用零Adapter真实数据")
         x, y, _ = self.real_targets(train)
         xv, yv, near = self.real_targets(validation)
+        return x, y, xv, yv, near
+
+    def warmup_real(self, epochs=20, *, dataset=None):
+        x, y, xv, yv, near = self.warmup_dataset() if dataset is None else dataset
         best, best_state = float("inf"), None
         batch = self.config.get("critic_batch_size", 256)
         for _ in range(epochs):

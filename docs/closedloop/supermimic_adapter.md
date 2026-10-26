@@ -83,6 +83,12 @@ reference_steps=10与bptt_steps=16独立；内部状态、历史、计划、音�
 不会每轮重跑整个任务表。收集分段不会reset，恢复则必须新episode，因为求解器隐藏状态
 未保存。日志报告真实/想象步数、吞吐、P50/P95/P99和20ms miss，不混淆仿真吞吐和实时能力。
 
+零策略标定同时保存训练/验证完整真实回放，s0仍只由训练速度决定。多个分片按未截断
+二阶矩/样本数合并，使用`--baseline-replay`核对任务、初态、音乐、名义与SM资产SHA后
+复用物理数据；因果音乐记忆/奖励按最终固定s0重算，不修改SM奖励、真实状态或动作。
+Critic多轮预热复用一次构造的完整MC特征/标签。`--preflight-only`禁止Adapter更新，
+即使一个门槛失败也测量其他独立门槛并保存完整报告；失败不能解锁正式训练。
+
 启动完整H8/H16；首次及每25accepted小配对，每100完整固定评价/方向；每次WM真实验证与
 执行梯度门槛。完成率下降、tracking相对下降5%、音乐代理下降0.1或F1下降0.05触发停止。
 首次、每25、完成/停止写唯一编号完整checkpoint，其余只JSONL。保存网络、三optimizer、
@@ -108,6 +114,7 @@ python -B tools/prepare_stage2_supermimic_adapter_assets.py \
 # 后续每个输出必须是不存在的新目录；不得覆盖失败证据或已有模型。
 python -B tools/prepare_stage2_supermimic_adapter_reference.py --config RUNTIME --output CACHE --torch-device cuda:0 --visualizer none --deterministic
 python -B tools/train_stage2_supermimic_adapter.py --config RUNTIME --tasks CACHE/tasks.json --calibrate-music --output S0 --torch-device cuda:0 --visualizer none --deterministic
+python -B tools/train_stage2_supermimic_adapter.py --config RUNTIME --tasks CACHE/tasks.json --music-baseline S0/music_baseline.pt --baseline-replay S0/real_replay.pt --preflight-only --output PREFLIGHT --torch-device cuda:0 --visualizer none --deterministic
 python -B tools/audit_stage2_supermimic_adapter.py --config RUNTIME --tasks CACHE/tasks.json --music-baseline S0/music_baseline.pt --physical --output AUDIT --torch-device cuda:0 --visualizer none --deterministic
 python -B tools/train_stage2_supermimic_adapter.py --config RUNTIME --tasks CACHE/tasks.json --music-baseline S0/music_baseline.pt --variant music --formal --target-updates 1000 --output FORMAL --torch-device cuda:0 --visualizer none --deterministic
 python -B tools/train_stage2_supermimic_adapter.py --config RUNTIME --tasks CACHE/tasks.json --music-baseline S0/music_baseline.pt --variant music --formal --target-updates 1000 --resume FULL_CHECKPOINT --output RESUME_NEW --torch-device cuda:0 --visualizer none --deterministic
@@ -116,6 +123,9 @@ python -B tools/evaluate_stage2_supermimic_adapter.py --config RUNTIME --tasks C
 ```
 
 CPU验证命令：`PYTHONDONTWRITEBYTECODE=1 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 /home/weili/GENMO/.venv/bin/python -B -m pytest tests/closedloop/reference_adapter -q -p no:cacheprovider --basetemp=独立临时目录`。
-当前29项通过；8步music→Adapter梯度39.949802/FD39.941036，music→动作6.796803/FD6.810326。
+当前30项通过；8步music→Adapter梯度39.949802/FD39.941036，music→动作6.796803/FD6.810326。
+Server-1已采集11首完整零策略训练/验证歌曲，FK缓存后完整控制P50约23.5ms，仍超过20ms。
+真实执行qd上的音乐方向梯度0.9056448/FD0.9064674，相对误差0.000908；该片段使用单曲
+训练标尺用于诊断，正式标尺必须合并全部训练歌曲后固定。
 冻结权重8/16步数值图不代表真实物理方向通过。首次正式accepted/PID/物理值必须以服务器
 实际记录补充，不能从本命令模板推断已启动。

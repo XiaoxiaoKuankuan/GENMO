@@ -34,6 +34,7 @@ def main(kind):
     parser.add_argument("--updates", type=int, default=1, help="有界测试的绝对目标，正式/恢复使用target-updates")
     parser.add_argument("--target-updates", type=int, help="绝对accepted更新目标，恢复不追加预算")
     parser.add_argument("--formal", action="store_true")
+    parser.add_argument("--preflight-only", action="store_true", help="真实独立门槛全部测量并保存，禁止执行Adapter更新；通过后可正式恢复")
     parser.add_argument("--physical", action="store_true", help="audit显式运行8/16步真实物理审计")
     parser.add_argument("--self-test", action="store_true", help="audit运行CPU合同测试，无物理或优化任务")
     parser.add_argument("--calibrate-music", action="store_true", help="train仅采集零Adapter真实速度，保存固定s0")
@@ -52,6 +53,8 @@ def main(kind):
     args = parser.parse_args()
     if args.resume and args.checkpoint:
         raise ValueError("resume与checkpoint只能指定一个完整模型")
+    if args.preflight_only and (kind != "train" or args.calibrate_music):
+        raise ValueError("preflight-only仅用于非标定train入口")
     from .application import read_config, read_tasks, require_file, seed_all, build_engine, task_assets, raw_task, behavior_config
     cfg = read_config(args.config)
     if args.tasks:
@@ -300,30 +303,62 @@ def main(kind):
                 return [collect_episode(t, zero=zero, add_replay=False)[1] for t in selected]
 
             try:
+                failures = []
                 if not trainer.critic_ready:
                     if not args.baseline_replay:
                         for task in training_tasks+validation_tasks:
                             collect_episode(task, zero=True)
+                    print("构造完整真实MC预热数据", flush=True)
+                    warmup_data = trainer.warmup_dataset()
                     for warmup_round in range(cfg["training"].get("critic_warmup_rounds", 5)):
-                        report = trainer.warmup_real(cfg["training"]["critic_warmup_epochs"])
+                        report = trainer.warmup_real(cfg["training"]["critic_warmup_epochs"], dataset=warmup_data)
                         write_json(output/f"critic_warmup_{warmup_round:02d}.json", report)
+                        print(json.dumps({"phase": "critic_warmup", "round": warmup_round, **report}), flush=True)
                         if trainer.critic_ready:
                             break
+                    del warmup_data
                     if not trainer.critic_ready:
-                        raise RuntimeError(f"Critic真实MC预热门槛失败: {trainer.warmup_report}")
+                        failures.append("critic_real_mc_quality")
+                        if not args.preflight_only:
+                            raise RuntimeError(f"Critic真实MC预热门槛失败: {trainer.warmup_report}")
                 # 独立WM先真实监督到验证合格；物理方向仍必须随后独立通过。
+                wm_history = []
                 for warmup in range(cfg["training"].get("wm_warmup_steps", 200)):
-                    if trainer.validate_wm()["quality_gate"]["passed"]:
+                    validation = trainer.validate_wm()
+                    if validation["quality_gate"]["passed"]:
                         break
-                    trainer.dynamics.fit(replay.sample_windows(cfg["training"]["batch_size"], 8), trainer.wm_optimizer)
+                    fit = trainer.dynamics.fit(replay.sample_windows(cfg["training"]["batch_size"], 8), trainer.wm_optimizer)
+                    row = dict(step=warmup+1, validation=validation,
+                               fit={k: float(v) if isinstance(v, torch.Tensor) else v for k, v in fit.items()})
+                    wm_history.append(row)
+                    with (output/"wm_warmup.jsonl").open("a") as stream:
+                        stream.write(json.dumps(row, allow_nan=False)+"\n")
+                    if warmup == 0 or (warmup+1) % 25 == 0:
+                        print(json.dumps({"phase": "wm_warmup", **row}), flush=True)
                 wm_preflight = trainer.validate_wm()
                 write_json(output/"wm_preflight.json", wm_preflight)
                 if not wm_preflight["quality_gate"]["passed"]:
-                    raise RuntimeError(f"WM真实1/8/16步预热门槛失败: {wm_preflight}")
-                trainer.register_physical_gate(gate())
+                    failures.append("wm_real_prediction")
+                    if not args.preflight_only:
+                        raise RuntimeError(f"WM真实1/8/16步预热门槛失败: {wm_preflight}")
+                print("执行独立H8/H16真实方向验收", flush=True)
+                direction = gate()
+                if direction["passed"]:
+                    trainer.register_physical_gate(direction)
+                else:
+                    failures.append("wm_real_direction")
+                    if not args.preflight_only:
+                        raise RuntimeError("当前Adapter真实物理方向门槛未通过")
                 if baseline is None:
                     baseline = evaluate_fixed(zero=True)
                     write_json(output/"zero_physical_baseline.json", baseline)
+                if args.preflight_only:
+                    report = dict(passed=not failures, failures=failures, critic=trainer.warmup_report,
+                                  wm=wm_preflight, wm_supervised_updates=len(wm_history), physical_direction=direction,
+                                  accepted_adapter_updates=trainer.update_index, zero_evaluation=baseline)
+                    write_json(output/"preflight.json", report)
+                    save("preflight_passed" if not failures else "preflight_failed")
+                    return 0 if not failures else 2
                 from .evaluation import quality_comparison
                 while trainer.update_index < target_updates:
                     # 单环境方案只在真episode边界优化/审计。只轮转必要歌曲，不每轮重跑全表。
