@@ -2,7 +2,7 @@
 
 仅用审计歌曲比较H1/H4/H8/H16的实际回报、接触分支、重复噪声与独立WM预测。
 每个case从固定初态重放0/50步前缀，不以直接写入预测状态冒充真实起点。接触分支
-变化先保持不确定，再用预先固定的1/5、1/25扰动做两次真实局部复测，两档均在相同
+变化先保持不确定，再沿固定1/5、1/25、1/125、1/625序列复测，连续两档均在相同
 接触分支且通过原噪声/重复性/状态门槛才确认局部方向。任何高信噪比反向明确失败，
 不能由更小扰动、loss下降或短时通过覆盖H16反例；所有原始结果完整保存。
 """
@@ -181,7 +181,7 @@ def resolve_contact_case(coarse, trials, criteria):
                 return result
     if coarse['passed']:
         return result
-    if not physics_ok(coarse) or len(trials) != 2 or not all(physics_ok(t) for t in trials):
+    if not physics_ok(coarse) or len(trials) < 2:
         return result
     if any(d['direction_status'] not in ('positive', 'uncertain_contact_change')
            or d['physical_return_difference'] < -d['noise_floor'] for d in coarse['directions']):
@@ -189,11 +189,12 @@ def resolve_contact_case(coarse, trials, criteria):
     for direction in result['directions']:
         probes = [next(d for d in t['directions'] if d['kind'] == direction['kind']) for t in trials]
         # 任何复测发现明确反向都保留失败；不挑选一次好结果覆盖反例。
-        if any(d['direction_status'] == 'negative' for d in probes):
+        if any(physics_ok(t) and d['direction_status'] == 'negative' for t, d in zip(trials, probes)):
             return result
         if direction['passed']:
             continue
-        if not all(d['passed'] and d['contact_matches_baseline'] for d in probes):
+        good = [physics_ok(t) and d['passed'] and d['contact_matches_baseline'] for t, d in zip(trials, probes)]
+        if not any(a and b for a, b in zip(good[:-1], good[1:])):
             return result
         direction.update(coarse_direction_status=direction['direction_status'],
                          direction_status='positive_two_local_scales', passed=True)
@@ -207,7 +208,7 @@ def physical_directions(collector, control, dynamics, critic, criteria, horizons
         and any(d['direction_status'] == 'uncertain_contact_change' for d in c['directions'])
         and all(d['direction_status'] in ('positive', 'uncertain_contact_change') for d in c['directions'])})
     trials = []
-    for factor in (.2, .04):
+    for factor in (.2, .04, .008, .0016):
         if not pending:
             break
         refined = dict(criteria, residual_epsilon=criteria['residual_epsilon']*factor,
@@ -220,5 +221,5 @@ def physical_directions(collector, control, dynamics, critic, criteria, horizons
              for c in coarse['cases']]
     passed = [h for h in horizons if all(c['passed'] for c in cases if c['horizon'] == h)]
     return dict(coarse, cases=cases, passed_horizons=passed, coarse_passed_horizons=coarse['passed_horizons'],
-                local_refinement_factors=[.2, .04], h16_allowed=16 in passed,
+                local_refinement_factors=[.2, .04, .008, .0016], h16_allowed=16 in passed,
                 finedance189=[c for c in cases if '189' in c['task']])

@@ -219,6 +219,9 @@ def test_contact_refinement_never_hides_negative_or_noise():
     crossed = copy.deepcopy(trial)
     crossed['directions'][0]['contact_matches_baseline'] = False
     assert not resolve_contact_case(coarse, [trial, crossed], criteria)['passed']
+    assert resolve_contact_case(coarse, [crossed, trial, trial], criteria)['passed']
+    assert not resolve_contact_case(coarse, [trial, crossed, trial], criteria)['passed']
+    assert not resolve_contact_case(coarse, [negative, trial, trial], criteria)['passed']
     original_negative = copy.deepcopy(coarse)
     original_negative['directions'][0].update(direction_status='negative', physical_return_difference=-.0055)
     assert not resolve_contact_case(original_negative, [trial, trial], criteria)['passed']
