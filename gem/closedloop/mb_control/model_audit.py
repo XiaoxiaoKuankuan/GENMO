@@ -177,7 +177,7 @@ def audit_known_reference(collector, music, initial, reference, horizons=(5, 10,
     z = collector.reset(music, initial, initial_reference=reference)
     ref0, _, _ = z.reference.read_current_future(0)
     matched_initial = flatten_state((ref0.root_p, ref0.root_R, ref0.root_v, ref0.root_w, ref0.q, ref0.qd))
-    traces, real_actions = {}, []
+    traces, real_actions, real_inputs, real_context = {}, [], [], []
     with torch.no_grad():
         for regime in ("real", "fixed_real_actions", "fixed_reference_closed_loop"):
             z = collector.reset(music, matched_initial, initial_reference=reference)
@@ -188,6 +188,9 @@ def audit_known_reference(collector, music, initial, reference, horizons=(5, 10,
                 z = collector.adapter.refresh_current_observation(z)
                 _, _, goal = z.reference.read_current_future(z.tick)
                 a = real_actions[step] if regime == "fixed_real_actions" else collector.adapter.bundle.act(z.sm_history, goal)
+                if regime == "real":
+                    real_inputs.append(z.state.detach().clone())
+                    real_context.append(z.xi.detach().clone())
                 state = (collector.env.step_physics(a) if regime == "real" else
                          collector.adapter.bundle.step_model(z.state, a, z.xi))
                 z = collector.adapter.advance(z, state, a, origin="real" if regime == "real" else "imagined")
@@ -198,6 +201,15 @@ def audit_known_reference(collector, music, initial, reference, horizons=(5, 10,
                     if bool(collector.adapter.runtime.termination(state, current).any()):
                         break
             traces[regime] = torch.cat(trace)
+        # 仅供定位：每步从记录的真实输入预测一步，区分接口偏差与自由滚动误差累积。
+        # 这些真实中间状态不进入GENMO条件、正式想象或原有预测验收判据。
+        teacher_forced = torch.cat([collector.adapter.bundle.step_model(s, a, xi).cpu()
+                                   for s, a, xi in zip(real_inputs, real_actions, real_context)])
+        diagnostics = {"teacher_forced_one_step": {
+            k: float(v) for k, v in state_errors(teacher_forced, traces["real"], collector.adapter.runtime.kin).items()}}
+        diagnostics["teacher_forced_mean_error"] = {
+            "root_position_m": (teacher_forced[:, :3] - traces["real"][:, :3]).mean(0).tolist(),
+            "joint_position_rad": (unflatten_state(teacher_forced)[4] - unflatten_state(traces["real"])[4]).mean(0).tolist()}
     result = {}
     for regime in ("fixed_real_actions", "fixed_reference_closed_loop"):
         prediction, real = traces[regime], traces["real"]
@@ -211,5 +223,6 @@ def audit_known_reference(collector, music, initial, reference, horizons=(5, 10,
     passed = criteria is not None and all("status" not in value and all(value[k] <= bound for k, bound in criteria["state_rmse_limits"].items())
                                          for regime in result.values() for value in regime.values())
     return {"regimes": result, "passed": bool(passed), "horizons": horizons,
+            "diagnostics": diagnostics,
             "real_state_envelope": state_envelope(traces["real"]),
             "real_control_steps": len(traces["real"]), "initialization": "reference_first_full_state_no_future_real_state"}

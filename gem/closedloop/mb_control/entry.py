@@ -27,6 +27,8 @@ def main(kind):
     parser.add_argument("--mode", choices=("stage1", "full", "no_forecast", "calibration"), default="stage1" if kind == "evaluate" else "full")
     parser.add_argument("--max-seconds", type=float)
     parser.add_argument("--criteria", help="WM审计的显式JSON数值/方向验收阈值")
+    parser.add_argument("--diagnostic-horizons", type=int, nargs="+", default=[5, 10, 15, 20, 32, 45, 90, 93, 102],
+                        help="仅dynamics故障定位使用；不能用该局部报告解锁正式训练")
     parser.add_argument("--perturbation-epsilon", type=float, default=.01,
                         help="真实方向中心差分的关节扰动幅度；改幅度的复查不能覆盖原验收报告")
     parser.add_argument("--latency-scenario", choices=("sample", "measured_worst"), default="sample",
@@ -150,6 +152,32 @@ def main(kind):
         try:
             if kind == "evaluate":
                 evaluate_tasks(collector, tasks, output, mode=args.mode, device=args.torch_device, max_seconds=args.max_seconds)
+            elif kind == "dynamics":
+                from .model_audit import audit_known_reference
+                criteria = json.loads(Path(args.criteria).read_text()) if args.criteria else None
+                before = adapter.bundle.frozen_snapshot()
+                cases = []
+                if not args.diagnostic_horizons or min(args.diagnostic_horizons) < 1:
+                    raise ValueError("诊断时域必须为正整数")
+                for task in tasks:
+                    for seed in task.get("seeds", [42]):
+                        seed_all(seed)
+                        music, initial = task_inputs(task, adapter, args.torch_device)
+                        reference = torch.as_tensor(np.load(require_file(task["known_reference_world_qpos28"],
+                            "已知参考qpos28"), allow_pickle=False), device=args.torch_device, dtype=torch.float32)[None]
+                        item = audit_known_reference(collector, music, initial, reference,
+                            horizons=args.diagnostic_horizons, criteria=criteria)
+                        item.update(task=task["id"], seed=seed)
+                        cases.append(item)
+                        with (output / "dynamics_cases.jsonl").open("a") as stream:
+                            stream.write(json.dumps(item, ensure_ascii=False, allow_nan=False) + "\n")
+                        print(json.dumps({"event": "dynamics_case", "task": task["id"],
+                            "known_reference_passed": item["passed"]}, ensure_ascii=False), flush=True)
+                adapter.bundle.assert_unchanged(before)
+                (output / "dynamics_diagnostic.json").write_text(json.dumps({
+                    "scope": "known_reference_diagnostics_only_not_formal_acceptance",
+                    "frozen_sha256": adapter.bundle.metadata["sha256"], "frozen_unchanged": True,
+                    "supported_control_steps": 0, "cases": cases}, ensure_ascii=False, indent=2, allow_nan=False))
             elif kind == "model":
                 from .model_audit import audit_generated_reference, audit_known_reference
                 criteria = json.loads(Path(args.criteria).read_text()) if args.criteria else None
