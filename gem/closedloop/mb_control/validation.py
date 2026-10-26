@@ -84,5 +84,14 @@ def select_short_horizon(cfg, report):
         raise ValueError("配置短时域未获得对应物理验收")
     if cfg["imagination"].get("critic_bootstrap") is not True:
         raise ValueError("短时训练必须启用独立上层Critic终点价值")
+    import json
+    from pathlib import Path
+    path = cfg["imagination"].get("anchor_gradient_report")
+    if not path:
+        raise ValueError("短时训练需要对应真实anchor的新执行梯度报告")
+    gradient = json.loads(Path(path).read_text())
+    if (gradient.get("method") != "physical_anchor_short_bptt" or gradient.get("passed") is not True or
+            gradient.get("horizon") != selected or gradient.get("frozen_sha256") != report.get("frozen_sha256")):
+        raise ValueError("真实anchor执行梯度报告不匹配或未通过")
     cfg["imagination"]["horizon_steps"] = selected
     return selected
