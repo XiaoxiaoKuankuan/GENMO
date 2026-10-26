@@ -62,7 +62,8 @@ class PlanAwareCritic(nn.Module):
             t = pending.ticket
             extra = [1., cache.version, (z.tick-t.request_tick)/600, (t.predicted_ready_tick-z.tick)/600,
                      (t.first_mutable_source_tick-z.tick)/600, (t.first_influence_tick-z.tick)/600,
-                     t.prefix_frames/60, t.base_version-cache.version, pending.actor_version, t.decision_id]
+                     t.prefix_frames/60, t.base_version-cache.version,
+                     max(0, pending.actor_version)/max(10000, pending.actor_version), t.decision_id]
         timing = z.state.new_tensor(scalar + extra + [0.] * (16 - len(old)) + [x / 600 for x in old] +
                                     [0.] * (16 - len(old)) + [1.] * len(old))
         schedule = self.schedule_proj(timing[None].expand(b, -1))[:, None]
