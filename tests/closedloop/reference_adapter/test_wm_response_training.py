@@ -32,6 +32,13 @@ def test_real_state_one_step_has_weighted_WM_gradient(system):
     for g, h in zip(grad, scaled):
         assert torch.isfinite(g).all()
         torch.testing.assert_close(h, g*3, rtol=1e-4, atol=1e-7)
+    # 同时验证函数内部字段权重参与损失与参数梯度，而非仅写入日志。
+    weights = dict.fromkeys(report['one_step_group_losses'], 0.)
+    weights['joint_velocity'] = 1.
+    qd_loss, qd_report = engine.dynamics.one_step_loss(window, weights=weights)
+    torch.testing.assert_close(qd_loss.detach(), qd_loss.new_tensor(qd_report['one_step_group_losses']['joint_velocity']))
+    qd_grad = torch.autograd.grad(qd_loss, params)
+    assert sum((g-q).square().sum() for g, q in zip(grad, qd_grad)) > 1e-8
     assert report['one_step_valid_transitions'] == 16
     assert all(p.grad is None for p in control.adapter.parameters())
 
