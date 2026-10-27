@@ -116,6 +116,16 @@ class PhysicsRequestStream:
                     except PhysicsRejected:
                         reasons['static_real_start_out_of_domain'] += 1
                         continue
+                    try:
+                        initial_guards[profile].check_state(episode['state'][start:start+horizon+1])
+                    except PhysicsRejected:
+                        reasons['static_real_window_state_out_of_domain'] += 1
+                        continue
+                    try:
+                        initial_guards[profile].check_action(episode['action'][start:start+horizon])
+                    except PhysicsRejected:
+                        reasons['static_real_window_action_out_of_domain'] += 1
+                        continue
                     item["timesteps"] = certification.timesteps_for(tags)
                     if not item["timesteps"]:
                         reasons["uncertified_noise_level"] += 1
@@ -126,7 +136,7 @@ class PhysicsRequestStream:
                 self.sources[key], self.requests[key] = (dataset,row), accepted
         self.keys = sorted(self.sources)
         self.identity = {"sidecar": store.identity, "horizon": horizon, "keys": self.keys,
-                         "static_selection":"time_prefix_halo_profile_and_real_state_v1",
+                         "static_selection":"time_prefix_halo_profile_real_window_state_action_v2",
                          "classification": CLASSIFICATION, "catalog": catalog.identity}
 
     def next(self, count, device):

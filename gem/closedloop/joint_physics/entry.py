@@ -19,6 +19,7 @@ def main(kind):
     parser.add_argument("--output")
     parser.add_argument("--torch-device")
     parser.add_argument("--checkpoint")
+    parser.add_argument("--validation-report",help="需要补充实际WM动作输入验证的本方法方向报告")
     parser.add_argument("--resume")
     parser.add_argument("--max-steps", type=int)
     parser.add_argument("--split", choices=("train", "val", "test"), default="train" if kind == "prepare" else "val")
@@ -35,7 +36,7 @@ def main(kind):
     from .config import read_config, build_adapter, seed_all
     cfg = read_config(preliminary.config, preliminary.set)
     sys.path.insert(0, str(Path(cfg["supermimic"]["repo"]).resolve()))
-    physical = (kind == "evaluate" and not preliminary.numerical_only) or (kind == "prepare" and not preliminary.import_sidecar) or (kind == "gradients" and preliminary.newton)
+    physical = kind=='action_domain' or (kind == "evaluate" and not preliminary.numerical_only) or (kind == "prepare" and not preliminary.import_sidecar) or (kind == "gradients" and preliminary.newton)
     if physical:
         from isaaclab.app import add_launcher_args, launch_simulation
         add_launcher_args(parser)
@@ -79,6 +80,10 @@ def main(kind):
     if args.max_control_steps is not None:
         cfg["prepare"]["max_control_steps"] = cfg["evaluation"]["max_control_steps"] = args.max_control_steps
     def execute(env):
+        if kind=='action_domain':
+            if not args.validation_report:raise ValueError('需要--validation-report，不能无原方向证据扩动作域')
+            from .action_domain import validate
+            return validate(cfg,args.validation_report,output,adapter,env)
         if kind == "prepare":
             if args.import_sidecar:
                 from .offline import prepare_from_sidecar
