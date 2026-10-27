@@ -220,6 +220,16 @@ def main():
                     publish('real_supervision_and_current_WM_repair')
                     for _ in range(train['collect_vector_steps_per_update']):
                         collector.step(replay)
+                    # 每轮都在当前参数动作中心重新取得真实正负配对。只改tangent_pairs
+                    # 内部的zero=False还不够：初始化的一批不能代表后续策略的局部响应。
+                    pair = collector.tangent_pairs()
+                    tangent.add(pair)
+                    tangent_collection = dict(adapter_sha256=parameter_identity(control.adapter),
+                        accepted_updates=state['accepted_updates'], actual_transitions=collector.num_envs,
+                        valid_pairs=len(pair['state']), rejected_pairs=pair['rejected_pairs'],
+                        initial_max_abs=pair['initial_max_abs'], total_pairs=tangent.total_pairs,
+                        refresh='each_real_supervision_iteration_current_policy')
+                    collector.reset(split='train', perturb=True)
                     wm_reports = []
                     steps = repair['wm_initial_steps'] if engine.dynamics.model_version == 0 else (
                         repair['wm_repair_steps'] if state['repair_attempts'] else train['wm_updates_per_iteration'])
@@ -237,6 +247,7 @@ def main():
                     starts = replay.starts(train['actor_batch'])
                     update, _ = adapter_update(control, engine.dynamics, critic, optimizers['adapter'], starts, 8,
                         terminal_value=False, microbatch=train['backward_microbatch'], probes=extra['fixed_probes'])
+                    update['tangent_collection'] = tangent_collection
                     if update['effective']:
                         publish('exact_candidate_H8_H16_physical_parameter_audit')
                         gate = parameter_update_audit(collector, control, engine.dynamics, critic, pending_before[0],

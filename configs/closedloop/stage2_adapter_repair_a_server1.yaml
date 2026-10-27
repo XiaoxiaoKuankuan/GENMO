@@ -84,7 +84,7 @@ vector:
   warmup_vector_steps: 128
   validation_vector_steps: 192
   validation_capacity: 8192
-  tangent_every_iterations: 32
+  tangent_every_iterations: 1
   repair_audit_wm_interval: 100
   wm_tangent: 0.1
   physical_gpu: 0
