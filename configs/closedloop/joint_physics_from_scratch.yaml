@@ -39,16 +39,29 @@ physics:
   lambda_safety: 0.0
   start_step: 1000
   warmup_steps: 10000
+  sampling_mode: independent_offline_requests
+  probe_every: 25
+  readiness_window: 64
+  readiness_min_samples: 16
+  readiness_min_rate: 0.25
+  readiness_min_sources: 3
+  readiness_min_types: 3
 execution_loss:
+  hard_safety: true
   soft_joint_limit_enabled: false
   discount: 1.0
   action_rate_weight: 0.0
   scales: {root_position: 0.3, root_orientation: 0.4, joint_position: 0.25, joint_velocity: 3.0, body_position: 0.15, body_orientation: 0.3, body_velocity: 1.0}
   weights: {root_position: 1.0, root_orientation: 1.0, joint_position: 1.0, joint_velocity: 0.2, body_position: 1.0, body_orientation: 0.5, body_velocity: 0.1}
-training: {seed: 42, batch_size: 16, learning_rate: 0.00001, weight_decay: 0.01, grad_clip: 1.0, precision: fp32, max_steps: 600000, lr_warmup_steps: 500, min_lr_ratio: 0.1, checkpoint_every: 1000, diagnostics_every: 100, smoke_max_steps: 200}
+training: {seed: 42, batch_size: 16, learning_rate: 0.00001, weight_decay: 0.01, grad_clip: 1.0, precision: fp32, max_steps: 600000, lr_warmup_steps: 500, min_lr_ratio: 0.1, checkpoint_every: 1000, diagnostics_every: 100, smoke_max_steps: 200, diagnostic_steps: [0, 100, 500, 1000, 2500, 5000]}
 prepare: {shard_episodes: 4, old_plan_frames: 120, old_plan_period_ticks: 300, max_sources: null, max_control_steps: null}
 evaluation: {split: val, max_sources: 4, seed: 12345, reconstruction_timesteps: [50, 250, 500, 750, 999], max_control_steps: null, request_interval_ticks: 300, latency_ticks: 60}
 audit:
+  timesteps: [50, 100, 250]
+  anchors_per_source: 3
+  directions: [root_x, root_y, root_yaw, upper_body, left_leg, right_leg, fastest_joint]
+  minimum_class_sources: 2
+  minimum_class_anchors: 3
   horizons: [32, 64]
   structural_search_frames: 60
   epsilon: 0.002

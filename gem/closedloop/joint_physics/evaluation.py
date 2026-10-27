@@ -53,7 +53,10 @@ def evaluation_windows(cfg, actor, adapter, *, split, structural_search_frames=0
         if source_index >= cfg["evaluation"]["max_sources"]:
             break
         metadata = dataset.get_window(row, 0)["meta"]
-        episode = store.episode(metadata)
+        try:
+            episode = store.episode(metadata)
+        except PhysicsRejected:
+            continue
         last_frame = min(episode["source_frames"]-61, (len(episode["state"])-1)*12//20 - 30)
         if last_frame < 0:
             yield episode, None, None, None, "insufficient_real_trajectory"

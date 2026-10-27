@@ -33,6 +33,7 @@ class JointPhysicsActor(nn.Module):
         self.stage1 = stage1
         self.future_encoder = FutureStateEncoder(stage1.denoiser.latent_dim)
         self.batch_cfg = True
+        self.fast_forecast = False
         self.initialization = "static_config_random_no_genmo_checkpoint"
 
     def future_residual(self, batch, contexts):
@@ -78,8 +79,15 @@ class JointPhysicsActor(nn.Module):
                 "noise": noise, "music_dropout_mask": drop_music_mask,
                 "known_mask": adapted["known_mask"], "unknown_mask": valid & ~adapted["known_mask"]}
 
-    def forward(self, batch, forecast_context=None, **kwargs):
-        return self.denoise_supervised(batch, forecast_context, **kwargs)
+    def forward(self, batch, forecast_context=None, physics_inputs=None, **kwargs):
+        data = self.denoise_supervised(batch, forecast_context, **kwargs)
+        if physics_inputs is None:
+            return data
+        # 同一次DDP forward内两次真正去噪。物理前向关闭网络dropout但保留输入及参数导数，
+        # 不消耗监督的全局dropout RNG，A/B监督噪声/样本/训练随机数保持可比。
+        with sampling_mode(self):
+            physics = self.denoise_supervised(**physics_inputs)
+        return data, physics
 
     def sample_differentiable(self, conditions, context, noise):
         from gem.closedloop.mb_control.sampler import sample_differentiable

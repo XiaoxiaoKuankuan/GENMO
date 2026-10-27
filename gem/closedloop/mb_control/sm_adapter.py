@@ -38,7 +38,7 @@ class SMAdapter:
         obs = self.runtime.observation(z.state, z.previous_action, z.xi, current)
         return replace(z, sm_history=torch.cat((z.sm_history[:, :-1], obs[:, None]), 1))
 
-    def advance(self, z, state, action, *, origin):
+    def advance(self, z, state, action, *, origin, trim_reference=True):
         tick = z.tick + 12
         current, _, _ = z.reference.read_current_future(tick)
         obs = self.runtime.observation(state, action, z.xi, current)
@@ -46,4 +46,4 @@ class SMAdapter:
                        sm_history=torch.cat((z.sm_history[:, 1:], obs[:, None]), 1),
                        genmo_history=torch.cat((z.genmo_history[:, 1:], self.proprio(state, z.xi)[:, None]), 1),
                        genmo_valid=torch.cat((z.genmo_valid[:, 1:], torch.ones_like(z.genmo_valid[:, :1])), 1),
-                       reference=z.reference.trim(tick), history_origin=origin)
+                       reference=z.reference.trim(tick) if trim_reference else z.reference, history_origin=origin)

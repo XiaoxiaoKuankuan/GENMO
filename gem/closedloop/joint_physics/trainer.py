@@ -19,7 +19,7 @@ from torch.nn.parallel import DistributedDataParallel
 
 from .config import build_actor, build_adapter, seed_all
 from .contracts import PhysicsRejected, digest, execution_contract
-from .curriculum import physics_selection, physics_weights
+from .curriculum import Readiness, physics_noise_levels
 from .data import JointDataStream, SidecarStore
 from .checkpoint import restore_trainer, save_trainer
 
@@ -28,7 +28,7 @@ def grad_summary(loss, actor, *, retain_graph=True):
     named = [(name, parameter) for name, parameter in actor.named_parameters() if parameter.requires_grad]
     values = torch.autograd.grad(loss, [p for _, p in named], retain_graph=retain_graph, allow_unused=True)
     result = {}
-    for group in ("future_encoder", "stage1.denoiser", "stage1.history_encoder", "stage1.music_embedder"):
+    for group in ("future_encoder", "stage1.denoiser", "stage1.history_encoder", "stage1.music_embedder", "stage1.prefix_encoder"):
         terms = [g.float().square().sum() for (name, _), g in zip(named, values) if name.startswith(group) and g is not None]
         result[group] = float(torch.stack(terms).sum().sqrt()) if terms else 0.
     return result
@@ -61,6 +61,15 @@ class JointTrainer:
         self.support = ValidatedSupport(report, self.assets, cfg["physics"]["horizon"], device, execution_contract(cfg)) if report else None
         self.noise_rng = torch.Generator().manual_seed(cfg["training"]["seed"]+1000+rank)
         self.window_rng = np.random.default_rng(cfg["training"]["seed"]+2000+rank)
+        self.physics_noise_rng = torch.Generator().manual_seed(cfg["training"]["seed"]+5000+rank)
+        self.readiness = Readiness(cfg["physics"])
+        self.physics_stream = None
+        self.physics_levels = None
+        if cfg["physics"]["enabled"] and self.store is not None and self.support is not None:
+            from .requests import PhysicsRequestStream
+            self.physics_stream = PhysicsRequestStream(self.stream.catalog, self.store, self.adapter.bundle.spec.joint_names,
+                cfg["physics"]["horizon"], cfg["training"]["seed"], rank, self.support)
+            self.physics_levels = physics_noise_levels(self.actor.stage1.train_diffusion, cfg["physics"], self.support.report)
         self.optimizer = torch.optim.AdamW((p for p in self.actor.parameters() if p.requires_grad), lr=cfg["training"]["learning_rate"],
                                            weight_decay=cfg["training"]["weight_decay"])
         tc = cfg["training"]
@@ -71,7 +80,8 @@ class JointTrainer:
             return tc["min_lr_ratio"]+(1-tc["min_lr_ratio"])*.5*(1+math.cos(math.pi*progress))
         self.scheduler = torch.optim.lr_scheduler.LambdaLR(self.optimizer, lr)
         self.step = 0
-        self.counters = {"supervised_updates": 0, "physics_updates": 0, "supervised_samples": 0, "physics_samples": 0}
+        self.counters = {"supervised_updates": 0, "physics_updates": 0, "supervised_samples": 0, "physics_samples": 0,
+                         "physics_attempts": 0, "physics_valid_samples": 0, "physics_effective_updates": 0}
         self.contract = {"assets": self.assets, "dataset": self.stream.catalog.identity,
             "sidecar": self.store.identity if self.store else None, "model": cfg["stage1"]["model"],
             "loss": cfg["stage1"]["loss"], "sampling": cfg["sampling"], "physics": cfg["physics"],
@@ -86,108 +96,137 @@ class JointTrainer:
     def update(self):
         from .reference import attach_sidecars
         from .execution import execute_window
+        from .diagnostics import sample_record, summarize
         started = time.perf_counter()
         self.actor.train()
         self.optimizer.zero_grad(set_to_none=True)
-        batch = self.stream.next(self.cfg["training"]["batch_size"], self.device)
-        batch, contexts, windows, missing = attach_sidecars(batch, self.store, self.adapter,
-            self.actor.stage1.endecoder.codec, self.cfg["physics"]["horizon"],
-            support_guard=self.support.state_guard if self.support else None)
-        b = len(batch["decision_time"])
+        batch = self.stream.next(self.cfg['training']['batch_size'], self.device)
+        # A/B完全相同的真实/代理历史；物理认证只影响执行分支，不能改变监督条件。
+        batch, contexts, _, missing = attach_sidecars(batch, self.store, self.adapter,
+            self.actor.stage1.endecoder.codec, self.cfg['physics']['horizon'])
+        b = len(batch['decision_time'])
         timesteps = torch.randint(1000, (b,), generator=self.noise_rng).to(self.device)
         noise = torch.randn(b, 60, 30, generator=self.noise_rng).to(self.device)
         drop = (torch.rand(b, generator=self.noise_rng) < self.actor.stage1.music_mask_prob).to(self.device)
-        out = self.network(batch, contexts, timesteps=timesteps, noise=noise, drop_music_mask=drop)
-        bc, components = self.data_loss(batch, out["pred_x_start"], out["static_conf_logits"], self.step)
-        weight, safety_weight = physics_weights(self.step, self.cfg["physics"])
-        eligible, snr = physics_selection(out, self.actor.stage1.train_diffusion, self.cfg["physics"])
-        rejection, accepted, coverage = Counter(), [], []
-        from .diagnostics import sample_record, summarize
-        sample_diagnostics = []
-        indices = self.window_rng.permutation(b).tolist()
-        for i in indices:
-            previous_rejection = rejection.copy()
-            record = sample_record(batch, i, timesteps[i], snr[i])
-            if not self.cfg["physics"]["enabled"]:
-                rejection["physics_disabled"] += 1
-            elif not weight and not safety_weight:
-                rejection["curriculum_data_dominant"] += 1
-            elif bool(drop[i]):
-                rejection["music_dropped"] += 1
-            elif not bool(eligible[i]):
-                rejection["snr_excluded"] += 1
-            elif windows[i] is None:
-                rejection[missing[i]] += 1
-            elif self.support is None:
-                rejection["new_newton_validation_missing"] += 1
-            elif windows[i].source_id not in self.support.source_ids:
-                rejection["source_not_in_new_validation"] += 1
-            elif len(accepted) >= self.cfg["physics"]["subbatch"]:
-                rejection["physics_subbatch_budget"] += 1
+        pcfg = self.cfg['physics']
+        probe = pcfg['enabled'] and (self.readiness.activated_step is not None or self.step % pcfg['probe_every'] == 0)
+        physical_inputs, physics_meta, windows, physics_missing = None, [], [], []
+        selection_reason = 'curriculum_not_active' if pcfg['enabled'] else 'physics_disabled'
+        if probe:
+            if self.physics_stream is None:
+                selection_reason = 'missing_sidecar_or_certification'
+            elif not self.physics_stream.keys:
+                selection_reason = 'no_certified_offline_requests'
             else:
-                record["stages"].extend(["curriculum_active", "conditions_passed", "execution_attempted"])
-                record["action_origin"] = "frozen_sm_from_student_denoised_x0"
+                pbatch, physics_meta = self.physics_stream.next(pcfg['subbatch'], self.device)
+                pbatch, pcontexts, windows, physics_missing = attach_sidecars(pbatch, self.store, self.adapter,
+                    self.actor.stage1.endecoder.codec, pcfg['horizon'])
+                n = len(physics_meta)
+                choices = [[k for k in m['timesteps'] if k in self.physics_levels.tolist()] for m in physics_meta]
+                if any(not c for c in choices):
+                    raise ValueError('已认证类型没有满足物理SNR区间的实际噪声等级')
+                k = torch.tensor([c[int(torch.randint(len(c),(1,),generator=self.physics_noise_rng))] for c in choices],device=self.device)
+                epsilon = torch.randn(n,60,30,generator=self.physics_noise_rng).to(self.device)
+                physical_inputs = dict(batch=pbatch, forecast_context=pcontexts, timesteps=k, noise=epsilon,
+                                       drop_music_mask=torch.zeros(n,dtype=torch.bool,device=self.device))
+        output = self.network(batch, contexts, timesteps=timesteps, noise=noise, drop_music_mask=drop,
+                              physics_inputs=physical_inputs)
+        out, physical = output if physical_inputs is not None else (output, None)
+        bc, components = self.data_loss(batch, out['pred_x_start'], out['static_conf_logits'], self.step)
+        accepted, rows, coverage = [], [], []
+        if physical is not None:
+            alpha = torch.as_tensor(self.actor.stage1.train_diffusion.alphas_cumprod,device=self.device)[k]
+            snr = alpha/(1-alpha)
+            for i, metadata in enumerate(physics_meta):
+                record = sample_record(pbatch,i,k[i],snr[i])
+                record.update(tags=metadata['tags'], stages=['sampled','static_metadata_passed','audited_noise'],
+                              action_origin='frozen_sm_from_student_denoised_x0')
                 try:
-                    result = execute_window(windows[i], out["pred_x_start"][i:i+1], out["static_conf_logits"][i:i+1],
-                        self.actor, self.adapter, self.cfg["execution_loss"], support=self.support)
-                    derivative, = torch.autograd.grad(result["loss"], out["pred_x_start"], retain_graph=True)
-                    if not torch.isfinite(derivative).all() or not bool(derivative.norm() > 0):
-                        raise PhysicsRejected("zero_or_nonfinite_execution_gradient")
-                    result["x0_gradient_norm"] = float(derivative.norm())
+                    if windows[i] is None:
+                        raise PhysicsRejected(physics_missing[i])
+                    support = self.support.for_tags(metadata['tags'])
+                    record['stages'].append('execution_attempted')
+                    result = execute_window(windows[i], physical['pred_x_start'][i:i+1], physical['static_conf_logits'][i:i+1],
+                                            self.actor,self.adapter,self.cfg['execution_loss'],support=support)
+                    derivative, = torch.autograd.grad(result['loss'],physical['pred_x_start'],retain_graph=True)
+                    if not torch.isfinite(derivative).all() or not bool(derivative.norm()>0):
+                        raise PhysicsRejected('zero_or_nonfinite_execution_gradient')
+                    result['x0_gradient_norm'] = float(derivative.norm())
                     accepted.append(result)
-                    coverage.append(result["coverage"])
+                    coverage.append(result['coverage'])
+                    record['reason'] = 'execution_gradient_completed'
                 except PhysicsRejected as error:
-                    rejection[error.reason] += 1
+                    record['reason'] = error.reason
                     record.update(error.details)
-            reason = list((rejection-previous_rejection).keys())
-            record["reason"] = reason[0] if reason else "execution_gradient_completed"
-            sample_diagnostics.append(record)
-        count, scale = distributed_execution_scale(len(accepted), self.device, self.world_size)
-        zero = out["pred_x_start"].sum()*0.
-        local_exec = sum((r["loss"] for r in accepted), zero)
-        local_safety = sum((r["safety"] for r in accepted), zero)
-        # DDP平均rank梯度，因此乘world_size后恰为全局有效样本均值。
-        total = bc + scale*(weight*local_exec + safety_weight*local_safety)
-        finite = torch.tensor(int(torch.isfinite(total).all()), device=self.device)
+                rows.append(record)
+        global_rows = rows
         if self.world_size > 1:
-            dist.all_reduce(finite, op=dist.ReduceOp.MIN)
+            gathered = [None]*self.world_size
+            dist.all_gather_object(gathered, rows)
+            global_rows = [row for rank_rows in gathered for row in rank_rows]
+        readiness = self.readiness.observe(global_rows,self.step)
+        weight = self.readiness.weight(self.step)
+        count,scale = distributed_execution_scale(len(accepted),self.device,self.world_size)
+        zero = out['pred_x_start'].sum()*0.
+        if physical is not None:
+            # 包含被拒绝rank的整个前向图，确保DDP所有rank同一次backward且未用分支也是零梯度。
+            zero = zero+physical['pred_x_start'].sum()*0.+physical['static_conf_logits'].sum()*0.
+        local_exec = sum((r['loss'] for r in accepted),zero)
+        total = bc+scale*weight*local_exec
+        finite = torch.tensor(int(torch.isfinite(total).all()),device=self.device)
+        if self.world_size>1:
+            dist.all_reduce(finite,op=dist.ReduceOp.MIN)
         if not bool(finite):
-            raise FloatingPointError("数据或执行总损失非有限，各rank同步拒绝更新")
-        diagnostics = {}
-        if self.step % self.cfg["training"]["diagnostics_every"] == 0 and self.world_size == 1:
-            diagnostics["data_gradient"] = grad_summary(bc, self.actor)
-            diagnostics["execution_gradient"] = grad_summary(local_exec, self.actor)
+            raise FloatingPointError('数据或执行损失非有限，各rank同步停止')
+        diagnostics, before = {}, {}
+        diagnostic = self.step % self.cfg['training']['diagnostics_every']==0 or self.step in self.cfg['training']['diagnostic_steps']
+        if diagnostic and self.world_size==1:
+            diagnostics['data_gradient_norm'] = grad_summary(bc,self.actor)
+            diagnostics['execution_gradient_norm'] = grad_summary(local_exec/max(1,len(accepted)),self.actor)
+            diagnostics['weighted_execution_to_data_gradient_ratio'] = {
+                key: weight*value/max(1e-12,diagnostics['data_gradient_norm'][key])
+                for key,value in diagnostics['execution_gradient_norm'].items()}
+            before = {name:p.detach().clone() for name,p in self.actor.named_parameters() if p.requires_grad}
         total.backward()
-        norm = torch.nn.utils.clip_grad_norm_(self.actor.parameters(), self.cfg["training"]["grad_clip"])
+        norm = torch.nn.utils.clip_grad_norm_(self.actor.parameters(),self.cfg['training']['grad_clip'])
         if not torch.isfinite(norm):
-            raise FloatingPointError("GENMO梯度非有限，未执行优化")
+            raise FloatingPointError('GENMO梯度非有限，未执行优化')
         self.optimizer.step()
         self.scheduler.step()
+        if before:
+            diagnostics['actual_parameter_delta'] = {}
+            for group in ('future_encoder','stage1.denoiser','stage1.history_encoder','stage1.music_embedder','stage1.prefix_encoder'):
+                terms = [(p.detach()-before[name]).float().square().sum() for name,p in self.actor.named_parameters() if name.startswith(group) and name in before]
+                diagnostics['actual_parameter_delta'][group] = float(torch.stack(terms).sum().sqrt()) if terms else 0.
         self.step += 1
-        self.counters["supervised_updates"] += 1
-        self.counters["supervised_samples"] += b*self.world_size
-        self.counters["physics_updates"] += int(count > 0)
-        self.counters["physics_samples"] += int(count)
-        reduced = torch.tensor([float(bc.detach()), float(local_exec.detach()), float(local_safety.detach())], device=self.device)
-        if self.world_size > 1:
+        effective = bool(weight>0 and count>0)
+        self.counters['supervised_updates'] += 1
+        self.counters['supervised_samples'] += b*self.world_size
+        self.counters['physics_attempts'] += len(global_rows)
+        self.counters['physics_valid_samples'] += int(count)
+        self.counters['physics_effective_updates'] += int(effective)
+        self.counters['physics_updates'] += int(effective)
+        self.counters['physics_samples'] += int(count) if effective else 0
+        reduced = torch.tensor([float(bc.detach()),float(local_exec.detach())],device=self.device)
+        if self.world_size>1:
             dist.all_reduce(reduced)
-            reasons = [None]*self.world_size
-            dist.all_gather_object(reasons, dict(rejection))
-            rejection = sum((Counter(r) for r in reasons), Counter())
-        return {"step": self.step, **self.counters, "data_loss": float(reduced[0]/self.world_size),
-            "execution_loss": float(reduced[1]/count.clamp_min(1)), "execution_safety": float(reduced[2]/count.clamp_min(1)),
-            "physics_valid_rate": float(count)/(b*self.world_size), "lambda_exec": weight, "lambda_safety": safety_weight,
-            "rejections": dict(rejection), "sample_diagnostics": summarize(sample_diagnostics),
-            "snr_range": [float(snr.min()), float(snr.max())],
-            "timesteps": timesteps.tolist(), "sample_ids": [(m["sample_id"], m["decision_frame"]) for m in batch["meta"]],
-            "music_dropout_mask": drop.tolist(), "physics_noise_eligible": int(eligible.sum()),
-            "history_sources": [m["proprio_source"] for m in batch["meta"]],
-            "data_terms": {k: float(v.detach().mean()) for k, v in components.items() if isinstance(v, torch.Tensor)},
-            "gradient_norm": float(norm), **diagnostics, "coverage": coverage,
-            "execution_x0_gradient_norm": [r["x0_gradient_norm"] for r in accepted],
-            "predicted_failure_steps": [r["failure_steps"] for r in accepted],
-            "wall_seconds": time.perf_counter()-started,
-            "peak_memory_bytes": torch.cuda.max_memory_allocated(self.device) if self.device.type == "cuda" else 0}
+        reasons = Counter(row['reason'] for row in global_rows if row['reason']!='execution_gradient_completed')
+        return {'step':self.step,**self.counters,'data_loss':float(reduced[0]/self.world_size),
+            'execution_loss':float(reduced[1]/count.clamp_min(1)),'execution_safety':0.,
+            'physics_valid_rate':float(count)/max(1,len(global_rows)),'lambda_exec':weight,'lambda_safety':0.,
+            'physics_update_fraction':self.counters['physics_effective_updates']/self.step,
+            'physics_selection_status':selection_reason if not global_rows else 'independent_student_probe' if not weight else 'independent_student_training',
+            'readiness':readiness,'rejections':dict(reasons),'physics_rejection_categories':dict(reasons),
+            'sample_diagnostics':summarize(global_rows),'data_sidecar_status':dict(Counter(missing)),
+            'timesteps':timesteps.tolist(),'sample_ids':[(m['sample_id'],m['decision_frame']) for m in batch['meta']],
+            'music_dropout_mask':drop.tolist(),'history_sources':[m['proprio_source'] for m in batch['meta']],
+            'physics_sample_ids':[(m['source'],m['frame']) for m in physics_meta],
+            'physics_timesteps':k.tolist() if physical is not None else [],
+            'data_terms':{key:float(v.detach().mean()) for key,v in components.items() if isinstance(v,torch.Tensor)},
+            'gradient_norm':float(norm),**diagnostics,'coverage':coverage,
+            'execution_x0_gradient_norm':[r['x0_gradient_norm'] for r in accepted],
+            'wall_seconds':time.perf_counter()-started,
+            'peak_memory_bytes':torch.cuda.max_memory_allocated(self.device) if self.device.type=='cuda' else 0}
 
     def run(self, output, stop_step):
         output = Path(output)
@@ -196,6 +235,10 @@ class JointTrainer:
             (output/"config.json").write_text(json.dumps(self.cfg, ensure_ascii=False, indent=2))
         if self.world_size > 1:
             dist.barrier()
+        if self.step == 0:
+            save_trainer(self, output/"joint_00000000.pt")
+        if self.rank == 0 and self.physics_stream is not None:
+            (output/"physics_inventory.json").write_text(json.dumps(self.physics_stream.inventory, ensure_ascii=False, indent=2))
         try:
             while self.step < stop_step:
                 result = self.update()
@@ -203,7 +246,7 @@ class JointTrainer:
                     with (output/"metrics.jsonl").open("a") as file:
                         file.write(json.dumps(result, ensure_ascii=False, allow_nan=False)+"\n")
                     print(json.dumps({k: result[k] for k in ("step", "data_loss", "execution_loss", "physics_updates", "rejections", "wall_seconds")}, ensure_ascii=False), flush=True)
-                if self.step % self.cfg["training"]["checkpoint_every"] == 0 or self.step == stop_step:
+                if self.step % self.cfg["training"]["checkpoint_every"] == 0 or self.step == stop_step or self.step in self.cfg["training"]["diagnostic_steps"]:
                     save_trainer(self, output/f"joint_{self.step:08d}.pt")
         finally:
             if self.adapter is not None:

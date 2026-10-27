@@ -14,7 +14,7 @@ import torch
 
 from .config import SCHEMA
 
-CHECKPOINT_SCHEMA = SCHEMA + ".checkpoint.v1"
+CHECKPOINT_SCHEMA = SCHEMA + ".checkpoint.v2.independent_physics"
 
 
 def rng_state():
@@ -50,7 +50,7 @@ def atomic_save(payload, path):
 def read_checkpoint(path):
     value = torch.load(path, map_location="cpu", weights_only=False)
     required = {"actor", "optimizer", "scheduler", "global_step", "curriculum", "rank_states", "contract", "counters", "config"}
-    if value.get("schema") != CHECKPOINT_SCHEMA or not required <= value.keys():
+    if value.get("schema") not in (CHECKPOINT_SCHEMA, SCHEMA+".checkpoint.v1") or not required <= value.keys():
         raise ValueError("只接受本联合流程完整checkpoint；旧Stage2不是等价恢复状态")
     return value
 
@@ -58,7 +58,9 @@ def read_checkpoint(path):
 def save_trainer(trainer, path):
     from torch import distributed as dist
     rank_state = {"data": trainer.stream.state_dict(), "noise": trainer.noise_rng.get_state(),
-                  "window": trainer.window_rng.bit_generator.state, "rng": rng_state()}
+                  "window": trainer.window_rng.bit_generator.state, "rng": rng_state(),
+                  "physics_data": trainer.physics_stream.state_dict() if trainer.physics_stream is not None else None,
+                  "physics_noise": trainer.physics_noise_rng.get_state()}
     states = [None] * trainer.world_size
     if trainer.world_size > 1:
         dist.all_gather_object(states, rank_state)
@@ -67,7 +69,8 @@ def save_trainer(trainer, path):
     if trainer.rank == 0:
         atomic_save({"schema": CHECKPOINT_SCHEMA, "actor": trainer.actor.state_dict(),
             "optimizer": trainer.optimizer.state_dict(), "scheduler": trainer.scheduler.state_dict(),
-            "global_step": trainer.step, "curriculum": {"step": trainer.step, "physics": trainer.cfg["physics"]},
+            "global_step": trainer.step, "curriculum": {"step": trainer.step, "physics": trainer.cfg["physics"],
+                                                        "readiness": trainer.readiness.state_dict()},
             "rank_states": states, "contract": trainer.contract, "counters": trainer.counters,
             "config": trainer.cfg, "initialization": trainer.actor.initialization}, path)
     if trainer.world_size > 1:
@@ -76,6 +79,8 @@ def save_trainer(trainer, path):
 
 def restore_trainer(trainer, path):
     value = read_checkpoint(path)
+    if value["schema"] != CHECKPOINT_SCHEMA:
+        raise ValueError("独立物理抽样只恢复本算法完整状态；旧共用噪声checkpoint仅可评价")
     if value["contract"] != trainer.contract or len(value["rank_states"]) != trainer.world_size:
         raise ValueError("恢复的架构/数据/资产/物理/采样预算或DDP布局不一致")
     trainer.actor.load_state_dict(value["actor"], strict=True)
@@ -86,4 +91,8 @@ def restore_trainer(trainer, path):
     trainer.stream.load_state_dict(state["data"])
     trainer.noise_rng.set_state(state["noise"].cpu())
     trainer.window_rng.bit_generator.state = state["window"]
+    trainer.physics_noise_rng.set_state(state["physics_noise"].cpu())
+    if trainer.physics_stream is not None:
+        trainer.physics_stream.load_state_dict(state["physics_data"])
+    trainer.readiness.load_state_dict(value["curriculum"]["readiness"])
     restore_rng(state["rng"])

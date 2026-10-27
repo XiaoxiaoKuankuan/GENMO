@@ -87,6 +87,20 @@ class JointDataStream:
 
 class SidecarStore:
     def __init__(self, directory, split, expected_assets=None, *, allow_raw=False, sample_contract=None):
+        self.children = None
+        if isinstance(directory, (list, tuple)):
+            self.children = [SidecarStore(path, split, expected_assets, allow_raw=allow_raw,
+                                         sample_contract=sample_contract) for path in directory]
+            self.index = dict(self.children[0].index, sources={})
+            self.owners = {}
+            for child in self.children:
+                for key,entry in child.index["sources"].items():
+                    if key in self.owners:
+                        raise ValueError("增量缓存不得重复保存同一首音乐")
+                    self.owners[key] = child
+                    self.index["sources"][key] = entry
+            self.identity = [child.identity for child in self.children]
+            return
         self.directory = Path(directory).resolve()
         self.index = json.loads((self.directory / "index.json").read_text())
         schemas = (SIDECAR_SCHEMA, RAW_SIDECAR_SCHEMA) if allow_raw else (SIDECAR_SCHEMA,)
@@ -101,6 +115,10 @@ class SidecarStore:
 
     def episode(self, meta):
         key = source_key(meta)
+        if self.children is not None:
+            if key not in self.owners:
+                raise PhysicsRejected("missing_real_sidecar")
+            return self.owners[key].episode(meta)
         if key not in self.index["sources"]:
             raise PhysicsRejected("missing_real_sidecar")
         entry = self.index["sources"][key]

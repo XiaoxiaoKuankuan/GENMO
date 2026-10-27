@@ -21,7 +21,7 @@ from .reference import candidate_reference
 class ValidatedSupport:
     def __init__(self, report_path, assets, horizon, device, objective):
         report = json.loads(Path(report_path).read_text())
-        if report["schema"] != "genmo.joint_physics.validation.v1" or report["assets"] != assets:
+        if report["schema"] not in ("genmo.joint_physics.validation.v1", "genmo.joint_physics.validation.v2") or report["assets"] != assets:
             raise ValueError("必须使用本方法与同一资产的新Newton报告")
         if horizon not in report["supported_horizons"]:
             raise ValueError("本方法当前H尚未通过实际物理方向/精度验证")
@@ -31,6 +31,46 @@ class ValidatedSupport:
         self.lower = torch.tensor(report["action_min"], device=device)
         self.upper = torch.tensor(report["action_max"], device=device)
         self.source_ids = set(report["source_ids"])
+        self.report = report
+        self.horizon = horizon
+        self.certificates = report.get("certificates", {}).get(str(horizon), {})
+
+    def certified(self, tags):
+        """来源ID只追溯；须与同H的真实动作/接触类型认证匹配，旧报告不可扩到新来源。"""
+        return bool(tags) and all(self.certificates.get(tag, {}).get("passed") for tag in tags)
+
+    def timesteps_for(self, tags):
+        if not self.certified(tags):
+            return []
+        return sorted(set.intersection(*(set(self.certificates[tag]["audited_timesteps"]) for tag in tags)))
+
+    def for_tags(self, tags):
+        if not self.certified(tags):
+            raise PhysicsRejected("uncertified_motion_type", {"required_motion_types": tags})
+        certificates = [self.certificates[tag] for tag in tags]
+        guard = object.__new__(ValidatedSupport)
+        envelope = dict(certificates[0]["state_envelope"])
+        envelope["minimum"] = torch.tensor([c["state_envelope"]["minimum"] for c in certificates]).amax(0).tolist()
+        envelope["maximum"] = torch.tensor([c["state_envelope"]["maximum"] for c in certificates]).amin(0).tolist()
+        guard.state_guard = ModelSupport(envelope, device=self.lower.device)
+        guard.lower = self.lower.new_tensor([c["action_min"] for c in certificates]).amax(0)
+        guard.upper = self.upper.new_tensor([c["action_max"] for c in certificates]).amin(0)
+        return guard
+
+    def check_state(self, state):
+        try:
+            self.state_guard(state)
+        except (UnsupportedModelState, FloatingPointError) as error:
+            raise PhysicsRejected("wm_state_out_of_domain", getattr(error, "details", {})) from error
+
+    def check_action(self, action):
+        if not torch.isfinite(action).all():
+            raise PhysicsRejected("nonfinite_sm_action")
+        outside = ((action.detach() < self.lower-.02) | (action.detach() > self.upper+.02)).nonzero().tolist()
+        if outside:
+            raise PhysicsRejected("action_out_of_validated_domain", {"components": [
+                {"joint_index": j, "value": float(action[i,j].detach()), "lower": float(self.lower[j]-.02),
+                 "upper": float(self.upper[j]+.02)} for i,j in outside]})
 
     def __call__(self, state, action):
         try:
@@ -48,6 +88,15 @@ def execute_window(window, predicted_x0, logits, actor, adapter, cfg, *, support
     window.validate()
     reference = candidate_reference(window, predicted_x0, logits, actor.stage1.endecoder.codec,
                                     actor.stage1.endecoder)
+    enforce = cfg.get("hard_safety", True)
+    def hard_joint(q, reason):
+        kin = adapter.runtime.kin
+        outside = ((q.detach() < kin.q_lo-1e-4) | (q.detach() > kin.q_hi+1e-4)).nonzero().tolist()
+        if outside:
+            raise PhysicsRejected(reason, {"first_reject_tick": window.start.tick, "components": outside,
+                                            "maximum_violation_rad": float(torch.maximum(kin.q_lo-q.detach(), q.detach()-kin.q_hi).max())})
+    if enforce:
+        hard_joint(reference.world_qpos[...,7:][...,adapter.to_sm], "reference_hard_joint_limit")
     first = reference.first_influence(window.request.tick, window.ticket.first_mutable_source_tick)
     if first != window.start.tick:
         raise PhysicsRejected("first_influence_mismatch")
@@ -55,6 +104,7 @@ def execute_window(window, predicted_x0, logits, actor, adapter, cfg, *, support
     losses, safety, terms, states, actions, support_ticks, center = [], [], [], [], [], set(), 0
     failure_steps = []
     for step in range(window.horizon):
+        rejection_tick, phase = z.tick, "reference_and_action"
         try:
             dependency = reference.dependency_support(z.tick)
             mutable = dependency[dependency >= window.ticket.first_mutable_source_tick]
@@ -66,9 +116,19 @@ def execute_window(window, predicted_x0, logits, actor, adapter, cfg, *, support
             z = adapter.refresh_current_observation(z)
             _, _, goal = z.reference.read_current_future(z.tick)
             action = adapter.bundle.act(z.sm_history, goal)
-            next_state = adapter.bundle.step_model(z.state, action, z.xi) if transition is None else transition(action)
+            if not torch.isfinite(action).all():
+                raise PhysicsRejected("nonfinite_sm_action")
             if support is not None:
-                support(next_state, action)
+                support.check_action(action)
+            rejection_tick, phase = z.tick+12, "predicted_state"
+            next_state = adapter.bundle.step_model(z.state, action, z.xi) if transition is None else transition(action)
+            if not torch.isfinite(next_state).all():
+                raise PhysicsRejected("nonfinite_predicted_state")
+            if enforce:
+                from supermimic.mdp import unflatten_state
+                hard_joint(unflatten_state(next_state)[4], "executed_hard_joint_limit")
+            if support is not None:
+                support.check_state(next_state)
             z = adapter.advance(z, next_state, action, origin="imagined" if transition is None else "real")
             target, _, _ = window.target.read_current_future(z.tick, 0)
             target = target._make(t.detach() for t in target)
@@ -77,8 +137,10 @@ def execute_window(window, predicted_x0, logits, actor, adapter, cfg, *, support
             with torch.no_grad():
                 if bool(adapter.runtime.termination(z.state.detach(), target).any()):
                     failure_steps.append(step + 1)
+                    if enforce:
+                        raise PhysicsRejected("sm_physical_termination")
         except PhysicsRejected as error:
-            error.details.update(first_reject_tick=z.tick, control_step=step,
+            error.details.update(first_reject_tick=rejection_tick, control_step=step, failure_phase=phase,
                                  action_origin="frozen_sm_from_student_denoised_x0")
             raise
         except ReferenceExhausted as error:

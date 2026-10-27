@@ -85,10 +85,11 @@ def main(kind):
             from .prepare_rollouts import prepare
             return prepare(cfg, args.split, output, adapter, env)
         if kind == "gradients":
-            from .evaluation import audit_gradients, complete_validation
+            from .evaluation import complete_validation
             if args.complete_validation:
                 return complete_validation(cfg, args.complete_validation, output, adapter)
-            return audit_gradients(cfg, args.checkpoint, output, adapter, env, args.interface_probe)
+            from .certification import audit
+            return audit(cfg, args.checkpoint, output, adapter, env, args.interface_probe)
         from .evaluation import evaluate
         return evaluate(cfg, args.checkpoint, output, adapter, env, args.mode)
     if not physical:

@@ -37,7 +37,8 @@ class GenerationWorker:
             def run():
                 with torch.no_grad():
                     begin = time.perf_counter()
-                    context = (forecast_rollout(snapshot, self.adapter, ticket.first_influence_tick).context
+                    context = (forecast_rollout(snapshot, self.adapter, ticket.first_influence_tick,
+                               reuse_current_observation=getattr(self.actor,"fast_forecast",False)).context
                                if self.forecast_enabled else ForecastContext.invalid(snapshot.state, snapshot.tick))
                     if snapshot.state.is_cuda:
                         torch.cuda.current_stream(snapshot.state.device).synchronize()

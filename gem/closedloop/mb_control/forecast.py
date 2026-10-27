@@ -25,7 +25,7 @@ class ForecastResult:
 
 def forecast_rollout(state, adapter, forecast_tick, *, support_guard=None,
                      reference_dependencies=None, initial_dependency_steps=0,
-                     transition_fn=None, on_step=None):
+                     transition_fn=None, on_step=None, reuse_current_observation=False):
     if state.pending or forecast_tick < state.tick or (forecast_tick - state.tick) % 12:
         raise ValueError("前瞻必须从无pending请求预测到未来控制网格")
     predicted = state
@@ -34,7 +34,10 @@ def forecast_rollout(state, adapter, forecast_tick, *, support_guard=None,
         reference_depth = (reference_dependencies.control_depth(predicted.reference, predicted.tick)
                            if reference_dependencies is not None else 0)
         depth = max(depth, reference_depth) + 1
-        predicted = adapter.refresh_current_observation(predicted)
+        # 固定旧参考前瞻中advance已重建下一时刻观测；无需再重做同一FK/观测。
+        # 默认保留旧路径供数值对照；短前瞻不trim可避免每步重复验证不可变源张量。
+        if not reuse_current_observation or predicted.tick == state.tick:
+            predicted = adapter.refresh_current_observation(predicted)
         _, _, goal = predicted.reference.read_current_future(predicted.tick)
         with torch.profiler.record_function("mb/forecast_sm_actor"):
             action = adapter.bundle.act(predicted.sm_history, goal)
@@ -43,7 +46,8 @@ def forecast_rollout(state, adapter, forecast_tick, *, support_guard=None,
                           if transition_fn is None else transition_fn(action))
         if support_guard is not None:
             support_guard(next_state)
-        predicted = adapter.advance(predicted, next_state, action, origin="imagined" if transition_fn is None else "real")
+        predicted = adapter.advance(predicted, next_state, action, origin="imagined" if transition_fn is None else "real",
+                                    trim_reference=not reuse_current_observation)
         if on_step is not None:
             on_step(predicted)
     ref, _, _ = predicted.reference.read_current_future(forecast_tick)

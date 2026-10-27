@@ -109,26 +109,52 @@ def prepare(cfg, split, output, adapter, env):
     from .offline import cache_requests, preprocessing_codec, source_provenance
     catalog = SourceCatalog(cfg, split)
     output = Path(output)
-    output.mkdir(parents=True, exist_ok=False)
+    resume = cfg["prepare"].get("resume", False)
+    output.mkdir(parents=True, exist_ok=resume)
     started = time.perf_counter()
     index = {"schema": SIDECAR_SCHEMA, "split": split, "assets": asset_contract(cfg, adapter),
              "dataset": catalog.identity, "sources": {}, "shards": {}, "episodes": [],
              "sample_contract": cfg["data"]["sample_contract"], "source_versions": source_provenance(cfg)}
+    if resume and (output/"index.json").exists():
+        previous = json.loads((output/"index.json").read_text())
+        if any(previous[k] != index[k] for k in ("schema", "split", "assets", "sample_contract", "dataset")):
+            raise ValueError("离线断点续处理身份不同，必须使用新目录")
+        for shard,sha in previous["shards"].items():
+            if digest(output/shard) != sha:
+                raise ValueError("已保存分片身份改变，禁止重复采集或覆盖")
+        index = previous
+    skip = set(index["sources"])
+    for directory in cfg["prepare"].get("exclude_sidecars", []):
+        from .data import SidecarStore
+        existing = SidecarStore(directory, split, index["assets"], sample_contract=cfg["data"]["sample_contract"])
+        skip.update(existing.index["sources"])
     codec = preprocessing_codec(cfg)
     pending = []
     frozen = adapter.bundle.frozen_snapshot()
     def flush():
-        name = f"shard_{len(index['shards']):05d}.pt"
+        import uuid
+        name = f"shard_{len(index['shards']):05d}_{uuid.uuid4().hex[:8]}.pt"
         with (output/name).open("xb") as file:
             torch.save(pending, file)
         index["shards"][name] = digest(output/name)
         for i, episode in enumerate(pending):
             index["sources"][episode["source_key"]] = {"shard": name, "episode": i}
         pending.clear()
+        temporary = output/"index.json.partial"
+        temporary.write_text(json.dumps(index, ensure_ascii=False, indent=2))
+        temporary.replace(output/"index.json")
+    per_dataset = {}
     for dataset, row in catalog.sources():
         limit = cfg["prepare"].get("max_sources")
         if limit is not None and len(index["episodes"]) >= limit:
             break
+        key = json.dumps([dataset.dataset_name, dataset.split, dataset.rows[row]["sample_id"]], ensure_ascii=False, separators=(",", ":"))
+        if key in skip:
+            continue
+        per_limit = cfg["prepare"].get("max_sources_per_dataset")
+        if per_limit is not None and per_dataset.get(dataset.dataset_name,0) >= per_limit:
+            continue
+        per_dataset[dataset.dataset_name] = per_dataset.get(dataset.dataset_name,0)+1
         episode = collect_source(dataset, row, cfg, adapter, env)
         preprocessing = cache_requests(episode, dataset, row, adapter, codec)
         pending.append(episode)
