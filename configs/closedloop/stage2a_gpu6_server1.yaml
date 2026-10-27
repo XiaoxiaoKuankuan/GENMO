@@ -94,7 +94,7 @@ stage2a:
   soft_joint_limit_cost: false
   projection: {}
   precision:
-    weight: 1.2945369773120208
+    weight: 0.893429592635922
     action_weight: 0.01
     velocity_weight: 0.002
     acceleration_weight: 0.0002
@@ -111,7 +111,7 @@ stage2a:
     seed: 42
     reference_budget: flexible
     precision_level: high
-    gradient_calibration: /data0/user/liwei/GENMO_outputs/stage2_supermimic_adapter/stage2a_projection_20261027_01/gradient_soft_off02/train_gradient_calibration.json
+    gradient_calibration: /data0/user/liwei/GENMO_outputs/stage2_supermimic_adapter/stage2a_projection_20261027_01/long_BPTT_memory_H32/train_gradient_calibration.json
     shared_assets_manifest: /data0/user/liwei/GENMO_outputs/stage2_supermimic_adapter/stage2a_projection_20261027_01/assets_64_sha256.json
     independent_online_data: true
   objective_version: q_qd_body_R_local_root_no_extra_body_w_v2

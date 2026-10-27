@@ -102,7 +102,7 @@ stage2a:
     rotation_velocity: 0.15
     rotation_acceleration: 1.5
   precision:
-    weight: 0.6472684886560104
+    weight: 0.446714796317961
     action_weight: 0.01
     velocity_weight: 0.002
     acceleration_weight: 0.0002
@@ -119,7 +119,7 @@ stage2a:
     seed: 42
     reference_budget: conservative
     precision_level: low
-    gradient_calibration: /data0/user/liwei/GENMO_outputs/stage2_supermimic_adapter/stage2a_projection_20261027_01/gradient_soft_off02/train_gradient_calibration.json
+    gradient_calibration: /data0/user/liwei/GENMO_outputs/stage2_supermimic_adapter/stage2a_projection_20261027_01/long_BPTT_memory_H32/train_gradient_calibration.json
     shared_assets_manifest: /data0/user/liwei/GENMO_outputs/stage2_supermimic_adapter/stage2a_projection_20261027_01/assets_64_sha256.json
     independent_online_data: true
   objective_version: q_qd_body_R_local_root_no_extra_body_w_v2
