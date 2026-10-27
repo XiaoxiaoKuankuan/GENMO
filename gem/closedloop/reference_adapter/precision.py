@@ -40,7 +40,7 @@ class PrecisionObjective:
         self.weight = weight
         self.action_weight, self.velocity_weight, self.acceleration_weight = action_weight, velocity_weight, acceleration_weight
         if set(self.scales) != set(NAMES) or any(v <= 0 for v in self.scales.values()):
-            raise ValueError('精度标尺必须是训练集固定正数且完整包含五项')
+            raise ValueError('精度标尺必须是训练集固定正数且完整包含四项')
 
     def __call__(self, control, z, proposal, state, nominal, sm):
         values = errors(control, z, state, nominal, sm)

@@ -7,7 +7,7 @@ Huber项。比较有无梯度检查点的H32/H64完整Adapter梯度，验证节�
 
 import torch
 import pytest
-from gem.closedloop.reference_adapter.reference_response import ReferenceResponseReplay, response_groups, consistency_loss
+from gem.closedloop.reference_adapter.reference_response import ReferenceResponseReplay, response_groups, consistency_loss, validate_response
 from gem.closedloop.reference_adapter.precision import PrecisionObjective, NAMES, RATIOS
 from gem.closedloop.reference_adapter.reference_constraints import ReferenceProjection
 from gem.closedloop.reference_adapter.vector_learning import rollout
@@ -65,6 +65,37 @@ def test_long_response_does_not_count_single_reliable_step_as_H32():
     assert replay.sample(32, horizon=32)['song'].eq(1).all()
     assert replay.sample(1, horizon=64) is None
     assert replay.coverage()['windows']['64']['reliable_at']['32'] == 1
+
+
+def test_response_metrics_exclude_states_after_real_termination(system):
+    engine, control, z = constrained_system(system, count=2)
+    state, rows = z['state'], []
+    action = torch.zeros(2, 16, 21)
+    with torch.no_grad():
+        for t in range(16):
+            state = engine.dynamics.step(state, action[:, t], z['xi'])
+            rows.append(state)
+    target = torch.stack(rows, 1)
+    valid = torch.ones(2, 16, dtype=torch.bool)
+    valid[1, 4:] = False
+    # 模拟第二条轨迹结束后已属于其它episode的标签，不能进入误差或可靠对统计。
+    target[1, 4:, :3] += 1000
+    target[1, 4:, 10:13] += 1000
+    target[1, 4:, 34:] += 1000
+    pairs = dict(state=z['state'], xi=z['xi'], plus_action=action, minus_action=action,
+        plus_next=target, minus_next=target, reliable=valid.clone(), trajectory_valid=valid,
+        contact_switch=torch.zeros_like(valid))
+    report = validate_response(engine.dynamics, pairs, horizons=(16,), kin=control.runtime.kin)['horizons']['16']
+    assert report['continuous_real_pairs'] == report['reliable_pairs'] == 1
+    assert report['plus_state_error']['joint_velocity_rad_s'] == 0
+    assert report['plus_state_error']['root_position_m'] == 0
+    assert all(field['physical_response_rmse'] == 0 for field in report['fields'].values())
+    pairs['trajectory_valid'][:] = False
+    pairs['reliable'][:] = False
+    report = validate_response(engine.dynamics, pairs, horizons=(16,), kin=control.runtime.kin)['horizons']['16']
+    assert report['continuous_real_pairs'] == report['reliable_pairs'] == 0
+    assert report['plus_state_error'] is None
+    assert all(field['physical_response_rmse'] is None for field in report['fields'].values())
 
 
 @pytest.mark.parametrize('horizon', [32, 64])
