@@ -168,6 +168,9 @@ def offline_audit(cfg,run,output,versions):
                 A.append(float(values.mean()));A_integral.append(float((values*discount).sum()))
                 coverage=anchor_coverage(sample);coverage.update(version=version,task=controls[0].start.task_id)
                 e=next((e for e in payload['events'] if e.get('reference_version')==sample.generation.reference_version),{})
+                coverage['predicted_first_influence_tick']=coverage['first_influence_tick']
+                coverage['first_influence_tick']=e.get('first_influence_tick',sample.state.tick)
+                coverage['observed_first_control_tick']=sample.state.tick
                 coverage['first_center_consumed_tick']=e.get('first_center_consumed_tick');all_coverage.append(coverage)
                 desc=describe_sample(sample,adapter);desc.update(version=version);all_samples.append(desc)
                 anchor_rows.append({'tick':sample.state.tick,'A_mean':A[-1],'A_integral':A_integral[-1],

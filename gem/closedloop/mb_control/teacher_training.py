@@ -214,7 +214,7 @@ def guarded_teacher_update(trainer,samples,supervised_batch,physical_intervals,p
             global_support_ticks=consumed_music_support(sample,engine.horizon_steps),
             global_control_ticks=consumed_music_ticks(sample,engine.horizon_steps),
             global_reference_records=sample.transitions[:engine.horizon_steps],global_reference_version=sample.generation.reference_version)
-        return {"dance":terms["dance_loss"].mean()/mass,"episode":terms["episode_dance_loss"].mean()/mass,"track":terms["current_reference_loss"].mean()/mass,
+        return {"dance":terms["dance_loss"].mean()/mass,"episode":terms["episode_dance_loss"].mean()/mass if weights["episode"] else terms["dance_loss"].new_zeros(()),"track":terms["current_reference_loss"].mean()/mass,
             "local":lp,"global":gp,"action_rate":terms["action_rate_cost"].mean()/mass,
             "joint_limit":terms["joint_limit_cost"].mean()/mass,"terminal_value":lp.new_zeros(())}
 

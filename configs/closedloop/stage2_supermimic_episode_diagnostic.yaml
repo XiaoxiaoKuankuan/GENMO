@@ -1,0 +1,220 @@
+# 独立音乐漂移修复实验，不替换旧正式运行配置，不自动启动大规模训练。
+# 从source_run/checkpoints/initial_actor.pt逐张量加载原Stage1，使用新AdamW；Critic权重为0。
+# 局部H16执行目标 + episode初态固定SE2累计目标；积分除以H16折扣质量0.297084。
+# BC/local/global等软辅助先限制相对主梯度预算，再投影冲突；硬限位不投影。
+# 4个实际音乐/时间anchor，0/10/25/50真实固定八曲评价；质量负结果完整保留。
+# 路径和GPU由服务器2独立运行副本显式重定位，所有null资产必须填实际原始来源。
+algorithm: genmo_supermimic_model_based
+training_method: physical_anchor_short_bptt
+physics_backend: isaaclab3_newton_mujoco_warp
+stage1:
+  checkpoint: null
+  stats: /home/weili/bumi-closedloop-worktrees/stage1_server2_scratch600k_20260930/assets/qpos30_train_stats.json
+  kinematics: configs/bumi/bumi_kinematics_robot_retargeter_fe934_v1.json
+  data_config: null
+supermimic:
+  repo: /home/weili/bumi-closedloop-worktrees/supermimic/SuperMimic
+  checkpoint: /home/weili/supermimic_vibed/logs/bumi3_seven_filtered_v1/ckpt_024000.pt
+  robot_asset_dir: /home/weili/supermimic_vibed/data/bumi3_4340/robot
+tasks: null
+latency_profile: null
+model:
+  motion_frames: 60
+  motion_fps: 30
+  ddim_steps: 20
+  eta: 0.0
+  cfg_scale: 2.5
+  forecast_enabled: true
+  activation_checkpointing: true
+  batch_cfg: true
+clock:
+  bootstrap_latency_ticks: null
+  latency_margin_ticks: 0
+  request_mode: eager
+  request_interval_ticks: 300
+  max_consecutive_timeouts: 3
+imagination:
+  mode: physical_anchor_short_bptt
+  horizon_steps: 16
+  critic_bootstrap: false
+  anchor_gradient_report: null
+  decision_intervals: 3
+  validated_model_steps: null
+  physical_validation_report: null
+  state_support_reference_report: null
+critic:
+  network:
+    width: 256
+    layers: 2
+    heads: 4
+    teacher_conditioned: true
+  gamma_per_control: 0.99
+training:
+  genmo_lr: 2.5e-07
+  forecast_lr: 2.5e-07
+  critic_lr: 0.0001
+  weight_decay: 0.01
+  bc_weight: 1.0
+  prior_weight: 2.0
+  local_prior_weight: 2.0
+  global_prior_weight: 0.2
+  auxiliary_gradient_projection: true
+  defer_critic: true
+  output_trust_region:
+    enabled: true
+    maximum_attempts: 3
+    lr_shrink: 0.25
+    joint_step_rad: 0.01
+    root_step_m: 0.005
+    orientation_step_rad: 0.01
+    local_joint_drift_rad: 0.2
+    global_joint_drift_rad: 0.35
+    global_root_drift_m: 0.15
+    global_orientation_drift_rad: 0.25
+    minimum_activity_ratio: 0.65
+    minimum_phase_cosine: -0.2
+    dance_worsening_atol: 1.0e-07
+    dance_worsening_rtol: 0.0
+    calibration_report: null
+  terminal_value_weight: 0.0
+  balanced_motion_sampling: true
+  grad_clip: 1.0
+  lambda_per_half_second: 0.95
+  warmup_updates: 2
+  stage1_supervision_step: 595000
+  actor_microbatch: 4
+  supervision_batch: 1
+  collect_decisions: 6
+  replay_capacity: 128
+  seed: 42
+  normalize_execution_horizon: true
+  soft_auxiliary_gradient_budget:
+    bc: 0.25
+    local: 0.5
+    global: 0.25
+    track: 0.25
+rewards:
+  mode: teacher_music
+  target_definition: local_h16_plus_episode_initial_se2_v2
+  dance_alignment: anchor_se2
+  track_weight: 0.1
+  dance_scales:
+    root_position: 0.3
+    root_orientation: 0.4
+    root_velocity: 1.0
+    body_position: 0.15
+    body_orientation: 0.3
+    body_velocity: 1.0
+    joint_position: 0.35
+    joint_velocity: 2.0
+    joint_acceleration: 20.0
+  scales:
+    anchor_pos: 0.3
+    anchor_ori: 0.4
+    body_pos: 0.15
+    body_ori: 0.2
+    body_lin_vel: 1.0
+    body_ang_vel: 3.14
+    foot_height: 0.07
+    leg_joint_pos: 0.25
+  body_names:
+  - base_link
+  - waist_yaw_link
+  - l_arm_pitch_link
+  - l_arm_roll_link
+  - l_arm_yaw_link
+  - l_elbow_pitch_link
+  - r_arm_pitch_link
+  - r_arm_roll_link
+  - r_arm_yaw_link
+  - r_elbow_pitch_link
+  - l_leg_pitch_link
+  - l_leg_roll_link
+  - l_leg_yaw_link
+  - l_knee_pitch_link
+  - l_ankle_pitch_link
+  - l_ankle_roll_link
+  - r_leg_pitch_link
+  - r_leg_roll_link
+  - r_leg_yaw_link
+  - r_knee_pitch_link
+  - r_ankle_pitch_link
+  - r_ankle_roll_link
+  foot_names:
+  - l_ankle_roll_link
+  - r_ankle_roll_link
+  leg_joint_names:
+  - l_leg_pitch_joint
+  - l_leg_roll_joint
+  - l_leg_yaw_joint
+  - l_knee_pitch_joint
+  - l_ankle_pitch_joint
+  - l_ankle_roll_joint
+  - r_leg_pitch_joint
+  - r_leg_roll_joint
+  - r_leg_yaw_joint
+  - r_knee_pitch_joint
+  - r_ankle_pitch_joint
+  - r_ankle_roll_joint
+  action_rate_weight: 0.0
+  joint_limit_weight: 2.0
+  root_huber_weight: 0.0
+  music_surrogate_enabled: false
+  episode_dance_weight: 1.0
+execution:
+  physics_determinism: run_to_run
+  start_large_scale_training: false
+  maximum_explicit_updates: 8
+  preserve_episode_across_collection_windows: true
+  physical_batch: 1
+  physical_worker_gpus:
+  - 1
+  - 2
+  - 6
+formal:
+  evaluation_timing_modes:
+  - fixed_delay_replay
+  - wall_clock_async
+  critic_validation_tasks: null
+  evaluation_tasks: null
+  evaluation_gpu: 4
+  checkpoint_every: 100
+  evaluate_every: 100
+  max_control_steps: 5000000
+  max_wall_hours: 72
+  maximum_invalid_streak: 20
+  critic_warmup:
+    seed: 3042
+    train_episodes: 16
+    minimum_samples_per_split: 24
+    max_collection_steps: 100000
+    batch_size: 8
+    minimum_updates: 100
+    max_updates: 2000
+    validate_every: 25
+    maximum_mse: 0.25
+    minimum_explained_variance: 0.1
+    minimum_relative_improvement: 0.2
+  degradation:
+    completion_drop: 0.1
+    minimum_duration_ratio: 0.9
+    minimum_activity_ratio: 0.8
+    maximum_beat_drop: 0.1
+  evaluation_gpus:
+  - 4
+  - 5
+  - 6
+  - 7
+teacher:
+  target_mode: online_consumed_reference_v1
+  online_manifest: null
+  online_seed: 42
+  enabled: true
+  cache_dir: null
+  seed: 73421
+  local_cache_size: 256
+  timeline_memory_cache_size: 4
+diagnostic:
+  phase: experiment
+  source_run: null
+  maximum_attempts: 250
