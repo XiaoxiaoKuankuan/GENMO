@@ -85,6 +85,7 @@ class PhysicsRequestStream:
         self.time_rng = np.random.default_rng(seed+4000+rank)
         self.draws, self.order, self.cursor = 0, [], 0
         self.sources, self.requests, self.inventory = {}, {}, []
+        initial_guards = {}
         for dataset,row in catalog.sources():
             key = json.dumps([dataset.dataset_name, dataset.split, dataset.rows[row]["sample_id"]], separators=(",",":"),ensure_ascii=False)
             if key not in store.index["sources"]:
@@ -107,6 +108,14 @@ class PhysicsRequestStream:
                     reasons["uncertified_motion_type"] += 1
                     continue
                 if certification is not None:
+                    profile = '|'.join(tags)
+                    if profile not in initial_guards:
+                        initial_guards[profile] = certification.for_tags(tags,device='cpu')
+                    try:
+                        initial_guards[profile].check_state(episode['state'][start:start+1])
+                    except PhysicsRejected:
+                        reasons['static_real_start_out_of_domain'] += 1
+                        continue
                     item["timesteps"] = certification.timesteps_for(tags)
                     if not item["timesteps"]:
                         reasons["uncertified_noise_level"] += 1
@@ -117,6 +126,7 @@ class PhysicsRequestStream:
                 self.sources[key], self.requests[key] = (dataset,row), accepted
         self.keys = sorted(self.sources)
         self.identity = {"sidecar": store.identity, "horizon": horizon, "keys": self.keys,
+                         "static_selection":"time_prefix_halo_profile_and_real_state_v1",
                          "classification": CLASSIFICATION, "catalog": catalog.identity}
 
     def next(self, count, device):

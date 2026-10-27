@@ -49,18 +49,19 @@ class ValidatedSupport:
             return self.profiles['|'.join(sorted(tags))]['audited_timesteps']
         return sorted(set.intersection(*(set(self.certificates[tag]["audited_timesteps"]) for tag in tags)))
 
-    def for_tags(self, tags):
+    def for_tags(self, tags, *, device=None):
         if not self.certified(tags):
             raise PhysicsRejected("uncertified_motion_type", {"required_motion_types": tags})
         certificates = ([self.profiles['|'.join(sorted(tags))]] if getattr(self,'profiles',None) is not None
                         else [self.certificates[tag] for tag in tags])
         guard = object.__new__(ValidatedSupport)
+        device = self.lower.device if device is None else torch.device(device)
         envelope = dict(certificates[0]["state_envelope"])
         envelope["minimum"] = torch.tensor([c["state_envelope"]["minimum"] for c in certificates]).amax(0).tolist()
         envelope["maximum"] = torch.tensor([c["state_envelope"]["maximum"] for c in certificates]).amin(0).tolist()
-        guard.state_guard = ModelSupport(envelope, device=self.lower.device)
-        guard.lower = self.lower.new_tensor([c["action_min"] for c in certificates]).amax(0)
-        guard.upper = self.upper.new_tensor([c["action_max"] for c in certificates]).amin(0)
+        guard.state_guard = ModelSupport(envelope, device=device)
+        guard.lower = torch.tensor([c["action_min"] for c in certificates],device=device).amax(0)
+        guard.upper = torch.tensor([c["action_max"] for c in certificates],device=device).amin(0)
         guard.motion_tags = sorted(t for t in tags if t not in ('double_support','single_support','landing','airborne'))
         return guard
 
