@@ -91,7 +91,7 @@ def trace_parameter_paths(collector, source, before, after, criteria, *, horizon
             case = dict(task=control.bank.tasks[song]['id'], start_frame=int(source['frame'][i]),
                         initial_mismatch=float(mismatch[i]), paths={})
             for name in ('teacher_forced', 'real_actions', 'closed_loop'):
-                first_opposite, first_resolved_error = None, None
+                first_opposite = None
                 for frame in rows:
                     actual = frame['paths']['real']['cumulative_return'][i]
                     predicted = frame['paths'][name]['cumulative_return'][i]
@@ -99,11 +99,7 @@ def trace_parameter_paths(collector, source, before, after, criteria, *, horizon
                     noise = max(criteria['direction_noise_floor'], 10*abs(actual[1]-actual[0]))
                     if abs(da)>noise and abs(dm)>1e-8 and da*dm<0 and first_opposite is None:
                         first_opposite = frame['step']
-                    # 这里只标记可见的速度预测误差，不把它变成更宽/更窄的新方向门槛。
-                    if max(frame['paths'][name]['errors']['qd'][i])>1e-4 and first_resolved_error is None:
-                        first_resolved_error = frame['step']
                 case['paths'][name] = dict(first_cumulative_high_snr_opposite=first_opposite,
-                    first_qd_error_over_diagnostic_1e4=first_resolved_error,
                     H64_actual_delta=rows[-1]['paths']['real']['cumulative_return'][i][2]-rows[-1]['paths']['real']['cumulative_return'][i][0],
                     H64_predicted_delta=rows[-1]['paths'][name]['cumulative_return'][i][2]-rows[-1]['paths'][name]['cumulative_return'][i][0])
             cases.append(case)

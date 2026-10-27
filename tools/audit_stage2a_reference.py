@@ -24,6 +24,7 @@ def main():
     parser.add_argument('--checkpoint', help='已接受或被拒候选的真实模型文件；评价/审计均不产生策略更新')
     parser.add_argument('--wm-checkpoint', help='显式替换独立WM用于同一Adapter候选复验；不恢复旧Replay/优化器')
     parser.add_argument('--horizons', type=int, nargs='+', default=[8, 16, 32, 64])
+    parser.add_argument('--bptt-horizon', type=int, choices=(32, 64), default=32)
     parser.add_argument('--starts', help='已保存的训练集真实零策略高误差起点，仅用于梯度尺度标定')
     parser.add_argument('--num-envs', type=int, default=128)
     parser.add_argument('--steps', type=int, default=96)
@@ -105,7 +106,11 @@ def main():
         from gem.closedloop.reference_adapter.precision import calibrate_gradient_weights
         from gem.closedloop.reference_adapter.update_diagnostics import fixed_probes
         starts = torch.load(args.starts, map_location='cuda:0', weights_only=False)
-        report = calibrate_gradient_weights(control, engine.dynamics, fixed_probes(starts, per_song=2))
+        torch.cuda.reset_peak_memory_stats()
+        report = calibrate_gradient_weights(control, engine.dynamics, fixed_probes(starts, per_song=2),
+                                            horizon=args.bptt_horizon)
+        report.update(peak_allocated_mib=torch.cuda.max_memory_allocated()/2**20, gpu_process_mib=gpu_usage(),
+                      gradient_checkpoint=True, backward_microbatch=32)
         json_write(output/'train_gradient_calibration.json', report)
         return 0
     collector = None
@@ -149,6 +154,8 @@ def main():
                 result['comparison'] = 'checkpoint_candidate_against_exact_zero_adapter_independent_audit_songs'
                 result['checkpoint'] = args.checkpoint
                 result['wm_checkpoint'] = args.wm_checkpoint
+                result.update(peak_allocated_mib=torch.cuda.max_memory_allocated()/2**20,
+                              gpu_process_mib=gpu_usage(), gradient_checkpoint=True)
                 json_write(output/'independent_parameter_direction.json', result)
             else:
                 pool, calibration = difficulty_scan(collector, args.steps)

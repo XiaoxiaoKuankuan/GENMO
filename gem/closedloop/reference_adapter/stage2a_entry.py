@@ -192,9 +192,10 @@ def main():
                     collector.step(replay)
                 collect_validation(collector, validation, vector['validation_vector_steps'])
                 eligible = collector.state['frame']+64 < bank.ends[collector.state['song']]
-                validation_source = fixed_probes(select_state(collector.state, eligible), per_song=2)
+                validation_source = fixed_probes(select_state(collector.state, eligible), per_song=8)
+                validation_source = select_state(validation_source, slice(0, collector.num_envs//4))
                 extra['response_validation'] = collect_reference_response(collector, validation_source,
-                    split='validation')
+                    split='validation', intervention_steps=long_settings['intervention_steps'])
                 collector.reset(split='train', perturb=True)
                 if args.mode == 'train':
                     evaluate('000000')
@@ -203,7 +204,8 @@ def main():
             if args.mode == 'integration':
                 eligible = (collector.state['frame']+64 < bank.ends[collector.state['song']]).nonzero().flatten()
                 source = select_state(collector.state, eligible[:min(8, collector.num_envs//4)])
-                data = collect_reference_response(collector, source, replay=replay)
+                data = collect_reference_response(collector, source, replay=replay,
+                                                  intervention_steps=long_settings['intervention_steps'])
                 response.add(data)
                 fitting = fit_wm(engine.dynamics, optimizers['wm'], replay.windows(32, 8), None, 0.,
                     reference_pairs=response.sample(32, horizon=32), reference_weight=settings['reference_response_weight'],
@@ -247,7 +249,8 @@ def main():
                                      per_song=max(2, (settings['response_pairs']+len(bank.by_split['train'])-1)//len(bank.by_split['train'])))
                 n = min(settings['response_pairs'], collector.num_envs//4, len(source['state']))
                 source = select_state(source, torch.linspace(0, len(source['state'])-1, n, device='cuda').long())
-                data = collect_reference_response(collector, source, replay=replay)
+                data = collect_reference_response(collector, source, replay=replay,
+                                                  intervention_steps=long_settings['intervention_steps'])
                 response.add(data)
                 publish('bounded_current_policy_WM_supervision')
                 steps = settings['wm_repair_steps'] if args.mode == 'wm-repair' or state['consecutive_rejections'] or engine.dynamics.model_version == 0 else train['wm_updates_per_iteration']
@@ -261,7 +264,8 @@ def main():
                         n_fresh = min(settings['response_pairs'], len(fresh['state']), collector.num_envs//4)
                         ids = torch.randperm(len(fresh['state']), generator=collector.generator, device='cuda')[:n_fresh]
                         fresh = select_state(fresh, ids)
-                        data = collect_reference_response(collector, fresh, replay=replay)
+                        data = collect_reference_response(collector, fresh, replay=replay,
+                                                          intervention_steps=long_settings['intervention_steps'])
                         response.add(data)
                     source_replay = background if background is not None and background.size >= 8 and wm_step % 5 == 0 else replay
                     response_h = long_settings['response_train_horizons'][engine.dynamics.model_version % len(long_settings['response_train_horizons'])]

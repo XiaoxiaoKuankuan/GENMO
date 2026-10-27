@@ -56,6 +56,17 @@ def test_body_w_is_FK_supervision_not_an_extra_reward(system):
     torch.testing.assert_close(terms['sm'], expected, atol=0, rtol=0)
 
 
+def test_long_response_does_not_count_single_reliable_step_as_H32():
+    replay = ReferenceResponseReplay()
+    mask = torch.ones(2, 64, dtype=torch.bool); mask[0, 1:] = False; mask[1, 32:] = False
+    replay.add(dict(origin='current_policy_real_reference_response', split='train', rejected={},
+        state=torch.zeros(2, 55), song=torch.arange(2), plus_action=torch.zeros(2, 64, 21),
+        minus_action=torch.zeros(2, 64, 21), reliable=mask, intervention_steps=torch.tensor([1, 32])))
+    assert replay.sample(32, horizon=32)['song'].eq(1).all()
+    assert replay.sample(1, horizon=64) is None
+    assert replay.coverage()['windows']['64']['reliable_at']['32'] == 1
+
+
 @pytest.mark.parametrize('horizon', [32, 64])
 def test_checkpoint_keeps_complete_long_BPTT_gradient(system, horizon):
     engine, control, z = constrained_system(system, count=1)

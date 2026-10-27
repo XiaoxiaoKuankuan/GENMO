@@ -103,6 +103,8 @@ def evaluate_candidate(collector, source, dynamics, critic, before, after, crite
                 plus_action=actions[:, :, 2], minus_action=actions[:, :, 3],
                 plus_next=actual[:, :, 2], minus_next=actual[:, :, 3], reliable=valid, contact_switch=switch,
                 policy_version=torch.full_like(source['song'], collector.policy_version),
+                intervention_steps=torch.full_like(source['song'], horizon),
+                intervention_kind=torch.ones_like(source['song']),
                 initial_mismatch=mismatch, repeated_states=actual[:, :, :2],
                 rejected=dict(unreliable_steps=int((~valid).sum()), contact_switch_steps=int(switch.sum()),
                               initial_mismatch=int((mismatch > 1e-5).sum()))))

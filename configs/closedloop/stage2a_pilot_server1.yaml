@@ -134,3 +134,7 @@ stage2a:
         joint_velocity: 0.35
         root_angular_velocity: 0.1
         body_angular_velocity: 0.1
+    intervention_steps:
+    - 1
+    - 8
+    - 32

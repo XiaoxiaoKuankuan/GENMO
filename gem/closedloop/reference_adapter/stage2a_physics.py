@@ -187,8 +187,9 @@ def oracle_experiment(collector, source, horizons=(8, 16, 32, 64)):
 
 
 @torch.no_grad()
-def collect_reference_response(collector, source, *, horizon=64, amplitude=.005, replay=None, split='train'):
-    """当前真实状态/历史四条件重置；只在第一步添加正负参考，后续闭环继续当前策略。"""
+def collect_reference_response(collector, source, *, horizon=64, amplitude=.005, replay=None, split='train',
+                               intervention_steps=1):
+    """同起点正负参考干预，按声明的1/8/32步持续时间采集，部署策略不添加控制器。"""
     control = collector.control
     if not bool(torch.isin(source['song'], control.bank.by_split[split]).all()):
         raise ValueError('参考响应起点与声明的隔离数据划分不符')
@@ -198,6 +199,11 @@ def collect_reference_response(collector, source, *, horizon=64, amplitude=.005,
         raise ValueError('参考响应窗口越过歌曲终点；不能补齐或外推真实状态')
     count, mismatch = install_repeated_start(collector, source, 4)
     groups = len(source['state'])
+    choices = torch.as_tensor([intervention_steps] if isinstance(intervention_steps, int) else intervention_steps,
+                              device=collector.device, dtype=torch.long)
+    if not len(choices) or bool(((choices < 1) | (choices > horizon)).any()):
+        raise ValueError('参考干预时长必须落在实际采集窗口内')
+    duration = choices[torch.arange(groups, device=collector.device)%len(choices)]
     start = detach_state(select_state(collector.state, slice(0, count)))
     noise = torch.randn(groups, 10, 27, device=collector.device, generator=collector.generator)
     # 方向是独立十帧；可执行性由同一QP负责，不用另一套低通探索控制器。
@@ -209,8 +215,10 @@ def collect_reference_response(collector, source, *, horizon=64, amplitude=.005,
     live = torch.ones(count, dtype=torch.bool, device=collector.device)
     previous_contact = None
     for t in range(horizon):
+        held = offset.clone()
+        held[:count] *= (t < duration.repeat_interleave(4))[:, None, None]
         row = collector.step(auto_reset=True, split=split, perturb=False,
-                             residual_offset=offset if t == 0 else None, contact_count=count)
+                             residual_offset=held, contact_count=count)
         current = row['end']['state'][:count].reshape(groups, 4, 55)
         action = row['proposal']['action'][:count].reshape(groups, 4, 21)
         contact = row['contacts'][0].reshape(groups, 4, -1)
@@ -237,6 +245,7 @@ def collect_reference_response(collector, source, *, horizon=64, amplitude=.005,
         plus_action=actions[:, :, 2], minus_action=actions[:, :, 3],
         plus_next=states[:, :, 2], minus_next=states[:, :, 3], reliable=valid, contact_switch=switch,
         policy_version=torch.full_like(source['song'], collector.policy_version),
+        intervention_steps=duration, intervention_kind=torch.zeros_like(duration),
         initial_mismatch=mismatch, repeated_states=states[:, :, :2],
         rejected=dict(unreliable_steps=int((~valid).sum()), contact_switch_steps=int(switch.sum()),
                       initial_mismatch=int((mismatch > 1e-5).sum())),

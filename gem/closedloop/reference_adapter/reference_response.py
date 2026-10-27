@@ -53,6 +53,8 @@ class ReferenceResponseReplay:
         for key, value in data['rejected'].items():
             self.rejected[key] = self.rejected.get(key, 0)+int(value)
         values = {k: v.detach() for k, v in data.items() if isinstance(v, torch.Tensor)}
+        values.setdefault('intervention_steps', torch.ones(count, dtype=torch.long, device=data['state'].device))
+        values.setdefault('intervention_kind', torch.zeros(count, dtype=torch.long, device=data['state'].device))
         for key in TEMPORAL & values.keys():
             if values[key].shape[1] != length:
                 raise ValueError('同一真实响应的时间维度不一致，禁止补齐标签')
@@ -74,7 +76,8 @@ class ReferenceResponseReplay:
                     del self.buckets[h]
 
     def sample(self, count, *, horizon=8):
-        eligible = [(h, b, b['reliable'][:, :horizon].any(-1).nonzero().flatten())
+        # 指定H32就采可靠到H32的真实对；不能用仅首步可靠的标签冒充长响应监督。
+        eligible = [(h, b, b['reliable'][:, :horizon].all(-1).nonzero().flatten())
                     for h, b in self.buckets.items() if h >= horizon]
         eligible = [(h, b, ids) for h, b, ids in eligible if len(ids)]
         if not eligible:
@@ -101,7 +104,10 @@ class ReferenceResponseReplay:
         songs = [b['song'] for b in self.buckets.values() if 'song' in b]
         return dict(songs=int(torch.cat(songs).unique().numel()) if songs else 0,
             windows={str(h): dict(pairs=len(b['state']), reliable_endpoint=int(b['reliable'][:, -1].sum()),
-                                 valid_steps=int(b['reliable'].sum())) for h, b in self.buckets.items()})
+                valid_steps=int(b['reliable'].sum()),
+                reliable_at={str(t): int(b['reliable'][:, :t].all(-1).sum()) for t in (8, 16, 32, 64) if t <= h},
+                intervention_steps={str(int(t)): int((b['intervention_steps'] == t).sum())
+                                    for t in b['intervention_steps'].unique()}) for h, b in self.buckets.items()})
 
     def state_dict(self):
         return dict(format='true_length_buckets_v2', buckets=self.buckets, total_pairs=self.total_pairs,
