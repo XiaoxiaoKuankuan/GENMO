@@ -34,6 +34,14 @@ def grad_summary(loss, actor, *, retain_graph=True):
     return result
 
 
+def distributed_execution_scale(local_count, device, world_size):
+    """DDP平均梯度与全局有效样本均值的精确换算；零样本rank仍参加collective。"""
+    count = torch.tensor(float(local_count), device=device)
+    if world_size > 1:
+        dist.all_reduce(count)
+    return count, world_size/count.clamp_min(1)
+
+
 class JointTrainer:
     def __init__(self, cfg, device, *, rank=0, world_size=1, resume=None):
         self.cfg, self.device, self.rank, self.world_size = cfg, torch.device(device), rank, world_size
@@ -122,14 +130,11 @@ class JointTrainer:
                     coverage.append(result["coverage"])
                 except PhysicsRejected as error:
                     rejection[error.reason] += 1
-        count = torch.tensor(float(len(accepted)), device=self.device)
-        if self.world_size > 1:
-            dist.all_reduce(count)
+        count, scale = distributed_execution_scale(len(accepted), self.device, self.world_size)
         zero = out["pred_x_start"].sum()*0.
         local_exec = sum((r["loss"] for r in accepted), zero)
         local_safety = sum((r["safety"] for r in accepted), zero)
         # DDP平均rank梯度，因此乘world_size后恰为全局有效样本均值。
-        scale = self.world_size/count.clamp_min(1)
         total = bc + scale*(weight*local_exec + safety_weight*local_safety)
         finite = torch.tensor(int(torch.isfinite(total).all()), device=self.device)
         if self.world_size > 1:
