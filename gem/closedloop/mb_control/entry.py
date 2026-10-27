@@ -204,6 +204,9 @@ def main(kind):
             elif kind == "collector":
                 from .parallel_collection import run_collector_service
                 run_collector_service(args, cfg, collector)
+            elif kind == "drift":
+                from .drift_physical import run_drift
+                run_drift(collector,actor,critic,engine,original,cfg,tasks,output,args.torch_device)
             elif kind == "critic":
                 from .critic_warmup import choose_warmup_tasks, warmup_critic, save_warmup
                 losses = build_stage1_losses(actor.stage1, original).to(args.torch_device)
