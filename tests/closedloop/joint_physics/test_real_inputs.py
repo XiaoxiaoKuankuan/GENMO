@@ -58,7 +58,8 @@ def test_actual_sidecar_conditions_do_not_read_unknown_labels(monkeypatch):
     # 实际连续状态验证控制快速路径：advance的最新观测与再次refresh严格相同；
     # 延后trim不得改变当前姿态、未来goal或速度支持，不能用改物理合同换取时延。
     episode = store.episode(batch['meta'][0])
-    normal = windows[0].request
+    # 起点缓存来自GPU采集，当前测试在CPU；两条路径先共同重建一次，匹配在线reset。
+    normal = adapter.refresh_current_observation(windows[0].request)
     fast = normal
     for _ in range(8):
         index = normal.tick//12
