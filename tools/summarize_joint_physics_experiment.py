@@ -21,13 +21,14 @@ def main():
     for path in sorted(root.glob('*/metrics.jsonl')):
         rows=[json.loads(s) for s in path.read_text().splitlines() if s.strip()]
         training[path.parent.name]=rows
-    keys=('data_loss','within_model_seed_diversity_rms','music_condition_sensitivity_rms','root_xy_range_m',
+    keys=('unknown_reconstruction_rmse','within_model_seed_diversity_rms','music_condition_sensitivity_rms','root_xy_range_m',
           'root_yaw_circular_spread','joint_amplitude_mean_rad','generated_joint_speed_mean_rad_s','complete_song')
     for path in sorted(root.glob('*/evaluation.json')):
         value=json.loads(path.read_text())
         row={'name':path.parent.name,'step':value['checkpoint_step'],'mode':value['mode'],
+             'training_run':value.get('training_run',Path(value['checkpoint']).parent.name),
              'evidence':value['evidence'],'timing_mode':value['evaluation_config'].get('timing_mode')}
-        for key in keys:
+        for key in (*keys,'data_loss'):
             selected=[float(r[key]) for r in value['rows'] if key in r]
             if selected:row[key]=sum(selected)/len(selected)
         row['rows']=len(value['rows'])
@@ -43,7 +44,7 @@ def main():
         groups=defaultdict(list)
         for row in evaluations:
             if key in row:
-                groups[(row['name'].split('_')[0],row['mode'],row['timing_mode'])].append(row)
+                groups[(row['training_run'],row['mode'],row['evidence'],row['timing_mode'])].append(row)
         for group,rows in groups.items():
             rows.sort(key=lambda r:r['step'])
             ax.plot([r['step'] for r in rows],[r[key] for r in rows],marker='o',label='/'.join(str(x) for x in group))
@@ -51,6 +52,14 @@ def main():
         if groups:ax.legend(fontsize=7)
     fig.suptitle('Independent reconstruction / DDIM20 generation / Newton evaluation')
     fig.savefig(output/'evaluation_curves.png',dpi=160)
+    plt.close(fig)
+    fig,axes=plt.subplots(2,2,figsize=(12,8),constrained_layout=True)
+    for ax,key in zip(axes.flat,('data_loss','execution_loss','physics_effective_updates','physics_update_fraction')):
+        for name,rows in training.items():
+            selected=[r for r in rows if key in r]
+            if selected:ax.plot([r['step'] for r in selected],[r[key] for r in selected],label=name)
+        ax.set_title(key);ax.set_xlabel('supervised updates');ax.grid(alpha=.2);ax.legend(fontsize=7)
+    fig.savefig(output/'training_curves.png',dpi=160)
     plt.close(fig)
 
 

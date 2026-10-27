@@ -425,6 +425,8 @@ def evaluate(cfg, checkpoint, output, adapter, env, mode):
                         loss, _ = losses(batch, out["pred_x_start"], out["static_conf_logits"], checkpoint_step)
                         row = {"source": episode["source_key"], "frame": batch["meta"][0]["decision_frame"], "k": k,
                                "noise_seed": g.initial_seed(), "data_loss": float(loss)}
+                        mask = out['unknown_mask']
+                        row['unknown_reconstruction_rmse'] = float((out['pred_x_start']-out['target_x_start'])[mask].square().mean().sqrt())
                         if env is None:
                             rows.append(row)
                             continue
@@ -468,6 +470,7 @@ def evaluate(cfg, checkpoint, output, adapter, env, mode):
                     rows[-1]["music_condition_sensitivity_rms"] = float((generated[0]-without["qpos30"])[mask].square().mean().sqrt())
     adapter.bundle.assert_unchanged(frozen)
     result = {"mode": mode, "checkpoint": str(checkpoint), "rows": rows, "frozen_unchanged": True,
+              "training_run":Path(checkpoint).parent.name,
               "checkpoint_step": checkpoint_step, "evaluation_config": cfg["evaluation"],
               "scope": "complete_song_attempts" if mode == "closed_loop" else "independent_local_windows",
               "evidence": "real_newton" if env is not None else "numerical_only_no_physical_claim", "method_improvement_claim": False}

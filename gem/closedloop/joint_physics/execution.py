@@ -61,7 +61,22 @@ class ValidatedSupport:
         guard.state_guard = ModelSupport(envelope, device=self.lower.device)
         guard.lower = self.lower.new_tensor([c["action_min"] for c in certificates]).amax(0)
         guard.upper = self.upper.new_tensor([c["action_max"] for c in certificates]).amin(0)
+        guard.motion_tags = sorted(t for t in tags if t not in ('double_support','single_support','landing','airborne'))
         return guard
+
+    def check_motion(self, states, joint_names):
+        """学生预测不能借目标的站立证书进入未经认证的高速/转身类型。
+
+        WM不输出真实接触；接触认证仅代表该真实起点/数据窗口及实际Newton扰动覆盖，
+        不把预测contact logits冒充已发生接触。这里另外核对预测链的可观测运动类型。
+        """
+        if not hasattr(self,'motion_tags'):
+            return
+        from .requests import motion_tags
+        actual = motion_tags(states,joint_names)
+        if actual != self.motion_tags:
+            raise PhysicsRejected('predicted_motion_type_uncertified',{
+                'certified_motion_types':self.motion_tags,'predicted_motion_types':actual})
 
     def check_state(self, state):
         try:
@@ -166,6 +181,13 @@ def execute_window(window, predicted_x0, logits, actor, adapter, cfg, *, support
         actions.append(action)
     if not support_ticks:
         raise PhysicsRejected("no_legal_new_reference_influence")
+    if support is not None:
+        try:
+            support.check_motion(torch.cat((window.start.state,*states)),adapter.bundle.spec.joint_names)
+        except PhysicsRejected as error:
+            error.details.update(first_reject_tick=z.tick,failure_phase='complete_motion_profile',
+                                 action_origin='frozen_sm_from_student_denoised_x0')
+            raise
     return {"loss": normalized_window(losses, cfg["discount"]).mean(),
         "safety": normalized_window(safety, cfg["discount"]).mean(),
         "terms": {k: normalized_window([t[k] for t in terms], cfg["discount"]).mean() for k in terms[0]},

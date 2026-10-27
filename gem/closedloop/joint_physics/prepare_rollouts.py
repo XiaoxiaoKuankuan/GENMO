@@ -143,7 +143,8 @@ def prepare(cfg, split, output, adapter, env):
         temporary = output/"index.json.partial"
         temporary.write_text(json.dumps(index, ensure_ascii=False, indent=2))
         temporary.replace(output/"index.json")
-    per_dataset = {}
+    from collections import Counter
+    per_dataset = Counter(json.loads(key)[0] for key in index['sources'])
     for dataset, row in catalog.sources():
         limit = cfg["prepare"].get("max_sources")
         if limit is not None and len(index["episodes"]) >= limit:
@@ -167,5 +168,7 @@ def prepare(cfg, split, output, adapter, env):
         flush()
     adapter.bundle.assert_unchanged(frozen)
     index.update(wall_seconds=time.perf_counter()-started, frozen_unchanged=True)
-    (output/"index.json").write_text(json.dumps(index, ensure_ascii=False, indent=2))
+    temporary = output/'index.json.partial'
+    temporary.write_text(json.dumps(index, ensure_ascii=False, indent=2))
+    temporary.replace(output/'index.json')
     return index
