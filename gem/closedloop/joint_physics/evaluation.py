@@ -304,6 +304,7 @@ def closed_loop_source(cfg, actor, adapter, env, dataset, row, checkpoint=None):
                           latency_margin_ticks=cfg["evaluation"].get("latency_margin_ticks",0))
     collector = PhysicalCollector(env, actor, adapter, scheduler, TrackingMonitor(adapter), record_trajectory=True)
     collector.reuse_control_observation = cfg['runtime'].get('reuse_control_observation',False)
+    collector.profile_control = cfg['runtime'].get('profile_control',False)
     reason = "not_started"
     try:
         collector.reset(music, initial)
@@ -369,6 +370,10 @@ def closed_loop_source(cfg, actor, adapter, env, dataset, row, checkpoint=None):
             key:{f'p{p}':float(torch.tensor([t[key] for t in timings]).quantile(p/100)) for p in (50,95,99)}
             for key in ('forecast_seconds','generation_decode_seconds','total_seconds') if timings}
         result['completed_request_count'] = len(timings)
+        result['control_phase_wall_seconds'] = {
+            key:{f'p{p}':float(torch.tensor([t[key] for t in collector.control_profiles]).quantile(p/100)) for p in (50,95,99)}
+            for key in collector.control_profiles[0]} if collector.control_profiles else {}
+        result['control_profile_scope'] = 'host wall time, including synchronization where the original path already waits'
         return result, collector.trajectory
     finally:
         collector.worker.close()

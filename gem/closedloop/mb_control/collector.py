@@ -92,6 +92,8 @@ class PhysicalCollector:
         # 可选推理优化：advance已经重建当前观测，只有参考实际接管后需要重算。
         # 不修改SM观测定义；不可变参考在决策边界裁剪，避免每20ms重复校验/拷贝。
         self.reuse_control_observation = False
+        self.profile_control = False
+        self.control_profiles = []
         self.actor_version = 0
         self.collector_id, self.episode_index = 0, -1
         self.anchor_horizon = 0
@@ -151,6 +153,7 @@ class PhysicalCollector:
         self.cancelled_requests = []
         self.overruns = 0
         self.control_wall_seconds = []
+        self.control_profiles = []
         self.reference_derivatives = []
         self.controls = []
         self.generations, self.consumed_versions, self.active_anchors = {}, set(), {}
@@ -209,6 +212,12 @@ class PhysicalCollector:
             try:
                 while True:
                     control_started = time.perf_counter()
+                    phase_started, profile = control_started, {}
+                    def mark(name):
+                        nonlocal phase_started
+                        if self.profile_control:
+                            now = time.perf_counter()
+                            profile[name], phase_started = now-phase_started, now
                     reference_changed = False
                     if z.tick >= z.music_end_tick:
                         self.terminal, reason = True, "music_end"
@@ -242,6 +251,7 @@ class PhysicalCollector:
                                 break
                     if not z.pending and z.tick >= next_boundary:
                         break
+                    mark('request_handling')
                     if not self.reuse_control_observation or reference_changed:
                         z = self.adapter.refresh_current_observation(z)
                     before_control = z.detached() if self.record_controls or self.anchor_horizon else None
@@ -252,17 +262,21 @@ class PhysicalCollector:
                         action = self.adapter.bundle.act(z.sm_history, goal)
                     # 先核对下一步目标支持，物理推进后不偷偷reset或丢弃终态。
                     ref1, _, _ = z.reference.read_current_future(z.tick + 12)
+                    mark('reference_observation_action')
                     with torch.profiler.record_function("mb/physics"):
                         state1 = self.env.step_physics(action)
+                    mark('newton_step')
                     target = (z.teacher_reference.read_current_future(z.tick+12, future_steps=0)[0]
                               if z.teacher_reference is not None else None)
                     from .episode_objective import episode_alignment
                     reward, metrics = self.rewards(state1, action, z.previous_action, ref1, teacher_reference=target,
                         episode_alignment=episode_alignment(z,required=bool(self.rewards.config.get("episode_dance_weight",0.))))
                     failed = bool(self.adapter.runtime.termination(state1, ref1).any())
+                    mark('reward_termination')
                     totals.add(reward, torch.zeros_like(reward) if failed else torch.ones_like(reward))
                     z = self.adapter.advance(z, state1, action, origin="real",
                         trim_reference=not self.reuse_control_observation)
+                    mark('history_advance')
                     contact = self.env.contact_events() if self.record_contacts or self.record_contact_metrics else None
                     if self.record_contact_metrics:
                         self._accumulate_contacts(contact)
@@ -286,6 +300,9 @@ class PhysicalCollector:
                         if self.record_reference_derivatives:
                             self.reference_derivatives.append((ref1.root_v.cpu(), ref1.root_w.cpu(), ref1.qd.cpu()))
                     self.control_wall_seconds.append(time.perf_counter()-control_started)
+                    mark('metrics_recording')
+                    if self.profile_control:
+                        self.control_profiles.append(profile)
                     if failed:
                         self.terminal, reason = True, "physical_failure"
                         break
