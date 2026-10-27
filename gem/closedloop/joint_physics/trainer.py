@@ -23,12 +23,15 @@ from .curriculum import Readiness, physics_noise_levels
 from .data import JointDataStream, SidecarStore
 from .checkpoint import restore_trainer, save_trainer
 
+GRADIENT_GROUPS = ('future_encoder','stage1.denoiser','stage1.history_encoder',
+                   'stage1.music_embedder','stage1.cond_exists_embedder','stage1.prefix_encoder')
+
 
 def grad_summary(loss, actor, *, retain_graph=True):
     named = [(name, parameter) for name, parameter in actor.named_parameters() if parameter.requires_grad]
     values = torch.autograd.grad(loss, [p for _, p in named], retain_graph=retain_graph, allow_unused=True)
     result = {}
-    for group in ("future_encoder", "stage1.denoiser", "stage1.history_encoder", "stage1.music_embedder", "stage1.prefix_encoder"):
+    for group in GRADIENT_GROUPS:
         terms = [g.float().square().sum() for (name, _), g in zip(named, values) if name.startswith(group) and g is not None]
         result[group] = float(torch.stack(terms).sum().sqrt()) if terms else 0.
     return result
@@ -179,7 +182,8 @@ class JointTrainer:
         if not bool(finite):
             raise FloatingPointError('数据或执行损失非有限，各rank同步停止')
         diagnostics, before = {}, {}
-        diagnostic = self.step % self.cfg['training']['diagnostics_every']==0 or self.step in self.cfg['training']['diagnostic_steps']
+        diagnostic = (self.step % self.cfg['training']['diagnostics_every']==0 or self.step in self.cfg['training']['diagnostic_steps']
+                      or (weight>0 and count>0 and self.counters['physics_effective_updates']<8))
         if diagnostic and self.world_size==1:
             diagnostics['data_gradient_norm'] = grad_summary(bc,self.actor)
             diagnostics['execution_gradient_norm'] = grad_summary(local_exec/max(1,len(accepted)),self.actor)
@@ -195,7 +199,7 @@ class JointTrainer:
         self.scheduler.step()
         if before:
             diagnostics['actual_parameter_delta'] = {}
-            for group in ('future_encoder','stage1.denoiser','stage1.history_encoder','stage1.music_embedder','stage1.prefix_encoder'):
+            for group in GRADIENT_GROUPS:
                 terms = [(p.detach()-before[name]).float().square().sum() for name,p in self.actor.named_parameters() if name.startswith(group) and name in before]
                 diagnostics['actual_parameter_delta'][group] = float(torch.stack(terms).sum().sqrt()) if terms else 0.
         self.step += 1
