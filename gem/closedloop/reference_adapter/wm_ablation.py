@@ -161,6 +161,8 @@ def main():
     p.add_argument('--group', choices=('A','B','C','D'), required=True)
     p.add_argument('--output', required=True)
     p.add_argument('--calibrate-only', action='store_true', help='只测训练标签H8/16/32梯度，不更新或运行审计')
+    p.add_argument('--candidate-only', action='store_true', help='当前WM提出全新H32 Adam参数步，仅真实审计、不接受策略更新')
+    p.add_argument('--wm-initialize', help='候选诊断使用的确切WM版本；不延长150次监督预算')
     first,_=p.parse_known_args()
     cfg=OmegaConf.to_container(OmegaConf.load(first.config), resolve=True)
     sys.path.insert(0,cfg['supermimic']['repo'])
@@ -184,7 +186,14 @@ def main():
     from supermimic.env import make_sim
     out=Path(args.output).resolve();out.mkdir(parents=True,exist_ok=False)
     seed_all(cfg['training']['seed']);torch.set_num_threads(1)
-    engine=build_engine(cfg,'cuda:0');bank=VectorBank(read_tasks(cfg['tasks']),engine,'cuda:0')
+    engine=build_engine(cfg,'cuda:0')
+    if bool(args.wm_initialize) != bool(args.candidate_only):
+        raise ValueError('指定已有WM仅用于明确的候选诊断，不能暗中接续监督预算')
+    if args.wm_initialize:
+        wm=torch.load(args.wm_initialize,map_location='cpu',weights_only=False,mmap=True)
+        engine.dynamics.load_state_dict(wm['dynamics'])
+        engine.dynamics.model_version=wm['wm_version']
+    bank=VectorBank(read_tasks(cfg['tasks']),engine,'cuda:0')
     control=VectorControl(engine,bank);control.adapter.disable_root_xy=True
     control.projection=ReferenceProjection(control.bundle.spec,control.adapter.bounds,**cfg['stage2a']['projection']).cuda()
     scales=json.loads(Path(cfg['stage2a']['calibration']).read_text())['scales']
@@ -207,8 +216,21 @@ def main():
         print(json.dumps(result),flush=True)
         return 0
     zero=copy.deepcopy(control.adapter.state_dict())
-    old=torch.load(cfg['wm_ablation']['direction_probe'],map_location='cpu',weights_only=False,mmap=True)
-    probe=old['adapter']
+    if args.candidate_only:
+        from .vector_learning import adapter_update
+        adapter_optimizer=torch.optim.Adam(control.adapter.parameters(),lr=cfg['training']['adapter_lr'])
+        candidate,_=adapter_update(control,engine.dynamics,critic,adapter_optimizer,data['source'],32,
+            terminal_value=False,microbatch=32,probes=data['source'],checkpoint_steps=True)
+        probe=copy.deepcopy(control.adapter.state_dict())
+        atomic_save(shared_cpu_state(dict(adapter=probe,before=zero,dynamics=engine.dynamics.state_dict(),
+            wm_version=engine.dynamics.model_version,optimizer=adapter_optimizer.state_dict(),config=cfg,
+            candidate=candidate,state=dict(accepted_updates=0),
+            boundary='new_H32_Adam_training_data_proposal_not_accepted_update')),out/'new_Adam_candidate.pt')
+        json_write(out/'candidate_report.json',candidate)
+        control.adapter.load_state_dict(zero)
+    else:
+        old=torch.load(cfg['wm_ablation']['direction_probe'],map_location='cpu',weights_only=False,mmap=True)
+        probe=old['adapter']
     optimizer=torch.optim.Adam(engine.dynamics.model.net.parameters(),lr=cfg['training']['wm_lr'])
     criteria=json.loads(Path(cfg['physical_criteria']).read_text()) | cfg['training']['wm_quality']
     settings=cfg['stage2a']['long_horizon'];ablation=cfg['wm_ablation']
@@ -253,7 +275,8 @@ def main():
             true_state_one_step=one_report,state_errors=state_report,reference_response=response_report,
             reward_response=reward_report,physical_parameter_direction=direction,
             accepted_adapter_updates=0,validation_label_sha256=data_sha,
-            direction_scope='same_known_complete_parameter_probe_current_WM_new_Newton_replay_not_new_Adam_acceptance')
+            direction_scope=('new_H32_Adam_complete_parameter_probe_current_WM_zero_accepted_updates' if args.candidate_only
+                else 'same_known_complete_parameter_probe_current_WM_new_Newton_replay_not_new_Adam_acceptance'))
         json_write(out/f'validation_{engine.dynamics.model_version:03d}.json',result)
         save(f'wm_{engine.dynamics.model_version:03d}')
         status('checkpoint_evaluated')
@@ -265,6 +288,10 @@ def main():
             collector=VectorCollector(env,control,seed=cfg['vector']['sampling_seed'])
             collector.reset(perturb=False)
             evaluate()
+            if args.candidate_only:
+                engine.step.bundle.assert_unchanged(frozen)
+                status('new_Adam_candidate_audited_zero_accepted_Adapter_updates')
+                return 0
             for update in range(1,ablation['updates']+1):
                 ids=torch.randint(len(windows['state']),(ablation['state_batch'],),device='cuda')
                 long={k:v[ids] if isinstance(v,torch.Tensor) else v for k,v in windows.items()}
