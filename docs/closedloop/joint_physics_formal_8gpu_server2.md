@@ -32,3 +32,31 @@ bash scripts/train_joint_physics.sh configs/closedloop/joint_physics_formal_8gpu
 完整恢复使用相同配置和8卡布局，加 `--resume /原输出/joint_00000500.pt`，输出指定新目录，
 `--max-steps 10000`仍表示绝对全局步数上限。正式任务仅启动一次；恢复前先确认原任务已退出。
 训练暂时无合法物理样本仍继续监督。正式启动不宣称自由生成、真实整曲或动力学一致性已经改善。
+
+## 实际启动记录
+
+训练代码提交 `06f7db8`。必要检查使用真实全库4287源、10首离线缓存及固定SM/WM资产，
+八卡先运行2步，完整保存后恢复到第3步，正常退出。临时将物理起点设为0以覆盖BPTT启动路径；
+24/24学生请求完成H32、3次全局有效物理更新，x0执行梯度范数各步最大值约0.1923/0.3363/0.0994。
+数据Loss约4.8827/4.7748/4.9097；执行Loss约0.8728/0.9240/0.7779。冻结资产检查通过。
+完整第3步checkpoint为2562523226字节、8rank状态、325项AdamW参数状态；临时目录已精确清理。
+这证明本次启动和反传有效，不是新增Newton方向或动作质量结论。摘要保存在正式根目录的preflight_summary.json。
+
+正式任务仅启动一次，未使用检查的学生权重；重新从随机初始化开始：
+
+- tmux：`joint_formal_8gpu_20261027`；torchrun PID：`2323466`。
+- 八个训练rank PID：`2323524`至`2323531`；GPU：0,1,2,3,4,5,6,7。
+- 根目录：`/data0/user/liwei/GENMO_outputs/joint_physics_formal_8gpu_20261027`。
+- 日志：根目录`train.log`；逐步指标：`run/metrics.jsonl`；checkpoint：`run/joint_XXXXXXXX.pt`。
+- 首次检查global_step=58，data_loss=4.6312876，物理有效更新0（尚未达到正式start_step=1000）。
+  约0.49～0.60秒/步，单rank累计峰值约6.7GiB；实际设备显存约7.8GiB，初始化checkpoint已经落盘。
+
+查看日志（Server-2）：
+
+```bash
+tail -f /data0/user/liwei/GENMO_outputs/joint_physics_formal_8gpu_20261027/train.log
+tmux attach -t joint_formal_8gpu_20261027
+```
+
+tmux运行启动脚本，训练输出写train.log；`Ctrl-b d`只退出查看，不停止任务。
+`launch.json`保存实际启动源码SHA，`torchrun.pid`保存启动器PID，退出后`exit.txt`保存退出码；不自动重启。
