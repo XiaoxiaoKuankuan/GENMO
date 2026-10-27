@@ -148,11 +148,17 @@ def collect(args, cfg, engine, tasks, bank):
         series = {k: torch.stack(v).numpy() for k, v in series.items()}
         raw_series = {k: torch.stack(v).numpy() for k, v in raw_series.items()}
         torch.save(snapshots, output/'causal_starts.pt')
-        native = env.to_native.cpu().numpy()
-        names = [engine.step.bundle.spec.joint_names[int(i)] for i in native]
+        # Isaac内部关节序不等于MJCF qpos序；渲染必须按MJCF关节名称重新映射。
+        import mujoco
+        mjcf = engine.step.bundle.spec.mjcf_path
+        render_model = mujoco.MjModel.from_xml_path(str(mjcf))
+        names = [mujoco.mj_id2name(render_model, mujoco.mjtObj.mjOBJ_JOINT, i)
+                 for i in range(render_model.njnt) if render_model.jnt_qposadr[i] >= 7]
+        native = np.array([engine.step.bundle.spec.joint_names.index(name) for name in names])
+        if render_model.nq != 28 or len(set(names)) != 21:
+            raise ValueError('渲染MJCF必须包含21个具名关节和自由根')
         lo, hi = control.runtime.kin.q_lo.cpu().numpy()[native], control.runtime.kin.q_hi.cpu().numpy()[native]
         soft_lo, soft_hi = control.runtime.mdp.soft_lo.cpu().numpy()[native], control.runtime.mdp.soft_hi.cpu().numpy()[native]
-        mjcf = engine.step.bundle.spec.mjcf_path
         write_json(output/'render_assets.json', dict(source_mjcf_sha256=sha(mjcf), mjcf=str(mjcf), joint_names=names))
         reports = []
         for column in range(count):
@@ -251,9 +257,9 @@ def mechanism(args, engine, bank):
             _, terms = control.runtime.reward(shifted['state'], pp['action'].detach(), z['action'], nominal, diagnostics=True)
             root_reward = .01*terms['root_pos']
             gp, = torch.autograd.grad(root_reward.sum(), shifted['state'])
-            translation.append(dict(shift_m=shift, input_max_abs=float((xx-x).abs().max()),
-                action_max_abs=float((pp['action']-proposal['action']).abs().max()),
-                mean_root_reward=float(root_reward.mean()), mean_root_x_gradient_abs=float(gp[:, 0].abs().mean()),
+            translation.append(dict(shift_m=shift, input_max_abs=float((xx-x).detach().abs().max()),
+                action_max_abs=float((pp['action']-proposal['action']).detach().abs().max()),
+                mean_root_reward=float(root_reward.detach().mean()), mean_root_x_gradient_abs=float(gp[:, 0].abs().mean()),
                 terminated=int(control.runtime.termination(shifted['state'], nominal).sum())))
         report = dict(model_index=model_index, checkpoint=str(path), accepted_updates=ck['state']['accepted_updates'],
             physical_starts=len(z['state']), start_frames=z['frame'].tolist(), translation=translation,
