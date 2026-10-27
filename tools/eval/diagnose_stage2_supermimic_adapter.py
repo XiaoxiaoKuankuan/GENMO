@@ -224,8 +224,8 @@ def mechanism(args, engine, bank):
     from gem.closedloop.reference_adapter.vector_control import VectorControl, select_state
     from gem.closedloop.reference_adapter.vector_learning import GroupNormalizedCritic, rollout
     from gem.closedloop.reference_adapter.dynamics import frozen_parameters
-    source = Path(args.trajectories)
-    snapshots = torch.load(source/'causal_starts.pt', map_location='cpu', weights_only=False)
+    snapshots = (torch.load(Path(args.trajectories)/'causal_starts.pt', map_location='cpu', weights_only=False)
+                 if args.starts_source == 'trajectory' else None)
     control = VectorControl(engine, bank)
     ns = len(bank.by_split['evaluation'])
     output = Path(args.output)
@@ -236,9 +236,19 @@ def mechanism(args, engine, bank):
         engine.dynamics.load_state_dict(ck['dynamics'])
         critic = GroupNormalizedCritic(2835, engine.step.adapter.input_spec).to(bank.device)
         critic.load_state_dict(ck['critic']); del model
-        begin = (1+4*model_index)*ns
-        states = [select_state(v, slice(begin, begin+ns)) for _, v in sorted(snapshots.items())]
-        z = {k: torch.cat([v[k] for v in states]).to(bank.device) for k in states[0]}
+        if snapshots is not None:
+            begin = (1+4*model_index)*ns
+            states = [select_state(v, slice(begin, begin+ns)) for _, v in sorted(snapshots.items())]
+            z = {k: torch.cat([v[k] for v in states]).to(bank.device) for k in states[0]}
+        else:
+            replay = ck['replay']; data = replay['data']
+            valid = (data['version'] >= data['version'].max()-3) & ~data['done']
+            valid &= data['z_frame']+16 < bank.ends.cpu()[data['z_song']]
+            pairs = valid.nonzero()
+            if len(pairs) < 16:
+                raise ValueError('checkpoint中缺少16个当前策略附近的真实训练起点')
+            row, column = pairs[torch.linspace(0, len(pairs)-1, 16).long()].unbind(-1)
+            z = {k: data['z_'+k][row, column].to(bank.device) for k in replay['dynamic_keys']}
         parameters = tuple(control.adapter.parameters())
         with torch.no_grad():
             x = control.packed(control.fields(z)); proposal = control.propose(z)
@@ -262,6 +272,8 @@ def mechanism(args, engine, bank):
                 mean_root_reward=float(root_reward.detach().mean()), mean_root_x_gradient_abs=float(gp[:, 0].abs().mean()),
                 terminated=int(control.runtime.termination(shifted['state'], nominal).sum())))
         report = dict(model_index=model_index, checkpoint=str(path), accepted_updates=ck['state']['accepted_updates'],
+            checkpoint_phase=ck['state']['phase'], checkpoint_critic_ready=ck['state']['critic_ready'],
+            starts_source=args.starts_source,
             physical_starts=len(z['state']), start_frames=z['frame'].tolist(), translation=translation,
             residual_saturation=float(saturation), logits_abs_max=float(logits.abs().max()),
             logits_abs_median=float(logits.abs().median()),
@@ -311,6 +323,7 @@ def main():
     parser.add_argument('--no-compile', action='store_true')
     parser.add_argument('--mode', choices=['collect', 'mechanism'], default='collect')
     parser.add_argument('--trajectories')
+    parser.add_argument('--starts-source', choices=['trajectory', 'checkpoint_replay'], default='trajectory')
     preliminary, _ = parser.parse_known_args()
     from omegaconf import OmegaConf
     cfg = OmegaConf.to_container(OmegaConf.load(preliminary.config), resolve=True)
