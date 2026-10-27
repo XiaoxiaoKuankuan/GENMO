@@ -70,8 +70,16 @@ def audit_logs(run,output):
         if d['actor_version']>=700:break
         funnel['A_all_real_requests'].extend(d.get('A_all_real_requests',[]))
         funnel['B_anchor_outcomes'].extend(d.get('B_anchor_outcomes',[]))
+        funnel['B_formed_H_anchor'].extend(r for r in d.get('B_anchor_outcomes',[]) if r.get('stage')=='B_formed_H_anchor')
+        funnel['B_legal_H_anchor'].extend(r for r in d.get('BC_support_classification',[]) if r.get('legal') is True)
+        funnel['C_outside_support'].extend(r for r in d.get('BC_support_classification',[]) if r.get('legal') is False)
         # Support records retain actual offending component/tick; do not relabel these as legal.
         funnel['BC_support_classification'].extend(d.get('BC_support_classification',[]))
+    funnel['D_drawn']=funnel['E_effective']+funnel['D_drawn_rejected']
+    support_failures=funnel['C_outside_support']
+    write_json(output/'support_failures.json',{'components':dict(Counter(c['name'] for r in support_failures for c in (r.get('support_details') or {}).get('components',[]))),
+        'prediction_steps':dict(Counter((r.get('support_details') or {}).get('prediction_step') for r in support_failures)),
+        'by_speed':{k:sample_counts([r for r in support_failures if r.get('speed_bin')==k]) for k in ['low','medium','high']}})
     report={'candidate_count':len(candidates),'accepted':len(accepted),'accepted_dance_worse':len(worse),
         'accepted_worsening_delta':stats([r['dance_delta'] for r in worse]),
         'module_gradients':{k:{field:stats([v[field] for v in vs]) for field in ['raw_norm','weighted_norm','cosine_with_dance']} for k,vs in gradients.items()},
@@ -87,12 +95,19 @@ def audit_logs(run,output):
 
 def anchor_coverage(sample):
     version=sample.generation.reference_version;future_only=0;center=0;support_sources=set();goal_steps=0
+    exact_center_steps=0;exact_center_points=set();first_exact_center=None;current_halo_only=0
     for step in sample.transitions:
         ref=step.start.reference;t=step.start.tick
         def selected(support):return support[ref.source_versions[(support-ref.lower)//20]==version]
         goal=selected(ref.dependency_support(t));current=selected(ref.dependency_support(t,future_steps=0))
         goal_steps+=bool(len(goal));future_only+=bool(len(goal)) and not bool(len(current))
         center+=bool(len(current));support_sources.update(current.tolist())
+        lo,hi,fraction=ref._indices(ref.ticks.new_tensor([t]))
+        indices=torch.unique(torch.cat((lo,hi[fraction!=0])))
+        exact=ref.ticks[indices[ref.source_versions[indices]==version]]
+        exact_center_steps+=bool(len(exact));exact_center_points.update(exact.tolist())
+        current_halo_only+=bool(len(current)) and not bool(len(exact))
+        if len(exact) and first_exact_center is None:first_exact_center=t
     ticket=sample.generation.request.ticket
     initial=sample.transitions[0].start.reference;final=sample.transitions[-1].end.reference
     owned=initial.ticks[initial.source_versions==version]
@@ -103,7 +118,9 @@ def anchor_coverage(sample):
         'first_influence_tick':ticket.first_influence_tick,'first_mutable_source_tick':ticket.first_mutable_source_tick,
         'h16_goal_influence_steps':goal_steps,'h16_current_reference_support_steps':center,
         'h16_future_goal_only_steps':future_only,'h16_unique_current_source_frames':len(support_sources),
-        'h16_current_source_ticks':sorted(support_sources),'overwritten_source_fraction':overwritten/max(1,len(common)),
+        'h16_current_source_ticks':sorted(support_sources),'h16_exact_center_consumption_steps':exact_center_steps,
+        'h16_exact_center_source_frames':len(exact_center_points),'h16_current_velocity_halo_only_steps':current_halo_only,
+        'first_actual_center_consumed_tick_in_H':first_exact_center,'overwritten_source_fraction':overwritten/max(1,len(common)),
         'overwritten_denominator':len(common),'old_source_frames_outside_final_cache_excluded':len(owned)-len(common)}
 
 
@@ -177,6 +194,6 @@ def offline_audit(cfg,run,output,versions):
     summary={str(v):{'songs':len([r for r in rows if r['version']==v]),
         **{k:float(np.mean([r[k] for r in rows if r['version']==v])) for k in ['B_episode_once_loss','C_world_loss','C_world_root_rms_m','C_world_yaw_rms_rad']},
         'A_anchor_H16_mean':float(np.mean([r['A_anchor_H16_mean']['mean'] for r in rows if r['version']==v])),
-        'coverage':{k:stats([r[k] for r in all_coverage if r['version']==v]) for k in ['h16_future_goal_only_steps','h16_current_reference_support_steps','h16_unique_current_source_frames','overwritten_source_fraction']}}
+        'coverage':{k:stats([r[k] for r in all_coverage if r['version']==v]) for k in ['h16_future_goal_only_steps','h16_current_reference_support_steps','h16_unique_current_source_frames','h16_exact_center_consumption_steps','h16_exact_center_source_frames','h16_current_velocity_halo_only_steps','overwritten_source_fraction']}}
         for v in versions}
     write_json(output/'summary.json',summary)
