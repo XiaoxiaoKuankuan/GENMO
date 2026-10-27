@@ -9,7 +9,6 @@ import copy
 
 import torch
 
-from tests.closedloop.test_stage1_actor import actor_factory  # noqa: F401
 from gem.closedloop.joint_physics.actor import JointPhysicsActor
 from gem.closedloop.mb_control.contracts import ForecastContext
 

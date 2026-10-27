@@ -47,4 +47,13 @@ execution_loss:
 training: {seed: 42, batch_size: 16, learning_rate: 0.00001, weight_decay: 0.01, grad_clip: 1.0, precision: fp32, max_steps: 600000, lr_warmup_steps: 500, min_lr_ratio: 0.1, checkpoint_every: 1000, diagnostics_every: 100, smoke_max_steps: 200}
 prepare: {shard_episodes: 4, old_plan_frames: 120, old_plan_period_ticks: 300, max_sources: null, max_control_steps: null}
 evaluation: {split: val, max_sources: 4, seed: 12345, reconstruction_timesteps: [50, 250, 500, 750, 999], max_control_steps: null, request_interval_ticks: 300, latency_ticks: 60}
+audit:
+  epsilon: 0.002
+  fd_atol: 0.0001
+  fd_rtol: 0.05
+  same_start_atol: 0.00001
+  direction_min_abs: 0.000001
+  minimum_probes: 4
+  minimum_direction_fraction: 0.75
+  state_rmse_limits: {root_xy_m: 0.05, root_height_m: 0.05, root_orientation_rad: 0.1, joint_position_rad: 0.1, joint_velocity_rad_s: 2.0}
 runtime: {device: cuda:0, cpu_threads: 4, output: null}
