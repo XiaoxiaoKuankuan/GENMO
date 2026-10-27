@@ -148,3 +148,30 @@ def test_formal_soft_termination_not_hard_failure_mask(system):
         assert not control.advance(z, proposal, z['state'])[4].any()
     finally:
         control.runtime.termination = original
+
+
+def test_active_SO3_projection_outside_checkpoint_preserves_gradient(system, monkeypatch):
+    from gem.closedloop.reference_adapter.reference_constraints import ReferenceProjection
+    from gem.closedloop.reference_adapter.alternating_learning import imagine
+    from gem.closedloop.reference_adapter.dynamics import frozen_parameters
+    engine, control, z = setup(system, count=1)
+    control.projection = ReferenceProjection(control.bundle.spec, control.adapter.bounds)
+    with torch.no_grad():
+        bias = control.adapter.net[-1].bias.view(10, 27)
+        bias[:, 3:6] = torch.atanh(torch.tensor([.008, -.007, .006])/control.adapter.bounds[3:6])
+    calls = []
+    original = torch.func.jacrev
+    def counted(*args, **kwargs):
+        calls.append(1)
+        return original(*args, **kwargs)
+    monkeypatch.setattr(torch.func, 'jacrev', counted)
+    critic = Critic(2835)
+    gradients = []
+    with engine.dynamics.adapter_phase(), frozen_parameters(critic):
+        for checked in (False, True):
+            value = imagine(control, engine.dynamics, critic, z, 2, terminal_value=True, checkpoint_steps=checked)
+            gradients.append(torch.autograd.grad(value['objective'].mean(), tuple(control.adapter.parameters())))
+    assert calls, '本回归必须实际进入非零SO(3) SQP Jacobian分支'
+    for a, b in zip(*gradients):
+        assert torch.isfinite(b).all()
+        torch.testing.assert_close(a, b, atol=1e-6, rtol=1e-4)

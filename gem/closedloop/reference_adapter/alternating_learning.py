@@ -79,15 +79,7 @@ def wm_update(dynamics, optimizer, windows):
 
 
 def imagine(control, dynamics, critic, start, horizon, *, terminal_value, gamma=.99, checkpoint_steps=True):
-    def step(z):
-        proposal = control.propose(z)
-        with torch.no_grad():
-            certificate = control.constraint_certificate(z, proposal)
-            if certificate is not None and not bool(certificate['feasible'].all()):
-                control.last_imagination_failure = dict(state=detach_state(z),
-                    certificate={k: v.detach() for k, v in certificate.items()},
-                    residual=proposal['residual'].detach())
-                raise RuntimeError('想象参考投影不可执行；不降低约束')
+    def step(z, proposal):
         state = dynamics.step(z['state'], proposal['action'], z['xi'])
         end, reward, _, terms, continuation, _, _ = control.advance(z, proposal, state)
         return end, reward, continuation, terms
@@ -97,12 +89,22 @@ def imagine(control, dynamics, critic, start, horizon, *, terminal_value, gamma=
     score = alive*0
     features, rewards, continuations, terms_sum = [], [], [], {}
     for t in range(horizon):
+        # 活跃SO(3)投影使用torch.func.jacrev，不允许放进checkpoint的saved_tensor
+        # hooks。投影原图保留；Actor及WM/奖励各自检查点，既不detach也不缩短H。
+        proposal = control.propose(z, checkpoint_actor=checkpoint_steps)
+        with torch.no_grad():
+            certificate = control.constraint_certificate(z, proposal)
+            if certificate is not None and not bool(certificate['feasible'].all()):
+                control.last_imagination_failure = dict(state=detach_state(z),
+                    certificate={k: v.detach() for k, v in certificate.items()},
+                    residual=proposal['residual'].detach())
+                raise RuntimeError('想象参考投影不可执行；不降低约束')
         if terminal_value:
             # 中间Critic特征只供后续MSE，终端特征另外保留完整输入梯度。
             with torch.no_grad():
                 features.append(control.critic_features(detach_state(z)))
-        end, reward, cont, terms = (checkpoint(step, z, use_reentrant=False, preserve_rng_state=True)
-                                   if checkpoint_steps and torch.is_grad_enabled() else step(z))
+        end, reward, cont, terms = (checkpoint(step, z, proposal, use_reentrant=False, preserve_rng_state=True)
+                                   if checkpoint_steps and torch.is_grad_enabled() else step(z, proposal))
         score = score+gamma**t*alive*reward
         for key, value in terms.items():
             terms_sum[key] = terms_sum.get(key, score*0)+gamma**t*alive*value

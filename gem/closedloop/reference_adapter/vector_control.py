@@ -111,7 +111,7 @@ class VectorControl:
         future = select_reference(ref, (slice(None), slice(1, None)))
         return current, future, goal_from_reference(current, future), halo[:, 0]
 
-    def propose(self, z, *, zero=False, residual_offset=None, action_offset=None, latent=None):
+    def propose(self, z, *, zero=False, residual_offset=None, action_offset=None, latent=None, checkpoint_actor=False):
         residual = (self.adapter.decode(latent) if latent is not None else
                     z['state'].new_zeros(len(z['state']), 10, 27) if zero else self.adapter.forward_packed(self.packed(self.fields(z))))
         if residual_offset is not None:
@@ -126,13 +126,18 @@ class VectorControl:
         elif self.constraint_beta < 1:
             residual = constrain_plan(residual, z['left'], z['anchor'], self.constraint_beta)
         current, future, goal, halo = self.reference(z, residual)
-        action = self.bundle.act(z['history'], goal)
+        def act(history, target):
+            if checkpoint_actor and torch.is_grad_enabled():
+                from torch.utils.checkpoint import checkpoint
+                return checkpoint(self.bundle.act, history, target, use_reentrant=False)
+            return self.bundle.act(history, target)
+        action = act(z['history'], goal)
         if action_offset is not None:
             action = action+action_offset
         result = dict(residual=residual, raw_residual=raw_residual, current=current, future=future, goal=goal, halo=halo, action=action)
         if self.precision is not None:
             # 对照动作在相同真实/想象状态及同一历史下使用原始Goal；保留其输入梯度。
-            result['zero_action'] = self.bundle.act(z['history'], self.nominal_goal(z)[1])
+            result['zero_action'] = act(z['history'], self.nominal_goal(z)[1])
         return result
 
     def constraint_certificate(self, z, proposal):

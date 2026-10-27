@@ -62,6 +62,7 @@ gamma=.99、lambda=.95；Critic LR1e-4，原版5 epochs×4 minibatches，MSE拟�
 - 配置矩阵、八组共享奖励/预算、AST、git diff --check通过。未运行新的方向研究或pilot。
 - 实际服务器根目录、源码、PID及首个有效Adam更新将在启动核验后追加，不把WM预热称为Adapter更新。
 - 首次正式启动八组均完成1次Adam后，发现全局TF32破坏SO(3)小差分和QP精化：GPU0保存的2048提案24个证书失败，改回严格FP32重投影全部通过，最大角加速度超量从1.4161降至0.0001588，原容差0.0025未改变。修正正式入口全局TF32并从本组完整checkpoint恢复；未进行WM方向研究或放宽约束。首次失败根目录与checkpoint保留。
+- r1恢复后的非零投影触发PyTorch `torch.func.jacrev` 与非重入检查点的saved_tensor_hooks冲突。现将投影留在检查点外保留原图，Actor与WM/奖励独立检查点；不改变隐式梯度或时域。新增真实SM活跃SO(3)分支回归，含Critic终端的有/无检查点参数梯度一致，7项定向回归4.97秒通过。全部r1完整状态仍保留，后续按本组恢复。
 
 Server-1启动：
 
