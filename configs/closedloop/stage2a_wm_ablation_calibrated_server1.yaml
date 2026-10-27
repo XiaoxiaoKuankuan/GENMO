@@ -111,6 +111,9 @@ stage2a:
   max_consecutive_rejections: 3
   objective_version: q_qd_body_R_local_root_no_extra_body_w_v2
   long_horizon:
+    one_step_weight: 1.0
+    reward_response_scale: 0.001
+    training_loss_calibration: /data0/user/liwei/GENMO_outputs/stage2_supermimic_adapter/stage2a_wm_response_20261027_02/calibration02/training_gradient_calibration.json
     response_train_horizons:
     - 8
     - 16

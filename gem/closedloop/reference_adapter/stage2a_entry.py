@@ -61,6 +61,10 @@ def main():
     if args.mode == 'train' and vector['initial_bptt_steps'] not in (32, 64):
         raise ValueError('本轮正式目标为H32/H64，H8/H16仅作诊断，不能默认回退')
     long_settings = settings['long_horizon']
+    if long_settings.get('training_loss_calibration'):
+        calibrated = json.loads(Path(long_settings['training_loss_calibration']).read_text())
+        settings['reference_response_weight'] = calibrated['reference_weight']
+        long_settings['reward_response_weight'] = calibrated['effective_weight']
     if max(long_settings['response_train_horizons']) > 32 or max(map(int, long_settings['state_weights'])) > 32:
         raise ValueError('当前H64只做独立验证，获得可靠方向证据前不得直接加入监督')
     if torch.cuda.device_count() != 1 or int(os.environ.get('WORLD_SIZE', 1)) != 1:
@@ -230,7 +234,8 @@ def main():
                     reference_kin=control.runtime.kin, response_settings=long_settings['response'],
                     long_windows=replay.windows(32, 32), long_weights=long_settings['state_weights'], checkpoint_steps=True,
                     one_step_weight=long_settings.get('one_step_weight', 0.),
-                    reward_response_weight=long_settings.get('reward_response_weight', 0.), reward_control=control)
+                    reward_response_weight=long_settings.get('reward_response_weight', 0.), reward_control=control,
+                    reward_response_scale=long_settings.get('reward_response_scale', .001))
                 identity = dict(adapter=parameter_identity(control.adapter), wm=parameter_identity(engine.dynamics),
                                 critic=parameter_identity(critic))
                 saved = checkpoint('integration')
@@ -295,7 +300,8 @@ def main():
                         response_settings=long_settings['response'], long_windows=replay.windows(long_settings['state_batch'], 32),
                         long_weights=long_settings['state_weights'], checkpoint_steps=True,
                         one_step_weight=long_settings.get('one_step_weight', 0.),
-                        reward_response_weight=long_settings.get('reward_response_weight', 0.), reward_control=control)
+                        reward_response_weight=long_settings.get('reward_response_weight', 0.), reward_control=control,
+                        reward_response_scale=long_settings.get('reward_response_scale', .001))
                     append_json(output/'wm.jsonl', report)
                 response_report = validate_response(engine.dynamics, data, kin=control.runtime.kin,
                                                     scales=long_settings['response']['scales'])
