@@ -14,6 +14,7 @@ import torch
 from gem.closedloop.contracts import STAGE1_CONDITION_KEYS
 from gem.closedloop.stage1_dataset import collate_stage1_training_samples
 from gem.closedloop.joint_physics.config import read_config, build_adapter, ROOT
+from gem.closedloop.joint_physics.contracts import source_key
 from gem.closedloop.joint_physics.data import SourceCatalog, SidecarStore
 from gem.closedloop.joint_physics.prepare_rollouts import asset_contract
 from gem.closedloop.joint_physics.reference import attach_sidecars
@@ -33,7 +34,8 @@ def test_actual_sidecar_conditions_do_not_read_unknown_labels(monkeypatch):
     options["kinematics_path"] = str(ROOT/options["kinematics_path"])
     codec = BumiEndecoder(**options).codec
     store = SidecarStore(cfg["data"]["sidecar"], "train", asset_contract(cfg, adapter))
-    dataset, row = next(SourceCatalog(cfg, "train").sources())
+    dataset, row = next((ds, i) for ds, i in SourceCatalog(cfg, "train").sources()
+        if source_key({"dataset_id": ds.dataset_name, "split": "train", "sample_id": ds.rows[i]["sample_id"]}) in store.index["sources"])
     for frame in (30, 60, 90, 120):
         batch = collate_stage1_training_samples([dataset.get_window(row, frame)])
         before, context, windows, _ = attach_sidecars(batch, store, adapter, codec, 8)

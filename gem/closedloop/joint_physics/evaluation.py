@@ -44,7 +44,7 @@ def sample_seed(meta, seed):
     return (int(hashlib.sha256(source_key(meta).encode()).hexdigest()[:12], 16)+seed) % (2**63-1)
 
 
-def evaluation_windows(cfg, actor, adapter, *, split):
+def evaluation_windows(cfg, actor, adapter, *, split, structural_search_frames=0):
     catalog = SourceCatalog(cfg, split)
     store = SidecarStore(cfg["data"]["sidecar"], split, asset_contract(cfg, adapter),
                         sample_contract=cfg["data"]["sample_contract"])
@@ -59,9 +59,26 @@ def evaluation_windows(cfg, actor, adapter, *, split):
             continue
         for fraction in (.15, .5, .85):
             frame = int(last_frame*fraction)//3*3
-            batch = batch_to_device(collate_stage1_training_samples([dataset.get_window(row, frame)]), adapter.runtime.kin.device)
-            batch, contexts, windows, reasons = attach_sidecars(batch, store, adapter, actor.stage1.endecoder.codec, cfg["physics"]["horizon"])
-            yield episode, batch, contexts, windows[0], reasons[0]
+            offsets = [0] + [sign*delta for delta in range(3, structural_search_frames+1, 3) for sign in (1, -1)]
+            window, reason = None, "insufficient_structural_support"
+            for offset in offsets:
+                selected_frame = frame+offset
+                if not 0 <= selected_frame <= last_frame:
+                    continue
+                batch = batch_to_device(collate_stage1_training_samples([dataset.get_window(row, selected_frame)]), adapter.runtime.kin.device)
+                batch, contexts, windows, reasons = attach_sidecars(batch, store, adapter, actor.stage1.endecoder.codec, cfg["physics"]["horizon"])
+                window, reason = windows[0], reasons[0]
+                if window is not None:
+                    # 在模型预测前，只按固定60源帧/右速度halo检查时域几何，绝不按Loss或方向挑选。
+                    required = window.start.tick + (window.horizon-1)*12 + 132
+                    if structural_search_frames and required > window.request.tick+59*20:
+                        window, reason = None, "candidate_right_halo_insufficient"
+                    else:
+                        window.provenance["audit_anchor_selection"] = {"requested_frame": frame,
+                            "selected_frame": selected_frame, "search_frames": structural_search_frames,
+                            "criterion": "real_time_prefix_and_halo_only_before_prediction"}
+                        break
+            yield episode, batch, contexts, window, reason
 
 
 @torch.no_grad()
@@ -85,7 +102,8 @@ def audit_gradients(cfg, checkpoint, output, adapter, env, interface_probe=False
     assets = asset_contract(cfg, adapter)
     rows, real_states, real_actions, source_ids = [], [], [], set()
     from .trainer import grad_summary
-    for episode, batch, contexts, window, reason in evaluation_windows(cfg, actor, adapter, split="train"):
+    for episode, batch, contexts, window, reason in evaluation_windows(cfg, actor, adapter, split="train",
+            structural_search_frames=cfg["audit"].get("structural_search_frames", 0)):
         source_ids.add(episode["source_key"])
         real_states.append(episode["state"])
         real_actions.append(episode["action"])
@@ -102,6 +120,7 @@ def audit_gradients(cfg, checkpoint, output, adapter, env, interface_probe=False
             selected = replace(window, horizon=horizon)
             for joint in (10, 17):
                 row = {"source": episode["source_key"], "frame": batch["meta"][0]["decision_frame"],
+                       "anchor_selection": window.provenance.get("audit_anchor_selection"),
                        "horizon": horizon, "joint_genmo_feature": joint, "prediction_origin": "gt_interface_probe" if interface_probe else "student_denoised_x0"}
                 try:
                     result = execute_window(selected, prediction, forward["static_conf_logits"], actor, adapter, cfg["execution_loss"])
@@ -178,7 +197,8 @@ def validate_forecasts(cfg, adapter):
     options["kinematics_path"] = str(ROOT/options["kinematics_path"])
     holder = SimpleNamespace(stage1=SimpleNamespace(endecoder=BumiEndecoder(**options)))
     rows = []
-    for episode, batch, contexts, window, reason in evaluation_windows(cfg, holder, adapter, split="train"):
+    for episode, batch, contexts, window, reason in evaluation_windows(cfg, holder, adapter, split="train",
+            structural_search_frames=cfg["audit"].get("structural_search_frames", 0)):
         if window is None:
             continue
         requests = episode["offline_requests"]
