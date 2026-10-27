@@ -240,7 +240,7 @@ def complete_validation(cfg, raw_path, output, adapter):
 @torch.no_grad()
 def execute_generated(window, reference, adapter, env, steps):
     z = replace(window.start, reference=reference)
-    records, rewards = [], []
+    records, rewards, contacts, speeds = [], [], [], []
     reason = "short_window_budget"
     for _ in range(steps):
         try:
@@ -248,19 +248,31 @@ def execute_generated(window, reference, adapter, env, steps):
             _, _, goal = z.reference.read_current_future(z.tick)
             action = adapter.bundle.act(z.sm_history, goal)
             state = env.step_physics(action)
+            from supermimic.mdp import unflatten_state
+            measured_q, measured_qd = unflatten_state(state)[4:6]
+            if not torch.isfinite(state).all():
+                reason = "nonfinite_measured_state"
+                break
             previous_action = z.previous_action
             z = adapter.advance(z, state, action, origin="real")
             target, _, _ = z.reference.read_current_future(z.tick, 0)
             reward, _ = adapter.runtime.reward(state, action, previous_action, target)
             records.append(state.cpu())
             rewards.append(float(reward))
+            contacts.append(env.contact_events())
+            speeds.append(float(measured_qd.abs().mean()))
+            if bool(((measured_q < adapter.runtime.kin.q_lo-1e-4) | (measured_q > adapter.runtime.kin.q_hi+1e-4)).any()):
+                reason = "measured_hard_joint_limit"
+                break
             if adapter.runtime.termination(state, target).any():
                 reason = "physical_failure"
                 break
         except ReferenceExhausted:
             reason = "reference_exhausted"
             break
-    return {"reason": reason, "steps": len(records), "tracking_reward_mean": sum(rewards)/max(1,len(rewards))}, records
+    return {"reason": reason, "steps": len(records), "tracking_reward_mean": sum(rewards)/max(1,len(rewards)),
+            "measured_joint_speed_mean_rad_s":sum(speeds)/max(1,len(speeds)),
+            "real_contacts":contacts}, records
 
 
 class TrackingMonitor:
@@ -339,7 +351,8 @@ def evaluate(cfg, checkpoint, output, adapter, env, mode):
         raise ValueError("评价必须显式提供新流程checkpoint")
     output = Path(output)
     output.mkdir(parents=True, exist_ok=False)
-    actor, losses = load_actor(cfg, checkpoint, env.device)
+    device = adapter.runtime.kin.device
+    actor, losses = load_actor(cfg, checkpoint, device)
     from .inference import configure
     configure(actor,cfg["runtime"].get("inference_backend","eager"))
     checkpoint_step = read_checkpoint(checkpoint)["global_step"]
@@ -360,15 +373,18 @@ def evaluate(cfg, checkpoint, output, adapter, env, mode):
                 rows.append({"source": episode["source_key"], "rejection": reason})
                 continue
             g = torch.Generator().manual_seed(sample_seed(batch["meta"][0], cfg["evaluation"]["seed"]))
-            noise = torch.randn(1, 60, 30, generator=g).to(env.device)
+            noise = torch.randn(1, 60, 30, generator=g).to(device)
             if mode == "reconstruction":
                 for k in cfg["evaluation"]["reconstruction_timesteps"]:
                     with torch.no_grad():
-                        out = actor.denoise_supervised(batch, contexts, torch.tensor([k], device=env.device), noise,
-                            torch.zeros(1, dtype=torch.bool, device=env.device))
+                        out = actor.denoise_supervised(batch, contexts, torch.tensor([k], device=device), noise,
+                            torch.zeros(1, dtype=torch.bool, device=device))
                         loss, _ = losses(batch, out["pred_x_start"], out["static_conf_logits"], checkpoint_step)
                         row = {"source": episode["source_key"], "frame": batch["meta"][0]["decision_frame"], "k": k,
                                "noise_seed": g.initial_seed(), "data_loss": float(loss)}
+                        if env is None:
+                            rows.append(row)
+                            continue
                         try:
                             row["same_start_max_abs"] = replay_to_start(env, episode, window)
                             result = execute_window(window, out["pred_x_start"], out["static_conf_logits"], actor, adapter,
@@ -385,29 +401,54 @@ def evaluate(cfg, checkpoint, output, adapter, env, mode):
                 with torch.no_grad():
                     for seed_offset in (0, 1):
                         g.manual_seed(g.initial_seed()+seed_offset)
-                        out = actor.sample_differentiable(conditions, contexts[0], torch.randn(1,60,30,generator=g).to(env.device))
+                        out = actor.sample_differentiable(conditions, contexts[0], torch.randn(1,60,30,generator=g).to(device))
                         generated.append(out["qpos30"])
                         row = {"source": episode["source_key"], "frame": batch["meta"][0]["decision_frame"],
                                "noise_seed": g.initial_seed(), "sampler": "pure_noise_ddim20_eta0_cfg2.5",
                                "joint_range_mean_rad": float(out["qpos30"][...,9:].std(dim=1).mean())}
+                        row.update(generation_statistics(out, batch))
                         try:
-                            prediction = actor.stage1.endecoder.normalize(out["qpos30"])
-                            reference = candidate_reference(window, prediction, out["contact_logits"], actor.stage1.endecoder.codec, actor.stage1.endecoder)
-                            row["same_start_max_abs"] = replay_to_start(env, episode, window)
-                            metrics, states = execute_generated(window, reference, adapter, env, window.horizon)
-                            row["real_physics"] = metrics
-                            atomic_save({"generated_qpos30": out["qpos30"].cpu(), "physical_states": states}, output/f"free_{len(rows):04d}.pt")
+                            if env is not None:
+                                prediction = actor.stage1.endecoder.normalize(out["qpos30"])
+                                reference = candidate_reference(window, prediction, out["contact_logits"], actor.stage1.endecoder.codec, actor.stage1.endecoder)
+                                row["same_start_max_abs"] = replay_to_start(env, episode, window)
+                                metrics, states = execute_generated(window, reference, adapter, env, window.horizon)
+                                row["real_physics"] = metrics
+                                atomic_save({"generated_qpos30": out["qpos30"].cpu(), "physical_states": states}, output/f"free_{len(rows):04d}.pt")
                         except PhysicsRejected as error:
                             row["rejection"] = error.reason
                         rows.append(row)
-                    rows[-1]["within_model_seed_diversity_rms"] = float((generated[0]-generated[1]).square().mean().sqrt())
+                    mask = batch["target_qpos30_valid"] & ~batch["known_qpos30_mask"]
+                    rows[-1]["within_model_seed_diversity_rms"] = float((generated[0]-generated[1])[mask].square().mean().sqrt())
                     silent = dict(conditions, music_valid=torch.zeros_like(conditions["music_valid"]))
                     without = actor.sample_differentiable(silent, contexts[0], noise)
-                    rows[-1]["music_condition_sensitivity_rms"] = float((generated[0]-without["qpos30"]).square().mean().sqrt())
+                    rows[-1]["music_condition_sensitivity_rms"] = float((generated[0]-without["qpos30"])[mask].square().mean().sqrt())
     adapter.bundle.assert_unchanged(frozen)
     result = {"mode": mode, "checkpoint": str(checkpoint), "rows": rows, "frozen_unchanged": True,
               "checkpoint_step": checkpoint_step, "evaluation_config": cfg["evaluation"],
               "scope": "complete_song_attempts" if mode == "closed_loop" else "independent_local_windows",
-              "evidence": "real_newton", "method_improvement_claim": False}
+              "evidence": "real_newton" if env is not None else "numerical_only_no_physical_claim", "method_improvement_claim": False}
     (output/"evaluation.json").write_text(json.dumps(result, ensure_ascii=False, indent=2, allow_nan=False))
     return result
+
+
+def generation_statistics(output, batch):
+    """只统计有效未知生成帧的幅度/速度，预测接触与真实接触名称严格区分。"""
+    from gem.utils.rotation_conversions import quaternion_to_matrix
+    q = output["qpos28"]
+    valid = batch["future_valid"] if "future_valid" in batch else batch["target_qpos30_valid"].any(-1)
+    unknown = ~batch["known_qpos30_mask"].all(-1) & valid
+    poses = q[unknown]
+    if len(poses)<2:
+        return {"generation_diagnostic": "insufficient_unknown_frames"}
+    pairs = unknown[:,1:] & unknown[:,:-1]
+    velocity = ((q[:,1:]-q[:,:-1])*30)[pairs]
+    rotation = quaternion_to_matrix(poses[:,3:7])
+    yaw = torch.atan2(rotation[:,1,0],rotation[:,0,0])
+    return {"unknown_frames":len(poses),"root_xy_range_m":float((poses[:,:2].amax(0)-poses[:,:2].amin(0)).norm()),
+        "root_yaw_circular_spread":float(1-torch.stack((yaw.sin().mean(),yaw.cos().mean())).norm()),
+        "joint_amplitude_mean_rad":float((poses[:,7:].amax(0)-poses[:,7:].amin(0)).mean()),
+        "generated_joint_speed_mean_rad_s":float(velocity[:,7:].abs().mean()),
+        "generated_root_speed_m_s":float(velocity[:,:2].norm(dim=-1).mean()),
+        "predicted_contact_probability_mean":output["contact"][unknown].mean(0).tolist(),
+        "metric_scope":"generated_reference_not_measured_robot"}

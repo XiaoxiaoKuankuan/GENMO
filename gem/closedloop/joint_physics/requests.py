@@ -101,7 +101,7 @@ class PhysicsRequestStream:
                 start = item["start_tick"]//12
                 tags = motion_tags(episode["state"][start:start+horizon+1], joint_names,
                                    episode["contacts"][start:start+horizon])
-                item.update(tags=tags, source=key, dataset=dataset.dataset_name)
+                item.update(tags=tags, source=key, dataset=dataset.dataset_name, music_identity=episode["music_sha256"])
                 categories.update(tags)
                 if certification is not None and not certification.certified(tags):
                     reasons["uncertified_motion_type"] += 1

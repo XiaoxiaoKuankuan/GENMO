@@ -101,6 +101,12 @@ def execute_window(window, predicted_x0, logits, actor, adapter, cfg, *, support
     if first != window.start.tick:
         raise PhysicsRejected("first_influence_mismatch")
     z = replace(window.start.detached(), reference=reference)
+    if support is not None:
+        try:
+            support.check_state(z.state)
+        except PhysicsRejected as error:
+            error.details.update(first_reject_tick=z.tick, failure_phase="real_initial_state", action_origin="not_executed")
+            raise PhysicsRejected("real_start_out_of_domain",error.details) from error
     losses, safety, terms, states, actions, support_ticks, center = [], [], [], [], [], set(), 0
     failure_steps = []
     for step in range(window.horizon):

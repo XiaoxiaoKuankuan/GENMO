@@ -122,6 +122,9 @@ def audit(cfg, checkpoint, output, adapter, env, interface_probe=False):
                         grad, = torch.autograd.grad(result['loss'],prediction,retain_graph=True)
                         if not torch.isfinite(grad).all() or not bool(grad.norm()>0):
                             raise PhysicsRejected('zero_or_nonfinite_execution_gradient')
+                        if not interface_probe:
+                            from .trainer import grad_summary
+                            base['execution_parameter_gradients'] = grad_summary(result['loss'],actor)
                     except PhysicsRejected as error:
                         rows.append(dict(base,rejection=error.reason,details=error.details));continue
                     for direction_name in cfg['audit']['directions']:
@@ -159,10 +162,12 @@ def audit(cfg, checkpoint, output, adapter, env, interface_probe=False):
                             if good:
                                 for tag in tags:
                                     target = collected[(horizon,tag)]
+                                    target['states'].append(selected_window.start.state.detach().cpu())
                                     target['states'].extend(p['states'].detach().cpu().flatten(0,1) for p in physical)
                                     target['actions'].extend(p['actions'].detach().cpu().flatten(0,1) for p in physical)
                                     target['rows'].append(record)
                                 all_states.extend(p['states'].detach().cpu().flatten(0,1) for p in physical)
+                                all_states.append(selected_window.start.state.detach().cpu())
                                 all_actions.extend(p['actions'].detach().cpu().flatten(0,1) for p in physical)
                         except PhysicsRejected as error:
                             record.update(rejection=error.reason,details=error.details)

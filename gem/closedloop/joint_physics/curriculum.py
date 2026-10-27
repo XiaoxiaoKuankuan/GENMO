@@ -45,17 +45,19 @@ class Readiness:
 
     def observe(self, rows, step):
         self.rows.extend({"valid": r["reason"] == "execution_gradient_completed", "source": r["source"],
-                          "types": r.get("tags", [])} for r in rows)
+                          "music": r.get("music_identity",r["source"]), "types": r.get("tags", [])} for r in rows)
         valid = [r for r in self.rows if r["valid"]]
         sources = {r["source"] for r in valid}
+        music = {r["music"] for r in valid}
         types = {t for r in valid for t in r["types"]}
         rate = len(valid)/max(1,len(self.rows))
         if (self.activated_step is None and step >= self.cfg["start_step"] and
             len(self.rows) >= self.cfg["readiness_min_samples"] and rate >= self.cfg["readiness_min_rate"] and
-            len(sources) >= self.cfg["readiness_min_sources"] and len(types) >= self.cfg["readiness_min_types"]):
+            len(sources) >= self.cfg["readiness_min_sources"] and len(music) >= self.cfg["readiness_min_sources"] and
+            len(types) >= self.cfg["readiness_min_types"]):
             self.activated_step = step
         return {"activated_step": self.activated_step, "recent_samples": len(self.rows),
-                "valid_rate": rate, "sources": sorted(sources), "types": sorted(types)}
+                "valid_rate": rate, "sources": sorted(sources), "music_identities": sorted(music), "types": sorted(types)}
 
     def weight(self, step):
         if self.activated_step is None or not self.cfg["enabled"]:

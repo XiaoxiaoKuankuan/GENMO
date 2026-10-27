@@ -139,7 +139,7 @@ class JointTrainer:
             snr = alpha/(1-alpha)
             for i, metadata in enumerate(physics_meta):
                 record = sample_record(pbatch,i,k[i],snr[i])
-                record.update(tags=metadata['tags'], stages=['sampled','static_metadata_passed','audited_noise'],
+                record.update(tags=metadata['tags'],music_identity=metadata['music_identity'], stages=['sampled','static_metadata_passed','audited_noise'],
                               action_origin='frozen_sm_from_student_denoised_x0')
                 try:
                     if windows[i] is None:
@@ -215,6 +215,7 @@ class JointTrainer:
             'execution_loss':float(reduced[1]/count.clamp_min(1)),'execution_safety':0.,
             'physics_valid_rate':float(count)/max(1,len(global_rows)),'lambda_exec':weight,'lambda_safety':0.,
             'physics_update_fraction':self.counters['physics_effective_updates']/self.step,
+            'data_samples_with_inactive_physics_curriculum':b*self.world_size if weight==0 else 0,
             'physics_selection_status':selection_reason if not global_rows else 'independent_student_probe' if not weight else 'independent_student_training',
             'readiness':readiness,'rejections':dict(reasons),'physics_rejection_categories':dict(reasons),
             'sample_diagnostics':summarize(global_rows),'data_sidecar_status':dict(Counter(missing)),

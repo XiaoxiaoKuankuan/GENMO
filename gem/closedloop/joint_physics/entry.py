@@ -28,13 +28,14 @@ def main(kind):
     parser.add_argument("--interface-probe", action="store_true", help="仅GT接口/方向审计，绝不算学生训练成功")
     parser.add_argument("--complete-validation", help="对已有本方法原始Newton报告补充已记录目标合同和真实前瞻检查，不覆盖原报告")
     parser.add_argument("--import-sidecar", help="一次性离线转换已有真实缓存，不重新仿真；输出必须是新目录")
+    parser.add_argument("--numerical-only", action="store_true", help="只计算重建/完整DDIM生成诊断，不启动Newton，不算真实执行验收")
     parser.add_argument("--mode", choices=("smoke", "train") if kind == "train" else ("reconstruction", "free_generation", "closed_loop"),
                         default="smoke" if kind == "train" else "reconstruction")
     preliminary, _ = parser.parse_known_args()
     from .config import read_config, build_adapter, seed_all
     cfg = read_config(preliminary.config, preliminary.set)
     sys.path.insert(0, str(Path(cfg["supermimic"]["repo"]).resolve()))
-    physical = kind == "evaluate" or (kind == "prepare" and not preliminary.import_sidecar) or (kind == "gradients" and preliminary.newton)
+    physical = (kind == "evaluate" and not preliminary.numerical_only) or (kind == "prepare" and not preliminary.import_sidecar) or (kind == "gradients" and preliminary.newton)
     if physical:
         from isaaclab.app import add_launcher_args, launch_simulation
         add_launcher_args(parser)
@@ -91,6 +92,8 @@ def main(kind):
             from .certification import audit
             return audit(cfg, args.checkpoint, output, adapter, env, args.interface_probe)
         from .evaluation import evaluate
+        if args.numerical_only and args.mode == "closed_loop":
+            raise ValueError("连续闭环必须真实Newton，不能用数值诊断冒充")
         return evaluate(cfg, args.checkpoint, output, adapter, env, args.mode)
     if not physical:
         execute(None)
