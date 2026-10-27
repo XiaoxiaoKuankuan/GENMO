@@ -20,6 +20,7 @@ import traceback
 
 
 def main():
+    raise RuntimeError('旧A/B/C入口已停止；当前用户指定唯一WM+BPTT主线，请使用tools/train_stage2a_reference.py。旧实现只作历史对照。')
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--config', required=True)
     parser.add_argument('--output', required=True)

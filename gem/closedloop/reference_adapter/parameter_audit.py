@@ -88,6 +88,14 @@ def parameter_update_audit(collector, control, dynamics, critic, before, *, term
                         root_non_saturating=control.root_cost_weight, reference_velocity=control.velocity_cost_weight),
                     constraint_beta=control.constraint_beta, disable_root_xy=control.adapter.disable_root_xy)
     identity['physical_criteria'] = dict(criteria)
+    if control.precision is not None:
+        identity['precision'] = dict(scales=control.precision.scales, weight=control.precision.weight,
+            action_weight=control.precision.action_weight, velocity_weight=control.precision.velocity_weight,
+            acceleration_weight=control.precision.acceleration_weight)
+    if control.projection is not None:
+        identity['projection'] = dict(velocity=control.projection.velocity.tolist(),
+            acceleration=control.projection.acceleration.tolist(), rotation_velocity=control.projection.rotation_velocity,
+            rotation_acceleration=control.projection.rotation_acceleration, kind='finite_horizon_QP_SO3_SQP')
     cases = []
     try:
         for prefix in prefixes:

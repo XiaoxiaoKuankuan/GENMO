@@ -20,7 +20,9 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--config', required=True)
     parser.add_argument('--output', required=True)
-    parser.add_argument('--mode', choices=('numerical', 'pressure', 'oracle', 'evaluate'), required=True)
+    parser.add_argument('--mode', choices=('numerical', 'pressure', 'oracle', 'evaluate', 'direction', 'calibrate'), required=True)
+    parser.add_argument('--checkpoint', help='已接受或被拒候选的真实模型文件；评价/审计均不产生策略更新')
+    parser.add_argument('--starts', help='已保存的训练集真实零策略高误差起点，仅用于梯度尺度标定')
     parser.add_argument('--num-envs', type=int, default=128)
     parser.add_argument('--steps', type=int, default=96)
     parser.add_argument('--oracle-batches', type=int, default=2)
@@ -55,7 +57,23 @@ def main():
     control.soft_imagination_continuation = False
     control.projection = ReferenceProjection(control.bundle.spec, control.adapter.bounds,
         **cfg.get('stage2a', {}).get('projection', {})).cuda()
-    control.precision = PrecisionObjective()
+    settings = cfg.get('stage2a', {})
+    scales = json.loads(Path(settings['calibration']).read_text())['scales'] if settings.get('calibration') else None
+    control.precision = PrecisionObjective(scales, **settings.get('precision', {}))
+    before = {k: v.detach().clone() for k, v in control.adapter.state_dict().items()}
+    checkpoint = None
+    if args.checkpoint:
+        checkpoint = torch.load(args.checkpoint, map_location='cpu', weights_only=False, mmap=True)
+        for key in ('projection', 'precision'):
+            if checkpoint['config']['stage2a'][key] != settings.get(key):
+                raise ValueError('审计必须使用checkpoint实际参考投影及精度目标，不能悄悄替换')
+        if args.mode != 'calibrate':
+            control.adapter.load_state_dict(checkpoint['adapter'])
+        engine.dynamics.load_state_dict(checkpoint['dynamics'])
+        engine.dynamics.model_version = checkpoint.get('wm_version', checkpoint.get('state', {}).get('wm_updates', 0))
+        saved_scales = checkpoint.get('extra_state', {}).get('precision_scales')
+        if saved_scales and args.mode != 'calibrate':
+            control.precision.scales = saved_scales
     json_write(output/'manifest.json', dict(pid=os.getpid(), gpu=os.environ.get('CUDA_VISIBLE_DEVICES'),
         command=[sys.executable, *sys.argv], config=cfg, mode=args.mode, num_envs=args.num_envs,
         accepted_updates=0, scope='Stage2-A_validation_only', physical_resume='explicit_reset_of_real_state_with_repeat_test'))
@@ -65,7 +83,8 @@ def main():
     proposal.data[..., :2] = 0
     anchor = torch.zeros(8, 27, device='cuda')
     projected = control.projection(proposal, anchor, anchor)
-    cpu = ReferenceProjection(control.bundle.spec, control.adapter.bounds.cpu(), iterations=1200)
+    cpu = ReferenceProjection(control.bundle.spec, control.adapter.bounds.cpu(),
+                              **cfg.get('stage2a', {}).get('projection', {}))
     expected = cpu(proposal.detach().cpu(), anchor.cpu(), anchor.cpu())
     torch.testing.assert_close(projected.cpu(), expected, atol=2e-5, rtol=2e-4)
     gradient, = torch.autograd.grad(projected.square().sum(), proposal)
@@ -75,6 +94,13 @@ def main():
     if args.mode == 'numerical':
         return 0
     json_write(output/'compiled_fk.json', compile_kinematics(engine, bank))
+    if args.mode == 'calibrate':
+        from gem.closedloop.reference_adapter.precision import calibrate_gradient_weights
+        from gem.closedloop.reference_adapter.update_diagnostics import fixed_probes
+        starts = torch.load(args.starts, map_location='cuda:0', weights_only=False)
+        report = calibrate_gradient_weights(control, engine.dynamics, fixed_probes(starts, per_song=2))
+        json_write(output/'train_gradient_calibration.json', report)
+        return 0
     collector = None
     try:
         with launch_simulation(make_sim('cuda:0', args), args):
@@ -91,7 +117,22 @@ def main():
                     peak_allocated_mib=torch.cuda.max_memory_allocated()/2**20, gpu_process_mib=gpu_usage(),
                     last_step_timing=collector.timing, accepted_updates=0))
             elif args.mode == 'evaluate':
-                json_write(output/'zero_full_song_evaluation.json', evaluate_physical(collector, zero=True))
+                report = evaluate_physical(collector, zero=not bool(args.checkpoint))
+                report['checkpoint'] = args.checkpoint
+                report['accepted_updates'] = checkpoint.get('state', {}).get('accepted_updates') if checkpoint else 0
+                json_write(output/('model_full_song_evaluation.json' if checkpoint else 'zero_full_song_evaluation.json'), report)
+            elif args.mode == 'direction':
+                if checkpoint is None:
+                    raise ValueError('独立闭环H8/H16/H32审计需要明确候选checkpoint')
+                from gem.closedloop.reference_adapter.parameter_audit import parameter_update_audit
+                from gem.closedloop.reference_adapter.vector_learning import GroupNormalizedCritic
+                critic = GroupNormalizedCritic(2835, control.spec).cuda()
+                criteria = json.loads(Path(cfg['physical_criteria']).read_text()) | cfg['training']['wm_quality']
+                result = parameter_update_audit(collector, control, engine.dynamics, critic, before,
+                    horizons=(8, 16, 32), criteria=criteria)
+                result['comparison'] = 'checkpoint_candidate_against_exact_zero_adapter_independent_audit_songs'
+                result['checkpoint'] = args.checkpoint
+                json_write(output/'independent_parameter_direction.json', result)
             else:
                 pool, calibration = difficulty_scan(collector, args.steps)
                 control.precision.scales = calibration['scales']

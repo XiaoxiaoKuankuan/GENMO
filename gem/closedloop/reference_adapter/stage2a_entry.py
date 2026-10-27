@@ -86,6 +86,8 @@ def main():
     validation = VectorReplay(vector['validation_capacity'], min(32, vector['num_envs']), 'cuda:0')
     tangent = TangentReplay(16384)
     response = ReferenceResponseReplay(8192)
+    background = (VectorReplay(65536, vector['num_envs']-len(bank.by_split['evaluation']), 'cuda:0')
+                  if vector['num_envs'] > len(bank.by_split['evaluation']) else None)
     collector = None
     pending = None
     state = dict(pid=os.getpid(), gpu=os.environ.get('CUDA_VISIBLE_DEVICES'), started_unix=time.time(),
@@ -113,6 +115,7 @@ def main():
     def checkpoint(label):
         publish(state['phase'])
         extra['response'] = response.state_dict()
+        extra['evaluation_background_replay'] = background.state_dict() if background else None
         extra['constraint_failure'] = getattr(collector, 'last_constraint_failure', None)
         extra['constraint_state'] = getattr(collector, 'last_constraint_state', None)
         extra['constraint_proposal'] = getattr(collector, 'last_constraint_proposal', None)
@@ -123,7 +126,8 @@ def main():
 
     def evaluate(label):
         publish('independent_full_song_physical_evaluation')
-        report = evaluate_physical(collector)
+        collector.policy_version = state['accepted_updates']
+        report = evaluate_physical(collector, zero=state['accepted_updates'] == 0, background_replay=background)
         report['accepted_updates'] = state['accepted_updates']
         json_write(output/f'evaluation_{label}.json', report)
         score = (report['completion_rate'], -report['mean_root_position_rmse_m'],
@@ -151,6 +155,8 @@ def main():
                 state.update(load_vector(args.resume, engine, critic, optimizers, replay, tangent, collector, cfg, validation))
                 extra = ck['extra_state']
                 response.load_state_dict(extra['response'], 'cuda:0')
+                if extra.get('evaluation_background_replay') and background is not None:
+                    background.load_state_dict(extra['evaluation_background_replay'])
                 for key in ('safety', 'high_error_starts'):
                     extra[key] = {k: v.cuda() for k, v in extra[key].items()}
                 control.precision.scales = extra['precision_scales']
@@ -163,7 +169,7 @@ def main():
                 # 安全起点使用独立随机流与时间段，来源仍是训练音乐中的实际执行。
                 collector.reset(split='train', random_start=True, perturb=False)
                 for _ in range(24):
-                    collector.step(zero=True, split='train_safety', perturb=False)
+                    collector.step(zero=True, split='train_safety', reset_split='train', perturb=False)
                 eligible = collector.state['frame']+64 < bank.ends[collector.state['song']]
                 safety = fixed_probes(select_state(collector.state, eligible), per_song=2)
                 extra['safety'] = {k: v.detach().clone() for k, v in safety.items()}
@@ -186,12 +192,29 @@ def main():
                 response.add(data)
                 fitting = fit_wm(engine.dynamics, optimizers['wm'], replay.windows(32, 8), None, 0.,
                     reference_pairs=response.sample(32), reference_weight=settings['reference_response_weight'])
-                identity = parameter_identity(control.adapter)
+                identity = dict(adapter=parameter_identity(control.adapter), wm=parameter_identity(engine.dynamics),
+                                critic=parameter_identity(critic))
                 saved = checkpoint('integration')
+                payload = torch.load(saved, map_location='cpu', weights_only=False, mmap=True)
                 state.update(load_vector(saved, engine, critic, optimizers, replay, tangent, collector, cfg, validation))
-                assert identity == parameter_identity(control.adapter)
+                assert identity == dict(adapter=parameter_identity(control.adapter), wm=parameter_identity(engine.dynamics),
+                                        critic=parameter_identity(critic))
+                restored_response = ReferenceResponseReplay(8192)
+                restored_response.load_state_dict(payload['extra_state']['response'], 'cuda:0')
+                assert restored_response.total_pairs == response.total_pairs
+                for key, value in response.data.items():
+                    torch.testing.assert_close(value, restored_response.data[key], atol=0, rtol=0)
+                assert set(payload['optimizers']) == {'adapter', 'wm', 'critic'}
+                for name, opt in optimizers.items():
+                    for index, slots in opt.state_dict()['state'].items():
+                        for key, value in slots.items():
+                            torch.testing.assert_close(value.cpu(), payload['optimizers'][name]['state'][index][key], atol=0, rtol=0)
+                for key, value in replay.data.items():
+                    torch.testing.assert_close(value[:replay.size].cpu(), payload['replay']['data'][key], atol=0, rtol=0)
                 engine.step.bundle.assert_unchanged(frozen)
                 json_write(output/'integration.json', dict(checkpoint_restored=True, adapter_updates=0,
+                    model_identities=identity, three_optimizers_exact=True, replay_exact=True, reference_response_exact=True,
+                    saved_rng_streams=list(payload['rng'])+['collector'], solver_resume='new_real_episode',
                     wm=fitting, response_rejected=response.rejected, real_transitions=collector.real_transitions))
                 publish('integration_complete_no_policy_update')
                 return 0
@@ -220,7 +243,8 @@ def main():
                         fresh = select_state(fresh, slice(0, min(settings['response_pairs'], len(fresh['state']), collector.num_envs//4)))
                         data = collect_reference_response(collector, fresh, replay=replay)
                         response.add(data)
-                    report = fit_wm(engine.dynamics, optimizers['wm'], replay.windows(train['wm_batch'], 8), None, 0.,
+                    source_replay = background if background is not None and background.size >= 8 and wm_step % 5 == 0 else replay
+                    report = fit_wm(engine.dynamics, optimizers['wm'], source_replay.windows(train['wm_batch'], 8), None, 0.,
                         reference_pairs=response.sample(train['wm_batch']), reference_weight=settings['reference_response_weight'])
                     append_json(output/'wm.jsonl', report)
                 response_report = validate_response(engine.dynamics, data)
@@ -271,6 +295,8 @@ def main():
                     evaluate(f'{state["accepted_updates"]:06d}')
                 if accepted and (state['accepted_updates'] % vector['checkpoint_every'] == 0 or state['accepted_updates'] == 1):
                     checkpoint('accepted')
+            if state['accepted_updates'] not in (0, 25, 50, 100, 200):
+                evaluate(f'{state["accepted_updates"]:06d}')
             checkpoint('complete')
             publish('completed_accepted_update_budget')
             return 0

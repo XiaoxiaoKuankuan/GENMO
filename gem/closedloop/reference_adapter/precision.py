@@ -67,3 +67,41 @@ class PrecisionObjective:
                         added_reference_velocity=-.02*self.velocity_weight*velocity,
                         added_reference_acceleration=-.02*self.acceleration_weight*acceleration)
         return raw, weighted
+
+
+def calibrate_gradient_weights(control, dynamics, starts, *, microbatch=32):
+    """用训练歌曲真实零策略起点预先固定两档权重，不以评价结果调参或更新任何网络。"""
+    from .vector_control import select_state, detach_state
+    from .vector_learning import GroupNormalizedCritic, rollout
+    from .dynamics import frozen_parameters
+    from .update_diagnostics import parameter_identity
+    if not bool(torch.isin(starts['song'], control.bank.by_split['train']).all()):
+        raise ValueError('精度梯度标定只能使用训练歌曲')
+    parameters = tuple(control.adapter.parameters())
+    critic = GroupNormalizedCritic(2835, control.spec).to(starts['state'].device)
+    names = ('sm', 'precision')
+    gradients = {k: [torch.zeros_like(p) for p in parameters] for k in names}
+    values = dict.fromkeys(names, 0.)
+    total = len(starts['state'])
+    with dynamics.adapter_phase(), frozen_parameters(critic):
+        for offset in range(0, total, microbatch):
+            z = detach_state(select_state(starts, slice(offset, offset+microbatch)))
+            result = rollout(control, dynamics, critic, z, 8, terminal_value=False)
+            terms = dict(sm=result['weighted']['sm'], precision=sum(v for k, v in result['weighted'].items() if k.startswith('precision_')))
+            for index, name in enumerate(names):
+                term = terms[name].sum()/total
+                grad = torch.autograd.grad(term, parameters, retain_graph=index == 0, allow_unused=True)
+                for accumulator, value in zip(gradients[name], grad):
+                    if value is not None:
+                        accumulator.add_(value.detach())
+                values[name] += float(term.detach())
+    norms = {k: float(sum(v.square().sum() for v in g).sqrt()) for k, g in gradients.items()}
+    if min(norms.values()) <= 1e-9:
+        raise ValueError('训练集执行梯度不足，无法标定精度权重')
+    base = control.precision.weight*norms['sm']/norms['precision']
+    return dict(samples=total, songs=int(starts['song'].unique().numel()), horizon=8, gradient_norms=norms,
+        values=values, low_weight=.5*base, high_weight=base, target_gradient_ratios=[.5, 1.],
+        wm_sha256=parameter_identity(dynamics), wm_version=dynamics.model_version,
+        adapter_sha256=parameter_identity(control.adapter), scales=control.precision.scales,
+        accepted_updates=0, selection='predeclared_train_gradient_norm_ratio_not_evaluation_search',
+        boundary='gradient_scale_calibration_does_not_certify_WM_direction_on_all_songs')

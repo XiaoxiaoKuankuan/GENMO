@@ -104,7 +104,8 @@ class VectorCollector:
 
     @torch.no_grad()
     def step(self, replay=None, *, zero=False, auto_reset=True, split='train', perturb=True,
-             residual_offset=None, action_offset=None, replay_ids=None, contact_count=0, latent=None):
+             residual_offset=None, action_offset=None, replay_ids=None, contact_count=0, latent=None,
+             reset_split=None):
         z = self.state
         if z is None:
             raise RuntimeError('采集前必须reset')
@@ -153,7 +154,8 @@ class VectorCollector:
         self.vector_steps += 1
         ended = done.nonzero().flatten()
         if auto_reset and len(ended):
-            self.reset(ended, split=split, random_start=True, perturb=perturb)
+            # 计费角色train_safety不是新的歌曲划分；复位仍显式采样其所属训练集。
+            self.reset(ended, split=reset_split or split, random_start=True, perturb=perturb)
         t5 = time.perf_counter()
         timing = dict(control_ms=(t1-t0)*1000, physics_ms=(t2-t1)*1000,
             reward_and_shared_diagnostics_ms=(t3-t2)*1000, detailed_contact_diagnostics_ms=(t3b-t3)*1000,

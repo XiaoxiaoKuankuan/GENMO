@@ -14,7 +14,7 @@ from .vector_audit import contact_tensors
 
 
 @torch.no_grad()
-def evaluate_physical(collector, *, zero=False, split='evaluation'):
+def evaluate_physical(collector, *, zero=False, split='evaluation', background_replay=None):
     bank = collector.bank
     prior_diagnostics = collector.control.detailed_reference
     collector.control.detailed_reference = True
@@ -22,6 +22,10 @@ def evaluate_physical(collector, *, zero=False, split='evaluation'):
     count = len(selected)
     songs = selected[torch.arange(collector.num_envs, device=bank.device)%count]
     frames = torch.zeros_like(songs)
+    if background_replay is not None:
+        if background_replay.num_envs != collector.num_envs-count:
+            raise ValueError('评价背景Replay只能包含隔离评价机器人以外的训练环境')
+        songs[count:], frames[count:] = collector.sampling(collector.num_envs-count, 'train')
     collector.reset(songs=songs, frames=frames, perturb=False)
     initial = collector.state['state'][:count].clone()
     active = torch.ones(count, device=bank.device, dtype=torch.bool)
@@ -30,7 +34,12 @@ def evaluate_physical(collector, *, zero=False, split='evaluation'):
     foot_names = tuple(collector.control.bundle.spec.tracked_bodies)
     foot_indices = [foot_names.index(n) for n in ('l_ankle_roll_link', 'r_ankle_roll_link')]
     while bool(active.any()):
-        row = collector.step(zero=zero, auto_reset=True, split=split, perturb=False, contact_count=count)
+        row = collector.step(background_replay, zero=zero, auto_reset=True,
+            split='train' if background_replay is not None else split, perturb=False, contact_count=count,
+            replay_ids=torch.arange(count, collector.num_envs, device=bank.device) if background_replay is not None else None)
+        if background_replay is not None:
+            collector.real_by_role['train'] -= int(active.sum())
+            collector.real_by_role[split] = collector.real_by_role.get(split, 0)+int(active.sum())
         states.append(row['end']['state'][:count].clone())
         live.append(active.clone())
         raws.append({k: v[:count].clone() for k, v in row['raw'].items() if isinstance(v, torch.Tensor)})
@@ -96,6 +105,7 @@ def evaluate_physical(collector, *, zero=False, split='evaluation'):
         mean_tracking=sum(r['sm_terms']['track'] for r in reports)/len(reports),
         mean_beat_f1=sum(r['music']['f1'] or 0. for r in reports)/len(reports),
         zero_adapter=zero, seed=42, observation_noise=False, num_envs=collector.num_envs,
+        measured_evaluation_envs=count, concurrent_train_replay_envs=background_replay.num_envs if background_replay is not None else 0,
         evidence='actual_physics_fixed_full_song_until_real_failure_or_music_end',
         ranking='joint_completion_root_rmse_full_horizon_tracking_jerk_then_music')
 

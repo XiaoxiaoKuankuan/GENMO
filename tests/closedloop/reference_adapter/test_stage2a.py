@@ -178,3 +178,39 @@ def test_real_committed_SO3_seam_regression():
     certificate = p.certificate(projected, left, anchor, rotation)
     assert certificate['feasible'].all(), certificate
     assert float(certificate['angular_acceleration_excess'].max()) < .0025
+
+
+def test_real_SO3_nearly_parallel_active_constraints():
+    import json
+    from pathlib import Path
+    fixture = json.loads((Path(__file__).parent/'fixtures/so3_nearly_parallel_constraints.json').read_text())
+    for dtype in (torch.float32, torch.float64):
+        p = projector(dtype)
+        raw = torch.zeros(6, 10, 27, dtype=dtype)
+        left = torch.zeros(6, 27, dtype=dtype)
+        anchor = torch.zeros_like(left)
+        raw[..., 3:6] = torch.tensor([c['raw'] for c in fixture['cases']], dtype=dtype)
+        rotation = torch.tensor([c['rotation'] for c in fixture['cases']], dtype=dtype)
+        result = p(raw, left, anchor, rotation)
+        certificate = p.certificate(result, left, anchor, rotation)
+        assert certificate['feasible'].all(), certificate
+
+
+def test_collector_accounting_role_does_not_change_reset_task_split():
+    from gem.closedloop.reference_adapter.vector_collector import VectorCollector
+    class Control:
+        bank = SimpleNamespace(device='cpu')
+        def propose(self, z, **kwargs):
+            return dict(action=torch.zeros(2, 21))
+        def constraint_certificate(self, z, proposal):
+            return None
+        def advance(self, z, proposal, nxt):
+            done = torch.tensor([True, False])
+            return z, torch.zeros(2), {}, {}, (~done).float(), done, done
+    collector = VectorCollector(SimpleNamespace(N=2, step_physics=lambda a: torch.zeros(2, 55)), Control())
+    collector.state = dict(state=torch.zeros(2, 55))
+    resets = []
+    collector.reset = lambda ids, **kwargs: resets.append((ids.tolist(), kwargs['split']))
+    collector.step(zero=True, split='train_safety', reset_split='train')
+    assert resets == [([0], 'train')]
+    assert collector.real_by_role == {'train_safety': 2}

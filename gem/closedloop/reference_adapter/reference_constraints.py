@@ -111,9 +111,10 @@ class ReferenceProjection(torch.nn.Module):
     def __init__(self, spec, bounds, *, joint_velocity=1., joint_acceleration=10.,
                  ankle_velocity=.5, ankle_acceleration=5., height_velocity=.12,
                  height_acceleration=1.2, rotation_velocity=.3, rotation_acceleration=3.,
-                 iterations=1200, tolerance=1e-6):
+                 iterations=1200, coupled_iterations=12000, tolerance=1e-6):
         super().__init__()
         self.iterations, self.tolerance = iterations, tolerance
+        self.coupled_iterations = coupled_iterations
         self.rotation_velocity, self.rotation_acceleration = rotation_velocity, rotation_acceleration
         # 旋转三个分量分配欧氏球预算；最终角速度始终以SO(3)复合后结果核验。
         velocity = [.12, .12, height_velocity]+[rotation_velocity/(3**.5)]*3
@@ -195,7 +196,7 @@ class ReferenceProjection(torch.nn.Module):
             # 可行集合及最近点目标严格不变，缩放仍参与autograd。
             scale = matrix.norm(dim=-1).clamp_min(1.)
             candidate = _CoupledProjection.apply(target, torch.cat((lo, torch.full_like(bound, -1e4)), -1)/scale,
-                torch.cat((hi, bound), -1)/scale, matrix/scale[..., None], self.iterations)
+                torch.cat((hi, bound), -1)/scale, matrix/scale[..., None], self.coupled_iterations)
             # 非线性SQP采用本次优化内部的merit回溯，不对跨控制周期的参考做滤波。
             # 原线性约束在凸组合下保持可行，实际SO(3)约束逐候选重新计算。
             fractions = x.new_tensor([1., .5, .25, .125, .0625, .03125, .015625, 0.])
