@@ -42,6 +42,7 @@ class VectorControl:
         self.velocity_cost_weight = 0.
         self.detailed_reference = False
         self.soft_imagination_continuation = True
+        self.relative_critic_features = False
 
     def initial(self, observed, songs, frames, episodes):
         state, xi = observed['state'], observed['xi']
@@ -182,5 +183,15 @@ class VectorControl:
             (self.bank.lengths[song]-1-frame).clamp_min(0)*.02, frame.new_full(frame.shape, -1).float(),
             frame*.02, torch.zeros_like(frame), torch.ones_like(frame), frame.new_full(frame.shape, .04, dtype=torch.float32)), -1)
         ref = torch.cat((current.root_p, mat_to_6d(current.root_R), current.root_v, current.root_w, current.q, current.qd*.1), -1)
-        return torch.cat((x, z['state'], normalize_xi(z['xi']), z['action'], z['heading'].flatten(1),
-                          clock, x.new_zeros(len(x), 6), ref), -1)
+        physical, context = z['state'], x.new_zeros(len(x), 6)
+        if self.relative_critic_features:
+            # 只改变训练Critic的特权字段，Adapter的2654维输入原样保留。
+            error = physical[:, :3]-current.root_p
+            physical = torch.cat((error, physical[:, 3:]), -1)
+            ref = torch.cat((torch.zeros_like(current.root_p[:, :2]), current.root_p[:, 2:3], ref[:, 3:]), -1)
+            remaining = (self.bank.ends[song]-frame).clamp_min(0).to(x)
+            discount = .99**remaining
+            context = torch.stack((error.square().sum(-1), discount, 1-discount,
+                torch.exp(-remaining*.02/5), torch.exp(-remaining*.02/20), (frame-z['start_frame'])*.02), -1)
+        return torch.cat((x, physical, normalize_xi(z['xi']), z['action'], z['heading'].flatten(1),
+                          clock, context, ref), -1)

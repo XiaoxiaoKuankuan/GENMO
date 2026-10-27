@@ -178,3 +178,16 @@ def test_parameter_ensemble_accepts_collector_explicit_none_latent(system):
     out = variants.propose(z, zero=False, residual_offset=None, action_offset=None, latent=None)
     torch.testing.assert_close(out['goal'][0], out['goal'][1], atol=0, rtol=0)
     assert (out['goal'][2]-out['goal'][0]).abs().max() > 0
+
+
+def test_critic_relative_position_and_discount_clock_do_not_leak_to_adapter(system):
+    engine, control, z = constrained_system(system)
+    control.relative_critic_features = True
+    original_adapter = control.packed(control.fields(z))
+    features = control.critic_features(z)
+    assert features.shape == (4, 2835)
+    torch.testing.assert_close(features[:, 2654:2657], z['state'][:, :3]-control.bank.ref(z['song'], z['frame']).root_p)
+    shifted = dict(z, state=z['state'].clone())
+    shifted['state'][:, 0] += 1
+    torch.testing.assert_close(control.packed(control.fields(shifted)), original_adapter, rtol=0, atol=0)
+    assert (control.critic_features(shifted)-features).abs().max() > .9

@@ -77,6 +77,7 @@ def main():
     control.root_cost_weight = repair['root_position_cost']
     control.velocity_cost_weight = repair['reference_velocity_cost']
     control.soft_imagination_continuation = False
+    control.relative_critic_features = True
     json_write(output/'reference_derivative_certificate.json', bank.derivative_certificate(control.adapter, control.constraint_beta))
     if args.mode == 'numerical':
         return 0
@@ -147,7 +148,7 @@ def main():
                 pair = collector.tangent_pairs(); tangent.add(pair)
                 wm = fit_wm(engine.dynamics, optimizers['wm'], replay.windows(32, 8), tangent.sample(32), vc['wm_tangent'])
                 gate = parameter_update_audit(collector, control, engine.dynamics, critic, before, criteria=train['wm_quality'])
-                state['accepted_updates'] = int(update['effective'])
+                state['integration_parameter_updates'] = int(update['effective'])
                 saved = checkpoint('integration_complete')
                 identity = parameter_identity(control.adapter)
                 load_vector(saved, engine, critic, optimizers, replay, tangent, collector, cfg, validation)

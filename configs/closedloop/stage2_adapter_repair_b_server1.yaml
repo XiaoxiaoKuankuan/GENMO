@@ -110,3 +110,4 @@ repair:
   imagination_soft_continuation: false
   initialization: zero_adapter
   root_xy_disabled: true
+  critic_feature_schema: nominal_relative_discount_clock_v1
