@@ -140,11 +140,20 @@ class JointTrainer:
         if physical is not None:
             alpha = torch.as_tensor(self.actor.stage1.train_diffusion.alphas_cumprod,device=self.device)[k]
             snr = alpha/(1-alpha)
+            finite_physics = torch.isfinite(physical['pred_x_start']).flatten(1).all(1) & torch.isfinite(physical['static_conf_logits']).flatten(1).all(1)
+            # 一个合批前向中有NaN时，其余样本的零上游梯度也可能与NaN激活相乘污染参数。
+            # 整个物理子批拒绝，分别记录自身非有限或同批连带拒绝；常规BC图保持完整。
+            nonfinite_physics_batch = not bool(finite_physics.all())
             for i, metadata in enumerate(physics_meta):
                 record = sample_record(pbatch,i,k[i],snr[i])
                 record.update(tags=metadata['tags'],music_identity=metadata['music_identity'], stages=['sampled','static_metadata_passed','audited_noise'],
                               action_origin='frozen_sm_from_student_denoised_x0')
                 try:
+                    if nonfinite_physics_batch:
+                        raise PhysicsRejected('nonfinite_denoised_x0_or_contact' if not bool(finite_physics[i])
+                                              else 'physics_batch_rejected_nonfinite_peer',
+                                              {'first_reject_tick':record['request_tick'],'action_origin':'not_executed',
+                                               'failure_phase':'denoising_output'})
                     if windows[i] is None:
                         raise PhysicsRejected(physics_missing[i])
                     support = self.support.for_tags(metadata['tags'])
@@ -171,9 +180,8 @@ class JointTrainer:
         weight = self.readiness.weight(self.step)
         count,scale = distributed_execution_scale(len(accepted),self.device,self.world_size)
         zero = out['pred_x_start'].sum()*0.
-        if physical is not None:
-            # 包含被拒绝rank的整个前向图，确保DDP所有rank同一次backward且未用分支也是零梯度。
-            zero = zero+physical['pred_x_start'].sum()*0.+physical['static_conf_logits'].sum()*0.
+        # 两次前向使用同一Actor，全部参数仍通过完整BC图参加DDP。拒绝的物理输出不乘零：
+        # NaN*0仍是NaN，不能因物理子批失败阻断本来有限的数据监督。
         local_exec = sum((r['loss'] for r in accepted),zero)
         total = bc+scale*weight*local_exec
         finite = torch.tensor(int(torch.isfinite(total).all()),device=self.device)
