@@ -242,6 +242,7 @@ def evaluate(cfg, checkpoint, output, adapter, env, mode):
     output = Path(output)
     output.mkdir(parents=True, exist_ok=False)
     actor, losses = load_actor(cfg, checkpoint, env.device)
+    checkpoint_step = read_checkpoint(checkpoint)["global_step"]
     frozen = adapter.bundle.frozen_snapshot()
     rows = []
     seed_all(cfg["evaluation"]["seed"])
@@ -265,7 +266,7 @@ def evaluate(cfg, checkpoint, output, adapter, env, mode):
                     with torch.no_grad():
                         out = actor.denoise_supervised(batch, contexts, torch.tensor([k], device=env.device), noise,
                             torch.zeros(1, dtype=torch.bool, device=env.device))
-                        loss, _ = losses(batch, out["pred_x_start"], out["static_conf_logits"], read_checkpoint(checkpoint)["global_step"])
+                        loss, _ = losses(batch, out["pred_x_start"], out["static_conf_logits"], checkpoint_step)
                         row = {"source": episode["source_key"], "frame": batch["meta"][0]["decision_frame"], "k": k,
                                "noise_seed": g.initial_seed(), "data_loss": float(loss)}
                         try:

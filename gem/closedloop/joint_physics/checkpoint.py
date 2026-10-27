@@ -34,14 +34,17 @@ def atomic_save(payload, path):
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_name(path.name+f".partial-{os.getpid()}")
+    created = False
     try:
         with temporary.open("xb") as handle:
+            created = True
             torch.save(payload, handle)
             handle.flush()
             os.fsync(handle.fileno())
         os.link(temporary, path)  # 目标已存在时拒绝，不覆盖旧checkpoint。
     finally:
-        temporary.unlink(missing_ok=True)
+        if created:
+            temporary.unlink(missing_ok=True)
 
 
 def read_checkpoint(path):

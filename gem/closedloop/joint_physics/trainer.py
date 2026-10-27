@@ -25,7 +25,7 @@ from .checkpoint import restore_trainer, save_trainer
 
 
 def grad_summary(loss, actor, *, retain_graph=True):
-    named = list(actor.named_parameters())
+    named = [(name, parameter) for name, parameter in actor.named_parameters() if parameter.requires_grad]
     values = torch.autograd.grad(loss, [p for _, p in named], retain_graph=retain_graph, allow_unused=True)
     result = {}
     for group in ("future_encoder", "stage1.denoiser", "stage1.history_encoder", "stage1.music_embedder"):
@@ -52,7 +52,7 @@ class JointTrainer:
         self.support = ValidatedSupport(report, self.assets, cfg["physics"]["horizon"], device) if cfg["physics"]["enabled"] and report else None
         self.noise_rng = torch.Generator().manual_seed(cfg["training"]["seed"]+1000+rank)
         self.window_rng = np.random.default_rng(cfg["training"]["seed"]+2000+rank)
-        self.optimizer = torch.optim.AdamW(self.actor.parameters(), lr=cfg["training"]["learning_rate"],
+        self.optimizer = torch.optim.AdamW((p for p in self.actor.parameters() if p.requires_grad), lr=cfg["training"]["learning_rate"],
                                            weight_decay=cfg["training"]["weight_decay"])
         tc = cfg["training"]
         def lr(step):

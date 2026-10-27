@@ -7,6 +7,7 @@
 """
 
 import json
+from functools import lru_cache
 from pathlib import Path
 import time
 
@@ -50,14 +51,14 @@ def collect_source(dataset, row_index, cfg, adapter, env):
         "old_plan_origin": "teacher_forced_append_only_precommitted", "reset_count": 1,
         "state_origin": "continuous_newton_observation_not_data_reference", "source_crop": [0, n]}
     device = env.device
-    def cache_at(tick):
-        version = tick // period
+    @lru_cache(maxsize=2)
+    def cache_for_version(version):
         upper = min(n-1, old_frames-1 + version*(period//20))
         ticks = torch.arange(upper+1, device=device)*20
         ref = ReferenceBuffer(ticks, qpos[:upper+1].to(device)[None], torch.zeros(1, upper+1, 2, device=device),
             source_versions[:upper+1].to(device), adapter.runtime.kin, adapter.to_sm, version=version)
         return ref, version*period
-    ref, _ = cache_at(0)
+    ref, _ = cache_for_version(0)
     initial, _, _ = ref.read_current_future(0)
     initial_state = flatten_state((initial.root_p, initial.root_R, initial.root_v, initial.root_w, initial.q, initial.qd))
     env.reset(torch.arange(1, device=device), initial_state)
@@ -69,7 +70,7 @@ def collect_source(dataset, row_index, cfg, adapter, env):
     history = None
     with torch.no_grad():
         while True:
-            ref, committed = cache_at(tick)
+            ref, committed = cache_for_version(tick // period)
             if tick+144 > ref.upper:
                 reason = "source_or_reference_end"
                 break
