@@ -10,6 +10,11 @@ render_stage10_model_comparison.py读取真实qpos完成，不把运动学回放
 mechanism模式从真实重放保存的因果起点检验输入可观测性、位置奖励梯度、输出饱和、
 局部响应训练动作覆盖和Critic终端梯度来源。诊断不使用未来真实状态，不更新参数，
 每项结果保留模型身份、任务和时域；有限步消融不自动证明整个训练过程的唯一原因。
+
+evaluation模式按各checkpoint自身参考约束恢复部署合同，依次评价零Adapter和两个
+冻结模型，复用正式整歌评价的求解器接触脚滑、六项Tracking、参考导数和相关矩阵。
+不创建优化器、不拟合Critic；逐模型重置到同样的名义初态，顺序求解器误差与同批次
+collect配对结果分开报告，不把顺序差异伪称训练增益。
 """
 
 from __future__ import annotations
@@ -67,6 +72,55 @@ def variants():
                                  ('no_root_xy_constrained', 1.)]:
             rows.append((f'model{model}_{component}_{scale:g}', model, component, scale))
     return rows
+
+
+def evaluate(args, cfg, engine, bank):
+    import torch
+    from isaaclab.app import launch_simulation
+    from supermimic.env import make_sim
+    from supermimic.bridge.streaming_env import StreamingPhysicalEnv
+    from gem.closedloop.reference_adapter.vector_control import VectorControl
+    from gem.closedloop.reference_adapter.vector_collector import VectorCollector
+    from gem.closedloop.reference_adapter.vector_evaluation import evaluate_physical
+    from gem.closedloop.reference_adapter.vector_entry import compile_kinematics
+    from gem.closedloop.reference_adapter.update_diagnostics import parameter_identity
+    if not args.no_compile:
+        compile_kinematics(engine, bank)
+    frozen = engine.step.bundle.frozen_snapshot()
+    models = [checkpoint_adapter(p, engine) for p in args.checkpoints]
+    control = VectorControl(engine, bank)
+    output = Path(args.output)
+    reports = {}
+    sim_cfg = make_sim('cuda:0', args)
+    with launch_simulation(sim_cfg, args), torch.no_grad():
+        env = StreamingPhysicalEnv(sim_cfg, args.num_envs, engine.step.bundle)
+        collector = VectorCollector(env, control, seed=20261027)
+        for index in (-1, 0, 1):
+            name = 'zero' if index < 0 else f'model{index}'
+            # 零基线使用相同新增成本与约束配置；其残差全零，部署动作保持零Adapter。
+            model, ck = models[max(index, 0)]
+            repair = ck.get('config', {}).get('repair', {})
+            control.adapter.load_state_dict(model.state_dict())
+            control.adapter.disable_root_xy = model.disable_root_xy
+            control.constraint_beta = model.reference_constraint_beta
+            control.root_cost_weight = float(repair.get('root_position_cost', 0.))
+            control.velocity_cost_weight = float(repair.get('reference_velocity_cost', 0.))
+            control.relative_critic_features = bool(repair.get('critic_feature_schema'))
+            control.soft_imagination_continuation = bool(repair.get('imagination_soft_continuation', True))
+            identity = parameter_identity(control.adapter)
+            result = evaluate_physical(collector, zero=index < 0)
+            assert parameter_identity(control.adapter) == identity
+            engine.step.bundle.assert_unchanged(frozen)
+            result.update(checkpoint=None if index < 0 else args.checkpoints[index],
+                          accepted_updates=0 if index < 0 else ck['state']['accepted_updates'],
+                          adapter_sha256=identity, optimizer_updates=0,
+                          comparison='sequential_fixed_initial_state_complement_to_batched_paired_evaluation')
+            write_json(output/f'evaluation_{name}.json', result)
+            reports[name] = {k: result[k] for k in ('completion_rate', 'mean_tracking',
+                'mean_root_position_rmse_m', 'mean_jerk_rms', 'mean_beat_f1')}
+        write_json(output/'result.json', dict(models=reports, actual_transitions=collector.real_transitions,
+            optimizer_updates=0, frozen_actor_unchanged=True, num_envs=args.num_envs,
+            peak_allocated_mib=torch.cuda.max_memory_allocated()/2**20))
 
 
 def collect(args, cfg, engine, tasks, bank):
@@ -383,7 +437,7 @@ def main():
     parser.add_argument('--output', required=True)
     parser.add_argument('--num-envs', type=int, default=2048)
     parser.add_argument('--no-compile', action='store_true')
-    parser.add_argument('--mode', choices=['collect', 'mechanism'], default='collect')
+    parser.add_argument('--mode', choices=['collect', 'mechanism', 'evaluation'], default='collect')
     parser.add_argument('--trajectories')
     parser.add_argument('--starts-source', choices=['trajectory', 'checkpoint_replay'], default='trajectory')
     preliminary, _ = parser.parse_known_args()
@@ -406,6 +460,7 @@ def main():
     engine = build_engine(cfg, 'cuda:0')
     tasks = read_tasks(cfg['tasks']); bank = VectorBank(tasks, engine, 'cuda:0')
     if args.mode == 'collect': collect(args, cfg, engine, tasks, bank)
+    elif args.mode == 'evaluation': evaluate(args, cfg, engine, bank)
     else: mechanism(args, engine, bank)
 
 
