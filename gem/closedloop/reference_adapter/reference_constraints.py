@@ -65,21 +65,51 @@ class _CoupledProjection(torch.autograd.Function):
     """SO(3)线性化半空间QP；包含对约束矩阵的隐式导数，不能以直通梯度替代。"""
     @staticmethod
     def forward(ctx, proposal, lower, upper, matrix, iterations):
-        eye = torch.eye(proposal.shape[-1], device=proposal.device, dtype=proposal.dtype)
-        inverse = torch.linalg.inv(eye+10*matrix.transpose(-1, -2)@matrix)
-        if proposal.is_cuda:
-            from .projection_kernel import solve_coupled
-            x, dual = solve_coupled(proposal, lower, upper, matrix, inverse, iterations)
-        else:
-            x = proposal
-            ax = (matrix@x[..., None]).squeeze(-1)
-            z, dual = ax.clamp(lower, upper), torch.zeros_like(lower)
-            for _ in range(iterations):
-                rhs = proposal+10*(matrix.transpose(-1, -2)@(z-dual)[..., None]).squeeze(-1)
-                x = (inverse@rhs[..., None]).squeeze(-1)
-                ax = (matrix@x[..., None]).squeeze(-1)
-                z = (ax+dual).clamp(lower, upper)
-                dual = dual+ax-z
+        # 近乎平行的SO(3)面使固定罚参数ADMM长期留下不可行残差；这里用双精度
+        # 可行性恢复的原始-对偶内点法求同一严格凸QP，不改变目标或放宽半空间。
+        # 全部环境批量30维线性代数；最多40个Newton步，反向仍为活跃面的隐式导数。
+        a64, y = matrix.double(), proposal.double()
+        g = torch.cat((a64, -a64), 1)
+        h = torch.cat((upper.double(), -lower.double()), 1)
+        eye64 = torch.eye(y.shape[-1], device=y.device, dtype=y.dtype)
+        x64 = y.clone()
+        slack = (h-(g@x64[..., None]).squeeze(-1)).abs().clamp_min(1.)
+        multipliers = slack.reciprocal()
+
+        def positive_step(value, direction):
+            ratios = torch.where(direction < 0, -value/direction.clamp_max(-1e-100), torch.full_like(value, float('inf')))
+            return ratios.amin(-1).clamp_max(1.)
+
+        for step in range(iterations):
+            dual_residual = x64-y+(g.transpose(-1, -2)@multipliers[..., None]).squeeze(-1)
+            primal_residual = (g@x64[..., None]).squeeze(-1)+slack-h
+            mu = (slack*multipliers).mean(-1)
+            finished = ((torch.maximum(primal_residual.abs().amax(-1), dual_residual.abs().amax(-1)) < 1e-8)
+                        & (mu < 1e-10)) if step >= 8 else torch.zeros_like(mu, dtype=torch.bool)
+            if bool(finished.all()):
+                break
+            ratio = multipliers/slack
+            lhs = eye64+g.transpose(-1, -2)@(ratio[..., None]*g)
+
+            def newton(central):
+                rhs = -dual_residual+(g.transpose(-1, -2)@((central-multipliers*primal_residual)/slack)[..., None]).squeeze(-1)
+                dx = torch.linalg.solve_ex(lhs, rhs[..., None]).result.squeeze(-1)
+                ds = -primal_residual-(g@dx[..., None]).squeeze(-1)
+                dl = (-central-multipliers*ds)/slack
+                return dx, ds, dl
+
+            _, ds_aff, dl_aff = newton(slack*multipliers)
+            ap, ad = positive_step(slack, ds_aff), positive_step(multipliers, dl_aff)
+            mu_aff = ((slack+ap[:, None]*ds_aff)*(multipliers+ad[:, None]*dl_aff)).mean(-1)
+            sigma = (mu_aff/mu.clamp_min(1e-30)).clamp(0, 1).pow(3)
+            dx, ds, dl = newton(slack*multipliers+ds_aff*dl_aff-sigma[:, None]*mu[:, None])
+            ap, ad = .995*positive_step(slack, ds), .995*positive_step(multipliers, dl)
+            x64 = torch.where(finished[:, None], x64, x64+ap[:, None]*dx)
+            slack = torch.where(finished[:, None], slack, (slack+ap[:, None]*ds).clamp_min(1e-30))
+            multipliers = torch.where(finished[:, None], multipliers, (multipliers+ad[:, None]*dl).clamp_min(1e-30))
+        x = x64.to(proposal)
+        dual = (multipliers[:, :lower.shape[1]]-multipliers[:, lower.shape[1]:]).to(proposal)
+        eye = eye64.to(proposal)
         active = dual.abs() > 2e-5
         a = matrix*active[..., None]
         gram = a.transpose(-1, -2).double()@a.double()
@@ -111,7 +141,7 @@ class ReferenceProjection(torch.nn.Module):
     def __init__(self, spec, bounds, *, joint_velocity=1., joint_acceleration=10.,
                  ankle_velocity=.5, ankle_acceleration=5., height_velocity=.12,
                  height_acceleration=1.2, rotation_velocity=.3, rotation_acceleration=3.,
-                 iterations=1200, coupled_iterations=12000, tolerance=1e-6):
+                 iterations=1200, coupled_iterations=40, tolerance=1e-6):
         super().__init__()
         self.iterations, self.tolerance = iterations, tolerance
         self.coupled_iterations = coupled_iterations
@@ -187,8 +217,11 @@ class ReferenceProjection(torch.nn.Module):
         lo, hi = lower[selected, 3:6].flatten(1), upper[selected, 3:6].flatten(1)
         jacobian = torch.func.vmap(torch.func.jacrev(self.angular_constraints, argnums=0))
         # SQP只修正真实SO(3)约束不满足的旋转通道；每次仍最小化与原提案的距离。
-        for _ in range(12):
+        for iteration in range(60):
             value = fn(x, past, current, rotation)
+            finished = value.amax(-1) <= 1e-5 if iteration >= 4 else torch.zeros(len(x), device=x.device, dtype=torch.bool)
+            if bool(finished.all()):
+                break
             jac = jacobian(x, past, current, rotation)
             bound = (jac@x[..., None]).squeeze(-1)-value
             matrix = torch.cat((base, jac), 1)
@@ -205,7 +238,7 @@ class ReferenceProjection(torch.nn.Module):
                    current.repeat_interleave(len(fractions), 0), rotation.repeat_interleave(len(fractions), 0))
             merit = .5*(trial-target[:, None]).square().sum(-1)+1000*torch.relu(g).sum(-1).reshape(len(x), -1)
             chosen = merit.argmin(-1)
-            x = trial[torch.arange(len(x), device=x.device), chosen]
+            x = torch.where(finished[:, None], x, trial[torch.arange(len(x), device=x.device), chosen])
         corrected = projected.clone()
         corrected[selected, :, 3:6] = x.reshape(-1, 3, 10).transpose(1, 2)*unit
         return corrected

@@ -107,7 +107,8 @@ def evaluate_candidate(collector, source, dynamics, critic, before, after, crite
                               initial_mismatch=int((mismatch > 1e-5).sum()))))
         return dict(identity=dict(wm_version=dynamics.model_version, wm_sha256=parameter_identity(dynamics),
             adapter_before_sha256=parameter_identity(control.adapter), objective_scales=control.precision.scales,
-            precision_weight=control.precision.weight, terminal_value=False), cases=cases, gate=gate,
+            precision_weight=control.precision.weight, terminal_value=False,
+            soft_joint_limit_cost=control.soft_joint_limit_cost, reference_soft_limit_weight=control.weights['reference_limit']), cases=cases, gate=gate,
             paired_transitions=count*horizon, concurrent_training_transitions=(collector.num_envs-count)*horizon,
             selection_split='train_safety_real_start_bank', horizon=horizon,
             WM_closed_loop_autograd_parameter_direction=directional,

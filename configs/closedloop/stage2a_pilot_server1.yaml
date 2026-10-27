@@ -37,7 +37,7 @@ rewards:
   magnitude: 0.02
   smooth: 0.01
   overlap: 0.02
-  reference_limit: 0.1
+  reference_limit: 0.0
   activity: 0.05
 training:
   batch_size: 64
@@ -91,6 +91,7 @@ stage2a:
   method: WM_BPTT_physical_trust
   purpose: pilot
   terminal_value: false
+  soft_joint_limit_cost: false
   projection: {}
   precision:
     weight: 1.0

@@ -45,6 +45,7 @@ class VectorControl:
         self.relative_critic_features = False
         self.projection = None
         self.precision = None
+        self.soft_joint_limit_cost = True
 
     def initial(self, observed, songs, frames, episodes):
         state, xi = observed['state'], observed['xi']
@@ -158,6 +159,11 @@ class VectorControl:
         frames = z['frame']+1
         nominal = self.bank.ref(z['song'], frames)
         r_sm, raw = self.runtime.reward(state_next, proposal['action'], z['action'], nominal, diagnostics=True)
+        original_sm = r_sm
+        if not self.soft_joint_limit_cost:
+            # 用户明确关闭90%软范围罚项：复用原六项与原action-rate，仅去掉软限位成本。
+            # 不改RobotSpec、求解器关节范围或参考速度/加速度约束。
+            r_sm = raw['track']+.02*self.runtime.mdp.cfg.w_action_rate*raw['action_rate']
         memory = self.bank.memory_push(z['music'], state_next[:, 34:], nominal.qd, self.music)
         r_music, activity, music_info = self.bank.music_reward(memory, z['song'], frames, self.music)
         d = proposal['residual']/self.adapter.bounds
@@ -180,7 +186,7 @@ class VectorControl:
             precise_raw, precise_weighted = self.precision(self, z, proposal, state_next, nominal, raw)
             raw.update(precise_raw)
             weighted.update(precise_weighted)
-        raw = dict(raw, sm=r_sm, music=r_music, **costs, **music_info,
+        raw = dict(raw, sm=r_sm, original_sm_with_soft_limit=original_sm, music=r_music, **costs, **music_info,
             residual_saturation=(d.abs() >= .98).float().mean((1, 2)),
             halo_max_abs=proposal['halo'].abs().amax(-1), target_qd_max_abs=proposal['future'].qd.abs().amax((1, 2)))
         raw.update(root_non_saturating=root_cost, reference_velocity=velocity_cost,

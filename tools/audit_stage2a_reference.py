@@ -60,6 +60,7 @@ def main():
     settings = cfg.get('stage2a', {})
     scales = json.loads(Path(settings['calibration']).read_text())['scales'] if settings.get('calibration') else None
     control.precision = PrecisionObjective(scales, **settings.get('precision', {}))
+    control.soft_joint_limit_cost = settings.get('soft_joint_limit_cost', True)
     before = {k: v.detach().clone() for k, v in control.adapter.state_dict().items()}
     checkpoint = None
     if args.checkpoint:

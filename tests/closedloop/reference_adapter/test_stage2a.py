@@ -92,6 +92,30 @@ def test_new_projection_real_SM_zero_identity_and_execution_gradients(system):
     torch.testing.assert_close(control.packed(control.fields(shifted)), control.packed(control.fields(z)), atol=0, rtol=0)
 
 
+def test_disabled_soft_joint_limits_preserve_six_tracking_and_action_rate(system):
+    _, control, z = constrained_system(system)
+    control.projection = ReferenceProjection(control.bundle.spec, control.adapter.bounds)
+    proposal = control.propose(z)
+    nxt = z['state'].clone()
+    nxt[:, 13:34] = control.runtime.mdp.soft_hi+.01
+    nxt.requires_grad_()
+    enabled = control.advance(z, proposal, nxt)
+    control.soft_joint_limit_cost = False
+    control.weights = dict(control.weights, reference_limit=0.)
+    disabled = control.advance(z, proposal, nxt)
+    raw, terms = disabled[2:4]
+    expected = raw['track']+.02*control.runtime.mdp.cfg.w_action_rate*raw['action_rate']
+    torch.testing.assert_close(terms['sm'], expected, atol=0, rtol=0)
+    assert terms['reference_limit'].count_nonzero() == 0
+    torch.testing.assert_close(enabled[3]['sm']-terms['sm'],
+        .02*control.runtime.mdp.cfg.w_joint_limit*raw['joint_limit'], atol=1e-8, rtol=1e-6)
+    for key in ('body_pos', 'body_ori', 'body_linvel', 'body_angvel', 'root_pos', 'root_ori'):
+        torch.testing.assert_close(raw[key], enabled[2][key], atol=0, rtol=0)
+    actual, = torch.autograd.grad(terms['sm'].sum(), nxt, retain_graph=True)
+    expected_gradient, = torch.autograd.grad(expected.sum(), nxt)
+    torch.testing.assert_close(actual, expected_gradient, atol=0, rtol=0)
+
+
 def test_SO3_constraints_use_true_composed_angular_acceleration():
     from supermimic.rotations import so3_exp
     p = projector()
@@ -214,3 +238,21 @@ def test_collector_accounting_role_does_not_change_reset_task_split():
     collector.step(zero=True, split='train_safety', reset_split='train')
     assert resets == [([0], 'train')]
     assert collector.real_by_role == {'train_safety': 2}
+
+
+def test_real_SO3_nonlinear_convergence_under_two_budgets():
+    import json
+    from pathlib import Path
+    fixture = json.loads((Path(__file__).parent/'fixtures/so3_nonlinear_convergence.json').read_text())
+    for case in fixture['cases']:
+        p = ReferenceProjection(SimpleNamespace(joint_names=['joint']*21), projector().bounds,
+            rotation_velocity=.3*case['budget'], rotation_acceleration=3*case['budget'])
+        raw = torch.zeros(1, 10, 27, dtype=torch.double)
+        left, anchor = torch.zeros(1, 27, dtype=torch.double), torch.zeros(1, 27, dtype=torch.double)
+        raw[..., 3:6] = torch.tensor(case['raw'], dtype=torch.double)
+        left[..., 3:6] = torch.tensor(case['left'], dtype=torch.double)
+        anchor[..., 3:6] = torch.tensor(case['anchor'], dtype=torch.double)
+        rotation = torch.tensor(case['rotation'], dtype=torch.double)[None]
+        result = p(raw, left, anchor, rotation)
+        certificate = p.certificate(result, left, anchor, rotation)
+        assert certificate['feasible'].all(), certificate

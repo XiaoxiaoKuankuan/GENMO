@@ -87,6 +87,8 @@ def parameter_update_audit(collector, control, dynamics, critic, before, *, term
                     objective=dict(sm='original_six_plus_original_action_and_limit_costs', **control.weights,
                         root_non_saturating=control.root_cost_weight, reference_velocity=control.velocity_cost_weight),
                     constraint_beta=control.constraint_beta, disable_root_xy=control.adapter.disable_root_xy)
+    identity['soft_joint_limit_cost'] = control.soft_joint_limit_cost
+    identity['reference_soft_limit_weight'] = control.weights['reference_limit']
     identity['physical_criteria'] = dict(criteria)
     if control.precision is not None:
         identity['precision'] = dict(scales=control.precision.scales, weight=control.precision.weight,
@@ -138,10 +140,13 @@ def parameter_update_audit(collector, control, dynamics, critic, before, *, term
                 tracks = scores.clone()
                 active = torch.ones(count, device=bank.device, dtype=torch.bool)
                 actual_states = []
+                component_scores = {}
                 for t in range(max(horizons)):
                     row = collector.step(auto_reset=False, split='audit', perturb=False)
                     scores += .99**t*row['reward'][:count]*active
                     tracks += .99**t*row['raw']['track'][:count]*active
+                    for name, value in row['weighted'].items():
+                        component_scores[name] = component_scores.get(name, torch.zeros_like(scores))+.99**t*value[:count]*active
                     active &= ~row['done'][:count]
                     actual_states.append(row['end']['state'][:count].clone())
                     h = t+1
@@ -156,15 +161,17 @@ def parameter_update_audit(collector, control, dynamics, critic, before, *, term
                         repeat = float((physical[i, 1]-physical[i, 0]).abs())
                         noise = max(criteria['direction_noise_floor'], 10*repeat)
                         resolved = abs(real_delta) > noise and abs(model_delta) > 1e-8
-                        errors = _state_error(predicted[h]['states'][-1][4*i:4*i+1], actual_states[-1][4*i:4*i+1])
+                        errors = _state_error(predicted[h]['states'][-1][4*i:4*i+4], actual_states[-1][4*i:4*i+4])
                         cases.append(dict(task=bank.tasks[song]['id'], prefix=prefix, horizon=h,
                             actual_full_objective_delta=real_delta, predicted_full_objective_delta=model_delta,
                             actual_tracking_delta=float(tracking[i, 2]-tracking[i, 0]),
                             reverse_full_objective_delta=float(physical[i, 3]-physical[i, 0]),
                             repeat_noise=repeat, noise_floor=noise, resolved=resolved,
-                            repeat_state_max_abs=float((actual_states[-1][4*i]-actual_states[-1][4*i+1]).abs().max()),
+                            repeat_state_max_abs=float((torch.stack(actual_states)[:, 4*i]-torch.stack(actual_states)[:, 4*i+1]).abs().max()),
                             direction_consistent=resolved and real_delta*model_delta > 0,
                             high_snr_opposite=resolved and real_delta*model_delta < 0,
+                            actual_components_delta={k: float(v[4*i+2]-v[4*i]) for k, v in component_scores.items()},
+                            predicted_components_delta={k: float(v[4*i+2]-v[4*i]) for k, v in predicted[h]['weighted'].items()},
                             model_state_error=errors, real_terminal=not bool(active[4*i:4*i+4].all()),
                             full_parameter_directional_derivative_all_songs=derivative[h]))
         gates = {str(h): summarize_horizon(cases, h, criteria) for h in horizons}

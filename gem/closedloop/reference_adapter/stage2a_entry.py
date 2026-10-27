@@ -76,6 +76,9 @@ def main():
     control.projection = ReferenceProjection(control.bundle.spec, control.adapter.bounds, **settings['projection']).cuda()
     calibration = json.loads(Path(settings['calibration']).read_text())
     control.precision = PrecisionObjective(calibration['scales'], **settings['precision'])
+    control.soft_joint_limit_cost = settings.get('soft_joint_limit_cost', False)
+    if not control.soft_joint_limit_cost and cfg['rewards']['reference_limit'] != 0:
+        raise ValueError('关闭软限位时修正参考的同一软限位成本也必须明确配置为0')
     control.soft_imagination_continuation = False
     control.relative_critic_features = True
     critic = GroupNormalizedCritic(2835, control.spec).cuda()
@@ -152,6 +155,8 @@ def main():
                 for key in ('method', 'projection', 'precision', 'terminal_value'):
                     if ck['config']['stage2a'][key] != settings[key]:
                         raise ValueError('恢复算法/参考/目标不兼容，不能加载旧饱和策略')
+                if ck['config']['stage2a'].get('soft_joint_limit_cost', True) != control.soft_joint_limit_cost:
+                    raise ValueError('软限位目标改变不能冒充同目标断点续训；新实验从零初始化，旧权重只用于明确物理对照')
                 state.update(load_vector(args.resume, engine, critic, optimizers, replay, tangent, collector, cfg, validation))
                 extra = ck['extra_state']
                 response.load_state_dict(extra['response'], 'cuda:0')
