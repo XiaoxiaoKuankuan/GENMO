@@ -99,7 +99,7 @@ stage2a:
     velocity_weight: 0.002
     acceleration_weight: 0.0002
   calibration: /data0/user/liwei/GENMO_outputs/stage2_supermimic_adapter/stage2a_projection_20261027_01/oracle64_flexible03/zero_train_calibration.json
-  oracle_evidence: /data0/user/liwei/GENMO_outputs/stage2_supermimic_adapter/stage2a_projection_20261027_01/oracle64_flexible04/oracle_summary.json
+  oracle_evidence: /data0/user/liwei/GENMO_outputs/stage2_supermimic_adapter/stage2a_projection_20261027_01/oracle64_flexible05/oracle_summary.json
   difficulty_steps: 96
   response_pairs: 32
   safety_pairs: 16
