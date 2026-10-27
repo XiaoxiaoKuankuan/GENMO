@@ -12,7 +12,7 @@ from gem.closedloop.joint_physics.actor import JointPhysicsActor
 from gem.closedloop.joint_physics.config import build_adapter, read_config, ROOT
 from gem.closedloop.joint_physics.contracts import Window
 from gem.closedloop.joint_physics.execution import execute_window
-from gem.closedloop.joint_physics.losses import normalized_window
+from gem.closedloop.joint_physics.losses import execution_terms, normalized_window
 from gem.closedloop.mb_control.contracts import ClosedLoopState, RequestTicket, ForecastContext
 from gem.closedloop.mb_control.reference_buffer import ReferenceBuffer
 from supermimic.mdp import flatten_state
@@ -42,6 +42,10 @@ def test_real_frozen_weights_execution_gradient_and_fd(actor_factory):
     logits = torch.zeros(1, 60, 2)
     result = execute_window(window, prediction, logits, actor, adapter, cfg["execution_loss"])
     assert result["safety"].item() == 0
+    violating = state.clone()
+    violating[:, 13:34] = adapter.runtime.kin.q_hi + .2
+    _, safety, diagnostics = execution_terms(violating, current, adapter.runtime.kin, cfg["execution_loss"])
+    assert safety.item() == 0 and diagnostics["joint_limit_violation_rad"].item() > .1
     gradient, = torch.autograd.grad(result["loss"], prediction)
     assert torch.isfinite(gradient).all() and gradient.norm() > 0
     direction = torch.zeros_like(prediction)
