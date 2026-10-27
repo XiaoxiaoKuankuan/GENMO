@@ -181,7 +181,18 @@ def offline_audit(cfg,run,output,versions):
                 'C_original_report_parity':abs(float(C.mean())-metric['physical_metrics_mean']['dance_loss']),
                 'C_world_root_rms_m':float((state[:,:3]-target.root_p).square().mean().sqrt()),
                 'C_world_yaw_rms_rad':float(yaw.square().mean().sqrt()),'C_final_yaw_rad':float(yaw[-1]),
-                'D_music_content':metric['music_content'],'B_components':{k:float(v.mean()) for k,v in B_parts.items()},
+                'D_music_content':metric['music_content'],
+                'D_exact_teacher_velocity':{
+                    'all_joint_phase_cosine':float(torch.nn.functional.cosine_similarity(state[:,34:55].flatten(),target.qd.flatten(),dim=0)),
+                    'quarter_phase_cosine':[float(torch.nn.functional.cosine_similarity(a.flatten(),b.flatten(),dim=0)) for a,b in zip(torch.tensor_split(state[:,34:55],4),torch.tensor_split(target.qd,4))],
+                    'joints':{name:{'position_rms_rad':float((state[:,13+j]-target.q[:,j]).square().mean().sqrt()),
+                        'velocity_rms_error_rad_s':float((state[:,34+j]-target.qd[:,j]).square().mean().sqrt()),
+                        'velocity_phase_cosine':float(torch.nn.functional.cosine_similarity(state[:,34+j],target.qd[:,j],dim=0)),
+                        'actual_range_rad':float(state[:,13+j].max()-state[:,13+j].min()),
+                        'teacher_range_rad':float(target.q[:,j].max()-target.q[:,j].min())}
+                        for j,name in enumerate(adapter.bundle.spec.joint_names)},
+                    'target':'original actually consumed 50Hz reference qd, not reconstructed difference'},
+                'B_components':{k:float(v.mean()) for k,v in B_parts.items()},
                 'quarter_B_loss':[float(x.mean()) for x in torch.tensor_split(B,4)],'quarter_yaw_rms':[float(x.square().mean().sqrt()) for x in torch.tensor_split(yaw,4)],
                 'anchor_rows':anchor_rows,'source_controls':str(source)}
             rows.append(row);write_json(output/'trajectory_objectives.json',rows)

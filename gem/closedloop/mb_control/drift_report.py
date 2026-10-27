@@ -17,7 +17,7 @@ from .drift_diagnostics import stats,sample_counts,write_json
 
 
 def summarize(root,run):
-    offline=root/'offline_v2'
+    offline=root/('offline_v3' if (root/'offline_v3/summary.json').exists() else 'offline_v2')
     raw=json.loads((offline/'trajectory_objectives.json').read_text())
     log=json.loads((offline/'log_audit.json').read_text())
     rows=[];dedup={};failures=[];effects=[]

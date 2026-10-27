@@ -92,6 +92,7 @@ def run_candidates(collector,actor,critic,engine,original,cfg,tasks,output,devic
     actor.load_state_dict(ck['actor'],strict=True);actor.eval();collector.actor_version=version
     trainer=Stage2Trainer(actor,critic,engine,build_stage1_losses(actor.stage1,original).to(device),cfg['training'])
     if 'genmo_optimizer' in ck:trainer.actor_optimizer.load_state_dict(ck['genmo_optimizer'])
+    for group in trainer.actor_optimizer.param_groups:group['lr']*=float(settings.get('candidate_lr_scale',1.))
     engine.support_guard=ModelSupport(json.loads((run/'state_support_contract.json').read_text()),device=device)
     del ck
     supervision=SupervisionStream(cfg['stage1']['data_config'],1,42,device)
