@@ -219,9 +219,10 @@ def execute_generated(window, reference, adapter, env, steps):
             _, _, goal = z.reference.read_current_future(z.tick)
             action = adapter.bundle.act(z.sm_history, goal)
             state = env.step_physics(action)
+            previous_action = z.previous_action
             z = adapter.advance(z, state, action, origin="real")
             target, _, _ = z.reference.read_current_future(z.tick, 0)
-            reward, _ = adapter.runtime.reward(state, action, z.previous_action, target)
+            reward, _ = adapter.runtime.reward(state, action, previous_action, target)
             records.append(state.cpu())
             rewards.append(float(reward))
             if adapter.runtime.termination(state, target).any():
@@ -319,6 +320,8 @@ def evaluate(cfg, checkpoint, output, adapter, env, mode):
                             result = execute_window(window, out["pred_x_start"], out["static_conf_logits"], actor, adapter,
                                                     cfg["execution_loss"], transition=env.step_physics)
                             row["real_execution_loss"] = float(result["loss"])
+                            row["coverage"] = result["coverage"]
+                            row["physical_failure_steps"] = result["failure_steps"]
                         except PhysicsRejected as error:
                             row["rejection"] = error.reason
                     rows.append(row)

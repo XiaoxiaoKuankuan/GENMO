@@ -7,6 +7,7 @@ import os
 from pathlib import Path
 import sys
 
-root = Path(__file__).resolve().parents[4]
-sys.path.insert(0, os.getenv("SUPERMIMIC_REPO", str(root.parent.parent / "supermimic/SuperMimic")))
+root = Path(__file__).resolve().parents[3]
+sm_root = os.getenv("SUPERMIMIC_REPO", os.getenv("JOINT_SM_REPO", str(root.parent.parent / "supermimic/SuperMimic")))
+sys.path.insert(0, sm_root)
 from tests.closedloop.test_stage1_actor import actor_factory  # noqa: F401,E402

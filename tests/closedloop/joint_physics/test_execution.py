@@ -5,12 +5,9 @@ Newton方向及学生有效更新由独立CLI验收。所有几何/速度均调�
 """
 
 from dataclasses import replace
-from pathlib import Path
-import sys
 
 import torch
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[4].parent.parent / "supermimic/SuperMimic"))
 from gem.closedloop.joint_physics.actor import JointPhysicsActor
 from gem.closedloop.joint_physics.config import build_adapter, read_config, ROOT
 from gem.closedloop.joint_physics.contracts import Window

@@ -50,7 +50,8 @@ def execute_window(window, predicted_x0, logits, actor, adapter, cfg, *, support
         raise PhysicsRejected("first_influence_mismatch")
     z = replace(window.start.detached(), reference=reference)
     losses, safety, terms, states, actions, support_ticks, center = [], [], [], [], [], set(), 0
-    for _ in range(window.horizon):
+    failure_steps = []
+    for step in range(window.horizon):
         try:
             dependency = reference.dependency_support(z.tick)
             mutable = dependency[dependency >= window.ticket.first_mutable_source_tick]
@@ -69,6 +70,10 @@ def execute_window(window, predicted_x0, logits, actor, adapter, cfg, *, support
             target, _, _ = window.target.read_current_future(z.tick, 0)
             target = target._make(t.detach() for t in target)
             loss, limit, components = execution_terms(z.state, target, adapter.runtime.kin, cfg)
+            # 只记录原SM失败判据，不以失败后reset拼接、不改变训练损失或覆盖门禁。
+            with torch.no_grad():
+                if bool(adapter.runtime.termination(z.state.detach(), target).any()):
+                    failure_steps.append(step + 1)
         except ReferenceExhausted as error:
             raise PhysicsRejected("incomplete_reference_window") from error
         if not torch.isfinite(loss).all() or not torch.isfinite(limit).all():
@@ -84,6 +89,7 @@ def execute_window(window, predicted_x0, logits, actor, adapter, cfg, *, support
         "safety": normalized_window(safety, cfg["discount"]).mean(),
         "terms": {k: normalized_window([t[k] for t in terms], cfg["discount"]).mean() for k in terms[0]},
         "states": torch.stack(states), "actions": torch.stack(actions),
+        "failure_steps": failure_steps,
         "coverage": {"horizon": window.horizon, "preview_only_steps": window.horizon-center,
             "center_consumption_steps": center, "supported_source_ticks": sorted(support_ticks),
             "supported_source_points": len(support_ticks), "mutable_source_points": 60-window.ticket.prefix_frames,

@@ -173,6 +173,7 @@ class JointTrainer:
             "data_terms": {k: float(v.detach().mean()) for k, v in components.items() if isinstance(v, torch.Tensor)},
             "gradient_norm": float(norm), **diagnostics, "coverage": coverage,
             "execution_x0_gradient_norm": [r["x0_gradient_norm"] for r in accepted],
+            "predicted_failure_steps": [r["failure_steps"] for r in accepted],
             "wall_seconds": time.perf_counter()-started,
             "peak_memory_bytes": torch.cuda.max_memory_allocated(self.device) if self.device.type == "cuda" else 0}
 
