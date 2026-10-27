@@ -4,6 +4,10 @@
 专用SQLite队列领取，逐曲输出真实轨迹和完成/失败记录。不加载Stage2训练权重，
 不创建任何优化器，不改变已有正式训练目录；任务准备与多卡监督由stage1_census模块提供。
 """
+from pathlib import Path
+import sys
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from gem.closedloop.mb_control.entry import main
 
 if __name__ == '__main__':
