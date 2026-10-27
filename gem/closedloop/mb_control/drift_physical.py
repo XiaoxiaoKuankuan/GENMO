@@ -236,6 +236,9 @@ def run_candidates(collector,actor,critic,engine,original,cfg,tasks,output,devic
 
 
 def run_drift(collector,actor,critic,engine,original,cfg,tasks,output,device):
+    if cfg['diagnostic']['phase']=='conditional_drift':
+        from .drift_conditionals import run_conditionals
+        return run_conditionals(actor,engine,cfg,tasks,output,device)
     if cfg['diagnostic']['phase']=='candidates':
         return run_candidates(collector,actor,critic,engine,original,cfg,tasks,output,device)
     from .drift_experiment import run_experiment
