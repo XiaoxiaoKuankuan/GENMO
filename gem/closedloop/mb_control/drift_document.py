@@ -152,6 +152,17 @@ def main():
     <li>新episode Critic MC与双目标条件尚未实现和独立验证，V保持0，不能导入旧奖励Critic冒充兼容。身体相对姿态修正仅做离线诊断，未在本曲线中途改奖励。</li>
     <li>过程失败：临时预算监控shell引号错误已留日志并修正，错误命令未发信号；恢复入口返回值在启动前检查修正。真实超域拒绝不改阈值，未按质量负结果删除证据或停止原正式任务。</li>
     </ul>''')
+    add('代码定位、建议与本轮实施状态',table(['问题','代码位置（gem/closedloop/mb_control）','建议与当前状态'],[
+        ['局部SE2不能保留累计偏差','dance_losses.py:32；imagination.py:184；collector.py:136；rewards.py:95','已新增episode初始SE2及独立累计执行目标；新10/25仍负，不能宣布修好'],
+        ['身体姿态重复计入世界转向','dance_losses.py:70；drift_orientation.py:25','已完成40曲离线相对姿态对照；本曲线没有中途改指标，修正奖励后仍需物理方向复验'],
+        ['BC与先验主导部分实际AdamW步','teacher_training.py:200、281、309；drift_physical.py:151','已增加执行积分归一化、软辅助预算/投影与同anchor组合目标复验；硬限位不删除'],
+        ['单微批信任域不能控制其他请求','output_trust_region.py:39；teacher_training.py:237','已验证完整回滚和当前候选Loss；跨歌曲、跨时段持久固定请求库尚未实施，是下一优先项'],
+        ['教师时间线与真实请求动作身份不同','teacher.py:98、118；collector.py:173；online_teacher.py:103','已逐请求比较时间/噪声身份；应统一外生请求和目标动作身份，不能调宽相位容差'],
+        ['H16新姿态直接消费覆盖少','dance_losses.py:131、142；imagination.py:193','已统计当前中心、速度halo、未来goal及整曲覆盖；4环境多anchor已实施，多消费时间窗和后续可微再生成仍未实现'],
+        ['局部WM接触方向失真','validation.py:64；drift_physical.py:160','已做实际Newton同候选对照；保留两例相反方向，扩大动作/接触覆盖后才能扩大可信范围'],
+        ['困难大幅度样本流失','sample_distribution.py:12、32；formal.py:467；drift_time_coverage.py:18','已区分五级漏斗与真实时间覆盖；不放宽状态支持域，困难动作采集比例仍需单独实验'],
+        ['评价与模型选择','evaluation.py:62；dance_evaluation.py:17；drift_document.py:34','已做完整固定8曲、实际交付事件配对和逐曲报告；新墙钟整曲对照与多种子仍未完成'],
+        ['新合同Critic','teacher_training.py:190；critic.py:13；short_audit.teacher_target_contract','lambdaV继续0；新MC/双目标条件Critic未重训，不能复用旧奖励价值模型']]))
     evidence=['objective_summary.json','offline_v3/trajectory_objectives.json','offline_v3/accepted_dance_worsening.json','offline_v3/candidate_history.jsonl','physical_direction_summary.json','physical_candidate_details.json','trust_drift_summary.json','gradient_conflict_summary.json','sampling_unique_summary.json','music_time_coverage.json','training_teacher_timing_comparison.json','reference_lifetimes/summary.json','conditional_drift/summary.json','body_orientation_comparison.json','paired_input_audit.json','decisive_report.json']
     if new_audit:evidence.append('new_trajectory_audit/trajectory_objectives.json')
     add('证据文件','<ul>'+''.join('<li><a href="'+p+'">'+p+'</a></li>' for p in evidence)+'</ul>')
