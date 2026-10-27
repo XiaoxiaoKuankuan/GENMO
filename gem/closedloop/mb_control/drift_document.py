@@ -49,6 +49,9 @@ def main():
     manifest=load(root,'episode_multianchor/manifest.json')['config']
     baseline_folder=Path(manifest['diagnostic']['source_run'])/'evaluations/fixed_delay_replay/initial_genmo_baseline'
     baseline_rows={r['task']:r for r in json.loads((baseline_folder/'physical_summary.json').read_text())['physical_results']}
+    for e in evals[1:]:
+        if e['loss'] is not None:
+            e['songs_better_than_stage1']=sum(r['loss']<baseline_rows[r['task']]['physical_metrics_mean']['dance_loss'] for r in e['per_song'])
     paired=[]
     for e in evals[1:]:
         if e['loss'] is None:continue
@@ -133,6 +136,8 @@ def main():
     <p>输入、音乐、初态、种子、请求时刻、实际交付事件和完整时长的逐曲对照保存在paired_input_audit.json；这不是只检查配置里写了fixed_delay。即使训练微批损失下降，完整真实曲线仍可恶化。</p>
     <p>新实验实际完整轨迹同口径重算：</p>'''+table(['新更新','每anchor重对齐H16均值','episode整曲Loss','世界yaw RMS/rad'],[[v,f"{d['A_anchor_H16_mean']:.6f}",f"{d['B_episode_once_loss']:.6f}",f"{d['C_world_yaw_rms_rad']:.6f}"] for v,d in new_audit.items()])+'''
     <p>新10→25的局部真实H16由0.02241降为0.01818，但世界yaw由0.20313涨为0.39983rad，整曲Loss进一步上升。这是实际轨迹支持的“局部部分恢复、累计转向更差”；两版局部指标仍劣于Stage1的0.01067。</p>
+    <p>逐曲而非只看总均值：</p>'''+table(['音乐','Stage1']+[str(e['update']) for e in evals[1:] if e['loss'] is not None],[[task,f"{row['physical_metrics_mean']['dance_loss']:.6f}"]+[f"{next(r['loss'] for r in e['per_song'] if r['task']==task):.6f}" for e in evals[1:] if e['loss'] is not None] for task,row in baseline_rows.items()])+'''
+    <p>新25八曲均劣于Stage1。FineDance 139（159.2秒）四段yaw RMS为0.5498/1.1127/1.2595/2.4318rad，对应四段音乐Loss为0.1188/0.3059/0.3602/0.7276，后段累计转向显著放大。F9u新25比新10恢复，但仍差于本曲Stage1，不能只选恢复歌曲宣布成功。</p>
     <p>从原Stage1逐张量初始化，新的AdamW，冻结Stage1教师/SM Actor/WM及统计不变。新增episode_objective.py和独立SE2状态字段；collector在reset建立初态目标，imagination保留局部H16并同时计算episode累计目标。teacher_training归一化执行积分，保留BC并限制软辅助梯度预算，冲突软梯度投影；硬限位不截断。</p>
     <p>独立配置：episode权重1，4个真实anchor/4个环境；BC/local/global/track辅助梯度预算相对组合主目标为0.25/0.5/0.25/0.25。候选模型与AdamW/RNG完全回滚；组合主任务容差改为rtol=0、atol=1e−7，其余输出与支持域不放宽。Critic仍0，Action Rate仍0。</p>
     <p>0为精确权重核对后复用完整原八曲基线。0→10在episode_multianchor；10→50从完整10检查点恢复Actor/AdamW/RNG/监督与任务游标，真实求解器明确重新开始episode，不伪装连续物理恢复。25/50评价异步独立进程，使用冻结检查点、相同音乐/初态/噪声种子/固定延迟事件。单环境辅助实验另有10次完整8曲0.07159399，按预定计算预算结束，负结果保留。</p>
