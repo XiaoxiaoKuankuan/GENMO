@@ -1,0 +1,23 @@
+# Server-2从零修复验收：全原训练集监督，10首已保存真实轨迹供独立物理请求抽样。
+# A/B同seed、数据噪声、原学习率和5000步监督预算；A仅显式关闭physics.enabled。
+# 原两首缓存只读，新增8首为独立分片；证书必须实际生成，不能伪造或沿用旧H8学生报告。
+base_config: joint_physics_server2.yaml
+data:
+  source_ids: null
+  sidecar:
+    - /data0/user/liwei/GENMO_outputs/joint_physics_acceptance_20261027/sidecar_train_offline_v2
+    - /data0/user/liwei/GENMO_outputs/joint_physics_repair_20261027/train_increment_8
+physics:
+  horizon: 32
+  start_step: 1000
+  validation_report: /data0/user/liwei/GENMO_outputs/joint_physics_repair_20261027/certification_interface_H32/validation.json
+  lambda_exec: 0.01
+  warmup_steps: 2000
+training:
+  batch_size: 4
+  diagnostics_every: 100
+  checkpoint_every: 1000
+evaluation:
+  max_sources: 12
+runtime:
+  inference_backend: cuda_graph

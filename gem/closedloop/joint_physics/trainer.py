@@ -57,7 +57,7 @@ class JointTrainer:
         self.frozen = self.adapter.bundle.frozen_snapshot() if self.adapter is not None else None
         self.store = SidecarStore(cfg["data"]["sidecar"], "train", self.assets,
             sample_contract=cfg["data"]["sample_contract"]) if cfg["data"]["sidecar"] else None
-        report = cfg["physics"].get("validation_report")
+        report = cfg["physics"].get("validation_report") if cfg["physics"]["enabled"] else None
         self.support = ValidatedSupport(report, self.assets, cfg["physics"]["horizon"], device, execution_contract(cfg)) if report else None
         self.noise_rng = torch.Generator().manual_seed(cfg["training"]["seed"]+1000+rank)
         self.window_rng = np.random.default_rng(cfg["training"]["seed"]+2000+rank)
