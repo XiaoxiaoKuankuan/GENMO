@@ -23,6 +23,8 @@ class ReferenceAdapter(nn.Module):
         bounds = [.03, .03, .02, .05, .05, .05]
         bounds += [.05 if "ankle" in name else .10 for name in spec.joint_names]
         self.register_buffer("bounds", torch.tensor(bounds))
+        # 配置开关不增加输入或参数；旧checkpoint仍具有完全相同的网络合同。
+        self.disable_root_xy = False
 
     def forward(self, fields):
         x = self.input_spec.flatten(fields)
@@ -32,7 +34,13 @@ class ReferenceAdapter(nn.Module):
         """已按InputSpec打包的内部批量路径；动作出口统一执行有限性检查。"""
         if x.shape[-1] != self.input_spec.dimension:
             raise ValueError("Adapter输入必须保持2654维")
-        d = self.net(x).reshape(len(x), 10, 27).tanh() * self.bounds
+        return self.decode(self.net(x).reshape(len(x), 10, 27))
+
+    def decode(self, latent):
+        """从270维原始输出构造有界残差；PPO在投影前latent上计算精确概率。"""
+        d = latent.reshape(-1, 10, 27).tanh() * self.bounds
+        if self.disable_root_xy:
+            d = torch.cat((d[..., :2]*0, d[..., 2:]), -1)
         rotation = d[..., 3:6]
         rotation = rotation / (rotation.norm(dim=-1, keepdim=True) / .05).clamp_min(1.)
         return torch.cat((d[..., :3], rotation, d[..., 6:]), -1)

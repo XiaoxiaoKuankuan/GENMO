@@ -86,7 +86,7 @@ class VectorCollector:
 
     @torch.no_grad()
     def step(self, replay=None, *, zero=False, auto_reset=True, split='train', perturb=True,
-             residual_offset=None, action_offset=None, replay_ids=None, contact_count=0):
+             residual_offset=None, action_offset=None, replay_ids=None, contact_count=0, latent=None):
         z = self.state
         if z is None:
             raise RuntimeError('采集前必须reset')
@@ -94,7 +94,7 @@ class VectorCollector:
         if cuda:
             torch.cuda.synchronize(self.device)
         t0 = time.perf_counter()
-        proposal = self.control.propose(z, zero=zero, residual_offset=residual_offset, action_offset=action_offset)
+        proposal = self.control.propose(z, zero=zero, residual_offset=residual_offset, action_offset=action_offset, latent=latent)
         if cuda:
             torch.cuda.synchronize(self.device)
         t1 = time.perf_counter()
@@ -154,7 +154,8 @@ class VectorCollector:
         d = 2*self.random((half, 21))-1
         d = d/d.norm(dim=-1, keepdim=True).clamp_min(1e-12)*epsilon
         offsets = torch.stack((d, -d), 1).flatten(0, 1)
-        row = self.step(zero=True, auto_reset=False, action_offset=offsets, split='tangent')
+        # 局部响应必须以当前策略动作作为中心，不能永远围绕零Adapter拟合导数。
+        row = self.step(zero=False, auto_reset=False, action_offset=offsets, split='tangent')
         mismatch = (z['state'][0::2]-z['state'][1::2]).abs().amax(-1)
         valid = (mismatch <= 1e-5) & ~row['done'][0::2] & ~row['done'][1::2]
         action = row['proposal']['action']

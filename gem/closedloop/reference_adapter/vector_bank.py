@@ -92,6 +92,50 @@ class VectorBank:
         # 尾部mask由控制器负责；这里只裁剪无效音乐历史，不制造有效参考支持。
         return self.offsets[songs] + torch.minimum(frames.clamp_min(0), self.lengths[songs]-1)
 
+    @torch.no_grad()
+    def derivative_certificate(self, adapter, beta):
+        """只读名义导数+解析残差预算，给出修正后绝对速度/加速度的逐歌曲上界。
+
+        这里使用名义参考而非未来执行状态；不用于训练统计或Actor输入。SO(3)增量
+        在0.5rad球内采用1.1的log Lipschitz上界，角加速度用相邻角速度误差的三角
+        不等式给出保守硬上界。若名义轨迹超出证明域，明确拒绝而非继续声称有保证。
+        """
+        from supermimic.rotations import so3_log
+        bounds = adapter.bounds.clone()
+        if adapter.disable_root_xy:
+            bounds[:2] = 0
+        residual_v = 2*bounds*beta/.02
+        residual_a = 4*bounds*beta**2/.02**2
+        angular_v = 1.1*2*.05*beta/.02
+        reports = []
+        for i, task in enumerate(self.tasks):
+            start, length = int(self.offsets[i]), int(self.lengths[i])
+            idx = slice(start, start+length)
+            r = self.reference
+            qd = r.q[idx].diff(dim=0)/.02
+            v = r.root_p[idx].diff(dim=0)/.02
+            rotations = r.root_R[idx]
+            w = so3_log(rotations[1:]@rotations[:-1].transpose(-1, -2))/.02
+            if beta < 1 and float(w.norm(dim=-1).max()*.02)+2*.05*beta >= .5:
+                raise ValueError('名义根旋转不在参考导数上界的证明域内')
+            nominal = dict(qd_abs_max_per_joint=qd.abs().amax(0).tolist(),
+                qdd_abs_max_per_joint=(qd.diff(dim=0)/.02).abs().amax(0).tolist(),
+                root_speed_max=float(v.norm(dim=-1).max()), root_acceleration_max=float((v.diff(dim=0)/.02).norm(dim=-1).max()),
+                root_angular_speed_max=float(w.norm(dim=-1).max()), root_angular_acceleration_max=float((w.diff(dim=0)/.02).norm(dim=-1).max()))
+            absolute = dict(qd_abs_max_per_joint=(qd.abs().amax(0)+residual_v[6:]).tolist(),
+                qdd_abs_max_per_joint=((qd.diff(dim=0)/.02).abs().amax(0)+residual_a[6:]).tolist(),
+                root_speed_max=nominal['root_speed_max']+float(residual_v[:3].norm()),
+                root_acceleration_max=nominal['root_acceleration_max']+float(residual_a[:3].norm()),
+                root_angular_speed_max=nominal['root_angular_speed_max']+angular_v,
+                root_angular_acceleration_max=nominal['root_angular_acceleration_max']+2*angular_v/.02)
+            reports.append(dict(task=task['id'], nominal=nominal, corrected_absolute_bounds=absolute))
+        return dict(beta=beta, dt=.02, residual_velocity_bounds=residual_v.tolist(),
+            residual_acceleration_bounds=residual_a.tolist(), root_angular_velocity_deviation_bound=angular_v,
+            root_angular_acceleration_deviation_bound=2*angular_v/.02, songs=reports,
+            halo='d11=2*d10-d9; residual_velocity_11=velocity_10; residual_acceleration_11=0',
+            seam='stage1=(anchor-(1-beta)*left)/beta; past_committed_anchors_read_only',
+            scope='forward_discrete_derivatives; central_Goal_velocities_are_adjacent_forward_averages')
+
     def ref(self, songs, frames):
         return select_reference(self.reference, self.indices(songs, frames))
 

@@ -16,6 +16,8 @@ from .vector_audit import contact_tensors
 @torch.no_grad()
 def evaluate_physical(collector, *, zero=False, split='evaluation'):
     bank = collector.bank
+    prior_diagnostics = collector.control.detailed_reference
+    collector.control.detailed_reference = True
     selected = bank.by_split[split]
     count = len(selected)
     songs = selected[torch.arange(collector.num_envs, device=bank.device)%count]
@@ -52,8 +54,22 @@ def evaluate_physical(collector, *, zero=False, split='evaluation'):
         velocities = raw_all['tracked_body_v'][:n, i, foot_indices, :2].norm(dim=-1)
         contact = feet[:n, i]
         slip = float(velocities[contact].mean()) if bool(contact.any()) else 0.
+        from .reference_constraints import quantiles
+        distributions = {k: quantiles(v[:n, i]) for k, v in raw_all.items() if k.startswith('reference_') and v.ndim > 2}
+        # 失败之后的未执行时段只给累计Tracking分母贡献，不伪造执行状态/音乐分数。
+        planned_steps = int(bank.ends[song])
+        normalized_tracking = float(raw_all['track'][:n, i].sum()/planned_steps)
+        names = [k for k in ('body_pos', 'body_ori', 'body_linvel', 'body_angvel', 'root_pos', 'root_ori',
+                             'root_non_saturating', 'magnitude', 'action_change') if k in raw_all]
+        samples = torch.stack([raw_all[k][:n, i] for k in names]+[(velocities*contact).mean(-1)], -1).float()
+        centered = samples-samples.mean(0)
+        cov = centered.T@centered/max(n, 1)
+        corr = cov/(cov.diag().sqrt()[:, None]*cov.diag().sqrt()[None, :]).clamp_min(1e-12)
         reports.append(dict(task=bank.tasks[song]['id'], song=bank.tasks[song]['song_id'], split=split,
             steps=n, reason='physical_failure' if bool(end_failed[i]) else 'music_end',
+            planned_steps=planned_steps, fraction_of_song_executed=n/planned_steps,
+            full_horizon_tracking=normalized_tracking, reference_distributions=distributions,
+            correlation_names=names+['foot_slip'], correlations=corr.cpu().tolist(),
             full_music_complete=not bool(end_failed[i]), physical_failure=bool(end_failed[i]),
             failure_time_s=n*.02 if bool(end_failed[i]) else None,
             sm_terms=terms, weighted_step_terms={k: float(v[:n, i].mean()) for k, v in weighted_all.items()},
@@ -65,12 +81,16 @@ def evaluate_physical(collector, *, zero=False, split='evaluation'):
             contact_foot_slip_mps=slip, foot_slip_status='solver_contact_measured_shared_reward_fk',
             timing_ms={k: {f'p{p}': float(np.percentile([t[k] for t in times[:n]], p)) for p in (50, 95, 99)} for k in times[0]},
             latency_scope=f'{collector.num_envs}_environments_batched_physics_not_single_robot_deployment'))
+    collector.control.detailed_reference = prior_diagnostics
     return dict(episodes=reports, completion_rate=sum(r['full_music_complete'] for r in reports)/len(reports),
+        mean_full_horizon_tracking=sum(r['full_horizon_tracking'] for r in reports)/len(reports),
+        mean_root_position_rmse_m=sum(r['root_position_rmse_m'] for r in reports)/len(reports),
+        mean_jerk_rms=sum(r['jerk_rms'] or 0 for r in reports)/len(reports),
         mean_tracking=sum(r['sm_terms']['track'] for r in reports)/len(reports),
         mean_beat_f1=sum(r['music']['f1'] or 0. for r in reports)/len(reports),
         zero_adapter=zero, seed=42, observation_noise=False, num_envs=collector.num_envs,
         evidence='actual_physics_fixed_full_song_until_real_failure_or_music_end',
-        ranking='completion_then_original_nominal_tracking_then_music')
+        ranking='joint_completion_root_rmse_full_horizon_tracking_jerk_then_music')
 
 
 @torch.no_grad()

@@ -121,6 +121,8 @@ def main():
     preliminary, _ = parser.parse_known_args()
     from omegaconf import OmegaConf
     raw_cfg = OmegaConf.load(preliminary.config)
+    if preliminary.mode == 'train':
+        raise ValueError('旧8组WM/H1训练入口已停用。请使用train_reference_ablation.py运行从零初始化的A/B/C修复对照。')
     sys.path.insert(0, str(raw_cfg.supermimic.repo))
     from isaaclab.app import add_launcher_args, launch_simulation
     add_launcher_args(parser)
@@ -390,6 +392,13 @@ def main():
         if collector:
             status.update(real_transitions=collector.real_transitions, num_envs=collector.num_envs)
         status['wm_updates'] = engine.dynamics.model_version
+        if collector is not None and replay is not None and tangent is not None:
+            try:
+                destination = output/f'failure_complete_{status["accepted_updates"]:06d}_{time.time_ns()}.pt'
+                save_vector(destination, engine, critic, optimizers, replay, tangent, collector, status.copy(), cfg, validation)
+                status['failure_checkpoint'] = str(destination)
+            except Exception as save_error:
+                status['checkpoint_error'] = repr(save_error)
         json_write(output/'failure.json', status)
         json_write(output/'status.json', status, replace=True)
         raise

@@ -11,6 +11,7 @@ import torch
 from supermimic.mdp import unflatten_state, normalize_xi
 from supermimic.motion import ReferenceBatch, select_reference, goal_from_reference
 from supermimic.rotations import yaw_mat, mat_to_6d, so3_exp, so3_log
+from .reference_constraints import constrain_plan, reference_kinematics
 
 
 def select_state(z, index):
@@ -36,6 +37,11 @@ class VectorControl:
         self.adapter, self.bundle, self.runtime = engine.step.adapter, engine.step.bundle, engine.step.runtime
         self.music, self.weights = engine.step.rewards.music, engine.step.rewards.weights
         self.spec = self.adapter.input_spec
+        self.constraint_beta = 1.
+        self.root_cost_weight = 0.
+        self.velocity_cost_weight = 0.
+        self.detailed_reference = False
+        self.soft_imagination_continuation = True
 
     def initial(self, observed, songs, frames, episodes):
         state, xi = observed['state'], observed['xi']
@@ -100,15 +106,27 @@ class VectorControl:
         future = select_reference(ref, (slice(None), slice(1, None)))
         return current, future, goal_from_reference(current, future), halo[:, 0]
 
-    def propose(self, z, *, zero=False, residual_offset=None, action_offset=None):
-        residual = z['state'].new_zeros(len(z['state']), 10, 27) if zero else self.adapter.forward_packed(self.packed(self.fields(z)))
+    def propose(self, z, *, zero=False, residual_offset=None, action_offset=None, latent=None):
+        residual = (self.adapter.decode(latent) if latent is not None else
+                    z['state'].new_zeros(len(z['state']), 10, 27) if zero else self.adapter.forward_packed(self.packed(self.fields(z))))
         if residual_offset is not None:
             residual = (residual+residual_offset).clamp(-self.adapter.bounds, self.adapter.bounds)
+        if self.adapter.disable_root_xy:
+            residual = torch.cat((residual[..., :2]*0, residual[..., 2:]), -1)
+        raw_residual = residual
+        if self.constraint_beta < 1:
+            residual = constrain_plan(residual, z['left'], z['anchor'], self.constraint_beta)
         current, future, goal, halo = self.reference(z, residual)
         action = self.bundle.act(z['history'], goal)
         if action_offset is not None:
             action = action+action_offset
-        return dict(residual=residual, current=current, future=future, goal=goal, halo=halo, action=action)
+        return dict(residual=residual, raw_residual=raw_residual, current=current, future=future, goal=goal, halo=halo, action=action)
+
+    def reference_diagnostics(self, z, proposal):
+        frames = (z['frame'][:, None]+self.bank.offset13).clamp_min(0)
+        p, R, q = self.bank.pose(z['song'][:, None], frames)
+        d = torch.cat((z['left'][:, None], z['anchor'][:, None], proposal['residual'], proposal['halo'][:, None]), 1)
+        return reference_kinematics(p, R, q, d, z['heading'])
 
     def advance(self, z, proposal, state_next):
         frames = z['frame']+1
@@ -124,13 +142,28 @@ class VectorControl:
             activity=activity)
         weighted = dict(sm=r_sm, music=.02*self.weights['music']*r_music,
                         **{k: -.02*self.weights[k]*v for k, v in costs.items()})
+        nominal_future = self.bank.ref(z['song'][:, None], z['frame'][:, None]+self.bank.offset11[1:])
+        # 误差平方无指数饱和，奖励使用训练可见的原名义世界坐标；不进入Adapter输入。
+        root_cost = (state_next[:, :3]-nominal.root_p).square().sum(-1)
+        velocity_cost = ((proposal['future'].root_v-nominal_future.root_v)/.3).square().mean((1, 2))
+        velocity_cost = velocity_cost+((proposal['future'].root_w-nominal_future.root_w)/.5).square().mean((1, 2))
+        velocity_cost = velocity_cost+(proposal['future'].qd-nominal_future.qd).square().mean((1, 2))
+        weighted.update(root_non_saturating=-.02*self.root_cost_weight*root_cost,
+                        reference_velocity=-.02*self.velocity_cost_weight*velocity_cost)
         raw = dict(raw, sm=r_sm, music=r_music, **costs, **music_info,
             residual_saturation=(d.abs() >= .98).float().mean((1, 2)),
             halo_max_abs=proposal['halo'].abs().amax(-1), target_qd_max_abs=proposal['future'].qd.abs().amax((1, 2)))
+        raw.update(root_non_saturating=root_cost, reference_velocity=velocity_cost,
+                   action_change=(proposal['action']-z['action']).square().mean(-1),
+                   proposal_saturation=(proposal.get('raw_residual', proposal['residual']).abs()/self.adapter.bounds >= .98).float().mean((1, 2)))
+        if self.detailed_reference:
+            raw.update({'reference_'+k: v for k, v in self.reference_diagnostics(z, proposal).items()})
         failed = self.runtime.termination(state_next, nominal)
         music_end = frames >= self.bank.ends[z['song']]
         done = failed | music_end
         continuation = (1-self.runtime.termination(state_next, nominal, soft=True))*(~done)
+        if not self.soft_imagination_continuation:
+            continuation = (~done).to(state_next)
         obs = self.runtime.observation(state_next, proposal['action'], z['xi'],
                                        select_reference(proposal['future'], (slice(None), 0)))
         if self.engine.step.observation_noise:

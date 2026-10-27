@@ -17,7 +17,7 @@ from .checkpoint import shared_cpu_state
 SCHEMA = 'genmo.adapter.vector.independent.v1'
 
 
-def save_vector(path, engine, critic, optimizers, replay, tangent, collector, state, config, validation_replay=None):
+def save_vector(path, engine, critic, optimizers, replay, tangent, collector, state, config, validation_replay=None, extra_state=None):
     payload = dict(schema=SCHEMA, adapter=engine.step.adapter.state_dict(), dynamics=engine.dynamics.state_dict(),
         critic=critic.state_dict(), optimizers={k: v.state_dict() for k, v in optimizers.items()},
         frozen_bundle=engine.step.bundle.state_dict(), input_spec=engine.step.adapter.input_spec,
@@ -30,6 +30,7 @@ def save_vector(path, engine, critic, optimizers, replay, tangent, collector, st
         collector_vector_steps=collector.vector_steps, collector_rng=collector.generator.get_state(),
         rng=dict(python=random.getstate(), numpy=np.random.get_state(), torch=torch.get_rng_state(),
                  cuda=torch.cuda.get_rng_state_all()),
+        extra_state=extra_state,
         physics_resume='new_episode_required_solver_hidden_state_not_saved')
     atomic_save(shared_cpu_state(payload), Path(path))
 

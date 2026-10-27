@@ -15,6 +15,7 @@ from .critic import calibration, lambda_returns
 from .dynamics import frozen_parameters
 from .quality import critic_gate
 from .vector_control import select_state, detach_state
+from .update_diagnostics import fixed_probes, update_effect
 
 
 class GroupNormalizedCritic(nn.Module):
@@ -171,12 +172,13 @@ def validate_critic(critic, dataset, constant, thresholds, train_count, tasks):
     return report
 
 
-def adapter_update(control, dynamics, critic, optimizer, starts, horizon, *, terminal_value, microbatch=32):
+def adapter_update(control, dynamics, critic, optimizer, starts, horizon, *, terminal_value, microbatch=32, probes=None):
     parameters = tuple(control.adapter.parameters())
     before = [p.detach().clone() for p in parameters]
     adam = copy.deepcopy(optimizer.state_dict())
+    probes = fixed_probes(starts) if probes is None else probes
     with torch.no_grad():
-        old = control.propose(select_state(starts, slice(0, min(32, len(starts['state'])))))
+        old = control.propose(probes)
     optimizer.zero_grad(set_to_none=True)
     totals, critic_x, critic_y = {}, [], []
     count = len(starts['state'])
@@ -206,14 +208,14 @@ def adapter_update(control, dynamics, critic, optimizer, starts, horizon, *, ter
         if any(not torch.isfinite(p).all() for p in parameters):
             raise FloatingPointError('Adapter参数非有限')
         with torch.no_grad():
-            new = control.propose(select_state(starts, slice(0, min(32, count))))
             delta = sum((a-b).square().sum() for a, b in zip(parameters, before)).sqrt()
-            action_delta = (new['action']-old['action']).square().mean().sqrt()
-            reference_delta = (new['goal']-old['goal']).square().mean().sqrt()
-            if delta <= 0 or action_delta <= 0 or reference_delta <= 0:
-                raise FloatingPointError('参数/参考/实际控制动作未变化')
-        totals.update(adapter_gradient_norm=float(norm), parameter_delta=float(delta), action_rms_delta=float(action_delta),
-                      goal_rms_delta=float(reference_delta), horizon=horizon,
+            effect = update_effect(control, probes, old, delta)
+            if not effect['effective']:
+                for p, saved in zip(parameters, before):
+                    p.copy_(saved)
+                optimizer.load_state_dict(adam)
+        totals.update(effect)
+        totals.update(adapter_gradient_norm=float(norm), horizon=horizon,
                       phase='lambda_return_with_calibrated_critic' if terminal_value else 'dense_tracking_no_terminal_value')
         return totals, (dict(x=torch.cat(critic_x), y=torch.cat(critic_y), split='train') if critic_x else None)
     except Exception:

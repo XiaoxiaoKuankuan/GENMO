@@ -203,6 +203,7 @@ def resolve_contact_case(coarse, trials, criteria):
 
 
 def physical_directions(collector, control, dynamics, critic, criteria, horizons=(1, 4, 8, 16)):
+    from .update_diagnostics import parameter_identity
     coarse = _physical_directions_once(collector, control, dynamics, critic, criteria, horizons)
     pending = sorted({c['horizon'] for c in coarse['cases'] if not c['passed']
         and any(d['direction_status'] == 'uncertain_contact_change' for d in c['directions'])
@@ -221,5 +222,7 @@ def physical_directions(collector, control, dynamics, critic, criteria, horizons
              for c in coarse['cases']]
     passed = [h for h in horizons if all(c['passed'] for c in cases if c['horizon'] == h)]
     return dict(coarse, cases=cases, passed_horizons=passed, coarse_passed_horizons=coarse['passed_horizons'],
+                wm_sha256=parameter_identity(dynamics), adapter_sha256=parameter_identity(control.adapter),
+                scope='first_step_local_intervention_diagnostic_not_full_parameter_training_permission',
                 local_refinement_factors=[.2, .04, .008, .0016], h16_allowed=16 in passed,
                 finedance189=[c for c in cases if '189' in c['task']])

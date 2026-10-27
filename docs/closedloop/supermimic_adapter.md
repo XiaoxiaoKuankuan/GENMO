@@ -1,9 +1,12 @@
-# GENMO十帧Adapter：单卡向量环境与八组独立实验
+# GENMO十帧Adapter：失败方法修复与真实物理对照
 
 2026-10-26，GENMO `feature/stage2-supermimic-adapter`，配套SuperMimic
 `feature/genmo-worldmodel-bridge`。本次运行位置为Server-1，Server-2不参与。
-当前正式入口为`tools/train_stage2_supermimic_adapter_vector.py`；旧单环境路径保留作为
-数值对照和历史验收工具，不用旧GENMO Trainer、不使用PPO/DDP/torchrun/NCCL。
+2026-10-27：旧8组已停止，原向量训练入口不再允许继续训练。当前修复入口为
+`tools/train_reference_ablation.py`，执行从零开始的A/B/C最多100步对照。用户本次明确
+授权C组使用真实物理PPO；GENMO与SM Actor仍冻结，不使用DDP/torchrun/NCCL。
+具体更新合同及预先固定的实验设置见[修复方法说明](supermimic_adapter_repair_20261027.md)。
+下面原八组说明作为失败基线历史保留，不代表该方法已验收通过。
 
 ## 不变的方法合同
 
