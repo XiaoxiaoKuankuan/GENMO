@@ -46,6 +46,7 @@ def sample_seed(meta, seed):
 
 def evaluation_windows(cfg, actor, adapter, *, split, structural_search_frames=0):
     catalog = SourceCatalog(cfg, split)
+    horizon = max(cfg["physics"]["horizon"], *cfg["audit"]["horizons"]) if structural_search_frames else cfg["physics"]["horizon"]
     store = SidecarStore(cfg["data"]["sidecar"], split, asset_contract(cfg, adapter),
                         sample_contract=cfg["data"]["sample_contract"])
     for source_index, (dataset, row) in enumerate(catalog.sources()):
@@ -66,7 +67,7 @@ def evaluation_windows(cfg, actor, adapter, *, split, structural_search_frames=0
                 if not 0 <= selected_frame <= last_frame:
                     continue
                 batch = batch_to_device(collate_stage1_training_samples([dataset.get_window(row, selected_frame)]), adapter.runtime.kin.device)
-                batch, contexts, windows, reasons = attach_sidecars(batch, store, adapter, actor.stage1.endecoder.codec, cfg["physics"]["horizon"])
+                batch, contexts, windows, reasons = attach_sidecars(batch, store, adapter, actor.stage1.endecoder.codec, horizon)
                 window, reason = windows[0], reasons[0]
                 if window is not None:
                     # 在模型预测前，只按固定60源帧/右速度halo检查时域几何，绝不按Loss或方向挑选。

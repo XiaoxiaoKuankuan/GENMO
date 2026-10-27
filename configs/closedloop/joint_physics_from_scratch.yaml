@@ -50,6 +50,7 @@ prepare: {shard_episodes: 4, old_plan_frames: 120, old_plan_period_ticks: 300, m
 evaluation: {split: val, max_sources: 4, seed: 12345, reconstruction_timesteps: [50, 250, 500, 750, 999], max_control_steps: null, request_interval_ticks: 300, latency_ticks: 60}
 audit:
   horizons: [32, 64]
+  structural_search_frames: 60
   epsilon: 0.002
   fd_atol: 0.0001
   fd_rtol: 0.05
