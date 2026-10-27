@@ -19,12 +19,14 @@ from .reference import candidate_reference
 
 
 class ValidatedSupport:
-    def __init__(self, report_path, assets, horizon, device):
+    def __init__(self, report_path, assets, horizon, device, objective):
         report = json.loads(Path(report_path).read_text())
         if report["schema"] != "genmo.joint_physics.validation.v1" or report["assets"] != assets:
             raise ValueError("必须使用本方法与同一资产的新Newton报告")
         if horizon not in report["supported_horizons"]:
             raise ValueError("本方法当前H尚未通过实际物理方向/精度验证")
+        if report.get("objective") != objective or not report.get("forecast_passed"):
+            raise ValueError("物理方向报告需绑定当前执行目标并通过真实请求前瞻验证")
         self.state_guard = ModelSupport(report["state_envelope"], device=device)
         self.lower = torch.tensor(report["action_min"], device=device)
         self.upper = torch.tensor(report["action_max"], device=device)

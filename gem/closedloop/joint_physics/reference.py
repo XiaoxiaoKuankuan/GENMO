@@ -13,6 +13,7 @@ import torch
 from gem.closedloop.mb_control.contracts import ClosedLoopState, ForecastContext, GeneratedPlan, RequestTicket, ReferenceExhausted
 from gem.closedloop.mb_control.forecast import forecast_rollout
 from gem.closedloop.mb_control.reference_buffer import ReferenceBuffer
+from gem.closedloop.mb_control.validation import UnsupportedModelState
 from .contracts import PhysicsRejected, Window, frame_tick
 from .data import slice_batch
 
@@ -83,7 +84,7 @@ def make_window(episode, sample, adapter, codec, horizon):
     return window, known
 
 
-def attach_sidecars(batch, store, adapter, codec, horizon):
+def attach_sidecars(batch, store, adapter, codec, horizon, support_guard=None):
     contexts, windows, reasons = [], [], []
     updated = {k: v.clone() if isinstance(v, torch.Tensor) else v for k, v in batch.items()}
     updated["meta"] = [dict(m) for m in batch["meta"]]
@@ -102,12 +103,14 @@ def attach_sidecars(batch, store, adapter, codec, horizon):
                 updated["meta"][i]["proprio_source"] = "real_continuous_newton_sidecar"
                 # 此处只预测请求时已知信息；不在本次候选的执行梯度链中，无需保留图。
                 with torch.no_grad():
-                    context = forecast_rollout(window.request, adapter, window.start.tick).context
+                    context = forecast_rollout(window.request, adapter, window.start.tick, support_guard=support_guard).context
                 reason = "available"
             except (PhysicsRejected, ReferenceExhausted) as error:
                 window, reason = None, getattr(error, "reason", "reference_support_missing")
             except FloatingPointError:
                 window, reason = None, "nonfinite_forecast"
+            except UnsupportedModelState:
+                window, reason = None, "forecast_out_of_domain"
         contexts.append(context)
         windows.append(window)
         reasons.append(reason)

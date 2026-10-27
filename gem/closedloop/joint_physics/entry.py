@@ -26,6 +26,7 @@ def main(kind):
     parser.add_argument("--max-control-steps", type=int)
     parser.add_argument("--newton", action="store_true")
     parser.add_argument("--interface-probe", action="store_true", help="仅GT接口/方向审计，绝不算学生训练成功")
+    parser.add_argument("--complete-validation", help="对已有本方法原始Newton报告补充已记录目标合同和真实前瞻检查，不覆盖原报告")
     parser.add_argument("--mode", choices=("smoke", "train") if kind == "train" else ("reconstruction", "free_generation", "closed_loop"),
                         default="smoke" if kind == "train" else "reconstruction")
     preliminary, _ = parser.parse_known_args()
@@ -43,6 +44,8 @@ def main(kind):
     device = args.torch_device or cfg["runtime"]["device"]
     output = args.output or cfg["runtime"]["output"] or f"outputs/joint_physics/{kind}_{datetime.now().strftime('%Y%m%d_%H%M%S_%f')}"
     if kind == "train":
+        if args.mode == "train" and cfg["physics"]["enabled"] and (not cfg["data"]["sidecar"] or not cfg["physics"]["validation_report"]):
+            raise ValueError("正式联合训练需真实sidecar及本方法验证报告，不能长期只有BC却称联合训练")
         from torch import distributed as dist
         from .trainer import JointTrainer
         world_size, rank = int(os.environ.get("WORLD_SIZE", 1)), int(os.environ.get("RANK", 0))
@@ -78,7 +81,9 @@ def main(kind):
             from .prepare_rollouts import prepare
             return prepare(cfg, args.split, output, adapter, env)
         if kind == "gradients":
-            from .evaluation import audit_gradients
+            from .evaluation import audit_gradients, complete_validation
+            if args.complete_validation:
+                return complete_validation(cfg, args.complete_validation, output, adapter)
             return audit_gradients(cfg, args.checkpoint, output, adapter, env, args.interface_probe)
         from .evaluation import evaluate
         return evaluate(cfg, args.checkpoint, output, adapter, env, args.mode)

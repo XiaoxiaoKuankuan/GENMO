@@ -22,7 +22,7 @@ from gem.closedloop.mb_control.validation import state_envelope
 from gem.closedloop.mb_control.model_audit import state_errors
 from .checkpoint import read_checkpoint, atomic_save
 from .config import build_actor, seed_all
-from .contracts import PhysicsRejected, source_key
+from .contracts import PhysicsRejected, source_key, execution_contract, digest
 from .data import SourceCatalog, SidecarStore
 from .execution import execute_window
 from .prepare_rollouts import asset_contract
@@ -78,6 +78,7 @@ def audit_gradients(cfg, checkpoint, output, adapter, env, interface_probe=False
         raise ValueError("学生审计需要新流程checkpoint；GT接口测试必须显式--interface-probe")
     output = Path(output)
     output.mkdir(parents=True, exist_ok=False)
+    (output/"input_manifest.json").write_text(json.dumps({"schema": "genmo.joint_physics.audit_inputs.v1", "config": cfg}, ensure_ascii=False, indent=2))
     actor, _ = load_actor(cfg, checkpoint, adapter.runtime.kin.device)
     frozen = adapter.bundle.frozen_snapshot()
     assets = asset_contract(cfg, adapter)
@@ -154,11 +155,55 @@ def audit_gradients(cfg, checkpoint, output, adapter, env, interface_probe=False
         if passed:
             supported.append(horizon)
     report = {"schema": "genmo.joint_physics.validation.v1", "assets": assets, "source_ids": sorted(source_ids),
+        "objective": execution_contract(cfg),
         "prediction_origin": "gt_interface_probe_not_student_success" if interface_probe else "student_denoised_x0",
         "rows": rows, "horizons": horizons, "supported_horizons": supported, "frozen_unchanged": True,
         "criteria": cfg["audit"], "state_envelope": state_envelope(torch.cat(real_states)),
         "action_min": torch.cat(real_actions).amin(0).tolist(), "action_max": torch.cat(real_actions).amax(0).tolist(),
         "evidence": "newton_replayed_prefix_paired_perturbations" if env is not None else "autograd_and_finite_difference_only"}
+    forecast = validate_forecasts(cfg, adapter)
+    report.update(forecast_rows=forecast, forecast_passed=bool(forecast) and all(r["passed"] for r in forecast))
+    (output/"validation.json").write_text(json.dumps(report, ensure_ascii=False, indent=2, allow_nan=False))
+    return report
+
+
+@torch.no_grad()
+def validate_forecasts(cfg, adapter):
+    """只用已提交旧计划预测，再与未进入条件的实测未来状态比较；不重跑/改写物理。"""
+    from types import SimpleNamespace
+    from gem.robots.bumi.endecoder import BumiEndecoder
+    from gem.closedloop.mb_control.forecast import forecast_rollout
+    from .config import ROOT
+    options = dict(cfg["stage1"]["endecoder"])
+    options["kinematics_path"] = str(ROOT/options["kinematics_path"])
+    holder = SimpleNamespace(stage1=SimpleNamespace(endecoder=BumiEndecoder(**options)))
+    rows = []
+    for episode, batch, contexts, window, reason in evaluation_windows(cfg, holder, adapter, split="train"):
+        if window is None:
+            continue
+        predicted = forecast_rollout(window.request, adapter, window.start.tick).predicted.state
+        errors = state_errors(predicted, window.start.state)
+        rows.append({"source": episode["source_key"], "request_tick": window.request.tick, "forecast_tick": window.start.tick,
+            "steps": (window.start.tick-window.request.tick)//12, "errors": {k:float(v) for k,v in errors.items()},
+            "passed": all(float(errors[k]) <= bound for k,bound in cfg["audit"]["state_rmse_limits"].items())})
+    return rows
+
+
+def complete_validation(cfg, raw_path, output, adapter):
+    """对已有原始测量补齐合同；必须读取该次运行的输入manifest，不能猜测旧报告目标。"""
+    raw_path, output = Path(raw_path), Path(output)
+    report = json.loads(raw_path.read_text())
+    recorded = json.loads((raw_path.parent/"input_manifest.json").read_text())["config"]
+    if report["schema"] != "genmo.joint_physics.validation.v1" or report["assets"] != asset_contract(cfg, adapter):
+        raise ValueError("不能给旧Stage2或不同资产报告补合同")
+    if execution_contract(recorded) != execution_contract(cfg) or recorded["data"] != cfg["data"] or report["criteria"] != cfg["audit"]:
+        raise ValueError("已实际记录的目标/输入/阈值不同，需要重新实际测量")
+    forecasts = validate_forecasts(cfg, adapter)
+    report.update(objective=execution_contract(recorded), forecast_rows=forecasts,
+        forecast_passed=bool(forecasts) and all(r["passed"] for r in forecasts),
+        raw_report=str(raw_path), raw_report_sha256=digest(raw_path),
+        completion_scope="原始Newton结果不变；绑定该次已记录配置并追加sidecar真实前瞻误差")
+    output.mkdir(parents=True, exist_ok=False)
     (output/"validation.json").write_text(json.dumps(report, ensure_ascii=False, indent=2, allow_nan=False))
     return report
 

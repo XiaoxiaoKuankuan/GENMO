@@ -38,6 +38,12 @@ def digest(path):
     return result.hexdigest()
 
 
+def execution_contract(cfg):
+    return {"prediction_mode": cfg["physics"]["prediction_mode"], "loss": cfg["execution_loss"],
+            "target": "same_source_data_fixed_episode_world", "start": "real_before_first_candidate_influence",
+            "reference": "original_codec_reference_buffer_velocity_halo_v1"}
+
+
 @dataclass(frozen=True)
 class Window:
     request: object

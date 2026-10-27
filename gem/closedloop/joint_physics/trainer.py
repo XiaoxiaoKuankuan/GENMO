@@ -18,7 +18,7 @@ from torch import distributed as dist
 from torch.nn.parallel import DistributedDataParallel
 
 from .config import build_actor, build_adapter, seed_all
-from .contracts import PhysicsRejected, digest
+from .contracts import PhysicsRejected, digest, execution_contract
 from .curriculum import physics_selection, physics_weights
 from .data import JointDataStream, SidecarStore
 from .checkpoint import restore_trainer, save_trainer
@@ -57,7 +57,7 @@ class JointTrainer:
         self.frozen = self.adapter.bundle.frozen_snapshot() if self.adapter is not None else None
         self.store = SidecarStore(cfg["data"]["sidecar"], "train", self.assets) if cfg["data"]["sidecar"] else None
         report = cfg["physics"].get("validation_report")
-        self.support = ValidatedSupport(report, self.assets, cfg["physics"]["horizon"], device) if cfg["physics"]["enabled"] and report else None
+        self.support = ValidatedSupport(report, self.assets, cfg["physics"]["horizon"], device, execution_contract(cfg)) if report else None
         self.noise_rng = torch.Generator().manual_seed(cfg["training"]["seed"]+1000+rank)
         self.window_rng = np.random.default_rng(cfg["training"]["seed"]+2000+rank)
         self.optimizer = torch.optim.AdamW((p for p in self.actor.parameters() if p.requires_grad), lr=cfg["training"]["learning_rate"],
@@ -90,7 +90,8 @@ class JointTrainer:
         self.optimizer.zero_grad(set_to_none=True)
         batch = self.stream.next(self.cfg["training"]["batch_size"], self.device)
         batch, contexts, windows, missing = attach_sidecars(batch, self.store, self.adapter,
-            self.actor.stage1.endecoder.codec, self.cfg["physics"]["horizon"])
+            self.actor.stage1.endecoder.codec, self.cfg["physics"]["horizon"],
+            support_guard=self.support.state_guard if self.support else None)
         b = len(batch["decision_time"])
         timesteps = torch.randint(1000, (b,), generator=self.noise_rng).to(self.device)
         noise = torch.randn(b, 60, 30, generator=self.noise_rng).to(self.device)
@@ -167,6 +168,8 @@ class JointTrainer:
             "physics_valid_rate": float(count)/(b*self.world_size), "lambda_exec": weight, "lambda_safety": safety_weight,
             "rejections": dict(rejection), "snr_range": [float(snr.min()), float(snr.max())],
             "timesteps": timesteps.tolist(), "sample_ids": [(m["sample_id"], m["decision_frame"]) for m in batch["meta"]],
+            "music_dropout_mask": drop.tolist(), "physics_noise_eligible": int(eligible.sum()),
+            "history_sources": [m["proprio_source"] for m in batch["meta"]],
             "data_terms": {k: float(v.detach().mean()) for k, v in components.items() if isinstance(v, torch.Tensor)},
             "gradient_norm": float(norm), **diagnostics, "coverage": coverage,
             "execution_x0_gradient_norm": [r["x0_gradient_norm"] for r in accepted],
