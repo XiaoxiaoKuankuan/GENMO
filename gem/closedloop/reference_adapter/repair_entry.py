@@ -51,6 +51,7 @@ def main():
     from supermimic.bridge.streaming_env import StreamingPhysicalEnv
     cfg = read_config(args.config)
     repair, train, vc = cfg['repair'], cfg['training'], cfg['vector']
+    physical_criteria = json.loads(Path(cfg['physical_criteria']).read_text()) | train['wm_quality']
     if repair['variant'] not in ('A', 'B', 'C') or vc['target_accepted_updates'] > 100:
         raise ValueError('本入口仅执行A/B/C最多100次从零开始的修复对照')
     if torch.cuda.device_count() != 1 or int(os.environ.get('WORLD_SIZE', 1)) != 1:
@@ -147,7 +148,7 @@ def main():
                     dict(x=batch['critic_x'], y=batch['target'], split='train'), epochs=1, batch=1024)
                 pair = collector.tangent_pairs(); tangent.add(pair)
                 wm = fit_wm(engine.dynamics, optimizers['wm'], replay.windows(32, 8), tangent.sample(32), vc['wm_tangent'])
-                gate = parameter_update_audit(collector, control, engine.dynamics, critic, before, criteria=train['wm_quality'])
+                gate = parameter_update_audit(collector, control, engine.dynamics, critic, before, criteria=physical_criteria)
                 state['integration_parameter_updates'] = int(update['effective'])
                 saved = checkpoint('integration_complete')
                 identity = parameter_identity(control.adapter)
@@ -239,7 +240,7 @@ def main():
                     if update['effective']:
                         publish('exact_candidate_H8_H16_physical_parameter_audit')
                         gate = parameter_update_audit(collector, control, engine.dynamics, critic, pending_before[0],
-                            criteria=train['wm_quality'])
+                            criteria=physical_criteria)
                         if not audit_matches(gate, engine.dynamics, control.adapter):
                             raise RuntimeError('WM/Adapter参数身份在审计后改变')
                         json_write(output/f'candidate_audit_{state["attempted_adapter_updates"]:06d}.json', gate)

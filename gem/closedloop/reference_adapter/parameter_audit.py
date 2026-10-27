@@ -16,6 +16,32 @@ from .audit import _state_error
 from .update_diagnostics import parameter_identity
 
 
+def summarize_horizon(cases, horizon, criteria):
+    """使用预先声明的原物理噪声下限重算可辨识性，不信任历史resolved标记。"""
+    floor = criteria['direction_noise_floor']
+    if floor < 1e-6:
+        raise ValueError('修复审计不得降低原物理噪声下限1e-6')
+    rows = [c for c in cases if c['horizon'] == horizon]
+    if not rows:
+        return dict(passed=False, reason='missing_physical_cases')
+    noises = [max(floor, 10*c['repeat_noise']) for c in rows]
+    resolved = [abs(c['actual_full_objective_delta']) > noise and abs(c['predicted_full_objective_delta']) > 1e-8
+                for c, noise in zip(rows, noises)]
+    opposite = [ok and c['actual_full_objective_delta']*c['predicted_full_objective_delta'] < 0
+                for c, ok in zip(rows, resolved)]
+    error_ok = all(all(c['model_state_error'].get(k, 0.) <= v for k, v in criteria.items()
+                      if k in c['model_state_error']) for c in rows)
+    repeat_ok = all(c.get('repeat_state_max_abs', float('inf')) <= criteria['repeatability_max_abs'] for c in rows)
+    actual = sum(c['actual_full_objective_delta'] for c in rows)
+    predicted = sum(c['predicted_full_objective_delta'] for c in rows)
+    passed = (horizon >= 8 and error_ok and repeat_ok and not any(opposite)
+              and not any(c['real_terminal'] for c in rows) and sum(resolved) >= (len(rows)+1)//2
+              and actual > sum(noises) and predicted > 0)
+    return dict(passed=passed, resolved=sum(resolved), cases=len(rows), high_snr_opposites=sum(opposite),
+        state_errors_within_limits=error_ok, repeats_within_limits=repeat_ok, actual_delta_sum=actual,
+        predicted_delta_sum=predicted, noise_floor_sum=sum(noises), configured_noise_floor=floor)
+
+
 class ParameterControl(VectorControl):
     def __init__(self, control, snapshots):
         self.__dict__.update(control.__dict__)
@@ -43,6 +69,8 @@ def parameter_update_audit(collector, control, dynamics, critic, before, *, term
     if terminal_value:
         raise ValueError('修复期不允许以未经导数校准的Critic终端价值做参数审计')
     bank = control.bank
+    if criteria is None or 'direction_noise_floor' not in criteria or 'repeatability_max_abs' not in criteria:
+        raise ValueError('完整参数审计必须显式传入原物理噪声和重复性阈值')
     after = copy.deepcopy(control.adapter.state_dict())
     adapter_after = parameter_identity(control.adapter)
     control.adapter.load_state_dict(before)
@@ -59,6 +87,7 @@ def parameter_update_audit(collector, control, dynamics, critic, before, *, term
                     objective=dict(sm='original_six_plus_original_action_and_limit_costs', **control.weights,
                         root_non_saturating=control.root_cost_weight, reference_velocity=control.velocity_cost_weight),
                     constraint_beta=control.constraint_beta, disable_root_xy=control.adapter.disable_root_xy)
+    identity['physical_criteria'] = dict(criteria)
     cases = []
     try:
         for prefix in prefixes:
@@ -117,7 +146,7 @@ def parameter_update_audit(collector, control, dynamics, critic, before, *, term
                         real_delta = float(physical[i, 2]-physical[i, 0])
                         model_delta = float(model[i, 2]-model[i, 0])
                         repeat = float((physical[i, 1]-physical[i, 0]).abs())
-                        noise = max(1e-7, 10*repeat)
+                        noise = max(criteria['direction_noise_floor'], 10*repeat)
                         resolved = abs(real_delta) > noise and abs(model_delta) > 1e-8
                         errors = _state_error(predicted[h]['states'][-1][4*i:4*i+1], actual_states[-1][4*i:4*i+1])
                         cases.append(dict(task=bank.tasks[song]['id'], prefix=prefix, horizon=h,
@@ -125,23 +154,12 @@ def parameter_update_audit(collector, control, dynamics, critic, before, *, term
                             actual_tracking_delta=float(tracking[i, 2]-tracking[i, 0]),
                             reverse_full_objective_delta=float(physical[i, 3]-physical[i, 0]),
                             repeat_noise=repeat, noise_floor=noise, resolved=resolved,
+                            repeat_state_max_abs=float((actual_states[-1][4*i]-actual_states[-1][4*i+1]).abs().max()),
                             direction_consistent=resolved and real_delta*model_delta > 0,
                             high_snr_opposite=resolved and real_delta*model_delta < 0,
                             model_state_error=errors, real_terminal=not bool(active[4*i:4*i+4].all()),
                             full_parameter_directional_derivative_all_songs=derivative[h]))
-        gates = {}
-        for h in horizons:
-            rows = [c for c in cases if c['horizon'] == h]
-            error_ok = all(all(c['model_state_error'].get(k, 0.) <= v for k, v in (criteria or {}).items()
-                              if k in c['model_state_error']) for c in rows)
-            actual = sum(c['actual_full_objective_delta'] for c in rows)
-            noise = sum(c['noise_floor'] for c in rows)
-            predicted_total = sum(c['predicted_full_objective_delta'] for c in rows)
-            passed = (h >= 8 and error_ok and not any(c['high_snr_opposite'] or c['real_terminal'] for c in rows)
-                and sum(c['resolved'] for c in rows) >= len(rows)//2 and actual > noise and predicted_total > 0)
-            gates[str(h)] = dict(passed=passed, resolved=sum(c['resolved'] for c in rows), cases=len(rows),
-                high_snr_opposites=sum(c['high_snr_opposite'] for c in rows), state_errors_within_limits=error_ok,
-                actual_delta_sum=actual, predicted_delta_sum=predicted_total, noise_floor_sum=noise)
+        gates = {str(h): summarize_horizon(cases, h, criteria) for h in horizons}
         return dict(identity=identity, cases=cases, gates=gates,
                     passed_horizons=[h for h in horizons if gates[str(h)]['passed']],
                     gate_scope='exact_current_WM_and_complete_candidate_parameter_update',

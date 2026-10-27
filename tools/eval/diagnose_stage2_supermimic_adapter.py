@@ -51,6 +51,11 @@ def checkpoint_adapter(path, engine):
         raise ValueError('冻结Actor/normalizer/资产与本次重放不符')
     model = copy.deepcopy(engine.step.adapter)
     model.load_state_dict(ck['adapter'])
+    # 新修复checkpoint的部署合同由其配置恢复，不能只加载权重后丢失XY屏蔽/参考约束。
+    repair = ck.get('config', {}).get('repair', {})
+    model.disable_root_xy = bool(repair.get('root_xy_disabled', False))
+    model.reference_constraint_beta = (float(repair.get('constraint_beta', 1.))
+        if repair.get('variant') in ('B', 'C') else 1.)
     return model, ck
 
 
@@ -74,6 +79,7 @@ def collect(args, cfg, engine, tasks, bank):
     from gem.closedloop.reference_adapter.vector_collector import VectorCollector
     from gem.closedloop.reference_adapter.evaluation import beat_report
     from gem.closedloop.reference_adapter.vector_entry import compile_kinematics
+    from gem.closedloop.reference_adapter.reference_constraints import constrain_plan, quantiles
     if not args.no_compile:
         compile_kinematics(engine, bank)
     models, identities = [], []
@@ -107,11 +113,17 @@ def collect(args, cfg, engine, tasks, bank):
                 zz = select_state(z, selected)
                 residual[selected] = model.forward_packed(self.packed(self.fields(zz)))
             residual = residual*mask[variant, None]*scale[variant, None, None]
+            raw_residual = residual.clone()
+            for model, selected in zip(models, subsets):
+                if model.reference_constraint_beta < 1:
+                    residual[selected] = constrain_plan(residual[selected], z['left'][selected], z['anchor'][selected],
+                                                         model.reference_constraint_beta)
             current, future, goal, halo = self.reference(z, residual)
-            return dict(residual=residual, current=current, future=future, goal=goal, halo=halo,
+            return dict(residual=residual, raw_residual=raw_residual, current=current, future=future, goal=goal, halo=halo,
                         action=self.bundle.act(z['history'], goal))
 
     control = PairedControl(engine, bank)
+    control.detailed_reference = True
     output = Path(args.output)
     started = time.time()
     sim_cfg = make_sim('cuda:0', args)
@@ -126,7 +138,7 @@ def collect(args, cfg, engine, tasks, bank):
         active = torch.ones(count, dtype=torch.bool, device=bank.device)
         failed = torch.zeros_like(active)
         series = {k: [] for k in ('state', 'action', 'residual', 'nominal', 'corrected', 'target_qd', 'reward', 'live')}
-        raw_series, snapshots = {}, {}
+        raw_series, snapshots, reference_series = {}, {}, {}
         step = 0
         while bool(active.any()):
             if step in (0, 50, 100, 200):
@@ -148,6 +160,8 @@ def collect(args, cfg, engine, tasks, bank):
             for k, v in row['raw'].items():
                 if isinstance(v, torch.Tensor) and v.ndim == 1:
                     raw_series.setdefault(k, []).append(v[:count].detach().cpu().clone())
+                elif k.startswith('reference_') and isinstance(v, torch.Tensor) and v.ndim > 2:
+                    reference_series.setdefault(k, []).append(v[:count].detach().cpu().clone())
             failed |= active & row['failed'][:count]
             active &= ~row['done'][:count]
             step += 1
@@ -181,6 +195,12 @@ def collect(args, cfg, engine, tasks, bank):
             corrected = series['corrected'][:n, column]
             corrected = np.concatenate((corrected[:, :7], corrected[:, 7:][:, native]), -1)
             raw = {k: v[:n, column] for k, v in raw_series.items()}
+            distributions = {}
+            for key, values in reference_series.items():
+                sample = torch.stack([v[column] for v in values[:n]])
+                if key in ('reference_root_v', 'reference_root_a', 'reference_root_w', 'reference_root_alpha'):
+                    sample = sample.norm(dim=-1)
+                distributions[key] = quantiles(sample)
             initial_qd = initial[column:column+1, 34:].cpu()
             qd = torch.cat((initial_qd, torch.from_numpy(state[:, 34:])))
             audio = bank.audio[song]
@@ -206,6 +226,7 @@ def collect(args, cfg, engine, tasks, bank):
                 num_envs=args.num_envs, initial_pair_max_abs=paired_error)
             write_json(output/(stem+'.json'), metadata)
             reports.append(dict(variant=name, task=task['id'], steps=n, completion=not bool(failed[column]),
+                reference_distributions=distributions,
                 failure_time_s=n*.02 if bool(failed[column]) else None, mean_tracking=float(raw['track'].mean()),
                 root_position_rmse_m=float(np.sqrt(raw['error_root_pos'].mean())),
                 root_orientation_rmse_rad=float(np.sqrt(raw['error_root_ori'].mean())),
@@ -241,6 +262,13 @@ def mechanism(args, engine, bank):
     for model_index, path in enumerate(args.checkpoints):
         model, ck = checkpoint_adapter(path, engine)
         engine.step.adapter.load_state_dict(model.state_dict())
+        engine.step.adapter.disable_root_xy = model.disable_root_xy
+        control.constraint_beta = model.reference_constraint_beta
+        repair = ck.get('config', {}).get('repair', {})
+        control.root_cost_weight = float(repair.get('root_position_cost', 0.))
+        control.velocity_cost_weight = float(repair.get('reference_velocity_cost', 0.))
+        control.relative_critic_features = bool(repair.get('critic_feature_schema'))
+        control.soft_imagination_continuation = bool(repair.get('imagination_soft_continuation', True))
         engine.dynamics.load_state_dict(ck['dynamics'])
         critic = GroupNormalizedCritic(2835, engine.step.adapter.input_spec).to(bank.device)
         critic.load_state_dict(ck['critic']); del model

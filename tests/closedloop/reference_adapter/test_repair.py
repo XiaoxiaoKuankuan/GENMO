@@ -191,3 +191,20 @@ def test_critic_relative_position_and_discount_clock_do_not_leak_to_adapter(syst
     shifted['state'][:, 0] += 1
     torch.testing.assert_close(control.packed(control.fields(shifted)), original_adapter, rtol=0, atol=0)
     assert (control.critic_features(shifted)-features).abs().max() > .9
+
+
+def test_parameter_gate_cannot_relax_original_noise_floor_or_use_H1():
+    import pytest
+    from gem.closedloop.reference_adapter.parameter_audit import summarize_horizon
+    criteria = dict(direction_noise_floor=1e-6, repeatability_max_abs=1e-4, root_position_m=.05)
+    case = dict(horizon=8, repeat_noise=0., actual_full_objective_delta=5e-7,
+        predicted_full_objective_delta=1e-6, model_state_error=dict(root_position_m=.001),
+        real_terminal=False, resolved=True, repeat_state_max_abs=0.)
+    result = summarize_horizon([case]*8, 8, criteria)
+    assert not result['passed'] and result['resolved'] == 0
+    good = dict(case, actual_full_objective_delta=3e-6)
+    assert summarize_horizon([good]*8, 8, criteria)['passed']
+    with pytest.raises(ValueError):
+        summarize_horizon([good]*8, 8, dict(criteria, direction_noise_floor=1e-7))
+    assert not summarize_horizon([dict(good, horizon=1)]*8, 1, criteria)['passed']
+    assert not summarize_horizon([good]*7+[dict(good, actual_full_objective_delta=-3e-6)], 8, criteria)['passed']
