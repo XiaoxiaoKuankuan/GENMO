@@ -285,7 +285,7 @@ class TrackingMonitor:
         return reward, {"sm_reward": reward, **components}
 
 
-def closed_loop_source(cfg, actor, adapter, env, dataset, row):
+def closed_loop_source(cfg, actor, adapter, env, dataset, row, checkpoint=None):
     from supermimic.mdp import flatten_state
     from gem.closedloop.mb_control.collector import PhysicalCollector
     from gem.closedloop.mb_control.scheduler import Scheduler
@@ -317,7 +317,24 @@ def closed_loop_source(cfg, actor, adapter, env, dataset, row):
         elif timing_mode != "wall_clock_async":
             raise ValueError("闭环必须明确固定交付或实际墙钟模式")
         warmup = None
-        if cfg["evaluation"].get("warmup_inference", True):
+        if cfg["runtime"].get("worker_process", False):
+            from .process_worker import ProcessGenerationWorker
+            from .inference import timed_request
+            collector.worker.close()
+            collector.worker = ProcessGenerationWorker(cfg, checkpoint, adapter)
+            snapshot = collector.state.detached()
+            ticket = scheduler.reserve(snapshot)
+            generator = torch.Generator(device=env.device).manual_seed(710)
+            noise = torch.randn(1,60,30,device=env.device,generator=generator)
+            reply,warmup = collector.worker.warmup(snapshot,ticket,noise)
+            direct,context,_ = timed_request(actor,adapter,snapshot,ticket,noise)
+            errors = {"world_reference":float((reply[0].world_qpos-direct.world_qpos).abs().max()),
+                      "forecast":float((reply[3].features-context.features).abs().max()),
+                      "contact":float((reply[0].contact-direct.contact).abs().max())}
+            warmup["same_input_parity_max_abs"] = errors
+            if max(errors.values())>1e-5:
+                raise ValueError("独立进程推理与原同输入输出不一致，拒绝运行真实闭环")
+        elif cfg["evaluation"].get("warmup_inference", True):
             from gem.closedloop.mb_control.compilation import warmup_inference
             # 只预热数值计算；不推进或重置真实状态，不更改权重、延迟预算或保护前缀。
             warmup = warmup_inference(actor, adapter, scheduler, collector.state.detached())
@@ -339,6 +356,9 @@ def closed_loop_source(cfg, actor, adapter, env, dataset, row):
             "startup_hold_source_seconds": 59/30, "startup_executable_seconds": 1.74,
             "startup_hold_counted_as_dance_gain": False,
             "inference_backend": cfg["runtime"].get("inference_backend","eager"),
+            "worker_process":cfg["runtime"].get("worker_process",False),
+            "control_wall_quantiles_seconds": {f"p{p}":float(torch.tensor(collector.control_wall_seconds).quantile(p/100))
+                for p in (50,95,99)} if collector.control_wall_seconds else {},
             "request_interval_seconds": cfg["evaluation"]["request_interval_ticks"]/600,
             "motion": motion_metrics(collector.trajectory, music), "timing_mode": collector.timing_mode}
         return result, collector.trajectory
@@ -364,7 +384,7 @@ def evaluate(cfg, checkpoint, output, adapter, env, mode):
         for i, (dataset, row) in enumerate(catalog.sources()):
             if i >= cfg["evaluation"]["max_sources"]:
                 break
-            result, trajectory = closed_loop_source(cfg, actor, adapter, env, dataset, row)
+            result, trajectory = closed_loop_source(cfg, actor, adapter, env, dataset, row, checkpoint)
             atomic_save(trajectory, output/f"closed_loop_{i:04d}.pt")
             rows.append(result)
     else:

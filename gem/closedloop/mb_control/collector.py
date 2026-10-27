@@ -88,6 +88,7 @@ class PhysicalCollector:
         self.events, self.trajectory, self.metrics = [], [], []
         self.cancelled_requests = []
         self.overruns, self.wall_started = 0, None
+        self.control_wall_seconds = []
         self.actor_version = 0
         self.collector_id, self.episode_index = 0, -1
         self.anchor_horizon = 0
@@ -146,6 +147,7 @@ class PhysicalCollector:
         self.events, self.trajectory, self.metrics = [], [], []
         self.cancelled_requests = []
         self.overruns = 0
+        self.control_wall_seconds = []
         self.reference_derivatives = []
         self.controls = []
         self.generations, self.consumed_versions, self.active_anchors = {}, set(), {}
@@ -203,6 +205,7 @@ class PhysicalCollector:
             wall_origin, tick_origin = request_wall, z.tick
             try:
                 while True:
+                    control_started = time.perf_counter()
                     if z.tick >= z.music_end_tick:
                         self.terminal, reason = True, "music_end"
                         break
@@ -275,6 +278,7 @@ class PhysicalCollector:
                                                 ref1.root_R.cpu(), ref1.q.cpu()))
                         if self.record_reference_derivatives:
                             self.reference_derivatives.append((ref1.root_v.cpu(), ref1.root_w.cpu(), ref1.qd.cpu()))
+                    self.control_wall_seconds.append(time.perf_counter()-control_started)
                     if failed:
                         self.terminal, reason = True, "physical_failure"
                         break
