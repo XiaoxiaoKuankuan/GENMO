@@ -256,3 +256,17 @@ def test_real_SO3_nonlinear_convergence_under_two_budgets():
         result = p(raw, left, anchor, rotation)
         certificate = p.certificate(result, left, anchor, rotation)
         assert certificate['feasible'].all(), certificate
+
+
+def test_real_affine_and_IPM_convergence_with_actual_RobotSpec(assets):
+    import json
+    from pathlib import Path
+    from gem.closedloop.reference_adapter.policy import ReferenceAdapter
+    bundle, _ = assets
+    for name in ('failed_affine_QP_tolerance', 'failed_SO3_IPM_gpu'):
+        case = json.loads((Path(__file__).parent/'fixtures'/f'{name}.json').read_text())
+        p = ReferenceProjection(bundle.spec, ReferenceAdapter(bundle.spec).bounds, **case.get('projection', {}))
+        raw, left, anchor, rotation = (torch.tensor(case[k], dtype=torch.float32) for k in ('raw', 'left', 'anchor', 'rotation'))
+        result = p(raw, left, anchor, rotation)
+        certificate = p.certificate(result, left, anchor, rotation)
+        assert certificate['feasible'].all(), certificate

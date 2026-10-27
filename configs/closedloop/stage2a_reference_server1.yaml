@@ -1,5 +1,4 @@
-# Stage2-A仅WM+BPTT，2048环境独立进程；参考预算和精度权重为待Oracle/梯度标定的候选。
-# 正式八组由训练集标定结果生成；当前模板不能宣称已经取得64首缓存或通过H8物理方向。
+# Stage2-A独立WM+BPTT正式模板；软关节限位关闭，八配置须有真实Oracle及逐候选方向证据。
 algorithm: genmo_supermimic_reference_adapter10
 physics_backend: isaaclab3_newton_mujoco_warp
 supermimic:
@@ -78,7 +77,7 @@ vector:
   initial_bptt_steps: 8
   target_accepted_updates: 200
   checkpoint_every: 100
-  evaluation_every: 100
+  evaluation_every: 25
   sampling_seed: 20261027
   compile_fk: true
   warmup_vector_steps: 128
@@ -87,7 +86,6 @@ vector:
   tangent_every_iterations: 1
   repair_audit_wm_interval: 100
   wm_tangent: 0.1
-  physical_gpu: 1
 stage2a:
   method: WM_BPTT_physical_trust
   purpose: formal
@@ -99,7 +97,7 @@ stage2a:
     action_weight: 0.01
     velocity_weight: 0.002
     acceleration_weight: 0.0002
-  calibration: /data0/user/liwei/GENMO_outputs/stage2_supermimic_adapter/stage2a_projection_20261027_01/oracle_128_03/zero_train_calibration.json
+  calibration: /data0/user/liwei/GENMO_outputs/stage2_supermimic_adapter/stage2a_projection_20261027_01/oracle64_flexible03/zero_train_calibration.json
   oracle_evidence: /data0/user/liwei/GENMO_outputs/stage2_supermimic_adapter/stage2a_projection_20261027_01/oracle_128_03/oracle_summary.json
   difficulty_steps: 96
   response_pairs: 32

@@ -111,6 +111,7 @@ def main():
             real_transitions=collector.real_transitions if collector else 0,
             real_transitions_by_role=collector.real_by_role if collector else {},
             response_pairs=response.total_pairs, replay_transitions=len(replay), gpu_process_mib=gpu_usage(),
+            response_song_coverage=int(response.data['song'].unique().numel()) if response.data else 0,
             peak_allocated_mib=torch.cuda.max_memory_allocated()/2**20)
         json_write(output/'status.json', state, replace=True)
         print(json.dumps(state, ensure_ascii=False), flush=True)
@@ -245,7 +246,9 @@ def main():
                             collector.step(replay)
                         eligible = collector.state['frame']+32 < bank.ends[collector.state['song']]
                         fresh = fixed_probes(select_state(collector.state, eligible), per_song=4)
-                        fresh = select_state(fresh, slice(0, min(settings['response_pairs'], len(fresh['state']), collector.num_envs//4)))
+                        n_fresh = min(settings['response_pairs'], len(fresh['state']), collector.num_envs//4)
+                        ids = torch.randperm(len(fresh['state']), generator=collector.generator, device='cuda')[:n_fresh]
+                        fresh = select_state(fresh, ids)
                         data = collect_reference_response(collector, fresh, replay=replay)
                         response.add(data)
                     source_replay = background if background is not None and background.size >= 8 and wm_step % 5 == 0 else replay

@@ -84,8 +84,8 @@ class _CoupledProjection(torch.autograd.Function):
             dual_residual = x64-y+(g.transpose(-1, -2)@multipliers[..., None]).squeeze(-1)
             primal_residual = (g@x64[..., None]).squeeze(-1)+slack-h
             mu = (slack*multipliers).mean(-1)
-            finished = ((torch.maximum(primal_residual.abs().amax(-1), dual_residual.abs().amax(-1)) < 1e-8)
-                        & (mu < 1e-10)) if step >= 8 else torch.zeros_like(mu, dtype=torch.bool)
+            finished = ((torch.maximum(primal_residual.abs().amax(-1), dual_residual.abs().amax(-1)) < 1e-6)
+                        & (mu < 1e-8)) if step >= 8 else torch.zeros_like(mu, dtype=torch.bool)
             if bool(finished.all()):
                 break
             ratio = multipliers/slack
@@ -141,7 +141,7 @@ class ReferenceProjection(torch.nn.Module):
     def __init__(self, spec, bounds, *, joint_velocity=1., joint_acceleration=10.,
                  ankle_velocity=.5, ankle_acceleration=5., height_velocity=.12,
                  height_acceleration=1.2, rotation_velocity=.3, rotation_acceleration=3.,
-                 iterations=1200, coupled_iterations=40, tolerance=1e-6):
+                 iterations=3000, coupled_iterations=40, tolerance=1e-6):
         super().__init__()
         self.iterations, self.tolerance = iterations, tolerance
         self.coupled_iterations = coupled_iterations
