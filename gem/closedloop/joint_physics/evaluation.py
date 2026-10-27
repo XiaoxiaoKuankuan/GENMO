@@ -261,10 +261,15 @@ def closed_loop_source(cfg, actor, adapter, env, dataset, row):
     scheduler = Scheduler(cfg["evaluation"]["latency_ticks"], request_mode="fixed_interval",
                           request_interval_ticks=cfg["evaluation"]["request_interval_ticks"])
     collector = PhysicalCollector(env, actor, adapter, scheduler, TrackingMonitor(adapter), record_trajectory=True)
-    started = time.perf_counter()
     reason = "not_started"
     try:
         collector.reset(music, initial)
+        warmup = None
+        if cfg["evaluation"].get("warmup_inference", True):
+            from gem.closedloop.mb_control.compilation import warmup_inference
+            # 只预热数值计算；不推进或重置真实状态，不更改权重、延迟预算或保护前缀。
+            warmup = warmup_inference(actor, adapter, scheduler, collector.state.detached())
+        started = time.perf_counter()
         while not collector.terminal:
             intervals = collector.collect(1)
             reason = intervals[-1].reason
@@ -276,6 +281,9 @@ def closed_loop_source(cfg, actor, adapter, env, dataset, row):
             "complete_song": reason == "music_end", "physical_seconds": collector.state.tick/600,
             "music_seconds": music.shape[1]/30, "wall_seconds": time.perf_counter()-started,
             "commits": sum(e["accepted"] for e in collector.events), "events": collector.events,
+            "cancelled_requests": collector.cancelled_requests, "control_deadline_overruns": collector.overruns,
+            "requests": collector.request_distribution, "numerical_warmup": warmup,
+            "bootstrap_latency_ticks": cfg["evaluation"]["latency_ticks"],
             "motion": motion_metrics(collector.trajectory, music), "timing_mode": collector.timing_mode}
         return result, collector.trajectory
     finally:
@@ -352,6 +360,7 @@ def evaluate(cfg, checkpoint, output, adapter, env, mode):
                     rows[-1]["music_condition_sensitivity_rms"] = float((generated[0]-without["qpos30"]).square().mean().sqrt())
     adapter.bundle.assert_unchanged(frozen)
     result = {"mode": mode, "checkpoint": str(checkpoint), "rows": rows, "frozen_unchanged": True,
+              "checkpoint_step": checkpoint_step, "evaluation_config": cfg["evaluation"],
               "scope": "complete_song_attempts" if mode == "closed_loop" else "independent_local_windows",
               "evidence": "real_newton", "method_improvement_claim": False}
     (output/"evaluation.json").write_text(json.dumps(result, ensure_ascii=False, indent=2, allow_nan=False))
