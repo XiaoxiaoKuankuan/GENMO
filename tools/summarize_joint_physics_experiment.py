@@ -5,6 +5,7 @@
 及整曲结束率；所有原始失败目录保留，图例显示实际评价模式。输出新目录可独立分享。
 """
 import argparse
+import hashlib
 import json
 from pathlib import Path
 from collections import defaultdict
@@ -14,11 +15,14 @@ def main():
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--root',required=True)
     parser.add_argument('--output',required=True)
+    parser.add_argument('--training-run',action='append',help='只绘制指定run，可重复；续训目录分别保留身份')
     args=parser.parse_args()
     root,output=Path(args.root),Path(args.output)
     output.mkdir(parents=True,exist_ok=False)
     training,evaluations={},[]
     for path in sorted(root.glob('*/metrics.jsonl')):
+        if args.training_run and path.parent.name not in args.training_run:
+            continue
         rows=[json.loads(s) for s in path.read_text().splitlines() if s.strip()]
         training[path.parent.name]=rows
     keys=('unknown_reconstruction_rmse','within_model_seed_diversity_rms','music_condition_sensitivity_rms','root_xy_range_m',
@@ -28,6 +32,13 @@ def main():
         row={'name':path.parent.name,'step':value['checkpoint_step'],'mode':value['mode'],
              'training_run':value.get('training_run',Path(value['checkpoint']).parent.name),
              'evidence':value['evidence'],'timing_mode':value['evaluation_config'].get('timing_mode')}
+        if args.training_run and row['training_run'] not in args.training_run:
+            continue
+        # 评价集合不同不能连成同一条曲线；选择身份不包含模型决定的成功/失败结果。
+        requests=[{k:r.get(k) for k in ('source','frame','k','noise_seed')} for r in value['rows']]
+        canonical=json.dumps(sorted(requests,key=lambda x:json.dumps(x,sort_keys=True)),sort_keys=True)
+        row['evaluation_set_sha256']=hashlib.sha256(canonical.encode()).hexdigest()
+        row['evaluation_sources']=sorted({r['source'] for r in value['rows']})
         for key in (*keys,'data_loss'):
             selected=[float(r[key]) for r in value['rows'] if key in r]
             if selected:row[key]=sum(selected)/len(selected)
@@ -44,7 +55,7 @@ def main():
         groups=defaultdict(list)
         for row in evaluations:
             if key in row:
-                groups[(row['training_run'],row['mode'],row['evidence'],row['timing_mode'])].append(row)
+                groups[(row['training_run'],row['mode'],row['evidence'],row['timing_mode'],row['evaluation_set_sha256'][:8])].append(row)
         for group,rows in groups.items():
             rows.sort(key=lambda r:r['step'])
             ax.plot([r['step'] for r in rows],[r[key] for r in rows],marker='o',label='/'.join(str(x) for x in group))

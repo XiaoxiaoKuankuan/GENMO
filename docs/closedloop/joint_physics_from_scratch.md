@@ -73,11 +73,12 @@ flowchart LR
 | `curriculum.py / trainer.py` | 完整监督噪声、物理子批、唯一AdamW、同步DDP与计数 |
 | `requests.py / diagnostics.py` | 静态合法请求索引、音乐与类型轮换、互斥拒绝终态 |
 | `certification.py` | 按H及完整运动/接触组合的真实Newton方向认证 |
+| `certificates.py / action_domain.py` | 汇集互不重叠的组合证据，并用Newton实测WM反馈下产生的SM动作输入 |
 | `inference.py / process_worker.py` | 评价专用推理优化、独立进程及完整墙钟计时 |
 | `checkpoint.py` | 新schema完整恢复、每rank全部采样/RNG状态和不覆盖发布 |
 | `evaluation.py / entry.py` | 三类独立评价、新目标Newton方向和前瞻验证、CLI |
 
-对应四个`tools/*joint_physics*.py`入口、四份`configs/closedloop/joint_physics*.yaml`、
+对应`tools/*joint_physics*.py`入口、`configs/closedloop/joint_physics*.yaml`配置、
 `tests/closedloop/joint_physics/`与`scripts/train_joint_physics.sh`均独立于旧Stage2。
 
 ## 数据与sidecar合同
@@ -170,6 +171,8 @@ physics_effective_updates和physics_update_fraction；课程前的探针合格�
 DDP每个rank执行相同forward/backward；执行子批梯度乘`world_size/global_valid_count`，
 使DDP平均后等于全局有效样本均值。无有效样本rank使用图内零项，全零也不跳过backward。
 单卡诊断间隔分解data/exec对Future和主干的梯度；DDP可用独立审计入口作细分诊断。
+两个前向共享同一Actor；物理合批出现非有限预测时弃用整个物理图，并分别记录自身失败与
+同批连带拒绝，不通过NaN乘零污染正常BC。同一模型的监督图仍完成全部参数同步。
 
 新schema：`genmo.joint_diffusion_physics.v1.checkpoint.v2.independent_physics`。保存Actor、唯一AdamW、scheduler、
 global_step、课程、每rank数据游标/PCG64、独立噪声与窗口随机流、Python/NumPy/CPU/CUDA RNG、
@@ -275,6 +278,13 @@ python tools/verify_joint_physics_resume.py --checkpoint <joint.pt> --output <ne
 python tools/diagnose_joint_physics_readiness.py --config <cfg> --checkpoint <joint.pt> \
   --samples 32 --output <new_diagnosis>
 
+# 只能汇集互不重叠的H/运动接触组合；重复组合不得择优覆盖失败证据。
+python tools/merge_joint_physics_certifications.py --report <direction_report_1.json> \
+  --report <direction_report_2.json> --output <new_merged_direction>
+# 必须实际把WM反馈下产生的每步SM动作交给Newton，不能凭经验扩大动作数值范围。
+python tools/validate_joint_physics_action_domain.py --config <cfg> \
+  --validation-report <new_merged_direction>/validation.json --output <new_action_input_validation>
+
 # 离线固定交付：生成完成后按显式事件推进物理，不验证实时性。
 python tools/evaluate_joint_physics.py --config <cfg> --checkpoint <joint.pt> --mode closed_loop \
   --set evaluation.timing_mode=fixed_delay_replay --set evaluation.latency_ticks=60 \
@@ -287,6 +297,10 @@ CUDA_VISIBLE_DEVICES=0,1 python tools/evaluate_joint_physics.py --config <cfg> \
 python tools/benchmark_joint_physics_inference.py --config <cfg> --checkpoint <joint.pt> --output <new_timing>
 python tools/summarize_joint_physics_experiment.py --root <experiment_root> --output <new_curves>
 ```
+
+汇总曲线按实际source/frame/noise集合另行分组，不将单曲诊断与四来源评价连接成收益曲线。
+可重复提供`--training-run <name>`只绘制同预算A/B；不同学习率是独立候选，A/B双方必须
+同时采用相同值。原LR=1e-5基线保留；本轮另测LR=1e-4的有界候选，不预先宣布其更优。
 
 推理默认保持FP32、完整DDIM20/eta0/CFG2.5，已有CFG合批和条件缓存不重复算作新增功能。
 `runtime.inference_backend=cuda_graph`只捕获原Transformer单步，不用于训练反向。
