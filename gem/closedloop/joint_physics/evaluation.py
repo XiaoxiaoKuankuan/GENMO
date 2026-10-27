@@ -308,6 +308,15 @@ def closed_loop_source(cfg, actor, adapter, env, dataset, row, checkpoint=None):
     reason = "not_started"
     try:
         collector.reset(music, initial)
+        monitor_warmup = None
+        if cfg['runtime'].get('graph_tracking_monitor',False):
+            from .inference import GraphTrackingMonitor
+            collector.rewards = GraphTrackingMonitor(adapter)
+            state = collector.state
+            reference,_,goal = state.reference.read_current_future(state.tick)
+            with torch.no_grad():
+                action = adapter.bundle.act(state.sm_history,goal)
+            monitor_warmup = collector.rewards.warmup(state.state,action,state.previous_action,reference)
         timing_mode = cfg["evaluation"].get("timing_mode", "wall_clock_async")
         if timing_mode == "fixed_delay_replay":
             delay = cfg["evaluation"]["fixed_delivery_ticks"]
@@ -354,6 +363,7 @@ def closed_loop_source(cfg, actor, adapter, env, dataset, row, checkpoint=None):
             "commits": sum(e["accepted"] for e in collector.events), "events": collector.events,
             "cancelled_requests": collector.cancelled_requests, "control_deadline_overruns": collector.overruns,
             "requests": collector.request_distribution, "numerical_warmup": warmup,
+            "tracking_monitor_warmup":monitor_warmup,
             "bootstrap_latency_ticks": cfg["evaluation"]["latency_ticks"],
             "startup_hold_source_seconds": 59/30, "startup_executable_seconds": 1.74,
             "startup_hold_counted_as_dance_gain": False,

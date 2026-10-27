@@ -40,6 +40,59 @@ class GraphDenoiser:
                 'static_conf_logits':torch.where(adapted['future_valid'][...,None],result['static_conf_logits'],0.)}
 
 
+class GraphTrackingMonitor:
+    """捕获原SM评价奖励中的FK，避免Python逐关节发射拖慢50Hz控制。
+
+    仅评价且无梯度，原reward公式/参数/终止检查保持不变；所有状态、动作和实际参考每步
+    拷入图。首次捕获和数值对照必须在正式计时之前完成，不把启动开销藏入控制时延。
+    返回clone防止图重放改写上一控制步的统计。不会用于执行Loss或训练。
+    """
+    def __init__(self, adapter):
+        self.adapter, self.config, self.graph = adapter, {}, None
+
+    @torch.no_grad()
+    def warmup(self, state, action, previous, reference):
+        from torch.utils._pytree import tree_flatten
+        if not state.is_cuda:
+            raise ValueError('控制监控CUDA Graph需要目标GPU')
+        began = time.perf_counter()
+        eager = self.adapter.runtime.reward(state,action,previous,reference)
+        leaves,self.input_spec = tree_flatten((state,action,previous,reference))
+        if not all(isinstance(value,torch.Tensor) for value in leaves):
+            raise ValueError('SM参考必须保持权威纯张量结构')
+        self.inputs = [value.clone() for value in leaves]
+        from torch.utils._pytree import tree_unflatten
+        arguments = tree_unflatten(self.inputs,self.input_spec)
+        stream = torch.cuda.Stream(device=state.device)
+        stream.wait_stream(torch.cuda.current_stream(state.device))
+        with torch.cuda.stream(stream):
+            for _ in range(3):self.adapter.runtime.reward(*arguments)
+        torch.cuda.current_stream(state.device).wait_stream(stream)
+        self.graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(self.graph,stream=stream):
+            self.result = self.adapter.runtime.reward(*arguments)
+        self.graph.replay()
+        actual,_ = tree_flatten(self.result)
+        expected,_ = tree_flatten(eager)
+        error = max(float((a-b).abs().max()) for a,b in zip(actual,expected))
+        if error>1e-6:raise ValueError('控制监控图与原SM奖励不一致')
+        return {'seconds':time.perf_counter()-began,'max_abs_error':error,'precision':'fp32',
+                'scope':'original_SM_reward_and_FK_only','before_physics_episode':True}
+
+    def __call__(self, state, action, previous, reference, **unused):
+        from torch.utils._pytree import tree_flatten
+        if torch.is_grad_enabled() or self.graph is None:
+            raise RuntimeError('控制监控图只能用于完成预热的无梯度评价')
+        leaves,spec = tree_flatten((state,action,previous,reference))
+        if spec!=self.input_spec or any(a.shape!=b.shape for a,b in zip(leaves,self.inputs)):
+            raise ValueError('控制监控状态/参考形状变化，不能复用图')
+        for destination,value in zip(self.inputs,leaves):destination.copy_(value)
+        self.graph.replay()
+        reward,components = self.result
+        reward = reward.clone()
+        return reward, {'sm_reward':reward,**{k:v.clone() for k,v in components.items()}}
+
+
 def configure(actor, backend):
     if backend not in ('eager','fast_forecast','cuda_graph'):
         raise ValueError('未知推理后端')
