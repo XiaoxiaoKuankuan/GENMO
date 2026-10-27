@@ -7,10 +7,12 @@ Newton方向及学生有效更新由独立CLI验收。所有几何/速度均调�
 from dataclasses import replace
 
 import torch
+import pytest
 
 from gem.closedloop.joint_physics.actor import JointPhysicsActor
 from gem.closedloop.joint_physics.config import build_adapter, read_config, ROOT
 from gem.closedloop.joint_physics.contracts import Window
+from gem.closedloop.joint_physics.contracts import PhysicsRejected
 from gem.closedloop.joint_physics.execution import execute_window
 from gem.closedloop.joint_physics.losses import execution_terms, normalized_window
 from gem.closedloop.mb_control.contracts import ClosedLoopState, RequestTicket, ForecastContext
@@ -40,6 +42,11 @@ def test_real_frozen_weights_execution_gradient_and_fd(actor_factory):
         ref, 8, "tensor_fixture_not_newton", {"old_plan_committed_tick": 0, "last_real_tick": 1188, "split": "train", "start_origin": "tensor_fixture_only"})
     prediction = base.endecoder.normalize(batch["target_qpos30"]).detach().requires_grad_()
     logits = torch.zeros(1, 60, 2)
+    # 原夹具是零膝角张量起点，WM下一步负膝角违反硬限位，必须拒绝，不能算学生成功。
+    with pytest.raises(PhysicsRejected, match="executed_hard_joint_limit"):
+        execute_window(window, prediction, logits, actor, adapter, cfg["execution_loss"])
+    # 以下只保留旧接口求导对照。正式read_config禁止关闭硬检查；此结果无训练验收含义。
+    cfg["execution_loss"]["hard_safety"] = False
     result = execute_window(window, prediction, logits, actor, adapter, cfg["execution_loss"])
     assert result["safety"].item() == 0
     violating = state.clone()

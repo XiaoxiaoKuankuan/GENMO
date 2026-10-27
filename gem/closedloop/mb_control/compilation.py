@@ -35,7 +35,8 @@ def warmup_inference(actor, adapter, scheduler, state):
     started = time.perf_counter()
     with torch.no_grad():
         for _ in range(3):
-            context = forecast_rollout(state, adapter, ticket.first_influence_tick).context
+            context = forecast_rollout(state, adapter, ticket.first_influence_tick,
+                                       reuse_current_observation=getattr(actor,"fast_forecast",False)).context
             actor.generate(state, ticket, context, noise)
     if state.state.is_cuda:
         torch.cuda.synchronize(state.state.device)

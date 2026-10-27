@@ -42,6 +42,8 @@ def read_config(path, overrides=()):
         raise ValueError("完整监督必须保持1000步日程")
     if cfg["execution_loss"]["action_rate_weight"] != 0:
         raise ValueError("首版Action Rate权重必须为0")
+    if not cfg["execution_loss"].get("hard_safety", True):
+        raise ValueError("正式CLI不得关闭硬机械限位与SM终止检查")
     if cfg["training"]["precision"] != "fp32":
         raise ValueError("本版先完成FP32导数验收，尚未开放混合精度")
     return cfg

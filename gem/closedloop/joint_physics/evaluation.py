@@ -49,14 +49,16 @@ def evaluation_windows(cfg, actor, adapter, *, split, structural_search_frames=0
     horizon = max(cfg["physics"]["horizon"], *cfg["audit"]["horizons"]) if structural_search_frames else cfg["physics"]["horizon"]
     store = SidecarStore(cfg["data"]["sidecar"], split, asset_contract(cfg, adapter),
                         sample_contract=cfg["data"]["sample_contract"])
-    for source_index, (dataset, row) in enumerate(catalog.sources()):
-        if source_index >= cfg["evaluation"]["max_sources"]:
+    available_sources = 0
+    for dataset, row in catalog.sources():
+        if available_sources >= cfg["evaluation"]["max_sources"]:
             break
         metadata = dataset.get_window(row, 0)["meta"]
         try:
             episode = store.episode(metadata)
         except PhysicsRejected:
             continue
+        available_sources += 1
         last_frame = min(episode["source_frames"]-61, (len(episode["state"])-1)*12//20 - 30)
         if last_frame < 0:
             yield episode, None, None, None, "insufficient_real_trajectory"
@@ -286,11 +288,22 @@ def closed_loop_source(cfg, actor, adapter, env, dataset, row):
                              q[7:][list(adapter.to_sm)][None], q.new_zeros(1,21)))
     music = sequence["music"].to(env.device)[None]
     scheduler = Scheduler(cfg["evaluation"]["latency_ticks"], request_mode="fixed_interval",
-                          request_interval_ticks=cfg["evaluation"]["request_interval_ticks"])
+                          request_interval_ticks=cfg["evaluation"]["request_interval_ticks"],
+                          latency_margin_ticks=cfg["evaluation"].get("latency_margin_ticks",0))
     collector = PhysicalCollector(env, actor, adapter, scheduler, TrackingMonitor(adapter), record_trajectory=True)
     reason = "not_started"
     try:
         collector.reset(music, initial)
+        timing_mode = cfg["evaluation"].get("timing_mode", "wall_clock_async")
+        if timing_mode == "fixed_delay_replay":
+            delay = cfg["evaluation"]["fixed_delivery_ticks"]
+            if delay % 12:
+                raise ValueError("固定交付事件必须在50Hz控制网格")
+            collector.timing_mode = timing_mode
+            collector.delay_events = {str(t): {"delivered":True,"actual_ready_tick":t+delay,
+                "delivery_tick":t+delay,"commit_tick":t+delay} for t in range(0,music.shape[1]*20,60)}
+        elif timing_mode != "wall_clock_async":
+            raise ValueError("闭环必须明确固定交付或实际墙钟模式")
         warmup = None
         if cfg["evaluation"].get("warmup_inference", True):
             from gem.closedloop.mb_control.compilation import warmup_inference
@@ -311,6 +324,10 @@ def closed_loop_source(cfg, actor, adapter, env, dataset, row):
             "cancelled_requests": collector.cancelled_requests, "control_deadline_overruns": collector.overruns,
             "requests": collector.request_distribution, "numerical_warmup": warmup,
             "bootstrap_latency_ticks": cfg["evaluation"]["latency_ticks"],
+            "startup_hold_source_seconds": 59/30, "startup_executable_seconds": 1.74,
+            "startup_hold_counted_as_dance_gain": False,
+            "inference_backend": cfg["runtime"].get("inference_backend","eager"),
+            "request_interval_seconds": cfg["evaluation"]["request_interval_ticks"]/600,
             "motion": motion_metrics(collector.trajectory, music), "timing_mode": collector.timing_mode}
         return result, collector.trajectory
     finally:
@@ -323,6 +340,8 @@ def evaluate(cfg, checkpoint, output, adapter, env, mode):
     output = Path(output)
     output.mkdir(parents=True, exist_ok=False)
     actor, losses = load_actor(cfg, checkpoint, env.device)
+    from .inference import configure
+    configure(actor,cfg["runtime"].get("inference_backend","eager"))
     checkpoint_step = read_checkpoint(checkpoint)["global_step"]
     frozen = adapter.bundle.frozen_snapshot()
     rows = []
