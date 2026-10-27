@@ -77,10 +77,16 @@ def audit(cfg, checkpoint, output, adapter, env, interface_probe=False):
     (output/'input_manifest.json').write_text(json.dumps({'config':cfg,'inventory':stream.inventory},ensure_ascii=False,indent=2))
     rows, certificates, supported = [], {}, []
     collected = defaultdict(lambda: {'states':[],'actions':[],'rows':[]})
+    profiles = defaultdict(lambda: {'states':[],'actions':[],'rows':[]})
     all_states,all_actions,source_ids = [],[],set()
     for key in stream.keys[:cfg['evaluation']['max_sources']]:
         dataset,row_index = stream.sources[key]
         items = stream.requests[key]
+        requested_profiles = cfg['audit'].get('profiles')
+        if requested_profiles is not None:
+            items = [item for item in items if '|'.join(item['tags']) in requested_profiles]
+        if not items:
+            continue
         # 仅按真实离线类别与音乐时间选择，绝不读取学生预测或方向结果进行挑选。
         selected, covered = [],set()
         for item in sorted(items,key=lambda item:item['frame']):
@@ -160,8 +166,9 @@ def audit(cfg, checkpoint, output, adapter, env, interface_probe=False):
                                 contact_changed_steps=sum(a['pair_signature']!=b['pair_signature'] for a,b in zip(*contacts)))
                             good = record['fd_pass'] and record['newton_direction_pass'] and record['model_accuracy_pass'] and max(repeats)<=cfg['audit']['same_start_atol']
                             if good:
-                                for tag in tags:
-                                    target = collected[(horizon,tag)]
+                                targets = [collected[(horizon,tag)] for tag in tags]
+                                targets.append(profiles[(horizon,'|'.join(tags))])
+                                for target in targets:
                                     target['states'].append(selected_window.start.state.detach().cpu())
                                     target['states'].extend(p['states'].detach().cpu().flatten(0,1) for p in physical)
                                     target['actions'].extend(p['actions'].detach().cpu().flatten(0,1) for p in physical)
@@ -175,6 +182,7 @@ def audit(cfg, checkpoint, output, adapter, env, interface_probe=False):
                         with (output/'probes.jsonl').open('a') as file:
                             file.write(json.dumps(record,ensure_ascii=False)+'\n')
                         print(json.dumps({k:v for k,v in record.items() if k not in ('real_contacts','coverage')},ensure_ascii=False),flush=True)
+    profile_certificates = {}
     for horizon in cfg['audit']['horizons']:
         certificates[str(horizon)] = {}
         for (h,tag),values in collected.items():
@@ -191,10 +199,27 @@ def audit(cfg, checkpoint, output, adapter, env, interface_probe=False):
                 'passed_probes':len(successes),'fraction':rate,'state_envelope':state_envelope(torch.cat(values['states'])),
                 'audited_timesteps':sorted({r['timestep'] for r in successes}),
                 'action_min':actions.amin(0).tolist(),'action_max':actions.amax(0).tolist()}
-        if any(c['passed'] for c in certificates[str(horizon)].values()):supported.append(horizon)
+        profile_certificates[str(horizon)] = {}
+        for (h,profile),values in profiles.items():
+            if h!=horizon:continue
+            selected = [r for r in rows if r.get('horizon')==h and '|'.join(r.get('tags',[]))==profile]
+            successes = values['rows']
+            sources = sorted({r['source'] for r in successes})
+            anchors = {(r['source'],r['frame']) for r in successes}
+            rate = len(successes)/max(1,len(selected))
+            passed = (len(sources)>=cfg['audit']['minimum_class_sources'] and len(anchors)>=cfg['audit']['minimum_class_anchors'] and
+                      rate>=cfg['audit']['minimum_direction_fraction'])
+            actions = torch.cat(values['actions'])
+            profile_certificates[str(h)][profile] = {'passed':passed,'sources':sources,'anchors':len(anchors),
+                'probes':len(selected),'passed_probes':len(successes),'fraction':rate,
+                'state_envelope':state_envelope(torch.cat(values['states'])),
+                'audited_timesteps':sorted({r['timestep'] for r in successes}),
+                'action_min':actions.amin(0).tolist(),'action_max':actions.amax(0).tolist()}
+        if any(c['passed'] for c in profile_certificates[str(horizon)].values()):supported.append(horizon)
     adapter.bundle.assert_unchanged(frozen)
     report = {'schema':'genmo.joint_physics.validation.v2','assets':assets,'objective':execution_contract(cfg),
         'source_ids':sorted(source_ids),'supported_horizons':supported,'certificates':certificates,
+        'profile_certificates':profile_certificates,'certification_scope':'exact_motion_and_contact_profile',
         'audited_timesteps':cfg['audit']['timesteps'],'classification':CLASSIFICATION,'criteria':cfg['audit'],
         'prediction_origin':'gt_interface_not_training_success' if interface_probe else 'student_denoised_x0',
         'student_physics_updates':state['counters']['physics_updates'] if state else 0,

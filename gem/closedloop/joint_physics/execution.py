@@ -34,20 +34,26 @@ class ValidatedSupport:
         self.report = report
         self.horizon = horizon
         self.certificates = report.get("certificates", {}).get(str(horizon), {})
+        self.profiles = report.get('profile_certificates',{}).get(str(horizon))
 
     def certified(self, tags):
         """来源ID只追溯；须与同H的真实动作/接触类型认证匹配，旧报告不可扩到新来源。"""
+        if getattr(self,'profiles',None) is not None:
+            return bool(tags) and self.profiles.get('|'.join(sorted(tags)),{}).get('passed',False)
         return bool(tags) and all(self.certificates.get(tag, {}).get("passed") for tag in tags)
 
     def timesteps_for(self, tags):
         if not self.certified(tags):
             return []
+        if getattr(self,'profiles',None) is not None:
+            return self.profiles['|'.join(sorted(tags))]['audited_timesteps']
         return sorted(set.intersection(*(set(self.certificates[tag]["audited_timesteps"]) for tag in tags)))
 
     def for_tags(self, tags):
         if not self.certified(tags):
             raise PhysicsRejected("uncertified_motion_type", {"required_motion_types": tags})
-        certificates = [self.certificates[tag] for tag in tags]
+        certificates = ([self.profiles['|'.join(sorted(tags))]] if getattr(self,'profiles',None) is not None
+                        else [self.certificates[tag] for tag in tags])
         guard = object.__new__(ValidatedSupport)
         envelope = dict(certificates[0]["state_envelope"])
         envelope["minimum"] = torch.tensor([c["state_envelope"]["minimum"] for c in certificates]).amax(0).tolist()

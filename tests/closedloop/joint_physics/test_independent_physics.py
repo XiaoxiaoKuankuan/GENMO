@@ -48,6 +48,11 @@ def test_type_certification_and_action_boundary():
     assert guard.certified(['standing'])
     assert not guard.certified(['standing','landing'])
     assert guard.timesteps_for(['standing'])==[100]
+    guard.profiles={'double_support|standing':{'passed':True,'audited_timesteps':[100]}}
+    assert guard.certified(['standing','double_support'])
+    assert not guard.certified(['standing','single_support'])
+    assert not guard.certified(['standing','double_support','turning'])
+    assert guard.timesteps_for(['standing','double_support'])==[100]
     guard.lower,guard.upper=torch.full((21,),-1.),torch.ones(21)
     with pytest.raises(PhysicsRejected,match='action_out_of_validated_domain') as error:
         guard.check_action(torch.full((1,21),2.))
