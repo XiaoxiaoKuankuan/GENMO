@@ -263,7 +263,7 @@ def test_real_affine_and_IPM_convergence_with_actual_RobotSpec(assets):
     from pathlib import Path
     from gem.closedloop.reference_adapter.policy import ReferenceAdapter
     bundle, _ = assets
-    for name in ('failed_affine_QP_tolerance', 'failed_SO3_IPM_gpu'):
+    for name in ('failed_affine_QP_tolerance', 'failed_SO3_IPM_gpu', 'failed_SO3_final_merit'):
         case = json.loads((Path(__file__).parent/'fixtures'/f'{name}.json').read_text())
         p = ReferenceProjection(bundle.spec, ReferenceAdapter(bundle.spec).bounds, **case.get('projection', {}))
         raw, left, anchor, rotation = (torch.tensor(case[k], dtype=torch.float32) for k in ('raw', 'left', 'anchor', 'rotation'))

@@ -210,11 +210,14 @@ class ReferenceProjection(torch.nn.Module):
         selected = (values.amax(-1) > 1e-5).nonzero().flatten()
         if not len(selected):
             return projected
-        x = x[selected]
-        target = (proposal[selected, :, 3:6]/unit).transpose(1, 2).flatten(1)
-        past, current, rotation = left[selected, 3:6], anchor[selected, 3:6], nominal_rotation[selected]
-        base = torch.block_diag(self.matrix, self.matrix, self.matrix).expand(len(selected), -1, -1)
-        lo, hi = lower[selected, 3:6].flatten(1), upper[selected, 3:6].flatten(1)
+        # 角加速度要两次除以20ms；仅内部QP使用double仍不足，float32的SO(3)
+        # 线性化/merit会在真实样本停滞。仅需修正的旋转子问题全程double，输出和
+        # Actor仍是原float32；类型转换保留梯度，不降低最终执行证书精度。
+        x = x[selected].double()
+        target = (proposal[selected, :, 3:6].double()/unit.double()).transpose(1, 2).flatten(1)
+        past, current, rotation = left[selected, 3:6].double(), anchor[selected, 3:6].double(), nominal_rotation[selected].double()
+        base = torch.block_diag(self.matrix, self.matrix, self.matrix).double().expand(len(selected), -1, -1)
+        lo, hi = lower[selected, 3:6].double().flatten(1), upper[selected, 3:6].double().flatten(1)
         jacobian = torch.func.vmap(torch.func.jacrev(self.angular_constraints, argnums=0))
         # SQP只修正真实SO(3)约束不满足的旋转通道；每次仍最小化与原提案的距离。
         for iteration in range(60):
@@ -240,7 +243,7 @@ class ReferenceProjection(torch.nn.Module):
             chosen = merit.argmin(-1)
             x = torch.where(finished[:, None], x, trial[torch.arange(len(x), device=x.device), chosen])
         corrected = projected.clone()
-        corrected[selected, :, 3:6] = x.reshape(-1, 3, 10).transpose(1, 2)*unit
+        corrected[selected, :, 3:6] = (x.reshape(-1, 3, 10).transpose(1, 2)*unit).to(projected)
         return corrected
 
     def certificate(self, proposal, left, anchor, nominal_rotation):
