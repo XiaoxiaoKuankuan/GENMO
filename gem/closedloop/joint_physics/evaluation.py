@@ -88,13 +88,21 @@ def evaluation_windows(cfg, actor, adapter, *, split, structural_search_frames=0
 
 
 @torch.no_grad()
-def replay_to_start(env, episode, window):
+def replay_to_start(env, episode, window, *, atol=None):
     device = window.start.state.device
     env.reset(torch.arange(1, device=device), episode["initial_state"].to(device)[None])
     for action in episode["action"][:window.start.tick//12]:
         env.step_physics(action.to(device)[None])
     observed = env.observe()
-    return float((observed["state"]-window.start.state).abs().max())
+    difference = (observed["state"]-window.start.state).abs().max()
+    finite = bool(torch.isfinite(difference))
+    maximum = float(difference) if finite else None
+    if atol is not None and (not finite or maximum > atol):
+        raise PhysicsRejected('newton_replay_start_mismatch',
+            {'same_start_max_abs':maximum,'same_start_tolerance':atol,
+             'first_reject_tick':window.start.tick,'failure_phase':'real_start_replay',
+             'action_origin':'not_executed'})
+    return float(difference)
 
 
 def audit_gradients(cfg, checkpoint, output, adapter, env, interface_probe=False):
@@ -447,7 +455,8 @@ def evaluate(cfg, checkpoint, output, adapter, env, mode):
                             rows.append(row)
                             continue
                         try:
-                            row["same_start_max_abs"] = replay_to_start(env, episode, window)
+                            row["same_start_max_abs"] = replay_to_start(env, episode, window,
+                                atol=cfg['audit']['same_start_atol'])
                             result = execute_window(window, out["pred_x_start"], out["static_conf_logits"], actor, adapter,
                                                     cfg["execution_loss"], transition=env.step_physics)
                             row["real_execution_loss"] = float(result["loss"])
@@ -455,6 +464,7 @@ def evaluate(cfg, checkpoint, output, adapter, env, mode):
                             row["physical_failure_steps"] = result["failure_steps"]
                         except PhysicsRejected as error:
                             row["rejection"] = error.reason
+                            row.update(error.details)
                     rows.append(row)
             else:
                 conditions = {k: batch[k] for k in STAGE1_CONDITION_KEYS}
@@ -472,12 +482,14 @@ def evaluate(cfg, checkpoint, output, adapter, env, mode):
                             if env is not None:
                                 prediction = actor.stage1.endecoder.normalize(out["qpos30"])
                                 reference = candidate_reference(window, prediction, out["contact_logits"], actor.stage1.endecoder.codec, actor.stage1.endecoder)
-                                row["same_start_max_abs"] = replay_to_start(env, episode, window)
+                                row["same_start_max_abs"] = replay_to_start(env, episode, window,
+                                    atol=cfg['audit']['same_start_atol'])
                                 metrics, states = execute_generated(window, reference, adapter, env, window.horizon)
                                 row["real_physics"] = metrics
                                 atomic_save({"generated_qpos30": out["qpos30"].cpu(), "physical_states": states}, output/f"free_{len(rows):04d}.pt")
                         except PhysicsRejected as error:
                             row["rejection"] = error.reason
+                            row.update(error.details)
                         rows.append(row)
                     mask = batch["target_qpos30_valid"] & ~batch["known_qpos30_mask"]
                     rows[-1]["within_model_seed_diversity_rms"] = float((generated[0]-generated[1])[mask].square().mean().sqrt())

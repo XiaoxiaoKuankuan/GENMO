@@ -94,3 +94,27 @@ def test_horizon_normalization():
     b = normalized_window([torch.tensor([2.])] * 16, .99)
     torch.testing.assert_close(a, b)
     torch.testing.assert_close(a, normalized_window([torch.tensor([2.])] * 64, .99))
+
+
+def test_real_start_replay_gate_rejects_mismatch_and_nonfinite():
+    """只测重放门禁，不把此假环境当作Newton证据；漂移时不得执行候选控制。"""
+    from types import SimpleNamespace
+    from gem.closedloop.joint_physics.evaluation import replay_to_start
+    class ReplayFixture:
+        state = torch.zeros(1,55)
+        def reset(self,*args):
+            pass
+        def step_physics(self,*args):
+            raise AssertionError('零时刻起点不应先执行控制')
+        def observe(self):
+            return {'state':self.state}
+    env=ReplayFixture()
+    window=SimpleNamespace(start=SimpleNamespace(state=torch.zeros(1,55),tick=0))
+    episode={'initial_state':torch.zeros(55),'action':torch.empty(0,21)}
+    assert replay_to_start(env,episode,window,atol=1e-5)==0.
+    for value in (.01,float('nan')):
+        env.state=torch.full((1,55),value)
+        with pytest.raises(PhysicsRejected,match='newton_replay_start_mismatch') as error:
+            replay_to_start(env,episode,window,atol=1e-5)
+        assert error.value.details['action_origin']=='not_executed'
+        assert error.value.details['first_reject_tick']==0

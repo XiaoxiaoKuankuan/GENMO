@@ -26,7 +26,8 @@ def main():
         rows=[json.loads(s) for s in path.read_text().splitlines() if s.strip()]
         training[path.parent.name]=rows
     keys=('unknown_reconstruction_rmse','within_model_seed_diversity_rms','music_condition_sensitivity_rms','root_xy_range_m',
-          'root_yaw_circular_spread','joint_amplitude_mean_rad','generated_joint_speed_mean_rad_s','complete_song')
+          'root_yaw_circular_spread','joint_amplitude_mean_rad','generated_joint_speed_mean_rad_s','complete_song',
+          'complete_song_with_hard_limits')
     for path in sorted(root.glob('*/evaluation.json')):
         value=json.loads(path.read_text())
         row={'name':path.parent.name,'step':value['checkpoint_step'],'mode':value['mode'],
@@ -45,7 +46,10 @@ def main():
         row['rows']=len(value['rows'])
         row['rejected_rows']=sum('rejection' in r for r in value['rows'])
         evaluations.append(row)
-    (output/'summary.json').write_text(json.dumps({'training':{k:v[-1] for k,v in training.items() if v},
+    run_names=sorted(set(training)|{r['training_run'] for r in evaluations})
+    aliases={name:f'R{i+1}' for i,name in enumerate(run_names)}
+    (output/'summary.json').write_text(json.dumps({'run_labels':{v:k for k,v in aliases.items()},
+                                                   'training':{k:v[-1] for k,v in training.items() if v},
                                                    'evaluations':evaluations},ensure_ascii=False,indent=2))
     import matplotlib
     matplotlib.use('Agg')
@@ -58,18 +62,27 @@ def main():
                 groups[(row['training_run'],row['mode'],row['evidence'],row['timing_mode'],row['evaluation_set_sha256'][:8])].append(row)
         for group,rows in groups.items():
             rows.sort(key=lambda r:r['step'])
-            ax.plot([r['step'] for r in rows],[r[key] for r in rows],marker='o',label='/'.join(str(x) for x in group))
-        ax.set_title(key);ax.set_xlabel('supervised updates');ax.grid(alpha=.2)
+            run,mode,evidence,timing,subset=group
+            evidence='Newton' if evidence=='real_newton' else 'numeric'
+            timing='fixed' if timing=='fixed_delay_replay' else 'wall'
+            label=f'{aliases[run]} {mode[:3]} {evidence} {timing} {subset[:6]}'
+            ax.plot([r['step'] for r in rows],[r[key] for r in rows],marker='o',label=label)
+        import textwrap
+        ax.set_title(textwrap.fill(key.replace('_',' '),34),fontsize=10)
+        ax.set_xlabel('supervised updates');ax.grid(alpha=.2)
+        if key.startswith('complete_song'):ax.set_ylim(-.05,1.05)
         if groups:ax.legend(fontsize=7)
     fig.suptitle('Independent reconstruction / DDIM20 generation / Newton evaluation')
+    fig.supxlabel('\n'.join(f'{alias}: {name}' for name,alias in aliases.items()),fontsize=8)
     fig.savefig(output/'evaluation_curves.png',dpi=160)
     plt.close(fig)
     fig,axes=plt.subplots(2,2,figsize=(12,8),constrained_layout=True)
     for ax,key in zip(axes.flat,('data_loss','execution_loss','physics_effective_updates','physics_update_fraction')):
         for name,rows in training.items():
             selected=[r for r in rows if key in r]
-            if selected:ax.plot([r['step'] for r in selected],[r[key] for r in selected],label=name)
+            if selected:ax.plot([r['step'] for r in selected],[r[key] for r in selected],label=aliases[name])
         ax.set_title(key);ax.set_xlabel('supervised updates');ax.grid(alpha=.2);ax.legend(fontsize=7)
+    fig.supxlabel('\n'.join(f'{alias}: {name}' for name,alias in aliases.items()),fontsize=8)
     fig.savefig(output/'training_curves.png',dpi=160)
     plt.close(fig)
 
