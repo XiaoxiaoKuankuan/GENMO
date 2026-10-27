@@ -185,15 +185,18 @@ def main(kind):
         (output / "physics_startup.json").write_text(json.dumps({"warmup_control_steps": 3,
             "startup_seconds": time.perf_counter() - warm_started, "episode_reset_after_warmup": True}))
         collector = PhysicalCollector(env, actor, adapter, scheduler, rewards, forecast_enabled=cfg["model"]["forecast_enabled"],
-                                      gamma=cfg["critic"]["gamma_per_control"], record_trajectory=kind == "evaluate")
-        collector.record_contact_metrics = kind == "evaluate"
+                                      gamma=cfg["critic"]["gamma_per_control"], record_trajectory=kind in ("evaluate", "census"))
+        collector.record_contact_metrics = kind in ("evaluate", "census")
         if cfg.get("teacher",{}).get("target_mode")=="online_consumed_reference_v1":
             collector.noise_seed=cfg["teacher"].get("online_seed",42)
         # 固定事件仅用于离线评价；正式采集仍使用真实墙钟异步，不能由评价设置改写。
         collector.timing_mode=("wall_clock_async" if kind in ("train","collector") else
             cfg.get("evaluation",{}).get("timing_mode","wall_clock_async"))
         try:
-            if kind == "online_teacher":
+            if kind == "census":
+                from .stage1_census import run_worker
+                run_worker(collector, cfg, output, args.torch_device)
+            elif kind == "online_teacher":
                 from .online_teacher import build_online_timelines
                 build_online_timelines(collector,engine.teacher,tasks,cfg,output,args.torch_device)
             elif kind == "evaluate":

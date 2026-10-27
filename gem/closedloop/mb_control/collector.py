@@ -80,6 +80,9 @@ class PhysicalCollector:
         self.scheduler, self.rewards, self.gamma = scheduler, rewards, gamma
         self.worker = GenerationWorker(actor, adapter, forecast_enabled)
         self.record_trajectory = record_trajectory
+        # 全量离线评价保存当时实际参考速度，避免后处理用差分速度代替SM原目标。
+        self.record_reference_derivatives = False
+        self.reference_derivatives = []
         self.state, self.terminal = None, False
         self.events, self.trajectory, self.metrics = [], [], []
         self.cancelled_requests = []
@@ -142,6 +145,7 @@ class PhysicalCollector:
         self.events, self.trajectory, self.metrics = [], [], []
         self.cancelled_requests = []
         self.overruns = 0
+        self.reference_derivatives = []
         self.controls = []
         self.generations, self.consumed_versions, self.active_anchors = {}, set(), {}
         self.contact_counts, self.previous_contact = {}, None
@@ -268,6 +272,8 @@ class PhysicalCollector:
                         # 重建已被覆盖的旧参考，也不把参考根平移到实际机器人位置。
                         self.trajectory.append((z.tick, state1.cpu(), ref1.root_p.cpu(), action.cpu(),
                                                 ref1.root_R.cpu(), ref1.q.cpu()))
+                        if self.record_reference_derivatives:
+                            self.reference_derivatives.append((ref1.root_v.cpu(), ref1.root_w.cpu(), ref1.qd.cpu()))
                     if failed:
                         self.terminal, reason = True, "physical_failure"
                         break
