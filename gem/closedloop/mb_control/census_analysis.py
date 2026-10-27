@@ -36,6 +36,8 @@ def analyze(root):
             'complexity':'实际被消费参考的运动量，早停歌曲存在右删失，非人工复杂舞蹈标签'},
         score_bins={},upper={},lower={},per_joint=[],timing={},worst_tracking=[],failures=[])
     result['stopped_by_user']=(root/'user_requested_stop.json').exists()
+    result['execution_protocol']={k:manifest.get(k) for k in ('timing_mode','num_envs_per_gpu','fixed_latency_seconds','wm_forward_calls_required')}
+    result['execution_protocol']['forecast_enabled']=manifest['model'].get('forecast_enabled')
     for lo,hi in [(0,50),(50,70),(70,80),(80,90),(90,95),(95,100.000001)]:
         selected=[r for r in physical if lo<=r['statistics']['tracking_score_100']<hi]
         result['score_bins'][f'{lo}-{min(hi,100):g}']=dict(count=len(selected),completed=sum(r['complete'] for r in selected))
@@ -79,6 +81,8 @@ def analyze(root):
     a=result['physical'];s=a['song_equal_weight']
     page='<!doctype html><html lang="zh"><meta charset="utf-8"><title>Stage1全音乐评价与第二阶段优化空间</title><style>body{font:17px system-ui;max-width:1250px;margin:32px auto;padding:0 20px;color:#163047}table{border-collapse:collapse;width:100%}td,th{border-bottom:1px solid #ddd;padding:10px;text-align:left}.note{background:#fff1d6;padding:16px}small{color:#526579}</style>'
     page+='<h1>Stage1全音乐评价与第二阶段优化空间</h1><p>'+html.escape(result['updated_utc'])+'</p>'
+    if manifest['timing_mode']=='sim_clock_fixed_latency':
+        page+=f'<p>每卡 {manifest["num_envs_per_gpu"]} 个独立真实物理环境；WM前瞻关闭；沿仿真时钟推进，固定 {manifest["fixed_latency_seconds"]:.2f} 秒参考交付，每 {manifest["clock"]["request_interval_ticks"]/600:.2f} 秒生成一次。本报告评估动作执行和跟踪，不评价墙钟部署超时。</p>'
     state_text='本轮已由用户停止，结果作为旧链路证据保留。' if result['stopped_by_user'] else ('全量任务已结束。' if complete else '全量评价仍在执行，当前数字只代表已完成子集。')
     page+=f'<p class="note">'+state_text+f' 原库{manifest["original_dataset_entries"]}条舞蹈记录，去重后{len(tasks)}份音乐输入；已有{len(rows)}份结果，真实物理{len(physical)}份。</p>'
     page+='<table><tr><th>指标</th><th>实测</th><th>说明</th></tr>'
